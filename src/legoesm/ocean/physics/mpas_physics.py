@@ -180,6 +180,70 @@ def make_mpas_ocean_physics(
                 dS_dt = dS_dt.at[:, 0].add(
                     state.S.data[:, 0] * cfg.E_minus_P * inv_dz * mask)
 
+        # --- External surface forcing (e.g. from JRA55 bulk fluxes) ---
+        # When sf_scheme is "none", the prescribed wind block above is
+        # skipped.  If the caller passes an OceanSurfaceForcing with
+        # tau_x / tau_y / q_net, apply them here.  This is the path
+        # used by run_omip.py --forcing-mode jra55_do_tropical on MPAS.
+        if not apply_wind_block and surface_forcing is not None:
+            _sf_tau_x = getattr(surface_forcing, "tau_x", None)
+            _sf_tau_y = getattr(surface_forcing, "tau_y", None)
+            _sf_q_net = getattr(surface_forcing, "q_net", None)
+
+            if _sf_tau_x is not None and _sf_tau_y is not None:
+                dz_0_cell = z_coord.dz_ref[0] * jacobian  # (nCells,)
+                # Negate: the bulk-flux solver returns tau in the
+                # atmosphere convention (opposing the wind).  The ocean
+                # needs the reaction force (in the direction of the
+                # wind).  The prescribed-wind path (wind_profiles.py)
+                # already uses the ocean convention, so this negation
+                # only applies to externally-provided bulk-flux tau.
+                tau_x_e = -0.5 * (_sf_tau_x[c1] + _sf_tau_x[c2])
+                tau_y_e = -0.5 * (_sf_tau_y[c1] + _sf_tau_y[c2])
+                tau_n = (tau_x_e * jnp.cos(mesh.angleEdge)
+                         + tau_y_e * jnp.sin(mesh.angleEdge))
+                dz_0_e = 0.5 * (dz_0_cell[c1] + dz_0_cell[c2])
+                inv_rho_dz_e = 1.0 / (
+                    rho_0_ref * jnp.maximum(dz_0_e, 1e-10))
+                du_dt = du_dt.at[:, 0].add(tau_n * inv_rho_dz_e)
+
+            if _sf_q_net is not None:
+                from legoesm.ocean.eos import c_sw
+                _sf_sw = getattr(surface_forcing, "sw_down", None)
+
+                if _sf_sw is not None:
+                    # Split heat flux: non-solar at surface + solar
+                    # penetrating through the column (Jerlov).
+                    # q_net = sw_absorbed + lw_down - lw_up - sh - lh
+                    # sw_absorbed = sw_down * (1 - albedo) — already
+                    # included in q_net.  Extract it for penetration.
+                    sw_absorbed = _sf_sw * 0.94  # ~6% reflected (albedo)
+                    q_nonsolar = _sf_q_net - sw_absorbed
+
+                    # Non-solar part: surface cell only
+                    dz_0_cell_q = z_coord.dz_ref[0] * jacobian
+                    inv_rho_csw_dz = 1.0 / (
+                        rho_0_ref * c_sw * jnp.maximum(dz_0_cell_q, 1e-10))
+                    dT_dt = dT_dt.at[:, 0].add(
+                        q_nonsolar * inv_rho_csw_dz * mask)
+
+                    # Solar part: Jerlov penetration through column
+                    from legoesm.ocean.physics.shortwave_penetration import (
+                        shortwave_penetration_tendency,
+                    )
+                    sw_tend = shortwave_penetration_tendency(
+                        sw_absorbed, z_coord.dz_ref, z_coord.z_half_ref,
+                        jacobian, rho_0=rho_0_ref, c_sw=c_sw,
+                    )
+                    dT_dt = dT_dt + sw_tend * mask[:, None]
+                else:
+                    # No SW field — all heat into surface (legacy)
+                    dz_0_cell_q = z_coord.dz_ref[0] * jacobian
+                    inv_rho_csw_dz = 1.0 / (
+                        rho_0_ref * c_sw * jnp.maximum(dz_0_cell_q, 1e-10))
+                    dT_dt = dT_dt.at[:, 0].add(
+                        _sf_q_net * inv_rho_csw_dz * mask)
+
         # --- T/S restoring (under "restoring" or "combined") ---
         if apply_restoring:
             from legoesm.ocean.physics.surface_forcing.restoring import (

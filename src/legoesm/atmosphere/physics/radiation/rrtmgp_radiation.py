@@ -18,8 +18,19 @@ _instance_cache: dict = {}
 
 
 def _get_instance(config: RRTMGPConfig) -> RRTMGP:
-    """Get or create a cached RRTMGP solver for the given config."""
-    key = RRTMGP._cache_key(config)
+    """Get or create a cached RRTMGP solver for the given config.
+
+    Codex adversarial review 019e5467 (issue #273 follow-up):
+    instance cache MUST key on the full set of solver-behavior
+    fields, not just the optics-table fields.  Previously the cache
+    shared its key with the optics-table cache, so a first call with
+    ``use_scan=False`` stamped a solver instance whose
+    ``self._config.use_scan = False``; a later call with the new
+    auto-pick default ``None`` (or explicit ``True``) silently reused
+    that instance and kept running the for-loop path on GPU,
+    defeating the scan auto-pick the module ships.
+    """
+    key = RRTMGP._instance_cache_key(config)
     if key not in _instance_cache:
         _instance_cache[key] = RRTMGP.from_legoesm_config(config)
     return _instance_cache[key]

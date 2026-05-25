@@ -20,8 +20,12 @@ from legoesm.core.field import Field
 from legoesm.core.state import (
     HydrostaticState,
     HydrostaticTendencies,
+    MPASNonHydrostaticState,
+    MPASNonHydrostaticTendencies,
     NonHydrostaticState,
     NonHydrostaticTendencies,
+    PlaneNonHydrostaticState,
+    PlaneNonHydrostaticTendencies,
 )
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import (
@@ -119,12 +123,17 @@ def make_microphysics_physics(
         return _make_hydrostatic_microphysics(microphysics_config, dt)
     elif model_type == "nonhydrostatic":
         return _make_nonhydrostatic_microphysics(microphysics_config, dt)
+    elif model_type == "plane":
+        return _make_plane_microphysics(microphysics_config, dt)
+    elif model_type == "mpas_nh":
+        return _make_mpas_nh_microphysics(microphysics_config, dt)
     elif model_type == "spectral_pe":
         return _make_spectral_pe_microphysics(microphysics_config, dt)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
-            f"Choose from 'hydrostatic', 'nonhydrostatic', 'spectral_pe', 'mpas'."
+            f"Choose from 'hydrostatic', 'nonhydrostatic', 'plane', "
+            f"'mpas_nh', 'spectral_pe', 'mpas'."
         )
 
 
@@ -429,6 +438,410 @@ def _make_nonhydrostatic_microphysics(
             drho_prime_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="drho_prime_dt_micro", dims=dims_3d, units="kg/m^3/s"),
             dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=_phis_dtype), name="dphis_dt_micro", dims=dims_2d, units="m^2/s^3"),
             dtracers_dt=Field(data=dtracers, name="dtracers_dt_micro", dims=dims_tr, units="1/s"),
+        )
+
+    def reset_state():
+        _ml_model_cache[0] = None
+
+    physics_fn.reset_state = reset_state
+    return physics_fn
+
+
+# ===========================================================================
+# Plane (doubly-periodic Cartesian CRM)
+# ===========================================================================
+
+# Minimum tracer-slot count each scheme requires to receive its full set of
+# tendency outputs without silent truncation. Slot layout is fixed:
+# [0]=q_v, [1]=q_c, [2]=q_r, [3]=q_i, [4]=q_s, [5]=q_g, [6]=N_c, [7]=N_r,
+# [8]=N_i. A scheme that writes any tendency at slot ``k`` requires
+# ``n_tracers >= k + 1`` or it silently discards that tendency.
+#
+# Codex review 2026-05-24: previously the plane adapter accepted any
+# n_tracers and silently dropped any tendency beyond the supplied slot
+# count. That hid scheme/state-shape mismatches (e.g., Morrison on a
+# 3-tracer plane state). Now we raise at factory-build time.
+_PLANE_MIN_TRACER_SLOTS = {
+    "kessler": 3,           # q_v, q_c, q_r
+    "sundqvist": 3,         # q_v, q_c, q_r
+    "seifert_beheng": 9,    # q_{v,c,r,i,s,g} + N_{c,r,i}
+    "morrison": 9,          # q_{v,c,r,i,s,g} + N_{c,r,i}
+    "thompson": 9,          # q_{v,c,r,i,s,g} + N_{c,r,i}
+    "ml_emulator": 9,       # generic full layout
+    "none": 0,              # no-op
+}
+
+
+def _make_plane_microphysics(
+    microphysics_config: MicrophysicsConfig,
+    dt: float,
+) -> Callable:
+    """Create microphysics physics_fn for the plane CompressibleEuler model.
+
+    Mirrors :func:`_make_nonhydrostatic_microphysics` but for
+    ``PlaneNonHydrostaticState`` (shape ``(ny, nx, nlev)``).
+
+    Signature: ``(state, grid, height_coord, terrain_metric) ->
+    PlaneNonHydrostaticTendencies``.
+
+    Raises ``ValueError`` on the first call if ``state.tracers``
+    carries fewer slots than the selected scheme writes — see
+    ``_PLANE_MIN_TRACER_SLOTS`` for the per-scheme minimum.
+    """
+    scheme_name, micro_fn, scheme_config = _get_microphysics_fn(
+        microphysics_config
+    )
+    is_ml = scheme_name == "ml_emulator"
+    _ml_model_cache = [None]
+    _min_slots = _PLANE_MIN_TRACER_SLOTS[scheme_name]
+
+    def physics_fn(
+        state: PlaneNonHydrostaticState,
+        grid,
+        height_coord: HeightCoordinate,
+        terrain_metric: TerrainMetric,
+    ) -> PlaneNonHydrostaticTendencies:
+        theta_p = state.theta_prime.data
+        rho_p = state.rho_prime.data
+        tracers = state.tracers.data
+
+        theta_0 = height_coord.theta_ref
+        rho_0 = height_coord.rho_ref
+        theta_total, rho_total = sanitize_theta_rho(
+            theta_0 + theta_p, rho_0 + rho_p,
+        )
+        p = pressure_from_eos(rho_total, theta_total)
+        exner = (p / constants.p_ref) ** constants.kappa
+        T = theta_total * exner
+
+        nlev = height_coord.n_levels
+        shape_3d = theta_p.shape          # (ny, nx, nlev)
+        shape_w = state.w.data.shape      # (ny, nx, nlev+1)
+        shape_2d = state.phis.data.shape  # (ny, nx)
+        ny, nx = shape_2d
+        ncol = ny * nx
+        n_tracers = tracers.shape[-1] if tracers.ndim >= 4 else 0
+
+        # Codex review 2026-05-24: hard-fail when the state cannot
+        # carry every tendency the scheme writes. Silent truncation
+        # (the prior behaviour) hid Morrison-on-3-tracer-state
+        # regressions where ice/snow/graupel/number tendencies were
+        # dropped without warning.
+        if n_tracers < _min_slots:
+            raise ValueError(
+                f"microphysics scheme {scheme_name!r} writes up to "
+                f"{_min_slots} tracer-slot tendencies (slot layout: "
+                f"[0]=q_v, [1]=q_c, [2]=q_r, [3]=q_i, [4]=q_s, "
+                f"[5]=q_g, [6]=N_c, [7]=N_r, [8]=N_i), but state "
+                f"carries only {n_tracers} tracer slots. Allocate "
+                f"the state with at least {_min_slots} tracers or "
+                f"choose a scheme with fewer requirements (e.g., "
+                f"kessler / sundqvist need 3)."
+            )
+
+        # Match the PlaneNonHydrostaticState field convention
+        # (("y","x","z"), ("y","x","z_half"), ...) so summed tendencies
+        # across surface_flux + radiation + microphysics carry
+        # consistent metadata for the dycore composer.
+        dims_3d = ("y", "x", "z")
+        dims_w = ("y", "x", "z_half")
+        dims_2d = ("y", "x")
+        dims_tr = ("y", "x", "z", "tracer")
+
+        _sd = T.dtype
+        _pd = state.phis.data.dtype
+
+        if micro_fn is None:
+            return PlaneNonHydrostaticTendencies(
+                du_dt=Field(data=jnp.zeros(shape_3d, dtype=_sd),
+                            name="du_dt_micro", dims=dims_3d, units="m/s^2"),
+                dv_dt=Field(data=jnp.zeros(shape_3d, dtype=_sd),
+                            name="dv_dt_micro", dims=dims_3d, units="m/s^2"),
+                dw_dt=Field(data=jnp.zeros(shape_w, dtype=_sd),
+                            name="dw_dt_micro", dims=dims_w, units="m/s^2"),
+                dtheta_prime_dt=Field(
+                    data=jnp.zeros(shape_3d, dtype=_sd),
+                    name="dtheta_prime_dt_micro", dims=dims_3d, units="K/s",
+                ),
+                drho_prime_dt=Field(
+                    data=jnp.zeros(shape_3d, dtype=_sd),
+                    name="drho_prime_dt_micro", dims=dims_3d, units="kg/m^3/s",
+                ),
+                dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=_pd),
+                               name="dphis_dt_micro", dims=dims_2d,
+                               units="m^2/s^3"),
+                dtracers_dt=Field(data=jnp.zeros_like(tracers),
+                                  name="dtracers_dt_micro", dims=dims_tr,
+                                  units="1/s"),
+            )
+
+        z_half_3d = terrain_metric.z_half_3d
+        dz = jnp.abs(
+            z_half_3d[..., :-1] - z_half_3d[..., 1:]
+        ).reshape(ncol, nlev)
+        p_half = reconstruct_half_level_pressure_hydrostatic(
+            p_full=p, rho_full=rho_total, z_half=z_half_3d,
+        ).reshape(ncol, nlev + 1)
+
+        T_col = T.reshape(ncol, nlev)
+        p_full_col = p.reshape(ncol, nlev)
+        rho_col = rho_total.reshape(ncol, nlev)
+
+        def _get_tracer(idx):
+            if n_tracers > idx:
+                return tracers[..., idx].reshape(ncol, nlev)
+            return jnp.zeros((ncol, nlev), dtype=_sd)
+
+        q_v_col = _get_tracer(0)
+        hydrometeors = HydrometeorState(
+            q_c=_get_tracer(1), q_r=_get_tracer(2), q_i=_get_tracer(3),
+            q_s=_get_tracer(4), q_g=_get_tracer(5),
+            N_c=_get_tracer(6), N_r=_get_tracer(7), N_i=_get_tracer(8),
+        )
+
+        if is_ml:
+            if _ml_model_cache[0] is None:
+                key = jax.random.PRNGKey(scheme_config.seed)
+                _ml_model_cache[0] = MicrophysicsEmulator(
+                    scheme_config.n_input, scheme_config.n_hidden,
+                    scheme_config.n_layers, scheme_config.n_output, key=key,
+                )
+            micro_out = micro_fn(
+                T_col, q_v_col, hydrometeors,
+                p_full_col, p_half, rho_col, dz, dt,
+                scheme_config, _ml_model_cache[0],
+            )
+        else:
+            micro_out = micro_fn(
+                T_col, q_v_col, hydrometeors,
+                p_full_col, p_half, rho_col, dz, dt, scheme_config,
+            )
+
+        dT_dt = micro_out.dT_dt.reshape(shape_3d)
+        dtheta_prime_dt = dT_dt / jnp.clip(exner, 1e-6, None)
+
+        dtracers = jnp.zeros_like(tracers)
+        tend_fields = [
+            micro_out.dq_v_dt, micro_out.dq_c_dt, micro_out.dq_r_dt,
+            micro_out.dq_i_dt, micro_out.dq_s_dt, micro_out.dq_g_dt,
+            micro_out.dN_c_dt, micro_out.dN_r_dt, micro_out.dN_i_dt,
+        ]
+        for idx, field in enumerate(tend_fields):
+            if n_tracers > idx:
+                dtracers = dtracers.at[..., idx].set(field.reshape(shape_3d))
+
+        return PlaneNonHydrostaticTendencies(
+            du_dt=Field(data=jnp.zeros(shape_3d, dtype=_sd),
+                        name="du_dt_micro", dims=dims_3d, units="m/s^2"),
+            dv_dt=Field(data=jnp.zeros(shape_3d, dtype=_sd),
+                        name="dv_dt_micro", dims=dims_3d, units="m/s^2"),
+            dw_dt=Field(data=jnp.zeros(shape_w, dtype=_sd),
+                        name="dw_dt_micro", dims=dims_w, units="m/s^2"),
+            dtheta_prime_dt=Field(
+                data=dtheta_prime_dt, name="dtheta_prime_dt_micro",
+                dims=dims_3d, units="K/s",
+            ),
+            drho_prime_dt=Field(
+                data=jnp.zeros(shape_3d, dtype=_sd),
+                name="drho_prime_dt_micro", dims=dims_3d, units="kg/m^3/s",
+            ),
+            dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=_pd),
+                           name="dphis_dt_micro", dims=dims_2d,
+                           units="m^2/s^3"),
+            dtracers_dt=Field(data=dtracers, name="dtracers_dt_micro",
+                              dims=dims_tr, units="1/s"),
+        )
+
+    def reset_state():
+        _ml_model_cache[0] = None
+
+    physics_fn.reset_state = reset_state
+    return physics_fn
+
+
+# ===========================================================================
+# MPAS Voronoi non-hydrostatic compressible Euler
+# ===========================================================================
+
+# Minimum tracer-slot count per scheme. Identical layout to
+# ``_PLANE_MIN_TRACER_SLOTS`` (q_v, q_c, q_r, q_i, q_s, q_g, N_c, N_r,
+# N_i). Plane and MPAS NH share the layout because the tracer column
+# axis is the same.
+_MPAS_NH_MIN_TRACER_SLOTS = dict(_PLANE_MIN_TRACER_SLOTS)
+
+
+def _make_mpas_nh_microphysics(
+    microphysics_config: MicrophysicsConfig,
+    dt: float,
+) -> Callable:
+    """Create microphysics physics_fn for the MPAS NH dycore.
+
+    Mirrors :func:`_make_nonhydrostatic_microphysics` but for
+    ``MPASNonHydrostaticState`` (cell-centred quantities on Voronoi
+    cells, shape ``(nCells, nlev)``).
+
+    Signature: ``(state, mesh, height_coord, terrain_metric) ->
+    MPASNonHydrostaticTendencies``.
+
+    Raises ``ValueError`` on the first call if the state carries
+    fewer tracer slots than the selected scheme writes — see
+    ``_MPAS_NH_MIN_TRACER_SLOTS`` for the per-scheme minimum.
+    """
+    scheme_name, micro_fn, scheme_config = _get_microphysics_fn(
+        microphysics_config
+    )
+    is_ml = scheme_name == "ml_emulator"
+    _ml_model_cache = [None]
+    _min_slots = _MPAS_NH_MIN_TRACER_SLOTS[scheme_name]
+
+    def physics_fn(
+        state: MPASNonHydrostaticState,
+        mesh,
+        height_coord: HeightCoordinate,
+        terrain_metric: TerrainMetric,
+    ) -> MPASNonHydrostaticTendencies:
+        theta_p = state.theta_prime.data
+        rho_p = state.rho_prime.data
+        tracers = state.tracers.data       # (nCells, nlev, n_tracers)
+
+        theta_0 = height_coord.theta_ref
+        rho_0 = height_coord.rho_ref
+        theta_total, rho_total = sanitize_theta_rho(
+            theta_0 + theta_p, rho_0 + rho_p,
+        )
+        p = pressure_from_eos(rho_total, theta_total)
+        exner = (p / constants.p_ref) ** constants.kappa
+        T = theta_total * exner
+
+        nlev = height_coord.n_levels
+        shape_cell_3d = (mesh.nCells, nlev)
+        shape_edge_3d = state.u.data.shape
+        shape_w = state.w.data.shape
+        shape_2d = (mesh.nCells,)
+        ncol = mesh.nCells
+        n_tracers = tracers.shape[-1] if tracers.ndim >= 3 else 0
+
+        if n_tracers < _min_slots:
+            raise ValueError(
+                f"microphysics scheme {scheme_name!r} writes up to "
+                f"{_min_slots} tracer-slot tendencies (slot layout: "
+                f"[0]=q_v, [1]=q_c, [2]=q_r, [3]=q_i, [4]=q_s, "
+                f"[5]=q_g, [6]=N_c, [7]=N_r, [8]=N_i), but MPAS NH "
+                f"state carries only {n_tracers} tracer slots. "
+                f"Allocate at least {_min_slots} tracers or pick a "
+                f"scheme with fewer requirements (kessler / sundqvist "
+                f"need 3)."
+            )
+
+        dims_cell = ("nCells", "nlev")
+        dims_edge = ("nEdges", "nlev")
+        dims_w = ("nCells", "nlev_half")
+        dims_2d = ("nCells",)
+        dims_tr = ("nCells", "nlev", "tracer")
+        _sd = T.dtype
+        _pd = state.phis.data.dtype
+
+        if micro_fn is None:
+            return MPASNonHydrostaticTendencies(
+                du_dt=Field(data=jnp.zeros(shape_edge_3d, dtype=_sd),
+                            name="du_dt_micro", dims=dims_edge,
+                            units="m/s^2"),
+                dw_dt=Field(data=jnp.zeros(shape_w, dtype=_sd),
+                            name="dw_dt_micro", dims=dims_w,
+                            units="m/s^2"),
+                dtheta_prime_dt=Field(
+                    data=jnp.zeros(shape_cell_3d, dtype=_sd),
+                    name="dtheta_prime_dt_micro",
+                    dims=dims_cell, units="K/s",
+                ),
+                drho_prime_dt=Field(
+                    data=jnp.zeros(shape_cell_3d, dtype=_sd),
+                    name="drho_prime_dt_micro",
+                    dims=dims_cell, units="kg/m^3/s",
+                ),
+                dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=_pd),
+                               name="dphis_dt_micro", dims=dims_2d,
+                               units="m^2/s^3"),
+                dtracers_dt=Field(data=jnp.zeros_like(tracers),
+                                  name="dtracers_dt_micro", dims=dims_tr,
+                                  units="1/s"),
+            )
+
+        # Terrain-aware layer thickness + half-level pressure.
+        z_half_3d = terrain_metric.z_half_3d         # (nCells, nlev+1)
+        dz = jnp.abs(z_half_3d[..., :-1] - z_half_3d[..., 1:])
+        p_half = reconstruct_half_level_pressure_hydrostatic(
+            p_full=p, rho_full=rho_total, z_half=z_half_3d,
+        )
+
+        T_col = T
+        p_full_col = p
+        rho_col = rho_total
+
+        def _get_tracer(idx):
+            if n_tracers > idx:
+                return tracers[..., idx]
+            return jnp.zeros((ncol, nlev), dtype=_sd)
+
+        q_v_col = _get_tracer(0)
+        hydrometeors = HydrometeorState(
+            q_c=_get_tracer(1), q_r=_get_tracer(2), q_i=_get_tracer(3),
+            q_s=_get_tracer(4), q_g=_get_tracer(5),
+            N_c=_get_tracer(6), N_r=_get_tracer(7), N_i=_get_tracer(8),
+        )
+
+        if is_ml:
+            if _ml_model_cache[0] is None:
+                key = jax.random.PRNGKey(scheme_config.seed)
+                _ml_model_cache[0] = MicrophysicsEmulator(
+                    scheme_config.n_input, scheme_config.n_hidden,
+                    scheme_config.n_layers, scheme_config.n_output, key=key,
+                )
+            micro_out = micro_fn(
+                T_col, q_v_col, hydrometeors,
+                p_full_col, p_half, rho_col, dz, dt,
+                scheme_config, _ml_model_cache[0],
+            )
+        else:
+            micro_out = micro_fn(
+                T_col, q_v_col, hydrometeors,
+                p_full_col, p_half, rho_col, dz, dt, scheme_config,
+            )
+
+        dT_dt = micro_out.dT_dt
+        dtheta_prime_dt = dT_dt / jnp.clip(exner, 1e-6, None)
+
+        dtracers = jnp.zeros_like(tracers)
+        tend_fields = [
+            micro_out.dq_v_dt, micro_out.dq_c_dt, micro_out.dq_r_dt,
+            micro_out.dq_i_dt, micro_out.dq_s_dt, micro_out.dq_g_dt,
+            micro_out.dN_c_dt, micro_out.dN_r_dt, micro_out.dN_i_dt,
+        ]
+        for idx, field in enumerate(tend_fields):
+            if n_tracers > idx:
+                dtracers = dtracers.at[..., idx].set(field)
+
+        return MPASNonHydrostaticTendencies(
+            du_dt=Field(data=jnp.zeros(shape_edge_3d, dtype=_sd),
+                        name="du_dt_micro", dims=dims_edge,
+                        units="m/s^2"),
+            dw_dt=Field(data=jnp.zeros(shape_w, dtype=_sd),
+                        name="dw_dt_micro", dims=dims_w,
+                        units="m/s^2"),
+            dtheta_prime_dt=Field(
+                data=dtheta_prime_dt, name="dtheta_prime_dt_micro",
+                dims=dims_cell, units="K/s",
+            ),
+            drho_prime_dt=Field(
+                data=jnp.zeros(shape_cell_3d, dtype=_sd),
+                name="drho_prime_dt_micro",
+                dims=dims_cell, units="kg/m^3/s",
+            ),
+            dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=_pd),
+                           name="dphis_dt_micro", dims=dims_2d,
+                           units="m^2/s^3"),
+            dtracers_dt=Field(data=dtracers, name="dtracers_dt_micro",
+                              dims=dims_tr, units="1/s"),
         )
 
     def reset_state():

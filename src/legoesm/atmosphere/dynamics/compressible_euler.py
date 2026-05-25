@@ -14,6 +14,74 @@ The A-grid cubed-sphere slow-tendency solver that previously lived here
 has been removed.  Use ``cdgrid_compressible_euler_slow_tendencies`` from
 ``compressible_euler_cdgrid.py`` instead.
 
+Equations solved
+----------------
+Compressible-Euler dry-air system in perturbation form. The prognostic
+state ``NonHydrostaticState`` carries
+
+    u, v          horizontal velocity components
+    w             vertical velocity at half-levels
+    theta_prime   potential-temperature perturbation about ref(z)
+    rho_prime     density perturbation about ref(z)
+    phis          surface geopotential (diagnostic)
+    tracers       passive + reactive tracer mixing ratios
+
+with the full state recovered as
+
+    theta(x, y, z, t) = theta_ref(z) + theta_prime(x, y, z, t)
+    rho(x, y, z, t)   = rho_ref(z)   + rho_prime(x, y, z, t).
+
+The reference profile ``(theta_ref, rho_ref)`` is supplied by
+``HeightCoordinate`` and is hydrostatically balanced. Subtracting it
+keeps the acoustic-substep pressure-gradient terms well-conditioned
+because the dominant background ``g * rho_ref`` cancels analytically.
+
+Acoustic substepping uses the Skamarock-Klemp split-explicit scheme:
+slow horizontal advection + tracer flux divergence + diffusion are
+frozen for ``n_acoustic_substeps`` short substeps that resolve the
+fast acoustic modes. Vertical acoustic terms can be advanced either
+forward-backward (default) or with a tridiagonal implicit solve when
+``semi_implicit_acoustic=True`` — see ``acoustic_substeps`` and
+``acoustic_substeps_semi_implicit`` for the exact update formulas.
+
+Grid callback contract (existing consumers)
+-------------------------------------------
+The acoustic substep routines in this module are grid-agnostic with
+respect to the horizontal stencil: each existing consumer
+(``compressible_euler_cdgrid.py``, ``compressible_euler_mpas.py``,
+``spectral_nh.py``) assembles the horizontal pressure-gradient and
+flux-divergence contributions in its own slow-tendency routine and
+then calls the shared substep kernel for the vertically coupled
+acoustic update.
+
+For that pattern to work, every dycore caller currently must provide:
+
+- ``HeightCoordinate`` exposing ``rho_ref``, ``theta_ref``, ``dz`` and
+  the half-level / full-level arrangement used by the chosen Lorenz
+  staggering.
+- ``TerrainMetric`` exposing the column-local Jacobian ``J`` and
+  half-level scale-factor used inside the vertical implicit solve.
+- A ``physics_fn`` callable that returns physics tendencies on the
+  same state pytree as the dycore, applied between split-explicit
+  outer stages.
+
+This contract is **descriptive, not prescriptive**: it documents the
+shape of what cubed-sphere C-D and MPAS Voronoi do today.
+Plane-specific or lat-lon-specific extensions land in their own
+modules in follow-up PRs of the CRM rollout and may add new optional
+callbacks (vertical-tridiagonal coefficient assembly, periodic-halo
+operator) without changing the existing signatures.
+
+Conservation invariant
+----------------------
+Discrete dry-air mass on each existing grid is ``sum_{cells} rho * J
+* area_cell * dz``. When ``CompressibleEulerConfig.fix_mass=True`` the
+dycore applies a uniform additive correction to ``rho_prime`` so that
+this sum equals a stored target (``anchor_mass_to_initial=True``
+anchors the target to ``t=0`` and prevents drift). The correction is
+constant per outer step and so preserves all spatial gradients used by
+the slow-tendency routine.
+
 References
 ----------
 - Skamarock & Klemp (2008): A Time-Split Nonhydrostatic Atmospheric Model.
@@ -54,6 +122,28 @@ class CompressibleEulerConfig(NamedTuple):
                                           # 0.0 = centered (neutral), 0.1 = slightly damped
                                           # Damps vertically-propagating acoustic modes
                                           # without horizontal CFL constraint (Skamarock 2008)
+    # ---- Plane-only fields (PR3c) ----
+    # The following two knobs are consumed ONLY by the doubly-periodic
+    # plane non-hydrostatic dycore
+    # (:mod:`legoesm.atmosphere.dynamics.compressible_euler_plane`).
+    # Cubed-sphere, MPAS, and spectral NH dycores ignore them entirely
+    # — each of those has its own Smagorinsky knob in its own
+    # ``*CompressibleEulerConfig`` (e.g. ``CDGridCompressibleEulerConfig.
+    # smagorinsky_cs``). Defaults of ``0.0`` and ``1.0`` make this a
+    # no-op on every dycore.
+    # PR3c is a HORIZONTAL-ONLY pilot Smag closure: the strain magnitude
+    # includes ∂u/∂x, ∂u/∂y, ∂v/∂x, ∂v/∂y only; vertical shear
+    # (∂u/∂z, ∂v/∂z, ∂w/∂x, ∂w/∂y, ∂w/∂z) is deferred to a 3D extension PR.
+    # The Prandtl number controls the *thermal* (K_h) leg of that same
+    # closure; the horizontal-only caveat applies to both fields below.
+    smagorinsky_cs: float = 0.0           # Smagorinsky-Lilly LES coefficient.
+                                          # K_m = (C_s * Δ)^2 * |S|. Typical 0.1-0.25.
+                                          # 0.0 disables (Python on/off gate).
+    smagorinsky_prandtl: float = 1.0      # Turbulent Prandtl number K_h = K_m / Pr.
+                                          # Plane LES default 1.0; classical atmosphere
+                                          # value is ~1/3 for stable stratification.
+                                          # Must be > 0 when smagorinsky_cs > 0
+                                          # (validate_plane_config enforces).
 
 
 # ==============================================================================
@@ -133,6 +223,114 @@ def _sponge_profile(
 # Acoustic substeps (forward-backward)
 # ==============================================================================
 
+
+def _acoustic_column_kernel(
+    w_c: jax.Array,
+    theta_p_c: jax.Array,
+    rho_p_c: jax.Array,
+    height_coord: HeightCoordinate,
+    J: jax.Array,
+    dt_s: float,
+    beta: float,
+    g: float,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Single forward-backward acoustic substep (column-local algebra).
+
+    This kernel encapsulates the vertical-only update of ``(w, theta',
+    rho')`` for one acoustic substep. It is grid-agnostic in the
+    horizontal: any number of leading axes broadcast through the
+    ``[..., k]`` slicing.
+
+    Contract (vertical = last axis)
+    -------------------------------
+    - ``w_c`` : ``(..., nlev+1)`` — vertical velocity at Lorenz half
+      (interface) levels. Rigid boundaries ``w_c[..., 0] = w_c[..., -1]
+      = 0`` must already hold on input; the kernel updates only the
+      interior ``[..., 1:-1]`` slice and leaves the boundary values
+      untouched.
+    - ``theta_p_c`` : ``(..., nlev)`` — potential-temperature
+      perturbation at full (cell-centre) levels.
+    - ``rho_p_c`` : ``(..., nlev)`` — density perturbation at full
+      levels.
+    - ``height_coord`` : ``HeightCoordinate`` providing
+      ``rho_ref(nlev,)``, ``theta_ref(nlev,)``, ``exner_ref(nlev,)``,
+      ``dz(nlev,)`` (full-level spacing), ``dz_half(nlev-1,)``
+      (half-level spacing between adjacent cell centres).
+    - ``J`` : Jacobian, shape broadcastable to the horizontal leading
+      axes of ``w_c``, ``theta_p_c``, ``rho_p_c``. The kernel uses
+      ``J[..., None]`` to broadcast over the vertical axis.
+    - ``dt_s`` : substep size in seconds (Python scalar).
+    - ``beta`` : Skamarock-Klemp off-centering parameter in ``[0, 1)``.
+      ``0`` is centred, larger values damp vertically-propagating
+      acoustic modes.
+    - ``g`` : gravitational acceleration [m/s^2].
+
+    Returns
+    -------
+    (w_new, theta_p_new, rho_p_new)
+        Updated arrays with the same shapes as the inputs. Rigid w
+        boundaries preserved.
+    """
+    c_p = constants.c_pd
+    dz = height_coord.dz
+    theta_0 = height_coord.theta_ref
+    rho_0 = height_coord.rho_ref
+
+    theta_total, rho_total = sanitize_theta_rho(
+        theta_0 + theta_p_c,
+        rho_0 + rho_p_c,
+    )
+
+    # --- Forward: update w ---
+    pi_p = compute_exner_perturbation(rho_p_c, theta_p_c, height_coord)
+
+    dpi_dz_inner = (pi_p[..., :-1] - pi_p[..., 1:]) / (
+        0.5 * (dz[:-1] + dz[1:])
+    )
+
+    theta_half_inner = 0.5 * (theta_total[..., :-1] + theta_total[..., 1:])
+
+    theta_p_half = 0.5 * (theta_p_c[..., :-1] + theta_p_c[..., 1:])
+    theta_0_half = 0.5 * (theta_0[:-1] + theta_0[1:])
+    buoyancy = g * theta_p_half / theta_0_half
+
+    dw_dt_inner = (
+        -c_p * theta_half_inner * dpi_dz_inner / J[..., None]
+        + buoyancy
+    )
+
+    w_new = w_c.at[..., 1:-1].set(
+        w_c[..., 1:-1] + dt_s * dw_dt_inner
+    )
+
+    # --- Backward: update rho' using continuity ---
+    rho_half = 0.5 * (rho_total[..., :-1] + rho_total[..., 1:])
+    pad_axes_w = ((0, 0),) * (w_new.ndim - 1)
+    rho_w = jnp.pad(rho_half * w_new[..., 1:-1], (*pad_axes_w, (1, 1)))
+
+    vert_div = (rho_w[..., :-1] - rho_w[..., 1:]) / dz
+    vert_div = vert_div / J[..., None]
+
+    rho_p_new = rho_p_c - dt_s * vert_div
+    rho_p_new = (1.0 + beta) * rho_p_new - beta * rho_p_c
+
+    # --- Backward: update theta' using vertical w advection ---
+    w_full = 0.5 * (w_new[..., :-1] + w_new[..., 1:])
+    nlev = theta_total.shape[-1]
+    if nlev > 2:
+        dz_half_val = height_coord.dz_half  # (nlev-1,)
+        dz_centered = dz_half_val[:-1] + dz_half_val[1:]  # (nlev-2,)
+        inner_grad = (theta_total[..., :-2] - theta_total[..., 2:]) / dz_centered
+        pad_axes_t = ((0, 0),) * (theta_total.ndim - 1)
+        dtheta_dz = jnp.pad(inner_grad, (*pad_axes_t, (1, 1)))
+    else:
+        dtheta_dz = jnp.zeros_like(theta_total)
+
+    theta_p_new = theta_p_c - dt_s * w_full / J[..., None] * dtheta_dz
+
+    return (w_new, theta_p_new, rho_p_new)
+
+
 def acoustic_substeps(
     state: NonHydrostaticState,
     slow_tend: NonHydrostaticTendencies,
@@ -149,6 +347,10 @@ def acoustic_substeps(
     1. Forward: update w using vertical Exner gradient + buoyancy
     2. Backward: update rho' using 3D divergence
     3. Backward: update theta' using vertical advection by w
+
+    The per-substep vertical algebra is factored into
+    :func:`_acoustic_column_kernel` so it can be reused by other dycores
+    (currently the future plane dycore in the CRM rollout, PR2b).
 
     Parameters
     ----------
@@ -171,106 +373,25 @@ def acoustic_substeps(
         State after all acoustic substeps.
     """
     g = euler_config.g
-    c_p = constants.c_pd
-    dz = height_coord.dz
-    theta_0 = height_coord.theta_ref
-    rho_0 = height_coord.rho_ref
     J = terrain_metric.jacobian
 
-    # Extract mutable arrays
     w = state.w.data
     theta_p = state.theta_prime.data
     rho_p = state.rho_prime.data
 
-    # Off-centering parameter for acoustic damping (Skamarock & Klemp 2008).
-    # beta > 0 introduces a small amount of temporal diffusion that damps
-    # vertically-propagating acoustic/gravity wave noise without affecting
-    # the horizontal CFL constraint.  Typical value: 0.1 for long runs.
     beta = euler_config.acoustic_off_centering
 
     def substep_body(i, carry):
         w_c, theta_p_c, rho_p_c = carry
-
-        theta_total, rho_total = sanitize_theta_rho(
-            theta_0 + theta_p_c,
-            rho_0 + rho_p_c,
+        return _acoustic_column_kernel(
+            w_c, theta_p_c, rho_p_c,
+            height_coord, J, dt_s, beta, g,
         )
 
-        # --- Forward: update w ---
-        # Exner perturbation at full levels
-        pi_p = compute_exner_perturbation(rho_p_c, theta_p_c, height_coord)
-
-        # Exner gradient at half levels: d(pi')/dz* from full to half
-        # Interior half levels only (1..nlev-1)
-        dpi_dz_inner = (pi_p[..., :-1] - pi_p[..., 1:]) / (
-            0.5 * (dz[:-1] + dz[1:])
-        )
-
-        # Theta at half levels (interpolated)
-        theta_half_inner = 0.5 * (theta_total[..., :-1] + theta_total[..., 1:])
-
-        # Buoyancy: +g * theta'/theta_0 at half levels
-        # Derived from: buoyancy = -c_p * theta' * d(pi_0)/dz
-        # Using hydrostatic balance d(pi_0)/dz = -g/(c_p*theta_0)
-        theta_p_half = 0.5 * (theta_p_c[..., :-1] + theta_p_c[..., 1:])
-        theta_0_half = 0.5 * (theta_0[:-1] + theta_0[1:])
-        buoyancy = g * theta_p_half / theta_0_half
-
-        # w tendency at interior half levels
-        dw_dt_inner = (
-            -c_p * theta_half_inner * dpi_dz_inner / J[..., None]
-            + buoyancy
-        )
-
-        # Update w (only interior levels, BCs stay at 0)
-        w_new = w_c.at[..., 1:-1].set(
-            w_c[..., 1:-1] + dt_s * dw_dt_inner
-        )
-
-        # --- Backward: update rho' using continuity ---
-        # Vertical mass flux divergence with updated w; ``rho_w`` has
-        # zero at top/bottom (rigid BC).  Single Pad HLO op replaces
-        # alloc-zeros + scatter.
-        rho_half = 0.5 * (rho_total[..., :-1] + rho_total[..., 1:])
-        pad_axes_w = ((0, 0),) * (w_new.ndim - 1)
-        rho_w = jnp.pad(rho_half * w_new[..., 1:-1], (*pad_axes_w, (1, 1)))
-
-        vert_div = (rho_w[..., :-1] - rho_w[..., 1:]) / dz
-        vert_div = vert_div / J[..., None]
-
-        rho_p_new = rho_p_c - dt_s * vert_div
-
-        # --- Off-centering: damp acoustic mode via time-averaging ---
-        # rho_p_damped = (1+beta)*rho_p_new - beta*rho_p_old
-        # For beta=0: no damping (centered). For beta>0: dissipative.
-        rho_p_new = (1.0 + beta) * rho_p_new - beta * rho_p_c
-
-        # --- Backward: update theta' using vertical w advection ---
-        # d(theta')/dt from acoustic vertical advection only.
-        # ``dtheta_dz`` is zero at top/bottom (no ghost), centred in
-        # the interior; single Pad HLO op replaces alloc-zeros +
-        # scatter.
-        w_full = 0.5 * (w_new[..., :-1] + w_new[..., 1:])
-        nlev = theta_total.shape[-1]
-        if nlev > 2:
-            dz_half_val = height_coord.dz_half  # (nlev-1,)
-            dz_centered = dz_half_val[:-1] + dz_half_val[1:]  # (nlev-2,)
-            inner_grad = (theta_total[..., :-2] - theta_total[..., 2:]) / dz_centered
-            pad_axes_t = ((0, 0),) * (theta_total.ndim - 1)
-            dtheta_dz = jnp.pad(inner_grad, (*pad_axes_t, (1, 1)))
-        else:
-            dtheta_dz = jnp.zeros_like(theta_total)
-
-        theta_p_new = theta_p_c - dt_s * w_full / J[..., None] * dtheta_dz
-
-        return (w_new, theta_p_new, rho_p_new)
-
-    # Run substeps via fori_loop
     w_final, theta_p_final, rho_p_final = jax.lax.fori_loop(
         0, n_substeps, substep_body, (w, theta_p, rho_p)
     )
 
-    # Return updated state
     return NonHydrostaticState(
         u=state.u,
         v=state.v,

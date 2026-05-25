@@ -72,6 +72,13 @@ _DRIVER_SUPPORTED: dict[tuple[str, str, str], str] = {
     ("hydrostatic",   "mpas",           "voronoi"):      "mpas_primitive_equations",
     ("nonhydrostatic","mpas",           "voronoi"):      "mpas_compressible_euler",
 
+    # --- Doubly-periodic plane (CRM rollout, PR2c) ---
+    # Plane only supports the non-hydrostatic compressible Euler dycore.
+    # All other (model_type, plane) combinations fall through to
+    # ``_fail_unsupported`` so users see a clear error pointing at the
+    # PR2c roadmap rather than a quiet construction crash.
+    ("nonhydrostatic","plane",          "plane"):        "plane_compressible_euler",
+
     # --- SFNO data-driven ---
     ("shallow_water", "sfno",           "cubed_sphere"): "sfno_shallow_water",
     ("hydrostatic",   "sfno",           "cubed_sphere"): "sfno_primitive_equations",
@@ -210,6 +217,12 @@ def create_atmosphere_dycore(
             div_damp_coeff=diff.div_damp,
             use_conservation_fixer=dc.conservation_fixer,
             fix_mass=dc.fix_mass,
+            # Issue #273 Phase 3: forward the implicit gravity-wave
+            # damping switches from the canonical driver config.
+            # Default off (both 0/False) keeps the explicit path
+            # bit-exact for existing call sites.
+            implicit_grav_wave_use_pcg=dc.implicit_grav_wave_use_pcg,
+            implicit_grav_wave_damping=dc.implicit_grav_wave_damping,
         )
         return CDGridPrimitiveEquationModel(grid, sigma, cfg)
 
@@ -285,6 +298,50 @@ def create_atmosphere_dycore(
     if solver_name == "mpas_compressible_euler":
         from legoesm.atmosphere.dynamics.compressible_euler_mpas import MPASCompressibleEulerModel
         return MPASCompressibleEulerModel(mesh=grid, sigma_coord=sigma)
+
+    # ----- Doubly-periodic plane -----
+    if solver_name == "plane_compressible_euler":
+        from legoesm.atmosphere.dynamics.compressible_euler import (
+            CompressibleEulerConfig,
+        )
+        from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+            PlaneCompressibleEulerModel,
+            make_flat_plane_terrain_metric,
+        )
+        # PR2c MVP: every plane setup is dry and uses flat terrain. The
+        # plane grid carries its own ``f_y`` (Coriolis) field built at
+        # ``create_plane_grid`` time; the driver does not override it.
+        # Build a flat terrain metric if the grid did not preattach one,
+        # and a default height coordinate if the driver did not pass a
+        # vertical coordinate that exposes ``z_full`` / ``z_half``.
+        height_coord = getattr(grid, "height_coord", None)
+        terrain_metric = getattr(grid, "terrain_metric", None)
+        if height_coord is None:
+            from legoesm.grids.vertical import create_height_coordinate
+            nlev = grid.nlev
+            # 30 km model top is the same default used by the
+            # cubed-sphere NH branch above.
+            height_coord = create_height_coordinate(nlev, H=30_000.0)
+        if terrain_metric is None:
+            terrain_metric = make_flat_plane_terrain_metric(grid, height_coord)
+        # PR2c keeps the driver path strict: hyperdiff / sponge knobs
+        # come from the dycore config but the plane dycore rejects
+        # them per ``validate_plane_config`` until PR3. The driver
+        # therefore constructs a minimal config that is safe for
+        # ``PR2c`` use; users wanting sponge enabled can construct
+        # ``PlaneCompressibleEulerModel`` directly with a custom
+        # ``CompressibleEulerConfig``.
+        cfg = CompressibleEulerConfig(
+            sponge_coeff=0.0,
+            hyperdiff_coeff=0.0,
+            hyperdiff_rho_coeff=0.0,
+            hyperdiff_w_coeff=0.0,
+            semi_implicit_acoustic=False,
+            use_coriolis=False,
+            fix_mass=dc.fix_mass,
+            anchor_mass_to_initial=dc.fix_mass,
+        )
+        return PlaneCompressibleEulerModel(grid, height_coord, terrain_metric, cfg)
 
     # ----- Lat-lon C-grid solvers -----
     if solver_name in ("latlon_cgrid_shallow_water",

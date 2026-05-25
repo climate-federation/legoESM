@@ -104,6 +104,13 @@ ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
         "legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid",
     ),
 
+    # -- Doubly-periodic plane (CRM rollout, PR2c) --
+    SolverEntry(
+        "atmosphere", "nonhydrostatic", "plane",
+        "plane_compressible_euler", "PlaneCompressibleEulerModel",
+        "legoesm.atmosphere.dynamics.compressible_euler_plane",
+    ),
+
     # -- Tracer transport --
     SolverEntry(
         "atmosphere", "tracer_transport", "cubed_sphere_cdgrid",
@@ -136,7 +143,7 @@ OCEAN_MATRIX: tuple[SolverEntry, ...] = (
     # NOTE: spectral ocean is unsupported — land boundary handling in
     # spectral space causes Gibbs ringing and unreliable masking.
     # Kept for reference; not included in the ocean test matrix.
-    # See https://github.com/leap-stc/legoESM/issues/99
+    # See https://github.com/gentine/legoESM/issues/99
     SolverEntry(
         "ocean", "hydrostatic", "spectral_gaussian",
         "spectral", "SpectralOceanModel",

@@ -756,63 +756,133 @@ def enforce_straits(
 # ============================================================================
 
 
-def _fill_isolated_basins(ocean_mask: np.ndarray) -> np.ndarray:
-    """Fill (set to land) isolated ocean basins not connected to the main ocean.
+def fill_isolated_basins(ocean_mask: np.ndarray, grid=None) -> np.ndarray:
+    """Remove isolated ocean basins not connected to the main ocean.
 
-    Uses flood-fill from the largest connected ocean component.
-    Works on flattened 1D mask with adjacency derived from the grid.
+    Flood-fills connected ocean components and keeps only the largest
+    (the global ocean).  All other components — semi-enclosed seas
+    whose connecting straits are narrower than the grid scale — are
+    set to land.
 
-    For simplicity, this operates on the raw numpy mask and uses
-    scipy's label function.
+    Works for any grid type:
+    - **Lat-lon** (2D): 4-connected with periodic longitude wrapping.
+    - **MPAS / Voronoi** (1D): uses ``mesh.cellsOnCell`` connectivity.
+    - **Cubed-sphere** (6, n, n): per-face 4-connected (approximate —
+      cross-face connectivity is ignored, sufficient for lakes).
 
     Parameters
     ----------
     ocean_mask : array
-        1=ocean, 0=land (any shape, but typically 2D or cubed-sphere).
+        1=ocean, 0=land.  Shape ``(n_lat, n_lon)`` for lat-lon,
+        ``(nCells,)`` for MPAS, or ``(6, n, n)`` for cubed-sphere.
+    grid : VoronoiMesh, optional
+        Required for MPAS (provides ``cellsOnCell`` adjacency).
+        Ignored for structured grids.
 
     Returns
     -------
-    ocean_mask : array
-        Updated mask with isolated basins filled.
+    array
+        Updated mask with isolated basins filled to land.
     """
-    try:
-        from scipy.ndimage import label
-    except ImportError:
-        return ocean_mask
+    from collections import deque
 
-    original_shape = ocean_mask.shape
-    # For cubed-sphere (6, n, n), process each face separately then merge
-    # This is approximate — cross-face connectivity is ignored — but
-    # sufficient for removing small interior lakes
-    if ocean_mask.ndim == 3 and ocean_mask.shape[0] == 6:
-        result = ocean_mask.copy()
+    mask = np.asarray(ocean_mask, dtype=np.float64).copy()
+    is_ocean = mask > 0.5
+
+    # --- MPAS (unstructured): use cellsOnCell adjacency ---
+    if mask.ndim == 1 and grid is not None and hasattr(grid, "cellsOnCell"):
+        n_cells = mask.shape[0]
+        adj_raw = np.asarray(grid.cellsOnCell)
+        # cellsOnCell may be (maxEdges, nCells) or (nCells, maxEdges)
+        if adj_raw.shape[0] < adj_raw.shape[1]:
+            adj = adj_raw.T  # → (nCells, maxEdges)
+        else:
+            adj = adj_raw
+
+        labels = np.zeros(n_cells, dtype=np.int32)
+        component_id = 0
+        sizes = []
+
+        for seed in range(n_cells):
+            if not is_ocean[seed] or labels[seed] > 0:
+                continue
+            component_id += 1
+            q = deque([seed])
+            labels[seed] = component_id
+            count = 0
+            while q:
+                c = q.popleft()
+                count += 1
+                for nb in adj[c]:
+                    nb = int(nb)
+                    if 0 <= nb < n_cells and is_ocean[nb] and labels[nb] == 0:
+                        labels[nb] = component_id
+                        q.append(nb)
+            sizes.append((component_id, count))
+
+        if not sizes:
+            return mask
+        largest_id = max(sizes, key=lambda x: x[1])[0]
+        n_removed = int(np.sum(is_ocean & (labels != largest_id)))
+        mask[is_ocean & (labels != largest_id)] = 0.0
+        if n_removed > 0:
+            basins = [(cid, cnt) for cid, cnt in sizes if cid != largest_id]
+            print(f"  Removed {n_removed} isolated-basin cells "
+                  f"({len(basins)} basins, sizes: "
+                  f"{sorted([c for _, c in basins], reverse=True)[:10]})")
+        return mask
+
+    # --- Cubed-sphere (6, n, n): per-face, approximate ---
+    if mask.ndim == 3 and mask.shape[0] == 6:
+        result = mask.copy()
         for face in range(6):
-            result[face] = _fill_isolated_basins_2d(ocean_mask[face])
+            result[face] = fill_isolated_basins(mask[face])
         return result
-    else:
-        return _fill_isolated_basins_2d(ocean_mask)
+
+    # --- Lat-lon (2D): 4-connected with periodic longitude wrapping ---
+    if mask.ndim != 2:
+        return mask
+
+    n_lat, n_lon = mask.shape
+    labels = np.zeros_like(mask, dtype=np.int32)
+    component_id = 0
+    sizes = []
+
+    for j in range(n_lat):
+        for i in range(n_lon):
+            if not is_ocean[j, i] or labels[j, i] > 0:
+                continue
+            component_id += 1
+            q = deque([(j, i)])
+            labels[j, i] = component_id
+            count = 0
+            while q:
+                cj, ci = q.popleft()
+                count += 1
+                for dj, di in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    nj = cj + dj
+                    ni = (ci + di) % n_lon  # periodic in longitude
+                    if 0 <= nj < n_lat and is_ocean[nj, ni] and labels[nj, ni] == 0:
+                        labels[nj, ni] = component_id
+                        q.append((nj, ni))
+            sizes.append((component_id, count))
+
+    if not sizes:
+        return mask
+    largest_id = max(sizes, key=lambda x: x[1])[0]
+    n_removed = int(np.sum(is_ocean & (labels != largest_id)))
+    mask[is_ocean & (labels != largest_id)] = 0.0
+    if n_removed > 0:
+        basins = [(cid, cnt) for cid, cnt in sizes if cid != largest_id]
+        print(f"  Removed {n_removed} isolated-basin cells "
+              f"({len(basins)} basins, sizes: "
+              f"{sorted([c for _, c in basins], reverse=True)[:10]})")
+    return mask
 
 
-def _fill_isolated_basins_2d(mask_2d: np.ndarray) -> np.ndarray:
-    """Fill isolated basins in a 2D ocean mask."""
-    try:
-        from scipy.ndimage import label
-    except ImportError:
-        return mask_2d
-
-    labeled, n_features = label(mask_2d > 0.5)
-    if n_features <= 1:
-        return mask_2d
-
-    # Find largest component
-    sizes = np.array([
-        np.sum(labeled == i) for i in range(1, n_features + 1)
-    ])
-    largest = np.argmax(sizes) + 1
-
-    result = mask_2d.copy()
-    result[labeled != largest] = 0.0
-    return result
+# Keep old names as aliases for back-compat with tests
+_fill_isolated_basins = fill_isolated_basins
+_fill_isolated_basins_2d = fill_isolated_basins
 
 
 # ============================================================================
@@ -1094,6 +1164,14 @@ def load_bathymetry_mpas(
             max_iter=cfg.meo_max_iter,
         )
         _LAST_MEO_INFO.update(meo_info)
+
+    # Remove isolated basins on the Voronoi mesh connectivity.
+    # The generic load_bathymetry call above may have attempted this
+    # via _fill_isolated_basins, but that version doesn't have mesh
+    # connectivity for 1D arrays.  Redo properly here.
+    if cfg.fill_isolated_basins:
+        ocean_mask = fill_isolated_basins(ocean_mask, grid=mesh)
+        depth = np.where(ocean_mask > 0.5, depth, 0.0)
 
     H_bathy = np.where(ocean_mask > 0.5, depth, 0.0)
 

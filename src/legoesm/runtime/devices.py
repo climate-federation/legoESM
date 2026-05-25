@@ -41,6 +41,7 @@ def setup_devices(
     backend: str | None = None,
     distributed: bool = False,
     grid_type: str = "cubed_sphere",
+    allow_level_fallback: bool = False,
 ) -> DeviceConfig:
     """One-shot device setup.
 
@@ -49,6 +50,17 @@ def setup_devices(
 
     Returns a :class:`DeviceConfig` (which is also set as the active
     singleton via ``parallel.mesh.set_active_config``).
+
+    Parameters
+    ----------
+    allow_level_fallback : bool
+        Issue #273 follow-up.  When True and ``grid_type='cubed_sphere'``
+        and ``n_devices`` fails face-sharding divisibility (e.g. 4,
+        which is not in ``{1, 2, 3, 6, 24, ...}``), the cubed-sphere
+        mesh constructor routes to ``create_cubed_sphere_level_mesh``
+        instead of clamping down to 3.  Without this flag, a 4-GPU
+        cubed-sphere boot raises (when ``n_devices=4`` explicit) or
+        silently clamps to 3 (when ``n_devices='auto'``).
     """
     # Late imports so that ``unittest.mock.patch`` on the canonical
     # ``legoesm.parallel.mesh`` module works in tests.
@@ -63,4 +75,7 @@ def setup_devices(
     elif grid_type == "spectral":
         return _mesh.create_level_mesh(n_devices=n_devices, backend=backend)
     else:
-        return _mesh.create_device_mesh(n_devices=n_devices, backend=backend)
+        return _mesh.create_device_mesh(
+            n_devices=n_devices, backend=backend,
+            allow_level_fallback=allow_level_fallback,
+        )

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 from legoesm import constants
+from legoesm.ocean.physics.vertical_mixing.tidal import TidalMixingConfig
 
 
 class ConstantVerticalMixingConfig(NamedTuple):
@@ -61,3 +62,11 @@ class VerticalMixingConfig(NamedTuple):
     constant: ConstantVerticalMixingConfig = ConstantVerticalMixingConfig()
     richardson: RichardsonVerticalMixingConfig = RichardsonVerticalMixingConfig()
     kpp: KPPConfig = KPPConfig()
+    # Tidal mixing is ADDITIVE: when ``tidal.enabled=True`` the
+    # caller computes a ``K_tidal(x, y, z)`` field via
+    # :func:`legoesm.ocean.physics.vertical_mixing.tidal.compute_tidal_diffusivity`
+    # and adds it on top of the diffusivity field from ``scheme``
+    # before applying the tracer mixing step.  Default off
+    # (``enabled=False``) preserves bit-exact regression on legacy
+    # configs.
+    tidal: TidalMixingConfig = TidalMixingConfig()

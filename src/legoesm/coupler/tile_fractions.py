@@ -122,4 +122,10 @@ def blend_tiles(
             ocean_resp.surface_mass_flux, ice_resp.surface_mass_flux,
             land_resp.surface_mass_flux, lake_resp.surface_mass_flux,
         ),
+        # Salt-flux blend (only sea-ice tile is non-zero in current
+        # implementation; other tiles return zeros).
+        salt_flux=_blend(
+            ocean_resp.salt_flux, ice_resp.salt_flux,
+            land_resp.salt_flux, lake_resp.salt_flux,
+        ),
     )

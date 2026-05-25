@@ -129,6 +129,7 @@ class PhysicsPipeline:
         gwd_fn=None,
         gwd_config=None,
         physics_parameterization=None,
+        column_mesh=None,
     ):
         self.adapter = adapter
         self.sigma_full = sigma_full
@@ -152,6 +153,13 @@ class PhysicsPipeline:
         self.gwd_fn = gwd_fn
         self.gwd_config = gwd_config
         self.physics_parameterization = physics_parameterization
+        # Issue #273 follow-up: optional column-shard mesh for the
+        # per-column radiation kernel.  When supplied, the column-format
+        # arrays passed into ``self.radiation_fn`` are placed on the
+        # mesh's ``'col'`` axis so radiation executes distributed
+        # without changing the JIT'd radiation kernel itself.
+        # ``None`` (default) preserves bit-exact single-mesh behavior.
+        self.column_mesh = column_mesh
         self._cloud_scheme = "none"  # set by build_physics_pipeline
 
     def physics_step_no_rad(self, T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic,
@@ -586,6 +594,38 @@ class PhysicsPipeline:
                 "cloud_fraction": cloud_props.cloud_fraction,
             }
 
+        # Issue #273 follow-up: when a column mesh is configured, place
+        # every column-format input on the mesh's 'col' axis before
+        # invoking the JIT'd radiation kernel.  Sharding propagates
+        # through the kernel automatically because the column ops are
+        # purely functional; the kernel itself is unchanged.
+        if self.column_mesh is not None:
+            from legoesm.parallel.column_shard import shard_columns
+            n_dev = self.column_mesh.shape["col"]
+            if ad.ncol % n_dev != 0:
+                raise ValueError(
+                    f"column_mesh requires ncol={ad.ncol} divisible by "
+                    f"n_devices={n_dev}.  Pick an n_devices that divides "
+                    f"the flattened column count, or disable "
+                    f"shard_radiation_columns."
+                )
+            _shard = lambda x: (
+                None if x is None else shard_columns(x, self.column_mesh)
+            )
+            T_col = _shard(T_col)
+            p_full_col = _shard(p_full_col)
+            p_half_col = _shard(p_half_col)
+            q_v_col = _shard(q_v_col)
+            T_sfc_col = _shard(T_sfc_col)
+            lat_col = _shard(lat_col)
+            lon_col = _shard(lon_col)
+            albedo_col = _shard(albedo_col)
+            emis_col = _shard(emis_col)
+            o3_vmr_precomputed = _shard(o3_vmr_precomputed)
+            aerosol_od_precomputed = _shard(aerosol_od_precomputed)
+            if cloud_kwargs:
+                cloud_kwargs = {k: _shard(v) for k, v in cloud_kwargs.items()}
+
         rad_out = self.radiation_fn(
             T_col, p_full_col, p_half_col, q_v_col,
             T_sfc_col, lat_col, lon_col,
@@ -794,9 +834,14 @@ def _build_rrtmgp_radiation_fn(config):
     diurnal = config.diurnal_cycle
     S_0 = config.S_0
 
-    # GPU default: Python for-loop unroll over columns (use_scan=False).
-    # Honour the experiment-level override so training/AD workflows can switch
-    # to jax.lax.scan without editing this file.
+    # Issue #273 GPU tuning: defer the scan-vs-unroll choice to
+    # ``rte_utils.recurrent_op_with_halos`` when the experiment
+    # config leaves ``rrtmgp_use_scan`` at its ``None`` default —
+    # auto-picks ``True`` on GPU/TPU (one fused scan kernel) and
+    # ``False`` on CPU/Metal (unrolled).  Explicit ``True``/``False``
+    # in the experiment config still overrides for benchmarking and
+    # AD workflows.
+    _exp_use_scan = getattr(config, 'rrtmgp_use_scan', None)
     rrtmg_config = RRTMGPConfig(
         co2_ppmv=config.co2_ppmv,
         ch4_ppbv=config.ch4_ppbv,
@@ -804,7 +849,7 @@ def _build_rrtmgp_radiation_fn(config):
         sfc_emissivity=config.sfc_emissivity,
         sfc_albedo=config.albedo_ocean,
         S_0=S_0,
-        use_scan=bool(getattr(config, 'rrtmgp_use_scan', False)),
+        use_scan=_exp_use_scan,
         include_clouds=(getattr(config, 'cloud_scheme', 'none') != 'none'),
     )
 
@@ -1138,6 +1183,55 @@ def build_physics_pipeline(grid, sigma, config):
         nlev=int(sigma.sigma_full.shape[0]),
     )
 
+    # Issue #273 follow-up: build a column-shard mesh when the
+    # ExperimentConfig opts in.  The mesh shards the flattened column
+    # axis across the *runtime-selected* device set so the per-column
+    # radiation kernel parallelizes on device counts that fail
+    # cubed-sphere face-divisibility (e.g. 4-GPU node) while still
+    # honoring whatever subset of visible devices the active
+    # ``ParallelRuntime`` / ``DeviceConfig`` owns.
+    #
+    # Codex adversarial review 019e544b (2026-05-23): using raw
+    # ``jax.devices()`` here would silently override a runtime that
+    # had been bootstrapped onto a subset of devices (e.g. an
+    # ensemble member that explicitly took 2-of-4) and create
+    # hard-to-debug cross-mesh resharding.  Always prefer the active
+    # ``DeviceConfig.mesh.devices``; fall back to ``jax.devices()``
+    # only when no runtime is active (e.g. unit tests that build the
+    # pipeline directly without a bootstrap step).
+    column_mesh = None
+    if getattr(config, "shard_radiation_columns", False):
+        from legoesm.parallel.column_shard import create_column_mesh
+        from legoesm.parallel.mesh import get_active_config
+        import jax
+
+        active = get_active_config()
+        if active is not None and active.mesh is not None:
+            runtime_devices = list(active.mesh.devices.reshape(-1))
+        else:
+            runtime_devices = list(jax.devices())
+
+        n_runtime_devices = len(runtime_devices)
+        if n_runtime_devices > 1:
+            # Validate up-front so a misconfiguration fails at build
+            # time, not deep inside the JIT'd hot path on the first
+            # radiation call.
+            if adapter.ncol % n_runtime_devices != 0:
+                raise ValueError(
+                    f"shard_radiation_columns=True requires "
+                    f"adapter.ncol={adapter.ncol} divisible by the "
+                    f"runtime-active device count "
+                    f"({n_runtime_devices}).  Pick a device count "
+                    f"that divides 6·n·n on the cubed sphere, "
+                    f"reduce ExperimentConfig.n_devices to a value "
+                    f"that divides ncol, or disable "
+                    f"shard_radiation_columns."
+                )
+            column_mesh = create_column_mesh(
+                n_devices=n_runtime_devices,
+                devices=runtime_devices,
+            )
+
     pipeline = PhysicsPipeline(
         adapter=adapter,
         sigma_full=sigma.sigma_full,
@@ -1161,6 +1255,7 @@ def build_physics_pipeline(grid, sigma, config):
         gwd_fn=gwd_fn,
         gwd_config=gwd_config,
         physics_parameterization=physics_parameterization,
+        column_mesh=column_mesh,
     )
     pipeline._cloud_scheme = getattr(config, 'cloud_scheme', 'none')
     return pipeline

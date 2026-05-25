@@ -2457,6 +2457,191 @@ def create_height_coordinate(
     )
 
 
+def create_stretched_height_coordinate(
+    n_levels: int,
+    H: float,
+    dz_sfc: float = 50.0,
+    stretching: float | None = None,
+    theta_ref_fn: Callable[[jax.Array], jax.Array] | None = None,
+) -> HeightCoordinate:
+    """Geometrically-stretched height-based (z-star) vertical coordinate.
+
+    Layer thicknesses grow geometrically from ``dz_sfc`` at the
+    surface to whatever value the constraint
+    ``sum_k dz_sfc · r^k == H`` requires::
+
+        dz[k] = dz_sfc · r^k  (k = 0 .. n_levels - 1, k=0 = surface)
+
+    The stretching ratio ``r`` is either supplied by the caller or
+    solved for given ``(n_levels, H, dz_sfc)``. The closed-form
+    constraint is ``dz_sfc · (1 - r^n) / (1 - r) == H``; we solve via
+    Newton iteration on host arithmetic (the ratio is a static scalar,
+    no per-step cost).
+
+    Layout convention matches :func:`create_height_coordinate`:
+    top-to-bottom storage so ``z_half[0] = H`` (model top) and
+    ``z_half[-1] = 0`` (surface). The geometric stretching means
+    ``dz[-1] = dz_sfc`` (thinnest at the surface, the last index) and
+    ``dz[0]`` is the thickest layer at the model top.
+
+    Parameters
+    ----------
+    n_levels : int
+        Number of full vertical levels.
+    H : float
+        Model top height [m].
+    dz_sfc : float
+        Lowest-layer thickness [m]. RCEMIP1 spec uses ~50 m.
+    stretching : float or None
+        Geometric ratio ``dz[k+1] / dz[k]``. If None (default), solved
+        from ``(n_levels, H, dz_sfc)`` via Newton iteration so the
+        column sum hits ``H`` exactly. Typical values 1.05–1.15 for
+        atmospheric CRM grids; values > 1.2 risk poorly-resolved
+        upper troposphere.
+    theta_ref_fn : callable, optional
+        Function ``theta_0(z) -> potential temperature [K]``. Default
+        is :func:`_default_theta_ref` (isothermal 300 K) — fine for
+        a smoke/test reference state, but UNREALISTIC for an RCEMIP
+        or other deep CRM column because the actual atmosphere is
+        strongly stratified (potential temperature increases by
+        ~100 K between the surface and the tropopause). Pass an
+        explicit Wing 2018-style sounding for production RCE runs.
+
+    Returns
+    -------
+    HeightCoordinate
+    """
+    if theta_ref_fn is None:
+        theta_ref_fn = _default_theta_ref
+    if dz_sfc <= 0.0:
+        raise ValueError(f"dz_sfc={dz_sfc} must be positive.")
+    if n_levels < 2:
+        raise ValueError(
+            f"n_levels={n_levels} must be >= 2 for a stretched grid."
+        )
+    if dz_sfc * n_levels >= H:
+        raise ValueError(
+            f"dz_sfc={dz_sfc} too large for H={H}, n_levels={n_levels}: "
+            f"uniform layers would exceed H. Reduce dz_sfc or increase "
+            f"n_levels."
+        )
+    # Codex review: callers that pass BOTH stretching and a non-default
+    # dz_sfc are mixing two over-determined constraints (the geometric
+    # sum must equal H). Reject explicitly rather than silently
+    # overriding dz_sfc — earlier behaviour was easy to misuse.
+    if stretching is not None and dz_sfc != 50.0:
+        raise ValueError(
+            f"Pass either `stretching` (and let `dz_sfc` derive from "
+            f"H, n_levels, r) OR `dz_sfc` (and let `stretching` be "
+            f"Newton-solved). Got both stretching={stretching} and "
+            f"non-default dz_sfc={dz_sfc}; the (stretching, dz_sfc, "
+            f"n_levels, H) tuple is over-determined for a geometric "
+            f"column."
+        )
+
+    import numpy as _np
+
+    n = n_levels
+    if stretching is None:
+        # Solve dz_sfc · (r^n - 1) / (r - 1) = H for r > 1 via
+        # BRACKETED BISECTION. Newton fails here because r=1 is a
+        # spurious fixed point of f(r) = dz_sfc·(r^n-1) - H·(r-1)
+        # and the iteration drifts back to that root for many start
+        # points (Codex iter-1). Bisection on (1+eps, r_max) is
+        # robust and the bracket is monotone — f(1+eps) < 0,
+        # f(r_max) > 0 by construction for any r_max with
+        # dz_sfc·r_max^(n-1) > H.
+        def _g(r):
+            return dz_sfc * (r ** n - 1.0) / (r - 1.0) - H
+
+        r_lo = 1.0 + 1.0e-9
+        r_hi = 10.0
+        # Ensure r_hi brackets the root (g(r_hi) > 0). For any
+        # reasonable (n, H, dz_sfc), r=10 produces a huge sum; if
+        # not, double until it does.
+        for _ in range(20):
+            if _g(r_hi) > 0.0:
+                break
+            r_hi *= 2.0
+        if _g(r_lo) >= 0.0 or _g(r_hi) <= 0.0:
+            raise ValueError(
+                f"No stretched-grid solution found in r ∈ ({r_lo}, "
+                f"{r_hi}) for n_levels={n}, H={H}, dz_sfc={dz_sfc}. "
+                f"Inputs may be unphysical."
+            )
+        for _ in range(200):
+            r_mid = 0.5 * (r_lo + r_hi)
+            g_mid = _g(r_mid)
+            if abs(g_mid) < 1.0e-12 * H or (r_hi - r_lo) < 1.0e-14:
+                r_lo = r_hi = r_mid
+                break
+            if g_mid > 0.0:
+                r_hi = r_mid
+            else:
+                r_lo = r_mid
+        r = 0.5 * (r_lo + r_hi)
+        final_sum = dz_sfc * (r ** n - 1.0) / (r - 1.0)
+        rel_residual = abs(final_sum - H) / H
+        if rel_residual > 1.0e-6:
+            raise ValueError(
+                f"Stretching solve did not converge: r={r}, "
+                f"sum(dz)={final_sum:.6f} vs H={H} "
+                f"(rel residual={rel_residual:.3e})."
+            )
+        stretching = float(r)
+    else:
+        # Caller supplied an explicit stretching ratio: derive the
+        # consistent ``dz_sfc`` from it so the column sums to H exactly
+        # and the layer ratios stay geometric throughout.
+        dz_sfc = float(
+            H * (stretching - 1.0) / (stretching ** n - 1.0)
+        )
+    if stretching <= 1.0:
+        raise ValueError(
+            f"stretching={stretching} must be > 1.0 (geometric ratio)."
+        )
+
+    # Layer thicknesses surface→top: dz_sfc · r^k. With the consistent
+    # (dz_sfc, r) pair the sum is H to ~1e-12; the trailing residual
+    # adjustment hides only floating-point round-off without
+    # measurably perturbing the top layer.
+    k_sfc_to_top = _np.arange(n_levels)
+    dz_sfc_to_top = dz_sfc * stretching ** k_sfc_to_top
+    residual = H - dz_sfc_to_top.sum()
+    dz_sfc_to_top[-1] += residual
+    # Storage is top-to-bottom, so reverse.
+    dz_np = dz_sfc_to_top[::-1]
+    dz = jnp.asarray(dz_np)
+    z_half_np = _np.concatenate([
+        _np.array([H]),
+        H - _np.cumsum(dz_np),
+    ])
+    z_half = jnp.asarray(z_half_np)
+    z_full = 0.5 * (z_half[:-1] + z_half[1:])
+    dz_half = z_full[:-1] - z_full[1:]
+
+    rho_ref, theta_ref, exner_ref = compute_reference_state(
+        z_full, theta_ref_fn,
+    )
+    rho_ref_half, _, exner_ref_half = compute_reference_state(
+        z_half, theta_ref_fn,
+    )
+
+    return HeightCoordinate(
+        n_levels=n_levels,
+        H=H,
+        z_full=z_full,
+        z_half=z_half,
+        dz=dz,
+        dz_half=dz_half,
+        rho_ref=rho_ref,
+        theta_ref=theta_ref,
+        exner_ref=exner_ref,
+        exner_ref_half=exner_ref_half,
+        rho_ref_half=rho_ref_half,
+    )
+
+
 def compute_terrain_metric(
     z_s: jax.Array,
     height_coord: HeightCoordinate,

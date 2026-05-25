@@ -64,6 +64,7 @@ _PER_GRID_FORMAT_PATTERNS = {
     "ico": re.compile(r"^ico[1-9]\d*$"),                      # icosahedral / mpas
     "T": re.compile(r"^T[1-9]\d*$"),                          # spectral
     "km": re.compile(r"^[1-9]\d*km$"),                        # mpas_regional
+    "orca": re.compile(r"^e?orca\d+$"),                       # tripole (e.g. eorca1, orca025)
 }
 
 

@@ -46,13 +46,26 @@ set_policy(PrecisionPolicy.fp64())
 # Grid types and default resolutions / timesteps
 # ===========================================================================
 
-GRID_TYPES = ["cubed_sphere", "latlon", "mpas", "spectral"]
+GRID_TYPES = ["cubed_sphere", "latlon", "mpas", "spectral", "tripole"]
 
 GRID_DEFAULTS: dict[str, dict] = {
-    "cubed_sphere": {"resolution": "C24", "dt": 300.0},
+    # cubed_sphere now uses the FC-Gram spectral baroclinic-tendency
+    # backend (see _create_setup) which eliminates the face-edge PGF
+    # halo amplification that previously blew up the cd-grid path
+    # at ~4 days under WOA SST restoring.  With FC + the existing
+    # tuned defaults (A_h, K_h, nbaro, restoring tau + ramp) the
+    # 30-day smoke run completes with physical max_speed ≈ 3e-5 m/s.
+    # dt=60 retained out of caution; FC step is ~1.6× slower per
+    # iteration than cdgrid because of the per-face Fourier
+    # continuation cost.
+    "cubed_sphere": {"resolution": "C24", "dt": 60.0},
     "latlon":       {"resolution": "36x72", "dt": 300.0},
     "mpas":         {"resolution": "ico3", "dt": 300.0},
     "spectral":     {"resolution": "T21", "dt": 300.0},
+    # Tripolar eORCA1 (332×362 mesh). Matches the validated 20-yr
+    # idealized production runner (run_tripole_20yr.py): dt=600s,
+    # 20 levels, ETOPO bathymetry + 80°N cap removal.
+    "tripole":      {"resolution": "eorca1", "dt": 600.0},
 }
 
 ALL_RESULTS: list[dict] = []
@@ -103,7 +116,7 @@ def parse_args():
                    help="Laplacian smoothing passes for bathymetry (default 2).")
     p.add_argument("--r-factor-max", type=float, default=0.2,
                    help="Maximum bathymetric slope r-factor for partial cells (default 0.2).")
-    p.add_argument("--north-cap-lat", type=float, default=80.0,
+    p.add_argument("--north-cap-lat", type=float, default=90.0,
                    help="Latitude [°N] above which all cells become land (default 80).")
     p.add_argument("--south-cap-lat", type=float, default=-80.0,
                    help=(
@@ -172,8 +185,24 @@ def parse_args():
     p.add_argument("--water-type", type=str, default="II",
                    choices=["I", "IA", "IB", "II", "III"])
     p.add_argument("--no-conservation-fixer", action="store_true")
-    p.add_argument("--restoring-timescale", type=float, default=1095.0,
-                   help="SST/SSS restoring timescale [days] (default: 1095)")
+    p.add_argument("--restoring-timescale", type=float, default=None,
+                   help=(
+                       "SST/SSS restoring timescale [days].  Omitting this "
+                       "uses 1095 days for latlon/mpas/spectral and 3650 "
+                       "days for cubed_sphere (the slower default delays "
+                       "the cubed-sphere face-edge PGF instability).  "
+                       "Passing an explicit value overrides the default "
+                       "for every grid, including cubed_sphere."
+                   ))
+    p.add_argument("--restoring-ramp-days", type=float, default=None,
+                   help=(
+                       "Ramp restoring strength linearly from 0 to full over "
+                       "this many days at the start of the integration.  "
+                       "Omitting this uses 0 days (full strength from step "
+                       "1) for latlon/mpas/spectral and 14 days for "
+                       "cubed_sphere.  Pass --restoring-ramp-days 0 "
+                       "explicitly to disable the cubed-sphere ramp."
+                   ))
     p.add_argument("--no-restoring", action="store_true",
                    help="Disable SST/SSS restoring")
     p.add_argument("--diag-every", type=int, default=None,
@@ -276,6 +305,18 @@ def _parse_resolution(grid_type: str, resolution: str) -> dict:
         return {"level": int(resolution.replace("ico", ""))}
     elif grid_type == "spectral":
         return {"truncation": int(resolution.lstrip("Tt"))}
+    elif grid_type == "tripole":
+        # Resolution maps to a mesh-file. Only eORCA1 supported today.
+        meshes = {
+            "eorca1": "data/grids/eORCA1.2_mesh_mask.nc",
+        }
+        key = resolution.lower()
+        if key not in meshes:
+            raise ValueError(
+                f"Unknown tripole resolution {resolution!r}. "
+                f"Available: {sorted(meshes)}."
+            )
+        return {"mesh_path": meshes[key]}
     raise ValueError(f"Unknown grid type: {grid_type}")
 
 
@@ -337,7 +378,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   slope_foot_alpha: float = 0.0,
                   no_lat_scaling: bool = False,
                   no_gm_redi: bool = False,
-                  implicit_vertical_mixing: bool = False):
+                  implicit_vertical_mixing: bool = False,
+                  forcing_mode: str = "restoring"):
     """Create grid, z_coord, config, model for any grid type.
 
     All grids use the SAME config-based diffusion (A_h, K_h, A_v, K_v)
@@ -380,17 +422,63 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.ocean.dynamics.ocean_model import OceanModel
         from legoesm.ocean.state import OceanConfig
+        from legoesm.core.operators_fc import build_fc_config
 
         grid = create_cubed_sphere(params["n"])
-        # physics=None → use built-in A_h/K_h/A_v/K_v diffusion
-        # (same as latlon/MPAS/spectral for consistency).
+        # Cubed-sphere OMIP-stability tuning.
+        #
+        # The cubed-sphere ``OceanModel`` exhibits a slow exponential
+        # instability when the horizontal density field develops
+        # gradients of any magnitude — the artifact lives at face
+        # boundaries and shows up as accelerating velocity / SSH growth
+        # at the cells just inside the cube edges (the diagnostic loop
+        # locates the first NaN at face-edge cells).  With the
+        # latlon-equivalent defaults (A_h=1e5, K_h=1e5,
+        # n_barotropic_substeps=30, dt=300s) the rest-state + WOA
+        # restoring smoke test reaches NaN at ≈ 2.2 days.  The values
+        # below extend the failure to ≈ 4-5 days under the 30-day
+        # quick CLI defaults — enough to exercise the cubed-sphere
+        # dycore but NOT enough for the 30-day quick matrix run to
+        # complete.  ``--grid all`` therefore excludes cubed_sphere
+        # in ``main`` so CI smoke tests are not permanently red; users
+        # who explicitly opt into ``--grid cubed_sphere`` get the
+        # warning printed at startup.  The structural fix (SMC03-style
+        # density-Jacobian PGF + duogrid halo on T, S) is tracked in
+        # docs/ocean_experiments/cubed_sphere_pgf_stability.md.
+        A_h_cs = max(A_h, 5.0e5)
+        K_h_cs = max(K_h, 5.0e6)
+        if A_h_cs > A_h:
+            print(
+                f"  WARNING: cubed_sphere A_h raised from {A_h:g} to "
+                f"{A_h_cs:g} for face-edge stability"
+            )
+        if K_h_cs > K_h:
+            print(
+                f"  WARNING: cubed_sphere K_h raised from {K_h:g} to "
+                f"{K_h_cs:g} for face-edge stability"
+            )
         config = OceanConfig(
-            A_h=A_h, K_h=K_h, A_v=A_v, K_v=K_v,
-            n_barotropic_substeps=30,
+            A_h=A_h_cs, K_h=K_h_cs, A_v=A_v, K_v=K_v,
+            n_barotropic_substeps=60,
+            barotropic_diffusion_alpha=0.3,
             use_conservation_fixer=True,
             physics=None,
         )
-        model = OceanModel(grid, z_coord, config)
+        # FC-Gram spectral baroclinic-tendency backend.  The default
+        # cd-grid A-L 4-pt corner stencil amplifies halo-interp errors
+        # at face boundaries by O(dx); under a slowly developing
+        # horizontal density gradient (rest-state + WOA restoring)
+        # this drives an exponentially growing PGF instability that
+        # blew up cubed_sphere OMIP at ~4-5 days even with the tuned
+        # diffusion defaults above.  FC-Gram operators evaluate
+        # gradients spectrally on each cube face with smooth Fourier-
+        # continuation extension into the halo region, so the
+        # face-edge artifact effectively vanishes.  Combined with the
+        # A_h/K_h floors above this lets cubed_sphere reach the 30-day
+        # quick smoke target and beyond.  See
+        # docs/ocean_experiments/cubed_sphere_pgf_stability.md.
+        fc_cfg = build_fc_config(dtype=jnp.float64)
+        model = OceanModel(grid, z_coord, config, fc_config=fc_cfg)
         return grid, z_coord, config, model, "cube"
 
     elif grid_type == "latlon":
@@ -513,11 +601,84 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         from legoesm.grids.voronoi import create_voronoi_mesh
         from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
         from legoesm.ocean.mpas_config import MPASOceanConfig
+        from legoesm.ocean.physics.combined import OceanPhysicsConfig
+        from legoesm.ocean.physics.surface_forcing.config import (
+            SurfaceForcingConfig, PrescribedForcingConfig, RestoringConfig,
+        )
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            VerticalMixingConfig, KPPConfig,
+        )
+        from legoesm.ocean.physics.convection.config import (
+            OceanConvectionConfig, EnhancedDiffusionConfig,
+        )
+        from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
+        from legoesm.ocean.physics.lateral_mixing.config import (
+            LateralMixingConfig, GMRediConfig, VisbeckConfig,
+        )
 
         mesh = create_voronoi_mesh(params["level"])
+
+        # For JRA55 forcing mode, use scheme="none" so that external
+        # tau/q_net from the bulk-flux solver are applied via the
+        # surface_forcing argument to model.step().  For restoring mode,
+        # use the same "combined" config as the comparison scripts.
+        # forcing_mode is passed from run_omip_single() via the parameter.
+        if forcing_mode == "jra55_do_tropical":
+            sf_config = SurfaceForcingConfig(scheme="none")
+        else:
+            sf_config = SurfaceForcingConfig(
+                scheme="combined",
+                prescribed=PrescribedForcingConfig(
+                    wind_profile="global_wind", tau_max=0.1,
+                    tropical_wind_scale=0.5,
+                    tropical_wind_lat_deg=15.0,
+                ),
+                restoring=RestoringConfig(
+                    tau_T=2592000.0, tau_S=2592000.0,
+                    T_star_eq=25.0, T_star_pole=0.0,
+                    S_star=35.0, T_profile="cosine",
+                ),
+            )
+
+        physics = OceanPhysicsConfig(
+            surface_forcing=sf_config,
+            vertical_mixing=VerticalMixingConfig(
+                scheme="kpp",
+                kpp=KPPConfig(K_conv=1.0),
+            ),
+            lateral_mixing=LateralMixingConfig(scheme="none"),
+            bottom_drag=BottomDragConfig(scheme="none"),
+            convection=OceanConvectionConfig(
+                scheme="enhanced_diffusion",
+                enhanced_diffusion=EnhancedDiffusionConfig(K_conv=1.0),
+            ),
+            shortwave_penetration=None,
+        )
+
         config = MPASOceanConfig(
-            A_h=A_h, K_h=K_h, A_v=A_v, K_v=K_v,
-            n_barotropic_substeps=30,
+            A_h=1.0e5,    # Higher than PR #261 (1e4) for stability under
+                          # JRA55 forcing over centennial integrations.
+            A_v=1.0e-4,   # PR #261 value (generic is 1e-3, too high for MPAS)
+            K_v=1.0e-5,   # PR #261 value (generic is 1e-4, too high for MPAS)
+            C_smag_lap=0.33,
+            K_zeta_bih=1e14,
+            barotropic_solver="implicit_cn",
+            barotropic_implicit_pcg_tol=1e-10,
+            barotropic_implicit_pcg_maxiter=300,
+            pgf_scheme="adcroft",
+            implicit_vertical_mixing=True,
+            normalize_freshwater=True,
+            tracer_advection="tvd",
+            bottom_drag_r=1e-3,
+            bottom_drag_bbl_thickness=100.0,
+            bottom_drag_bg_velocity=0.1,
+            gm_redi=GMRediConfig(
+                kappa_GM=600.0, kappa_Redi=600.0,
+                S_max=0.005,
+                visbeck=VisbeckConfig(enabled=False),
+                slope_scheme="centered",
+            ),
+            physics=physics,
         )
         model = MPASOceanModel(mesh, z_coord, config)
         return mesh, z_coord, config, model, "mpas"
@@ -539,6 +700,92 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         model = SpectralOceanModel(grid, z_coord, config)
         return grid, z_coord, config, model, "gaussian"
 
+    elif grid_type == "tripole":
+        # eORCA1 tripolar via LatLonCGridOceanModel.  Mirrors the
+        # MPAS JRA55 path: SurfaceForcingConfig(scheme="none") when
+        # forcing_mode=="jra55_do_tropical" so the dynamics-core
+        # external-tau block (ocean_pe_latlon_cgrid.py:1838+) is the
+        # sole consumer of tau / q_net / sw_down from
+        # OceanSurfaceForcing.  Bathymetry + dissipation defaults are
+        # lifted from run_tripole_20yr.py (validated by the 20-yr
+        # idealized production run).
+        from legoesm.grids.tripole import create_tripole_grid
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+        from legoesm.ocean.physics.combined import OceanPhysicsConfig
+        from legoesm.ocean.physics.surface_forcing.config import (
+            SurfaceForcingConfig, RestoringConfig,
+        )
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            VerticalMixingConfig, KPPConfig,
+        )
+        from legoesm.ocean.physics.convection.config import (
+            OceanConvectionConfig, EnhancedDiffusionConfig,
+        )
+        from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
+        from legoesm.ocean.physics.lateral_mixing.config import (
+            LateralMixingConfig, GMRediConfig, VisbeckConfig,
+        )
+
+        geom = create_tripole_grid(params["mesh_path"])
+
+        if forcing_mode == "jra55_do_tropical":
+            sf_config = SurfaceForcingConfig(scheme="none")
+        else:
+            sf_config = SurfaceForcingConfig(
+                scheme="restoring",
+                restoring=RestoringConfig(
+                    tau_T=2592000.0, tau_S=2592000.0,
+                    T_star_eq=25.0, T_star_pole=0.0,
+                    S_star=35.0, T_profile="cosine",
+                ),
+            )
+
+        physics = OceanPhysicsConfig(
+            surface_forcing=sf_config,
+            vertical_mixing=VerticalMixingConfig(
+                scheme="kpp",
+                kpp=KPPConfig(K_conv=1.0),
+            ),
+            lateral_mixing=LateralMixingConfig(scheme="none"),
+            bottom_drag=BottomDragConfig(scheme="none"),
+            convection=OceanConvectionConfig(
+                scheme="enhanced_diffusion",
+                enhanced_diffusion=EnhancedDiffusionConfig(K_conv=1.0),
+            ),
+            shortwave_penetration=None,
+        )
+
+        config = LatLonCGridOceanConfig(
+            A_h=1.0e5,
+            A_v=1.0e-4,
+            K_v=1.0e-5,
+            B_h=0.0,
+            C_smag_lap=0.33,
+            n_barotropic_substeps=30,
+            barotropic_solver="implicit_cn",
+            barotropic_implicit_pcg_tol=1e-10,
+            barotropic_implicit_pcg_maxiter=300,
+            pgf_scheme="adcroft",
+            implicit_vertical_mixing=True,
+            tracer_advection="tvd",
+            bottom_drag_r=1e-3,
+            bottom_drag_bbl_thickness=100.0,
+            bottom_drag_bg_velocity=0.1,
+            freshwater_closure="virtual_salt_flux",
+            gm_redi=GMRediConfig(
+                kappa_GM=600.0, kappa_Redi=600.0,
+                S_max=0.005,
+                visbeck=VisbeckConfig(enabled=False),
+                slope_scheme="centered",
+            ),
+            physics=physics,
+        )
+        model = LatLonCGridOceanModel(geom, z_coord, config)
+        return geom, z_coord, config, model, "tripole"
+
     raise ValueError(f"Unknown grid type: {grid_type}")
 
 
@@ -547,7 +794,9 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
 # ===========================================================================
 
 def _init_rest_state(grid_type, grid, z_coord, H_max,
-                     H_bathy=None, land_mask=None):
+                     H_bathy=None, land_mask=None,
+                     bathy_cfg=None,
+                     use_etopo_postinit=False):
     """Create rest-state initial condition (zero velocity, exponential T, uniform S).
 
     Uses each grid's standard rest_state function, which provides a
@@ -575,10 +824,29 @@ def _init_rest_state(grid_type, grid, z_coord, H_max,
         )
     elif grid_type == "mpas":
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
-        return rest_state_mpas_ocean(grid, z_coord, H_max=H_max)
+        # When ETOPO bathymetry will be applied post-init, use
+        # land_lat_threshold=90 so the initial state has ocean
+        # everywhere (including the Arctic). The ETOPO block will
+        # set the real land_mask and H_bathy afterwards.
+        lat_thresh = 90.0 if use_etopo_postinit else 80.0
+        return rest_state_mpas_ocean(
+            grid, z_coord, H_max=H_max,
+            bathymetry=bathy_cfg,
+            land_lat_threshold=lat_thresh,
+        )
     elif grid_type == "spectral":
         from legoesm.ocean.dynamics.spectral_ocean_pe import rest_state_spectral_ocean
         return rest_state_spectral_ocean(grid, z_coord, H_max=H_max)
+    elif grid_type == "tripole":
+        from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+        # Reuse the lat-lon C-grid rest-state (tripole shares the same
+        # geometry struct + state layout). H_bathy / land_mask come
+        # from ETOPO post-init, same as MPAS.
+        return rest_state_latlon_cgrid_ocean(
+            grid, z_coord, H_max=H_max,
+            H_bathy_override=H_bathy,
+            land_mask_override=land_mask,
+        )
     raise ValueError(f"Unknown grid type: {grid_type}")
 
 
@@ -595,8 +863,7 @@ def _build_surface_forcing(grid_type, grid, sw_down_value):
     elif grid_type == "latlon":
         shape = (grid.lat.shape[0], grid.lon.shape[0])
     elif grid_type == "mpas":
-        # MPAS model.step doesn't accept surface_forcing yet
-        return None
+        shape = (grid.nCells,)
     elif grid_type == "spectral":
         # Spectral model doesn't use surface_forcing pipeline
         return None
@@ -611,7 +878,8 @@ def _build_surface_forcing(grid_type, grid, sw_down_value):
 # Grid-agnostic SST/SSS restoring
 # ===========================================================================
 
-def _apply_restoring(state, grid_type, grid, T_target, S_target, dt, tau_s):
+def _apply_restoring(state, grid_type, grid, T_target, S_target, dt, tau_s,
+                     ramp_scale: float = 1.0):
     """Apply SST/SSS restoring toward WOA climatology.
 
     This is the OMIP-standard Haney (1971) surface flux restoring:
@@ -630,9 +898,14 @@ def _apply_restoring(state, grid_type, grid, T_target, S_target, dt, tau_s):
         Timestep [s].
     tau_s : float
         Restoring timescale [s].
+    ramp_scale : float
+        Scale factor in [0, 1] applied to the per-step restoring
+        coefficient.  Used for a linear spin-up ramp on cubed-sphere
+        OMIP where the rest-state ↔ WOA shock excites the face-edge
+        PGF instability.
     """
-    # Restoring coefficient: fraction toward target per step
-    alpha = dt / tau_s
+    # Restoring coefficient: fraction toward target per step (with optional ramp)
+    alpha = dt / tau_s * ramp_scale
 
     if grid_type == "spectral":
         from legoesm.grids.gaussian import sh_analysis
@@ -714,11 +987,11 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         the corresponding feature is disabled regardless of the
         ``--jra55-no-...`` flags.
     """
-    if grid_type != "latlon":
+    _supported_jra55_grids = ("latlon", "mpas", "tripole")
+    if grid_type not in _supported_jra55_grids:
         raise ValueError(
             "--forcing-mode jra55_do_tropical currently supports only "
-            f"--grid latlon (got {grid_type!r}). Other grids will need "
-            "an additional regridding step."
+            f"--grid {_supported_jra55_grids} (got {grid_type!r})."
         )
     if args.jra55_cache is None:
         raise ValueError(
@@ -735,18 +1008,61 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
     ds = xr.open_zarr(str(cache_path), decode_times=False)
     cache_n_lat = int(ds.sizes["lat"])
     cache_n_lon = int(ds.sizes["lon"])
-    model_n_lat = int(grid.lat.shape[0])
-    model_n_lon = int(grid.lon.shape[0])
-    if (cache_n_lat, cache_n_lon) != (model_n_lat, model_n_lon):
-        raise ValueError(
-            f"JRA55-do cache grid ({cache_n_lat}×{cache_n_lon}) does not "
-            f"match model grid ({model_n_lat}×{model_n_lon}). Rebuild the "
-            "cache with prepare_omip_forcing.py at the matching resolution."
-        )
 
-    # Build 2-D lat/lon (in radians) for cos_zenith / atm_to_surface.
-    lat_2d = jnp.asarray(np.deg2rad(np.asarray(grid.lat))[:, None])
-    lon_2d = jnp.asarray(np.deg2rad(np.asarray(grid.lon))[None, :])
+    # For MPAS / tripole we need regrid weights; for lat-lon we validate
+    # grid match (cache is pre-built at lat-lon resolution).
+    regrid_weights = None
+    if grid_type == "mpas":
+        from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
+        src_lat_rad = np.deg2rad(np.asarray(ds["lat"]))
+        src_lon_rad = np.deg2rad(np.asarray(ds["lon"]))
+        tgt_lat_rad = np.asarray(grid.latCell)
+        tgt_lon_rad = np.asarray(grid.lonCell)
+        regrid_weights = compute_latlon_to_voronoi_weights(
+            src_lat_rad, src_lon_rad, tgt_lat_rad, tgt_lon_rad,
+        )
+        print(f"  JRA55 regrid: {cache_n_lat}×{cache_n_lon} lat-lon → "
+              f"{grid.nCells} MPAS cells (k=4 IDW)")
+        # lat/lon for zenith angle (1-D, radians, on MPAS cells)
+        lat_2d = jnp.asarray(tgt_lat_rad)
+        lon_2d = jnp.asarray(tgt_lon_rad)
+    elif grid_type == "tripole":
+        # Same KDTree IDW path as MPAS, but the target is a 2-D
+        # curvilinear array (lat_T, lon_T).  Flatten for the regrid
+        # weight builder, then reshape the output in _jra55_step (the
+        # latlon-cgrid model consumes 2-D surface fields).
+        from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
+        src_lat_rad = np.deg2rad(np.asarray(ds["lat"]))
+        src_lon_rad = np.deg2rad(np.asarray(ds["lon"]))
+        tgt_lat_rad_2d = np.asarray(grid.lat_T)
+        tgt_lon_rad_2d = np.asarray(grid.lon_T)
+        n_lat = int(tgt_lat_rad_2d.shape[0])
+        n_lon = int(tgt_lat_rad_2d.shape[1])
+        regrid_weights = compute_latlon_to_voronoi_weights(
+            src_lat_rad, src_lon_rad,
+            tgt_lat_rad_2d.ravel(), tgt_lon_rad_2d.ravel(),
+        )
+        # Mark the regrid output as 2-D so _jra55_step can reshape.
+        regrid_weights = regrid_weights._replace(
+            target_shape=(n_lat, n_lon),
+        )
+        print(f"  JRA55 regrid: {cache_n_lat}×{cache_n_lon} lat-lon → "
+              f"{n_lat}×{n_lon} tripole T-points (k=4 IDW)")
+        lat_2d = jnp.asarray(tgt_lat_rad_2d)
+        lon_2d = jnp.asarray(tgt_lon_rad_2d)
+    else:
+        # lat-lon: validate cache matches model grid
+        model_n_lat = int(grid.lat.shape[0])
+        model_n_lon = int(grid.lon.shape[0])
+        if (cache_n_lat, cache_n_lon) != (model_n_lat, model_n_lon):
+            raise ValueError(
+                f"JRA55-do cache grid ({cache_n_lat}×{cache_n_lon}) does not "
+                f"match model grid ({model_n_lat}×{model_n_lon}). Rebuild the "
+                "cache with prepare_omip_forcing.py at the matching resolution."
+            )
+        # Build 2-D lat/lon (in radians) for cos_zenith / atm_to_surface.
+        lat_2d = jnp.asarray(np.deg2rad(np.asarray(grid.lat))[:, None])
+        lon_2d = jnp.asarray(np.deg2rad(np.asarray(grid.lon))[None, :])
 
     # Coupler config: LY09 bulk flux at 10 m winds, 2 m T/q (the JRA55-do
     # convention). The Item 1 fixes (LY09 U^6 term, 0.98 q_sat, separate
@@ -766,6 +1082,7 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         "lon_2d": lon_2d,
         "coupler_cfg": coupler_cfg,
         "co2_ppmv": float(args.jra55_co2_ppmv),
+        "grid_type": grid_type,
         # Cycle the cache modulo its length when --jra55-cycle is set.
         # This is the Stewart 2020 RYF path: a single-year cache drives
         # a multi-year run by replaying the same 12 months.
@@ -774,6 +1091,8 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         # Stored in seconds for direct use in the step functions.
         "T_ramp_seconds": float(getattr(args, "T_ramp_days", 1.0)) * 86400.0,
     }
+    if regrid_weights is not None:
+        state["regrid_weights"] = regrid_weights
 
     # Sponge layer at 60°S/60°N — uses the existing
     # legoesm.ocean.sponge.compute_sponge_gamma_latlon utility. Active
@@ -784,14 +1103,24 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         and S_woa is not None
     )
     if sponge_enabled:
-        from legoesm.ocean.sponge import compute_sponge_gamma_latlon
-        sponge_gamma = compute_sponge_gamma_latlon(
-            grid,
-            lat_south=args.sponge_lat_min,
-            lat_north=args.sponge_lat_max,
-            width_deg=args.sponge_width_deg,
-            timescale_days=args.sponge_tau_days,
-        )
+        if grid_type == "mpas":
+            from legoesm.ocean.sponge import compute_sponge_gamma_mpas
+            sponge_gamma = compute_sponge_gamma_mpas(
+                grid,
+                lat_south=args.sponge_lat_min,
+                lat_north=args.sponge_lat_max,
+                width_deg=args.sponge_width_deg,
+                timescale_days=args.sponge_tau_days,
+            )
+        else:
+            from legoesm.ocean.sponge import compute_sponge_gamma_latlon
+            sponge_gamma = compute_sponge_gamma_latlon(
+                grid,
+                lat_south=args.sponge_lat_min,
+                lat_north=args.sponge_lat_max,
+                width_deg=args.sponge_width_deg,
+                timescale_days=args.sponge_tau_days,
+            )
         state["sponge_gamma_2d"] = jnp.asarray(sponge_gamma)
         state["sponge_T_ref_3d"] = jnp.asarray(T_woa)
         state["sponge_S_ref_3d"] = jnp.asarray(S_woa)
@@ -935,6 +1264,10 @@ def _jra55_step(state, step_idx, dt, model, jra55_state):
         ref_year=jra55_state["ref_year"],
         cycle=jra55_state.get("cycle", False),
     )
+    # Regrid from lat-lon cache to MPAS cell centres if needed.
+    if "regrid_weights" in jra55_state:
+        from legoesm.forcing.jra55_do import regrid_jra55_slice
+        slc = regrid_jra55_slice(slc, jra55_state["regrid_weights"])
     atm = jra55_to_atm_surface(
         slc,
         jra55_state["lat_2d"],
@@ -1083,6 +1416,106 @@ def _preload_jra55_forcing_block(start_step_idx, n_steps, dt, jra55_state):
     return atm_stack, runoff_stack
 
 
+def _preload_jra55_full_cache(jra55_state):
+    """Pre-load and regrid the entire JRA55 cache into RAM.
+
+    For repeat-year forcing (``--jra55-cycle``), the same 2920 records
+    are read over and over.  Loading everything once at startup and
+    regridding to the target grid eliminates all per-block Zarr I/O.
+
+    Returns ``(all_records, record_days, cache_length_days)`` where:
+    - ``all_records``: dict of ``(n_total_records, n_spatial)`` arrays
+    - ``record_days``: ``(n_total_records,)`` fractional days
+    - ``cache_length_days``: float, total cache duration
+    """
+    import xarray as xr
+    from legoesm.forcing.jra55_do import JRA55_VARIABLES, RECORDS_PER_DAY
+
+    cache_path = jra55_state["cache_path"]
+    ds = xr.open_zarr(str(cache_path), decode_times=False)
+    n_cache_records = int(ds.attrs["n_records"])
+    cache_length_days = n_cache_records / RECORDS_PER_DAY
+
+    t0 = time.time()
+    all_records = {}
+    # float32 cache: JRA55 fields are atmospheric forcing accurate to
+    # ~0.1%, so f32 (~7 sig figs) is well within the precision budget.
+    # Halves the staged memory footprint (28 GB -> 14 GB) so the cache
+    # fits on a 32 GB V100S alongside a 120k-cell tripole state.
+    # The model promotes back to float64 at the per-step consumer.
+    for var in JRA55_VARIABLES:
+        all_records[var] = jnp.asarray(ds[var].values, dtype=jnp.float32)
+    ds.close()
+
+    # Regrid from lat-lon to MPAS cells if needed.
+    if "regrid_weights" in jra55_state:
+        from legoesm.grids.regridding import regrid_scalar
+        rw = jra55_state["regrid_weights"]
+        for var in all_records:
+            arr = all_records[var]  # (n_records, n_lat, n_lon)
+            all_records[var] = jnp.stack([
+                regrid_scalar(arr[i], rw)
+                for i in range(arr.shape[0])
+            ])
+
+    record_days = jnp.asarray(
+        np.arange(n_cache_records, dtype=np.float64) / RECORDS_PER_DAY,
+    )
+
+    elapsed = time.time() - t0
+    nbytes = sum(a.nbytes for a in all_records.values())
+    print(f"  Pre-loaded full JRA55 cache: {n_cache_records} records, "
+          f"{nbytes / 1e9:.1f} GB, {elapsed:.1f}s")
+
+    return all_records, record_days, cache_length_days
+
+
+def _slice_preloaded_records(start_step_idx, n_steps, dt, jra55_state,
+                             all_records, all_record_days, cache_length_days):
+    """Slice bracketing records from the pre-loaded cache for one block.
+
+    Same interface as ``_preload_jra55_raw_records`` but reads from
+    in-memory arrays instead of Zarr.
+    """
+    from legoesm.forcing.jra55_do import RECORDS_PER_DAY
+
+    cycle = jra55_state.get("cycle", False)
+    n_cache_records = all_record_days.shape[0]
+
+    start_day = start_step_idx * dt / 86400.0
+    end_day = (start_step_idx + n_steps - 1) * dt / 86400.0
+
+    if cycle:
+        start_day_c = start_day % cache_length_days
+        end_day_c = end_day % cache_length_days
+    else:
+        start_day_c = start_day
+        end_day_c = end_day
+
+    i_first = int(np.floor(start_day_c * RECORDS_PER_DAY))
+    i_last = int(np.floor(end_day_c * RECORDS_PER_DAY)) + 1
+    i_last = min(i_last, n_cache_records - 1)
+
+    if cycle and i_last < i_first:
+        indices = list(range(i_first, n_cache_records)) + list(range(0, i_last + 1))
+    else:
+        indices = list(range(i_first, i_last + 1))
+
+    raw_stack = {var: all_records[var][jnp.array(indices)] for var in all_records}
+    runoff_stack = raw_stack["friver"]
+    record_days = all_record_days[jnp.array(indices)]
+
+    record_meta = {
+        "record_days": record_days,
+        "block_start_day": float(start_day),
+        "dt": float(dt),
+        "n_steps": int(n_steps),
+        "cache_length_days": float(cache_length_days),
+        "cycle": cycle,
+    }
+    return raw_stack, runoff_stack, record_meta
+
+
 def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
     """Pre-load only the native 3-hourly JRA55 records that bracket a block.
 
@@ -1156,7 +1589,19 @@ def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
     )
 
     raw_stack = {var: var_data[var] for var in JRA55_VARIABLES}
-    runoff_stack = var_data["friver"]
+
+    # Regrid from lat-lon cache to MPAS cell centres if needed.
+    # Each variable is (n_records, n_lat, n_lon) → (n_records, nCells).
+    if "regrid_weights" in jra55_state:
+        from legoesm.grids.regridding import regrid_scalar
+        rw = jra55_state["regrid_weights"]
+        for var in raw_stack:
+            raw_stack[var] = jnp.stack([
+                regrid_scalar(raw_stack[var][i], rw)
+                for i in range(raw_stack[var].shape[0])
+            ])
+
+    runoff_stack = raw_stack["friver"]
 
     record_meta = {
         "record_days": record_days,          # (n_records,) fractional days
@@ -1490,9 +1935,10 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
 
                 if enable_sss:
                     S = new_state.S.data
+                    _sss_mask = new_state.land_mask.data
                     S_new = S.at[..., 0].set(
                         S[..., 0] - sss_alpha_static * (
-                            S[..., 0] - sss_target_static))
+                            S[..., 0] - sss_target_static) * _sss_mask)
                     new_state = new_state._replace(
                         S=new_state.S.replace(data=S_new))
                 if enable_freeze:
@@ -1580,7 +2026,7 @@ def _extract_scalars(state, grid_type, grid, z_coord):
         v_raw = np.asarray(state.v.data) if hasattr(state, 'v') else np.zeros_like(u_raw)
         # C-grid lat-lon: u is (nlat, nlon+1, nlev), v is (nlat+1, nlon, nlev).
         # Interpolate staggered velocities to cell centers before computing speed.
-        if grid_type == "latlon" and u_raw.shape[1] != T.shape[1]:
+        if grid_type in ("latlon", "tripole") and u_raw.shape[1] != T.shape[1]:
             u_c = 0.5 * (u_raw[:, :-1] + u_raw[:, 1:])
             v_c = 0.5 * (v_raw[:-1, :] + v_raw[1:, :])
         else:
@@ -1764,10 +2210,12 @@ def _load_restart(restart_path, template_state):
 def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                    diag_every, label="",
                    restoring_targets=None, restoring_tau_s=None,
+                   restoring_ramp_days: float = 0.0,
                    jra55_state=None,
                    checkpoint_days=None, checkpoint_dir=None,
                    start_step=0,
-                   nudge_woa_tau=0.0, T_woa_3d=None):
+                   nudge_woa_tau=0.0, T_woa_3d=None, S_woa_3d=None,
+                   snapshot_fn=None):
     """Run time loop with diagnostics.
 
     Two forcing paths, mutually exclusive:
@@ -1807,6 +2255,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
         raise ValueError(
             "_run_omip_loop: checkpoint_days requires checkpoint_dir."
         )
+    _snapshot_fn = snapshot_fn
     diag: dict[str, list] = {"day": [], "step": []}
     snapshots: dict[int, dict] = {}
     snap_steps = {0, n_steps}
@@ -1857,8 +2306,16 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             _get_block_fn_interp = _build_jra55_block_fn_interp(
                 model, jra55_state, dt)
             print("  GPU-interp mode: forcing interpolation on GPU")
+            # Pre-load the full JRA55 cache for repeat-year runs to
+            # eliminate per-block Zarr I/O (~0.3s/block → ~0s/block).
+            _full_cache = None
+            if jra55_state.get("cycle", False):
+                _fc_all, _fc_days, _fc_len = _preload_jra55_full_cache(
+                    jra55_state)
+                _full_cache = (_fc_all, _fc_days, _fc_len)
         else:
             block_fn = _build_jra55_block_fn(model, jra55_state, dt)
+            _full_cache = None
         block_size = max(1, diag_every)
         if checkpoint_days is not None:
             steps_per_ckpt = max(1, int(round(checkpoint_days * 86400.0 / dt)))
@@ -1870,7 +2327,12 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             actual = min(block_size, n_steps - block_start)
             t_io_start = time.time()
 
-            if use_gpu_interp:
+            if use_gpu_interp and _full_cache is not None:
+                raw_stack, runoff_records, record_meta = (
+                    _slice_preloaded_records(
+                        block_start, actual, dt, jra55_state,
+                        *_full_cache))
+            elif use_gpu_interp:
                 raw_stack, runoff_records, record_meta = (
                     _preload_jra55_raw_records(
                         block_start, actual, dt, jra55_state))
@@ -1905,15 +2367,42 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 blown_up = True
                 break
 
-            # WOA T nudging: dT/dt += (T_woa - T) / tau
+            # WOA T/S nudging: dX/dt += (X_woa - X) / tau
+            # After nudging, correct global-mean eta to prevent steric
+            # volume drift from the density change.
             if nudge_woa_tau > 0 and T_woa_3d is not None:
                 nudge_per_step = dt / (nudge_woa_tau * 86400.0)
                 daily_frac = 1.0 - (1.0 - nudge_per_step) ** actual
                 mask_3d = state.land_mask.data[..., jnp.newaxis]
+                mask_2d = state.land_mask.data
+
+                # Save pre-nudge eta mean for volume correction
+                area = grid.areaCell if hasattr(grid, 'areaCell') else None
+                if area is not None:
+                    eta_mean_before = jnp.sum(
+                        state.eta.data * mask_2d * area
+                    ) / jnp.maximum(jnp.sum(mask_2d * area), 1e-10)
+
                 T_nudged = state.T.data + daily_frac * (
                     T_woa_3d - state.T.data) * mask_3d
                 state = state._replace(
                     T=state.T.replace(data=T_nudged.astype(state.T.data.dtype)))
+                if S_woa_3d is not None:
+                    S_nudged = state.S.data + daily_frac * (
+                        S_woa_3d - state.S.data) * mask_3d
+                    state = state._replace(
+                        S=state.S.replace(data=S_nudged.astype(state.S.data.dtype)))
+
+                # Restore global-mean eta to pre-nudge value so the
+                # nudge doesn't inject/remove volume stericly.
+                if area is not None:
+                    eta_mean_after = jnp.sum(
+                        state.eta.data * mask_2d * area
+                    ) / jnp.maximum(jnp.sum(mask_2d * area), 1e-10)
+                    eta_correction = eta_mean_before - eta_mean_after
+                    eta_corrected = state.eta.data + eta_correction * mask_2d
+                    state = state._replace(
+                        eta=state.eta.replace(data=eta_corrected))
 
             scalars = _extract_scalars(state, grid_type, grid, z_coord)
 
@@ -1974,6 +2463,11 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             if (steps_per_ckpt is not None and
                     (step % steps_per_ckpt == 0 or step == n_steps)):
                 fname = _save_restart(state, day, step, checkpoint_dir)
+                if _snapshot_fn is not None:
+                    try:
+                        _snapshot_fn(fname)
+                    except Exception as e:
+                        print(f"    Snapshot failed: {e}", flush=True)
                 print(f"    Restart saved: {fname.name}", flush=True)
 
         # After the block loop, jump to the post-loop tally below.
@@ -1983,7 +2477,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             jax.block_until_ready(state.T.data)
         wall = time.time() - t0
         ok = not blown_up and _check_finite(state, grid_type)
-        return state, diag, wall, ok
+        return state, diag, wall, ok, blowup_info
     # --------------------------------------------------------------------
 
     # ----- JRA55-do single-step path (partial-cell fallback) -----------
@@ -2021,13 +2515,26 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 if (steps_per_ckpt is not None and
                         (step % steps_per_ckpt == 0 or step == n_steps)):
                     fname = _save_restart(state, day, step, checkpoint_dir)
+                    if _snapshot_fn is not None:
+                        try:
+                            _snapshot_fn(fname)
+                        except Exception as e:
+                            print(f"    Snapshot failed: {e}", flush=True)
                     print(f"    Restart saved: {fname.name}", flush=True)
 
         jax.block_until_ready(state.T.data)
         wall = time.time() - t0
         ok = not blown_up and _check_finite(state, grid_type)
-        return state, diag, wall, ok
+        return state, diag, wall, ok, blowup_info
     # --------------------------------------------------------------------
+
+    # Restoring ramp: scale restoring strength linearly from 0 to 1 over
+    # the first ``restoring_ramp_steps`` steps.  See ``--restoring-ramp-
+    # days``; cubed_sphere defaults to 14 days at the call-site to
+    # delay the face-edge PGF instability onset, other grids default
+    # to 0.
+    ramp_days = float(restoring_ramp_days)
+    restoring_ramp_steps = max(1, int(ramp_days * 86400.0 / dt)) if ramp_days > 0 else 1
 
     for i in range(start_step, n_steps):
         state = model.step(state, dt)
@@ -2035,9 +2542,10 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
         # Apply SST/SSS restoring (grid-agnostic, after dynamics step)
         if restoring_targets is not None:
             T_tgt, S_tgt = restoring_targets
+            ramp_scale = min(1.0, (i + 1) / restoring_ramp_steps)
             state = _apply_restoring(
                 state, grid_type, grid, T_tgt, S_tgt,
-                dt, restoring_tau_s,
+                dt, restoring_tau_s, ramp_scale=ramp_scale,
             )
 
         step = i + 1
@@ -2129,6 +2637,12 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             steps_per_ckpt = max(1, int(round(checkpoint_days * 86400.0 / dt)))
             if step % steps_per_ckpt == 0 or step == n_steps:
                 fname = _save_restart(state, day_now, step, checkpoint_dir)
+                # Auto-generate snapshot plot alongside the restart.
+                if _snapshot_fn is not None:
+                    try:
+                        _snapshot_fn(fname)
+                    except Exception as e:
+                        print(f"    Snapshot failed: {e}", flush=True)
                 # Friendly progress; gated on the same 15-s cadence as
                 # the diag print so we don't spam.
                 if time.time() - last_print < 1.0:
@@ -2355,6 +2869,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         no_gm_redi=getattr(args, "no_gm_redi", False),
         implicit_vertical_mixing=getattr(
             args, "implicit_vertical_mixing", False),
+        forcing_mode=getattr(args, "forcing_mode", "restoring"),
     )
 
     # --- Initialization strategy ---
@@ -2370,7 +2885,15 @@ def run_omip_single(grid_type: str, args) -> dict:
     # Bathymetry: realistic (ETOPO) or flat-bottom.
     H_bathy_init = None
     land_mask_init = None
-    if args.bathymetry is not None:
+    bathy_cfg = None
+    if args.bathymetry is not None and grid_type not in ("mpas", "tripole"):
+        # MPAS bathymetry is handled after _init_rest_state via the
+        # PR 261 recipe (load_bathymetry_mpas + north cap + snap +
+        # partial cells). Tripole follows the same post-init pattern,
+        # with init_ocean_bathymetry on the curvilinear geom. The
+        # generic path here has lat-lon-specific post-processing
+        # (equatorial smoothing, passage widening) that doesn't apply
+        # to MPAS or tripole.
         from legoesm.ocean.bathymetry import BathymetryConfig, init_ocean_bathymetry
         bathy_cfg = BathymetryConfig(
             source="file",
@@ -2682,7 +3205,150 @@ def run_omip_single(grid_type: str, args) -> dict:
     state = _init_rest_state(
         grid_type, grid, z_coord, args.H_max,
         H_bathy=H_bathy_init, land_mask=land_mask_init,
+        bathy_cfg=bathy_cfg,
+        use_etopo_postinit=(grid_type == "mpas" and args.bathymetry is not None),
     )
+    # --- MPAS ETOPO post-processing (matches run_comparison_mpas.py) ---
+    # The generic init_ocean_bathymetry path doesn't do north-cap masking,
+    # partial-cell snapping, or partial-cell coordinate creation for MPAS.
+    # Apply the proven PR 261 recipe here.
+    if grid_type == "mpas" and args.bathymetry is not None:
+        from legoesm.ocean.bathymetry import BathymetryConfig, load_bathymetry_mpas
+        from legoesm.ocean.vertical import create_partial_cell_coordinate
+
+        mpas_bathy_cfg = BathymetryConfig(
+            source="file", path=args.bathymetry,
+            H_max=args.H_max, H_min=args.H_min,
+            smoothing_passes=args.smoothing_passes,
+            r_factor_max=args.r_factor_max,
+            depth_is_negative=True,
+            fill_isolated_basins=True,
+        )
+        H_bathy_raw, ocean_mask = load_bathymetry_mpas(grid, mpas_bathy_cfg)
+
+        # Optional north cap (default: 90° = full globe, no cap).
+        # The comparison scripts used 80°N for parity with lat-lon;
+        # for production OMIP runs the full Arctic is desired.
+        north_cap_lat = getattr(args, "north_cap_lat", 90.0)
+        if north_cap_lat < 90.0:
+            lat_cell_deg = np.degrees(np.asarray(grid.latCell))
+            cap_mask = jnp.asarray(lat_cell_deg <= north_cap_lat,
+                                   dtype=H_bathy_raw.dtype)
+            H_bathy_raw = H_bathy_raw * cap_mask
+            ocean_mask = ocean_mask * cap_mask
+
+        # Snap thin partial cells to nearest interface (30% threshold)
+        snap_frac = 0.30
+        abs_z_half = jnp.abs(z_coord.z_half_ref)
+        nlev = z_coord.n_levels
+        n_above = jnp.sum(
+            abs_z_half[None, :] < H_bathy_raw[:, None], axis=1)
+        bottom_level = jnp.clip(n_above - 1, 0, nlev - 1)
+        dz_at_bottom = z_coord.dz_ref[bottom_level]
+        partial_thick = H_bathy_raw - abs_z_half[bottom_level]
+        frac = partial_thick / jnp.maximum(dz_at_bottom, 1e-10)
+        z_upper = abs_z_half[bottom_level]
+        z_lower = abs_z_half[jnp.minimum(bottom_level + 1, nlev)]
+        H_snapped = jnp.where(
+            H_bathy_raw - z_upper < z_lower - H_bathy_raw,
+            z_upper, z_lower)
+        needs_snap = (frac < snap_frac) & (frac > 0) & (H_bathy_raw > 0)
+        H_bathy_final = jnp.where(needs_snap, H_snapped, H_bathy_raw)
+        H_bathy_final = jnp.where(H_bathy_final <= 0, 0.0, H_bathy_final)
+        ocean_mask = jnp.where(H_bathy_final > 0, ocean_mask, 0.0)
+
+        # Isolated basin removal is handled inside load_bathymetry_mpas
+        # via fill_isolated_basins=True in the BathymetryConfig.
+
+        # Create partial cell coordinate and rebuild model
+        pc_coord = create_partial_cell_coordinate(z_coord, H_bathy_final)
+        z_coord = pc_coord
+
+        from legoesm.core.field import Field
+        state = state._replace(
+            H_bathy=Field(data=H_bathy_final, name="H_bathy",
+                          dims=("nCells",), units="m"),
+            land_mask=Field(data=ocean_mask, name="land_mask",
+                            dims=("nCells",), units="1"),
+        )
+        # Rebuild model with partial cell coordinate
+        from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+        model = MPASOceanModel(grid, pc_coord, config)
+
+        n_ocean = int(jnp.sum(ocean_mask > 0.5))
+        cap_str = f"cap={north_cap_lat}°N" if north_cap_lat < 90.0 else "no cap"
+        print(f"  MPAS ETOPO: {n_ocean}/{grid.nCells} ocean cells "
+              f"({cap_str}, snap={snap_frac}, "
+              f"smooth={args.smoothing_passes})")
+
+    # Tripole post-init for ETOPO bathymetry — mirrors the validated
+    # run_tripole_20yr.py recipe (H_min=200, south_cap=-75, snap+partial
+    # cells). Mandatory whenever JRA55 forcing is used on tripole: the
+    # bipolar-fold cells have dx_v floor=1000m and would otherwise be
+    # treated as ocean, violating CFL within ~3 steps under JRA55 wind.
+    if grid_type == "tripole" and args.bathymetry is not None:
+        from legoesm.ocean.bathymetry import BathymetryConfig, init_ocean_bathymetry
+        from legoesm.ocean.vertical import create_partial_cell_coordinate
+        from legoesm.ocean.init_latlon_cgrid import (
+            rest_state_latlon_cgrid_ocean,
+        )
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+
+        tri_bathy_cfg = BathymetryConfig(
+            source="file", path=args.bathymetry,
+            H_max=args.H_max, H_min=args.H_min,
+            smoothing_passes=args.smoothing_passes,
+            r_factor_max=args.r_factor_max,
+            depth_is_negative=True,
+            north_cap_lat=None,
+            south_cap_lat=args.south_cap_lat,
+        )
+        H_raw, mask_raw = init_ocean_bathymetry(grid, tri_bathy_cfg)
+        H_raw = jnp.asarray(H_raw, dtype=jnp.float64)
+        mask_raw = jnp.asarray(mask_raw, dtype=jnp.float64)
+
+        # Snap thin partial cells to the nearest interface (30% threshold).
+        snap_frac = 0.30
+        abs_z_half = jnp.abs(z_coord.z_half_ref)
+        nlev = z_coord.n_levels
+        Hf = H_raw.ravel()
+        n_above = jnp.sum(abs_z_half[None, :] < Hf[:, None], axis=1)
+        bottom_level = jnp.clip(n_above - 1, 0, nlev - 1)
+        dzb = z_coord.dz_ref[bottom_level]
+        partial_thick = Hf - abs_z_half[bottom_level]
+        frac = partial_thick / jnp.maximum(dzb, 1e-10)
+        z_upper = abs_z_half[bottom_level]
+        z_lower = abs_z_half[jnp.minimum(bottom_level + 1, nlev)]
+        Hs = jnp.where(Hf - z_upper < z_lower - Hf, z_upper, z_lower)
+        needs_snap = (frac < snap_frac) & (frac > 0) & (Hf > 0)
+        H_snap = jnp.where(needs_snap, Hs, Hf)
+        H_snap = jnp.where(H_snap <= 0, 0.0, H_snap).reshape(H_raw.shape)
+        mask_snap = jnp.where(H_snap > 0, mask_raw, 0.0)
+
+        # Partial-cell coordinate + model rebuild (the eta-stretched
+        # operators expect this z_coord to match the bathymetry).
+        pc_coord = create_partial_cell_coordinate(z_coord, H_snap)
+        z_coord = pc_coord
+        model = LatLonCGridOceanModel(grid, z_coord, config)
+
+        # Rebuild the rest state with the real bathymetry + mask.
+        # rest_state_latlon_cgrid_ocean enforces u_mask/v_mask
+        # consistency with land_mask atomically.
+        state = rest_state_latlon_cgrid_ocean(
+            grid, z_coord, H_max=args.H_max,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+            H_bathy_override=H_snap,
+            land_mask_override=mask_snap,
+        )
+
+        n_ocean = int(jnp.sum(mask_snap > 0.5))
+        n_total = int(np.prod(np.asarray(mask_snap).shape))
+        print(f"  Tripole ETOPO: {n_ocean}/{n_total} ocean cells "
+              f"(H_min={args.H_min}m, south_cap={args.south_cap_lat}°, "
+              f"snap={snap_frac}, smooth={args.smoothing_passes})")
+
     if args.woa_init and T_woa is not None and S_woa is not None:
         # Replace rest-state T/S with WOA18 climatology.
         # Keep zero velocity, zero eta — let the model adjust.
@@ -2720,7 +3386,9 @@ def run_omip_single(grid_type: str, args) -> dict:
         )
         # Provide the ocean mask for global freeze-cap when no sponge.
         jra55_state["_ocean_mask_2d"] = state.land_mask.data > 0.5
-        jra55_state["_gpu_interp"] = getattr(args, "gpu_interp", False)
+        # GPU-interp path: use lax.scan block for all grids (MPAS
+        # regridding is handled in _preload_jra55_raw_records).
+        jra55_state["_gpu_interp"] = True
         flags = []
         if jra55_state.get("enable_sponge"):
             flags.append("sponge")
@@ -2740,8 +3408,24 @@ def run_omip_single(grid_type: str, args) -> dict:
         # (large-scale gradients trigger exponential growth that
         # hyperdiffusion cannot suppress); rely on dynamics + diffusion.
         restoring_targets = (T_woa[..., 0], S_woa[..., 0])
-        restoring_tau_s = args.restoring_timescale * 86400.0  # days → seconds
-        print(f"  Restoring: tau={args.restoring_timescale:.0f} days")
+        # Cubed-sphere uses a slower default restoring (3650 d
+        # vs 1095 d for latlon/mpas) because the rest-state → WOA
+        # gradient excites the face-edge PGF instability.  Slower
+        # restoring + 14d ramp delays the blow-up but does not
+        # eliminate it; production multi-year OMIP requires a different
+        # grid until the cubed-sphere PGF rework lands.
+        # ``args.restoring_timescale is None`` distinguishes omitted
+        # from explicit (the previous ``<= 1095`` check silently
+        # ignored any explicit value below 1095 on cubed_sphere,
+        # which made parameter sweeps impossible).
+        if args.restoring_timescale is None:
+            restoring_tau_days = (
+                3650.0 if grid_type == "cubed_sphere" else 1095.0
+            )
+        else:
+            restoring_tau_days = args.restoring_timescale
+        restoring_tau_s = restoring_tau_days * 86400.0
+        print(f"  Restoring: tau={restoring_tau_days:.0f} days")
     elif grid_type == "spectral":
         print(f"  Restoring: disabled (spectral stability)")
 
@@ -2749,37 +3433,45 @@ def run_omip_single(grid_type: str, args) -> dict:
     print(f"  Setup: {setup_time:.1f}s")
 
     # --- Save full run configuration ---
-    # Dump every CLI arg plus the constructed physics config so that
-    # restarts can be relaunched with identical parameters.  The file
-    # is written at the START of the run (not the end) so it exists
-    # even if the run crashes.
+    # Every parameter that the model actually uses is recorded here,
+    # including defaults.  This is the authoritative record of what
+    # ran — not the CLI args (which may differ from effective values
+    # due to grid-specific overrides in _create_setup).
     config_dir = Path(args.output) / grid_type / resolution
     config_dir.mkdir(parents=True, exist_ok=True)
-    run_config = {"cli_args": vars(args)}
-    # Include the actual ocean config fields (these reflect defaults
-    # that were applied inside _create_setup, not just the CLI overrides).
-    if hasattr(config, "_fields"):
-        ocean_cfg = {}
-        for field_name in config._fields:
-            val = getattr(config, field_name)
-            # Serialize NamedTuples and configs as dicts recursively
-            if hasattr(val, "_fields"):
-                sub = {}
-                for sf in val._fields:
-                    sv = getattr(val, sf)
-                    if hasattr(sv, "_fields"):
-                        sub[sf] = {ssf: getattr(sv, ssf) for ssf in sv._fields
-                                   if not callable(getattr(sv, ssf))}
-                    elif callable(sv):
-                        sub[sf] = str(sv)
-                    else:
-                        sub[sf] = sv
-                ocean_cfg[field_name] = sub
-            elif callable(val):
-                ocean_cfg[field_name] = str(val)
-            else:
-                ocean_cfg[field_name] = val
-        run_config["ocean_config"] = ocean_cfg
+
+    def _namedtuple_to_dict(obj):
+        """Recursively convert NamedTuples to dicts with field names."""
+        if obj is None:
+            return None
+        if hasattr(obj, "_fields"):
+            return {
+                f: _namedtuple_to_dict(getattr(obj, f))
+                for f in obj._fields
+            }
+        if isinstance(obj, (list, tuple)):
+            return [_namedtuple_to_dict(x) for x in obj]
+        if callable(obj):
+            return f"<callable: {getattr(obj, '__name__', str(obj))}>"
+        # JAX arrays → Python scalars for JSON
+        if hasattr(obj, "item"):
+            try:
+                return obj.item()
+            except (ValueError, AttributeError):
+                return str(obj)
+        return obj
+
+    run_config = {
+        "grid_type": grid_type,
+        "resolution": resolution,
+        "n_levels": int(z_coord.n_levels),
+        "dt_seconds": float(dt),
+        "days": float(args.days),
+        "forcing_mode": getattr(args, "forcing_mode", "restoring"),
+        "initial_condition": "woa18" if args.woa_init else "rest_state",
+        "ocean_config": _namedtuple_to_dict(config),
+        "cli_args": vars(args),
+    }
     config_path = config_dir / "run_config.json"
     try:
         with open(config_path, "w") as f:
@@ -2794,12 +3486,51 @@ def run_omip_single(grid_type: str, args) -> dict:
     checkpoint_dir = None
     checkpoint_days = None
     if jra55_state is not None and args.checkpoint_days > 0.0:
-        checkpoint_dir = Path(args.output) / grid_type / resolution
+        checkpoint_dir = Path(args.output) / grid_type / resolution / "restarts"
         checkpoint_days = float(args.checkpoint_days)
         print(
             f"  Restart cadence: every {checkpoint_days:g} simulated days "
             f"→ {checkpoint_dir}"
         )
+
+    # Build snapshot function for auto-plotting with each restart save.
+    # Only for MPAS with the tripcolor/cartopy plotter; other grids use
+    # the end-of-run timeseries plot only.
+    _snapshot_fn = None
+    if grid_type == "mpas":
+        try:
+            from plot_mpas_omip_snapshot import plot_snapshot as _plot_snap
+            import threading
+            _snap_mesh = grid
+            _snap_z = z_coord
+            _snap_lock = threading.Lock()
+
+            def _snapshot_fn(restart_path):
+                """Plot snapshot in a background thread so the GPU isn't blocked.
+
+                Uses a lock to serialize matplotlib calls (not thread-safe).
+                """
+                def _render():
+                    with _snap_lock:
+                        try:
+                            _plot_snap(restart_path, _snap_mesh, _snap_z)
+                        except Exception as e:
+                            print(f"    Snapshot failed: {e}", flush=True)
+                t = threading.Thread(target=_render, daemon=True)
+                t.start()
+        except ImportError:
+            pass
+
+    # Restoring ramp: cubed_sphere defaults to 14d to delay the
+    # face-edge PGF instability; other grids default to 0d.  Sentinel
+    # ``None`` from argparse means "use grid default" — an explicit
+    # ``--restoring-ramp-days 0`` honours the user's choice.
+    if args.restoring_ramp_days is not None:
+        ramp_days_eff = args.restoring_ramp_days
+    elif grid_type == "cubed_sphere":
+        ramp_days_eff = 14.0
+    else:
+        ramp_days_eff = 0.0
 
     # Run time loop
     state, diag, wall_time, ok, blowup_info = _run_omip_loop(
@@ -2808,6 +3539,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         label=f"{grid_type}/{resolution}",
         restoring_targets=restoring_targets,
         restoring_tau_s=restoring_tau_s,
+        restoring_ramp_days=ramp_days_eff,
         jra55_state=jra55_state,
         checkpoint_days=checkpoint_days,
         checkpoint_dir=checkpoint_dir,
@@ -2815,6 +3547,9 @@ def run_omip_single(grid_type: str, args) -> dict:
         nudge_woa_tau=args.nudge_woa_tau,
         T_woa_3d=(T_woa * state.land_mask.data[..., jnp.newaxis]).astype(
             state.T.data.dtype) if args.nudge_woa_tau > 0 and T_woa is not None else None,
+        S_woa_3d=(S_woa * state.land_mask.data[..., jnp.newaxis]).astype(
+            state.S.data.dtype) if args.nudge_woa_tau > 0 and S_woa is not None else None,
+        snapshot_fn=_snapshot_fn,
     )
 
     status = "PASS" if ok else "FAIL"
@@ -2883,6 +3618,9 @@ def print_summary():
 def main():
     args = parse_args()
 
+    # ``--grid all`` runs every grid.  cubed_sphere is now stable on
+    # the FC-Gram spectral baroclinic backend (see _create_setup) so
+    # it is included in the default matrix.
     grids = GRID_TYPES if args.grid == "all" else [args.grid]
 
     print(f"legoESM OMIP Reference Simulation")

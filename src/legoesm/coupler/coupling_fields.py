@@ -97,6 +97,25 @@ class TileResponse(NamedTuple):
     # over any tile that sublimates rather than evaporates.
     # Audit F3.
     surface_mass_flux: jax.Array
+    # Net salt mass flux delivered by this tile to the ocean
+    # [kg(salt)/m²/s, positive = salt INTO ocean].  Note: ocean
+    # *salinity* rises during freezing not because salt is added but
+    # because water mass leaves (negative ``freshwater_flux``); the
+    # absolute salt mass balance is what this channel tracks.
+    # Sea-ice tiles report:
+    #   * negative flux during freezing of new lead ice — a small
+    #     amount of salt is locked into the new ice at ``S_lead_ice``
+    #     (≈ 4 PSU), so the ocean column loses that salt mass.  Ocean
+    #     salinity still rises because the water mass loss is much
+    #     larger (classical "brine rejection" rise in S).
+    #   * positive flux during basal / surface melt — ice salt at
+    #     ``S_ice`` returns to the ocean column.
+    #   * negative flux during snow-ice flooding — white ice traps
+    #     pore-water salt at ``S_white_ice`` (≈ 17 PSU).
+    # Tiles without a salt channel (atmosphere, land, lake) return
+    # zeros.  Always a populated array — pytree-uniform with
+    # ``freshwater_flux``.
+    salt_flux: jax.Array
 
 
 class SurfaceToAtm(NamedTuple):
@@ -130,3 +149,6 @@ class SurfaceToAtm(NamedTuple):
     # Tile-blended phase-aware surface moisture mass flux
     # [kg/m²/s, positive up].  See ``TileResponse.surface_mass_flux``.
     surface_mass_flux: jax.Array
+    # Tile-blended salt mass flux to ocean [kg(salt)/m²/s, positive
+    # = INTO ocean].  See ``TileResponse.salt_flux``.
+    salt_flux: jax.Array

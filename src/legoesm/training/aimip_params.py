@@ -42,8 +42,8 @@ from legoesm.atmosphere.physics.turbulence.config import (
 )
 from legoesm.training.trainable_params import (
     ParamConstraint,
-    _range_to_sigmoid,
-    _sigmoid_to_range,
+    range_to_sigmoid,
+    sigmoid_to_range,
 )
 from legoesm.training.aimip_spatial import (
     AIMIPSpatialSurfaceParams,
@@ -282,7 +282,7 @@ class AIMIPClassicalParams(eqx.Module):
                 c.max_val - margin, max(c.min_val + margin, default),
             )
             raw[c.name] = jnp.asarray(
-                _range_to_sigmoid(default_clamped, c.min_val, c.max_val),
+                range_to_sigmoid(default, c.min_val, c.max_val),
                 dtype=param_dtype,
             )
         spatial = None
@@ -301,7 +301,7 @@ class AIMIPClassicalParams(eqx.Module):
     def as_dict(self) -> dict[str, jax.Array]:
         """Return constrained physical values for every knob."""
         return {
-            c.name: _sigmoid_to_range(self.raw_values[c.name], c.min_val, c.max_val)
+            c.name: sigmoid_to_range(self.raw_values[c.name], c.min_val, c.max_val)
             for c in self.constraints
         }
 
@@ -615,50 +615,6 @@ def make_aimip_classical_spectral_physics(
         RRTMGPConfig,
     )
 
-    p = params.as_dict()
-
-    # ---- Spatial surface fields (optional) ----
-    # When ``params.spatial_surface`` is non-None, each spatial field
-    # is evaluated on the grid (with optional land-mask gating) and
-    # flattened to (ncol,) so the downstream surface_layer / gray-
-    # radiation code paths receive arrays that broadcast against the
-    # column-wise prognostic fields.
-    #
-    # v7: pass the trained sigmoid-bounded scalar leaves as the per-
-    # field baseline (``f_0_override``) so the scalar gradient flows
-    # through the spatial field and the bias-penalty loss can move
-    # the scalar knob.  Without this, the static ``f_0`` in
-    # ``_FIELD_SPECS`` is the only baseline and the scalar
-    # ``rrtmgp_sfc_emissivity`` / ``rrtmgp_sfc_albedo`` etc. leaves
-    # are effectively bypassed under ``aimip_spatial_surface: true``.
-    # Surface aerodynamic baselines use the (already-traced) surface
-    # config values; radiation baselines pick the active scheme's
-    # leaves.
-    spatial_fields_col: dict[str, jax.Array] = {}
-    if params.spatial_surface is not None:
-        baselines: dict[str, jax.Array] = {}
-        # Surface aerodynamic fields -- scalar trained leaves.
-        baselines["Cd_neutral"] = p["surface_Cd_neutral"]
-        baselines["Ch_neutral"] = p["surface_Ch_neutral"]
-        baselines["z0"] = p["surface_z0"]
-        # Radiation surface fields -- pick the active scheme's leaf.
-        if radiation == "rrtmgp":
-            baselines["sfc_emissivity"] = p["rrtmgp_sfc_emissivity"]
-            baselines["sfc_albedo"] = p["rrtmgp_sfc_albedo"]
-        else:  # gray (or unknown -> use gray defaults)
-            baselines["sfc_emissivity"] = p["gray_sfc_emissivity"]
-            baselines["sfc_albedo"] = p["gray_sfc_albedo"]
-        # Shared albedo knobs.
-        baselines["albedo_ocean"] = p["albedo_ocean"]
-        baselines["albedo_ice"] = p["albedo_ice"]
-
-        fields_2d = params.spatial_surface.evaluate(
-            grid, land_mask=land_mask, baselines=baselines,
-        )
-        n_lat, n_lon = grid.n_lat, grid.n_lon
-        for name, arr in fields_2d.items():
-            spatial_fields_col[name] = arr.reshape(n_lat * n_lon)
-
     # Radiation backend toggle.  ``rrtmgp`` is the production
     # correlated-k path: it explicitly couples Xu-Randall cloud
     # fraction into shortwave + longwave fluxes and makes the
@@ -809,39 +765,8 @@ def make_aimip_classical_spectral_physics(
     else:
         micro_cfg = MicrophysicsConfig(scheme=microphysics_scheme)
 
-    # Note: ``p = params.as_dict()`` is already computed above for
-    # gray-radiation tau knobs; reused here only when gray is active.
-    del p  # avoid leaking variable into nested closure
-
-    if not split_rad:
-        physics_config = PhysicsConfig(
-            radiation=rad_cfg,
-            convection=conv_cfg,
-            turbulence=turb_cfg,
-            microphysics=micro_cfg,
-            gravity_wave_drag=gwd_cfg,
-        )
-        raw_fn = make_physics(physics_config, model_type="spectral_pe", dt=dt)
-
-        def physics_fn(state, grid_, sigma_coord):
-            result = raw_fn(state, grid_, sigma_coord)
-            return result[0] if isinstance(result, tuple) else result
-
-        return physics_fn
-
-    # ---- Split rad / non-rad branch ----
-    # When the caller asks for ``split_rad=True`` (typical when
-    # ``rad_update_interval_steps > 1`` and the rollout will gate the
-    # radiation call via :func:`spectral_rollout`'s ``lax.cond`` path)
-    # we build TWO physics_fns:
-    #   - ``non_rad_fn``: every scheme except radiation, evaluated on
-    #     every dycore step.
-    #   - ``rad_fn``: radiation only, evaluated periodically by
-    #     ``spectral_rollout`` and cached in the scan carry.
-    # The two outputs are summed downstream (see
-    # ``_add_phys_tendencies`` in training/neural_gcm_spectral.py).
-    non_rad_cfg = PhysicsConfig(
-        radiation=RadiationConfig(scheme="none"),
+    physics_config = PhysicsConfig(
+        radiation=rad_cfg,
         convection=conv_cfg,
         turbulence=turb_cfg,
         microphysics=micro_cfg,

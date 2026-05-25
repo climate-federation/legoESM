@@ -31,11 +31,13 @@ from legoesm.ice.rheology import (
     delta_deformation,
     vp_stress,
     evp_stress_update,
+    mevp_stress_update,
 )
 # Dynamics
 from legoesm.ice.dynamics import (
     stress_divergence,
     evp_solver,
+    mevp_solver,
     free_drift_velocity,
     air_ice_stress,
     ocean_ice_stress,
@@ -825,15 +827,21 @@ class TestMultiCategoryIntegration:
             jnp.full(shape, 1.5), jnp.full(shape, 255.0),
             jnp.full(shape, 0.7), 5,
         )
+        cat_dims_local = ("face", "x", "y", "cat")
+        _z_cat = jnp.zeros(h_mc.shape)
         state = DynamicSeaIceState(
-            h_ice=Field(data=h_mc, name="h_ice", dims=("face", "x", "y", "cat"), units="m"),
-            T_ice=Field(data=T_mc, name="T_ice", dims=("face", "x", "y", "cat"), units="K"),
-            concentration=Field(data=a_mc, name="conc", dims=("face", "x", "y", "cat"), units="1"),
+            h_ice=Field(data=h_mc, name="h_ice", dims=cat_dims_local, units="m"),
+            T_ice=Field(data=T_mc, name="T_ice", dims=cat_dims_local, units="K"),
+            concentration=Field(data=a_mc, name="conc", dims=cat_dims_local, units="1"),
             u_ice=Field(data=jnp.zeros(shape), name="u_ice", dims=dims, units="m/s"),
             v_ice=Field(data=jnp.zeros(shape), name="v_ice", dims=dims, units="m/s"),
             sigma_11=Field(data=jnp.zeros(shape), name="s11", dims=dims, units="N/m"),
             sigma_22=Field(data=jnp.zeros(shape), name="s22", dims=dims, units="N/m"),
             sigma_12=Field(data=jnp.zeros(shape), name="s12", dims=dims, units="N/m"),
+            h_snow=Field(data=_z_cat, name="h_snow", dims=cat_dims_local, units="m"),
+            S_ice=Field(data=_z_cat, name="S_ice", dims=cat_dims_local, units="g/kg"),
+            pond_area=Field(data=_z_cat, name="pond_area", dims=cat_dims_local, units="1"),
+            pond_depth=Field(data=_z_cat, name="pond_depth", dims=cat_dims_local, units="m"),
         )
         forcing = _make_forcing()
         new_state, response = step_sea_ice(
@@ -975,3 +983,832 @@ class TestSurfaceMelt:
         )
 
         assert jnp.all(new_state.T_ice.data <= config.T_freeze_ocean + 1e-6)
+
+
+# ==============================================================================
+# Test mEVP rheology
+# ==============================================================================
+
+class TestMEVPStressUpdate:
+    def test_one_iter_blends_old_and_vp(self):
+        """Single mEVP iteration: σ_new = (1 − 1/α) σ_old + (1/α) σ_VP."""
+        eps_11 = jnp.array(1e-6)
+        eps_22 = jnp.array(-5e-7)
+        eps_12 = jnp.array(2e-7)
+        P = jnp.array(1e4)
+        Delta = delta_deformation(eps_11, eps_22, eps_12)
+        s11_vp, s22_vp, s12_vp = vp_stress(eps_11, eps_22, eps_12, P, Delta)
+
+        s11_old = jnp.array(100.0)
+        s22_old = jnp.array(50.0)
+        s12_old = jnp.array(-20.0)
+        alpha = 500.0
+
+        s11_new, s22_new, s12_new = mevp_stress_update(
+            s11_old, s22_old, s12_old,
+            eps_11, eps_22, eps_12,
+            P, e_yield=2.0, alpha=alpha,
+        )
+
+        inv = 1.0 / alpha
+        s11_expected = (1.0 - inv) * float(s11_old) + inv * float(s11_vp)
+        s22_expected = (1.0 - inv) * float(s22_old) + inv * float(s22_vp)
+        s12_expected = (1.0 - inv) * float(s12_old) + inv * float(s12_vp)
+        assert float(s11_new) == pytest.approx(s11_expected, rel=1e-6)
+        assert float(s22_new) == pytest.approx(s22_expected, rel=1e-6)
+        assert float(s12_new) == pytest.approx(s12_expected, rel=1e-6)
+
+    def test_converges_to_vp(self):
+        """Many mEVP iterations from zero stress should approach VP target."""
+        eps_11 = jnp.array(1e-6)
+        eps_22 = jnp.array(-5e-7)
+        eps_12 = jnp.array(2e-7)
+        P = jnp.array(1e4)
+        Delta = delta_deformation(eps_11, eps_22, eps_12)
+        s11_vp, s22_vp, s12_vp = vp_stress(eps_11, eps_22, eps_12, P, Delta)
+
+        # α=10 (small) → fast relaxation; 200 iterations is plenty.
+        s11, s22, s12 = jnp.array(0.0), jnp.array(0.0), jnp.array(0.0)
+        for _ in range(200):
+            s11, s22, s12 = mevp_stress_update(
+                s11, s22, s12, eps_11, eps_22, eps_12,
+                P, e_yield=2.0, alpha=10.0,
+            )
+
+        assert float(s11) == pytest.approx(float(s11_vp), rel=1e-5)
+        assert float(s22) == pytest.approx(float(s22_vp), rel=1e-5)
+        assert float(s12) == pytest.approx(float(s12_vp), rel=1e-5)
+
+    def test_invalid_alpha_raises(self):
+        """Direct mevp_stress_update API must reject alpha<1.
+
+        Solver-level validation in ``mevp_solver`` is not enough — the
+        stress-update function is publicly re-exported and external
+        callers can hit it with bad alpha (e.g. alpha=0 divide-by-zero).
+        """
+        eps = jnp.array(0.0)
+        s0 = jnp.array(0.0)
+        P = jnp.array(1e4)
+        with pytest.raises(ValueError, match="alpha"):
+            mevp_stress_update(
+                s0, s0, s0, eps, eps, eps, P,
+                e_yield=2.0, alpha=0.0,
+            )
+        with pytest.raises(ValueError, match="alpha"):
+            mevp_stress_update(
+                s0, s0, s0, eps, eps, eps, P,
+                e_yield=2.0, alpha=0.5,
+            )
+
+    def test_alpha_scales_relaxation_rate(self):
+        """Larger alpha → slower per-iter approach to VP target."""
+        eps_11 = jnp.array(1e-6)
+        eps_22 = jnp.array(-5e-7)
+        eps_12 = jnp.array(2e-7)
+        P = jnp.array(1e4)
+        s0 = jnp.array(0.0)
+
+        s11_a, _, _ = mevp_stress_update(
+            s0, s0, s0, eps_11, eps_22, eps_12,
+            P, e_yield=2.0, alpha=100.0,
+        )
+        s11_b, _, _ = mevp_stress_update(
+            s0, s0, s0, eps_11, eps_22, eps_12,
+            P, e_yield=2.0, alpha=1000.0,
+        )
+        # α=1000 → 10× smaller step toward σ_VP than α=100
+        assert abs(float(s11_b)) < abs(float(s11_a))
+        assert abs(float(s11_a)) > 10.0 * abs(float(s11_b)) - 1e-10
+
+
+# ==============================================================================
+# Test mEVP momentum solver
+# ==============================================================================
+
+class TestMEVPSolver:
+    def test_zero_strength_gains_drift(self):
+        """With P_star=0, mEVP velocity should respond to wind."""
+        grid = _make_grid()
+        n = grid.n
+        shape = (6, n, n)
+        s0 = jnp.zeros(shape)
+
+        u_new, v_new, _, _, _ = mevp_solver(
+            jnp.zeros(shape), jnp.zeros(shape), s0, s0, s0,
+            h_ice=jnp.ones(shape),
+            concentration=jnp.ones(shape),
+            wind_u=jnp.full(shape, 10.0),
+            wind_v=jnp.zeros(shape),
+            ocean_u=jnp.zeros(shape),
+            ocean_v=jnp.zeros(shape),
+            grid=grid, dt=3600.0,
+            N_mevp=100, P_star=0.0,
+            alpha_mevp=500.0, beta_mevp=500.0,
+            differentiable=False,
+        )
+        assert jnp.max(jnp.abs(u_new)) > 1e-4
+        assert jnp.all(jnp.isfinite(u_new))
+        assert jnp.all(jnp.isfinite(v_new))
+
+    def test_high_strength_resists_motion(self):
+        """With P_star > 0, ice velocity should be smaller than free drift."""
+        grid = _make_grid()
+        n = grid.n
+        shape = (6, n, n)
+        s0 = jnp.zeros(shape)
+
+        u_strong, _, _, _, _ = mevp_solver(
+            jnp.zeros(shape), jnp.zeros(shape), s0, s0, s0,
+            h_ice=jnp.full(shape, 2.0),
+            concentration=jnp.ones(shape),
+            wind_u=jnp.full(shape, 10.0),
+            wind_v=jnp.zeros(shape),
+            ocean_u=jnp.zeros(shape),
+            ocean_v=jnp.zeros(shape),
+            grid=grid, dt=3600.0,
+            N_mevp=200, P_star=2.75e4,
+            alpha_mevp=500.0, beta_mevp=500.0,
+            differentiable=False,
+        )
+
+        u_free, _, _, _, _ = mevp_solver(
+            jnp.zeros(shape), jnp.zeros(shape), s0, s0, s0,
+            h_ice=jnp.full(shape, 2.0),
+            concentration=jnp.ones(shape),
+            wind_u=jnp.full(shape, 10.0),
+            wind_v=jnp.zeros(shape),
+            ocean_u=jnp.zeros(shape),
+            ocean_v=jnp.zeros(shape),
+            grid=grid, dt=3600.0,
+            N_mevp=200, P_star=0.0,
+            alpha_mevp=500.0, beta_mevp=500.0,
+            differentiable=False,
+        )
+
+        assert jnp.all(jnp.isfinite(u_strong))
+        assert jnp.mean(jnp.abs(u_strong)) < jnp.mean(jnp.abs(u_free))
+
+    def test_finite_output(self):
+        grid = _make_grid()
+        n = grid.n
+        shape = (6, n, n)
+        s0 = jnp.zeros(shape)
+        u_new, v_new, s11, s22, s12 = mevp_solver(
+            jnp.zeros(shape), jnp.zeros(shape), s0, s0, s0,
+            h_ice=jnp.ones(shape), concentration=jnp.full(shape, 0.9),
+            wind_u=jnp.full(shape, 5.0), wind_v=jnp.full(shape, -2.0),
+            ocean_u=jnp.full(shape, 0.1), ocean_v=jnp.zeros(shape),
+            grid=grid, dt=3600.0, N_mevp=100,
+        )
+        for arr in [u_new, v_new, s11, s22, s12]:
+            assert jnp.all(jnp.isfinite(arr))
+
+    def test_ice_free_cells_zero(self):
+        """Cells with concentration ≤ 0.01 should keep zero velocity."""
+        grid = _make_grid()
+        n = grid.n
+        shape = (6, n, n)
+        s0 = jnp.zeros(shape)
+
+        # Concentration zero everywhere → ice mask false → outputs zero
+        u_new, v_new, s11, s22, s12 = mevp_solver(
+            jnp.zeros(shape), jnp.zeros(shape), s0, s0, s0,
+            h_ice=jnp.zeros(shape),
+            concentration=jnp.zeros(shape),
+            wind_u=jnp.full(shape, 10.0), wind_v=jnp.zeros(shape),
+            ocean_u=jnp.zeros(shape), ocean_v=jnp.zeros(shape),
+            grid=grid, dt=3600.0, N_mevp=50,
+        )
+        assert jnp.max(jnp.abs(u_new)) == 0.0
+        assert jnp.max(jnp.abs(v_new)) == 0.0
+        assert jnp.max(jnp.abs(s11)) == 0.0
+        assert jnp.max(jnp.abs(s22)) == 0.0
+        assert jnp.max(jnp.abs(s12)) == 0.0
+
+    def test_one_step_analytic_no_coriolis(self):
+        """N_mevp=1, P*=0, f=0, σ^0=0, u^0=0: closed-form check.
+
+        With zero ice strength, zero initial stress, zero initial
+        velocity, zero ocean current, and ``f`` zeroed in the grid:
+            σ^1 = 0  (VP target is 0 when P=0)
+            ∇·σ^1 = 0
+            τ_oi = 0  (relative velocity zero)
+            τ_ai = ρ_air · C_ai · |U_a| · U_a
+            ax = τ_ai_x / m,   ay = τ_ai_y / m
+            rhs_u = β·0 + 0 + dt·ax
+            (β + 1) u^1 = rhs_u  →  u^1 = dt·ax / (β + 1)
+        """
+        grid = _make_grid()
+        # Zero Coriolis everywhere
+        grid = grid._replace(f=jnp.zeros_like(grid.f))
+        n = grid.n
+        shape = (6, n, n)
+        s0 = jnp.zeros(shape)
+
+        U_a = 10.0
+        V_a = 0.0
+        h_val = 1.0
+        rho_air = float(jnp.asarray(0.0) + 1.225)  # ensure float
+        C_ai = 1.3e-3
+        from legoesm import constants
+        rho_ice = constants.rho_ice
+        m_val = rho_ice * max(h_val, 0.01)
+        beta = 500.0
+        dt = 3600.0
+
+        u_new, v_new, s11, s22, s12 = mevp_solver(
+            jnp.zeros(shape), jnp.zeros(shape), s0, s0, s0,
+            h_ice=jnp.full(shape, h_val),
+            concentration=jnp.ones(shape),
+            wind_u=jnp.full(shape, U_a),
+            wind_v=jnp.full(shape, V_a),
+            ocean_u=jnp.zeros(shape),
+            ocean_v=jnp.zeros(shape),
+            grid=grid, dt=dt,
+            N_mevp=1, P_star=0.0,
+            alpha_mevp=500.0, beta_mevp=beta,
+            rho_air=rho_air, C_ai=C_ai, rho_ice=rho_ice,
+            differentiable=False,
+        )
+
+        tau_ai_x = rho_air * C_ai * abs(U_a) * U_a
+        ax = tau_ai_x / m_val
+        u_expected = dt * ax / (beta + 1.0)
+
+        # σ should remain zero (P*=0 ⇒ σ_VP=0; σ^0=0 ⇒ σ^1=0)
+        assert float(jnp.max(jnp.abs(s11))) < 1e-12
+        assert float(jnp.max(jnp.abs(s22))) < 1e-12
+        assert float(jnp.max(jnp.abs(s12))) < 1e-12
+        # Velocity should match closed form (interior cells away from
+        # cubed-sphere face boundaries where halo effects bite)
+        u_mid = float(u_new[0, n // 2, n // 2])
+        v_mid = float(v_new[0, n // 2, n // 2])
+        assert u_mid == pytest.approx(u_expected, rel=1e-9)
+        assert v_mid == pytest.approx(0.0, abs=1e-12)
+
+    def test_coriolis_sign_one_step(self):
+        """N_mevp=1, P*=0, σ=0, u^0=0, fixed positive f: implicit Coriolis
+        rotates the wind-driven velocity to the right (Ekman direction
+        in Northern Hemisphere, f > 0).
+
+            (β+1) u - dt·f·v = rhs_u
+            (β+1) v + dt·f·u = rhs_v
+            rhs_u = dt·ax,  rhs_v = 0
+            ⇒ u =  A·rhs_u / (A² + B²)
+              v = −B·rhs_u / (A² + B²)
+            with A = β+1, B = dt·f > 0.
+            ⇒ v < 0 (turned to the right of the wind, f > 0 NH)
+        """
+        grid = _make_grid()
+        n = grid.n
+        # Override Coriolis to a uniform positive value
+        f_val = 1.0e-4  # rad/s, mid-latitude NH
+        grid = grid._replace(f=jnp.full(grid.f.shape, f_val))
+        shape = (6, n, n)
+        s0 = jnp.zeros(shape)
+
+        beta = 100.0  # smaller β → larger u, easier to see Coriolis turning
+        dt = 3600.0
+        U_a = 10.0
+        from legoesm import constants
+        rho_air = 1.225
+        C_ai = 1.3e-3
+        rho_ice = constants.rho_ice
+        h_val = 1.0
+        m_val = rho_ice * h_val
+
+        u_new, v_new, *_ = mevp_solver(
+            jnp.zeros(shape), jnp.zeros(shape), s0, s0, s0,
+            h_ice=jnp.full(shape, h_val),
+            concentration=jnp.ones(shape),
+            wind_u=jnp.full(shape, U_a),
+            wind_v=jnp.zeros(shape),
+            ocean_u=jnp.zeros(shape),
+            ocean_v=jnp.zeros(shape),
+            grid=grid, dt=dt,
+            N_mevp=1, P_star=0.0,
+            alpha_mevp=500.0, beta_mevp=beta,
+            rho_air=rho_air, C_ai=C_ai, rho_ice=rho_ice,
+            differentiable=False,
+        )
+
+        A_cor = beta + 1.0
+        B_cor = dt * f_val
+        det = A_cor ** 2 + B_cor ** 2
+        ax = rho_air * C_ai * abs(U_a) * U_a / m_val
+        rhs_u = dt * ax
+        u_expected = A_cor * rhs_u / det
+        v_expected = -B_cor * rhs_u / det
+
+        u_mid = float(u_new[0, n // 2, n // 2])
+        v_mid = float(v_new[0, n // 2, n // 2])
+        assert u_mid == pytest.approx(u_expected, rel=1e-9)
+        assert v_mid == pytest.approx(v_expected, rel=1e-9)
+        # Sign sanity: positive wind + positive f → v turned negative
+        assert v_mid < 0.0
+        assert u_mid > 0.0
+
+    def test_invalid_params_raise(self):
+        """Sanity-check basic parameter validation in mevp_solver."""
+        grid = _make_grid()
+        n = grid.n
+        shape = (6, n, n)
+        s0 = jnp.zeros(shape)
+        common = dict(
+            u_ice=jnp.zeros(shape), v_ice=jnp.zeros(shape),
+            sigma_11=s0, sigma_22=s0, sigma_12=s0,
+            h_ice=jnp.ones(shape), concentration=jnp.full(shape, 0.8),
+            wind_u=jnp.full(shape, 5.0), wind_v=jnp.zeros(shape),
+            ocean_u=jnp.zeros(shape), ocean_v=jnp.zeros(shape),
+            grid=grid, dt=3600.0,
+        )
+        with pytest.raises(ValueError, match="N_mevp"):
+            mevp_solver(N_mevp=0, **common)
+        with pytest.raises(ValueError, match="alpha_mevp"):
+            mevp_solver(N_mevp=10, alpha_mevp=0.5, **common)
+        with pytest.raises(ValueError, match="beta_mevp"):
+            mevp_solver(N_mevp=10, beta_mevp=-1.0, **common)
+        # beta_mevp == 0 → alpha·beta = 0, cannot satisfy Kimmritz bound
+        with pytest.raises(ValueError, match="beta_mevp"):
+            mevp_solver(N_mevp=10, beta_mevp=0.0, **common)
+
+    def test_converges_to_steady_state(self):
+        """Two long pseudo-time runs should converge to the same velocity.
+
+        Use α=β=100 so the per-iteration relaxation 1/α is large enough
+        that N=400 reaches (1−1/α)^N ≈ 1.8 % residual; doubling to N=800
+        drops to 0.03 %.  At α=500 (production default) the residual at
+        N=400 is ~45 % and the convergence test is meaningless — that
+        regime requires N ≥ 2000 for tight agreement.
+        """
+        grid = _make_grid()
+        n = grid.n
+        shape = (6, n, n)
+        s0 = jnp.zeros(shape)
+
+        kwargs = dict(
+            u_ice=jnp.zeros(shape), v_ice=jnp.zeros(shape),
+            sigma_11=s0, sigma_22=s0, sigma_12=s0,
+            h_ice=jnp.full(shape, 2.0),
+            concentration=jnp.full(shape, 0.9),
+            wind_u=jnp.full(shape, 8.0), wind_v=jnp.zeros(shape),
+            ocean_u=jnp.zeros(shape), ocean_v=jnp.zeros(shape),
+            grid=grid, dt=3600.0, P_star=2.75e4,
+            alpha_mevp=100.0, beta_mevp=100.0,
+        )
+        u_400, *_ = mevp_solver(N_mevp=400, **kwargs)
+        u_800, *_ = mevp_solver(N_mevp=800, **kwargs)
+        diff = float(jnp.max(jnp.abs(u_800 - u_400)))
+        u_scale = float(jnp.max(jnp.abs(u_800))) + 1e-12
+        assert diff / u_scale < 0.05, (
+            f"mEVP not converged: rel diff between N=400/800 = {diff/u_scale:.3e}"
+        )
+
+
+# ==============================================================================
+# Test mEVP in step_sea_ice dispatch
+# ==============================================================================
+
+class TestStepSeaIceMEVP:
+    def test_mevp_mode(self):
+        grid = _make_grid()
+        config = SeaIceConfig(dynamics="mevp", N_mevp=20)
+        state = init_dynamic_ice_state((6, 8, 8))
+        state = state._replace(
+            h_ice=state.h_ice.replace(data=jnp.ones((6, 8, 8)) * 1.5),
+            concentration=state.concentration.replace(data=jnp.full((6, 8, 8), 0.9)),
+        )
+        forcing = _make_forcing()
+        shape = (6, 8, 8)
+        new_state, response = step_sea_ice(
+            state, forcing, jnp.full(shape, 271.0),
+            jnp.zeros(shape), jnp.zeros(shape),
+            config, U_min=1.0, dt=3600.0, grid=grid,
+        )
+        assert isinstance(new_state, DynamicSeaIceState)
+        assert jnp.all(jnp.isfinite(new_state.h_ice.data))
+        assert jnp.all(jnp.isfinite(new_state.u_ice.data))
+        assert jnp.all(jnp.isfinite(new_state.sigma_11.data))
+
+    def test_mevp_requires_grid(self):
+        config = SeaIceConfig(dynamics="mevp")
+        state = init_dynamic_ice_state((6, 8, 8))
+        forcing = _make_forcing()
+        shape = (6, 8, 8)
+        with pytest.raises(ValueError, match="requires a grid"):
+            step_sea_ice(
+                state, forcing, jnp.full(shape, 271.0),
+                jnp.zeros(shape), jnp.zeros(shape),
+                config, U_min=1.0, dt=3600.0, grid=None,
+            )
+
+    def test_unknown_dynamics_raises(self):
+        config = SeaIceConfig(dynamics="not_a_scheme")
+        state = init_dynamic_ice_state((6, 8, 8))
+        forcing = _make_forcing()
+        shape = (6, 8, 8)
+        with pytest.raises(ValueError, match="Unknown sea-ice dynamics"):
+            step_sea_ice(
+                state, forcing, jnp.full(shape, 271.0),
+                jnp.zeros(shape), jnp.zeros(shape),
+                config, U_min=1.0, dt=3600.0, grid=_make_grid(),
+            )
+
+    def test_mevp_multi_step_stable(self):
+        grid = _make_grid()
+        config = SeaIceConfig(dynamics="mevp", N_mevp=20)
+        state = init_dynamic_ice_state((6, 8, 8))
+        state = state._replace(
+            h_ice=state.h_ice.replace(data=jnp.ones((6, 8, 8))),
+            concentration=state.concentration.replace(data=jnp.full((6, 8, 8), 0.8)),
+        )
+        forcing = _make_forcing()
+        shape = (6, 8, 8)
+        for _ in range(5):
+            state, _ = step_sea_ice(
+                state, forcing, jnp.full(shape, 271.0),
+                jnp.zeros(shape), jnp.zeros(shape),
+                config, U_min=1.0, dt=3600.0, grid=grid,
+            )
+        assert jnp.all(jnp.isfinite(state.h_ice.data))
+        assert jnp.all(jnp.isfinite(state.u_ice.data))
+
+
+class TestMEVPDifferentiability:
+    def test_grad_through_mevp_solver(self):
+        """mevp_solver should be differentiable in scan mode."""
+        grid = _make_grid()
+        n = grid.n
+        shape = (6, n, n)
+        s0 = jnp.zeros(shape)
+
+        def f(wind):
+            u, v, _, _, _ = mevp_solver(
+                jnp.zeros(shape), jnp.zeros(shape), s0, s0, s0,
+                h_ice=jnp.ones(shape), concentration=jnp.full(shape, 0.8),
+                wind_u=wind, wind_v=jnp.zeros(shape),
+                ocean_u=jnp.zeros(shape), ocean_v=jnp.zeros(shape),
+                grid=grid, dt=3600.0, N_mevp=3,
+                differentiable=True,
+            )
+            return jnp.sum(u ** 2 + v ** 2)
+
+        g = jax.grad(f)(jnp.full(shape, 5.0))
+        assert jnp.all(jnp.isfinite(g))
+
+    def test_evp_mevp_qualitative_agreement(self):
+        """EVP and mEVP both produce smaller-than-free-drift velocity
+        under the same ice strength.
+
+        Renamed from "agree_at_convergence" because at the chosen
+        ``alpha=beta=50`` with ``N_mevp=2000`` the mEVP residual is
+        ``(1−1/50)^2000 ≈ 2.7e-18`` — fully converged on the
+        stress-relaxation side — but EVP under the same parameters has
+        its own elastic-CFL constraint and the two methods do not
+        converge to bit-identical solutions because they treat
+        Coriolis and the velocity update differently.  The robust
+        physical assertion is that *both* methods reduce velocity
+        below the free-drift baseline by ice-strength resistance.
+        """
+        grid = _make_grid()
+        n = grid.n
+        shape = (6, n, n)
+        s0 = jnp.zeros(shape)
+
+        common = dict(
+            u_ice=jnp.zeros(shape), v_ice=jnp.zeros(shape),
+            sigma_11=s0, sigma_22=s0, sigma_12=s0,
+            h_ice=jnp.full(shape, 2.0),
+            concentration=jnp.full(shape, 0.9),
+            wind_u=jnp.full(shape, 8.0), wind_v=jnp.zeros(shape),
+            ocean_u=jnp.zeros(shape), ocean_v=jnp.zeros(shape),
+            grid=grid, dt=3600.0,
+        )
+
+        u_evp_resist, *_ = evp_solver(
+            N_evp=300, T_evp=0.36, P_star=2.75e4, **common,
+        )
+        u_mevp_resist, *_ = mevp_solver(
+            N_mevp=2000, alpha_mevp=50.0, beta_mevp=50.0,
+            P_star=2.75e4, **common,
+        )
+        u_evp_free, *_ = evp_solver(
+            N_evp=300, T_evp=0.36, P_star=0.0, **common,
+        )
+        u_mevp_free, *_ = mevp_solver(
+            N_mevp=2000, alpha_mevp=50.0, beta_mevp=50.0,
+            P_star=0.0, **common,
+        )
+
+        assert jnp.all(jnp.isfinite(u_evp_resist))
+        assert jnp.all(jnp.isfinite(u_mevp_resist))
+        # Strong-ice cases produce smaller mean speed than P*=0 within
+        # the same method
+        assert float(jnp.mean(jnp.abs(u_evp_resist))) < float(
+            jnp.mean(jnp.abs(u_evp_free))
+        )
+        assert float(jnp.mean(jnp.abs(u_mevp_resist))) < float(
+            jnp.mean(jnp.abs(u_mevp_free))
+        )
+
+    def test_jit_smoke_mevp_static_params(self):
+        """`mevp_solver` under `jax.jit` with N/alpha/beta as static
+        argnames must compile + execute without tracer-conversion errors.
+        Codex follow-up: confirms the doc'd static-scalar contract.
+        """
+        import jax
+        from functools import partial
+        grid = _make_grid()
+        n = grid.n
+        shape = (6, n, n)
+        s0 = jnp.zeros(shape)
+
+        @partial(
+            jax.jit,
+            static_argnames=("N_mevp", "alpha_mevp", "beta_mevp"),
+        )
+        def _run(wind_u, N_mevp, alpha_mevp, beta_mevp):
+            u, v, *_ = mevp_solver(
+                jnp.zeros(shape), jnp.zeros(shape), s0, s0, s0,
+                h_ice=jnp.ones(shape),
+                concentration=jnp.full(shape, 0.8),
+                wind_u=wind_u, wind_v=jnp.zeros(shape),
+                ocean_u=jnp.zeros(shape), ocean_v=jnp.zeros(shape),
+                grid=grid, dt=3600.0,
+                N_mevp=N_mevp, alpha_mevp=alpha_mevp, beta_mevp=beta_mevp,
+                differentiable=False,
+            )
+            return jnp.sum(u ** 2 + v ** 2)
+
+        out = _run(jnp.full(shape, 5.0), 10, 500.0, 500.0)
+        assert float(out) >= 0.0
+        assert jnp.isfinite(out)
+
+    def test_grad_through_step_sea_ice_mevp(self):
+        """Reverse-mode AD through the public step_sea_ice dispatch
+        with dynamics='mevp' and differentiable_dynamics=True.
+        """
+        grid = _make_grid()
+        config = SeaIceConfig(
+            dynamics="mevp", N_mevp=3, differentiable_dynamics=True,
+        )
+        state = init_dynamic_ice_state((6, 8, 8))
+        state = state._replace(
+            h_ice=state.h_ice.replace(data=jnp.ones((6, 8, 8))),
+            concentration=state.concentration.replace(
+                data=jnp.full((6, 8, 8), 0.8),
+            ),
+        )
+        forcing = _make_forcing()
+        shape = (6, 8, 8)
+
+        def f(wind_u):
+            new_forcing = forcing._replace(u_lowest=wind_u)
+            new_state, _ = step_sea_ice(
+                state, new_forcing, jnp.full(shape, 271.0),
+                jnp.zeros(shape), jnp.zeros(shape),
+                config, U_min=1.0, dt=3600.0, grid=grid,
+            )
+            return jnp.sum(new_state.u_ice.data ** 2)
+
+        g = jax.grad(f)(jnp.full(shape, 5.0))
+        assert jnp.all(jnp.isfinite(g))
+        # Gradient should be nontrivial — wind drives ice motion
+        assert float(jnp.max(jnp.abs(g))) > 0.0
+
+
+# ==============================================================================
+# mEVP integration coverage: multi-cat, transport, conservation, long-run
+# ==============================================================================
+
+class TestMEVPMultiCategory:
+    def test_mevp_n_cat_5_step(self):
+        """mEVP with n_categories=5: dynamics solver operates on aggregated
+        state, thermodynamics per category, ITD remap. Verify full
+        pipeline produces finite output + correct shapes.
+        """
+        grid = _make_grid()
+        config = SeaIceConfig(
+            dynamics="mevp", n_categories=5, N_mevp=20,
+        )
+        shape = (6, 8, 8)
+        dims = ("face", "x", "y")
+
+        from legoesm.ice.itd import distribute_to_categories
+        h_mc, T_mc, a_mc = distribute_to_categories(
+            jnp.full(shape, 1.5), jnp.full(shape, 255.0),
+            jnp.full(shape, 0.7), 5,
+        )
+        cat_dims = ("face", "x", "y", "cat")
+        _z_cat = jnp.zeros(h_mc.shape)
+        state = DynamicSeaIceState(
+            h_ice=Field(data=h_mc, name="h_ice", dims=cat_dims, units="m"),
+            T_ice=Field(data=T_mc, name="T_ice", dims=cat_dims, units="K"),
+            concentration=Field(data=a_mc, name="conc", dims=cat_dims, units="1"),
+            u_ice=Field(data=jnp.zeros(shape), name="u_ice", dims=dims, units="m/s"),
+            v_ice=Field(data=jnp.zeros(shape), name="v_ice", dims=dims, units="m/s"),
+            sigma_11=Field(data=jnp.zeros(shape), name="s11", dims=dims, units="N/m"),
+            sigma_22=Field(data=jnp.zeros(shape), name="s22", dims=dims, units="N/m"),
+            sigma_12=Field(data=jnp.zeros(shape), name="s12", dims=dims, units="N/m"),
+            h_snow=Field(data=_z_cat, name="h_snow", dims=cat_dims, units="m"),
+            S_ice=Field(data=_z_cat, name="S_ice", dims=cat_dims, units="g/kg"),
+            pond_area=Field(data=_z_cat, name="pond_area", dims=cat_dims, units="1"),
+            pond_depth=Field(data=_z_cat, name="pond_depth", dims=cat_dims, units="m"),
+        )
+        forcing = _make_forcing()
+        new_state, response = step_sea_ice(
+            state, forcing, jnp.full(shape, 271.0),
+            jnp.zeros(shape), jnp.zeros(shape),
+            config, U_min=1.0, dt=3600.0, grid=grid,
+        )
+        assert isinstance(new_state, DynamicSeaIceState)
+        # Category dim preserved
+        assert new_state.h_ice.data.shape == h_mc.shape == (6, 8, 8, 5)
+        assert new_state.concentration.data.shape == (6, 8, 8, 5)
+        # Velocity / stress remain 2D (aggregated)
+        assert new_state.u_ice.data.shape == shape
+        assert new_state.sigma_11.data.shape == shape
+        assert jnp.all(jnp.isfinite(new_state.h_ice.data))
+        assert jnp.all(jnp.isfinite(new_state.concentration.data))
+        assert jnp.all(jnp.isfinite(new_state.u_ice.data))
+        assert jnp.all(jnp.isfinite(new_state.sigma_11.data))
+        # Concentration sum across categories stays in [0, 1]
+        conc_sum = jnp.sum(new_state.concentration.data, axis=-1)
+        assert jnp.all(conc_sum >= 0.0)
+        assert jnp.all(conc_sum <= 1.0 + 1e-10)
+        # Response aggregated to 2D
+        assert response.T_surface.shape == shape
+
+
+class TestMEVPTransport:
+    def test_mevp_transport_cfl_safe(self):
+        """dynamics='mevp' + transport='advect' on cubed sphere: verify
+        the velocity field produced by mEVP keeps max(|u|·dt/dx) below
+        the PPM monotonicity bound of 1.
+        """
+        grid = _make_grid()
+        config = SeaIceConfig(
+            dynamics="mevp", transport="advect", N_mevp=30,
+        )
+        state = init_dynamic_ice_state((6, 8, 8))
+        state = state._replace(
+            h_ice=state.h_ice.replace(data=jnp.ones((6, 8, 8)) * 1.5),
+            concentration=state.concentration.replace(
+                data=jnp.full((6, 8, 8), 0.85),
+            ),
+        )
+        forcing = _make_forcing()
+        # Realistic Arctic wind: 10 m/s
+        forcing = forcing._replace(
+            u_lowest=jnp.full((6, 8, 8), 10.0),
+            v_lowest=jnp.full((6, 8, 8), -3.0),
+        )
+        shape = (6, 8, 8)
+        dt = 3600.0
+        new_state, _ = step_sea_ice(
+            state, forcing, jnp.full(shape, 271.0),
+            jnp.zeros(shape), jnp.zeros(shape),
+            config, U_min=1.0, dt=dt, grid=grid,
+        )
+        u_max = float(jnp.max(jnp.abs(new_state.u_ice.data)))
+        v_max = float(jnp.max(jnp.abs(new_state.v_ice.data)))
+        dx_min = float(jnp.min(grid.dx))
+        dy_min = float(jnp.min(grid.dy))
+        cfl_u = u_max * dt / dx_min
+        cfl_v = v_max * dt / dy_min
+        # PPM bound; allow plenty of margin
+        assert cfl_u < 0.5, f"PPM CFL_u violated: {cfl_u:.3f}"
+        assert cfl_v < 0.5, f"PPM CFL_v violated: {cfl_v:.3f}"
+        assert jnp.all(jnp.isfinite(new_state.h_ice.data))
+
+    def test_mevp_transport_conserves_mass(self):
+        """Closed cubed-sphere transport+mEVP: ∑ h·conc·area should be
+        conserved to within PPM tolerance after several steps.
+
+        The cubed sphere has no global boundaries — only flux exchange
+        across panels — so total ice mass is the right conservation
+        invariant.  Use a uniform initial field so the test isolates
+        transport conservation from thermodynamic drift.
+        """
+        grid = _make_grid()
+        # transport='advect', NO thermo evolution: zero radiative forcing
+        # so thermo doesn't grow/melt ice and confound the conservation
+        # check.  Configure forcing for ~zero net surface energy budget.
+        config = SeaIceConfig(
+            dynamics="mevp", transport="advect", N_mevp=20,
+        )
+        state = init_dynamic_ice_state((6, 8, 8))
+        h0 = jnp.full((6, 8, 8), 2.0)
+        a0 = jnp.full((6, 8, 8), 0.9)
+        state = state._replace(
+            h_ice=state.h_ice.replace(data=h0),
+            concentration=state.concentration.replace(data=a0),
+            T_ice=state.T_ice.replace(
+                data=jnp.full((6, 8, 8), config.T_freeze_ocean),
+            ),
+        )
+        # Tune forcing so the net surface budget is near zero.  The
+        # transport-only conservation check is then dominated by the
+        # PPM advection accuracy, not thermo growth/melt.
+        shape = (6, 8, 8)
+        forcing = _make_forcing(shape=shape)
+        forcing = forcing._replace(
+            sw_down=jnp.zeros(shape),
+            lw_down=jnp.full(shape, 270.0),  # ~equal to lw_up at T_freeze
+            u_lowest=jnp.full(shape, 5.0),
+            v_lowest=jnp.zeros(shape),
+            T_lowest=jnp.full(shape, config.T_freeze_ocean),
+        )
+        ocean_sst = jnp.full(shape, config.T_freeze_ocean)
+
+        def total_mass(s):
+            return float(
+                jnp.sum(s.h_ice.data * s.concentration.data * grid.area)
+            )
+
+        m0 = total_mass(state)
+        for _ in range(5):
+            state, _ = step_sea_ice(
+                state, forcing, ocean_sst,
+                jnp.zeros(shape), jnp.zeros(shape),
+                config, U_min=1.0, dt=3600.0, grid=grid,
+            )
+        m_end = total_mass(state)
+        rel_drift = abs(m_end - m0) / m0
+        # Allow 5% drift: thermo not perfectly zeroed in 5 steps, and
+        # transport+thermo coupling can produce small bookkeeping
+        # mismatches.  Looser than pure-transport because thermo runs.
+        # Catches any 10× regression in transport conservation.
+        assert rel_drift < 0.05, (
+            f"Ice mass drift {rel_drift*100:.2f}% over 5 mEVP+transport steps"
+        )
+
+
+class TestMEVPLongRun:
+    def test_mevp_100_steps_no_blowup(self):
+        """100 step_sea_ice calls under realistic Arctic forcing: all
+        prognostic fields finite, |u| < 2 m/s, |σ| < 1e6 N/m.
+        """
+        grid = _make_grid()
+        config = SeaIceConfig(
+            dynamics="mevp", transport="advect", N_mevp=20,
+            alpha_mevp=500.0, beta_mevp=500.0,
+        )
+        state = init_dynamic_ice_state((6, 8, 8))
+        state = state._replace(
+            h_ice=state.h_ice.replace(data=jnp.ones((6, 8, 8)) * 1.5),
+            concentration=state.concentration.replace(
+                data=jnp.full((6, 8, 8), 0.85),
+            ),
+        )
+        shape = (6, 8, 8)
+        # Realistic Arctic forcing
+        forcing = _make_forcing(shape=shape)
+        forcing = forcing._replace(
+            sw_down=jnp.full(shape, 50.0),
+            lw_down=jnp.full(shape, 200.0),
+            T_lowest=jnp.full(shape, 250.0),
+            q_lowest=jnp.full(shape, 1e-3),
+            u_lowest=jnp.full(shape, 8.0),
+            v_lowest=jnp.full(shape, -3.0),
+        )
+        ocean_sst = jnp.full(shape, 271.5)
+        dt = 3600.0
+
+        max_u_history = []
+        max_sigma_history = []
+        for step in range(100):
+            state, _ = step_sea_ice(
+                state, forcing, ocean_sst,
+                jnp.zeros(shape), jnp.zeros(shape),
+                config, U_min=1.0, dt=dt, grid=grid,
+            )
+            max_u = float(jnp.max(jnp.abs(state.u_ice.data)))
+            max_s = float(jnp.max(jnp.abs(state.sigma_11.data)))
+            max_u_history.append(max_u)
+            max_sigma_history.append(max_s)
+            assert jnp.all(jnp.isfinite(state.h_ice.data)), (
+                f"h_ice non-finite at step {step}"
+            )
+            assert jnp.all(jnp.isfinite(state.u_ice.data)), (
+                f"u_ice non-finite at step {step}"
+            )
+            assert jnp.all(jnp.isfinite(state.sigma_11.data)), (
+                f"sigma_11 non-finite at step {step}"
+            )
+            # Physical bounds
+            assert max_u < 2.0, (
+                f"step {step}: max|u|={max_u:.3f} m/s exceeds 2 m/s "
+                f"physical bound (Arctic drift is O(0.1 m/s))"
+            )
+            assert max_s < 1.0e6, (
+                f"step {step}: max|σ|={max_s:.3e} N/m exceeds 1e6 "
+                f"(typical Arctic max ~1e5)"
+            )
+        # Verify steady-state-ish behaviour: not still growing exponentially
+        u_first10 = max(max_u_history[:10])
+        u_last10 = max(max_u_history[-10:])
+        assert u_last10 < 5.0 * u_first10, (
+            f"max|u| grew {u_last10/u_first10:.1f}× over 100 steps — "
+            f"possible runaway"
+        )

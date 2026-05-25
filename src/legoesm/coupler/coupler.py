@@ -289,6 +289,9 @@ def ocean_tile_response(
         # Ocean evaporation: lhflx already used L_v, so evap_rate
         # is the correct mass flux.
         surface_mass_flux=evap_rate,
+        # Ocean tile is the salt-budget sink, not a source of salt
+        # back to itself — zero flux on this channel.
+        salt_flux=jnp.zeros(shape, dtype=_ssh_dtype),
     )
 
 

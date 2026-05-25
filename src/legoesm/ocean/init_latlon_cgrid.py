@@ -13,6 +13,56 @@ from legoesm.ocean.state import LatLonCGridOceanState
 from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
 
 
+def partial_periodic_seam_wall_latlon(
+    grid: LatLonGrid,
+    open_lat_south_deg: float,
+    open_lat_north_deg: float,
+    seam_column_index: int = 0,
+    base_mask: jnp.ndarray | None = None,
+):
+    """Build a per-cell land mask that creates a wall at one longitude
+    column EVERYWHERE EXCEPT in a specified latitude band.
+
+    The lat-lon C-grid operators wrap longitude periodically via
+    ``jnp.roll``. To represent a closed basin with a re-entrant
+    channel band (Drake passage analog), mark a single longitude
+    column as land outside the open band — the periodic identification
+    sees a wall there, except inside the band where the cells stay
+    ocean.
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+    open_lat_south_deg, open_lat_north_deg : float
+        Latitude band [°N] in which the seam stays open (no wall).
+    seam_column_index : int, default 0
+        Longitude column index that hosts the wall. Defaults to the
+        westernmost column (index 0); pick the easternmost (n_lon-1)
+        for the same effect with periodic identification.
+    base_mask : array, optional
+        Pre-existing land mask (n_lat, n_lon). The seam wall is
+        intersected with it.
+
+    Returns
+    -------
+    land_mask : jax array, shape (n_lat, n_lon)
+        1.0 = ocean, 0.0 = land.
+    """
+    lat_1d_deg = jnp.degrees(grid.lat)  # (n_lat,)
+    in_open_band = (
+        (lat_1d_deg >= open_lat_south_deg)
+        & (lat_1d_deg <= open_lat_north_deg)
+    )
+    is_seam_col = jnp.zeros(grid.n_lon).at[seam_column_index].set(1.0)
+    is_outside_band = jnp.where(in_open_band, 0.0, 1.0)
+    seam_wall_2d = is_outside_band[:, None] * is_seam_col[None, :]
+    if base_mask is None:
+        land_mask = 1.0 - seam_wall_2d
+    else:
+        land_mask = jnp.where(base_mask > 0.5, 1.0 - seam_wall_2d, 0.0)
+    return land_mask.astype(jnp.float32)
+
+
 def idealized_bathymetry_latlon_cgrid(
     grid: LatLonGrid,
     H_max: float = 5500.0,

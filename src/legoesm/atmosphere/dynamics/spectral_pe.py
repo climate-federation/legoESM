@@ -1020,7 +1020,10 @@ class SpectralPrimitiveEquationModel:
         try:
             from mpi4py import MPI
             _mpi_world = MPI.COMM_WORLD.Get_size()
-        except ImportError:
+        except (ImportError, RuntimeError, OSError):
+            # mpi4py installed but libmpi missing/incompatible → assume
+            # single-rank. Distributed launches will surface real MPI
+            # errors elsewhere.
             pass
         if _mpi_world > 1:
             raise RuntimeError(

@@ -493,6 +493,8 @@ def step_multilayer_land(
         # for L_eff switch and water-limit in the columnar Richards
         # solve).  Audit F3.
         surface_mass_flux=evap_rate,
+        # Land tile does not exchange salt with the ocean directly.
+        salt_flux=jnp.zeros(ncol),
     )
 
     return new_state, response, carbon_state_new

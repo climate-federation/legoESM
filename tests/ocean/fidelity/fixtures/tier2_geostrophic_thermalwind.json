@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "tier": 2,
+  "description": "Geostrophic / thermal-wind adjustment: 1/f timescale and Rossby radius from first_baroclinic_deformation_radius",
+  "common": {
+    "precision": "x64",
+    "grid": "latlon_cgrid",
+    "resolution": "2p5deg"
+  },
+  "cases": {
+    "geostrophic_adjustment_timescale": {
+      "metric": "adjustment_timescale_over_inverse_f",
+      "tolerance_window": [0.7, 1.5],
+      "reference": {"kind": "analytical", "value": 1.0},
+      "ci_marker": "fast",
+      "expected_runtime_s": 120
+    },
+    "geostrophic_adjustment_front_width": {
+      "metric": "front_width_over_L_d",
+      "tolerance_window": [0.8, 1.3],
+      "reference": {
+        "kind": "analytical",
+        "fn": "legoesm.ocean.diagnostics:first_baroclinic_deformation_radius"
+      },
+      "ci_marker": "fast",
+      "expected_runtime_s": 120
+    },
+    "baroclinic_thermal_wind_residual": {
+      "metric": "thermal_wind_residual_relative",
+      "tolerance_window": [0.0, 0.05],
+      "reference": {"kind": "analytical", "value": 0.0},
+      "ci_marker": "fast",
+      "expected_runtime_s": 180
+    }
+  }
+}

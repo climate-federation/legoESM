@@ -35,6 +35,8 @@ import jax
 import jax.numpy as jnp
 import yaml
 
+from legoesm.ml.loss import latitude_weighted_bias, latitude_weighted_rmse
+
 
 def _load_yaml(path: Path) -> dict:
     with path.open() as fh:
@@ -83,13 +85,10 @@ def _per_var_metrics(pred_grid, target_carry, grid):
     weights = jnp.asarray(grid.weights)
 
     def _rmse(p, t):
-        # Zonal-mean square error, then latitude-weighted mean.
-        sq_zonal = jnp.mean((p - t) ** 2, axis=-1)
-        return float(jnp.sqrt(jnp.sum(sq_zonal * weights) / jnp.sum(weights)))
+        return float(latitude_weighted_rmse(p, t, weights))
 
     def _bias(p, t):
-        diff_zonal = jnp.mean(p - t, axis=-1)
-        return float(jnp.sum(diff_zonal * weights) / jnp.sum(weights))
+        return float(latitude_weighted_bias(p, t, weights))
 
     nlev = pred_grid["T"].shape[-1]
     mid = nlev // 2

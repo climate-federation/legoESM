@@ -110,6 +110,7 @@ def make_physics(
     config: PhysicsConfig,
     model_type: str = "hydrostatic",
     dt: float = 300.0,
+    column_mesh=None,
 ) -> Callable:
     """Create a combined physics function for a dynamical core.
 
@@ -121,9 +122,18 @@ def make_physics(
     config : PhysicsConfig
         Unified physics configuration.
     model_type : str
-        One of ``"hydrostatic"``, ``"nonhydrostatic"``, ``"spectral_pe"``.
+        One of ``"hydrostatic"``, ``"nonhydrostatic"``, ``"spectral_pe"``,
+        ``"mpas"``.
     dt : float
         Model time step [s].
+    column_mesh : jax.sharding.Mesh or None, optional
+        Issue #273 follow-up.  When supplied (build via
+        ``legoesm.parallel.column_shard.create_column_mesh``), the
+        per-column radiation kernel is sharded across the mesh's
+        ``'col'`` axis so a device count that fails cubed-sphere
+        face-divisibility (e.g. 4-GPU node) still keeps every device
+        busy on the radiation hot path.  Default ``None`` preserves
+        bit-exact behavior.
 
     Returns
     -------
@@ -131,13 +141,13 @@ def make_physics(
         Physics function with the correct signature for *model_type*.
     """
     if model_type == "hydrostatic":
-        return _make_hydrostatic_combined(config, dt)
+        return _make_hydrostatic_combined(config, dt, column_mesh=column_mesh)
     elif model_type == "nonhydrostatic":
         return _make_nonhydrostatic_combined(config, dt)
     elif model_type == "spectral_pe":
         return _make_spectral_pe_combined(config, dt)
     elif model_type == "mpas":
-        return _make_mpas_combined(config, dt)
+        return _make_mpas_combined(config, dt, column_mesh=column_mesh)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -150,16 +160,26 @@ def make_physics(
 # ======================================================================
 
 def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
-                               model_type: str = "hydrostatic") -> Callable:
+                               model_type: str = "hydrostatic",
+                               column_mesh=None) -> Callable:
     """Combined physics for any hydrostatic model (cubed-sphere, lat-lon, MPAS).
 
     Uses the unified ``HydrostaticTendencies`` with optional ``dv_dt``.
     When *model_type* is ``"mpas"``, the radiation factory is called
     with ``"mpas"`` so that lat/lon extraction uses mesh.latCell/lonCell.
+
+    Issue #273 follow-up: when ``column_mesh`` is supplied, the
+    per-column radiation kernel runs sharded across the mesh.
     """
     tagged_fns = []
     if config.radiation.scheme != "none":
-        tagged_fns.append((make_radiation_physics(config.radiation, model_type), False, None))
+        tagged_fns.append((
+            make_radiation_physics(
+                config.radiation, model_type, column_mesh=column_mesh,
+            ),
+            False,
+            None,
+        ))
     if config.convection.scheme != "none":
         tagged_fns.append((make_convection_physics(config.convection, model_type, dt), True, "conv_prog_profile"))
     if config.turbulence.scheme != "none":
@@ -570,5 +590,8 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
 # MPAS (Voronoi mesh) — uses unified hydrostatic combined path
 # ======================================================================
 
-def _make_mpas_combined(config: PhysicsConfig, dt: float) -> Callable:
-    return _make_hydrostatic_combined(config, dt, model_type="mpas")
+def _make_mpas_combined(config: PhysicsConfig, dt: float,
+                        column_mesh=None) -> Callable:
+    return _make_hydrostatic_combined(
+        config, dt, model_type="mpas", column_mesh=column_mesh,
+    )

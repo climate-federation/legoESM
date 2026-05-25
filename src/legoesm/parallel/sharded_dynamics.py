@@ -115,7 +115,35 @@ class ShardingSpec(NamedTuple):
 
 
 def _make_sharding_spec(config: DeviceConfig) -> ShardingSpec:
-    """Build PartitionSpec objects from a DeviceConfig."""
+    """Build PartitionSpec objects from a DeviceConfig.
+
+    Three regimes:
+
+    * **Face-only sharding** (1, 2, 3, 6 devices): leading face axis
+      is sharded.
+    * **Sub-face tiling** (6·k² devices): face axis + two tile axes.
+    * **Level-parallel cubed-sphere** (issue #273 fallback for
+      device counts that fail face-divisibility, e.g. 4): mesh
+      axis is ``'level'``, NOT ``'face'``.  The dycore runs
+      fully replicated horizontally — every device computes the
+      complete cubed-sphere stencil independently — and the
+      level axis is reserved for downstream column-wise physics
+      to shard.  Returning ``P()`` for both 3D and 4D specs
+      makes ``shard_state`` produce a fully-replicated dycore
+      state, which is the correct behavior on the level mesh.
+    """
+    if getattr(config, "grid_type", None) == "cubed_sphere_level":
+        # Replicated-dycore path.  Mesh has only a ``'level'`` axis;
+        # any attempt to address ``'face'`` would crash with
+        # ``unmatched mesh axis`` from JAX.
+        return ShardingSpec(
+            face_3d=P(),
+            face_2d=P(),
+            replicated=P(),
+            tiled_3d=None,
+            tiled_2d=None,
+        )
+
     tx, ty = config.tiling
     if tx == 1 and ty == 1:
         # Face-only sharding

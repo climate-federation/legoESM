@@ -241,6 +241,10 @@ class TestDynamicIceGrad:
             sigma_11=Field(jnp.zeros(shape), name="sigma_11"),
             sigma_22=Field(jnp.zeros(shape), name="sigma_22"),
             sigma_12=Field(jnp.zeros(shape), name="sigma_12"),
+            h_snow=Field(jnp.zeros(shape), name="h_snow"),
+            S_ice=Field(jnp.zeros(shape), name="S_ice"),
+            pond_area=Field(jnp.zeros(shape), name="pond_area"),
+            pond_depth=Field(jnp.zeros(shape), name="pond_depth"),
         )
         self.forcing = make_ice_forcing(shape)
         self.ocean_sst = 271.35 * jnp.ones(shape)

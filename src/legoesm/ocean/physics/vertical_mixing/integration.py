@@ -165,14 +165,29 @@ def _make_kpp(config: VerticalMixingConfig,
             B_salt = constants.g * beta * Q_sfc_S
             B_f = B_salt if B_f is None else (B_f + B_salt)
 
+        # KPP expects u, v at cell centers (same shape as T).
+        # On C-grids, u is (n_lat, n_lon+1, nlev) and v is
+        # (n_lat+1, n_lon, nlev) — average to cell centers.
+        u_data = state.u.data
+        v_data = state.v.data
+        if u_data.shape[1] != state.T.data.shape[1]:
+            # C-grid: u at lon+1, v at lat+1 faces → cell centers
+            u_data = 0.5 * (u_data[:, :-1, :] + u_data[:, 1:, :])
+            v_data = 0.5 * (v_data[:-1, :, :] + v_data[1:, :, :])
         out = kpp_vertical_mixing(
-            state.u.data, state.v.data, state.T.data, state.S.data,
+            u_data, v_data, state.T.data, state.S.data,
             rho, state.eta.data, z_coord, J, cfg,
             tau_x=tau_x, tau_y=tau_y, B_f=B_f,
             Q_sfc_T=Q_sfc_T, Q_sfc_S=Q_sfc_S,
             apply_diffusion=apply_diffusion,
         )
-        return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state,
+        # When apply_diffusion is False, KPP returns zero du/dv at
+        # cell-center shape (from the C-grid u/v interpolation above).
+        # Pass None so _wrap_tendencies uses the face-shaped zero
+        # template — avoids shape mismatch with C-grid state.
+        _du = None if not apply_diffusion else out.du_dt
+        _dv = None if not apply_diffusion else out.dv_dt
+        return _wrap_tendencies(_du, _dv, out.dT_dt, out.dS_dt, state,
                                 K_v=out.K_v if not apply_diffusion else None,
                                 A_v=out.A_v if not apply_diffusion else None)
     return physics_fn

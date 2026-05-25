@@ -362,6 +362,98 @@ class MPASNonHydrostaticTendencies(NamedTuple):
 
 
 # ==============================================================================
+# Doubly-periodic Cartesian plane non-hydrostatic state (CRM rollout)
+# ==============================================================================
+#
+# Staged-not-integrated: this state pytree is the prognostic container for
+# the future plane non-hydrostatic dycore (CRM rollout, PR2b). PR2a ships
+# the state class plus mass-integral helpers consumed by the column-kernel
+# refactor; the dycore body that produces and consumes the state lands in
+# PR2b. Until then no public factory dispatches into it.
+#
+# Convention
+# ----------
+# Vertical-LAST axis layout, matching ``NonHydrostaticState`` (cubed-sphere)
+# and ``MPASNonHydrostaticState``. All ``Field`` wrappers carry ``.data``
+# JAX arrays of the listed shapes; tendency objects share the same pytree
+# shape so ``jax.tree_util.tree_map`` works through SSP-RK3 averaging.
+#
+# Arakawa-C staggering (matches PR1 ``PlaneGrid`` + ``plane_operators``):
+#   - scalar / cell centre: ``(ny, nx, nlev)``
+#   - u at x-faces: ``(ny, nx, nlev)`` — no duplicated periodic endpoint
+#   - v at y-faces: ``(ny, nx, nlev)`` — no duplicated periodic endpoint
+#   - w at z-interfaces (Lorenz): ``(ny, nx, nlev+1)``
+#   - phis: ``(ny, nx)``
+#   - tracers: ``(ny, nx, nlev, n_tracers)``
+
+class PlaneNonHydrostaticState(NamedTuple):
+    """State for the non-hydrostatic compressible Euler equations on a
+    doubly-periodic Cartesian plane.
+
+    Uses reference-state subtraction: prognostic variables are
+    perturbations from a 1D hydrostatically balanced reference state
+    ``rho_0(z)``, ``theta_0(z)``.
+
+    All horizontal arrays have shape ``(ny, nx, ...)`` with no
+    duplicated periodic endpoint — periodic neighbours come from
+    ``jnp.roll`` / ``jnp.pad(..., mode='wrap')`` in
+    ``plane_operators``.
+
+    Fields
+    ------
+    u : Field
+        Zonal wind [m/s] at x-faces (Arakawa-C).
+        Shape ``(ny, nx, nlev)``.
+    v : Field
+        Meridional wind [m/s] at y-faces (Arakawa-C).
+        Shape ``(ny, nx, nlev)``.
+    w : Field
+        Vertical velocity [m/s] at half (interface) levels.
+        Shape ``(ny, nx, nlev+1)``. Lorenz staggering.
+        Rigid boundary conditions: ``w = 0`` at model top and bottom
+        (the plane is flat — surface geopotential ``phis`` is zero).
+    theta_prime : Field
+        Potential temperature perturbation [K]. ``theta' = theta - theta_0(z)``.
+        Shape ``(ny, nx, nlev)``.
+    rho_prime : Field
+        Dry density perturbation [kg/m^3]. ``rho' = rho - rho_0(z)``.
+        Shape ``(ny, nx, nlev)``.
+    phis : Field
+        Surface geopotential [m^2/s^2]. Static (not time-stepped).
+        Shape ``(ny, nx)``. Zero on a flat plane.
+    tracers : Field
+        Tracer mixing ratios [kg/kg]. Shape ``(ny, nx, nlev, n_tracers)``.
+        PR2a accepts ``n_tracers == 0`` only (empty last axis). Tracer
+        transport on the plane lands in PR3 together with microphysics.
+    """
+    u: Field
+    v: Field
+    w: Field
+    theta_prime: Field
+    rho_prime: Field
+    phis: Field
+    tracers: Field
+
+
+class PlaneNonHydrostaticTendencies(NamedTuple):
+    """Tendencies (time derivatives) for the plane non-hydrostatic equations.
+
+    Same pytree structure as :class:`PlaneNonHydrostaticState` so
+    ``jax.tree_util.tree_map`` works for SSP-RK3 averaging and physics
+    coupling. ``dphis_dt`` is always zero because the plane surface is
+    static; it is kept for pytree shape compatibility with the existing
+    NH tendency interface.
+    """
+    du_dt: Field
+    dv_dt: Field
+    dw_dt: Field
+    dtheta_prime_dt: Field
+    drho_prime_dt: Field
+    dphis_dt: Field
+    dtracers_dt: Field
+
+
+# ==============================================================================
 # MPAS Voronoi Mesh Ocean States
 # ==============================================================================
 

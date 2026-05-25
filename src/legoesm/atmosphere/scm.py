@@ -1,0 +1,572 @@
+"""Single-column model (SCM) driver for legoESM.
+
+Issue #277: a minimal, dycore-free driver that exercises the atmospheric
+physics pipeline on a single (lat, lon) column. Intended for
+parameterization integration tests, stability sweeps, and idealized
+process studies (e.g. radiative-convective equilibrium, GABLS-style
+boundary layer cases).
+
+The SCM reuses the canonical hydrostatic physics factory
+(`legoesm.atmosphere.physics.combined.make_physics`) so any scheme that
+works in the full 3-D model also works here without modification. There
+is no horizontal advection, no pressure-gradient force, and no Coriolis
+— only column tendencies from radiation, convection, turbulence,
+microphysics, and gravity-wave drag, integrated forward Euler.
+
+Example
+-------
+>>> from legoesm.atmosphere.scm import SingleColumnModel
+>>> from legoesm.atmosphere.physics import (
+...     PhysicsConfig, RadiationConfig, TurbulenceConfig,
+... )
+>>> cfg = PhysicsConfig(
+...     radiation=RadiationConfig(scheme="gray"),
+...     turbulence=TurbulenceConfig(scheme="louis"),
+... )
+>>> scm = SingleColumnModel.create(
+...     physics_config=cfg, nlev=40, dt=300.0,
+...     latitude_deg=0.0, T_profile=jnp.linspace(220.0, 295.0, 40),
+... )
+>>> final_state, history = scm.run(nsteps=288, save_every=12)
+"""
+
+from __future__ import annotations
+
+from typing import Callable, NamedTuple
+
+import jax
+import jax.numpy as jnp
+
+from legoesm import constants
+from legoesm.core.field import Field
+from legoesm.core.state import HydrostaticState, HydrostaticTendencies
+from legoesm.grids.vertical import SigmaCoordinate, create_sigma_coordinate
+from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
+from legoesm.atmosphere.physics.physics_state import (
+    PhysicsState,
+    init_physics_state,
+)
+
+
+_DIMS_3D = ("face", "x", "y", "level")
+_DIMS_2D = ("face", "x", "y")
+
+
+class SCMGrid(NamedTuple):
+    """Minimal grid object for the single-column model.
+
+    Exposes the ``grid_lat`` / ``grid_lon`` / ``radius`` attributes
+    consumed by the radiation and GWD integration helpers. Shape is
+    ``(1, 1)`` so column reshapes give ``ncol = 1``.
+    """
+    grid_lat: jax.Array  # (1, 1, 1) [rad]
+    grid_lon: jax.Array  # (1, 1, 1) [rad]
+    radius: float
+
+    @property
+    def grid_n_columns(self) -> int:
+        return 1
+
+    @property
+    def grid_shape_2d(self) -> tuple[int, int, int]:
+        return (1, 1, 1)
+
+
+def make_scm_grid(latitude_deg: float, longitude_deg: float = 0.0) -> SCMGrid:
+    """Build a single-column grid at the given latitude/longitude."""
+    lat = jnp.asarray([[[jnp.deg2rad(latitude_deg)]]])
+    lon = jnp.asarray([[[jnp.deg2rad(longitude_deg)]]])
+    return SCMGrid(grid_lat=lat, grid_lon=lon, radius=constants.R_earth)
+
+
+def make_column_state(
+    nlev: int,
+    *,
+    T_profile: jax.Array,
+    q_v_profile: jax.Array | None = None,
+    u: float = 0.0,
+    v: float = 0.0,
+    p_s: float = 1.0e5,
+    phis: float = 0.0,
+    dtype=None,
+) -> HydrostaticState:
+    """Construct a `HydrostaticState` of shape (1, 1, nlev) for the SCM.
+
+    Profiles are indexed top-to-bottom (k=0 = model top, k=nlev-1 =
+    surface), matching `HybridSigmaPressureCoordinate` / `SigmaCoordinate`
+    conventions.
+    """
+    if dtype is None:
+        dtype = jnp.float64 if jax.config.read("jax_enable_x64") else jnp.float32
+
+    T_profile = jnp.asarray(T_profile, dtype=dtype)
+    if T_profile.size != nlev:
+        raise ValueError(
+            f"T_profile must have {nlev} elements, got {T_profile.size}"
+        )
+    T_data = T_profile.reshape(1, 1, 1, nlev)
+    u_data = jnp.full((1, 1, 1, nlev), u, dtype=dtype)
+    v_data = jnp.full((1, 1, 1, nlev), v, dtype=dtype)
+    p_s_data = jnp.full((1, 1, 1), p_s, dtype=dtype)
+    phis_data = jnp.full((1, 1, 1), phis, dtype=dtype)
+
+    tracers = None
+    if q_v_profile is not None:
+        q_v_arr = jnp.asarray(q_v_profile, dtype=dtype)
+        if q_v_arr.size != nlev:
+            raise ValueError(
+                f"q_v_profile must have {nlev} elements, got {q_v_arr.size}"
+            )
+        q_v_arr = q_v_arr.reshape(nlev)
+        tracers = {
+            "q_v": Field(
+                data=q_v_arr.reshape(1, 1, 1, nlev),
+                name="q_v", dims=_DIMS_3D, units="kg/kg",
+            )
+        }
+
+    return HydrostaticState(
+        u=Field(data=u_data, name="u", dims=_DIMS_3D, units="m/s"),
+        T=Field(data=T_data, name="T", dims=_DIMS_3D, units="K"),
+        p_s=Field(data=p_s_data, name="p_s", dims=_DIMS_2D, units="Pa"),
+        phis=Field(data=phis_data, name="phis", dims=_DIMS_2D, units="m^2/s^2"),
+        v=Field(data=v_data, name="v", dims=_DIMS_3D, units="m/s"),
+        tracers=tracers,
+    )
+
+
+def _apply_tendencies(
+    state: HydrostaticState,
+    tend: HydrostaticTendencies,
+    dt: float,
+) -> HydrostaticState:
+    """Apply scaled tendencies to a column state (used by every integrator).
+
+    Tracer behaviour:
+    - Every species present in ``state.tracers`` is carried forward; if
+      a matching tendency is returned it is added.
+    - Any tracer tendency returned by physics whose species is *not*
+      already in ``state.tracers`` is materialised from zero — this is
+      what lets microphysics/convection introduce ``q_c``, ``q_r``,
+      ``q_i``, etc. without the SCM silently dropping them.
+    - No positivity clipping is applied here. Schemes that need positive
+      mixing ratios must enforce that themselves (most do). Clipping at
+      the integrator level hides instability and breaks AD smoothness.
+    """
+    new_u = state.u.replace(data=state.u.data + dt * tend.du_dt.data)
+    new_T = state.T.replace(data=state.T.data + dt * tend.dT_dt.data)
+    new_p_s = state.p_s.replace(data=state.p_s.data + dt * tend.dp_s_dt.data)
+    new_v = state.v
+    if state.v is not None and tend.dv_dt is not None:
+        new_v = state.v.replace(data=state.v.data + dt * tend.dv_dt.data)
+
+    if tend.tracer_tendencies is None and state.tracers is None:
+        new_tracers = None
+    else:
+        new_tracers = {}
+        existing = state.tracers or {}
+        tend_tracers = tend.tracer_tendencies or {}
+        # Carry every existing species; add tendency if returned.
+        for k, fld in existing.items():
+            if k in tend_tracers:
+                new_tracers[k] = fld.replace(
+                    data=fld.data + dt * tend_tracers[k].data
+                )
+            else:
+                new_tracers[k] = fld
+        # Materialise any new species introduced by physics tendencies.
+        for k, tend_fld in tend_tracers.items():
+            if k in new_tracers:
+                continue
+            zero = jnp.zeros_like(tend_fld.data)
+            new_tracers[k] = Field(
+                data=zero + dt * tend_fld.data,
+                name=k,
+                dims=tend_fld.dims if tend_fld.dims else _DIMS_3D,
+                units="kg/kg",
+            )
+
+    return HydrostaticState(
+        u=new_u, T=new_T, p_s=new_p_s, phis=state.phis,
+        v=new_v, tracers=new_tracers,
+    )
+
+
+def _tendency_fn(physics_fn, grid, sigma_coord):
+    """Return a closure ``(state, phys_state) -> (tend, phys_state_out)``.
+
+    Used by the time-integrator strategies so they all share the same
+    physics-evaluation interface regardless of which scheme is active.
+    """
+    def f(state, phys_state):
+        return physics_fn(state, grid, sigma_coord, phys_state=phys_state)
+    return f
+
+
+def _euler_step(state, phys_state, f, dt):
+    """Forward Euler (1st order)."""
+    tend, phys_out = f(state, phys_state)
+    return _apply_tendencies(state, tend, dt), phys_out
+
+
+def _rk2_step(state, phys_state, f, dt):
+    """Heun's method (RK2, midpoint-correction variant).
+
+    ``phys_state`` is advanced once per outer step (stage-1 update) to
+    keep the prognostic-physics carry single-valued. Tendencies are
+    averaged between the predictor and corrector stages.
+    """
+    tend1, phys_mid = f(state, phys_state)
+    mid = _apply_tendencies(state, tend1, dt)
+    tend2, _ = f(mid, phys_mid)
+    avg = _average_tendencies(tend1, tend2, weights=(0.5, 0.5))
+    return _apply_tendencies(state, avg, dt), phys_mid
+
+
+def _rk4_step(state, phys_state, f, dt):
+    """Classical RK4. Physics-state carry advanced from stage-1 only."""
+    k1, phys_mid = f(state, phys_state)
+    s2 = _apply_tendencies(state, k1, 0.5 * dt)
+    k2, _ = f(s2, phys_mid)
+    s3 = _apply_tendencies(state, k2, 0.5 * dt)
+    k3, _ = f(s3, phys_mid)
+    s4 = _apply_tendencies(state, k3, dt)
+    k4, _ = f(s4, phys_mid)
+    avg = _average_tendencies(k1, k2, k3, k4, weights=(1/6, 1/3, 1/3, 1/6))
+    return _apply_tendencies(state, avg, dt), phys_mid
+
+
+def _average_tendencies(*tends, weights):
+    """Linear combination of HydrostaticTendencies with the given weights."""
+    if len(weights) != len(tends):
+        raise ValueError("weights length must match number of tendencies")
+
+    def combine(field_list):
+        return sum(w * f.data for w, f in zip(weights, field_list))
+
+    first = tends[0]
+    du = combine([t.du_dt for t in tends])
+    dT = combine([t.dT_dt for t in tends])
+    dps = combine([t.dp_s_dt for t in tends])
+    dphis = combine([t.dphis_dt for t in tends])
+
+    dv_dt = None
+    if first.dv_dt is not None and all(t.dv_dt is not None for t in tends):
+        dv_dt = first.dv_dt.replace(
+            data=combine([t.dv_dt for t in tends])
+        )
+
+    tracer_tendencies = None
+    if first.tracer_tendencies is not None and all(
+        t.tracer_tendencies is not None for t in tends
+    ):
+        tracer_tendencies = {}
+        for k in first.tracer_tendencies:
+            if all(k in t.tracer_tendencies for t in tends):
+                tracer_tendencies[k] = first.tracer_tendencies[k].replace(
+                    data=combine([t.tracer_tendencies[k] for t in tends])
+                )
+
+    return HydrostaticTendencies(
+        du_dt=first.du_dt.replace(data=du),
+        dT_dt=first.dT_dt.replace(data=dT),
+        dp_s_dt=first.dp_s_dt.replace(data=dps),
+        dphis_dt=first.dphis_dt.replace(data=dphis),
+        dv_dt=dv_dt,
+        tracer_tendencies=tracer_tendencies,
+    )
+
+
+# Public registry — same naming pattern as PhysicsConfig schemes so that
+# swapping integrators feels like swapping a parameterization.
+TIME_INTEGRATORS: dict[str, Callable] = {
+    "forward_euler": _euler_step,
+    "rk2": _rk2_step,
+    "rk4": _rk4_step,
+}
+
+
+def register_time_integrator(name: str, step_fn: Callable) -> None:
+    """Register a custom time-integrator under ``name``.
+
+    The signature must be ``step_fn(state, phys_state, f, dt)`` where
+    ``f`` is the tendency callable returned by :func:`_tendency_fn`. The
+    integrator must return ``(new_state, new_phys_state)``.
+    """
+    TIME_INTEGRATORS[name] = step_fn
+
+
+class SCMHistory(NamedTuple):
+    """Stacked time-series of column state along a leading time axis.
+
+    Each field has a leading axis of length ``n_saved``. The vertical
+    coordinate convention (top-to-bottom) is preserved.
+    """
+    time: jax.Array        # (n_saved,) [s]
+    T: jax.Array           # (n_saved, nlev)
+    u: jax.Array           # (n_saved, nlev)
+    v: jax.Array           # (n_saved, nlev)
+    p_s: jax.Array         # (n_saved,)
+    q_v: jax.Array | None  # (n_saved, nlev) or None
+
+
+class SingleColumnModel:
+    """Driver for a single-column atmospheric physics integration.
+
+    Construct via :meth:`create` (preferred) or by passing pre-built
+    `physics_fn`, `state`, `phys_state`, `grid`, and `sigma_coord`.
+
+    Notes
+    -----
+    Integration is forward Euler. Schemes that are themselves implicit
+    in the vertical (e.g. ``"louis"`` turbulence, ``"tke"`` PBL) handle
+    their own implicit step inside the physics function — only the
+    explicit *remainder* is exposed as a tendency, so forward Euler at
+    the SCM level is consistent with the full-model coupling.
+
+    Surface temperature is taken as the lowest-level air temperature
+    ``T[..., -1]`` (the convention used throughout the model). To impose
+    a prescribed SST, hold ``T[..., -1]`` fixed externally after each
+    step (see :meth:`step`'s return value).
+    """
+
+    def __init__(
+        self,
+        *,
+        physics_fn: Callable,
+        state: HydrostaticState,
+        phys_state: PhysicsState,
+        grid: SCMGrid,
+        sigma_coord: SigmaCoordinate,
+        dt: float,
+        time_integrator: str = "forward_euler",
+    ):
+        if time_integrator not in TIME_INTEGRATORS:
+            raise ValueError(
+                f"Unknown time_integrator: {time_integrator!r}. "
+                f"Available: {sorted(TIME_INTEGRATORS)}."
+            )
+        self.physics_fn = physics_fn
+        self.state = state
+        self.phys_state = phys_state
+        self.grid = grid
+        self.sigma_coord = sigma_coord
+        self.dt = float(dt)
+        self.time_integrator = time_integrator
+        self._step_fn = TIME_INTEGRATORS[time_integrator]
+        self._tend_fn = _tendency_fn(physics_fn, grid, sigma_coord)
+
+    @staticmethod
+    def _validate_integrator_compatibility(
+        physics_config: PhysicsConfig, time_integrator: str,
+    ) -> None:
+        """Reject integrator/physics combinations that would silently lie.
+
+        Multi-stage integrators (rk2, rk4) reuse the *stage-1* PhysicsState
+        and stage-1 calendar time across every stage. That is safe only
+        when (a) no scheme carries a prognostic physics state and (b) no
+        scheme depends on sub-step time (diurnal radiation). Otherwise
+        the integrator label would be misleading: schemes would see a
+        stale carry and the result would not be a true RK update of the
+        coupled (state, phys_state) system.
+        """
+        if time_integrator in ("forward_euler",):
+            return
+        stateful_turb = physics_config.turbulence.scheme in (
+            "tke", "clubb_lite", "edmf"
+        )
+        # Schemes that *read* the previous ``conv_prog_profile`` or
+        # ``conv_stoch_state`` — and therefore must not be advanced
+        # with a stale stage-1 carry under multi-stage integrators.
+        # The other convection schemes (``sbm``, ``dca``, ``kuo``,
+        # ``kain_fritsch``, ``emanuel``) are diagnostic: they `del`
+        # the incoming profile and emit a fresh one each call, so RK
+        # stages may freely re-evaluate them.
+        stateful_conv_schemes = (
+            "mass_flux", "edmf",
+            "zhang_mcfarlane", "tiedtke", "bechtold",
+        )
+        stateful_conv = physics_config.convection.scheme in stateful_conv_schemes
+        throttled_conv = (
+            physics_config.convection.scheme != "none"
+            and getattr(physics_config.convection, "update_interval_steps", 1) != 1
+        )
+        stateful_gwd = physics_config.gravity_wave_drag.scheme == (
+            "prognostic_spectral"
+        )
+        diurnal_rad = bool(
+            getattr(physics_config.radiation, "diurnal_cycle", False)
+        )
+        bad = []
+        if stateful_turb:
+            bad.append(f"turbulence={physics_config.turbulence.scheme!r}")
+        if stateful_conv:
+            bad.append(f"convection={physics_config.convection.scheme!r}")
+        if throttled_conv:
+            bad.append("convection.update_interval_steps != 1")
+        if stateful_gwd:
+            bad.append("gravity_wave_drag='prognostic_spectral'")
+        if diurnal_rad:
+            bad.append("radiation.diurnal_cycle=True")
+        if bad:
+            raise ValueError(
+                f"time_integrator={time_integrator!r} is incompatible with "
+                f"stateful/non-autonomous physics: {', '.join(bad)}. "
+                f"Use 'forward_euler', disable these schemes, or extend "
+                f"the SCM integrator interface to advance PhysicsState "
+                f"and stage time per stage."
+            )
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        physics_config: PhysicsConfig,
+        nlev: int,
+        dt: float,
+        T_profile: jax.Array,
+        q_v_profile: jax.Array | None = None,
+        u: float = 0.0,
+        v: float = 0.0,
+        p_s: float = 1.0e5,
+        phis: float = 0.0,
+        latitude_deg: float = 0.0,
+        longitude_deg: float = 0.0,
+        sigma_top: float = 0.01,
+        prng_seed: int = 0,
+        dtype=None,
+        time_integrator: str = "forward_euler",
+    ) -> "SingleColumnModel":
+        """Build a single-column model with sensible defaults.
+
+        Parameters
+        ----------
+        physics_config
+            Combined physics configuration. Pass schemes with
+            ``scheme="none"`` to disable a module.
+        nlev
+            Number of vertical levels.
+        dt
+            Physics time step [s].
+        T_profile
+            Initial temperature profile [K], shape ``(nlev,)``,
+            indexed top→bottom.
+        q_v_profile
+            Optional initial water-vapor mixing ratio [kg/kg], shape
+            ``(nlev,)``. When omitted no tracers are carried.
+        u, v
+            Initial uniform wind components [m/s].
+        p_s
+            Initial surface pressure [Pa].
+        phis
+            Surface geopotential [m^2/s^2] (0 for sea-level column).
+        latitude_deg, longitude_deg
+            Column location. Used by radiation (solar zenith angle) and
+            GWD (latitudinal coupling).
+        sigma_top
+            Top sigma value for the vertical coordinate.
+        prng_seed
+            Seed for the stochastic-physics PRNG carry.
+        dtype
+            Optional dtype override for state arrays.
+        """
+        cls._validate_integrator_compatibility(physics_config, time_integrator)
+        grid = make_scm_grid(latitude_deg, longitude_deg)
+        sigma_coord = create_sigma_coordinate(nlev, sigma_top=sigma_top, dtype=dtype)
+
+        needs_moist = (
+            physics_config.convection.scheme != "none"
+            or physics_config.microphysics.scheme != "none"
+            or physics_config.turbulence.scheme != "none"
+        )
+        if needs_moist and q_v_profile is None:
+            q_v_profile = jnp.zeros(nlev)
+        state = make_column_state(
+            nlev, T_profile=T_profile, q_v_profile=q_v_profile,
+            u=u, v=v, p_s=p_s, phis=phis, dtype=dtype,
+        )
+        # Pre-allocate condensate/precip species that microphysics or
+        # convection may emit, so the first physics call sees a
+        # consistent tracer registry rather than relying on the
+        # auto-materialisation path in _apply_tendencies.
+        if state.tracers is not None and physics_config.microphysics.scheme != "none":
+            extra_keys = ("q_c", "q_r", "q_i", "q_s")
+            new_tracers = dict(state.tracers)
+            for k in extra_keys:
+                if k not in new_tracers:
+                    zeros = jnp.zeros_like(state.tracers["q_v"].data)
+                    new_tracers[k] = Field(
+                        data=zeros, name=k, dims=_DIMS_3D, units="kg/kg",
+                    )
+            state = state._replace(tracers=new_tracers)
+        physics_fn = make_physics(physics_config, model_type="hydrostatic", dt=dt)
+        phys_state = init_physics_state(
+            ncol=1, nlev=nlev, physics_config=physics_config,
+            dtype=dtype, prng_seed=prng_seed,
+        )
+        return cls(
+            physics_fn=physics_fn, state=state, phys_state=phys_state,
+            grid=grid, sigma_coord=sigma_coord, dt=dt,
+            time_integrator=time_integrator,
+        )
+
+    def set_time(self, day_of_year: float, seconds_of_day: float) -> None:
+        """Propagate calendar time to sub-physics (radiation diurnal cycle)."""
+        set_time = getattr(self.physics_fn, "set_time", None)
+        if callable(set_time):
+            set_time(day_of_year, seconds_of_day)
+
+    def step(self) -> HydrostaticState:
+        """Advance the column by one step using the selected integrator."""
+        new_state, new_phys = self._step_fn(
+            self.state, self.phys_state, self._tend_fn, self.dt,
+        )
+        self.state = new_state
+        if new_phys is not None:
+            self.phys_state = new_phys
+        return self.state
+
+    def run(
+        self,
+        nsteps: int,
+        *,
+        save_every: int = 1,
+        start_day_of_year: float = 0.0,
+        start_seconds_of_day: float = 0.0,
+    ) -> tuple[HydrostaticState, SCMHistory]:
+        """Integrate for ``nsteps`` physics steps and return final state + history.
+
+        ``save_every`` controls the output cadence (1 = every step).
+        Calendar time advances by ``dt`` each step so that radiation's
+        diurnal cycle is exercised correctly.
+        """
+        seconds_per_day = 86400.0
+        times = []
+        Ts, us, vs, p_ss, qvs = [], [], [], [], []
+        has_qv = (self.state.tracers is not None
+                  and "q_v" in self.state.tracers)
+
+        for k in range(nsteps):
+            elapsed = k * self.dt
+            doy = start_day_of_year + (start_seconds_of_day + elapsed) / seconds_per_day
+            sod = (start_seconds_of_day + elapsed) % seconds_per_day
+            self.set_time(doy, sod)
+            self.step()
+            if k % save_every == 0 or k == nsteps - 1:
+                times.append((k + 1) * self.dt)
+                Ts.append(self.state.T.data[0, 0, 0])
+                us.append(self.state.u.data[0, 0, 0])
+                vs.append(self.state.v.data[0, 0, 0])
+                p_ss.append(self.state.p_s.data[0, 0, 0])
+                if has_qv:
+                    qvs.append(self.state.tracers["q_v"].data[0, 0, 0])
+
+        history = SCMHistory(
+            time=jnp.asarray(times),
+            T=jnp.stack(Ts),
+            u=jnp.stack(us),
+            v=jnp.stack(vs),
+            p_s=jnp.asarray(p_ss),
+            q_v=jnp.stack(qvs) if has_qv else None,
+        )
+        return self.state, history

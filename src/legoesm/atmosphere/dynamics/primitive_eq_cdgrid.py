@@ -200,6 +200,53 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # FV3_3D iter 23: FV3-faithful vector cube-vertex fill (sw_core.F90:1762). NO-OP at nord=1.
     corner_div_damp_dt_proxy: float = 200.0
         # FV3_3D iter 188: dt fallback for adaptive cap when dt_actual not passed. PE typical 50-200s.
+    sponge_implicit: bool = False
+        # Issue-#273 throughput work: when True, skip the explicit
+        # ``-α u`` Rayleigh-sponge tendency contribution inside
+        # ``fv3_hydrostatic_tendencies`` and apply the sponge as an
+        # operator-split multiplicative damping
+        # ``u ← u · exp(-α dt)`` after the RK3 integrator inside
+        # ``CDGridPrimitiveEquationModel._step_fv3``.  Unconditionally
+        # stable for any ``α · dt > 0`` — takes the sponge out of
+        # the explicit-CFL budget so future work on issue #273 can
+        # push ``dt`` upward without re-tuning ``sponge_tau_sec``.
+        # Default ``False`` keeps the legacy tendency-form path
+        # bit-exact.  Field appended to the end of the NamedTuple
+        # to preserve positional construction for legacy call sites.
+    implicit_grav_wave_use_pcg: bool = False
+        # Issue-#273 throughput work, Phase 3 of the Hoskins–Simmons
+        # FV3 D-grid port.  When True and
+        # ``implicit_grav_wave_damping > 0``, the post-RK3 surface-
+        # pressure correction switches from the legacy explicit
+        # forward-Euler diffusion ``p_s ← p_s + α dt ∇²p_s``
+        # (conditionally stable at ``α dt / dx² < 0.5``) to an
+        # implicit Helmholtz solve
+        # ``(I − α dt ∇²) p_s_new = p_s_explicit`` via
+        # ``jax.scipy.sparse.linalg.cg``.  The cubed-sphere D-grid
+        # ``cdgrid_scalar_laplacian`` is built on a nearest-copy
+        # halo exchange so it is FV-adjoint-symmetric + negative
+        # semi-definite under the area-weighted inner product, and
+        # a ``M^{1/2}·A·M^{-1/2}`` shim casts that to a Euclidean-
+        # SPD operator inside ``cg_helmholtz_solve``.  Production
+        # tolerance ``1e-10`` reached in ~10 CG iterations at
+        # ``α dt / dx² ≤ 5``.
+        #
+        # Solver contract.  When CG fails to reach tolerance within
+        # ``maxiter=200`` (extreme coefficients or pathological
+        # metrics), the production wrapper falls back JAX-safely to
+        # *no damping for this step* (``p_s`` left unchanged) and
+        # surfaces a ``RuntimeWarning`` via ``jax.debug.callback``
+        # — falling back to the legacy explicit path at the same
+        # coefficient would re-introduce the CFL instability the
+        # implicit path was meant to suppress.
+        #
+        # AD: ``jax.scipy.sparse.linalg.cg`` installs an implicit-
+        # function-theorem VJP, so ``jax.grad`` flows cleanly
+        # through this branch (subject to the warm-start being
+        # detached from the gradient).
+        #
+        # Default ``False`` keeps the legacy explicit-diffusion
+        # path bit-exact.
 
 
 def validate_corner_div_damp_nord(nord: int) -> None:
@@ -999,7 +1046,34 @@ def fv3_hydrostatic_tendencies(
         dp_s_dt_data = dp_s_dt_data + diff_ps.data
 
     # --- 13. Upper-atmosphere Rayleigh sponge (D-grid) ---
-    if config.sponge_tau_sec > 0 and config.sponge_sigma > 0:
+    #
+    # Two paths:
+    #
+    # * ``config.sponge_implicit = False`` (default) — legacy
+    #   explicit-tendency form ``du/dt = -α u``.  Conditionally
+    #   stable: forward Euler diverges at ``α · dt > 2`` and
+    #   SSP-RK3 around ``α · dt ≳ 2.5``.  At production parameters
+    #   (τ = 3600 s, dt = 150 s, peak α ≈ 2.8e-4 s⁻¹) the margin
+    #   is comfortable, so this path stays bit-exact for legacy
+    #   configs and direct callers of ``fv3_hydrostatic_tendencies``.
+    #
+    # * ``config.sponge_implicit = True`` — operator-split path.
+    #   The sponge contribution is *omitted* from the tendency and
+    #   instead applied once per macro step as the analytic
+    #   multiplicative damping ``u ← u · exp(-α dt)`` inside
+    #   ``CDGridPrimitiveEquationModel._step_fv3``.  Unconditionally
+    #   stable for any ``α · dt > 0`` — takes the sponge out of
+    #   the explicit-CFL budget so issue-#273 throughput work can
+    #   push ``dt`` upward without re-tuning ``sponge_tau_sec``.
+    #
+    # The naive ``expm1(-α dt) / dt · u`` "effective-tendency"
+    # trick is intentionally *not* used: SSP-RK3 re-evaluates the
+    # tendency on each stage's state, so the multi-stage update
+    # saturates at ``u_new ≈ u_old / 3`` for ``α dt → ∞`` instead
+    # of damping to zero (Codex review iter-1 catch).
+    if (config.sponge_tau_sec > 0
+            and config.sponge_sigma > 0
+            and not config.sponge_implicit):
         sigma_full = sigma_coord.sigma_full
         sponge_frac = jnp.clip(
             (config.sponge_sigma - sigma_full) / config.sponge_sigma, 0.0, 1.0
@@ -1177,6 +1251,40 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             state, tendency_fn, dt, self.config.time_integrator,
         )
 
+        # Operator-split upper-atmosphere Rayleigh sponge — opt-in
+        # path (``config.sponge_implicit = True``).  Replaces the
+        # explicit ``-α u`` tendency contribution that is skipped
+        # inside ``fv3_hydrostatic_tendencies`` when this flag is
+        # set, with the analytic multiplicative damping
+        # ``u_new = u_old · exp(−sponge_rate · dt)``.  Exact integrator
+        # of the linear ODE ``du/dt = −α u``, unconditionally stable
+        # for any ``α · dt > 0`` — takes the sponge out of the
+        # explicit-CFL budget so issue-#273 throughput work can
+        # push ``dt`` upward without re-tuning ``sponge_tau_sec``.
+        #
+        # Default ``sponge_implicit = False`` keeps the legacy
+        # tendency-form path bit-exact (see the matching branch in
+        # ``fv3_hydrostatic_tendencies``).
+        if (self.config.sponge_tau_sec > 0
+                and self.config.sponge_sigma > 0
+                and self.config.sponge_implicit):
+            sigma_full = self.sigma_coord.sigma_full
+            sponge_frac = jnp.clip(
+                (self.config.sponge_sigma - sigma_full)
+                / self.config.sponge_sigma,
+                0.0, 1.0,
+            )
+            sponge_rate = sponge_frac**2 / self.config.sponge_tau_sec
+            damp_factor = jnp.exp(-sponge_rate * dt)
+            state_new = state_new._replace(
+                u_d=state_new.u_d.replace(
+                    data=state_new.u_d.data * damp_factor,
+                ),
+                v_d=state_new.v_d.replace(
+                    data=state_new.v_d.data * damp_factor,
+                ),
+            )
+
         # Synchronize D-grid boundary corners across cubed-sphere faces
         state_new = self._sync_dgrid_boundary(state_new)
 
@@ -1329,11 +1437,78 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                     v_d=state_new.v_d.replace(data=v_corner + dv_corner),
                 )
 
-        # Implicit gravity wave damping — post-step Laplacian diffusion on p_s.
+        # Implicit gravity wave damping — post-step Laplacian operation on p_s.
+        #
+        # Default path: explicit forward-Euler diffusion
+        # ``p_s ← p_s + α dt ∇²p_s``.  Conditionally stable at
+        # ``α dt / dx² < 0.5``.
+        #
+        # ``implicit_grav_wave_use_pcg = True`` switches to a
+        # Phase-3 implicit Helmholtz solve
+        # ``(I − α dt ∇²) p_s_new = p_s_explicit`` using
+        # ``cg_helmholtz_solve``.  The FV-adjoint-symmetric
+        # ``cdgrid_scalar_laplacian`` (built on a nearest-copy halo
+        # exchange) makes the operator M-symmetric and negative
+        # semi-definite under the area-weighted inner product, and a
+        # ``M^{1/2}·A·M^{-1/2}`` shim casts that to a Euclidean-SPD
+        # operator so ``jax.scipy.sparse.linalg.cg`` is well-defined.
+        # CG also installs an implicit-function-theorem VJP, so
+        # ``jax.grad`` flows cleanly through the solve.
         if self.config.implicit_grav_wave_damping > 0:
             alpha = self.config.implicit_grav_wave_damping
-            lap_ps = laplacian_compact(state_new.p_s.data, self.grid)
-            p_s_damped = state_new.p_s.data + alpha * dt * lap_ps
+            if self.config.implicit_grav_wave_use_pcg:
+                from legoesm.atmosphere.dynamics.semi_implicit_cdgrid import (
+                    cg_helmholtz_solve,
+                )
+                # Production tolerance 1e-10 — CG reaches it in ~10
+                # iterations at α dt / dx² ≤ 5, two orders of
+                # magnitude tighter than the Phase-2 Richardson
+                # tol=1e-6.  When the solver fails to reach
+                # tolerance within ``maxiter`` (e.g. at extreme
+                # ``α dt / dx² ≫ 100`` or with ill-conditioned
+                # metrics), fall back JAX-safely to *no damping
+                # for this step* — applying explicit forward-Euler
+                # at the same coefficient would violate its CFL
+                # bound and amplify the instability the implicit
+                # path was meant to suppress.  A ``RuntimeWarning``
+                # is surfaced via ``jax.debug.callback`` so the
+                # user can lower ``dt`` or ``α``.
+                _pcg_tol = 1.0e-10
+                _p_s_implicit, _rel_res = cg_helmholtz_solve(
+                    state_new.p_s.data,
+                    coeff=alpha * dt,
+                    cdgrid=self.cdgrid,
+                    tol=_pcg_tol,
+                    maxiter=200,
+                    return_residual=True,
+                )
+                _converged = _rel_res <= _pcg_tol
+                def _maybe_audit(rel_res):
+                    def _warn(rel):
+                        import warnings
+                        warnings.warn(
+                            f"implicit_grav_wave CG failed to reach "
+                            f"tol={_pcg_tol:.0e} "
+                            f"(rel_res={float(rel):.3e}); leaving "
+                            f"p_s unchanged for this step.  Reduce "
+                            f"``implicit_grav_wave_damping``, reduce "
+                            f"``dt``, or raise ``maxiter`` in "
+                            f"``cg_helmholtz_solve``.",
+                            RuntimeWarning,
+                        )
+                    jax.debug.callback(_warn, rel_res)
+                jax.lax.cond(
+                    _converged,
+                    lambda _: None,
+                    _maybe_audit,
+                    _rel_res,
+                )
+                p_s_damped = jnp.where(
+                    _converged, _p_s_implicit, state_new.p_s.data,
+                )
+            else:
+                lap_ps = laplacian_compact(state_new.p_s.data, self.grid)
+                p_s_damped = state_new.p_s.data + alpha * dt * lap_ps
             p_s_damped = jnp.maximum(p_s_damped, self.config.p_floor)
             state_new = state_new._replace(
                 p_s=state_new.p_s.replace(data=p_s_damped),

@@ -27,25 +27,32 @@ import jax.numpy as jnp
 class FreshwaterForcing(NamedTuple):
     """Freshwater fluxes applied to the ocean surface.
 
-    All fields have shape (nCells,) and units kg/m2/s.
+    All fields have shape (nCells,) and units kg/m²/s.
     Positive = freshwater into ocean, except evaporation which is
     positive upward (i.e., freshwater leaving ocean).
 
     Fields
     ------
     precip : jax.Array
-        Precipitation rate [kg/m2/s].
+        Precipitation rate [kg/m²/s].
     evap : jax.Array
-        Evaporation rate [kg/m2/s], positive upward.
+        Evaporation rate [kg/m²/s], positive upward.
     runoff : jax.Array
-        Land runoff rate [kg/m2/s].
+        Land runoff rate [kg/m²/s].
     ice_fw : jax.Array
-        Ice melt/freeze freshwater [kg/m2/s], positive = melt.
+        Ice melt/freeze freshwater [kg/m²/s], positive = melt.
+    restoring : jax.Array
+        OMIP-2 SSS-restoring virtual freshwater flux [kg/m²/s,
+        positive INTO ocean].  Computed from
+        :func:`legoesm.ocean.forcing.sss_restoring.compute_sss_restoring_flux`.
+        Zero by default for backward compatibility with the
+        legacy 4-component constructor.
     """
     precip: jnp.ndarray
     evap: jnp.ndarray
     runoff: jnp.ndarray
     ice_fw: jnp.ndarray
+    restoring: jnp.ndarray = None  # type: ignore[assignment]
 
 
 def zero_freshwater(nCells: int) -> FreshwaterForcing:
@@ -64,15 +71,18 @@ def zero_freshwater(nCells: int) -> FreshwaterForcing:
     # under a non-default precision policy can ``cast_pytree`` the
     # result to match their state.
     z = jnp.zeros(nCells)
-    return FreshwaterForcing(precip=z, evap=z, runoff=z, ice_fw=z)
+    return FreshwaterForcing(precip=z, evap=z, runoff=z, ice_fw=z, restoring=z)
 
 
 def net_freshwater_flux(fw: FreshwaterForcing) -> jnp.ndarray:
-    """Compute net freshwater flux into ocean [kg/m2/s].
+    """Compute net freshwater flux into ocean [kg/m²/s].
 
-    F_fw = P - E + R + M
+    F_fw = P - E + R + M + R_restore
 
-    where P=precip, E=evaporation (positive up), R=runoff, M=ice melt.
+    where P=precip, E=evaporation (positive up), R=runoff,
+    M=ice melt, R_restore=SSS-restoring virtual FW flux (zero
+    when ``restoring`` field is None or absent — legacy
+    callers built without the SSS-restoring extension).
 
     Parameters
     ----------
@@ -81,9 +91,14 @@ def net_freshwater_flux(fw: FreshwaterForcing) -> jnp.ndarray:
     Returns
     -------
     jax.Array, shape (nCells,)
-        Net freshwater flux [kg/m2/s], positive into ocean.
+        Net freshwater flux [kg/m²/s], positive into ocean.
     """
-    return fw.precip - fw.evap + fw.runoff + fw.ice_fw
+    base = fw.precip - fw.evap + fw.runoff + fw.ice_fw
+    # ``restoring is None`` is a Python (trace-time) check — safe
+    # under JIT because the field is structural metadata.
+    if fw.restoring is None:
+        return base
+    return base + fw.restoring
 
 
 def freshwater_eta_tendency(fw: FreshwaterForcing, rho_0: float) -> jnp.ndarray:
@@ -134,8 +149,13 @@ def virtual_salt_flux(
         Salinity tendency [PSU/s] for top layer.
     """
     F_fw = net_freshwater_flux(fw)
-    dz_safe = jnp.maximum(dz_0, 1e-10)
-    return -S_ref * F_fw / (rho_0 * dz_safe)
+    # Guard thin cells: on partial-cell grids, dz_0 can be O(cm) at
+    # shallow coastal cells.  Dividing by tiny dz produces huge dS/dt.
+    # Zero the tendency where dz_0 < 1mm (same guard as prescribed
+    # surface forcing's is_ocean threshold).
+    is_wet = dz_0 > 1.0e-3
+    dz_safe = jnp.maximum(dz_0, 1.0e-3)
+    return jnp.where(is_wet, -S_ref * F_fw / (rho_0 * dz_safe), 0.0)
 
 
 def freshwater_from_coupler(
@@ -250,4 +270,67 @@ def freshwater_from_coupler(
         evap=evap,
         runoff=runoff,
         ice_fw=ice_fw,
+        restoring=jnp.zeros_like(precip),
     )
+
+
+def with_sss_restoring(
+    fw: FreshwaterForcing,
+    *,
+    S_model_top: jnp.ndarray,
+    S_target: jnp.ndarray,
+    lat_deg: jnp.ndarray,
+    lon_deg: jnp.ndarray,
+    ice_concentration: jnp.ndarray,
+    restoring_config,
+) -> FreshwaterForcing:
+    """Augment a ``FreshwaterForcing`` with the OMIP-2 SSS restoring FW flux.
+
+    The restoring is added to the dedicated ``restoring`` field so
+    ``net_freshwater_flux`` automatically picks it up.  Per-cell
+    salt-mass exchange is delegated to the standard virtual-salt
+    convention via ``virtual_salt_flux``: the restoring contribution
+    is salt-conserving by construction because it acts on the FW
+    side only.
+
+    When ``restoring_config.enabled`` is False this is a no-op and
+    the original ``fw`` is returned unchanged.
+
+    Parameters
+    ----------
+    fw : FreshwaterForcing
+        Existing freshwater forcing (precip - evap + runoff + ice_fw).
+    S_model_top : array
+        Top-layer model salinity [PSU] on the ocean's per-cell grid.
+    S_target : array
+        Target SSS climatology [PSU] interpolated onto the same grid.
+    lat_deg, lon_deg : array
+        Cell-centred latitude and longitude [°].
+    ice_concentration : array
+        Cell ice fraction in [0, 1] used to gate restoring under ice.
+    restoring_config : SSSRestoringConfig
+        Configuration for region masks, piston velocity, ice gating.
+
+    Returns
+    -------
+    FreshwaterForcing
+        Same forcing with ``restoring`` populated.
+    """
+    # Local import to avoid a cycle with ocean.forcing → ocean.freshwater.
+    from legoesm.ocean.forcing.sss_restoring import compute_sss_restoring_flux
+
+    if not restoring_config.enabled:
+        return fw
+
+    out = compute_sss_restoring_flux(
+        S_model_top=S_model_top,
+        S_target=S_target,
+        lat_deg=lat_deg,
+        lon_deg=lon_deg,
+        ice_concentration=ice_concentration,
+        config=restoring_config,
+    )
+    # Combine with any pre-existing ``restoring`` component (e.g.
+    # multiple restoring channels stacked).
+    prior = fw.restoring if fw.restoring is not None else jnp.zeros_like(out["freshwater_flux"])
+    return fw._replace(restoring=prior + out["freshwater_flux"])

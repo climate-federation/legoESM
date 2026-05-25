@@ -47,6 +47,18 @@ class DycoreConfig(NamedTuple):
     div_damp_scale: float = 1.0
     conservation_fixer: bool = True
     fix_mass: bool = True
+    # Issue #273 Phase 3: Hoskins–Simmons FV3 D-grid implicit
+    # gravity-wave damping.  When ``implicit_grav_wave_use_pcg=True``
+    # and ``implicit_grav_wave_damping > 0``, the post-RK3 surface-
+    # pressure correction switches from explicit forward-Euler
+    # diffusion (conditionally stable at α dt / dx² < 0.5) to an
+    # implicit Helmholtz solve via ``cg_helmholtz_solve`` — removing
+    # the CFL ceiling on the gravity-wave-damping coefficient and
+    # enabling larger production ``dt``.  Empirically supports
+    # α dt / dx² up to ~50 at tol=1e-10 on a (6, n, n) cube.
+    # Default OFF (False, 0.0) preserves legacy bit-exact behavior.
+    implicit_grav_wave_use_pcg: bool = False
+    implicit_grav_wave_damping: float = 0.0
 
 
 class OutputConfig(NamedTuple):
@@ -99,7 +111,13 @@ class ExperimentConfig(NamedTuple):
     #   False = Python for-loop (fully unrolled XLA graph, GPU-friendly default)
     #   True  = jax.lax.scan (smaller graph, often slower per step on GPU but
     #           reduces compile time and is preferred for large nlev or AD)
-    rrtmgp_use_scan: bool = False
+    # Issue #273 GPU tuning: ``None`` defers the choice to
+    # ``rte_utils.recurrent_op_with_halos`` which auto-picks
+    # ``True`` on GPU/TPU (collapses ``nlev`` separate kernel
+    # launches into one fused ``lax.scan`` — the biggest single win
+    # against the 2600s cold-compile time called out in issue #273)
+    # and ``False`` on CPU.  Explicit ``True``/``False`` overrides.
+    rrtmgp_use_scan: bool | None = None
     co2_ppmv: float = 415.0
     ch4_ppbv: float = 1900.0
     n2o_ppbv: float = 332.0
@@ -201,6 +219,22 @@ class ExperimentConfig(NamedTuple):
     distributed: bool = False
     ensemble_size: int = 1
     n_devices: int | str = "auto"  # number of GPUs, or "auto" for all visible
+    # Issue #273 follow-up: opt-in horizontal-column sharding for the
+    # per-column radiation kernel.  Decouples per-column physics
+    # throughput from cubed-sphere face-divisibility (4-GPU node
+    # unblock).  Requires ``6 · n · n`` (the flattened column count)
+    # divisible by the active device count — typically holds for
+    # production resolutions (C16=1536, C48=13824).  Default off
+    # preserves bit-exact behavior.
+    shard_radiation_columns: bool = False
+    # Issue #273 follow-up: opt-in level-parallel cubed-sphere mesh
+    # for device counts that fail face-sharding divisibility (e.g.
+    # 4 on a 4×A100 node).  When True, ``bootstrap()`` routes the
+    # dycore mesh to ``cubed_sphere_level`` (replicated horizontal
+    # stencil, level-sharded) instead of clamping to the nearest
+    # face-compatible count.  Pair with ``shard_radiation_columns``
+    # for the full 4-GPU unblock.  Default off.
+    allow_level_fallback: bool = False
 
     def validate_strict(self) -> None:
         """Raise ValueError for invalid parameter values.

@@ -442,8 +442,107 @@ def configure_backend(backend: str | None = None) -> str:
                 except Exception:
                     pass
 
+    # JAX persistent JIT-compile cache.  Off by default in upstream
+    # JAX; legoESM's compiled segment (~2600 s cold-compile, ~600 s
+    # warm) is the dominant per-job overhead for AMIP / OMIP runs.
+    # Re-using the XLA cache across runs cuts subsequent jobs to a
+    # few seconds of cache-lookup.  Turn it on whenever the backend
+    # is GPU/CPU; Metal/TPU paths often have their own compile
+    # caches and we leave them alone.
+    if backend in ("gpu", "cpu"):
+        _configure_persistent_jit_cache()
+
     logger.info("Configured XLA for %s backend", backend)
     return backend
+
+
+def _configure_persistent_jit_cache() -> None:
+    """Activate JAX's persistent JIT-compile cache.
+
+    Respects two environment variables:
+
+    * ``LEGOESM_JIT_CACHE_DIR`` — directory to store cached compiles.
+      Defaults to ``${XDG_CACHE_HOME:-~/.cache}/legoesm/jit_cache``.
+      Set to ``""`` (empty) to disable caching for this process
+      without code changes (handy for clean-room benchmark runs).
+    * ``LEGOESM_JIT_CACHE_MIN_SECS`` — only cache compiles slower
+      than this many seconds.  Default ``1.0`` matches the JAX
+      upstream convention and keeps short compiles out of the cache.
+
+    Idempotent: a second call in the same process is a no-op.
+    Safe to call before or after ``jax.devices()``.
+    """
+    import jax
+
+    if getattr(_configure_persistent_jit_cache, "_done", False):
+        return
+
+    env_dir = os.environ.get("LEGOESM_JIT_CACHE_DIR", None)
+    if env_dir == "":
+        # Explicit opt-out.
+        _configure_persistent_jit_cache._done = True  # type: ignore[attr-defined]
+        return
+    if env_dir is None:
+        # The XDG base-directory contract requires an absolute path;
+        # treat empty / relative ``XDG_CACHE_HOME`` as unset so we do
+        # not silently scatter caches into the job working directory
+        # on Slurm / container setups that leave the variable set to
+        # a value like "".
+        xdg = os.environ.get("XDG_CACHE_HOME") or ""
+        if not xdg or not os.path.isabs(xdg):
+            xdg = os.path.join(os.path.expanduser("~"), ".cache")
+        cache_dir = os.path.join(xdg, "legoesm", "jit_cache")
+    else:
+        cache_dir = os.path.expanduser(env_dir)
+
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "Could not create JIT cache dir %s (%s); persistent cache "
+            "disabled this run.", cache_dir, exc,
+        )
+        _configure_persistent_jit_cache._done = True  # type: ignore[attr-defined]
+        return
+
+    try:
+        min_secs = float(os.environ.get("LEGOESM_JIT_CACHE_MIN_SECS", "1.0"))
+    except ValueError:
+        min_secs = 1.0
+
+    # Catch only the narrow class of "this JAX build does not know
+    # about the persistent-cache options" failures.  Anything else
+    # (e.g. a typed-argument programming error introduced by a future
+    # refactor) must propagate so the regression is visible — this
+    # whole helper exists *because* the cache being silently off is
+    # the regression we are trying to fix.  ``LEGOESM_JIT_CACHE_DIR=""``
+    # is the explicit escape hatch for users on older JAX.
+    try:
+        jax.config.update("jax_compilation_cache_dir", cache_dir)
+        # ``jax_persistent_cache_min_entry_size_bytes`` defaults to 0 in
+        # current JAX (cache everything that meets the time threshold).
+        jax.config.update(
+            "jax_persistent_cache_min_compile_time_secs", min_secs,
+        )
+    except AttributeError as exc:
+        # JAX < 0.4.18 (or a vendored fork) is missing these options
+        # entirely.  Skip with a single warning so legoESM still runs;
+        # the user can drop the persistent-cache flags by setting
+        # LEGOESM_JIT_CACHE_DIR="".
+        logger.warning(
+            "JAX persistent cache options not available in this JAX "
+            "build (%s); legoESM will run without compile caching.  "
+            "Upgrade JAX to 0.4.18+ or set LEGOESM_JIT_CACHE_DIR=\"\" "
+            "to silence this warning.", exc,
+        )
+        _configure_persistent_jit_cache._done = True  # type: ignore[attr-defined]
+        return
+
+    logger.info(
+        "JAX persistent JIT cache: dir=%s, min_compile_secs=%.1f",
+        cache_dir, min_secs,
+    )
+    _configure_persistent_jit_cache._done = True  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------

@@ -8,6 +8,22 @@ It is focused on commands that already exist in this repository:
 - `scripts/run_ocean_test_matrix.py` (ocean runtime/regression matrix)
 - `tests/distributed/test_halo_mpi.py` and `tests/ocean/distributed/test_ocean_mpi_conservation.py` (MPI ocean/distributed checks)
 
+## 0. What's new (2026-05)
+
+- **Persistent JAX JIT cache** (issue #273) is enabled by default — the
+  first segment compile is cached to disk and reused. Override with
+  `LEGOESM_JAX_CACHE_DIR=/path`, disable with `LEGOESM_JAX_CACHE_DISABLE=1`.
+  Large multi-GPU runs benefit most.
+- **SPMD halo backend** (issue #275) is activated in the AMIP
+  production profile for multi-device runs.
+- **OMIP centennial driver** (`scripts/run_omip.py`) supports
+  tripolar (eORCA1), MPAS Voronoi (ico5 / ico6), lat-lon, and
+  cubed-sphere grids with auto-restart and `jra55_3way` run sets.
+- **mpi4jax compatibility guardrails** in `legoesm.parallel.reductions`
+  hard-error for `mpi4jax<0.8`; warn for JAX / mpi4jax outside the
+  tested range; promote to error with
+  `LEGOESM_MPI_STRICT_COMPAT=1`.
+
 ## 1. Prerequisites
 
 From repo root:

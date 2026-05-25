@@ -57,6 +57,7 @@ logger = logging.getLogger("aimip")
 
 
 from legoesm.driver.config import AIMIP_VARIANTS as _AIMIP_VARIANTS_FULL
+from legoesm.ml.loss import latitude_weighted_bias, latitude_weighted_rmse
 
 # Run-time variants (drop the empty string which means "not AIMIP").
 _VALID_VARIANTS = tuple(v for v in _AIMIP_VARIANTS_FULL if v)
@@ -386,17 +387,6 @@ def _evaluate_variant(
 
     from legoesm.atmosphere.dynamics.spectral_pe import spectral_pe_to_grid
 
-    def _area_weighted_rmse(pred, target, w_lat):
-        # Zonal mean over lon (axis -1) then latitude-weighted mean.
-        sq_zonal_mean = jnp.mean((pred - target) ** 2, axis=-1)
-        return float(jnp.sqrt(
-            jnp.sum(sq_zonal_mean * w_lat) / jnp.sum(w_lat)
-        ))
-
-    def _area_weighted_bias(pred, target, w_lat):
-        diff_zonal_mean = jnp.mean(pred - target, axis=-1)
-        return float(jnp.sum(diff_zonal_mean * w_lat) / jnp.sum(w_lat))
-
     losses: list[float] = []
     per_var_rmse: dict[str, list[float]] = {k: [] for k in ("T", "u", "v", "p_s")}
     per_var_bias: dict[str, list[float]] = {k: [] for k in ("T", "u", "v", "p_s")}
@@ -439,18 +429,18 @@ def _evaluate_variant(
             # RMSE numbers are comparable to WeatherBench T@500 hPa.
             mid = p_arr.shape[-1] // 2
             per_var_rmse[name].append(
-                _area_weighted_rmse(p_arr[..., mid], t_arr[..., mid], weights)
+                float(latitude_weighted_rmse(p_arr[..., mid], t_arr[..., mid], weights))
             )
             per_var_bias[name].append(
-                _area_weighted_bias(p_arr[..., mid], t_arr[..., mid], weights)
+                float(latitude_weighted_bias(p_arr[..., mid], t_arr[..., mid], weights))
             )
         # Surface pressure (2D).
         p_s_target = jnp.asarray(target.p_s)
         per_var_rmse["p_s"].append(
-            _area_weighted_rmse(pred_grid["p_s"], p_s_target, weights)
+            float(latitude_weighted_rmse(pred_grid["p_s"], p_s_target, weights))
         )
         per_var_bias["p_s"].append(
-            _area_weighted_bias(pred_grid["p_s"], p_s_target, weights)
+            float(latitude_weighted_bias(pred_grid["p_s"], p_s_target, weights))
         )
 
     def _agg(lst: list[float]) -> dict[str, float]:

@@ -348,6 +348,194 @@ class TestBuildPhysicsPipelineSingleColumn:
         assert pipeline.adapter.shape_2d == (1,)
 
 
+class TestColumnShardWiring:
+    """Issue #273 follow-up: ``ExperimentConfig.shard_radiation_columns``
+    drives the construction of a column mesh inside
+    ``build_physics_pipeline``.  Locks the wiring contract:
+
+    1. Flag off (default) → ``pipeline.column_mesh is None``, legacy
+       single-mesh radiation path.
+    2. Flag on + single-device host → ``pipeline.column_mesh is None``
+       (sharding across 1 device is a no-op; helper skips the mesh).
+    3. Flag on + multi-device host → ``pipeline.column_mesh is not None``
+       and the radiation hot path passes the column-format inputs
+       through ``shard_columns``.
+
+    Multi-device assertions only run when at least 2 devices are
+    visible to JAX (use ``XLA_FLAGS=--xla_force_host_platform_device_count=4``
+    to emulate locally).
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset_active_config(self):
+        """Codex #273 review: the active ``DeviceConfig`` singleton is
+        global state shared across tests.  Earlier tests that called
+        ``create_device_mesh`` leave a stale ``_active_config`` that
+        otherwise leaks into the runtime-aware column-mesh path.
+        Snapshot + restore so each test sees a clean slate."""
+        from legoesm.parallel.mesh import (
+            get_active_config, set_active_config,
+        )
+        prev = get_active_config()
+        set_active_config(None)
+        yield
+        set_active_config(prev)
+
+    def test_default_no_column_mesh(self, cs_grid):
+        sigma = _make_sigma(NLEV)
+        config = _make_config()  # shard_radiation_columns defaults to False
+        pipeline = build_physics_pipeline(cs_grid, sigma, config)
+        assert pipeline.column_mesh is None
+
+    def test_opt_in_single_device(self, cs_grid):
+        sigma = _make_sigma(NLEV)
+        config = _make_config(shard_radiation_columns=True)
+        pipeline = build_physics_pipeline(cs_grid, sigma, config)
+        if len(jax.devices()) <= 1:
+            # No-op on a single-device host.
+            assert pipeline.column_mesh is None
+        else:
+            assert pipeline.column_mesh is not None
+            assert pipeline.column_mesh.axis_names == ("col",)
+            assert pipeline.column_mesh.shape["col"] == len(jax.devices())
+
+    def test_opt_in_multidevice(self, cs_grid):
+        if len(jax.devices()) < 2:
+            pytest.skip(
+                "single-device host — set XLA_FLAGS to emulate"
+            )
+        sigma = _make_sigma(NLEV)
+        config = _make_config(shard_radiation_columns=True)
+        pipeline = build_physics_pipeline(cs_grid, sigma, config)
+        assert pipeline.column_mesh is not None
+        ncol = pipeline.adapter.ncol
+        n_dev = pipeline.column_mesh.shape["col"]
+        assert ncol % n_dev == 0, (
+            f"test grid ncol={ncol} must divide n_dev={n_dev} "
+            f"so the sharded path is exercised cleanly"
+        )
+
+    def test_column_mesh_honors_active_runtime_devices(self, cs_grid):
+        """Codex adversarial review 019e544b (#273): the column mesh
+        must use the *runtime-active* device set, not raw
+        ``jax.devices()``.  A bootstrap that explicitly takes a subset
+        (e.g. 2-of-4 devices) must not be overridden by a column mesh
+        that grabs all 4."""
+        if len(jax.devices()) < 4:
+            pytest.skip(
+                "needs ≥4 emulated devices to exercise the subset path"
+            )
+        from legoesm.parallel.mesh import (
+            create_device_mesh, set_active_config, get_active_config,
+        )
+        sigma = _make_sigma(NLEV)
+        config = _make_config(shard_radiation_columns=True)
+        # Force the active DeviceConfig to a 2-device subset.
+        all_devs = jax.devices()
+        prev_active = get_active_config()
+        subset_cfg = create_device_mesh(
+            n_devices=2, devices=all_devs[:2],
+        )
+        set_active_config(subset_cfg)
+        try:
+            pipeline = build_physics_pipeline(cs_grid, sigma, config)
+            assert pipeline.column_mesh is not None
+            # Must match the runtime subset (2), not raw jax.devices() (4).
+            assert pipeline.column_mesh.shape["col"] == 2, (
+                f"column_mesh ignored runtime subset; got "
+                f"col={pipeline.column_mesh.shape['col']}, want 2"
+            )
+            # And the actual device objects must be the subset.
+            mesh_devs = list(pipeline.column_mesh.devices.reshape(-1))
+            assert mesh_devs == list(all_devs[:2])
+        finally:
+            set_active_config(prev_active)
+
+    def test_raises_when_ncol_not_divisible_by_runtime_devices(self, cs_grid):
+        """Codex review: divisibility violation must raise at
+        ``build_physics_pipeline`` time, not silently at JIT trace."""
+        # cs_grid has ncol = 6*4*4 = 96.  Need a runtime device count
+        # that does NOT divide 96 to force the failure.  96 is divisible
+        # by 1,2,3,4,6,8,12,16,24,32,48,96 — pick 5 or 7 if 5+ devices
+        # available.  Otherwise skip.
+        if len(jax.devices()) < 5:
+            pytest.skip("needs ≥5 emulated devices to exercise this")
+        from legoesm.parallel.mesh import (
+            create_device_mesh, set_active_config, get_active_config,
+        )
+        all_devs = jax.devices()
+        # 5 doesn't divide 96 (96 % 5 = 1).
+        prev_active = get_active_config()
+        subset = create_device_mesh(
+            n_devices=5, devices=all_devs[:5],
+            allow_level_fallback=True,
+        )
+        set_active_config(subset)
+        try:
+            sigma = _make_sigma(NLEV)
+            config = _make_config(shard_radiation_columns=True)
+            with pytest.raises(ValueError, match="divisible"):
+                build_physics_pipeline(cs_grid, sigma, config)
+        finally:
+            set_active_config(prev_active)
+
+    def test_compute_radiation_core_matches_unsharded(self, cs_grid):
+        """Hot-path equivalence: ``compute_radiation_core`` on a
+        column-sharded pipeline produces bit-for-bit identical
+        ``dT_dt_rad`` vs the unsharded pipeline on the same inputs.
+        Validates the ``shard_columns`` wiring inside the hot path
+        does not perturb the kernel output."""
+        if len(jax.devices()) < 2:
+            pytest.skip(
+                "single-device host — set XLA_FLAGS to emulate"
+            )
+        sigma = _make_sigma(NLEV)
+        ref_cfg = _make_config(shard_radiation_columns=False)
+        shard_cfg = _make_config(shard_radiation_columns=True)
+        ref = build_physics_pipeline(cs_grid, sigma, ref_cfg)
+        shard = build_physics_pipeline(cs_grid, sigma, shard_cfg)
+
+        # Synthetic state (held_suarez-like).
+        np.random.seed(0)
+        n = cs_grid.n
+        T = jnp.asarray(
+            250.0 + 20.0 * np.random.randn(6, n, n, NLEV)
+        )
+        p_s = jnp.asarray(
+            1.0e5 + 100.0 * np.random.randn(6, n, n)
+        )
+        q_v = jnp.asarray(
+            0.01 * np.abs(np.random.randn(6, n, n, NLEV))
+        )
+        sst = jnp.full((6, n, n), 290.0)
+        sic = jnp.zeros((6, n, n))
+        lat = cs_grid.lat
+        lon = cs_grid.lon
+
+        solar_weights = jnp.zeros((0,))
+        s_0 = 1361.0
+        o3 = None
+        aero = None
+
+        ref_out = ref.compute_radiation_core(
+            T, p_s, q_v, sst, sic, lat, lon,
+            day_of_year=80.0, seconds_of_day=43200.0,
+            solar_weights=solar_weights, s_0=s_0,
+            o3_vmr_precomputed=o3, aerosol_od_precomputed=aero,
+        )
+        shard_out = shard.compute_radiation_core(
+            T, p_s, q_v, sst, sic, lat, lon,
+            day_of_year=80.0, seconds_of_day=43200.0,
+            solar_weights=solar_weights, s_0=s_0,
+            o3_vmr_precomputed=o3, aerosol_od_precomputed=aero,
+        )
+        np.testing.assert_allclose(
+            np.asarray(shard_out[0]),  # dT_dt_rad
+            np.asarray(ref_out[0]),
+            rtol=1.0e-12, atol=1.0e-14,
+        )
+
+
 # ===================================================================
 # Test: physics_step_no_rad through all three grids
 # ===================================================================

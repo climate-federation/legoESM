@@ -323,6 +323,8 @@ def step_land(
         # using L_eff (L_s if snow-covered, L_v otherwise) so dividing
         # by L_eff recovers the correct mass.
         surface_mass_flux=lhflx_actual / L_eff,
+        # Land tile does not exchange salt with the ocean directly.
+        salt_flux=jnp.zeros_like(T_soil),
     )
 
     return new_state, response, carbon_state_new

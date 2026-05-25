@@ -81,6 +81,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--start-day", type=float, default=0.0)
     parser.add_argument("--days", type=int, default=200)
     parser.add_argument("--dt", type=float, default=600.0)
+    # Issue #273 Phase 3: implicit gravity-wave damping (semi-implicit
+    # Helmholtz solve via CG).  Off by default to preserve bit-exact
+    # behaviour with the legacy explicit-diffusion path.  Set
+    # ``--implicit-grav-wave-use-pcg --implicit-grav-wave-damping
+    # 1e8`` (typical α ~ 1e7–1e8 m²/s) to remove the explicit-CFL
+    # ceiling and enable larger ``--dt``.
+    parser.add_argument(
+        "--implicit-grav-wave-use-pcg", action="store_true",
+        default=False,
+        help=(
+            "Issue #273 Phase 3: switch the post-RK3 gravity-wave "
+            "damping from explicit forward-Euler to an implicit "
+            "Helmholtz solve via jax.scipy.sparse.linalg.cg.  Removes "
+            "the CFL ceiling on ``--implicit-grav-wave-damping`` and "
+            "enables larger ``--dt``."
+        ),
+    )
+    parser.add_argument(
+        "--implicit-grav-wave-damping", type=float, default=0.0,
+        help=(
+            "Gravity-wave damping coefficient α [m²/s].  ``0`` (default) "
+            "skips the post-RK3 ``p_s`` damping entirely.  Typical "
+            "production: α ~ 1e7–1e8.  At α dt / dx² > 0.5 you MUST "
+            "also pass ``--implicit-grav-wave-use-pcg`` or the "
+            "explicit path will blow up."
+        ),
+    )
     parser.add_argument("--diag-days", type=int, default=5)
 
     # Output
@@ -103,7 +130,36 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Radiation
     parser.add_argument("--radiation", type=str, default="gray",
                         choices=["gray", "rrtmg", "rrtmgp"])
-    parser.add_argument("--rad-update-steps", type=int, default=1)
+    # Default is ``None`` so ``_postprocess_args`` can tell an explicit
+    # ``--rad-update-steps 1`` from "the user did not pass this flag".
+    # ``--production-profile`` only auto-sets the production cadence
+    # when the user did not provide a value.  Resolved to ``1`` after
+    # production-profile processing.
+    parser.add_argument("--rad-update-steps", type=int, default=None)
+    # Issue #273 GPU tuning: RRTMGP column-recurrence kernel choice.
+    # ``--rrtmgp-use-scan`` forces ``jax.lax.scan`` (smaller graph,
+    # ~5-10× cheaper to JIT — material against the 2600s cold compile
+    # called out in the issue); ``--rrtmgp-no-scan`` forces the
+    # Python for-loop unroll.  Neither flag → auto-pick (scan on
+    # GPU/TPU, unroll on CPU/Metal), which is the new production
+    # default.
+    _rrtmg_scan = parser.add_mutually_exclusive_group()
+    _rrtmg_scan.add_argument(
+        "--rrtmgp-use-scan", dest="rrtmgp_use_scan",
+        action="store_const", const=True, default=None,
+        help=(
+            "Force RRTMGP column recurrence to use jax.lax.scan.  "
+            "Default (no flag) auto-picks scan on GPU/TPU."
+        ),
+    )
+    _rrtmg_scan.add_argument(
+        "--rrtmgp-no-scan", dest="rrtmgp_use_scan",
+        action="store_const", const=False,
+        help=(
+            "Force RRTMGP column recurrence to use a Python for-loop "
+            "(legacy default).  Useful for CPU benchmarking."
+        ),
+    )
     parser.add_argument("--diurnal-cycle", action="store_true", default=False)
     parser.add_argument("--co2-ppmv", type=float, default=415.0)
     parser.add_argument("--ch4-ppbv", type=float, default=1900.0)
@@ -240,11 +296,51 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Enable gradient checkpointing for O(sqrt(N)) AD memory")
     parser.add_argument("--profile", type=int, default=0, metavar="N_STEPS",
                         help="Profile first N steps with jax.profiler and exit")
+    parser.add_argument(
+        "--production-profile", action="store_true", default=False,
+        help=(
+            "Bundle of conservative production-AMIP defaults aimed at "
+            "long (1+ year) MPI/GPU runs.  Applied AFTER explicit user "
+            "flags so any individual override still wins.  Currently "
+            "raises ``--rad-update-steps`` to floor(3600/dt) (≈1-hour "
+            "radiation cadence — the CESM/E3SM standard) and warns if "
+            "``--fix-moisture`` is paired with prognostic-condensate "
+            "microphysics (incorrect mass-budget closure).  See issue "
+            "#275 for the perf rationale."
+        ),
+    )
 
     # Distributed / MPI
     parser.add_argument("--distributed", action="store_true", default=False,
                         help="Enable MPI distributed execution (auto-detected from environment)")
     parser.add_argument("--ensemble-size", type=int, default=1)
+    # Issue #273 follow-up: opt-in horizontal-column sharding for the
+    # per-column radiation kernel.  Decouples per-column physics
+    # throughput from cubed-sphere face-divisibility, unblocking
+    # 4-GPU nodes (4 ∉ {1, 2, 3, 6, 24, ...}).  Requires the
+    # flattened column count ``6·n·n`` divisible by the device count
+    # (holds for C16/C48 production resolutions on 1–8 GPUs).
+    parser.add_argument(
+        "--shard-radiation-columns", action="store_true", default=False,
+        help=(
+            "Issue #273: shard the per-column radiation kernel across "
+            "all visible devices.  Required to keep all 4 GPUs busy "
+            "on a 4×A100 node where face-sharding clamps to 3."
+        ),
+    )
+    parser.add_argument(
+        "--allow-level-fallback", action="store_true", default=False,
+        help=(
+            "Issue #273: when the requested device count fails "
+            "cubed-sphere face-sharding divisibility (e.g. 4 on a "
+            "4×A100 node), route the dycore mesh to the level-"
+            "parallel fallback instead of clamping to the nearest "
+            "valid face-shard count (3 on a 4-GPU node).  Pair with "
+            "``--shard-radiation-columns`` for the full 4-GPU "
+            "unblock — dycore runs replicated on the level mesh, "
+            "radiation shards columns across all 4 devices."
+        ),
+    )
 
     # Visualization
     parser.add_argument("--plot", action="store_true", default=False,
@@ -266,6 +362,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
     dycore_config = DycoreConfig(
         discretization=args.discretization,
         dt=args.dt,
+        implicit_grav_wave_use_pcg=args.implicit_grav_wave_use_pcg,
+        implicit_grav_wave_damping=args.implicit_grav_wave_damping,
     )
 
     output_config = OutputConfig(
@@ -295,6 +393,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sic_scale=args.sic_scale or 1.0,
         radiation=args.radiation,
         rad_update_steps=args.rad_update_steps,
+        rrtmgp_use_scan=args.rrtmgp_use_scan,
         diurnal_cycle=args.diurnal_cycle,
         co2_ppmv=args.co2_ppmv,
         ch4_ppbv=args.ch4_ppbv,
@@ -338,6 +437,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         precision=args.precision,
         gradient_checkpoint=args.gradient_checkpoint,
         distributed=args.distributed,
+        shard_radiation_columns=args.shard_radiation_columns,
+        allow_level_fallback=args.allow_level_fallback,
         ensemble_size=args.ensemble_size,
         ic=args.ic,
         ic_path=args.ic_path,
@@ -394,6 +495,54 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
     # triple.  ``cdgrid`` is the cubed-sphere C-D grid; keep it as-is.
     if args.discretization == "cgrid" and args.grid_type == "latlon":
         args.discretization = "latlon_cgrid"
+
+    # Issue #275 fix C: ``--production-profile`` bundles defaults that
+    # the CLI cannot ship as global defaults (because they would silently
+    # change behaviour for non-production callers).  Honor explicit user
+    # overrides — ``--rad-update-steps`` uses ``default=None`` so we can
+    # distinguish "user did not pass the flag" from "user passed
+    # ``--rad-update-steps 1``".  An explicit value always wins.
+    _rad_explicit = args.rad_update_steps is not None
+    if args.production_profile:
+        # 1-hour radiation cadence ≈ CESM/E3SM standard.  For dt < 3600
+        # this means rad_update_steps = floor(3600/dt).  Only auto-set
+        # when the user did not pass ``--rad-update-steps`` at all.
+        if not _rad_explicit:
+            rad_floor = max(1, int(3600.0 / max(args.dt, 1e-6)))
+            args.rad_update_steps = rad_floor
+            print(
+                f"[production-profile] --rad-update-steps={rad_floor} "
+                f"(≈ floor(3600/dt) for 1-hour radiation cadence)"
+            )
+        cadence_seconds = args.dt * args.rad_update_steps
+        if cadence_seconds > 3 * 3600.0:
+            print(
+                f"[production-profile] WARNING: radiation cadence "
+                f"{cadence_seconds:.0f}s (>3h) may smear the diurnal "
+                f"cycle; consider lowering --rad-update-steps."
+            )
+
+        # Conservation closure: ``fix_moisture`` rescales only q_v and
+        # ignores q_c/q_r/precipitation, so combining it with a
+        # prognostic-condensate microphysics scheme silently breaks the
+        # mass budget (config.py validation already warns).  Surface
+        # the same warning at the AMIP CLI so production launchers
+        # cannot miss it.
+        _prog_microphys = args.microphysics in (
+            "kessler", "sundqvist", "seifert_beheng", "morrison", "thompson",
+        )
+        if args.fix_moisture and _prog_microphys:
+            print(
+                "[production-profile] WARNING: --fix-moisture with "
+                f"prognostic microphysics ({args.microphysics}) breaks "
+                "total-water conservation (rescales q_v only).  Drop "
+                "--fix-moisture or wait for a total-water fixer."
+            )
+
+    # Resolve the rad-update-steps default last so explicit overrides
+    # and production-profile-derived values are both visible upstream.
+    if args.rad_update_steps is None:
+        args.rad_update_steps = 1
 
     return args
 

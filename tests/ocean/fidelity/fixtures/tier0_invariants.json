@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "tier": 0,
+  "description": "No-motion invariants: V/H/S conservation and machine-zero rest-state drift",
+  "common": {
+    "precision": "x64",
+    "grid": "latlon_cgrid",
+    "resolution": "2p5deg"
+  },
+  "cases": {
+    "rest_state_T_drift": {
+      "metric": "T_drift_max_abs",
+      "tolerance_window": [0.0, 1.0e-8],
+      "reference": {"kind": "analytical", "value": 0.0},
+      "ci_marker": "fast",
+      "expected_runtime_s": 30
+    },
+    "rest_state_volume_conservation": {
+      "metric": "delta_V_over_V0",
+      "tolerance_window": [0.0, 1.0e-12],
+      "reference": {"kind": "analytical", "value": 0.0},
+      "ci_marker": "fast",
+      "expected_runtime_s": 30
+    },
+    "rest_state_heat_conservation": {
+      "metric": "delta_H_over_H0",
+      "tolerance_window": [0.0, 1.0e-10],
+      "reference": {"kind": "analytical", "value": 0.0},
+      "ci_marker": "fast",
+      "expected_runtime_s": 30
+    },
+    "rest_state_salt_conservation": {
+      "metric": "delta_S_over_S0",
+      "tolerance_window": [0.0, 1.0e-12],
+      "reference": {"kind": "analytical", "value": 0.0},
+      "ci_marker": "fast",
+      "expected_runtime_s": 30
+    },
+    "rest_state_u_max_after_30dt": {
+      "metric": "u_max_abs",
+      "tolerance_window": [0.0, 1.0e-10],
+      "reference": {"kind": "analytical", "value": 0.0},
+      "ci_marker": "fast",
+      "expected_runtime_s": 30
+    }
+  }
+}

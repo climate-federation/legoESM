@@ -8,6 +8,7 @@ Tests cover:
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 import jax
 import jax.numpy as jnp
@@ -636,6 +637,102 @@ class TestRRTMGP:
             assert jnp.all(jnp.isfinite(b))
             assert jnp.allclose(a, b, rtol=1e-5, atol=1e-5)
 
+    def test_cache_isolates_use_scan_order_sensitive(self):
+        """Codex adversarial review 019e5467 (issue #273): the
+        RRTMGP instance cache must key on ``use_scan`` so the
+        first call's value does not leak into later calls with
+        different ``use_scan``.
+
+        Exercises all 6 orderings of (False, True, None) starting
+        from a clean cache, and asserts the cached instance's
+        ``_config.use_scan`` matches the requested value — i.e.
+        no instance is reused with a stale ``use_scan``."""
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+            _instance_cache, _get_instance,
+        )
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+
+        for ordering in [
+            (False, True),
+            (True, False),
+            (False, None),
+            (None, False),
+            (True, None),
+            (None, True),
+        ]:
+            _instance_cache.clear()
+            for use_scan_val in ordering:
+                cfg = RRTMGPConfig(use_scan=use_scan_val)
+                inst = _get_instance(cfg)
+                assert inst._config.use_scan == use_scan_val, (
+                    f"order={ordering}: requested use_scan="
+                    f"{use_scan_val} but cached instance carries "
+                    f"use_scan={inst._config.use_scan} — the cache "
+                    f"reused a stale solver and the auto-pick path "
+                    f"is silently broken"
+                )
+
+    def test_cache_keys_distinguish_use_scan(self):
+        """Companion unit test on the cache-key contract: the
+        instance key must change with ``use_scan`` while the optics
+        key must NOT.  Pins the design so the optics tables are
+        not duplicated per ``use_scan`` value (waste) and instance
+        cache entries do not collide across ``use_scan`` values
+        (correctness)."""
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        cfg_loop = RRTMGPConfig(use_scan=False)
+        cfg_scan = RRTMGPConfig(use_scan=True)
+        cfg_auto = RRTMGPConfig(use_scan=None)
+        # Optics cache key drops use_scan → tables shared.
+        assert RRTMGP._optics_cache_key(cfg_loop) == RRTMGP._optics_cache_key(cfg_scan)
+        assert RRTMGP._optics_cache_key(cfg_loop) == RRTMGP._optics_cache_key(cfg_auto)
+        # Instance cache key keeps use_scan → instances isolated.
+        assert RRTMGP._instance_cache_key(cfg_loop) != RRTMGP._instance_cache_key(cfg_scan)
+        assert RRTMGP._instance_cache_key(cfg_loop) != RRTMGP._instance_cache_key(cfg_auto)
+        assert RRTMGP._instance_cache_key(cfg_scan) != RRTMGP._instance_cache_key(cfg_auto)
+
+    def test_use_scan_none_matches_explicit_choice(self):
+        """Issue #273 GPU tuning: ``RRTMGPConfig(use_scan=None)`` (the
+        new production default) must produce the same heating rates
+        as ``use_scan=False`` on CPU and ``use_scan=True`` on GPU/TPU.
+        The local test backend is CPU, so the auto-picked path is
+        the unrolled for-loop.  Equivalence with ``use_scan=False``
+        proves the auto-pick wiring works end-to-end without
+        changing the kernel result."""
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+            rrtmgp_radiation,
+            _instance_cache,
+        )
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+
+        ncol, nlev = 3, 20
+        T, p_full, p_half, T_sfc, _, _ = _make_column_data(ncol, nlev)
+        q_v = jnp.full((ncol, nlev), 5.0e-4)
+        cos_zen = jnp.full(ncol, 0.4)
+
+        cfg_explicit = RRTMGPConfig(use_scan=False)
+        cfg_auto = RRTMGPConfig()  # use_scan defaults to None
+        assert cfg_auto.use_scan is None, (
+            "RRTMGPConfig.use_scan default must be None for the "
+            "auto-pick path; production runs rely on this"
+        )
+
+        _instance_cache.clear()
+        out_explicit = rrtmgp_radiation(
+            T, p_full, p_half, T_sfc, q_v, cos_zen, cfg_explicit,
+        )
+        out_auto = rrtmgp_radiation(
+            T, p_full, p_half, T_sfc, q_v, cos_zen, cfg_auto,
+        )
+
+        # CPU host → auto-pick lands on use_scan=False, output identical.
+        assert jnp.allclose(
+            out_explicit.heating_rate, out_auto.heating_rate,
+            rtol=1.0e-12, atol=1.0e-14,
+        )
+
 
 # ===========================================================================
 # Diurnal cycle tests
@@ -1152,3 +1249,104 @@ class TestCloudFraction:
         )(state, grid, sigma)
 
         assert jnp.allclose(tend_clear.dT_dt.data, tend_none.dT_dt.data)
+
+
+class TestColumnShardedRadiation:
+    """Issue #273 follow-up: ``make_radiation_physics(column_mesh=...)``
+    shards the per-column radiation kernel across the supplied mesh.
+    Locks in two contracts:
+
+    1. **Numerical equivalence** — the sharded output matches the
+       single-device baseline bit-for-bit on a divisible
+       ``ncol = 6·n·n``.
+    2. **Divisibility check** — when ``ncol`` does not divide the
+       mesh device count, the factory raises ``ValueError`` instead
+       of silently rounding down.
+
+    The 4-device equivalence test only runs when at least 2 devices
+    are visible to JAX; on a single-device host it is skipped.  Set
+    ``XLA_FLAGS=--xla_force_host_platform_device_count=4`` to
+    exercise locally.
+    """
+
+    def _make_state(self, n=8, nlev=10):
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.held_suarez import held_suarez_init
+        grid = create_cubed_sphere(n)
+        sigma = create_sigma_coordinate(nlev)
+        return grid, sigma, held_suarez_init(grid, sigma)
+
+    def test_sharded_matches_unsharded_on_single_device(self):
+        """Single-device mesh degenerates to no-op sharding; output
+        must still match exactly."""
+        from legoesm.parallel.column_shard import create_column_mesh
+        grid, sigma, state = self._make_state()
+        config = RadiationConfig(scheme="gray")
+        ref = make_radiation_physics(
+            config, model_type="hydrostatic",
+        )(state, grid, sigma)
+        mesh = create_column_mesh(n_devices=1)
+        out = make_radiation_physics(
+            config, model_type="hydrostatic", column_mesh=mesh,
+        )(state, grid, sigma)
+        np.testing.assert_allclose(
+            np.asarray(out.dT_dt.data),
+            np.asarray(ref.dT_dt.data),
+            rtol=1.0e-12, atol=1.0e-14,
+        )
+
+    def test_raises_on_non_divisible_ncol(self):
+        """When the cubed-sphere ``ncol`` does not divide the mesh
+        device count, the factory must raise rather than silently
+        produce wrong results."""
+        if len(jax.devices()) < 2:
+            pytest.skip("non-divisibility check requires >=2 devices")
+        from legoesm.parallel.column_shard import create_column_mesh
+        # Build a grid where ncol = 6*5*5 = 150.  Pick a device count
+        # that does not divide 150 — e.g. 4 (150 % 4 = 2).
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.held_suarez import held_suarez_init
+        grid = create_cubed_sphere(5)
+        sigma = create_sigma_coordinate(8)
+        state = held_suarez_init(grid, sigma)
+        config = RadiationConfig(scheme="gray")
+        n_dev = min(4, len(jax.devices()))
+        if (6 * 5 * 5) % n_dev == 0:
+            pytest.skip(
+                f"chosen ncol={6*5*5} happens to divide n_dev={n_dev}; "
+                f"cannot exercise the failure mode"
+            )
+        mesh = create_column_mesh(n_devices=n_dev)
+        physics_fn = make_radiation_physics(
+            config, model_type="hydrostatic", column_mesh=mesh,
+        )
+        with pytest.raises(ValueError, match="divisible"):
+            physics_fn(state, grid, sigma)
+
+    def test_sharded_matches_unsharded_multidevice(self):
+        """4-device CPU emulation: sharded ``make_radiation_physics``
+        produces identical heating rates to the single-device path."""
+        if len(jax.devices()) < 2:
+            pytest.skip(
+                "single-device host — set XLA_FLAGS to emulate 4 devices"
+            )
+        from legoesm.parallel.column_shard import create_column_mesh
+        grid, sigma, state = self._make_state(n=8, nlev=10)
+        config = RadiationConfig(scheme="gray")
+        ref = make_radiation_physics(
+            config, model_type="hydrostatic",
+        )(state, grid, sigma)
+        # 6*8*8 = 384, divisible by 1, 2, 3, 4, 6, 8, 12 — any common
+        # CPU emulation count works.
+        n_dev = len(jax.devices())
+        mesh = create_column_mesh(n_devices=n_dev)
+        out = make_radiation_physics(
+            config, model_type="hydrostatic", column_mesh=mesh,
+        )(state, grid, sigma)
+        np.testing.assert_allclose(
+            np.asarray(out.dT_dt.data),
+            np.asarray(ref.dT_dt.data),
+            rtol=1.0e-12, atol=1.0e-14,
+        )

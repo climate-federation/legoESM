@@ -266,6 +266,198 @@ class TestCGridOceanModel:
         eta_max = float(jnp.max(jnp.abs(s.eta.data)))
         assert eta_max < 1.0, f"Rest state eta drift too large: {eta_max}"
 
+    def test_no_eta_volume_drift(self, grid, z_coord, state):
+        """Issue #271: ``sum(eta * area)`` must not drift step-to-step.
+
+        Default Mercator C-grid config enables ``fix_eta_drift`` so the
+        global volume integral is preserved to numerical precision
+        regardless of bathymetry complexity.
+        """
+        cfg = LatLonCGridOceanConfig()
+        model = LatLonCGridOceanModel(grid, z_coord, cfg)
+        area = grid.area
+        mask = state.land_mask.data
+        vol0 = float(jnp.sum(state.eta.data * area * mask))
+        s = state
+        for _ in range(20):
+            s = model.step(s, 3600.0)
+        vol_final = float(jnp.sum(s.eta.data * area * mask))
+        ocean_area = float(jnp.sum(area * mask))
+        # Mean eta drift per step (m).  Must be machine-precision.
+        mean_drift = abs(vol_final - vol0) / max(ocean_area, 1.0)
+        assert mean_drift < 1.0e-10, (
+            f"Volume leak: mean eta drift {mean_drift} m after 20 steps"
+        )
+
+    def test_eta_drift_correction_can_be_disabled(self, grid, z_coord, state):
+        """Backwards-compat: ``fix_eta_drift=False`` restores the legacy
+        path so existing regression baselines can opt out."""
+        cfg = LatLonCGridOceanConfig(fix_eta_drift=False)
+        model = LatLonCGridOceanModel(grid, z_coord, cfg)
+        s = model.step(state, 3600.0)
+        # Just check that the disabled path runs and produces finite eta.
+        assert jnp.all(jnp.isfinite(s.eta.data))
+
+    def test_no_eta_volume_drift_partial_cells(self, grid):
+        """Issue #271 root cause: partial-cell bathymetry amplifies the
+        leak 7×.  Run with a non-flat bathymetry on the partial-cell
+        coord and assert the default projection still pins the volume
+        integral exactly.
+        """
+        from legoesm.ocean.vertical import create_partial_cell_coordinate
+        from legoesm.ocean.init_latlon_cgrid import (
+            rest_state_latlon_cgrid_ocean,
+        )
+
+        H_max = 4000.0
+        # Stepped bathymetry — emulates the partial-cell mismatch path.
+        n_lat, n_lon = grid.n_lat, grid.n_lon
+        H_bathy = H_max * (
+            0.5 + 0.5 * jnp.cos(
+                jnp.pi * jnp.arange(n_lat)[:, None] / n_lat
+            ) * jnp.cos(
+                jnp.pi * jnp.arange(n_lon)[None, :] / n_lon
+            )
+        )
+        zstar = create_ocean_z_star(n_levels=5, H_max=H_max)
+        z_coord = create_partial_cell_coordinate(zstar, H_bathy)
+        state = rest_state_latlon_cgrid_ocean(
+            grid, z_coord,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+            H_max=H_max,
+            H_bathy_override=H_bathy,
+        )
+        cfg = LatLonCGridOceanConfig()
+        model = LatLonCGridOceanModel(grid, z_coord, cfg)
+        area = grid.area
+        mask = state.land_mask.data
+        vol0 = float(jnp.sum(state.eta.data * area * mask))
+        s = state
+        for _ in range(10):
+            s = model.step(s, 1800.0)
+        vol_final = float(jnp.sum(s.eta.data * area * mask))
+        ocean_area = float(jnp.sum(area * mask))
+        mean_drift = abs(vol_final - vol0) / max(ocean_area, 1.0)
+        # f32 storage cast at end of each step introduces ~1e-10 m/step
+        # round-off even when the projection is exact in accumulation
+        # precision.  Bound is still 10⁴× tighter than the unfixed
+        # ETOPO leak (0.4 mm/yr ≈ 1e-7 m/step).
+        assert mean_drift < 1.0e-8, (
+            f"Partial-cell volume leak: mean eta drift {mean_drift} m"
+        )
+
+    def test_no_eta_volume_drift_explicit_substepping(
+        self, grid, z_coord, state,
+    ):
+        """The explicit substepping barotropic solver does not project
+        the global mean internally — the end-of-step fix must catch
+        any leak it introduces."""
+        cfg = LatLonCGridOceanConfig(barotropic_solver="explicit_substep")
+        model = LatLonCGridOceanModel(grid, z_coord, cfg)
+        area = grid.area
+        mask = state.land_mask.data
+        vol0 = float(jnp.sum(state.eta.data * area * mask))
+        s = state
+        for _ in range(10):
+            s = model.step(s, 600.0)
+        vol_final = float(jnp.sum(s.eta.data * area * mask))
+        ocean_area = float(jnp.sum(area * mask))
+        mean_drift = abs(vol_final - vol0) / max(ocean_area, 1.0)
+        assert mean_drift < 1.0e-10, (
+            f"Substepping volume leak: mean eta drift {mean_drift} m"
+        )
+
+    def test_freshwater_target_volume(self, grid, z_coord, state):
+        """With non-zero freshwater the projection target is
+        ``vol(eta_old) + dt * sum(F_eta * area)``, not just
+        ``vol(eta_old)``.  Drive a precipitation excess and verify the
+        post-step volume matches that target."""
+        from legoesm.ocean.freshwater import (
+            zero_freshwater, freshwater_eta_tendency,
+        )
+
+        # Lat-lon C-grid uses 2-D freshwater forcing shape (n_lat, n_lon).
+        z2 = jnp.zeros((grid.n_lat, grid.n_lon))
+        precip = jnp.full_like(z2, 1.0e-4)  # ~ 8 mm/day
+        from legoesm.ocean.freshwater import FreshwaterForcing
+        fw = FreshwaterForcing(
+            precip=precip, evap=z2, runoff=z2, ice_fw=z2, restoring=z2,
+        )
+        cfg = LatLonCGridOceanConfig(freshwater_closure="virtual_salt_flux")
+        model = LatLonCGridOceanModel(grid, z_coord, cfg)
+        area = grid.area
+        mask = state.land_mask.data
+        vol0 = float(jnp.sum(state.eta.data * area * mask))
+        F_eta = freshwater_eta_tendency(fw, cfg.rho_0) * mask
+        expected_change = float(jnp.sum(F_eta * area * mask)) * 3600.0
+        s = model.step(state, 3600.0, freshwater=fw)
+        vol_final = float(jnp.sum(s.eta.data * area * mask))
+        observed_change = vol_final - vol0
+        ocean_area = float(jnp.sum(area * mask))
+        # The relative match must be tight; the storage-precision cast
+        # at the end of step bounds the absolute error to ~1e-9 m * area.
+        rel_err = abs(observed_change - expected_change) / max(
+            abs(expected_change), 1.0
+        )
+        assert rel_err < 1.0e-4, (
+            f"Freshwater volume target mismatch: rel_err={rel_err} "
+            f"(expected {expected_change}, observed {observed_change})"
+        )
+
+    def test_implicit_cn_no_op_when_no_leak(self, grid, z_coord, state):
+        """When the implicit-CN solver already projects volume
+        internally, our end-of-step projection must be a near-no-op
+        — verify that toggling ``fix_eta_drift`` on vs off gives
+        bit-close eta fields on a single step where no real leak
+        exists."""
+        cfg_on = LatLonCGridOceanConfig(
+            barotropic_solver="implicit_cn", fix_eta_drift=True,
+        )
+        cfg_off = LatLonCGridOceanConfig(
+            barotropic_solver="implicit_cn", fix_eta_drift=False,
+        )
+        s_on = LatLonCGridOceanModel(grid, z_coord, cfg_on).step(state, 3600.0)
+        s_off = LatLonCGridOceanModel(grid, z_coord, cfg_off).step(state, 3600.0)
+        diff = float(jnp.max(jnp.abs(s_on.eta.data - s_off.eta.data)))
+        # Implicit-CN already conserves volume to ~1e-10 m, so our
+        # extra projection should not visibly perturb eta.
+        assert diff < 1.0e-7, (
+            f"fix_eta_drift perturbed implicit-CN eta by {diff} m"
+        )
+
+    def test_eta_projection_consistent_with_layer_thickness(
+        self, grid, z_coord, state,
+    ):
+        """The eta correction is applied BEFORE the tracer step's
+        ``h_k_new`` recompute, so layer thicknesses, w, T and S must
+        all be consistent with the corrected eta.  Verify by checking
+        that ``sum_k h_k_new`` matches the post-step ``eta + H_bathy``
+        column thickness within numerical precision.
+        """
+        from legoesm.ocean.vertical import compute_layer_thickness
+
+        cfg = LatLonCGridOceanConfig()
+        model = LatLonCGridOceanModel(grid, z_coord, cfg)
+        s = model.step(state, 3600.0)
+        h_k = compute_layer_thickness(
+            s.eta.data, s.H_bathy.data, model.z_coord,
+            min_water_column_m=cfg.min_water_column_m,
+        )
+        wc = jnp.sum(h_k, axis=-1)
+        expected = jnp.maximum(
+            s.eta.data + s.H_bathy.data, cfg.min_water_column_m,
+        )
+        rel = jnp.max(
+            jnp.abs(wc - expected) / jnp.maximum(expected, 1.0)
+        )
+        # f32 storage cast at end of step bounds the relative
+        # consistency to ~1e-7; we just need to confirm the eta
+        # correction did NOT desynchronise h_k from eta by an
+        # O(correction) amount (which would be a real bug).
+        assert float(rel) < 1.0e-6, (
+            f"h_k_new not consistent with corrected eta: rel err {float(rel)}"
+        )
+
     def test_barotropic_wave_stability(self, grid, z_coord):
         """Barotropic wave should propagate stably for 10+ steps.
 
@@ -321,3 +513,56 @@ class TestCGridOceanModel:
         grad_fn = jax.grad(loss_fn)
         g = grad_fn(state.eta.data)
         assert jnp.all(jnp.isfinite(g))
+
+
+# =========================================================================
+# Bugfix-knob coverage (PR #261)
+# =========================================================================
+
+
+class TestPR261ConfigDispatch:
+    """Each new public-config dispatch branch from PR #261 must select
+    cleanly via :class:`LatLonCGridOceanConfig` and produce finite
+    tendencies.  These tests guard the slopbuster-flagged untested
+    dispatch knobs (`A_h_merid`, `B_h_lat_scaling`)."""
+
+    def test_A_h_merid_branch_active(self, grid, z_coord, state):
+        cfg = LatLonCGridOceanConfig(A_h_merid=5.0e4)
+        assert cfg.A_h_merid > 0.0
+        tend = latlon_cgrid_ocean_baroclinic_tendencies(
+            state, grid, z_coord, cfg,
+        )
+        assert jnp.all(jnp.isfinite(tend.du_dt.data))
+        assert jnp.all(jnp.isfinite(tend.dv_dt.data))
+
+    def test_A_h_merid_default_inactive(self, grid, z_coord, state):
+        cfg = LatLonCGridOceanConfig()
+        assert cfg.A_h_merid == 0.0
+
+    def test_B_h_lat_scaling_on(self, grid, z_coord, state):
+        cfg = LatLonCGridOceanConfig(B_h=1.0e10, B_h_lat_scaling=True)
+        tend = latlon_cgrid_ocean_baroclinic_tendencies(
+            state, grid, z_coord, cfg,
+        )
+        assert jnp.all(jnp.isfinite(tend.du_dt.data))
+
+    def test_B_h_lat_scaling_off(self, grid, z_coord, state):
+        cfg = LatLonCGridOceanConfig(B_h=1.0e10, B_h_lat_scaling=False)
+        tend = latlon_cgrid_ocean_baroclinic_tendencies(
+            state, grid, z_coord, cfg,
+        )
+        assert jnp.all(jnp.isfinite(tend.du_dt.data))
+
+
+def test_gm_redi_surface_complement_config_defaults_round_trip():
+    """The two new ``GMRediConfig`` surface-complement knobs from
+    PR #261 must round-trip through the NamedTuple cleanly."""
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+
+    cfg = GMRediConfig()
+    assert cfg.surface_complement is True
+    assert cfg.surface_complement_depth == 100.0
+
+    cfg2 = GMRediConfig(surface_complement=False, surface_complement_depth=50.0)
+    assert cfg2.surface_complement is False
+    assert cfg2.surface_complement_depth == 50.0

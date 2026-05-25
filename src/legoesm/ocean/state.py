@@ -111,6 +111,16 @@ class OceanConfig(NamedTuple):
     fix_volume: bool = True
     fix_heat: bool = True
     fix_salt: bool = True
+    # Bottom drag (mirror of LatLonCGridOceanConfig). ``bottom_drag_r > 0``
+    # enables linear drag ``du/dt|_drag = -r*u/h_bot`` on the bottom
+    # cell; setting ``bottom_drag_bg_velocity > 0`` lifts it to the
+    # MOM6 quadratic-with-floor form. ``bottom_drag_bbl_thickness > 0``
+    # spreads the drag over a fixed Ekman thickness (Killworth &
+    # Edwards 1999) instead of dumping it into a possibly very thin
+    # partial cell.
+    bottom_drag_r: float = 0.0
+    bottom_drag_bg_velocity: float = 0.0
+    bottom_drag_bbl_thickness: float = 0.0
     # 2-D Laplacian damping used in barotropic subcycling.
     # Per-substep coefficient is alpha * (dt_s / dt_ref) * area * laplacian(...),
     # so the damping is explicitly dt-scaled and tunable.
@@ -516,7 +526,21 @@ class LatLonCGridOceanConfig(NamedTuple):
     A_h_eq_sigma_deg: float = 5.0  # Gaussian half-width in degrees of the
                                     # equatorial boost.  Typical 3-7°
                                     # (~equatorial waveguide width).
+    A_h_merid: float = 0.0        # Meridional-only Laplacian viscosity [m²/s].
+                                    # Applies d²u/dy² directly at u-faces and
+                                    # d²v/dy² at v-faces — a scalar operator
+                                    # that damps meridional structure (2Δy mode)
+                                    # without affecting zonal flow.  Independent
+                                    # of A_h.  Use on lat-lon grids where
+                                    # dx/dy anisotropy makes isotropic A_h
+                                    # either too strong (zonal) or too weak
+                                    # (meridional).
     B_h: float = 0.0
+    B_h_lat_scaling: bool = True   # Apply (cos(lat)/cos_max)⁴ scaling to B_h.
+                                    # Default True (MOM6 convention) prevents
+                                    # CFL violation at poles where dx shrinks.
+                                    # Set False to keep full B_h everywhere
+                                    # (requires smaller dt for CFL safety).
     B_h_barotropic: float = 0.0  # Biharmonic hyperviscosity coeff [m^4/s]
                                    # applied to the DEPTH-MEAN (U_bar,
                                    # V_bar) only, via the F_slow channel
@@ -550,6 +574,17 @@ class LatLonCGridOceanConfig(NamedTuple):
     fix_volume: bool = True
     fix_heat: bool = True
     fix_salt: bool = True
+    # Issue #271: standalone end-of-step volume-drift projection that
+    # runs independently of ``use_conservation_fixer``.  The lat-lon
+    # C-grid path leaks ~0.4 mm/yr of mean eta with ETOPO bathymetry
+    # (0.06 mm/yr flat) because the partial-cell face masking creates a
+    # small mismatch between the depth-integrated tracer transport and
+    # the barotropic ``Hu_avg``.  This projection forces
+    # ``sum(eta_new * area) == sum(eta_old * area) + dt * sum(F_eta * area)``
+    # exactly each step, identical in spirit to MOM6/NEMO/MITgcm
+    # practice.  Default-on for lat-lon C-grid; MPAS already conserves
+    # to machine precision.
+    fix_eta_drift: bool = True
     barotropic_diffusion_alpha: float = 0.01
     barotropic_diffusion_dt_ref: float = 60.0
     barotropic_div_damp: float = 0.0  # Divergence damping on barotropic velocity (dimensionless)
@@ -644,7 +679,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     #   nonlinear limiters (TVD, WENO, FCT).
     tracer_time_integrator: str = "euler"
     ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar)
-    # Implicit (backward-Euler) vertical mixing.  When True:
+    # Implicit (backward-Euler) vertical mixing.  When True (default):
     #   1. The PE tendency function skips the explicit ``A_v`` viscous
     #      block (lines tagged ``if config.A_v > 0 ...``).
     #   2. The vertical-mixing and ``enhanced_diffusion`` convection
@@ -659,5 +694,29 @@ class LatLonCGridOceanConfig(NamedTuple):
     # Removes the explicit-diffusion CFL limit ``dt < dz² / (2 K)``,
     # which becomes binding when ``K_conv = 1 m²/s`` is active with
     # surface dz < 30 m or when vertical resolution is increased.
-    # MOM6 / NEMO / POP / MITgcm all use this approach.
-    implicit_vertical_mixing: bool = False
+    # MOM6 / NEMO / POP / MITgcm all use this approach, and MPAS
+    # (`MPASOceanConfig`) also defaults True. The lat-lon default was
+    # flipped from False to True on 2026-05-14 after a DINO forced run
+    # at j=0,i=26 hit the explicit-CFL bound under KPP-driven cold
+    # restoring (see docs/ocean_experiments/dino_replication_plan.md
+    # Finding 5). Set explicit ``implicit_vertical_mixing=False`` to
+    # reproduce the historical explicit-diffusion behavior.
+    implicit_vertical_mixing: bool = True
+
+    # --- Polar-cap viscosity boost (tripolar fold support) ---
+    # Appended at the end of the NamedTuple to preserve positional
+    # construction semantics for legacy callers.  When > 1, multiplies
+    # A_h by 1 + (boost − 1) · S(|lat| − cap_lat_deg) where S is a
+    # smooth tanh ramp of width ``A_h_cap_width_deg``.  Damps the
+    # bipolar-cap cascade on tripolar grids where the cos(lat) scaling
+    # drops to zero at the fold boundary but the deformed cap cells
+    # need stronger dissipation than ``A_h_floor`` alone provides.
+    # Typical ORCA1 production: 5–20.  Disabled by default (1.0) to
+    # preserve bit-exact regression on legacy lat-lon configs.
+    A_h_cap_boost: float = 1.0
+    # Latitude (°N) at which the polar-cap boost ramp begins.  For
+    # tripolar grids, set close to the ``fold_lat`` of the
+    # FoldDescriptor.  Typical 70–80°.
+    A_h_cap_lat_deg: float = 75.0
+    # Half-width of the polar-cap boost tanh transition [°]; default 5°.
+    A_h_cap_width_deg: float = 5.0

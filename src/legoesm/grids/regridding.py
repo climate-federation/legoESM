@@ -161,6 +161,67 @@ def compute_gauss_to_cs_weights(
     )
 
 
+def compute_latlon_to_voronoi_weights(
+    src_lat_1d: np.ndarray,
+    src_lon_1d: np.ndarray,
+    tgt_lat: np.ndarray,
+    tgt_lon: np.ndarray,
+    k_neighbors: int = 4,
+) -> RegridWeights:
+    """Compute regridding weights from regular lat-lon to unstructured points.
+
+    Uses KD-tree in Cartesian coordinates for nearest-neighbor lookup,
+    then inverse-distance weighting for interpolation.
+
+    Parameters
+    ----------
+    src_lat_1d : array, shape (n_lat,)
+        Source latitude centres in **radians**.
+    src_lon_1d : array, shape (n_lon,)
+        Source longitude centres in **radians**.
+    tgt_lat : array, shape (n_target,)
+        Target point latitudes in **radians** (e.g. ``mesh.latCell``).
+    tgt_lon : array, shape (n_target,)
+        Target point longitudes in **radians** (e.g. ``mesh.lonCell``).
+    k_neighbors : int
+        Number of nearest neighbors for interpolation.
+
+    Returns
+    -------
+    RegridWeights
+        Precomputed weights with ``target_shape = (n_target,)``.
+    """
+    from scipy.spatial import cKDTree
+
+    # Source: regular lat-lon meshgrid → (n_lat*n_lon, 3)
+    lon2d, lat2d = np.meshgrid(
+        np.asarray(src_lon_1d), np.asarray(src_lat_1d),
+    )
+    src_xyz = _latlon_to_xyz(lat2d.ravel(), lon2d.ravel())
+
+    # Target: unstructured points → (n_target, 3)
+    tgt_xyz = _latlon_to_xyz(
+        np.asarray(tgt_lat).ravel(), np.asarray(tgt_lon).ravel(),
+    )
+
+    tree = cKDTree(src_xyz)
+    distances, indices = tree.query(tgt_xyz, k=k_neighbors)
+
+    distances = np.maximum(distances, 1e-12)
+    inv_dist = 1.0 / distances
+    weights = inv_dist / inv_dist.sum(axis=-1, keepdims=True)
+
+    n_target = tgt_xyz.shape[0]
+    src_flat_size = int(len(src_lat_1d)) * int(len(src_lon_1d))
+
+    return RegridWeights(
+        src_indices=jnp.array(indices, dtype=jnp.int32),
+        weights=jnp.array(weights, dtype=jnp.float32),
+        target_shape=(n_target,),
+        src_flat_size=src_flat_size,
+    )
+
+
 def regrid_scalar(
     field: jnp.ndarray,
     regrid_weights: RegridWeights,
