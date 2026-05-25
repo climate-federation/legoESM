@@ -1,123 +1,16 @@
-"""Doubly-periodic plane non-hydrostatic compressible Euler dycore.
+"""Doubly-periodic plane non-hydrostatic compressible Euler — building blocks.
 
-Stages of the CRM rollout
--------------------------
-PR2a (already merged in this file) shipped the building blocks:
-vertical-last operator wrappers around the PR1 plane stencils, a
-flat-terrain metric constructor, the dry-mass integral and a uniform-
-additive mass fixer. PR2b (this revision) wires those building blocks
-into a working dry plane dycore by adding:
+Staged-not-integrated (CRM rollout, PR2a):
 
-* :func:`plane_compressible_euler_slow_tendencies` — RK-stage slow
-  tendency (horizontal advection of mass / theta / momentum,
-  horizontal pressure-gradient, optional Coriolis, horizontal w slow
-  part). Vertical acoustic terms are deferred to the substep kernel.
-* :func:`plane_acoustic_substeps` — thin wrapper around
-  :func:`compressible_euler._acoustic_column_kernel` (extracted in
-  PR2a) that drives the substep loop and rewraps the result into
-  ``PlaneNonHydrostaticState``.
-* :class:`PlaneCompressibleEulerModel` — outer driver with strict
-  PR2b config validation (rejects semi-implicit acoustic, sponge,
-  hyperdiffusion, tracers, non-flat terrain, ``physics_fn``).
-
-PR2c will publicly expose this dycore in the driver config and
-``supported_matrix`` so experiments can dispatch into it. PR3 adds
-microphysics + LES SGS + hyperdiffusion + tracer transport.
-
-Equations solved (dry, perturbation form)
------------------------------------------
-Prognostic ``(u, v, w, theta', rho')`` with full state
-``theta = theta_ref(z) + theta'`` and ``rho = rho_ref(z) + rho'``
-where ``(theta_ref, rho_ref)`` is the hydrostatically balanced 1D
-reference profile from :class:`HeightCoordinate`.
-
-Continuity (mass, flux-form so the discrete dry-mass integral is
-conserved up to mass-fixer correction)
-
-    drho'/dt = -d/dx (rho_total * u) - d/dy (rho_total * v)
-             - (vertical acoustic mass flux divergence, in substep)
-
-Potential temperature (advective form; vertical advection by w is
-absorbed into the substep)
-
-    dtheta'/dt = -u * d theta_total / dx - v * d theta_total / dy
-                - (w * d theta_total / dz, in substep)
-
-Horizontal momentum (advective form; vertical advection by w via
-:func:`_vertical_advection_plane` per column)
-
-    du/dt = -u du/dx - v du/dy - w du/dz
-           - c_p * theta_total * d pi' / dx + f * v
-    dv/dt = -u dv/dx - v dv/dy - w dv/dz
-           - c_p * theta_total * d pi' / dy - f * u
-
-Vertical velocity (horizontal slow advection + vertical PG and
-buoyancy via substep)
-
-    dw/dt = -u dw/dx - v dw/dy
-           + (-c_p * theta * d pi' / dz + g * theta' / theta_ref, in substep)
-
-Operator splitting
-------------------
-The split-explicit infrastructure
-(:func:`legoesm.timestepping.split_explicit.split_explicit_step`)
-applies the slow tendency at each outer SSP-RK3 stage, then runs
-``n_substeps`` acoustic substeps (vertical-only) on ``(w, theta',
-rho')``. Slow updates to ``u, v, w`` (and the horizontal slow part of
-``rho'``) are applied via an axpy on the full state pytree before each
-substep loop. Tracer transport is deferred to PR3, so PR2b accepts
-only ``n_tracers == 0``.
-
-Hyperdiffusion stability (PR3a)
--------------------------------
-Biharmonic damping ``-K_h ∇⁴`` is integrated explicitly through the
-slow-tendency path, so the user-supplied ``hyperdiff_coeff``,
-``hyperdiff_rho_coeff``, ``hyperdiff_w_coeff`` must satisfy the
-explicit-Euler CFL bound on the 5-point stencil::
-
-    dt * K * (4/dx² + 4/dy²)² < CFL_max
-
-with ``CFL_max ≈ 2`` for SSP-RK3 (slightly looser than forward
-Euler). For the CI test grid (``dx = dy = 200 m``, ``dt = 0.5 s``)
-the eigenvalue is ``(2·4/200²)² = 4 × 10⁻⁸``, so the bound becomes
-``K < 2 / (0.5 · 4 × 10⁻⁸) = 1 × 10⁸ m⁴/s``; the CI tests use
-``K = 1 × 10⁶`` and ``1 × 10⁷``, well inside the bound. The plane dycore does not check
-the bound at runtime — the same convention as the cubed-sphere and
-MPAS NH dycores. Setting ``K`` near the bound trades increased
-damping for risk of grid-scale oscillation; documented user
-responsibility.
-
-Arakawa-C discretisation with energy-consistent PG/divergence pair
-------------------------------------------------------------------
-The slow tendency honours the Arakawa-C staggering in every term:
-``u`` at x-faces, ``v`` at y-faces, scalars at cell centres,
-``w`` at half levels. The horizontal pressure gradient uses
-:func:`grad_x_vlast` / :func:`grad_y_vlast` which return values at
-the x/y-face — exactly where ``u/v`` live — and the discrete
-divergence uses :func:`divergence_vlast` on the face-staggered
-mass fluxes ``rho_face · u`` and ``rho_face · v``. This is the
-adjoint pair documented in
-:mod:`plane_operators` — discrete integration by parts
-``sum(phi · div(u, v)) == -sum(u · grad_x(phi)) -
-sum(v · grad_y(phi))`` holds to machine epsilon, the discrete
-condition for energy-consistent PG / divergence coupling.
-
-Cross-component velocities for momentum advection use the 4-point
-corner-average interpolators
-(:func:`interp_yface_to_xface_vlast`,
-:func:`interp_xface_to_yface_vlast`); scalar advection uses
-face→centre averages (:func:`interp_xface_to_cell_vlast`,
-:func:`interp_yface_to_cell_vlast`). Smagorinsky-Lilly LES
-(below) is the full 3D strain tensor — every component is
-evaluated at its natural Arakawa-C location, then ``S_ij²`` is
-averaged to cell centres for the eddy-viscosity ``K_m``. No
-A-grid simplification anywhere.
-
-Note: horizontal advection of momentum, theta and tracers is
-first-order upwind (dissipative). Full energy-conserving
-vector-invariant momentum advection is a separate item; the
-PG/div pairing alone is the adjoint identity that
-:mod:`plane_operators` proves to machine epsilon.
+* PR2a (this file) ships the *building blocks* needed by the future
+  plane non-hydrostatic dycore: vertical-last operator wrappers around
+  the PR1 plane stencils, a flat terrain-metric constructor, the
+  dry-mass integral, and a uniform-additive mass fixer. None of these
+  are wired into any factory dispatch.
+* PR2b will add the full ``PlaneCompressibleEulerModel`` class, slow
+  tendency, ``plane_acoustic_substeps`` (a thin wrapper around the
+  shared :func:`compressible_euler._acoustic_column_kernel`), and the
+  dry-validation harness (rising thermal + Straka).
 
 State convention
 ----------------
@@ -127,8 +20,8 @@ cubed-sphere / MPAS convention) so that the shared acoustic column
 kernel slices the same axis. PR1 plane operators in
 :mod:`legoesm.atmosphere.dynamics.plane_operators` expect
 ``(..., ny, nx)`` (vertical-trailing-horizontal). The vlast wrappers
-in this module use :func:`jax.numpy.moveaxis` to bridge the two
-conventions without modifying PR1 operators.
+here use :func:`jax.numpy.moveaxis` to bridge the two conventions
+without modifying PR1 operators.
 
 Field unwrap policy
 -------------------
@@ -142,8 +35,6 @@ staggering) is preserved. No public helper here returns a bare array.
 
 from __future__ import annotations
 
-import functools
-
 import jax
 import jax.numpy as jnp
 
@@ -156,16 +47,9 @@ from legoesm.atmosphere.dynamics.compressible_euler import (
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm.core.field import Field
-from legoesm.core.state import (
-    PlaneNonHydrostaticState,
-    PlaneNonHydrostaticTendencies,
-)
+from legoesm.core.state import PlaneNonHydrostaticState
 from legoesm.grids.plane import PlaneGrid
 from legoesm.grids.vertical import HeightCoordinate, TerrainMetric
-from legoesm.timestepping.split_explicit import (
-    SplitExplicitConfig,
-    split_explicit_step,
-)
 
 
 # --------------------------------------------------------------------- #
@@ -229,48 +113,6 @@ def laplacian_vlast(phi_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
     """5-point scalar Laplacian, vertical-last."""
     return _move_vertical_to_back(
         _plane_ops.laplacian_3d(_move_vertical_to_front(phi_yxz), grid)
-    )
-
-
-def interp_cell_to_xface_vlast(phi_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
-    """Cell-centre → x-face interpolation, vertical-last."""
-    return _move_vertical_to_back(
-        _plane_ops.interp_cell_to_xface(_move_vertical_to_front(phi_yxz), grid)
-    )
-
-
-def interp_cell_to_yface_vlast(phi_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
-    """Cell-centre → y-face interpolation, vertical-last."""
-    return _move_vertical_to_back(
-        _plane_ops.interp_cell_to_yface(_move_vertical_to_front(phi_yxz), grid)
-    )
-
-
-def interp_xface_to_cell_vlast(u_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
-    """x-face → cell-centre interpolation, vertical-last."""
-    return _move_vertical_to_back(
-        _plane_ops.interp_xface_to_cell(_move_vertical_to_front(u_yxz), grid)
-    )
-
-
-def interp_yface_to_cell_vlast(v_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
-    """y-face → cell-centre interpolation, vertical-last."""
-    return _move_vertical_to_back(
-        _plane_ops.interp_yface_to_cell(_move_vertical_to_front(v_yxz), grid)
-    )
-
-
-def interp_yface_to_xface_vlast(v_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
-    """y-face → x-face (4-pt corner average), vertical-last."""
-    return _move_vertical_to_back(
-        _plane_ops.interp_yface_to_xface(_move_vertical_to_front(v_yxz), grid)
-    )
-
-
-def interp_xface_to_yface_vlast(u_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
-    """x-face → y-face (4-pt corner average), vertical-last."""
-    return _move_vertical_to_back(
-        _plane_ops.interp_xface_to_yface(_move_vertical_to_front(u_yxz), grid)
     )
 
 

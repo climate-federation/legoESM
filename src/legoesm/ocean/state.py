@@ -574,6 +574,17 @@ class LatLonCGridOceanConfig(NamedTuple):
     fix_volume: bool = True
     fix_heat: bool = True
     fix_salt: bool = True
+    # Issue #271: standalone end-of-step volume-drift projection that
+    # runs independently of ``use_conservation_fixer``.  The lat-lon
+    # C-grid path leaks ~0.4 mm/yr of mean eta with ETOPO bathymetry
+    # (0.06 mm/yr flat) because the partial-cell face masking creates a
+    # small mismatch between the depth-integrated tracer transport and
+    # the barotropic ``Hu_avg``.  This projection forces
+    # ``sum(eta_new * area) == sum(eta_old * area) + dt * sum(F_eta * area)``
+    # exactly each step, identical in spirit to MOM6/NEMO/MITgcm
+    # practice.  Default-on for lat-lon C-grid; MPAS already conserves
+    # to machine precision.
+    fix_eta_drift: bool = True
     barotropic_diffusion_alpha: float = 0.01
     barotropic_diffusion_dt_ref: float = 60.0
     barotropic_div_damp: float = 0.0  # Divergence damping on barotropic velocity (dimensionless)

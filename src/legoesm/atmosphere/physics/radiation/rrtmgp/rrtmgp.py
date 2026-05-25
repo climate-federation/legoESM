@@ -734,21 +734,28 @@ class RRTMGP:
       cos_z_col = jnp.clip(cos_zenith, 0.0, 1.0)
       zenith_col = jnp.arccos(cos_z_col)[:, None, None]
 
-      if sfc_albedo is not None:
-          eff_albedo = jnp.asarray(sfc_albedo, dtype=p_3d.dtype)
-          if eff_albedo.ndim == 0:
-              eff_albedo = jnp.broadcast_to(eff_albedo, (ncol,))
-          eff_albedo = eff_albedo.reshape(ncol, 1)
-      else:
-          eff_albedo = jnp.full((ncol, 1), config.sfc_albedo, dtype=p_3d.dtype)
+      def _resolve_surface_field(override, fallback):
+          """Promote a per-column surface field to ``(ncol, 1)``.
 
-      if sfc_emissivity is not None:
-          eff_emis = jnp.asarray(sfc_emissivity, dtype=p_3d.dtype)
-          if eff_emis.ndim == 0:
-              eff_emis = jnp.broadcast_to(eff_emis, (ncol,))
-          eff_emis = eff_emis.reshape(ncol, 1)
-      else:
-          eff_emis = jnp.full((ncol, 1), config.sfc_emissivity, dtype=p_3d.dtype)
+          Accepts a Python scalar, a 0-D JAX scalar, or a ``(ncol,)``
+          / ``(ncol, 1)`` array.  AIMIP's spatial surface
+          parameterization populates ``config.sfc_albedo`` /
+          ``config.sfc_emissivity`` with ``(ncol,)`` arrays produced
+          by a low-rank lat-lon expansion; this branch preserves the
+          legacy scalar path while supporting that AIMIP use case
+          without forcing every call site to thread an explicit
+          override kwarg through ``_call_radiation_backend``.
+          """
+          source = override if override is not None else fallback
+          val = jnp.asarray(source, dtype=p_3d.dtype)
+          if val.ndim == 0:
+              return jnp.full((ncol, 1), val, dtype=p_3d.dtype)
+          if val.ndim == 1:
+              return val.reshape(ncol, 1)
+          return val  # already (ncol, 1)
+
+      eff_albedo = _resolve_surface_field(sfc_albedo, config.sfc_albedo)
+      eff_emis = _resolve_surface_field(sfc_emissivity, config.sfc_emissivity)
 
       atmos_state = atmospheric_state.AtmosphericState(
           sfc_emis=eff_emis,

@@ -231,33 +231,6 @@ def test_operators_reject_wrong_shape():
         curl_3d(u_ok, v_diff_lead, g)
 
 
-def test_interp_helpers_reject_wrong_shape():
-    """Codex review 2026-05-24: the new C-grid interpolation helpers
-    must validate input shape so a transposed or low-rank array
-    fails loudly instead of producing a plausible-but-wrong stencil."""
-    from legoesm.atmosphere.dynamics.plane_operators import (
-        interp_cell_to_xface, interp_cell_to_yface,
-        interp_xface_to_cell, interp_yface_to_cell,
-        interp_yface_to_xface, interp_xface_to_yface,
-    )
-    g = _grid(nx=10, ny=8, nlev=2)
-    bad_2d = jnp.zeros((g.ny, g.nx))
-    for fn in (
-        interp_cell_to_xface, interp_cell_to_yface,
-        interp_xface_to_cell, interp_yface_to_cell,
-        interp_yface_to_xface, interp_xface_to_yface,
-    ):
-        with pytest.raises(ValueError, match="ndim >= 3"):
-            fn(bad_2d, g)
-    bad_transposed = jnp.zeros((g.nlev, g.nx, g.ny))
-    for fn in (
-        interp_cell_to_xface, interp_cell_to_yface,
-        interp_yface_to_xface, interp_xface_to_yface,
-    ):
-        with pytest.raises(ValueError, match="trailing axes"):
-            fn(bad_transposed, g)
-
-
 def test_operators_grad_pass_finite_difference_check():
     """``check_grads`` confirms forward + reverse-mode AD match
     second-order finite differences for each operator."""

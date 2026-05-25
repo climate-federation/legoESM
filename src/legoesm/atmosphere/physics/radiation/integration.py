@@ -15,6 +15,7 @@ from __future__ import annotations
 import math
 from typing import Callable
 
+import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
@@ -1179,10 +1180,30 @@ def _make_spectral_pe_radiation(
 
     Transforms spectral state to Gaussian grid, computes radiation,
     then transforms temperature tendency back to spectral space.
+
+    Memory note (RRTMGP path)
+    -------------------------
+    ``two_stream.solve_lw`` / ``solve_sw`` iterate over 16 LW + 14 SW
+    bands, each accumulating per-layer flux intermediates that would
+    otherwise be stored for the autodiff backward pass.  Under
+    ``eqx.filter_value_and_grad`` over a 48-step daily rollout this
+    materializes hundreds of GiB at T21 L8 -- well past a single
+    consumer GPU (RTX 5090, 24 GiB).  We wrap the inner
+    ``_physics_fn_core`` in :func:`jax.checkpoint` with
+    ``nothing_saveable`` so the entire RRTMGP solve is recomputed
+    from scratch during backward.  The outer
+    ``jax.checkpoint(step_fn, prevent_cse=True)`` in
+    ``spectral_rollout`` already recomputes per-step activations; the
+    nested radiation checkpoint trades ~2x extra forward compute for
+    the activation-storage relief that lets the production AIMIP
+    run finish on a single GPU.
     """
     _time, set_time = _make_time_state()
 
-    def physics_fn(state, grid, sigma_coord, grid_fields=None):
+    def _physics_fn_core(
+        state, grid, sigma_coord, grid_fields=None,
+        sim_time_seconds=0.0,
+    ):
         # 1. Transform spectral state to grid space
         fields = grid_fields
         if fields is None:
@@ -1201,6 +1222,22 @@ def _make_spectral_pe_radiation(
         # Surface temperature = lowest level
         T_sfc = T[..., -1]  # (n_lat, n_lon)
 
+        # Effective time-of-day for the diurnal cycle.  ``_time`` holds
+        # the *initial* day_of_year + seconds_of_day captured at module
+        # import (or set via ``set_time`` between epochs); the scan
+        # body in :func:`spectral_rollout` passes the current
+        # in-rollout elapsed time as ``sim_time_seconds`` so each
+        # radiation evaluation sees the correct cos(SZA) at its hour
+        # of day.  Without this thread, all rad calls within a
+        # rollout would share the static initial-IC time and the
+        # diurnal pattern would be frozen (verified 2026-05-22 --
+        # the v10 production setup had this bug).
+        secs_init = _time["seconds_of_day"]
+        day_init = _time["day_of_year"]
+        total_secs = secs_init + sim_time_seconds
+        secs_eff = jnp.mod(total_secs, 86400.0)
+        day_eff = day_init + jnp.floor_divide(total_secs, 86400.0)
+
         # Insolation (with diurnal cycle support).
         # For diurnal cycle we need 2-D lat/lon; otherwise lat is 1-D and
         # the result is broadcast to (n_lat, n_lon).
@@ -1210,14 +1247,14 @@ def _make_spectral_pe_radiation(
             insol, cos_sza, f_day = _compute_insolation(
                 lat_2d, radiation_config,
                 lon=lon_2d,
-                day_of_year=_time["day_of_year"],
-                seconds_of_day=_time["seconds_of_day"],
+                day_of_year=day_eff,
+                seconds_of_day=secs_eff,
             )
         else:
             insol_1d, _, f_day_1d = _compute_insolation(
                 lat, radiation_config,
-                day_of_year=_time["day_of_year"],
-                seconds_of_day=_time["seconds_of_day"],
+                day_of_year=day_eff,
+                seconds_of_day=secs_eff,
             )
             insol = jnp.broadcast_to(insol_1d[:, None], (n_lat, n_lon))
             cos_sza = None
@@ -1274,6 +1311,29 @@ def _make_spectral_pe_radiation(
             lnps_hat=state.lnps_hat.replace(data=zero_2d),
             phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
         )
+
+    # Wrap the inner radiation compute in ``jax.checkpoint`` only for
+    # the RRTMGP path -- gray two-stream is cheap enough that the
+    # extra recompute on backward is wasted.  ``static_argnums`` skips
+    # ``grid`` and ``sigma_coord`` which are static (non-array)
+    # NamedTuples; ``grid_fields`` may be a pytree of grid-space
+    # arrays and flows through normally.
+    if radiation_config.scheme == "rrtmgp":
+        _physics_fn_ckpt = jax.checkpoint(
+            _physics_fn_core,
+            static_argnums=(1, 2),
+            prevent_cse=True,
+        )
+
+        def physics_fn(
+            state, grid, sigma_coord, grid_fields=None,
+            sim_time_seconds=0.0,
+        ):
+            return _physics_fn_ckpt(
+                state, grid, sigma_coord, grid_fields, sim_time_seconds,
+            )
+    else:
+        physics_fn = _physics_fn_core
 
     physics_fn.set_time = set_time
     return physics_fn

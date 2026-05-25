@@ -118,6 +118,41 @@ class NeuralGCMSpectralConfig(NamedTuple):
     n_train_days: int = 365      # Number of daily IC/target pairs
     start_year: int = 2015       # ERA5 year to use
 
+    # Rollout supervision horizon.  Legacy semantics: each IC/target
+    # pair is integrated for ``rollout_days * 24`` simulated hours.
+    # v12 adds ``rollout_hours`` for sub-daily horizons (AIMIP /
+    # NeuralGCM convention is 6-hour pairs).  When ``rollout_hours``
+    # is set explicitly it takes precedence; otherwise the loader
+    # falls back to ``rollout_days * 24``.  The ERA5 snapshots are
+    # loaded at the ``TrainingERA5Config.dt_hours`` cadence (6 h by
+    # default), so ``rollout_hours`` must be a multiple of 6.
+    rollout_days: int = 1
+    rollout_hours: int = 0   # 0 -> use rollout_days * 24
+
+    # Per-group learning-rate multiplier for AIMIP spatial-surface
+    # coefficients.  When the trainable model carries a
+    # ``spatial_surface`` field (AIMIPClassicalParams under
+    # ``spatial_surface=True``), these coefficients live in a
+    # low-rank Legendre x Fourier basis whose gradient magnitudes are
+    # typically much smaller than the sigmoid-bounded scheme scalars,
+    # so the base AIMIP LR (~3e-4) leaves them effectively untrained.
+    # A multiplier of 5-10 brings spatial-coef updates to the same
+    # rough scale as scheme-knob updates per step.  Default 1.0
+    # disables the per-group split (single-LR behavior).
+    spatial_lr_scale: float = 1.0
+
+    # Step period between radiation re-evaluations during the rollout.
+    # When > 1, ``make_physics_fn`` is expected to return a tuple
+    # ``(non_rad_fn, rad_fn)`` and :func:`spectral_rollout` gates the
+    # rad call via ``lax.cond`` on the scan step index, caching the
+    # last heating tendency between recomputes.  This drops RRTMGP
+    # backward-pass memory and forward compute by ``N`` x at the cost
+    # of holding the radiation tendency constant for the gating window
+    # (acceptable for AIMIP forecast losses where the rad time scale
+    # is ~hours, not seconds).  Default 1 = compute every step
+    # (legacy combined physics_fn).
+    rad_update_interval: int = 1
+
     # Loss
     loss_config: LossConfig = LossConfig()
 
@@ -433,6 +468,25 @@ def _compute_tracer_filter(
     return combined
 
 
+def _add_phys_tendencies(a, b):
+    """Sum two physics tendency :class:`SpectralHydrostaticState`s.
+
+    Both inputs share the dycore-tendency layout used by
+    ``make_physics`` (Equinox Fields wrapping per-mode/per-level
+    arrays).  This helper walks the field tree and adds the
+    underlying ``.data`` arrays so that "non-rad" and "rad-only"
+    physics_fn outputs can be combined under :func:`spectral_rollout`
+    when the rad branch is gated by ``rad_update_interval > 1``.
+    """
+    def _sum(x, y):
+        if hasattr(x, "data") and hasattr(y, "data"):
+            return x.replace(data=x.data + y.data)
+        return x + y
+    return jax.tree_util.tree_map(
+        _sum, a, b, is_leaf=lambda obj: hasattr(obj, "data"),
+    )
+
+
 def spectral_rollout(
     initial_state: SpectralHydrostaticState,
     physics_fn,
@@ -443,6 +497,8 @@ def spectral_rollout(
     n_steps: int,
     sponge_factor: jnp.ndarray | None = None,
     spectral_filter: jnp.ndarray | None = None,
+    rad_physics_fn=None,
+    rad_update_interval: int = 1,
 ) -> SpectralHydrostaticState:
     """Roll out spectral PE + SFNO physics for n_steps using lax.scan.
 
@@ -464,7 +520,9 @@ def spectral_rollout(
         Initial condition in spectral space.
     physics_fn : callable
         ``(state, grid, sigma_coord) -> SpectralHydrostaticState``
-        SFNO physics function from ``make_sfno_spectral_physics``.
+        Physics-tendency function for every-step schemes.  When
+        ``rad_physics_fn`` is supplied this should be the *non-rad*
+        contribution; otherwise it is the combined contribution.
     grid : GaussianGrid
     sigma_coord : SigmaCoordinate
     pe_config : SpectralPEConfig
@@ -476,6 +534,21 @@ def spectral_rollout(
         Precomputed sponge damping factors per level.
     spectral_filter : array or None
         Precomputed exponential spectral filter.
+    rad_physics_fn : callable or None
+        Optional separate radiation-tendency callable.  When provided,
+        the radiation contribution is evaluated only at step indices
+        divisible by ``rad_update_interval`` (and at step 0); on
+        intervening steps the cached previous heating tendency is
+        added to ``physics_fn``'s non-rad contribution.  This keeps
+        the backward-pass memory footprint and forward compute of the
+        expensive RRTMGP solve under control on a 48-step daily
+        rollout (one rad call instead of 48 when
+        ``rad_update_interval=48``).  None disables gating; the
+        legacy single-physics_fn path runs.
+    rad_update_interval : int
+        Step period between radiation re-evaluations.  Only used when
+        ``rad_physics_fn`` is non-None.  Default 1 = compute every
+        step (same as a single combined physics_fn).
 
     Returns
     -------
@@ -492,26 +565,122 @@ def spectral_rollout(
         grid, pe_config, spectral_filter, dt,
     )
 
-    def tendency_fn(s):
-        phys = physics_fn(s, grid, sigma_coord)
-        return spectral_pe_tendencies(s, grid, sigma_coord, pe_config, phys)
+    use_rad_gating = rad_physics_fn is not None and rad_update_interval > 1
 
-    def step_fn(state, _):
-        new_state = dispatch_integrator(state, tendency_fn, dt, integrator_name)
+    if not use_rad_gating:
+        # Legacy single-physics path -- physics_fn computes the full
+        # tendency (radiation included or absent) every dycore step.
+        def tendency_fn(s):
+            phys = physics_fn(s, grid, sigma_coord)
+            return spectral_pe_tendencies(s, grid, sigma_coord, pe_config, phys)
 
-        # Implicit sponge damping at model top
+        def step_fn(state, _):
+            new_state = dispatch_integrator(
+                state, tendency_fn, dt, integrator_name,
+            )
+
+            # Implicit sponge damping at model top
+            if sponge_factor is not None:
+                new_state = _apply_sponge_filter(new_state, sponge_factor, ms)
+
+            # Exponential spectral filter on highest wavenumbers
+            if spectral_filter is not None:
+                new_state = _apply_spectral_filter_to_state(
+                    new_state, spectral_filter,
+                )
+
+            # Combined spectral + implicit hyperdiff applied to grid-space
+            # tracers via one SH round-trip per tracer per step (no-op when
+            # tracer_filter is None or state.tracers is None).
+            if tracer_filter is not None and new_state.tracers is not None:
+                new_state = new_state._replace(
+                    tracers=_apply_filter_to_tracers(
+                        new_state.tracers, tracer_filter, grid,
+                    )
+                )
+
+            return new_state, None
+
+        # ``prevent_cse=True`` plus ``policy=nothing_saveable`` is the
+        # most aggressive memory-saving mode: every intermediate is
+        # recomputed during backward.  Necessary on a 48-step daily
+        # rollout with RRTMGP enabled (the gas-optics + two-stream
+        # solver allocate hundreds of GiB of activations otherwise).
+        # Gray-radiation runs are insensitive to this choice.
+        step_fn_ckpt = jax.checkpoint(
+            step_fn,
+            prevent_cse=True,
+            policy=jax.checkpoint_policies.nothing_saveable,
+        )
+
+        final_state, _ = jax.lax.scan(
+            step_fn_ckpt, initial_state, None, length=n_steps,
+        )
+        return final_state
+
+    # Rad-gating path: ``physics_fn`` is the *non-rad* contribution,
+    # evaluated every dycore step; ``rad_physics_fn`` is evaluated
+    # only when ``step_idx % rad_update_interval == 0``, and its
+    # output is cached in the scan carry for the intervening
+    # ``rad_update_interval - 1`` steps.  This drops RRTMGP backward-
+    # pass memory and forward compute by ``rad_update_interval`` x at
+    # the cost of holding the radiation tendency constant for the
+    # gating window (acceptable for the AIMIP daily forecast loss
+    # where the rad time scale is ~hours, not seconds).
+    # ``rad_physics_fn`` accepts an optional ``sim_time_seconds``
+    # kwarg used by the radiation diurnal cycle in
+    # :func:`_make_spectral_pe_radiation` -- threading the current
+    # scan step's elapsed time lets each rad evaluation see the
+    # correct hour-of-day cos(SZA) instead of the static IC time
+    # (the latter was the v10 behaviour and froze the diurnal
+    # pattern; v11 fix).  Callers whose rad function predates the
+    # kwarg still work because they ignore extra kwargs via the
+    # ``physics_fn(... , grid_fields=None, sim_time_seconds=0.0)``
+    # default in the integration wrapper.
+    def _call_rad(s, t_seconds):
+        try:
+            return rad_physics_fn(
+                s, grid, sigma_coord, sim_time_seconds=t_seconds,
+            )
+        except TypeError:
+            # Legacy rad_physics_fn signature without sim_time_seconds.
+            return rad_physics_fn(s, grid, sigma_coord)
+
+    init_rad_tendency = _call_rad(initial_state, 0.0)
+
+    def step_fn_gated(carry, step_idx):
+        state, cached_rad_tendency = carry
+
+        # Refresh rad tendency at the start of every gating window.
+        # ``lax.cond`` retains backward-mode differentiability through
+        # the rad branch; on skipped steps the cached tensor flows
+        # through unchanged.
+        should_refresh = (step_idx % rad_update_interval) == 0
+        sim_time_seconds = step_idx.astype(jnp.float64) * dt
+        new_rad_tendency = jax.lax.cond(
+            should_refresh,
+            lambda _: _call_rad(state, sim_time_seconds),
+            lambda _: cached_rad_tendency,
+            operand=None,
+        )
+
+        def tendency_fn(s):
+            non_rad_phys = physics_fn(s, grid, sigma_coord)
+            combined_phys = _add_phys_tendencies(non_rad_phys, new_rad_tendency)
+            return spectral_pe_tendencies(
+                s, grid, sigma_coord, pe_config, combined_phys,
+            )
+
+        new_state = dispatch_integrator(
+            state, tendency_fn, dt, integrator_name,
+        )
+
         if sponge_factor is not None:
             new_state = _apply_sponge_filter(new_state, sponge_factor, ms)
-
-        # Exponential spectral filter on highest wavenumbers
         if spectral_filter is not None:
             new_state = _apply_spectral_filter_to_state(
                 new_state, spectral_filter,
             )
-
-        # Combined spectral + implicit hyperdiff applied to grid-space
-        # tracers via one SH round-trip per tracer per step (no-op when
-        # tracer_filter is None or state.tracers is None).
         if tracer_filter is not None and new_state.tracers is not None:
             new_state = new_state._replace(
                 tracers=_apply_filter_to_tracers(
@@ -519,12 +688,18 @@ def spectral_rollout(
                 )
             )
 
-        return new_state, None
+        return (new_state, new_rad_tendency), None
 
-    step_fn_ckpt = jax.checkpoint(step_fn, prevent_cse=False)
+    step_fn_ckpt = jax.checkpoint(
+        step_fn_gated,
+        prevent_cse=True,
+        policy=jax.checkpoint_policies.nothing_saveable,
+    )
 
-    final_state, _ = jax.lax.scan(
-        step_fn_ckpt, initial_state, None, length=n_steps,
+    (final_state, _), _ = jax.lax.scan(
+        step_fn_ckpt,
+        (initial_state, init_rad_tendency),
+        jnp.arange(n_steps),
     )
     return final_state
 
@@ -580,19 +755,71 @@ def spectral_state_vs_carry_loss(
     else:
         T_norm = wind_norm = q_norm = ps_norm = 1.0
 
+    # Latitude-weighted mean over the Gaussian grid for the bias-
+    # penalty term.  ``grid.weights`` are Gaussian-quadrature
+    # latitude weights; combined with uniform longitude weighting
+    # this gives an area-weighted global mean.
+    lat_w = grid.weights.astype(jnp.float32)
+    lat_w_sum = jnp.sum(lat_w)
+
+    def _area_weighted_mean_3d(field):
+        # (n_lat, n_lon, nlev) -> level-weighted scalar bias.
+        # Average over lon, weight by Gaussian quadrature in lat,
+        # then sum over level (already level-weighted via lev_w).
+        zonal = jnp.mean(field, axis=1)        # (n_lat, nlev)
+        weighted_lat = jnp.sum(zonal * lat_w[:, None], axis=0) / lat_w_sum
+        return jnp.sum(weighted_lat * lev_w) / lev_w.shape[0]
+
+    def _area_weighted_mean_2d(field):
+        zonal = jnp.mean(field, axis=1)        # (n_lat,)
+        return jnp.sum(zonal * lat_w) / lat_w_sum
+
     # Temperature: (n_lat, n_lon, nlev)
     dT = fields['T'].astype(jnp.float32) - target_carry.T
     loss = loss + config.w_T * jnp.mean(dT ** 2 * lev_w) / T_norm
+    if config.w_bias_T > 0.0:
+        bias_T = _area_weighted_mean_3d(dT)
+        loss = loss + config.w_bias_T * bias_T ** 2 / T_norm
 
     # Winds: (n_lat, n_lon, nlev)
     du = fields['u'].astype(jnp.float32) - target_carry.u
     dv = fields['v'].astype(jnp.float32) - target_carry.v
     loss = loss + config.w_u * jnp.mean(du ** 2 * lev_w) / wind_norm
     loss = loss + config.w_v * jnp.mean(dv ** 2 * lev_w) / wind_norm
+    if config.w_bias_u > 0.0:
+        bias_u = _area_weighted_mean_3d(du)
+        loss = loss + config.w_bias_u * bias_u ** 2 / wind_norm
+    if config.w_bias_v > 0.0:
+        bias_v = _area_weighted_mean_3d(dv)
+        loss = loss + config.w_bias_v * bias_v ** 2 / wind_norm
+
+    # CRPS contribution (deterministic = MAE).  The fair-CRPS for a
+    # single-member forecast (M=1) reduces to area-weighted |pred -
+    # target|; the M>=2 fair-CRPS would subtract the ensemble
+    # self-spread term ``(1/(2M(M-1))) Σ |x_m - x_m'|``, but we don't
+    # have an ensemble here.  We normalise by the variable scale
+    # (NOT scale^2) because |error| has units of the variable, not
+    # variance.  Weights ``w_crps_{T,u,v,ps}`` default to 0; setting
+    # them non-zero combines an MAE + MSE objective in the NeuralGCM
+    # style.
+    T_scale = config.T_scale if config.normalize_by_scale else 1.0
+    wind_scale = config.wind_scale if config.normalize_by_scale else 1.0
+    ps_scale = config.ps_scale if config.normalize_by_scale else 1.0
+    if config.w_crps_T > 0.0:
+        loss = loss + config.w_crps_T * jnp.mean(jnp.abs(dT) * lev_w) / T_scale
+    if config.w_crps_u > 0.0:
+        loss = loss + config.w_crps_u * jnp.mean(jnp.abs(du) * lev_w) / wind_scale
+    if config.w_crps_v > 0.0:
+        loss = loss + config.w_crps_v * jnp.mean(jnp.abs(dv) * lev_w) / wind_scale
 
     # Surface pressure: (n_lat, n_lon)
     dp = fields['p_s'].astype(jnp.float32) - target_carry.p_s
     loss = loss + config.w_ps * jnp.mean(dp ** 2) / ps_norm
+    if config.w_crps_ps > 0.0:
+        loss = loss + config.w_crps_ps * jnp.mean(jnp.abs(dp)) / ps_scale
+    if config.w_bias_ps > 0.0:
+        bias_ps = _area_weighted_mean_2d(dp)
+        loss = loss + config.w_bias_ps * bias_ps ** 2 / ps_norm
 
     # Specific humidity (q_v): contribute to the loss only when the
     # predicted state actually carries a ``q_v`` tracer (i.e., the
@@ -683,38 +910,77 @@ def load_training_data(
             )
             return heuristic
 
+    rollout_days = int(getattr(config, "rollout_days", 1) or 1)
+    if rollout_days < 1:
+        raise ValueError(
+            f"config.rollout_days must be >= 1, got {rollout_days!r}."
+        )
+    # v12: ``rollout_hours`` lets the supervision horizon drop below
+    # one day (AIMIP / NeuralGCM convention is 6 h).  Fallback to the
+    # legacy daily horizon when not set.  ERA5 cadence is fixed at
+    # ``era5_config.dt_hours`` (6 h by default); ``rollout_hours``
+    # must be a multiple of that, and so must the per-IC stride
+    # ``ic_stride_units`` (which advances the IC by one ERA5 snapshot
+    # = 6 h between consecutive pairs).
+    rollout_hours_cfg = int(getattr(config, "rollout_hours", 0) or 0)
+    if rollout_hours_cfg > 0:
+        rollout_hours = rollout_hours_cfg
+    else:
+        rollout_hours = rollout_days * 24
+    era5_dt_hours = int(era5_config.dt_hours)
+    if rollout_hours % era5_dt_hours != 0:
+        raise ValueError(
+            f"rollout_hours={rollout_hours} must be a multiple of "
+            f"era5_dt_hours={era5_dt_hours}."
+        )
+    rollout_stride = rollout_hours // era5_dt_hours          # snapshot units between IC and target
+    snapshots_per_day = 24 // era5_dt_hours                  # 4 at 6h cadence
+    ic_stride_units = 1                                      # one snapshot between consecutive ICs
+
     if windows:
         # AIMIP-style multi-window contiguous sampling.  Each window
-        # contributes its own (n_days+1) snapshots; pairs are only
-        # formed within a window so no cross-window leakage occurs.
+        # spec is ``(year, day_offset, n_days)``.  v12: with sub-daily
+        # rollouts we still describe windows in DAYS at the YAML
+        # level, but expand each window to one IC per ERA5 snapshot
+        # (4 per day at 6 h cadence).  Pairs are formed inside the
+        # window only -- no cross-window leakage.
         window_specs: list[tuple[int, int, int]] = [
             (int(y), int(off), int(n)) for (y, off, n) in windows
         ]
         time_indices: list[int] = []
-        window_offsets: list[tuple[int, int]] = []  # (start_in_time_indices, n_days)
+        window_offsets: list[tuple[int, int]] = []  # (start_in_time_indices, n_ics)
         for (year, day_offset, n_days_w) in window_specs:
-            start_idx_w = _year_to_idx(year) + int(day_offset) * 4
+            if n_days_w < 1:
+                raise ValueError(
+                    f"Window {(year, day_offset, n_days_w)} has n_days < 1."
+                )
+            start_idx_w = _year_to_idx(year) + int(day_offset) * snapshots_per_day
             base = len(time_indices)
+            n_ics_w = n_days_w * snapshots_per_day
+            n_snapshots_w = n_ics_w + rollout_stride
             time_indices.extend(
-                start_idx_w + d * 4 for d in range(n_days_w + 1)
+                start_idx_w + s for s in range(n_snapshots_w)
             )
-            window_offsets.append((base, n_days_w))
-        n_days = sum(w[2] for w in window_specs)
+            window_offsets.append((base, n_ics_w))
+        n_pairs = sum(w[1] for w in window_offsets)
         logger.info(
-            f"Loading {n_days} daily ERA5 pairs across "
-            f"{len(window_specs)} windows: "
+            f"Loading {n_pairs} ERA5 pairs "
+            f"(rollout={rollout_hours}h, era5 cadence={era5_dt_hours}h) "
+            f"across {len(window_specs)} windows: "
             + ", ".join(f"{y}@day{o}+{n}" for (y, o, n) in window_specs)
             + f" ({len(time_indices)} snapshots)..."
         )
     else:
         n_days = config.n_train_days
+        n_ics = n_days * snapshots_per_day
         start_idx = _year_to_idx(config.start_year)
-        time_indices = [start_idx + d * 4 for d in range(n_days + 1)]
-        window_offsets = [(0, n_days)]
+        time_indices = [start_idx + s for s in range(n_ics + rollout_stride)]
+        window_offsets = [(0, n_ics)]
         logger.info(
-            f"Loading {n_days} daily ERA5 pairs from year "
-            f"{config.start_year} (start_idx={start_idx}; opening Zarr "
-            f"store once, reading {len(time_indices)} snapshots)..."
+            f"Loading {n_ics} ERA5 pairs "
+            f"(rollout={rollout_hours}h, era5 cadence={era5_dt_hours}h) "
+            f"from year {config.start_year} (start_idx={start_idx}; "
+            f"opening Zarr store once, reading {len(time_indices)} snapshots)..."
         )
 
     # Read lat/lon and pressure levels
@@ -792,15 +1058,23 @@ def load_training_data(
 
     logger.info(f"Loaded {len(time_indices)} snapshots ({_time.time()-t0:.0f}s)")
 
-    # Build IC/target pairs (per-window so no cross-window leakage)
+    # Build IC/target pairs (per-window so no cross-window leakage).
+    # Target is ``carry[base + d + rollout_stride]`` where stride is
+    # in ERA5-snapshot units (1 = era5_dt_hours).  The loss
+    # supervises the rollout end-state ``rollout_hours`` ahead.
     ic_states = []
     target_carries = []
+    n_total_pairs = 0
     for (base, n_w) in window_offsets:
         for d in range(n_w):
             ic_states.append(carry_to_spectral_state(carries[base + d], grid))
-            target_carries.append(carries[base + d + 1])
+            target_carries.append(carries[base + d + rollout_stride])
+            n_total_pairs += 1
 
-    logger.info(f"Built {n_days} IC/target pairs across {len(window_offsets)} window(s)")
+    logger.info(
+        f"Built {n_total_pairs} IC/target pairs "
+        f"(rollout={rollout_hours}h) across {len(window_offsets)} window(s)"
+    )
     return ic_states, target_carries
 
 
@@ -856,36 +1130,149 @@ def _train_spectral_loop(
     from legoesm.ml.training import TrainingConfig, create_optimizer
 
     n_steps_per_day = int(86400 / config.dt)
-    optimizer = create_optimizer(TrainingConfig(
+    rollout_days = int(getattr(config, "rollout_days", 1) or 1)
+    rollout_hours_cfg = int(getattr(config, "rollout_hours", 0) or 0)
+    rollout_hours = rollout_hours_cfg if rollout_hours_cfg > 0 else rollout_days * 24
+    n_steps_rollout = int(round(rollout_hours * 3600.0 / config.dt))
+    total_steps = max(1, config.n_epochs * max(1, len(ic_states)))
+    base_optimizer = create_optimizer(TrainingConfig(
         lr=config.lr,
         warmup_steps=config.warmup_steps,
-        total_steps=max(1, config.n_epochs * max(1, len(ic_states))),
+        total_steps=total_steps,
         weight_decay=config.weight_decay,
         grad_clip_norm=config.grad_clip_norm,
         optimizer=config.optimizer,
     ))
+
+    # Per-group LR partitioning for AIMIP spatial-surface coefficients.
+    # When ``model.spatial_surface`` is present and the user has asked
+    # for a non-default ``spatial_lr_scale``, build a second optimizer
+    # at the scaled LR and route spatial-coef leaves to it via
+    # ``optax.multi_transform``.  Detection is purely structural: any
+    # leaf whose path contains the substring ``spatial_surface`` is
+    # treated as a spatial coefficient, so the partition works for any
+    # eqx.Module that nests a :class:`AIMIPSpatialSurfaceParams` under
+    # that attribute name.
+    spatial_lr_scale = float(getattr(config, "spatial_lr_scale", 1.0) or 1.0)
+    has_spatial = getattr(model, "spatial_surface", None) is not None
+    if has_spatial and spatial_lr_scale != 1.0:
+        spatial_optimizer = create_optimizer(TrainingConfig(
+            lr=config.lr * spatial_lr_scale,
+            warmup_steps=config.warmup_steps,
+            total_steps=total_steps,
+            weight_decay=config.weight_decay,
+            grad_clip_norm=config.grad_clip_norm,
+            optimizer=config.optimizer,
+        ))
+
+        def _label_aimip_params(params):
+            def _label(path, _leaf):
+                path_str = "/".join(
+                    str(getattr(p, "name", p) if hasattr(p, "name") else p)
+                    for p in path
+                )
+                return "spatial" if "spatial_surface" in path_str else "base"
+            return jax.tree_util.tree_map_with_path(_label, params)
+
+        optimizer = optax.multi_transform(
+            {"spatial": spatial_optimizer, "base": base_optimizer},
+            _label_aimip_params,
+        )
+        logger.info(
+            f"Per-group LR: spatial coefs at lr={config.lr * spatial_lr_scale:.2e} "
+            f"(x{spatial_lr_scale}), scalar/MLP at lr={config.lr:.2e}"
+        )
+    else:
+        optimizer = base_optimizer
+
     opt_state = optimizer.init(eqx.filter(model, eqx.is_array))
     loss_history = []
 
     logger.info(
         f"Training: {config.n_epochs} epochs, "
         f"{len(ic_states)} samples/epoch, "
-        f"{n_steps_per_day} dycore steps/day (dt={config.dt}s)"
+        f"{n_steps_per_day} dycore steps/day (dt={config.dt}s), "
+        f"rollout_hours={rollout_hours} -> {n_steps_rollout} steps/sample"
     )
 
-    def make_loss_fn(ic_spectral, target_carry):
+    # Build the JIT-compiled train step ONCE outside the per-sample
+    # loop.  The previous implementation built ``loss_fn`` -- and
+    # therefore the ``physics_fn`` Python closure tree -- on every
+    # gradient call, hitting the ``CLAUDE.md`` anti-pattern documented
+    # under "Never build closures inside training loops" and leaking
+    # ~1.5 GiB of Python/XLA metadata per sample at T11 L6 under
+    # RRTMGP (verified 2026-05-17; OOM-killed mid-epoch-1).  Wrapping
+    # the whole step in :func:`eqx.filter_jit` traces the build path
+    # exactly once and caches the resulting XLA graph; subsequent
+    # samples are pure GPU-bound forward+backward+update calls.
+    #
+    # ``make_physics_fn`` is a Python callable captured in the closure
+    # (non-array, not a JIT input).  ``optimizer`` is likewise an
+    # ``optax.GradientTransformation`` captured in the closure --
+    # ``filter_jit`` traces it as a static argument.
+    rad_update_interval = int(
+        getattr(config, "rad_update_interval", 1) or 1
+    )
+
+    # Pre-warm the RRTMGP optics-table cache OUTSIDE the
+    # ``filter_jit``-wrapped train step.  ``RRTMGP.preload`` reads
+    # NetCDF gas-optics tables (``bnd_limits_gpt`` et al.) at first
+    # call and stashes the resulting ``optics_lib`` in a module-level
+    # cache keyed by the static file paths.  When the first
+    # invocation happens inside ``eqx.filter_value_and_grad`` the
+    # NetCDF-load path hits the Equinox-tracer state and crashes with
+    # ``TracerArrayConversionError`` (verified 2026-05-18).  A
+    # concrete-args call here populates the cache so the inside-trace
+    # calls hit the cache and skip the load entirely.
+    try:
+        _warmup_physics = make_physics_fn(model, grid)
+        del _warmup_physics
+    except Exception as exc:
+        logger.warning(
+            f"RRTMGP cache warm-up call raised {exc!r}; continuing "
+            "(the first jitted train step will retry under tracing -- "
+            "if that also fails you likely hit a non-AIMIP physics path)."
+        )
+
+    def _train_step(model, opt_state, ic_spectral, target_carry):
         def loss_fn(m):
-            physics_fn = make_physics_fn(m, grid)
-            pred = spectral_rollout(
-                ic_spectral, physics_fn, grid, sigma, pe_config,
-                config.dt, n_steps_per_day,
-                sponge_factor, spectral_filter,
-            )
+            physics = make_physics_fn(m, grid)
+            # ``make_physics_fn`` may return either a single
+            # combined-physics callable (legacy / sfno / column_nn
+            # paths) or a ``(non_rad_fn, rad_fn)`` tuple (AIMIP
+            # classical with ``split_rad=True``).  Dispatch through
+            # the rad-gating branch of spectral_rollout when we get a
+            # tuple AND the configured interval is greater than 1.
+            if isinstance(physics, tuple):
+                non_rad_fn, rad_fn = physics
+                pred = spectral_rollout(
+                    ic_spectral, non_rad_fn, grid, sigma, pe_config,
+                    config.dt, n_steps_rollout,
+                    sponge_factor, spectral_filter,
+                    rad_physics_fn=rad_fn,
+                    rad_update_interval=rad_update_interval,
+                )
+            else:
+                pred = spectral_rollout(
+                    ic_spectral, physics, grid, sigma, pe_config,
+                    config.dt, n_steps_rollout,
+                    sponge_factor, spectral_filter,
+                )
             return spectral_state_vs_carry_loss(
                 pred, target_carry, grid, sigma,
                 sigma_full, config.loss_config,
             )
-        return loss_fn
+        loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
+        grad_norm = optax.global_norm(eqx.filter(grads, eqx.is_array))
+        updates, new_opt_state = optimizer.update(
+            eqx.filter(grads, eqx.is_array),
+            opt_state,
+            eqx.filter(model, eqx.is_array),
+        )
+        new_model = eqx.apply_updates(model, updates)
+        return new_model, new_opt_state, loss, grad_norm
+
+    train_step = eqx.filter_jit(_train_step)
 
     best_loss = float("inf")
     patience_counter = 0
@@ -898,8 +1285,9 @@ def _train_spectral_loop(
         grad_norm_val = 0.0
 
         for sample_idx, (ic, target) in enumerate(zip(ic_states, target_carries)):
-            loss_fn = make_loss_fn(ic, target)
-            loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
+            model, opt_state, loss, grad_norm = train_step(
+                model, opt_state, ic, target,
+            )
 
             # --- NaN / Inf detection (outside JIT, values are materialized) ---
             loss_val = float(loss)
@@ -909,7 +1297,6 @@ def _train_spectral_loop(
                     f"(loss={loss_val}). "
                     "Check CFL conditions, parameter bounds, and input data."
                 )
-            grad_norm = optax.global_norm(eqx.filter(grads, eqx.is_array))
             grad_norm_val = float(grad_norm)
             if jnp.isnan(grad_norm) or jnp.isinf(grad_norm):
                 raise RuntimeError(
@@ -919,13 +1306,6 @@ def _train_spectral_loop(
                 )
 
             epoch_loss += loss_val
-
-            updates, opt_state = optimizer.update(
-                eqx.filter(grads, eqx.is_array),
-                opt_state,
-                eqx.filter(model, eqx.is_array),
-            )
-            model = eqx.apply_updates(model, updates)
 
         avg_loss = epoch_loss / max(len(ic_states), 1)
         loss_history.append(avg_loss)

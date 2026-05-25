@@ -39,7 +39,7 @@ Three things that make it different from a traditional ESM:
 ## 2. Install (5 commands)
 
 ```bash
-git clone https://github.com/leap-stc/legoESM.git
+git clone https://github.com/gentine/legoESM.git
 cd legoESM
 python -m venv .venv
 source .venv/bin/activate

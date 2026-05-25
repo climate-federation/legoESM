@@ -89,6 +89,14 @@ def _apply_smoke_overrides(cfg: dict[str, Any]) -> dict[str, Any]:
         aimip_n_epochs=1,
         aimip_warmup=1,
         dt=1800.0,
+        # Force the cheap radiation backend + single-day rollout for
+        # smoke runs.  The full AIMIP base config defaults to RRTMGP +
+        # spatial surface fields for production training, but those
+        # add ~10x compile cost and aren't useful for smoke-level
+        # end-to-end verification.
+        aimip_radiation="gray",
+        aimip_spatial_surface=False,
+        aimip_rollout_days=1,
     ))
     return cfg
 
@@ -139,6 +147,10 @@ def _build_spectral_config(cfg: dict[str, Any]):
             tuple(int(x) for x in w[:3])
             for w in (cfg.get("train_windows") or ())
         ) or None,
+        rollout_days=int(cfg.get("aimip_rollout_days", 1)),
+        rollout_hours=int(cfg.get("aimip_rollout_hours", 0)),
+        spatial_lr_scale=float(cfg.get("aimip_spatial_lr_scale", 1.0)),
+        rad_update_interval=int(cfg.get("aimip_rad_update_interval", 1)),
         loss_config=loss_config,
         log_every=int(cfg.get("log_every", 1)),
         checkpoint_dir=str(Path(cfg["output_dir"]) / cfg["aimip_variant"]),
@@ -203,9 +215,23 @@ def _train_aimip_classical(spec_cfg, cache_dir: str, *, cfg: dict | None = None)
         spec_cfg.n_levels, sigma_top=spec_cfg.sigma_top,
     )
 
-    params = AIMIPClassicalParams.from_defaults()
+    spatial_surface = bool(cfg.get("aimip_spatial_surface", False))
+    params = AIMIPClassicalParams.from_defaults(
+        spatial_surface=spatial_surface,
+        spatial_init_std=float(cfg.get("aimip_spatial_init_std", 0.0)),
+        spatial_seed=int(cfg.get("aimip_spatial_seed", 0)),
+    )
+    n_scalar = len(params.raw_values)
+    n_spatial = (
+        params.spatial_surface.n_trainable() if params.spatial_surface else 0
+    )
     logger.info(
-        f"AIMIPClassicalParams: {len(params.raw_values)} trainable scheme knobs"
+        f"AIMIPClassicalParams: {n_scalar} trainable scheme knobs"
+        + (
+            f" + {n_spatial} spatial coefs across "
+            f"{len(params.spatial_surface.fields)} surface fields"
+            if spatial_surface else ""
+        )
     )
 
     ic_states, target_carries = load_training_data(
@@ -217,11 +243,31 @@ def _train_aimip_classical(spec_cfg, cache_dir: str, *, cfg: dict | None = None)
     radiation = str(cfg.get("aimip_radiation", "gray"))
     rad_update_interval = int(cfg.get("aimip_rad_update_interval", 6))
 
+    # Derive the land mask from surface geopotential (phis > 0 over
+    # land).  Static across samples so we extract it once.  Using a
+    # soft sigmoid keeps the lat-lon surface-parameter gradients
+    # smooth across coastlines (vs. a hard step that would clip them).
+    land_mask = None
+    if spatial_surface and target_carries:
+        from legoesm.training.aimip_spatial import land_mask_from_phis
+        land_mask = land_mask_from_phis(
+            jnp.asarray(target_carries[0].phis), smooth=True,
+        )
+
+    # When rad gating is on (``aimip_rad_update_interval > 1``),
+    # ``make_aimip_classical_spectral_physics`` returns a
+    # ``(non_rad_fn, rad_fn)`` tuple and the rollout uses lax.cond
+    # to compute the RRTMGP step periodically.  Otherwise the legacy
+    # single-callable path runs.
+    split_rad = rad_update_interval > 1
+
     def _make_physics_fn(p, grid_):
         return make_aimip_classical_spectral_physics(
             p, grid_, dt,
             radiation=radiation,
             rad_update_interval_steps=rad_update_interval,
+            land_mask=land_mask,
+            split_rad=split_rad,
         )
 
     return _train_spectral_loop(
@@ -300,14 +346,38 @@ def _evaluate_variant(
 
     sigma_full = jnp.asarray(sigma.sigma_full)
     n_steps_per_day = int(86400 / spec_cfg.dt)
+    eval_rollout_days = int(getattr(spec_cfg, "rollout_days", 1) or 1)
+    eval_rollout_hours_cfg = int(getattr(spec_cfg, "rollout_hours", 0) or 0)
+    eval_rollout_hours = (
+        eval_rollout_hours_cfg
+        if eval_rollout_hours_cfg > 0
+        else eval_rollout_days * 24
+    )
+    n_steps_eval = int(round(eval_rollout_hours * 3600.0 / spec_cfg.dt))
+    eval_rad_interval = int(cfg.get("aimip_rad_update_interval", 1))
 
     # Build the per-variant physics_fn (model is frozen for eval).
+    eval_physics_pair = None  # (non_rad_fn, rad_fn) when split active
     if variant == "classical":
-        physics_fn = make_aimip_classical_spectral_physics(
+        eval_land_mask = None
+        if bool(cfg.get("aimip_spatial_surface", False)) and target_carries:
+            from legoesm.training.aimip_spatial import land_mask_from_phis
+            eval_land_mask = land_mask_from_phis(
+                jnp.asarray(target_carries[0].phis), smooth=True,
+            )
+        eval_split_rad = eval_rad_interval > 1
+        built = make_aimip_classical_spectral_physics(
             trained_model, grid, spec_cfg.dt,
             radiation=str(cfg.get("aimip_radiation", "gray")),
-            rad_update_interval_steps=int(cfg.get("aimip_rad_update_interval", 6)),
+            rad_update_interval_steps=eval_rad_interval,
+            land_mask=eval_land_mask,
+            split_rad=eval_split_rad,
         )
+        if isinstance(built, tuple):
+            eval_physics_pair = built
+            physics_fn = built[0]  # non-rad; rad threaded separately
+        else:
+            physics_fn = built
     elif variant == "column_nn":
         physics_fn = make_column_mlp_spectral_physics(trained_model, grid)
     elif variant in ("sfno_physics", "sfno_full"):
@@ -324,11 +394,21 @@ def _evaluate_variant(
     weights = jnp.asarray(grid.weights)
 
     for ic, target in zip(ic_states, target_carries):
-        pred = spectral_rollout(
-            ic, physics_fn, grid, sigma, pe_config,
-            spec_cfg.dt, n_steps_per_day,
-            sponge_factor, spectral_filter,
-        )
+        if eval_physics_pair is not None:
+            non_rad_fn, rad_fn = eval_physics_pair
+            pred = spectral_rollout(
+                ic, non_rad_fn, grid, sigma, pe_config,
+                spec_cfg.dt, n_steps_eval,
+                sponge_factor, spectral_filter,
+                rad_physics_fn=rad_fn,
+                rad_update_interval=eval_rad_interval,
+            )
+        else:
+            pred = spectral_rollout(
+                ic, physics_fn, grid, sigma, pe_config,
+                spec_cfg.dt, n_steps_eval,
+                sponge_factor, spectral_filter,
+            )
         losses.append(float(
             spectral_state_vs_carry_loss(
                 pred, target, grid, sigma, sigma_full, spec_cfg.loss_config,

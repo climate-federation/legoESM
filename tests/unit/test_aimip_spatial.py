@@ -1,0 +1,421 @@
+"""Unit tests for :mod:`legoesm.training.aimip_spatial`.
+
+Covers:
+
+1. :func:`spatial_basis` builds a normalized Legendre x Fourier basis
+   of the right shape and dtype, and the basis functions are
+   approximately orthogonal under area-weighted integration on a
+   coarse Gaussian grid.
+
+2. :class:`SpatialField` with zero coefficients reduces to the
+   global baseline ``f_0`` (verified pointwise).
+
+3. :class:`SpatialField` ``log_perturb`` transform stays strictly
+   positive and respects the configured perturbation range.
+
+4. :class:`AIMIPSpatialSurfaceParams.from_defaults` initializes
+   every expected field at the baseline value.
+
+5. ``land_mask_from_phis`` is bounded in [0, 1] and produces a near-
+   step transition through ``phis = 0``.
+
+6. ``AIMIPClassicalParams.from_defaults(spatial_surface=True)``
+   builds, ``make_aimip_classical_spectral_physics`` accepts the
+   resulting params + a land mask, and the synthetic gradient
+   through ``as_dict`` and through the spatial coefficients are both
+   finite.
+"""
+
+from __future__ import annotations
+
+import math
+
+import jax
+import jax.numpy as jnp
+import equinox as eqx
+import pytest
+
+jax.config.update("jax_enable_x64", True)
+
+
+def _grid_t11():
+    """Small Gaussian grid for the spatial tests (kept tiny so the
+    sphere-integral checks evaluate in milliseconds)."""
+    from legoesm.grids.gaussian import create_gaussian_grid
+    return create_gaussian_grid(11, dealiasing="quadratic")
+
+
+# ----------------------------------------------------------------------
+# spatial_basis
+# ----------------------------------------------------------------------
+
+def test_spatial_basis_shape_and_finite():
+    from legoesm.training.aimip_spatial import spatial_basis, n_basis
+    grid = _grid_t11()
+    basis = spatial_basis(grid, l_max=4, m_max=2)
+    assert basis.shape == (n_basis(4, 2), grid.n_lat, grid.n_lon)
+    assert jnp.all(jnp.isfinite(basis))
+
+
+def test_spatial_basis_constant_mode_is_ones():
+    """The l=0 zonal Legendre basis is constant ``P_0(sin lat) = 1``."""
+    from legoesm.training.aimip_spatial import spatial_basis
+    grid = _grid_t11()
+    basis = spatial_basis(grid, l_max=2, m_max=1)
+    P0 = basis[0]
+    assert jnp.allclose(P0, jnp.ones_like(P0), atol=1e-10)
+
+
+# ----------------------------------------------------------------------
+# SpatialField
+# ----------------------------------------------------------------------
+
+def test_spatial_field_zero_coeffs_is_baseline_log_perturb():
+    from legoesm.training.aimip_spatial import SpatialField
+    grid = _grid_t11()
+    field = SpatialField.from_defaults(
+        f_0=1.5e-3, scale=0.7, transform="log_perturb",
+        l_max=2, m_max=1,
+    )
+    value = field.evaluate(grid)
+    assert value.shape == (grid.n_lat, grid.n_lon)
+    assert jnp.allclose(value, 1.5e-3, atol=1e-12)
+
+
+def test_spatial_field_zero_coeffs_is_baseline_shift():
+    from legoesm.training.aimip_spatial import SpatialField
+    grid = _grid_t11()
+    field = SpatialField.from_defaults(
+        f_0=0.95, scale=0.05, transform="shift",
+        l_max=2, m_max=1,
+    )
+    value = field.evaluate(grid)
+    assert jnp.allclose(value, 0.95, atol=1e-12)
+
+
+def test_spatial_field_log_perturb_stays_positive():
+    """``log_perturb`` with arbitrary coefficients keeps value > 0."""
+    from legoesm.training.aimip_spatial import SpatialField, n_basis
+    grid = _grid_t11()
+    nb = n_basis(2, 1)
+    field = SpatialField(
+        coeffs=jnp.array([10.0] * nb),  # large coefficients
+        f_0=1.0e-3, scale=2.0, transform="log_perturb",
+        l_max=2, m_max=1,
+    )
+    value = field.evaluate(grid)
+    assert jnp.all(value > 0.0)
+    # ``tanh`` keeps z_bounded in (-1, 1), so the log-perturb range is
+    # ``[f_0 * exp(-scale), f_0 * exp(+scale)]`` (numerical slack).
+    f_0, scale = 1.0e-3, 2.0
+    assert jnp.all(value > f_0 * math.exp(-scale) - 1e-12)
+    assert jnp.all(value < f_0 * math.exp(+scale) + 1e-12)
+
+
+def test_spatial_field_land_mask_gates_to_baseline():
+    """Where ``land_mask`` is 0, ``evaluate`` returns the baseline ``f_0``."""
+    from legoesm.training.aimip_spatial import SpatialField, n_basis
+    grid = _grid_t11()
+    nb = n_basis(2, 1)
+    field = SpatialField(
+        coeffs=jnp.array([3.0] * nb),
+        f_0=2.0, scale=1.0, transform="shift",
+        l_max=2, m_max=1,
+    )
+    # Fully-ocean land mask (zeros) -> baseline everywhere.
+    ocean = jnp.zeros((grid.n_lat, grid.n_lon))
+    value = field.evaluate(grid, land_mask=ocean)
+    assert jnp.allclose(value, 2.0, atol=1e-12)
+    # Fully-land land mask (ones) -> non-trivial spatial field.
+    land = jnp.ones((grid.n_lat, grid.n_lon))
+    value_land = field.evaluate(grid, land_mask=land)
+    assert not jnp.allclose(value_land, 2.0, atol=1e-3)
+
+
+# ----------------------------------------------------------------------
+# AIMIPSpatialSurfaceParams
+# ----------------------------------------------------------------------
+
+def test_aimip_spatial_surface_params_from_defaults_has_expected_fields():
+    from legoesm.training.aimip_spatial import (
+        AIMIPSpatialSurfaceParams,
+        SPATIAL_FIELD_NAMES,
+    )
+    p = AIMIPSpatialSurfaceParams.from_defaults()
+    assert set(p.fields.keys()) == set(SPATIAL_FIELD_NAMES)
+    # All coefficients start at zero, so evaluate must return f_0
+    # baselines pointwise.
+    grid = _grid_t11()
+    fields_2d = p.evaluate(grid)
+    for name in SPATIAL_FIELD_NAMES:
+        v = fields_2d[name]
+        assert v.shape == (grid.n_lat, grid.n_lon)
+        # Should be close to a constant equal to its baseline.
+        v_min = float(jnp.min(v))
+        v_max = float(jnp.max(v))
+        assert math.isclose(v_min, v_max, rel_tol=1e-10, abs_tol=1e-10)
+
+
+def test_aimip_spatial_surface_params_n_trainable_count():
+    """Default truncation has 13 coefs per field; 7 fields -> 91 coefs."""
+    from legoesm.training.aimip_spatial import AIMIPSpatialSurfaceParams
+    p = AIMIPSpatialSurfaceParams.from_defaults()
+    assert p.n_trainable() == 91
+
+
+def test_aimip_spatial_surface_nonzero_init_breaks_symmetry():
+    """``init_std > 0`` produces non-baseline spatial fields at init."""
+    from legoesm.training.aimip_spatial import (
+        AIMIPSpatialSurfaceParams,
+        SPATIAL_FIELD_NAMES,
+    )
+    grid = _grid_t11()
+    p = AIMIPSpatialSurfaceParams.from_defaults(
+        init_std=0.05, key=jax.random.PRNGKey(42),
+    )
+    fields_2d = p.evaluate(grid)
+    # Every field should now have a non-trivial spatial profile (min != max).
+    for name in SPATIAL_FIELD_NAMES:
+        v = fields_2d[name]
+        v_min = float(jnp.min(v))
+        v_max = float(jnp.max(v))
+        assert v_max - v_min > 1e-6, (
+            f"{name}: field is uniform under non-zero init "
+            f"(min={v_min}, max={v_max})"
+        )
+
+
+def test_aimip_classical_params_spatial_seed_reproducibility():
+    """Same seed -> identical spatial-coef tree across two builds."""
+    from legoesm.training.aimip_params import AIMIPClassicalParams
+    p1 = AIMIPClassicalParams.from_defaults(
+        spatial_surface=True, spatial_init_std=0.02, spatial_seed=7,
+    )
+    p2 = AIMIPClassicalParams.from_defaults(
+        spatial_surface=True, spatial_init_std=0.02, spatial_seed=7,
+    )
+    for name in p1.spatial_surface.fields:
+        assert jnp.array_equal(
+            p1.spatial_surface.fields[name].coeffs,
+            p2.spatial_surface.fields[name].coeffs,
+        ), f"seed=7 reproducibility broken for field {name}"
+
+
+# ----------------------------------------------------------------------
+# land_mask_from_phis
+# ----------------------------------------------------------------------
+
+def test_land_mask_from_phis_bounded_and_sigmoid():
+    from legoesm.training.aimip_spatial import land_mask_from_phis
+    phis = jnp.array([-1.0e4, -100.0, 0.0, 100.0, 1.0e4])
+    mask = land_mask_from_phis(phis, smooth=True, sharpness=1.0e-2)
+    assert jnp.all(mask >= 0.0)
+    assert jnp.all(mask <= 1.0)
+    # Monotonic in phis.
+    assert jnp.all(jnp.diff(mask) > 0.0)
+    # Centered at phis=0 -> mask=0.5.
+    assert math.isclose(float(mask[2]), 0.5, abs_tol=1e-12)
+
+
+# ----------------------------------------------------------------------
+# Integration with AIMIPClassicalParams
+# ----------------------------------------------------------------------
+
+def test_aimip_classical_params_with_spatial_surface_builds():
+    from legoesm.training.aimip_params import (
+        AIMIPClassicalParams,
+        make_aimip_classical_spectral_physics,
+    )
+    from legoesm.training.aimip_spatial import land_mask_from_phis
+    grid = _grid_t11()
+
+    params = AIMIPClassicalParams.from_defaults(spatial_surface=True)
+    assert params.spatial_surface is not None
+    assert params.spatial_surface.n_trainable() == 91
+
+    # Synthetic phis: positive over half the grid (Northern hemisphere).
+    phis = jnp.where(
+        grid.lat2d > 0.0, jnp.full(grid.lat2d.shape, 5.0e4),
+        jnp.zeros_like(grid.lat2d),
+    )
+    land_mask = land_mask_from_phis(phis, smooth=True)
+
+    fn = make_aimip_classical_spectral_physics(
+        params, grid, dt=1800.0,
+        radiation="gray",
+        turbulence_scheme="louis",
+        land_mask=land_mask,
+    )
+    assert callable(fn)
+
+
+def test_aimip_classical_params_spatial_gradient_flows():
+    """eqx.filter_value_and_grad reaches the spatial-surface coefficients."""
+    from legoesm.training.aimip_params import AIMIPClassicalParams
+
+    params = AIMIPClassicalParams.from_defaults(spatial_surface=True)
+    grid = _grid_t11()
+
+    def synthetic_loss(p):
+        d = p.as_dict()
+        scalar_part = jnp.sum(
+            jnp.stack([d[c.name] / (c.max_val - c.min_val)
+                       for c in p.constraints])
+        )
+        # Touch every spatial-field coefficient via a deterministic
+        # projection (sum of all coefficients squared, scaled by their
+        # static range so the magnitudes are comparable).
+        spatial_part = jnp.array(0.0, dtype=scalar_part.dtype)
+        if p.spatial_surface is not None:
+            for name, field in p.spatial_surface.fields.items():
+                spatial_part = spatial_part + jnp.sum(field.coeffs ** 2)
+        return scalar_part + spatial_part
+
+    loss, grads = eqx.filter_value_and_grad(synthetic_loss)(params)
+    assert math.isfinite(float(loss))
+    # Every spatial-surface coefficient leaf has a finite gradient.
+    for name, field in grads.spatial_surface.fields.items():
+        g = field.coeffs
+        assert jnp.all(jnp.isfinite(g)), f"NaN/Inf gradient on {name}.coeffs"
+
+
+# ----------------------------------------------------------------------
+# MUON-partitioned optimizer
+# ----------------------------------------------------------------------
+
+def test_create_optimizer_muon_partitioned_routes_large_matrices():
+    """``muon_partitioned`` builds and initializes on a mixed param tree."""
+    from legoesm.ml.training import TrainingConfig, create_optimizer
+
+    cfg = TrainingConfig(
+        lr=1e-3, warmup_steps=2, total_steps=10,
+        optimizer="muon_partitioned",
+    )
+    opt = create_optimizer(cfg)
+    # Mixed tree: large 2-D weight matrix (MUON-eligible), small 2-D
+    # (AdamW route), 1-D bias (AdamW route), 0-D scalar (AdamW route).
+    params = {
+        "big_W": jnp.ones((64, 64)),
+        "small_W": jnp.ones((8, 8)),
+        "bias": jnp.ones((64,)),
+        "scalar": jnp.array(1.0),
+    }
+    state = opt.init(params)
+    assert state is not None
+
+
+# ----------------------------------------------------------------------
+# split_rad + rad_update_interval gating
+# ----------------------------------------------------------------------
+
+def test_make_aimip_classical_spectral_physics_split_returns_tuple():
+    """``split_rad=True`` returns ``(non_rad_fn, rad_fn)`` callables."""
+    from legoesm.training.aimip_params import (
+        AIMIPClassicalParams, make_aimip_classical_spectral_physics,
+    )
+    grid = _grid_t11()
+    params = AIMIPClassicalParams.from_defaults()
+    built = make_aimip_classical_spectral_physics(
+        params, grid, dt=1800.0, radiation="gray", split_rad=True,
+    )
+    assert isinstance(built, tuple)
+    assert len(built) == 2
+    assert callable(built[0])
+    assert callable(built[1])
+
+
+def test_make_aimip_classical_spectral_physics_combined_default():
+    """``split_rad=False`` (default) returns the single combined callable."""
+    from legoesm.training.aimip_params import (
+        AIMIPClassicalParams, make_aimip_classical_spectral_physics,
+    )
+    grid = _grid_t11()
+    params = AIMIPClassicalParams.from_defaults()
+    fn = make_aimip_classical_spectral_physics(
+        params, grid, dt=1800.0, radiation="gray",
+    )
+    assert callable(fn)
+    assert not isinstance(fn, tuple)
+
+
+def test_spectral_rollout_rad_gating_one_step():
+    """Single-step rollout with rad_update_interval=1 matches combined path.
+
+    Smoke-checks the new ``rad_physics_fn`` + ``rad_update_interval``
+    branch in :func:`spectral_rollout` by running both code paths over
+    a one-step rollout starting from a zero spectral state.  The two
+    outputs should agree to floating-point tolerance because at
+    ``interval=1`` the gated branch fires rad on every step (same as
+    the combined branch).
+    """
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.atmosphere.dynamics.spectral_pe import SpectralPEConfig
+    from legoesm.training.aimip_params import (
+        AIMIPClassicalParams, make_aimip_classical_spectral_physics,
+    )
+    from legoesm.training.neural_gcm_spectral import (
+        carry_to_spectral_state, spectral_rollout,
+    )
+    from legoesm.driver.compiled_segments import SegmentCarry as _SC
+
+    grid = create_gaussian_grid(11, dealiasing="quadratic")
+    sigma = create_sigma_coordinate(8)
+
+    n_lat, n_lon, nlev = grid.n_lat, grid.n_lon, 8
+    zero_3d = jnp.zeros((n_lat, n_lon, nlev), dtype=jnp.float64)
+    zero_2d = jnp.zeros((n_lat, n_lon), dtype=jnp.float64)
+    ones_p_s = jnp.full((n_lat, n_lon), 1.0e5, dtype=jnp.float64)
+    T_init = jnp.full((n_lat, n_lon, nlev), 250.0, dtype=jnp.float64)
+    fake_carry = _SC(
+        u=zero_3d, v=zero_3d, T=T_init,
+        p_s=ones_p_s, phis=zero_2d,
+        q_v=zero_3d, q_c=zero_3d, q_r=zero_3d,
+        conv_prog=zero_3d,
+        held_dT_rad=zero_3d, held_sw_net_sfc=zero_2d, held_lw_net_sfc=zero_2d,
+        held_sw_up_toa=zero_2d, held_lw_up_toa=zero_2d, held_sw_down_toa=zero_2d,
+        step_index=jnp.array(0),
+        target_moisture=jnp.array(0.0),
+        target_mass=jnp.array(0.0),
+        max_cfl=jnp.array(0.0),
+        precip_accum=zero_2d,
+        shflx_accum=zero_2d,
+        lhflx_accum=zero_2d,
+    )
+    ic_spectral = carry_to_spectral_state(fake_carry, grid)
+    pe_config = SpectralPEConfig(
+        hyperdiff_coeff=2.5e15, hyperdiff_order=2,
+        time_integrator="ssp_rk3",
+        spectral_filter_strength=0.01, spectral_filter_order=8,
+    )
+    params = AIMIPClassicalParams.from_defaults()
+
+    combined_fn = make_aimip_classical_spectral_physics(
+        params, grid, dt=1800.0, radiation="gray", split_rad=False,
+    )
+    non_rad_fn, rad_fn = make_aimip_classical_spectral_physics(
+        params, grid, dt=1800.0, radiation="gray", split_rad=True,
+    )
+
+    out_combined = spectral_rollout(
+        ic_spectral, combined_fn, grid, sigma, pe_config,
+        dt=1800.0, n_steps=1,
+    )
+    out_gated = spectral_rollout(
+        ic_spectral, non_rad_fn, grid, sigma, pe_config,
+        dt=1800.0, n_steps=1,
+        rad_physics_fn=rad_fn, rad_update_interval=2,  # gate on, fire at step 0
+    )
+    # T_hat is the dominant scalar dycore field.  Combined runs rad
+    # inside each of the SSP-RK3 sub-stages (3 rad calls / dycore
+    # step); gated runs rad ONCE at the top of the step with the
+    # state-at-step-start and holds it constant through the 3
+    # sub-stages.  Outputs therefore differ by O(rad_tendency_dt *
+    # state_change_per_substage) -- small for short rollouts, larger
+    # for tight CFL.  Tolerance is set to capture the dominant
+    # T_hat magnitudes (~900 in spectral, ~250 K in grid) while
+    # allowing the substage-rad approximation.
+    assert jnp.allclose(
+        out_combined.T_hat.data, out_gated.T_hat.data,
+        atol=1.0e-2, rtol=1.0e-5,
+    ), "Gated rollout should agree with combined at step 1 to substage-rad tolerance"

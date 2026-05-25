@@ -37,6 +37,45 @@ class LossConfig(NamedTuple):
     w_v: float = 0.5          # meridional wind
     w_q: float = 0.2          # specific humidity
     w_ps: float = 0.3         # surface pressure
+    # Bias-penalty weights.  ``w_bias_<var>`` multiplies the squared
+    # global-mean error ``(area_weighted_mean(pred - target))^2``,
+    # normalized by the same variable scale as the MSE term.  Adds
+    # an explicit penalty on constant offsets that the per-cell MSE
+    # only weakly constrains -- e.g. the +1.07 K warm T bias the
+    # AIMIP v5 classical variant produced at T11 L8 (residual after
+    # the spatial-surface fields over-corrected).  Default 0.0
+    # preserves legacy behaviour; set ``w_bias_T`` ~ 1-10 in AIMIP
+    # configs to drive the bias toward zero.
+    w_bias_T: float = 0.0
+    w_bias_u: float = 0.0
+    w_bias_v: float = 0.0
+    w_bias_ps: float = 0.0
+    # CRPS-style probabilistic loss weights.  For a deterministic
+    # forecast (ensemble size M=1) the fair-CRPS reduces to the area-
+    # weighted MAE of the per-cell error, normalised by the same
+    # variable scale as the MSE term.  This is what NeuralGCM uses
+    # alongside MSE for its probabilistic head; even at M=1 the MAE
+    # term puts a different penalty profile on large errors than
+    # squared error (less skewed toward outliers).  Default 0.0
+    # preserves legacy MSE-only behaviour.  Ensemble (M>=2) fair-CRPS
+    # is a separate code path tracked in the ``ensemble_size`` knob
+    # below; the deterministic path emits the MAE limit.
+    w_crps_T: float = 0.0
+    w_crps_u: float = 0.0
+    w_crps_v: float = 0.0
+    w_crps_ps: float = 0.0
+    # Forecast horizons (in hours since IC) at which the loss is
+    # evaluated when multi-step supervision is on.  Empty tuple
+    # disables it (legacy single-target behaviour).  Set e.g.
+    # ``multi_step_hours=(6, 12, 18, 24)`` to penalise the model at
+    # 6 / 12 / 18 / 24 hour leads.  Each lead requires one extra
+    # spectral_rollout call from the same IC, so cost scales with
+    # ``len(multi_step_hours)``.  Targets are loaded once at IC time
+    # and indexed by lead.
+    multi_step_hours: tuple[int, ...] = ()
+    # Optional per-lead weight; defaults to uniform.  Length must
+    # match ``multi_step_hours`` if provided, else ignored.
+    multi_step_weights: tuple[float, ...] = ()
     # Loss components
     spectral_weight: float = 0.0   # weight for spectral loss term
     level_weighting: str = "pressure"  # "uniform", "pressure", or "boundary_layer"
