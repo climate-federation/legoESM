@@ -1,11 +1,22 @@
-"""Rising-thermal warm-bubble benchmark on the plane NH dycore.
+"""Rising-thermal warm-bubble **CI smoke** for the plane NH dycore.
 
-PR2d ships a CI-sized version of the Skamarock & Klemp (2008) Sec 5b
-warm-bubble (also known as Wicker-Skamarock 1998). Domain, resolution,
-timestep and integration length are scaled down so the test fits in
-the unit-test budget; the full-resolution validation that pins
-maximum-w / bubble-altitude tolerances to published reference values
-lives in ``scripts/`` and runs nightly (PR2e).
+This file is a **stability smoke test**, not a full Wicker-Skamarock
+validation. Domain, resolution, timestep, and integration length are
+scaled down so the test fits in the unit-test budget; the full-
+resolution validation that pins maximum-w / bubble-altitude
+tolerances to published reference values lives in
+``scripts/run_plane_rising_thermal.py`` (PR2e nightly).
+
+PR3b lifted the CI integration from 10 s (PR2d) to 30 s by wiring
+first-order upwind horizontal advection. Standalone runs survive
+past 75 s on the same grid before the current dry dycore
+configuration develops unphysical amplitudes (u ~ 260 m/s); full
+validation awaits the LES SGS closure and remaining numerics work
+(advection order, energy-consistent C-grid pairing, possible
+diffusion choices) that will land in subsequent PRs. The 30 s CI
+window has a ~2.5× safety margin within the currently observed
+stable interval. CI assertions cover bubble spin-up and
+finite-ness in that window, not Skamarock-reference tolerances.
 
 CI configuration
 ----------------
@@ -73,21 +84,20 @@ jax.config.update("jax_enable_x64", True)
 
 
 # CI-sized constants — see module docstring for full spec.
-# The CI integration window is kept short (≈10 s) because the PR2d
-# dycore uses centred-difference horizontal advection without
-# hyperdiffusion (deferred to PR3). The bubble develops sharp
-# gradients that excite the 2-Δx mode after ~15 s and blow up the
-# integration around 25 s on a 200 m grid. The full Skamarock 2008
-# Sec 5b benchmark — with hyperdiffusion, finer grid, and 1000 s
-# integration — lives in ``scripts/run_plane_rising_thermal.py``
-# (PR2e). The CI assertions below cover bubble spin-up and finite-
-# ness, not Skamarock-reference tolerances.
+# Integration window extended from 10 s (PR2d) to 30 s after PR3b
+# wired first-order upwind horizontal advection. The bubble plume
+# still develops sharp gradients that grow to unphysical magnitudes
+# beyond ~75 s on this CI grid (without an LES SGS closure to drain
+# energy into a sub-grid model — that lands in PR3c), so the CI
+# integration stays well inside the stable window. The full
+# Skamarock 2008 Sec 5b benchmark — with finer grid + LES + longer
+# integration — lives in ``scripts/run_plane_rising_thermal.py``.
 NX, NY, NLEV = 20, 4, 20
 DX = DY = 200.0       # m
 LX = NX * DX          # 4 km
 LZ = 4_000.0          # m
 DT = 0.5              # s
-N_STEPS = 20          # → 10 s integration (before dispersive blow-up)
+N_STEPS = 60          # → 30 s integration (3x longer than PR2d)
 THETA_PERT = 2.0      # K
 L_BUBBLE = 1_000.0    # m (bubble radius)
 X_C = 2_000.0         # m (bubble centre x)

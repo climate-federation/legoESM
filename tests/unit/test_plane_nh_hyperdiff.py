@@ -110,30 +110,41 @@ def test_hyperdiff_damps_two_dx_checkerboard_mode():
     )
     state_4dx = state._replace(u=state.u.replace(data=u_smooth))
 
-    tend_2dx = plane_compressible_euler_slow_tendencies(
-        state_2dx, grid, hc, tm,
-        CompressibleEulerConfig(
-            sponge_coeff=0.0, hyperdiff_coeff=1.0e6,
-            hyperdiff_rho_coeff=0.0, hyperdiff_w_coeff=0.0,
-            semi_implicit_acoustic=False, use_coriolis=False, fix_mass=False,
-        ),
+    cfg_on = CompressibleEulerConfig(
+        sponge_coeff=0.0, hyperdiff_coeff=1.0e6,
+        hyperdiff_rho_coeff=0.0, hyperdiff_w_coeff=0.0,
+        semi_implicit_acoustic=False, use_coriolis=False, fix_mass=False,
     )
-    tend_4dx = plane_compressible_euler_slow_tendencies(
-        state_4dx, grid, hc, tm,
-        CompressibleEulerConfig(
-            sponge_coeff=0.0, hyperdiff_coeff=1.0e6,
-            hyperdiff_rho_coeff=0.0, hyperdiff_w_coeff=0.0,
-            semi_implicit_acoustic=False, use_coriolis=False, fix_mass=False,
-        ),
+    cfg_off = CompressibleEulerConfig(
+        sponge_coeff=0.0, hyperdiff_coeff=0.0,
+        hyperdiff_rho_coeff=0.0, hyperdiff_w_coeff=0.0,
+        semi_implicit_acoustic=False, use_coriolis=False, fix_mass=False,
     )
+    # Isolate the hyperdiff contribution by subtracting the
+    # no-hyperdiff tendency from the with-hyperdiff tendency. PR3b
+    # added upwind advection that also damps the 2-Δx mode (but with
+    # a different wavenumber scaling), so comparing raw
+    # ``max|du_dt|`` would conflate the two damping mechanisms.
+    tend_2dx_on = plane_compressible_euler_slow_tendencies(
+        state_2dx, grid, hc, tm, cfg_on)
+    tend_2dx_off = plane_compressible_euler_slow_tendencies(
+        state_2dx, grid, hc, tm, cfg_off)
+    tend_4dx_on = plane_compressible_euler_slow_tendencies(
+        state_4dx, grid, hc, tm, cfg_on)
+    tend_4dx_off = plane_compressible_euler_slow_tendencies(
+        state_4dx, grid, hc, tm, cfg_off)
+
+    # Pure hyperdiff contribution: tend_on - tend_off.
+    hd_2dx = tend_2dx_on.du_dt.data - tend_2dx_off.du_dt.data
+    hd_4dx = tend_4dx_on.du_dt.data - tend_4dx_off.du_dt.data
 
     # Hyperdiff damping rate on a wavenumber-k mode is proportional to
     # the eigenvalue of Lap² on that mode. For the 5-point stencil the
     # eigenvalue scales as (-4 sin²(π k/nx)/dx²)². 2-Δx (k=nx/2) gives
     # eigenvalue ~ (4/dx²)² = 16/dx⁴. 4-Δx (k=nx/4) gives ~
     # (2/dx²)² = 4/dx⁴. So 2-Δx damping is ~4× the 4-Δx damping.
-    max_damp_2dx = float(jnp.max(jnp.abs(tend_2dx.du_dt.data)))
-    max_damp_4dx = float(jnp.max(jnp.abs(tend_4dx.du_dt.data)))
+    max_damp_2dx = float(jnp.max(jnp.abs(hd_2dx)))
+    max_damp_4dx = float(jnp.max(jnp.abs(hd_4dx)))
     ratio = max_damp_2dx / max_damp_4dx
     # Theoretical ratio is (sin²(π/2) / sin²(π/4))² = (1 / 0.5)² = 4.
     # Allow ±20% for measurement noise.

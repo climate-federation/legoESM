@@ -477,6 +477,63 @@ def _d_dy_centered(field_yxz: jax.Array, dy: float) -> jax.Array:
     )
 
 
+def _upwind_advection_x(field_yxz: jax.Array, u_yxz: jax.Array,
+                        dx: float) -> jax.Array:
+    """First-order upwind contribution to ``-u df/dx`` at cell centres.
+
+    For each cell pick the one-sided difference on the side the local
+    ``u`` flows from::
+
+        out = -max(u, 0) * (f[i] - f[i-1]) / dx
+              - min(u, 0) * (f[i+1] - f[i]) / dx
+
+    Periodic neighbours via ``jnp.roll`` (axis=1 = x for the
+    ``(ny, nx, nlev)`` layout). Upwind biasing damps the 2-Δx
+    dispersive mode that destabilises centred differencing on
+    advection-dominated plume flow — same role as upwind / flux-
+    limited reconstruction in the ocean ``_van_leer_limiter`` and
+    cubed-sphere ``advect_upwind`` paths.
+
+    A-grid simplification (PR2b carry-over)
+    ---------------------------------------
+    ``field_yxz`` and ``u_yxz`` are assumed to live at the same
+    horizontal location — the cell centre. PR2b made the explicit
+    choice to treat the state's nominally Arakawa-C ``u``, ``v``
+    values as cell-centered for the slow tendency, trading
+    energy-consistent C-grid PG/divergence pairing for simpler
+    advection. PR3b inherits that simplification — the upwind side
+    is picked from the local cell-centered velocity rather than a
+    proper face-staggered interpolation. The energy-consistent
+    C-grid refactor (which would interpolate ``v`` to x-faces for
+    ``u``-advection and so on) lands in a follow-up PR alongside
+    the LES SGS closure.
+
+    Differentiability
+    -----------------
+    ``jnp.maximum`` / ``jnp.minimum`` against ``0.0`` introduce a
+    kink at ``u = 0`` (or ``v = 0``). JAX returns a finite
+    subgradient at the kink, so ``jax.grad`` flows cleanly even
+    through zero-velocity cells — verified by
+    ``tests/unit/test_plane_nh_upwind.py::test_upwind_grad_through_zero_velocity``.
+    """
+    f_backward = (field_yxz - jnp.roll(field_yxz, 1, axis=1)) / dx
+    f_forward = (jnp.roll(field_yxz, -1, axis=1) - field_yxz) / dx
+    u_pos = jnp.maximum(u_yxz, 0.0)
+    u_neg = jnp.minimum(u_yxz, 0.0)
+    return -(u_pos * f_backward + u_neg * f_forward)
+
+
+def _upwind_advection_y(field_yxz: jax.Array, v_yxz: jax.Array,
+                        dy: float) -> jax.Array:
+    """First-order upwind contribution to ``-v df/dy`` at cell centres.
+    Same algebra as :func:`_upwind_advection_x` but along ``axis=0``."""
+    f_backward = (field_yxz - jnp.roll(field_yxz, 1, axis=0)) / dy
+    f_forward = (jnp.roll(field_yxz, -1, axis=0) - field_yxz) / dy
+    v_pos = jnp.maximum(v_yxz, 0.0)
+    v_neg = jnp.minimum(v_yxz, 0.0)
+    return -(v_pos * f_backward + v_neg * f_forward)
+
+
 def _horizontal_divergence_centered(
     u_yxz: jax.Array, v_yxz: jax.Array, grid: PlaneGrid
 ) -> jax.Array:
@@ -619,18 +676,29 @@ def plane_compressible_euler_slow_tendencies(
         rho_total * u, rho_total * v, grid,
     )
 
-    # 5. Theta horizontal advection (advective form).
-    dtheta_p_dt = -(
-        u * _d_dx_centered(theta_total, grid.dx)
-        + v * _d_dy_centered(theta_total, grid.dy)
+    # 5. Theta horizontal advection (advective form, first-order
+    #    upwind so the 2-Δx mode triggered by sharp plume gradients
+    #    is damped at the advection step — see PR3a docstring).
+    #    NB: ``u``, ``v`` are passed in as cell-centered velocities
+    #    per the module-level "A-grid simplification used in PR2b"
+    #    section — the same convention is honoured for Sections 6, 7,
+    #    8 below. Field locations therefore match where the upwind
+    #    helper expects them; the Arakawa-C state labels remain in
+    #    place for the future C-grid refactor.
+    dtheta_p_dt = (
+        _upwind_advection_x(theta_total, u, grid.dx)
+        + _upwind_advection_y(theta_total, v, grid.dy)
     )
 
-    # 6. Horizontal momentum advection (advective form, A-grid centred).
-    du_adv = -(
-        u * _d_dx_centered(u, grid.dx) + v * _d_dy_centered(u, grid.dy)
+    # 6. Horizontal momentum advection (advective form, first-order
+    #    upwind on cell-centred ``u``, ``v``).
+    du_adv = (
+        _upwind_advection_x(u, u, grid.dx)
+        + _upwind_advection_y(u, v, grid.dy)
     )
-    dv_adv = -(
-        u * _d_dx_centered(v, grid.dx) + v * _d_dy_centered(v, grid.dy)
+    dv_adv = (
+        _upwind_advection_x(v, u, grid.dx)
+        + _upwind_advection_y(v, v, grid.dy)
     )
 
     # 7. Vertical advection of u, v by full-level w (cell-centred A-grid).
@@ -643,9 +711,9 @@ def plane_compressible_euler_slow_tendencies(
     # 8. w slow part: horizontal advection of w (advective form on
     #    full-level interpolation; rigid w boundaries at interfaces).
     w_full = 0.5 * (w[..., :-1] + w[..., 1:])
-    dw_full = -(
-        u * _d_dx_centered(w_full, grid.dx)
-        + v * _d_dy_centered(w_full, grid.dy)
+    dw_full = (
+        _upwind_advection_x(w_full, u, grid.dx)
+        + _upwind_advection_y(w_full, v, grid.dy)
     )
     # Re-map to half levels: interior is the average of adjacent full
     # values; top and bottom interfaces stay rigid (zero) so the
