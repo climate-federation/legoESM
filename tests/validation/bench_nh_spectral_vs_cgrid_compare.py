@@ -218,6 +218,11 @@ def main():
     z_s_cg = jnp.zeros((grid_cg.n_lat, grid_cg.n_lon))
     terrain_cg = compute_terrain_metric(z_s_cg, hcoord_cg)
 
+    # Horizontal Laplacian hyperdiffusion on the C-grid -- mirror what
+    # the spectral side gets from its bilaplacian truncation control.
+    # Scale chosen so the dissipation timescale at the grid wavelength
+    # matches the spectral side at T21 (~ 1.5e6 m^2/s when read in the
+    # Laplacian convention used here).
     cfg_cg = CGridLatLonCompressibleEulerConfig(
         euler=CompressibleEulerConfig(
             sponge_width=10000.0,
@@ -226,6 +231,9 @@ def main():
             semi_implicit_acoustic=True,
             use_coriolis=True,
         ),
+        hyperdiff_uv=1.0e6,
+        hyperdiff_w=1.0e5,
+        hyperdiff_scalar=1.0e6,
     )
 
     lat_2d_cg_deg = jnp.degrees(grid_cg.lat2d)
