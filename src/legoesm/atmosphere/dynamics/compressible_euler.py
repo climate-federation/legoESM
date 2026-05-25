@@ -122,6 +122,28 @@ class CompressibleEulerConfig(NamedTuple):
                                           # 0.0 = centered (neutral), 0.1 = slightly damped
                                           # Damps vertically-propagating acoustic modes
                                           # without horizontal CFL constraint (Skamarock 2008)
+    # ---- Plane-only fields (PR3c) ----
+    # The following two knobs are consumed ONLY by the doubly-periodic
+    # plane non-hydrostatic dycore
+    # (:mod:`legoesm.atmosphere.dynamics.compressible_euler_plane`).
+    # Cubed-sphere, MPAS, and spectral NH dycores ignore them entirely
+    # — each of those has its own Smagorinsky knob in its own
+    # ``*CompressibleEulerConfig`` (e.g. ``CDGridCompressibleEulerConfig.
+    # smagorinsky_cs``). Defaults of ``0.0`` and ``1.0`` make this a
+    # no-op on every dycore.
+    # PR3c is a HORIZONTAL-ONLY pilot Smag closure: the strain magnitude
+    # includes ∂u/∂x, ∂u/∂y, ∂v/∂x, ∂v/∂y only; vertical shear
+    # (∂u/∂z, ∂v/∂z, ∂w/∂x, ∂w/∂y, ∂w/∂z) is deferred to a 3D extension PR.
+    # The Prandtl number controls the *thermal* (K_h) leg of that same
+    # closure; the horizontal-only caveat applies to both fields below.
+    smagorinsky_cs: float = 0.0           # Smagorinsky-Lilly LES coefficient.
+                                          # K_m = (C_s * Δ)^2 * |S|. Typical 0.1-0.25.
+                                          # 0.0 disables (Python on/off gate).
+    smagorinsky_prandtl: float = 1.0      # Turbulent Prandtl number K_h = K_m / Pr.
+                                          # Plane LES default 1.0; classical atmosphere
+                                          # value is ~1/3 for stable stratification.
+                                          # Must be > 0 when smagorinsky_cs > 0
+                                          # (validate_plane_config enforces).
 
 
 # ==============================================================================
