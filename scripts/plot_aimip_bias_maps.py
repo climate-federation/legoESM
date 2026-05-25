@@ -52,6 +52,8 @@ logger = logging.getLogger("aimip-bias-maps")
 _VARIABLES = ("T", "u", "v", "p_s")
 _VAR_UNITS = {"T": "K", "u": "m/s", "v": "m/s", "p_s": "Pa"}
 _VAR_VMAX = {"T": 8.0, "u": 12.0, "v": 12.0, "p_s": 3000.0}
+# RMSE map colour scale (positive only; per-cell RMSE in same units).
+_VAR_VMAX_RMSE = {"T": 8.0, "u": 12.0, "v": 12.0, "p_s": 3000.0}
 
 
 # ----------------------------------------------------------------------
@@ -225,7 +227,16 @@ def _compute_bias_for_variant(
             order=pe_config.spectral_filter_order,
             cutoff_fraction=pe_config.spectral_filter_strength,
         )
+    # Honor the training rollout horizon for eval so bias/RMSE maps
+    # reflect the model's actual forecast skill at its supervised
+    # horizon.  v12 uses 6-hour pairs; if the config sets
+    # ``aimip_rollout_hours`` we use that, else fall back to a 1-day
+    # rollout (legacy behaviour).  ERA5 cadence is 6 h so the
+    # period_cfg loader also needs rollout_hours threaded in.
     n_steps_per_day = int(86400 / spec_cfg.dt)
+    rollout_hours_cfg = int(base_cfg.get("aimip_rollout_hours", 0) or 0)
+    rollout_hours_eval = rollout_hours_cfg if rollout_hours_cfg > 0 else 24
+    n_steps_eval = int(round(rollout_hours_eval * 3600.0 / spec_cfg.dt))
 
     out: dict[str, dict[str, np.ndarray]] = {}
     for period_name, years in (
@@ -236,6 +247,7 @@ def _compute_bias_for_variant(
         period_cfg = spec_cfg._replace(
             n_train_days=sum(w[2] for w in windows),
             windows=tuple(windows),
+            rollout_hours=rollout_hours_eval,
         )
         logger.info(
             f"[{variant}] loading {period_name} windows "
@@ -246,11 +258,12 @@ def _compute_bias_for_variant(
         )
 
         sum_bias = {v: None for v in _VARIABLES}
+        sum_sq = {v: None for v in _VARIABLES}
         count = 0
         for ic, target in zip(ic_states, target_carries):
             pred = spectral_rollout(
                 ic, physics_fn, grid, sigma, pe_config,
-                spec_cfg.dt, n_steps_per_day,
+                spec_cfg.dt, n_steps_eval,
                 sponge_factor, spectral_filter,
             )
             pred_grid = spectral_pe_to_grid(pred, grid, sigma)
@@ -264,9 +277,15 @@ def _compute_bias_for_variant(
             }
             for v in _VARIABLES:
                 sum_bias[v] = sample[v] if sum_bias[v] is None else (sum_bias[v] + sample[v])
+                sample_sq = sample[v] ** 2
+                sum_sq[v] = sample_sq if sum_sq[v] is None else (sum_sq[v] + sample_sq)
             count += 1
+        # Per-cell RMSE = sqrt(mean(error**2)) across samples.
         out[period_name] = {
-            v: sum_bias[v] / max(count, 1) for v in _VARIABLES
+            "bias": {v: sum_bias[v] / max(count, 1) for v in _VARIABLES},
+            "rmse": {
+                v: np.sqrt(sum_sq[v] / max(count, 1)) for v in _VARIABLES
+            },
         }
         logger.info(
             f"[{variant}] {period_name}: averaged over {count} samples"
@@ -280,13 +299,14 @@ def _compute_bias_for_variant(
 
 def _plot_one_variable(
     var: str,
-    biases: dict[str, dict[str, np.ndarray]],
+    biases: dict[str, dict[str, dict[str, np.ndarray]]],
     grid,
     out_path: Path,
     historical_label: str = "2015-2016",
     future_label: str = "2017-2022",
+    metric: str = "bias",
 ):
-    """Bias map: rows = variants, cols = [historical, future]."""
+    """Map: rows = variants, cols = [historical, future]; metric = bias or rmse."""
     variants = list(biases.keys())
     n_rows = len(variants)
     n_cols = 2
@@ -300,17 +320,33 @@ def _plot_one_variable(
 
     lon = np.rad2deg(np.asarray(grid.lon))
     lat = np.rad2deg(np.asarray(grid.lat))
-    vmax = _VAR_VMAX[var]
-    norm = TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
+    if metric == "bias":
+        vmax = _VAR_VMAX[var]
+        norm = TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
+        cmap = "RdBu_r"
+        cbar_label = f"{var} bias (pred − target) [{_VAR_UNITS[var]}]"
+        title_metric = "bias"
+    else:  # rmse
+        vmax = _VAR_VMAX_RMSE[var]
+        norm = None
+        cmap = "viridis"
+        cbar_label = f"{var} RMSE (per-cell) [{_VAR_UNITS[var]}]"
+        title_metric = "RMSE"
 
     im = None
     for i, variant in enumerate(variants):
         for j, period in enumerate(("historical", "future")):
-            arr = biases[variant][period][var]
+            arr = biases[variant][period][metric][var]
             ax = axes[i, j]
-            im = ax.pcolormesh(
-                lon, lat, arr, cmap="RdBu_r", norm=norm, shading="auto",
-            )
+            if metric == "rmse":
+                im = ax.pcolormesh(
+                    lon, lat, arr, cmap=cmap, vmin=0.0, vmax=vmax,
+                    shading="auto",
+                )
+            else:
+                im = ax.pcolormesh(
+                    lon, lat, arr, cmap=cmap, norm=norm, shading="auto",
+                )
             ax.set_title(f"{variant} — {period}", fontsize=9)
             if j == 0:
                 ax.set_ylabel("lat [°]")
@@ -322,10 +358,10 @@ def _plot_one_variable(
             im, ax=axes, orientation="horizontal", shrink=0.7,
             pad=0.02, aspect=40,
         )
-        cbar.set_label(f"{var} bias (pred − target) [{_VAR_UNITS[var]}]")
+        cbar.set_label(cbar_label)
 
     fig.suptitle(
-        f"AIMIP — mid-level {var} bias map "
+        f"AIMIP — mid-level {var} {title_metric} map "
         f"(historical {historical_label} / future {future_label})",
         fontsize=11,
     )
@@ -406,13 +442,24 @@ def main():
     historical_label = f"{min(args.historical_years)}-{max(args.historical_years)}"
     future_label = f"{min(args.future_years)}-{max(args.future_years)}"
     for var in _VARIABLES:
-        out_path = args.results / f"aimip_bias_{var}_map.png"
+        # Bias map.
+        bias_path = args.results / f"aimip_bias_{var}_map.png"
         _plot_one_variable(
-            var, biases, grid, out_path,
+            var, biases, grid, bias_path,
             historical_label=historical_label,
             future_label=future_label,
+            metric="bias",
         )
-        logger.info(f"Wrote {out_path}")
+        logger.info(f"Wrote {bias_path}")
+        # RMSE map.
+        rmse_path = args.results / f"aimip_rmse_{var}_map.png"
+        _plot_one_variable(
+            var, biases, grid, rmse_path,
+            historical_label=historical_label,
+            future_label=future_label,
+            metric="rmse",
+        )
+        logger.info(f"Wrote {rmse_path}")
 
 
 if __name__ == "__main__":

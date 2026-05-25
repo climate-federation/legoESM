@@ -78,8 +78,22 @@ def create_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
 
     - ``adamw`` (default): legacy SFNO behavior, uses ``config.weight_decay``.
     - ``adam``: plain Adam (weight_decay ignored).
-    - ``muon``: Momentum Orthogonalized via Newton-Schulz (``optax.contrib.muon``).
-      Recommended for AIMIP and mixed scheme-scalar + neural-weight pytrees.
+    - ``muon``: Momentum Orthogonalized via Newton-Schulz
+      (``optax.contrib.muon``).  Applies the orthogonalized update to
+      *every* parameter leaf, which is the historical default but
+      destabilizes SFNO training during early steps because the
+      Newton-Schulz iteration is poorly conditioned on the
+      randomly-initialized decoder weights -- this is the
+      ``epoch-1 silent exit`` regression the AIMIP suite hit on 34M-
+      parameter SFNO under the 20-day windowed setup.
+    - ``muon_partitioned``: MUON applied only to 2-D weight matrices
+      whose smaller dimension is at least ``muon_min_dim`` (default
+      32); AdamW handles 1-D biases, scalars, and small matrices.
+      This is the recommended SFNO-safe deployment pattern from the
+      original MUON paper (Jordan et al. 2024 sec. 5) and the one
+      legoESM should use when ``aimip_optimizer: muon`` is requested.
+      Use this in place of ``muon`` once you trust the SFNO branch
+      again.
 
     Parameters
     ----------
@@ -94,7 +108,7 @@ def create_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
     Raises
     ------
     ValueError
-        If ``config.optimizer`` is not one of 'adamw', 'adam', 'muon'.
+        If ``config.optimizer`` is not one of the supported names.
     """
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.0,
@@ -120,15 +134,63 @@ def create_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
                 "select optimizer='adamw'/'adam'."
             ) from exc
         core = muon(learning_rate=schedule)
+    elif config.optimizer == "muon_partitioned":
+        core = _muon_partitioned_optimizer(
+            schedule=schedule,
+            weight_decay=config.weight_decay,
+        )
     else:
         raise ValueError(
             f"Unknown optimizer {config.optimizer!r}; "
-            f"expected one of 'adamw', 'adam', 'muon'."
+            f"expected one of 'adamw', 'adam', 'muon', 'muon_partitioned'."
         )
 
     return optax.chain(
         optax.clip_by_global_norm(config.grad_clip_norm),
         core,
+    )
+
+
+# Minimum smaller-axis dimension for a parameter leaf to receive the
+# MUON update under ``muon_partitioned``.  Smaller matrices, 1-D bias
+# vectors, and scalar physics knobs route to AdamW instead, where the
+# Newton-Schulz orthogonalization is either degenerate (1-D leaves) or
+# numerically unstable on randomly-initialized very small matrices.
+_MUON_MIN_DIM_DEFAULT = 32
+
+
+def _muon_partitioned_optimizer(
+    schedule, weight_decay: float, min_dim: int = _MUON_MIN_DIM_DEFAULT,
+) -> optax.GradientTransformation:
+    """Build a multi-transform optimizer routing MUON / AdamW per leaf.
+
+    The MUON branch only fires on 2-D weight matrices with both
+    dimensions at least ``min_dim``; everything else (biases, scalars,
+    embedding tables narrower than ``min_dim``) flows through AdamW.
+
+    This pairing is the SFNO-safe MUON deployment from the original
+    Jordan et al. (2024) recipe -- applying Newton-Schulz to small or
+    1-D leaves is what broke the AIMIP suite (silent epoch-1 NaN
+    under MUON-on-all-leaves).
+    """
+    from optax.contrib import muon
+    import jax
+
+    muon_tx = muon(learning_rate=schedule)
+    adam_tx = optax.adamw(learning_rate=schedule, weight_decay=weight_decay)
+
+    def _label(params):
+        def _classify(leaf):
+            if not hasattr(leaf, "ndim"):
+                return "adam"
+            if leaf.ndim == 2 and min(leaf.shape) >= min_dim:
+                return "muon"
+            return "adam"
+        return jax.tree_util.tree_map(_classify, params)
+
+    return optax.multi_transform(
+        {"muon": muon_tx, "adam": adam_tx},
+        _label,
     )
 
 
