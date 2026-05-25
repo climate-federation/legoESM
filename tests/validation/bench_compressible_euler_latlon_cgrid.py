@@ -180,6 +180,13 @@ def main():
     # Sponge layer in top 10 km with the same coeff as the spectral
     # benchmark (0.05 1/s).  We use the semi-implicit acoustic substep
     # so dt=5 s is well inside the slow-tendency CFL.
+    # Horizontal Laplacian hyperdiffusion: needed at finite volume on a
+    # 32 x 64 lat-lon grid to keep grid-scale noise from accumulating
+    # in long integrations.  Coefficient K ~ dx^2 / (2 * tau) with
+    # dx ~ 625 km at the equator and tau ~ 6 h gives K ~ 9e6 m^2/s;
+    # we round to 1e6 m^2/s (tau ~ 2 day) for a gentler default and
+    # use 1e5 m^2/s on w (w hyperdiff only suppresses 2dx wiggles in
+    # the vertical-velocity gravity-wave train).
     cfg = CGridLatLonCompressibleEulerConfig(
         euler=CompressibleEulerConfig(
             sponge_width=10000.0,
@@ -188,6 +195,9 @@ def main():
             semi_implicit_acoustic=True,
             use_coriolis=True,
         ),
+        hyperdiff_uv=1.0e6,
+        hyperdiff_w=1.0e5,
+        hyperdiff_scalar=1.0e6,
     )
 
     dt = 5.0
