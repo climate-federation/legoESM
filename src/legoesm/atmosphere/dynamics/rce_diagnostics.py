@@ -153,6 +153,34 @@ def column_moist_static_energy_plane(
     return jnp.sum(mse_density * rho_total * height_coord.dz, axis=-1)
 
 
+def moist_static_energy_3d_plane(
+    state, height_coord, qv_slot: int = 0,
+) -> jax.Array:
+    """3D moist static energy [J/kg] per grid cell.
+
+    ``MSE(j, i, k) = c_pd·T(j,i,k) + L_v·q_v(j,i,k) + g·z(k)``
+
+    Returns the per-cell MSE *density* (specific MSE) on the
+    (ny, nx, nlev) grid; integrating
+    ``MSE_density · rho_total · dz`` along k recovers
+    :func:`column_moist_static_energy_plane`.
+    """
+    _validate_plane_state(state, height_coord)
+    _validate_slot(qv_slot, state.tracers.data.shape[-1], "qv_slot")
+    theta_total = height_coord.theta_ref + state.theta_prime.data
+    T = theta_total * height_coord.exner_ref
+    q_v = state.tracers.data[..., qv_slot]
+    z = height_coord.z_full   # (nlev,) broadcasts
+    return constants.c_pd * T + constants.L_v * q_v + constants.g * z
+
+
+def temperature_3d_plane(state, height_coord) -> jax.Array:
+    """3D temperature [K] from Exner conversion of theta_total."""
+    _validate_plane_state(state, height_coord)
+    theta_total = height_coord.theta_ref + state.theta_prime.data
+    return theta_total * height_coord.exner_ref
+
+
 def pseudo_equivalent_potential_temperature(
     state, height_coord, qv_slot: int = 0,
 ) -> jax.Array:

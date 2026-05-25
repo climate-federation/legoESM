@@ -62,7 +62,8 @@ from legoesm.atmosphere.dynamics.moist_mass_fixer import (
 )
 from legoesm.atmosphere.dynamics.rce_diagnostics import (
     cloud_fraction_profile_plane, column_moist_static_energy_plane,
-    column_water_vapor_plane, precipitation_rate_proxy_plane,
+    column_water_vapor_plane, moist_static_energy_3d_plane,
+    precipitation_rate_proxy_plane, temperature_3d_plane,
 )
 from legoesm.atmosphere.dynamics.rce_mpi import (
     compute_total_water_mass_plane_mpi,
@@ -153,6 +154,10 @@ def parse_args():
     p.add_argument("--sponge-coeff", type=float, default=0.05)
     p.add_argument("--sponge-width", type=float, default=5_000.0)
     p.add_argument("--snapshot-hours", type=float, default=24.0)
+    p.add_argument("--snapshot-3d-hours", type=float, default=0.0,
+                   help="If > 0, dump full 3D MSE/qv/T volumes "
+                        "(ny,nx,nlev) as compressed float32 NPZ "
+                        "every N simulation hours. 0 disables.")
     p.add_argument("--profile-days", type=float, default=5.0)
     p.add_argument("--log-every-steps", type=int, default=100)
     p.add_argument("--output", type=str, default="results/rce_long")
@@ -182,12 +187,30 @@ def build_height_coord_and_state(args, grid):
         (grid.ny, grid.nx, nlev), dtype=jnp.float64,
     )
     new_tracers = new_tracers.at[..., 0].set(qv_3d)
-    rng = jax.random.PRNGKey(0)
-    theta_kick = 0.1 * jax.random.normal(
-        rng, state.theta_prime.data.shape,
+    # Convection seed: Wing-style localized warm bubble at lowest
+    # ~1 km, cosine-tapered horizontally over ~10·dx, ΔT_max=0.5 K.
+    # Localised support means acoustic transients are bounded and
+    # damped by the sponge — random whole-domain theta_prime noise
+    # excites grid-scale acoustic modes that grow unboundedly.
+    ny, nx = grid.ny, grid.nx
+    jj = jnp.arange(ny)
+    ii = jnp.arange(nx)
+    yy, xx = jnp.meshgrid(jj, ii, indexing="ij")
+    yc, xc = (ny - 1) / 2.0, (nx - 1) / 2.0
+    r_cells = jnp.sqrt((yy - yc) ** 2 + (xx - xc) ** 2)
+    r0 = 10.0  # bubble radius in cell units
+    horiz = jnp.where(
+        r_cells < r0,
+        0.5 * (1.0 + jnp.cos(jnp.pi * r_cells / r0)),
+        0.0,
     )
+    z_top_bubble = 1000.0
+    vert = jnp.where(z < z_top_bubble,
+                     0.5 * (1.0 + jnp.cos(jnp.pi * z / z_top_bubble)),
+                     0.0)
+    bubble = 0.5 * horiz[:, :, None] * vert[None, None, :]
     state = state._replace(
-        theta_prime=state.theta_prime.replace(data=theta_kick),
+        theta_prime=state.theta_prime.replace(data=bubble),
         tracers=state.tracers.replace(data=new_tracers),
     )
     return hc, state
@@ -302,6 +325,28 @@ def save_snapshot(out_dir, day_idx, t_sim, state, hc):
         cwv=cwv, mse=mse, precip=precip,
         T_sfc=T_sfc, qv_sfc=qv_sfc, qc_sfc=qc_sfc, qr_sfc=qr_sfc,
         u_sfc=u_sfc, v_sfc=v_sfc, wind_sfc=wind_sfc,
+    )
+
+
+def save_snapshot_3d(out_dir, hr_idx, t_sim, state, hc):
+    """Full 3D MSE/q_v/T volumes [float32, compressed].
+
+    Stored at ``snapshots_3d/snap_hr_NNNN.npz`` with arrays:
+    ``mse``, ``qv``, ``T`` each shape (ny, nx, nlev); plus ``z``
+    (nlev,) and scalars ``t_sim``, ``day``, ``hour``.
+    """
+    mse_3d = np.asarray(
+        moist_static_energy_3d_plane(state, hc), dtype=np.float32,
+    )
+    qv_3d = np.asarray(state.tracers.data[..., 0], dtype=np.float32)
+    T_3d = np.asarray(temperature_3d_plane(state, hc), dtype=np.float32)
+    z = np.asarray(hc.z_full, dtype=np.float32)
+    snap_path = out_dir / "snapshots_3d" / f"snap_hr_{hr_idx:04d}.npz"
+    snap_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        snap_path,
+        t_sim=t_sim, day=t_sim / SEC_PER_DAY, hour=t_sim / 3600.0,
+        z=z, mse=mse_3d, qv=qv_3d, T=T_3d,
     )
 
 
@@ -437,6 +482,8 @@ def main():
     total_t = args.days * SEC_PER_DAY
     total_steps = int(total_t / args.dt)
     snap_dt = args.snapshot_hours * 3600.0
+    snap3d_dt = args.snapshot_3d_hours * 3600.0
+    snap3d_enabled = args.snapshot_3d_hours > 0.0
     prof_dt = args.profile_days * SEC_PER_DAY
 
     out_dir = Path(args.output)
@@ -444,6 +491,8 @@ def main():
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "snapshots").mkdir(exist_ok=True)
         (out_dir / "profiles").mkdir(exist_ok=True)
+        if snap3d_enabled:
+            (out_dir / "snapshots_3d").mkdir(exist_ok=True)
         log_path = out_dir / "log.txt"
         log_f = open(log_path, "w", buffering=1)
         log_f.write(
@@ -463,10 +512,13 @@ def main():
         # Save IC snapshot + profile.
         save_snapshot(out_dir, 0, 0.0, state, hc)
         save_profile(out_dir, 0, 0.0, state, hc)
+        if snap3d_enabled:
+            save_snapshot_3d(out_dir, 0, 0.0, state, hc)
         write_progress(out_dir, 0.0, total_t, 0, total_steps, 0.0)
 
     wall_start = time.time()
     next_snap_t = snap_dt
+    next_snap3d_t = snap3d_dt
     next_prof_t = prof_dt
 
     for step in range(1, total_steps + 1):
@@ -538,6 +590,12 @@ def main():
                 day_idx = int(round(t_sim / SEC_PER_DAY))
                 save_snapshot(out_dir, day_idx, t_sim, state, hc)
                 next_snap_t += snap_dt
+
+            # 3D snapshot every snapshot_3d_hours.
+            if snap3d_enabled and t_sim >= next_snap3d_t:
+                hr_idx = int(round(t_sim / 3600.0))
+                save_snapshot_3d(out_dir, hr_idx, t_sim, state, hc)
+                next_snap3d_t += snap3d_dt
 
             # Profile every profile_days.
             if t_sim >= next_prof_t:
