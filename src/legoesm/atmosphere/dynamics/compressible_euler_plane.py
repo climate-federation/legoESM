@@ -151,6 +151,7 @@ from legoesm.atmosphere.dynamics import plane_operators as _plane_ops
 from legoesm.atmosphere.dynamics.compressible_euler import (
     CompressibleEulerConfig,
     _acoustic_column_kernel,
+    _semi_implicit_acoustic_column_kernel,
     _sponge_profile,
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
@@ -1232,6 +1233,59 @@ def plane_acoustic_substeps(
     )
 
 
+def plane_acoustic_substeps_semi_implicit(
+    state: PlaneNonHydrostaticState,
+    slow_tend: PlaneNonHydrostaticTendencies,
+    dt_s: float,
+    n_substeps: int,
+    config: SplitExplicitConfig,
+    height_coord: HeightCoordinate,
+    terrain_metric: TerrainMetric,
+    euler_config: CompressibleEulerConfig,
+) -> PlaneNonHydrostaticState:
+    """Semi-implicit acoustic substeps on the plane via per-column
+    Thomas tridiagonal solve.
+
+    Lifts the vertical acoustic CFL constraint that limits the
+    forward-backward variant to ``dt ≲ dx/c_s``. Permits outer
+    ``dt`` ~ 30-60 s at dx=2 km (advective CFL bound only).
+
+    Thin wrapper around
+    :func:`compressible_euler._semi_implicit_acoustic_column_kernel`
+    — column-local algebra, no duplicated vertical math. Signature
+    parity with :func:`plane_acoustic_substeps`.
+    """
+    del slow_tend, config  # signature parity with other dycores
+    g = euler_config.g
+    J = terrain_metric.jacobian
+    beta = euler_config.acoustic_off_centering
+
+    w = state.w.data
+    theta_p = state.theta_prime.data
+    rho_p = state.rho_prime.data
+
+    def substep_body(_, carry):
+        w_c, theta_p_c, rho_p_c = carry
+        return _semi_implicit_acoustic_column_kernel(
+            w_c, theta_p_c, rho_p_c,
+            height_coord, J, dt_s, beta, g,
+        )
+
+    w_final, theta_p_final, rho_p_final = jax.lax.fori_loop(
+        0, n_substeps, substep_body, (w, theta_p, rho_p),
+    )
+
+    return PlaneNonHydrostaticState(
+        u=state.u,
+        v=state.v,
+        w=state.w.replace(data=w_final),
+        theta_prime=state.theta_prime.replace(data=theta_p_final),
+        rho_prime=state.rho_prime.replace(data=rho_p_final),
+        phis=state.phis,
+        tracers=state.tracers,
+    )
+
+
 # --------------------------------------------------------------------- #
 # Config validation                                                     #
 # --------------------------------------------------------------------- #
@@ -1259,13 +1313,9 @@ def validate_plane_config(config: CompressibleEulerConfig) -> None:
     - ``hyperdiff_coeff / hyperdiff_rho_coeff / hyperdiff_w_coeff > 0``
       — biharmonic damping lands in PR3.
     """
-    if config.semi_implicit_acoustic:
-        raise NotImplementedError(
-            "PR2b plane dycore only supports forward-backward acoustic "
-            "substeps; set semi_implicit_acoustic=False or wait for the "
-            "follow-up PR that lifts the kernel into the tridiagonal "
-            "solver path."
-        )
+    # semi_implicit_acoustic now supported via
+    # plane_acoustic_substeps_semi_implicit (per-column Thomas solve
+    # using the shared _semi_implicit_acoustic_column_kernel).
     # ``sponge_coeff > 0`` is now supported (PR2d) — the Rayleigh
     # sponge is applied inside ``plane_compressible_euler_slow_tendencies``
     # to ``u``, ``v``, ``theta'`` at full levels and ``w`` at half
@@ -1470,11 +1520,18 @@ class PlaneCompressibleEulerModel:
                 tracers=s.tracers.replace(data=tend.dtracers_dt.data),
             )
 
-        def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
-            return plane_acoustic_substeps(
-                s, slow_tend, dt_s, n_sub, cfg,
-                self.height_coord, self.terrain_metric, self.config,
-            )
+        if self.config.semi_implicit_acoustic:
+            def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
+                return plane_acoustic_substeps_semi_implicit(
+                    s, slow_tend, dt_s, n_sub, cfg,
+                    self.height_coord, self.terrain_metric, self.config,
+                )
+        else:
+            def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
+                return plane_acoustic_substeps(
+                    s, slow_tend, dt_s, n_sub, cfg,
+                    self.height_coord, self.terrain_metric, self.config,
+                )
 
         state_new = split_explicit_step(
             state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
