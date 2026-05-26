@@ -204,7 +204,12 @@ def _assert_max_wind_peak_below(out_dir, label, cap):
 
     Codex iter-66 HIGH: ``float("nan")`` parses successfully but
     ``max(0.0, nan)`` returns ``0.0`` in CPython (NaN-naive
-    comparison). Reject NaN explicitly via ``math.isfinite``.
+    comparison). NaN-rejection logic distinguishes:
+    * **NaN** → SKIP (treat as junk data; iter-66 vacuous-pass guard).
+    * **inf** → PROPAGATE through ``max()`` (it's a real signal of a
+      CFL blowup that the cap check should fire on).
+    iter-87 refined the iter-66 ``not isfinite`` skip — which
+    incorrectly skipped inf too — to specifically check ``isnan``.
     """
     mean_csv = out_dir / "mean_timeseries.csv"
     assert mean_csv.exists(), (
@@ -229,8 +234,10 @@ def _assert_max_wind_peak_below(out_dir, label, cap):
         for row in reader:
             try:
                 val = abs(float(row["max_wind"]))
-                if not math.isfinite(val):
-                    continue
+                if math.isnan(val):
+                    continue  # junk data, not a CFL signal
+                # inf is preserved: ``max(0.0, inf) = inf`` propagates
+                # through to ``peak_v < cap`` → assertion fires loudly.
                 peak_v = max(peak_v, val)
                 seen_max_wind = True
             except (TypeError, ValueError):

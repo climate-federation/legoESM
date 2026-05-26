@@ -149,6 +149,46 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 87
+
+**Distinguish NaN vs inf in iter-66 ``_assert_max_wind_peak_below``
+guard (NaN = junk data → skip; inf = CFL crash signal → propagate).**
+
+iter-66 added ``if not math.isfinite(val): continue`` to fix the
+NaN silent-vacuous-pass bug (``max(0.0, nan)=0.0`` in CPython).
+That fix incorrectly treated **inf** the same as NaN.
+
+Real semantics:
+* **NaN**: junk data (parse error, uninitialized field). Skip ✓.
+* **inf**: a REAL signal of CFL blowup that the cap check should
+  fire on. Propagating ``max(0.0, inf) = inf`` correctly trips
+  ``peak_v < cap`` = False → loud assertion.
+
+Pre-iter-87 inf handling: silently skipped → peak_v stayed at 0.0
+or other finite value → CFL-crash signal LOST. If all rows were
+inf, the "no parseable" assertion would fire (misleading; should
+be "cap exceeded").
+
+**Fix**: changed ``not math.isfinite(val): continue`` to
+``math.isnan(val): continue``. inf no longer skipped; propagates
+into peak_v through ``max()``.
+
+**3 new unit tests**:
+* ``test_inf_propagates_to_cap_check``: single inf row → peak_v=inf
+  → cap check fires.
+* ``test_all_inf_rows_trip_cap``: all inf rows → cap check fires
+  (not "no parseable").
+* ``test_mixed_nan_inf_and_finite``: NaN skipped, inf propagates,
+  finite counted; one inf row makes peak_v=inf.
+
+**Tests**: 36/36 PASS in 0.41 s (was 33). All iter-66 NaN tests
+still pass (NaN-skip semantics preserved); new inf-propagate
+semantics covered.
+
+**R-roadmap status**: R1-R8, R10, R12 ✓. F9 platform-blocked.
+``_rce_helpers`` NaN/inf semantics now reflect actual production
+signals: NaN = junk, inf = catastrophe.
+
 ### 2026-05-26 — iter 86
 
 **Refresh Components table for iter-78/79/83/84/85 helper-module

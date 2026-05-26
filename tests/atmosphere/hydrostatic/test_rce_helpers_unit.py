@@ -230,6 +230,50 @@ def test_assert_max_wind_peak_below_mixed_nan_and_finite(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# iter-87: distinguish NaN (skip, junk data) from inf (propagate,
+# CFL crash signal). The iter-66 ``not isfinite`` skip incorrectly
+# treated inf the same as NaN — but inf is a real signal of CFL
+# blowup that the cap check should fire on.
+# ---------------------------------------------------------------------------
+
+
+def test_assert_max_wind_peak_below_inf_propagates_to_cap_check(tmp_path):
+    """A single ``inf`` row should make peak_v=inf and trip the cap
+    check (NOT silently skip like NaN). Models a future driver that
+    emits inf max_wind on CFL crash."""
+    out = _write_timeseries(
+        tmp_path,
+        [(1, 5.0), (2, "inf"), (3, 3.0)],
+    )
+    with pytest.raises(AssertionError, match="peak max"):
+        _assert_max_wind_peak_below(out, label="inf-crash", cap=25.0)
+
+
+def test_assert_max_wind_peak_below_all_inf_rows_trip_cap(tmp_path):
+    """All inf rows: seen_max_wind=True (vs iter-66 NaN case where
+    it'd be False), peak_v=inf, cap check fires. The error message
+    is the cap-exceeded assertion, NOT the "no parseable" one."""
+    out = _write_timeseries(
+        tmp_path,
+        [(1, "inf"), (2, "inf"), (3, "inf")],
+    )
+    with pytest.raises(AssertionError, match="peak max"):
+        _assert_max_wind_peak_below(out, label="all-inf", cap=25.0)
+
+
+def test_assert_max_wind_peak_below_mixed_nan_inf_and_finite(tmp_path):
+    """Mixed bag: NaN skipped, inf propagates, finite values counted.
+    With one inf row, peak_v=inf → cap check fires regardless of
+    finite-row values."""
+    out = _write_timeseries(
+        tmp_path,
+        [(1, "nan"), (2, 5.0), (3, "inf"), (4, 12.0)],
+    )
+    with pytest.raises(AssertionError, match="peak max"):
+        _assert_max_wind_peak_below(out, label="mixed-nan-inf", cap=25.0)
+
+
+# ---------------------------------------------------------------------------
 # iter-83: unit coverage for _parse_results / _parse_notes / _assert_rce_pass.
 # These were extracted to _rce_helpers.py at iter-78 alongside _assert_dt_used
 # + _assert_max_wind_peak_below (which iter-52 already covered). Now all 5
