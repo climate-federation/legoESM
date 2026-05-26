@@ -121,6 +121,38 @@ def test_auto_dt_rce_lies_inside_cfl_envelope():
             )
 
 
+def test_print_rce_auto_dt_table_script_runs():
+    """Smoke: the iter-31 diagnostic table script
+    (scripts/print_rce_auto_dt_table.py) must run cleanly and print
+    rows for every cubed_sphere row in the parametrise above.
+
+    Lightweight — no JAX dycore, no run_rce.py invocation. Catches
+    breakage of the script (e.g. an estimator removed, the
+    ``auto_dt_rce`` import broken) without spending wall time.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+    script = Path(__file__).resolve().parents[3] / "scripts" / "print_rce_auto_dt_table.py"
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, (
+        f"print_rce_auto_dt_table.py exited {result.returncode}:\n"
+        f"{result.stdout}\n---stderr---\n{result.stderr}"
+    )
+    # Every cubed_sphere case must appear in the table.
+    for token in ("C24", "C48", "C72", "C96"):
+        assert token in result.stdout, (
+            f"diagnostic table missing {token} row:\n{result.stdout}"
+        )
+    # The header must include the expected columns.
+    assert "ladder dt" in result.stdout
+    assert "CFL ratio" in result.stdout
+    assert "fit ratio" in result.stdout
+
+
 def test_ladder_matches_empirical_dt_dx2_fit():
     """The iter-12..26 measurements give a clean ``dt ∝ dx²`` fit on
     the cubed_sphere branch (iter-28 finding). This test asserts the

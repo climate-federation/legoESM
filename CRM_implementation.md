@@ -222,6 +222,55 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 31
+
+**Auto-dt diagnostic table script + matching smoke test**
+
+New `scripts/print_rce_auto_dt_table.py`: standalone diagnostic
+that prints the per-grid auto-dt ladder + the gravity-wave CFL
+bound + the iter-29 dx² fit + their ratios, in a single table.
+No JAX dycore import; runs in <1 s. Useful for:
+* Planning a new resolution before launching a 30-day run.
+* Spotting structural drift during a refactor.
+* Documentation: paste the output into commit messages or docs.
+
+Sample output:
+
+```
+          grid    res   dx_min[m]   ladder dt    CFL [s]   CFL ratio    dx² fit   fit ratio
+------------------------------------------------------------------------------------------
+  cubed_sphere    C24      240753       600.0      454.0        1.32×      600.0        1.00×
+  cubed_sphere    C48      120376       150.0      227.0        0.66×      150.0        1.00×
+  cubed_sphere    C72       80251        75.0      151.3        0.50×       66.7        1.13×
+  cubed_sphere    C96       60188        37.0      113.5        0.33×       37.5        0.99×
+        latlon   LL16      122618       600.0      231.2        2.60×      155.6        3.86×
+        latlon   LL32       30692       150.0       57.9        2.59×        9.8       15.38×
+      gaussian    T21      909809       600.0     1715.6        0.35×     8568.6        0.07×
+      gaussian    T42      465484       150.0      877.7        0.17×     2242.9        0.07×
+       voronoi     V4      379278       300.0      715.2        0.42×     1489.1        0.20×
+       voronoi     V5      189694       300.0      357.7        0.84×      372.5        0.81×
+```
+
+Confirms the iter-29 finding that **cubed_sphere is fit-anchored
+within 1 %** at C24/C48/C96 and 13 % at C72 — solid empirical
+agreement with dt ∝ dx². The other grids show large ratios
+because their pole-cell-clamp / different-geometry stability
+profiles aren't captured by the cubed_sphere-fitted constant.
+
+**New regression test** `test_print_rce_auto_dt_table_script_runs`:
+subprocess-invokes the script, asserts exit code 0 + presence of
+expected column headers + every C{24,48,72,96} row. Catches script
+breakage without spending wall time.
+
+**Test count**: 9 PASS in 25 s (added 1 new diagnostic-script
+smoke).
+
+**C96 30-day at dt=37 still running** (39 min CPU; day 5 not yet
+printed — slow on M5 Pro).
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-31 diagnostic table
++ script smoke), R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 30
 
 **CFL advisory now shows BOTH bounds (gravity-wave + dx² fit).**
