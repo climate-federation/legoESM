@@ -18,8 +18,12 @@ the dycore.  The variants are:
   :func:`legoesm.training.neural_gcm_spectral.train_column_mlp_spectral`.
 * ``sfno_physics`` — SFNO replaces the gridded physics step via
   :func:`legoesm.training.neural_gcm_spectral.train_neural_gcm_spectral`.
-* ``sfno_full`` — alias of ``sfno_physics`` (kept for forward-compat
-  once an end-to-end spectral-SFNO mode lands).
+* ``sfno_full`` — SFNO as the full atmospheric emulator (no dycore,
+  no physics tendency) via
+  :func:`legoesm.training.neural_gcm_spectral.train_sfno_full_spectral`.
+  The trained model is :class:`SFNOPrimitiveEquationModel` operating
+  in ``state_update`` mode at a macro time step ``dt_sfno`` (default
+  6 h), with post-hoc dry-air-mass and moisture-budget corrections.
 
 Usage
 -----
@@ -182,7 +186,7 @@ def _train_variant(variant: str, cfg: dict[str, Any], cache_dir: str):
             n_layers=int(cfg.get("nn_n_layers", 4)),
         )
 
-    if variant in ("sfno_physics", "sfno_full"):
+    if variant == "sfno_physics":
         from legoesm.training.neural_gcm_spectral import (
             train_neural_gcm_spectral,
         )
@@ -190,6 +194,17 @@ def _train_variant(variant: str, cfg: dict[str, Any], cache_dir: str):
             config=spec_cfg,
             cache_dir=cache_dir,
             seed=int(cfg.get("sfno_seed", 0)),
+        )
+
+    if variant == "sfno_full":
+        from legoesm.training.neural_gcm_spectral import (
+            train_sfno_full_spectral,
+        )
+        return train_sfno_full_spectral(
+            config=spec_cfg,
+            cache_dir=cache_dir,
+            seed=int(cfg.get("sfno_seed", 0)),
+            dt_sfno=float(cfg.get("dt_sfno", 21600.0)),
         )
 
     raise ValueError(f"Unknown AIMIP variant: {variant!r}")
@@ -418,8 +433,13 @@ def _evaluate_variant(
     n_steps_eval = int(round(eval_rollout_hours * 3600.0 / spec_cfg.dt))
     eval_rad_interval = int(cfg.get("aimip_rad_update_interval", 1))
 
-    # Build the per-variant physics_fn (model is frozen for eval).
+    # Build the per-variant rollout closure (model is frozen for eval).
+    # ``sfno_full`` doesn't use a physics_fn / dycore at all -- it
+    # iterates the trained SFNO step directly at ``dt_sfno``.  All other
+    # variants share the spectral_rollout(physics_fn) path.
     eval_physics_pair = None  # (non_rad_fn, rad_fn) when split active
+    eval_full_emulator_rollout = None  # set only when variant == "sfno_full"
+    physics_fn = None
     if variant == "classical":
         eval_land_mask = None
         if bool(cfg.get("aimip_spatial_surface", False)) and target_carries:
@@ -450,8 +470,54 @@ def _evaluate_variant(
             physics_fn = built
     elif variant == "column_nn":
         physics_fn = make_column_mlp_spectral_physics(trained_model, grid)
-    elif variant in ("sfno_physics", "sfno_full"):
+    elif variant == "sfno_physics":
         physics_fn = make_sfno_spectral_physics(trained_model, grid)
+    elif variant == "sfno_full":
+        from legoesm.atmosphere.dynamics.sfno_pe import (
+            SFNOPrimitiveEquationConfig,
+            SFNOPrimitiveEquationModel,
+        )
+        from legoesm.ml.channel_packing import PE3DChannelSpec
+        from legoesm.ml.sfno import SFNOConfig
+        _channels = PE3DChannelSpec(nlev=spec_cfg.n_levels).n_channels
+        eval_dt_sfno = float(cfg.get("dt_sfno", 21600.0))
+        eval_pe_cfg = SFNOPrimitiveEquationConfig(
+            sfno_config=SFNOConfig(
+                in_channels=_channels,
+                out_channels=_channels,
+                embed_dim=spec_cfg.sfno_embed_dim,
+                n_blocks=spec_cfg.sfno_n_blocks,
+                mlp_expansion=spec_cfg.sfno_mlp_expansion,
+                residual_prediction=False,
+            ),
+            mode="state_update",
+            dt_sfno=eval_dt_sfno,
+            correct_mass=True,
+            correct_moisture_budget=True,
+            clip_q=True,
+            use_normalization=False,
+        )
+        eval_full_wrapper = SFNOPrimitiveEquationModel(
+            grid=grid, sigma_coord=sigma,
+            config=eval_pe_cfg, sfno_model=trained_model,
+        )
+        n_steps_eval_sfno = max(
+            1, int(round(eval_rollout_hours * 3600.0 / eval_dt_sfno))
+        )
+        logger.info(
+            f"sfno_full eval: {n_steps_eval_sfno} SFNO steps "
+            f"@ dt_sfno={eval_dt_sfno:.0f}s (= {eval_rollout_hours} h)"
+        )
+
+        def _scan_body(s, _):
+            return eval_full_wrapper.step(s, eval_dt_sfno), None
+
+        @jax.jit
+        def eval_full_emulator_rollout(state):
+            final, _ = jax.lax.scan(
+                _scan_body, state, jnp.arange(n_steps_eval_sfno),
+            )
+            return final
     else:
         raise ValueError(f"Unknown variant in eval: {variant!r}")
 
@@ -473,7 +539,9 @@ def _evaluate_variant(
         # carries.  Eval only scores against the longest lead.
         if isinstance(target, tuple):
             target = target[-1]
-        if eval_physics_pair is not None:
+        if eval_full_emulator_rollout is not None:
+            pred = eval_full_emulator_rollout(ic)
+        elif eval_physics_pair is not None:
             non_rad_fn, rad_fn = eval_physics_pair
             pred = spectral_rollout(
                 ic, non_rad_fn, grid, sigma, pe_config,

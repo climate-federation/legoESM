@@ -1,0 +1,7 @@
+base: config/aimip/t106_headtohead/base.yaml
+variants:
+- sfno_full
+output_dir: results/aimip_t106_headtohead_sfno_full_lr2
+cfg_overrides:
+  aimip_lr: 1.0e-3
+  sfno_seed: 0

@@ -1623,6 +1623,302 @@ def train_neural_gcm_spectral(
     )
 
 
+def train_sfno_full_spectral(
+    config: NeuralGCMSpectralConfig = NeuralGCMSpectralConfig(),
+    cache_dir: str = "data/era5_cache",
+    seed: int = 0,
+    dt_sfno: float = 21600.0,
+):
+    """Train SFNO as a full atmospheric emulator (no dycore).
+
+    Unlike :func:`train_neural_gcm_spectral` (where SFNO produces
+    physics-tendency increments that the spectral PE dycore advances),
+    here SFNO directly maps ``state_t -> state_{t+1}`` at the macro
+    step ``dt_sfno`` (default 6 h, matching the standard SFNO/FourCastNet
+    autoregressive cadence).  The wrapper
+    :class:`SFNOPrimitiveEquationModel` applies post-hoc dry-air-mass
+    and moisture-budget corrections after each step.
+
+    The training loop mirrors :func:`_train_spectral_loop` (multi-step
+    autoregressive supervision, bias / CRPS / spectral-CRPS loss,
+    per-epoch checkpointing and early stopping) but uses
+    ``model.step()`` for rollouts instead of ``spectral_rollout``.
+    Segment lengths in the multi-step schedule are computed in SFNO
+    macro-step units (``dt_sfno``), not the dycore micro-step
+    (``config.dt``), so a 24 h lead at ``dt_sfno=6 h`` is 4 SFNO steps.
+
+    Returns (trained_sfno, loss_history).
+    """
+    from legoesm.atmosphere.dynamics.sfno_pe import (
+        SFNOPrimitiveEquationConfig,
+        SFNOPrimitiveEquationModel,
+    )
+
+    grid = create_gaussian_grid(config.n_max, dealiasing="quadratic")
+    sigma = create_sigma_coordinate(config.n_levels, sigma_top=config.sigma_top)
+
+    spec = PE3DChannelSpec(nlev=config.n_levels)
+    sfno_arch_cfg = SFNOConfig(
+        in_channels=spec.n_channels,
+        out_channels=spec.n_channels,
+        embed_dim=config.sfno_embed_dim,
+        n_blocks=config.sfno_n_blocks,
+        mlp_expansion=config.sfno_mlp_expansion,
+        residual_prediction=False,
+    )
+    sfno = SFNO(sfno_arch_cfg, grid, key=jax.random.PRNGKey(seed))
+    n_p = sum(x.size for x in jax.tree.leaves(eqx.filter(sfno, eqx.is_array)))
+    logger.info(
+        f"SFNO full-emulator: {spec.n_channels}ch, {config.sfno_embed_dim}d, "
+        f"{config.sfno_n_blocks} blocks, {n_p:,} params, "
+        f"dt_sfno={dt_sfno:.0f}s ({dt_sfno/3600:.1f}h macro step)"
+    )
+
+    pe_emulator_cfg = SFNOPrimitiveEquationConfig(
+        sfno_config=sfno_arch_cfg,
+        mode="state_update",
+        dt_sfno=dt_sfno,
+        correct_mass=True,
+        correct_moisture_budget=True,
+        clip_q=True,
+        use_normalization=False,
+    )
+
+    ic_states, target_carries = load_training_data(
+        config, grid, sigma, cache_dir, windows=config.windows,
+    )
+
+    return _train_sfno_full_loop(
+        sfno, pe_emulator_cfg, grid, sigma,
+        ic_states, target_carries, config, dt_sfno,
+    )
+
+
+def _train_sfno_full_loop(
+    sfno: SFNO,
+    pe_emulator_cfg,
+    grid: GaussianGrid,
+    sigma: SigmaCoordinate,
+    ic_states,
+    target_carries,
+    config: NeuralGCMSpectralConfig,
+    dt_sfno: float,
+):
+    """Training loop for SFNO full-atmosphere emulator (no dycore).
+
+    Parallel to :func:`_train_spectral_loop` but uses
+    ``SFNOPrimitiveEquationModel.step(state, dt_sfno)`` for rollout
+    instead of the dycore + physics-tendency assembly.  The multi-step
+    segment schedule is reused verbatim from ``config.loss_config``,
+    but segment lengths are converted into SFNO macro steps.
+    """
+    from legoesm.atmosphere.dynamics.sfno_pe import (
+        SFNOPrimitiveEquationModel,
+    )
+    from legoesm.ml.training import TrainingConfig, create_optimizer
+
+    sigma_full = jnp.asarray(sigma.sigma_full)
+
+    total_steps = max(1, config.n_epochs * max(1, len(ic_states)))
+    optimizer = create_optimizer(TrainingConfig(
+        lr=config.lr,
+        warmup_steps=config.warmup_steps,
+        total_steps=total_steps,
+        weight_decay=config.weight_decay,
+        grad_clip_norm=config.grad_clip_norm,
+        optimizer=config.optimizer,
+    ))
+    opt_state = optimizer.init(eqx.filter(sfno, eqx.is_array))
+    loss_history = []
+
+    # Multi-step segment schedule (same lead set as the dycore-mode
+    # training, but expressed in SFNO macro steps).
+    loss_cfg_train = config.loss_config
+    multi_step_hours_train = tuple(
+        int(h) for h in (loss_cfg_train.multi_step_hours or ())
+    )
+    if multi_step_hours_train:
+        prev = 0
+        segment_steps = []
+        for h in multi_step_hours_train:
+            n_sfno = int(round((h - prev) * 3600.0 / dt_sfno))
+            if n_sfno <= 0:
+                raise ValueError(
+                    f"Non-positive SFNO segment derived from "
+                    f"multi_step_hours={multi_step_hours_train}, "
+                    f"dt_sfno={dt_sfno}s.  Use a smaller dt_sfno or "
+                    f"larger leads."
+                )
+            segment_steps.append(n_sfno)
+            prev = h
+        ms_weights_cfg = tuple(loss_cfg_train.multi_step_weights or ())
+        if ms_weights_cfg and len(ms_weights_cfg) != len(segment_steps):
+            raise ValueError(
+                f"multi_step_weights length {len(ms_weights_cfg)} != "
+                f"len(multi_step_hours)={len(segment_steps)}."
+            )
+        ms_weights = (
+            tuple(float(w) for w in ms_weights_cfg)
+            if ms_weights_cfg else (1.0,) * len(segment_steps)
+        )
+        ms_weight_sum = float(sum(ms_weights))
+        logger.info(
+            f"SFNO full-emulator multi-step supervision: "
+            f"leads={multi_step_hours_train}h "
+            f"(segments={segment_steps} SFNO steps, weights={ms_weights})"
+        )
+    else:
+        # Single-step fallback: roll out config.rollout_hours at dt_sfno.
+        n_sfno_single = max(
+            1,
+            int(round(
+                float(getattr(config, "rollout_hours", 0) or 24)
+                * 3600.0 / dt_sfno
+            )),
+        )
+        segment_steps = (n_sfno_single,)
+        ms_weights = (1.0,)
+        ms_weight_sum = 1.0
+        logger.info(
+            f"SFNO full-emulator single-segment supervision: "
+            f"{n_sfno_single} SFNO steps "
+            f"(~{n_sfno_single * dt_sfno / 3600:.1f} h)"
+        )
+
+    logger.info(
+        f"SFNO full-emulator training: {config.n_epochs} epochs, "
+        f"{len(ic_states)} samples/epoch, dt_sfno={dt_sfno:.0f}s"
+    )
+
+    def _rollout_segment(state, model_wrapper, n_steps):
+        """Iterate ``model_wrapper.step`` ``n_steps`` times via lax.scan."""
+        def body(s, _):
+            return model_wrapper.step(s, dt_sfno), None
+        final, _ = jax.lax.scan(body, state, jnp.arange(n_steps))
+        return final
+
+    def _train_step(sfno_m, opt_state_in, ic_spectral, target_carry):
+        def loss_fn(m):
+            # Rebuild the wrapper inside the trace; ``grid``,
+            # ``sigma``, and ``pe_emulator_cfg`` are static so the
+            # constructor introduces no new array work, and the inner
+            # SFNO ``m`` is the differentiable target.
+            wrapper = SFNOPrimitiveEquationModel(
+                grid=grid,
+                sigma_coord=sigma,
+                config=pe_emulator_cfg,
+                sfno_model=m,
+            )
+            state = ic_spectral
+            total = jnp.float32(0.0)
+            comp_total = {
+                "mse": jnp.float32(0.0),
+                "bias": jnp.float32(0.0),
+                "crps": jnp.float32(0.0),
+                "spec_crps": jnp.float32(0.0),
+            }
+            for k, n_seg in enumerate(segment_steps):
+                state = _rollout_segment(state, wrapper, n_seg)
+                seg_loss, seg_comp = _spectral_state_loss_components(
+                    state, target_carry[k], grid, sigma,
+                    sigma_full, loss_cfg_train,
+                )
+                total = total + ms_weights[k] * seg_loss
+                for key in comp_total:
+                    comp_total[key] = comp_total[key] + ms_weights[k] * seg_comp[key]
+            inv = 1.0 / ms_weight_sum
+            return total * inv, {k: v * inv for k, v in comp_total.items()}
+
+        (loss, components), grads = eqx.filter_value_and_grad(
+            loss_fn, has_aux=True,
+        )(sfno_m)
+        grad_norm = optax.global_norm(eqx.filter(grads, eqx.is_array))
+        updates, new_opt_state = optimizer.update(
+            eqx.filter(grads, eqx.is_array),
+            opt_state_in,
+            eqx.filter(sfno_m, eqx.is_array),
+        )
+        new_model = eqx.apply_updates(sfno_m, updates)
+        return new_model, new_opt_state, loss, grad_norm, components
+
+    train_step = eqx.filter_jit(_train_step)
+
+    best_loss = float("inf")
+    patience_counter = 0
+    early_stop_patience = int(getattr(config, "early_stop_patience", 0) or 0)
+    early_stop_min_delta = float(getattr(config, "early_stop_min_delta", 1.0e-3))
+
+    for epoch in range(config.n_epochs):
+        epoch_loss = 0.0
+        epoch_components = {"mse": 0.0, "bias": 0.0, "crps": 0.0, "spec_crps": 0.0}
+        t0 = time.time()
+        grad_norm_val = 0.0
+
+        for sample_idx, (ic, target) in enumerate(zip(ic_states, target_carries)):
+            sfno, opt_state, loss, grad_norm, components = train_step(
+                sfno, opt_state, ic, target,
+            )
+
+            loss_val = float(loss)
+            if jnp.isnan(loss) or jnp.isinf(loss):
+                raise RuntimeError(
+                    f"SFNO full-emulator: NaN/Inf loss at epoch {epoch}, "
+                    f"sample {sample_idx} (loss={loss_val})."
+                )
+            grad_norm_val = float(grad_norm)
+            if jnp.isnan(grad_norm) or jnp.isinf(grad_norm):
+                raise RuntimeError(
+                    f"SFNO full-emulator: NaN/Inf gradient at epoch {epoch}, "
+                    f"sample {sample_idx} (grad_norm={grad_norm_val})."
+                )
+
+            epoch_loss += loss_val
+            for key in epoch_components:
+                epoch_components[key] += float(components[key])
+
+        n_samples = max(len(ic_states), 1)
+        avg_loss = epoch_loss / n_samples
+        avg_components = {k: v / n_samples for k, v in epoch_components.items()}
+        loss_history.append(avg_loss)
+
+        if epoch % config.log_every == 0 or epoch == config.n_epochs - 1:
+            elapsed = time.time() - t0
+            logger.info(
+                f"Epoch {epoch:4d}: loss={avg_loss:.6f} "
+                f"(mse={avg_components['mse']:.4f} "
+                f"bias={avg_components['bias']:.4f} "
+                f"crps={avg_components['crps']:.4f} "
+                f"spec_crps={avg_components['spec_crps']:.4f}), "
+                f"grad_norm={grad_norm_val:.6e}, time={elapsed:.1f}s"
+            )
+
+        if (epoch + 1) % 10 == 0 or epoch == config.n_epochs - 1:
+            from pathlib import Path
+            from legoesm.ml.training import save_checkpoint
+            ckpt_dir = Path(config.checkpoint_dir)
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+            ckpt_path = ckpt_dir / f"epoch_{epoch:04d}.eqx"
+            save_checkpoint(sfno, ckpt_path)
+            logger.info(f"Saved checkpoint: {ckpt_path}")
+
+        if early_stop_patience > 0:
+            if best_loss - avg_loss > early_stop_min_delta:
+                best_loss = avg_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= early_stop_patience:
+                    logger.info(
+                        f"Early stop at epoch {epoch}: no improvement "
+                        f"> {early_stop_min_delta} for "
+                        f"{early_stop_patience} consecutive epochs "
+                        f"(best={best_loss:.6f}, last={avg_loss:.6f})."
+                    )
+                    break
+
+    return sfno, loss_history
+
+
 def train_column_mlp_spectral(
     config: NeuralGCMSpectralConfig = NeuralGCMSpectralConfig(),
     cache_dir: str = "data/era5_cache",
