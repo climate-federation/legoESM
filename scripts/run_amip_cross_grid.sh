@@ -60,9 +60,16 @@ ANY_FAILED=0
 GRID_TABLE=(
     "cubed_sphere:48:cdgrid:cubed_sphere::150"
     "latlon:90:latlon_cgrid:latlon::"
-    "voronoi:6:mpas:icosahedral::"
+    "voronoi:6:mpas:icosahedral::60"
     "gaussian:42:spectral:spectral:--truncation 42:150"
 )
+# Voronoi dt notes (iter-32 Codex HIGH):
+#   scripts/smoke_test_amip_all_grids.py uses --dt 60 at V4 explicitly,
+#   noting "the MPAS hydrostatic dycore is unstable at the default
+#   600 s step despite the CFL diagnostic reporting 0.09". V6 is
+#   ~4x as many cells as V4 (10242 vs 2562) so MUST be at least as
+#   tight as V4. Pinned dt=60 here. iter-32 measurement of V6
+#   30-day at dt=60 is the pending follow-up.
 
 # Build the optional-forcing flag set once.
 EXTRA_FLAGS=""

@@ -222,6 +222,47 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 33
+
+**Codex iter-31/32 review caught 1 HIGH + 2 MEDIUM — fixed two now.**
+
+* **HIGH — Voronoi V6 AMIP at dt=600 BLOWUP risk**. iter-32 left
+  the voronoi row's DT_OVERRIDE empty in the AMIP wrapper,
+  so AMIP V6 ran at dt=600. ``smoke_test_amip_all_grids.py``
+  already documents V4 needing `--dt 60` because "the MPAS
+  hydrostatic dycore is unstable at the default 600 s step
+  despite the CFL diagnostic reporting 0.09". V6 = 4× V4 cells
+  → silently BLOWUP-prone. **Pinned dt=60 for voronoi V6 in the
+  AMIP wrapper** with comment referencing the smoke-test note and
+  the iter-32 pending V6-30day measurement.
+
+* **MEDIUM #3 — misleading dx² ratios for non-cubed-sphere grids
+  in the diagnostic table**. Codex pointed out that
+  `print_rce_auto_dt_table.py` printed LL/T/V fit ratios from the
+  C24-anchored constant — physically meaningless for those grids.
+  **Print "—" for non-cubed_sphere fit columns**.
+
+* **MEDIUM (deferred)**: K anchor drift — `_DT_DX2_K` in
+  rce_dt.py is both the production constant and the regression
+  oracle. If C24 is re-measured both shift together. Acceptable
+  trade-off for now (the test asserts cubed_sphere ladder
+  matches the C24-anchored fit within 30 %; a future C24
+  re-measurement that breaks this is the kind of structural
+  change that should require an explicit + visible code touch
+  rather than being caught by an independent oracle).
+
+* **LOW — LL90 dt=600 in AMIP wrapper**: Codex verified the
+  in-script pole-cell CFL clamp at `component_factory.py:386-396`
+  fires harder at LL90 than at LL32, so the adaptive path holds.
+  No action needed.
+
+**Tests**: 9/9 PASS in 33 s.
+
+**C96 30-day** still running (CPU time crept past 50 min).
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-33 codex HIGH fix +
+table cleanup), R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 32
 
 **AMIP cross-grid wrapper carries the same iter-7/iter-13 bugs — fixed.**

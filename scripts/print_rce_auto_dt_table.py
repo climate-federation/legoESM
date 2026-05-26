@@ -57,12 +57,18 @@ def main():
                 dt_str = f"{dt:>10.1f}"
                 cfl_ratio = dt / cfl
                 cfl_ratio_str = f"{cfl_ratio:>10.2f}×"
-                # dx² fit only meaningful for grids it was fitted on
-                # (cubed_sphere); show it anyway for context.
-                fit_dt = empirical_dt_dx2(dx)
-                fit_ratio = dt / fit_dt
-                fit_str = f"{fit_dt:>9.1f}"
-                fit_ratio_str = f"{fit_ratio:>10.2f}×"
+                # dx² fit is anchored to C24 (cubed_sphere); print "—"
+                # for the other grids because the fit constant
+                # _DT_DX2_K is not tuned for their geometry (iter-32
+                # Codex MEDIUM #3 — misleading ratios for LL/T/V).
+                if grid_type == "cubed_sphere":
+                    fit_dt = empirical_dt_dx2(dx)
+                    fit_ratio = dt / fit_dt
+                    fit_str = f"{fit_dt:>9.1f}"
+                    fit_ratio_str = f"{fit_ratio:>10.2f}×"
+                else:
+                    fit_str = f"{'—':>9}"
+                    fit_ratio_str = f"{'—':>10}"
             print(
                 f"{grid_type:>14}  {prefix+str(N):>5}  {dx:>10.0f}  "
                 f"{dt_str:>10}  {cfl:>9.1f}  {cfl_ratio_str:>10}  "
