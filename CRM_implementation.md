@@ -19,8 +19,10 @@ Canonical state of CRM rollout — built, broken, next. Each iteration appends d
 | Multi-grid RCE driver | `scripts/run_rce.py`, `scripts/run_rce_cross_grid.sh` | Built for `cubed_sphere`, `latlon`, `voronoi`, `gaussian`. 30-day production validated for {C24, C48, C72, V4, LL32, T21} (iter-12 + iter-15 + iter-26); C96 stays at 2-day nightly per iter-22 wall-time decision |
 | Bare-dycore stability diagnostic | `scripts/diag_bare_dycore_stability.py` | Built (iter-1) with `--implicit-buoyancy` / `--vertical-theta-diffusion` / `--advection` switches |
 | Auto-dt ladder | `src/legoesm/driver/rce_dt.py` | Built (iter-24). 5-tier per-grid ladder + N>96 hard refusal (iter-21). Anchored by 5 measurement layers (iter-28/29/34/36/51) |
-| Radiation-schedule helper | `src/legoesm/driver/physics_schedule.py` | Built (iter-42). Single source of truth for the ``rad_call_every_steps`` arithmetic; 22 unit tests (iter-42 + iter-43 NaN/inf/sys.maxsize hardening) |
-| Shared RCE assertion helpers | `tests/atmosphere/hydrostatic/test_rce_cross_grid_smoke.py` | Built (iter-46). `_assert_dt_used` + `_assert_max_wind_peak_below` shared across C48/C72/C96/V4/LL32/T21 nightlies; 16 unit tests (iter-52) |
+| Radiation-schedule helper | `src/legoesm/driver/physics_schedule.py` | Built (iter-42). Single source of truth for the ``rad_call_every_steps`` arithmetic; 24 unit tests (iter-42 + iter-43 NaN/inf/sys.maxsize hardening) |
+| Shared hydrostatic RCE assertion helpers | `tests/atmosphere/hydrostatic/_rce_helpers.py` | Built (iter-46; promoted to dedicated module iter-78). 6 helpers (5 pure + 1 subprocess) shared across C48/C72/C96/V4/LL32/T21 nightlies. 32 unit tests (iter-52 + iter-66 + iter-83 + iter-85) |
+| Shared plane CRM assertion helpers | `tests/atmosphere/nonhydrostatic/integration/_plane_crm_helpers.py` | Built (iter-79; ``_read_log`` added iter-84). 2 pure helpers (``_parse_rad_call_count`` iter-40/54 + ``_read_log`` iter-84). 18 unit tests |
+| Production driver CLI input validation | `scripts/run_rce_mpi_long.py:main` + `scripts/run_rce.py:main` | Built (iter-65-75). 5-layer defense-in-depth: (1) NaN/inf rejection (iter-67/68 auto-detect via ``vars(args)``), (2) positive-int guards (iter-69/71), (3) range guards including ``--acoustic-off-centering ∈ [0,1)`` (iter-70), (4) negative-Kelvin sst-init (iter-74), (5) total_steps >= 1 post-derivation (iter-75). 13 + 29 parametric regression tests |
 
 ---
 
@@ -146,6 +148,33 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 * `--implicit-buoyancy` now exposed but inert at substep level (F2). Kept in API for future outer-step variant.
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
+
+### 2026-05-26 — iter 86
+
+**Refresh Components table for iter-78/79/83/84/85 helper-module
++ iter-65-75 CLI validation layer.**
+
+iter-53 refreshed the table for the iter-1/24/42/46 components.
+iter-78/79/83/84/85 added two helper modules; iter-65-75 added a
+5-layer CLI validation block. Table was stale.
+
+Refreshed rows:
+* "Shared RCE assertion helpers" → split into "Shared hydrostatic
+  RCE assertion helpers" (``_rce_helpers.py``) + "Shared plane CRM
+  assertion helpers" (``_plane_crm_helpers.py``) reflecting iter-78
+  hydrostatic + iter-79/84 plane CRM module extractions.
+* Hydrostatic helpers row: count refreshed from "16 unit tests
+  (iter-52)" to "32 unit tests (iter-52 + iter-66 + iter-83 +
+  iter-85)".
+* Plane CRM helpers row: new — 2 helpers + 18 unit tests.
+* New row "Production driver CLI input validation": documents the
+  iter-65-75 5-layer defense-in-depth with regression test counts
+  (13 hydrostatic + 29 plane CRM parametric cases).
+* Radiation-schedule helper: count refreshed from 22 → 24 unit
+  tests (iter-43 final).
+
+**R-roadmap status**: R1-R8, R10, R12 ✓. F9 platform-blocked.
+Components table now reflects post-iter-85 reality.
 
 ### 2026-05-26 — iter 85
 
