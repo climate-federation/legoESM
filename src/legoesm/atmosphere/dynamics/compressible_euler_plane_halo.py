@@ -873,8 +873,27 @@ def slow_tendency_jit_split(
 
     Tracers + Smag NOT yet supported in this fast path; falls back
     to the eager call when needed.
+
+    iter-56 Codex review: the kernel-2 trace below also lacks branches
+    for Coriolis (HIGH#1), WENO5 advection (HIGH#2), and
+    ``hyperdiff_w_coeff`` (MEDIUM#1). Without an early-fallback those
+    features silently no-op on this fast path while running correctly
+    on ``step_halo``. Extended the fallback set so any production-
+    style config falls through to the eager path, leaving this fast
+    path correct in its narrower regime (no-Smag, no-tracer,
+    no-Coriolis, upwind1, no-hyperdiff_w bench-style runs).
+    Production driver always trips at least one of these gates
+    (Smag c_s=0.2 + 3 tracers) so behaviour is unchanged.
     """
-    if config.smagorinsky_cs > 0.0 or state.tracers.data.shape[-1] > 0:
+    _w_hyperdiff = getattr(config, "hyperdiff_w_coeff", 0.0)
+    _advection = getattr(config, "horizontal_advection_scheme", "upwind1")
+    if (
+        config.smagorinsky_cs > 0.0
+        or state.tracers.data.shape[-1] > 0
+        or config.use_coriolis
+        or _advection != "upwind1"
+        or _w_hyperdiff > 0.0
+    ):
         return plane_compressible_euler_slow_tendencies_halo(
             state, grid, height_coord, terrain_metric, config, layout,
             f_pad_cached=f_pad_cached,

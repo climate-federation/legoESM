@@ -134,6 +134,62 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 56
+
+**Codex holistic review of plane CRM dycore + halo caught 2 HIGH +
+2 MEDIUM — closed via fallback gate (production unaffected).**
+
+iter-3 (Smag in halo), iter-4 (R7 MPI mass fixer wiring), iter-7
+(WENO5 in halo) added significant features to the plane CRM
+halo-aware slow tendency. iter-56 ran the first holistic Codex
+review since.
+
+Findings in ``slow_tendency_jit_split`` (Python-driven 2-MPI-round
+fast-path orchestrator used by the bench ``scripts/bench_dd_scaling.py``;
+NOT used by the production driver):
+
+* **HIGH#1** — silently omits Coriolis when ``config.use_coriolis``
+  is True. Kernel-2 trace has no Coriolis branch.
+* **HIGH#2** — silently degrades WENO5 to upwind1 (hardcoded
+  ``oh.upwind_advection_*_halo`` calls).
+* **MEDIUM#1** — missing ``hyperdiff_w_coeff`` branch (vertical-
+  velocity grid-scale damping silently absent).
+* **MEDIUM#2** — owned_mask not passed into the slow-tendency
+  computation (non-owned cells receive full tendencies; mass-fixer
+  masking happens post-step).
+
+**Fix**: extended the existing ``smagorinsky_cs > 0 or tracers > 0``
+early-fallback set to also include ``use_coriolis``, ``advection ==
+weno5``, and ``hyperdiff_w_coeff > 0``. Any production-style config
+trips at least one gate (production uses Smag c_s=0.2 + 3 tracers,
+so the fallback was always firing anyway). The fast-path is now
+correctness-clean within its restricted regime (no-Smag, no-tracer,
+no-Coriolis, upwind1, no-hyperdiff_w bench-style runs).
+
+MEDIUM#2 (owned_mask) is by-design: ``step_halo`` computes tendencies
+on the full local slab (interior + halo), then halo cells are
+overwritten by the next exchange. Mass fixer is the only consumer of
+owned_mask. A docstring annotation would clarify but no code change
+needed.
+
+**Production impact**: ZERO. ``run_rce_mpi_long.py:step_halo`` (used
+by all iter-38/39/41 slow tests) was already going through the eager
+``plane_compressible_euler_slow_tendencies_halo`` path because
+production config trips the Smag+tracer gate.
+
+**Tests**: 79/79 fast PASS in 17 s across the unit + integration
+test sweep (test_plane_slow_tend_halo, test_plane_mass_fixer_mpi,
+test_weno5_halo_equiv, test_physics_schedule, plane_crm_end_to_end_smoke,
+plane_crm_helpers_unit, rce_helpers_unit).
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-56 plane CRM halo
+correctness gates extended), R6 ✓. F9 platform-blocked.
+
+DOD item 5 progress: production driver + halo-aware slow tendency
+now have 0 HIGH + 0 MEDIUM findings against the Codex iter-55/56
+holistic reviews. Bench fast-path (slow_tendency_jit_split) hardened
+with explicit fallback for non-production configs.
+
 ### 2026-05-26 — iter 55
 
 **Codex holistic review of the production driver caught 2 MEDIUM
