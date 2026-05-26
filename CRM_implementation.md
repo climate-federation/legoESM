@@ -222,6 +222,56 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 4
+
+**Changes**
+* `src/legoesm/atmosphere/dynamics/rce_mpi.py` (R7):
+  - `compute_dry_mass_plane_mpi(state, grid, hc, tm, layout, owned_mask)`:
+    owned-mask local sum + `global_sum_mpi` across ranks. Single-rank
+    short-circuits to `compute_dry_mass_plane`.
+  - `_plane_volume_weight_mpi(grid, hc, tm, layout, owned_mask)`:
+    global owned-cell volume = global denominator of the additive
+    rho' correction.
+  - `fix_mass_nonhydrostatic_plane_mpi(state, target_mass, grid, hc,
+    tm, layout, owned_mask)`: uniform additive correction to rho'
+    using MPI-reduced (current_mass, volume_weight). Every rank sees
+    the same delta — global mass restored to `target_mass` to
+    round-off. AD-safe.
+* `src/legoesm/atmosphere/dynamics/compressible_euler_plane.py`:
+  `step_halo` accepts new `owned_mask` kwarg. When `config.fix_mass=True`
+  AND `owned_mask is not None` AND multi-rank, the MPI fixer is
+  invoked after the SSP-RK3 + acoustic substeps. With
+  `anchor_mass_to_initial=True` the initial mass is captured via
+  `compute_dry_mass_plane_mpi` so every rank uses the same target.
+  Docstring updated to reflect R7 completion.
+* `tests/unit/test_plane_mass_fixer_mpi.py` (NEW): 7 tests covering
+  single-rank bit-equivalence (compute_dry_mass + fixer match the
+  serial versions exactly), round-trip mass-restoration, volume
+  weight, the spatially-uniform-delta invariant, owned_mask handling
+  on the serial short-circuit, and end-to-end `step_halo` mass
+  conservation across 5 dt=0.5 steps with random momentum kick.
+
+**Measurements**
+* `pytest tests/unit/test_plane_mass_fixer_mpi.py`: 7/7 pass in 2 s.
+* Combined suite (halo equivalence + mass fixer): 18/18 pass in 6 s.
+* No regressions in the dt-stability suite (4/4 still pass).
+
+**R-roadmap status**:
+* R1-R5, R7 ✓
+* R6 (WENO5 halo) — deferred.
+* Next gating items: 6-h smoke at 132×132 to verify convection
+  spinup (R11 prep), then multi-rank smoke via `mpirun -np 2` to
+  exercise the new fixer under real MPI (single-process tests cover
+  the short-circuit + algorithm; real MPI exercises mpi4jax
+  `global_sum_mpi`).
+
+**Net effect**: `step_halo` is now feature-complete for production
+use on multi-rank (Smag, vertical-θ-diff, hyperdiff, sponge, mass
+fixer all available). Only blocker for switching the production
+30-day driver from "rank-0-broadcast" to true MPI DD is the driver
+script itself (`run_rce_mpi_long.py:558` calls `model.step` inside
+`if rank == 0:`). That's the next concrete iteration target.
+
 ### 2026-05-26 — iter 3
 
 **Changes**

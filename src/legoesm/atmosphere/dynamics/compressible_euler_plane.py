@@ -1463,6 +1463,7 @@ class PlaneCompressibleEulerModel:
         dt: float,
         layout,
         f_pad_cached: jax.Array | None = None,
+        owned_mask: jax.Array | None = None,
     ) -> PlaneNonHydrostaticState:
         """Domain-decomposed step using halo-aware slow tendency.
 
@@ -1480,8 +1481,12 @@ class PlaneCompressibleEulerModel:
 
         Smagorinsky LES + vertical-θ diffusion now supported on the
         halo path (R4/R5 — see ``compressible_euler_plane_halo``).
-        Mass fixer still not supported on multi-rank (compute_dry_mass
-        global reduction pending — R7).
+        Mass fixer R7: pass ``owned_mask`` (rank-local 0/1 mask of
+        cells the rank owns) to use the MPI-aware dry-mass fixer
+        :func:`legoesm.atmosphere.dynamics.rce_mpi.fix_mass_nonhydrostatic_plane_mpi`.
+        Without ``owned_mask`` the multi-rank fix_mass branch is
+        skipped (mass not anchored to target) — single-rank still
+        uses the serial fixer via ``step``.
         """
         from legoesm.atmosphere.dynamics.compressible_euler_plane_halo import (
             plane_compressible_euler_slow_tendencies_halo,
@@ -1533,10 +1538,38 @@ class PlaneCompressibleEulerModel:
                     self.height_coord, self.terrain_metric, self.config,
                 )
 
-        return split_explicit_step(
+        stepped = split_explicit_step(
             state_local, slow_tendency_fn, acoustic_update_fn,
             dt, se_config,
         )
+
+        # MPI-aware dry-mass fixer (R7). Only fires when the user
+        # passes an owned_mask + config.fix_mass is True. Without the
+        # mask we can't compute a non-double-counted global mass.
+        if self.config.fix_mass and owned_mask is not None:
+            from legoesm.atmosphere.dynamics.rce_mpi import (
+                compute_dry_mass_plane_mpi,
+                fix_mass_nonhydrostatic_plane_mpi,
+            )
+            if self.config.anchor_mass_to_initial:
+                if self._target_mass is None:
+                    # Initial reduction across all ranks so every rank
+                    # captures the same anchor.
+                    self._target_mass = compute_dry_mass_plane_mpi(
+                        state_local, self.grid, self.height_coord,
+                        self.terrain_metric, layout, owned_mask,
+                    )
+                target = self._target_mass
+            else:
+                target = compute_dry_mass_plane_mpi(
+                    state_local, self.grid, self.height_coord,
+                    self.terrain_metric, layout, owned_mask,
+                )
+            stepped = fix_mass_nonhydrostatic_plane_mpi(
+                stepped, target, self.grid, self.height_coord,
+                self.terrain_metric, layout, owned_mask,
+            )
+        return stepped
 
     # ------------------------------------------------------------------
     # JIT boundary
