@@ -610,6 +610,34 @@ def main(argv: list[str] | None = None):
     parser = build_arg_parser()
     args = parser.parse_args(argv)
     args = _postprocess_args(args, parser)
+
+    # iter-36: dt sanity advisory, generalising the iter-32
+    # AMIP-wrapper fix to the script level. The hard-coded
+    # default(--dt) = 600 was iter-13-validated only at N <= 24.
+    # Higher resolutions (e.g. C48 at dt=600) BLOWUP at day 25.
+    # Warn (don't raise) when the user-supplied dt exceeds the
+    # iter-13/iter-26 cross-grid ladder by > 2× so the operator
+    # can decide whether to override consciously.
+    try:
+        from legoesm.driver.rce_dt import auto_dt_rce
+        try:
+            _auto = auto_dt_rce(args.grid_type, args.resolution)
+        except ValueError:
+            # N > 96 — auto_dt_rce refuses; no comparison possible.
+            _auto = None
+        if _auto is not None and args.dt > 2.0 * _auto:
+            print(
+                f"WARNING: --dt {args.dt:.0f} s exceeds the iter-13/26 "
+                f"AMIP/RCE cross-grid ladder ({_auto:.0f} s for "
+                f"{args.grid_type}/N={args.resolution}) by "
+                f"{args.dt / _auto:.1f}×. Long runs at this dt may "
+                "BLOWUP (see CRM_implementation.md iter-12/20). "
+                "Pass --dt explicitly to suppress this warning.",
+                file=sys.stderr,
+            )
+    except ImportError:
+        pass
+
     config = build_config_from_args(args)
 
     from legoesm.driver.model_driver import ModelDriver

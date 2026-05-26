@@ -222,6 +222,53 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 36
+
+**AMIP dt-safety advisory at the script level + matching test.**
+
+iter-32 wired the iter-13 dt=150 default into the AMIP cross-grid
+wrapper for C48/T42 paths. But a direct `run_amip.py` invocation
+(from a training script, manual run, sweep) bypasses the wrapper
+entirely and could still land in the iter-13-banned dt=600 / C48
+configuration. iter-36 generalises the wrapper fix to the script:
+
+```python
+if args.dt > 2.0 * auto_dt_rce(args.grid_type, args.resolution):
+    print("WARNING: --dt {dt} exceeds the iter-13/26 ladder ...",
+          file=sys.stderr)
+```
+
+Warning, not raise — preserves backward compat for users with
+their own measured dt. The advisory points the operator at
+CRM_implementation.md iter-12/20 if they want to investigate.
+
+* Fires on C48 dt=600 (iter-12 BLOWUP config) ✓
+* Silent on C24 dt=600 (iter-12 PASS config) ✓
+* Silent on N>96 (ladder raises; comparison not meaningful) ✓
+
+Wrapped in `try/except ImportError` so a partial install gracefully
+skips the advisory.
+
+**New test** `tests/atmosphere/hydrostatic/test_amip_dt_warning.py`:
+3 parametrised subprocess invocations with `--days 0` (cheap
+dry-run; the warning prints before any compute). All 3 PASS in 57 s.
+
+**Cumulative dt-safety layers** through iter-36:
+1. iter-24: per-N exact-boundary tests on `auto_dt_rce`
+2. iter-28: 2×-CFL envelope structural test
+3. iter-29: dx² fit structural test
+4. iter-34: wrapper-override-vs-ladder regression
+5. **iter-36: in-script dt warning + warning regression**
+
+**C96 30-day at dt=37**: killed at 47 min wall — stuck without
+any day-5 print despite active CPU. The iter-22 C96 10-day at
+dt=37 PASS already validates the (72, 96] ladder branch for
+production; full 30-day at C96 stays a nice-to-have empirical
+extension, not a blocker.
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-36 script-level dt
+warning), R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 35
 
 **Codex iter-33/34 review: 2 HIGH + 1 MEDIUM — all fixed.**
