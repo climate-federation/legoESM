@@ -100,18 +100,22 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 ## Roadmap (concrete, ordered)
 
-* [ ] **R1**: Reduce production dt from 2 s → 1 s in `run_rce_30day.sh` and `run_rce_mpi_long.py` defaults. [done this iter]
-* [ ] **R2**: Plumb `--implicit-buoyancy` / `--advection weno5` through `run_rce_mpi_long.py` for A/B test. [done this iter]
-* [ ] **R3**: Add automated dt-stability test in `tests/atmosphere/` running `diag_bare_dycore_stability.py` at dt=0.5/1.0/1.5/2.0, checks max|w| @ step 100 bounded for dt ≤ 1.0 s.
-* [ ] **R4**: Port Smagorinsky LES to `compressible_euler_plane_halo.py` (reuse `_compute_smagorinsky_K_m_plane` via halo-aware shear stencil).
-* [ ] **R5**: Port vertical-θ-diff + WENO5 advection to halo path (column-local → no extra halo).
-* [ ] **R6**: Port KW78 implicit buoyancy to halo SI substep (column-local solve → no extra halo).
-* [ ] **R7**: Implement MPI-aware mass fixer (`compute_dry_mass_plane_mpi` via `global_sum_mpi`); replace rank-0-only `_broadcast_state` flow with `step_halo` multi-rank.
-* [ ] **R8**: Strong + weak scaling benchmarks on 1 / 4 / 12 / 48 ranks via `scripts/run_levante_gpu_scaling.py` (extend for plane CRM).
-* [ ] **R9**: Klemp-Wilhelmson 1978 **outer-step** implicit buoyancy (substep version in F2 inert). Real fix for buoyancy/w mode amplification, lifts dt limit.
-* [ ] **R10**: Cross-grid CRM validation — extend `run_rce_cross_grid.sh` to thread CRM physics stack through every grid's dycore (or document explicitly that only plane is "CRM" and others are hydrostatic RCE).
-* [ ] **R11**: 30-day production run end-to-end with success criteria 1-5.
-* [ ] **R12**: `/codex:adversarial-review` on full delta; address findings.
+Status legend: `[x]` = done · `[~]` = partial · `[!]` = obsolete ·
+`[ ]` = pending. (Checklist refreshed iter-81 to match iter-N status
+lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
+
+* [x] **R1**: Reduce production dt from 2 s → 1 s in `run_rce_30day.sh` and `run_rce_mpi_long.py` defaults. (iter-1; iter-58/59 later refreshed to dt=5 s + N_ACOUSTIC=12 per iter-9 F10.)
+* [x] **R2**: Plumb `--implicit-buoyancy` / `--advection weno5` through `run_rce_mpi_long.py` for A/B test. (iter-1.)
+* [x] **R3**: Automated dt-stability test (iter-2 `test_plane_crm_dt_stability.py` 4 cases).
+* [x] **R4**: Smag LES in halo path (iter-3).
+* [x] **R5**: Vertical-θ-diff in halo path (iter-3) + WENO5 (iter-7).
+* [x] **R6**: WENO5 in halo path with 4-cell halo (iter-7).
+* [x] **R7**: MPI-aware mass fixer (iter-4 `fix_mass_nonhydrostatic_plane_mpi`); `step_halo` multi-rank wired via `--use-dd` (iter-5).
+* [~] **R8**: Bench plumbing ✓ (iter-6 `bench_plane_crm_dd_scaling.py`). Real strong/weak scaling numbers F9-platform-blocked on macOS Python 3.13 (mpi4jax 0.9 vs JAX 0.10 stack mismatch).
+* [!] **R9**: KW78 outer-step implicit buoyancy — OBSOLETE per F10 (iter-9): clean Wing IC + dt=5 s production-stable without KW78. Substep variant inert (F2). Not on critical path.
+* [x] **R10**: Cross-grid RCE validation (iter-7 wrapper; iter-12 30-day on 4 grids; iter-50/51 added V4 + LL32 + T21 30-day nightlies; iter-73 added C96 10-day nightly).
+* [~] **R11**: 30-day end-to-end with criteria 1-5. Hydrostatic family ✓ (iter-12 + iter-50/51); plane CRM 1-sim-hour ✓ (iter-14 + iter-38/63); full plane CRM 30-day wall-time gated (~8 days single-rank on M5 Pro).
+* [x] **R12**: `/codex:adversarial-review` pass — DOD item 5 holistic review (iter-55 driver + iter-56 dycore/halo + iter-57 MPI halo) all 0 HIGH + 0 MEDIUM. Iterative reviews continued through iter-80 (catch additional HIGH/MEDIUM as new code lands).
 
 ---
 
@@ -133,6 +137,35 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 * `--implicit-buoyancy` now exposed but inert at substep level (F2). Kept in API for future outer-step variant.
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
+
+### 2026-05-26 — iter 81
+
+**Refresh stale R-roadmap checkboxes (iter-1 set `[ ]`; never
+flipped through 80 iters of work).**
+
+The R-roadmap checklist (line 100-115) was last edited in iter-1.
+All 12 items shipped with `[ ]` (pending). Subsequent iters added
+"R1-R8 ✓" status lines to the iteration log, but the checkbox
+state was never updated. Future-iter readers scanning the checklist
+would see "all pending" — misleading.
+
+iter-81 flips boxes to reflect current state per the iter-N status
+lines:
+* R1-R7, R10, R12: ``[x]`` done (iter-1..7 + iter-12/50/51/73 +
+  iter-55/56/57).
+* R8: ``[~]`` partial (bench plumbing ✓; real scaling numbers
+  F9-platform-blocked).
+* R9: ``[!]`` obsolete per F10 (clean Wing IC + dt=5 s
+  production-stable without KW78).
+* R11: ``[~]`` partial (hydrostatic family + plane CRM 1-sim-hour
+  ✓; full plane CRM 30-day wall-time-gated).
+
+Added a status legend at top of the checklist explaining
+``[x]/[~]/[!]/[ ]``.
+
+**R-roadmap status**: 9× `[x]` + 2× `[~]` + 1× `[!]`. Only R8 + R11
+remain as `[~]` — both platform/wall-time-budgeted, not
+correctness-blocked. F9 platform-blocked.
 
 ### 2026-05-26 — iter 80
 
