@@ -228,17 +228,30 @@ def main():
         else:
             _dx_min = None
         if _dx_min is not None:
-            # Pure gravity-wave CFL with safety 0.8. The iter-13..22
-            # ladder measurements always picked dt ≤ 1.32× this
-            # formula (C24 dt=600 vs CFL=454s = 1.32×); the empirical
-            # mode that destabilises is slower-wave + synoptic-noise
-            # driven, not gravity-wave CFL, so the formula is a
-            # loose upper bound. The print is informational.
+            # Two reference bounds (both informational, do NOT
+            # override the ladder):
+            #   * gravity-wave CFL (iter-23): dt ∝ dx with safety 0.8.
+            #     Loose upper bound; the destabilising mode isn't
+            #     gravity-wave CFL.
+            #   * empirical dx² fit (iter-29): α≈2 fit of the
+            #     iter-12..26 ladder. Tight reference — the ladder
+            #     should agree with this within 30 %.
             _dt_cfl_gravity = float(cfl_max_dt(_dx_min, 300.0, 0.8, ndim=2))
+            try:
+                from legoesm.driver.rce_dt import empirical_dt_dx2
+                _dt_fit = float(empirical_dt_dx2(_dx_min))
+                _fit_ratio = DT / _dt_fit
+                _fit_part = (
+                    f", dx² fit dt={_dt_fit:.0f} s "
+                    f"({_fit_ratio:.2f}× fit)"
+                )
+            except ImportError:
+                _fit_part = ""
             print(
                 f"  CFL advisory: dx_min={_dx_min:.0f} m, "
-                f"gravity-wave dt_max={_dt_cfl_gravity:.0f} s, "
-                f"using DT={DT:.0f} s ({DT/_dt_cfl_gravity:.2f}× formula)."
+                f"gravity-wave dt_max={_dt_cfl_gravity:.0f} s "
+                f"({DT/_dt_cfl_gravity:.2f}× formula)"
+                f"{_fit_part}, using DT={DT:.0f} s."
             )
 
     config = ExperimentConfig(

@@ -222,6 +222,39 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 30
+
+**CFL advisory now shows BOTH bounds (gravity-wave + dx² fit).**
+
+iter-23 added the gravity-wave CFL bound to the run_rce.py
+advisory print. iter-29 identified the dx² empirical fit + added
+``empirical_dt_dx2(dx_min)`` to ``rce_dt.py``. iter-30 wires the
+fit into the advisory so every run shows:
+
+```
+CFL advisory: dx_min=120376 m, gravity-wave dt_max=227 s
+(0.66× formula), dx² fit dt=150 s (1.00× fit), using DT=150 s.
+```
+
+Operators now see (a) the loose CFL formula upper bound, (b) the
+tight empirical fit reference, and (c) the actual ladder choice.
+A ratio far from 1.0 on the fit (>30 % per iter-29 test) signals
+the ladder has structurally drifted.
+
+The fit import is wrapped in try/except ImportError so a partial
+install (no `legoesm.driver.rce_dt`) gracefully shows only the
+gravity-wave bound. Codex iter-22..24 broad-except HIGH stays
+fixed (only ImportError is swallowed).
+
+**Verified end-to-end at C48**: ``CFL advisory: dx_min=120376 m,
+gravity-wave dt_max=227 s (0.66× formula), dx² fit dt=150 s
+(1.00× fit), using DT=150 s.``
+
+**C96 30-day at dt=37** still running (25+ min CPU).
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-30 dual-bound CFL
+advisory wired in), R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 29
 
 **Empirical `dt ∝ dx²` scaling identified + locked in.**
