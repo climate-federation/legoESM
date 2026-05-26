@@ -134,6 +134,42 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 68
+
+**Refactor iter-67 hardcoded float-arg list to auto-detect via
+``vars(args)`` — future-proof.**
+
+iter-67 listed 17 float args by name in a dict literal. A future
+``parse_args`` adding a new ``--coeff-X`` (type=float) would not be
+auto-validated; developer must remember to update the dict.
+
+iter-68 replaces the hardcoded dict with a walk over ``vars(args)``,
+checking ``isinstance(val, float)`` and skipping
+``rad_call_interval_s`` (validated by the physics_schedule helper
+with a more specific message). The ``--dt > 0`` positive guard kept
+explicit since it's specific to one arg.
+
+**Verified**:
+* ``--sponge-coeff nan`` (previously in iter-67 list) still rejected:
+  ``error: --sponge-coeff rejected: must be finite, got nan`` exit 1.
+* Happy path: ``--dt 5.0 --no-radiation`` completes 8 steps cleanly.
+* Test ``isinstance(True, float) == False`` confirmed safe — bool
+  args won't be float-validated even though bool is int subclass.
+
+**Note**: bool args (``--no-radiation``, ``--use-dd``, ``--implicit-
+buoyancy``, ``--semi-implicit-acoustic``) explicitly excluded
+because ``isinstance(True, float)`` returns False. int args
+(``--nx``, ``--ny``, ``--nlev``, ``--n-acoustic-substeps``,
+``--n-physics-substeps``, ``--qv-noise-seed``, ``--log-every-steps``)
+also excluded — argparse type=int rejects nan/inf at parse time.
+
+**Tests**: existing iter-67 regression test
+``test_plane_crm_driver_rejects_nan_inf_numeric_args`` (8 cases)
+covers the refactor — re-runs in background.
+
+**R-roadmap status**: R1-R8, R10, R12 ✓ (with iter-68 future-proof
+finite-arg validation). F9 platform-blocked.
+
 ### 2026-05-26 — iter 67
 
 **Extend iter-65 NaN/inf rejection to ALL numeric driver args.**

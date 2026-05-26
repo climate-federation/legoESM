@@ -582,37 +582,30 @@ def main():
             "(the Klemp-Wilhelmson 1978 substitution lives inside "
             "the column tridiagonal solve)."
         )
-    # iter-67: validate numeric CLI args reject NaN/inf with concise
-    # SystemExit. iter-65 caught the --rad-call-interval-s case via
-    # try/except around the physics_schedule helper. Without this
-    # validation, --dt nan would crash later with
-    # ``ValueError: cannot convert float NaN to integer`` at the
-    # ``total_steps = int(total_t / args.dt)`` line — opaque
-    # traceback vs a clean CLI error.
+    # iter-67/68: validate numeric CLI args reject NaN/inf with
+    # concise SystemExit. iter-67 hardcoded 17 arg names; iter-68
+    # auto-detects via vars(args) so a future ``--new-coeff``
+    # added to parse_args is automatically validated.
+    #
+    # Skip ``rad_call_interval_s``: validated by
+    # physics_schedule.radiation_call_every_steps (iter-43) which
+    # iter-65 wrapped to also produce a clean SystemExit. Including
+    # it here would double-validate but the helper error message is
+    # more specific (cites the schedule constraints), so let the
+    # helper handle it.
     import math as _math
-    _numeric_finite_args = {
-        "--dt": args.dt,
-        "--days": args.days,
-        "--dx": args.dx,
-        "--H": args.H,
-        "--dz-sfc": args.dz_sfc,
-        "--c-h": args.c_h,
-        "--smag-cs": args.smag_cs,
-        "--hyperdiff": args.hyperdiff,
-        "--sponge-coeff": args.sponge_coeff,
-        "--sponge-width": args.sponge_width,
-        "--acoustic-off-centering": args.acoustic_off_centering,
-        "--vertical-theta-diffusion": args.vertical_theta_diffusion,
-        "--bubble-theta-pert": args.bubble_theta_pert,
-        "--qv-noise-amp": args.qv_noise_amp,
-        "--snapshot-hours": args.snapshot_hours,
-        "--snapshot-3d-hours": args.snapshot_3d_hours,
-        "--profile-days": args.profile_days,
-    }
-    for flag, val in _numeric_finite_args.items():
-        if not _math.isfinite(val):
+    _SKIP_FINITE_CHECK = {"rad_call_interval_s"}
+    for _attr, _val in vars(args).items():
+        if _attr in _SKIP_FINITE_CHECK:
+            continue
+        # Only validate float-typed args (bool is a subclass of int,
+        # so `isinstance(True, float)` is False — safe).
+        if not isinstance(_val, float):
+            continue
+        if not _math.isfinite(_val):
+            _flag = "--" + _attr.replace("_", "-")
             raise SystemExit(
-                f"error: {flag} rejected: must be finite, got {val!r}"
+                f"error: {_flag} rejected: must be finite, got {_val!r}"
             )
     # --dt must additionally be positive (the production driver
     # divides by dt at line ~741).
