@@ -285,6 +285,67 @@ def test_legoesm_imports_without_jax_dispatch_crash() -> None:
     assert mod is not None
 
 
+# Modules that are lazy-imported (not reached by ``import legoesm``).
+# For these, the AST-static check catches literal ``jnp.<ctor>(...)``
+# at module top, but a function call returning jax.Array values
+# bound to module globals (iter-94d bug class) WILL slip past the
+# static check. The runtime introspection test below complements
+# the AST check for these modules.
+_LAZY_PROTECTED_MODULES = [
+    "legoesm.parallel.cubesphere_exchange",
+]
+
+
+@pytest.mark.parametrize("module_name", _LAZY_PROTECTED_MODULES)
+def test_lazy_module_no_jax_array_globals(module_name: str) -> None:
+    """Runtime introspection: import ``module_name`` in a fresh
+    subprocess and assert no module global is a ``jax.Array``.
+
+    iter-94d motivation: ``_build_ppermute_tables()`` returned
+    ``jnp.array`` tables and was called at module top:
+    ``_PPERMUTE_SEND, ... = _build_ppermute_tables()``. The AST
+    static check did not detect this because the call site is
+    ``_build_ppermute_tables()`` (a plain function call, not a
+    literal ``jnp.<ctor>(...)``). Static analysis cannot trace
+    into the function body without full inter-procedural analysis.
+
+    This runtime test catches the bug class regardless of how the
+    ``jax.Array`` ended up at module top: literal constructor,
+    function return, decorator side effect, etc.
+
+    Forces ``JAX_PLATFORMS=cpu`` so the test works on macOS where
+    the Metal default would crash before the assertion runs.
+    """
+    import os
+    code = (
+        f"import jax\n"
+        f"import {module_name} as m\n"
+        f"bad = [k for k, v in vars(m).items() if isinstance(v, jax.Array)]\n"
+        f"if bad:\n"
+        f"    raise AssertionError(\n"
+        f"        'Module-top jax.Array globals in {module_name}: ' + repr(bad)\n"
+        f"    )\n"
+        f"print('ok')\n"
+    )
+    env = {**os.environ, "JAX_PLATFORMS": "cpu"}
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+    assert proc.returncode == 0, (
+        f"Runtime jax.Array global introspection failed for "
+        f"{module_name}:\n"
+        f"STDOUT:\n{proc.stdout}\n"
+        f"STDERR:\n{proc.stderr}\n"
+        f"This is the iter-94d failure mode: a function call at "
+        f"module top returned jax.Array values that bound to "
+        f"module globals — the AST audit cannot detect this "
+        f"pattern; use the runtime check OR refactor the function "
+        f"to return numpy arrays."
+    )
+    assert "ok" in proc.stdout
+
+
 def test_legoesm_imports_cold_subprocess() -> None:
     """Subprocess cold-import smoke test (Codex LOW iter-93).
 
