@@ -828,6 +828,20 @@ def main():
 
     total_t = args.days * SEC_PER_DAY
     total_steps = int(total_t / args.dt)
+    # iter-75: catch the silent-pass class where ``args.dt >>
+    # total_t`` (e.g. ``--dt 1e10`` + ``--days 0.0005``) makes the
+    # int division round to 0 and the outer loop skips entirely,
+    # producing "Done. 0 steps" silently. iter-70 caught --days <= 0
+    # at parse time, but a finite positive dt > total_t is a
+    # different path. Reject loudly.
+    if total_steps < 1:
+        raise SystemExit(
+            f"error: --dt rejected: total_steps={total_steps} "
+            f"(computed from --days={args.days} × 86400 s / "
+            f"--dt={args.dt}); must be >= 1. Either --dt is too "
+            f"large or --days is too small for the chosen --dt to "
+            f"advance at least one outer step."
+        )
     snap_dt = args.snapshot_hours * 3600.0
     snap3d_dt = args.snapshot_3d_hours * 3600.0
     snap3d_enabled = args.snapshot_3d_hours > 0.0

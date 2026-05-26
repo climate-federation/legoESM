@@ -625,6 +625,17 @@ def main():
     # ---------------------------------------------------------------
     n_steps = int(args.days * 86400 / DT)
     diag_interval = int(args.diag_days * 86400 / DT)
+    # iter-75 (mirror of plane CRM iter-75 fix): reject huge --dt that
+    # truncates n_steps to 0. iter-71 caught --days <= 0 at parse time
+    # but a finite positive --dt > days*86400 silently produces a
+    # zero-step run.
+    if n_steps < 1:
+        raise SystemExit(
+            f"error: --dt rejected: n_steps={n_steps} (computed "
+            f"from --days={args.days} × 86400 s / dt={DT}); must "
+            f"be >= 1. Either --dt is too large or --days is too "
+            f"small."
+        )
 
     _ocean_label = OCEAN_MODE if not IS_LAND else "slab_soil"
     print("=" * 70)

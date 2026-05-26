@@ -134,6 +134,43 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 75
+
+**Catch huge-dt silent-pass class (total_steps=0).**
+
+iter-70/71 caught all upfront-rejectable bad inputs. iter-75 finds a
+REMAINING silent-pass: ``--dt 1e10`` is finite + positive (passes
+iter-67/68/70 guards), but ``total_steps = int(days × 86400 / dt)``
+rounds to 0 → empty loop → "Done. 0 steps" silent.
+
+Direct probe pre-iter-75:
+* ``--dt 1e10 --days 0.0005`` → ``Done. 0 steps, 0.000 days sim``
+  silent.
+
+iter-75 adds `total_steps >= 1` guard AFTER total_steps derivation
+in both drivers:
+* ``scripts/run_rce_mpi_long.py``: after line 830 ``total_steps =
+  int(total_t / args.dt)``.
+* ``scripts/run_rce.py``: after line 626 ``n_steps = int(...)``.
+
+Both produce: ``error: --dt rejected: total_steps=0 ... must be
+>= 1`` exit 1.
+
+**Tests**:
+* run_rce.py regression: 13/13 PASS (was 12) — added ``--dt 1e10``
+  case.
+* plane CRM regression: 29 parametric cases (was 28) — added
+  ``--dt 1e10`` case.
+
+**R-roadmap status**: R1-R8, R10, R12 ✓. F9 platform-blocked.
+
+Both production drivers now have defense-in-depth across:
+1. NaN/inf upfront rejection (iter-65/67/68)
+2. Positive-int upfront (iter-69/71)
+3. Range guards [0, 1) (iter-70)
+4. Negative-Kelvin sst-init (iter-74)
+5. Huge-dt silent-pass (iter-75)
+
 ### 2026-05-26 — iter 74
 
 **Codex caught 1 HIGH + 2 MEDIUM + 1 LOW in iter-71/72/73 — all fixed.**

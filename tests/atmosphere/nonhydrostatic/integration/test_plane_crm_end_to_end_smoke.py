@@ -746,6 +746,10 @@ def test_plane_crm_production_scale_132x132_with_radiation(tmp_path):
     ("--acoustic-off-centering", "-0.05", "must be in"),
     ("--acoustic-off-centering", "1.0", "must be in"),
     ("--acoustic-off-centering", "1.5", "must be in"),
+    # iter-75 post-derivation guard: huge dt / tiny days → total_steps=0
+    # silent-pass. argparse type=float accepts 1e10; the guard fires
+    # after total_steps computation.
+    ("--dt", "1e10", "total_steps=0"),
 ])
 def test_plane_crm_driver_rejects_nan_inf_numeric_args(
     tmp_path, flag, value, expected_err,

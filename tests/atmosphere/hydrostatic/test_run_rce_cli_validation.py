@@ -43,6 +43,8 @@ DRIVER = REPO_ROOT / "scripts" / "run_rce.py"
     ("--sst-init", "-1.0", "must be positive Kelvin"),
     ("--sst-init", "0.0", "must be positive Kelvin"),
     ("--truncation", "0", "must be positive integer"),
+    # iter-75 post-derivation guard: huge dt / tiny days → n_steps=0.
+    ("--dt", "1e10", "n_steps=0"),
 ])
 def test_run_rce_rejects_bad_cli_args(tmp_path, flag, value, expected_err):
     env = os.environ.copy()
