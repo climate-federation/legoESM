@@ -96,36 +96,13 @@ def _read_log(output_dir):
     return rows
 
 
-def _parse_rad_call_count(stdout: str) -> int | None:
-    """Extract ``rad_calls=N`` from the driver's final ``Done.`` line.
-
-    Driver format (``scripts/run_rce_mpi_long.py:914``):
-        ``f"rad_calls={rad_call_count}."`` — always integer + trailing
-        period (the Done.-line punctuation).
-
-    Regex requirements (anchored to that exact format):
-    * line starts with ``Done.`` (multiline + ``\\b`` word-bound
-      avoids ``total_rad_calls=5`` substring drift — iter-40 Codex
-      LOW#4 fix).
-    * ``\\d+\\.[^\\S\\n]*$`` (multiline) requires integer-then-
-      period as the LAST non-whitespace token on the Done. line.
-      The character class ``[^\\S\\n]*`` is "any whitespace except
-      newline" — so trailing spaces / tabs / CR (before \\n) are
-      tolerated, but a future schema drift like
-      ``rad_calls=5. (cached)`` or ``rad_calls=5.0.`` is rejected
-      (iter-54 hardening; closes the iter-53-pinned gap).
-
-    Returns the count when exactly one ``Done.`` line matches, else
-    ``None`` (older driver / parser-side regression / unexpected
-    multiple matches).
-    """
-    import re
-    matches = re.findall(
-        r"(?m)^Done\..*\brad_calls=(\d+)\.[^\S\n]*$", stdout,
-    )
-    if len(matches) != 1:
-        return None
-    return int(matches[0])
+# iter-79: ``_parse_rad_call_count`` moved to sibling
+# ``_plane_crm_helpers.py`` so the iter-53/54 unit-test file can
+# import it without triggering pytest collection of THIS file as
+# an import side effect. Mirrors iter-78 hydrostatic refactor.
+from tests.atmosphere.nonhydrostatic.integration._plane_crm_helpers import (
+    _parse_rad_call_count,
+)
 
 
 def test_plane_crm_short_smoke_clean_ic(tmp_path):

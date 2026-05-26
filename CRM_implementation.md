@@ -134,6 +134,44 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 79
+
+**Mirror iter-78 refactor for the plane CRM ``_parse_rad_call_count``
+helper.**
+
+iter-78 extracted hydrostatic test helpers to ``_rce_helpers.py``.
+The plane CRM had a similar cross-file import pattern in
+``test_plane_crm_helpers_unit.py``:
+``from tests.atmosphere.nonhydrostatic.integration.test_plane_crm_end_to_end_smoke
+import _parse_rad_call_count``. iter-79 closes that.
+
+**Changes**:
+* New ``tests/atmosphere/nonhydrostatic/integration/
+  _plane_crm_helpers.py`` containing ``_parse_rad_call_count``
+  (iter-40 / iter-54 provenance preserved in docstring).
+* ``test_plane_crm_end_to_end_smoke.py``: removed the function
+  definition; added ``from ... ._plane_crm_helpers import
+  _parse_rad_call_count``.
+* ``test_plane_crm_helpers_unit.py``: import switched from the
+  test file to the helpers module.
+
+**Why minimal scope (only one helper moved)**: the other 4
+test-file functions (``_run_driver``, ``_read_log``,
+``_run_driver_with_radiation``, ``_run_driver_production_scale``)
+are FILE-LOCAL with no cross-file consumers. Moving them is
+over-engineering. iter-78 hydrostatic refactor moved 6 helpers
+because all 6 were genuinely shared.
+
+**Verified**:
+* Helper unit tests: 12/12 PASS in 0.14 s.
+* Plane CRM collection: 33/36 (3 slow deselected), no errors.
+* iter-78 cross-grid + helper unit: 23/23 PASS in 261 s (live-
+  verified concurrent with iter-79 work).
+
+**R-roadmap status**: R1-R8, R10, R12 ✓. F9 platform-blocked.
+Cross-file ``from test_X import ...`` anti-pattern eliminated
+from both the hydrostatic + plane CRM test suites.
+
 ### 2026-05-26 — iter 78
 
 **Promote iter-46 helpers to a dedicated sibling module.**

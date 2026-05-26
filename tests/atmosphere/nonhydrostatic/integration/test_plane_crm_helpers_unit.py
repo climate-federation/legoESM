@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.atmosphere.nonhydrostatic.integration.test_plane_crm_end_to_end_smoke import (
+from tests.atmosphere.nonhydrostatic.integration._plane_crm_helpers import (
     _parse_rad_call_count,
 )
 
