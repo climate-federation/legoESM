@@ -292,7 +292,18 @@ def test_legoesm_imports_without_jax_dispatch_crash() -> None:
 # static check. The runtime introspection test below complements
 # the AST check for these modules.
 _LAZY_PROTECTED_MODULES = [
+    # iter-94d: caught the original residual bug via this entry.
     "legoesm.parallel.cubesphere_exchange",
+    # iter-94f: proactive coverage of other lazy modules that were
+    # empirically verified clean at iter-94 (no module-top
+    # jax.Array globals). These entries lock the invariant so a
+    # future refactor that re-introduces a function-call-returns-
+    # jax.Array pattern at module top will fire this test.
+    "legoesm.parallel.voronoi_partition",
+    "legoesm.parallel.mesh",
+    "legoesm.atmosphere.dynamics.primitive_eq_cdgrid",
+    "legoesm.atmosphere.dynamics.compressible_euler",
+    "legoesm.ml.sfno",
 ]
 
 
