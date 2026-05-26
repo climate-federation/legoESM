@@ -134,6 +134,57 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 55
+
+**Codex holistic review of the production driver caught 2 MEDIUM
+bugs — both fixed.**
+
+iter-39/40/42/54 each added a radiation-path change to
+``scripts/run_rce_mpi_long.py``. iter-55 ran a fresh Codex review
+across the whole file to verify the post-stack composition. Found:
+
+* **MEDIUM#1 — ``--no-radiation`` + bogus ``--rad-call-interval-s``
+  crashes on the unused setting.** The iter-43 NaN/inf validation
+  in ``physics_schedule.radiation_call_every_steps`` is correct
+  *when radiation is enabled* — but the driver called the helper
+  unconditionally, so even with ``--no-radiation`` a NaN interval
+  would raise ValueError. Fixed: skip the helper entirely when
+  ``args.no_radiation`` is True. Verified: ``--no-radiation
+  --rad-call-interval-s nan`` now completes cleanly.
+
+* **MEDIUM#2 — ``--days 0`` crashes the final ``Done.`` print with
+  NameError on ``step``.** With total_steps=0 the ``for step in
+  range(1, 1)`` loop body is skipped, leaving ``step`` + ``t_sim``
+  undefined when the final-print block reads them. iter-32 AMIP
+  wrapper uses ``--days 0`` as a dry-run; iter-55 exposes the same
+  pattern in the CRM driver. Fixed: init ``step = 0`` +
+  ``t_sim = 0.0`` before the loop. Verified: ``--days 0`` now
+  prints ``Done. 0 steps... rad_calls=0`` and exits cleanly.
+
+* **LOW#1 + LOW#2** (deferred): rad_call_count under DD path is
+  per-rank-local (intentional per iter-40 Codex review — print
+  shows rank 0's count, not an MPI-sum); ValueError from helper
+  propagates as raw traceback instead of SystemExit. Both
+  cosmetic.
+
+**Tests**:
+* Direct smoke: ``--days 0 + --no-radiation`` → "Done. 0 steps..."
+  ✓ (no crash).
+* Direct smoke: ``--no-radiation --rad-call-interval-s nan`` →
+  "Done. 8 steps..." ✓ (no crash on unused NaN).
+* Fast test inventory (CRM + physics_schedule): 36/36 PASS in
+  11 s. No regression.
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-55 production-
+driver MEDIUM bug fixes via Codex holistic review of the post-
+iter-39/40/42/54 radiation-path stack), R6 ✓. F9 platform-blocked.
+
+DOD item 5 (``Pass /codex:adversarial-review on dycore + MPI halo
++ production driver with no MEDIUM/HIGH findings outstanding``):
+production driver now has 0 HIGH + 0 MEDIUM findings against the
+radiation path. Dycore + halo still need a fresh post-iter-N
+holistic Codex pass.
+
 ### 2026-05-26 — iter 54
 
 **Tighten `_parse_rad_call_count` regex to actually reject schema

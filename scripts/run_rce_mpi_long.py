@@ -648,10 +648,21 @@ def main():
         model = PlaneCompressibleEulerModel(grid, hc, terrain, config=cfg)
         fast_physics_fn = build_fast_physics_fn(args, grid, hc, terrain)
         slow_physics_fn = build_slow_physics_fn(args, grid, hc, terrain)
-    from legoesm.driver.physics_schedule import radiation_call_every_steps
-    rad_call_every_steps = radiation_call_every_steps(
-        args.rad_call_interval_s, args.dt,
-    )
+    # iter-55 Codex MEDIUM#1 fix: skip the schedule helper entirely
+    # when --no-radiation is set. Otherwise a bogus --rad-call-
+    # interval-s (NaN/inf, rejected by physics_schedule's iter-43
+    # validation) crashes the driver even though the value is
+    # unused. With --no-radiation the schedule is irrelevant —
+    # cached_rad_tend stays None for the full run.
+    if args.no_radiation:
+        rad_call_every_steps = 1  # harmless sentinel; never consulted
+    else:
+        from legoesm.driver.physics_schedule import (
+            radiation_call_every_steps as _rad_every,
+        )
+        rad_call_every_steps = _rad_every(
+            args.rad_call_interval_s, args.dt,
+        )
     cached_rad_tend = [None]  # mutable closure for the cache
 
     def apply_physics_substep(state, dt_sub):
@@ -759,6 +770,13 @@ def main():
     # MEDIUM#1 / MEDIUM#3 gap: without an observable count the test
     # could pass under a broken rad_call_every_steps arithmetic.
     rad_call_count = 0
+    # iter-55 Codex MEDIUM#2 fix: init step + t_sim BEFORE the loop
+    # so that ``--days 0`` (used by some smoke-tests as a CLI-parse-
+    # only dry-run) doesn't crash the final ``Done.`` print with a
+    # NameError. With total_steps=0 the loop body is skipped and the
+    # report shows ``Done. 0 steps...``.
+    step = 0
+    t_sim = 0.0
 
     def _maybe_fire_radiation(step_idx):
         """Fire gray-radiation slow tendency on schedule. Returns
