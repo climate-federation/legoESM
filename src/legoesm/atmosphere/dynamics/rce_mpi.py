@@ -251,6 +251,43 @@ def fix_moist_mass_plane_mpi(
     )
 
 
+def _validate_plane_state_for_mpi_dry(
+    state, height_coord, grid, terrain_metric,
+) -> None:
+    """Geometry + state-shape validation for the dry-mass MPI helpers.
+
+    Mirrors :func:`_validate_plane_state_for_mpi_water` but checks
+    only the fields the dry-mass path actually uses (rho_prime,
+    rho_ref, dz, area_T, terrain Jacobian). Catches the
+    broadcast-silent-wrong-shape failure mode flagged by Codex.
+    """
+    rho_p = state.rho_prime.data
+    if rho_p.ndim != 3:
+        raise ValueError(
+            f"rho_prime must be 3D (ny, nx, nlev); got ndim={rho_p.ndim} "
+            f"shape={rho_p.shape}."
+        )
+    ny, nx, nlev = rho_p.shape
+    if grid.area_T.shape != (ny, nx):
+        raise ValueError(
+            f"grid.area_T shape {grid.area_T.shape} != (ny={ny}, nx={nx})."
+        )
+    if terrain_metric.jacobian.shape != (ny, nx):
+        raise ValueError(
+            f"terrain_metric.jacobian shape "
+            f"{terrain_metric.jacobian.shape} != (ny={ny}, nx={nx})."
+        )
+    if height_coord.dz.shape != (nlev,):
+        raise ValueError(
+            f"height_coord.dz shape {height_coord.dz.shape} != (nlev={nlev},)."
+        )
+    if height_coord.rho_ref.shape != (nlev,):
+        raise ValueError(
+            f"height_coord.rho_ref shape {height_coord.rho_ref.shape} "
+            f"!= (nlev={nlev},)."
+        )
+
+
 def compute_dry_mass_plane_mpi(
     state, grid, height_coord, terrain_metric, layout, owned_mask,
 ) -> jax.Array:
@@ -267,12 +304,10 @@ def compute_dry_mass_plane_mpi(
         return compute_dry_mass_plane(
             state, grid, height_coord, terrain_metric,
         )
+    _validate_plane_state_for_mpi_dry(
+        state, height_coord, grid, terrain_metric,
+    )
     rho_p = state.rho_prime.data
-    if rho_p.ndim != 3:
-        raise ValueError(
-            f"rho_prime must be 3D (ny, nx, nlev); got ndim={rho_p.ndim} "
-            f"shape={rho_p.shape}."
-        )
     ny, nx, _ = rho_p.shape
     _validate_owned_mask(owned_mask, (ny, nx))
     from legoesm.parallel.reductions import global_sum_mpi

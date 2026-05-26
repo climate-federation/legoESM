@@ -1502,6 +1502,22 @@ class PlaneCompressibleEulerModel:
             # gives ~14x faster per-step on small grids.
             return self.step(state_local, dt)
 
+        # Multi-rank correctness gate (Codex 2026-05 review): silently
+        # skipping the mass fixer when fix_mass=True but no owned_mask
+        # is provided lets dry mass drift unbounded across a long
+        # production run while reporting "fix_mass=True". Surface
+        # immediately so callers wire owned_mask explicitly.
+        if self.config.fix_mass and owned_mask is None:
+            raise ValueError(
+                "step_halo on multi-rank with config.fix_mass=True "
+                "requires owned_mask (shape (ny_local, nx_local), "
+                "1.0 on owned cells, 0.0 on duplicated halo rows). "
+                "Compute it once from layout.iy_start/iy_end + "
+                "layout.ix_start/ix_end and pass it via the "
+                "owned_mask kwarg, or set config.fix_mass=False to "
+                "opt out of mass anchoring on this multi-rank path."
+            )
+
         se_config = SplitExplicitConfig(
             n_substeps=self.config.n_acoustic_substeps,
             outer_integrator=self.config.outer_integrator,

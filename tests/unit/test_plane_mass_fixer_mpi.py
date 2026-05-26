@@ -171,6 +171,32 @@ def test_owned_mask_excludes_halo_rows_from_global_sum():
     )
 
 
+def test_step_halo_raises_when_fix_mass_without_owned_mask_multirank():
+    """Codex 2026-05 review fix: step_halo on multi-rank with
+    config.fix_mass=True must raise when owned_mask is omitted, not
+    silently let dry mass drift. Construct a fake n_ranks=2 layout
+    (no real MPI) and verify the gate fires before any compute."""
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        PlaneCompressibleEulerModel,
+    )
+    grid, hc, tm, state, _layout, _mask = _setup()
+    cfg = CompressibleEulerConfig(
+        sponge_coeff=0.05, sponge_width=5_000.0,
+        smagorinsky_cs=0.0, use_coriolis=False,
+        semi_implicit_acoustic=True,
+        fix_mass=True, anchor_mass_to_initial=True,
+        n_acoustic_substeps=12,
+    )
+    model = PlaneCompressibleEulerModel(grid, hc, tm, config=cfg)
+    # Fake multi-rank layout (no actual MPI launcher).
+    fake_layout = make_plane_pencil_layout(
+        rank=0, n_ranks=2, n_ranks_y=2, n_ranks_x=1,
+        ny_global=12, nx_global=8,
+    )
+    with pytest.raises(ValueError, match="owned_mask"):
+        model.step_halo(state, dt=0.5, layout=fake_layout)
+
+
 def test_step_halo_with_fix_mass_anchored_single_rank():
     """End-to-end: step_halo on single rank with owned_mask + fix_mass
     must preserve the initial dry mass to round-off across many steps."""
