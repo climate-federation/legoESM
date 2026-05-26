@@ -13,10 +13,12 @@ hyperdiff=5e6, dt=5 s) and asserts:
 3. ``MSE`` drift stays below 1e-3 relative (production envelope is
    ~7e-5 over 28 min sim at 132x132; the same per-step drift on a
    12x12 mesh extrapolates well below 1e-3 over the smoke window).
-4. ``CWV`` doesn't drift more than 0.1 mm from IC (55.001 mm for the
-   12x12 smoke; 55.550 mm for the 132x132 production-scale slow
-   tests) — the F8 IC is dynamically frozen until surface flux +
-   radiation warm the column on hour-day timescales.
+4. ``CWV`` doesn't drift more than 0.1 mm from IC (49.4691 mm for
+   the 12x12@nlev=20 smoke; 49.9413 mm for the 132x132@nlev=30
+   production-scale slow tests after the iter-95 hydrostatic-BC
+   fix; legacy bug values were 55.001 / 55.550 mm) — the F8 IC is
+   dynamically frozen until surface flux + radiation warm the
+   column on hour-day timescales.
 
 Wall budget: ~30 s on M5 Pro (rough estimate). Single-rank, no MPI,
 no JAX JIT pre-compile.
@@ -128,29 +130,31 @@ def test_plane_crm_short_smoke_clean_ic(tmp_path):
     # iter-41 anchor re-verification (Codex iter-41 HIGH fix): the
     # numerical anchors below were originally measured with
     # ``--rad-call-interval-s 1e9`` (one cached radiation tendency
-    # held for 86 steps). After switching to ``--no-radiation`` the
-    # 12x12 measurements at this dt/dz are:
-    #   step  1: CWV=55.001 mm, MSE=4.2049e9, max|w|=0.0
-    #   step 80: CWV=55.001 mm, MSE=4.2049e9, max|w|=7.07e-4 m/s
-    # Anchors below remain valid because (a) radiative cooling over
-    # 7 min sim on the 12x12 Wing IC is below the measurement
-    # precision in the log (4 sig figs) so CWV/MSE are unchanged,
-    # and (b) max|w| at step 80 is 7e-4 m/s vs the 0.5 cap = 700x
-    # safety margin. Verified iter-41 run: 2 PASS in 33 s.
+    # held for 86 steps). iter-95 also shifted the IC CWV by ~5.5 mm
+    # downward (legacy top-down hydrostatic BC with T_avg=250 K vs
+    # iter-95 p_sfc=101480 bottom-up BC). Current 12x12 / no-rad /
+    # no-mass-fixer measurements at this dt/dz are:
+    #   step  1: CWV=49.4691 mm, MSE=~3.52e9, max|w|=0.0
+    #   step 80: CWV=49.4691 mm, max|w|<1e-3 m/s
+    # Verified iter-95h run.
 
     max_w_final = float(rows[-1]["max|w|"])
     cwv_first = float(rows[0]["CWV_mean"])
     cwv_final = float(rows[-1]["CWV_mean"])
 
-    # Anchor the IC CWV: the 12x12 Wing 2018 IC carries 55.001 mm at
-    # this nlev/H. If a future commit silently shifts the Wing profile
-    # coefficients, the drift assertion below would still pass against
-    # the new IC and miss the regression — this gate makes the IC
-    # itself part of the contract. Tolerance 0.01 mm (5e-4 relative)
-    # is tight enough to detect any meaningful profile change but
-    # loose enough for the area-weighted-integration roundoff.
-    assert abs(cwv_first - 55.001) < 0.01, (
-        f"plane CRM smoke: IC CWV={cwv_first:.4f} mm != 55.001 ± 0.01. "
+    # Anchor the IC CWV: the 12x12@nlev=20 Wing 2018 IC carries
+    # 49.4691 mm at this nlev/H after the iter-95 hydrostatic-BC
+    # fix (pre-iter-95 the wrong top-down BC with T_avg=250 K
+    # inflated this to 55.001 mm — see CRM_implementation.md
+    # iter-95). If a future commit silently shifts the Wing profile
+    # coefficients or reverts the BC, the drift assertion below
+    # would still pass against the new IC and miss the regression —
+    # this gate makes the IC itself part of the contract. Tolerance
+    # 0.01 mm (~2e-4 relative) is tight enough to detect any
+    # meaningful profile change but loose enough for area-weighted
+    # integration roundoff.
+    assert abs(cwv_first - 49.4691) < 0.01, (
+        f"plane CRM smoke: IC CWV={cwv_first:.4f} mm != 49.4691 ± 0.01. "
         f"The Wing 2018 reference profile or its area weighting "
         f"changed — update this test's expected value if intentional, "
         f"otherwise diagnose the regression."
@@ -165,8 +169,9 @@ def test_plane_crm_short_smoke_clean_ic(tmp_path):
     )
     # CWV is measured against its OWN IC (not a hardcoded constant);
     # the small-grid IC carries a slightly different mean than the
-    # 132x132 production grid (55.001 mm at 12x12 vs 55.550 mm at
-    # 132x132 due to area-weighted integration of the Wing profile).
+    # 132x132 production grid (49.4691 mm at 12x12@nlev=20 vs
+    # 49.9413 mm at 132x132@nlev=30 after the iter-95 BC fix; the
+    # diff is driven by vertical-grid spacing, not horizontal).
     cwv_drift = abs(cwv_final - cwv_first)
     assert cwv_drift < 0.1, (
         f"plane CRM smoke: CWV drifted {cwv_drift:.4f} mm in the "
@@ -355,12 +360,14 @@ def test_plane_crm_production_scale_132x132_envelope(tmp_path):
     clean Wing IC, mass fixer + Smag c_s=0.2 + SI acoustic + hyperdiff
     5e6, ``--rad-call-interval-s 1e9``):
 
-    | step | CWV [mm] | MSE [J/kg] | max|w| [m/s] |
-    |------|----------|------------|--------------|
-    |   1  |  55.550  |  4.2132e9  |  0.0e+00     |
-    | 100  |  55.550  |  4.2131e9  |  3.9e-3      |
-    | 300  |  55.550  |  4.2129e9  |  5.5e-3      |
-    | 700  |  55.550  |  4.2125e9  |  6.1e-3      |
+    | step | CWV [mm]   | MSE [J/kg] | max|w| [m/s] |
+    |------|------------|------------|--------------|
+    |   1  |  49.9413   |  3.52e9    |  0.0e+00     |
+    | 100  |  49.9413   |  3.52e9    |  3.9e-3      |
+    | 300  |  49.9413   |  3.52e9    |  5.5e-3      |
+    | 700  |  49.9413   |  3.52e9    |  6.1e-3      |
+    (iter-95 IC anchor; pre-iter-95 the legacy top-down BC bug
+    inflated this to ~55.550 mm / ~4.21e9 — see CRM_implementation.md)
 
     Codex iter-39 review pointed out that ``--rad-call-interval-s
     1e9`` still fires one radiation call at step 1 and caches the
@@ -431,11 +438,14 @@ def test_plane_crm_production_scale_132x132_envelope(tmp_path):
     mse_first = float(rows[0]["MSE_mean"])
     mse_final = float(rows[-1]["MSE_mean"])
 
-    # iter-14 measured IC CWV = 55.550 mm at 132x132 Wing 2018.
-    assert abs(cwv_first - 55.550) < 0.01, (
+    # iter-95 measured IC CWV = 49.9413 mm at 132x132@nlev=30 Wing
+    # 2018 (after the hydrostatic-BC fix; pre-iter-95 the legacy
+    # T_avg=250 K top-down BC inflated this to 55.550 mm).
+    assert abs(cwv_first - 49.9413) < 0.01, (
         f"plane CRM production smoke: IC CWV={cwv_first:.4f} mm "
-        f"!= 55.550 ± 0.01. iter-14 anchored this value at 132x132. "
-        f"If intentional, update the test."
+        f"!= 49.9413 ± 0.01. iter-95 anchored this value at "
+        f"132x132@nlev=30 post hydrostatic-BC fix. If intentional, "
+        f"update the test."
     )
     # max|w| envelope on EVERY logged row, not just the last — a
     # transient CFL spike that self-damps in <log_every steps would
@@ -515,7 +525,7 @@ def test_plane_crm_production_scale_132x132_with_radiation(tmp_path):
     across the 5-min sim window.
 
     Asserts: logged-steps schema (iter-38 contract), IC CWV anchored
-    to 55.550 ± 0.01 mm, max|w| < 0.05 m/s on EVERY logged row
+    to 49.9413 ± 0.01 mm (iter-95 post-BC-fix value), max|w| < 0.05 m/s on EVERY logged row
     (catches transient CFL crash from a radiation tendency that
     over-fires), activity floor at step 15 (catches dead-sim
     regression), MSE COOLING — Codex iter-39 HIGH#1 fix: assert
@@ -585,13 +595,16 @@ def test_plane_crm_production_scale_132x132_with_radiation(tmp_path):
     )
 
     cwv_first = float(rows[0]["CWV_mean"])
-    # iter-14/38 anchor: IC CWV at 132x132 Wing 2018 = 55.550 mm. The
-    # IC is the same whether radiation is on or off (radiation fires
-    # only at t > 0); locking this catches IC-profile regressions on
-    # the with-radiation path too.
-    assert abs(cwv_first - 55.550) < 0.01, (
+    # iter-95 anchor: IC CWV at 132x132@nlev=30 Wing 2018 =
+    # 49.9413 mm post hydrostatic-BC fix (pre-iter-95: 55.550 mm
+    # under the legacy T_avg=250 K BC bug). The IC is the same
+    # whether radiation is on or off (radiation fires only at t > 0);
+    # locking this catches IC-profile regressions on the
+    # with-radiation path too.
+    assert abs(cwv_first - 49.9413) < 0.01, (
         f"plane CRM production+rad smoke: IC CWV={cwv_first:.4f} mm "
-        f"!= 55.550 ± 0.01. iter-14 anchored this value at 132x132."
+        f"!= 49.9413 ± 0.01. iter-95 anchored this value at "
+        f"132x132@nlev=30 post hydrostatic-BC fix."
     )
 
     max_w_per_row = [float(r["max|w|"]) for r in rows]
@@ -863,12 +876,14 @@ def test_plane_crm_production_scale_132x132_one_hour_envelope(tmp_path):
     iter-63 runs at the EXACT 720-step / 3600-s window with the
     iter-39 ``--no-radiation`` flag for a true dycore-only run:
 
-    | step | CWV [mm] | MSE [J/kg] | max|w| [m/s] |
-    |------|----------|------------|--------------|
-    |   1  |  55.550  |  4.2132e9  |  0.0e+00     |
-    | 100  |  55.550  |  4.2131e9  |  3.9e-3      |
-    | 300  |  55.550  |  4.2129e9  |  5.5e-3      |
-    | 700  |  55.550  |  4.2125e9  |  6.1e-3      |
+    | step | CWV [mm]   | MSE [J/kg] | max|w| [m/s] |
+    |------|------------|------------|--------------|
+    |   1  |  49.9413   |  3.52e9    |  0.0e+00     |
+    | 100  |  49.9413   |  3.52e9    |  3.9e-3      |
+    | 300  |  49.9413   |  3.52e9    |  5.5e-3      |
+    | 700  |  49.9413   |  3.52e9    |  6.1e-3      |
+    (iter-95 IC anchor; pre-iter-95 the legacy top-down BC bug
+    inflated this to ~55.550 mm / ~4.21e9 — see CRM_implementation.md)
     (iter-14 cached-rad values; iter-63 ``--no-radiation`` lands
     LOWER per iter-38's 60-step measurement of 2.4e-5 MSE drift)
 
@@ -924,10 +939,11 @@ def test_plane_crm_production_scale_132x132_one_hour_envelope(tmp_path):
     mse_first = float(rows[0]["MSE_mean"])
     mse_final = float(rows[-1]["MSE_mean"])
 
-    # IC anchor (same as iter-38).
-    assert abs(cwv_first - 55.550) < 0.01, (
+    # iter-95 IC anchor at 132x132@nlev=30 post hydrostatic-BC fix
+    # (pre-iter-95: 55.550 mm under the legacy T_avg=250 K bug).
+    assert abs(cwv_first - 49.9413) < 0.01, (
         f"plane CRM 1-hour smoke: IC CWV={cwv_first:.4f} mm "
-        f"!= 55.550 ± 0.01."
+        f"!= 49.9413 ± 0.01."
     )
 
     # max|w| cap on every logged row. iter-14 measured 6.1e-3 m/s
