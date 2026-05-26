@@ -134,6 +134,43 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 78
+
+**Promote iter-46 helpers to a dedicated sibling module.**
+
+iter-46 + iter-66 + iter-51 evolved 6 shared assertion helpers
+inside ``tests/atmosphere/hydrostatic/test_rce_cross_grid_smoke.py``.
+iter-52 added unit tests that cross-imported via
+``from tests.atmosphere.hydrostatic.test_rce_cross_grid_smoke import
+_assert_dt_used``. Side effect: pytest collected the source test
+file when importing for the unit tests.
+
+iter-78 extracts the helpers (_run_rce, _parse_results, _parse_notes,
+_assert_rce_pass, _assert_dt_used, _assert_max_wind_peak_below)
+into ``tests/atmosphere/hydrostatic/_rce_helpers.py``. Underscore
+prefix means pytest's ``test_*.py`` glob skips the module.
+
+Both consumers now use the conventional pattern:
+* ``test_rce_cross_grid_smoke.py``:
+  ``from tests.atmosphere.hydrostatic._rce_helpers import ...``
+* ``test_rce_helpers_unit.py``:
+  ``from tests.atmosphere.hydrostatic._rce_helpers import ...``
+
+**Verified**:
+* Helper unit tests: 18/18 PASS in 2.7 s (no behavior change).
+* Cross-grid collection: 5/13 selected (5 fast + 8 slow), no
+  collection errors.
+* Broader hydrostatic collection: 925 tests, no errors.
+
+**Source preserved**: the iter-46/51/66 design notes + iter-N
+provenance comments all carry over to the new module's docstrings.
+``_rce_helpers.py`` module docstring documents the iter-78
+extraction lineage.
+
+**R-roadmap status**: R1-R8, R10, R12 ✓. F9 platform-blocked. DRY
+posture aligned with CLAUDE.md "no thin dispatch-only wrappers" +
+"reuse existing code as much as possible".
+
 ### 2026-05-26 — iter 77
 
 **Doc compression — folded iter-37..iter-50 (14 iters) to summary

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.atmosphere.hydrostatic.test_rce_cross_grid_smoke import (
+from tests.atmosphere.hydrostatic._rce_helpers import (
     _assert_dt_used,
     _assert_max_wind_peak_below,
 )
