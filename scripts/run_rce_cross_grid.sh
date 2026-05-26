@@ -89,8 +89,15 @@ if [ "$ANY_FAILED" = "1" ]; then
 fi
 # iter-104 codex MEDIUM-4: wrap the comparison-plot step.
 # See ``run_omip_cross_grid.sh`` for the rationale.
+#
+# iter-28: same JAX_PLATFORMS=cpu default as the per-grid runs.
+# iter-7 documented the Metal MLIR legalisation crash on the
+# spectral-grid plot path; without this pin a user with
+# JAX_PLATFORMS=metal exported in their shell would always see the
+# comparison-plot step crash even though every per-grid run wrote
+# valid output.
 PLOT_FAILED=0
-JAX_ENABLE_X64=1 .venv/bin/python scripts/run_atmosphere_test_matrix.py \
+JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}" JAX_ENABLE_X64=1 .venv/bin/python scripts/run_atmosphere_test_matrix.py \
     --cross-grid-plots-only --test rce --output "$OUTPUT" \
     || PLOT_FAILED=1
 if [ "$PLOT_FAILED" = "1" ]; then

@@ -76,6 +76,51 @@ def test_override_takes_precedence():
     assert _resolve_dt("cubed_sphere", 192, dt_override=10.0) == 10.0
 
 
+def test_auto_dt_rce_lies_inside_cfl_envelope():
+    """Sanity: every empirical ladder value must satisfy
+    ``auto_dt_rce(...) <= 2.0 * gravity_wave_cfl(dx)``.
+
+    iter-23 CFL advisory measurements showed our ladder picks dt
+    between 0.33× and 1.32× the gravity-wave CFL formula. A future
+    bump that pushes past 2.0× would be a strong signal that the
+    ladder is back in BLOWUP territory — the iter-13/20 mistakes
+    that produced the C48/C96 crashes both started with ratios ≥
+    1.32×. 2.0× gives a comfortable buffer above the empirical
+    envelope while still catching gross regression.
+
+    Voronoi/MPAS is excluded because its CFL profile is different
+    (the dx_min estimator uses a different formula and the actual
+    stability bound is not gravity-wave-CFL-limited).
+
+    Latlon is also excluded: ``auto_dt_rce`` returns the un-clamped
+    ladder value, but ``run_rce.py`` runs a SECOND pole-cell-CFL
+    clamp afterwards (see scripts/run_rce.py:229-235) that drops
+    the effective dt below the latlon CFL formula. Measuring the
+    auto-dt ladder against the formula directly is therefore not
+    meaningful for latlon — the effective dt is the clamped value.
+    """
+    from legoesm.core.cfl import (
+        cfl_max_dt, estimate_min_dx_cubed_sphere,
+        estimate_min_dx_gaussian,
+    )
+    cases = [
+        ("cubed_sphere", estimate_min_dx_cubed_sphere, [24, 48, 72, 96]),
+        ("gaussian", estimate_min_dx_gaussian, [21, 42]),
+    ]
+    for grid_type, dx_fn, resolutions in cases:
+        for N in resolutions:
+            dx_min = dx_fn(N)
+            dt_cfl = float(cfl_max_dt(dx_min, 300.0, cfl_number=0.8, ndim=2))
+            dt_ladder = auto_dt_rce(grid_type, N)
+            ratio = dt_ladder / dt_cfl
+            assert ratio < 2.0, (
+                f"{grid_type}/N={N}: ladder dt={dt_ladder} > 2.0× CFL "
+                f"formula ({dt_cfl:.1f} s, ratio={ratio:.2f}). iter-13/20 "
+                f"showed crossings of 1.3× already produce BLOWUP at "
+                f"30-day; ratio={ratio:.2f} is firmly in the danger zone."
+            )
+
+
 def test_auto_dt_rce_is_public_api():
     """auto_dt_rce must be re-exported from ``legoesm.driver`` so
     callers can do ``from legoesm.driver import auto_dt_rce`` instead

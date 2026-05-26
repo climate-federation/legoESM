@@ -222,6 +222,49 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 28
+
+**Cross-grid plotter Metal pin + CFL-envelope structural test**
+
+Two concrete additions while the C96 30-day at dt=37 runs in
+background:
+
+1. **iter-7 follow-through**: `scripts/run_rce_cross_grid.sh` last
+   step (`run_atmosphere_test_matrix.py --cross-grid-plots-only`)
+   still used the shell default JAX_PLATFORMS. iter-7 had documented
+   the Apple-Metal MLIR legalisation crash on the spectral-plot path
+   for the per-grid runs but not the comparison plot. Pinned
+   `JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}"` so a user with metal
+   exported in their shell can't accidentally trip the same crash.
+
+2. **New structural test** `test_auto_dt_rce_lies_inside_cfl_envelope`:
+   asserts every empirical ladder value satisfies
+   `auto_dt_rce(...) <= 2.0 * gravity_wave_cfl(dx)` for cubed_sphere
+   + gaussian. iter-13/20 BLOWUPS both started at ratios ≥ 1.32×;
+   2.0× is the comfortable buffer. A future ladder bump that pushes
+   past 2× will FAIL this test before reaching production.
+
+   Latlon excluded: ``run_rce.py`` runs a SECOND pole-cell CFL
+   clamp afterwards (the effective dt is below the formula); the
+   un-clamped auto_dt_rce value isn't a meaningful measure for the
+   latlon path. Voronoi excluded for the same physical reason
+   (MPAS dycore has a different stability profile not bounded by
+   gravity-wave CFL on the cell metric).
+
+   Empirical ratios pinned:
+   * C24 → 1.32×, C48 → 0.66×, C72 → 0.50×, C96 → 0.33×
+   * T21 → 0.69×, T42 → 0.35×
+
+**Updated test count**: 7 PASS in 11 s
+(test_rce_cross_grid_dt_defaults.py). Plus 35 from earlier suites
+unchanged.
+
+**C96 30-day at dt=37 still running** (5+ min CPU, day 5 not yet
+printed).
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-28 plotter pin +
+CFL-envelope structural test), R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 27
 
 **Codex review of iter-25/26: 0 HIGH, 0 MEDIUM, 1 LOW (acknowledged).**
