@@ -147,6 +147,39 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 84
+
+**Move plane CRM ``_read_log`` to ``_plane_crm_helpers.py`` + unit
+tests.**
+
+iter-83 added unit coverage to the iter-78 hydrostatic helpers.
+Symmetric work for plane CRM: ``_read_log`` (used at 4 call sites
+in ``test_plane_crm_end_to_end_smoke.py``) was the only remaining
+pure-function helper not directly unit-tested.
+
+**Changes**:
+* ``_plane_crm_helpers.py``: added ``_read_log`` (docstring cites
+  driver schema at ``run_rce_mpi_long.py:722-734``).
+* ``test_plane_crm_end_to_end_smoke.py``: removed inline
+  ``_read_log`` def; added import.
+* ``test_plane_crm_helpers_unit.py``: added 6 new tests:
+  - basic header + CSV row parsing
+  - missing log.txt → empty list
+  - blank lines skipped
+  - extra comments (e.g. ``# BAIL: NaN``) skipped
+  - rows with wrong column count silently dropped (defensive
+    against driver schema drift mid-run)
+  - no header line → empty result
+
+**Tests**: 18/18 PASS in 0.2 s (was 12).
+
+**R-roadmap status**: R1-R8, R10, R12 ✓. F9 platform-blocked.
+
+iter-78/79/83/84 helper-module pattern now complete:
+* `_rce_helpers.py`: 6 helpers (5 pure unit-tested + 1 subprocess).
+* `_plane_crm_helpers.py`: 2 helpers (both pure unit-tested:
+  ``_parse_rad_call_count`` iter-54 + ``_read_log`` iter-84).
+
 ### 2026-05-26 — iter 83
 
 **Extend iter-52 unit coverage to remaining iter-78 helpers

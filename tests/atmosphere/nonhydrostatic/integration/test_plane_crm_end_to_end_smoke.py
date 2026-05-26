@@ -74,25 +74,10 @@ def _run_driver(output_dir):
     return result
 
 
-def _read_log(output_dir):
-    """Read log.txt rows as a list of dicts."""
-    log_path = Path(output_dir) / "log.txt"
-    if not log_path.exists():
-        return []
-    rows = []
-    with open(log_path) as fh:
-        header = None
-        for line in fh:
-            line = line.strip()
-            if line.startswith("# step,"):
-                header = line.lstrip("# ").split(",")
-            elif line.startswith("#") or not line:
-                continue
-            elif header is not None:
-                parts = line.split(",")
-                if len(parts) == len(header):
-                    rows.append(dict(zip(header, parts)))
-    return rows
+# iter-84: ``_read_log`` moved to ``_plane_crm_helpers.py`` (mirror
+# of iter-79 ``_parse_rad_call_count`` extraction) so the parser
+# can be unit-tested directly. All 4 use sites in this file now
+# import via the helpers module.
 
 
 # iter-79: ``_parse_rad_call_count`` moved to sibling
@@ -101,6 +86,7 @@ def _read_log(output_dir):
 # an import side effect. Mirrors iter-78 hydrostatic refactor.
 from tests.atmosphere.nonhydrostatic.integration._plane_crm_helpers import (
     _parse_rad_call_count,
+    _read_log,
 )
 
 

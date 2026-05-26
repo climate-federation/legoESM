@@ -16,6 +16,7 @@ import pytest
 
 from tests.atmosphere.nonhydrostatic.integration._plane_crm_helpers import (
     _parse_rad_call_count,
+    _read_log,
 )
 
 
@@ -145,3 +146,92 @@ def test_parse_rad_call_count_two_done_lines_returns_none():
         "Done. 60 steps, 0.003 days sim. Wall: 2.1 min. rad_calls=7.\n"
     )
     assert _parse_rad_call_count(stdout) is None
+
+
+# ---------------------------------------------------------------------------
+# iter-84: unit coverage for _read_log (moved from
+# test_plane_crm_end_to_end_smoke.py to _plane_crm_helpers.py).
+# ---------------------------------------------------------------------------
+
+
+def _write_log(tmp_path, content):
+    out = tmp_path / "rce_out"
+    out.mkdir()
+    (out / "log.txt").write_text(content)
+    return out
+
+
+def test_read_log_basic_format(tmp_path):
+    """Driver's actual log.txt format (header lines + CSV rows)."""
+    out = _write_log(tmp_path, (
+        "# RCE MPI LONG  n_ranks=1 grid=12x12 nlev=20 dx=2000.0 dt=5.0\n"
+        "# physics: NO radiation + Kessler microphysics + Smag\n"
+        "# step,day,CWV_mean,MSE_mean,max|w|\n"
+        "1,0.000058,5.5001e+01,4.2049e+09,0.0000e+00\n"
+        "20,0.001157,5.5001e+01,4.2049e+09,4.7400e-04\n"
+    ))
+    rows = _read_log(out)
+    assert len(rows) == 2
+    assert rows[0]["step"] == "1"
+    assert rows[0]["CWV_mean"] == "5.5001e+01"
+    assert rows[1]["max|w|"] == "4.7400e-04"
+
+
+def test_read_log_returns_empty_when_missing(tmp_path):
+    """Missing log.txt → empty list (driver crashed before writing)."""
+    out = tmp_path / "no_log"
+    out.mkdir()
+    assert _read_log(out) == []
+
+
+def test_read_log_skips_blank_lines(tmp_path):
+    out = _write_log(tmp_path, (
+        "# step,day,max|w|\n"
+        "\n"
+        "1,0.0,1e-3\n"
+        "\n"
+        "2,0.0001,2e-3\n"
+    ))
+    rows = _read_log(out)
+    assert len(rows) == 2
+
+
+def test_read_log_skips_extra_comments(tmp_path):
+    """Lines starting with ``#`` after the header are skipped (e.g.
+    a ``# BAIL: NaN at step N`` marker the driver writes on failure)."""
+    out = _write_log(tmp_path, (
+        "# RCE MPI LONG\n"
+        "# step,day,max|w|\n"
+        "1,0.0,1e-3\n"
+        "# BAIL: NaN at step 2\n"
+    ))
+    rows = _read_log(out)
+    assert len(rows) == 1
+
+
+def test_read_log_rejects_row_with_wrong_column_count(tmp_path):
+    """A row with too few/many fields is silently dropped (rather
+    than producing a malformed dict). Defensive against driver
+    schema drift mid-run."""
+    out = _write_log(tmp_path, (
+        "# step,day,max|w|\n"
+        "1,0.0,1e-3\n"
+        "2,0.0001\n"       # missing one field
+        "3,0.0002,3e-3,extra\n"  # extra field
+    ))
+    rows = _read_log(out)
+    # Only the well-formed row 1 makes it through.
+    assert len(rows) == 1
+    assert rows[0]["step"] == "1"
+
+
+def test_read_log_without_header_returns_empty(tmp_path):
+    """A log.txt that never contains the ``# step,...`` schema line
+    has no parseable rows."""
+    out = _write_log(tmp_path, (
+        "# RCE MPI LONG header only\n"
+        "# no schema line\n"
+        "1,2,3\n"
+    ))
+    rows = _read_log(out)
+    assert rows == []

@@ -7,15 +7,50 @@ import it without triggering pytest collection of the source test
 file as an import side effect. Mirrors the iter-78 hydrostatic
 helpers extraction.
 
-The driver subprocess helpers (``_run_driver``, ``_read_log``,
+iter-84: added ``_read_log`` (pure log.txt parser, file-local
+until now). All 4 use sites in ``test_plane_crm_end_to_end_smoke.py``
+import via this module so the parser is unit-testable.
+
+The driver subprocess helpers (``_run_driver``,
 ``_run_driver_with_radiation``, ``_run_driver_production_scale``)
-stay in ``test_plane_crm_end_to_end_smoke.py`` — they are file-
-local with no cross-file consumers.
+stay in ``test_plane_crm_end_to_end_smoke.py`` — they hardcode
+config-specific CLI args and have no cross-file consumers.
 
 Underscore prefix marks the module as a non-test helper so
 pytest's ``test_*.py`` glob skips it.
 """
 from __future__ import annotations
+
+from pathlib import Path
+
+
+def _read_log(output_dir):
+    """Read ``log.txt`` rows as a list of dicts.
+
+    Driver format (``scripts/run_rce_mpi_long.py:722-734``):
+    * Header lines start with ``# RCE MPI LONG`` + ``# physics:``.
+    * Schema line starts with ``# step,`` listing the CSV columns.
+    * Subsequent lines are CSV data rows.
+    * Returns an empty list when ``log.txt`` is missing (driver
+      crashed before writing) — caller asserts ``rows`` non-empty.
+    """
+    log_path = Path(output_dir) / "log.txt"
+    if not log_path.exists():
+        return []
+    rows = []
+    with open(log_path) as fh:
+        header = None
+        for line in fh:
+            line = line.strip()
+            if line.startswith("# step,"):
+                header = line.lstrip("# ").split(",")
+            elif line.startswith("#") or not line:
+                continue
+            elif header is not None:
+                parts = line.split(",")
+                if len(parts) == len(header):
+                    rows.append(dict(zip(header, parts)))
+    return rows
 
 
 def _parse_rad_call_count(stdout: str) -> int | None:
