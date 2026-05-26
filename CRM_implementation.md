@@ -134,6 +134,36 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 72
+
+**Regression test for iter-71 ``run_rce.py`` CLI validation.**
+
+iter-71 added input-validation guards to ``scripts/run_rce.py`` but
+the contract had no regression backstop. iter-72 lands
+``tests/atmosphere/hydrostatic/test_run_rce_cli_validation.py``
+with 10 parametric cases:
+
+* ``--days -1``, ``--days 0`` → "must be positive integer"
+* ``--resolution 0`` → "must be positive integer"
+* ``--nlev -1`` → "must be positive integer"
+* ``--diag-days -5`` → "must be positive integer"
+* ``--dt nan`` → "must be finite"
+* ``--dt 0.0``, ``--dt -1.0`` → "must be positive"
+* ``--sst-init nan`` → "must be finite"
+* ``--truncation 0`` → "must be positive integer when set"
+
+Each case asserts non-zero exit + "rejected" marker + no
+"Traceback" in output (catches future regression).
+
+Wall: ~10 s per case (lightweight hydrostatic driver, no JAX MPI
+init). ~100 s total for 10 cases.
+
+Mirrors the iter-67/70 plane CRM regression test pattern.
+
+**R-roadmap status**: R1-R8, R10, R12 ✓ (with iter-72 closing the
+last regression backstop for CLI input validation across both
+production drivers). F9 platform-blocked.
+
 ### 2026-05-26 — iter 71
 
 **Mirror iter-67/70 CLI input validation onto ``scripts/run_rce.py``
