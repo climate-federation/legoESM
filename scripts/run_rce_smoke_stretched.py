@@ -123,9 +123,14 @@ def build_height_coord_and_state(nlev, H, dz_sfc, grid):
         T_sfc=T_SFC_K, q_sfc=Q_SFC_FRAC, z_t=Z_T, Gamma=GAMMA_TROP,
     )
     qv_fn = make_wing2018_qv_ref_fn(q_sfc=Q_SFC_FRAC, z_t=Z_T)
+    # iter-95: pass p_sfc=101480 (Wing 2018 Tab A1) for the
+    # correct hydrostatic surface BC. Without this the legacy
+    # top-down T_avg=250 K BC produces ~12 K too-hot T at the
+    # lowest model level on H=33 km columns.
     hc = create_stretched_height_coordinate(
         n_levels=nlev, H=H, dz_sfc=dz_sfc,
         theta_ref_fn=theta_fn,
+        p_sfc=101480.0,
     )
     state = make_rest_state(grid, hc, dtype=jnp.float64)
     # theta_prime starts at zero (rest state convention) since
