@@ -105,13 +105,22 @@ def _parse_notes(notes: str) -> dict:
     return out
 
 
-def _assert_rce_pass(out_dir, label, temp_tol=1.0, max_v_cap=50.0):
+def _assert_rce_pass(out_dir, label, temp_tol=1.0, max_v_cap=50.0,
+                     max_v_floor=None):
     """Shared post-run assertion for a 2-day or longer RCE smoke.
 
     Asserts (1) results.txt exists, (2) status == PASS,
     (3) mean_T_sfc within `temp_tol` of 300 K, (4) max|v| < `max_v_cap`.
     Used by the parametrise smoke and the slow C96/C48 variants
     to avoid duplicating the envelope checks (Codex iter-19 MEDIUM).
+
+    iter-89: optional ``max_v_floor`` mirrors the iter-88
+    ``_assert_max_wind_peak_below(min_floor=...)`` activity-floor
+    contract. When set, asserts ``max_v >= max_v_floor`` AFTER the
+    cap check fires-first ordering. Closes the all-zero silent-pass
+    class for the fast 2-day smokes (which use only
+    ``_assert_rce_pass`` and thus don't get the iter-88 peak-scan
+    floor). Default ``None`` preserves iter-46/19 behaviour.
     """
     fields = _parse_results(out_dir)
     assert fields is not None, (
@@ -141,6 +150,14 @@ def _assert_rce_pass(out_dir, label, temp_tol=1.0, max_v_cap=50.0):
         f"Production envelope is 2-12 m/s; >{max_v_cap} m/s means a "
         f"CFL crash in flight (even before the 200 m/s BLOWUP gate)."
     )
+    if max_v_floor is not None:
+        assert max_v >= max_v_floor, (
+            f"{label}: max|v|={max_v:.2f} m/s below activity floor "
+            f"{max_v_floor} m/s. The dycore may be inactive — RCE "
+            f"runs typically reach ~1-3 m/s by day 2 and ~2-15 m/s "
+            f"by day 30. iter-12 smallest 30-day measured (V4) was "
+            f"2.28 m/s; iter-13 C48 day-2 reached ~1.7 m/s."
+        )
 
 
 def _assert_dt_used(out_dir, label, expected_dt, abs_tol=None):

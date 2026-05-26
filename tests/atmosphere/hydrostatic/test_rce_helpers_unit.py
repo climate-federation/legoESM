@@ -470,6 +470,52 @@ def test_assert_rce_pass_fail_on_missing_max_v(tmp_path):
         _assert_rce_pass(out, label="missing-maxv")
 
 
+# iter-89: max_v_floor opt-in mirror of iter-88 min_floor.
+
+
+def test_assert_rce_pass_max_v_floor_default_unchanged(tmp_path):
+    """``max_v_floor=None`` (default) preserves iter-46/19 behavior.
+    max|v|=0.0 (all-zero broken dycore) passes envelope check."""
+    out = _write_results(tmp_path, [
+        "status: PASS",
+        "notes: mean_T_sfc=300.0, max|v|=0.0",
+    ])
+    _assert_rce_pass(out, label="zero-default")
+
+
+def test_assert_rce_pass_max_v_floor_catches_zero(tmp_path):
+    """``max_v_floor=0.1`` flags an all-zero (broken dycore) run."""
+    out = _write_results(tmp_path, [
+        "status: PASS",
+        "notes: mean_T_sfc=300.0, max|v|=0.0",
+    ])
+    with pytest.raises(AssertionError, match="below activity floor"):
+        _assert_rce_pass(out, label="zero-floor", max_v_floor=0.1)
+
+
+def test_assert_rce_pass_max_v_floor_passes_real_run(tmp_path):
+    """``max_v_floor=0.1`` accepts a real V4-style measurement
+    (iter-12 2.28 m/s) — must NOT false-fail."""
+    out = _write_results(tmp_path, [
+        "status: PASS",
+        "notes: mean_T_sfc=300.85, max|v|=2.28",
+    ])
+    _assert_rce_pass(out, label="v4-30day", max_v_floor=0.1)
+
+
+def test_assert_rce_pass_max_v_floor_cap_fires_first(tmp_path):
+    """Order matters: cap check fires BEFORE floor. peak > cap means
+    user sees the cap error (more actionable)."""
+    out = _write_results(tmp_path, [
+        "status: PASS",
+        "notes: mean_T_sfc=300.0, max|v|=99.0",
+    ])
+    with pytest.raises(AssertionError, match="exceeds"):
+        _assert_rce_pass(
+            out, label="cap-first", max_v_cap=50.0, max_v_floor=0.1,
+        )
+
+
 def test_assert_rce_pass_fail_on_missing_results(tmp_path):
     """No results.txt → AssertionError 'silently'."""
     out = tmp_path / "no_results"

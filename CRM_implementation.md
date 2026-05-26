@@ -149,6 +149,47 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 89
+
+**Symmetric ``max_v_floor`` on ``_assert_rce_pass`` (mirror of
+iter-88 ``min_floor`` on peak-scan helper).**
+
+iter-88 added activity-floor protection to
+``_assert_max_wind_peak_below``. That covered the 30-day nightlies
+which use BOTH the peak scan + the envelope check. The FAST 2-day
+smokes use ONLY ``_assert_rce_pass`` — so a broken dycore producing
+``max|v|=0.0`` in the notes-line would PASS the cap check.
+
+iter-89 adds symmetric ``max_v_floor`` parameter to
+``_assert_rce_pass`` (default ``None`` preserves iter-46/19
+behavior). When set, asserts ``max_v >= max_v_floor`` AFTER the
+cap check, mirroring the iter-88 cap-fires-first pattern.
+
+iter-13 C48 day-2 measured max|v| ≈ 1.7 m/s — so ``max_v_floor=0.1``
+gives ~17× margin for 2-day smokes.
+
+**4 new unit tests**:
+* default None preserves prior behavior on all-zero rows.
+* ``max_v_floor=0.1`` catches all-zeros.
+* ``max_v_floor=0.1`` accepts real V4 30-day measurement (2.28).
+* cap-fires-first ordering preserved.
+
+**Tests**: 45/45 PASS in 0.32 s (was 41).
+
+**R-roadmap status**: R1-R8, R10, R12 ✓. F9 platform-blocked.
+
+iter-46/66/87/88/89 collectively close the entire vacuous-pass
+risk surface across BOTH the timeseries-peak path
+(``_assert_max_wind_peak_below``) AND the final-day notes path
+(``_assert_rce_pass``):
+
+| Risk class | peak path | notes path |
+|------------|-----------|------------|
+| No parseable rows | iter-46/66 "no parseable" | iter-46 status check |
+| NaN-only rows | iter-66/87 isnan skip | NaN-False comparison fires |
+| All-zero rows | iter-88 `min_floor` opt-in | iter-89 `max_v_floor` opt-in |
+| inf in any row | iter-87 propagates → cap | inf-False comparison fires |
+
 ### 2026-05-26 — iter 88
 
 **Close all-zero silent-pass class in `_assert_max_wind_peak_below`
