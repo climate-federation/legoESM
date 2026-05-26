@@ -21,6 +21,8 @@ The schedule matches the driver loop ``if (step - 1) % every == 0`` at
 """
 from __future__ import annotations
 
+import math
+import sys
 from typing import NamedTuple
 
 
@@ -59,6 +61,20 @@ def radiation_call_every_steps(rad_call_interval_s: float, dt: float) -> int:
     Clamped to >= 1 so a sub-dt interval still fires every outer step
     (which is the only safe behaviour without sub-step interpolation).
     """
+    # iter-42 Codex 2nd-pass MEDIUM: reject NaN/inf BEFORE the
+    # ordering / round-trip guards. NaN compares False against
+    # anything so ``dt <= 0.0`` would silently pass for ``dt=nan``
+    # and then ``round(rad/nan)`` raises an opaque ValueError;
+    # ``inf`` propagates into ``round(inf) → OverflowError``.
+    if not math.isfinite(dt):
+        raise ValueError(
+            f"radiation_call_every_steps: dt must be finite, got {dt!r}"
+        )
+    if not math.isfinite(rad_call_interval_s):
+        raise ValueError(
+            f"radiation_call_every_steps: rad_call_interval_s must "
+            f"be finite, got {rad_call_interval_s!r}"
+        )
     if dt <= 0.0:
         raise ValueError(
             f"radiation_call_every_steps: dt must be positive, got {dt!r}"
@@ -92,6 +108,19 @@ def radiation_call_schedule(
         raise TypeError(
             f"radiation_call_schedule: total_steps must be int, got "
             f"{type(total_steps).__name__}"
+        )
+    # iter-42 Codex 2nd-pass MEDIUM: ``range(1, total_steps + 1, ...)``
+    # overflows when ``total_steps == sys.maxsize``. Hard-cap below
+    # that boundary — no realistic ESM run gets even close (a
+    # 10-million-step run would still be 4 orders of magnitude below
+    # sys.maxsize on a 64-bit system), so this is a fail-loudly guard
+    # against logic bugs (passing the wrong int, negative-step
+    # underflow producing a huge unsigned value, etc.).
+    if total_steps >= sys.maxsize:
+        raise ValueError(
+            f"radiation_call_schedule: total_steps={total_steps} too "
+            f"large (>= sys.maxsize={sys.maxsize}). This is likely a "
+            f"logic bug — no realistic ESM run exceeds 10^9 steps."
         )
     every = radiation_call_every_steps(rad_call_interval_s, dt)
     if total_steps <= 0:

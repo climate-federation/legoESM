@@ -222,6 +222,59 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 43
+
+**Hardened ``physics_schedule`` against pathological inputs (Codex
+2nd-pass).**
+
+Codex iter-42 first-pass review caught 1 MEDIUM (memory) + 1 LOW
+(boundary). The iter-43 2nd-pass review caught 3 MEDIUMs around
+non-finite inputs that the first guard block didn't reject:
+
+* **NaN dt**: ``dt <= 0.0`` compares False against NaN, so the
+  guard silently passed; ``round(rad/nan)`` then raised an opaque
+  ``ValueError`` deep in CPython.
+* **inf dt or interval**: ``rad/inf = 0`` rounds to ``0`` and
+  ``max(1, 0)`` returns 1, masking the bug. ``round(inf)`` would
+  ``OverflowError`` if interval is inf.
+* **total_steps == sys.maxsize**: ``range(1, sys.maxsize + 1, ...)``
+  overflows on CPython.
+
+**Fixes** (``src/legoesm/driver/physics_schedule.py``):
+* Added ``math.isfinite()`` checks at top of
+  ``radiation_call_every_steps`` for both dt and rad_call_interval_s.
+  Rejected BEFORE the ordering guards so the error is clear.
+* Added ``total_steps >= sys.maxsize`` guard at top of
+  ``radiation_call_schedule``. Includes a "no realistic ESM run
+  exceeds 10^9 steps" message so the failure mode is obvious if
+  a future caller passes a corrupted int.
+
+**Unit tests** added (``tests/unit/test_physics_schedule.py``):
+* ``test_every_steps_rejects_nan_dt``
+* ``test_every_steps_rejects_inf_dt``
+* ``test_every_steps_rejects_nan_interval``
+* ``test_every_steps_rejects_inf_interval``
+* ``test_schedule_rejects_sys_maxsize_total_steps``
+
+5 new tests, total 22 unit tests for the module (was 17). All
+PASS in 2 s.
+
+**Codex 2nd-pass LOW** acknowledged but not fixed:
+* RadiationCallSchedule field order is now public tuple ABI —
+  reordering would break callers using positional construction.
+  Acceptable: callers in this repo use keyword construction or
+  named attribute access. Future breaking change would be a
+  deliberate API bump.
+
+**Tests**:
+* ``pytest tests/unit/test_physics_schedule.py``: 22 PASS in 2.0 s.
+* ``pytest -m 'not slow' tests/atmosphere/nonhydrostatic/
+  integration/test_plane_crm_end_to_end_smoke.py``: 2 PASS in 32 s.
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-43 input-domain
+hardening of the iter-42 schedule helper), R6 ✓. F9
+platform-blocked.
+
 ### 2026-05-26 — iter 42
 
 **Radiation-call schedule arithmetic factored to a unit-testable

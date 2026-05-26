@@ -71,6 +71,31 @@ def test_every_steps_rejects_negative_interval():
         radiation_call_every_steps(-1.0, 5.0)
 
 
+def test_every_steps_rejects_nan_dt():
+    """iter-42 Codex 2nd-pass MEDIUM: NaN dt would silently bypass
+    the ``dt <= 0`` guard (NaN compares False vs anything) and then
+    fail in round() with an opaque error."""
+    with pytest.raises(ValueError, match="dt must be finite"):
+        radiation_call_every_steps(60.0, float("nan"))
+
+
+def test_every_steps_rejects_inf_dt():
+    with pytest.raises(ValueError, match="dt must be finite"):
+        radiation_call_every_steps(60.0, float("inf"))
+
+
+def test_every_steps_rejects_nan_interval():
+    with pytest.raises(ValueError, match="rad_call_interval_s must be finite"):
+        radiation_call_every_steps(float("nan"), 5.0)
+
+
+def test_every_steps_rejects_inf_interval():
+    """A literal float('inf') interval would cause round(inf)
+    OverflowError in CPython. Reject at the boundary."""
+    with pytest.raises(ValueError, match="rad_call_interval_s must be finite"):
+        radiation_call_every_steps(float("inf"), 5.0)
+
+
 # ---------------------------------------------------------------------------
 # radiation_call_schedule
 # ---------------------------------------------------------------------------
@@ -153,3 +178,13 @@ def test_schedule_num_calls_matches_fire_count():
 def test_schedule_rejects_non_int_total_steps():
     with pytest.raises(TypeError, match="total_steps must be int"):
         radiation_call_schedule(60.0, 5.0, 60.0)  # type: ignore[arg-type]
+
+
+def test_schedule_rejects_sys_maxsize_total_steps():
+    """iter-42 Codex 2nd-pass MEDIUM: range(1, sys.maxsize + 1, ...)
+    overflows. Fail loudly so a logic bug (wrong int, unsigned
+    underflow) trips early instead of producing a confusing
+    OverflowError deep inside CPython."""
+    import sys
+    with pytest.raises(ValueError, match="too large"):
+        radiation_call_schedule(60.0, 5.0, sys.maxsize)
