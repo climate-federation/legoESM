@@ -149,6 +149,91 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 93
+
+**Fix import-time Metal-init crash + add structural regression test.**
+
+While trying to run helper unit tests (which should be pure-Python
+and fast), discovered `tests/conftest.py` failed to load with:
+```
+jax.errors.JaxRuntimeError: UNIMPLEMENTED: default_memory_space is
+not supported.
+```
+Traceback root: `src/legoesm/grids/vertical.py:1169: _A60 =
+jnp.asarray([...])` at module top.
+
+**Root cause**: `grids/vertical.py` had two module-top
+`jnp.asarray([...])` calls (`_A60`, `_B60` — the FV3 L60 hybrid
+coord tables). At `import legoesm` time these eagerly dispatch
+`lax.convert_element_type` to whatever JAX default platform is
+initialized — on macOS that's `METAL`, which currently rejects
+the op. The fallback to CPU (`ensure_metal_or_fallback()`) lives
+inside `tests/conftest.py:13`, AFTER `legoesm` is imported on
+line 12, so the fallback never gets a chance to apply. Result:
+`import legoesm` bricks on Apple Silicon. Affected EVERY
+pure-Python unit test on Mac.
+
+**Fix** (`src/legoesm/grids/vertical.py:1169-1198`):
+* Module-top: `np.asarray(...)` (pure NumPy data, no device
+  dispatch).
+* Inside `set_eta_L60()`: `jnp.asarray(_A60)` / `jnp.asarray(_B60)`
+  to convert to jax.Array on demand, AFTER fallback applied.
+
+Verification:
+* `import legoesm` → succeeds with warning instead of crash.
+* `set_eta_L60()` returns identical `(ak, bk, ptop, ks)`
+  (dtype float32 under x32, float64 under x64; ptop=300.0,
+  ks=20; ak[0]=300, ak[-1]=0; bk[0]=0, bk[-1]=1).
+* `tests/test_fv3_set_eta_L60_iter647.py` 7/7 PASS.
+* `tests/atmosphere/nonhydrostatic/integration/test_plane_crm_helpers_unit.py`
+  18/18 PASS (was unable to collect before fix).
+
+**Regression test** (`tests/unit/test_no_module_top_jax_alloc.py`):
+8 cases. AST-walks 7 protected modules on the `import legoesm`
+critical path; flags any top-level `jnp.{array,asarray,zeros,ones,
+full,arange,linspace,eye}` call (or `jax.numpy.<ctor>` form).
+Scalar ops like `jnp.pi` and metadata reads like `jnp.finfo(...)
+.tiny` are NOT flagged (allow-list by name). Includes 1 smoke
+test that imports `legoesm` and asserts no crash. Synthetic
+sanity check confirms the AST walker fires on a planted
+`_BAD = jnp.asarray([1.0, 2.0])` module-top.
+
+Why structural test: a future contributor adding a module-top
+`jnp.array([...])` constant table would silently re-introduce
+the same Metal-import crash. The test pins the invariant
+*statically* so the regression is caught at collection time, on
+any platform, not just on Macs.
+
+R12 (test infrastructure) status: this fix unblocks all
+pure-Python unit tests on macOS that were previously crashing
+at `tests/conftest.py:12`. Critical for the iterate-with-codex
+loop, where fast unit tests are the inner-loop signal.
+
+**Honest re-evaluation of iter-92 cross-resolution claim.**
+
+iter-92's "cross-resolution trajectory consistency" claim was
+TECHNICALLY TRUE but TRIVIAL. Both runs used the identical Wing
+2018 column IC replicated across N×N cells; the convection-free
+spinup phase is dominated by column processes (radiation, surface
+flux, gravity-wave equilibration) which are resolution-independent
+given identical column IC. So agreement at max\|w\| was EXPECTED,
+not a non-trivial validation.
+
+iter-93 clarifies the iter-92 doc with:
+* Honest caveat about what cross-resolution agreement does/doesn't
+  validate in the pre-convection phase.
+* Explicit list of what iter-92 DID validate (driver end-to-end,
+  no blowup, stack composition) vs what it did NOT validate
+  (convection-dependent cross-resolution behavior, full 30-day RCE
+  plateau).
+
+R11 plane CRM 30-day status: structurally proven via iter-14
+1-sim-hour + extensive code review; cross-resolution agreement
+in pre-convection phase is necessary but not sufficient evidence
+for the 30-day claim. Full validation remains wall-time-gated.
+
+**R-roadmap status**: R1-R8, R10, R12 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 92
 
 **User-suggested bridge: short low-res empirical run between iter-14
@@ -177,14 +262,40 @@ captured:
 |  720 | 0.041667 | 55.0010  | 4.2042e+09 | 5.779e-03      | 0.000   | 0.000   |
 |  960 | 0.055556 | 55.0010  | 4.2040e+09 | 5.887e-03      | 0.000   | 0.000   |
 
-**Cross-resolution trajectory consistency**:
+**Cross-resolution trajectory consistency (pre-convection only)**:
 * iter-14 at 132×132 step 700 (58 min sim): max\|w\| = 6.1e-3 m/s.
 * iter-92 at 12×12 step 720 (60 min sim): max\|w\| = 5.78e-3 m/s.
 
-Same order-of-magnitude at the same sim time → the time integration
-+ acoustic substepping + slow tendency stack scales correctly across
-horizontal resolution. The 132×132 measurements are NOT a single-
-config artifact; the same trajectory shape appears at 12×12.
+Same order-of-magnitude at the same sim time. **Caveat (iter-93
+honest re-evaluation)**: both runs use the IDENTICAL Wing 2018
+column IC replicated across N×N cells. In the convection-free
+spinup phase (qc=qr=0 through 80 sim-min) the trajectory is
+dominated by **column processes** (radiation cooling + surface
+flux + gravity wave equilibration) which are resolution-
+independent given identical column IC. Cross-resolution agreement
+at this phase is EXPECTED, not surprising.
+
+Convection-dependent cross-resolution behavior (where 132×132's
+17,424 cells host many independent updrafts vs 12×12's 144 cells
+hosting only a few) requires LONGER simulation (hours-days into
+the radiation-driven spinup) — box-load-blocked at iter-92.
+
+What iter-92 DOES validate:
+* Driver setup + JIT compile + log emission work end-to-end at
+  the small-grid config.
+* Acoustic substep + slow tendency + halo exchange (single-rank)
+  + Smag + WENO5 + Kessler microphysics + gray radiation
+  composition does NOT BLOW UP at 12×12.
+* Per-step MSE drift rate (2.6e-6 per step at 12×12) is comparable
+  to iter-14's 132×132 measurement (2.3e-7 per step → roughly 10×
+  larger at smaller domain due to relative reduction; still
+  bounded).
+
+What iter-92 does NOT validate:
+* Whether convection spinup at 12×12 (later sim time) reaches a
+  realistic RCE plateau. Would need ≫ 1 sim-day of wall budget.
+* Whether 30-day plane CRM at production resolution actually
+  reaches RCE — still wall-time-gated.
 
 **MSE drift**: 4.2049e9 → 4.2040e9 over 80 sim-min at 12×12 with
 radiation enabled = 2.1e-4 relative drift = ~3e-4 per sim-day rate.

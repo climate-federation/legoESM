@@ -36,6 +36,7 @@ from typing import Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
 
@@ -1166,7 +1167,15 @@ def compute_dz_L32() -> tuple[jax.Array, jax.Array]:
     return dz_flipped, ztop
 
 
-_A60 = jnp.asarray([
+# iter-93: stored as numpy (not jnp) at module-top. jnp.asarray at
+# import time eagerly dispatches to the default JAX backend (Metal
+# on macOS), which currently rejects convert_element_type with
+# "UNIMPLEMENTED: default_memory_space is not supported". That
+# bricks `import legoesm` on Apple Silicon even for pure-Python
+# unit tests. Defer jnp conversion to inside `set_eta_L60()` so
+# only callers that actually need the FV3 L60 hybrid coord pay the
+# JAX device-init cost.
+_A60 = np.asarray([
     300.0000, 430.00000, 558.00000, 700.00000, 863.05803,
     1051.07995, 1265.75194, 1510.71101, 1790.05098, 2108.36604,
     2470.78817, 2883.03811, 3351.46002, 3883.05187, 4485.49315,
@@ -1181,7 +1190,7 @@ _A60 = jnp.asarray([
     776.23591, 581.48797, 408.53400, 255.26520, 119.70243,
     0.0,
 ])
-_B60 = jnp.asarray([
+_B60 = np.asarray([
     0.00000, 0.00000, 0.00000, 0.00000, 0.00000,
     0.00000, 0.00000, 0.00000, 0.00000, 0.00000,
     0.00000, 0.00000, 0.00000, 0.00000, 0.00000,
@@ -1221,8 +1230,8 @@ def set_eta_L60() -> tuple[jax.Array, jax.Array, jax.Array, int]:
         Number of pure-pressure LAYERS = max index where bk < eps
         (from iter-637 set_external_eta).
     """
-    ak = _A60
-    bk = _B60
+    ak = jnp.asarray(_A60)
+    bk = jnp.asarray(_B60)
     ptop = ak[0]
     # ks = last index where bk < 1e-7
     eps = 1.0e-7
