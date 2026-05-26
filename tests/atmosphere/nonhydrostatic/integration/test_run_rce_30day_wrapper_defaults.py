@@ -77,6 +77,11 @@ def test_other_production_defaults(wrapper_text):
         "HYPERDIFF": "5.0e6",
         "BUBBLE_K": "0.0",   # F7 / F10 contract: clean Wing IC
         "QV_NOISE": "0.0",   # F7 / F10 contract: no qv noise
+        # iter-61 Codex MEDIUM coverage gap fix: env defaults that
+        # iter-58 missed.
+        "DAYS": "30",
+        "RANKS": "12",
+        "USE_DD": "0",   # legacy rank-0-broadcast is the F8-stable default
     }
     for name, expected in defaults.items():
         actual = _parse_env_default(wrapper_text, name)
@@ -84,3 +89,56 @@ def test_other_production_defaults(wrapper_text):
             f"run_rce_30day.sh {name} default = {actual!r}, "
             f"expected {expected!r} (iter-12/14/38 production contract)."
         )
+
+
+# iter-61 Codex MEDIUM silent-pass fix: the wrapper passes several
+# production-relevant flags HARDCODED in the mpirun argv (not via
+# env vars). A partial revert of these would slip past both this
+# test + the driver-defaults test. Lock them here.
+
+
+_HARDCODED_PASSTHROUGH_FLAGS = {
+    "--acoustic-off-centering": "0.1",  # iter-14/38 production beta
+    "--snapshot-hours": "24.0",          # daily snapshots
+    "--snapshot-3d-hours": "1.0",        # hourly 3D snapshots
+    "--profile-days": "5.0",
+    "--log-every-steps": "100",
+    # --semi-implicit-acoustic is a store_true; verified separately.
+}
+
+
+@pytest.mark.parametrize(
+    "flag,expected_value",
+    sorted(_HARDCODED_PASSTHROUGH_FLAGS.items()),
+)
+def test_wrapper_hardcoded_driver_flag(wrapper_text, flag, expected_value):
+    """Each ``flag VALUE`` pair appears verbatim in the wrapper's
+    mpirun invocation line (no env-var indirection). Catches a
+    silent revert of any production tunable that the iter-58
+    env-only coverage missed.
+    """
+    # The wrapper uses bash backslash-continuation; flags appear on
+    # separate continuation lines like
+    #   --acoustic-off-centering 0.1 \
+    # Match flag then whitespace then the literal value.
+    pattern = re.escape(flag) + r"\s+" + re.escape(expected_value) + r"\b"
+    assert re.search(pattern, wrapper_text), (
+        f"run_rce_30day.sh missing hardcoded {flag} {expected_value} "
+        f"in the mpirun invocation. A partial revert of this "
+        f"production tunable would slip past both the env-var "
+        f"defaults test (iter-58) and the driver argparse test "
+        f"(iter-59)."
+    )
+
+
+def test_wrapper_semi_implicit_acoustic_present(wrapper_text):
+    """--semi-implicit-acoustic is a bare flag (no value); verify it
+    appears in the mpirun invocation. Production contract since
+    iter-1 + verified by iter-14/38."""
+    assert re.search(r"\\\n\s*--semi-implicit-acoustic\b", wrapper_text), (
+        "run_rce_30day.sh missing --semi-implicit-acoustic flag in "
+        "mpirun invocation. The SI substep is the iter-14/38 "
+        "production contract; removing it falls back to explicit "
+        "forward-Euler which is dt-stability-bounded at the iter-1 "
+        "ladder (dt <= 1.0 s)."
+    )

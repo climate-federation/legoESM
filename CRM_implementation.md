@@ -134,6 +134,60 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 61
+
+**Codex review of iter-58/59 defaults regressions caught 5 MEDIUM
+coverage gaps — extended both tests.**
+
+iter-58/59 introduced wrapper- and driver-defaults regression tests
+that were committed without prior Codex review. iter-61 fresh review
+found 0 HIGH, 5 MEDIUM, 7 LOW. Key gaps closed:
+
+**Wrapper test extensions** (``test_run_rce_30day_wrapper_defaults.py``):
+* env-var coverage: ``DAYS``, ``RANKS``, ``USE_DD`` added (iter-58
+  missed these — Codex MEDIUM#4).
+* hardcoded driver-flag pass-through assertions (Codex MEDIUM#5):
+  the wrapper hardcodes ``--acoustic-off-centering 0.1``,
+  ``--snapshot-hours 24.0``, ``--snapshot-3d-hours 1.0``,
+  ``--profile-days 5.0``, ``--log-every-steps 100`` in the
+  mpirun argv. A partial revert of any would silently pass both
+  the env-only iter-58 + driver iter-59 tests. New parametric
+  test asserts each flag-value pair appears in the mpirun
+  invocation line. Plus ``--semi-implicit-acoustic`` presence
+  pinned (bare flag, no value).
+
+**Driver test extensions** (``test_run_rce_mpi_long_driver_defaults.py``):
+* 11 new defaults asserted: ``--dx``, ``--H``, ``--dz-sfc``,
+  ``--vertical-grid``, ``--n-physics-substeps``,
+  ``--rad-call-interval-s``, ``--no-radiation``, ``--use-dd``,
+  ``--advection``, ``--sponge-coeff``, ``--sponge-width``,
+  ``--implicit-buoyancy``, ``--qv-noise-seed``.
+* iter-61 audit caught: ``--vertical-grid`` production default is
+  ``uniform`` not ``stretched`` (uniform dz ≈ 1100 m at nlev=30,
+  H=33 km — stretched is opt-in). Updated assertion + comment.
+
+**Codex iter-61 LOW deferred**:
+* Regex robustness vs here-docs/disabled bash blocks: would only
+  false-match if the wrapper grows new comment-example syntax;
+  no current risk.
+* Duplication between AST + regex helpers across the two tests:
+  different targets, no consolidation needed yet.
+* Test isolation: tests parse source only, no live imports —
+  intentional (avoids triggering JAX/MPI at import time).
+
+**Tests**: 28/28 PASS in 0.36 s (was 11). Added 17 new assertions.
+
+**R-roadmap status**: R1-R8, R10, R12 ✓ (with iter-61 defaults
+regression coverage extended per Codex MEDIUM gaps), R6 ✓. F9
+platform-blocked.
+
+Test inventory (post-iter-61):
+* 58 unit (was 50 pre-iter-58, then +8 driver-defaults at iter-59,
+  then +11 driver-defaults at iter-61 → 69 unit-class regression).
+* Wait, double-check: iter-58 added 3, iter-59 added 8, iter-61
+  added 6 wrapper + 11 driver = 28 total in the two files.
+* 12 cross-grid + 4 plane CRM e2e + 28 defaults-regression.
+
 ### 2026-05-26 — iter 60
 
 **Delete orphaned ``scripts/run_rce_mpi_full.py`` (superseded by

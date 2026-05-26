@@ -111,3 +111,71 @@ def test_nx_ny_production_defaults(driver_defaults):
 def test_nlev_production_default(driver_defaults):
     """iter-12 + iter-14 production uses nlev=30."""
     assert driver_defaults["--nlev"] == 30
+
+
+# iter-61 Codex MEDIUM coverage-gap fix: assert the production-anchored
+# defaults that iter-59 missed. These are values that affect either the
+# stability envelope (sponge_*, advection, semi-implicit) or the
+# observability (log_every_steps, rad_call_interval_s) of the iter-14
+# production measurement. Each is grounded in CRM_implementation.md.
+
+
+def test_dx_production_default(driver_defaults):
+    """iter-12 production grid spacing: dx=2 km."""
+    assert driver_defaults["--dx"] == 2000.0
+
+
+def test_H_production_default(driver_defaults):
+    """iter-12 production domain height: H=33 km."""
+    assert driver_defaults["--H"] == 33_000.0
+
+
+def test_dz_sfc_production_default(driver_defaults):
+    """iter-12 surface dz=100 m."""
+    assert driver_defaults["--dz-sfc"] == 100.0
+
+
+def test_vertical_grid_production_default(driver_defaults):
+    """iter-14/38 production: --vertical-grid uniform (dz=H/nlev ≈ 1100m
+    at nlev=30, H=33km). Stretched grid is opt-in via CLI."""
+    assert driver_defaults["--vertical-grid"] == "uniform"
+
+
+def test_n_physics_substeps_production_default(driver_defaults):
+    """iter-14/38 production: 10 physics substeps per dycore step."""
+    assert driver_defaults["--n-physics-substeps"] == 10
+
+
+def test_rad_call_interval_default(driver_defaults):
+    """Driver default rad cadence = 600 s. Production runs without
+    --no-radiation. iter-39 added --no-radiation flag with default
+    False (production unaffected)."""
+    assert driver_defaults["--rad-call-interval-s"] == 600.0
+    assert driver_defaults["--no-radiation"] is False
+
+
+def test_use_dd_default(driver_defaults):
+    """iter-5 added --use-dd; default False keeps the legacy
+    rank-0-broadcast F8-stable path as the canonical entry."""
+    assert driver_defaults["--use-dd"] is False
+
+
+def test_advection_production_default(driver_defaults):
+    """iter-7 production: upwind1 (WENO5 is opt-in via CLI)."""
+    assert driver_defaults["--advection"] == "upwind1"
+
+
+def test_sponge_production_defaults(driver_defaults):
+    """iter-1 sponge layer config."""
+    assert driver_defaults["--sponge-coeff"] == 0.05
+    assert driver_defaults["--sponge-width"] == 10_000.0
+
+
+def test_implicit_buoyancy_default(driver_defaults):
+    """F2/F10: KW78 substep is inert at production dt; default off."""
+    assert driver_defaults["--implicit-buoyancy"] is False
+
+
+def test_qv_noise_seed_default(driver_defaults):
+    """Deterministic seed for qv-noise (when amp > 0)."""
+    assert driver_defaults["--qv-noise-seed"] == 0
