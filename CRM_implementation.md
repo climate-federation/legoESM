@@ -134,6 +134,42 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 57
+
+**Codex holistic review of plane CRM MPI halo (plane_mpi.py)
+— 0 HIGH + 0 MEDIUM + 3 LOW. DOD item 5 met across all three
+production-path modules.**
+
+Final piece of the DOD item 5 holistic Codex pass:
+* iter-55: production driver (``scripts/run_rce_mpi_long.py``) — 0 HIGH + 0 MEDIUM, 2 LOW deferred.
+* iter-56: dycore + halo-aware slow tendency (``compressible_euler_plane.py`` + ``compressible_euler_plane_halo.py``) — 0 HIGH + 0 MEDIUM (production); 2 HIGH + 2 MEDIUM in the bench-only fast-path closed via fallback gate.
+* iter-57: MPI halo + reductions (``src/legoesm/parallel/plane_mpi.py``) — 0 HIGH + 0 MEDIUM + 3 LOW.
+
+iter-57 Codex review highlights (all clean except cosmetic LOWs):
+* AD-safety: every halo sendrecv routes via ``_get_sendrecv_vjp(mpi4jax)`` — no raw ``MPI.Sendrecv`` / ``Isend`` / ``Irecv`` leaks.
+* Halo correctness: width validated on both axes; N/S slabs + E/W corner filling via second pass correct.
+* Single-rank short-circuit: ``jnp.pad(..., mode="wrap")`` matches multi-rank halo result bit-for-bit.
+* 4D halo mandate: ``packed_exchange_halo_plane_yxz`` stacks fields + issues a single MPI call — no ``vmap(pad_halo)``.
+* AD-safe reductions: no ``global_max_mpi``/``global_min_mpi``/``allgather``/``bcast`` in this file.
+
+**LOW fixes applied**:
+* LOW#2 — magic MPI tag bases (``_TAG_NS=1000``, ``_TAG_EW=2000``) now documented (tag namespace invariant: 2 axes × 1 packed call ≪ 1000-tag span budget).
+
+**LOW deferred**:
+* LOW#1 — iter-N provenance comments in production code: kept (CLAUDE.md doesn't ban them; useful trace context).
+* LOW#3 — N/S vs E/W sendrecv block duplication: kept (2-site copy with indexing-only diffs; premature abstraction risk).
+
+**DOD item 5 status**: ✓ MET. Production driver + dycore + halo all
+hold 0 HIGH + 0 MEDIUM findings under the iter-55/56/57 holistic
+Codex sweep. R12 (full /codex:adversarial-review pass) substantially
+complete.
+
+**R-roadmap status**: R1-R8, R10, R12 ✓ (with iter-57 closing the
+DOD item 5 holistic review), R6 ✓. F9 platform-blocked (R8 real
+scaling numbers). R11 30-day plane CRM still wall-time gated
+(~8 days single-rank on M5 Pro), but structurally pinned via
+iter-38/39 production-scale regressions.
+
 ### 2026-05-26 — iter 56
 
 **Codex holistic review of plane CRM dycore + halo caught 2 HIGH +
