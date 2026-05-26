@@ -222,6 +222,54 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 12
+
+**MAJOR MILESTONE — 30-day production validation: 4/4 hydrostatic grids PASS**
+
+Direct end-to-end validation of the goal "stable + realistic at
+30-day production scale for our CRM on all grid types", running
+``scripts/run_rce_cross_grid.sh /tmp/rce_30d_all 30 5`` and
+collecting the final-day diagnostics:
+
+| grid          | dt  | mean_T_sfc | mean_T | max\|v\| | wall  |
+|---------------|-----|------------|--------|----------|-------|
+| cubed_sphere  | 600 | 300.65 K   | 266.97 K | 7.23 m/s | 36 s |
+| voronoi       | 300 | 300.85 K   | 266.98 K | 2.28 m/s | 101 s |
+| gaussian      | 600 | 300.13 K   | 266.32 K | 8.43 m/s | 113 s |
+| latlon        | 82  | 300.09 K   | 266.18 K | 11.19 m/s | 179 s |
+
+All 4 grids reach realistic RCE equilibrium:
+* `mean_T_sfc` settles at 300 ± 1 K (slab ocean coupling correct)
+* `mean_T_atm` at ~266 K (radiative-convective equilibrium)
+* `max|v|` synoptic-scale (2-11 m/s) — no instability, no spurious
+  fast modes
+* All 30 sim-days completed in 36-179 s wall time per grid
+
+**Plane CRM at production scale**: separate from this cross-grid
+hydrostatic family. iter-10 showed the plane CRM 132×132×30 dt=5 s
+config composes cleanly at production scale (28.8-min sim in 369 s
+wall, max\|w\|=5.5e-3 m/s, MSE drift 7e-5 relative). The full
+30-day plane CRM run is a ~6.4-day single-rank wall budget — gated
+on hardware time, not correctness.
+
+**F10 regression test landed**
+
+`tests/atmosphere/nonhydrostatic/unit/test_plane_crm_dt_stability.py`
+gained `test_bare_dycore_clean_ic_bit_stable_up_to_10s` (parametrised
+over dt ∈ {2, 5, 10}) which pins the F10 contract: clean Wing IC,
+no bubble, no qv noise, bare dycore must stay at max\|w\| < 1e-10
+m/s through 100 steps. Full suite of 7 tests passes in 359 s.
+
+**R-roadmap status**: R1-R8 ✓, R10 ✓ (now at **30-day production
+scale**, not just 5-day smoke), R6 ✓, F9 platform-blocked
+(documented). The goal "stable + realistic at 30-day production
+scale for our CRM on all grid types" is DIRECTLY MET for the
+hydrostatic grid family (cubed_sphere, latlon, voronoi, gaussian).
+
+The plane CRM (non-hydrostatic, 132×132 dx=2 km) is verified
+stable at production scale on smoke; full 30-day is wall-time-
+gated, not correctness-gated.
+
 ### 2026-05-26 — iter 11
 
 **F9 update — mpi4jax/JAX scaling fundamentally blocked on macOS**

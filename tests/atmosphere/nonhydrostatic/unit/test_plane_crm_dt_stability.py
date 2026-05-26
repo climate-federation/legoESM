@@ -168,3 +168,38 @@ def test_bare_dycore_blows_up_at_2s():
         f"{BLOWUP_MAX_W} m/s. F1 says this regime should blow up by "
         "step 70."
     )
+
+
+def _run_steps_no_bubble(dt: float, n_steps: int = 100):
+    """F10 path: same setup as ``_run_steps`` but with the CLEAN
+    Wing IC (no warm bubble, no qv noise) — matches the production
+    `--bubble-theta-pert 0` default."""
+    model, grid, hc = _build_model(dt)
+    state = make_rest_state(grid, hc, dtype=jnp.float64)
+    for _ in range(n_steps):
+        state = model.step(state, dt=dt, physics_fn=None)
+    return float(jnp.max(jnp.abs(state.w.data)))
+
+
+# F10 finding (iter-9, 2026-05): without the warm bubble IC the bare
+# dycore is BIT-stable at dt much larger than the bubble-driven F1
+# ladder. Measured max|w| at step 100 stays below ~1e-12 (round-off
+# only) for dt up to 10 s. Production default lifted 1 -> 5 s.
+F10_CLEAN_MAX_W = 1e-10  # m/s — round-off-only cap
+
+
+@pytest.mark.parametrize("dt", [2.0, 5.0, 10.0])
+def test_bare_dycore_clean_ic_bit_stable_up_to_10s(dt):
+    """F10: clean Wing IC (no bubble) — bare dycore must stay at
+    round-off (max|w| < 1e-10 m/s) for dt up to 10 s. Regression
+    here means a stability-relevant numerical change has crept in
+    that breaks the production dt=5 s default; update F10 + this
+    test if the regression is intentional."""
+    max_w = _run_steps_no_bubble(dt=dt, n_steps=100)
+    assert max_w < F10_CLEAN_MAX_W, (
+        f"dt={dt}s with clean Wing IC: max|w|={max_w:.3e} m/s "
+        f"exceeds F10 round-off cap {F10_CLEAN_MAX_W} m/s. F10 says "
+        "bare-dycore stays at round-off for dt<=10 s with this IC. "
+        "If a stability-relevant change is intentional, update F10 "
+        "and the test threshold; otherwise this is a regression."
+    )
