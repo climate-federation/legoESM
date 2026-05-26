@@ -99,15 +99,30 @@ def _read_log(output_dir):
 def _parse_rad_call_count(stdout: str) -> int | None:
     """Extract ``rad_calls=N`` from the driver's final ``Done.`` line.
 
-    Anchored to the start of a ``Done.`` line + word-bounded ``\\b``
-    integer so a future log line like ``total_rad_calls=5`` or
-    ``rad_calls=5.0`` cannot accidentally match. Returns the count
-    when exactly one ``Done.`` line matches, else ``None`` (older
-    driver / parser-side regression / unexpected multiple matches).
-    Codex iter-40 LOW fix.
+    Driver format (``scripts/run_rce_mpi_long.py:914``):
+        ``f"rad_calls={rad_call_count}."`` — always integer + trailing
+        period (the Done.-line punctuation).
+
+    Regex requirements (anchored to that exact format):
+    * line starts with ``Done.`` (multiline + ``\\b`` word-bound
+      avoids ``total_rad_calls=5`` substring drift — iter-40 Codex
+      LOW#4 fix).
+    * ``\\d+\\.[^\\S\\n]*$`` (multiline) requires integer-then-
+      period as the LAST non-whitespace token on the Done. line.
+      The character class ``[^\\S\\n]*`` is "any whitespace except
+      newline" — so trailing spaces / tabs / CR (before \\n) are
+      tolerated, but a future schema drift like
+      ``rad_calls=5. (cached)`` or ``rad_calls=5.0.`` is rejected
+      (iter-54 hardening; closes the iter-53-pinned gap).
+
+    Returns the count when exactly one ``Done.`` line matches, else
+    ``None`` (older driver / parser-side regression / unexpected
+    multiple matches).
     """
     import re
-    matches = re.findall(r"(?m)^Done\..*\brad_calls=(\d+)\b", stdout)
+    matches = re.findall(
+        r"(?m)^Done\..*\brad_calls=(\d+)\.[^\S\n]*$", stdout,
+    )
     if len(matches) != 1:
         return None
     return int(matches[0])

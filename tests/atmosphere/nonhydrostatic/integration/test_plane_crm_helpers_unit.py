@@ -74,19 +74,39 @@ def test_parse_rad_call_count_rejects_substring_only_match():
 
 
 def test_parse_rad_call_count_rejects_float_suffix():
-    """``rad_calls=5.0`` is invalid — iter-40 regex uses ``\\b\\d+\\b``
-    to enforce integer-only matching. A future schema drift that
-    silently switches to floats must be rejected loudly."""
+    """``rad_calls=5.0`` is invalid — iter-54 regex requires
+    integer-then-period as the LAST non-whitespace token
+    (``\\d+\\.[^\\S\\n]*$`` multiline). The float form fails
+    because ``5.`` is followed by ``0``, not by line-end.
+
+    iter-53 pinned the looser ``\\b\\d+\\b`` regex as "current
+    behaviour" (silently extracted ``5`` from ``5.0``); iter-54
+    closes that gap.
+    """
     stdout = "Done. 60 steps. Wall: 2.1 min. rad_calls=5.0.\n"
-    # Word-boundary \b matches between digit and '.', so the regex
-    # extracts "5" — but the trailing ".0" remains attached to the
-    # broader output and we still get 5. Document the behaviour:
-    # this is acceptable because schema drift to floats would
-    # appear in BOTH the production driver AND the test, and the
-    # 5 vs 5.0 distinction is not a stability signal. A future
-    # tighter contract would change `\d+` → `\d+\b` post-anchor.
-    # Pinning the current behaviour here flags any regex change.
+    assert _parse_rad_call_count(stdout) is None
+
+
+def test_parse_rad_call_count_rejects_trailing_token():
+    """iter-54 Codex LOW fix: ``rad_calls=5. (cached)`` would have
+    silently matched 5 under the iter-54 first-cut ``(?:\\s|$)``
+    suffix (any one whitespace, then arbitrary trailing). The
+    multiline ``$`` anchor + non-newline-whitespace tolerance
+    closes that gap so any future debug-suffix on the Done. line
+    must be addressed explicitly rather than silently absorbed.
+    """
+    stdout = "Done. 60 steps. Wall: 2.1 min. rad_calls=5. (cached=true)\n"
+    assert _parse_rad_call_count(stdout) is None
+
+
+def test_parse_rad_call_count_tolerates_trailing_whitespace():
+    """Trailing spaces / tabs before the newline must STILL match —
+    legitimate terminal-padding from f-string formatting or CRLF
+    line endings should not break the parser."""
+    stdout = "Done. 60 steps. Wall: 2.1 min. rad_calls=5.   \n"
     assert _parse_rad_call_count(stdout) == 5
+    stdout_crlf = "Done. 60 steps. Wall: 2.1 min. rad_calls=5.\r\n"
+    assert _parse_rad_call_count(stdout_crlf) == 5
 
 
 # ---------------------------------------------------------------------------

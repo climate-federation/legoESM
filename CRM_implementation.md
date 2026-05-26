@@ -134,6 +134,54 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 54
+
+**Tighten `_parse_rad_call_count` regex to actually reject schema
+drift (closes iter-53-pinned Codex iter-40 LOW#4 gap).**
+
+iter-53 added a unit test pinning ``rad_calls=5.0 → 5`` as "current
+behaviour". Auditing during iter-54: that's actually a real silent-
+drift gap — the iter-40 Codex LOW#4 fix was *supposed* to prevent
+float-form matching, but the iter-40 regex
+``(?m)^Done\..*\brad_calls=(\d+)\b`` matched the ``5`` in ``5.0``
+via word-boundary between digit-and-dot, exactly the failure mode
+the original Codex finding wanted closed.
+
+**Fixes**:
+
+* ``_parse_rad_call_count`` regex tightened:
+  - iter-40: ``\brad_calls=(\d+)\b``
+  - iter-54 cut-1: ``\brad_calls=(\d+)\.`` — still matched
+    ``rad_calls=5.0.`` via greedy backtrack
+  - iter-54 cut-2 (Codex LOW fix): ``\brad_calls=(\d+)\.[^\S\n]*$``
+    multiline — requires integer-then-period as the LAST
+    non-whitespace token on the ``Done.`` line.
+
+* iter-53 ``test_parse_rad_call_count_rejects_float_suffix`` flipped
+  from "extracts 5 from 5.0 (pinned current behaviour)" to "returns
+  None — drift rejected loudly".
+
+* Two new unit tests:
+  - ``test_parse_rad_call_count_rejects_trailing_token``: catches
+    ``rad_calls=5. (cached=true)`` (Codex iter-54 LOW concern).
+  - ``test_parse_rad_call_count_tolerates_trailing_whitespace``:
+    pins CRLF + trailing-space-padding compatibility.
+
+**Codex iter-54** caught the iter-54 cut-1 regex was still too
+loose (``(?:\s|$)`` allowed arbitrary trailing). Cut-2 multiline
+``$`` anchor + ``[^\S\n]*`` (non-newline-whitespace) closes the
+gap cleanly.
+
+**Tests**: 12 unit (was 10 in iter-53) + 2 fast integration PASS
+in 11 s.
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-54 closing the
+iter-40 Codex LOW#4 gap that iter-53 inadvertently pinned as
+acceptable), R6 ✓. F9 platform-blocked.
+
+Test inventory (post-iter-54): 50 unit (was 48) + 12 cross-grid
++ 4 plane CRM e2e.
+
 ### 2026-05-26 — iter 53
 
 **Refresh stale Components table + unit-test the `_parse_rad_call_count`
