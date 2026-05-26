@@ -485,3 +485,71 @@ def test_c72_30day_nightly_validation(tmp_path):
     # measured) — the same generous-but-meaningful margin used for
     # the C48 nightly. Catches slow CFL growth at C72 specifically.
     _assert_rce_pass(out_dir, label="C72 30-day", temp_tol=1.0, max_v_cap=25.0)
+
+
+@pytest.mark.slow
+def test_voronoi_v4_30day_nightly_validation(tmp_path):
+    """SLOW nightly test (~2 min wall): runs voronoi V4 RCE for
+    30 days at the iter-8/12 dt=300 pin and asserts the iter-12
+    measured PASS envelope.
+
+    iter-12 measured:
+        dt                = 300 s
+        final mean_T_sfc  = 300.85 K (+0.85 from IC = 300.0 K)
+        max\\|v\\|        = 2.28 m/s
+        wall              = 101 s
+
+    iter-8 + iter-33 history:
+        - iter-8: V4 dt>=450 BLOWUPs at day 1 — pinned to dt=300 in
+          the auto_dt_rce ladder (``return 300.0`` for voronoi).
+        - iter-33 Codex HIGH: V6 AMIP wrapper was running dt=600
+          → BLOWUP risk; tightened to dt=60.
+        - The MPAS dycore has a different stability profile than
+          gravity-wave-CFL would predict (per ``cfl_max_dt`` ratio
+          ~0.42 at V4 implies dt=712 should be safe — it ISN'T).
+
+    Until iter-50 this dt=300 contract had no 30-day CI backing.
+    Adds the same iter-46 hardening helpers used by C48/C72/C96:
+    - ``_assert_dt_used(expected_dt=300.0)`` catches a ladder drift
+      that re-routes voronoi onto a different dt branch.
+    - ``_assert_max_wind_peak_below(cap=25.0)`` catches a mid-run
+      CFL spike that recovered by day 30. iter-12 measured peak
+      2.28 m/s; 25.0 cap is ~10x cushion.
+    - ``_assert_rce_pass`` keeps the loose last-day envelope.
+
+    Skipped by default (`@pytest.mark.slow`). Run nightly via:
+        pytest -m slow tests/atmosphere/hydrostatic/
+
+    Wall budget ~2 min on M5 Pro. timeout_s=1800 (15x cushion).
+    """
+    out_dir = tmp_path / "voronoi_v4_30d"
+    result = _run_rce(
+        grid_type="voronoi",
+        discretization="mpas",
+        resolution=4,
+        days=30,
+        output_dir=out_dir,
+        timeout_s=1800,
+    )
+    if result.returncode != 0:
+        pytest.fail(
+            f"V4 30-day at dt=300 failed: rc={result.returncode}"
+            f"\nstdout tail:\n{result.stdout[-2000:]}"
+            f"\nstderr tail:\n{result.stderr[-1000:]}"
+        )
+    _assert_dt_used(out_dir, label="V4 30-day", expected_dt=300.0)
+    # Codex iter-50 MEDIUM: cap=25.0 was 11x iter-12 peak (2.28
+    # m/s). Tightened to 10.0 (still 4.4x cushion, but no longer
+    # mirrors the cubed-sphere caps that came from a totally
+    # different stability regime — MPAS dycore stays well below
+    # synoptic-wave scales at V4 resolution).
+    _assert_max_wind_peak_below(out_dir, label="V4 30-day", cap=10.0)
+    # iter-12 measured V4 30-day at mean_T_sfc=300.85 (Δ=+0.85),
+    # max|v|=2.28. Codex iter-50 HIGH: ``_assert_rce_pass`` uses
+    # strict ``<`` against ``abs(t_sfc - 300.0) < temp_tol``, so
+    # temp_tol=1.0 left only 0.15 K of positive-drift headroom
+    # vs the measured 0.85 K warming. Bumped to 1.5 (0.65 K
+    # cushion, robust to run-to-run variance on MPAS).
+    _assert_rce_pass(
+        out_dir, label="V4 30-day", temp_tol=1.5, max_v_cap=10.0,
+    )

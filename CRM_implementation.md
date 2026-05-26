@@ -131,6 +131,42 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 50
+
+**V4 (voronoi/MPAS) 30-day nightly slow regression landed.**
+
+iter-12 measured voronoi V4 30-day at dt=300 PASS (mean_T_sfc=300.85, max\|v\|=2.28 m/s, wall=101 s on M5 Pro). iter-8 noted dt>=450 BLOWUPs at day 1 — dt=300 pinned in ``auto_dt_rce`` for voronoi. Until iter-50 dt=300 contract had **no 30-day CI backing** — only 2-day V4 smoke gated regressions; iter-44 showed 2-day misses mid-run CFL spikes that recover.
+
+New ``test_voronoi_v4_30day_nightly_validation`` mirrors C48/C72 30-day pattern via iter-46 shared helpers:
+* ``_assert_dt_used(expected_dt=300.0)`` — catches future ladder drift.
+* ``_assert_max_wind_peak_below(cap=10.0)`` — full-timeseries peak; 4.4× cushion over iter-12 measured 2.28 m/s.
+* ``_assert_rce_pass(temp_tol=1.5, max_v_cap=10.0)`` — V4-specific envelope tuned for MPAS stability profile.
+
+**Codex iter-50** caught 1 HIGH + 1 MEDIUM + 3 LOW:
+* HIGH — original temp_tol=1.0 left 0.15 K positive-drift headroom vs measured +0.85 K. ``_assert_rce_pass`` uses strict ``<`` → fail risk. Fixed: temp_tol=1.5.
+* MEDIUM — original cap=25.0 was 11× iter-12 peak (mirroring cubed-sphere caps from different regime). Tightened to 10.0 — still 4.4× cushion.
+* LOW — hardcoded expected_dt vs auto_dt_rce("voronoi",4): intentional regression pin, kept.
+* LOW — mean_timeseries.csv schema for MPAS path: confirmed via run_rce.py:668-676.
+* LOW — CLI --dt override would fail: intended.
+
+**Verified**: V4 30-day live run (loose thresholds, ran before Codex fixes) 1 PASS in 177 s. Tightened thresholds mathematically pass at iter-12 measurements (2.28 < 10.0; 0.85 < 1.5).
+
+**R-roadmap status**: R1-R8, R10 ✓ (iter-50 closes last 30-day production-scale empirical gap for hydrostatic voronoi as structural regression), R6 ✓. F9 platform-blocked.
+
+Slow nightly count: was 6 (4 cdgrid + 2 plane CRM), now 7. 30-day production-scale empirical gates: cubed_sphere C48+C72, voronoi V4.
+
+### 2026-05-26 — iter 48 (re-landed; was lost in iter-49 compress)
+
+**``test_blowup_gate_fires_on_supersonic_winds`` now verifies the supersonic channel actually fired** (not just status: FAIL).
+
+iter-17 added BLOWUP-gate regression locking iter-13 threshold (run_rce.py reports status: FAIL + non-zero exit when max\|v\| > 200 m/s). Verified FAIL signal but NOT channel — different failure mode (NaN earlier, runtime crash) could produce status: FAIL without supersonic-winds gate firing.
+
+Added ``mean_timeseries.csv`` peak-max-wind scan asserting peak_v >= 200.0 after existing FAIL assertions. iter-13 measured 236 m/s by day 20 — comfortable margin. Inverse of iter-46 ``_assert_max_wind_peak_below`` (used in C48/C72/C96 PASS tests).
+
+csv-exists check gated (``if mean_csv.exists()``) rather than mandatory: BLOWUP could crash driver before any diagnostic write — preserves existing FAIL-only contract while strengthening when data available.
+
+(iter-48 doc entry was added to working tree but dropped in iter-49 compression. iter-50 re-lands it for the historical record. Test change itself committed in 839f3cac.)
+
 ### 2026-05-26 — iter 47
 
 **Applied iter-46 shared hardening helpers to C96 2-day slow smoke + fixed stale ladder-branch reference.**
