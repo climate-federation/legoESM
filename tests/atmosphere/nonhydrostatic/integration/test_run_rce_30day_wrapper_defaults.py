@@ -86,6 +86,13 @@ def test_other_production_defaults(wrapper_text):
         # to a non-venv Python would silently break the pinned
         # JAX/mpi4jax/JAX-MPI versions iter-10 / iter-11 stacked.
         "PYBIN": ".venv/bin/python",
+        # iter-95g: 30-day RCE wrapper defaults to --no-mass-fixer.
+        # The legacy fix_moist_mass_plane rescales total water back to
+        # IC every step which kills RCE spinup (surface flux must NET
+        # ADD moisture until precip balances). The 30-day wrapper is
+        # RCE-specific, so default ON (NO_MASS_FIXER=1). Gravity-wave
+        # smokes that want the fixer can flip it to 0.
+        "NO_MASS_FIXER": "1",
     }
     for name, expected in defaults.items():
         actual = _parse_env_default(wrapper_text, name)
@@ -145,4 +152,26 @@ def test_wrapper_semi_implicit_acoustic_present(wrapper_text):
         "production contract; removing it falls back to explicit "
         "forward-Euler which is dt-stability-bounded at the iter-1 "
         "ladder (dt <= 1.0 s)."
+    )
+
+
+def test_wrapper_no_mass_fixer_conditional_present(wrapper_text):
+    """iter-95g: --no-mass-fixer must be passed when NO_MASS_FIXER=1
+    (the wrapper's default). Verify the conditional bash logic is
+    intact (NMF_FLAG variable assigned and threaded into the mpirun
+    invocation)."""
+    # The wrapper assigns NMF_FLAG="--no-mass-fixer" when
+    # NO_MASS_FIXER=1, then includes $NMF_FLAG in the mpirun argv.
+    assert re.search(
+        r'NMF_FLAG\s*=\s*"--no-mass-fixer"', wrapper_text,
+    ), (
+        "run_rce_30day.sh missing NMF_FLAG=\"--no-mass-fixer\" "
+        "assignment. iter-95b's RCE-spinup fix is opt-in via this "
+        "driver flag; without it CWV pins at IC and 30-day RCE "
+        "never spins up."
+    )
+    assert re.search(r"\\\n\s*\$NMF_FLAG\b", wrapper_text), (
+        "run_rce_30day.sh assigns NMF_FLAG but does not pass "
+        "$NMF_FLAG into the mpirun invocation. The flag would "
+        "be silently dropped and Bug 2 from iter-95 would return."
     )

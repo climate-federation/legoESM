@@ -35,6 +35,10 @@
 #   N_ACOUSTIC   acoustic substeps per outer step (default 12, matches dt=5.0s
 #                + iter-14 production measurement)
 #   ADVECTION    upwind1 | weno5  (default upwind1)
+#   NO_MASS_FIXER  1 = pass --no-mass-fixer to driver (iter-95b RCE-spinup
+#                fix; default 1 for this 30-day RCE wrapper). 0 keeps
+#                the legacy fix_moist_mass_plane ON (use only for
+#                gravity-wave / hydrostatic smokes — not 30-day RCE).
 #   PYBIN        python interpreter (default .venv/bin/python)
 
 set -euo pipefail
@@ -54,6 +58,7 @@ HYPERDIFF="${HYPERDIFF:-5.0e6}"
 BUBBLE_K="${BUBBLE_K:-0.0}"
 QV_NOISE="${QV_NOISE:-0.0}"
 USE_DD="${USE_DD:-0}"
+NO_MASS_FIXER="${NO_MASS_FIXER:-1}"
 PYBIN="${PYBIN:-.venv/bin/python}"
 
 # USE_DD=1 switches the driver from the legacy rank-0-dycore-broadcast
@@ -63,6 +68,18 @@ PYBIN="${PYBIN:-.venv/bin/python}"
 DD_FLAG=""
 if [ "$USE_DD" = "1" ]; then
     DD_FLAG="--use-dd"
+fi
+
+# NO_MASS_FIXER=1 (default for this 30-day RCE wrapper) passes
+# --no-mass-fixer to the driver. iter-95b found fix_moist_mass_plane
+# rescales total water back to IC every outer step, killing RCE
+# spinup because surface flux must NET ADD moisture until precip
+# balances at equilibrium. Set NO_MASS_FIXER=0 to keep the legacy
+# fixer ON (appropriate for gravity-wave / hydrostatic smokes where
+# total water IS conserved; not appropriate for 30-day RCE).
+NMF_FLAG=""
+if [ "$NO_MASS_FIXER" = "1" ]; then
+    NMF_FLAG="--no-mass-fixer"
 fi
 
 mkdir -p "$OUTPUT"
@@ -85,6 +102,7 @@ exec mpirun -np "$RANKS" "$PYBIN" \
     --bubble-theta-pert "$BUBBLE_K" \
     --qv-noise-amp "$QV_NOISE" \
     $DD_FLAG \
+    $NMF_FLAG \
     --snapshot-hours 24.0 \
     --snapshot-3d-hours 1.0 \
     --profile-days 5.0 \
