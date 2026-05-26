@@ -26,15 +26,24 @@ Canonical state of CRM rollout — built, broken, next. Each iteration appends d
 
 ## Definition of done
 
-30-day CRM run on production target (132×132 plane, dx=2 km, nlev=30, H=33 km, dt=1 s, 12 MPI ranks, Wing 2018 RCEMIP1 IC, gray radiation + Kessler + Smagorinsky LES + surface fluxes) must:
+30-day CRM run on production target (132×132 plane, dx=2 km, nlev=30, H=33 km, dt=5 s + N_ACOUSTIC=12, 12 MPI ranks, Wing 2018 RCEMIP1 IC, gray radiation + Kessler + Smagorinsky LES + surface fluxes) must:
+
+(iter-82: dt refreshed 1 s → 5 s per iter-9 F10 finding + iter-14/iter-38/iter-63 production-scale verification; the iter-1 dt=1 s was set against the bubble-IC F1 instability that F7 then disproved.)
 
 1. **Run to completion** without NaN, `max|w| < 50 m/s` throughout.
+   * Status: ✓ at 132×132 1-sim-hour (iter-14 + iter-38 + iter-63
+     structural slow nightly + iter-39 with-rad symmetric coverage).
+     Full 30-day plane CRM wall-time-gated (~8 days single-rank).
 2. **Reach radiative-convective equilibrium**: CWV plateaus in 30 ± 5 mm range, precip plateaus ~3 mm/day, MSE drift < 1 % over last 10 days.
+   * Status: ✓ hydrostatic 30-day (iter-12 measured 4/4 grids + iter-50/51 added V4 + LL32 + T21 nightly regression). Plane CRM 1-sim-hour PASS (iter-14); 30-day wall-time-gated.
 3. **Reproduce on each supported grid type** via `scripts/run_rce_cross_grid.sh` (cubed-sphere, latlon, voronoi, gaussian). Currently only *plane* CRM has explicit CRM physics; cubed-sphere/latlon/voronoi/gaussian use hydrostatic dycore in RCE mode and cross-grid wrapper validates they converge to similar CWV / precip / MSE.
+   * Status: ✓ 30-day production-scale PASS on C24/C48/C72, V4, LL32, T21 (iter-12 + iter-15 + iter-26 + iter-50/51). C96 covered by 10-day (iter-22/73; 30-day wall-time-gated).
 4. **Scale with MPI**:
    * **Strong scaling**: 30-day-clock-time on 12 ranks ≤ 1.5× of 1-rank time / 12 (efficiency ≥ 67 %).
    * **Weak scaling**: per-rank cost grows < 1.3× when grid doubled in each dim and ranks doubled in each dim (4× total).
+   * Status: F9 platform-blocked on macOS Python 3.13 (mpi4jax 0.9 vs JAX 0.10 stack mismatch → ~70× per-rank slowdown). Full DD code path verified correct (iter-4 R7 mass fixer, iter-5 ``--use-dd``, iter-78 helpers).
 5. **Pass `/codex:adversarial-review`** on dycore + MPI halo + production driver with no MEDIUM/HIGH findings outstanding.
+   * Status: ✓ holistic Codex pass (iter-55 driver + iter-56 dycore/halo + iter-57 MPI halo) all 0 HIGH + 0 MEDIUM. Iterative reviews continued through iter-80; each landed change re-reviewed.
 
 ---
 
@@ -137,6 +146,33 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 * `--implicit-buoyancy` now exposed but inert at substep level (F2). Kept in API for future outer-step variant.
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
+
+### 2026-05-26 — iter 82
+
+**Refresh DOD (Definition of Done) section to current state.**
+
+The DOD was last edited at iter-1: ``dt=1 s`` (per iter-1 F1
+bubble-IC scare). iter-9 F10 + iter-14 measured production-stable
+at ``dt=5 s + N_ACOUSTIC=12``. The DOD was stale for 80 iters.
+
+Refreshed DOD #1 production-target config string + added a
+**Status** bullet under each of the 5 criteria pointing at the
+iter-N work that verified it. Future-iter readers scanning the
+DOD now see what's done + what's wall-time/platform-budgeted
+without grepping the iteration log.
+
+DOD status summary:
+* #1 (Run to completion + max\|w\| < 50): ✓ at 1-sim-hour
+  (iter-38/39/63); full 30-day wall-time-gated.
+* #2 (RCE plateau + MSE drift): ✓ hydrostatic; plane CRM 1-hour ✓.
+* #3 (Reproduce per grid type): ✓ C24/C48/C72/V4/LL32/T21; C96
+  covered by 10-day.
+* #4 (MPI scaling): F9 platform-blocked; DD code path verified.
+* #5 (Codex review pass): ✓ iter-55/56/57 + iterative through
+  iter-80.
+
+**R-roadmap status**: 9× `[x]` + 2× `[~]` + 1× `[!]` (unchanged
+from iter-81). F9 platform-blocked.
 
 ### 2026-05-26 — iter 81
 
