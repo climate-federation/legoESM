@@ -131,6 +131,56 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 52
+
+**Unit tests for the iter-46 shared assertion helpers (LL32 + T21 PASS).**
+
+iter-46 factored ``_assert_dt_used`` + ``_assert_max_wind_peak_below``
+into shared helpers. Until iter-52 those helpers were exercised only
+through the slow nightly tests (100-2400 s each) — a regression in the
+assertion logic itself would not be caught until nightly run.
+
+**New file** ``tests/atmosphere/hydrostatic/test_rce_helpers_unit.py``:
+16 direct unit tests for the helpers using ``tmp_path`` + handwritten
+``results.txt`` / ``mean_timeseries.csv`` files. Coverage:
+
+* ``_assert_dt_used`` (9 tests):
+  - strict ``==`` pass
+  - strict fail on wrong dt + on tiny deviation (catches silent rounding)
+  - missing ``results.txt``
+  - missing ``dt:`` field (NaN propagation)
+  - abs_tol pass at iter-51 LL32 production value
+  - abs_tol pass just inside boundary
+  - abs_tol fail with informative ``± X`` message
+  - ``abs_tol=0`` = strict equivalence (Codex iter-51 concern verified)
+
+* ``_assert_max_wind_peak_below`` (7 tests):
+  - happy path peak < cap
+  - takes abs value (negative spike counted)
+  - fail on peak > cap
+  - missing csv
+  - header-only csv rejected (iter-46 Codex MEDIUM fix)
+  - missing ``max_wind`` column rejected (iter-45 column-pin)
+  - all-unparseable rows rejected (iter-46 MEDIUM extension)
+
+**Live verified**: LL32 + T21 30-day slow tests (iter-51) **PASS in
+321 s combined**. Confirms iter-51 thresholds work end-to-end:
+abs_tol=1e-2 absorbed the post-clamp dt variance without false-fail,
+cap=20.0 caught the iter-12 measured envelopes cleanly.
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-52 direct-unit-test
+coverage of the iter-44/46 hardening helpers — assertion-logic
+regressions now fail in < 1 s instead of waiting for nightly), R6 ✓.
+F9 platform-blocked.
+
+Test inventory:
+* 16 unit (iter-52, < 0.1 s)
+* 22 unit physics_schedule (iter-42/43, ~2 s)
+* 5 fast cross-grid + 7 slow nightly (iter-13..iter-51)
+* 4 plane CRM (2 fast + 2 slow, iter-15/16/38/39)
+* iter-38..iter-51 hardening: schedule/dt/peak/csv-schema all
+  pinned at both production-scale + test-helper level.
+
 ### 2026-05-26 — iter 51
 
 **Closed the last 30-day production-scale empirical gaps for the
