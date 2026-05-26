@@ -38,7 +38,12 @@ DRIVER = REPO_ROOT / "scripts" / "run_rce_mpi_long.py"
 def _run_driver(output_dir):
     """Invoke run_rce_mpi_long.py with the F8/F10 production defaults."""
     env = os.environ.copy()
-    env.setdefault("JAX_PLATFORMS", "cpu")
+    # FORCE JAX_PLATFORMS=cpu (override any exported value). iter-7
+    # found that JAX_PLATFORMS=metal triggers MLIR legalisation
+    # crashes on spectral / voronoi / latlon-cgrid paths; the same
+    # backend can also break the plane CRM in subtle ways. Tests must
+    # always run on CPU regardless of the developer's shell env.
+    env["JAX_PLATFORMS"] = "cpu"
     env["JAX_ENABLE_X64"] = "1"
     cmd = [
         sys.executable, str(DRIVER),
@@ -104,6 +109,20 @@ def test_plane_crm_short_smoke_clean_ic(tmp_path):
     max_w_final = float(rows[-1]["max|w|"])
     cwv_first = float(rows[0]["CWV_mean"])
     cwv_final = float(rows[-1]["CWV_mean"])
+
+    # Anchor the IC CWV: the 12x12 Wing 2018 IC carries 55.001 mm at
+    # this nlev/H. If a future commit silently shifts the Wing profile
+    # coefficients, the drift assertion below would still pass against
+    # the new IC and miss the regression — this gate makes the IC
+    # itself part of the contract. Tolerance 0.01 mm (5e-4 relative)
+    # is tight enough to detect any meaningful profile change but
+    # loose enough for the area-weighted-integration roundoff.
+    assert abs(cwv_first - 55.001) < 0.01, (
+        f"plane CRM smoke: IC CWV={cwv_first:.4f} mm != 55.001 ± 0.01. "
+        f"The Wing 2018 reference profile or its area weighting "
+        f"changed — update this test's expected value if intentional, "
+        f"otherwise diagnose the regression."
+    )
     mse_first = float(rows[0]["MSE_mean"])
     mse_final = float(rows[-1]["MSE_mean"])
 
@@ -130,4 +149,67 @@ def test_plane_crm_short_smoke_clean_ic(tmp_path):
         f"plane CRM smoke: MSE drift {rel_mse_drift:.3e} relative "
         f"exceeds 1e-3 cap. F8/F10 production measurements: 7e-5 "
         f"relative over 28 min sim at 132x132."
+    )
+
+
+def _run_driver_with_radiation(output_dir):
+    """Variant of _run_driver that ENABLES gray radiation. Catches a
+    regression where radiation is broken in a way the dycore-only
+    smoke would miss (e.g. NaN in the column-water-vapor reduction
+    used by gray rad, or a crash in the first radiation tendency
+    application)."""
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    env["JAX_ENABLE_X64"] = "1"
+    cmd = [
+        sys.executable, str(DRIVER),
+        "--nx", "12", "--ny", "12", "--nlev", "20",
+        "--dx", "2000.0", "--dt", "5.0",
+        "--days", "0.002",       # ~3 min sim = ~35 outer steps
+        "--semi-implicit-acoustic",
+        "--acoustic-off-centering", "0.1",
+        "--n-acoustic-substeps", "12",
+        "--advection", "upwind1",
+        "--hyperdiff", "5e6",
+        "--bubble-theta-pert", "0.0",
+        "--qv-noise-amp", "0.0",
+        "--log-every-steps", "10",
+        "--n-physics-substeps", "1",
+        "--rad-call-interval-s", "30.0",  # fire radiation every 30s
+        "--output", str(output_dir),
+    ]
+    return subprocess.run(
+        cmd, env=env, capture_output=True, text=True, timeout=300,
+    )
+
+
+def test_plane_crm_short_smoke_with_radiation(tmp_path):
+    """Plane CRM with gray radiation actively called every 30 s sim
+    time. Codex iter-16 gap: the main dycore-only smoke disables
+    radiation via --rad-call-interval-s=1e9, so a radiation
+    regression (NaN in CWV reduction, broken first tendency
+    application, etc.) would slip through CI.
+
+    This shorter smoke exercises the radiation path with a tight
+    call interval. Only asserts the driver exits cleanly + ``max|w|``
+    stays bounded — radiation can drive larger drift than the
+    dycore-only case over the same window, so the CWV/MSE caps
+    above are not appropriate here."""
+    out_dir = tmp_path / "rce_plane_smoke_rad"
+    result = _run_driver_with_radiation(out_dir)
+    if result.returncode != 0:
+        pytest.fail(
+            "run_rce_mpi_long.py exited nonzero with radiation enabled "
+            f"({result.returncode})\n"
+            f"stdout tail:\n{result.stdout[-2000:]}\n"
+            f"stderr tail:\n{result.stderr[-1000:]}"
+        )
+    rows = _read_log(out_dir)
+    assert rows, "log.txt produced no diagnostic rows with radiation on"
+    max_w_final = float(rows[-1]["max|w|"])
+    assert max_w_final < 0.5, (
+        f"plane CRM smoke with radiation: max|w|={max_w_final:.3e} "
+        f"m/s at end exceeds 0.5 m/s production envelope. Possibly a "
+        f"radiation tendency injecting too much energy too quickly — "
+        f"check make_radiation_physics output."
     )

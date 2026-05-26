@@ -27,7 +27,9 @@ RUN_RCE = REPO_ROOT / "scripts" / "run_rce.py"
 def _run_rce(grid_type, discretization, resolution, days, output_dir):
     """Invoke scripts/run_rce.py with the iter-12-validated CLI."""
     env = os.environ.copy()
-    env.setdefault("JAX_PLATFORMS", "cpu")
+    # FORCE JAX_PLATFORMS=cpu (override exported value); iter-7
+    # documented Metal MLIR crashes on spectral/voronoi/latlon-cgrid.
+    env["JAX_PLATFORMS"] = "cpu"
     env["JAX_ENABLE_X64"] = "1"
     cmd = [
         sys.executable, str(RUN_RCE),

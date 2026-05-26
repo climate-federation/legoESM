@@ -222,6 +222,39 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 16
+
+**Codex caught 1 HIGH + 1 MEDIUM + 1 LOW on iter-14/15 — all fixed.**
+
+* **HIGH (#1)**: `env.setdefault("JAX_PLATFORMS", "cpu")` in the new
+  test runners doesn't override an exported shell value. If a
+  developer has `JAX_PLATFORMS=metal` set, the tests would run on
+  Metal — which iter-7 documented has MLIR legalisation crashes on
+  spectral / voronoi / latlon-cgrid paths. Fixed: forced assignment
+  `env["JAX_PLATFORMS"] = "cpu"` in both
+  ``test_plane_crm_end_to_end_smoke.py`` and
+  ``test_rce_cross_grid_smoke.py``.
+* **MEDIUM (#2)**: dycore-only smoke disables radiation via
+  ``--rad-call-interval-s 1e9``; a radiation regression would slip
+  through CI. Fixed: added a second smoke
+  ``test_plane_crm_short_smoke_with_radiation`` that fires
+  radiation every 30 s sim time (35 outer steps, only asserts
+  driver exits + max\|w\| bounded since radiation can drive larger
+  drift).
+* **LOW (#5)**: CWV-drift assertion compared to first log row, so
+  silent Wing IC profile changes would shift the baseline
+  undetected. Fixed: anchored ``cwv_first`` to ``55.001 ± 0.01 mm``
+  at 12x12 with a comment explaining the contract.
+
+Tests now: 5 cross-grid smokes + 2 plane CRM smokes = 7 PASS in 137 s.
+
+**C96 30-day still running** (N>48 → dt=75 branch validation —
+the only ladder branch that's still "extrapolated"). Result will
+land in iter-17.
+
+**R-roadmap status**: R1-R8 ✓, R10 ✓ (now even more hardened
+post-codex), R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 15
 
 **C48 30-day with iter-13 fix: PASS**
