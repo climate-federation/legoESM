@@ -109,6 +109,13 @@ def main():
             f"error: --sst-init rejected: must be finite, got "
             f"{args.sst_init!r}"
         )
+    # iter-74 Codex HIGH: --sst-init is a Kelvin temperature; negative
+    # values are physically invalid. iter-71 only checked finiteness.
+    if args.sst_init <= 0.0:
+        raise SystemExit(
+            f"error: --sst-init rejected: must be positive Kelvin "
+            f"temperature, got {args.sst_init!r}"
+        )
     _POSITIVE_INTS = {
         "--days": args.days,
         "--resolution": args.resolution,

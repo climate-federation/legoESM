@@ -14,7 +14,7 @@ This test parametric-asserts each guard produces:
   re-introduces the raw exception path)
 
 Wall: ~10 s per case (lightweight hydrostatic driver, no JAX MPI
-init). ~50 s total for 5 cases.
+init). ~100 s total for ~10 cases.
 """
 from __future__ import annotations
 
@@ -39,6 +39,9 @@ DRIVER = REPO_ROOT / "scripts" / "run_rce.py"
     ("--dt", "0.0", "must be positive"),
     ("--dt", "-1.0", "must be positive"),
     ("--sst-init", "nan", "must be finite"),
+    # iter-74 Codex HIGH coverage: --sst-init negative was missed.
+    ("--sst-init", "-1.0", "must be positive Kelvin"),
+    ("--sst-init", "0.0", "must be positive Kelvin"),
     ("--truncation", "0", "must be positive integer"),
 ])
 def test_run_rce_rejects_bad_cli_args(tmp_path, flag, value, expected_err):

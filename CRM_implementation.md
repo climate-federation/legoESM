@@ -134,6 +134,30 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 74
+
+**Codex caught 1 HIGH + 2 MEDIUM + 1 LOW in iter-71/72/73 — all fixed.**
+
+* **HIGH** — ``--sst-init`` only rejected NaN/inf; finite negative
+  values fell through to initialize the ocean/land surface to an
+  unphysical negative Kelvin. iter-71 missed positivity check.
+  Fixed: added explicit ``args.sst_init <= 0`` guard with message
+  "must be positive Kelvin temperature".
+* **MEDIUM#1** — iter-72 regression matrix didn't cover negative
+  --sst-init. Fixed: added ``-1.0`` and ``0.0`` parametric cases
+  asserting "must be positive Kelvin".
+* **MEDIUM#2** — iter-73 C96 10-day ``timeout_s=4800`` was claimed
+  "2× iter-22's 2506 s" but actually 1.9×. A runner exactly 2×
+  slower than M5 Pro would time out. Fixed: bumped to ``timeout_s=
+  6000`` (2.4× cushion).
+* **LOW** — iter-72 docstring still said "~50 s total for 5 cases"
+  but had 10. Fixed: updated to ~100 s for ~10 cases.
+
+**Tests**: 12/12 PASS in 17 s (iter-72 expanded from 10 to 12
+cases with the iter-74 negative-sst-init coverage).
+
+**R-roadmap status**: R1-R8, R10, R12 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 73
 
 **C96 10-day nightly slow test + fix iter-70 qv-noise-amp argparse

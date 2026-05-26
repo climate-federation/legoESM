@@ -711,7 +711,8 @@ def test_c96_10day_nightly_validation(tmp_path):
     ≈ 26 m/s by day 10 in iter-20 broken run).
 
     Skipped by default. Run nightly via ``pytest -m slow``.
-    timeout_s=4800 (2× iter-22's measured 2506 s wall).
+    timeout_s=6000 (2.4× iter-22's measured 2506 s wall — Codex
+    iter-74 MEDIUM caught the iter-73 4800 was actually only 1.9×).
     """
     out_dir = tmp_path / "c96_10d"
     result = _run_rce(
@@ -720,7 +721,7 @@ def test_c96_10day_nightly_validation(tmp_path):
         resolution=96,
         days=10,
         output_dir=out_dir,
-        timeout_s=4800,
+        timeout_s=6000,
     )
     if result.returncode != 0:
         pytest.fail(
