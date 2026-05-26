@@ -222,6 +222,43 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 22
+
+**Validating the iter-21 ladder at the never-measured N=72 boundary**
+
+Codex iter-21 review surfaced that the iter-13 dt=75 branch covered
+N=49..72 but only N=49 was empirically verified (and C49 is just the
+C48 boundary, not the upper end). Same anti-pattern as the C96
+extrapolation that triggered iter-20.
+
+Ran two follow-up 30-day measurements:
+
+| run                | dt [s] | final mean_T_sfc | final max\|v\| | wall | status |
+|--------------------|--------|------------------|----------------|------|--------|
+| C96 10-day at dt=37| 37     | 299.98 K         | 9.07 m/s       | 2506 s | PASS |
+| C72 30-day day 20  | 75     | 299.88 K         | 14.48 m/s      | (running) | running |
+
+**C96 dt=37**: confirms the iter-20 ladder choice for N=(72, 96] is
+production-stable through 10-day; SLOW nightly will push to 30-day.
+
+**C72 dt=75 through day 20**: max\|v\| is rising steadily (4.8 → 10.4
+→ 13.1 → 14.5 m/s at days 5/10/15/20). Day 30 will land in iter-23
+to confirm whether dt=75 holds end-to-end or eventually trips the
+BLOWUP gate like C96 did. Slow but not catastrophic so far.
+
+**Status summary post-iter-22**:
+
+| ladder branch | dt   | empirical coverage                                  |
+|---------------|------|-----------------------------------------------------|
+| N ≤ 24        | 600  | C24 30-day PASS (iter-12)                            |
+| (24, 48]      | 150  | C48 30-day PASS (iter-13/15)                         |
+| (48, 72]      | 75   | C49 effective via C48 boundary; C72 30-day in flight |
+| (72, 96]      | 37   | C96 10-day PASS (iter-22); 30-day SLOW pending       |
+| > 96          | error | iter-21 hard refusal                                |
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-22 empirical
+extension toward the C72/C96 boundaries), R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 21
 
 **Codex iter-20 review: HIGH on silent N>96 extrapolation — fixed.**
