@@ -222,6 +222,90 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 39
+
+**Codex caught iter-38 was never truly dycore-only — fixed at the
+driver + landed radiation-symmetric production-scale slow test.**
+
+* **Codex iter-39 HIGH#2** (real bug in iter-38): the iter-38 helper
+  passed ``--rad-call-interval-s 1e9`` thinking that disables
+  radiation. Inspection of the driver loop showed the radiation tick
+  uses ``(step - 1) % rad_call_every_steps == 0`` — at step 1 the
+  modulo is 0 regardless of the interval, so radiation fires ONCE
+  at step 1 and caches the tendency for the full run. iter-38 was
+  actually exercising "dycore + 1 cached radiation tendency", not
+  pure dycore-only.
+
+  Fixed by wiring a real ``--no-radiation`` CLI flag into
+  ``scripts/run_rce_mpi_long.py``:
+
+  ```python
+  if not args.no_radiation and (step - 1) % rad_call_every_steps == 0:
+      cached_rad_tend[0] = slow_physics_fn(state, grid, hc, terrain)
+  ```
+
+  Branch gated at both the DD path and the legacy rank-0-broadcast
+  path. ``cached_rad_tend`` stays ``None`` for the entire run when
+  ``--no-radiation`` is set, so ``apply_physics_substep`` skips the
+  radiation term entirely. Log header updated to show
+  ``"NO radiation"`` vs ``"gray radiation"`` so post-hoc analysis
+  of a log file unambiguously shows which mode the run was in.
+
+* **iter-38 test retargeted**: now passes ``--no-radiation`` and is
+  genuinely radiation-free. The 5e-5 MSE-drift cap remains valid as
+  an UPPER bound on the dycore + fast-physics drift rate (the
+  cached-radiation rate is strictly above the radiation-free rate
+  because gray-rad cools).
+
+* **iter-39 with-radiation slow test landed**:
+  ``test_plane_crm_production_scale_132x132_with_radiation`` in
+  ``tests/atmosphere/nonhydrostatic/integration/test_plane_crm_end_to_end_smoke.py``.
+  Same config as iter-38 but with ``rad_call_interval_s=60.0`` —
+  5 radiation refreshes (steps 1, 13, 25, 37, 49) across the
+  5-min sim window. Closes the iter-16 (12×12 with rad) →
+  iter-38 (132×132 no rad) → iter-39 (132×132 with rad) symmetry.
+
+* **Codex iter-39 HIGH#1 fix**: the with-rad test now has a
+  RADIATION-SPECIFIC sandwich assertion on MSE drift:
+  - **sign check**: ``(mse_final - mse_first)/mse_first < 0``
+    (radiation must cool the column over 5 min sim — flipped flux
+    convention or sign-flipped LW tendency fails this)
+  - **floor**: ``|rel_mse_drift| > 5e-7`` (a silently-disabled
+    radiation path lands well below 5e-7; iter-38 ``--no-radiation``
+    measures 0 drift to 5 sig figs, so this distinguishes the two
+    paths cleanly)
+  - **ceiling**: ``|rel_mse_drift| < 5e-4`` (over-firing detector)
+
+* MEDIUM-#1..#5 from Codex acknowledged + docstring-only fixes
+  (radiation call schedule, step-1 IC interpretation, rad-specific
+  log fields gap noted as a future driver schema extension).
+
+**Measurements (post-fix, 132×132×30 dx=2km dt=5s 60 outer steps)**:
+
+| variant | flag | max\|w\| @ step60 | MSE @ step60 | MSE drift |
+|---------|------|-------------------|--------------|-----------|
+| iter-38 | ``--no-radiation`` | 7.6e-4 m/s | 4.2132e9 | < 1e-5 |
+| iter-39 | ``--rad-call-interval-s 60`` | 3.0e-3 m/s | 4.2131e9 | ~2.4e-5 cooling |
+
+The 4× higher max|w| in iter-39 (3.0e-3 vs 7.6e-4) at the same
+step count is the radiation cooling tendency driving small-amplitude
+convective response — exactly the regime iter-38 was supposed to
+EXCLUDE but was actually including via the cached step-1 tendency.
+
+**Tests**:
+* ``pytest -m slow tests/atmosphere/nonhydrostatic/integration/
+  test_plane_crm_end_to_end_smoke.py``: 2 PASS in 213 s
+  (iter-38 ~92 s, iter-39 ~121 s including JIT compile of the
+  radiation slow tendency).
+* Default suite: 2/2 short smokes still PASS in 45 s; slow tests
+  deselected.
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-38 dycore-only +
+iter-39 radiation-symmetric production-scale slow regressions),
+R6 ✓. F9 platform-blocked. The plane CRM production envelope is
+now structurally guarded against both dycore regressions AND
+radiation-tendency regressions at 132×132.
+
 ### 2026-05-26 — iter 38
 
 **Plane CRM 132×132 production-scale regression test landed (nightly).**

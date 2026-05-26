@@ -162,6 +162,15 @@ def parse_args():
                    help="Radiation call interval [s]. Literature: SAM "
                         "600s, CM1 60-120s, WRF-LES 300-600s. "
                         "Tendency held constant between calls.")
+    p.add_argument("--no-radiation", action="store_true", default=False,
+                   help="Fully disable the gray radiation tendency "
+                        "(skips slow_physics_fn entirely; cached_rad_tend "
+                        "stays None). Use for dycore-isolation smokes. "
+                        "Codex iter-39 review: --rad-call-interval-s=1e9 "
+                        "does NOT disable radiation — it still fires once "
+                        "at step 1 and caches the tendency for the full "
+                        "run. This flag is the only way to truly run "
+                        "without radiation.")
     p.add_argument("--smag-cs", type=float, default=0.2)
     p.add_argument("--semi-implicit-acoustic", action="store_true",
                    help="Use per-column Thomas tridiagonal solve for "
@@ -716,7 +725,9 @@ def main():
             f"days={args.days} total_steps={total_steps}\n"
         )
         log_f.write(
-            f"# physics: gray radiation + Kessler microphysics + "
+            f"# physics: "
+            f"{'NO radiation' if args.no_radiation else 'gray radiation'}"
+            f" + Kessler microphysics + "
             f"Smagorinsky LES (cs={args.smag_cs})\n"
         )
         log_f.write(
@@ -744,7 +755,7 @@ def main():
             # ----------------------------------------------------- #
             # True per-rank DD path.                                #
             # ----------------------------------------------------- #
-            if (step - 1) % rad_call_every_steps == 0:
+            if not args.no_radiation and (step - 1) % rad_call_every_steps == 0:
                 cached_rad_tend[0] = slow_physics_fn(
                     state, grid, hc, terrain,
                 )
@@ -768,7 +779,7 @@ def main():
             # Legacy rank-0-dycore + broadcast path (replicated).   #
             # ----------------------------------------------------- #
             if rank == 0:
-                if (step - 1) % rad_call_every_steps == 0:
+                if not args.no_radiation and (step - 1) % rad_call_every_steps == 0:
                     cached_rad_tend[0] = slow_physics_fn(
                         state, grid, hc, terrain,
                     )

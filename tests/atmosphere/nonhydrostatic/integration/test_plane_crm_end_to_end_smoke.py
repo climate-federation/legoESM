@@ -216,7 +216,8 @@ def test_plane_crm_short_smoke_with_radiation(tmp_path):
 
 
 def _run_driver_production_scale(output_dir, *, n_outer_steps=60,
-                                 log_every_steps=15):
+                                 log_every_steps=15,
+                                 rad_call_interval_s=None):
     """Invoke run_rce_mpi_long.py at the iter-14 production scale
     (132x132x30 dx=2km dt=5s) for ``n_outer_steps`` outer steps.
 
@@ -225,8 +226,16 @@ def _run_driver_production_scale(output_dir, *, n_outer_steps=60,
     no qv noise), hyperdiff=5e6, Smag c_s=0.2 (passed explicitly so
     a future driver default change can't silently shift this
     regression), SI acoustic with off-centering=0.1 + 12 substeps,
-    mass fixer on (driver default), radiation disabled to isolate
-    dycore behaviour.
+    mass fixer on (driver default).
+
+    ``rad_call_interval_s=None`` (default) passes ``--no-radiation``
+    to the driver — radiation is FULLY skipped (cached_rad_tend
+    stays None). Codex iter-39 review pointed out that the prior
+    ``--rad-call-interval-s 1e9`` still fired one radiation call at
+    step 1 and cached it for the rest of the run, so "dycore-only"
+    was a misnomer. The iter-39 fix wires a real disable flag.
+    Pass a positive float (e.g. 60.0) to exercise the radiation
+    path with refreshes every N seconds of sim time.
 
     ``--days`` carries +0.5*dt padding so ``int(total_t / dt)`` in
     the driver always lands at ``n_outer_steps`` exactly (without
@@ -256,9 +265,13 @@ def _run_driver_production_scale(output_dir, *, n_outer_steps=60,
         "--qv-noise-amp", "0.0",
         "--log-every-steps", str(log_every_steps),
         "--n-physics-substeps", "1",
-        "--rad-call-interval-s", "1e9",
         "--output", str(output_dir),
     ]
+    if rad_call_interval_s is None:
+        cmd.append("--no-radiation")
+    else:
+        cmd.extend(["--rad-call-interval-s",
+                    repr(float(rad_call_interval_s))])
     return subprocess.run(
         cmd, env=env, capture_output=True, text=True, timeout=900,
     )
@@ -267,11 +280,12 @@ def _run_driver_production_scale(output_dir, *, n_outer_steps=60,
 @pytest.mark.slow
 def test_plane_crm_production_scale_132x132_envelope(tmp_path):
     """Nightly slow regression for the plane CRM 132x132 production
-    config (5-min-sim sub-envelope of the iter-14 1-sim-hour smoke).
+    config (5-min-sim sub-envelope of the iter-14 1-sim-hour smoke,
+    truly dycore-only — radiation fully disabled via --no-radiation).
 
     iter-14 measured (725 steps = 1 sim-hour, 132x132x30 dx=2km dt=5s,
     clean Wing IC, mass fixer + Smag c_s=0.2 + SI acoustic + hyperdiff
-    5e6, no radiation):
+    5e6, ``--rad-call-interval-s 1e9``):
 
     | step | CWV [mm] | MSE [J/kg] | max|w| [m/s] |
     |------|----------|------------|--------------|
@@ -280,17 +294,23 @@ def test_plane_crm_production_scale_132x132_envelope(tmp_path):
     | 300  |  55.550  |  4.2129e9  |  5.5e-3      |
     | 700  |  55.550  |  4.2125e9  |  6.1e-3      |
 
-    Per-step MSE drift in iter-14 ≈ 2.3e-7 relative; this test runs
-    60 outer steps so expected MSE drift ≈ 1.4e-5 (well below the 5e-5
-    cap below). max|w| at step 60 is interpolated from iter-14 as
-    ~2e-3 m/s (the actual logged value at first run was 2.08e-3).
+    Codex iter-39 review pointed out that ``--rad-call-interval-s
+    1e9`` still fires one radiation call at step 1 and caches the
+    tendency for the entire run — so iter-14 / iter-38 first-cut
+    was actually "dycore + 1 cached radiation tendency", not pure
+    dycore. iter-39 added a real ``--no-radiation`` flag to the
+    driver and this test now uses it, so the iter-38 envelope is
+    now genuinely radiation-free. The expected MSE drift drops vs
+    the original iter-38 cached-radiation measurement; we hold the
+    same 5e-5 cap because it remains a valid UPPER bound (caches
+    the per-step dycore/fast-physics drift rate, not the radiation
+    contribution).
 
-    This is a strict SUB-envelope of the iter-14 measurement — the
-    asserts below are tighter than the iter-14 ceiling because 60
-    steps is only 8% of the iter-14 window. Catches any regression
-    that silently destabilises the production-scale config (e.g. a
-    future halo / Smag / hyperdiff / mass-fixer change that the 12x12
-    smoke misses because the unstable mode is grid-scale).
+    The matching ``test_plane_crm_production_scale_132x132_with_radiation``
+    (iter-39) exercises radiation refreshing every 60 s — its
+    MSE-drift FLOOR assertion (>5e-7 relative) catches a
+    silently-disabled radiation path that this --no-radiation
+    dycore-only test would not.
 
     Wall budget ~2.5 min on M5 Pro (1.35 s/step × 60 + JIT compile).
     Marked ``slow``; runs via ``pytest -m slow``. Default skips it.
@@ -368,16 +388,174 @@ def test_plane_crm_production_scale_132x132_envelope(tmp_path):
         f"steps. iter-14 saw zero drift at 132x132 over 700 steps. "
         f"Possibly the moist-mass fixer regressed."
     )
-    # iter-14 saw 1.7e-4 relative drift over 725 steps (per-step rate
-    # ≈ 2.3e-7). For 60 steps expected ≈ 1.4e-5. Cap at 5e-5: catches
-    # ~3x per-step rate regression but stays well clear of the
-    # one-sim-hour iter-14 ceiling (1.7e-4) so this is a STRICT
-    # sub-envelope, not a re-statement.
+    # iter-14 saw 1.7e-4 relative drift over 725 steps WITH one cached
+    # radiation tendency (Codex iter-39 review: ``--rad-call-interval-s
+    # 1e9`` still fires once at step 1 + caches). iter-39 fix switches
+    # this test to ``--no-radiation`` so the drift now reflects dycore
+    # + fast physics only — likely smaller per-step rate. The 5e-5 cap
+    # remains a valid UPPER bound and still catches a 3x per-step
+    # regression of the dycore/fast-physics drift rate; the original
+    # iter-14 reference is now a CEILING (the true dycore-only rate
+    # must be < the cached-radiation rate, since radiation cools).
     rel_mse_drift = abs(mse_final - mse_first) / mse_first
     assert rel_mse_drift < 5e-5, (
-        f"plane CRM production smoke: MSE drift {rel_mse_drift:.3e} "
-        f"relative exceeds 5e-5 sub-envelope cap. iter-14 measured "
-        f"1.7e-4 over 725 steps (per-step ≈ 2.3e-7); 60 steps should "
-        f"land at ~1.4e-5. >5e-5 means per-step rate has tripled — "
-        f"investigate energy budget."
+        f"plane CRM production smoke (truly no-radiation): MSE drift "
+        f"{rel_mse_drift:.3e} relative exceeds 5e-5 sub-envelope cap. "
+        f"iter-14 measured 1.7e-4 over 725 steps WITH 1 cached "
+        f"radiation tendency (per-step ≈ 2.3e-7); pure dycore + fast "
+        f"physics at 60 steps should land BELOW that. Investigate "
+        f"dycore energy budget if exceeded."
+    )
+
+
+@pytest.mark.slow
+def test_plane_crm_production_scale_132x132_with_radiation(tmp_path):
+    """Nightly slow regression for the plane CRM 132x132 production
+    config WITH gray radiation refreshing every 60 s sim time
+    (iter-39 — radiation analog of iter-38).
+
+    iter-16 added the radiation smoke at 12x12x20 to catch a
+    radiation-tendency regression the dycore-only smoke would miss
+    (NaN in CWV reduction, crash in first tendency application,
+    etc.). iter-38 added the dycore-only smoke at 132x132x30
+    production scale. This test closes the symmetry: production
+    scale WITH radiation. A radiation regression that only
+    triggers at production-scale grid resolution (cwv reduction
+    underflow at 132x132 area weighting, gray-tau column integral
+    dtype regression, etc.) would slip through iter-16's 12x12
+    smoke but be caught here.
+
+    Config: same as iter-38 (132x132x30, dx=2km, dt=5s, hyperdiff
+    5e6, Smag c_s=0.2, SI acoustic off-centering=0.1 + 12 substeps,
+    mass fixer on, clean Wing IC) but with ``rad_call_interval_s
+    =60.0`` — 5 radiation refreshes (steps 1, 13, 25, 37, 49)
+    across the 5-min sim window.
+
+    Asserts: logged-steps schema (iter-38 contract), IC CWV anchored
+    to 55.550 ± 0.01 mm, max|w| < 0.05 m/s on EVERY logged row
+    (catches transient CFL crash from a radiation tendency that
+    over-fires), activity floor at step 15 (catches dead-sim
+    regression), MSE COOLING — Codex iter-39 HIGH#1 fix: assert
+    ``mse_final < mse_first`` AND ``rel_mse_drift > 5e-7`` so a
+    silently-disabled radiation path (cached_rad_tend stays None;
+    iter-38 truly-dycore-only would land at ≪ 5e-7 drift) cannot
+    pass this test. The drift floor combined with the iter-38
+    ``--no-radiation`` flag makes the two tests genuinely
+    distinguishable.
+
+    Wall budget ~2.5 min on M5 Pro. Marked ``slow``.
+    """
+    n_steps = 60
+    log_every = 15
+    out_dir = tmp_path / "rce_plane_prod_rad"
+    result = _run_driver_production_scale(
+        out_dir, n_outer_steps=n_steps, log_every_steps=log_every,
+        rad_call_interval_s=60.0,
+    )
+    if result.returncode != 0:
+        pytest.fail(
+            "run_rce_mpi_long.py exited nonzero at production scale "
+            f"with radiation ({result.returncode})\n"
+            f"stdout tail:\n{result.stdout[-2000:]}\n"
+            f"stderr tail:\n{result.stderr[-1000:]}"
+        )
+    rows = _read_log(out_dir)
+    assert rows, (
+        "log.txt produced no diagnostic rows at production scale "
+        "with radiation"
+    )
+
+    expected_logged_steps = [1, 15, 30, 45, 60]
+    logged_steps = [int(r["step"]) for r in rows]
+    assert logged_steps == expected_logged_steps, (
+        f"plane CRM production+rad smoke: logged steps={logged_steps} "
+        f"!= expected {expected_logged_steps}. Driver step counter or "
+        f"log-every cadence regressed (possibly the radiation tick "
+        f"branch broke the outer loop)."
+    )
+
+    cwv_first = float(rows[0]["CWV_mean"])
+    # iter-14/38 anchor: IC CWV at 132x132 Wing 2018 = 55.550 mm. The
+    # IC is the same whether radiation is on or off (radiation fires
+    # only at t > 0); locking this catches IC-profile regressions on
+    # the with-radiation path too.
+    assert abs(cwv_first - 55.550) < 0.01, (
+        f"plane CRM production+rad smoke: IC CWV={cwv_first:.4f} mm "
+        f"!= 55.550 ± 0.01. iter-14 anchored this value at 132x132."
+    )
+
+    max_w_per_row = [float(r["max|w|"]) for r in rows]
+    for step_idx, mw in zip(logged_steps, max_w_per_row):
+        assert mw < 0.05, (
+            f"plane CRM production+rad smoke: max|w|={mw:.3e} m/s "
+            f"at step {step_idx} exceeds 0.05 m/s safety cap. "
+            f"iter-14 dycore-only envelope is ~6e-3 m/s; radiation "
+            f"can drive larger drift but >5e-2 m/s is a CFL crash "
+            f"likely caused by an over-firing radiation tendency."
+        )
+    # Activity floor at step 15 (iter-38 logic): catches dead-sim.
+    step15_max_w = max_w_per_row[1]
+    assert step15_max_w > 1e-6, (
+        f"plane CRM production+rad smoke: max|w|={step15_max_w:.3e} "
+        f"m/s at step 15 — dycore appears inactive. iter-14 saw "
+        f"~2e-3 m/s by step 20 from baseline thermo gradient + SI "
+        f"acoustic. <1e-6 means step() is a no-op."
+    )
+    # Finite-value sanity on every numeric column for every logged
+    # row — radiation NaN typically appears as inf in MSE_mean or
+    # negative CWV from a column-integral underflow. iter-16 chose
+    # not to assert finiteness; this is a small hardening over that
+    # baseline.
+    numeric_cols = ("CWV_mean", "CWV_max", "MSE_mean", "max|w|",
+                    "max(qc)", "max(qr)", "max(precip_mm_day)",
+                    "Ca_substep")
+    import math
+    for step_idx, row in zip(logged_steps, rows):
+        for col in numeric_cols:
+            val = float(row[col])
+            assert math.isfinite(val), (
+                f"plane CRM production+rad smoke: non-finite "
+                f"{col}={val!r} at step {step_idx}. Radiation NaN "
+                f"or column-integral underflow on the 132x132 "
+                f"path."
+            )
+    # Radiation-specific assertion (Codex iter-39 HIGH#1 fix). Gray
+    # radiation cools the column at ~1 K/day in the upper troposphere
+    # at this IC. Over a 5-min sim window with 5 tendency refreshes,
+    # the integrated MSE drift must be (a) NEGATIVE (cooling, not
+    # heating — sign-check catches a flipped flux convention) and
+    # (b) ABOVE a small relative floor (catches the silently-disabled
+    # radiation path: if cached_rad_tend stays None for the whole run,
+    # MSE drift falls to surface-flux + dycore noise floor ≪ 5e-7).
+    # The matching iter-38 ``--no-radiation`` test now lands at
+    # ~zero MSE drift, so this assertion genuinely distinguishes the
+    # two paths.
+    mse_first = float(rows[0]["MSE_mean"])
+    mse_final = float(rows[-1]["MSE_mean"])
+    mse_drift_signed = (mse_final - mse_first) / mse_first
+    rel_mse_drift = abs(mse_drift_signed)
+    assert mse_drift_signed < 0, (
+        f"plane CRM production+rad smoke: MSE drift "
+        f"{mse_drift_signed:+.3e} relative is non-negative. Gray "
+        f"radiation should cool the column over 5 min sim; positive "
+        f"drift means a flipped flux convention or broken sign in "
+        f"the LW tendency."
+    )
+    assert rel_mse_drift > 5e-7, (
+        f"plane CRM production+rad smoke: |MSE drift| "
+        f"{rel_mse_drift:.3e} relative below 5e-7 floor. Radiation "
+        f"appears inactive — cached_rad_tend likely stays None or "
+        f"the tendency is zero. iter-38 measures comparable drift "
+        f"~2e-5 with cached radiation; truly dycore-only "
+        f"(--no-radiation) lands well below 5e-7."
+    )
+    # Upper bound — radiation over-firing/over-amplification would
+    # spike MSE drift past the iter-14 1-sim-hour ceiling. Cap at
+    # 5e-4 (3x over iter-14's 1.7e-4) keeps room for radiation
+    # cooling at production scale without false positives.
+    assert rel_mse_drift < 5e-4, (
+        f"plane CRM production+rad smoke: |MSE drift| "
+        f"{rel_mse_drift:.3e} relative exceeds 5e-4 cap. Radiation "
+        f"tendency is over-firing — check rad_call_every_steps "
+        f"calc and cached_rad_tend sign."
     )
