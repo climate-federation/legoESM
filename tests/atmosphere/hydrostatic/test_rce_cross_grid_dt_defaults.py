@@ -30,6 +30,9 @@ def _auto_dt(grid_type: str, resolution: int, dt_override=None) -> float:
     drops faster than linearly past C48 because higher resolution
     resolves more synoptic-wave activity that exponentially demands
     tighter CFL.
+    iter-21: N>96 now RAISES instead of silently picking dt=20
+    (Codex iter-20 HIGH). High-resolution runs must pass explicit
+    --dt until empirical measurement lands.
     """
     if dt_override is not None:
         return float(dt_override)
@@ -43,7 +46,9 @@ def _auto_dt(grid_type: str, resolution: int, dt_override=None) -> float:
         return 75.0
     if resolution <= 96:
         return 37.0
-    return 20.0
+    raise ValueError(
+        f"auto-dt has no validated value for N={resolution} (>96)"
+    )
 
 
 def test_voronoi_auto_dt_is_300s():
@@ -64,7 +69,16 @@ def test_cubed_sphere_auto_dt():
     assert _auto_dt("cubed_sphere", 72) == 75.0
     assert _auto_dt("cubed_sphere", 73) == 37.0   # iter-20: C96 needs ≤ 37
     assert _auto_dt("cubed_sphere", 96) == 37.0
-    assert _auto_dt("cubed_sphere", 97) == 20.0   # extrapolated
+    # iter-21: N>96 RAISES instead of silently picking dt=20 (Codex
+    # iter-20 HIGH: silent extrapolation hid the same iter-13 mistake
+    # that produced the C96 BLOWUP).
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match=">96"):
+        _auto_dt("cubed_sphere", 97)
+    with _pytest.raises(ValueError):
+        _auto_dt("cubed_sphere", 192)
+    # User-supplied dt always wins, even for high N.
+    assert _auto_dt("cubed_sphere", 192, dt_override=10.0) == 10.0
 
 
 def test_latlon_auto_dt():
@@ -105,4 +119,9 @@ def test_run_rce_branch_matches_local_helper():
     assert "DT = 37.0" in text, (
         "scripts/run_rce.py no longer has the iter-20 dt=37 step "
         "for N in (72, 96] — refresh this test if the ladder changed."
+    )
+    # iter-21: N>96 RAISES instead of silently picking a value.
+    assert 'auto-dt has no validated value for N=' in text, (
+        "scripts/run_rce.py no longer refuses N>96 — Codex iter-20 "
+        "HIGH requested a hard error for silent high-N extrapolation."
     )

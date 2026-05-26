@@ -222,6 +222,57 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 21
+
+**Codex iter-20 review: HIGH on silent N>96 extrapolation — fixed.**
+
+iter-20 added an extrapolated `N > 96 → dt = 20.0` branch to the
+ladder, marked "verify before commit". Codex flagged this as HIGH:
+
+> "scripts/run_rce.py silently assigns DT=20.0 for N>96 with only
+>  a comment, no warning/assertion/CLI refusal. Given dt=20 has no
+>  empirical basis, this lets unvalidated high resolutions run as
+>  if supported."
+
+Same pattern as the iter-13 dt=75 extrapolation that produced the
+iter-20 C96 BLOWUP. Fixed: N>96 now **raises ValueError** with a
+clear pointer at the caller workflow:
+
+```
+ValueError: auto-dt has no validated value for N=144 (>96). The
+iter-13/iter-20 ladder past N=48 was already shown to
+over-extrapolate (C96 BLOWUP at iter-13 dt=75). To run at N=144,
+pass an explicit --dt (start with dt=10 and watch the BLOWUP gate
+at 200 m/s), then update the ladder + tests after a 30-day
+stability measurement.
+```
+
+Verified end-to-end: ``run_rce.py --resolution 144`` aborts before
+any compute. Default suite untouched (no regression).
+
+**Also addressed Codex MEDIUM #3** (false claims in comments):
+* Old: "iter-13 verified at N=49..72". Reality: iter-13 only
+  measured N=49 (the C48 boundary). Comment now says "verified
+  ONLY at N=49; long-run stability at N=56..72 NOT YET MEASURED".
+* Old: "dt=37 needed for 30-day stability". Reality: dt=37 only
+  validated at C96 10-day partial. Comment now says "Not yet
+  confirmed for 30-day production".
+
+**Tests updated**: `test_rce_cross_grid_dt_defaults.py` now asserts
+the new N>96 ValueError contract + dt-override-wins-for-high-N
+behavior. 6/6 PASS in 0.05 s.
+
+**Open**: Codex MEDIUM #2 (CFL formula in `core/cfl.py` exists but
+unused for cubed-sphere ladder selection) — documented as a future
+refactor; the current explicit ladder + N>96 hard error is the
+correct fail-safe stance.
+
+**C96 dt=37 10-day** still running: day 6 PASS at
+mean_T_sfc=299.97 K, max\|v\|=5.08 m/s. Days 8/10 incoming.
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-21 high-N hard error),
+R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 20
 
 **C96 30-day BLOWUP at iter-13 extrapolated dt=75 — ladder fixed**
