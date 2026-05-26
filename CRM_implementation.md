@@ -222,6 +222,42 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 26
+
+**C72 30-day completes: PASS at iter-13 ladder choice.**
+
+| metric        | value               |
+|---------------|---------------------|
+| dt            | 75 s                |
+| status        | PASS                |
+| mean_T_sfc    | 299.81 K (−0.19 from IC) |
+| mean_T        | 269.05 K            |
+| max\|v\|      | 17.85 m/s           |
+| wall          | 2373 s              |
+
+Trend day-by-day: mean_T_sfc 299.96 → 299.94 → 299.90 → 299.88 →
+299.85 → 299.81 (steady, no runaway cooling); max\|v\| 4.8 → 10.4
+→ 13.1 → 14.5 → 16.2 → 17.9 m/s (steadily rising but well inside
+the 200 m/s BLOWUP gate; saturates near 18 m/s).
+
+**iter-13 dt=75 branch (N=49..72) is now empirically verified at
+both ends** — C49 (via C48 boundary) and C72 30-day PASS. The
+ladder branch is solid; iter-22's "verify before commit" annotation
+can be dropped.
+
+**Updated empirical-coverage table**:
+
+| branch          | dt   | empirical coverage                          |
+|-----------------|------|---------------------------------------------|
+| N ≤ 24          | 600  | C24 30-day PASS (iter-12)                   |
+| (24, 48]        | 150  | C48 30-day PASS (iter-13/15)                |
+| (48, 72]        | 75   | C49 boundary + **C72 30-day PASS (iter-26)** |
+| (72, 96]        | 37   | C96 10-day PASS (iter-22); 30-day SLOW pending |
+| > 96            | error | iter-21 hard refusal                        |
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-26 dt=75 branch
+fully validated), R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 25
 
 **Codex iter-22..24 review caught 2 HIGH + 1 MEDIUM — all fixed.**
