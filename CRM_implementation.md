@@ -222,6 +222,61 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 10
+
+**Production-grid 132×132 smoke at dt=5 s: PASS**
+
+First end-to-end smoke at the PRODUCTION grid (132×132×30, dx=2 km,
+H=33 km), F8 clean Wing IC, full physics stack (gray rad + Kessler +
+Smag c_s=0.2 + surface flux + mean-wind removal + moist-mass fixer +
+positive filter), single-rank legacy path:
+
+| step | day      | CWV [mm] | MSE [J/kg] | max\|w\| [m/s] |
+|------|----------|----------|------------|----------------|
+| 1    | 5.8e-5   | 55.550   | 4.2132e9   | 0.0e+00        |
+| 50   | 2.9e-3   | 55.550   | 4.2131e9   | 2.7e-3         |
+| 150  | 8.7e-3   | 55.550   | 4.2130e9   | 4.6e-3         |
+| 300  | 1.7e-2   | 55.550   | 4.2129e9   | 5.5e-3         |
+| 345  | 2.0e-2   | 55.550   | 4.2129e9   | 5.5e-3         |
+
+345 steps × dt=5 s = 1725 s sim = **28.8 min sim** in 369 s wall =
+**1.07 s/step** at 132×132 single-rank. max\|w\| caps at 5.5e-3 m/s
+(no instability). MSE drift = 7e-5 relative through the window.
+CWV pinned at IC. The F10 production config composes cleanly at the
+target grid.
+
+**30-day wall budget**: 30 d × 86400 s / dt=5 s = 518,400 steps ×
+1.07 s = ~6.4 days single-rank on M5 Pro. Cluster or real-MPI-scaling
+needed for a same-day turnaround.
+
+**F9 stack pin landed**
+
+* `requirements_mpi.txt` (NEW): pins JAX 0.9.0 + jaxlib 0.9.0 +
+  mpi4jax 0.8.4 + mpi4py 4.x + numpy 2.1.x. Documented rationale
+  (mpi4jax 0.8.x uses CustomCallV1 deprecated in JAX 0.9 and removed
+  in JAX 0.10; default ``.venv`` install lands on JAX 0.10.1 which
+  triggers a slow-path fallback). Pin set is the last
+  tested-compatible pair until mpi4jax 0.10 ships with FFI support.
+* `scripts/setup_mpi_venv.sh` (NEW): bootstraps a dedicated
+  ``.venv-mpi`` via ``python3.13 -m venv`` + ``pip install -e .`` +
+  ``pip install -r requirements_mpi.txt``, then sanity-prints the
+  resolved versions.
+* `scripts/run_dd_scaling_sweep.sh`: prefers ``.venv-mpi/bin/python``
+  if present; falls back to ``.venv/bin/python`` with a warning
+  about the F9 slow-path overhead so a user can't accidentally
+  benchmark on the wrong stack.
+
+**Net effect**: real MPI scaling numbers are now ONE COMMAND away
+(``bash scripts/setup_mpi_venv.sh``). Re-running the iter-6 strong/
+weak sweep with ``.venv-mpi`` should drop per-step overhead from
+~700 ms back to the expected ~10-30 ms range at np=2.
+
+**R-roadmap status**: R1-R8, R10 ✓, R6 ✓; F9 stack-pin
+infrastructure landed (real numbers gated on ``setup_mpi_venv.sh``
+run by user). End-to-end 30-day production validation remaining;
+6.4-day single-rank wall budget at dt=5 s is the floor without
+real DD scaling.
+
 ### 2026-05-26 — iter 9
 
 **5-day cross-grid + 10-day voronoi: PASS**

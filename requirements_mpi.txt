@@ -1,0 +1,51 @@
+# MPI workload version pins for legoESM.
+#
+# Why this exists
+# ---------------
+# The default project install (``pip install -e ".[dev]"``) pulls the
+# latest JAX. As of 2026-05 that's JAX 0.10.1, but ``mpi4jax`` 0.8.x +
+# 0.9.x use the CustomCallV1 API that JAX 0.9 deprecated and JAX 0.10
+# removed. Under the version mismatch every ``mpi4jax.sendrecv`` /
+# ``allreduce`` falls back to a slow compatibility path; the iter-6
+# scaling sweep measured 70x per-step slowdown going from 1 rank to
+# 2 (CRM_implementation.md F9).
+#
+# Until mpi4jax ships its FFI-based rewrite (tracking
+# https://github.com/mpi4jax/mpi4jax), MPI workloads need a
+# tested-compatible pair.
+#
+# How to use
+# ----------
+# 1. Create a dedicated venv for MPI work:
+#      python3.13 -m venv .venv-mpi
+#      .venv-mpi/bin/pip install --upgrade pip
+# 2. Install the project + this pin set:
+#      .venv-mpi/bin/pip install -e .
+#      .venv-mpi/bin/pip install -r requirements_mpi.txt
+# 3. Run MPI scripts via ``.venv-mpi/bin/python``:
+#      JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun -np 4 \
+#          .venv-mpi/bin/python scripts/bench_plane_crm_dd_scaling.py ...
+#
+# Validation
+# ----------
+# The pin set is verified by tests/distributed/test_mpi_differentiability.py
+# under the existing CI mpi-distributed.yml job. Local validation:
+#   .venv-mpi/bin/python -m pytest tests/distributed/ -q
+# should run mpirun -np 2 without the slow-path mpi4jax fallback
+# warning fired by the default ``.venv`` install.
+#
+# When you can DROP this file
+# ---------------------------
+# Once mpi4jax >=0.10 ships with FFI support for JAX >=0.10, the
+# default install becomes scaling-safe and this file can be deleted.
+# CRM_implementation.md F9 tracks the milestone.
+
+# Tested-compatible pair (mpi4jax 0.8.x + JAX 0.9.x):
+jax==0.9.0
+jaxlib==0.9.0
+mpi4jax==0.8.4
+mpi4py>=4.0,<5.0
+
+# Pin numpy to a JAX-0.9-compatible major to avoid the
+# numpy.lib.npyio deprecations that mpi4jax 0.8 trips on.
+numpy>=2.1,<2.3

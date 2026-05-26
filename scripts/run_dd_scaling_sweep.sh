@@ -32,7 +32,21 @@ WARMUP="${WARMUP:-3}"
 TIME_STEPS="${TIME_STEPS:-20}"
 RANKS="${RANKS:-1 2 4}"
 OUTPUT="${OUTPUT:-results/dd_scaling}"
-PYBIN="${PYBIN:-.venv/bin/python}"
+# Prefer the MPI-compatible pinned venv (.venv-mpi from
+# scripts/setup_mpi_venv.sh + requirements_mpi.txt) if present. F9
+# explains why: the default .venv ships JAX 0.10 + mpi4jax 0.9 which
+# falls back to the slow compatibility path and gives ~70x per-step
+# slowdown at np=2.
+if [ -z "${PYBIN:-}" ]; then
+    if [ -x ".venv-mpi/bin/python" ]; then
+        PYBIN=".venv-mpi/bin/python"
+    else
+        PYBIN=".venv/bin/python"
+        echo "NOTE: .venv-mpi not found — scaling numbers will be"
+        echo "      dominated by the F9 mpi4jax/JAX mismatch overhead."
+        echo "      Run scripts/setup_mpi_venv.sh first for real numbers."
+    fi
+fi
 
 mkdir -p "$OUTPUT"
 CSV="$OUTPUT/scaling_sweep.csv"
