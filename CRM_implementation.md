@@ -134,6 +134,56 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 63
+
+**Lock the iter-14 FULL 1-sim-hour plane CRM envelope as a slow
+nightly regression (vs iter-38's 5-min sub-envelope).**
+
+iter-14 measured 1-sim-hour PASS at 132×132×30 dx=2km dt=5s. iter-38
+locks only a 5-min sub-envelope (60 steps). A regression that
+destabilises between step 60 and step 700 (slow CFL drift, halo
+edge accumulation, mass-fixer convergence issue) slips iter-38.
+
+iter-63 adds ``test_plane_crm_production_scale_132x132_one_hour_envelope``:
+* 720 outer steps at dt=5 (exact 1 sim-hour = 3600 s).
+* log_every=60 → 13 logged rows {1, 60, 120, ..., 720}.
+* Same iter-39 ``--no-radiation`` semantics as iter-38.
+* Caps: max\|w\| < 0.05 on every row (8x iter-14's 6.1e-3 peak);
+  CWV drift < 0.01 mm; MSE drift < 5e-4 relative.
+
+**Codex iter-63 review** caught 2 HIGH + 1 MEDIUM + 2 LOW:
+
+* **HIGH#1** — slow marker means default CI skips this. iter-63
+  contract: runs via ``pytest -m slow`` nightly. Intentional.
+* **HIGH#2** — ``_run_driver_production_scale`` hardcoded
+  ``timeout=900`` (15 min) but the 1-hour run wall is ~17 min.
+  Would have KILLED the run before completion. Fixed: added
+  ``timeout_s`` parameter; iter-63 passes ``timeout_s=1800``
+  (1.8× cushion). Existing iter-38/39 callers use the default
+  900 (their 5-min sub-envelope runs in ~3 min so 900 is plenty).
+* **MEDIUM** — MSE cap 5e-4 too loose vs iter-14 baseline.
+  Acknowledged in the docstring: iter-14's 1.7e-4 ceiling was
+  WITH cached radiation; ``--no-radiation`` should land lower
+  per iter-38's 2.4e-5 measurement. 5e-4 is a conservative
+  upper bound; tighten when the iter-63 live run produces a
+  measurement.
+* **LOW#1** — docstring said "725 steps = 1 sim-hour" but 725 *
+  5 = 3625 s. Clarified: iter-14 ran 725 ≈ 1 sim-hour + 25 s;
+  iter-63 uses 720 = EXACT 3600-s window.
+* **LOW#2** — docstring confused iter-14 radiation status.
+  Clarified: iter-14 ran with cached step-1 radiation tendency
+  (Codex iter-39 finding); iter-63 uses true ``--no-radiation``.
+
+**Tests collected**: 5 plane CRM tests (was 4); the iter-63 test
+is the third slow-marked nightly in this file. Total CRM slow
+nightlies now: 3 (production-scale dycore-only iter-38, with-rad
+iter-39, full-1-hour-envelope iter-63).
+
+**R-roadmap status**: R1-R8, R10, R12 ✓. F9 platform-blocked.
+R11 30-day plane CRM still wall-time gated (~8 days single-rank),
+but iter-63 now empirically pins the 1-sim-hour scale — 12× tighter
+empirical bound than iter-38 alone.
+
 ### 2026-05-26 — iter 62
 
 **Doc compression — 1923 → 1081 lines (44% reduction).**

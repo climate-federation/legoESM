@@ -322,7 +322,8 @@ def test_plane_crm_short_smoke_with_radiation(tmp_path):
 
 def _run_driver_production_scale(output_dir, *, n_outer_steps=60,
                                  log_every_steps=15,
-                                 rad_call_interval_s=None):
+                                 rad_call_interval_s=None,
+                                 timeout_s=900):
     """Invoke run_rce_mpi_long.py at the iter-14 production scale
     (132x132x30 dx=2km dt=5s) for ``n_outer_steps`` outer steps.
 
@@ -378,7 +379,7 @@ def _run_driver_production_scale(output_dir, *, n_outer_steps=60,
         cmd.extend(["--rad-call-interval-s",
                     repr(float(rad_call_interval_s))])
     return subprocess.run(
-        cmd, env=env, capture_output=True, text=True, timeout=900,
+        cmd, env=env, capture_output=True, text=True, timeout=timeout_s,
     )
 
 
@@ -705,4 +706,128 @@ def test_plane_crm_production_scale_132x132_with_radiation(tmp_path):
         f"{rel_mse_drift:.3e} relative exceeds 5e-4 cap. Radiation "
         f"tendency is over-firing — check rad_call_every_steps "
         f"calc and cached_rad_tend sign."
+    )
+
+
+@pytest.mark.slow
+def test_plane_crm_production_scale_132x132_one_hour_envelope(tmp_path):
+    """SLOW nightly regression for the plane CRM 132x132 production
+    config at near-full iter-14 reference (720 steps = exactly
+    1 sim-hour at dt=5s, vs iter-38's 60-step 5-min sub-envelope).
+
+    iter-14 measured 725 outer steps at dt=5s (3625 s sim ≈ 1 sim-hour
+    + 25 s) at 132x132x30 dx=2km. iter-14 ran WITH the legacy
+    ``--rad-call-interval-s 1e9`` "disable" trick that Codex iter-39
+    later found actually fires radiation ONCE at step 1 then caches.
+    iter-63 runs at the EXACT 720-step / 3600-s window with the
+    iter-39 ``--no-radiation`` flag for a true dycore-only run:
+
+    | step | CWV [mm] | MSE [J/kg] | max|w| [m/s] |
+    |------|----------|------------|--------------|
+    |   1  |  55.550  |  4.2132e9  |  0.0e+00     |
+    | 100  |  55.550  |  4.2131e9  |  3.9e-3      |
+    | 300  |  55.550  |  4.2129e9  |  5.5e-3      |
+    | 700  |  55.550  |  4.2125e9  |  6.1e-3      |
+    (iter-14 cached-rad values; iter-63 ``--no-radiation`` lands
+    LOWER per iter-38's 60-step measurement of 2.4e-5 MSE drift)
+
+    iter-38 only locks the 5-min sub-envelope. iter-63 closes the
+    empirical gap between step 60 and step 720 — a regression that
+    destabilises later (slow CFL drift, halo edge accumulation,
+    mass-fixer convergence issue) slips iter-38 but trips here.
+
+    Wall budget: ~17 min on M5 Pro (1.35 s/step × 720 steps + JIT
+    compile). timeout_s=1800 (1.8× cushion). Marked ``slow``;
+    runs via ``pytest -m slow``.
+
+    Codex iter-63 HIGH#2 fix: pass timeout_s=1800 explicitly. The
+    helper used to hardcode timeout=900 which would have killed
+    the 1-hour run before completion.
+    """
+    n_steps = 720  # 720 * 5 = 3600 s = 1 sim-hour (exact)
+    log_every = 60  # logs at steps 1, 60, 120, ..., 720 (13 rows)
+    out_dir = tmp_path / "rce_plane_prod_1hr"
+    result = _run_driver_production_scale(
+        out_dir, n_outer_steps=n_steps, log_every_steps=log_every,
+        timeout_s=1800,
+    )
+    if result.returncode != 0:
+        pytest.fail(
+            "run_rce_mpi_long.py exited nonzero at production scale "
+            f"1-hour ({result.returncode})\n"
+            f"stdout tail:\n{result.stdout[-2000:]}\n"
+            f"stderr tail:\n{result.stderr[-1000:]}"
+        )
+    rows = _read_log(out_dir)
+    assert rows, "log.txt produced no diagnostic rows at production 1-hour"
+
+    # iter-40 contract: --no-radiation must produce rad_calls=0.
+    rad_calls = _parse_rad_call_count(result.stdout)
+    assert rad_calls == 0, (
+        f"plane CRM 1-hour smoke (--no-radiation): driver "
+        f"reported rad_calls={rad_calls!r}, expected 0."
+    )
+
+    # Schema sanity: with log_every=60 + n=720, expect rows at
+    # steps {1, 60, 120, ..., 720} = 13 rows.
+    expected_logged_steps = [1] + list(range(60, 721, 60))
+    logged_steps = [int(r["step"]) for r in rows]
+    assert logged_steps == expected_logged_steps, (
+        f"plane CRM 1-hour smoke: logged steps={logged_steps} != "
+        f"expected {expected_logged_steps}. Driver step counter "
+        f"or log-every cadence regressed."
+    )
+
+    cwv_first = float(rows[0]["CWV_mean"])
+    cwv_final = float(rows[-1]["CWV_mean"])
+    mse_first = float(rows[0]["MSE_mean"])
+    mse_final = float(rows[-1]["MSE_mean"])
+
+    # IC anchor (same as iter-38).
+    assert abs(cwv_first - 55.550) < 0.01, (
+        f"plane CRM 1-hour smoke: IC CWV={cwv_first:.4f} mm "
+        f"!= 55.550 ± 0.01."
+    )
+
+    # max|w| cap on every logged row. iter-14 measured 6.1e-3 m/s
+    # at the peak (step 700); cap at 0.05 = 8x cushion vs that.
+    max_w_per_row = [float(r["max|w|"]) for r in rows]
+    for step_idx, mw in zip(logged_steps, max_w_per_row):
+        assert mw < 0.05, (
+            f"plane CRM 1-hour smoke: max|w|={mw:.3e} m/s at "
+            f"step {step_idx} exceeds 0.05 m/s safety cap. "
+            f"iter-14 measured ~6e-3 m/s peak across step 1..700; "
+            f"this is a smoking gun for an in-flight CFL crash "
+            f"between step 60 (iter-38 boundary) and step 720."
+        )
+
+    # Activity floor (same as iter-38).
+    step60_max_w = max_w_per_row[1]
+    assert step60_max_w > 1e-6, (
+        f"plane CRM 1-hour smoke: max|w|={step60_max_w:.3e} m/s "
+        f"at step 60 — dycore appears inactive."
+    )
+
+    # CWV drift cap. iter-14 saw zero drift to 4 sig figs;
+    # 0.01 mm cushion absorbs any rounding/integration noise.
+    cwv_drift = abs(cwv_final - cwv_first)
+    assert cwv_drift < 0.01, (
+        f"plane CRM 1-hour smoke: CWV drifted {cwv_drift:.4f} mm "
+        f"in 720 steps. iter-14 saw zero drift over 725 steps."
+    )
+
+    # MSE drift cap. iter-14 measured 1.7e-4 relative over 725
+    # steps WITH the cached step-1 radiation tendency (Codex
+    # iter-39 found this); with --no-radiation the actual drift
+    # is much smaller. iter-38 with --no-radiation at 60 steps
+    # measured 2.4e-5. Extrapolating per-step rate to 720 steps:
+    # ~3e-4. Cap at 5e-4 gives ~1.7x margin over the expected
+    # 1-sim-hour drift without radiation.
+    rel_mse_drift = abs(mse_final - mse_first) / mse_first
+    assert rel_mse_drift < 5e-4, (
+        f"plane CRM 1-hour smoke: MSE drift {rel_mse_drift:.3e} "
+        f"relative exceeds 5e-4 cap. The iter-14 ceiling was "
+        f"1.7e-4 WITH cached radiation; --no-radiation should "
+        f"land BELOW that. Investigate dycore + fast-physics "
+        f"energy budget at the 1-sim-hour scale."
     )
