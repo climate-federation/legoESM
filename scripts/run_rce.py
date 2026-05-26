@@ -51,7 +51,11 @@ def main():
                         help="Grid resolution (N for cubed-sphere, n_max for spectral, etc.)")
     parser.add_argument("--nlev", type=int, default=20)
     parser.add_argument("--dt", type=float, default=None,
-                        help="Timestep [s] (auto: 600 for N<=24, 300 for N>24)")
+                        help="Timestep [s]. Auto: 600 for N<=24, 300 "
+                             "for N>24 on cubed_sphere/latlon/gaussian; "
+                             "300 unconditionally on voronoi/MPAS (V4 "
+                             "blows up at dt>=450 in the cross-grid "
+                             "smoke).")
     parser.add_argument("--diag-days", type=int, default=5)
     parser.add_argument("--sst-init", type=float, default=300.0,
                         help="Initial SST [K] (ocean) or soil T [K] (land)")
@@ -138,7 +142,16 @@ def main():
 
     N = args.resolution
     NLEV = args.nlev
-    DT = args.dt or (300.0 if N > 24 else 600.0)
+    # Auto-dt heuristic. Voronoi/MPAS hits a tighter stability bound
+    # than the other dycores on the V4 / L20 RCE setup — verified
+    # 2026-05 cross-grid sweep: dt=600 blows up at day 1, dt=300 is
+    # stable through day 1. Cap MPAS at 300 s regardless of N.
+    if args.dt is not None:
+        DT = args.dt
+    elif args.grid_type == "voronoi":
+        DT = 300.0
+    else:
+        DT = 300.0 if N > 24 else 600.0
     OUTPUT_DIR = Path(args.output or f"results/rce_{args.mode}")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 

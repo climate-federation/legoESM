@@ -222,6 +222,44 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 8
+
+**R10 completion bootstrap — voronoi RCE fixed**
+
+The 3/4-grid pass from iter-7 left voronoi V4/L20 blowing up at day 1
+with the shared 600 s default dt. Bisected the stability bound:
+
+| dt [s] | voronoi V4/L20 status |
+|--------|-----------------------|
+| 60     | PASS (mean_T_sfc=299.96, max\|v\|=1.01) |
+| 200    | PASS (max\|v\|=1.67) |
+| 300    | PASS (max\|v\|=1.82) |
+| **450** | **BLOWUP** |
+| 600    | BLOWUP (NaN within step 1) |
+
+Fix in `scripts/run_rce.py`: auto-dt heuristic now picks
+`DT = 300.0` unconditionally for `grid_type == "voronoi"`, regardless
+of resolution. Other grids still get the legacy 300/600 ladder.
+
+Regression test pinning the contract:
+`tests/atmosphere/hydrostatic/test_rce_cross_grid_dt_defaults.py`
+(6 tests, < 0.1 s wall).
+
+**Cross-grid 1-day smoke after fix: 4/4 PASS**
+
+| grid          | status | notes                                                   |
+|---------------|--------|---------------------------------------------------------|
+| cubed_sphere  | PASS   | mean_T_sfc=299.96, mean_T=278.64, max\|v\|=0.86         |
+| latlon        | PASS   | mean_T_sfc=299.94, mean_T=278.59, max\|v\|=2.05         |
+| gaussian      | PASS   | mean_T_sfc=299.94, mean_T=278.59, max\|v\|=2.19         |
+| voronoi       | PASS   | mean_T_sfc=299.96, mean_T=278.63, max\|v\|=1.82         |
+
+**R-roadmap status**: R1-R7 ✓, R6 ✓, R8 bench ✓ (real numbers
+blocked on stack pin), R10 ✓ at 1-day cross-grid smoke. R9
+(KW78 outer-step) still pending; that's the lever for raising plane
+CRM dt from 1 s to ~5-10 s and shrinking the 30-day production
+wall budget.
+
 ### 2026-05-26 — iter 7
 
 **R6 done — WENO5 ported to halo path**
