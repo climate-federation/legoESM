@@ -149,6 +149,98 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 95 (two-bug physics fix; CRM now spins up)
+
+User flagged "we should have convection by now" at iter-94's 12×12
+day 9.5. iter-95 investigation found **two independent bugs** in
+the plane CRM stack that together prevented convection initiation:
+
+**Bug 1 — IC hydrostatic BC** (`src/legoesm/grids/vertical.py`,
+`compute_reference_state`):
+* Legacy top-down integration with hardcoded `T_avg=250 K`
+  gave `pi(z=550m) = 1.027` instead of correct 0.987 for the
+  Wing 2018 RCE300 column with H=33km.
+* Diagnosed T at lowest model level was 309 K (12 K too hot).
+* Surface flux scheme (SST=300 K) cooled air toward SST,
+  removing energy instead of warming it.
+* **Fix**: add `p_sfc` opt-in parameter to switch to
+  bottom-up integration with known surface BC. Driver passes
+  `p_sfc=101480.0` (Wing 2018 Tab A1). After fix,
+  T(z=550m) = 296.81 K — within 0.5 K of Wing 2018 spec.
+
+**Bug 2 — IC-time total-water enforcement**
+(`scripts/run_rce_mpi_long.py`):
+* `fix_moist_mass_plane_mpi` was unconditionally called every
+  outer step to rescale total water back to the IC-time value.
+* For gravity-wave smokes (where total water IS conserved),
+  this is correct. For RCE spinup it's FATAL: surface
+  evaporation must NET ADD moisture until precipitation
+  balances at equilibrium.
+* Evidence from iter-95 v2 run (with Bug 1 fixed only): CWV
+  stayed EXACTLY at 49.941 mm for the entire 11+ sim-hours
+  of trajectory. Surface flux was successfully adding qv at
+  the lowest model level but the fixer immediately removed
+  it globally (downward-rescaling the rest of the column).
+* **Fix**: add `--no-mass-fixer` CLI flag (default False
+  for backward compat). When set, skips both the
+  `fix_moist_mass_plane_mpi` (DD path) and
+  `fix_moist_mass_plane` (legacy rank-0 path) calls.
+
+**Verification (iter-95 v3 run, 32x32×30 dx=4km dt=10s, 5
+sim-days, both fixes applied)**:
+
+| sim_day | CWV [mm] | MSE [J/kg]   | max\|w\| [m/s] | qc/qr/precip |
+|---------|----------|--------------|----------------|---------------|
+|  0      | 49.942   | 3.5247e+09   | 0.0e+00        | 0 |
+|  0.083  | 50.339   | 3.5252e+09   | 1.32e-03       | 0 |
+|  0.25   | 51.077   | 3.5260e+09   | 1.43e-03       | 0 |
+|  0.50   | 52.056   | 3.5270e+09   | 1.57e-03       | 0 |
+|  0.83   | 53.154   | 3.5278e+09   | 1.74e-03       | 0 |
+|  1.00   | 53.627   | 3.5280e+09   | 1.82e-03       | 0 |
+|  1.50   | 54.792   | 3.5281e+09   | 2.05e-03       | 0 |
+|  1.75   | 55.256   | 3.5278e+09   | 2.17e-03       | 0 |
+
+* CWV **growing 3-4 mm/day** (was pinned pre-fix). Surface
+  flux is finally working.
+* MSE growing, then plateauing (3.5282e9 max, now slowly
+  decreasing). Approaching radiative equilibrium.
+* max\|w\| linear growth, very small — gentle gravity waves.
+* qc=qr=precip still 0; convection trigger not yet fired
+  (Kessler needs local saturation; surface RH 79%→93% over
+  day 1).
+
+**Day-1 profile vs IC**:
+* Surface (z=550m): T 296.81 → 297.07 K (+0.3K), qv
+  15.60 → 18.63 g/kg (+19%), **RH 79% → 92.8%**.
+* Strato-tropical: T cooled 1-3 K (radiative cooling without
+  convective rebalance — expected for pre-convection RCE).
+* Lower trop dried slightly (passive subsidence).
+
+**Profile is conditionally unstable** (verified iter-95
+moist-adiabat comparison): a parcel lifted from saturated
+surface conditions would be ~3K buoyant relative to environment
+at z=550-3km. CAPE is positive; just waiting for local
+saturation to trigger Kessler.
+
+**Commits**:
+* `6305b88f` (iter-95): vertical.py + driver IC fix.
+* `975f7db1` (iter-95b): driver `--no-mass-fixer` flag.
+
+**Open questions** (not yet resolved at iter-95):
+* When exactly does first convection initiate? (Expect day
+  2-3 based on saturation timescale.)
+* Does the system reach a steady RCE plateau or oscillate?
+* What's the equilibrium CWV / precipitation rate?
+* Need profile every day (not every 5) to track moist-adiabatic
+  approach.
+
+**R-roadmap impact**: R11 status fundamentally changes. Before
+iter-95: "plane CRM 1-sim-hour ✓; 30-day wall-time-gated". After
+iter-95: "plane CRM has correct IC AND surface budget; spinup
+to RCE in progress; 30-day still wall-time-gated AT PRODUCTION
+RESOLUTION (132×132 unchanged), but the physics path now works
+end-to-end".
+
 ### 2026-05-26 — iter 94
 
 **12×12 plane CRM 1-sim-DAY run — first complete 24-sim-hour
