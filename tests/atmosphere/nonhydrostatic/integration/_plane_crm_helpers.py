@@ -8,8 +8,10 @@ file as an import side effect. Mirrors the iter-78 hydrostatic
 helpers extraction.
 
 iter-84: added ``_read_log`` (pure log.txt parser, file-local
-until now). All 4 use sites in ``test_plane_crm_end_to_end_smoke.py``
-import via this module so the parser is unit-testable.
+until now). All 5 use sites in ``test_plane_crm_end_to_end_smoke.py``
+import via this module so the parser is unit-testable. (Codex
+iter-85 LOW: previous doc said "4 use sites" — was an undercount
+discovered post-commit.)
 
 The driver subprocess helpers (``_run_driver``,
 ``_run_driver_with_radiation``, ``_run_driver_production_scale``)

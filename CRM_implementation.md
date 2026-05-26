@@ -147,6 +147,26 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 85
+
+**Codex review of iter-83/84 — 3 LOW fixes.**
+
+* LOW#1 (test_rce_helpers_unit.py:test_parse_results_only_lines_with_colon):
+  test used a tolerant ``or`` assertion describing two possible
+  outputs. Re-read ``_parse_results``: ``":" in line`` guard means
+  no-colon lines are SKIPPED. Tightened to strict ``==``.
+* LOW#2 (test_assert_rce_pass coverage gap): iter-83 covered the
+  missing-``mean_T_sfc`` branch but not the parallel missing-``max\|v\|``
+  branch in ``_assert_rce_pass``. Added
+  ``test_assert_rce_pass_fail_on_missing_max_v``.
+* LOW#3 (_plane_crm_helpers.py docstring): said "4 use sites" but
+  the smoke test actually has 5. Fixed.
+
+**Tests**: 51/51 PASS in 0.44 s (was 50).
+
+**R-roadmap status**: R1-R8, R10, R12 ✓. F9 platform-blocked.
+iter-83/84 helper-test layer now Codex-clean.
+
 ### 2026-05-26 — iter 84
 
 **Move plane CRM ``_read_log`` to ``_plane_crm_helpers.py`` + unit

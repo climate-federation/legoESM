@@ -272,7 +272,11 @@ def test_parse_results_handles_empty_value(tmp_path):
 
 def test_parse_results_only_lines_with_colon(tmp_path):
     """Lines without a colon are skipped (e.g. blank lines, comments
-    that don't follow the key:value convention)."""
+    that don't follow the key:value convention). Codex iter-85 LOW:
+    tightened from a tolerant ``or`` to a strict equality after
+    re-reading ``_parse_results`` — the ``":" in line`` guard means
+    no-colon lines are SKIPPED, never returned with empty value.
+    """
     out = _write_results(tmp_path, [
         "",
         "# leading comment",
@@ -280,8 +284,7 @@ def test_parse_results_only_lines_with_colon(tmp_path):
         "trailing-no-colon",
     ])
     fields = _parse_results(out)
-    assert fields == {"# leading comment": "", "status": "PASS"} or \
-        fields == {"status": "PASS"}, fields
+    assert fields == {"status": "PASS"}
 
 
 def test_parse_notes_basic():
@@ -352,13 +355,25 @@ def test_assert_rce_pass_fail_on_max_v_cap(tmp_path):
 
 
 def test_assert_rce_pass_fail_on_missing_notes_fields(tmp_path):
-    """notes line missing ``mean_T_sfc`` or ``max|v|`` triggers."""
+    """notes line missing ``mean_T_sfc`` triggers."""
     out = _write_results(tmp_path, [
         "status: PASS",
         "notes: no_recognised_fields_here",
     ])
     with pytest.raises(AssertionError, match="missing mean_T_sfc"):
         _assert_rce_pass(out, label="notes-broken")
+
+
+def test_assert_rce_pass_fail_on_missing_max_v(tmp_path):
+    """notes line has mean_T_sfc but no max|v| → distinct assertion
+    (Codex iter-85 LOW: iter-83 covered mean_T_sfc missing but not
+    max|v| missing)."""
+    out = _write_results(tmp_path, [
+        "status: PASS",
+        "notes: mean_T_sfc=300.0",
+    ])
+    with pytest.raises(AssertionError, match="missing max"):
+        _assert_rce_pass(out, label="missing-maxv")
 
 
 def test_assert_rce_pass_fail_on_missing_results(tmp_path):
