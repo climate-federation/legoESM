@@ -42,6 +42,9 @@ NX="${NX:-132}"
 NY="${NY:-132}"
 N_ACOUSTIC="${N_ACOUSTIC:-24}"
 ADVECTION="${ADVECTION:-upwind1}"
+HYPERDIFF="${HYPERDIFF:-5.0e6}"
+BUBBLE_K="${BUBBLE_K:-0.0}"
+QV_NOISE="${QV_NOISE:-0.0}"
 PYBIN="${PYBIN:-.venv/bin/python}"
 
 mkdir -p "$OUTPUT"
@@ -60,6 +63,9 @@ exec mpirun -np "$RANKS" "$PYBIN" \
     --acoustic-off-centering 0.1 \
     --n-acoustic-substeps "$N_ACOUSTIC" \
     --advection "$ADVECTION" \
+    --hyperdiff "$HYPERDIFF" \
+    --bubble-theta-pert "$BUBBLE_K" \
+    --qv-noise-amp "$QV_NOISE" \
     --snapshot-hours 24.0 \
     --snapshot-3d-hours 1.0 \
     --profile-days 5.0 \

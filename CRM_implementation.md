@@ -112,6 +112,40 @@ is taken on multi-rank.
 So even if we switch the production driver to `step_halo`, we lose every
 stabilizer we just added. **Blocker for MPI scaling**.
 
+### F6. Production default hyperdiff=1e6 is 5× too weak
+
+Bare-dycore probe at dt=1 s, hyperdiff=1e6 (the production default) blows
+up at step 250 (max|w|=22 m/s); at hyperdiff=5e6 the blow-up is *delayed*
+to step ~470 (single-bubble IC). The fundamental mode is bubble-seeded
+and only delayed by hyperdiff — fixing the IC is the real cure (F7).
+
+### F7. Single-level warm-bubble IC seeds a 2-Δz vertical mode
+
+At nlev=30, H=33 km the uniform dz~1.1 km. The legacy IC sets θ' only
+where z < 1 km — that's a single grid level (z_full[29] ≈ 550 m).
+The resulting 2-Δz vertical mode is unrepresentable on the staggered
+grid and aliases into a numerical instability that hyperdiff can only
+slow down. Pure-Wing IC (no bubble) on 24×24×30 is stable through 1296
+steps (20 min sim) with max|w| < 5 × 10⁻³ m/s and zero qc.
+
+Aggressive qv noise (≥ 2.5 × 10⁻⁴ kg/kg in lowest 4 levels) is *also*
+destabilising: localised qv hotspots → spatial gradients in surface
+flux → non-uniform heating → grid-scale convection burst. **Default
+qv noise lowered to 0**; small values (1–5 × 10⁻⁵ kg/kg) acceptable
+as a stochastic seed but must be verified.
+
+### F8. Stable physics-on smoke confirms dycore+physics composes cleanly
+
+Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full
+physics (gray rad + Kessler + Smag c_s=0.2 + surface flux + mean-wind
+removal + moist-mass fixer + positive filter): max|w| stays at
+~5 × 10⁻³ m/s through 1200 steps (20 min sim), MSE drift < 7 × 10⁻⁵
+relative, CWV pinned to IC. **No spurious convection** — confirms
+the full physics-on driver is dynamically stable when started from
+a clean IC. Convection will spin up later from radiative cooling
++ surface flux on a timescale of hours-days (to be verified at the
+6-h / 24-h smoke step).
+
 ---
 
 ## Roadmap (concrete, ordered)
@@ -187,3 +221,47 @@ stabilizer we just added. **Blocker for MPI scaling**.
 sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
+
+### 2026-05-26 — iter 2
+
+**Changes**
+* `scripts/run_rce_mpi_long.py`:
+  - Default `--dt`: 6.0 → 1.0 s (matches the 30-day wrapper).
+  - Default `--hyperdiff`: 1.0e6 → 5.0e6 (F6).
+  - New `--bubble-theta-pert` (default 0; legacy 0.5 K bubble opt-in).
+  - New `--qv-noise-amp` (default 0; ≤ 5e-5 acceptable; ≥ 2.5e-4 blows up
+    in <5 min sim per F7).
+  - New `--qv-noise-seed` (deterministic RNG seed).
+  - IC builder rewritten to apply bubble + noise as opt-in branches.
+* `scripts/run_rce_30day.sh`:
+  - Surfaces `HYPERDIFF`, `BUBBLE_K`, `QV_NOISE` env knobs.
+  - Defaults set to the F8-stable config (clean Wing IC, 5e6 hyperdiff).
+* `tests/atmosphere/nonhydrostatic/unit/test_plane_crm_dt_stability.py`
+  (NEW): 4 parametrised tests pinning the F1 dt-stability ladder
+  (dt ∈ {0.5, 1.0} stable; dt=1.5 growing; dt=2.0 blow-up). Uses
+  48×48×30 mesh + warm bubble IC matching F1 measurement conditions.
+  Catches regressions in: SI substep tridiag, RK3 weights, buoyancy /
+  PG sign, hyperdiff stencil, sponge profile, Smag strain, mass fixer.
+  Wall time: 87 s.
+
+**Measurements**
+* F6 confirmed: hyperdiff=1e6 blows up at step 250 (max|w|=22 m/s);
+  hyperdiff=5e6 delays to step 470 with the bubble IC.
+* F7 confirmed: bubble-seeded blow-up is 2-Δz mode-driven; **removing
+  the bubble fully eliminates the blow-up** through 1296 steps in
+  F8 smoke.
+* F8 confirmed: 24×24×30, dt=1 s, full-physics smoke at clean Wing IC
+  is dynamically stable for the full smoke window. CWV pinned at
+  55.55 mm (= IC), MSE drift = 4.213e9 → 4.213e9 (< 7e-5 relative).
+* dt-stability regression test passes 4/4.
+
+**Pivot**: F6/F7/F8 collectively answer the iter-1 question "why does
+physics-on destabilise where bare-dycore is stable?". Answer: **it does
+not**, when the IC is clean. The iter-1 smoke that grew max|w| to 95 m/s
+used the legacy 0.5 K bubble — that bubble is the source. With the
+bubble removed and qv noise at 0, the full physics-on stack is stable.
+
+**Next iteration target**: F8 verified at 24×24 / 20-min sim. Scale up
+to 132×132 / 6 h to verify convection spinup at production resolution,
+then to a full day. Concurrently start R4 (Smag in halo path) to
+unblock real MPI DD.

@@ -121,8 +121,13 @@ def parse_args():
     p.add_argument("--ny", type=int, default=132)
     p.add_argument("--nlev", type=int, default=30)
     p.add_argument("--dx", type=float, default=2_000.0)
-    p.add_argument("--dt", type=float, default=6.0,
-                   help="Outer dt [s]. CFL_a=6/24·340/100=0.85, safe.")
+    p.add_argument("--dt", type=float, default=1.0,
+                   help="Outer dt [s]. Bare-dycore stability bound at "
+                        "dx=2 km, nlev=30, H=33 km is dt ≤ ~1.0 s "
+                        "(see CRM_implementation.md F1). Production "
+                        "default kept conservative at 1.0 s until the "
+                        "outer-step KW78 implicit buoyancy (R9) lifts "
+                        "the constraint.")
     p.add_argument("--days", type=float, default=100.0)
     p.add_argument("--H", type=float, default=33_000.0,
                    help="Model top [m]. RCEMIP1 33 km.")
@@ -150,7 +155,37 @@ def parse_args():
                    help="Use per-column Thomas tridiagonal solve for "
                         "the acoustic substep (lifts vertical-CFL "
                         "limit; main benefit on stretched grids).")
-    p.add_argument("--hyperdiff", type=float, default=1.0e6)
+    p.add_argument("--hyperdiff", type=float, default=5.0e6,
+                   help="Biharmonic horizontal diffusion on u, v, theta', "
+                        "rho', w [m^4/s]. Production default 5e6 — the "
+                        "previous 1e6 default could not damp the 2-Δz "
+                        "vertical mode seeded by the warm-bubble IC at "
+                        "dt=1 s, max|w| growing to >20 m/s by step 250 "
+                        "(see CRM_implementation.md F6).")
+    p.add_argument("--bubble-theta-pert", type=float, default=0.0,
+                   help="Warm-bubble convection seed amplitude [K]. "
+                        "Default 0 = no bubble (standard RCEMIP1 "
+                        "protocol: spin up convection from surface "
+                        "fluxes + qv noise alone). Set 0.5 to "
+                        "reproduce the legacy single-bubble IC. The "
+                        "0.5 K bubble seeds a 2-Δz vertical mode at "
+                        "dz~1.1 km that no amount of hyperdiff fully "
+                        "damps — only suitable for short rising-"
+                        "thermal smokes, not 30-day runs.")
+    p.add_argument("--qv-noise-amp", type=float, default=0.0,
+                   help="Amplitude of zero-mean random qv perturbations "
+                        "[kg/kg] applied to the lowest 4 model levels "
+                        "of the IC. Default 0 = clean Wing 2018 IC; "
+                        "convection spins up from radiative cooling + "
+                        "surface flux (~hours). Set 1e-5 - 5e-5 (0.01 - "
+                        "0.05 g/kg) for a gentle stochastic seed. "
+                        "Amplitudes ≥ 2.5e-4 trigger immediate Kessler "
+                        "condensation hotspots that destabilise the "
+                        "dycore in <5 min sim time (smoke verified — "
+                        "see CRM_implementation.md F7).")
+    p.add_argument("--qv-noise-seed", type=int, default=0,
+                   help="RNG seed for qv noise perturbation. Same seed "
+                        "→ bit-identical IC across reruns.")
     p.add_argument("--sponge-coeff", type=float, default=0.05)
     p.add_argument("--sponge-width", type=float, default=10_000.0,
                    help="Sponge layer width from model top [m]. "
@@ -213,34 +248,64 @@ def build_height_coord_and_state(args, grid):
         (grid.ny, grid.nx, nlev), dtype=jnp.float64,
     )
     new_tracers = new_tracers.at[..., 0].set(qv_3d)
-    # Convection seed: warm bubble at lowest ~1 km, cosine-tapered
-    # horizontally over ~10·dx, ΔT_max = 0.5 K. Density perturbation
-    # set so the initial pressure is unperturbed
-    # (ρ'/ρ_ref = −θ'/θ_ref) — the standard warm-bubble IC used by
-    # the validated rising-thermal test. Without this rho' balance
-    # the IC has a pressure imbalance that drives acoustic
-    # transients which grow past step ~70 at 132×132 dx=2 km dt=2.
-    ny, nx = grid.ny, grid.nx
-    jj = jnp.arange(ny)
-    ii = jnp.arange(nx)
-    yy, xx = jnp.meshgrid(jj, ii, indexing="ij")
-    yc, xc = (ny - 1) / 2.0, (nx - 1) / 2.0
-    r_cells = jnp.sqrt((yy - yc) ** 2 + (xx - xc) ** 2)
-    r0 = 10.0  # bubble radius in cell units
-    horiz = jnp.where(
-        r_cells < r0,
-        0.5 * (1.0 + jnp.cos(jnp.pi * r_cells / r0)),
-        0.0,
-    )
-    z_top_bubble = 1000.0
-    vert = jnp.where(z < z_top_bubble,
-                     0.5 * (1.0 + jnp.cos(jnp.pi * z / z_top_bubble)),
-                     0.0)
-    bubble_theta = 0.5 * horiz[:, :, None] * vert[None, None, :]
-    bubble_rho = -hc.rho_ref * bubble_theta / hc.theta_ref
+
+    # Convection seed.
+    # --------------------------------------------------------------
+    # Default (--bubble-theta-pert 0): NO bubble. Convection spins
+    # up from --qv-noise-amp boundary-layer qv perturbations + the
+    # surface flux. This matches the RCEMIP1 protocol and avoids
+    # the 2-Δz vertical mode that the single-bubble IC seeds at
+    # the coarse dz~1.1 km production grid (see CRM_implementation.md
+    # F6: hyperdiff up to 5e6 only delays — does not stop — the mode
+    # that grows from the bubble's single-level perturbation).
+    #
+    # Optional (--bubble-theta-pert > 0): legacy warm-bubble IC,
+    # cosine-tapered horizontally over ~10·dx and vertically over
+    # z<1 km. Density set so the initial pressure is unperturbed
+    # (ρ'/ρ_ref = −θ'/θ_ref). Use ONLY for short rising-thermal
+    # smokes.
+    bubble_amp = float(args.bubble_theta_pert)
+    if bubble_amp > 0.0:
+        ny, nx = grid.ny, grid.nx
+        jj = jnp.arange(ny)
+        ii = jnp.arange(nx)
+        yy, xx = jnp.meshgrid(jj, ii, indexing="ij")
+        yc, xc = (ny - 1) / 2.0, (nx - 1) / 2.0
+        r_cells = jnp.sqrt((yy - yc) ** 2 + (xx - xc) ** 2)
+        r0 = 10.0  # bubble radius in cell units
+        horiz = jnp.where(
+            r_cells < r0,
+            0.5 * (1.0 + jnp.cos(jnp.pi * r_cells / r0)),
+            0.0,
+        )
+        z_top_bubble = 1000.0
+        vert = jnp.where(z < z_top_bubble,
+                         0.5 * (1.0 + jnp.cos(jnp.pi * z / z_top_bubble)),
+                         0.0)
+        bubble_theta = bubble_amp * horiz[:, :, None] * vert[None, None, :]
+        bubble_rho = -hc.rho_ref * bubble_theta / hc.theta_ref
+        state = state._replace(
+            theta_prime=state.theta_prime.replace(data=bubble_theta),
+            rho_prime=state.rho_prime.replace(data=bubble_rho),
+        )
+
+    # RCEMIP1 qv noise seed in the lowest 4 levels.
+    qv_noise_amp = float(args.qv_noise_amp)
+    if qv_noise_amp > 0.0:
+        key = jax.random.PRNGKey(int(args.qv_noise_seed))
+        n_seed_lev = min(4, nlev)
+        noise = jax.random.uniform(
+            key, shape=(grid.ny, grid.nx, n_seed_lev),
+            minval=-qv_noise_amp, maxval=qv_noise_amp, dtype=jnp.float64,
+        )
+        noise = noise - jnp.mean(noise, axis=(0, 1), keepdims=True)
+        # Lowest n_seed_lev model levels = LAST indices (k goes top→bottom).
+        new_qv = new_tracers[..., 0]
+        new_qv = new_qv.at[..., -n_seed_lev:].add(noise)
+        new_qv = jnp.maximum(new_qv, 0.0)
+        new_tracers = new_tracers.at[..., 0].set(new_qv)
+
     state = state._replace(
-        theta_prime=state.theta_prime.replace(data=bubble_theta),
-        rho_prime=state.rho_prime.replace(data=bubble_rho),
         tracers=state.tracers.replace(data=new_tracers),
     )
     return hc, state
