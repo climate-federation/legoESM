@@ -180,6 +180,19 @@ def parse_args():
                         "at step 1 and caches the tendency for the full "
                         "run. This flag is the only way to truly run "
                         "without radiation.")
+    p.add_argument("--no-mass-fixer", action="store_true", default=False,
+                   help="iter-95: disable fix_moist_mass_plane which "
+                        "rescales all moist tracers to maintain "
+                        "IC-time total water mass. Necessary for "
+                        "RCE spinup runs: surface flux must be "
+                        "allowed to NET ADD moisture until "
+                        "precipitation balances at equilibrium. "
+                        "The fixer is appropriate for gravity-wave "
+                        "smokes where total water IS conserved; "
+                        "it is FATAL for RCE because it removes "
+                        "the surface-flux moisture every step, "
+                        "pinning CWV at IC value and preventing "
+                        "convection initiation.")
     p.add_argument("--smag-cs", type=float, default=0.2)
     p.add_argument("--semi-implicit-acoustic", action="store_true",
                    help="Use per-column Thomas tridiagonal solve for "
@@ -935,10 +948,11 @@ def main():
             state = remove_horizontal_mean_wind_plane_mpi(
                 state, layout, owned_mask,
             )
-            state = fix_moist_mass_plane_mpi(
-                state, hc, grid, layout, owned_mask,
-                target_total_water=target_water,
-            )
+            if not args.no_mass_fixer:
+                state = fix_moist_mass_plane_mpi(
+                    state, hc, grid, layout, owned_mask,
+                    target_total_water=target_water,
+                )
         else:
             # ----------------------------------------------------- #
             # Legacy rank-0-dycore + broadcast path (replicated).   #
@@ -960,9 +974,10 @@ def main():
             _ = compute_total_water_mass_plane_mpi(
                 state, hc, grid, layout, owned_mask,
             )
-            state = fix_moist_mass_plane(
-                state, hc, grid, target_total_water=target_water,
-            )
+            if not args.no_mass_fixer:
+                state = fix_moist_mass_plane(
+                    state, hc, grid, target_total_water=target_water,
+                )
         t_sim = step * args.dt
         wall_elapsed = time.time() - wall_start
 
