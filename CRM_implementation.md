@@ -149,6 +149,33 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 91
+
+**Revert iter-90 max_v_floor opt-in on fast 2-day smokes (false-fail
+risk on V4-style spinup-slow grids).**
+
+iter-90 wired ``max_v_floor=0.1`` into the 5-grid fast parametric
+smoke + C96 2-day. Box was too loaded to live-verify safety on
+every grid's actual day-2 max\|v\|.
+
+Concern: iter-12 measured V4 day-30 max\|v\|=2.28; day-2 likely
+≪ that (probably 0.1-0.3 m/s). Pushing the floor to 0.1 risks
+false-failing real V4 spinup runs.
+
+iter-91 reverts the fast-suite opt-in. The 30-day nightlies keep
+iter-88 ``min_floor=0.5`` on the peak-scan path (where day-30
+max\|v\| ≫ floor reliably). Fast 2-day smokes retain other
+broken-dycore guards:
+* ``status: PASS`` check (driver writes FAIL on NaN/BLOWUP).
+* ``temp_tol=1.0 K`` on mean_T_sfc (broken dycore would cool/
+  heat freely → drift > 1 K within 2 days).
+* ``max|v| < 50 m/s`` cap (catches CFL crash).
+
+The iter-89 ``max_v_floor`` helper API stays available; only
+the iter-90 opt-in is reverted.
+
+**R-roadmap status**: R1-R8, R10, R12 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 90
 
 **Opt-in iter-89 ``max_v_floor`` on the fast 2-day cross-grid smokes
