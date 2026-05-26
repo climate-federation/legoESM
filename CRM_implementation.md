@@ -222,6 +222,45 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 32
+
+**AMIP cross-grid wrapper carries the same iter-7/iter-13 bugs — fixed.**
+
+Audit during iter-32: `scripts/run_amip_cross_grid.sh` (AMIP
+counterpart to the iter-7-fixed `run_rce_cross_grid.sh`) was
+suffering from two issues the RCE wrapper already had fixed:
+
+1. **macOS Bash 3.2 incompatibility** (iter-7 fix replicated):
+   shebang `#!/bin/bash`, four `declare -A` associative arrays.
+   On macOS the wrapper exited immediately with
+   `declare: -A: invalid option`. Switched to
+   `#!/usr/bin/env bash` + a single colon-delimited
+   `GRID_TABLE` parallel-array pattern (same shape as the iter-7
+   RCE-wrapper fix).
+
+2. **AMIP at C48 ran at iter-13-banned dt=600**:
+   `scripts/run_amip.py` defaults `--dt` to 600 (line 83). The
+   cross-grid wrapper at C48 inherited that default. iter-13
+   showed C48 BLOWUP at dt=600 → 236 m/s by day 25 in RCE; the
+   same dycore-level instability would apply to AMIP. iter-32
+   wires the iter-13/iter-26 dt=150 into the AMIP wrapper for the
+   C48 cubed_sphere + T42 gaussian rows (both fall in the
+   `(24, 48]` ladder branch). Other grids stay at AMIP's default
+   for now until measured.
+
+3. **JAX_PLATFORMS=cpu pin** replicated from iter-7 (Metal MLIR
+   crash potential).
+
+**Verified**: `bash scripts/run_amip_cross_grid.sh /tmp/check 0` now
+parses cleanly and reaches the per-grid AMIP invocation (which
+expectedly errors on `--days 0` further down — not the wrapper's
+problem).
+
+**C96 30-day at dt=37** still running (48 min CPU).
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-32 AMIP wrapper
+brought to parity with the RCE wrapper), R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 31
 
 **Auto-dt diagnostic table script + matching smoke test**
