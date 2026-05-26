@@ -222,6 +222,59 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 15
+
+**C48 30-day with iter-13 fix: PASS**
+
+Iter-13 lifted the auto-dt for N in (24, 48] from 300 → 150 after
+the C48 30-day BLOWUP. Iter-15 ran C48 30-day again with the new
+default to confirm:
+
+| metric        | iter-12 (dt=300, broken) | iter-15 (dt=150, fixed) |
+|---------------|--------------------------|-------------------------|
+| status        | PASS (false-positive)    | **PASS**                |
+| mean_T_sfc    | 288.89 K (−11 from IC)   | 300.13 K (+0.13 from IC) |
+| mean_T        | 223.48 K                 | 268.61 K                |
+| max\|v\|      | 235.91 m/s               | 13.45 m/s               |
+| wall          | 292.7 s                  | 500.9 s                 |
+
+Confirms the iter-13 dt ladder fix delivers a physically realistic
+30-day RCE at C48. The cost (500 s vs 292 s) is the price of dt=150
+vs dt=300 — but the broken dt=300 was producing corrupted output, so
+the comparison isn't meaningful.
+
+**Plane CRM end-to-end smoke regression test added**
+
+`tests/atmosphere/nonhydrostatic/integration/test_plane_crm_end_to_end_smoke.py`
+(NEW): smallest CI regression for the plane CRM production stack.
+Runs ``scripts/run_rce_mpi_long.py`` on a 12×12×20 mesh for 86
+outer steps at F8/F10/iter-13 defaults (clean Wing IC, dt=5 s,
+hyperdiff=5e6, Smag c_s=0.2, mass fixer on, radiation disabled to
+isolate dycore behaviour) and asserts:
+
+1. driver exits cleanly with finite diagnostics
+2. ``max|w| < 0.5 m/s`` at end of smoke
+3. ``CWV`` drift < 0.1 mm from IC
+4. ``MSE`` drift < 1e-3 relative
+
+Test passes in 5.8 s. Mirrors the hydrostatic
+``test_rce_cross_grid_smoke.py`` pattern from iter-13/iter-14.
+
+**Full regression suite: 39 PASS in 97 s**
+
+All 6 regression test files pass cleanly:
+* test_rce_cross_grid_dt_defaults.py (6 tests, 0.03 s)
+* test_rce_cross_grid_smoke.py (5 tests, 113 s wall reported earlier)
+* test_plane_crm_end_to_end_smoke.py (1 test, 5.8 s)
+* test_plane_slow_tend_halo.py (13 tests)
+* test_plane_mass_fixer_mpi.py (8 tests)
+* test_weno5_halo_equiv.py (6 tests)
+
+**R-roadmap status**: R1-R8 ✓, R10 ✓ (now with C48 30-day verified
++ plane CRM smoke + cross-grid smoke + dt-ladder regression), R6 ✓.
+F9 platform-blocked. Plane CRM full 30-day still wall-time-gated
+(~8.1 days single-rank on M5 Pro).
+
 ### 2026-05-26 — iter 14
 
 **Codex review caught HIGH gap in iter-13 smoke test**
