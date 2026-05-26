@@ -183,35 +183,46 @@ def plot_time_per_step(rows: list[dict], out: Path):
 
 
 def plot_peak_bar(rows: list[dict], out: Path):
-    """Bar chart: peak Mcells/s per (grid, precision)."""
+    """Bar chart: peak Mcells/s per (grid, precision).
+
+    NOTE: `_label_from_row` must include grid+precision (verified above) so
+    fp32 and fp64 rows yield separate bars. `total_cells` from the CSV
+    contract is horizontal cells × levels (cell-levels), not horizontal
+    cells alone — annotated as such.
+    """
     groups: dict[str, list[dict]] = {}
     for r in rows:
         lbl = _label_from_row(r)
         groups.setdefault(lbl, []).append(r)
 
-    peak_data: list[tuple[str, float, int]] = []  # label, peak Mcells/s, n_cells
+    # label, peak Mcells/s, total_cell_levels, resolution
+    peak_data: list[tuple[str, float, int, str]] = []
     for label, rs in groups.items():
         best = max(rs, key=lambda r: float(r["mcells_per_s"]))
-        peak_data.append((label, float(best["mcells_per_s"]),
-                          int(best["total_cells"])))
+        peak_data.append((
+            label, float(best["mcells_per_s"]),
+            int(best["total_cells"]),
+            str(best.get("resolution", "?")),
+        ))
     peak_data.sort(key=lambda x: x[1], reverse=True)
 
     labels = [p[0] for p in peak_data]
     vals = [p[1] for p in peak_data]
     sizes = [p[2] for p in peak_data]
+    resos = [p[3] for p in peak_data]
 
     fig, ax = plt.subplots(figsize=(11, 6), constrained_layout=True)
     cmap = plt.get_cmap("tab10")
     bars = ax.bar(range(len(labels)), vals,
                   color=[cmap(i % 10) for i in range(len(labels))])
-    for i, (b, v, n) in enumerate(zip(bars, vals, sizes)):
+    for i, (b, v, n, r) in enumerate(zip(bars, vals, sizes, resos)):
         ax.text(b.get_x() + b.get_width()/2, v + max(vals)*0.01,
-                f"{v:.0f}\n({n:,} cells)",
+                f"{v:.0f}\n(res={r}, {n:,} cell·lev)",
                 ha="center", va="bottom", fontsize=8)
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=9)
-    ax.set_ylabel("Peak throughput [Mcells / s]")
-    ax.set_title("Single-GPU peak throughput by grid × precision (RTX 5090)")
+    ax.set_ylabel("Peak throughput at best resolution  [Mcells / s]")
+    ax.set_title("Single-GPU peak throughput by grid × precision (mobile RTX 5090)")
     ax.grid(axis="y", alpha=0.3)
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=140)
@@ -251,11 +262,17 @@ def plot_weak(rows: list[dict], out: Path):
 
 
 def main():
+    global PEAK_BW_BYTES_S
     p = argparse.ArgumentParser()
     p.add_argument("--atm", nargs="*", default=[])
     p.add_argument("--ocean", nargs="*", default=[])
     p.add_argument("--out", default="results/scaling_gpu")
+    p.add_argument("--peak-bw", type=float, default=PEAK_BW_BYTES_S,
+                   help="Peak HBM bandwidth in bytes/s (default: mobile "
+                        "RTX 5090 measured sustained = 7.3e11; desktop "
+                        "5090 = 1.79e12)")
     args = p.parse_args()
+    PEAK_BW_BYTES_S = args.peak_bw
     rows = _read_csv(args.atm + args.ocean)
     if not rows:
         print("no rows found")
