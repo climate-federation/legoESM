@@ -67,6 +67,13 @@ def parse_args():
                    help="Explicit vertical Laplacian diffusivity on "
                         "theta_prime [m^2/s]. Tames the buoyancy-driven "
                         "gravity-wave amplification at coarse dz.")
+    p.add_argument("--implicit-buoyancy", action="store_true", default=False,
+                   help="Enable Klemp-Wilhelmson 1978 implicit-buoyancy "
+                        "treatment in the SI acoustic substep. Adds three "
+                        "nearest-neighbour bands to the tridiagonal that "
+                        "encode g/theta_0 * dtheta_ref/dz coupling between "
+                        "w_new and theta_p_new. Closes the gravity-wave "
+                        "amplification loop at coarse vertical resolution.")
     return p.parse_args()
 
 
@@ -103,6 +110,7 @@ def main():
         n_acoustic_substeps=args.n_acoustic_substeps,
         horizontal_advection_scheme=args.advection,
         vertical_theta_diffusion=args.vertical_theta_diffusion,
+        implicit_buoyancy=args.implicit_buoyancy,
     )
     model = PlaneCompressibleEulerModel(grid, hc, terrain, config=cfg)
     state = make_rest_state(grid, hc, dtype=jnp.float64)

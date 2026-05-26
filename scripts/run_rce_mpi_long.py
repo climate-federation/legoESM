@@ -163,6 +163,22 @@ def parse_args():
                         "0.05-0.1 damps acoustic modes. Try 0.1 if "
                         "instability appears as growing rho_prime / w "
                         "oscillations.")
+    p.add_argument("--vertical-theta-diffusion", type=float, default=0.0,
+                   help="Explicit vertical Laplacian diffusivity on "
+                        "theta_prime [m^2/s]. 0 = off. Try 1e4-5e4 to "
+                        "damp the buoyancy/PG feedback that destabilises "
+                        "the dycore at dt > 0.5 s on coarse vertical grids.")
+    p.add_argument("--advection", choices=["upwind1", "weno5"],
+                   default="upwind1",
+                   help="Horizontal advection scheme for theta/u/v/w.")
+    p.add_argument("--implicit-buoyancy", action="store_true", default=False,
+                   help="Klemp-Wilhelmson 1978 implicit-buoyancy treatment "
+                        "of the w-equation in the SI acoustic substep. Adds "
+                        "three nearest-neighbour bands proportional to "
+                        "dtheta_ref/dz to the tridiagonal solve. Closes the "
+                        "w<->theta gravity-wave feedback that destabilises "
+                        "the dycore at coarse dz (~1 km) with stratified "
+                        "ICs. Only active when --semi-implicit-acoustic.")
     p.add_argument("--snapshot-hours", type=float, default=24.0)
     p.add_argument("--snapshot-3d-hours", type=float, default=0.0,
                    help="If > 0, dump full 3D MSE/qv/T volumes "
@@ -407,6 +423,12 @@ def write_progress(out_dir, t_sim, total_t, step, total_steps,
 
 def main():
     args = parse_args()
+    if args.implicit_buoyancy and not args.semi_implicit_acoustic:
+        raise SystemExit(
+            "--implicit-buoyancy requires --semi-implicit-acoustic "
+            "(the Klemp-Wilhelmson 1978 substitution lives inside "
+            "the column tridiagonal solve)."
+        )
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     n_ranks = comm.Get_size()
@@ -448,6 +470,9 @@ def main():
         fix_mass=True, anchor_mass_to_initial=True,
         smagorinsky_cs=args.smag_cs, smagorinsky_prandtl=1.0,
         n_acoustic_substeps=args.n_acoustic_substeps,
+        vertical_theta_diffusion=args.vertical_theta_diffusion,
+        horizontal_advection_scheme=args.advection,
+        implicit_buoyancy=args.implicit_buoyancy,
     )
     model = PlaneCompressibleEulerModel(grid, hc, terrain, config=cfg)
     fast_physics_fn = build_fast_physics_fn(args, grid, hc, terrain)

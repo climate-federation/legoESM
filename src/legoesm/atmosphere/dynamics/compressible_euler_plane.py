@@ -1259,6 +1259,7 @@ def plane_acoustic_substeps_semi_implicit(
     g = euler_config.g
     J = terrain_metric.jacobian
     beta = euler_config.acoustic_off_centering
+    implicit_buoyancy = euler_config.implicit_buoyancy
 
     w = state.w.data
     theta_p = state.theta_prime.data
@@ -1269,6 +1270,7 @@ def plane_acoustic_substeps_semi_implicit(
         return _semi_implicit_acoustic_column_kernel(
             w_c, theta_p_c, rho_p_c,
             height_coord, J, dt_s, beta, g,
+            implicit_buoyancy=implicit_buoyancy,
         )
 
     w_final, theta_p_final, rho_p_final = jax.lax.fori_loop(
