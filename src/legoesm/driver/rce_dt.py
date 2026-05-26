@@ -11,18 +11,17 @@ ladder used by ``scripts/run_rce.py``. Lives in
   2. Other drivers (long-run wrappers, batch sweeps) can reuse
      the heuristic without copy-paste.
 
-Empirical lineage (full table in CRM_implementation.md iter-12/13/15/
-20/21/22):
+Empirical lineage (full table in CRM_implementation.md iter-12..26):
 
-  voronoi/MPAS V4:   dt=300 PASS (30-day, max|v|=2.3 m/s)
-                     dt>=450 BLOWUP at day 1
-  cubed_sphere C24:  dt=600 PASS (30-day, max|v|=7.2 m/s)
-  cubed_sphere C48:  dt=300 BLOWUP at day 25 (max|v|=236 m/s)
+  voronoi/MPAS V4:   dt=300 PASS (30-day, max|v|=2.3 m/s, iter-12)
+                     dt>=450 BLOWUP at day 1 (iter-8)
+  cubed_sphere C24:  dt=600 PASS (30-day, max|v|=7.2 m/s, iter-12)
+  cubed_sphere C48:  dt=300 BLOWUP at day 25 (max|v|=236 m/s, iter-12)
                      dt=150 PASS 30-day (verified iter-13/15)
-  cubed_sphere C72:  dt=75  PASS day 20 (running iter-22/23)
-  cubed_sphere C96:  dt=75  BLOWUP at day 20 (max|v|=527 m/s) iter-20
-                     dt=37  PASS at 10-day (iter-22)
-  gaussian T21:      dt=600 PASS
+  cubed_sphere C72:  dt=75  PASS 30-day (max|v|=17.9 m/s, iter-26)
+  cubed_sphere C96:  dt=75  BLOWUP at day 20 (max|v|=527 m/s, iter-20)
+                     dt=37  PASS at 10-day (iter-22); 30-day in flight
+  gaussian T21:      dt=600 PASS (30-day, iter-12)
 
 iter-21: N>96 RAISES (silent extrapolation hid the iter-20 mistake).
 """

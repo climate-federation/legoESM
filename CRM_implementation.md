@@ -222,6 +222,34 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 27
+
+**Codex review of iter-25/26: 0 HIGH, 0 MEDIUM, 1 LOW (acknowledged).**
+
+Codex specifically validated:
+* CFL-advisory narrowing (iter-25 HIGH #1): clean. Import error
+  is caught; numeric/format errors past the import correctly
+  propagate.
+* Re-export at `legoesm.driver` (iter-25 HIGH #2): clean. `rce_dt.py`
+  only imports `__future__`, so no cycle risk through the re-export.
+* Identity assertion in `test_auto_dt_rce_is_public_api` (iter-25
+  MEDIUM): "stronger and less brittle than the iter-24 text-match
+  it replaced. Only fragile under an explicit deprecation shim,
+  which would itself be a visible code change." — accepted.
+* LOW: `rce_dt.py` docstring still flagged C96 30-day as "in
+  flight". **Updated this iteration** — kicked off C96 30-day at
+  dt=37 (running in background) and refreshed the docstring to
+  show the iter-26 C72 measurement details.
+
+**C96 30-day at dt=37 running**: validates the iter-13/20 ladder
+boundary at full production length. Day 5+ result lands in a
+later iteration; CFL advisory line printed cleanly:
+`CFL advisory: dx_min=60188 m, gravity-wave dt_max=113 s, using
+DT=37 s (0.33× formula).`
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-27 codex sign-off
+on the iter-25 fixes), R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 26
 
 **C72 30-day completes: PASS at iter-13 ladder choice.**
