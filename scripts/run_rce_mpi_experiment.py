@@ -103,6 +103,13 @@ def parse_args():
     p.add_argument("--H", type=float, default=20_000.0)
     p.add_argument("--dz-sfc", type=float, default=50.0)
     p.add_argument("--c-h", type=float, default=1.5e-3)
+    p.add_argument("--no-mass-fixer", action="store_true", default=False,
+                   help="iter-95b: disable fix_moist_mass_plane "
+                        "(which rescales total water to IC every step). "
+                        "Default False matches the script's conservation-"
+                        "smoke purpose; set this flag for any spin-up "
+                        "experiment >~1 sim-hour so surface flux can "
+                        "NET ADD moisture instead of being clipped.")
     p.add_argument("--n-acoustic-substeps", type=int, default=12)
     p.add_argument("--output", type=str,
                    default="results/rce_mpi_experiment.txt")
@@ -238,9 +245,10 @@ def main():
     for step in range(args.steps):
         state = model.step(state, dt=args.dt)
         state = physics_step(state, hc, grid, args.dt, args.c_h)
-        state = fix_moist_mass_plane(
-            state, hc, grid, target_total_water=target_water,
-        )
+        if not args.no_mass_fixer:
+            state = fix_moist_mass_plane(
+                state, hc, grid, target_total_water=target_water,
+            )
         cwv = column_water_vapor_plane(state, hc)
         mse = column_moist_static_energy_plane(state, hc)
         cf = cloud_fraction_profile_plane(state, hc)

@@ -100,6 +100,13 @@ def parse_args():
     p.add_argument("--H", type=float, default=20_000.0)
     p.add_argument("--dz-sfc", type=float, default=50.0)
     p.add_argument("--c-h", type=float, default=1.5e-3)
+    p.add_argument("--no-mass-fixer", action="store_true", default=False,
+                   help="iter-95b: disable fix_moist_mass_plane "
+                        "(rescales total water to IC every step). "
+                        "Default False matches this script's conservation-"
+                        "smoke purpose; set for any spin-up smoke "
+                        "longer than ~10 outer steps where surface flux "
+                        "should be allowed to NET ADD moisture.")
     p.add_argument("--n-acoustic-substeps", type=int, default=6,
                    help="Acoustic substeps per outer step. Must match "
                         "CompressibleEulerConfig.n_acoustic_substeps.")
@@ -210,9 +217,10 @@ def main():
     for step in range(args.steps):
         state = model.step(state, dt=args.dt)
         state = physics_step(state, hc, grid, args.dt, args.c_h)
-        state = fix_moist_mass_plane(
-            state, hc, grid, target_total_water=target_water_mass,
-        )
+        if not args.no_mass_fixer:
+            state = fix_moist_mass_plane(
+                state, hc, grid, target_total_water=target_water_mass,
+            )
         # Diagnostics every step.
         cwv = column_water_vapor_plane(state, hc)
         mse = column_moist_static_energy_plane(state, hc)
