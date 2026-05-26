@@ -849,7 +849,6 @@ def main():
             if t_sim >= next_snap_t:
                 day_idx = int(round(t_sim / SEC_PER_DAY))
                 save_snapshot(out_dir, day_idx, t_sim, state_for_io, hc)
-                next_snap_t += snap_dt
 
             # 3D snapshot every snapshot_3d_hours.
             if snap3d_enabled and t_sim >= next_snap3d_t:
@@ -857,13 +856,20 @@ def main():
                 save_snapshot_3d(
                     out_dir, hr_idx, t_sim, state_for_io, hc,
                 )
-                next_snap3d_t += snap3d_dt
 
             # Profile every profile_days.
             if t_sim >= next_prof_t:
                 day_idx = int(round(t_sim / SEC_PER_DAY))
                 save_profile(out_dir, day_idx, t_sim, state_for_io, hc)
-                next_prof_t += prof_dt
+
+        # Keep gather/snapshot/profile timers identical on every rank.
+        # These thresholds feed need_gather, which gates collective gathers.
+        if t_sim >= next_snap_t:
+            next_snap_t += snap_dt
+        if snap3d_enabled and t_sim >= next_snap3d_t:
+            next_snap3d_t += snap3d_dt
+        if t_sim >= next_prof_t:
+            next_prof_t += prof_dt
 
     if rank == 0:
         log_f.close()

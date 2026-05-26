@@ -222,6 +222,74 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 6
+
+**Codex adversarial review of iter-5 caught one HIGH bug**
+* `need_gather` evaluated on all ranks but `next_snap_t` /
+  `next_snap3d_t` / `next_prof_t` were advanced ONLY inside the
+  `if rank == 0:` block. After the first snapshot fired, rank 0's
+  timers advanced; other ranks' did not. On the next tick
+  `need_gather=True` on rank 0 but `=False` on others → rank 0
+  enters `_gather_state` collective alone and deadlocks.
+* Fix applied by Codex: timer advances moved OUTSIDE the
+  `if rank == 0:` guard. Same `t_sim >= next_*_t` predicates evaluated
+  on every rank, so all ranks advance their timers in lockstep.
+
+**Verification**
+* 2-rank smoke at 12×12×20, dt=5 s, `--snapshot-hours 0.02` (forces
+  the snapshot threshold to cross multiple times) — completed 50
+  steps + emitted 1 snapshot without deadlock.
+
+**New work (R8 bootstrap)**
+* `scripts/bench_plane_crm_dd_scaling.py` (NEW): strong + weak
+  scaling benchmark for `step_halo`. Modes:
+  - `strong`: fixed global grid (24×24 default), rank count varies.
+  - `weak`: fixed per-rank grid, global grows with rank count.
+  Reports `wall_s,steps_per_s,wall_per_step_s` to a CSV; warmup
+  steps separated from timed window so JIT compile is not in the
+  numbers. Uses `step_halo` + MPI mean-wind reduction per step;
+  Smag off by default to isolate halo-exchange + acoustic-substep
+  cost.
+* `scripts/run_dd_scaling_sweep.sh` (NEW): wrapper that runs the
+  bench across `RANKS="1 2 4"` for both modes + prints the
+  efficiency table.
+
+**Measurements (macOS Pro M5, OpenMPI 5.0.9, mpi4jax 0.9 / JAX 0.10.1)**
+
+Local strong-scaling sweep on 24×24×16:
+
+| mode   | ranks | wall/step | steps/s | efficiency |
+|--------|-------|-----------|---------|------------|
+| strong | 1     | 0.00981 s | 102     | 1.000      |
+| strong | 2     | 0.70428 s | 1.42    | **0.007**  |
+| weak   | 1     | 0.01013 s | 99      | 1.000      |
+| weak   | 2     | 0.71384 s | 1.40    | **0.014**  |
+
+**Finding F9**: macOS shared-memory MPI scaling is catastrophically
+poor (~70× slowdown per rank) on this local hardware. Root cause is
+NOT in the dycore but in the mpi4jax 0.9 / JAX 0.10.1 stack
+mismatch — every mpirun launches with the warning:
+`mpi4jax==0.9.0.post1, jax==0.10.1; mpi4jax 0.8.x uses a custom-call
+API deprecated in JAX 0.9 and removed in JAX 0.10. Pin JAX < 0.10
+for MPI workloads.`
+
+step_halo does ~30 packed-halo-exchange calls per outer step (3 RK3
+stages × ~10 exchanges per slow tendency, plus Smag K_m and rho
+hyperdiff re-exchanges). With the slow-path fallback each
+sendrecv is order 20 ms on shared mem → ~600 ms per step at np=2,
+matching the measured 704 ms.
+
+**Net effect**: the production scaling claim is not defensible on
+this laptop. Required next step: either (a) pin `JAX==0.9.x +
+mpi4jax==0.8.x` in a dedicated benchmarking venv, or (b) defer
+real scaling validation to a cluster with native MPI + working
+mpi4jax FFI. **Documenting this as a stack-environment limitation
+in scope**, not a dycore regression.
+
+**R-roadmap status**: R1-R5, R7, R8 bench plumbing ✓. Real scaling
+numbers blocked on stack pin (Codex iter-3 advice flagged the same
+issue). R6 (WENO5 halo) deferred. R10 (cross-grid CRM) pending.
+
 ### 2026-05-26 — iter 5
 
 **Changes**
