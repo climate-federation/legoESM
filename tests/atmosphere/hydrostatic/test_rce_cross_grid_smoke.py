@@ -121,6 +121,89 @@ def _assert_rce_pass(out_dir, label, temp_tol=1.0, max_v_cap=50.0):
     )
 
 
+def _assert_dt_used(out_dir, label, expected_dt):
+    """Pin the dt actually used in ``results.txt`` against the
+    iter-13/26 ladder. Catches a silent auto_dt_rce ladder drift
+    that would still pass the wider envelope checks.
+
+    iter-46: factored out of the iter-44 C72 nightly so the same
+    pattern can be applied to C48 + future N-day nightly tests
+    without duplication.
+    """
+    results_txt = out_dir / "results.txt"
+    fields = _parse_results(out_dir)
+    assert fields is not None, (
+        f"{label}: did not produce results.txt at {results_txt}"
+    )
+    dt_used = float(fields.get("dt", "nan"))
+    assert dt_used == expected_dt, (
+        f"{label}: dt={dt_used} != {expected_dt} (the iter-13/26 "
+        f"ladder branch this test pins). ``auto_dt_rce`` may have "
+        f"drifted; update the ladder + this test together. "
+        f"Source: {results_txt}"
+    )
+
+
+def _assert_max_wind_peak_below(out_dir, label, cap):
+    """Scan ``mean_timeseries.csv`` for the peak ``max_wind`` across
+    ALL logged days (not just the final) and assert below cap.
+
+    iter-46: factored out of the iter-44 C72 nightly so the same
+    Codex iter-44 MEDIUM#2 fix applies to C48 + future N-day
+    nightly tests without duplication. ``_assert_rce_pass`` reads
+    ``notes`` (final-day-only); a mid-run CFL spike that recovered
+    by the last log day would silently pass it.
+
+    Pins the exact column name ``max_wind`` written by
+    ``run_rce.py:668-676`` (Codex iter-45 hardening — was a
+    substring match in iter-44 that could false-match
+    ``max_dvdt``).
+
+    Codex iter-46 MEDIUM: tracks ``seen_max_wind`` so an empty
+    timeseries (header-only, no data rows) or all-unparseable
+    values can't pass the cap vacuously (initial ``peak_v=0.0``
+    would otherwise satisfy ``< cap`` even with zero real data).
+    """
+    mean_csv = out_dir / "mean_timeseries.csv"
+    assert mean_csv.exists(), (
+        f"{label}: mean_timeseries.csv missing — run_rce.py "
+        f"diagnostic emitter regressed. Expected at {mean_csv}"
+    )
+    import csv
+    peak_v = 0.0
+    seen_max_wind = False
+    with open(mean_csv) as fh:
+        reader = csv.DictReader(fh)
+        assert (
+            reader.fieldnames is not None
+            and "max_wind" in reader.fieldnames
+        ), (
+            f"{label}: mean_timeseries.csv at {mean_csv} missing "
+            f"``max_wind`` column. Headers: {reader.fieldnames!r}. "
+            f"run_rce.py:668-676 schema may have changed; if "
+            f"intentional, update this test."
+        )
+        for row in reader:
+            try:
+                peak_v = max(peak_v, abs(float(row["max_wind"])))
+                seen_max_wind = True
+            except (TypeError, ValueError):
+                pass
+    assert seen_max_wind, (
+        f"{label}: mean_timeseries.csv at {mean_csv} had no "
+        f"parseable ``max_wind`` rows (header-only or all "
+        f"unparseable values). The cap check would otherwise pass "
+        f"vacuously against peak_v=0.0."
+    )
+    assert peak_v < cap, (
+        f"{label}: peak max|v|={peak_v:.2f} across the full "
+        f"timeseries exceeds {cap} m/s cap. A mid-run CFL spike "
+        f"that recovered by the final log day would slip past the "
+        f"notes-line (last-day-only) check in ``_assert_rce_pass``; "
+        f"this assertion catches it. Source: {mean_csv}"
+    )
+
+
 # Coverage matrix (iter-13). Includes C48 (iter-13 auto-dt=150
 # branch) so any future regression of the auto-dt ladder trips the
 # BLOWUP gate at 2 days and FAILS this test. iter-13 measurements:
@@ -277,6 +360,19 @@ def test_c48_30day_nightly_validation(tmp_path):
             f"\nstdout tail:\n{result.stdout[-2000:]}"
             f"\nstderr tail:\n{result.stderr[-1000:]}"
         )
+    # iter-46: apply Codex iter-44 MEDIUM#1+#2 hardening (originally
+    # landed for C72 only) to C48 too. Same silent-pass risks
+    # apply: a ladder drift that silently routes C48 onto a
+    # different dt branch (e.g. 75 instead of 150) would still
+    # produce a 30-day run that passes the wider envelope checks
+    # below — but it would NOT be testing the iter-13 dt=150
+    # branch any longer.
+    _assert_dt_used(out_dir, label="C48 30-day", expected_dt=150.0)
+    # And catch a mid-run CFL spike that recovers by day 30
+    # (iter-12 broken-C48 spike reached 240 m/s at days 20-25
+    # then settled — the kind of trajectory the final-day notes
+    # check misses).
+    _assert_max_wind_peak_below(out_dir, label="C48 30-day", cap=25.0)
     # Tighter envelope than the 2-day smoke: iter-15 measured C48
     # 30-day at mean_T_sfc=300.13, max|v|=13.45. Allow ±1 K (3x
     # iter-15 deviation from IC) + max|v| < 25 m/s (almost 2x
@@ -330,58 +426,17 @@ def test_c72_30day_nightly_validation(tmp_path):
             f"\nstdout tail:\n{result.stdout[-2000:]}"
             f"\nstderr tail:\n{result.stderr[-1000:]}"
         )
-    # iter-44 Codex MEDIUM#1: lock the dt actually used. iter-13/26
-    # production contract is dt=75 for N in (48, 72]. If a future
-    # refactor of auto_dt_rce silently changes the ladder, the
-    # envelope check below might still pass but the test would no
-    # longer be validating the dt=75 branch.
-    fields = _parse_results(out_dir)
-    assert fields is not None, "C72 30-day did not produce results.txt"
-    dt_used = float(fields.get("dt", "nan"))
-    assert dt_used == 75.0, (
-        f"C72 30-day: dt={dt_used} != 75.0 (the iter-13/26 dt=75 "
-        f"ladder branch). auto_dt_rce ladder may have drifted; "
-        f"update both the ladder + this test together."
-    )
-    # iter-44 Codex MEDIUM#2: also check max|v| PEAK across the
-    # 30-day timeseries, not just the final day. The
-    # ``_assert_rce_pass`` helper reads ``notes`` (last-day-only).
-    # A CFL crash that recovers by day 30 would slip through; iter-26
-    # measured a monotone rise to ~18 m/s but a regression that
-    # spikes to 100+ at day 15 and damps back by day 30 would not.
-    # iter-45 Codex-hardening: pin the exact column name
-    # ``max_wind`` written by ``run_rce.py:668-676`` instead of the
-    # iter-44 substring heuristic, which would have false-matched
-    # a future column named ``max_dvdt`` (contains both "max" and
-    # "v"). If ``run_rce.py`` renames the column, the test fails
-    # loudly here rather than silently scanning the wrong field.
-    mean_csv = out_dir / "mean_timeseries.csv"
-    assert mean_csv.exists(), (
-        f"C72 30-day: mean_timeseries.csv missing — run_rce.py "
-        f"diagnostic emitter regressed."
-    )
-    import csv
-    peak_v = 0.0
-    with open(mean_csv) as fh:
-        reader = csv.DictReader(fh)
-        assert reader.fieldnames is not None and "max_wind" in reader.fieldnames, (
-            f"C72 30-day: mean_timeseries.csv missing the "
-            f"``max_wind`` column. Headers: {reader.fieldnames!r}. "
-            f"run_rce.py:668-676 schema may have changed; if "
-            f"intentional, update this test."
-        )
-        for row in reader:
-            try:
-                peak_v = max(peak_v, abs(float(row["max_wind"])))
-            except (TypeError, ValueError):
-                pass
-    assert peak_v < 25.0, (
-        f"C72 30-day: peak max|v|={peak_v:.2f} across the "
-        f"30-day timeseries exceeds 25 m/s cap. A mid-run CFL "
-        f"spike that recovered by day 30 would slip past the "
-        f"notes-line (last-day-only) check; this assertion "
-        f"catches it."
-    )
+    # iter-44 Codex MEDIUM#1 (refactored to shared helper in
+    # iter-46): lock the dt actually used. iter-13/26 contract is
+    # dt=75 for N in (48, 72]. Silent ladder drift would still
+    # pass the wider envelope checks below.
+    _assert_dt_used(out_dir, label="C72 30-day", expected_dt=75.0)
+    # iter-44 Codex MEDIUM#2 (refactored to shared helper in
+    # iter-46): check the PEAK max|v| across the 30-day timeseries,
+    # not just the final day. iter-26 measured monotone rise to
+    # ~18 m/s; a regression that spikes to 100+ mid-run and damps
+    # by day 30 would slip through the last-day-only check.
+    _assert_max_wind_peak_below(out_dir, label="C72 30-day", cap=25.0)
     # Tighter envelope than the 2-day C96 smoke: iter-26 measured
     # C72 30-day at mean_T_sfc=299.81 (Δ=-0.19), max|v|=17.85.
     # Allow ±1 K (5x iter-26 |Δ|) + max|v| < 25 m/s (1.4x iter-26

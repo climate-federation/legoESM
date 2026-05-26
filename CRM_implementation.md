@@ -222,6 +222,59 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 46
+
+**Factored iter-44 hardening into shared helpers + propagated to
+C48 30-day nightly.**
+
+iter-44 landed two Codex-MEDIUM fixes inline in the C72 30-day
+nightly: dt-used assertion (#1) + ``mean_timeseries.csv``
+peak-max-wind scan (#2). C48 30-day nightly never got the same
+hardening — same silent-pass risk (a ladder drift routing C48 to
+the wrong dt branch, or a mid-run max\|v\| spike that recovered
+by day 30, would slip through the loose final-day envelope).
+
+**Factored two shared helpers** in
+``tests/atmosphere/hydrostatic/test_rce_cross_grid_smoke.py``:
+
+* ``_assert_dt_used(out_dir, label, expected_dt)``: parses
+  ``results.txt``, asserts ``dt == expected_dt``. Pins the
+  iter-13/26 ladder contract.
+* ``_assert_max_wind_peak_below(out_dir, label, cap)``: scans
+  ``mean_timeseries.csv`` for the peak ``max_wind`` across all
+  logged days, asserts below cap. Pins the exact column name
+  ``max_wind`` (Codex iter-45 hardening retained).
+
+Both helpers applied to BOTH the C48 + C72 30-day nightlies
+with the appropriate expected_dt (150.0 for C48, 75.0 for C72)
+and the same cap (25.0 m/s — generous margin over iter-15/26
+measurements).
+
+**Codex iter-46 review** caught 1 MEDIUM + 1 LOW:
+
+* **MEDIUM** — ``_assert_max_wind_peak_below`` would PASS vacuously
+  on an empty timeseries (header-only csv or all-unparseable
+  rows): ``peak_v`` initialised to ``0.0`` always satisfies
+  ``< cap``. Fixed: added a ``seen_max_wind`` boolean tracking
+  at least one successful row parse, asserted before the cap
+  check.
+* **LOW** — helper failure messages omitted the diagnostic file
+  paths. Fixed: every assertion message now embeds the
+  ``results.txt`` / ``mean_timeseries.csv`` path so a CI
+  failure points the developer directly at the artifact to
+  inspect.
+
+**Tests**:
+* Fast suite: 5/5 PASS in 211 s (no regression).
+* Slow tests: 7 total CRM-relevant slow tests now
+  (test_rce_cross_grid_smoke: c96 2-day, blowup gate,
+  c48 30-day, c72 30-day; test_plane_crm_end_to_end_smoke:
+  production 132x132 envelope, production 132x132 with rad).
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-46 DRY refactor of
+the iter-44/45 hardening + C48 propagation + Codex MEDIUM fix),
+R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 45
 
 **Propagate iter-44 Codex HIGH-class timeout fix to the C96 2-day
