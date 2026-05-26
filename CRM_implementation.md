@@ -222,6 +222,41 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 17
+
+**Codex MEDIUM #4 + new BLOWUP-gate regression landed**
+
+iter-16 addressed Codex HIGH/MEDIUM/LOW on tests but left MEDIUM #4
+open: "the C48 30-day validation (~500 s wall) has no CI backing".
+
+Two new tests in ``test_rce_cross_grid_smoke.py``, both marked
+``@pytest.mark.slow`` (deselected by default via the existing
+``addopts = "-v --tb=short -m 'not slow'"`` in ``pyproject.toml``):
+
+* ``test_blowup_gate_fires_on_supersonic_winds`` — drives C48
+  30-day with the iter-13-banned ``dt=300`` to verify
+  ``run_rce.py`` now reports ``status: FAIL`` + exits non-zero
+  when the 200 m/s BLOWUP gate trips. Locks in the iter-13
+  threshold fix.
+* ``test_c48_30day_nightly_validation`` — replays iter-15's C48
+  30-day measurement at auto-dt=150 and asserts the production
+  envelope (``mean_T_sfc`` within ±0.5 K of IC, ``max|v|`` ≤
+  20 m/s) holds. Catches slow radiative-convective-equilibration
+  regressions that the 2-day smoke can't see.
+
+Both tests run nightly via ``pytest -m slow`` (~10 min wall each).
+Default ``pytest tests/`` skips them.
+
+Default smoke suite: **5 passed, 2 deselected in 148 s**.
+
+**C96 30-day** still running in background (37 min CPU as of
+iter-16 commit, day 5 stable at mean_T_sfc=299.90, max|v|=7.99
+m/s). Validates the N>48 → dt=75 branch of the iter-13 ladder.
+ETA ~5-6 hours wall; result will land in a later iteration.
+
+**R-roadmap status**: R1-R8 ✓, R10 ✓ (now with nightly slow tests
+covering the production envelope), R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 16
 
 **Codex caught 1 HIGH + 1 MEDIUM + 1 LOW on iter-14/15 — all fixed.**

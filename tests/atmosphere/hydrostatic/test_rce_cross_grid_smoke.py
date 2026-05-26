@@ -147,3 +147,103 @@ def test_rce_2day_smoke_passes(tmp_path, grid_type, discretization, resolution):
         f"though the BLOWUP gate at 200 m/s has not fired yet. "
         f"Bisect against the iter-13 auto-dt ladder + CRM_implementation.md."
     )
+
+
+@pytest.mark.slow
+def test_blowup_gate_fires_on_supersonic_winds(tmp_path):
+    """Regression for the iter-13 BLOWUP threshold (max_v > 200 m/s).
+
+    Drives a deliberately-unstable C48 run with the OLD broken
+    dt=300 default to verify scripts/run_rce.py now:
+      (a) writes status: FAIL
+      (b) exits with non-zero return code
+
+    This was iter-13's exact failure mode at C48; the threshold was
+    500 m/s pre-iter-13 and the run reported PASS while max|v| was
+    236 m/s. The threshold is now 200 m/s; this test locks it in.
+    """
+    out_dir = tmp_path / "c48_dt300_blowup"
+    result = _run_rce(
+        grid_type="cubed_sphere",
+        discretization="cdgrid",
+        resolution=48,
+        days=30,
+        output_dir=out_dir,
+    )
+    # _run_rce uses the auto-dt heuristic which (post-iter-13) picks
+    # dt=150 for C48 — safe. To reproduce the blowup we need to force
+    # dt=300. Re-invoke directly.
+    import sys
+    cmd = [
+        sys.executable, str(RUN_RCE),
+        "--grid-type", "cubed_sphere", "--discretization", "cdgrid",
+        "--resolution", "48", "--days", "30", "--diag-days", "5",
+        "--dt", "300", "--nlev", "20", "--output", str(out_dir),
+    ]
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    env["JAX_ENABLE_X64"] = "1"
+    result = subprocess.run(
+        cmd, env=env, capture_output=True, text=True, timeout=1800,
+    )
+    # When run_rce.py detects BLOWUP it: writes status: FAIL +
+    # exits with code 1 (iter-101 contract).
+    assert result.returncode != 0, (
+        "C48 30-day at the iter-13-banned dt=300 should BLOWUP "
+        "(iter-13 measured max_wind=236 m/s by day 20), making "
+        f"run_rce.py exit non-zero. Got returncode={result.returncode}. "
+        "Either the BLOWUP threshold is too loose again, or "
+        "C48-dt=300 is stable now (unexpected — re-verify F11)."
+    )
+    fields = _parse_results(out_dir)
+    assert fields is not None, "C48-dt=300 didn't even write results.txt"
+    assert fields.get("status") == "FAIL", (
+        f"C48-dt=300: status={fields.get('status')} (want FAIL). "
+        f"notes={fields.get('notes')}"
+    )
+
+
+@pytest.mark.slow
+def test_c48_30day_nightly_validation(tmp_path):
+    """SLOW nightly test (~10 min wall): runs C48 RCE for 30 days at
+    iter-13 auto-dt=150 and asserts the iter-15 measured PASS
+    envelope (mean_T_sfc within ±0.5 K of IC, max\\|v\\| ≤ 20 m/s).
+
+    Skipped by default (`@pytest.mark.slow`). Run nightly via:
+        pytest -m slow tests/atmosphere/hydrostatic/
+
+    Catches slow radiative-convective-equilibration regressions
+    that the 2-day smoke can't see — particularly a slow CFL
+    growth that exceeds the 50 m/s 2-day cap by day 10-15 (per
+    the iter-12 broken C48 timeseries).
+    """
+    out_dir = tmp_path / "c48_30d"
+    result = _run_rce(
+        grid_type="cubed_sphere",
+        discretization="cdgrid",
+        resolution=48,
+        days=30,
+        output_dir=out_dir,
+    )
+    if result.returncode != 0:
+        pytest.fail(
+            f"C48 30-day at iter-13 auto-dt failed: rc={result.returncode}"
+            f"\nstdout tail:\n{result.stdout[-2000:]}"
+            f"\nstderr tail:\n{result.stderr[-1000:]}"
+        )
+    fields = _parse_results(out_dir)
+    assert fields and fields.get("status") == "PASS", (
+        f"C48 30-day: {fields}"
+    )
+    nd = _parse_notes(fields.get("notes", ""))
+    t_sfc = nd.get("mean_T_sfc")
+    max_v = nd.get("max|v|")
+    assert t_sfc is not None and max_v is not None
+    assert abs(t_sfc - 300.0) < 0.5, (
+        f"C48 30-day mean_T_sfc={t_sfc:.2f} K outside iter-15 envelope "
+        f"(300.13 ± 0.5)"
+    )
+    assert max_v < 20.0, (
+        f"C48 30-day max|v|={max_v:.2f} m/s outside iter-15 envelope "
+        f"(13.45 ± 6.55)"
+    )
