@@ -1,4 +1,4 @@
-"""Unit tests for the shared helpers in ``test_rce_cross_grid_smoke.py``.
+"""Unit tests for the shared helpers in ``tests.atmosphere.hydrostatic._rce_helpers``.
 
 iter-46 factored ``_assert_dt_used`` + ``_assert_max_wind_peak_below``
 out of the iter-44 C72 nightly so the same regression pattern could

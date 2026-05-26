@@ -15,7 +15,6 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -25,12 +24,17 @@ import pytest
 # module — previously, the unit tests cross-imported from this test
 # file which triggered pytest collection of THIS file as a side
 # effect of the import.
+#
+# iter-80: removed unused REPO_ROOT + _parse_notes + Path imports
+# (Codex iter-80 MEDIUM): both were imported but never referenced
+# in this file. RUN_RCE is still used by test_blowup_gate which
+# constructs its own subprocess cmd (rather than going through
+# _run_rce); the others (_run_rce / _parse_results / _assert_*) are
+# all used by test bodies.
 from tests.atmosphere.hydrostatic._rce_helpers import (
-    REPO_ROOT,
     RUN_RCE,
     _run_rce,
     _parse_results,
-    _parse_notes,
     _assert_rce_pass,
     _assert_dt_used,
     _assert_max_wind_peak_below,

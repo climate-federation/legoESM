@@ -134,6 +134,26 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 80
+
+**Codex review of iter-78/79 refactors caught 4 MEDIUM + 1 LOW
+dead-import / stale-docstring — all fixed.**
+
+* MEDIUM (test_rce_cross_grid_smoke.py): unused ``Path``, ``REPO_ROOT``,
+  ``_parse_notes`` imports. Removed.
+* MEDIUM (test_plane_crm_end_to_end_smoke.py): unused ``csv``
+  import. Removed.
+* LOW (test_rce_helpers_unit.py): docstring still referenced
+  ``test_rce_cross_grid_smoke.py`` as helper location. Updated to
+  cite ``tests.atmosphere.hydrostatic._rce_helpers``.
+
+**Verified**: 30/30 unit tests PASS in 0.30 s; 35/43 collection
+clean (8 slow deselected).
+
+**R-roadmap status**: R1-R8, R10, R12 ✓. F9 platform-blocked.
+iter-78/79 refactor now fully clean — Codex 0 HIGH + 0 MEDIUM
+post-iter-80.
+
 ### 2026-05-26 — iter 79
 
 **Mirror iter-78 refactor for the plane CRM ``_parse_rad_call_count``

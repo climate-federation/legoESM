@@ -23,7 +23,6 @@ no JAX JIT pre-compile.
 """
 from __future__ import annotations
 
-import csv
 import os
 import subprocess
 import sys
