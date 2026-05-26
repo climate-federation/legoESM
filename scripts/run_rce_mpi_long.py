@@ -613,6 +613,25 @@ def main():
         raise SystemExit(
             f"error: --dt rejected: must be positive, got {args.dt!r}"
         )
+    # iter-69: positive-int guards for grid dims + substep counts.
+    # Without these, ``--nx 0`` would crash deep in plane_mpi
+    # ``make_plane_pencil_layout`` with an opaque
+    # ``ValueError: n_ranks_x=1 exceeds nx_global=0``. argparse
+    # type=int accepts 0/negative for these args.
+    _POSITIVE_INTS = {
+        "--nx": args.nx,
+        "--ny": args.ny,
+        "--nlev": args.nlev,
+        "--n-acoustic-substeps": args.n_acoustic_substeps,
+        "--n-physics-substeps": args.n_physics_substeps,
+        "--log-every-steps": args.log_every_steps,
+    }
+    for _flag, _val in _POSITIVE_INTS.items():
+        if _val <= 0:
+            raise SystemExit(
+                f"error: {_flag} rejected: must be positive integer, "
+                f"got {_val!r}"
+            )
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     n_ranks = comm.Get_size()

@@ -134,6 +134,36 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 69
+
+**Positive-int guards for grid + substep CLI args (parallel to
+iter-67/68 float NaN/inf guards).**
+
+Same UX issue as iter-67 NaN-float rejection but for int args:
+``--nx 0`` would crash deep in ``plane_mpi.make_plane_pencil_layout``
+with an opaque ``ValueError: n_ranks_x=1 exceeds nx_global=0``.
+argparse ``type=int`` accepts 0/negative without complaint.
+
+iter-69 adds positive-int guards in ``main()`` (same block as
+iter-67/68 finite/positive validation) for:
+* ``--nx``, ``--ny``, ``--nlev`` (grid dims)
+* ``--n-acoustic-substeps``, ``--n-physics-substeps`` (substep
+  counts must be >= 1)
+* ``--log-every-steps`` (avoid divide-by-zero in the log gate)
+
+``--qv-noise-seed`` excluded (0 is the valid deterministic default).
+
+**Verified** (direct smoke):
+* ``--nx 0`` → ``error: --nx rejected: must be positive integer,
+  got 0`` exit 1.
+
+**Extended regression test**:
+``test_plane_crm_driver_rejects_nan_inf_numeric_args`` now has 13
+parametric cases (was 7) covering all the int guards too.
+
+**R-roadmap status**: R1-R8, R10, R12 ✓ (with iter-69 closing the
+positive-int CLI gap). F9 platform-blocked.
+
 ### 2026-05-26 — iter 68
 
 **Refactor iter-67 hardcoded float-arg list to auto-detect via

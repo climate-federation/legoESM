@@ -710,6 +710,7 @@ def test_plane_crm_production_scale_132x132_with_radiation(tmp_path):
 
 
 @pytest.mark.parametrize("flag,value,expected_err", [
+    # iter-67/68 float NaN/inf cases.
     ("--dt", "nan", "must be finite"),
     ("--dt", "inf", "must be finite"),
     ("--dt", "0.0", "must be positive"),
@@ -717,6 +718,13 @@ def test_plane_crm_production_scale_132x132_with_radiation(tmp_path):
     ("--hyperdiff", "nan", "must be finite"),
     ("--smag-cs", "inf", "must be finite"),
     ("--acoustic-off-centering", "nan", "must be finite"),
+    # iter-69 positive-int guards: grid dims + substep counts.
+    ("--nx", "0", "must be positive integer"),
+    ("--ny", "-1", "must be positive integer"),
+    ("--nlev", "0", "must be positive integer"),
+    ("--n-acoustic-substeps", "0", "must be positive integer"),
+    ("--n-physics-substeps", "-3", "must be positive integer"),
+    ("--log-every-steps", "0", "must be positive integer"),
 ])
 def test_plane_crm_driver_rejects_nan_inf_numeric_args(
     tmp_path, flag, value, expected_err,
