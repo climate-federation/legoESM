@@ -222,6 +222,65 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 41
+
+**iter-15/16 short smokes propagated the iter-39 / iter-40 hardening.**
+
+Codex iter-39 HIGH#2 fix in iter-39 only touched the iter-38/iter-39
+slow tests. The 12×12 short smokes ``test_plane_crm_short_smoke_clean_ic``
+(iter-15) and ``test_plane_crm_short_smoke_with_radiation`` (iter-16)
+were still using the misleading ``--rad-call-interval-s 1e9`` /
+silent-pass-on-broken-radiation pattern. iter-41 closes that gap.
+
+**Changes** (``test_plane_crm_end_to_end_smoke.py``):
+* ``_run_driver`` (iter-15 dycore-only): swapped
+  ``--rad-call-interval-s 1e9`` → ``--no-radiation``. Now truly
+  dycore-only.
+* ``test_plane_crm_short_smoke_clean_ic`` (iter-15): added
+  ``rad_calls == 0`` assertion + re-verification block documenting
+  that the existing anchors (CWV=55.001 mm, max\|w\| < 0.5,
+  CWV drift < 0.1, MSE drift < 1e-3) still hold under genuine
+  ``--no-radiation`` — verified by measurement:
+  ```
+  step  1: CWV=55.001 mm, MSE=4.2049e9, max|w|=0.0
+  step 80: CWV=55.001 mm, MSE=4.2049e9, max|w|=7.07e-4 m/s
+  ```
+  All anchors hold with 700× margin on max\|w\|.
+* ``test_plane_crm_short_smoke_with_radiation`` (iter-16): added
+  an EXACT-count rad_calls assertion (Codex iter-41 MEDIUM fix:
+  ``rad_calls > 0`` was too loose — a broken cadence pinning
+  rad_calls=1 would still pass). Now uses the same derivation
+  pattern as iter-40:
+  ```python
+  expected_rad_calls = 1 + (total_steps - 1) // every
+  ```
+  For days=0.002, dt=5, rad-interval=30: total_steps=34, every=6,
+  expected=6 (fires at steps 1, 7, 13, 19, 25, 31).
+* Module docstring: ``55.55 mm`` IC reference replaced with the
+  per-grid pair (``55.001 mm for the 12x12 smoke;
+  55.550 mm for the 132x132 production-scale slow tests``).
+  Codex iter-41 LOW fix.
+
+**Codex iter-41 review** caught 1 HIGH (anchors not recalibrated
+under --no-radiation), 1 MEDIUM (rad_calls > 0 too loose), 1 LOW
+(module docstring stale). All three addressed.
+
+**Measurements** (12×12×20 dx=2km dt=5s):
+* iter-15 (``--no-radiation``, 86 steps): ``rad_calls=0`` ✓,
+  CWV+MSE unchanged from IC to 4 sig figs, max\|w\| @ step 80
+  = 7.07e-4 m/s.
+* iter-16 (``--rad-call-interval-s 30``, 34 steps): ``rad_calls=6`` ✓,
+  schedule matches derived count.
+
+**Wall time impact**: iter-15 dropped from 87s → ~17s (skipping
+slow_physics_fn JIT compile saves significant time). Combined fast
+tests now 2 PASS in 30 s (was 87s before iter-41).
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-41 propagating
+iter-39/40 hardening to 12×12 short smokes), R6 ✓. F9
+platform-blocked. The plane CRM test pyramid is now consistently
+calibrated against the iter-39 ``--no-radiation`` semantics.
+
 ### 2026-05-26 — iter 40
 
 **Radiation call count surfaced + tests assert it (Codex iter-39

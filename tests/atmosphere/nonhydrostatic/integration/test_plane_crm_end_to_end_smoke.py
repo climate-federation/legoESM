@@ -13,9 +13,10 @@ hyperdiff=5e6, dt=5 s) and asserts:
 3. ``MSE`` drift stays below 1e-3 relative (production envelope is
    ~7e-5 over 28 min sim at 132x132; the same per-step drift on a
    12x12 mesh extrapolates well below 1e-3 over the smoke window).
-4. ``CWV`` doesn't drift more than 0.1 mm from IC (55.55 mm) — the
-   F8 IC is dynamically frozen until surface flux + radiation
-   warm the column on hour-day timescales.
+4. ``CWV`` doesn't drift more than 0.1 mm from IC (55.001 mm for the
+   12x12 smoke; 55.550 mm for the 132x132 production-scale slow
+   tests) — the F8 IC is dynamically frozen until surface flux +
+   radiation warm the column on hour-day timescales.
 
 Wall budget: ~30 s on M5 Pro (rough estimate). Single-rank, no MPI,
 no JAX JIT pre-compile.
@@ -36,7 +37,13 @@ DRIVER = REPO_ROOT / "scripts" / "run_rce_mpi_long.py"
 
 
 def _run_driver(output_dir):
-    """Invoke run_rce_mpi_long.py with the F8/F10 production defaults."""
+    """Invoke run_rce_mpi_long.py with the F8/F10 production defaults.
+
+    iter-41: switched the dycore-only path from
+    ``--rad-call-interval-s 1e9`` (Codex iter-39 HIGH#2: fires once at
+    step 1 + caches) to the real ``--no-radiation`` flag. The smoke
+    now truly excludes radiation.
+    """
     env = os.environ.copy()
     # FORCE JAX_PLATFORMS=cpu (override any exported value). iter-7
     # found that JAX_PLATFORMS=metal triggers MLIR legalisation
@@ -59,7 +66,7 @@ def _run_driver(output_dir):
         "--qv-noise-amp", "0.0",
         "--log-every-steps", "20",
         "--n-physics-substeps", "1",
-        "--rad-call-interval-s", "1e9",  # disable radiation in smoke
+        "--no-radiation",
         "--output", str(output_dir),
     ]
     result = subprocess.run(
@@ -110,6 +117,11 @@ def test_plane_crm_short_smoke_clean_ic(tmp_path):
     """Plane CRM with F8 clean IC + F10 dt=5 s + iter-13 hardened
     defaults must complete a 7-minute smoke window with all
     diagnostics in the production envelope.
+
+    iter-41: now uses ``--no-radiation`` (was previously
+    ``--rad-call-interval-s 1e9`` which Codex iter-39 HIGH#2 showed
+    actually fires radiation once at step 1 + caches the tendency
+    for the full run). The dycore-only contract is now genuine.
     """
     out_dir = tmp_path / "rce_plane_smoke"
     result = _run_driver(out_dir)
@@ -122,6 +134,32 @@ def test_plane_crm_short_smoke_clean_ic(tmp_path):
         )
     rows = _read_log(out_dir)
     assert rows, "log.txt produced no diagnostic rows"
+
+    # iter-41 dycore-only contract: --no-radiation must yield
+    # rad_calls=0. If a future regression strips the --no-radiation
+    # gate or drops the rad_calls counter from the Done. line, this
+    # fires before the envelope checks below.
+    rad_calls = _parse_rad_call_count(result.stdout)
+    assert rad_calls == 0, (
+        f"plane CRM dycore-only smoke: driver reported "
+        f"rad_calls={rad_calls!r}, expected 0 under --no-radiation. "
+        f"Either the --no-radiation gate regressed or the rad_calls "
+        f"counter is missing from the Done. line.\n"
+        f"stdout tail:\n{result.stdout[-500:]}"
+    )
+
+    # iter-41 anchor re-verification (Codex iter-41 HIGH fix): the
+    # numerical anchors below were originally measured with
+    # ``--rad-call-interval-s 1e9`` (one cached radiation tendency
+    # held for 86 steps). After switching to ``--no-radiation`` the
+    # 12x12 measurements at this dt/dz are:
+    #   step  1: CWV=55.001 mm, MSE=4.2049e9, max|w|=0.0
+    #   step 80: CWV=55.001 mm, MSE=4.2049e9, max|w|=7.07e-4 m/s
+    # Anchors below remain valid because (a) radiative cooling over
+    # 7 min sim on the 12x12 Wing IC is below the measurement
+    # precision in the log (4 sig figs) so CWV/MSE are unchanged,
+    # and (b) max|w| at step 80 is 7e-4 m/s vs the 0.5 cap = 700x
+    # safety margin. Verified iter-41 run: 2 PASS in 33 s.
 
     max_w_final = float(rows[-1]["max|w|"])
     cwv_first = float(rows[0]["CWV_mean"])
@@ -211,7 +249,16 @@ def test_plane_crm_short_smoke_with_radiation(tmp_path):
     call interval. Only asserts the driver exits cleanly + ``max|w|``
     stays bounded — radiation can drive larger drift than the
     dycore-only case over the same window, so the CWV/MSE caps
-    above are not appropriate here."""
+    above are not appropriate here.
+
+    iter-41: also asserts ``rad_calls > 0`` so a silently-disabled
+    radiation path on the 12x12 smoke fails immediately. With
+    days=0.002 → 34 outer steps and rad-interval=30s/dt=5s
+    (every=6), the tick fires at steps 1, 7, 13, 19, 25, 31 = 6
+    calls. The lower-bound assertion (>0) keeps the test robust to
+    minor day/dt fiddling; the schedule arithmetic itself is
+    pinned by the iter-40 production-scale tests.
+    """
     out_dir = tmp_path / "rce_plane_smoke_rad"
     result = _run_driver_with_radiation(out_dir)
     if result.returncode != 0:
@@ -221,6 +268,29 @@ def test_plane_crm_short_smoke_with_radiation(tmp_path):
             f"stdout tail:\n{result.stdout[-2000:]}\n"
             f"stderr tail:\n{result.stderr[-1000:]}"
         )
+    # iter-41 hardening: radiation tick must fire the derived
+    # expected number of times. Codex iter-41 MEDIUM fix: tighten
+    # from rad_calls > 0 (a broken cadence pinning rad_calls=1
+    # would still pass) to an exact count derived from CLI args.
+    # days=0.002 → total_steps=34; rad-interval=30, dt=5 → every=6;
+    # expected = 1 + (34 - 1) // 6 = 6 (fires at steps 1, 7, 13,
+    # 19, 25, 31).
+    dt_s = 5.0
+    rad_interval_s = 30.0
+    days = 0.002
+    total_steps = int(days * 86400.0 / dt_s)
+    every = max(1, round(rad_interval_s / dt_s))
+    expected_rad_calls = 1 + (total_steps - 1) // every
+    rad_calls = _parse_rad_call_count(result.stdout)
+    assert rad_calls == expected_rad_calls, (
+        f"plane CRM radiation smoke: driver reported "
+        f"rad_calls={rad_calls!r}, expected {expected_rad_calls} "
+        f"(dt={dt_s}, rad-interval={rad_interval_s}, "
+        f"total_steps={total_steps} → every={every}). Either the "
+        f"radiation tick gate regressed or the rad_calls counter "
+        f"is missing.\n"
+        f"stdout tail:\n{result.stdout[-500:]}"
+    )
     rows = _read_log(out_dir)
     assert rows, "log.txt produced no diagnostic rows with radiation on"
     max_w_final = float(rows[-1]["max|w|"])
