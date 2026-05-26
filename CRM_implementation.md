@@ -222,6 +222,57 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 11
+
+**F9 update — mpi4jax/JAX scaling fundamentally blocked on macOS**
+
+Iter-10 introduced `requirements_mpi.txt` + `setup_mpi_venv.sh` with a
+JAX 0.9 + mpi4jax 0.8 pin that the iter-6 measurements suggested
+would deliver the missing scaling. iter-11 measured the actual result.
+
+**Setup ran successfully**: `.venv-mpi` built with jax 0.9.2 + jaxlib
+0.9.2 + mpi4jax 0.8.1.post2 + mpi4py 4.1.2 + numpy 2.2.6 — no
+resolver conflicts.
+
+**Bench result on `.venv-mpi` (strong np=1 vs np=2, 24×24×16)**:
+
+| stack                              | np=1 [s/step] | np=2 [s/step] | speedup |
+|------------------------------------|---------------|---------------|---------|
+| default `.venv` (JAX 0.10.1, mpi4jax 0.9.0.post1) | 0.010         | 0.704         | 0.014   |
+| `.venv-mpi`  (JAX 0.9.2, mpi4jax 0.8.1.post2)    | 0.010         | 0.693         | 0.014   |
+
+**No improvement.** Bench output shows XLA printing
+`API_VERSION_STATUS_RETURNING is not supported by XLA:CPU` on every
+mpi_sendrecv + mpi_allreduce. The pin solved the iter-6 "JAX 0.10
+removed CustomCallV1" issue but **JAX 0.8 already dropped the
+STATUS_RETURNING API that mpi4jax 0.8 emits**.
+
+Tried jaxlib 0.4.34 + mpi4jax 0.5.4 (older custom-call API) — legoesm
+runtime hard-rejects mpi4jax < 0.8 (`runtime/...mpi4jax >= 0.8 < 0.9
+because older versions use incompatible token semantics`). So no
+working combination exists on macOS Python 3.13.
+
+**Codex 2026-05 review** of iter-10 flagged the missing
+`mpi4jax==0.8.4` version (latest 0.8.x is 0.8.1.post2). Pin updated.
+
+**F9 conclusion**: real MPI scaling on this hardware is impossible
+until mpi4jax ships its FFI rewrite (tracking
+https://github.com/mpi4jax/mpi4jax). `requirements_mpi.txt` updated
+with the full platform-status note so a future user doesn't waste
+time chasing the same dead end. Real scaling validation gated on:
+* (a) cluster Linux with an older jaxlib that still supports
+  CustomCallV2, OR
+* (b) mpi4jax FFI release.
+
+**Net**: F9 is a STACK LIMITATION, not a legoesm dycore issue. The
+DD code path itself (R7 mass fixer + step_halo) is verified correct
+under both stacks — the slow numbers are 100% mpi4jax overhead.
+
+**R-roadmap status unchanged**: R1-R8, R10 ✓, R6 ✓. F9 documented
+as platform-blocked. End-to-end 30-day production validation
+remains the last item; doable on single-rank at ~6.4 days wall
+budget (132×132 measured at 1.07 s/step).
+
 ### 2026-05-26 — iter 10
 
 **Production-grid 132×132 smoke at dt=5 s: PASS**
