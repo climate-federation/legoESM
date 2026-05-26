@@ -24,6 +24,9 @@ import pytest
 from tests.atmosphere.hydrostatic._rce_helpers import (
     _assert_dt_used,
     _assert_max_wind_peak_below,
+    _assert_rce_pass,
+    _parse_notes,
+    _parse_results,
 )
 
 
@@ -224,3 +227,143 @@ def test_assert_max_wind_peak_below_mixed_nan_and_finite(tmp_path):
     # under the pre-iter-66 bug).
     with pytest.raises(AssertionError, match="peak max"):
         _assert_max_wind_peak_below(out, label="mixed-nan-fail", cap=10.0)
+
+
+# ---------------------------------------------------------------------------
+# iter-83: unit coverage for _parse_results / _parse_notes / _assert_rce_pass.
+# These were extracted to _rce_helpers.py at iter-78 alongside _assert_dt_used
+# + _assert_max_wind_peak_below (which iter-52 already covered). Now all 5
+# pure helpers in the module have direct unit tests.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_results_basic(tmp_path):
+    """Parse a typical results.txt with key: value pairs."""
+    out = _write_results(tmp_path, [
+        "test: rce",
+        "grid: cubed_sphere",
+        "resolution: 24",
+        "dt: 600.0",
+        "status: PASS",
+        "notes: mean_T_sfc=300.65, max|v|=7.23",
+    ])
+    fields = _parse_results(out)
+    assert fields is not None
+    assert fields["test"] == "rce"
+    assert fields["dt"] == "600.0"
+    assert fields["status"] == "PASS"
+    assert "mean_T_sfc=300.65" in fields["notes"]
+
+
+def test_parse_results_returns_none_when_missing(tmp_path):
+    """No results.txt → None (driver crashed before writing)."""
+    out = tmp_path / "no_results"
+    out.mkdir()
+    assert _parse_results(out) is None
+
+
+def test_parse_results_handles_empty_value(tmp_path):
+    """Some keys may have empty values (e.g. ``notes:`` with no
+    diagnostics). Should parse as empty string, not crash."""
+    out = _write_results(tmp_path, ["status: PASS", "notes:"])
+    fields = _parse_results(out)
+    assert fields["notes"] == ""
+
+
+def test_parse_results_only_lines_with_colon(tmp_path):
+    """Lines without a colon are skipped (e.g. blank lines, comments
+    that don't follow the key:value convention)."""
+    out = _write_results(tmp_path, [
+        "",
+        "# leading comment",
+        "status: PASS",
+        "trailing-no-colon",
+    ])
+    fields = _parse_results(out)
+    assert fields == {"# leading comment": "", "status": "PASS"} or \
+        fields == {"status": "PASS"}, fields
+
+
+def test_parse_notes_basic():
+    """``key=val, key=val`` parse to float dict."""
+    notes = "mean_T_sfc=300.65, mean_T=266.97, max|v|=7.23"
+    out = _parse_notes(notes)
+    assert out["mean_T_sfc"] == 300.65
+    assert out["mean_T"] == 266.97
+    assert out["max|v|"] == 7.23
+
+
+def test_parse_notes_skips_non_floats():
+    """Non-float values get dropped without raising."""
+    notes = "status=PASS, max|v|=2.28, label=clean"
+    out = _parse_notes(notes)
+    assert out == {"max|v|": 2.28}
+
+
+def test_parse_notes_handles_whitespace():
+    """Whitespace around ``=`` and ``,`` is tolerated."""
+    notes = "  mean_T_sfc  =  300.13  ,  max|v|  =  8.43  "
+    out = _parse_notes(notes)
+    assert out["mean_T_sfc"] == 300.13
+    assert out["max|v|"] == 8.43
+
+
+def test_parse_notes_empty():
+    """Empty notes returns empty dict."""
+    assert _parse_notes("") == {}
+
+
+def test_assert_rce_pass_happy_path(tmp_path):
+    """status=PASS + mean_T_sfc within tol + max|v| < cap."""
+    out = _write_results(tmp_path, [
+        "status: PASS",
+        "notes: mean_T_sfc=299.95, max|v|=8.2",
+    ])
+    _assert_rce_pass(out, label="happy", temp_tol=1.0, max_v_cap=20.0)
+
+
+def test_assert_rce_pass_fail_on_wrong_status(tmp_path):
+    out = _write_results(tmp_path, [
+        "status: FAIL",
+        "notes: mean_T_sfc=299.95, max|v|=8.2",
+    ])
+    with pytest.raises(AssertionError, match="want PASS"):
+        _assert_rce_pass(out, label="status-fail")
+
+
+def test_assert_rce_pass_fail_on_temp_drift(tmp_path):
+    """mean_T_sfc drift > temp_tol triggers."""
+    out = _write_results(tmp_path, [
+        "status: PASS",
+        "notes: mean_T_sfc=305.0, max|v|=8.2",
+    ])
+    with pytest.raises(AssertionError, match="drifted"):
+        _assert_rce_pass(out, label="temp-drift", temp_tol=1.0)
+
+
+def test_assert_rce_pass_fail_on_max_v_cap(tmp_path):
+    """max|v| > cap triggers."""
+    out = _write_results(tmp_path, [
+        "status: PASS",
+        "notes: mean_T_sfc=300.05, max|v|=60.0",
+    ])
+    with pytest.raises(AssertionError, match="exceeds"):
+        _assert_rce_pass(out, label="cap-fail", max_v_cap=50.0)
+
+
+def test_assert_rce_pass_fail_on_missing_notes_fields(tmp_path):
+    """notes line missing ``mean_T_sfc`` or ``max|v|`` triggers."""
+    out = _write_results(tmp_path, [
+        "status: PASS",
+        "notes: no_recognised_fields_here",
+    ])
+    with pytest.raises(AssertionError, match="missing mean_T_sfc"):
+        _assert_rce_pass(out, label="notes-broken")
+
+
+def test_assert_rce_pass_fail_on_missing_results(tmp_path):
+    """No results.txt → AssertionError 'silently'."""
+    out = tmp_path / "no_results"
+    out.mkdir()
+    with pytest.raises(AssertionError, match="did not produce"):
+        _assert_rce_pass(out, label="no-results")

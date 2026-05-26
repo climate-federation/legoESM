@@ -147,6 +147,39 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 83
+
+**Extend iter-52 unit coverage to remaining iter-78 helpers
+(_parse_results, _parse_notes, _assert_rce_pass).**
+
+iter-78 extracted 6 helpers to ``_rce_helpers.py``. iter-52 unit
+tests cover ``_assert_dt_used`` + ``_assert_max_wind_peak_below``.
+The other 4 (``_run_rce``, ``_parse_results``, ``_parse_notes``,
+``_assert_rce_pass``) had only indirect coverage via the slow
+nightly tests (100-2400 s each).
+
+iter-83 adds 14 direct unit tests covering 3 of the 4:
+
+* ``_parse_results`` (4 cases): basic key:value parse; missing
+  results.txt → None; empty value tolerated; lines without colon
+  skipped.
+* ``_parse_notes`` (4 cases): basic float-extract from notes line;
+  non-float values dropped (not raised); whitespace tolerated;
+  empty notes → empty dict.
+* ``_assert_rce_pass`` (5 cases): happy path; status != PASS →
+  fail; temp drift > tol → fail; max\|v\| > cap → fail; missing
+  notes fields → fail; missing results.txt → fail.
+
+``_run_rce`` is subprocess-only — direct unit-testing not
+practical without spinning up the driver (covered by all the
+integration tests that call it).
+
+**Tests**: 32/32 PASS in 0.58 s (was 18 in iter-52 + iter-66).
+
+**R-roadmap status**: R1-R8, R10, R12 ✓. F9 platform-blocked.
+All pure helpers in ``_rce_helpers.py`` now have direct unit
+coverage (5 of 6; `_run_rce` is subprocess-only by design).
+
 ### 2026-05-26 — iter 82
 
 **Refresh DOD (Definition of Done) section to current state.**
