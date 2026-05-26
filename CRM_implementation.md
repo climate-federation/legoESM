@@ -222,6 +222,61 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 14
+
+**Codex review caught HIGH gap in iter-13 smoke test**
+
+iter-13 added `test_rce_cross_grid_smoke.py` to lock in 30-day
+production validation as a CI regression. Codex flagged:
+
+> "the new smoke test would not have caught the original C48 bug.
+>  It only runs C12/LL16/V4/T21 for 2 days, and never asserts
+>  `max|v|`. A future CFL regression with slow wind growth can pass
+>  CI until the production-length run fails."
+
+True. The test asserted `mean_T_sfc within 1 K of IC` but the C48
+BLOWUP had `mean_T_sfc=299.9` at day 5 (within 0.1 K) — only the
+wind diverged. Fixed:
+
+1. **Added C48 to the test matrix** (parametrised over the iter-13
+   auto-dt boundary). Future regression of the dt ladder that lets
+   N>24..48 fall through to a larger dt would trip BLOWUP at day 2.
+2. **Added `max|v| < 50 m/s` assertion** at 2-day. Production
+   envelope is 2-12 m/s; >50 m/s is a smoking gun for an in-flight
+   CFL crash even when the 200 m/s BLOWUP gate hasn't fired yet.
+3. **Factored `_parse_notes()`** to read the `notes:` line robustly
+   instead of regex-fishing.
+
+Test now collects 5 cases (was 4): C12, C48, LL16, V4, T21. All 5
+PASS in 113 s.
+
+**Plane CRM 1-hour smoke at 132×132 COMPLETE**
+
+iter-13 launched the production-scale plane CRM 1-hour smoke. Done:
+
+| step | day      | CWV [mm] | MSE [J/kg] | max\|w\| [m/s] |
+|------|----------|----------|------------|----------------|
+| 1    | 5.8e-5   | 55.550   | 4.2132e9   | 0.0e+00        |
+| 100  | 5.8e-3   | 55.550   | 4.2131e9   | 3.9e-3         |
+| 300  | 1.7e-2   | 55.550   | 4.2129e9   | 5.5e-3         |
+| 500  | 2.9e-2   | 55.550   | 4.2127e9   | 5.9e-3         |
+| 700  | 4.1e-2   | 55.550   | 4.2125e9   | 6.1e-3         |
+| 725  | 4.2e-2   | 55.550   | 4.2125e9   | 6.1e-3         |
+
+725 steps × dt=5 s = 3625 s sim = **1 sim-hour** in 977 s wall =
+**1.35 s/step** at 132×132 single-rank. max\|w\| capped at 6.1e-3
+m/s (no instability, no convection yet — surface flux + radiation
+drive convection on hour-day timescale). MSE drift = 1.7e-4 relative.
+**Plane CRM production scale stable through 1 sim-hour.**
+
+Extrapolating: 30 sim-days = 518,400 steps × 1.35 s = ~8.1 days
+single-rank wall on M5 Pro. Lower bound until F9 unblocks real MPI
+scaling.
+
+**R-roadmap status**: R1-R8, R10 ✓ (now hardened with C48 in
+smoke + max\|v\| gate + 1-hour plane production smoke), R6 ✓. F9
+platform-blocked. Plane CRM full 30-day still wall-time-gated.
+
 ### 2026-05-26 — iter 13
 
 **C48 BLOWUP exposed loose auto-dt + loose BLOWUP threshold**
