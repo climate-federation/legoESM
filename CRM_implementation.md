@@ -222,6 +222,79 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 38
+
+**Plane CRM 132×132 production-scale regression test landed (nightly).**
+
+iter-14 measured a 1-sim-hour smoke at 132×132×30 dx=2 km dt=5 s
+that locked in the production envelope (max|w|=6.1e-3 m/s, MSE
+drift=1.7e-4 over 725 steps, CWV pinned at 55.550 mm). Until iter-38
+this measurement had **no regression test** — only the iter-15
+12×12×20 smoke gated CI, which misses any regression that destabilises
+only at production-scale grid (grid-scale modes, halo edge artifacts,
+Smag eddy-viscosity scaling at large nx/ny).
+
+New `@pytest.mark.slow` test
+`test_plane_crm_production_scale_132x132_envelope` in
+`tests/atmosphere/nonhydrostatic/integration/test_plane_crm_end_to_end_smoke.py`:
+
+* Invokes `run_rce_mpi_long.py` at 132×132×30 dx=2 km dt=5 s for
+  60 outer steps (5 min sim, 5e-min sub-envelope of the iter-14
+  1-sim-hour reference) with the F8/F10/iter-13 production defaults:
+  clean Wing IC, hyperdiff=5e6, Smag c_s=0.2 (passed explicitly),
+  SI acoustic off-centering=0.1 + 12 substeps, mass fixer ON,
+  radiation disabled.
+* `--days` carries +0.5·dt padding so `int(days·86400/dt)` always
+  hits exactly `n_outer_steps=60` (without padding, float roundoff
+  silently truncated 60 → 59 and `rows[-1]` landed on step 40).
+* `--log-every-steps=15` so all 5 logged rows {1, 15, 30, 45, 60}
+  get checked. iter-37 had log_every=20 → could miss transient
+  spikes between rows.
+* Asserts: logged-step-numbers schema (catches driver miscount),
+  IC CWV=55.550 ± 0.01 mm, max|w| < 0.05 m/s on **every** logged
+  row (catches transient CFL spike), activity floor at step 15
+  (max|w| > 1e-6, catches dead simulation), CWV drift < 0.01 mm,
+  MSE drift < 5e-5 relative (strict sub-envelope of iter-14's
+  1.7e-4 over 725 steps).
+
+**Codex adversarial review on the new test**: 2 HIGH + 5 MEDIUM
++ 3 LOW raised; all but the 3 LOW (informational) addressed:
+
+* HIGH#1 — MSE cap 1e-4 looked inconsistent with cited iter-14
+  1.7e-4: clarified the cap is a sub-envelope (60 vs 725 steps);
+  tightened to 5e-5 to make the strict sub-envelope explicit.
+* HIGH#2 — `--days = n*dt/86400` float-truncates to n-1 steps,
+  `rows[-1]` evaluates step 40 not step 60: fixed with +0.5*dt
+  padding + explicit `logged_steps == [1,15,30,45,60]` assertion.
+* MEDIUM transients hidden between log rows: now checks max|w|
+  on every logged row.
+* MEDIUM dead-simulation false-pass: added activity floor at step 15.
+* MEDIUM schema not validated: added logged-step-numbers assertion.
+* MEDIUM docstring claimed "1-sim-hour" while running 60 steps:
+  retitled as "5-min-sim sub-envelope of the iter-14 reference".
+* MEDIUM Smag c_s default implicit: now passed explicitly as
+  `--smag-cs 0.2` so a future driver-default change can't shift
+  the regression silently.
+
+**Measurements (post-fix)**:
+* logged steps: [1, 15, 30, 45, 60] (exact)
+* IC CWV: 55.5500 mm ✓
+* max|w| @ step 60: 2.10e-3 m/s (cap 5e-2, 24× margin)
+* max|w| @ step 15: 2.06e-3 m/s (> activity floor 1e-6)
+* CWV drift: 0.0000 mm (cap 0.01)
+* MSE drift: 2.4e-5 relative (cap 5e-5, well below per-step rate
+  cap that catches 3× regression)
+* Wall: 125.3 s on M5 Pro single-rank
+* `pytest -m slow tests/atmosphere/nonhydrostatic/integration/
+  test_plane_crm_end_to_end_smoke.py`: 1 PASS in 125 s.
+
+**Default suite unchanged**: 2/2 plane-CRM smokes pass in 87 s
+(slow test deselected as expected).
+
+**R-roadmap status**: R1-R8, R10 ✓ (now with iter-38 production-scale
+plane CRM regression), R6 ✓. F9 platform-blocked. The iter-14 measured
+envelope is structurally protected against silent regression.
+
 ### 2026-05-26 — iter 37
 
 **Full regression sweep: 38/38 PASS in 72 s.**
