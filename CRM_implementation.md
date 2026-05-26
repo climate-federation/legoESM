@@ -209,6 +209,43 @@ pure-Python unit tests on macOS that were previously crashing
 at `tests/conftest.py:12`. Critical for the iterate-with-codex
 loop, where fast unit tests are the inner-loop signal.
 
+**Codex adversarial-review hardening (iter-93, post-commit)**:
+* MEDIUM-1: Constructor set widened from 8 to 20 names —
+  added `empty`, `zeros_like`, `ones_like`, `empty_like`,
+  `full_like`, `meshgrid`, `broadcast_to`, `tile`, `repeat`,
+  `logspace`, `geomspace`, `identity`, `diag`, `diagflat`, `tri`.
+* MEDIUM-2: Alias-aware. Walker now parses `import jax.numpy as
+  <name>` / `from jax import numpy as <name>` / `from jax.numpy
+  import <ctor>` and tracks ALL bound names, not just literal
+  `jnp`.
+* MEDIUM-3: Protected-modules list expanded from 7 hand-curated
+  files to ALL of `src/legoesm/grids/*.py` (subtree walk) plus
+  early-imported package `__init__.py` files plus
+  `parallel/cubesphere_exchange.py` (next LOW).
+* LOW-1: Subprocess cold-import smoke test added. Spawns fresh
+  interpreter with NO conftest preamble; verifies `import
+  legoesm` succeeds. The in-process variant has limited value
+  (conftest has already applied fallback by collection time).
+* LOW-2: `jax.device_put(...)` now detected. Also catches bare
+  `ast.Expr` statements at module top, not just assignments.
+* LOW-3: `src/legoesm/parallel/cubesphere_exchange.py` had 3
+  module-top `jnp.array` tables (`_NBR_FACES`, `_NBR_EDGES`,
+  `_IS_REVERSED`). Latent risk — not on the eager-import path
+  today, but a single `from legoesm.parallel.cubesphere_exchange
+  import …` would re-trigger the Metal crash. Applied same
+  `np.array` module-top + `jnp.asarray` inside `_exchange`
+  closures pattern. JIT inside `_make_exchange_allgather` /
+  `_make_exchange_allgather_h2` does the jnp conversion once
+  per exchange-build call; XLA constant-folds inside the
+  shard_map body.
+
+Test now covers 28 cases (vs. 8 initial): 25 protected-module
+scans + 1 in-process import smoke + 1 subprocess cold-import
+smoke + 1 synthetic-regression sanity (informal, via REPL).
+All 28 pass. Cubed-sphere parallel tests still pass
+(1 passed, 20 skipped — multi-device gated; in-process scalar
+test verifies tables retain correct shape + dtype).
+
 **Honest re-evaluation of iter-92 cross-resolution claim.**
 
 iter-92's "cross-resolution trajectory consistency" claim was

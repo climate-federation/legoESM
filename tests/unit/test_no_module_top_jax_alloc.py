@@ -16,88 +16,223 @@ expressions that eagerly allocate on the JAX default device must
 live INSIDE a function body so they fire only when the function
 is called (after fallback is in place).
 
-Detection strategy: AST-walk legoesm source modules and flag any
-top-level assignment whose RHS resolves to a ``jnp.<array_ctor>(`` /
-``jax.numpy.<array_ctor>(`` call. Scalar ops (``jnp.pi``) and
-metadata reads (``jnp.finfo(...).tiny``) are NOT array allocations
-and are explicitly allow-listed.
+iter-93 Codex hardening (post-adversarial-review):
+* Constructor set widened to cover ``empty``, ``*_like``,
+  ``meshgrid``, ``broadcast_to``, ``tile``, ``repeat``, ``logspace``,
+  ``identity``, ``diag``, etc.  Any of these on module-top would
+  hit the same Metal dispatch crash.
+* Alias-aware: parses ``import jax.numpy as <name>`` / ``from jax
+  import numpy as <name>`` / ``from jax.numpy import asarray, ...``
+  and tracks ALL bound names that resolve to ``jax.numpy`` or
+  individual JAX numpy constructors.  No longer assumes the alias
+  is literally ``jnp``.
+* ``jax.device_put(...)`` detected (also triggers eager dispatch).
+* Protected-module list now scans the entire ``src/legoesm/grids/``
+  subtree (per Codex MEDIUM — re-exports from ``__init__.py``
+  pull in the whole package early).
+* ``src/legoesm/parallel/cubesphere_exchange.py`` added to
+  protected list (Codex LOW#3: had 3 module-top ``jnp.array``
+  tables of its own; latent risk because not on the eager
+  import path but a single ``from legoesm.parallel.cubesphere_exchange
+  import …`` from a test conftest would re-trigger the crash).
+* Subprocess cold-import smoke test: spawn a fresh interpreter
+  with no ``conftest.py`` preamble and verify ``import legoesm``
+  succeeds.  The in-process smoke test cannot exercise the
+  pre-fallback failure mode (conftest already ran fallback by
+  the time pytest collects this file).
 """
 from __future__ import annotations
 
 import ast
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 
 # JAX numpy / jax functions that ALLOCATE an array (vs scalar ops
-# or pure-metadata reads). Adding ``arange`` here would catch a
-# similar future-bug; ``finfo`` / ``iinfo`` / ``pi`` are NOT here
-# because they don't trigger XLA dispatch.
+# or pure-metadata reads). Codex MEDIUM iter-93: widened from the
+# initial 8 constructors to the full set of array-producing JAX
+# numpy ops that would trigger eager device dispatch on module top.
+# Excluded: ``finfo`` / ``iinfo`` / ``pi`` / ``e`` / ``newaxis``
+# (constants, metadata reads — no XLA dispatch).
 _ARRAY_CONSTRUCTORS = frozenset({
-    "array",
-    "asarray",
-    "zeros",
-    "ones",
-    "full",
-    "arange",
-    "linspace",
-    "eye",
+    # bare allocators
+    "array", "asarray", "zeros", "ones", "empty", "full",
+    "arange", "linspace", "logspace", "geomspace",
+    "eye", "identity", "diag", "diagflat", "tri",
+    # _like family — allocates new buffer matching shape/dtype
+    "zeros_like", "ones_like", "empty_like", "full_like",
+    # shape/broadcast operations that allocate new arrays
+    "meshgrid", "broadcast_to", "tile", "repeat",
 })
 
+# Top-level JAX functions that move data to device (also trigger
+# eager dispatch on the default platform).
+_JAX_DISPATCH_FUNCS = frozenset({"device_put"})
 
-def _is_jax_alloc_call(node: ast.AST) -> bool:
-    """True if ``node`` is a call to a JAX array constructor.
 
-    Matches ``jnp.array(...)``, ``jnp.asarray(...)``,
-    ``jax.numpy.array(...)``, etc. Does NOT match
-    ``jnp.finfo(...).tiny`` (attribute access on the call result is
-    not an alloc call itself unless the outer call is a constructor).
+def _collect_jax_aliases(tree: ast.AST) -> tuple[set[str], set[str]]:
+    """Walk imports in ``tree``; return (jax_numpy_aliases, jax_aliases).
+
+    Tracks BOTH:
+    * Module aliases pointing at ``jax.numpy`` (e.g., ``jnp``,
+      ``jax_np``, ``np2`` after ``import jax.numpy as np2``).
+    * Module aliases pointing at ``jax`` itself (for ``jax.device_put``
+      detection).
+
+    Does NOT track ``from jax.numpy import asarray`` — direct-name
+    imports surface as ``ast.Name`` nodes, handled separately in
+    ``_is_jax_alloc_call``.
+    """
+    jnp_aliases: set[str] = set()
+    jax_aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "jax.numpy":
+                    jnp_aliases.add(alias.asname or "jax.numpy")
+                elif alias.name == "jax":
+                    jax_aliases.add(alias.asname or "jax")
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "jax" and node.level == 0:
+                for alias in node.names:
+                    if alias.name == "numpy":
+                        jnp_aliases.add(alias.asname or "numpy")
+    return jnp_aliases, jax_aliases
+
+
+def _collect_directly_imported_ctors(tree: ast.AST) -> set[str]:
+    """Names bound directly from ``jax.numpy``: ``from jax.numpy import asarray``.
+
+    Returns the set of names (e.g., ``{"asarray", "zeros"}``) that
+    were imported and intersect with ``_ARRAY_CONSTRUCTORS``.
+    """
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "jax.numpy":
+            for alias in node.names:
+                name = alias.asname or alias.name
+                if alias.name in _ARRAY_CONSTRUCTORS:
+                    bound.add(name)
+    return bound
+
+
+def _is_jax_alloc_call(
+    node: ast.AST,
+    jnp_aliases: set[str],
+    jax_aliases: set[str],
+    direct_ctors: set[str],
+) -> bool:
+    """True if ``node`` is a call that eagerly dispatches a JAX op.
+
+    Matches:
+    * ``<jnp_alias>.<array_ctor>(...)``  (e.g., ``jnp.asarray(...)``)
+    * ``<jax_alias>.numpy.<array_ctor>(...)``
+    * ``<jax_alias>.device_put(...)``
+    * ``<direct_ctor>(...)`` for ``from jax.numpy import <ctor>``
     """
     if not isinstance(node, ast.Call):
         return False
     func = node.func
+
+    if isinstance(func, ast.Name) and func.id in direct_ctors:
+        return True
+
     if not isinstance(func, ast.Attribute):
         return False
-    if func.attr not in _ARRAY_CONSTRUCTORS:
-        return False
+
     val = func.value
-    if isinstance(val, ast.Name) and val.id in ("jnp", "np"):
-        return val.id == "jnp"
-    if isinstance(val, ast.Attribute):
-        if val.attr == "numpy" and isinstance(val.value, ast.Name) and val.value.id == "jax":
+
+    if isinstance(val, ast.Name):
+        if val.id in jnp_aliases and func.attr in _ARRAY_CONSTRUCTORS:
             return True
+        if val.id in jax_aliases and func.attr in _JAX_DISPATCH_FUNCS:
+            return True
+        return False
+
+    if isinstance(val, ast.Attribute):
+        # jax.numpy.<ctor>: val.attr=="numpy", val.value.id in jax_aliases.
+        if (
+            val.attr == "numpy"
+            and isinstance(val.value, ast.Name)
+            and val.value.id in jax_aliases
+            and func.attr in _ARRAY_CONSTRUCTORS
+        ):
+            return True
+
     return False
 
 
-def _walk_for_top_level_jax_allocs(tree: ast.AST) -> list[tuple[int, str]]:
-    """Return ``(line, code_snippet)`` for each top-level JAX alloc."""
+def _walk_for_top_level_jax_allocs(
+    tree: ast.AST,
+) -> list[tuple[int, str]]:
+    """Return ``(line, code_snippet)`` for each top-level JAX alloc.
+
+    Scans ``ast.Assign``, ``ast.AnnAssign``, AND bare ``ast.Expr``
+    statements at module scope (Codex LOW: a bare ``jax.device_put(...)``
+    at module top is a statement, not an assignment, and the initial
+    walker missed it).
+    """
+    jnp_aliases, jax_aliases = _collect_jax_aliases(tree)
+    direct_ctors = _collect_directly_imported_ctors(tree)
+
     hits: list[tuple[int, str]] = []
     for node in tree.body:
+        candidates: list[ast.AST] = []
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
-            value = node.value
-            if value is None:
-                continue
+            if node.value is not None:
+                candidates.append(node.value)
+        elif isinstance(node, ast.Expr):
+            candidates.append(node.value)
+        for value in candidates:
             for sub in ast.walk(value):
-                if _is_jax_alloc_call(sub):
-                    snippet = ast.unparse(node).splitlines()[0][:80]
+                if _is_jax_alloc_call(sub, jnp_aliases, jax_aliases, direct_ctors):
+                    try:
+                        snippet = ast.unparse(node).splitlines()[0][:80]
+                    except Exception:
+                        snippet = f"<unparseable node at line {node.lineno}>"
                     hits.append((node.lineno, snippet))
                     break
     return hits
 
 
-# Files we know must stay free of module-top JAX allocs because
-# they sit on the ``import legoesm`` critical path. Anything in
-# ``src/legoesm/grids/`` is loaded by ``grids/__init__.py``.
-_PROTECTED_MODULES = [
-    "src/legoesm/grids/vertical.py",
-    "src/legoesm/grids/__init__.py",
-    "src/legoesm/__init__.py",
-    "src/legoesm/core/__init__.py",
-    "src/legoesm/runtime/__init__.py",
-    "src/legoesm/parallel/__init__.py",
-    "src/legoesm/constants.py",
-]
+def _enumerate_protected_modules(repo_root: Path) -> list[str]:
+    """Modules on the ``import legoesm`` critical path that must
+    stay free of module-top JAX allocs.
+
+    Codex MEDIUM iter-93: extended from a hand-curated 7-file list
+    to the full ``src/legoesm/grids/`` subtree (since
+    ``grids/__init__.py`` re-exports submodules) plus the
+    ``__init__.py`` files of the early-imported subpackages plus
+    ``parallel/cubesphere_exchange.py`` (Codex LOW#3 latent risk).
+    """
+    files: list[Path] = []
+
+    # Full grids/ subtree.
+    grids_dir = repo_root / "src/legoesm/grids"
+    if grids_dir.exists():
+        files.extend(sorted(grids_dir.rglob("*.py")))
+
+    # Early-imported package __init__s.
+    for rel in (
+        "src/legoesm/__init__.py",
+        "src/legoesm/core/__init__.py",
+        "src/legoesm/runtime/__init__.py",
+        "src/legoesm/parallel/__init__.py",
+        "src/legoesm/constants.py",
+        "src/legoesm/parallel/cubesphere_exchange.py",
+    ):
+        path = repo_root / rel
+        if path.exists() and path not in files:
+            files.append(path)
+
+    return [str(p.relative_to(repo_root)) for p in files]
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_PROTECTED_MODULES = _enumerate_protected_modules(_REPO_ROOT)
 
 
 @pytest.mark.parametrize("rel_path", _PROTECTED_MODULES)
@@ -108,8 +243,7 @@ def test_no_module_top_jax_array_alloc(rel_path: str) -> None:
     ``ensure_metal_or_fallback()`` and crashes on Metal. See iter-93
     docstring at the top of this file.
     """
-    repo_root = Path(__file__).resolve().parents[2]
-    path = repo_root / rel_path
+    path = _REPO_ROOT / rel_path
     if not path.exists():
         pytest.skip(f"protected module missing: {rel_path}")
     tree = ast.parse(path.read_text(), filename=str(path))
@@ -120,20 +254,53 @@ def test_no_module_top_jax_array_alloc(rel_path: str) -> None:
             f"{rel_path}: module-top JAX array allocation found:\n"
             f"{details}\n"
             f"Move the alloc INSIDE a function body so it only fires "
-            f"after `ensure_metal_or_fallback()` has run."
+            f"after `ensure_metal_or_fallback()` has run. Pattern: "
+            f"`_TBL = np.asarray(...)` at module top, "
+            f"`jnp.asarray(_TBL)` inside the caller."
         )
 
 
 def test_legoesm_imports_without_jax_dispatch_crash() -> None:
-    """``import legoesm`` succeeds on whatever the default JAX
-    platform is at conftest time.
+    """``import legoesm`` succeeds on the current JAX platform.
 
-    This is a smoke test — it only validates that the static AST
-    invariant above translates to a working import. Failure here
+    This is a smoke test — the in-process variant has limited value
+    because by the time pytest collects this test, ``conftest.py``
+    has already run ``ensure_metal_or_fallback()``. Failure here
     means a NEW module-top JAX alloc has slipped in to a module
-    not yet in ``_PROTECTED_MODULES``.
+    not yet covered by ``_PROTECTED_MODULES``.
     """
     import importlib
 
     mod = importlib.import_module("legoesm")
     assert mod is not None
+
+
+def test_legoesm_imports_cold_subprocess() -> None:
+    """Subprocess cold-import smoke test (Codex LOW iter-93).
+
+    Spawn a fresh Python interpreter with NO conftest preamble and
+    verify ``import legoesm`` succeeds. This exercises the same
+    code path that broke pre-iter-93 on Apple Silicon: legoesm
+    imports BEFORE any conftest fallback gets a chance to run.
+
+    We don't force ``JAX_PLATFORMS=metal`` because that only works
+    on Apple Silicon with jax-metal installed; we let JAX pick its
+    default. On Linux/x86 the default is CPU (no-op). On macOS
+    with jax-metal it's METAL (the original bug scenario).
+    """
+    code = "import legoesm; print('ok')"
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert proc.returncode == 0, (
+        f"`import legoesm` failed in cold subprocess "
+        f"(returncode={proc.returncode}). This is the iter-93 "
+        f"failure mode: a module on the import path eagerly "
+        f"dispatched a JAX op before any fallback could apply.\n"
+        f"STDOUT:\n{proc.stdout}\n"
+        f"STDERR:\n{proc.stderr}"
+    )
+    assert "ok" in proc.stdout

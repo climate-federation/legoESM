@@ -46,34 +46,40 @@ except ImportError:
 
 # ---------------------------------------------------------------------------
 # Static connectivity tables (built once at import).
+#
+# iter-93: stored as ``np.array`` at module-top to avoid eager
+# JAX device dispatch on ``import legoesm.parallel.cubesphere_exchange``.
+# See ``src/legoesm/grids/vertical.py`` for the same pattern + rationale
+# (Metal default_memory_space crash before fallback applies). Callers
+# convert via ``jnp.asarray(...)`` inside the per-exchange closures.
 # ---------------------------------------------------------------------------
 
-_NBR_FACES = jnp.array([
+_NBR_FACES = np.array([
     [3, 1, 5, 4],   # face 0: W←3, E←1, S←5, N←4
     [0, 2, 5, 4],   # face 1
     [1, 3, 5, 4],   # face 2
     [2, 0, 5, 4],   # face 3
     [3, 1, 0, 2],   # face 4
     [3, 1, 2, 0],   # face 5
-], dtype=jnp.int32)
+], dtype=np.int32)
 
-_NBR_EDGES = jnp.array([
+_NBR_EDGES = np.array([
     [EAST, WEST, NORTH, SOUTH],    # face 0
     [EAST, WEST, EAST,  EAST],     # face 1
     [EAST, WEST, SOUTH, NORTH],    # face 2
     [EAST, WEST, WEST,  WEST],     # face 3
     [NORTH, NORTH, NORTH, NORTH],  # face 4
     [SOUTH, SOUTH, SOUTH, SOUTH],  # face 5
-], dtype=jnp.int32)
+], dtype=np.int32)
 
-_IS_REVERSED = jnp.array([
+_IS_REVERSED = np.array([
     [0, 0, 0, 0],
     [0, 0, 1, 0],
     [0, 0, 1, 1],
     [0, 0, 0, 1],
     [1, 0, 0, 1],
     [0, 1, 1, 0],
-], dtype=jnp.int32)
+], dtype=np.int32)
 
 
 # ---------------------------------------------------------------------------
@@ -316,12 +322,18 @@ def _make_exchange_allgather(mesh, ndim, with_offsets=False):
         if with_offsets:
             from legoesm.grids.halo import _interp_strip
 
+        # iter-93: convert np connectivity tables to jnp once per
+        # exchange call; XLA constant-folds inside the JIT body.
+        nbr_faces_j = jnp.asarray(_NBR_FACES)
+        nbr_edges_j = jnp.asarray(_NBR_EDGES)
+        is_reversed_j = jnp.asarray(_IS_REVERSED)
+
         padded_faces = []
         for i in range(n_faces_per_shard):
             global_face = my_idx * n_faces_per_shard + i
-            nbr_f = _NBR_FACES[global_face]
-            nbr_e = _NBR_EDGES[global_face]
-            rev = _IS_REVERSED[global_face]
+            nbr_f = nbr_faces_j[global_face]
+            nbr_e = nbr_edges_j[global_face]
+            rev = is_reversed_j[global_face]
             face = local_shard[i]
             if ndim == 3:
                 padded = jnp.pad(face, ((1, 1), (1, 1)))
@@ -423,12 +435,18 @@ def _make_exchange_allgather_h2(mesh, ndim, with_offsets=False):
         if with_offsets:
             from legoesm.grids.halo import _interp_strip
 
+        # iter-93: convert np connectivity tables to jnp once per
+        # exchange call; XLA constant-folds inside the JIT body.
+        nbr_faces_j = jnp.asarray(_NBR_FACES)
+        nbr_edges_j = jnp.asarray(_NBR_EDGES)
+        is_reversed_j = jnp.asarray(_IS_REVERSED)
+
         padded_faces = []
         for i in range(n_faces_per_shard):
             global_face = my_idx * n_faces_per_shard + i
-            nbr_f = _NBR_FACES[global_face]
-            nbr_e = _NBR_EDGES[global_face]
-            rev = _IS_REVERSED[global_face]
+            nbr_f = nbr_faces_j[global_face]
+            nbr_e = nbr_edges_j[global_face]
+            rev = is_reversed_j[global_face]
             face = local_shard[i]
 
             if ndim == 3:
