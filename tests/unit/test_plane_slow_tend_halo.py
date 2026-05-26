@@ -147,13 +147,49 @@ def test_halo_equiv_full():
     _eq_tendencies(actual, expected)
 
 
-def test_halo_raises_on_smagorinsky():
+def test_halo_equiv_with_smagorinsky():
+    """R4: Smag LES ported to halo path; single-rank must match serial
+    bit-for-bit. Halo K_m uses padded slice stencils equivalent to the
+    serial jnp.roll stencils when n_ranks=1 wraps the padded slab."""
     grid, hc, tm, cfg, state, layout = _setup()
-    cfg_smag = cfg._replace(smagorinsky_cs=0.2)
-    with pytest.raises(NotImplementedError, match="Smagorinsky"):
-        plane_compressible_euler_slow_tendencies_halo(
-            state, grid, hc, tm, cfg_smag, layout,
-        )
+    cfg_smag = cfg._replace(smagorinsky_cs=0.2, smagorinsky_prandtl=1.0)
+    expected = plane_compressible_euler_slow_tendencies(
+        state, grid, hc, tm, cfg_smag,
+    )
+    actual = plane_compressible_euler_slow_tendencies_halo(
+        state, grid, hc, tm, cfg_smag, layout,
+    )
+    _eq_tendencies(actual, expected, rtol=1e-11, atol=1e-11)
+
+
+def test_halo_equiv_with_vertical_theta_diffusion():
+    """R5: vertical θ Laplacian is column-local — bit-equivalent on
+    single rank."""
+    grid, hc, tm, cfg, state, layout = _setup()
+    cfg_vtd = cfg._replace(vertical_theta_diffusion=1.0e4)
+    expected = plane_compressible_euler_slow_tendencies(
+        state, grid, hc, tm, cfg_vtd,
+    )
+    actual = plane_compressible_euler_slow_tendencies_halo(
+        state, grid, hc, tm, cfg_vtd, layout,
+    )
+    _eq_tendencies(actual, expected, rtol=1e-11, atol=1e-11)
+
+
+def test_halo_equiv_smag_plus_vertical_theta_diff_plus_hyperdiff():
+    """R4 + R5 + hyperdiff all on at once; still bit-equivalent."""
+    grid, hc, tm, cfg, state, layout = _setup(hyperdiff=1.0e6)
+    cfg_full = cfg._replace(
+        smagorinsky_cs=0.2, smagorinsky_prandtl=1.0,
+        vertical_theta_diffusion=1.0e4,
+    )
+    expected = plane_compressible_euler_slow_tendencies(
+        state, grid, hc, tm, cfg_full,
+    )
+    actual = plane_compressible_euler_slow_tendencies_halo(
+        state, grid, hc, tm, cfg_full, layout,
+    )
+    _eq_tendencies(actual, expected, rtol=1e-11, atol=1e-11)
 
 
 def test_halo_uses_cached_f_pad():

@@ -1478,8 +1478,10 @@ class PlaneCompressibleEulerModel:
         is a global reduction — separate MPI variant needed). Single
         rank with ``fix_mass=True`` falls back to :meth:`step`.
 
-        Smagorinsky LES + fix_mass not yet supported on multi-rank
-        path (deferred to follow-up PR).
+        Smagorinsky LES + vertical-θ diffusion now supported on the
+        halo path (R4/R5 — see ``compressible_euler_plane_halo``).
+        Mass fixer still not supported on multi-rank (compute_dry_mass
+        global reduction pending — R7).
         """
         from legoesm.atmosphere.dynamics.compressible_euler_plane_halo import (
             plane_compressible_euler_slow_tendencies_halo,

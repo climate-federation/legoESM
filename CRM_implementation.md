@@ -222,6 +222,66 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 3
+
+**Changes**
+* `src/legoesm/atmosphere/dynamics/compressible_euler_plane_halo.py`:
+  - **R4 done**: Smagorinsky LES ported to halo path. New
+    `_compute_smagorinsky_K_m_plane_halo` computes the full 3D strain
+    tensor (S11, S22, S33, S12, S13, S23) on already-halo-padded
+    u, v, w using slice-based stencils (1-1 equivalent to the serial
+    `jnp.roll` stencils when ``layout.n_ranks == 1``). Reuses
+    ``_safe_sqrt_strain`` + ``_full_level_centred_d_dz`` from the
+    serial module — no code duplication. K_m is exchanged once
+    (single packed MPI round) before driving the existing
+    ``oh.variable_K_diffusion_vlast_halo`` on u, v, theta', and w.
+  - **R5 done**: vertical-θ Laplacian wired into the halo slow
+    tendency (column-local — needs no halo exchange).
+  - Removed the `NotImplementedError` gate on `smagorinsky_cs > 0`.
+  - **Bug fix**: halo path was missing
+    ``drho_p_dt -= sponge_full * rho_p`` (added to the serial path in
+    commit aa0a8d75 but never mirrored to halo). This caused
+    `drho_prime_dt` to diverge by 1.4 × 10⁻⁴ from the serial reference
+    even on single-rank — the test_halo_equiv_basic test had been
+    broken since aa0a8d75 was merged. Fixed in both
+    slow-tendency entry points (the regular one and the
+    split-trace variant `_compute_local_tendencies_post_halo`).
+* `src/legoesm/atmosphere/dynamics/compressible_euler_plane.py`:
+  - Updated `step_halo` docstring: Smag + vertical-θ diff now
+    supported; mass fixer still single-rank only (R7 pending).
+* `tests/unit/test_plane_slow_tend_halo.py`:
+  - Replaced `test_halo_raises_on_smagorinsky` (assertion now wrong
+    after R4) with three new bit-equivalence tests:
+    `test_halo_equiv_with_smagorinsky`,
+    `test_halo_equiv_with_vertical_theta_diffusion`,
+    `test_halo_equiv_smag_plus_vertical_theta_diff_plus_hyperdiff`.
+    All 9 tests in the suite now pass (previously: 8 passing, 1 of
+    them — `test_halo_equiv_basic_no_coriolis_no_hyperdiff` — silently
+    failing because no CI run ever exercised it after aa0a8d75; now
+    all 9 green at rtol=1e-12).
+
+**Measurements**
+* `pytest tests/unit/test_plane_slow_tend_halo.py`: 9/9 pass in 5 s.
+* Manual per-field diff (random IC, no Smag, no hyperdiff): du/dv/dw
+  bit-identical at 0.0; dtheta' at 7e-18 (1 ULP); drho' at 1.4e-4 BEFORE
+  the sponge fix, 0.0 AFTER.
+
+**Net effect on R-roadmap**:
+* R4 ✓ (Smag in halo)
+* R5 ✓ (vertical θ diff in halo)
+* R6 deferred — WENO5 halo port needs `layout.halo=3` + new
+  `_weno5_advection_*_halo` operators; non-blocking since upwind1 is
+  the production default for now.
+* R7 remains the gating item for multi-rank `step_halo`
+  (MPI-aware mass fixer).
+
+**Next iteration target**: R7 (MPI-aware mass fixer for multi-rank
+`step_halo`), then run a single-rank smoke at 132×132 / 6 h with
+Smag + vertical-θ-diff enabled via the halo path (still routes
+through `step()` on single rank — no behaviour change, but exercises
+the freshly-ported helpers indirectly via shared-import reuse), then
+multi-rank smoke verifying state matches single-rank.
+
 ### 2026-05-26 — iter 2
 
 **Changes**
