@@ -274,6 +274,56 @@ def test_assert_max_wind_peak_below_mixed_nan_inf_and_finite(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# iter-88: optional min_floor parameter closes all-zero silent-pass class.
+# ---------------------------------------------------------------------------
+
+
+def test_assert_max_wind_peak_below_min_floor_default_unchanged(tmp_path):
+    """``min_floor=None`` (default) preserves iter-46/66/87 behavior.
+    All-zero rows pass cap check without floor enforcement."""
+    out = _write_timeseries(tmp_path, [(1, 0.0), (2, 0.0), (3, 0.0)])
+    _assert_max_wind_peak_below(out, label="zeros-default", cap=10.0)
+
+
+def test_assert_max_wind_peak_below_min_floor_catches_all_zeros(tmp_path):
+    """``min_floor=0.5`` flags all-zero (broken dycore) runs."""
+    out = _write_timeseries(tmp_path, [(1, 0.0), (2, 0.0), (3, 0.0)])
+    with pytest.raises(AssertionError, match="below activity floor"):
+        _assert_max_wind_peak_below(
+            out, label="zeros-floor", cap=10.0, min_floor=0.5,
+        )
+
+
+def test_assert_max_wind_peak_below_min_floor_passes_real_run(tmp_path):
+    """``min_floor=0.5`` accepts a real run with max|v|=2.28 (iter-12
+    V4 30-day measurement) — must NOT false-fail."""
+    out = _write_timeseries(tmp_path, [(1, 1.5), (2, 2.0), (3, 2.28)])
+    _assert_max_wind_peak_below(
+        out, label="real-run", cap=10.0, min_floor=0.5,
+    )
+
+
+def test_assert_max_wind_peak_below_min_floor_at_boundary(tmp_path):
+    """Peak exactly at floor: ``peak_v >= min_floor`` (<= boundary
+    accepted, like ``_assert_dt_used`` abs_tol)."""
+    out = _write_timeseries(tmp_path, [(1, 0.5)])
+    _assert_max_wind_peak_below(
+        out, label="boundary", cap=10.0, min_floor=0.5,
+    )
+
+
+def test_assert_max_wind_peak_below_min_floor_cap_check_first(tmp_path):
+    """Order matters: cap check fires BEFORE floor check. If peak
+    exceeds cap AND floor, the user sees the cap error (more
+    actionable). Test by passing peak > cap > floor."""
+    out = _write_timeseries(tmp_path, [(1, 30.0)])
+    with pytest.raises(AssertionError, match="exceeds 25.0 m/s cap"):
+        _assert_max_wind_peak_below(
+            out, label="cap-first", cap=25.0, min_floor=0.5,
+        )
+
+
+# ---------------------------------------------------------------------------
 # iter-83: unit coverage for _parse_results / _parse_notes / _assert_rce_pass.
 # These were extracted to _rce_helpers.py at iter-78 alongside _assert_dt_used
 # + _assert_max_wind_peak_below (which iter-52 already covered). Now all 5

@@ -251,7 +251,9 @@ def test_c48_30day_nightly_validation(tmp_path):
     # (iter-12 broken-C48 spike reached 240 m/s at days 20-25
     # then settled — the kind of trajectory the final-day notes
     # check misses).
-    _assert_max_wind_peak_below(out_dir, label="C48 30-day", cap=25.0)
+    _assert_max_wind_peak_below(
+        out_dir, label="C48 30-day", cap=25.0, min_floor=0.5,
+    )
     # Tighter envelope than the 2-day smoke: iter-15 measured C48
     # 30-day at mean_T_sfc=300.13, max|v|=13.45. Allow ±1 K (3x
     # iter-15 deviation from IC) + max|v| < 25 m/s (almost 2x
@@ -315,7 +317,9 @@ def test_c72_30day_nightly_validation(tmp_path):
     # not just the final day. iter-26 measured monotone rise to
     # ~18 m/s; a regression that spikes to 100+ mid-run and damps
     # by day 30 would slip through the last-day-only check.
-    _assert_max_wind_peak_below(out_dir, label="C72 30-day", cap=25.0)
+    _assert_max_wind_peak_below(
+        out_dir, label="C72 30-day", cap=25.0, min_floor=0.5,
+    )
     # Tighter envelope than the 2-day C96 smoke: iter-26 measured
     # C72 30-day at mean_T_sfc=299.81 (Δ=-0.19), max|v|=17.85.
     # Allow ±1 K (5x iter-26 |Δ|) + max|v| < 25 m/s (1.4x iter-26
@@ -380,7 +384,9 @@ def test_voronoi_v4_30day_nightly_validation(tmp_path):
     # mirrors the cubed-sphere caps that came from a totally
     # different stability regime — MPAS dycore stays well below
     # synoptic-wave scales at V4 resolution).
-    _assert_max_wind_peak_below(out_dir, label="V4 30-day", cap=10.0)
+    _assert_max_wind_peak_below(
+        out_dir, label="V4 30-day", cap=10.0, min_floor=0.5,
+    )
     # iter-12 measured V4 30-day at mean_T_sfc=300.85 (Δ=+0.85),
     # max|v|=2.28. Codex iter-50 HIGH: ``_assert_rce_pass`` uses
     # strict ``<`` against ``abs(t_sfc - 300.0) < temp_tol``, so
@@ -447,7 +453,9 @@ def test_latlon_ll32_30day_nightly_validation(tmp_path):
     # iter-12 peak max|v|=11.19 m/s. Cap 20.0 = 1.8x cushion;
     # latlon C-grid with pole clamp is steadier than cubed-sphere
     # at the same resolution but more lively than MPAS.
-    _assert_max_wind_peak_below(out_dir, label="LL32 30-day", cap=20.0)
+    _assert_max_wind_peak_below(
+        out_dir, label="LL32 30-day", cap=20.0, min_floor=0.5,
+    )
     # iter-12 mean_T_sfc=300.09 (Δ=+0.09). temp_tol=1.0 gives
     # ample headroom.
     _assert_rce_pass(
@@ -489,7 +497,9 @@ def test_gaussian_t21_30day_nightly_validation(tmp_path):
         )
     _assert_dt_used(out_dir, label="T21 30-day", expected_dt=600.0)
     # iter-12 peak max|v|=8.43 m/s. Cap 20.0 = 2.4x cushion.
-    _assert_max_wind_peak_below(out_dir, label="T21 30-day", cap=20.0)
+    _assert_max_wind_peak_below(
+        out_dir, label="T21 30-day", cap=20.0, min_floor=0.5,
+    )
     # iter-12 mean_T_sfc=300.13 (Δ=+0.13). temp_tol=1.0 gives ample
     # headroom for the spectral path's run-to-run variance.
     _assert_rce_pass(
@@ -547,7 +557,9 @@ def test_c96_10day_nightly_validation(tmp_path):
     # iter-20 broken-dt=75 reached 175 m/s by day 15 — cap 25
     # is the C48/C72 nightly value, ample headroom for production
     # C96 + clean fail signal vs the iter-20 BLOWUP trajectory.
-    _assert_max_wind_peak_below(out_dir, label="C96 10-day", cap=25.0)
+    _assert_max_wind_peak_below(
+        out_dir, label="C96 10-day", cap=25.0, min_floor=0.5,
+    )
     # iter-22 mean_T_sfc=299.98 (Δ=-0.02). temp_tol=1.0 generous.
     _assert_rce_pass(
         out_dir, label="C96 10-day", temp_tol=1.0, max_v_cap=25.0,

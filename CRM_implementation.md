@@ -149,6 +149,50 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 88
+
+**Close all-zero silent-pass class in `_assert_max_wind_peak_below`
+via optional `min_floor`.**
+
+iter-66 fixed NaN vacuous-pass; iter-87 distinguished NaN vs inf.
+Remaining silent-pass class: **all-zero finite values**. A broken
+dycore that never moves would produce ``max_wind=0.0`` for every
+row; ``peak_v=0.0 < cap=25.0`` passes vacuously. Other iter-46
+helper checks (status PASS + temp drift) would likely catch the
+broken dycore, but the cap check itself is vulnerable.
+
+**Fix**: added optional ``min_floor`` parameter (default ``None``
+preserves iter-46/66/87 behaviour). When set, asserts
+``peak_v >= min_floor`` AFTER the cap check fires-first ordering.
+
+iter-12 smallest measured max\\|v\\| = V4 2.28 m/s. Setting
+``min_floor=0.5`` gives ~4.5× safety margin vs the smallest real
+measurement.
+
+**Opt-in on all 30-day-class nightlies** (cross_grid_smoke.py):
+* C48, C72, V4, LL32, T21 30-day nightlies + C96 10-day nightly
+  → ``min_floor=0.5``.
+* C96 2-day smoke stays at default (no floor; 2-day window may
+  not develop strong winds yet).
+
+**5 new unit tests** in test_rce_helpers_unit.py:
+* default ``None`` preserves prior behavior on all-zero rows.
+* ``min_floor=0.5`` catches all-zeros.
+* ``min_floor=0.5`` accepts real V4-style run (max 2.28).
+* boundary exactly at floor accepted.
+* cap-fires-first ordering: peak > cap > floor → cap error.
+
+**Tests**: 41/41 PASS in 0.5 s (was 36).
+
+**R-roadmap status**: R1-R8, R10, R12 ✓. F9 platform-blocked.
+
+iter-46/66/87/88 collectively close the entire vacuous-pass risk
+class:
+* no parseable rows → "no parseable" (iter-46/66).
+* NaN-only rows → "no parseable" (iter-66/87).
+* All-zero rows → "below activity floor" (iter-88, opt-in).
+* inf in any row → "exceeds cap" (iter-87).
+
 ### 2026-05-26 — iter 87
 
 **Distinguish NaN vs inf in iter-66 ``_assert_max_wind_peak_below``

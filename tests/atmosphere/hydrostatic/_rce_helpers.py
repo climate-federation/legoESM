@@ -182,7 +182,7 @@ def _assert_dt_used(out_dir, label, expected_dt, abs_tol=None):
     )
 
 
-def _assert_max_wind_peak_below(out_dir, label, cap):
+def _assert_max_wind_peak_below(out_dir, label, cap, min_floor=None):
     """Scan ``mean_timeseries.csv`` for the peak ``max_wind`` across
     ALL logged days (not just the final) and assert below cap.
 
@@ -210,6 +210,16 @@ def _assert_max_wind_peak_below(out_dir, label, cap):
       CFL blowup that the cap check should fire on).
     iter-87 refined the iter-66 ``not isfinite`` skip — which
     incorrectly skipped inf too — to specifically check ``isnan``.
+
+    iter-88: optional ``min_floor`` parameter closes the all-zero
+    silent-pass class. If set, asserts ``peak_v >= min_floor`` AFTER
+    the cap check — catches a "broken dycore that never moves" run
+    where every max_wind row is legitimately 0.0 (passes NaN guard +
+    cap check vacuously). Default ``None`` preserves the iter-46/66
+    behaviour for existing callers; opt-in by passing
+    ``min_floor=0.5`` for 30-day RCE nightlies where iter-12 smallest
+    measured max\\|v\\| was 2.28 m/s (V4) so 0.5 m/s gives safe
+    margin without false-failing real runs.
     """
     mean_csv = out_dir / "mean_timeseries.csv"
     assert mean_csv.exists(), (
@@ -255,3 +265,11 @@ def _assert_max_wind_peak_below(out_dir, label, cap):
         f"notes-line (last-day-only) check in ``_assert_rce_pass``; "
         f"this assertion catches it. Source: {mean_csv}"
     )
+    if min_floor is not None:
+        assert peak_v >= min_floor, (
+            f"{label}: peak max|v|={peak_v:.2f} below activity floor "
+            f"{min_floor} m/s. The dycore may be inactive — RCE "
+            f"runs typically reach ~5-15 m/s within a few days. "
+            f"iter-12 smallest measured (V4) was 2.28 m/s. "
+            f"Source: {mean_csv}"
+        )
