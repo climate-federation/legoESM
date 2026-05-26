@@ -74,7 +74,7 @@ _JAX_DISPATCH_FUNCS = frozenset({"device_put"})
 
 
 def _collect_jax_aliases(tree: ast.AST) -> tuple[set[str], set[str]]:
-    """Walk imports in ``tree``; return (jax_numpy_aliases, jax_aliases).
+    """Walk MODULE-TOP imports only; return (jax_numpy_aliases, jax_aliases).
 
     Tracks BOTH:
     * Module aliases pointing at ``jax.numpy`` (e.g., ``jnp``,
@@ -85,10 +85,16 @@ def _collect_jax_aliases(tree: ast.AST) -> tuple[set[str], set[str]]:
     Does NOT track ``from jax.numpy import asarray`` — direct-name
     imports surface as ``ast.Name`` nodes, handled separately in
     ``_is_jax_alloc_call``.
+
+    iter-94 (Codex Q3 LOW): scans ``tree.body`` only, NOT
+    ``ast.walk(tree)``. A function-local ``import jax.numpy as jnp``
+    must not be collected as a module-level alias — that would
+    produce false-positive matches at module top against names that
+    don't actually bind to ``jnp`` there.
     """
     jnp_aliases: set[str] = set()
     jax_aliases: set[str] = set()
-    for node in ast.walk(tree):
+    for node in tree.body:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name == "jax.numpy":
@@ -104,13 +110,17 @@ def _collect_jax_aliases(tree: ast.AST) -> tuple[set[str], set[str]]:
 
 
 def _collect_directly_imported_ctors(tree: ast.AST) -> set[str]:
-    """Names bound directly from ``jax.numpy``: ``from jax.numpy import asarray``.
+    """Names bound directly from ``jax.numpy`` at MODULE TOP.
 
     Returns the set of names (e.g., ``{"asarray", "zeros"}``) that
-    were imported and intersect with ``_ARRAY_CONSTRUCTORS``.
+    were imported via ``from jax.numpy import asarray`` at module
+    scope and intersect with ``_ARRAY_CONSTRUCTORS``.
+
+    iter-94 (Codex Q3 LOW): scans ``tree.body`` only, same
+    rationale as ``_collect_jax_aliases``.
     """
     bound: set[str] = set()
-    for node in ast.walk(tree):
+    for node in tree.body:
         if isinstance(node, ast.ImportFrom) and node.module == "jax.numpy":
             for alias in node.names:
                 name = alias.asname or alias.name
