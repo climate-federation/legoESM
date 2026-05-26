@@ -134,6 +134,44 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 64
+
+**Closed last defaults-regression coverage gaps (PYBIN + snapshot/log
+cadence).**
+
+iter-58/59/61 extended the wrapper + driver defaults regression
+tests but a few production-anchored defaults remained uncovered:
+
+* Wrapper: ``PYBIN`` (Codex iter-61 noted as missing). A revert to
+  a non-venv Python would silently break the pinned JAX/mpi4jax/
+  JAX-MPI stack (iter-10/11). Now asserted ``.venv/bin/python``.
+
+* Driver: ``--snapshot-hours``, ``--snapshot-3d-hours``,
+  ``--profile-days``, ``--log-every-steps``. The wrapper hardcodes
+  the first three to match the driver defaults; if the driver
+  defaults silently shift, the wrapper would either become
+  redundant or override unintentionally. ``--snapshot-3d-hours``
+  is a LEGITIMATE wrapper override (driver 0.0 disabled → wrapper
+  1.0 hourly for GIF generation); the others must match.
+
+**Tests**: 32/32 PASS in 1.05 s (was 28).
+
+**R-roadmap status**: R1-R8, R10, R12 ✓ (with iter-64 closing the
+last defaults-regression coverage gaps). F9 platform-blocked.
+R11 30-day plane CRM still wall-time gated; iter-63 1-hour
+nightly is the empirically-pinned upper bound.
+
+**Outstanding observation**: live iter-63 test run was launched
+during iter-63 but hit ~40 min wall (vs iter-14's measured
+~17 min on quiet box). M5 Pro is heavily loaded today across
+multiple agent runs; iter-63 test infrastructure code is correct
+but its live execution awaits a quiet box.
+
+Test inventory (post-iter-64):
+* 32 defaults-regression (was 28).
+* 58 + helper-unit + 12 cross-grid + 5 plane CRM e2e (4 fast + 3
+  slow nightlies counting iter-63).
+
 ### 2026-05-26 — iter 63
 
 **Lock the iter-14 FULL 1-sim-hour plane CRM envelope as a slow

@@ -179,3 +179,37 @@ def test_implicit_buoyancy_default(driver_defaults):
 def test_qv_noise_seed_default(driver_defaults):
     """Deterministic seed for qv-noise (when amp > 0)."""
     assert driver_defaults["--qv-noise-seed"] == 0
+
+
+# iter-64: cover the snapshot/profile/log cadence defaults. iter-61
+# added the wrapper-side hardcoded values (--snapshot-hours 24.0,
+# --profile-days 5.0, --log-every-steps 100) as parametric
+# assertions but the driver-side defaults were uncovered. The
+# wrapper relies on these matching: a driver default change would
+# now be silently different from the wrapper claim.
+
+
+def test_snapshot_hours_default(driver_defaults):
+    """24-hour snapshot cadence (daily). Wrapper also passes 24.0
+    explicitly — driver+wrapper should agree."""
+    assert driver_defaults["--snapshot-hours"] == 24.0
+
+
+def test_snapshot_3d_hours_default(driver_defaults):
+    """Driver default 0.0 = disabled. Wrapper overrides to 1.0
+    (hourly 3D snapshots for GIF generation) — this is the only
+    legitimate wrapper override of a driver default in this
+    cadence group."""
+    assert driver_defaults["--snapshot-3d-hours"] == 0.0
+
+
+def test_profile_days_default(driver_defaults):
+    """5-day profile cadence. Wrapper also passes 5.0 explicitly."""
+    assert driver_defaults["--profile-days"] == 5.0
+
+
+def test_log_every_steps_default(driver_defaults):
+    """Production driver: log every 100 outer steps. Wrapper also
+    passes 100 explicitly. iter-15/38 short smokes / production-
+    scale tests override to 20/15/60 for tighter inspection."""
+    assert driver_defaults["--log-every-steps"] == 100

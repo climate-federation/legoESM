@@ -82,6 +82,10 @@ def test_other_production_defaults(wrapper_text):
         "DAYS": "30",
         "RANKS": "12",
         "USE_DD": "0",   # legacy rank-0-broadcast is the F8-stable default
+        # iter-64: PYBIN was the last env default uncovered. A revert
+        # to a non-venv Python would silently break the pinned
+        # JAX/mpi4jax/JAX-MPI versions iter-10 / iter-11 stacked.
+        "PYBIN": ".venv/bin/python",
     }
     for name, expected in defaults.items():
         actual = _parse_env_default(wrapper_text, name)
