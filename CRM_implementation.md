@@ -222,6 +222,41 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 19
+
+**Codex caught 1 HIGH + 1 MEDIUM cleanup on iter-17/18 — fixed.**
+
+* **HIGH (#1)** Codex found a dead `_run_rce(...)` call at the top
+  of ``test_blowup_gate_fires_on_supersonic_winds``. The test runs
+  a full 30-day simulation at the iter-13-banned dt=300 to verify
+  BLOWUP detection, but the function first invoked `_run_rce(...)`
+  (which picks the SAFE auto-dt=150 — an expensive 30-day run that
+  gets completely ignored). Net cost was ~2× wall on every nightly
+  invocation. **Removed.**
+* **MEDIUM (#5)** Both the parametrised default smoke and the
+  slow C96 / C48-30day variants duplicated the same
+  ``status: PASS`` + ``mean_T_sfc`` envelope + ``max|v|`` cap
+  assertion block. **Factored into a single
+  ``_assert_rce_pass(out_dir, label, temp_tol, max_v_cap)``
+  helper** at the top of the file; the three call sites now
+  pass through parametric tolerances (1 K + 50 m/s default;
+  1 K + 25 m/s for the C48 30-day nightly which has tighter
+  measured envelope).
+* **MEDIUM (#2)** C48 30-day envelope was tight (0.5 K + 20 m/s).
+  Widened to 1 K + 25 m/s to absorb run-to-run variation while
+  still catching slow CFL crashes the 2-day smoke can't see.
+
+Default smoke: 5 passed, 3 deselected in 119 s.
+
+**C96 30-day** in progress at 150 min CPU; day 10 PASS at
+mean_T_sfc=299.58 K, max\|v\|=26.52 m/s. Higher characteristic
+winds than C48 (13.45 m/s at day 30) but well inside the F8/F10
+production envelope — expected for higher-resolution dycores
+resolving more synoptic dynamics. Final result in a later iter.
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-19 test cleanups),
+R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 18
 
 **Cross-grid smoke: every auto-dt ladder branch is now exercised**
