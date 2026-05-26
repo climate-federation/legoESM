@@ -386,3 +386,64 @@ def test_legoesm_imports_cold_subprocess() -> None:
         f"STDERR:\n{proc.stderr}"
     )
     assert "ok" in proc.stdout
+
+
+def test_whole_legoesm_codebase_no_jax_array_globals() -> None:
+    """iter-94h: single-subprocess WHOLE-CODEBASE scan for module-top
+    jax.Array globals across all 495+ legoesm modules.
+
+    Complements the parametrized ``_LAZY_PROTECTED_MODULES`` list:
+    instead of requiring each module to be hand-added, this test
+    discovers all submodules of ``legoesm`` via ``pkgutil.walk_packages``
+    and inspects globals on each. Catches iter-94d-class regressions
+    (function-returning-jax.Array bound to module-top) in ANY
+    legoesm module without manual enumeration.
+
+    Marked ``slow`` because it imports the whole codebase (takes
+    ~20s wall on M5 Pro). Runs in a subprocess with
+    ``JAX_PLATFORMS=cpu`` so it works on macOS without crashing on
+    Metal.
+
+    Failure mode: lists every module that has module-top
+    ``jax.Array`` globals, separating real failures from import
+    errors (some modules legitimately fail to import on this
+    platform — e.g. spectral_plane has a known stale-import
+    issue; those are skipped, not failed).
+    """
+    import os
+    code = (
+        "import jax\n"
+        "import importlib\n"
+        "import pkgutil\n"
+        "import legoesm\n"
+        "bad_modules = []\n"
+        "import_errors = []\n"
+        "for mod_info in pkgutil.walk_packages(legoesm.__path__, 'legoesm.'):\n"
+        "    if mod_info.ispkg:\n"
+        "        continue\n"
+        "    try:\n"
+        "        m = importlib.import_module(mod_info.name)\n"
+        "    except Exception as e:\n"
+        "        import_errors.append((mod_info.name, type(e).__name__))\n"
+        "        continue\n"
+        "    bad = [k for k, v in vars(m).items() if isinstance(v, jax.Array)]\n"
+        "    if bad:\n"
+        "        bad_modules.append((mod_info.name, bad[:5]))\n"
+        "if bad_modules:\n"
+        "    msg = 'Module-top jax.Array globals found:\\n'\n"
+        "    for name, bad in bad_modules:\n"
+        "        msg += f'  {name}: {bad}\\n'\n"
+        "    raise AssertionError(msg)\n"
+        "print(f'CLEAN: scanned modules; import_errors={len(import_errors)}')\n"
+    )
+    env = {**os.environ, "JAX_PLATFORMS": "cpu"}
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True, timeout=120, env=env,
+    )
+    assert proc.returncode == 0, (
+        f"Whole-codebase audit failed:\n"
+        f"STDOUT:\n{proc.stdout}\n"
+        f"STDERR:\n{proc.stderr}"
+    )
+    assert "CLEAN" in proc.stdout
