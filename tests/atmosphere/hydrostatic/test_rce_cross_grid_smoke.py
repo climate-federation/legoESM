@@ -340,6 +340,33 @@ def test_blowup_gate_fires_on_supersonic_winds(tmp_path):
         f"C48-dt=300: status={fields.get('status')} (want FAIL). "
         f"notes={fields.get('notes')}"
     )
+    # iter-48: also pin that the SPIKE actually fired with a
+    # supersonic-class peak. ``status: FAIL`` could in principle be
+    # raised by a different failure mode (NaN earlier, runtime crash,
+    # etc.) — the test name says "supersonic winds" so verify the
+    # gating channel by scanning ``mean_timeseries.csv`` for a
+    # peak ``max_wind`` >= 200 m/s (iter-13 measured 236 m/s by day
+    # 20). Inverse of the iter-46 ``_assert_max_wind_peak_below``.
+    mean_csv = out_dir / "mean_timeseries.csv"
+    if mean_csv.exists():
+        import csv
+        peak_v = 0.0
+        with open(mean_csv) as fh:
+            reader = csv.DictReader(fh)
+            if (reader.fieldnames is not None
+                    and "max_wind" in reader.fieldnames):
+                for row in reader:
+                    try:
+                        peak_v = max(peak_v, abs(float(row["max_wind"])))
+                    except (TypeError, ValueError):
+                        pass
+        assert peak_v >= 200.0, (
+            f"C48-dt=300: peak max|v|={peak_v:.2f} did NOT cross "
+            f"the 200 m/s BLOWUP threshold (iter-13 measured "
+            f"~236 m/s by day 20). status: FAIL fired but via a "
+            f"different channel — check that the supersonic-wind "
+            f"gate actually tripped. Source: {mean_csv}"
+        )
 
 
 @pytest.mark.slow
