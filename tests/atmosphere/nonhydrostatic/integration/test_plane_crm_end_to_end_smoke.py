@@ -287,6 +287,98 @@ def test_plane_crm_short_smoke_with_radiation(tmp_path):
     )
 
 
+def _run_driver_no_mass_fixer(output_dir):
+    """iter-95k: variant that disables fix_moist_mass_plane via
+    ``--no-mass-fixer``. Surface flux is allowed to NET ADD moisture,
+    so CWV should GROW from the IC over the smoke window. The default
+    test (``test_plane_crm_short_smoke_clean_ic``) verifies the
+    opposite: with the fixer ON, CWV stays pinned. Together the two
+    tests pin both halves of iter-95b's Bug 2 fix.
+
+    Window: ~7 min sim = 86 outer steps on the 12x12 mesh — enough
+    time for surface flux to inject ~mm-level moisture.
+    """
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    env["JAX_ENABLE_X64"] = "1"
+    cmd = [
+        sys.executable, str(DRIVER),
+        "--nx", "12", "--ny", "12", "--nlev", "20",
+        "--dx", "2000.0", "--dt", "5.0",
+        "--days", "0.005",
+        "--semi-implicit-acoustic",
+        "--acoustic-off-centering", "0.1",
+        "--n-acoustic-substeps", "12",
+        "--advection", "upwind1",
+        "--hyperdiff", "5e6",
+        "--bubble-theta-pert", "0.0",
+        "--qv-noise-amp", "0.0",
+        "--log-every-steps", "20",
+        "--n-physics-substeps", "1",
+        "--no-radiation",
+        "--no-mass-fixer",
+        "--output", str(output_dir),
+    ]
+    return subprocess.run(
+        cmd, env=env, capture_output=True, text=True, timeout=300,
+    )
+
+
+def test_plane_crm_no_mass_fixer_lets_cwv_grow(tmp_path):
+    """iter-95k: pin the behavioural half of iter-95b's Bug 2 fix.
+
+    With ``--no-mass-fixer`` set, fix_moist_mass_plane is NOT called
+    after surface flux deposits q_v in the lowest model level. CWV
+    must therefore GROW from the IC (49.4691 mm at 12x12@nlev=20).
+    The matching default-config test pins the inverse: with the
+    fixer ON, CWV stays pinned within 0.1 mm.
+
+    Failure modes this catches:
+    * Someone removes the gate ``if not args.no_mass_fixer:`` (CWV
+      would pin again and this test fails).
+    * Someone flips the argparse default to True (the default
+      test would start failing because CWV would grow there too).
+    * Surface flux scheme stops actually depositing moisture
+      (CWV would not grow with the flag set).
+    """
+    out_dir = tmp_path / "rce_plane_smoke_no_mass_fixer"
+    result = _run_driver_no_mass_fixer(out_dir)
+    if result.returncode != 0:
+        pytest.fail(
+            f"run_rce_mpi_long.py --no-mass-fixer exited "
+            f"{result.returncode}\n"
+            f"stdout tail:\n{result.stdout[-1000:]}\n"
+            f"stderr tail:\n{result.stderr[-500:]}"
+        )
+    rows = _read_log(out_dir)
+    assert rows, "log.txt produced no diagnostic rows with --no-mass-fixer"
+    cwv_first = float(rows[0]["CWV_mean"])
+    cwv_final = float(rows[-1]["CWV_mean"])
+    # IC anchor (same as the default-config smoke): iter-95 12x12 = 49.4691.
+    assert abs(cwv_first - 49.4691) < 0.01, (
+        f"plane CRM --no-mass-fixer smoke: IC CWV={cwv_first:.4f} mm "
+        f"!= 49.4691 ± 0.01. Either the Wing IC drifted or the "
+        f"iter-95 hydrostatic-BC fix regressed."
+    )
+    # Behavioural check: CWV must grow. The default-config test
+    # asserts drift < 0.1 mm; here we assert drift > 0.01 mm (a
+    # solid margin above the noise floor in 86 outer steps and
+    # above the default-config drift limit at <1e-4). Measured
+    # growth in this 86-step / dt=5s / 12x12 window is ~0.026 mm;
+    # the 0.01 mm gate has a 2.5x cushion. On the iter-95 v3 run
+    # at 32x32 / dt=10s CWV grew ~0.4 mm in the first 7 minutes —
+    # consistent with this measurement.
+    cwv_growth = cwv_final - cwv_first
+    assert cwv_growth > 0.01, (
+        f"plane CRM --no-mass-fixer smoke: CWV grew only "
+        f"{cwv_growth:.4f} mm (IC={cwv_first:.4f}, "
+        f"final={cwv_final:.4f}). Expected > 0.01 mm growth — "
+        f"either --no-mass-fixer regressed (fixer still rescaling "
+        f"back to IC), surface flux scheme stopped depositing "
+        f"moisture, or both."
+    )
+
+
 def _run_driver_production_scale(output_dir, *, n_outer_steps=60,
                                  log_every_steps=15,
                                  rad_call_interval_s=None,
