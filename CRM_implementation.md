@@ -8,16 +8,19 @@ Canonical state of CRM rollout — built, broken, next. Each iteration appends d
 
 ## Components owned by this rollout
 
-| Component | Path | Status |
+| Component | Path | Status (refreshed iter-53) |
 |---|---|---|
-| Plane non-hydrostatic CRM dycore | `src/legoesm/atmosphere/dynamics/compressible_euler_plane.py` | Built, **unstable at dt=2 s** at production scale |
-| Plane CRM halo-aware slow tendency | `src/legoesm/atmosphere/dynamics/compressible_euler_plane_halo.py` | Built, **missing Smag / WENO5 / vertical-θ-diff / KW78 implicit buoyancy** |
-| Plane CRM acoustic substeps (SI) | `compressible_euler.py:acoustic_substeps_semi_implicit`, `compressible_euler_plane.py:plane_acoustic_substeps_semi_implicit` | Built, KW78 implicit-buoyancy WIP (this iter PR) |
-| 2-D pencil MPI layout + halo exchange | `src/legoesm/parallel/plane_mpi.py` | Built, AD-safe |
-| MPI-aware reductions for RCE | `src/legoesm/atmosphere/dynamics/rce_mpi.py` | Built |
-| 30-day production driver | `scripts/run_rce_mpi_long.py`, `scripts/run_rce_30day.sh` | **Runs dycore on rank 0 + broadcasts state** — DD wired only for reductions; no dycore scaling |
-| Multi-grid RCE driver | `scripts/run_rce.py`, `scripts/run_rce_cross_grid.sh` | Built for `cubed_sphere`, `latlon`, `voronoi`, `gaussian` — *hydrostatic*, not CRM |
-| Bare-dycore stability diagnostic | `scripts/diag_bare_dycore_stability.py` | Built, with `--implicit-buoyancy` / `--vertical-theta-diffusion` / `--advection` switches |
+| Plane non-hydrostatic CRM dycore | `src/legoesm/atmosphere/dynamics/compressible_euler_plane.py` | Built. **Production-stable at dt=5 s** on clean Wing IC (F8/F10/iter-12); F10 lifted the dt=1 s ladder constraint without R9 |
+| Plane CRM halo-aware slow tendency | `src/legoesm/atmosphere/dynamics/compressible_euler_plane_halo.py` | Built. Smag ✓ (iter-3 R4), vertical-θ-diff ✓ (iter-3 R5), WENO5 ✓ (iter-7 R6); KW78 obsolete (F10) |
+| Plane CRM acoustic substeps (SI) | `compressible_euler.py:acoustic_substeps_semi_implicit`, `compressible_euler_plane.py:plane_acoustic_substeps_semi_implicit` | Built. Substep KW78 placement algebraically correct but inert (F2); R9 outer-step variant no longer on critical path (F10 + iter-12 dt=5 s PASS) |
+| 2-D pencil MPI layout + halo exchange | `src/legoesm/parallel/plane_mpi.py` | Built, AD-safe (iter-4 + iter-5) |
+| MPI-aware reductions for RCE | `src/legoesm/atmosphere/dynamics/rce_mpi.py` | Built (iter-4 R7 — full DD mass fixer) |
+| 30-day production driver | `scripts/run_rce_mpi_long.py`, `scripts/run_rce_30day.sh` | DD path wired via ``--use-dd`` (iter-5); legacy rank-0-broadcast retained as F8-stable default. Real MPI scaling F9-platform-blocked on macOS Python 3.13 |
+| Multi-grid RCE driver | `scripts/run_rce.py`, `scripts/run_rce_cross_grid.sh` | Built for `cubed_sphere`, `latlon`, `voronoi`, `gaussian`. 30-day production validated for {C24, C48, C72, V4, LL32, T21} (iter-12 + iter-15 + iter-26); C96 stays at 2-day nightly per iter-22 wall-time decision |
+| Bare-dycore stability diagnostic | `scripts/diag_bare_dycore_stability.py` | Built (iter-1) with `--implicit-buoyancy` / `--vertical-theta-diffusion` / `--advection` switches |
+| Auto-dt ladder | `src/legoesm/driver/rce_dt.py` | Built (iter-24). 5-tier per-grid ladder + N>96 hard refusal (iter-21). Anchored by 5 measurement layers (iter-28/29/34/36/51) |
+| Radiation-schedule helper | `src/legoesm/driver/physics_schedule.py` | Built (iter-42). Single source of truth for the ``rad_call_every_steps`` arithmetic; 22 unit tests (iter-42 + iter-43 NaN/inf/sys.maxsize hardening) |
+| Shared RCE assertion helpers | `tests/atmosphere/hydrostatic/test_rce_cross_grid_smoke.py` | Built (iter-46). `_assert_dt_used` + `_assert_max_wind_peak_below` shared across C48/C72/C96/V4/LL32/T21 nightlies; 16 unit tests (iter-52) |
 
 ---
 
@@ -130,6 +133,59 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 * `--implicit-buoyancy` now exposed but inert at substep level (F2). Kept in API for future outer-step variant.
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
+
+### 2026-05-26 — iter 53
+
+**Refresh stale Components table + unit-test the `_parse_rad_call_count`
+parser (mirrors iter-52 for the plane CRM side).**
+
+**Doc refresh** (``CRM_implementation.md``):
+Components table claims dated to iter-1/2 (some 50+ iters stale). Refreshed
+every row to reflect iter-12/15/26/42/46/52 current state:
+* Plane CRM dycore: "unstable at dt=2 s" → "production-stable at dt=5 s
+  (F10 lifted constraint)".
+* Plane CRM halo: "missing Smag/WENO5/vertical-θ-diff/KW78" → all four
+  landed (iter-3/iter-7) except KW78 which is obsolete per F10.
+* SI substeps: "KW78 WIP" → "Substep KW78 inert (F2); R9 outer-step no
+  longer on critical path (F10)".
+* 30-day production driver: "Runs dycore on rank 0 + broadcasts" → "DD
+  path wired via --use-dd (iter-5); legacy retained as default".
+* Multi-grid RCE driver: 30-day production validated for {C24, C48, C72,
+  V4, LL32, T21} (iter-12 + iter-15 + iter-26 + iter-51).
+* Added 3 new rows: Auto-dt ladder (iter-24), Radiation-schedule helper
+  (iter-42), Shared RCE assertion helpers (iter-46).
+
+**Substantive code**: ``tests/atmosphere/nonhydrostatic/integration/
+test_plane_crm_helpers_unit.py`` (NEW) — 10 unit tests for the
+``_parse_rad_call_count(stdout)`` regex helper added in iter-40.
+
+Coverage:
+* Happy-path matches (basic, zero, large rad_calls value).
+* Anchor robustness — ignores ``total_rad_calls=`` substring (iter-40
+  Codex LOW#4 fix); rejects substring-only match without a ``Done.``
+  prefix.
+* Edge: ``rad_calls=5.0`` extracts 5 due to ``\b\d+`` word-boundary
+  (pinned as current behaviour — explicit doc for future regex
+  tightening).
+* Missing markers: empty stdout, ``Done.`` line without marker,
+  no ``Done.`` line at all → returns ``None``.
+* Pathological: two ``Done.`` lines (botched retry) → returns ``None``
+  per iter-40 "exactly one match" contract.
+
+10/10 PASS in 0.05 s.
+
+Also: ``CRM_implementation.original.md`` was deleted from working tree by
+some out-of-band process between iter-51 and iter-53; restored via
+``git checkout HEAD -- ...``. iter-49 backup intact.
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-53 doc-state refresh +
+plane CRM parser unit-test coverage), R6 ✓. F9 platform-blocked.
+
+Test inventory (post-iter-53):
+* 48 total unit tests (was 38 pre-iter-53): 22 physics_schedule + 16 RCE
+  assertion helpers + 10 plane CRM parsers.
+* 5 fast cross-grid + 7 slow cross-grid nightly.
+* 4 plane CRM end-to-end (2 fast + 2 slow).
 
 ### 2026-05-26 — iter 52
 
