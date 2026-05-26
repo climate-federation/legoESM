@@ -23,12 +23,18 @@ def _auto_dt(grid_type: str, resolution: int, dt_override=None) -> float:
     is intentionally a duplicate of the production heuristic — if the
     production branch is changed without updating this test, the
     test must fail so the author sees the contract change.
+
+    iter-13: ladder refined after the C48 BLOWUP at dt=300.
     """
     if dt_override is not None:
         return float(dt_override)
     if grid_type == "voronoi":
         return 300.0
-    return 300.0 if resolution > 24 else 600.0
+    if resolution <= 24:
+        return 600.0
+    if resolution <= 48:
+        return 150.0
+    return 75.0
 
 
 def test_voronoi_auto_dt_is_300s():
@@ -43,17 +49,19 @@ def test_voronoi_auto_dt_is_300s():
 
 def test_cubed_sphere_auto_dt():
     assert _auto_dt("cubed_sphere", 24) == 600.0
-    assert _auto_dt("cubed_sphere", 25) == 300.0
+    assert _auto_dt("cubed_sphere", 25) == 150.0  # iter-13: C25-48 needs 150
+    assert _auto_dt("cubed_sphere", 48) == 150.0
+    assert _auto_dt("cubed_sphere", 49) == 75.0   # extrapolated
 
 
 def test_latlon_auto_dt():
     assert _auto_dt("latlon", 16) == 600.0
-    assert _auto_dt("latlon", 32) == 300.0
+    assert _auto_dt("latlon", 32) == 150.0  # iter-13: LL>24 needs 150
 
 
 def test_gaussian_auto_dt():
     assert _auto_dt("gaussian", 21) == 600.0
-    assert _auto_dt("gaussian", 42) == 300.0
+    assert _auto_dt("gaussian", 42) == 150.0  # iter-13: T>24 needs 150
 
 
 def test_override_takes_precedence():
@@ -72,4 +80,9 @@ def test_run_rce_branch_matches_local_helper():
         "scripts/run_rce.py no longer pins voronoi to dt=300 — update "
         "CRM_implementation.md iter-8 + this test if the voronoi "
         "stability boundary has shifted."
+    )
+    # iter-13: dt ladder now branches at N<=24, N<=48, N>48.
+    assert "DT = 150.0" in text, (
+        "scripts/run_rce.py no longer has the iter-13 dt=150 step "
+        "for N in (24, 48] — refresh this test if the ladder changed."
     )

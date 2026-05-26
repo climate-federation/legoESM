@@ -222,6 +222,55 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 13
+
+**C48 BLOWUP exposed loose auto-dt + loose BLOWUP threshold**
+
+iter-12 validated 30-day at C24 / LL32 / V4 / T21. iter-13 pushed
+the cubed-sphere resolution to C48 (30 days, default auto-dt=300 s
+under the iter-8 ladder `N>24 → 300`). The run wrote `status: PASS`
+but the diagnostics showed CFL-blown-state:
+
+| day | mean_T_sfc | mean_T | max_wind |
+|-----|------------|--------|----------|
+|  5  | 299.91 K   | 274.15 | 7.5 m/s  |
+| 10  | 299.66     | 272.26 | 19.7     |
+| 15  | 299.20     | 268.45 | 57.7     |
+| 20  | 297.04     | 248.91 | **242**  |
+| 25  | 293.02     | 233.95 | 247      |
+| 30  | 288.89     | 223.48 | **236**  |
+
+Slab ocean dropped 11 K from IC. Max wind locked at ~240 m/s for
+days 20-30 (sound-speed regime).
+
+**Two regressions exposed**:
+* `scripts/run_rce.py`: BLOWUP threshold was `max_v > 500 m/s` —
+  way above any physically possible flow. Lowered to **200 m/s**
+  in iter-13 so future runs surface a config error instead of
+  saving a corrupted file as PASS.
+* Auto-dt ladder was binary at N=24: `dt=600` for N≤24, `dt=300`
+  for N>24. iter-13 measurements: C48 needs `dt=150` (confirmed
+  PASS in 10-day run: mean_T_sfc=299.99 K, max\|v\|=8.77 m/s).
+  New ladder: 600 / 150 / 75 at N ≤ 24 / ≤ 48 / > 48 on
+  cubed_sphere · latlon · gaussian; voronoi stays pinned at 300.
+
+**New regression tests landed**
+* `tests/atmosphere/hydrostatic/test_rce_cross_grid_dt_defaults.py`
+  refreshed for the new ladder (6 tests, < 0.1 s).
+* `tests/atmosphere/hydrostatic/test_rce_cross_grid_smoke.py` (NEW):
+  4 parametrised tests run a 2-day RCE smoke per grid and assert
+  `status == PASS` + `mean_T_sfc` within 1 K of IC. 4/4 PASS in 79 s.
+  This is the smallest CI-friendly regression that would catch the
+  C48-style failure had it been committed.
+
+**Plane CRM 1-hour smoke**: still running as of commit time. iter-10
+had 28-min sim @ 132×132 dt=5 s = PASS; iter-13 push is to 1 sim-hr
+(720 outer steps). Result captured in later iteration.
+
+**R-roadmap status**: R1-R8, R10 ✓ (now with iter-13 ladder fix +
+tighter BLOWUP gate + cross-grid smoke regression). R6 ✓. F9
+platform-blocked. Plane CRM full 30-day still wall-time-gated.
+
 ### 2026-05-26 — iter 12
 
 **MAJOR MILESTONE — 30-day production validation: 4/4 hydrostatic grids PASS**

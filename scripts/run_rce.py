@@ -142,16 +142,28 @@ def main():
 
     N = args.resolution
     NLEV = args.nlev
-    # Auto-dt heuristic. Voronoi/MPAS hits a tighter stability bound
-    # than the other dycores on the V4 / L20 RCE setup — verified
-    # 2026-05 cross-grid sweep: dt=600 blows up at day 1, dt=300 is
-    # stable through day 1. Cap MPAS at 300 s regardless of N.
+    # Auto-dt heuristic. Stability bounds measured in the
+    # iter-12/iter-13 cross-grid sweeps:
+    #   voronoi/MPAS V4:  dt=300 PASS (30-day, max|v|=2.3 m/s)
+    #                     dt>=450 BLOWUP at day 1
+    #   cubed_sphere C24: dt=600 PASS (30-day, max|v|=7.2 m/s)
+    #   cubed_sphere C48: dt=300 BLOWUP (max|v|=236 m/s by day 25)
+    #                     dt=150 PASS (verified iter-13)
+    #   gaussian T21:     dt=600 PASS
+    # Inverse-N scaling for the cubed-sphere/gaussian branch (dt
+    # halves whenever the linear-resolution doubles past N=24); cap
+    # voronoi at 300 unconditionally (its MPAS dycore has its own
+    # CFL profile that's already at the floor).
     if args.dt is not None:
         DT = args.dt
     elif args.grid_type == "voronoi":
         DT = 300.0
+    elif N <= 24:
+        DT = 600.0
+    elif N <= 48:
+        DT = 150.0
     else:
-        DT = 300.0 if N > 24 else 600.0
+        DT = 75.0  # extrapolated; verify before committing to long runs
     OUTPUT_DIR = Path(args.output or f"results/rce_{args.mode}")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -618,7 +630,17 @@ def main():
                 "max_wind": max_v,
             })
 
-            if not bool(is_finite_state(state)) or max_v > 500:
+            # BLOWUP threshold lowered from 500 -> 200 m/s in iter-13
+            # (2026-05). At 500 m/s the iter-13 C48 run cleared the
+            # gate but was clearly unphysical (max|v|=236 m/s after a
+            # cooling crash that pulled mean_T_sfc to 289 K — slab
+            # ocean dropped 11 K from IC in 30 days). Jet streams cap
+            # at ~100 m/s and the sound speed is ~330 m/s; anything
+            # over 200 m/s in a hydrostatic RCE is either a CFL crash
+            # in progress or a numerical instability that is about to
+            # NaN. Catching it earlier surfaces the right config
+            # change (lower dt) instead of saving a corrupted file.
+            if not bool(is_finite_state(state)) or max_v > 200:
                 print(f"  BLOWUP at day {day:.0f}")
                 blowup = True
                 break
