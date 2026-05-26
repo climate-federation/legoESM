@@ -149,6 +149,99 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 94
+
+**12×12 plane CRM 1-sim-DAY run — first complete 24-sim-hour
+production-config trajectory (was 1-sim-hour pre-iter-94).**
+**30-day 12×12 background run launched** to populate DOD #2
+(RCE plateau verification) — expected ~5h wall.
+
+iter-92 attempted the 1-day run but was killed at 80 sim-min by
+box overload. iter-94 ran cleanly to completion on a freed box.
+
+**Config**: 12×12×20 plane CRM, dx=2km, dt=5s, hyperdiff=5e6,
+Smag c_s=0.2, full physics (gray rad @ 600s cadence, Kessler,
+surface flux, Smagorinsky LES), clean Wing 2018 IC, no bubble,
+no qv noise.
+
+**Wall-time**: 10.1 min for 17280 outer steps = 1 sim-day.
+Rate: ~28 steps/s. Implies 30-sim-day at 12×12 = ~5h wall
+(feasible; launched as iter-94 background process). At
+132×132 production scale ≈25 days wall (F9-MPI-blocked for
+parallel speedup).
+
+**Trajectory** (every 4 sim-hours via --log-every-steps 240):
+
+| sim_hour | CWV [mm] | MSE [J/kg]   | max\|w\| [m/s] | qc | qr | precip |
+|----------|----------|--------------|----------------|----|----|--------|
+| 0.00     | 55.001   | 4.20490e+09  | 0.0000e+00     | 0  | 0  | 0      |
+| 1.00     | 55.001   | 4.20475e+09  | 5.531e-03      | 0  | 0  | 0      |
+| 6.00     | 55.001   | 4.20218e+09  | 5.682e-03      | 0  | 0  | 0      |
+| 12.00    | 55.001   | 4.19847e+09  | 5.684e-03      | 0  | 0  | 0      |
+| 18.00    | 55.001   | 4.19482e+09  | 5.706e-03      | 0  | 0  | 0      |
+| 24.00    | 55.001   | 4.19078e+09  | 5.713e-03      | 0  | 0  | 0      |
+
+**Stability indicators**:
+* CWV: zero drift (radiation drying balanced by surface flux).
+* MSE drift: 3.36e-3 relative over 1 sim-day = 0.336%/day. If
+  this rate persisted over 30 days = 10% — would EXCEED DOD #2
+  threshold of <1% over last 10 days. BUT: real RCE trajectory
+  is expected to plateau as convection initiates and balances
+  the radiative cooling. iter-94 captured pre-convection phase
+  only. iter-94 30-day background run will resolve this.
+* max\|w\|: bounded 0 → 5.7e-3 m/s. Gentle gravity-wave
+  oscillation around ~5.68e-3 with slight upward trend
+  approaching day 1. NOT a CFL signal (CFL at this scale ~10
+  m/s); the wave is ~5 orders of magnitude below cap.
+* qc=qr=precip=0 throughout: **no convection developed in 24
+  sim-hours**. Consistent with physical expectation — at 12×12
+  with only 144 columns and identical Wing IC across cells, the
+  symmetry-breaking needed for convection requires either
+  (a) longer simulation for instability to grow from
+  numerical noise, or (b) explicit IC perturbation (bubble or
+  qv noise — both disabled per iter-9 F10 production config).
+* Cross-iter consistency: iter-92 partial (80 sim-min) measured
+  MSE drift 2.1e-4 over 80 min = 3.8e-3/sim-day-equivalent;
+  iter-94 measured 3.36e-3 over full sim-day. Ratio 1.13 —
+  within 15% (iter-92 was extrapolating from a 6%-of-day
+  sample, so the modest discrepancy is expected).
+
+**Snapshots captured**: ``snap_day_0000.npz`` (IC) and
+``snap_day_0001.npz`` (end of day 1). Profile capture only at
+day 0 (default ``--profile-days=1`` => one profile per day; day
+1 profile not yet written when run ended at exactly day=1.0).
+
+**30-day 12×12 background run** (iter-94, PID 1714 at
+2026-05-26 21:55 UTC):
+* Same config as 1-day run, with ``--days 30 --log-every-steps
+  1440 --snapshot-hours 24 --profile-days 5``.
+* Output dir: ``/tmp/iter94_crm12x12_30day/``.
+* Expected to populate criterion #2 (RCE plateau + MSE drift <
+  1% over last 10 days) — the first empirical verification
+  across the full 30-day window at any plane CRM grid.
+* If trajectory blows up at e.g. day 7-14 (convection
+  initiation), this run is what will detect it; iter-14
+  1-sim-hour + iter-94 1-sim-day cannot.
+
+**DOD updates from iter-94**:
+| # | criterion | iter-94 status |
+|---|-----------|----------------|
+| 1 | Run to completion, max\|w\| < 50 | ✓ at **1 sim-day** (up from 1 sim-hour pre-iter-94) |
+| 2 | RCE plateau, MSE drift < 1% / 10 days | ⏳ background 30-day run launched |
+| 3 | Reproduce per grid | ✓ hydrostatic family + plane CRM 12×12 |
+| 4 | MPI weak/strong scaling | ⛔ F9-platform-blocked |
+| 5 | Codex review pass | ✓ clean through iter-93b |
+
+Raw run output kept at ``/tmp/iter94_crm12x12/`` and
+``/tmp/iter94_crm12x12_30day/`` (local, not committed).
+``trajectory.png`` generated via existing
+``scripts/plot_rce_log.py`` (no new plotter needed per CLAUDE.md
+"reuse existing code" mandate).
+
+**R-roadmap status**: R1-R7, R10, R12 ✓. R8 ``[~]`` (F9-blocked).
+R9 ``[!]`` obsolete. R11 ``[~]`` advanced: 12×12 30-day in
+progress; production-resolution 30-day still wall-time-gated.
+
 ### 2026-05-26 — iter 93
 
 **Fix import-time Metal-init crash + add structural regression test.**
