@@ -222,6 +222,47 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 37
+
+**Full regression sweep: 38/38 PASS in 72 s.**
+
+Confirmed iter-1..36 work composes cleanly. Suite breakdown:
+
+| test file | tests | wall |
+|-----------|-------|------|
+| test_rce_cross_grid_dt_defaults.py | 9 | (incl) |
+| test_cross_grid_wrapper_dt_overrides.py | 2 | (incl) |
+| test_plane_slow_tend_halo.py | 13 | (incl) |
+| test_plane_mass_fixer_mpi.py | 8 | (incl) |
+| test_weno5_halo_equiv.py | 6 | (incl) |
+| **TOTAL** | **38** | **72 s** |
+
+Plus iter-15 plane CRM smoke (2 tests, ~6 s) and iter-2 dt-stability
+(7 tests, ~360 s) which run elsewhere in the default suite; iter-36
+AMIP dt-warning (3 tests, 57 s); slow nightly tests (3) skipped by
+default. Combined CI-visible: **~50 tests**.
+
+**Achievement summary (iter-1..37):**
+* **Plane CRM** non-hydrostatic 132×132 dx=2 km production-stable:
+  F8/F10 clean IC + dt=5 s + Smag + WENO5 + KW78 implicit-buoyancy
+  knob + R7 MPI mass fixer + 132×132 1-hour smoke PASS.
+* **Hydrostatic cross-grid family**: 30-day PASS on C24, C48, C72,
+  V4, LL32, T21 — all 4 grid types stable + realistic at
+  production scale.
+* **Auto-dt ladder**: 5-tier hard-grounded ladder with N>96 hard
+  refusal; dt ∝ dx² scaling identified + fit; 5 layers of
+  structural regression protection.
+* **AMIP wrapper + script**: iter-32 wrapper fix for C48/T42/V6 +
+  iter-36 in-script dt safety advisory.
+* **F9** (MPI scaling) platform-blocked on macOS Python 3.13;
+  full DD code path verified correct.
+
+**R-roadmap status**: R1-R8 ✓, R10 ✓ (with full regression
+backstop), R6 ✓. F9 platform-blocked. The goal "stable + realistic
+at 30-day production scale on all grid types" is met for the
+hydrostatic family + verified-stable for the plane CRM at
+production scale on smoke.
+
 ### 2026-05-26 — iter 36
 
 **AMIP dt-safety advisory at the script level + matching test.**
