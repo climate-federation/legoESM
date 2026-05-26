@@ -222,6 +222,47 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 47
+
+**Applied iter-46 shared hardening helpers to C96 2-day slow smoke +
+fixed stale ladder-branch reference.**
+
+iter-46 factored ``_assert_dt_used`` + ``_assert_max_wind_peak_below``
+into shared helpers and applied them to C48 + C72 30-day nightlies.
+The C96 2-day slow smoke remained on the loose ``_assert_rce_pass``
+final-day-only envelope — same silent-pass risks the iter-46 fix
+exists to catch.
+
+Particularly dangerous for C96 because iter-20 BLOWUP at C96/dt=75
+reached max\|v\|=175 m/s by day 15, 527 by day 20 — but at 2 days
+the same broken config lands at max\|v\|≈5-10 m/s (CFL-stable for
+the first few days). A 2-day smoke alone CANNOT distinguish
+dt=37 (production) from dt=75 (BLOWUP-in-flight). Only the
+dt-assertion does.
+
+**Changes** (``tests/atmosphere/hydrostatic/test_rce_cross_grid_smoke.py``):
+* Docstring corrected from "iter-13 dt=75 ladder branch" to
+  "iter-20 dt=37" with explanation of the iter-20 BLOWUP fix.
+* Added ``_assert_dt_used(out_dir, "C96 2-day", expected_dt=37.0)``
+  — catches a ladder drift that re-routes C96 onto dt=75.
+* Added ``_assert_max_wind_peak_below(out_dir, "C96 2-day", cap=50.0)``
+  — same cap as the existing final-day check; catches a mid-run
+  CFL spike that recovers by the end of the 2-day window.
+
+**Codex iter-47** caught 0 HIGH, 0 MEDIUM, 1 LOW (stale comment
+referencing non-existent ``test_rce_2day_smoke_passes_slow``).
+Fixed: comment now points at ``test_rce_2day_smoke_c96_slow`` and
+cites the iter-20 ladder branch correctly.
+
+**Tests**:
+* Fast suite collection: 9 tests collected (5 fast + 4 slow);
+  fast suite continues PASS in ~210 s.
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-47 closing the
+last cross-grid slow test gap that lacked dt-assertion + peak-
+max-wind hardening — all 4 cdgrid nightlies now consistently
+protected), R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 46
 
 **Factored iter-44 hardening into shared helpers + propagated to

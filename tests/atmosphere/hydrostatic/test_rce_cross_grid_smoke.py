@@ -209,9 +209,10 @@ def _assert_max_wind_peak_below(out_dir, label, cap):
 # BLOWUP gate at 2 days and FAILS this test. iter-13 measurements:
 # C48 reached only max|v|≈1.7 m/s by day 2.
 #
-# C96 (auto-dt=75 branch) lives in `test_rce_2day_smoke_passes_slow`
-# below because C96 2-day takes ~10 min wall — too slow for default
-# CI but worthwhile as a nightly run.
+# C96 (iter-20 auto-dt=37 branch — iter-13's dt=75 BLEW UP at
+# day 20, iter-20 dropped to dt=37) lives in
+# `test_rce_2day_smoke_c96_slow` below because C96 2-day takes
+# ~10 min wall — too slow for default CI but worthwhile nightly.
 @pytest.mark.parametrize("grid_type,discretization,resolution", [
     ("cubed_sphere", "cdgrid", 12),
     ("cubed_sphere", "cdgrid", 48),   # iter-13 auto-dt=150 branch
@@ -254,15 +255,20 @@ def test_rce_2day_smoke_passes(tmp_path, grid_type, discretization, resolution):
 
 @pytest.mark.slow
 def test_rce_2day_smoke_c96_slow(tmp_path):
-    """SLOW: C96 2-day smoke for the iter-13 dt=75 ladder branch.
+    """SLOW: C96 2-day smoke for the iter-20 dt=37 ladder branch.
 
     Same assertions as ``test_rce_2day_smoke_passes`` but for C96
     (cdgrid). Lives outside the default smoke matrix because C96
     2-day takes ~10 min wall on M5 Pro (vs 1-3 min for C12/C48/V4
     /T21). Run nightly via ``pytest -m slow``.
 
-    iter-13 measured C96 30-day day 5 PASS at mean_T_sfc=299.90,
-    max|v|=7.99 m/s. A 2-day run lands well inside that envelope.
+    iter-22 measured C96 10-day at dt=37 PASS (mean_T_sfc=299.98,
+    max\\|v\\|=9.07 m/s, wall=2506 s ≈ 250 s/day). A 2-day run
+    lands well inside that envelope.
+
+    iter-47: docstring corrected from "iter-13 dt=75" — that
+    extrapolation BLEW UP at iter-20 (C96 30-day max\\|v\\|=527 m/s
+    by day 20). The current ladder pins C96 → dt=37 (iter-20 fix).
     """
     out_dir = tmp_path / "cubed_sphere_96"
     # iter-45 Codex HIGH carryover: C96 2-day measured ~500-600 s on
@@ -278,6 +284,15 @@ def test_rce_2day_smoke_c96_slow(tmp_path):
             "C96 2-day exited nonzero "
             f"({result.returncode})\nstdout tail:\n{result.stdout[-1500:]}"
         )
+    # iter-47: apply iter-46 shared hardening to C96. iter-20 BLOWUP
+    # at C96/dt=75 is exactly the silent-pass class these helpers
+    # exist to catch — a future ladder regression that re-routes
+    # C96 onto the dt=75 branch would only fail at day 20 of a 30-day
+    # run; the 2-day smoke (which lands well inside even the
+    # dt=75 BLOWUP timeline at day 20) would still pass _assert_rce_pass.
+    # The dt-assertion below catches that drift at the 2-day point.
+    _assert_dt_used(out_dir, label="C96 2-day", expected_dt=37.0)
+    _assert_max_wind_peak_below(out_dir, label="C96 2-day", cap=50.0)
     _assert_rce_pass(out_dir, label="C96 2-day", temp_tol=1.0, max_v_cap=50.0)
 
 
