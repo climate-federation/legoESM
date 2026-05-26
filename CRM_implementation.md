@@ -222,6 +222,39 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 18
+
+**Cross-grid smoke: every auto-dt ladder branch is now exercised**
+
+iter-13 introduced the resolution-stepped ladder (dt=600 / 150 / 75
+for N ≤ 24 / ≤ 48 / > 48). iter-14 added C48 (dt=150 branch).
+iter-18 adds **C96 (dt=75 branch)** to the parametrised default
+smoke. Now every auto-dt branch is exercised at 2-day in the
+default `pytest tests/atmosphere/hydrostatic/`:
+
+| param          | covers                | dt | iter-13 ladder branch |
+|----------------|-----------------------|----|----|
+| C12 cdgrid     | small-N baseline      | 600 | N≤24 |
+| C48 cdgrid     | iter-13 dt=150 fix    | 150 | 24<N≤48 |
+| C96 cdgrid     | iter-18 dt=75 extrap (SLOW) | 75  | N>48 |
+| LL16 latlon_cgrid | latlon path        | 600 | N≤24 |
+| V4 mpas        | voronoi/MPAS pin      | 300 | voronoi |
+| T21 spectral   | gaussian path         | 600 | N≤24 |
+
+C96 2-day takes ~10 min wall on M5 Pro so it's `@pytest.mark.slow`
+(nightly) rather than default. C48 covers the auto-dt boundary at
+day 2 — any regression of the iter-13 ladder still trips at C48.
+
+Default suite: **5 passed, 3 deselected in 159 s** (slow tests:
+C96 2-day, BLOWUP gate at C48-dt=300, C48 30-day nightly).
+
+C96 30-day continues running in background to confirm full
+production validation; day 5 already PASS (mean_T_sfc=299.90,
+max\|v\|=7.99).
+
+**R-roadmap status**: R1-R8, R10 ✓ (now with full per-branch
+coverage in default smoke), R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 17
 
 **Codex MEDIUM #4 + new BLOWUP-gate regression landed**

@@ -75,14 +75,17 @@ def _parse_notes(notes: str) -> dict:
     return out
 
 
-# Coverage matrix (iter-13). Includes C48 deliberately so any future
-# regression of the auto-dt ladder (e.g. accidentally restoring
-# dt=300 for N>24) trips the BLOWUP gate at 2 days and FAILS this
-# test. iter-13 measurements: C48 at dt=150 (auto) reached only
-# max|v|≈1.7 m/s by day 2, well inside the production envelope.
+# Coverage matrix (iter-13). Includes C48 (iter-13 auto-dt=150
+# branch) so any future regression of the auto-dt ladder trips the
+# BLOWUP gate at 2 days and FAILS this test. iter-13 measurements:
+# C48 reached only max|v|≈1.7 m/s by day 2.
+#
+# C96 (auto-dt=75 branch) lives in `test_rce_2day_smoke_passes_slow`
+# below because C96 2-day takes ~10 min wall — too slow for default
+# CI but worthwhile as a nightly run.
 @pytest.mark.parametrize("grid_type,discretization,resolution", [
     ("cubed_sphere", "cdgrid", 12),
-    ("cubed_sphere", "cdgrid", 48),   # iter-13 auto-dt=150 stability
+    ("cubed_sphere", "cdgrid", 48),   # iter-13 auto-dt=150 branch
     ("latlon", "latlon_cgrid", 16),
     ("voronoi", "mpas", 4),
     ("gaussian", "spectral", 21),
@@ -146,6 +149,39 @@ def test_rce_2day_smoke_passes(tmp_path, grid_type, discretization, resolution):
         f">50 m/s in a 2-day smoke means a CFL crash in flight even "
         f"though the BLOWUP gate at 200 m/s has not fired yet. "
         f"Bisect against the iter-13 auto-dt ladder + CRM_implementation.md."
+    )
+
+
+@pytest.mark.slow
+def test_rce_2day_smoke_c96_slow(tmp_path):
+    """SLOW: C96 2-day smoke for the iter-13 dt=75 ladder branch.
+
+    Same assertions as ``test_rce_2day_smoke_passes`` but for C96
+    (cdgrid). Lives outside the default smoke matrix because C96
+    2-day takes ~10 min wall on M5 Pro (vs 1-3 min for C12/C48/V4
+    /T21). Run nightly via ``pytest -m slow``.
+
+    iter-13 measured C96 30-day day 5 PASS at mean_T_sfc=299.90,
+    max|v|=7.99 m/s. A 2-day run lands well inside that envelope.
+    """
+    out_dir = tmp_path / "cubed_sphere_96"
+    result = _run_rce(
+        grid_type="cubed_sphere", discretization="cdgrid",
+        resolution=96, days=2, output_dir=out_dir,
+    )
+    if result.returncode != 0:
+        pytest.fail(
+            "C96 2-day exited nonzero "
+            f"({result.returncode})\nstdout tail:\n{result.stdout[-1500:]}"
+        )
+    fields = _parse_results(out_dir)
+    assert fields and fields.get("status") == "PASS"
+    nd = _parse_notes(fields.get("notes", ""))
+    assert abs(nd.get("mean_T_sfc", 0.0) - 300.0) < 1.0, (
+        f"C96 2-day mean_T_sfc={nd.get('mean_T_sfc')} outside ±1 K"
+    )
+    assert nd.get("max|v|", 1e9) < 50.0, (
+        f"C96 2-day max|v|={nd.get('max|v|')} > 50 m/s"
     )
 
 
