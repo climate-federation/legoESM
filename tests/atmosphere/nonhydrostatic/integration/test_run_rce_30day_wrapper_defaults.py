@@ -175,3 +175,32 @@ def test_wrapper_no_mass_fixer_conditional_present(wrapper_text):
         "$NMF_FLAG into the mpirun invocation. The flag would "
         "be silently dropped and Bug 2 from iter-95 would return."
     )
+
+
+def test_wrapper_no_mass_fixer_actually_conditional(wrapper_text):
+    """iter-95m (Codex iter-95g-k LOW#2): the iter-95g sibling
+    test above only checks text presence — if the bash conditional
+    became unconditional (e.g. ``NMF_FLAG="--no-mass-fixer"`` not
+    guarded by ``if [ "$NO_MASS_FIXER" = "1" ]``), it would still
+    pass. Catch that drift by asserting the wrapper carries the
+    guard literally."""
+    # Match: NMF_FLAG="" assignment + the bash if guard around the
+    # NMF_FLAG="--no-mass-fixer" reassignment.
+    assert re.search(r'NMF_FLAG\s*=\s*""\s*\n', wrapper_text), (
+        "run_rce_30day.sh missing the empty-default "
+        "``NMF_FLAG=\"\"`` initialisation. Without it, "
+        "NO_MASS_FIXER=0 (legacy fixer ON) would still pass "
+        "--no-mass-fixer to the driver, breaking gravity-wave "
+        "smokes that rely on the fixer."
+    )
+    assert re.search(
+        r'if\s*\[\s*"\$NO_MASS_FIXER"\s*=\s*"1"\s*\]\s*;\s*then\s*'
+        r'\n\s*NMF_FLAG\s*=\s*"--no-mass-fixer"',
+        wrapper_text,
+    ), (
+        "run_rce_30day.sh missing the bash conditional gate "
+        "``if [ \"$NO_MASS_FIXER\" = \"1\" ]; then NMF_FLAG=\"...\"``. "
+        "If the assignment is unconditional, NO_MASS_FIXER=0 stops "
+        "working and there is no escape hatch back to the legacy "
+        "fixer behaviour for gravity-wave / hydrostatic smokes."
+    )
