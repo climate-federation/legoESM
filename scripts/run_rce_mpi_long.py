@@ -269,14 +269,20 @@ def build_height_coord_and_state(args, grid):
         T_sfc=T_SFC_K, q_sfc=Q_SFC_FRAC, z_t=Z_T, Gamma=GAMMA_TROP,
     )
     qv_fn = make_wing2018_qv_ref_fn(q_sfc=Q_SFC_IC_FRAC, z_t=Z_T)
+    # iter-95: pass p_sfc=101480 (Wing 2018 Tab A1) to enable the
+    # bottom-up hydrostatic BC. Without this, the legacy top-down BC
+    # produces 12 K too-hot T at the lowest model level, breaking
+    # surface-flux coupling and preventing convection initiation.
     if args.vertical_grid == "uniform":
         hc = create_height_coordinate(
             n_levels=args.nlev, H=args.H, theta_ref_fn=theta_fn,
+            p_sfc=101480.0,
         )
     else:
         hc = create_stretched_height_coordinate(
             n_levels=args.nlev, H=args.H, dz_sfc=args.dz_sfc,
             theta_ref_fn=theta_fn,
+            p_sfc=101480.0,
         )
     state = make_rest_state(grid, hc, dtype=jnp.float64)
     z = hc.z_full
