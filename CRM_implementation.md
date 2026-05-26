@@ -134,6 +134,45 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 67
+
+**Extend iter-65 NaN/inf rejection to ALL numeric driver args.**
+
+iter-65 wrapped only the `--rad-call-interval-s` ValueError. Other
+numeric args (--dt, --hyperdiff, --smag-cs, etc.) still produced raw
+Python tracebacks if passed NaN/inf — e.g. ``--dt nan`` crashed
+``ValueError: cannot convert float NaN to integer`` at
+``total_steps = int(total_t / args.dt)``.
+
+iter-67 adds a finiteness validation block at the top of `main()`
+(after parse_args). For each of 17 numeric args (--dt, --days, --dx,
+--H, --dz-sfc, --c-h, --smag-cs, --hyperdiff, --sponge-coeff,
+--sponge-width, --acoustic-off-centering, --vertical-theta-diffusion,
+--bubble-theta-pert, --qv-noise-amp, --snapshot-hours, --snapshot-3d-
+hours, --profile-days), reject NaN/inf with concise
+``error: <flag> rejected: must be finite, got <value>`` + exit 1.
+
+Plus a positive-dt guard: ``--dt`` must be > 0 (the driver divides
+by dt at line ~741).
+
+**Verified** (direct smoke):
+* ``--dt nan`` → ``error: --dt rejected: must be finite, got nan`` exit 1.
+* ``--dt 0.0`` → ``error: --dt rejected: must be positive, got 0.0`` exit 1.
+
+**New parametric regression test**
+``test_plane_crm_driver_rejects_nan_inf_numeric_args`` — 7
+parametrized cases (--dt nan/inf/0/-1, --hyperdiff nan, --smag-cs inf,
+--acoustic-off-centering nan). Each asserts non-zero exit + "rejected"
+marker + no Python traceback. Mirrors the iter-65 nan-rad test.
+
+Note: subprocess-based parametric tests take ~60 s × 7 cases ≈ 7 min
+total wall (Python startup + JAX import for each invocation). Live
+run started but heavy box load delays completion across iters.
+
+**R-roadmap status**: R1-R8, R10, R12 ✓ (with iter-67 generalising
+iter-65's NaN/inf rejection to all numeric driver args). F9
+platform-blocked.
+
 ### 2026-05-26 — iter 66
 
 **Codex review of iter-52 helpers unit tests caught HIGH in

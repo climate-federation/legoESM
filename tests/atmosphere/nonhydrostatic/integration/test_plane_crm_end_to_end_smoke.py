@@ -709,6 +709,60 @@ def test_plane_crm_production_scale_132x132_with_radiation(tmp_path):
     )
 
 
+@pytest.mark.parametrize("flag,value,expected_err", [
+    ("--dt", "nan", "must be finite"),
+    ("--dt", "inf", "must be finite"),
+    ("--dt", "0.0", "must be positive"),
+    ("--dt", "-1.0", "must be positive"),
+    ("--hyperdiff", "nan", "must be finite"),
+    ("--smag-cs", "inf", "must be finite"),
+    ("--acoustic-off-centering", "nan", "must be finite"),
+])
+def test_plane_crm_driver_rejects_nan_inf_numeric_args(
+    tmp_path, flag, value, expected_err,
+):
+    """iter-67: numeric CLI args reject NaN/inf with concise
+    SystemExit + non-zero exit code, NOT a raw Python traceback.
+
+    iter-65 caught the --rad-call-interval-s case via try/except
+    around the physics_schedule helper. iter-67 extends to all
+    numeric args via a finiteness validation block in main().
+
+    Without iter-67, --dt nan would crash with
+    ``ValueError: cannot convert float NaN to integer`` at
+    ``int(total_t / args.dt)`` — opaque trace deep in the driver.
+    """
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    env["JAX_ENABLE_X64"] = "1"
+    cmd = [
+        sys.executable, str(DRIVER),
+        "--nx", "12", "--ny", "12", "--nlev", "20",
+        "--dx", "2000.0", "--dt", "5.0",
+        "--days", "0.0005",
+        "--no-radiation",
+        flag, value,
+        "--output", str(tmp_path / f"rce_bad_{flag.strip('-')}"),
+    ]
+    result = subprocess.run(
+        cmd, env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode != 0, (
+        f"driver exited 0 with {flag}={value}; expected non-zero.\n"
+        f"stdout: {result.stdout[-500:]}\nstderr: {result.stderr[-500:]}"
+    )
+    combined = result.stdout + result.stderr
+    assert "rejected" in combined and expected_err in combined, (
+        f"driver exit message missing 'rejected' + '{expected_err}'.\n"
+        f"stdout: {result.stdout[-500:]}\nstderr: {result.stderr[-500:]}"
+    )
+    assert "Traceback" not in combined, (
+        f"driver emitted Python traceback for {flag}={value}; "
+        f"iter-67 contract: clean SystemExit.\n"
+        f"stdout: {result.stdout[-500:]}\nstderr: {result.stderr[-500:]}"
+    )
+
+
 def test_plane_crm_driver_rejects_nan_rad_interval_with_clean_exit(tmp_path):
     """iter-65: passing ``--rad-call-interval-s nan`` (without
     ``--no-radiation``) must produce a SystemExit with a concise
