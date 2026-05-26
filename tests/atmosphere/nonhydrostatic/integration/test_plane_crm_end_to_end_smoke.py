@@ -736,7 +736,9 @@ def test_plane_crm_production_scale_132x132_with_radiation(tmp_path):
     ("--profile-days", "-5.0", "must be positive"),
     # Non-negative floats (zero is a meaningful disabled sentinel).
     ("--bubble-theta-pert", "-1.0", "must be non-negative"),
-    ("--qv-noise-amp", "-1e-5", "must be non-negative"),
+    # argparse interprets ``-1e-5`` as a new flag (starts with ``-``);
+    # use ``-0.001`` to test negative qv-noise rejection.
+    ("--qv-noise-amp", "-0.001", "must be non-negative"),
     ("--smag-cs", "-0.1", "must be non-negative"),
     ("--hyperdiff", "-1.0", "must be non-negative"),
     ("--sponge-coeff", "-0.01", "must be non-negative"),

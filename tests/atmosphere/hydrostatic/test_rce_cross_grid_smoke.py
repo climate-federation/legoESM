@@ -683,3 +683,59 @@ def test_gaussian_t21_30day_nightly_validation(tmp_path):
     _assert_rce_pass(
         out_dir, label="T21 30-day", temp_tol=1.0, max_v_cap=20.0,
     )
+
+
+@pytest.mark.slow
+def test_c96_10day_nightly_validation(tmp_path):
+    """SLOW nightly test (~42 min wall): runs C96 (cdgrid) RCE for
+    10 days at the iter-20/22 measured dt=37 ladder branch.
+
+    iter-22 measured:
+        dt                = 37 s (iter-20 ladder)
+        final mean_T_sfc  = 299.98 K (-0.02 from IC = 300.0 K)
+        max\\|v\\|        = 9.07 m/s
+        wall              = 2506 s
+
+    Background: iter-20 found C96 dt=75 BLOWUP at day 20 (max wind
+    reaches 175 by day 15, 527 by day 20). iter-22 dropped the
+    ladder to dt=37 + measured a 10-day PASS. C96 30-day is
+    wall-time-gated (~125 min on M5 Pro).
+
+    iter-47 noted the C96 2-day smoke CANNOT distinguish dt=37
+    (production) from dt=75 (BLOWUP-in-flight) because BOTH land
+    at max wind ≈ 5-10 m/s by day 2. The iter-47 added
+    ``_assert_dt_used`` catches a ladder-side regression at the
+    2-day level, but ONLY exercises 2 days of integration. iter-73
+    closes that gap with 10 days at dt=37 — long enough that the
+    iter-20 BLOWUP trajectory would already be visible (max wind
+    ≈ 26 m/s by day 10 in iter-20 broken run).
+
+    Skipped by default. Run nightly via ``pytest -m slow``.
+    timeout_s=4800 (2× iter-22's measured 2506 s wall).
+    """
+    out_dir = tmp_path / "c96_10d"
+    result = _run_rce(
+        grid_type="cubed_sphere",
+        discretization="cdgrid",
+        resolution=96,
+        days=10,
+        output_dir=out_dir,
+        timeout_s=4800,
+    )
+    if result.returncode != 0:
+        pytest.fail(
+            f"C96 10-day at iter-20/22 dt=37 failed: "
+            f"rc={result.returncode}"
+            f"\nstdout tail:\n{result.stdout[-2000:]}"
+            f"\nstderr tail:\n{result.stderr[-1000:]}"
+        )
+    _assert_dt_used(out_dir, label="C96 10-day", expected_dt=37.0)
+    # iter-22 peak max|v|=9.07 m/s. Cap 25.0 = 2.75x cushion;
+    # iter-20 broken-dt=75 reached 175 m/s by day 15 — cap 25
+    # is the C48/C72 nightly value, ample headroom for production
+    # C96 + clean fail signal vs the iter-20 BLOWUP trajectory.
+    _assert_max_wind_peak_below(out_dir, label="C96 10-day", cap=25.0)
+    # iter-22 mean_T_sfc=299.98 (Δ=-0.02). temp_tol=1.0 generous.
+    _assert_rce_pass(
+        out_dir, label="C96 10-day", temp_tol=1.0, max_v_cap=25.0,
+    )

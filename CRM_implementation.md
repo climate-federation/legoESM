@@ -134,6 +134,38 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 73
+
+**C96 10-day nightly slow test + fix iter-70 qv-noise-amp argparse
+quirk.**
+
+iter-47 noted the C96 2-day smoke CANNOT distinguish dt=37
+(production) from dt=75 (iter-20 BLOWUP-in-flight) because BOTH
+land at max wind ≈ 5-10 m/s by day 2. The iter-47 ``_assert_dt_used``
+catches a ladder-side regression, but only at the 2-day level.
+
+iter-73 lands ``test_c96_10day_nightly_validation`` (slow nightly):
+* 10 days at C96 dt=37 — iter-22 measured PASS at mean_T_sfc=299.98,
+  max\|v\|=9.07, wall=2506 s.
+* Long enough that the iter-20 BLOWUP trajectory would be visible
+  (broken iter-20 dt=75 reached max\|v\| ≈ 26 m/s by day 10).
+* timeout_s=4800 (2× cushion vs measured 2506 s).
+* iter-46 shared helpers: ``_assert_dt_used(37.0)`` +
+  ``_assert_max_wind_peak_below(cap=25.0)`` + ``_assert_rce_pass``.
+
+Also fixed iter-70 parametric regression test: ``--qv-noise-amp
+-1e-5`` failed because argparse interprets ``-1e-5`` as a new flag
+(starts with ``-``). Replaced with ``-0.001`` which argparse
+accepts. Confirmed 27/28 cases PASS at iter-70 verification run;
+iter-73 fix closes the last case → expect 28/28 next run.
+
+**Slow nightly count now 9** (4 cdgrid + V4 + LL32 + T21 + C96
+10-day + BLOWUP gate). 30-day production-scale empirical gates:
+C48, C72, V4, LL32, T21. C96 covered by 10-day (30-day wall-time
+gated).
+
+**R-roadmap status**: R1-R8, R10, R12 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 72
 
 **Regression test for iter-71 ``run_rce.py`` CLI validation.**
