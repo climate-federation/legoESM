@@ -134,6 +134,56 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 58
+
+**Refreshed stale `run_rce_30day.sh` defaults + landed regression test.**
+
+iter-58 audit of ``scripts/run_rce_30day.sh`` (the production-launch
+wrapper) found two stale defaults dating to iter-1 / pre-F10:
+
+* ``N_ACOUSTIC`` env default ``24`` — was set for iter-1's
+  ``dt=1.0 s`` config. iter-14 + iter-38 production runs use
+  ``N_ACOUSTIC=12`` for ``dt=5.0 s``. With ``dt=5`` + the stale
+  ``N_ACOUSTIC=24`` the acoustic CFL ratio would halve — produces
+  an over-stable but slower substep, and silently differs from
+  the iter-14 measurement that locks 1-sim-hour PASS at
+  ``N_ACOUSTIC=12``.
+
+* Documentation block lines 12-22 still cited the iter-1 F1
+  dt-stability ladder + "outer dt must satisfy dt <= ~1.0 s"
+  conclusion + R9 (KW78 outer-step) as the path forward. iter-2
+  F7 + iter-9 F10 + iter-14 production all superseded that: clean
+  Wing IC + dt=5 s is production-stable, R9 no longer on critical
+  path.
+
+**Fixes**:
+* ``scripts/run_rce_30day.sh``: bumped ``N_ACOUSTIC`` default
+  ``24 → 12``; rewrote the stability-history comment block to
+  reflect F7/F8/F10/iter-14 + iter-38 reality.
+
+**New regression test**
+``tests/atmosphere/nonhydrostatic/integration/
+test_run_rce_30day_wrapper_defaults.py``: 3 tests parsing the
+bash env-var defaults via regex and asserting they match the
+iter-12/14/38 production contract. Covers ``DT``,
+``N_ACOUSTIC``, ``NX``, ``NY``, ``ADVECTION``, ``HYPERDIFF``,
+``BUBBLE_K``, ``QV_NOISE``. A future silent revert would trip in
+< 1 s.
+
+**Verified**: ``DAYS=0.0005 NX=12 NY=12 RANKS=1`` smoke runs the
+wrapper cleanly with the new defaults; the production driver
+prints ``Done. 8 steps, ... rad_calls=1`` (default ``rad-call-
+interval-s=600`` fires once at step 1).
+
+**Tests**: 3/3 wrapper-defaults regression PASS in 0.03 s. No
+existing test affected.
+
+**R-roadmap status**: R1-R8, R10, R12 ✓ (with iter-58 production
+wrapper script refreshed to match the iter-14/iter-38 production
+contract + structural-regression backstop), R6 ✓. F9
+platform-blocked. R11 30-day plane CRM still wall-time gated
+(~8 days single-rank on M5 Pro).
+
 ### 2026-05-26 — iter 57
 
 **Codex holistic review of plane CRM MPI halo (plane_mpi.py)

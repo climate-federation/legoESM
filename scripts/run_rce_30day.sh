@@ -9,17 +9,17 @@
 # opt-in).
 # Hourly 3D MSE/qv/T snapshots for GIF, daily surface snapshots, 5-day profiles.
 #
-# Stability constraints (measured by scripts/diag_bare_dycore_stability.py
+# Stability history (measured by scripts/diag_bare_dycore_stability.py
 # at nx=ny=48, nlev=30, dx=2 km, H=33 km, --semi-implicit-acoustic):
-#   dt=0.5 s -> stable (max|w| ~ 7e-3 m/s through 200 steps)
-#   dt=1.0 s -> stable
-#   dt=1.5 s -> growing instability (max|w| ~ 4 m/s by step 100)
-#   dt=2.0 s -> blows up by step 70 (max|w| > 100 m/s)
-# Conclusion: outer dt must satisfy dt <= ~1.0 s with the Wing 2018 IC
-# (warm bubble at z<1 km) until the buoyancy/w mode amplification at
-# the SSP-RK3 outer step is fixed (e.g. by porting Klemp-Wilhelmson
-# 1978 implicit-buoyancy to the OUTER step, not just the acoustic
-# substep — see CRM_implementation.md).
+# F1 (iter-1, with bubble IC):
+#   dt=1.0 s -> stable; dt=1.5 s -> growing; dt=2.0 s -> blows up step 70
+# F7 (iter-2) found the bubble IC was the destabiliser, not dt itself.
+# F8/F10 (iter-2/9) verified: clean Wing IC (no bubble, no qv noise) is
+# stable at dt up to 10 s; full-physics smoke at dt=5 s ran 864 steps
+# stably. iter-14 measured 132x132 1-sim-hour PASS at dt=5 s + N_ACOUSTIC=12
+# (max|w|=6.1e-3 m/s); iter-38 locks this as a structural regression.
+# R9 (Klemp-Wilhelmson 1978 outer-step implicit buoyancy) no longer on
+# critical path: F10 lifted the dt constraint without it.
 #
 # Usage:
 #   scripts/run_rce_30day.sh                  # default output dir results/rce_30day
@@ -30,9 +30,10 @@
 # Env vars:
 #   DAYS         simulation days (default 30)
 #   RANKS        MPI ranks (default 12)
-#   DT           outer timestep [s] (default 1.0 — stable at production scale)
+#   DT           outer timestep [s] (default 5.0 — F10 production stable)
 #   NX,NY        grid dims (default 132)
-#   N_ACOUSTIC   acoustic substeps per outer step (default 24, matches dt=1.0s)
+#   N_ACOUSTIC   acoustic substeps per outer step (default 12, matches dt=5.0s
+#                + iter-14 production measurement)
 #   ADVECTION    upwind1 | weno5  (default upwind1)
 #   PYBIN        python interpreter (default .venv/bin/python)
 
@@ -47,7 +48,7 @@ RANKS="${RANKS:-12}"
 DT="${DT:-5.0}"
 NX="${NX:-132}"
 NY="${NY:-132}"
-N_ACOUSTIC="${N_ACOUSTIC:-24}"
+N_ACOUSTIC="${N_ACOUSTIC:-12}"
 ADVECTION="${ADVECTION:-upwind1}"
 HYPERDIFF="${HYPERDIFF:-5.0e6}"
 BUBBLE_K="${BUBBLE_K:-0.0}"
