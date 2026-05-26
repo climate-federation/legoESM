@@ -44,3 +44,8 @@ from legoesm.driver.earth_system_driver import EarthSystemDriver
 from legoesm.driver.coupled_esm_driver import CoupledESMDriver
 from legoesm.driver.coupled_config import CoupledConfig, PRESETS as COUPLED_PRESETS
 from legoesm.driver.rce_dt import auto_dt_rce
+from legoesm.driver.physics_schedule import (
+    RadiationCallSchedule,
+    radiation_call_every_steps,
+    radiation_call_schedule,
+)

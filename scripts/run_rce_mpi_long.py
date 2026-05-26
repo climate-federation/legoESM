@@ -648,7 +648,10 @@ def main():
         model = PlaneCompressibleEulerModel(grid, hc, terrain, config=cfg)
         fast_physics_fn = build_fast_physics_fn(args, grid, hc, terrain)
         slow_physics_fn = build_slow_physics_fn(args, grid, hc, terrain)
-    rad_call_every_steps = max(1, int(round(args.rad_call_interval_s / args.dt)))
+    from legoesm.driver.physics_schedule import radiation_call_every_steps
+    rad_call_every_steps = radiation_call_every_steps(
+        args.rad_call_interval_s, args.dt,
+    )
     cached_rad_tend = [None]  # mutable closure for the cache
 
     def apply_physics_substep(state, dt_sub):

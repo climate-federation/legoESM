@@ -273,20 +273,23 @@ def test_plane_crm_short_smoke_with_radiation(tmp_path):
     # from rad_calls > 0 (a broken cadence pinning rad_calls=1
     # would still pass) to an exact count derived from CLI args.
     # days=0.002 → total_steps=34; rad-interval=30, dt=5 → every=6;
-    # expected = 1 + (34 - 1) // 6 = 6 (fires at steps 1, 7, 13,
-    # 19, 25, 31).
+    # expected = 6 (fires at steps 1, 7, 13, 19, 25, 31).
+    # iter-42: use the production helper instead of re-deriving the
+    # arithmetic locally — keeps test contract anchored to the same
+    # source the driver uses.
+    from legoesm.driver.physics_schedule import radiation_call_schedule
     dt_s = 5.0
     rad_interval_s = 30.0
     days = 0.002
     total_steps = int(days * 86400.0 / dt_s)
-    every = max(1, round(rad_interval_s / dt_s))
-    expected_rad_calls = 1 + (total_steps - 1) // every
+    schedule = radiation_call_schedule(rad_interval_s, dt_s, total_steps)
     rad_calls = _parse_rad_call_count(result.stdout)
-    assert rad_calls == expected_rad_calls, (
+    assert rad_calls == schedule.num_calls, (
         f"plane CRM radiation smoke: driver reported "
-        f"rad_calls={rad_calls!r}, expected {expected_rad_calls} "
+        f"rad_calls={rad_calls!r}, expected {schedule.num_calls} "
         f"(dt={dt_s}, rad-interval={rad_interval_s}, "
-        f"total_steps={total_steps} → every={every}). Either the "
+        f"total_steps={total_steps} → every={schedule.every_steps}, "
+        f"fires at {schedule.fire_step_indices}). Either the "
         f"radiation tick gate regressed or the rad_calls counter "
         f"is missing.\n"
         f"stdout tail:\n{result.stdout[-500:]}"
@@ -573,22 +576,24 @@ def test_plane_crm_production_scale_132x132_with_radiation(tmp_path):
     # ``rad_call_every_steps = max(1, round(rad_interval / dt))``
     # and fires at outer steps where ``(step - 1) % every == 0``,
     # so the expected fire count over ``n_steps`` outer steps is
-    # ``1 + (n_steps - 1) // every``. For this config
+    # encoded by ``radiation_call_schedule``. For this config
     # (dt=5, interval=60, n_steps=60): every=12, count=5
-    # (steps 1, 13, 25, 37, 49). A broken
-    # ``rad_call_every_steps`` arithmetic or a regression in the
-    # tick gate would change this count.
+    # (steps 1, 13, 25, 37, 49). iter-42 routes the test through
+    # the same helper the driver uses so a refactor of the
+    # schedule formula updates BOTH sides in lock-step.
+    from legoesm.driver.physics_schedule import radiation_call_schedule
     dt_s = 5.0
     rad_interval_s = 60.0
-    every = max(1, round(rad_interval_s / dt_s))
-    expected_rad_calls = 1 + (n_steps - 1) // every
+    schedule = radiation_call_schedule(rad_interval_s, dt_s, n_steps)
     rad_calls = _parse_rad_call_count(result.stdout)
-    assert rad_calls == expected_rad_calls, (
+    assert rad_calls == schedule.num_calls, (
         f"plane CRM production+rad smoke: driver reported "
-        f"rad_calls={rad_calls!r}, expected {expected_rad_calls} "
+        f"rad_calls={rad_calls!r}, expected {schedule.num_calls} "
         f"(dt={dt_s}, rad-interval={rad_interval_s}, n_steps={n_steps} "
-        f"→ every={every}). Either the radiation tick gate regressed "
-        f"or the rad_calls counter is missing from the Done. line. "
+        f"→ every={schedule.every_steps}, "
+        f"fires at {schedule.fire_step_indices}). Either the "
+        f"radiation tick gate regressed or the rad_calls counter is "
+        f"missing from the Done. line. "
         f"stdout tail:\n{result.stdout[-500:]}"
     )
 

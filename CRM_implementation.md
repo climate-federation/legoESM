@@ -222,6 +222,74 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 42
+
+**Radiation-call schedule arithmetic factored to a unit-testable
+driver helper (single source of truth).**
+
+CLAUDE.md DRY rule + Codex iter-39/40/41 review trail flagged the
+inline arithmetic
+``rad_call_every_steps = max(1, int(round(rad_call_interval_s/dt)))``
++ ``expected = 1 + (n_steps - 1) // every`` as a silent-divergence
+risk: the driver and two test files all encoded the formula
+independently. iter-42 extracts it to ``legoesm.driver.physics_schedule``.
+
+**New module** ``src/legoesm/driver/physics_schedule.py``:
+* ``RadiationCallSchedule`` NamedTuple with fields
+  ``(every_steps, num_calls, fire_step_indices)``.
+  ``fire_step_indices`` is a lazy ``range`` (Codex iter-42 MEDIUM:
+  the original tuple materialisation would have allocated a
+  million ints on a 10M-step run; ``range`` is O(1) memory).
+* ``radiation_call_every_steps(rad_call_interval_s, dt)`` — mirrors
+  the exact driver formula incl. ``int(round(...))`` rounding
+  semantics. Raises ``ValueError`` on ``dt <= 0`` or negative
+  interval (was previously silent).
+* ``radiation_call_schedule(rad_call_interval_s, dt, total_steps)``
+  — full schedule with O(1) ``num_calls`` derivation.
+
+**Wiring**:
+* ``src/legoesm/driver/__init__.py`` re-exports all three names.
+* ``scripts/run_rce_mpi_long.py`` uses
+  ``radiation_call_every_steps`` (function-scope import to avoid
+  the cross-package eager-import pattern CLAUDE.md warns against).
+* ``tests/atmosphere/nonhydrostatic/integration/
+  test_plane_crm_end_to_end_smoke.py``: iter-16 + iter-39
+  assertions now go through ``radiation_call_schedule`` instead of
+  re-deriving the formula locally. Single canonical source the
+  driver also uses.
+
+**New unit tests** (``tests/unit/test_physics_schedule.py``):
+17 tests covering:
+* basic schedule (driver-mirror formula match)
+* sub-dt clamping
+* huge-interval anti-pattern (Codex iter-39 HIGH#2:
+  ``rad_call_interval_s=1e9`` still fires ONCE at step 1)
+* int(round(...)) tie-breaks (5.4 → 5, 5.6 → 6)
+* invalid-input ValueError contracts (negative dt / interval)
+* total_steps boundary (0 → empty, 1 → one fire)
+* memory invariant: lazy range for huge total_steps
+* first-fire-always-step-1 invariant across all intervals
+* num_calls matches len(fire_step_indices)
+
+**Codex iter-42 review**: 0 HIGH, 1 MEDIUM, 1 LOW. Both fixed:
+* MEDIUM: ``fire_step_indices`` materialisation; switched to lazy
+  ``range``.
+* LOW: missing ``total_steps=1`` boundary test; added.
+
+**Tests**:
+* ``pytest tests/unit/test_physics_schedule.py``: 17 PASS in 1.8 s.
+* ``pytest -m 'not slow' tests/atmosphere/nonhydrostatic/
+  integration/test_plane_crm_end_to_end_smoke.py``: 2 PASS in 33 s.
+
+**Net effect**: the formula is now anchored once and tested both
+in isolation (15 unit cases) and through the production driver +
+slow tests (integration). A regression in the formula trips the
+unit test in < 2 s, before any slow nightly fires.
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-42 schedule-formula
+de-duplication landing as the iter-39/40/41 closing piece), R6 ✓.
+F9 platform-blocked.
+
 ### 2026-05-26 — iter 41
 
 **iter-15/16 short smokes propagated the iter-39 / iter-40 hardening.**
