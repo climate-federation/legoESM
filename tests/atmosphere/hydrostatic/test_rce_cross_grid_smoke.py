@@ -182,9 +182,13 @@ def test_rce_2day_smoke_c96_slow(tmp_path):
     max|v|=7.99 m/s. A 2-day run lands well inside that envelope.
     """
     out_dir = tmp_path / "cubed_sphere_96"
+    # iter-45 Codex HIGH carryover: C96 2-day measured ~500-600 s on
+    # M5 Pro (iter-22 timed C96 10-day at 2506 s ≈ 250 s/day). The
+    # iter-44 default _run_rce timeout=600 cut too close — a 10%
+    # slower box would silently hang. Bump to 1800 s (3x cushion).
     result = _run_rce(
         grid_type="cubed_sphere", discretization="cdgrid",
-        resolution=96, days=2, output_dir=out_dir,
+        resolution=96, days=2, output_dir=out_dir, timeout_s=1800,
     )
     if result.returncode != 0:
         pytest.fail(
@@ -255,12 +259,17 @@ def test_c48_30day_nightly_validation(tmp_path):
     the iter-12 broken C48 timeseries).
     """
     out_dir = tmp_path / "c48_30d"
+    # iter-45 Codex HIGH carryover: iter-15 measured C48 30-day at
+    # wall=500.9 s. Default _run_rce timeout=600 left only 20%
+    # margin — a slower box would silently hang. Bump to 1800 s
+    # (3.6x cushion).
     result = _run_rce(
         grid_type="cubed_sphere",
         discretization="cdgrid",
         resolution=48,
         days=30,
         output_dir=out_dir,
+        timeout_s=1800,
     )
     if result.returncode != 0:
         pytest.fail(
@@ -340,30 +349,39 @@ def test_c72_30day_nightly_validation(tmp_path):
     # A CFL crash that recovers by day 30 would slip through; iter-26
     # measured a monotone rise to ~18 m/s but a regression that
     # spikes to 100+ at day 15 and damps back by day 30 would not.
+    # iter-45 Codex-hardening: pin the exact column name
+    # ``max_wind`` written by ``run_rce.py:668-676`` instead of the
+    # iter-44 substring heuristic, which would have false-matched
+    # a future column named ``max_dvdt`` (contains both "max" and
+    # "v"). If ``run_rce.py`` renames the column, the test fails
+    # loudly here rather than silently scanning the wrong field.
     mean_csv = out_dir / "mean_timeseries.csv"
-    if mean_csv.exists():
-        import csv
-        peak_v = 0.0
-        with open(mean_csv) as fh:
-            for row in csv.DictReader(fh):
-                # tolerate column-name drift
-                key = next(
-                    (k for k in row if "max" in k.lower()
-                     and ("v" in k.lower() or "wind" in k.lower())),
-                    None,
-                )
-                if key is not None:
-                    try:
-                        peak_v = max(peak_v, abs(float(row[key])))
-                    except (TypeError, ValueError):
-                        pass
-        assert peak_v < 25.0, (
-            f"C72 30-day: peak max|v|={peak_v:.2f} across the "
-            f"30-day timeseries exceeds 25 m/s cap. A mid-run CFL "
-            f"spike that recovered by day 30 would slip past the "
-            f"notes-line (last-day-only) check; this assertion "
-            f"catches it."
+    assert mean_csv.exists(), (
+        f"C72 30-day: mean_timeseries.csv missing — run_rce.py "
+        f"diagnostic emitter regressed."
+    )
+    import csv
+    peak_v = 0.0
+    with open(mean_csv) as fh:
+        reader = csv.DictReader(fh)
+        assert reader.fieldnames is not None and "max_wind" in reader.fieldnames, (
+            f"C72 30-day: mean_timeseries.csv missing the "
+            f"``max_wind`` column. Headers: {reader.fieldnames!r}. "
+            f"run_rce.py:668-676 schema may have changed; if "
+            f"intentional, update this test."
         )
+        for row in reader:
+            try:
+                peak_v = max(peak_v, abs(float(row["max_wind"])))
+            except (TypeError, ValueError):
+                pass
+    assert peak_v < 25.0, (
+        f"C72 30-day: peak max|v|={peak_v:.2f} across the "
+        f"30-day timeseries exceeds 25 m/s cap. A mid-run CFL "
+        f"spike that recovered by day 30 would slip past the "
+        f"notes-line (last-day-only) check; this assertion "
+        f"catches it."
+    )
     # Tighter envelope than the 2-day C96 smoke: iter-26 measured
     # C72 30-day at mean_T_sfc=299.81 (Δ=-0.19), max|v|=17.85.
     # Allow ±1 K (5x iter-26 |Δ|) + max|v| < 25 m/s (1.4x iter-26

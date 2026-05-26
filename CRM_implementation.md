@@ -222,6 +222,47 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 45
+
+**Propagate iter-44 Codex HIGH-class timeout fix to the C96 2-day
++ C48 30-day slow tests + tighten C72 csv parsing.**
+
+iter-44 fixed `_run_rce` to accept ``timeout_s`` and passed
+``timeout_s=4800`` for the C72 30-day nightly. Two sibling slow
+tests still used the 600 s default, both with marginal headroom:
+
+* ``test_rce_2day_smoke_c96_slow``: iter-22 measured C96 10-day at
+  2506 s ≈ 250 s/day → 2-day ≈ 500 s. Default 600 leaves only 20%
+  margin; a 10%-slower runner would silently hang.
+* ``test_c48_30day_nightly_validation``: iter-15 measured C48
+  30-day at 500.9 s. Default 600 leaves only 20% margin.
+
+Both bumped to ``timeout_s=1800`` (3-3.6× cushion vs measured wall).
+A genuine hang now fires the timeout cleanly; a normal slow box
+finishes well inside the new budget.
+
+**Secondary hardening** on the iter-44 C72 csv parsing:
+* iter-44 used a substring heuristic
+  (``"max" in k and ("v" in k or "wind" in k)``) for the
+  ``max_wind`` column lookup. Would false-match a future column
+  named e.g. ``max_dvdt`` (contains both "max" and "v").
+* iter-45 pins the exact column name ``max_wind`` (matches
+  ``run_rce.py:668-676`` schema). If the schema changes, the test
+  fails loudly with a clear "if intentional, update this test"
+  pointer.
+* Also promoted the ``mean_timeseries.csv`` existence check from
+  a silent skip to a hard fail (driver-emit regression now visible).
+
+**Tests**:
+* Fast suite still 5/5 PASS in 207 s.
+* No new slow tests added; iter-44 ladder unchanged. Risk: the
+  iter-44 timeout=4800 for C72 + iter-45 timeout=1800 for C48/C96
+  give all 4 cross-grid slow tests safe budgets on M5 Pro and
+  slightly slower runners.
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-45 slow-test timeout
+hardening), R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 44
 
 **C72 30-day nightly regression test landed + Codex caught a HIGH
