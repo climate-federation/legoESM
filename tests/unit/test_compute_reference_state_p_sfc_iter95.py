@@ -65,11 +65,15 @@ def test_legacy_mode_gives_too_hot_lowest_level():
     """Pins the bug iter-95 fixed.
 
     Without p_sfc, T at the lowest model level (z ≈ 550 m for
-    H=33 km / n_lev=30) is ~12 K above the Wing 2018 RCE300 IC
-    of 296.8 K. This is the bug that broke CRM surface-flux
-    coupling: air ~9 K above the prescribed SST=300 K drove the
-    wrong sign of sensible heat flux, preventing convection
-    initiation.
+    H=33 km / n_lev=30) is the documented ~308.8 K (12 K above the
+    Wing 2018 RCE300 IC of 296.8 K). This is the bug that broke
+    CRM surface-flux coupling: air ~9 K above the prescribed
+    SST=300 K drove the wrong sign of sensible heat flux,
+    preventing convection initiation.
+
+    Codex iter-95 LOW: tightened from (305, 315) K to a 0.5 K
+    tolerance around the measured 308.78 K so partial drift in
+    the legacy BC fails this test instead of silently shifting.
     """
     z = _build_z_topdown()
     rho_0, theta_0, exner_0 = compute_reference_state(
@@ -77,10 +81,12 @@ def test_legacy_mode_gives_too_hot_lowest_level():
     )
     T = _t_from_pi_and_theta(theta_0, exner_0)
     T_lowest = float(T[-1])
-    assert 305.0 < T_lowest < 315.0, (
-        f"Legacy mode T_lowest expected in (305, 315) K (the bug); "
-        f"got {T_lowest:.2f} K. Test pins the legacy behaviour — if "
-        f"this fails, the top-down BC has changed."
+    T_legacy_expected = 308.78
+    assert abs(T_lowest - T_legacy_expected) < 0.5, (
+        f"Legacy mode T_lowest expected {T_legacy_expected:.2f} K "
+        f"± 0.5 K (the documented bug; see CRM_implementation.md "
+        f"iter-95); got {T_lowest:.2f} K. If the top-down BC has "
+        f"changed, update the anchor; otherwise diagnose the drift."
     )
 
 
@@ -110,8 +116,8 @@ def test_p_sfc_mode_vs_legacy_diff_at_lowest_level():
     """iter-95 fix is materially different at the lowest level.
 
     The whole reason for the iter-95 patch is that the two
-    integration paths disagree by ~12 K at z ≈ 550 m. Pin that
-    so neither branch can silently drift to match the other.
+    integration paths disagree by the documented ~12 K at z ≈
+    550 m. Pin to 11.97 K ± 0.5 K (Codex iter-95 LOW tightening).
     """
     z = _build_z_topdown()
     _, theta_legacy, exner_legacy = compute_reference_state(
@@ -123,9 +129,12 @@ def test_p_sfc_mode_vs_legacy_diff_at_lowest_level():
     T_legacy = float((theta_legacy * exner_legacy)[-1])
     T_psfc = float((theta_psfc * exner_psfc)[-1])
     diff = T_legacy - T_psfc
-    assert diff > 8.0, (
-        f"Legacy mode should be > 8 K hotter than p_sfc mode at "
-        f"the lowest level (the iter-95 bug); got diff={diff:.2f} K."
+    diff_expected = 11.97
+    assert abs(diff - diff_expected) < 0.5, (
+        f"Legacy-minus-fixed diff at lowest level: expected "
+        f"{diff_expected:.2f} K ± 0.5 K (the documented iter-95 "
+        f"bug magnitude); got {diff:.2f} K. Either branch drifting "
+        f"toward the other would silently mask the iter-95 regression."
     )
 
 
