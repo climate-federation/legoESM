@@ -202,12 +202,21 @@ def main():
     # CFL-formula advisory (Codex iter-21 MEDIUM #2 — does not
     # override the ladder, just surfaces the formula bound so
     # operators see the headroom they're running on).
+    #
+    # Codex iter-24 HIGH: previous broad `except Exception` would
+    # swallow TypeErrors from signature drift in cfl_max_dt and
+    # AttributeErrors from renamed estimators, masking real bugs.
+    # Now we only swallow ImportError (e.g. mid-refactor missing
+    # module) and re-raise everything else.
     try:
         from legoesm.core.cfl import (
             cfl_max_dt, estimate_min_dx_cubed_sphere,
             estimate_min_dx_gaussian, estimate_min_dx_icosahedral,
             estimate_min_dx_latlon,
         )
+    except ImportError as _exc:
+        print(f"  CFL advisory unavailable ({_exc!r}); skipping.")
+    else:
         if grid_type == "cubed_sphere":
             _dx_min = estimate_min_dx_cubed_sphere(N)
         elif grid_type == "latlon":
@@ -231,8 +240,6 @@ def main():
                 f"gravity-wave dt_max={_dt_cfl_gravity:.0f} s, "
                 f"using DT={DT:.0f} s ({DT/_dt_cfl_gravity:.2f}× formula)."
             )
-    except Exception as _exc:
-        print(f"  CFL advisory unavailable ({_exc!r}); skipping.")
 
     config = ExperimentConfig(
         grid=GridConfig(grid_type=grid_type, resolution=N, nlev=NLEV),

@@ -222,6 +222,44 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 25
+
+**Codex iter-22..24 review caught 2 HIGH + 1 MEDIUM — all fixed.**
+
+* **HIGH (#1) — broad `except Exception` swallowed real bugs**
+  in the iter-23 CFL advisory. `cfl_max_dt` signature drift or
+  estimator renames would silently print "CFL advisory unavailable"
+  while the run continued. Narrowed to `except ImportError` only;
+  any other exception (TypeError, AttributeError, ValueError)
+  propagates as it should.
+* **HIGH (#2) — auto_dt_rce missing from public API**.
+  iter-24 introduced ``src/legoesm/driver/rce_dt.py`` but didn't
+  re-export from ``legoesm.driver``. ``from legoesm.driver import
+  auto_dt_rce`` raised ImportError despite iter-24 framing
+  ``rce_dt.py`` as reusable driver infrastructure. Added the
+  re-export to ``src/legoesm/driver/__init__.py``.
+* **MEDIUM — fragile text-match in test_run_rce_uses_auto_dt_rce**.
+  The iter-24 sanity check grepped the run_rce.py source text for
+  `"from legoesm.driver.rce_dt import auto_dt_rce"`. A future valid
+  refactor (alias import, indirect call, whitespace change) would
+  trip the test without changing production behaviour. Rewritten as
+  a behavioural check: ``test_auto_dt_rce_is_public_api`` asserts
+  the public attribute exists on ``legoesm.driver`` AND is the same
+  function object as ``legoesm.driver.rce_dt.auto_dt_rce``.
+
+**Verified end-to-end**:
+* `pytest tests/atmosphere/hydrostatic/test_rce_cross_grid_dt_defaults.py`:
+  6/6 PASS in 3.6 s.
+* `from legoesm.driver import auto_dt_rce` works; returns 600.0
+  for C24, 37.0 for C96 (as iter-24).
+* `run_rce.py` still prints the CFL advisory.
+
+**C72 30-day** still running (170 min CPU; day 25 PASS at
+mean_T_sfc=299.85, max\|v\|=16.24 m/s). Day 30 result pending.
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-25 codex HIGH fixes),
+R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 24
 
 **Refactor: auto-dt extracted to `legoesm.driver.rce_dt.auto_dt_rce`**

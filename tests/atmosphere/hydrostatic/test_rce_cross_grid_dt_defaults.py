@@ -76,19 +76,16 @@ def test_override_takes_precedence():
     assert _resolve_dt("cubed_sphere", 192, dt_override=10.0) == 10.0
 
 
-def test_run_rce_uses_auto_dt_rce():
-    """Sanity check that scripts/run_rce.py still imports + uses
-    legoesm.driver.rce_dt.auto_dt_rce. If the production script is
-    refactored to inline the ladder again, this test forces a
-    refresh."""
-    from pathlib import Path
-    src = Path(__file__).resolve().parents[3] / "scripts" / "run_rce.py"
-    text = src.read_text()
-    assert "from legoesm.driver.rce_dt import auto_dt_rce" in text, (
-        "scripts/run_rce.py no longer imports auto_dt_rce from "
-        "legoesm.driver.rce_dt — iter-24 refactor reverted? Update "
-        "this test if the ladder source moved."
+def test_auto_dt_rce_is_public_api():
+    """auto_dt_rce must be re-exported from ``legoesm.driver`` so
+    callers can do ``from legoesm.driver import auto_dt_rce`` instead
+    of digging into the submodule. iter-24 Codex HIGH caught the
+    missing re-export when iter-24 first landed."""
+    import legoesm.driver
+    assert hasattr(legoesm.driver, "auto_dt_rce"), (
+        "legoesm.driver does not re-export auto_dt_rce — iter-24 "
+        "follow-up missing? Update src/legoesm/driver/__init__.py."
     )
-    assert "auto_dt_rce(args.grid_type, N)" in text, (
-        "scripts/run_rce.py no longer calls auto_dt_rce — refactor?"
-    )
+    # And the re-export must be the SAME function object (not a wrapper).
+    from legoesm.driver.rce_dt import auto_dt_rce as _from_submodule
+    assert legoesm.driver.auto_dt_rce is _from_submodule
