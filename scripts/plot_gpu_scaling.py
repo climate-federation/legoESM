@@ -25,8 +25,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-# RTX 5090: ~1.79 TB/s HBM bandwidth.
-PEAK_BW_BYTES_S = 1.79e12
+# Default = mobile RTX 5090 sustained measured ~730 GB/s (iter-8 probe).
+# Desktop 5090 = ~1.79 TB/s peak (override via --peak-bw if benchmarked
+# on a different device).
+PEAK_BW_BYTES_S = 7.3e11
 
 # Lower bound on bytes/cell-step (1 R + 1 W of 10 fp64 prognostic fields, no
 # intermediates). Real dycores do RK3 substeps, hyperdiff passes, halo packs,
@@ -180,6 +182,42 @@ def plot_time_per_step(rows: list[dict], out: Path):
     # Dead-code reference removal — caught in adversarial review.
 
 
+def plot_peak_bar(rows: list[dict], out: Path):
+    """Bar chart: peak Mcells/s per (grid, precision)."""
+    groups: dict[str, list[dict]] = {}
+    for r in rows:
+        lbl = _label_from_row(r)
+        groups.setdefault(lbl, []).append(r)
+
+    peak_data: list[tuple[str, float, int]] = []  # label, peak Mcells/s, n_cells
+    for label, rs in groups.items():
+        best = max(rs, key=lambda r: float(r["mcells_per_s"]))
+        peak_data.append((label, float(best["mcells_per_s"]),
+                          int(best["total_cells"])))
+    peak_data.sort(key=lambda x: x[1], reverse=True)
+
+    labels = [p[0] for p in peak_data]
+    vals = [p[1] for p in peak_data]
+    sizes = [p[2] for p in peak_data]
+
+    fig, ax = plt.subplots(figsize=(11, 6), constrained_layout=True)
+    cmap = plt.get_cmap("tab10")
+    bars = ax.bar(range(len(labels)), vals,
+                  color=[cmap(i % 10) for i in range(len(labels))])
+    for i, (b, v, n) in enumerate(zip(bars, vals, sizes)):
+        ax.text(b.get_x() + b.get_width()/2, v + max(vals)*0.01,
+                f"{v:.0f}\n({n:,} cells)",
+                ha="center", va="bottom", fontsize=8)
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=9)
+    ax.set_ylabel("Peak throughput [Mcells / s]")
+    ax.set_title("Single-GPU peak throughput by grid × precision (RTX 5090)")
+    ax.grid(axis="y", alpha=0.3)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=140)
+    print(f"wrote {out}")
+
+
 def plot_weak(rows: list[dict], out: Path):
     """Per-cell wall time (ns/cell) vs problem size — flat = device-saturated."""
     fig, ax = plt.subplots(figsize=(9, 6), constrained_layout=True)
@@ -226,6 +264,7 @@ def main():
     plot_throughput(rows, out_dir / "scaling_gpu_throughput.png")
     plot_time_per_step(rows, out_dir / "scaling_gpu_strong.png")
     plot_weak(rows, out_dir / "scaling_gpu_weak.png")
+    plot_peak_bar(rows, out_dir / "scaling_gpu_peak_bar.png")
     return 0
 
 

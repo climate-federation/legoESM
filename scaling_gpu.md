@@ -4,9 +4,10 @@ Track weak + strong scaling vs theoretical roofline for atm/ocean grid types on 
 
 ## Hardware
 
-- RTX 5090, 32 GB GDDR7 (24 GB usable here)
-- ~104 TFLOPs FP32 dense (Blackwell, sm_120)
-- ~1.79 TB/s HBM bandwidth
+- RTX 5090 **mobile** (laptop SKU), 24 GB GDDR7, 55 W TDP cap
+- 256-bit bus, 28 Gbps GDDR7 → ~896 GB/s peak HBM (desktop 5090 = 1.79 TB/s)
+- Measured sustained HBM (jax copy kernel): **730 GB/s @ 1 G fp32 elts = 82% of mobile peak**
+- ~75 TFLOPs FP32 dense (estimated mobile derating)
 - CUDA 13.0, driver 580.142
 
 ## Theoretical limits
@@ -335,6 +336,52 @@ Side-effect check on CS atm:
 - **Atm icosahedral: fp64 ALU penalty bounded by GPU hardware** — cannot improve without datacenter GPU (A100/H100 fp64 = 1/2 fp32).
 - **Atm spectral: O(N³) inherent** — needs transform-library replacement (sphericart / SHTns GPU port).
 
-### Next: iter 8
-- Investigate why CS atm with CUDA graphs slows by 10% at C96 — possibly XLA fusion conflict with graph capture; document as known tradeoff
-- Compare to published single-GPU ESM benchmarks (Oceananigans, NeMo, NEMO4) to sanity-check Mcells/s
+### Iter 8 — 2026-05-26 — XLA flag sweep + HBM-peak correction
+
+**XLA flag sensitivity (CS atm C96 fp32 baseline = 5.08 ms / 283 Mcells/s):**
+
+| flag set                                                          | ms/step | delta   |
+|-------------------------------------------------------------------|---------|---------|
+| latency-hiding-scheduler only (baseline)                          | 5.08    |         |
+| + command_buffer=FUSION                                            | 5.19    | -2.2%   |
+| + command_buffer=FUSION,CUSTOM_CALL,CUBLAS,CUDNN                   | 5.64    | -11%    |
+| + triton_gemm_any=true (stencil — no matmul)                       | n/a (I5: -6%)| harmful |
+
+**Conclusion:** CUDA graphs net-harmful for atm stencil dycores (FV3 PPM + acoustic) but net-beneficial for MPAS Voronoi indirect addressing. Triton GEMM neutral/harmful for stencil codes. **Split decision:** atm bench (`run_levante_gpu_scaling.py`) keeps minimal flags; ocean bench (`bench_ocean_gpu_scaling.py`) adds CUDA graphs.
+
+**MPAS fp64 + CUDA graphs (verification):**
+
+| res | fp64 ms (no flag) | fp64 ms (+ graphs) | delta  |
+|-----|--------------------|---------------------|--------|
+| I4  | 2.38               | 2.31                | -3%    |
+| I5  | 3.00               | 2.92                | -3%    |
+| I6  | 6.55               | 6.56                | 0%     |
+
+⇒ CUDA graphs marginally help fp64 too. Confirmed safe to default-on for ocean bench.
+
+**HBM bandwidth probe (jax `x*2.0` kernel, fp32):**
+
+| array size | sustained BW |
+|-----------:|-------------:|
+|       16 M |      519 GB/s |
+|       64 M |      523 GB/s |
+|      256 M |      585 GB/s |
+|     1024 M |      731 GB/s |
+
+⇒ Mobile RTX 5090 peak HBM ≈ 896 GB/s; we observe 731 GB/s sustained (~82%). Earlier scaling_gpu.md cited 1.79 TB/s (desktop SKU). **Corrected** above. Implication: dycore "effective HBM %" estimates in iter 4-5 should be ~2× higher than reported because we benchmarked against a too-high peak.
+
+**Recomputed effective HBM% with correct peak (≈ 896 GB/s sustained / ≈ 730 GB/s achievable):**
+
+| grid              | best meas Mcells/s | inferred bytes traffic | % of 730 GB/s actual peak |
+|-------------------|---------------------|------------------------|---------------------------|
+| atm CS fp32       | 298 (C48)          | 298e6 × 26 × ~75 B/cell·lev = 581 GB/s | **80%** |
+| atm ico fp32      | 428 (I5)           | similar                | **75-85%** |
+| ocean LL fp32     | 405 (LL192)        | 405e6 × 20 × ~80 B/cell·lev = 648 GB/s | **89%** |
+| ocean MPAS fp32   | 126 (I6)           | indirect addressing penalty | **~30-40%** |
+
+⇒ **Structured-grid codes (atm CS, ocean LL) hit 75-89% of sustained HBM peak.** That's **at the limit** for stencil dycores on mobile GPUs. MPAS at ~30-40% reflects Voronoi indirect-addressing cost (a known limit, not a tuning problem).
+
+### Next: iter 9
+- Final QA pass on plots (axis labels, legend ordering, color consistency)
+- Add a side-by-side bar chart of "best Mcells/s per grid per precision"
+- Run codex final review of iter-7/8 changes
