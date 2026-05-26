@@ -136,11 +136,18 @@ def _build_ppermute_tables():
         rounds_recv.append(tuple(recv_e))
         rounds_rev.append(tuple(recv_r))
 
+    # iter-94d: return np.array (not jnp.array) so the module-top
+    # call ``_PPERMUTE_* = _build_ppermute_tables()`` does NOT
+    # eagerly dispatch to the JAX default platform (METAL on
+    # macOS, which raises UNIMPLEMENTED). Same pattern as the
+    # iter-93b refactor of ``_NBR_FACES``/``_NBR_EDGES``/
+    # ``_IS_REVERSED``. Callers convert via ``jnp.asarray`` inside
+    # the ``_make_exchange_ppermute._exchange`` closure.
     return (
         rounds_perm,
-        jnp.array(rounds_send, dtype=jnp.int32),   # (4, 6)
-        jnp.array(rounds_recv, dtype=jnp.int32),
-        jnp.array(rounds_rev, dtype=jnp.int32),
+        np.array(rounds_send, dtype=np.int32),   # (4, 6)
+        np.array(rounds_recv, dtype=np.int32),
+        np.array(rounds_rev, dtype=np.int32),
     )
 
 
@@ -532,14 +539,21 @@ def _make_exchange_ppermute(mesh, ndim, with_offsets=False):
         if with_offsets:
             from legoesm.grids.halo import _interp_strip
 
+        # iter-94d: convert ppermute tables to jnp once per exchange
+        # call; XLA constant-folds inside the JIT body. Same pattern
+        # as iter-93b for the connectivity tables.
+        ppermute_send_j = jnp.asarray(_PPERMUTE_SEND)
+        ppermute_recv_j = jnp.asarray(_PPERMUTE_RECV)
+        ppermute_rev_j = jnp.asarray(_PPERMUTE_REV)
+
         for r in range(4):
-            send_edge = _PPERMUTE_SEND[r, my_idx]   # traced int
+            send_edge = ppermute_send_j[r, my_idx]   # traced int
             to_send = my_strips[send_edge]           # (n,) or (n, C)
             received = jax.lax.ppermute(
                 to_send, "face", _PPERMUTE_PERMS[r],
             )
-            recv_edge = _PPERMUTE_RECV[r, my_idx]
-            rev = _PPERMUTE_REV[r, my_idx]
+            recv_edge = ppermute_recv_j[r, my_idx]
+            rev = ppermute_rev_j[r, my_idx]
             received = jnp.where(rev, received[::-1], received)
             if with_offsets:
                 # offsets[my_idx, recv_edge] selects the right per-edge
