@@ -134,6 +134,43 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 71
+
+**Mirror iter-67/70 CLI input validation onto ``scripts/run_rce.py``
+(hydrostatic driver).**
+
+iter-67/68/69/70 hardened ``scripts/run_rce_mpi_long.py`` against
+bad numeric CLI inputs. The hydrostatic sibling ``scripts/run_rce.py``
+(used by the cross-grid 30-day nightlies via the cross-grid wrapper)
+had the same class of silent-pass bugs: ``--days -1`` produced a
+"Complete: 0.0s wall time" with zero diag rows. Direct probe
+confirmed.
+
+iter-71 adds a parallel validation block to ``run_rce.py``:
+* ``--dt`` (optional float; default None for auto-dt) — if set,
+  must be finite + positive.
+* ``--sst-init`` — must be finite (300.0 default; user could pass
+  --sst-init nan).
+* Positive-int guards: ``--days``, ``--resolution``, ``--nlev``,
+  ``--diag-days``.
+* ``--truncation`` — optional; if set, must be > 0.
+
+**Verified**:
+* ``--days -1`` → ``error: --days rejected: must be positive
+  integer, got -1`` exit 1 (was: silent "Complete: 0.0s wall time"
+  with zero diag rows).
+
+iter-70 28-case fast suite (run before iter-71 changes): 16/16
+PASS in 167 s (slow nightlies deselected as expected).
+
+**R-roadmap status**: R1-R8, R10, R12 ✓ (with iter-71 propagating
+iter-67/70 CLI guards to the hydrostatic driver). F9
+platform-blocked.
+
+Now BOTH production drivers (plane CRM ``run_rce_mpi_long.py`` and
+hydrostatic ``run_rce.py``) reject all bad numeric CLI inputs with
+clean SystemExit + exit 1.
+
 ### 2026-05-26 — iter 70
 
 **Codex review caught 6 HIGH range-guard gaps in iter-67/68/69

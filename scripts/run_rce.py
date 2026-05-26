@@ -89,6 +89,44 @@ def main():
 
     args = parser.parse_args()
 
+    # iter-71 (mirrors iter-67/70 on run_rce_mpi_long.py): validate
+    # numeric CLI args reject NaN/inf + out-of-range values with
+    # concise SystemExit. Without these, ``--days -1`` silently
+    # produces a 0-day run with empty diag_log; ``--resolution 0``
+    # crashes deep in grid creation; ``--sst-init nan`` propagates
+    # to all column ICs.
+    import math as _math
+    if args.dt is not None and not _math.isfinite(args.dt):
+        raise SystemExit(
+            f"error: --dt rejected: must be finite, got {args.dt!r}"
+        )
+    if args.dt is not None and args.dt <= 0.0:
+        raise SystemExit(
+            f"error: --dt rejected: must be positive, got {args.dt!r}"
+        )
+    if not _math.isfinite(args.sst_init):
+        raise SystemExit(
+            f"error: --sst-init rejected: must be finite, got "
+            f"{args.sst_init!r}"
+        )
+    _POSITIVE_INTS = {
+        "--days": args.days,
+        "--resolution": args.resolution,
+        "--nlev": args.nlev,
+        "--diag-days": args.diag_days,
+    }
+    for _flag, _val in _POSITIVE_INTS.items():
+        if _val <= 0:
+            raise SystemExit(
+                f"error: {_flag} rejected: must be positive integer, "
+                f"got {_val!r}"
+            )
+    if args.truncation is not None and args.truncation <= 0:
+        raise SystemExit(
+            f"error: --truncation rejected: must be positive integer "
+            f"when set, got {args.truncation!r}"
+        )
+
     # Translate the legacy ``latlon_fv`` alias to the canonical
     # ``finite_volume`` name registered in
     # ``component_factory._DRIVER_SUPPORTED`` for the lat-lon C-grid
