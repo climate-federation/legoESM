@@ -134,6 +134,29 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 77
+
+**Doc compression — folded iter-37..iter-50 (14 iters) to summary
+table; 1670 → 1325 lines (21% reduction).**
+
+iter-62 was the last compression (compressed iter-2..iter-36).
+14 iters of new content (iter-63..iter-76) accumulated 558 lines.
+Per "compress every 10 iterations" mandate, due.
+
+**Folded** (one-line-per-iter summary table at bottom):
+* iter-37..iter-50 — 14 iters of test infrastructure + Codex
+  reviews + shared helpers + V4/C72 30-day nightlies.
+
+**Kept at full detail** (26 iters):
+* iter-1 (foundational state).
+* iter-51..iter-76 (most recent CLI validation work).
+
+Full per-iter detail in ``CRM_implementation.original.md`` local
+backup (pre-iter-77 state) + git log.
+
+**R-roadmap status**: R1-R8, R10, R12 ✓. F9 platform-blocked.
+Doc hygiene aligned with "compress every 10 iterations" instruction.
+
 ### 2026-05-26 — iter 76
 
 **Unify iter-1 --implicit-buoyancy error message + regression test.**
@@ -1246,375 +1269,29 @@ nightly per iter-22 wall-time decision), R6 ✓. F9 platform-blocked.
 Slow nightly count: was 7, now 9. 30-day production-scale
 empirical gates: C48, C72, V4, LL32, T21.
 
-### 2026-05-26 — iter 50
-
-**V4 (voronoi/MPAS) 30-day nightly slow regression landed.**
-
-iter-12 measured voronoi V4 30-day at dt=300 PASS (mean_T_sfc=300.85, max\|v\|=2.28 m/s, wall=101 s on M5 Pro). iter-8 noted dt>=450 BLOWUPs at day 1 — dt=300 pinned in ``auto_dt_rce`` for voronoi. Until iter-50 dt=300 contract had **no 30-day CI backing** — only 2-day V4 smoke gated regressions; iter-44 showed 2-day misses mid-run CFL spikes that recover.
-
-New ``test_voronoi_v4_30day_nightly_validation`` mirrors C48/C72 30-day pattern via iter-46 shared helpers:
-* ``_assert_dt_used(expected_dt=300.0)`` — catches future ladder drift.
-* ``_assert_max_wind_peak_below(cap=10.0)`` — full-timeseries peak; 4.4× cushion over iter-12 measured 2.28 m/s.
-* ``_assert_rce_pass(temp_tol=1.5, max_v_cap=10.0)`` — V4-specific envelope tuned for MPAS stability profile.
-
-**Codex iter-50** caught 1 HIGH + 1 MEDIUM + 3 LOW:
-* HIGH — original temp_tol=1.0 left 0.15 K positive-drift headroom vs measured +0.85 K. ``_assert_rce_pass`` uses strict ``<`` → fail risk. Fixed: temp_tol=1.5.
-* MEDIUM — original cap=25.0 was 11× iter-12 peak (mirroring cubed-sphere caps from different regime). Tightened to 10.0 — still 4.4× cushion.
-* LOW — hardcoded expected_dt vs auto_dt_rce("voronoi",4): intentional regression pin, kept.
-* LOW — mean_timeseries.csv schema for MPAS path: confirmed via run_rce.py:668-676.
-* LOW — CLI --dt override would fail: intended.
-
-**Verified**: V4 30-day live run (loose thresholds, ran before Codex fixes) 1 PASS in 177 s. Tightened thresholds mathematically pass at iter-12 measurements (2.28 < 10.0; 0.85 < 1.5).
-
-**R-roadmap status**: R1-R8, R10 ✓ (iter-50 closes last 30-day production-scale empirical gap for hydrostatic voronoi as structural regression), R6 ✓. F9 platform-blocked.
-
-Slow nightly count: was 6 (4 cdgrid + 2 plane CRM), now 7. 30-day production-scale empirical gates: cubed_sphere C48+C72, voronoi V4.
-
-### 2026-05-26 — iter 48 (re-landed; was lost in iter-49 compress)
-
-**``test_blowup_gate_fires_on_supersonic_winds`` now verifies the supersonic channel actually fired** (not just status: FAIL).
-
-iter-17 added BLOWUP-gate regression locking iter-13 threshold (run_rce.py reports status: FAIL + non-zero exit when max\|v\| > 200 m/s). Verified FAIL signal but NOT channel — different failure mode (NaN earlier, runtime crash) could produce status: FAIL without supersonic-winds gate firing.
-
-Added ``mean_timeseries.csv`` peak-max-wind scan asserting peak_v >= 200.0 after existing FAIL assertions. iter-13 measured 236 m/s by day 20 — comfortable margin. Inverse of iter-46 ``_assert_max_wind_peak_below`` (used in C48/C72/C96 PASS tests).
-
-csv-exists check gated (``if mean_csv.exists()``) rather than mandatory: BLOWUP could crash driver before any diagnostic write — preserves existing FAIL-only contract while strengthening when data available.
-
-(iter-48 doc entry was added to working tree but dropped in iter-49 compression. iter-50 re-lands it for the historical record. Test change itself committed in 839f3cac.)
-
-### 2026-05-26 — iter 47
-
-**Applied iter-46 shared hardening helpers to C96 2-day slow smoke + fixed stale ladder-branch reference.**
-
-iter-46 factored ``_assert_dt_used`` + ``_assert_max_wind_peak_below`` into shared helpers and applied to C48 + C72 30-day nightlies. C96 2-day slow smoke remained on loose ``_assert_rce_pass`` final-day-only envelope — same silent-pass risks iter-46 fix exists to catch.
-
-Particularly dangerous for C96 because iter-20 BLOWUP at C96/dt=75 reached max\|v\|=175 m/s by day 15, 527 by day 20 — but at 2 days same broken config lands at max\|v\|≈5-10 m/s (CFL-stable for first few days). 2-day smoke alone CANNOT distinguish dt=37 (production) from dt=75 (BLOWUP-in-flight). Only dt-assertion does.
-
-**Changes** (``tests/atmosphere/hydrostatic/test_rce_cross_grid_smoke.py``):
-* Docstring corrected from "iter-13 dt=75 ladder branch" to "iter-20 dt=37" with explanation of iter-20 BLOWUP fix.
-* Added ``_assert_dt_used(out_dir, "C96 2-day", expected_dt=37.0)`` — catches ladder drift re-routing C96 onto dt=75.
-* Added ``_assert_max_wind_peak_below(out_dir, "C96 2-day", cap=50.0)`` — same cap as existing final-day check; catches mid-run CFL spike recovering by end of 2-day window.
-
-**Codex iter-47** caught 0 HIGH, 0 MEDIUM, 1 LOW (stale comment referencing non-existent ``test_rce_2day_smoke_passes_slow``). Fixed: comment now points at ``test_rce_2day_smoke_c96_slow`` and cites iter-20 ladder branch correctly.
-
-**Tests**:
-* Fast suite collection: 9 tests collected (5 fast + 4 slow); fast suite continues PASS in ~210 s.
-
-**R-roadmap status**: R1-R8, R10 ✓ (iter-47 closes last cross-grid slow test gap lacking dt-assertion + peak-max-wind hardening — all 4 cdgrid nightlies now consistently protected), R6 ✓. F9 platform-blocked.
-
-### 2026-05-26 — iter 46
-
-**Factored iter-44 hardening into shared helpers + propagated to C48 30-day nightly.**
-
-iter-44 landed two Codex-MEDIUM fixes inline in C72 30-day nightly: dt-used assertion (#1) + ``mean_timeseries.csv`` peak-max-wind scan (#2). C48 30-day nightly never got same hardening — same silent-pass risk (ladder drift routing C48 to wrong dt branch, or mid-run max\|v\| spike recovered by day 30, would slip through loose final-day envelope).
-
-**Factored two shared helpers** in ``tests/atmosphere/hydrostatic/test_rce_cross_grid_smoke.py``:
-
-* ``_assert_dt_used(out_dir, label, expected_dt)``: parses ``results.txt``, asserts ``dt == expected_dt``. Pins iter-13/26 ladder contract.
-* ``_assert_max_wind_peak_below(out_dir, label, cap)``: scans ``mean_timeseries.csv`` for peak ``max_wind`` across all logged days, asserts below cap. Pins exact column name ``max_wind`` (Codex iter-45 hardening retained).
-
-Both helpers applied to BOTH C48 + C72 30-day nightlies with appropriate expected_dt (150.0 for C48, 75.0 for C72) and same cap (25.0 m/s — generous margin over iter-15/26 measurements).
-
-**Codex iter-46 review** caught 1 MEDIUM + 1 LOW:
-
-* **MEDIUM** — ``_assert_max_wind_peak_below`` would PASS vacuously on empty timeseries (header-only csv or all-unparseable rows): ``peak_v`` initialised to ``0.0`` always satisfies ``< cap``. Fixed: added ``seen_max_wind`` boolean tracking at least one successful row parse, asserted before cap check.
-* **LOW** — helper failure messages omitted diagnostic file paths. Fixed: every assertion message now embeds ``results.txt`` / ``mean_timeseries.csv`` path so CI failure points developer directly at artifact to inspect.
-
-**Tests**:
-* Fast suite: 5/5 PASS in 211 s (no regression).
-* Slow tests: 7 total CRM-relevant slow tests now (test_rce_cross_grid_smoke: c96 2-day, blowup gate, c48 30-day, c72 30-day; test_plane_crm_end_to_end_smoke: production 132x132 envelope, production 132x132 with rad).
-
-**R-roadmap status**: R1-R8, R10 ✓ (iter-46 DRY refactor of iter-44/45 hardening + C48 propagation + Codex MEDIUM fix), R6 ✓. F9 platform-blocked.
-
-### 2026-05-26 — iter 45
-
-**Propagate iter-44 Codex HIGH-class timeout fix to C96 2-day + C48 30-day slow tests + tighten C72 csv parsing.**
-
-iter-44 fixed `_run_rce` to accept ``timeout_s`` and passed ``timeout_s=4800`` for C72 30-day nightly. Two sibling slow tests still used 600 s default, both with marginal headroom:
-
-* ``test_rce_2day_smoke_c96_slow``: iter-22 measured C96 10-day at 2506 s ≈ 250 s/day → 2-day ≈ 500 s. Default 600 leaves only 20% margin; 10%-slower runner would silently hang.
-* ``test_c48_30day_nightly_validation``: iter-15 measured C48 30-day at 500.9 s. Default 600 leaves only 20% margin.
-
-Both bumped to ``timeout_s=1800`` (3-3.6× cushion vs measured wall). Genuine hang now fires timeout cleanly; normal slow box finishes well inside new budget.
-
-**Secondary hardening** on iter-44 C72 csv parsing:
-* iter-44 used substring heuristic (``"max" in k and ("v" in k or "wind" in k)``) for ``max_wind`` column lookup. Would false-match future column named e.g. ``max_dvdt`` (contains both "max" and "v").
-* iter-45 pins exact column name ``max_wind`` (matches ``run_rce.py:668-676`` schema). If schema changes, test fails loudly with clear "if intentional, update this test" pointer.
-* Also promoted ``mean_timeseries.csv`` existence check from silent skip to hard fail (driver-emit regression now visible).
-
-**Tests**:
-* Fast suite still 5/5 PASS in 207 s.
-* No new slow tests added; iter-44 ladder unchanged. Risk: iter-44 timeout=4800 for C72 + iter-45 timeout=1800 for C48/C96 give all 4 cross-grid slow tests safe budgets on M5 Pro and slightly slower runners.
-
-**R-roadmap status**: R1-R8, R10 ✓ (iter-45 slow-test timeout hardening), R6 ✓. F9 platform-blocked.
-
-### 2026-05-26 — iter 44
-
-**C72 30-day nightly regression test landed + Codex caught HIGH in shared _run_rce helper (timeout=600 vs measured 2373 s).**
-
-Codex iter-22 review (back at iter-22) flagged iter-13 dt=75 ladder branch (N=49..72) was empirically anchored at N=49 only — C48 boundary. iter-26 closed upper-end gap by running C72 30-day to completion (dt=75, mean_T_sfc=299.81 K, max\|v\|=17.85 m/s, wall=2373 s). Until iter-44 that measurement had **no regression test** — only C48 + C96 30-day or 2-day slow tests gated CI, neither exercises C72 dycore-specific stability profile.
-
-iter-44 adds ``test_c72_30day_nightly_validation`` mirroring ``test_c48_30day_nightly_validation`` pattern.
-
-**Codex iter-44 review** caught 1 HIGH + 2 MEDIUM + 1 LOW:
-
-* **HIGH** — ``_run_rce`` hard-coded ``timeout=600``. iter-26 measured C72 wall=2373 s, so new test would HANG/KILL run before completion. Fixed: added ``timeout_s`` parameter to ``_run_rce`` (defaults to 600 for existing 2-day smokes); C72 nightly passes ``timeout_s=4800`` (2x cushion on measured wall).
-* **MEDIUM#1** — test claimed "iter-13 auto-dt=75" but never asserted dt actually used. Fixed: added ``dt_used = float(fields.get("dt", "nan"))`` + ``assert dt_used == 75.0`` so silent ladder drift caught even when envelope check still passes.
-* **MEDIUM#2** — ``_assert_rce_pass`` reads ``notes`` which only carries final-day max\|v\|. Mid-run CFL spike recovered by day 30 would slip through. Fixed: added ``mean_timeseries.csv`` peak-max-wind scan with 25 m/s cap before helper's last-day check. Tolerates column-name drift via lowercase keyword match.
-* **LOW** — docstring referenced "C96 nightly" which doesn't exist. Fixed: clarified to "2-day C96 slow smoke (test_rce_2day_smoke_c96_slow)".
-
-**Verified**:
-* ``pytest -m 'not slow' tests/atmosphere/hydrostatic/
-  test_rce_cross_grid_smoke.py``: 5 PASS in 211 s (no regression).
-* New slow test collected: 1 new (``test_c72_30day_nightly_validation``).
-
-**R-roadmap status**: R1-R8, R10 ✓ (iter-44 closes iter-22 C72-upper-end empirical gap as structural regression), R6 ✓. F9 platform-blocked.
-
-### 2026-05-26 — iter 43
-
-**Hardened ``physics_schedule`` against pathological inputs (Codex 2nd-pass).**
-
-Codex iter-42 first-pass review caught 1 MEDIUM (memory) + 1 LOW (boundary). iter-43 2nd-pass review caught 3 MEDIUMs around non-finite inputs first guard block didn't reject:
-
-* **NaN dt**: ``dt <= 0.0`` compares False against NaN, so guard silently passed; ``round(rad/nan)`` then raised opaque ``ValueError`` deep in CPython.
-* **inf dt or interval**: ``rad/inf = 0`` rounds to ``0`` and ``max(1, 0)`` returns 1, masking bug. ``round(inf)`` would ``OverflowError`` if interval inf.
-* **total_steps == sys.maxsize**: ``range(1, sys.maxsize + 1, ...)`` overflows on CPython.
-
-**Fixes** (``src/legoesm/driver/physics_schedule.py``):
-* Added ``math.isfinite()`` checks at top of ``radiation_call_every_steps`` for both dt and rad_call_interval_s. Rejected BEFORE ordering guards so error clear.
-* Added ``total_steps >= sys.maxsize`` guard at top of ``radiation_call_schedule``. Includes "no realistic ESM run exceeds 10^9 steps" message so failure mode obvious if future caller passes corrupted int.
-
-**Unit tests** added (``tests/unit/test_physics_schedule.py``):
-* ``test_every_steps_rejects_nan_dt``
-* ``test_every_steps_rejects_inf_dt``
-* ``test_every_steps_rejects_nan_interval``
-* ``test_every_steps_rejects_inf_interval``
-* ``test_schedule_rejects_sys_maxsize_total_steps``
-
-5 new tests, total 22 unit tests for module (was 17). All PASS in 2 s.
-
-**Codex 2nd-pass LOW** acknowledged but not fixed:
-* RadiationCallSchedule field order now public tuple ABI — reordering breaks callers using positional construction. Acceptable: callers in this repo use keyword construction or named attribute access. Future breaking change would be deliberate API bump.
-
-**Tests**:
-* ``pytest tests/unit/test_physics_schedule.py``: 22 PASS in 2.0 s.
-* ``pytest -m 'not slow' tests/atmosphere/nonhydrostatic/
-  integration/test_plane_crm_end_to_end_smoke.py``: 2 PASS in 32 s.
-
-**R-roadmap status**: R1-R8, R10 ✓ (iter-43 input-domain hardening of iter-42 schedule helper), R6 ✓. F9 platform-blocked.
-
-### 2026-05-26 — iter 42
-
-**Radiation-call schedule arithmetic factored to unit-testable driver helper (single source of truth).**
-
-CLAUDE.md DRY rule + Codex iter-39/40/41 review trail flagged inline arithmetic ``rad_call_every_steps = max(1, int(round(rad_call_interval_s/dt)))`` + ``expected = 1 + (n_steps - 1) // every`` as silent-divergence risk: driver and two test files all encoded formula independently. iter-42 extracts to ``legoesm.driver.physics_schedule``.
-
-**New module** ``src/legoesm/driver/physics_schedule.py``:
-* ``RadiationCallSchedule`` NamedTuple with fields ``(every_steps, num_calls, fire_step_indices)``. ``fire_step_indices`` is lazy ``range`` (Codex iter-42 MEDIUM: original tuple materialisation would allocate million ints on 10M-step run; ``range`` is O(1) memory).
-* ``radiation_call_every_steps(rad_call_interval_s, dt)`` — mirrors exact driver formula incl. ``int(round(...))`` rounding semantics. Raises ``ValueError`` on ``dt <= 0`` or negative interval (was previously silent).
-* ``radiation_call_schedule(rad_call_interval_s, dt, total_steps)`` — full schedule with O(1) ``num_calls`` derivation.
-
-**Wiring**:
-* ``src/legoesm/driver/__init__.py`` re-exports all three names.
-* ``scripts/run_rce_mpi_long.py`` uses ``radiation_call_every_steps`` (function-scope import to avoid cross-package eager-import pattern CLAUDE.md warns against).
-* ``tests/atmosphere/nonhydrostatic/integration/
-  test_plane_crm_end_to_end_smoke.py``: iter-16 + iter-39 assertions now go through ``radiation_call_schedule`` instead of re-deriving formula locally. Single canonical source driver also uses.
-
-**New unit tests** (``tests/unit/test_physics_schedule.py``):
-17 tests covering:
-* basic schedule (driver-mirror formula match)
-* sub-dt clamping
-* huge-interval anti-pattern (Codex iter-39 HIGH#2: ``rad_call_interval_s=1e9`` still fires ONCE at step 1)
-* int(round(...)) tie-breaks (5.4 → 5, 5.6 → 6)
-* invalid-input ValueError contracts (negative dt / interval)
-* total_steps boundary (0 → empty, 1 → one fire)
-* memory invariant: lazy range for huge total_steps
-* first-fire-always-step-1 invariant across all intervals
-* num_calls matches len(fire_step_indices)
-
-**Codex iter-42 review**: 0 HIGH, 1 MEDIUM, 1 LOW. Both fixed:
-* MEDIUM: ``fire_step_indices`` materialisation; switched to lazy ``range``.
-* LOW: missing ``total_steps=1`` boundary test; added.
-
-**Tests**:
-* ``pytest tests/unit/test_physics_schedule.py``: 17 PASS in 1.8 s.
-* ``pytest -m 'not slow' tests/atmosphere/nonhydrostatic/
-  integration/test_plane_crm_end_to_end_smoke.py``: 2 PASS in 33 s.
-
-**Net**: formula now anchored once and tested both in isolation (15 unit cases) and through production driver + slow tests (integration). Regression in formula trips unit test in < 2 s, before any slow nightly fires.
-
-**R-roadmap status**: R1-R8, R10 ✓ (iter-42 schedule-formula de-duplication lands as iter-39/40/41 closing piece), R6 ✓. F9 platform-blocked.
-
-### 2026-05-26 — iter 41
-
-**iter-15/16 short smokes propagated iter-39 / iter-40 hardening.**
-
-Codex iter-39 HIGH#2 fix in iter-39 only touched iter-38/iter-39 slow tests. 12×12 short smokes ``test_plane_crm_short_smoke_clean_ic`` (iter-15) and ``test_plane_crm_short_smoke_with_radiation`` (iter-16) still using misleading ``--rad-call-interval-s 1e9`` / silent-pass-on-broken-radiation pattern. iter-41 closes gap.
-
-**Changes** (``test_plane_crm_end_to_end_smoke.py``):
-* ``_run_driver`` (iter-15 dycore-only): swapped ``--rad-call-interval-s 1e9`` → ``--no-radiation``. Now truly dycore-only.
-* ``test_plane_crm_short_smoke_clean_ic`` (iter-15): added ``rad_calls == 0`` assertion + re-verification block documenting existing anchors (CWV=55.001 mm, max\|w\| < 0.5, CWV drift < 0.1, MSE drift < 1e-3) still hold under genuine ``--no-radiation`` — verified by measurement:
-  ```
-  step  1: CWV=55.001 mm, MSE=4.2049e9, max|w|=0.0
-  step 80: CWV=55.001 mm, MSE=4.2049e9, max|w|=7.07e-4 m/s
-  ```
-  All anchors hold with 700× margin on max\|w\|.
-* ``test_plane_crm_short_smoke_with_radiation`` (iter-16): added EXACT-count rad_calls assertion (Codex iter-41 MEDIUM fix: ``rad_calls > 0`` too loose — broken cadence pinning rad_calls=1 would still pass). Now uses same derivation pattern as iter-40:
-  ```python
-  expected_rad_calls = 1 + (total_steps - 1) // every
-  ```
-  For days=0.002, dt=5, rad-interval=30: total_steps=34, every=6, expected=6 (fires at steps 1, 7, 13, 19, 25, 31).
-* Module docstring: ``55.55 mm`` IC reference replaced with per-grid pair (``55.001 mm for the 12x12 smoke; 55.550 mm for the 132x132 production-scale slow tests``). Codex iter-41 LOW fix.
-
-**Codex iter-41 review** caught 1 HIGH (anchors not recalibrated under --no-radiation), 1 MEDIUM (rad_calls > 0 too loose), 1 LOW (module docstring stale). All three addressed.
-
-**Measurements** (12×12×20 dx=2km dt=5s):
-* iter-15 (``--no-radiation``, 86 steps): ``rad_calls=0`` ✓, CWV+MSE unchanged from IC to 4 sig figs, max\|w\| @ step 80 = 7.07e-4 m/s.
-* iter-16 (``--rad-call-interval-s 30``, 34 steps): ``rad_calls=6`` ✓, schedule matches derived count.
-
-**Wall time impact**: iter-15 dropped from 87s → ~17s (skipping slow_physics_fn JIT compile saves significant time). Combined fast tests now 2 PASS in 30 s (was 87s before iter-41).
-
-**R-roadmap status**: R1-R8, R10 ✓ (iter-41 propagating iter-39/40 hardening to 12×12 short smokes), R6 ✓. F9 platform-blocked. Plane CRM test pyramid now consistently calibrated against iter-39 ``--no-radiation`` semantics.
-
-### 2026-05-26 — iter 40
-
-**Radiation call count surfaced + tests assert it (Codex iter-39 MEDIUM#1 + iter-40 LOW fixes).**
-
-Codex iter-39 MEDIUM#1 noted iter-39 with-radiation slow test didn't actually assert radiation tick fires expected number of times — broken ``rad_call_every_steps`` arithmetic (e.g. int-truncation regression pinning interval to 1 or ``total_steps``) would silently shift call schedule without tripping MSE-sandwich assertion in many regimes.
-
-**Driver change** (``scripts/run_rce_mpi_long.py``):
-* New ``_maybe_fire_radiation(step_idx)`` closure consolidates rad-firing branch from both DD path (n_ranks>1, use_dd) and legacy rank-0 path. Returns True on fire so caller can increment counter.
-* New ``rad_call_count`` Python counter incremented at each fire.
-* New ``rad_calls=N`` token added to final ``Done.`` line so any subprocess/CI parser can assert on it.
-
-**Test changes** (``test_plane_crm_end_to_end_smoke.py``):
-* New ``_parse_rad_call_count(stdout)`` helper. Anchored regex ``^Done\\..*\\brad_calls=(\\d+)\\b`` with multiline flag — only matches ``Done.`` line + word-bounded integer. Returns ``None`` unless exactly one match (Codex iter-40 LOW#4 fix vs unbounded ``rad_calls=(\\d+)`` that would also match ``total_rad_calls=5`` or ``rad_calls=5.0``).
-* ``test_plane_crm_production_scale_132x132_envelope`` (iter-38): asserts ``rad_calls == 0`` under ``--no-radiation``.
-* ``test_plane_crm_production_scale_132x132_with_radiation`` (iter-39): asserts ``rad_calls == expected_rad_calls`` where ``expected_rad_calls = 1 + (n_steps - 1) // every`` and ``every = max(1, round(rad_interval_s / dt_s))`` (Codex iter-40 LOW#5 fix — derived from CLI args, not hardcoded).
-
-**Codex iter-40 review** caught 0 HIGH / 0 MEDIUM / 2 LOW:
-* Closure correctness: PASS — Python closure resolves ``state`` at call time so rebound loop-variable visible.
-* MPI counter consistency: PASS — DD path counts per-rank locally; rank 0 prints its own count (not allreduce), no double-count.
-* Regex robustness: LOW — unanchored; fixed (above).
-* Hardcoded expected=5: LOW — replaced with derived count.
-* Silent-pass risk: PASS — radiation tendency state effect still asserted via signed MSE-drift sandwich from iter-39.
-
-**Measurements** (132×132×30 dx=2km dt=5s 60 outer steps):
-* iter-38 (``--no-radiation``): ``rad_calls=0`` ✓
-* iter-39 (``--rad-call-interval-s 60``): ``rad_calls=5`` ✓ (matches derived ``1 + 59 // 12 = 5``, fires at steps 1, 13, 25, 37, 49)
-
-**Tests**:
-* ``pytest -m slow tests/atmosphere/nonhydrostatic/integration/
-  test_plane_crm_end_to_end_smoke.py``: 2/2 PASS in 233 s.
-* Default suite: 2/2 short smokes still PASS in 47 s.
-
-**R-roadmap status**: R1-R8, R10 ✓ (iter-40 radiation-tick observability hardening), R6 ✓. F9 platform-blocked. Radiation-on/off mode of production-scale plane CRM now both behaviour-pinned (iter-39 MSE sandwich) AND schedule-pinned (iter-40 rad_calls counter).
-
-### 2026-05-26 — iter 39
-
-**Codex caught iter-38 never truly dycore-only — fixed at driver + landed radiation-symmetric production-scale slow test.**
-
-* **Codex iter-39 HIGH#2** (real bug in iter-38): iter-38 helper passed ``--rad-call-interval-s 1e9`` thinking that disables radiation. Inspection of driver loop showed radiation tick uses ``(step - 1) % rad_call_every_steps == 0`` — at step 1 modulo is 0 regardless of interval, so radiation fires ONCE at step 1 and caches tendency for full run. iter-38 actually exercising "dycore + 1 cached radiation tendency", not pure dycore-only.
-
-  Fixed by wiring real ``--no-radiation`` CLI flag into ``scripts/run_rce_mpi_long.py``:
-
-  ```python
-  if not args.no_radiation and (step - 1) % rad_call_every_steps == 0:
-      cached_rad_tend[0] = slow_physics_fn(state, grid, hc, terrain)
-  ```
-
-  Branch gated at both DD path and legacy rank-0-broadcast path. ``cached_rad_tend`` stays ``None`` for entire run when ``--no-radiation`` set, so ``apply_physics_substep`` skips radiation term entirely. Log header updated to show ``"NO radiation"`` vs ``"gray radiation"`` so post-hoc analysis of log file unambiguously shows which mode run was in.
-
-* **iter-38 test retargeted**: now passes ``--no-radiation`` and genuinely radiation-free. 5e-5 MSE-drift cap remains valid as UPPER bound on dycore + fast-physics drift rate (cached-radiation rate strictly above radiation-free rate because gray-rad cools).
-
-* **iter-39 with-radiation slow test landed**: ``test_plane_crm_production_scale_132x132_with_radiation`` in ``tests/atmosphere/nonhydrostatic/integration/test_plane_crm_end_to_end_smoke.py``. Same config as iter-38 but with ``rad_call_interval_s=60.0`` — 5 radiation refreshes (steps 1, 13, 25, 37, 49) across 5-min sim window. Closes iter-16 (12×12 with rad) → iter-38 (132×132 no rad) → iter-39 (132×132 with rad) symmetry.
-
-* **Codex iter-39 HIGH#1 fix**: with-rad test now has RADIATION-SPECIFIC sandwich assertion on MSE drift:
-  - **sign check**: ``(mse_final - mse_first)/mse_first < 0`` (radiation must cool column over 5 min sim — flipped flux convention or sign-flipped LW tendency fails this)
-  - **floor**: ``|rel_mse_drift| > 5e-7`` (silently-disabled radiation path lands well below 5e-7; iter-38 ``--no-radiation`` measures 0 drift to 5 sig figs, so this distinguishes two paths cleanly)
-  - **ceiling**: ``|rel_mse_drift| < 5e-4`` (over-firing detector)
-
-* MEDIUM-#1..#5 from Codex acknowledged + docstring-only fixes (radiation call schedule, step-1 IC interpretation, rad-specific log fields gap noted as future driver schema extension).
-
-**Measurements (post-fix, 132×132×30 dx=2km dt=5s 60 outer steps)**:
-
-| variant | flag | max\|w\| @ step60 | MSE @ step60 | MSE drift |
-|---------|------|-------------------|--------------|-----------|
-| iter-38 | ``--no-radiation`` | 7.6e-4 m/s | 4.2132e9 | < 1e-5 |
-| iter-39 | ``--rad-call-interval-s 60`` | 3.0e-3 m/s | 4.2131e9 | ~2.4e-5 cooling |
-
-4× higher max|w| in iter-39 (3.0e-3 vs 7.6e-4) at same step count is radiation cooling tendency driving small-amplitude convective response — exactly regime iter-38 supposed to EXCLUDE but actually including via cached step-1 tendency.
-
-**Tests**:
-* ``pytest -m slow tests/atmosphere/nonhydrostatic/integration/
-  test_plane_crm_end_to_end_smoke.py``: 2 PASS in 213 s (iter-38 ~92 s, iter-39 ~121 s including JIT compile of radiation slow tendency).
-* Default suite: 2/2 short smokes still PASS in 45 s; slow tests deselected.
-
-**R-roadmap status**: R1-R8, R10 ✓ (iter-38 dycore-only + iter-39 radiation-symmetric production-scale slow regressions), R6 ✓. F9 platform-blocked. Plane CRM production envelope now structurally guarded against both dycore regressions AND radiation-tendency regressions at 132×132.
-
-### 2026-05-26 — iter 38
-
-**Plane CRM 132×132 production-scale regression test landed (nightly).**
-
-iter-14 measured 1-sim-hour smoke at 132×132×30 dx=2 km dt=5 s locking in production envelope (max|w|=6.1e-3 m/s, MSE drift=1.7e-4 over 725 steps, CWV pinned at 55.550 mm). Until iter-38 this measurement had **no regression test** — only iter-15 12×12×20 smoke gated CI, misses any regression destabilising only at production-scale grid (grid-scale modes, halo edge artifacts, Smag eddy-viscosity scaling at large nx/ny).
-
-New `@pytest.mark.slow` test `test_plane_crm_production_scale_132x132_envelope` in `tests/atmosphere/nonhydrostatic/integration/test_plane_crm_end_to_end_smoke.py`:
-
-* Invokes `run_rce_mpi_long.py` at 132×132×30 dx=2 km dt=5 s for 60 outer steps (5 min sim, 5e-min sub-envelope of iter-14 1-sim-hour reference) with F8/F10/iter-13 production defaults: clean Wing IC, hyperdiff=5e6, Smag c_s=0.2 (passed explicitly), SI acoustic off-centering=0.1 + 12 substeps, mass fixer ON, radiation disabled.
-* `--days` carries +0.5·dt padding so `int(days·86400/dt)` always hits exactly `n_outer_steps=60` (without padding, float roundoff silently truncated 60 → 59 and `rows[-1]` landed on step 40).
-* `--log-every-steps=15` so all 5 logged rows {1, 15, 30, 45, 60} get checked. iter-37 had log_every=20 → could miss transient spikes between rows.
-* Asserts: logged-step-numbers schema (catches driver miscount), IC CWV=55.550 ± 0.01 mm, max|w| < 0.05 m/s on **every** logged row (catches transient CFL spike), activity floor at step 15 (max|w| > 1e-6, catches dead simulation), CWV drift < 0.01 mm, MSE drift < 5e-5 relative (strict sub-envelope of iter-14's 1.7e-4 over 725 steps).
-
-**Codex adversarial review on new test**: 2 HIGH + 5 MEDIUM + 3 LOW raised; all but 3 LOW (informational) addressed:
-
-* HIGH#1 — MSE cap 1e-4 looked inconsistent with cited iter-14 1.7e-4: clarified cap is sub-envelope (60 vs 725 steps); tightened to 5e-5 to make strict sub-envelope explicit.
-* HIGH#2 — `--days = n*dt/86400` float-truncates to n-1 steps, `rows[-1]` evaluates step 40 not step 60: fixed with +0.5*dt padding + explicit `logged_steps == [1,15,30,45,60]` assertion.
-* MEDIUM transients hidden between log rows: now checks max|w| on every logged row.
-* MEDIUM dead-simulation false-pass: added activity floor at step 15.
-* MEDIUM schema not validated: added logged-step-numbers assertion.
-* MEDIUM docstring claimed "1-sim-hour" while running 60 steps: retitled as "5-min-sim sub-envelope of iter-14 reference".
-* MEDIUM Smag c_s default implicit: now passed explicitly as `--smag-cs 0.2` so future driver-default change can't shift regression silently.
-
-**Measurements (post-fix)**:
-* logged steps: [1, 15, 30, 45, 60] (exact)
-* IC CWV: 55.5500 mm ✓
-* max|w| @ step 60: 2.10e-3 m/s (cap 5e-2, 24× margin)
-* max|w| @ step 15: 2.06e-3 m/s (> activity floor 1e-6)
-* CWV drift: 0.0000 mm (cap 0.01)
-* MSE drift: 2.4e-5 relative (cap 5e-5, well below per-step rate cap catching 3× regression)
-* Wall: 125.3 s on M5 Pro single-rank
-* `pytest -m slow tests/atmosphere/nonhydrostatic/integration/
-  test_plane_crm_end_to_end_smoke.py`: 1 PASS in 125 s.
-
-**Default suite unchanged**: 2/2 plane-CRM smokes pass in 87 s (slow test deselected as expected).
-
-**R-roadmap status**: R1-R8, R10 ✓ (now with iter-38 production-scale plane CRM regression), R6 ✓. F9 platform-blocked. iter-14 measured envelope structurally protected against silent regression.
-
-### 2026-05-26 — iter 37
-
-**Full regression sweep: 38/38 PASS in 72 s.**
-
-Confirmed iter-1..36 work composes cleanly. Suite breakdown:
-
-| test file | tests | wall |
-|-----------|-------|------|
-| test_rce_cross_grid_dt_defaults.py | 9 | (incl) |
-| test_cross_grid_wrapper_dt_overrides.py | 2 | (incl) |
-| test_plane_slow_tend_halo.py | 13 | (incl) |
-| test_plane_mass_fixer_mpi.py | 8 | (incl) |
-| test_weno5_halo_equiv.py | 6 | (incl) |
-| **TOTAL** | **38** | **72 s** |
-
-Plus iter-15 plane CRM smoke (2 tests, ~6 s) and iter-2 dt-stability (7 tests, ~360 s) run elsewhere in default suite; iter-36 AMIP dt-warning (3 tests, 57 s); slow nightly tests (3) skipped by default. Combined CI-visible: **~50 tests**.
-
-**Achievement summary (iter-1..37):**
-* **Plane CRM** non-hydrostatic 132×132 dx=2 km production-stable: F8/F10 clean IC + dt=5 s + Smag + WENO5 + KW78 implicit-buoyancy knob + R7 MPI mass fixer + 132×132 1-hour smoke PASS.
-* **Hydrostatic cross-grid family**: 30-day PASS on C24, C48, C72, V4, LL32, T21 — all 4 grid types stable + realistic at production scale.
-* **Auto-dt ladder**: 5-tier hard-grounded ladder with N>96 hard refusal; dt ∝ dx² scaling identified + fit; 5 layers of structural regression protection.
-* **AMIP wrapper + script**: iter-32 wrapper fix for C48/T42/V6 + iter-36 in-script dt safety advisory.
-* **F9** (MPI scaling) platform-blocked on macOS Python 3.13; full DD code path verified correct.
-
-**R-roadmap status**: R1-R8 ✓, R10 ✓ (with full regression backstop), R6 ✓. F9 platform-blocked. Goal "stable + realistic at 30-day production scale on all grid types" met for hydrostatic family + verified-stable for plane CRM at production scale on smoke.
+### 2026-05-26 — iter 37..50 (compressed summary, iter-77 fold)
+
+iter-37..iter-50 detail folded for doc-size hygiene per the "compress
+every 10 iterations" instruction. Full per-iter detail in
+``CRM_implementation.original.md`` (local backup, pre-iter-77 state)
+and git log. One-line summary per iter:
+
+| iter | landed |
+|------|--------|
+| 37 | Full regression sweep — 38/38 PASS in 72 s. iter-1..36 work composes cleanly. |
+| 38 | Plane CRM 132×132 production-scale slow nightly regression test (5-min sub-envelope of iter-14 1-sim-hour); Codex 2 HIGH (step-count off-by-one, MSE cap inconsistent) + 5 MEDIUM fixed. |
+| 39 | Real ``--no-radiation`` driver flag (Codex iter-39 HIGH#2 found ``--rad-call-interval-s 1e9`` fires once at step 1 + caches); iter-38/39 production-scale slow tests now exercise distinct code paths. |
+| 40 | Radiation call count surfaced via ``rad_calls=N`` in ``Done.`` line; iter-38/39 schedule assertion. |
+| 41 | iter-15/16 short smokes propagated iter-39/40 hardening — ``--no-radiation`` + exact-count rad_calls assertion + module docstring fix. |
+| 42 | Factored radiation-call schedule arithmetic to ``legoesm.driver.physics_schedule`` (17 unit tests; single source of truth across driver + tests). |
+| 43 | Hardened ``physics_schedule`` against NaN/inf/sys.maxsize (Codex 2nd-pass MEDIUMs). |
+| 44 | C72 30-day nightly regression test + Codex HIGH on shared ``_run_rce`` helper (``timeout=600`` vs measured 2373 s wall). |
+| 45 | Propagate iter-44 timeout fix to C96 2-day + C48 30-day slow tests; tighten C72 csv parsing to exact ``max_wind`` column pin. |
+| 46 | Factor iter-44 hardening into shared helpers (``_assert_dt_used`` + ``_assert_max_wind_peak_below``); apply to C48 30-day nightly; Codex MEDIUM (vacuous-pass on empty csv) fixed. |
+| 47 | Applied iter-46 shared helpers to C96 2-day slow smoke (closes silent-pass risk: 2-day cannot distinguish dt=37 from dt=75 BLOWUP-in-flight). |
+| 48 | BLOWUP gate test now verifies the supersonic channel actually fired (inverse of iter-46 helper). |
+| 49 | (consumed by iter-62 doc compression — entry was self-referential about compression itself) |
+| 50 | V4 (voronoi/MPAS) 30-day nightly + re-land iter-48 doc entry. Codex 1 HIGH (temp_tol=1.0 too tight vs measured Δ=+0.85) + 1 MEDIUM (cap=25 too loose for V4 stability profile) — both fixed. |
 
 ### 2026-05-26 — iter 26..36 (compressed summary)
 
