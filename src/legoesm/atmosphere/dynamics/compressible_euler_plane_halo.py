@@ -41,11 +41,15 @@ Smagorinsky LES + vertical-θ diffusion (R4/R5)
   ``compressible_euler_plane.py:1050-1064`` and is applied in both
   the main entry point and the split-trace phase-2 variant.
 
-Not covered here yet:
-
-* WENO5 horizontal advection (``horizontal_advection_scheme="weno5"``)
-  — needs ``layout.halo >= 3`` + a halo-aware port of the WENO5-Z
-  stencil. Tracked as R6 in CRM_implementation.md.
+WENO5 horizontal advection
+--------------------------
+* ``config.horizontal_advection_scheme == "weno5"`` switches theta /
+  u / v / w / tracer horizontal advection to the 5th-order WENO-Z
+  stencil. Requires ``layout.halo >= 3`` (6-point WENO5 reconstruction
+  reaches ±3 cells on each axis). Single-rank build with
+  ``make_plane_pencil_layout(..., halo=3)`` is bit-identical to the
+  serial ``_weno5_advection_x/y`` (tests in
+  ``test_weno5_halo_equiv.py``).
 
 Single-rank equivalence
 -----------------------
@@ -384,9 +388,33 @@ def plane_compressible_euler_slow_tendencies_halo(
     # upwind. Re-pad the interior result.
     u_center_pad = _re_pad_halo(u_center, layout, h)
     v_center_pad = _re_pad_halo(v_center, layout, h)
+    # Choose horizontal advection scheme. WENO5 requires layout halo ≥ 3.
+    scheme = getattr(config, "horizontal_advection_scheme", "upwind1")
+    if scheme == "weno5":
+        if h < 3:
+            raise ValueError(
+                f"horizontal_advection_scheme='weno5' requires "
+                f"layout.halo >= 3; got halo={h}. Construct the layout "
+                f"with make_plane_pencil_layout(..., halo=3) when "
+                f"using WENO5 on the halo path."
+            )
+        adv_x = lambda f_pad, u_pad_, dx_, h_: (
+            oh.weno5_advection_x_halo(f_pad, u_pad_, dx_, h_)
+        )
+        adv_y = lambda f_pad, v_pad_, dy_, h_: (
+            oh.weno5_advection_y_halo(f_pad, v_pad_, dy_, h_)
+        )
+    elif scheme == "upwind1":
+        adv_x = oh.upwind_advection_x_halo
+        adv_y = oh.upwind_advection_y_halo
+    else:
+        raise ValueError(
+            f"Unknown horizontal_advection_scheme: {scheme!r}. "
+            "Expected 'upwind1' or 'weno5'."
+        )
     dtheta_p_dt = (
-        oh.upwind_advection_x_halo(theta_total_pad, u_center_pad, grid.dx, h)
-        + oh.upwind_advection_y_halo(theta_total_pad, v_center_pad, grid.dy, h)
+        adv_x(theta_total_pad, u_center_pad, grid.dx, h)
+        + adv_y(theta_total_pad, v_center_pad, grid.dy, h)
     )
 
     # 6. Horizontal momentum advection — u advected by (u, v_at_xface),
@@ -396,12 +424,12 @@ def plane_compressible_euler_slow_tendencies_halo(
     v_at_xface_pad = _re_pad_halo(v_at_xface, layout, h)
     u_at_yface_pad = _re_pad_halo(u_at_yface, layout, h)
     du_adv = (
-        oh.upwind_advection_x_halo(u_pad, u_pad, grid.dx, h)
-        + oh.upwind_advection_y_halo(u_pad, v_at_xface_pad, grid.dy, h)
+        adv_x(u_pad, u_pad, grid.dx, h)
+        + adv_y(u_pad, v_at_xface_pad, grid.dy, h)
     )
     dv_adv = (
-        oh.upwind_advection_x_halo(v_pad, u_at_yface_pad, grid.dx, h)
-        + oh.upwind_advection_y_halo(v_pad, v_pad, grid.dy, h)
+        adv_x(v_pad, u_at_yface_pad, grid.dx, h)
+        + adv_y(v_pad, v_pad, grid.dy, h)
     )
 
     # 7. Vertical advection (column-local).
@@ -411,12 +439,12 @@ def plane_compressible_euler_slow_tendencies_halo(
     du_dt = du_adv + du_vert + du_pg + du_cor
     dv_dt = dv_adv + dv_vert + dv_pg + dv_cor
 
-    # 8. w slow part.
+    # 8. w slow part — same scheme as theta + momentum (set above).
     w_full = 0.5 * (w[..., :-1] + w[..., 1:])
     w_full_pad = _re_pad_halo(w_full, layout, h)
     dw_full = (
-        oh.upwind_advection_x_halo(w_full_pad, u_center_pad, grid.dx, h)
-        + oh.upwind_advection_y_halo(w_full_pad, v_center_pad, grid.dy, h)
+        adv_x(w_full_pad, u_center_pad, grid.dx, h)
+        + adv_y(w_full_pad, v_center_pad, grid.dy, h)
     )
     pad_axes = ((0, 0),) * (dw_full.ndim - 1)
     dw_dt = jnp.pad(
@@ -552,8 +580,8 @@ def plane_compressible_euler_slow_tendencies_halo(
 
         def _tracer_tend_one(q_pad, q_int):
             return (
-                oh.upwind_advection_x_halo(q_pad, u_center_pad, grid.dx, h)
-                + oh.upwind_advection_y_halo(q_pad, v_center_pad, grid.dy, h)
+                adv_x(q_pad, u_center_pad, grid.dx, h)
+                + adv_y(q_pad, v_center_pad, grid.dy, h)
                 + _vertical_advection_plane(q_int, w, height_coord, J)
             )
         dtracers_dt = jax.vmap(

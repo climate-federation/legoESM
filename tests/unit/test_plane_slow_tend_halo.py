@@ -176,6 +176,60 @@ def test_halo_equiv_with_vertical_theta_diffusion():
     _eq_tendencies(actual, expected, rtol=1e-11, atol=1e-11)
 
 
+def test_halo_equiv_with_weno5_advection():
+    """R6: WENO5 horizontal advection ported to halo path. Single-rank
+    must match the serial WENO5 implementation bit-for-bit. Layout
+    halo must be ≥ 3 for the 6-point stencil — verify the gate."""
+    grid = create_plane_grid(
+        nx=8, ny=6, nlev=10, dx=1000.0, dy=2000.0, dtype=jnp.float64,
+    )
+    hc = create_height_coordinate(10, H=20_000.0)
+    tm = make_flat_plane_terrain_metric(grid, hc)
+    cfg = CompressibleEulerConfig(
+        sponge_coeff=0.05, sponge_width=5_000.0,
+        smagorinsky_cs=0.0,
+        use_coriolis=False,
+        n_acoustic_substeps=12,
+        horizontal_advection_scheme="weno5",
+    )
+    rest = make_rest_state(grid, hc, dtype=jnp.float64)
+    rng = jax.random.PRNGKey(0)
+    keys = jax.random.split(rng, 5)
+    state = rest._replace(
+        u=rest.u.replace(data=0.1 * jax.random.normal(keys[0], rest.u.data.shape)),
+        v=rest.v.replace(data=0.1 * jax.random.normal(keys[1], rest.v.data.shape)),
+        w=rest.w.replace(data=0.01 * jax.random.normal(keys[2], rest.w.data.shape)),
+        theta_prime=rest.theta_prime.replace(
+            data=0.5 * jax.random.normal(keys[3], rest.theta_prime.data.shape),
+        ),
+        rho_prime=rest.rho_prime.replace(
+            data=0.001 * jax.random.normal(keys[4], rest.rho_prime.data.shape),
+        ),
+    )
+    layout = make_plane_pencil_layout(
+        rank=0, n_ranks=1, n_ranks_y=1, n_ranks_x=1,
+        ny_global=6, nx_global=8, halo=3,
+    )
+    expected = plane_compressible_euler_slow_tendencies(
+        state, grid, hc, tm, cfg,
+    )
+    actual = plane_compressible_euler_slow_tendencies_halo(
+        state, grid, hc, tm, cfg, layout,
+    )
+    _eq_tendencies(actual, expected, rtol=1e-11, atol=1e-11)
+
+
+def test_halo_weno5_rejects_halo_lt_3():
+    """WENO5 needs layout.halo ≥ 3; default layout (halo=1) must
+    fail-fast with a clear error message."""
+    grid, hc, tm, cfg, state, layout = _setup()
+    cfg_weno = cfg._replace(horizontal_advection_scheme="weno5")
+    with pytest.raises(ValueError, match="halo >= 3"):
+        plane_compressible_euler_slow_tendencies_halo(
+            state, grid, hc, tm, cfg_weno, layout,
+        )
+
+
 def test_halo_equiv_smag_plus_vertical_theta_diff_plus_hyperdiff():
     """R4 + R5 + hyperdiff all on at once; still bit-equivalent."""
     grid, hc, tm, cfg, state, layout = _setup(hyperdiff=1.0e6)

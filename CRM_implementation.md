@@ -222,6 +222,66 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 7
+
+**R6 done — WENO5 ported to halo path**
+* `src/legoesm/atmosphere/dynamics/plane_operators_halo.py`:
+  - New `_slice_axis_shift(arr_pad, halo, axis, shift)` helper —
+    returns interior-shape view of `arr_pad[i+shift]` for every
+    interior i. Equivalent to `jnp.roll(arr, -shift, axis)` on the
+    unpadded array when `layout.n_ranks == 1` + `mode='wrap'`.
+  - New `weno5_advection_x_halo` / `weno5_advection_y_halo` — full
+    6-point WENO5-Z reconstruction at i±1/2 faces; rebuilds the
+    L-face reconstruction from the shifted stencil rather than
+    `jnp.roll(flux_R, 1)` so the math is purely slice-based on the
+    padded array. Both fail-fast with ValueError when `halo < 3`.
+  - Module docstring updated: WENO5 ops need `halo >= 3`; other
+    operators stay at `halo == 1`.
+* `src/legoesm/atmosphere/dynamics/compressible_euler_plane_halo.py`:
+  - Wires `config.horizontal_advection_scheme` ∈ {`upwind1`,
+    `weno5`} through theta / u / v / w / tracer horizontal
+    advection blocks. Single dispatch picks `adv_x`/`adv_y` once
+    per slow-tendency call.
+  - Gate raises ValueError on `layout.halo < 3` when WENO5
+    selected. Module docstring updated to document R6 coverage.
+* `tests/unit/test_weno5_halo_equiv.py` (NEW): 6 tests pinning
+  bit-equivalence with serial WENO5 at halo ∈ {3, 4} for both axes
+  + the halo<3 reject path.
+* `tests/unit/test_plane_slow_tend_halo.py` (extended): 2 new tests
+  covering the full halo slow-tendency with WENO5 enabled (single-
+  rank bit-equivalence + halo<3 gate).
+
+**R10 progress — cross-grid RCE smoke**
+* `scripts/run_rce_cross_grid.sh`:
+  - Shebang `#!/usr/bin/env bash` + replaced `declare -A`
+    associative arrays with a colon-delimited parallel-array
+    pattern (macOS default Bash 3.2 does not support `-A`).
+  - Pins `JAX_PLATFORMS=cpu` on each `run_rce.py` invocation: the
+    spectral + voronoi + latlon-cgrid paths hit an MLIR
+    legalisation error on Apple Metal ("`func.func` op data types
+    not supported"). User can override with `JAX_PLATFORMS=metal`
+    at their own risk.
+
+**Measurements**
+* `pytest tests/unit/test_plane_slow_tend_halo.py
+  tests/unit/test_plane_mass_fixer_mpi.py
+  tests/unit/test_weno5_halo_equiv.py`: **27 passed in 7.05 s**.
+* Codex adversarial review: 1 LOW (stale docstrings, fixed inline),
+  0 HIGH/MEDIUM. Index math + L-face reconstruction + halo gate
+  + face velocity all verified.
+* Cross-grid RCE at days=1: 3/4 grids PASS
+  - cubed_sphere C24/L20: PASS (mean T_sfc=299.96, max|v|=0.86)
+  - latlon LL32/L20: PASS (mean T_sfc=299.94, max|v|=2.05)
+  - gaussian T21/L20: PASS (mean T_sfc=299.94, max|v|=2.19)
+  - voronoi V4/L20: **FAIL — BLOWUP at day 1** ← R10 follow-up
+* Cross-grid comparison-plot step crashes on Metal (separate
+  Apple-Metal legalisation issue — orthogonal to the dycore).
+
+**R-roadmap status**: R1-R7 ✓, R8 bench ✓ (real numbers blocked
+on stack pin), **R6 ✓** (WENO5 in halo path). R10 partial: 3/4
+hydrostatic grids stable at day-1 smoke; voronoi RCE blows up
+within 24 h. R9 (KW78 outer-step) still pending.
+
 ### 2026-05-26 — iter 6
 
 **Codex adversarial review of iter-5 caught one HIGH bug**

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Run moist RCE on each supported grid type and produce a cross-grid
 # time-series comparison via the atmosphere-matrix plotter.
 #
@@ -25,33 +25,20 @@ ANY_FAILED=0
 # so the cross-grid plotter has something to read.
 DIAG_DAYS=${3:-1}
 
-# Map grid_type → (resolution, discretization, folder) appropriate
-# for ~1.25-3 deg coverage.  iter-26 codex HIGH: ``--discretization``
-# is REQUIRED for non-cubed grids — ``run_rce.py``'s default
-# ``cdgrid`` is rejected for latlon/voronoi/gaussian.
-declare -A GRID_RES=(
-    [cubed_sphere]="24"
-    [latlon]="32"
-    [voronoi]="4"
-    [gaussian]="21"
-)
-declare -A GRID_DISC=(
-    [cubed_sphere]="cdgrid"
-    [latlon]="latlon_cgrid"
-    [voronoi]="mpas"
-    [gaussian]="spectral"
-)
-declare -A GRID_FOLDER=(
-    [cubed_sphere]="cubed_sphere"
-    [latlon]="latlon"
-    [voronoi]="icosahedral"
-    [gaussian]="spectral"
+# Grid configuration table (parallel arrays — macOS default bash 3.2
+# does not support `declare -A` associative arrays). Each entry is
+# "<grid_type>:<resolution>:<discretization>:<output_folder>". iter-26
+# codex HIGH: --discretization is REQUIRED for non-cubed grids;
+# run_rce.py's default cdgrid is rejected for latlon/voronoi/gaussian.
+GRID_TABLE=(
+    "cubed_sphere:24:cdgrid:cubed_sphere"
+    "latlon:32:latlon_cgrid:latlon"
+    "voronoi:4:mpas:icosahedral"
+    "gaussian:21:spectral:spectral"
 )
 
-for GRID in cubed_sphere latlon voronoi gaussian; do
-    RES=${GRID_RES[$GRID]}
-    DISC=${GRID_DISC[$GRID]}
-    FOLDER=${GRID_FOLDER[$GRID]}
+for ENTRY in "${GRID_TABLE[@]}"; do
+    IFS=':' read -r GRID RES DISC FOLDER <<< "$ENTRY"
     OUTDIR="$OUTPUT/hydrostatic/rce/$FOLDER/$RES"
     echo "=================================================="
     echo "  RCE on $GRID/$DISC (resolution=$RES, days=$DAYS)"
@@ -75,7 +62,11 @@ for GRID in cubed_sphere latlon voronoi gaussian; do
     # ``run_amip.py`` conventions), so this guard now reliably
     # catches the expected per-grid failures via ``$?`` and
     # records ``ANY_FAILED=1``.
-    JAX_ENABLE_X64=1 .venv/bin/python scripts/run_rce.py \
+    # JAX_PLATFORMS=${JAX_PLATFORMS:-cpu}: pin CPU by default; the
+    # spectral + voronoi paths trigger an MLIR legalisation error on
+    # Apple Metal ("func.func op ... data types not supported"). User
+    # can override with JAX_PLATFORMS=metal at their own risk.
+    JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}" JAX_ENABLE_X64=1 .venv/bin/python scripts/run_rce.py \
         --grid-type "$GRID" --discretization "$DISC" \
         --resolution "$RES" --days "$DAYS" --diag-days "$DIAG_DAYS" \
         --output "$OUTDIR" || {
