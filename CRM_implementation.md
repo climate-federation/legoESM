@@ -134,6 +134,53 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 59
+
+**Refreshed plane CRM production driver argparse default + AST regression test.**
+
+iter-58 fixed the wrapper script defaults. iter-59 audit of the underlying
+``scripts/run_rce_mpi_long.py`` argparse found the same staleness:
+
+* ``--n-acoustic-substeps`` default = ``24`` (iter-1 dt=1.0 s legacy);
+  iter-14 + iter-38 production use ``N=12`` at the driver's
+  default ``dt=5.0 s``. A user invoking the driver with all defaults
+  (no wrapper) would get N=24 → 2x slower substep + silent
+  divergence from the iter-14 measurement.
+
+**Fix**: bumped ``--n-acoustic-substeps`` default ``24 → 12`` with a
+detailed help block citing the iter-14 + iter-38 production contract
++ the iter-1 historical reason for the old value.
+
+**New regression test**
+``tests/atmosphere/nonhydrostatic/integration/
+test_run_rce_mpi_long_driver_defaults.py`` — 8 tests parsing the
+driver source via ``ast.walk`` to find every ``p.add_argument`` call
++ asserting the literal defaults. Covers: dt, n-acoustic-substeps,
+hyperdiff, smag-cs, bubble-theta-pert, qv-noise-amp, nx/ny, nlev.
+
+Mirrors iter-58 wrapper-script pattern with stronger parser (AST
+vs bash regex). Future silent revert trips in < 1 s.
+
+**Verified**:
+* Driver smoke: ``--dt 5.0 --days 0.0005 --no-radiation`` with the
+  default N_ACOUSTIC=12 (no explicit flag) runs 8 steps cleanly.
+* 17/17 CRM fast tests PASS in 11 s (no regression).
+* 8/8 driver-defaults regression PASS in 0.03 s.
+
+Note: ``scripts/run_rce_mpi_full.py`` (an older sibling, not actively
+called) still has the stale ``N_ACOUSTIC=24`` default. Left untouched
+— refresh when/if it returns to use.
+
+**R-roadmap status**: R1-R8, R10, R12 ✓ (with iter-59 driver-argparse
+default refresh + AST-based regression backstop), R6 ✓. F9
+platform-blocked.
+
+Test inventory (post-iter-59):
+* 58 unit (was 50 in iter-54): added 8 driver-defaults regression tests.
+* 12 cross-grid + 4 plane CRM e2e.
+* 3 wrapper-script regression (iter-58).
+* 8 driver-script regression (iter-59).
+
 ### 2026-05-26 — iter 58
 
 **Refreshed stale `run_rce_30day.sh` defaults + landed regression test.**
