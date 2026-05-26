@@ -1,0 +1,17 @@
+# AIMIP multi-step autoregressive suite manifest.
+#
+# Same three variants as ``aimip_suite.yaml`` (classical / column_nn /
+# sfno_physics) but trained with the GenCast-style multi-step CRPS+MSE
+# loss (4 chained 6-hourly rollouts, leads at 6/12/18/24 h).  Base
+# config lives in ``aimip_era5_multistep.yaml``; variant overlays are
+# the same as the production suite (they only override scheme-level
+# fields, not the shared loss / grid / data).
+
+base: "config/aimip/aimip_era5_multistep.yaml"
+
+variants:
+  - classical
+  - column_nn
+  - sfno_physics
+
+output_dir: "results/aimip_multistep_001"

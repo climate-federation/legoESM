@@ -1,0 +1,91 @@
+era5_zarr: gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr
+cache_dir: .cache/aimip_era5
+train_windows:
+- - 2015
+  - 0
+  - 3
+- - 2015
+  - 180
+  - 3
+- - 2016
+  - 0
+  - 3
+- - 2016
+  - 180
+  - 3
+eval_windows:
+- - 2017
+  - 0
+  - 3
+- - 2017
+  - 180
+  - 3
+train_year: 2015
+eval_year: 2017
+train_period:
+- '2015-01-01'
+- '2016-12-31'
+eval_period:
+- '2017-01-01'
+- '2017-12-31'
+n_train_days: 12
+n_eval_days: 6
+aimip_grid: gaussian
+n_max: 106
+nlev: 8
+dt: 400.0
+aimip_n_epochs: 4
+aimip_patience: 2
+aimip_min_delta: 0.001
+aimip_lr: 1.5e-4
+aimip_warmup: 10
+aimip_weight_decay: 1.0e-05
+aimip_grad_clip: 1.0
+aimip_optimizer: adamw
+aimip_radiation: rrtmgp
+aimip_rad_update_interval: 12
+aimip_spatial_surface: false
+aimip_spatial_init_std: 0.0
+aimip_spatial_seed: 0
+aimip_spatial_lr_scale: 1.0
+aimip_rollout_days: 1
+aimip_rollout_hours: 6
+aimip_convection: tiedtke
+aimip_turbulence: louis
+aimip_gwd: mcfarlane
+aimip_microphysics: sundqvist
+aimip_cloud: xu_randall
+loss:
+  w_T: 1.0
+  w_u: 0.5
+  w_v: 0.5
+  w_q: 0.3
+  w_ps: 0.3
+  w_bias_T: 100.0
+  w_bias_u: 1.0
+  w_bias_v: 1.0
+  w_bias_ps: 1.0
+  w_crps_T: 0.5
+  w_crps_u: 0.25
+  w_crps_v: 0.25
+  w_crps_q: 0.5
+  w_crps_ps: 0.15
+  w_spec_crps_T: 0.5
+  w_spec_crps_u: 0.25
+  w_spec_crps_v: 0.25
+  w_spec_crps_q: 0.5
+  multi_step_hours:
+  - 24
+  - 48
+  - 72
+  multi_step_weights:
+  - 1.0
+  - 0.7
+  - 0.5
+  spectral_weight: 0.0
+  level_weighting: pressure
+  normalize_by_scale: true
+  T_scale: 30.0
+  wind_scale: 20.0
+  q_scale: 0.005
+  ps_scale: 1000.0

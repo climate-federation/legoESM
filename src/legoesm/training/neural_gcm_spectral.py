@@ -499,6 +499,8 @@ def spectral_rollout(
     spectral_filter: jnp.ndarray | None = None,
     rad_physics_fn=None,
     rad_update_interval: int = 1,
+    *,
+    sim_time_offset_seconds: float = 0.0,
 ) -> SpectralHydrostaticState:
     """Roll out spectral PE + SFNO physics for n_steps using lax.scan.
 
@@ -646,7 +648,12 @@ def spectral_rollout(
             # Legacy rad_physics_fn signature without sim_time_seconds.
             return rad_physics_fn(s, grid, sigma_coord)
 
-    init_rad_tendency = _call_rad(initial_state, 0.0)
+    init_rad_tendency = _call_rad(initial_state, sim_time_offset_seconds)
+
+    # Cast the (Python-float) offset into the same dtype the gated
+    # branch uses, so the radiation diurnal cycle sees a single
+    # consistent dtype regardless of how the offset is supplied.
+    _offset = jnp.asarray(sim_time_offset_seconds, dtype=jnp.float64)
 
     def step_fn_gated(carry, step_idx):
         state, cached_rad_tendency = carry
@@ -656,7 +663,13 @@ def spectral_rollout(
         # the rad branch; on skipped steps the cached tensor flows
         # through unchanged.
         should_refresh = (step_idx % rad_update_interval) == 0
-        sim_time_seconds = step_idx.astype(jnp.float64) * dt
+        # Cumulative simulated time = optional caller-supplied offset
+        # plus per-step contribution from THIS rollout's scan index.
+        # Multi-step autoregressive supervision passes the wall time
+        # elapsed since the IC so segment k's rad call sees the right
+        # solar phase (otherwise every segment starts at 00 UTC and
+        # the diurnal cycle is frozen at the IC's time-of-day).
+        sim_time_seconds = step_idx.astype(jnp.float64) * dt + _offset
         new_rad_tendency = jax.lax.cond(
             should_refresh,
             lambda _: _call_rad(state, sim_time_seconds),
@@ -708,41 +721,49 @@ def spectral_rollout(
 # Loss function
 # =============================================================================
 
-def spectral_state_vs_carry_loss(
+def _spectral_state_loss_components(
     pred_state: SpectralHydrostaticState,
     target_carry,
     grid: GaussianGrid,
     sigma_coord: SigmaCoordinate,
     sigma_full: jnp.ndarray,
     config: LossConfig = LossConfig(),
-) -> jnp.ndarray:
-    """Compute weighted MSE between predicted spectral state and ERA5 target.
+):
+    """Compute ``spectral_state_vs_carry_loss`` + per-family component breakdown.
 
-    Converts the predicted spectral state to grid space via SH synthesis,
-    then compares against the target SegmentCarry fields.
+    The four returned families are mutually exclusive and sum to the
+    total loss, so the per-epoch diagnostic remains exact rather than
+    a recomputation.  Each family already includes the user-supplied
+    ``w_*`` weights and the per-variable scale normalisation:
 
-    Parameters
-    ----------
-    pred_state : SpectralHydrostaticState
-        Predicted state after rollout.
-    target_carry : SegmentCarry
-        Target ERA5 state on the Gaussian grid.
-    grid : GaussianGrid
-    sigma_coord : SigmaCoordinate
-    sigma_full : (nlev,)
-        Sigma levels for pressure weighting.
-    config : LossConfig
+    - ``mse``      : Σ_v w_v · <(pred - target)² · lev_w> / scale²
+    - ``bias``     : Σ_v w_bias_v · (area-weighted mean error)² / scale²
+    - ``crps``     : Σ_v w_crps_v · <|pred - target| · lev_w> / scale
+                     (grid-space M=1 fair-CRPS = MAE)
+    - ``spec_crps``: Σ_v w_spec_crps_v · <|SH(pred - target)|> / scale
+                     (spectral M=1 fair-CRPS, requires JAX_ENABLE_X64=True)
 
     Returns
     -------
-    scalar loss
+    total_loss : scalar
+        Sum of the four component scalars (= legacy
+        ``spectral_state_vs_carry_loss`` output, ignoring spec_crps
+        when its weights are zero).
+    components : dict[str, scalar]
+        Keys ``mse``, ``bias``, ``crps``, ``spec_crps``; each is a JAX
+        scalar suitable for ``has_aux=True`` accumulation.
     """
     lev_w = level_weights(sigma_full, config=config)
 
     # Spectral -> grid-space
     fields = spectral_pe_to_grid(pred_state, grid, sigma_coord)
 
-    loss = jnp.float32(0.0)
+    # Component accumulators.  Use float32 to match the legacy ``loss``
+    # dtype; the bias/CRPS terms inherit this through arithmetic.
+    mse_loss = jnp.float32(0.0)
+    bias_loss = jnp.float32(0.0)
+    crps_loss = jnp.float32(0.0)
+    spec_crps_loss = jnp.float32(0.0)
 
     # Per-variable scale denominators — same convention as carry_mse
     # (iter-69 fix carried over to the spectral path so identical
@@ -774,27 +795,36 @@ def spectral_state_vs_carry_loss(
         zonal = jnp.mean(field, axis=1)        # (n_lat,)
         return jnp.sum(zonal * lat_w) / lat_w_sum
 
+    def _spec_mae_3d(field_grid):
+        # Deterministic (M=1) fair-CRPS in spectral space.  SH analysis
+        # requires float64 to match the dycore's spectral convention;
+        # the |.| is taken on the complex coefficient and averaged
+        # across all (n_sh, nlev) entries.  Cast back to float32 so it
+        # composes with the float32 ``loss`` accumulator.
+        coeffs = sh_analysis_3d(grid, field_grid.astype(jnp.float64))
+        return jnp.mean(jnp.abs(coeffs)).astype(jnp.float32)
+
     # Temperature: (n_lat, n_lon, nlev)
     dT = fields['T'].astype(jnp.float32) - target_carry.T
-    loss = loss + config.w_T * jnp.mean(dT ** 2 * lev_w) / T_norm
+    mse_loss = mse_loss + config.w_T * jnp.mean(dT ** 2 * lev_w) / T_norm
     if config.w_bias_T > 0.0:
         bias_T = _area_weighted_mean_3d(dT)
-        loss = loss + config.w_bias_T * bias_T ** 2 / T_norm
+        bias_loss = bias_loss + config.w_bias_T * bias_T ** 2 / T_norm
 
     # Winds: (n_lat, n_lon, nlev)
     du = fields['u'].astype(jnp.float32) - target_carry.u
     dv = fields['v'].astype(jnp.float32) - target_carry.v
-    loss = loss + config.w_u * jnp.mean(du ** 2 * lev_w) / wind_norm
-    loss = loss + config.w_v * jnp.mean(dv ** 2 * lev_w) / wind_norm
+    mse_loss = mse_loss + config.w_u * jnp.mean(du ** 2 * lev_w) / wind_norm
+    mse_loss = mse_loss + config.w_v * jnp.mean(dv ** 2 * lev_w) / wind_norm
     if config.w_bias_u > 0.0:
         bias_u = _area_weighted_mean_3d(du)
-        loss = loss + config.w_bias_u * bias_u ** 2 / wind_norm
+        bias_loss = bias_loss + config.w_bias_u * bias_u ** 2 / wind_norm
     if config.w_bias_v > 0.0:
         bias_v = _area_weighted_mean_3d(dv)
-        loss = loss + config.w_bias_v * bias_v ** 2 / wind_norm
+        bias_loss = bias_loss + config.w_bias_v * bias_v ** 2 / wind_norm
 
-    # CRPS contribution (deterministic = MAE).  The fair-CRPS for a
-    # single-member forecast (M=1) reduces to area-weighted |pred -
+    # Grid-space CRPS contribution (deterministic = MAE).  The fair-CRPS
+    # for a single-member forecast (M=1) reduces to area-weighted |pred -
     # target|; the M>=2 fair-CRPS would subtract the ensemble
     # self-spread term ``(1/(2M(M-1))) Σ |x_m - x_m'|``, but we don't
     # have an ensemble here.  We normalise by the variable scale
@@ -806,20 +836,39 @@ def spectral_state_vs_carry_loss(
     wind_scale = config.wind_scale if config.normalize_by_scale else 1.0
     ps_scale = config.ps_scale if config.normalize_by_scale else 1.0
     if config.w_crps_T > 0.0:
-        loss = loss + config.w_crps_T * jnp.mean(jnp.abs(dT) * lev_w) / T_scale
+        crps_loss = crps_loss + config.w_crps_T * jnp.mean(jnp.abs(dT) * lev_w) / T_scale
     if config.w_crps_u > 0.0:
-        loss = loss + config.w_crps_u * jnp.mean(jnp.abs(du) * lev_w) / wind_scale
+        crps_loss = crps_loss + config.w_crps_u * jnp.mean(jnp.abs(du) * lev_w) / wind_scale
     if config.w_crps_v > 0.0:
-        loss = loss + config.w_crps_v * jnp.mean(jnp.abs(dv) * lev_w) / wind_scale
+        crps_loss = crps_loss + config.w_crps_v * jnp.mean(jnp.abs(dv) * lev_w) / wind_scale
+
+    # Spectral-space CRPS (M=1 = MAE of coefficient differences).  Same
+    # normalisation convention as the grid CRPS: scale (not scale²).
+    # Skipped silently when ``JAX_ENABLE_X64`` is off — the
+    # ``sh_analysis_3d`` path requires float64.  Users opting into
+    # spec-CRPS without x64 see a clear failure inside the SH kernel,
+    # which is preferable to silently dropping the term.
+    if config.w_spec_crps_T > 0.0:
+        spec_crps_loss = spec_crps_loss + (
+            config.w_spec_crps_T * _spec_mae_3d(dT) / T_scale
+        )
+    if config.w_spec_crps_u > 0.0:
+        spec_crps_loss = spec_crps_loss + (
+            config.w_spec_crps_u * _spec_mae_3d(du) / wind_scale
+        )
+    if config.w_spec_crps_v > 0.0:
+        spec_crps_loss = spec_crps_loss + (
+            config.w_spec_crps_v * _spec_mae_3d(dv) / wind_scale
+        )
 
     # Surface pressure: (n_lat, n_lon)
     dp = fields['p_s'].astype(jnp.float32) - target_carry.p_s
-    loss = loss + config.w_ps * jnp.mean(dp ** 2) / ps_norm
+    mse_loss = mse_loss + config.w_ps * jnp.mean(dp ** 2) / ps_norm
     if config.w_crps_ps > 0.0:
-        loss = loss + config.w_crps_ps * jnp.mean(jnp.abs(dp)) / ps_scale
+        crps_loss = crps_loss + config.w_crps_ps * jnp.mean(jnp.abs(dp)) / ps_scale
     if config.w_bias_ps > 0.0:
         bias_ps = _area_weighted_mean_2d(dp)
-        loss = loss + config.w_bias_ps * bias_ps ** 2 / ps_norm
+        bias_loss = bias_loss + config.w_bias_ps * bias_ps ** 2 / ps_norm
 
     # Specific humidity (q_v): contribute to the loss only when the
     # predicted state actually carries a ``q_v`` tracer (i.e., the
@@ -835,9 +884,70 @@ def spectral_state_vs_carry_loss(
             _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
         ).astype(jnp.float32)
         dq = qv_grid - target_carry.q_v
-        loss = loss + config.w_q * jnp.mean(dq ** 2 * lev_w) / q_norm
+        mse_loss = mse_loss + config.w_q * jnp.mean(dq ** 2 * lev_w) / q_norm
+        # CRPS / MAE term for q (M=1 fair-CRPS limit).  The tails of
+        # the q error distribution are wider than for T or wind --
+        # convective + microphysical noise concentrates errors in
+        # extreme columns -- so the linear (MAE) penalty is more
+        # appropriate than squared error for this variable.  Same
+        # area-weighting convention as the MSE term so the two
+        # contributions live in commensurate units.
+        q_scale = config.q_scale if config.normalize_by_scale else 1.0
+        if getattr(config, "w_crps_q", 0.0) > 0.0:
+            crps_loss = crps_loss + config.w_crps_q * jnp.mean(jnp.abs(dq) * lev_w) / q_scale
+        # Spectral CRPS for q.  Penalises errors in the spectral
+        # pattern of humidity that grid-MAE underweights when the
+        # error is concentrated at small scales (convective noise).
+        if getattr(config, "w_spec_crps_q", 0.0) > 0.0:
+            spec_crps_loss = spec_crps_loss + (
+                config.w_spec_crps_q * _spec_mae_3d(dq) / q_scale
+            )
 
-    return loss
+    total = mse_loss + bias_loss + crps_loss + spec_crps_loss
+    return total, {
+        "mse": mse_loss,
+        "bias": bias_loss,
+        "crps": crps_loss,
+        "spec_crps": spec_crps_loss,
+    }
+
+
+def spectral_state_vs_carry_loss(
+    pred_state: SpectralHydrostaticState,
+    target_carry,
+    grid: GaussianGrid,
+    sigma_coord: SigmaCoordinate,
+    sigma_full: jnp.ndarray,
+    config: LossConfig = LossConfig(),
+) -> jnp.ndarray:
+    """Scalar wrapper around :func:`_spectral_state_loss_components`.
+
+    Kept for backward compatibility with eval scripts and tests that
+    only need the total loss.  Training paths that want per-family
+    diagnostics should call ``_spectral_state_loss_components``
+    directly and use ``has_aux=True`` in
+    ``eqx.filter_value_and_grad``.
+
+    Parameters
+    ----------
+    pred_state : SpectralHydrostaticState
+        Predicted state after rollout.
+    target_carry : SegmentCarry
+        Target ERA5 state on the Gaussian grid.
+    grid : GaussianGrid
+    sigma_coord : SigmaCoordinate
+    sigma_full : (nlev,)
+        Sigma levels for pressure weighting.
+    config : LossConfig
+
+    Returns
+    -------
+    scalar loss
+    """
+    total, _ = _spectral_state_loss_components(
+        pred_state, target_carry, grid, sigma_coord, sigma_full, config,
+    )
+    return total
 
 
 # =============================================================================
@@ -937,6 +1047,28 @@ def load_training_data(
     snapshots_per_day = 24 // era5_dt_hours                  # 4 at 6h cadence
     ic_stride_units = 1                                      # one snapshot between consecutive ICs
 
+    # GenCast-style multi-step autoregressive supervision: when
+    # ``loss_config.multi_step_hours`` is non-empty, load one target
+    # per lead in addition to the legacy ``rollout_stride`` target.  The
+    # loss is then summed (optionally weighted) over all leads after
+    # chained 6-hour rollouts.
+    loss_cfg = getattr(config, "loss_config", None)
+    multi_step_hours = tuple(
+        int(h) for h in (getattr(loss_cfg, "multi_step_hours", ()) or ())
+    )
+    if multi_step_hours:
+        max_lead_hours = max(multi_step_hours)
+        if any(h % era5_dt_hours != 0 for h in multi_step_hours):
+            raise ValueError(
+                f"All multi_step_hours={multi_step_hours} must be multiples "
+                f"of era5_dt_hours={era5_dt_hours}."
+            )
+        target_strides = tuple(h // era5_dt_hours for h in multi_step_hours)
+        max_target_stride = max_lead_hours // era5_dt_hours
+    else:
+        target_strides = (rollout_stride,)
+        max_target_stride = rollout_stride
+
     if windows:
         # AIMIP-style multi-window contiguous sampling.  Each window
         # spec is ``(year, day_offset, n_days)``.  v12: with sub-daily
@@ -957,7 +1089,7 @@ def load_training_data(
             start_idx_w = _year_to_idx(year) + int(day_offset) * snapshots_per_day
             base = len(time_indices)
             n_ics_w = n_days_w * snapshots_per_day
-            n_snapshots_w = n_ics_w + rollout_stride
+            n_snapshots_w = n_ics_w + max_target_stride
             time_indices.extend(
                 start_idx_w + s for s in range(n_snapshots_w)
             )
@@ -974,7 +1106,7 @@ def load_training_data(
         n_days = config.n_train_days
         n_ics = n_days * snapshots_per_day
         start_idx = _year_to_idx(config.start_year)
-        time_indices = [start_idx + s for s in range(n_ics + rollout_stride)]
+        time_indices = [start_idx + s for s in range(n_ics + max_target_stride)]
         window_offsets = [(0, n_ics)]
         logger.info(
             f"Loading {n_ics} ERA5 pairs "
@@ -1059,22 +1191,38 @@ def load_training_data(
     logger.info(f"Loaded {len(time_indices)} snapshots ({_time.time()-t0:.0f}s)")
 
     # Build IC/target pairs (per-window so no cross-window leakage).
-    # Target is ``carry[base + d + rollout_stride]`` where stride is
-    # in ERA5-snapshot units (1 = era5_dt_hours).  The loss
-    # supervises the rollout end-state ``rollout_hours`` ahead.
+    # Legacy path (``multi_step_hours`` empty): one target at
+    # ``rollout_stride`` snapshots ahead, returned as a flat list of
+    # carries.  Multi-step path: a tuple of K carries per IC, one per
+    # lead in ``multi_step_hours``.  Downstream callers detect the
+    # tuple form and run K chained 6-hour rollouts.
     ic_states = []
-    target_carries = []
+    target_carries: list = []
     n_total_pairs = 0
+    multi_step = len(target_strides) > 1 or bool(multi_step_hours)
     for (base, n_w) in window_offsets:
         for d in range(n_w):
             ic_states.append(carry_to_spectral_state(carries[base + d], grid))
-            target_carries.append(carries[base + d + rollout_stride])
+            if multi_step:
+                targets_seq = tuple(
+                    carries[base + d + s] for s in target_strides
+                )
+                target_carries.append(targets_seq)
+            else:
+                target_carries.append(carries[base + d + target_strides[0]])
             n_total_pairs += 1
 
-    logger.info(
-        f"Built {n_total_pairs} IC/target pairs "
-        f"(rollout={rollout_hours}h) across {len(window_offsets)} window(s)"
-    )
+    if multi_step:
+        logger.info(
+            f"Built {n_total_pairs} IC/(target_seq) tuples "
+            f"(multi-step leads={multi_step_hours}h) across "
+            f"{len(window_offsets)} window(s)"
+        )
+    else:
+        logger.info(
+            f"Built {n_total_pairs} IC/target pairs "
+            f"(rollout={rollout_hours}h) across {len(window_offsets)} window(s)"
+        )
     return ic_states, target_carries
 
 
@@ -1234,35 +1382,115 @@ def _train_spectral_loop(
             "if that also fails you likely hit a non-AIMIP physics path)."
         )
 
+    # GenCast-style autoregressive supervision: chain K rollouts of
+    # ``segment_steps[k]`` dycore steps each (one per lead in
+    # ``loss_config.multi_step_hours``) and sum a CRPS+MSE loss after
+    # each segment.  M=1 ensemble => CRPS reduces to MAE (the per-
+    # segment loss already mixes MSE + MAE via ``w_*`` and ``w_crps_*``).
+    # ``segment_steps`` is empty / single-element on the legacy
+    # single-step path; downstream code is identical in that case.
+    loss_cfg_train = config.loss_config
+    multi_step_hours_train = tuple(
+        int(h) for h in (loss_cfg_train.multi_step_hours or ())
+    )
+    if multi_step_hours_train:
+        prev = 0
+        segment_steps = []
+        for h in multi_step_hours_train:
+            segment_steps.append(
+                int(round((h - prev) * 3600.0 / config.dt))
+            )
+            prev = h
+        if any(s <= 0 for s in segment_steps):
+            raise ValueError(
+                f"Non-positive segment length derived from "
+                f"multi_step_hours={multi_step_hours_train}, dt={config.dt}."
+            )
+        ms_weights_cfg = tuple(loss_cfg_train.multi_step_weights or ())
+        if ms_weights_cfg and len(ms_weights_cfg) != len(segment_steps):
+            raise ValueError(
+                f"multi_step_weights length {len(ms_weights_cfg)} != "
+                f"len(multi_step_hours)={len(segment_steps)}."
+            )
+        ms_weights = (
+            tuple(float(w) for w in ms_weights_cfg)
+            if ms_weights_cfg else (1.0,) * len(segment_steps)
+        )
+        ms_weight_sum = float(sum(ms_weights))
+        logger.info(
+            f"Multi-step autoregressive supervision active: "
+            f"leads={multi_step_hours_train}h "
+            f"(segments={segment_steps} dycore steps, weights={ms_weights})"
+        )
+    else:
+        segment_steps = ()
+        ms_weights = ()
+        ms_weight_sum = 0.0
+
+    def _rollout_one_segment(state, physics, n_seg_steps, time_offset_seconds):
+        """Run one autoregressive segment (n_seg_steps dycore steps).
+
+        ``time_offset_seconds`` is the cumulative simulated time elapsed
+        since the IC.  The gated-radiation branch adds this to the
+        per-segment scan index so the diurnal cycle stays phase-correct
+        across multi-step autoregressive rollouts (segment k of K
+        evaluates rad at IC + k * 6h, not 00 UTC each time).
+        """
+        if isinstance(physics, tuple):
+            non_rad_fn, rad_fn = physics
+            return spectral_rollout(
+                state, non_rad_fn, grid, sigma, pe_config,
+                config.dt, n_seg_steps,
+                sponge_factor, spectral_filter,
+                rad_physics_fn=rad_fn,
+                rad_update_interval=rad_update_interval,
+                sim_time_offset_seconds=time_offset_seconds,
+            )
+        return spectral_rollout(
+            state, physics, grid, sigma, pe_config,
+            config.dt, n_seg_steps,
+            sponge_factor, spectral_filter,
+            sim_time_offset_seconds=time_offset_seconds,
+        )
+
     def _train_step(model, opt_state, ic_spectral, target_carry):
         def loss_fn(m):
             physics = make_physics_fn(m, grid)
-            # ``make_physics_fn`` may return either a single
-            # combined-physics callable (legacy / sfno / column_nn
-            # paths) or a ``(non_rad_fn, rad_fn)`` tuple (AIMIP
-            # classical with ``split_rad=True``).  Dispatch through
-            # the rad-gating branch of spectral_rollout when we get a
-            # tuple AND the configured interval is greater than 1.
-            if isinstance(physics, tuple):
-                non_rad_fn, rad_fn = physics
-                pred = spectral_rollout(
-                    ic_spectral, non_rad_fn, grid, sigma, pe_config,
-                    config.dt, n_steps_rollout,
-                    sponge_factor, spectral_filter,
-                    rad_physics_fn=rad_fn,
-                    rad_update_interval=rad_update_interval,
-                )
-            else:
-                pred = spectral_rollout(
-                    ic_spectral, physics, grid, sigma, pe_config,
-                    config.dt, n_steps_rollout,
-                    sponge_factor, spectral_filter,
-                )
-            return spectral_state_vs_carry_loss(
-                pred, target_carry, grid, sigma,
-                sigma_full, config.loss_config,
+            if segment_steps:
+                state = ic_spectral
+                total = jnp.float32(0.0)
+                comp_total = {
+                    "mse": jnp.float32(0.0),
+                    "bias": jnp.float32(0.0),
+                    "crps": jnp.float32(0.0),
+                    "spec_crps": jnp.float32(0.0),
+                }
+                t_offset = 0.0
+                for k, n_seg in enumerate(segment_steps):
+                    state = _rollout_one_segment(
+                        state, physics, n_seg, t_offset,
+                    )
+                    seg_loss, seg_comp = _spectral_state_loss_components(
+                        state, target_carry[k], grid, sigma,
+                        sigma_full, loss_cfg_train,
+                    )
+                    total = total + ms_weights[k] * seg_loss
+                    for key in comp_total:
+                        comp_total[key] = comp_total[key] + ms_weights[k] * seg_comp[key]
+                    t_offset = t_offset + float(n_seg) * config.dt
+                inv = 1.0 / ms_weight_sum
+                return total * inv, {k: v * inv for k, v in comp_total.items()}
+            # Legacy single-step path.
+            pred = _rollout_one_segment(
+                ic_spectral, physics, n_steps_rollout, 0.0,
             )
-        loss, grads = eqx.filter_value_and_grad(loss_fn)(model)
+            return _spectral_state_loss_components(
+                pred, target_carry, grid, sigma,
+                sigma_full, loss_cfg_train,
+            )
+        (loss, components), grads = eqx.filter_value_and_grad(
+            loss_fn, has_aux=True,
+        )(model)
         grad_norm = optax.global_norm(eqx.filter(grads, eqx.is_array))
         updates, new_opt_state = optimizer.update(
             eqx.filter(grads, eqx.is_array),
@@ -1270,7 +1498,7 @@ def _train_spectral_loop(
             eqx.filter(model, eqx.is_array),
         )
         new_model = eqx.apply_updates(model, updates)
-        return new_model, new_opt_state, loss, grad_norm
+        return new_model, new_opt_state, loss, grad_norm, components
 
     train_step = eqx.filter_jit(_train_step)
 
@@ -1281,11 +1509,12 @@ def _train_spectral_loop(
 
     for epoch in range(config.n_epochs):
         epoch_loss = 0.0
+        epoch_components = {"mse": 0.0, "bias": 0.0, "crps": 0.0, "spec_crps": 0.0}
         t0 = time.time()
         grad_norm_val = 0.0
 
         for sample_idx, (ic, target) in enumerate(zip(ic_states, target_carries)):
-            model, opt_state, loss, grad_norm = train_step(
+            model, opt_state, loss, grad_norm, components = train_step(
                 model, opt_state, ic, target,
             )
 
@@ -1306,14 +1535,22 @@ def _train_spectral_loop(
                 )
 
             epoch_loss += loss_val
+            for key in epoch_components:
+                epoch_components[key] += float(components[key])
 
-        avg_loss = epoch_loss / max(len(ic_states), 1)
+        n_samples = max(len(ic_states), 1)
+        avg_loss = epoch_loss / n_samples
+        avg_components = {k: v / n_samples for k, v in epoch_components.items()}
         loss_history.append(avg_loss)
 
         if epoch % config.log_every == 0 or epoch == config.n_epochs - 1:
             elapsed = time.time() - t0
             logger.info(
-                f"Epoch {epoch:4d}: loss={avg_loss:.6f}, "
+                f"Epoch {epoch:4d}: loss={avg_loss:.6f} "
+                f"(mse={avg_components['mse']:.4f} "
+                f"bias={avg_components['bias']:.4f} "
+                f"crps={avg_components['crps']:.4f} "
+                f"spec_crps={avg_components['spec_crps']:.4f}), "
                 f"grad_norm={grad_norm_val:.6e}, time={elapsed:.1f}s"
             )
 

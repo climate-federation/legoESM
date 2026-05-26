@@ -1,0 +1,6 @@
+base: config/aimip/t106_headtohead/base.yaml
+variants:
+- classical
+- column_nn
+- sfno_physics
+output_dir: results/aimip_t106_headtohead

@@ -1,0 +1,4 @@
+aimip_convection: tiedtke
+aimip_turbulence: louis
+aimip_gwd: rayleigh
+aimip_microphysics: sundqvist

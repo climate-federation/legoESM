@@ -1,0 +1,3 @@
+sfno_embed_dim: 32
+sfno_n_blocks: 2
+aimip_optimizer: muon_partitioned

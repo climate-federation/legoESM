@@ -1,0 +1,12 @@
+# T106 multi-step suite restricted to the sfno_physics variant so it
+# can run in parallel with the classical and column_nn jobs.  Writes
+# its scorecard to a per-variant output_dir to avoid races on the
+# shared scorecard JSON.  Uses the downsized SFNO overlay in this
+# directory (embed_dim=32, n_blocks=2) so the model fits in 24 GiB.
+
+base: "config/aimip/t106/aimip_era5_multistep.yaml"
+
+variants:
+  - sfno_physics
+
+output_dir: "results/aimip_multistep_t106_001/sfno_physics_run"

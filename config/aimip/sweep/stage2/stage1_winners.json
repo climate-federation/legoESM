@@ -1,0 +1,194 @@
+{
+  "metric": "loss",
+  "baseline_score": 6.67860107284233,
+  "all_scores": {
+    "aimip_convection": [
+      {
+        "scheme": "sbm",
+        "score": 6.676079728389806,
+        "combo_name": "combo_conv_sbm"
+      },
+      {
+        "scheme": "dca",
+        "score": 6.389295846080045,
+        "combo_name": "combo_conv_dca"
+      },
+      {
+        "scheme": "kuo",
+        "score": 7.668842366518256,
+        "combo_name": "combo_conv_kuo"
+      },
+      {
+        "scheme": "mass_flux",
+        "score": 6.4306680154505855,
+        "combo_name": "combo_conv_mass_flux"
+      },
+      {
+        "scheme": "edmf",
+        "score": 7.624986345193559,
+        "combo_name": "combo_conv_edmf"
+      },
+      {
+        "scheme": "zhang_mcfarlane",
+        "score": 6.381305025936826,
+        "combo_name": "combo_conv_zhang_mcfarlane"
+      },
+      {
+        "scheme": "kain_fritsch",
+        "score": 6.727738393455611,
+        "combo_name": "combo_conv_kain_fritsch"
+      },
+      {
+        "scheme": "emanuel",
+        "score": 6.394400490551864,
+        "combo_name": "combo_conv_emanuel"
+      },
+      {
+        "scheme": "bechtold",
+        "score": 6.75314455656417,
+        "combo_name": "combo_conv_bechtold"
+      },
+      {
+        "scheme": "tiedtke",
+        "score": 6.67860107284233,
+        "combo_name": "combo_baseline"
+      }
+    ],
+    "aimip_turbulence": [
+      {
+        "scheme": "tke",
+        "score": 6.71478351981515,
+        "combo_name": "combo_turb_tke"
+      },
+      {
+        "scheme": "smagorinsky",
+        "score": 6.533411879928288,
+        "combo_name": "combo_turb_smagorinsky"
+      },
+      {
+        "scheme": "clubb_lite",
+        "score": 6.7134375640065675,
+        "combo_name": "combo_turb_clubb_lite"
+      },
+      {
+        "scheme": "holtslag_boville",
+        "score": 6.6790198593653685,
+        "combo_name": "combo_turb_holtslag_boville"
+      },
+      {
+        "scheme": "ysu",
+        "score": 6.6790198610802705,
+        "combo_name": "combo_turb_ysu"
+      },
+      {
+        "scheme": "edmf",
+        "score": 6.296870765522414,
+        "combo_name": "combo_turb_edmf"
+      },
+      {
+        "scheme": "none",
+        "score": 6.833304565247789,
+        "combo_name": "combo_turb_none"
+      },
+      {
+        "scheme": "louis",
+        "score": 6.67860107284233,
+        "combo_name": "combo_baseline"
+      }
+    ],
+    "aimip_gwd": [
+      {
+        "scheme": "lindzen",
+        "score": 6.776549067128186,
+        "combo_name": "combo_gwd_lindzen"
+      },
+      {
+        "scheme": "rayleigh",
+        "score": 6.621063709353255,
+        "combo_name": "combo_gwd_rayleigh"
+      },
+      {
+        "scheme": "hines",
+        "score": 6.60640229544708,
+        "combo_name": "combo_gwd_hines"
+      },
+      {
+        "scheme": "prognostic_spectral",
+        "score": 6.906436017449534,
+        "combo_name": "combo_gwd_prognostic_spectral"
+      },
+      {
+        "scheme": "none",
+        "score": 6.612191671163321,
+        "combo_name": "combo_gwd_none"
+      },
+      {
+        "scheme": "mcfarlane",
+        "score": 6.67860107284233,
+        "combo_name": "combo_baseline"
+      }
+    ],
+    "aimip_microphysics": [
+      {
+        "scheme": "kessler",
+        "score": 7.179214214094586,
+        "combo_name": "combo_micro_kessler"
+      },
+      {
+        "scheme": "seifert_beheng",
+        "score": 7.184229451556125,
+        "combo_name": "combo_micro_seifert_beheng"
+      },
+      {
+        "scheme": "morrison",
+        "score": 7.065148954141967,
+        "combo_name": "combo_micro_morrison"
+      },
+      {
+        "scheme": "thompson",
+        "score": 7.0775070216000735,
+        "combo_name": "combo_micro_thompson"
+      },
+      {
+        "scheme": "none",
+        "score": 7.36620883216154,
+        "combo_name": "combo_micro_none"
+      },
+      {
+        "scheme": "sundqvist",
+        "score": 6.67860107284233,
+        "combo_name": "combo_baseline"
+      }
+    ]
+  },
+  "winners": {
+    "aimip_convection": [
+      {
+        "scheme": "zhang_mcfarlane",
+        "score": 6.381305025936826,
+        "combo_name": "combo_conv_zhang_mcfarlane"
+      }
+    ],
+    "aimip_turbulence": [
+      {
+        "scheme": "edmf",
+        "score": 6.296870765522414,
+        "combo_name": "combo_turb_edmf"
+      }
+    ],
+    "aimip_gwd": [
+      {
+        "scheme": "hines",
+        "score": 6.60640229544708,
+        "combo_name": "combo_gwd_hines"
+      }
+    ],
+    "aimip_microphysics": [
+      {
+        "scheme": "sundqvist",
+        "score": 6.67860107284233,
+        "combo_name": "combo_baseline"
+      }
+    ]
+  }
+}

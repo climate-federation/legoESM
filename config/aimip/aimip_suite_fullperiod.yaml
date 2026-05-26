@@ -1,0 +1,12 @@
+# AIMIP full-period suite manifest -- used after the architecture
+# sweep identifies winning column_nn + sfno configs.  Variant overlays
+# will be patched in-flight to carry the best-arch overrides.
+
+base: "config/aimip/aimip_era5_fullperiod.yaml"
+
+variants:
+  - classical
+  - column_nn
+  - sfno_physics
+
+output_dir: "results/aimip_fullperiod_001"

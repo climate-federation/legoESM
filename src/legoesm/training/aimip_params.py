@@ -634,6 +634,26 @@ def make_aimip_classical_spectral_physics(
         from legoesm.atmosphere.physics.clouds.config import CloudConfig as _CC
         cloud_cfg_trained = _CC(scheme=cloud_scheme)
 
+    # ---- Spatial surface field columns (optional) ----
+    # When the trainable params bundle carries an
+    # :class:`AIMIPSpatialSurfaceParams` and a ``land_mask`` is
+    # provided, evaluate each spatial field on the Gaussian grid and
+    # flatten to (ncol,) so the column-shaped physics configs
+    # (``RRTMGPConfig``, ``GrayRadiationConfig``, ``SurfaceLayerConfig``)
+    # can accept them as broadcastable arrays.  Falls back to an
+    # empty dict when the spatial-surface mode is off — every
+    # downstream ``"<name>" in spatial_fields_col`` check then
+    # short-circuits to False, preserving the global-scalar path.
+    spatial_fields_col: dict[str, jax.Array] = {}
+    if getattr(params, "spatial_surface", None) is not None and land_mask is not None:
+        baselines = params.as_dict()
+        fields_2d = params.spatial_surface.evaluate(
+            grid, land_mask=land_mask, baselines=baselines,
+        )
+        spatial_fields_col = {
+            name: arr.reshape(-1) for name, arr in fields_2d.items()
+        }
+
     # ---- Radiation ----
     if radiation == "rrtmgp":
         rrtmgp_cfg = params.to_rrtmgp_config()
@@ -772,24 +792,75 @@ def make_aimip_classical_spectral_physics(
         microphysics=micro_cfg,
         gravity_wave_drag=gwd_cfg,
     )
-    rad_only_cfg = PhysicsConfig(
-        radiation=rad_cfg,
-        convection=ConvectionConfig(scheme="none"),
-        turbulence=TurbulenceConfig(scheme="none"),
-        microphysics=__import__(
-            "legoesm.atmosphere.physics.microphysics.config", fromlist=["MicrophysicsConfig"],
-        ).MicrophysicsConfig(scheme="none"),
-        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+
+    # Combined (legacy) path: a single callable computes every-step
+    # physics including radiation.  Returned when ``split_rad=False``
+    # so the caller can dispatch through the simple
+    # ``spectral_rollout(state, physics_fn, ...)`` branch.
+    if not split_rad:
+        combined_raw = make_physics(physics_config, model_type="spectral_pe", dt=dt)
+
+        def combined_fn(state, grid_, sigma_coord):
+            result = combined_raw(state, grid_, sigma_coord)
+            return result[0] if isinstance(result, tuple) else result
+
+        return combined_fn
+
+    # Rad-split path: separate non-radiative and radiative callables.
+    # ``spectral_rollout`` gates the rad fn via ``lax.cond`` on the
+    # scan step index so RRTMGP only fires every
+    # ``rad_update_interval_steps`` steps.
+    #
+    # NOTE on the rad branch -- the combined-physics wrapper
+    # (``make_physics`` -> ``_make_spectral_pe_combined``) does NOT
+    # forward ``sim_time_seconds`` to the inner radiation callable, so
+    # going through it would silently strip the diurnal-cycle time
+    # offset that ``spectral_rollout`` and the multi-step rollout pass
+    # in.  Call the spectral-PE radiation builder directly here so the
+    # kwarg reaches ``_make_spectral_pe_radiation._physics_fn_core``.
+    from legoesm.atmosphere.physics.microphysics.config import (
+        MicrophysicsConfig,
+    )
+    from legoesm.atmosphere.physics.radiation.integration import (
+        make_radiation_physics,
+    )
+    non_rad_cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="none"),
+        convection=conv_cfg,
+        turbulence=turb_cfg,
+        microphysics=micro_cfg,
+        gravity_wave_drag=gwd_cfg,
     )
     non_rad_raw = make_physics(non_rad_cfg, model_type="spectral_pe", dt=dt)
-    rad_only_raw = make_physics(rad_only_cfg, model_type="spectral_pe", dt=dt)
+    rad_only_raw = make_radiation_physics(rad_cfg, "spectral_pe")
 
     def non_rad_fn(state, grid_, sigma_coord):
         result = non_rad_raw(state, grid_, sigma_coord)
         return result[0] if isinstance(result, tuple) else result
 
-    def rad_fn(state, grid_, sigma_coord):
-        result = rad_only_raw(state, grid_, sigma_coord)
-        return result[0] if isinstance(result, tuple) else result
+    def rad_fn(state, grid_, sigma_coord, *, sim_time_seconds=0.0):
+        # ``make_radiation_physics`` returns the per-module physics_fn
+        # with signature
+        # ``(state, grid, sigma_coord, grid_fields=None, sim_time_seconds=0.0)``
+        # -> tendency-only.  The radiation module does not touch the
+        # tracer pytree, so its output carries ``tracers=None``; the
+        # non-rad combined wrapper attaches a tracer dict from Tiedtke
+        # + microphysics.  ``_add_phys_tendencies`` performs a
+        # tree_map that requires identical pytree structure -- so we
+        # synthesise a zero-tendency tracer dict here when the input
+        # state carries tracers, keeping the rad and non-rad
+        # tendency pytrees structurally identical.
+        rad_out = rad_only_raw(
+            state, grid_, sigma_coord, sim_time_seconds=sim_time_seconds,
+        )
+        if rad_out.tracers is None and state.tracers is not None:
+            zero_tracers = {}
+            for k, f in state.tracers.items():
+                if hasattr(f, "data") and hasattr(f, "replace"):
+                    zero_tracers[k] = f.replace(data=jnp.zeros_like(f.data))
+                else:
+                    zero_tracers[k] = jnp.zeros_like(f)
+            rad_out = rad_out._replace(tracers=zero_tracers)
+        return rad_out
 
     return non_rad_fn, rad_fn

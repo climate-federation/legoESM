@@ -1,0 +1,125 @@
+# Stage-1 baseline for the AIMIP classical physics combinatorial sweep.
+#
+# Shared across all 28 OAT (one-at-a-time) variants.  Each variant
+# overlay (``combo_<scheme>_<value>/variant_classical.yaml``) only
+# changes one of:
+#   aimip_convection, aimip_turbulence, aimip_gwd, aimip_microphysics
+# Everything else -- grid, dt, loss, optimizer, ERA5 windows, RRTMGP
+# settings -- is held fixed here so the sweep isolates the
+# parameterization choice.
+#
+# Resolution: T21 (32 lat x 64 lon, ncol = 2048), 8 levels, dt = 1200s.
+# Chosen at the user's request to rank schemes cheaply before
+# promoting winners to T106 for the final 3-way head-to-head.
+#
+# Radiation: gray Frierson two-stream held fixed across all variants.
+# RRTMGP was tried first (kept the filename "_rrtmgp" for git history)
+# but every array task TIMEOUT-ed at the 6h burst limit before
+# completing a single epoch — RRTMGP at T21 + (24,48,72)h multi-step
+# is ~10x more expensive than gray and not affordable for a 27-combo
+# OAT screen.  Switching to gray matches the proven multistep_001
+# envelope (~15-30 min/variant) and the T106 head-to-head base.yaml
+# (also gray), so the sweep ranking is consistent with downstream
+# evaluation.  Radiation is identical across all 27 combos so the
+# relative ordering of conv/turb/gwd/micro schemes is preserved.
+#
+# Loss: identical to ``aimip_era5_multistep.yaml`` -- multi-day MSE
+# (24/48/72h leads), area-weighted bias penalty, grid-space CRPS, and
+# spectral CRPS for T/u/v/q.  Per-component diagnostics surface in
+# the epoch log via ``_spectral_state_loss_components`` (training
+# loop emits ``loss=X (mse=A bias=B crps=C spec_crps=D)``).
+
+era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
+cache_dir: ".cache/aimip_era5"
+
+train_windows:
+  - [2015,   0,  3]     # 2015 Jan (winter)
+  - [2015, 180,  3]     # 2015 Jun (summer)
+  - [2016,   0,  3]     # 2016 Jan
+  - [2016, 180,  3]     # 2016 Jun
+
+eval_windows:
+  - [2017,   0,  3]     # 2017 Jan (held-out year)
+  - [2017, 180,  3]     # 2017 Jun
+
+train_year: 2015
+eval_year:  2017
+train_period: ["2015-01-01", "2016-12-31"]
+eval_period:  ["2017-01-01", "2017-12-31"]
+
+n_train_days: 12
+n_eval_days:  6
+
+aimip_grid: "gaussian"
+n_max: 21
+nlev: 8
+dt: 1200.0
+
+aimip_n_epochs: 4
+aimip_patience: 2
+aimip_min_delta: 1.0e-3
+aimip_lr: 3.0e-4
+aimip_warmup: 10
+aimip_weight_decay: 1.0e-5
+aimip_grad_clip: 1.0
+aimip_optimizer: "adamw"
+
+# Gray Frierson two-stream radiation held fixed across all combos.
+# rad_update_interval=6 dycore steps = 2h of model time at dt=1200s,
+# matching the multistep_001 envelope.
+aimip_radiation: "gray"
+aimip_rad_update_interval: 6
+
+# No spatial surface fields at T21 (basis is too coarse to resolve);
+# kept off so the sweep isolates the parameterization choice rather
+# than the spatial-field initialization noise.
+aimip_spatial_surface: false
+aimip_spatial_init_std: 0.0
+aimip_spatial_seed: 0
+aimip_spatial_lr_scale: 1.0
+
+# Default physics schemes (overridden per-variant in the OAT sweep).
+# Baseline combo "tiedtke + louis + mcfarlane + sundqvist" matches the
+# AIMIP production classical recipe.
+aimip_convection: "tiedtke"
+aimip_turbulence: "louis"
+aimip_gwd: "mcfarlane"
+aimip_microphysics: "sundqvist"
+aimip_cloud: "xu_randall"
+
+# Legacy single-step rollout (overridden by multi_step_hours in loss).
+aimip_rollout_days: 1
+aimip_rollout_hours: 6
+
+loss:
+  w_T: 1.0
+  w_u: 0.5
+  w_v: 0.5
+  w_q: 0.3
+  w_ps: 0.3
+  # Area-weighted bias penalty.
+  w_bias_T: 100.0
+  w_bias_u: 1.0
+  w_bias_v: 1.0
+  w_bias_ps: 1.0
+  # Grid-space deterministic CRPS (M=1 = area-weighted MAE).
+  w_crps_T: 0.5
+  w_crps_u: 0.25
+  w_crps_v: 0.25
+  w_crps_q: 0.5
+  w_crps_ps: 0.15
+  # Spectral-space deterministic CRPS for T/u/v/q.
+  w_spec_crps_T: 0.5
+  w_spec_crps_u: 0.25
+  w_spec_crps_v: 0.25
+  w_spec_crps_q: 0.5
+  # Multi-day autoregressive supervision (1d / 2d / 3d leads).
+  multi_step_hours: [24, 48, 72]
+  multi_step_weights: [1.0, 0.7, 0.5]
+  spectral_weight: 0.0
+  level_weighting: "pressure"
+  normalize_by_scale: true
+  T_scale: 30.0
+  wind_scale: 20.0
+  q_scale: 5.0e-3
+  ps_scale: 1000.0

@@ -1,0 +1,29 @@
+# AIMIP variant: SFNO replaces grid-space physics at T106.
+#
+# Drops embed_dim from 64 (T21 smoke) to 32 and n_blocks from 4 to
+# 2 so the SpectralConv2d weights fit on a single RTX 8000 at T106.
+# SpectralConv weights scale as embed_dim^2 * n_sh * 2; at T106
+# n_sh = (107*108)/2 = 5778, so embed_dim=64 would give
+# 64^2 * 5778 * 2 * 4 blocks = 189 M params *per spectral conv*,
+# OOM-ing at gradient init (the T63 variant comment in
+# ../variant_sfno_physics.yaml documents the same failure mode at
+# the smaller resolution).
+#
+# embed_dim=32, n_blocks=2 -> ~12 M params per spec conv, ~30 M
+# total -- fits in 24 GiB with headroom for K=4 multi-step chain
+# gradient buffers.
+
+aimip_variant: "sfno_physics"
+
+convection: "none"
+turbulence: "none"
+gravity_wave_drag: "none"
+cloud_scheme: "none"
+microphysics: "none"
+radiation: "gray"
+physics_parameterization: "none"
+
+sfno_embed_dim: 32
+sfno_n_blocks: 2
+sfno_mlp_expansion: 4
+sfno_seed: 0
