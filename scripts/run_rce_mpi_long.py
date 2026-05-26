@@ -578,9 +578,9 @@ def main():
     args = parse_args()
     if args.implicit_buoyancy and not args.semi_implicit_acoustic:
         raise SystemExit(
-            "--implicit-buoyancy requires --semi-implicit-acoustic "
-            "(the Klemp-Wilhelmson 1978 substitution lives inside "
-            "the column tridiagonal solve)."
+            "error: --implicit-buoyancy rejected: requires "
+            "--semi-implicit-acoustic (the Klemp-Wilhelmson 1978 "
+            "substitution lives inside the column tridiagonal solve)."
         )
     # iter-67/68: validate numeric CLI args reject NaN/inf with
     # concise SystemExit. iter-67 hardcoded 17 arg names; iter-68

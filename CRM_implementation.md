@@ -134,6 +134,33 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 76
+
+**Unify iter-1 --implicit-buoyancy error message + regression test.**
+
+Audit found inconsistency in SystemExit message format:
+* iter-1 added ``--implicit-buoyancy requires --semi-implicit-acoustic``
+  (no "error:" prefix, no "rejected" marker).
+* iter-65/67/70/74/75 added ``error: <flag> rejected: <reason>``
+  consistent format.
+
+iter-76 unified the iter-1 message to the same format:
+``error: --implicit-buoyancy rejected: requires
+--semi-implicit-acoustic (the Klemp-Wilhelmson 1978 substitution
+lives inside the column tridiagonal solve).``
+
+**New regression test**
+``test_plane_crm_driver_rejects_implicit_buoyancy_without_si`` —
+asserts non-zero exit + "rejected" marker + "semi-implicit-acoustic"
+in output + no Python traceback. Catches a future silent revert
+of either the validation OR the message format.
+
+**Tests**: 1/1 PASS in 4.85 s.
+
+**R-roadmap status**: R1-R8, R10, R12 ✓. F9 platform-blocked. All
+driver error messages now follow consistent ``error: <flag>
+rejected: <reason>`` format.
+
 ### 2026-05-26 — iter 75
 
 **Catch huge-dt silent-pass class (total_steps=0).**

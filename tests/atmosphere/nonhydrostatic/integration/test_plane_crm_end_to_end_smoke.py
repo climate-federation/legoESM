@@ -796,6 +796,49 @@ def test_plane_crm_driver_rejects_nan_inf_numeric_args(
     )
 
 
+def test_plane_crm_driver_rejects_implicit_buoyancy_without_si(tmp_path):
+    """iter-76: ``--implicit-buoyancy`` without
+    ``--semi-implicit-acoustic`` is invalid (KW78 substitution lives
+    inside the SI substep). iter-1 added this guard with a different
+    message style; iter-76 unified it with the iter-67+ pattern
+    (``error: <flag> rejected: <reason>``).
+
+    Catches a future silent revert that removes the validation OR
+    reverts the message format.
+    """
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    env["JAX_ENABLE_X64"] = "1"
+    cmd = [
+        sys.executable, str(DRIVER),
+        "--nx", "12", "--ny", "12", "--nlev", "20",
+        "--dx", "2000.0", "--dt", "5.0",
+        "--days", "0.0005",
+        "--no-radiation",
+        "--implicit-buoyancy",  # without --semi-implicit-acoustic
+        "--output", str(tmp_path / "rce_implicit_no_si"),
+    ]
+    result = subprocess.run(
+        cmd, env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode != 0, (
+        f"driver exited 0 with --implicit-buoyancy alone; expected "
+        f"non-zero.\nstdout: {result.stdout[-500:]}\n"
+        f"stderr: {result.stderr[-500:]}"
+    )
+    combined = result.stdout + result.stderr
+    assert "rejected" in combined and "semi-implicit-acoustic" in combined, (
+        f"driver exit message missing 'rejected' + "
+        f"'semi-implicit-acoustic'.\nstdout: {result.stdout[-500:]}\n"
+        f"stderr: {result.stderr[-500:]}"
+    )
+    assert "Traceback" not in combined, (
+        f"driver emitted Python traceback for --implicit-buoyancy "
+        f"alone; iter-76 contract: clean SystemExit.\n"
+        f"stdout: {result.stdout[-500:]}\nstderr: {result.stderr[-500:]}"
+    )
+
+
 def test_plane_crm_driver_rejects_nan_rad_interval_with_clean_exit(tmp_path):
     """iter-65: passing ``--rad-call-interval-s nan`` (without
     ``--no-radiation``) must produce a SystemExit with a concise
