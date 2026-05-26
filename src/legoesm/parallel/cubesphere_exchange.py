@@ -269,6 +269,13 @@ def _make_exchange_allgather(mesh, ndim, with_offsets=False):
     else:
         in_sp = in_sp_data
 
+    # iter-94g: build jnp tables in outer factory body (not inside
+    # shard_map body) so they're closure-captured constants. See
+    # detailed rationale in `_make_exchange_ppermute` below.
+    nbr_faces_j = jnp.asarray(_NBR_FACES)
+    nbr_edges_j = jnp.asarray(_NBR_EDGES)
+    is_reversed_j = jnp.asarray(_IS_REVERSED)
+
     @partial(shard_map, mesh=mesh, in_specs=in_sp, out_specs=out_sp,
              check_vma=False)
     def _exchange(*args):
@@ -329,12 +336,6 @@ def _make_exchange_allgather(mesh, ndim, with_offsets=False):
         if with_offsets:
             from legoesm.grids.halo import _interp_strip
 
-        # iter-93: convert np connectivity tables to jnp once per
-        # exchange call; XLA constant-folds inside the JIT body.
-        nbr_faces_j = jnp.asarray(_NBR_FACES)
-        nbr_edges_j = jnp.asarray(_NBR_EDGES)
-        is_reversed_j = jnp.asarray(_IS_REVERSED)
-
         padded_faces = []
         for i in range(n_faces_per_shard):
             global_face = my_idx * n_faces_per_shard + i
@@ -390,6 +391,12 @@ def _make_exchange_allgather_h2(mesh, ndim, with_offsets=False):
     else:
         in_sp = in_sp_data
 
+    # iter-94g: build jnp tables in outer factory body, not inside
+    # shard_map body. See _make_exchange_ppermute rationale.
+    nbr_faces_j = jnp.asarray(_NBR_FACES)
+    nbr_edges_j = jnp.asarray(_NBR_EDGES)
+    is_reversed_j = jnp.asarray(_IS_REVERSED)
+
     @partial(shard_map, mesh=mesh, in_specs=in_sp, out_specs=out_sp,
              check_vma=False)
     def _exchange(*args):
@@ -441,12 +448,6 @@ def _make_exchange_allgather_h2(mesh, ndim, with_offsets=False):
         my_idx = jax.lax.axis_index("face")
         if with_offsets:
             from legoesm.grids.halo import _interp_strip
-
-        # iter-93: convert np connectivity tables to jnp once per
-        # exchange call; XLA constant-folds inside the JIT body.
-        nbr_faces_j = jnp.asarray(_NBR_FACES)
-        nbr_edges_j = jnp.asarray(_NBR_EDGES)
-        is_reversed_j = jnp.asarray(_IS_REVERSED)
 
         padded_faces = []
         for i in range(n_faces_per_shard):
@@ -509,6 +510,22 @@ def _make_exchange_ppermute(mesh, ndim, with_offsets=False):
     else:
         in_sp = in_sp_data
 
+    # iter-94g: build the jnp tables HERE (in the outer factory
+    # body, outside the shard_map decorator), so they are regular
+    # jax.Array constants captured by reference in the shard_map
+    # closure — same semantics as the pre-iter-93b module-top
+    # jnp.array. Building them INSIDE the shard_map body (iter-94d
+    # initial attempt) caused JAX/XLA to behave differently under
+    # multi-device emulation (10x worse numerical drift on 6-device
+    # cubed-sphere SPMD tests vs. pre-iter-93b baseline). The
+    # outer-scope construction runs ONCE per factory call (when
+    # `_make_exchange_ppermute` is called from
+    # `activate_spmd_halo_backend`), which is after
+    # `ensure_metal_or_fallback()` has run — so no Metal crash.
+    ppermute_send_j = jnp.asarray(_PPERMUTE_SEND)
+    ppermute_recv_j = jnp.asarray(_PPERMUTE_RECV)
+    ppermute_rev_j = jnp.asarray(_PPERMUTE_REV)
+
     @partial(shard_map, mesh=mesh, in_specs=in_sp, out_specs=out_sp,
              check_vma=False)
     def _exchange(*args):
@@ -538,13 +555,6 @@ def _make_exchange_ppermute(mesh, ndim, with_offsets=False):
         halo_strips = [None, None, None, None]
         if with_offsets:
             from legoesm.grids.halo import _interp_strip
-
-        # iter-94d: convert ppermute tables to jnp once per exchange
-        # call; XLA constant-folds inside the JIT body. Same pattern
-        # as iter-93b for the connectivity tables.
-        ppermute_send_j = jnp.asarray(_PPERMUTE_SEND)
-        ppermute_recv_j = jnp.asarray(_PPERMUTE_RECV)
-        ppermute_rev_j = jnp.asarray(_PPERMUTE_REV)
 
         for r in range(4):
             send_edge = ppermute_send_j[r, my_idx]   # traced int
