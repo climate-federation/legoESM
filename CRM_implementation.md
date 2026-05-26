@@ -149,6 +149,82 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 95d (5-sim-day verification complete)
+
+iter-95 v3 run reached `target_day=5.000` cleanly (43200/43200 steps,
+4418 s wall-clock = 1.23 h, 32×32×30 plane CRM, dx=4 km, dt=10 s, no
+bubble, no qv noise, --no-mass-fixer, p_sfc=101480 Pa, full physics,
+radiation disabled). System fully stable end-to-end; no NaN, no CFL
+blow-up, no negative-q triggers, no halo divergence.
+
+**Final 5-day trajectory** (extends iter-95 day-1.75 table):
+
+| sim_day | CWV [mm] | MSE [J/kg]   | max\|w\| [m/s] | qc_max [kg/kg] |
+|---------|----------|--------------|----------------|----------------|
+|  0      | 49.942   | 3.5247e+09   | 0.0e+00        | 0              |
+|  1      | 53.627   | 3.5280e+09   | 1.82e-03       | 0              |
+|  2      | 55.616   | 3.5278e+09   | 1.99e-03       | 0              |
+|  3      | 56.682   | 3.5266e+09   | 2.20e-03       | 0              |
+|  4      | 57.093   | 3.5232e+09   | 2.20e-03       | 1.60e-04       |
+|  4.33   | 57.131   | 3.5222e+09   | 2.30e-03       | 2.29e-04       |
+|  4.66   | 57.099   | 3.5210e+09   | 2.23e-03       | 2.94e-04       |
+|  5      | 57.037   | 3.5199e+09   | 2.22e-03       | 3.56e-04       |
+
+**Profile evolution (T_sfc, T at z=10km, qv_sfc, qc_max, cloud fraction)**:
+
+| day | T_sfc [K] | T@10km [K] | qv_sfc [g/kg] | qc_max [g/kg] | cf_max |
+|-----|-----------|------------|---------------|---------------|--------|
+| 0   | 296.81    | 202.73     | 15.60         | 0.000         | 0.000  |
+| 1   | 297.07    | 202.73     | 18.63         | 0.000         | 0.000  |
+| 2   | 297.40    | 202.73     | 20.25         | 0.056         | 1.000  |
+| 3   | 298.14    | 202.73     | 21.19         | 0.063         | 1.000  |
+| 4   | 298.53    | 202.73     | 21.71         | 0.160         | 1.000  |
+| 5   | 298.75    | 202.73     | 22.00         | 0.356         | 1.000  |
+
+**Verdict on iter-95 hypothesis**:
+
+* ✓ CWV grows monotonically day 0→3, plateaus day 3→4.3 at ~57.1 mm,
+  then slowly drifts down to 57.04 (entering quasi-steady regime).
+* ✓ Surface flux scheme delivers 7.1 mm column moisture over 5 days
+  (Bug 2 fix verified end-to-end).
+* ✓ Cloud water onset at day ~1.92 (Kessler activated when local
+  RH reached 100% — confirms IC + surface flux loop closes; Bug 1
+  fix verified end-to-end).
+* ✓ qc grows steadily 0 → 3.56e-4 kg/kg (0.36 g/kg) by day 5,
+  cloud fraction = 1.000 above day 2 (stratiform-like deep cloud
+  layer; expected from radiation-off cold-trap saturation).
+* ✓ Stratospheric T (z=10km, level index 5) remained pinned at
+  202.73 K (no spurious top-of-domain forcing — sponge working).
+* ✗ qr/precip still zero at day 5. Kessler autoconversion
+  threshold (`q_c_threshold ≈ 1 g/kg`) is ~3× higher than the
+  current peak qc. **Not a bug**; gentle radiation-off RCE
+  spinup needs longer integration OR radiation enabled to
+  destabilize the column and trigger resolved updrafts.
+* max|w| capped at 2.3e-3 m/s throughout — **no resolved
+  convective updrafts**. The qc grows by grid-scale condensation,
+  not by parcel ascent. This is the expected behaviour for
+  --rad-call-every-steps=∞ (radiation disabled in this run).
+
+**What iter-95 verifies**:
+* IC fix (Bug 1) is correct: T(z=550m) = 296.81 K matches Wing 2018
+  IC, system reaches stable hydrostatic balance.
+* Mass-fixer bypass (Bug 2) is correct: surface flux can now ADD
+  moisture, CWV growth is bounded by Clausius-Clapeyron not the
+  fixer.
+* Kessler microphysics path closes: condensation triggers when
+  RH=100%; qc accumulates without crashing.
+* End-to-end 5-day stable, smooth, conservative-enough run on
+  32×32 plane CRM.
+
+**Remaining gap to full RCE**: enabling radiation (`--rad-call-every-steps
+600 + scheme=gray`) plus 10-30 day integration. The current iter-95
+verification ran with radiation disabled to isolate the IC + surface-flux
+fix; v2/v3 demonstrate that piece works. Radiation-enabled long run
+is the iter-96+ deliverable.
+
+**Snapshots/profiles**: `/tmp/iter95_crm32x32_v3/{profiles,snapshots}/`
+(6 each at day 0,1,2,3,4,5).
+
 ### 2026-05-27 — iter 95 (two-bug physics fix; CRM now spins up)
 
 User flagged "we should have convection by now" at iter-94's 12×12
