@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 # 30-day RCE @ 132x132, dx=2 km, 12 MPI ranks, full physics.
+#
+# Default outer dt: 5.0 s. F10 finding (2026-05 iter-9): bare-dycore
+# stable at dt up to 10 s with the clean F8 IC (no bubble, no qv
+# noise). Full-physics smoke at dt=5 s ran 864 steps stably. This
+# replaces the iter-2 conservative 1 s default that was set based
+# on the bubble-driven F1 instability — fixed by F7 (bubble made
+# opt-in).
 # Hourly 3D MSE/qv/T snapshots for GIF, daily surface snapshots, 5-day profiles.
 #
 # Stability constraints (measured by scripts/diag_bare_dycore_stability.py
@@ -37,7 +44,7 @@ cd "$REPO_ROOT"
 OUTPUT="${1:-results/rce_30day}"
 DAYS="${DAYS:-30}"
 RANKS="${RANKS:-12}"
-DT="${DT:-1.0}"
+DT="${DT:-5.0}"
 NX="${NX:-132}"
 NY="${NY:-132}"
 N_ACOUSTIC="${N_ACOUSTIC:-24}"

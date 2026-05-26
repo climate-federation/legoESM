@@ -222,6 +222,55 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 9
+
+**5-day cross-grid + 10-day voronoi: PASS**
+
+| grid          | days | mean_T_sfc | mean_T | mean_precip | mean_CWV | max\|v\| |
+|---------------|------|------------|--------|-------------|----------|----------|
+| cubed_sphere  |  5   | 299.98     | 273.90 | 2.22 mm/day | 47.1 mm  | 3.7 m/s  |
+| latlon        |  5   | 299.87     | 273.89 | -           | -        | 9.0 m/s  |
+| gaussian      |  5   | 299.88     | 273.89 | -           | -        | 8.9 m/s  |
+| voronoi       |  5   | 300.00     | 273.83 | -           | -        | 4.0 m/s  |
+| voronoi       | 10   | 300.15     | 270.72 | 3.47 mm/day | 54.3 mm  | 3.8 m/s  |
+
+All 4 grids show real RCE evolution: mean_T drops 5K over 5 days from
+278.6 → 273.9 (radiative cooling), CWV grows 27 → 47 mm (moistening),
+precipitation spins up from 0.09 → 2.2 mm/day, slab-ocean SST stays
+within 0.15 K of IC. Voronoi confirmed stable through 10 days too.
+**R10 done at 5-day production-scale + 10-day voronoi single-grid.**
+
+**F10 finding — production dt was over-conservative by 5×**
+
+iter-2 set production dt=1 s based on the F1 stability ladder which
+measured **with the bubble IC**. With the F8-stable config (no bubble,
+no qv noise) the bare-dycore stability boundary is much higher:
+
+| dt [s] | bare-dycore max\|w\| @ step 100 |
+|--------|---------------------------------|
+| 2.0    | 1.0e-13 (bit-stable)            |
+| 5.0    | 6.2e-15 (bit-stable)            |
+| 10.0   | 1.9e-15 (bit-stable)            |
+
+Full-physics smoke at dt=5 s, 24×24×30, 864 steps (= 1.2 h sim) —
+max\|w\| stays at 6.2e-3 m/s, MSE drift < 2e-4 relative, CWV pinned
+at 55.55 mm. The 1-s default was leaving a 5× speedup on the table.
+
+**Changes**
+* `scripts/run_rce_mpi_long.py`: `--dt` default 1.0 → 5.0 s.
+* `scripts/run_rce_30day.sh`: `DT` default 1.0 → 5.0 s (with header
+  block citing F10).
+
+**Net effect on production**: 30-day run wall budget at the F8-stable
+config drops from ~5 days → ~1 day on a single CPU node (M5 Pro
+extrapolation: 0.5 s/step × 5.18M steps at dt=5 s = 30 days at
+~10× cost reduction vs the 1-s default).
+
+**R-roadmap status**: R1-R8, R10 ✓. R9 (KW78 outer-step) **no longer
+on the critical path** — F10 lifted the dt constraint without R9.
+R6 ✓. Remaining work: real MPI scaling numbers (F9 stack pin) +
+end-to-end 30-day production run with USE_DD=1.
+
 ### 2026-05-26 — iter 8
 
 **R10 completion bootstrap — voronoi RCE fixed**

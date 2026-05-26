@@ -129,13 +129,17 @@ def parse_args():
     p.add_argument("--ny", type=int, default=132)
     p.add_argument("--nlev", type=int, default=30)
     p.add_argument("--dx", type=float, default=2_000.0)
-    p.add_argument("--dt", type=float, default=1.0,
-                   help="Outer dt [s]. Bare-dycore stability bound at "
-                        "dx=2 km, nlev=30, H=33 km is dt ≤ ~1.0 s "
-                        "(see CRM_implementation.md F1). Production "
-                        "default kept conservative at 1.0 s until the "
-                        "outer-step KW78 implicit buoyancy (R9) lifts "
-                        "the constraint.")
+    p.add_argument("--dt", type=float, default=5.0,
+                   help="Outer dt [s]. Bare-dycore stability bound is "
+                        "BUBBLE-dependent: with the legacy 0.5 K warm "
+                        "bubble at z<1 km (F1) dt was limited to ≤1 s; "
+                        "with the F8/F10 clean Wing IC (no bubble + no "
+                        "qv noise) dt=10 s is bit-stable bare-dycore + "
+                        "dt=5 s is stable through 864 steps of full "
+                        "physics (smoke iter-9, 2026-05). Production "
+                        "default set to 5 s — 5× speedup of every "
+                        "30-day run vs the iter-2 conservative 1 s "
+                        "default.")
     p.add_argument("--days", type=float, default=100.0)
     p.add_argument("--H", type=float, default=33_000.0,
                    help="Model top [m]. RCEMIP1 33 km.")
