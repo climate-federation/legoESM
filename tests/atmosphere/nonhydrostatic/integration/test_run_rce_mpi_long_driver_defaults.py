@@ -154,6 +154,32 @@ def test_rad_call_interval_default(driver_defaults):
     assert driver_defaults["--no-radiation"] is False
 
 
+def test_no_mass_fixer_default(driver_defaults):
+    """iter-95 added --no-mass-fixer to disable
+    fix_moist_mass_plane{,_mpi}. Default MUST stay False so that:
+
+    * Gravity-wave / hydrostatic smokes (where total water IS
+      conserved) keep the legacy fixer to catch mass drift bugs.
+    * Existing 30-day production runs are unaffected (backward-
+      compat).
+    * RCE spinup callers must explicitly opt-in via the flag —
+      otherwise iter-95 Bug 2 returns (surface flux is removed
+      every step → CWV pinned at IC → no convection).
+
+    If someone silently flips this to True ``default=True``,
+    every existing wave-mode regression that relies on the fixer
+    would start drifting.
+    """
+    assert driver_defaults["--no-mass-fixer"] is False, (
+        f"--no-mass-fixer default = "
+        f"{driver_defaults['--no-mass-fixer']!r}, expected False. "
+        f"Flipping the default to True breaks every existing "
+        f"gravity-wave / hydrostatic smoke that asserts total "
+        f"water is conserved. iter-95 added the flag as an "
+        f"opt-in for RCE spinup, not as the new default."
+    )
+
+
 def test_use_dd_default(driver_defaults):
     """iter-5 added --use-dd; default False keeps the legacy
     rank-0-broadcast F8-stable path as the canonical entry."""
