@@ -142,53 +142,18 @@ def main():
 
     N = args.resolution
     NLEV = args.nlev
-    # Auto-dt heuristic. Stability bounds measured in the
-    # iter-12/iter-13/iter-20 cross-grid sweeps:
-    #   voronoi/MPAS V4:  dt=300 PASS (30-day, max|v|=2.3 m/s)
-    #                     dt>=450 BLOWUP at day 1
-    #   cubed_sphere C24: dt=600 PASS (30-day, max|v|=7.2 m/s)
-    #   cubed_sphere C48: dt=300 BLOWUP (max|v|=236 m/s by day 25)
-    #                     dt=150 PASS (verified iter-13/15, 30-day)
-    #   cubed_sphere C96: dt=75 BLOWUP at day 20 (max|v|=527 m/s) iter-20
-    #                     dt=37 PASS only at C96 10-day partial (iter-20)
-    #   gaussian T21:     dt=600 PASS
-    # Inverse-square-N scaling: dt drops faster than linearly past
-    # the C48 boundary because higher-resolution dycores resolve more
-    # synoptic wave activity that exponentially demands tighter CFL.
-    # Voronoi capped at 300 (MPAS dycore has its own CFL profile at
-    # the floor).
-    #
-    # Codex iter-21 HIGH: previously the N>96 branch silently picked
-    # dt=20, which is purely extrapolated with no empirical backing
-    # (iter-20 confirmed iter-13's similar dt=75 N>48 extrapolation
-    # was over-loose, BLOWUP at C96 day 20). Refuse N>96 without
-    # explicit --dt so future high-resolution runs surface the
-    # missing measurement instead of crashing days later.
+    # Auto-dt ladder lives in legoesm.driver.rce_dt (iter-24: was
+    # inline here through iter-21 but Codex iter-19 LOW asked for an
+    # importable function so the test mirror in
+    # test_rce_cross_grid_dt_defaults.py can call the SAME logic
+    # instead of hand-copying it). See CRM_implementation.md
+    # iter-12..23 for the per-tier empirical measurements; the
+    # function raises for N>96 to refuse silent extrapolation.
+    from legoesm.driver.rce_dt import auto_dt_rce
     if args.dt is not None:
         DT = args.dt
-    elif args.grid_type == "voronoi":
-        DT = 300.0
-    elif N <= 24:
-        DT = 600.0
-    elif N <= 48:
-        DT = 150.0
-    elif N <= 72:
-        DT = 75.0   # iter-13 extrapolation; verified ONLY at N=49 (C48
-                    # is the largest measured N); long-run stability at
-                    # N=56..72 NOT YET MEASURED — track in iter-21+.
-    elif N <= 96:
-        DT = 37.0   # iter-20 C96 10-day at dt=37 passed day 4; full
-                    # 10-day + 30-day still in flight. Not yet
-                    # confirmed for 30-day production.
     else:
-        raise ValueError(
-            f"auto-dt has no validated value for N={N} (>96). The "
-            "iter-13/iter-20 ladder past N=48 was already shown to "
-            "over-extrapolate (C96 BLOWUP at iter-13 dt=75). To run "
-            f"at N={N}, pass an explicit --dt (start with dt=10 and "
-            "watch the BLOWUP gate at 200 m/s), then update the "
-            "ladder + tests after a 30-day stability measurement."
-        )
+        DT = auto_dt_rce(args.grid_type, N)
     OUTPUT_DIR = Path(args.output or f"results/rce_{args.mode}")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 

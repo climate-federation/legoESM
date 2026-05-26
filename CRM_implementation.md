@@ -222,6 +222,48 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 24
+
+**Refactor: auto-dt extracted to `legoesm.driver.rce_dt.auto_dt_rce`**
+
+Codex iter-19 LOW finding: the test mirror ``_auto_dt`` in
+``test_rce_cross_grid_dt_defaults.py`` was a hand-copy of the
+production ladder in ``scripts/run_rce.py``. A future change to the
+production logic that landed without updating the mirror would
+silently let the mirror lie about the production contract.
+
+iter-24 fixes this by extracting the ladder into a new module:
+
+* ``src/legoesm/driver/rce_dt.py`` (NEW): single-source-of-truth
+  ``auto_dt_rce(grid_type, resolution) -> float`` function with
+  the full empirical-lineage docstring referencing iter-12/13/15/
+  20/21/22 measurements. Raises for N>96.
+* ``scripts/run_rce.py``: now does
+  ``from legoesm.driver.rce_dt import auto_dt_rce`` + calls it,
+  instead of inlining the if/elif ladder.
+* ``tests/atmosphere/hydrostatic/test_rce_cross_grid_dt_defaults.py``:
+  imports the production function directly. No more mirror.
+  Test rewritten end-to-end to exercise every ladder branch
+  + the override path + the iter-21 ValueError contract +
+  a sanity check that `run_rce.py` still calls
+  ``auto_dt_rce``.
+
+**Verified end-to-end**:
+* `pytest tests/atmosphere/hydrostatic/test_rce_cross_grid_dt_defaults.py`:
+  6/6 PASS in 1.1 s.
+* `run_rce.py --resolution 24`: still produces "CFL advisory:
+  dx_min=240753 m, gravity-wave dt_max=454 s, using DT=600 s
+  (1.32× formula)" → confirms ladder still routes through
+  ``auto_dt_rce``.
+* `run_rce.py --resolution 192`: still raises the iter-21 N>96
+  ValueError with the full caller-pointer message.
+
+**C72 30-day** progress (still running): day 25 PASS at
+mean_T_sfc=299.85, max\|v\|=16.24 m/s. Day 30 still pending.
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-24 auto-dt
+de-duplication), R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 23
 
 **CFL formula advisory landed (Codex iter-21 MEDIUM #2)**
