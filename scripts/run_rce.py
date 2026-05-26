@@ -234,6 +234,41 @@ def main():
         if DT > _dt_max_pole:
             DT = _dt_max_pole
 
+    # CFL-formula advisory (Codex iter-21 MEDIUM #2 — does not
+    # override the ladder, just surfaces the formula bound so
+    # operators see the headroom they're running on).
+    try:
+        from legoesm.core.cfl import (
+            cfl_max_dt, estimate_min_dx_cubed_sphere,
+            estimate_min_dx_gaussian, estimate_min_dx_icosahedral,
+            estimate_min_dx_latlon,
+        )
+        if grid_type == "cubed_sphere":
+            _dx_min = estimate_min_dx_cubed_sphere(N)
+        elif grid_type == "latlon":
+            _dx_min = estimate_min_dx_latlon(N)
+        elif grid_type == "gaussian":
+            _dx_min = estimate_min_dx_gaussian(N)
+        elif grid_type == "voronoi":
+            _dx_min = estimate_min_dx_icosahedral(N)
+        else:
+            _dx_min = None
+        if _dx_min is not None:
+            # Pure gravity-wave CFL with safety 0.8. The iter-13..22
+            # ladder measurements always picked dt ≤ 1.32× this
+            # formula (C24 dt=600 vs CFL=454s = 1.32×); the empirical
+            # mode that destabilises is slower-wave + synoptic-noise
+            # driven, not gravity-wave CFL, so the formula is a
+            # loose upper bound. The print is informational.
+            _dt_cfl_gravity = float(cfl_max_dt(_dx_min, 300.0, 0.8, ndim=2))
+            print(
+                f"  CFL advisory: dx_min={_dx_min:.0f} m, "
+                f"gravity-wave dt_max={_dt_cfl_gravity:.0f} s, "
+                f"using DT={DT:.0f} s ({DT/_dt_cfl_gravity:.2f}× formula)."
+            )
+    except Exception as _exc:
+        print(f"  CFL advisory unavailable ({_exc!r}); skipping.")
+
     config = ExperimentConfig(
         grid=GridConfig(grid_type=grid_type, resolution=N, nlev=NLEV),
         dycore=DycoreConfig(discretization=discretization, dt=DT),

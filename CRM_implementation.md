@@ -222,6 +222,37 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 23
+
+**CFL formula advisory landed (Codex iter-21 MEDIUM #2)**
+
+Codex iter-21 flagged that `src/legoesm/core/cfl.py` ships a working
+``cfl_max_dt`` + ``estimate_min_dx_*`` API but `scripts/run_rce.py`
+only uses it for the latlon pole-cell clamp, not for cubed-sphere
+ladder selection. iter-23 wires an **advisory print** that shows
+the gravity-wave CFL bound alongside the chosen ladder dt:
+
+| N  | ladder dt | gravity-CFL formula | ratio |
+|----|-----------|---------------------|-------|
+| 24 | 600 s     | 454 s               | 1.32× |
+| 48 | 150 s     | 227 s               | 0.66× |
+| 72 | 75 s      | 151 s               | 0.50× |
+| 96 | 37 s      | 113 s               | 0.33× |
+
+The ladder picks values **below** the gravity-wave CFL at C48+ but
+**above** at C24. The destabilising mode is NOT gravity-wave CFL
+— iter-13 C48 dt=300 was at 1.32× ratio (same as PASS C24!) and
+BLEW UP. So the formula is informational only; the explicit ladder
+stays. Removed the earlier "DT > 3× formula" NOTE since it would
+never fire at current ladder values.
+
+**C72 30-day still running** (138 min CPU as of commit time; day 20
+PASS at mean_T_sfc=299.88, max\|v\|=14.48 m/s). Day 25/30 will land
+later.
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-22 high-N empirical
+extension + iter-23 CFL advisory wiring), R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 22
 
 **Validating the iter-21 ladder at the never-measured N=72 boundary**
