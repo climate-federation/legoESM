@@ -131,6 +131,44 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 51
+
+**Closed the last 30-day production-scale empirical gaps for the
+hydrostatic family — LL32 + T21 nightly regressions landed.**
+
+iter-12 measured the full cross-grid 30-day cohort but only C48/C72/V4 had nightly regression backing post-iter-50. LL32 (latlon C-grid, pole-clamped dt=81.844 s) and T21 (gaussian spectral, dt=600 s) had only 2-day smokes — same silent-pass risk iter-44/46 fixed for C48/C72.
+
+**New tests** (``tests/atmosphere/hydrostatic/test_rce_cross_grid_smoke.py``):
+
+* ``test_latlon_ll32_30day_nightly_validation``:
+  - dt assertion: ``_assert_dt_used(81.844, abs_tol=1e-2)``.
+  - peak max\|v\| cap=20.0 (1.8× iter-12 measured 11.19 m/s).
+  - temp_tol=1.0 (iter-12 Δ=+0.09 K → ample headroom).
+* ``test_gaussian_t21_30day_nightly_validation``:
+  - dt assertion: ``_assert_dt_used(600.0)`` (strict ==).
+  - peak max\|v\| cap=20.0 (2.4× iter-12 measured 8.43 m/s).
+  - temp_tol=1.0 (iter-12 Δ=+0.13 K → ample headroom).
+
+**Helper extension**: ``_assert_dt_used`` now takes an optional
+``abs_tol`` parameter (default None → strict ``==``). Needed for LL32
+where the pole-cell CFL clamp produces a non-integer dt
+(81.84408841999117 confirmed via probe run). Ladder values
+600/300/150/75/37 remain strict ``==``.
+
+**Codex iter-51**: 0 HIGH, 0 MEDIUM, 1 LOW. Original abs_tol=0.5
+was too loose — would accept an inadvertent ``round(dt)``
+silently. Fixed: abs_tol=1e-2 (catches a rounding/scaling
+regression while absorbing cross-platform double-precision drift).
+
+**R-roadmap status**: R1-R8, R10 ✓ (iter-51 closes the LAST
+30-day production-scale empirical gap for the hydrostatic
+cross-grid family — all 4 grid types {C48/C72, V4, LL32, T21}
+now have 30-day nightly regression backing; C96 stays at 2-day
+nightly per iter-22 wall-time decision), R6 ✓. F9 platform-blocked.
+
+Slow nightly count: was 7, now 9. 30-day production-scale
+empirical gates: C48, C72, V4, LL32, T21.
+
 ### 2026-05-26 — iter 50
 
 **V4 (voronoi/MPAS) 30-day nightly slow regression landed.**

@@ -121,7 +121,7 @@ def _assert_rce_pass(out_dir, label, temp_tol=1.0, max_v_cap=50.0):
     )
 
 
-def _assert_dt_used(out_dir, label, expected_dt):
+def _assert_dt_used(out_dir, label, expected_dt, abs_tol=None):
     """Pin the dt actually used in ``results.txt`` against the
     iter-13/26 ladder. Catches a silent auto_dt_rce ladder drift
     that would still pass the wider envelope checks.
@@ -129,6 +129,16 @@ def _assert_dt_used(out_dir, label, expected_dt):
     iter-46: factored out of the iter-44 C72 nightly so the same
     pattern can be applied to C48 + future N-day nightly tests
     without duplication.
+
+    iter-51: added optional ``abs_tol`` for grids where the
+    effective dt is post-clamped by another rule (latlon pole-cell
+    CFL clamp uses ``pole_cell_dx(grid)`` + ``cfl_max_dt`` which
+    returns a non-integer-divisible value depending on grid math —
+    LL32 lands at ~81.844 s, not the ladder's 150 s). ``abs_tol``
+    means "this dt should match the documented pin within this
+    absolute tolerance"; ``None`` (default) means strict ``==``
+    (suitable for the ladder values 600/300/150/75/37 which are
+    integer-clean).
     """
     results_txt = out_dir / "results.txt"
     fields = _parse_results(out_dir)
@@ -136,10 +146,16 @@ def _assert_dt_used(out_dir, label, expected_dt):
         f"{label}: did not produce results.txt at {results_txt}"
     )
     dt_used = float(fields.get("dt", "nan"))
-    assert dt_used == expected_dt, (
-        f"{label}: dt={dt_used} != {expected_dt} (the iter-13/26 "
-        f"ladder branch this test pins). ``auto_dt_rce`` may have "
-        f"drifted; update the ladder + this test together. "
+    if abs_tol is None:
+        ok = dt_used == expected_dt
+    else:
+        ok = abs(dt_used - expected_dt) <= abs_tol
+    assert ok, (
+        f"{label}: dt={dt_used} != {expected_dt}"
+        f"{f' ± {abs_tol}' if abs_tol is not None else ''} "
+        f"(the iter-13/26 ladder branch / post-clamp this test "
+        f"pins). ``auto_dt_rce`` or the pole-cell-CFL clamp may "
+        f"have drifted; update the ladder + this test together. "
         f"Source: {results_txt}"
     )
 
@@ -552,4 +568,109 @@ def test_voronoi_v4_30day_nightly_validation(tmp_path):
     # cushion, robust to run-to-run variance on MPAS).
     _assert_rce_pass(
         out_dir, label="V4 30-day", temp_tol=1.5, max_v_cap=10.0,
+    )
+
+
+@pytest.mark.slow
+def test_latlon_ll32_30day_nightly_validation(tmp_path):
+    """SLOW nightly test (~3 min wall): runs LL32 (latlon C-grid)
+    RCE for 30 days at the iter-12 measurement and asserts the
+    PASS envelope.
+
+    iter-12 measured:
+        dt                = 81.844 s (auto-dt-ladder 150 post-clamped
+                            via pole_cell_dx + cfl_max_dt; cfl=0.8)
+        final mean_T_sfc  = 300.09 K (+0.09 from IC = 300.0 K)
+        max\\|v\\|        = 11.19 m/s
+        wall              = 179 s
+
+    Until iter-51 the LL32 dt=82 contract had **no 30-day CI
+    backing** — only the 2-day LL16 smoke gated latlon regressions
+    (and LL16 dt=600 is the ladder branch, not the post-clamp).
+
+    Uses ``_assert_dt_used(..., abs_tol=1e-2)`` because the
+    pole-cell CFL clamp produces a non-integer value (81.844 s)
+    that depends on the pole_cell_dx computation. abs_tol=1e-2
+    is tight enough to catch a rounding/scaling regression yet
+    loose enough to absorb cross-platform double-precision drift
+    (Codex iter-51 LOW fix: original 0.5 was too loose — would
+    accept an inadvertent ``round(dt)`` to 82.0 silently).
+
+    Skipped by default. Run nightly via:
+        pytest -m slow tests/atmosphere/hydrostatic/
+
+    Wall budget ~3 min on M5 Pro. timeout_s=1800 (10x cushion).
+    """
+    out_dir = tmp_path / "ll32_30d"
+    result = _run_rce(
+        grid_type="latlon",
+        discretization="latlon_cgrid",
+        resolution=32,
+        days=30,
+        output_dir=out_dir,
+        timeout_s=1800,
+    )
+    if result.returncode != 0:
+        pytest.fail(
+            f"LL32 30-day failed: rc={result.returncode}"
+            f"\nstdout tail:\n{result.stdout[-2000:]}"
+            f"\nstderr tail:\n{result.stderr[-1000:]}"
+        )
+    # Pin the post-clamped dt within 1e-2 of the iter-12 measurement
+    # (Codex iter-51 LOW fix: 0.5 was too loose; pole_cell_dx +
+    # cfl_max_dt is deterministic float math so 1e-2 absorbs only
+    # cross-platform double-precision drift).
+    _assert_dt_used(
+        out_dir, label="LL32 30-day", expected_dt=81.844, abs_tol=1e-2,
+    )
+    # iter-12 peak max|v|=11.19 m/s. Cap 20.0 = 1.8x cushion;
+    # latlon C-grid with pole clamp is steadier than cubed-sphere
+    # at the same resolution but more lively than MPAS.
+    _assert_max_wind_peak_below(out_dir, label="LL32 30-day", cap=20.0)
+    # iter-12 mean_T_sfc=300.09 (Δ=+0.09). temp_tol=1.0 gives
+    # ample headroom.
+    _assert_rce_pass(
+        out_dir, label="LL32 30-day", temp_tol=1.0, max_v_cap=20.0,
+    )
+
+
+@pytest.mark.slow
+def test_gaussian_t21_30day_nightly_validation(tmp_path):
+    """SLOW nightly test (~2 min wall): runs T21 (gaussian/spectral)
+    RCE for 30 days at the iter-12 auto-dt=600 measurement.
+
+    iter-12 measured:
+        dt                = 600 s
+        final mean_T_sfc  = 300.13 K (+0.13 from IC = 300.0 K)
+        max\\|v\\|        = 8.43 m/s
+        wall              = 113 s
+
+    Until iter-51 the T21 dt=600 contract had no 30-day CI
+    backing — only the 2-day T21 smoke gated gaussian/spectral
+    regressions.
+
+    Wall budget ~2 min on M5 Pro. timeout_s=1800 (15x cushion).
+    """
+    out_dir = tmp_path / "t21_30d"
+    result = _run_rce(
+        grid_type="gaussian",
+        discretization="spectral",
+        resolution=21,
+        days=30,
+        output_dir=out_dir,
+        timeout_s=1800,
+    )
+    if result.returncode != 0:
+        pytest.fail(
+            f"T21 30-day failed: rc={result.returncode}"
+            f"\nstdout tail:\n{result.stdout[-2000:]}"
+            f"\nstderr tail:\n{result.stderr[-1000:]}"
+        )
+    _assert_dt_used(out_dir, label="T21 30-day", expected_dt=600.0)
+    # iter-12 peak max|v|=8.43 m/s. Cap 20.0 = 2.4x cushion.
+    _assert_max_wind_peak_below(out_dir, label="T21 30-day", cap=20.0)
+    # iter-12 mean_T_sfc=300.13 (Δ=+0.13). temp_tol=1.0 gives ample
+    # headroom for the spectral path's run-to-run variance.
+    _assert_rce_pass(
+        out_dir, label="T21 30-day", temp_tol=1.0, max_v_cap=20.0,
     )
