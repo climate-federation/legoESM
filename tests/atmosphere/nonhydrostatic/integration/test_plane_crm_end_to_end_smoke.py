@@ -709,6 +709,55 @@ def test_plane_crm_production_scale_132x132_with_radiation(tmp_path):
     )
 
 
+def test_plane_crm_driver_rejects_nan_rad_interval_with_clean_exit(tmp_path):
+    """iter-65: passing ``--rad-call-interval-s nan`` (without
+    ``--no-radiation``) must produce a SystemExit with a concise
+    CLI-style error message + non-zero exit code, NOT a raw
+    Python traceback.
+
+    iter-43 physics_schedule.radiation_call_every_steps rejects
+    NaN/inf with ``ValueError``. iter-55 added --no-radiation that
+    skips the helper. Codex iter-55 LOW#2 noted the ValueError
+    still propagates as raw traceback when radiation is enabled.
+    iter-65 wraps it in SystemExit.
+
+    Fast — argparse + import + ValueError fires before any compute.
+    """
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    env["JAX_ENABLE_X64"] = "1"
+    cmd = [
+        sys.executable, str(DRIVER),
+        "--nx", "12", "--ny", "12", "--nlev", "20",
+        "--dx", "2000.0", "--dt", "5.0",
+        "--days", "0.0005",
+        "--rad-call-interval-s", "nan",
+        "--output", str(tmp_path / "rce_nan"),
+    ]
+    result = subprocess.run(
+        cmd, env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode != 0, (
+        f"driver exited 0 with --rad-call-interval-s=nan; expected "
+        f"non-zero (NaN must be rejected loudly).\n"
+        f"stdout: {result.stdout[-500:]}\n"
+        f"stderr: {result.stderr[-500:]}"
+    )
+    combined = result.stdout + result.stderr
+    assert "rejected" in combined, (
+        f"driver exit message missing 'rejected' marker. iter-65 "
+        f"contract: ``error: --rad-call-interval-s rejected: ...``\n"
+        f"stdout: {result.stdout[-500:]}\n"
+        f"stderr: {result.stderr[-500:]}"
+    )
+    assert "Traceback" not in combined, (
+        f"driver emitted a raw Python traceback for nan input. "
+        f"iter-65 contract: catch ValueError → SystemExit.\n"
+        f"stdout: {result.stdout[-500:]}\n"
+        f"stderr: {result.stderr[-500:]}"
+    )
+
+
 @pytest.mark.slow
 def test_plane_crm_production_scale_132x132_one_hour_envelope(tmp_path):
     """SLOW nightly regression for the plane CRM 132x132 production

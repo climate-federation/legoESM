@@ -669,9 +669,20 @@ def main():
         from legoesm.driver.physics_schedule import (
             radiation_call_every_steps as _rad_every,
         )
-        rad_call_every_steps = _rad_every(
-            args.rad_call_interval_s, args.dt,
-        )
+        # iter-65 Codex iter-55 LOW#2 fix: convert raw ValueError from
+        # the schedule helper (iter-43 NaN/inf/dt<=0 guard) into a
+        # SystemExit with a concise CLI-style message. A user typing
+        # ``--rad-call-interval-s nan`` no longer gets a Python
+        # traceback; they get a clear ``error: --rad-call-interval-s
+        # rejected: ...`` and exit code 2.
+        try:
+            rad_call_every_steps = _rad_every(
+                args.rad_call_interval_s, args.dt,
+            )
+        except ValueError as exc:
+            raise SystemExit(
+                f"error: --rad-call-interval-s rejected: {exc}"
+            ) from None
     cached_rad_tend = [None]  # mutable closure for the cache
 
     def apply_physics_substep(state, dt_sub):

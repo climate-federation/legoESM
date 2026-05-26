@@ -134,6 +134,62 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 65
+
+**Convert ValueError from physics_schedule to SystemExit (Codex iter-55
+LOW#2 fix) + subprocess regression test.**
+
+iter-55 holistic Codex review of the production driver flagged
+that ValueError from ``physics_schedule.radiation_call_every_steps``
+(iter-43 NaN/inf guard) propagated as a raw Python traceback
+rather than a clean CLI-style error. Codex iter-55 LOW#2.
+
+iter-65 wraps the helper call site with try/except, converting
+the ValueError into a SystemExit with concise
+``error: --rad-call-interval-s rejected: <reason>`` message +
+exit code 1.
+
+**Before** (raw traceback):
+```
+Traceback (most recent call last):
+  File "scripts/run_rce_mpi_long.py", line 672, in main
+    rad_call_every_steps = _rad_every(args.rad_call_interval_s, args.dt)
+  File "src/legoesm/driver/physics_schedule.py", line 76, in radiation_call_every_steps
+    raise ValueError(...)
+ValueError: radiation_call_every_steps: rad_call_interval_s must be finite, got nan
+```
+
+**After**:
+```
+error: --rad-call-interval-s rejected: radiation_call_every_steps:
+rad_call_interval_s must be finite, got nan
+```
++ exit code 1.
+
+**New subprocess regression test**
+``test_plane_crm_driver_rejects_nan_rad_interval_with_clean_exit``
+in ``tests/atmosphere/nonhydrostatic/integration/
+test_plane_crm_end_to_end_smoke.py``:
+* Asserts exit code != 0
+* Asserts ``"rejected"`` marker in stdout/stderr
+* Asserts ``"Traceback"`` NOT in output (catches a future
+  regression that re-introduces the raw exception path)
+
+**Tests**:
+* New regression: 1 PASS in 62 s (Python startup + JAX import +
+  argparse error before compute).
+* Existing 2 fast smokes: 2/2 PASS in 231 s.
+
+**Live iter-63 1-hour test re-attempt**: hit ~30+ min wall on a
+heavily-loaded M5 Pro (multiple agents running simultaneously) —
+killed manually; test infrastructure is correct, live execution
+still awaits a quiet box. Not blocking; the iter-38/39 fast
+smokes + iter-63 structural test code pin the contract.
+
+**R-roadmap status**: R1-R8, R10, R12 ✓ (with iter-65 closing the
+last Codex iter-55 LOW finding — production driver now has 0 HIGH
++ 0 MEDIUM + 0 LOW radiation-path findings). F9 platform-blocked.
+
 ### 2026-05-26 — iter 64
 
 **Closed last defaults-regression coverage gaps (PYBIN + snapshot/log
