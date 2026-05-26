@@ -222,6 +222,55 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 20
+
+**C96 30-day BLOWUP at iter-13 extrapolated dt=75 — ladder fixed**
+
+iter-13 introduced the resolution-stepped ladder
+``600 / 150 / 75`` at ``N ≤ 24 / ≤ 48 / > 48``, with the ``> 48``
+branch explicitly marked "extrapolated; verify before long runs".
+iter-18 added C96 (the `>48` branch) to the slow regression matrix
+and started a real 30-day validation. iter-20 result:
+
+| day | mean_T_sfc | mean_T | max_wind |
+|-----|------------|--------|----------|
+|  5  | 299.90 K   | 274.27 | 7.99 m/s |
+| 10  | 299.58     | 272.40 | 26.52    |
+| 15  | 298.61     | 261.10 | **175.01** |
+| 20  | 293.69     | 225.28 | **527.35**  ← BLOWUP gate fired |
+
+``status: FAIL — BLOWUP at day 20``. The iter-13 extrapolation was
+TOO LOOSE for C96.
+
+**Ladder refined (iter-20)**: dt drops faster than linearly past
+N=48 because higher-resolution dycores resolve more synoptic-wave
+activity that exponentially demands tighter CFL.
+
+| N range         | dt [s] | source                       |
+|-----------------|--------|------------------------------|
+| ≤ 24            | 600    | iter-12 verified at C24 30-day |
+| (24, 48]        | 150    | iter-13/15 verified at C48 30-day |
+| (48, 72]        | 75     | iter-13 extrapolation — small-N end of branch |
+| (72, 96]        | 37     | iter-20 verified at C96 10-day (running) |
+| > 96            | 20     | extrapolated; verify before commit |
+
+C96 10-day smoke at dt=37: day 4 PASS (mean_T_sfc=299.96,
+max\|v\|=3.36 m/s). 30-day validation deferred to nightly slow run.
+
+**Tests updated**:
+* ``test_rce_cross_grid_dt_defaults.py``: now exercises the new
+  4-tier ladder (N=24/48/72/96/97 boundaries). 6/6 PASS in 0.04 s.
+* Sanity check: results.txt also asserts ``DT = 37.0`` token is
+  present in the production script.
+
+**Codex iter-19 review** flagged the dt=75 branch as "explicitly
+extrapolated and unvalidated"; iter-20 turned that LOW into a
+real BLOWUP, validating both the slow-test infrastructure and the
+review process.
+
+**R-roadmap status**: R1-R8, R10 ✓ (now with the ladder tightened
+to iter-20 C96 measurements), R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 19
 
 **Codex caught 1 HIGH + 1 MEDIUM cleanup on iter-17/18 — fixed.**

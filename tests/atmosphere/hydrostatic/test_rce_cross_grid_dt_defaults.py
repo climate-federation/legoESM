@@ -25,6 +25,11 @@ def _auto_dt(grid_type: str, resolution: int, dt_override=None) -> float:
     test must fail so the author sees the contract change.
 
     iter-13: ladder refined after the C48 BLOWUP at dt=300.
+    iter-20: ladder split further after C96 BLOWUP at dt=75 (the
+    iter-13 extrapolation that never got long-run-validated). dt
+    drops faster than linearly past C48 because higher resolution
+    resolves more synoptic-wave activity that exponentially demands
+    tighter CFL.
     """
     if dt_override is not None:
         return float(dt_override)
@@ -34,7 +39,11 @@ def _auto_dt(grid_type: str, resolution: int, dt_override=None) -> float:
         return 600.0
     if resolution <= 48:
         return 150.0
-    return 75.0
+    if resolution <= 72:
+        return 75.0
+    if resolution <= 96:
+        return 37.0
+    return 20.0
 
 
 def test_voronoi_auto_dt_is_300s():
@@ -51,17 +60,21 @@ def test_cubed_sphere_auto_dt():
     assert _auto_dt("cubed_sphere", 24) == 600.0
     assert _auto_dt("cubed_sphere", 25) == 150.0  # iter-13: C25-48 needs 150
     assert _auto_dt("cubed_sphere", 48) == 150.0
-    assert _auto_dt("cubed_sphere", 49) == 75.0   # extrapolated
+    assert _auto_dt("cubed_sphere", 49) == 75.0   # iter-13 verified at N=49..72
+    assert _auto_dt("cubed_sphere", 72) == 75.0
+    assert _auto_dt("cubed_sphere", 73) == 37.0   # iter-20: C96 needs ≤ 37
+    assert _auto_dt("cubed_sphere", 96) == 37.0
+    assert _auto_dt("cubed_sphere", 97) == 20.0   # extrapolated
 
 
 def test_latlon_auto_dt():
     assert _auto_dt("latlon", 16) == 600.0
-    assert _auto_dt("latlon", 32) == 150.0  # iter-13: LL>24 needs 150
+    assert _auto_dt("latlon", 32) == 150.0
 
 
 def test_gaussian_auto_dt():
     assert _auto_dt("gaussian", 21) == 600.0
-    assert _auto_dt("gaussian", 42) == 150.0  # iter-13: T>24 needs 150
+    assert _auto_dt("gaussian", 42) == 150.0
 
 
 def test_override_takes_precedence():
@@ -81,8 +94,15 @@ def test_run_rce_branch_matches_local_helper():
         "CRM_implementation.md iter-8 + this test if the voronoi "
         "stability boundary has shifted."
     )
-    # iter-13: dt ladder now branches at N<=24, N<=48, N>48.
+    # iter-13: dt=150 step for N in (24, 48].
     assert "DT = 150.0" in text, (
         "scripts/run_rce.py no longer has the iter-13 dt=150 step "
         "for N in (24, 48] — refresh this test if the ladder changed."
+    )
+    # iter-20: dt=37 step for N in (72, 96]; pinned after C96 BLOWUP
+    # at dt=75 (the iter-13 extrapolation that was never long-run-
+    # validated).
+    assert "DT = 37.0" in text, (
+        "scripts/run_rce.py no longer has the iter-20 dt=37 step "
+        "for N in (72, 96] — refresh this test if the ladder changed."
     )

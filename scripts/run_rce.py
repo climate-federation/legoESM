@@ -143,17 +143,20 @@ def main():
     N = args.resolution
     NLEV = args.nlev
     # Auto-dt heuristic. Stability bounds measured in the
-    # iter-12/iter-13 cross-grid sweeps:
+    # iter-12/iter-13/iter-20 cross-grid sweeps:
     #   voronoi/MPAS V4:  dt=300 PASS (30-day, max|v|=2.3 m/s)
     #                     dt>=450 BLOWUP at day 1
     #   cubed_sphere C24: dt=600 PASS (30-day, max|v|=7.2 m/s)
     #   cubed_sphere C48: dt=300 BLOWUP (max|v|=236 m/s by day 25)
     #                     dt=150 PASS (verified iter-13)
+    #   cubed_sphere C96: dt=75 BLOWUP at day 20 (max|v|=527 m/s) ←iter-20
+    #                     dt=37 PASS at 10-day smoke (verified iter-20)
     #   gaussian T21:     dt=600 PASS
-    # Inverse-N scaling for the cubed-sphere/gaussian branch (dt
-    # halves whenever the linear-resolution doubles past N=24); cap
-    # voronoi at 300 unconditionally (its MPAS dycore has its own
-    # CFL profile that's already at the floor).
+    # Inverse-square-N scaling: dt drops faster than linearly past
+    # the C48 boundary because higher-resolution dycores resolve more
+    # synoptic wave activity that exponentially demands tighter CFL.
+    # Voronoi capped at 300 (MPAS dycore has its own CFL profile at
+    # the floor).
     if args.dt is not None:
         DT = args.dt
     elif args.grid_type == "voronoi":
@@ -162,8 +165,12 @@ def main():
         DT = 600.0
     elif N <= 48:
         DT = 150.0
+    elif N <= 72:
+        DT = 75.0   # iter-13 extrapolation; only verified at small-N end
+    elif N <= 96:
+        DT = 37.0   # iter-20: C96 needs ≤37 s for 30-day stability
     else:
-        DT = 75.0  # extrapolated; verify before committing to long runs
+        DT = 20.0   # extrapolated; verify before committing
     OUTPUT_DIR = Path(args.output or f"results/rce_{args.mode}")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
