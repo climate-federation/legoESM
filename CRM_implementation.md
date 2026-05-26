@@ -134,6 +134,46 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 60
+
+**Delete orphaned ``scripts/run_rce_mpi_full.py`` (superseded by
+iter-3/4/5/7 halo work).**
+
+iter-59 noted the orphaned sibling driver carrying a stale
+``N_ACOUSTIC=24`` default. iter-60 audit confirms it's been
+completely superseded:
+
+* **History**: single commit ever (``e6befce7`` "WIP: RCE MPI long-run
+  scripts, dt-stability diag, CLAUDE.md compress"). No subsequent
+  updates since.
+* **Docstring**: explicitly describes itself as the rank-0-dycore +
+  broadcast variant predating halo exchange — "the honest fix is to
+  thread halo exchange through plane_operators — separate PR". That
+  separate PR was iter-3 (Smag in halo) + iter-4 (R7 MPI mass fixer)
+  + iter-5 (DD path in ``run_rce_mpi_long``) + iter-7 (WENO5 in halo).
+  All the work the docstring promised is done — the file is
+  vestigial.
+* **References**: 0 callers outside its own docstring. iter-59 doc
+  note was the only living reference and is being removed.
+* **Missing iter-39+ updates**: no ``--no-radiation`` flag, no
+  ``rad_calls`` counter, no iter-42 ``physics_schedule`` import, no
+  iter-55 ``--days 0`` fix, no iter-59 N_ACOUSTIC default refresh.
+  Cannot be safely revived without re-doing all this work.
+
+Per CLAUDE.md "Removing module: also remove ``__init__.py`` re-export,
+``supported_matrix.py`` entry, dispatch, test file, ``__pycache__``" —
+the file had none of those touchpoints, so a clean ``git rm`` is the
+full cleanup.
+
+**Verified**:
+* ``git rm scripts/run_rce_mpi_full.py``
+* ``grep -rn "run_rce_mpi_full"`` post-delete → only the deletion
+  itself + CRM_implementation.md mentions.
+* CRM fast test sweep: PASS (no regression).
+
+**R-roadmap status**: R1-R8, R10, R12 ✓ (with iter-60 dead-script
+removal — CLAUDE.md slopbuster hygiene), R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 59
 
 **Refreshed plane CRM production driver argparse default + AST regression test.**
@@ -167,9 +207,8 @@ vs bash regex). Future silent revert trips in < 1 s.
 * 17/17 CRM fast tests PASS in 11 s (no regression).
 * 8/8 driver-defaults regression PASS in 0.03 s.
 
-Note: ``scripts/run_rce_mpi_full.py`` (an older sibling, not actively
-called) still has the stale ``N_ACOUSTIC=24`` default. Left untouched
-— refresh when/if it returns to use.
+Note: ``scripts/run_rce_mpi_full.py`` (orphaned older sibling that
+predated the iter-3/4/5/7 halo work) deleted in iter-60 — see below.
 
 **R-roadmap status**: R1-R8, R10, R12 ✓ (with iter-59 driver-argparse
 default refresh + AST-based regression backstop), R6 ✓. F9
