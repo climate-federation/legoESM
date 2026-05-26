@@ -30,49 +30,55 @@ from legoesm.driver.rce_dt import auto_dt_rce
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-def _parse_grid_table(script_path: Path):
+_GRID_TABLE_RE = re.compile(
+    # Anchor to start-of-line GRID_TABLE assignment to skip any
+    # accidental occurrences in comments. Match the FIRST opening
+    # parenthesis after `GRID_TABLE=` and balance to the matching
+    # close (no nested parens inside the bash array literal).
+    r"^GRID_TABLE=\((?P<body>[^)]*)\)",
+    re.MULTILINE,
+)
+
+
+def _parse_grid_table(script_path: Path, *, expected_fields: int):
     """Return list of (grid_type, resolution, dt_override_or_None) tuples
     from a GRID_TABLE block in a wrapper script.
 
-    Tolerates 4-, 5-, or 6-field entries (trailing fields optional).
+    Codex iter-34/35 HIGH:
+    * Regex anchors to start-of-line + uses a non-greedy character
+      class to avoid matching a comment block that happens to
+      contain ``GRID_TABLE=(``.
+    * Caller declares the EXPECTED number of fields explicitly
+      (4 for RCE, 6 for AMIP). Lines with a different field count
+      fail the test — no length-based heuristic that could
+      misclassify a future 5-field row.
     """
     text = script_path.read_text()
-    # Find the GRID_TABLE=( ... ) block.
-    match = re.search(r"GRID_TABLE=\((.*?)\)", text, re.DOTALL)
-    assert match, f"{script_path.name}: no GRID_TABLE=(...) block found"
-    body = match.group(1)
+    matches = list(_GRID_TABLE_RE.finditer(text))
+    assert len(matches) == 1, (
+        f"{script_path.name}: expected exactly one GRID_TABLE=(...) "
+        f"at start-of-line; found {len(matches)}."
+    )
+    body = matches[0].group("body")
     entries = []
     for line in body.splitlines():
         line = line.strip().strip('"').strip("'")
         if not line:
             continue
-        # Skip a comment line that starts with ``#`` (line comments aren't
-        # part of the bash array but we want to be tolerant).
         if line.startswith("#"):
             continue
-        # Strip trailing inline comments after the closing quote (rare).
         parts = line.split(":")
-        if len(parts) < 4:
-            continue
+        assert len(parts) == expected_fields, (
+            f"{script_path.name}: GRID_TABLE row {line!r} has "
+            f"{len(parts)} fields; expected {expected_fields}. "
+            f"Add a comment to the wrapper if the format changed, "
+            f"and refresh this test."
+        )
         grid_type = parts[0]
         resolution = int(parts[1])
-        dt_override = parts[5] if len(parts) >= 6 else (
-            parts[4] if len(parts) >= 5 else ""
-        )
-        # The RCE wrapper has 4 fields (no DT_OVERRIDE column);
-        # detect by checking whether parts[4] is a number.
-        if len(parts) <= 4:
-            dt_override = ""
-        elif len(parts) == 5:
-            # RCE wrapper format has no DT column; the 5th field
-            # is a folder. Try parsing as float — if it fails,
-            # it's not a dt override.
-            try:
-                float(parts[4])
-                dt_override = parts[4]
-            except (ValueError, TypeError):
-                dt_override = ""
-        # parts[5] (6-field) is the DT_OVERRIDE for the AMIP wrapper.
+        # DT_OVERRIDE column is the LAST one in the AMIP 6-field
+        # format. RCE 4-field format has no DT column.
+        dt_override = parts[-1] if expected_fields == 6 else ""
         dt_val = float(dt_override) if dt_override.strip() else None
         entries.append((grid_type, resolution, dt_val))
     return entries
@@ -88,17 +94,26 @@ def test_amip_cross_grid_wrapper_dt_overrides_match_ladder():
     ladder shift that doesn't propagate to the wrapper.
     """
     script = REPO_ROOT / "scripts" / "run_amip_cross_grid.sh"
-    entries = _parse_grid_table(script)
+    entries = _parse_grid_table(script, expected_fields=6)
     for grid_type, N, dt_override in entries:
         if dt_override is None:
             continue
         # Voronoi: ladder returns 300, wrapper pins 60 because the
         # MPAS dycore is unstable at the default per iter-33 / the
-        # smoke-test-amip note. Skip the strict ratio check here.
+        # smoke-test-amip note ("the MPAS hydrostatic dycore is
+        # unstable at the default 600 s step despite the CFL
+        # diagnostic reporting 0.09"). Lock the iter-33-pinned
+        # value EXACTLY (60 s) so a future regression that bumps it
+        # back to dt=300 silently trips this test — sanity-only
+        # "tighter than ladder" was Codex iter-34/35 MEDIUM finding.
         if grid_type == "voronoi":
-            assert dt_override < auto_dt_rce(grid_type, N), (
-                f"{script.name}: voronoi override dt={dt_override} should "
-                f"be TIGHTER than the ladder value (auto={auto_dt_rce(grid_type, N)})"
+            assert dt_override == 60.0, (
+                f"{script.name}: voronoi override dt={dt_override} "
+                f"differs from the iter-33 pin of 60 s. The MPAS dycore "
+                f"is documented unstable at the run_amip default 600; "
+                f"60 s is the smoke-test-amip-validated value. Update "
+                f"this test only if a new measurement justifies a "
+                f"different pin."
             )
             continue
         ladder = auto_dt_rce(grid_type, N)

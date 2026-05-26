@@ -222,6 +222,38 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 35
+
+**Codex iter-33/34 review: 2 HIGH + 1 MEDIUM — all fixed.**
+
+* **HIGH #1**: regex `re.search(r"GRID_TABLE=\((.*?)\)")` would
+  match a stray `GRID_TABLE=` in a comment block in a future
+  refactor. Anchored to start-of-line with `^GRID_TABLE=`
+  + MULTILINE flag.
+* **HIGH #2**: length-based field-count heuristic could
+  misclassify a future 5-field row. Replaced with explicit
+  `expected_fields=4` (RCE) or `expected_fields=6` (AMIP) parameter
+  + a hard assert that the row count matches. Mistakes now FAIL
+  the test with a clear message.
+* **MEDIUM** (voronoi sanity-only check): replaced
+  ``dt_override < auto_dt_rce(...)`` with strict equality
+  ``dt_override == 60.0`` so a future regression that bumps the
+  pin (e.g. to dt=300) trips the test instead of silently passing
+  the loose inequality.
+
+**LOW** (Codex): test imports `legoesm.driver` package which eagerly
+loads heavy submodules. Acceptable — the venv requires the full
+install anyway; cycle-safety verified in iter-25 codex review.
+
+2/2 PASS in 10 s after the iter-35 hardening.
+
+**C96 30-day at dt=37** still running (43 min wall, 72 min CPU;
+day 5 still not printed — looks stuck or extremely slow at C96.
+Will investigate separately if it doesn't print by iter-36).
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-35 codex HIGH
+hardening), R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 34
 
 **Cross-grid wrapper dt-override regression test landed.**
