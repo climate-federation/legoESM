@@ -45,7 +45,17 @@ ADVECTION="${ADVECTION:-upwind1}"
 HYPERDIFF="${HYPERDIFF:-5.0e6}"
 BUBBLE_K="${BUBBLE_K:-0.0}"
 QV_NOISE="${QV_NOISE:-0.0}"
+USE_DD="${USE_DD:-0}"
 PYBIN="${PYBIN:-.venv/bin/python}"
+
+# USE_DD=1 switches the driver from the legacy rank-0-dycore-broadcast
+# pattern to true per-rank domain decomposition via step_halo + the R7
+# MPI mass fixer. Required for any real MPI scaling claim. Verify on
+# DAYS=0.05 + RANKS=2 before committing to a multi-day production run.
+DD_FLAG=""
+if [ "$USE_DD" = "1" ]; then
+    DD_FLAG="--use-dd"
+fi
 
 mkdir -p "$OUTPUT"
 LOGFILE="$OUTPUT/mpi.stdout.log"
@@ -66,6 +76,7 @@ exec mpirun -np "$RANKS" "$PYBIN" \
     --hyperdiff "$HYPERDIFF" \
     --bubble-theta-pert "$BUBBLE_K" \
     --qv-noise-amp "$QV_NOISE" \
+    $DD_FLAG \
     --snapshot-hours 24.0 \
     --snapshot-3d-hours 1.0 \
     --profile-days 5.0 \

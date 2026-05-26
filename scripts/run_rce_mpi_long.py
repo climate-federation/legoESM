@@ -66,7 +66,10 @@ from legoesm.atmosphere.dynamics.rce_diagnostics import (
     precipitation_rate_proxy_plane, temperature_3d_plane,
 )
 from legoesm.atmosphere.dynamics.rce_mpi import (
+    compute_dry_mass_plane_mpi,
     compute_total_water_mass_plane_mpi,
+    fix_mass_nonhydrostatic_plane_mpi,
+    fix_moist_mass_plane_mpi,
     remove_horizontal_mean_wind_plane_mpi,
 )
 from legoesm.atmosphere.dynamics.rce_surface_flux import (
@@ -94,7 +97,12 @@ from legoesm.grids.plane import create_plane_grid
 from legoesm.grids.vertical import (
     create_height_coordinate, create_stretched_height_coordinate,
 )
-from legoesm.parallel.plane_mpi import make_plane_pencil_layout
+from legoesm.parallel.plane_mpi import (
+    gather_plane_field,
+    make_plane_pencil_grid,
+    make_plane_pencil_layout,
+    scatter_plane_field,
+)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -186,6 +194,15 @@ def parse_args():
     p.add_argument("--qv-noise-seed", type=int, default=0,
                    help="RNG seed for qv noise perturbation. Same seed "
                         "→ bit-identical IC across reruns.")
+    p.add_argument("--use-dd", action="store_true", default=False,
+                   help="Switch from the legacy rank-0-dycore + "
+                        "broadcast pattern to true per-rank domain "
+                        "decomposition via step_halo + owned_mask. "
+                        "Activates the R7 MPI mass fixer + MPI mean "
+                        "wind. Required for any real MPI scaling claim. "
+                        "Defaults False to preserve the F8-stable "
+                        "config from iter-2; flip to True once you have "
+                        "verified the DD path on the smoke run.")
     p.add_argument("--sponge-coeff", type=float, default=0.05)
     p.add_argument("--sponge-width", type=float, default=10_000.0,
                    help="Sponge layer width from model top [m]. "
@@ -397,6 +414,55 @@ def _broadcast_state(state, comm, root=0):
     return state._replace(**new_fields)
 
 
+_DD_FIELD_NAMES = (
+    "u", "v", "w", "theta_prime", "rho_prime", "phis", "tracers",
+)
+
+
+def _scatter_state(state, layout):
+    """Build rank-local slab from a globally-replicated state.
+
+    Each rank independently calls :func:`scatter_plane_field` (pure
+    slicing — no MPI). Assumes every rank has built the same global
+    IC deterministically before this call. Avoids the bcast cost of
+    a "rank-0 owns; everyone else receives" pattern at IC time."""
+    new_fields = {}
+    for name in _DD_FIELD_NAMES:
+        fld = getattr(state, name)
+        local_data = scatter_plane_field(fld.data, layout)
+        new_fields[name] = fld.replace(data=local_data)
+    return state._replace(**new_fields)
+
+
+def _gather_state(state_local, layout):
+    """Gather rank-local slabs to a single global state on rank 0.
+
+    Per-field :func:`gather_plane_field` (uses ``comm.gather`` under
+    the hood — a COLLECTIVE that every rank must enter). Returns the
+    gathered global state on rank 0 and ``None`` on all other ranks.
+
+    Bug avoided: previously this returned early on the first
+    ``gather_plane_field == None`` (i.e. on non-rank-0 after the
+    first field), which left rank 0 blocked on the next gather
+    waiting for a peer that had already exited. We now ALWAYS
+    participate in every collective regardless of rank.
+    """
+    rank0_arrays = []
+    for name in _DD_FIELD_NAMES:
+        fld = getattr(state_local, name)
+        global_data = gather_plane_field(fld.data, layout)
+        rank0_arrays.append(global_data)
+    # Non-rank-0 has None in every slot — return None to signal the
+    # caller this isn't the rank that owns the gathered state.
+    if rank0_arrays[0] is None:
+        return None
+    rank0_fields = {}
+    for name, arr in zip(_DD_FIELD_NAMES, rank0_arrays):
+        fld = getattr(state_local, name)
+        rank0_fields[name] = fld.replace(data=arr)
+    return state_local._replace(**rank0_fields)
+
+
 def save_snapshot(out_dir, day_idx, t_sim, state, hc):
     """x-y surface fields snapshot."""
     cwv = np.asarray(column_water_vapor_plane(state, hc))
@@ -539,9 +605,36 @@ def main():
         horizontal_advection_scheme=args.advection,
         implicit_buoyancy=args.implicit_buoyancy,
     )
-    model = PlaneCompressibleEulerModel(grid, hc, terrain, config=cfg)
-    fast_physics_fn = build_fast_physics_fn(args, grid, hc, terrain)
-    slow_physics_fn = build_slow_physics_fn(args, grid, hc, terrain)
+    # Save the GLOBAL state for snapshot dumping (needed on every rank
+    # in legacy mode; saved on rank 0 in DD mode after gather).
+    state_global_ic = state
+
+    # ----------------------------------------------------------------- #
+    # Domain-decomposition: scatter IC + rebuild local grid / model /   #
+    # physics so every rank steps its own slab via step_halo.           #
+    # ----------------------------------------------------------------- #
+    if args.use_dd and n_ranks > 1:
+        state = _scatter_state(state, layout)
+        grid_local = make_plane_pencil_grid(
+            layout, dx=args.dx, dy=args.dx, nlev=args.nlev,
+            dtype=jnp.float64,
+        )
+        terrain_local = make_flat_plane_terrain_metric(grid_local, hc)
+        model = PlaneCompressibleEulerModel(
+            grid_local, hc, terrain_local, config=cfg,
+        )
+        fast_physics_fn = build_fast_physics_fn(
+            args, grid_local, hc, terrain_local,
+        )
+        slow_physics_fn = build_slow_physics_fn(
+            args, grid_local, hc, terrain_local,
+        )
+        grid = grid_local
+        terrain = terrain_local
+    else:
+        model = PlaneCompressibleEulerModel(grid, hc, terrain, config=cfg)
+        fast_physics_fn = build_fast_physics_fn(args, grid, hc, terrain)
+        slow_physics_fn = build_slow_physics_fn(args, grid, hc, terrain)
     rad_call_every_steps = max(1, int(round(args.rad_call_interval_s / args.dt)))
     cached_rad_tend = [None]  # mutable closure for the cache
 
@@ -576,13 +669,26 @@ def main():
                 state, tracer_slots_to_filter=(0, 1, 2), mode="clip",
             )
         return state
-    target_water = compute_total_water_mass_plane(state, hc, grid)
-
-    owned_mask = jnp.zeros((args.ny, args.nx), dtype=jnp.float64)
-    owned_mask = owned_mask.at[
-        layout.iy_start:layout.iy_end,
-        layout.ix_start:layout.ix_end,
-    ].set(1.0)
+    # owned_mask + target water mass.
+    if args.use_dd and n_ranks > 1:
+        # Per-rank local mask is all-ones (every cell of the local slab
+        # is owned by this rank; halo is added by step_halo's exchange).
+        owned_mask = jnp.ones(
+            (layout.ny_local, layout.nx_local), dtype=jnp.float64,
+        )
+        target_water = compute_total_water_mass_plane_mpi(
+            state, hc, grid, layout, owned_mask,
+        )
+    else:
+        # Legacy rank-0-broadcast path: owned_mask is in GLOBAL coords
+        # so the MPI helpers can mark only this rank's slice of the
+        # replicated full state.
+        owned_mask = jnp.zeros((args.ny, args.nx), dtype=jnp.float64)
+        owned_mask = owned_mask.at[
+            layout.iy_start:layout.iy_end,
+            layout.ix_start:layout.ix_end,
+        ].set(1.0)
+        target_water = compute_total_water_mass_plane(state, hc, grid)
 
     total_t = args.days * SEC_PER_DAY
     total_steps = int(total_t / args.dt)
@@ -614,11 +720,14 @@ def main():
             f"max(qc),max(qr),max(precip_mm_day),Ca_substep\n"
         )
 
-        # Save IC snapshot + profile.
-        save_snapshot(out_dir, 0, 0.0, state, hc)
-        save_profile(out_dir, 0, 0.0, state, hc)
+        # Save IC snapshot + profile. In DD mode the `state` variable
+        # holds the rank-local slab; dump from the pre-scatter global
+        # IC so snapshots stay full-domain shape.
+        ic_state_for_io = state_global_ic if args.use_dd else state
+        save_snapshot(out_dir, 0, 0.0, ic_state_for_io, hc)
+        save_profile(out_dir, 0, 0.0, ic_state_for_io, hc)
         if snap3d_enabled:
-            save_snapshot_3d(out_dir, 0, 0.0, state, hc)
+            save_snapshot_3d(out_dir, 0, 0.0, ic_state_for_io, hc)
         write_progress(out_dir, 0.0, total_t, 0, total_steps, 0.0)
 
     wall_start = time.time()
@@ -627,55 +736,99 @@ def main():
     next_prof_t = prof_dt
 
     for step in range(1, total_steps + 1):
-        if rank == 0:
-            # 1. Refresh radiation tendency every N steps (cached
-            #    between calls — literature standard, e.g. SAM 600s).
+        if args.use_dd and n_ranks > 1:
+            # ----------------------------------------------------- #
+            # True per-rank DD path.                                #
+            # ----------------------------------------------------- #
             if (step - 1) % rad_call_every_steps == 0:
                 cached_rad_tend[0] = slow_physics_fn(
                     state, grid, hc, terrain,
                 )
-            # 2. Dycore step (no physics — split out).
-            state = model.step(state, dt=args.dt, physics_fn=None)
-            # 3. Operator-split physics: N forward-Euler sub-steps
-            #    at dt_outer/N (fast physics + cached radiation).
-            state = physics_split(
-                state, args.dt, args.n_physics_substeps,
+            state = model.step_halo(
+                state, dt=args.dt, layout=layout,
+                owned_mask=owned_mask,
             )
-        state = _broadcast_state(state, comm, root=0)
-        # Tracer positivity: clip negatives created by dycore advection
-        # BEFORE the mass fixer (which raises on negative total water).
-        state = apply_positive_filter_state(
-            state, tracer_slots_to_filter=(0, 1, 2), mode="clip",
-        )
-        state = remove_horizontal_mean_wind_plane_mpi(
-            state, layout, owned_mask,
-        )
-        _ = compute_total_water_mass_plane_mpi(
-            state, hc, grid, layout, owned_mask,
-        )
-        state = fix_moist_mass_plane(
-            state, hc, grid, target_total_water=target_water,
-        )
+            state = physics_split(state, args.dt, args.n_physics_substeps)
+            state = apply_positive_filter_state(
+                state, tracer_slots_to_filter=(0, 1, 2), mode="clip",
+            )
+            state = remove_horizontal_mean_wind_plane_mpi(
+                state, layout, owned_mask,
+            )
+            state = fix_moist_mass_plane_mpi(
+                state, hc, grid, layout, owned_mask,
+                target_total_water=target_water,
+            )
+        else:
+            # ----------------------------------------------------- #
+            # Legacy rank-0-dycore + broadcast path (replicated).   #
+            # ----------------------------------------------------- #
+            if rank == 0:
+                if (step - 1) % rad_call_every_steps == 0:
+                    cached_rad_tend[0] = slow_physics_fn(
+                        state, grid, hc, terrain,
+                    )
+                state = model.step(state, dt=args.dt, physics_fn=None)
+                state = physics_split(
+                    state, args.dt, args.n_physics_substeps,
+                )
+            state = _broadcast_state(state, comm, root=0)
+            state = apply_positive_filter_state(
+                state, tracer_slots_to_filter=(0, 1, 2), mode="clip",
+            )
+            state = remove_horizontal_mean_wind_plane_mpi(
+                state, layout, owned_mask,
+            )
+            _ = compute_total_water_mass_plane_mpi(
+                state, hc, grid, layout, owned_mask,
+            )
+            state = fix_moist_mass_plane(
+                state, hc, grid, target_total_water=target_water,
+            )
         t_sim = step * args.dt
         wall_elapsed = time.time() - wall_start
+
+        # In DD mode, diagnostics + snapshots need a globally-assembled
+        # state on rank 0. Gather lazily — only on log/snapshot/profile
+        # ticks, never every step.
+        need_gather = args.use_dd and n_ranks > 1 and (
+            step % args.log_every_steps == 0 or step == 1
+            or t_sim >= next_snap_t
+            or (snap3d_enabled and t_sim >= next_snap3d_t)
+            or t_sim >= next_prof_t
+        )
+        state_for_io = (
+            _gather_state(state, layout) if need_gather else state
+        )
 
         if rank == 0:
             # Live progress every step.
             write_progress(
                 out_dir, t_sim, total_t, step, total_steps, wall_elapsed,
             )
-            # Per-step diagnostics (cheap, no extra MPI).
+            # Per-step diagnostics. In DD mode `state_for_io` is the
+            # gathered global state on rank 0; in legacy mode it is the
+            # same as `state` (rank-0 already holds the full domain).
             if step % args.log_every_steps == 0 or step == 1:
-                cwv = column_water_vapor_plane(state, hc)
-                mse = column_moist_static_energy_plane(state, hc)
-                precip = precipitation_rate_proxy_plane(state, hc)
+                state_io = state_for_io
+                # Build a global grid for CFL diagnostics in DD mode
+                # (cn.acoustic depends only on rho_ref + dx + dt).
+                grid_io = grid
+                if args.use_dd and n_ranks > 1:
+                    grid_io = create_plane_grid(
+                        nx=args.nx, ny=args.ny, nlev=args.nlev,
+                        dx=args.dx, dy=args.dx, dtype=jnp.float64,
+                    )
+                cwv = column_water_vapor_plane(state_io, hc)
+                mse = column_moist_static_energy_plane(state_io, hc)
+                precip = precipitation_rate_proxy_plane(state_io, hc)
                 cn = compute_courant_numbers_plane(
-                    state, hc, grid, args.dt,
+                    state_io, hc, grid_io, args.dt,
                     n_acoustic_substeps=args.n_acoustic_substeps,
                 )
-                max_w = float(jnp.max(jnp.abs(state.w.data)))
-                max_qc = float(jnp.max(state.tracers.data[..., 1]))
-                max_qr = float(jnp.max(state.tracers.data[..., 2]))
+                max_w = float(jnp.max(jnp.abs(state_io.w.data)))
+                max_qc = float(jnp.max(state_io.tracers.data[..., 1]))
+                max_qr = float(jnp.max(state_io.tracers.data[..., 2]))
                 precip_mmday = float(jnp.max(precip)) * SEC_PER_DAY
                 log_f.write(
                     f"{step},{t_sim / SEC_PER_DAY:.6f},"
@@ -690,22 +843,26 @@ def main():
                     log_f.write(f"# BAIL: NaN at step {step}\n")
                     break
 
-            # Snapshot every snapshot_hours.
+            # Snapshot every snapshot_hours. state_for_io is the
+            # gathered global state on rank 0 in DD mode, or `state`
+            # in legacy mode (rank 0 already holds the full domain).
             if t_sim >= next_snap_t:
                 day_idx = int(round(t_sim / SEC_PER_DAY))
-                save_snapshot(out_dir, day_idx, t_sim, state, hc)
+                save_snapshot(out_dir, day_idx, t_sim, state_for_io, hc)
                 next_snap_t += snap_dt
 
             # 3D snapshot every snapshot_3d_hours.
             if snap3d_enabled and t_sim >= next_snap3d_t:
                 hr_idx = int(round(t_sim / 3600.0))
-                save_snapshot_3d(out_dir, hr_idx, t_sim, state, hc)
+                save_snapshot_3d(
+                    out_dir, hr_idx, t_sim, state_for_io, hc,
+                )
                 next_snap3d_t += snap3d_dt
 
             # Profile every profile_days.
             if t_sim >= next_prof_t:
                 day_idx = int(round(t_sim / SEC_PER_DAY))
-                save_profile(out_dir, day_idx, t_sim, state, hc)
+                save_profile(out_dir, day_idx, t_sim, state_for_io, hc)
                 next_prof_t += prof_dt
 
     if rank == 0:

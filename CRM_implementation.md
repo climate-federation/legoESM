@@ -222,6 +222,53 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 5
+
+**Changes**
+* `scripts/run_rce_mpi_long.py`:
+  - New `--use-dd` CLI flag (default False — preserves the F8-stable
+    legacy rank-0-broadcast path).
+  - New `_scatter_state` / `_gather_state` helpers built on
+    `scatter_plane_field` / `gather_plane_field`.
+  - DD branch in the main loop: each rank holds a local slab, calls
+    `model.step_halo(state_local, dt, layout, owned_mask=owned_mask)`
+    + local physics + MPI mean-wind + MPI moist-mass fixer. Diagnostic
+    + snapshot tick gathers state to rank 0 once per log interval —
+    not every step.
+  - Builds a per-rank local `PlaneGrid` via `make_plane_pencil_grid`
+    and a local `TerrainMetric` via `make_flat_plane_terrain_metric`
+    for the local grid so step_halo + physics see correct
+    Arakawa-C cell counts and global beta-plane offsets.
+  - `_gather_state` participates in ALL field collectives on every
+    rank (fixed the rank-0-blocked-on-second-gather deadlock that
+    showed up in the first multi-rank smoke).
+* `scripts/run_rce_30day.sh`: new `USE_DD` env knob (0 default).
+  Surfaces the DD switch for production smoke at flip time.
+
+**Measurements**
+* mpirun -np 2 smoke at 12×12×20, dt=1 s, no bubble, no qv noise,
+  43 steps in 0.9 min wall. max|w| stable at ~7e-4 m/s through
+  step 30. CWV pinned at 55.001 mm (= IC). MSE drift < 7e-5
+  relative. **First true MPI DD smoke that runs to completion**.
+* Legacy path unchanged on the smoke — bit-identical to the iter-2
+  F8 reproducer.
+* Used the standalone `/tmp/mpi_diag.py` exerciser to confirm
+  step_halo + MPI mass fixer compose cleanly under real
+  mpi4jax sendrecv before wiring into the production driver.
+
+**Net effect**: with `--use-dd` and the R7 mass fixer in place,
+the production driver is now structurally capable of strong + weak
+MPI scaling. Per-step DD cost on macOS shared-mem MPI is dominated
+by first-time JIT compile + per-step mpi4jax sendrecv overhead;
+real scaling numbers (efficiency 1 vs 2 vs 4 vs 12 ranks) are the
+next concrete iteration target.
+
+**R-roadmap status**: R1-R5, R7, R8-bootstrap ✓. R10 (cross-grid
+CRM) still pending; R6 (WENO5 halo) deferred. The 30-day production
+run is now a 1-flag flip (`USE_DD=1`) away — but needs a 6-h smoke
+at 132×132 to baseline wall-clock before committing to the full
+30-day spend.
+
 ### 2026-05-26 — iter 4
 
 **Changes**
