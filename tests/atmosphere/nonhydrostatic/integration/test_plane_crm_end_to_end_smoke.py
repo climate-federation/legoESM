@@ -89,6 +89,23 @@ def _read_log(output_dir):
     return rows
 
 
+def _parse_rad_call_count(stdout: str) -> int | None:
+    """Extract ``rad_calls=N`` from the driver's final ``Done.`` line.
+
+    Anchored to the start of a ``Done.`` line + word-bounded ``\\b``
+    integer so a future log line like ``total_rad_calls=5`` or
+    ``rad_calls=5.0`` cannot accidentally match. Returns the count
+    when exactly one ``Done.`` line matches, else ``None`` (older
+    driver / parser-side regression / unexpected multiple matches).
+    Codex iter-40 LOW fix.
+    """
+    import re
+    matches = re.findall(r"(?m)^Done\..*\brad_calls=(\d+)\b", stdout)
+    if len(matches) != 1:
+        return None
+    return int(matches[0])
+
+
 def test_plane_crm_short_smoke_clean_ic(tmp_path):
     """Plane CRM with F8 clean IC + F10 dt=5 s + iter-13 hardened
     defaults must complete a 7-minute smoke window with all
@@ -331,6 +348,21 @@ def test_plane_crm_production_scale_132x132_envelope(tmp_path):
     rows = _read_log(out_dir)
     assert rows, "log.txt produced no diagnostic rows at production scale"
 
+    # iter-40 hardening: --no-radiation must produce rad_calls=0
+    # on the driver's "Done." line. A regression where the
+    # _maybe_fire_radiation gate degrades silently (e.g. the
+    # ``args.no_radiation`` early return is removed) would
+    # otherwise be invisible because the MSE-drift cap on this
+    # test is an UPPER bound only.
+    rad_calls = _parse_rad_call_count(result.stdout)
+    assert rad_calls == 0, (
+        f"plane CRM production smoke (--no-radiation): driver "
+        f"reported rad_calls={rad_calls!r}, expected 0. Either the "
+        f"--no-radiation gate regressed or the rad_calls= counter "
+        f"is missing from the Done. line. "
+        f"stdout tail:\n{result.stdout[-500:]}"
+    )
+
     # Schema + step-count sanity: log_every=15 + n=60 yields exact rows
     # at steps 1, 15, 30, 45, 60. A short run (driver miscount) would
     # leave the final row at an earlier step and all envelope asserts
@@ -463,6 +495,31 @@ def test_plane_crm_production_scale_132x132_with_radiation(tmp_path):
     assert rows, (
         "log.txt produced no diagnostic rows at production scale "
         "with radiation"
+    )
+
+    # iter-40 hardening (Codex iter-39 MEDIUM#1 fix; iter-40
+    # Codex LOW#5 fix: derive expected count from CLI args, don't
+    # hardcode). The driver computes
+    # ``rad_call_every_steps = max(1, round(rad_interval / dt))``
+    # and fires at outer steps where ``(step - 1) % every == 0``,
+    # so the expected fire count over ``n_steps`` outer steps is
+    # ``1 + (n_steps - 1) // every``. For this config
+    # (dt=5, interval=60, n_steps=60): every=12, count=5
+    # (steps 1, 13, 25, 37, 49). A broken
+    # ``rad_call_every_steps`` arithmetic or a regression in the
+    # tick gate would change this count.
+    dt_s = 5.0
+    rad_interval_s = 60.0
+    every = max(1, round(rad_interval_s / dt_s))
+    expected_rad_calls = 1 + (n_steps - 1) // every
+    rad_calls = _parse_rad_call_count(result.stdout)
+    assert rad_calls == expected_rad_calls, (
+        f"plane CRM production+rad smoke: driver reported "
+        f"rad_calls={rad_calls!r}, expected {expected_rad_calls} "
+        f"(dt={dt_s}, rad-interval={rad_interval_s}, n_steps={n_steps} "
+        f"→ every={every}). Either the radiation tick gate regressed "
+        f"or the rad_calls counter is missing from the Done. line. "
+        f"stdout tail:\n{result.stdout[-500:]}"
     )
 
     expected_logged_steps = [1, 15, 30, 45, 60]

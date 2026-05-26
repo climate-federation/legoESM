@@ -222,6 +222,69 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 40
+
+**Radiation call count surfaced + tests assert it (Codex iter-39
+MEDIUM#1 + iter-40 LOW fixes).**
+
+Codex iter-39 MEDIUM#1 noted that the iter-39 with-radiation slow
+test didn't actually assert the radiation tick fires the expected
+number of times — a broken ``rad_call_every_steps`` arithmetic
+(e.g. an int-truncation regression that pins the interval to 1 or
+to ``total_steps``) would silently shift the call schedule without
+tripping the MSE-sandwich assertion in many regimes.
+
+**Driver change** (``scripts/run_rce_mpi_long.py``):
+* New ``_maybe_fire_radiation(step_idx)`` closure consolidates the
+  rad-firing branch from both the DD path (n_ranks>1, use_dd) and
+  the legacy rank-0 path. Returns True on a fire so the caller can
+  increment a counter.
+* New ``rad_call_count`` Python counter incremented at each fire.
+* New ``rad_calls=N`` token added to the final ``Done.`` line so
+  any subprocess/CI parser can assert on it.
+
+**Test changes** (``test_plane_crm_end_to_end_smoke.py``):
+* New ``_parse_rad_call_count(stdout)`` helper. Anchored regex
+  ``^Done\\..*\\brad_calls=(\\d+)\\b`` with multiline flag — only
+  matches a ``Done.`` line + word-bounded integer. Returns ``None``
+  unless exactly one match (Codex iter-40 LOW#4 fix vs an unbounded
+  ``rad_calls=(\\d+)`` that would also match ``total_rad_calls=5``
+  or ``rad_calls=5.0``).
+* ``test_plane_crm_production_scale_132x132_envelope`` (iter-38):
+  asserts ``rad_calls == 0`` under ``--no-radiation``.
+* ``test_plane_crm_production_scale_132x132_with_radiation``
+  (iter-39): asserts ``rad_calls == expected_rad_calls`` where
+  ``expected_rad_calls = 1 + (n_steps - 1) // every`` and
+  ``every = max(1, round(rad_interval_s / dt_s))`` (Codex iter-40
+  LOW#5 fix — derived from CLI args, not hardcoded).
+
+**Codex iter-40 review** caught 0 HIGH / 0 MEDIUM / 2 LOW:
+* Closure correctness: PASS — Python closure resolves ``state`` at
+  call time so the rebound loop-variable is visible.
+* MPI counter consistency: PASS — DD path counts per-rank locally;
+  rank 0 prints its own count (not an allreduce), no double-count.
+* Regex robustness: LOW — unanchored; fixed (above).
+* Hardcoded expected=5: LOW — replaced with derived count.
+* Silent-pass risk: PASS — radiation tendency state effect still
+  asserted via the signed MSE-drift sandwich from iter-39.
+
+**Measurements** (132×132×30 dx=2km dt=5s 60 outer steps):
+* iter-38 (``--no-radiation``): ``rad_calls=0`` ✓
+* iter-39 (``--rad-call-interval-s 60``): ``rad_calls=5`` ✓
+  (matches derived ``1 + 59 // 12 = 5``, fires at steps 1, 13, 25,
+  37, 49)
+
+**Tests**:
+* ``pytest -m slow tests/atmosphere/nonhydrostatic/integration/
+  test_plane_crm_end_to_end_smoke.py``: 2/2 PASS in 233 s.
+* Default suite: 2/2 short smokes still PASS in 47 s.
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-40 radiation-tick
+observability hardening), R6 ✓. F9 platform-blocked. The
+radiation-on/off mode of the production-scale plane CRM is now
+both behaviour-pinned (iter-39 MSE sandwich) AND
+schedule-pinned (iter-40 rad_calls counter).
+
 ### 2026-05-26 — iter 39
 
 **Codex caught iter-38 was never truly dycore-only — fixed at the

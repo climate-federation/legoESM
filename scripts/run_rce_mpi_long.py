@@ -749,16 +749,31 @@ def main():
     next_snap_t = snap_dt
     next_snap3d_t = snap3d_dt
     next_prof_t = prof_dt
+    # iter-40: explicit counter for radiation tendency refreshes. Used
+    # by test_plane_crm_production_scale_132x132_with_radiation /
+    # ..._envelope (iter-38/39) to assert the radiation tick branch
+    # actually fires the expected number of times. Codex iter-39
+    # MEDIUM#1 / MEDIUM#3 gap: without an observable count the test
+    # could pass under a broken rad_call_every_steps arithmetic.
+    rad_call_count = 0
+
+    def _maybe_fire_radiation(step_idx):
+        """Fire gray-radiation slow tendency on schedule. Returns
+        True if it fired this step (caller increments the counter)."""
+        if args.no_radiation:
+            return False
+        if (step_idx - 1) % rad_call_every_steps != 0:
+            return False
+        cached_rad_tend[0] = slow_physics_fn(state, grid, hc, terrain)
+        return True
 
     for step in range(1, total_steps + 1):
         if args.use_dd and n_ranks > 1:
             # ----------------------------------------------------- #
             # True per-rank DD path.                                #
             # ----------------------------------------------------- #
-            if not args.no_radiation and (step - 1) % rad_call_every_steps == 0:
-                cached_rad_tend[0] = slow_physics_fn(
-                    state, grid, hc, terrain,
-                )
+            if _maybe_fire_radiation(step):
+                rad_call_count += 1
             state = model.step_halo(
                 state, dt=args.dt, layout=layout,
                 owned_mask=owned_mask,
@@ -779,10 +794,8 @@ def main():
             # Legacy rank-0-dycore + broadcast path (replicated).   #
             # ----------------------------------------------------- #
             if rank == 0:
-                if not args.no_radiation and (step - 1) % rad_call_every_steps == 0:
-                    cached_rad_tend[0] = slow_physics_fn(
-                        state, grid, hc, terrain,
-                    )
+                if _maybe_fire_radiation(step):
+                    rad_call_count += 1
                 state = model.step(state, dt=args.dt, physics_fn=None)
                 state = physics_split(
                     state, args.dt, args.n_physics_substeps,
@@ -894,7 +907,8 @@ def main():
         )
         print(
             f"Done. {step} steps, {t_sim / SEC_PER_DAY:.3f} days sim. "
-            f"Wall: {(time.time() - wall_start) / 60:.1f} min."
+            f"Wall: {(time.time() - wall_start) / 60:.1f} min. "
+            f"rad_calls={rad_call_count}."
         )
 
 
