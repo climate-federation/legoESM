@@ -134,6 +134,73 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 70
+
+**Codex review caught 6 HIGH range-guard gaps in iter-67/68/69
+finiteness validation — all closed.**
+
+iter-67/68/69 added finiteness-only checks for floats + positivity-
+only for ints. Codex iter-70 review found these silently let
+bad-but-finite values through to downstream crashes or silent
+mis-runs:
+
+* **HIGH#1** — ``--days -1`` → total_steps = -17280 → empty loop →
+  ``Done. 0 steps`` silent.
+* **HIGH#2** — ``--snapshot-hours 0`` → div-by-zero in snap_dt
+  → save snapshot every step.
+* **HIGH#3** — ``--dx <= 0`` → grid creation downstream crash.
+* **HIGH#4** — ``--H``, ``--dz-sfc`` <= 0 → invalid vertical
+  geometry.
+* **HIGH#5** — physics coefs (--smag-cs, --hyperdiff, etc.)
+  negative → silent anti-diffusion or out-of-range Smag.
+* **HIGH#6** — ``--bubble-theta-pert``, ``--qv-noise-amp``
+  negative → silent skip of seed branches (gated by ``> 0``).
+
+**Fix** (``main()`` validation block):
+
+* ``_POSITIVE_FLOATS`` set: must be > 0 (div-by-zero or empty-loop
+  risk). Covers --dt, --days, --dx, --H, --dz-sfc, --snapshot-hours,
+  --profile-days.
+* ``_NONNEG_FLOATS`` set: must be >= 0 (0 is a meaningful
+  "disabled" sentinel). Covers --snapshot-3d-hours, --smag-cs,
+  --hyperdiff, --sponge-coeff, --sponge-width,
+  --vertical-theta-diffusion, --bubble-theta-pert, --qv-noise-amp,
+  --c-h.
+* Explicit range guard: ``--acoustic-off-centering`` ∈ [0, 1)
+  (Skamarock-Klemp constraint; ≥ 1 causes acoustic-mode
+  amplification).
+
+**Verified** (direct smokes):
+* ``--days -1`` → ``must be positive, got -1.0`` exit 1.
+* ``--snapshot-hours 0.0`` → ``must be positive, got 0.0`` exit 1.
+* ``--dx -100.0`` → ``must be positive, got -100.0`` exit 1.
+* ``--bubble-theta-pert -1.0`` → ``must be non-negative, got -1.0``
+  exit 1.
+* ``--acoustic-off-centering 1.5`` → ``must be in [0, 1), got 1.5``
+  exit 1.
+
+**Extended regression test**: ``test_plane_crm_driver_rejects_nan_inf_numeric_args``
+now has 28 parametric cases (was 13) covering all the new range
+guards. Mixed group: positive-floats, non-neg-floats, range-bound
+off-centering, positive-ints from iter-69.
+
+**Codex iter-70 MEDIUM (--rad-call-interval-s with --no-radiation):
+deferred** — when --no-radiation is set, the helper is skipped
+intentionally per iter-55 MEDIUM#1 fix. Codex flagged this as a
+"silent pass" but no actual mis-run happens (radiation isn't called
+at all). The technical correctness vs the UX trade-off was already
+made at iter-55.
+
+**Codex iter-70 LOW: stale line-reference comment**. Defer.
+
+**R-roadmap status**: R1-R8, R10, R12 ✓ (with iter-70 closing the
+6 Codex HIGH range-guard gaps). F9 platform-blocked.
+
+Production driver CLI is now defense-in-depth across the full
+numeric input domain: NaN/inf rejected, negative/zero where invalid
+rejected, range-bounded args (beta) range-checked. Any malformed
+numeric input → clean SystemExit + exit 1, no raw Python traceback.
+
 ### 2026-05-26 — iter 69
 
 **Positive-int guards for grid + substep CLI args (parallel to

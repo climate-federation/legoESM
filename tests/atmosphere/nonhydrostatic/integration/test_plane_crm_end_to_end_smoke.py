@@ -725,6 +725,25 @@ def test_plane_crm_production_scale_132x132_with_radiation(tmp_path):
     ("--n-acoustic-substeps", "0", "must be positive integer"),
     ("--n-physics-substeps", "-3", "must be positive integer"),
     ("--log-every-steps", "0", "must be positive integer"),
+    # iter-70 Codex HIGH: range guards beyond NaN/inf.
+    # Positive-floats (zero invalid — div-by-zero or empty loop).
+    ("--days", "-1.0", "must be positive"),
+    ("--days", "0.0", "must be positive"),
+    ("--dx", "-100.0", "must be positive"),
+    ("--H", "0.0", "must be positive"),
+    ("--dz-sfc", "-50.0", "must be positive"),
+    ("--snapshot-hours", "0.0", "must be positive"),
+    ("--profile-days", "-5.0", "must be positive"),
+    # Non-negative floats (zero is a meaningful disabled sentinel).
+    ("--bubble-theta-pert", "-1.0", "must be non-negative"),
+    ("--qv-noise-amp", "-1e-5", "must be non-negative"),
+    ("--smag-cs", "-0.1", "must be non-negative"),
+    ("--hyperdiff", "-1.0", "must be non-negative"),
+    ("--sponge-coeff", "-0.01", "must be non-negative"),
+    # Acoustic off-centering range [0, 1) — Skamarock-Klemp constraint.
+    ("--acoustic-off-centering", "-0.05", "must be in"),
+    ("--acoustic-off-centering", "1.0", "must be in"),
+    ("--acoustic-off-centering", "1.5", "must be in"),
 ])
 def test_plane_crm_driver_rejects_nan_inf_numeric_args(
     tmp_path, flag, value, expected_err,

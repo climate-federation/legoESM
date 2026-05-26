@@ -607,11 +607,50 @@ def main():
             raise SystemExit(
                 f"error: {_flag} rejected: must be finite, got {_val!r}"
             )
-    # --dt must additionally be positive (the production driver
-    # divides by dt at line ~741).
-    if args.dt <= 0.0:
+    # iter-70 Codex HIGH coverage: extend iter-67/68/69 validation to
+    # ranges, not just finiteness/integer-positivity. Without these,
+    # bad-but-finite values silently corrupt the run:
+    # * --days -1 → total_steps = -17280 → empty loop → "Done. 0 steps"
+    # * --snapshot-hours 0 → division-by-zero in snap_dt → save every step
+    # * --dx <= 0, --H <= 0, --dz-sfc <= 0 → grid creation fails downstream
+    # * --bubble-theta-pert -1, --qv-noise-amp -1 → silent skip of seed
+    # * --acoustic-off-centering -0.1 → physically invalid; > 1.0 → unstable
+    _POSITIVE_FLOATS = {  # must be > 0 (zero meaningless or div-by-zero risk)
+        "--dt": args.dt,
+        "--days": args.days,
+        "--dx": args.dx,
+        "--H": args.H,
+        "--dz-sfc": args.dz_sfc,
+        "--snapshot-hours": args.snapshot_hours,
+        "--profile-days": args.profile_days,
+    }
+    for _flag, _val in _POSITIVE_FLOATS.items():
+        if _val <= 0.0:
+            raise SystemExit(
+                f"error: {_flag} rejected: must be positive, got {_val!r}"
+            )
+    _NONNEG_FLOATS = {  # must be >= 0 (0 is a meaningful "disabled" sentinel)
+        "--snapshot-3d-hours": args.snapshot_3d_hours,
+        "--smag-cs": args.smag_cs,
+        "--hyperdiff": args.hyperdiff,
+        "--sponge-coeff": args.sponge_coeff,
+        "--sponge-width": args.sponge_width,
+        "--vertical-theta-diffusion": args.vertical_theta_diffusion,
+        "--bubble-theta-pert": args.bubble_theta_pert,
+        "--qv-noise-amp": args.qv_noise_amp,
+        "--c-h": args.c_h,
+    }
+    for _flag, _val in _NONNEG_FLOATS.items():
+        if _val < 0.0:
+            raise SystemExit(
+                f"error: {_flag} rejected: must be non-negative, "
+                f"got {_val!r}"
+            )
+    # --acoustic-off-centering beta must be in [0, 1) per Skamarock-Klemp.
+    if not (0.0 <= args.acoustic_off_centering < 1.0):
         raise SystemExit(
-            f"error: --dt rejected: must be positive, got {args.dt!r}"
+            f"error: --acoustic-off-centering rejected: must be in "
+            f"[0, 1), got {args.acoustic_off_centering!r}"
         )
     # iter-69: positive-int guards for grid dims + substep counts.
     # Without these, ``--nx 0`` would crash deep in plane_mpi
