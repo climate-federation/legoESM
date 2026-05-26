@@ -222,6 +222,56 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 44
+
+**C72 30-day nightly regression test landed + Codex caught a HIGH
+in the shared _run_rce helper (timeout=600 vs measured 2373 s).**
+
+Codex iter-22 review (back at iter-22) flagged that the iter-13
+dt=75 ladder branch (N=49..72) was empirically anchored at N=49
+only — the C48 boundary. iter-26 closed the upper-end gap by
+running C72 30-day to completion (dt=75, mean_T_sfc=299.81 K,
+max\|v\|=17.85 m/s, wall=2373 s). Until iter-44 that measurement
+had **no regression test** — only the C48 + C96 30-day or 2-day
+slow tests gated CI, neither of which exercises the C72
+dycore-specific stability profile.
+
+iter-44 adds ``test_c72_30day_nightly_validation`` mirroring the
+``test_c48_30day_nightly_validation`` pattern.
+
+**Codex iter-44 review** caught 1 HIGH + 2 MEDIUM + 1 LOW:
+
+* **HIGH** — ``_run_rce`` hard-coded ``timeout=600``. iter-26
+  measured C72 wall=2373 s, so the new test would HANG/KILL
+  the run before completion. Fixed: added ``timeout_s``
+  parameter to ``_run_rce`` (defaults to 600 for the existing
+  2-day smokes); C72 nightly passes ``timeout_s=4800`` (2x
+  cushion on the measured wall).
+* **MEDIUM#1** — test claimed "iter-13 auto-dt=75" but never
+  asserted the dt actually used. Fixed: added
+  ``dt_used = float(fields.get("dt", "nan"))`` + ``assert dt_used
+  == 75.0`` so a silent ladder drift is caught even when the
+  envelope check still passes.
+* **MEDIUM#2** — ``_assert_rce_pass`` reads ``notes`` which only
+  carries the final-day max\|v\|. A mid-run CFL spike that
+  recovered by day 30 would slip through. Fixed: added a
+  ``mean_timeseries.csv`` peak-max-wind scan with a 25 m/s cap
+  before the helper's last-day check. Tolerates column-name
+  drift via lowercase keyword match.
+* **LOW** — docstring referenced "C96 nightly" which doesn't
+  exist. Fixed: clarified to "2-day C96 slow smoke
+  (test_rce_2day_smoke_c96_slow)".
+
+**Verified**:
+* ``pytest -m 'not slow' tests/atmosphere/hydrostatic/
+  test_rce_cross_grid_smoke.py``: 5 PASS in 211 s (no
+  regression).
+* New slow test collected: 1 new (``test_c72_30day_nightly_validation``).
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-44 closing the
+iter-22 C72-upper-end empirical gap as a structural regression),
+R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 43
 
 **Hardened ``physics_schedule`` against pathological inputs (Codex

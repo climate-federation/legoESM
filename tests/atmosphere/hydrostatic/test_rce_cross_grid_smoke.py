@@ -24,8 +24,16 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 RUN_RCE = REPO_ROOT / "scripts" / "run_rce.py"
 
 
-def _run_rce(grid_type, discretization, resolution, days, output_dir):
-    """Invoke scripts/run_rce.py with the iter-12-validated CLI."""
+def _run_rce(grid_type, discretization, resolution, days, output_dir,
+             timeout_s=600):
+    """Invoke scripts/run_rce.py with the iter-12-validated CLI.
+
+    iter-44 Codex HIGH fix: hard-coded ``timeout=600`` was killing
+    the C72 30-day nightly (iter-26 measured 2373 s wall) and the
+    C48 30-day nightly (iter-15 measured 500 s, occasionally
+    spilling past 600 on a busy box). ``timeout_s`` parameter lets
+    each test pick its own ceiling.
+    """
     env = os.environ.copy()
     # FORCE JAX_PLATFORMS=cpu (override exported value); iter-7
     # documented Metal MLIR crashes on spectral/voronoi/latlon-cgrid.
@@ -42,7 +50,7 @@ def _run_rce(grid_type, discretization, resolution, days, output_dir):
         "--output", str(output_dir),
     ]
     result = subprocess.run(
-        cmd, env=env, capture_output=True, text=True, timeout=600,
+        cmd, env=env, capture_output=True, text=True, timeout=timeout_s,
     )
     return result
 
@@ -266,3 +274,99 @@ def test_c48_30day_nightly_validation(tmp_path):
     # iter-15 measured) to absorb run-to-run variation while still
     # catching slow CFL crashes that the 2-day smoke missed.
     _assert_rce_pass(out_dir, label="C48 30-day", temp_tol=1.0, max_v_cap=25.0)
+
+
+@pytest.mark.slow
+def test_c72_30day_nightly_validation(tmp_path):
+    """SLOW nightly test (~40 min wall on M5 Pro): runs C72 RCE for
+    30 days at iter-13 auto-dt=75 and asserts the iter-26 measured
+    PASS envelope.
+
+    iter-26 measured:
+        dt                = 75 s
+        final mean_T_sfc  = 299.81 K (−0.19 from IC = 300.0 K)
+        max\\|v\\|        = 17.85 m/s
+        wall              = 2373 s
+
+    Codex iter-22 review flagged that the iter-13 dt=75 branch
+    (N=49..72) was empirically anchored at N=49 only (the C48
+    boundary) — iter-26 closed the upper-end gap by measuring C72
+    directly. This test locks that measurement as a regression
+    contract so a future ladder bump that re-tunes the dt=75
+    branch must update this test in the same PR.
+
+    Skipped by default (`@pytest.mark.slow`). Run nightly via:
+        pytest -m slow tests/atmosphere/hydrostatic/
+
+    Catches slow CFL growth past day 10 that the 2-day C96 slow
+    smoke (test_rce_2day_smoke_c96_slow) and the C48 30-day nightly
+    (test_c48_30day_nightly_validation) cannot expose at C72
+    specifically.
+    """
+    out_dir = tmp_path / "c72_30d"
+    # iter-44 Codex HIGH: iter-26 measured 2373 s wall on M5 Pro.
+    # 4800 s gives a 2x cushion on slower runners + a hang guard.
+    result = _run_rce(
+        grid_type="cubed_sphere",
+        discretization="cdgrid",
+        resolution=72,
+        days=30,
+        output_dir=out_dir,
+        timeout_s=4800,
+    )
+    if result.returncode != 0:
+        pytest.fail(
+            f"C72 30-day at iter-13 auto-dt=75 failed: "
+            f"rc={result.returncode}"
+            f"\nstdout tail:\n{result.stdout[-2000:]}"
+            f"\nstderr tail:\n{result.stderr[-1000:]}"
+        )
+    # iter-44 Codex MEDIUM#1: lock the dt actually used. iter-13/26
+    # production contract is dt=75 for N in (48, 72]. If a future
+    # refactor of auto_dt_rce silently changes the ladder, the
+    # envelope check below might still pass but the test would no
+    # longer be validating the dt=75 branch.
+    fields = _parse_results(out_dir)
+    assert fields is not None, "C72 30-day did not produce results.txt"
+    dt_used = float(fields.get("dt", "nan"))
+    assert dt_used == 75.0, (
+        f"C72 30-day: dt={dt_used} != 75.0 (the iter-13/26 dt=75 "
+        f"ladder branch). auto_dt_rce ladder may have drifted; "
+        f"update both the ladder + this test together."
+    )
+    # iter-44 Codex MEDIUM#2: also check max|v| PEAK across the
+    # 30-day timeseries, not just the final day. The
+    # ``_assert_rce_pass`` helper reads ``notes`` (last-day-only).
+    # A CFL crash that recovers by day 30 would slip through; iter-26
+    # measured a monotone rise to ~18 m/s but a regression that
+    # spikes to 100+ at day 15 and damps back by day 30 would not.
+    mean_csv = out_dir / "mean_timeseries.csv"
+    if mean_csv.exists():
+        import csv
+        peak_v = 0.0
+        with open(mean_csv) as fh:
+            for row in csv.DictReader(fh):
+                # tolerate column-name drift
+                key = next(
+                    (k for k in row if "max" in k.lower()
+                     and ("v" in k.lower() or "wind" in k.lower())),
+                    None,
+                )
+                if key is not None:
+                    try:
+                        peak_v = max(peak_v, abs(float(row[key])))
+                    except (TypeError, ValueError):
+                        pass
+        assert peak_v < 25.0, (
+            f"C72 30-day: peak max|v|={peak_v:.2f} across the "
+            f"30-day timeseries exceeds 25 m/s cap. A mid-run CFL "
+            f"spike that recovered by day 30 would slip past the "
+            f"notes-line (last-day-only) check; this assertion "
+            f"catches it."
+        )
+    # Tighter envelope than the 2-day C96 smoke: iter-26 measured
+    # C72 30-day at mean_T_sfc=299.81 (Δ=-0.19), max|v|=17.85.
+    # Allow ±1 K (5x iter-26 |Δ|) + max|v| < 25 m/s (1.4x iter-26
+    # measured) — the same generous-but-meaningful margin used for
+    # the C48 nightly. Catches slow CFL growth at C72 specifically.
+    _assert_rce_pass(out_dir, label="C72 30-day", temp_tol=1.0, max_v_cap=25.0)
