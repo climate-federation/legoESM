@@ -222,6 +222,47 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 34
+
+**Cross-grid wrapper dt-override regression test landed.**
+
+iter-32 hard-coded `--dt 150` for C48 + T42 in the AMIP wrapper;
+iter-33 added `--dt 60` for voronoi V6. These hard-coded values
+sit independently of the iter-24 `legoesm.driver.rce_dt.auto_dt_rce`
+central ladder. A future iter that re-tunes the ladder (e.g. a
+C48 re-measurement) would silently leave the wrapper's hard-coded
+values stale.
+
+New test
+`tests/atmosphere/hydrostatic/test_cross_grid_wrapper_dt_overrides.py`:
+* Parses the AMIP wrapper's `GRID_TABLE=(...)` block via regex,
+  extracts each (grid_type, N, dt_override) row.
+* Asserts every non-empty override sits within 0.5× — 2.0× of the
+  central ladder value for the same (grid_type, N). Catches the
+  silent-staleness pattern.
+* Voronoi gets a special case: override MUST be TIGHTER than the
+  ladder (because the wrapper deliberately tightens past the
+  central ladder per the smoke-test note on MPAS instability).
+* Also locks the RCE wrapper's 4-field `GRID_TABLE` contract
+  (iter-24 refactor moved dt selection into `run_rce.py`; a
+  wrapper change that re-adds explicit overrides should refresh
+  the test).
+
+**Tests**: 2/2 PASS in 11 s. Combined with iter-33's 9 tests in
+`test_rce_cross_grid_dt_defaults.py`, the cross-grid dt contract
+is now structurally regression-protected at four layers:
+
+1. iter-24 per-N exact-boundary tests (lock specific ladder values)
+2. iter-28 2×-CFL envelope test (catches gross drift)
+3. iter-29 dx² fit test (catches scaling drift)
+4. iter-34 wrapper-override-vs-ladder test (catches wrapper staleness)
+
+**C96 30-day at dt=37 still running** (65+ min CPU; day 5 still
+not printed — slow on M5 Pro at this resolution).
+
+**R-roadmap status**: R1-R8, R10 ✓ (with iter-34 wrapper-override
+regression), R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 33
 
 **Codex iter-31/32 review caught 1 HIGH + 2 MEDIUM — fixed two now.**
