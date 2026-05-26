@@ -24,8 +24,58 @@ Empirical lineage (full table in CRM_implementation.md iter-12..26):
   gaussian T21:      dt=600 PASS (30-day, iter-12)
 
 iter-21: N>96 RAISES (silent extrapolation hid the iter-20 mistake).
+
+Empirical scaling (iter-28 fit on the cubed_sphere ladder)
+----------------------------------------------------------
+Fitting ``ln(dt) = α · ln(dx) + c`` over C24, C48, C72, C96 yields
+α ≈ 2.0 — i.e. ``dt ∝ dx²`` rather than the linear ``dt ∝ dx``
+expected from advective CFL. The destabilising mode in our RCE
+setup is consistent with a *diffusive* CFL scaling, which matches
+the inverse-square scaling observed in the empirical ladder. This
+is the structural reason the iter-13 inverse-linear extrapolation
+(``dt=75`` at C96) was too loose: linear-CFL undershoots, diffusive-
+CFL gets the right scaling.
+
+The empirical ladder is preserved because (a) the iter-12..26
+measurements explicitly bracket each branch with PASS/BLOWUP
+evidence at the boundary, and (b) wrapping in a formula would
+hide the per-measurement provenance. The reference function
+:func:`empirical_dt_dx2` is provided for diagnostic use only.
 """
 from __future__ import annotations
+
+from legoesm.core.cfl import (
+    estimate_min_dx_cubed_sphere, estimate_min_dx_gaussian,
+)
+
+
+# Empirical anchor (iter-12 C24 measurement): dt=600 s at dx≈240753 m.
+# Other points (C48 dt=150, C72 dt=75, C96 dt=37) all sit on the same
+# dt ∝ dx² curve within ±15 %.
+_DT_DX2_K = 600.0 / (240753.0 ** 2)  # s / m² ≈ 1.04e-8
+
+
+def empirical_dt_dx2(dx_min: float) -> float:
+    """Reference dt from the iter-28 empirical ``dt ∝ dx²`` fit.
+
+    Diagnostic only. The actual production picks come from
+    :func:`auto_dt_rce` so each branch is anchored to a specific
+    measurement (iter-12 .. iter-26) rather than an extrapolation.
+    Use this function to compare an alternative resolution against
+    the ladder before adding it.
+
+    Parameters
+    ----------
+    dx_min : float
+        Minimum grid spacing [m]. For cubed_sphere use
+        :func:`legoesm.core.cfl.estimate_min_dx_cubed_sphere(N)`.
+
+    Returns
+    -------
+    dt : float
+        Recommended dt [s] from the empirical fit.
+    """
+    return _DT_DX2_K * dx_min ** 2
 
 
 def auto_dt_rce(grid_type: str, resolution: int) -> float:

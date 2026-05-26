@@ -222,6 +222,51 @@ sooner than bare-dycore (separate radiation tendency mag, surface flux,
 Kessler q-tendency); start R3 (dt-stability regression test) +
 R4 (Smag in halo path).
 
+### 2026-05-26 — iter 29
+
+**Empirical `dt ∝ dx²` scaling identified + locked in.**
+
+Fitting ``ln(dt) = α · ln(dx) + c`` over the iter-12..26 cubed_sphere
+measurements (C24..C96) yields **α ≈ 2.0**:
+
+| N  | dx_min [m] | ladder dt | fit dt | ratio |
+|----|------------|-----------|--------|-------|
+| 24 | 240753     | 600.0     | 600.0  | 1.00  |
+| 48 | 120376     | 150.0     | 150.0  | 1.00  |
+| 72 | 80251      | 75.0      | 66.7   | 1.13  |
+| 96 | 60188      | 37.0      | 37.5   | 0.99  |
+
+The destabilising mode in our RCE setup is consistent with a
+**diffusive** CFL (dt ∝ dx²), NOT the advective dt ∝ dx that the
+iter-13 ladder originally assumed. This is the structural reason
+the iter-13 inverse-linear extrapolation (dt=75 at C96) was too
+loose — linear-CFL undershoots the actual constraint.
+
+The empirical ladder stays as the source of truth (per-branch
+provenance pinned to specific iter-12..26 measurements), but
+``rce_dt.py`` now exposes a diagnostic ``empirical_dt_dx2(dx_min)``
+function for cross-checking proposed new resolutions before
+adding them.
+
+**New regression test**: ``test_ladder_matches_empirical_dt_dx2_fit``
+asserts every cubed_sphere ladder value sits within 30% of the
+dx² fit. Catches structural drift (e.g. accidentally halving
+instead of quartering past N=96).
+
+**Status**: 8/8 PASS in 8 s.
+* The iter-28 ``test_auto_dt_rce_lies_inside_cfl_envelope``
+  catches gross drift (>2× gravity-wave CFL).
+* The iter-29 ``test_ladder_matches_empirical_dt_dx2_fit`` catches
+  structural drift (>30% off the empirical dx² fit).
+* The iter-24 per-N boundary tests catch exact-value drift.
+
+Three layers of regression coverage for the auto-dt ladder.
+
+**C96 30-day at dt=37 still running** (22 min CPU; day 5 imminent).
+
+**R-roadmap status**: R1-R8, R10 ✓ (now with iter-29 structural
+dx² scaling test), R6 ✓. F9 platform-blocked.
+
 ### 2026-05-26 — iter 28
 
 **Cross-grid plotter Metal pin + CFL-envelope structural test**

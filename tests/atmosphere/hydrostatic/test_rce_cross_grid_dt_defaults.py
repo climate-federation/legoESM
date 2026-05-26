@@ -121,6 +121,37 @@ def test_auto_dt_rce_lies_inside_cfl_envelope():
             )
 
 
+def test_ladder_matches_empirical_dt_dx2_fit():
+    """The iter-12..26 measurements give a clean ``dt ∝ dx²`` fit on
+    the cubed_sphere branch (iter-28 finding). This test asserts the
+    ladder values agree with that fit within 30%, locking in the
+    structural scaling.
+
+    Tightens the iter-28 "2×-CFL envelope" check from a sanity
+    backstop into a structural regression: a future ladder change
+    that breaks the dx² scaling (e.g. a halving past N=96 instead
+    of quartering) will FAIL here.
+
+    30% tolerance reflects iter-12..26 measurements: actual ratios
+    of ladder dt to the empirical fit are 1.00 (C24 anchor), 1.20
+    (C48), 0.98 (C72), 1.18 (C96). 30% is double the largest
+    observed deviation.
+    """
+    from legoesm.core.cfl import estimate_min_dx_cubed_sphere
+    from legoesm.driver.rce_dt import empirical_dt_dx2
+    for N in (24, 48, 72, 96):
+        dx = estimate_min_dx_cubed_sphere(N)
+        fit_dt = empirical_dt_dx2(dx)
+        ladder_dt = auto_dt_rce("cubed_sphere", N)
+        rel = ladder_dt / fit_dt
+        assert 0.70 < rel < 1.30, (
+            f"C{N}: ladder dt={ladder_dt}, empirical-fit dt={fit_dt:.1f}, "
+            f"ratio={rel:.2f} outside [0.7, 1.3]. iter-28 documented the "
+            "dt ∝ dx² scaling; a 30%+ deviation means either the ladder "
+            "or the fit anchor has shifted — bisect against rce_dt.py."
+        )
+
+
 def test_auto_dt_rce_is_public_api():
     """auto_dt_rce must be re-exported from ``legoesm.driver`` so
     callers can do ``from legoesm.driver import auto_dt_rce`` instead
