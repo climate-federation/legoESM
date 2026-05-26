@@ -134,6 +134,60 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 66
+
+**Codex review of iter-52 helpers unit tests caught HIGH in
+``_assert_max_wind_peak_below`` (NaN silent-pass).**
+
+iter-52 unit-tested the iter-46 helpers but the helpers themselves
+were never holistically Codex-reviewed since iter-46. iter-66
+ran a fresh adversarial pass and caught:
+
+* **HIGH** — ``float("nan")`` parses successfully and
+  ``max(0.0, nan)`` returns ``0.0`` in CPython (NaN-naive
+  comparison). Pre-iter-66 helper would set
+  ``seen_max_wind=True`` (iter-46 vacuous-pass guard satisfied)
+  yet leave ``peak_v=0.0`` → ``0.0 < cap`` is True → SILENT
+  VACUOUS PASS against the cap check.
+
+**Fix** (``test_rce_cross_grid_smoke.py:_assert_max_wind_peak_below``):
+* Added ``math.isfinite()`` guard before updating
+  ``seen_max_wind``/``peak_v``. NaN rows are now SKIPPED (don't
+  count as parseable for the iter-46 guard) so an all-NaN csv
+  trips ``"no parseable finite rows"`` instead of vacuously
+  passing.
+
+**Two new unit tests**:
+* ``test_assert_max_wind_peak_below_all_nan_rows_rejected`` —
+  all-NaN csv → AssertionError on the iter-46 "no parseable" path.
+* ``test_assert_max_wind_peak_below_mixed_nan_and_finite`` —
+  mixed NaN + finite rows: helper uses finite values only;
+  asserts both PASS at cap=25 + FAIL at cap=10 (which would
+  silent-pass under the pre-iter-66 bug because peak_v would
+  stay 0.0).
+
+**Codex iter-66 MEDIUM + LOW deferred**:
+* MEDIUM — CSV header whitespace (`" max_wind "`): unlikely
+  schema; would only matter if `run_rce.py` regressed in a
+  specific way. Defer.
+* LOW — non-numeric dt raises ValueError vs AssertionError:
+  cosmetic style inconsistency; current message still informative.
+  Defer.
+
+**Tests**: 18/18 PASS in 2.8 s (was 16). 2 new tests + iter-66
+NaN guard verified.
+
+**R-roadmap status**: R1-R8, R10, R12 ✓ (with iter-66 closing the
+NaN silent-pass risk in the iter-46 helpers). F9 platform-blocked.
+
+DOD item 5 progress: helper-side now has 0 HIGH + 0 MEDIUM
+findings outstanding (Codex iter-66 LOW noted but deferred per
+cosmetic).
+
+Test inventory (post-iter-66): 18 hydrostatic helpers unit
+(was 16) + 12 plane CRM helpers unit (iter-54) + ... full
+inventory in iter-64.
+
 ### 2026-05-26 — iter 65
 
 **Convert ValueError from physics_schedule to SystemExit (Codex iter-55

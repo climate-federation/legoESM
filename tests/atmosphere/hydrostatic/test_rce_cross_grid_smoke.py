@@ -199,17 +199,26 @@ def _assert_max_wind_peak_below(out_dir, label, cap):
             f"run_rce.py:668-676 schema may have changed; if "
             f"intentional, update this test."
         )
+        # iter-66 Codex HIGH fix: ``float("nan")`` parses successfully
+        # but ``max(0.0, nan)`` returns ``0.0`` in CPython (NaN-naive
+        # comparison) — would set seen_max_wind=True yet leave
+        # peak_v=0.0 → silent vacuous pass. Reject NaN explicitly
+        # via ``math.isfinite``.
+        import math
         for row in reader:
             try:
-                peak_v = max(peak_v, abs(float(row["max_wind"])))
+                val = abs(float(row["max_wind"]))
+                if not math.isfinite(val):
+                    continue
+                peak_v = max(peak_v, val)
                 seen_max_wind = True
             except (TypeError, ValueError):
                 pass
     assert seen_max_wind, (
         f"{label}: mean_timeseries.csv at {mean_csv} had no "
-        f"parseable ``max_wind`` rows (header-only or all "
-        f"unparseable values). The cap check would otherwise pass "
-        f"vacuously against peak_v=0.0."
+        f"parseable finite ``max_wind`` rows (header-only, all "
+        f"unparseable, or all NaN). The cap check would otherwise "
+        f"pass vacuously against peak_v=0.0."
     )
     assert peak_v < cap, (
         f"{label}: peak max|v|={peak_v:.2f} across the full "

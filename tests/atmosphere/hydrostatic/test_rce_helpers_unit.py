@@ -191,3 +191,36 @@ def test_assert_max_wind_peak_below_unparseable_rows_rejected(tmp_path):
     )
     with pytest.raises(AssertionError, match="no parseable"):
         _assert_max_wind_peak_below(out, label="bad-data", cap=25.0)
+
+
+def test_assert_max_wind_peak_below_all_nan_rows_rejected(tmp_path):
+    """iter-66 Codex HIGH fix: ``float("nan")`` parses successfully
+    but ``max(0.0, nan)`` returns 0.0 in CPython (NaN-naive
+    comparison) — pre-iter-66 helper would set seen_max_wind=True
+    yet leave peak_v=0.0 → silent vacuous pass against cap.
+    The math.isfinite guard now rejects NaN rows, falling back to
+    the same "no parseable finite rows" assertion.
+    """
+    out = _write_timeseries(
+        tmp_path,
+        [(1, "nan"), (2, "nan"), (3, "nan")],
+    )
+    with pytest.raises(AssertionError, match="no parseable"):
+        _assert_max_wind_peak_below(out, label="nan-rows", cap=25.0)
+
+
+def test_assert_max_wind_peak_below_mixed_nan_and_finite(tmp_path):
+    """Mixed NaN + finite rows: helper must use the finite values
+    only. A regression that re-introduced max(0.0, nan)=0.0 would
+    pass here vacuously (NaN row encountered first → seen_max_wind
+    + peak_v=0.0 stays at 0)."""
+    out = _write_timeseries(
+        tmp_path,
+        [(1, "nan"), (2, 5.0), (3, "nan"), (4, 12.0)],
+    )
+    # peak finite value is 12.0; cap 25 → pass.
+    _assert_max_wind_peak_below(out, label="mixed-nan", cap=25.0)
+    # peak finite value is 12.0; cap 10 → fail (would silent-pass
+    # under the pre-iter-66 bug).
+    with pytest.raises(AssertionError, match="peak max"):
+        _assert_max_wind_peak_below(out, label="mixed-nan-fail", cap=10.0)
