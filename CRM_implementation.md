@@ -149,6 +149,35 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-26 — iter 90
+
+**Opt-in iter-89 ``max_v_floor`` on the fast 2-day cross-grid smokes
++ C96 2-day slow smoke.**
+
+iter-89 added the parameter; iter-90 wires it into the actual fast-
+suite test sites that use ONLY ``_assert_rce_pass`` (no iter-88
+peak-scan complement):
+
+* ``test_rce_2day_smoke_passes`` parametrize (5 grids):
+  ``max_v_floor=0.1``.
+* ``test_rce_2day_smoke_c96_slow``: ``max_v_floor=0.1``.
+
+The 30-day nightlies already have iter-88 ``min_floor=0.5`` on the
+peak-scan path; adding the same on the final-day notes path would
+be redundant. Skip.
+
+iter-13 C48 day-2 measured max|v|≈1.7 m/s → 0.1 floor gives ~17×
+safety margin while catching all-zero regressions.
+
+**Verified**: collection clean, 58 tests collected post-opt-in
+(was 58 — no count change since parametric expansion shape is
+unchanged).
+
+**R-roadmap status**: R1-R8, R10, R12 ✓. F9 platform-blocked.
+
+iter-46/66/87/88/89/90 collectively close + actively-enforce the
+entire vacuous-pass risk surface on EVERY ``_assert_*`` test site.
+
 ### 2026-05-26 — iter 89
 
 **Symmetric ``max_v_floor`` on ``_assert_rce_pass`` (mirror of

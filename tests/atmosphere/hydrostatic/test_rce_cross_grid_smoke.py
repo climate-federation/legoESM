@@ -87,6 +87,11 @@ def test_rce_2day_smoke_passes(tmp_path, grid_type, discretization, resolution):
         out_dir,
         label=f"{grid_type}/{discretization}@{resolution}",
         temp_tol=1.0, max_v_cap=50.0,
+        # iter-90: opt-in iter-89 activity floor. iter-13 C48 day-2
+        # measured max|v|≈1.7 m/s; 0.1 m/s gives 17x safety margin
+        # while catching all-zero (broken dycore) regressions that
+        # the 50 m/s cap + 1 K temp_tol would otherwise pass.
+        max_v_floor=0.1,
     )
 
 
@@ -130,7 +135,10 @@ def test_rce_2day_smoke_c96_slow(tmp_path):
     # The dt-assertion below catches that drift at the 2-day point.
     _assert_dt_used(out_dir, label="C96 2-day", expected_dt=37.0)
     _assert_max_wind_peak_below(out_dir, label="C96 2-day", cap=50.0)
-    _assert_rce_pass(out_dir, label="C96 2-day", temp_tol=1.0, max_v_cap=50.0)
+    _assert_rce_pass(
+        out_dir, label="C96 2-day", temp_tol=1.0, max_v_cap=50.0,
+        max_v_floor=0.1,  # iter-90 activity floor
+    )
 
 
 @pytest.mark.slow
