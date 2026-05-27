@@ -395,14 +395,24 @@ def set_halo_backend(backend: str, topology=None) -> None:
         ``"spmd"`` uses ``shard_map`` + ``all_gather`` for explicit
         multi-GPU collectives (set via
         :func:`parallel.cubesphere_exchange.activate_spmd_halo_backend`).
-    topology : CommTopology, optional
-        Required when ``backend="mpi"``.
+    topology : CommTopology or LatLonBandLayout, optional
+        Required when ``backend="mpi"``.  Cubed-sphere passes a
+        :class:`~legoesm.parallel.comm.CommTopology`; the lat-lon
+        band path passes a
+        :class:`~legoesm.parallel.latlon_mpi.LatLonBandLayout`.  The
+        per-grid ``pad_halo*`` functions branch on the topology's
+        type, so a single backend slot serves both grids and the
+        conservation reductions' ``_is_distributed()`` gate fires
+        uniformly.
     """
     global _halo_backend, _mpi_topology
     if backend not in ("local", "mpi", "spmd"):
         raise ValueError(f"Unknown halo backend: {backend!r}")
     if backend == "mpi" and topology is None:
-        raise ValueError("CommTopology is required for MPI halo backend")
+        raise ValueError(
+            "MPI halo backend requires a topology "
+            "(CommTopology for cubed-sphere, LatLonBandLayout for lat-lon)."
+        )
     _halo_backend = backend
     _mpi_topology = topology
 
@@ -410,6 +420,18 @@ def set_halo_backend(backend: str, topology=None) -> None:
 def get_halo_backend() -> str:
     """Return the current halo exchange backend name."""
     return _halo_backend
+
+
+def get_mpi_topology():
+    """Return the active MPI topology object (or ``None``).
+
+    Cubed-sphere callers receive a
+    :class:`~legoesm.parallel.comm.CommTopology`; lat-lon callers
+    receive a
+    :class:`~legoesm.parallel.latlon_mpi.LatLonBandLayout`.  Each
+    grid's halo-pad dispatch checks the type before consuming it.
+    """
+    return _mpi_topology
 
 
 # ==============================================================================

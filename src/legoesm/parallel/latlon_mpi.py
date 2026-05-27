@@ -325,6 +325,68 @@ def exchange_halo_latlon(
 
 
 # ============================================================================
+# Backend-dispatched pad_halo_latlon implementation
+# ============================================================================
+#
+# Used by :mod:`legoesm.grids.halo_latlon` when the global halo
+# backend is ``"mpi"`` and the active topology is a
+# :class:`LatLonBandLayout`.  Composes the existing
+# :func:`exchange_halo_latlon` (lat MPI sendrecv + boundary pole-fold)
+# with a periodic-lon wrap that every rank performs locally.  Output
+# shape matches the serial :func:`legoesm.grids.halo_latlon.pad_halo_latlon`
+# family — operators stay backend-oblivious.
+#
+# This is the architectural reuse point the user asked for: no
+# parallel registry, no operator-side branching, no duplicate
+# halo-machinery.  The cubed-sphere precedent
+# (``set_halo_backend`` → ``_halo_backend`` global → ``pad_halo``
+# dispatch) is mirrored exactly.
+
+
+def _pad_halo_latlon_mpi(
+    data, layout: LatLonBandLayout, halo: int = 1,
+    is_vector_v: bool = False,
+):
+    """MPI variant of :func:`legoesm.grids.halo_latlon.pad_halo_latlon`.
+
+    Step 1 — periodic lon wrap (same on every rank; every rank owns
+    the full longitude axis).  This matches the serial code's
+    lon-pad order so the operator's downstream stencil sees the same
+    layout under both backends.
+
+    Step 2 — lat halo via :func:`exchange_halo_latlon`:
+      - Boundary ranks (``layout.<side>_rank is None``) apply the
+        pole-fold convention used by the serial
+        :func:`legoesm.grids.halo_latlon.pad_halo_latlon` (mirror +
+        180° lon shift + sign flip for vectors).
+      - Interior partition cuts MPI-sendrecv with the neighbour rank.
+
+    The result has the same shape and semantics as the serial
+    helper.  Under MPI the lat axis is the rank's band plus the halo
+    rows; the lon axis is the full global lon plus its periodic
+    halo, identical to serial.
+    """
+    if data.ndim not in (2, 3):
+        raise ValueError(
+            f"_pad_halo_latlon_mpi: data.ndim must be 2 or 3, got {data.ndim}"
+        )
+    # Step 1: periodic lon wrap (local on every rank).
+    if data.ndim == 2:
+        lon_padded = jnp.pad(data, ((0, 0), (halo, halo)), mode="wrap")
+    else:
+        lon_padded = jnp.pad(
+            data, ((0, 0), (halo, halo), (0, 0)), mode="wrap",
+        )
+    # Step 2: lat halo — sendrecv at interior cuts, pole-fold at
+    # boundary ranks.  ``exchange_halo_latlon`` already handles both
+    # cases (single-rank pole-fold + multi-rank MPI sendrecv) and
+    # is AD-safe via ``_get_sendrecv_vjp``.
+    return exchange_halo_latlon(
+        lon_padded, layout, halo=halo, is_vector_v=is_vector_v,
+    )
+
+
+# ============================================================================
 # Scatter / gather
 # ============================================================================
 
