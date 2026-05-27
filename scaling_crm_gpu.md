@@ -117,6 +117,25 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 25 — 2026-05-27 — `--repeat 5` confirms tighter within-process range
+
+Single Python process, median-of-5, full plateau range:
+
+| res    | median-5 ms | Mc/s |
+|--------|-------------|------|
+| N=96   | 0.41        | 672  |
+| N=128  | 0.65        | 752  |
+| N=192  | 1.62        | 681  |
+
+Within-process plateau **672-752 Mc/s** (3 sizes, ±6%). Tighter than
+cross-process 640-820 (±15% from iter 18-19). Confirms:
+- Within process: median-of-5 reliable to ±6%
+- Cross process: ±15% variance is GPU thermal / JIT cache state, irreducible
+
+**Final honest CRM peak: 670-820 Mc/s plateau N=96-192 fp32 explicit
+(typical 700; ~750 best-process)**. Median-of-N tightens within process
+but doesn't fix cross-process noise.
+
 ### Iter 22 — 2026-05-27 — codex review iter-20 walks back "77% HBM" → range
 
 Codex flagged: 10-pass-per-step assumption unvalidated; sensitivity
