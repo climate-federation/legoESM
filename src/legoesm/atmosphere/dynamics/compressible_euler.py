@@ -727,16 +727,6 @@ def acoustic_substeps_semi_implicit(
     beta = euler_config.acoustic_off_centering
     implicit_buoyancy = euler_config.implicit_buoyancy
 
-    # Linearized sound speed squared: c_s^2 = gamma * R_d * T_ref
-    # where T_ref = theta_0 * pi_0 and gamma = c_p / c_v
-    gamma = c_p / c_v
-    T_ref = theta_0 * height_coord.exner_ref  # (nlev,)
-    cs2 = gamma * R_d * T_ref  # (nlev,)
-
-    # Sound speed at half levels (interior): average of adjacent full levels
-    cs2_half = 0.5 * (cs2[:-1] + cs2[1:])  # (nlev-1,)
-    theta_0_half_static = 0.5 * (theta_0[:-1] + theta_0[1:])  # (nlev-1,)
-
     # Extract mutable arrays
     w = state.w.data       # (..., nlev+1)
     theta_p = state.theta_prime.data  # (..., nlev)
@@ -744,36 +734,13 @@ def acoustic_substeps_semi_implicit(
 
     nlev = theta_p.shape[-1]
 
-    # Precompute implicit-buoyancy tridiagonal addends (Klemp-Wilhelmson 1978).
-    # Mean-state dtheta_ref/dz at full levels, then per-half-level kappa.
-    if implicit_buoyancy and nlev > 2:
-        _dz_centered = dz_half[:-1] + dz_half[1:]
-        _inner = (theta_0[:-2] - theta_0[2:]) / _dz_centered
-        _top = (theta_0[0:1] - theta_0[1:2]) / dz_half[0]
-        _bot = (theta_0[-2:-1] - theta_0[-1:]) / dz_half[-1]
-        dtheta_ref_dz = jnp.concatenate([_top, _inner, _bot], axis=-1)  # (nlev,)
-        _kappa = 0.25 * dt_s ** 2 * g / (theta_0_half_static * J[..., None])
-        _d_above = dtheta_ref_dz[:-1]
-        _d_below = dtheta_ref_dz[1:]
-        a_buoy_full = _kappa * _d_above
-        b_buoy_full = _kappa * (_d_above + _d_below)
-        c_buoy_full = _kappa * _d_below
-        _pad_axes_buoy = ((0, 0),) * (a_buoy_full.ndim - 1)
-        a_buoy = jnp.pad(a_buoy_full[..., 1:], (*_pad_axes_buoy, (1, 0)))
-        c_buoy = jnp.pad(c_buoy_full[..., :-1], (*_pad_axes_buoy, (0, 1)))
-    else:
-        a_buoy = None
-        b_buoy_full = None
-        c_buoy = None
-
-    # Precompute tridiagonal matrix coefficients for the implicit w solve.
-    # The implicit equation at interior half-level k (k=1..nlev-1) is:
-    #   -alpha * w[k-1] + (1 + 2*alpha) * w[k] - alpha * w[k+1] = RHS
-    # where alpha = dt_s^2 * cs2_half[k] / dz_k^2 / J^2
-    # But interior half-levels use dz between adjacent full levels.
-    # dz at half-level k is 0.5*(dz[k-1]+dz[k]) for interior levels.
-
+    # Loop-invariant pieces: dz_inner used in the explicit RHS dpi/dz,
+    # and the tridiag bands (alpha + buoyancy) shared across substeps.
+    # Hoisted out of the fori_loop via precompute_si_tridiag_bands.
     dz_inner = 0.5 * (dz[:-1] + dz[1:])  # (nlev-1,)
+    a_tri_pre, b_tri_pre, c_tri_pre = precompute_si_tridiag_bands(
+        height_coord, J, dt_s, g, implicit_buoyancy, nlev=nlev,
+    )
 
     def substep_body(i, carry):
         w_c, theta_p_c, rho_p_c = carry
@@ -798,35 +765,10 @@ def acoustic_substeps_semi_implicit(
         )
 
         # RHS of tridiagonal system: w_old + dt_s * explicit_tendency
-        rhs = w_c[..., 1:-1] + dt_s * dw_dt_inner  # (6,n,n,nlev-1)
+        rhs = w_c[..., 1:-1] + dt_s * dw_dt_inner
 
-        # --- Build tridiagonal coefficients for implicit solve ---
-        # alpha_k = dt_s^2 * cs2_half[k] / (dz_inner[k] * J)^2
-        alpha = dt_s**2 * cs2_half / (dz_inner * J[..., None])**2  # (6,n,n,nlev-1)
-
-        # Sub-diagonal: 0 at k=0, -alpha for k > 0.  Single Pad HLO op
-        # replaces alloc-zeros + scatter.
-        pad_axes_a = ((0, 0),) * (alpha.ndim - 1)
-        a_tri = jnp.pad(-alpha[..., 1:], (*pad_axes_a, (1, 0)))
-
-        # Main diagonal: 1 + alpha + alpha_interior, where alpha_interior
-        # is alpha with the boundary entries zeroed.  This collapses
-        # ``b_tri = 1 + 2*alpha`` + 2 boundary scatters into 1 Pad HLO op
-        # (the slice + Pad share intermediates).
-        # At boundaries (k=0, k=-1) the implicit BC sets w_outside=0 so
-        # the diagonal is 1 + alpha; in the interior it is 1 + 2*alpha.
-        alpha_interior = jnp.pad(alpha[..., 1:-1], (*pad_axes_a, (1, 1)))
-        b_tri = 1.0 + alpha + alpha_interior
-
-        # Super-diagonal: -alpha for k < n_inner-1, 0 at k=-1.  Single
-        # Pad HLO op replaces alloc-zeros + scatter.
-        c_tri = jnp.pad(-alpha[..., :-1], (*pad_axes_a, (0, 1)))
-
-        # Klemp-Wilhelmson 1978: implicit-buoyancy band additions.
-        if implicit_buoyancy and nlev > 2:
-            a_tri = a_tri + a_buoy
-            b_tri = b_tri + b_buoy_full
-            c_tri = c_tri + c_buoy
+        # Tridiag system reused across substeps (loop-invariant).
+        a_tri, b_tri, c_tri = a_tri_pre, b_tri_pre, c_tri_pre
 
         # Solve tridiagonal system
         w_inner_new = thomas_solve_batched(a_tri, b_tri, c_tri, rhs)

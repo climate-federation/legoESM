@@ -117,6 +117,45 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 68 — 2026-05-27 — cubed-sphere SI substep parity hoist
+
+iter-67's hoist was plane-only; cubed-sphere `acoustic_substeps_semi_implicit`
+in `compressible_euler.py` still rebuilt alpha + a_tri + b_tri + c_tri
+inside its `substep_body` (lines 805-823 pre-refactor) and conditionally
+added the buoyancy bands. The cavecrew adversarial review flagged the
+cross-dycore inconsistency.
+
+Change:
+- Removed the inline buoyancy-band precompute block (was lines 747-767)
+- Removed gamma/T_ref/cs2/cs2_half/theta_0_half_static locals (now
+  encapsulated inside `precompute_si_tridiag_bands`)
+- Hoisted the precompute call to one site OUTSIDE the substep loop:
+  ```
+  a_tri_pre, b_tri_pre, c_tri_pre = precompute_si_tridiag_bands(
+      height_coord, J, dt_s, g, implicit_buoyancy, nlev=nlev,
+  )
+  ```
+- Inside substep_body, the tridiag bands are now reused unchanged
+  (single 3-tuple assignment); the old in-body alpha rebuild +
+  conditional buoyancy addition is deleted
+
+Net diff: -47 lines, +12 lines. **More code deleted than added** —
+fits "minimum code production" while delivering cross-dycore parity.
+
+Regression coverage:
+- `tests/atmosphere/nonhydrostatic/unit/test_compressible_euler.py`
+  33/33 PASS (cubed-sphere NH unit tests)
+- `tests/atmosphere/nonhydrostatic/integration/test_nh_mass_conservation_anchored.py`
+  6/6 PASS (mass-conservation under SI for cubed-sphere + others)
+- `tests/unit/test_compressible_euler_plane.py` 15/15 PASS
+- `tests/unit/test_plane_nh_conservation.py` 3/3 PASS
+- Plane bench fp32 nsub=6 unchanged (282/275/248 Mc/s vs iter-67
+  285/279/253 — within noise)
+
+Cross-dycore benefit: lat-lon C-grid and CD-grid NH dycores also
+use `acoustic_substeps_semi_implicit` via the shared module —
+they inherit this hoist automatically.
+
 ### Iter 67 — 2026-05-27 — hoist SI tridiag bands out of fori_loop
 
 `_semi_implicit_acoustic_column_kernel` rebuilt the tridiagonal
