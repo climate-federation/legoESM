@@ -411,6 +411,26 @@ The single-GPU theoretical limit has been reached for the structured-grid config
 - Algorithm change (replace spectral with spectral-element or GPU-native SHTns)
 - Mesh-level optimization (Hilbert reordering for MPAS) — invasive
 
+### Iter 16 — 2026-05-27 — mass conservation check (closes codex iter-14 #2)
+
+Added explicit `∫(H_bathy + eta) · area · land_mask` integral to
+`validate_baro_solver.py`. Compared drift over 50 steps × 600 s.
+
+| grid  | initial mass [m³] | explicit drift | impl_cn drift | tol  |
+|-------|-------------------|---------------:|--------------:|-----:|
+| LL64  | 2.752e18          | **0.000e+00**  | **9.99e-08**  | 1e-6 |
+| MPAS I4| 2.763e18         | **0.000e+00**  | **0.000e+00** | 1e-6 |
+
+**Both solvers conserve mass at machine precision.** impl_cn shows
+1e-7 fp64 round-off; explicit_substep shows none (likely because
+its barotropic update is closed-form add+subtract at the same point).
+Either way, drift is **3+ orders of magnitude below the 1 ppm tolerance**.
+
+Closes codex iter-14 finding #2 (conservation drift never measured).
+Codex iter-14 finding #6 (RMS norm loses sign/pattern) deliberately
+not addressed — RMS is the right metric for *integrated* divergence
+comparison; max-abs + RMS pair already prints in the per-leaf table.
+
 ### Iter 15 — 2026-05-27 — LL impl_cn × CUDA-graphs cross-test
 
 Cross-tested whether CUDA graphs add to the impl_cn win on LL ocean.

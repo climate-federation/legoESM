@@ -74,6 +74,29 @@ def _diff(state_a, state_b) -> dict:
     return out
 
 
+def _ocean_mass(state, grid_or_mesh, kind: str):
+    """Return ∫(H_bathy + eta) · area · land_mask  [m³].
+
+    LL: state.H_bathy (n_lat, n_lon); grid.area (n_lat, n_lon).
+    MPAS: state.bathymetry (nCells,); mesh.areaCell (nCells,).
+    """
+    import jax.numpy as jnp
+    eta = state.eta.data
+    if kind == "latlon":
+        H = state.H_bathy.data
+        mask = state.land_mask.data
+        area = grid_or_mesh.area
+        col = (H + eta) * area * mask
+    else:
+        H = getattr(state, "bathymetry", None)
+        H = H.data if H is not None else getattr(state, "H_bathy").data
+        mask = getattr(state, "land_mask", None)
+        mask = mask.data if mask is not None else jnp.ones_like(eta)
+        area = grid_or_mesh.areaCell
+        col = (H + eta) * area * mask
+    return float(jnp.sum(col))
+
+
 def _step_n(model, state, n: int, dt: float):
     import jax
     @jax.jit
@@ -108,6 +131,9 @@ def main():
         m2, s2, _ = _build_latlon(key, args.precision == "float64",
                                   baro_solver="implicit_cn")
         gridtag = f"LL{args.n_lat}"
+        # m1.grid / m2.grid are the LatLonCGridGeometry built inside the model
+        grid_or_mesh_1 = m1.grid
+        grid_or_mesh_2 = m2.grid
     else:
         key = args.mpas_level
         m1, s1, _ = _build_mpas(key, args.precision == "float64",
@@ -115,6 +141,8 @@ def main():
         m2, s2, _ = _build_mpas(key, args.precision == "float64",
                                 baro_solver="implicit_cn")
         gridtag = f"I{args.mpas_level}"
+        grid_or_mesh_1 = m1.mesh
+        grid_or_mesh_2 = m2.mesh
 
     # Perturb eta. Rest state has u=v=eta=0 so the barotropic solver
     # would do nothing without a kick.
@@ -142,8 +170,19 @@ def main():
 
     print(f"\nValidating {gridtag} {args.precision} over {args.n_steps} "
           f"steps × {args.dt}s = {args.n_steps * args.dt / 3600:.1f} h")
+    # Mass before stepping (same for both — same kicked init)
+    mass0 = _ocean_mass(s1, grid_or_mesh_1, args.grid)
     s1_n = _step_n(m1, s1, args.n_steps, args.dt)
     s2_n = _step_n(m2, s2, args.n_steps, args.dt)
+    mass1 = _ocean_mass(s1_n, grid_or_mesh_1, args.grid)
+    mass2 = _ocean_mass(s2_n, grid_or_mesh_2, args.grid)
+    drift1 = abs(mass1 - mass0) / max(abs(mass0), 1.0)
+    drift2 = abs(mass2 - mass0) / max(abs(mass0), 1.0)
+    print(f"\nMass conservation (∫(H_bathy + eta)·area·land_mask):")
+    print(f"  initial mass  = {mass0:.6e} m³")
+    print(f"  explicit final= {mass1:.6e} m³  drift = {drift1:.3e}")
+    print(f"  impl_cn final = {mass2:.6e} m³  drift = {drift2:.3e}")
+    MASS_DRIFT_TOL = 1e-6  # 1 ppm over 50 baroclinic steps
 
     import jax.numpy as jnp
     diff = _diff(s1_n, s2_n)
@@ -197,6 +236,10 @@ def main():
     if not (finite1 and finite2):
         print("FAIL: a solver produced non-finite state.")
         return 2
+    if max(drift1, drift2) > MASS_DRIFT_TOL:
+        print(f"WARN: mass drift > {MASS_DRIFT_TOL:.0e} (ppm); "
+              f"explicit={drift1:.3e}, impl_cn={drift2:.3e}")
+        return 1
     if max_norm_rel > 0.5:
         print("WARN: integrated norms diverge by >50% — investigate.")
         return 1
