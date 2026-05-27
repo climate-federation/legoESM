@@ -145,6 +145,32 @@ def test_dod_quotes_plateau_window_in_days():
     )
 
 
+def test_dod_quotes_final_dod_mse_drift():
+    """iter-158: ``DOD_FINAL_MSE_DRIFT = 0.01`` is the production
+    final-DOD gate (criterion 2's tighter end-of-run check). DOD
+    section quotes ``< 1 %`` — must stay in sync with the code
+    constant. Pre-iter-158 only DEFAULT_MSE_RELATIVE_DRIFT (5 %)
+    was locked; the production-grade 1 % gate could drift silently.
+
+    iter-109's MSE regex is the model — same int-vs-float tolerance.
+    """
+    mod = _load_summarizer_module()
+    dod = _read_dod_section()
+    pct = mod.DOD_FINAL_MSE_DRIFT * 100.0
+    if pct.is_integer():
+        # ``1`` or ``1.0`` followed by optional whitespace + ``%``.
+        # Word boundary + lookahead reject ``10`` / ``15`` /``11``.
+        pat = rf"\b{int(pct)}(?:\.0+)?\s*%(?!\d)"
+    else:
+        pat = rf"\b{re.escape(f'{pct:g}')}\s*%"
+    assert re.search(pat, dod), (
+        f"DOD section in CRM_implementation.md must quote the active "
+        f"final-DOD MSE drift tolerance ({pct:g} %, from "
+        f"DOD_FINAL_MSE_DRIFT = {mod.DOD_FINAL_MSE_DRIFT}). "
+        f"DOD section does not match pattern {pat!r}."
+    )
+
+
 def test_dod_quotes_summarizer_max_w_threshold():
     """iter-157: DOD criterion 1 says ``max|w| < 50 m/s``; the code
     constant is ``DEFAULT_MAX_W_THRESHOLD_MS = 50.0``. They must stay
