@@ -470,34 +470,39 @@ def test_wrapper_summarizer_fail_allow_downgrade(tmp_path):
 
 
 def test_wrapper_evaluate_dod_threads_into_summarizer(wrapper_text):
-    """iter-103: ``EVALUATE_DOD=1`` must thread ``--evaluate`` into
-    the summarizer invocation. Lock the conditional bash logic so a
-    silent revert is caught by the < 1 s text test before any nightly
-    integration run hits it."""
+    """iter-103 / iter-113: ``EVALUATE_DOD`` must thread the right
+    flag into the summarizer invocation. iter-113 widened to a
+    three-way case:
+
+      EVALUATE_DOD=0      → no flag (default)
+      EVALUATE_DOD=1      → ``--evaluate`` (spinup gate)
+      EVALUATE_DOD=final  → ``--final-dod`` (30-day production gate)
+
+    Lock the bash ``case`` so a silent revert is caught by the
+    < 1 s text test before any nightly hits it."""
     code = _strip_bash_comments(wrapper_text)
-    # 1. The conditional sets EVAL_FLAG="--evaluate" only when EVALUATE_DOD=1.
+    # 1. EVAL_FLAG="" default (else EVAL_FLAG is unset under any
+    #    EVALUATE_DOD other than 1/final, which set -u would abort).
+    assert re.search(r'^\s*EVAL_FLAG\s*=\s*""\s*$', code, re.MULTILINE), (
+        "run_rce_30day.sh missing the ``EVAL_FLAG=\"\"`` default."
+    )
+    # 2. The case statement maps 1 → --evaluate, final → --final-dod.
     assert re.search(
-        r'if\s*\[\s*"\$EVALUATE_DOD"\s*=\s*"1"\s*\]\s*;\s*then\s*\n\s*'
-        r'EVAL_FLAG\s*=\s*"--evaluate"',
+        r'case\s+"\$EVALUATE_DOD"\s+in[\s\S]*?'
+        r'1\)\s*EVAL_FLAG\s*=\s*"--evaluate"[\s\S]*?'
+        r'final\)\s*EVAL_FLAG\s*=\s*"--final-dod"',
         code,
     ), (
-        "run_rce_30day.sh missing the ``if [ \"$EVALUATE_DOD\" = "
-        "\"1\" ]; then EVAL_FLAG=\"--evaluate\" fi`` conditional."
+        "run_rce_30day.sh missing the iter-113 ``case "
+        "\"$EVALUATE_DOD\" in 1) ... ; final) ... esac`` dispatch. "
+        "Without it, EVALUATE_DOD=final cannot reach the new "
+        "--final-dod summarizer flag."
     )
-    # 2. EVAL_FLAG is threaded into the summarizer argv.
+    # 3. EVAL_FLAG is threaded into the summarizer argv.
     assert re.search(r'\$EVAL_FLAG\b', code), (
         "run_rce_30day.sh defines EVAL_FLAG but does not pass it "
-        "into the summarizer invocation. EVALUATE_DOD=1 would be a "
-        "silent no-op."
-    )
-    # 3. EVAL_FLAG default is the empty string (else NO_EVAL=0 still
-    #    passes --evaluate, which would break smoke runs).
-    assert re.search(r'^\s*EVAL_FLAG\s*=\s*""\s*$', code, re.MULTILINE), (
-        "run_rce_30day.sh missing the ``EVAL_FLAG=\"\"`` default. "
-        "Without it, EVALUATE_DOD=0 would still pass --evaluate (the "
-        "EVAL_FLAG variable would be unset, which under set -u "
-        "aborts the wrapper; without set -u it would expand to "
-        "nothing, which is fine, but the contract is explicit)."
+        "into the summarizer invocation. EVALUATE_DOD=1/final would "
+        "be a silent no-op."
     )
 
 
@@ -549,3 +554,81 @@ def test_wrapper_evaluate_dod_allow_summary_failure_downgrades(tmp_path):
     )
     assert res.returncode == 0
     assert "WARN" in res.stderr
+
+
+def test_wrapper_evaluate_dod_final_threads_final_dod_flag(tmp_path):
+    """iter-113: EVALUATE_DOD=final must reach the summarizer as
+    ``--final-dod``. The stub PYBIN echoes its argv so we can
+    verify the flag actually made it through the bash dispatch."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _make_stub(bin_dir / "mpirun", exit_code=0)
+    pybin = bin_dir / "fake_pybin"
+    _make_stub(pybin, exit_code=0)
+    out_dir = tmp_path / "wrapper_out"
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["PYBIN"] = str(pybin)
+    env["DAYS"] = "0"
+    env["NX"] = "4"
+    env["NY"] = "4"
+    env["RANKS"] = "1"
+    env["NO_MASS_FIXER"] = "1"
+    env["ALLOW_SUMMARY_FAILURE"] = "0"
+    env["EVALUATE_DOD"] = "final"
+    res = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+         str(out_dir)],
+        env=env,
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    # The stub PYBIN echo lands in trajectory.txt (the wrapper
+    # redirects > "$OUTPUT/trajectory.txt" 2>&1). Read it back.
+    traj_path = out_dir / "trajectory.txt"
+    assert traj_path.exists(), (
+        f"wrapper did not invoke summarizer; stdout={res.stdout!r} "
+        f"stderr={res.stderr!r}"
+    )
+    text = traj_path.read_text()
+    assert "--final-dod" in text, (
+        f"EVALUATE_DOD=final did NOT reach the summarizer; "
+        f"trajectory.txt={text!r}"
+    )
+    assert "--evaluate" not in text, (
+        f"EVALUATE_DOD=final accidentally also passed --evaluate "
+        f"(should be mutually exclusive); trajectory.txt={text!r}"
+    )
+
+
+def test_wrapper_evaluate_dod_1_threads_evaluate_flag(tmp_path):
+    """iter-113 sibling: EVALUATE_DOD=1 still reaches the summarizer
+    as ``--evaluate`` (back-compat with iter-103)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _make_stub(bin_dir / "mpirun", exit_code=0)
+    pybin = bin_dir / "fake_pybin"
+    _make_stub(pybin, exit_code=0)
+    out_dir = tmp_path / "wrapper_out"
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["PYBIN"] = str(pybin)
+    env["DAYS"] = "0"
+    env["NX"] = "4"
+    env["NY"] = "4"
+    env["RANKS"] = "1"
+    env["NO_MASS_FIXER"] = "1"
+    env["ALLOW_SUMMARY_FAILURE"] = "0"
+    env["EVALUATE_DOD"] = "1"
+    res = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+         str(out_dir)],
+        env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
+        check=False, timeout=30,
+    )
+    traj = (out_dir / "trajectory.txt").read_text()
+    assert "--evaluate" in traj
+    assert "--final-dod" not in traj

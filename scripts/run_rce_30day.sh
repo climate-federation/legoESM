@@ -39,13 +39,17 @@
 #                fix; default 1 for this 30-day RCE wrapper). 0 keeps
 #                the legacy fix_moist_mass_plane ON (use only for
 #                gravity-wave / hydrostatic smokes — not 30-day RCE).
-#   EVALUATE_DOD 1 = pass --evaluate to the post-run summarizer so the
-#                trajectory is graded against the DOD criteria (Wing
-#                2018 plateau CWV range, max|U|_sfc, MSE drift). FAIL
-#                propagates as non-zero wrapper exit unless
-#                ALLOW_SUMMARY_FAILURE=1. Default 0 (smoke runs +
-#                DAYS<10 are usually too short for the plateau check).
-#                Production 30-day runs SHOULD set EVALUATE_DOD=1.
+#   EVALUATE_DOD 0 (default) = skip post-run grading.
+#                1            = pass --evaluate (10-day SPINUP gate,
+#                               5 % MSE drift). Use on DAYS>=10
+#                               smokes / mid-run health checks.
+#                final        = pass --final-dod (30-day PRODUCTION
+#                               gate, 1 % MSE drift, requires
+#                               >=30 days of snapshots). Use on
+#                               the canonical 30-day production
+#                               run — iter-112 contract.
+#                FAIL / INSUFFICIENT propagate as non-zero wrapper
+#                exit unless ALLOW_SUMMARY_FAILURE=1.
 #   ALLOW_SUMMARY_FAILURE  1 = downgrade a non-zero summarizer exit to
 #                a WARN on stderr (wrapper still exits 0). Default 0
 #                propagates the failure as the wrapper's exit code.
@@ -143,16 +147,22 @@ mpirun -np "$RANKS" "$PYBIN" \
 #     for runs aborted before any snapshot landed, where the
 #     summarizer's FileNotFoundError is expected).
 ALLOW_SUMMARY_FAILURE="${ALLOW_SUMMARY_FAILURE:-0}"
-# iter-103: EVALUATE_DOD=1 appends ``--evaluate`` to the summarizer
-# invocation. With that flag set the summarizer exits non-zero on
-# DOD criteria FAIL (e.g. plateau CWV outside Wing 2018 range,
-# max|U|_sfc > 50 m/s, MSE drift > 5 %). Default 0 keeps 1-day
-# smokes / DAYS=0.05 sanity runs non-gated; production 30-day runs
-# should set EVALUATE_DOD=1.
+# iter-103 / iter-113: EVALUATE_DOD threads either ``--evaluate``
+# (spinup 5 % gate) or ``--final-dod`` (production 1 % gate +
+# >=30 days) into the post-run summarizer. Three valid values:
+#   0     (default) — skip the grade step.
+#   1     — spinup gate. 10-day window, 5 % MSE drift tolerance.
+#   final — 30-day production gate (iter-112). 10-day window,
+#           1 % MSE drift tolerance, requires >=30 days of snapshots.
+# Anything else falls through to no flag (also the default). The
+# summarizer's ``--evaluate`` and ``--final-dod`` are mutually
+# exclusive (driver argparse enforces); the case below picks at
+# most one.
 EVAL_FLAG=""
-if [ "$EVALUATE_DOD" = "1" ]; then
-    EVAL_FLAG="--evaluate"
-fi
+case "$EVALUATE_DOD" in
+    1)     EVAL_FLAG="--evaluate" ;;
+    final) EVAL_FLAG="--final-dod" ;;
+esac
 echo "Computing per-day RCE trajectory summary..."
 set +e
 "$PYBIN" "$REPO_ROOT/scripts/summarize_rce_trajectory.py" "$OUTPUT" \
