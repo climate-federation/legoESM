@@ -117,6 +117,35 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 52 — 2026-05-27 — lat-lon C-grid NH tests verify cuSPARSE downstream
+
+Ran `tests/unit/test_compressible_euler_latlon_cgrid.py` — 8/8 PASS:
+- `test_slow_tendencies_shapes_at_rest`
+- `test_slow_tendencies_finite_at_rest`
+- `test_pole_wall_bc_on_dv`
+- `test_rest_state_remains_at_rest_under_one_step`
+- `test_uv_shapes_preserved_through_step`
+- `test_exner_perturbation_zero_at_rest`
+- `test_pgf_zero_at_rest`
+- `test_warm_bubble_drives_upward_motion`
+
+Including the warm-bubble convection test — verifies pressure-gradient
+force + buoyancy physics correctness through the cuSPARSE-replaced
+acoustic substep loop.
+
+**Earlier acoustic-suite (`test_nh_dynamic_exner_post_acoustic_iter337.py`):
+11/11 PASS** including **bit-for-bit baseline tests**:
+- `test_damp_v_baseline_bit_for_bit`
+- `test_damp_w_baseline_bit_for_bit`
+
+cuSPARSE result is **binary-identical** to legacy fori_loop for the
+test scenarios — strongest possible correctness guarantee.
+
+**Total cuSPARSE regression-test green-light: 5 RCEMIP smoke + 11
+nh-dynamic-exner-post-acoustic + 4 plane-NH-density-current + 8
+latlon-cgrid-NH = 28/28 PASS.** dycore-wide correctness preserved
+across 4 NH compressible-Euler dycores.
+
 ### Iter 50 — 2026-05-27 — cuSPARSE benefits 4 NH dycores, not just plane
 
 Audit of all `thomas_solve_batched` callers in `src/legoesm/`:
