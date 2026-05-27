@@ -117,6 +117,25 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 15 — 2026-05-27 — nlev sensitivity (vertical-dim scaling)
+
+Explicit fp32 N=128 dt=0.5 nsub=4 median-3 across nlev:
+
+| nlev | total cells | ms/step | Mc/s | SYPD |
+|------|-------------|---------|------|------|
+|  30  |   491,520   |  0.65   | 757  | 2.11 |
+|  60  |   983,040   |  1.76   | 559  | 0.78 |
+| 120  | 1,966,080   |  3.65   | 538  | 0.37 |
+
+Vertical scaling:
+- nlev 30→60: cells 2×, time 2.7× → throughput drops 26% (kernel-
+  launch overhead amortizes better at higher work)
+- nlev 60→120: cells 2×, time 2.07× → near-ideal linear
+
+CRM throughput stays in 530-760 Mc/s band across 4× vertical range.
+Production LES (nlev=60-80) sits in the middle of plateau. Fine-
+vertical research (120+) only loses ~5% from typical.
+
 ### Iter 14 — 2026-05-27 — explicit acoustic decomposition (where time goes)
 
 Per-stage decomposition of explicit fp32 at peak (N=128, median-3):
