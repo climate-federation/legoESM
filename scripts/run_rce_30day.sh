@@ -283,7 +283,21 @@ fi
 # Three modes: 0 = skip, 1 = best-effort (WARN-on-fail), strict =
 # propagate-on-fail (Codex iter-125 MEDIUM#2 — CI gates that REQUIRE
 # the PNG artefact can opt into propagation).
+# iter-177: reject typo / unrecognised values explicitly (mirroring
+# the iter-114 EVALUATE_DOD typo-rejection). Pre-iter-177 a value
+# like ``Strict`` or ``yes`` silently fell through to the implicit
+# "skip" branch — a user expecting strict propagation got a silent
+# no-PNG instead, with no error to surface the mismatch.
 EMIT_TRAJECTORY_PNG="${EMIT_TRAJECTORY_PNG:-0}"
+case "$EMIT_TRAJECTORY_PNG" in
+    0|1|strict) ;;
+    *)
+        echo "ERROR: EMIT_TRAJECTORY_PNG='$EMIT_TRAJECTORY_PNG' not recognised." >&2
+        echo "  Valid values: 0 (default, skip), 1 (best-effort," >&2
+        echo "                WARN-on-fail), strict (propagate-on-fail)." >&2
+        exit 1
+        ;;
+esac
 if [ "$EMIT_TRAJECTORY_PNG" = "1" ] || [ "$EMIT_TRAJECTORY_PNG" = "strict" ]; then
     echo "Rendering trajectory PNG (mode=$EMIT_TRAJECTORY_PNG)..."
     set +e
