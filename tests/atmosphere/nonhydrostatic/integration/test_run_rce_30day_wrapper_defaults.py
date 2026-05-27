@@ -1,4 +1,5 @@
-"""Regression test for the plane CRM 30-day wrapper script defaults.
+"""Regression tests for the plane CRM 30-day wrapper script defaults
+and post-run summarizer failure propagation behaviour.
 
 Locks the iter-14 production-measured config as a contract on
 ``scripts/run_rce_30day.sh`` env-var defaults. iter-58 found this
@@ -324,3 +325,139 @@ def test_wrapper_summarizer_failure_propagates(wrapper_text):
         "branch. Without it, the wrapper exits 0 when the summarizer "
         "fails — the exact iter-99 Codex MEDIUM#1 finding."
     )
+
+
+# iter-101 (Codex iter-100 LOW): behavioural regression test that
+# actually executes the wrapper bash with stubbed mpirun + summarizer
+# and asserts the exit-status contract end-to-end. The text-regex
+# tests above prove the right tokens are present; this one proves the
+# wrapper actually does the right thing when the summarizer fails —
+# closes the "tokens in wrong order" coverage gap Codex flagged.
+
+import os
+import stat
+import subprocess
+
+
+def _make_stub(path: Path, exit_code: int = 0, body: str = "") -> None:
+    """Create an executable stub script at ``path`` that prints its
+    argv on stdout then exits with ``exit_code``."""
+    path.write_text(
+        "#!/usr/bin/env bash\n"
+        f"echo STUB:{path.name}:\"$@\"\n"
+        f"{body}\n"
+        f"exit {exit_code}\n"
+    )
+    path.chmod(
+        path.stat().st_mode
+        | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH,
+    )
+
+
+def _run_wrapper_with_stubs(
+    tmp_path: Path,
+    *,
+    mpirun_exit: int,
+    summarizer_exit: int,
+    allow_summary_failure: str = "0",
+    days: str = "0",
+) -> subprocess.CompletedProcess[str]:
+    """Run ``scripts/run_rce_30day.sh`` with stubbed mpirun + Python
+    interpreter so the wrapper exercises its post-run branch logic
+    against synthetic exit codes.
+
+    The stubbed PYBIN is set to point at a tiny bash wrapper whose
+    only job is to ``exit summarizer_exit`` so we never invoke the
+    real summarizer (which would FileNotFoundError on an empty
+    output dir anyway — that exit code is ``1``, which the test
+    treats as a real failure, not a behavioural one).
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    # Stub mpirun.
+    _make_stub(bin_dir / "mpirun", exit_code=mpirun_exit)
+    # Stub the PYBIN — the wrapper calls "$PYBIN" "$REPO_ROOT/.../summarize_rce_trajectory.py" "$OUTPUT".
+    # Make PYBIN a script that ignores argv and just exits with the
+    # configured code. Use a unique filename so we can point PYBIN at
+    # the absolute path (bypasses PATH).
+    pybin = bin_dir / "fake_pybin"
+    _make_stub(pybin, exit_code=summarizer_exit)
+    out_dir = tmp_path / "wrapper_out"
+    env = os.environ.copy()
+    # Prepend bin_dir so ``mpirun`` resolves to our stub.
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["PYBIN"] = str(pybin)
+    env["DAYS"] = days
+    env["NX"] = "4"
+    env["NY"] = "4"
+    env["RANKS"] = "1"
+    env["NO_MASS_FIXER"] = "1"
+    env["ALLOW_SUMMARY_FAILURE"] = allow_summary_failure
+    # Provide an explicit output dir so the wrapper doesn't pollute
+    # results/.
+    return subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+         str(out_dir)],
+        env=env,
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+
+def test_wrapper_mpirun_ok_summarizer_ok_exits_zero(tmp_path):
+    """Sanity baseline: both stages succeed → exit 0."""
+    res = _run_wrapper_with_stubs(
+        tmp_path, mpirun_exit=0, summarizer_exit=0,
+    )
+    assert res.returncode == 0, (
+        f"baseline failed: stdout={res.stdout!r} stderr={res.stderr!r}"
+    )
+    assert "Wrote " in res.stdout
+
+
+def test_wrapper_mpirun_fail_propagates(tmp_path):
+    """mpirun nonzero → wrapper nonzero (set -e + pipefail). The
+    summarizer should NOT even run."""
+    res = _run_wrapper_with_stubs(
+        tmp_path, mpirun_exit=42, summarizer_exit=0,
+    )
+    assert res.returncode != 0, (
+        f"mpirun failure was masked: {res.stdout!r} {res.stderr!r}"
+    )
+    # "Computing per-day RCE trajectory summary..." prints AFTER
+    # mpirun completes. set -e should kill the wrapper before that.
+    assert "Computing per-day RCE trajectory summary" not in res.stdout, (
+        "summarizer ran despite mpirun failure — set -e gate is broken."
+    )
+
+
+def test_wrapper_summarizer_fail_default_propagates(tmp_path):
+    """iter-100 Codex MEDIUM#1: mpirun OK + summarizer fail +
+    ALLOW_SUMMARY_FAILURE=0 (default) → wrapper exits nonzero."""
+    res = _run_wrapper_with_stubs(
+        tmp_path, mpirun_exit=0, summarizer_exit=7,
+        allow_summary_failure="0",
+    )
+    assert res.returncode == 7, (
+        f"summarizer failure was masked: returncode={res.returncode} "
+        f"stdout={res.stdout!r} stderr={res.stderr!r}"
+    )
+    assert "ERROR" in res.stderr
+
+
+def test_wrapper_summarizer_fail_allow_downgrade(tmp_path):
+    """ALLOW_SUMMARY_FAILURE=1 → wrapper exits 0 even when the
+    summarizer fails. The escape hatch is intentional for runs
+    aborted before any snapshot landed."""
+    res = _run_wrapper_with_stubs(
+        tmp_path, mpirun_exit=0, summarizer_exit=7,
+        allow_summary_failure="1",
+    )
+    assert res.returncode == 0, (
+        f"ALLOW_SUMMARY_FAILURE=1 did not downgrade: "
+        f"returncode={res.returncode} stderr={res.stderr!r}"
+    )
+    assert "WARN" in res.stderr
