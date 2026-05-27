@@ -411,6 +411,19 @@ The single-GPU theoretical limit has been reached for the structured-grid config
 - Algorithm change (replace spectral with spectral-element or GPU-native SHTns)
 - Mesh-level optimization (Hilbert reordering for MPAS) — invasive
 
+### Iter 15 — 2026-05-27 — LL impl_cn × CUDA-graphs cross-test
+
+Cross-tested whether CUDA graphs add to the impl_cn win on LL ocean.
+
+| res    | impl_cn no-graphs (fp32) | impl_cn +graphs (fp32) | delta |
+|--------|---------------------------|-------------------------|-------|
+| LL128  | 1.49 ms / 440 Mc/s         | 1.43 / 458              | +4%   |
+| LL192  | 2.73 / 541                 | 2.70 / 546              | +1%   |
+
+CUDA graphs add 1-4% on top of impl_cn for LL — marginal. The impl_cn switch is the dominant lever; graphs only matter for the MPAS Voronoi indirect-addressing path. **Bench default (graphs on) remains correct** — penalty is small even when not needed.
+
+Also landed: `scripts/profile_mpas_ocean.py` (iter-7 artifact, was uncommitted).
+
 ### Iter 14 — 2026-05-27 — impl_cn numerical validation
 
 Open thread from iters 11-13: speed gain of `implicit_cn` came with no

@@ -1,10 +1,18 @@
-"""Numerical validation: explicit_substep vs implicit_cn barotropic solvers.
+"""Short smoke test (NOT full validation) of explicit_substep vs implicit_cn.
 
-Runs both solvers for N steps from rest state on LL64 and MPAS I4, compares
-final state (eta, u, v, T, S) using max-abs and RMSE. Acceptance: solvers
-should agree to ~ O(dt²) for the barotropic mode (both are 2nd-order in time)
-on a quiescent flow with no forcing — typical max-abs eta drift below ~1e-3 m
-over a few days is acceptable; both schemes should yield finite values.
+Runs both solvers for N steps (default 50 × 600 s = 8.3 h) from a kicked
+rest state, then reports:
+  - finiteness of both end-states (must hold)
+  - integrated norm of each PyTree leaf (matched by path, not by index)
+  - structure-equality check between the two states
+  - per-leaf max-abs and RMSE divergence
+  - mass-conservation drift if a layer-thickness leaf is found
+
+Acceptance: smoke level only. Both solvers should remain finite. Norm
+divergence ≤50% in 8 h means no immediate instability and rules out
+gross algorithmic mismatch. Full validation (multi-day Rossby spinup,
+energy/mass drift <1e-3) is OUT OF SCOPE for this script and belongs
+in a longer regression suite.
 
 Usage:
     PYTHONPATH=. .venv/bin/python scripts/validate_baro_solver.py \\
@@ -22,19 +30,47 @@ sys.path.insert(0, str(Path(__file__).parent))
 from bench_ocean_gpu_scaling import _build_latlon, _build_mpas, _block_state  # noqa
 
 
-def _diff(state_a, state_b, label: str) -> dict:
+def _path_str(path) -> str:
+    """Render a jax.tree path tuple as a stable dotted-key string."""
+    parts = []
+    for p in path:
+        # GetAttrKey, DictKey, SequenceKey, ...
+        for attr in ("name", "key", "idx"):
+            if hasattr(p, attr):
+                parts.append(str(getattr(p, attr)))
+                break
+        else:
+            parts.append(str(p))
+    return ".".join(parts) if parts else "<root>"
+
+
+def _diff(state_a, state_b) -> dict:
+    """Path-keyed diff so leaves can't silently get re-ordered.
+
+    Raises ValueError if the two states have differing tree structures.
+    """
     import jax, jax.numpy as jnp
-    leaves_a = jax.tree_util.tree_leaves(state_a)
-    leaves_b = jax.tree_util.tree_leaves(state_b)
+    paths_a, _ = zip(*jax.tree_util.tree_flatten_with_path(state_a)[0]) \
+        if jax.tree_util.tree_flatten_with_path(state_a)[0] else ((), ())
+    flat_a = jax.tree_util.tree_flatten_with_path(state_a)[0]
+    flat_b = jax.tree_util.tree_flatten_with_path(state_b)[0]
+    if len(flat_a) != len(flat_b):
+        raise ValueError(
+            f"PyTree leaf-count mismatch: a={len(flat_a)} b={len(flat_b)}"
+        )
     out = {}
-    for i, (a, b) in enumerate(zip(leaves_a, leaves_b)):
+    for (pa, a), (pb, b) in zip(flat_a, flat_b):
+        keya = _path_str(pa)
+        keyb = _path_str(pb)
+        if keya != keyb:
+            raise ValueError(f"PyTree path mismatch: {keya!r} vs {keyb!r}")
         if not (hasattr(a, "dtype") and jnp.issubdtype(a.dtype, jnp.floating)):
             continue
         diff = jnp.abs(a - b)
         max_abs = float(jnp.max(diff))
         rmse = float(jnp.sqrt(jnp.mean(diff * diff)))
         ref_max = float(jnp.max(jnp.abs(a)) + 1e-30)
-        out[f"leaf_{i}"] = (max_abs, rmse, ref_max, max_abs / ref_max)
+        out[keya] = (max_abs, rmse, ref_max, max_abs / ref_max)
     return out
 
 
@@ -110,40 +146,44 @@ def main():
     s2_n = _step_n(m2, s2, args.n_steps, args.dt)
 
     import jax.numpy as jnp
-    diff = _diff(s1_n, s2_n, "exs-vs-impcn")
+    diff = _diff(s1_n, s2_n)
     max_rel = max(v[3] for v in diff.values())
-    print(f"{'leaf':>6}  {'max|Δ|':>12}  {'RMSE|Δ|':>12}  "
+    print(f"{'path':>20}  {'max|Δ|':>12}  {'RMSE|Δ|':>12}  "
           f"{'max|ref|':>12}  {'max-rel':>10}")
     for k, (m, r, rf, rel) in diff.items():
-        print(f"{k:>6}  {m:>12.4e}  {r:>12.4e}  {rf:>12.4e}  {rel:>10.4e}")
+        print(f"{k:>20}  {m:>12.4e}  {r:>12.4e}  {rf:>12.4e}  {rel:>10.4e}")
 
-    # Norm-based correctness check. Pointwise max-rel is dominated by wave
-    # phase shift between schemes (both 2nd-order in time but with different
-    # dispersion errors) — not a stability or conservation failure.
-    # Instead compare integrated norms.
-    def _norm(state, label):
-        leaves = jax.tree_util.tree_leaves(state)
-        ns = []
-        for leaf in leaves:
+    # Path-keyed norm comparison.
+    def _norm_per_path(state):
+        flat = jax.tree_util.tree_flatten_with_path(state)[0]
+        ns = {}
+        for path, leaf in flat:
             if hasattr(leaf, "dtype") and jnp.issubdtype(leaf.dtype, jnp.floating):
-                ns.append(float(jnp.sqrt(jnp.mean(leaf * leaf))))
+                ns[_path_str(path)] = float(jnp.sqrt(jnp.mean(leaf * leaf)))
         return ns
-    n1 = _norm(s1_n, "exs")
-    n2 = _norm(s2_n, "impcn")
+    n1 = _norm_per_path(s1_n)
+    n2 = _norm_per_path(s2_n)
+    if set(n1.keys()) != set(n2.keys()):
+        print("FAIL: PyTree path mismatch between states")
+        return 2
     print()
-    print(f"{'leaf':>6}  {'||exs||':>12}  {'||impcn||':>12}  {'rel-diff':>10}")
-    # Skip noise-floor leaves (both norms < 1e-5) — they are diagnostic
-    # quantities (e.g. is_active flags scaled near zero) where rel-diff
-    # amplifies floating-point noise and is not meaningful.
+    print(f"{'path':>20}  {'||exs||':>12}  {'||impcn||':>12}  {'rel-diff':>10}")
     NOISE_FLOOR = 1e-5
+    skipped = []
     norm_ratios = []
-    for i, (a, b) in enumerate(zip(n1, n2)):
+    for k in sorted(n1):
+        a, b = n1[k], n2[k]
         denom = max(a, b, 1e-30)
         rel = abs(a - b) / denom
-        tag = "" if max(a, b) >= NOISE_FLOOR else "  (noise-floor; skip)"
-        print(f"leaf_{i:>2}  {a:>12.4e}  {b:>12.4e}  {rel:>10.4e}{tag}")
-        if max(a, b) >= NOISE_FLOOR:
+        if max(a, b) < NOISE_FLOOR:
+            skipped.append(k)
+            tag = "  (noise-floor; skip)"
+        else:
+            tag = ""
             norm_ratios.append(rel)
+        print(f"{k:>20}  {a:>12.4e}  {b:>12.4e}  {rel:>10.4e}{tag}")
+    if skipped:
+        print(f"Skipped {len(skipped)} noise-floor leaves: {skipped}")
 
     finite1 = all(jnp.all(jnp.isfinite(l)) for l in jax.tree_util.tree_leaves(s1_n)
                   if hasattr(l, "dtype") and jnp.issubdtype(l.dtype, jnp.floating))
@@ -160,8 +200,9 @@ def main():
     if max_norm_rel > 0.5:
         print("WARN: integrated norms diverge by >50% — investigate.")
         return 1
-    print("OK: both solvers stable, integrated norms agree within 50%. "
-          "Pointwise differences = expected wave-phase decorrelation.")
+    print("SMOKE TEST OK: both solvers stable, no gross structural "
+          "mismatch, norms within 50%. This is NOT full validation — "
+          "multi-day energy/mass conservation regression is out of scope.")
     return 0
 
 
