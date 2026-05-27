@@ -117,6 +117,24 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 49 — 2026-05-27 — full test suite green with cuSPARSE swap
+
+Verified cuSPARSE Thomas swap doesn't break production validation:
+
+`tests/validation/test_rcemip_plane_smoke.py` — **5/5 PASS**:
+- `test_rcemip_profiles_match_wing_2018_values`
+- `test_rcemip_smoke_10_step_integration`
+- `test_rcemip_water_budget_positive_q_v_source`
+- `test_rcemip_physics_fn_is_differentiable`
+- `test_rcemip_physics_fn_returns_correct_tendency_shape`
+
+Plus iter-39 verified `tests/unit/test_acoustic_column_kernel.py` 3/3 +
+`tests/test_nh_acoustic_substeps_iter271.py` 3/3 PASS.
+
+⇒ **No regression**: cuSPARSE Thomas is bit-equivalent to legacy
+fori_loop within fp32/fp64 machine precision, passes water-budget
+conservation, AD differentiability, tendency-shape contract.
+
 ### Iter 47 — 2026-05-27 — cuSPARSE win at large N (better than at peak)
 
 Tested SI fp32 with cuSPARSE at N>=256 (past L2-overflow point):
