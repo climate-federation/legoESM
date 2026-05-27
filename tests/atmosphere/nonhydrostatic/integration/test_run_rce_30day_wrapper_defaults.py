@@ -101,10 +101,13 @@ def test_other_production_defaults(wrapper_text):
         # added --theta-noise-amp) exhibits the same pattern.
         # F11 is a structural radiation-feedback bug that needs
         # physics-side debugging; reverting keeps the wrapper
-        # functional at the iter-180 dt=20+WENO5 production
+        # functional at the iter-183 dt=20+Van Leer production
         # contract. Convection remains column-symmetric
         # (iter-149) so realistic precipitation is gated on F11.
         "QV_NOISE": "0.0",
+        # iter-198: companion env var for the iter-181 theta-noise
+        # alternative symmetry-breaker. Same F11 reproduction wall.
+        "THETA_NOISE": "0.0",
         # iter-61 Codex MEDIUM coverage gap fix: env defaults that
         # iter-58 missed.
         "DAYS": "30",
@@ -1348,7 +1351,7 @@ def test_wrapper_help_lists_all_env_vars(tmp_path):
     # ``NX,NY  grid dims`` line satisfied substring ``NX`` only.
     for env_var in (
         "DAYS", "RANKS", "DT", "NX", "NY", "N_ACOUSTIC", "ADVECTION",
-        "HYPERDIFF", "BUBBLE_K", "QV_NOISE", "USE_DD",
+        "HYPERDIFF", "BUBBLE_K", "QV_NOISE", "THETA_NOISE", "USE_DD",
         "NO_MASS_FIXER", "EVALUATE_DOD", "ALLOW_SUMMARY_FAILURE",
         "EMIT_TRAJECTORY_PNG", "CHECK_LOG_MAX_W", "PYBIN",
     ):

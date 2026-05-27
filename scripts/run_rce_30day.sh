@@ -71,6 +71,17 @@
 #                contract; convection remains column-symmetric
 #                (iter-149) so realistic precipitation is gated on
 #                F11 resolution.
+#   THETA_NOISE  theta' noise IC amplitude [K] (default 0.0 per
+#                iter-181 F11 reproduction: theta' noise hits the
+#                same F11 wall as qv noise — any nonzero amplitude
+#                + gray radiation -> exponential blowup in 25-50
+#                outer steps. Documented as the RCEMIP / Wing 2018
+#                standard symmetry-breaker; set 0.1 (Wing 2018
+#                RCEMIP1 protocol value) only on the F11 fix paths
+#                (LES dx=1km, subgrid convection scheme, smooth IC,
+#                adaptive dt). iter-198 added this env var so the
+#                F11 fix-path experiments are wrapper-accessible
+#                without manually invoking the driver.
 #   USE_DD       1 = pass --use-dd to driver (true per-rank domain
 #                decomposition via step_halo + R7 MPI mass fixer).
 #                Default 0 keeps the legacy rank-0-broadcast pattern
@@ -153,6 +164,8 @@ ADVECTION="${ADVECTION:-van_leer}"
 HYPERDIFF="${HYPERDIFF:-5.0e6}"
 BUBBLE_K="${BUBBLE_K:-0.0}"
 QV_NOISE="${QV_NOISE:-0.0}"
+# iter-198: THETA_NOISE wrapper env var. Default 0.0 per F11.
+THETA_NOISE="${THETA_NOISE:-0.0}"
 USE_DD="${USE_DD:-0}"
 NO_MASS_FIXER="${NO_MASS_FIXER:-1}"
 EVALUATE_DOD="${EVALUATE_DOD:-0}"
@@ -203,6 +216,7 @@ mpirun -np "$RANKS" "$PYBIN" \
     --hyperdiff "$HYPERDIFF" \
     --bubble-theta-pert "$BUBBLE_K" \
     --qv-noise-amp "$QV_NOISE" \
+    --theta-noise-amp "$THETA_NOISE" \
     $DD_FLAG \
     $NMF_FLAG \
     --snapshot-hours 24.0 \
