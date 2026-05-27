@@ -789,6 +789,41 @@ def test_sustained_stuck_undecided_on_short_trajectory():
     assert reason is None
 
 
+def test_sustained_stuck_returns_undecided_when_finite_rows_short():
+    """iter-151: NaN cwv_mean rows must be filtered out, and if the
+    survivor count drops below ``2 * consecutive_days`` the detector
+    must return ``(False, None)`` — undecided, not False-Positive.
+
+    Constructs 6 total rows (passes the first len check at
+    ``2 * 3 = 6``) of which 4 are NaN — only 2 finite rows, well
+    below the 6-row finite threshold. Exercises the second guard at
+    summarize_rce_trajectory.py:636.
+    """
+    finite = [_row(0.0, cwv_mean=50.0, cwv_max=50.0),
+              _row(5.0, cwv_mean=53.0, cwv_max=53.0)]
+    nan_rows = [_row(float(i), cwv_mean=float("nan"),
+                     cwv_max=float("nan"))
+                for i in (1, 2, 3, 4)]
+    rows = [finite[0]] + nan_rows + [finite[1]]
+    flagged, reason = summary_mod.detect_sustained_stuck_trajectory(rows)
+    assert flagged is False
+    assert reason is None
+
+
+def test_stuck_returns_undecided_when_finite_rows_short():
+    """Companion test for ``detect_stuck_trajectory``: NaN rows
+    filtered out, survivor count below ``consecutive_days`` returns
+    ``(False, None)`` rather than tripping on the leading-window
+    check. Exercises summarize_rce_trajectory.py:584.
+    """
+    rows = [_row(0.0, cwv_mean=50.0, cwv_max=50.0),
+            _row(1.0, cwv_mean=float("nan"), cwv_max=float("nan")),
+            _row(2.0, cwv_mean=float("nan"), cwv_max=float("nan"))]
+    flagged, reason = summary_mod.detect_stuck_trajectory(rows)
+    assert flagged is False
+    assert reason is None
+
+
 def test_sustained_stuck_constants_locked():
     """Lock the 1e-7 mm tight tolerance so a future widen surfaces
     in code review (a 1e-3 mm value would catch real equilibrium
