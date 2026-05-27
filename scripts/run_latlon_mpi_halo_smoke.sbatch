@@ -127,6 +127,11 @@ for NP in 2 4; do
         tests/distributed/test_latlon_mpi_checkpoint.py
 
     echo
+    echo "--- Step ${NP}-rank : polar filter under MPI (Stage 3-E) ---"
+    ${MPI_LAUNCH} -n ${NP} ${PY} -m pytest -xvs \
+        tests/distributed/test_latlon_mpi_polar_filter.py
+
+    echo
     echo "--- Step ${NP}-rank : full step equivalence ---"
     ${MPI_LAUNCH} -n ${NP} ${PY} -m pytest -xvs \
         tests/distributed/test_latlon_mpi_step.py

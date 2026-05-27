@@ -108,6 +108,26 @@ class DycoreConfig(NamedTuple):
     implicit_grav_wave_use_pcg: bool = False
     implicit_grav_wave_damping: float = 0.0
 
+    # Stage 3-E: Fourier polar filter for lat-lon C-grid.
+    # The polar CFL problem: dx_pole = R * dlon * cos(π/2 - dlat/2) → 0
+    # at the poles, forcing an explicit ``dt`` ≤ ~5 s at 1° resolution
+    # even when the equatorial CFL allows ~600 s.  Enabling
+    # ``use_polar_filter`` truncates Fourier modes in longitude that
+    # would violate CFL at high latitudes, so the run can use the
+    # equatorial-CFL ``dt`` everywhere.  Without this, 100-y AMIP at
+    # 1° lat-lon FV requires ~600 B time steps and is not feasible
+    # within a chained 72-h SLURM budget.
+    #
+    # The filter is lon-only FFT (``jnp.fft.rfft`` along axis -1), so
+    # under lat-band MPI each rank applies it independently on its
+    # own band — no MPI exchange needed for the filter itself.  See
+    # ``src/legoesm/grids/polar_filter.py`` for the algorithm and
+    # ``CGridLatLonPrimitiveEquationConfig.use_polar_filter`` for the
+    # model-side flag this propagates to.
+    use_polar_filter: bool = False
+    polar_filter_cutoff_deg: float = 60.0
+    polar_filter_max_wave_speed: float = 300.0
+
 
 class OutputConfig(NamedTuple):
     """Output and diagnostics configuration."""

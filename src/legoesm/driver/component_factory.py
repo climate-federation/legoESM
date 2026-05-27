@@ -389,30 +389,57 @@ def create_atmosphere_dycore(
         # cell at the poles: dx_pole = R * dlon * cos(π/2 - dlat/2).
         # Both the advective CFL (dt < dx / c_grav) and the diffusive
         # CFL (A_h < 0.4 * dx² / dt) must be satisfied there.
+        #
+        # Stage 3-E: when ``dc.use_polar_filter`` is True, the Fourier
+        # polar filter truncates Fourier modes in longitude that would
+        # violate CFL at high latitudes, so the dynamics is stable at
+        # ``dt`` set by the equatorial CFL instead of the pole CFL.
+        # ``dx_equator`` = R * dlon ≫ dx_pole at all but the lowest
+        # resolutions, so this typically lifts the clamp by ~100x at
+        # n_lat=180 and ~10x at n_lat=90 — enough to make a 100-y AMIP
+        # at 1° feasible within a chained 72-h SLURM budget.
         from legoesm.core.cfl import (
             pole_cell_dx, cfl_max_dt, max_laplacian_viscosity,
         )
         dx_pole = pole_cell_dx(grid)
         c_grav = 300.0  # gravity wave speed [m/s]
-        dt_max_advective = cfl_max_dt(dx_pole, c_grav, cfl_number=0.8, ndim=1)
+        dt_max_advective_pole = cfl_max_dt(
+            dx_pole, c_grav, cfl_number=0.8, ndim=1,
+        )
         _effective_dt = dc.dt
+
+        if getattr(dc, "use_polar_filter", False):
+            # Filter on → equatorial CFL is the effective limit.
+            # dx_equator = R * dlon = circumference / n_lon.
+            import math as _math
+            dx_equator = float(2.0 * _math.pi * grid.radius / grid.n_lon)
+            dt_max_advective = cfl_max_dt(
+                dx_equator, c_grav, cfl_number=0.8, ndim=1,
+            )
+            dx_for_diffusion = dx_equator
+            _clamp_dx_label = "equatorial"
+        else:
+            dt_max_advective = dt_max_advective_pole
+            dx_for_diffusion = dx_pole
+            _clamp_dx_label = "pole-cell"
+
         if _effective_dt > dt_max_advective:
             logger.warning(
-                "Lat-lon C-grid: dt=%.1f s exceeds pole-cell advective "
+                "Lat-lon C-grid: dt=%.1f s exceeds %s advective "
                 "CFL limit (%.1f s); clamping to %.1f s. "
                 "Set dycore.dt <= %.1f for this grid.",
-                _effective_dt, dt_max_advective, dt_max_advective,
-                dt_max_advective,
+                _effective_dt, _clamp_dx_label, dt_max_advective,
+                dt_max_advective, dt_max_advective,
             )
             _effective_dt = dt_max_advective
 
-        A_h_max = max_laplacian_viscosity(dx_pole, _effective_dt)
+        A_h_max = max_laplacian_viscosity(dx_for_diffusion, _effective_dt)
         _A_h = min(diff.A_h, A_h_max)
         if diff.A_h > A_h_max:
             logger.warning(
-                "Lat-lon C-grid: A_h=%.2e exceeds pole-cell diffusive "
+                "Lat-lon C-grid: A_h=%.2e exceeds %s diffusive "
                 "CFL limit (%.2e); clamping.",
-                diff.A_h, A_h_max,
+                diff.A_h, _clamp_dx_label, A_h_max,
             )
 
     if solver_name == "latlon_cgrid_shallow_water":
@@ -434,6 +461,17 @@ def create_atmosphere_dycore(
         cfg = CGridLatLonPrimitiveEquationConfig(
             A_h=_A_h,
             fix_mass=_fix_mass,
+            # Stage 3-E: pass polar-filter parameters through.  When
+            # use_polar_filter is False (default) the model's filter
+            # mask is None and no FFT is applied — bit-identical to
+            # pre-Stage-3-E behaviour.
+            use_polar_filter=getattr(dc, "use_polar_filter", False),
+            polar_filter_cutoff_deg=getattr(
+                dc, "polar_filter_cutoff_deg", 60.0,
+            ),
+            polar_filter_max_wave_speed=getattr(
+                dc, "polar_filter_max_wave_speed", 300.0,
+            ),
         )
         model = CGridLatLonPrimitiveEquationModel(
             grid, sigma, cfg, dt=_effective_dt)

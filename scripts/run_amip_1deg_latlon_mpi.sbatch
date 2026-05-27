@@ -140,9 +140,19 @@ CMD=(
     --output "${OUTPUT_DIR}"
     --monthly-means
 )
+
+# ``run_amip_cmip6_deck.py`` uses ``--extra nargs=REMAINDER`` which
+# consumes ALL subsequent argv into args.extra.  Build the trailing
+# argv block first, then attach it once with a single ``--extra``.
+# Stage 3-E: ``--use-polar-filter`` lifts the pole-cell CFL clamp so
+# the run can use ``--dt 300`` set by the equatorial CFL.  Without
+# this flag, 100-y at 1° lat-lon FV needs ~600 B time steps and is
+# infeasible in the 72-h × N restart-chain SLURM budget.
+EXTRA_ARGS=(--use-polar-filter)
 if [[ -n "${LATEST_CKPT}" ]]; then
-    CMD+=(--extra --restart-from "${LATEST_CKPT}")
+    EXTRA_ARGS+=(--restart-from "${LATEST_CKPT}")
 fi
+CMD+=(--extra "${EXTRA_ARGS[@]}")
 
 # --------------------------------------------------------------------
 # Launch under MPI.  ``run_amip.py`` auto-detects SLURM_NTASKS and
