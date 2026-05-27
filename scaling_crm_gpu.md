@@ -117,6 +117,36 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 19 — 2026-05-27 — within-process timing stability vs cross-process
+
+Same N=128 fp32 explicit nsub=4 dt=0.5, single Python process,
+varying scan length n_timing × 5 repeats each:
+
+| n_timing | median ms | min   | max   | spread |
+|----------|-----------|-------|-------|--------|
+|  30      | 0.748     | 0.745 | 0.752 |  1.0%  |
+| 100      | 0.767     | 0.736 | 0.773 |  4.8%  |
+| 300      | 0.769     | 0.704 | 0.941 | 30.8%  |
+| 1000     | 0.774     | 0.756 | 0.793 |  4.8%  |
+
+**Within-process median stable to 3.5%** across all scan lengths.
+n_timing=30 is already adequate.
+
+But across 3 separate Python processes (iter 11 / 18 / 19):
+- Run 1: 0.66 ms (740 Mc/s)
+- Run 2: 0.64 ms (774)
+- Run 3: 0.77 ms (640)
+
+**Cross-process variance ~20%** = the actual noise floor for sub-ms
+timings. `--repeat N` only tightens within-process; new process
+gets fresh GPU thermal state, JIT cache load, kernel selection.
+
+⇒ **Final honest CRM peak: 640-820 Mc/s plateau N=96-192 fp32 explicit
+(median value depends on Python process; ~700 Mc/s typical).**
+
+n_timing=30 default is right; increasing past 100 gives no benefit
+(possibly worse — thermal drift over longer-running scan).
+
 ### Iter 18 — 2026-05-27 — dx sweep + run-to-run variance widened
 
 Explicit fp32 N=128 nsub=4 dt=0.5 across dx (median-3 each):
