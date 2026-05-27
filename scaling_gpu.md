@@ -661,6 +661,17 @@ Updated final ladder:
 - `scaling_gpu_weak.png` — ns/cell vs cells, flat = saturated
 - `scaling_gpu_peak_bar.png` — peak Mcells/s by grid × precision
 
+### Iter 30 — 2026-05-27 — final plot regen with 30-iter dataset
+
+All 4 figures regenerated with full data from iters 1-29:
+- 22 CSV inputs covering atm CS (C12-C192), atm ico (I4-I7),
+  atm spectral (T42-T170), ocean LL impl_cn (LL16-LL384), ocean
+  MPAS impl_cn (I3-I7), at fp32 + fp64
+- 11 distinct (grid, precision, solver) series each tracked across
+  4 scaling regimes
+
+Plots: `results/scaling_gpu/scaling_gpu_{throughput,strong,weak,peak_bar}.png`
+
 ### Iter 29 — 2026-05-27 — MPAS impl_cn small-N regime + dispatch-floor unification
 
 Mirror iter-28 on MPAS ocean impl_cn fp32:
