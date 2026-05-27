@@ -207,6 +207,50 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 234..236 (Codex iter-233 round-1/2 fixes + focused CRM regression sweep)
+
+**iter-234 — Codex iter-233 round-1**: 1 MEDIUM + 1 LOW.
+* MEDIUM: ``compute_courant_numbers_plane`` was called with
+  ``args.dt`` (outer) but the dycore steps at ``dt_inner =
+  args.dt / n_outer_split`` when ``n_outer_split > 1``.
+  ``Ca_substep`` inflated by n_outer_split → false CFL alarms.
+  Fix: pass ``dt_inner`` to the diagnostic. Bit-equal for default
+  ``n_outer_split=1``.
+* LOW: no driver-level subprocess tests for ``--n-outer-split foo``
+  or ``--n-outer-split 0`` rejection (only the helper-level
+  ``ValueError`` was unit-tested). Fix: 2 new SystemExit
+  integration tests.
+
+**iter-235 — Codex iter-234 round-2**: 2 LOW.
+* LOW#1: ``--n-outer-split=auto`` raises raw ValueError from
+  ``select_n_outer_split`` on bad inputs (``--max-wind-safe=0``,
+  ``--cfl-safe=nan``) BEFORE the iter-67/68 finite/range CLI
+  validator runs. Fix: try/except → clean SystemExit.
+* LOW#2: ``# RCE MPI LONG`` run-header logs ``dt={args.dt}`` while
+  ``Ca_substep`` is computed at ``dt_inner``. Fix: append
+  ``dt_inner=X`` field (redundant when ``n_outer_split=1`` but
+  schema-stable). Added 3rd SystemExit test for the auto path.
+
+**iter-236 — focused CRM regression sweep**:
+``JAX_PLATFORMS=cpu .venv/bin/python -m pytest
+tests/atmosphere/nonhydrostatic/ tests/unit/test_select_n_outer_split.py
+tests/unit/test_van_leer_advection.py
+tests/unit/test_van_leer_halo_equiv.py -q --timeout=120``
+→ **353 passed, 4 deselected, 7m33s wall**. No regressions
+introduced by the iter-229..235 chain.
+
+Pre-existing unrelated collection errors (NOT caused by this
+chain, flagged for future cleanup):
+* ``tests/unit/test_spectral_plane_dycore.py``:
+  ``SpectralPlanePhysicsState`` missing import in
+  ``legoesm.core.state``.
+* ``tests/validation/test_rcemip_plane_smoke.py``,
+  ``test_spectral_plane_rce_smoke.py``: module-level
+  ``float(jnp.log(100.0))`` in ``spectral_pe.py:72`` crashes on
+  Metal backend (StableHLO bytecode mismatch). Works under
+  ``JAX_PLATFORMS=cpu``; the conftest's ``ensure_metal_or_fallback``
+  doesn't run at import time.
+
 ### 2026-05-27 — iter 233 (FV3-style trace-time n_outer_split — replaces iter-228 adaptive-dt stub)
 
 User suggestion: "FV3-style answer is split-explicit subcycling
