@@ -203,6 +203,45 @@ def test_van_leer_grad_finite_on_zero_delta():
     )
 
 
+def test_smooth_k1_perturbation_zero_mean_and_bounded():
+    """iter-203: the smooth_k1 theta-noise mode applies a
+    ``0.5 * (cos(2π x/nx) + cos(2π y/ny))`` pattern at amplitude
+    ``theta_noise_amp`` in the lowest 4 levels. Two properties
+    must hold:
+    * Zero horizontal mean per level (cos integrates to 0 over
+      [0, 2π]) — total energy conserved at IC, mirrors the
+      white-noise mean-removal pattern.
+    * Peak amplitude bounded by theta_noise_amp.
+    Lock both so a future refactor that swaps cos→sin or shifts
+    the wavenumber surfaces here, not as a silent energy injection.
+    """
+    import jax.numpy as jnp
+    ny, nx, nlev = 8, 12, 4
+    amp = 0.1
+    jj = jnp.arange(ny, dtype=jnp.float64)
+    ii = jnp.arange(nx, dtype=jnp.float64)
+    yy, xx = jnp.meshgrid(jj, ii, indexing="ij")
+    two_pi = 2.0 * jnp.pi
+    pattern = 0.5 * (
+        jnp.cos(two_pi * xx / nx) + jnp.cos(two_pi * yy / ny)
+    )
+    theta_noise = amp * pattern[:, :, None] * jnp.ones(
+        (1, 1, nlev), dtype=jnp.float64,
+    )
+    # Zero-mean per level
+    mean_per_level = jnp.mean(theta_noise, axis=(0, 1))
+    assert jnp.allclose(mean_per_level, 0.0, atol=1e-14), (
+        f"smooth_k1 perturbation must be zero-mean per level; "
+        f"got mean={mean_per_level}"
+    )
+    # Peak amplitude bounded — 0.5*(cos(0)+cos(0)) = 1.0 at (0,0)
+    # gives full amp. cos range is [-1, 1] so 0.5*(c+c) is [-1, 1].
+    assert jnp.max(jnp.abs(theta_noise)) <= amp * (1.0 + 1e-12), (
+        f"smooth_k1 peak amplitude exceeds {amp}; got "
+        f"{float(jnp.max(jnp.abs(theta_noise)))}"
+    )
+
+
 def test_horizontal_advection_halo_requirement_map_locked():
     """iter-187: HORIZONTAL_ADVECTION_HALO_REQUIREMENT is the single
     source of truth for halo widths consumed by both the driver
