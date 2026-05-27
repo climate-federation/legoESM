@@ -216,6 +216,78 @@ def test_qv_noise_seed_default(driver_defaults):
     assert driver_defaults["--qv-noise-seed"] == 0
 
 
+def test_driver_argparse_advection_choices_derived_from_shared_map():
+    """iter-192 Codex MEDIUM#2: argparse ``--advection choices`` MUST
+    be derived from the shared HORIZONTAL_ADVECTION_HALO_REQUIREMENT
+    map (or its alias) so a future fourth scheme automatically
+    surfaces in --help. A regression that hardcodes
+    ``choices=["upwind1", "van_leer", "weno5"]`` inline would
+    re-introduce the iter-186/187 dual-registry drift hazard the
+    fix collapsed.
+
+    AST-based check: locate the ``p.add_argument("--advection", ...)``
+    call and verify the ``choices`` keyword argument is a call to
+    ``sorted(...)`` with a Name argument that resolves to the same
+    alias used elsewhere in the file for HORIZONTAL_ADVECTION_HALO_REQUIREMENT.
+    """
+    import ast
+    tree = ast.parse(DRIVER.read_text())
+    # Find what name HORIZONTAL_ADVECTION_HALO_REQUIREMENT is bound to.
+    aliases = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module == (
+            "legoesm.atmosphere.dynamics.compressible_euler_plane"
+        ):
+            for alias in node.names:
+                if alias.name == "HORIZONTAL_ADVECTION_HALO_REQUIREMENT":
+                    aliases.add(alias.asname or alias.name)
+    assert aliases, (
+        "Driver missing the iter-187 shared map import (precondition "
+        "for the iter-192 choices derivation)."
+    )
+    # Walk every ``p.add_argument("--advection", ...)`` call.
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute)
+                and func.attr == "add_argument"):
+            continue
+        if not (node.args and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "--advection"):
+            continue
+        # Found the --advection add_argument call. Inspect the
+        # choices kwarg.
+        choices_kw = next(
+            (kw for kw in node.keywords if kw.arg == "choices"),
+            None,
+        )
+        assert choices_kw is not None, (
+            "--advection add_argument call missing choices kwarg "
+            "(iter-192 contract: derived from sorted(_ADV_HALO_REQ))."
+        )
+        # Expect: sorted(<one of the aliases>)
+        val = choices_kw.value
+        assert (
+            isinstance(val, ast.Call)
+            and isinstance(val.func, ast.Name)
+            and val.func.id == "sorted"
+            and len(val.args) == 1
+            and isinstance(val.args[0], ast.Name)
+            and val.args[0].id in aliases
+        ), (
+            "--advection choices must be sorted(<shared-map-alias>); "
+            f"got ast.dump(val)={ast.dump(val)} with known aliases "
+            f"{aliases!r}. A hardcoded list re-introduces the dual-"
+            f"registry drift hazard."
+        )
+        return
+    pytest.fail(
+        "Driver source has no ``p.add_argument(\"--advection\", ...)`` "
+        "call — argparse contract broken."
+    )
+
+
 def test_driver_consults_shared_halo_requirement_map():
     """iter-187/192: the driver MUST source its per-scheme halo
     requirement from the shared
