@@ -469,7 +469,13 @@ def parse_log_max_w(out_dir: "Path | str") -> tuple[float, int]:
     step_col_idx: int | None = None
     max_w_seen = 0.0
     n_rows = 0
-    with log_path.open() as fh:
+    # iter-142 Codex MEDIUM#5: explicit ``encoding="utf-8"`` so a
+    # future driver embedding non-ASCII characters (e.g. ``°``,
+    # ``μ``) doesn't raise UnicodeDecodeError on platforms where the
+    # default codec isn't UTF-8 (Windows, some HPC login nodes with
+    # LANG=C). ``errors="replace"`` keeps the parser running through
+    # genuinely corrupt bytes instead of crashing.
+    with log_path.open(encoding="utf-8", errors="replace") as fh:
         for lineno, line in enumerate(fh, 1):
             stripped = line.strip()
             if not stripped:

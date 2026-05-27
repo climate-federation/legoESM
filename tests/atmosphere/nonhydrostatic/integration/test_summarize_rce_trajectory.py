@@ -1220,14 +1220,60 @@ def test_combined_evaluate_and_check_log_max_w(tmp_path):
         capture_output=True, text=True, check=False,
     )
     assert res.returncode == 0
-    # Order check: log max|w| line BEFORE the DOD verdict line.
-    log_line_idx = res.stdout.index("log max|w|")
-    verdict_line_idx = res.stdout.index("DOD verdict:")
+    # iter-142 Codex LOW#3 fix: compare LINE indices, not character
+    # offsets. A future refactor merging both tokens onto a single
+    # line would otherwise pass the character-offset check
+    # vacuously. Find the line each token lives on + assert
+    # log-line-idx < verdict-line-idx + they're on different lines.
+    lines = res.stdout.splitlines()
+    log_line_idx = next(
+        i for i, ln in enumerate(lines) if "log max|w|" in ln
+    )
+    verdict_line_idx = next(
+        i for i, ln in enumerate(lines) if "DOD verdict:" in ln
+    )
     assert log_line_idx < verdict_line_idx, (
         f"Expected log max|w| BEFORE DOD verdict; "
-        f"log@{log_line_idx} verdict@{verdict_line_idx}; "
+        f"log line {log_line_idx} verdict line {verdict_line_idx}; "
         f"stdout={res.stdout!r}"
+    )
+    assert log_line_idx != verdict_line_idx, (
+        f"log max|w| and DOD verdict must be on SEPARATE lines; "
+        f"both found on line {log_line_idx}: "
+        f"{lines[log_line_idx]!r}"
     )
     assert "DOD verdict: PASS" in res.stdout
     # max([1e-3, 5e-3, 2e-3, 8e-3]) = 8e-3
     assert "8.0000e-03" in res.stdout
+
+
+def test_parse_log_max_w_returns_sentinel_on_schema_free_log(tmp_path):
+    """iter-142 Codex Q1 gap: a log.txt with no ``# step,`` schema
+    row returns (0.0, 0) — same sentinel as missing log. Callers
+    using --check-log-max-w then fail per the iter-139 HIGH#3 fix."""
+    log_path = tmp_path / "log.txt"
+    log_path.write_text(
+        "# header comment only\n"
+        "100,0.01,50.0,50.0,3.5e+09,5.0e-03,0,0,0,0.4\n"
+        "200,0.02,50.0,50.0,3.5e+09,8.0e-03,0,0,0,0.4\n"
+    )
+    max_w, n_rows = summary_mod.parse_log_max_w(tmp_path)
+    assert max_w == 0.0
+    assert n_rows == 0
+
+
+def test_parse_log_max_w_handles_utf8_content(tmp_path):
+    """iter-142 Codex MEDIUM#5: log.txt with non-ASCII characters
+    must parse without UnicodeDecodeError on platforms where the
+    default codec isn't UTF-8."""
+    log_path = tmp_path / "log.txt"
+    # Embed a degree sign ° (U+00B0) in a comment line.
+    log_path.write_text(
+        "# RCE MPI LONG  T_sfc = 300 °C target\n"
+        "# step,day,CWV_mean,CWV_max,MSE_mean,max|w|,max(qc),max(qr),max(precip_mm_day),Ca_substep\n"
+        "100,0.01,50.0,50.0,3.5e+09,5.0e-03,0,0,0,0.4\n",
+        encoding="utf-8",
+    )
+    max_w, n_rows = summary_mod.parse_log_max_w(tmp_path)
+    assert max_w == pytest.approx(5e-3)
+    assert n_rows == 1
