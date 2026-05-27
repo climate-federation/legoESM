@@ -65,28 +65,108 @@ def _build_initial_q_v(hc, shape):
 # --------------------------------------------------------------------- #
 
 
-def _compose_nh_moist_physics(model_type: str, dt: float):
-    """iter-275: compose Kessler microphysics + gray radiation
-    into a single physics_fn that the non-hydrostatic dycores
-    (cubed-sphere, MPAS NH) can pass to ``model.step``.
+def _make_cubed_sphere_surface_flux_tendency(
+    Cd: float = 1.0e-3, Ch: float = 1.0e-3,
+    T_sfc: float = 300.0, q_sfc: float = 0.018,
+):
+    """iter-283: bulk surface flux tendency for cubed-sphere
+    NonHydrostaticState. Mirrors the plane CRM
+    ``_make_surface_flux_physics`` pattern in
+    ``scripts/run_rcemip_plane.py`` — operates on the lowest
+    model level via axis-(-1) indexing so the (face, n, n, nlev)
+    shape works identically to the plane (ny, nx, nlev) shape.
 
-    The two factories return tendency functions with the same
-    signature for a given ``model_type``. We sum their outputs
-    via ``jax.tree_util.tree_map`` so the dycore sees a single
-    composed tendency per call. This mirrors the
-    ``make_rcemip_physics`` pattern in
-    ``scripts/run_rcemip_plane.py`` (plane CRM) — extracted here
-    because the plane helper takes a (grid, hc, tm)
-    signature that doesn't carry to the cubed-sphere / MPAS
-    NonHydrostaticState shapes.
+    Why iter-283 needed this: iter-282 MPAS 30-day moist run
+    blew up at day 15 with theta' cooling -2.8 K/day (gray
+    radiation with no surface-flux counter-balance). Adding
+    bulk Cd/Ch + T_sfc/q_sfc fixed-SST relaxation closes the
+    column energy budget.
+    """
+    from legoesm import constants as legoesm_constants
+    from legoesm.coupler.bulk_flux import simple_bulk_fluxes
+    from legoesm.core.state import NonHydrostaticTendencies
+
+    def physics_fn(state, grid_in, hc_in, tm_in):
+        nlev_local = state.theta_prime.data.shape[-1]
+        k_sfc = nlev_local - 1
+        rho_0 = hc_in.rho_ref
+        theta_0 = hc_in.theta_ref
+        theta_total = theta_0 + state.theta_prime.data
+        rho_total = rho_0 + state.rho_prime.data
+        u_lo = state.u.data[..., k_sfc]
+        v_lo = state.v.data[..., k_sfc]
+        rho_lo = rho_total[..., k_sfc]
+        theta_lo = theta_total[..., k_sfc]
+        pi_sfc = hc_in.exner_ref[k_sfc]
+        T_lo = theta_lo * pi_sfc
+        q_lo = state.tracers.data[..., k_sfc, 0]
+        wind_speed = jnp.sqrt(u_lo ** 2 + v_lo ** 2 + 1.0)
+
+        tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
+            u_lowest=u_lo, v_lowest=v_lo, T_lowest=T_lo, q_lowest=q_lo,
+            T_sfc=jnp.full_like(T_lo, T_sfc),
+            q_sfc=jnp.full_like(T_lo, q_sfc),
+            rho=rho_lo, wind_speed=wind_speed, Cd=Cd, Ch=Ch,
+        )
+
+        dz_sfc = hc_in.dz[k_sfc]
+        du_sfc = tau_x / (rho_lo * dz_sfc)
+        dv_sfc = tau_y / (rho_lo * dz_sfc)
+        du_dt_data = jnp.zeros_like(state.u.data).at[..., k_sfc].set(du_sfc)
+        dv_dt_data = jnp.zeros_like(state.v.data).at[..., k_sfc].set(dv_sfc)
+
+        dT_sfc = shflx / (rho_lo * legoesm_constants.c_pd * dz_sfc)
+        dtheta_sfc = dT_sfc / pi_sfc
+        dtheta_p_data = jnp.zeros_like(
+            state.theta_prime.data
+        ).at[..., k_sfc].set(dtheta_sfc)
+
+        dtracers_data = jnp.zeros_like(state.tracers.data)
+        dq_sfc = lhflx / (rho_lo * legoesm_constants.L_v * dz_sfc)
+        dtracers_data = dtracers_data.at[..., k_sfc, 0].add(dq_sfc)
+
+        return NonHydrostaticTendencies(
+            du_dt=state.u.replace(data=du_dt_data),
+            dv_dt=state.v.replace(data=dv_dt_data),
+            dw_dt=state.w.replace(data=jnp.zeros_like(state.w.data)),
+            dtheta_prime_dt=state.theta_prime.replace(data=dtheta_p_data),
+            drho_prime_dt=state.rho_prime.replace(
+                data=jnp.zeros_like(state.rho_prime.data),
+            ),
+            dphis_dt=state.phis.replace(
+                data=jnp.zeros_like(state.phis.data),
+            ),
+            dtracers_dt=state.tracers.replace(data=dtracers_data),
+        )
+
+    return physics_fn
+
+
+def _compose_nh_moist_physics(model_type: str, dt: float,
+                              *, with_surface_flux: bool = False):
+    """iter-275/283: compose Kessler microphysics + gray radiation
+    (+ optional surface flux) into a single physics_fn that the
+    non-hydrostatic dycores (cubed-sphere, MPAS NH) can pass to
+    ``model.step``.
+
+    Each factory returns a tendency callable with identical
+    *pytree shapes* but distinct Field-name metadata. We sum
+    at the leaf-array level + rebuild with the first treedef
+    so downstream consumers see a single composed tendency.
 
     Parameters
     ----------
     model_type : str
         'nonhydrostatic' for cubed-sphere CRM, 'mpas_nh' for MPAS.
     dt : float
-        Outer time step [s], passed to the microphysics factory
-        for sub-step scheduling.
+        Outer time step [s], passed to the microphysics factory.
+    with_surface_flux : bool, default False
+        iter-283: if True, also compose
+        ``_make_cubed_sphere_surface_flux_tendency`` (bulk Cd/Ch
+        with fixed T_sfc=300 K, q_sfc=0.018). Only supported for
+        ``model_type='nonhydrostatic'`` (cubed-sphere) today —
+        MPAS has u-on-edges + no v which needs a separate helper
+        (deferred to a follow-on iter).
 
     Returns
     -------
@@ -107,6 +187,15 @@ def _compose_nh_moist_physics(model_type: str, dt: float):
         make_radiation_physics,
     )
 
+    if with_surface_flux and model_type != "nonhydrostatic":
+        raise ValueError(
+            f"_compose_nh_moist_physics: with_surface_flux=True is "
+            f"only supported for model_type='nonhydrostatic' "
+            f"(cubed-sphere); got model_type={model_type!r}. The "
+            f"MPAS surface flux path (u-on-edges, no v field) "
+            f"requires a separate helper."
+        )
+
     micro_fn = make_microphysics_physics(
         MicrophysicsConfig(scheme="kessler", kessler=KesslerConfig()),
         model_type=model_type, dt=dt,
@@ -115,16 +204,14 @@ def _compose_nh_moist_physics(model_type: str, dt: float):
         RadiationConfig(scheme="gray", gray=GrayRadiationConfig()),
         model_type=model_type,
     )
+    sfc_fn = None
+    if with_surface_flux:
+        sfc_fn = _make_cubed_sphere_surface_flux_tendency()
 
     def physics_fn(*args, **kwargs):
         # Both factories return tendency callables with identical
-        # *pytree shapes* but distinct Field-name metadata (e.g.
-        # ``dtracers_dt_micro`` vs ``dtracers_dt_rad``). Field is
-        # registered as a pytree node with name as treedef metadata,
-        # so ``jax.tree_util.tree_map`` refuses to pair them.
-        # Sum at the leaf-array level + rebuild with the micro
-        # treedef so downstream consumers see a single composed
-        # tendency.
+        # *pytree shapes* but distinct Field-name metadata. Sum at
+        # the leaf-array level + rebuild with the micro treedef.
         t_micro = micro_fn(*args, **kwargs)
         t_rad = rad_fn(*args, **kwargs)
         leaves_m, treedef = jax.tree_util.tree_flatten(t_micro)
@@ -137,6 +224,16 @@ def _compose_nh_moist_physics(model_type: str, dt: float):
                 f"contract mismatch."
             )
         summed = [a + b for a, b in zip(leaves_m, leaves_r)]
+        if sfc_fn is not None:
+            t_sfc = sfc_fn(*args, **kwargs)
+            leaves_s = jax.tree_util.tree_leaves(t_sfc)
+            if len(leaves_s) != len(summed):
+                raise ValueError(
+                    f"_compose_nh_moist_physics: surface tendency has "
+                    f"{len(leaves_s)} leaves vs combined {len(summed)} "
+                    f"— contract mismatch."
+                )
+            summed = [a + b for a, b in zip(summed, leaves_s)]
         return jax.tree_util.tree_unflatten(treedef, summed)
 
     return physics_fn
@@ -372,9 +469,15 @@ def _run_cubed_sphere(days: float, dt: float, print_every: int, output: Path,
     # iter-275: opt-in moist physics for cubed_sphere.
     # model_type='nonhydrostatic' selects the cubed-sphere /
     # NonHydrostaticState factory branch.
+    # iter-283: moist=True now also includes bulk surface flux —
+    # iter-282 measured -2.8 K/day cooling without it (gray rad
+    # uncountered) → NaN at sim day 15. Surface flux closes the
+    # column energy budget for sustained RCE.
     if moist:
-        physics_fn = _compose_nh_moist_physics(model_type="nonhydrostatic",
-                                               dt=dt)
+        physics_fn = _compose_nh_moist_physics(
+            model_type="nonhydrostatic", dt=dt,
+            with_surface_flux=True,
+        )
     else:
         physics_fn = None
 
