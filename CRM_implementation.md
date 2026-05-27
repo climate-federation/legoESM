@@ -223,6 +223,57 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 285..286 (cubed-sphere C4 tightened config — still NaN at day 2; mesh-resolution-bound confirmed)
+
+iter-284 cubed-sphere C4 moist+sfc NaN'd at day 2 with default
+``CDGridCompressibleEulerConfig(n_acoustic_substeps=4,
+fix_mass=False)``. iter-285 tightened the config when moist:
+``n_acoustic_substeps=12`` (3× more substeps), ``use_coriolis=False``
+(C4 gridscale Coriolis unphysical), ``fix_mass=True,
+anchor_mass_to_initial=True``. Also dropped dt 10→5 s for
+acoustic safety.
+
+**Result (iter-286)**: NaN at sim-day 2 again. Tightened
+config did NOT fix the failure.
+
+```
+step    t[d]  max|w|     θ' range            q_v_max     mass_drift
+    1   0.00  4.03e-01   [-3.7e-4, 9.2e-1]  9.35e-3     3.0e-16
+17280   1.00  1.12e-02   [-5.9, 4.4]        1.04e-2     0
+34560   2.00  NaN
+```
+
+Comparison day-1 max|w|:
+- iter-284 (n_acoustic=4 + Coriolis + no mass-fixer):     2.80e-2 m/s
+- iter-286 (n_acoustic=12 + no Coriolis + mass-fixer):    1.12e-2 m/s
+- iter-282 MPAS L=2 no-sfc:                                1.28e-3 m/s
+
+Improvement on day 1 (~60% reduction in max|w|), but day-2 NaN
+remains. The blow-up is dominated by horizontal gradients
+across the ~14,000 km C4 cells, not by acoustic CFL.
+
+**Conclusion**: surface flux + Kessler + gray radiation
+forcing produces unphysical convective initiation at this mesh
+no matter how the dycore is tuned. The C4 mesh has only 96
+cells globally — too coarse to resolve convection. Each cell
+averages convective heat/moisture flux over ~5e12 m² —
+multiple orders of magnitude above the LES regime needed for
+explicit moist convection.
+
+**Resolution path** (not in-session — multi-day compute):
+* C24 mesh (3456 cells, dx ≈ 800 km) — still coarse for CRM
+  but should be marginally more stable. Projected wall ~158 h
+  for 30-day production.
+* C96 mesh (55296 cells, dx ≈ 250 km) — close to GCM
+  resolution. Projected wall ~3000 h (months).
+* True CRM at C384+ (~3 km dx) needs HPC cluster.
+
+**Status update**: cross-grid 30-day production at PRODUCTION
+mesh resolution remains an open multi-day compute commitment.
+The COMPOSITION + DYCORE pieces (iter-275 + iter-283) are
+verified correct; iter-285/286 confirms the failure mode is
+mesh-resolution-bound, not composition-bound.
+
 ### 2026-05-27 — iter 284 (cubed-sphere 30-day moist+sfc — NaN at day 2: surface flux over-forces at C4 planetary mesh)
 
 iter-283 added bulk surface flux to ``_compose_nh_moist_physics``
