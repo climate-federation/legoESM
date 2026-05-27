@@ -162,6 +162,63 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 151..173 (test-coverage hardening during iter-105 monitor)
+
+In-flight monitoring iters while iter-105 30-day run climbed
+from 50% → 60%. 23 commits adding regression coverage for
+gaps in the summarizer / wrapper / driver / doc-code stack —
+each commit ~20-60 LOC of tests, no behaviour changes. Cumulative:
+
+* iter-151..152: ±Inf and NaN-row guards in parse_log_max_w +
+  detect_stuck_trajectory / detect_sustained_stuck_trajectory.
+* iter-153: pin 3 unprotected driver defaults (c-h,
+  acoustic-off-centering, vertical-theta-diffusion) so a silent
+  flip shifts the iter-14 envelope without slipping past CI.
+* iter-154: parse_log_max_w robustness — truncated row from MPI
+  rank crash + non-numeric ValueError-throwing cell both skip
+  silently instead of aborting the parse.
+* iter-155: compare_rce_trajectories --quiet absent-table check
+  (the iter-111 summary line was tested but the table-suppression
+  side of the flag was not).
+* iter-156: wrapper EVALUATE_DOD=final + CHECK_LOG_MAX_W=1
+  combined regression — the production-recommended combo per
+  the iter-124 hint.
+* iter-157: wrapper hint fires on EVALUATE_DOD=stability +
+  echoes the user's env value verbatim.
+* iter-158..159: doc-code locks for DEFAULT_MAX_W_THRESHOLD_MS
+  (50 m/s) + DOD_FINAL_MSE_DRIFT (1 % gate).
+* iter-160..162: evaluate_rce_final_dod plateau-window vs
+  full-window scoping — 3 tests pinning the docstring's
+  ``last_n_days_for_plateau`` scope contract (CWV recovery PASS,
+  |U|_sfc full-window FAIL, NaN CWV full-window FAIL).
+* iter-163..164: write_csv parent-directory creation
+  (parents=True, exist_ok=True) for both summarizer + compare.
+* iter-165: final-DOD runaway-evaporation regression (companion
+  to iter-104's spinup-gate test).
+* iter-166..167: profile NaN-day rejection + wind NaN
+  non-finite-branch categorisation (must surface as ``non-finite
+  |U|_sfc`` not ``|U|_sfc exceeded``).
+* iter-168..170: --final-dod CLI surface — PASS label,
+  INSUFFICIENT exit code, FAIL exit code, + combined
+  --final-dod + --check-log-max-w end-to-end.
+* iter-171: include NY in wrapper --help env-var lockstep
+  (count claimed 17, list held 16).
+* iter-172: doc-code lock for DOD_FINAL_MIN_DAYS = 30.
+* iter-173: ALLOW_SUMMARY_FAILURE downgrade covers IO error (1)
+  and DOD INSUFFICIENT (4) on top of the iter-103 DOD FAIL (3).
+
+Test counts after iter-173 (was after iter-150):
+* test_summarize_rce_trajectory.py: 63 → 80 (+17).
+* test_compare_rce_trajectories.py: 17 → 19 (+2).
+* test_run_rce_30day_wrapper_defaults.py: 42 → 46 (+4).
+* test_run_rce_mpi_long_driver_defaults.py: 24 → 27 (+3).
+* test_dod_doc_code_consistency.py: 5 → 8 (+3).
+* All other suites unchanged.
+
+iter-105 run still healthy at iter-173 commit time: CWV 55.57
+mm, max|w| 4.7e-3 m/s, MSE drift < 0.01 %, cf 0.437, no NaN.
+Day 18.13/30 (60.4 %).
+
 ### 2026-05-27 — iter 150 (MPI DD path verified exercisable on macOS — F9 still scaling-blocked)
 
 User asked "is MPI running for this case?". Answer: NO — iter-105
