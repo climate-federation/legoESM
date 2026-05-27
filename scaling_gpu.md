@@ -661,6 +661,33 @@ Updated final ladder:
 - `scaling_gpu_weak.png` — ns/cell vs cells, flat = saturated
 - `scaling_gpu_peak_bar.png` — peak Mcells/s by grid × precision
 
+### Iter 23 — 2026-05-27 — LL ocean explicit n_barotropic_substeps sweep
+
+Same nsub sweep on LL192 ocean (both precisions):
+
+| nsub          | fp64 Mc/s | fp32 Mc/s |
+|---------------|-----------|-----------|
+|  5            | **243**   | **518**   |
+| 10            | 237       | 489       |
+| 15            | 231       | 470       |
+| 20            | 225       | 451       |
+| 30 (default)  | 214       | 416       |
+| impl_cn       | 247       | 546       |
+
+For LL ocean, **tuned explicit (nsub=5) catches up to impl_cn:**
+- fp64: 243 vs 247 (1.6% gap — within bench noise)
+- fp32: 518 vs 546 (5% gap)
+
+Different story from MPAS where impl_cn still won 43% even with
+tuned explicit. Explanation: LL has structured stencils (cheap
+gather), so the barotropic substep cost scales modestly with nsub
+count. MPAS Voronoi indirect addressing makes each substep ~5×
+more expensive — substep-count reduction matters there.
+
+⇒ For LL ocean throughput, **`n_barotropic_substeps=5` is the
+right knob to expose if impl_cn is contra-indicated**. Same CFL
+caveat as iter-22.
+
 ### Iter 22 — 2026-05-27 — MPAS explicit n_barotropic_substeps sweep
 
 For users who can't use impl_cn (numerical reasons), is the default
