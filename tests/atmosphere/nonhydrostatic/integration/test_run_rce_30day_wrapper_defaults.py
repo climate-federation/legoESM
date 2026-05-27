@@ -1005,3 +1005,27 @@ def test_wrapper_evaluate_dod_stability_threads_no_plateau_check(tmp_path):
         f"trajectory.txt={traj!r}"
     )
     assert "--final-dod" not in traj
+
+
+def test_wrapper_mpirun_fail_propagates_even_with_allow_summary_failure(tmp_path):
+    """iter-135: ``ALLOW_SUMMARY_FAILURE=1`` only downgrades a
+    summarizer failure; mpirun failures MUST still propagate
+    because set -e + pipefail kills the script BEFORE the post-run
+    block runs. Without this test a future refactor that adds a
+    wrap-around-mpirun ``set +e`` could silently mask mpirun
+    failures."""
+    res = _run_wrapper_with_stubs(
+        tmp_path, mpirun_exit=42, summarizer_exit=0,
+        allow_summary_failure="1",
+    )
+    assert res.returncode != 0, (
+        f"mpirun failure was masked under ALLOW_SUMMARY_FAILURE=1: "
+        f"stdout={res.stdout!r} stderr={res.stderr!r}"
+    )
+    # mpirun's stub returned 42; bash + pipefail propagates that
+    # literal code through ``mpirun ... | tee``. The exact code
+    # depends on pipe semantics; just assert non-zero.
+    assert "Computing per-day RCE trajectory summary" not in res.stdout, (
+        "summarizer ran despite mpirun failure; ALLOW_SUMMARY_FAILURE=1 "
+        "must NOT bypass the mpirun guard."
+    )
