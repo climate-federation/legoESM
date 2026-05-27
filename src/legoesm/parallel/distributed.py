@@ -255,6 +255,97 @@ def initialize_distributed(
     return tuple(result) if len(result) > 1 else result[0]
 
 
+def initialize_distributed_latlon(
+    *,
+    global_n_lat: int,
+    global_n_lon: int | None = None,
+):
+    """Initialize the MPI halo backend for a latitude-band lat-lon run.
+
+    Parallel entry point to :func:`initialize_distributed` for the
+    SCVT/cubed-sphere grids — separate because the lat-lon path
+    needs neither the face-topology dance nor JAX's device-mesh
+    SPMD machinery.  All the lat-lon MPI work happens through
+    mpi4jax sendrecv (see
+    :mod:`legoesm.parallel.latlon_mpi`) and the backend-dispatched
+    halo helpers (see :mod:`legoesm.grids.halo_latlon`).
+
+    What this does
+    --------------
+    1. Reads ``rank`` and ``n_processes`` from ``MPI.COMM_WORLD``.
+    2. Builds a :class:`LatLonBandLayout` for the band this rank
+       owns.
+    3. Activates ``set_halo_backend("mpi", layout)`` — every
+       subsequent ``pad_halo_latlon`` / ``pad_with_pole_bc_lat``
+       call inside the dycore dispatches through MPI sendrecv at
+       partition cuts + pole-fold / wall-BC constants at boundary
+       ranks, and ``_is_distributed()`` returns True (gating
+       conservation reductions).
+
+    What this does NOT do
+    ---------------------
+    * Does not initialize ``jax.distributed`` (multi-node JAX
+      coordinator).  Single-node CPU MPI runs don't need it; if
+      you need multi-node JAX SPMD, call :func:`initialize_distributed`
+      first (cubed-sphere path) or extend this helper to take the
+      coordinator arguments.
+    * Does not scatter state/forcing.  Callers slice the global
+      grid + initial state themselves using the returned
+      ``LatLonBandLayout`` (see ``scatter_state_latlon``).
+    * Does not register an ``_active_layout`` of the cubed-sphere
+      ``DistributedLayout`` type (those carry ``ownership.face_ids``
+      etc. which have no lat-lon analog).  The
+      ``LatLonBandLayout`` is exposed via ``get_mpi_topology()``
+      from :mod:`legoesm.grids.halo` for code that needs to query
+      "what part of the global lat axis do I own".
+
+    Parameters
+    ----------
+    global_n_lat : int
+        Global number of latitude rows of the grid this rank's band
+        slices into.
+    global_n_lon : int, optional
+        Global number of longitude columns.  Defaults to
+        ``2 * global_n_lat`` (the standard square-cell AMIP layout).
+
+    Returns
+    -------
+    LatLonBandLayout
+        This rank's band layout.  Use
+        ``layout.lat_start`` / ``layout.lat_end`` to slice the
+        global grid + initial state for this rank.
+    """
+    global _active_topology
+    if _active_topology is not None:
+        warnings.warn(
+            "initialize_distributed_latlon() called more than once. "
+            "Returning the existing topology.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return _active_topology
+
+    if global_n_lon is None:
+        global_n_lon = 2 * global_n_lat
+
+    # Validate MPI dependencies before touching JAX.
+    _mpi4jax, MPI = _require_mpi_stack()
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    n_processes = comm.Get_size()
+
+    from legoesm.parallel.latlon_mpi import make_latlon_band_layout
+    layout = make_latlon_band_layout(
+        rank=rank, n_ranks=n_processes,
+        n_lat=global_n_lat, n_lon=global_n_lon,
+    )
+    _active_topology = layout
+
+    from legoesm.grids.halo import set_halo_backend
+    set_halo_backend("mpi", layout)
+    return layout
+
+
 def get_active_topology() -> CommTopology | None:
     """Return the active MPI communication topology, if initialized."""
     return _active_topology
