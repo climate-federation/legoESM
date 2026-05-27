@@ -446,6 +446,88 @@ def _upwind_advection_y(field_yxz: jax.Array, v_at_field: jax.Array,
 
 
 # --------------------------------------------------------------------- #
+# Van Leer TVD flux-form advection (2nd-order, monotone, bounded).      #
+# Drop-in replacement for _upwind_advection_x/y with the same           #
+# co-located (field, velocity) convention. Cheaper than WENO5 (stencil  #
+# width 4 vs 6) but still 2nd-order accurate in smooth regions; falls   #
+# back to 1st-order upwind at extrema. Less numerical diffusion than    #
+# upwind1 → relaxes the advective CFL bound and lets larger dt run      #
+# stably (iter-178 motivation).                                         #
+# --------------------------------------------------------------------- #
+
+
+def _van_leer_advection_x(
+    field_yxz: jax.Array, u_at_field: jax.Array, dx: float,
+) -> jax.Array:
+    """2nd-order Van Leer TVD upwind contribution to ``-u df/dx``.
+
+    Reconstruct field at face i+1/2 from a 4-cell stencil
+    [f[i-1], f[i], f[i+1], f[i+2]] using a slope-limited 2nd-order
+    extrapolation. Upwind side selected by face velocity sign.
+    Convert flux-form divergence to advective form via the
+    ``-d(uf)/dx + f·du/dx`` identity (same trick as WENO5).
+
+    Face velocity is the 2-point centred average of ``u_at_field``
+    (consistent with the WENO5 path).
+
+    Differentiability: Van Leer's analytic ``(r+|r|)/(1+|r|)`` is
+    smooth everywhere except a single subgradient kink at ``r=0``
+    (an extremum). ``jnp.where`` for sign selection contributes a
+    second well-behaved subgradient. ``jax.grad`` flows cleanly.
+    """
+    from legoesm.core.flux_limiters import van_leer_limiter
+    eps = 1e-30
+    f = field_yxz
+    f_im1 = jnp.roll(f,  1, axis=1)  # f[i-1]
+    f_i   = f                         # f[i]
+    f_ip1 = jnp.roll(f, -1, axis=1)  # f[i+1]
+    f_ip2 = jnp.roll(f, -2, axis=1)  # f[i+2]
+    # Positive-velocity reconstruction at face i+1/2 (upwind from left).
+    # delta = f[i+1] - f[i]; r = (f[i] - f[i-1]) / delta.
+    delta_pos = f_ip1 - f_i
+    r_pos = (f_i - f_im1) / jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps)
+    phi_pos = f_i + 0.5 * van_leer_limiter(r_pos) * delta_pos
+    # Negative-velocity reconstruction at face i+1/2 (upwind from right).
+    # delta = f[i] - f[i+1]; r = (f[i+2] - f[i+1]) / delta.
+    delta_neg = f_i - f_ip1
+    r_neg = (f_ip2 - f_ip1) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
+    phi_neg = f_ip1 + 0.5 * van_leer_limiter(r_neg) * delta_neg
+    # Face velocity: 2-point centred average of co-located cell velocities.
+    u_face_R = 0.5 * (u_at_field + jnp.roll(u_at_field, -1, axis=1))
+    phi_R = jnp.where(u_face_R >= 0.0, phi_pos, phi_neg)
+    flux_R = u_face_R * phi_R
+    flux_L = jnp.roll(flux_R, 1, axis=1)
+    u_face_L = jnp.roll(u_face_R, 1, axis=1)
+    return -(flux_R - flux_L) / dx + f * (u_face_R - u_face_L) / dx
+
+
+def _van_leer_advection_y(
+    field_yxz: jax.Array, v_at_field: jax.Array, dy: float,
+) -> jax.Array:
+    """2nd-order Van Leer TVD upwind contribution to ``-v df/dy``
+    (axis=0). Same convention as :func:`_van_leer_advection_x`."""
+    from legoesm.core.flux_limiters import van_leer_limiter
+    eps = 1e-30
+    f = field_yxz
+    f_jm1 = jnp.roll(f,  1, axis=0)
+    f_j   = f
+    f_jp1 = jnp.roll(f, -1, axis=0)
+    f_jp2 = jnp.roll(f, -2, axis=0)
+    delta_pos = f_jp1 - f_j
+    r_pos = (f_j - f_jm1) / jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps)
+    phi_pos = f_j + 0.5 * van_leer_limiter(r_pos) * delta_pos
+    delta_neg = f_j - f_jp1
+    r_neg = (f_jp2 - f_jp1) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
+    phi_neg = f_jp1 + 0.5 * van_leer_limiter(r_neg) * delta_neg
+    v_face_R = 0.5 * (v_at_field + jnp.roll(v_at_field, -1, axis=0))
+    phi_R = jnp.where(v_face_R >= 0.0, phi_pos, phi_neg)
+    flux_R = v_face_R * phi_R
+    flux_L = jnp.roll(flux_R, 1, axis=0)
+    v_face_L = jnp.roll(v_face_R, 1, axis=0)
+    return -(flux_R - flux_L) / dy + f * (v_face_R - v_face_L) / dy
+
+
+# --------------------------------------------------------------------- #
 # WENO5-Z flux-form upwind advection (5th-order, monotone).             #
 # Drop-in replacements for _upwind_advection_x/y with the same          #
 # co-located (field, velocity) convention. Periodic in both axes        #
@@ -935,12 +1017,14 @@ def plane_compressible_euler_slow_tendencies(
     scheme = getattr(config, "horizontal_advection_scheme", "upwind1")
     if scheme == "weno5":
         adv_x, adv_y = _weno5_advection_x, _weno5_advection_y
+    elif scheme == "van_leer":
+        adv_x, adv_y = _van_leer_advection_x, _van_leer_advection_y
     elif scheme == "upwind1":
         adv_x, adv_y = _upwind_advection_x, _upwind_advection_y
     else:
         raise ValueError(
             f"Unknown horizontal_advection_scheme: {scheme!r}. "
-            "Expected 'upwind1' or 'weno5'."
+            "Expected 'upwind1', 'van_leer', or 'weno5'."
         )
     u_center = interp_xface_to_cell_vlast(u, grid)
     v_center = interp_yface_to_cell_vlast(v, grid)

@@ -77,7 +77,13 @@ def test_other_production_defaults(wrapper_text):
         "ADVECTION": "upwind1",
         "HYPERDIFF": "5.0e6",
         "BUBBLE_K": "0.0",   # F7 / F10 contract: clean Wing IC
-        "QV_NOISE": "0.0",   # F7 / F10 contract: no qv noise
+        # iter-179: QV_NOISE flipped from 0.0 -> 1e-4 to break the
+        # iter-149 column-symmetric convection trap (Wing IC + no
+        # bubble + no qv noise + mean-wind removal made every column
+        # evolve identically → no horizontal organization → 1500x
+        # below Wing 2018 precip target). 1e-4 is 50x smaller than
+        # the iter-97 F7 destabilising 5e-3.
+        "QV_NOISE": "1e-4",
         # iter-61 Codex MEDIUM coverage gap fix: env defaults that
         # iter-58 missed.
         "DAYS": "30",

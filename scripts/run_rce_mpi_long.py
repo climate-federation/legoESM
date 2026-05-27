@@ -255,9 +255,15 @@ def parse_args():
                         "theta_prime [m^2/s]. 0 = off. Try 1e4-5e4 to "
                         "damp the buoyancy/PG feedback that destabilises "
                         "the dycore at dt > 0.5 s on coarse vertical grids.")
-    p.add_argument("--advection", choices=["upwind1", "weno5"],
+    p.add_argument("--advection", choices=["upwind1", "van_leer", "weno5"],
                    default="upwind1",
-                   help="Horizontal advection scheme for theta/u/v/w.")
+                   help="Horizontal advection scheme for theta/u/v/w. "
+                        "upwind1: 1st-order, cheap, dispersive (default). "
+                        "van_leer: 2nd-order TVD, monotone, less numerical "
+                        "diffusion than upwind1 → relaxes the advective CFL "
+                        "bound and lets larger dt run stably (iter-179). "
+                        "weno5: 5th-order WENO-Z, much less grid-scale "
+                        "dispersion but wider stencil + extra cost.")
     p.add_argument("--implicit-buoyancy", action="store_true", default=False,
                    help="Klemp-Wilhelmson 1978 implicit-buoyancy treatment "
                         "of the w-equation in the SI acoustic substep. Adds "
