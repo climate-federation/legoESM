@@ -58,15 +58,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         choices=["sigma", "hybrid"])
     parser.add_argument("--p-top", type=float, default=None)
     parser.add_argument("--stretching", type=float, default=None)
-    # ``mpas_voronoi`` is the canonical name for the SCVT Voronoi mesh
-    # + TRiSK discretization (Ringler 2010 / Thuburn 2009).  Legacy
-    # aliases ``voronoi`` / ``icosahedral`` / ``mpas`` are accepted
-    # and normalised by ``legoesm.driver.config.normalize_grid_type``
+    # ``mpas`` is the canonical name for the SCVT Voronoi mesh + TRiSK
+    # discretization (Ringler 2010 / Thuburn 2009), matching the ocean
+    # side which has always used this name.  Legacy aliases
+    # ``voronoi`` / ``icosahedral`` / ``mpas_voronoi`` are accepted and
+    # normalised by ``legoesm.driver.config.normalize_grid_type``
     # before reaching any internal dispatch.
     parser.add_argument("--grid-type", type=str, default="cubed_sphere",
                         choices=["cubed_sphere", "gaussian", "latlon",
-                                 "mpas_voronoi",
-                                 "voronoi", "icosahedral", "mpas"])
+                                 "mpas",
+                                 "voronoi", "icosahedral", "mpas_voronoi"])
     # The canonical names in `supported_matrix.py` are:
     #   - centered       (cubed_sphere, latlon)
     #   - finite_volume  (cubed_sphere, latlon)

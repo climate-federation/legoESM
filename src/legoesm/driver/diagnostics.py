@@ -318,7 +318,7 @@ class DiagnosticCollector:
                     tgt_nlat=self._cmip_nlat,
                     tgt_nlon=self._cmip_nlon,
                 )
-        elif grid_type == "mpas_voronoi":
+        elif grid_type == "mpas":
             raise ValueError(
                 f"CMIP output is not supported for grid_type={grid_type!r}. "
                 f"The SCVT Voronoi mesh requires unstructured-to-latlon "

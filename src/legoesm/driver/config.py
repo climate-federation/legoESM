@@ -32,17 +32,18 @@ class GridConfig(NamedTuple):
     """Horizontal and vertical grid configuration.
 
     ``grid_type`` is one of the canonical names:
-    ``cubed_sphere``, ``gaussian``, ``latlon``, ``mpas_voronoi``.
+    ``cubed_sphere``, ``gaussian``, ``latlon``, ``mpas``.
 
-    ``mpas_voronoi`` is the SCVT Voronoi mesh + TRiSK discretization
-    (Ringler 2010, Thuburn 2009).  Pre-2026-05 the codebase used three
-    different aliases for this single mesh — ``voronoi``,
-    ``icosahedral``, and (confusingly) ``mpas``.  All three now
-    normalize to ``mpas_voronoi`` at the config boundary; internal
-    dispatch checks only the canonical name.  See
-    :func:`normalize_grid_type`.
+    ``mpas`` is the SCVT Voronoi mesh + TRiSK discretization
+    (Ringler 2010, Thuburn 2009).  Pre-2026-05 the codebase used
+    multiple aliases for this single mesh on the atmosphere side
+    (``voronoi``, ``icosahedral``, ``mpas_voronoi``) while the ocean
+    consistently used ``mpas``.  All variants now normalize to
+    ``mpas`` at the config boundary so the atmosphere and ocean
+    use one identifier; internal dispatch checks only the canonical
+    name.  See :func:`normalize_grid_type`.
     """
-    grid_type: str = "cubed_sphere"  # cubed_sphere, gaussian, latlon, mpas_voronoi
+    grid_type: str = "cubed_sphere"  # cubed_sphere, gaussian, latlon, mpas
     resolution: int = 16             # N for CS, n_max for spectral
     nlev: int = 40
     vertical_coord: str = "hybrid"   # sigma, hybrid
@@ -51,21 +52,22 @@ class GridConfig(NamedTuple):
 
 
 # Canonical name for the SCVT Voronoi mesh + TRiSK discretization.
-# Pre-2026-05 grid_type literals that all refer to the same mesh:
+# Atmosphere-side pre-2026-05 aliases that all refer to the same mesh:
 _GRID_TYPE_ALIASES: dict[str, str] = {
-    "voronoi": "mpas_voronoi",
-    "icosahedral": "mpas_voronoi",
-    "ico": "mpas_voronoi",
-    "mpas": "mpas_voronoi",   # legacy: "mpas" sometimes appeared as grid_type
+    "voronoi": "mpas",
+    "icosahedral": "mpas",
+    "ico": "mpas",
+    "mpas_voronoi": "mpas",
 }
 
 
 def normalize_grid_type(name: str) -> str:
     """Canonicalise legacy aliases for the SCVT Voronoi mesh.
 
-    Maps ``"voronoi"``, ``"icosahedral"``, ``"ico"``, ``"mpas"`` (as
-    grid_type) all to ``"mpas_voronoi"``.  Every other grid_type
-    string passes through unchanged.
+    Maps ``"voronoi"``, ``"icosahedral"``, ``"ico"``,
+    ``"mpas_voronoi"`` all to ``"mpas"`` (the name the ocean side
+    has always used).  Every other grid_type string passes through
+    unchanged.
 
     Callers
     -------
@@ -74,7 +76,7 @@ def normalize_grid_type(name: str) -> str:
       legacy names.
     * Internal code that branches on grid_type SHOULD assume the
       string has already been normalised — i.e. compare to
-      ``"mpas_voronoi"``, not to the aliases.
+      ``"mpas"``, not to the aliases.
 
     Returns
     -------

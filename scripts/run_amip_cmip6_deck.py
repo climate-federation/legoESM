@@ -154,10 +154,10 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.add_argument("--grid-type", type=str, default="cubed_sphere",
                         choices=["cubed_sphere", "gaussian", "latlon",
-                                 "mpas_voronoi",
+                                 "mpas",
                                  # Legacy aliases for the SCVT mesh,
                                  # normalised by run_amip.py
-                                 "voronoi", "icosahedral", "mpas"])
+                                 "voronoi", "icosahedral", "mpas_voronoi"])
     parser.add_argument("--discretization", type=str, default="centered",
                         choices=["centered", "finite_volume", "cgrid",
                                   "latlon_cgrid", "cdgrid", "mpas", "spectral"])

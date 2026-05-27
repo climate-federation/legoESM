@@ -79,9 +79,9 @@ class ModelDriver:
         # Defensive canonical-name normalization at the driver entry:
         # callers that bypass run_amip's argparse postprocessor (direct
         # test fixtures, ad-hoc scripts, older YAML loaders) might still
-        # pass ``voronoi`` / ``icosahedral`` / ``mpas`` as grid_type for
-        # the SCVT mesh.  The dispatch sites below speak only the
-        # canonical ``mpas_voronoi`` — normalise once here so every
+        # pass ``voronoi`` / ``icosahedral`` / ``mpas_voronoi`` as
+        # grid_type for the SCVT mesh.  The dispatch sites below speak
+        # only the canonical ``mpas`` — normalise once here so every
         # downstream branch is consistent.
         from legoesm.driver.config import normalize_grid_type
         canonical_grid_type = normalize_grid_type(config.grid.grid_type)
@@ -241,10 +241,10 @@ class ModelDriver:
         elif gc.grid_type == "latlon":
             from legoesm.grids.latlon import create_latlon_grid
             self.grid = create_latlon_grid(gc.resolution)
-        elif gc.grid_type == "mpas_voronoi":
+        elif gc.grid_type == "mpas":
             # SCVT Voronoi mesh + TRiSK discretization.  Legacy aliases
-            # (voronoi, icosahedral, mpas) are normalised to this
-            # canonical name at the config boundary
+            # (voronoi, icosahedral, mpas_voronoi) are normalised to
+            # this canonical name at the config boundary
             # (driver.config.normalize_grid_type).
             from legoesm.grids.voronoi import create_voronoi_mesh
             self.grid = create_voronoi_mesh(gc.resolution, lloyd_iterations=50)
@@ -439,7 +439,7 @@ class ModelDriver:
         N = cfg.grid.resolution
         NLEV = cfg.grid.nlev
 
-        if cfg.grid.grid_type == "mpas_voronoi":
+        if cfg.grid.grid_type == "mpas":
             from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
             shape_3d = (self.grid.nCells, NLEV)
             self.state = held_suarez_init_mpas(
@@ -1514,7 +1514,7 @@ class ModelDriver:
         try:
             # MPAS and spectral states use different pytree layouts;
             # use dedicated simple run loops.
-            if self.config.grid.grid_type == "mpas_voronoi":
+            if self.config.grid.grid_type == "mpas":
                 return self._run_mpas(start_step, start_day)
             if self.config.dycore.discretization == "spectral":
                 return self._run_spectral(start_step, start_day)
