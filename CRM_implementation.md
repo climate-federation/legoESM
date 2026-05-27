@@ -198,6 +198,43 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 190..211 (post-iter-190 polish + iter-203 smooth_k1 + Codex round-2 fixes)
+
+22 iterations during the iter-183 30-day production run. Three
+substantive groups + cleanup:
+
+* iter-191..197: docstring + test-docstring refreshes from
+  iter-180 (WENO5) → iter-183 (Van Leer) naming; iter-194
+  serial-dispatch error-message refactor to consult the shared
+  HORIZONTAL_ADVECTION_HALO_REQUIREMENT map.
+* iter-198..201: THETA_NOISE wrapper env var added + locked
+  threading; iter-200/201 scheme-dispatch comment + Config docstring
+  refresh.
+* iter-202: test_acoustic_off_centering docstring -> iter-183 contract.
+* iter-203..210 (F11 fix-path-3 attempt + Codex round 2): added
+  --theta-noise-mode {white, smooth_k1} for a smooth low-wavenumber
+  perturbation as F11 fix-path-3 candidate. iter-203 smoke at
+  dx=4 km amplitudes 1e-3..0.1 K → NaN at step 50. NEGATIVE result;
+  helper retained for future LES-regime experiments. iter-205 added
+  THETA_NOISE_MODE wrapper env. iter-206 locked threading. iter-207
+  Codex round-2 fixes (2 MEDIUM + 1 LOW): mean-subtract on
+  degenerate grids, extract helper to test-importable location,
+  --theta-noise-seed help clarifies white-only. iter-208 promoted
+  build_smooth_k1_pattern to legoesm.atmosphere.idealized.rcemip_initial_conditions
+  so the unit test imports via standard package path. iter-209 locked
+  driver default. iter-210 documented iter-203 negative in F11.
+* iter-211 (Codex round 3): AST-lock --theta-noise-mode choices
+  list so a future smooth_k2 addition forces test updates.
+
+Production contract unchanged across the chain: dt=20 + Van Leer +
+beta=0.2 (iter-183) remains stable; iter-183 30-day run reached
+48% during the iter-191..211 work without issue.
+
+Test growth: ~10 new unit + AST tests across the chain. The
+iter-203..211 cluster is self-coherent — argparse choices,
+driver dispatch, wrapper env, and unit tests all reference the
+same shared helper.
+
 ### 2026-05-27 — iter 175..189 (Van Leer TVD chain + production-default refresh + F11 root cause)
 
 Major dycore upgrade prompted by the iter-105 30-day diagnostic:
