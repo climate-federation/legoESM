@@ -99,8 +99,9 @@ def test_run_scm_rce_half_day_smoke():
         f"surface pressure should be constant."
     )
 
-    # History line: T_sfc trajectory exists + is monotonic-ish
-    # (small drift away from IC).
+    # iter-301 (Codex iter-300 LOW): the prior comment claimed
+    # "monotonic-ish" but the assertion only checks the trajectory
+    # line is PRESENT in stdout. Reworded for accuracy.
     assert "T_sfc trajectory" in result.stdout, (
         f"[history] T_sfc trajectory line missing.\n"
         f"stdout:\n{result.stdout[-1500:]}"
