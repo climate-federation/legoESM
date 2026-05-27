@@ -70,6 +70,38 @@ CRM peak so far: **43.2 Mc/s @ N=192 fp64 nsub=6**. Still ~3× below
 atm CS peak (141 Mc/s fp64) but in the same memory-bound regime now
 that substep count is reasonable.
 
+### Iter 3 — 2026-05-27 — push to N=384 + fp32 sweep
+
+**fp64 N=384 nsub=6:** 164.98 ms / 26.8 Mc/s — falls 38% past N=192 peak.
+**Plateau-then-fall confirmed** — state at N=384 (~400 MB fp64) far past
+L2 (48 MB) so HBM dominates with no reuse.
+
+**fp32 nsub=6 sweep (keeps climbing past N=192):**
+
+| res    | total cell-lev | ms/step | Mc/s |
+|--------|----------------|---------|------|
+| N=96   |   276,480      |  7.28   |  38  |
+| N=192  | 1,105,920      | 23.43   |  47  |
+| N=384  | 4,423,680      | 78.02   | **57** |
+
+fp32/fp64 ratio at N=384 = 2.1 → fully bandwidth-bound. Smaller state
+size (200 MB) closer to L2 fit. **CRM peak overall: 57 Mc/s @ N=384
+fp32 nsub=6.**
+
+Beats prior fp64 peak (43 Mc/s) by 32%. Still 4× below ocean LL
+impl_cn peak (546 Mc/s) because:
+1. Acoustic substep loop is fundamentally serial (12-iter Thomas chain)
+2. Plane operators (gradient, divergence) on full 3D state per substep
+3. Slow tendency RK3 outer still doubles base work
+
+**Codex iter-2 review applied:**
+- [HIGH] post-warmup + post-timing `jnp.isfinite` assert added —
+  NaN/Inf now raises RuntimeError instead of silently fast
+- [HIGH] horizontal acoustic CFL (`c_sound·dt/nsub/dx`) computed +
+  warned when >0.7; printed in run header at startup
+- Sub-warning thresholds preserved (default config CFL=0.057
+  comfortable, nsub=2 would be 0.85 → blocked)
+
 ### Iter 1 — 2026-05-27 — scaffold + first sweep
 
 - New branch `crm_gpu` off main `21098286`

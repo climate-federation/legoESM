@@ -72,7 +72,7 @@ def _block_state(state):
 
 
 def _time_step(model, state, dt: float, n_warmup: int, n_timing: int):
-    import jax
+    import jax, jax.numpy as jnp
     t0 = time.perf_counter()
     s = model.step(state, dt)
     _block_state(s)
@@ -83,6 +83,16 @@ def _time_step(model, state, dt: float, n_warmup: int, n_timing: int):
         s = model.step(s, dt)
     _block_state(s)
     warmup_s = time.perf_counter() - t0
+
+    # Post-warmup finite assertion. Catches NaN/Inf that would otherwise
+    # be silently reported as fast wall-clock numbers (codex iter-2 #1).
+    for leaf in jax.tree.leaves(s):
+        if hasattr(leaf, "dtype") and jnp.issubdtype(leaf.dtype, jnp.floating):
+            if not bool(jnp.all(jnp.isfinite(leaf))):
+                raise RuntimeError(
+                    f"NaN/Inf in state leaf after {n_warmup} warmup steps; "
+                    f"check dt={dt}, n_acoustic_substeps, IC amplitude"
+                )
 
     input_dtypes = jax.tree.map(
         lambda x: x.dtype if hasattr(x, "dtype") else None, s,
@@ -109,11 +119,33 @@ def _time_step(model, state, dt: float, n_warmup: int, n_timing: int):
     s = _scan_run(s)
     _block_state(s)
     timing_s = time.perf_counter() - t0
+
+    # Post-timing finite assert — same as warmup. NaN math is fast.
+    for leaf in jax.tree.leaves(s):
+        if hasattr(leaf, "dtype") and jnp.issubdtype(leaf.dtype, jnp.floating):
+            if not bool(jnp.all(jnp.isfinite(leaf))):
+                raise RuntimeError(
+                    f"NaN/Inf after timing loop ({n_timing} steps)"
+                )
     return compile_s, warmup_s, timing_s
+
+
+def _acoustic_cfl(dt: float, n_acoustic_substeps: int, dx: float,
+                  c_sound: float = 340.0) -> float:
+    """Horizontal acoustic CFL = c_sound * (dt/nsub) / dx.
+
+    Semi-implicit acoustic relaxes vertical CFL; horizontal still
+    constrained by sound-speed Courant number. Stable when ≤ ~0.7.
+    """
+    return c_sound * (dt / n_acoustic_substeps) / dx
 
 
 def _bench_one(nx: int, ny: int, nlev: int, dx: float, dt: float,
                prec: str, n_acoustic_substeps: int = 12) -> TimingResult:
+    cfl = _acoustic_cfl(dt, n_acoustic_substeps, dx)
+    if cfl > 0.7:
+        print(f"  WARN: horizontal acoustic CFL = {cfl:.2f} (>0.7) — "
+              f"unstable expected at dx={dx}m, dt={dt}s, nsub={n_acoustic_substeps}")
     model, state, n_horiz = _build_model(
         nx, ny, nlev, dx, prec == "float64",
         n_acoustic_substeps=n_acoustic_substeps,
@@ -164,9 +196,11 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Backend: {jax.default_backend().upper()}  Devices: {jax.devices()}")
+    cfl = _acoustic_cfl(args.dt, args.n_acoustic_substeps, args.dx)
     print(f"Precision: {args.precision}  nlev: {args.nlev}  "
           f"dx: {args.dx} m  dt: {args.dt} s  "
-          f"nsub: {args.n_acoustic_substeps}")
+          f"nsub: {args.n_acoustic_substeps}  "
+          f"horiz acoustic CFL: {cfl:.3f}")
 
     results = []
     failures = []
