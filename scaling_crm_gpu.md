@@ -117,6 +117,34 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 42 — 2026-05-27 — full production SI+physics+cuSPARSE sweep
+
+| res    | iter 36 (pre-cuSPARSE) | iter 42 (post-cuSPARSE) | gain |
+|--------|------------------------|--------------------------|------|
+| N= 32  |  4.7 Mc/s               | 14.3 Mc/s                | +204% |
+| N= 64  | 13.1                    | 25.2                     | +92%  |
+| N= 96  | 21.9                    | 28.3                     | +29%  |
+| N=128  | 28.5                    | **29.4** (peak)          | +3%   |
+| N=192  | 26.1                    | 26.0                     | ~0%   |
+| N=256  | 28.6                    | 26.9                     | ~0%   |
+
+cuSPARSE gain concentrated at small N (dycore is large share);
+marginal at large N (physics dominates production cost).
+
+**Final production CRM throughput:** ~28-29 Mc/s plateau N=96-128,
+**SYPD 0.33-0.56** at typical production resolutions. Sim-time-
+effective: 50-59 Mc·s/s — best yet for full-physics CRM on this
+hardware.
+
+**Final 4-tier throughput ladder (median-3, fp32):**
+
+| tier                                  | best Mc/s         | sim-time eff | notes |
+|---------------------------------------|--------------------|--------------|-------|
+| Bare dycore explicit (no Smag)        | 866 (N=128)       | 433         | bench-only |
+| Bare dycore SI+cuSPARSE (no physics)  | 273 (N=128-192)   | 546         | bench, dt=2 |
+| Production-config Smag (no physics)   | ~410 (estimated)  | n/a         | iter-31 baseline |
+| **Production SI + full physics + cuSPARSE** | **29.4 (N=128)** | 59 | **production peak** |
+
 ### Iter 41 — 2026-05-27 — final sweep all-wins-applied: explicit vs SI reset
 
 Re-bench after cuSPARSE Thomas + scan-compatible fix_mass:
