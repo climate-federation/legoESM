@@ -45,7 +45,7 @@ def reset_halo_backend():
     set_halo_backend("local")
 
 
-def _build_pe_model_and_state(n: int = 8, nlev: int = 5):
+def _build_pe_model_and_state(n: int = 8, nlev: int = 5, **config_overrides):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
     from legoesm.grids.vertical import create_sigma_coordinate
@@ -60,13 +60,15 @@ def _build_pe_model_and_state(n: int = 8, nlev: int = 5):
     cdgrid = create_cubed_sphere_cdgrid(grid)
     sigma = create_sigma_coordinate(nlev)
 
-    config = CDGridPrimitiveEquationConfig(
+    cfg_kwargs = dict(
         hyperdiff_coeff=0.0,
         hyperdiff_ps_coeff=0.0,
         use_conservation_fixer=False,
         fix_mass=False,
         zero_mean_ps_tendency=False,
     )
+    cfg_kwargs.update(config_overrides)
+    config = CDGridPrimitiveEquationConfig(**cfg_kwargs)
     state_cc = baroclinic_wave_init(grid, sigma, perturbed=True)
     state_global = hydrostatic_to_fv3(state_cc, cdgrid)
 
@@ -76,6 +78,38 @@ def _build_pe_model_and_state(n: int = 8, nlev: int = 5):
     dist_model = CDGridPrimitiveEquationModel(grid, sigma, config)
 
     return ref_model, dist_model, state_global
+
+
+def _run_pe_pair_and_assert(rank, size, ref_model, dist_model,
+                              state_global, dt, n_steps):
+    ref_state = state_global
+    for _ in range(n_steps):
+        ref_state = ref_model.step(ref_state, dt)
+    jax.block_until_ready(ref_state.T.data)
+
+    initialize_distributed(global_n=state_global.T.data.shape[1])
+    assert get_halo_backend() == "mpi"
+
+    dist_state = state_global
+    for _ in range(n_steps):
+        dist_state = dist_model.step(dist_state, dt)
+    jax.block_until_ready(dist_state.T.data)
+
+    from legoesm.parallel.comm import build_comm_topology
+    topology = build_comm_topology(rank, size)
+    for field_name in ("T", "u_d", "v_d", "p_s"):
+        ref_arr = np.asarray(getattr(ref_state, field_name).data)
+        dist_arr = np.asarray(getattr(dist_state, field_name).data)
+        for f in topology.local_face_ids:
+            np.testing.assert_allclose(
+                dist_arr[f], ref_arr[f],
+                atol=1e-10, rtol=1e-10,
+                err_msg=(
+                    f"FV3 PE 3D step diverges from single-rank "
+                    f"reference on rank {rank} owned face {f}, "
+                    f"field '{field_name}'."
+                ),
+            )
 
 
 class TestFV3PEStepMPIFidelity:
@@ -137,3 +171,24 @@ class TestFV3PEStepMPIFidelity:
                         f"path."
                     ),
                 )
+
+    def test_pe_3_step_with_a2b_zeta_corner(self):
+        """FV3_3D iter-1043 (codex claim-6): PE MPI with a2b_zeta_corner.
+
+        The PE path had the same ``jax.vmap`` around
+        ``_interp_center_to_corner_a2b_ord4`` that crashed NH MPI.
+        iter-1043 lifts it; this test guards.
+        """
+        rank = MPI.COMM_WORLD.Get_rank()
+        size = MPI.COMM_WORLD.Get_size()
+        if size > 6 or 6 % size != 0:
+            pytest.skip("Face-only mode only (1/2/3/6 ranks).")
+
+        set_halo_backend("local")
+        ref_model, dist_model, state_global = _build_pe_model_and_state(
+            use_fv3_a2b_zeta_corner=True,
+        )
+        _run_pe_pair_and_assert(
+            rank, size, ref_model, dist_model, state_global,
+            dt=300.0, n_steps=3,
+        )

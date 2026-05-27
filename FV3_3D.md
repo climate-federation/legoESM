@@ -2378,6 +2378,101 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1043 (2026-05-27): lift ``_interp_center_to_corner_a2b_ord4`` out of ``jax.vmap`` (PE + NH)
+
+### Goal
+
+Close the first of the three vmap-around-``pad_halo`` follow-ups
+listed at the end of iter-1042 (codex review FLAG).  Fires under
+MPI whenever ``use_fv3_a2b_zeta_corner=True`` or
+``use_fv3_a2b_ord4_theta_corner=True``.
+
+### Fix
+
+``_interp_center_to_corner_a2b_ord4(field, cdgrid)`` in
+``core/operators_cdgrid.py`` is shape-polymorphic: all stencil
+slices are on axes 1, 2 with trailing axes broadcast through, and
+``_pad_halo_auto_h2`` already dispatches 4D input to
+``pad_halo_4d``.  Replaced the ``jax.vmap`` wrappers at both
+call sites with direct 4D calls:
+
+- ``atmosphere/dynamics/compressible_euler_cdgrid.py:370-405``
+  (NH): zeta + theta paths.
+- ``atmosphere/dynamics/primitive_eq_cdgrid.py:397-403``
+  (PE): zeta path (Codex iter-1043 review claim-6 — PE had the
+  same broken pattern; iter-1043 fixes both sides in the same PR).
+
+Pure-equivalence refactor: per-level vmap over the same per-level
+arithmetic is bit-identical to one 4D-native call.  Verified by
+the single-device a2b regression suite (9 tests, atol=rtol
+unchanged) and by the new MPI fidelity tests.
+
+### Tests
+
+Three new NH MPI fidelity tests in
+``tests/distributed/test_mpi_fv3_nh_step_fidelity.py``:
+
+- ``test_nh_3_step_with_a2b_zeta_corner``
+- ``test_nh_3_step_with_a2b_ord4_theta_corner``
+- ``test_nh_3_step_with_both_a2b_paths`` (Codex iter-1043 review
+  claim-3 — combined-flag coverage).
+
+One new PE MPI fidelity test:
+``test_pe_3_step_with_a2b_zeta_corner`` (Codex claim-6 — PE
+counterpart).  PE has no theta a2b flag.
+
+Refactored both PE and NH test files to share a
+``_run_pair_and_assert`` / ``_run_pe_pair_and_assert`` helper so
+flag-variant tests stay compact.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 mpirun -np 2 .venv/bin/python -m pytest \
+        tests/distributed/test_mpi_fv3_step_fidelity.py \
+        tests/distributed/test_mpi_fv3_nh_step_fidelity.py \
+        -v
+    => 6 passed (2 PE + 4 NH including 3 a2b variants)
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_a2b_zeta_corner_nh.py \
+        tests/test_fv3_a2b_zeta_corner_nh_impact_iter702.py \
+        tests/test_fv3_a2b_ord4_theta_corner_iter700.py \
+        -q
+    => 9 passed (single-device a2b regression unchanged)
+
+### Codex adversarial review
+
+Round 1, ``gpt-5.3-codex``: 4/6 claims CLEAN, 2 FLAG-only items
+addressed in same PR:
+
+- Claim 3 (combined-flag test coverage): added
+  ``test_nh_3_step_with_both_a2b_paths``.
+- Claim 6 (PE also broken): applied same lift to
+  ``primitive_eq_cdgrid.py`` and added
+  ``test_pe_3_step_with_a2b_zeta_corner``.
+
+Codex's catch on claim 6 was the key save — iter-1043 was
+originally NH-only, but PE had the identical broken pattern.
+Without that catch, PE MPI with the FV3-fidelity factory enabled
+would still have crashed.
+
+### Status
+
+2 of 3 remaining vmap-around-``pad_halo`` follow-ups from
+iter-1042 still open:
+
+- **iter-1044 candidate**: ``_lap_per_level`` vmap at
+  ``compressible_euler_cdgrid.py:629`` (corner div-damp).
+- **iter-1045 candidate**: ``damp_v`` / ``damp_w`` post-step
+  vmaps at lines 1198 and 1390 (``_del6_vt_flux``).
+
+The default-config NH MPI step (no FV3-fidelity flags) was
+already working via iter-1042; iter-1043 extends MPI fidelity to
+``use_fv3_a2b_zeta_corner`` and ``use_fv3_a2b_ord4_theta_corner``
+on BOTH PE and NH paths.
+
 ## Iteration 1042 (2026-05-27): NH compressible-Euler MPI step + lift ``cgrid_mass_flux_divergence`` halo out of ``jax.vmap``
 
 ### Goal

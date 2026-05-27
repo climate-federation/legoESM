@@ -34,7 +34,7 @@ def reset_halo_backend():
     set_halo_backend("local")
 
 
-def _build_nh_model_and_state(n: int = 8, nlev: int = 5):
+def _build_nh_model_and_state(n: int = 8, nlev: int = 5, **config_overrides):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import (
         compute_terrain_metric,
@@ -53,11 +53,13 @@ def _build_nh_model_and_state(n: int = 8, nlev: int = 5):
     terrain = jnp.zeros((6, grid.n, grid.n))
     terrain_metric = compute_terrain_metric(terrain, height_coord)
 
-    config = CDGridCompressibleEulerConfig(
+    cfg_kwargs = dict(
         hyperdiff_coeff=0.0,
         n_acoustic_substeps=4,
         fix_mass=False,
     )
+    cfg_kwargs.update(config_overrides)
+    config = CDGridCompressibleEulerConfig(**cfg_kwargs)
 
     # Two distinct instances → independent JIT caches (static_argnums=0).
     ref_model = CDGridCompressibleEulerModel(
@@ -93,6 +95,40 @@ def _build_nh_model_and_state(n: int = 8, nlev: int = 5):
     return ref_model, dist_model, state
 
 
+def _run_pair_and_assert(rank, size, ref_model, dist_model, state,
+                           dt, n_steps, fields):
+    """Shared helper: run ref+dist, compare owned faces per rank."""
+    ref_state = state
+    for _ in range(n_steps):
+        ref_state = ref_model.step(ref_state, dt)
+    jax.block_until_ready(ref_state.theta_prime.data)
+
+    initialize_distributed(global_n=state.u.data.shape[1])
+    assert get_halo_backend() == "mpi"
+
+    dist_state = state
+    for _ in range(n_steps):
+        dist_state = dist_model.step(dist_state, dt)
+    jax.block_until_ready(dist_state.theta_prime.data)
+
+    from legoesm.parallel.comm import build_comm_topology
+    topology = build_comm_topology(rank, size)
+
+    for field_name in fields:
+        ref_arr = np.asarray(getattr(ref_state, field_name).data)
+        dist_arr = np.asarray(getattr(dist_state, field_name).data)
+        for f in topology.local_face_ids:
+            np.testing.assert_allclose(
+                dist_arr[f], ref_arr[f],
+                atol=1e-10, rtol=1e-10,
+                err_msg=(
+                    f"FV3 NH 3D step diverges from single-rank "
+                    f"reference on rank {rank} owned face {f}, "
+                    f"field '{field_name}'."
+                ),
+            )
+
+
 class TestFV3NHStepMPIFidelity:
     """NH compressible-Euler MPI step matches single-rank reference."""
 
@@ -108,38 +144,75 @@ class TestFV3NHStepMPIFidelity:
         set_halo_backend("local")
         ref_model, dist_model, state = _build_nh_model_and_state()
 
-        ref_state = state
-        for _ in range(n_steps):
-            ref_state = ref_model.step(ref_state, dt)
-        jax.block_until_ready(ref_state.theta_prime.data)
+        _run_pair_and_assert(
+            rank, size, ref_model, dist_model, state, dt, n_steps,
+            ("u", "v", "w", "theta_prime", "rho_prime"),
+        )
 
-        initialize_distributed(global_n=state.u.data.shape[1])
-        assert get_halo_backend() == "mpi"
+    def test_nh_3_step_with_a2b_zeta_corner(self):
+        """FV3_3D iter-1043: a2b_ord4 zeta corner interp under MPI.
 
-        dist_state = state
-        for _ in range(n_steps):
-            dist_state = dist_model.step(dist_state, dt)
-        jax.block_until_ready(dist_state.theta_prime.data)
+        Exercises ``use_fv3_a2b_zeta_corner=True`` which previously
+        wrapped ``_interp_center_to_corner_a2b_ord4`` in ``jax.vmap``
+        on the NH 4D path — and that vmap put ``pad_halo`` (halo=2)
+        inside the vmap, triggering mpi4jax's sendrecv batching
+        assertion under MPI.  iter-1043 lifts the vmap (the helper
+        is shape-polymorphic), so this test guards the fix.
+        """
+        rank = MPI.COMM_WORLD.Get_rank()
+        size = MPI.COMM_WORLD.Get_size()
+        if size > 6 or 6 % size != 0:
+            pytest.skip("Face-only mode only (1/2/3/6 ranks).")
 
-        from legoesm.parallel.comm import build_comm_topology
-        topology = build_comm_topology(rank, size)
+        set_halo_backend("local")
+        ref_model, dist_model, state = _build_nh_model_and_state(
+            use_fv3_a2b_zeta_corner=True,
+        )
+        _run_pair_and_assert(
+            rank, size, ref_model, dist_model, state,
+            dt=10.0, n_steps=3,
+            fields=("u", "v", "w", "theta_prime", "rho_prime"),
+        )
 
-        # FV3_3D iter-1042 (codex review claim-6): assert on every rank's
-        # owned faces, not just rank 0.  A bug that diverges on rank 1's
-        # face 3 must not pass undetected because rank 0 didn't compare it.
-        for field_name in ("u", "v", "w", "theta_prime", "rho_prime"):
-            ref_arr = np.asarray(getattr(ref_state, field_name).data)
-            dist_arr = np.asarray(getattr(dist_state, field_name).data)
-            for f in topology.local_face_ids:
-                np.testing.assert_allclose(
-                    dist_arr[f], ref_arr[f],
-                    atol=1e-10, rtol=1e-10,
-                    err_msg=(
-                        f"FV3 NH 3D step diverges from single-rank "
-                        f"reference on rank {rank} owned face {f}, "
-                        f"field '{field_name}'.  Likely the MPI halo "
-                        f"path (packed_pad_halo_mpi_4d or "
-                        f"pad_halo_mpi_4d with interp_offsets) "
-                        f"regressed."
-                    ),
-                )
+    def test_nh_3_step_with_a2b_ord4_theta_corner(self):
+        """FV3_3D iter-1043: a2b_ord4 theta corner interp under MPI.
+
+        Mirror of the zeta test for the theta path — same vmap-lift
+        rationale, gated by ``use_fv3_a2b_ord4_theta_corner=True``.
+        """
+        rank = MPI.COMM_WORLD.Get_rank()
+        size = MPI.COMM_WORLD.Get_size()
+        if size > 6 or 6 % size != 0:
+            pytest.skip("Face-only mode only (1/2/3/6 ranks).")
+
+        set_halo_backend("local")
+        ref_model, dist_model, state = _build_nh_model_and_state(
+            use_fv3_a2b_ord4_theta_corner=True,
+        )
+        _run_pair_and_assert(
+            rank, size, ref_model, dist_model, state,
+            dt=10.0, n_steps=3,
+            fields=("u", "v", "w", "theta_prime", "rho_prime"),
+        )
+
+    def test_nh_3_step_with_both_a2b_paths(self):
+        """FV3_3D iter-1043 (codex claim-3): both a2b flags ON simultaneously.
+
+        Catches any subtle ordering/state-sharing bug between the
+        two a2b paths that the single-flag tests above can't see.
+        """
+        rank = MPI.COMM_WORLD.Get_rank()
+        size = MPI.COMM_WORLD.Get_size()
+        if size > 6 or 6 % size != 0:
+            pytest.skip("Face-only mode only (1/2/3/6 ranks).")
+
+        set_halo_backend("local")
+        ref_model, dist_model, state = _build_nh_model_and_state(
+            use_fv3_a2b_zeta_corner=True,
+            use_fv3_a2b_ord4_theta_corner=True,
+        )
+        _run_pair_and_assert(
+            rank, size, ref_model, dist_model, state,
+            dt=10.0, n_steps=3,
+            fields=("u", "v", "w", "theta_prime", "rho_prime"),
+        )

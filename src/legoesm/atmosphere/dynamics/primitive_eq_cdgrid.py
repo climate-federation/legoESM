@@ -394,14 +394,12 @@ def fv3_hydrostatic_tendencies(
         from legoesm.core.operators_cdgrid import (
             _interp_center_to_corner_a2b_ord4,
         )
-        # a2b_ord4 takes 3D shape (6, n, n) — vmap over level axis.
-        if zeta.ndim == 4:
-            _zeta_a2b_ord4 = jax.vmap(
-                lambda lev: _interp_center_to_corner_a2b_ord4(lev, cdgrid),
-                in_axes=-1, out_axes=-1,
-            )(zeta)
-        else:
-            _zeta_a2b_ord4 = _interp_center_to_corner_a2b_ord4(zeta, cdgrid)
+        # FV3_3D iter-1043: ``_interp_center_to_corner_a2b_ord4`` is
+        # shape-polymorphic (axes-1/2 slicing, trailing axes broadcast)
+        # and ``_pad_halo_auto_h2`` already dispatches to ``pad_halo_4d``
+        # for 4D input.  Calling it directly on 4D avoids a ``jax.vmap``
+        # that would wrap ``pad_halo`` under MPI — same fix as NH iter-1043.
+        _zeta_a2b_ord4 = _interp_center_to_corner_a2b_ord4(zeta, cdgrid)
 
     if config.use_fv3_a2b_zeta_corner:
         zeta_corner_relative = _zeta_a2b_ord4

@@ -373,14 +373,14 @@ def cdgrid_compressible_euler_slow_tendencies(
         from legoesm.core.operators_cdgrid import (
             _interp_center_to_corner_a2b_ord4,
         )
-        # a2b_ord4 takes 3D shape (6, n, n) — vmap over level axis.
-        if zeta.ndim == 4:
-            _zeta_a2b_ord4 = jax.vmap(
-                lambda lev: _interp_center_to_corner_a2b_ord4(lev, cdgrid),
-                in_axes=-1, out_axes=-1,
-            )(zeta)
-        else:
-            _zeta_a2b_ord4 = _interp_center_to_corner_a2b_ord4(zeta, cdgrid)
+        # FV3_3D iter-1043: ``_interp_center_to_corner_a2b_ord4`` is
+        # shape-polymorphic (axis-1/2 slicing, trailing axes broadcast)
+        # and ``_pad_halo_auto_h2`` already dispatches to
+        # ``pad_halo_4d`` for 4D input.  Calling it directly on the 4D
+        # ``zeta`` avoids a ``jax.vmap`` that would wrap ``pad_halo``
+        # under MPI — mpi4jax's sendrecv batching rule asserts matching
+        # batch axes and fires when sendrecv runs inside vmap.
+        _zeta_a2b_ord4 = _interp_center_to_corner_a2b_ord4(zeta, cdgrid)
 
     if config.use_fv3_a2b_zeta_corner:
         zeta_corner = _zeta_a2b_ord4
@@ -394,13 +394,9 @@ def cdgrid_compressible_euler_slow_tendencies(
         from legoesm.core.operators_cdgrid import (
             _interp_center_to_corner_a2b_ord4 as _icc_a2b_ord4_theta,
         )
-        if theta_total.ndim == 4:
-            theta_corner = jax.vmap(
-                lambda lev: _icc_a2b_ord4_theta(lev, cdgrid),
-                in_axes=-1, out_axes=-1,
-            )(theta_total)
-        else:
-            theta_corner = _icc_a2b_ord4_theta(theta_total, cdgrid)
+        # FV3_3D iter-1043: same lift-out-of-vmap rationale as the
+        # ``zeta`` a2b path above.
+        theta_corner = _icc_a2b_ord4_theta(theta_total, cdgrid)
     else:
         theta_corner = _interp_center_to_corner(theta_total, cdgrid)
 
