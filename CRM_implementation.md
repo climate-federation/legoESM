@@ -112,6 +112,14 @@ Aggressive qv noise (≥ 2.5 × 10⁻⁴ kg/kg in lowest 4 levels) *also* destab
 
 Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics (gray rad + Kessler + Smag c_s=0.2 + surface flux + mean-wind removal + moist-mass fixer + positive filter): max|w| stays ~5 × 10⁻³ m/s through 1200 steps (20 min sim), MSE drift < 7 × 10⁻⁵ relative, CWV pinned to IC. **No spurious convection** — confirms full physics-on driver dynamically stable from clean IC. Convection spins up later from radiative cooling + surface flux on hours-days timescale (verify at 6-h / 24-h smoke step).
 
+### F9. MPI scaling platform-blocked on macOS Python 3.13
+
+mpi4jax 0.9 vs JAX 0.10 stack mismatch produces ~70× per-rank slowdown on macOS Python 3.13. The full DD code path is verified correct (iter-4 R7 mass fixer, iter-5 ``--use-dd``, iter-78 helpers, iter-57 Codex MPI-halo review 0 HIGH + 0 MEDIUM), but real strong/weak scaling numbers require a platform that doesn't trigger the mismatch (Linux MPI cluster, or macOS once the stack is fixed). Documented as a *platform* blocker, not a code defect — the DD path itself is production-ready under the iter-95 IC fix once the stack regression resolves. DOD criterion 4 cannot be filled until F9 unblocks.
+
+### F10. Clean Wing IC + dt = 5 s production-stable without KW78
+
+iter-9 measurement on the 132×132×30 plane CRM at dt=5 s + N_ACOUSTIC=12 + clean Wing IC (no bubble, no qv noise) showed max|w| ≤ 6.1 × 10⁻³ m/s over 720 outer steps (1 sim-hour). The bubble-IC F1 dt-stability ladder (dt=1 s) was a SYMPTOM of the bubble-seeded 2-Δz mode (F7), not a fundamental outer-dt limit. With the clean IC F8 path, the dt=5 s + SI acoustic + N_ACOUSTIC=12 production config is stable WITHOUT KW78 (R9 obsolete). iter-58/59 refreshed all production wrapper + driver defaults from the iter-2 conservative dt=1 s / N_ACOUSTIC=24 to dt=5 s / N_ACOUSTIC=12; iter-14/iter-38/iter-63 produced the structural slow nightly regression.
+
 ---
 
 ## Roadmap (concrete, ordered)
