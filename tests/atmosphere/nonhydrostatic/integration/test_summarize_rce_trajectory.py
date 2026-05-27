@@ -1458,6 +1458,80 @@ def test_parse_log_max_w_streams_large_log(tmp_path):
     assert n_rows == 5000
 
 
+def test_final_dod_cli_emits_dod_final_label_on_pass(tmp_path):
+    """iter-167: a --final-dod CLI invocation on a 30-day PASS
+    trajectory must print ``DOD FINAL verdict: PASS`` and exit 0.
+    Pre iter-167 the ``label = "DOD FINAL"`` branch in main()
+    (summarize_rce_trajectory.py:864) was uncovered at the CLI
+    level — only the Python function evaluate_rce_final_dod was
+    directly tested. A regression that swapped the label to
+    something else (e.g. ``DOD``) would still pass at the function
+    level but break log scrapers that grep for ``DOD FINAL``.
+    """
+    import subprocess
+    snaps = tmp_path / "snapshots"
+    snaps.mkdir()
+    for i in range(30):
+        # Sub-mm CWV oscillation around 55 mm avoids
+        # detect_stuck / detect_sustained_stuck and keeps the
+        # plateau check inside (35, 65) mm. MSE drift over the
+        # last 10 days stays well under 1 % (driven by the
+        # _write_snapshot mse = cwv * 1e7 mapping).
+        cwv = 55.0 + 0.01 * (i % 3 - 1)
+        _write_snapshot(snaps / f"snap_day_{i:04d}.npz",
+                        day=float(i), cwv_value=cwv)
+    res = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[4]
+                / "scripts" / "summarize_rce_trajectory.py"),
+            str(tmp_path), "--final-dod", "--quiet",
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert res.returncode == 0, (
+        f"30-day PASS trajectory should exit 0; got "
+        f"{res.returncode}; stdout={res.stdout!r}; "
+        f"stderr={res.stderr!r}"
+    )
+    assert "DOD FINAL verdict: PASS" in res.stdout, (
+        f"CLI must print 'DOD FINAL' label, not 'DOD' or "
+        f"'DOD STABILITY'; stdout={res.stdout!r}"
+    )
+
+
+def test_final_dod_cli_exits_insufficient_on_short_run(tmp_path):
+    """iter-167: --final-dod on a < 30-day trajectory exits
+    EXIT_DOD_INSUFFICIENT (4) with ``DOD FINAL verdict:
+    INSUFFICIENT``. Distinct from EXIT_DOD_FAIL (3) so automation
+    can tell "too short to grade" apart from "graded and failed".
+    """
+    import subprocess
+    snaps = tmp_path / "snapshots"
+    snaps.mkdir()
+    for i in range(15):  # 15 < DOD_FINAL_MIN_DAYS (30)
+        _write_snapshot(snaps / f"snap_day_{i:04d}.npz",
+                        day=float(i), cwv_value=55.0)
+    res = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[4]
+                / "scripts" / "summarize_rce_trajectory.py"),
+            str(tmp_path), "--final-dod", "--quiet",
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert res.returncode == summary_mod.EXIT_DOD_INSUFFICIENT, (
+        f"15-day trajectory + --final-dod should exit "
+        f"EXIT_DOD_INSUFFICIENT ({summary_mod.EXIT_DOD_INSUFFICIENT}); "
+        f"got {res.returncode}; stdout={res.stdout!r}"
+    )
+    assert "DOD FINAL verdict: INSUFFICIENT" in res.stdout, (
+        f"CLI must print 'DOD FINAL verdict: INSUFFICIENT'; "
+        f"stdout={res.stdout!r}"
+    )
+
+
 def test_combined_evaluate_and_check_log_max_w(tmp_path):
     """iter-140: --evaluate + --check-log-max-w fire BOTH gates
     (criterion 1 via log + criterion 2 via plateau). Locks the
