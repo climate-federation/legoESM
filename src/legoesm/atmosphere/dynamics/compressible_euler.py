@@ -161,15 +161,24 @@ class CompressibleEulerConfig(NamedTuple):
                                           # (validate_plane_config enforces).
     horizontal_advection_scheme: str = "upwind1"
                                           # Horizontal advection of theta_prime, u, v, w
-                                          # (and tracers) on the plane dycore.
-                                          # "upwind1" = first-order upwind (cheap, very
-                                          # dispersive at coarse dx, unstable above
-                                          # dt ~ 0.5 s on dx=2 km with the Wing RCEMIP
-                                          # IC). "weno5" = 5th-order WENO-Z upwind
-                                          # (recommended for plane LES / RCE; periodic
-                                          # 6-point stencil, much less grid-scale
-                                          # dispersion, lets dt grow to ~2 s on the
-                                          # same configuration).
+                                          # (and tracers) on the plane dycore. Three
+                                          # choices, defined by
+                                          # HORIZONTAL_ADVECTION_HALO_REQUIREMENT in
+                                          # compressible_euler_plane.py:
+                                          # "upwind1" — first-order upwind (cheap, very
+                                          # dispersive at coarse dx).
+                                          # "van_leer" — 2nd-order TVD, stencil 4
+                                          # (iter-183 production: 3x wall-time speedup
+                                          # vs upwind1 at dt=20 thanks to lower
+                                          # numerical diffusion + monotonicity).
+                                          # "weno5" — 5th-order WENO-Z, stencil 6
+                                          # (least grid-scale dispersion but ~3x
+                                          # per-step cost; opt-in for sharp-front
+                                          # problems).
+                                          # Class default stays "upwind1" for back-
+                                          # compat with iter-7 fixtures; the
+                                          # production driver overrides to van_leer
+                                          # at parse_args time (iter-183).
                                           # Consumed by
                                           # ``compressible_euler_plane.py`` only;
                                           # cubed-sphere / MPAS ignore it.
