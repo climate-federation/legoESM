@@ -712,6 +712,14 @@ def acoustic_substeps_semi_implicit(
     new physics; revert to ``at[..., 1:-1].set`` if a moving boundary
     is ever introduced.
 
+    Substep loop unroll (post iter-70): ``n_substeps`` MUST be a
+    Python ``int`` (it always is when passed through ``SplitExplicitConfig``).
+    The function uses a plain Python ``for _ in range(n_substeps)`` to
+    fully unroll the substep sequence so XLA can fuse across iterations.
+    Passing a traced ``n_substeps`` (e.g., from ``lax.cond``) will fail
+    at trace time with ``TracerIntegerConversionError`` — that error is
+    the correct guard, do not silence it with ``int(...)``.
+
     The implicit equation for w at interior half-levels is:
 
         (1 + dt_s^2 * c_s^2 / dz^2 / J^2) * w_new = w_old + dt_s * RHS_explicit

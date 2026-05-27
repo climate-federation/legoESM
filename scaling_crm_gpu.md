@@ -117,7 +117,24 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
-### Iter 70 — 2026-05-27 — Python-loop unroll of substep loops
+### Iter 70 — 2026-05-27 — Python-loop unroll of substep loops (cavecrew followup)
+
+cavecrew adversarial review flagged 5 risks; addressed:
+1. `n_substeps` MUST be Python int — documented in docstring;
+   `int(n_substeps)` cast in the for-loop raises
+   `TracerIntegerConversionError` if a traced value is passed
+   (correct guard, kept).
+2. AD memory: `lax.fori_loop` reverse-mode already unrolls in JAX;
+   Python unroll doesn't increase backward memory.
+3. CPU regression possible — flagged for follow-up, no test in this
+   session. Would need CPU bench to quantify; expected mild for n=6
+   since the dispatch overhead saved equals what was added.
+4. tri_bands closure: XLA CSE collapses duplicate references to
+   the same captured tuple.
+5. Compile-time scaling: +0.6s at nsub=6; linear → +1.2s at nsub=12.
+   Acceptable for JIT-once-then-run pattern.
+
+
 
 iter-69 left 4 fusion kernels + 1 cuSPARSE custom-call PER SUBSTEP. At
 n_substeps=6, RK3=3, that's 90 kernel launches/step from substeps alone
