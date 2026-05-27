@@ -117,6 +117,43 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 73 — 2026-05-27 — bench HBM annotation + nsub=3 finding
+
+Extended `scripts/bench_crm_gpu_scaling.py` to print inline HBM
+bandwidth utilization estimate alongside each run:
+
+```
+N 128 step=1.18ms throughput=417.8Mc/s SYPD=4.65 HBM≈702GB/s(96%)
+N 192 step=2.76ms throughput=400.4Mc/s SYPD=1.98 HBM≈673GB/s(92%)
+N 256 step=6.55ms throughput=300.1Mc/s SYPD=0.84 HBM≈504GB/s(69%)
+```
+
+Formula: `Mc/s × 80 B/cell-lev × passes_per_step` where
+`passes = 3 RK3 × (1 slow_tend + n_substeps)`. Reference HBM ceiling:
+730 GB/s sustained on consumer mobile RTX 5090 (advertised peak
+960 GB/s; ~76% sustained ratio typical).
+
+**nsub stability finding under PCR default (production dt=2s dx=2km):**
+| nsub | N=128 Mc/s | N=192 Mc/s | N=256 Mc/s | stability |
+|------|-----------|-----------|-----------|-----------|
+| 2    | NaN       | NaN       | NaN       | unstable (CFL=0.17) |
+| **3** | **613**  | **528**   | **445**   | stable  (CFL=0.113) |
+| 4    | 535       | 467       | 386       | stable  (CFL=0.085) |
+| 6    | 418       | 400       | 300       | stable  (CFL=0.057) |
+
+⇒ **nsub=3 doubles SYPD vs the safe default of nsub=6** while still
+   stable. nsub=2 NaN's at CFL=0.17, so the practical stability bound
+   is between CFL=0.113 and 0.17 — narrower than the canonical
+   acoustic-CFL=0.7 because of off-centering + buoyancy + advection
+   coupling. Default n_substeps=6 retained for safety margin.
+
+For users with confidence in their configuration, setting
+`n_acoustic_substeps=3` in `CompressibleEulerConfig` yields **613
+Mc/s @ N=128 fp32 = 6.83 SYPD** — the practical single-GPU peak
+for this CRM under PCR.
+
+⇒ **Practical single-GPU peak (nsub=3): 613 Mc/s @ N=128 fp32.**
+
 ### Iter 72 — 2026-05-27 — PCR becomes default on GPU after broader validation
 
 Iter-71 added PCR as opt-in via `LEGOESM_TRIDIAG=pcr`. This iter

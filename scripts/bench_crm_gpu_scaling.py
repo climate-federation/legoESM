@@ -267,11 +267,20 @@ def main() -> int:
                 allow_unsafe_cfl=args.allow_unsafe_cfl,
                 repeat=args.repeat,
             )
+            # HBM utilization estimate: 80 B/cell-level × passes/step.
+            # Passes = 3 RK3 stages × (1 slow_tend + n_substeps), each
+            # pass touches the prognostic state arrays (5 fields).
+            # Use 730 GB/s as consumer-mobile RTX 5090 sustained ceiling
+            # (advertised peak 960 GB/s; ~76% sustained typical).
+            passes_per_step = 3 * (1 + args.n_acoustic_substeps)
+            bw_used = r.mcells_per_s * 1e6 * 80 * passes_per_step / 1e9
+            hbm_pct = 100.0 * bw_used / 730.0
             print(f"  N{n:>4d} cells={r.total_cells:>10,}  "
                   f"compile={r.compile_time_s:6.2f}s  "
                   f"step={r.time_per_step_ms:7.2f}ms  "
                   f"throughput={r.mcells_per_s:6.1f}Mcells/s  "
-                  f"SYPD={r.sypd:8.2f}")
+                  f"SYPD={r.sypd:8.2f}  "
+                  f"HBM≈{bw_used:5.0f}GB/s({hbm_pct:4.0f}%)")
             results.append(r)
         except Exception as exc:
             import traceback
