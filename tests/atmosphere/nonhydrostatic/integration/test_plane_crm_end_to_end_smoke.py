@@ -620,13 +620,14 @@ def test_plane_crm_iter183_production_scale_132x132_envelope(tmp_path):
     DOD PASS with log max|w|=1.06e-02 m/s, CWV evolution
     49.94→53.33 mm (Wing 2018 plateau), MSE drift -1.6%. This test
     runs the SAME wrapper-equivalent configuration for 60 outer
-    steps (= 20 sim-min) so a regression in any of
-    {dt=20, van_leer, beta=0.2, no-mass-fixer} that would have
-    shown up at 30-day scale is caught nightly. This is an
-    early-stability + config-fingerprint smoke, not a 30-day proxy:
-    later-time effects (precipitation cycles starting day 16,
-    slow MSE drift, late convective amplification) are out of
-    scope at 20 sim-min and would need a separate test.
+    steps (= 20 sim-min) and acts as an early-stability +
+    config-fingerprint smoke. It catches CFL crashes, dycore
+    no-ops, and silent kwarg fallbacks in any of
+    {dt=20, van_leer, beta=0.2, no-mass-fixer, n_acoustic=12,
+    hyperdiff=5e6}. It does NOT cover late-time effects
+    (precipitation cycles starting day 16, slow MSE drift, late
+    convective amplification) — those remain covered by the
+    30-day production runs themselves, not by this smoke.
 
     Empirical measurement (iter-230 smoke, dt=20, n=60, NMF):
 
@@ -696,14 +697,17 @@ def test_plane_crm_iter183_production_scale_132x132_envelope(tmp_path):
         f"!= expected {expected_logged_steps}."
     )
 
-    # iter-231 (Codex round-2 MEDIUM#1): hard fingerprint of
-    # advection scheme + acoustic_off_centering + mass-fixer mode
-    # from the driver's ``# config:`` log header line. Ca_substep
-    # alone fingerprints dt + n_acoustic only — a silent fallback
-    # to ``upwind1`` advection or ``beta=0.1`` would still pass the
-    # numerical checks. iter-231 added the config line to
-    # ``scripts/run_rce_mpi_long.py:1051`` so the contract becomes
-    # grep-able post-run.
+    # iter-231 (Codex round-2 MEDIUM#1) + iter-232 (Codex round-3
+    # MEDIUM): exact-token fingerprint of advection + beta +
+    # mass-fixer + n_acoustic + hyperdiff from the driver's
+    # ``# config:`` log header line. Round-2 used ``in
+    # config_line`` substring matching which would pass
+    # ``acoustic_off_centering=0.25`` as containing
+    # ``acoustic_off_centering=0.2`` and ``n_acoustic_substeps=120``
+    # as containing ``n_acoustic_substeps=12``. Round-3 fix: parse
+    # the line into an exact ``key=value`` dict and compare typed
+    # values (float for off-centering / hyperdiff, int for
+    # n_acoustic_substeps, str for advection / on/off flags).
     log_path = out_dir / "log.txt"
     config_line = None
     with open(log_path) as fh:
@@ -716,22 +720,59 @@ def test_plane_crm_iter183_production_scale_132x132_envelope(tmp_path):
         "iter-231 ``# config:`` line — either the driver regressed "
         "(removed the header) or the log path changed."
     )
-    expected_config_tokens = {
-        "advection=van_leer",
-        "acoustic_off_centering=0.2",
-        "mass_fixer=off",
-        "si_acoustic=on",
-        "n_acoustic_substeps=12",
-    }
-    missing = [
-        tok for tok in expected_config_tokens if tok not in config_line
-    ]
-    assert not missing, (
-        f"plane CRM iter-183 envelope: ``# config:`` line missing "
-        f"tokens {missing!r}. Logged line: {config_line!r}. The "
-        f"iter-183 contract requires van_leer + beta=0.2 + "
-        f"no-mass-fixer + SI acoustic + n_acoustic=12; a silent "
-        f"helper-kwarg fallback would change one of these."
+    # Parse ``# config: k1=v1 k2=v2 ...`` into a dict. Tokens are
+    # space-separated after the leading ``# config:`` marker; each
+    # token is a single ``key=value`` (no spaces in values for the
+    # current driver — driver writes floats/ints/strings only).
+    config_body = config_line[len("# config:"):].strip()
+    config_kv: dict[str, str] = {}
+    for tok in config_body.split():
+        if "=" not in tok:
+            pytest.fail(
+                f"plane CRM iter-183 envelope: malformed ``# config:`` "
+                f"token {tok!r} (no ``=``). Full line: {config_line!r}"
+            )
+        k, v = tok.split("=", 1)
+        config_kv[k] = v
+    # Required exact matches (typed where applicable). Each line
+    # asserts ONE contract element so a regression message tells
+    # the dev which kwarg flipped, not just "fingerprint mismatch".
+    assert config_kv.get("advection") == "van_leer", (
+        f"plane CRM iter-183 envelope: advection="
+        f"{config_kv.get('advection')!r}, expected 'van_leer'. "
+        f"Silent helper-kwarg fallback to upwind1?"
+    )
+    assert float(config_kv.get("acoustic_off_centering", "nan")) == 0.2, (
+        f"plane CRM iter-183 envelope: acoustic_off_centering="
+        f"{config_kv.get('acoustic_off_centering')!r}, expected '0.2'. "
+        f"iter-183's beta=0.2 contract regressed."
+    )
+    assert config_kv.get("mass_fixer") == "off", (
+        f"plane CRM iter-183 envelope: mass_fixer="
+        f"{config_kv.get('mass_fixer')!r}, expected 'off'. The "
+        f"--no-mass-fixer flag silently flipped — CWV growth check "
+        f"is now meaningless."
+    )
+    assert config_kv.get("si_acoustic") == "on", (
+        f"plane CRM iter-183 envelope: si_acoustic="
+        f"{config_kv.get('si_acoustic')!r}, expected 'on'. The "
+        f"--semi-implicit-acoustic flag regressed."
+    )
+    assert int(config_kv.get("n_acoustic_substeps", "0")) == 12, (
+        f"plane CRM iter-183 envelope: n_acoustic_substeps="
+        f"{config_kv.get('n_acoustic_substeps')!r}, expected 12. "
+        f"Ca_substep would still pass with n_acoustic=120 — exact "
+        f"match required."
+    )
+    # iter-232: add hyperdiff fingerprint (was on the contract but
+    # not on the round-2 assertion list). 5e6 is the iter-14 +
+    # iter-183 production default; a regression to 1e6 (pre-iter-9
+    # default) would slip past every numerical check at 60 steps.
+    assert float(config_kv.get("hyperdiff", "nan")) == 5e6, (
+        f"plane CRM iter-183 envelope: hyperdiff="
+        f"{config_kv.get('hyperdiff')!r}, expected '5e6'. The "
+        f"pre-iter-9 default 1e6 (5× too weak) would pass the "
+        f"20-sim-min max|w| envelope but fail at 30-day scale."
     )
 
     # dt=20 fingerprint #1: final logged sim day matches 60·dt/86400.
