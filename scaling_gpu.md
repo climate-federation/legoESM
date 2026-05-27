@@ -661,6 +661,31 @@ Updated final ladder:
 - `scaling_gpu_weak.png` — ns/cell vs cells, flat = saturated
 - `scaling_gpu_peak_bar.png` — peak Mcells/s by grid × precision
 
+### Iter 29 — 2026-05-27 — MPAS impl_cn small-N regime + dispatch-floor unification
+
+Mirror iter-28 on MPAS ocean impl_cn fp32:
+
+| res | nCells × 20 | ms/step | Mc/s |
+|-----|-------------|---------|------|
+| I3  |    12,840   |  0.68   |  19  |
+| I4  |    51,240   |  0.76   |  67  |
+| I5  |   204,840   |  1.05   | 195  |
+| I6  |   819,240   |  2.51   | 326  |
+| I7  | 3,276,840   | 23.91   | 137  |
+
+MPAS impl_cn dispatch floor ≈ **0.68 ms** — matches LL impl_cn
+exactly (0.65 ms). Both ocean solvers share the implicit_cn PCG
+solver structure, so the per-step launch overhead is identical
+regardless of grid topology.
+
+CS atm at 0.18 ms uses no PCG → much lower dispatch floor.
+
+⇒ **PCG launch dominates impl_cn small-N performance** for both
+ocean grids. At very small problem sizes the PCG iteration count
+× per-matvec kernel-launch cost is non-trivial. This is the
+known trade-off: implicit solver wins big at large N
+(LL 1.36-1.95×, MPAS 2.6-3.1× vs explicit), loses small at low N.
+
 ### Iter 28 — 2026-05-27 — LL ocean impl_cn small-N regime
 
 Mirrors iter-27 (CS atm small-N) for ocean LL impl_cn fp32:
