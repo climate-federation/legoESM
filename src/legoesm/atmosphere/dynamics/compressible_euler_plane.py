@@ -1044,9 +1044,14 @@ def plane_compressible_euler_slow_tendencies(
     elif scheme == "upwind1":
         adv_x, adv_y = _upwind_advection_x, _upwind_advection_y
     else:
+        # iter-194: list the active registry instead of a hardcoded
+        # string so a future fourth scheme in
+        # HORIZONTAL_ADVECTION_HALO_REQUIREMENT automatically surfaces
+        # in the error message.
         raise ValueError(
             f"Unknown horizontal_advection_scheme: {scheme!r}. "
-            "Expected 'upwind1', 'van_leer', or 'weno5'."
+            f"Expected one of "
+            f"{sorted(HORIZONTAL_ADVECTION_HALO_REQUIREMENT)}."
         )
     u_center = interp_xface_to_cell_vlast(u, grid)
     v_center = interp_yface_to_cell_vlast(v, grid)

@@ -248,7 +248,12 @@ def test_van_leer_scheme_dispatch_in_slow_tendency():
         assert f'"{name}"' in block, (
             f"scheme {name!r} missing from dispatch block"
         )
-    # And the ValueError on unknown scheme must mention all three.
-    assert "Expected 'upwind1', 'van_leer', or 'weno5'" in block, (
-        "ValueError message must list all three valid schemes"
+    # iter-194: the ValueError message must reference the shared
+    # registry map so a future fourth scheme automatically surfaces.
+    # Pre-iter-194 the message was a hardcoded list "'upwind1',
+    # 'van_leer', or 'weno5'" which would have gone stale.
+    assert "HORIZONTAL_ADVECTION_HALO_REQUIREMENT" in block, (
+        "ValueError must reference the shared "
+        "HORIZONTAL_ADVECTION_HALO_REQUIREMENT registry so the "
+        "list of valid schemes stays in lockstep with the map."
     )
