@@ -117,6 +117,48 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 36 — 2026-05-27 — production SI+physics sweep + bottleneck inventory
+
+**Production SI + full RCEMIP physics fp32 sweep (10-step scan):**
+
+| N    | ms/step | Mc/s | SYPD  |
+|------|---------|------|-------|
+|  32  |   6.51  |  4.7 | 0.841 |
+|  64  |   9.35  | 13.1 | 0.586 |
+|  96  |  12.65  | 21.9 | 0.433 |
+| 128  |  17.23  | 28.5 | 0.318 |
+| 192  |  42.35  | 26.1 | 0.129 |
+| 256  |  68.66  | 28.6 | 0.080 |
+
+**Production CRM plateau: ~28 Mc/s @ N=128-256 fp32 with SI + full
+physics.** SYPD ~0.08-0.32 depending on N.
+
+### Remaining bottlenecks for further scaling (ROI-ordered)
+
+1. **Microphysics** (2.87 ms/step at N=128, 26%) — sequential
+   thermodynamic iteration, fp64-heavy paths. **ROI: high.** Rewrite
+   for fp32-clean state path → likely 1.5× speedup of physics.
+2. **Radiation RRTMGP gas optics** (1.93 ms/step, 18%) — fp64
+   internal regardless of state. **ROI: medium.** Needs RRTMGP fp32
+   port; lookup-table memory-bound.
+3. **`fix_mass=True` tracer leak with `lax.scan`** — production
+   driver uses Python loop, loses ~10-15% from scan fuse. **ROI: med.**
+   Refactor fix_mass to scan-compatible custom_vjp.
+4. **Column-Thomas vertical recursion in SI acoustic** — inherently
+   serial per column. **ROI: hard.** Needs batched-tridiagonal
+   cuSPARSE primitive; ~1.5× SI dycore speedup.
+5. **fp64 ALU bottleneck on consumer Blackwell** (mobile 5090 fp64 =
+   1/64 fp32 nominal). **ROI: hardware-only.** Datacenter A100/H100
+   → fp64 = 1/2 fp32.
+6. **L2 overflow past N=256 fp32** (state ~200MB vs 48MB L2). **ROI:
+   hardware-bound.** Only multi-GPU shards help.
+7. **Single-GPU only** — multi-GPU MPI domain-decomp exists for
+   plane CRM (`bench_plane_crm_dd_scaling.py` from prior work).
+   **ROI: high.** Near-linear scaling once intra-GPU saturated.
+
+**Highest combined ROI:** #1 + #2 (physics fp32 cleanup) + #7 (multi-
+GPU) → production 28 Mc/s → ~50 Mc/s single-GPU + Nx multi-GPU.
+
 ### Iter 35 — 2026-05-27 — explicit vs SI WITH physics — SI wins production SYPD
 
 Decomposition at N=128 fp32:
