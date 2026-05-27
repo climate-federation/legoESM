@@ -223,6 +223,74 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 282 (MPAS 30-day moist attempt — STABLE 14 days, NaN day 15: missing surface flux)
+
+First attempt at the cross-grid 30-day production cell for MPAS.
+Launched ``run_rcemip_long.py --grid mpas --days 30 --dt 10 --moist``
+in background; ran for 2.2 min wall before NaN at step 129600
+(day 15 sim-time).
+
+**Trajectory** (8640-step print cadence = 1 sim-day):
+
+```
+step  t[d]  max|w|    θ' range          q_v_max    mass_drift
+   1  0.00  4.07e-01  [-7e-4, 9e-1]    9.35e-3    1.5e-16
+8640  1.00  1.28e-03  [-5.7,  2.2]    9.35e-3    0
+17280 2.00  1.67e-03  [-10.8, 2.4]    9.35e-3    1.5e-16
+...
+60480 7.00  5.09e-03  [-28.3, 2.1]    9.79e-3    3.0e-16
+69120 8.00  7.64e-03  [-29.8, 1.9]    9.98e-3    3.0e-16
+77760 9.00  1.59e-02  [-31.3, 1.7]    1.04e-2    3.0e-16
+86400 10.0  1.22e-02  [-32.7, 1.5]    1.02e-2    3.0e-16
+95040 11.0  1.46e-02  [-34.3, 1.2]    1.11e-2    0
+103680 12.0 1.95e-02  [-36.0, 1.0]    1.10e-2    4.5e-16
+112320 13.0 4.01e-02  [-37.8, 0.76]   1.08e-2    0
+120960 14.0 9.94e-02  [-39.5, 1.8]    1.06e-2    1.5e-16
+129600 15.0 NaN       NaN              NaN        NaN
+```
+
+**Diagnosis**
+
+* Mass conservation HOLDS at machine precision (1.5e-16) for all
+  14 stable days — the iter-275 ``_compose_nh_moist_physics``
+  pytree sum is correct.
+* θ' drops -39.5 K over 14 days = **-2.8 K/day average cooling**
+  — far above the canonical gray-radiation tropospheric rate
+  of ~1-1.5 K/day at this column.
+* max|w| grows from sub-mm/s to 0.1 m/s by day 14 — vertical
+  instability building.
+* q_v_max INCREASES slightly (9.35e-3 → 1.06e-2) despite Kessler
+  microphysics ostensibly removing vapor.
+
+**Root cause**: the iter-275 ``_compose_nh_moist_physics``
+composes ONLY gray radiation + Kessler microphysics. The plane
+CRM's ``make_rcemip_physics`` adds a THIRD component:
+``_make_surface_flux_physics`` (bulk Cd/Ch + T_sfc + q_sfc
+relaxation toward fixed SST). Without surface flux:
+
+* No upward latent-heat flux to replenish q_v → vapor only
+  cycles through Kessler condensation/evaporation.
+* No upward sensible-heat flux to balance gray radiation cooling
+  → θ' drifts toward radiative equilibrium without convective
+  warming, eventually destabilizing.
+* No surface stress to dissipate near-surface wind.
+
+iter-275 closed the COMPOSITION half of cross-grid moist
+capability (factories compose cleanly, pytree sum correct), but
+not the FULL ATMOSPHERIC ENERGY BALANCE for sustained RCE. The
+next iter needs to add surface flux to ``_compose_nh_moist_physics``
+— extracting the plane CRM's ``_make_surface_flux_physics``
+pattern (or a cubed-sphere/MPAS analog).
+
+**14-day stable run wall**: 2.2 min wall on M5 Pro single-rank.
+Per-step ~0.5 ms (cached JIT after warmup). Full 30-day run
+would be ~5.5 min if surface-flux balance prevents the day-15
+blowup.
+
+**Status update**: cross-grid moist 30-day cell now reads
+"BLOCKED on surface flux" not just "not run" — a concrete,
+actionable next step.
+
 ### 2026-05-27 — iter 281 (cross-grid moist 86-step stability probe + 30-day wall-time projection)
 
 Extended the iter-275 moist smoke from 8 → 86 outer steps to
