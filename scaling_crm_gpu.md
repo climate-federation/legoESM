@@ -117,6 +117,35 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 63 — 2026-05-27 — cuSPARSE moves SI dycore into memory-bound regime
+
+Substep-decomposition of SI fp32 N=128 with cuSPARSE Thomas:
+
+| nsub | ms/step | inferred slow_tend × 3 | per-substep ms |
+|------|---------|------------------------|----------------|
+|  1   | 0.536   | 0.27 ms                | n/a (1 sub × 3 = 3 calls) |
+|  2   | 0.855   | 0.27                   | 0.089          |
+|  4   | 1.396   | 0.27                   | 0.089          |
+|  6   | 1.876   | 0.27                   | 0.089          |
+
+Per RK3 stage at nsub=6:
+- slow_tend: 0.087 ms (14% of stage)
+- 6 substeps: 0.534 ms (86%)
+
+Pre-cuSPARSE per-substep was ~3 ms (column-Thomas serial). Now 0.089 ms
+— **34× faster per substep**.
+
+**Effective HBM utilization (model-inferred):**
+- 491,520 cell-lev × 80 B/cell-lev × ~21 effective passes (3 RK3 × (1 slow + 6 sub))
+- = 39 MB × 21 = 819 MB/step / 1.88 ms = **435 GB/s ≈ 60% of 730 GB/s sustained HBM**
+
+This is **at the top of iter-22's 40-70% honest range** — cuSPARSE has
+pushed plane CRM SI dycore into the memory-bound regime, not column-
+serial regime. Further gains require either:
+- Hardware (more HBM bandwidth)
+- Fewer passes per step (kernel fusion of slow_tend with substeps)
+- Multi-GPU (linear scaling beyond single-device HBM ceiling)
+
 ### Iter 60 — 2026-05-27 — FINAL production bench with ALL wins integrated
 
 CRM N=128 fp32 SI + full RCEMIP physics (radiation + microphysics +
