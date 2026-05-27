@@ -117,6 +117,34 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 58 — 2026-05-27 — precompute_target_mass regression test added
+
+Codex iter-57 #7 asked for a test proving `scan/JIT does not recompute
+or capture tracers` for the precompute_target_mass API. Added to
+`tests/unit/test_plane_nh_conservation.py`:
+
+```python
+def test_precompute_target_mass_enables_lax_scan_with_fix_mass():
+    model._target_mass = None  # default state after __init__
+    model.precompute_target_mass(state)
+    assert model._target_mass is not None
+    assert not isinstance(model._target_mass, jax.core.Tracer)
+
+    @jax.jit
+    def run(s):
+        def body(c, _): return model.step(c, 0.5), None
+        return jax.lax.scan(body, s, None, length=20)[0]
+    out = run(state)
+    # Mass preserved to 1e-11 (fp64 machine precision) under fix_mass + scan
+```
+
+PASS in 2.67s. Pins iter-37 API contract: precompute returns a concrete
+array (not Tracer), and `model.step` inside `lax.scan` preserves mass
+to fp64 machine precision.
+
+⇒ **Total regression test count: 32/33 PASS** (1 timeout = cubed-sphere
+JIT compile environmental; new precompute test adds +1 PASS).
+
 ### Iter 57 — 2026-05-27 — codex final review applied + cubed-sphere 3/4 PASS
 
 **Cubed-sphere NH tests (after long compile):** 3 PASS + 1 timeout
