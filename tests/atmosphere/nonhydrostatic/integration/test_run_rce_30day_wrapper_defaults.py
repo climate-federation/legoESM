@@ -94,6 +94,12 @@ def test_other_production_defaults(wrapper_text):
         # RCE-specific, so default ON (NO_MASS_FIXER=1). Gravity-wave
         # smokes that want the fixer can flip it to 0.
         "NO_MASS_FIXER": "1",
+        # iter-103: EVALUATE_DOD=0 default keeps 1-day smokes / 0.05-day
+        # sanity runs non-gated. Production 30-day runs are expected to
+        # set EVALUATE_DOD=1 explicitly (the wrapper docstring + the
+        # test_wrapper_evaluate_dod_threads_into_summarizer test below
+        # both spell this out).
+        "EVALUATE_DOD": "0",
     }
     for name, expected in defaults.items():
         actual = _parse_env_default(wrapper_text, name)
@@ -460,4 +466,64 @@ def test_wrapper_summarizer_fail_allow_downgrade(tmp_path):
         f"ALLOW_SUMMARY_FAILURE=1 did not downgrade: "
         f"returncode={res.returncode} stderr={res.stderr!r}"
     )
+    assert "WARN" in res.stderr
+
+
+def test_wrapper_evaluate_dod_threads_into_summarizer(wrapper_text):
+    """iter-103: ``EVALUATE_DOD=1`` must thread ``--evaluate`` into
+    the summarizer invocation. Lock the conditional bash logic so a
+    silent revert is caught by the < 1 s text test before any nightly
+    integration run hits it."""
+    code = _strip_bash_comments(wrapper_text)
+    # 1. The conditional sets EVAL_FLAG="--evaluate" only when EVALUATE_DOD=1.
+    assert re.search(
+        r'if\s*\[\s*"\$EVALUATE_DOD"\s*=\s*"1"\s*\]\s*;\s*then\s*\n\s*'
+        r'EVAL_FLAG\s*=\s*"--evaluate"',
+        code,
+    ), (
+        "run_rce_30day.sh missing the ``if [ \"$EVALUATE_DOD\" = "
+        "\"1\" ]; then EVAL_FLAG=\"--evaluate\" fi`` conditional."
+    )
+    # 2. EVAL_FLAG is threaded into the summarizer argv.
+    assert re.search(r'\$EVAL_FLAG\b', code), (
+        "run_rce_30day.sh defines EVAL_FLAG but does not pass it "
+        "into the summarizer invocation. EVALUATE_DOD=1 would be a "
+        "silent no-op."
+    )
+    # 3. EVAL_FLAG default is the empty string (else NO_EVAL=0 still
+    #    passes --evaluate, which would break smoke runs).
+    assert re.search(r'^\s*EVAL_FLAG\s*=\s*""\s*$', code, re.MULTILINE), (
+        "run_rce_30day.sh missing the ``EVAL_FLAG=\"\"`` default. "
+        "Without it, EVALUATE_DOD=0 would still pass --evaluate (the "
+        "EVAL_FLAG variable would be unset, which under set -u "
+        "aborts the wrapper; without set -u it would expand to "
+        "nothing, which is fine, but the contract is explicit)."
+    )
+
+
+def test_wrapper_evaluate_dod_propagates_dod_fail(tmp_path):
+    """iter-103 behavioural smoke: EVALUATE_DOD=1 + a summarizer that
+    fails (e.g. on FAIL DOD verdict, exit 1) must propagate non-zero
+    unless ALLOW_SUMMARY_FAILURE=1 downgrades it. Reuses the iter-101
+    stub harness."""
+    res = _run_wrapper_with_stubs(
+        tmp_path, mpirun_exit=0, summarizer_exit=1,
+        allow_summary_failure="0",
+    )
+    assert res.returncode == 1, (
+        f"DOD FAIL did not propagate: returncode={res.returncode} "
+        f"stderr={res.stderr!r}"
+    )
+
+
+def test_wrapper_evaluate_dod_allow_summary_failure_downgrades(tmp_path):
+    """iter-103: ALLOW_SUMMARY_FAILURE=1 still covers DOD FAIL — the
+    wrapper exits 0 with WARN on stderr. This is the intentional
+    escape hatch (a developer can opt out of DOD-blocking by setting
+    the env)."""
+    res = _run_wrapper_with_stubs(
+        tmp_path, mpirun_exit=0, summarizer_exit=1,
+        allow_summary_failure="1",
+    )
+    assert res.returncode == 0
     assert "WARN" in res.stderr

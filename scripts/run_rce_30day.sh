@@ -39,6 +39,18 @@
 #                fix; default 1 for this 30-day RCE wrapper). 0 keeps
 #                the legacy fix_moist_mass_plane ON (use only for
 #                gravity-wave / hydrostatic smokes — not 30-day RCE).
+#   EVALUATE_DOD 1 = pass --evaluate to the post-run summarizer so the
+#                trajectory is graded against the DOD criteria (Wing
+#                2018 plateau CWV range, max|U|_sfc, MSE drift). FAIL
+#                propagates as non-zero wrapper exit unless
+#                ALLOW_SUMMARY_FAILURE=1. Default 0 (smoke runs +
+#                DAYS<10 are usually too short for the plateau check).
+#                Production 30-day runs SHOULD set EVALUATE_DOD=1.
+#   ALLOW_SUMMARY_FAILURE  1 = downgrade a non-zero summarizer exit to
+#                a WARN on stderr (wrapper still exits 0). Default 0
+#                propagates the failure as the wrapper's exit code.
+#                Set to 1 only for runs aborted before any snapshot
+#                landed (where the FileNotFoundError is expected).
 #   PYBIN        python interpreter (default .venv/bin/python)
 
 set -euo pipefail
@@ -59,6 +71,7 @@ BUBBLE_K="${BUBBLE_K:-0.0}"
 QV_NOISE="${QV_NOISE:-0.0}"
 USE_DD="${USE_DD:-0}"
 NO_MASS_FIXER="${NO_MASS_FIXER:-1}"
+EVALUATE_DOD="${EVALUATE_DOD:-0}"
 PYBIN="${PYBIN:-.venv/bin/python}"
 
 # USE_DD=1 switches the driver from the legacy rank-0-dycore-broadcast
@@ -130,9 +143,20 @@ mpirun -np "$RANKS" "$PYBIN" \
 #     for runs aborted before any snapshot landed, where the
 #     summarizer's FileNotFoundError is expected).
 ALLOW_SUMMARY_FAILURE="${ALLOW_SUMMARY_FAILURE:-0}"
+# iter-103: EVALUATE_DOD=1 appends ``--evaluate`` to the summarizer
+# invocation. With that flag set the summarizer exits non-zero on
+# DOD criteria FAIL (e.g. plateau CWV outside Wing 2018 range,
+# max|U|_sfc > 50 m/s, MSE drift > 5 %). Default 0 keeps 1-day
+# smokes / DAYS=0.05 sanity runs non-gated; production 30-day runs
+# should set EVALUATE_DOD=1.
+EVAL_FLAG=""
+if [ "$EVALUATE_DOD" = "1" ]; then
+    EVAL_FLAG="--evaluate"
+fi
 echo "Computing per-day RCE trajectory summary..."
 set +e
 "$PYBIN" "$REPO_ROOT/scripts/summarize_rce_trajectory.py" "$OUTPUT" \
+    $EVAL_FLAG \
     > "$OUTPUT/trajectory.txt" 2>&1
 summary_status=$?
 set -e
