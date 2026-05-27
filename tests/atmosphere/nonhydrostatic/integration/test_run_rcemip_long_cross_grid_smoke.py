@@ -93,31 +93,16 @@ _EXPECTED_DIAG_COLS = {
 
 @pytest.mark.parametrize("grid", [
     "plane_fd",
-    # iter-240 (Codex iter-239 round-2 LOW#2): plane_spectral is
-    # blocked by TWO pre-existing bugs that surface under
-    # JAX_PLATFORMS=cpu inside the subprocess:
-    # 1. ``src/legoesm/atmosphere/dynamics/spectral_plane.py:83``
-    #    imports ``SpectralPlanePhysicsState`` from
-    #    ``legoesm.core.state`` but that symbol is missing.
-    # 2. ``src/legoesm/atmosphere/dynamics/spectral_pe.py:72``
-    #    ``float(jnp.log(100.0))`` crashes under Metal (only
-    #    relevant once #1 is fixed; insulated for now by the
-    #    subprocess JAX_PLATFORMS=cpu).
-    # Use ``xfail(strict=True)`` so a future fix that resolves
-    # both bugs auto-restores coverage — an XPASS surfaces as a
-    # test failure forcing the xfail to be removed.
-    pytest.param(
-        "plane_spectral",
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason="plane_spectral subprocess fails on pre-existing "
-            "ImportError(SpectralPlanePhysicsError missing from "
-            "legoesm.core.state) — flagged at iter-236; clear the "
-            "xfail when src/legoesm/atmosphere/dynamics/spectral_plane.py "
-            "+ src/legoesm/atmosphere/dynamics/spectral_pe.py are "
-            "both fixed.",
-        ),
-    ),
+    # iter-241: removed the iter-240 xfail-strict marker after
+    # cherry-picking SpectralPlanePhysicsState +
+    # SpectralPlanePhysicsTendencies from the unmerged
+    # feature/crm-plane-spectral branch (edbae138) into
+    # src/legoesm/core/state.py. The subprocess JAX_PLATFORMS=cpu
+    # wrapper insulates against the unrelated
+    # spectral_pe.py:72 Metal bug, so plane_spectral now PASSES.
+    # The xfail-strict design did its job — XPASS fired the
+    # moment the fix was in place.
+    "plane_spectral",
     "cubed_sphere",
     "mpas",
 ])
