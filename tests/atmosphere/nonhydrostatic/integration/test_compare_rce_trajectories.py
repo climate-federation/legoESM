@@ -288,3 +288,14 @@ def test_align_rows_one_to_one(tmp_path):
         f"only the first A row should pair with B; got {len(paired)} "
         f"pairings"
     )
+
+
+def test_diff_trajectories_accepts_string_paths(tmp_path):
+    """iter-119: ``diff_trajectories`` accepts ``str`` as well as
+    ``Path`` (matches summarize_rce_trajectory.collect_trajectory's
+    iter-119 ergonomics fix)."""
+    a = _make_run(tmp_path, "a", [(0.0, 50.0)])
+    b = _make_run(tmp_path, "b", [(0.0, 50.0)])
+    diffs = compare_mod.diff_trajectories(str(a), str(b))
+    assert len(diffs) == 1
+    assert diffs[0]["delta_cwv_mean"] == pytest.approx(0.0)

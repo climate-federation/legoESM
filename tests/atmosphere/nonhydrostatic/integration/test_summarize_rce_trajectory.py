@@ -730,3 +730,12 @@ def test_evaluate_quality_check_stuck_opt_out():
         f"check_stuck=False must suppress the pinned-CWV reason; "
         f"got {off_verdict.reasons!r}"
     )
+
+
+def test_collect_trajectory_accepts_string_path(synthetic_run: Path):
+    """iter-119: ``collect_trajectory`` accepts ``str`` as well as
+    ``Path`` (an ergonomic fix for CLI / shell callers). Pre-iter-119
+    a string path raised ``TypeError: unsupported operand type(s)
+    for /`` deep inside the function."""
+    rows = summary_mod.collect_trajectory(str(synthetic_run))
+    assert [r.day for r in rows] == [0.0, 1.0, 2.0]

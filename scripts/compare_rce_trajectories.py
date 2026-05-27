@@ -109,11 +109,16 @@ def _diff_value(a: float | None, b: float | None) -> "float | str":
     return b - a
 
 
-def _ic_snapshot_shape(out_dir: Path) -> tuple[int, ...]:
+def _ic_snapshot_shape(out_dir: "Path | str") -> tuple[int, ...]:
     """Read the IC snapshot's ``cwv`` array shape — a cheap proxy
     for the run's horizontal grid. Used by ``diff_trajectories`` to
     catch a same-day pair across MISMATCHED CONFIGS (iter-111
-    MEDIUM#1)."""
+    MEDIUM#1).
+
+    iter-119: accepts ``str`` as well as ``Path`` (same convenience
+    as the summarizer's ``collect_trajectory``).
+    """
+    out_dir = Path(out_dir)
     snap_dir = out_dir / "snapshots"
     snap_files = sorted(p for p in snap_dir.iterdir()
                         if summary_mod._SNAP_FILE_RE.match(p.name))
@@ -155,8 +160,8 @@ def _align_rows(
 
 
 def diff_trajectories(
-    out_dir_a: Path,
-    out_dir_b: Path,
+    out_dir_a: "Path | str",
+    out_dir_b: "Path | str",
     *,
     day_tol: float = 1e-6,
     force_shape_mismatch: bool = False,
@@ -172,7 +177,11 @@ def diff_trajectories(
     Returns a list of dicts (one per matched day) with keys ``day``,
     ``a``, ``b`` (raw DayRow refs), and one ``delta_<col>`` entry per
     diffable column. Skips days that appear in only one trajectory.
+
+    iter-119: accepts ``str`` as well as ``Path`` for both args.
     """
+    out_dir_a = Path(out_dir_a)
+    out_dir_b = Path(out_dir_b)
     shape_a = _ic_snapshot_shape(out_dir_a)
     shape_b = _ic_snapshot_shape(out_dir_b)
     if shape_a != shape_b and not force_shape_mismatch:

@@ -142,9 +142,14 @@ def _attach_profile(row: DayRow, prof_path: Path) -> None:
     row.w_var_col_max = float(np.max(d["w_variance"]))
 
 
-def collect_trajectory(out_dir: Path) -> list[DayRow]:
+def collect_trajectory(out_dir: "Path | str") -> list[DayRow]:
     """Read every ``snap_day_NNNN.npz`` under ``out_dir/snapshots``
     and optionally attach matching profile data.
+
+    iter-119: accepts ``str`` as well as ``Path`` for ergonomics
+    (Path conversion at entry). Pre-iter-119 the function silently
+    raised a confusing ``TypeError: unsupported operand type(s) for
+    /`` when called with a string path.
 
     Returns rows sorted by ``day``. Raises:
 
@@ -156,6 +161,7 @@ def collect_trajectory(out_dir: Path) -> list[DayRow]:
       stored day disagrees with its filename's snapshot day (iter-99
       Codex MEDIUM#2).
     """
+    out_dir = Path(out_dir)
     snap_dir = out_dir / "snapshots"
     if not snap_dir.is_dir():
         raise FileNotFoundError(f"no snapshots dir at {snap_dir}")
