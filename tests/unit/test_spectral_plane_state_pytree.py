@@ -197,35 +197,50 @@ def test_spectral_state_is_namedtuple_pytree(label, real_dtype, cplx_dtype):
     fp_ctx = _x64_enabled() if cplx_dtype == jnp.complex128 else contextlib.nullcontext()
     with fp_ctx:
         state = _build_dummy_state(real_dtype=real_dtype, complex_dtype=cplx_dtype)
-        # iter-268 MEDIUM: anchor the test against the requested
-        # precision so silent truncation fails.
-        assert state.u_hat.data.dtype == cplx_dtype, (
-            f"u_hat dtype = {state.u_hat.data.dtype}, expected "
-            f"{cplx_dtype} — JAX is silently truncating (likely "
-            f"jax_enable_x64 disabled for fp64 row)."
+        # iter-269 (Codex iter-268 round-2 MEDIUM-1): anchor EVERY
+        # field against its requested dtype, not just u_hat + phis.
+        # A Field-constructor regression that only affects v_hat /
+        # w_hat / theta_prime_hat / rho_prime_hat / tracers_hat
+        # would be self-consistent through the round-trip but
+        # silently truncate that one field.
+        _SPECTRAL_FIELDS = (
+            "u_hat", "v_hat", "w_hat",
+            "theta_prime_hat", "rho_prime_hat", "tracers_hat",
         )
+        for fld in _SPECTRAL_FIELDS:
+            actual = getattr(state, fld).data.dtype
+            assert actual == cplx_dtype, (
+                f"state.{fld}.dtype = {actual}, expected "
+                f"{cplx_dtype} — JAX is silently truncating "
+                f"(likely jax_enable_x64 disabled for fp64 row)."
+            )
         assert state.phis.data.dtype == real_dtype, (
             f"phis dtype = {state.phis.data.dtype}, expected "
             f"{real_dtype}."
         )
-    leaves, treedef = jax.tree_util.tree_flatten(state)
-    restored = jax.tree_util.tree_unflatten(treedef, leaves)
-    assert isinstance(restored, SpectralPlanePhysicsState)
-    # Field-by-field VALUE identity through round-trip — sentinels
-    # are unique per field so swaps trip the equality check.
-    for fld in SpectralPlanePhysicsState._fields:
-        orig = np.asarray(getattr(state, fld).data)
-        rec = np.asarray(getattr(restored, fld).data)
-        assert orig.shape == rec.shape, (
-            f"field {fld!r} shape changed: {orig.shape} → {rec.shape}"
-        )
-        assert orig.dtype == rec.dtype, (
-            f"field {fld!r} dtype changed: {orig.dtype} → {rec.dtype}"
-        )
-        np.testing.assert_array_equal(orig, rec, err_msg=(
-            f"field {fld!r} VALUES changed after round-trip — "
-            f"leaf-order or treedef regression."
-        ))
+        # iter-269 (Codex iter-268 round-2 MEDIUM-2): keep
+        # tree_flatten + restored construction INSIDE the with-block
+        # for symmetry with the tree_map test. Field.__init__ doesn't
+        # cast today but a future cast inside Field would re-truncate
+        # outside the block.
+        leaves, treedef = jax.tree_util.tree_flatten(state)
+        restored = jax.tree_util.tree_unflatten(treedef, leaves)
+        assert isinstance(restored, SpectralPlanePhysicsState)
+        for fld in SpectralPlanePhysicsState._fields:
+            orig = np.asarray(getattr(state, fld).data)
+            rec = np.asarray(getattr(restored, fld).data)
+            assert orig.shape == rec.shape, (
+                f"field {fld!r} shape changed: "
+                f"{orig.shape} → {rec.shape}"
+            )
+            assert orig.dtype == rec.dtype, (
+                f"field {fld!r} dtype changed: "
+                f"{orig.dtype} → {rec.dtype}"
+            )
+            np.testing.assert_array_equal(orig, rec, err_msg=(
+                f"field {fld!r} VALUES changed after round-trip — "
+                f"leaf-order or treedef regression."
+            ))
 
 
 @pytest.mark.parametrize("label,real_dtype,cplx_dtype", _PRECISION_PAIRS)
@@ -233,20 +248,34 @@ def test_spectral_tendencies_is_namedtuple_pytree(label, real_dtype, cplx_dtype)
     """Mirror check for SpectralPlanePhysicsTendencies."""
     fp_ctx = _x64_enabled() if cplx_dtype == jnp.complex128 else contextlib.nullcontext()
     with fp_ctx:
-        tend = _build_dummy_tendencies(real_dtype=real_dtype, complex_dtype=cplx_dtype)
-        assert tend.du_hat_dt.data.dtype == cplx_dtype
+        tend = _build_dummy_tendencies(
+            real_dtype=real_dtype, complex_dtype=cplx_dtype,
+        )
+        # iter-269 (Codex iter-268 round-2 MEDIUM-1): all-field
+        # dtype anchor (mirrors state test).
+        _SPECTRAL_TEND_FIELDS = (
+            "du_hat_dt", "dv_hat_dt", "dw_hat_dt",
+            "dtheta_prime_hat_dt", "drho_prime_hat_dt",
+            "dtracers_hat_dt",
+        )
+        for fld in _SPECTRAL_TEND_FIELDS:
+            actual = getattr(tend, fld).data.dtype
+            assert actual == cplx_dtype, (
+                f"tend.{fld}.dtype = {actual}, expected {cplx_dtype}."
+            )
         assert tend.dphis_dt.data.dtype == real_dtype
-    leaves, treedef = jax.tree_util.tree_flatten(tend)
-    restored = jax.tree_util.tree_unflatten(treedef, leaves)
-    assert isinstance(restored, SpectralPlanePhysicsTendencies)
-    for fld in SpectralPlanePhysicsTendencies._fields:
-        orig = np.asarray(getattr(tend, fld).data)
-        rec = np.asarray(getattr(restored, fld).data)
-        assert orig.shape == rec.shape
-        assert orig.dtype == rec.dtype
-        np.testing.assert_array_equal(orig, rec, err_msg=(
-            f"tendency {fld!r} VALUES changed after round-trip."
-        ))
+        # iter-269 MEDIUM-2: round-trip inside with-block.
+        leaves, treedef = jax.tree_util.tree_flatten(tend)
+        restored = jax.tree_util.tree_unflatten(treedef, leaves)
+        assert isinstance(restored, SpectralPlanePhysicsTendencies)
+        for fld in SpectralPlanePhysicsTendencies._fields:
+            orig = np.asarray(getattr(tend, fld).data)
+            rec = np.asarray(getattr(restored, fld).data)
+            assert orig.shape == rec.shape
+            assert orig.dtype == rec.dtype
+            np.testing.assert_array_equal(orig, rec, err_msg=(
+                f"tendency {fld!r} VALUES changed after round-trip."
+            ))
 
 
 @pytest.mark.parametrize("label,real_dtype,cplx_dtype", _PRECISION_PAIRS)
