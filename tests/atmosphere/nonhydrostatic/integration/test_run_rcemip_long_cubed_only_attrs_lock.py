@@ -1,19 +1,22 @@
-"""AST-locked check that ``_CUBED_ONLY_ATTRS`` matches the actual
-cubed-sphere-only argparse registrations.
+"""AST-locked checks for the cubed-sphere-only + surface-flux-
+shared CLI flag sets.
 
-iter-294 (Codex iter-293 round-4 residual note): the iter-291
-cubed-sphere-only misuse detection relies on
-``_CUBED_ONLY_ATTRS`` being kept in sync with the CLI flags
-that semantically apply only to ``--grid cubed_sphere``. If a
-future PR adds a new ``--cubed-*`` or surface-flux ``--sfc-*``
-flag and forgets to extend ``_CUBED_ONLY_ATTRS``, the silent-
-ignore bug returns (passing the flag with --grid mpas does
-nothing, no error).
+iter-294 (Codex iter-293 round-4 residual note) introduced the
+``_CUBED_ONLY_ATTRS`` lock so a future PR adding a
+``--cubed-*`` flag without extending the tuple fails loudly.
+iter-309 (Codex iter-307/308 round-1 HIGH) split the surface-
+flux flags out of cubed-only into a parallel
+``_SFC_SHARED_ATTRS`` set because MPAS now uses them too — they
+are no longer cubed-sphere-exclusive. This file holds TWO
+parallel AST locks:
 
-This AST-based test parses scripts/run_rcemip_long.py and asserts
-the ``_CUBED_ONLY_ATTRS`` literal exactly matches the set of
-parser-flag attribute names that begin with the cubed-sphere or
-surface-flux prefixes. A new flag triggers the lock.
+* ``test_cubed_only_attrs_matches_add_argument_registrations``
+  for ``n_cubed_sphere`` + ``cubed_*`` prefixes.
+* ``test_sfc_shared_attrs_matches_add_argument_registrations``
+  for ``sfc_*`` prefix.
+
+A future PR adding a ``--cubed-X`` / ``--sfc-X`` flag without
+extending the corresponding tuple fails the appropriate lock.
 """
 from __future__ import annotations
 

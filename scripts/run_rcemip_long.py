@@ -2,10 +2,13 @@
 cubed-sphere C-D / MPAS Voronoi).
 
 Per-grid setup, same physics composition where the factory supports it:
-gray radiation (Frierson 2006) + Kessler warm-rain microphysics. Plane
-adds bulk surface fluxes; cubed-sphere + MPAS NH use the lat-lon-driven
-insolation directly (no surface flux scheme in the NH-MPAS / NH-cube
-factory yet — those are out-of-scope follow-ups).
+gray radiation (Frierson 2006) + Kessler warm-rain microphysics, plus
+bulk surface flux when ``--moist`` is set:
+* plane: bulk surface flux via ``run_rcemip_plane.py`` composer.
+* cubed-sphere (iter-283): full Cd/Ch heat + moisture + momentum drag
+  via ``_make_cubed_sphere_surface_flux_tendency``.
+* MPAS NH (iter-307): simplified — heat + moisture only, no momentum
+  drag (u-on-edges needs edge↔cell reconstruction — follow-on).
 
 The run is sized for a reduced-resolution "100-day in a CI/desktop wall
 budget" target:
