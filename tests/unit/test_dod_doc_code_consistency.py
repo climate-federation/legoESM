@@ -21,6 +21,8 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -142,6 +144,72 @@ def test_dod_quotes_plateau_window_in_days():
         f"DEFAULT_LAST_N_DAYS_FOR_PLATEAU = {n_days} days "
         f"(as 'last {n_days} days' or '{n_days}-day plateau'). "
         f"DOD section does not contain either phrase."
+    )
+
+
+def _scrape_driver_argparse_default(flag: str) -> str | int | float:
+    """Scrape ``--<flag>``'s argparse default literal from
+    run_rce_mpi_long.py. Helper for the parametrized
+    preamble-claim consistency tests below."""
+    driver_text = (REPO_ROOT / "scripts" / "run_rce_mpi_long.py").read_text()
+    pat = (
+        rf'p\.add_argument\("--{flag}",\s*type=(int|float),'
+        rf'\s*default=([0-9.eE_+-]+)'
+    )
+    m = re.search(pat, driver_text)
+    assert m, f"driver missing --{flag} argparse default (regex {pat!r})"
+    return float(m.group(2)) if m.group(1) == "float" else int(m.group(2))
+
+
+@pytest.mark.parametrize("claim", [
+    # (claim_pattern_template, driver_flag, transform_fn, label)
+    # template uses {v} which is filled with the active driver default.
+    pytest.param(
+        ("dx", lambda v: int(v / 1000.0), r"\bdx\s*=\s*{v}\s*km\b"),
+        id="dx_km",
+    ),
+    pytest.param(
+        ("nlev", lambda v: v, r"\bnlev\s*=\s*{v}\b"),
+        id="nlev",
+    ),
+    pytest.param(
+        ("H", lambda v: int(v / 1000.0), r"\bH\s*=\s*{v}\s*km\b"),
+        id="H_km",
+    ),
+    pytest.param(
+        ("dt", lambda v: int(v) if float(v).is_integer() else v,
+         r"\bdt\s*=\s*{v}\s*s\b"),
+        id="dt_s",
+    ),
+    pytest.param(
+        ("n-acoustic-substeps", lambda v: v,
+         r"\bN_ACOUSTIC\s*=\s*{v}\b"),
+        id="n_acoustic",
+    ),
+])
+def test_dod_preamble_quotes_driver_default(claim):
+    """iter-175: the DOD production-config preamble (line 31 of
+    CRM_implementation.md) packs 5 active-default claims in one
+    line: dx=2 km, nlev=30, H=33 km, dt=5 s, N_ACOUSTIC=12. Each
+    must match the corresponding driver argparse default.
+
+    iter-176 already locked the 132x132 grid size + iter-175 the
+    RANKS=12 wrapper value; this parametrized test closes the
+    remaining 5 preamble claims so the entire ``30-day CRM run on
+    production target`` line stays in lockstep with the driver.
+
+    A regression in any one default that doesn't update the doc
+    will surface here as a per-parameter test failure.
+    """
+    flag, transform, pat_tmpl = claim
+    raw = _scrape_driver_argparse_default(flag)
+    value = transform(raw)
+    pat = pat_tmpl.replace("{v}", str(value))
+    dod = _read_dod_section()
+    assert re.search(pat, dod), (
+        f"DOD preamble must reference the active driver default "
+        f"--{flag}={raw!r} (transformed: {value}). Pattern "
+        f"{pat!r} not found in DOD section."
     )
 
 
