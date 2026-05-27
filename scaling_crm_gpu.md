@@ -117,6 +117,59 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 67 — 2026-05-27 — hoist SI tridiag bands out of fori_loop
+
+`_semi_implicit_acoustic_column_kernel` rebuilt the tridiagonal
+coefficients `(alpha, a_tri, b_tri, c_tri)` on every substep, but
+those bands depend only on `dt_s, height_coord, J, g,
+implicit_buoyancy` — they are loop-invariant relative to the
+substep carry `(w, theta_p, rho_p)`.
+
+Change:
+- New `precompute_si_tridiag_bands(...)` in
+  `compressible_euler.py` returns the loop-invariant bands once.
+- `_semi_implicit_acoustic_column_kernel` gains optional
+  `precomputed_tridiag` kwarg; when provided, the kernel skips
+  the rebuild AND the buoyancy-band addition (both already baked
+  into the precompute). The non-precompute path is unchanged.
+- `plane_acoustic_substeps_semi_implicit` precomputes once
+  outside its `jax.lax.fori_loop` and passes the bands into every
+  substep call.
+
+Bench fp32 nsub=6:
+| N   | iter-66 (vmap rm) | iter-67 (hoist) | Δ      |
+|-----|-------------------|-----------------|--------|
+| 128 | 276.8             | **284.8**       | +2.9%  |
+| 192 | 264.2             | **278.6**       | +5.5%  |
+| 256 | 254.9             | 252.9           | noise  |
+| 384 | 155.8             | 156.4           | noise  |
+
+Bit-for-bit on random tridiag fp64 (both implicit_buoyancy=False
+and =True): max_diff a/b/c = **0.0**.
+
+Regression: `tests/unit/test_plane_nh_conservation.py` 3/3 PASS
+(mass drift under fix_mass + lax.scan).
+
+⇒ Confirms XLA was NOT fully hoisting the tridiag rebuild out of
+   fori_loop. Manual hoist nets +2-5% peak throughput at N=128/192.
+   Win is largest at small N where the rebuild cost is a larger
+   fraction of substep time (~half-dozen elementwise pad/add ops
+   eliminated per substep × 6 substeps × 3 RK3 stages = 18 saved).
+
+Cubed-sphere `acoustic_substeps_semi_implicit` (in
+`compressible_euler.py`) has its own inline structure and still
+recomputes alpha/a_tri/c_tri inside its substep loop — out of
+scope for this iter; flagged for future cleanup.
+
+Codex sandbox network issue blocked the standard adversarial pass;
+substituted `cavecrew-reviewer` adversarial diff review. Applied
+HIGH fixes:
+- Moved late `precompute_si_tridiag_bands` import to top of
+  `compressible_euler_plane.py`
+- Added explicit Contract docstring section warning that the
+  bands and the kernel's `dt_s, J, g, implicit_buoyancy` must
+  match — silent if mismatched
+
 ### Iter 66 — 2026-05-27 — vmap → native batched tridiagonal_solve (cleanup)
 
 `thomas_solve_batched` previously wrapped `tridiagonal_solve` in

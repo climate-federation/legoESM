@@ -461,6 +461,86 @@ def acoustic_substeps(
 # Semi-implicit acoustic substeps (tridiagonal)
 # ==============================================================================
 
+def precompute_si_tridiag_bands(
+    height_coord: HeightCoordinate,
+    J: jax.Array,
+    dt_s: float,
+    g: float,
+    implicit_buoyancy: bool = False,
+    nlev: int | None = None,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Loop-invariant pieces of the semi-implicit acoustic tridiag system.
+
+    ``alpha``, ``a_tri``, ``b_tri``, ``c_tri`` and the implicit-buoyancy
+    band additions only depend on ``dt_s``, ``height_coord``, ``J``, and
+    ``g`` — they do NOT depend on the substep carry ``(w, theta_p,
+    rho_p)``. Callers running a multi-substep ``jax.lax.fori_loop``
+    can call this once outside the loop and pass the result into
+    :func:`_semi_implicit_acoustic_column_kernel` via
+    ``precomputed_tridiag`` to skip recomputing them every iteration.
+
+    Contract
+    --------
+    The returned ``(a_tri, b_tri, c_tri)`` are tied to the EXACT
+    ``(dt_s, height_coord, J, g, implicit_buoyancy)`` passed here.
+    When forwarded to :func:`_semi_implicit_acoustic_column_kernel`,
+    the same ``dt_s``, ``height_coord``, ``J``, ``g`` MUST be passed
+    to the kernel (used for the RHS / backward updates). When
+    ``precomputed_tridiag is not None`` the kernel IGNORES its own
+    ``implicit_buoyancy`` flag because the bands already encode it —
+    so callers should not mix bands built with ``implicit_buoyancy=A``
+    and a kernel call with ``implicit_buoyancy=B≠A`` expecting B to
+    take effect. The mismatch is silent at runtime.
+
+    Returns
+    -------
+    (a_tri, b_tri, c_tri) — each broadcastable to ``(*spatial, nlev-1)``.
+    """
+    c_p = constants.c_pd
+    R_d = constants.R_d
+    c_v = constants.c_vd
+    dz = height_coord.dz
+    dz_half = height_coord.dz_half
+    theta_0 = height_coord.theta_ref
+    gamma = c_p / c_v
+    T_ref = theta_0 * height_coord.exner_ref
+    cs2 = gamma * R_d * T_ref
+    cs2_half = 0.5 * (cs2[:-1] + cs2[1:])
+    dz_inner = 0.5 * (dz[:-1] + dz[1:])
+    theta_0_half = 0.5 * (theta_0[:-1] + theta_0[1:])
+    if nlev is None:
+        nlev = int(theta_0.shape[-1])
+
+    alpha = dt_s ** 2 * cs2_half / (dz_inner * J[..., None]) ** 2
+    pad_axes_a = ((0, 0),) * (alpha.ndim - 1)
+    a_tri = jnp.pad(-alpha[..., 1:], (*pad_axes_a, (1, 0)))
+    alpha_interior = jnp.pad(alpha[..., 1:-1], (*pad_axes_a, (1, 1)))
+    b_tri = 1.0 + alpha + alpha_interior
+    c_tri = jnp.pad(-alpha[..., :-1], (*pad_axes_a, (0, 1)))
+
+    if implicit_buoyancy and nlev > 2:
+        dz_centered = dz_half[:-1] + dz_half[1:]
+        inner_grad_ref = (theta_0[:-2] - theta_0[2:]) / dz_centered
+        top_grad_ref = (theta_0[0:1] - theta_0[1:2]) / dz_half[0]
+        bottom_grad_ref = (theta_0[-2:-1] - theta_0[-1:]) / dz_half[-1]
+        dtheta_ref_dz = jnp.concatenate(
+            [top_grad_ref, inner_grad_ref, bottom_grad_ref], axis=-1,
+        )
+        kappa = 0.25 * dt_s ** 2 * g / (theta_0_half * J[..., None])
+        d_above = dtheta_ref_dz[:-1]
+        d_below = dtheta_ref_dz[1:]
+        a_buoy_full = kappa * d_above
+        b_buoy_full = kappa * (d_above + d_below)
+        c_buoy_full = kappa * d_below
+        a_buoy = jnp.pad(a_buoy_full[..., 1:], (*pad_axes_a, (1, 0)))
+        c_buoy = jnp.pad(c_buoy_full[..., :-1], (*pad_axes_a, (0, 1)))
+        a_tri = a_tri + a_buoy
+        b_tri = b_tri + b_buoy_full
+        c_tri = c_tri + c_buoy
+
+    return (a_tri, b_tri, c_tri)
+
+
 def _semi_implicit_acoustic_column_kernel(
     w_c: jax.Array,
     theta_p_c: jax.Array,
@@ -471,6 +551,7 @@ def _semi_implicit_acoustic_column_kernel(
     beta: float,
     g: float,
     implicit_buoyancy: bool = False,
+    precomputed_tridiag: tuple[jax.Array, jax.Array, jax.Array] | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Single semi-implicit acoustic substep (column-local algebra).
 
@@ -524,36 +605,43 @@ def _semi_implicit_acoustic_column_kernel(
     rhs = w_c[..., 1:-1] + dt_s * dw_dt_inner
 
     # --- Tridiagonal coefficients for implicit w solve ---
-    alpha = dt_s**2 * cs2_half / (dz_inner * J[..., None])**2
-    pad_axes_a = ((0, 0),) * (alpha.ndim - 1)
-    a_tri = jnp.pad(-alpha[..., 1:], (*pad_axes_a, (1, 0)))
-    alpha_interior = jnp.pad(alpha[..., 1:-1], (*pad_axes_a, (1, 1)))
-    b_tri = 1.0 + alpha + alpha_interior
-    c_tri = jnp.pad(-alpha[..., :-1], (*pad_axes_a, (0, 1)))
+    # Hoisted fast path: callers running a multi-substep loop can pass
+    # the precomputed (a_tri, b_tri, c_tri) — they are loop-invariant
+    # (depend only on dt_s, height_coord, J, g) — to skip the rebuild
+    # every iteration. See :func:`precompute_si_tridiag_bands`.
+    if precomputed_tridiag is not None:
+        a_tri, b_tri, c_tri = precomputed_tridiag
+    else:
+        alpha = dt_s**2 * cs2_half / (dz_inner * J[..., None])**2
+        pad_axes_a = ((0, 0),) * (alpha.ndim - 1)
+        a_tri = jnp.pad(-alpha[..., 1:], (*pad_axes_a, (1, 0)))
+        alpha_interior = jnp.pad(alpha[..., 1:-1], (*pad_axes_a, (1, 1)))
+        b_tri = 1.0 + alpha + alpha_interior
+        c_tri = jnp.pad(-alpha[..., :-1], (*pad_axes_a, (0, 1)))
 
-    if implicit_buoyancy and nlev > 2:
-        # Mean-state d(theta_ref)/dz at full levels (sign convention matches
-        # the backward theta'-update used downstream).
-        dz_centered = dz_half[:-1] + dz_half[1:]
-        inner_grad_ref = (theta_0[:-2] - theta_0[2:]) / dz_centered
-        top_grad_ref = (theta_0[0:1] - theta_0[1:2]) / dz_half[0]
-        bottom_grad_ref = (theta_0[-2:-1] - theta_0[-1:]) / dz_half[-1]
-        dtheta_ref_dz = jnp.concatenate(
-            [top_grad_ref, inner_grad_ref, bottom_grad_ref], axis=-1,
-        )  # shape (nlev,)
-        # kappa at interior half-levels k_int=0..nlev-2, shape (..., nlev-1)
-        kappa = 0.25 * dt_s ** 2 * g / (theta_0_half * J[..., None])
-        d_above = dtheta_ref_dz[:-1]   # dtheta_dz[k_int]   (above the half-lev)
-        d_below = dtheta_ref_dz[1:]    # dtheta_dz[k_int+1] (below the half-lev)
-        a_buoy_full = kappa * d_above
-        b_buoy_full = kappa * (d_above + d_below)
-        c_buoy_full = kappa * d_below
-        # Boundary handling: drop sub-diag at k_int=0, super-diag at k_int=-1.
-        a_buoy = jnp.pad(a_buoy_full[..., 1:], (*pad_axes_a, (1, 0)))
-        c_buoy = jnp.pad(c_buoy_full[..., :-1], (*pad_axes_a, (0, 1)))
-        a_tri = a_tri + a_buoy
-        b_tri = b_tri + b_buoy_full
-        c_tri = c_tri + c_buoy
+        if implicit_buoyancy and nlev > 2:
+            # Mean-state d(theta_ref)/dz at full levels (sign convention
+            # matches the backward theta'-update used downstream).
+            dz_centered = dz_half[:-1] + dz_half[1:]
+            inner_grad_ref = (theta_0[:-2] - theta_0[2:]) / dz_centered
+            top_grad_ref = (theta_0[0:1] - theta_0[1:2]) / dz_half[0]
+            bottom_grad_ref = (theta_0[-2:-1] - theta_0[-1:]) / dz_half[-1]
+            dtheta_ref_dz = jnp.concatenate(
+                [top_grad_ref, inner_grad_ref, bottom_grad_ref], axis=-1,
+            )  # shape (nlev,)
+            # kappa at interior half-levels k_int=0..nlev-2, (..., nlev-1).
+            kappa = 0.25 * dt_s ** 2 * g / (theta_0_half * J[..., None])
+            d_above = dtheta_ref_dz[:-1]
+            d_below = dtheta_ref_dz[1:]
+            a_buoy_full = kappa * d_above
+            b_buoy_full = kappa * (d_above + d_below)
+            c_buoy_full = kappa * d_below
+            # Boundary handling: drop sub-diag at k_int=0, super-diag at -1.
+            a_buoy = jnp.pad(a_buoy_full[..., 1:], (*pad_axes_a, (1, 0)))
+            c_buoy = jnp.pad(c_buoy_full[..., :-1], (*pad_axes_a, (0, 1)))
+            a_tri = a_tri + a_buoy
+            b_tri = b_tri + b_buoy_full
+            c_tri = c_tri + c_buoy
 
     w_inner_new = thomas_solve_batched(a_tri, b_tri, c_tri, rhs)
     w_new = w_c.at[..., 1:-1].set(w_inner_new)

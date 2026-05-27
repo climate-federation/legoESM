@@ -46,6 +46,7 @@ from legoesm.atmosphere.dynamics.compressible_euler import (
     _acoustic_column_kernel,
     _semi_implicit_acoustic_column_kernel,
     _sponge_profile,
+    precompute_si_tridiag_bands,
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm.core.field import Field
@@ -1381,12 +1382,19 @@ def plane_acoustic_substeps_semi_implicit(
     theta_p = state.theta_prime.data
     rho_p = state.rho_prime.data
 
+    # Loop-invariant tridiag bands — hoisted once, reused n_substeps times.
+    tri_bands = precompute_si_tridiag_bands(
+        height_coord, J, dt_s, g, implicit_buoyancy,
+        nlev=theta_p.shape[-1],
+    )
+
     def substep_body(_, carry):
         w_c, theta_p_c, rho_p_c = carry
         return _semi_implicit_acoustic_column_kernel(
             w_c, theta_p_c, rho_p_c,
             height_coord, J, dt_s, beta, g,
             implicit_buoyancy=implicit_buoyancy,
+            precomputed_tridiag=tri_bands,
         )
 
     w_final, theta_p_final, rho_p_final = jax.lax.fori_loop(
