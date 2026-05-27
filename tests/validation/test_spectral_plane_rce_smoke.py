@@ -69,7 +69,19 @@ def _build_setup():
         hyperdiff_rho_coeff=1.0e5,
         hyperdiff_w_coeff=1.0e5,
         semi_implicit_acoustic=False, use_coriolis=False,
-        fix_mass=False, smagorinsky_cs=0.2, smagorinsky_prandtl=1.0,
+        # iter-247 (Codex iter-244 round-1 LOW): the test asserts
+        # mass_drift < 1e-6 — that's only achievable with the
+        # anchored dry-mass fixer. The pre-iter-244 test set
+        # fix_mass=False which made the 1e-6 cap unreachable; main
+        # branch never had the spectral-wrapper-internal fixer that
+        # the unmerged feature/crm-plane-spectral branch (edbae138)
+        # used. The FD-plane fixer delegated to via
+        # ``self._fd_model.step`` IS active when fix_mass=True is
+        # set on CompressibleEulerConfig (see
+        # compressible_euler_plane.py:1564-1574). Setting it here
+        # is the LOW-recommended narrower repair than xfail.
+        fix_mass=True, anchor_mass_to_initial=True,
+        smagorinsky_cs=0.2, smagorinsky_prandtl=1.0,
     )
     return grid, hc, tm, cfg
 
@@ -91,20 +103,6 @@ def _build_initial_phys(grid, hc, ny, nx):
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="iter-244: mass_drift cap 1e-6 was set in unmerged "
-    "feature/crm-plane-spectral branch (edbae138) where it measured "
-    "2.56e-16; on main with fix_mass=False the drift is ~6e-4 (a "
-    "factor ~1e12 different). The drift cap likely assumed an "
-    "anchored mass-fixer that never landed on main. Once the "
-    "spectral_plane mass-conservation path is reconciled with main's "
-    "plane CRM mass fixer (CRM_implementation.md iter-217..236 fold "
-    "lists this in 'Outstanding'), the cap should be relaxed to "
-    "match main's behaviour OR the fixer should be wired into the "
-    "spectral wrapper. Until then xfail-strict so a future fix "
-    "auto-restores this gate.",
-)
 def test_spectral_rce_smoke_stable_and_conservative():
     """Spectral-plane RCE leg with full physics (gray radiation +
     Kessler + bulk surface). Uses the spectral wrapper with
