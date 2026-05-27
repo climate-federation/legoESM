@@ -206,6 +206,44 @@ def test_polar_filter_3d_matches_global_slice(global_grid, band_grid, layout):
     )
 
 
+def test_polar_filter_mask_v_face_matches_global_slice(
+    global_grid, band_grid, layout,
+):
+    """v-face mask (shape (n_lat+1, n_freq)) equals the global v-face
+    mask sliced to this rank's band ``[lat_start, lat_end+1)``.
+
+    Codex review Stage 3-E round 2 BLOCK #1 caught that using the
+    cell-centered mask on v-face indices admits k modes the v-face
+    CFL forbids near the poles (half-cell lat offset → ~0.5° error,
+    which at n_lat=180 allows ``k=3`` where the actual v-face CFL
+    allows only ``k=2``).  The v-face mask uses ``cos_lat_v`` and the
+    half-cell-offset lat-interface coordinates instead.
+    """
+    global_mask_v = compute_polar_filter_mask(
+        global_grid, dt=DT,
+        max_wave_speed=MAX_WAVE_SPEED,
+        cutoff_lat_deg=CUTOFF_LAT_DEG,
+        is_v_face=True,
+    )
+    band_mask_v = compute_polar_filter_mask(
+        band_grid, dt=DT,
+        max_wave_speed=MAX_WAVE_SPEED,
+        cutoff_lat_deg=CUTOFF_LAT_DEG,
+        is_v_face=True,
+    )
+    s, e = layout.lat_start, layout.lat_end
+    # v-face mask spans [s, e+1] rows for this rank's band.
+    np.testing.assert_array_equal(
+        np.asarray(band_mask_v), np.asarray(global_mask_v[s:e + 1]),
+        err_msg=(
+            f"Rank {layout.rank} v-face polar-filter mask diverges "
+            f"from global_mask_v[{s}:{e + 1}].  v-face mask "
+            "construction is not slice-equivariant under band "
+            "decomposition."
+        ),
+    )
+
+
 def test_polar_filter_mask_is_global_invariant_across_ranks(
     global_grid, band_grid, layout, comm,
 ):

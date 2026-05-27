@@ -27,10 +27,13 @@ def compute_polar_filter_mask(
     max_wave_speed: float = 300.0,
     cutoff_lat_deg: float = 60.0,
     safety_factor: float = 0.85,
+    *,
+    is_v_face: bool = False,
 ) -> jnp.ndarray:
     """Precompute the Fourier polar filter mask.
 
-    Returns a 2D mask (n_lat, n_freq) where n_freq = n_lon//2 + 1,
+    Returns a 2D mask (n_lat, n_freq) for cell-centered fields or
+    (n_lat+1, n_freq) for v-face fields, where n_freq = n_lon//2 + 1,
     suitable for multiplying the output of jnp.fft.rfft.
 
     Parameters
@@ -45,21 +48,48 @@ def compute_polar_filter_mask(
         Latitude (degrees) beyond which filtering is applied.
     safety_factor : float
         Fraction of the theoretical CFL limit to use (< 1 for margin).
+    is_v_face : bool, optional
+        When True, build a mask for v-face fields (lat-interface
+        values, shape ``(n_lat+1, ...)``) using ``grid.cos_lat_v`` /
+        the half-cell-offset lat-interface coordinates.  Codex review
+        Stage 3-E round 2 caught that applying the cell-centered mask
+        to v-face indices introduces a half-cell lat offset that
+        admits ``k`` modes the actual v-face CFL forbids.
 
     Returns
     -------
-    jax.Array : Boolean-valued mask, shape (n_lat, n_freq).
+    jax.Array : Float mask, shape (n_lat, n_freq) if ``is_v_face``
+                is False, else (n_lat+1, n_freq).
     """
     # RK3 stability limit for centered differences: sqrt(3)
     cfl_limit = jnp.sqrt(3.0) * safety_factor
 
+    if is_v_face:
+        # v-face: shape (n_lat+1,).  ``grid.cos_lat_v`` is zero at the
+        # global poles by construction (wall BC in regular lat-lon).
+        # lat_v = (lat[:-1] + lat[1:]) / 2 in the interior, ±π/2 at
+        # the global poles.  Use ``arcsin(sin(lat_v))`` would be
+        # exact, but here we mirror the construction in
+        # ``create_latlon_grid``.
+        cos_lat_face = grid.cos_lat_v
+        # Interior lat-face values, then pad with ±π/2 at the poles.
+        lat_v_interior = 0.5 * (grid.lat[:-1] + grid.lat[1:])
+        lat_face = jnp.concatenate([
+            jnp.asarray([-jnp.pi / 2.0]),
+            lat_v_interior,
+            jnp.asarray([jnp.pi / 2.0]),
+        ])
+    else:
+        cos_lat_face = grid.cos_lat
+        lat_face = grid.lat
+
     # CFL-based max wavenumber at each latitude
-    max_k_cfl = cfl_limit * grid.radius * grid.cos_lat / (max_wave_speed * dt)
+    max_k_cfl = cfl_limit * grid.radius * cos_lat_face / (max_wave_speed * dt)
     max_k_cfl = jnp.clip(max_k_cfl, 1.0, float(grid.n_lon // 2))
 
     # Only apply filtering poleward of cutoff
     cutoff_rad = jnp.deg2rad(cutoff_lat_deg)
-    is_poleward = jnp.abs(grid.lat) > cutoff_rad
+    is_poleward = jnp.abs(lat_face) > cutoff_rad
     max_k = jnp.where(is_poleward, max_k_cfl, float(grid.n_lon // 2))
 
     # Build mask

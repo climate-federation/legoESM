@@ -399,10 +399,20 @@ class TestBuildPaddedGrid:
 
 class TestStage12Guardrails:
     """Stage-2 supports dry PE + tracers.  Physics (``physics_fn``)
-    and polar filter remain unsupported and must raise loudly."""
+    remains unsupported and must raise loudly.  Polar filter is now
+    supported (Stage 3-E commit cd3e662d+) — its guardrail test was
+    inverted to verify the lift, not the legacy NotImplementedError.
+    """
 
-    def test_polar_filter_raises(self, single_rank_layout):
-        """``config.use_polar_filter=True`` → factory NotImplementedError."""
+    def test_polar_filter_accepted(self, single_rank_layout):
+        """``config.use_polar_filter=True`` → factory builds the step
+        function without raising.  Previously raised
+        ``NotImplementedError`` (Stage-3 placeholder); Stage 3-E now
+        ships the filter under MPI so the wrapper accepts the flag
+        and the slice-equivariance tests in
+        ``tests/distributed/test_latlon_mpi_polar_filter.py`` pin
+        the correctness of the rank-local mask + 2-D + 3-D filter.
+        """
         from legoesm.parallel.latlon_mpi import make_latlon_mpi_step
         from legoesm.grids.latlon import create_latlon_grid
         from legoesm.grids.vertical import create_sigma_coordinate
@@ -416,8 +426,16 @@ class TestStage12Guardrails:
             fix_mass=True, use_polar_filter=True,
         )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, cfg)
-        with pytest.raises(NotImplementedError, match="polar filter"):
-            make_latlon_mpi_step(model, single_rank_layout, halo=2)
+        step_fn = make_latlon_mpi_step(model, single_rank_layout, halo=2)
+        # The step_fn must be callable — exercising it would JIT-
+        # compile the dycore which is too expensive for a serial
+        # guardrail; the cheap callable-check is enough to prove the
+        # NotImplementedError gate is gone.
+        assert callable(step_fn), (
+            "make_latlon_mpi_step must return a callable when "
+            "use_polar_filter=True; got "
+            f"{type(step_fn).__name__}"
+        )
 
 
 # ---------------------------------------------------------------------------

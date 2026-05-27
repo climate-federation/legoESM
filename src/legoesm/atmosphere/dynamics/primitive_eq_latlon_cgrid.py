@@ -652,15 +652,29 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         dx_pole = pole_cell_dx(grid)
         self._max_dt = cfl_max_dt(dx_pole, 300.0, cfl_number=0.8, ndim=1)
 
-        # Precompute polar filter mask
+        # Precompute polar filter masks: one for cell-centered fields
+        # (dT, dps, du after lon-trim, every tracer) and one for v-face
+        # fields (dv).  The v-face mask is built against
+        # ``grid.cos_lat_v`` + the half-cell-offset lat-interface
+        # coordinates so the wavenumber cutoff matches the actual
+        # v-face CFL — using the cell-centered mask on v-face indices
+        # admits k modes the v-face CFL forbids (Codex review Stage
+        # 3-E round 2 BLOCK #1).
         if self.config.use_polar_filter:
             self._polar_mask = compute_polar_filter_mask(
                 grid, dt=dt,
                 max_wave_speed=self.config.polar_filter_max_wave_speed,
                 cutoff_lat_deg=self.config.polar_filter_cutoff_deg,
             )
+            self._polar_mask_v = compute_polar_filter_mask(
+                grid, dt=dt,
+                max_wave_speed=self.config.polar_filter_max_wave_speed,
+                cutoff_lat_deg=self.config.polar_filter_cutoff_deg,
+                is_v_face=True,
+            )
         else:
             self._polar_mask = None
+            self._polar_mask_v = None
 
         # Cache for the last C-grid output state.  Keyed on Python id()
         # of (u, v, T, p_s, phis, tracers) arrays in the HydrostaticState.
@@ -790,17 +804,16 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 du_int = fourier_filter_3d(du[:, :-1, :], self.grid, self._polar_mask)
                 du = jnp.concatenate([du_int, du_int[:, 0:1, :]], axis=1)
 
-                # v: lat-interface, shape (n_lat+1, n_lon, nlev).  Mask
-                # has n_lat rows; filter the first n_lat lat-interface
-                # rows and re-append the final row (north-pole v-face,
-                # which the dycore BC zeros each step anyway).  Using
-                # the cell-centered mask at v-face indices introduces
-                # a half-cell lat offset in mask coefficients — the
-                # filter cutoff differs by <O(dlat) in lat, which is
-                # well within the cos(lat) tolerance the CFL margin
-                # already absorbs.
-                dv_int = fourier_filter_3d(dv[:dT.shape[0], :, :], self.grid, self._polar_mask)
-                dv = jnp.concatenate([dv_int, dv[-1:, :, :]], axis=0)
+                # v: lat-interface, shape (n_lat+1, n_lon, nlev).  Use
+                # the v-face mask (precomputed in __init__ against
+                # cos_lat_v) so EVERY v-face row is filtered — not
+                # only the first n_lat rows.  Codex review Stage 3-E
+                # round 2 caught: under lat-band MPI, interior ranks'
+                # ``dv[-1]`` is NOT a pole row (it's a shared v-face
+                # with the northern neighbour) so re-appending it
+                # unfiltered would leak an unfiltered perturbation
+                # into v at each step.
+                dv = fourier_filter_3d(dv, self.grid, self._polar_mask_v)
 
                 # Tracers: each transported tracer has the same
                 # (n_lat, n_lon, nlev) shape as dT, so the same mask

@@ -1256,11 +1256,26 @@ def make_latlon_mpi_step(
         # (handled by the pole_v_bc tuple above).
         pole_v_bc_offset=0,
     )
+    # Use the SAME ``dt`` the input model was constructed with so the
+    # polar-filter mask is sized identically to the serial reference
+    # (Codex Stage 3-E round 2 BLOCK #2: ``_max_dt`` is the pole-cell
+    # CFL — using it here would size the mask for the tiny pole-CFL
+    # dt instead of the actual production dt, masking modes the
+    # production dt does not require).  ``model.effective_dt`` is the
+    # canonical post-clamp dt set by ``component_factory``;
+    # ``model.dt`` is the constructor arg the model stashed.  Prefer
+    # effective_dt and fall back to the constructor dt.
+    _mpi_dt = getattr(
+        model, "effective_dt",
+        getattr(model, "dt", None),
+    )
+    if _mpi_dt is None:
+        _mpi_dt = getattr(model, "_max_dt", 600.0)
     mpi_model = CGridLatLonPrimitiveEquationModel(
         grid=mpi_grid,
         sigma_coord=model.sigma_coord,
         config=mpi_config,
-        dt=getattr(model, "_max_dt", 600.0),
+        dt=_mpi_dt,
     )
 
     def step_fn(local_state, dt, *, target_mass=None):
