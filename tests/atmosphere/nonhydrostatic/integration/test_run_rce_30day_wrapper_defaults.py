@@ -1059,3 +1059,94 @@ def test_wrapper_help_flag_prints_usage_and_exits_zero(tmp_path):
             f"{flag} did not strip leading ``# ``: "
             f"first_line={first_content_line!r}"
         )
+
+
+def test_wrapper_check_log_max_w_threads_flag(wrapper_text):
+    """iter-138: ``CHECK_LOG_MAX_W=1`` must thread
+    ``--check-log-max-w`` into the summarizer invocation.
+
+    Lock the bash conditional (default 0 + ``if [ ... = "1" ];
+    then EVAL_FLAG="$EVAL_FLAG --check-log-max-w"; fi``)."""
+    code = _strip_bash_comments(wrapper_text)
+    assert re.search(
+        r'CHECK_LOG_MAX_W\s*=\s*"\$\{CHECK_LOG_MAX_W:-0\}"',
+        code,
+    ), (
+        "run_rce_30day.sh missing CHECK_LOG_MAX_W=0 default; "
+        "without it the env var would silently default OFF or "
+        "trigger set -u abort."
+    )
+    assert re.search(
+        r'if\s*\[\s*"\$CHECK_LOG_MAX_W"\s*=\s*"1"\s*\]\s*;\s*then\s*\n\s*'
+        r'EVAL_FLAG\s*=\s*"\$EVAL_FLAG --check-log-max-w"',
+        code,
+    ), (
+        "run_rce_30day.sh missing the iter-138 ``if [ "
+        "\"$CHECK_LOG_MAX_W\" = \"1\" ]; then EVAL_FLAG=... fi`` "
+        "block. CHECK_LOG_MAX_W=1 would be a silent no-op."
+    )
+
+
+def test_wrapper_check_log_max_w_subprocess_threads_flag(tmp_path):
+    """iter-138 behavioural: CHECK_LOG_MAX_W=1 reaches the
+    summarizer argv via the stub PYBIN echo."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _make_stub(bin_dir / "mpirun", exit_code=0)
+    pybin = bin_dir / "fake_pybin"
+    _make_stub(pybin, exit_code=0)
+    out_dir = tmp_path / "wrapper_out"
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["PYBIN"] = str(pybin)
+    env["DAYS"] = "0"
+    env["NX"] = "4"
+    env["NY"] = "4"
+    env["RANKS"] = "1"
+    env["NO_MASS_FIXER"] = "1"
+    env["ALLOW_SUMMARY_FAILURE"] = "0"
+    env["EVALUATE_DOD"] = "0"
+    env["CHECK_LOG_MAX_W"] = "1"
+    res = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+         str(out_dir)],
+        env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
+        check=False, timeout=30,
+    )
+    traj = (out_dir / "trajectory.txt").read_text()
+    assert "--check-log-max-w" in traj, (
+        f"CHECK_LOG_MAX_W=1 did NOT reach the summarizer; "
+        f"trajectory.txt={traj!r}"
+    )
+
+
+def test_wrapper_check_log_max_w_default_off(tmp_path):
+    """iter-138: CHECK_LOG_MAX_W defaults to 0 → no flag passed."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _make_stub(bin_dir / "mpirun", exit_code=0)
+    pybin = bin_dir / "fake_pybin"
+    _make_stub(pybin, exit_code=0)
+    out_dir = tmp_path / "wrapper_out"
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["PYBIN"] = str(pybin)
+    env["DAYS"] = "0"
+    env["NX"] = "4"
+    env["NY"] = "4"
+    env["RANKS"] = "1"
+    env["NO_MASS_FIXER"] = "1"
+    env["ALLOW_SUMMARY_FAILURE"] = "0"
+    env["EVALUATE_DOD"] = "0"
+    # CHECK_LOG_MAX_W unset → falls back to 0.
+    res = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+         str(out_dir)],
+        env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
+        check=False, timeout=30,
+    )
+    traj = (out_dir / "trajectory.txt").read_text()
+    assert "--check-log-max-w" not in traj, (
+        f"--check-log-max-w should NOT be passed when "
+        f"CHECK_LOG_MAX_W unset/0; trajectory.txt={traj!r}"
+    )

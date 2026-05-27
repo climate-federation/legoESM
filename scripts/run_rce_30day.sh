@@ -70,6 +70,10 @@
 #                         exit code. Use in CI gates that REQUIRE the
 #                         PNG artefact.
 #                matplotlib + Agg is needed for the PNG step.
+#   CHECK_LOG_MAX_W  1 = thread --check-log-max-w to the summarizer
+#                so the run-wide 3D max|w| from log.txt is gated
+#                against DOD criterion 1 (50 m/s). Default 0 keeps
+#                short smokes ungated. iter-137 contract.
 #   PYBIN        python interpreter (default .venv/bin/python)
 
 set -euo pipefail
@@ -202,6 +206,13 @@ case "$EVALUATE_DOD" in
         exit 1
         ;;
 esac
+# iter-138: thread --check-log-max-w to the summarizer when
+# CHECK_LOG_MAX_W=1. Independent of the EVALUATE_DOD case (both
+# gates are additive — criterion 1 vs criterion 2).
+CHECK_LOG_MAX_W="${CHECK_LOG_MAX_W:-0}"
+if [ "$CHECK_LOG_MAX_W" = "1" ]; then
+    EVAL_FLAG="$EVAL_FLAG --check-log-max-w"
+fi
 echo "Computing per-day RCE trajectory summary..."
 set +e
 "$PYBIN" "$REPO_ROOT/scripts/summarize_rce_trajectory.py" "$OUTPUT" \
