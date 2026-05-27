@@ -37,8 +37,14 @@
 #   DT           outer timestep [s] (default 20.0 — iter-183 production
 #                contract pairing with ADVECTION=van_leer + beta=0.2)
 #   NX,NY        grid dims (default 132)
-#   N_ACOUSTIC   acoustic substeps per outer step (default 12, matches dt=5.0s
-#                + iter-14 production measurement)
+#   N_ACOUSTIC   acoustic substeps per outer step (default 12). With
+#                the iter-183 dt=20 s outer step the inner acoustic
+#                dt = 20/12 = 1.67 s and the SI substep runs at
+#                Ca_substep = 0.87 (well under the SI-relaxed acoustic
+#                CFL bound). iter-14 measured the same N_ACOUSTIC=12
+#                paired with dt=5 s at Ca_substep ~ 0.22; iter-183
+#                kept N_ACOUSTIC fixed and lifted dt because Van Leer
+#                + stronger beta absorb the extra inner stiffness.
 #   ADVECTION    upwind1 | van_leer | weno5  (default van_leer — iter-183
 #                production: 2nd-order TVD, stencil 4, 3x wall-time
 #                speedup vs upwind1 at dt=10. upwind1 = legacy; weno5
@@ -135,9 +141,11 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
     # finding) so CHECK_LOG_MAX_W is now at 98-101 and PYBIN at 102.
     # iter-186 (Codex LOW) refreshed the iter-183 production
     # contract docs at the top (DT=20, ADVECTION=van_leer, beta=0.2);
-    # CHECK_LOG_MAX_W is now at 107-110 and PYBIN at 111 — widened
-    # to 111 in lockstep.
-    sed -n '2,111p' "$0" | sed -E 's/^# ?//'
+    # CHECK_LOG_MAX_W is now at 107-110 and PYBIN at 111. iter-190
+    # expanded the N_ACOUSTIC env-var docblock with the
+    # Ca_substep=0.87 measurement, pushing CHECK_LOG_MAX_W to
+    # 113-116 and PYBIN to 117 — range widened to 117 in lockstep.
+    sed -n '2,117p' "$0" | sed -E 's/^# ?//'
     exit 0
 fi
 
