@@ -117,6 +117,30 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 50 — 2026-05-27 — cuSPARSE benefits 4 NH dycores, not just plane
+
+Audit of all `thomas_solve_batched` callers in `src/legoesm/`:
+
+| dycore                                    | benefits |
+|-------------------------------------------|----------|
+| `compressible_euler_plane.py` (plane CRM) | ✓ this PR's target |
+| `compressible_euler_latlon_cgrid.py`      | ✓ inherited |
+| `compressible_euler_cdgrid.py` (cubed-sphere) | ✓ inherited |
+| `spectral_nh.py` (spectral non-hydrostatic) | ✓ inherited |
+
+**One-file swap in `tridiagonal.py` accelerates 4 NH compressible-Euler
+dycores simultaneously** — the legacy fori_loop Thomas was the column-
+serial bottleneck for all of them.
+
+This is the broader architectural lesson: when a shared utility is
+2000× slower than the JAX-built-in (`jax.lax.linalg.tridiagonal_solve`
+wraps cuSPARSE on GPU), every caller pays the same cost. Swapping the
+shared util cascades wins across the whole dycore stack.
+
+⇒ **PR #320 is broader than CRM scaling — it's a dycore-wide SI
+acoustic accelerator.** Cubed-sphere NH, lat-lon C-grid NH, spectral
+NH all get the same 2.4-5.2× speedup at their N=128-256 sweet spots.
+
 ### Iter 49 — 2026-05-27 — full test suite green with cuSPARSE swap
 
 Verified cuSPARSE Thomas swap doesn't break production validation:
