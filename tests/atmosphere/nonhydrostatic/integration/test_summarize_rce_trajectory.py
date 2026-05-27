@@ -295,6 +295,28 @@ def test_profile_day_value_mismatch_raises(tmp_path: Path):
         summary_mod.collect_trajectory(out_dir)
 
 
+def test_profile_non_finite_day_raises(tmp_path: Path):
+    """iter-165: _attach_profile's ``not math.isfinite(prof_day)``
+    guard (summarize_rce_trajectory.py:132) must reject a profile
+    npz whose ``day`` scalar is NaN. Pre-iter-165 only the
+    finite-but-mismatched branch was exercised
+    (test_profile_day_value_mismatch_raises); the non-finite
+    branch fell through to the abs() comparison which would
+    return NaN > tol -> True by accident but with the WRONG
+    error message. Realistic corruption signature: a profile
+    writer that hit a divide-by-zero before serialising.
+    """
+    out_dir = tmp_path / "profile_nan"
+    snaps = out_dir / "snapshots"
+    profs = out_dir / "profiles"
+    snaps.mkdir(parents=True)
+    profs.mkdir(parents=True)
+    _write_snapshot(snaps / "snap_day_0005.npz", day=5.0, cwv_value=55.0)
+    _write_profile(profs / "prof_day_0005.npz", day=float("nan"))
+    with pytest.raises(ValueError, match="profile day mismatch"):
+        summary_mod.collect_trajectory(out_dir)
+
+
 def test_non_finite_snapshot_day_raises(tmp_path: Path):
     """iter-99 LOW#5: NaN / inf in a snapshot's ``day`` scalar must
     raise before sorting (sort order on NaN is undefined)."""
