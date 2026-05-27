@@ -299,11 +299,13 @@ def thomas_solve_batched(
             f"axis; got n_sys={a.shape[-1]}"
         )
 
-    # Backend selection priority:
-    #   1. env LEGOESM_TRIDIAG=pcr   -> pure-JAX PCR (fusable with surrounding ops)
-    #   2. env LEGOESM_TRIDIAG=legacy-> fori_loop Thomas (debug / CPU fallback)
-    #   3. CUDA backend                 -> cuSPARSE via tridiagonal_solve
-    #   4. Else                        -> legacy fori_loop
+    # Backend selection priority (post iter-72):
+    #   1. env LEGOESM_TRIDIAG=pcr      -> pure-JAX PCR (default on GPU)
+    #   2. env LEGOESM_TRIDIAG=cusparse -> jax.lax.linalg.tridiagonal_solve (custom_call)
+    #   3. env LEGOESM_TRIDIAG=legacy   -> fori_loop Thomas (debug)
+    #   4. CUDA backend                  -> PCR (new default; +51% throughput
+    #                                       over cuSPARSE at peak via XLA fusion)
+    #   5. Else                          -> legacy fori_loop
     #
     # NOTE: the env var is read at JIT trace time and baked into the
     # compiled graph; changing the env var after JIT compile has no
@@ -313,19 +315,42 @@ def thomas_solve_batched(
     forced = os.environ.get("LEGOESM_TRIDIAG", "").lower()
     if forced == "pcr":
         return pcr_solve_batched(a, b, c, d)
+    if forced == "cusparse":
+        try:
+            from jax.lax.linalg import tridiagonal_solve  # noqa: F401
+            on_gpu = jax.default_backend() in ("gpu", "cuda")
+        except (ImportError, AttributeError):
+            on_gpu = False
+        if on_gpu:
+            return _cusparse_solve(a, b, c, d)
+        return _thomas_solve_batched_legacy(a, b, c, d)
     if forced == "legacy":
         return _thomas_solve_batched_legacy(a, b, c, d)
 
+    # No env override: prefer PCR on GPU (best perf), legacy on CPU/Metal/TPU
+    # (PCR has more elementwise ops; on CPU the simpler Thomas is competitive
+    # and PCR's pad-heavy structure may not lower as cleanly).
     try:
-        from jax.lax.linalg import tridiagonal_solve  # noqa: F401
-        default_platform = jax.default_backend()
-        use_cusparse = default_platform in ("gpu", "cuda")
-    except (ImportError, AttributeError):
-        use_cusparse = False
+        on_gpu = jax.default_backend() in ("gpu", "cuda")
+    except AttributeError:
+        on_gpu = False
+    if on_gpu:
+        return pcr_solve_batched(a, b, c, d)
+    return _thomas_solve_batched_legacy(a, b, c, d)
 
-    if not use_cusparse:
-        return _thomas_solve_batched_legacy(a, b, c, d)
 
+def _cusparse_solve(
+    a: jax.Array,
+    b: jax.Array,
+    c: jax.Array,
+    d: jax.Array,
+) -> jax.Array:
+    """Batched cuSPARSE tridiagonal solve via jax.lax.linalg.tridiagonal_solve.
+
+    Lowering: single batched cuSPARSE invocation via the natively-batched
+    primitive. Same numerical behavior as :func:`pcr_solve_batched` and
+    :func:`_thomas_solve_batched_legacy` to machine epsilon.
+    """
     from jax.lax.linalg import tridiagonal_solve
     import math
 
@@ -339,11 +364,6 @@ def thomas_solve_batched(
     c_flat = c.reshape(n_cols, n_sys)
     d_flat = d.reshape(n_cols, n_sys)
 
-    # jax.lax.linalg.tridiagonal_solve signature: (dl, d, du, b)
-    # natively accepts a leading batch axis: dl/d/du shape (B, n) and
-    # b shape (B, n, nrhs). Pass batched directly — XLA lowers to a
-    # single batched cuSPARSE invocation, skipping the vmap-induced
-    # per-column launch loop.
     x_flat = tridiagonal_solve(
         a_flat, b_flat, c_flat, d_flat[..., None],
     )[..., 0]

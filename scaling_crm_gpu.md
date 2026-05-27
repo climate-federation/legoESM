@@ -117,6 +117,82 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 72 — 2026-05-27 — PCR becomes default on GPU after broader validation
+
+Iter-71 added PCR as opt-in via `LEGOESM_TRIDIAG=pcr`. This iter
+validated PCR across the broader regression suite and promoted it
+to the default on GPU.
+
+**Validation under PCR:**
+- `tests/atmosphere/nonhydrostatic/integration/test_nh_mass_conservation_anchored.py`
+  6/6 PASS (cubed-sphere, plane, MPAS NH integration mass-conservation)
+- `tests/atmosphere/test_anchor_mass_api.py` 20/20 PASS at 240s
+  timeout — includes `test_anchored_step_supports_jax_grad_cube_nh`
+  which exercises `jax.grad` THROUGH the cubed-sphere NH dycore
+  (AD-through-PCR validated)
+- `tests/atmosphere/nonhydrostatic/unit/test_compressible_euler.py`
+  33/33 PASS
+- `tests/unit/test_compressible_euler_plane.py` 15/15 PASS
+- `tests/unit/test_plane_nh_conservation.py` 3/3 PASS
+
+⇒ **77 tests total PASS under PCR**, including the AD-grad path
+used by training.
+
+**Note on the cube-NH AD test timeout:** previous runs failed at
+120s; both cuSPARSE and PCR paths complete in ~144-146s — PCR
+adds <2s compile-time overhead in this large jaxpr. Failure
+was timeout, not numerical regression. Bumped timeout in our
+sweep.
+
+**Code change:** dispatch in `thomas_solve_batched` updated:
+
+```
+LEGOESM_TRIDIAG=pcr      -> pure-JAX PCR (default on GPU)
+LEGOESM_TRIDIAG=cusparse -> jax.lax.linalg.tridiagonal_solve
+LEGOESM_TRIDIAG=legacy   -> fori_loop Thomas
+default                  -> PCR on GPU, legacy on CPU/Metal/TPU
+```
+
+Pre-iter-72 default on GPU was cuSPARSE; post-iter-72 default is
+PCR. cuSPARSE remains one env-var away for any user who needs the
+custom_call path.
+
+**HLO inspection (full step at N=128 fp32, default PCR):**
+- custom-call ops: 0  (was 18 cuSPARSE calls pre-iter-71)
+- fusion ops: 135    (was 80 pre-iter-71)
+- concat ops: 1016 (most inside fusions, XLA-folded)
+- pad ops: 313
+
+Fusion count went UP because PCR's 5 reduction levels × 18 substeps
+spawns many small fused kernels. But each is now part of XLA's main
+compute pipeline (no custom-call boundary).
+
+**Final bench fp32 nsub=6 (default PCR):**
+| N   | Mc/s    | step ms |
+|-----|---------|---------|
+| 128 | **420** | 1.17    |
+| 192 | **400** | 2.76    |
+| 256 | 307     | 6.41    |
+| 384 | 165     | 26.8    |
+
+**HBM utilization @ N=128 peak: 96% sustained** of consumer mobile
+RTX 5090's 730 GB/s ceiling. **Effectively at the theoretical
+single-GPU memory-bound limit.**
+
+**Cumulative iter-66 → iter-72 at N=128 fp32 peak:**
+
+| iter | change                                  | Mc/s | HBM% |
+|------|-----------------------------------------|------|------|
+| 66   | vmap-rm baseline                        | 276  | 63%  |
+| 67   | tridiag hoist (plane)                   | 285  | 65%  |
+| 68   | CS parity hoist                         | 282  | 64%  |
+| 69   | w pad-with-0                            | 286  | 65%  |
+| 70   | substep loop unroll                     | 324  | 75%  |
+| 71   | pure-JAX PCR (opt-in)                   | 417  | 96%  |
+| 72   | PCR default on GPU                      | 420  | 96%  |
+
+**Net iter-66 → iter-72: +52% throughput, +33pp HBM utilization.**
+
 ### Iter 71 — 2026-05-27 — pure-JAX PCR Thomas: 96% HBM peak
 
 iter-66 measurement: cuSPARSE = 37 us per substep call. 18 calls × 3 RK3
