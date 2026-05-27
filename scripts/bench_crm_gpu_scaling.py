@@ -144,25 +144,45 @@ def _acoustic_cfl(dt: float, n_acoustic_substeps: int, dx: float,
 
 def _bench_one(nx: int, ny: int, nlev: int, dx: float, dt: float,
                prec: str, n_acoustic_substeps: int = 12,
-               semi_implicit_acoustic: bool = True) -> TimingResult:
+               semi_implicit_acoustic: bool = True,
+               allow_unsafe_cfl: bool = False,
+               repeat: int = 1) -> TimingResult:
     cfl = _acoustic_cfl(dt, n_acoustic_substeps, dx)
     if cfl > 0.7:
-        print(f"  WARN: horizontal acoustic CFL = {cfl:.2f} (>0.7) — "
-              f"unstable expected at dx={dx}m, dt={dt}s, nsub={n_acoustic_substeps}")
+        msg = (f"horizontal acoustic CFL = {cfl:.2f} (>0.7) "
+               f"at dx={dx}m, dt={dt}s, nsub={n_acoustic_substeps}")
+        if allow_unsafe_cfl:
+            print(f"  WARN: {msg} — proceeding (--allow-unsafe-cfl)")
+        else:
+            raise SystemExit(f"REFUSE: {msg}. Pass --allow-unsafe-cfl to override.")
     if not semi_implicit_acoustic:
         dz_min = 100.0  # default stretched-coord surface dz
         cfl_v = 340.0 * (dt / n_acoustic_substeps) / dz_min
         if cfl_v > 0.5:
-            print(f"  WARN: vertical acoustic CFL = {cfl_v:.2f} (>0.5) — "
-                  f"explicit will NaN at dz_sfc≈100m, dt_a={dt/n_acoustic_substeps:.3f}s")
+            msg = (f"vertical acoustic CFL = {cfl_v:.2f} (>0.5) "
+                   f"at dz_sfc≈100m, dt_a={dt/n_acoustic_substeps:.3f}s")
+            if allow_unsafe_cfl:
+                print(f"  WARN: {msg} — proceeding (--allow-unsafe-cfl)")
+            else:
+                raise SystemExit(f"REFUSE: {msg}. Pass --allow-unsafe-cfl to override.")
     model, state, n_horiz = _build_model(
         nx, ny, nlev, dx, prec == "float64",
         n_acoustic_substeps=n_acoustic_substeps,
         semi_implicit_acoustic=semi_implicit_acoustic,
     )
-    compile_s, warmup_s, timing_s = _time_step(
-        model, state, dt, N_WARMUP, N_TIMING,
-    )
+    # Median of `repeat` timing runs reduces noise on sub-millisecond
+    # cases where scan-amortization + cache warmth can dominate
+    # (codex iter-9 #1).
+    timings = []
+    last_compile_s = last_warmup_s = 0.0
+    for i in range(max(1, repeat)):
+        c_s, w_s, t_s = _time_step(model, state, dt, N_WARMUP, N_TIMING)
+        timings.append(t_s)
+        if i == 0:
+            last_compile_s, last_warmup_s = c_s, w_s
+    timings.sort()
+    timing_s = timings[len(timings) // 2]
+    compile_s, warmup_s = last_compile_s, last_warmup_s
     step_wall_s = timing_s / N_TIMING
     ms = step_wall_s * 1000.0
     sypd = (dt / step_wall_s) / (365.25 * 86400.0) * 86400.0
@@ -197,9 +217,15 @@ def main() -> int:
                         "for short integrations; verify CFL for production.")
     p.add_argument("--explicit-acoustic", action="store_true",
                    help="Use explicit acoustic instead of semi-implicit. "
-                        "Requires smaller dt (≤0.5 s at dz_sfc=100m, nsub=4). "
-                        "Best throughput on GPU: fp32 explicit dt=0.5 nsub=4 "
-                        "→ 660 Mc/s plateau N=128-256 (iter 8).")
+                        "Requires small dt (~0.5 s at dz_sfc=100m, nsub=4). "
+                        "Empirically faster on consumer GPUs where fp64 ALU "
+                        "is throttled — bypasses column-Thomas serial path.")
+    p.add_argument("--allow-unsafe-cfl", action="store_true",
+                   help="Continue even when horiz CFL >0.7 or vertical CFL "
+                        ">0.5 (explicit). Default = refuse (raise SystemExit).")
+    p.add_argument("--repeat", type=int, default=1,
+                   help="Number of repeated timing runs per case (median "
+                        "reported when >1). 3 recommended for fast cases <1 ms.")
     p.add_argument("--output-dir", default="results/scaling_crm_gpu")
     p.add_argument("--no-timestamp", action="store_true")
     args = p.parse_args()
@@ -229,6 +255,8 @@ def main() -> int:
                 n, n, args.nlev, args.dx, args.dt, args.precision,
                 n_acoustic_substeps=args.n_acoustic_substeps,
                 semi_implicit_acoustic=not args.explicit_acoustic,
+                allow_unsafe_cfl=args.allow_unsafe_cfl,
+                repeat=args.repeat,
             )
             print(f"  N{n:>4d} cells={r.total_cells:>10,}  "
                   f"compile={r.compile_time_s:6.2f}s  "

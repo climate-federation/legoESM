@@ -117,6 +117,37 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 10 — 2026-05-27 — codex review iter-9 + median-of-3 walks back 820 Mc/s
+
+Codex flagged: single-shot timing inflated by cache warmup; CFL warns
+should refuse by default; stale "660" doc string. Applied:
+
+- `--repeat N` flag (default 1, recommend 3 for <1 ms steps). Median
+  of N runs reduces scan-amortization noise.
+- `--allow-unsafe-cfl` flag. Default behavior: refuse with `SystemExit`
+  when horiz CFL >0.7 or vertical CFL >0.5 (explicit). Was warn-only.
+- CLI help cleaned up; no longer embeds volatile benchmark numbers.
+
+**Median-of-3 explicit fp32 dt=0.5 nsub=4 (re-measured):**
+
+| res    | single-shot Mc/s | median-3 Mc/s | delta |
+|--------|------------------|---------------|-------|
+| N=96   | 636              | **702**       | +10%  |
+| N=128  | **820**          | **740**       | -10%  |
+| N=192  | 686              | 694           | ~0    |
+
+**Honest CRM peak: 740 Mc/s @ N=128 fp32 explicit (median-3).**
+
+The 820 single-shot number was cache-warmup-inflated as codex
+predicted. N=192 is stable across single/median measurements because
+state is large enough that cache effects are minor.
+
+Updated final ladder (legoESM single-GPU peaks, all median-grade):
+- CRM explicit fp32: **740 Mc/s** @ N=128
+- Ocean LL impl_cn fp32: 546 (PR #319 single-shot — likely also
+  inflated; needs median verification)
+- Atm icosahedral fp32: 428 (PR #319, similar caveat)
+
 ### Iter 9 — 2026-05-27 — bench supports `--explicit-acoustic` flag
 
 `bench_crm_gpu_scaling.py` now exposes `--explicit-acoustic`. Through
