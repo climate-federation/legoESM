@@ -118,7 +118,7 @@ mpi4jax 0.9 vs JAX 0.10 stack mismatch produces ~70× per-rank slowdown on macOS
 
 ### F10. Clean Wing IC + dt = 5 s production-stable without KW78
 
-iter-9 measurement on the 132×132×30 plane CRM at dt=5 s + N_ACOUSTIC=12 + clean Wing IC (no bubble, no qv noise) showed max|w| ≤ 6.1 × 10⁻³ m/s over 720 outer steps (1 sim-hour). The bubble-IC F1 dt-stability ladder (dt=1 s) was a SYMPTOM of the bubble-seeded 2-Δz mode (F7), not a fundamental outer-dt limit. With the clean IC F8 path, the dt=5 s + SI acoustic + N_ACOUSTIC=12 production config is stable WITHOUT KW78 (R9 obsolete). iter-58/59 refreshed all production wrapper + driver defaults from the iter-2 conservative dt=1 s / N_ACOUSTIC=24 to dt=5 s / N_ACOUSTIC=12; iter-14/iter-38/iter-63 produced the structural slow nightly regression. iter-180 further refreshed defaults to dt=20 s + WENO5 + β=0.2 (4× speedup at the same horizontal grid; smoke verified stable at 432 outer steps under radiation).
+iter-9 measurement on the 132×132×30 plane CRM at dt=5 s + N_ACOUSTIC=12 + clean Wing IC (no bubble, no qv noise) showed max|w| ≤ 6.1 × 10⁻³ m/s over 720 outer steps (1 sim-hour). The bubble-IC F1 dt-stability ladder (dt=1 s) was a SYMPTOM of the bubble-seeded 2-Δz mode (F7), not a fundamental outer-dt limit. With the clean IC F8 path, the dt=5 s + SI acoustic + N_ACOUSTIC=12 production config is stable WITHOUT KW78 (R9 obsolete). iter-58/59 refreshed all production wrapper + driver defaults from the iter-2 conservative dt=1 s / N_ACOUSTIC=24 to dt=5 s / N_ACOUSTIC=12; iter-14/iter-38/iter-63 produced the structural slow nightly regression. iter-180 first lifted defaults to dt=20 s + WENO5 + β=0.2 based on stability alone; iter-183 wall-time benchmark showed WENO5 at dt=20 was 1.22× SLOWER than the iter-14 dt=10 + upwind1 baseline (2x fewer steps but 2.4x per-step cost). iter-183 walked advection back to Van Leer TVD (stencil 4, 2nd-order, less numerical diffusion than upwind1) which gives a measured 3× wall-time speedup at dt=20.
 
 ### F11. Radiative-convective initiation at dx=4 km is dycore-/Kessler-resolution-bound (open)
 
@@ -154,7 +154,7 @@ Fix paths (open):
 
 The iter-149 column-symmetric trap is now understood: with QV_NOISE=0 the dycore can run stably for >10 sim-days because there is no horizontal seed for convection to initiate; precipitation stays at ~5e-4 mm/day vs Wing 2018 target ~3 mm/day. Breaking the trap WITHOUT crashing the dycore needs one of the fix paths above (none is a one-liner).
 
-iter-181 reverted the wrapper `QV_NOISE` default 1e-4 → 0.0 (iter-179 flipped it the wrong way without re-running the smoke) so the production wrapper remains functional at the iter-180 dt=20 + WENO5 + β=0.2 contract while F11 is open.
+iter-181 reverted the wrapper `QV_NOISE` default 1e-4 → 0.0 (iter-179 flipped it the wrong way without re-running the smoke) so the production wrapper remains functional at the iter-183 dt=20 + Van Leer + β=0.2 contract while F11 is open.
 
 ---
 
