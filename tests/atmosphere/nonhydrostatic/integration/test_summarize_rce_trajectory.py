@@ -1500,6 +1500,48 @@ def test_final_dod_cli_emits_dod_final_label_on_pass(tmp_path):
     )
 
 
+def test_final_dod_cli_exits_dod_fail_on_runaway_evaporation(tmp_path):
+    """iter-168: --final-dod CLI on a 30-day trajectory whose
+    plateau window shows runaway evaporation (CWV climbing past
+    the Wing upper bound) exits EXIT_DOD_FAIL (3) with
+    ``DOD FINAL verdict: FAIL`` + the runaway-evaporation reason.
+
+    Locks the FAIL exit path (summarize_rce_trajectory.py:907)
+    for the --final-dod CLI wrapper. Pre iter-168 only PASS +
+    INSUFFICIENT were CLI-tested.
+    """
+    import subprocess
+    snaps = tmp_path / "snapshots"
+    snaps.mkdir()
+    for i in range(30):
+        if i < 20:
+            cwv = 55.0 + 0.01 * (i % 3 - 1)
+        else:
+            # Days 20-29: monotonic runaway 55 -> 80 mm.
+            cwv = 55.0 + (i - 20) * (25.0 / 9.0)
+        _write_snapshot(snaps / f"snap_day_{i:04d}.npz",
+                        day=float(i), cwv_value=cwv)
+    res = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[4]
+                / "scripts" / "summarize_rce_trajectory.py"),
+            str(tmp_path), "--final-dod", "--quiet",
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert res.returncode == summary_mod.EXIT_DOD_FAIL, (
+        f"runaway evaporation should exit EXIT_DOD_FAIL "
+        f"({summary_mod.EXIT_DOD_FAIL}); got {res.returncode}; "
+        f"stdout={res.stdout!r}"
+    )
+    assert "DOD FINAL verdict: FAIL" in res.stdout, (
+        f"CLI must print 'DOD FINAL verdict: FAIL'; "
+        f"stdout={res.stdout!r}"
+    )
+    assert "runaway evaporation" in res.stdout
+
+
 def test_final_dod_cli_exits_insufficient_on_short_run(tmp_path):
     """iter-167: --final-dod on a < 30-day trajectory exits
     EXIT_DOD_INSUFFICIENT (4) with ``DOD FINAL verdict:
