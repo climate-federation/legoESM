@@ -55,6 +55,13 @@
 #                propagates the failure as the wrapper's exit code.
 #                Set to 1 only for runs aborted before any snapshot
 #                landed (where the FileNotFoundError is expected).
+#   EMIT_TRAJECTORY_PNG  1 = run scripts/plot_rce_log.py at the end
+#                to render <OUTPUT>/trajectory.png (per-100-step time
+#                series of CWV, MSE, max|w|, qc/qr_max, precip).
+#                Default 0 keeps the wrapper minimal-dependency
+#                (matplotlib + Agg is needed for the PNG step).
+#                Best-effort: a PNG failure does NOT change the
+#                wrapper exit status.
 #   PYBIN        python interpreter (default .venv/bin/python)
 
 set -euo pipefail
@@ -205,4 +212,26 @@ if [ "$EVALUATE_DOD" = "0" ] && [ "${DAYS%.*}" -ge 30 ] 2>/dev/null; then
     echo "      $OUTPUT --final-dod"
     echo "  Or re-launch this wrapper with EVALUATE_DOD=final to gate"
     echo "  on the verdict (non-zero exit on FAIL)."
+fi
+
+# iter-125: optional trajectory PNG via plot_rce_log.py. Off by
+# default to keep the wrapper minimal-dependency (matplotlib is
+# already in legoesm[dev] but env-only matplotlib distros may not
+# have it). Set EMIT_TRAJECTORY_PNG=1 to render
+# <OUTPUT>/trajectory.png from log.txt (per-100-step time series of
+# CWV, MSE, max|w|, qc/qr_max, precip).
+EMIT_TRAJECTORY_PNG="${EMIT_TRAJECTORY_PNG:-0}"
+if [ "$EMIT_TRAJECTORY_PNG" = "1" ]; then
+    echo "Rendering trajectory PNG..."
+    set +e
+    "$PYBIN" "$REPO_ROOT/scripts/plot_rce_log.py" "$OUTPUT" \
+        > "$OUTPUT/trajectory_plot.log" 2>&1
+    plot_status=$?
+    set -e
+    if [ "$plot_status" -eq 0 ]; then
+        echo "Wrote $OUTPUT/trajectory.png"
+    else
+        echo "WARN: plot_rce_log.py failed (status $plot_status); see $OUTPUT/trajectory_plot.log" >&2
+        echo "WARN: trajectory.csv still emitted; PNG is best-effort." >&2
+    fi
 fi

@@ -772,3 +772,67 @@ def test_wrapper_no_hint_when_evaluate_dod_set(tmp_path):
         f"EVALUATE_DOD=final should suppress the hint; "
         f"stdout={res.stdout!r}"
     )
+
+
+def test_wrapper_emit_trajectory_png_default_off(wrapper_text):
+    """iter-125: EMIT_TRAJECTORY_PNG defaults to 0 (PNG step skipped)
+    so the wrapper stays minimal-dependency. Locks the bash env
+    default + the conditional gate around the plot call."""
+    code = _strip_bash_comments(wrapper_text)
+    # Default env value 0.
+    assert re.search(
+        r'EMIT_TRAJECTORY_PNG\s*=\s*"\$\{EMIT_TRAJECTORY_PNG:-0\}"',
+        code,
+    ), (
+        "run_rce_30day.sh missing EMIT_TRAJECTORY_PNG=0 default; "
+        "the PNG step would default to ON, adding a matplotlib "
+        "dependency for runs that don't need the visual."
+    )
+    # Conditional gate around the plot call.
+    assert re.search(
+        r'if\s*\[\s*"\$EMIT_TRAJECTORY_PNG"\s*=\s*"1"\s*\]\s*;\s*then',
+        code,
+    ), (
+        "run_rce_30day.sh missing EMIT_TRAJECTORY_PNG=1 gate; the "
+        "PNG render step would run unconditionally."
+    )
+
+
+def test_wrapper_emit_trajectory_png_invokes_plot_rce_log(wrapper_text):
+    """iter-125: when the EMIT_TRAJECTORY_PNG=1 branch fires, it
+    must invoke scripts/plot_rce_log.py against $OUTPUT."""
+    code = _strip_bash_comments(wrapper_text)
+    assert re.search(
+        r'"\$PYBIN"\s+"\$REPO_ROOT/scripts/plot_rce_log\.py"\s+"\$OUTPUT"',
+        code,
+    ), (
+        "run_rce_30day.sh EMIT_TRAJECTORY_PNG=1 branch must call "
+        "``\"$PYBIN\" \"$REPO_ROOT/scripts/plot_rce_log.py\" "
+        "\"$OUTPUT\"``."
+    )
+
+
+def test_wrapper_emit_trajectory_png_best_effort(wrapper_text):
+    """iter-125: PNG render failure must NOT change the wrapper exit
+    status. Lock the WARN-on-fail behaviour vs the summarizer's
+    propagate-on-fail behaviour."""
+    code = _strip_bash_comments(wrapper_text)
+    # The plot block uses set +e ... set -e and reports WARN on fail
+    # without exit "$status".
+    # Find the plot_status check.
+    assert re.search(r'plot_status\s*=\s*\$\?', code), (
+        "run_rce_30day.sh missing plot_status capture."
+    )
+    # WARN message on failure path; no ``exit "$plot_status"`` for the
+    # best-effort branch.
+    plot_block = re.search(
+        r'EMIT_TRAJECTORY_PNG[\s\S]*?fi',
+        code,
+    )
+    assert plot_block is not None
+    block_text = plot_block.group(0)
+    assert "WARN" in block_text
+    assert 'exit "$plot_status"' not in block_text, (
+        "PNG render is best-effort; failure must NOT propagate as "
+        "wrapper exit status."
+    )
