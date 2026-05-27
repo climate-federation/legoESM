@@ -411,6 +411,32 @@ The single-GPU theoretical limit has been reached for the structured-grid config
 - Algorithm change (replace spectral with spectral-element or GPU-native SHTns)
 - Mesh-level optimization (Hilbert reordering for MPAS) — invasive
 
+### Iter 11 — 2026-05-27 — MPAS implicit_cn barotropic = 2.6-3.1× win
+
+Profile (iter-7) showed MPAS step = 67% barotropic substep loop (30 sequential iters of div+grad+tang). Swap explicit_substep → implicit_cn (single CN solve instead of 30 substeps).
+
+`MPASOceanConfig(barotropic_solver="implicit_cn")` exposed via new `--mpas-baro-solver` flag on bench script.
+
+| res | fp64 explicit | fp64 impl_cn  | speedup | fp32 impl_cn  |
+|-----|---------------|---------------|---------|---------------|
+| I4  | 2.38 ms / 22 Mc/s | **0.76 ms / 68 Mc/s** | 3.1× | 0.77 ms / 67 Mc/s |
+| I5  | 3.00 ms / 68  | **1.06 ms / 192** | 2.8× | 1.07 ms / 192 |
+| I6  | 6.55 ms / 125 | **2.52 ms / 325** | 2.6× | 2.46 ms / 333 |
+
+MPAS I6 fp32 now at **333 Mcells/s** — close to ocean-LL peak (405). Was 125 (impl_cn off).
+
+ratio fp64/fp32 now ≈ 1.0 (was already ≈1 with CUDA graphs). implicit_cn solver removes the barotropic dispatch+gather burden.
+
+Updated final ladder:
+
+| grid            | best meas Mcells/s | regime |
+|-----------------|--------------------:|--------|
+| atm CS fp32     |  299              | ~100% mem-bound |
+| atm ico fp32    |  428              | mixed BW + fp64 ALU pen. |
+| ocean LL fp32   |  405              | ~99% mem-bound |
+| **ocean MPAS fp32 impcn** | **333**     | **mem-bound (no longer Voronoi-limited)** |
+| atm spectral fp64 | 25.7            | O(N³) inherent |
+
 ### Code summary
 - `scripts/bench_ocean_gpu_scaling.py` (228 LOC) — ocean GPU bench with CUDA graphs + lax.scan fuse
 - `scripts/plot_gpu_scaling.py` (260 LOC) — 4 plots, precision-aware legend, theoretical floor, peak-bar

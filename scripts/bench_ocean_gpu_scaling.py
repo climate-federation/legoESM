@@ -90,7 +90,7 @@ def _build_latlon(n_lat: int, dtype_x64: bool):
     return model, state, n_cells
 
 
-def _build_mpas(level: int, dtype_x64: bool):
+def _build_mpas(level: int, dtype_x64: bool, baro_solver: str = "explicit_substep"):
     from legoesm.grids.voronoi import create_voronoi_mesh
     from legoesm.ocean.vertical import create_ocean_z_star
     from legoesm.ocean.init_mpas import rest_state_mpas_ocean
@@ -99,7 +99,7 @@ def _build_mpas(level: int, dtype_x64: bool):
     )
     mesh = create_voronoi_mesh(subdivision_level=level, lloyd_iterations=5)
     z = create_ocean_z_star(n_levels=OCEAN_NLEV)
-    cfg = MPASOceanConfig()
+    cfg = MPASOceanConfig(barotropic_solver=baro_solver)
     model = MPASOceanModel(mesh, z, cfg)
     state = rest_state_mpas_ocean(mesh, z)
     n_cells = mesh.nCells
@@ -202,6 +202,10 @@ def main() -> int:
                    help="Override LATLON_RES (comma list)")
     p.add_argument("--mpas-levels", default=None,
                    help="Override MPAS_LEVELS (comma list)")
+    p.add_argument("--mpas-baro-solver",
+                   choices=["explicit_substep", "implicit_cn"],
+                   default="explicit_substep",
+                   help="MPAS barotropic solver (implicit_cn skips 30 substeps)")
     p.add_argument("--no-cuda-graphs", action="store_true",
                    help="Disable XLA CUDA-graphs flag (default: enabled to "
                         "fix MPAS-ocean fp32 anomaly; recognised at import "
@@ -248,10 +252,13 @@ def main() -> int:
                 failures.append(f"latlon LL{n}: {exc}")
 
     if "mpas" in grids:
-        print(f"\nMPAS Voronoi ocean — levels {mp_lev}")
+        print(f"\nMPAS Voronoi ocean — levels {mp_lev}  "
+              f"(baro={args.mpas_baro_solver})")
+        def _mk_mpas(level, x64, _solver=args.mpas_baro_solver):
+            return _build_mpas(level, x64, baro_solver=_solver)
         for L in mp_lev:
             try:
-                r = _bench_one(f"I{L}", _build_mpas, L, args.precision)
+                r = _bench_one(f"I{L}", _mk_mpas, L, args.precision)
                 print(f"  I{L} n_cells={r.total_cells:>10,}  "
                       f"compile={r.compile_time_s:6.2f}s  "
                       f"step={r.time_per_step_ms:7.2f}ms  "
