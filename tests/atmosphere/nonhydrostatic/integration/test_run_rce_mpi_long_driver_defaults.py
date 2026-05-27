@@ -62,10 +62,12 @@ def driver_defaults() -> dict[str, object]:
     return _parse_argparse_defaults(DRIVER.read_text())
 
 
-def test_dt_default_matches_iter14(driver_defaults):
-    """iter-14 measured 132x132 1-sim-hour PASS at dt=5.0 s.
-    Driver default must match."""
-    assert driver_defaults["--dt"] == 5.0
+def test_dt_default_matches_iter180(driver_defaults):
+    """iter-180 refresh: WENO5 + beta=0.2 lets the production driver
+    run at dt=20.0 s (4x iter-14's dt=5.0). The driver default
+    moved in lockstep with the wrapper. Locks the new production
+    contract."""
+    assert driver_defaults["--dt"] == 20.0
 
 
 def test_n_acoustic_substeps_default_matches_iter14(driver_defaults):
@@ -187,8 +189,12 @@ def test_use_dd_default(driver_defaults):
 
 
 def test_advection_production_default(driver_defaults):
-    """iter-7 production: upwind1 (WENO5 is opt-in via CLI)."""
-    assert driver_defaults["--advection"] == "upwind1"
+    """iter-180 refresh: WENO5 (5th-order, less grid-scale dispersion)
+    is now the production default. The iter-7 upwind1 default was
+    cheaper but introduced more numerical diffusion + tighter
+    advective CFL — upwind1 stays available via ``--advection upwind1``
+    for back-compat / bit-comparison runs."""
+    assert driver_defaults["--advection"] == "weno5"
 
 
 def test_sponge_production_defaults(driver_defaults):
@@ -258,12 +264,12 @@ def test_c_h_production_default(driver_defaults):
 
 
 def test_acoustic_off_centering_production_default(driver_defaults):
-    """Skamarock-Klemp off-centering parameter beta. 0.0 = neutral
-    forward-backward (iter-14 contract). A silent change to 0.05-0.1
-    would damp acoustic modes — could mask real instabilities the
-    DOD criterion 1 test is supposed to catch, or destabilise an
-    otherwise-PASS run by drifting energy."""
-    assert driver_defaults["--acoustic-off-centering"] == 0.0
+    """iter-180 refresh: beta=0.2 is the new production default
+    pairing with dt=20 + WENO5. Stronger off-centering damps the
+    acoustic mode at the larger outer dt without needing more
+    substeps. iter-14's beta=0.0 (neutral) was sufficient at
+    dt=5; the 4x dt increase needs the extra damping."""
+    assert driver_defaults["--acoustic-off-centering"] == 0.2
 
 
 def test_vertical_theta_diffusion_production_default(driver_defaults):

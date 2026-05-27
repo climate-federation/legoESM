@@ -129,7 +129,7 @@ def parse_args():
     p.add_argument("--ny", type=int, default=132)
     p.add_argument("--nlev", type=int, default=30)
     p.add_argument("--dx", type=float, default=2_000.0)
-    p.add_argument("--dt", type=float, default=5.0,
+    p.add_argument("--dt", type=float, default=20.0,
                    help="Outer dt [s]. Bare-dycore stability bound is "
                         "BUBBLE-dependent: with the legacy 0.5 K warm "
                         "bubble at z<1 km (F1) dt was limited to ≤1 s; "
@@ -244,7 +244,7 @@ def parse_args():
                         "Default 10 km matches CompressibleEulerConfig. "
                         "5 km is too thin for H=33 km when gravity-wave "
                         "wavelengths exceed sponge depth.")
-    p.add_argument("--acoustic-off-centering", type=float, default=0.0,
+    p.add_argument("--acoustic-off-centering", type=float, default=0.2,
                    help="Skamarock-Klemp off-centering parameter beta "
                         "in [0, 1). 0 = neutral forward-backward. "
                         "0.05-0.1 damps acoustic modes. Try 0.1 if "
@@ -256,7 +256,7 @@ def parse_args():
                         "damp the buoyancy/PG feedback that destabilises "
                         "the dycore at dt > 0.5 s on coarse vertical grids.")
     p.add_argument("--advection", choices=["upwind1", "van_leer", "weno5"],
-                   default="upwind1",
+                   default="weno5",
                    help="Horizontal advection scheme for theta/u/v/w. "
                         "upwind1: 1st-order, cheap, dispersive (default). "
                         "van_leer: 2nd-order TVD, monotone, less numerical "

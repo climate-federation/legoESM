@@ -124,11 +124,11 @@ fi
 OUTPUT="${1:-results/rce_30day}"
 DAYS="${DAYS:-30}"
 RANKS="${RANKS:-12}"
-DT="${DT:-5.0}"
+DT="${DT:-20.0}"
 NX="${NX:-132}"
 NY="${NY:-132}"
 N_ACOUSTIC="${N_ACOUSTIC:-12}"
-ADVECTION="${ADVECTION:-upwind1}"
+ADVECTION="${ADVECTION:-weno5}"
 HYPERDIFF="${HYPERDIFF:-5.0e6}"
 BUBBLE_K="${BUBBLE_K:-0.0}"
 QV_NOISE="${QV_NOISE:-1e-4}"
@@ -176,7 +176,7 @@ mpirun -np "$RANKS" "$PYBIN" \
     --nx "$NX" --ny "$NY" \
     --days "$DAYS" --dt "$DT" \
     --semi-implicit-acoustic \
-    --acoustic-off-centering 0.1 \
+    --acoustic-off-centering 0.2 \
     --n-acoustic-substeps "$N_ACOUSTIC" \
     --advection "$ADVECTION" \
     --hyperdiff "$HYPERDIFF" \

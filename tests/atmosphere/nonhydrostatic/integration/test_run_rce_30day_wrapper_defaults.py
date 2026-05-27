@@ -44,14 +44,22 @@ def wrapper_text() -> str:
     return WRAPPER.read_text()
 
 
-def test_dt_default_matches_iter14_production(wrapper_text):
-    """iter-14 measured the 132x132 plane CRM 1-sim-hour PASS at
-    dt=5.0 s (725 steps, max|w|=6.1e-3 m/s). The wrapper must
-    default to that value; iter-58 found it stale at 1.0 s."""
+def test_dt_default_matches_iter180_production(wrapper_text):
+    """iter-180 refresh: WENO5 horizontal advection + stronger
+    acoustic off-centering (beta=0.2) lifts the iter-14 dt=5 s
+    contract to dt=20 s. Smoke measurements at 32x32x30 dx=4 km
+    with WENO5 + beta=0.2 + radiation showed stable 432-step runs
+    at max|w|<=1.8e-3 m/s and Ca_substep=0.87 (well under the
+    SI-relaxed acoustic CFL bound). 4x speedup over iter-14.
+
+    Pre iter-180 the wrapper defaulted DT=5.0 (the iter-14 measured
+    value with upwind1 + beta=0.1). The new combination is now the
+    production contract.
+    """
     dt = _parse_env_default(wrapper_text, "DT")
-    assert dt == "5.0", (
-        f"run_rce_30day.sh DT default = {dt!r}, expected '5.0' "
-        f"(iter-14 + iter-38 production contract)."
+    assert dt == "20.0", (
+        f"run_rce_30day.sh DT default = {dt!r}, expected '20.0' "
+        f"(iter-180 WENO5 + beta=0.2 production contract)."
     )
 
 
@@ -74,7 +82,10 @@ def test_other_production_defaults(wrapper_text):
     defaults = {
         "NX": "132",
         "NY": "132",
-        "ADVECTION": "upwind1",
+        # iter-180: WENO5 is the production advection scheme (5th-order,
+        # less grid-scale dispersion than upwind1; pairs with dt=20 + beta=0.2
+        # at acoustic CFL Ca_sub=0.87 in the iter-180 smoke).
+        "ADVECTION": "weno5",
         "HYPERDIFF": "5.0e6",
         "BUBBLE_K": "0.0",   # F7 / F10 contract: clean Wing IC
         # iter-179: QV_NOISE flipped from 0.0 -> 1e-4 to break the
@@ -122,7 +133,10 @@ def test_other_production_defaults(wrapper_text):
 
 
 _HARDCODED_PASSTHROUGH_FLAGS = {
-    "--acoustic-off-centering": "0.1",  # iter-14/38 production beta
+    # iter-180 refresh: beta=0.1 (iter-14/38 dt=5) -> 0.2 to pair with
+    # the dt=20 + WENO5 production combo. Stronger off-centering
+    # damps the acoustic mode without needing more substeps.
+    "--acoustic-off-centering": "0.2",
     "--snapshot-hours": "24.0",          # daily snapshots
     "--snapshot-3d-hours": "1.0",        # hourly 3D snapshots
     "--profile-days": "5.0",
