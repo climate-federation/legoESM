@@ -411,6 +411,24 @@ The single-GPU theoretical limit has been reached for the structured-grid config
 - Algorithm change (replace spectral with spectral-element or GPU-native SHTns)
 - Mesh-level optimization (Hilbert reordering for MPAS) — invasive
 
+### Iter 19 — 2026-05-27 — MPAS ocean I7 confirms same plateau-then-fall pattern
+
+| res | total cells | fp32 ms/Mc/s   | fp64 ms/Mc/s   |
+|-----|-------------|----------------|----------------|
+| I5  |   204,840   |  1.07 /  192   |  1.06 /  192   |
+| I6  |   819,240   |  2.51 /  **326** |  2.40 / **342** |
+| I7  | 3,276,840   | 23.91 /   137  | 21.05 /   156  |
+
+MPAS **I6 = peak** (4× I5 throughput, 16.4M cell-lev). At I7 the
+state (2.6 GB fp32) is 50× the 48 MB L2 — every R/W must hit HBM
+with no reuse. fp64/fp32 ratio at I7 ≈ 1.13, far from the 2× bandwidth-
+bound expectation: confirms MPAS indirect-addressing latency dominates
+over dtype-bytes traffic when L2 is overwhelmed.
+
+Same plateau-then-fall pattern as LL ocean (peak LL192) and atm CS
+(peak C48) — all three architectures saturate at the L2-fit point
+of state size.
+
 ### Iter 18 — 2026-05-27 — LL ocean throughput plateau confirmed
 
 Pushed LL ocean past prior peak (LL192) to find the saturation envelope.
