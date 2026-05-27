@@ -117,6 +117,29 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 18 — 2026-05-27 — dx sweep + run-to-run variance widened
+
+Explicit fp32 N=128 nsub=4 dt=0.5 across dx (median-3 each):
+
+| dx   | ms/step | Mc/s | SYPD |
+|------|---------|------|------|
+| 1 km | 0.58    | 851  | 2.37 |
+| 2 km | 0.64    | 774  | 2.16 |
+| 4 km | 0.65    | 758  | 2.11 |
+
+Throughput Mc/s essentially **grid-spacing-invariant** (cell-level work
+doesn't depend on dx; only horizontal CFL constraint does, and stays
+safe across this range).
+
+But: across the 3 fresh Python processes, **range 758-851 = ±6%**, and
+prior median-3 measurements at same point gave 680-740. **Honest run-to-
+run variance closer to ±15%** than the ±5% claimed iter 11. Codex iter-16
+#1 was right — median-of-3 isn't tight enough for sub-ms timings.
+
+**Corrected final CRM peak: 680-850 Mc/s plateau N=96-192 fp32 explicit
+dt=0.5 nsub=4 (median-3, run-to-run var ±15%).** Reporting a range
+rather than point estimate is the honest summary.
+
 ### Iter 17 — 2026-05-27 — codex iter-16 review applied
 
 Codex flagged HIGH:
