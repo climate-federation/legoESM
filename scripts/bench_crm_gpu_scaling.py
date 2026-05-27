@@ -30,7 +30,8 @@ N_WARMUP = 3
 N_TIMING = 30
 
 
-def _build_model(nx: int, ny: int, nlev: int, dx: float, dtype_x64: bool):
+def _build_model(nx: int, ny: int, nlev: int, dx: float, dtype_x64: bool,
+                 n_acoustic_substeps: int = 12):
     import jax.numpy as jnp
     from legoesm.atmosphere.dynamics.compressible_euler import (
         CompressibleEulerConfig,
@@ -47,7 +48,7 @@ def _build_model(nx: int, ny: int, nlev: int, dx: float, dtype_x64: bool):
     hc = create_stretched_height_coordinate(nlev, H=20_000.0, dz_sfc=100.0)
     tm = make_flat_plane_terrain_metric(grid, hc)
     cfg = CompressibleEulerConfig(
-        n_acoustic_substeps=12, semi_implicit_acoustic=True,
+        n_acoustic_substeps=n_acoustic_substeps, semi_implicit_acoustic=True,
         sponge_coeff=0.05, sponge_width=5000.,
         hyperdiff_coeff=1e6, hyperdiff_rho_coeff=1e6, hyperdiff_w_coeff=1e6,
         smagorinsky_cs=0.0, use_coriolis=True,
@@ -112,8 +113,11 @@ def _time_step(model, state, dt: float, n_warmup: int, n_timing: int):
 
 
 def _bench_one(nx: int, ny: int, nlev: int, dx: float, dt: float,
-               prec: str) -> TimingResult:
-    model, state, n_horiz = _build_model(nx, ny, nlev, dx, prec == "float64")
+               prec: str, n_acoustic_substeps: int = 12) -> TimingResult:
+    model, state, n_horiz = _build_model(
+        nx, ny, nlev, dx, prec == "float64",
+        n_acoustic_substeps=n_acoustic_substeps,
+    )
     compile_s, warmup_s, timing_s = _time_step(
         model, state, dt, N_WARMUP, N_TIMING,
     )
@@ -125,7 +129,7 @@ def _bench_one(nx: int, ny: int, nlev: int, dx: float, dt: float,
     return TimingResult(
         n_gpus=1, resolution=nx, n_levels=nlev,
         precision=prec, mode="crm_plane_strong",
-        physics_level=f"f-plane_dycore_only_dx{int(dx)}m",
+        physics_level=f"f-plane_dx{int(dx)}m_nsub{n_acoustic_substeps}",
         dt_seconds=dt, n_warmup=N_WARMUP, n_timing=N_TIMING,
         compile_time_s=compile_s, warmup_time_s=warmup_s,
         timing_time_s=timing_s, time_per_step_ms=ms, sypd=sypd,
@@ -143,6 +147,10 @@ def main() -> int:
     p.add_argument("--dt", type=float, default=2.0, help="seconds")
     p.add_argument("--precision", choices=["float32", "float64"],
                    default="float64")
+    p.add_argument("--n-acoustic-substeps", type=int, default=12,
+                   help="Inner acoustic substep count per RK3 stage. "
+                        "Default 12 (conservative). 4-6 typically stable "
+                        "for short integrations; verify CFL for production.")
     p.add_argument("--output-dir", default="results/scaling_crm_gpu")
     p.add_argument("--no-timestamp", action="store_true")
     args = p.parse_args()
@@ -157,14 +165,16 @@ def main() -> int:
 
     print(f"Backend: {jax.default_backend().upper()}  Devices: {jax.devices()}")
     print(f"Precision: {args.precision}  nlev: {args.nlev}  "
-          f"dx: {args.dx} m  dt: {args.dt} s")
+          f"dx: {args.dx} m  dt: {args.dt} s  "
+          f"nsub: {args.n_acoustic_substeps}")
 
     results = []
     failures = []
     print(f"\nPlane CRM (f-plane) GPU sweep — nx={args.nx}")
     for n in args.nx:
         try:
-            r = _bench_one(n, n, args.nlev, args.dx, args.dt, args.precision)
+            r = _bench_one(n, n, args.nlev, args.dx, args.dt, args.precision,
+                           n_acoustic_substeps=args.n_acoustic_substeps)
             print(f"  N{n:>4d} cells={r.total_cells:>10,}  "
                   f"compile={r.compile_time_s:6.2f}s  "
                   f"step={r.time_per_step_ms:7.2f}ms  "
