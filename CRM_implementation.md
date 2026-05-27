@@ -301,6 +301,58 @@ The plane CRM is the only one with a 30-day production-scale
 validation; cubed-sphere/MPAS 30-day production runs are the
 next chunk for full cross-grid DOD closure.
 
+**iter-252..260 (untested-bench coverage chain)**:
+
+Closed test coverage for the 7 untested CRM scripts that had ZERO
+test exposure pre iter-252. Same pattern as iter-238 (untested
+multi-grid CRM driver run_rcemip_long.py) — silent regressions
+in any of these would only surface when a user tried to launch
+a real scaling sweep:
+
+| Iter | Script | What it benches |
+|---|---|---|
+| iter-252 | `bench_plane_crm_dd_scaling.py` | DD strong + weak scaling (CSV) |
+| iter-254 | `bench_halo_ops_scaling.py` | 8-operator halo-aware pipeline timing |
+| iter-255 | `bench_dd_scaling.py` | DD per-step wall (original bench) |
+| iter-257 | `bench_halo_exchange.py` | MPI halo-exchange micro-bench (JSON) |
+| iter-258 | `bench_mpi_scaling.py` | Replicated-dycore reference (anti-scaling) |
+| iter-259 | `bench_plane_dycore.py` | Single-rank dycore throughput + JIT compile |
+
+Each smoke is single-rank single-process (no `mpirun` runtime
+dependency), runs in O(few-second) cold JIT, and locks the
+script's stdout/CSV/JSON schema. iter-256 added round-1 Codex
+hardening: end-anchored regexes (catch trailing-field additions),
+no-op floors (~100× below measured baseline / 100× above
+kernel-launch overhead — detects fully-elided dycore/operator
+pipelines), throughput tolerance 2%→10% (rounding-noise tolerant).
+
+iter-253 measured F9 (MPI scaling platform-blocked) with
+concrete numbers on M5 Pro: np=2 strong efficiency **1.8%** under
+jax 0.10 vs mpi4jax 0.9 FFI-API mismatch. Documented env-fix
+recipe (`pip install 'mpi4jax>=0.8,<0.9' 'jax<0.10'`) and the
+mpi4jax FFI port as the structural fix.
+
+**iter-260 final regression sweep** (extended scope):
+
+```
+JAX_PLATFORMS=cpu pytest \
+  tests/atmosphere/nonhydrostatic/integration/ \
+  tests/unit/test_select_n_outer_split.py \
+  tests/unit/test_spectral_plane_dycore.py \
+  tests/validation/test_rcemip_plane_smoke.py \
+  tests/validation/test_spectral_plane_rce_smoke.py
+→ 299 passed, 4 deselected, 3m18s wall
+```
+
+vs iter-245 sweep (353 PASS — narrower scope): the iter-238..259
+chain ADDED 9 new test files (6 bench smokes + cross-grid
+driver + spectral state cherry-pick unblock + rcemip-plane fix +
+no-fixer dycore companion) and the iter-256 hardening + iter-247
+xfail removal converted 0 → 9 previously-blocked validation
+tests. Total new test surface: roughly +30 test cases vs
+pre-iter-238 baseline. No regressions in any pre-existing
+test_atmosphere/nonhydrostatic/ test.
+
 **iter-246..250 (post-sweep Codex polish chain — 4 rounds)**:
 
 * iter-246 (Codex round-1 on iter-243/244 — 2 HIGH + 1 LOW):
