@@ -61,6 +61,7 @@ from typing import Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.grids.halo_latlon import (
     pad_halo_latlon,
@@ -692,44 +693,130 @@ def scatter_state_latlon(state, layout: LatLonBandLayout):
     )
 
 
-def gather_state_latlon(local_state, layout: LatLonBandLayout):
-    """Gather rank-local bands onto rank 0; returns ``None`` elsewhere.
+def gather_field_latlon(
+    local_arr,
+    layout: LatLonBandLayout,
+    *,
+    is_v_face: bool = False,
+):
+    """Gather a rank-local lat-banded array onto rank 0.
 
-    The duplicated ``v`` boundary row is handled by trimming the
-    trailing row from every rank except the northernmost so the
-    concatenated global array has shape ``(n_lat_global+1, n_lon, ...)``.
+    Used by both :func:`gather_state_latlon` (dycore-internal raw state)
+    and ``ModelDriver._gather_state_for_global_checkpoint`` (driver-side
+    Field-wrapped state).  Keep the v-row-trim convention in one place
+    so save / restart and dynamics stay in sync.
+
+    Parameters
+    ----------
+    local_arr : jax.Array or numpy.ndarray
+        Rank-local field with first axis = lat (cell-centre for scalars
+        or face for ``v``).
+    layout : LatLonBandLayout
+    is_v_face : bool
+        When True, ``local_arr`` is a v-face array (shape
+        ``(n_lat_local+1, n_lon, ...)``).  Every rank except the
+        northernmost trims its trailing row before send so the
+        concatenated global array has shape ``(n_lat_global+1, ...)``
+        rather than ``(n_lat_global + n_ranks, ...)``.
+
+    Returns
+    -------
+    jax.Array on rank 0 (concatenated global array), ``None`` on
+    other ranks.  When mpi4py is unavailable returns the input as-is.
     """
     try:
         from mpi4py import MPI
     except ImportError:
-        return local_state
+        return local_arr
 
     comm = MPI.COMM_WORLD
 
-    def _gather_field(local_field):
-        gathered = comm.gather(local_field, root=0)
-        if layout.rank == 0:
-            return jnp.concatenate(gathered, axis=0)
-        return None
+    arr_to_send = local_arr
+    if is_v_face and layout.rank < layout.n_ranks - 1:
+        arr_to_send = local_arr[:-1]
+    gathered = comm.gather(np.asarray(arr_to_send), root=0)
+    if layout.rank == 0:
+        return jnp.concatenate(gathered, axis=0)
+    return None
 
-    T_global = _gather_field(local_state.T)
-    p_s_global = _gather_field(local_state.p_s)
-    phis_global = _gather_field(local_state.phis)
-    u_global = _gather_field(local_state.u)
 
-    # v: trim duplicated boundary row except on the northernmost rank
-    if layout.rank < layout.n_ranks - 1:
-        v_to_send = local_state.v[:-1]
+def scatter_field_latlon(
+    global_arr,
+    layout: LatLonBandLayout,
+    *,
+    is_v_face: bool = False,
+):
+    """Scatter a rank-0-resident global array to all ranks' bands.
+
+    Mirror of :func:`gather_field_latlon` for the restart path.  Rank 0
+    broadcasts the global array; every rank then slices its own band.
+
+    A ``bcast`` of the full global array is wasteful relative to a true
+    MPI scatterv, but at AMIP resolutions (1° = 180x360x32, ~5 MB per
+    3-D field) the simplicity wins: a restart is rare, and the
+    bcast happens once per chained job.
+
+    Parameters
+    ----------
+    global_arr : jax.Array or numpy.ndarray or None
+        Global array on rank 0 (first axis = lat).  Other ranks may
+        pass ``None``.
+    layout : LatLonBandLayout
+    is_v_face : bool
+        When True, slice ``[lat_start : lat_end+1]`` so neighbouring
+        ranks duplicate the boundary v-face row (same convention as
+        :func:`scatter_state_latlon`).
+
+    Returns
+    -------
+    jax.Array — this rank's band-local view of the global field.
+    """
+    try:
+        from mpi4py import MPI
+    except ImportError:
+        # Single-process: the caller's global array IS the rank-local
+        # band (one rank == one band == the whole world).
+        return global_arr
+
+    comm = MPI.COMM_WORLD
+
+    if layout.rank == 0:
+        if global_arr is None:
+            raise ValueError(
+                "scatter_field_latlon: rank 0 must supply the global "
+                "array; got None.  Other ranks may pass None."
+            )
+        payload = np.asarray(global_arr)
     else:
-        v_to_send = local_state.v
-    v_global = _gather_field(v_to_send)
+        payload = None
+    payload = comm.bcast(payload, root=0)
+
+    s, e = layout.lat_start, layout.lat_end
+    band = payload[s : e + 1] if is_v_face else payload[s:e]
+    return jnp.asarray(band)
+
+
+def gather_state_latlon(local_state, layout: LatLonBandLayout):
+    """Gather rank-local bands onto rank 0; returns ``None`` elsewhere.
+
+    Thin wrapper over :func:`gather_field_latlon` that handles the
+    canonical C-grid lat-lon state NamedTuple (raw jnp arrays, not
+    Field-wrapped).  Driver-side callers that hold a Field-wrapped
+    ``HydrostaticState`` should call :func:`gather_field_latlon` per
+    ``.data`` attribute directly (see
+    ``ModelDriver._gather_state_for_global_checkpoint``).
+    """
+    T_global = gather_field_latlon(local_state.T, layout)
+    p_s_global = gather_field_latlon(local_state.p_s, layout)
+    phis_global = gather_field_latlon(local_state.phis, layout)
+    u_global = gather_field_latlon(local_state.u, layout)
+    v_global = gather_field_latlon(local_state.v, layout, is_v_face=True)
 
     tracers_global = None
     if getattr(local_state, "tracers", None):
         tracers_global = {}
         for name, tr in local_state.tracers.items():
-            gathered = _gather_field(tr)
-            tracers_global[name] = gathered
+            tracers_global[name] = gather_field_latlon(tr, layout)
 
     if layout.rank == 0:
         return local_state._replace(

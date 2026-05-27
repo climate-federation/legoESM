@@ -103,6 +103,7 @@ echo "--- Step 1/3 : serial (n_ranks=1) tests, no MPI ---"
 ${PY} -m pytest -xvs \
     tests/parallel/test_latlon_mpi_halo_serial.py \
     tests/parallel/test_latlon_mpi_step_serial.py \
+    tests/parallel/test_latlon_mpi_gather_scatter.py \
     tests/atmosphere/test_cgrid_latlon_pole_v_bc.py
 
 # Detect a usable MPI launcher.  Ginsburg ships srun (preferred under
@@ -119,6 +120,11 @@ for NP in 2 4; do
     echo "--- Step ${NP}-rank : MPI halo tests ---"
     ${MPI_LAUNCH} -n ${NP} ${PY} -m pytest -xvs \
         tests/distributed/test_latlon_mpi_halo.py
+
+    echo
+    echo "--- Step ${NP}-rank : gather/scatter checkpoint round-trip ---"
+    ${MPI_LAUNCH} -n ${NP} ${PY} -m pytest -xvs \
+        tests/distributed/test_latlon_mpi_checkpoint.py
 
     echo
     echo "--- Step ${NP}-rank : full step equivalence ---"
