@@ -117,6 +117,33 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 33 — 2026-05-27 — production-test discovery: dycore-only ≠ production
+
+Found `tests/validation/test_rcemip_plane_smoke.py` — the production
+RCEMIP validation runs **10 steps** with `make_rcemip_physics`
+(radiation + microphysics + surface flux) + Smagorinsky LES. Long-
+duration RCE (`run_rce_mpi_long.py`) uses same physics stack + multi-
+day spin-up + adaptive damping.
+
+⇒ **Bench config measures the bare dycore.** Physics tendencies
+(radiation cooling, microphysics latent heating, surface drag) are
+the dominant stability mechanism for long runs. Without them, even
+the production driver would be unstable.
+
+**Reframed scope:**
+- **Dycore throughput** (this bench): 670-820 Mc/s plateau N=96-192
+  fp32 explicit
+- **Dycore + Smagorinsky LES** (closer to production cost basis):
+  410 Mc/s at N=192 fp32 explicit
+- **Full production (physics+driver)**: not measured here; needs
+  `run_rce_mpi_long.py` with non-scan code path
+
+The "scale to theoretical limit" target was for the **dycore step
+itself** — that's bench-default 670-820 Mc/s, at 40-70% model-
+inferred HBM. Production throughput will be lower (physics adds
+~50% time per the smoke-test cost model) but that's a physics-
+performance question, not a dycore-scaling one.
+
 ### Iter 31 — 2026-05-27 — production-config bench: 410 Mc/s with Smagorinsky LES
 
 Replicated `run_rce_mpi_long.py` config (smag_cs=0.2, hyperdiff=5e6,
