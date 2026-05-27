@@ -117,6 +117,30 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 29 — 2026-05-27 — semi-implicit also unstable long-run
+
+Tested whether semi-implicit (vertical-implicit acoustic) is more
+production-stable than explicit. Same random-noise IC (0.001 K kick):
+
+| solver        | 200 steps      | 500+ steps |
+|---------------|----------------|------------|
+| explicit fp32 | OK, |θ'|=5e-3, |w|=0.04 | NaN by 1000 |
+| **SI fp64**   | **|θ'|=26 K, |w|=384 m/s** | NaN by 500 |
+
+SI is actually WORSE long-run than explicit — its 4× larger dt
+amplifies random-noise pumping faster. Vertical-implicit damps the
+vertical acoustic but doesn't help with horizontal gravity-wave
+amplification from broadband IC.
+
+⇒ **Both solvers fail at long integration with default config +
+random-noise IC.** The CRM dycore on f-plane needs deeper stability
+tuning regardless of acoustic scheme. Out of "minimum code production
++ scale to limit" scope.
+
+The 670-820 Mc/s explicit + 115 Mc/s SI throughput numbers are real
+**bench-grade** values. Production stability is a distinct
+validation cycle.
+
 ### Iter 28 — 2026-05-27 — long-stability fix attempt — needs dycore tuning beyond scope
 
 Tried two fixes for the 1000-step NaN:
