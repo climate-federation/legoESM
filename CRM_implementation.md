@@ -198,6 +198,65 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 175..189 (Van Leer TVD chain + production-default refresh + F11 root cause)
+
+Major dycore upgrade prompted by the iter-105 30-day diagnostic:
+
+* iter-175..178: small wrapper / doc-code locks (RANKS, 132x132 grid,
+  preamble defaults, EMIT_TRAJECTORY_PNG strict typo rejection).
+* iter-179: new ``src/legoesm/core/flux_limiters.py`` with the shared
+  Van Leer limiter (de-duplicates 2 ocean call sites); new
+  ``_van_leer_advection_x/y`` in compressible_euler_plane.py (2nd-order
+  TVD, stencil 4, monotone); driver ``--advection {upwind1, van_leer,
+  weno5}`` choices widened. Plus theta-noise IC alternative
+  (``--theta-noise-amp / --theta-noise-seed``).
+* iter-180/181: production defaults flipped dt=5 → 20 + beta=0.1 →
+  0.2; QV_NOISE briefly 0 → 1e-4 then reverted after F11 surfaced.
+  iter-180 picked WENO5 as the new production advection.
+* iter-181/182: F11 — radiation + any horizontal IC heterogeneity →
+  exponential blowup in ~30 steps. Diagnostic script
+  ``/tmp/diag_rad_qv.py`` showed the radiation tendency itself
+  responds CORRECTLY to qv perturbations (3.99e-12 K/s spread on
+  +1e-8 kg/kg noise) — the blowup is the inherent radiative-
+  convective initiation expressing itself in 250 sim-seconds
+  because dx=4 km can't resolve the convective cells once they
+  nucleate. Documented with 4 fix paths (LES at dx=1km, subgrid
+  convection scheme, smooth Gaussian Wing 2018 IC, adaptive dt) —
+  none is a one-liner.
+* iter-183: wall-time benchmark showed WENO5 at dt=20 is 1.22x
+  SLOWER than dt=10+upwind1 (2x fewer steps, 2.4x per-step cost),
+  while Van Leer at dt=20 is **3x faster**. Flipped production
+  ADVECTION default WENO5 → Van Leer. Smoke
+  test_plane_crm_dt20_van_leer_stability_smoke runs in 8.5 s.
+* iter-184: Van Leer halo path added to plane_operators_halo.py so
+  the iter-183 production default works under ``--use-dd``. New
+  ``test_van_leer_halo_equiv.py`` (6 tests, halo {2,3,4} x-axis and
+  y-axis bit-equivalence).
+* iter-185: Van Leer module docstring refresh.
+* iter-186/187/188 (Codex adversarial review): 1 HIGH + 2 LOW
+  findings. HIGH was ``--use-dd --advection van_leer`` crashed
+  because driver always built halo=1 layout. Promoted halo
+  requirements to public ``HORIZONTAL_ADVECTION_HALO_REQUIREMENT``
+  map; driver + halo dispatch both consult it. LOW#1 refreshed
+  wrapper --help text (sed range 102 → 111). LOW#2 added y-axis
+  + zero-delta grad coverage. iter-188 locked the
+  driver-consumes-shared-map pattern in CI.
+* iter-189: ``--theta-noise-amp`` added to the iter-70 non-negative
+  validator; was missing since iter-181.
+
+Cumulative production contract refresh:
+* dt: 5 → 20 (4x speedup at the same horizontal grid).
+* ADVECTION: upwind1 → Van Leer (3x wall-time speedup measured).
+* β acoustic off-centering: 0.0/0.1 → 0.2 (relaxes acoustic CFL).
+* QV_NOISE: 0.0 (reverted from iter-179's 1e-4; F11 blocks).
+
+iter-183 30-day production verification IN FLIGHT (single-rank,
+ETA ~2.6 hours from launch). Tests after iter-189: 273+ across the
+NH integration suite; 9 Van Leer serial unit tests; 6 Van Leer
+halo equivalence tests; 1 driver-consumes-map lock; 1
+HORIZONTAL_ADVECTION_HALO_REQUIREMENT lock; 1 theta-noise-amp
+rejection.
+
 ### 2026-05-27 — iter 151..173 (test-coverage hardening during iter-105 monitor)
 
 In-flight monitoring iters while iter-105 30-day run climbed
