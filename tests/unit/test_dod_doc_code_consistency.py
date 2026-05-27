@@ -145,6 +145,30 @@ def test_dod_quotes_plateau_window_in_days():
     )
 
 
+def test_dod_quotes_final_dod_min_days():
+    """iter-171: ``DOD_FINAL_MIN_DAYS = 30`` is the minimum
+    trajectory length below which evaluate_rce_final_dod returns
+    INSUFFICIENT. The DOD section must reference ``30-day`` (or
+    ``30 day``) somewhere in criterion 2's text so the
+    production-window length is unambiguous.
+
+    Pre iter-171 only DOD_FINAL_MSE_DRIFT (1 %) was locked; the
+    30-day MIN_DAYS could drift silently (e.g. to 14 / 60) without
+    a doc update.
+    """
+    mod = _load_summarizer_module()
+    crit2 = _read_criterion_2_text()
+    n_days = mod.DOD_FINAL_MIN_DAYS
+    # ``30-day`` or ``30 day`` (singular / plural) both accepted.
+    pat = rf"\b{n_days}[-\s]days?\b"
+    assert re.search(pat, crit2), (
+        f"DOD criterion 2 must reference the active minimum "
+        f"trajectory length DOD_FINAL_MIN_DAYS = {n_days} days "
+        f"(as '{n_days}-day' or '{n_days} day(s)'). criterion 2 "
+        f"does not match pattern {pat!r}."
+    )
+
+
 def test_dod_quotes_final_dod_mse_drift():
     """iter-158: ``DOD_FINAL_MSE_DRIFT = 0.01`` is the production
     final-DOD gate (criterion 2's tighter end-of-run check). DOD
