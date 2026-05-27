@@ -45,6 +45,24 @@ def test_run_rce_smoke_stretched_3_step_smoke(tmp_path):
     dt=1 s + n_acoustic=24 to satisfy the script's per-substep
     acoustic CFL guard). Verifies the full RCE stack composes
     cleanly + emits the documented diagnostic columns.
+
+    iter-272 (Codex iter-271 round-1) design-choice notes:
+    * HIGH#3 — this is a WIRING SMOKE not a production-contract
+      guard. dt=1/n_acoustic=24 ≠ iter-183 contract
+      (dt=20/n_acoustic=12). Production-contract regressions
+      are covered by the iter-230
+      ``test_plane_crm_iter183_production_scale_132x132_envelope``
+      slow test at 132x132x30. This wiring smoke runs in O(3 s)
+      and catches IC build + factory dispatch + diagnostic
+      emission regressions.
+    * HIGH#1 — no-op dycore detection is intentionally NOT in
+      scope at the rest-state IC. With u=v=w=θ'=0 + mass fixer
+      ON, a no-op step is functionally indistinguishable from a
+      real step (CWV/MSE/cloud/precip all stay at IC values).
+      The iter-256 wall-time floor (>1e-4 s) doesn't apply: the
+      script doesn't emit a wall-time field. Catching no-op
+      would require non-rest IC + tracking state-change
+      magnitude, which is out of scope for this wiring smoke.
     """
     out_file = tmp_path / "rce_stretched_smoke.txt"
     result = run_bench(SCRIPT, [
@@ -99,18 +117,27 @@ def test_run_rce_smoke_stretched_3_step_smoke(tmp_path):
             f"t[s] mismatch at step {i}: got {p['t_s']}, "
             f"expected {(i+1) * 1.0}"
         )
-    # CWV_mean must be positive + ~Wing-2018-IC for 6x6x12 at
-    # 50m surface dz (script's default vertical grid). Empirical
-    # measurement: ~6.15e+01 kg/m^2.
+    # iter-272 (Codex iter-271 round-1 HIGH#2): tightened CWV
+    # bound. The Wing 2018 RCEMIP IC at 6x6x12 on the stretched
+    # grid (50 m surface dz, H=20 km) measures
+    # CWV_mean = 6.1526e+01 kg/m^2 empirically. With the moist
+    # mass fixer ON + rest IC, the value stays bit-identical
+    # across all 3 logged steps. Tight bound (55, 70) catches a
+    # ~10% IC-profile regression (e.g. Wing coefficient shift)
+    # while tolerating ~3% fp32 vs fp64 numerical drift.
     for p in parsed:
-        assert 1.0 < p["cwv"] < 200.0, (
-            f"CWV_mean={p['cwv']} outside (1, 200) kg/m^2 range; "
-            f"Wing 2018 IC expected ~60 kg/m^2."
+        assert 55.0 < p["cwv"] < 70.0, (
+            f"CWV_mean={p['cwv']} outside (55, 70) kg/m^2 — Wing "
+            f"2018 IC expected ~61.5 kg/m^2 at 6x6x12 stretched; "
+            f">10% drift indicates an IC-profile or mass-fixer "
+            f"regression."
         )
-    # MSE_mean positive + finite.
+    # MSE_mean tightened similarly. Empirical baseline: 3.3158e+09
+    # J/m^2 on the stretched 6x6x12 grid.
     for p in parsed:
-        assert 1e9 < p["mse"] < 1e10, (
-            f"MSE_mean={p['mse']} outside (1e9, 1e10) J/m^2 range."
+        assert 3.0e9 < p["mse"] < 3.6e9, (
+            f"MSE_mean={p['mse']} outside (3.0e9, 3.6e9) J/m^2 — "
+            f"empirical baseline 3.32e9 on this grid."
         )
     # Acoustic Courant C_a_max < 1.0 (script's --acoustic-cfl-max
     # default). Catches a regression where the per-substep CFL
