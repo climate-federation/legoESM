@@ -648,6 +648,14 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         self.sigma_coord = sigma_coord
         self.config = config or CGridLatLonPrimitiveEquationConfig()
 
+        # Stash the constructor ``dt`` so callers downstream (notably
+        # ``make_latlon_mpi_step`` rebuilding an MPI-aware model) can
+        # recover it without falling back to the pole-cell ``_max_dt``
+        # — Codex review Stage 3-E round 3 BLOCK caught the fallback
+        # silently using ``_max_dt`` on direct-construction paths
+        # where ``component_factory`` did not set ``effective_dt``.
+        self.dt = float(dt)
+
         # Pole-cell CFL limit: dx_pole is the smallest cell on the grid.
         dx_pole = pole_cell_dx(grid)
         self._max_dt = cfl_max_dt(dx_pole, 300.0, cfl_number=0.8, ndim=1)

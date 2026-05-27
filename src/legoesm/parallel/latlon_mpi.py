@@ -959,6 +959,13 @@ def slice_latlon_grid_to_band(grid, layout: LatLonBandLayout):
         lon2d=grid.lon2d[s:e, :],
         cos_lat=grid.cos_lat[s:e],
         sin_lat=grid.sin_lat[s:e],
+        # v-face arrays span ``[lat_start, lat_end+1)`` so each rank
+        # holds the v-face row shared with its northern neighbour.
+        # Matches the v-state-array slicing in ``scatter_state_latlon``.
+        # Without this, the polar-filter v-face mask would be sized
+        # against the GLOBAL v-face axis on every rank.
+        lat_v=grid.lat_v[s:e + 1],
+        cos_lat_v=grid.cos_lat_v[s:e + 1],
         dy=grid.dy[s:e],
         f=grid.f[s:e, :],
         dx=grid.dx[s:e, :],

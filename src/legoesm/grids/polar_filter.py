@@ -65,20 +65,17 @@ def compute_polar_filter_mask(
     cfl_limit = jnp.sqrt(3.0) * safety_factor
 
     if is_v_face:
-        # v-face: shape (n_lat+1,).  ``grid.cos_lat_v`` is zero at the
-        # global poles by construction (wall BC in regular lat-lon).
-        # lat_v = (lat[:-1] + lat[1:]) / 2 in the interior, ±π/2 at
-        # the global poles.  Use ``arcsin(sin(lat_v))`` would be
-        # exact, but here we mirror the construction in
-        # ``create_latlon_grid``.
+        # v-face: read the precomputed ``grid.lat_v`` and
+        # ``grid.cos_lat_v`` arrays directly.  These were placed at
+        # ``LatLonGrid``-construction time using the cell-axis ``lat``
+        # available at the call site — so under MPI band decomposition
+        # the rank-local grid carries the rank-local v-face arrays
+        # (length ``n_lat_local+1``).  A previous implementation
+        # reconstructed the v-face axis with ``±π/2`` padding which
+        # silently broke interior ranks; Codex review Stage 3-E
+        # round 3 caught that regression.
         cos_lat_face = grid.cos_lat_v
-        # Interior lat-face values, then pad with ±π/2 at the poles.
-        lat_v_interior = 0.5 * (grid.lat[:-1] + grid.lat[1:])
-        lat_face = jnp.concatenate([
-            jnp.asarray([-jnp.pi / 2.0]),
-            lat_v_interior,
-            jnp.asarray([jnp.pi / 2.0]),
-        ])
+        lat_face = grid.lat_v
     else:
         cos_lat_face = grid.cos_lat
         lat_face = grid.lat

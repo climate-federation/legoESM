@@ -427,15 +427,32 @@ class TestStage12Guardrails:
         )
         model = CGridLatLonPrimitiveEquationModel(grid, sigma, cfg)
         step_fn = make_latlon_mpi_step(model, single_rank_layout, halo=2)
-        # The step_fn must be callable — exercising it would JIT-
-        # compile the dycore which is too expensive for a serial
-        # guardrail; the cheap callable-check is enough to prove the
-        # NotImplementedError gate is gone.
         assert callable(step_fn), (
             "make_latlon_mpi_step must return a callable when "
             "use_polar_filter=True; got "
             f"{type(step_fn).__name__}"
         )
+        # Additionally pin the mask shapes — a regression that
+        # returns a step_fn whose internal model was built with the
+        # wrong dt (and therefore the wrong-size or zero mask) would
+        # silently fail every step under load.  Exposed via the
+        # closed-over ``mpi_model`` on the step_fn closure.
+        mpi_model = step_fn.__closure__[0].cell_contents
+        # ``mpi_model`` is the rebuilt CGridLatLonPrimitiveEquationModel
+        # inside make_latlon_mpi_step; its ``_polar_mask`` and
+        # ``_polar_mask_v`` must be non-None and properly shaped.
+        assert mpi_model._polar_mask is not None, (
+            "MPI model rebuilt by make_latlon_mpi_step is missing the "
+            "cell-centered polar filter mask."
+        )
+        assert mpi_model._polar_mask_v is not None, (
+            "MPI model rebuilt by make_latlon_mpi_step is missing the "
+            "v-face polar filter mask."
+        )
+        # Mask shapes match the rank-local band on the single-rank
+        # layout (which is the entire grid).
+        assert mpi_model._polar_mask.shape == (grid.n_lat, grid.n_lon // 2 + 1)
+        assert mpi_model._polar_mask_v.shape == (grid.n_lat + 1, grid.n_lon // 2 + 1)
 
 
 # ---------------------------------------------------------------------------

@@ -93,6 +93,13 @@ def band_grid(global_grid, layout):
         lon2d=global_grid.lon2d[s:e, :],
         cos_lat=global_grid.cos_lat[s:e],
         sin_lat=global_grid.sin_lat[s:e],
+        # v-face: span [s, e+1) so band carries one extra row at the
+        # northern boundary (shared with neighbour rank).  Without
+        # this slice the band grid would carry the GLOBAL v-face
+        # axis → polar-filter v-face mask would mismatch the global
+        # slice on every interior rank.
+        lat_v=global_grid.lat_v[s:e + 1],
+        cos_lat_v=global_grid.cos_lat_v[s:e + 1],
         dy=global_grid.dy[s:e],
         f=global_grid.f[s:e, :],
         dx=global_grid.dx[s:e, :],

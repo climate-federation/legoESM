@@ -148,6 +148,14 @@ def _make_local_model(global_grid, sigma, serial_config, layout):
         lon2d=band_lon2d,
         cos_lat=band_cos_lat,
         sin_lat=band_sin_lat,
+        # v-face arrays span ``[s, e+1)`` — one extra row at the
+        # northern boundary (shared with neighbour rank).  Stage 3-E:
+        # the polar filter builds its v-face mask from these, so the
+        # band slice must carry the rank-local v-face metric, not the
+        # global one.  Same convention as
+        # ``slice_latlon_grid_to_band``.
+        lat_v=global_grid.lat_v[s:e + 1],
+        cos_lat_v=global_grid.cos_lat_v[s:e + 1],
         dy=band_dy,
         f=band_f,
         dx=band_dx,
