@@ -213,6 +213,18 @@ def test_qv_noise_seed_default(driver_defaults):
     assert driver_defaults["--qv-noise-seed"] == 0
 
 
+def test_theta_noise_defaults(driver_defaults):
+    """iter-181 added --theta-noise-amp / --theta-noise-seed for the
+    RCEMIP / Wing 2018 standard theta' symmetry-breaker. Default
+    0.0 = clean Wing IC (no perturbation). F11 documents why even
+    non-zero theta' noise is not yet a recommended path. Lock the
+    defaults so the iter-181 alternative-symmetry-breaker entry
+    point cannot silently activate at production scale.
+    """
+    assert driver_defaults["--theta-noise-amp"] == 0.0
+    assert driver_defaults["--theta-noise-seed"] == 0
+
+
 # iter-64: cover the snapshot/profile/log cadence defaults. iter-61
 # added the wrapper-side hardcoded values (--snapshot-hours 24.0,
 # --profile-days 5.0, --log-every-steps 100) as parametric
