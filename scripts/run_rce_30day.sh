@@ -253,9 +253,10 @@ if [ "$EVALUATE_DOD" != "final" ] && [ "${DAYS%.*}" -ge 30 ] 2>/dev/null; then
     echo "  To grade the trajectory against the final DOD criterion 2"
     echo "  (Wing 2018 plateau, 1 % MSE drift over last 10 days), run:"
     echo "    $PYBIN scripts/summarize_rce_trajectory.py \\"
-    echo "      $OUTPUT --final-dod"
-    echo "  Or re-launch this wrapper with EVALUATE_DOD=final to gate"
-    echo "  on the verdict (non-zero exit on FAIL)."
+    echo "      $OUTPUT --final-dod --check-log-max-w"
+    echo "  Or re-launch this wrapper with EVALUATE_DOD=final and"
+    echo "  CHECK_LOG_MAX_W=1 to gate on BOTH DOD criteria (1 + 2)"
+    echo "  (non-zero exit on FAIL)."
 fi
 
 # iter-125 / iter-126: optional trajectory PNG via plot_rce_log.py.

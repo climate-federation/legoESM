@@ -713,6 +713,15 @@ def test_wrapper_prints_final_dod_hint_on_30day_default(tmp_path):
         f"stdout={res.stdout!r}"
     )
     assert "--final-dod" in res.stdout
+    # iter-141: hint must also mention --check-log-max-w (criterion 1
+    # gate landed iter-137/138). Pre-iter-141 the hint only covered
+    # criterion 2 (plateau / MSE drift), leaving criterion 1
+    # (max|w|) silently un-checked on 30-day production runs.
+    assert "--check-log-max-w" in res.stdout, (
+        f"hint should mention --check-log-max-w so users gate "
+        f"BOTH DOD criteria; stdout={res.stdout!r}"
+    )
+    assert "CHECK_LOG_MAX_W=1" in res.stdout
 
 
 def test_wrapper_no_hint_on_short_run(tmp_path):
