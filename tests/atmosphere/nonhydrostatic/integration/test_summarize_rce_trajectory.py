@@ -577,6 +577,29 @@ def test_final_dod_constants_locked():
     assert summary_mod.DOD_FINAL_MIN_DAYS == 30
 
 
+def test_final_dod_fails_on_transient_nan_cwv_outside_plateau_window():
+    """iter-161 companion: criterion 1 (finite CWV everywhere) is
+    full-window scoped. A 30-day trajectory whose last 10 days are
+    a perfect plateau but with a single NaN CWV at day 5 MUST FAIL
+    the final-DOD gate. Closes the third scoping case (CWV plateau
+    vs CWV finite vs |U|_sfc) so all three docstring claims at
+    summarize_rce_trajectory.py:695-703 are independently locked.
+    """
+    rows = []
+    for i in range(30):
+        cwv = 55.0 + 0.01 * (i % 3 - 1)
+        if i == 5:
+            cwv = float("nan")
+        rows.append(_row(float(i), cwv_mean=cwv, cwv_max=cwv))
+    verdict = summary_mod.evaluate_rce_final_dod(rows)
+    assert not verdict.passed, (
+        f"final-DOD must FAIL on a day-5 NaN CWV even with a "
+        f"perfect last-10-day plateau. reasons: {verdict.reasons!r}"
+    )
+    assert any("non-finite CWV" in r for r in verdict.reasons)
+    assert verdict.evaluated
+
+
 def test_final_dod_fails_on_transient_wind_blowup_outside_plateau_window():
     """iter-160 companion: evaluate_rce_final_dod's docstring
     (summarize_rce_trajectory.py:700-702) promises the
