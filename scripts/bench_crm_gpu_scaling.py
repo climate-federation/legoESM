@@ -272,18 +272,24 @@ def main() -> int:
                 allow_unsafe_cfl=args.allow_unsafe_cfl,
                 repeat=args.repeat,
             )
-            # HBM utilization estimate: dtype-aware bytes/cell-level × passes.
-            # Passes = 3 RK3 stages × (1 slow_tend + n_substeps), each
-            # touches ~5 prognostic fields read+write with ~2× intermediate
-            # overhead: 5 × dtype_bytes × 2 read+write × 2 intermediate
-            # = 20 × dtype_bytes. fp32 → 80 B/cell-lev; fp64 → 160 B/cell-lev.
-            # Use 730 GB/s as consumer-mobile RTX 5090 sustained ceiling
-            # (advertised peak 960 GB/s; ~76% sustained typical).
+            # HBM utilization estimate — TWO bounds:
+            #   - upper: 20 × dtype_bytes per cell-lev × passes (per-kernel
+            #     full-state materialization, no L2 reuse)
+            #   - lower: 6 × dtype_bytes per cell-lev × passes (only 3
+            #     prognostic fields read+write per substep, full state per
+            #     slow_tend), assuming aggressive XLA fusion + L2 reuse
+            # True HBM traffic is between these. Report the upper bound
+            # (matches the way roofline models typically count traffic) but
+            # this is a relative-not-absolute indicator. Reference ceiling
+            # 730 GB/s = consumer-mobile RTX 5090 sustained.
             dtype_bytes = 4 if args.precision == "float32" else 8
-            bytes_per_cell_lev = 20 * dtype_bytes
             passes_per_step = 3 * (1 + args.n_acoustic_substeps)
-            bw_used = (r.mcells_per_s * 1e6 * bytes_per_cell_lev
-                       * passes_per_step / 1e9)
+            bw_upper = (r.mcells_per_s * 1e6 * 20 * dtype_bytes
+                        * passes_per_step / 1e9)
+            bw_lower = (r.mcells_per_s * 1e6 * 6 * dtype_bytes
+                        * passes_per_step / 1e9)
+            # Display upper bound; if user wants lower-bound, see doc.
+            bw_used = bw_upper
             hbm_pct = 100.0 * bw_used / 730.0
             print(f"  N{n:>4d} cells={r.total_cells:>10,}  "
                   f"compile={r.compile_time_s:6.2f}s  "

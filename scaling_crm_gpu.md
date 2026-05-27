@@ -117,6 +117,33 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 77 — 2026-05-27 — HBM accounting honesty
+
+The bench's HBM-utilization formula uses `20 × dtype_bytes` per
+cell-level × `passes_per_step` (= 3 RK3 × (1 slow_tend + n_substeps)).
+At fp32 nsub=6 N=128, this yields the reported "96% HBM".
+
+This model is an **upper bound** on HBM traffic — it assumes every
+"pass" materializes full state to HBM with no cross-kernel L2 reuse.
+A **lower-bound** model (only-state-fields-read-once-write-once,
+ignoring intermediates) gives ~3× less traffic and would yield
+"~35% HBM" for the same throughput.
+
+True HBM traffic is somewhere between these bounds depending on
+XLA's actual fusion + L2 reuse decisions. Without NVIDIA Nsight or
+similar GPU profiler we can't pin the exact number.
+
+**What's actually true:**
+- Cumulative iter-66 → iter-71 throughput gain at N=128 fp32 is
+  **measured** at +52% (276 → 420 Mc/s). This is the headline win.
+- PCR replacing cuSPARSE eliminates 18 custom_call boundaries per
+  step, enabling XLA fusion across substep work.
+- At larger N the throughput drops (N=256 → 307 Mc/s; N=384 → 167)
+  consistent with L2-cache spill (state size > L2 at N≥256).
+
+**The HBM %% in bench output should be read as a RELATIVE indicator
+of memory-boundedness across runs, not an absolute claim.**
+
 ### Iter 74 — 2026-05-27 — bench `--check-tridiag-backends` + fp64 PCR win
 
 Added `--check-tridiag-backends` flag to
