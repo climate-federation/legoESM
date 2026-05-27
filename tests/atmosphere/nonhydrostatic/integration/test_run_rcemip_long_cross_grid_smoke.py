@@ -39,6 +39,7 @@ dominates; the 1-step physics-off run is negligible).
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -142,56 +143,60 @@ def test_run_rcemip_long_cross_grid_moist_smoke(tmp_path, grid):
         f"history JSON label={doc.get('label')!r}, expected "
         f"{grid}_moist."
     )
-    # Last history row diag fields finite + present.
+    # iter-279 (Codex iter-278 round-4 HIGH + MEDIUM): extend the
+    # per-row finite + schema validation to ALL diag fields across
+    # ALL history rows. iter-278 only validated max_qv/min_qv; a
+    # transient NaN in max_w / min_th / max_th on an early row
+    # that recovered by the last row would have slipped through.
+    # Also validate ``step`` is a true integer (JSON values like
+    # 1.5 or "1" would otherwise be silently truncated/coerced).
     history_rows = doc["history"]
     assert len(history_rows) >= 2
+    _DIAG_COLUMNS = ("max_w", "min_th", "max_th", "min_qv", "max_qv")
+    for row in history_rows:
+        # step schema lock — must be an integer (not float/str).
+        step_val = row.get("step")
+        assert isinstance(step_val, int) and not isinstance(step_val, bool), (
+            f"history row step={step_val!r} not a true int "
+            f"(type={type(step_val).__name__}). "
+            f"JSON 1.5 or \"1\" would slip past int() coercion."
+        )
+        for col in _DIAG_COLUMNS:
+            assert col in row, (
+                f"history row step={step_val} missing column {col!r}."
+            )
+            val = row[col]
+            assert isinstance(val, (int, float)) and not isinstance(val, bool), (
+                f"history row step={step_val} {col}={val!r} not numeric."
+            )
+            assert math.isfinite(val), (
+                f"history row step={step_val} {col}={val} non-finite "
+                f"(NaN/Inf) — physics_fn emitted invalid tendency."
+            )
     last = history_rows[-1]
-    for col in ("max_w", "min_th", "max_th", "min_qv", "max_qv"):
-        assert col in last
-        v = last[col]
-        assert isinstance(v, (int, float)) and v == v
     # iter-276 (Codex iter-275 round-1 LOW): tightened q_v upper
     # bound. IC max q_v = Q_V_SFC * exp(-z/4000) at z=1 km
     # ~ 0.012 * 0.78 ~ 9.35e-3. The iter-275 bound 0.05 was 5x
     # over IC.
     # iter-277 (Codex iter-276 round-2 MEDIUM-1): scan ALL rows.
-    # iter-278 (Codex iter-277 round-3 HIGH + MEDIUM):
-    #   * Validate every row's q_v fields are PRESENT + FINITE
-    #     BEFORE computing max/min — Python's max() skips NaN
-    #     silently depending on order, so a transient NaN
-    #     spike could otherwise leave a finite run-wide max +
-    #     pass the bound.
-    #   * Track which step produced the worst q_v so the
-    #     failure message points the dev at the right row.
-    import math as _math
-    per_step_qv = []
-    for row in history_rows:
-        for col in ("max_qv", "min_qv"):
-            assert col in row, (
-                f"history row at step={row.get('step')!r} missing "
-                f"required column {col!r}."
-            )
-            val = row[col]
-            assert isinstance(val, (int, float)), (
-                f"history row step={row.get('step')!r} {col}={val!r} "
-                f"is not numeric."
-            )
-            assert _math.isfinite(val), (
-                f"history row step={row.get('step')!r} {col}={val} "
-                f"is non-finite (NaN/Inf) — physics_fn emitted "
-                f"non-finite tendency."
-            )
-        per_step_qv.append((
-            int(row["step"]),
-            float(row["max_qv"]),
-            float(row["min_qv"]),
-        ))
-    worst_max_step, worst_max_qv, _ = max(
-        per_step_qv, key=lambda t: t[1],
-    )
-    worst_min_step, _, worst_min_qv = min(
-        per_step_qv, key=lambda t: t[2],
-    )
+    # iter-278 (Codex iter-277 round-3): NaN-safe + offending-step.
+    # iter-279 (Codex iter-278 round-4 LOW#2): single-pass scan
+    # for both extremes. The finite-check loop above already
+    # ensured every q_v value is finite + numeric; no need to
+    # re-validate here.
+    worst_max_step = history_rows[0]["step"]
+    worst_max_qv = float(history_rows[0]["max_qv"])
+    worst_min_step = history_rows[0]["step"]
+    worst_min_qv = float(history_rows[0]["min_qv"])
+    for row in history_rows[1:]:
+        qv_max = float(row["max_qv"])
+        qv_min = float(row["min_qv"])
+        if qv_max > worst_max_qv:
+            worst_max_qv = qv_max
+            worst_max_step = row["step"]
+        if qv_min < worst_min_qv:
+            worst_min_qv = qv_min
+            worst_min_step = row["step"]
     assert 0.0 <= worst_max_qv < 0.015, (
         f"max_qv over the run = {worst_max_qv} at step "
         f"{worst_max_step} outside (0, 0.015) — IC max ~9.35e-3 "
