@@ -72,6 +72,7 @@ _SFC_CLI_RANGES = {
 _CUBED_ONLY_ATTRS = (
     "n_cubed_sphere",
     "cubed_n_acoustic", "cubed_coriolis", "cubed_fix_mass",
+    "cubed_convection",
 )
 # iter-309: shared surface-flux attrs used by BOTH cubed-sphere
 # + MPAS moist paths. Validation runs for any grid that uses
@@ -287,7 +288,8 @@ def _compose_nh_moist_physics(model_type: str, dt: float,
                               sfc_Cd: float = 1.0e-3,
                               sfc_Ch: float = 1.0e-3,
                               sfc_T: float = 300.0,
-                              sfc_q: float = 0.018):
+                              sfc_q: float = 0.018,
+                              convection_scheme: str = "none"):
     """iter-275/283: compose Kessler microphysics + gray radiation
     (+ optional surface flux) into a single physics_fn that the
     non-hydrostatic dycores (cubed-sphere, MPAS NH) can pass to
@@ -364,6 +366,31 @@ def _compose_nh_moist_physics(model_type: str, dt: float,
                 Cd=sfc_Cd, Ch=sfc_Ch, T_sfc=sfc_T, q_sfc=sfc_q,
             )
 
+    # iter-314: opt-in sub-grid convection scheme. Only supported
+    # for cubed-sphere today — make_convection_physics has a
+    # 'nonhydrostatic' branch (iter-275 model_type) but no
+    # 'mpas_nh' branch. MPAS convection would need a separate
+    # factory.
+    conv_fn = None
+    if convection_scheme != "none":
+        if model_type != "nonhydrostatic":
+            raise ValueError(
+                f"_compose_nh_moist_physics: convection_scheme="
+                f"{convection_scheme!r} only supported for "
+                f"model_type='nonhydrostatic' (cubed-sphere) today; "
+                f"got model_type={model_type!r}."
+            )
+        from legoesm.atmosphere.physics.convection.config import (
+            ConvectionConfig,
+        )
+        from legoesm.atmosphere.physics.convection.integration import (
+            make_convection_physics,
+        )
+        conv_fn = make_convection_physics(
+            ConvectionConfig(scheme=convection_scheme),
+            model_type=model_type, dt=dt,
+        )
+
     def physics_fn(*args, **kwargs):
         # Both factories return tendency callables with identical
         # *pytree shapes* but distinct Field-name metadata. Sum at
@@ -390,6 +417,16 @@ def _compose_nh_moist_physics(model_type: str, dt: float,
                     f"— contract mismatch."
                 )
             summed = [a + b for a, b in zip(summed, leaves_s)]
+        if conv_fn is not None:
+            t_conv = conv_fn(*args, **kwargs)
+            leaves_c = jax.tree_util.tree_leaves(t_conv)
+            if len(leaves_c) != len(summed):
+                raise ValueError(
+                    f"_compose_nh_moist_physics: convection tendency "
+                    f"has {len(leaves_c)} leaves vs combined "
+                    f"{len(summed)} — contract mismatch."
+                )
+            summed = [a + b for a, b in zip(summed, leaves_c)]
         return jax.tree_util.tree_unflatten(treedef, summed)
 
     return physics_fn
@@ -578,7 +615,8 @@ def _run_cubed_sphere(days: float, dt: float, print_every: int, output: Path,
                       sfc_T: float = 300.0, sfc_q: float = 0.018,
                       n_acoustic: int | None = None,
                       coriolis: str | None = None,
-                      fix_mass: str | None = None):
+                      fix_mass: str | None = None,
+                      convection_scheme: str = "none"):
     from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
         CDGridCompressibleEulerConfig, CDGridCompressibleEulerModel,
     )
@@ -675,6 +713,7 @@ def _run_cubed_sphere(days: float, dt: float, print_every: int, output: Path,
             with_surface_flux=True,
             sfc_Cd=sfc_Cd, sfc_Ch=sfc_Ch,
             sfc_T=sfc_T, sfc_q=sfc_q,
+            convection_scheme=convection_scheme,
         )
     else:
         physics_fn = None
@@ -957,6 +996,27 @@ def main():
         "when --no-moist, 'on' when --moist (matches iter-183 "
         "plane CRM contract).",
     )
+    # iter-314: opt-in sub-grid convection scheme for the cubed-
+    # sphere moist composition. iter-284/286/287/308 confirmed
+    # the 30-day stability barrier is gridscale convection
+    # unresolved at C4..C12. Adding a sub-grid convection
+    # parameterization stabilizes coarse-mesh moist runs without
+    # needing HPC compute. 'none' (default) preserves the
+    # iter-275 composition (Kessler-only moist).
+    p.add_argument(
+        "--cubed-convection",
+        choices=["none", "kuo", "sbm", "dca", "mass_flux", "edmf",
+                 "zhang_mcfarlane", "kain_fritsch", "emanuel",
+                 "tiedtke", "bechtold"],
+        default="none",
+        help="iter-314: cubed-sphere sub-grid convection scheme "
+        "for --moist runs. 'none' (default) = Kessler-only moist "
+        "(iter-275 baseline). Choices match the legoesm convection "
+        "scheme registry. Cluster users tackling 30-day stability "
+        "at coarse mesh should try 'kuo' (simplest mass-flux) or "
+        "'tiedtke' (production-grade). Ignored for non-cubed-sphere "
+        "grids.",
+    )
     args = p.parse_args()
 
     dispatch = {
@@ -1045,6 +1105,8 @@ def main():
         common_kwargs["n_acoustic"] = args.cubed_n_acoustic
         common_kwargs["coriolis"] = args.cubed_coriolis
         common_kwargs["fix_mass"] = args.cubed_fix_mass
+        # iter-314: convection scheme forward.
+        common_kwargs["convection_scheme"] = args.cubed_convection
     elif args.grid == "mpas":
         # iter-309 (Codex iter-307/308 round-1 HIGH): MPAS now
         # accepts the shared --sfc-* CLI flags (forwarded into
