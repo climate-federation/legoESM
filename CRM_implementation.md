@@ -625,14 +625,20 @@ nightly regression — ``CWV drift < 0.01`` is the tight gate that
 catches a regression in the mass-fixer or surface-flux pipeline
 without needing a multi-day run.
 
-**iter-66 NaN silent-pass fix** (Codex HIGH): the shared
-``_assert_max_wind_peak_below`` helper used a ``max < cap``
-comparison that silently PASSES on NaN because ``NaN < cap`` is
-False... but so is ``NaN >= cap``, so the negation also rules.
-The helper was checking ``not (max >= cap)`` which evaluates True
-on NaN (NaN >= cap → False → not False = True). Fix: assert
-``math.isfinite(max)`` first; NaN now raises instead of
-silently passing the CFL gate.
+**iter-66 NaN silent-pass fix** (Codex HIGH on
+``tests/atmosphere/hydrostatic/_rce_helpers.py:_assert_max_wind_peak_below``):
+the helper iterates rows of ``mean_timeseries.csv`` with
+``peak_v = max(peak_v, abs(float(row["max_wind"])))``, then
+``assert peak_v < cap``. The masking bug: ``float("nan")``
+parses successfully but in CPython ``max(0.0, nan) == 0.0``
+(NaN-naive comparison). So a NaN max_wind row left ``peak_v`` at
+its prior value — usually 0.0 — and the final ``assert`` passed
+vacuously. Fix: explicit ``if math.isnan(val): continue`` skip
+inside the loop + ``seen_max_wind`` tracker so an all-NaN /
+empty timeseries fails the assertion instead. iter-87 refined the
+fix: the initial ``not isfinite`` guard wrongly skipped ``inf``
+too (a real CFL-blowup signal that the cap check should fire
+on); narrowed to ``isnan`` only.
 
 **Production driver CLI input validation (iter-65..iter-75)** —
 defense-in-depth across BOTH plane-CRM driver

@@ -623,10 +623,31 @@ def test_detect_stuck_trajectory_flags_pinned_cwv():
     stuck, reason = summary_mod.detect_stuck_trajectory(rows)
     assert stuck is True
     assert reason is not None
-    assert "stuck" in reason
+    assert "pinned" in reason
     assert "Bug 2" in reason, (
         f"reason should reference Bug 2 for future debuggers; "
         f"got {reason!r}"
+    )
+
+
+def test_detect_stuck_trajectory_late_equilibrium_not_flagged():
+    """iter-118 Codex HIGH fix: a real late-equilibrium plateau
+    where CWV drift falls below 0.001 mm/day in the LATE part of a
+    30-day run must NOT trip the stuck gate. The pre-iter-118
+    sliding-window implementation false-positived here. The fix
+    scopes the check to the LEADING window only — Bug 2 always
+    pins CWV from day 0 onward."""
+    # Days 0-9: spinup (49.94 → 56.55 mm, ~0.7 mm/day average drift).
+    # Days 10-29: late equilibrium plateau with sub-tolerance drift.
+    spinup = [49.94, 50.5, 51.3, 52.2, 53.6, 55.0, 56.0, 56.3, 56.4, 56.5]
+    late_equilibrium = [56.5000 + 0.0001 * (i % 3 - 1) for i in range(20)]
+    cwv = spinup + late_equilibrium
+    rows = [_row(float(i), cwv_mean=v, cwv_max=v) for i, v in enumerate(cwv)]
+    stuck, reason = summary_mod.detect_stuck_trajectory(rows)
+    assert stuck is False, (
+        f"Late equilibrium with sub-tolerance drift must NOT trip "
+        f"the stuck gate (false positive would chase a non-bug). "
+        f"reason={reason!r}"
     )
 
 
@@ -671,14 +692,41 @@ def test_stuck_detector_constants_locked():
 def test_evaluate_quality_wires_stuck_detector():
     """iter-117: evaluate_rce_quality must flag a stuck trajectory
     as a FAIL reason. The full evaluator should catch Bug 2
-    regressions END-TO-END, not just via a separate diagnostic."""
+    regressions END-TO-END, not just via a separate diagnostic.
+
+    iter-118: stuck reason now says ``pinned`` (was ``stuck``)."""
     rows = [
         _row(float(i), cwv_mean=49.9413, cwv_max=49.9413)
         for i in range(12)
     ]
     verdict = summary_mod.evaluate_rce_quality(rows)
     assert not verdict.passed
-    assert any("stuck" in r for r in verdict.reasons), (
+    assert any("pinned" in r for r in verdict.reasons), (
         f"evaluate_rce_quality should surface the stuck detector's "
         f"reason; got {verdict.reasons!r}"
+    )
+
+
+def test_evaluate_quality_check_stuck_opt_out():
+    """iter-118 Codex MEDIUM#1 fix: ``check_stuck=False`` lets
+    callers run only the plateau gates without the leading-window
+    stuck check. Useful when comparing two known-equilibrated
+    trajectories where the leading window is intentionally
+    constant (e.g. a continuation from the same restart)."""
+    rows = [
+        _row(0.0, cwv_mean=49.9413, cwv_max=49.9413),
+        _row(1.0, cwv_mean=49.9413, cwv_max=49.9413),
+        _row(2.0, cwv_mean=49.9413, cwv_max=49.9413),
+    ]
+    # Default: stuck-detect fires.
+    on_verdict = summary_mod.evaluate_rce_quality(rows)
+    assert any("pinned" in r for r in on_verdict.reasons)
+    # Opt-out: stuck-detect skipped; reasons may still list other
+    # failures (CWV out of range etc.) but NOT the pinned reason.
+    off_verdict = summary_mod.evaluate_rce_quality(
+        rows, check_stuck=False,
+    )
+    assert not any("pinned" in r for r in off_verdict.reasons), (
+        f"check_stuck=False must suppress the pinned-CWV reason; "
+        f"got {off_verdict.reasons!r}"
     )

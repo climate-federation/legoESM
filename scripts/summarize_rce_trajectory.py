@@ -311,6 +311,7 @@ def evaluate_rce_quality(
     max_w_threshold_ms: float = DEFAULT_MAX_W_THRESHOLD_MS,
     mse_relative_drift: float = DEFAULT_MSE_RELATIVE_DRIFT,
     last_n_days_for_plateau: int = DEFAULT_LAST_N_DAYS_FOR_PLATEAU,
+    check_stuck: bool = True,
 ) -> QualityVerdict:
     """Evaluate an RCE trajectory against the production DOD criteria.
 
@@ -360,12 +361,15 @@ def evaluate_rce_quality(
         reasons.append(
             f"non-finite |U|_sfc on day(s) {nonfinite_w!r}"
         )
-    # iter-117: stuck-trajectory detector — surfaces pre-iter-95
-    # Bug 2 regressions (CWV pinned at IC by unconditional mass
-    # fixer).
-    stuck, stuck_reason = detect_stuck_trajectory(rows)
-    if stuck:
-        reasons.append(stuck_reason)  # type: ignore[arg-type]
+    # iter-117 / iter-118: stuck-trajectory detector — surfaces
+    # pre-iter-95 Bug 2 regressions (CWV pinned at IC by
+    # unconditional mass fixer). iter-118 opt-out for callers that
+    # only want the plateau gates (e.g. comparing two equilibrated
+    # trajectories where the leading window matters less).
+    if check_stuck:
+        stuck, stuck_reason = detect_stuck_trajectory(rows)
+        if stuck:
+            reasons.append(stuck_reason)  # type: ignore[arg-type]
     # Criteria 2 + 4: need at least last_n_days_for_plateau rows.
     evaluated_plateau = len(rows) >= last_n_days_for_plateau
     if evaluated_plateau:
@@ -427,21 +431,28 @@ def detect_stuck_trajectory(
     consecutive_days: int = DEFAULT_STUCK_CONSECUTIVE_DAYS,
     cwv_tol_mm: float = DEFAULT_STUCK_CWV_TOL_MM,
 ) -> tuple[bool, str | None]:
-    """Detect a "stuck" trajectory where CWV has not changed by
-    more than ``cwv_tol_mm`` over ``consecutive_days`` consecutive
-    snapshots.
+    """Detect a Bug-2-signature pinned-IC trajectory.
 
-    Returns ``(True, reason)`` on detection, ``(False, None)``
-    otherwise.
+    Returns ``(True, reason)`` if the FIRST ``consecutive_days``
+    rows all sit within ``cwv_tol_mm`` of each other, ``(False,
+    None)`` otherwise.
+
+    iter-118 Codex HIGH: the iter-117 version scanned the FULL
+    trajectory with a sliding window, which false-positived on
+    legitimate late-equilibrium plateaus where CWV drift falls
+    below 0.001 mm/day after full equilibration. That misled
+    users into chasing a mass-fixer bug on perfectly correct runs.
+
+    iter-118 fix: scope the check to the LEADING window only.
 
     Pre-iter-95 Bug 2 signature: ``cwv_mean`` reported the IC value
     (49.941 mm) on every snapshot. Surface flux WAS adding qv at
     the lowest model level but the unconditional
     ``fix_moist_mass_plane`` rescaled total water back to IC every
-    outer step. ``cwv_tol_mm = 0.001`` flags a column-mean change of
-    < 1 micron — pre-iter-95 the actual stuck signal was < 1e-9 mm
-    (literally bit-for-bit identical across snapshots) so the
-    threshold has 6 orders of magnitude of margin.
+    outer step — and the failure mode is at the START of the run
+    (the IC pin persists from day 0). Real spinup like iter-98
+    drifts CWV 49.94 → 53.63 mm in day 0-to-day-1 alone, more
+    than 3,000x the 0.001 mm tolerance.
 
     Trajectories shorter than ``consecutive_days`` return
     ``(False, None)`` (cannot decide yet — caller can re-check
@@ -452,20 +463,22 @@ def detect_stuck_trajectory(
     finite_rows = [r for r in rows if math.isfinite(r.cwv_mean)]
     if len(finite_rows) < consecutive_days:
         return False, None
-    # Sliding window of consecutive_days rows.
-    for i in range(len(finite_rows) - consecutive_days + 1):
-        window = finite_rows[i:i + consecutive_days]
-        cwvs = [r.cwv_mean for r in window]
-        if max(cwvs) - min(cwvs) <= cwv_tol_mm:
-            return True, (
-                f"CWV stuck within {cwv_tol_mm} mm across "
-                f"{consecutive_days} consecutive snapshots "
-                f"(days {window[0].day:.2f}..{window[-1].day:.2f}, "
-                f"CWV range {min(cwvs):.6f}..{max(cwvs):.6f} mm). "
-                f"Pre-iter-95 Bug 2 signature: surface flux gains "
-                f"undone by an unconditional mass fixer. Check "
-                f"--no-mass-fixer / fix_moist_mass_plane wiring."
-            )
+    # iter-118 fix: ONLY the leading window. A late equilibrium
+    # plateau with sub-tolerance drift is not Bug 2.
+    window = finite_rows[:consecutive_days]
+    cwvs = [r.cwv_mean for r in window]
+    if max(cwvs) - min(cwvs) <= cwv_tol_mm:
+        return True, (
+            f"CWV pinned within {cwv_tol_mm} mm across the FIRST "
+            f"{consecutive_days} snapshots "
+            f"(days {window[0].day:.2f}..{window[-1].day:.2f}, "
+            f"CWV range {min(cwvs):.6f}..{max(cwvs):.6f} mm). "
+            f"This matches the pre-iter-95 Bug 2 signature: surface "
+            f"flux gains undone by an unconditional mass fixer. "
+            f"Check ``--no-mass-fixer`` is set in the driver call / "
+            f"``fix_moist_mass_plane`` is not being applied "
+            f"unconditionally."
+        )
     return False, None
 
 
