@@ -661,6 +661,31 @@ Updated final ladder:
 - `scaling_gpu_weak.png` — ns/cell vs cells, flat = saturated
 - `scaling_gpu_peak_bar.png` — peak Mcells/s by grid × precision
 
+### Iter 25 — 2026-05-27 — MPAS CFL stability sweep CONFIRMS iter-22 nsub=10
+
+Mirror iter-24 check on MPAS. I5 fp64 dt=600 s, 200 steps (33 h) with
+eta=0.1 m kick:
+
+| nsub | finite? | |eta|_max  |
+|------|---------|------------|
+|   5  | True    | 0.0376 m   |
+|  10  | True    | 0.0453 m   |
+|  15  | True    | 0.0469 m   |
+|  30  | True    | 0.0469 m   |
+
+**All MPAS nsub stable** — unlike LL where nsub=5 NaN'd in iter 24.
+
+Why the difference? LL192 has a singular polar coordinate: smallest
+cell dx → 0 near pole → tight barotropic CFL at small substep dt.
+MPAS Voronoi has ~uniform cell area everywhere (no polar singularity),
+so substep dt = 600/5 = 120 s comfortably below sqrt(g·H_max)/dx_min
+even at nsub=5.
+
+⇒ **Iter-22 MPAS nsub=10 recommendation stands.** Throughput 134 Mc/s
+fp64 I5 → confirmed stable + 1.91× faster than default. impl_cn at
+192 Mc/s (1.43× over tuned-explicit) is the further throughput-
+preferred option when applicable.
+
 ### Iter 24 — 2026-05-27 — CFL stability check WALKS BACK iter-23 claim
 
 Iter-23 reported nsub=5 → 518 Mc/s for LL192 fp32 and recommended
