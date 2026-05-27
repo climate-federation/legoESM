@@ -404,6 +404,34 @@ def test_evaluate_flags_max_w_blowup():
     assert any("|U|_sfc exceeded" in r for r in verdict.reasons)
 
 
+def test_evaluate_flags_nan_wind_via_nonfinite_branch():
+    """iter-166: a NaN wind_sfc_max must be flagged via the
+    ``non-finite |U|_sfc`` branch (summarize_rce_trajectory.py:365),
+    NOT via the ``|U|_sfc exceeded`` branch — the latter short-
+    circuits at math.isfinite() and would silently drop the NaN
+    row from the over_w list.
+
+    Pre iter-166 only the finite blow-up branch was exercised
+    (test_evaluate_flags_max_w_blowup uses 999.0); the NaN
+    branch fell through to plateau checks below which could
+    pass or fail for unrelated reasons, masking the actual
+    failure mode in the verdict.
+    """
+    rows = [_row(float(i)) for i in range(12)]
+    rows[5] = _row(5.0, wind_sfc_max=float("nan"))
+    verdict = summary_mod.evaluate_rce_quality(rows)
+    assert not verdict.passed
+    assert any("non-finite |U|_sfc" in r for r in verdict.reasons), (
+        f"NaN wind must surface via the non-finite branch; "
+        f"reasons: {verdict.reasons!r}"
+    )
+    # Sanity: must NOT be reported as a finite blow-up.
+    assert not any("|U|_sfc exceeded" in r for r in verdict.reasons), (
+        f"NaN should not be reported as a finite blow-up; "
+        f"reasons: {verdict.reasons!r}"
+    )
+
+
 def test_evaluate_flags_nan_cwv():
     rows = [_row(float(i)) for i in range(12)]
     rows[5] = _row(5.0, cwv_mean=float("nan"))
