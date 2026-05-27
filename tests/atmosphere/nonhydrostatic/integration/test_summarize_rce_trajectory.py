@@ -1193,3 +1193,41 @@ def test_parse_log_max_w_streams_large_log(tmp_path):
     max_w, n_rows = summary_mod.parse_log_max_w(tmp_path)
     assert max_w == pytest.approx(12.0)
     assert n_rows == 5000
+
+
+def test_combined_evaluate_and_check_log_max_w(tmp_path):
+    """iter-140: --evaluate + --check-log-max-w fire BOTH gates
+    (criterion 1 via log + criterion 2 via plateau). Locks the
+    order: log_max_w prints first, then DOD verdict. On PASS both
+    branches print, exit 0."""
+    import subprocess
+    snaps = tmp_path / "snapshots"
+    snaps.mkdir()
+    for i in range(12):
+        _write_snapshot(
+            snaps / f"snap_day_{i:04d}.npz",
+            day=float(i), cwv_value=50.0 + 0.1 * i,
+        )
+    _write_log_txt(tmp_path / "log.txt", [1e-3, 5e-3, 2e-3, 8e-3])
+    res = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[4]
+                / "scripts" / "summarize_rce_trajectory.py"),
+            str(tmp_path),
+            "--evaluate", "--check-log-max-w", "--quiet",
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert res.returncode == 0
+    # Order check: log max|w| line BEFORE the DOD verdict line.
+    log_line_idx = res.stdout.index("log max|w|")
+    verdict_line_idx = res.stdout.index("DOD verdict:")
+    assert log_line_idx < verdict_line_idx, (
+        f"Expected log max|w| BEFORE DOD verdict; "
+        f"log@{log_line_idx} verdict@{verdict_line_idx}; "
+        f"stdout={res.stdout!r}"
+    )
+    assert "DOD verdict: PASS" in res.stdout
+    # max([1e-3, 5e-3, 2e-3, 8e-3]) = 8e-3
+    assert "8.0000e-03" in res.stdout
