@@ -149,7 +149,7 @@ Conclusion: this is NOT a radiation/dycore bug. It is the inherent radiative-con
 Fix paths (open):
 * **Resolve convection explicitly**: drop dx to 1 km or 256 m (LES regime). 132×132 dx=2 km is closer; 264×264 dx=1 km would be solid.
 * **Use a mass-flux subgrid convection scheme** at dx=4 km regime instead of explicit Kessler — Tiedtke or Zhang-McFarlane spreads the buoyancy injection across the implicit-convection envelope.
-* **Smoother IC perturbation**: replace per-cell uniform random with a low-wavenumber sine wave or a Gaussian bump (Wing 2018 RCEMIP Section 3.1 actually specifies smooth Gaussian, not white noise — the current driver implementation deviates).
+* **Smoother IC perturbation**: replace per-cell uniform random with a low-wavenumber sine wave or a Gaussian bump (Wing 2018 RCEMIP Section 3.1 actually specifies smooth Gaussian, not white noise — the current driver implementation deviates). **iter-203 tested smooth_k1 (single-cosine wave at kx=ky=1) — NEGATIVE result at dx=4 km: blows up at step 50 regardless of amplitude. Helper retained as `--theta-noise-mode smooth_k1` for future LES-regime (dx=1 km) experiments where the smaller dx may resolve convective cells before Kessler saturates.**
 * **Adaptive dt** — drop dt to ~1 s once max|w| exceeds 1 m/s.
 
 The iter-149 column-symmetric trap is now understood: with QV_NOISE=0 the dycore can run stably for >10 sim-days because there is no horizontal seed for convection to initiate; precipitation stays at ~5e-4 mm/day vs Wing 2018 target ~3 mm/day. Breaking the trap WITHOUT crashing the dycore needs one of the fix paths above (none is a one-liner).
