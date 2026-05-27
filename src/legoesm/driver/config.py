@@ -29,13 +29,61 @@ AIMIP_VARIANTS: tuple[str, ...] = (
 
 
 class GridConfig(NamedTuple):
-    """Horizontal and vertical grid configuration."""
-    grid_type: str = "cubed_sphere"  # cubed_sphere, gaussian, latlon, voronoi
+    """Horizontal and vertical grid configuration.
+
+    ``grid_type`` is one of the canonical names:
+    ``cubed_sphere``, ``gaussian``, ``latlon``, ``mpas``.
+
+    ``mpas`` is the SCVT Voronoi mesh + TRiSK discretization
+    (Ringler 2010, Thuburn 2009).  Pre-2026-05 the codebase used
+    multiple aliases for this single mesh on the atmosphere side
+    (``voronoi``, ``icosahedral``, ``mpas_voronoi``) while the ocean
+    consistently used ``mpas``.  All variants now normalize to
+    ``mpas`` at the config boundary so the atmosphere and ocean
+    use one identifier; internal dispatch checks only the canonical
+    name.  See :func:`normalize_grid_type`.
+    """
+    grid_type: str = "cubed_sphere"  # cubed_sphere, gaussian, latlon, mpas
     resolution: int = 16             # N for CS, n_max for spectral
     nlev: int = 40
     vertical_coord: str = "hybrid"   # sigma, hybrid
     p_top_Pa: float = 200.0
     stretching: float = 2.0
+
+
+# Canonical name for the SCVT Voronoi mesh + TRiSK discretization.
+# Atmosphere-side pre-2026-05 aliases that all refer to the same mesh:
+_GRID_TYPE_ALIASES: dict[str, str] = {
+    "voronoi": "mpas",
+    "icosahedral": "mpas",
+    "ico": "mpas",
+    "mpas_voronoi": "mpas",
+}
+
+
+def normalize_grid_type(name: str) -> str:
+    """Canonicalise legacy aliases for the SCVT Voronoi mesh.
+
+    Maps ``"voronoi"``, ``"icosahedral"``, ``"ico"``,
+    ``"mpas_voronoi"`` all to ``"mpas"`` (the name the ocean side
+    has always used).  Every other grid_type string passes through
+    unchanged.
+
+    Callers
+    -------
+    * ``scripts/run_amip*.py`` argparse postprocessors.
+    * Test fixtures that construct ``GridConfig`` directly with the
+      legacy names.
+    * Internal code that branches on grid_type SHOULD assume the
+      string has already been normalised — i.e. compare to
+      ``"mpas"``, not to the aliases.
+
+    Returns
+    -------
+    str
+        Canonical grid-type name.
+    """
+    return _GRID_TYPE_ALIASES.get(name, name)
 
 
 class DycoreConfig(NamedTuple):
@@ -59,6 +107,26 @@ class DycoreConfig(NamedTuple):
     # Default OFF (False, 0.0) preserves legacy bit-exact behavior.
     implicit_grav_wave_use_pcg: bool = False
     implicit_grav_wave_damping: float = 0.0
+
+    # Stage 3-E: Fourier polar filter for lat-lon C-grid.
+    # The polar CFL problem: dx_pole = R * dlon * cos(π/2 - dlat/2) → 0
+    # at the poles, forcing an explicit ``dt`` ≤ ~5 s at 1° resolution
+    # even when the equatorial CFL allows ~600 s.  Enabling
+    # ``use_polar_filter`` truncates Fourier modes in longitude that
+    # would violate CFL at high latitudes, so the run can use the
+    # equatorial-CFL ``dt`` everywhere.  Without this, 100-y AMIP at
+    # 1° lat-lon FV requires ~600 B time steps and is not feasible
+    # within a chained 72-h SLURM budget.
+    #
+    # The filter is lon-only FFT (``jnp.fft.rfft`` along axis -1), so
+    # under lat-band MPI each rank applies it independently on its
+    # own band — no MPI exchange needed for the filter itself.  See
+    # ``src/legoesm/grids/polar_filter.py`` for the algorithm and
+    # ``CGridLatLonPrimitiveEquationConfig.use_polar_filter`` for the
+    # model-side flag this propagates to.
+    use_polar_filter: bool = False
+    polar_filter_cutoff_deg: float = 60.0
+    polar_filter_max_wave_speed: float = 300.0
 
 
 class OutputConfig(NamedTuple):

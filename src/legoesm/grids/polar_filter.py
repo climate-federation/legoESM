@@ -27,10 +27,13 @@ def compute_polar_filter_mask(
     max_wave_speed: float = 300.0,
     cutoff_lat_deg: float = 60.0,
     safety_factor: float = 0.85,
+    *,
+    is_v_face: bool = False,
 ) -> jnp.ndarray:
     """Precompute the Fourier polar filter mask.
 
-    Returns a 2D mask (n_lat, n_freq) where n_freq = n_lon//2 + 1,
+    Returns a 2D mask (n_lat, n_freq) for cell-centered fields or
+    (n_lat+1, n_freq) for v-face fields, where n_freq = n_lon//2 + 1,
     suitable for multiplying the output of jnp.fft.rfft.
 
     Parameters
@@ -45,21 +48,45 @@ def compute_polar_filter_mask(
         Latitude (degrees) beyond which filtering is applied.
     safety_factor : float
         Fraction of the theoretical CFL limit to use (< 1 for margin).
+    is_v_face : bool, optional
+        When True, build a mask for v-face fields (lat-interface
+        values, shape ``(n_lat+1, ...)``) using ``grid.cos_lat_v`` /
+        the half-cell-offset lat-interface coordinates.  Codex review
+        Stage 3-E round 2 caught that applying the cell-centered mask
+        to v-face indices introduces a half-cell lat offset that
+        admits ``k`` modes the actual v-face CFL forbids.
 
     Returns
     -------
-    jax.Array : Boolean-valued mask, shape (n_lat, n_freq).
+    jax.Array : Float mask, shape (n_lat, n_freq) if ``is_v_face``
+                is False, else (n_lat+1, n_freq).
     """
     # RK3 stability limit for centered differences: sqrt(3)
     cfl_limit = jnp.sqrt(3.0) * safety_factor
 
+    if is_v_face:
+        # v-face: read the precomputed ``grid.lat_v`` and
+        # ``grid.cos_lat_v`` arrays directly.  These were placed at
+        # ``LatLonGrid``-construction time using the cell-axis ``lat``
+        # available at the call site — so under MPI band decomposition
+        # the rank-local grid carries the rank-local v-face arrays
+        # (length ``n_lat_local+1``).  A previous implementation
+        # reconstructed the v-face axis with ``±π/2`` padding which
+        # silently broke interior ranks; Codex review Stage 3-E
+        # round 3 caught that regression.
+        cos_lat_face = grid.cos_lat_v
+        lat_face = grid.lat_v
+    else:
+        cos_lat_face = grid.cos_lat
+        lat_face = grid.lat
+
     # CFL-based max wavenumber at each latitude
-    max_k_cfl = cfl_limit * grid.radius * grid.cos_lat / (max_wave_speed * dt)
+    max_k_cfl = cfl_limit * grid.radius * cos_lat_face / (max_wave_speed * dt)
     max_k_cfl = jnp.clip(max_k_cfl, 1.0, float(grid.n_lon // 2))
 
     # Only apply filtering poleward of cutoff
     cutoff_rad = jnp.deg2rad(cutoff_lat_deg)
-    is_poleward = jnp.abs(grid.lat) > cutoff_rad
+    is_poleward = jnp.abs(lat_face) > cutoff_rad
     max_k = jnp.where(is_poleward, max_k_cfl, float(grid.n_lon // 2))
 
     # Build mask

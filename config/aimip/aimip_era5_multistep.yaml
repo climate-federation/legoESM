@@ -1,0 +1,120 @@
+# AIMIP multi-step autoregressive + CRPS configuration.
+#
+# Overlay applied on top of ``aimip_era5.yaml`` for a GenCast-style
+# training run (Price et al. 2024, Nature) where the loss is the
+# CRPS + MSE sum over 4 chained 6-hourly rollouts.  Sized so a single
+# variant (classical / column_nn / sfno_physics) fits in roughly an
+# hour of wall-clock on a single GPU, leaving headroom in the
+# 12-hour ``short`` partition limit for all 3 variants sequentially.
+#
+# Differences from ``aimip_era5.yaml``:
+#   - Grid drops T63 -> T21 (Williamson-tractable, 32 lat x 64 lon).
+#   - Radiation drops RRTMGP -> gray (no cloud-LW coupling, but ~10x
+#     cheaper; the multi-step chain is already 4x more expensive).
+#   - Smaller train windows so 4 windows still cover both winter and
+#     summer of 2015 + 2016 but with fewer days per window.
+#   - ``multi_step_hours: [6, 12, 18, 24]`` activates the chained
+#     rollout supervision.  Per-lead CRPS+MSE weights inherited from
+#     the base.
+#   - ``aimip_rollout_hours: 6`` is the per-segment integration; the
+#     total rollout per training pair is 4 * 6 = 24 hours.
+
+era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
+cache_dir: ".cache/aimip_era5"
+
+train_windows:
+  - [2015,   0,  3]     # 2015 Jan (winter)
+  - [2015, 180,  3]     # 2015 Jun (summer)
+  - [2016,   0,  3]     # 2016 Jan
+  - [2016, 180,  3]     # 2016 Jun
+
+eval_windows:
+  - [2017,   0,  3]     # 2017 Jan (held-out year, winter)
+  - [2017, 180,  3]     # 2017 Jun (held-out year, summer)
+
+train_year: 2015
+eval_year:  2017
+train_period: ["2015-01-01", "2016-12-31"]
+eval_period:  ["2017-01-01", "2017-12-31"]
+
+n_train_days: 12
+n_eval_days:  6
+
+# T21 -> 32 lat x 64 lon, ncol = 2048.  ~50x cheaper than T63 per dt.
+aimip_grid: "gaussian"
+n_max: 21
+nlev: 8
+dt: 1200.0
+
+# 4 epochs, tighter early-stop.
+aimip_n_epochs: 4
+aimip_patience: 2
+aimip_min_delta: 1.0e-3
+aimip_lr: 3.0e-4
+aimip_warmup: 10
+aimip_weight_decay: 1.0e-5
+aimip_grad_clip: 1.0
+aimip_optimizer: "adamw"
+
+# Gray two-stream radiation (Frierson) -- cheap, differentiable in
+# tau_equator / tau_pole; matches the smoke baseline for this run.
+aimip_radiation: "gray"
+aimip_rad_update_interval: 6
+
+# Disable spatial-surface fields (T21 + gray rad is the smoke profile;
+# spatial coefs are not the dominant lever at this resolution).
+aimip_spatial_surface: false
+aimip_spatial_init_std: 0.0
+aimip_spatial_seed: 0
+aimip_spatial_lr_scale: 1.0
+
+# Per-segment rollout is 6h.  Loss config below sets the K=4 chain.
+aimip_rollout_days: 1
+aimip_rollout_hours: 6
+
+loss:
+  w_T: 1.0
+  w_u: 0.5
+  w_v: 0.5
+  w_q: 0.3            # humidity now included; MSE term moderate
+  w_ps: 0.3
+  # Area-weighted bias-penalty (squared global mean of error,
+  # normalised by scale²).  Wired into both spectral and grid loss
+  # paths (carry_mse + spectral_state_vs_carry_loss).
+  w_bias_T: 100.0
+  w_bias_u: 1.0
+  w_bias_v: 1.0
+  w_bias_ps: 1.0
+  # Grid-space deterministic CRPS (M=1 = area-weighted MAE).
+  w_crps_T: 0.5
+  w_crps_u: 0.25
+  w_crps_v: 0.25
+  w_crps_ps: 0.15
+  # Humidity is heavy-tailed (convective + microphysics noise) so the
+  # CRPS/MAE term dominates over the squared-error term: set
+  # w_crps_q > w_q.  This is what GenCast does for tail-heavy
+  # variables (Price et al. 2024 SI, Sec. 3.2).
+  w_crps_q: 0.5
+  # Spectral-space deterministic CRPS (M=1 = MAE of SH coefficient
+  # differences) for T / u / v / q.  Penalises errors in the spectral
+  # pattern that grid-MAE underweights when concentrated at small
+  # scales.  Requires JAX_ENABLE_X64=True.
+  w_spec_crps_T: 0.5
+  w_spec_crps_u: 0.25
+  w_spec_crps_v: 0.25
+  w_spec_crps_q: 0.5
+  # Multi-day rollout supervision: 1d / 2d / 3d leads.  Total rollout
+  # 72h = 216 dycore steps at T21/dt=1200s (~3x the previous
+  # [6,12,18,24] sub-day chain).  Declining per-lead weight reflects
+  # that later leads have larger irreducible error.
+  multi_step_hours: [24, 48, 72]
+  multi_step_weights: [1.0, 0.7, 0.5]
+  spectral_weight: 0.0  # legacy combined_loss path -- unused by AIMIP
+  level_weighting: "pressure"
+  normalize_by_scale: true
+  T_scale: 30.0
+  wind_scale: 20.0
+  q_scale: 5.0e-3
+  ps_scale: 1000.0
+
+output_dir: "results/aimip_multistep_001"

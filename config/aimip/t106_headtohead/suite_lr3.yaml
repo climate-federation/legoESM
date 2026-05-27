@@ -1,0 +1,4 @@
+base: config/aimip/t106_headtohead/base_lr3.yaml
+variants:
+- classical
+output_dir: results/aimip_t106_headtohead_lr3

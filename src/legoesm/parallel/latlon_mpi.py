@@ -1,25 +1,58 @@
-"""MPI domain decomposition for lat-lon C-grid dynamical core.
+"""MPI domain decomposition for the lat-lon C-grid atmospheric dycore.
 
-Implements latitude-band decomposition: each MPI rank owns a contiguous
-band of latitude rows.  All ranks own all longitudes (no decomposition
-in the periodic direction).
+Latitude-band decomposition: each MPI rank owns a contiguous band of
+latitude rows; every rank owns all longitudes (no decomposition in the
+periodic direction).
 
-Usage
------
-::
+Stage 0 (this file) provides the halo-exchange and padded-grid
+machinery only.  The per-step driver ``make_latlon_mpi_step`` is a
+stub that raises ``NotImplementedError`` — Stage 1 will wire it
+against the existing serial C-grid step in
+:mod:`legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid`.
 
-    from legoesm.parallel.latlon_mpi import (
-        make_latlon_band_layout,
-        scatter_state_latlon,
-        make_latlon_mpi_step,
-    )
+Conventions
+-----------
+- Halo width ``halo``: number of ghost lat rows added on each side
+  (south + north).  Operators with compact 1-cell stencils (gradient,
+  divergence, curl) need ``halo=1``; operators with PPM
+  reconstruction or biharmonic stencils need ``halo=2``.
+- Pole fold matches :func:`legoesm.grids.halo_latlon.pad_halo_latlon`
+  exactly: mirror-reverse the first/last ``halo`` interior rows, shift
+  by 180° in longitude, and (optionally) negate for vector ``v``
+  components.  This single source of truth lives in
+  :mod:`legoesm.grids.halo_latlon`; we reuse it here so MPI and
+  single-rank paths can never disagree at pole-touching ranks.
+- C-grid layout:
 
-    layout = make_latlon_band_layout(rank, n_ranks, n_lat, n_lon)
-    local_state = scatter_state_latlon(global_state, layout)
-    step_fn = make_latlon_mpi_step(model, grid, layout, sigma, config)
+      u : (n_lat_local,    n_lon,   nlev)  — zonal velocity at lon faces
+                              (n_lon+1 in serial; lon is periodic so we
+                              treat the trailing face as wrap-around)
+      v : (n_lat_local+1,  n_lon,   nlev)  — meridional velocity at lat
+                              interfaces; neighbouring ranks share the
+                              ``v`` row at the partition boundary
+      T, p_s, phis, tracers : (n_lat_local, n_lon, ...) cell-centered
 
-    for _ in range(n_steps):
-        local_state = step_fn(local_state, dt)
+  For ``v`` we keep the duplicated boundary row across neighbours; the
+  scatter and halo-exchange helpers handle this explicitly.
+
+- AD safety: halo sendrecv uses
+  :func:`legoesm.parallel.halo_exchange._get_sendrecv_vjp` (the AD-safe
+  wrapper around ``mpi4jax.sendrecv``).  Backward swaps source/dest as
+  required by the reverse-mode rule.
+
+Status
+------
+Stage 0 (DONE):
+    LatLonBandLayout, make_latlon_band_layout, exchange_halo_latlon,
+    scatter_state_latlon, gather_state_latlon, pad_state_halos,
+    strip_halos, build_padded_grid.
+
+Stage 1 (TODO — explicit NotImplementedError):
+    make_latlon_mpi_step — wrap
+    ``cgrid_latlon_hydrostatic_tendencies`` and the RK driver inside a
+    pad → step → strip cycle.  Must also make the pole-wall BC
+    (``v=0`` at the global lat boundaries) rank-aware so interior cuts
+    are NOT zeroed.
 """
 
 from __future__ import annotations
@@ -28,8 +61,22 @@ from typing import Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
+from legoesm.grids.halo_latlon import (
+    pad_halo_latlon,
+    pad_halo_latlon_3d,
+    pad_halo_latlon_vector,
+    pad_halo_latlon_vector_3d,
+    _fold_pole_rows,
+    _fold_pole_rows_3d,
+)
 from legoesm.parallel.halo_exchange import _get_sendrecv_vjp
+
+
+# ============================================================================
+# Layout
+# ============================================================================
 
 
 class LatLonBandLayout(NamedTuple):
@@ -37,25 +84,19 @@ class LatLonBandLayout(NamedTuple):
 
     Attributes
     ----------
-    rank : int
-        This process's MPI rank.
-    n_ranks : int
-        Total MPI processes.
-    n_lat_global : int
-        Total latitude rows (global).
-    n_lon_global : int
-        Total longitude columns (global).
+    rank, n_ranks : int
+        This process's MPI rank and the world size.
+    n_lat_global, n_lon_global : int
+        Total latitude rows / longitude columns (global problem size).
     n_lat_local : int
-        Latitude rows owned by this rank (interior, excluding halos).
-    lat_start : int
-        Global index of the first owned latitude row.
-    lat_end : int
-        Global index one past the last owned latitude row.
-    south_rank : int or None
-        MPI rank of the southern neighbor, or None if at south pole.
-    north_rank : int or None
-        MPI rank of the northern neighbor, or None if at north pole.
+        Interior latitude rows owned by this rank (no halos).
+    lat_start, lat_end : int
+        Global indices of the owned band: rows ``[lat_start, lat_end)``.
+    south_rank, north_rank : int or None
+        MPI ranks of the southern / northern neighbour, or ``None`` if
+        this rank touches the south / north pole.
     """
+
     rank: int
     n_ranks: int
     n_lat_global: int
@@ -73,40 +114,31 @@ def make_latlon_band_layout(
     n_lat: int,
     n_lon: int,
 ) -> LatLonBandLayout:
-    """Create a latitude-band decomposition layout.
+    """Build a latitude-band decomposition layout.
 
-    Divides ``n_lat`` rows as evenly as possible across ``n_ranks``.
-    Remainder rows are distributed to the first few ranks.
-
-    Parameters
-    ----------
-    rank : int
-        This process's MPI rank.
-    n_ranks : int
-        Total MPI processes.
-    n_lat : int
-        Number of latitude rows (global).
-    n_lon : int
-        Number of longitude columns (global).
-
-    Returns
-    -------
-    LatLonBandLayout
+    Divides ``n_lat`` rows as evenly as possible across ``n_ranks``;
+    the first ``n_lat % n_ranks`` ranks get one extra row.
     """
+    if n_ranks < 1:
+        raise ValueError(f"n_ranks must be >=1, got {n_ranks}")
+    if rank < 0 or rank >= n_ranks:
+        raise ValueError(f"rank {rank} out of range [0, {n_ranks})")
+    if n_lat < n_ranks:
+        raise ValueError(
+            f"Cannot decompose {n_lat} lat rows across {n_ranks} ranks "
+            "(at least one row per rank is required for a 1-cell halo "
+            "neighbour exchange)."
+        )
+
     base = n_lat // n_ranks
     remainder = n_lat % n_ranks
-
-    # Ranks [0, remainder) get one extra row.
     if rank < remainder:
         n_local = base + 1
         lat_start = rank * (base + 1)
     else:
         n_local = base
         lat_start = remainder * (base + 1) + (rank - remainder) * base
-
     lat_end = lat_start + n_local
-    south_rank = rank - 1 if rank > 0 else None
-    north_rank = rank + 1 if rank < n_ranks - 1 else None
 
     return LatLonBandLayout(
         rank=rank,
@@ -116,121 +148,538 @@ def make_latlon_band_layout(
         n_lat_local=n_local,
         lat_start=lat_start,
         lat_end=lat_end,
-        south_rank=south_rank,
-        north_rank=north_rank,
+        south_rank=rank - 1 if rank > 0 else None,
+        north_rank=rank + 1 if rank < n_ranks - 1 else None,
     )
 
 
-def _exchange_halo_latlon(
-    field: jax.Array,
-    layout: LatLonBandLayout,
-    is_vector_v: bool = False,
-) -> jax.Array:
-    """Exchange 1-cell latitude halo between neighboring ranks.
+# ============================================================================
+# Halo exchange
+# ============================================================================
 
-    Parameters
-    ----------
-    field : jax.Array, shape (n_lat_local, n_lon, ...)
-        Rank-local field (interior rows only).
-    layout : LatLonBandLayout
-    is_vector_v : bool
-        If True, apply sign reversal at polar fold (for v-velocity).
+
+def _serial_pad_then_strip_lon(
+    field: jax.Array, halo: int, negate: bool,
+) -> jax.Array:
+    """Run the canonical serial ``pad_halo_latlon*`` then strip the lon halos.
+
+    Why this exists
+    ---------------
+    A naive 180° rotation via ``jnp.roll(field, n_lon//2, axis=1)`` does NOT
+    bit-reproduce serial ``pad_halo_latlon``.  The serial helper wrap-pads in
+    longitude first and only then rolls by ``data.shape[1] // 2 ==
+    (n_lon + 2*halo) // 2``; after slicing the interior lon columns the
+    result is an *aliased* halo that depends on ``halo``, not a clean
+    physical 180° rotation.  See ``tests/parallel/test_latlon_mpi_halo_serial.py``
+    for the concrete (4-cell) example.
+
+    To guarantee Stage-1+ produces bit-identical results to the serial
+    path under MPI, this helper delegates the lon-padding + fold + slice
+    to the canonical helper itself, then strips the lon halos so the
+    output has the rank-local lon shape.
+
+    This is also why we cannot fix the "physical correctness" question
+    here: changing the convention would diverge from the serial dycore.
+    That refactor belongs in a separate Stage-0.5 audit of the upstream
+    fold convention (tracked in CLAUDE.md follow-up debt).
 
     Returns
     -------
-    jax.Array, shape (n_lat_local + 2, n_lon, ...)
-        Padded field with 1 halo row on each side.
+    (south_halo, north_halo) : each shape (halo, n_lon[, nlev])
+        Ready for concatenation south of ``field[0]`` / north of
+        ``field[-1]``.
     """
+    # IMPORTANT: call the *_local* helpers directly, NOT the
+    # backend-dispatched public ``pad_halo_latlon*``.  This helper
+    # runs INSIDE the MPI backend's pole-fold step, so calling the
+    # public dispatcher would re-enter the MPI path and recurse
+    # forever:
+    #   pad_halo_latlon (public)
+    #     → _pad_halo_latlon_mpi   (MPI branch)
+    #       → exchange_halo_latlon
+    #         → _pole_fold_south / _north  (at boundary ranks)
+    #           → _serial_pad_then_strip_lon
+    #             → pad_halo_latlon (public, again!) ← recursion
+    # The fix: pole-fold uses the SERIAL implementation directly.
+    # That's what the docstring above promised; the early Stage 0
+    # version pre-dated the backend-dispatch refactor and called
+    # the dispatcher by accident.
+    from legoesm.grids.halo_latlon import (
+        _pad_halo_latlon_local,
+        _pad_halo_latlon_vector_local,
+        _pad_halo_latlon_3d_local,
+        _pad_halo_latlon_vector_3d_local,
+    )
+    if field.ndim == 2:
+        helper = (
+            _pad_halo_latlon_vector_local if negate
+            else _pad_halo_latlon_local
+        )
+        padded = helper(field, halo=halo)        # (n_lat + 2h, n_lon + 2h)
+        # Strip the lon halos to recover (halo, n_lon).
+        south = padded[:halo, halo:halo + field.shape[1]]
+        north = padded[-halo:, halo:halo + field.shape[1]]
+    elif field.ndim == 3:
+        helper = (
+            _pad_halo_latlon_vector_3d_local if negate
+            else _pad_halo_latlon_3d_local
+        )
+        padded = helper(field, halo=halo)        # (n_lat + 2h, n_lon + 2h, nlev)
+        south = padded[:halo, halo:halo + field.shape[1], :]
+        north = padded[-halo:, halo:halo + field.shape[1], :]
+    else:
+        raise ValueError(
+            f"_serial_pad_then_strip_lon: field.ndim must be 2 or 3, "
+            f"got {field.ndim}"
+        )
+    return south, north
+
+
+def _pole_fold_south(field: jax.Array, halo: int, negate: bool) -> jax.Array:
+    """South-pole halo, bit-identical to serial ``pad_halo_latlon*``
+    (stripped of lon halos).
+
+    Operates on ``field`` *without* lon padding — the helper internally
+    lon-pads, pole-folds the lon-padded data (matching serial's
+    ``(n_lon + 2*halo) // 2`` lon-shift), then strips the lon halos.
+    Returns shape ``(halo, n_lon[, nlev])``.
+
+    Stage-0 tests in ``tests/parallel/test_latlon_mpi_halo_serial.py``
+    pin this contract: ``exchange_halo_latlon(unpadded, ...)`` at a
+    pole-touching rank must equal serial
+    ``pad_halo_latlon(unpadded, halo)[:, halo:-halo]``.
+    """
+    south, _ = _serial_pad_then_strip_lon(field, halo, negate)
+    return south
+
+
+def _pole_fold_north(field: jax.Array, halo: int, negate: bool) -> jax.Array:
+    """North-pole halo — see :func:`_pole_fold_south`."""
+    _, north = _serial_pad_then_strip_lon(field, halo, negate)
+    return north
+
+
+def exchange_halo_latlon(
+    field: jax.Array,
+    layout: LatLonBandLayout,
+    halo: int = 1,
+    is_vector_v: bool = False,
+) -> jax.Array:
+    """Exchange ``halo`` ghost lat rows on each side via MPI sendrecv.
+
+    Boundary ranks (south_rank is None / north_rank is None) pole-fold
+    using the same convention as
+    :func:`legoesm.grids.halo_latlon.pad_halo_latlon`: mirror-reverse
+    the first / last ``halo`` interior rows, shift by 180° in
+    longitude, sign-flip for vector ``v``.
+
+    Periodic longitude is preserved (every rank owns all longitudes;
+    no lon halo).
+
+    Parameters
+    ----------
+    field : jax.Array, shape (n_lat_local, n_lon)  or  (n_lat_local, n_lon, nlev)
+        Rank-local interior field, no halos in input.
+    layout : LatLonBandLayout
+    halo : int, default 1
+        Number of ghost rows to add on each lat side.
+    is_vector_v : bool
+        Whether the field is a vector component that flips sign
+        across the pole (e.g. v-velocity, or any meridional flux).
+        Has no effect at non-pole-touching ranks.
+
+    Returns
+    -------
+    jax.Array, shape (n_lat_local + 2*halo, n_lon[, nlev])
+    """
+    if halo <= 0:
+        return field
+
+    n_lat_local = field.shape[0]
+    if halo > n_lat_local:
+        # At halo=2 this can bite when n_lat_global < 2 * n_ranks * halo;
+        # surface a clear error rather than producing garbage halos.
+        raise ValueError(
+            f"exchange_halo_latlon: halo={halo} exceeds n_lat_local="
+            f"{n_lat_local} on rank {layout.rank}.  Reduce n_ranks or "
+            "increase grid resolution."
+        )
+
+    trailing = field.shape[1:]
+
+    # Single-rank ⇒ both sides pole-fold; never touch MPI.  This branch
+    # keeps the n_ranks=1 path runnable without mpi4jax installed, which
+    # matters for serial smoke tests on the login node and for users
+    # who haven't built the optional MPI stack.
+    if layout.south_rank is None and layout.north_rank is None:
+        south_halo = _pole_fold_south(field, halo, negate=is_vector_v)
+        north_halo = _pole_fold_north(field, halo, negate=is_vector_v)
+        return jnp.concatenate([south_halo, field, north_halo], axis=0)
+
     try:
         import mpi4jax
         from mpi4py import MPI
     except ImportError as exc:
         raise ImportError(
-            "Lat-lon MPI halo exchange requires mpi4jax and mpi4py."
+            "Lat-lon MPI halo exchange (n_ranks>1) requires mpi4jax and mpi4py."
         ) from exc
 
     comm = MPI.COMM_WORLD
-    rank = layout.rank
-    n_lon = layout.n_lon_global
-    trailing = field.shape[2:]  # (...) after (n_lat_local, n_lon)
-
-    # Pad with zeros on south and north.
-    padded = jnp.pad(field, [(1, 1)] + [(0, 0)] * (field.ndim - 1))
-
     sendrecv = _get_sendrecv_vjp(mpi4jax)
 
-    # --- South halo ---
+    # ---- South halo ----
     if layout.south_rank is not None:
-        # Send my southernmost row to my southern neighbor, receive their
-        # northernmost row as my south halo.
-        send_buf = field[0].reshape(-1)
-        recv_template = jnp.zeros_like(send_buf)
-        recv_buf = sendrecv(
-            send_buf, recv_template,
-            layout.south_rank, layout.south_rank,
-            rank, layout.south_rank, comm,
+        # Receive from southern neighbour's TOP `halo` rows (their
+        # ``field[-halo:]``), placed as our ``[0:halo)``.  We send our
+        # bottom `halo` rows in return (the south neighbour's north
+        # halo).
+        send_bot = field[:halo].reshape(-1)
+        recv_template = jnp.zeros_like(send_bot)
+        recv_south = sendrecv(
+            send_bot, recv_template,
+            layout.south_rank,         # source
+            layout.south_rank,         # dest
+            layout.rank,               # sendtag = sender's rank
+            layout.south_rank,         # recvtag = source's rank
+            comm,
         )
-        padded = padded.at[0].set(recv_buf.reshape(field[0].shape))
+        south_halo = recv_south.reshape((halo,) + trailing)
     else:
-        # South pole: fold (reflect with 180° lon shift).
-        south_row = field[0]
-        folded = jnp.roll(south_row, n_lon // 2, axis=0)
-        if is_vector_v:
-            folded = -folded
-        padded = padded.at[0].set(folded)
+        south_halo = _pole_fold_south(field, halo, negate=is_vector_v)
+
+    # ---- North halo ----
+    if layout.north_rank is not None:
+        send_top = field[-halo:].reshape(-1)
+        recv_template = jnp.zeros_like(send_top)
+        recv_north = sendrecv(
+            send_top, recv_template,
+            layout.north_rank,
+            layout.north_rank,
+            layout.rank,
+            layout.north_rank,
+            comm,
+        )
+        north_halo = recv_north.reshape((halo,) + trailing)
+    else:
+        north_halo = _pole_fold_north(field, halo, negate=is_vector_v)
+
+    return jnp.concatenate([south_halo, field, north_halo], axis=0)
+
+
+# ============================================================================
+# Backend-dispatched pad_halo_latlon implementation
+# ============================================================================
+#
+# Used by :mod:`legoesm.grids.halo_latlon` when the global halo
+# backend is ``"mpi"`` and the active topology is a
+# :class:`LatLonBandLayout`.  Composes the existing
+# :func:`exchange_halo_latlon` (lat MPI sendrecv + boundary pole-fold)
+# with a periodic-lon wrap that every rank performs locally.  Output
+# shape matches the serial :func:`legoesm.grids.halo_latlon.pad_halo_latlon`
+# family — operators stay backend-oblivious.
+#
+# This is the architectural reuse point the user asked for: no
+# parallel registry, no operator-side branching, no duplicate
+# halo-machinery.  The cubed-sphere precedent
+# (``set_halo_backend`` → ``_halo_backend`` global → ``pad_halo``
+# dispatch) is mirrored exactly.
+
+
+def _pad_halo_latlon_mpi(
+    data, layout: LatLonBandLayout, halo: int = 1,
+    is_vector_v: bool = False,
+):
+    """MPI variant of :func:`legoesm.grids.halo_latlon.pad_halo_latlon`.
+
+    Step 1 — periodic lon wrap (same on every rank; every rank owns
+    the full longitude axis).  This matches the serial code's
+    lon-pad order so the operator's downstream stencil sees the same
+    layout under both backends.
+
+    Step 2 — lat halo via :func:`exchange_halo_latlon`:
+      - Boundary ranks (``layout.<side>_rank is None``) apply the
+        pole-fold convention used by the serial
+        :func:`legoesm.grids.halo_latlon.pad_halo_latlon` (mirror +
+        180° lon shift + sign flip for vectors).
+      - Interior partition cuts MPI-sendrecv with the neighbour rank.
+
+    The result has the same shape and semantics as the serial
+    helper.  Under MPI the lat axis is the rank's band plus the halo
+    rows; the lon axis is the full global lon plus its periodic
+    halo, identical to serial.
+    """
+    if data.ndim not in (2, 3):
+        raise ValueError(
+            f"_pad_halo_latlon_mpi: data.ndim must be 2 or 3, got {data.ndim}"
+        )
+
+    # Step 1: periodic lon wrap (local on every rank — every rank owns
+    # the full lon axis).  This produces ``lon_padded`` shape
+    # ``(n_lat_local, n_lon + 2*halo[, nlev])``.
+    if data.ndim == 2:
+        lon_padded = jnp.pad(data, ((0, 0), (halo, halo)), mode="wrap")
+    else:
+        lon_padded = jnp.pad(
+            data, ((0, 0), (halo, halo), (0, 0)), mode="wrap",
+        )
+
+    # Step 2: lat halo — pole-fold the LON-PADDED data at boundary
+    # ranks (matches serial ``pad_halo_latlon``'s lon-pad-then-fold
+    # order, so the pole-fold lon-shift is ``(n_lon + 2*halo) // 2``
+    # like serial does).  Interior partition cuts MPI sendrecv with
+    # the neighbour rank.
+    #
+    # We do NOT call ``exchange_halo_latlon`` here because that
+    # function operates on an *unpadded* field and is designed to
+    # return serial-stripped (lon-halo-stripped) halos.  Routing
+    # through it would either re-lon-pad or produce stripped halos
+    # — neither matches the full-pad result serial expects.
+    if halo > data.shape[0]:
+        raise ValueError(
+            f"_pad_halo_latlon_mpi: halo={halo} exceeds n_lat_local="
+            f"{data.shape[0]} on rank {layout.rank}."
+        )
+
+    # --- South halo ---
+    if layout.south_rank is None:
+        # Pole-fold the lon-padded first ``halo`` rows.  Uses
+        # ``_fold_pole_rows*`` whose lon-shift is ``data.shape[1] // 2``
+        # — for lon-padded input that's exactly ``(n_lon + 2*halo) // 2``
+        # which is the serial convention.
+        if data.ndim == 2:
+            south_halo, _ = _fold_pole_rows(lon_padded, halo, negate=is_vector_v)
+        else:
+            south_halo, _ = _fold_pole_rows_3d(
+                lon_padded, halo, negate=is_vector_v,
+            )
+    else:
+        # MPI sendrecv with south neighbour — exchanges the
+        # lon-padded boundary rows.  AD-safe via _get_sendrecv_vjp.
+        try:
+            import mpi4jax
+            from mpi4py import MPI
+        except ImportError as exc:
+            raise ImportError(
+                "_pad_halo_latlon_mpi: multi-rank lat halo requires "
+                "mpi4jax and mpi4py."
+            ) from exc
+        comm = MPI.COMM_WORLD
+        sendrecv = _get_sendrecv_vjp(mpi4jax)
+        send_bot = lon_padded[:halo].reshape(-1)
+        recv_template = jnp.zeros_like(send_bot)
+        recv_south = sendrecv(
+            send_bot, recv_template,
+            layout.south_rank, layout.south_rank,
+            layout.rank, layout.south_rank, comm,
+        )
+        # Inter-rank exchange: no sign flip (v is continuous across a
+        # partition cut, only flips across the actual pole).
+        south_halo = recv_south.reshape((halo,) + lon_padded.shape[1:])
 
     # --- North halo ---
-    if layout.north_rank is not None:
-        send_buf = field[-1].reshape(-1)
-        recv_template = jnp.zeros_like(send_buf)
-        recv_buf = sendrecv(
-            send_buf, recv_template,
-            layout.north_rank, layout.north_rank,
-            rank, layout.north_rank, comm,
-        )
-        padded = padded.at[-1].set(recv_buf.reshape(field[-1].shape))
+    if layout.north_rank is None:
+        if data.ndim == 2:
+            _, north_halo = _fold_pole_rows(lon_padded, halo, negate=is_vector_v)
+        else:
+            _, north_halo = _fold_pole_rows_3d(
+                lon_padded, halo, negate=is_vector_v,
+            )
     else:
-        # North pole: fold (reflect with 180° lon shift).
-        north_row = field[-1]
-        folded = jnp.roll(north_row, n_lon // 2, axis=0)
-        if is_vector_v:
-            folded = -folded
-        padded = padded.at[-1].set(folded)
+        try:
+            import mpi4jax
+            from mpi4py import MPI
+        except ImportError as exc:
+            raise ImportError(
+                "_pad_halo_latlon_mpi: multi-rank lat halo requires "
+                "mpi4jax and mpi4py."
+            ) from exc
+        comm = MPI.COMM_WORLD
+        sendrecv = _get_sendrecv_vjp(mpi4jax)
+        send_top = lon_padded[-halo:].reshape(-1)
+        recv_template = jnp.zeros_like(send_top)
+        recv_north = sendrecv(
+            send_top, recv_template,
+            layout.north_rank, layout.north_rank,
+            layout.rank, layout.north_rank, comm,
+        )
+        north_halo = recv_north.reshape((halo,) + lon_padded.shape[1:])
 
+    return jnp.concatenate([south_halo, lon_padded, north_halo], axis=0)
+
+
+def _pad_with_pole_bc_lat_mpi_1d(
+    interior, layout: LatLonBandLayout, halo: int,
+    south_value: float, north_value: float,
+):
+    """MPI pad for 1-D lat-axis metrics (sin_lat, cos_lat_v, dx_cell).
+
+    1-D fields don't have a longitude axis to pole-fold over, so the
+    standard ``exchange_halo_latlon`` (which assumes axis 1 = lon)
+    can't be reused directly.  This helper builds the (n_lat_local +
+    2*halo,) result by:
+
+      * inter-rank sendrecv on the lat axis (just like
+        ``exchange_halo_latlon``), and
+      * constant ``south_value`` / ``north_value`` pad at pole-touching
+        boundaries (instead of pole-fold).
+
+    Pole-fold would be inappropriate here even with the right shape:
+    a wall-BC pad on ``sin_lat`` wants the constant ``-1`` / ``+1``
+    (sin at the pole), not the mirror-then-shift of ``sin(lat[0])``.
+    Which is exactly what ``pad_with_pole_bc_lat`` is for.
+    """
+    interior_dtype = interior.dtype
+
+    if halo > interior.shape[0]:
+        raise ValueError(
+            f"_pad_with_pole_bc_lat_mpi_1d: halo={halo} exceeds "
+            f"n_lat_local={interior.shape[0]} on rank {layout.rank}"
+        )
+
+    # South side
+    if layout.south_rank is None:
+        south_slab = jnp.full(
+            (halo,), jnp.asarray(south_value, dtype=interior_dtype),
+        )
+    else:
+        try:
+            import mpi4jax
+            from mpi4py import MPI
+        except ImportError as exc:
+            raise ImportError(
+                "Lat-lon MPI 1-D pad (interior partition cut) requires "
+                "mpi4jax and mpi4py."
+            ) from exc
+        comm = MPI.COMM_WORLD
+        sendrecv = _get_sendrecv_vjp(mpi4jax)
+        send_bot = interior[:halo]
+        recv_template = jnp.zeros_like(send_bot)
+        south_slab = sendrecv(
+            send_bot, recv_template,
+            layout.south_rank, layout.south_rank,
+            layout.rank, layout.south_rank, comm,
+        )
+
+    # North side
+    if layout.north_rank is None:
+        north_slab = jnp.full(
+            (halo,), jnp.asarray(north_value, dtype=interior_dtype),
+        )
+    else:
+        try:
+            import mpi4jax
+            from mpi4py import MPI
+        except ImportError as exc:
+            raise ImportError(
+                "Lat-lon MPI 1-D pad (interior partition cut) requires "
+                "mpi4jax and mpi4py."
+            ) from exc
+        comm = MPI.COMM_WORLD
+        sendrecv = _get_sendrecv_vjp(mpi4jax)
+        send_top = interior[-halo:]
+        recv_template = jnp.zeros_like(send_top)
+        north_slab = sendrecv(
+            send_top, recv_template,
+            layout.north_rank, layout.north_rank,
+            layout.rank, layout.north_rank, comm,
+        )
+
+    return jnp.concatenate([south_slab, interior, north_slab], axis=0)
+
+
+def _pad_with_pole_bc_lat_mpi(
+    interior, layout: LatLonBandLayout, halo: int = 1,
+    south_value: float = 0.0, north_value: float = 0.0,
+    is_vector_v: bool = False,
+):
+    """MPI variant of :func:`legoesm.grids.halo_latlon.pad_with_pole_bc_lat`.
+
+    Pole-touching south rank → ``south_value`` constant pad.
+    Pole-touching north rank → ``north_value`` constant pad.
+    Interior partition cuts → MPI sendrecv with neighbour.
+
+    Reuses :func:`exchange_halo_latlon` for the inter-rank exchange;
+    overrides the pole-fold result with the requested constants on
+    the boundary ranks afterwards (so the wall-BC semantics is
+    preserved instead of pole-folding).  This is the SIMPLEST way
+    to reuse the existing AD-safe sendrecv machinery — we let
+    ``exchange_halo_latlon`` do the heavy lifting and then patch
+    the boundary halo slabs.
+    """
+    if halo <= 0:
+        return interior
+
+    # 1D lat-axis metrics (sin_lat, cos_lat_v_interior, dx_cell, …)
+    # don't have a lon axis to pole-fold over.  Build the result
+    # directly: constant pad at pole-touching boundaries, sendrecv
+    # at interior cuts — no call to ``exchange_halo_latlon`` (which
+    # assumes axis 1 = lon and would fail on ndim=1).
+    if interior.ndim == 1:
+        return _pad_with_pole_bc_lat_mpi_1d(
+            interior, layout, halo=halo,
+            south_value=south_value, north_value=north_value,
+        )
+
+    # Step 1: run the standard halo exchange.  Boundary ranks will
+    # get pole-folded values; interior cuts will get sendrecv'd
+    # neighbour values (which is what we want — those are NOT to
+    # be overwritten).
+    padded = exchange_halo_latlon(
+        interior, layout, halo=halo, is_vector_v=is_vector_v,
+    )
+    # Step 2: where this rank touches a pole, replace the
+    # pole-folded slab with the wall-BC constant.  Slab shapes
+    # match by construction.  We use the bcast-tuple pattern so
+    # this works for 1D (sin_lat), 2D (face metrics) and 3D
+    # (u-on-face-with-levels) fields uniformly.
+    trailing_ones = (1,) * (interior.ndim - 1)
+    if layout.south_rank is None:
+        south_const = jnp.full(
+            (halo,) + interior.shape[1:],
+            jnp.asarray(south_value, dtype=interior.dtype),
+        )
+        padded = jnp.concatenate([south_const, padded[halo:]], axis=0)
+        del trailing_ones  # silence linter on unused alias
+    if layout.north_rank is None:
+        north_const = jnp.full(
+            (halo,) + interior.shape[1:],
+            jnp.asarray(north_value, dtype=interior.dtype),
+        )
+        padded = jnp.concatenate([padded[:-halo], north_const], axis=0)
     return padded
 
 
+# ============================================================================
+# Scatter / gather
+# ============================================================================
+
+
 def scatter_state_latlon(state, layout: LatLonBandLayout):
-    """Extract rank-local band from a global lat-lon state.
+    """Extract the rank-local band from a global C-grid lat-lon state.
 
-    Parameters
-    ----------
-    state : CGridLatLonHydrostaticState
-        Global state with fields shaped (n_lat, n_lon, ...) etc.
-    layout : LatLonBandLayout
+    Each rank reads its own slice of the global arrays; we do not call
+    MPI here (callers either broadcast a global state from rank 0 or
+    each rank constructs the global initial state locally and slices).
 
-    Returns
-    -------
-    CGridLatLonHydrostaticState
-        Rank-local state with latitude dimension = n_lat_local.
+    The C-grid v-field at lat interfaces has one extra row globally
+    (shape ``(n_lat+1, n_lon, ...)``); we give each rank rows
+    ``[lat_start, lat_end+1)`` so neighbouring ranks duplicate the
+    boundary row.  The duplicated row is the *same* face — both ranks
+    must always hold the same value there.  Halo exchange of ``v``
+    after a step uses ``is_vector_v=True`` so the pole-touching rank
+    sign-flips correctly.
     """
     s, e = layout.lat_start, layout.lat_end
 
-    # Scalar fields: (n_lat, n_lon, ...) → (n_lat_local, n_lon, ...)
     T_local = state.T[s:e]
     p_s_local = state.p_s[s:e]
     phis_local = state.phis[s:e]
-
-    # C-grid u: (n_lat, n_lon+1, ...) → (n_lat_local, n_lon+1, ...)
     u_local = state.u[s:e]
-
-    # C-grid v: (n_lat+1, n_lon, ...) → (n_lat_local+1, n_lon, ...)
-    # v is at lat INTERFACES, so we need one extra row.
+    # v: lat-interface, one extra global row
     v_local = state.v[s:e + 1]
 
-    # Tracers
     tracers_local = {}
-    if hasattr(state, 'tracers') and state.tracers:
+    if getattr(state, "tracers", None):
         for name, tr in state.tracers.items():
             tracers_local[name] = tr[s:e]
 
@@ -244,83 +693,183 @@ def scatter_state_latlon(state, layout: LatLonBandLayout):
     )
 
 
-def gather_state_latlon(local_state, layout: LatLonBandLayout):
-    """Gather rank-local bands into a global state on rank 0.
+def gather_field_latlon(
+    local_arr,
+    layout: LatLonBandLayout,
+    *,
+    is_v_face: bool = False,
+):
+    """Gather a rank-local lat-banded array onto rank 0.
+
+    Used by both :func:`gather_state_latlon` (dycore-internal raw state)
+    and ``ModelDriver._gather_state_for_global_checkpoint`` (driver-side
+    Field-wrapped state).  Keep the v-row-trim convention in one place
+    so save / restart and dynamics stay in sync.
 
     Parameters
     ----------
-    local_state : CGridLatLonHydrostaticState
-        Rank-local state.
+    local_arr : jax.Array or numpy.ndarray
+        Rank-local field with first axis = lat (cell-centre for scalars
+        or face for ``v``).
     layout : LatLonBandLayout
+    is_v_face : bool
+        When True, ``local_arr`` is a v-face array (shape
+        ``(n_lat_local+1, n_lon, ...)``).  Every rank except the
+        northernmost trims its trailing row before send so the
+        concatenated global array has shape ``(n_lat_global+1, ...)``
+        rather than ``(n_lat_global + n_ranks, ...)``.
 
     Returns
     -------
-    CGridLatLonHydrostaticState or None
-        Global state on rank 0, None on other ranks.
+    jax.Array on rank 0 (concatenated global array), ``None`` on
+    other ranks.  When mpi4py is unavailable returns the input as-is.
     """
     try:
         from mpi4py import MPI
     except ImportError:
-        return local_state
+        return local_arr
 
     comm = MPI.COMM_WORLD
 
-    def _gather_field(local_field):
-        """Gather a field along the latitude axis."""
-        gathered = comm.gather(local_field, root=0)
-        if layout.rank == 0:
-            return jnp.concatenate(gathered, axis=0)
-        return None
+    arr_to_send = local_arr
+    if is_v_face and layout.rank < layout.n_ranks - 1:
+        arr_to_send = local_arr[:-1]
+    gathered = comm.gather(np.asarray(arr_to_send), root=0)
+    if layout.rank == 0:
+        return jnp.concatenate(gathered, axis=0)
+    return None
 
-    T_global = _gather_field(local_state.T)
-    p_s_global = _gather_field(local_state.p_s)
-    phis_global = _gather_field(local_state.phis)
-    u_global = _gather_field(local_state.u)
-    # v needs special handling: each rank has n_lat_local+1 rows,
-    # overlapping by 1. Take rank's [0:n_lat_local] rows, last rank
-    # adds the final row.
-    if layout.rank < layout.n_ranks - 1:
-        v_to_send = local_state.v[:-1]
+
+def scatter_field_latlon(
+    global_arr,
+    layout: LatLonBandLayout,
+    *,
+    is_v_face: bool = False,
+):
+    """Scatter a rank-0-resident global array to all ranks' bands.
+
+    Mirror of :func:`gather_field_latlon` for the restart path.  Rank 0
+    broadcasts the global array; every rank then slices its own band.
+
+    A ``bcast`` of the full global array is wasteful relative to a true
+    MPI scatterv, but at AMIP resolutions (1° = 180x360x32, ~5 MB per
+    3-D field) the simplicity wins: a restart is rare, and the
+    bcast happens once per chained job.
+
+    Parameters
+    ----------
+    global_arr : jax.Array or numpy.ndarray or None
+        Global array on rank 0 (first axis = lat).  Other ranks may
+        pass ``None``.
+    layout : LatLonBandLayout
+    is_v_face : bool
+        When True, slice ``[lat_start : lat_end+1]`` so neighbouring
+        ranks duplicate the boundary v-face row (same convention as
+        :func:`scatter_state_latlon`).
+
+    Returns
+    -------
+    jax.Array — this rank's band-local view of the global field.
+    """
+    try:
+        from mpi4py import MPI
+    except ImportError:
+        # Single-process: the caller's global array IS the rank-local
+        # band (one rank == one band == the whole world).
+        return global_arr
+
+    comm = MPI.COMM_WORLD
+
+    if layout.rank == 0:
+        if global_arr is None:
+            raise ValueError(
+                "scatter_field_latlon: rank 0 must supply the global "
+                "array; got None.  Other ranks may pass None."
+            )
+        payload = np.asarray(global_arr)
     else:
-        v_to_send = local_state.v
-    v_global = _gather_field(v_to_send)
+        payload = None
+    payload = comm.bcast(payload, root=0)
+
+    s, e = layout.lat_start, layout.lat_end
+    band = payload[s : e + 1] if is_v_face else payload[s:e]
+    return jnp.asarray(band)
+
+
+def gather_state_latlon(local_state, layout: LatLonBandLayout):
+    """Gather rank-local bands onto rank 0; returns ``None`` elsewhere.
+
+    Thin wrapper over :func:`gather_field_latlon` that handles the
+    canonical C-grid lat-lon state NamedTuple (raw jnp arrays, not
+    Field-wrapped).  Driver-side callers that hold a Field-wrapped
+    ``HydrostaticState`` should call :func:`gather_field_latlon` per
+    ``.data`` attribute directly (see
+    ``ModelDriver._gather_state_for_global_checkpoint``).
+    """
+    T_global = gather_field_latlon(local_state.T, layout)
+    p_s_global = gather_field_latlon(local_state.p_s, layout)
+    phis_global = gather_field_latlon(local_state.phis, layout)
+    u_global = gather_field_latlon(local_state.u, layout)
+    v_global = gather_field_latlon(local_state.v, layout, is_v_face=True)
+
+    tracers_global = None
+    if getattr(local_state, "tracers", None):
+        tracers_global = {}
+        for name, tr in local_state.tracers.items():
+            tracers_global[name] = gather_field_latlon(tr, layout)
 
     if layout.rank == 0:
         return local_state._replace(
             u=u_global, v=v_global, T=T_global,
             p_s=p_s_global, phis=phis_global,
+            tracers=(tracers_global if tracers_global is not None
+                     else local_state.tracers),
         )
     return None
 
 
-def _pad_state_halos(state, layout: LatLonBandLayout):
-    """Add 1-cell latitude halos to a rank-local C-grid state.
+# ============================================================================
+# Padded state + grid
+# ============================================================================
 
-    Each scalar field (T, p_s, phis) and u get 1 halo row on south
-    and north via MPI sendrecv with pole-folding at boundaries.
-    v (at lat interfaces) gets 1 halo row on each side as well.
+
+def pad_state_halos(state, layout: LatLonBandLayout, halo: int = 1):
+    """Add ``halo`` ghost lat rows to every field in a C-grid state.
+
+    Scalar fields (T, p_s, phis, tracers) and the u face-velocity get
+    standard scalar pole-fold at boundary ranks.  v is treated as a
+    vector and sign-flipped at the pole.
+
+    The ``u`` field already lives on lon interfaces; the ``halo``
+    rows added on each lat side are lon-face values from the
+    neighbour, which is what every C-grid operator expects.
 
     Parameters
     ----------
-    state : CGridLatLonHydrostaticState
-        Rank-local state (interior rows only).
+    state : CGridLatLonHydrostaticState or compatible NamedTuple
     layout : LatLonBandLayout
+    halo : int
 
     Returns
     -------
-    CGridLatLonHydrostaticState
-        State with shape (n_lat_local + 2, ...) for all fields.
+    state with all fields shaped ``(n_lat_local + 2*halo, ...)`` in
+    their first axis.  The ``v`` field, originally shape
+    ``(n_lat_local+1, ...)``, becomes ``(n_lat_local+1 + 2*halo, ...)``;
+    the south/north halos are scattered around the *interior* +
+    duplicated-boundary block.
     """
-    T_pad = _exchange_halo_latlon(state.T, layout, is_vector_v=False)
-    p_s_pad = _exchange_halo_latlon(state.p_s, layout, is_vector_v=False)
-    phis_pad = _exchange_halo_latlon(state.phis, layout, is_vector_v=False)
-    u_pad = _exchange_halo_latlon(state.u, layout, is_vector_v=False)
-    v_pad = _exchange_halo_latlon(state.v, layout, is_vector_v=True)
+    T_pad = exchange_halo_latlon(state.T, layout, halo, is_vector_v=False)
+    p_s_pad = exchange_halo_latlon(state.p_s, layout, halo, is_vector_v=False)
+    phis_pad = exchange_halo_latlon(state.phis, layout, halo, is_vector_v=False)
+    u_pad = exchange_halo_latlon(state.u, layout, halo, is_vector_v=False)
+    v_pad = exchange_halo_latlon(state.v, layout, halo, is_vector_v=True)
 
     tracers_pad = {}
-    if hasattr(state, 'tracers') and state.tracers:
+    if getattr(state, "tracers", None):
         for name, tr in state.tracers.items():
-            tracers_pad[name] = _exchange_halo_latlon(tr, layout, is_vector_v=False)
+            tracers_pad[name] = exchange_halo_latlon(
+                tr, layout, halo, is_vector_v=False,
+            )
 
     return state._replace(
         u=u_pad, v=v_pad, T=T_pad, p_s=p_s_pad, phis=phis_pad,
@@ -328,25 +877,21 @@ def _pad_state_halos(state, layout: LatLonBandLayout):
     )
 
 
-def _strip_halos(state, layout: LatLonBandLayout):
-    """Remove 1-cell latitude halos from a padded C-grid state.
+def strip_halos(state, layout: LatLonBandLayout, halo: int = 1):
+    """Remove ``halo`` ghost lat rows added by :func:`pad_state_halos`.
 
-    Parameters
-    ----------
-    state : CGridLatLonHydrostaticState
-        Padded state (n_lat_local + 2, ...).
-    layout : LatLonBandLayout
-
-    Returns
-    -------
-    CGridLatLonHydrostaticState
-        Interior-only state (n_lat_local, ...).
+    Inverse of :func:`pad_state_halos`.  Required after every
+    operator chain that ran on the padded state, before returning to
+    rank-local storage.
     """
+    if halo <= 0:
+        return state
+
     def _strip(field):
-        return field[1:-1]
+        return field[halo:-halo]
 
     tracers_stripped = {}
-    if hasattr(state, 'tracers') and state.tracers:
+    if getattr(state, "tracers", None):
         for name, tr in state.tracers.items():
             tracers_stripped[name] = _strip(tr)
 
@@ -360,79 +905,398 @@ def _strip_halos(state, layout: LatLonBandLayout):
     )
 
 
-def _build_padded_grid(grid, layout: LatLonBandLayout):
-    """Build a sub-grid for the padded domain (interior + 1-cell halos).
+def slice_latlon_grid_to_band(grid, layout: LatLonBandLayout):
+    """Slice a global ``LatLonGrid`` to this rank's lat band.
 
-    Slices the global grid's latitude-dependent arrays to cover
-    ``[lat_start-1, lat_end+1)`` (clamped and edge-padded at poles),
-    giving ``n_lat_local + 2`` rows.  All LatLonGrid fields are updated
-    consistently so operators see correct metrics.
+    All latitude-dependent metric arrays (1-D: ``lat``, ``cos_lat``,
+    ``sin_lat``, ``dy``; 2-D: ``lat2d``, ``lon2d``, ``f``, ``dx``,
+    ``area``) are sliced along axis 0 to ``[lat_start:lat_end]``.
+    The scalar ``total_area`` is REPLACED with the rank's *global*
+    sphere area via ``global_sum_mpi(rank_local_band_area)`` so that
+    the mass fixer's uniform p_s correction divides by the right
+    denominator (the rank-local sum would be the band area only).
+
+    The ``n_lat`` field on the returned grid is the rank-local row
+    count (``layout.n_lat_local``), so downstream code that reads
+    ``grid.n_lat`` sees what this rank actually owns.
+
+    Used by
+    -------
+    * ``ModelDriver.setup()`` when ``grid_type=latlon`` and the
+      runtime bootstrap activated MPI — see Stage 3-B in commit
+      log.
+    * ``make_latlon_mpi_step``'s ``fixer_model`` construction —
+      same operation, kept inlined there for the wrapper-function
+      entry-point that bypasses ModelDriver.
+    * Multi-rank tests in
+      ``tests/distributed/test_latlon_mpi_step.py`` (extract from
+      the ad-hoc ``_make_local_model`` helper).
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+        Global grid covering the full sphere.
+    layout : LatLonBandLayout
+        This rank's band.
+
+    Returns
+    -------
+    LatLonGrid
+        Rank-local grid with global ``total_area`` (allreduced).
     """
+    from legoesm.parallel.reductions import global_sum_mpi
     s, e = layout.lat_start, layout.lat_end
-    s_pad = max(s - 1, 0)
-    e_pad = min(e + 1, layout.n_lat_global)
-
-    def _slice_1d(arr):
-        sliced = arr[s_pad:e_pad]
-        ps = 1 if s == 0 else 0
-        pn = 1 if e == layout.n_lat_global else 0
-        if ps + pn > 0:
-            sliced = jnp.pad(sliced, (ps, pn), mode='edge')
-        return sliced
-
-    def _slice_2d(arr):
-        sliced = arr[s_pad:e_pad]
-        ps = 1 if s == 0 else 0
-        pn = 1 if e == layout.n_lat_global else 0
-        if ps + pn > 0:
-            sliced = jnp.pad(sliced, [(ps, pn), (0, 0)], mode='edge')
-        return sliced
-
-    area_pad = _slice_2d(grid.area)
+    band_area = grid.area[s:e, :]
+    band_total = jnp.sum(band_area)
+    # Allreduce → global sphere area.  Under the local backend
+    # this is a no-op (returns the local value unchanged), so the
+    # function also works correctly at single-rank.
+    global_total = global_sum_mpi(band_total)
     return grid._replace(
-        n_lat=layout.n_lat_local + 2,
-        lat=_slice_1d(grid.lat),
-        lat2d=_slice_2d(grid.lat2d),
-        lon2d=_slice_2d(grid.lon2d),
-        cos_lat=_slice_1d(grid.cos_lat),
-        sin_lat=_slice_1d(grid.sin_lat),
-        f=_slice_2d(grid.f),
-        dx=_slice_2d(grid.dx),
-        area=area_pad,
-        total_area=jnp.sum(area_pad),
+        n_lat=layout.n_lat_local,
+        lat=grid.lat[s:e],
+        lat2d=grid.lat2d[s:e, :],
+        lon2d=grid.lon2d[s:e, :],
+        cos_lat=grid.cos_lat[s:e],
+        sin_lat=grid.sin_lat[s:e],
+        # v-face arrays span ``[lat_start, lat_end+1)`` so each rank
+        # holds the v-face row shared with its northern neighbour.
+        # Matches the v-state-array slicing in ``scatter_state_latlon``.
+        # Without this, the polar-filter v-face mask would be sized
+        # against the GLOBAL v-face axis on every rank.
+        lat_v=grid.lat_v[s:e + 1],
+        cos_lat_v=grid.cos_lat_v[s:e + 1],
+        dy=grid.dy[s:e],
+        f=grid.f[s:e, :],
+        dx=grid.dx[s:e, :],
+        area=band_area,
+        total_area=global_total,
     )
+
+
+def pole_v_bc_for_layout(layout: LatLonBandLayout) -> tuple[bool, bool]:
+    """Return the ``(south_pole, north_pole)`` flags for a band.
+
+    True at an end means that end of this rank's band is the *actual*
+    global pole — the wall-BC v=0 enforcement must fire there.
+    False means that end is an interior partition cut (shared with a
+    neighbouring rank's v-row) and must NOT be zeroed.
+
+    Used to set ``CGridLatLonPrimitiveEquationConfig.pole_v_bc``.
+    """
+    return (layout.south_rank is None, layout.north_rank is None)
+
+
+def slice_latlon_state_to_band(state, layout: LatLonBandLayout):
+    """Slice a global ``CGridLatLonHydrostaticState`` to a rank-local band.
+
+    Thin alias for :func:`scatter_state_latlon` exposed at the
+    function level with a name that mirrors
+    :func:`slice_latlon_grid_to_band` — same convention for callers
+    who slice the grid + state at ModelDriver setup time.
+    """
+    return scatter_state_latlon(state, layout)
+
+
+def build_padded_grid(grid, layout: LatLonBandLayout, halo: int = 1):
+    """Build a ``LatLonGrid`` for the padded local domain (interior + halos).
+
+    Interior cells (where the rank's band lies) copy the global grid's
+    metrics bit-exactly.  Halo cells on **interior partition cuts**
+    (neighbour rank present) likewise slice the global grid.  Halo
+    cells **past a pole** are filled by **linearly extrapolating
+    ``lat``** and recomputing all derived metrics (``sin_lat``,
+    ``cos_lat``, ``f``, ``dx``, ``area``) from the extended ``lat``
+    using the same formulas as :func:`create_latlon_grid`.
+
+    Why linear extrapolation
+    ------------------------
+    The earlier ``mode='edge'`` pad produced *duplicate* latitudes at
+    the halo (``[lat[0], lat[0], lat[0], lat[1], ...]``).  The
+    canonical ``curl_vertex_cgrid`` then computes vertex areas as
+    ``R² dlon |sin_ext[k+1] - sin_ext[k]|`` over the entire padded
+    lat axis, giving ``A_vertex = 0`` at any pair of duplicate-lat
+    rows — and ``zeta = circ / 0 = ±Inf`` propagates into the
+    interior via the absolute-vorticity averaging onto u/v faces.
+    Diagnostic in ``scripts/_diag_mpi_step_nans.py`` pinpointed this.
+
+    Linear extrapolation past the pole keeps ``lat`` strictly
+    monotonic, ``A_vertex > 0`` everywhere, and (critically) the
+    interior lat values bit-exactly equal to the global grid's — so
+    the operator's stencils at interior cells are unchanged from
+    serial.  Halo cell *outputs* still get stripped after the step;
+    only the freedom from spurious zeros at intermediate stages is
+    what matters.
+
+    Assumptions
+    -----------
+    Uniform-``dlat`` lat-lon grid (the regular case used for AMIP).
+    Mercator and tripolar grids carry per-row ``dy`` / fold metadata
+    that this builder does NOT extrapolate yet — Stage 3 follow-up.
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+    layout : LatLonBandLayout
+    halo : int
+
+    Returns
+    -------
+    LatLonGrid with ``n_lat = n_lat_local + 2*halo``, all metrics
+    derived consistently from the (extrapolated where necessary)
+    extended ``lat``.
+    """
+    if halo < 0:
+        raise ValueError(f"halo must be >= 0, got {halo}")
+    if halo == 0:
+        return grid._replace(
+            n_lat=layout.n_lat_local,
+            lat=grid.lat[layout.lat_start:layout.lat_end],
+            lat2d=grid.lat2d[layout.lat_start:layout.lat_end, :],
+            lon2d=grid.lon2d[layout.lat_start:layout.lat_end, :],
+            cos_lat=grid.cos_lat[layout.lat_start:layout.lat_end],
+            sin_lat=grid.sin_lat[layout.lat_start:layout.lat_end],
+            dy=grid.dy[layout.lat_start:layout.lat_end],
+            f=grid.f[layout.lat_start:layout.lat_end, :],
+            dx=grid.dx[layout.lat_start:layout.lat_end, :],
+            area=grid.area[layout.lat_start:layout.lat_end, :],
+            total_area=jnp.sum(
+                grid.area[layout.lat_start:layout.lat_end, :]
+            ),
+        )
+
+    s, e = layout.lat_start, layout.lat_end
+    n_lat_g = layout.n_lat_global
+    s_pad = max(s - halo, 0)
+    e_pad = min(e + halo, n_lat_g)
+    pad_s = halo - (s - s_pad)   # rows to fabricate past south pole
+    pad_n = halo - (e_pad - e)   # rows to fabricate past north pole
+
+    # ---- Extended lat past poles: step *from the pole boundary* ----
+    # Linear extrapolation by ``dlat`` from the cell centers produces
+    # halo lat values that are SYMMETRIC across the pole to interior
+    # rows (since cell centers sit at ``-π/2 ± dlat/2``).  ``sin`` is
+    # symmetric about ``-π/2`` (``sin(-π/2 + x) = sin(-π/2 - x) =
+    # -cos(x)``), so symmetric lat values yield identical ``sin``
+    # values and ``A_vertex = R² dlon |sin Δ| = 0`` in the operator
+    # — bringing back the original NaN bug.  Instead, treat the
+    # pole as the canonical reference: place halo cell centers at
+    # ``-π/2 - dlat * k`` (south) and ``π/2 + dlat * k`` (north) for
+    # k = 1, 2, …, halo.  This gives strictly monotonic ``sin`` in
+    # the halo, A_vertex > 0 everywhere, and interior lat values
+    # remain untouched (bit-exact to serial).
+    dlat = float(grid.dlat)
+    south_pole_lat = -float(jnp.pi) / 2.0
+    north_pole_lat = float(jnp.pi) / 2.0
+    lat_sliced = grid.lat[s_pad:e_pad]
+    extended_lat = lat_sliced
+    if pad_s > 0:
+        south_extrap = (
+            south_pole_lat - dlat * jnp.arange(pad_s, 0, -1)
+        )
+        extended_lat = jnp.concatenate([south_extrap, extended_lat])
+    if pad_n > 0:
+        north_extrap = (
+            north_pole_lat + dlat * jnp.arange(1, pad_n + 1)
+        )
+        extended_lat = jnp.concatenate([extended_lat, north_extrap])
+
+    # Recover ``omega`` from the original grid's Coriolis field so the
+    # rebuilt grid carries the same rotation rate (the LatLonGrid
+    # NamedTuple does not store ``omega`` directly).  Use the
+    # interior row furthest from the pole so cos(lat) is well above
+    # the clamp floor.
+    mid = grid.lat.shape[0] // 2
+    omega_eff = float(grid.f[mid, 0] / (2.0 * grid.sin_lat[mid]))
+
+    # Delegate the metric construction to the shared helper so the
+    # serial create_latlon_grid path and this MPI extension stay
+    # algebraically identical.  Interior cells of the extended grid
+    # come out bit-for-bit equal to the original grid (same formulas,
+    # same lat values); halo cells are freshly computed from the
+    # extrapolated lat.
+    from legoesm.grids.latlon import _build_uniform_latlon_grid_from_axes
+    return _build_uniform_latlon_grid_from_axes(
+        lat=extended_lat,
+        lon=grid.lon,
+        dlat=dlat,
+        dlon=float(grid.dlon),
+        radius=float(grid.radius),
+        omega=omega_eff,
+        dtype=grid.lat.dtype,
+    )
+
+
+# ============================================================================
+# Stage-1: dry C-grid PE MPI step
+# ============================================================================
 
 
 def make_latlon_mpi_step(
     model,
-    grid,
     layout: LatLonBandLayout,
-    sigma,
-    config,
+    *,
+    halo: int = 2,  # kept for backward-compat signature; unused now
 ) -> Callable:
-    """Create an MPI-aware step function for the lat-lon C-grid dycore.
+    """Build an MPI-aware step function for the lat-lon C-grid dycore.
 
-    Not yet implemented.  True lat-lon MPI scaling requires adapting
-    the C-grid operators (gradient, divergence, Coriolis, polar filter)
-    to work on latitude sub-domains with halo exchange, which is a
-    significant refactor.  The infrastructure for domain decomposition
-    (``LatLonBandLayout``, ``scatter_state_latlon``,
-    ``gather_state_latlon``, ``_exchange_halo_latlon``) is in place;
-    what remains is wiring halo exchange into each operator's boundary
-    treatment and the model's conservation/polar-filter logic.
+    Thin backend-aware wrapper (Step 4 of the Option-(ii) refactor).
+    Previous iterations of this function pre-padded state on a padded
+    grid and ran a "padded model"; that approach hit an architectural
+    mismatch at the pole because the dycore's operator-internal
+    pole-BC pads were applied at the *padded* array's outer faces, not
+    at the actual global pole rows.  The new design activates the
+    backend-dispatched
+    :func:`legoesm.grids.halo_latlon.pad_halo_latlon` family — so
+    every operator that needs halo data fetches it via inter-rank
+    sendrecv at partition cuts and pole-fold / wall-BC constants at
+    boundary ranks, with no pre-padding of state on the caller side.
 
-    Raises
-    ------
-    NotImplementedError
-        Always.  Use single-rank execution for lat-lon benchmarks,
-        or cubed-sphere / icosahedral grids for MPI scaling.
+    Architecture
+    ------------
+    1. ``set_halo_backend("mpi", layout)`` is activated once at
+       factory time.  Every subsequent ``pad_halo_latlon*``,
+       ``pad_ns_zero``, and ``pad_with_pole_bc_lat`` call inside the
+       dycore operators dispatches through the MPI sendrecv path.
+       ``_is_distributed()`` returns True, which gates the
+       allreduce inside ``_batch_global_area_sums`` and
+       ``zero_mean_tendency`` (the mass-fixer reductions).
+
+    2. A rank-local ``mpi_model`` is built once:
+
+       * **Grid** — same rank-local grid as ``model.grid`` *except*
+         ``total_area`` is replaced with the global sphere area
+         (``global_sum_mpi`` over the rank-local band area).  This is
+         what the mass fixer's uniform-correction divisor needs.
+         The per-cell ``area`` field stays rank-local.
+
+       * **Config** — ``pole_v_bc = (south_rank is None, north_rank
+         is None)`` so only the boundary ranks zero the actual pole
+         rows; interior ranks leave their band-edge v-rows alone
+         (those are interior v-faces shared with the neighbour rank
+         and kept consistent by halo exchange).  ``pole_v_bc_offset``
+         stays 0 since we're operating on rank-local state, not on
+         a pre-padded array.
+
+    3. ``step_fn`` is a one-line delegate to ``mpi_model._step_cgrid``.
+       No padding, no stripping, no external fixer call — the
+       backend-aware operators inside ``_step_cgrid`` handle all the
+       halo plumbing.
+
+    Polar filter is still gated as a Stage-3 follow-up.  Physics
+    (``physics_fn``) and prescribed-SST scatter for AMIP also belong
+    to Stage 3 — surfaced as ``physics_fn=None`` here.
+
+    Parameters
+    ----------
+    model : CGridLatLonPrimitiveEquationModel
+        Built against the **rank-local** grid (sliced from the
+        global grid for this band).  ``model.grid.total_area`` may be
+        either the band area or the sphere area; the wrapper
+        re-allreduces it defensively so callers don't have to remember
+        which.
+    layout : LatLonBandLayout
+    halo : int, default 2
+        Kept for backward-compatible signature.  No longer used —
+        the operator-internal halo widths (1 for compact stencils,
+        2 for PPM and biharmonic) are determined by each operator
+        as it calls ``pad_halo_latlon(field, halo=k)``.
+
+    Returns
+    -------
+    step_fn : callable
+        ``step_fn(local_state, dt, *, target_mass=None) -> local_state``.
+
+    Side effect
+    -----------
+    Activates ``set_halo_backend("mpi", layout)`` at the global
+    module level.  Caller is responsible for resetting via
+    ``set_halo_backend("local")`` once the run is finished — see
+    ``ModelDriver._finalize_run`` for the cubed-sphere precedent.
+    Tests that share a Python process should reset between cases.
+
+    Note on ``halo`` kwarg
+    ----------------------
+    The previous (pre-pad) implementation took ``halo`` to size its
+    padded state buffer.  In the new design no buffer exists — each
+    operator picks its own halo width from the
+    backend-dispatched ``pad_halo_latlon(..., halo=k)`` call.  The
+    kwarg is retained for signature stability with existing test
+    fixtures and the (now legacy) tests/parallel/test_latlon_mpi_step_serial.py.
     """
-    raise NotImplementedError(
-        "Lat-lon MPI local-compute stepping is not yet implemented. "
-        "The domain decomposition infrastructure (LatLonBandLayout, "
-        "scatter/gather, halo exchange) exists, but the C-grid "
-        "operators and model internals (polar filter, mass fixer) "
-        "require adaptation for latitude sub-domains.  Run lat-lon "
-        "benchmarks with a single rank, or use cubed-sphere or "
-        "icosahedral grids for MPI scaling tests."
+    # Local imports keep this module importable without the dycore on
+    # the path (important for the Stage-0 halo tests which don't need
+    # the heavy dycore stack).
+    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        CGridLatLonPrimitiveEquationModel,
     )
+    from legoesm.grids.halo import set_halo_backend
+    from legoesm.parallel.reductions import global_sum_mpi
+
+    # Stage 3-E (commit 8b736e04): polar filter is now MPI-safe.  The
+    # filter algorithm is lon-only FFT (``jnp.fft.rfft`` along axis -1)
+    # so each rank applies it independently on its own band — no MPI
+    # exchange is required for the filter itself.  Slice-equivariance
+    # of the mask + filter output is pinned by
+    # ``tests/distributed/test_latlon_mpi_polar_filter.py``.
+
+    # Activate the MPI halo backend.  Every pad_halo_latlon /
+    # pad_with_pole_bc_lat call inside the dycore now dispatches
+    # through inter-rank sendrecv at partition cuts and constant /
+    # pole-fold pads at boundary ranks.  This also flips
+    # ``_is_distributed()`` so the mass-fixer reductions allreduce.
+    set_halo_backend("mpi", layout)
+
+    # Build the MPI-aware model: rank-local grid with allreduced
+    # ``total_area`` (mass-fixer divisor); pole_v_bc tracks which
+    # ends of the band touch actual global poles.
+    global_total_area = global_sum_mpi(model.grid.total_area)
+    mpi_grid = model.grid._replace(total_area=global_total_area)
+    mpi_config = model.config._replace(
+        pole_v_bc=(
+            layout.south_rank is None,
+            layout.north_rank is None,
+        ),
+        # No padding → no offset.  The dycore zeros v at v[0] / v[-1]
+        # of its rank-local input — those ARE the band's lat ends,
+        # which are the actual poles ONLY at pole-touching ranks
+        # (handled by the pole_v_bc tuple above).
+        pole_v_bc_offset=0,
+    )
+    # Use the SAME ``dt`` the input model was constructed with so the
+    # polar-filter mask is sized identically to the serial reference
+    # (Codex Stage 3-E round 2 BLOCK #2: ``_max_dt`` is the pole-cell
+    # CFL — using it here would size the mask for the tiny pole-CFL
+    # dt instead of the actual production dt, masking modes the
+    # production dt does not require).  ``model.effective_dt`` is the
+    # canonical post-clamp dt set by ``component_factory``;
+    # ``model.dt`` is the constructor arg the model stashed.  Prefer
+    # effective_dt and fall back to the constructor dt.
+    _mpi_dt = getattr(
+        model, "effective_dt",
+        getattr(model, "dt", None),
+    )
+    if _mpi_dt is None:
+        _mpi_dt = getattr(model, "_max_dt", 600.0)
+    mpi_model = CGridLatLonPrimitiveEquationModel(
+        grid=mpi_grid,
+        sigma_coord=model.sigma_coord,
+        config=mpi_config,
+        dt=_mpi_dt,
+    )
+
+    def step_fn(local_state, dt, *, target_mass=None):
+        # No pre-pad, no strip.  The operators inside ``_step_cgrid``
+        # call backend-aware halo helpers that, under
+        # ``_halo_backend == "mpi"``, MPI-sendrecv with neighbouring
+        # ranks for halo cells at partition cuts and apply the
+        # serial pole-fold / wall-BC constants at boundary ranks.
+        # The mass fixer's allreduce fires through the same
+        # ``_is_distributed()`` gate.
+        return mpi_model._step_cgrid(
+            local_state, dt,
+            target_mass=target_mass,
+            physics_fn=None,
+        )
+
+    return step_fn

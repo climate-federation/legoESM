@@ -1,0 +1,6 @@
+base: config/aimip/t106_headtohead/base.yaml
+variants:
+- sfno_physics
+output_dir: results/aimip_t106_headtohead_sfno_physics_s0
+cfg_overrides:
+  sfno_seed: 0

@@ -58,8 +58,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         choices=["sigma", "hybrid"])
     parser.add_argument("--p-top", type=float, default=None)
     parser.add_argument("--stretching", type=float, default=None)
+    # ``mpas`` is the canonical name for the SCVT Voronoi mesh + TRiSK
+    # discretization (Ringler 2010 / Thuburn 2009), matching the ocean
+    # side which has always used this name.  Legacy aliases
+    # ``voronoi`` / ``icosahedral`` / ``mpas_voronoi`` are accepted and
+    # normalised by ``legoesm.driver.config.normalize_grid_type``
+    # before reaching any internal dispatch.
     parser.add_argument("--grid-type", type=str, default="cubed_sphere",
-                        choices=["cubed_sphere", "gaussian", "latlon", "voronoi"])
+                        choices=["cubed_sphere", "gaussian", "latlon",
+                                 "mpas",
+                                 "voronoi", "icosahedral", "mpas_voronoi"])
     # The canonical names in `supported_matrix.py` are:
     #   - centered       (cubed_sphere, latlon)
     #   - finite_volume  (cubed_sphere, latlon)
@@ -87,6 +95,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # ``--implicit-grav-wave-use-pcg --implicit-grav-wave-damping
     # 1e8`` (typical α ~ 1e7–1e8 m²/s) to remove the explicit-CFL
     # ceiling and enable larger ``--dt``.
+    # Stage 3-E: Fourier polar filter for lat-lon C-grid.  Lifts the
+    # pole-cell CFL constraint by truncating high-wavenumber Fourier
+    # modes near the poles, so ``--dt`` can be set by the equatorial
+    # CFL.  Essential for 1° AMIP runs spanning >10 yr.
+    parser.add_argument(
+        "--use-polar-filter", action="store_true",
+        help="Enable Fourier polar filter for lat-lon C-grid (lifts "
+             "pole-cell CFL → enables larger --dt at high resolution).",
+    )
+    parser.add_argument(
+        "--polar-filter-cutoff-deg", type=float, default=60.0,
+        help="Latitude (degrees) poleward of which the polar filter "
+             "is applied (default 60.0).",
+    )
+    parser.add_argument(
+        "--polar-filter-max-wave-speed", type=float, default=300.0,
+        help="Max wave speed [m/s] used to size the polar filter "
+             "CFL mask (default 300.0 = external gravity wave).",
+    )
     parser.add_argument(
         "--implicit-grav-wave-use-pcg", action="store_true",
         default=False,
@@ -364,6 +391,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         dt=args.dt,
         implicit_grav_wave_use_pcg=args.implicit_grav_wave_use_pcg,
         implicit_grav_wave_damping=args.implicit_grav_wave_damping,
+        # Stage 3-E: polar filter for lat-lon C-grid pole-CFL relief.
+        use_polar_filter=args.use_polar_filter,
+        polar_filter_cutoff_deg=args.polar_filter_cutoff_deg,
+        polar_filter_max_wave_speed=args.polar_filter_max_wave_speed,
     )
 
     output_config = OutputConfig(
@@ -495,6 +526,13 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
     # triple.  ``cdgrid`` is the cubed-sphere C-D grid; keep it as-is.
     if args.discretization == "cgrid" and args.grid_type == "latlon":
         args.discretization = "latlon_cgrid"
+
+    # Normalise the SCVT Voronoi mesh aliases (voronoi / icosahedral /
+    # mpas-as-grid_type) to the canonical ``mpas_voronoi`` before any
+    # downstream consumer sees them.  See
+    # ``legoesm.driver.config.normalize_grid_type``.
+    from legoesm.driver.config import normalize_grid_type
+    args.grid_type = normalize_grid_type(args.grid_type)
 
     # Issue #275 fix C: ``--production-profile`` bundles defaults that
     # the CLI cannot ship as global defaults (because they would silently

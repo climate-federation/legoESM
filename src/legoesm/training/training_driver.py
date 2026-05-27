@@ -201,7 +201,7 @@ def train_physics_params(
                 model, step_unified, grid, sigma, dt, **seg_kw,
             )
             pred = single_day_rollout(ic, forcing, run_seg.raw, dt=dt)
-            return combined_loss(pred, target, sigma_full, config=loss_config)
+            return combined_loss(pred, target, sigma_full, grid=grid, config=loss_config)
         return loss_fn
 
     return _training_loop(
@@ -257,7 +257,7 @@ def train_neural_gcm(
                 model, step_unified, grid, sigma, dt,
             )
             pred = single_day_rollout(ic, forcing, run_seg.raw, dt=dt)
-            return combined_loss(pred, target, sigma_full, config=loss_config)
+            return combined_loss(pred, target, sigma_full, grid=grid, config=loss_config)
         return loss_fn
 
     return _training_loop(
@@ -330,7 +330,7 @@ def train_sfno_coupled(
                 model, step_unified, grid, sigma, dt,
             )
             pred = single_day_rollout(ic, forcing, run_seg.raw, dt=dt)
-            return combined_loss(pred, target, sigma_full, config=loss_config)
+            return combined_loss(pred, target, sigma_full, grid=grid, config=loss_config)
         return loss_fn
 
     return _training_loop(

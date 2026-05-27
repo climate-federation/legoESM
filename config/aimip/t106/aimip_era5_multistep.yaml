@@ -1,0 +1,115 @@
+# AIMIP multi-step + CRPS configuration at T106 (~1.1 deg).
+#
+# Bumps the spectral truncation from the T21 smoke profile up to
+# T106 (160 lat x 320 lon, ncol = 51200) so the held-out forecast
+# RMSE is in the same regime as the historic ~1.5 K T_500 number
+# from the production AIMIP run.  Loss + multi-step chain stay the
+# same as ``../aimip_era5_multistep.yaml`` (4 chained 6h rollouts,
+# CRPS + MSE).
+#
+# Sized for the burst partition (14-day walltime).  Per-variant
+# wall clock at this resolution + K=4 chain is ~3-8 h on a single
+# RTX 8000.  Each variant ships in its own SLURM job
+# (``scripts/run_aimip_t106_*.sbatch``) so the three variants run
+# in parallel on separate GPUs and the total wall clock is the
+# slowest variant, not the sum.
+
+era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
+cache_dir: ".cache/aimip_era5"
+
+# 12-day train / 6-day eval windows match the T21 multistep run so
+# the resolution lift is the only variable we change here.
+train_windows:
+  - [2015,   0,  3]
+  - [2015, 180,  3]
+  - [2016,   0,  3]
+  - [2016, 180,  3]
+
+eval_windows:
+  - [2017,   0,  3]
+  - [2017, 180,  3]
+
+train_year: 2015
+eval_year:  2017
+train_period: ["2015-01-01", "2016-12-31"]
+eval_period:  ["2017-01-01", "2017-12-31"]
+
+n_train_days: 12
+n_eval_days:  6
+
+# T106 = 160 lat x 320 lon, ncol = 51200, dx ~ 110 km at the equator.
+# dt = 400 s keeps gravity-wave CFL safe for SSP-RK3 + the implicit
+# spectral filter.  18 dycore steps per 6 h segment at T21
+# (dt=1200 s) -> 54 steps per 6 h segment at T106 (dt=400 s);
+# 4 chained rollouts -> 216 step-samples per IC.
+aimip_grid: "gaussian"
+n_max: 106
+nlev: 8
+dt: 400.0
+
+aimip_n_epochs: 4
+aimip_patience: 2
+aimip_min_delta: 1.0e-3
+aimip_lr: 3.0e-4
+aimip_warmup: 10
+aimip_weight_decay: 1.0e-5
+aimip_grad_clip: 1.0
+aimip_optimizer: "adamw"
+
+# Gray two-stream radiation (same as the T21 multistep smoke).
+# RRTMGP at T106 + K=4 chain would blow wall clock; can be turned
+# back on in the fullperiod follow-on if the radiative loss-of-skill
+# turns out to matter.
+aimip_radiation: "gray"
+aimip_rad_update_interval: 6
+
+aimip_spatial_surface: false
+aimip_spatial_init_std: 0.0
+aimip_spatial_seed: 0
+aimip_spatial_lr_scale: 1.0
+
+aimip_rollout_days: 1
+aimip_rollout_hours: 6
+
+loss:
+  w_T: 1.0
+  w_u: 0.5
+  w_v: 0.5
+  w_q: 0.3
+  w_ps: 0.3
+  # Area-weighted bias-penalty (squared global mean of error, normalised
+  # by scale²).  Wired into both spectral_state_vs_carry_loss and
+  # carry_mse so the same weights work across both training paths.
+  w_bias_T: 100.0
+  w_bias_u: 1.0
+  w_bias_v: 1.0
+  w_bias_ps: 1.0
+  # Grid-space deterministic CRPS (M=1 = area-weighted MAE).
+  w_crps_T: 0.5
+  w_crps_u: 0.25
+  w_crps_v: 0.25
+  w_crps_q: 0.5
+  w_crps_ps: 0.15
+  # Spectral-space deterministic CRPS (M=1 = MAE of SH coefficient
+  # differences).  Penalises errors in the spectral pattern of T, u,
+  # v, q that the grid-MAE underweights when error is concentrated at
+  # small scales.  Requires JAX_ENABLE_X64=True.
+  w_spec_crps_T: 0.5
+  w_spec_crps_u: 0.25
+  w_spec_crps_v: 0.25
+  w_spec_crps_q: 0.5
+  # Multi-day autoregressive supervision: chain 1d / 2d / 3d
+  # forecasts from the same IC and accumulate a weighted loss across
+  # leads.  Total rollout = 72h = 648 dycore steps at T106/dt=400s
+  # (~3x the previous [6,12,18,24] sub-day chain), so wall-clock per
+  # epoch goes up commensurately.  Declining per-lead weight reflects
+  # that later leads have larger irreducible error.
+  multi_step_hours: [24, 48, 72]
+  multi_step_weights: [1.0, 0.7, 0.5]
+  spectral_weight: 0.0  # legacy combined_loss path -- unused by AIMIP
+  level_weighting: "pressure"
+  normalize_by_scale: true
+  T_scale: 30.0
+  wind_scale: 20.0
+  q_scale: 5.0e-3
+  ps_scale: 1000.0

@@ -351,11 +351,36 @@ class ParallelRuntime:
             halo = HaloBackend.HYBRID
             reduction = ReductionBackend.HYBRID
 
-        # Build topology for MPI modes
+        # Build topology for MPI modes — grid-specific.
         topology = None
         if is_mpi and grid_type == "cubed_sphere":
             from legoesm.parallel.comm import build_comm_topology
             topology = build_comm_topology(rank, world_size)
+        elif is_mpi and grid_type == "latlon":
+            # Lat-lon band MPI: build a LatLonBandLayout and activate
+            # the MPI halo backend via the standalone helper.  This
+            # is what makes ``pad_halo_latlon*`` / ``pad_ns_zero`` /
+            # ``pad_with_pole_bc_lat`` inside the dycore dispatch
+            # through MPI sendrecv at partition cuts and pole-fold /
+            # wall-BC constants at boundary ranks — see
+            # legoesm.parallel.distributed.initialize_distributed_latlon
+            # for the full activation contract.
+            #
+            # Requires ``grid_n`` (= n_lat) to be passed; cubed-sphere
+            # callers historically pass this as the per-face N, and
+            # for lat-lon AMIP we use n_lat which the CLI postprocessor
+            # threads through ExperimentConfig.grid.resolution.
+            if grid_n is None or grid_n <= 0:
+                raise ValueError(
+                    "Lat-lon MPI initialisation requires grid_n (=n_lat) "
+                    "> 0.  Got grid_n=%r.  Pass it through "
+                    "ParallelRuntime.create(grid_n=...) or set "
+                    "config.grid.resolution before driver setup." % (grid_n,)
+                )
+            from legoesm.parallel.distributed import (
+                initialize_distributed_latlon,
+            )
+            topology = initialize_distributed_latlon(global_n_lat=grid_n)
 
         rt = cls(
             mode=mode,

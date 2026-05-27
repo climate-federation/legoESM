@@ -64,6 +64,28 @@ class LossConfig(NamedTuple):
     w_crps_u: float = 0.0
     w_crps_v: float = 0.0
     w_crps_ps: float = 0.0
+    # Specific humidity carries the heaviest tail of any prognostic
+    # (convective + microphysical noise concentrates the error in
+    # extreme columns).  An MAE / M=1-CRPS term down-weights those
+    # outliers relative to a pure MSE objective and stabilises the
+    # column-level error distribution; recommended to set this
+    # higher than the corresponding MSE weight ``w_q`` so the CRPS
+    # contribution dominates for q.
+    w_crps_q: float = 0.0
+    # Spectral-space CRPS (deterministic M=1 limit = MAE of the
+    # spectral-coefficient error).  Distinct from the grid-space
+    # ``w_crps_*`` family: takes ``sh_analysis_3d(pred - target)`` and
+    # averages ``|.|`` over all (l, m, level) coefficients, normalised
+    # by the variable scale (NOT scale^2, since |error| is in raw
+    # units).  Penalises errors in the large-scale spectral pattern in
+    # commensurate units with the grid losses.  Only the spectral-PE
+    # path implements this (``spectral_state_vs_carry_loss``); the
+    # grid-only ``carry_mse`` path silently ignores these weights.
+    # Requires JAX_ENABLE_X64=True (SH transforms need float64).
+    w_spec_crps_T: float = 0.0
+    w_spec_crps_u: float = 0.0
+    w_spec_crps_v: float = 0.0
+    w_spec_crps_q: float = 0.0
     # Forecast horizons (in hours since IC) at which the loss is
     # evaluated when multi-step supervision is on.  Empty tuple
     # disables it (legacy single-target behaviour).  Set e.g.
@@ -164,27 +186,40 @@ def carry_mse(
     def _lat_weighted_mean(sq_err: jax.Array) -> jax.Array:
         """Mean over all dims, with optional latitude weighting.
 
-        When ``lat_weights`` is provided and ``sq_err`` has an axis
-        of length ``n_lat = len(lat_weights)``, the mean is
+        When ``lat_weights`` is provided and ``sq_err`` has *exactly
+        one* axis of length ``n_lat = len(lat_weights)``, the mean is
         replaced by the area-weighted mean
         ``mean(sq · lat_w) · n_lat / Σ(lat_w)`` (resolution-
         independent, identical correction as iter-63 ml/loss.py).
-        Without lat_weights or on non-Gaussian shapes (e.g.
-        cubed-sphere with leading face dim) this falls back to
-        a uniform mean.
+
+        Disambiguation rules (size-matching is intentionally strict
+        because the bias term is silent-failure-prone otherwise):
+        - 0 axes match n_lat → uniform mean (e.g. cubed-sphere where
+          leading face dim differs from n_lat).
+        - 1 axis matches → use it.
+        - >1 axes match → raise.  Callers seeing this should pass
+          their carry field with an unambiguous lat axis (e.g. by
+          flattening a batch dim that coincidentally equals n_lat).
         """
         if lat_weights is None:
             return jnp.mean(sq_err)
         n_lat_w = lat_weights.shape[0]
-        # Apply weight on the FIRST axis of length n_lat.
-        for axis, dim in enumerate(sq_err.shape):
-            if dim == n_lat_w:
-                shape = [1] * sq_err.ndim
-                shape[axis] = n_lat_w
-                w = lat_weights.reshape(shape)
-                return jnp.mean(sq_err * w) * n_lat_w / jnp.sum(lat_weights)
-        # No matching axis — fall back to uniform mean.
-        return jnp.mean(sq_err)
+        matching_axes = [a for a, d in enumerate(sq_err.shape) if d == n_lat_w]
+        if not matching_axes:
+            return jnp.mean(sq_err)
+        if len(matching_axes) > 1:
+            raise ValueError(
+                f"_lat_weighted_mean: field shape {sq_err.shape} has "
+                f"{len(matching_axes)} axes of length n_lat={n_lat_w} "
+                f"(axes={matching_axes}).  Lat axis is ambiguous; flatten "
+                f"or rename the colliding axis before calling carry_mse "
+                f"with lat_weights set."
+            )
+        axis = matching_axes[0]
+        shape = [1] * sq_err.ndim
+        shape[axis] = n_lat_w
+        w = lat_weights.reshape(shape)
+        return jnp.mean(sq_err * w) * n_lat_w / jnp.sum(lat_weights)
 
     # Per-variable scale denominators.  When normalize_by_scale=True
     # each variable's MSE is divided by its typical amplitude² so the
@@ -218,6 +253,28 @@ def carry_mse(
     dp = pred_carry.p_s - target_carry.p_s
     loss = loss + config.w_ps * _lat_weighted_mean(dp ** 2) / ps_norm
 
+    # Bias-penalty terms.  Squared (level-weighted) area-mean error
+    # for each variable, normalised by the same scale as the MSE
+    # term.  ``_lat_weighted_mean`` returns the area-weighted mean
+    # over all axes when ``lat_weights`` is provided, or the uniform
+    # mean otherwise (acceptable for cubed-sphere where cells have
+    # roughly equal area).  Mirrors the spectral-path bias term in
+    # ``neural_gcm_spectral.spectral_state_vs_carry_loss`` so the
+    # same ``w_bias_*`` weights have the same physical effect in
+    # both training paths.
+    if config.w_bias_T > 0.0:
+        bias_T = _lat_weighted_mean(dT * lev_w)
+        loss = loss + config.w_bias_T * bias_T ** 2 / T_norm
+    if config.w_bias_u > 0.0:
+        bias_u = _lat_weighted_mean(du * lev_w)
+        loss = loss + config.w_bias_u * bias_u ** 2 / wind_norm
+    if config.w_bias_v > 0.0:
+        bias_v = _lat_weighted_mean(dv * lev_w)
+        loss = loss + config.w_bias_v * bias_v ** 2 / wind_norm
+    if config.w_bias_ps > 0.0:
+        bias_ps = _lat_weighted_mean(dp)
+        loss = loss + config.w_bias_ps * bias_ps ** 2 / ps_norm
+
     return loss
 
 
@@ -225,6 +282,7 @@ def multi_day_loss(
     pred_carries,
     target_carries,
     sigma_full: jax.Array,
+    lat_weights: jax.Array | None = None,
     config: LossConfig = LossConfig(),
 ) -> jax.Array:
     """Multi-day rollout loss: average carry_mse over multiple lead times.
@@ -236,6 +294,12 @@ def multi_day_loss(
     target_carries : pytree with leading (n_days,) dimension
         Target states from ERA5 at corresponding days.
     sigma_full : (nlev,)
+    lat_weights : (n_lat,) or None
+        Latitude weights forwarded to ``carry_mse``.  REQUIRED for
+        correct area-weighting of the bias-penalty term on Gaussian /
+        lat-lon grids when ``config.w_bias_* > 0``; without it the
+        bias mean is a uniform average and over-weights the poles.
+        ``None`` is acceptable for cubed-sphere (cells ~equal area).
     config : LossConfig
 
     Returns
@@ -249,7 +313,10 @@ def multi_day_loss(
     # with ``in_axes=0`` lets the batching machinery slice the leading
     # axis without any Python tree walk inside the inner loop.
     def _day_loss(pred_i, target_i):
-        return carry_mse(pred_i, target_i, sigma_full, config=config)
+        return carry_mse(
+            pred_i, target_i, sigma_full,
+            lat_weights=lat_weights, config=config,
+        )
 
     day_losses = jax.vmap(_day_loss)(pred_carries, target_carries)
     return jnp.mean(day_losses)
@@ -306,6 +373,7 @@ def combined_loss(
     target_carry,
     sigma_full: jax.Array,
     grid=None,
+    lat_weights: jax.Array | None = None,
     config: LossConfig = LossConfig(),
 ) -> jax.Array:
     """Combined loss: weighted MSE + optional spectral penalty.
@@ -315,13 +383,26 @@ def combined_loss(
     pred_carry, target_carry : SegmentCarry
     sigma_full : (nlev,)
     grid : GaussianGrid or None (spectral loss requires grid)
+    lat_weights : (n_lat,) or None
+        Latitude weights forwarded to ``carry_mse``.  When ``grid`` is
+        a ``GaussianGrid``, falls back to ``grid.weights`` if not
+        provided — that's the right area weighting for the bias term
+        when ``config.w_bias_* > 0``.  Pass explicit weights for
+        cubed-sphere / lat-lon grids; ``None`` is OK on cubed-sphere
+        where cells have approximately equal area.
     config : LossConfig
 
     Returns
     -------
     scalar — total loss
     """
-    loss = carry_mse(pred_carry, target_carry, sigma_full, config=config)
+    if lat_weights is None and grid is not None:
+        lat_weights = getattr(grid, "weights", None)
+
+    loss = carry_mse(
+        pred_carry, target_carry, sigma_full,
+        lat_weights=lat_weights, config=config,
+    )
 
     if config.spectral_weight > 0.0 and grid is not None:
         loss = loss + config.spectral_weight * carry_spectral_loss(

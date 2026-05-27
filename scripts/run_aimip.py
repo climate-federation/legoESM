@@ -18,8 +18,12 @@ the dycore.  The variants are:
   :func:`legoesm.training.neural_gcm_spectral.train_column_mlp_spectral`.
 * ``sfno_physics`` — SFNO replaces the gridded physics step via
   :func:`legoesm.training.neural_gcm_spectral.train_neural_gcm_spectral`.
-* ``sfno_full`` — alias of ``sfno_physics`` (kept for forward-compat
-  once an end-to-end spectral-SFNO mode lands).
+* ``sfno_full`` — SFNO as the full atmospheric emulator (no dycore,
+  no physics tendency) via
+  :func:`legoesm.training.neural_gcm_spectral.train_sfno_full_spectral`.
+  The trained model is :class:`SFNOPrimitiveEquationModel` operating
+  in ``state_update`` mode at a macro time step ``dt_sfno`` (default
+  6 h), with post-hoc dry-air-mass and moisture-budget corrections.
 
 Usage
 -----
@@ -112,8 +116,14 @@ def _build_spectral_config(cfg: dict[str, Any]):
     from legoesm.training.losses import LossConfig
 
     loss_kwargs = cfg.get("loss", {}) or {}
-    loss_config = LossConfig(**{k: v for k, v in loss_kwargs.items()
-                                if k in LossConfig._fields})
+    # YAML lists -> tuples for fields LossConfig declares as tuples.
+    # Keeps the NamedTuple hashable for ``filter_jit`` static-arg
+    # comparisons and matches the tuple-typed default.
+    _tuple_fields = {"multi_step_hours", "multi_step_weights"}
+    loss_config = LossConfig(**{
+        k: (tuple(v) if k in _tuple_fields and v is not None else v)
+        for k, v in loss_kwargs.items() if k in LossConfig._fields
+    })
 
     sfno_embed = int(cfg.get("sfno_embed_dim", 128))
     sfno_n_blocks = int(cfg.get("sfno_n_blocks", 4))
@@ -176,7 +186,7 @@ def _train_variant(variant: str, cfg: dict[str, Any], cache_dir: str):
             n_layers=int(cfg.get("nn_n_layers", 4)),
         )
 
-    if variant in ("sfno_physics", "sfno_full"):
+    if variant == "sfno_physics":
         from legoesm.training.neural_gcm_spectral import (
             train_neural_gcm_spectral,
         )
@@ -184,6 +194,17 @@ def _train_variant(variant: str, cfg: dict[str, Any], cache_dir: str):
             config=spec_cfg,
             cache_dir=cache_dir,
             seed=int(cfg.get("sfno_seed", 0)),
+        )
+
+    if variant == "sfno_full":
+        from legoesm.training.neural_gcm_spectral import (
+            train_sfno_full_spectral,
+        )
+        return train_sfno_full_spectral(
+            config=spec_cfg,
+            cache_dir=cache_dir,
+            seed=int(cfg.get("sfno_seed", 0)),
+            dt_sfno=float(cfg.get("dt_sfno", 21600.0)),
         )
 
     raise ValueError(f"Unknown AIMIP variant: {variant!r}")
@@ -249,9 +270,16 @@ def _train_aimip_classical(spec_cfg, cache_dir: str, *, cfg: dict | None = None)
     # smooth across coastlines (vs. a hard step that would clip them).
     land_mask = None
     if spatial_surface and target_carries:
+        # ``target_carries[0]`` is a single SegmentCarry on the legacy
+        # path and a tuple of K SegmentCarry on the multi-step
+        # autoregressive path.  Surface geopotential is static across
+        # snapshots so any of them works; unwrap when needed.
+        ref_carry = target_carries[0]
+        if isinstance(ref_carry, tuple):
+            ref_carry = ref_carry[0]
         from legoesm.training.aimip_spatial import land_mask_from_phis
         land_mask = land_mask_from_phis(
-            jnp.asarray(target_carries[0].phis), smooth=True,
+            jnp.asarray(ref_carry.phis), smooth=True,
         )
 
     # When rad gating is on (``aimip_rad_update_interval > 1``),
@@ -261,11 +289,31 @@ def _train_aimip_classical(spec_cfg, cache_dir: str, *, cfg: dict | None = None)
     # single-callable path runs.
     split_rad = rad_update_interval > 1
 
+    # Physics scheme dispatch from YAML.  Defaults reproduce the legacy
+    # AIMIP classical recipe (tiedtke + louis + mcfarlane + none).
+    # Used by the combinatorial physics sweep
+    # (scripts/run_aimip_classical_sweep_stage1.py).
+    conv_scheme = str(cfg.get("aimip_convection", "tiedtke"))
+    turb_scheme = str(cfg.get("aimip_turbulence", "louis"))
+    gwd_scheme = str(cfg.get("aimip_gwd", "mcfarlane"))
+    micro_scheme = str(cfg.get("aimip_microphysics", "none"))
+    cloud_scheme = str(cfg.get("aimip_cloud", "xu_randall"))
+    logger.info(
+        f"AIMIP classical physics: conv={conv_scheme} turb={turb_scheme} "
+        f"gwd={gwd_scheme} micro={micro_scheme} cloud={cloud_scheme} "
+        f"rad={radiation}"
+    )
+
     def _make_physics_fn(p, grid_):
         return make_aimip_classical_spectral_physics(
             p, grid_, dt,
             radiation=radiation,
             rad_update_interval_steps=rad_update_interval,
+            convection_scheme=conv_scheme,
+            turbulence_scheme=turb_scheme,
+            gwd_scheme=gwd_scheme,
+            microphysics_scheme=micro_scheme,
+            cloud_scheme=cloud_scheme,
             land_mask=land_mask,
             split_rad=split_rad,
         )
@@ -285,11 +333,21 @@ def _evaluate_variant(
     trained_model,
     cfg: dict[str, Any],
     cache_dir: str,
+    *,
+    period: str = "test",
 ) -> dict[str, float]:
-    """Evaluate trained model on held-out ERA5 days.
+    """Evaluate trained model on a named ERA5 window set.
+
+    Parameters
+    ----------
+    period : str
+        ``"test"``  -> held-out ``eval_windows`` (default; matches the
+                       legacy behavior).
+        ``"train"`` -> ``train_windows`` (in-sample forecast skill for
+                       the AIMIP-fleet annual-mean comparison plot).
 
     Returns a dict of mean ``LossConfig``-weighted error + per-variable
-    RMSE/bias on the eval window.  Both share the same loss as the
+    RMSE/bias on the chosen window.  Both share the same loss as the
     training objective so the scorecard is directly comparable across
     variants.
     """
@@ -311,13 +369,22 @@ def _evaluate_variant(
     )
 
     spec_cfg = _build_spectral_config(cfg)
-    eval_windows_raw = cfg.get("eval_windows") or ()
+    if period == "train":
+        windows_raw = cfg.get("train_windows") or ()
+        n_days = int(cfg.get("n_train_days", 2))
+        year = int(cfg.get("train_year", spec_cfg.start_year))
+    elif period == "test":
+        windows_raw = cfg.get("eval_windows") or ()
+        n_days = int(cfg.get("n_eval_days", 2))
+        year = int(cfg.get("eval_year", spec_cfg.start_year))
+    else:
+        raise ValueError(f"Unknown eval period {period!r}; expected 'train' or 'test'.")
     eval_windows = tuple(
-        tuple(int(x) for x in w[:3]) for w in eval_windows_raw
+        tuple(int(x) for x in w[:3]) for w in windows_raw
     ) or None
     eval_cfg = spec_cfg._replace(
-        n_train_days=int(cfg.get("n_eval_days", 2)),
-        start_year=int(cfg.get("eval_year", spec_cfg.start_year)),
+        n_train_days=n_days,
+        start_year=year,
         windows=eval_windows,
     )
 
@@ -348,28 +415,51 @@ def _evaluate_variant(
     n_steps_per_day = int(86400 / spec_cfg.dt)
     eval_rollout_days = int(getattr(spec_cfg, "rollout_days", 1) or 1)
     eval_rollout_hours_cfg = int(getattr(spec_cfg, "rollout_hours", 0) or 0)
-    eval_rollout_hours = (
-        eval_rollout_hours_cfg
-        if eval_rollout_hours_cfg > 0
-        else eval_rollout_days * 24
+    # When multi-step autoregressive supervision is on, evaluate the
+    # forecast at the longest training lead (it dominates the scorecard
+    # and matches the held-out horizon the model was supervised at).
+    multi_step_hours_eval = tuple(
+        int(h) for h in (
+            (spec_cfg.loss_config.multi_step_hours or ())
+            if spec_cfg.loss_config is not None else ()
+        )
     )
+    if multi_step_hours_eval:
+        eval_rollout_hours = max(multi_step_hours_eval)
+    elif eval_rollout_hours_cfg > 0:
+        eval_rollout_hours = eval_rollout_hours_cfg
+    else:
+        eval_rollout_hours = eval_rollout_days * 24
     n_steps_eval = int(round(eval_rollout_hours * 3600.0 / spec_cfg.dt))
     eval_rad_interval = int(cfg.get("aimip_rad_update_interval", 1))
 
-    # Build the per-variant physics_fn (model is frozen for eval).
+    # Build the per-variant rollout closure (model is frozen for eval).
+    # ``sfno_full`` doesn't use a physics_fn / dycore at all -- it
+    # iterates the trained SFNO step directly at ``dt_sfno``.  All other
+    # variants share the spectral_rollout(physics_fn) path.
     eval_physics_pair = None  # (non_rad_fn, rad_fn) when split active
+    eval_full_emulator_rollout = None  # set only when variant == "sfno_full"
+    physics_fn = None
     if variant == "classical":
         eval_land_mask = None
         if bool(cfg.get("aimip_spatial_surface", False)) and target_carries:
+            ref_carry = target_carries[0]
+            if isinstance(ref_carry, tuple):
+                ref_carry = ref_carry[0]
             from legoesm.training.aimip_spatial import land_mask_from_phis
             eval_land_mask = land_mask_from_phis(
-                jnp.asarray(target_carries[0].phis), smooth=True,
+                jnp.asarray(ref_carry.phis), smooth=True,
             )
         eval_split_rad = eval_rad_interval > 1
         built = make_aimip_classical_spectral_physics(
             trained_model, grid, spec_cfg.dt,
             radiation=str(cfg.get("aimip_radiation", "gray")),
             rad_update_interval_steps=eval_rad_interval,
+            convection_scheme=str(cfg.get("aimip_convection", "tiedtke")),
+            turbulence_scheme=str(cfg.get("aimip_turbulence", "louis")),
+            gwd_scheme=str(cfg.get("aimip_gwd", "mcfarlane")),
+            microphysics_scheme=str(cfg.get("aimip_microphysics", "none")),
+            cloud_scheme=str(cfg.get("aimip_cloud", "xu_randall")),
             land_mask=eval_land_mask,
             split_rad=eval_split_rad,
         )
@@ -380,21 +470,78 @@ def _evaluate_variant(
             physics_fn = built
     elif variant == "column_nn":
         physics_fn = make_column_mlp_spectral_physics(trained_model, grid)
-    elif variant in ("sfno_physics", "sfno_full"):
+    elif variant == "sfno_physics":
         physics_fn = make_sfno_spectral_physics(trained_model, grid)
+    elif variant == "sfno_full":
+        from legoesm.atmosphere.dynamics.sfno_pe import (
+            SFNOPrimitiveEquationConfig,
+            SFNOPrimitiveEquationModel,
+        )
+        from legoesm.ml.channel_packing import PE3DChannelSpec
+        from legoesm.ml.sfno import SFNOConfig
+        _channels = PE3DChannelSpec(nlev=spec_cfg.n_levels).n_channels
+        eval_dt_sfno = float(cfg.get("dt_sfno", 21600.0))
+        eval_pe_cfg = SFNOPrimitiveEquationConfig(
+            sfno_config=SFNOConfig(
+                in_channels=_channels,
+                out_channels=_channels,
+                embed_dim=spec_cfg.sfno_embed_dim,
+                n_blocks=spec_cfg.sfno_n_blocks,
+                mlp_expansion=spec_cfg.sfno_mlp_expansion,
+                residual_prediction=False,
+            ),
+            mode="state_update",
+            dt_sfno=eval_dt_sfno,
+            correct_mass=True,
+            correct_moisture_budget=True,
+            clip_q=True,
+            use_normalization=False,
+        )
+        eval_full_wrapper = SFNOPrimitiveEquationModel(
+            grid=grid, sigma_coord=sigma,
+            config=eval_pe_cfg, sfno_model=trained_model,
+        )
+        n_steps_eval_sfno = max(
+            1, int(round(eval_rollout_hours * 3600.0 / eval_dt_sfno))
+        )
+        logger.info(
+            f"sfno_full eval: {n_steps_eval_sfno} SFNO steps "
+            f"@ dt_sfno={eval_dt_sfno:.0f}s (= {eval_rollout_hours} h)"
+        )
+
+        def _scan_body(s, _):
+            return eval_full_wrapper.step(s, eval_dt_sfno), None
+
+        @jax.jit
+        def eval_full_emulator_rollout(state):
+            final, _ = jax.lax.scan(
+                _scan_body, state, jnp.arange(n_steps_eval_sfno),
+            )
+            return final
     else:
         raise ValueError(f"Unknown variant in eval: {variant!r}")
 
     from legoesm.atmosphere.dynamics.spectral_pe import spectral_pe_to_grid
 
     losses: list[float] = []
-    per_var_rmse: dict[str, list[float]] = {k: [] for k in ("T", "u", "v", "p_s")}
-    per_var_bias: dict[str, list[float]] = {k: [] for k in ("T", "u", "v", "p_s")}
+    # ``T`` reports the mid-level (~500 hPa) cross-section for direct
+    # comparability to WeatherBench T@500.  ``T_sfc`` reports the
+    # lowest-sigma-level (near-surface) cross-section so we can place
+    # the AIMIP-fleet annual-mean ``tas`` comparison on the same y-axis
+    # in the multi-step intercomparison plot.
+    per_var_rmse: dict[str, list[float]] = {k: [] for k in ("T", "T_sfc", "u", "v", "p_s")}
+    per_var_bias: dict[str, list[float]] = {k: [] for k in ("T", "T_sfc", "u", "v", "p_s")}
 
     weights = jnp.asarray(grid.weights)
 
     for ic, target in zip(ic_states, target_carries):
-        if eval_physics_pair is not None:
+        # Multi-step training => loader returns a tuple of K target
+        # carries.  Eval only scores against the longest lead.
+        if isinstance(target, tuple):
+            target = target[-1]
+        if eval_full_emulator_rollout is not None:
+            pred = eval_full_emulator_rollout(ic)
+        elif eval_physics_pair is not None:
             non_rad_fn, rad_fn = eval_physics_pair
             pred = spectral_rollout(
                 ic, non_rad_fn, grid, sigma, pe_config,
@@ -434,6 +581,21 @@ def _evaluate_variant(
             per_var_bias[name].append(
                 float(latitude_weighted_bias(p_arr[..., mid], t_arr[..., mid], weights))
             )
+            # Near-surface level (sigma closest to surface) — used
+            # in the multi-step intercomparison plot to compare on
+            # the same y-axis as the AIMIP fleet's annual-mean ``tas``.
+            if name == "T":
+                surf = p_arr.shape[-1] - 1  # last sigma level
+                per_var_rmse["T_sfc"].append(
+                    float(latitude_weighted_rmse(
+                        p_arr[..., surf], t_arr[..., surf], weights,
+                    ))
+                )
+                per_var_bias["T_sfc"].append(
+                    float(latitude_weighted_bias(
+                        p_arr[..., surf], t_arr[..., surf], weights,
+                    ))
+                )
         # Surface pressure (2D).
         p_s_target = jnp.asarray(target.p_s)
         per_var_rmse["p_s"].append(
@@ -499,6 +661,11 @@ def main():
 
     suite = _load_yaml(args.suite)
     base = _load_yaml(Path(suite["base"]))
+    # Per-suite cfg overrides (used by mini-sweeps that vary nn_seed /
+    # sfno_seed / aimip_lr without duplicating the full base YAML).
+    # Additive: absent field -> no-op, so existing suites are unaffected.
+    if suite.get("cfg_overrides"):
+        base = _merge(base, suite["cfg_overrides"])
     if args.variants:
         variants = [v.strip() for v in args.variants.split(",") if v.strip()]
     else:
@@ -542,7 +709,17 @@ def main():
         model, loss_history = _train_variant(variant, cfg, cache_dir)
         train_elapsed = time.time() - t0
 
-        eval_metrics = _evaluate_variant(variant, model, cfg, cache_dir)
+        # Evaluate on BOTH the training windows (in-sample skill, for
+        # the AIMIP-fleet annual-mean overlay during 2015-2016) and
+        # the held-out test windows (default 2017).  Both reports use
+        # an identical loss / rollout horizon so they are directly
+        # comparable in absolute K.
+        eval_metrics_test = _evaluate_variant(
+            variant, model, cfg, cache_dir, period="test",
+        )
+        eval_metrics_train = _evaluate_variant(
+            variant, model, cfg, cache_dir, period="train",
+        )
         ckpt_path = output_dir / variant / "params.eqx"
         ckpt_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -552,16 +729,17 @@ def main():
         results["variants"][variant] = {
             "train_loss_history": [float(x) for x in loss_history],
             "train_seconds": train_elapsed,
-            "eval_metrics": eval_metrics,
+            "eval_metrics": eval_metrics_test,
+            "eval_metrics_train_period": eval_metrics_train,
             "checkpoint": str(ckpt_path),
         }
         logger.info(
             f"{variant}: train_loss[-1]={loss_history[-1]:.6f}, "
-            f"eval_loss={eval_metrics['loss']['mean']:.6f}, "
-            f"RMSE T={eval_metrics['rmse']['T']['mean']:.3f}K "
-            f"u={eval_metrics['rmse']['u']['mean']:.3f}m/s "
-            f"v={eval_metrics['rmse']['v']['mean']:.3f}m/s "
-            f"p_s={eval_metrics['rmse']['p_s']['mean']:.1f}Pa, "
+            f"test_loss={eval_metrics_test['loss']['mean']:.6f}, "
+            f"test RMSE T={eval_metrics_test['rmse']['T']['mean']:.3f}K "
+            f"T_sfc={eval_metrics_test['rmse']['T_sfc']['mean']:.3f}K | "
+            f"train RMSE T={eval_metrics_train['rmse']['T']['mean']:.3f}K "
+            f"T_sfc={eval_metrics_train['rmse']['T_sfc']['mean']:.3f}K, "
             f"train_time={train_elapsed:.1f}s"
         )
 
@@ -578,6 +756,56 @@ def main():
     with scorecard_path.open("w") as fh:
         json.dump(results, fh, indent=2)
     logger.info(f"Wrote AIMIP scorecard: {scorecard_path}")
+
+    # Final scorecard summary table -- printed to stdout (and the SLURM
+    # log) so the per-variant in-sample (training) and held-out (test)
+    # forecast skill is visible at a glance.  Mirrors the structure of
+    # ``aimip_scorecard.json`` for the variables that drive the AIMIP
+    # comparison plot.
+    print("\n" + "=" * 78)
+    print("AIMIP scorecard summary")
+    print("=" * 78)
+    header = (
+        f"{'variant':20s}  "
+        f"{'period':8s}  "
+        f"{'loss':>8s}  "
+        f"{'T@500':>8s}  "
+        f"{'T_sfc':>8s}  "
+        f"{'u':>8s}  "
+        f"{'v':>8s}  "
+        f"{'p_s':>10s}"
+    )
+    print(header)
+    print("-" * len(header))
+
+    def _row(name: str, period: str, em: dict) -> str:
+        def g(k1, k2):
+            return (
+                em.get(k1, {}).get(k2, {}).get("mean", float("nan"))
+                if em else float("nan")
+            )
+        loss = (em or {}).get("loss", {}).get("mean", float("nan"))
+        return (
+            f"{name:20s}  {period:8s}  "
+            f"{loss:8.4f}  "
+            f"{g('rmse','T'):8.3f}  "
+            f"{g('rmse','T_sfc'):8.3f}  "
+            f"{g('rmse','u'):8.3f}  "
+            f"{g('rmse','v'):8.3f}  "
+            f"{g('rmse','p_s'):10.1f}"
+        )
+
+    for vname, vdata in results["variants"].items():
+        em_test = vdata.get("eval_metrics", {})
+        em_train = vdata.get("eval_metrics_train_period", {})
+        print(_row(vname, "train", em_train))
+        print(_row(vname, "test", em_test))
+    print("=" * 78)
+    print(
+        "Units: RMSE in K (T, T_sfc, u, v), Pa (p_s).  ``loss`` is the "
+        "combined MSE+CRPS+spectral training objective."
+    )
+    print("=" * 78)
 
 
 if __name__ == "__main__":

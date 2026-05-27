@@ -80,14 +80,14 @@ ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
         "legoesm.atmosphere.dynamics.sfno_pe",
     ),
 
-    # -- MPAS icosahedral --
+    # -- MPAS / SCVT Voronoi mesh + TRiSK discretization --
     SolverEntry(
-        "atmosphere", "hydrostatic", "mpas_voronoi",
+        "atmosphere", "hydrostatic", "mpas",
         "mpas_primitive_equations", "MPASPrimitiveEquationModel",
         "legoesm.atmosphere.dynamics.primitive_eq_mpas",
     ),
     SolverEntry(
-        "atmosphere", "nonhydrostatic", "mpas_voronoi",
+        "atmosphere", "nonhydrostatic", "mpas",
         "mpas_compressible_euler", "MPASCompressibleEulerModel",
         "legoesm.atmosphere.dynamics.compressible_euler_mpas",
     ),
@@ -118,7 +118,7 @@ ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
         "legoesm.atmosphere.dynamics.tracer_transport",
     ),
     SolverEntry(
-        "atmosphere", "tracer_transport", "voronoi",
+        "atmosphere", "tracer_transport", "mpas",
         "tracer_transport_mpas", "TracerTransportMPASModel",
         "legoesm.atmosphere.dynamics.tracer_transport_mpas",
     ),
@@ -155,7 +155,7 @@ OCEAN_MATRIX: tuple[SolverEntry, ...] = (
         "legoesm.ocean.dynamics.ocean_model_latlon_cgrid",
     ),
     SolverEntry(
-        "ocean", "hydrostatic", "mpas_voronoi",
+        "ocean", "hydrostatic", "mpas",
         "mpas", "MPASOceanModel",
         "legoesm.ocean.dynamics.ocean_model_mpas",
     ),

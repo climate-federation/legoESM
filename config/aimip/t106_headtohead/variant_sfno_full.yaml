@@ -1,0 +1,15 @@
+# Full-atmosphere SFNO variant overlay.  Same architecture and
+# optimizer as variant_sfno_physics.yaml (so the model size and
+# trainer setup are directly comparable), but dispatched through
+# train_sfno_full_spectral so the trained model emulates the full
+# atmospheric state evolution end-to-end (no dycore, no physics
+# tendency, SFNOPrimitiveEquationModel.step(state, dt_sfno) at every
+# macro step).
+sfno_embed_dim: 32
+sfno_n_blocks: 2
+aimip_optimizer: muon_partitioned
+# 6h macro step (standard SFNO/FourCastNet cadence).  At T106 with
+# multi-step leads (24, 48, 72) h this gives segments of 4 SFNO steps
+# each, which is comfortably within the autoregressive horizon SFNO
+# is normally trained on.
+dt_sfno: 21600.0

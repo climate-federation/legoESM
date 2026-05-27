@@ -76,6 +76,19 @@ class ModelDriver:
     """
 
     def __init__(self, config: ExperimentConfig, output_dir: str | Path | None = None):
+        # Defensive canonical-name normalization at the driver entry:
+        # callers that bypass run_amip's argparse postprocessor (direct
+        # test fixtures, ad-hoc scripts, older YAML loaders) might still
+        # pass ``voronoi`` / ``icosahedral`` / ``mpas_voronoi`` as
+        # grid_type for the SCVT mesh.  The dispatch sites below speak
+        # only the canonical ``mpas`` — normalise once here so every
+        # downstream branch is consistent.
+        from legoesm.driver.config import normalize_grid_type
+        canonical_grid_type = normalize_grid_type(config.grid.grid_type)
+        if canonical_grid_type != config.grid.grid_type:
+            config = config._replace(
+                grid=config.grid._replace(grid_type=canonical_grid_type),
+            )
         self.config = config
         self.grid = None
         self.sigma = None
@@ -227,8 +240,40 @@ class ModelDriver:
             self.grid = create_gaussian_grid(gc.resolution)
         elif gc.grid_type == "latlon":
             from legoesm.grids.latlon import create_latlon_grid
-            self.grid = create_latlon_grid(gc.resolution)
-        elif gc.grid_type == "voronoi":
+            global_grid = create_latlon_grid(gc.resolution)
+            # Stage 3-B: under lat-lon band MPI, slice the global grid
+            # to this rank's lat band.  The runtime bootstrap (Stage
+            # 3-A) already activated set_halo_backend("mpi", layout)
+            # via initialize_distributed_latlon — query that layout
+            # via the standard ``get_mpi_topology`` accessor.
+            #
+            # The global grid is preserved as ``self._grid_global``
+            # for downstream code that needs it (state init at the
+            # global grid, output gather to rank 0 — Stage 3-D).
+            from legoesm.grids.halo import get_mpi_topology
+            from legoesm.parallel.latlon_mpi import (
+                LatLonBandLayout, slice_latlon_grid_to_band,
+            )
+            _layout = get_mpi_topology()
+            if (self.config.distributed
+                    and isinstance(_layout, LatLonBandLayout)):
+                self._grid_global = global_grid
+                self.grid = slice_latlon_grid_to_band(global_grid, _layout)
+                logger.info(
+                    "  Lat-lon MPI: rank %d owns rows [%d:%d) of %d "
+                    "(n_lat_local=%d, n_lon=%d).  total_area set to "
+                    "global sphere area via allreduce.",
+                    _layout.rank, _layout.lat_start, _layout.lat_end,
+                    _layout.n_lat_global, _layout.n_lat_local,
+                    _layout.n_lon_global,
+                )
+            else:
+                self.grid = global_grid
+        elif gc.grid_type == "mpas":
+            # SCVT Voronoi mesh + TRiSK discretization.  Legacy aliases
+            # (voronoi, icosahedral, mpas_voronoi) are normalised to
+            # this canonical name at the config boundary
+            # (driver.config.normalize_grid_type).
             from legoesm.grids.voronoi import create_voronoi_mesh
             self.grid = create_voronoi_mesh(gc.resolution, lloyd_iterations=50)
         elif gc.grid_type == "plane":
@@ -308,6 +353,37 @@ class ModelDriver:
         )
 
         self.model = create_atmosphere_dycore(self.config, self.grid, self.sigma)
+
+        # Stage 3-B: under lat-lon band MPI the dycore model needs its
+        # config's ``pole_v_bc`` flags set per this rank's pole-touch
+        # state — only the boundary rank zeros the actual global pole
+        # row; interior ranks leave their band-edge v-row alone (it's
+        # an interior v-face shared with the neighbour rank).  Apply
+        # the override after the factory built the model with default
+        # serial flags ``(True, True)``.
+        if self.config.distributed and self.config.grid.grid_type == "latlon":
+            from legoesm.grids.halo import get_mpi_topology
+            from legoesm.parallel.latlon_mpi import (
+                LatLonBandLayout, pole_v_bc_for_layout,
+            )
+            _layout = get_mpi_topology()
+            if isinstance(_layout, LatLonBandLayout):
+                # Model.config is a CGridLatLonPrimitiveEquationConfig
+                # NamedTuple — use ``_replace`` to set the rank-aware
+                # flags.  ``pole_v_bc_offset`` stays 0 because the
+                # backend-aware operator path operates on rank-local
+                # (unpadded) state, not on a pre-padded array.
+                self.model.config = self.model.config._replace(
+                    pole_v_bc=pole_v_bc_for_layout(_layout),
+                    pole_v_bc_offset=0,
+                )
+                logger.info(
+                    "  Lat-lon MPI: pole_v_bc=%s on rank %d "
+                    "(south_pole=%s, north_pole=%s).",
+                    self.model.config.pole_v_bc, _layout.rank,
+                    _layout.south_rank is None,
+                    _layout.north_rank is None,
+                )
 
         # The component factory may clamp dt for pole-cell CFL on lat-lon
         # grids.  Propagate the clamped value back into the driver config
@@ -422,7 +498,7 @@ class ModelDriver:
         N = cfg.grid.resolution
         NLEV = cfg.grid.nlev
 
-        if cfg.grid.grid_type == "voronoi":
+        if cfg.grid.grid_type == "mpas":
             from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
             shape_3d = (self.grid.nCells, NLEV)
             self.state = held_suarez_init_mpas(
@@ -982,16 +1058,36 @@ class ModelDriver:
             allow_level_fallback=getattr(
                 self.config, "allow_level_fallback", False,
             ),
+            # For lat-lon MPI: pass n_lat so initialize_distributed_latlon
+            # can build the rank's LatLonBandLayout.  Other grids ignore
+            # this — cubed-sphere uses the per-face N via its own path.
+            grid_n=self.config.grid.resolution,
         )
         self._device_config = rc.device_config
 
-        # Detect MPI rank early for output guards and logging
+        # Detect MPI rank early for output guards and logging.
+        # Two topology shapes coexist in the codebase:
+        #   - cubed-sphere ``MPITopology``       → ``.n_processes``
+        #   - lat-lon band ``LatLonBandLayout``  → ``.n_ranks``
+        # Use ``getattr`` so this early hook works for both without
+        # needing to import either type here.  ``_setup_parallel``
+        # later overwrites these values with the type-specific path.
         if rc.distributed:
             from legoesm.parallel.distributed import get_active_topology
             topo = get_active_topology()
             if topo is not None:
                 self._mpi_rank = topo.rank
-                self._mpi_world_size = topo.n_processes
+                self._mpi_world_size = getattr(
+                    topo, "n_processes",
+                    getattr(topo, "n_ranks", None),
+                )
+                if self._mpi_world_size is None:
+                    raise RuntimeError(
+                        f"Active topology {type(topo).__name__} exposes "
+                        "neither ``.n_processes`` nor ``.n_ranks``; "
+                        "cannot determine MPI world size.  Extend the "
+                        "early-detect hook in _bootstrap_runtime."
+                    )
 
         logger.info(
             f"  Runtime: backend={rc.backend}, precision={self.config.precision}, "
@@ -1022,6 +1118,56 @@ class ModelDriver:
         if (not self._device_config.is_distributed
                 and self._device_config.n_devices <= 1):
             return
+
+        # Stage 3-C: lat-lon band MPI follows a different parallel
+        # protocol than cubed-sphere replicated dynamics — each rank
+        # owns its band's state directly (no 6-face replication), so
+        # no scatter-from-global is needed and no ColumnAdapter
+        # rebuild applies.  But SST/SIC + lat/lon physics arrays DO
+        # need rank-local slicing for the column-local physics.
+        if (self._device_config.is_distributed
+                and self.config.grid.grid_type == "latlon"):
+            from legoesm.grids.halo import get_mpi_topology
+            from legoesm.parallel.latlon_mpi import LatLonBandLayout
+            _layout = get_mpi_topology()
+            if isinstance(_layout, LatLonBandLayout):
+                self._layout = _layout
+                self._mpi_rank = _layout.rank
+                self._mpi_world_size = _layout.n_ranks
+
+                s, e = _layout.lat_start, _layout.lat_end
+
+                # Slice lat/lon arrays for physics (column-local).
+                # The grid in self.grid is already rank-local
+                # (Stage 3-B), so its lat2d/lon2d are already
+                # band-sliced — reuse them.
+                self._physics_lat = self.grid.lat2d
+                self._physics_lon = self.grid.lon2d
+
+                # Wrap SST/SIC to return only this rank's lat band.
+                # The global ``get_sst_sic(day)`` returns shape
+                # ``(n_lat_global, n_lon)``; slice along axis 0.
+                if self.get_sst_sic is not None:
+                    _global_fn = self.get_sst_sic
+
+                    def _band_get_sst_sic(day, _s=s, _e=e, _fn=_global_fn):
+                        sst, sic = _fn(day)
+                        sst = jnp.asarray(sst)
+                        sic = jnp.asarray(sic)
+                        # SST/SIC shapes: typically (n_lat, n_lon),
+                        # sometimes (n_lat, n_lon, 1) for ensemble.
+                        # Slice axis 0 unconditionally.
+                        return sst[_s:_e], sic[_s:_e]
+
+                    self.get_sst_sic = _band_get_sst_sic
+
+                logger.info(
+                    "  Parallel: lat-lon band MPI — rank %d/%d, "
+                    "rows [%d:%d) of %d (n_lat_local=%d)",
+                    _layout.rank, _layout.n_ranks, s, e,
+                    _layout.n_lat_global, _layout.n_lat_local,
+                )
+                return  # Skip the cubed-sphere replicated-dynamics path below.
 
         if self._device_config.is_distributed:
             from legoesm.parallel.distributed import (
@@ -1316,13 +1462,231 @@ class ModelDriver:
         except Exception:  # noqa: BLE001
             pass
 
+    def _is_latlon_mpi(self) -> bool:
+        """True iff this driver is running under lat-lon band MPI.
+
+        Cubed-sphere uses ``_owned_face_ids``; lat-lon uses
+        ``_layout`` but never ``_owned_face_ids``.  Distinguishing them
+        keeps the save/load dispatch unambiguous so a future grid that
+        sets a ``LatLonBandLayout``-shaped ``_layout`` won't silently
+        steal the cubed-sphere branch.
+        """
+        from legoesm.parallel.latlon_mpi import LatLonBandLayout
+        return (
+            self._device_config is not None
+            and self._device_config.is_distributed
+            and self._layout is not None
+            and isinstance(self._layout, LatLonBandLayout)
+            and self._owned_face_ids is None
+        )
+
+    def _gather_state_for_global_checkpoint(self):
+        """Collective gather of rank-local bands → rank-0 global state.
+
+        Every rank in the lat-lon MPI communicator MUST call this; it
+        runs ``mpi4py.comm.gather`` per state field.  Used by
+        ``save_checkpoint`` so the resulting ``.npz`` is a single
+        global-shape file (the format ``run_amip_1deg_latlon_mpi.sbatch``
+        and ``--restart-from`` expect).
+
+        Returns
+        -------
+        (state_global, tracers_global) on rank 0, where ``state_global``
+        is a fresh HydrostaticState whose Field ``.data`` arrays span
+        the full ``n_lat_global`` lat axis.  All other ranks get
+        ``(None, None)``.
+        """
+        from legoesm.parallel.latlon_mpi import gather_field_latlon
+
+        s = self.state
+        T_g = gather_field_latlon(s.T.data, self._layout)
+        u_g = gather_field_latlon(s.u.data, self._layout)
+        v_g = gather_field_latlon(s.v.data, self._layout, is_v_face=True)
+        p_g = gather_field_latlon(s.p_s.data, self._layout)
+        phi_g = gather_field_latlon(s.phis.data, self._layout)
+
+        # Collective tracer-key safety (Codex review MEDIUM #1).  If
+        # ranks disagree on which tracers are active, the per-tracer
+        # ``comm.gather`` below would either deadlock or fall out of
+        # sync silently.  Allgather sorted-key tuples and assert
+        # identical before iterating — fail loudly if not.
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+        my_keys = tuple(sorted(
+            k for k, v in self.tracers.items() if v is not None
+        ))
+        all_keys = comm.allgather(my_keys)
+        if any(k != all_keys[0] for k in all_keys):
+            raise RuntimeError(
+                "Tracer key sets diverge across ranks under lat-lon "
+                "MPI; refusing to checkpoint to avoid silent "
+                "corruption.  Rank-by-rank keys: "
+                f"{all_keys!r}.  Every rank's TracerRegistry must "
+                "produce the same set of active tracer names."
+            )
+
+        # v-face boundary-row consistency (Codex review MEDIUM #2).
+        # Each rank K (except the northernmost) shares v[lat_end_K] with
+        # rank K+1's v[lat_start_{K+1}].  After every dycore step these
+        # are written via different code paths on the two ranks; the
+        # invariant 'duplicated row is bit-identical' must hold or the
+        # gather below will silently pick rank K's value over K+1's.
+        #
+        # Implementation note: use ``sendrecv`` to ship each rank's
+        # v[-1] north + receive the southern neighbour's v[-1], then
+        # ``allreduce(MAX)`` over every rank's local diff so EVERY rank
+        # raises (or none does) — keeps the assertion collective-safe.
+        # A previous per-rank ``raise`` design would deadlock the
+        # northernmost rank (no south to compare → doesn't raise →
+        # walks into the gather collective while raised ranks have
+        # left it).
+        if self._layout.north_rank is not None:
+            my_last_v = np.asarray(self.state.v.data[-1])
+        else:
+            my_last_v = None
+        neighbour_south_last_v = comm.sendrecv(
+            sendobj=my_last_v,
+            dest=(self._layout.north_rank if self._layout.north_rank is not None
+                  else MPI.PROC_NULL),
+            sendtag=0,
+            source=(self._layout.south_rank if self._layout.south_rank is not None
+                    else MPI.PROC_NULL),
+            recvtag=0,
+        )
+        if self._layout.south_rank is not None:
+            my_first_v = np.asarray(self.state.v.data[0])
+            local_diff = float(np.abs(my_first_v - neighbour_south_last_v).max())
+        else:
+            local_diff = 0.0
+        global_max_diff = comm.allreduce(local_diff, op=MPI.MAX)
+        if global_max_diff > 0.0:
+            raise RuntimeError(
+                "v-face boundary row diverges somewhere in the rank "
+                f"chain; max |diff| across all rank pairs = "
+                f"{global_max_diff:.3e}.  Halo-exchange invariant "
+                "violated; refusing to checkpoint to avoid writing a "
+                "non-deterministic global v field."
+            )
+
+        tracers_g: dict | None = {}
+        for name in all_keys[0]:
+            arr = self.tracers[name]
+            tracers_g[name] = gather_field_latlon(arr, self._layout)
+
+        if self._mpi_rank != 0:
+            return None, None
+
+        state_g = s._replace(
+            T=s.T.replace(data=T_g),
+            u=s.u.replace(data=u_g),
+            v=s.v.replace(data=v_g),
+            p_s=s.p_s.replace(data=p_g),
+            phis=s.phis.replace(data=phi_g),
+        )
+        return state_g, tracers_g
+
+    def _scatter_global_state_to_bands(self, state_global, tracers_global):
+        """Mirror of :meth:`_gather_state_for_global_checkpoint` for restart.
+
+        Rank 0 holds the global state just loaded from the checkpoint;
+        all other ranks pass ``None``.  Every rank participates in the
+        collective bcast inside :func:`scatter_field_latlon` and gets
+        back its own lat band.
+
+        Failure semantics (Codex review round 3, MEDIUM #2): the
+        tracer-key collective-safety check runs BEFORE any state
+        scatter so a divergent TracerRegistry leaves ``self.state``
+        untouched.  A failed load can therefore be retried (or the
+        driver torn down cleanly) without first having to undo a
+        half-loaded band-shaped state.
+        """
+        from legoesm.parallel.latlon_mpi import scatter_field_latlon
+        from mpi4py import MPI
+
+        comm = MPI.COMM_WORLD
+
+        # ----------------------------------------------------------
+        # Stage A — collective sanity check on tracer-registry parity.
+        # Done BEFORE any state mutation so a divergent registry
+        # surfaces an error without side effects.
+        # ----------------------------------------------------------
+        if self._mpi_rank == 0:
+            tracer_keys = sorted(
+                k for k, v in tracers_global.items() if v is not None
+            )
+        else:
+            tracer_keys = None
+        tracer_keys = comm.bcast(tracer_keys, root=0)
+
+        # Allgather every rank's missing-keys tuple so every rank sees
+        # the same divergence flag and raises in lockstep (or none
+        # does).  A per-rank raise pattern would leave non-raised
+        # ranks blocked inside ``scatter_field_latlon``'s inner bcast.
+        my_existing_keys = set(self.tracers.keys())
+        my_missing = tuple(sorted(
+            k for k in tracer_keys if k not in my_existing_keys
+        ))
+        all_missing = comm.allgather(my_missing)
+        if any(m for m in all_missing):
+            raise RuntimeError(
+                "TracerRegistry key sets diverge across ranks at load "
+                "time; every rank must already have the keys the "
+                "checkpoint contains before load_checkpoint runs.  "
+                "Rank-by-rank missing keys: "
+                f"{all_missing!r}."
+            )
+
+        # ----------------------------------------------------------
+        # Stage B — scatter state fields.  Past this point self.state
+        # is mutated; failures from now on are non-atomic but every
+        # error path that follows is a JAX shape/dtype regression of
+        # the helper itself (a code bug, not a data-dependent failure).
+        # ----------------------------------------------------------
+        if self._mpi_rank == 0:
+            s = state_global
+            T_g = s.T.data
+            u_g = s.u.data
+            v_g = s.v.data
+            p_g = s.p_s.data
+            phi_g = s.phis.data
+        else:
+            s = self.state  # use rank-local Field templates for .replace()
+            T_g = u_g = v_g = p_g = phi_g = None
+
+        T_loc = scatter_field_latlon(T_g, self._layout)
+        u_loc = scatter_field_latlon(u_g, self._layout)
+        v_loc = scatter_field_latlon(v_g, self._layout, is_v_face=True)
+        p_loc = scatter_field_latlon(p_g, self._layout)
+        phi_loc = scatter_field_latlon(phi_g, self._layout)
+
+        self.state = s._replace(
+            T=s.T.replace(data=T_loc),
+            u=s.u.replace(data=u_loc),
+            v=s.v.replace(data=v_loc),
+            p_s=s.p_s.replace(data=p_loc),
+            phis=s.phis.replace(data=phi_loc),
+        )
+
+        # ----------------------------------------------------------
+        # Stage C — scatter tracers.  Key set already validated in
+        # Stage A so this loop is just per-tracer slicing.
+        # ----------------------------------------------------------
+        for name in tracer_keys:
+            global_arr = tracers_global[name] if self._mpi_rank == 0 else None
+            self.tracers[name] = scatter_field_latlon(
+                global_arr, self._layout,
+            )
+
     def save_checkpoint(self, step: int, day: float) -> None:
         """Save checkpoint to output directory using unified restart API.
 
         When running under MPI with partitioned state, uses per-rank
         distributed checkpoint so every rank writes its own partition
-        concurrently (no barrier).  For replicated state, only rank 0
-        writes and signals completion via a lightweight barrier.
+        concurrently (no barrier).  For lat-lon band MPI, gathers all
+        ranks' bands onto rank 0 and writes a single global ``.npz`` so
+        ``--restart-from`` and the yearly-map plotter see a single
+        canonical file.  For replicated state, only rank 0 writes and
+        signals completion via a lightweight barrier.
         """
         elapsed_day = day - self.config.start_day
 
@@ -1353,6 +1717,37 @@ class ModelDriver:
                 MPI.COMM_WORLD.Barrier()
                 if self._mpi_rank == 0:
                     logger.info(f"  Checkpoint: {ckpt_dir.name} (distributed, {self._mpi_world_size} ranks)")
+                return
+
+            # Lat-lon band MPI: gather rank-local bands → rank 0 writes
+            # a single global-shape ``.npz``.  This matches the format
+            # expected by ``--restart-from`` in run_amip.py and the
+            # checkpoint-glob in ``run_amip_1deg_latlon_mpi.sbatch``.
+            if self._is_latlon_mpi():
+                state_g, tracers_g = self._gather_state_for_global_checkpoint()
+                if self._mpi_rank == 0:
+                    ckpt_path = (
+                        self._output_dir
+                        / f"checkpoint_day_{int(elapsed_day):04d}.npz"
+                    )
+                    save_restart(
+                        path=ckpt_path,
+                        state=state_g,
+                        q_v=tracers_g.get("q_v"),
+                        step=step,
+                        day=day,
+                        config=self.config,
+                        q_c=tracers_g.get("q_c"),
+                        q_r=tracers_g.get("q_r"),
+                        carry_aux=self._carry_aux,
+                    )
+                    logger.info(
+                        f"  Checkpoint: {ckpt_path.name} "
+                        f"(lat-lon MPI gathered, "
+                        f"{self._mpi_world_size} ranks)"
+                    )
+                from mpi4py import MPI
+                MPI.COMM_WORLD.Barrier()
                 return
 
             # Replicated state: only rank 0 writes
@@ -1445,6 +1840,84 @@ class ModelDriver:
                 )
                 return step, day
 
+        # Lat-lon band MPI: rank 0 loads the global ``.npz`` against
+        # the global grid, then scatters bands to all ranks.  Mirror of
+        # the gather path in ``save_checkpoint`` so a chained job picks
+        # up exactly where the prior one left off.
+        if self._is_latlon_mpi() and path.is_file():
+            from mpi4py import MPI
+            comm = MPI.COMM_WORLD
+
+            state_global = None
+            tracers_global = None
+            step = 0
+            day = 0.0
+            carry_aux: dict = {}
+
+            # Codex review round 4 BLOCK fix: rank 0's ``load_restart``
+            # can raise on a missing file, a corrupt npz, or a
+            # ``.meta.json`` digest mismatch.  If we let that exception
+            # propagate locally on rank 0, the non-root ranks would
+            # walk into the next ``comm.bcast`` waiting for a payload
+            # that never arrives → multi-rank MPI deadlock.  Catch on
+            # rank 0, bcast an OK/error status integer FIRST, and have
+            # every rank raise in lockstep when rank 0 failed.
+            load_error: str | None = None
+            if self._mpi_rank == 0:
+                local_grid = self.grid
+                self.grid = self._grid_global
+                try:
+                    result = load_restart(
+                        path, self.grid, self.sigma, strict=True,
+                    )
+                    (state_global, q_v_g, step, day,
+                     _, _, q_c_g, q_r_g, metadata, carry_aux) = result
+                    tracers_global = {"q_v": q_v_g}
+                    if q_c_g is not None:
+                        tracers_global["q_c"] = q_c_g
+                    if q_r_g is not None:
+                        tracers_global["q_r"] = q_r_g
+                    if metadata:
+                        logger.info(
+                            f"  Loaded restart: step={step}, day={day}, "
+                            f"digest={metadata.state_digest[:16]}... "
+                            f"(lat-lon MPI gathered file, will scatter to "
+                            f"{self._mpi_world_size} ranks)"
+                        )
+                except Exception as exc:  # noqa: BLE001 — collective gate
+                    load_error = f"{type(exc).__name__}: {exc}"
+                    logger.error(
+                        f"Rank 0 load_restart failed: {load_error}.  "
+                        "Will bcast error status so other ranks raise "
+                        "in lockstep instead of deadlocking on the "
+                        "next collective."
+                    )
+                finally:
+                    self.grid = local_grid
+
+            # Bcast the rank-0 error status BEFORE any other collective.
+            # Every rank sees the same string (None on success).  If
+            # non-empty, every rank raises identically.
+            load_error = comm.bcast(load_error, root=0)
+            if load_error is not None:
+                raise RuntimeError(
+                    f"Lat-lon MPI restart aborted because rank 0 "
+                    f"load_restart failed: {load_error}.  No state "
+                    "scatter happened; every rank is at the same "
+                    "pre-load state."
+                )
+
+            # Broadcast scalar / dict metadata.  State + tracer arrays
+            # are scattered band-wise inside the helper, so the heavy
+            # arrays do NOT round-trip through rank 0's Python.
+            step = comm.bcast(step, root=0)
+            day = comm.bcast(day, root=0)
+            carry_aux = comm.bcast(carry_aux, root=0)
+
+            self._scatter_global_state_to_bands(state_global, tracers_global)
+            self._carry_aux = carry_aux if carry_aux else {}
+            return step, day
+
         # Single-process path
         result = load_restart(
             path, self.grid, self.sigma, strict=True,
@@ -1497,7 +1970,7 @@ class ModelDriver:
         try:
             # MPAS and spectral states use different pytree layouts;
             # use dedicated simple run loops.
-            if self.config.grid.grid_type == "voronoi":
+            if self.config.grid.grid_type == "mpas":
                 return self._run_mpas(start_step, start_day)
             if self.config.dycore.discretization == "spectral":
                 return self._run_spectral(start_step, start_day)
