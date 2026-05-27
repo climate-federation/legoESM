@@ -23,7 +23,7 @@ assertions catch regressions the script's own gate would miss.
 
 iter-300 smoke runs 0.5 sim-days (~72 outer steps at default
 dt=600 s) at default ``--latitude-deg 0.0`` — verifies the
-harness composes + produces sane day-half-day trajectory +
+harness composes + produces a sane half-day trajectory +
 emits the documented ``[result]`` + ``[OK] RCE sanity passed``
 lines. iter-303 (Codex iter-302 round-3 LOW): corrected the
 flag name from ``--lat`` (not exposed) to ``--latitude-deg``.
