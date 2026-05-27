@@ -117,6 +117,35 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 27 — 2026-05-27 — long-integration stability — bench config NOT production-stable
+
+Codex iter-16 #4 flagged that 30-step throughput claim ≠ production
+validation. Tested with longer integrations:
+
+| steps | sim time | finite? | |θ'|_max | |w|_max     |
+|-------|----------|---------|----------|-------------|
+|  200  |  100 s   | ✓       | 4.6e-3 K | 0.04 m/s    |
+|  500  |  250 s   | ✓       | **0.04** | **48 m/s** (supersonic!) |
+| 1000+ |  500 s+  | **NaN** | n/a      | n/a         |
+
+Between 200-500 steps the random-noise IC excites gravity-wave modes
+that the **default hyperdiff (1e6) cannot damp at dx=2 km**. By 500
+steps the waves are supersonic and blow up by step 1000.
+
+⇒ **The bench's 30-step throughput is bench-only.** Production CRM
+runs at this dx need:
+- Stronger hyperdiff (e.g. 1e9)
+- Smoother IC (no broadband white noise — e.g. Wing RCEMIP thermal-bubble)
+- Larger sponge_coeff or sponge_width
+
+The 670-820 Mc/s plateau remains the THROUGHPUT ceiling but the
+bench setup is **scientifically invalid for runs >~ 200 steps**.
+Real CRM users should re-validate stability with their IC + damping
+config.
+
+Walks back implicit assumption that "200-step finite" (iter 8) → safe
+for production.
+
 ### Iter 26 — 2026-05-27 — dispatch floor characterized (small-N regime)
 
 Extended sweep to N=16-32 (extreme small):
