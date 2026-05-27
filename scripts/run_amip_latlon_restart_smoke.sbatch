@@ -64,8 +64,14 @@ else
 fi
 
 RES=90  # 2° at the equator
-DT=600.0
-RAD=6
+# At n_lat=90, n_lon=180 → dx_equator = 2π R / n_lon ≈ 2.22e5 m.
+# Equatorial advective CFL with c=300 m/s, CFL=0.8 → dt_max ≈ 593 s.
+# DT=540 leaves ~9% margin and avoids the factory clamp.  The polar
+# filter (--use-polar-filter, below) handles the pole-cell CFL by
+# truncating modes that violate it at this dt — Stage 3-E commit
+# 79837145.  Before Stage 3-E, dt would have been clamped to ~10 s.
+DT=540.0
+RAD=7    # ~1-h radiation cadence at dt=540 (3780 s)
 
 REF_DIR="${REPO_ROOT}/results/amip_latlon_restart_smoke/reference"
 CHAIN_DIR="${REPO_ROOT}/results/amip_latlon_restart_smoke/chain"
@@ -96,7 +102,8 @@ echo "--- Reference: 4-day continuous run ---"
     --diag-days 1 \
     --checkpoint-days 2 \
     --output "${REF_DIR}" \
-    --dataset analytical
+    --dataset analytical \
+    --use-polar-filter
 
 REF_DAY4="${REF_DIR}/checkpoint_day_0004.npz"
 if [[ ! -f "${REF_DAY4}" ]]; then
@@ -121,7 +128,8 @@ echo "--- Chain leg 1: 0 → 2 days, writes day-2 checkpoint ---"
     --diag-days 1 \
     --checkpoint-days 2 \
     --output "${CHAIN_DIR}" \
-    --dataset analytical
+    --dataset analytical \
+    --use-polar-filter
 
 CHAIN_DAY2="${CHAIN_DIR}/checkpoint_day_0002.npz"
 if [[ ! -f "${CHAIN_DAY2}" ]]; then
@@ -151,6 +159,7 @@ echo "--- Chain leg 2: restart day-2 → day-4 ---"
     --checkpoint-days 2 \
     --output "${CHAIN_DIR}" \
     --dataset analytical \
+    --use-polar-filter \
     --restart-from "${CHAIN_DAY2}"
 
 CHAIN_DAY4="${CHAIN_DIR}/checkpoint_day_0004.npz"
