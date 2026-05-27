@@ -910,3 +910,39 @@ def test_no_plateau_check_rejected_with_final_dod(tmp_path):
         capture_output=True, text=True, check=False,
     )
     assert res.returncode == summary_mod.EXIT_USAGE
+
+
+def test_summarize_quiet_suppresses_table(tmp_path):
+    """iter-128: --quiet flag skips the per-day fixed-width table
+    but still emits trajectory.csv + the ``wrote ...`` summary
+    line."""
+    import subprocess
+    snaps = tmp_path / "snapshots"
+    snaps.mkdir()
+    for i in range(3):
+        _write_snapshot(
+            snaps / f"snap_day_{i:04d}.npz",
+            day=float(i), cwv_value=50.0 + 0.5 * i,
+        )
+    res = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[4]
+                / "scripts" / "summarize_rce_trajectory.py"),
+            str(tmp_path),
+            "--quiet",
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert res.returncode == 0
+    # Summary line still prints.
+    assert "wrote" in res.stdout
+    assert "(3 rows)" in res.stdout
+    # Table header column (e.g. ``CWV_mean[mm]``) should NOT be in
+    # stdout because the table was suppressed.
+    assert "CWV_mean[mm]" not in res.stdout, (
+        f"--quiet should suppress the table; stdout={res.stdout!r}"
+    )
+    # CSV still written.
+    csv = tmp_path / "trajectory.csv"
+    assert csv.exists()

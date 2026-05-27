@@ -680,6 +680,16 @@ def main() -> None:
              "checks (finite, max|U|_sfc, stuck detectors) fail. "
              "Only valid with --evaluate (not --final-dod).",
     )
+    # iter-128: --quiet suppresses the per-day fixed-width table so
+    # CI gates can keep their logs clean. The summary line + DOD
+    # verdict still print; the CSV is still written.
+    p.add_argument(
+        "--quiet",
+        action="store_true",
+        default=False,
+        help="Skip printing the fixed-width per-day table. "
+             "trajectory.csv + summary + DOD verdict still emit.",
+    )
     args = p.parse_args()
     if args.evaluate and args.final_dod:
         # iter-114 Codex LOW#2: ``raise SystemExit("msg")`` exits 1,
@@ -700,8 +710,9 @@ def main() -> None:
     rows = collect_trajectory(args.out_dir)
     csv_path = args.csv or args.out_dir / "trajectory.csv"
     write_csv(rows, csv_path)
-    print(format_table(rows))
-    print()
+    if not args.quiet:
+        print(format_table(rows))
+        print()
     print(f"wrote {csv_path} ({len(rows)} rows)")
     if args.evaluate or args.final_dod:
         if args.final_dod:
