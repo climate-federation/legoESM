@@ -447,48 +447,75 @@ def parse_log_max_w(out_dir: "Path | str") -> tuple[float, int]:
     ``# step,day,CWV_mean,CWV_max,MSE_mean,max|w|,max(qc),...``
     schema row. Returns 0.0 + 0 if no log.txt or no parseable rows.
 
-    Raises ``ValueError`` on a NaN or non-finite max|w| (catches
-    silent NaN-blow-up in the dycore — driver normally aborts but
-    test fixtures can plant a NaN).
+    Raises ``ValueError`` on a NaN or non-finite max|w|; the message
+    includes the file line number + ``step`` value from the data row
+    so a debugger can jump straight to the offending point (iter-139
+    Codex MEDIUM#6).
+
+    iter-139 Codex HIGH#1: streams the file line-by-line instead of
+    slurping with ``read_text().splitlines()``. A multi-GB 30-day
+    production log can otherwise OOM.
+
+    iter-139 Codex MEDIUM#2: header detection now strips the leading
+    ``#`` + whitespace generically, accepting both ``# step,`` and
+    ``#step,`` (future driver schema drift tolerance).
     """
     out_dir = Path(out_dir)
     log_path = out_dir / "log.txt"
     if not log_path.exists():
         return 0.0, 0
     header_cols: list[str] | None = None
+    max_w_col_idx: int | None = None
+    step_col_idx: int | None = None
     max_w_seen = 0.0
     n_rows = 0
-    for line in log_path.read_text().splitlines():
-        stripped = line.strip()
-        if stripped.startswith(_LOG_HEADER_PREFIX):
-            # Schema row: parse to find the max|w| column index.
-            header_cols = [
-                c.strip() for c in stripped[2:].split(",")
-            ]
-            continue
-        if stripped.startswith("#") or not stripped:
-            continue
-        if header_cols is None:
-            continue
-        cells = stripped.split(",")
-        if len(cells) != len(header_cols):
-            continue
-        try:
-            idx = header_cols.index(_LOG_MAX_W_COL_NAME)
-        except ValueError:
-            return max_w_seen, n_rows
-        try:
-            val = float(cells[idx])
-        except ValueError:
-            continue
-        if not math.isfinite(val):
-            raise ValueError(
-                f"non-finite max|w| = {val!r} at log row "
-                f"{n_rows + 1} in {log_path}; dycore blew up "
-                f"without aborting (DOD criterion 1 violation)."
-            )
-        max_w_seen = max(max_w_seen, val)
-        n_rows += 1
+    with log_path.open() as fh:
+        for lineno, line in enumerate(fh, 1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("#"):
+                # Lenient header detection: strip the leading ``#``
+                # + any whitespace, then test for the schema row by
+                # looking for the ``step`` column name as the FIRST
+                # comma-separated token.
+                payload = stripped[1:].lstrip()
+                if payload.startswith("step,") or payload == "step":
+                    header_cols = [c.strip() for c in payload.split(",")]
+                    try:
+                        max_w_col_idx = header_cols.index(_LOG_MAX_W_COL_NAME)
+                    except ValueError:
+                        return max_w_seen, n_rows
+                    try:
+                        step_col_idx = header_cols.index("step")
+                    except ValueError:
+                        step_col_idx = None
+                # Comment lines that are not the schema row.
+                continue
+            if header_cols is None or max_w_col_idx is None:
+                continue
+            cells = stripped.split(",")
+            if len(cells) != len(header_cols):
+                continue
+            try:
+                val = float(cells[max_w_col_idx])
+            except ValueError:
+                continue
+            if not math.isfinite(val):
+                step_str = (
+                    cells[step_col_idx]
+                    if step_col_idx is not None
+                    and step_col_idx < len(cells)
+                    else "?"
+                )
+                raise ValueError(
+                    f"non-finite max|w| = {val!r} at log.txt line "
+                    f"{lineno} (sim step {step_str}) in {log_path}; "
+                    f"dycore blew up without aborting "
+                    f"(DOD criterion 1 violation)."
+                )
+            max_w_seen = max(max_w_seen, val)
+            n_rows += 1
     return max_w_seen, n_rows
 
 
@@ -807,6 +834,18 @@ def main() -> None:
             f"(over {n_log_rows} log rows; "
             f"DOD criterion 1 threshold = {DEFAULT_MAX_W_THRESHOLD_MS} m/s)"
         )
+        # iter-139 Codex HIGH#3: a missing or empty log.txt returns
+        # (0.0, 0) which previously printed "log max|w| = 0.0 over 0
+        # log rows" + passed silently. That looks like a healthy run
+        # but actually means we have NO telemetry — opposite of
+        # certifying DOD criterion 1. Fail loudly.
+        if n_log_rows == 0:
+            print(
+                "DOD criterion 1 FAIL: log.txt missing or empty — "
+                "cannot certify max|w| < "
+                f"{DEFAULT_MAX_W_THRESHOLD_MS} m/s without log data."
+            )
+            raise SystemExit(EXIT_DOD_FAIL)
         if log_max_w > DEFAULT_MAX_W_THRESHOLD_MS:
             print(
                 f"DOD criterion 1 FAIL: log max|w| {log_max_w:.4e} > "

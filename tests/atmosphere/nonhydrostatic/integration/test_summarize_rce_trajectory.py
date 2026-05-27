@@ -1103,3 +1103,93 @@ def test_check_log_max_w_fails_on_blowup(tmp_path):
     )
     assert res.returncode == summary_mod.EXIT_DOD_FAIL
     assert "DOD criterion 1 FAIL" in res.stdout
+
+
+# iter-139: HIGH/MEDIUM Codex iter-137/138 follow-up tests.
+
+
+def test_parse_log_max_w_accepts_hashless_schema(tmp_path):
+    """iter-139 MEDIUM#2: future driver schema drift to ``#step,``
+    (no space after ``#``) must still parse."""
+    log_path = tmp_path / "log.txt"
+    log_path.write_text(
+        "# RCE MPI LONG header\n"
+        "#step,day,CWV_mean,CWV_max,MSE_mean,max|w|,max(qc),max(qr),max(precip_mm_day),Ca_substep\n"
+        "100,0.01,50.0,50.0,3.5e+09,5.0e-03,0,0,0,0.4\n"
+        "200,0.02,50.0,50.0,3.5e+09,8.0e-03,0,0,0,0.4\n"
+    )
+    max_w, n_rows = summary_mod.parse_log_max_w(tmp_path)
+    assert max_w == pytest.approx(8e-3)
+    assert n_rows == 2
+
+
+def test_parse_log_max_w_nan_message_includes_step(tmp_path):
+    """iter-139 MEDIUM#6: NaN ValueError must include the file line
+    number + the simulation ``step`` value so a debugger can jump
+    straight to the offending point."""
+    log_path = tmp_path / "log.txt"
+    _write_log_txt(log_path, [1e-3, 5e-3, float("nan"), 2e-3])
+    with pytest.raises(ValueError) as excinfo:
+        summary_mod.parse_log_max_w(tmp_path)
+    msg = str(excinfo.value)
+    # The NaN row is index 2 of max_w_values → step (i+1)*100 = 300.
+    assert "step 300" in msg, f"NaN reason missing step value; got: {msg!r}"
+    assert "line " in msg, f"NaN reason missing line number; got: {msg!r}"
+
+
+def test_check_log_max_w_fails_on_missing_log(tmp_path):
+    """iter-139 HIGH#3: missing log.txt + --check-log-max-w must
+    fail loudly (cannot certify DOD criterion 1 without telemetry).
+    Pre-iter-139 this branch printed ``log max|w| = 0.0 over 0
+    log rows`` and silently exited 0."""
+    import subprocess
+    snaps = tmp_path / "snapshots"
+    snaps.mkdir()
+    _write_snapshot(snaps / "snap_day_0000.npz", day=0.0, cwv_value=50.0)
+    # NO log.txt written.
+    res = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[4]
+                / "scripts" / "summarize_rce_trajectory.py"),
+            str(tmp_path), "--check-log-max-w", "--quiet",
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert res.returncode == summary_mod.EXIT_DOD_FAIL, (
+        f"missing log.txt + --check-log-max-w should exit "
+        f"EXIT_DOD_FAIL; got {res.returncode}, stdout={res.stdout!r}"
+    )
+    assert "log.txt missing or empty" in res.stdout
+
+
+def test_parse_log_max_w_streams_large_log(tmp_path):
+    """iter-139 HIGH#1: parse_log_max_w must stream the file, not
+    slurp via read_text(). This test writes a 5000-row log (small
+    enough for the test runner but large enough to exercise the
+    line-by-line iteration path).
+
+    We can't truly assert ``read_text()`` is not used without
+    monkeypatching ``Path.read_text``; instead the test verifies
+    the function returns the correct max for a moderately large
+    log without inflating memory enough to crash CI."""
+    log_path = tmp_path / "log.txt"
+    # Build 5000 rows; max|w| = 12.0 at row 2500.
+    rows = []
+    for i in range(5000):
+        step = (i + 1) * 100
+        day = step / 8640.0
+        val = 12.0 if i == 2500 else (i % 100) * 1e-4
+        rows.append(
+            f"{step},{day:.6f},50.0,50.0,3.5e+09,{val:.4e},"
+            f"0.0,0.0,0.0,0.4370"
+        )
+    log_path.write_text(
+        "# RCE MPI LONG header\n"
+        "# physics line\n"
+        "# step,day,CWV_mean,CWV_max,MSE_mean,max|w|,max(qc),max(qr),max(precip_mm_day),Ca_substep\n"
+        + "\n".join(rows) + "\n"
+    )
+    max_w, n_rows = summary_mod.parse_log_max_w(tmp_path)
+    assert max_w == pytest.approx(12.0)
+    assert n_rows == 5000
