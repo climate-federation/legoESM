@@ -223,6 +223,61 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 284 (cubed-sphere 30-day moist+sfc — NaN at day 2: surface flux over-forces at C4 planetary mesh)
+
+iter-283 added bulk surface flux to ``_compose_nh_moist_physics``
+for cubed-sphere. iter-284 launched the actual 30-day production
+to verify the iter-282 day-15 failure mode is fixed.
+
+**Result**: NaN at sim-day 2 (step 17280, wall 42 s). Trajectory:
+
+```
+step  t[d]  max|w|    θ' range          q_v_max
+   1  0.00  4.07e-01  [-7e-4,  9e-1]   9.35e-3
+8640  1.00  2.80e-02  [-5.8,  5.3]    1.10e-2
+17280 2.00  NaN
+```
+
+**Diagnosis**: surface flux is too aggressive at C4 mesh
+(n=4 → 96 cells globally, dx ≈ 14000 km per cell). Compare with
+iter-282 MPAS L=2 same-physics-LESS-surface-flux baseline:
+
+| Source | Day-1 max\\|w\\| | Day-1 θ' range | Day to NaN |
+|---|---|---|---|
+| iter-282 MPAS no-sfc | 1.28e-3 m/s | [-5.7, 2.2] K | 15 |
+| iter-284 C4 +sfc     | 2.80e-2 m/s | [-5.8, 5.3] K | 2 |
+
+The cubed-sphere mesh has only 96 cells covering the whole globe;
+each cell averages convective heat/moisture flux over ~5e12 m^2.
+Surface flux feeding latent + sensible heat into such enormous
+cells produces unphysical convective initiation. Coriolis is ON
+by default in CDGridCompressibleEulerConfig (use_coriolis=True),
+which compounds the issue at C4 where each cell spans multiple
+latitudes.
+
+Two paths forward (deferred — multi-day compute commitment):
+
+1. **Mesh refinement**: C24 = 3456 cells, dx ≈ 800 km. At
+   uniform 60 ms/step extrapolation: 30-day wall ~4.4 h × 36
+   = 158 h. Cluster job.
+2. **Config tuning for small mesh**: turn off Coriolis, raise
+   n_acoustic_substeps from 4 to 12, switch on fix_mass /
+   anchor_mass_to_initial. Could potentially stabilize at C4
+   but the gridscale convection is fundamentally unresolved.
+
+**Status update**:
+
+* Cross-grid **CAPABILITY** (iter-275): ✅ moist physics
+  composition works.
+* Cross-grid **30-day STABILITY** at small mesh: ❌ — surface
+  flux without surface flux produces day-15 NaN (iter-282);
+  with surface flux at C4 produces day-2 NaN (iter-284).
+* Cross-grid **30-day PRODUCTION**: requires either production
+  mesh (multi-day compute) OR carefully-tuned small-mesh config
+  (additional work). The iter-275 + iter-283 composition
+  helpers are correct; the FAILURE is mesh-resolution-bound, not
+  composition-bound.
+
 ### 2026-05-27 — iter 282 (MPAS 30-day moist attempt — STABLE 14 days, NaN day 15: missing surface flux)
 
 First attempt at the cross-grid 30-day production cell for MPAS.
