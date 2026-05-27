@@ -224,6 +224,27 @@ def test_write_csv_round_trip(synthetic_run: Path, tmp_path: Path):
     )
 
 
+def test_write_csv_creates_parent_directories(
+    synthetic_run: Path, tmp_path: Path,
+):
+    """iter-162: write_csv must create non-existent parent
+    directories (mkdir(parents=True, exist_ok=True) at
+    summarize_rce_trajectory.py:232). A regression that dropped
+    the ``parents=True`` flag would crash on a deeply-nested CSV
+    path. Realistic case: a wrapper that runs the summarizer
+    inside a per-run output dir that hasn't been pre-created.
+    """
+    rows = summary_mod.collect_trajectory(synthetic_run)
+    csv_path = tmp_path / "a" / "b" / "c" / "out.csv"
+    assert not csv_path.parent.exists()
+    summary_mod.write_csv(rows, csv_path)
+    assert csv_path.exists()
+    # exist_ok=True branch: re-writing to the same nested path
+    # must NOT raise FileExistsError on the existing parent dir.
+    summary_mod.write_csv(rows, csv_path)
+    assert csv_path.exists()
+
+
 def test_missing_snapshots_dir_raises(tmp_path: Path):
     with pytest.raises(FileNotFoundError, match="no snapshots dir"):
         summary_mod.collect_trajectory(tmp_path)
