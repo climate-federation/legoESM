@@ -122,11 +122,14 @@ def _make_cubed_sphere_surface_flux_tendency(
     cubed-sphere (face, n, n, nlev); but the EMITTED tendency
     type is cubed-sphere-only.
 
-    Why iter-283 needed this: iter-282 MPAS 30-day moist run
-    blew up at day 15 with theta' cooling -2.8 K/day (gray
-    radiation with no surface-flux counter-balance). Adding
-    bulk Cd/Ch + T_sfc/q_sfc fixed-SST relaxation closes the
-    column energy budget.
+    Why surface flux is needed for moist NH dycores: iter-282
+    measured -2.8 K/day theta' cooling on the MPAS no-sfc baseline
+    (gray radiation with no surface-flux counter-balance); the
+    same column-energy-budget gap applies to any moist NH run.
+    Bulk Cd/Ch + T_sfc/q_sfc fixed-SST relaxation closes it.
+    iter-283 wired this for cubed-sphere; iter-307 added the
+    MPAS analogue (``_make_mpas_surface_flux_tendency``,
+    heat+moisture only).
     """
     from legoesm import constants as legoesm_constants
     from legoesm.coupler.bulk_flux import simple_bulk_fluxes
