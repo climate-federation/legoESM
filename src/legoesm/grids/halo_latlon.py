@@ -319,6 +319,53 @@ def pad_halo_vector_latlon_3d(
 # follow-up commit to delegate here).
 
 
+def zero_polar_lat_ends(field: jnp.ndarray) -> jnp.ndarray:
+    """Zero a field at its lat-boundary rows (wall BC), backend-aware.
+
+    Used by operators that pre-pad a field via :func:`pad_halo_latlon`
+    and then compute a compact stencil — the resulting gradient
+    contains a (generally non-zero) value at the polar v-faces from
+    the pole-fold ghost, which must be overridden with zero to match
+    the dycore's wall-BC convention.
+
+    Local backend
+        Always zeros indices ``0`` and ``-1`` of axis 0 (the historical
+        "both ends are poles" assumption).
+
+    MPI backend (LatLonBandLayout topology)
+        Zeros index 0 only if this rank touches the south pole
+        (``layout.south_rank is None``); zeros index ``-1`` only if
+        this rank touches the north pole.  Interior partition cuts
+        are left intact so the cross-partition gradient computed
+        from neighbour-sendrecv'd halo values is preserved.
+
+    Parameters
+    ----------
+    field : jax.Array
+        Shape ``(n_lat_v, ...)``.  Axis 0 is the lat (v-face) axis.
+
+    Returns
+    -------
+    jax.Array : same shape as ``field``.
+    """
+    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
+    if get_halo_backend() == "mpi":
+        topology = get_mpi_topology()
+        from legoesm.parallel.latlon_mpi import LatLonBandLayout
+        if isinstance(topology, LatLonBandLayout):
+            out = field
+            if topology.south_rank is None:
+                out = out.at[0].set(jnp.zeros_like(out[0]))
+            if topology.north_rank is None:
+                out = out.at[-1].set(jnp.zeros_like(out[-1]))
+            return out
+    # Local fallback (and non-LatLonBandLayout MPI): always zero both
+    # ends — preserves the single-rank wall-BC convention.
+    out = field.at[0].set(jnp.zeros_like(field[0]))
+    out = out.at[-1].set(jnp.zeros_like(out[-1]))
+    return out
+
+
 def pad_with_pole_bc_lat(
     interior: jnp.ndarray,
     halo: int = 1,

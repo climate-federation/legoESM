@@ -485,48 +485,86 @@ def gradient_y_cgrid(
     -------
     df_dy : array, shape (n_lat+1, n_lon, ...) at v-points.
     """
-    # dy at v-point: on a regular lat-lon grid this is the scalar
-    # R*dlat; on a tripolar grid it varies per cell.  Use the scalar
-    # when dlat > 0 (regular grid) for bit-exact backward compat.
+    # Tripolar grids retain the legacy compact-stencil-then-pad path
+    # — the north fold-face gradient uses a per-cell partner lookup
+    # that does not fit the pre-pad model.  Regular / Mercator lat-lon
+    # grids switch to pre-pad-then-stencil so the compact stencil
+    # spans rank-local partition cuts via backend-dispatched halo
+    # exchange (the cross-partition correctness fix flagged in the
+    # previous commit).
     if is_tripolar(grid):
-        # Tripolar: per-cell meridional spacing
         dy_v_int = grid.dy_v[1:-1]  # (n_lat-1, n_lon)
-        dy_v_interior = dy_v_int if f.ndim == 2 else dy_v_int[:, :, jnp.newaxis]
-    else:
-        # Regular or Mercator: variable-dy safe.
-        dy_h = grid.dy * 0.5                           # (n_lat,) cell-row heights
-        dy_v_interior = 0.5 * (dy_h[1:] + dy_h[:-1])    # (n_lat-1,)
-
-    # Interior v-faces: i=1..n_lat-1
-    f_diff = f[1:] - f[:-1]
-    if dy_v_interior.ndim < f_diff.ndim:
-        # 1D dy (regular/Mercator): broadcast over lon and level axes
-        bcast = (slice(None),) + (jnp.newaxis,) * (f_diff.ndim - 1)
-        df_interior = f_diff / dy_v_interior[bcast]
-    else:
-        # 2D/3D dy (tripolar): already shaped for direct division
+        dy_v_interior = (
+            dy_v_int if f.ndim == 2 else dy_v_int[:, :, jnp.newaxis]
+        )
+        f_diff = f[1:] - f[:-1]
         df_interior = f_diff / dy_v_interior
-
-    # Boundary: wall BC (zero) on regular lat-lon; fold gradient on tripolar.
-    fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active:
-        # The fold face connects cell (fold_j, i) with its fold partner
-        # (fold_j, perm_T[i]).  Compute the gradient directly rather than
-        # reflecting the interior gradient (which is at a different location).
-        f_partner = f[-1:, fold.perm_T]  # (1, n_lon, ...)
-        dy_fold = grid.dy_v[-1:]  # (1, n_lon) — fold-face distance
+        # Tripolar north-boundary fold partner.
+        fold = grid.fold
+        f_partner = f[-1:, fold.perm_T]
+        dy_fold = grid.dy_v[-1:]
         if f.ndim == 3:
             dy_fold = dy_fold[:, :, jnp.newaxis]
-        # Pure numerical guard against division by zero at degenerate
-        # fold cells. Real ocean fold cells are O(km); 1e-30 only kicks
-        # in when ``dy_v`` is identically zero (e.g. synthetic test).
         dy_fold_safe = jnp.maximum(dy_fold, 1.0e-30)
         df_fold = (f_partner - f[-1:]) / dy_fold_safe
         south = jnp.zeros_like(df_interior[:1])
-        df_dy = jnp.concatenate([south, df_interior, df_fold], axis=0)
+        return jnp.concatenate([south, df_interior, df_fold], axis=0)
+
+    # ---- Regular / Mercator lat-lon: pre-pad then compact stencil ----
+    #
+    # Why pre-pad: the old "compute interior gradient → pad with
+    # zero" pattern hid an architectural mismatch under MPI.  At
+    # interior partition cuts the band-end v-face should carry the
+    # gradient across the cut (= (this_rank_f[0] - south_neighbour_f[-1])
+    # / dy_v), but the old pad helper had no access to the neighbour
+    # ``f`` value — only to a sendrecv'd ``df`` endpoint, which is
+    # the wrong v-face's gradient.
+    #
+    # The new path pre-pads ``f`` via ``pad_halo_latlon`` (backend-
+    # dispatched: local pole-fold OR MPI sendrecv + boundary pole-
+    # fold), runs the compact stencil on the padded ``f``, and then
+    # overrides the polar v-faces with zero via ``zero_polar_lat_ends``
+    # (also backend-aware so interior cuts are left alone).
+    #
+    # Serial bit-exactness: the local backend's pole-fold gives a
+    # non-zero gradient at v-faces 0 and -1, exactly what the new
+    # path computes; ``zero_polar_lat_ends`` then zeros those two
+    # ends — equivalent to the historical ``pad_ns_zero(df_interior)``.
+    from legoesm.grids.halo_latlon import (
+        pad_halo_latlon,
+        pad_halo_latlon_3d,
+        zero_polar_lat_ends,
+    )
+    if f.ndim == 2:
+        f_padded = pad_halo_latlon(f, halo=1)
+        # Strip the lon halo — gradient_y only needs the lat halo.
+        f_padded = f_padded[:, 1:-1]
+    elif f.ndim == 3:
+        f_padded = pad_halo_latlon_3d(f, halo=1)
+        f_padded = f_padded[:, 1:-1, :]
     else:
-        df_dy = pad_ns_zero(df_interior)
-    return df_dy
+        raise ValueError(
+            f"gradient_y_cgrid: f.ndim must be 2 or 3, got {f.ndim}"
+        )
+
+    # Compact stencil on padded f — gradient at ALL v-faces of the
+    # rank-local band, including the partition cuts.
+    f_diff = f_padded[1:] - f_padded[:-1]  # (n_lat_v, n_lon[, nlev])
+
+    # ``dy_v`` at all v-faces.  For uniform-dlat regular lat-lon
+    # this is constant (= R * dlat); ``mode='edge'`` pad simply
+    # repeats the constant.  For Mercator (variable dlat) edge-pad
+    # is the existing convention extended by one row — kept here so
+    # the operator's behaviour is unchanged on Mercator grids.
+    dy_h = grid.dy * 0.5                           # (n_lat,)
+    dy_h_padded = jnp.pad(dy_h, (1, 1), mode="edge")
+    dy_v = 0.5 * (dy_h_padded[1:] + dy_h_padded[:-1])  # (n_lat+1,)
+    bcast = (slice(None),) + (jnp.newaxis,) * (f_diff.ndim - 1)
+    df_dy = f_diff / dy_v[bcast]
+
+    # Wall BC at the pole-touching v-faces.  Under MPI on interior
+    # ranks this is a no-op; cross-partition gradients survive.
+    return zero_polar_lat_ends(df_dy)
 
 
 # =============================================================================
