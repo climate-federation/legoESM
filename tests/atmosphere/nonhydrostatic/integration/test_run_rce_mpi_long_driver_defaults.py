@@ -239,3 +239,36 @@ def test_log_every_steps_default(driver_defaults):
     passes 100 explicitly. iter-15/38 short smokes / production-
     scale tests override to 20/15/60 for tighter inspection."""
     assert driver_defaults["--log-every-steps"] == 100
+
+
+# iter-153: pin the three surface-flux + acoustic-damping defaults
+# that drive the iter-14 measured production envelope (max|w| = 6.1e-3
+# m/s, MSE drift = 1.7e-4 over 725 steps). Silent changes here would
+# alter CWV equilibrium or mask instabilities while still passing
+# every other test in this file.
+
+
+def test_c_h_production_default(driver_defaults):
+    """Surface bulk heat exchange coefficient.  c_h = 1.5e-3 is the
+    iter-14 production value (typical ocean ABL transfer coefficient).
+    A silent change to e.g. 1e-3 would shift the CWV equilibrium
+    outside the Wing 2018 45-60 mm plateau without tripping any
+    other test."""
+    assert driver_defaults["--c-h"] == 1.5e-3
+
+
+def test_acoustic_off_centering_production_default(driver_defaults):
+    """Skamarock-Klemp off-centering parameter beta. 0.0 = neutral
+    forward-backward (iter-14 contract). A silent change to 0.05-0.1
+    would damp acoustic modes — could mask real instabilities the
+    DOD criterion 1 test is supposed to catch, or destabilise an
+    otherwise-PASS run by drifting energy."""
+    assert driver_defaults["--acoustic-off-centering"] == 0.0
+
+
+def test_vertical_theta_diffusion_production_default(driver_defaults):
+    """Explicit vertical Laplacian on theta' [m^2/s]. 0.0 = off
+    (iter-14 contract).  A silent flip to 1e4-5e4 would smear
+    convection vertically and inflate the cloud-fraction plateau
+    above the 0.4-0.5 range the iter-105 30-day run sits in."""
+    assert driver_defaults["--vertical-theta-diffusion"] == 0.0
