@@ -427,6 +427,71 @@ def evaluate_rce_quality(
     )
 
 
+# iter-137: log.txt parser — reads max|w| at the driver's
+# log-every-steps cadence (~100 steps = 16.7 sim-min at dt=10 s),
+# vastly finer than the 24-hr snapshot cadence ``wind_sfc_max``.
+# DOD criterion 1 (``max|w| < 50 m/s throughout``) wants the 3D
+# vertical velocity max, not the surface horizontal wind, so this
+# parser closes the criterion 1 verdict gap.
+_LOG_HEADER_PREFIX = "# step,"
+_LOG_MAX_W_COL_NAME = "max|w|"
+
+
+def parse_log_max_w(out_dir: "Path | str") -> tuple[float, int]:
+    """Return ``(max_w_seen, n_rows_parsed)`` from
+    ``<out_dir>/log.txt``.
+
+    Driver schema at ``scripts/run_rce_mpi_long.py``: lines starting
+    with ``#`` are header / schema / config; data rows are
+    comma-separated with the column order pinned in the
+    ``# step,day,CWV_mean,CWV_max,MSE_mean,max|w|,max(qc),...``
+    schema row. Returns 0.0 + 0 if no log.txt or no parseable rows.
+
+    Raises ``ValueError`` on a NaN or non-finite max|w| (catches
+    silent NaN-blow-up in the dycore — driver normally aborts but
+    test fixtures can plant a NaN).
+    """
+    out_dir = Path(out_dir)
+    log_path = out_dir / "log.txt"
+    if not log_path.exists():
+        return 0.0, 0
+    header_cols: list[str] | None = None
+    max_w_seen = 0.0
+    n_rows = 0
+    for line in log_path.read_text().splitlines():
+        stripped = line.strip()
+        if stripped.startswith(_LOG_HEADER_PREFIX):
+            # Schema row: parse to find the max|w| column index.
+            header_cols = [
+                c.strip() for c in stripped[2:].split(",")
+            ]
+            continue
+        if stripped.startswith("#") or not stripped:
+            continue
+        if header_cols is None:
+            continue
+        cells = stripped.split(",")
+        if len(cells) != len(header_cols):
+            continue
+        try:
+            idx = header_cols.index(_LOG_MAX_W_COL_NAME)
+        except ValueError:
+            return max_w_seen, n_rows
+        try:
+            val = float(cells[idx])
+        except ValueError:
+            continue
+        if not math.isfinite(val):
+            raise ValueError(
+                f"non-finite max|w| = {val!r} at log row "
+                f"{n_rows + 1} in {log_path}; dycore blew up "
+                f"without aborting (DOD criterion 1 violation)."
+            )
+        max_w_seen = max(max_w_seen, val)
+        n_rows += 1
+    return max_w_seen, n_rows
+
+
 # iter-117: a "stuck trajectory" detector. Pre-iter-95 Bug 2
 # (unconditional fix_moist_mass_plane rescaling) pinned CWV at the
 # IC value (49.941 mm) for 11+ sim-hours because the mass fixer
@@ -690,6 +755,21 @@ def main() -> None:
         help="Skip printing the fixed-width per-day table. "
              "trajectory.csv + summary + DOD verdict still emit.",
     )
+    # iter-137: --check-log-max-w parses <out_dir>/log.txt at the
+    # driver's per-100-step cadence and prints the maximum 3D
+    # max|w| seen. DOD criterion 1 (max|w| < 50 m/s throughout) is
+    # an INSTANTANEOUS gate; snapshots at 24-hr cadence sample
+    # 1/8640 of the per-100-step values. Use this on a finished
+    # run to certify criterion 1.
+    p.add_argument(
+        "--check-log-max-w",
+        action="store_true",
+        default=False,
+        help="Parse <out_dir>/log.txt for the maximum 3D max|w| at "
+             "the driver's log cadence (~100 steps). Prints "
+             "``log max|w| = X m/s`` and exits EXIT_DOD_FAIL if > "
+             "DEFAULT_MAX_W_THRESHOLD_MS.",
+    )
     args = p.parse_args()
     if args.evaluate and args.final_dod:
         # iter-114 Codex LOW#2: ``raise SystemExit("msg")`` exits 1,
@@ -714,6 +794,25 @@ def main() -> None:
         print(format_table(rows))
         print()
     print(f"wrote {csv_path} ({len(rows)} rows)")
+    # iter-137: --check-log-max-w reports the run-wide max|w| from
+    # log.txt + fails on > 50 m/s (DOD criterion 1).
+    if args.check_log_max_w:
+        try:
+            log_max_w, n_log_rows = parse_log_max_w(args.out_dir)
+        except ValueError as exc:
+            print(f"log max|w|: ERROR — {exc}")
+            raise SystemExit(EXIT_DOD_FAIL)
+        print(
+            f"log max|w| = {log_max_w:.4e} m/s "
+            f"(over {n_log_rows} log rows; "
+            f"DOD criterion 1 threshold = {DEFAULT_MAX_W_THRESHOLD_MS} m/s)"
+        )
+        if log_max_w > DEFAULT_MAX_W_THRESHOLD_MS:
+            print(
+                f"DOD criterion 1 FAIL: log max|w| {log_max_w:.4e} > "
+                f"{DEFAULT_MAX_W_THRESHOLD_MS} m/s"
+            )
+            raise SystemExit(EXIT_DOD_FAIL)
     if args.evaluate or args.final_dod:
         if args.final_dod:
             verdict = evaluate_rce_final_dod(rows)

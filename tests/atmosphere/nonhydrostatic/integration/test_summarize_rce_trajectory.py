@@ -1011,3 +1011,95 @@ def test_quiet_with_no_plateau_check_prints_stability_verdict(tmp_path):
     assert res.returncode == summary_mod.EXIT_OK
     assert "CWV_mean[mm]" not in res.stdout
     assert "DOD STABILITY verdict: PASS" in res.stdout
+
+
+# iter-137: --check-log-max-w + parse_log_max_w tests.
+
+
+def _write_log_txt(path: Path, max_w_values: list[float]) -> None:
+    """Build a minimal log.txt matching run_rce_mpi_long.py's
+    schema. ``max_w_values`` populates the max|w| column row by
+    row."""
+    lines = [
+        "# RCE MPI LONG  n_ranks=1 grid=4x4 nlev=10 dx=4000.0 dt=10.0 days=1.0 total_steps=8640",
+        "# physics: gray radiation + Kessler microphysics",
+        "# step,day,CWV_mean,CWV_max,MSE_mean,max|w|,max(qc),max(qr),max(precip_mm_day),Ca_substep",
+    ]
+    for i, val in enumerate(max_w_values):
+        step = (i + 1) * 100
+        day = step / 8640.0
+        lines.append(
+            f"{step},{day:.6f},50.0,50.0,3.5e+09,{val:.4e},"
+            f"0.0,0.0,0.0,0.4370"
+        )
+    path.write_text("\n".join(lines) + "\n")
+
+
+def test_parse_log_max_w_returns_max_across_all_rows(tmp_path):
+    """iter-137: parse_log_max_w scans every data row in log.txt
+    and returns the maximum |w| seen."""
+    log_path = tmp_path / "log.txt"
+    _write_log_txt(log_path, [1e-3, 5e-3, 2e-3, 8e-3, 4e-3])
+    max_w, n_rows = summary_mod.parse_log_max_w(tmp_path)
+    assert max_w == pytest.approx(8e-3)
+    assert n_rows == 5
+
+
+def test_parse_log_max_w_missing_log_returns_zero(tmp_path):
+    """No log.txt → (0.0, 0). Caller can check ``n_rows == 0`` to
+    distinguish from "all rows were 0"."""
+    max_w, n_rows = summary_mod.parse_log_max_w(tmp_path)
+    assert max_w == 0.0
+    assert n_rows == 0
+
+
+def test_parse_log_max_w_rejects_nan(tmp_path):
+    """NaN in max|w| column raises ValueError — silent NaN-blow-up
+    would otherwise pass through ``max(0.0, nan) == 0.0`` (iter-66
+    helper bug pattern). iter-137 catches this at log-parse time."""
+    log_path = tmp_path / "log.txt"
+    _write_log_txt(log_path, [1e-3, float("nan"), 2e-3])
+    with pytest.raises(ValueError, match="non-finite max"):
+        summary_mod.parse_log_max_w(tmp_path)
+
+
+def test_check_log_max_w_passes_on_quiet_run(tmp_path):
+    """End-to-end CLI: --check-log-max-w on a finished run with
+    max|w| < 50 m/s prints the log max + does NOT fail."""
+    import subprocess
+    snaps = tmp_path / "snapshots"
+    snaps.mkdir()
+    _write_snapshot(snaps / "snap_day_0000.npz", day=0.0, cwv_value=50.0)
+    _write_log_txt(tmp_path / "log.txt", [1e-3, 5e-3, 2e-3])
+    res = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[4]
+                / "scripts" / "summarize_rce_trajectory.py"),
+            str(tmp_path), "--check-log-max-w", "--quiet",
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert res.returncode == 0
+    assert "log max|w| = 5.0000e-03" in res.stdout
+
+
+def test_check_log_max_w_fails_on_blowup(tmp_path):
+    """--check-log-max-w on a run where log max|w| > 50 m/s
+    exits EXIT_DOD_FAIL and prints the criterion-1 reason."""
+    import subprocess
+    snaps = tmp_path / "snapshots"
+    snaps.mkdir()
+    _write_snapshot(snaps / "snap_day_0000.npz", day=0.0, cwv_value=50.0)
+    _write_log_txt(tmp_path / "log.txt", [1e-3, 99.0, 2e-3])
+    res = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[4]
+                / "scripts" / "summarize_rce_trajectory.py"),
+            str(tmp_path), "--check-log-max-w", "--quiet",
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert res.returncode == summary_mod.EXIT_DOD_FAIL
+    assert "DOD criterion 1 FAIL" in res.stdout
