@@ -216,6 +216,40 @@ def test_qv_noise_seed_default(driver_defaults):
     assert driver_defaults["--qv-noise-seed"] == 0
 
 
+def test_driver_consults_shared_halo_requirement_map():
+    """iter-187: the driver MUST source its per-scheme halo
+    requirement from the shared
+    HORIZONTAL_ADVECTION_HALO_REQUIREMENT map in
+    compressible_euler_plane, not a hardcoded inline dict.
+
+    Pre iter-187 the driver hardcoded
+    ``{"upwind1": 1, "van_leer": 2, "weno5": 3}`` inline and the
+    halo dispatch hardcoded the same values separately — classic
+    drift hazard. iter-187 collapsed to a single source of truth;
+    this test locks the driver's import-and-use pattern so a
+    future revert can't go unnoticed.
+
+    Scrapes the driver source for the import + dictionary lookup.
+    """
+    driver_text = DRIVER.read_text()
+    assert (
+        "from legoesm.atmosphere.dynamics.compressible_euler_plane "
+        "import"
+    ) in driver_text and "HORIZONTAL_ADVECTION_HALO_REQUIREMENT" in driver_text, (
+        "Driver must import HORIZONTAL_ADVECTION_HALO_REQUIREMENT "
+        "from compressible_euler_plane (iter-187 single source of "
+        "truth)."
+    )
+    assert (
+        "HORIZONTAL_ADVECTION_HALO_REQUIREMENT[args.advection]"
+    ) in driver_text, (
+        "Driver must look up the required halo via "
+        "HORIZONTAL_ADVECTION_HALO_REQUIREMENT[args.advection] so "
+        "layout halo matches the active --advection at construction "
+        "time (iter-186 Codex HIGH fix)."
+    )
+
+
 def test_theta_noise_defaults(driver_defaults):
     """iter-181 added --theta-noise-amp / --theta-noise-seed for the
     RCEMIP / Wing 2018 standard theta' symmetry-breaker. Default
