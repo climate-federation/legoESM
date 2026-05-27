@@ -763,10 +763,20 @@ def main():
             print(f"ERROR: grid not divisible by {n_ranks_y}x{n_ranks_x}.")
         return
 
+    # iter-186 Codex HIGH: the halo width must match the advection
+    # scheme's stencil reach. upwind1 needs halo=1 (stencil ±1),
+    # van_leer needs halo>=2 (stencil ±1 each side of face + 1
+    # extra for the +2 read), weno5 needs halo>=3 (stencil ±3).
+    # Pre-iter-186 the layout always defaulted to halo=1 so
+    # --use-dd --advection van_leer (the iter-183 production combo)
+    # crashed at the first halo slow-tendency call.
+    _SCHEME_HALO = {"upwind1": 1, "van_leer": 2, "weno5": 3}
+    _required_halo = _SCHEME_HALO[args.advection]
     layout = make_plane_pencil_layout(
         rank=rank, n_ranks=n_ranks,
         n_ranks_y=n_ranks_y, n_ranks_x=n_ranks_x,
         ny_global=args.ny, nx_global=args.nx,
+        halo=_required_halo,
     )
     grid = create_plane_grid(
         nx=args.nx, ny=args.ny, nlev=args.nlev,

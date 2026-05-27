@@ -151,6 +151,58 @@ def test_van_leer_differentiable_via_jax_grad():
     )
 
 
+def test_van_leer_y_differentiable_via_jax_grad():
+    """iter-186 Codex LOW: the iter-179 x-axis differentiability
+    test left the y-axis (_van_leer_advection_y) uncovered. The
+    y path has its own ``where(|delta|>eps, delta, eps)`` ratio
+    computation and a potentially distinct kink behaviour. Lock
+    it explicitly so a future refactor that breaks y-axis grad
+    surfaces here instead of mid-training run."""
+    ny, nx, nlev = 8, 4, 2
+    rng = jax.random.PRNGKey(42)
+    f0 = jax.random.normal(rng, (ny, nx, nlev), dtype=jnp.float64)
+    v = jax.random.normal(
+        jax.random.fold_in(rng, 1), f0.shape, dtype=jnp.float64,
+    )
+    dy = 1000.0
+
+    def loss_fn(f):
+        return jnp.sum(_van_leer_advection_y(f, v, dy) ** 2)
+
+    grad = jax.grad(loss_fn)(f0)
+    assert jnp.all(jnp.isfinite(grad)), (
+        "Van Leer y-axis gradient has non-finite entries — the "
+        "ratio-eps branch in _van_leer_advection_y leaked NaN."
+    )
+
+
+def test_van_leer_grad_finite_on_zero_delta():
+    """iter-186 Codex LOW: the ``where(|delta|>eps, delta, eps)``
+    pattern can silently feed eps=1e-30 into a downstream multiply
+    that overflows or produces non-finite gradients. Exercise the
+    zero-delta branch directly with a CONSTANT field (every
+    delta = 0 → every ratio denominator falls back to eps) on both
+    axes."""
+    ny, nx, nlev = 4, 4, 2
+    f0 = jnp.ones((ny, nx, nlev), dtype=jnp.float64) * 2.5
+    u = jnp.ones_like(f0) * 0.5
+    dx = 1000.0
+
+    def loss_x(f):
+        return jnp.sum(_van_leer_advection_x(f, u, dx) ** 2)
+    grad_x = jax.grad(loss_x)(f0)
+    assert jnp.all(jnp.isfinite(grad_x)), (
+        "Van Leer x: zero-delta branch produced non-finite gradient"
+    )
+
+    def loss_y(f):
+        return jnp.sum(_van_leer_advection_y(f, u, dx) ** 2)
+    grad_y = jax.grad(loss_y)(f0)
+    assert jnp.all(jnp.isfinite(grad_y)), (
+        "Van Leer y: zero-delta branch produced non-finite gradient"
+    )
+
+
 def test_van_leer_scheme_dispatch_in_slow_tendency():
     """The plane CRM slow-tendency entry rejects bad scheme names AND
     accepts the three supported names. Iter-179 added 'van_leer' to

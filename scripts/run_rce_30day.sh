@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # 30-day RCE @ 132x132, dx=2 km, 12 MPI ranks, full physics.
 #
-# Default outer dt: 5.0 s. F10 finding (2026-05 iter-9): bare-dycore
-# stable at dt up to 10 s with the clean F8 IC (no bubble, no qv
-# noise). Full-physics smoke at dt=5 s ran 864 steps stably. This
-# replaces the iter-2 conservative 1 s default that was set based
-# on the bubble-driven F1 instability — fixed by F7 (bubble made
-# opt-in).
+# Default outer dt: 20.0 s (iter-183 production refresh — 4x faster
+# than the iter-14 dt=5 s contract). iter-179 added Van Leer TVD
+# horizontal advection; iter-180/183 measured Van Leer at dt=20 +
+# beta=0.2 acoustic off-centering gives 3x wall-time speedup vs the
+# iter-14 dt=10 + upwind1 baseline at the same sim time. F10
+# verified the bare dycore is stable at dt up to 10 s with the
+# clean F8 IC; iter-180/183 pushed dt up to 20 s by pairing with
+# WENO5 / Van Leer (less numerical diffusion -> looser advective
+# CFL) and stronger acoustic off-centering (beta=0.2 vs iter-14's
+# 0.0/0.1).
 # Hourly 3D MSE/qv/T snapshots for GIF, daily surface snapshots, 5-day profiles.
 #
 # Stability history (measured by scripts/diag_bare_dycore_stability.py
@@ -30,11 +34,16 @@
 # Env vars:
 #   DAYS         simulation days (default 30)
 #   RANKS        MPI ranks (default 12)
-#   DT           outer timestep [s] (default 5.0 — F10 production stable)
+#   DT           outer timestep [s] (default 20.0 — iter-183 production
+#                contract pairing with ADVECTION=van_leer + beta=0.2)
 #   NX,NY        grid dims (default 132)
 #   N_ACOUSTIC   acoustic substeps per outer step (default 12, matches dt=5.0s
 #                + iter-14 production measurement)
-#   ADVECTION    upwind1 | weno5  (default upwind1)
+#   ADVECTION    upwind1 | van_leer | weno5  (default van_leer — iter-183
+#                production: 2nd-order TVD, stencil 4, 3x wall-time
+#                speedup vs upwind1 at dt=10. upwind1 = legacy; weno5
+#                = sharp-front opt-in but ~3x per-step cost so SLOWER
+#                end-to-end than upwind1 at dt=10).
 #   HYPERDIFF    horizontal hyperdiffusion coefficient (default 5.0e6;
 #                iter-9 F6 found weaker values let bubble IC blow up).
 #   BUBBLE_K     warm-bubble IC perturbation [K] (default 0.0 = no
@@ -52,7 +61,7 @@
 #                noise. F11 needs separate physics-side debugging
 #                (likely radiation+dycore coupling, not the dycore
 #                proper). Default 0.0 keeps the wrapper functional
-#                at the iter-180 dt=20+WENO5+beta=0.2 production
+#                at the iter-183 dt=20+van_leer+beta=0.2 production
 #                contract; convection remains column-symmetric
 #                (iter-149) so realistic precipitation is gated on
 #                F11 resolution.
@@ -115,17 +124,20 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
     # macOS BSD sed does not support ``\?``; use ``-E`` (extended
     # regex) so ``# ?`` strips the leading ``# `` (with optional
     # trailing space).
-    # iter-143/iter-144/iter-179/iter-181: extracted range widened to
-    # cover every documented env var. iter-136 stopped at line 72
-    # (pre-iter-138 CHECK_LOG_MAX_W docs); iter-143 widened to 77
-    # (post-iter-138); iter-144 added HYPERDIFF/BUBBLE_K/QV_NOISE/
-    # USE_DD docs + PYBIN moved to 89. iter-179 expanded the
-    # QV_NOISE docblock (column-symmetry-trap rationale) which
+    # iter-143/iter-144/iter-179/iter-181/iter-186: extracted range
+    # widened to cover every documented env var. iter-136 stopped at
+    # line 72 (pre-iter-138 CHECK_LOG_MAX_W docs); iter-143 widened
+    # to 77 (post-iter-138); iter-144 added HYPERDIFF/BUBBLE_K/
+    # QV_NOISE/USE_DD docs + PYBIN moved to 89. iter-179 expanded
+    # the QV_NOISE docblock (column-symmetry-trap rationale) which
     # pushed CHECK_LOG_MAX_W + PYBIN to 93-97. iter-181 further
     # expanded the QV_NOISE docblock (F11 radiation-feedback
-    # finding) so CHECK_LOG_MAX_W is now at 98-101 and PYBIN at
-    # 102 — range widened to 102 in lockstep.
-    sed -n '2,102p' "$0" | sed -E 's/^# ?//'
+    # finding) so CHECK_LOG_MAX_W is now at 98-101 and PYBIN at 102.
+    # iter-186 (Codex LOW) refreshed the iter-183 production
+    # contract docs at the top (DT=20, ADVECTION=van_leer, beta=0.2);
+    # CHECK_LOG_MAX_W is now at 107-110 and PYBIN at 111 — widened
+    # to 111 in lockstep.
+    sed -n '2,111p' "$0" | sed -E 's/^# ?//'
     exit 0
 fi
 
