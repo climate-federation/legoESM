@@ -237,13 +237,35 @@ def write_csv(rows: list[DayRow], csv_path: Path) -> None:
 
 @dataclass
 class QualityVerdict:
-    """Result of ``evaluate_rce_quality``. ``passed`` is the
-    boolean AND of every individual criterion; ``reasons`` lists
-    one line per failed criterion so callers can surface specifics
-    in CI output."""
+    """Result of ``evaluate_rce_quality``.
+
+    ``passed`` is the boolean AND of every individual criterion;
+    ``reasons`` lists one line per failed criterion so callers can
+    surface specifics in CI output.
+
+    ``evaluated`` distinguishes a real PASS (plateau check fired and
+    every criterion was met) from an INSUFFICIENT verdict where the
+    trajectory was too short to evaluate the plateau (iter-104
+    Codex MEDIUM#3). Smokes / DAYS<10 land in INSUFFICIENT; the CLI
+    surfaces it as a distinct exit code (4) so automation can tell
+    "PASS but only finite + wind sanity ran" apart from a real
+    plateau-PASS.
+    """
 
     passed: bool
     reasons: list[str]
+    evaluated: bool = True
+
+
+# iter-104 Codex MEDIUM#7 fix: distinct CLI exit codes so automation
+# can distinguish a DOD FAIL verdict from an IO / parse error.
+EXIT_OK = 0
+EXIT_IO_ERROR = 1            # raised by Python on uncaught
+                              # FileNotFoundError / ValueError
+EXIT_DOD_FAIL = 3            # --evaluate ran and at least one
+                              # criterion failed
+EXIT_DOD_INSUFFICIENT = 4    # --evaluate ran but trajectory too
+                              # short for plateau check
 
 
 # iter-102: default thresholds drawn from Wing et al. 2018 RCEMIP1
@@ -313,26 +335,48 @@ def evaluate_rce_quality(
             f"non-finite |U|_sfc on day(s) {nonfinite_w!r}"
         )
     # Criteria 2 + 4: need at least last_n_days_for_plateau rows.
-    if len(rows) >= last_n_days_for_plateau:
+    evaluated_plateau = len(rows) >= last_n_days_for_plateau
+    if evaluated_plateau:
         plateau = rows[-last_n_days_for_plateau:]
-        plateau_cwv = sum(r.cwv_mean for r in plateau) / len(plateau)
-        if not (cwv_range_mm[0] <= plateau_cwv <= cwv_range_mm[1]):
+        plateau_cwv_mean = sum(r.cwv_mean for r in plateau) / len(plateau)
+        if not (cwv_range_mm[0] <= plateau_cwv_mean <= cwv_range_mm[1]):
             reasons.append(
-                f"plateau CWV {plateau_cwv:.3f} mm outside "
+                f"plateau CWV mean {plateau_cwv_mean:.3f} mm outside "
                 f"target range {cwv_range_mm} (last "
                 f"{last_n_days_for_plateau} days)."
+            )
+        # iter-104 Codex MEDIUM#1: the mean alone misses a runaway
+        # that starts low and ends high (e.g. 30 → 80 mm averages
+        # 55 mm — passes). Also assert plateau CWV max stays inside
+        # the upper bound (the lower bound is checked by the mean —
+        # a slow drain dips the mean before any value goes below).
+        plateau_cwv_max = max(r.cwv_max for r in plateau)
+        if plateau_cwv_max > cwv_range_mm[1]:
+            reasons.append(
+                f"plateau CWV max {plateau_cwv_max:.3f} mm exceeded "
+                f"upper bound {cwv_range_mm[1]} mm — runaway "
+                f"evaporation signature."
             )
         mse_vals = [r.mse_mean for r in plateau if math.isfinite(r.mse_mean)]
         if mse_vals:
             mse_min, mse_max = min(mse_vals), max(mse_vals)
-            relative = abs(mse_max - mse_min) / max(abs(mse_max), 1e-30)
+            # iter-104 Codex LOW#2: denominator should be
+            # max(abs(min), abs(max), 1e-30) so all-negative MSE
+            # arrays (defensive — MSE is non-negative in practice)
+            # don't overstate drift.
+            denom = max(abs(mse_max), abs(mse_min), 1e-30)
+            relative = abs(mse_max - mse_min) / denom
             if relative > mse_relative_drift:
                 reasons.append(
                     f"MSE relative drift {relative:.4e} > "
                     f"{mse_relative_drift} over last "
                     f"{last_n_days_for_plateau} days."
                 )
-    return QualityVerdict(passed=(not reasons), reasons=reasons)
+    return QualityVerdict(
+        passed=(not reasons),
+        reasons=reasons,
+        evaluated=evaluated_plateau,
+    )
 
 
 def main() -> None:
@@ -366,13 +410,26 @@ def main() -> None:
     print(f"wrote {csv_path} ({len(rows)} rows)")
     if args.evaluate:
         verdict = evaluate_rce_quality(rows)
+        # iter-104 Codex MEDIUM#3 + MEDIUM#7: three-way verdict +
+        # distinct exit codes so automation can tell PASS from
+        # INSUFFICIENT (too short for plateau check) and from a
+        # crash on IO / parse error (exit 1 from uncaught Python).
+        if not verdict.evaluated:
+            print("DOD verdict: INSUFFICIENT")
+            print(
+                f"  - trajectory has {len(rows)} day(s), need "
+                f"{DEFAULT_LAST_N_DAYS_FOR_PLATEAU} for the plateau check."
+            )
+            for r in verdict.reasons:
+                print(f"  - {r}")
+            raise SystemExit(EXIT_DOD_INSUFFICIENT)
         if verdict.passed:
             print("DOD verdict: PASS")
         else:
             print("DOD verdict: FAIL")
             for r in verdict.reasons:
                 print(f"  - {r}")
-            raise SystemExit(1)
+            raise SystemExit(EXIT_DOD_FAIL)
 
 
 if __name__ == "__main__":

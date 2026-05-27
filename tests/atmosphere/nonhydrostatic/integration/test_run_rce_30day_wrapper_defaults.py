@@ -503,26 +503,48 @@ def test_wrapper_evaluate_dod_threads_into_summarizer(wrapper_text):
 
 def test_wrapper_evaluate_dod_propagates_dod_fail(tmp_path):
     """iter-103 behavioural smoke: EVALUATE_DOD=1 + a summarizer that
-    fails (e.g. on FAIL DOD verdict, exit 1) must propagate non-zero
-    unless ALLOW_SUMMARY_FAILURE=1 downgrades it. Reuses the iter-101
-    stub harness."""
+    fails (e.g. on FAIL DOD verdict, iter-104 exit code 3) must
+    propagate non-zero unless ALLOW_SUMMARY_FAILURE=1 downgrades it.
+    Reuses the iter-101 stub harness.
+
+    iter-104: switched the expected summarizer exit code from 1 to 3
+    to match the new distinct-code contract (Codex MEDIUM#7). The
+    wrapper still propagates the literal status, so the assertion
+    is the literal stub code, not a hardcoded ``1``."""
     res = _run_wrapper_with_stubs(
-        tmp_path, mpirun_exit=0, summarizer_exit=1,
+        tmp_path, mpirun_exit=0, summarizer_exit=3,
         allow_summary_failure="0",
     )
-    assert res.returncode == 1, (
-        f"DOD FAIL did not propagate: returncode={res.returncode} "
+    assert res.returncode == 3, (
+        f"DOD FAIL (exit 3) did not propagate: returncode={res.returncode} "
         f"stderr={res.stderr!r}"
     )
 
 
-def test_wrapper_evaluate_dod_allow_summary_failure_downgrades(tmp_path):
-    """iter-103: ALLOW_SUMMARY_FAILURE=1 still covers DOD FAIL — the
-    wrapper exits 0 with WARN on stderr. This is the intentional
-    escape hatch (a developer can opt out of DOD-blocking by setting
-    the env)."""
+def test_wrapper_evaluate_dod_insufficient_propagates(tmp_path):
+    """iter-104 Codex MEDIUM#3: --evaluate on a too-short trajectory
+    exits with EXIT_DOD_INSUFFICIENT=4. The wrapper must propagate
+    that literal code (distinct from PASS=0 and FAIL=3) so automation
+    can tell "trajectory too short to gate" apart from "trajectory
+    gated and failed"."""
     res = _run_wrapper_with_stubs(
-        tmp_path, mpirun_exit=0, summarizer_exit=1,
+        tmp_path, mpirun_exit=0, summarizer_exit=4,
+        allow_summary_failure="0",
+    )
+    assert res.returncode == 4, (
+        f"DOD INSUFFICIENT (exit 4) did not propagate: "
+        f"returncode={res.returncode} stderr={res.stderr!r}"
+    )
+
+
+def test_wrapper_evaluate_dod_allow_summary_failure_downgrades(tmp_path):
+    """iter-103: ALLOW_SUMMARY_FAILURE=1 still covers any non-zero
+    summarizer exit (IO=1, DOD FAIL=3, INSUFFICIENT=4). The wrapper
+    exits 0 with WARN on stderr. Intentional escape hatch (a developer
+    can opt out of DOD-blocking by setting the env). iter-104 exercises
+    the DOD FAIL code 3 (post-Codex MEDIUM#7 split)."""
+    res = _run_wrapper_with_stubs(
+        tmp_path, mpirun_exit=0, summarizer_exit=3,
         allow_summary_failure="1",
     )
     assert res.returncode == 0

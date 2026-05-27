@@ -367,25 +367,114 @@ def test_evaluate_flags_mse_drift():
     assert any("MSE relative drift" in r for r in verdict.reasons)
 
 
-def test_evaluate_skips_plateau_on_short_trajectory():
-    """Fewer than ``last_n_days_for_plateau`` rows → only the
-    finite-checks fire; plateau criteria are skipped to avoid
-    false-FAIL on early spin-up."""
+def test_evaluate_short_trajectory_marks_insufficient():
+    """iter-104 Codex MEDIUM#3: fewer than
+    ``last_n_days_for_plateau`` rows → plateau checks skipped AND
+    ``verdict.evaluated`` is False. ``passed`` may still be True
+    (finite + wind checks ran), but callers can distinguish a real
+    plateau-PASS from an INSUFFICIENT verdict."""
     rows = [_row(float(i), cwv_mean=10.0) for i in range(3)]
     verdict = summary_mod.evaluate_rce_quality(rows)
-    # CWV is in finite range; no plateau check fires; PASS.
-    assert verdict.passed, verdict.reasons
+    assert verdict.evaluated is False, (
+        "3-day trajectory should be marked evaluated=False so "
+        "callers can distinguish INSUFFICIENT from real PASS."
+    )
+    # Finite + wind sanity passed; plateau never ran → passed=True
+    # but evaluated=False is the tri-state.
+    assert verdict.passed
+    assert verdict.reasons == []
+
+
+def test_evaluate_full_trajectory_marks_evaluated():
+    """Symmetric to test_evaluate_short_trajectory_marks_insufficient:
+    when the trajectory IS long enough, ``evaluated=True`` so the
+    CLI exit code differentiation (PASS → 0, FAIL → 3, INSUFFICIENT
+    → 4) works."""
+    rows = [_row(float(i)) for i in range(12)]
+    verdict = summary_mod.evaluate_rce_quality(rows)
+    assert verdict.evaluated is True
+    assert verdict.passed
 
 
 def test_evaluate_iter98_inflight_trajectory_passes():
     """Smoke against the actual iter-98 trajectory shape: CWV
     overshoot then settle in [55, 58] mm. The defaults must accept
-    this — if they don't, the defaults are too tight."""
-    cwv = [49.94, 53.63, 55.67, 56.77, 57.18, 57.12, 56.85, 56.54, 56.20, 55.87]
+    this — if they don't, the defaults are too tight.
+
+    iter-104 Codex LOW#6: the iter-98 trajectory is exactly 10 days,
+    matching ``DEFAULT_LAST_N_DAYS_FOR_PLATEAU``. Extend the fixture
+    by 1 spin-up day so any future raise of the plateau window
+    surfaces here in lockstep (instead of silently skipping the
+    plateau check and still printing PASS)."""
+    cwv = [44.40,  # synthetic spin-up day so len(rows) > DEFAULT_LAST_N
+           49.94, 53.63, 55.67, 56.77, 57.18, 57.12, 56.85, 56.54,
+           56.20, 55.87]
+    assert len(cwv) > summary_mod.DEFAULT_LAST_N_DAYS_FOR_PLATEAU, (
+        "fixture too short — would hollow out plateau check if "
+        "DEFAULT_LAST_N_DAYS_FOR_PLATEAU is ever raised."
+    )
     rows = [_row(float(i), cwv_mean=v, cwv_max=v) for i, v in enumerate(cwv)]
     verdict = summary_mod.evaluate_rce_quality(rows)
+    assert verdict.evaluated is True
     assert verdict.passed, (
         "iter-98 in-flight 32x32 + radiation trajectory should pass "
         f"the DOD evaluator with default thresholds. Reasons: "
+        f"{verdict.reasons!r}"
+    )
+
+
+def test_evaluate_flags_runaway_evaporation_via_max(tmp_path):
+    """iter-104 Codex MEDIUM#1: a runaway evaporation that climbs
+    from 30 mm to 80 mm has plateau MEAN ≈ 55 mm (inside default
+    window) but plateau MAX = 80 mm > upper bound. The max-gate
+    must catch this."""
+    cwv = [30.0 + i * 5.0 for i in range(11)]  # 30, 35, ..., 80
+    rows = [_row(float(i), cwv_mean=v, cwv_max=v) for i, v in enumerate(cwv)]
+    verdict = summary_mod.evaluate_rce_quality(rows)
+    assert not verdict.passed
+    assert any("runaway evaporation" in r for r in verdict.reasons), (
+        f"runaway evaporation should be flagged via the max-gate; "
+        f"reasons: {verdict.reasons!r}"
+    )
+
+
+def test_evaluate_exit_code_constants():
+    """iter-104 Codex MEDIUM#7: lock the distinct exit codes so a
+    future refactor cannot silently re-collide them."""
+    assert summary_mod.EXIT_OK == 0
+    assert summary_mod.EXIT_IO_ERROR == 1
+    assert summary_mod.EXIT_DOD_FAIL == 3
+    assert summary_mod.EXIT_DOD_INSUFFICIENT == 4
+    # 1 is reserved for uncaught Python errors; 2 is reserved by
+    # argparse for misuse.
+    codes = {
+        summary_mod.EXIT_OK,
+        summary_mod.EXIT_IO_ERROR,
+        summary_mod.EXIT_DOD_FAIL,
+        summary_mod.EXIT_DOD_INSUFFICIENT,
+    }
+    assert len(codes) == 4, "exit codes must be pairwise distinct"
+
+
+def test_evaluate_mse_drift_denominator_uses_max_abs():
+    """iter-104 Codex LOW#2: the relative-drift denominator should
+    be ``max(abs(min), abs(max), 1e-30)`` so a (synthetic) negative
+    MSE array doesn't overstate the drift."""
+    rows = [
+        _row(
+            float(i),
+            mse_mean=-2.0e9 + i * 5.0e6,   # -2e9 → -1.95e9, drift = 5e7
+        )
+        for i in range(12)
+    ]
+    verdict = summary_mod.evaluate_rce_quality(rows)
+    # |max - min| = 5e7; |max| = 1.95e9, |min| = 2e9.
+    # Correct denom = max(1.95e9, 2e9) = 2e9; drift = 0.025 < 5 %.
+    # Pre-fix denom (just abs(max)) would have been 1.95e9 → drift
+    # 0.0256 — still < 5 % so the *test* doesn't trip the threshold
+    # either way. So we ALSO assert no MSE drift reason was
+    # appended, locking the "no false positive" branch.
+    assert not any("MSE relative drift" in r for r in verdict.reasons), (
+        f"MSE drift should not fire on this synthetic; reasons: "
         f"{verdict.reasons!r}"
     )
