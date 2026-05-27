@@ -637,6 +637,55 @@ def test_driver_rejects_n_outer_split_zero(tmp_path):
     )
 
 
+def test_driver_rejects_n_outer_split_auto_bad_max_wind_safe(tmp_path):
+    """iter-235 (Codex iter-234 round-2 LOW#1): --n-outer-split=auto
+    must SystemExit cleanly when --max-wind-safe is 0 or negative.
+
+    Pre iter-235 the helper raised raw ValueError from
+    select_n_outer_split (the existing CLI finite/range validator
+    runs AFTER the auto-resolve block). iter-235 wraps the helper
+    in try/except ValueError -> SystemExit so a post-run analyst
+    gets a clean error message.
+    """
+    import subprocess
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    cmd = [
+        sys.executable, str(DRIVER),
+        "--nx", "12", "--ny", "12", "--nlev", "20",
+        "--dx", "2000.0", "--dt", "5.0",
+        "--days", "0.001",
+        "--semi-implicit-acoustic",
+        "--acoustic-off-centering", "0.1",
+        "--n-acoustic-substeps", "6",
+        "--no-radiation",
+        "--n-outer-split", "auto",
+        "--max-wind-safe", "0.0",  # invalid
+        "--output", str(tmp_path / "out"),
+    ]
+    result = subprocess.run(
+        cmd, env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode != 0, (
+        f"Driver did not reject --n-outer-split=auto with "
+        f"--max-wind-safe=0 (returncode {result.returncode}). "
+        f"stdout: {result.stdout[-500:]}"
+    )
+    combined_err = (result.stderr + result.stdout).lower()
+    # Either a clean iter-235 SystemExit (preferred) or the
+    # iter-67/68 generic-finite-validator message; both are
+    # acceptable as long as a stack trace is NOT shown.
+    assert ("auto" in combined_err or "max-wind-safe" in combined_err
+            or "max_wind_safe" in combined_err), (
+        f"Driver auto-mode rejection should mention 'auto' or "
+        f"'max-wind-safe'. stderr: {result.stderr[-500:]}"
+    )
+    assert "traceback" not in combined_err, (
+        f"Driver should SystemExit cleanly, not raise a Python "
+        f"traceback. stderr: {result.stderr[-500:]}"
+    )
+
+
 def test_driver_imports_select_n_outer_split_from_package():
     """iter-233: the driver must import ``select_n_outer_split``
     from ``legoesm.timestepping.split_explicit`` rather than

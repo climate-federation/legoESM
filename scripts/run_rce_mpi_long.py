@@ -807,11 +807,25 @@ def main():
         from legoesm.timestepping.split_explicit import (
             select_n_outer_split,
         )
-        n_outer_split = select_n_outer_split(
-            args.dt, args.dx,
-            max_wind_safe=args.max_wind_safe,
-            cfl_safe=args.cfl_safe,
-        )
+        # iter-235 (Codex iter-234 round-2 LOW#1): catch raw
+        # ValueError from select_n_outer_split (bad
+        # --max-wind-safe / --cfl-safe / --dt / --dx) and re-raise
+        # as clean SystemExit. The earlier finite/range CLI
+        # validator runs AFTER this block, so auto-mode would
+        # otherwise crash with a raw stack trace from
+        # math.ceil(nan) / divide-by-zero.
+        try:
+            n_outer_split = select_n_outer_split(
+                args.dt, args.dx,
+                max_wind_safe=args.max_wind_safe,
+                cfl_safe=args.cfl_safe,
+            )
+        except ValueError as exc:
+            raise SystemExit(
+                f"error: --n-outer-split=auto failed: {exc}. Check "
+                f"--dt, --dx, --max-wind-safe, --cfl-safe are all "
+                f"finite positive (cfl-safe in (0,1])."
+            )
     else:
         try:
             n_outer_split = int(args.n_outer_split)
@@ -1121,9 +1135,17 @@ def main():
             (out_dir / "snapshots_3d").mkdir(exist_ok=True)
         log_path = out_dir / "log.txt"
         log_f = open(log_path, "w", buffering=1)
+        # iter-235 (Codex iter-234 round-2 LOW#2): log dt_inner
+        # alongside the outer dt so a post-run analyst doesn't see
+        # ``dt=20`` beside a Ca_substep that was actually computed
+        # at dt_inner=2.5 (n_outer_split=8). For the default
+        # n_outer_split=1 path, dt_inner==dt and the field is
+        # redundant; logging it unconditionally keeps the schema
+        # stable.
         log_f.write(
             f"# RCE MPI LONG  n_ranks={n_ranks} grid={args.ny}x{args.nx} "
             f"nlev={args.nlev} dx={args.dx} dt={args.dt} "
+            f"dt_inner={dt_inner} "
             f"days={args.days} total_steps={total_steps}\n"
         )
         log_f.write(
