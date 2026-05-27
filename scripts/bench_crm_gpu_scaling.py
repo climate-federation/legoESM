@@ -31,7 +31,8 @@ N_TIMING = 30
 
 
 def _build_model(nx: int, ny: int, nlev: int, dx: float, dtype_x64: bool,
-                 n_acoustic_substeps: int = 12):
+                 n_acoustic_substeps: int = 12,
+                 semi_implicit_acoustic: bool = True):
     import jax.numpy as jnp
     from legoesm.atmosphere.dynamics.compressible_euler import (
         CompressibleEulerConfig,
@@ -48,7 +49,8 @@ def _build_model(nx: int, ny: int, nlev: int, dx: float, dtype_x64: bool,
     hc = create_stretched_height_coordinate(nlev, H=20_000.0, dz_sfc=100.0)
     tm = make_flat_plane_terrain_metric(grid, hc)
     cfg = CompressibleEulerConfig(
-        n_acoustic_substeps=n_acoustic_substeps, semi_implicit_acoustic=True,
+        n_acoustic_substeps=n_acoustic_substeps,
+        semi_implicit_acoustic=semi_implicit_acoustic,
         sponge_coeff=0.05, sponge_width=5000.,
         hyperdiff_coeff=1e6, hyperdiff_rho_coeff=1e6, hyperdiff_w_coeff=1e6,
         smagorinsky_cs=0.0, use_coriolis=True,
@@ -141,14 +143,22 @@ def _acoustic_cfl(dt: float, n_acoustic_substeps: int, dx: float,
 
 
 def _bench_one(nx: int, ny: int, nlev: int, dx: float, dt: float,
-               prec: str, n_acoustic_substeps: int = 12) -> TimingResult:
+               prec: str, n_acoustic_substeps: int = 12,
+               semi_implicit_acoustic: bool = True) -> TimingResult:
     cfl = _acoustic_cfl(dt, n_acoustic_substeps, dx)
     if cfl > 0.7:
         print(f"  WARN: horizontal acoustic CFL = {cfl:.2f} (>0.7) — "
               f"unstable expected at dx={dx}m, dt={dt}s, nsub={n_acoustic_substeps}")
+    if not semi_implicit_acoustic:
+        dz_min = 100.0  # default stretched-coord surface dz
+        cfl_v = 340.0 * (dt / n_acoustic_substeps) / dz_min
+        if cfl_v > 0.5:
+            print(f"  WARN: vertical acoustic CFL = {cfl_v:.2f} (>0.5) — "
+                  f"explicit will NaN at dz_sfc≈100m, dt_a={dt/n_acoustic_substeps:.3f}s")
     model, state, n_horiz = _build_model(
         nx, ny, nlev, dx, prec == "float64",
         n_acoustic_substeps=n_acoustic_substeps,
+        semi_implicit_acoustic=semi_implicit_acoustic,
     )
     compile_s, warmup_s, timing_s = _time_step(
         model, state, dt, N_WARMUP, N_TIMING,
@@ -158,10 +168,12 @@ def _bench_one(nx: int, ny: int, nlev: int, dx: float, dt: float,
     sypd = (dt / step_wall_s) / (365.25 * 86400.0) * 86400.0
     total = n_horiz * nlev
     mcells_per_s = total / step_wall_s / 1e6
+    acoustic_tag = "si" if semi_implicit_acoustic else "exp"
     return TimingResult(
         n_gpus=1, resolution=nx, n_levels=nlev,
         precision=prec, mode="crm_plane_strong",
-        physics_level=f"f-plane_dx{int(dx)}m_nsub{n_acoustic_substeps}",
+        physics_level=(f"f-plane_dx{int(dx)}m_nsub{n_acoustic_substeps}_"
+                       f"{acoustic_tag}_dt{dt}"),
         dt_seconds=dt, n_warmup=N_WARMUP, n_timing=N_TIMING,
         compile_time_s=compile_s, warmup_time_s=warmup_s,
         timing_time_s=timing_s, time_per_step_ms=ms, sypd=sypd,
@@ -183,6 +195,11 @@ def main() -> int:
                    help="Inner acoustic substep count per RK3 stage. "
                         "Default 12 (conservative). 4-6 typically stable "
                         "for short integrations; verify CFL for production.")
+    p.add_argument("--explicit-acoustic", action="store_true",
+                   help="Use explicit acoustic instead of semi-implicit. "
+                        "Requires smaller dt (≤0.5 s at dz_sfc=100m, nsub=4). "
+                        "Best throughput on GPU: fp32 explicit dt=0.5 nsub=4 "
+                        "→ 660 Mc/s plateau N=128-256 (iter 8).")
     p.add_argument("--output-dir", default="results/scaling_crm_gpu")
     p.add_argument("--no-timestamp", action="store_true")
     args = p.parse_args()
@@ -197,18 +214,22 @@ def main() -> int:
 
     print(f"Backend: {jax.default_backend().upper()}  Devices: {jax.devices()}")
     cfl = _acoustic_cfl(args.dt, args.n_acoustic_substeps, args.dx)
+    acoustic = "explicit" if args.explicit_acoustic else "semi_implicit"
     print(f"Precision: {args.precision}  nlev: {args.nlev}  "
           f"dx: {args.dx} m  dt: {args.dt} s  "
-          f"nsub: {args.n_acoustic_substeps}  "
-          f"horiz acoustic CFL: {cfl:.3f}")
+          f"nsub: {args.n_acoustic_substeps}  acoustic: {acoustic}  "
+          f"horiz CFL: {cfl:.3f}")
 
     results = []
     failures = []
     print(f"\nPlane CRM (f-plane) GPU sweep — nx={args.nx}")
     for n in args.nx:
         try:
-            r = _bench_one(n, n, args.nlev, args.dx, args.dt, args.precision,
-                           n_acoustic_substeps=args.n_acoustic_substeps)
+            r = _bench_one(
+                n, n, args.nlev, args.dx, args.dt, args.precision,
+                n_acoustic_substeps=args.n_acoustic_substeps,
+                semi_implicit_acoustic=not args.explicit_acoustic,
+            )
             print(f"  N{n:>4d} cells={r.total_cells:>10,}  "
                   f"compile={r.compile_time_s:6.2f}s  "
                   f"step={r.time_per_step_ms:7.2f}ms  "

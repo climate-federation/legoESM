@@ -117,6 +117,37 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 9 — 2026-05-27 — bench supports `--explicit-acoustic` flag
+
+`bench_crm_gpu_scaling.py` now exposes `--explicit-acoustic`. Through
+the bench (with `lax.scan` fuse + isfinite guard + vertical CFL warn),
+explicit fp32 dt=0.5 nsub=4 sweep:
+
+| res    | ms/step | Mc/s     | SYPD |
+|--------|---------|----------|------|
+| N=48   |  0.18   | 374      | 7.40 |
+| N=96   |  0.43   | 636      | 3.15 |
+| N=128  |  0.60   | **820**  | 2.29 |
+| N=192  |  1.61   | 686      | 0.85 |
+| N=256  |  3.04   | 648      | 0.45 |
+| N=384  |  9.35   | 473      | 0.15 |
+
+**NEW CRM PEAK: 820 Mc/s @ N=128 fp32 explicit dt=0.5 nsub=4.**
+
+Through-bench numbers are ~24% higher than ad-hoc inline loop
+(iter-7) — `lax.scan` fuse amortizes per-step Python overhead at
+the sub-millisecond step times.
+
+Final ladder vs prior gpu-scaling work (PR #319):
+- Ocean LL impl_cn fp32 peak: 546 Mc/s
+- Atm icosahedral fp32 peak: 428
+- **CRM explicit fp32 peak: 820** ← highest in legoESM suite
+- CRM semi-implicit fp32 peak: 57
+
+CRM dispatch floor (explicit): 0.18 ms at N=48 — much smaller than
+semi-implicit's 5+ ms because no column-Thomas + smaller dt = less
+work per step.
+
 ### Iter 8 — 2026-05-27 — explicit fp32 plateau + 200-step CFL
 
 Filled mid-range + checked long-run stability:
