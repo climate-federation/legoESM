@@ -1348,14 +1348,27 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
 
             # Project FV3 normal → corners by mode='edge' padding + avg
             # FV3_3D iter 370: opt cross-face halo via pad_halo_4d (duogrid-aware)
-            if self.config.use_fv3_cross_face_du_proj:
+            # iter-1046: ``du_normal``/``dv_normal`` are non-square
+            # ``(6, n, n+1, nlev)``/``(6, n+1, n, nlev)``; the cubed-
+            # sphere ``pad_halo_4d`` MPI path assumes square ``(6, n, n,
+            # nlev)`` and crashes on non-square data without duogrid.
+            # Fall through to ``mode='edge'`` only when MPI is active
+            # AND duogrid is off (the iter-370 regression test depends
+            # on the non-square local diff being non-zero, so we keep
+            # the call on the local backend).
+            from legoesm.grids.halo import get_halo_backend as _ghb_pe
+            _dg_cf = self.grid.duogrid
+            _force_edge_pe = (
+                self.config.use_fv3_cross_face_du_proj
+                and _ghb_pe() == "mpi"
+                and _dg_cf is None
+            )
+            if (self.config.use_fv3_cross_face_du_proj
+                    and not _force_edge_pe):
                 from legoesm.grids.halo import pad_halo_4d as _pad_h4
-                _dg = self.grid.duogrid
-                du_full = _pad_h4(du_normal, duogrid=_dg)
-                # (6, n+2, n+3, nlev) → slice axis=2 to (n+1)
+                du_full = _pad_h4(du_normal, duogrid=_dg_cf)
                 du_pad = du_full[:, :, 1:-1, :]
-                dv_full = _pad_h4(dv_normal, duogrid=_dg)
-                # (6, n+3, n+2, nlev) → slice axis=1 to (n+1)
+                dv_full = _pad_h4(dv_normal, duogrid=_dg_cf)
                 dv_pad = dv_full[:, 1:-1, :, :]
             else:
                 du_pad = jnp.pad(

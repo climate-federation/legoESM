@@ -2378,6 +2378,131 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1046 (2026-05-28): factory MPI test + 2 known limitations surfaced
+
+### Goal
+
+Add a comprehensive ``make_fv3_faithful_{pe,nh}_config(...)``
+factory MPI test that composes ALL FV3-fidelity flags
+simultaneously (rather than the per-flag tests of iter-1042 ..
+iter-1045).  This is the production-config entry point users are
+pointed to in ``FV3_3D.md`` and the next-deeper integration check.
+
+### Surfaced bugs (2 known limitations, both documented)
+
+The first factory test run exposed two MPI-incompatible paths
+that the per-flag tests did not exercise:
+
+**1. ``use_fv3_cross_face_du_proj`` on non-square D-grid increments.**
+
+The cross-face halo at the ``damp_v`` post-step wind-increment
+projection (compressible_euler_cdgrid.py:1220 / primitive_eq_
+cdgrid.py:1351) passes ``du_normal`` / ``dv_normal`` of shape
+``(6, n, n+1, nlev)`` / ``(6, n+1, n, nlev)`` through
+``pad_halo_4d``.  The cubed-sphere halo helpers (single-device
+``_pad_halo_local_4d`` connectivity tables + MPI
+``_pad_halo_mpi_face_only_4d``'s ``_place_strip_4d``) all assume
+SQUARE ``(6, n, n, nlev)`` data.
+
+- Single-device: the call writes mis-indexed halos (the axis-2
+  ``j ∈ [n+2]`` outermost cells stay at the zero-pad initial
+  value) but doesn't crash.  iter-370 happens to detect this as
+  a measurable diff vs the ``mode='edge'`` fallback.
+- MPI: crashes in ``_place_strip_4d`` with a ``(n+1, nlev)`` vs
+  ``(n, nlev)`` broadcast mismatch.
+
+iter-1046 defensive mitigation: in BOTH PE and NH ``damp_v``
+post-step blocks, when ``use_fv3_cross_face_du_proj=True`` AND
+the MPI backend is active AND duogrid is None, fall through to
+``jnp.pad(mode='edge')``.  Local backend is unchanged
+(``_force_edge`` is False).  The iter-370 single-device test
+still passes; MPI no longer crashes.  The true fix (non-square
+halo support) is tracked as a follow-up.
+
+**2. ``use_duogrid=True`` + full factory under MPI.**
+
+The factory docstring says "Pair with use_duogrid=True so
+iter-325 halo wiring + iter-370 cross_face transfer values."
+Running the factory test with ``use_duogrid=True`` shows a
+bit-for-bit MPI mismatch vs single-rank.  Hypothesis: the
+duogrid post-pad remap (``cube_rmp_vectorized`` +
+``fill_corner_region``) reads halo cells whose MPI-replicated-
+mode contents differ from local backend.  Codex iter-1046
+review found this hypothesis "evidence is against" — needs
+deeper investigation.  Tracked as a follow-up.
+
+### Tests
+
+Two new MPI fidelity tests, both passing under ``mpirun -np 2``:
+
+- ``test_pe_3_step_with_fv3_faithful_factory``
+- ``test_nh_3_step_with_fv3_faithful_factory``
+
+Each composes 8+ FV3-fidelity flags via the factory function:
+``use_fv3_a2b_zeta_corner``, ``use_fv3_metric_aware_d_con``,
+``d_con_top_zero_levels``, ``delt_max``, ``nord_v`` /
+``corner_div_damp_nord``, ``corner_div_damp_d4_bg``,
+``heat_source_del2_iters``, ``use_fv3_sponge_damp_v`` (+ NH's
+``use_fv3_d_con_cv``, ``use_fv3_vector_halo_uv``,
+``use_fv3_a2b_ord4_vector_uv``, ``use_fv3_dynamic_exner``,
+``use_fv3_sponge_damp_w``, ``use_fv3_a2b_ord4_theta_corner``),
+PLUS the production damp/A_h overrides.
+
+Two flags explicitly disabled in the factory tests with
+documented rationale: ``use_fv3_cross_face_du_proj`` and
+``use_duogrid``.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 mpirun -np 2 .venv/bin/python -m pytest \
+        tests/distributed/test_mpi_fv3_step_fidelity.py \
+        tests/distributed/test_mpi_fv3_nh_step_fidelity.py \
+        tests/distributed/test_mpi_interp_offsets.py \
+        --no-header
+    => 22 passed in 208.81 s
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_cross_face_du_proj_iter370.py \
+        tests/test_corner_div_damp_nh.py \
+        tests/test_damp_v_nh.py \
+        tests/test_damp_w_nh_iter193.py \
+        tests/atmosphere/nonhydrostatic/integration/test_fv_cubesphere.py \
+        -q
+    => 24 passed in 149.51 s
+
+### Codex adversarial review
+
+``gpt-5.3-codex``: SHIP-WITH-NOTES.  Key confirmations:
+
+- The ``_force_edge`` guard is JIT-safe (Python module-level
+  global read at trace time, NOT a traced value).
+- Single-device behaviour bit-for-bit unchanged
+  (``_ghb() == "mpi"`` is False; iter-370 regression passes).
+- Test docstring corrected to acknowledge the 2 disabled paths
+  rather than overclaim "ALL FV3-fidelity flags" coverage.
+
+### Status
+
+| Path | Status | Test |
+|------|--------|------|
+| Per-flag (a2b zeta / theta / both / corner-div / damp_v / damp_w) | ✅ MPI bit-for-bit | iter-1042..1045 tests |
+| Factory minus cross_face minus duogrid | ✅ MPI bit-for-bit | iter-1046 factory test |
+| ``use_fv3_cross_face_du_proj=True`` MPI | ⚠️ pre-existing non-square shape bug; defensive fallback to mode='edge' | tracked |
+| ``use_duogrid=True`` + full factory under MPI | ⚠️ bit-for-bit mismatch; root cause unidentified | tracked |
+
+### Why this iteration was meaningful
+
+Per-flag tests confirmed each individual fidelity flag is MPI-
+bit-for-bit.  The factory test confirms the 8+ flags COMPOSE
+correctly under MPI — a much higher bar.  The 2 limitations
+surfaced are pre-existing architectural issues (non-square
+halo + duogrid composition) that the per-flag tests couldn't
+have caught: cross_face was off in every per-flag test, and
+duogrid was off everywhere.  Naming them and documenting them
+turns "unknown unknowns" into tracked follow-ups.
+
 ## Iteration 1045 (2026-05-27): damp_v / damp_w 4D-native — **all NH/PE 3D vmap-MPI sites closed**
 
 ### Goal

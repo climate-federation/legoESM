@@ -215,6 +215,70 @@ class TestFV3PEStepMPIFidelity:
             dt=300.0, n_steps=3,
         )
 
+    def test_pe_3_step_with_fv3_faithful_factory(self):
+        """FV3_3D iter-1046: factory minus 2 known MPI-incompatible paths.
+
+        Mirror of NH ``test_nh_3_step_with_fv3_faithful_factory``.
+        Composes ``make_fv3_faithful_pe_config(**production_overrides)``
+        under MPI except for ``use_fv3_cross_face_du_proj`` (non-
+        square ``(6, n, n+1, nlev)`` `pad_halo_4d` MPI crash) and
+        ``use_duogrid=True`` (full-factory + duogrid bit-for-bit
+        mismatch).  Both disabled here; see NH factory docstring
+        for the architectural notes.
+
+        Remaining factory flags exercised: use_fv3_a2b_zeta_corner,
+        use_fv3_metric_aware_d_con, d_con_top_zero_levels, delt_max,
+        nord_v, corner_div_damp_nord, corner_div_damp_d4_bg,
+        heat_source_del2_iters, use_fv3_sponge_damp_v + the production
+        damp/A_h overrides.
+        """
+        rank = MPI.COMM_WORLD.Get_rank()
+        size = MPI.COMM_WORLD.Get_size()
+        if size > 6 or 6 % size != 0:
+            pytest.skip("Face-only mode only (1/2/3/6 ranks).")
+
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            CDGridPrimitiveEquationModel,
+            hydrostatic_to_fv3,
+            make_fv3_faithful_pe_config,
+        )
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from tests.test_cases.baroclinic_wave import baroclinic_wave_init
+
+        n, nlev = 8, 5
+        # iter-1046: see NH factory note — duogrid disabled here.
+        grid = create_cubed_sphere(n)
+        cdgrid = create_cubed_sphere_cdgrid(grid)
+        sigma = create_sigma_coordinate(nlev)
+
+        # Documented PE production knobs from FV3_3D.md.
+        # iter-1046: ``use_fv3_cross_face_du_proj`` disabled — see NH
+        # factory test for the same known limitation (non-square
+        # ``(6, n, n+1)`` D-grid increment through ``pad_halo_4d``).
+        config = make_fv3_faithful_pe_config(
+            damp_v=0.030, damp_v_d_con=1.0,
+            corner_div_damp_d2_bg=0.0005, corner_div_damp_d_con=1.0,
+            div_damp_coeff=1e6, div_damp_d_con=1.0,
+            A_h=1e6, ah_d_con=1.0,
+            use_conservation_fixer=False,
+            fix_mass=False,
+            zero_mean_ps_tendency=False,
+            use_fv3_cross_face_du_proj=False,
+        )
+        state_cc = baroclinic_wave_init(grid, sigma, perturbed=True)
+        state_global = hydrostatic_to_fv3(state_cc, cdgrid)
+
+        ref_model = CDGridPrimitiveEquationModel(grid, sigma, config)
+        dist_model = CDGridPrimitiveEquationModel(grid, sigma, config)
+
+        set_halo_backend("local")
+        _run_pe_pair_and_assert(
+            rank, size, ref_model, dist_model, state_global,
+            dt=300.0, n_steps=3,
+        )
+
     def test_pe_3_step_with_corner_div_damp(self):
         """FV3_3D iter-1044 (codex claim-3): PE MPI with corner-div-damp nord=1.
 

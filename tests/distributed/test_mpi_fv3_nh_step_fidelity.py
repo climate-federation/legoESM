@@ -316,3 +316,116 @@ class TestFV3NHStepMPIFidelity:
             dt=10.0, n_steps=3,
             fields=("u", "v", "w", "theta_prime", "rho_prime"),
         )
+
+    def test_nh_3_step_with_fv3_faithful_factory(self):
+        """FV3_3D iter-1046: factory minus 2 known MPI-incompatible paths.
+
+        Composes the ``make_fv3_faithful_nh_config(**production_overrides)``
+        factory under MPI, EXCEPT for two paths with known MPI
+        limitations (disabled below):
+
+        - ``use_fv3_cross_face_du_proj``: operates on non-square
+          ``(6, n, n+1, nlev)`` D-grid wind increments via
+          ``pad_halo_4d``, whose MPI helpers assume square shape.
+          Crashes under MPI; silently mis-indexes halos under
+          single-device.  Documented as iter-370 requiring
+          duogrid=True to be effective; tracked for non-square halo
+          implementation.
+        - ``use_duogrid=True``: factory docstring recommends this
+          pairing, but the duogrid post-pad remap shows a bit-for-
+          bit MPI discrepancy when composed with the full factory
+          stack.  Tracked separately.
+
+        With those two disabled, this test still composes 8+
+        FV3-fidelity flags simultaneously (cv branch, vector halo,
+        a2b vector (u, v), dynamic Exner, metric-aware d_con,
+        d_con_top_zero, delt_max, nord_v/corner_div_damp_nord,
+        corner_div_damp_d4_bg, heat_source_del2, sponge_damp_v/w)
+        plus the production damp/A_h knobs.  Catches hidden MPI
+        bugs that the smaller per-flag iter-1042..1045 tests would
+        miss when those flags interact.
+        """
+        rank = MPI.COMM_WORLD.Get_rank()
+        size = MPI.COMM_WORLD.Get_size()
+        if size > 6 or 6 % size != 0:
+            pytest.skip("Face-only mode only (1/2/3/6 ranks).")
+
+        from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
+            CDGridCompressibleEulerModel,
+            make_fv3_faithful_nh_config,
+        )
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.grids.vertical import (
+            compute_terrain_metric,
+            create_height_coordinate,
+        )
+        from legoesm.core.field import Field
+        from legoesm.core.state import NonHydrostaticState
+
+        n, nlev = 8, 5
+        # iter-1046: factory docstring recommends ``use_duogrid=True``
+        # but the duogrid post-pad remap shows an MPI bit-for-bit
+        # discrepancy when composed with the full factory stack
+        # (cross_face is already disabled below).  Use the default
+        # grid for this test; the per-flag tests above already cover
+        # duogrid composition with smaller flag subsets.
+        grid = create_cubed_sphere(n)
+        z_top = 30000.0
+        height_coord = create_height_coordinate(nlev, z_top)
+        terrain = jnp.zeros((6, grid.n, grid.n))
+        terrain_metric = compute_terrain_metric(terrain, height_coord)
+
+        # Documented production knobs from FV3_3D.md "Production usage"
+        # section (the example users are pointed to).
+        # iter-1046 known limitation: ``use_fv3_cross_face_du_proj``
+        # operates on non-square ``(6, n, n+1)`` / ``(6, n+1, n)`` D-grid
+        # increments via ``pad_halo_4d``, whose helpers assume square
+        # ``(6, n, n)``.  Single-device the call writes mis-indexed
+        # halos (silent buggy) but doesn't crash; MPI crashes on the
+        # non-square shape in ``_place_strip_4d``.  Disabled here until
+        # a proper non-square halo lands.
+        config = make_fv3_faithful_nh_config(
+            damp_v=0.030, damp_v_d_con=1.0,
+            corner_div_damp_d2_bg=0.0005, corner_div_damp_d_con=1.0,
+            div_damp_coeff=1e6, div_damp_d_con=1.0,
+            A_h=1e6, ah_d_con=1.0,
+            damp_w=0.030, damp_w_d_con=1.0,
+            n_acoustic_substeps=4,
+            fix_mass=False,
+            use_fv3_cross_face_du_proj=False,
+        )
+
+        ref_model = CDGridCompressibleEulerModel(
+            grid, height_coord, terrain_metric, config,
+        )
+        dist_model = CDGridCompressibleEulerModel(
+            grid, height_coord, terrain_metric, config,
+        )
+
+        dims_3d = ("face", "x", "y", "level")
+        dims_w = ("face", "x", "y", "level_half")
+        dims_2d = ("face", "x", "y")
+        state = NonHydrostaticState(
+            u=Field(data=jnp.full((6, n, n, nlev), 5.0),
+                    name="u", dims=dims_3d, units="m/s"),
+            v=Field(data=jnp.zeros((6, n, n, nlev)),
+                    name="v", dims=dims_3d, units="m/s"),
+            w=Field(data=jnp.zeros((6, n, n, nlev + 1)),
+                    name="w", dims=dims_w, units="m/s"),
+            theta_prime=Field(data=jnp.zeros((6, n, n, nlev)),
+                              name="theta_prime", dims=dims_3d, units="K"),
+            rho_prime=Field(data=jnp.zeros((6, n, n, nlev)),
+                            name="rho_prime", dims=dims_3d, units="kg/m^3"),
+            phis=Field(data=jnp.zeros((6, n, n)),
+                       name="phis", dims=dims_2d, units="m^2/s^2"),
+            tracers=Field(data=jnp.zeros((6, n, n, nlev, 0)),
+                          name="tracers",
+                          dims=("face", "x", "y", "level", "tracer"),
+                          units="kg/kg"),
+        )
+
+        _run_pair_and_assert(
+            rank, size, ref_model, dist_model, state,
+            dt=10.0, n_steps=3,
+            fields=("u", "v", "w", "theta_prime", "rho_prime"),
+        )

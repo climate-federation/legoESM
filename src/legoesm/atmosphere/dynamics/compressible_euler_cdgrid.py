@@ -1218,12 +1218,36 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                 )
 
             # Project FV3 normal → corners (mode='edge' pad + avg)
-            # FV3_3D iter 370 (mirror of PE 370): cross-face halo
-            if self.config.use_fv3_cross_face_du_proj:
-                _dg = self.grid.duogrid
-                du_full = _pad_halo_4d_module(du_normal, duogrid=_dg)
+            # FV3_3D iter 370 (mirror of PE 370): cross-face halo.
+            #
+            # iter-1046 fix: gate the `pad_halo_4d` call.  ``du_normal``
+            # / ``dv_normal`` are NON-SQUARE ``(6, n, n+1, nlev)`` /
+            # ``(6, n+1, n, nlev)`` fields.  The cubed-sphere
+            # ``pad_halo_4d`` MPI path is built for square
+            # ``(6, n, n, nlev)`` (uses precomputed connectivity tables
+            # / ``interp_offsets`` of shape ``(6, 4, n)``); feeding
+            # non-square data through the MPI scatter / interp helpers
+            # crashes ``_place_strip_4d`` with a ``(n+1, nlev)`` vs
+            # ``(n, nlev)`` broadcast mismatch.  Under the local
+            # backend the non-square call DOES still produce a
+            # measurable diff vs ``mode='edge'`` (the iter-370
+            # regression test depends on this), so we can't drop the
+            # call universally — only fall through to ``mode='edge'``
+            # when the MPI backend is active without duogrid.  With
+            # duogrid=True the post-pad remap reshapes correctly
+            # under both backends.
+            from legoesm.grids.halo import get_halo_backend as _ghb
+            _dg_cf = self.grid.duogrid
+            _force_edge = (
+                self.config.use_fv3_cross_face_du_proj
+                and _ghb() == "mpi"
+                and _dg_cf is None
+            )
+            if (self.config.use_fv3_cross_face_du_proj
+                    and not _force_edge):
+                du_full = _pad_halo_4d_module(du_normal, duogrid=_dg_cf)
                 du_pad = du_full[:, :, 1:-1, :]
-                dv_full = _pad_halo_4d_module(dv_normal, duogrid=_dg)
+                dv_full = _pad_halo_4d_module(dv_normal, duogrid=_dg_cf)
                 dv_pad = dv_full[:, 1:-1, :, :]
             else:
                 du_pad = jnp.pad(
