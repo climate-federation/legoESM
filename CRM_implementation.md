@@ -116,6 +116,22 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 
 mpi4jax 0.9 vs JAX 0.10 stack mismatch produces ~70× per-rank slowdown on macOS Python 3.13. The full DD code path is verified correct (iter-4 R7 mass fixer, iter-5 ``--use-dd``, iter-78 helpers, iter-57 Codex MPI-halo review 0 HIGH + 0 MEDIUM), but real strong/weak scaling numbers require a platform that doesn't trigger the mismatch (Linux MPI cluster, or macOS once the stack is fixed). Documented as a *platform* blocker, not a code defect — the DD path itself is production-ready under the iter-95 IC fix once the stack regression resolves. DOD criterion 4 cannot be filled until F9 unblocks.
 
+**iter-253 measurement** (M5 Pro, jax 0.10.1, mpi4jax 0.9.0.post1):
+
+| Mode | n_ranks | Mesh | wall_s | steps/s | Efficiency |
+|------|---------|------|--------|---------|------------|
+| strong | 1 | 48×48×12 | 0.27 | 37.0 | 1.00 (baseline) |
+| strong | 2 | 48×48×12 (24×48 local) | 7.68 | 1.30 | **0.018 (1.8%)** |
+| weak | 2 | 24×24×12 per rank (48×24 global) | 8.44 | 1.18 | **n/a baseline** |
+
+np=2 is **28× SLOWER** than np=1 — the mpi4jax/jax FFI-API
+mismatch dominates step cost. ``mpi4jax`` raises a runtime
+warning citing this exact incompatibility. The fix is environment
+(``pip install 'mpi4jax>=0.8,<0.9' jax<0.10`` per the warning, or
+wait for the FFI port). NOT a CRM-side change. iter-252 single-
+rank smoke is the test gate for the DD compose path; the >np=1
+sweep waits for F9 unblock.
+
 ### F10. Clean Wing IC + dt = 5 s production-stable without KW78
 
 iter-9 measurement on the 132×132×30 plane CRM at dt=5 s + N_ACOUSTIC=12 + clean Wing IC (no bubble, no qv noise) showed max|w| ≤ 6.1 × 10⁻³ m/s over 720 outer steps (1 sim-hour). The bubble-IC F1 dt-stability ladder (dt=1 s) was a SYMPTOM of the bubble-seeded 2-Δz mode (F7), not a fundamental outer-dt limit. With the clean IC F8 path, the dt=5 s + SI acoustic + N_ACOUSTIC=12 production config is stable WITHOUT KW78 (R9 obsolete). iter-58/59 refreshed all production wrapper + driver defaults from the iter-2 conservative dt=1 s / N_ACOUSTIC=24 to dt=5 s / N_ACOUSTIC=12; iter-14/iter-38/iter-63 produced the structural slow nightly regression. iter-180 first lifted defaults to dt=20 s + WENO5 + β=0.2 based on stability alone; iter-183 wall-time benchmark showed WENO5 at dt=20 was 1.22× SLOWER than the iter-14 dt=10 + upwind1 baseline (2x fewer steps but 2.4x per-step cost). iter-183 walked advection back to Van Leer TVD (stencil 4, 2nd-order, less numerical diffusion than upwind1) which gives a measured 3× wall-time speedup at dt=20.
