@@ -213,8 +213,12 @@ Locked the iter-183 production contract (dt=20 + van_leer +
 beta=0.2 + NO mass fixer + no radiation, 132x132x30 dx=2 km) as a
 nightly slow regression. iter-229 verified the contract at full
 30-day scale via the actual production run — iter-230 adds the
-fast smoke equivalent so a regression that would have shown up at
-30 days is caught in ~30 s on cached JIT.
+fast 20-sim-min smoke equivalent that fingerprints the config +
+catches early-stability regressions (CFL crash, dycore no-op,
+silent kwarg fallback) in ~30 s on cached JIT. Late-time effects
+(day-16 precip cycles, slow MSE drift, late convective
+amplification) are out of scope at 20 sim-min and remain
+covered by the 30-day production runs themselves.
 
 **Changes**
 * ``tests/atmosphere/nonhydrostatic/integration/test_plane_crm_end_to_end_smoke.py``:

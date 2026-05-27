@@ -1059,6 +1059,21 @@ def main():
             f" + Kessler microphysics + "
             f"Smagorinsky LES (cs={args.smag_cs})\n"
         )
+        # iter-231 (Codex round-2 MEDIUM#1): the contract fingerprint
+        # at run_rce_mpi_long.py:1051 dropped advection +
+        # acoustic_off_centering + mass-fixer mode, so a regression
+        # test could not prove those parts of the iter-183 contract
+        # actually ran. Logging them on a discrete ``# config:`` line
+        # makes the contract grep-able post-run and gives the iter-183
+        # envelope test a hard fingerprint to assert against.
+        log_f.write(
+            f"# config: advection={args.advection} "
+            f"acoustic_off_centering={args.acoustic_off_centering} "
+            f"mass_fixer={'off' if args.no_mass_fixer else 'on'} "
+            f"si_acoustic={'on' if args.semi_implicit_acoustic else 'off'} "
+            f"n_acoustic_substeps={args.n_acoustic_substeps} "
+            f"hyperdiff={args.hyperdiff}\n"
+        )
         log_f.write(
             f"# step,day,CWV_mean,CWV_max,MSE_mean,max|w|,"
             f"max(qc),max(qr),max(precip_mm_day),Ca_substep\n"

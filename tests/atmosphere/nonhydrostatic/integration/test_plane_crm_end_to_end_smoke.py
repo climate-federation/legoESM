@@ -696,6 +696,44 @@ def test_plane_crm_iter183_production_scale_132x132_envelope(tmp_path):
         f"!= expected {expected_logged_steps}."
     )
 
+    # iter-231 (Codex round-2 MEDIUM#1): hard fingerprint of
+    # advection scheme + acoustic_off_centering + mass-fixer mode
+    # from the driver's ``# config:`` log header line. Ca_substep
+    # alone fingerprints dt + n_acoustic only — a silent fallback
+    # to ``upwind1`` advection or ``beta=0.1`` would still pass the
+    # numerical checks. iter-231 added the config line to
+    # ``scripts/run_rce_mpi_long.py:1051`` so the contract becomes
+    # grep-able post-run.
+    log_path = out_dir / "log.txt"
+    config_line = None
+    with open(log_path) as fh:
+        for line in fh:
+            if line.startswith("# config:"):
+                config_line = line.strip()
+                break
+    assert config_line is not None, (
+        "plane CRM iter-183 envelope: driver log.txt is missing the "
+        "iter-231 ``# config:`` line — either the driver regressed "
+        "(removed the header) or the log path changed."
+    )
+    expected_config_tokens = {
+        "advection=van_leer",
+        "acoustic_off_centering=0.2",
+        "mass_fixer=off",
+        "si_acoustic=on",
+        "n_acoustic_substeps=12",
+    }
+    missing = [
+        tok for tok in expected_config_tokens if tok not in config_line
+    ]
+    assert not missing, (
+        f"plane CRM iter-183 envelope: ``# config:`` line missing "
+        f"tokens {missing!r}. Logged line: {config_line!r}. The "
+        f"iter-183 contract requires van_leer + beta=0.2 + "
+        f"no-mass-fixer + SI acoustic + n_acoustic=12; a silent "
+        f"helper-kwarg fallback would change one of these."
+    )
+
     # dt=20 fingerprint #1: final logged sim day matches 60·dt/86400.
     # A silent fallback to dt=5 (iter-14 default) would land at
     # 0.00347 instead of 0.01389 — 4× too low.
@@ -747,28 +785,33 @@ def test_plane_crm_iter183_production_scale_132x132_envelope(tmp_path):
         f"plane CRM iter-183 envelope: max|w|={step15_max_w:.3e} m/s "
         f"at step 15 — dycore appears inactive."
     )
-    # No-mass-fixer + surface-flux moisture: empirical iter-230
-    # measurement = 0.066 mm in 60 steps. Cap 0.15 mm is ~2.3×
-    # over measured — catches a flipped surface-flux sign (positive
-    # would dump moisture far faster) or an accidental --mass-fixer
-    # flip (fixer would pin near zero).
-    cwv_drift = abs(cwv_final - cwv_first)
-    assert cwv_drift < 0.15, (
-        f"plane CRM iter-183 envelope: CWV drifted {cwv_drift:.4f} mm "
+    # iter-231 (Codex round-2 MEDIUM#2): signed CWV GROWTH (not
+    # absolute drift). The wrapper-equivalent --no-mass-fixer path
+    # must show MOISTURE GAIN early in RCE spinup (surface flux >
+    # column losses); a drying run with cwv_final - cwv_first ≈
+    # -0.066 mm would pass an abs() check but indicates a flipped
+    # surface-flux sign or broken evaporation. Empirical iter-230
+    # measurement = +0.066 mm gain over 60 steps.
+    cwv_growth = cwv_final - cwv_first
+    assert cwv_growth < 0.15, (
+        f"plane CRM iter-183 envelope: CWV grew {cwv_growth:+.4f} mm "
         f"(IC={cwv_first:.4f}, final={cwv_final:.4f}) in {n_steps} "
-        f"steps. iter-230 measured 0.066 mm at this config; >0.15 "
-        f"means a surface-flux regression. <1e-4 means the mass "
-        f"fixer was silently re-enabled (helper kwarg flip)."
+        f"steps. iter-230 measured +0.066 mm; >+0.15 means a "
+        f"surface-flux regression (over-firing evaporation)."
     )
-    # Inverted fixer-flip floor: empirical = 0.066 mm; with the fixer
-    # ON it would be <0.005 mm. A floor of 1e-3 mm catches the
-    # no_mass_fixer kwarg silently defaulting to False.
-    assert cwv_drift > 1e-3, (
-        f"plane CRM iter-183 envelope: CWV drift {cwv_drift:.5f} mm "
-        f"below 1e-3 floor. The wrapper-equivalent --no-mass-fixer "
-        f"path must show some surface-flux moisture growth at 20 "
-        f"sim-min (~0.066 mm measured); <1e-3 means the helper's "
-        f"no_mass_fixer kwarg silently defaulted to False."
+    # Inverted fixer-flip floor: empirical gain = +0.066 mm; with
+    # fixer ON the gain would be <+0.005 mm. A floor of +1e-3 mm
+    # catches the no_mass_fixer kwarg silently defaulting to False
+    # AND a flipped surface-flux sign (drying run would land
+    # negative, failing the floor).
+    assert cwv_growth > 1e-3, (
+        f"plane CRM iter-183 envelope: CWV growth {cwv_growth:+.5f} mm "
+        f"below +1e-3 floor. The wrapper-equivalent --no-mass-fixer "
+        f"path must SHOW MOISTURE GAIN at 20 sim-min (~+0.066 mm "
+        f"measured); a negative or near-zero value means either the "
+        f"helper's no_mass_fixer kwarg silently defaulted to False "
+        f"(fixer pins near zero) OR the surface-flux sign flipped "
+        f"(drying instead of moistening)."
     )
     rel_mse_drift = abs(mse_final - mse_first) / mse_first
     assert rel_mse_drift < 1.5e-4, (
