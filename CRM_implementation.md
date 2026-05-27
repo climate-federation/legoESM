@@ -162,6 +162,35 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 148 (iter-105 day 10 milestone — full bit-equal overlap)
+
+iter-105 30-day run reached step 86400 (day 10) — the endpoint of
+iter-98's 10-day run. Compare across all 11 overlapping snapshot
+days (0-10):
+
+  matched 11 day(s); max |d cwv_mean| = 0; max |d mse_mean| = 0;
+  max |d wind_sfc_max| = 0 on every column.
+
+**Bit-for-bit deterministic reproducibility** through the entire
+iter-98 trajectory, including the day-9.68 Kessler autoconv
+precip onset (step 83600: max|w| jumped 3.4e-3 → 2.0e-2 m/s, qr
+0 → 8e-5 g/kg) and the subsequent convection-event tail (CWV
+56.55→56.43→56.49 mm over days 9.7-10).
+
+In-flight DOD verdict (via ``--evaluate --check-log-max-w``):
+
+  log max|w| = 2.03e-2 m/s (over 868 log rows; criterion 1
+                            threshold 50 m/s — PASS)
+  DOD verdict: PASS (criterion 2 — Wing 2018 plateau + 5 % MSE
+                     drift gate)
+
+Both DOD-relevant gates pass at the iter-98-equivalent endpoint.
+iter-105 now enters NEW territory beyond iter-98's last data
+point. Wall-time remaining: ~4.7 h to reach day 30. The day 10..30
+window will reveal whether the plane CRM holds its Wing 2018
+plateau through the 30-day production window (criterion 2 production
+target).
+
 ### 2026-05-27 — iter 134..144 (compressed summary)
 
 11 iterations of CLI flag polish + Codex review cycles + wrapper
