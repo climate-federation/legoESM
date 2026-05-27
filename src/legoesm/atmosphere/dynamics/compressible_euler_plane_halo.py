@@ -41,8 +41,8 @@ Smagorinsky LES + vertical-θ diffusion (R4/R5)
   ``compressible_euler_plane.py:1050-1064`` and is applied in both
   the main entry point and the split-trace phase-2 variant.
 
-WENO5 horizontal advection
---------------------------
+Higher-order horizontal advection
+---------------------------------
 * ``config.horizontal_advection_scheme == "weno5"`` switches theta /
   u / v / w / tracer horizontal advection to the 5th-order WENO-Z
   stencil. Requires ``layout.halo >= 3`` (6-point WENO5 reconstruction
@@ -50,6 +50,13 @@ WENO5 horizontal advection
   ``make_plane_pencil_layout(..., halo=3)`` is bit-identical to the
   serial ``_weno5_advection_x/y`` (tests in
   ``test_weno5_halo_equiv.py``).
+* ``config.horizontal_advection_scheme == "van_leer"`` (iter-184)
+  switches the same fields to the 2nd-order Van Leer TVD stencil.
+  Requires ``layout.halo >= 2`` (4-point reconstruction). Single-rank
+  build with ``make_plane_pencil_layout(..., halo=2)`` is bit-identical
+  to the serial ``_van_leer_advection_x/y`` (tests in
+  ``test_van_leer_halo_equiv.py``). This is the iter-183 production
+  default since it gives 3x wall-time speedup over upwind1 at dt=20.
 
 Single-rank equivalence
 -----------------------
