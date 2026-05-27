@@ -147,7 +147,11 @@ def _make_cubed_sphere_surface_flux_tendency(
 
 
 def _compose_nh_moist_physics(model_type: str, dt: float,
-                              *, with_surface_flux: bool = False):
+                              *, with_surface_flux: bool = False,
+                              sfc_Cd: float = 1.0e-3,
+                              sfc_Ch: float = 1.0e-3,
+                              sfc_T: float = 300.0,
+                              sfc_q: float = 0.018):
     """iter-275/283: compose Kessler microphysics + gray radiation
     (+ optional surface flux) into a single physics_fn that the
     non-hydrostatic dycores (cubed-sphere, MPAS NH) can pass to
@@ -210,7 +214,9 @@ def _compose_nh_moist_physics(model_type: str, dt: float,
     )
     sfc_fn = None
     if with_surface_flux:
-        sfc_fn = _make_cubed_sphere_surface_flux_tendency()
+        sfc_fn = _make_cubed_sphere_surface_flux_tendency(
+            Cd=sfc_Cd, Ch=sfc_Ch, T_sfc=sfc_T, q_sfc=sfc_q,
+        )
 
     def physics_fn(*args, **kwargs):
         # Both factories return tendency callables with identical
@@ -421,7 +427,9 @@ def _run_plane_spectral(days: float, dt: float, print_every: int, output: Path,
 
 
 def _run_cubed_sphere(days: float, dt: float, print_every: int, output: Path,
-                      *, moist: bool = False, n: int = 4):
+                      *, moist: bool = False, n: int = 4,
+                      sfc_Cd: float = 1.0e-3, sfc_Ch: float = 1.0e-3,
+                      sfc_T: float = 300.0, sfc_q: float = 0.018):
     from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
         CDGridCompressibleEulerConfig, CDGridCompressibleEulerModel,
     )
@@ -509,6 +517,8 @@ def _run_cubed_sphere(days: float, dt: float, print_every: int, output: Path,
         physics_fn = _compose_nh_moist_physics(
             model_type="nonhydrostatic", dt=dt,
             with_surface_flux=True,
+            sfc_Cd=sfc_Cd, sfc_Ch=sfc_Ch,
+            sfc_T=sfc_T, sfc_q=sfc_q,
         )
     else:
         physics_fn = None
@@ -721,6 +731,35 @@ def main():
         "iter-286 confirmed C4 is too coarse for moist 30-day "
         "production. Ignored for non-cubed-sphere grids.",
     )
+    # iter-289 (Codex iter-288 round-1 MEDIUM): surface flux
+    # tuning knobs for cluster sensitivity runs. Hardcoded
+    # defaults match the plane CRM's iter-183 production contract
+    # so untouched cluster runs reproduce baseline trajectory.
+    p.add_argument(
+        "--sfc-Cd", type=float, default=1.0e-3,
+        help="iter-289: drag coefficient for bulk surface flux "
+        "(--moist + --grid cubed_sphere only today). Default 1e-3 "
+        "matches the plane CRM iter-183 contract. Lower (e.g. "
+        "1e-4) reduces momentum drag for cluster sensitivity "
+        "probes.",
+    )
+    p.add_argument(
+        "--sfc-Ch", type=float, default=1.0e-3,
+        help="iter-289: heat transfer coefficient for bulk "
+        "surface flux. Default 1e-3 = iter-183 contract.",
+    )
+    p.add_argument(
+        "--sfc-T", type=float, default=300.0,
+        help="iter-289: fixed sea surface temperature [K] for "
+        "bulk surface flux. Default 300 K = Wing 2018 RCEMIP "
+        "tropical SST.",
+    )
+    p.add_argument(
+        "--sfc-q", type=float, default=0.018,
+        help="iter-289: surface specific humidity [kg/kg] for "
+        "bulk surface flux. Default 0.018 = saturation at "
+        "T_sfc=300 K, p=1013 hPa.",
+    )
     args = p.parse_args()
 
     dispatch = {
@@ -742,6 +781,15 @@ def main():
     common_kwargs = dict(moist=args.moist)
     if args.grid == "cubed_sphere":
         common_kwargs["n"] = args.n_cubed_sphere
+        # iter-289: forward surface-flux kwargs to the cubed-sphere
+        # runner so the user can tune Cd/Ch/T_sfc/q_sfc without
+        # editing code. plane_fd / mpas paths don't accept these
+        # today (plane CRM uses its own composer in run_rcemip_plane.py;
+        # MPAS u-on-edges surface flux not yet wired).
+        common_kwargs["sfc_Cd"] = args.sfc_Cd
+        common_kwargs["sfc_Ch"] = args.sfc_Ch
+        common_kwargs["sfc_T"] = args.sfc_T
+        common_kwargs["sfc_q"] = args.sfc_q
     dispatch[args.grid](
         args.days, args.dt, args.print_every, args.output,
         **common_kwargs,
