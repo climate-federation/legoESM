@@ -355,9 +355,16 @@ def test_theta_noise_defaults(driver_defaults):
     non-zero theta' noise is not yet a recommended path. Lock the
     defaults so the iter-181 alternative-symmetry-breaker entry
     point cannot silently activate at production scale.
+
+    iter-208: --theta-noise-mode (added iter-203) defaults to
+    'white' — the RCEMIP / Wing 2018 uniform random pattern. The
+    'smooth_k1' alternative is the F11 fix-path-3 candidate; the
+    default must stay 'white' so the production wrapper's
+    THETA_NOISE_MODE=white pass-through is consistent.
     """
     assert driver_defaults["--theta-noise-amp"] == 0.0
     assert driver_defaults["--theta-noise-seed"] == 0
+    assert driver_defaults["--theta-noise-mode"] == "white"
 
 
 # iter-64: cover the snapshot/profile/log cadence defaults. iter-61
