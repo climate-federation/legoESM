@@ -153,23 +153,54 @@ def test_run_rcemip_long_cross_grid_moist_smoke(tmp_path, grid):
     # iter-276 (Codex iter-275 round-1 LOW): tightened q_v upper
     # bound. IC max q_v = Q_V_SFC * exp(-z/4000) at z=1 km
     # ~ 0.012 * 0.78 ~ 9.35e-3. The iter-275 bound 0.05 was 5x
-    # over IC — would silently miss a 4x moisture inflation.
-    # Tightened to (-1e-10, 0.015) = IC + 60% margin.
-    # iter-277 (Codex iter-276 round-2 MEDIUM-1): scan ALL history
-    # rows, not just the last. A transient q_v spike at step 3
-    # that recovers by step 8 would slip through a last-row-only
-    # check.
-    qv_max_over_run = max(float(r["max_qv"]) for r in history_rows)
-    qv_min_over_run = min(float(r["min_qv"]) for r in history_rows)
-    assert 0.0 <= qv_max_over_run < 0.015, (
-        f"max_qv over the run = {qv_max_over_run} outside "
-        f"(0, 0.015) — IC max ~9.35e-3 at z=1 km; >0.015 means "
-        f"moisture inflation regression (transient or final)."
+    # over IC.
+    # iter-277 (Codex iter-276 round-2 MEDIUM-1): scan ALL rows.
+    # iter-278 (Codex iter-277 round-3 HIGH + MEDIUM):
+    #   * Validate every row's q_v fields are PRESENT + FINITE
+    #     BEFORE computing max/min — Python's max() skips NaN
+    #     silently depending on order, so a transient NaN
+    #     spike could otherwise leave a finite run-wide max +
+    #     pass the bound.
+    #   * Track which step produced the worst q_v so the
+    #     failure message points the dev at the right row.
+    import math as _math
+    per_step_qv = []
+    for row in history_rows:
+        for col in ("max_qv", "min_qv"):
+            assert col in row, (
+                f"history row at step={row.get('step')!r} missing "
+                f"required column {col!r}."
+            )
+            val = row[col]
+            assert isinstance(val, (int, float)), (
+                f"history row step={row.get('step')!r} {col}={val!r} "
+                f"is not numeric."
+            )
+            assert _math.isfinite(val), (
+                f"history row step={row.get('step')!r} {col}={val} "
+                f"is non-finite (NaN/Inf) — physics_fn emitted "
+                f"non-finite tendency."
+            )
+        per_step_qv.append((
+            int(row["step"]),
+            float(row["max_qv"]),
+            float(row["min_qv"]),
+        ))
+    worst_max_step, worst_max_qv, _ = max(
+        per_step_qv, key=lambda t: t[1],
     )
-    assert qv_min_over_run >= -1e-10, (
-        f"min_qv over the run = {qv_min_over_run} below -1e-10 "
-        f"floor — negative-bias regression in moist tracer "
-        f"positivity filter."
+    worst_min_step, _, worst_min_qv = min(
+        per_step_qv, key=lambda t: t[2],
+    )
+    assert 0.0 <= worst_max_qv < 0.015, (
+        f"max_qv over the run = {worst_max_qv} at step "
+        f"{worst_max_step} outside (0, 0.015) — IC max ~9.35e-3 "
+        f"at z=1 km; >0.015 means moisture inflation regression."
+    )
+    assert worst_min_qv >= -1e-10, (
+        f"min_qv over the run = {worst_min_qv} at step "
+        f"{worst_min_step} below -1e-10 floor — negative-bias "
+        f"regression in moist tracer positivity filter."
     )
 
 
