@@ -807,3 +807,106 @@ def test_evaluate_quality_wires_sustained_stuck_detector():
     verdict = summary_mod.evaluate_rce_quality(rows)
     assert not verdict.passed
     assert any("AFTER spinup" in r for r in verdict.reasons)
+
+
+# iter-127: --no-plateau-check CLI behaviour.
+
+
+def test_no_plateau_check_folds_insufficient_into_pass(tmp_path):
+    """iter-127: a 3-day trajectory normally returns INSUFFICIENT
+    (exit 4) from --evaluate. With --no-plateau-check the plateau
+    branch is skipped and only stability checks run; PASS exits 0."""
+    import subprocess
+    snaps = tmp_path / "snapshots"
+    snaps.mkdir()
+    for i in range(3):
+        _write_snapshot(
+            snaps / f"snap_day_{i:04d}.npz",
+            day=float(i), cwv_value=50.0 + 0.5 * i,
+        )
+    res = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[4]
+                / "scripts" / "summarize_rce_trajectory.py"),
+            str(tmp_path),
+            "--evaluate", "--no-plateau-check",
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert res.returncode == summary_mod.EXIT_OK, (
+        f"--no-plateau-check should fold INSUFFICIENT into PASS on "
+        f"a 3-day finite trajectory; got exit {res.returncode}, "
+        f"stderr={res.stderr!r}"
+    )
+    assert "DOD verdict: PASS" in res.stdout
+
+
+def test_no_plateau_check_still_fails_on_blowup(tmp_path):
+    """iter-127: --no-plateau-check skips the plateau branch but
+    leaves max|U|_sfc / NaN / stuck-detector gates intact. A 3-day
+    trajectory with max|U|_sfc > 50 m/s must STILL FAIL."""
+    import subprocess
+    snaps = tmp_path / "snapshots"
+    snaps.mkdir()
+    for i in range(3):
+        _write_snapshot(
+            snaps / f"snap_day_{i:04d}.npz",
+            day=float(i), cwv_value=50.0 + 0.5 * i,
+        )
+    # Mutate the day-1 snapshot to plant a blow-up wind value via
+    # the snapshot writer's wind_sfc factor: the iter-126 helper
+    # uses ``day * 0.01`` so day=5000 → wind=50 m/s. Replace day 1.
+    import numpy as np
+    ny, nx = 4, 4
+    zeros = np.zeros((ny, nx), dtype=np.float64)
+    np.savez_compressed(
+        snaps / "snap_day_0001.npz",
+        t_sim=86400.0, day=1.0,
+        cwv=np.full((ny, nx), 50.5), mse=np.full((ny, nx), 3.5e9),
+        precip=zeros,
+        T_sfc=np.full((ny, nx), 300.0),
+        qv_sfc=np.full((ny, nx), 0.02),
+        qc_sfc=zeros, qr_sfc=zeros,
+        u_sfc=zeros, v_sfc=zeros,
+        wind_sfc=np.full((ny, nx), 99.0),  # > 50 m/s blow-up.
+    )
+    res = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[4]
+                / "scripts" / "summarize_rce_trajectory.py"),
+            str(tmp_path),
+            "--evaluate", "--no-plateau-check",
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert res.returncode == summary_mod.EXIT_DOD_FAIL, (
+        f"--no-plateau-check should still FAIL on max|U|_sfc "
+        f"blow-up; got exit {res.returncode}, "
+        f"stdout={res.stdout!r}"
+    )
+    assert "DOD verdict: FAIL" in res.stdout
+    assert "|U|_sfc exceeded" in res.stdout
+
+
+def test_no_plateau_check_rejected_with_final_dod(tmp_path):
+    """iter-127: --no-plateau-check + --final-dod is rejected by
+    argparse (EXIT_USAGE=2) because --final-dod's plateau check IS
+    the DOD criterion 2 verdict — skipping it would defeat the
+    purpose."""
+    import subprocess
+    snaps = tmp_path / "snapshots"
+    snaps.mkdir()
+    _write_snapshot(snaps / "snap_day_0000.npz", day=0.0, cwv_value=50.0)
+    res = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[4]
+                / "scripts" / "summarize_rce_trajectory.py"),
+            str(tmp_path),
+            "--final-dod", "--no-plateau-check",
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert res.returncode == summary_mod.EXIT_USAGE

@@ -666,6 +666,20 @@ def main() -> None:
              "criterion 2 (>=30 day rows, 1 %% MSE drift over last "
              "10 days). Use on a finished 30-day production run.",
     )
+    # iter-127: --no-plateau-check skips the plateau gates and the
+    # INSUFFICIENT branch. The remaining finite + max|U|_sfc + stuck
+    # detectors still run. Useful for mid-flight progress monitoring
+    # where the trajectory is too short for the plateau check but
+    # the user wants a stability verdict (PASS/FAIL only).
+    p.add_argument(
+        "--no-plateau-check",
+        action="store_true",
+        default=False,
+        help="Skip the plateau / MSE-drift gates and the "
+             "INSUFFICIENT branch. Returns PASS unless stability "
+             "checks (finite, max|U|_sfc, stuck detectors) fail. "
+             "Only valid with --evaluate (not --final-dod).",
+    )
     args = p.parse_args()
     if args.evaluate and args.final_dod:
         # iter-114 Codex LOW#2: ``raise SystemExit("msg")`` exits 1,
@@ -675,6 +689,12 @@ def main() -> None:
         p.error(
             "--evaluate (spinup gate) and --final-dod (30-day DOD "
             "gate) are mutually exclusive; pick one."
+        )
+    if args.no_plateau_check and args.final_dod:
+        p.error(
+            "--no-plateau-check is only valid with --evaluate; "
+            "--final-dod's plateau check IS the DOD criterion 2 "
+            "verdict — skipping it would defeat the purpose."
         )
 
     rows = collect_trajectory(args.out_dir)
@@ -688,13 +708,25 @@ def main() -> None:
             verdict = evaluate_rce_final_dod(rows)
             label = "DOD FINAL"
         else:
-            verdict = evaluate_rce_quality(rows)
+            # iter-127: --no-plateau-check passes a sentinel
+            # ``last_n_days_for_plateau`` larger than any practical
+            # trajectory, so the plateau branch never fires but the
+            # stability / stuck-detector branches still run.
+            n_plateau = (
+                10**6 if args.no_plateau_check
+                else DEFAULT_LAST_N_DAYS_FOR_PLATEAU
+            )
+            verdict = evaluate_rce_quality(
+                rows, last_n_days_for_plateau=n_plateau,
+            )
             label = "DOD"
         # iter-104 Codex MEDIUM#3 + MEDIUM#7: three-way verdict +
         # distinct exit codes so automation can tell PASS from
         # INSUFFICIENT (too short for plateau check) and from a
         # crash on IO / parse error (exit 1 from uncaught Python).
-        if not verdict.evaluated:
+        # iter-127: --no-plateau-check folds INSUFFICIENT into
+        # PASS (only stability checks matter).
+        if not verdict.evaluated and not args.no_plateau_check:
             print(f"{label} verdict: INSUFFICIENT")
             if not verdict.reasons:
                 print(
