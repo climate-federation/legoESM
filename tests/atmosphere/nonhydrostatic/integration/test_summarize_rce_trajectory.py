@@ -1334,3 +1334,52 @@ def test_parse_log_max_w_handles_utf8_content(tmp_path):
     max_w, n_rows = summary_mod.parse_log_max_w(tmp_path)
     assert max_w == pytest.approx(5e-3)
     assert n_rows == 1
+
+
+# iter-154: parse_log_max_w robustness against corrupt rows. The
+# implementation has two distinct "skip + keep going" branches at
+# scripts/summarize_rce_trajectory.py:504 (column-count mismatch)
+# and 508 (non-numeric float parse). Both surface in real runs:
+# - col-count mismatch when an MPI rank crash truncates a row mid-
+#   write (the driver appends row-at-a-time but flushes after each
+#   write, so a SIGKILL between separator and newline yields a row
+#   with too few cells);
+# - ValueError when the driver substitutes a sentinel string (e.g.
+#   ``"NaN"`` from an older format) that ``float()`` parses fine
+#   but the math.isfinite guard catches — only a genuinely non-
+#   numeric token reaches the ValueError continue.
+
+
+def test_parse_log_max_w_skips_truncated_row(tmp_path):
+    """A row with fewer cells than the header is skipped — the
+    parser keeps going and returns the max from the surviving
+    valid rows. Models a partial-write from an MPI rank crash."""
+    log_path = tmp_path / "log.txt"
+    log_path.write_text(
+        "# RCE MPI LONG short\n"
+        "# step,day,CWV_mean,CWV_max,MSE_mean,max|w|,max(qc),max(qr),max(precip_mm_day),Ca_substep\n"
+        "100,0.01,50.0,50.0,3.5e+09,5.0e-03,0,0,0,0.4\n"
+        "200,0.02,50.0,50.0,3.5e+09,\n"  # truncated
+        "300,0.03,50.0,50.0,3.5e+09,9.0e-03,0,0,0,0.4\n"
+    )
+    max_w, n_rows = summary_mod.parse_log_max_w(tmp_path)
+    assert max_w == pytest.approx(9e-3)
+    assert n_rows == 2
+
+
+def test_parse_log_max_w_skips_non_numeric_cell(tmp_path):
+    """A cell that ``float()`` rejects with ValueError (e.g. a
+    stray ASCII word) is skipped silently — the parser keeps
+    going and returns the max from valid rows. Distinct from the
+    NaN / +Inf branches above (those parse but fail isfinite)."""
+    log_path = tmp_path / "log.txt"
+    log_path.write_text(
+        "# RCE MPI LONG corrupt\n"
+        "# step,day,CWV_mean,CWV_max,MSE_mean,max|w|,max(qc),max(qr),max(precip_mm_day),Ca_substep\n"
+        "100,0.01,50.0,50.0,3.5e+09,5.0e-03,0,0,0,0.4\n"
+        "200,0.02,50.0,50.0,3.5e+09,corrupt,0,0,0,0.4\n"
+        "300,0.03,50.0,50.0,3.5e+09,9.0e-03,0,0,0,0.4\n"
+    )
+    max_w, n_rows = summary_mod.parse_log_max_w(tmp_path)
+    assert max_w == pytest.approx(9e-3)
+    assert n_rows == 2
