@@ -117,6 +117,27 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 44 — 2026-05-27 — fp64 production identical to fp32 (launch-bound confirmed)
+
+Re-bench production SI+phys+cuSPARSE at fp64:
+
+| N    | fp32 Mc/s | fp64 Mc/s | ratio |
+|------|-----------|-----------|-------|
+|  64  |  25.2     |  25.1     | 1.00  |
+|  96  |  28.3     |  28.1     | 1.01  |
+| 128  |  29.4     |  29.4     | 1.00  |
+| 192  |  26.0     |  26.0     | 1.00  |
+
+**fp32 ≡ fp64 production throughput exactly across the full plateau.**
+Confirms iter 38: physics is launch-overhead-bound, not arithmetic-
+bound. Consumer Blackwell fp64 ALU = 1/64 fp32 doesn't matter because
+kernel launches dominate.
+
+⇒ **Production users can use fp64 for free** when physics included.
+Choose precision based on AD-stability / numerical accuracy needs,
+not throughput. fp64 recommended for long-run RCEMIP integrations
+(better mass conservation + EOS accuracy).
+
 ### Iter 42 — 2026-05-27 — full production SI+physics+cuSPARSE sweep
 
 | res    | iter 36 (pre-cuSPARSE) | iter 42 (post-cuSPARSE) | gain |
