@@ -93,13 +93,29 @@ _EXPECTED_DIAG_COLS = {
 
 @pytest.mark.parametrize("grid", [
     "plane_fd",
+    # iter-240 (Codex iter-239 round-2 LOW#2): plane_spectral is
+    # blocked by TWO pre-existing bugs that surface under
+    # JAX_PLATFORMS=cpu inside the subprocess:
+    # 1. ``src/legoesm/atmosphere/dynamics/spectral_plane.py:83``
+    #    imports ``SpectralPlanePhysicsState`` from
+    #    ``legoesm.core.state`` but that symbol is missing.
+    # 2. ``src/legoesm/atmosphere/dynamics/spectral_pe.py:72``
+    #    ``float(jnp.log(100.0))`` crashes under Metal (only
+    #    relevant once #1 is fixed; insulated for now by the
+    #    subprocess JAX_PLATFORMS=cpu).
+    # Use ``xfail(strict=True)`` so a future fix that resolves
+    # both bugs auto-restores coverage — an XPASS surfaces as a
+    # test failure forcing the xfail to be removed.
     pytest.param(
         "plane_spectral",
-        marks=pytest.mark.skip(
-            reason="plane_spectral depends on spectral_pe.py:72 "
-            "float(jnp.log(100.0)) which crashes on Metal — pre-iter-238 "
-            "collection error documented in CRM_implementation.md iter-236 "
-            "fold. Once fixed, drop this skip."
+        marks=pytest.mark.xfail(
+            strict=True,
+            reason="plane_spectral subprocess fails on pre-existing "
+            "ImportError(SpectralPlanePhysicsError missing from "
+            "legoesm.core.state) — flagged at iter-236; clear the "
+            "xfail when src/legoesm/atmosphere/dynamics/spectral_plane.py "
+            "+ src/legoesm/atmosphere/dynamics/spectral_pe.py are "
+            "both fixed.",
         ),
     ),
     "cubed_sphere",
@@ -146,39 +162,59 @@ def test_run_rcemip_long_grid_smoke(tmp_path, grid):
             f"in the smoke run. stdout tail: {result.stdout[-500:]}"
         )
 
-    # iter-239 (Codex iter-238 round-1 HIGH): assert model.step
-    # actually fired. The driver writes a JSON history with one
-    # entry per print-every interval; with print-every=1 + n_steps=8
-    # we expect ~9 history rows (IC + 8 steps). A history with
-    # ONLY the IC row (length 1) means n_steps collapsed to 0 again
-    # and the smoke would silently degrade.
+    # iter-239 (Codex iter-238 round-1 HIGH) + iter-240
+    # (Codex iter-239 round-2 MEDIUM#1+#2): assert model.step
+    # actually fired with the EXACT contract — print-every=1 +
+    # days=0.001 + dt=10 → n_steps=8 → history len = 9 (IC + 8
+    # steps with step indices 0,1,2,...,8).
     assert out_file.exists(), (
         f"Driver did not write the history JSON at {out_file}. "
         f"stdout tail: {result.stdout[-500:]}"
     )
     history_doc = json.loads(out_file.read_text())
-    assert history_doc.get("n_steps", 0) > 0, (
-        f"Driver wrote n_steps={history_doc.get('n_steps')} for "
-        f"grid={grid} — model.step was never called and the smoke "
-        f"validated only construction/teardown. iter-239 raised "
-        f"--days from 0.0001 to 0.001 to make this fire."
+    expected_n_steps = 8  # int(0.001 * 86400 / 10)
+    assert history_doc.get("n_steps") == expected_n_steps, (
+        f"Driver wrote n_steps={history_doc.get('n_steps')!r} for "
+        f"grid={grid}; expected exactly {expected_n_steps} (= "
+        f"int(0.001·86400/10)). A mismatch means the driver step "
+        f"calc regressed (n_steps=0 would mean model.step never "
+        f"fires — Codex iter-238 round-1 HIGH)."
     )
     history_rows = history_doc.get("history", [])
-    assert len(history_rows) >= 2, (
+    assert len(history_rows) == expected_n_steps + 1, (
         f"Driver wrote {len(history_rows)} history rows for "
-        f"grid={grid}; expected at least 2 (IC + ≥1 stepped). "
-        f"Likely the print-every gate skipped all steps."
+        f"grid={grid}; expected exactly {expected_n_steps + 1} "
+        f"(IC + {expected_n_steps} steps at print-every=1). A "
+        f"short history means a step was skipped or the print "
+        f"gate regressed."
     )
-    # Final history row must hold finite floats (a NaN would have
-    # surfaced as ``finite=False`` in the diag dict and triggered
-    # the driver's ``non-finite`` early-exit, but a sub-step NaN
-    # that recovered would otherwise slip past the stdout markers).
+    actual_steps = [row.get("step") for row in history_rows]
+    expected_steps = list(range(expected_n_steps + 1))
+    assert actual_steps == expected_steps, (
+        f"Driver wrote step sequence {actual_steps!r} for "
+        f"grid={grid}; expected exactly {expected_steps!r} "
+        f"(monotonic 0..{expected_n_steps}). A gap means the "
+        f"driver skipped a step; a duplicate means double-logging."
+    )
+    # iter-240 (Codex round-2 MEDIUM#2): require each diag field
+    # present + finite — NOT ``v is None or finite``. Missing
+    # diagnostic fields are the schema-drift this smoke is meant
+    # to catch.
+    # iter-240 (Codex round-2 LOW#1): scoped claim — this catches
+    # a NaN at the FINAL outer step, not sub-step NaNs that
+    # recovered inside model.step.
     last = history_rows[-1]
     for col in ("max_w", "min_th", "max_th", "min_qv", "max_qv"):
-        v = last.get(col)
-        assert v is None or (isinstance(v, (int, float))
-                             and v == v and v != float("inf")
-                             and v != float("-inf")), (
+        assert col in last, (
+            f"history[-1] for grid={grid} is missing required "
+            f"diagnostic field {col!r}. Driver schema regressed."
+        )
+        v = last[col]
+        assert (isinstance(v, (int, float))
+                and v == v
+                and v not in (float("inf"), float("-inf"))), (
             f"history[-1][{col}]={v!r} is non-finite for grid="
-            f"{grid}."
+            f"{grid} (final outer-step diag). A sub-step NaN that "
+            f"recovered before the diag fire would slip past this — "
+            f"out of scope for the 8-step smoke."
         )
