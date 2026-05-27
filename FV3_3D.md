@@ -2378,6 +2378,129 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1045 (2026-05-27): damp_v / damp_w 4D-native — **all NH/PE 3D vmap-MPI sites closed**
+
+### Goal
+
+Close the third and final vmap-around-``pad_halo`` follow-up
+from iter-1042.  Both PE and NH have a ``damp_v`` post-step
+that wrapped ``fv3_del6_vorticity_damping`` in a per-level
+``jax.vmap``; NH additionally has a ``damp_w`` post-step that
+wrapped ``_del6_vt_flux`` similarly.  Gated by ``damp_v > 0``
+and ``damp_w > 0`` (both off by default; FV3 production
+typically uses 0.030).
+
+### Fix
+
+Two coordinated changes in ``core/fv3_del6_vt_flux.py``:
+
+1. ``_del6_vt_flux`` is now ndim-aware (3D or 4D).  For 4D ``q``:
+   dynamic halo via ``pad_halo_4d`` (one batched sendrecv per
+   call across the trailing nlev axis); static metric arrays
+   (``del6_u``, ``del6_v``, ``rarea``) get a trailing
+   ``[..., None]`` broadcast.  Defensive ``ndim ∈ {3, 4}``
+   guard.  The 3D branch is bit-for-bit unchanged.
+
+2. ``fv3_del6_vorticity_damping`` is now ndim-aware.  4D
+   ``(u_d, v_d)`` route through the same broadcast pattern:
+   ``cdgrid.dx_edge_y[..., None]`` and
+   ``cdgrid.dy_edge_x[..., None]`` for the circulation step
+   and the final velocity conversion.  Same defensive guard.
+
+Three NH/PE call-site updates:
+
+- ``compressible_euler_cdgrid.py:1187-1199`` (NH damp_v):
+  ``_per_level`` vmap removed, direct call on 4D ``(u_normal,
+  v_normal)``.
+- ``compressible_euler_cdgrid.py:1370-1390`` (NH damp_w):
+  ``_per_half_level`` vmap + ``jnp.moveaxis`` removed, direct
+  call on 4D ``w_new_data``; net-flux divergence uses
+  ``rarea_w[..., None]`` broadcasting.
+- ``primitive_eq_cdgrid.py:1318-1332`` (PE damp_v):
+  same vmap lift as NH (mirror).
+
+### Tests
+
+Three new MPI fidelity tests:
+
+- ``test_nh_3_step_with_damp_v`` (damp_v=0.030, nord_v=2)
+- ``test_nh_3_step_with_damp_w`` (damp_w=0.030, nord_w=2)
+- ``test_pe_3_step_with_damp_v`` (PE counterpart; PE has no
+  damp_w since hydrostatic has no prognostic w)
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 mpirun -np 2 .venv/bin/python -m pytest \
+        tests/distributed/test_mpi_fv3_step_fidelity.py \
+        tests/distributed/test_mpi_fv3_nh_step_fidelity.py \
+        -v
+    => 12 passed (4 PE + 8 NH)
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_damp_v_nh.py \
+        tests/test_damp_w_nh_iter193.py \
+        tests/test_damp_v_quantitative_iter175.py \
+        tests/test_damp_w_quantitative_iter195.py \
+        -q
+    => 17 passed (single-device damp regression unchanged)
+
+### Codex adversarial review
+
+``gpt-5.3-codex``: 6/7 claims CONFIRMED, 1 minor inaccuracy in
+the review prompt description (the metric broadcast vs halo pad
+phrasing — code is correct).  No code bugs.  Verdict: ship.
+
+Key Codex confirmations:
+- Outside-NH/PE call site ``shallow_water_fv3_cdgrid.py:1342``
+  still passes 3D, uses the legacy branch — unaffected.
+- No float64 rounding sensitivity between vmap and 4D-native
+  (pointwise ops only; 17 single-device tests pass at full
+  tolerance).
+- Only one ``jax.vmap`` remains in both 3D atmosphere files:
+  NH line 889 tracer vertical advection — vertical-only, no
+  halo exchange, safe under MPI.
+
+### Status: ALL VMAP-MPI SITES CLOSED
+
+| iter | site | status |
+|------|------|--------|
+| 1042 | NH ``cgrid_mass_flux_divergence`` (slow-tendency, every step) | ✅ |
+| 1043 | PE + NH ``_interp_center_to_corner_a2b_ord4`` | ✅ |
+| 1044 | PE + NH ``_lap_per_level`` (corner div-damp) | ✅ |
+| 1044 | PE + NH ``fv3_divergence_corner_3d`` (every step) | ✅ |
+| 1045 | PE + NH ``damp_v`` post-step | ✅ |
+| 1045 | NH ``damp_w`` post-step | ✅ |
+
+The full FV3-fidelity NH 3D production config can now run
+under MPI bit-for-bit identically to the single-device backend.
+PE FV3-fidelity config likewise.  This closes the goal stated
+at the top of FV3_3D.md: "Always run on MPI as this will be
+standard" — every documented FV3-fidelity flag combination
+now works under ``mpirun -np N`` for face-only mode
+(N ∈ {1, 2, 3, 6}).
+
+### Why this iteration was meaningful
+
+iter-1040 unlocked MPI for the basic 3D step.  iter-1042/1043/
+1044/1045 unlocked the FULL FV3-fidelity flag stack one
+config-gated vmap-around-pad_halo at a time, each catch
+preceded by Codex's adversarial enumeration of remaining
+sites.  Four iterations, four codex reviews, twelve MPI
+fidelity tests covering 8 distinct config variants — the
+3D atmospheric paths are now end-to-end MPI-faithful.
+
+Open follow-ups (out of scope for the vmap-MPI series):
+- Sub-face tiling (n_processes > 6) with ``interp_offsets``:
+  refused with a clear error in iter-1040; tile-local offset
+  indexing is the next architectural step.
+- The two pre-existing failures in
+  ``test_mpi_driver.py::test_initialize_distributed_sets_mpi_backend``
+  and ``::test_pad_halo_4d_mpi_matches_local`` are unrelated
+  to the vmap-MPI series (replicated-data semantics that
+  pre-date the session-scoped MPI conftest).
+
 ## Iteration 1044 (2026-05-27): corner div-damp 4D-native (lift ``_lap_per_level`` + ``fv3_divergence_corner_3d`` vmaps under MPI)
 
 ### Goal

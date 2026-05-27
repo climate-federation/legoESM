@@ -1185,20 +1185,15 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                 self.config.nord_v + 1
             )
 
-            def _per_level(args):
-                u_lev, v_lev = args
-                return fv3_del6_vorticity_damping(
-                    u_lev, v_lev, damp=damp_step,
-                    nord=self.config.nord_v, cdgrid=self.cdgrid,
-                )
-
-            u_normal_t = jnp.moveaxis(u_normal, -1, 0)
-            v_normal_t = jnp.moveaxis(v_normal, -1, 0)
-            du_normal_t, dv_normal_t = jax.vmap(_per_level)(
-                (u_normal_t, v_normal_t),
+            # FV3_3D iter-1045: ``fv3_del6_vorticity_damping`` is now
+            # 4D-native (3D static metrics broadcast via ``[..., None]``;
+            # halo dispatched to ``pad_halo_4d``).  Direct call avoids
+            # ``jax.vmap`` around ``pad_halo`` under MPI — same pattern
+            # as iter-1042 / iter-1043 / iter-1044.
+            du_normal, dv_normal = fv3_del6_vorticity_damping(
+                u_normal, v_normal, damp=damp_step,
+                nord=self.config.nord_v, cdgrid=self.cdgrid,
             )
-            du_normal = jnp.moveaxis(du_normal_t, 0, -1)
-            dv_normal = jnp.moveaxis(dv_normal_t, 0, -1)
 
             # FV3_3D iter 442/447: sponge boost of damp_v at k=0,1 (NOT k=2). FV3 damp_vt = 0.5*d2_divg.
             if self.config.use_fv3_sponge_damp_v:
@@ -1375,24 +1370,22 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                 self.config.nord_w + 1
             )
 
-            def _per_half_level(w_2d):
-                # Returns (fx2, fy2) for (6, n, n) w_2d
-                return _del6_vt_flux(
-                    w_2d, damp=damp_step_w, nord=self.config.nord_w,
-                    del6_u=del6_u_w, del6_v=del6_v_w, rarea=rarea_w,
-                    cdgrid=self.cdgrid,
-                )
-
-            # Vmap over half-level axis
+            # FV3_3D iter-1045: ``_del6_vt_flux`` is now 4D-native.
+            # Direct call on the full half-level field avoids ``jax.vmap``
+            # around ``pad_halo`` under MPI.  Output ``fx2``/``fy2`` are
+            # 4D (6, n+1, n, nlev_half) and (6, n, n+1, nlev_half).
             w_new_data = state_new.w.data        # (6, n, n, nlev_half)
-            w_t = jnp.moveaxis(w_new_data, -1, 0)
-            fx2_t, fy2_t = jax.vmap(_per_half_level)(w_t)
-            # FV3 flux convention: fx2[w]-fx2[e]; fy2[s]-fy2[n]. Fluxes include damp factor.
-            dw_t = (
-                fx2_t[..., :-1, :] - fx2_t[..., 1:, :]
-                + fy2_t[..., :-1] - fy2_t[..., 1:]
-            ) * rarea_w[None, ...]               # (nlev_half, 6, n, n)
-            dw = jnp.moveaxis(dw_t, 0, -1)       # (6, n, n, nlev_half)
+            fx2_w, fy2_w = _del6_vt_flux(
+                w_new_data, damp=damp_step_w, nord=self.config.nord_w,
+                del6_u=del6_u_w, del6_v=del6_v_w, rarea=rarea_w,
+                cdgrid=self.cdgrid,
+            )
+            # FV3 flux convention: fx2[w]-fx2[e]; fy2[s]-fy2[n].
+            # Broadcast 3D rarea_w against 4D net-flux.
+            dw = (
+                fx2_w[:, :-1, :, :] - fx2_w[:, 1:, :, :]
+                + fy2_w[:, :, :-1, :] - fy2_w[:, :, 1:, :]
+            ) * rarea_w[..., None]               # (6, n, n, nlev_half)
 
             # FV3_3D iter 441/447: sponge boost of damp_w at k=0/1/2. Factor 1.0 (FV3 damp_w = d2_divg).
             if self.config.use_fv3_sponge_damp_w:

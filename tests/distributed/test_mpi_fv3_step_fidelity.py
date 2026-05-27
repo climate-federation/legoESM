@@ -193,6 +193,28 @@ class TestFV3PEStepMPIFidelity:
             dt=300.0, n_steps=3,
         )
 
+    def test_pe_3_step_with_damp_v(self):
+        """FV3_3D iter-1045: PE ``damp_v`` post-step under MPI.
+
+        PE counterpart to NH ``test_nh_3_step_with_damp_v``.  PE has
+        no ``damp_w`` (no prognostic w in hydrostatic).  Same
+        ``fv3_del6_vorticity_damping`` 4D-native helper used.
+        """
+        rank = MPI.COMM_WORLD.Get_rank()
+        size = MPI.COMM_WORLD.Get_size()
+        if size > 6 or 6 % size != 0:
+            pytest.skip("Face-only mode only (1/2/3/6 ranks).")
+
+        set_halo_backend("local")
+        ref_model, dist_model, state_global = _build_pe_model_and_state(
+            damp_v=0.030,
+            nord_v=2,
+        )
+        _run_pe_pair_and_assert(
+            rank, size, ref_model, dist_model, state_global,
+            dt=300.0, n_steps=3,
+        )
+
     def test_pe_3_step_with_corner_div_damp(self):
         """FV3_3D iter-1044 (codex claim-3): PE MPI with corner-div-damp nord=1.
 

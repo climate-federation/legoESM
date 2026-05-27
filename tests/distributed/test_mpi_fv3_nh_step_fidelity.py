@@ -248,6 +248,53 @@ class TestFV3NHStepMPIFidelity:
             fields=("u", "v", "w", "theta_prime", "rho_prime"),
         )
 
+    def test_nh_3_step_with_damp_v(self):
+        """FV3_3D iter-1045: ``damp_v`` post-step under MPI.
+
+        Exercises ``fv3_del6_vorticity_damping`` previously wrapped in
+        ``jax.vmap`` over levels.  iter-1045 makes it 4D-native by
+        broadcasting 3D static metrics with ``[..., None]`` and
+        dispatching halo through ``pad_halo_4d``.
+        """
+        rank = MPI.COMM_WORLD.Get_rank()
+        size = MPI.COMM_WORLD.Get_size()
+        if size > 6 or 6 % size != 0:
+            pytest.skip("Face-only mode only (1/2/3/6 ranks).")
+
+        set_halo_backend("local")
+        ref_model, dist_model, state = _build_nh_model_and_state(
+            damp_v=0.030,
+            nord_v=2,
+        )
+        _run_pair_and_assert(
+            rank, size, ref_model, dist_model, state,
+            dt=10.0, n_steps=3,
+            fields=("u", "v", "w", "theta_prime", "rho_prime"),
+        )
+
+    def test_nh_3_step_with_damp_w(self):
+        """FV3_3D iter-1045: ``damp_w`` post-step under MPI.
+
+        Exercises ``_del6_vt_flux`` directly on the half-level w
+        field — the second of two damp post-step paths the iter-1045
+        4D-native refactor unblocks under MPI.
+        """
+        rank = MPI.COMM_WORLD.Get_rank()
+        size = MPI.COMM_WORLD.Get_size()
+        if size > 6 or 6 % size != 0:
+            pytest.skip("Face-only mode only (1/2/3/6 ranks).")
+
+        set_halo_backend("local")
+        ref_model, dist_model, state = _build_nh_model_and_state(
+            damp_w=0.030,
+            nord_w=2,
+        )
+        _run_pair_and_assert(
+            rank, size, ref_model, dist_model, state,
+            dt=10.0, n_steps=3,
+            fields=("u", "v", "w", "theta_prime", "rho_prime"),
+        )
+
     def test_nh_3_step_with_both_a2b_paths(self):
         """FV3_3D iter-1043 (codex claim-3): both a2b flags ON simultaneously.
 

@@ -1315,21 +1315,14 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 self.config.nord_v + 1
             )
 
-            # Per-level vmap over (6, n, n+1) and (6, n+1, n)
-            def _per_level(args):
-                u_lev, v_lev = args
-                return fv3_del6_vorticity_damping(
-                    u_lev, v_lev, damp=damp_step,
-                    nord=self.config.nord_v, cdgrid=self.cdgrid,
-                )
-
-            u_normal_t = jnp.moveaxis(u_normal, -1, 0)  # (nlev, 6, n, n+1)
-            v_normal_t = jnp.moveaxis(v_normal, -1, 0)  # (nlev, 6, n+1, n)
-            du_normal_t, dv_normal_t = jax.vmap(_per_level)(
-                (u_normal_t, v_normal_t),
+            # FV3_3D iter-1045: ``fv3_del6_vorticity_damping`` is now
+            # 4D-native (3D static metrics broadcast via ``[..., None]``;
+            # halo dispatched to ``pad_halo_4d``).  Direct call avoids
+            # ``jax.vmap`` around ``pad_halo`` under MPI.
+            du_normal, dv_normal = fv3_del6_vorticity_damping(
+                u_normal, v_normal, damp=damp_step,
+                nord=self.config.nord_v, cdgrid=self.cdgrid,
             )
-            du_normal = jnp.moveaxis(du_normal_t, 0, -1)
-            dv_normal = jnp.moveaxis(dv_normal_t, 0, -1)
 
             # FV3_3D iter 443 (PE mirror of NH 442): sponge boost at k=0,k=1 (NOT k=2)
             if self.config.use_fv3_sponge_damp_v:
