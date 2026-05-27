@@ -12,8 +12,11 @@ Usage:
     JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv/bin/python scripts/run_scm_rce.py --days 50
 
 Exits non-zero if the final state is non-finite or fails coarse RCE
-sanity checks (surface T in [240, 320] K; stratospheric T in
-[160, 260] K).
+sanity checks: surface T in (240, 320) K; stratospheric T in
+(150, 270) K; full column q_v >= -1e-8 kg/kg (positivity floor).
+iter-304 (Codex iter-303 round-4 LOW): pre-iter-304 docstring
+listed T_top bounds as [160, 260] K + omitted q_v gate; both
+disagreed with the implementation at the bottom of ``main()``.
 """
 
 from __future__ import annotations
