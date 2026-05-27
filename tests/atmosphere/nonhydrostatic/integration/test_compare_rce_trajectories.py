@@ -122,30 +122,36 @@ def test_align_rows_rejects_above_tolerance(tmp_path):
 
 
 def test_format_table_renders_missing_as_na(tmp_path):
-    """If a column happens to be ``None`` on one side (synthetic
+    """If a column happens to be ``MISSING`` on one side (synthetic
     edge — the summarizer never emits None for surface columns, but
     profile columns can be None for missing profile files), the
-    diff renders ``NA`` to match the iter-99 sentinel."""
+    diff renders ``NA`` to match the iter-99 sentinel.
+
+    iter-111 MEDIUM#2: separate path for ``NONFINITE`` covered in
+    ``test_nonfinite_rendered_separately`` below."""
     a = _make_run(tmp_path, "a", [(0.0, 50.0)])
     b = _make_run(tmp_path, "b", [(0.0, 51.0)])
     diffs = compare_mod.diff_trajectories(a, b)
-    # Force-inject a None to exercise the NA branch.
-    diffs[0]["delta_cwv_mean"] = None
+    # Force-inject a MISSING sentinel to exercise the NA branch.
+    diffs[0]["delta_cwv_mean"] = compare_mod._DELTA_MISSING
     text = compare_mod.format_diff_table(diffs)
     assert summary_mod.MISSING_SENTINEL in text
 
 
-def test_summary_reports_max_abs_delta(tmp_path, capsys):
+def test_summary_reports_max_abs_delta(tmp_path, capsys, monkeypatch):
+    """iter-111 LOW#6 fix: use monkeypatch.setattr for sys.argv so
+    test state does not leak into subsequent tests."""
     a = _make_run(tmp_path, "a", [(0.0, 50.0), (1.0, 51.0)])
     b = _make_run(tmp_path, "b", [(0.0, 50.5), (1.0, 52.0)])
-    # Run main() via argv injection so the print output is captured.
-    sys.argv = ["compare_rce_trajectories.py", str(a), str(b),
-                "--quiet"]
+    monkeypatch.setattr(
+        sys, "argv",
+        ["compare_rce_trajectories.py", str(a), str(b), "--quiet"],
+    )
     compare_mod.main()
     out = capsys.readouterr().out
     assert "matched 2 day(s)" in out
-    # Max |Δ cwv_mean| over (0.5, 1.0) = 1.0
-    assert "max |Δ cwv_mean| = 1.000000e+00" in out
+    # Max |d cwv_mean| over (0.5, 1.0) = 1.0 (ASCII label per LOW#5).
+    assert "max |d cwv_mean| = 1.000000e+00" in out
 
 
 def test_diff_against_real_iter98_baseline(tmp_path):
@@ -159,3 +165,126 @@ def test_diff_against_real_iter98_baseline(tmp_path):
     diffs = compare_mod.diff_trajectories(a, b)
     assert len(diffs) == 1
     assert diffs[0]["delta_cwv_mean"] == pytest.approx(0.0)
+
+
+# iter-111: regression tests for Codex MEDIUM #1 / #2 / #3 + LOW #4.
+
+
+def _make_run_with_shape(tmp_path, name, day_cwv_pairs, *, shape=(4, 4)):
+    """Variant of ``_make_run`` that lets the test choose the
+    horizontal grid shape. iter-111 MEDIUM#1: required for the
+    shape-mismatch regression."""
+    out_dir = tmp_path / name
+    snaps = out_dir / "snapshots"
+    snaps.mkdir(parents=True)
+    for idx, (day, cwv) in enumerate(day_cwv_pairs):
+        ny, nx = shape
+        arr = np.full((ny, nx), cwv, dtype=np.float64)
+        np.savez_compressed(
+            snaps / f"snap_day_{idx:04d}.npz",
+            t_sim=day * 86400.0, day=day,
+            cwv=arr, mse=arr * 1e7, precip=arr * 0.0,
+            T_sfc=np.full_like(arr, 300.0),
+            qv_sfc=np.full_like(arr, 0.02),
+            qc_sfc=np.full_like(arr, 0.0),
+            qr_sfc=np.full_like(arr, 0.0),
+            u_sfc=np.full_like(arr, 0.0),
+            v_sfc=np.full_like(arr, 0.0),
+            wind_sfc=np.full_like(arr, 0.0),
+        )
+    return out_dir
+
+
+def test_diff_refuses_shape_mismatch_by_default(tmp_path):
+    """iter-111 MEDIUM#1: a 132×132 vs 32×32 diff produces
+    meaningful-looking domain-mean deltas but the numbers are
+    physically meaningless. Refuse by default."""
+    a = _make_run_with_shape(tmp_path, "a", [(0.0, 50.0)], shape=(4, 4))
+    b = _make_run_with_shape(tmp_path, "b", [(0.0, 50.0)], shape=(8, 8))
+    with pytest.raises(ValueError, match="snapshot shape mismatch"):
+        compare_mod.diff_trajectories(a, b)
+
+
+def test_diff_force_shape_mismatch_overrides(tmp_path):
+    """iter-111 MEDIUM#1: ``force_shape_mismatch=True`` allows
+    overriding the shape check (e.g. a sanity-check across
+    resolutions)."""
+    a = _make_run_with_shape(tmp_path, "a", [(0.0, 50.0)], shape=(4, 4))
+    b = _make_run_with_shape(tmp_path, "b", [(0.0, 51.0)], shape=(8, 8))
+    diffs = compare_mod.diff_trajectories(
+        a, b, force_shape_mismatch=True,
+    )
+    assert len(diffs) == 1
+    assert diffs[0]["delta_cwv_mean"] == pytest.approx(1.0)
+
+
+def test_nonfinite_rendered_separately(tmp_path):
+    """iter-111 MEDIUM#2: NaN / inf on one side is surfaced as a
+    distinct ``NONFINITE`` sentinel (not collapsed into MISSING /
+    None) so users can tell a corrupt diagnostic apart from a
+    missing-profile column."""
+    a = _make_run(tmp_path, "a", [(0.0, float("nan"))])
+    b = _make_run(tmp_path, "b", [(0.0, 51.0)])
+    diffs = compare_mod.diff_trajectories(a, b)
+    assert diffs[0]["delta_cwv_mean"] == compare_mod._DELTA_NONFINITE
+    table = compare_mod.format_diff_table(diffs)
+    assert "NONFINITE" in table
+
+
+def test_summary_reports_nonfinite_count(tmp_path):
+    """iter-111 MEDIUM#2: _column_summary tracks NaN/inf separately
+    from finite max-abs so a corrupt diagnostic is visible."""
+    a = _make_run(tmp_path, "a", [(0.0, float("inf"))])
+    b = _make_run(tmp_path, "b", [(0.0, 51.0)])
+    diffs = compare_mod.diff_trajectories(a, b)
+    summary = compare_mod._column_summary(diffs)
+    assert summary["cwv_mean"]["nonfinite_count"] == 1
+    assert summary["cwv_mean"]["max_abs"] is None
+
+
+def test_csv_output_written(tmp_path):
+    """iter-111 MEDIUM#3: ``--csv`` (or the default
+    ``<dir_a>/diff_vs_<dir_b>.csv``) is actually written; previously
+    the docstring claimed CSV output but main() never wrote one."""
+    a = _make_run(tmp_path, "a", [(0.0, 50.0), (1.0, 51.0)])
+    b = _make_run(tmp_path, "b", [(0.0, 50.5), (1.0, 52.0)])
+    csv_path = tmp_path / "diff.csv"
+    compare_mod.write_csv(compare_mod.diff_trajectories(a, b), csv_path)
+    assert csv_path.exists()
+    text = csv_path.read_text()
+    lines = text.splitlines()
+    assert lines[0].startswith("day,cwv_mean,cwv_max")
+    # 2 data rows + header.
+    assert len(lines) == 3
+
+
+def test_align_rows_one_to_one(tmp_path):
+    """iter-111 LOW#4: two A rows whose days are both within
+    ``day_tol`` of the SAME B row must not both pair to it. The
+    first claims the B row; the second is dropped (the run had a
+    sub-tolerance intra-run day spacing, which is itself rare)."""
+    # Manually craft DayRow lists since collect_trajectory's
+    # duplicate-day rejection blocks this through the file path.
+    ra1 = summary_mod.DayRow(
+        day=1.0, cwv_mean=50.0, cwv_min=50.0, cwv_max=50.0,
+        cwv_std=0.0, mse_mean=3.5e9, precip_mean=0.0, precip_max=0.0,
+        T_sfc_mean=300.0, qv_sfc_mean=0.02, qc_sfc_max=0.0,
+        qr_sfc_max=0.0, wind_sfc_mean=0.0, wind_sfc_max=0.0,
+    )
+    ra2 = summary_mod.DayRow(
+        day=1.0000001, cwv_mean=60.0, cwv_min=60.0, cwv_max=60.0,
+        cwv_std=0.0, mse_mean=3.5e9, precip_mean=0.0, precip_max=0.0,
+        T_sfc_mean=300.0, qv_sfc_mean=0.02, qc_sfc_max=0.0,
+        qr_sfc_max=0.0, wind_sfc_mean=0.0, wind_sfc_max=0.0,
+    )
+    rb = summary_mod.DayRow(
+        day=1.0, cwv_mean=55.0, cwv_min=55.0, cwv_max=55.0,
+        cwv_std=0.0, mse_mean=3.5e9, precip_mean=0.0, precip_max=0.0,
+        T_sfc_mean=300.0, qv_sfc_mean=0.02, qc_sfc_max=0.0,
+        qr_sfc_max=0.0, wind_sfc_mean=0.0, wind_sfc_max=0.0,
+    )
+    paired = compare_mod._align_rows([ra1, ra2], [rb], day_tol=1e-5)
+    assert len(paired) == 1, (
+        f"only the first A row should pair with B; got {len(paired)} "
+        f"pairings"
+    )
