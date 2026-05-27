@@ -38,6 +38,36 @@ import sys
 import time
 from pathlib import Path
 
+
+# iter-293 (Codex iter-292 round-3 LOW): module-level physical-range
+# table for the --sfc-* CLI validators. Pre-iter-293 the (lo, hi)
+# bounds were inline in the per-flag validator loop; iter-292
+# already had to adjust sfc-T once, and bumping a value buried in
+# main() risks missing other callers. Module-top table = single
+# source of truth + easy to extend.
+_SFC_CLI_RANGES = {
+    # flag-name  : (attr-name, lo, hi)
+    "sfc-Cd": ("sfc_Cd", 0.0, 1.0),
+    "sfc-Ch": ("sfc_Ch", 0.0, 1.0),
+    # sfc-T: widened [100, 400] → [50, 800] K at iter-292 for
+    # non-Earth idealised CRM (snowball Earth ~200 K,
+    # Venus-like ~700 K). Earth tropical RCEMIP 300 K inside.
+    "sfc-T":  ("sfc_T",  50.0, 800.0),
+    "sfc-q":  ("sfc_q",  0.0,  0.1),
+}
+
+
+# iter-293 (Codex iter-292 round-3 MEDIUM#2): cubed-sphere-only
+# CLI flag names. Defaults derived from argparse via
+# ``p.get_default(attr)`` at validation time, so a future
+# default change can't drift past the misuse check. The list
+# itself stays here as the source-of-truth set of cubed-only
+# knobs.
+_CUBED_ONLY_ATTRS = (
+    "n_cubed_sphere", "sfc_Cd", "sfc_Ch", "sfc_T", "sfc_q",
+    "cubed_n_acoustic", "cubed_coriolis", "cubed_fix_mass",
+)
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -816,16 +846,14 @@ def main():
     # cubed-only set — iter-291 omitted it so ``--grid mpas
     # --n-cubed-sphere 96`` was silently ignored.
     if args.grid != "cubed_sphere":
-        _CUBED_DEFAULTS = {
-            "n_cubed_sphere": 4,
-            "sfc_Cd": 1.0e-3, "sfc_Ch": 1.0e-3,
-            "sfc_T": 300.0, "sfc_q": 0.018,
-            "cubed_n_acoustic": None,
-            "cubed_coriolis": None, "cubed_fix_mass": None,
-        }
+        # iter-293 (Codex iter-292 round-3 MEDIUM#2): derive
+        # default values from the argparse parser (single source
+        # of truth) instead of duplicating them. A future PR that
+        # changes a default in p.add_argument() automatically
+        # updates the misuse-detection logic too.
         _passed_cubed_only = [
-            _attr for _attr, _default in _CUBED_DEFAULTS.items()
-            if getattr(args, _attr) != _default
+            _attr for _attr in _CUBED_ONLY_ATTRS
+            if getattr(args, _attr) != p.get_default(_attr)
         ]
         if _passed_cubed_only:
             raise SystemExit(
@@ -842,21 +870,13 @@ def main():
             f"be >= 1. Typical values: 4 (default smoke), 12, "
             f"24, 48, 96, 192 (production)."
         )
-    # iter-291 (Codex iter-289..290 round-1 HIGH#1): validate
-    # surface-flux CLI flags. NaN T_sfc or negative Cd/Ch
-    # propagates into flux compute + flips sign of drag/heat/moisture
+    # iter-291 (HIGH#1) + iter-292 (MEDIUM#1) + iter-293 (LOW):
+    # validate surface-flux CLI flags against the module-level
+    # ``_SFC_CLI_RANGES`` table. NaN T_sfc or negative Cd/Ch
+    # propagates into flux compute + flips sign of drag/heat
     # forcing without error.
-    # iter-292 (Codex round-2 MEDIUM#1): widened sfc-T range
-    # [100, 400] → [50, 800] K to support non-Earth idealised
-    # experiments (cold tropopause snowball-Earth ≈ 200 K;
-    # Venus-like upper bound 800 K). Earth tropical RCEMIP IC
-    # uses 300 K and remains inside the widened bound.
-    for _fname, _fval, _lo, _hi in [
-        ("sfc-Cd", args.sfc_Cd, 0.0, 1.0),
-        ("sfc-Ch", args.sfc_Ch, 0.0, 1.0),
-        ("sfc-T", args.sfc_T, 50.0, 800.0),
-        ("sfc-q", args.sfc_q, 0.0, 0.1),
-    ]:
+    for _fname, (_attr, _lo, _hi) in _SFC_CLI_RANGES.items():
+        _fval = getattr(args, _attr)
         if not math.isfinite(_fval):
             raise SystemExit(
                 f"error: --{_fname}={_fval} not finite."
