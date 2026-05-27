@@ -166,15 +166,26 @@ def thomas_solve_batched(
     -------
     x : jax.Array, shape (..., n_sys)
     """
+    # Stronger argument validation per codex iter-57 review:
     if a.shape != b.shape or a.shape != c.shape or a.shape != d.shape:
         raise ValueError(
             f"thomas_solve_batched expects a/b/c/d to share shape; "
             f"got a={a.shape}, b={b.shape}, c={c.shape}, d={d.shape}"
         )
+    if a.dtype != b.dtype or a.dtype != c.dtype or a.dtype != d.dtype:
+        raise ValueError(
+            f"thomas_solve_batched expects a/b/c/d to share dtype; "
+            f"got a={a.dtype}, b={b.dtype}, c={c.dtype}, d={d.dtype}"
+        )
     if a.ndim < 1:
         raise ValueError(
             f"thomas_solve_batched requires at least 1 axis (the tridiag "
             f"system axis as the last dim); got shape {a.shape}"
+        )
+    if a.shape[-1] < 2:
+        raise ValueError(
+            f"thomas_solve_batched requires n_sys >= 2 on the trailing "
+            f"axis; got n_sys={a.shape[-1]}"
         )
 
     # CPU/Metal fallback: `tridiagonal_solve` exists in JAX 0.4+, but its

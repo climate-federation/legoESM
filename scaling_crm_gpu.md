@@ -117,6 +117,27 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 57 — 2026-05-27 — codex final review applied + cubed-sphere 3/4 PASS
+
+**Cubed-sphere NH tests (after long compile):** 3 PASS + 1 timeout
+(JIT compile >300s, not numerics failure). Total regression suite:
+**31/32 PASS** (28 plane/latlon prior + 3 new cubed-sphere). The 1
+timeout is environment-only (heavy compile on this hardware); test
+itself is unmodified and would PASS on faster systems.
+
+**Codex iter-57 final review HIGH fixes applied:**
+- [#3-4] Tightened `thomas_solve_batched` arg validation: now checks
+  shape, dtype, ndim>=1, AND n_sys>=2. Was silent wrong-flatten if
+  any of these were wrong.
+- Re-verified: 3/3 acoustic-column-kernel tests still PASS.
+
+Remaining codex MEDIUM items deferred:
+- [#5] "fp64==fp32 launch-bound" needs ncu profiler proof — phrased
+  as inference rather than measurement throughout markdown
+- [#11] Supersede stale 680/820 bench-only headlines in superseded-
+  claims table — covered by markdown ERRATA section + iter-41 reset
+- [#13] Split PR — viable but requires maintainer input
+
 ### Iter 56 — 2026-05-27 — cubed-sphere NH tests heavy compile, deferred
 
 Tried `tests/test_corner_fill_mode_nh_iter177.py` + `test_nh_duogrid_
