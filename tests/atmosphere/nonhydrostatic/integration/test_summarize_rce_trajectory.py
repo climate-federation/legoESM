@@ -739,3 +739,65 @@ def test_collect_trajectory_accepts_string_path(synthetic_run: Path):
     for /`` deep inside the function."""
     rows = summary_mod.collect_trajectory(str(synthetic_run))
     assert [r.day for r in rows] == [0.0, 1.0, 2.0]
+
+
+# iter-120 Codex MEDIUM: sustained-stuck detector tests.
+
+
+def test_sustained_stuck_flags_mid_run_pin():
+    """A trajectory that drifts normally for days 0-4 then bit-pins
+    for days 5-8 (CWV literally identical) must be flagged as
+    sustained-stuck. Models a mass-fixer regression that kicks in
+    mid-run."""
+    spinup = [49.94, 50.5, 51.3, 52.2, 53.6]
+    stuck = [53.6, 53.6, 53.6, 53.6]  # bit-equal post-spinup
+    cwv = spinup + stuck
+    rows = [_row(float(i), cwv_mean=v, cwv_max=v)
+            for i, v in enumerate(cwv)]
+    flagged, reason = summary_mod.detect_sustained_stuck_trajectory(rows)
+    assert flagged is True
+    assert reason is not None
+    assert "AFTER spinup" in reason
+
+
+def test_sustained_stuck_passes_late_equilibrium_oscillation():
+    """Late equilibrium oscillates at ~1e-3 mm (well above the
+    sustained 1e-7 mm tolerance). Must NOT trip."""
+    rows = []
+    for i in range(15):
+        # Sub-day oscillation at 0.01 mm scale — legitimate
+        # convection / radiation balance noise.
+        cwv = 50.0 + 0.01 * ((i * 7) % 5 - 2)  # 49.98..50.02
+        rows.append(_row(float(i), cwv_mean=cwv, cwv_max=cwv))
+    flagged, _ = summary_mod.detect_sustained_stuck_trajectory(rows)
+    assert flagged is False
+
+
+def test_sustained_stuck_undecided_on_short_trajectory():
+    """Need at least 2 * consecutive_days rows to distinguish
+    leading window from sustained tail. Shorter returns
+    (False, None)."""
+    rows = [_row(float(i), cwv_mean=50.0 + 0.1 * i) for i in range(4)]
+    flagged, reason = summary_mod.detect_sustained_stuck_trajectory(rows)
+    assert flagged is False
+    assert reason is None
+
+
+def test_sustained_stuck_constants_locked():
+    """Lock the 1e-7 mm tight tolerance so a future widen surfaces
+    in code review (a 1e-3 mm value would catch real equilibrium
+    oscillations as false positives)."""
+    assert summary_mod.DEFAULT_SUSTAINED_STUCK_CWV_TOL_MM == 1e-7
+
+
+def test_evaluate_quality_wires_sustained_stuck_detector():
+    """evaluate_rce_quality must surface sustained-stuck reasons
+    on the verdict.reasons list."""
+    spinup = [49.94, 50.5, 51.3, 52.2, 53.6]
+    stuck = [53.6, 53.6, 53.6, 53.6]
+    cwv = spinup + stuck
+    rows = [_row(float(i), cwv_mean=v, cwv_max=v)
+            for i, v in enumerate(cwv)]
+    verdict = summary_mod.evaluate_rce_quality(rows)
+    assert not verdict.passed
+    assert any("AFTER spinup" in r for r in verdict.reasons)

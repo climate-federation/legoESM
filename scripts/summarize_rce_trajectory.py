@@ -367,15 +367,21 @@ def evaluate_rce_quality(
         reasons.append(
             f"non-finite |U|_sfc on day(s) {nonfinite_w!r}"
         )
-    # iter-117 / iter-118: stuck-trajectory detector — surfaces
-    # pre-iter-95 Bug 2 regressions (CWV pinned at IC by
-    # unconditional mass fixer). iter-118 opt-out for callers that
-    # only want the plateau gates (e.g. comparing two equilibrated
-    # trajectories where the leading window matters less).
+    # iter-117 / iter-118 / iter-120: stuck-trajectory detectors.
+    # detect_stuck_trajectory: pre-iter-95 Bug 2 (leading window).
+    # detect_sustained_stuck_trajectory: mid-run regression that
+    # would otherwise slip past the leading-window check (Codex
+    # iter-118 MEDIUM). iter-118 opt-out for callers that only want
+    # the plateau gates.
     if check_stuck:
         stuck, stuck_reason = detect_stuck_trajectory(rows)
         if stuck:
             reasons.append(stuck_reason)  # type: ignore[arg-type]
+        sustained, sustained_reason = (
+            detect_sustained_stuck_trajectory(rows)
+        )
+        if sustained:
+            reasons.append(sustained_reason)  # type: ignore[arg-type]
     # Criteria 2 + 4: need at least last_n_days_for_plateau rows.
     evaluated_plateau = len(rows) >= last_n_days_for_plateau
     if evaluated_plateau:
@@ -429,6 +435,16 @@ def evaluate_rce_quality(
 # regression surfaces programmatically.
 DEFAULT_STUCK_CONSECUTIVE_DAYS: int = 3
 DEFAULT_STUCK_CWV_TOL_MM: float = 0.001
+
+# iter-120 Codex MEDIUM: a mass-fixer that REGRESSES mid-run (after
+# initial spinup) would not be caught by the leading-window check.
+# Add a separate "sustained-stuck" detector that uses a TIGHTER
+# tolerance so that legitimate late-equilibrium plateaus (which
+# oscillate at ~1e-3 mm or larger) do not false-positive. Bit-equal
+# CWV across consecutive days can only mean the run is not actually
+# integrating moisture forward — distinct from "oscillating around
+# an equilibrium value."
+DEFAULT_SUSTAINED_STUCK_CWV_TOL_MM: float = 1e-7
 
 
 def detect_stuck_trajectory(
@@ -485,6 +501,61 @@ def detect_stuck_trajectory(
             f"``fix_moist_mass_plane`` is not being applied "
             f"unconditionally."
         )
+    return False, None
+
+
+def detect_sustained_stuck_trajectory(
+    rows: list[DayRow],
+    *,
+    consecutive_days: int = DEFAULT_STUCK_CONSECUTIVE_DAYS,
+    cwv_tol_mm: float = DEFAULT_SUSTAINED_STUCK_CWV_TOL_MM,
+) -> tuple[bool, str | None]:
+    """Detect a mid-run "stuck" regression — CWV bit-equal across
+    a sliding window AFTER some prior dynamic drift.
+
+    iter-120 Codex MEDIUM: pairs with ``detect_stuck_trajectory``
+    (leading-window only) to catch the hypothetical delayed-stuck
+    case where a mass-fixer regression kicks in mid-run, AFTER the
+    initial spinup that ``detect_stuck_trajectory`` would otherwise
+    rule out.
+
+    To avoid false-positives on legitimate late-equilibrium
+    plateaus (which oscillate at ~1e-3 mm or larger from
+    convection / radiation balance), this detector uses a much
+    tighter tolerance (1e-7 mm by default — effectively bit-equal).
+    A real run never sits THAT tightly; only a stuck-rescaling bug
+    can produce bit-equal CWV across multiple snapshots.
+
+    Returns ``(True, reason)`` if any sliding window of
+    ``consecutive_days`` rows has CWV range < ``cwv_tol_mm``,
+    EXCLUDING the leading window (which is already checked by
+    ``detect_stuck_trajectory``). ``(False, None)`` otherwise.
+    """
+    if len(rows) < 2 * consecutive_days:
+        # Too short for a meaningful "post-spinup" sustained check.
+        return False, None
+    finite_rows = [r for r in rows if math.isfinite(r.cwv_mean)]
+    if len(finite_rows) < 2 * consecutive_days:
+        return False, None
+    # Sliding windows starting at index 1 onward (skip the leading
+    # window — that's the other detector's job, with its own looser
+    # tolerance + actionable Bug 2 message).
+    for i in range(1, len(finite_rows) - consecutive_days + 1):
+        window = finite_rows[i:i + consecutive_days]
+        cwvs = [r.cwv_mean for r in window]
+        if max(cwvs) - min(cwvs) <= cwv_tol_mm:
+            return True, (
+                f"CWV bit-equal within {cwv_tol_mm} mm across "
+                f"{consecutive_days} consecutive snapshots "
+                f"AFTER spinup (days {window[0].day:.2f}.."
+                f"{window[-1].day:.2f}, range {min(cwvs):.9f}.."
+                f"{max(cwvs):.9f} mm). Legitimate equilibrium "
+                f"oscillates at ~1e-3 mm or larger; bit-equal "
+                f"across multiple days suggests the moisture loop "
+                f"stopped integrating mid-run — possibly a "
+                f"reintroduced mass-fixer call or a state-update "
+                f"regression."
+            )
     return False, None
 
 
