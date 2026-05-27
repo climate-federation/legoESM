@@ -577,6 +577,52 @@ def test_final_dod_constants_locked():
     assert summary_mod.DOD_FINAL_MIN_DAYS == 30
 
 
+def test_final_dod_passes_with_early_cwv_excursion_outside_plateau_window():
+    """iter-159: evaluate_rce_final_dod's docstring (lines 695-703
+    of summarize_rce_trajectory.py) promises that the plateau CWV
+    check inspects only the LAST ``last_n_days_for_plateau`` rows
+    (default 10). A 30-day trajectory whose CWV is OUTSIDE the
+    Wing 2018 plateau range for days 0-19 but recovers to the
+    plateau over days 20-29 must therefore PASS the final-DOD
+    gate.
+
+    This behaviour was uncovered pre-iter-159 — only the strict-
+    pass case (entire trajectory in range) was exercised. A
+    regression that changed the plateau check to scan all rows
+    (instead of just the trailing window) would silently break
+    real recovery-from-overshoot trajectories like iter-98's
+    day-4 spike to 57.18 mm.
+    """
+    # iter-159: drift the leading rows monotonically to evade the
+    # detect_stuck_trajectory leading-window check (range > 0.001 mm
+    # over the first 3 rows). Hold at 70 mm for the body, then drop
+    # to a 55 mm plateau over the final 10 days.
+    rows = []
+    # Days 0-2: monotonic drift 70.0 -> 69.9 -> 69.8 (range 0.2 mm >
+    # detect_stuck tol so not flagged as Bug 2).
+    for i in range(3):
+        cwv = 70.0 - 0.1 * i
+        rows.append(_row(float(i), cwv_mean=cwv, cwv_max=cwv))
+    # Days 3-19: hold around 70 mm (well above Wing upper bound 65 mm)
+    # with sub-mm oscillation to evade detect_sustained_stuck_trajectory
+    # (which flags bit-equal CWV across 3 consecutive post-spinup days).
+    for i in range(3, 20):
+        cwv = 70.0 + 0.01 * (i % 3 - 1)  # 69.99..70.01
+        rows.append(_row(float(i), cwv_mean=cwv, cwv_max=cwv))
+    # Days 20-29: plateau at 55 mm (inside Wing 45-60 mm band) with
+    # sub-1 % MSE drift.
+    for i in range(20, 30):
+        cwv = 55.0 + 0.02 * (i % 3 - 1)  # 54.98..55.02 oscillation
+        rows.append(_row(float(i), cwv_mean=cwv, cwv_max=cwv))
+    verdict = summary_mod.evaluate_rce_final_dod(rows)
+    assert verdict.passed, (
+        f"final-DOD must pass on a recovery-from-overshoot "
+        f"trajectory: early days outside plateau, last 10 days "
+        f"inside (45, 60). reasons: {verdict.reasons!r}"
+    )
+    assert verdict.evaluated
+
+
 def test_exit_usage_constant():
     """iter-114 Codex LOW#2: EXIT_USAGE=2 (argparse convention) is a
     distinct constant from EXIT_IO_ERROR=1; CLI misuse no longer
