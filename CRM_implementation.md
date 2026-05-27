@@ -149,6 +149,89 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 101 (behavioural wrapper exit-code tests, Codex iter-100 LOW)
+
+**Code change** (commit `d740019f`):
+
+* `tests/atmosphere/nonhydrostatic/integration/test_run_rce_30day_wrapper_defaults.py`
+  (+138 lines, 4 new tests): closes the iter-100 Codex LOW
+  finding that the iter-100 text-regex tests proved the right
+  tokens are present but not that they execute in the right order.
+  New `_run_wrapper_with_stubs` helper actually runs
+  `scripts/run_rce_30day.sh` with stubbed mpirun + stubbed PYBIN
+  under a tmp PATH and asserts the exit-status contract end-to-end
+  for all four branches:
+  - mpirun OK + summarizer OK → exit 0 + ``Wrote ...`` stdout.
+  - mpirun nonzero → wrapper nonzero, summarizer NEVER runs (set -e
+    + pipefail kills the shell before the post-run block).
+  - mpirun OK + summarizer fails + ``ALLOW_SUMMARY_FAILURE=0``
+    (default) → wrapper exits with the summarizer's status (7 in
+    the fixture); ``ERROR`` on stderr.
+  - same + ``ALLOW_SUMMARY_FAILURE=1`` → wrapper exits 0 +
+    ``WARN`` on stderr.
+
+17/17 wrapper tests pass in 0.75 s (1.59 s with the 4 new
+subprocess-driven ones included).
+
+### 2026-05-27 — iter 100 (Codex iter-98/99 review: 4 MEDIUM + 2 LOW)
+
+**Code change** (commit `cc5533d6`, 4 files / +271/-46 lines):
+
+Codex adversarial-review of iter-98 (summarizer) + iter-99 (wrapper
+post-run hook) flagged 6 findings; all addressed in this commit.
+
+`scripts/summarize_rce_trajectory.py`:
+* MEDIUM #3: replace loose ``snap_day_*.npz`` glob with anchored
+  ``^snap_day_(\d{4})\.npz$`` regex — stray
+  ``snap_day_backup.npz`` / ``snap_day_0001.old.npz`` are now
+  rejected.
+* MEDIUM #2: cross-check ``prof["day"]`` vs the matching snapshot
+  day (1-minute tolerance). A renamed / overwritten profile file
+  raises ``ValueError`` instead of silently attaching a wrong-day
+  profile.
+* LOW #5: assert every snapshot day is finite + unique BEFORE
+  sorting; NaN / duplicate days would produce an undefined or
+  non-monotonic trajectory.
+* LOW #6: ``MISSING_SENTINEL = "NA"`` shared by the printed table
+  and the CSV (previously dash vs empty cell — different sentinels
+  for human vs machine readers).
+
+`scripts/run_rce_30day.sh`:
+* MEDIUM #1: capture the summarizer's exit status under
+  ``set +e`` … ``set -e``, propagate non-zero as the wrapper exit
+  unless ``ALLOW_SUMMARY_FAILURE=1`` downgrades it to a stderr
+  warning. Previously a successful mpirun + a failed summarizer
+  silently exited 0.
+
+`tests/atmosphere/nonhydrostatic/integration/test_run_rce_30day_wrapper_defaults.py`:
+* MEDIUM #4: strip bash comments before regex-matching + anchor
+  the summarizer call to ``^\s*"$PYBIN"`` so a comment-only
+  mention cannot satisfy the contract.
+* New ``test_wrapper_summarizer_failure_propagates``: locks the
+  four bash pieces (``ALLOW_SUMMARY_FAILURE`` default, ``set +e``
+  gate, ``summary_status=$?`` capture, ``exit "$summary_status"``).
+
+14/14 summarizer tests pass; 13/13 wrapper tests pass.
+
+### 2026-05-27 — iter 99 (30-day wrapper auto-invokes summarizer)
+
+**Code change** (commit `8b2d36ab`):
+
+`scripts/run_rce_30day.sh`:
+* Drop ``exec`` from the mpirun line so the post-run summarizer
+  step actually runs (``exec`` replaces the shell process and
+  skips every later command).
+* Append the summarizer invocation reading ``$OUTPUT`` and
+  writing ``$OUTPUT/trajectory.txt`` + ``$OUTPUT/trajectory.csv``.
+
+`tests/atmosphere/nonhydrostatic/integration/test_run_rce_30day_wrapper_defaults.py`:
+* New ``test_wrapper_invokes_post_run_summarizer``: asserts no
+  ``exec mpirun`` at line start AND the summarizer call exists
+  AFTER the mpirun line, anchored against the comment-stripped
+  view (iter-100 hardening).
+
+12/12 wrapper tests pass in 0.04 s.
+
 ### 2026-05-27 — iter 98 (per-day RCE trajectory summarizer landed)
 
 **Code change** (commit `93fd0ba8`):
