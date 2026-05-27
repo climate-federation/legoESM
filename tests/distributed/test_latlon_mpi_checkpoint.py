@@ -355,7 +355,11 @@ def test_gather_assertion_fires_on_v_face_row_mismatch(comm, layout):
     # divergence at the rank-0/rank-1 interface.
     base_state = _make_mock_state_for_rank(layout)
     if layout.rank > 0:
-        v = np.asarray(base_state.v.data)
+        # ``np.asarray(jax_array)`` returns a READ-ONLY view of the
+        # device buffer; mutating in place raises
+        # ``ValueError: assignment destination is read-only``.  Take an
+        # explicit writable copy before perturbing.
+        v = np.array(base_state.v.data, copy=True)
         v[0] = v[0] + 1.0  # deliberate perturbation
         base_state = base_state._replace(v=_MockField(jnp.asarray(v)))
 
