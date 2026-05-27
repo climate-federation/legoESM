@@ -598,6 +598,37 @@ def test_final_dod_constants_locked():
     assert summary_mod.DOD_FINAL_MIN_DAYS == 30
 
 
+def test_final_dod_fails_on_runaway_evaporation_in_plateau_window():
+    """iter-162 companion: the runaway-evaporation max-gate
+    (iter-104 Codex MEDIUM#1) must fire for final-DOD too when
+    the climb happens INSIDE the plateau window. A 30-day
+    trajectory with days 0-19 stable at 50 mm then climbing
+    monotonically 50 → 80 mm over days 20-29 has plateau mean
+    around 65 mm (still inside (35, 65)) but plateau max =
+    80 mm (above upper bound).
+
+    Pre iter-162 only the spinup-gate variant
+    (test_evaluate_flags_runaway_evaporation_via_max) was
+    tested; the final-DOD wrapper was uncovered.
+    """
+    rows = []
+    # Days 0-19: stable 50 mm with sub-mm oscillation (avoids
+    # detect_sustained_stuck false-positive).
+    for i in range(20):
+        cwv = 50.0 + 0.01 * (i % 3 - 1)
+        rows.append(_row(float(i), cwv_mean=cwv, cwv_max=cwv))
+    # Days 20-29: monotonic runaway 50 -> 80 mm.
+    for i in range(20, 30):
+        cwv = 50.0 + (i - 20) * (30.0 / 9.0)
+        rows.append(_row(float(i), cwv_mean=cwv, cwv_max=cwv))
+    verdict = summary_mod.evaluate_rce_final_dod(rows)
+    assert not verdict.passed, (
+        f"final-DOD must FAIL on a runaway evaporation inside the "
+        f"plateau window; reasons: {verdict.reasons!r}"
+    )
+    assert any("runaway evaporation" in r for r in verdict.reasons)
+
+
 def test_final_dod_fails_on_transient_nan_cwv_outside_plateau_window():
     """iter-161 companion: criterion 1 (finite CWV everywhere) is
     full-window scoped. A 30-day trajectory whose last 10 days are
