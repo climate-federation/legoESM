@@ -105,9 +105,6 @@ def test_run_rcemip_long_cross_grid_moist_smoke(tmp_path, grid):
     # ignoring any nonzero exit. Dropped the redundant dry pre-run;
     # the dry path is already covered by the parametrise above.
     out_file_moist = tmp_path / f"rcemip_{grid}_moist_v2.json"
-    from tests.atmosphere.nonhydrostatic.integration._bench_smoke_helpers import (
-        run_bench,
-    )
     result = run_bench(DRIVER, [
         "--grid", grid,
         "--days", "0.001",
@@ -157,15 +154,23 @@ def test_run_rcemip_long_cross_grid_moist_smoke(tmp_path, grid):
     # bound. IC max q_v = Q_V_SFC * exp(-z/4000) at z=1 km
     # ~ 0.012 * 0.78 ~ 9.35e-3. The iter-275 bound 0.05 was 5x
     # over IC — would silently miss a 4x moisture inflation.
-    # Tightened to (-1e-10, 0.015) = IC + 60% margin (catches
-    # any meaningful inflation while tolerating advective
-    # transport across 8 sim-steps).
-    assert 0.0 <= last["max_qv"] < 0.015, (
-        f"max_qv={last['max_qv']} outside (0, 0.015) — IC max "
-        f"~9.35e-3 at z=1 km; >0.015 means moisture inflation "
-        f"regression."
+    # Tightened to (-1e-10, 0.015) = IC + 60% margin.
+    # iter-277 (Codex iter-276 round-2 MEDIUM-1): scan ALL history
+    # rows, not just the last. A transient q_v spike at step 3
+    # that recovers by step 8 would slip through a last-row-only
+    # check.
+    qv_max_over_run = max(float(r["max_qv"]) for r in history_rows)
+    qv_min_over_run = min(float(r["min_qv"]) for r in history_rows)
+    assert 0.0 <= qv_max_over_run < 0.015, (
+        f"max_qv over the run = {qv_max_over_run} outside "
+        f"(0, 0.015) — IC max ~9.35e-3 at z=1 km; >0.015 means "
+        f"moisture inflation regression (transient or final)."
     )
-    assert last["min_qv"] >= -1e-10
+    assert qv_min_over_run >= -1e-10, (
+        f"min_qv over the run = {qv_min_over_run} below -1e-10 "
+        f"floor — negative-bias regression in moist tracer "
+        f"positivity filter."
+    )
 
 
 @pytest.mark.parametrize("grid", [
