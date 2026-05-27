@@ -203,6 +203,48 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 212..216 (in-flight precip observation + iter-105 reanalysis)
+
+5 monitoring-loop iterations during the iter-183 production run.
+Continues the post-iter-190 polish pattern with substantive
+findings:
+
+* iter-212: in-flight iter-183 30-day run reached day 15.62 sim
+  with qc crossing the Kessler autoconv threshold (1.0e-3) and
+  first non-zero surface precip recorded (5.25e-6 mm/day → peak
+  7.7e-4 mm/day within 200 steps at sedimentation timescale).
+  Documented the qc/qr/precip cycle in the F11 partial-precip
+  note. iter-212 also added the iter-190..211 fold block to the
+  iteration log.
+* iter-213: refuted the prior "theta' is safer than qv noise"
+  claim with a no-radiation smoke at theta_noise=0.01 K +
+  smooth_k1: NaN at step 20. theta' noise destabilises via
+  direct buoyancy injection, not radiation feedback. F11 has TWO
+  independent dx=4 km failure pathways.
+* iter-214: iter-183 partial-precip observation documented.
+* iter-215: cycle refinement (~3 sim-day rebuild, ~1 sim-day
+  precip window, avg ~5e-5 mm/day at production scale).
+* iter-216: re-examined iter-105 and discovered iter-105 ALSO
+  had precip events (peak 2.15e-3 mm/day at day 16.72). The
+  iter-213/214 claim that iter-105 NEVER produced precip was
+  WRONG — sigmoid-soft Kessler autoconv (sharpness=10) fires
+  below the 1e-3 hard threshold. Both iter-105 and iter-183
+  produce real surface precip; the relative diffusion claim
+  (iter-183 lower diffusion → qc reaches 1e-3, iter-105 plateaus
+  at 9.78e-4) is quantitatively true but doesn't change the
+  qualitative precip story.
+
+Net iter-183 chain wins:
+* 3x wall-time speedup over iter-105 baseline (measured iter-183
+  smoke).
+* Stable 30-day plane CRM at production scale (verified through
+  60% in flight).
+* First non-zero surface precip in any documented 30-day plane
+  CRM run (iter-105 had it too but went undocumented until
+  iter-216 re-examination).
+* F11 dx=4 km wall remains structural; column-symmetric trap ×
+  Kessler under-resolution still ~6 OOM below Wing 2018 target.
+
 ### 2026-05-27 — iter 190..211 (post-iter-190 polish + iter-203 smooth_k1 + Codex round-2 fixes)
 
 22 iterations during the iter-183 30-day production run. Three
