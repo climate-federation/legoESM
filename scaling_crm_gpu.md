@@ -117,6 +117,32 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 45 — 2026-05-27 — multi-GPU SPMD path explored (jax.shard_map)
+
+Tested JAX virtual-device SPMD infrastructure (`XLA_FLAGS=--xla_force_host_platform_device_count=4` + `JAX_PLATFORMS=cpu` → 4 virtual CPU devices). `jax.shard_map` + `Mesh` available and discoverable.
+
+**Status: infrastructure ready, model not sharded.** Implementing
+sharded `model.step` requires:
+1. Halo-exchange via `jax.lax.permute` or `jax.lax.psum` collective
+   primitives (replace mpi4jax sendrecv in `step_halo`)
+2. Sharded `PlaneNonHydrostaticState` PyTree with `PartitionSpec(("y",))`
+3. Verify acoustic-substep tridiagonal solver works under shard_map
+   (column-local — should be no-op shard)
+4. Mass-fixer collective `psum` swap
+
+**Scope:** ~200-400 LOC of new sharded-dycore code + halo refactor.
+Beyond "minimum code production" but smaller than the cuSPARSE swap
+(50 LOC) that gave 2.4× win. Not undertaken in this PR.
+
+Existing MPI path (`bench_plane_crm_dd_scaling.py`) already validates
+domain-decomp scaling for plane CRM — multi-GPU MPI runs would
+demonstrate near-linear scaling on a real cluster. mpi4py blocked at
+install in current env, so cannot run side-by-side here.
+
+⇒ **Bottleneck #7 (multi-GPU) is infrastructure-ready but unsolved
+in this PR.** Cleanest extension: future PR adds sharded `step_spmd`
+method to `PlaneCompressibleEulerModel`.
+
 ### Iter 44 — 2026-05-27 — fp64 production identical to fp32 (launch-bound confirmed)
 
 Re-bench production SI+phys+cuSPARSE at fp64:
