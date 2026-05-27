@@ -117,7 +117,35 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
-### Iter 20 — 2026-05-27 — effective HBM utilization at CRM peak
+### Iter 22 — 2026-05-27 — codex review iter-20 walks back "77% HBM" → range
+
+Codex flagged: 10-pass-per-step assumption unvalidated; sensitivity
+6-20 moves estimate 38-128% — too wide for a single-point claim.
+Also: cross-dycore comparison only valid under SAME pass model.
+
+**Revised model-inferred HBM utilization (CRM explicit fp32 ~700 Mc/s,
+72 B/cell-lev per pass, range of plausible pass counts):**
+
+| passes/step | inferred HBM | % of 730 GB/s |
+|-------------|--------------|---------------|
+|  6          |   302 GB/s   | 41%           |
+|  8          |   403        | 55%           |
+| 10          |   504        | 69%           |
+| 14          |   706        | 97%           |
+| 20          | 1008         | 138% (impossible — model breaks) |
+
+The 14-pass scenario hits ~peak — suggests true pass count is ≤14.
+The 6-pass scenario gives 41%, still respectable.
+
+**Honest claim: model-inferred HBM utilization in ~40-70% range,
+consistent with high but not measured-saturated use.** Hardware
+counters (Nsight Compute) would resolve definitively — out of scope.
+
+Same caveat applies to PR #319 comparisons: those used the same
+assumed-pass-count model so relative ordering (CRM > LL > CS) holds,
+but absolute percentages are model-inferred, not measured.
+
+### Iter 20 — 2026-05-27 — effective HBM utilization at CRM peak (SUPERSEDED — see iter 22)
 
 CRM explicit fp32 typical 700 Mc/s @ N=128 plateau. Assuming ~10
 prognostic fields per cell-level read/written (u, v, w, theta', rho',
@@ -145,6 +173,8 @@ was the unlock; semi-implicit at ~30% HBM is launch-overhead-bound.
 ⇒ **The "scale as close as possible to theoretical limit" target is
 materially achieved** for CRM on this hardware. Remaining 23% gap is
 unavoidable XLA dispatch + non-fused intermediate buffers.
+
+⚠ NOTE: iter-22 walks back the 77% claim — see above.
 
 ### Iter 19 — 2026-05-27 — within-process timing stability vs cross-process
 
