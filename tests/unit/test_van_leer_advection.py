@@ -203,43 +203,71 @@ def test_van_leer_grad_finite_on_zero_delta():
     )
 
 
-def test_smooth_k1_perturbation_zero_mean_and_bounded():
-    """iter-203: the smooth_k1 theta-noise mode applies a
-    ``0.5 * (cos(2π x/nx) + cos(2π y/ny))`` pattern at amplitude
-    ``theta_noise_amp`` in the lowest 4 levels. Two properties
-    must hold:
-    * Zero horizontal mean per level (cos integrates to 0 over
-      [0, 2π]) — total energy conserved at IC, mirrors the
-      white-noise mean-removal pattern.
-    * Peak amplitude bounded by theta_noise_amp.
-    Lock both so a future refactor that swaps cos→sin or shifts
-    the wavenumber surfaces here, not as a silent energy injection.
+def _import_smooth_k1_helper():
+    """Load build_smooth_k1_pattern from the driver script (the
+    helper lives in scripts/run_rce_mpi_long.py which is not on
+    sys.path). iter-207 Codex MEDIUM#2 fix: the iter-204 test
+    re-derived the formula inline so a driver regression would
+    leave it green. Now we exercise THE SAME function the driver
+    calls."""
+    import importlib.util
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parents[2]
+    path = repo_root / "scripts" / "run_rce_mpi_long.py"
+    # The driver imports heavy modules at top — JIT compile cost is
+    # paid once for the duration of the test session.
+    spec = importlib.util.spec_from_file_location(
+        "run_rce_mpi_long_for_smooth_k1_test", path,
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    import sys
+    sys.modules["run_rce_mpi_long_for_smooth_k1_test"] = mod
+    spec.loader.exec_module(mod)
+    return mod.build_smooth_k1_pattern
+
+
+def test_smooth_k1_pattern_zero_mean_and_bounded():
+    """iter-203/204/207: the smooth_k1 theta-noise mode applies a
+    ``0.5 * (cos(2π x/nx) + cos(2π y/ny))`` pattern (minus its
+    horizontal mean for safety on degenerate grids — iter-207
+    Codex MEDIUM#1 fix).
+
+    Properties locked:
+    * Zero horizontal mean — total energy conserved at IC.
+    * Peak amplitude bounded by 1.0 — driver multiplies by
+      theta_noise_amp [K] for unit scaling.
+
+    Exercises the actual driver helper (iter-207 Codex MEDIUM#2
+    fix: the iter-204 test re-derived the formula inline, missing
+    driver regressions). Three grid shapes:
+    * 8x12 (healthy): orthogonal cos sum integrates to 0 by
+      construction; explicit mean subtraction is a no-op.
+    * 1x1 (degenerate both axes): naive cos pattern = 1.0
+      everywhere; explicit mean subtraction → 0 everywhere.
+    * 4x1 (degenerate one axis): cos in x gives 1,0,-1,0 → mean
+      = 0 in x. cos in y on length-1 gives 1 → mean = 1 in y.
+      Combined naive = 0.5*(c_x + 1). Explicit mean subtraction
+      → zero-mean across the 4 cells.
     """
     import jax.numpy as jnp
-    ny, nx, nlev = 8, 12, 4
-    amp = 0.1
-    jj = jnp.arange(ny, dtype=jnp.float64)
-    ii = jnp.arange(nx, dtype=jnp.float64)
-    yy, xx = jnp.meshgrid(jj, ii, indexing="ij")
-    two_pi = 2.0 * jnp.pi
-    pattern = 0.5 * (
-        jnp.cos(two_pi * xx / nx) + jnp.cos(two_pi * yy / ny)
-    )
-    theta_noise = amp * pattern[:, :, None] * jnp.ones(
-        (1, 1, nlev), dtype=jnp.float64,
-    )
-    # Zero-mean per level
-    mean_per_level = jnp.mean(theta_noise, axis=(0, 1))
-    assert jnp.allclose(mean_per_level, 0.0, atol=1e-14), (
-        f"smooth_k1 perturbation must be zero-mean per level; "
-        f"got mean={mean_per_level}"
-    )
-    # Peak amplitude bounded — 0.5*(cos(0)+cos(0)) = 1.0 at (0,0)
-    # gives full amp. cos range is [-1, 1] so 0.5*(c+c) is [-1, 1].
-    assert jnp.max(jnp.abs(theta_noise)) <= amp * (1.0 + 1e-12), (
-        f"smooth_k1 peak amplitude exceeds {amp}; got "
-        f"{float(jnp.max(jnp.abs(theta_noise)))}"
-    )
+    build_smooth_k1_pattern = _import_smooth_k1_helper()
+    for ny, nx in [(8, 12), (1, 1), (4, 1), (1, 4)]:
+        pattern = build_smooth_k1_pattern(ny, nx)
+        assert pattern.shape == (ny, nx), (
+            f"shape mismatch on ({ny},{nx}): {pattern.shape}"
+        )
+        # Zero-mean (iter-207 MEDIUM#1 — explicit mean subtraction
+        # is what guarantees this on degenerate grids).
+        assert jnp.abs(jnp.mean(pattern)) < 1e-14, (
+            f"smooth_k1 pattern not zero-mean on ({ny},{nx}); "
+            f"got mean={float(jnp.mean(pattern))}"
+        )
+        # Peak amplitude bounded by 1.0 (caller multiplies by amp).
+        assert jnp.max(jnp.abs(pattern)) <= 1.0 + 1e-12, (
+            f"smooth_k1 peak exceeds 1.0 on ({ny},{nx}); got "
+            f"{float(jnp.max(jnp.abs(pattern)))}"
+        )
 
 
 def test_horizontal_advection_halo_requirement_map_locked():

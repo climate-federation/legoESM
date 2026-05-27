@@ -116,6 +116,33 @@ GAMMA_TROP = 6.7e-3
 Z_T = 15_000.0
 SEC_PER_DAY = 86400.0
 
+
+def build_smooth_k1_pattern(ny: int, nx: int) -> jnp.ndarray:
+    """Build the iter-203 smooth_k1 theta'-noise pattern.
+
+    Returns a ``(ny, nx)`` array of ``0.5 * (cos(2π x/nx) + cos(2π y/ny))``
+    with the horizontal mean explicitly subtracted to GUARANTEE zero
+    mean on degenerate grids (nx=1 → cos=1 everywhere, mean=1, not
+    zero-mean per the F11 fix-path-3 contract; iter-207 Codex MEDIUM
+    #1 fix).
+
+    Peak amplitude is 1.0 on healthy grids (nx, ny >= 2); the driver
+    multiplies by theta_noise_amp [K] to scale.
+
+    Extracted as a module-level helper so the iter-204 unit test
+    exercises THIS function directly (iter-207 Codex MEDIUM #2 fix
+    — the prior test re-derived the formula inline so a future
+    driver regression would have passed the test).
+    """
+    jj = jnp.arange(ny, dtype=jnp.float64)
+    ii = jnp.arange(nx, dtype=jnp.float64)
+    yy, xx = jnp.meshgrid(jj, ii, indexing="ij")
+    two_pi = 2.0 * jnp.pi
+    pattern = 0.5 * (
+        jnp.cos(two_pi * xx / nx) + jnp.cos(two_pi * yy / ny)
+    )
+    return pattern - jnp.mean(pattern)
+
 # Radiation call-frequency convention (literature):
 # - SAM (Khairoutdinov-Randall): 600 s
 # - CM1 (Bryan-Fritsch): 60-120 s
@@ -253,7 +280,12 @@ def parse_args():
                         "See CRM_implementation.md F11.")
     p.add_argument("--theta-noise-seed", type=int, default=0,
                    help="RNG seed for theta' noise perturbation. Same "
-                        "seed → bit-identical IC across reruns.")
+                        "seed → bit-identical IC across reruns. "
+                        "iter-207 Codex LOW: only consumed by "
+                        "--theta-noise-mode=white. The smooth_k1 mode "
+                        "is deterministic (cos pattern depends only "
+                        "on grid dims) so this seed is silently "
+                        "ignored when mode=smooth_k1.")
     p.add_argument("--theta-noise-mode",
                    choices=["white", "smooth_k1"], default="white",
                    help="theta' perturbation pattern (iter-203). "
@@ -454,19 +486,13 @@ def build_height_coord_and_state(args, grid):
                 theta_noise, axis=(0, 1), keepdims=True,
             )
         elif mode == "smooth_k1":
-            # Lowest non-trivial wavenumber on the periodic plane:
-            # one full cosine wave across the domain in x AND y.
-            # Result is automatically zero-mean (cos integrates to
-            # 0 over [0, 2pi]) and smooth — no sub-cell variation.
-            jj = jnp.arange(grid.ny, dtype=jnp.float64)
-            ii = jnp.arange(grid.nx, dtype=jnp.float64)
-            yy, xx = jnp.meshgrid(jj, ii, indexing="ij")
-            two_pi = 2.0 * jnp.pi
-            # 0.5 * (cos(kx)+cos(ky)) has range [-1, 1] in 2D.
-            pattern = 0.5 * (
-                jnp.cos(two_pi * xx / grid.nx)
-                + jnp.cos(two_pi * yy / grid.ny)
-            )
+            # iter-207: defer to the module-level
+            # build_smooth_k1_pattern helper so unit tests exercise
+            # the same code path the driver uses. The helper also
+            # subtracts the horizontal mean explicitly so degenerate
+            # grids (nx=1 or ny=1) don't violate the zero-mean
+            # contract.
+            pattern = build_smooth_k1_pattern(grid.ny, grid.nx)
             theta_noise = theta_noise_amp * pattern[:, :, None] * jnp.ones(
                 (1, 1, n_seed_lev), dtype=jnp.float64,
             )
