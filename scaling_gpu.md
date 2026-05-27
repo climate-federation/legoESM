@@ -411,6 +411,32 @@ The single-GPU theoretical limit has been reached for the structured-grid config
 - Algorithm change (replace spectral with spectral-element or GPU-native SHTns)
 - Mesh-level optimization (Hilbert reordering for MPAS) — invasive
 
+### Iter 20 — 2026-05-27 — atm icosahedral I7 — completes 4-grid plateau matrix
+
+| res | total cells | fp32 ms/Mc/s     | fp64 ms/Mc/s     |
+|-----|-------------|------------------|------------------|
+| I4  |    66,612   | 0.19 / 349       | 0.59 / 112       |
+| I5  |   266,292   | 0.62 / **428**   | 2.07 / **128**   |
+| I6  | 1,065,012   | 3.88 / 276       | 10.55 / 101      |
+| I7  | 4,259,892   | 22.43 / 190      | 50.98 / 84       |
+
+Atm icosahedral peaks at I5 (266k cells × 26 lev = 6.9M cell-lev),
+falls 56% by I7 (4.3M cells, same L2-overflow story).
+
+**Full 4-grid plateau matrix (peak Mcells/s at fp32):**
+
+| grid          | peak res  | peak fp32 Mc/s | falls at  |
+|---------------|-----------|----------------|-----------|
+| atm CS        | C48       | 299            | C144+     |
+| atm icosahedral| I5       | 428            | I6+       |
+| atm spectral  | T42       |  26 (fp64 only)| T85+ (N³) |
+| ocean LL impcn| LL192     | **546**        | LL256+    |
+| ocean MPAS impcn| I6      | 326            | I7+       |
+
+All structured grids saturate at the L2-cache-fit point of state.
+Spectral PE remains the only architectural outlier (O(N³) Legendre
+transforms — needs SHTns/sphericart GPU port, out of scope).
+
 ### Iter 19 — 2026-05-27 — MPAS ocean I7 confirms same plateau-then-fall pattern
 
 | res | total cells | fp32 ms/Mc/s   | fp64 ms/Mc/s   |
