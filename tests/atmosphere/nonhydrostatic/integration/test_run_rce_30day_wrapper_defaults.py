@@ -777,7 +777,10 @@ def test_wrapper_no_hint_when_evaluate_dod_set(tmp_path):
 def test_wrapper_emit_trajectory_png_default_off(wrapper_text):
     """iter-125: EMIT_TRAJECTORY_PNG defaults to 0 (PNG step skipped)
     so the wrapper stays minimal-dependency. Locks the bash env
-    default + the conditional gate around the plot call."""
+    default + the conditional gate around the plot call.
+
+    iter-126: gate widened to ``= "1" || = "strict"`` so the
+    propagate-on-fail mode also runs the plot call."""
     code = _strip_bash_comments(wrapper_text)
     # Default env value 0.
     assert re.search(
@@ -788,13 +791,19 @@ def test_wrapper_emit_trajectory_png_default_off(wrapper_text):
         "the PNG step would default to ON, adding a matplotlib "
         "dependency for runs that don't need the visual."
     )
-    # Conditional gate around the plot call.
+    # Conditional gate around the plot call — must accept BOTH
+    # ``1`` (best-effort) and ``strict`` (propagate-on-fail).
     assert re.search(
-        r'if\s*\[\s*"\$EMIT_TRAJECTORY_PNG"\s*=\s*"1"\s*\]\s*;\s*then',
+        r'if\s*\[\s*"\$EMIT_TRAJECTORY_PNG"\s*=\s*"1"\s*\]'
+        r'\s*\|\|\s*'
+        r'\[\s*"\$EMIT_TRAJECTORY_PNG"\s*=\s*"strict"\s*\]'
+        r'\s*;\s*then',
         code,
     ), (
-        "run_rce_30day.sh missing EMIT_TRAJECTORY_PNG=1 gate; the "
-        "PNG render step would run unconditionally."
+        "run_rce_30day.sh missing EMIT_TRAJECTORY_PNG gate accepting "
+        "BOTH ``1`` (best-effort) and ``strict`` (propagate-on-fail). "
+        "Without the disjunction, EMIT_TRAJECTORY_PNG=strict would "
+        "be a silent no-op (iter-126 Codex MEDIUM#2 regression risk)."
     )
 
 
@@ -812,27 +821,144 @@ def test_wrapper_emit_trajectory_png_invokes_plot_rce_log(wrapper_text):
     )
 
 
-def test_wrapper_emit_trajectory_png_best_effort(wrapper_text):
-    """iter-125: PNG render failure must NOT change the wrapper exit
-    status. Lock the WARN-on-fail behaviour vs the summarizer's
-    propagate-on-fail behaviour."""
+def test_wrapper_emit_trajectory_png_best_effort_and_strict(wrapper_text):
+    """iter-125 + iter-126: PNG render block has two failure modes:
+
+    * ``=1`` best-effort — WARN on fail, no exit-code change.
+    * ``=strict`` — ERROR + ``exit "$plot_status"`` to propagate.
+
+    Lock BOTH branches so a future refactor that drops either gets
+    caught."""
     code = _strip_bash_comments(wrapper_text)
-    # The plot block uses set +e ... set -e and reports WARN on fail
-    # without exit "$status".
-    # Find the plot_status check.
     assert re.search(r'plot_status\s*=\s*\$\?', code), (
         "run_rce_30day.sh missing plot_status capture."
     )
-    # WARN message on failure path; no ``exit "$plot_status"`` for the
-    # best-effort branch.
-    plot_block = re.search(
-        r'EMIT_TRAJECTORY_PNG[\s\S]*?fi',
+    # The plot block uses set +e / set -e then branches on
+    # ``elif [ "$EMIT_TRAJECTORY_PNG" = "strict" ]; then exit "$plot_status"``.
+    assert re.search(
+        r'elif\s*\[\s*"\$EMIT_TRAJECTORY_PNG"\s*=\s*"strict"\s*\]'
+        r'[\s\S]{0,200}?exit\s+"\$plot_status"',
         code,
+    ), (
+        "iter-126 MEDIUM#2: EMIT_TRAJECTORY_PNG=strict must "
+        "propagate the plot exit code via ``exit \"$plot_status\"``."
     )
-    assert plot_block is not None
-    block_text = plot_block.group(0)
-    assert "WARN" in block_text
-    assert 'exit "$plot_status"' not in block_text, (
-        "PNG render is best-effort; failure must NOT propagate as "
-        "wrapper exit status."
+    # And the best-effort (=1, fall-through) branch must still WARN.
+    assert "WARN: plot_rce_log.py failed" in code, (
+        "Best-effort branch missing the WARN on-fail message."
     )
+
+
+def _run_wrapper_quick(tmp_path, *, days, evaluate_dod):
+    """Shared helper for iter-126 hint edge-case tests."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _make_stub(bin_dir / "mpirun", exit_code=0)
+    pybin = bin_dir / "fake_pybin"
+    _make_stub(pybin, exit_code=0)
+    out_dir = tmp_path / "wrapper_out"
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["PYBIN"] = str(pybin)
+    env["DAYS"] = days
+    env["NX"] = "4"
+    env["NY"] = "4"
+    env["RANKS"] = "1"
+    env["NO_MASS_FIXER"] = "1"
+    env["ALLOW_SUMMARY_FAILURE"] = "0"
+    env["EVALUATE_DOD"] = evaluate_dod
+    return subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+         str(out_dir)],
+        env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
+        check=False, timeout=30,
+    )
+
+
+def test_wrapper_hint_fires_on_30day_spinup_gate(tmp_path):
+    """iter-126 Codex MEDIUM#1 fix: EVALUATE_DOD=1 (spinup 5 % gate)
+    on a 30-day run is NOT the production 1 % gate. The hint must
+    fire so the user knows to also run --final-dod."""
+    res = _run_wrapper_quick(tmp_path, days="30", evaluate_dod="1")
+    assert res.returncode == 0
+    assert "Hint: this is a >=30-day" in res.stdout, (
+        f"EVALUATE_DOD=1 on a 30-day run should still trigger the "
+        f"final-DOD hint (spinup gate != production gate); "
+        f"stdout={res.stdout!r}"
+    )
+
+
+def test_wrapper_hint_does_not_fire_on_decimal_days_below_30(tmp_path):
+    """iter-126 LOW#1: DAYS=29.99 (floors to 29) must NOT trigger
+    the hint."""
+    res = _run_wrapper_quick(tmp_path, days="29.99", evaluate_dod="0")
+    assert res.returncode == 0
+    assert "Hint: this is a >=30-day" not in res.stdout
+
+
+def test_wrapper_hint_fires_on_30dot5_days(tmp_path):
+    """iter-126 LOW#1: DAYS=30.5 (floors to 30) MUST trigger the
+    hint."""
+    res = _run_wrapper_quick(tmp_path, days="30.5", evaluate_dod="0")
+    assert res.returncode == 0
+    assert "Hint: this is a >=30-day" in res.stdout
+
+
+def test_wrapper_hint_skipped_on_non_numeric_days(tmp_path):
+    """iter-126 LOW#1: malformed DAYS value (non-numeric) must NOT
+    crash the wrapper; the hint silently skips via 2>/dev/null on
+    the bash arithmetic. mpirun would already have rejected
+    --days "abc" upstream, so this is purely defensive."""
+    res = _run_wrapper_quick(tmp_path, days="abc", evaluate_dod="0")
+    # The stub mpirun ignores its argv so we won't actually crash on
+    # the upstream rejection. The hint should just not fire.
+    assert res.returncode == 0
+    assert "Hint: this is a >=30-day" not in res.stdout
+
+
+def test_wrapper_emit_trajectory_png_strict_propagates(tmp_path):
+    """iter-126 Codex MEDIUM#2 fix: EMIT_TRAJECTORY_PNG=strict
+    propagates a PNG-render failure as the wrapper's exit code,
+    distinct from the default best-effort ``=1`` mode."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _make_stub(bin_dir / "mpirun", exit_code=0)
+    # PYBIN stub: succeed on the summarizer call (first .py argv),
+    # FAIL with exit 42 on the plot call. Use a simple counter
+    # approach: the stub script counts invocations via a sibling
+    # file.
+    pybin = bin_dir / "fake_pybin"
+    pybin.write_text(
+        "#!/usr/bin/env bash\n"
+        f"count_file={tmp_path}/pybin_count\n"
+        'if [ ! -f "$count_file" ]; then echo 0 > "$count_file"; fi\n'
+        'count=$(cat "$count_file")\n'
+        'next=$((count + 1))\n'
+        'echo "$next" > "$count_file"\n'
+        'echo "STUB:fake_pybin:$@"\n'
+        'if [ "$count" -eq 0 ]; then exit 0; else exit 42; fi\n'
+    )
+    pybin.chmod(0o755)
+    out_dir = tmp_path / "wrapper_out"
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["PYBIN"] = str(pybin)
+    env["DAYS"] = "0"
+    env["NX"] = "4"
+    env["NY"] = "4"
+    env["RANKS"] = "1"
+    env["NO_MASS_FIXER"] = "1"
+    env["ALLOW_SUMMARY_FAILURE"] = "0"
+    env["EVALUATE_DOD"] = "0"
+    env["EMIT_TRAJECTORY_PNG"] = "strict"
+    res = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+         str(out_dir)],
+        env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
+        check=False, timeout=30,
+    )
+    assert res.returncode == 42, (
+        f"EMIT_TRAJECTORY_PNG=strict should propagate exit 42; "
+        f"got {res.returncode}; stderr={res.stderr!r}"
+    )
+    assert "ERROR: plot_rce_log.py failed" in res.stderr

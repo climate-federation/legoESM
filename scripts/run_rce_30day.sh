@@ -55,13 +55,14 @@
 #                propagates the failure as the wrapper's exit code.
 #                Set to 1 only for runs aborted before any snapshot
 #                landed (where the FileNotFoundError is expected).
-#   EMIT_TRAJECTORY_PNG  1 = run scripts/plot_rce_log.py at the end
-#                to render <OUTPUT>/trajectory.png (per-100-step time
-#                series of CWV, MSE, max|w|, qc/qr_max, precip).
-#                Default 0 keeps the wrapper minimal-dependency
-#                (matplotlib + Agg is needed for the PNG step).
-#                Best-effort: a PNG failure does NOT change the
-#                wrapper exit status.
+#   EMIT_TRAJECTORY_PNG  Trajectory PNG rendering mode:
+#                0      (default) — skip the PNG step.
+#                1      — best-effort. Render via scripts/plot_rce_log.py;
+#                         WARN on failure but DO NOT change wrapper exit.
+#                strict — render + propagate failure as the wrapper's
+#                         exit code. Use in CI gates that REQUIRE the
+#                         PNG artefact.
+#                matplotlib + Agg is needed for the PNG step.
 #   PYBIN        python interpreter (default .venv/bin/python)
 
 set -euo pipefail
@@ -197,15 +198,25 @@ else
     exit "$summary_status"
 fi
 
-# iter-124: if the user ran a >=30-day production run without
-# EVALUATE_DOD=final, the wrapper landed trajectory.csv but did NOT
-# grade it against the production DOD criterion 2 (1 % MSE drift,
-# Wing 2018 plateau range). Print a hint so the manual follow-up
-# is obvious. The check uses bash arithmetic on DAYS; non-integer
-# DAYS values (rare) just fall through with no hint.
-if [ "$EVALUATE_DOD" = "0" ] && [ "${DAYS%.*}" -ge 30 ] 2>/dev/null; then
+# iter-124 / iter-126: if the user ran a >=30-day production run
+# without EVALUATE_DOD=final, the wrapper landed trajectory.csv but
+# did NOT grade it against the production DOD criterion 2 (1 % MSE
+# drift, Wing 2018 plateau range). Print a hint so the manual
+# follow-up is obvious.
+#
+# iter-126 Codex MEDIUM#1: condition is now ``!= "final"`` (was
+# ``= "0"``). EVALUATE_DOD=1 (spinup 5 % gate) ALSO benefits from
+# the hint because spinup-gate PASS != production-DOD PASS — the
+# 1 % gate is strictly tighter.
+#
+# DAYS edge cases: bash arithmetic ``[ "${DAYS%.*}" -ge 30 ]`` with
+# 2>/dev/null silently skips the hint on non-numeric / empty /
+# negative DAYS (test cases covered in iter-126). ``${DAYS%.*}``
+# strips trailing decimals so 30.5 floors to 30 (hint fires);
+# 29.99 floors to 29 (skipped).
+if [ "$EVALUATE_DOD" != "final" ] && [ "${DAYS%.*}" -ge 30 ] 2>/dev/null; then
     echo ""
-    echo "Hint: this is a >=30-day production run with EVALUATE_DOD=0."
+    echo "Hint: this is a >=30-day production run with EVALUATE_DOD=$EVALUATE_DOD."
     echo "  To grade the trajectory against the final DOD criterion 2"
     echo "  (Wing 2018 plateau, 1 % MSE drift over last 10 days), run:"
     echo "    $PYBIN scripts/summarize_rce_trajectory.py \\"
@@ -214,15 +225,13 @@ if [ "$EVALUATE_DOD" = "0" ] && [ "${DAYS%.*}" -ge 30 ] 2>/dev/null; then
     echo "  on the verdict (non-zero exit on FAIL)."
 fi
 
-# iter-125: optional trajectory PNG via plot_rce_log.py. Off by
-# default to keep the wrapper minimal-dependency (matplotlib is
-# already in legoesm[dev] but env-only matplotlib distros may not
-# have it). Set EMIT_TRAJECTORY_PNG=1 to render
-# <OUTPUT>/trajectory.png from log.txt (per-100-step time series of
-# CWV, MSE, max|w|, qc/qr_max, precip).
+# iter-125 / iter-126: optional trajectory PNG via plot_rce_log.py.
+# Three modes: 0 = skip, 1 = best-effort (WARN-on-fail), strict =
+# propagate-on-fail (Codex iter-125 MEDIUM#2 — CI gates that REQUIRE
+# the PNG artefact can opt into propagation).
 EMIT_TRAJECTORY_PNG="${EMIT_TRAJECTORY_PNG:-0}"
-if [ "$EMIT_TRAJECTORY_PNG" = "1" ]; then
-    echo "Rendering trajectory PNG..."
+if [ "$EMIT_TRAJECTORY_PNG" = "1" ] || [ "$EMIT_TRAJECTORY_PNG" = "strict" ]; then
+    echo "Rendering trajectory PNG (mode=$EMIT_TRAJECTORY_PNG)..."
     set +e
     "$PYBIN" "$REPO_ROOT/scripts/plot_rce_log.py" "$OUTPUT" \
         > "$OUTPUT/trajectory_plot.log" 2>&1
@@ -230,8 +239,13 @@ if [ "$EMIT_TRAJECTORY_PNG" = "1" ]; then
     set -e
     if [ "$plot_status" -eq 0 ]; then
         echo "Wrote $OUTPUT/trajectory.png"
+    elif [ "$EMIT_TRAJECTORY_PNG" = "strict" ]; then
+        echo "ERROR: plot_rce_log.py failed (status $plot_status); see $OUTPUT/trajectory_plot.log" >&2
+        echo "ERROR: EMIT_TRAJECTORY_PNG=strict — propagating exit code." >&2
+        exit "$plot_status"
     else
         echo "WARN: plot_rce_log.py failed (status $plot_status); see $OUTPUT/trajectory_plot.log" >&2
         echo "WARN: trajectory.csv still emitted; PNG is best-effort." >&2
+        echo "WARN: set EMIT_TRAJECTORY_PNG=strict to propagate this failure." >&2
     fi
 fi

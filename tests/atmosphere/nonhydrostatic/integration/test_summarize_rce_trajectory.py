@@ -55,22 +55,28 @@ PROF_KEYS = (
 
 
 def _write_snapshot(path: Path, day: float, cwv_value: float) -> None:
+    # iter-126: mirror iter-123's NaN-safety fix in
+    # test_compare_rce_trajectories.py — ``arr * 0.0`` propagates
+    # NaN. No current test passes NaN cwv_value through this helper,
+    # but the failure mode is structurally identical to the iter-123
+    # patched footgun; pre-empt before a future NaN-fixture lands.
     ny, nx = 4, 4
     arr = np.full((ny, nx), cwv_value, dtype=np.float64)
+    zeros = np.zeros((ny, nx), dtype=np.float64)
     np.savez_compressed(
         path,
         t_sim=day * 86400.0,
         day=day,
         cwv=arr,
-        mse=arr * 1e7,
-        precip=arr * 0.0,
-        T_sfc=np.full_like(arr, 300.0 - day * 0.1),
-        qv_sfc=np.full_like(arr, 0.02),
-        qc_sfc=np.full_like(arr, day * 1e-5),
-        qr_sfc=np.full_like(arr, day * 1e-6),
-        u_sfc=np.full_like(arr, 0.0),
-        v_sfc=np.full_like(arr, 0.0),
-        wind_sfc=np.full_like(arr, day * 0.01),
+        mse=np.full((ny, nx), cwv_value * 1e7, dtype=np.float64),
+        precip=zeros,
+        T_sfc=np.full((ny, nx), 300.0 - day * 0.1, dtype=np.float64),
+        qv_sfc=np.full((ny, nx), 0.02, dtype=np.float64),
+        qc_sfc=np.full((ny, nx), day * 1e-5, dtype=np.float64),
+        qr_sfc=np.full((ny, nx), day * 1e-6, dtype=np.float64),
+        u_sfc=zeros,
+        v_sfc=zeros,
+        wind_sfc=np.full((ny, nx), day * 0.01, dtype=np.float64),
     )
 
 
