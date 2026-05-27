@@ -382,7 +382,11 @@ def test_plane_crm_no_mass_fixer_lets_cwv_grow(tmp_path):
 def _run_driver_production_scale(output_dir, *, n_outer_steps=60,
                                  log_every_steps=15,
                                  rad_call_interval_s=None,
-                                 timeout_s=900):
+                                 timeout_s=900,
+                                 dt=5.0,
+                                 advection="upwind1",
+                                 acoustic_off_centering=0.1,
+                                 no_mass_fixer=False):
     """Invoke run_rce_mpi_long.py at the iter-14 production scale
     (132x132x30 dx=2km dt=5s) for ``n_outer_steps`` outer steps.
 
@@ -392,6 +396,12 @@ def _run_driver_production_scale(output_dir, *, n_outer_steps=60,
     a future driver default change can't silently shift this
     regression), SI acoustic with off-centering=0.1 + 12 substeps,
     mass fixer on (driver default).
+
+    ``dt``, ``advection``, ``acoustic_off_centering`` (iter-230 fix):
+    parameterised so the iter-183 production contract (dt=20,
+    van_leer, beta=0.2) gets its own regression envelope without
+    a fork of this helper. iter-14 envelope: dt=5/upwind1/0.1;
+    iter-183 envelope: dt=20/van_leer/0.2.
 
     ``rad_call_interval_s=None`` (default) passes ``--no-radiation``
     to the driver — radiation is FULLY skipped (cached_rad_tend
@@ -414,16 +424,16 @@ def _run_driver_production_scale(output_dir, *, n_outer_steps=60,
     env = os.environ.copy()
     env["JAX_PLATFORMS"] = "cpu"
     env["JAX_ENABLE_X64"] = "1"
-    days = (n_outer_steps + 0.5) * 5.0 / 86400.0
+    days = (n_outer_steps + 0.5) * dt / 86400.0
     cmd = [
         sys.executable, str(DRIVER),
         "--nx", "132", "--ny", "132", "--nlev", "30",
-        "--dx", "2000.0", "--dt", "5.0",
+        "--dx", "2000.0", "--dt", repr(float(dt)),
         "--days", f"{days:.8f}",
         "--semi-implicit-acoustic",
-        "--acoustic-off-centering", "0.1",
+        "--acoustic-off-centering", repr(float(acoustic_off_centering)),
         "--n-acoustic-substeps", "12",
-        "--advection", "upwind1",
+        "--advection", str(advection),
         "--hyperdiff", "5e6",
         "--smag-cs", "0.2",
         "--bubble-theta-pert", "0.0",
@@ -437,6 +447,8 @@ def _run_driver_production_scale(output_dir, *, n_outer_steps=60,
     else:
         cmd.extend(["--rad-call-interval-s",
                     repr(float(rad_call_interval_s))])
+    if no_mass_fixer:
+        cmd.append("--no-mass-fixer")
     return subprocess.run(
         cmd, env=env, capture_output=True, text=True, timeout=timeout_s,
     )
@@ -590,6 +602,179 @@ def test_plane_crm_production_scale_132x132_envelope(tmp_path):
         f"radiation tendency (per-step ≈ 2.3e-7); pure dycore + fast "
         f"physics at 60 steps should land BELOW that. Investigate "
         f"dycore energy budget if exceeded."
+    )
+
+
+@pytest.mark.slow
+def test_plane_crm_iter183_production_scale_132x132_envelope(tmp_path):
+    """iter-230: nightly slow regression for the iter-183 plane CRM
+    production contract (dt=20 s + van_leer + beta=0.2 + Smag c_s=0.2
+    + hyperdiff 5e6 + NO mass fixer, no radiation). The
+    --no-mass-fixer flag matches the 30-day wrapper default
+    (run_rce_30day.sh: NO_MASS_FIXER=${NO_MASS_FIXER:-1}); without
+    that the test would silently pin CWV at IC via the fixer and
+    miss a surface-flux regression. The iter-14 envelope above
+    keeps the fixer ON because the iter-14 contract relies on it.
+
+    iter-229 verified the iter-183 contract at full 30-day scale:
+    DOD PASS with log max|w|=1.06e-02 m/s, CWV evolution
+    49.94→53.33 mm (Wing 2018 plateau), MSE drift -1.6%. This test
+    runs the SAME wrapper-equivalent configuration for 60 outer
+    steps (= 20 sim-min) so a regression in any of
+    {dt=20, van_leer, beta=0.2, no-mass-fixer} that would have
+    shown up at 30-day scale is caught nightly. This is an
+    early-stability + config-fingerprint smoke, not a 30-day proxy:
+    later-time effects (precipitation cycles starting day 16,
+    slow MSE drift, late convective amplification) are out of
+    scope at 20 sim-min and would need a separate test.
+
+    Empirical measurement (iter-230 smoke, dt=20, n=60, NMF):
+
+    | step | day       | CWV_mean[mm] | MSE_mean[J/m²] | max|w|[m/s] | Ca |
+    |------|-----------|--------------|----------------|-------------|----|
+    |  1   | 0.000231  | 49.942       | 3.5247e9       | 0.0e+00     |0.87|
+    | 15   | 0.003472  | 49.958       | 3.5247e9       | 3.81e-04    |0.87|
+    | 30   | 0.006944  | 49.975       | 3.5248e9       | 5.41e-04    |0.87|
+    | 45   | 0.010417  | 49.992       | 3.5248e9       | 6.22e-04    |0.87|
+    | 60   | 0.013889  | 50.008       | 3.5249e9       | 6.68e-04    |0.87|
+
+    Bounds + dt fingerprints (each catches a different regression):
+    * max|w| < 0.05 m/s on every logged row — generic CFL safety net.
+    * activity floor max|w| > 1e-6 m/s at step 15 — catches no-op step().
+    * |CWV drift| < 0.15 mm (2.3× measured 0.066 mm) — catches a
+      surface-flux regression OR an accidental --mass-fixer flip
+      (fixer would pin near zero).
+    * |MSE drift| < 1.5e-4 relative (2.6× measured 5.7e-5) — catches
+      energy-budget drift; tighter than iter-39 with-rad envelope
+      because no radiation cooling source.
+    * Final logged day ≈ 60·20/86400 = 0.01389 (rejects a dt=5
+      fallback at 4× too-low day count).
+    * Ca_substep > 0.5 — fingerprints dt=20 (iter-14 dt=5 gives
+      Ca_substep ≈ 0.22; iter-183 dt=20 gives ≈ 0.87). A silent
+      kwarg-default fallback to dt=5 would fail this.
+
+    Wall budget ~30 s on M5 Pro cached JIT, ~1.5 min cold (4× fewer
+    steps than the iter-14 envelope's dt=5 equivalent for the same
+    20-min sim window). Marked ``slow``.
+    """
+    n_steps = 60
+    log_every = 15
+    dt = 20.0
+    out_dir = tmp_path / "rce_plane_iter183_prod"
+    result = _run_driver_production_scale(
+        out_dir,
+        n_outer_steps=n_steps,
+        log_every_steps=log_every,
+        dt=dt,
+        advection="van_leer",
+        acoustic_off_centering=0.2,
+        no_mass_fixer=True,
+    )
+    if result.returncode != 0:
+        pytest.fail(
+            "run_rce_mpi_long.py exited nonzero at iter-183 "
+            f"production scale ({result.returncode})\n"
+            f"stdout tail:\n{result.stdout[-2000:]}\n"
+            f"stderr tail:\n{result.stderr[-1000:]}"
+        )
+    rows = _read_log(out_dir)
+    assert rows, (
+        "log.txt produced no diagnostic rows at iter-183 production "
+        "scale"
+    )
+
+    rad_calls = _parse_rad_call_count(result.stdout)
+    assert rad_calls == 0, (
+        f"plane CRM iter-183 envelope (--no-radiation): driver "
+        f"reported rad_calls={rad_calls!r}, expected 0."
+    )
+
+    expected_logged_steps = [1, 15, 30, 45, 60]
+    logged_steps = [int(r["step"]) for r in rows]
+    assert logged_steps == expected_logged_steps, (
+        f"plane CRM iter-183 envelope: logged steps={logged_steps} "
+        f"!= expected {expected_logged_steps}."
+    )
+
+    # dt=20 fingerprint #1: final logged sim day matches 60·dt/86400.
+    # A silent fallback to dt=5 (iter-14 default) would land at
+    # 0.00347 instead of 0.01389 — 4× too low.
+    expected_final_day = n_steps * dt / 86400.0
+    final_day = float(rows[-1]["day"])
+    assert abs(final_day - expected_final_day) < 1e-5, (
+        f"plane CRM iter-183 envelope: final day={final_day:.6f} "
+        f"!= expected {expected_final_day:.6f} (= n_steps·dt/86400 "
+        f"at dt={dt}). Likely the helper's dt kwarg defaulted to "
+        f"5.0 instead of 20.0 — silent path regression."
+    )
+
+    # dt=20 fingerprint #2: Ca_substep > 0.5. iter-183's dt=20 +
+    # n_acoustic=12 yields Ca_substep ≈ 0.87; iter-14 dt=5 + same
+    # n_acoustic gives ≈ 0.22. A silent dt-fallback would drop
+    # this well under 0.5.
+    ca_substep_first = float(rows[0]["Ca_substep"])
+    assert ca_substep_first > 0.5, (
+        f"plane CRM iter-183 envelope: Ca_substep={ca_substep_first:.4f} "
+        f"at step 1 below 0.5 lower bound. iter-183's dt=20 + "
+        f"n_acoustic=12 must give ≈0.87; a silent dt fallback to 5 "
+        f"would drop this to ≈0.22. See run_rce_mpi_long.py iter-183 "
+        f"docstring for the contract."
+    )
+
+    cwv_first = float(rows[0]["CWV_mean"])
+    cwv_final = float(rows[-1]["CWV_mean"])
+    mse_first = float(rows[0]["MSE_mean"])
+    mse_final = float(rows[-1]["MSE_mean"])
+
+    assert abs(cwv_first - 49.9413) < 0.01, (
+        f"plane CRM iter-183 envelope: IC CWV={cwv_first:.4f} mm "
+        f"!= 49.9413 ± 0.01. The IC anchor must match the iter-14 "
+        f"envelope (same Wing 2018 IC); a drift here means the IC "
+        f"build path regressed."
+    )
+
+    max_w_per_row = [float(r["max|w|"]) for r in rows]
+    for step_idx, mw in zip(logged_steps, max_w_per_row):
+        assert mw < 0.05, (
+            f"plane CRM iter-183 envelope: max|w|={mw:.3e} m/s at "
+            f"step {step_idx} exceeds 0.05 m/s safety cap. iter-229 "
+            f"measured 1.06e-2 m/s end-state at 30-day scale; >5e-2 "
+            f"at 20 sim-min is a smoking gun for a dt=20 + van_leer "
+            f"regression."
+        )
+    step15_max_w = max_w_per_row[1]
+    assert step15_max_w > 1e-6, (
+        f"plane CRM iter-183 envelope: max|w|={step15_max_w:.3e} m/s "
+        f"at step 15 — dycore appears inactive."
+    )
+    # No-mass-fixer + surface-flux moisture: empirical iter-230
+    # measurement = 0.066 mm in 60 steps. Cap 0.15 mm is ~2.3×
+    # over measured — catches a flipped surface-flux sign (positive
+    # would dump moisture far faster) or an accidental --mass-fixer
+    # flip (fixer would pin near zero).
+    cwv_drift = abs(cwv_final - cwv_first)
+    assert cwv_drift < 0.15, (
+        f"plane CRM iter-183 envelope: CWV drifted {cwv_drift:.4f} mm "
+        f"(IC={cwv_first:.4f}, final={cwv_final:.4f}) in {n_steps} "
+        f"steps. iter-230 measured 0.066 mm at this config; >0.15 "
+        f"means a surface-flux regression. <1e-4 means the mass "
+        f"fixer was silently re-enabled (helper kwarg flip)."
+    )
+    # Inverted fixer-flip floor: empirical = 0.066 mm; with the fixer
+    # ON it would be <0.005 mm. A floor of 1e-3 mm catches the
+    # no_mass_fixer kwarg silently defaulting to False.
+    assert cwv_drift > 1e-3, (
+        f"plane CRM iter-183 envelope: CWV drift {cwv_drift:.5f} mm "
+        f"below 1e-3 floor. The wrapper-equivalent --no-mass-fixer "
+        f"path must show some surface-flux moisture growth at 20 "
+        f"sim-min (~0.066 mm measured); <1e-3 means the helper's "
+        f"no_mass_fixer kwarg silently defaulted to False."
+    )
+    rel_mse_drift = abs(mse_final - mse_first) / mse_first
+    assert rel_mse_drift < 1.5e-4, (
+        f"plane CRM iter-183 envelope: MSE drift {rel_mse_drift:.3e} "
+        f"relative exceeds 1.5e-4 cap. iter-230 measured 5.7e-5 at "
+        f"this config; >1.5e-4 is an energy-budget regression."
     )
 
 

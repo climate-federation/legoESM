@@ -207,6 +207,75 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 230 (iter-183 production-contract envelope regression + Codex round-1 fixes)
+
+Locked the iter-183 production contract (dt=20 + van_leer +
+beta=0.2 + NO mass fixer + no radiation, 132x132x30 dx=2 km) as a
+nightly slow regression. iter-229 verified the contract at full
+30-day scale via the actual production run — iter-230 adds the
+fast smoke equivalent so a regression that would have shown up at
+30 days is caught in ~30 s on cached JIT.
+
+**Changes**
+* ``tests/atmosphere/nonhydrostatic/integration/test_plane_crm_end_to_end_smoke.py``:
+  added ``test_plane_crm_iter183_production_scale_132x132_envelope``
+  (slow). Parameterised the existing
+  ``_run_driver_production_scale`` helper with four new kwargs
+  (``dt``, ``advection``, ``acoustic_off_centering``,
+  ``no_mass_fixer``) defaulting to the iter-14 contract so the
+  existing iter-14 envelope + with-radiation tests keep working
+  unchanged.
+* Pre-existing failure observed:
+  ``test_plane_crm_production_scale_132x132_with_radiation``
+  reports MSE drift = +0.000e+00 (4-sig-fig log truncation) on
+  the iter-229 baseline. Not iter-230 work — a separate
+  follow-on PR should bump the driver's log precision from
+  ``:.4e`` to ``:.6e`` so the iter-39 cooling-sign assertion can
+  actually fire.
+
+**Codex round-1 review of the new test** (`/codex:adversarial-review --fresh`):
+
+* HIGH — original draft kept the driver mass fixer ON (helper
+  default), contradicting the iter-229 production wrapper which
+  defaults ``NO_MASS_FIXER=1`` and passes ``--no-mass-fixer``.
+  CWV-drift assertion was artificially tight because the fixer
+  pinned moisture at IC. **Fix**: added ``no_mass_fixer`` kwarg;
+  iter-183 test passes ``True`` to match the wrapper. Empirical
+  drift over 60 steps = 0.066 mm; cap raised to 0.15 mm + floor
+  at 1e-3 mm to also catch a silent fixer re-enable.
+* MEDIUM#1 — test did not verify dt=20 / van_leer / beta=0.2
+  actually ran (silent helper-kwarg fallback to iter-14 dt=5
+  would pass every envelope check). **Fix**: added two dt
+  fingerprints — (a) final-logged ``day == 60·dt/86400`` within
+  1e-5 (rejects dt=5 fallback at 4× too-low day count); (b)
+  ``Ca_substep > 0.5`` at step 1 (iter-183's dt=20+n_acoustic=12
+  yields ≈0.87; iter-14 dt=5 same n_acoustic gives ≈0.22).
+* MEDIUM#2 — docstring overclaimed "catches regressions that
+  would have shown up at 30-day scale". **Fix**: rephrased to
+  "early-stability + config-fingerprint smoke, not a 30-day
+  proxy" — explicitly notes that late-time effects (day-16
+  precip cycles, slow MSE drift, late convective amplification)
+  are out of scope at 20 sim-min.
+* LOW — thresholds copied verbatim from iter-14 envelope; did
+  not distinguish iter-183 from iter-14. **Fix**: anchored all
+  bounds to the empirical iter-230 smoke measurement (table in
+  docstring); the new Ca_substep + final-day fingerprints
+  distinguish the two contracts.
+
+**Measurements** (iter-183 contract, 132x132x30, dt=20, n=60):
+
+| step | day      | CWV[mm] | MSE[J/m²] | max|w|[m/s] | Ca_substep |
+|------|----------|---------|-----------|-------------|------------|
+|  1   | 0.000231 | 49.942  | 3.5247e9  | 0.0e+00     | 0.8741     |
+| 15   | 0.003472 | 49.958  | 3.5247e9  | 3.81e-04    | 0.8741     |
+| 30   | 0.006944 | 49.975  | 3.5248e9  | 5.41e-04    | 0.8741     |
+| 45   | 0.010417 | 49.992  | 3.5248e9  | 6.22e-04    | 0.8741     |
+| 60   | 0.013889 | 50.008  | 3.5249e9  | 6.68e-04    | 0.8741     |
+
+Test wall: 28.4 s cached JIT (1.5 min cold). All 36 non-slow
+tests still pass. iter-14 envelope test still passes (helper
+backward-compat verified).
+
 ### 2026-05-27 — iter 217..229 (LES F11 fix-path-1 sweep + iter-183 30-day DOD PASS)
 
 13 iterations spanning the F11 LES experiment chain and the final
