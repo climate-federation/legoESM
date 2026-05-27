@@ -127,6 +127,17 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     """Configuration for the C-grid lat-lon hydrostatic PE model.
 
     Time integrator options: "ssp_rk3", "ssp_rk34", "ssp_rk54", "rk4".
+
+    pole_v_bc : tuple[bool, bool]
+        (south, north) — whether to zero ``v`` at the south / north pole
+        rows of the lat axis.  Default ``(True, True)`` is the serial /
+        single-rank convention (wall BC at both global poles).  Under
+        latitude-band MPI, the wrapper sets each flag to
+        ``layout.<side>_rank is None`` so only the boundary ranks zero
+        the actual global poles and interior ranks leave their band
+        boundaries (which are interior v-faces shared with the
+        neighbour rank) alone.  See
+        :func:`legoesm.parallel.latlon_mpi.make_latlon_mpi_step`.
     """
     g: float = constants.g
     A_h: float = 0.0              # Laplacian viscosity [m^2/s]
@@ -140,6 +151,43 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     use_polar_filter: bool = False
     polar_filter_cutoff_deg: float = 60.0
     polar_filter_max_wave_speed: float = 300.0
+    pole_v_bc: tuple = (True, True)  # (south_pole, north_pole) — see docstring
+
+
+def _zero_v_at_pole(v, *, south: bool, north: bool):
+    """Zero ``v`` at the south / north lat-boundary rows (wall BC).
+
+    Replaces the historical hardcoded
+    ``jnp.pad(v[1:-1, :, :], ((1, 1), (0, 0), (0, 0)))`` pattern which
+    *unconditionally* zeroed both ends.  Under latitude-band MPI, only
+    boundary ranks own the actual global poles; interior ranks have
+    band-boundary v-rows that must NOT be zeroed (they are interior
+    v-faces shared with the neighbour rank, kept consistent by halo
+    exchange + scatter duplication).
+
+    Implementation notes
+    --------------------
+    For the default ``(south=True, north=True)`` case the body lowers
+    to the same single ``Pad`` HLO op the original line used, so serial
+    bit-exactness and performance are preserved.  The
+    asymmetric cases use ``concatenate`` to keep the no-op rows
+    unchanged; this lowers to a slice + concat pair, one more HLO than
+    the original but still cheap.
+    """
+    if south and north:
+        # Exactly the original single-Pad path — serial bit-identical.
+        return jnp.pad(v[1:-1, :, :], ((1, 1), (0, 0), (0, 0)))
+    if south and not north:
+        # Zero only the first row; pad bottom, keep top.
+        return jnp.concatenate(
+            [jnp.zeros_like(v[:1]), v[1:]], axis=0,
+        )
+    if not south and north:
+        return jnp.concatenate(
+            [v[:-1], jnp.zeros_like(v[-1:])], axis=0,
+        )
+    # Neither end is a global pole on this rank: pass through unchanged.
+    return v
 
 
 # interp_cell_to_uface and interp_cell_to_vface are imported from
@@ -542,10 +590,13 @@ def cgrid_latlon_hydrostatic_tendencies(
 
     # Enforce zero tendency at poles (wall BC) so that intermediate RK
     # stages never see nonzero v at poles feeding into divergence/Coriolis.
-    # Single ``Pad`` HLO op (zero-pad the interior slice) replaces two
-    # ``ScatterUpdate`` ops on the leading lat axis — same per-RK-stage
-    # pattern as the spectral_nh ``w_new`` rewrite.
-    dv_dt = jnp.pad(dv_dt[1:-1, :, :], ((1, 1), (0, 0), (0, 0)))
+    # Rank-aware via config.pole_v_bc — under latitude-band MPI, only the
+    # boundary ranks zero the actual global poles; interior ranks pass
+    # through unchanged (their band-edge v-faces are shared with the
+    # neighbour rank and kept consistent by halo exchange).
+    dv_dt = _zero_v_at_pole(
+        dv_dt, south=config.pole_v_bc[0], north=config.pole_v_bc[1],
+    )
 
     return du_dt, dv_dt, dT_dt, dp_s_dt, tracer_tends
 
@@ -725,9 +776,15 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             state_c, tendency_fn, dt, self.config.time_integrator,
         )
 
-        # Enforce v = 0 at poles via a single Pad HLO op (matches the
-        # tendency-side rewrite above).
-        v_new = jnp.pad(state_new.v[1:-1, :, :], ((1, 1), (0, 0), (0, 0)))
+        # Enforce v = 0 at poles via the rank-aware helper (matches the
+        # tendency-side rewrite above).  Serial config has
+        # ``pole_v_bc=(True, True)`` so this preserves bit-exact
+        # behaviour with the pre-refactor single-Pad implementation.
+        v_new = _zero_v_at_pole(
+            state_new.v,
+            south=self.config.pole_v_bc[0],
+            north=self.config.pole_v_bc[1],
+        )
         state_new = state_new._replace(v=v_new)
 
         # Safety rails: T floor, p_s floor, mass fixer
