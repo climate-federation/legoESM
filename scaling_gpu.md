@@ -411,6 +411,20 @@ The single-GPU theoretical limit has been reached for the structured-grid config
 - Algorithm change (replace spectral with spectral-element or GPU-native SHTns)
 - Mesh-level optimization (Hilbert reordering for MPAS) — invasive
 
+### Iter 13 — 2026-05-27 — LL ocean implicit_cn also a 1.2-1.95× win
+
+Same trick that fixed MPAS applies to lat-lon C-grid. Exposed via new `--ll-baro-solver` flag.
+
+| res    | fp64 explicit | fp64 impl_cn  | speedup | fp32 explicit | fp32 impl_cn  | speedup |
+|--------|---------------|---------------|---------|---------------|---------------|---------|
+| LL64   |  1.77 / 92    | **0.94 / 175**  | 1.9×    | 1.57 / 105    | **0.90 / 182**  | 1.74×   |
+| LL128  |  4.21 / 156   | **2.96 / 221**  | 1.42×   | 2.13 / 320    | **1.43 / 458**  | 1.43×   |
+| LL192  |  6.98 / 211   | **5.97 / 247**  | 1.17×   | 3.67 / 405    | **2.70 / 546**  | 1.36×   |
+
+**New peak Mcells/s in this study: LL192 fp32 impl_cn = 546 Mc/s.**
+
+`plot_gpu_scaling.py:_label_from_row` extended to surface barotropic-solver tag (from CSV `physics_level` column added iter-12) so explicit and impl_cn series don't collide in plot legends.
+
 ### Iter 12 — 2026-05-27 — codex review iter-11 + ico+graphs neutral
 
 Codex review of iter-11 changes flagged three things; all applied:

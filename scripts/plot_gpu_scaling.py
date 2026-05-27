@@ -115,7 +115,17 @@ def _label_from_row(r: dict) -> str:
             grid = "ocean-mpas"
         else:
             grid = "ocean-latlon"
-    return f"{grid} ({prec or 'unk'})"
+    # Ocean physics_level carries barotropic-solver tag ("baro=implicit_cn"
+    # or "baro=explicit_substep"); surface it so series stay separate.
+    phys = r.get("physics_level", "").strip()
+    suffix = ""
+    if phys.startswith("baro="):
+        baro = phys.split("=", 1)[1]
+        if baro == "implicit_cn":
+            suffix = " impcn"
+        elif baro == "explicit_substep":
+            suffix = " exs"
+    return f"{grid} ({prec or 'unk'}){suffix}"
 
 
 def _theoretical_floor(total_cells: np.ndarray) -> np.ndarray:

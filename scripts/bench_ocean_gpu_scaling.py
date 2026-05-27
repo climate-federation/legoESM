@@ -73,17 +73,19 @@ N_WARMUP = 3
 N_TIMING = 30
 
 
-def _build_latlon(n_lat: int, dtype_x64: bool):
+def _build_latlon(n_lat: int, dtype_x64: bool,
+                  baro_solver: str = "explicit_substep"):
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.ocean.vertical import create_ocean_z_star
     from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel, LatLonCGridOceanConfig,
+        LatLonCGridOceanModel,
     )
+    from legoesm.ocean.state import LatLonCGridOceanConfig
     n_lon = 2 * n_lat
     grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
     z = create_ocean_z_star(n_levels=OCEAN_NLEV)
-    cfg = LatLonCGridOceanConfig()
+    cfg = LatLonCGridOceanConfig(barotropic_solver=baro_solver)
     model = LatLonCGridOceanModel(grid, z, cfg)
     state = rest_state_latlon_cgrid_ocean(grid, z)
     n_cells = n_lat * n_lon
@@ -227,6 +229,11 @@ def main() -> int:
                         "Crank-Nicolson free-surface system once per "
                         "baroclinic step; explicit_substep iterates "
                         "n_barotropic_substeps small steps (config-defined).")
+    p.add_argument("--ll-baro-solver",
+                   choices=["explicit_substep", "implicit_cn"],
+                   default="explicit_substep",
+                   help="Lat-lon C-grid barotropic solver (same options "
+                        "as --mpas-baro-solver).")
     p.add_argument("--no-cuda-graphs", action="store_true",
                    help="Disable XLA CUDA-graphs flag (default: enabled to "
                         "fix MPAS-ocean fp32 anomaly; recognised at import "
@@ -256,11 +263,14 @@ def main() -> int:
     failures: list[str] = []
 
     if "latlon" in grids:
-        print(f"\nLatLon C-grid ocean — resolutions {ll_res}")
+        print(f"\nLatLon C-grid ocean — resolutions {ll_res}  "
+              f"(baro={args.ll_baro_solver})")
+        def _mk_latlon(n, x64, _solver=args.ll_baro_solver):
+            return _build_latlon(n, x64, baro_solver=_solver)
         for n in ll_res:
             try:
-                r = _bench_one(f"LL{n}", _build_latlon, n, args.precision,
-                               solver_tag="latlon_default")
+                r = _bench_one(f"LL{n}", _mk_latlon, n, args.precision,
+                               solver_tag=args.ll_baro_solver)
                 print(f"  LL{n:4d} n_cells={r.total_cells:>10,}  "
                       f"compile={r.compile_time_s:6.2f}s  "
                       f"step={r.time_per_step_ms:7.2f}ms  "
