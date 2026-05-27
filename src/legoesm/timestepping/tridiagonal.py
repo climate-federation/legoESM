@@ -216,11 +216,13 @@ def thomas_solve_batched(
     d_flat = d.reshape(n_cols, n_sys)
 
     # jax.lax.linalg.tridiagonal_solve signature: (dl, d, du, b)
-    # where dl=sub-diagonal, d=main, du=super, b=RHS (n_sys, nrhs).
-    def _solve_one(a_col, b_col, c_col, d_col):
-        return tridiagonal_solve(a_col, b_col, c_col, d_col[:, None])[:, 0]
-
-    x_flat = jax.vmap(_solve_one)(a_flat, b_flat, c_flat, d_flat)
+    # natively accepts a leading batch axis: dl/d/du shape (B, n) and
+    # b shape (B, n, nrhs). Pass batched directly — XLA lowers to a
+    # single batched cuSPARSE invocation, skipping the vmap-induced
+    # per-column launch loop.
+    x_flat = tridiagonal_solve(
+        a_flat, b_flat, c_flat, d_flat[..., None],
+    )[..., 0]
     return x_flat.reshape(orig_shape)
 
 

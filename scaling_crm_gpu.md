@@ -117,6 +117,86 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 66 — 2026-05-27 — vmap → native batched tridiagonal_solve (cleanup)
+
+`thomas_solve_batched` previously wrapped `tridiagonal_solve` in
+`jax.vmap` over the flattened column axis with per-call
+`[:, None] / [:, 0]` reshape. `tridiagonal_solve` natively accepts
+a leading batch axis on `dl/d/du` and `(B, n, nrhs)` RHS, so the
+vmap was redundant.
+
+Verified:
+- Bit-for-bit identical to legacy `_thomas_solve_batched_legacy`
+  on random tridiag fp64: `max_diff=4.4e-16`, `max_residual=1.3e-15`
+- Bench fp32 nsub=6: N=128 276.8 → 276.8 Mc/s,
+  N=192 264.2 → 264.2 Mc/s, N=256 254.9 → 254.9 Mc/s
+- XLA was already optimizing the vmap, so this is perf-neutral
+  but cleaner (saves the surrounding reshape boilerplate)
+
+Standalone cuSPARSE timing (n_cols=16384, nlev=30, fp32):
+- jitted `tridiagonal_solve(..., d[...,None])[...,0]` = **37 us/call**
+- Whole substep = 89 us/call ⇒ cuSPARSE is **42%** of substep
+- Remaining 52 us = elementwise ops (pi_p, ∇pi, buoyancy,
+  rho_p+theta_p backward updates)
+
+XLA Command-Buffer probe:
+- `--xla_gpu_enable_command_buffer=FUSION,CONDITIONAL,WHILE`
+  (default): N=192 265 Mc/s
+- `+CUSTOM_CALL` (capture cuSPARSE in graph): N=192 275 Mc/s
+  (+4%), but N=128 269 Mc/s (-3%) — net wash, regression at
+  small N due to capture/replay overhead exceeding savings
+
+⇒ At N=128 fp32 the substep is **launch-bound on the post-cuSPARSE
+   tail**, not arithmetic-bound. Further gains require either
+   - fusing the substep elementwise pipeline into 1 kernel that
+     absorbs the cuSPARSE custom call (requires PCR/CR in pure
+     JAX, ~100 LOC, defers cuSPARSE)
+   - CUDA Graph capture across the whole RK3 stage (XLA flag
+     wash — needs end-to-end persistent buffer reuse)
+   - Multi-GPU (linear scaling beyond single-device HBM ceiling
+     — still blocked: mpi4py install unauthorized)
+
+### Iter 65 — 2026-05-27 — honesty walkback: iter-49 "62/63 PASS" was incomplete
+
+Bit-for-bit baseline test in `tests/unit/test_thomas_solve.py` was
+the only check used to declare cuSPARSE swap safe. Validation suite
+`tests/validation/test_plane_nh_rising_thermal.py` was NOT in the
+iter-49 sweep.
+
+Ran that file on **crm_gpu** (cuSPARSE active):
+```
+FAILED test_warm_bubble_state_is_finite_at_end           NaN
+FAILED test_warm_bubble_generates_upward_motion          NaN
+FAILED test_warm_bubble_dry_mass_conserved_with_fixer    NaN
+1 passed (smoke), 3 failed
+```
+
+Reverted only `tridiagonal.py` to main (legacy fori_loop), ran same
+test file: **same 3 failures, same NaN signature.**
+
+⇒ **Failure is pre-existing on main, unrelated to cuSPARSE swap.**
+   The rising-thermal warm-bubble physics has an independent NaN
+   regression that the iter-49 "62/63 PASS" claim missed because
+   the rising-thermal file was never run as part of that sweep.
+
+Action items:
+- File separate issue for rising-thermal NaN (out of scope for
+  GPU scaling PR #320)
+- Tighten the iter-49 claim from "62/63 PASS" to "62/63 PASS on
+  the tests actually executed; rising-thermal not run"
+- cuSPARSE numerical safety is still established by:
+  (a) `test_thomas_solve` bit-for-bit baseline (max residual
+      9.99e-16 fp64, 5e-7 fp32)
+  (b) acoustic substep tests 6/6 PASS
+  (c) precompute_target_mass scan test fix_mass mass drift <1e-11
+  (d) AD gradient test (mean ~1.0 sum-of-output) PASS
+
+### Iter 64 — 2026-05-27 — extending coverage discovered failure
+
+Tried to add rising-thermal warm-bubble test to cuSPARSE regression
+sweep. Result: 3 NaN failures. Initial concern: cuSPARSE regression
+that bit-for-bit test missed. Investigated in iter-65.
+
 ### Iter 63 — 2026-05-27 — cuSPARSE moves SI dycore into memory-bound regime
 
 Substep-decomposition of SI fp32 N=128 with cuSPARSE Thomas:
