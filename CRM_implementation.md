@@ -223,6 +223,40 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 300..305 (SCM RCE smoke + 5 Codex docstring polish rounds — 10th untested-script coverage)
+
+10th previously-untested CRM-adjacent script in the iter-238..273
+coverage chain. ``scripts/run_scm_rce.py`` is the single-column
+radiative-convective equilibrium harness (gray radiation + Louis
+turbulence + Kessler microphysics + simple mass-flux convection).
+
+**iter-300 — first coverage**: 0.5-sim-day smoke (~72 outer
+steps at default dt=600 s). Asserts: stdout headers (`[SCM RCE]`
++ `[OK] RCE sanity passed`); 4 regex-parsed `[result]` lines
+(T_sfc, T_top, q_v_sfc, p_s); T_sfc in (290, 310) K (tighter
+than script's own (240, 320) gate); T_top in (195, 205) K
+(gray-rad equilibrium 200 K target); q_v_sfc in (15, 21) g/kg;
+p_s == 100000 Pa; trajectory line present. **1/1 PASS 19.6 s**.
+
+**iter-301..305 — 5 Codex docstring polish rounds**:
+
+* iter-301 (round-1 LOW): "monotonic-ish" comment was
+  misleading (assertion only checks line presence). Reworded.
+* iter-302 (round-2 LOW): docstring T_top bounds [160, 260]
+  didn't match script's actual gates (150, 270). Fixed.
+* iter-303 (round-3 2 LOW): added missing q_v positivity gate
+  to docstring + fixed flag name (--lat → --latitude-deg).
+* iter-304 (round-4 2 LOW): added finite-temperature gate to
+  smoke + updated run_scm_rce.py's OWN module docstring to
+  match implementation (T_top [160,260]→[150,270], added q_v
+  gate).
+* iter-305 (round-5 2 LOW): line wrap >80 chars (script usage
+  example) + "day-half-day" awkward phrase polish.
+
+All 5 rounds were docstring-only — no behavioral changes. Each
+ran to completion in <0.05 s code change + ~20 s subprocess
+smoke verification.
+
 ### 2026-05-27 — iter 299 (final extended regression sweep — 379/379 PASS in 9m27s)
 
 Closing-iteration sweep across the iter-229..298 cumulative
