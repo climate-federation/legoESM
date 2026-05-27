@@ -99,10 +99,11 @@ def test_run_rcemip_long_cross_grid_moist_smoke(tmp_path, grid):
     * 8 outer steps complete (no NaN, no compose error)
     * label includes ``_moist`` suffix in the history JSON
     """
-    out_file = tmp_path / f"rcemip_{grid}_moist_history.json"
-    result = _run_driver(out_file, grid=grid, days=0.001, dt=10.0)
-    # Re-run with --moist appended manually since _run_driver doesn't
-    # take a moist flag — use run_bench directly to add --moist.
+    # iter-276 (Codex iter-275 round-1 MEDIUM): the iter-275 draft
+    # called _run_driver() WITHOUT --moist before the moist
+    # run_bench, paying for an extra subprocess/JIT and silently
+    # ignoring any nonzero exit. Dropped the redundant dry pre-run;
+    # the dry path is already covered by the parametrise above.
     out_file_moist = tmp_path / f"rcemip_{grid}_moist_v2.json"
     from tests.atmosphere.nonhydrostatic.integration._bench_smoke_helpers import (
         run_bench,
@@ -136,6 +137,14 @@ def test_run_rcemip_long_cross_grid_moist_smoke(tmp_path, grid):
         f"Driver n_steps={doc['n_steps']}, expected 8. moist "
         f"path may have early-aborted."
     )
+    # iter-276 (Codex iter-275 round-1 LOW): also assert the
+    # JSON history label — not just the stdout marker — so a
+    # label-schema regression that breaks the JSON side without
+    # touching stdout fires.
+    assert doc.get("label") == f"{grid}_moist", (
+        f"history JSON label={doc.get('label')!r}, expected "
+        f"{grid}_moist."
+    )
     # Last history row diag fields finite + present.
     history_rows = doc["history"]
     assert len(history_rows) >= 2
@@ -144,10 +153,18 @@ def test_run_rcemip_long_cross_grid_moist_smoke(tmp_path, grid):
         assert col in last
         v = last[col]
         assert isinstance(v, (int, float)) and v == v
-    # q_v should remain in (0, 0.05): radiation cools, Kessler may
-    # remove some moisture, but at 8 sim-steps the column stays
-    # near IC.
-    assert 0.0 <= last["max_qv"] < 0.05
+    # iter-276 (Codex iter-275 round-1 LOW): tightened q_v upper
+    # bound. IC max q_v = Q_V_SFC * exp(-z/4000) at z=1 km
+    # ~ 0.012 * 0.78 ~ 9.35e-3. The iter-275 bound 0.05 was 5x
+    # over IC — would silently miss a 4x moisture inflation.
+    # Tightened to (-1e-10, 0.015) = IC + 60% margin (catches
+    # any meaningful inflation while tolerating advective
+    # transport across 8 sim-steps).
+    assert 0.0 <= last["max_qv"] < 0.015, (
+        f"max_qv={last['max_qv']} outside (0, 0.015) — IC max "
+        f"~9.35e-3 at z=1 km; >0.015 means moisture inflation "
+        f"regression."
+    )
     assert last["min_qv"] >= -1e-10
 
 
