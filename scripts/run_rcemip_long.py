@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -806,49 +807,17 @@ def main():
         "cubed_sphere": _run_cubed_sphere,
         "mpas": _run_mpas,
     }
-    # iter-288 (Codex iter-283..287 round-1 LOW#2): validate
-    # --n-cubed-sphere is a positive integer. Argparse type=int
-    # accepts 0 / -1 which would reach grid construction and
-    # raise a cryptic shape error.
-    if args.n_cubed_sphere < 1:
-        raise SystemExit(
-            f"error: --n-cubed-sphere={args.n_cubed_sphere} must "
-            f"be >= 1. Typical values: 4 (default smoke), 12, "
-            f"24, 48, 96, 192 (production)."
-        )
-    # iter-291 (Codex iter-289..290 round-1 HIGH#1): validate
-    # surface-flux CLI flags. NaN T_sfc or negative Cd/Ch
-    # propagates into flux compute + flips sign of drag/heat/moisture
-    # forcing without error.
-    import math as _math
-    for _fname, _fval, _lo, _hi in [
-        ("sfc-Cd", args.sfc_Cd, 0.0, 1.0),
-        ("sfc-Ch", args.sfc_Ch, 0.0, 1.0),
-        ("sfc-T", args.sfc_T, 100.0, 400.0),
-        ("sfc-q", args.sfc_q, 0.0, 0.1),
-    ]:
-        if not _math.isfinite(_fval):
-            raise SystemExit(
-                f"error: --{_fname}={_fval} not finite."
-            )
-        if not (_lo <= _fval <= _hi):
-            raise SystemExit(
-                f"error: --{_fname}={_fval} outside physical "
-                f"range [{_lo}, {_hi}]."
-            )
-    # iter-291 (Codex round-1 HIGH#2): validate --cubed-n-acoustic
-    # >= 1. 0 would divide-by-zero in split_explicit.py:313.
-    if args.cubed_n_acoustic is not None and args.cubed_n_acoustic < 1:
-        raise SystemExit(
-            f"error: --cubed-n-acoustic={args.cubed_n_acoustic} "
-            f"must be >= 1."
-        )
-    # iter-291 (Codex round-1 HIGH#3): warn (via SystemExit) when
-    # --sfc-* or --cubed-* are passed for a non-cubed-sphere grid.
-    # Silently ignoring them is the documented-bug case Codex
-    # flagged — flag-misuse should surface loudly.
+    # iter-292 (Codex iter-291 round-2 MEDIUM#2): cubed-sphere-only
+    # flag-misuse check runs FIRST so e.g.
+    # ``--grid plane_fd --cubed-n-acoustic 0`` surfaces the
+    # grid-mismatch (the real problem) instead of the secondary
+    # range-validation error. Reordered.
+    # iter-292 (Codex round-2 HIGH): added n_cubed_sphere to the
+    # cubed-only set — iter-291 omitted it so ``--grid mpas
+    # --n-cubed-sphere 96`` was silently ignored.
     if args.grid != "cubed_sphere":
         _CUBED_DEFAULTS = {
+            "n_cubed_sphere": 4,
             "sfc_Cd": 1.0e-3, "sfc_Ch": 1.0e-3,
             "sfc_T": 300.0, "sfc_q": 0.018,
             "cubed_n_acoustic": None,
@@ -865,6 +834,45 @@ def main():
                 f"{', '.join('--' + a.replace('_', '-') for a in _passed_cubed_only)}. "
                 f"These only apply to --grid cubed_sphere."
             )
+    # iter-288 (Codex iter-283..287 round-1 LOW#2): validate
+    # --n-cubed-sphere is a positive integer.
+    if args.n_cubed_sphere < 1:
+        raise SystemExit(
+            f"error: --n-cubed-sphere={args.n_cubed_sphere} must "
+            f"be >= 1. Typical values: 4 (default smoke), 12, "
+            f"24, 48, 96, 192 (production)."
+        )
+    # iter-291 (Codex iter-289..290 round-1 HIGH#1): validate
+    # surface-flux CLI flags. NaN T_sfc or negative Cd/Ch
+    # propagates into flux compute + flips sign of drag/heat/moisture
+    # forcing without error.
+    # iter-292 (Codex round-2 MEDIUM#1): widened sfc-T range
+    # [100, 400] → [50, 800] K to support non-Earth idealised
+    # experiments (cold tropopause snowball-Earth ≈ 200 K;
+    # Venus-like upper bound 800 K). Earth tropical RCEMIP IC
+    # uses 300 K and remains inside the widened bound.
+    for _fname, _fval, _lo, _hi in [
+        ("sfc-Cd", args.sfc_Cd, 0.0, 1.0),
+        ("sfc-Ch", args.sfc_Ch, 0.0, 1.0),
+        ("sfc-T", args.sfc_T, 50.0, 800.0),
+        ("sfc-q", args.sfc_q, 0.0, 0.1),
+    ]:
+        if not math.isfinite(_fval):
+            raise SystemExit(
+                f"error: --{_fname}={_fval} not finite."
+            )
+        if not (_lo <= _fval <= _hi):
+            raise SystemExit(
+                f"error: --{_fname}={_fval} outside physical "
+                f"range [{_lo}, {_hi}]."
+            )
+    # iter-291 (Codex round-1 HIGH#2): validate --cubed-n-acoustic
+    # >= 1. 0 would divide-by-zero in split_explicit.py:313.
+    if args.cubed_n_acoustic is not None and args.cubed_n_acoustic < 1:
+        raise SystemExit(
+            f"error: --cubed-n-acoustic={args.cubed_n_acoustic} "
+            f"must be >= 1."
+        )
     common_kwargs = dict(moist=args.moist)
     if args.grid == "cubed_sphere":
         common_kwargs["n"] = args.n_cubed_sphere
