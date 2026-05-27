@@ -154,6 +154,81 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 121..132 (compressed summary)
+
+12 iterations of tooling polish + Codex review chains + doc
+hygiene on top of the iter 99..120 trajectory-tools landing.
+iter-105 30-day run still in flight throughout.
+
+**iter-121 + iter-122 — fold of iter 99..120 + correction**
+(commits `4d851928`, `5ab5ccef`): fold 22 iters of post-iter-98
+tooling into one compressed summary block. iter-122 fixed 2
+Codex findings (test count 87→85 over-claim; iter-104 11-day
+fixture detail dropped).
+
+**iter-123 — test NaN-warning cleanup** (commit `169b45ee`): the
+test_compare_rce_trajectories ``_write_snapshot`` helper used
+``precip = arr * 0.0`` which propagated NaN under the NONFINITE-
+test fixtures, surfacing a numpy RuntimeWarning. Replaced with
+``np.zeros((ny, nx))``. iter-126 mirrored the same fix to
+test_summarize_rce_trajectory.
+
+**iter-124..126 — 30-day wrapper polish** (commits `5753efcc`,
+`49d9c446`, `a3c6e574`):
+* iter-124: wrapper prints a hint on DAYS>=30 + EVALUATE_DOD=0
+  runs (manual ``--final-dod`` invocation reminder).
+* iter-125: optional ``EMIT_TRAJECTORY_PNG=1`` (best-effort PNG
+  via plot_rce_log.py).
+* iter-126 (Codex iter-123/124/125): 2 MEDIUM + 2 LOW —
+  EVALUATE_DOD=1 also fires the hint (MEDIUM#1); ``=strict``
+  PNG mode propagates plot failure (MEDIUM#2); 4 DAYS edge-case
+  tests covering 29.99 / 30.5 / abc / 5; helper mirror fix.
+
+**iter-127..130 — --no-plateau-check + stability mode** (commits
+`93d30872`, `7f84d6e4`, `25d385af`, `ee6d2cf8`):
+* iter-127: new ``--no-plateau-check`` CLI flag — runs only the
+  finite + max|U|_sfc + stuck-detector gates on a trajectory too
+  short for the plateau check. Folds INSUFFICIENT into PASS.
+* iter-128: new ``--quiet`` flag suppresses the per-day fixed-
+  width table for CI gates that just want the verdict.
+* iter-129: wrapper EVALUATE_DOD widened to 4-way
+  ``{0, 1, stability, final}`` — ``stability`` threads
+  ``--evaluate --no-plateau-check`` for in-flight progress
+  monitoring.
+* iter-130 (Codex iter-128/129): 1 MEDIUM — distinct
+  ``DOD STABILITY verdict: PASS/FAIL`` label so log scrapers
+  don't mistake a stability-only PASS for a full
+  plateau-validated PASS.
+
+**iter-131..132 — doc-state refresh** (commits `46f2d308`,
+`081b8c5e`):
+* iter-131: Components table ``_rce_helpers`` test count refreshed
+  32 → 45. Full atmosphere/nonhydrostatic suite 191/191 PASS in
+  138 s wall.
+* iter-132: R11 + R12 roadmap status refreshed — R11 picks up the
+  iter-98 10-day PASS + iter-105 30-day in-flight; R12's "iter-80"
+  citation upgraded to "iter-130" reflecting the actual
+  continuous-review pattern.
+
+**End-of-cycle ledger** (post-iter-132):
+
+* Cumulative test count: 49 ``summarize_rce_trajectory`` + 15
+  ``compare_rce_trajectories`` + 36 ``run_rce_30day_wrapper_defaults``
+  + 5 ``test_dod_doc_code_consistency`` + 18
+  ``test_plane_crm_helpers_unit`` + 45
+  ``test_rce_helpers_unit`` = 168 across the iter 99..132 tooling
+  + helper unit tests.
+* Wrapper integration: ``EVALUATE_DOD`` 4-way (0 / 1 / stability /
+  final) + ``ALLOW_SUMMARY_FAILURE`` (0/1) + ``EMIT_TRAJECTORY_PNG``
+  (0 / 1 / strict).
+* CLI verdict labels: ``DOD``, ``DOD STABILITY``, ``DOD FINAL`` —
+  distinct so downstream log readers can tell apart a stability-
+  only PASS from a full plateau-validated PASS.
+
+**R-roadmap status**: R1-R8, R10, R12 ✓. F9 platform-blocked.
+R11 [~] still partial pending iter-105 30-day completion (32x32
+in flight; 132x132 wall-time gated).
+
 ### 2026-05-27 — iter 99..120 (compressed summary, iter-121 fold)
 
 22 iterations of post-iter-98 tooling + Codex hardening on top of
