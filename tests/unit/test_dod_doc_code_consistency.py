@@ -145,6 +145,30 @@ def test_dod_quotes_plateau_window_in_days():
     )
 
 
+def test_dod_quotes_wrapper_default_ranks():
+    """iter-173: DOD section's production-config preamble at
+    CRM_implementation.md:31 says ``12 MPI ranks``; the
+    run_rce_30day.sh wrapper defaults RANKS=12. They drift
+    independently and pre-iter-173 nothing enforced lockstep.
+
+    A wrapper revert to RANKS=4 (or any other value) would
+    leave the doc claim stale. This test scrapes the active
+    RANKS default from the wrapper's ``RANKS="${RANKS:-N}"``
+    line, then asserts criterion 2's text references the same N.
+    """
+    dod = _read_dod_section()
+    wrapper_text = (REPO_ROOT / "scripts" / "run_rce_30day.sh").read_text()
+    m = re.search(r'^RANKS="\$\{RANKS:-(\d+)\}"', wrapper_text, re.MULTILINE)
+    assert m, "wrapper missing RANKS env default"
+    ranks = int(m.group(1))
+    pat = rf"\b{ranks}\s+MPI\s+ranks?\b"
+    assert re.search(pat, dod), (
+        f"DOD section must reference the active wrapper RANKS "
+        f"default ({ranks}). DOD section does not match "
+        f"pattern {pat!r}."
+    )
+
+
 def test_dod_quotes_final_dod_min_days():
     """iter-171: ``DOD_FINAL_MIN_DAYS = 30`` is the minimum
     trajectory length below which evaluate_rce_final_dod returns
