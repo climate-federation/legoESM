@@ -149,6 +149,74 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 98 (per-day RCE trajectory summarizer landed)
+
+**Code change** (commit `93fd0ba8`):
+
+* `scripts/summarize_rce_trajectory.py` (new, 158 lines): reads
+  every `<out_dir>/snapshots/snap_day_NNNN.npz` written by
+  `run_rce_mpi_long.py:save_snapshot_2d`, optionally folds in
+  matching `<out_dir>/profiles/prof_day_NNNN.npz`
+  (`save_profile`), and prints a fixed-width per-day table + writes
+  `trajectory.csv` with one row per day. Columns: day, CWV
+  (mean/min/max/std), MSE_mean, precip (mean/max), T_sfc_mean,
+  qv_sfc_mean, qc_sfc_max, qr_sfc_max, |U|_sfc (mean/max), plus
+  profile-derived qc_col_max, qr_col_max, cf_col_max,
+  w_var_col_max (None → printed `-` / empty CSV cell on days with
+  no profile).
+* `tests/atmosphere/nonhydrostatic/integration/test_summarize_rce_trajectory.py`
+  (new, 9 tests, 0.12 s): contract tests vs
+  `run_rce_mpi_long.py` (snapshot + profile field sets), day-order
+  sort, present/missing profile branches, dash placeholder,
+  CSV round-trip, two error paths (no snapshots dir, empty
+  snapshots dir).
+
+No duplicated diagnostic formulas — every value is read directly
+from the driver-written `.npz` files, not recomputed.
+
+**Why iter-98 needed it**: the in-flight 10-day rad-enabled
+32×32×30 spinup run was outputting surface-only snapshots
+(`qc_sfc`, `qr_sfc`) which both stayed at zero through 10 days
+even though `log.txt`'s `max(qc)` (over the full column) was
+already at 7.7×10⁻⁴ kg/kg by day 7.7. The surface snapshots
+missed the column qc growth entirely. Now `summarize_rce_trajectory`
+pulls the profile-derived column-max columns into the same
+per-day table, so the trajectory CSV captures the actual
+convection onset story.
+
+**Day-by-day trajectory** (days 0–8 of the in-flight run, from
+`/tmp/iter98_crm32x32_rad10d/trajectory.csv`):
+
+| day | CWV_mean [mm] | T_sfc_mean [K] | qc_col_max [kg/kg] | cf_col_max |
+|---:|---:|---:|---:|---:|
+| 0 | 49.94 | 296.81 | 0.0 (IC) | 0.0 |
+| 1 | 53.63 | 297.07 | — | — |
+| 2 | 55.67 | 297.23 | — | — |
+| 3 | 56.77 | 297.94 | — | — |
+| 4 | 57.18 | 298.32 | — | — |
+| 5 | 57.12 | 298.53 | 3.62×10⁻⁴ | 1.00 |
+| 6 | 56.85 | 298.65 | — | — |
+| 7 | 56.54 | 298.71 | — | — |
+| 8 | 56.20 | 298.75 | — | — |
+
+CWV reaches Wing 2018 RCEMIP1 plateau range (50–60 mm) peaking
+day 4 at 57.18 mm then slowly drifts down — consistent with the
+expected overshoot-then-settle behaviour. T_sfc still rising
+toward the prescribed 300 K (radiation + flux not yet in steady
+state). cf_col_max = 1.0 at day 5 means at some vertical level
+the cloud fraction proxy is saturated; surface still dry
+(`qc_sfc`, `qr_sfc`, `precip` all 0).
+
+**Not yet measured** (run still in flight at 82% / day 8.2):
+day 9, day 10 endpoint, precip onset (Kessler autoconv triggers
+at column qc ~ 1 g/kg, currently 0.8 g/kg from log).
+
+**Next iter target** (iter-99): when iter-98 run completes,
+re-run `summarize_rce_trajectory` on the full 10-day output,
+commit the final CSV + day-10 endpoint table to the log,
+then decide whether to push to 30 days at this grid or move
+straight to 132×132 production.
+
 ### 2026-05-27 — iter 97 (qv-noise destabilises iter-95 IC; F7 stale)
 
 **Negative result**: tried iter-96 config + ``--qv-noise-amp`` at
