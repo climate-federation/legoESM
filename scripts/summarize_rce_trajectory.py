@@ -268,12 +268,33 @@ EXIT_DOD_INSUFFICIENT = 4    # --evaluate ran but trajectory too
                               # short for plateau check
 
 
-# iter-102: default thresholds drawn from Wing et al. 2018 RCEMIP1
-# multi-model statistics at SST = 300 K. Tuning history is captured
-# in the iteration log; do NOT silently widen these — drift here
-# should trigger a CRM_implementation.md update.
+# iter-102 / iter-109: default thresholds drawn from Wing et al.
+# 2018 RCEMIP1 multi-model statistics at SST = 300 K. Reference:
+# Wing, Reed, Satoh, Stevens, Bony, Ohno 2018, "Radiative-Convective
+# Equilibrium Model Intercomparison Project", Geoscientific Model
+# Development 11(2):793-813, doi:10.5194/gmd-11-793-2018. Fig. 5b
+# PWV-vs-SST envelope at SST = 300 K shows inter-model spread
+# ~45-60 mm (median ~50 mm, range across 16 cloud-resolving + 5
+# global models).
+#
+# DEFAULT_CWV_RANGE_MM is intentionally asymmetric around the Wing
+# band (45-60 mm):
+#   - Lower bound 35 mm: Wing band lower + 10 mm safety margin to
+#     absorb the IC dip. iter-98 IC = 49.94 mm; a symmetric ±5 mm
+#     band would put the lower edge above the IC and false-FAIL
+#     trajectories whose plateau mean is pulled down by the early
+#     pre-spinup days included in the rolling window.
+#   - Upper bound 65 mm: Wing band upper + 5 mm tolerance for the
+#     iter-98 day-4 CWV overshoot to 57.18 mm.
+# Tuning history captured in the iteration log; do NOT silently
+# widen these — drift here MUST trigger a CRM_implementation.md
+# update (locked by tests/unit/test_dod_doc_code_consistency.py).
 DEFAULT_CWV_RANGE_MM: tuple[float, float] = (35.0, 65.0)
 DEFAULT_MAX_W_THRESHOLD_MS: float = 50.0
+# 5 % is the 10-day SPINUP stability gate, not the final 30-day DOD
+# requirement (which is < 1 %). See CRM_implementation.md Definition
+# of done criterion 2 for the split. iter-98 measured 0.6 % over 10
+# days; iter-104 Codex MEDIUM flagged the 1 %/5 % conflation.
 DEFAULT_MSE_RELATIVE_DRIFT: float = 0.05
 DEFAULT_LAST_N_DAYS_FOR_PLATEAU: int = 10
 

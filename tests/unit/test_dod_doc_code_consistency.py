@@ -49,39 +49,78 @@ def _read_dod_section() -> str:
     return text[start:end]
 
 
+def _read_criterion_2_text() -> str:
+    """Extract DOD *criterion 2 only* (between the ``2. **Reach
+    radiative-convective equilibrium**:`` heading and the next
+    numbered criterion). iter-109 Codex MEDIUM#2 fix: the previous
+    whole-section match let the Wing 2018 citation in the DOD
+    preamble satisfy the criterion-2-Wing-citation lock, hollowing
+    out the test. Scope the match to the criterion's own text."""
+    dod = _read_dod_section()
+    crit2_start = dod.index("2. **Reach radiative-convective equilibrium**")
+    # Look ahead for the next ``\nN. **`` numbered criterion.
+    m = re.search(r"\n[3-9]\.\s+\*\*", dod[crit2_start:])
+    assert m is not None, (
+        "Could not find criterion 3+ after criterion 2 in DOD."
+    )
+    crit2_end = crit2_start + m.start()
+    return dod[crit2_start:crit2_end]
+
+
 def test_dod_quotes_summarizer_default_cwv_upper_bound():
     """iter-107 set ``DEFAULT_CWV_RANGE_MM = (35, 65)`` (Wing 2018
-    SST=300K multi-model band + 5 mm tolerance). The DOD section
-    documents the (35, 65) range. If a future widening / tightening
-    drifts only one of them, this test surfaces the drift."""
+    SST=300K multi-model band + asymmetric tolerance per iter-109).
+    The DOD section documents the (35, 65) range. iter-109 Codex
+    LOW#4 fix: parse the tuple via regex so trivial formatting
+    differences (`(35.0, 65.0)`, `(35, 65,)`, whitespace) don't
+    break the test on innocent reformatting."""
     mod = _load_summarizer_module()
     dod = _read_dod_section()
     low, high = mod.DEFAULT_CWV_RANGE_MM
-    expected_low = int(low) if float(low).is_integer() else low
-    expected_high = int(high) if float(high).is_integer() else high
-    needle = f"DEFAULT_CWV_RANGE_MM = ({expected_low}, {expected_high})"
-    assert needle in dod, (
+    # Match ``DEFAULT_CWV_RANGE_MM = (NUM, NUM)`` with flexible
+    # whitespace + optional trailing comma + integer-or-float NUM.
+    pattern = (
+        r"DEFAULT_CWV_RANGE_MM\s*=\s*\(\s*"
+        r"(?P<low>-?\d+(?:\.\d+)?)\s*,\s*"
+        r"(?P<high>-?\d+(?:\.\d+)?)\s*,?\s*\)"
+    )
+    m = re.search(pattern, dod)
+    assert m is not None, (
         f"DOD section in CRM_implementation.md must quote the active "
-        f"DEFAULT_CWV_RANGE_MM = ({expected_low}, {expected_high}). "
-        f"Got DOD section that does not contain {needle!r}. Either the "
-        f"summarizer constant was tightened/widened without updating "
-        f"the doc, or the doc was edited without updating the code."
+        f"DEFAULT_CWV_RANGE_MM = ({low}, {high}). No matching "
+        f"``DEFAULT_CWV_RANGE_MM = (..., ...)`` clause found in DOD."
+    )
+    doc_low = float(m.group("low"))
+    doc_high = float(m.group("high"))
+    assert doc_low == low and doc_high == high, (
+        f"DOD doc says DEFAULT_CWV_RANGE_MM = ({doc_low}, {doc_high}) "
+        f"but the active code says ({low}, {high}). One of them is "
+        f"stale; update both in lockstep."
     )
 
 
 def test_dod_quotes_summarizer_mse_drift_tolerance():
     """``DEFAULT_MSE_RELATIVE_DRIFT`` (currently 0.05) is the
-    code-level gate. The DOD doc quotes ``5 %``. Lock the relationship
-    so a future tighten to 0.01 must also update the doc to ``1 %``."""
+    code-level gate. The DOD doc quotes ``5 %`` (or equivalent
+    formatting). iter-109 Codex LOW#5 fix: regex tolerates ``5 %``,
+    ``5%``, ``5.0 %``, ``5.0%``."""
     mod = _load_summarizer_module()
     dod = _read_dod_section()
     pct = mod.DEFAULT_MSE_RELATIVE_DRIFT * 100.0
-    pct_str = f"{int(pct)} %" if pct.is_integer() else f"{pct:g} %"
-    assert pct_str in dod, (
+    # Build a tight regex around the active value. Examples for
+    # pct=5.0: matches `5 %`, `5%`, `5.0 %`, `5.0%`, but NOT `15 %`
+    # or `5.5 %` (those would be different drift tolerances).
+    if pct.is_integer():
+        # e.g. `5` or `5.0` followed by optional space + ``%``.
+        pat = rf"\b{int(pct)}(?:\.0+)?\s*%"
+    else:
+        # Non-integer like 1.5 % — match exact decimal.
+        pat = rf"\b{re.escape(f'{pct:g}')}\s*%"
+    assert re.search(pat, dod), (
         f"DOD section in CRM_implementation.md must quote the active "
-        f"MSE drift tolerance {pct_str} (from "
+        f"MSE drift tolerance ({pct:g} %, from "
         f"DEFAULT_MSE_RELATIVE_DRIFT = {mod.DEFAULT_MSE_RELATIVE_DRIFT}). "
-        f"DOD section does not contain {pct_str!r}."
+        f"DOD section does not match pattern {pat!r}."
     )
 
 
@@ -106,15 +145,45 @@ def test_dod_quotes_plateau_window_in_days():
     )
 
 
-def test_dod_mentions_wing_2018():
+def test_criterion_2_cites_wing_2018():
     """iter-107: DOD criterion 2 must cite Wing 2018 (the canonical
     RCEMIP1 reference for the CWV range). A future revert that drops
     the Wing reference and goes back to a hand-rolled estimate is
-    the exact kind of stale-DOD bug iter-107 fixed."""
-    dod = _read_dod_section()
-    assert re.search(r"Wing\s*(et\s*al\.?\s*)?2018", dod), (
-        "DOD criterion 2 must cite ``Wing 2018`` / ``Wing et al. "
-        "2018`` for the RCEMIP1 plateau range. Pre-iter-107 the doc "
-        "had a stale 30 +/- 5 mm hand-rolled estimate; this test "
-        "blocks any future revert."
+    the exact kind of stale-DOD bug iter-107 fixed.
+
+    iter-109 Codex MEDIUM#2 fix: extract criterion 2 specifically
+    so the citation in the DOD preamble cannot satisfy this test —
+    criterion 2's own text must carry the Wing reference.
+
+    iter-109 (Codex Q5 follow-up): the surname-only regex
+    ``Wing\\s*...2018`` would also match ``Wing-Tatang 2018``. Tighten
+    to require either ``Wing 2018`` exactly OR
+    ``Wing et al. 2018`` — both with a word boundary AFTER ``Wing``
+    so a hyphenated compound surname doesn't satisfy the test."""
+    crit2 = _read_criterion_2_text()
+    # Word boundary after Wing rejects "Wing-Tatang", "Wingerd", etc.
+    # Allow whitespace + "et al." optionally, then a 4-digit year.
+    assert re.search(
+        r"\bWing\b(?:\s+et\s+al\.?)?\s+2018", crit2,
+    ), (
+        "DOD criterion 2 (text between ``2. **Reach radiative-"
+        "convective equilibrium**`` and the next numbered criterion) "
+        "must cite ``Wing 2018`` or ``Wing et al. 2018`` for the "
+        "RCEMIP1 plateau range. iter-107 fixed the stale 30 +/- 5 "
+        "mm estimate; this test blocks any future revert AND blocks "
+        "a same-name false positive (``Wing-Tatang 2018`` is "
+        "rejected by the word boundary)."
+    )
+
+
+def test_criterion_2_quotes_wing_doi():
+    """iter-109 Codex LOW#6 fix: the DOD criterion 2 citation must
+    include the Wing 2018 DOI so auditors can verify the cited
+    PWV-vs-SST envelope without leaving the repo."""
+    crit2 = _read_criterion_2_text()
+    assert "10.5194/gmd-11-793-2018" in crit2, (
+        "DOD criterion 2 must include the Wing 2018 DOI "
+        "``10.5194/gmd-11-793-2018`` so the CWV plateau range "
+        "citation is verifiable from the repo alone (iter-109 "
+        "Codex LOW#6)."
     )
