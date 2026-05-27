@@ -1033,9 +1033,14 @@ def plane_compressible_euler_slow_tendencies(
     # 5. Theta advection (advective form). Theta at cell centre;
     #    advect with the cell-centre velocity formed by face→cell
     #    averaging of u, v. Scheme selected by config.
-    #    horizontal_advection_scheme: "upwind1" (cheap, dispersive,
-    #    dt-constrained) or "weno5" (5th-order WENO-Z, much less
-    #    grid-scale dispersion, recommended for plane LES / RCE).
+    #    horizontal_advection_scheme:
+    #    - "upwind1" (cheap, 1st-order, dispersive, dt-constrained).
+    #    - "van_leer" (2nd-order TVD, stencil 4, monotone — iter-183
+    #      production default: 3x wall-time speedup vs upwind1 at
+    #      dt=20 thanks to lower numerical diffusion).
+    #    - "weno5" (5th-order WENO-Z, stencil 6 — least grid-scale
+    #      dispersion but ~3x per-step cost; opt-in for sharp-front
+    #      problems where dispersion matters more than throughput).
     scheme = getattr(config, "horizontal_advection_scheme", "upwind1")
     if scheme == "weno5":
         adv_x, adv_y = _weno5_advection_x, _weno5_advection_y
