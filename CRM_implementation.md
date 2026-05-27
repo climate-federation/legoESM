@@ -207,250 +207,41 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
-### 2026-05-27 — iter 234..236 (Codex iter-233 round-1/2 fixes + focused CRM regression sweep)
+### 2026-05-27 — iter 217..236 (compressed fold: iter-183 30-day DOD PASS + production envelope + FV3 n_outer_split)
 
-**iter-234 — Codex iter-233 round-1**: 1 MEDIUM + 1 LOW.
-* MEDIUM: ``compute_courant_numbers_plane`` was called with
-  ``args.dt`` (outer) but the dycore steps at ``dt_inner =
-  args.dt / n_outer_split`` when ``n_outer_split > 1``.
-  ``Ca_substep`` inflated by n_outer_split → false CFL alarms.
-  Fix: pass ``dt_inner`` to the diagnostic. Bit-equal for default
-  ``n_outer_split=1``.
-* LOW: no driver-level subprocess tests for ``--n-outer-split foo``
-  or ``--n-outer-split 0`` rejection (only the helper-level
-  ``ValueError`` was unit-tested). Fix: 2 new SystemExit
-  integration tests.
+20 iterations covering F11 LES sweep, iter-183 30-day production
+verification, production envelope regression with 3 Codex rounds,
+FV3-style n_outer_split with 2 Codex rounds, regression sweep.
 
-**iter-235 — Codex iter-234 round-2**: 2 LOW.
-* LOW#1: ``--n-outer-split=auto`` raises raw ValueError from
-  ``select_n_outer_split`` on bad inputs (``--max-wind-safe=0``,
-  ``--cfl-safe=nan``) BEFORE the iter-67/68 finite/range CLI
-  validator runs. Fix: try/except → clean SystemExit.
-* LOW#2: ``# RCE MPI LONG`` run-header logs ``dt={args.dt}`` while
-  ``Ca_substep`` is computed at ``dt_inner``. Fix: append
-  ``dt_inner=X`` field (redundant when ``n_outer_split=1`` but
-  schema-stable). Added 3rd SystemExit test for the auto path.
+**iter-217..228 (F11 fix-path-1 LES sweep)** — full prose at
+F11 (lines 153..160). Key results:
 
-**iter-236 — focused CRM regression sweep**:
-``JAX_PLATFORMS=cpu .venv/bin/python -m pytest
-tests/atmosphere/nonhydrostatic/ tests/unit/test_select_n_outer_split.py
-tests/unit/test_van_leer_advection.py
-tests/unit/test_van_leer_halo_equiv.py -q --timeout=120``
-→ **353 passed, 4 deselected, 7m33s wall**. No regressions
-introduced by the iter-229..235 chain.
+* iter-220/221: LES dx=500 m + dt=0.5 + smooth_k1 theta_noise ran
+  864 steps WITHOUT NaN; gravity-wave mode halved by 2× larger
+  domain.
+* iter-222: LES + theta_noise=0 baseline → max|w|=1-4e-4 m/s for
+  864 steps. Confirms gravity wave is smooth_k1 response.
+* iter-223: LES + white noise 0.01 K → realistic-rate precip
+  **7.46 mm/day** at step 600 (Wing 2018 order of magnitude); qc
+  over-amplify (0.305) → NaN at step 700.
+* iter-224 → iter-225/226 correction: Smag c_s=0.4 + 0.001 K
+  delayed but didn't prevent qc cascade (NaN at step 1250).
+* iter-227: amp-independent — 1e-5 K still grew max|w| to 69 m/s.
+* iter-228: --adaptive-dt parse-only stub. Codex iter-225
+  feasibility: iter-223 NaN had max|w|=225 m/s → Ca_adv=0.225
+  (still < 1) → blow-up not an advective-CFL violation.
 
-Pre-existing unrelated collection errors (NOT caused by this
-chain, flagged for future cleanup):
-* ``tests/unit/test_spectral_plane_dycore.py``:
-  ``SpectralPlanePhysicsState`` missing import in
-  ``legoesm.core.state``.
-* ``tests/validation/test_rcemip_plane_smoke.py``,
-  ``test_spectral_plane_rce_smoke.py``: module-level
-  ``float(jnp.log(100.0))`` in ``spectral_pe.py:72`` crashes on
-  Metal backend (StableHLO bytecode mismatch). Works under
-  ``JAX_PLATFORMS=cpu``; the conftest's ``ensure_metal_or_fallback``
-  doesn't run at import time.
+**iter-229 — iter-183 30-day production DOD PASS**:
 
-### 2026-05-27 — iter 233 (FV3-style trace-time n_outer_split — replaces iter-228 adaptive-dt stub)
-
-User suggestion: "FV3-style answer is split-explicit subcycling
-with a fixed n_split — the substep count is a static integer
-chosen at trace time from a conservative max wind, which is
-natively scan-friendly and fully reverse-differentiable without
-any of the above gymnastics. You can reuse it if we have it in
-our FV3 implementation".
-
-Investigation: `src/legoesm/core/fv3_*.py` (SW-core primitives:
-D-grid, divergence corner, sponge layer, del6 vt flux) has no
-n_split selector. `src/legoesm/timestepping/split_explicit.py`
-has `SplitExplicitConfig(n_substeps=6)` but only for SK08
-ACOUSTIC inner substeps within each RK3 stage — not the FV3
-OUTER subcycle the user described. So we add the missing piece
-rather than reuse.
-
-**Changes**
-
-* `src/legoesm/timestepping/split_explicit.py`: added
-  `select_n_outer_split(dt_outer, dx, max_wind_safe=300.0,
-  cfl_safe=0.4) -> int`. Pure Python float-in / int-out
-  utility. Trace-time. Reusable across dycores.
-* `scripts/run_rce_mpi_long.py`: added three CLI flags:
-  * `--n-outer-split N|auto` (default `'1'` = no subcycling,
-    preserves iter-183 production bit-equal). `auto` calls
-    `select_n_outer_split` at parse time. Integer `N` overrides.
-  * `--max-wind-safe FLOAT` (default 300.0 m/s = iter-223 F11
-    ceiling + 33%% safety margin).
-  * `--cfl-safe FLOAT` (default 0.4 = SK08/FV3 standard).
-  The chosen `n_outer_split` is a STATIC Python int used as
-  `range(n_outer_split)` in the outer loop (both DD and
-  legacy rank-0 paths). No XLA retrace, no traced control
-  flow, fully reverse-differentiable.
-* `# config:` log header now includes `n_outer_split=N` for
-  fingerprint testing.
-* `--adaptive-dt` stub help text updated to point users at the
-  iter-233 replacement.
-* `tests/unit/test_select_n_outer_split.py`: 19 unit tests.
-  Cover iter-183 production -> 8, steady opt-down -> 1, LES
-  regime -> 1, ceiling rounding (0.2 cfl -> 15 not 16),
-  Python-int return type, ValueError validation on
-  dt/dx/max_wind/cfl.
-* `tests/atmosphere/nonhydrostatic/integration/test_run_rce_mpi_long_driver_defaults.py`:
-  4 new tests:
-  * `test_n_outer_split_default_preserves_iter183_contract` —
-    default MUST be "1" (default-flip would silently invalidate
-    iter-229 DOD PASS).
-  * `test_max_wind_safe_default_300`
-  * `test_cfl_safe_default_0p4`
-  * `test_driver_imports_select_n_outer_split_from_package` —
-    AST-lock the helper-import path (mirrors iter-218 pattern).
-
-**Measurements**
-
-* iter-183 envelope test (default --n-outer-split 1) still
-  PASSES in 28.5 s — bit-equal to pre-iter-233 behavior.
-* `--n-outer-split 2` smoke (12x12 dx=2000 dt=5): exits 0,
-  log shows `n_outer_split=2`. Stable.
-* `--n-outer-split auto` smoke (12x12 dx=2000 dt=20): exits 0,
-  log shows `n_outer_split=8` (matches the docstring example
-  ceil(20·300/(0.4·2000))=8). Stable.
-* 19 unit tests + 4 AST/integration tests pass (54.9 s including
-  the 36 pre-iter-233 smoke tests).
-
-**Why not iter-228 adaptive-dt (mid-run dt halving)?**
-
-The iter-228 proposal required restructuring the time
-integration loop from `for step in range(total_steps)` to
-`while t_sim < target_t` with per-step CFL monitoring +
-dt-shrinkage. That breaks `lax.scan`-friendliness (variable
-loop length), forces XLA retrace on dt change (dt is a
-JIT-static in some code paths), and complicates AD (the
-while-condition is a traced bool). iter-233 keeps the static
-fori_loop discipline by picking N upfront from the worst-case
-wind — the cost is some wasted subcycling for steady runs (a
-user who knows max|w|<1 m/s sets `--max-wind-safe 1.0` and
-gets N=1).
-
-### 2026-05-27 — iter 230 (iter-183 production-contract envelope regression + Codex round-1 fixes)
-
-Locked the iter-183 production contract (dt=20 + van_leer +
-beta=0.2 + NO mass fixer + no radiation, 132x132x30 dx=2 km) as a
-nightly slow regression. iter-229 verified the contract at full
-30-day scale via the actual production run — iter-230 adds the
-fast 20-sim-min smoke equivalent that fingerprints the config +
-catches early-stability regressions (CFL crash, dycore no-op,
-silent kwarg fallback) in ~30 s on cached JIT. Late-time effects
-(day-16 precip cycles, slow MSE drift, late convective
-amplification) are out of scope at 20 sim-min and remain
-covered by the 30-day production runs themselves.
-
-**Changes**
-* ``tests/atmosphere/nonhydrostatic/integration/test_plane_crm_end_to_end_smoke.py``:
-  added ``test_plane_crm_iter183_production_scale_132x132_envelope``
-  (slow). Parameterised the existing
-  ``_run_driver_production_scale`` helper with four new kwargs
-  (``dt``, ``advection``, ``acoustic_off_centering``,
-  ``no_mass_fixer``) defaulting to the iter-14 contract so the
-  existing iter-14 envelope + with-radiation tests keep working
-  unchanged.
-* Pre-existing failure observed:
-  ``test_plane_crm_production_scale_132x132_with_radiation``
-  reports MSE drift = +0.000e+00 (4-sig-fig log truncation) on
-  the iter-229 baseline. Not iter-230 work — a separate
-  follow-on PR should bump the driver's log precision from
-  ``:.4e`` to ``:.6e`` so the iter-39 cooling-sign assertion can
-  actually fire.
-
-**Codex round-1 review of the new test** (`/codex:adversarial-review --fresh`):
-
-* HIGH — original draft kept the driver mass fixer ON (helper
-  default), contradicting the iter-229 production wrapper which
-  defaults ``NO_MASS_FIXER=1`` and passes ``--no-mass-fixer``.
-  CWV-drift assertion was artificially tight because the fixer
-  pinned moisture at IC. **Fix**: added ``no_mass_fixer`` kwarg;
-  iter-183 test passes ``True`` to match the wrapper. Empirical
-  drift over 60 steps = 0.066 mm; cap raised to 0.15 mm + floor
-  at 1e-3 mm to also catch a silent fixer re-enable.
-* MEDIUM#1 — test did not verify dt=20 / van_leer / beta=0.2
-  actually ran (silent helper-kwarg fallback to iter-14 dt=5
-  would pass every envelope check). **Fix**: added two dt
-  fingerprints — (a) final-logged ``day == 60·dt/86400`` within
-  1e-5 (rejects dt=5 fallback at 4× too-low day count); (b)
-  ``Ca_substep > 0.5`` at step 1 (iter-183's dt=20+n_acoustic=12
-  yields ≈0.87; iter-14 dt=5 same n_acoustic gives ≈0.22).
-* MEDIUM#2 — docstring overclaimed "catches regressions that
-  would have shown up at 30-day scale". **Fix**: rephrased to
-  "early-stability + config-fingerprint smoke, not a 30-day
-  proxy" — explicitly notes that late-time effects (day-16
-  precip cycles, slow MSE drift, late convective amplification)
-  are out of scope at 20 sim-min.
-* LOW — thresholds copied verbatim from iter-14 envelope; did
-  not distinguish iter-183 from iter-14. **Fix**: anchored all
-  bounds to the empirical iter-230 smoke measurement (table in
-  docstring); the new Ca_substep + final-day fingerprints
-  distinguish the two contracts.
-
-**Measurements** (iter-183 contract, 132x132x30, dt=20, n=60):
-
-| step | day      | CWV[mm] | MSE[J/m²] | max|w|[m/s] | Ca_substep |
-|------|----------|---------|-----------|-------------|------------|
-|  1   | 0.000231 | 49.942  | 3.5247e9  | 0.0e+00     | 0.8741     |
-| 15   | 0.003472 | 49.958  | 3.5247e9  | 3.81e-04    | 0.8741     |
-| 30   | 0.006944 | 49.975  | 3.5248e9  | 5.41e-04    | 0.8741     |
-| 45   | 0.010417 | 49.992  | 3.5248e9  | 6.22e-04    | 0.8741     |
-| 60   | 0.013889 | 50.008  | 3.5249e9  | 6.68e-04    | 0.8741     |
-
-Test wall: 28.4 s cached JIT (1.5 min cold). All 36 non-slow
-tests still pass. iter-14 envelope test still passes (helper
-backward-compat verified).
-
-### 2026-05-27 — iter 217..229 (LES F11 fix-path-1 sweep + iter-183 30-day DOD PASS)
-
-13 iterations spanning the F11 LES experiment chain and the final
-iter-183 30-day production verification.
-
-**iter-217..228 (F11 fix-path-1 LES sweep + adaptive-dt stub)**:
-documented above in F11 prose (lines 153..160). Key results:
-
-* iter-220/221: LES dx=500 m + dt=0.5 + theta_noise smooth_k1 ran
-  864 steps WITHOUT NaN — first non-NaN nonzero-theta-noise runs
-  at any iteration. Gravity-wave mode halved by 2× larger domain.
-* iter-222 control (LES + theta_noise=0): max|w| stays at 1-4e-4
-  m/s through 864 steps — confirms gravity wave is smooth_k1
-  response, not intrinsic LES instability.
-* iter-223 (LES + white theta_noise 0.01 K): **realistic-rate
-  precip 7.46 mm/day** at step 600 (order-of-magnitude match for
-  Wing 2018 ~3 mm/day) — but qc cells over-amplify (qc=0.305,
-  10× supersaturated) → NaN at step 700.
-* iter-224 (LES + theta_noise 0.001 K + Smag c_s=0.4): APPARENT
-  breakthrough at 864 steps; iter-225 follow-up to 28 sim-min
-  shows NaN at step 1250 — Smag+amp tuning only delays the qc
-  cascade. iter-226 documents the correction.
-* iter-227 (theta_noise=1e-5 K): max|w|=69 m/s by step 750 —
-  amp-independent at LES dx, F11 cascade kicks in regardless.
-* iter-228: --adaptive-dt parse-only stub added. Real
-  implementation (~80 LOC time-loop restructure) reserved for
-  follow-on PR. iter-225 feasibility note: max|w|=225 m/s at
-  iter-223 NaN corresponds to Ca_adv=0.225 (still < 1), so the
-  blow-up isn't an advective-CFL violation — adaptive dt would
-  delay but not prevent the qc buoyancy cascade.
-
-**iter-229 — iter-183 30-day production COMPLETED, DOD PASS**:
-
-The iter-183 30-day production run (PID 33311) terminated cleanly
-after 129600/129600 steps = 30.000 sim-days in 10368 s wall =
-**2 h 53 m** on a single rank (132×132×30, dx=2 km, dt=20 s, Van
-Leer horizontal advection, beta=0.2, Smag c_s=0.2, hyperdiff=5e6,
-no theta-noise — the iter-183 production contract).
-
-Final-DOD verdict via
-``summarize_rce_trajectory.py --final-dod --check-log-max-w``:
+Run PID 33311 finished 129600/129600 steps = 30.000 sim-days in
+10368 s wall = **2 h 53 m** single rank (132×132×30, dx=2 km,
+dt=20 s, Van Leer, beta=0.2, Smag c_s=0.2, hyperdiff=5e6, no
+theta-noise).
 
 ```
-log max|w| = 1.0605e-02 m/s (1297 log rows; DOD threshold = 50.0 m/s)
+log max|w| = 1.0605e-02 m/s (1297 log rows; DOD threshold 50.0 m/s)
 DOD FINAL verdict: PASS
 ```
-
-Trajectory plateau (CWV, MSE, max|w|, surface precip):
 
 | day | CWV[mm] | MSE[J/m²] | log max|w|[m/s] | precip[mm/day] |
 |---|---|---|---|---|
@@ -459,34 +250,135 @@ Trajectory plateau (CWV, MSE, max|w|, surface precip):
 | 10 | 56.07 | 3.5010e9 | ~3e-3   | 0       |
 | 15 | 55.56 | 3.4892e9 | ~5e-3   | 0       |
 | 16 | 55.49 | 3.4872e9 | ~6e-3   | 7.1e-4  |
-| 20 | 54.83 | 3.4800e9 | ~6e-3   | 4.9e-4  |
-| 25 | 54.01 | 3.4725e9 | ~6e-3   | 4.3e-4  |
 | 30 | 53.33 | 3.4668e9 | 1.06e-2 | 1.19e-3 |
 
-Cumulative surface precip over days 16..30:
-~14 d × 86400 s × ~6.5e-9 mm/s ≈ **7.9e-3 mm total**, average
-**~5.6e-4 mm/day** — three OOM below Wing 2018 ~3 mm/day plateau
-target. Column-symmetric trap × Kessler under-resolution at
-dx=2 km still binds (the LES sweep above showed real cells form
-at dx=500 m but blow up in F11 qc cascade by step 700).
+Cumulative precip days 16..30 ≈ 7.9e-3 mm (avg ~5.6e-4 mm/day),
+still 3 OOM below Wing 2018 ~3 mm/day plateau. Closes the
+"stable" half of the DOD; "realistic precip" gated by F11.
 
-**Net iter-183 chain wins (verified iter-229)**:
+* 30-day plane CRM stable throughout (safety margin ~5000× under
+  DOD max|w| threshold).
+* CWV plateau in Wing 2018 range. MSE drift -1.6% over 30 days.
+* **3× wall-time speedup** over iter-14 baseline (~9 h → 2 h 53 m).
+* First documented 30-day plane CRM with non-trivial precip
+  starting day 16.
 
-* 30-day plane CRM **STABLE THROUGHOUT** (max|w|=1.06e-2 m/s
-  end-state; DOD threshold 50 m/s, safety margin ~5000×).
-* CWV plateau 49.94 → 53.33 mm (Wing 2018 range; -1.6% MSE drift
-  across 30 days, no runaway).
-* **3× wall-time speedup** confirmed at production scale
-  (iter-14 baseline ~9 h vs iter-183 2 h 53 m).
-* First end-to-end documented 30-day plane CRM run with
-  non-trivial precipitation cycles starting day 16.
-* Iter-183 production contract (dt=20 + Van Leer + beta=0.2)
-  closes the "stable" half of the DOD goal.
+**iter-230..232 — production envelope regression + 3 Codex rounds**:
 
-**Outstanding**: realistic precip rates still gated by F11
-(dx ≤ 1 km LES regime); cross-grid CRM (cubed-sphere/MPAS)
-remains the "all grid types" piece (run_rce_cross_grid.sh covers
-hydrostatic RCE today, not non-hydrostatic CRM).
+`tests/atmosphere/nonhydrostatic/integration/test_plane_crm_end_to_end_smoke.py`
+gained `test_plane_crm_iter183_production_scale_132x132_envelope`
+(slow, 28.4 s cached JIT). Locks iter-183 contract (dt=20,
+van_leer, beta=0.2, no-mass-fixer, no-rad) at 60 outer steps =
+20 sim-min. Parameterised `_run_driver_production_scale` with 4
+kwargs (`dt`, `advection`, `acoustic_off_centering`,
+`no_mass_fixer`) keeping iter-14 envelope + with-rad tests
+unchanged.
+
+Codex round-1 (HIGH + 2 MEDIUM + 1 LOW): mass-fixer mismatch
+fixed via `no_mass_fixer=True`; dt fingerprints added
+(`final_day == 60·dt/86400` ± 1e-5, `Ca_substep > 0.5`); docstring
+overclaim narrowed to "early-stability + config-fingerprint
+smoke"; thresholds anchored to empirical iter-230 measurements.
+
+Codex round-2 (2 MEDIUM): driver now emits
+`# config: advection=X acoustic_off_centering=Y mass_fixer={on,off}
+si_acoustic={on,off} n_acoustic_substeps=N hyperdiff=H` log
+header; test parses + asserts exact tokens. CWV drift switched
+from `abs()` to signed `cwv_growth` requiring positive moisture
+gain (catches flipped surface-flux sign).
+
+Codex round-3 (1 MEDIUM + 1 LOW): exact-token dict parse (was
+substring `in` matching); added `hyperdiff=5e6` fingerprint.
+
+Empirical iter-230 measurement table (locked in test docstring):
+
+| step | day      | CWV[mm] | MSE[J/m²] | max|w|[m/s] | Ca_substep |
+|------|----------|---------|-----------|-------------|------------|
+|  1   | 0.000231 | 49.942  | 3.5247e9  | 0.0e+00     | 0.8741     |
+| 60   | 0.013889 | 50.008  | 3.5249e9  | 6.68e-04    | 0.8741     |
+
+**iter-233 — FV3-style trace-time n_outer_split** (user-proposed):
+
+User feedback: "FV3-style answer is split-explicit subcycling
+with a fixed n_split — substep count chosen at trace time from
+a conservative max wind. Natively scan-friendly and fully
+reverse-differentiable without any of the above gymnastics."
+
+Investigation: `src/legoesm/core/fv3_*.py` has SW-core primitives
+(D-grid, divergence corner, sponge, del6 vt flux); no n_split
+selector. `split_explicit.py` has SK08 acoustic inner substeps
+only. Added the missing piece:
+
+* `src/legoesm/timestepping/split_explicit.py:
+  select_n_outer_split(dt_outer, dx, max_wind_safe=300.0,
+  cfl_safe=0.4) -> int`. Pure Python int. Trace-time. Reusable.
+  Examples: iter-183 → 8; steady opt-down (max_wind=1) → 1;
+  LES dx=500/dt=0.5 → 1.
+* `scripts/run_rce_mpi_long.py`: `--n-outer-split N|auto`
+  (default `'1'` = preserves iter-183 bit-equal),
+  `--max-wind-safe FLOAT` (default 300 m/s = iter-223 F11
+  ceiling + 33% margin), `--cfl-safe FLOAT` (default 0.4 =
+  SK08/FV3). Static Python int used as `range(n_outer_split)`
+  in outer loop. No XLA retrace, no traced control flow, fully
+  AD-safe. `# config:` log includes `n_outer_split=N`.
+* Tests: 19 unit tests
+  (`tests/unit/test_select_n_outer_split.py`) + 4 driver-default
+  AST tests in `test_run_rce_mpi_long_driver_defaults.py`.
+
+Why not iter-228 adaptive-dt: while-loop refactor breaks
+`lax.scan`, forces XLA retrace on dt change, complicates AD.
+Static n_split keeps the fori_loop discipline; cost is some
+wasted subcycling for steady runs.
+
+**iter-234..235 — Codex iter-233 round-1 + round-2**:
+
+Round-1 (1 MEDIUM + 1 LOW): `Ca_substep` was computed with
+`args.dt` not `dt_inner = args.dt / n_outer_split` → false CFL
+alarms at n>1. Fix: pass `dt_inner` (bit-equal for default
+n=1). Added 2 subprocess SystemExit tests for `--n-outer-split
+foo` and `0`.
+
+Round-2 (2 LOW): auto-mode raised raw ValueError on bad inputs
+(`--max-wind-safe=0`); wrapped in try/except → SystemExit with
+named diagnostic. Run header now logs `dt_inner=X` alongside
+outer dt for post-run analyst clarity. Added 3rd SystemExit
+test for the auto path.
+
+**iter-236 — focused CRM regression sweep**:
+
+```
+JAX_PLATFORMS=cpu pytest \
+  tests/atmosphere/nonhydrostatic/ \
+  tests/unit/test_select_n_outer_split.py \
+  tests/unit/test_van_leer_advection.py \
+  tests/unit/test_van_leer_halo_equiv.py
+→ 353 passed, 4 deselected, 7m33s wall
+```
+
+No regressions from iter-229..235 chain.
+
+**Pre-existing unrelated collection errors** (NOT iter-229..236
+work, flagged for future PR):
+* `tests/unit/test_spectral_plane_dycore.py`:
+  `SpectralPlanePhysicsState` missing from
+  `legoesm.core.state`.
+* `tests/validation/test_rcemip_plane_smoke.py` +
+  `test_spectral_plane_rce_smoke.py`: module-level
+  `float(jnp.log(100.0))` in `spectral_pe.py:72` crashes on
+  Metal backend (StableHLO bytecode mismatch). Works under
+  `JAX_PLATFORMS=cpu`.
+* `test_plane_crm_production_scale_132x132_with_radiation`
+  reports MSE drift = +0.000e+00 (`:.4e` log truncation).
+  Fix: bump driver log precision to `:.6e`.
+
+**Outstanding for the DOD goal**:
+* Realistic precip rates gated by F11 (dx ≤ 1 km LES regime
+  needed; even there iter-223..227 hit qc buoyancy cascade).
+* Cross-grid CRM ("all grid types"):
+  `compressible_euler_mpas.py` Voronoi grid has no
+  `horizontal_advection_scheme` dispatch — single edge-based
+  scheme hardcoded. Adding van_leer / weno5 parity is a
+  meaningful chunk for a follow-on iter.
 
 ### 2026-05-27 — iter 212..216 (in-flight precip observation + iter-105 reanalysis)
 
