@@ -18,14 +18,14 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-# Add scripts/ to import path so the test can import _make_rcemip_physics.
+# Add scripts/ to import path so the test can import make_rcemip_physics.
 _SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 from run_rcemip_plane import (  # type: ignore
     _build_rcemip_initial_state,
-    _make_rcemip_physics,
+    make_rcemip_physics,
     _rcemip_qv_profile,
     _rcemip_theta_profile,
 )
@@ -91,7 +91,7 @@ def test_rcemip_profiles_match_wing_2018_values():
 def test_rcemip_smoke_10_step_integration():
     """10-step integration must stay finite + mass-conservative."""
     model, state, grid, hc, tm = _setup_rcemip()
-    physics_fn = _make_rcemip_physics(grid, hc, tm)
+    physics_fn = make_rcemip_physics(grid, hc, tm, radiation_config=None, microphysics_config=None, dt=2.0)
     mass0 = float(compute_dry_mass_plane(state, grid, hc, tm))
     for _ in range(10):
         state = model.step(state, dt=2.0, physics_fn=physics_fn)
@@ -115,7 +115,7 @@ def test_rcemip_water_budget_positive_q_v_source():
     mass is NOT conserved (surface acts as a source) while dry mass
     is."""
     model, state, grid, hc, tm = _setup_rcemip()
-    physics_fn = _make_rcemip_physics(grid, hc, tm)
+    physics_fn = make_rcemip_physics(grid, hc, tm, radiation_config=None, microphysics_config=None, dt=2.0)
     tend = physics_fn(state, grid, hc, tm)
     # surface q_v tendency = lhflx / (rho L_v dz_sfc); for q_lo < q_sfc
     # this is positive.
@@ -134,7 +134,7 @@ def test_rcemip_physics_fn_is_differentiable():
     wind_speed has a 1 m/s floor so the kink at zero wind is avoided
     by construction; the Exner conversion is a constant scalar."""
     model, state, grid, hc, tm = _setup_rcemip()
-    physics_fn = _make_rcemip_physics(grid, hc, tm)
+    physics_fn = make_rcemip_physics(grid, hc, tm, radiation_config=None, microphysics_config=None, dt=2.0)
     # Scalar loss = sum(dtheta_prime_dt² + dtracers_dt²)
     # differentiated w.r.t. surface theta + q_v perturbations.
     k_sfc = state.theta_prime.data.shape[-1] - 1
@@ -166,10 +166,10 @@ def test_rcemip_physics_fn_is_differentiable():
 
 
 def test_rcemip_physics_fn_returns_correct_tendency_shape():
-    """``_make_rcemip_physics`` must return a PlaneNonHydrostaticTendencies
+    """``make_rcemip_physics`` must return a PlaneNonHydrostaticTendencies
     pytree with shapes matching the state."""
     model, state, grid, hc, tm = _setup_rcemip()
-    physics_fn = _make_rcemip_physics(grid, hc, tm)
+    physics_fn = make_rcemip_physics(grid, hc, tm, radiation_config=None, microphysics_config=None, dt=2.0)
     tend = physics_fn(state, grid, hc, tm)
     assert tend.du_dt.data.shape == state.u.data.shape
     assert tend.dv_dt.data.shape == state.v.data.shape
