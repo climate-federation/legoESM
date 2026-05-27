@@ -661,32 +661,44 @@ Updated final ladder:
 - `scaling_gpu_weak.png` — ns/cell vs cells, flat = saturated
 - `scaling_gpu_peak_bar.png` — peak Mcells/s by grid × precision
 
-### Iter 23 — 2026-05-27 — LL ocean explicit n_barotropic_substeps sweep
+### Iter 24 — 2026-05-27 — CFL stability check WALKS BACK iter-23 claim
+
+Iter-23 reported nsub=5 → 518 Mc/s for LL192 fp32 and recommended
+it as the "right knob." Iter-24 stability test (200 steps × 600 s
+= 33 h with eta=0.1 m kick) finds:
+
+| nsub | finite after 200 steps? | |eta|_max at end |
+|------|-------------------------|------------------|
+|  5   | **FALSE — NaN**         | NaN              |
+| 10   | True                    | 0.052 m          |
+| 30   | True (default)          | 0.057 m          |
+
+**nsub=5 violates CFL** on LL192 at dt=600 s (barotropic substep
+dt=120 s, > grid-light-speed limit). Throughput claim stands but
+the configuration is **scientifically invalid**.
+
+Corrected recommendation: for LL ocean, **`n_barotropic_substeps=10`
+is the practical safe minimum** (489 Mc/s fp32, 1.18× vs default 30,
+still finite at 33 h). impl_cn (546 Mc/s) remains the throughput-
+preferred path. iter-22's MPAS nsub=10 finding also needs the same
+CFL check — flagged below.
+
+### Iter 23 — 2026-05-27 — LL ocean explicit n_barotropic_substeps sweep (SUPERSEDED — see iter 24)
 
 Same nsub sweep on LL192 ocean (both precisions):
 
 | nsub          | fp64 Mc/s | fp32 Mc/s |
 |---------------|-----------|-----------|
-|  5            | **243**   | **518**   |
-| 10            | 237       | 489       |
+|  5 (UNSTABLE) | 243       | 518       |
+| 10 (stable)   | 237       | **489**   |
 | 15            | 231       | 470       |
 | 20            | 225       | 451       |
 | 30 (default)  | 214       | 416       |
 | impl_cn       | 247       | 546       |
 
-For LL ocean, **tuned explicit (nsub=5) catches up to impl_cn:**
-- fp64: 243 vs 247 (1.6% gap — within bench noise)
-- fp32: 518 vs 546 (5% gap)
-
-Different story from MPAS where impl_cn still won 43% even with
-tuned explicit. Explanation: LL has structured stencils (cheap
-gather), so the barotropic substep cost scales modestly with nsub
-count. MPAS Voronoi indirect addressing makes each substep ~5×
-more expensive — substep-count reduction matters there.
-
-⇒ For LL ocean throughput, **`n_barotropic_substeps=5` is the
-right knob to expose if impl_cn is contra-indicated**. Same CFL
-caveat as iter-22.
+Iter-23 originally recommended nsub=5; **iter-24 invalidates this**
+on stability grounds. nsub=10 is the corrected safe-minimum knob
+(15-18% speedup vs default, finite at 33 h).
 
 ### Iter 22 — 2026-05-27 — MPAS explicit n_barotropic_substeps sweep
 
