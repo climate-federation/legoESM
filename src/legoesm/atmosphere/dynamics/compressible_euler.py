@@ -564,6 +564,16 @@ def _semi_implicit_acoustic_column_kernel(
     ``[..., nlev+1]`` w (rigid lid/bottom), ``[..., nlev]`` theta'+rho',
     ``J`` broadcastable to the horizontal leading axes.
 
+    Boundary contract (post iter-69)
+    --------------------------------
+    Unlike :func:`_acoustic_column_kernel` (explicit) which preserves
+    the input boundary values ``w_c[..., 0]`` and ``w_c[..., -1]``,
+    this kernel **overwrites** them with 0 (rigid lid/bottom BC) on
+    output. Callers MUST already obey the rigid BC on entry; this
+    enforcement is a fusion optimization, not new physics. If a future
+    layout exposes a nonzero-w boundary (e.g., moving bottom), revert
+    to the explicit kernel's ``at[..., 1:-1].set(...)`` pattern.
+
     When ``implicit_buoyancy=True`` the buoyancy contribution
     ``g * theta_p_half / theta_0_half`` in the w-equation is treated
     implicitly by substituting the backward theta'-update into the
@@ -690,6 +700,13 @@ def acoustic_substeps_semi_implicit(
     system for w at each substep. This removes the acoustic CFL
     constraint in the vertical direction, enabling larger time steps
     and longer stable integrations.
+
+    Boundary contract (post iter-69): the substep body overwrites
+    ``w[..., 0]`` and ``w[..., -1]`` with 0 (rigid lid/bottom BC) on
+    every iteration via ``jnp.pad(w_inner_new, ..., (1, 1))``. Callers
+    MUST obey the rigid BC on input. This is a fusion optimization, not
+    new physics; revert to ``at[..., 1:-1].set`` if a moving boundary
+    is ever introduced.
 
     The implicit equation for w at interior half-levels is:
 
