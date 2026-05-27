@@ -145,6 +145,41 @@ def test_dod_quotes_plateau_window_in_days():
     )
 
 
+def test_dod_quotes_driver_production_grid_size():
+    """iter-174: DOD section's production-config preamble at
+    CRM_implementation.md:31 says ``132×132 plane``; the driver
+    script defaults ``--nx 132 --ny 132``. Lock the doc <->
+    driver agreement here.
+
+    The test scrapes the active ``--nx`` and ``--ny`` defaults
+    from the run_rce_mpi_long.py argparse source. Pre-iter-174
+    nothing enforced lockstep — a driver revert to 64x64 would
+    leave the doc claim stale until a human noticed.
+    """
+    dod = _read_dod_section()
+    driver_text = (REPO_ROOT / "scripts" / "run_rce_mpi_long.py").read_text()
+    # Scrape ``--nx`` and ``--ny`` defaults from argparse calls.
+    nx_m = re.search(
+        r'p\.add_argument\("--nx",\s*type=int,\s*default=(\d+)',
+        driver_text,
+    )
+    ny_m = re.search(
+        r'p\.add_argument\("--ny",\s*type=int,\s*default=(\d+)',
+        driver_text,
+    )
+    assert nx_m and ny_m, "driver missing --nx / --ny argparse defaults"
+    nx = int(nx_m.group(1))
+    ny = int(ny_m.group(1))
+    # ``×`` is the unicode multiplication sign used in the doc
+    # (``132×132``). Accept either that or ASCII ``x``.
+    pat = rf"\b{nx}\s*[×x]\s*{ny}\s+plane\b"
+    assert re.search(pat, dod), (
+        f"DOD section must reference the active driver grid size "
+        f"({nx}x{ny}) as ``{nx}×{ny} plane`` or ``{nx}x{ny} "
+        f"plane``. DOD section does not match pattern {pat!r}."
+    )
+
+
 def test_dod_quotes_wrapper_default_ranks():
     """iter-173: DOD section's production-config preamble at
     CRM_implementation.md:31 says ``12 MPI ranks``; the
