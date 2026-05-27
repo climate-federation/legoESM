@@ -1103,6 +1103,56 @@ class ModelDriver:
                 and self._device_config.n_devices <= 1):
             return
 
+        # Stage 3-C: lat-lon band MPI follows a different parallel
+        # protocol than cubed-sphere replicated dynamics — each rank
+        # owns its band's state directly (no 6-face replication), so
+        # no scatter-from-global is needed and no ColumnAdapter
+        # rebuild applies.  But SST/SIC + lat/lon physics arrays DO
+        # need rank-local slicing for the column-local physics.
+        if (self._device_config.is_distributed
+                and self.config.grid.grid_type == "latlon"):
+            from legoesm.grids.halo import get_mpi_topology
+            from legoesm.parallel.latlon_mpi import LatLonBandLayout
+            _layout = get_mpi_topology()
+            if isinstance(_layout, LatLonBandLayout):
+                self._layout = _layout
+                self._mpi_rank = _layout.rank
+                self._mpi_world_size = _layout.n_ranks
+
+                s, e = _layout.lat_start, _layout.lat_end
+
+                # Slice lat/lon arrays for physics (column-local).
+                # The grid in self.grid is already rank-local
+                # (Stage 3-B), so its lat2d/lon2d are already
+                # band-sliced — reuse them.
+                self._physics_lat = self.grid.lat2d
+                self._physics_lon = self.grid.lon2d
+
+                # Wrap SST/SIC to return only this rank's lat band.
+                # The global ``get_sst_sic(day)`` returns shape
+                # ``(n_lat_global, n_lon)``; slice along axis 0.
+                if self.get_sst_sic is not None:
+                    _global_fn = self.get_sst_sic
+
+                    def _band_get_sst_sic(day, _s=s, _e=e, _fn=_global_fn):
+                        sst, sic = _fn(day)
+                        sst = jnp.asarray(sst)
+                        sic = jnp.asarray(sic)
+                        # SST/SIC shapes: typically (n_lat, n_lon),
+                        # sometimes (n_lat, n_lon, 1) for ensemble.
+                        # Slice axis 0 unconditionally.
+                        return sst[_s:_e], sic[_s:_e]
+
+                    self.get_sst_sic = _band_get_sst_sic
+
+                logger.info(
+                    "  Parallel: lat-lon band MPI — rank %d/%d, "
+                    "rows [%d:%d) of %d (n_lat_local=%d)",
+                    _layout.rank, _layout.n_ranks, s, e,
+                    _layout.n_lat_global, _layout.n_lat_local,
+                )
+                return  # Skip the cubed-sphere replicated-dynamics path below.
+
         if self._device_config.is_distributed:
             from legoesm.parallel.distributed import (
                 get_active_layout, set_active_layout,
