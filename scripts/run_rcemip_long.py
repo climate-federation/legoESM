@@ -898,11 +898,13 @@ def main():
     # so untouched cluster runs reproduce baseline trajectory.
     p.add_argument(
         "--sfc-Cd", type=float, default=1.0e-3,
-        help="iter-289: drag coefficient for bulk surface flux "
-        "(--moist + --grid cubed_sphere only today). Default 1e-3 "
+        help="iter-289: drag coefficient for bulk surface flux. "
+        "Applies to ``--moist`` + ``--grid {cubed_sphere, mpas}`` "
+        "(iter-309 widened from cubed-sphere-only). Default 1e-3 "
         "matches the plane CRM iter-183 contract. Lower (e.g. "
         "1e-4) reduces momentum drag for cluster sensitivity "
-        "probes.",
+        "probes. NOTE: MPAS surface flux is heat+moisture only "
+        "(no momentum drag — see iter-307 helper docstring).",
     )
     p.add_argument(
         "--sfc-Ch", type=float, default=1.0e-3,

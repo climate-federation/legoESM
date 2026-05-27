@@ -170,10 +170,13 @@ def test_sfc_shared_attrs_matches_add_argument_registrations():
 
 def test_cubed_only_attrs_matches_add_argument_registrations():
     """Lock that ``_CUBED_ONLY_ATTRS`` includes every parser dest
-    starting with ``n_cubed_sphere``, ``sfc_``, or ``cubed_``. A
-    future ``--cubed-hyperdiff`` (or similar) added without
-    extending the tuple fires this test instead of slipping past
-    the iter-291 misuse detection.
+    starting with ``n_cubed_sphere`` or ``cubed_`` (iter-309:
+    ``sfc_`` was moved to ``_SFC_SHARED_ATTRS`` because MPAS now
+    uses those flags too — see
+    ``test_sfc_shared_attrs_matches_add_argument_registrations``
+    above). A future ``--cubed-hyperdiff`` (or similar) added
+    without extending the tuple fires this test instead of
+    slipping past the iter-291 misuse detection.
     """
     tree = ast.parse(DRIVER.read_text())
     cubed_only_attrs = set(_extract_cubed_only_attrs_tuple(tree))
