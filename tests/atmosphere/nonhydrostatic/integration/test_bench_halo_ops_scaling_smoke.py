@@ -31,6 +31,10 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = REPO_ROOT / "scripts" / "bench_halo_ops_scaling.py"
 
 
+# iter-256 (Codex iter-252..255 round-1 HIGH#2): end-anchored
+# regex so a future PR that adds a trailing field to the bench
+# output line fails the schema lock loudly. Pre-iter-256 the regex
+# only used match() with no $ — trailing additions would pass.
 _LINE_RE = re.compile(
     r"(?P<label>\S+)\s+nranks=\s*(?P<nranks>\d+)\s+"
     r"grid=(?P<ny>\d+)x(?P<nx>\d+)\s+"
@@ -38,7 +42,7 @@ _LINE_RE = re.compile(
     r"nx_local=(?P<nx_local>\d+)\s+"
     r"total=\s*(?P<total>[\d.]+)ms\s+"
     r"local_compute=\s*(?P<local>[\d.]+)ms\s+"
-    r"halo_comm=\s*(?P<comm>-?[\d.]+)ms"
+    r"halo_comm=\s*(?P<comm>-?[\d.]+)ms\s*$"
 )
 
 
@@ -107,6 +111,17 @@ def test_bench_halo_ops_scaling_single_rank_smoke(tmp_path):
     )
     assert 0.0 < local_ms < 5000.0, (
         f"local_ms={local_ms} outside (0, 5000) range."
+    )
+    # iter-256 (Codex iter-252..255 round-1 HIGH#1): no-op detector.
+    # Real 8-operator pipeline on 12x12x8 takes ~0.04 ms local
+    # compute per step. An elided pipeline would land at <1 us
+    # (kernel-launch overhead only) — orders of magnitude below.
+    # Floor at 1 us catches a fully-elided kernel while tolerating
+    # fast hardware.
+    assert local_ms > 1.0e-3, (
+        f"local_compute={local_ms} ms below 1us floor; the "
+        f"8-operator pipeline likely no-op'd. Real measured "
+        f"baseline is ~0.04 ms on this mesh."
     )
     # On a single rank halo_comm should be small (a few percent of
     # total at most). Cap at 4× total to catch a regression where

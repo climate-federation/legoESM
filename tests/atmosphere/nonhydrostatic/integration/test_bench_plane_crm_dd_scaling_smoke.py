@@ -116,9 +116,27 @@ def test_bench_plane_crm_dd_scaling_single_rank_smoke(tmp_path, mode):
     assert wall_per_step_s > 0.0, (
         f"wall_per_step_s={wall_per_step_s!r} must be positive."
     )
-    # Cross-check throughput consistency: steps_per_s ≈ 3 / wall_s.
+    # iter-256 (Codex iter-252..255 round-1 HIGH#1): no-op detector.
+    # Real step_halo on 12x12x8 takes ~3 ms per step (~9 ms total
+    # for 3 steps). A silent no-op step (e.g. step_halo elided by a
+    # future refactor, returning input unchanged) would land at
+    # microseconds — orders of magnitude below 1 ms total. The
+    # floor of 0.1 ms total (33 us per step) catches a fully-elided
+    # step kernel while still tolerating fast hardware. The bench
+    # script JIT-compiles in warmup so the 3-step timed window
+    # measures only the warm path.
+    assert wall_s > 1.0e-4, (
+        f"wall_s={wall_s:.6f} below 1e-4 floor; the dycore step "
+        f"likely no-op'd. Real step_halo on this mesh measures "
+        f"~3 ms/step, so 3 steps should be at least 0.1 ms."
+    )
+    # iter-256 (Codex iter-252..255 round-1 MEDIUM#2): cross-check
+    # throughput consistency loosened from 2% to 10% to absorb the
+    # 4-decimal wall_s rounding noise. wall_s=0.0028 (the measured
+    # baseline) has rounding error ~5e-5 = 1.8% — the prior 2%
+    # cap was right at the edge of flakiness on faster hardware.
     expected_throughput = 3.0 / wall_s
-    assert abs(steps_per_s - expected_throughput) / expected_throughput < 0.02, (
+    assert abs(steps_per_s - expected_throughput) / expected_throughput < 0.10, (
         f"Throughput inconsistent: steps_per_s={steps_per_s:.4f} "
         f"vs 3/wall_s={expected_throughput:.4f}."
     )

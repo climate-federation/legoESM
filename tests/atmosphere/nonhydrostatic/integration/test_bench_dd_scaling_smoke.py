@@ -23,12 +23,13 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = REPO_ROOT / "scripts" / "bench_dd_scaling.py"
 
 
+# iter-256 (Codex iter-252..255 round-1 HIGH#2): end-anchored.
 _LINE_RE = re.compile(
     r"(?P<label>\S+)\s+nranks=\s*(?P<nranks>\d+)\s+"
     r"grid=(?P<ny>\d+)x(?P<nx>\d+)\s+"
     r"ny_local=(?P<ny_local>\d+)\s+"
     r"nx_local=(?P<nx_local>\d+)\s+"
-    r"per_step=\s*(?P<per_step>[\d.]+)ms"
+    r"per_step=\s*(?P<per_step>[\d.]+)ms\s*$"
 )
 
 
@@ -87,4 +88,13 @@ def test_bench_dd_scaling_single_rank_smoke():
     # pathological.
     assert 0.0 < per_step_ms < 60_000.0, (
         f"per_step={per_step_ms} ms outside (0, 60s) range."
+    )
+    # iter-256 (Codex iter-252..255 round-1 HIGH#1): no-op detector.
+    # Real slow_tendency_jit_split on 12x12x8 measures ~6 ms.
+    # An elided pipeline would land at microseconds. Floor at
+    # 0.05 ms catches a fully-elided kernel.
+    assert per_step_ms > 0.05, (
+        f"per_step={per_step_ms} ms below 50us floor; the "
+        f"slow-tendency pipeline likely no-op'd. Real measured "
+        f"baseline is ~6 ms on this mesh."
     )
