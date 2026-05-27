@@ -661,6 +661,23 @@ Updated final ladder:
 - `scaling_gpu_weak.png` — ns/cell vs cells, flat = saturated
 - `scaling_gpu_peak_bar.png` — peak Mcells/s by grid × precision
 
+### Iter 27 — 2026-05-27 — atm CS small-N regime (dispatch-floor characterization)
+
+Added C12 to the cubed-sphere fp32 sweep to bound the dispatch overhead:
+
+| res | total cells | ms/step | Mc/s | dispatch fraction (est.) |
+|-----|-------------|---------|------|--------------------------|
+| C12 |     22,464  |  0.24   |  92  | ~75%                     |
+| C24 |     89,856  |  0.33   | 274  | ~55%                     |
+| C48 |    359,424  |  1.21   | 297  | ~15% (peak)              |
+
+Inferred dispatch floor: ~0.18 ms/step (from C12 wall-time minus
+memory-bound floor for 580k cell-lev × ~75 B × 10 passes / 730 GB/s).
+This is the **smallest practical CS resolution before launch
+overhead dominates**: C24 is borderline (55% dispatch), C48 is
+clean (15%). For real-time forecasting (~24 SYPD daily-update
+threshold), C12 is way over (10400 SYPD), C48 is comfortable (475).
+
 ### Iter 26 — 2026-05-27 — velocity-kick stability + PR description update
 
 Stability check broadened from eta-only kick to a u-velocity kick
