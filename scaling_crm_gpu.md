@@ -117,6 +117,42 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 35 — 2026-05-27 — explicit vs SI WITH physics — SI wins production SYPD
+
+Decomposition at N=128 fp32:
+
+| stage                  | ms/step | share |
+|------------------------|---------|-------|
+| bare dycore (SI+Smag)  |  6.89   |  63%  |
+| radiation              |  +1.93  |  18%  |
+| microphysics           |  +2.87  |  26%  |
+| **total (SI + full)**  | 10.99   | 100%  |
+
+Physics adds ~4.8 ms/step **regardless of dycore choice** (radiation/
+microphysics are physics-state functions, not dycore).
+
+**With full physics, explicit dycore loses its advantage:**
+
+| solver/dt        | ms/step | Mc/s @ N=128 | sim time / step |
+|------------------|---------|--------------|------------------|
+| explicit + phys (dt=0.5) |  9.86   |  50    | 0.5 s |
+| **SI + phys (dt=2.0)**   | 10.99   |  45    | **2.0 s** |
+
+At fixed wall time, SI advances **4× more sim time per step**.
+Sim-time-per-second:
+- explicit: 0.5 / 9.86e-3 = **50.7 sim_s/wall_s**
+- SI:       2.0 / 10.99e-3 = **182 sim_s/wall_s** ← **3.6× faster**
+
+**Production CRM verdict: SI wins SYPD by 3.6×** when full physics
+runs. Opposite of dycore-only conclusion (iters 6-7).
+
+Why? Physics cost is dt-invariant; SI's 4× larger dt amortizes
+physics over more sim time. Explicit's faster bare dycore matters
+less when physics dominates step cost.
+
+⇒ **Final production guidance:** use semi-implicit + full physics
++ dt=2.0 for CRM long-runs. Explicit is bench-only.
+
 ### Iter 34 — 2026-05-27 — REAL production throughput with full RCEMIP physics
 
 Ran 10-step JIT-scan with `make_rcemip_physics` (radiation +
