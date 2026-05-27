@@ -22,7 +22,7 @@ Canonical state of CRM rollout — built, broken, next. Each iteration appends d
 | Radiation-schedule helper | `src/legoesm/driver/physics_schedule.py` | Built (iter-42). Single source of truth for the ``rad_call_every_steps`` arithmetic; 24 unit tests (iter-42 + iter-43 NaN/inf/sys.maxsize hardening) |
 | Shared hydrostatic RCE assertion helpers | `tests/atmosphere/hydrostatic/_rce_helpers.py` | Built (iter-46; promoted to dedicated module iter-78). 6 helpers (5 pure + 1 subprocess) shared across C48/C72/C96/V4/LL32/T21 nightlies. 32 unit tests (iter-52 + iter-66 + iter-83 + iter-85) |
 | Shared plane CRM assertion helpers | `tests/atmosphere/nonhydrostatic/integration/_plane_crm_helpers.py` | Built (iter-79; ``_read_log`` added iter-84). 2 pure helpers (``_parse_rad_call_count`` iter-40/54 + ``_read_log`` iter-84). 18 unit tests |
-| Production driver CLI input validation | `scripts/run_rce_mpi_long.py:main` + `scripts/run_rce.py:main` | Built (iter-65-75). 5-layer defense-in-depth: (1) NaN/inf rejection (iter-67/68 auto-detect via ``vars(args)``), (2) positive-int guards (iter-69/71), (3) range guards including ``--acoustic-off-centering ∈ [0,1)`` (iter-70), (4) negative-Kelvin sst-init (iter-74), (5) total_steps >= 1 post-derivation (iter-75). 13 + 29 parametric regression tests |
+| Production driver CLI input validation | `scripts/run_rce_mpi_long.py:main` + `scripts/run_rce.py:main` | Built (iter-65-75). Defense-in-depth across BOTH drivers via auto-detected guards on every float / int / positive-int / range / Kelvin arg from `vars(args)` (iter-67/68/69/70/74) + post-derivation `total_steps >= 1` (iter-75). `--sst-init` positive-Kelvin layer (iter-74) only on `run_rce.py` — plane-CRM driver hardcodes `T_SFC_K`. 13 + 29 parametric regression tests |
 
 ---
 
@@ -556,9 +556,11 @@ Per "compress every 10 iterations" mandate, due.
 * iter-37..iter-50 — 14 iters of test infrastructure + Codex
   reviews + shared helpers + V4/C72 30-day nightlies.
 
-**Kept at full detail** (26 iters):
-* iter-1 (foundational state).
-* iter-51..iter-76 (most recent CLI validation work).
+**Kept at full detail at the time** (iter-77's pre-iter-115
+state): iter-1 + iter-51..iter-76. iter-115 has since folded
+iter-51..iter-76 into the summary block immediately below this
+entry; the "kept at full detail" claim describes iter-77's
+contemporaneous state, NOT the current doc layout.
 
 Full per-iter detail in ``CRM_implementation.original.md`` local
 backup (pre-iter-77 state) + git log.
@@ -573,22 +575,36 @@ test infrastructure on top of the iter-50 hydrostatic 30-day
 empirical-gate closure. Key technical landmarks:
 
 **30-day production-scale empirical coverage (iter-51)**: LL32
-(latlon C-grid, pole-clamped dt=81.844 s) + T21 (gaussian spectral,
-dt=600 s) 30-day nightly regressions land in
-``tests/atmosphere/hydrostatic/test_rce_cross_grid_smoke.py``,
+(latlon C-grid, pole-clamped dt=81.844 s, peak max|v| cap=20.0
+m/s = 1.8× iter-12 measured 11.19 m/s, temp_tol=1.0 K) + T21
+(gaussian spectral, dt=600 s, peak max|v| cap=20.0 = 2.4× iter-12
+measured 8.43 m/s, temp_tol=1.0 K) 30-day nightly regressions land
+in ``tests/atmosphere/hydrostatic/test_rce_cross_grid_smoke.py``,
 closing the last empirical gap (C48/C72/V4 already covered by
 iter-50/iter-12). ``_assert_dt_used`` helper gains optional
 ``abs_tol`` (1e-2 default — strict ``==`` for ladder dt's, loose
-for pole-CFL-clamped LL32). Codex caught 1 LOW; abs_tol fixed.
+for pole-CFL-clamped LL32). Codex caught 1 LOW (abs_tol=0.5 too
+loose vs round(dt) silent-pass); fixed to 1e-2.
 
-**Codex holistic review chain (iter-52..iter-57)**: three
-full-component passes — driver (iter-55), dycore + halo (iter-56),
-MPI halo / plane_mpi.py (iter-57) — collectively land 0 HIGH +
-0 MEDIUM outstanding for the production stack at that point.
-iter-52 added the iter-46 shared assertion helper unit tests
-(LL32 + T21 PASS). iter-53/54 tightened
-``_parse_rad_call_count`` regex against schema drift (308.78 K
-± 0.5 K + iter-95j 308.78 K tightening upstream).
+**Codex holistic review chain (iter-52..iter-57)** — three
+full-component passes that landed 0 HIGH + 0 MEDIUM outstanding
+*after* fixing the findings each pass caught:
+
+* iter-52 added 28 unit tests for the iter-46 shared assertion
+  helpers (LL32 + T21 paths).
+* iter-53/54 tightened ``_parse_rad_call_count`` regex against
+  schema drift (multiline anchor + ``[^\\S\\n]*`` trailing-
+  whitespace tolerance — rejects ``rad_calls=5. (cached)`` and
+  ``rad_calls=5.0.``).
+* **iter-55 (driver pass)** — caught 2 MEDIUM: ``--no-radiation``
+  crashed on an unused-but-invalid ``--rad-call-interval-s``
+  cadence (validation order bug), and ``--days 0`` hit a
+  ``NameError`` on the post-loop summary. Both fixed.
+* **iter-56 (dycore + halo pass)** — caught 2 HIGH + 2 MEDIUM
+  in the bench-script fast-path + fallback-gate logic; fix
+  hardens the bench-plumbing for F9 measurements.
+* **iter-57 (MPI halo / plane_mpi.py pass)** — no new HIGH; all
+  prior findings rolled in.
 
 **Driver defaults regression backstop (iter-58..iter-64)**:
 ``scripts/run_rce_30day.sh`` defaults refreshed from stale
@@ -597,36 +613,66 @@ iter-14 / iter-38 production-measured dt=5.0 / N_ACOUSTIC=12.
 ``tests/atmosphere/nonhydrostatic/integration/test_run_rce_30day_wrapper_defaults.py``
 locks every env-var default (including PYBIN per iter-64 + the
 hardcoded snapshot / log cadence flags per iter-61 Codex MEDIUM).
-iter-60 deletes orphaned ``scripts/run_rce_mpi_full.py`` (superseded).
+iter-59 ALSO refreshes ``scripts/run_rce_mpi_long.py`` argparse
+defaults (the driver itself, distinct from the wrapper) and
+lands an AST-walk regression test that catches future drift in
+the argparse ``default=`` literals at import time. iter-60
+deletes orphaned ``scripts/run_rce_mpi_full.py`` (superseded).
 iter-62 + iter-77 compression: 1923→1081→1325 lines (cumulative).
-iter-63 promotes the iter-14 full envelope (725 steps, max|w| <
-0.05 m/s, drift < 1e-4) to a slow nightly regression.
+**iter-63** promotes the iter-14 full envelope (720 outer steps
+= 1 sim-hour, CWV drift < 0.01 mm, MSE drift < 5e-4) to a slow
+nightly regression — ``CWV drift < 0.01`` is the tight gate that
+catches a regression in the mass-fixer or surface-flux pipeline
+without needing a multi-day run.
+
+**iter-66 NaN silent-pass fix** (Codex HIGH): the shared
+``_assert_max_wind_peak_below`` helper used a ``max < cap``
+comparison that silently PASSES on NaN because ``NaN < cap`` is
+False... but so is ``NaN >= cap``, so the negation also rules.
+The helper was checking ``not (max >= cap)`` which evaluates True
+on NaN (NaN >= cap → False → not False = True). Fix: assert
+``math.isfinite(max)`` first; NaN now raises instead of
+silently passing the CFL gate.
 
 **Production driver CLI input validation (iter-65..iter-75)** —
-5 layers of defense-in-depth land via 13 + 29 parametric regression
-tests:
+defense-in-depth across BOTH plane-CRM driver
+(``scripts/run_rce_mpi_long.py``) and hydrostatic driver
+(``scripts/run_rce.py``) — landed via 13 + 29 parametric tests.
+**iter-65** converts the physics-schedule ``ValueError`` from
+``--rad-call-interval-s NaN`` into a clean ``SystemExit`` with
+the ``error: <flag> rejected: <reason>`` marker (Codex iter-55
+follow-up; pre-fix the user got a Python traceback). The
+remaining layers (with which driver carries each):
 
-1. NaN / inf rejection (iter-67, generalised in iter-68 via
-   auto-detect over ``vars(args)``).
-2. Positive-int guards for grid / substep args (iter-69, locked
-   in iter-71 against silent total_steps=0).
-3. Range guards (iter-70) including ``--acoustic-off-centering ∈
-   [0, 1)``; iter-70 Codex caught 6 HIGH range-guard gaps in
-   iter-67/68/69, all fixed.
-4. Negative-Kelvin sst-init guard (iter-74) — Codex caught 1
-   HIGH + 2 MEDIUM + 1 LOW in iter-71/72/73, all fixed.
-5. Post-derivation ``total_steps >= 1`` guard (iter-75) — catches
-   the huge-dt silent-pass class (``dt=days*86400`` → 1 step
-   doing the full integration).
+1. **NaN / inf rejection** (iter-67, generalised in iter-68 via
+   auto-detect over ``vars(args)`` — every float / int arg is
+   checked).
+2. **Positive-int guards** for grid / substep args (iter-69 +
+   mirrored to ``run_rce.py`` in iter-71).
+3. **Range guards** (iter-70) including
+   ``--acoustic-off-centering ∈ [0, 1)``. iter-70 Codex caught
+   6 HIGH range-guard gaps in iter-67/68/69, all fixed.
+4. **Positive-Kelvin sst-init** guard (iter-74) — only on
+   ``scripts/run_rce.py`` (the plane CRM driver has no
+   ``--sst-init`` argument; ``T_SFC_K`` is hardcoded). Codex
+   caught 1 HIGH + 2 MEDIUM + 1 LOW in iter-71/72/73 all fixed.
+5. **Post-derivation ``total_steps >= 1`` guard** (iter-75) —
+   catches the silent-pass class where ``dt > total_t`` makes
+   ``total_steps = int(total_t / dt)`` round down to 0, leaving
+   the run loop with zero iterations (NOT the "huge-dt 1-step"
+   misdescription of an earlier draft — the failure mode is
+   ZERO steps, not one).
 
-iter-71/72 mirror the same 5-layer pattern onto
-``scripts/run_rce.py`` (hydrostatic-family driver) with 10
-parametric test cases. iter-73 lands the C96 10-day nightly
-(production wall-time-gated for 30-day) + fixes a
-``--qv-noise-amp`` argparse regression. iter-76 unifies the
-iter-1 ``--implicit-buoyancy`` SystemExit message to the
-iter-65/67/70/74/75 ``error: <flag> rejected: <reason>`` format
-+ adds the regression test.
+iter-71/72 mirror the layer-1/2/3/4 pattern onto
+``scripts/run_rce.py`` with 10 parametric test cases. iter-73
+lands the C96 10-day nightly (production wall-time-gated for
+30-day) + fixes a ``--qv-noise-amp`` argparse regression.
+**iter-74** raises the C96 nightly's pytest-timeout from 4800
+to 6000 seconds (the iter-73 measurement showed worst-case
+wall ≈ 5050 s at C96 + 10 sim-days). iter-76 unifies the iter-1
+``--implicit-buoyancy`` SystemExit message to the iter-65/67/70/74/75
+``error: <flag> rejected: <reason>`` format + adds the regression
+test.
 
 **Cross-grid test cohort end-of-cycle** (iter-77 ledger):
 - Slow nightly count: 9 (was 7 pre-iter-51).
