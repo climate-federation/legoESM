@@ -35,6 +35,18 @@
 #   N_ACOUSTIC   acoustic substeps per outer step (default 12, matches dt=5.0s
 #                + iter-14 production measurement)
 #   ADVECTION    upwind1 | weno5  (default upwind1)
+#   HYPERDIFF    horizontal hyperdiffusion coefficient (default 5.0e6;
+#                iter-9 F6 found weaker values let bubble IC blow up).
+#   BUBBLE_K     warm-bubble IC perturbation [K] (default 0.0 = no
+#                bubble per F7/F10 — clean Wing IC). Non-zero only
+#                for bare-dycore stability probing.
+#   QV_NOISE     qv noise IC amplitude [kg/kg] (default 0.0 per
+#                iter-97 F7-stale finding — any nonzero value
+#                destabilises the iter-95 IC under radiation).
+#   USE_DD       1 = pass --use-dd to driver (true per-rank domain
+#                decomposition via step_halo + R7 MPI mass fixer).
+#                Default 0 keeps the legacy rank-0-broadcast pattern
+#                (F8-stable). Required for any real MPI scaling claim.
 #   NO_MASS_FIXER  1 = pass --no-mass-fixer to driver (iter-95b RCE-spinup
 #                fix; default 1 for this 30-day RCE wrapper). 0 keeps
 #                the legacy fix_moist_mass_plane ON (use only for
@@ -90,11 +102,12 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
     # macOS BSD sed does not support ``\?``; use ``-E`` (extended
     # regex) so ``# ?`` strips the leading ``# `` (with optional
     # trailing space).
-    # iter-143: extracted range widened from 2..72 to 2..77 so the
-    # iter-138 ``CHECK_LOG_MAX_W`` + iter-125 ``EMIT_TRAJECTORY_PNG``
-    # + iter-141 hint env vars all appear in --help output (the
-    # iter-136 range stopped at line 72 = before PYBIN).
-    sed -n '2,77p' "$0" | sed -E 's/^# ?//'
+    # iter-143/iter-144: extracted range widened to cover every
+    # documented env var. iter-136 stopped at line 72 (pre-iter-138
+    # CHECK_LOG_MAX_W docs); iter-143 widened to 77 (post-iter-138);
+    # iter-144 added HYPERDIFF/BUBBLE_K/QV_NOISE/USE_DD docs +
+    # PYBIN moved to 89.
+    sed -n '2,89p' "$0" | sed -E 's/^# ?//'
     exit 0
 fi
 
