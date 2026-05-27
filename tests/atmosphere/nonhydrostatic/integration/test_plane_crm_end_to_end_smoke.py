@@ -806,6 +806,10 @@ def test_plane_crm_production_scale_132x132_with_radiation(tmp_path):
     # argparse interprets ``-1e-5`` as a new flag (starts with ``-``);
     # use ``-0.001`` to test negative qv-noise rejection.
     ("--qv-noise-amp", "-0.001", "must be non-negative"),
+    # iter-188: --theta-noise-amp added in iter-181 but missing from
+    # the iter-70 non-negative validator until iter-188. A negative
+    # amplitude used to silently no-op via the ``if amp > 0.0`` gate.
+    ("--theta-noise-amp", "-0.01", "must be non-negative"),
     ("--smag-cs", "-0.1", "must be non-negative"),
     ("--hyperdiff", "-1.0", "must be non-negative"),
     ("--sponge-coeff", "-0.01", "must be non-negative"),

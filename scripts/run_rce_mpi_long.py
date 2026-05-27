@@ -712,6 +712,12 @@ def main():
         "--vertical-theta-diffusion": args.vertical_theta_diffusion,
         "--bubble-theta-pert": args.bubble_theta_pert,
         "--qv-noise-amp": args.qv_noise_amp,
+        # iter-188 Codex gap: --theta-noise-amp was added in iter-181
+        # but not wired into the non-negative validator. A negative
+        # amplitude was silently treated as "no noise" by the
+        # ``if theta_noise_amp > 0.0`` gate at line 405, masking a
+        # caller-side typo. Reject explicitly.
+        "--theta-noise-amp": args.theta_noise_amp,
         "--c-h": args.c_h,
     }
     for _flag, _val in _NONNEG_FLOATS.items():
