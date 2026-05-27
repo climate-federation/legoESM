@@ -60,9 +60,16 @@ def parse_args():
     p.add_argument("--bubble-theta-pert", type=float, default=0.5)
     p.add_argument("--no-bubble", action="store_true",
                    help="Run from pure rest state (no IC perturbation).")
-    p.add_argument("--advection", choices=["upwind1", "weno5"],
+    p.add_argument("--advection",
+                   choices=["upwind1", "van_leer", "weno5"],
                    default="upwind1",
-                   help="Horizontal advection scheme for theta/u/v/w.")
+                   help="Horizontal advection scheme for theta/u/v/w. "
+                        "iter-179/183 added van_leer (2nd-order TVD, "
+                        "stencil 4) as the dycore's third choice; the "
+                        "production driver default in run_rce_mpi_long.py "
+                        "is now van_leer (iter-183 wall-time refresh). "
+                        "This diag retains upwind1 as the cheapest "
+                        "default for the bare-dycore stability sweep.")
     p.add_argument("--vertical-theta-diffusion", type=float, default=0.0,
                    help="Explicit vertical Laplacian diffusivity on "
                         "theta_prime [m^2/s]. Tames the buoyancy-driven "
