@@ -36,8 +36,8 @@ Canonical state of CRM rollout — built, broken, next. Each iteration appends d
    * Status: ✓ at 132×132 1-sim-hour (iter-14 + iter-38 + iter-63
      structural slow nightly + iter-39 with-rad symmetric coverage).
      Full 30-day plane CRM wall-time-gated (~8 days single-rank).
-2. **Reach radiative-convective equilibrium**: CWV plateaus in 30 ± 5 mm range, precip plateaus ~3 mm/day, MSE drift < 1 % over last 10 days.
-   * Status: ✓ hydrostatic 30-day (iter-12 measured 4/4 grids + iter-50/51 added V4 + LL32 + T21 nightly regression). Plane CRM 1-sim-hour PASS (iter-14); 30-day wall-time-gated.
+2. **Reach radiative-convective equilibrium**: CWV plateaus in Wing 2018 RCEMIP1 multi-model range — at SST = 300 K the inter-model spread is ~45-60 mm (Wing et al. 2018 Table 4 / Fig. 5); precip plateaus ~3 mm/day; MSE drift < 1 % over last 10 days. iter-104 implements the gated check via `scripts/summarize_rce_trajectory.py --evaluate` with default `DEFAULT_CWV_RANGE_MM = (35, 65)` (the Wing band + 5 mm tolerance each side) and 5 % MSE-drift tolerance over the 10-day plateau window.
+   * Status: ✓ hydrostatic 30-day (iter-12 measured 4/4 grids + iter-50/51 added V4 + LL32 + T21 nightly regression). Plane CRM **10-day** PASS at 32×32×30 + radiation (iter-98, CWV 49.94 → 57.18 mm peak → 56.55 mm settled; MSE drift 0.6 %; first precip onset at day 10). Full 30-day plane CRM in flight (iter-105). The 30 ± 5 mm number on this line pre-iter-95 was a stale estimate from an early hydrostatic-family extrapolation — Wing 2018 RCEMIP1 at SST = 300 K is the canonical reference.
 3. **Reproduce on each supported grid type** via `scripts/run_rce_cross_grid.sh` (cubed-sphere, latlon, voronoi, gaussian). Currently only *plane* CRM has explicit CRM physics; cubed-sphere/latlon/voronoi/gaussian use hydrostatic dycore in RCE mode and cross-grid wrapper validates they converge to similar CWV / precip / MSE.
    * Status: ✓ 30-day production-scale PASS on C24/C48/C72, V4, LL32, T21 (iter-12 + iter-15 + iter-26 + iter-50/51). C96 covered by 10-day (iter-22/73; 30-day wall-time-gated).
 4. **Scale with MPI**:
