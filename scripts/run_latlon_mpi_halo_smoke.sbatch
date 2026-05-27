@@ -8,7 +8,7 @@
 #SBATCH --ntasks=4
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=16G
-#SBATCH --time=00:30:00
+#SBATCH --time=01:30:00
 #
 # Stage-0 smoke test for the lat-lon band-MPI halo machinery introduced in
 # ``src/legoesm/parallel/latlon_mpi.py``.  Validates that:

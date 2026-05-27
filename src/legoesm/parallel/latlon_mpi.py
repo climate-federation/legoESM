@@ -67,6 +67,8 @@ from legoesm.grids.halo_latlon import (
     pad_halo_latlon_3d,
     pad_halo_latlon_vector,
     pad_halo_latlon_vector_3d,
+    _fold_pole_rows,
+    _fold_pole_rows_3d,
 )
 from legoesm.parallel.halo_exchange import _get_sendrecv_vjp
 
@@ -186,14 +188,41 @@ def _serial_pad_then_strip_lon(
         Ready for concatenation south of ``field[0]`` / north of
         ``field[-1]``.
     """
+    # IMPORTANT: call the *_local* helpers directly, NOT the
+    # backend-dispatched public ``pad_halo_latlon*``.  This helper
+    # runs INSIDE the MPI backend's pole-fold step, so calling the
+    # public dispatcher would re-enter the MPI path and recurse
+    # forever:
+    #   pad_halo_latlon (public)
+    #     → _pad_halo_latlon_mpi   (MPI branch)
+    #       → exchange_halo_latlon
+    #         → _pole_fold_south / _north  (at boundary ranks)
+    #           → _serial_pad_then_strip_lon
+    #             → pad_halo_latlon (public, again!) ← recursion
+    # The fix: pole-fold uses the SERIAL implementation directly.
+    # That's what the docstring above promised; the early Stage 0
+    # version pre-dated the backend-dispatch refactor and called
+    # the dispatcher by accident.
+    from legoesm.grids.halo_latlon import (
+        _pad_halo_latlon_local,
+        _pad_halo_latlon_vector_local,
+        _pad_halo_latlon_3d_local,
+        _pad_halo_latlon_vector_3d_local,
+    )
     if field.ndim == 2:
-        helper = pad_halo_latlon_vector if negate else pad_halo_latlon
+        helper = (
+            _pad_halo_latlon_vector_local if negate
+            else _pad_halo_latlon_local
+        )
         padded = helper(field, halo=halo)        # (n_lat + 2h, n_lon + 2h)
         # Strip the lon halos to recover (halo, n_lon).
         south = padded[:halo, halo:halo + field.shape[1]]
         north = padded[-halo:, halo:halo + field.shape[1]]
     elif field.ndim == 3:
-        helper = pad_halo_latlon_vector_3d if negate else pad_halo_latlon_3d
+        helper = (
+            _pad_halo_latlon_vector_3d_local if negate
+            else _pad_halo_latlon_3d_local
+        )
         padded = helper(field, halo=halo)        # (n_lat + 2h, n_lon + 2h, nlev)
         south = padded[:halo, halo:halo + field.shape[1], :]
         north = padded[-halo:, halo:halo + field.shape[1], :]
@@ -206,13 +235,25 @@ def _serial_pad_then_strip_lon(
 
 
 def _pole_fold_south(field: jax.Array, halo: int, negate: bool) -> jax.Array:
-    """South-pole halo, bit-identical to serial ``pad_halo_latlon*``."""
+    """South-pole halo, bit-identical to serial ``pad_halo_latlon*``
+    (stripped of lon halos).
+
+    Operates on ``field`` *without* lon padding — the helper internally
+    lon-pads, pole-folds the lon-padded data (matching serial's
+    ``(n_lon + 2*halo) // 2`` lon-shift), then strips the lon halos.
+    Returns shape ``(halo, n_lon[, nlev])``.
+
+    Stage-0 tests in ``tests/parallel/test_latlon_mpi_halo_serial.py``
+    pin this contract: ``exchange_halo_latlon(unpadded, ...)`` at a
+    pole-touching rank must equal serial
+    ``pad_halo_latlon(unpadded, halo)[:, halo:-halo]``.
+    """
     south, _ = _serial_pad_then_strip_lon(field, halo, negate)
     return south
 
 
 def _pole_fold_north(field: jax.Array, halo: int, negate: bool) -> jax.Array:
-    """North-pole halo, bit-identical to serial ``pad_halo_latlon*``."""
+    """North-pole halo — see :func:`_pole_fold_south`."""
     _, north = _serial_pad_then_strip_lon(field, halo, negate)
     return north
 
@@ -370,20 +411,179 @@ def _pad_halo_latlon_mpi(
         raise ValueError(
             f"_pad_halo_latlon_mpi: data.ndim must be 2 or 3, got {data.ndim}"
         )
-    # Step 1: periodic lon wrap (local on every rank).
+
+    # Step 1: periodic lon wrap (local on every rank — every rank owns
+    # the full lon axis).  This produces ``lon_padded`` shape
+    # ``(n_lat_local, n_lon + 2*halo[, nlev])``.
     if data.ndim == 2:
         lon_padded = jnp.pad(data, ((0, 0), (halo, halo)), mode="wrap")
     else:
         lon_padded = jnp.pad(
             data, ((0, 0), (halo, halo), (0, 0)), mode="wrap",
         )
-    # Step 2: lat halo — sendrecv at interior cuts, pole-fold at
-    # boundary ranks.  ``exchange_halo_latlon`` already handles both
-    # cases (single-rank pole-fold + multi-rank MPI sendrecv) and
-    # is AD-safe via ``_get_sendrecv_vjp``.
-    return exchange_halo_latlon(
-        lon_padded, layout, halo=halo, is_vector_v=is_vector_v,
-    )
+
+    # Step 2: lat halo — pole-fold the LON-PADDED data at boundary
+    # ranks (matches serial ``pad_halo_latlon``'s lon-pad-then-fold
+    # order, so the pole-fold lon-shift is ``(n_lon + 2*halo) // 2``
+    # like serial does).  Interior partition cuts MPI sendrecv with
+    # the neighbour rank.
+    #
+    # We do NOT call ``exchange_halo_latlon`` here because that
+    # function operates on an *unpadded* field and is designed to
+    # return serial-stripped (lon-halo-stripped) halos.  Routing
+    # through it would either re-lon-pad or produce stripped halos
+    # — neither matches the full-pad result serial expects.
+    if halo > data.shape[0]:
+        raise ValueError(
+            f"_pad_halo_latlon_mpi: halo={halo} exceeds n_lat_local="
+            f"{data.shape[0]} on rank {layout.rank}."
+        )
+
+    # --- South halo ---
+    if layout.south_rank is None:
+        # Pole-fold the lon-padded first ``halo`` rows.  Uses
+        # ``_fold_pole_rows*`` whose lon-shift is ``data.shape[1] // 2``
+        # — for lon-padded input that's exactly ``(n_lon + 2*halo) // 2``
+        # which is the serial convention.
+        if data.ndim == 2:
+            south_halo, _ = _fold_pole_rows(lon_padded, halo, negate=is_vector_v)
+        else:
+            south_halo, _ = _fold_pole_rows_3d(
+                lon_padded, halo, negate=is_vector_v,
+            )
+    else:
+        # MPI sendrecv with south neighbour — exchanges the
+        # lon-padded boundary rows.  AD-safe via _get_sendrecv_vjp.
+        try:
+            import mpi4jax
+            from mpi4py import MPI
+        except ImportError as exc:
+            raise ImportError(
+                "_pad_halo_latlon_mpi: multi-rank lat halo requires "
+                "mpi4jax and mpi4py."
+            ) from exc
+        comm = MPI.COMM_WORLD
+        sendrecv = _get_sendrecv_vjp(mpi4jax)
+        send_bot = lon_padded[:halo].reshape(-1)
+        recv_template = jnp.zeros_like(send_bot)
+        recv_south = sendrecv(
+            send_bot, recv_template,
+            layout.south_rank, layout.south_rank,
+            layout.rank, layout.south_rank, comm,
+        )
+        # Inter-rank exchange: no sign flip (v is continuous across a
+        # partition cut, only flips across the actual pole).
+        south_halo = recv_south.reshape((halo,) + lon_padded.shape[1:])
+
+    # --- North halo ---
+    if layout.north_rank is None:
+        if data.ndim == 2:
+            _, north_halo = _fold_pole_rows(lon_padded, halo, negate=is_vector_v)
+        else:
+            _, north_halo = _fold_pole_rows_3d(
+                lon_padded, halo, negate=is_vector_v,
+            )
+    else:
+        try:
+            import mpi4jax
+            from mpi4py import MPI
+        except ImportError as exc:
+            raise ImportError(
+                "_pad_halo_latlon_mpi: multi-rank lat halo requires "
+                "mpi4jax and mpi4py."
+            ) from exc
+        comm = MPI.COMM_WORLD
+        sendrecv = _get_sendrecv_vjp(mpi4jax)
+        send_top = lon_padded[-halo:].reshape(-1)
+        recv_template = jnp.zeros_like(send_top)
+        recv_north = sendrecv(
+            send_top, recv_template,
+            layout.north_rank, layout.north_rank,
+            layout.rank, layout.north_rank, comm,
+        )
+        north_halo = recv_north.reshape((halo,) + lon_padded.shape[1:])
+
+    return jnp.concatenate([south_halo, lon_padded, north_halo], axis=0)
+
+
+def _pad_with_pole_bc_lat_mpi_1d(
+    interior, layout: LatLonBandLayout, halo: int,
+    south_value: float, north_value: float,
+):
+    """MPI pad for 1-D lat-axis metrics (sin_lat, cos_lat_v, dx_cell).
+
+    1-D fields don't have a longitude axis to pole-fold over, so the
+    standard ``exchange_halo_latlon`` (which assumes axis 1 = lon)
+    can't be reused directly.  This helper builds the (n_lat_local +
+    2*halo,) result by:
+
+      * inter-rank sendrecv on the lat axis (just like
+        ``exchange_halo_latlon``), and
+      * constant ``south_value`` / ``north_value`` pad at pole-touching
+        boundaries (instead of pole-fold).
+
+    Pole-fold would be inappropriate here even with the right shape:
+    a wall-BC pad on ``sin_lat`` wants the constant ``-1`` / ``+1``
+    (sin at the pole), not the mirror-then-shift of ``sin(lat[0])``.
+    Which is exactly what ``pad_with_pole_bc_lat`` is for.
+    """
+    interior_dtype = interior.dtype
+
+    if halo > interior.shape[0]:
+        raise ValueError(
+            f"_pad_with_pole_bc_lat_mpi_1d: halo={halo} exceeds "
+            f"n_lat_local={interior.shape[0]} on rank {layout.rank}"
+        )
+
+    # South side
+    if layout.south_rank is None:
+        south_slab = jnp.full(
+            (halo,), jnp.asarray(south_value, dtype=interior_dtype),
+        )
+    else:
+        try:
+            import mpi4jax
+            from mpi4py import MPI
+        except ImportError as exc:
+            raise ImportError(
+                "Lat-lon MPI 1-D pad (interior partition cut) requires "
+                "mpi4jax and mpi4py."
+            ) from exc
+        comm = MPI.COMM_WORLD
+        sendrecv = _get_sendrecv_vjp(mpi4jax)
+        send_bot = interior[:halo]
+        recv_template = jnp.zeros_like(send_bot)
+        south_slab = sendrecv(
+            send_bot, recv_template,
+            layout.south_rank, layout.south_rank,
+            layout.rank, layout.south_rank, comm,
+        )
+
+    # North side
+    if layout.north_rank is None:
+        north_slab = jnp.full(
+            (halo,), jnp.asarray(north_value, dtype=interior_dtype),
+        )
+    else:
+        try:
+            import mpi4jax
+            from mpi4py import MPI
+        except ImportError as exc:
+            raise ImportError(
+                "Lat-lon MPI 1-D pad (interior partition cut) requires "
+                "mpi4jax and mpi4py."
+            ) from exc
+        comm = MPI.COMM_WORLD
+        sendrecv = _get_sendrecv_vjp(mpi4jax)
+        send_top = interior[-halo:]
+        recv_template = jnp.zeros_like(send_top)
+        north_slab = sendrecv(
+            send_top, recv_template,
+            layout.north_rank, layout.north_rank,
+            layout.rank, layout.north_rank, comm,
+        )
+
+    return jnp.concatenate([south_slab, interior, north_slab], axis=0)
 
 
 def _pad_with_pole_bc_lat_mpi(
@@ -407,6 +607,17 @@ def _pad_with_pole_bc_lat_mpi(
     """
     if halo <= 0:
         return interior
+
+    # 1D lat-axis metrics (sin_lat, cos_lat_v_interior, dx_cell, …)
+    # don't have a lon axis to pole-fold over.  Build the result
+    # directly: constant pad at pole-touching boundaries, sendrecv
+    # at interior cuts — no call to ``exchange_halo_latlon`` (which
+    # assumes axis 1 = lon and would fail on ndim=1).
+    if interior.ndim == 1:
+        return _pad_with_pole_bc_lat_mpi_1d(
+            interior, layout, halo=halo,
+            south_value=south_value, north_value=north_value,
+        )
 
     # Step 1: run the standard halo exchange.  Boundary ranks will
     # get pole-folded values; interior cuts will get sendrecv'd
@@ -745,103 +956,93 @@ def make_latlon_mpi_step(
     model,
     layout: LatLonBandLayout,
     *,
-    halo: int = 2,
+    halo: int = 2,  # kept for backward-compat signature; unused now
 ) -> Callable:
     """Build an MPI-aware step function for the lat-lon C-grid dycore.
 
-    **Stage 1 + Stage 2 scope** — hydrostatic primitive equations with
-    optional tracers.  Physics (``physics_fn``) and polar filter will be
-    added in Stage 3.  Stage 2 (tracer support) reuses Stage 0's
-    halo machinery transparently because ``pad_state_halos`` /
-    ``strip_halos`` already iterate over ``state.tracers``; the
-    external mass fixer also already rescales tracers when ``p_s``
-    is corrected (see ``_apply_safety_rails`` in
-    ``primitive_eq_latlon_cgrid.py``).
+    Thin backend-aware wrapper (Step 4 of the Option-(ii) refactor).
+    Previous iterations of this function pre-padded state on a padded
+    grid and ran a "padded model"; that approach hit an architectural
+    mismatch at the pole because the dycore's operator-internal
+    pole-BC pads were applied at the *padded* array's outer faces, not
+    at the actual global pole rows.  The new design activates the
+    backend-dispatched
+    :func:`legoesm.grids.halo_latlon.pad_halo_latlon` family — so
+    every operator that needs halo data fetches it via inter-rank
+    sendrecv at partition cuts and pole-fold / wall-BC constants at
+    boundary ranks, with no pre-padding of state on the caller side.
 
     Architecture
     ------------
-    The serial step
-    (:meth:`CGridLatLonPrimitiveEquationModel._step_cgrid`) runs:
+    1. ``set_halo_backend("mpi", layout)`` is activated once at
+       factory time.  Every subsequent ``pad_halo_latlon*``,
+       ``pad_ns_zero``, and ``pad_with_pole_bc_lat`` call inside the
+       dycore operators dispatches through the MPI sendrecv path.
+       ``_is_distributed()`` returns True, which gates the
+       allreduce inside ``_batch_global_area_sums`` and
+       ``zero_mean_tendency`` (the mass-fixer reductions).
 
-      1. Tendency computation via the C-grid operators.
-      2. SSPRK / RK4 integration via ``dispatch_integrator``.
-      3. Pole-wall BC (``v[poles] = 0``).
-      4. Safety rails (T floor, p_s floor, mass fixer with global sum).
+    2. A rank-local ``mpi_model`` is built once:
 
-    Under latitude-band MPI we want phases 1–3 to run on a **padded
-    local-band state** with a **padded local grid**, then strip the
-    halos, and finally apply phase 4 on the rank-local interior with
-    its rank-local grid so global reductions land on the right
-    contributions.
+       * **Grid** — same rank-local grid as ``model.grid`` *except*
+         ``total_area`` is replaced with the global sphere area
+         (``global_sum_mpi`` over the rank-local band area).  This is
+         what the mass fixer's uniform-correction divisor needs.
+         The per-cell ``area`` field stays rank-local.
 
-    Concrete plumbing
-    -----------------
+       * **Config** — ``pole_v_bc = (south_rank is None, north_rank
+         is None)`` so only the boundary ranks zero the actual pole
+         rows; interior ranks leave their band-edge v-rows alone
+         (those are interior v-faces shared with the neighbour rank
+         and kept consistent by halo exchange).  ``pole_v_bc_offset``
+         stays 0 since we're operating on rank-local state, not on
+         a pre-padded array.
 
-    * **Padded model.**  Built once per call to this factory.  It
-      reuses the original ``CGridLatLonPrimitiveEquationModel`` class
-      with three config overrides:
+    3. ``step_fn`` is a one-line delegate to ``mpi_model._step_cgrid``.
+       No padding, no stripping, no external fixer call — the
+       backend-aware operators inside ``_step_cgrid`` handle all the
+       halo plumbing.
 
-        - ``pole_v_bc = (layout.south_rank is None,
-                         layout.north_rank is None)`` — only boundary
-          ranks zero the actual global poles; interior ranks leave
-          their band-edge v-rows alone (those are interior v-faces
-          shared with the neighbour rank and kept consistent by halo
-          exchange).
-
-        - ``fix_mass = False``, ``zero_mean_ps_tendency = False`` —
-          turn OFF the global-sum operations *inside* the padded
-          step.  Otherwise they would integrate over halo cells which
-          duplicate the neighbour rank's interior, double-counting
-          under allreduce.  Global mass conservation is restored
-          *externally* below.
-
-    * **Per-step closure.**  Pads the input state via
-      :func:`pad_state_halos`, runs ``padded_model._step_cgrid`` on
-      the padded state, strips the halos, and finally applies the
-      mass fixer using the ORIGINAL ``model`` (which carries the
-      rank-local grid).  The original model's
-      ``_apply_safety_rails`` uses ``_batch_global_area_sums`` which
-      delegates to ``global_sum_mpi`` whenever
-      ``_is_distributed()`` is True — so the caller must have
-      activated the MPI halo backend before any step runs.
+    Polar filter is still gated as a Stage-3 follow-up.  Physics
+    (``physics_fn``) and prescribed-SST scatter for AMIP also belong
+    to Stage 3 — surfaced as ``physics_fn=None`` here.
 
     Parameters
     ----------
     model : CGridLatLonPrimitiveEquationModel
-        Built against the **rank-local** grid (no halos in its
-        ``grid.area`` / ``grid.lat`` etc.).  This is the canonical
-        "what this rank owns" object.
+        Built against the **rank-local** grid (sliced from the
+        global grid for this band).  ``model.grid.total_area`` may be
+        either the band area or the sphere area; the wrapper
+        re-allreduces it defensively so callers don't have to remember
+        which.
     layout : LatLonBandLayout
     halo : int, default 2
-        Halo width passed to ``pad_state_halos``.  Must be at least
-        as wide as the deepest stencil in the dycore — PPM scalar
-        transport + bilaplacian hyperdiff use a 2-cell stencil
-        (see Stage-0 survey), so ``halo=2`` is the default.
+        Kept for backward-compatible signature.  No longer used —
+        the operator-internal halo widths (1 for compact stencils,
+        2 for PPM and biharmonic) are determined by each operator
+        as it calls ``pad_halo_latlon(field, halo=k)``.
 
     Returns
     -------
     step_fn : callable
-        ``step_fn(local_state, dt, *, target_mass=None) -> local_state``
+        ``step_fn(local_state, dt, *, target_mass=None) -> local_state``.
 
-    Notes on what is NOT yet supported
-    ----------------------------------
+    Side effect
+    -----------
+    Activates ``set_halo_backend("mpi", layout)`` at the global
+    module level.  Caller is responsible for resetting via
+    ``set_halo_backend("local")`` once the run is finished — see
+    ``ModelDriver._finalize_run`` for the cubed-sphere precedent.
+    Tests that share a Python process should reset between cases.
 
-    * **Physics** (``physics_fn is not None``): the SST/SIC forcing,
-      radiation, convection, microphysics paths plug into
-      ``_step_cgrid`` via the ``physics_fn`` argument.  These are
-      column-local (no lat halo) BUT the AMIP coupler must scatter
-      the global SST/SIC time series to per-rank bands before each
-      step.  Defer to Stage 3.
-
-    * **Polar filter** (``config.use_polar_filter``): the FFT is
-      per-latitude-row so it's MPI-local in principle, but the
-      precomputed mask in the padded model would include halo rows
-      with edge-extrapolated metrics — needs verification before
-      enabling.  Defer.
-
-    These are surfaced as explicit ``NotImplementedError`` raises at
-    step time (not at factory time) so callers get a clear signal
-    rather than silent wrong answers.
+    Note on ``halo`` kwarg
+    ----------------------
+    The previous (pre-pad) implementation took ``halo`` to size its
+    padded state buffer.  In the new design no buffer exists — each
+    operator picks its own halo width from the
+    backend-dispatched ``pad_halo_latlon(..., halo=k)`` call.  The
+    kwarg is retained for signature stability with existing test
+    fixtures and the (now legacy) tests/parallel/test_latlon_mpi_step_serial.py.
     """
     # Local imports keep this module importable without the dycore on
     # the path (important for the Stage-0 halo tests which don't need
@@ -849,10 +1050,9 @@ def make_latlon_mpi_step(
     from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationModel,
     )
+    from legoesm.grids.halo import set_halo_backend
     from legoesm.parallel.reductions import global_sum_mpi
 
-    if halo < 1:
-        raise ValueError(f"halo must be >= 1, got {halo}")
     if model.config.use_polar_filter:
         raise NotImplementedError(
             "make_latlon_mpi_step: polar filter under MPI is not "
@@ -860,91 +1060,48 @@ def make_latlon_mpi_step(
             "or run single-rank."
         )
 
-    # ---- Build the padded local grid + padded model once ----
-    padded_grid = build_padded_grid(model.grid, layout, halo=halo)
-    padded_config = model.config._replace(
-        fix_mass=False,              # external fixer on the stripped state
-        zero_mean_ps_tendency=False, # ditto — avoid in-step global sums
+    # Activate the MPI halo backend.  Every pad_halo_latlon /
+    # pad_with_pole_bc_lat call inside the dycore now dispatches
+    # through inter-rank sendrecv at partition cuts and constant /
+    # pole-fold pads at boundary ranks.  This also flips
+    # ``_is_distributed()`` so the mass-fixer reductions allreduce.
+    set_halo_backend("mpi", layout)
+
+    # Build the MPI-aware model: rank-local grid with allreduced
+    # ``total_area`` (mass-fixer divisor); pole_v_bc tracks which
+    # ends of the band touch actual global poles.
+    global_total_area = global_sum_mpi(model.grid.total_area)
+    mpi_grid = model.grid._replace(total_area=global_total_area)
+    mpi_config = model.config._replace(
         pole_v_bc=(
             layout.south_rank is None,
             layout.north_rank is None,
         ),
-        # Under padded execution the actual pole rows sit ``halo``
-        # cells into the padded v-array, NOT at its ends — without
-        # this offset the wall-BC enforcement zeros halo rows
-        # instead and the real poles drift, producing NaNs by the
-        # second RK stage (see Stage-2 smoke run #3).
-        pole_v_bc_offset=halo,
+        # No padding → no offset.  The dycore zeros v at v[0] / v[-1]
+        # of its rank-local input — those ARE the band's lat ends,
+        # which are the actual poles ONLY at pole-touching ranks
+        # (handled by the pole_v_bc tuple above).
+        pole_v_bc_offset=0,
     )
-    padded_model = CGridLatLonPrimitiveEquationModel(
-        grid=padded_grid,
+    mpi_model = CGridLatLonPrimitiveEquationModel(
+        grid=mpi_grid,
         sigma_coord=model.sigma_coord,
-        config=padded_config,
-        dt=getattr(model, "_max_dt", 600.0),  # only used for polar filter init
-    )
-
-    # ---- Build the rank-local "fixer model" with a GLOBAL total area ----
-    #
-    # The serial ``_apply_safety_rails`` computes
-    #
-    #     correction = (mass_target - mass_new) / self.grid.grid_total_area
-    #
-    # where ``mass_*`` come from ``_batch_global_area_sums`` (already
-    # allreduced under MPI).  ``self.grid.grid_total_area`` is NOT
-    # allreduced; on a rank-local lat-lon band it equals the band area,
-    # not the sphere area — so the uniform correction divides by the
-    # wrong denominator and mass drifts every step.
-    #
-    # The cubed-sphere replicated-MPI path doesn't hit this because each
-    # rank holds the full grid (grid_total_area is already global).  For
-    # the lat-lon band path we pre-allreduce here and inject the result
-    # into a "fixer model" via a NamedTuple replace on the grid.  We
-    # don't mutate the caller's ``model.grid`` (no surprise side effects
-    # on shared state).
-    # ``LatLonGrid.grid_total_area`` is a property delegating to
-    # ``total_area`` — the actual NamedTuple field — so ``_replace``
-    # must use the underlying name.
-    global_total_area = global_sum_mpi(model.grid.total_area)
-    fixer_grid = model.grid._replace(total_area=global_total_area)
-    fixer_config = model.config  # keep fix_mass etc. as caller intended
-    fixer_model = CGridLatLonPrimitiveEquationModel(
-        grid=fixer_grid,
-        sigma_coord=model.sigma_coord,
-        config=fixer_config,
+        config=mpi_config,
         dt=getattr(model, "_max_dt", 600.0),
     )
 
     def step_fn(local_state, dt, *, target_mass=None):
-        # 1. Pad the local interior state by `halo` lat rows on each side.
-        #    pad_state_halos already iterates over state.tracers and pads
-        #    each one — so a state with q_v, q_c, etc. is transparently
-        #    handled by Stage 0's halo machinery.
-        padded_state = pad_state_halos(local_state, layout, halo=halo)
-        # 2. Run pure dynamics on the padded grid+state — no fixer, no
-        #    zero-mean (those are external below).  Tracer transport
-        #    (PPM mass-flux form) runs here automatically when
-        #    ``padded_state.tracers`` is non-empty; the operators use
-        #    ``halo`` rows of lat padding that we just supplied, so PPM
-        #    reconstruction at the interior cells sees the right
-        #    neighbour values.
-        padded_new = padded_model._step_cgrid(
-            padded_state, dt, target_mass=None, physics_fn=None,
+        # No pre-pad, no strip.  The operators inside ``_step_cgrid``
+        # call backend-aware halo helpers that, under
+        # ``_halo_backend == "mpi"``, MPI-sendrecv with neighbouring
+        # ranks for halo cells at partition cuts and apply the
+        # serial pole-fold / wall-BC constants at boundary ranks.
+        # The mass fixer's allreduce fires through the same
+        # ``_is_distributed()`` gate.
+        return mpi_model._step_cgrid(
+            local_state, dt,
+            target_mass=target_mass,
+            physics_fn=None,
         )
-        # 3. Strip halos to recover the rank-local interior state.
-        stripped = strip_halos(padded_new, layout, halo=halo)
-        # 4. Apply mass fixer on the stripped state using the
-        #    GLOBAL-aware fixer model.  Routes through
-        #    ``_batch_global_area_sums`` which delegates to
-        #    ``global_sum_mpi`` whenever ``_is_distributed()`` is True
-        #    — i.e. when the caller has set the halo backend to MPI
-        #    (see legoesm.grids.halo.set_halo_backend).  The fixer
-        #    model carries the pre-allreduced
-        #    ``grid_total_area`` so the per-step uniform p_s
-        #    correction divides by the right denominator.
-        if model.config.fix_mass:
-            stripped = fixer_model._apply_safety_rails(
-                stripped, target_mass=target_mass, pre_state=local_state,
-            )
-        return stripped
 
     return step_fn

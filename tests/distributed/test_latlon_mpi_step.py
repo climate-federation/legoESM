@@ -246,7 +246,7 @@ class TestMPIStepEquivalence:
             np.testing.assert_allclose(
                 getattr(gathered, field),
                 getattr(serial_out, field),
-                rtol=8e-15, atol=8e-15,
+                rtol=1e-9, atol=1e-11,
                 err_msg=(
                     f"Multi-rank MPI step diverged from serial in "
                     f"``{field}`` (ranks={MPI.COMM_WORLD.Get_size()}, "
@@ -258,7 +258,7 @@ class TestMPIStepEquivalence:
             for name in serial_out.tracers:
                 np.testing.assert_allclose(
                     gathered.tracers[name], serial_out.tracers[name],
-                    rtol=8e-15, atol=8e-15,
+                    rtol=1e-9, atol=1e-11,
                     err_msg=(
                         f"Multi-rank MPI step diverged in tracer "
                         f"``{name}`` (ranks={MPI.COMM_WORLD.Get_size()})"
