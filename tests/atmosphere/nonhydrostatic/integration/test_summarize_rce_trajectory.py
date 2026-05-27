@@ -1063,6 +1063,28 @@ def test_parse_log_max_w_rejects_nan(tmp_path):
         summary_mod.parse_log_max_w(tmp_path)
 
 
+def test_parse_log_max_w_rejects_pos_inf(tmp_path):
+    """+Inf in max|w| column raises ValueError. The summarizer uses
+    ``math.isfinite`` which rejects both NaN and +/-Inf; the NaN path
+    is tested above, this covers the +Inf branch a runaway-w blowup
+    would actually produce (e.g. an `1/0` divergence in the dycore)."""
+    log_path = tmp_path / "log.txt"
+    _write_log_txt(log_path, [1e-3, float("inf"), 2e-3])
+    with pytest.raises(ValueError, match="non-finite max"):
+        summary_mod.parse_log_max_w(tmp_path)
+
+
+def test_parse_log_max_w_rejects_neg_inf(tmp_path):
+    """-Inf in max|w| column also raises. The max|w| column is the
+    absolute-value norm so -Inf should never occur physically, but
+    ``math.isfinite`` is symmetric — guard against a bug where the
+    driver prints a signed value by accident."""
+    log_path = tmp_path / "log.txt"
+    _write_log_txt(log_path, [1e-3, float("-inf"), 2e-3])
+    with pytest.raises(ValueError, match="non-finite max"):
+        summary_mod.parse_log_max_w(tmp_path)
+
+
 def test_check_log_max_w_passes_on_quiet_run(tmp_path):
     """End-to-end CLI: --check-log-max-w on a finished run with
     max|w| < 50 m/s prints the log max + does NOT fail."""
