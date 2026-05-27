@@ -162,6 +162,45 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 150 (MPI DD path verified exercisable on macOS — F9 still scaling-blocked)
+
+User asked "is MPI running for this case?". Answer: NO — iter-105
+was launched as ``python scripts/run_rce_mpi_long.py ...`` (single-
+process), not ``mpirun -np N python ...``. The driver script is
+*named* ``run_rce_mpi_long.py`` but the MPI code path only fires
+when invoked under mpirun (Get_size() > 1). Single-rank invocation
+sets ``n_ranks=1`` in the log header (verified).
+
+**Why single-rank**: F9 (mpi4jax 0.9 vs JAX 0.10.1 stack mismatch
+on macOS Python 3.13) makes per-rank MPI throughput ~25-70× slower
+than single-rank Python. Restarting iter-105 under ``mpirun -np N``
+would not finish within any reasonable wall time.
+
+**iter-150 verification**: launched a tiny 2-rank smoke
+(``mpirun -np 2 ... --nx 8 --ny 8 --days 0.005``, output at
+``/tmp/iter150_mpi_smoke``). Completed 43 steps in 66 s wall (~0.65
+steps/s, vs single-rank iter-105 at ~10 steps/s = 15× per-rank
+slowdown — close to the F9 estimate). The DD code path
+**WORKS**: log header shows ``n_ranks=2 grid=8x8``, step-1 CWV
+matches iter-105 bit-for-bit (49.942 mm = iter-95 IC), driver
+exits 0 with ``Done. 43 steps``.
+
+The mpi4jax / reductions module fires a ``RuntimeWarning`` on
+import (``Detected versions outside legoESM's tested MPI range:
+jax==0.10.1 (tested >=0.8.0, <0.10.0), mpi4jax==0.9.0.post1
+(tested >=0.8.0, <0.9.0)``) but continues; ``LEGOESM_MPI_STRICT_COMPAT=1``
+would turn this into a hard error.
+
+**Status update on F9**: the DD code path is verified
+**FUNCTIONALLY CORRECT** end-to-end on macOS (iter-150 smoke +
+iter-4 R7 mass fixer tests + iter-5 ``--use-dd`` tests + iter-57
+Codex MPI-halo review 0 HIGH + 0 MEDIUM). What is platform-
+blocked is performance — real strong/weak scaling numbers require
+a tested mpi4jax + JAX stack (Linux MPI cluster, or once
+mpi4jax FFI-based release lands per the warning text). Until
+then, single-rank Python is the canonical production path on
+this machine.
+
 ### 2026-05-27 — iter 149 (iter-105 day-10 investigation — column-symmetric convection)
 
 User asked for day-10 investigation since the 30-day run is too
