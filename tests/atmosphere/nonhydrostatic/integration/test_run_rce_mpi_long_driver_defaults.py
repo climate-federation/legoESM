@@ -18,6 +18,8 @@ which locks the wrapper-script env-var defaults.
 from __future__ import annotations
 
 import ast
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -563,6 +565,76 @@ def test_cfl_safe_default_0p4(driver_defaults):
     """iter-233: --cfl-safe default = 0.4 (SK08/FV3 conservative
     target, 2.5x margin under the formal CFL=1 limit)."""
     assert driver_defaults["--cfl-safe"] == 0.4
+
+
+def test_driver_rejects_n_outer_split_non_numeric_string(tmp_path):
+    """iter-234 (Codex iter-233 round-1 LOW): the driver must
+    SystemExit cleanly when --n-outer-split receives an invalid
+    non-numeric, non-'auto' string. Unit test of
+    select_n_outer_split covers the helper-level ValueError but
+    NOT the driver-level coercion path; this closes the gap.
+    """
+    import subprocess
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    cmd = [
+        sys.executable, str(DRIVER),
+        "--nx", "12", "--ny", "12", "--nlev", "20",
+        "--dx", "2000.0", "--dt", "5.0",
+        "--days", "0.001",
+        "--semi-implicit-acoustic",
+        "--acoustic-off-centering", "0.1",
+        "--n-acoustic-substeps", "6",
+        "--no-radiation",
+        "--n-outer-split", "foo",
+        "--output", str(tmp_path / "out"),
+    ]
+    result = subprocess.run(
+        cmd, env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode != 0, (
+        f"Driver did not reject --n-outer-split=foo (returncode "
+        f"{result.returncode}). stdout: {result.stdout[-500:]}"
+    )
+    combined_err = (result.stderr + result.stdout).lower()
+    assert "n-outer-split" in combined_err or "n_outer_split" in combined_err, (
+        f"Driver rejection message missing 'n-outer-split' marker. "
+        f"stderr: {result.stderr[-500:]}"
+    )
+
+
+def test_driver_rejects_n_outer_split_zero(tmp_path):
+    """iter-234 (Codex iter-233 round-1 LOW): the driver must
+    SystemExit on --n-outer-split=0 (running zero inner steps
+    would advance the state by zero per outer step — silent no-op).
+    """
+    import subprocess
+    env = os.environ.copy()
+    env["JAX_PLATFORMS"] = "cpu"
+    cmd = [
+        sys.executable, str(DRIVER),
+        "--nx", "12", "--ny", "12", "--nlev", "20",
+        "--dx", "2000.0", "--dt", "5.0",
+        "--days", "0.001",
+        "--semi-implicit-acoustic",
+        "--acoustic-off-centering", "0.1",
+        "--n-acoustic-substeps", "6",
+        "--no-radiation",
+        "--n-outer-split", "0",
+        "--output", str(tmp_path / "out"),
+    ]
+    result = subprocess.run(
+        cmd, env=env, capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode != 0, (
+        f"Driver did not reject --n-outer-split=0 (returncode "
+        f"{result.returncode}). stdout: {result.stdout[-500:]}"
+    )
+    combined_err = (result.stderr + result.stdout).lower()
+    assert ">= 1" in combined_err or "must be" in combined_err, (
+        f"Driver rejection message for n-outer-split=0 missing "
+        f"the '>= 1' / 'must be' marker. stderr: {result.stderr[-500:]}"
+    )
 
 
 def test_driver_imports_select_n_outer_split_from_package():

@@ -1288,8 +1288,16 @@ def main():
                 cwv = column_water_vapor_plane(state_io, hc)
                 mse = column_moist_static_energy_plane(state_io, hc)
                 precip = precipitation_rate_proxy_plane(state_io, hc)
+                # iter-233 Codex MEDIUM: under outer subcycling
+                # (n_outer_split>1) the dycore actually steps at
+                # ``dt_inner = args.dt / n_outer_split``, not
+                # ``args.dt``. Passing args.dt inflates the reported
+                # Ca_substep by n_outer_split and would trigger
+                # false-alarm CFL warnings even though the physics
+                # is correct (each subcycle uses dt_inner internally
+                # for acoustic substepping).
                 cn = compute_courant_numbers_plane(
-                    state_io, hc, grid_io, args.dt,
+                    state_io, hc, grid_io, dt_inner,
                     n_acoustic_substeps=args.n_acoustic_substeps,
                 )
                 max_w = float(jnp.max(jnp.abs(state_io.w.data)))
