@@ -1533,6 +1533,33 @@ class PlaneCompressibleEulerModel:
     # Public API
     # ------------------------------------------------------------------
 
+    def precompute_target_mass(
+        self,
+        state: PlaneNonHydrostaticState,
+    ) -> None:
+        """Cache target dry mass from ``state`` for fix_mass use under JIT.
+
+        ``step()`` lazily caches ``_target_mass`` from its first input,
+        which leaks the traced array when called inside ``jax.lax.scan``
+        with ``fix_mass=True``. Calling this method BEFORE the scan
+        pre-populates the cache with a concrete (non-traced) array, so
+        the scan body sees a closed-over constant.
+
+        Usage::
+
+            model._target_mass = None  # if already set
+            model.precompute_target_mass(initial_state)
+            out = jax.lax.scan(lambda s,_: (model.step(s, dt), None),
+                               initial_state, None, length=N)[0]
+
+        Required when fix_mass=True + anchor_mass_to_initial=True is
+        combined with lax.scan-based time integration.
+        """
+        if self.config.fix_mass:
+            self._target_mass = compute_dry_mass_plane(
+                state, self.grid, self.height_coord, self.terrain_metric,
+            )
+
     def step(
         self,
         state: PlaneNonHydrostaticState,

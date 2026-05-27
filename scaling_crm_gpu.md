@@ -117,6 +117,31 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 37 — 2026-05-27 — BOTTLENECK #3 SOLVED: fix_mass + lax.scan compatibility
+
+Root cause of "tracer leak" (iter 31): `step()` lazily caches
+`_target_mass` from first input. Inside `lax.scan` that first input
+is a traced array → leaked reference.
+
+**Fix:** new public method `precompute_target_mass(state)` on
+`PlaneCompressibleEulerModel`. Pre-populates the cache with a
+concrete (non-traced) array before scan begins. ~10 LOC added.
+
+Usage:
+```python
+model.precompute_target_mass(initial_state)
+out = jax.lax.scan(lambda s,_: (model.step(s, dt), None),
+                   initial_state, None, length=N)[0]
+```
+
+Verified: **fix_mass=True + lax.scan now works**. 652 Mc/s @ N=128
+fp32 explicit (vs 752 without fix_mass — 13% mass-fixer overhead,
+matches earlier "10-15%" estimate).
+
+Production driver could now use scan-based fuse for the dycore step
+(when not interleaving Python-side I/O), recovering ~10-15% of the
+fix_mass scan-fuse gap from the iter-31 walkback.
+
 ### Iter 36 — 2026-05-27 — production SI+physics sweep + bottleneck inventory
 
 **Production SI + full RCEMIP physics fp32 sweep (10-step scan):**
