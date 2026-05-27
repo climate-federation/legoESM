@@ -90,7 +90,11 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
     # macOS BSD sed does not support ``\?``; use ``-E`` (extended
     # regex) so ``# ?`` strips the leading ``# `` (with optional
     # trailing space).
-    sed -n '2,72p' "$0" | sed -E 's/^# ?//'
+    # iter-143: extracted range widened from 2..72 to 2..77 so the
+    # iter-138 ``CHECK_LOG_MAX_W`` + iter-125 ``EMIT_TRAJECTORY_PNG``
+    # + iter-141 hint env vars all appear in --help output (the
+    # iter-136 range stopped at line 72 = before PYBIN).
+    sed -n '2,77p' "$0" | sed -E 's/^# ?//'
     exit 0
 fi
 

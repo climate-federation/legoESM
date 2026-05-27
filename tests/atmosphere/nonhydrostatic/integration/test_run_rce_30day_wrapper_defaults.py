@@ -1159,3 +1159,29 @@ def test_wrapper_check_log_max_w_default_off(tmp_path):
         f"--check-log-max-w should NOT be passed when "
         f"CHECK_LOG_MAX_W unset/0; trajectory.txt={traj!r}"
     )
+
+
+def test_wrapper_help_lists_all_env_vars(tmp_path):
+    """iter-143: --help output must include every env var the
+    wrapper documents (the iter-136 extracted range capped at
+    line 72, dropping the iter-138 + iter-125 + PYBIN docs).
+    A future env var addition that doesn't widen the range would
+    be caught here."""
+    res = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+         "--help"],
+        cwd=str(REPO_ROOT), capture_output=True, text=True,
+        check=False, timeout=10,
+    )
+    assert res.returncode == 0
+    # Every documented env var must surface.
+    for env_var in (
+        "DAYS", "RANKS", "DT", "NX", "N_ACOUSTIC", "ADVECTION",
+        "NO_MASS_FIXER", "EVALUATE_DOD", "ALLOW_SUMMARY_FAILURE",
+        "EMIT_TRAJECTORY_PNG", "CHECK_LOG_MAX_W", "PYBIN",
+    ):
+        assert env_var in res.stdout, (
+            f"--help missing env var {env_var!r}; the iter-136 sed "
+            f"range may need widening to cover newer docs. "
+            f"stdout tail: {res.stdout[-500:]!r}"
+        )
