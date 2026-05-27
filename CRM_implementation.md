@@ -101,7 +101,7 @@ Bare-dycore probe at dt=1 s, hyperdiff=1e6 (production default) blows up at step
 
 At nlev=30, H=33 km uniform dz~1.1 km. Legacy IC sets θ' only where z < 1 km — single grid level (z_full[29] ≈ 550 m). Resulting 2-Δz vertical mode unrepresentable on staggered grid, aliases into numerical instability hyperdiff can only slow down. Pure-Wing IC (no bubble) on 24×24×30 stable through 1296 steps (20 min sim) with max|w| < 5 × 10⁻³ m/s and zero qc.
 
-Aggressive qv noise (≥ 2.5 × 10⁻⁴ kg/kg in lowest 4 levels) *also* destabilising: localised qv hotspots → spatial gradients in surface flux → non-uniform heating → grid-scale convection burst. **Default qv noise lowered to 0**; small values (1–5 × 10⁻⁵ kg/kg) acceptable as stochastic seed but must verify.
+Aggressive qv noise (≥ 2.5 × 10⁻⁴ kg/kg in lowest 4 levels) *also* destabilising: localised qv hotspots → spatial gradients in surface flux → non-uniform heating → grid-scale convection burst. **Default qv noise lowered to 0**; F7-original said small values (1–5 × 10⁻⁵ kg/kg) acceptable as stochastic seed but iter-97 found this is STALE post-iter-95 (both 1e-5 and 5e-5 NaN at step 100 on the corrected IC + radiation; corrected lowest-level T sits closer to saturation, any qv perturbation pushes cells over the Kessler threshold and explodes the acoustic mode). **Keep ``--qv-noise-amp 0`` as the only safe default on the iter-95 IC path**; re-measure threshold before re-enabling.
 
 ### F8. Stable physics-on smoke confirms dycore+physics composes cleanly
 
@@ -148,6 +148,36 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 * `--implicit-buoyancy` now exposed but inert at substep level (F2). Kept in API for future outer-step variant.
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
+
+### 2026-05-27 — iter 97 (qv-noise destabilises iter-95 IC; F7 stale)
+
+**Negative result**: tried iter-96 config + ``--qv-noise-amp`` at
+both 5e-5 (F7's "destabilising" threshold) and 1e-5 (F7's "gentle
+stochastic seed"). BOTH produced ``NaN`` at step 100.
+
+* 5e-5: NaN at step 100. Expected per F7.
+* 1e-5: NaN at step 100. **Unexpected** — F7 said this amplitude
+  was acceptable.
+
+**Diagnosis**: F7's noise-amplitude tolerance was measured pre-iter-
+95 on the legacy hydrostatic-BC IC (T_lowest ≈ 309 K, supercritical).
+The iter-95-corrected IC (T_lowest ≈ 296.81 K, matches Wing 2018)
+sits closer to saturation in the lowest few model levels; adding
+ANY qv perturbation pushes those cells over saturation
+instantaneously, Kessler dumps the excess as condensation heat,
+acoustic mode explodes within ~5 outer steps.
+
+**Action**: leave ``--qv-noise-amp 0`` as the only safe default for
+the corrected IC. F7's "1–5e-5 acceptable" is now STALE — do not
+re-enable noise on the iter-95 path without re-measuring the
+stability threshold. Convection trigger for RCE spinup will need a
+different mechanism (longer integration → radiative-cooling-driven
+instability OR a single-cell warm bubble at z≥3 km, ABOVE the
+saturation-sensitive layer).
+
+**No code changes** (the existing ``--qv-noise-amp`` default = 0
+already protects production runs). This iteration is a documented
+no-go finding only.
 
 ### 2026-05-27 — iter 96 (radiation-enabled 5-sim-day run)
 
