@@ -32,7 +32,8 @@ N_TIMING = 30
 
 def _build_model(nx: int, ny: int, nlev: int, dx: float, dtype_x64: bool,
                  n_acoustic_substeps: int = 12,
-                 semi_implicit_acoustic: bool = True):
+                 semi_implicit_acoustic: bool = True,
+                 fix_mass: bool = False):
     import jax.numpy as jnp
     from legoesm.atmosphere.dynamics.compressible_euler import (
         CompressibleEulerConfig,
@@ -54,7 +55,7 @@ def _build_model(nx: int, ny: int, nlev: int, dx: float, dtype_x64: bool,
         sponge_coeff=0.05, sponge_width=5000.,
         hyperdiff_coeff=1e6, hyperdiff_rho_coeff=1e6, hyperdiff_w_coeff=1e6,
         smagorinsky_cs=0.0, use_coriolis=True,
-        fix_mass=False, anchor_mass_to_initial=False,
+        fix_mass=fix_mass, anchor_mass_to_initial=fix_mass,
     )
     model = PlaneCompressibleEulerModel(grid, hc, tm, cfg)
     state = make_rest_state(grid, hc, dtype=dtype)
@@ -63,6 +64,10 @@ def _build_model(nx: int, ny: int, nlev: int, dx: float, dtype_x64: bool,
     rng = jax.random.PRNGKey(0)
     kick = 0.001 * jax.random.normal(rng, state.theta_prime.data.shape, dtype=dtype)
     state = state._replace(theta_prime=state.theta_prime.replace(data=kick))
+    # Pre-cache target_mass so fix_mass=True is lax.scan-compatible
+    # (iter-37 fix).
+    if fix_mass:
+        model.precompute_target_mass(state)
     return model, state, nx * ny
 
 

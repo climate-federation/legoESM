@@ -723,7 +723,7 @@ def acoustic_substeps_semi_implicit(
     dz_half = height_coord.dz_half
     theta_0 = height_coord.theta_ref
     rho_0 = height_coord.rho_ref
-    J = terrain_metric.jacobian  # (6, n, n)
+    J = terrain_metric.jacobian  # (*spatial,) — cubed-sphere (6,n,n), latlon (ny,nx), etc.
     beta = euler_config.acoustic_off_centering
     implicit_buoyancy = euler_config.implicit_buoyancy
 
@@ -737,6 +737,9 @@ def acoustic_substeps_semi_implicit(
     # Loop-invariant pieces: dz_inner used in the explicit RHS dpi/dz,
     # and the tridiag bands (alpha + buoyancy) shared across substeps.
     # Hoisted out of the fori_loop via precompute_si_tridiag_bands.
+    # NOTE: dz_inner is also recomputed inside precompute_si_tridiag_bands;
+    # the recomputation is a 5-character expression and XLA folds it. The
+    # helper consumes it for alpha; we use it here for dpi/dz in the RHS.
     dz_inner = 0.5 * (dz[:-1] + dz[1:])  # (nlev-1,)
     a_tri_pre, b_tri_pre, c_tri_pre = precompute_si_tridiag_bands(
         height_coord, J, dt_s, g, implicit_buoyancy, nlev=nlev,
