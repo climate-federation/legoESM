@@ -36,10 +36,23 @@ REPO_ROOT="/burg-archive/glab/users/pg2328/legoESM"
 cd "${REPO_ROOT}"
 mkdir -p results/latlon_mpi
 
-# pg2328 has no .venv — reuse jn2808's conda env, prepend pg2328's source
-# tree so ``import legoesm`` resolves to the code we just wrote.  See
-# ~/.claude/projects/.../memory/python_env.md.
-PY="/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python"
+# Prefer the pg2328-owned venv with mpi4jax (created by
+# ``scripts/setup_legoesm_mpi_venv.sbatch``); fall back to jn2808's
+# conda env when running tests that don't need MPI.  The pre-flight
+# below will abort if mpi4jax isn't importable from the chosen Python.
+PG_VENV="${HOME}/.venvs/legoesm-mpi/bin/python"
+JN_BASE="/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python"
+if [[ -x "${PG_VENV}" ]]; then
+    PY="${PG_VENV}"
+else
+    PY="${JN_BASE}"
+fi
+echo "Using Python: ${PY}"
+
+# Load openmpi (mpirun + libmpi for mpi4jax) on the compute node.
+source /etc/profile.d/modules.sh 2>/dev/null || true
+module load openmpi/gcc/64/4.1.7a1 2>/dev/null || true
+
 export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
 export JAX_PLATFORMS=cpu
 export JAX_ENABLE_X64=1

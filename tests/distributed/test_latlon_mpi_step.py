@@ -136,6 +136,7 @@ def _make_local_model(global_grid, sigma, serial_config, layout):
     band_lon2d = global_grid.lon2d[s:e, :]
     band_cos_lat = global_grid.cos_lat[s:e]
     band_sin_lat = global_grid.sin_lat[s:e]
+    band_dy = global_grid.dy[s:e]
     band_f = global_grid.f[s:e, :]
     band_dx = global_grid.dx[s:e, :]
     band_area = global_grid.area[s:e, :]
@@ -147,11 +148,14 @@ def _make_local_model(global_grid, sigma, serial_config, layout):
         lon2d=band_lon2d,
         cos_lat=band_cos_lat,
         sin_lat=band_sin_lat,
+        dy=band_dy,
         f=band_f,
         dx=band_dx,
         area=band_area,
         total_area=band_total_area,
-        grid_total_area=band_total_area,
+        # ``grid_total_area`` is a property delegating to
+        # ``total_area`` — _replace must use the underlying field
+        # name (this caught the first smoke run on Stage 2).
     )
     return CGridLatLonPrimitiveEquationModel(
         band_grid, sigma, serial_config,

@@ -93,6 +93,42 @@ class TestZeroVAtPole:
             )
 
 
+class TestOffset:
+    """``offset>0`` zeros the actual pole rows when the array is
+    padded by ``offset`` halo rows on each side (MPI use case)."""
+
+    def test_offset_halo2_zeros_interior_indices(self, v_random_3d):
+        """With halo=2 padding, the actual pole rows sit at index 2 and
+        ``-3``; halo rows at 0, 1, -1, -2 must remain unchanged."""
+        out = _zero_v_at_pole(v_random_3d, south=True, north=True, offset=2)
+        # Halo rows untouched
+        np.testing.assert_allclose(out[0], v_random_3d[0], rtol=0, atol=0)
+        np.testing.assert_allclose(out[1], v_random_3d[1], rtol=0, atol=0)
+        np.testing.assert_allclose(out[-2], v_random_3d[-2], rtol=0, atol=0)
+        np.testing.assert_allclose(out[-1], v_random_3d[-1], rtol=0, atol=0)
+        # Pole rows zeroed
+        assert jnp.all(out[2] == 0)
+        assert jnp.all(out[-3] == 0)
+        # Interior unchanged
+        np.testing.assert_allclose(out[3:-3], v_random_3d[3:-3], rtol=0, atol=0)
+
+    def test_offset_halo1_zeros_interior_indices(self, v_random_3d):
+        out = _zero_v_at_pole(v_random_3d, south=True, north=True, offset=1)
+        np.testing.assert_allclose(out[0], v_random_3d[0], rtol=0, atol=0)
+        np.testing.assert_allclose(out[-1], v_random_3d[-1], rtol=0, atol=0)
+        assert jnp.all(out[1] == 0)
+        assert jnp.all(out[-2] == 0)
+
+    def test_offset_zero_reproduces_legacy(self, v_random_3d):
+        """Belt-and-braces: offset=0 must still bit-match the legacy
+        single-Pad expression (the kwarg default)."""
+        legacy = jnp.pad(v_random_3d[1:-1, :, :], ((1, 1), (0, 0), (0, 0)))
+        out = _zero_v_at_pole(
+            v_random_3d, south=True, north=True, offset=0,
+        )
+        np.testing.assert_allclose(out, legacy, rtol=0, atol=0)
+
+
 class TestConfigDefault:
     """The config's ``pole_v_bc`` default must remain ``(True, True)``
     so the existing AMIP / Held-Suarez / Williamson runs keep their

@@ -495,14 +495,40 @@ def strip_halos(state, layout: LatLonBandLayout, halo: int = 1):
 
 
 def build_padded_grid(grid, layout: LatLonBandLayout, halo: int = 1):
-    """Build a LatLonGrid for the padded local domain (interior + halos).
+    """Build a ``LatLonGrid`` for the padded local domain (interior + halos).
 
-    Slices the global grid's latitude-dependent arrays to cover
-    ``[lat_start - halo, lat_end + halo)``.  At pole-touching ranks,
-    the slice is clamped and the missing rows are filled by
-    edge-padding the metric (so the operator sees plausible ``dy``,
-    ``cos_lat`` etc. in the halo even though the dynamic field there
-    is the pole-folded mirror).
+    Interior cells (where the rank's band lies) copy the global grid's
+    metrics bit-exactly.  Halo cells on **interior partition cuts**
+    (neighbour rank present) likewise slice the global grid.  Halo
+    cells **past a pole** are filled by **linearly extrapolating
+    ``lat``** and recomputing all derived metrics (``sin_lat``,
+    ``cos_lat``, ``f``, ``dx``, ``area``) from the extended ``lat``
+    using the same formulas as :func:`create_latlon_grid`.
+
+    Why linear extrapolation
+    ------------------------
+    The earlier ``mode='edge'`` pad produced *duplicate* latitudes at
+    the halo (``[lat[0], lat[0], lat[0], lat[1], ...]``).  The
+    canonical ``curl_vertex_cgrid`` then computes vertex areas as
+    ``R² dlon |sin_ext[k+1] - sin_ext[k]|`` over the entire padded
+    lat axis, giving ``A_vertex = 0`` at any pair of duplicate-lat
+    rows — and ``zeta = circ / 0 = ±Inf`` propagates into the
+    interior via the absolute-vorticity averaging onto u/v faces.
+    Diagnostic in ``scripts/_diag_mpi_step_nans.py`` pinpointed this.
+
+    Linear extrapolation past the pole keeps ``lat`` strictly
+    monotonic, ``A_vertex > 0`` everywhere, and (critically) the
+    interior lat values bit-exactly equal to the global grid's — so
+    the operator's stencils at interior cells are unchanged from
+    serial.  Halo cell *outputs* still get stripped after the step;
+    only the freedom from spurious zeros at intermediate stages is
+    what matters.
+
+    Assumptions
+    -----------
+    Uniform-``dlat`` lat-lon grid (the regular case used for AMIP).
+    Mercator and tripolar grids carry per-row ``dy`` / fold metadata
+    that this builder does NOT extrapolate yet — Stage 3 follow-up.
 
     Parameters
     ----------
@@ -512,42 +538,88 @@ def build_padded_grid(grid, layout: LatLonBandLayout, halo: int = 1):
 
     Returns
     -------
-    LatLonGrid with ``n_lat = n_lat_local + 2*halo`` and all metrics
-    sliced consistently.
+    LatLonGrid with ``n_lat = n_lat_local + 2*halo``, all metrics
+    derived consistently from the (extrapolated where necessary)
+    extended ``lat``.
     """
     if halo < 0:
         raise ValueError(f"halo must be >= 0, got {halo}")
+    if halo == 0:
+        return grid._replace(
+            n_lat=layout.n_lat_local,
+            lat=grid.lat[layout.lat_start:layout.lat_end],
+            lat2d=grid.lat2d[layout.lat_start:layout.lat_end, :],
+            lon2d=grid.lon2d[layout.lat_start:layout.lat_end, :],
+            cos_lat=grid.cos_lat[layout.lat_start:layout.lat_end],
+            sin_lat=grid.sin_lat[layout.lat_start:layout.lat_end],
+            dy=grid.dy[layout.lat_start:layout.lat_end],
+            f=grid.f[layout.lat_start:layout.lat_end, :],
+            dx=grid.dx[layout.lat_start:layout.lat_end, :],
+            area=grid.area[layout.lat_start:layout.lat_end, :],
+            total_area=jnp.sum(
+                grid.area[layout.lat_start:layout.lat_end, :]
+            ),
+        )
+
     s, e = layout.lat_start, layout.lat_end
     n_lat_g = layout.n_lat_global
     s_pad = max(s - halo, 0)
     e_pad = min(e + halo, n_lat_g)
-    pad_s = halo - (s - s_pad)   # how many ghost rows we need to fabricate
-    pad_n = halo - (e_pad - e)
+    pad_s = halo - (s - s_pad)   # rows to fabricate past south pole
+    pad_n = halo - (e_pad - e)   # rows to fabricate past north pole
 
-    def _slice_1d(arr):
-        sliced = arr[s_pad:e_pad]
-        if pad_s + pad_n > 0:
-            sliced = jnp.pad(sliced, (pad_s, pad_n), mode="edge")
-        return sliced
+    # ---- Extended lat past poles: step *from the pole boundary* ----
+    # Linear extrapolation by ``dlat`` from the cell centers produces
+    # halo lat values that are SYMMETRIC across the pole to interior
+    # rows (since cell centers sit at ``-π/2 ± dlat/2``).  ``sin`` is
+    # symmetric about ``-π/2`` (``sin(-π/2 + x) = sin(-π/2 - x) =
+    # -cos(x)``), so symmetric lat values yield identical ``sin``
+    # values and ``A_vertex = R² dlon |sin Δ| = 0`` in the operator
+    # — bringing back the original NaN bug.  Instead, treat the
+    # pole as the canonical reference: place halo cell centers at
+    # ``-π/2 - dlat * k`` (south) and ``π/2 + dlat * k`` (north) for
+    # k = 1, 2, …, halo.  This gives strictly monotonic ``sin`` in
+    # the halo, A_vertex > 0 everywhere, and interior lat values
+    # remain untouched (bit-exact to serial).
+    dlat = float(grid.dlat)
+    south_pole_lat = -float(jnp.pi) / 2.0
+    north_pole_lat = float(jnp.pi) / 2.0
+    lat_sliced = grid.lat[s_pad:e_pad]
+    extended_lat = lat_sliced
+    if pad_s > 0:
+        south_extrap = (
+            south_pole_lat - dlat * jnp.arange(pad_s, 0, -1)
+        )
+        extended_lat = jnp.concatenate([south_extrap, extended_lat])
+    if pad_n > 0:
+        north_extrap = (
+            north_pole_lat + dlat * jnp.arange(1, pad_n + 1)
+        )
+        extended_lat = jnp.concatenate([extended_lat, north_extrap])
 
-    def _slice_2d(arr):
-        sliced = arr[s_pad:e_pad]
-        if pad_s + pad_n > 0:
-            sliced = jnp.pad(sliced, [(pad_s, pad_n), (0, 0)], mode="edge")
-        return sliced
+    # Recover ``omega`` from the original grid's Coriolis field so the
+    # rebuilt grid carries the same rotation rate (the LatLonGrid
+    # NamedTuple does not store ``omega`` directly).  Use the
+    # interior row furthest from the pole so cos(lat) is well above
+    # the clamp floor.
+    mid = grid.lat.shape[0] // 2
+    omega_eff = float(grid.f[mid, 0] / (2.0 * grid.sin_lat[mid]))
 
-    area_pad = _slice_2d(grid.area)
-    return grid._replace(
-        n_lat=layout.n_lat_local + 2 * halo,
-        lat=_slice_1d(grid.lat),
-        lat2d=_slice_2d(grid.lat2d),
-        lon2d=_slice_2d(grid.lon2d),
-        cos_lat=_slice_1d(grid.cos_lat),
-        sin_lat=_slice_1d(grid.sin_lat),
-        f=_slice_2d(grid.f),
-        dx=_slice_2d(grid.dx),
-        area=area_pad,
-        total_area=jnp.sum(area_pad),
+    # Delegate the metric construction to the shared helper so the
+    # serial create_latlon_grid path and this MPI extension stay
+    # algebraically identical.  Interior cells of the extended grid
+    # come out bit-for-bit equal to the original grid (same formulas,
+    # same lat values); halo cells are freshly computed from the
+    # extrapolated lat.
+    from legoesm.grids.latlon import _build_uniform_latlon_grid_from_axes
+    return _build_uniform_latlon_grid_from_axes(
+        lat=extended_lat,
+        lon=grid.lon,
+        dlat=dlat,
+        dlon=float(grid.dlon),
+        radius=float(grid.radius),
+        omega=omega_eff,
+        dtype=grid.lat.dtype,
     )
 
 
@@ -684,6 +756,12 @@ def make_latlon_mpi_step(
             layout.south_rank is None,
             layout.north_rank is None,
         ),
+        # Under padded execution the actual pole rows sit ``halo``
+        # cells into the padded v-array, NOT at its ends — without
+        # this offset the wall-BC enforcement zeros halo rows
+        # instead and the real poles drift, producing NaNs by the
+        # second RK stage (see Stage-2 smoke run #3).
+        pole_v_bc_offset=halo,
     )
     padded_model = CGridLatLonPrimitiveEquationModel(
         grid=padded_grid,
@@ -710,8 +788,11 @@ def make_latlon_mpi_step(
     # into a "fixer model" via a NamedTuple replace on the grid.  We
     # don't mutate the caller's ``model.grid`` (no surprise side effects
     # on shared state).
-    global_total_area = global_sum_mpi(model.grid.grid_total_area)
-    fixer_grid = model.grid._replace(grid_total_area=global_total_area)
+    # ``LatLonGrid.grid_total_area`` is a property delegating to
+    # ``total_area`` — the actual NamedTuple field — so ``_replace``
+    # must use the underlying name.
+    global_total_area = global_sum_mpi(model.grid.total_area)
+    fixer_grid = model.grid._replace(total_area=global_total_area)
     fixer_config = model.config  # keep fix_mass etc. as caller intended
     fixer_model = CGridLatLonPrimitiveEquationModel(
         grid=fixer_grid,

@@ -265,31 +265,119 @@ def latlon_grid():
 
 
 class TestBuildPaddedGrid:
+    """Padded-grid construction must (a) be bit-exact to the serial grid
+    at interior cells, and (b) keep ``lat`` strictly monotonic across
+    halos so vertex-area formulas don't divide by zero.  An earlier
+    implementation used ``mode='edge'`` to pad ``lat``, producing
+    duplicate values at the halo and ``A_vertex = 0`` inside
+    ``curl_vertex_cgrid`` (diagnosed by
+    ``scripts/_diag_mpi_step_nans.py``).  The fix uses linear
+    extrapolation by ``dlat``.
+    """
+
     @pytest.mark.parametrize("halo", [1, 2])
-    def test_single_rank_grid_matches_serial_pad(self, latlon_grid, halo):
+    def test_interior_matches_serial_within_storage_eps(
+        self, latlon_grid, halo,
+    ):
+        """Interior cells of the padded grid must equal the original
+        grid to within the storage dtype's epsilon.
+
+        Exact bit-equality fails because the original grid stores
+        ``cos_lat`` etc. at the storage dtype (fp32 by default) — the
+        serial path computes ``cos`` in fp64 then casts, whereas this
+        helper takes the fp32-stored ``lat`` and recomputes ``cos``.
+        The metric difference is at the storage-eps level (~1e-6 in
+        fp32) and irrelevant for the operator stencils — the dycore-
+        level bit-exactness contract is enforced by
+        ``test_state_after_one_step_matches_serial`` in
+        ``test_latlon_mpi_step_serial.py`` instead.
+        """
         layout = make_latlon_band_layout(
             rank=0, n_ranks=1,
             n_lat=latlon_grid.n_lat, n_lon=latlon_grid.n_lon,
         )
         padded = build_padded_grid(latlon_grid, layout, halo=halo)
-        # n_lat axis grew by 2*halo
         assert padded.n_lat == latlon_grid.n_lat + 2 * halo
-        # Interior of metric slices matches the original
+        # ``lat`` itself is just a slice of the original (no recompute),
+        # so it remains bit-exact.
         np.testing.assert_allclose(
             padded.lat[halo:-halo], latlon_grid.lat,
             rtol=0, atol=0,
+            err_msg="interior lat must remain a bit-exact slice",
         )
+        # ``dy`` is uniform; recompute matches up to storage eps.
         np.testing.assert_allclose(
-            padded.area[halo:-halo, :], latlon_grid.area,
-            rtol=0, atol=0,
+            padded.dy[halo:-halo], latlon_grid.dy,
+            rtol=1e-6, atol=1e-6,
         )
-        # Pole-side halo metrics were edge-padded (since both pole rows
-        # are owned at n_ranks=1, the halo rows fall outside the grid)
-        np.testing.assert_allclose(
-            padded.lat[:halo], latlon_grid.lat[0], rtol=0, atol=0,
+        for field in ("cos_lat", "sin_lat"):
+            sliced = getattr(padded, field)[halo:-halo]
+            np.testing.assert_allclose(
+                sliced, getattr(latlon_grid, field),
+                rtol=1e-6, atol=1e-6,
+                err_msg=f"interior {field} diverges from serial beyond eps",
+            )
+        for field in ("lat2d", "lon2d", "f", "dx", "area"):
+            sliced = getattr(padded, field)[halo:-halo, :]
+            ref = getattr(latlon_grid, field)
+            # ``area`` near the pole has relative eps amplified by the
+            # tiny cos(lat) factor — absolute tolerance is what matters.
+            np.testing.assert_allclose(
+                sliced, ref, rtol=1e-6, atol=1e-6 * float(jnp.max(jnp.abs(ref))),
+                err_msg=f"interior {field} diverges from serial beyond eps",
+            )
+
+    @pytest.mark.parametrize("halo", [1, 2])
+    def test_halo_lat_steps_from_the_pole(self, latlon_grid, halo):
+        """Halo ``lat`` must step away from the pole boundary, not from
+        the interior cell centers.
+
+        Cell centers sit at ``-π/2 + dlat/2`` (south-most) and
+        ``π/2 - dlat/2`` (north-most).  Extrapolating from these by
+        whole ``dlat`` would place halo cells at lat values
+        *symmetric* across the pole to interior rows, and ``sin`` is
+        symmetric about ``-π/2`` — so the operator's
+        ``A_vertex = R² dlon |sin Δ|`` collapses to 0.  Instead the
+        halo cell at offset ``k`` (1-indexed from the pole) sits at
+        ``∓π/2 ∓ k·dlat``.  This keeps ``sin`` strictly monotonic in
+        the halo and the operator finite.
+        """
+        layout = make_latlon_band_layout(
+            rank=0, n_ranks=1,
+            n_lat=latlon_grid.n_lat, n_lon=latlon_grid.n_lon,
         )
-        np.testing.assert_allclose(
-            padded.lat[-halo:], latlon_grid.lat[-1], rtol=0, atol=0,
+        padded = build_padded_grid(latlon_grid, layout, halo=halo)
+        dlat = float(latlon_grid.dlat)
+        for k in range(halo):
+            expected_south = -float(np.pi) / 2.0 - (halo - k) * dlat
+            np.testing.assert_allclose(
+                padded.lat[k], expected_south, rtol=0, atol=1e-6,
+            )
+            expected_north = float(np.pi) / 2.0 + (k + 1) * dlat
+            np.testing.assert_allclose(
+                padded.lat[-halo + k], expected_north,
+                rtol=0, atol=1e-6,
+            )
+
+    @pytest.mark.parametrize("halo", [1, 2])
+    def test_vertex_areas_strictly_positive_at_halo(
+        self, latlon_grid, halo,
+    ):
+        """The root cause of the Stage-2 NaN smoke failure was
+        ``A_vertex = 0`` in the halo region.  Pin that down: with
+        linear extrapolation, every consecutive pair of padded
+        latitudes must produce a positive ``|sin Δ|``."""
+        layout = make_latlon_band_layout(
+            rank=0, n_ranks=1,
+            n_lat=latlon_grid.n_lat, n_lon=latlon_grid.n_lon,
+        )
+        padded = build_padded_grid(latlon_grid, layout, halo=halo)
+        sin_lat = np.sin(np.asarray(padded.lat, dtype=np.float64))
+        diffs = np.abs(np.diff(sin_lat))
+        assert np.all(diffs > 0), (
+            f"build_padded_grid produced duplicate / zero-Δ sin(lat) at "
+            f"indices {np.where(diffs == 0)[0].tolist()} — this would "
+            f"NaN the Coriolis term in curl_vertex_cgrid."
         )
 
     def test_zero_halo_passthrough(self, latlon_grid):
