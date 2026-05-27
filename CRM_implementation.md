@@ -157,6 +157,8 @@ Fix paths (open):
 
 The iter-149 column-symmetric trap is now understood: with QV_NOISE=0 the dycore can run stably for >10 sim-days because there is no horizontal seed for convection to initiate; precipitation stays at ~5e-4 mm/day vs Wing 2018 target ~3 mm/day. Breaking the trap WITHOUT crashing the dycore needs one of the fix paths above (none is a one-liner).
 
+**iter-213 partial-precip observation**: at the iter-183 production contract (dt=20 + Van Leer + β=0.2, QV_NOISE=0, full physics), the 30-day prod run **did** produce a tiny precipitation onset at day 15.62 sim-time — qc reached 1.0e-3 (autoconv threshold), Kessler fired, qr reached 6.6e-5, surface precip = 5.25e-6 mm/day. Still ~6 orders of magnitude below the Wing 2018 ~3 mm/day target, but distinct from iter-105's 19-day run that NEVER crossed autoconv (max qc plateaued at 9.6e-4). The dt=20 + Van Leer combo has less numerical diffusion than iter-105's dt=10 + upwind1, letting qv accumulate enough to cross threshold. Column-symmetric still — the precip event hits every column simultaneously.
+
 iter-181 reverted the wrapper `QV_NOISE` default 1e-4 → 0.0 (iter-179 flipped it the wrong way without re-running the smoke) so the production wrapper remains functional at the iter-183 dt=20 + Van Leer + β=0.2 contract while F11 is open.
 
 ---
