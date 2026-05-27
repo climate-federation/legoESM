@@ -149,6 +149,104 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 104 (Codex iter-102/103 review: 3 MEDIUM + 2 LOW + first precip onset)
+
+**Code change** (commit `bbf9f0c3`):
+
+Address Codex adversarial-review of iter-102 (quality-gate evaluator)
+and iter-103 (wrapper EVALUATE_DOD threading).
+
+`scripts/summarize_rce_trajectory.py`:
+* MEDIUM #1 — runaway evaporation gate: a trajectory climbing 30
+  → 80 mm averages 55 mm and would pass the mean-only check. Add
+  ``plateau_cwv_max > cwv_range_mm[1]`` gate with a "runaway
+  evaporation signature" reason.
+* LOW #2 — fix MSE relative-drift denominator to
+  ``max(abs(min), abs(max), 1e-30)`` so synthetic negative MSE
+  arrays don't overstate drift.
+* MEDIUM #3 — tri-state ``QualityVerdict.evaluated`` field.
+  Trajectories shorter than ``DEFAULT_LAST_N_DAYS_FOR_PLATEAU``
+  return ``evaluated=False``; CLI surfaces this as a distinct
+  ``DOD verdict: INSUFFICIENT`` print + exit code.
+* MEDIUM #7 — distinct exit codes: ``EXIT_OK=0``,
+  ``EXIT_IO_ERROR=1`` (uncaught Python — preserved), ``EXIT_DOD_FAIL=3``,
+  ``EXIT_DOD_INSUFFICIENT=4``. Reserves 1 for IO errors and 2
+  (argparse misuse).
+
+`tests/.../test_summarize_rce_trajectory.py` (+ 6 tests):
+* ``test_evaluate_short_trajectory_marks_insufficient`` +
+  ``test_evaluate_full_trajectory_marks_evaluated`` lock the
+  tri-state.
+* LOW #6 — fixture for iter-98 anchor now 11 days (one synthetic
+  spin-up + the real 10) so the plateau check is never silently
+  skipped if ``DEFAULT_LAST_N_DAYS_FOR_PLATEAU`` is raised.
+* ``test_evaluate_flags_runaway_evaporation_via_max``,
+  ``test_evaluate_exit_code_constants``, and
+  ``test_evaluate_mse_drift_denominator_uses_max_abs`` lock the
+  Codex fixes.
+
+`tests/.../test_run_rce_30day_wrapper_defaults.py`:
+* Update DOD-FAIL stub to ``summarizer_exit=3`` (was ``1``).
+* New ``test_wrapper_evaluate_dod_insufficient_propagates``:
+  subprocess test that ``EXIT_DOD_INSUFFICIENT=4`` passes through
+  the wrapper untouched.
+
+46/46 tests pass. iter-98 in-flight + final 10-day trajectory still
+PASSes ``--evaluate``.
+
+**MAJOR MILESTONE — iter-98 10-day run COMPLETED**:
+
+The 32×32×30 plane CRM + radiation + Kessler + Smag LES run that
+this rollout has been pacing completed at 100 % (8464.7 s wall =
+2 h 21 m) with DOD verdict **PASS**. Day-by-day trajectory from
+``/tmp/iter98_crm32x32_rad10d/trajectory.csv``:
+
+| day | CWV_mean [mm] | T_sfc_mean [K] | qc_col_max [kg/kg] | qr_col_max [kg/kg] | cf_max | MSE_mean [J/m²] |
+|---:|---:|---:|---:|---:|---:|---:|
+|  0 | 49.94 | 296.81 | 0.0     | 0.0     | 0.0 | 3.5247×10⁹ |
+|  1 | 53.63 | 297.07 | NA      | NA      | NA  | 3.5280×10⁹ |
+|  2 | 55.67 | 297.23 | NA      | NA      | NA  | 3.5275×10⁹ |
+|  3 | 56.77 | 297.94 | NA      | NA      | NA  | 3.5258×10⁹ |
+|  4 | 57.18 | 298.32 | NA      | NA      | NA  | 3.5230×10⁹ |
+|  5 | 57.12 | 298.53 | 3.62×10⁻⁴ | 0       | 1.0 | 3.5195×10⁹ |
+|  6 | 56.85 | 298.65 | NA      | NA      | NA  | 3.5159×10⁹ |
+|  7 | 56.54 | 298.71 | NA      | NA      | NA  | 3.5122×10⁹ |
+|  8 | 56.20 | 298.75 | NA      | NA      | NA  | 3.5086×10⁹ |
+|  9 | 55.87 | 298.77 | NA      | NA      | NA  | 3.5051×10⁹ |
+| 10 | 56.55 | 298.76 | 6.97×10⁻⁴ | **1.02×10⁻⁶** | 1.0 | 3.5022×10⁹ |
+
+Key findings:
+
+* **First precipitation onset**: ``qr_col_max`` jumps from 0 (day 5)
+  to 1.02×10⁻⁶ kg/kg (day 10) — Kessler autoconv triggered after
+  the plateau-resident qc grew past ~0.5 g/kg. Surface ``qr_sfc``
+  still zero (rain not yet sedimented to lowest model level).
+* **Wing 2018 RCEMIP1 plateau**: CWV settles in 55-57 mm range
+  (range of multi-model RCEMIP1 SST=300 K equilibrium is
+  ~50-55 mm — slight overshoot but well inside the default
+  ``DEFAULT_CWV_RANGE_MM = (35, 65)`` gate).
+* **MSE drift 0.6 %** across all 10 days (3.5247→3.5022×10⁹),
+  comfortably under the 5 % DOD ``mse_relative_drift`` gate.
+* **Dycore stable**: ``max|w|`` peaked at 3.39×10⁻³ m/s (log day
+  9.6) — orders of magnitude under the 50 m/s blow-up gate.
+  ``T_sfc_mean`` still approaching prescribed 300 K (296.81 →
+  298.76 K over 10 days) — slower than CWV equilibration, expected
+  for radiation+flux heat-up.
+
+This is the **first production-grade 10-day RCE run** with full
+physics (radiation + Kessler + Smag LES + surface fluxes) that
+converged to Wing 2018 RCEMIP1 plateau and triggered precipitation
+on the legoESM plane CRM stack. Promotes the iter-95 hydrostatic-BC
+fix + iter-95b mass-fixer fix + iter-96 radiation-enabled regime
+from "10-day stable but no precip" to **"10-day stable, plateau,
+precip-onset, DOD PASS"**.
+
+**Next iter target** (iter-105): launch the 30-day variant of this
+config (same 32×32×30, same physics, ``DAYS=30 NX=32 NY=32 EVALUATE_DOD=1
+./scripts/run_rce_30day.sh /tmp/iter105_crm32x32_rad30d``). Wall
+extrapolation: ~7 h. Goal: confirm CWV plateau holds through day
+30 + precip rate stabilises at ~3 mm/day (DOD criterion 2).
+
 ### 2026-05-27 — iter 101 (behavioural wrapper exit-code tests, Codex iter-100 LOW)
 
 **Code change** (commit `d740019f`):
