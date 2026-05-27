@@ -199,6 +199,37 @@ def test_wrapper_semi_implicit_acoustic_present(wrapper_text):
     )
 
 
+def test_wrapper_theta_noise_mode_threaded(wrapper_text):
+    """iter-205: THETA_NOISE_MODE env var MUST reach the driver as
+    --theta-noise-mode "$THETA_NOISE_MODE" in the mpirun argv. A
+    regression that defined the env default but forgot to thread
+    it into mpirun would silently no-op (driver would default to
+    'white') and the F11 fix-path-3 (smooth_k1) experiments would
+    all silently fall back to the iter-181 white-noise behaviour.
+    Mirror of test_wrapper_theta_noise_threaded for the iter-205
+    mode addition.
+    """
+    assert re.search(
+        r'^THETA_NOISE_MODE\s*=\s*"\$\{THETA_NOISE_MODE:-white\}"',
+        wrapper_text,
+        re.MULTILINE,
+    ), (
+        "run_rce_30day.sh missing THETA_NOISE_MODE=\"${THETA_NOISE_MODE:-white}\" "
+        "default line. iter-205 added it as the wrapper's pattern-mode "
+        "hook for F11 fix-path-3 experiments."
+    )
+    assert re.search(
+        r"\\\n\s*--theta-noise-mode\s+\"\$THETA_NOISE_MODE\"",
+        wrapper_text,
+    ), (
+        "run_rce_30day.sh defined THETA_NOISE_MODE but does not pass "
+        "--theta-noise-mode \"$THETA_NOISE_MODE\" into the mpirun argv. "
+        "The env var would be silently dropped and smooth_k1 mode "
+        "would be wrapper-inaccessible (default 'white' would always "
+        "be used regardless of THETA_NOISE_MODE)."
+    )
+
+
 def test_wrapper_theta_noise_threaded(wrapper_text):
     """iter-198: THETA_NOISE env var MUST reach the driver as
     --theta-noise-amp \"$THETA_NOISE\" in the mpirun argv. A
