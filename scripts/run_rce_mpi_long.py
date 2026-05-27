@@ -327,6 +327,21 @@ def parse_args():
                         "dt=20 actually runs SLOWER than upwind1 at dt=10 "
                         "(2x fewer steps but 2.4x cost per step). Use only "
                         "for sharp-front problems where dispersion matters.")
+    p.add_argument("--adaptive-dt", action="store_true", default=False,
+                   help="iter-228 F11 fix-path-4 STUB: opt-in flag "
+                        "for runtime CFL monitoring + dt shrinkage. "
+                        "When implemented (not yet wired into the "
+                        "time-integration loop — see iter-225 "
+                        "feasibility note in CRM_implementation.md "
+                        "F11), monitor advective Courant ``Ca_adv = "
+                        "max|w| * dt / dx`` after each outer step. "
+                        "Halve dt for the next step if Ca > 0.5; "
+                        "restore to nominal --dt when Ca < 0.1. "
+                        "The flag is reserved for a follow-on PR; "
+                        "today it parses correctly + raises a clear "
+                        "NotImplementedError at main() entry if set. "
+                        "The production iter-183 contract "
+                        "(theta_noise=0) doesn't need adaptive-dt.")
     p.add_argument("--implicit-buoyancy", action="store_true", default=False,
                    help="Klemp-Wilhelmson 1978 implicit-buoyancy treatment "
                         "of the w-equation in the SI acoustic substep. Adds "
@@ -726,6 +741,20 @@ def main():
             "error: --implicit-buoyancy rejected: requires "
             "--semi-implicit-acoustic (the Klemp-Wilhelmson 1978 "
             "substitution lives inside the column tridiagonal solve)."
+        )
+    if args.adaptive_dt:
+        # iter-228: flag parses but isn't wired through the time loop
+        # yet (~80 LOC restructure to switch the for-loop to a
+        # ``while t_sim < target_t`` loop with per-step Ca_adv
+        # diagnostic + dt shrinkage). Refuse explicitly rather than
+        # silently no-op'ing the user's expectation.
+        raise SystemExit(
+            "error: --adaptive-dt is a parse-only stub today. The "
+            "runtime CFL-monitoring + dt-shrinkage loop is reserved "
+            "for a follow-on PR (see CRM_implementation.md F11 "
+            "fix-path-4 feasibility note). If you need to test it "
+            "manually, use a smaller --dt + smaller --theta-noise-amp; "
+            "the iter-183 production contract does not require it."
         )
     # iter-67/68: validate numeric CLI args reject NaN/inf with
     # concise SystemExit. iter-67 hardcoded 17 arg names; iter-68

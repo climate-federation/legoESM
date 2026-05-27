@@ -184,6 +184,13 @@ def test_no_mass_fixer_default(driver_defaults):
     )
 
 
+def test_adaptive_dt_default(driver_defaults):
+    """iter-228: --adaptive-dt opt-in flag parses but is a stub
+    until the F11 fix-path-4 time-loop restructure lands. Default
+    False keeps the iter-183 production contract unchanged."""
+    assert driver_defaults["--adaptive-dt"] is False
+
+
 def test_use_dd_default(driver_defaults):
     """iter-5 added --use-dd; default False keeps the legacy
     rank-0-broadcast F8-stable path as the canonical entry."""
