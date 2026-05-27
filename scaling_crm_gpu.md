@@ -117,6 +117,49 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 7 — 2026-05-27 — explicit acoustic full sweep — NEW CRM PEAK
+
+Pushed explicit acoustic to full N range, fp64 + fp32:
+
+**fp64 explicit dt=0.5 nsub=4:**
+
+| res    | ms/step | Mc/s |
+|--------|---------|------|
+| N=48   |  0.69   |  99.6 |
+| N=96   |  2.46   | **112** (peak) |
+| N=192  | 11.24   |  98.4 |
+| N=384  | 49.05   |  90.2 |
+
+Flatter than semi-implicit. Peak 112 Mc/s, drops only to 90 at N=384.
+
+**fp32 explicit dt=0.5 nsub=4 — ABSOLUTE CRM PEAK:**
+
+| res    | ms/step | Mc/s     | SYPD |
+|--------|---------|----------|------|
+| N=48   |  0.17   | 415      | 8.04 |
+| N=96   |  0.43   | 636      | 3.18 |
+| N=192  |  1.67   | **661**  | 0.82 |
+| N=384  | 11.93   | 371      | 0.11 |
+
+**661 Mc/s @ N=192 fp32** — exceeds ocean LL impl_cn peak (546).
+This is the **highest single-GPU throughput in the legoESM suite**.
+
+fp32/fp64 ratio at N=192 = 6.7× — fp64 ALU bottlenecked (consumer
+RTX 5090 fp64 = 1/64 fp32 nominal). Datacenter A100/H100 would
+hit fp64 ratio ~2×.
+
+**Walks back iter-6 conclusion.** SYPD comparison @ N=96 fp32:
+- semi-implicit dt=2 nsub=6:  7.28 ms / 0.75 SYPD
+- explicit dt=0.5 nsub=4:     0.43 ms / **3.18 SYPD**
+
+Explicit wins SYPD by **4.2×** when CFL margin permits. Previous
+iter-6 comparison was at fp64 where the fp64 ALU penalty hides
+the advantage.
+
+⇒ **Explicit + fp32 is the right CRM throughput config.** Semi-
+implicit only relevant when dt is constrained by physics-scale (>1 s)
+or for AD-stable trajectory studies.
+
 ### Iter 6 — 2026-05-27 — explicit acoustic comparison (throughput vs SYPD)
 
 Tested whether bypassing column-Thomas via fully-explicit acoustic
