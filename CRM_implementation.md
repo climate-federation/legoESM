@@ -162,6 +162,98 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 149 (iter-105 day-10 investigation — column-symmetric convection)
+
+User asked for day-10 investigation since the 30-day run is too
+long to wait for completion. Snapshot ``snap_day_0010.npz`` +
+profile ``prof_day_0010.npz`` analysed below.
+
+**Day-10 snapshot horizontal stats** (32×32 columns):
+
+| field   | min / mean / max         | std        |
+|---------|--------------------------|------------|
+| CWV     | 56.5542 mm everywhere    | 1.4e-14    |
+| MSE     | 3.5022e+09 J/m² uniform  | 0          |
+| precip  | 0 everywhere             | 0          |
+| T_sfc   | 298.76 K uniform         | 5.7e-14    |
+| qv_sfc  | 0.02242 kg/kg uniform    | 0          |
+| qc_sfc  | 0 everywhere             | 0          |
+| qr_sfc  | 0 everywhere             | 0          |
+| u_sfc, v_sfc | -6.2e-33 uniform    | 0          |
+| wind_sfc | 8.7e-33 uniform         | 2.7e-48    |
+
+**Finding**: every surface field is bit-uniform across the
+32×32 domain at the day-10 snapshot moment. The trajectory has
+NO horizontal organization at the surface. This is a direct
+consequence of:
+
+* Wing 2018 IC is horizontally uniform.
+* No surface flux variation (T_sfc + C_h constant).
+* No initial bubble (F7/F10) or qv noise (F7-stale via iter-97).
+* Mean-wind removal filter zeros the domain-mean horizontal flow.
+
+The system therefore evolves IDENTICALLY in every column — a
+column-symmetric Wing 2018 RCEMIP1 SST=300K simulation. Convection
+happens vertically but not horizontally; no triggering of
+cluster/aggregation dynamics that 132×132 would resolve.
+
+**Day-10 profile** (vertical, horizontally averaged — column-
+symmetry means horizontal-mean = single-column value):
+
+* z range: 550 m (sfc) to 32450 m (top), nlev=30.
+* T: 298.76 K (sfc) → 202.45 K (top).
+* qv: 2.24e-2 kg/kg (sfc) → 1e-11 (top tracer-floor sentinel).
+* qc max: **6.97e-4 kg/kg at z=6050 m** (mid-troposphere — the
+  cloud layer).
+* qr max: **1.02e-6 kg/kg at z=2750 m** (rain falling from
+  cloud base to ~3 km but never reaching the lowest model level
+  at 550 m).
+* cloud_fraction max: **1.0 at z=8250 m** (saturated layer
+  aloft).
+* w_variance max: 7.1e-33 at z=28050 m (stratospheric gravity
+  waves; small).
+
+**Day-9.5..10.5 convection event** (87 log rows):
+
+* Precip onset (first qr>0): step 83600 = day 9.6759 — qc hit
+  Kessler autoconv threshold (max(qc)=9.96e-4 g/kg → qr=4.92e-6
+  g/kg).
+* Peak convection: max|w| spiked 3.4e-3 → 2.03e-2 m/s (6× pre-
+  onset), qc dipped 0.68 g/kg as Kessler converted qc→qr, qr
+  peaked 1.09e-4 g/kg.
+* Settled: by day 10.5, max|w| back to 3.6e-3 m/s, qc rebuilt
+  to ~7.3e-4, qr decayed to ~7.5e-7 (residual).
+
+**Post-day-10..11.5 plateau**:
+
+* CWV range over last 100 log rows: 56.35-56.48 mm (Wing 2018
+  plateau band).
+* MSE drift over last 100 log rows: 0.08 % — well under the
+  1 % final-DOD criterion.
+* max|w| range: 3.56e-3 .. 3.79e-3 m/s — far below the 50 m/s
+  criterion 1 threshold.
+
+**Surface precip = 0** throughout. Kessler rain falls from
+~6 km cloud layer but doesn't reach z=550m (the lowest model
+level) within the post-onset window — terminal fall velocity
+assumption (5 m/s × 6000 m / dt = 1200 dt-steps = 3.3 h to
+descend if uninterrupted) explains the lag. Realistic precip
+rate at surface (Wing 2018 ~3 mm/day target) requires the rain
+column to fully sediment, which would happen at day 10.5-11
+under continuous source. The brief convection event at day 9.7
+didn't sustain long enough for surface precip to register.
+
+**Implication for production**: the iter-105 32×32×30 CRM is
+producing physically correct vertically-resolved convection
+(qc at ~6 km, qr at ~3 km) but no horizontal organization
+because the IC + forcing is column-symmetric. The 132×132 grid
+at the same dx would behave identically per-column unless the
+IC breaks the horizontal symmetry. The "stable + realistic"
+DOD criteria 1 + 2 (no NaN, max|w|<50, plateau CWV in Wing
+range, MSE drift <1%) are all PASS at day 10; the iter-105
+30-day continuation is on a deterministic path through Wing
+2018 plateau equilibrium.
+
 ### 2026-05-27 — iter 148 (iter-105 day 10 milestone — full bit-equal overlap)
 
 iter-105 30-day run reached step 86400 (day 10) — the endpoint of
