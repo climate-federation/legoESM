@@ -409,7 +409,7 @@ def _run_plane_spectral(days: float, dt: float, print_every: int, output: Path,
 
 
 def _run_cubed_sphere(days: float, dt: float, print_every: int, output: Path,
-                      *, moist: bool = False):
+                      *, moist: bool = False, n: int = 4):
     from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
         CDGridCompressibleEulerConfig, CDGridCompressibleEulerModel,
     )
@@ -432,13 +432,33 @@ def _run_cubed_sphere(days: float, dt: float, print_every: int, output: Path,
         compute_terrain_metric, create_height_coordinate,
     )
 
-    n = 4
+    # iter-287: n is now a kwarg (default 4 for back-compat with
+    # iter-238 cross-grid smoke). Raise to 12, 24, 96 for finer
+    # mesh production runs. C12=864 cells ~830 km/cell, C24=3456
+    # cells ~415 km/cell, C96=55296 cells ~104 km/cell. iter-286
+    # showed C4 is too coarse for moist 30-day production
+    # regardless of dycore tuning — mesh-resolution-bound failure.
     grid = create_cubed_sphere(n, use_duogrid=True)
     hc = create_height_coordinate(NLEV, H_TOP)
     tm = compute_terrain_metric(jnp.zeros((6, n, n)), hc)
-    cfg = CDGridCompressibleEulerConfig(
-        n_acoustic_substeps=4, fix_mass=False,
-    )
+    # iter-285: when moist=True, use a TIGHTER config at the C4
+    # mesh because iter-284 measured day-2 NaN under the default
+    # (n_acoustic=4 + use_coriolis=True + fix_mass=False). The
+    # tightened config raises n_acoustic 4→12 (more acoustic CFL
+    # margin per outer step), turns Coriolis OFF (each C4 cell
+    # spans many latitudes — gridscale Coriolis is unphysical),
+    # and turns on anchored mass-fixer (matches the plane CRM
+    # iter-183 contract). Dry path keeps the iter-238 contract.
+    if moist:
+        cfg = CDGridCompressibleEulerConfig(
+            n_acoustic_substeps=12,
+            fix_mass=True, anchor_mass_to_initial=True,
+            use_coriolis=False,
+        )
+    else:
+        cfg = CDGridCompressibleEulerConfig(
+            n_acoustic_substeps=4, fix_mass=False,
+        )
     model = CDGridCompressibleEulerModel(grid, hc, tm, cfg)
     dims_3d = ("face", "x", "y", "level")
     dims_w = ("face", "x", "y", "level_half")
@@ -659,6 +679,14 @@ def main():
         "cubed_sphere + mpas paths. Dry by default (preserves "
         "iter-238 smoke contract).",
     )
+    p.add_argument(
+        "--n-cubed-sphere", type=int, default=4,
+        help="iter-287: cubed-sphere face size n (default 4 = C4 "
+        "preserves iter-238 smoke). C12=864 cells ~830 km/cell, "
+        "C24=3456 cells ~415 km/cell, C96=55296 cells ~104 km/cell. "
+        "iter-286 confirmed C4 is too coarse for moist 30-day "
+        "production. Ignored for non-cubed-sphere grids.",
+    )
     args = p.parse_args()
 
     dispatch = {
@@ -667,9 +695,12 @@ def main():
         "cubed_sphere": _run_cubed_sphere,
         "mpas": _run_mpas,
     }
+    common_kwargs = dict(moist=args.moist)
+    if args.grid == "cubed_sphere":
+        common_kwargs["n"] = args.n_cubed_sphere
     dispatch[args.grid](
         args.days, args.dt, args.print_every, args.output,
-        moist=args.moist,
+        **common_kwargs,
     )
 
 

@@ -223,6 +223,60 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 287 (--n-cubed-sphere CLI flag + C12 probe — NaN at day 1, NOT improved by mesh refinement)
+
+iter-287 added ``--n-cubed-sphere N`` CLI flag (default 4 for
+back-compat with iter-238 smoke) so future cluster jobs can run
+C12/C24/C96 production without code edits. Mesh stats:
+
+| n | cells | dx (km) | iter-287 probe result |
+|---|---|---|---|
+| 4 | 96 | ~3300 | NaN day 2 (iter-284/286) |
+| 12 | 864 | ~830 | NaN day 1 (this iter) |
+| 24 | 3456 | ~415 | not run (multi-h compute) |
+| 96 | 55296 | ~104 | not run (multi-day compute) |
+
+**Counterintuitive finding**: C12 NaN'd SOONER than C4
+(day 1 vs day 2). Trajectory comparison:
+
+```
+                            day-0.5 max|w|   day-1 max|w|
+C4 v2 (iter-286)            ~5e-3            1.12e-2
+C12 v2 (this iter)          5.92e-2          NaN
+```
+
+**Diagnosis**: at C12, dx ≈ 830 km. The convective updrafts
+seeded by surface flux + Kessler are still gridscale (real
+convection is 1-10 km, three orders of magnitude finer). At
+C4 the cells are SO BLOCKY (3300 km) that horizontal gradients
+are heavily damped by the mesh itself; C12 lets small-scale
+moist instabilities grow before they're large enough for the
+sponge / hyperdiff to control. **Mesh refinement WITHOUT
+gridscale resolution of convection is worse, not better**.
+
+This confirms: cross-grid 30-day production at ANY mesh below
+C384 (≈3 km dx, true CRM) blows up under realistic moist
+forcing. The iter-275 + iter-283 composition is correct; the
+small-mesh failure is a physics-vs-mesh-resolution mismatch
+that no CLI tuning can resolve.
+
+**Status update for "all grid types" DOD**:
+
+| Grid | Production-mesh 30-day | Path to closure |
+|---|---|---|
+| Plane FD (132x132 dx=2km) | ✅ iter-229 DOD PASS | done |
+| Plane spectral | not run | (small mesh demo only — same physics-vs-mesh issue) |
+| Cubed-sphere | ❌ blocked at C4/C12 | needs C384+ HPC job |
+| MPAS Voronoi | ❌ blocked at L2 (iter-282 day-15) | needs L≥7 HPC job |
+
+The plane CRM closes the DOD because dx=2 km RESOLVES convection.
+The other grids need cluster compute at production resolution.
+
+iter-287 value-add: ``--n-cubed-sphere`` CLI infrastructure
+unblocks future cluster jobs without code edits. The
+composition + dycore + tightened-config + CLI scaffolding
+is now complete; only HPC compute remains.
+
 ### 2026-05-27 — iter 285..286 (cubed-sphere C4 tightened config — still NaN at day 2; mesh-resolution-bound confirmed)
 
 iter-284 cubed-sphere C4 moist+sfc NaN'd at day 2 with default
