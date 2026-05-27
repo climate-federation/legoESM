@@ -128,6 +128,89 @@ def thomas_solve(
     return x
 
 
+def pcr_solve_batched(
+    a: jax.Array,
+    b: jax.Array,
+    c: jax.Array,
+    d: jax.Array,
+) -> jax.Array:
+    """Parallel cyclic reduction for batched tridiagonal systems.
+
+    Pure-JAX. Unlike :func:`thomas_solve_batched` which calls cuSPARSE
+    via a custom_call (fusion barrier), PCR is a sequence of elementwise
+    ops that XLA can fuse into surrounding compute. For the small
+    nlev (~30) used in the SI acoustic substep this is comparable in
+    raw speed to cuSPARSE but enables single-kernel substep bodies.
+
+    Algorithm: at level k (stride = 2^k), each row eliminates its
+    sub/super-diagonal contributions from the row stride positions
+    away. After log2(n_pad) levels, every row is decoupled and
+    ``x = d / b`` solves the system trivially.
+
+    Shape ``(..., n)`` for a/b/c/d (n is the tridiag system size, last
+    axis); leading axes are batched over. n need not be a power of 2 —
+    the system is padded to the next power of 2 with identity rows
+    (``b=1, a=c=d=0``) which decouple from the original system.
+    """
+    if a.shape != b.shape or a.shape != c.shape or a.shape != d.shape:
+        raise ValueError(
+            f"pcr_solve_batched expects matching shapes; got a={a.shape}, "
+            f"b={b.shape}, c={c.shape}, d={d.shape}"
+        )
+    if a.shape[-1] < 2:
+        raise ValueError(
+            f"pcr_solve_batched requires n>=2 on trailing axis; got {a.shape[-1]}"
+        )
+
+    import math
+    n = a.shape[-1]
+    pad_axes = ((0, 0),) * (a.ndim - 1)
+    n_pad = 1 << max(1, (n - 1).bit_length())
+    pad_n = n_pad - n
+
+    if pad_n > 0:
+        a = jnp.pad(a, (*pad_axes, (0, pad_n)))
+        b = jnp.pad(b, (*pad_axes, (0, pad_n)), constant_values=1.0)
+        c = jnp.pad(c, (*pad_axes, (0, pad_n)))
+        d = jnp.pad(d, (*pad_axes, (0, pad_n)))
+
+    idx = jnp.arange(n_pad)
+    n_levels = int(math.log2(n_pad))
+
+    for k in range(n_levels):
+        stride = 1 << k
+        has_above = idx >= stride
+        has_below = idx < n_pad - stride
+
+        a_up = jnp.pad(a[..., :-stride], (*pad_axes, (stride, 0)))
+        b_up = jnp.pad(
+            b[..., :-stride], (*pad_axes, (stride, 0)), constant_values=1.0,
+        )
+        c_up = jnp.pad(c[..., :-stride], (*pad_axes, (stride, 0)))
+        d_up = jnp.pad(d[..., :-stride], (*pad_axes, (stride, 0)))
+
+        a_dn = jnp.pad(a[..., stride:], (*pad_axes, (0, stride)))
+        b_dn = jnp.pad(
+            b[..., stride:], (*pad_axes, (0, stride)), constant_values=1.0,
+        )
+        c_dn = jnp.pad(c[..., stride:], (*pad_axes, (0, stride)))
+        d_dn = jnp.pad(d[..., stride:], (*pad_axes, (0, stride)))
+
+        alpha = jnp.where(has_above, -a / b_up, 0.0)
+        beta = jnp.where(has_below, -c / b_dn, 0.0)
+
+        a = alpha * a_up
+        c = beta * c_dn
+        b_new = b + alpha * c_up + beta * a_dn
+        d = d + alpha * d_up + beta * d_dn
+        b = b_new
+
+    x = d / b
+    if pad_n > 0:
+        x = x[..., :n]
+    return x
+
+
 def thomas_solve_batched(
     a: jax.Array,
     b: jax.Array,
@@ -188,12 +271,20 @@ def thomas_solve_batched(
             f"axis; got n_sys={a.shape[-1]}"
         )
 
-    # CPU/Metal fallback: `tridiagonal_solve` exists in JAX 0.4+, but its
-    # custom_call backend may not have a registered implementation outside
-    # CUDA. Detect platform and fall back when needed.
+    # Backend selection priority:
+    #   1. env LEGOESM_TRIDIAG=pcr   -> pure-JAX PCR (fusable with surrounding ops)
+    #   2. env LEGOESM_TRIDIAG=legacy-> fori_loop Thomas (debug / CPU fallback)
+    #   3. CUDA backend                 -> cuSPARSE via tridiagonal_solve
+    #   4. Else                        -> legacy fori_loop
+    import os
+    forced = os.environ.get("LEGOESM_TRIDIAG", "").lower()
+    if forced == "pcr":
+        return pcr_solve_batched(a, b, c, d)
+    if forced == "legacy":
+        return _thomas_solve_batched_legacy(a, b, c, d)
+
     try:
         from jax.lax.linalg import tridiagonal_solve  # noqa: F401
-        # Probe backend: jax.devices() returns the active devices
         default_platform = jax.default_backend()
         use_cusparse = default_platform in ("gpu", "cuda")
     except (ImportError, AttributeError):

@@ -117,6 +117,94 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 71 — 2026-05-27 — pure-JAX PCR Thomas: 96% HBM peak
+
+iter-66 measurement: cuSPARSE = 37 us per substep call. 18 calls × 3 RK3
+stages × ~5 us launch each ⇒ ~270 us pure custom-call overhead per step.
+More importantly, cuSPARSE is a custom_call so XLA can NOT fuse it with
+the pre- and post-substep elementwise work — forcing 4 fused-kernel
+launches per substep instead of 1.
+
+Implemented `pcr_solve_batched(a, b, c, d)` — Parallel Cyclic Reduction
+in pure JAX (~80 LOC including docstrings + dispatch glue). Algorithm:
+
+```
+For k = 0, 1, ..., log2(n_pad)-1:
+    stride = 2^k
+    eliminate row i±stride contributions from row i:
+        alpha = -a[i] / b[i-stride]
+        beta = -c[i] / b[i+stride]
+        a[i] *= a_up, c[i] *= c_dn
+        b[i] += alpha * c_up + beta * a_dn
+        d[i] += alpha * d_up + beta * d_dn
+After log2(n_pad) levels: each row decoupled → x = d / b.
+```
+
+Non-power-of-2 `n` padded to next power of 2 with identity rows
+(b=1, a=c=d=0) — they decouple cleanly.
+
+**Correctness (vs legacy fori_loop Thomas, fp64):**
+| n_sys | max_diff   | max_residual |
+|-------|------------|--------------|
+| 4     | 2.22e-16   | 8.88e-16     |
+| 8     | 3.33e-16   | 8.88e-16     |
+| 29    | 3.33e-16   | 1.33e-15     |
+| 30    | 4.44e-16   | 1.33e-15     |
+| 32    | 3.33e-16   | 1.33e-15     |
+| 60    | 4.44e-16   | 1.33e-15     |
+
+⇒ machine epsilon across all sizes including non-power-of-2.
+
+**AD safety:** `jax.grad(sum(pcr_solve(a, b, c, d)))(d)` finite, mean
+~0.21 — gradients flow correctly. No custom_vjp needed; pure-JAX
+ops natively support reverse-mode AD.
+
+**Standalone timing (n_cols=16384, n_sys=29, fp32):**
+- cuSPARSE: 37.4 us/call
+- PCR    : 37.2 us/call ≈ same
+
+**In-substep timing (the win comes from FUSION not raw speed):**
+| N   | cuSPARSE   | PCR        | Δ      |
+|-----|------------|------------|--------|
+| 128 | 324 Mc/s   | **417**    | +29%   |
+| 192 | 316        | 399        | +26%   |
+| 256 | 271        | 309        | +14%   |
+
+⇒ **Peak now 417 Mc/s @ N=128 fp32 nsub=6.**
+
+**HBM utilization at peak:**
+- 417 Mc/s × 80 B/cell-lev × 21 passes / N_cells ≈ 700 GB/s
+- 700 / 730 GB/s sustained = **96% HBM peak**
+
+This is effectively at the consumer-mobile RTX 5090's HBM ceiling.
+
+**Cumulative iter-66 → iter-71 at N=128 fp32 peak:**
+- iter-66 (vmap-rm baseline)          : 276 Mc/s
+- iter-67 (tridiag hoist plane)       : 285 Mc/s
+- iter-68 (CS parity hoist)           : 282 Mc/s
+- iter-69 (w pad-with-0)              : 286 Mc/s
+- iter-70 (substep loop unroll)       : 324 Mc/s
+- iter-71 (PCR replaces cuSPARSE)     : **417 Mc/s**
+
+⇒ **Total iter-66 → iter-71: +51% at N=128 peak.**
+⇒ **HBM utilization 63% → 96% sustained.**
+
+**Dispatch:** `thomas_solve_batched` now selects via env:
+- `LEGOESM_TRIDIAG=pcr`       → pure-JAX PCR (recommended for GPU)
+- `LEGOESM_TRIDIAG=legacy`    → fori_loop Thomas (debug)
+- default                     → cuSPARSE (safe, known-stable)
+
+Kept default as cuSPARSE to preserve the well-tested production path
+pending broader codex adversarial review. PCR can be opted in for
+benchmark/research runs via `LEGOESM_TRIDIAG=pcr`.
+
+**Regression PASS under both paths:**
+- cuSPARSE: 18 plane SI+conservation tests PASS
+- PCR: 18 plane + 33 cubed-sphere NH unit tests PASS
+
+Compile-time bump: +1.4s (PCR adds 5 reduction-level kernels per
+substep × 6 substeps × 3 RK3 = 90 sub-kernels in trace). Acceptable.
+
 ### Iter 70 — 2026-05-27 — Python-loop unroll of substep loops (cavecrew followup)
 
 cavecrew adversarial review flagged 5 risks; addressed:
