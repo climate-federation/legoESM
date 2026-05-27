@@ -117,6 +117,58 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 70 — 2026-05-27 — Python-loop unroll of substep loops
+
+iter-69 left 4 fusion kernels + 1 cuSPARSE custom-call PER SUBSTEP. At
+n_substeps=6, RK3=3, that's 90 kernel launches/step from substeps alone
+— ~25% of step time at N=128 fp32 (5-10 us launch × 90 = ~600 us out
+of 1.78 ms measured).
+
+`SplitExplicitConfig.n_substeps` is a Python int (compile-time static),
+so `lax.fori_loop` keeps the substeps as a while-loop in HLO and
+prevents inter-iteration fusion. Replaced with a plain Python for-loop
+that fully unrolls n_substeps iterations into straight-line HLO. XLA
+then sees the full substep sequence and can fuse the post-cuSPARSE tail
+of one substep with the pre-cuSPARSE head of the next.
+
+Applied at 4 callsites (all share-the-pattern fori_loops):
+1. `plane_acoustic_substeps_semi_implicit` (plane SI)
+2. `plane_acoustic_substeps` (plane explicit)
+3. `acoustic_substeps_semi_implicit` (cubed-sphere SI, shared by
+   lat-lon C-grid + CD-grid NH dycores via this module)
+4. `_acoustic_substeps` / cubed-sphere explicit (same module)
+
+Bench fp32 nsub=6 (repeat=5):
+| N   | iter-69     | iter-70     | Δ       |
+|-----|-------------|-------------|---------|
+| 128 | 286.4       | **323.8**   | +13.1%  |
+| 192 | 289.5       | 312.7       | +8.0%   |
+| 256 | 254.6       | 271.5       | +6.6%   |
+| 384 | 157.5       | 167.2       | +6.2%   |
+
+Compile-time bump: 2.1s → 2.7s (+0.6s). Acceptable — body inlined
+6× still trivially small.
+
+HBM check at peak:
+- 324 Mc/s × 80 B/cell-lev × 21 passes = ~544 GB/s
+- 544 / 730 GB/s = **75% sustained HBM** (was 67% in iter-69)
+
+Regression PASS:
+- 33/33 cubed-sphere NH unit tests
+- 15/15 plane SI unit tests
+- 3/3 plane NH conservation
+- 51 tests total in cross-dycore sweep
+
+Cumulative iter-66 → iter-70 at N=128 fp32 peak:
+- iter-66 (vmap-rm baseline)          : 276 Mc/s
+- iter-67 (tridiag hoist plane)       : 285 Mc/s  (+3.3%)
+- iter-68 (CS parity hoist)           : 282 Mc/s  (noise)
+- iter-69 (w pad-with-0)              : 286 Mc/s  (+1.4%)
+- iter-70 (substep loop unroll)       : **324 Mc/s**  (+13.3%)
+
+⇒ **Total iter-66 → iter-70: +17.4% at N=128 peak.**
+⇒ **HBM utilization 63% → 75% sustained.**
+
 ### Iter 69 — 2026-05-27 — w_new pad-with-0 swap (eliminate DUS barrier)
 
 Both SI substep kernels (`_semi_implicit_acoustic_column_kernel`

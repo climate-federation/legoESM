@@ -442,9 +442,13 @@ def acoustic_substeps(
             height_coord, J, dt_s, beta, g,
         )
 
-    w_final, theta_p_final, rho_p_final = jax.lax.fori_loop(
-        0, n_substeps, substep_body, (w, theta_p, rho_p)
-    )
+    # Python-loop unroll (n_substeps is compile-time static via
+    # SplitExplicitConfig). See semi-implicit variant for full rationale.
+    w_final, theta_p_final, rho_p_final = (w, theta_p, rho_p)
+    for _i in range(int(n_substeps)):
+        w_final, theta_p_final, rho_p_final = substep_body(
+            _i, (w_final, theta_p_final, rho_p_final),
+        )
 
     return NonHydrostaticState(
         u=state.u,
@@ -837,10 +841,15 @@ def acoustic_substeps_semi_implicit(
 
         return (w_new, theta_p_new, rho_p_new)
 
-    # Run substeps via fori_loop
-    w_final, theta_p_final, rho_p_final = jax.lax.fori_loop(
-        0, n_substeps, substep_body, (w, theta_p, rho_p)
-    )
+    # Python-loop unroll: n_substeps is compile-time static so XLA can
+    # fuse the post-cuSPARSE tail of one substep with the pre-cuSPARSE
+    # head of the next. lax.fori_loop kept the substeps as a while-loop
+    # and prevented inter-iteration fusion.
+    w_final, theta_p_final, rho_p_final = (w, theta_p, rho_p)
+    for _i in range(int(n_substeps)):
+        w_final, theta_p_final, rho_p_final = substep_body(
+            _i, (w_final, theta_p_final, rho_p_final),
+        )
 
     return NonHydrostaticState(
         u=state.u,
