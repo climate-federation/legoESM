@@ -193,7 +193,10 @@ extends the 30-day wrapper, all driven by the iter-98 success.
 * iter-104 (Codex iter-102/103): runaway-evaporation max gate
   added (MEDIUM#1); MSE drift denominator fix (LOW#2); tri-state
   ``QualityVerdict.evaluated`` (MEDIUM#3); distinct CLI exit
-  codes (MEDIUM#7). 6/6 findings closed.
+  codes (MEDIUM#7); extended the iter-98 anchor fixture from
+  10 to 11 rows (LOW#6 — was exactly
+  ``DEFAULT_LAST_N_DAYS_FOR_PLATEAU``, would silently hollow out
+  if the constant moved). 6/6 findings closed.
 
 **iter-105 — 30-day production run launched** (no commit; output
 at ``/tmp/iter105_crm32x32_rad30d``). Same config as iter-98 with
@@ -287,11 +290,12 @@ utility — max |d cwv_mean| = 0 across days 0-3).
 
 **End-of-cycle ledger** (post-iter-120):
 
-* Test count: 45/45 ``summarize_rce_trajectory`` tests + 14/14
-  ``compare_rce_trajectories`` tests + 23/23
+* Test count: 45/45 ``summarize_rce_trajectory`` tests + 15/15
+  ``compare_rce_trajectories`` tests + 20/20
   ``run_rce_30day_wrapper_defaults`` tests + 5/5
-  ``test_dod_doc_code_consistency`` tests = 87 new regression
-  tests across the iter 99..120 chain.
+  ``test_dod_doc_code_consistency`` tests = 85 new regression
+  tests across the iter 99..120 chain (verified by Codex iter-122
+  audit; iter-121's "87" was a 2-test over-count).
 * Tools added: ``scripts/summarize_rce_trajectory.py``,
   ``scripts/compare_rce_trajectories.py``.
 * Wrapper integration: ``EVALUATE_DOD`` env var (0/1/final) +
