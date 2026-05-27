@@ -207,7 +207,7 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
-### 2026-05-27 — iter 238..245 (cross-grid CRM smoke + state.py cherry-pick + pre-existing fixes)
+### 2026-05-27 — iter 238..250 (cross-grid CRM smoke + state.py cherry-pick + pre-existing test fixes + 4-round Codex polish)
 
 8 iterations covering the cross-grid CRM test surface lift:
 * iter-238: first test coverage for `scripts/run_rcemip_long.py`.
@@ -285,67 +285,57 @@ The plane CRM is the only one with a 30-day production-scale
 validation; cubed-sphere/MPAS 30-day production runs are the
 next chunk for full cross-grid DOD closure.
 
-### 2026-05-27 — iter 238 (cross-grid CRM smoke — first test coverage for run_rcemip_long.py)
+**iter-246..250 (post-sweep Codex polish chain — 4 rounds)**:
 
-Investigation: ``scripts/run_rcemip_long.py`` is the multi-grid
-non-hydrostatic CRM driver, dispatching on ``--grid {plane_fd,
-plane_spectral, cubed_sphere, mpas}``. Pre iter-238 it had **zero
-test coverage** — a silent regression on any of the four paths
-(wrong-shape state, factory dispatch, IC adapter import drift,
-upstream API change) would only surface when a user tried to
-launch a 30-day production.
+* iter-246 (Codex round-1 on iter-243/244 — 2 HIGH + 1 LOW):
+  - HIGH#1: iter-244 xfail covered the WHOLE spectral stability
+    test, hiding regressions in max_w/finite/q_v alongside the
+    mass-drift cap.
+  - HIGH#2: iter-243 silently dropped radiation by passing
+    `radiation_config=None`; original `_make_rcemip_physics` did
+    Newtonian relaxation (later swapped to gray in 0ec1da4b).
+  - LOW: try `fix_mass=True` instead of xfail.
+* iter-247: switched `_build_setup` to
+  `fix_mass=True, anchor_mass_to_initial=True` →
+  spectral drift dropped 6.12e-4 → **1.15e-15** (machine
+  precision). xfail removed. Restored gray radiation + Kessler
+  microphysics via module-level
+  `_RCEMIP_RADIATION_CFG` + `_RCEMIP_MICROPHYSICS_CFG`. All
+  4 make_rcemip_physics calls threaded.
+* iter-248 (Codex round-2 — 1 HIGH + 1 LOW):
+  - HIGH: fix_mass=True makes the 1e-6 cap measure
+    POST-FIXER drift; a regression in NATURAL dycore
+    conservation would be masked. Fix: companion
+    `test_spectral_rce_dycore_natural_conservation` with
+    `fix_mass=False` + 1e-3 cap. `_build_setup` takes optional
+    `fix_mass: bool = True` kwarg.
+  - LOW: stale "Newtonian radiation" docstring → "gray
+    radiation + Kessler microphysics" with full 04712098 →
+    0ec1da4b → iter-243 → iter-247 history.
+* iter-249 (Codex round-3 — 1 HIGH + 1 LOW):
+  - HIGH: 1e-3 cap = only 1.7× over measured 6e-4 baseline
+    (CI flakiness risk under JAX/XLA version variance).
+    Loosened to 5e-3 (~8× margin).
+  - LOW: dehydrated iter-247/248 docstring refs to behavioural
+    measurements.
+* iter-250 (Codex round-4 — 1 MEDIUM addressed, 1 LOW noted):
+  - MEDIUM: cap-rationale conflated per-step vs total-window
+    drift. Fix: "1e-2 = 1% TOTAL drift over the 30-step /
+    1-sim-min window — NOT per-step" with iter-183
+    cross-reference.
+  - LOW: iter-249 commit body still used iter-numbers
+    (permanent git metadata — can't retroactively fix).
 
-**Changes**
-
-* New test
-  ``tests/atmosphere/nonhydrostatic/integration/test_run_rcemip_long_cross_grid_smoke.py``:
-  parametrised 1-step dry-RCE smoke covering all four
-  ``--grid`` choices. Asserts driver exits clean, stdout includes
-  ``[<grid>]`` header + diagnostic columns (``max|w|``,
-  ``min/max(θ')``, ``q_v_min/max``), and no instability markers
-  fire.
-
-**Results** (M5 Pro, CPU, ``--days 0.0001 --dt 10``):
+**Validation chain endpoint** (`tests/validation/`):
 
 ```
-plane_fd        PASS
-plane_spectral  SKIPPED (pre-existing Metal collection error)
-cubed_sphere    PASS
-mpas            PASS
-3 passed, 1 skipped, 12.76 s total
+tests/validation/test_rcemip_plane_smoke.py         5/5 PASS
+tests/validation/test_spectral_plane_rce_smoke.py   4/4 PASS
 ```
 
-**Findings**
-
-* All 3 non-spectral grids run 1-step dry RCE cleanly. No
-  state-shape, factory-dispatch, or import regressions.
-* ``plane_spectral`` skip is the same pre-existing
-  ``spectral_pe.py:72 float(jnp.log(100.0))`` Metal-backend bug
-  noted at iter-236. The test marks the skip with the reason
-  + a TODO so a future fix drops the skip automatically.
-* Driver bug surfaced + worked around in test: ``--output``
-  expects a FILE path (``output.open("w")``), not a directory.
-  Test now creates a parent ``tmp_path`` and passes
-  ``<grid>_history.json`` inside it.
-
-**Status for "all grid types" DOD**
-
-* **Plane CRM**: 30-day production VERIFIED stable (iter-229
-  DOD PASS).
-* **Cubed-sphere CRM**: smoke runs OK; no 30-day production
-  verified yet.
-* **MPAS Voronoi CRM**: smoke runs OK; no 30-day production
-  verified yet. Currently dry-only path in run_rcemip_long.py;
-  moist Kessler + gray-radiation physics are imported but
-  ``physics_fn=None`` is hard-coded.
-* **Spectral plane CRM**: blocked on the
-  ``spectral_pe.py`` Metal import bug.
-
-iter-238 reduces "untested non-hydrostatic CRM cross-grid
-surface" from 4 grids to 0 (3 covered + 1 skipped with a
-documented blocker). Adding moist physics + CRM-resolution
-production driver for cubed-sphere/MPAS is the next chunk for
-true cross-grid CRM parity.
+9 PASS, 0 xfailed, 0 collection errors. Both the post-fixer
+machine-precision conservation (1e-6 cap) AND the dycore-only
+natural conservation (5e-3 cap) are gates.
 
 ### 2026-05-27 — iter 217..236 (compressed fold: iter-183 30-day DOD PASS + production envelope + FV3 n_outer_split)
 
