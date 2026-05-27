@@ -329,7 +329,6 @@ def main() -> int:
                     ).decode()
                     for line in out.splitlines():
                         if f"N{nx:>4d} cells=" in line:
-                            # Parse: throughput=XXX.XMcells/s and step=XX.XXms
                             import re
                             m_mc = re.search(r"throughput=\s*([\d.]+)Mcells", line)
                             m_ms = re.search(r"step=\s*([\d.]+)ms", line)
@@ -339,7 +338,15 @@ def main() -> int:
                                       f"{float(m_ms.group(1)):8.2f}")
                             break
                 except subprocess.CalledProcessError as exc:
-                    print(f"  {backend:10s}  {nx:5d}  FAILED ({exc.returncode})")
+                    # Surface the underlying failure reason (NaN/CFL/etc.)
+                    # rather than just the exit code. Per cavecrew #3.
+                    stdout = (exc.output or b"").decode(errors="replace")
+                    last_err = "no output"
+                    for line in stdout.splitlines():
+                        if any(tag in line for tag in
+                               ("NaN", "RuntimeError", "FAILED N", "Error:")):
+                            last_err = line.strip()[:80]
+                    print(f"  {backend:10s}  {nx:5d}  FAILED ({exc.returncode}): {last_err}")
 
     if not results:
         print("\nNo successful runs — exiting nonzero.")

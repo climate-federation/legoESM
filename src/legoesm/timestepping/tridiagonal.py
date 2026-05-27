@@ -155,10 +155,29 @@ def pcr_solve_batched(
     Stability assumption
     --------------------
     PCR is pivot-free; roundoff growth depends on diagonal dominance.
-    The SI acoustic system has b ~ 1 + alpha (alpha > 0), so b is
-    bounded away from zero — PCR is stable in this regime. For
-    weakly-diagonal-dominant systems consider falling back to Thomas
-    (set ``LEGOESM_TRIDIAG=legacy``).
+    The SI acoustic system has ``b ~ 1 + alpha`` (alpha > 0), so b is
+    bounded away from zero — PCR is stable in this regime. Empirically
+    (iter-73 sweep at dt=2s, dx=2km, plane CRM):
+    - n_substeps=2 (acoustic CFL ≈ 0.17): **NaN** within 30 steps
+    - n_substeps=3 (CFL ≈ 0.113): stable
+    The practical stability bound under default off-centering
+    (``beta=0``) is between CFL=0.113 and 0.17 — narrower than the
+    canonical 0.7 acoustic CFL because of off-centering + buoyancy +
+    advection coupling. For weakly-diagonal-dominant systems or to
+    A/B-validate, fall back via ``LEGOESM_TRIDIAG=legacy`` or
+    ``=cusparse``.
+
+    AD memory cost
+    --------------
+    Each PCR level materializes ~12 intermediate arrays (a, b, c, d
+    plus a_up, b_up, c_up, d_up, alpha, beta, new a/b/c/d). For
+    n_sys=29 → 5 levels → ~60 intermediates per substep call.
+    Reverse-mode AD captures all forward ops, so peak AD memory
+    grows with substep count × levels × state size. Compared to
+    cuSPARSE (which has a single custom_call with internal-only
+    state), PCR's AD footprint is larger by roughly 5-10× per
+    substep. Training with ``jax.grad`` on large grids may require
+    activation checkpointing.
 
     Division-in-graph caveat
     ------------------------
