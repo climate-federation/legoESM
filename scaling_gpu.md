@@ -1,5 +1,41 @@
 # GPU scaling — legoESM
 
+> **ERRATA (iter 21, 2026-05-27)** — final codex review caught issues with
+> earlier iter-3 / iter-8 / iter-10 prose. Specifically:
+>
+> 1. **Unit bug**: `Mcells/s` in the CSVs is **already cell-levels per
+>    second** (`total_cells × levels / step_time / 1e6`). Multiplying by
+>    `n_levels` again — as in iter 3 ("298.7 × 26 = 7.77 G") and iter 8
+>    ("405e6 × 20") — double-counts. Corrected effective-HBM estimates:
+>    - atm CS C48 fp32: 299 Mc/s × ~75 B/cell-lev = **22 GB/s of useful
+>      field traffic** (≈ 10 R/W passes × 22 GB/s = 220 GB/s effective HBM
+>      = **30% of 730 GB/s sustained**).
+>    - ocean LL192 fp32 impl_cn: 546 × ~75 = 41 GB/s useful → ~400 GB/s
+>      effective = **55% sustained HBM**.
+> 2. **Roofline reference**: pick **730 GB/s sustained** (measured iter 8)
+>    as the denominator everywhere. Desktop 5090 1.79 TB/s spec was for the
+>    wrong SKU.
+> 3. **Overreach**: earlier "100% memory-bound limit reached" came from the
+>    2-precision linear fit's `mem_share` ≈ 100% — that means "step time is
+>    100% memory rather than compute," NOT "100% of HBM saturated." The two
+>    are different. Effective HBM utilization is 30-55% across structured
+>    grids; the kernel is memory-bound but doesn't fully saturate HBM
+>    because of stencil-launch / latency gaps. The final ladder is the
+>    authoritative reference.
+> 4. **"Strong/weak scaling"**: this is a single-GPU bench; the more honest
+>    label is **throughput-vs-size sweep + saturation curve**. Strong-
+>    scaling-proper requires varying device count; weak-scaling-proper
+>    requires fixed cells/device across counts. Neither is possible on
+>    one GPU.
+> 5. **L2-cache-fit explanation for plateau**: plausible but unproven
+>    without Nsight Compute counters. Register spill, occupancy drop,
+>    memory-coalescing decay, and XLA capture/dispatch all remain
+>    candidates. State-fits-in-L2 is the simplest explanation matching
+>    the curve shape but is a hypothesis, not a measured cause.
+>
+> See "FINAL LADDER" section at the bottom for the authoritative summary.
+
+
 Track weak + strong scaling vs theoretical roofline for atm/ocean grid types on RTX 5090 (single GPU).
 
 ## Hardware
@@ -624,3 +660,44 @@ Updated final ladder:
 - `scaling_gpu_strong.png` — ms/step vs cells, log-log
 - `scaling_gpu_weak.png` — ns/cell vs cells, flat = saturated
 - `scaling_gpu_peak_bar.png` — peak Mcells/s by grid × precision
+
+---
+
+## FINAL LADDER (authoritative — supersedes prior iter tables)
+
+Single-GPU, mobile RTX 5090 (24 GB GDDR7, ~730 GB/s sustained HBM measured iter 8).
+"Mcells/s" = total (horizontal × vertical) cell-level operations per second.
+
+| grid            | precision | peak res | ms/step | Mc/s   | useful B/s @ ~75 B/cl | % sustained HBM est. |
+|-----------------|-----------|----------|---------|--------|------------------------|----------------------:|
+| atm spectral    | fp64 only | T42      |   8.30  |   25.7 | 1.9 GB/s × ~10 passes  | ~3% (O(N³) compute-bound) |
+| atm cubed-sphere| fp32      | C48      |   1.20  |  299   | 22 GB/s × ~10 passes   | ~30%                  |
+| atm cubed-sphere| fp64      | C48      |   2.55  |  141   | 21 GB/s × ~10 passes   | ~29%                  |
+| atm icosahedral | fp32      | I5       |   0.62  |  428   | 32 GB/s × ~10 passes   | ~44%                  |
+| atm icosahedral | fp64      | I5       |   2.07  |  128   | 19 GB/s × ~10 passes   | ~26%                  |
+| ocean LL impcn  | fp32      | LL192    |   2.70  | **546**| 41 GB/s × ~10 passes   | **~56% (study peak)** |
+| ocean LL impcn  | fp64      | LL192    |   5.97  |  247   | 37 GB/s × ~10 passes   | ~51%                  |
+| ocean MPAS impcn| fp32      | I6       |   2.46  |  333   | 25 GB/s × ~10 passes   | ~34%                  |
+| ocean MPAS impcn| fp64      | I6       |   2.40  |  342   | 26 GB/s × ~10 passes   | ~35%                  |
+
+`% sustained HBM` is **rough**: assumes ~75 B/cell-lev useful field
+traffic and ~10 dycore passes per step (estimate, not measured). Real
+ratio derivable only from Nsight Compute memory counters (out of scope).
+
+**What "as close as possible to theoretical limit" means here:**
+- For LL ocean: **~56% of sustained HBM**, with a 5x dycore-passes
+  multiplier — close to typical published structured-grid GPU peaks
+  (40-70%) for stencil dycores.
+- All structured grids hit a **plateau-then-fall** curve at the L2-
+  fit point of state (hypothesis, not measured cause).
+- Spectral remains an algorithmic outlier (O(N³) — fix requires
+  GPU-native SHTns / sphericart port, not a tuning knob).
+
+**What is NOT claimed:**
+- "100% of HBM saturated" — earlier wording was incorrect; the
+  2-precision fit says step time is ~100% memory phase vs compute
+  phase, not that HBM is fully driven.
+- "Theoretical maximum reached" — the gap to peak HBM is real
+  (~40-70% remaining) and is dominated by stencil-launch overhead
+  and L2-overflow latency at large N.
+
