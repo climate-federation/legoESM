@@ -117,6 +117,30 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 26 — 2026-05-27 — dispatch floor characterized (small-N regime)
+
+Extended sweep to N=16-32 (extreme small):
+
+| res    | ms/step | Mc/s | regime           |
+|--------|---------|------|------------------|
+| N=16   | 0.14    |  56  | dispatch (floor) |
+| N=24   | 0.14    | 126  | dispatch         |
+| N=32   | 0.13    | 234  | dispatch         |
+| N=48   | 0.17    | 402  | ramp             |
+| N=96   | 0.41    | 672  | plateau          |
+| N=128  | 0.65    | 752  | plateau          |
+| N=192  | 1.62    | 681  | plateau          |
+| N=256  | 3.04    | 648  | post-plateau     |
+| N=384  | 11.93   | 371  | L2-overflow      |
+
+**True dispatch floor: ~0.13-0.14 ms.** Below N=48, kernel-launch
+overhead × ~10 GPU kernels per step dominates. Above N=48 dycore
+arithmetic catches up. Plateau region N=96-192 spans best Mc/s.
+
+CRM scaling curve now spans 4 orders of magnitude (N=16 → N=384,
+7680 → 4.4M cells × 30 levels). Full envelope characterized:
+dispatch / ramp / plateau / L2-overflow.
+
 ### Iter 25 — 2026-05-27 — `--repeat 5` confirms tighter within-process range
 
 Single Python process, median-of-5, full plateau range:
