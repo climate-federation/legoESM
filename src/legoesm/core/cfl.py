@@ -268,6 +268,7 @@ def cfl_check_and_adjust(
     radius: float = constants.R_earth,
     verbose: bool = True,
     grid_type: str = "cubed_sphere",
+    use_polar_filter: bool = False,
 ) -> float:
     """Check CFL condition and reduce dt if needed.
 
@@ -299,7 +300,20 @@ def cfl_check_and_adjust(
         Adjusted time step (≤ dt) that satisfies CFL.
     """
     if grid_type == "latlon":
-        dx_min = estimate_min_dx_latlon(n, radius)
+        if use_polar_filter:
+            # Stage 3-E: Fourier polar filter truncates the
+            # high-wavenumber modes that would violate CFL near the
+            # poles, so the actual stability limit is the equatorial
+            # CFL ``R * dlon``.  Without this branch the legacy
+            # ``estimate_min_dx_latlon`` returns the pole-cell dx
+            # (a ~60x smaller value at n_lat=180) and the driver
+            # clamps ``dt`` to ~5 s — undoing the polar filter's
+            # whole purpose.  See ``component_factory.py`` for the
+            # mirror logic at the model-builder level.
+            n_lon = 2 * n
+            dx_min = float(2.0 * np.pi * radius / n_lon)
+        else:
+            dx_min = estimate_min_dx_latlon(n, radius)
     elif grid_type == "gaussian":
         dx_min = estimate_min_dx_gaussian(n, radius)
     elif grid_type == "mpas":
