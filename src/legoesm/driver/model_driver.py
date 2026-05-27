@@ -1065,13 +1065,29 @@ class ModelDriver:
         )
         self._device_config = rc.device_config
 
-        # Detect MPI rank early for output guards and logging
+        # Detect MPI rank early for output guards and logging.
+        # Two topology shapes coexist in the codebase:
+        #   - cubed-sphere ``MPITopology``       → ``.n_processes``
+        #   - lat-lon band ``LatLonBandLayout``  → ``.n_ranks``
+        # Use ``getattr`` so this early hook works for both without
+        # needing to import either type here.  ``_setup_parallel``
+        # later overwrites these values with the type-specific path.
         if rc.distributed:
             from legoesm.parallel.distributed import get_active_topology
             topo = get_active_topology()
             if topo is not None:
                 self._mpi_rank = topo.rank
-                self._mpi_world_size = topo.n_processes
+                self._mpi_world_size = getattr(
+                    topo, "n_processes",
+                    getattr(topo, "n_ranks", None),
+                )
+                if self._mpi_world_size is None:
+                    raise RuntimeError(
+                        f"Active topology {type(topo).__name__} exposes "
+                        "neither ``.n_processes`` nor ``.n_ranks``; "
+                        "cannot determine MPI world size.  Extend the "
+                        "early-detect hook in _bootstrap_runtime."
+                    )
 
         logger.info(
             f"  Runtime: backend={rc.backend}, precision={self.config.precision}, "
