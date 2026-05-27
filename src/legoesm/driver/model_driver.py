@@ -1489,10 +1489,72 @@ class ModelDriver:
         p_g = gather_field_latlon(s.p_s.data, self._layout)
         phi_g = gather_field_latlon(s.phis.data, self._layout)
 
+        # Collective tracer-key safety (Codex review MEDIUM #1).  If
+        # ranks disagree on which tracers are active, the per-tracer
+        # ``comm.gather`` below would either deadlock or fall out of
+        # sync silently.  Allgather sorted-key tuples and assert
+        # identical before iterating — fail loudly if not.
+        from mpi4py import MPI
+        comm = MPI.COMM_WORLD
+        my_keys = tuple(sorted(
+            k for k, v in self.tracers.items() if v is not None
+        ))
+        all_keys = comm.allgather(my_keys)
+        if any(k != all_keys[0] for k in all_keys):
+            raise RuntimeError(
+                "Tracer key sets diverge across ranks under lat-lon "
+                "MPI; refusing to checkpoint to avoid silent "
+                "corruption.  Rank-by-rank keys: "
+                f"{all_keys!r}.  Every rank's TracerRegistry must "
+                "produce the same set of active tracer names."
+            )
+
+        # v-face boundary-row consistency (Codex review MEDIUM #2).
+        # Each rank K (except the northernmost) shares v[lat_end_K] with
+        # rank K+1's v[lat_start_{K+1}].  After every dycore step these
+        # are written via different code paths on the two ranks; the
+        # invariant 'duplicated row is bit-identical' must hold or the
+        # gather below will silently pick rank K's value over K+1's.
+        #
+        # Implementation note: use ``sendrecv`` to ship each rank's
+        # v[-1] north + receive the southern neighbour's v[-1], then
+        # ``allreduce(MAX)`` over every rank's local diff so EVERY rank
+        # raises (or none does) — keeps the assertion collective-safe.
+        # A previous per-rank ``raise`` design would deadlock the
+        # northernmost rank (no south to compare → doesn't raise →
+        # walks into the gather collective while raised ranks have
+        # left it).
+        if self._layout.north_rank is not None:
+            my_last_v = np.asarray(self.state.v.data[-1])
+        else:
+            my_last_v = None
+        neighbour_south_last_v = comm.sendrecv(
+            sendobj=my_last_v,
+            dest=(self._layout.north_rank if self._layout.north_rank is not None
+                  else MPI.PROC_NULL),
+            sendtag=0,
+            source=(self._layout.south_rank if self._layout.south_rank is not None
+                    else MPI.PROC_NULL),
+            recvtag=0,
+        )
+        if self._layout.south_rank is not None:
+            my_first_v = np.asarray(self.state.v.data[0])
+            local_diff = float(np.abs(my_first_v - neighbour_south_last_v).max())
+        else:
+            local_diff = 0.0
+        global_max_diff = comm.allreduce(local_diff, op=MPI.MAX)
+        if global_max_diff > 0.0:
+            raise RuntimeError(
+                "v-face boundary row diverges somewhere in the rank "
+                f"chain; max |diff| across all rank pairs = "
+                f"{global_max_diff:.3e}.  Halo-exchange invariant "
+                "violated; refusing to checkpoint to avoid writing a "
+                "non-deterministic global v field."
+            )
+
         tracers_g: dict | None = {}
-        for name, arr in self.tracers.items():
-            if arr is None:
-                continue
+        for name in all_keys[0]:
+            arr = self.tracers[name]
             tracers_g[name] = gather_field_latlon(arr, self._layout)
 
         if self._mpi_rank != 0:
@@ -1554,6 +1616,21 @@ class ModelDriver:
         else:
             tracer_keys = None
         tracer_keys = comm.bcast(tracer_keys, root=0)
+
+        # Collective sanity check (Codex review follow-on to MEDIUM #1):
+        # every rank's pre-load TracerRegistry must already contain the
+        # broadcast keys, so the assignment below updates an existing
+        # entry rather than silently creating one (which would mask a
+        # registry-divergence bug across ranks).
+        my_existing_keys = set(self.tracers.keys())
+        missing = [k for k in tracer_keys if k not in my_existing_keys]
+        if missing:
+            raise RuntimeError(
+                f"Rank {self._mpi_rank} lacks tracer keys {missing!r} "
+                f"that rank 0's checkpoint contains.  Every rank's "
+                "TracerRegistry must produce the same set of active "
+                "tracer names before load_checkpoint runs."
+            )
 
         for name in tracer_keys:
             global_arr = tracers_global[name] if self._mpi_rank == 0 else None
