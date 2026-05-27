@@ -62,10 +62,12 @@ def driver_defaults() -> dict[str, object]:
     return _parse_argparse_defaults(DRIVER.read_text())
 
 
-def test_dt_default_matches_iter180(driver_defaults):
-    """iter-180 refresh: WENO5 + beta=0.2 lets the production driver
-    run at dt=20.0 s (4x iter-14's dt=5.0). The driver default
-    moved in lockstep with the wrapper. Locks the new production
+def test_dt_default_matches_iter183(driver_defaults):
+    """iter-180/183 refresh: Van Leer (iter-183, after iter-180's
+    WENO5 walked back on a wall-time regression) + beta=0.2 lets the
+    production driver run at dt=20.0 s (4x iter-14's dt=5.0 + 3x
+    wall-time speedup vs dt=10+upwind1). The driver default moved
+    in lockstep with the wrapper. Locks the new production
     contract."""
     assert driver_defaults["--dt"] == 20.0
 
