@@ -23,12 +23,33 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from legoesm.core.field import Field
 from legoesm.core.state import (
     SpectralPlanePhysicsState,
     SpectralPlanePhysicsTendencies,
 )
+
+
+# iter-267: explicitly enable x64 at module scope so the fp64
+# parametrise rows actually run at fp64 (without this, JAX silently
+# truncates complex128 → complex64 and float64 → float32, defeating
+# the point of the parametrise).
+jax.config.update("jax_enable_x64", True)
+
+
+# iter-267 (Codex iter-264 round-1 MEDIUM#1 deferred from iter-265):
+# parametrise the pytree tests across fp64/complex128 AND
+# fp32/complex64 so the iter-241 cherry-pick contract is locked
+# for BOTH precision paths. The default precision policy in
+# src/legoesm/core/precision.py:96 is fp32, so the
+# float32/complex64 combination is the production-default path —
+# locking fp64 only left the default path uncovered.
+_PRECISION_PAIRS = [
+    ("fp64", jnp.float64, jnp.complex128),
+    ("fp32", jnp.float32, jnp.complex64),
+]
 
 
 def _make_field_with_sentinel(shape, dtype, name, dims, units, sentinel):
@@ -47,14 +68,22 @@ def _make_field_with_sentinel(shape, dtype, name, dims, units, sentinel):
     return Field(arr, name=name, dims=dims, units=units)
 
 
-def _build_dummy_state(ny=4, nx=4, nlev=3, n_tracers=2):
+def _build_dummy_state(ny=4, nx=4, nlev=3, n_tracers=2,
+                       real_dtype=jnp.float64,
+                       complex_dtype=jnp.complex128):
     """rfft2 of a face/cell field has shape (ny, nx//2+1) complex.
     Tendencies share the same pytree shape. Each field gets a
     UNIQUE sentinel value (iter-265 HIGH#1 fix) so a bad unflatten
     that swaps same-shaped leaves trips the round-trip check.
+
+    iter-267 (Codex iter-264 round-1 MEDIUM#1): added
+    ``real_dtype`` + ``complex_dtype`` kwargs so the same builder
+    serves both fp64/complex128 (the iter-241 cherry-pick
+    measurement path) AND fp32/complex64 (the precision-policy
+    default path).
     """
     nx_r = nx // 2 + 1
-    cplx = jnp.complex128
+    cplx = complex_dtype
     shp_full = (ny, nx_r, nlev)
     shp_half = (ny, nx_r, nlev + 1)
     shp_tracers = (ny, nx_r, nlev, n_tracers)
@@ -81,7 +110,7 @@ def _build_dummy_state(ny=4, nx=4, nlev=3, n_tracers=2):
         ),
         # phis is REAL (physical-space static), not spectral.
         phis=_make_field_with_sentinel(
-            (ny, nx), jnp.float64, "phis",
+            (ny, nx), real_dtype, "phis",
             ("ny", "nx"), "m^2/s^2", sentinel=6.0,
         ),
         tracers_hat=_make_field_with_sentinel(
@@ -91,9 +120,11 @@ def _build_dummy_state(ny=4, nx=4, nlev=3, n_tracers=2):
     )
 
 
-def _build_dummy_tendencies(ny=4, nx=4, nlev=3, n_tracers=2):
+def _build_dummy_tendencies(ny=4, nx=4, nlev=3, n_tracers=2,
+                            real_dtype=jnp.float64,
+                            complex_dtype=jnp.complex128):
     nx_r = nx // 2 + 1
-    cplx = jnp.complex128
+    cplx = complex_dtype
     shp_full = (ny, nx_r, nlev)
     shp_half = (ny, nx_r, nlev + 1)
     shp_tracers = (ny, nx_r, nlev, n_tracers)
@@ -119,7 +150,7 @@ def _build_dummy_tendencies(ny=4, nx=4, nlev=3, n_tracers=2):
             ("ny", "nx_r", "nlev"), "kg/m^3/s", sentinel=50.0,
         ),
         dphis_dt=_make_field_with_sentinel(
-            (ny, nx), jnp.float64, "dphis_dt",
+            (ny, nx), real_dtype, "dphis_dt",
             ("ny", "nx"), "m^2/s^3", sentinel=60.0,
         ),
         dtracers_hat_dt=_make_field_with_sentinel(
@@ -130,13 +161,19 @@ def _build_dummy_tendencies(ny=4, nx=4, nlev=3, n_tracers=2):
     )
 
 
-def test_spectral_state_is_namedtuple_pytree():
+@pytest.mark.parametrize("label,real_dtype,cplx_dtype", _PRECISION_PAIRS)
+def test_spectral_state_is_namedtuple_pytree(label, real_dtype, cplx_dtype):
     """SpectralPlanePhysicsState must be a NamedTuple + auto-register
     as a JAX pytree. tree_flatten/tree_unflatten round-trip MUST
     preserve VALUE identity (iter-265 HIGH#1: unique sentinels per
     field so a bad unflatten that swaps same-shape leaves is
-    detected — shape/dtype-only checks would pass silently)."""
-    state = _build_dummy_state()
+    detected — shape/dtype-only checks would pass silently).
+
+    iter-267 (Codex iter-264 round-1 MEDIUM#1): parametrise across
+    fp64/complex128 + fp32/complex64 (the precision-policy
+    default).
+    """
+    state = _build_dummy_state(real_dtype=real_dtype, complex_dtype=cplx_dtype)
     leaves, treedef = jax.tree_util.tree_flatten(state)
     restored = jax.tree_util.tree_unflatten(treedef, leaves)
     assert isinstance(restored, SpectralPlanePhysicsState)
@@ -157,9 +194,10 @@ def test_spectral_state_is_namedtuple_pytree():
         ))
 
 
-def test_spectral_tendencies_is_namedtuple_pytree():
+@pytest.mark.parametrize("label,real_dtype,cplx_dtype", _PRECISION_PAIRS)
+def test_spectral_tendencies_is_namedtuple_pytree(label, real_dtype, cplx_dtype):
     """Mirror check for SpectralPlanePhysicsTendencies."""
-    tend = _build_dummy_tendencies()
+    tend = _build_dummy_tendencies(real_dtype=real_dtype, complex_dtype=cplx_dtype)
     leaves, treedef = jax.tree_util.tree_flatten(tend)
     restored = jax.tree_util.tree_unflatten(treedef, leaves)
     assert isinstance(restored, SpectralPlanePhysicsTendencies)
@@ -173,7 +211,8 @@ def test_spectral_tendencies_is_namedtuple_pytree():
         ))
 
 
-def test_spectral_state_tree_map_actually_visits_each_leaf():
+@pytest.mark.parametrize("label,real_dtype,cplx_dtype", _PRECISION_PAIRS)
+def test_spectral_state_tree_map_actually_visits_each_leaf(label, real_dtype, cplx_dtype):
     """jax.tree_util.tree_map across the state MUST visit every
     Field's .data array + produce a new state with the same pytree
     structure. Tests the SSP-RK3 averaging contract relies on
@@ -183,9 +222,10 @@ def test_spectral_state_tree_map_actually_visits_each_leaf():
     version used all-zero sentinels + lambda x: 2*x, which gave
     2*0=0 — a no-op traversal or one that treated Field as opaque
     leaf passed silently. iter-265 uses unique nonzero sentinels +
-    asserts new == 2*original element-wise.
+    asserts new == 2*original element-wise. iter-267 adds fp32
+    parametrise.
     """
-    state = _build_dummy_state()
+    state = _build_dummy_state(real_dtype=real_dtype, complex_dtype=cplx_dtype)
     doubled = jax.tree_util.tree_map(lambda x: 2.0 * x, state)
     assert isinstance(doubled, SpectralPlanePhysicsState)
     for fld in SpectralPlanePhysicsState._fields:
