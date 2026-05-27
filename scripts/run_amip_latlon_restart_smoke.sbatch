@@ -131,10 +131,19 @@ fi
 
 echo
 echo "--- Chain leg 2: restart day-2 → day-4 ---"
+# ``--start-day 2`` makes ``cfg.start_day = 2`` so the elapsed-day
+# math in ``ModelDriver.save_checkpoint`` (``elapsed_day = day -
+# cfg.start_day``) produces ``day_0004.npz``.  Without this flag
+# ``cfg.start_day`` defaults to 0 and the chain-leg's first save lands
+# at ``day_0006.npz`` (the absolute ``START_DAY + N_DAYS`` from
+# ``_run_compiled``), which would mismatch the reference filename
+# even though the underlying STATE is bit-equivalent.  Codex review
+# round 3 caught this filename-vs-state inconsistency.
 "${MPI_LAUNCH[@]}" -n 4 "${PY}" "${REPO_ROOT}/scripts/run_amip.py" \
     --resolution "${RES}" \
     --grid-type latlon \
     --discretization finite_volume \
+    --start-day 2 \
     --days 4 \
     --dt "${DT}" \
     --rad-update-steps "${RAD}" \

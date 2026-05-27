@@ -1576,9 +1576,56 @@ class ModelDriver:
         all other ranks pass ``None``.  Every rank participates in the
         collective bcast inside :func:`scatter_field_latlon` and gets
         back its own lat band.
+
+        Failure semantics (Codex review round 3, MEDIUM #2): the
+        tracer-key collective-safety check runs BEFORE any state
+        scatter so a divergent TracerRegistry leaves ``self.state``
+        untouched.  A failed load can therefore be retried (or the
+        driver torn down cleanly) without first having to undo a
+        half-loaded band-shaped state.
         """
         from legoesm.parallel.latlon_mpi import scatter_field_latlon
+        from mpi4py import MPI
 
+        comm = MPI.COMM_WORLD
+
+        # ----------------------------------------------------------
+        # Stage A — collective sanity check on tracer-registry parity.
+        # Done BEFORE any state mutation so a divergent registry
+        # surfaces an error without side effects.
+        # ----------------------------------------------------------
+        if self._mpi_rank == 0:
+            tracer_keys = sorted(
+                k for k, v in tracers_global.items() if v is not None
+            )
+        else:
+            tracer_keys = None
+        tracer_keys = comm.bcast(tracer_keys, root=0)
+
+        # Allgather every rank's missing-keys tuple so every rank sees
+        # the same divergence flag and raises in lockstep (or none
+        # does).  A per-rank raise pattern would leave non-raised
+        # ranks blocked inside ``scatter_field_latlon``'s inner bcast.
+        my_existing_keys = set(self.tracers.keys())
+        my_missing = tuple(sorted(
+            k for k in tracer_keys if k not in my_existing_keys
+        ))
+        all_missing = comm.allgather(my_missing)
+        if any(m for m in all_missing):
+            raise RuntimeError(
+                "TracerRegistry key sets diverge across ranks at load "
+                "time; every rank must already have the keys the "
+                "checkpoint contains before load_checkpoint runs.  "
+                "Rank-by-rank missing keys: "
+                f"{all_missing!r}."
+            )
+
+        # ----------------------------------------------------------
+        # Stage B — scatter state fields.  Past this point self.state
+        # is mutated; failures from now on are non-atomic but every
+        # error path that follows is a JAX shape/dtype regression of
+        # the helper itself (a code bug, not a data-dependent failure).
+        # ----------------------------------------------------------
         if self._mpi_rank == 0:
             s = state_global
             T_g = s.T.data
@@ -1604,45 +1651,10 @@ class ModelDriver:
             phis=s.phis.replace(data=phi_loc),
         )
 
-        # Tracers: rank 0 sends each, every rank slices its band.  All
-        # ranks must agree on the key set so the bcast pattern is the
-        # same on every rank — drive iteration off rank 0's keys.
-        from mpi4py import MPI
-        comm = MPI.COMM_WORLD
-        if self._mpi_rank == 0:
-            tracer_keys = sorted(
-                k for k, v in tracers_global.items() if v is not None
-            )
-        else:
-            tracer_keys = None
-        tracer_keys = comm.bcast(tracer_keys, root=0)
-
-        # Collective sanity check (Codex review round 2 BLOCK fix):
-        # every rank's pre-load TracerRegistry must already contain the
-        # broadcast keys, so the assignment below updates an existing
-        # entry rather than silently creating one (which would mask a
-        # registry-divergence bug across ranks).
-        #
-        # MUST be collective-safe: raising only on ranks that detect a
-        # mismatch would leave the rest inside the per-tracer
-        # ``scatter_field_latlon`` collective ``bcast`` waiting for a
-        # rank-0 payload that never lands.  Allgather every rank's
-        # ``missing`` tuple so every rank sees the union and raises in
-        # lockstep (or none does).
-        my_existing_keys = set(self.tracers.keys())
-        my_missing = tuple(sorted(
-            k for k in tracer_keys if k not in my_existing_keys
-        ))
-        all_missing = comm.allgather(my_missing)
-        if any(m for m in all_missing):
-            raise RuntimeError(
-                "TracerRegistry key sets diverge across ranks at load "
-                "time; every rank must already have the keys the "
-                "checkpoint contains before load_checkpoint runs.  "
-                "Rank-by-rank missing keys: "
-                f"{all_missing!r}."
-            )
-
+        # ----------------------------------------------------------
+        # Stage C — scatter tracers.  Key set already validated in
+        # Stage A so this loop is just per-tracer slicing.
+        # ----------------------------------------------------------
         for name in tracer_keys:
             global_arr = tracers_global[name] if self._mpi_rank == 0 else None
             self.tracers[name] = scatter_field_latlon(
