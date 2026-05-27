@@ -154,6 +154,81 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 134..144 (compressed summary)
+
+11 iterations of CLI flag polish + Codex review cycles + wrapper
+hygiene. iter-105 30-day run remained in flight throughout.
+
+**iter-134..136 — CLI interaction tests + wrapper --help**
+(commits `173dcca8`, `7b4e90df`, `80f4301e`):
+* iter-134: 2 tests cover ``--quiet`` × ``--evaluate`` /
+  ``--no-plateau-check`` combination — verdict-print preserved
+  when table suppressed.
+* iter-135: locks ``ALLOW_SUMMARY_FAILURE=1`` cannot mask mpirun
+  failures (set -e + pipefail kills before post-run block).
+* iter-136: wrapper ``--help`` / ``-h`` prints docstring header +
+  exits 0 (pre-iter-136 ``--help`` was OUTPUT=--help → garbage
+  write to disk). macOS BSD ``sed -E`` strips ``# ``.
+
+**iter-137..139 — DOD criterion 1 evaluator** (commits
+`584f07e2`, `c3917135`, `b60d879e`):
+* iter-137: new ``parse_log_max_w(out_dir)`` reads log.txt at the
+  driver's per-100-step cadence + returns run-wide max|w|. NaN
+  raises ValueError. New ``--check-log-max-w`` CLI flag exits
+  ``EXIT_DOD_FAIL`` if > 50 m/s. Closes the gap where the
+  snapshot wind check (24-hr cadence on surface horizontal wind)
+  was the only DOD-relevant wind gate.
+* iter-138: wrapper ``CHECK_LOG_MAX_W=1`` threads ``--check-log-max-w``
+  into the summarizer call. Additive to ``EVALUATE_DOD``.
+* iter-139 (Codex iter-137/138): 2 HIGH + 2 MEDIUM fixed —
+  streaming log parser (vs read_text() slurp; HIGH#1), missing
+  log fails EXIT_DOD_FAIL (HIGH#3), lenient ``#step,`` schema
+  detection (MEDIUM#2), NaN diag includes file line + sim step
+  (MEDIUM#6).
+
+**iter-140..142 — combined criteria 1+2 + Codex follow-up**
+(commits `79239d6c`, `480f9472`, `73de56be`):
+* iter-140: locks the ``log max|w|`` + ``DOD verdict`` output
+  ORDER (criterion 1 first, criterion 2 second) when both flags
+  are active.
+* iter-141: wrapper hint suggests ``--final-dod --check-log-max-w``
+  + ``EVALUATE_DOD=final + CHECK_LOG_MAX_W=1`` for full DOD
+  gating.
+* iter-142 (Codex iter-139/140/141): 2 MEDIUM + 1 LOW + 1 gap —
+  UTF-8 explicit ``open(encoding="utf-8")`` (MEDIUM#5), hint
+  clarifies log.txt requirement (MEDIUM#4), line-level test
+  comparison (LOW#3), schema-free log sentinel test (Q1 gap).
+
+**iter-143..144 — wrapper docstring completeness** (commits
+`a7d0f669`, `92c2d2e0`):
+* iter-143: ``--help`` sed range widened from 2..72 to 2..77 so
+  iter-138 ``CHECK_LOG_MAX_W`` + iter-125 ``EMIT_TRAJECTORY_PNG``
+  + PYBIN env-var docs all surface.
+* iter-144: documented 4 previously-undocumented env vars
+  (``HYPERDIFF`` / ``BUBBLE_K`` / ``QV_NOISE`` / ``USE_DD``);
+  widened ``--help`` range to 2..89; lock all 16 documented env
+  vars in the iter-143 test.
+
+**End-of-cycle ledger** (post-iter-144):
+
+* Wrapper env var contract: 17 documented vars across DAYS /
+  RANKS / DT / NX / NY / N_ACOUSTIC / ADVECTION / HYPERDIFF /
+  BUBBLE_K / QV_NOISE / USE_DD / NO_MASS_FIXER / EVALUATE_DOD /
+  ALLOW_SUMMARY_FAILURE / EMIT_TRAJECTORY_PNG / CHECK_LOG_MAX_W /
+  PYBIN.
+* Summarizer CLI: ``--evaluate`` (criterion 2 spinup gate) +
+  ``--final-dod`` (criterion 2 production gate) +
+  ``--no-plateau-check`` (stability mode) + ``--quiet`` (table
+  suppression) + ``--check-log-max-w`` (criterion 1) + ``--csv``.
+* Exit code set: ``EXIT_OK=0`` / ``EXIT_IO_ERROR=1`` /
+  ``EXIT_USAGE=2`` / ``EXIT_DOD_FAIL=3`` / ``EXIT_DOD_INSUFFICIENT=4``.
+* Test count: 61 summarize + 15 compare + 42 wrapper + 5 DOD
+  consistency = 123 tests across the iter 99..144 chain.
+
+**R-roadmap status**: R1-R8, R10, R12 ✓. F9 platform-blocked.
+R11 [~] still partial pending iter-105 30-day completion (32x32
+in flight at ~28 %; 132x132 wall-time gated).
+
 ### 2026-05-27 — iter 121..132 (compressed summary)
 
 12 iterations of tooling polish + Codex review chains + doc
