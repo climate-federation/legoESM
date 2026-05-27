@@ -117,6 +117,29 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 5 — 2026-05-27 — bottleneck root-cause + N=512 plateau confirm
+
+**Per-stage breakdown N=384 fp64 nsub=6:**
+- full step = 158 ms
+- nsub=1 step = 36 ms ⇒ slow_tend = 4 ms/RK3 stage × 3 = 12 ms (8%)
+- per-substep = 8.1 ms × 18 substep calls = 146 ms (92%)
+
+Each substep solves column-Thomas tridiagonal (vertical semi-implicit
+acoustic). 384² = 147k columns × 30 levels = ~44M ops/substep,
+producing only 5.4 GFLOPs/substep on fp64 — **0.5% of fp64 ALU peak,
+3% of HBM peak**. Column-Thomas is serial along the vertical axis
+(forward+backward sweep), so JAX/XLA cannot vectorize beyond the
+horizontal column dimension. The substep loop is already
+`jax.lax.fori_loop`-fused — no extra kernel launch overhead.
+
+⇒ **Root cause: column-Thomas vertical recursion is the fundamental
+serial bottleneck.** Cannot beat this without batched-tridiagonal
+GPU primitive (cuSPARSE / cuSolverDn). Out of scope for "minimum
+code production."
+
+**fp32 N=512 nsub=6:** 167.7 ms / 46.9 Mc/s — falls 18% past peak.
+Final fp32 plateau: N=256-384 at **57 Mc/s**.
+
 ### Iter 3 codex review applied:
 - [HIGH] post-warmup + post-timing `jnp.isfinite` assert added —
   NaN/Inf now raises RuntimeError instead of silently fast
