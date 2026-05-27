@@ -81,6 +81,7 @@ from legoesm.atmosphere.dynamics.tracer_positivity import (
     apply_positive_filter_state,
 )
 from legoesm.atmosphere.idealized.rcemip_initial_conditions import (
+    build_smooth_k1_pattern,
     make_wing2018_qv_ref_fn, make_wing2018_theta_ref_fn,
 )
 from legoesm.atmosphere.physics.microphysics.config import (
@@ -117,31 +118,11 @@ Z_T = 15_000.0
 SEC_PER_DAY = 86400.0
 
 
-def build_smooth_k1_pattern(ny: int, nx: int) -> jnp.ndarray:
-    """Build the iter-203 smooth_k1 theta'-noise pattern.
-
-    Returns a ``(ny, nx)`` array of ``0.5 * (cos(2π x/nx) + cos(2π y/ny))``
-    with the horizontal mean explicitly subtracted to GUARANTEE zero
-    mean on degenerate grids (nx=1 → cos=1 everywhere, mean=1, not
-    zero-mean per the F11 fix-path-3 contract; iter-207 Codex MEDIUM
-    #1 fix).
-
-    Peak amplitude is 1.0 on healthy grids (nx, ny >= 2); the driver
-    multiplies by theta_noise_amp [K] to scale.
-
-    Extracted as a module-level helper so the iter-204 unit test
-    exercises THIS function directly (iter-207 Codex MEDIUM #2 fix
-    — the prior test re-derived the formula inline so a future
-    driver regression would have passed the test).
-    """
-    jj = jnp.arange(ny, dtype=jnp.float64)
-    ii = jnp.arange(nx, dtype=jnp.float64)
-    yy, xx = jnp.meshgrid(jj, ii, indexing="ij")
-    two_pi = 2.0 * jnp.pi
-    pattern = 0.5 * (
-        jnp.cos(two_pi * xx / nx) + jnp.cos(two_pi * yy / ny)
-    )
-    return pattern - jnp.mean(pattern)
+# iter-208: ``build_smooth_k1_pattern`` lives in
+# ``legoesm.atmosphere.idealized.rcemip_initial_conditions`` so the
+# iter-207 unit test imports it without loading the entire driver
+# (mpi4jax / jax-MPI / argparse / etc.). The driver consumes it via
+# the package-path import block below.
 
 # Radiation call-frequency convention (literature):
 # - SAM (Khairoutdinov-Randall): 600 s
