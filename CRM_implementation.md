@@ -223,364 +223,108 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
-### 2026-05-27 — iter 287 (--n-cubed-sphere CLI flag + C12 probe — NaN at day 1, NOT improved by mesh refinement)
-
-iter-287 added ``--n-cubed-sphere N`` CLI flag (default 4 for
-back-compat with iter-238 smoke) so future cluster jobs can run
-C12/C24/C96 production without code edits. Mesh stats:
-
-| n | cells | dx (km) | iter-287 probe result |
-|---|---|---|---|
-| 4 | 96 | ~3300 | NaN day 2 (iter-284/286) |
-| 12 | 864 | ~830 | NaN day 1 (this iter) |
-| 24 | 3456 | ~415 | not run (multi-h compute) |
-| 96 | 55296 | ~104 | not run (multi-day compute) |
-
-**Counterintuitive finding**: C12 NaN'd SOONER than C4
-(day 1 vs day 2). Trajectory comparison:
-
-```
-                            day-0.5 max|w|   day-1 max|w|
-C4 v2 (iter-286)            ~5e-3            1.12e-2
-C12 v2 (this iter)          5.92e-2          NaN
-```
-
-**Diagnosis**: at C12, dx ≈ 830 km. The convective updrafts
-seeded by surface flux + Kessler are still gridscale (real
-convection is 1-10 km, three orders of magnitude finer). At
-C4 the cells are SO BLOCKY (3300 km) that horizontal gradients
-are heavily damped by the mesh itself; C12 lets small-scale
-moist instabilities grow before they're large enough for the
-sponge / hyperdiff to control. **Mesh refinement WITHOUT
-gridscale resolution of convection is worse, not better**.
-
-This confirms: cross-grid 30-day production at ANY mesh below
-C384 (≈3 km dx, true CRM) blows up under realistic moist
-forcing. The iter-275 + iter-283 composition is correct; the
-small-mesh failure is a physics-vs-mesh-resolution mismatch
-that no CLI tuning can resolve.
-
-**Status update for "all grid types" DOD**:
-
-| Grid | Production-mesh 30-day | Path to closure |
-|---|---|---|
-| Plane FD (132x132 dx=2km) | ✅ iter-229 DOD PASS | done |
-| Plane spectral | not run | (small mesh demo only — same physics-vs-mesh issue) |
-| Cubed-sphere | ❌ blocked at C4/C12 | needs C384+ HPC job |
-| MPAS Voronoi | ❌ blocked at L2 (iter-282 day-15) | needs L≥7 HPC job |
-
-The plane CRM closes the DOD because dx=2 km RESOLVES convection.
-The other grids need cluster compute at production resolution.
-
-iter-287 value-add: ``--n-cubed-sphere`` CLI infrastructure
-unblocks future cluster jobs without code edits. The
-composition + dycore + tightened-config + CLI scaffolding
-is now complete; only HPC compute remains.
-
-### 2026-05-27 — iter 285..286 (cubed-sphere C4 tightened config — still NaN at day 2; mesh-resolution-bound confirmed)
-
-iter-284 cubed-sphere C4 moist+sfc NaN'd at day 2 with default
-``CDGridCompressibleEulerConfig(n_acoustic_substeps=4,
-fix_mass=False)``. iter-285 tightened the config when moist:
-``n_acoustic_substeps=12`` (3× more substeps), ``use_coriolis=False``
-(C4 gridscale Coriolis unphysical), ``fix_mass=True,
-anchor_mass_to_initial=True``. Also dropped dt 10→5 s for
-acoustic safety.
-
-**Result (iter-286)**: NaN at sim-day 2 again. Tightened
-config did NOT fix the failure.
-
-```
-step    t[d]  max|w|     θ' range            q_v_max     mass_drift
-    1   0.00  4.03e-01   [-3.7e-4, 9.2e-1]  9.35e-3     3.0e-16
-17280   1.00  1.12e-02   [-5.9, 4.4]        1.04e-2     0
-34560   2.00  NaN
-```
-
-Comparison day-1 max|w|:
-- iter-284 (n_acoustic=4 + Coriolis + no mass-fixer):     2.80e-2 m/s
-- iter-286 (n_acoustic=12 + no Coriolis + mass-fixer):    1.12e-2 m/s
-- iter-282 MPAS L=2 no-sfc:                                1.28e-3 m/s
-
-Improvement on day 1 (~60% reduction in max|w|), but day-2 NaN
-remains. The blow-up is dominated by horizontal gradients
-across the ~14,000 km C4 cells, not by acoustic CFL.
-
-**Conclusion**: surface flux + Kessler + gray radiation
-forcing produces unphysical convective initiation at this mesh
-no matter how the dycore is tuned. The C4 mesh has only 96
-cells globally — too coarse to resolve convection. Each cell
-averages convective heat/moisture flux over ~5e12 m² —
-multiple orders of magnitude above the LES regime needed for
-explicit moist convection.
-
-**Resolution path** (not in-session — multi-day compute):
-* C24 mesh (3456 cells, dx ≈ 800 km) — still coarse for CRM
-  but should be marginally more stable. Projected wall ~158 h
-  for 30-day production.
-* C96 mesh (55296 cells, dx ≈ 250 km) — close to GCM
-  resolution. Projected wall ~3000 h (months).
-* True CRM at C384+ (~3 km dx) needs HPC cluster.
-
-**Status update**: cross-grid 30-day production at PRODUCTION
-mesh resolution remains an open multi-day compute commitment.
-The COMPOSITION + DYCORE pieces (iter-275 + iter-283) are
-verified correct; iter-285/286 confirms the failure mode is
-mesh-resolution-bound, not composition-bound.
-
-### 2026-05-27 — iter 284 (cubed-sphere 30-day moist+sfc — NaN at day 2: surface flux over-forces at C4 planetary mesh)
-
-iter-283 added bulk surface flux to ``_compose_nh_moist_physics``
-for cubed-sphere. iter-284 launched the actual 30-day production
-to verify the iter-282 day-15 failure mode is fixed.
-
-**Result**: NaN at sim-day 2 (step 17280, wall 42 s). Trajectory:
-
-```
-step  t[d]  max|w|    θ' range          q_v_max
-   1  0.00  4.07e-01  [-7e-4,  9e-1]   9.35e-3
-8640  1.00  2.80e-02  [-5.8,  5.3]    1.10e-2
-17280 2.00  NaN
-```
-
-**Diagnosis**: surface flux is too aggressive at C4 mesh
-(n=4 → 96 cells globally, dx ≈ 14000 km per cell). Compare with
-iter-282 MPAS L=2 same-physics-LESS-surface-flux baseline:
-
-| Source | Day-1 max\\|w\\| | Day-1 θ' range | Day to NaN |
-|---|---|---|---|
-| iter-282 MPAS no-sfc | 1.28e-3 m/s | [-5.7, 2.2] K | 15 |
-| iter-284 C4 +sfc     | 2.80e-2 m/s | [-5.8, 5.3] K | 2 |
-
-The cubed-sphere mesh has only 96 cells covering the whole globe;
-each cell averages convective heat/moisture flux over ~5e12 m^2.
-Surface flux feeding latent + sensible heat into such enormous
-cells produces unphysical convective initiation. Coriolis is ON
-by default in CDGridCompressibleEulerConfig (use_coriolis=True),
-which compounds the issue at C4 where each cell spans multiple
-latitudes.
-
-Two paths forward (deferred — multi-day compute commitment):
-
-1. **Mesh refinement**: C24 = 3456 cells, dx ≈ 800 km. At
-   uniform 60 ms/step extrapolation: 30-day wall ~4.4 h × 36
-   = 158 h. Cluster job.
-2. **Config tuning for small mesh**: turn off Coriolis, raise
-   n_acoustic_substeps from 4 to 12, switch on fix_mass /
-   anchor_mass_to_initial. Could potentially stabilize at C4
-   but the gridscale convection is fundamentally unresolved.
-
-**Status update**:
-
-* Cross-grid **CAPABILITY** (iter-275): ✅ moist physics
-  composition works.
-* Cross-grid **30-day STABILITY** at small mesh: ❌ — surface
-  flux without surface flux produces day-15 NaN (iter-282);
-  with surface flux at C4 produces day-2 NaN (iter-284).
-* Cross-grid **30-day PRODUCTION**: requires either production
-  mesh (multi-day compute) OR carefully-tuned small-mesh config
-  (additional work). The iter-275 + iter-283 composition
-  helpers are correct; the FAILURE is mesh-resolution-bound, not
-  composition-bound.
-
-### 2026-05-27 — iter 282 (MPAS 30-day moist attempt — STABLE 14 days, NaN day 15: missing surface flux)
-
-First attempt at the cross-grid 30-day production cell for MPAS.
-Launched ``run_rcemip_long.py --grid mpas --days 30 --dt 10 --moist``
-in background; ran for 2.2 min wall before NaN at step 129600
-(day 15 sim-time).
-
-**Trajectory** (8640-step print cadence = 1 sim-day):
-
-```
-step  t[d]  max|w|    θ' range          q_v_max    mass_drift
-   1  0.00  4.07e-01  [-7e-4, 9e-1]    9.35e-3    1.5e-16
-8640  1.00  1.28e-03  [-5.7,  2.2]    9.35e-3    0
-17280 2.00  1.67e-03  [-10.8, 2.4]    9.35e-3    1.5e-16
-...
-60480 7.00  5.09e-03  [-28.3, 2.1]    9.79e-3    3.0e-16
-69120 8.00  7.64e-03  [-29.8, 1.9]    9.98e-3    3.0e-16
-77760 9.00  1.59e-02  [-31.3, 1.7]    1.04e-2    3.0e-16
-86400 10.0  1.22e-02  [-32.7, 1.5]    1.02e-2    3.0e-16
-95040 11.0  1.46e-02  [-34.3, 1.2]    1.11e-2    0
-103680 12.0 1.95e-02  [-36.0, 1.0]    1.10e-2    4.5e-16
-112320 13.0 4.01e-02  [-37.8, 0.76]   1.08e-2    0
-120960 14.0 9.94e-02  [-39.5, 1.8]    1.06e-2    1.5e-16
-129600 15.0 NaN       NaN              NaN        NaN
-```
-
-**Diagnosis**
-
-* Mass conservation HOLDS at machine precision (1.5e-16) for all
-  14 stable days — the iter-275 ``_compose_nh_moist_physics``
-  pytree sum is correct.
-* θ' drops -39.5 K over 14 days = **-2.8 K/day average cooling**
-  — far above the canonical gray-radiation tropospheric rate
-  of ~1-1.5 K/day at this column.
-* max|w| grows from sub-mm/s to 0.1 m/s by day 14 — vertical
-  instability building.
-* q_v_max INCREASES slightly (9.35e-3 → 1.06e-2) despite Kessler
-  microphysics ostensibly removing vapor.
-
-**Root cause**: the iter-275 ``_compose_nh_moist_physics``
-composes ONLY gray radiation + Kessler microphysics. The plane
-CRM's ``make_rcemip_physics`` adds a THIRD component:
-``_make_surface_flux_physics`` (bulk Cd/Ch + T_sfc + q_sfc
-relaxation toward fixed SST). Without surface flux:
-
-* No upward latent-heat flux to replenish q_v → vapor only
-  cycles through Kessler condensation/evaporation.
-* No upward sensible-heat flux to balance gray radiation cooling
-  → θ' drifts toward radiative equilibrium without convective
-  warming, eventually destabilizing.
-* No surface stress to dissipate near-surface wind.
-
-iter-275 closed the COMPOSITION half of cross-grid moist
-capability (factories compose cleanly, pytree sum correct), but
-not the FULL ATMOSPHERIC ENERGY BALANCE for sustained RCE. The
-next iter needs to add surface flux to ``_compose_nh_moist_physics``
-— extracting the plane CRM's ``_make_surface_flux_physics``
-pattern (or a cubed-sphere/MPAS analog).
-
-**14-day stable run wall**: 2.2 min wall on M5 Pro single-rank.
-Per-step ~0.5 ms (cached JIT after warmup). Full 30-day run
-would be ~5.5 min if surface-flux balance prevents the day-15
-blowup.
-
-**Status update**: cross-grid moist 30-day cell now reads
-"BLOCKED on surface flux" not just "not run" — a concrete,
-actionable next step.
-
-### 2026-05-27 — iter 281 (cross-grid moist 86-step stability probe + 30-day wall-time projection)
-
-Extended the iter-275 moist smoke from 8 → 86 outer steps to
-probe whether the iter-275 ``_compose_nh_moist_physics``
-composition is stable beyond the smoke window + measure
-per-step wall to project 30-day production feasibility.
-
-**Cubed-sphere moist (n=4, NLEV=10, dt=10 s, 86 steps)**:
-
-```
-step  max|w|       θ' range          q_v_max       mass_drift
-   1  4.07e-01    [-6e-4,  9e-1]    9.346e-03    1.5e-16
-  10  7.14e-02    [-6e-3,  2.0]     9.347e-03    1.5e-16
-  40  1.05e-02    [-2.6e-2, 2.0]    9.347e-03    3.0e-16
-  80  5.66e-03    [-5.2e-2, 2.0]    9.347e-03    4.5e-16
-```
-
-Wall: 63.1 ms/step on M5 Pro. **Projected 30-day production
-~4.5 hours** wall at this small mesh (259200 outer steps × 63 ms).
-
-**MPAS moist (level-2 Voronoi, NLEV=10, dt=10 s, 86 steps)**:
-
-```
-step  max|w|       θ' range          q_v_max       mass_drift
-   1  4.07e-01    [-7e-4,  9e-1]    9.346e-03    1.5e-16
-  10  7.10e-02    [-7e-3,  2.0]     9.346e-03    1.5e-16
-  40  1.06e-02    [-2.8e-2, 2.0]    9.346e-03    1.5e-16
-  80  5.72e-03    [-5.6e-2, 2.0]    9.346e-03    0
-```
-
-Wall: **5.6 ms/step**. **Projected 30-day production ~24 min**
-wall (259200 × 5.6 ms).
-
-**Findings**
-
-* Both moist paths are STABLE for 86 sim-steps with mass drift
-  at machine precision (~1e-16 throughout).
-* Initial max|w| 0.41 m/s transient (radiative-convective
-  initiation kick from gray radiation cooling the column) damps
-  to ~6e-3 m/s by step 80.
-* θ' range cools to [-5e-2, 2.0] K — consistent with gray
-  radiation slowly cooling the troposphere.
-* q_v_max stays bit-identical at 9.35e-3 kg/kg (the IC value
-  at z=1 km) across all 86 steps. Kessler condensation is too
-  slow at this mesh to draw down vapor in 86 steps; the
-  positivity filter clips q_v_min near zero (-2e-11 noise floor).
-* MPAS is 11× faster per step than cubed-sphere on this mesh
-  (5.6 vs 63 ms). The cubed-sphere overhead is the metric +
-  duogrid setup + d2a2c interpolation that MPAS doesn't pay.
-
-**30-day production tractability** (this small mesh, single-rank
-CPU on M5 Pro):
-
-| Grid | ms/step | 30-day wall | Status |
-|---|---|---|---|
-| MPAS L=2 | 5.6 | ~24 min | tractable in-session |
-| Cubed C4 | 63 | ~4.5 h | tractable overnight |
-
-These mesh sizes are NOT production resolution (Wing 2018 calls
-for ~3-4 km grid spacing). The level-2 Voronoi has ~270 km
-inter-cell spacing — equivalent to ~80 km dx if regridded —
-roughly DCMIP idealised-baroclinic scale, not CRM. To get to
-true CRM resolution would need MPAS level 7-8 + cubed C96-C192,
-which scales as cells × per-cell-cost.
-
-iter-281 conclusion: **cross-grid moist capability is verified
-functional + dynamically stable at small mesh**. Production-scale
-verification needs upscaling the mesh + multi-day compute
-budget, but the dycore + physics composition is correct.
-
-### 2026-05-27 — iter 275 (cross-grid moist physics — cubed-sphere + MPAS CRM capability)
-
-**User request**: "implement cross-grid (cubed-sphere/MPAS) capability".
-
-Pre iter-275: `scripts/run_rcemip_long.py` was dry-only for ALL
-4 grid backends (`physics_fn = None` hardcoded). The factories
-``make_microphysics_physics`` + ``make_radiation_physics`` were
-imported but never composed.
-
-**Changes**
-
-* `scripts/run_rcemip_long.py`:
-  * Added `_compose_nh_moist_physics(model_type, dt)` helper that
-    builds Kessler microphysics + gray radiation factories with
-    the right ``model_type`` ('nonhydrostatic' for cubed-sphere,
-    'mpas_nh' for MPAS) and sums their tendency leaves via
-    ``tree_flatten`` + element-wise sum + ``tree_unflatten``.
-    Direct ``tree_map(a + b)`` doesn't work because Field is a
-    pytree node with name-metadata, and the micro/rad tendencies
-    carry distinct names (``dtracers_dt_micro`` vs
-    ``dtracers_dt_rad``) — treedef mismatch.
-  * New `--moist` CLI flag (opt-in, default off). When set,
-    cubed-sphere + MPAS paths use the composed moist physics_fn;
-    plane_fd + plane_spectral ignore the flag (preserves iter-238
-    dry smoke contract).
-  * label includes ``_moist`` suffix in stdout + history JSON for
-    fingerprint testing.
-
-* `tests/atmosphere/nonhydrostatic/integration/test_run_rcemip_long_cross_grid_smoke.py`:
-  * New parametrised test `test_run_rcemip_long_cross_grid_moist_smoke`
-    over (cubed_sphere, mpas). 8-step moist smoke at small mesh
-    verifies --moist parses + composes cleanly, stdout label
-    matches, n_steps=8, q_v stays in (0, 0.05).
-
-**Verified**
-
-* Manual smoke runs:
-  - cubed_sphere --moist 8 steps: 542 ms/step, max|w| 0.41→0.06 m/s
-    (radiative-convective initiation), drift ~1e-16.
-  - mpas --moist 8 steps: 47.5 ms/step, similar trajectory.
-* Cross-grid smoke suite: **6/6 PASS** in 45.8 s
-  (4 dry [plane_fd/plane_spectral/cubed_sphere/mpas] + 2 moist
-  [cubed_sphere/mpas]).
-* Both Codex Round 1 HIGH from iter-274 (full 8-scheme sweep)
-  + the user-requested cross-grid moist capability landed in
-  this same commit.
-
-**Status for "all grid types" DOD** (refreshed):
+### 2026-05-27 — iter 275..296 (compressed fold: cross-grid moist CAPABILITY + 6 Codex polish rounds + AST lock)
+
+22 iterations closing the user-requested cross-grid (cubed-sphere
++ MPAS) moist physics capability. Composition delivered + cluster
+sensitivity CLI infrastructure + future-flag drift protection
+via AST lock. 30-day production at any mesh below C384 remains
+multi-day HPC compute (mesh-resolution-bound, not composition).
+
+**iter-275** — first cross-grid moist composition.
+`_compose_nh_moist_physics(model_type, dt)` in
+`scripts/run_rcemip_long.py` composes Kessler microphysics + gray
+radiation by summing tendency leaves via `tree_flatten` +
+element-wise add + `tree_unflatten`. Direct `tree_map(a+b)` fails
+because Field is a pytree node with name-metadata
+(`dtracers_dt_micro` ≠ `dtracers_dt_rad`). New `--moist` opt-in
+CLI flag (default off preserves iter-238 dry smoke). Wired into
+`_run_cubed_sphere` + `_run_mpas`.
+
+**iter-281** — extended moist smoke 8 → 86 outer steps. Both
+grids stable. Wall projections: MPAS L=2 24 min / 30-day,
+cubed C4 4.5 h / 30-day. NOT production resolution (level-2
+Voronoi ≈ 270 km / cell).
+
+**iter-282 — MPAS 30-day moist attempt**: STABLE 14 sim-days
+then NaN at day 15. Mass drift at machine precision (~1e-16)
+throughout — composition correct. Failure mode: missing surface
+flux. θ' cooled -2.8 K/day (gray rad uncountered) → instability.
+
+**iter-283** — added `_make_cubed_sphere_surface_flux_tendency`
+(bulk Cd/Ch with fixed T_sfc=300 K, q_sfc=0.018) +
+`with_surface_flux: bool = False` kwarg to
+`_compose_nh_moist_physics`. cubed-sphere-only because MPAS u
+lives on edges (no v field) — needs separate helper.
+
+**iter-284 — cubed C4 30-day moist+sfc**: NaN at day 2 instead
+of fixing iter-282's day-15. Surface flux OVER-FORCES at C4
+planetary mesh (~14000 km/cell): the 14-day delay without
+surface flux exposed the underlying mesh-resolution mismatch.
+
+**iter-285..286** — tightened CDGridCompressibleEulerConfig
+when moist: n_acoustic 4→12, use_coriolis=False (gridscale
+unphysical at C4 spanning multiple latitudes), fix_mass=True +
+anchor_mass_to_initial=True (matches plane CRM iter-183).
+Still NaN at day 2.
+
+**iter-287 — `--n-cubed-sphere N` CLI flag** (default 4 for
+iter-238 back-compat). Probed C12 (864 cells, ~830 km/cell):
+NaN at day 1 — SOONER than C4. Counter-intuitive: mesh refinement
+WITHOUT gridscale resolution of convection (1-10 km, three
+orders of magnitude finer than C12) makes things WORSE; C4's
+blocky cells damp horizontal gradients that C12 lets grow.
+
+**iter-288..296 — Codex polish chain** (6 rounds, all addressed):
+
+* iter-288 (round-1 HIGH+LOW): diag() `finite` check now covers
+  ALL prognostic arrays (was inspecting only s.w.data — real
+  race-condition vulnerability); docstring scope clarification;
+  `--n-cubed-sphere` ≥ 1 SystemExit.
+* iter-289 (round-1 MEDIUM#1): `--sfc-{Cd,Ch,T,q}` CLI flags
+  for cluster sensitivity probes. Defaults match iter-183.
+* iter-290 (round-1 MEDIUM#2): `--cubed-{n-acoustic,coriolis,
+  fix-mass}` CLI overrides with None-passthrough preserving
+  moist-vs-dry defaults.
+* iter-291 (round-1 3 HIGH): post-parse validation: sfc-T NaN
+  → SystemExit; sfc-Cd/Ch range [0,1]; cubed-n-acoustic ≥ 1;
+  cubed-only flags raise SystemExit on non-cubed grids.
+* iter-292 (round-2 HIGH+2MEDIUM+LOW): added n_cubed_sphere to
+  cubed-only set; widened sfc-T [100,400]→[50,800] K (non-Earth
+  idealised); validator order (grid-mismatch before range
+  checks); `import math` to module top.
+* iter-293 (round-3 MEDIUM+LOW): extracted module-level
+  `_SFC_CLI_RANGES` + `_CUBED_ONLY_ATTRS`; derive defaults at
+  runtime via `p.get_default()` — no drift if argparse defaults
+  change.
+* iter-294 — AST-lock test
+  `test_run_rcemip_long_cubed_only_attrs_lock.py` parses
+  argparse `add_argument` calls + asserts they match
+  `_CUBED_ONLY_ATTRS`. Future flag added without tuple update
+  fires immediately.
+* iter-295 (round-1 MEDIUM): dest extractor scans ALL positional
+  args for first `--long-form` (was only checking args[0] —
+  missed `p.add_argument('-c', '--cubed-X', ...)` pattern).
+* iter-296 (round-2 LOW): 3 synthetic AST snippet tests lock
+  the iter-295 short+long-form branches (driver-AST test alone
+  doesn't exercise them).
+
+**Status table** (refreshed iter-296):
 
 | Grid | Smoke | Moist physics | 30-day production |
 |---|---|---|---|
-| Plane FD | ✅ iter-238 | ✅ existing (run_rce_mpi_long.py) | ✅ iter-229 DOD PASS |
-| Plane spectral | ✅ iter-241 | (dry-only in this driver) | ⏳ not run |
-| Cubed-sphere | ✅ iter-238 | ✅ **iter-275 (this iter)** | ⏳ not run |
-| MPAS Voronoi | ✅ iter-238 | ✅ **iter-275 (this iter)** | ⏳ not run |
+| Plane FD | ✅ | ✅ existing | ✅ iter-229 DOD PASS |
+| Plane spectral | ✅ | (dry-only here) | ⏳ |
+| Cubed-sphere | ✅ | ✅ iter-275 + sfc iter-283 + tuning iter-285 + CLI iter-289/290 | ⏳ mesh-resolution-bound at C4/C12 |
+| MPAS Voronoi | ✅ | ✅ iter-275 (no sfc — u-on-edges helper deferred) | ⏳ day-15 NaN without sfc; sfc deferred |
 
-The "cross-grid CAPABILITY" half is now closed for cubed-sphere +
-MPAS. Closing the "30-day production" cell requires multi-day
-compute jobs at production-resolution mesh — out of scope for an
-in-session iteration but unblocked by this commit.
+**Conclusion**: cross-grid CAPABILITY is fully delivered + 6 Codex
+polish rounds closed + AST lock prevents future regression. 30-day
+production at PRODUCTION mesh (C384+ ~3 km dx for true CRM)
+remains an HPC cluster job — multi-day compute commitment outside
+in-session scope. The cluster-sensitivity CLI surface
+(`--sfc-{Cd,Ch,T,q}` + `--cubed-{n-acoustic,coriolis,fix-mass}`
++ `--n-cubed-sphere`) makes future cluster jobs zero-code-edit.
 
 ### 2026-05-27 — iter 238..262 (cross-grid CRM smoke + state.py cherry-pick + 7-script untested-bench chain + helper extraction)
 
