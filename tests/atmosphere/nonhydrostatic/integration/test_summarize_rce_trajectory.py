@@ -577,6 +577,41 @@ def test_final_dod_constants_locked():
     assert summary_mod.DOD_FINAL_MIN_DAYS == 30
 
 
+def test_final_dod_fails_on_transient_wind_blowup_outside_plateau_window():
+    """iter-160 companion: evaluate_rce_final_dod's docstring
+    (summarize_rce_trajectory.py:700-702) promises the
+    ``max_w_threshold_ms`` check is **full-window** scoped
+    (``already covered``). A 30-day trajectory whose CWV plateau
+    recovery is perfect (last 10 days inside Wing range) but with
+    a single day-5 surface-wind blow-up to 999 m/s MUST FAIL the
+    final-DOD gate. This is the inverse of the iter-160 test:
+
+    * iter-160 (CWV check): transient excursion *outside* the
+      plateau window → PASS (plateau-window scoped).
+    * iter-160 companion (|U|_sfc check): transient blow-up at
+      *any* row → FAIL (full-window scoped).
+
+    Pre iter-160 only the spinup-gate |U|_sfc blow-up was tested
+    (test_evaluate_flags_max_w_blowup); the final-DOD wrapper was
+    uncovered for the same scenario.
+    """
+    rows = []
+    # 30 days, all CWV inside plateau, mostly low surface wind.
+    for i in range(30):
+        cwv = 55.0 + 0.01 * (i % 3 - 1)
+        wind = 0.01 if i != 5 else 999.0  # day-5 spike
+        rows.append(_row(float(i), cwv_mean=cwv, cwv_max=cwv,
+                         wind_sfc_max=wind))
+    verdict = summary_mod.evaluate_rce_final_dod(rows)
+    assert not verdict.passed, (
+        f"final-DOD must FAIL on a day-5 |U|_sfc blow-up even "
+        f"with a perfect last-10-day CWV plateau. reasons: "
+        f"{verdict.reasons!r}"
+    )
+    assert any("|U|_sfc exceeded" in r for r in verdict.reasons)
+    assert verdict.evaluated
+
+
 def test_final_dod_passes_with_early_cwv_excursion_outside_plateau_window():
     """iter-159: evaluate_rce_final_dod's docstring (lines 695-703
     of summarize_rce_trajectory.py) promises that the plateau CWV
