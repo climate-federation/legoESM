@@ -437,7 +437,16 @@ class TestStage12Guardrails:
         # wrong dt (and therefore the wrong-size or zero mask) would
         # silently fail every step under load.  Exposed via the
         # closed-over ``mpi_model`` on the step_fn closure.
-        mpi_model = step_fn.__closure__[0].cell_contents
+        # Key on the free-variable name, not index position — Codex
+        # round-4 non-blocking suggestion: a future refactor that
+        # reorders closure variables would silently make
+        # ``__closure__[0]`` point at the wrong object and the rest
+        # of this test would pass against an unrelated object.
+        _closure = dict(zip(
+            step_fn.__code__.co_freevars,
+            step_fn.__closure__,
+        ))
+        mpi_model = _closure["mpi_model"].cell_contents
         # ``mpi_model`` is the rebuilt CGridLatLonPrimitiveEquationModel
         # inside make_latlon_mpi_step; its ``_polar_mask`` and
         # ``_polar_mask_v`` must be non-None and properly shaped.
