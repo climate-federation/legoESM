@@ -999,6 +999,10 @@ class ModelDriver:
             allow_level_fallback=getattr(
                 self.config, "allow_level_fallback", False,
             ),
+            # For lat-lon MPI: pass n_lat so initialize_distributed_latlon
+            # can build the rank's LatLonBandLayout.  Other grids ignore
+            # this — cubed-sphere uses the per-face N via its own path.
+            grid_n=self.config.grid.resolution,
         )
         self._device_config = rc.device_config
 
