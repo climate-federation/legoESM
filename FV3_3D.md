@@ -2378,6 +2378,75 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1048 (2026-05-28): minimal NH+duogrid step divergence — narrowed to non-pad_halo source
+
+### Goal
+
+Continue iter-1047's investigation of the duogrid + NH-step MPI
+bit-for-bit divergence (~5e-3 ``max diff`` in ``theta_prime``).
+iter-1047 ruled out the obvious "halo op bug" hypothesis by
+showing standalone ``pad_halo_4d(field, duogrid=DG)`` is MPI
+bit-for-bit on CPU.  iter-1048 widens the probe suite.
+
+### Probes
+
+Four CPU+MPI probes, all with ``use_duogrid=True``:
+
+1. **``pad_halo_4d(field, halo=1, duogrid=DG)``** on (6, n, n, nlev)
+   cell-centered data → ``max_diff = 0.0`` on owned faces.  ✅
+
+2. **``pad_halo_4d(field, halo=2, duogrid=DG)``** on (6, n, n, nlev)
+   cell-centered data → ``max_diff = 0.0`` on owned faces.  ✅
+
+3. **``pad_halo_4d(field, duogrid=DG)``** on (6, n+1, n+1, nlev)
+   corner-staggered data (same shape used by the iter-325
+   ``_ke_correction`` halo at compressible_euler_cdgrid.py:671) →
+   ``max_diff = 0.0`` on owned faces.  ✅
+
+4. **``packed_pad_halo_mpi_4d(f1, f2, f3, duogrid=DG)``** on three
+   (6, n, n, nlev) fields (the iter-1041 pack pattern) →
+   ``max_diff = 0.0`` on owned faces.  ✅
+
+5. **Minimal NH step** (no FV3-fidelity flags) + ``use_duogrid=True``
+   under MPI → ``max_diff = 5.7e-3`` in ``theta_prime`` after a
+   single SSP-RK3 step.  ❌
+
+### Conclusion
+
+Every direct ``pad_halo_*`` call with duogrid is provably MPI
+bit-for-bit on CPU.  Yet the composed NH step with duogrid still
+diverges.  The divergence is NOT in the halo ops themselves —
+it must be in:
+
+- A halo operation NOT routed through ``pad_halo_*`` /
+  ``packed_pad_halo_mpi_4d`` (vector halos? halo_exchange's
+  raw sendrecv?).
+- A non-deterministic op inside the step (unlikely on CPU).
+- An interaction between JIT trace boundaries and the global
+  ``_mpi_topology`` / ``_halo_backend`` Python values that
+  changes the compiled program semantics.
+
+Next candidates to investigate (deferred):
+
+- ``pad_halo_vector_4d`` for vector (u, v) halos in the NH step.
+- The raw ``mpi4jax.sendrecv`` reductions outside of pad_halo.
+- The acoustic substep loop's internal halo calls.
+
+### Outcome
+
+Documented narrowing.  No code changes.  All 22 MPI tests still
+pass; the duogrid+factory limitation noted in iter-1046/1047 is
+still tracked as an open follow-up but the search space is now
+significantly narrower — the underlying ``pad_halo_*`` MPI helper
+infrastructure is verified clean.
+
+### Why this iteration was meaningful
+
+Eliminating four broad hypotheses (h1, h2, corner-staggered,
+packed exchange) in a single iteration is faster than blind
+bisection of the step body.  Whoever picks this up next can skip
+the halo-op layer entirely and focus on the composition glue.
+
 ## Iteration 1047 (2026-05-28): duogrid+factory MPI investigation — 2 negative findings
 
 ### Goal
