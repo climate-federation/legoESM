@@ -50,7 +50,21 @@ from legoesm.grids.latlon import LatLonGrid  # noqa: F401 — kept for type comp
 
 
 def pad_ns_zero(interior: jnp.ndarray) -> jnp.ndarray:
-    """Zero-pad south and north rows (wall BC).
+    """Zero-pad south and north rows (wall BC), backend-dispatched.
+
+    Local backend
+        Pads ``interior`` with zeros at both lat ends (the historical
+        single-rank wall BC).  Bit-identical to the previous
+        implementation.
+
+    MPI backend (lat-lon band layout)
+        Pole-touching ranks pad their pole side with zero (wall BC at
+        the actual pole); interior partition cuts MPI-sendrecv with
+        the neighbour rank so the gradient / divergence stencil sees
+        continuous data across the cut.  Routes through
+        :func:`legoesm.grids.halo_latlon.pad_with_pole_bc_lat` which
+        in turn delegates to
+        :func:`legoesm.parallel.latlon_mpi._pad_with_pole_bc_lat_mpi`.
 
     Parameters
     ----------
@@ -61,8 +75,12 @@ def pad_ns_zero(interior: jnp.ndarray) -> jnp.ndarray:
     -------
     padded : (..., n_interior+2, n_lon, ...)
     """
-    pad_axes = ((0, 0),) * (interior.ndim - 1)
-    return jnp.pad(interior, ((1, 1), *pad_axes))
+    # Deferred import to avoid cycles — ocean.dynamics is imported by
+    # many grid-related modules.
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
+    return pad_with_pole_bc_lat(
+        interior, halo=1, south_value=0.0, north_value=0.0,
+    )
 
 
 def is_tripolar(grid) -> bool:
@@ -622,7 +640,15 @@ def divergence_cgrid(
         lat = grid.lat
         lat_interior = 0.5 * (lat[:-1] + lat[1:])
         cos_lat_v_interior = jnp.cos(lat_interior)
-        cos_lat_v = jnp.pad(cos_lat_v_interior, (1, 1))
+        # Wall-BC pad: cos at the polar v-faces = 0 (no flux through
+        # the pole).  Under MPI on a band-only rank the same call
+        # sendrecv's the neighbour's cos_lat_v_interior at interior
+        # partition cuts so flux continuity holds across the cut.
+        from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
+        cos_lat_v = pad_with_pole_bc_lat(
+            cos_lat_v_interior, halo=1,
+            south_value=0.0, north_value=0.0,
+        )
         face_dx = grid.radius * cos_lat_v * grid.dlon  # (n_lat+1,)
 
     # North face flux - south face flux
@@ -858,7 +884,13 @@ def curl_vertex_cgrid(
         lat = grid.lat
         cos_lat = grid.cos_lat
         sin_lat = jnp.sin(lat)
-        sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
+        # Wall-BC pad of sin_lat: sin(south_pole)=-1, sin(north_pole)=+1.
+        # Backend-aware so MPI interior ranks sendrecv from neighbour
+        # rather than apply pole BC at the wrong location.
+        from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
+        sin_ext = pad_with_pole_bc_lat(
+            sin_lat, halo=1, south_value=-1.0, north_value=1.0,
+        )
         A_vertex_all = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
         A_vertex_interior = A_vertex_all[1:-1]
         dx_cell = R * cos_lat * dlon
@@ -885,10 +917,14 @@ def curl_vertex_cgrid(
         dv_circ = (v_east - v_west) * dy_edge[bcast_lat]
 
     # u contribution: u[i-1, j]*dx[i-1] - u[i, j]*dx[i].
-    # Pad with zeros at poles along the lat axis (axis 0).  Extra
-    # ``(0, 0)`` pad-tuples for any trailing dims (level axis in 3D).
-    pad_extra = ((0, 0),) * (u.ndim - 2)
-    u_ext = jnp.pad(u, ((1, 1), (0, 0), *pad_extra))
+    # Pad with zeros at poles along the lat axis (axis 0).  Wall BC
+    # at the pole; under MPI on an interior rank the same call
+    # sendrecv's the neighbour's u row instead (the pole pad fires
+    # only at boundary ranks).
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
+    u_ext = pad_with_pole_bc_lat(
+        u, halo=1, south_value=0.0, north_value=0.0,
+    )
     if _tripolar_curl:
         # dx_cell is 2D (n_lat, n_lon); pad lat axis, append wrap column
         dx_pad = jnp.pad(dx_cell, ((1, 1), (0, 0)))  # (n_lat+2, n_lon)
@@ -902,7 +938,12 @@ def curl_vertex_cgrid(
         u_north = u_ext[1:]
         du_circ = u_south * dx_south - u_north * dx_north
     else:
-        dx_ext = jnp.pad(dx_cell, (1, 1))
+        # Wall-BC pad of dx_cell at poles (zero contribution beyond
+        # the pole); under MPI interior ranks pad with neighbour's
+        # dx via sendrecv instead.
+        dx_ext = pad_with_pole_bc_lat(
+            dx_cell, halo=1, south_value=0.0, north_value=0.0,
+        )
         u_south = u_ext[:-1]
         u_north = u_ext[1:]
         dx_south = dx_ext[:-1]

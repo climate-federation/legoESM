@@ -386,6 +386,57 @@ def _pad_halo_latlon_mpi(
     )
 
 
+def _pad_with_pole_bc_lat_mpi(
+    interior, layout: LatLonBandLayout, halo: int = 1,
+    south_value: float = 0.0, north_value: float = 0.0,
+    is_vector_v: bool = False,
+):
+    """MPI variant of :func:`legoesm.grids.halo_latlon.pad_with_pole_bc_lat`.
+
+    Pole-touching south rank → ``south_value`` constant pad.
+    Pole-touching north rank → ``north_value`` constant pad.
+    Interior partition cuts → MPI sendrecv with neighbour.
+
+    Reuses :func:`exchange_halo_latlon` for the inter-rank exchange;
+    overrides the pole-fold result with the requested constants on
+    the boundary ranks afterwards (so the wall-BC semantics is
+    preserved instead of pole-folding).  This is the SIMPLEST way
+    to reuse the existing AD-safe sendrecv machinery — we let
+    ``exchange_halo_latlon`` do the heavy lifting and then patch
+    the boundary halo slabs.
+    """
+    if halo <= 0:
+        return interior
+
+    # Step 1: run the standard halo exchange.  Boundary ranks will
+    # get pole-folded values; interior cuts will get sendrecv'd
+    # neighbour values (which is what we want — those are NOT to
+    # be overwritten).
+    padded = exchange_halo_latlon(
+        interior, layout, halo=halo, is_vector_v=is_vector_v,
+    )
+    # Step 2: where this rank touches a pole, replace the
+    # pole-folded slab with the wall-BC constant.  Slab shapes
+    # match by construction.  We use the bcast-tuple pattern so
+    # this works for 1D (sin_lat), 2D (face metrics) and 3D
+    # (u-on-face-with-levels) fields uniformly.
+    trailing_ones = (1,) * (interior.ndim - 1)
+    if layout.south_rank is None:
+        south_const = jnp.full(
+            (halo,) + interior.shape[1:],
+            jnp.asarray(south_value, dtype=interior.dtype),
+        )
+        padded = jnp.concatenate([south_const, padded[halo:]], axis=0)
+        del trailing_ones  # silence linter on unused alias
+    if layout.north_rank is None:
+        north_const = jnp.full(
+            (halo,) + interior.shape[1:],
+            jnp.asarray(north_value, dtype=interior.dtype),
+        )
+        padded = jnp.concatenate([padded[:-halo], north_const], axis=0)
+    return padded
+
+
 # ============================================================================
 # Scatter / gather
 # ============================================================================

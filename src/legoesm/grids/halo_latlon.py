@@ -297,3 +297,113 @@ def pad_halo_vector_latlon_3d(
     (u_padded, v_padded) : each shape (n_lat+2*halo, n_lon+2*halo, nlev).
     """
     return pad_halo_latlon_vector_3d(u, halo), pad_halo_latlon_vector_3d(v, halo)
+
+
+# ==============================================================================
+# Wall-BC pad with backend dispatch
+# ==============================================================================
+#
+# This is the lat-lon analog of cubed-sphere ``pad_halo``'s wall-BC
+# behaviour.  Operators such as ``curl_vertex_cgrid``,
+# ``gradient_y_cgrid`` and ``divergence_cgrid`` extend their fields
+# along the lat axis with a constant value at the poles (``-1``/``+1``
+# for ``sin_lat``, ``0`` for u / dx / df_interior).  Under serial
+# execution the constant pad IS the correct boundary condition.
+# Under latitude-band MPI, the same convention applies only at the
+# pole-touching ranks; interior partition cuts must instead receive
+# the neighbour rank's value via MPI sendrecv.
+#
+# We expose one helper, ``pad_with_pole_bc_lat``, and route every
+# pole-BC-style pad through it (``pad_ns_zero`` and friends in
+# ``ocean.dynamics.latlon_cgrid_operators`` are refactored in a
+# follow-up commit to delegate here).
+
+
+def pad_with_pole_bc_lat(
+    interior: jnp.ndarray,
+    halo: int = 1,
+    south_value: float = 0.0,
+    north_value: float = 0.0,
+    *,
+    is_vector_v: bool = False,
+) -> jnp.ndarray:
+    """Pad along lat axis with pole-BC constants; backend-dispatched.
+
+    Local backend
+    -------------
+    ``jnp.pad(interior, ((halo, halo), (0, 0), ...))`` with
+    ``constant_values=(south_value, north_value)`` — identical to
+    the inline ``jnp.pad`` calls the operators currently make.
+
+    MPI backend
+    -----------
+    Pole-touching south rank → pad with ``south_value``.
+    Pole-touching north rank → pad with ``north_value``.
+    Interior partition cuts → MPI sendrecv with the neighbour rank,
+    reusing the AD-safe
+    :func:`legoesm.parallel.latlon_mpi.exchange_halo_latlon` path.
+    The ``is_vector_v`` flag is forwarded to the exchange so the
+    pole fold applies its sign flip when called at an interior rank
+    next to (but not owning) a pole — typically dormant for the
+    typical band layouts but kept for safety.
+
+    Parameters
+    ----------
+    interior : jax.Array
+        Field to pad along axis 0.  Shape ``(n_lat_interior, ...)``;
+        any trailing axes are passed through unchanged.
+    halo : int
+        Number of rows to add on each side (typically 1 for
+        compact-stencil operators, sometimes 2 for biharmonic /
+        PPM).
+    south_value, north_value : float
+        Constant pad values at pole-touching ranks (or both ends
+        under the local backend).
+    is_vector_v : bool
+        Forwarded to the MPI exchange's pole-fold sign-flip
+        convention.  For scalar wall BC (sin, dx, df, etc.) this
+        stays False.
+
+    Returns
+    -------
+    jax.Array : shape ``(n_lat_interior + 2*halo, ...)``.
+    """
+    if halo <= 0:
+        return interior
+    # Local fallback: same as the operators' previous inline pad.
+    # We construct the per-axis pad-tuple manually so the function
+    # works for arbitrary trailing dimensions (1D sin_lat, 2D u-face,
+    # 3D u-face-with-levels, etc.).
+    pad_widths = ((halo, halo),) + ((0, 0),) * (interior.ndim - 1)
+
+    from legoesm.grids.halo import get_halo_backend, get_mpi_topology
+    if get_halo_backend() != "mpi":
+        # Symmetric constants → single Pad HLO via ``constant_values``
+        # tuple (matches the operators' historical formulation).
+        return jnp.pad(
+            interior, pad_widths,
+            constant_values=((south_value, north_value),)
+            + ((0, 0),) * (interior.ndim - 1),
+        )
+
+    topology = get_mpi_topology()
+    # Lat-lon topology is the only kind that maps onto this helper;
+    # if the active backend is MPI but for a different grid, fall
+    # back to the local serial pad.
+    from legoesm.parallel.latlon_mpi import (
+        LatLonBandLayout,
+        _pad_with_pole_bc_lat_mpi,
+    )
+    if not isinstance(topology, LatLonBandLayout):
+        return jnp.pad(
+            interior, pad_widths,
+            constant_values=((south_value, north_value),)
+            + ((0, 0),) * (interior.ndim - 1),
+        )
+    return _pad_with_pole_bc_lat_mpi(
+        interior, topology,
+        halo=halo,
+        south_value=south_value,
+        north_value=north_value,
+        is_vector_v=is_vector_v,
+    )
