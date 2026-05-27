@@ -411,6 +411,35 @@ The single-GPU theoretical limit has been reached for the structured-grid config
 - Algorithm change (replace spectral with spectral-element or GPU-native SHTns)
 - Mesh-level optimization (Hilbert reordering for MPAS) — invasive
 
+### Iter 18 — 2026-05-27 — LL ocean throughput plateau confirmed
+
+Pushed LL ocean past prior peak (LL192) to find the saturation envelope.
+
+**LL ocean impl_cn fp32 (full curve):**
+
+| res    | total cells | ms/step | Mcells/s | regime           |
+|--------|-------------|---------|----------|------------------|
+| LL64   |   163,840   |   0.90  |  182     | dispatch         |
+| LL96   |   368,640   |   1.20  |  307     | ramp             |
+| LL128  |   655,360   |   1.43  |  458     | ramp             |
+| LL160  | 1,024,000   |   2.04  |  502     | plateau          |
+| LL192  | 1,474,560   |   2.70  | **546**  | **peak**         |
+| LL224  | 2,007,040   |   3.90  |  515     | plateau          |
+| LL256  | 2,621,440   |   5.23  |  501     | -8% past peak    |
+| LL384  | 5,898,240   |  16.78  |  352     | -36% past peak   |
+
+**LL ocean impl_cn fp64:**
+
+| res    | total cells | ms/step | Mcells/s |
+|--------|-------------|---------|----------|
+| LL192  | 1,474,560   |   5.97  | **247**  |
+| LL256  | 2,621,440   |  10.94  |  240     |
+| LL384  | 5,898,240   |  33.34  |  177     |
+
+**LL192 is the architectural sweet-spot on this hardware.** Beyond it the array exceeds last-level cache capacity (RTX 5090 mobile L2 = 48 MB; LL192 fp32 state = 192·384·20·~10 fields·4 B = 59 MB, marginal; LL384 fp32 = 236 MB, fully HBM-served). Past the plateau, throughput falls because every R/W must hit HBM with no cache reuse.
+
+The "scale as close as possible to theoretical limit" target is **already saturated at LL192**. Pushing N further is counterproductive.
+
 ### Iter 17 — 2026-05-27 — eta-amplitude stability sweep (closes codex iter-14 #5)
 
 Added `--eta-amp` flag to `validate_baro_solver.py`. Swept LL64 fp64
