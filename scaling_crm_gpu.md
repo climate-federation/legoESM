@@ -117,6 +117,39 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 6 — 2026-05-27 — explicit acoustic comparison (throughput vs SYPD)
+
+Tested whether bypassing column-Thomas via fully-explicit acoustic
+recovers throughput. Vertical CFL constrains dt_a < ~0.15 s at
+dz_sfc=100 m.
+
+Explicit acoustic N=96 fp64 (dt=2.0 s NaN'd; tried dt=0.5 s):
+
+| dt   | nsub | ms/step | Mc/s    | CFL_v | finite | SYPD  |
+|------|------|---------|---------|-------|--------|-------|
+| 0.5  |   4  |  2.46   | **113** | 0.42  | ✓      | 0.557 |
+| 0.5  |   8  |  3.78   |  73     | 0.21  | ✓      | 0.362 |
+| 0.5  |  12  |  5.13   |  54     | 0.14  | ✓      | 0.267 |
+| 2.0  |   8  |  2.74   | 101     | 0.85  | NaN    | n/a   |
+
+Compare semi-implicit (dt=2.0 nsub=6): 9.04 ms, 30.6 Mc/s, SYPD 0.61.
+
+**Different metrics tell different stories:**
+- Throughput Mc/s: explicit (113) beats semi-implicit (30.6) by 3.7×
+- SYPD (sim years per wall day): nearly tied — explicit 0.56 vs
+  semi-implicit 0.61 — because explicit's smaller dt requires 4×
+  more steps per simulated second
+- Compute per sim-second: semi-implicit 4.52 ms/sim_s, explicit
+  4.92 ms/sim_s — semi-implicit wins ~8%
+
+⇒ **Semi-implicit is the right path for SYPD/climate-scale runs**
+(longer dt amortizes column-Thomas serialization). Explicit is
+better for throughput-only benchmarks (denser per-step work,
+larger Mc/s).
+
+For storm-resolving runs where dt is naturally bounded by horizontal
+advection (~0.5 s at dx=2 km), explicit may be the better choice.
+
 ### Iter 5 — 2026-05-27 — bottleneck root-cause + N=512 plateau confirm
 
 **Per-stage breakdown N=384 fp64 nsub=6:**
