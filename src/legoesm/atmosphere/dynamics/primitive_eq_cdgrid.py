@@ -577,18 +577,16 @@ def fv3_hydrostatic_tendencies(
             )
             _vfill = config.corner_div_damp_fv3_vector_fill
 
-            def _lap_per_level(field_3d):
-                return jax.vmap(
-                    lambda lev: fv3_corner_laplacian_iteration(
-                        lev, cdgrid, apply_vector_corner_fill=_vfill,
-                    ),
-                    in_axes=-1, out_axes=-1,
-                )(field_3d)
-
+            # FV3_3D iter-1044: ``fv3_corner_laplacian_iteration`` is now
+            # 4D-native (mirror of NH iter-1044).  Direct call avoids
+            # ``jax.vmap`` around ``pad_halo`` which fires mpi4jax's
+            # sendrecv batch-axis assertion under MPI.
             _delpc_initial = delpc
             _divg_d_iter = delpc
             for _ in range(config.corner_div_damp_nord):
-                _divg_d_iter = _lap_per_level(_divg_d_iter)
+                _divg_d_iter = fv3_corner_laplacian_iteration(
+                    _divg_d_iter, cdgrid, apply_vector_corner_fill=_vfill,
+                )
 
             # FV3_3D iter 187: smag_vort cap for nord>=1 (FV3 sw_core.F90:1797-1809).
             # smag_vort = |dt|*sqrt(delpc² + wk_corner²); wk_corner = a2b_ord4(zeta_relative).

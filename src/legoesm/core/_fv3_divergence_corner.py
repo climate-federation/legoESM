@@ -113,7 +113,16 @@ def fv3_divergence_corner_2d(
     v_corner: jnp.ndarray,
     cdgrid: CubedSphereCDGrid,
 ) -> jnp.ndarray:
-    """Faithful port of FV3 ``sw_core.F90:divergence_corner`` (2D).
+    """Faithful port of FV3 ``sw_core.F90:divergence_corner`` (2D or 4D).
+
+    FV3_3D iter-1044: ndim-polymorphic.  Accepts both 3D inputs
+    ``(6, n+1, n+1)`` and 4D inputs ``(6, n+1, n+1, nlev)``.  Under
+    MPI the 4D path issues exactly ONE ``pad_halo_4d`` call for
+    ``ua`` and one for ``va`` (one ``mpi4jax.sendrecv`` per call,
+    batched over levels via the trailing axis), instead of ``nlev``
+    separate sendrecvs.  Static metric pads still happen once
+    regardless of ``nlev``.  This closes the codex iter-1044 review
+    blocker on the per-level Python loop's O(nlev) sendrecv count.
 
     Direct port of the non-bounded-domain, ``grid_type < 3`` branch
     (lines 2181-2225 in the Fortran source).  Computes B-grid corner
@@ -151,29 +160,43 @@ def fv3_divergence_corner_2d(
       3-cell convergence at the cube vertex.
     """
     # Step 1: bring inputs into FV3 normal D-grid + A-grid layouts.
-    u_fv3, v_fv3 = _to_fv3_normal_dgrid_2d(u_corner, v_corner)  # (6, n, n+1), (6, n+1, n)
-    ua, va = _to_agrid_cell_centre_2d(u_corner, v_corner)        # (6, n, n)
+    # The helpers are shape-polymorphic (axis-1/2 slicing, trailing
+    # axes broadcast).
+    u_fv3, v_fv3 = _to_fv3_normal_dgrid_2d(u_corner, v_corner)
+    ua, va = _to_agrid_cell_centre_2d(u_corner, v_corner)
 
     n = cdgrid.n
+    _is_4d = u_corner.ndim == 4
 
     # Step 2: pad ua, va with halo=1 so the cosa cross-correction at
     # j-1 / i-1 reads neighbour-panel cells (cross-face values).
-    ua_pad = pad_halo(ua)   # (6, n+2, n+2)
-    va_pad = pad_halo(va)
+    # FV3_3D iter-1044: dispatch pad_halo vs pad_halo_4d by ndim so
+    # the 4D path issues one batched sendrecv per array (not nlev).
+    if _is_4d:
+        from legoesm.grids.halo import pad_halo_4d
+        ua_pad = pad_halo_4d(ua)
+        va_pad = pad_halo_4d(va)
+    else:
+        ua_pad = pad_halo(ua)
+        va_pad = pad_halo(va)
 
-    # Step 3: pad u_fv3, v_fv3 with halo=1 in the cell-axis.  u_fv3
-    # has axis-1 length n (cells), axis-2 length n+1 (faces); we need
-    # u_fv3 at i ∈ [-1, n+1] for the corner stencil.  Pad axis 1 by 1
-    # via mode='edge' (halo handled by sin_sg pad below).
-    # For our purposes the FV3 formula reads u(is-1:ie+1, js:je+1) which
-    # in 0-based is u(0:n+1, 0:n+1) — exactly the (n+2, n+1) range.
-    # u_fv3 (n, n+1) padded to (n+2, n+1) covers this.
-    u_fv3_pad = jnp.pad(
-        u_fv3, [(0, 0), (1, 1), (0, 0)], mode="edge",
-    )                                                # (6, n+2, n+1)
-    v_fv3_pad = jnp.pad(
-        v_fv3, [(0, 0), (0, 0), (1, 1)], mode="edge",
-    )                                                # (6, n+1, n+2)
+    # Step 3: pad u_fv3, v_fv3 with halo=1 in the cell-axis via
+    # mode='edge'.  For 4D input, leave the trailing nlev axis with
+    # zero pad widths.
+    if _is_4d:
+        u_fv3_pad = jnp.pad(
+            u_fv3, [(0, 0), (1, 1), (0, 0), (0, 0)], mode="edge",
+        )
+        v_fv3_pad = jnp.pad(
+            v_fv3, [(0, 0), (0, 0), (1, 1), (0, 0)], mode="edge",
+        )
+    else:
+        u_fv3_pad = jnp.pad(
+            u_fv3, [(0, 0), (1, 1), (0, 0)], mode="edge",
+        )
+        v_fv3_pad = jnp.pad(
+            v_fv3, [(0, 0), (0, 0), (1, 1)], mode="edge",
+        )
 
     # Step 4: extract sin_sg / cos_sg at the 4 sub-grid positions used.
     # FV3 indexing convention (0-based here): sg[0]=west, sg[1]=south,
@@ -284,10 +307,13 @@ def fv3_divergence_corner_2d(
     va_at_j_face = 0.5 * (va_s + va_n)   # (6, n, n+1) — this is 0.25*(va(j-1)+va(j))*2
 
     # j-face mask: True where j == 0 or j == n (boundary), False elsewhere.
-    # j_face indices 0..n.
+    # j_face indices 0..n.  For 4D input add a trailing nlev broadcast axis.
     j_face_idx = jnp.arange(n + 1)
     is_boundary_j = (j_face_idx == 0) | (j_face_idx == n)        # (n+1,)
-    boundary_j_3d = is_boundary_j[None, None, :]                  # (1, 1, n+1)
+    if _is_4d:
+        boundary_j_3d = is_boundary_j[None, None, :, None]        # (1, 1, n+1, 1)
+    else:
+        boundary_j_3d = is_boundary_j[None, None, :]              # (1, 1, n+1)
 
     # Now compute uf.  But note FV3's uf has shape (i_face, j_face) with
     # i_face ∈ [is-1, ie+1] (so halo+1).  Our u_fv3 (n, n+1) in axis 1
@@ -315,15 +341,20 @@ def fv3_divergence_corner_2d(
     # in 0-based maps to padded index 1..n; halo at 0 and n+1.
 
     # Build uf with both branches and select via boundary mask.
-    u_full = u_fv3_pad[:, :, :]                   # (6, n+2, n+1)
-    # va at v-interfaces in cell-i coords: va_at_j_face shape (6, n, n+1).
-    # Pad axis 1 (cell-i) to (n+2, n+1).
-    va_at_jface_pad = jnp.pad(
-        va_at_j_face, [(0, 0), (1, 1), (0, 0)], mode="edge",
-    )
+    u_full = u_fv3_pad[:, :, :]                   # (6, n+2, n+1[, nlev])
+    # va at v-interfaces in cell-i coords: va_at_j_face shape (6, n, n+1[, nlev]).
+    # Pad axis 1 (cell-i) to (n+2, n+1) via mode='edge' — keep nlev pad width=0.
+    if _is_4d:
+        va_at_jface_pad = jnp.pad(
+            va_at_j_face, [(0, 0), (1, 1), (0, 0), (0, 0)], mode="edge",
+        )
+    else:
+        va_at_jface_pad = jnp.pad(
+            va_at_j_face, [(0, 0), (1, 1), (0, 0)], mode="edge",
+        )
     cos_v_pad = jnp.pad(
         cos_v_face, [(0, 0), (1, 1), (0, 0)], mode="edge",
-    )
+    )                                              # (6, n+2, n+1) — 3D static
     sin_v_pad = jnp.pad(
         sin_v_face, [(0, 0), (1, 1), (0, 0)], mode="edge",
     )
@@ -332,21 +363,21 @@ def fv3_divergence_corner_2d(
     # Pad cell-i to (n+2, n+1) via mode='edge'.
     dyc_pad = jnp.pad(cdgrid.dyc, [(0, 0), (1, 1), (0, 0)], mode="edge")
 
-    # Boundary uf:  uf = u * dyc * sin_v_face
-    # Interior uf:  uf = (u - 0.5*va_at_j_face*(2*cos_v_face)) * dyc * sin_v_face
-    # FV3's 0.25*(va_W+va_E)*(cos_W+cos_E) = 0.5*va_avg*2*cos_avg = va_avg * 2*cos_avg.
-    # Wait, va_at_j_face = 0.5*(va_W + va_E) so 0.25*(va_W+va_E) = 0.5*va_at_j_face.
-    # Likewise (cos_W + cos_E) = 2*cos_v_face.  So the cross term = 0.5*va_at_j_face * 2*cos_v_face = va_at_j_face * cos_v_face.
-    #
-    # No wait — Fortran: 0.25 * (va(i,j-1)+va(i,j)) * (cos_sg(i,j-1,4)+cos_sg(i,j,2))
-    # = 0.25 * 2*va_avg * 2*cos_avg = va_avg * cos_avg.
-    # Where va_avg = 0.5*(va(j-1)+va(j)) and cos_avg = 0.5*(cos(j-1)+cos(j)).
-    # So Fortran cross term = va_avg * cos_avg.
+    # FV3_3D iter-1044: broadcast 3D static metric pads against 4D data
+    # via a trailing nlev singleton axis.
+    if _is_4d:
+        cos_v_pad_b = cos_v_pad[..., None]
+        sin_v_pad_b = sin_v_pad[..., None]
+        dyc_pad_b = dyc_pad[..., None]
+    else:
+        cos_v_pad_b = cos_v_pad
+        sin_v_pad_b = sin_v_pad
+        dyc_pad_b = dyc_pad
 
-    cross = va_at_jface_pad * cos_v_pad           # (6, n+2, n+1)
-    uf_interior = (u_full - cross) * dyc_pad * sin_v_pad
-    uf_boundary = u_full * dyc_pad * sin_v_pad
-    uf = jnp.where(boundary_j_3d, uf_boundary, uf_interior)  # (6, n+2, n+1)
+    cross = va_at_jface_pad * cos_v_pad_b
+    uf_interior = (u_full - cross) * dyc_pad_b * sin_v_pad_b
+    uf_boundary = u_full * dyc_pad_b * sin_v_pad_b
+    uf = jnp.where(boundary_j_3d, uf_boundary, uf_interior)
 
     # Same construction for vf.  FV3 lines 2200-2207:
     #   vf(i,j) = (v(i,j) - 0.25*(ua(i-1,j)+ua(i,j))*(cos_sg(i-1,j,3)+cos_sg(i,j,1))) * dxc(i,j) * 0.5*(sin_sg(i-1,j,3)+sin_sg(i,j,1))
@@ -371,21 +402,38 @@ def fv3_divergence_corner_2d(
     sin_u_pad = jnp.pad(
         sin_u_face, [(0, 0), (0, 0), (1, 1)], mode="edge",
     )
-    ua_at_iface_pad = jnp.pad(
-        ua_at_iface, [(0, 0), (0, 0), (1, 1)], mode="edge",
-    )
+    if _is_4d:
+        ua_at_iface_pad = jnp.pad(
+            ua_at_iface, [(0, 0), (0, 0), (1, 1), (0, 0)], mode="edge",
+        )
+    else:
+        ua_at_iface_pad = jnp.pad(
+            ua_at_iface, [(0, 0), (0, 0), (1, 1)], mode="edge",
+        )
     dxc_pad = jnp.pad(cdgrid.dxc, [(0, 0), (0, 0), (1, 1)], mode="edge")
 
-    # i-face boundary mask: i_face = 0 or n.
+    # i-face boundary mask: i_face = 0 or n.  4D-broadcast on nlev.
     i_face_idx = jnp.arange(n + 1)
     is_boundary_i = (i_face_idx == 0) | (i_face_idx == n)
-    boundary_i_3d = is_boundary_i[None, :, None]
+    if _is_4d:
+        boundary_i_3d = is_boundary_i[None, :, None, None]
+    else:
+        boundary_i_3d = is_boundary_i[None, :, None]
 
-    cross_v = ua_at_iface_pad * cos_u_pad
-    vf_full = v_fv3_pad                            # (6, n+1, n+2) already
-    vf_interior = (vf_full - cross_v) * dxc_pad * sin_u_pad
-    vf_boundary = vf_full * dxc_pad * sin_u_pad
-    vf = jnp.where(boundary_i_3d, vf_boundary, vf_interior)  # (6, n+1, n+2)
+    if _is_4d:
+        cos_u_pad_b = cos_u_pad[..., None]
+        sin_u_pad_b = sin_u_pad[..., None]
+        dxc_pad_b = dxc_pad[..., None]
+    else:
+        cos_u_pad_b = cos_u_pad
+        sin_u_pad_b = sin_u_pad
+        dxc_pad_b = dxc_pad
+
+    cross_v = ua_at_iface_pad * cos_u_pad_b
+    vf_full = v_fv3_pad
+    vf_interior = (vf_full - cross_v) * dxc_pad_b * sin_u_pad_b
+    vf_boundary = vf_full * dxc_pad_b * sin_u_pad_b
+    vf = jnp.where(boundary_i_3d, vf_boundary, vf_interior)
 
     # Step 6: assemble divg_d at corners (n+1, n+1).  FV3 line 2211:
     #   divg_d(i, j) = vf(i, j-1) - vf(i, j) + uf(i-1, j) - uf(i, j)
@@ -427,6 +475,8 @@ def fv3_divergence_corner_2d(
 
     # Step 8: divide by area_corner (Fortran rarea_c).
     rarea_c = cdgrid.rarea_c                    # (6, n+1, n+1)
+    if _is_4d:
+        rarea_c = rarea_c[..., None]
     return divg_d * rarea_c
 
 
@@ -435,7 +485,13 @@ def fv3_divergence_corner_3d(
     v_corner_3d: jnp.ndarray,
     cdgrid: CubedSphereCDGrid,
 ) -> jnp.ndarray:
-    """3D wrapper that vmaps :func:`fv3_divergence_corner_2d` over levels.
+    """3D wrapper around the now-4D-native :func:`fv3_divergence_corner_2d`.
+
+    FV3_3D iter-1044: ``fv3_divergence_corner_2d`` is shape-polymorphic
+    (3D and 4D), so the 3D wrapper is now a single direct call rather
+    than a per-level ``jax.vmap`` or Python loop.  Under MPI the dynamic
+    ``ua``/``va`` go through one ``pad_halo_4d`` (one batched sendrecv
+    per array, not ``nlev`` of them); static metric pads happen once.
 
     Parameters
     ----------
@@ -447,12 +503,14 @@ def fv3_divergence_corner_3d(
     -------
     divg_d_3d : (6, n+1, n+1, nlev)
     """
-    u_t = jnp.moveaxis(u_corner_3d, -1, 0)   # (nlev, 6, n+1, n+1)
-    v_t = jnp.moveaxis(v_corner_3d, -1, 0)
-    divg_t = jax.vmap(
-        lambda args: fv3_divergence_corner_2d(args[0], args[1], cdgrid),
-    )((u_t, v_t))
-    return jnp.moveaxis(divg_t, 0, -1)
+    if u_corner_3d.ndim != 4:
+        raise ValueError(
+            f"fv3_divergence_corner_3d expects 4D input "
+            f"(6, n+1, n+1, nlev); got ndim={u_corner_3d.ndim}, "
+            f"shape={tuple(u_corner_3d.shape)}.  Use "
+            f"fv3_divergence_corner_2d for 3D input."
+        )
+    return fv3_divergence_corner_2d(u_corner_3d, v_corner_3d, cdgrid)
 
 
 def fv3_corner_laplacian_iteration(
@@ -551,13 +609,27 @@ def fv3_corner_laplacian_iteration(
       until the wider nord >= 2 restructure (iter 21+) is in place.
     """
     n = cdgrid.n
+    # FV3_3D iter-1044 (codex review claim-4): ndim guard.
+    if divg_d.ndim not in (3, 4):
+        raise ValueError(
+            f"fv3_corner_laplacian_iteration expects ndim ∈ {{3, 4}}; "
+            f"got ndim={divg_d.ndim}, shape={tuple(divg_d.shape)}."
+        )
 
-    # Step 1: cross-panel halo of divg_d.  divg_pad shape (6, n+3, n+3).
-    # Padded index 0 = west halo (i = -1 in shifted 0-based); padded
-    # index n+2 = east halo (i = n+1).  Cube-vertex halo follows
-    # ``set_corner_fill_mode`` (default "avg" since iter-7).
-    from legoesm.grids.halo import pad_halo
-    divg_pad = pad_halo(divg_d)                            # (6, n+3, n+3)
+    # Step 1: cross-panel halo of divg_d.  divg_pad shape (6, n+3, n+3)
+    # for 3D input or (6, n+3, n+3, nlev) for 4D input.
+    # FV3_3D iter-1044: dispatch by ndim so NH callers can pass the
+    # full 4D ``(6, n+1, n+1, nlev)`` corner-staggered ``delpc`` array
+    # directly and avoid wrapping this function in ``jax.vmap`` (which
+    # under MPI puts ``mpi4jax.sendrecv`` inside a vmap and trips
+    # mpi4jax's batch-axis assertion).  Padded index 0 = west halo
+    # (i = -1 shifted), padded index n+2 = east halo (i = n+1).
+    # Cube-vertex halo follows ``set_corner_fill_mode`` (iter-7 "avg").
+    from legoesm.grids.halo import pad_halo, pad_halo_4d
+    if divg_d.ndim == 4:
+        divg_pad = pad_halo_4d(divg_d)                     # (6, n+3, n+3, nlev)
+    else:
+        divg_pad = pad_halo(divg_d)                        # (6, n+3, n+3)
 
     if apply_vector_corner_fill:
         # FV3-faithful path with full halo'd vc / uc (matches FV3
@@ -569,16 +641,16 @@ def fv3_corner_laplacian_iteration(
 
     # Default iter-18 path: vc / uc with the minimum halo needed by
     # the divergence operator + corner removal at nt = 0.
+    # FV3_3D iter-1044: when input is 4D, broadcast 3D metric arrays
+    # against trailing nlev axis.  3D metric stays 3D when input is 3D.
+    _is_4d = divg_d.ndim == 4
 
     # Step 2: x-flux ``vc(i, j) = (divg_d(i+1, j) - divg_d(i, j)) * divg_u``
-    # at i ∈ [-1, n], j ∈ [0, n] — shape (6, n+2, n+1).
-    # Padded index translation: i (shifted) = -1..n → padded index 0..n+1.
-    # divg_d(i+1) at i = -1..n → padded 1..n+2.
-    # divg_d(i)   at i = -1..n → padded 0..n+1.
+    # at i ∈ [-1, n], j ∈ [0, n] — shape (6, n+2, n+1) or (6, n+2, n+1, nlev).
     vc_raw = (
         divg_pad[:, 1:n + 3, 1:n + 2]   # divg_d(i+1, j), i ∈ [-1, n]
         - divg_pad[:, 0:n + 2, 1:n + 2]  # divg_d(i,   j)
-    )                                                       # (6, n+2, n+1)
+    )
     # FV3 ``divg_u = dy / dxc`` at u-face.  Our equivalent:
     # ``dy_edge_x * rdxc``, shape (6, n+1, n) at u-face.  Pad to
     # (6, n+2, n+1) via edge mode (the metric is geometric and varies
@@ -588,19 +660,23 @@ def fv3_corner_laplacian_iteration(
     divg_u_pad = jnp.pad(
         divg_u, [(0, 0), (1, 0), (0, 1)], mode="edge",
     )                                                       # (6, n+2, n+1)
-    vc = vc_raw * divg_u_pad                                # (6, n+2, n+1)
+    if _is_4d:
+        divg_u_pad = divg_u_pad[..., None]
+    vc = vc_raw * divg_u_pad
 
     # Step 3: y-flux ``uc(i, j) = (divg_d(i, j+1) - divg_d(i, j)) * divg_v``
-    # at i ∈ [0, n], j ∈ [-1, n] — shape (6, n+1, n+2).
+    # at i ∈ [0, n], j ∈ [-1, n] — shape (6, n+1, n+2) or (..., nlev).
     uc_raw = (
         divg_pad[:, 1:n + 2, 1:n + 3]   # divg_d(i, j+1), j ∈ [-1, n]
         - divg_pad[:, 1:n + 2, 0:n + 2]  # divg_d(i, j)
-    )                                                       # (6, n+1, n+2)
+    )
     divg_v = cdgrid.dx_edge_y * cdgrid.rdyc                  # (6, n, n+1)
     divg_v_pad = jnp.pad(
         divg_v, [(0, 0), (0, 1), (1, 0)], mode="edge",
     )                                                       # (6, n+1, n+2)
-    uc = uc_raw * divg_v_pad                                # (6, n+1, n+2)
+    if _is_4d:
+        divg_v_pad = divg_v_pad[..., None]
+    uc = uc_raw * divg_v_pad
 
     # Step 4: divergence of (vc, uc) back at corners.
     #   divg_d_new(i, j) = uc(i, j-1) - uc(i, j) + vc(i-1, j) - vc(i, j)
@@ -632,7 +708,9 @@ def fv3_corner_laplacian_iteration(
     lap_divg = lap_divg.at[:, 0, n].add(nw)
 
     # Step 6: normalise by rarea_c (Fortran line 1782).
-    return lap_divg * cdgrid.rarea_c
+    # FV3_3D iter-1044: broadcast 3D rarea_c against 4D lap_divg.
+    _rarea_c = cdgrid.rarea_c[..., None] if _is_4d else cdgrid.rarea_c
+    return lap_divg * _rarea_c
 
 
 def fv3_laplacian_step_from_pad_h1(
@@ -1127,35 +1205,34 @@ def _laplacian_iteration_with_vector_fill(
         fv3_fill_corners_dgrid_vector,
     )
 
+    # FV3_3D iter-1044: 4D-broadcast guard for the metric arrays.
+    _is_4d = divg_pad.ndim == 4
+
     # vc at i ∈ [-1, n], j ∈ [-1, n+1] — shape (6, n+2, n+3).
-    # Padded index translation in our shifted convention:
-    #   i (shifted) = -1..n   → padded i = 0..n+1
-    #   j (shifted) = -1..n+1 → padded j = 0..n+2
-    # vc(i, j) = divg_d(i+1, j) - divg_d(i, j)
-    # divg_d(i+1) → padded i = 1..n+2
-    # divg_d(i)   → padded i = 0..n+1
     vc_raw = (
         divg_pad[:, 1:n + 3, 0:n + 3]
         - divg_pad[:, 0:n + 2, 0:n + 3]
-    )                                                       # (6, n+2, n+3)
+    )
     divg_u = cdgrid.dy_edge_x * cdgrid.rdxc                  # (6, n+1, n)
-    # Pad to (6, n+2, n+3): (1, 0) on i (add west halo), (1, 2) on j
-    # (add 1 south halo + 2 north halo to cover j ∈ [-1, n+1]).
     divg_u_pad = jnp.pad(
         divg_u, [(0, 0), (1, 0), (1, 2)], mode="edge",
     )                                                       # (6, n+2, n+3)
-    vc = vc_raw * divg_u_pad                                # (6, n+2, n+3)
+    if _is_4d:
+        divg_u_pad = divg_u_pad[..., None]
+    vc = vc_raw * divg_u_pad
 
     # uc at i ∈ [-1, n+1], j ∈ [-1, n] — shape (6, n+3, n+2).
     uc_raw = (
         divg_pad[:, 0:n + 3, 1:n + 3]
         - divg_pad[:, 0:n + 3, 0:n + 2]
-    )                                                       # (6, n+3, n+2)
+    )
     divg_v = cdgrid.dx_edge_y * cdgrid.rdyc                  # (6, n, n+1)
     divg_v_pad = jnp.pad(
         divg_v, [(0, 0), (1, 2), (1, 0)], mode="edge",
     )                                                       # (6, n+3, n+2)
-    uc = uc_raw * divg_v_pad                                # (6, n+3, n+2)
+    if _is_4d:
+        divg_v_pad = divg_v_pad[..., None]
+    uc = uc_raw * divg_v_pad
 
     # Apply FV3 vector cube-vertex fill (sw_core.F90:1762).
     # This overwrites the 4 cube-vertex halo cells of vc / uc with the
@@ -1192,4 +1269,5 @@ def _laplacian_iteration_with_vector_fill(
     lap_divg = lap_divg.at[:, n, n].add(ne)
     lap_divg = lap_divg.at[:, 0, n].add(nw)
 
-    return lap_divg * cdgrid.rarea_c
+    _rarea_c = cdgrid.rarea_c[..., None] if _is_4d else cdgrid.rarea_c
+    return lap_divg * _rarea_c

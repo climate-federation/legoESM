@@ -625,18 +625,17 @@ def cdgrid_compressible_euler_slow_tendencies(
             )
             _vfill = config.corner_div_damp_fv3_vector_fill
 
-            def _lap_per_level(field_3d):
-                return jax.vmap(
-                    lambda lev: fv3_corner_laplacian_iteration(
-                        lev, cdgrid, apply_vector_corner_fill=_vfill,
-                    ),
-                    in_axes=-1, out_axes=-1,
-                )(field_3d)
-
+            # FV3_3D iter-1044: ``fv3_corner_laplacian_iteration`` is now
+            # shape-polymorphic (3D and 4D dispatched at pad_halo step).
+            # Calling it directly on the 4D ``delpc`` field avoids a
+            # ``jax.vmap`` that would wrap ``pad_halo`` under MPI — same
+            # mpi4jax sendrecv batch-axis fix as iter-1042 / iter-1043.
             _delpc_initial = delpc
             _divg_d_iter = delpc
             for _ in range(config.corner_div_damp_nord):
-                _divg_d_iter = _lap_per_level(_divg_d_iter)
+                _divg_d_iter = fv3_corner_laplacian_iteration(
+                    _divg_d_iter, cdgrid, apply_vector_corner_fill=_vfill,
+                )
 
             # FV3_3D iter 187: smag_vort cap for nord>=1 (FV3 sw_core.F90:1797-1809).
             # smag_vort = |dt|*sqrt(delpc² + ζ²); iter-181/183 double-where guards sqrt(0).

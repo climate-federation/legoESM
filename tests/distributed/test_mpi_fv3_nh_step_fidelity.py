@@ -195,6 +195,59 @@ class TestFV3NHStepMPIFidelity:
             fields=("u", "v", "w", "theta_prime", "rho_prime"),
         )
 
+    def test_nh_3_step_with_corner_div_damp(self):
+        """FV3_3D iter-1044: corner div-damp ``nord>=1`` under MPI.
+
+        Exercises the iterated Laplacian path
+        (``fv3_corner_laplacian_iteration``) that previously sat
+        inside ``jax.vmap`` over levels, crashing mpi4jax's sendrecv
+        batch-axis rule.  iter-1044 lifts the vmap by making the
+        helper shape-polymorphic.
+
+        Combination ``d2_bg>0 + d4_bg>0 + nord=1`` engages the full
+        iter-187 smag_vort cap + iter-1044 Laplacian iteration path.
+        """
+        rank = MPI.COMM_WORLD.Get_rank()
+        size = MPI.COMM_WORLD.Get_size()
+        if size > 6 or 6 % size != 0:
+            pytest.skip("Face-only mode only (1/2/3/6 ranks).")
+
+        set_halo_backend("local")
+        ref_model, dist_model, state = _build_nh_model_and_state(
+            corner_div_damp_d2_bg=5e-4,
+            corner_div_damp_d4_bg=0.16,
+            corner_div_damp_nord=1,
+        )
+        _run_pair_and_assert(
+            rank, size, ref_model, dist_model, state,
+            dt=10.0, n_steps=3,
+            fields=("u", "v", "w", "theta_prime", "rho_prime"),
+        )
+
+    def test_nh_3_step_with_corner_div_damp_nord2(self):
+        """FV3_3D iter-1044: ``nord=2`` (del-6) corner div-damp under MPI.
+
+        Runs TWO Laplacian iterations in the inner loop.  If the
+        4D-native helper had any per-iteration state-sharing bug
+        that the nord=1 single-iteration test misses, this catches it.
+        """
+        rank = MPI.COMM_WORLD.Get_rank()
+        size = MPI.COMM_WORLD.Get_size()
+        if size > 6 or 6 % size != 0:
+            pytest.skip("Face-only mode only (1/2/3/6 ranks).")
+
+        set_halo_backend("local")
+        ref_model, dist_model, state = _build_nh_model_and_state(
+            corner_div_damp_d2_bg=5e-4,
+            corner_div_damp_d4_bg=0.16,
+            corner_div_damp_nord=2,
+        )
+        _run_pair_and_assert(
+            rank, size, ref_model, dist_model, state,
+            dt=10.0, n_steps=3,
+            fields=("u", "v", "w", "theta_prime", "rho_prime"),
+        )
+
     def test_nh_3_step_with_both_a2b_paths(self):
         """FV3_3D iter-1043 (codex claim-3): both a2b flags ON simultaneously.
 

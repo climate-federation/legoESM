@@ -192,3 +192,27 @@ class TestFV3PEStepMPIFidelity:
             rank, size, ref_model, dist_model, state_global,
             dt=300.0, n_steps=3,
         )
+
+    def test_pe_3_step_with_corner_div_damp(self):
+        """FV3_3D iter-1044 (codex claim-3): PE MPI with corner-div-damp nord=1.
+
+        PE counterpart to NH ``test_nh_3_step_with_corner_div_damp``.
+        Exercises the iter-1044 4D-native ``fv3_corner_laplacian_iteration``
+        + the iter-1044 4D-native ``fv3_divergence_corner_3d`` (no vmap
+        around any pad_halo / sendrecv).
+        """
+        rank = MPI.COMM_WORLD.Get_rank()
+        size = MPI.COMM_WORLD.Get_size()
+        if size > 6 or 6 % size != 0:
+            pytest.skip("Face-only mode only (1/2/3/6 ranks).")
+
+        set_halo_backend("local")
+        ref_model, dist_model, state_global = _build_pe_model_and_state(
+            corner_div_damp_d2_bg=5e-4,
+            corner_div_damp_d4_bg=0.02,
+            corner_div_damp_nord=1,
+        )
+        _run_pe_pair_and_assert(
+            rank, size, ref_model, dist_model, state_global,
+            dt=300.0, n_steps=3,
+        )

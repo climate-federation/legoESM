@@ -2378,6 +2378,127 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1044 (2026-05-27): corner div-damp 4D-native (lift ``_lap_per_level`` + ``fv3_divergence_corner_3d`` vmaps under MPI)
+
+### Goal
+
+Close the second of three vmap-around-``pad_halo`` follow-ups
+from iter-1042.  Both PE and NH have a ``_lap_per_level`` vmap
+around ``fv3_corner_laplacian_iteration`` gated by
+``corner_div_damp_d2_bg > 0`` / ``...d4_bg > 0``.  In addition
+``fv3_divergence_corner_3d`` (called every step regardless of
+config) vmaps ``fv3_divergence_corner_2d`` per level, putting
+its 10 ``pad_halo`` calls (8 static metrics + 2 dynamic ua/va)
+inside the vmap and tripping mpi4jax's sendrecv batch-axis rule.
+
+### Fix
+
+Three coordinated changes in ``core/_fv3_divergence_corner.py``:
+
+1. ``fv3_corner_laplacian_iteration``: ndim-aware dispatch.
+   ``divg_d.ndim == 4`` routes through ``pad_halo_4d``; static
+   metric pads (``divg_u_pad``, ``divg_v_pad``, ``rarea_c``) get
+   a trailing ``[..., None]`` so they broadcast against 4D data.
+   Same change applied to the optional vector-fill branch
+   (``_laplacian_iteration_with_vector_fill``).  Includes a
+   defensive ``ndim ∉ {3, 4}`` ValueError guard (codex review
+   non-blocker recommendation).
+
+2. ``fv3_divergence_corner_2d``: ndim-polymorphic.  All eight
+   static metric arrays (``cos_v_pad``, ``sin_v_pad``,
+   ``dyc_pad``, ``cos_u_pad``, ``sin_u_pad``, ``dxc_pad``,
+   ``rarea_c``) gain ``[..., None]`` broadcast in the 4D branch.
+   Dynamic ``ua``/``va`` route through ``pad_halo_4d`` (one
+   batched sendrecv per array, NOT ``nlev`` of them).  Boundary
+   masks ``is_boundary_j`` / ``is_boundary_i`` extended to 4D
+   shape via trailing singleton axes.  Dynamic ``jnp.pad`` calls
+   get a 4-tuple padding spec ``[(0,0),(1,1),(0,0),(0,0)]``.
+   The ``_is_4d=False`` execution path produces identical
+   arithmetic to the pre-iter-1044 code (verified by 48/48
+   single-device tests).
+
+3. ``fv3_divergence_corner_3d``: simplified to a single direct
+   call ``fv3_divergence_corner_2d(u_4d, v_4d, cdgrid)``.  No
+   more vmap, no more per-level Python loop.  Raises ValueError
+   for non-4D input (codex review claim-4 — strict guard
+   acceptable since all production callers pass 4D).
+
+### Codex iter-1044 review evolution
+
+Round 1 raised TWO blockers:
+- PE ``primitive_eq_cdgrid.py:580-591`` still had the vmap (NH
+  was fixed but PE was missed in the initial iter-1044 commit).
+- The Python ``for`` loop attempt in
+  ``fv3_divergence_corner_3d`` would have emitted ``nlev × 10``
+  separate MPI sendrecvs at production ``nlev=127`` — unacceptable.
+
+Round 2 (after fixes): only a WARNING about the 3D path's
+structural diff (alias variables ``cos_v_pad_b = cos_v_pad`` in
+the ``_is_4d=False`` branch).  Numerics verified equivalent by
+the 48-test single-device regression.
+
+MPI sendrecv count per ``fv3_divergence_corner_3d`` call:
+- Static metric pads: 8 (sin_s, sin_n, sin_w, sin_e, cos_s,
+  cos_n, cos_w, cos_e) — independent of ``nlev``.
+- Dynamic pads: 2 (``pad_halo_4d`` for ua and va, each batched
+  over the trailing ``nlev`` axis in a single mpi4jax sendrecv).
+- Total: 10, scaling O(1) with ``nlev``.  At production
+  ``nlev=127``, this saves ~1260 sendrecvs per call vs the
+  Python-loop alternative.
+
+### Tests
+
+Three new MPI fidelity tests across the PE and NH test files:
+
+- ``test_pe_3_step_with_corner_div_damp`` (PE iter-1044)
+- ``test_nh_3_step_with_corner_div_damp`` (NH iter-1044, nord=1)
+- ``test_nh_3_step_with_corner_div_damp_nord2`` (NH iter-1044,
+  nord=2 — exercises two Laplacian iterations to catch any
+  iteration-state-sharing bug the single iteration misses)
+
+PE call site at ``primitive_eq_cdgrid.py:580-591`` updated to
+remove ``_lap_per_level`` vmap helper (mirror of NH change).
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 mpirun -np 2 .venv/bin/python -m pytest \
+        tests/distributed/test_mpi_fv3_step_fidelity.py \
+        tests/distributed/test_mpi_fv3_nh_step_fidelity.py \
+        -v
+    => 9 passed (3 PE + 6 NH, including 3 corner-div-damp variants)
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_corner_div_damp_nh.py \
+        tests/atmosphere/nonhydrostatic/integration/test_fv_cubesphere.py \
+        tests/test_fv3_divergence_corner.py \
+        tests/test_fv3_laplacian_nord_iter892.py \
+        tests/test_corner_laplacian_linearity_iter304.py \
+        tests/test_corner_laplacian_constant_iter305.py \
+        -q
+    => 48 passed in 70.76 s (single-device regression unchanged)
+
+### Status
+
+2 of 3 vmap-around-``pad_halo`` follow-ups now closed:
+
+- ✅ **iter-1043** a2b_ord4 corner interp (PE + NH).
+- ✅ **iter-1044** corner div-damp + divergence-corner (PE + NH).
+- ⏳ **iter-1045** ``damp_v`` / ``damp_w`` post-step
+  ``_del6_vt_flux`` vmaps (config-gated, dormant in default
+  test config).
+
+### Why this iteration was meaningful
+
+The codex review's claim of "Python loop is fine" was naive —
+production ``nlev=127`` would have generated ~1260 sendrecvs per
+divergence-corner call.  The cleanup forced a real architectural
+fix: ``fv3_divergence_corner_2d`` is now genuinely 4D-native, not
+just 3D-with-a-vmap-wrapper.  Static metric pads stay O(1) under
+``nlev``; dynamic pads collapse to O(1) batched sendrecvs.  This
+is the right abstraction for production runs.
+
 ## Iteration 1043 (2026-05-27): lift ``_interp_center_to_corner_a2b_ord4`` out of ``jax.vmap`` (PE + NH)
 
 ### Goal
