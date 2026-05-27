@@ -348,6 +348,41 @@ def test_driver_consults_shared_halo_requirement_map():
     )
 
 
+def test_driver_imports_build_smooth_k1_pattern_from_package():
+    """iter-218: iter-208 moved build_smooth_k1_pattern from
+    scripts/run_rce_mpi_long.py to
+    legoesm.atmosphere.idealized.rcemip_initial_conditions. The
+    driver now imports it via the standard package path.
+
+    Pre iter-218 no test asserted this import wiring. If someone
+    reverted the iter-208 move by inlining the function back in
+    the driver, the iter-204/207 unit test would still pass (it
+    imports from the package); the unit-test-vs-driver path
+    coverage would silently diverge.
+
+    AST-based check: assert the driver has a TOP-LEVEL ImportFrom
+    that brings in build_smooth_k1_pattern from the rcemip_initial_conditions
+    module.
+    """
+    import ast
+    tree = ast.parse(DRIVER.read_text())
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module == (
+            "legoesm.atmosphere.idealized.rcemip_initial_conditions"
+        ):
+            for alias in node.names:
+                if alias.name == "build_smooth_k1_pattern":
+                    return
+    pytest.fail(
+        "Driver must have a top-level import of "
+        "build_smooth_k1_pattern from "
+        "legoesm.atmosphere.idealized.rcemip_initial_conditions "
+        "(iter-208 helper-move contract). A future revert to an "
+        "inline driver-local implementation would silently bypass "
+        "the iter-204/207 unit test."
+    )
+
+
 def test_driver_argparse_theta_noise_mode_choices_locked():
     """iter-211 Codex LOW: lock the exact ``--theta-noise-mode``
     choices list via AST so a future PR that adds a 'smooth_k2'
