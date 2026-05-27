@@ -117,6 +117,37 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 38 — 2026-05-27 — bottleneck #1 MISDIAGNOSED — physics is launch-bound
+
+Measured SI+full-physics throughput at TRUE fp64 vs fp32 (JAX_ENABLE_X64
+properly set):
+
+| precision | N=128 ms/step | N=192 ms/step |
+|-----------|---------------|---------------|
+| fp64      | 17.20         | 42.35         |
+| fp32      | 17.21         | 42.10         |
+
+**fp32 ≡ fp64 to <1% noise.** The physics is **launch-overhead-bound,
+not arithmetic-bound.** Iter 34's "fp32 ≈ fp64 because internal fp64
+paths" hypothesis was wrong — Kessler has zero `jnp.float64` calls.
+
+Reality: each physics column-update launches its own GPU kernel
+(thermo lookup, saturation adjustment, fall velocity, condensation
+rate), and there are ~20-30 such kernels per step. Kernel launch
+overhead × kernel count dominates over arithmetic at this state size.
+
+XLA flag tuning (`--xla_gpu_enable_command_buffer`,
+`async_dot`, `while_loop_double_buffering`): +1.4% only.
+
+⇒ **Bottleneck #1 (microphysics fp32) is NOT a real lever.** fp32
+rewrite would not help. Real lever for physics is **kernel fusion**
+— either via XLA improvements (out of our hands) or by restructuring
+microphysics + radiation as fewer larger kernels (substantial code
+work — out of "minimum code" scope).
+
+Walks back iter-36's bottleneck #1 ROI claim ("HIGH" → effectively
+zero).
+
 ### Iter 37 — 2026-05-27 — BOTTLENECK #3 SOLVED: fix_mass + lax.scan compatibility
 
 Root cause of "tracer leak" (iter 31): `step()` lazily caches
