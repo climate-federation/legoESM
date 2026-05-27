@@ -117,6 +117,46 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 34 — 2026-05-27 — REAL production throughput with full RCEMIP physics
+
+Ran 10-step JIT-scan with `make_rcemip_physics` (radiation +
+microphysics + surface flux) — the production stack:
+
+**fp64 (production default):**
+| N    | ms/step | Mc/s |
+|------|---------|------|
+| N=16 |  1.29   |   6  |
+| N=32 |  1.73   |  18  |
+| N=64 |  3.47   |  36  |
+
+**fp32:**
+| N    | ms/step | Mc/s |
+|------|---------|------|
+| N=32 |  1.61   |  19  |
+| N=64 |  3.45   |  36  |
+| N=128| 11.00   |  45  |
+| N=192| 23.76   |**47** ← peak |
+
+fp32 ≈ fp64 because physics ops (radiation/microphysics) have
+internal fp64 paths regardless of state precision.
+
+**Final 3-tier throughput ladder:**
+
+| tier                      | best Mc/s | notes                  |
+|---------------------------|-----------|------------------------|
+| Bare dycore (bench)       | 670-820   | fp32 explicit nsub=4   |
+| + Smag LES only           | 410       | adds 40% overhead      |
+| + Full RCEMIP physics     | **47**    | **production-grade**, ~15× slower than bench |
+
+Physics is **the dominant cost** in production, not the dycore.
+Optimizing dycore further has small ROI; the real throughput
+ceiling for full-physics CRM is in `make_rcemip_physics` (radiation
++ microphysics kernels).
+
+⇒ **47 Mc/s is the real CRM production throughput on this hardware.**
+The bench's 670-820 number is the **dycore-only** ceiling — useful for
+optimization work but not the production-throughput claim.
+
 ### Iter 33 — 2026-05-27 — production-test discovery: dycore-only ≠ production
 
 Found `tests/validation/test_rcemip_plane_smoke.py` — the production
