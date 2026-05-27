@@ -306,3 +306,49 @@ def test_diff_trajectories_accepts_string_paths(tmp_path):
     diffs = compare_mod.diff_trajectories(str(a), str(b))
     assert len(diffs) == 1
     assert diffs[0]["delta_cwv_mean"] == pytest.approx(0.0)
+
+
+def test_csv_default_path_written_by_cli(tmp_path, monkeypatch):
+    """iter-147: when ``--csv`` is not passed, main() writes the
+    diff CSV to the default path ``<dir_a>/diff_vs_<dir_b>.csv``.
+    Locks the iter-111 MEDIUM#3 default-path contract that
+    test_csv_output_written only covered via direct write_csv
+    call."""
+    a = _make_run(tmp_path, "a", [(0.0, 50.0), (1.0, 51.0)])
+    b = _make_run(tmp_path, "b", [(0.0, 50.5), (1.0, 52.0)])
+    monkeypatch.setattr(
+        sys, "argv",
+        ["compare_rce_trajectories.py", str(a), str(b), "--quiet"],
+    )
+    compare_mod.main()
+    # Default path: <dir_a>/diff_vs_<dir_b>.csv (dir_b's basename).
+    expected_csv = a / f"diff_vs_{b.name}.csv"
+    assert expected_csv.exists(), (
+        f"expected default CSV at {expected_csv}, "
+        f"got {list(a.iterdir())}"
+    )
+    text = expected_csv.read_text()
+    assert text.startswith("day,cwv_mean,cwv_max"), (
+        f"default CSV missing expected header; "
+        f"got first line: {text.splitlines()[0]!r}"
+    )
+
+
+def test_csv_explicit_path_overrides_default(tmp_path, monkeypatch):
+    """iter-147: ``--csv PATH`` overrides the default; the default
+    path is NOT written + the explicit path IS."""
+    a = _make_run(tmp_path, "a", [(0.0, 50.0), (1.0, 51.0)])
+    b = _make_run(tmp_path, "b", [(0.0, 50.5), (1.0, 52.0)])
+    explicit_csv = tmp_path / "custom_diff.csv"
+    monkeypatch.setattr(
+        sys, "argv",
+        ["compare_rce_trajectories.py", str(a), str(b),
+         "--csv", str(explicit_csv), "--quiet"],
+    )
+    compare_mod.main()
+    default_csv = a / f"diff_vs_{b.name}.csv"
+    assert explicit_csv.exists()
+    assert not default_csv.exists(), (
+        f"explicit --csv should suppress the default path write; "
+        f"default also written at {default_csv}"
+    )
