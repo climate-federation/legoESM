@@ -58,8 +58,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         choices=["sigma", "hybrid"])
     parser.add_argument("--p-top", type=float, default=None)
     parser.add_argument("--stretching", type=float, default=None)
+    # ``mpas_voronoi`` is the canonical name for the SCVT Voronoi mesh
+    # + TRiSK discretization (Ringler 2010 / Thuburn 2009).  Legacy
+    # aliases ``voronoi`` / ``icosahedral`` / ``mpas`` are accepted
+    # and normalised by ``legoesm.driver.config.normalize_grid_type``
+    # before reaching any internal dispatch.
     parser.add_argument("--grid-type", type=str, default="cubed_sphere",
-                        choices=["cubed_sphere", "gaussian", "latlon", "voronoi"])
+                        choices=["cubed_sphere", "gaussian", "latlon",
+                                 "mpas_voronoi",
+                                 "voronoi", "icosahedral", "mpas"])
     # The canonical names in `supported_matrix.py` are:
     #   - centered       (cubed_sphere, latlon)
     #   - finite_volume  (cubed_sphere, latlon)
@@ -495,6 +502,13 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
     # triple.  ``cdgrid`` is the cubed-sphere C-D grid; keep it as-is.
     if args.discretization == "cgrid" and args.grid_type == "latlon":
         args.discretization = "latlon_cgrid"
+
+    # Normalise the SCVT Voronoi mesh aliases (voronoi / icosahedral /
+    # mpas-as-grid_type) to the canonical ``mpas_voronoi`` before any
+    # downstream consumer sees them.  See
+    # ``legoesm.driver.config.normalize_grid_type``.
+    from legoesm.driver.config import normalize_grid_type
+    args.grid_type = normalize_grid_type(args.grid_type)
 
     # Issue #275 fix C: ``--production-profile`` bundles defaults that
     # the CLI cannot ship as global defaults (because they would silently

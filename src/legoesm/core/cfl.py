@@ -302,7 +302,7 @@ def cfl_check_and_adjust(
         dx_min = estimate_min_dx_latlon(n, radius)
     elif grid_type == "gaussian":
         dx_min = estimate_min_dx_gaussian(n, radius)
-    elif grid_type == "voronoi":
+    elif grid_type == "mpas_voronoi":
         dx_min = estimate_min_dx_icosahedral(n, radius)
     else:
         dx_min = estimate_min_dx_cubed_sphere(n, radius)

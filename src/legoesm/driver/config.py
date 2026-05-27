@@ -29,13 +29,59 @@ AIMIP_VARIANTS: tuple[str, ...] = (
 
 
 class GridConfig(NamedTuple):
-    """Horizontal and vertical grid configuration."""
-    grid_type: str = "cubed_sphere"  # cubed_sphere, gaussian, latlon, voronoi
+    """Horizontal and vertical grid configuration.
+
+    ``grid_type`` is one of the canonical names:
+    ``cubed_sphere``, ``gaussian``, ``latlon``, ``mpas_voronoi``.
+
+    ``mpas_voronoi`` is the SCVT Voronoi mesh + TRiSK discretization
+    (Ringler 2010, Thuburn 2009).  Pre-2026-05 the codebase used three
+    different aliases for this single mesh — ``voronoi``,
+    ``icosahedral``, and (confusingly) ``mpas``.  All three now
+    normalize to ``mpas_voronoi`` at the config boundary; internal
+    dispatch checks only the canonical name.  See
+    :func:`normalize_grid_type`.
+    """
+    grid_type: str = "cubed_sphere"  # cubed_sphere, gaussian, latlon, mpas_voronoi
     resolution: int = 16             # N for CS, n_max for spectral
     nlev: int = 40
     vertical_coord: str = "hybrid"   # sigma, hybrid
     p_top_Pa: float = 200.0
     stretching: float = 2.0
+
+
+# Canonical name for the SCVT Voronoi mesh + TRiSK discretization.
+# Pre-2026-05 grid_type literals that all refer to the same mesh:
+_GRID_TYPE_ALIASES: dict[str, str] = {
+    "voronoi": "mpas_voronoi",
+    "icosahedral": "mpas_voronoi",
+    "ico": "mpas_voronoi",
+    "mpas": "mpas_voronoi",   # legacy: "mpas" sometimes appeared as grid_type
+}
+
+
+def normalize_grid_type(name: str) -> str:
+    """Canonicalise legacy aliases for the SCVT Voronoi mesh.
+
+    Maps ``"voronoi"``, ``"icosahedral"``, ``"ico"``, ``"mpas"`` (as
+    grid_type) all to ``"mpas_voronoi"``.  Every other grid_type
+    string passes through unchanged.
+
+    Callers
+    -------
+    * ``scripts/run_amip*.py`` argparse postprocessors.
+    * Test fixtures that construct ``GridConfig`` directly with the
+      legacy names.
+    * Internal code that branches on grid_type SHOULD assume the
+      string has already been normalised — i.e. compare to
+      ``"mpas_voronoi"``, not to the aliases.
+
+    Returns
+    -------
+    str
+        Canonical grid-type name.
+    """
+    return _GRID_TYPE_ALIASES.get(name, name)
 
 
 class DycoreConfig(NamedTuple):

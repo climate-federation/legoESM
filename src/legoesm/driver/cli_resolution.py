@@ -190,7 +190,10 @@ def expand_cli_resolution(N: int, grid_type: str) -> str:
         return f"C{N}"
     elif grid_type == "latlon":
         return f"{N}x{2 * N}"
-    elif grid_type in ("icosahedral", "mpas"):
+    elif grid_type in ("mpas_voronoi", "icosahedral", "mpas", "voronoi"):
+        # ``mpas_voronoi`` is the canonical name (driver.config.normalize_grid_type);
+        # the other three are accepted for backward compat with older
+        # CLI invocations that pre-dated the unification.
         raw_level = round(math.log(2 * N * N / 10) / math.log(4))
         level = max(2, min(8, raw_level))
         if raw_level > 8:

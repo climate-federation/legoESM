@@ -118,7 +118,7 @@ ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
         "legoesm.atmosphere.dynamics.tracer_transport",
     ),
     SolverEntry(
-        "atmosphere", "tracer_transport", "voronoi",
+        "atmosphere", "tracer_transport", "mpas_voronoi",
         "tracer_transport_mpas", "TracerTransportMPASModel",
         "legoesm.atmosphere.dynamics.tracer_transport_mpas",
     ),

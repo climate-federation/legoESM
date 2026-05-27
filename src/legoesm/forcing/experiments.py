@@ -483,15 +483,13 @@ def create_experiment_config(
         "cubed_sphere": "cdgrid",
         "latlon": "latlon_cgrid",
         "gaussian": "spectral",
-        "voronoi": "mpas",
-        "mpas": "mpas",
+        "mpas_voronoi": "mpas",
     }
     _GRID_DEFAULT_MODEL = {
         "cubed_sphere": "hydrostatic",
         "latlon": "hydrostatic",
         "gaussian": "spectral_pe",
-        "voronoi": "hydrostatic",
-        "mpas": "hydrostatic",
+        "mpas_voronoi": "hydrostatic",
     }
     if "discretization" not in dycore_ov and "grid_type" in grid_ov:
         gt = grid.grid_type

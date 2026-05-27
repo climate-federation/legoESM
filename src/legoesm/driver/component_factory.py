@@ -68,9 +68,12 @@ _DRIVER_SUPPORTED: dict[tuple[str, str, str], str] = {
     ("shallow_water", "latlon_cgrid",   "latlon"):       "latlon_cgrid_shallow_water",
     ("hydrostatic",   "latlon_cgrid",   "latlon"):       "latlon_cgrid_primitive_equations",
 
-    # --- MPAS icosahedral ---
-    ("hydrostatic",   "mpas",           "voronoi"):      "mpas_primitive_equations",
-    ("nonhydrostatic","mpas",           "voronoi"):      "mpas_compressible_euler",
+    # --- MPAS icosahedral (SCVT Voronoi mesh + TRiSK discretization;
+    # canonical grid_type = "mpas_voronoi", legacy aliases
+    # voronoi/icosahedral/mpas are normalised at the config boundary
+    # via driver.config.normalize_grid_type) ---
+    ("hydrostatic",   "mpas",           "mpas_voronoi"): "mpas_primitive_equations",
+    ("nonhydrostatic","mpas",           "mpas_voronoi"): "mpas_compressible_euler",
 
     # --- Doubly-periodic plane (CRM rollout, PR2c) ---
     # Plane only supports the non-hydrostatic compressible Euler dycore.
@@ -179,7 +182,14 @@ def create_atmosphere_dycore(
 
     model_type = dc.model_type
     discretization = dc.discretization
-    grid_type = gc.grid_type
+    # Defensive canonical-name normalization at the factory entry: callers
+    # that bypass run_amip's argparse postprocessor (direct test fixtures,
+    # ad-hoc scripts, older YAML loaders) might still pass ``voronoi`` /
+    # ``icosahedral`` / ``mpas`` for the SCVT mesh.  The dispatch table
+    # below speaks only the canonical ``mpas_voronoi`` so we normalise
+    # here too — the cost is one dict lookup.
+    from legoesm.driver.config import normalize_grid_type
+    grid_type = normalize_grid_type(gc.grid_type)
 
     key = (model_type, discretization, grid_type)
 
