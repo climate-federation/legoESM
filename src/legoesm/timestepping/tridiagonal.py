@@ -151,11 +151,39 @@ def pcr_solve_batched(
     axis); leading axes are batched over. n need not be a power of 2 —
     the system is padded to the next power of 2 with identity rows
     (``b=1, a=c=d=0``) which decouple from the original system.
+
+    Stability assumption
+    --------------------
+    PCR is pivot-free; roundoff growth depends on diagonal dominance.
+    The SI acoustic system has b ~ 1 + alpha (alpha > 0), so b is
+    bounded away from zero — PCR is stable in this regime. For
+    weakly-diagonal-dominant systems consider falling back to Thomas
+    (set ``LEGOESM_TRIDIAG=legacy``).
+
+    Division-in-graph caveat
+    ------------------------
+    ``jnp.where`` does NOT short-circuit. ``alpha = jnp.where(has_above,
+    -a / b_up, 0.0)`` evaluates the division at all rows including those
+    masked out. ``b_up`` is set to 1.0 at masked rows via constant-pad,
+    so the division is safe. If a future caller introduces a real row
+    with b==0, the graph will propagate NaN even where masked.
+
+    Compile-time
+    ------------
+    The Python for-loop unrolls log2(n_pad) levels at trace time. Each
+    level adds ~12 elementwise ops to the traced graph. For n=29
+    (5 levels) × 6 substeps × 3 RK3 stages × outer jit = ~5s compile
+    in practice. Acceptable for JIT-once workloads.
     """
     if a.shape != b.shape or a.shape != c.shape or a.shape != d.shape:
         raise ValueError(
             f"pcr_solve_batched expects matching shapes; got a={a.shape}, "
             f"b={b.shape}, c={c.shape}, d={d.shape}"
+        )
+    if a.ndim < 1:
+        raise ValueError(
+            f"pcr_solve_batched requires at least 1 axis (the tridiag "
+            f"system axis as the last dim); got shape {a.shape}"
         )
     if a.shape[-1] < 2:
         raise ValueError(
@@ -276,6 +304,11 @@ def thomas_solve_batched(
     #   2. env LEGOESM_TRIDIAG=legacy-> fori_loop Thomas (debug / CPU fallback)
     #   3. CUDA backend                 -> cuSPARSE via tridiagonal_solve
     #   4. Else                        -> legacy fori_loop
+    #
+    # NOTE: the env var is read at JIT trace time and baked into the
+    # compiled graph; changing the env var after JIT compile has no
+    # effect on a cached compilation. Set it BEFORE importing legoesm
+    # in your driver script.
     import os
     forced = os.environ.get("LEGOESM_TRIDIAG", "").lower()
     if forced == "pcr":
