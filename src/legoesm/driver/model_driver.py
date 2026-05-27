@@ -1617,19 +1617,30 @@ class ModelDriver:
             tracer_keys = None
         tracer_keys = comm.bcast(tracer_keys, root=0)
 
-        # Collective sanity check (Codex review follow-on to MEDIUM #1):
+        # Collective sanity check (Codex review round 2 BLOCK fix):
         # every rank's pre-load TracerRegistry must already contain the
         # broadcast keys, so the assignment below updates an existing
         # entry rather than silently creating one (which would mask a
         # registry-divergence bug across ranks).
+        #
+        # MUST be collective-safe: raising only on ranks that detect a
+        # mismatch would leave the rest inside the per-tracer
+        # ``scatter_field_latlon`` collective ``bcast`` waiting for a
+        # rank-0 payload that never lands.  Allgather every rank's
+        # ``missing`` tuple so every rank sees the union and raises in
+        # lockstep (or none does).
         my_existing_keys = set(self.tracers.keys())
-        missing = [k for k in tracer_keys if k not in my_existing_keys]
-        if missing:
+        my_missing = tuple(sorted(
+            k for k in tracer_keys if k not in my_existing_keys
+        ))
+        all_missing = comm.allgather(my_missing)
+        if any(m for m in all_missing):
             raise RuntimeError(
-                f"Rank {self._mpi_rank} lacks tracer keys {missing!r} "
-                f"that rank 0's checkpoint contains.  Every rank's "
-                "TracerRegistry must produce the same set of active "
-                "tracer names before load_checkpoint runs."
+                "TracerRegistry key sets diverge across ranks at load "
+                "time; every rank must already have the keys the "
+                "checkpoint contains before load_checkpoint runs.  "
+                "Rank-by-rank missing keys: "
+                f"{all_missing!r}."
             )
 
         for name in tracer_keys:

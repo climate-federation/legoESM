@@ -296,6 +296,52 @@ def test_gather_succeeds_when_tracer_keys_agree(comm, layout):
         assert tracers_g is None
 
 
+def test_scatter_assertion_fires_collectively_on_missing_tracer(comm, layout):
+    """Load-side tracer-registry divergence MUST raise on every rank.
+
+    Codex review round 2 flagged the prior load-side guard as
+    deadlock-prone: it raised only on ranks with missing keys, so the
+    rest would step into ``scatter_field_latlon``'s inner ``comm.bcast``
+    and hang waiting for a payload that never arrives.  The fix uses
+    ``comm.allgather`` of each rank's missing-keys tuple so every rank
+    sees the same divergence flag and raises in lockstep.  This test
+    pins that property: simulate a checkpoint that contains ``q_xtra``
+    while every rank's TracerRegistry has only ``q_v``, then assert
+    every rank raises with the expected diagnostic.
+    """
+    if comm.Get_size() < 2:
+        pytest.skip("Need at least 2 ranks to exercise the collective")
+
+    # Rank 0 holds the "global" state from a checkpoint that had
+    # ``q_xtra``; every rank's pre-load self.tracers lacks ``q_xtra``.
+    if layout.rank == 0:
+        global_shape = (layout.n_lat_global, N_LON, NLEV)
+        tracers_global = {
+            "q_v": jnp.zeros(global_shape),
+            "q_xtra": jnp.zeros(global_shape),
+        }
+        global_state = _make_mock_state_for_rank(  # rank-0 reads the global, not its band
+            make_latlon_band_layout(0, 1, layout.n_lat_global, N_LON),
+        )
+    else:
+        tracers_global = None
+        global_state = None
+
+    from legoesm.driver.model_driver import ModelDriver
+
+    fake_driver = SimpleNamespace(
+        _layout=layout,
+        _mpi_rank=layout.rank,
+        state=_make_mock_state_for_rank(layout),
+        tracers={"q_v": jnp.zeros((layout.n_lat_local, N_LON, NLEV))},
+    )
+
+    with pytest.raises(RuntimeError, match="TracerRegistry key sets diverge"):
+        ModelDriver._scatter_global_state_to_bands(
+            fake_driver, global_state, tracers_global,
+        )
+
+
 def test_gather_assertion_fires_on_v_face_row_mismatch(comm, layout):
     """If a rank's v[0] disagrees with the southern neighbour's
     v[-1], ``_gather_state_for_global_checkpoint`` must raise
