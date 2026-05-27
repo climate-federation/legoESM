@@ -56,8 +56,15 @@ def _extract_cubed_only_attrs_tuple(tree: ast.Module) -> tuple[str, ...]:
 
 def _extract_add_argument_dest_names(tree: ast.Module) -> set[str]:
     """Walk every ``p.add_argument(...)`` call and return the
-    argparse-derived ``dest`` attr name (from the first positional
-    arg, stripping ``--`` prefix and substituting ``-`` for ``_``).
+    argparse-derived ``dest`` attr name. argparse derives ``dest``
+    from the FIRST long-form (``--foo``) option string, regardless
+    of position, so we scan ALL string positional args.
+
+    iter-295 (Codex iter-294 round-1 MEDIUM): the iter-294 version
+    inspected only ``node.args[0]``, missing patterns like
+    ``add_argument('-c', '--cubed-hyperdiff', ...)`` where the
+    long form is the second arg. That would silently bypass the
+    AST lock for short-form-prefixed cubed-only flags.
     """
     dests: set[str] = set()
     for node in ast.walk(tree):
@@ -70,12 +77,15 @@ def _extract_add_argument_dest_names(tree: ast.Module) -> set[str]:
             continue
         if not node.args:
             continue
-        first = node.args[0]
-        if isinstance(first, ast.Constant) and isinstance(first.value, str):
-            flag = first.value
-            if flag.startswith("--"):
-                dest = flag[2:].replace("-", "_")
+        # Scan ALL positional string args for the first one
+        # starting with ``--`` (argparse picks that for dest).
+        for arg in node.args:
+            if (isinstance(arg, ast.Constant)
+                    and isinstance(arg.value, str)
+                    and arg.value.startswith("--")):
+                dest = arg.value[2:].replace("-", "_")
                 dests.add(dest)
+                break  # argparse uses the first --long-form
     return dests
 
 
