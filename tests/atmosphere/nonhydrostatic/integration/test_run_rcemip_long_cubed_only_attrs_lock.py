@@ -25,33 +25,41 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 DRIVER = REPO_ROOT / "scripts" / "run_rcemip_long.py"
 
 
-# Prefixes that conceptually mean "cubed-sphere-only" in this
-# driver. n-cubed-sphere is the grid-resolution knob; sfc-* are
-# the bulk surface-flux knobs (cubed-sphere is the only grid
-# wired for them today); cubed-* are dycore-tuning knobs.
-_CUBED_PREFIXES = ("n_cubed_sphere", "sfc_", "cubed_")
+# Prefixes that conceptually mean "cubed-sphere-strict" in this
+# driver. n-cubed-sphere is the grid-resolution knob; cubed-*
+# are dycore-tuning knobs.
+# iter-309: sfc-* REMOVED from this set because MPAS now also
+# uses them (iter-307 _make_mpas_surface_flux_tendency).
+# sfc-* belong to _SFC_SHARED_ATTRS in the driver, locked
+# separately by test_sfc_shared_attrs_matches_add_argument_registrations
+# below.
+_CUBED_PREFIXES = ("n_cubed_sphere", "cubed_")
+_SFC_PREFIX = "sfc_"
 
 
-def _extract_cubed_only_attrs_tuple(tree: ast.Module) -> tuple[str, ...]:
-    """Return the literal value of the module-level
-    ``_CUBED_ONLY_ATTRS`` assignment."""
+def _extract_tuple_literal(tree: ast.Module, name: str) -> tuple[str, ...]:
+    """Return the literal value of the module-level ``<name>``
+    tuple assignment in the driver AST."""
     for node in tree.body:
         if isinstance(node, ast.Assign):
             for tgt in node.targets:
-                if isinstance(tgt, ast.Name) and tgt.id == "_CUBED_ONLY_ATTRS":
+                if isinstance(tgt, ast.Name) and tgt.id == name:
                     if not isinstance(node.value, ast.Tuple):
                         raise AssertionError(
-                            "_CUBED_ONLY_ATTRS RHS is not a tuple "
-                            f"literal: {ast.dump(node.value)}"
+                            f"{name} RHS is not a tuple literal: "
+                            f"{ast.dump(node.value)}"
                         )
                     return tuple(
                         elt.value for elt in node.value.elts
                         if isinstance(elt, ast.Constant)
                     )
     raise AssertionError(
-        "module-level _CUBED_ONLY_ATTRS tuple not found in "
-        f"{DRIVER}"
+        f"module-level {name} tuple not found in {DRIVER}"
     )
+
+
+def _extract_cubed_only_attrs_tuple(tree: ast.Module) -> tuple[str, ...]:
+    return _extract_tuple_literal(tree, "_CUBED_ONLY_ATTRS")
 
 
 def _extract_add_argument_dest_names(tree: ast.Module) -> set[str]:
@@ -135,6 +143,28 @@ def test_extract_dest_handles_two_long_forms():
     dests = _extract_add_argument_dest_names(tree)
     assert dests == {"cubed_X"}, (
         f"First --long-form should win; got {dests}."
+    )
+
+
+def test_sfc_shared_attrs_matches_add_argument_registrations():
+    """iter-309: parallel AST lock for ``_SFC_SHARED_ATTRS``. The
+    sfc-* CLI flags moved out of cubed-sphere-only in iter-307
+    (MPAS now uses them too); this test ensures the
+    ``_SFC_SHARED_ATTRS`` tuple stays in sync with the actual
+    ``--sfc-*`` argparse registrations.
+    """
+    tree = ast.parse(DRIVER.read_text())
+    sfc_attrs = set(_extract_tuple_literal(tree, "_SFC_SHARED_ATTRS"))
+    all_dests = _extract_add_argument_dest_names(tree)
+    sfc_prefix_dests = {d for d in all_dests if d.startswith(_SFC_PREFIX)}
+    missing = sfc_prefix_dests - sfc_attrs
+    extra = sfc_attrs - sfc_prefix_dests
+    assert not missing, (
+        f"_SFC_SHARED_ATTRS missing dest(s): {sorted(missing)}."
+    )
+    assert not extra, (
+        f"_SFC_SHARED_ATTRS contains attrs that don't correspond "
+        f"to any p.add_argument() registration: {sorted(extra)}."
     )
 
 

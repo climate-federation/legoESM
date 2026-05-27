@@ -60,13 +60,21 @@ _SFC_CLI_RANGES = {
 # iter-293 (Codex iter-292 round-3 MEDIUM#2): cubed-sphere-only
 # CLI flag names. Defaults derived from argparse via
 # ``p.get_default(attr)`` at validation time, so a future
-# default change can't drift past the misuse check. The list
-# itself stays here as the source-of-truth set of cubed-only
-# knobs.
+# default change can't drift past the misuse check.
+# iter-309 (Codex iter-307/308 round-1 HIGH): sfc_* attrs
+# REMOVED from this tuple because MPAS now also uses them (via
+# iter-307 _make_mpas_surface_flux_tendency). The remaining
+# entries are STRICTLY cubed-sphere — n_cubed_sphere selects
+# the C-grid face size, cubed-* tunes the CDGridCompressibleEulerConfig.
 _CUBED_ONLY_ATTRS = (
-    "n_cubed_sphere", "sfc_Cd", "sfc_Ch", "sfc_T", "sfc_q",
+    "n_cubed_sphere",
     "cubed_n_acoustic", "cubed_coriolis", "cubed_fix_mass",
 )
+# iter-309: shared surface-flux attrs used by BOTH cubed-sphere
+# + MPAS moist paths. Validation runs for any grid that uses
+# moist physics; if --grid plane_fd/plane_spectral and any
+# sfc-* is non-default, misuse is reported.
+_SFC_SHARED_ATTRS = ("sfc_Cd", "sfc_Ch", "sfc_T", "sfc_q")
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
@@ -291,12 +299,15 @@ def _compose_nh_moist_physics(model_type: str, dt: float,
     dt : float
         Outer time step [s], passed to the microphysics factory.
     with_surface_flux : bool, default False
-        iter-283: if True, also compose
-        ``_make_cubed_sphere_surface_flux_tendency`` (bulk Cd/Ch
-        with fixed T_sfc=300 K, q_sfc=0.018). Only supported for
-        ``model_type='nonhydrostatic'`` (cubed-sphere) today —
-        MPAS has u-on-edges + no v which needs a separate helper
-        (deferred to a follow-on iter).
+        If True, also compose a bulk surface flux tendency:
+        * ``model_type='nonhydrostatic'`` → iter-283
+          ``_make_cubed_sphere_surface_flux_tendency`` (full
+          Cd/Ch heat + moisture + momentum drag).
+        * ``model_type='mpas_nh'`` → iter-307
+          ``_make_mpas_surface_flux_tendency`` (heat + moisture
+          only, no momentum drag — MPAS u-on-edges + no v
+          needs edge↔cell reconstruction for that).
+        ValueError raised for any other model_type.
 
     Returns
     -------
@@ -699,7 +710,9 @@ def _run_cubed_sphere(days: float, dt: float, print_every: int, output: Path,
 
 
 def _run_mpas(days: float, dt: float, print_every: int, output: Path,
-              *, moist: bool = False):
+              *, moist: bool = False,
+              sfc_Cd: float = 1.0e-3, sfc_Ch: float = 1.0e-3,
+              sfc_T: float = 300.0, sfc_q: float = 0.018):
     from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
         MPASCompressibleEulerConfig, MPASCompressibleEulerModel,
     )
@@ -761,6 +774,8 @@ def _run_mpas(days: float, dt: float, print_every: int, output: Path,
     if moist:
         physics_fn = _compose_nh_moist_physics(
             model_type="mpas_nh", dt=dt, with_surface_flux=True,
+            sfc_Cd=sfc_Cd, sfc_Ch=sfc_Ch,
+            sfc_T=sfc_T, sfc_q=sfc_q,
         )
     else:
         physics_fn = None
@@ -950,12 +965,12 @@ def main():
     # iter-292 (Codex round-2 HIGH): added n_cubed_sphere to the
     # cubed-only set — iter-291 omitted it so ``--grid mpas
     # --n-cubed-sphere 96`` was silently ignored.
+    # iter-309 (Codex iter-307/308 round-1 HIGH): split misuse
+    # detection between cubed-sphere-strict + sfc-moist-shared.
+    # sfc-* are now used by BOTH cubed-sphere AND MPAS, so they
+    # check against the moist-physics-grids set ({cubed_sphere,
+    # mpas}), not strictly cubed-sphere.
     if args.grid != "cubed_sphere":
-        # iter-293 (Codex iter-292 round-3 MEDIUM#2): derive
-        # default values from the argparse parser (single source
-        # of truth) instead of duplicating them. A future PR that
-        # changes a default in p.add_argument() automatically
-        # updates the misuse-detection logic too.
         _passed_cubed_only = [
             _attr for _attr in _CUBED_ONLY_ATTRS
             if getattr(args, _attr) != p.get_default(_attr)
@@ -966,6 +981,18 @@ def main():
                 f"flags were passed: "
                 f"{', '.join('--' + a.replace('_', '-') for a in _passed_cubed_only)}. "
                 f"These only apply to --grid cubed_sphere."
+            )
+    if args.grid not in ("cubed_sphere", "mpas"):
+        _passed_sfc_shared = [
+            _attr for _attr in _SFC_SHARED_ATTRS
+            if getattr(args, _attr) != p.get_default(_attr)
+        ]
+        if _passed_sfc_shared:
+            raise SystemExit(
+                f"error: --grid={args.grid} but moist-surface-flux "
+                f"flags were passed: "
+                f"{', '.join('--' + a.replace('_', '-') for a in _passed_sfc_shared)}. "
+                f"These only apply to --grid cubed_sphere or mpas."
             )
     # iter-288 (Codex iter-283..287 round-1 LOW#2): validate
     # --n-cubed-sphere is a positive integer.
@@ -1001,20 +1028,23 @@ def main():
     common_kwargs = dict(moist=args.moist)
     if args.grid == "cubed_sphere":
         common_kwargs["n"] = args.n_cubed_sphere
-        # iter-289: forward surface-flux kwargs to the cubed-sphere
-        # runner so the user can tune Cd/Ch/T_sfc/q_sfc without
-        # editing code. plane_fd / mpas paths don't accept these
-        # today (plane CRM uses its own composer in run_rcemip_plane.py;
-        # MPAS u-on-edges surface flux not yet wired).
+        # iter-289: forward surface-flux kwargs.
         common_kwargs["sfc_Cd"] = args.sfc_Cd
         common_kwargs["sfc_Ch"] = args.sfc_Ch
         common_kwargs["sfc_T"] = args.sfc_T
         common_kwargs["sfc_q"] = args.sfc_q
-        # iter-290: dycore-tuning forwards. None passthrough means
-        # _run_cubed_sphere applies the moist-vs-dry default.
+        # iter-290: dycore-tuning forwards.
         common_kwargs["n_acoustic"] = args.cubed_n_acoustic
         common_kwargs["coriolis"] = args.cubed_coriolis
         common_kwargs["fix_mass"] = args.cubed_fix_mass
+    elif args.grid == "mpas":
+        # iter-309 (Codex iter-307/308 round-1 HIGH): MPAS now
+        # accepts the shared --sfc-* CLI flags (forwarded into
+        # _make_mpas_surface_flux_tendency).
+        common_kwargs["sfc_Cd"] = args.sfc_Cd
+        common_kwargs["sfc_Ch"] = args.sfc_Ch
+        common_kwargs["sfc_T"] = args.sfc_T
+        common_kwargs["sfc_q"] = args.sfc_q
     dispatch[args.grid](
         args.days, args.dt, args.print_every, args.output,
         **common_kwargs,
