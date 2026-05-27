@@ -272,13 +272,18 @@ def main() -> int:
                 allow_unsafe_cfl=args.allow_unsafe_cfl,
                 repeat=args.repeat,
             )
-            # HBM utilization estimate: 80 B/cell-level × passes/step.
+            # HBM utilization estimate: dtype-aware bytes/cell-level × passes.
             # Passes = 3 RK3 stages × (1 slow_tend + n_substeps), each
-            # pass touches the prognostic state arrays (5 fields).
+            # touches ~5 prognostic fields read+write with ~2× intermediate
+            # overhead: 5 × dtype_bytes × 2 read+write × 2 intermediate
+            # = 20 × dtype_bytes. fp32 → 80 B/cell-lev; fp64 → 160 B/cell-lev.
             # Use 730 GB/s as consumer-mobile RTX 5090 sustained ceiling
             # (advertised peak 960 GB/s; ~76% sustained typical).
+            dtype_bytes = 4 if args.precision == "float32" else 8
+            bytes_per_cell_lev = 20 * dtype_bytes
             passes_per_step = 3 * (1 + args.n_acoustic_substeps)
-            bw_used = r.mcells_per_s * 1e6 * 80 * passes_per_step / 1e9
+            bw_used = (r.mcells_per_s * 1e6 * bytes_per_cell_lev
+                       * passes_per_step / 1e9)
             hbm_pct = 100.0 * bw_used / 730.0
             print(f"  N{n:>4d} cells={r.total_cells:>10,}  "
                   f"compile={r.compile_time_s:6.2f}s  "
