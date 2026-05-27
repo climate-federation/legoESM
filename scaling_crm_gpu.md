@@ -117,6 +117,25 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 12 — 2026-05-27 — verify PR #319 ocean LL peak is not inflated
+
+Ran ocean LL192 fp32 impl_cn 3 times in series:
+
+  Run 1: 2.70 ms / **545.4 Mc/s**
+  Run 2: 2.70 ms / **547.1 Mc/s**
+  Run 3: 2.70 ms / **546.3 Mc/s**
+
+Variance ±0.3%. PR #319 single-shot peak of 546 Mc/s is **verified
+robust** — not inflated.
+
+Conclusion: single-shot timing is reliable when step time >2 ms.
+Sub-millisecond cases (CRM explicit N<192) need median-of-3.
+
+The CRM explicit-acoustic plateau at 680 Mc/s (iter 11) and ocean LL
+peak at 546 are both real; the prior CRM 820 inflation was an
+artifact of the sub-millisecond regime + scan-amortization + cache
+warmth, not a systematic bench-wide noise.
+
 ### Iter 11 — 2026-05-27 — median-3 sweeps for BOTH solvers (corrections)
 
 Full median-3 sweeps. Prior single-shot numbers were systematically
