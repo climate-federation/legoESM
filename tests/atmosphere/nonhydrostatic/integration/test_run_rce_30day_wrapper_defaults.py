@@ -82,10 +82,14 @@ def test_other_production_defaults(wrapper_text):
     defaults = {
         "NX": "132",
         "NY": "132",
-        # iter-180: WENO5 is the production advection scheme (5th-order,
-        # less grid-scale dispersion than upwind1; pairs with dt=20 + beta=0.2
-        # at acoustic CFL Ca_sub=0.87 in the iter-180 smoke).
-        "ADVECTION": "weno5",
+        # iter-183 wall-time refresh: WENO5 at dt=20 actually runs SLOWER
+        # than the iter-14 dt=10+upwind1 baseline (2x fewer steps, 2.4x
+        # cost per step → net 1.22x slower). Van Leer at dt=20 is the
+        # right TVD-2nd-order choice: stencil width 4, 3x wall-time
+        # speedup over dt=10+upwind1 at the same sim time. WENO5 stays
+        # available as opt-in for sharp-front problems where dispersion
+        # matters more than throughput.
+        "ADVECTION": "van_leer",
         "HYPERDIFF": "5.0e6",
         "BUBBLE_K": "0.0",   # F7 / F10 contract: clean Wing IC
         # iter-181 F11: QV_NOISE reverted 1e-4 -> 0.0 after the

@@ -1082,29 +1082,29 @@ def test_plane_crm_production_scale_132x132_one_hour_envelope(tmp_path):
     )
 
 
-def test_plane_crm_dt20_weno5_stability_smoke(tmp_path):
-    """iter-180 regression: the new production combination
-    (dt=20 + WENO5 + beta=0.2) must run stably with radiation.
+def test_plane_crm_dt20_van_leer_stability_smoke(tmp_path):
+    """iter-183 regression: the new production combination
+    (dt=20 + Van Leer + beta=0.2) must run stably with radiation.
 
     Smoke measurements at 32x32x30 dx=4 km, single-rank, clean
     Wing IC, no bubble, no qv noise, gray radiation every 600 s,
     --no-mass-fixer, --hyperdiff 5e6, --smag-cs 0.2,
     --semi-implicit-acoustic, --acoustic-off-centering 0.2,
-    --advection weno5: 432 steps in 1.9 min wall (M5 Pro CPU)
-    with max|w| <= 1.78e-3 m/s and Ca_substep = 0.87. iter-180
-    pre-prod test before flipping the 30-day wrapper defaults.
+    --advection van_leer: 432 steps in 0.6 min wall (M5 Pro CPU)
+    with max|w| <= 1.78e-3 m/s and Ca_substep = 0.87. iter-183
+    measured 3x wall-time speedup over the dt=10+upwind1 baseline
+    at the same sim time.
 
-    A regression that destabilises this combination (e.g. a
-    silent revert of the iter-179 WENO5 dispatch wiring, the
-    iter-180 driver default refresh, or the SI acoustic
-    off-centering coefficient) would surface here as a NaN at
-    < 100 steps. Fast enough (~1 min wall) to run in the regular
-    suite, not under ``slow``.
+    A regression that destabilises this combination (e.g. a silent
+    revert of the iter-179 Van Leer dispatch wiring, the iter-180
+    dt/beta refresh, or the iter-183 advection scheme refresh)
+    would surface here as a NaN at < 100 steps. Fast enough
+    (~30 s wall) to run in the regular suite, not under ``slow``.
     """
     env = os.environ.copy()
     env["JAX_PLATFORMS"] = "cpu"
     env["JAX_ENABLE_X64"] = "1"
-    out_dir = tmp_path / "rce_dt20_weno5"
+    out_dir = tmp_path / "rce_dt20_van_leer"
     cmd = [
         sys.executable, str(DRIVER),
         "--nx", "32", "--ny", "32", "--nlev", "30",
@@ -1113,7 +1113,7 @@ def test_plane_crm_dt20_weno5_stability_smoke(tmp_path):
         "--semi-implicit-acoustic",
         "--acoustic-off-centering", "0.2",
         "--n-acoustic-substeps", "12",
-        "--advection", "weno5",
+        "--advection", "van_leer",
         "--hyperdiff", "5e6",
         "--smag-cs", "0.2",
         "--bubble-theta-pert", "0.0",
@@ -1129,41 +1129,41 @@ def test_plane_crm_dt20_weno5_stability_smoke(tmp_path):
     )
     if result.returncode != 0:
         pytest.fail(
-            "dt=20 + WENO5 + beta=0.2 driver exited nonzero "
+            "dt=20 + Van Leer + beta=0.2 driver exited nonzero "
             f"({result.returncode})\n"
             f"stdout tail:\n{result.stdout[-1500:]}\n"
             f"stderr tail:\n{result.stderr[-800:]}"
         )
     rows = _read_log(out_dir)
     assert rows, (
-        "dt=20 + WENO5 smoke: log.txt empty. The driver compiled "
+        "dt=20 + Van Leer smoke: log.txt empty. The driver compiled "
         "but exited without writing any data rows."
     )
     # Every row must be finite — any NaN means the new combination
-    # destabilised. iter-180 baseline smoke saw max|w| <= 1.8e-3
+    # destabilised. iter-183 baseline smoke saw max|w| <= 1.8e-3
     # at 432 steps with radiation; 100-step max should land well
     # under 5e-3.
     for r in rows:
         for key in ("CWV_mean", "max|w|", "MSE_mean"):
             val = r[key]
             assert val not in ("nan", "inf", "-inf"), (
-                f"dt=20 + WENO5: {key}={val!r} at step {r['step']!r} "
-                f"— iter-180 production combination destabilised."
+                f"dt=20 + Van Leer: {key}={val!r} at step {r['step']!r} "
+                f"— iter-183 production combination destabilised."
             )
     final = rows[-1]
     max_w_final = float(final["max|w|"])
     assert max_w_final < 5e-3, (
-        f"dt=20 + WENO5 smoke: final max|w|={max_w_final:.3e} "
-        f"exceeds 5e-3 cap (iter-180 baseline measurement was "
+        f"dt=20 + Van Leer smoke: final max|w|={max_w_final:.3e} "
+        f"exceeds 5e-3 cap (iter-183 baseline measurement was "
         f"1.78e-3 at 432 steps with radiation)."
     )
     # Acoustic CFL ratio should stay well below the SI-relaxed
-    # bound. Pre-iter-180 the smoke read Ca_substep = 0.87 at
+    # bound. Pre-iter-183 the smoke read Ca_substep = 0.87 at
     # dt=20 + N_ACOUSTIC=12. Cap at 1.5 leaves room for minor
     # variations across hardware while catching a config that
     # silently doubles the inner CFL.
     ca_final = float(final["Ca_substep"])
     assert ca_final < 1.5, (
-        f"dt=20 + WENO5 smoke: Ca_substep={ca_final:.3f} exceeds "
+        f"dt=20 + Van Leer smoke: Ca_substep={ca_final:.3f} exceeds "
         f"1.5 — N_ACOUSTIC may have been reduced silently."
     )

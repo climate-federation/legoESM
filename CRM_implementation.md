@@ -28,7 +28,7 @@ Canonical state of CRM rollout — built, broken, next. Each iteration appends d
 
 ## Definition of done
 
-30-day CRM run on production target (132×132 plane, dx=2 km, nlev=30, H=33 km, dt=20 s + N_ACOUSTIC=12, 12 MPI ranks, Wing 2018 RCEMIP1 IC, gray radiation + Kessler + Smagorinsky LES + surface fluxes, WENO5 horizontal advection, β=0.2 acoustic off-centering) must:
+30-day CRM run on production target (132×132 plane, dx=2 km, nlev=30, H=33 km, dt=20 s + N_ACOUSTIC=12, 12 MPI ranks, Wing 2018 RCEMIP1 IC, gray radiation + Kessler + Smagorinsky LES + surface fluxes, Van Leer TVD horizontal advection, β=0.2 acoustic off-centering) must:
 
 (iter-82: dt refreshed 1 s → 5 s per iter-9 F10 finding + iter-14/iter-38/iter-63 production-scale verification; the iter-1 dt=1 s was set against the bubble-IC F1 instability that F7 then disproved.)
 

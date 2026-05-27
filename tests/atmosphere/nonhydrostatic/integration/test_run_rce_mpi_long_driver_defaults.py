@@ -189,12 +189,15 @@ def test_use_dd_default(driver_defaults):
 
 
 def test_advection_production_default(driver_defaults):
-    """iter-180 refresh: WENO5 (5th-order, less grid-scale dispersion)
-    is now the production default. The iter-7 upwind1 default was
-    cheaper but introduced more numerical diffusion + tighter
-    advective CFL — upwind1 stays available via ``--advection upwind1``
-    for back-compat / bit-comparison runs."""
-    assert driver_defaults["--advection"] == "weno5"
+    """iter-183 wall-time refresh: Van Leer TVD is the production
+    default at dt=20. iter-180 had set WENO5 as the new default
+    based on a stability check alone, but the iter-183 wall-time
+    measurement showed WENO5 at dt=20 actually runs SLOWER than
+    iter-14's dt=10+upwind1 (2x fewer steps but 2.4x per-step
+    cost → net 1.22x slower). Van Leer at dt=20 is 3x faster than
+    the baseline at the same sim time. WENO5 stays available as
+    opt-in for sharp-front problems."""
+    assert driver_defaults["--advection"] == "van_leer"
 
 
 def test_sponge_production_defaults(driver_defaults):
