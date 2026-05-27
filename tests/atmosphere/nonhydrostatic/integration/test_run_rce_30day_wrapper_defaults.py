@@ -672,3 +672,103 @@ def test_wrapper_evaluate_dod_rejects_typo(tmp_path):
     assert "Valid values: 0" in res.stderr, (
         "stderr should list valid values"
     )
+
+
+def test_wrapper_prints_final_dod_hint_on_30day_default(tmp_path):
+    """iter-124: when DAYS>=30 and EVALUATE_DOD=0 (default), the
+    wrapper should print a hint on stdout suggesting --final-dod
+    as the manual follow-up. Catches the silent-skip class where
+    a production-config run lands a trajectory.csv but never grades
+    it."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _make_stub(bin_dir / "mpirun", exit_code=0)
+    pybin = bin_dir / "fake_pybin"
+    _make_stub(pybin, exit_code=0)
+    out_dir = tmp_path / "wrapper_out"
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["PYBIN"] = str(pybin)
+    env["DAYS"] = "30"        # production-scale
+    env["NX"] = "4"
+    env["NY"] = "4"
+    env["RANKS"] = "1"
+    env["NO_MASS_FIXER"] = "1"
+    env["ALLOW_SUMMARY_FAILURE"] = "0"
+    env["EVALUATE_DOD"] = "0"  # the default — DOD not auto-gated
+    res = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+         str(out_dir)],
+        env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
+        check=False, timeout=30,
+    )
+    assert res.returncode == 0
+    assert "Hint: this is a >=30-day production run" in res.stdout, (
+        f"expected the iter-124 hint on a 30-day + EVALUATE_DOD=0 run;\n"
+        f"stdout={res.stdout!r}"
+    )
+    assert "--final-dod" in res.stdout
+
+
+def test_wrapper_no_hint_on_short_run(tmp_path):
+    """iter-124 sibling: short runs (DAYS<30) should NOT trigger the
+    final-DOD hint."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _make_stub(bin_dir / "mpirun", exit_code=0)
+    pybin = bin_dir / "fake_pybin"
+    _make_stub(pybin, exit_code=0)
+    out_dir = tmp_path / "wrapper_out"
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["PYBIN"] = str(pybin)
+    env["DAYS"] = "5"
+    env["NX"] = "4"
+    env["NY"] = "4"
+    env["RANKS"] = "1"
+    env["NO_MASS_FIXER"] = "1"
+    env["ALLOW_SUMMARY_FAILURE"] = "0"
+    env["EVALUATE_DOD"] = "0"
+    res = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+         str(out_dir)],
+        env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
+        check=False, timeout=30,
+    )
+    assert res.returncode == 0
+    assert "Hint: this is a >=30-day" not in res.stdout, (
+        f"5-day smoke should not trigger the 30-day hint; "
+        f"stdout={res.stdout!r}"
+    )
+
+
+def test_wrapper_no_hint_when_evaluate_dod_set(tmp_path):
+    """iter-124: EVALUATE_DOD=final already grades the run, so the
+    hint is redundant — suppress it."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _make_stub(bin_dir / "mpirun", exit_code=0)
+    pybin = bin_dir / "fake_pybin"
+    _make_stub(pybin, exit_code=0)
+    out_dir = tmp_path / "wrapper_out"
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["PYBIN"] = str(pybin)
+    env["DAYS"] = "30"
+    env["NX"] = "4"
+    env["NY"] = "4"
+    env["RANKS"] = "1"
+    env["NO_MASS_FIXER"] = "1"
+    env["ALLOW_SUMMARY_FAILURE"] = "0"
+    env["EVALUATE_DOD"] = "final"  # already grading
+    res = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+         str(out_dir)],
+        env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
+        check=False, timeout=30,
+    )
+    assert res.returncode == 0
+    assert "Hint: this is a >=30-day" not in res.stdout, (
+        f"EVALUATE_DOD=final should suppress the hint; "
+        f"stdout={res.stdout!r}"
+    )

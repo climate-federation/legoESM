@@ -189,3 +189,20 @@ else
     echo "Set ALLOW_SUMMARY_FAILURE=1 to downgrade to a warning." >&2
     exit "$summary_status"
 fi
+
+# iter-124: if the user ran a >=30-day production run without
+# EVALUATE_DOD=final, the wrapper landed trajectory.csv but did NOT
+# grade it against the production DOD criterion 2 (1 % MSE drift,
+# Wing 2018 plateau range). Print a hint so the manual follow-up
+# is obvious. The check uses bash arithmetic on DAYS; non-integer
+# DAYS values (rare) just fall through with no hint.
+if [ "$EVALUATE_DOD" = "0" ] && [ "${DAYS%.*}" -ge 30 ] 2>/dev/null; then
+    echo ""
+    echo "Hint: this is a >=30-day production run with EVALUATE_DOD=0."
+    echo "  To grade the trajectory against the final DOD criterion 2"
+    echo "  (Wing 2018 plateau, 1 % MSE drift over last 10 days), run:"
+    echo "    $PYBIN scripts/summarize_rce_trajectory.py \\"
+    echo "      $OUTPUT --final-dod"
+    echo "  Or re-launch this wrapper with EVALUATE_DOD=final to gate"
+    echo "  on the verdict (non-zero exit on FAIL)."
+fi
