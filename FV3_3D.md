@@ -2378,6 +2378,93 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1047 (2026-05-28): duogrid+factory MPI investigation — 2 negative findings
+
+### Goal
+
+Resolve iter-1046's open follow-up: ``use_duogrid=True`` + full
+factory MPI bit-for-bit mismatch.  Per iter-1046's Codex review,
+"evidence is against" the obvious "non-owned halo feedback"
+hypothesis; deeper investigation needed.
+
+### Probe 1: ``pad_halo_4d(duogrid=DG)`` standalone
+
+Wrote a focused probe `/tmp/test_duogrid_halo.py` that calls
+``pad_halo_4d(field, duogrid=DG)`` directly under both local
+and MPI backends and compares output on owned faces.
+
+Result: **PASSES bit-for-bit on CPU.**  ``max_diff = 0.0`` on
+every owned face.  So the underlying duogrid halo op is correct
+under MPI.  The iter-1046 mismatch is NOT a bug in the halo op
+itself.
+
+### Probe 2: Metal backend artifact
+
+The same probe FAILS on the default Metal backend with::
+
+    jax.errors.JaxRuntimeError: UNKNOWN: -:0:0:
+    error: unknown attribute code: 22
+
+The error fires inside ``jnp.linspace`` called during
+``create_cubed_sphere(use_duogrid=True)`` grid construction.
+This is a ``jax-metal`` + duogrid incompatibility on macOS,
+NOT a legoESM bug.  Workaround: ``JAX_PLATFORMS=cpu`` for any
+MPI run with duogrid.
+
+### Probe 3: In-suite vs alone
+
+The iter-1046 NH factory test with ``use_duogrid=True``:
+
+- **Passes** when run alone via
+  ``pytest tests/distributed/test_mpi_fv3_nh_step_fidelity.py::TestFV3NHStepMPIFidelity::test_nh_3_step_with_fv3_faithful_factory``.
+- **Fails** with ~5e-3 max-diff in ``w`` and ``theta_prime``
+  fields when run AFTER any other NH test in the same pytest
+  session.  Even with ``jax.clear_caches()`` immediately before
+  the factory body.
+
+The failure reproduces in a standalone probe file that does NOT
+use the legoESM ``tests/distributed/conftest.py`` (which pre-
+initializes ``initialize_distributed(global_n=2)`` at session
+start).
+
+Suspect: ``initialize_distributed`` builds a JAX device mesh on
+first call.  When the factory test runs as the first MPI
+``initialize_distributed`` call (probe case OR after some prior
+test that already toggled the backend), the device mesh / global
+config differs from the iter-1046 conftest-pre-init case.
+Something in the NH split-explicit acoustic substep loop reads
+this global state and produces different XLA output.
+
+### Outcome
+
+Reverted ``use_duogrid=True`` in both PE and NH factory tests —
+kept at ``False`` to match the iter-1046 status.  The factory
+tests pass in-suite for the no-duogrid case.  The duogrid+factory
+in-suite divergence is documented as an iter-1047 known
+limitation.
+
+### Codex review
+
+Skipped — iter-1047 is a diagnostic-only iteration with no code
+changes beyond docstrings.  The 22-test MPI suite continues to
+pass.
+
+### Status of iter-1046 open follow-ups
+
+| Item | Status |
+|------|--------|
+| Non-square halo for ``use_fv3_cross_face_du_proj`` | ⏳ deferred (substantial refactor required) |
+| ``use_duogrid=True`` + full factory MPI in-suite | ⏳ root cause unidentified (probably JAX device mesh / global state); standalone halo is bit-for-bit confirmed |
+
+### Why this iteration was meaningful
+
+Negative findings have value.  iter-1047 ruled out the obvious
+hypothesis (halo op bug) and isolated the failure mode to the
+in-suite global state interaction — narrowing the search space
+for a future investigator.  Also surfaced the Metal-vs-CPU
+incompatibility for MPI runs with duogrid, which is a useful
+workaround note for users.
+
 ## Iteration 1046 (2026-05-28): factory MPI test + 2 known limitations surfaced
 
 ### Goal

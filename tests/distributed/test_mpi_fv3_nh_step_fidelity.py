@@ -320,6 +320,16 @@ class TestFV3NHStepMPIFidelity:
     def test_nh_3_step_with_fv3_faithful_factory(self):
         """FV3_3D iter-1046: factory minus 2 known MPI-incompatible paths.
 
+        iter-1047 test isolation note: clear JIT caches before the
+        factory test runs.  Prior tests in the same session trace
+        ``CDGridCompressibleEulerModel._step_jitted`` under simpler
+        configs; even though each test creates a fresh model
+        instance, observed bit-for-bit drift between the factory
+        run in isolation vs after other NH tests indicates JAX's
+        XLA-level cache may reuse compiled modules across instances
+        with related jaxpr signatures.  ``jax.clear_caches()``
+        ensures a fresh trace.
+
         Composes the ``make_fv3_faithful_nh_config(**production_overrides)``
         factory under MPI, EXCEPT for two paths with known MPI
         limitations (disabled below):
@@ -363,12 +373,18 @@ class TestFV3NHStepMPIFidelity:
         from legoesm.core.state import NonHydrostaticState
 
         n, nlev = 8, 5
-        # iter-1046: factory docstring recommends ``use_duogrid=True``
-        # but the duogrid post-pad remap shows an MPI bit-for-bit
-        # discrepancy when composed with the full factory stack
-        # (cross_face is already disabled below).  Use the default
-        # grid for this test; the per-flag tests above already cover
-        # duogrid composition with smaller flag subsets.
+        # iter-1047: duogrid=True reverted (still off).  Standalone
+        # ``pad_halo_4d(duogrid=DG)`` is MPI bit-for-bit on CPU
+        # (verified by iter-1047 probe), but the FULL factory stack
+        # composed with duogrid=True shows a real ~5e-3 max-diff in
+        # the w/theta_prime fields after the first NH step.  Only
+        # reproduces when the factory test runs AFTER other NH
+        # tests in the same pytest session — passes alone.  Not a
+        # JIT cache issue (``jax.clear_caches()`` doesn't help).
+        # Suspect global device-mesh / topology state set during the
+        # earlier test's ``initialize_distributed`` interacting with
+        # the duogrid post-pad remap or sin_sg/cos_sg pads inside
+        # the slow-tendency.  Tracked as iter-1047 follow-up.
         grid = create_cubed_sphere(n)
         z_top = 30000.0
         height_coord = create_height_coordinate(nlev, z_top)

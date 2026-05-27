@@ -248,7 +248,9 @@ class TestFV3PEStepMPIFidelity:
         from tests.test_cases.baroclinic_wave import baroclinic_wave_init
 
         n, nlev = 8, 5
-        # iter-1046: see NH factory note — duogrid disabled here.
+        # iter-1047: duogrid=True reverted (still off).  See NH
+        # factory docstring for the full diagnosis — passes alone,
+        # fails in-suite even on CPU.  Tracked.
         grid = create_cubed_sphere(n)
         cdgrid = create_cubed_sphere_cdgrid(grid)
         sigma = create_sigma_coordinate(nlev)
