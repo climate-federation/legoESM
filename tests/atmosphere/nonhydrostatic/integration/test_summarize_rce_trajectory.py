@@ -951,3 +951,63 @@ def test_summarize_quiet_suppresses_table(tmp_path):
     # CSV still written.
     csv = tmp_path / "trajectory.csv"
     assert csv.exists()
+
+
+def test_quiet_with_evaluate_still_prints_verdict(tmp_path):
+    """iter-134: --quiet + --evaluate must still print the DOD
+    verdict line on stdout (the verdict is the actionable signal
+    even when the table is suppressed). The "wrote N rows" line +
+    verdict ARE the entire stdout under --quiet."""
+    import subprocess
+    snaps = tmp_path / "snapshots"
+    snaps.mkdir()
+    for i in range(12):
+        _write_snapshot(
+            snaps / f"snap_day_{i:04d}.npz",
+            day=float(i), cwv_value=50.0 + 0.1 * i,
+        )
+    res = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[4]
+                / "scripts" / "summarize_rce_trajectory.py"),
+            str(tmp_path),
+            "--quiet", "--evaluate",
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert res.returncode == summary_mod.EXIT_OK
+    # Table column header (e.g. ``CWV_mean[mm]``) suppressed.
+    assert "CWV_mean[mm]" not in res.stdout
+    # Wrote-line still emits.
+    assert "wrote" in res.stdout
+    # DOD verdict still emits.
+    assert "DOD verdict: PASS" in res.stdout
+
+
+def test_quiet_with_no_plateau_check_prints_stability_verdict(tmp_path):
+    """iter-134: --quiet + --evaluate + --no-plateau-check must
+    still print the iter-130 ``DOD STABILITY`` label (table
+    suppressed, verdict line preserved). Locks the verdict-print
+    flow across all three flags."""
+    import subprocess
+    snaps = tmp_path / "snapshots"
+    snaps.mkdir()
+    for i in range(3):
+        _write_snapshot(
+            snaps / f"snap_day_{i:04d}.npz",
+            day=float(i), cwv_value=50.0 + 0.5 * i,
+        )
+    res = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[4]
+                / "scripts" / "summarize_rce_trajectory.py"),
+            str(tmp_path),
+            "--quiet", "--evaluate", "--no-plateau-check",
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert res.returncode == summary_mod.EXIT_OK
+    assert "CWV_mean[mm]" not in res.stdout
+    assert "DOD STABILITY verdict: PASS" in res.stdout
