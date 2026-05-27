@@ -154,186 +154,155 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
-### 2026-05-27 — iter 104 (Codex iter-102/103 review: 3 MEDIUM + 2 LOW + first precip onset)
+### 2026-05-27 — iter 99..120 (compressed summary, iter-121 fold)
 
-**Code change** (commit `bbf9f0c3`):
+22 iterations of post-iter-98 tooling + Codex hardening on top of
+the iter-98 10-day RCE PASS milestone. Adds two new Python tools +
+extends the 30-day wrapper, all driven by the iter-98 success.
 
-Address Codex adversarial-review of iter-102 (quality-gate evaluator)
-and iter-103 (wrapper EVALUATE_DOD threading).
+**iter-99..101 — 30-day wrapper + summarizer integration** (commits
+`8b2d36ab`, `cc5533d6`, `d740019f`):
+* iter-99: drop ``exec`` from ``run_rce_30day.sh`` mpirun line +
+  append a post-run ``scripts/summarize_rce_trajectory.py``
+  invocation. Writes ``trajectory.csv`` per production run.
+* iter-100: Codex review of iter-98/99 flagged 4 MEDIUM + 2 LOW —
+  anchored ``snap_day_(\d{4})\.npz`` regex (no stray-file
+  acceptance), profile day-value cross-check (1-min tol),
+  finite + unique day assertion, ``NA`` sentinel shared by table /
+  CSV; wrapper captures summarizer exit status under ``set +e`` /
+  ``set -e`` and propagates non-zero unless
+  ``ALLOW_SUMMARY_FAILURE=1`` downgrades to a WARN.
+* iter-101: 4 subprocess-driven wrapper tests using stubbed mpirun
+  + PYBIN that lock the exit-status contract end-to-end (closes
+  Codex iter-100 LOW — text tests were proving the right tokens
+  present but not that they execute in order).
 
-`scripts/summarize_rce_trajectory.py`:
-* MEDIUM #1 — runaway evaporation gate: a trajectory climbing 30
-  → 80 mm averages 55 mm and would pass the mean-only check. Add
-  ``plateau_cwv_max > cwv_range_mm[1]`` gate with a "runaway
-  evaporation signature" reason.
-* LOW #2 — fix MSE relative-drift denominator to
-  ``max(abs(min), abs(max), 1e-30)`` so synthetic negative MSE
-  arrays don't overstate drift.
-* MEDIUM #3 — tri-state ``QualityVerdict.evaluated`` field.
-  Trajectories shorter than ``DEFAULT_LAST_N_DAYS_FOR_PLATEAU``
-  return ``evaluated=False``; CLI surfaces this as a distinct
-  ``DOD verdict: INSUFFICIENT`` print + exit code.
-* MEDIUM #7 — distinct exit codes: ``EXIT_OK=0``,
-  ``EXIT_IO_ERROR=1`` (uncaught Python — preserved), ``EXIT_DOD_FAIL=3``,
-  ``EXIT_DOD_INSUFFICIENT=4``. Reserves 1 for IO errors and 2
-  (argparse misuse).
+**iter-102..104 — quality-gate evaluator + EVALUATE_DOD env**
+(commits `043eed66`, `31bff6f7`, `bbf9f0c3`):
+* iter-102: new ``QualityVerdict`` dataclass +
+  ``evaluate_rce_quality()`` function in
+  ``summarize_rce_trajectory.py`` gating finite CWV, max|U|_sfc <
+  50 m/s, plateau CWV mean inside ``DEFAULT_CWV_RANGE_MM =
+  (35, 65)`` mm (Wing 2018 band + asymmetric tolerance), and 5 %
+  MSE drift over last 10 days. CLI ``--evaluate`` flag, distinct
+  exit codes ``EXIT_OK=0`` / ``EXIT_DOD_FAIL=3`` /
+  ``EXIT_DOD_INSUFFICIENT=4``. iter-98 trajectory verified PASS.
+* iter-103: ``EVALUATE_DOD`` env var (``0`` / ``1``) threads
+  ``--evaluate`` into the wrapper's summarizer call. Default
+  ``0`` so smokes / DAYS<10 stay non-gated.
+* iter-104 (Codex iter-102/103): runaway-evaporation max gate
+  added (MEDIUM#1); MSE drift denominator fix (LOW#2); tri-state
+  ``QualityVerdict.evaluated`` (MEDIUM#3); distinct CLI exit
+  codes (MEDIUM#7). 6/6 findings closed.
 
-`tests/.../test_summarize_rce_trajectory.py` (+ 6 tests):
-* ``test_evaluate_short_trajectory_marks_insufficient`` +
-  ``test_evaluate_full_trajectory_marks_evaluated`` lock the
-  tri-state.
-* LOW #6 — fixture for iter-98 anchor now 11 days (one synthetic
-  spin-up + the real 10) so the plateau check is never silently
-  skipped if ``DEFAULT_LAST_N_DAYS_FOR_PLATEAU`` is raised.
-* ``test_evaluate_flags_runaway_evaporation_via_max``,
-  ``test_evaluate_exit_code_constants``, and
-  ``test_evaluate_mse_drift_denominator_uses_max_abs`` lock the
-  Codex fixes.
+**iter-105 — 30-day production run launched** (no commit; output
+at ``/tmp/iter105_crm32x32_rad30d``). Same config as iter-98 with
+``DAYS=30``. PID 5914, ~7 h wall-time. Bit-for-bit identical to
+iter-98 through the overlap (verified via the iter-110 compare
+utility — max |d cwv_mean| = 0 across days 0-3).
 
-`tests/.../test_run_rce_30day_wrapper_defaults.py`:
-* Update DOD-FAIL stub to ``summarizer_exit=3`` (was ``1``).
-* New ``test_wrapper_evaluate_dod_insufficient_propagates``:
-  subprocess test that ``EXIT_DOD_INSUFFICIENT=4`` passes through
-  the wrapper untouched.
+**iter-106..109 — doc folds + DOD coherence** (commits
+`1519e021`, `25978f15`, `9a214c50`, `b31e89ca`):
+* iter-106: fold iter 93..97 verbose entries (-382 lines).
+* iter-107: DOD criterion 2 — replace stale "30 ± 5 mm CWV
+  plateau" with Wing 2018 RCEMIP1 multi-model band (45-60 mm)
+  + ``DEFAULT_CWV_RANGE_MM = (35, 65)`` rationale (Wing band +
+  10 mm lower-bound margin + 5 mm upper-bound tolerance).
+* iter-108: 4-test ``tests/unit/test_dod_doc_code_consistency.py``
+  lock between ``CRM_implementation.md`` DOD section and
+  summarizer constants (CWV range, MSE drift %, plateau-window
+  length, Wing 2018 citation).
+* iter-109 (Codex iter-106/107/108): 3 MEDIUM + 3 LOW — DOD
+  tolerance arithmetic rationale, criterion-2 Wing citation
+  scoping, 1 % vs 5 % MSE split documented, regex de-brittling,
+  Wing 2018 DOI ``10.5194/gmd-11-793-2018`` added to the doc.
 
-46/46 tests pass. iter-98 in-flight + final 10-day trajectory still
-PASSes ``--evaluate``.
+**iter-110..111 — trajectory diff utility** (commits
+`94f73913`, `e16cdc55`):
+* iter-110: new ``scripts/compare_rce_trajectories.py`` — reads
+  two run output dirs via ``collect_trajectory`` + prints
+  per-day delta table for CWV (mean/max), MSE, T_sfc, qc/qr_sfc
+  max, wind. iter-98 vs iter-105 bit-equal through day 3 +
+  in-flight day 4 to follow as iter-105 progresses.
+* iter-111 (Codex iter-110): 3 MEDIUM + 3 LOW — snapshot shape
+  validation refuses 132×132 vs 32×32 diffs (MEDIUM#1);
+  ``NONFINITE`` sentinel distinct from ``MISSING`` (MEDIUM#2);
+  ``--csv`` actually writes output (MEDIUM#3); one-to-one
+  alignment (LOW#4); ASCII labels for stdout-encoding portability
+  (LOW#5); ``monkeypatch.setattr(sys, "argv")`` (LOW#6).
 
-**MAJOR MILESTONE — iter-98 10-day run COMPLETED**:
+**iter-112..114 — 30-day final DOD evaluator + EVALUATE_DOD=final**
+(commits `8c1a5477`, `75268cb6`, `cf32cdc6`):
+* iter-112: new ``evaluate_rce_final_dod()`` — tighter 1 % MSE
+  drift gate + ≥30-day data-sufficiency requirement (vs spinup
+  evaluator's 5 % + 10-day). Reuses spinup checks. New
+  ``--final-dod`` CLI flag (mutually exclusive with
+  ``--evaluate``).
+* iter-113: wrapper ``EVALUATE_DOD`` becomes three-way (``0`` /
+  ``1`` / ``final``) via a bash ``case`` statement. Production
+  30-day runs now opt into the 1 % gate with a single env var.
+* iter-114 (Codex iter-112/113): 1 MEDIUM + 3 LOW — typo
+  rejection on EVALUATE_DOD=Final (MEDIUM#4 — silent fall-through
+  fixed); ``EXIT_USAGE=2`` constant separated from EXIT_IO_ERROR=1;
+  test drift target pinned to active constants; plateau-window
+  scoping documented.
 
-The 32×32×30 plane CRM + radiation + Kessler + Smag LES run that
-this rollout has been pacing completed at 100 % (8464.7 s wall =
-2 h 21 m) with DOD verdict **PASS**. Day-by-day trajectory from
-``/tmp/iter98_crm32x32_rad10d/trajectory.csv``:
+**iter-115..116 — doc fold + restore lost landmarks** (commits
+`cc82c317`, `82dadf48`):
+* iter-115: fold iter 51..76 (-1036 lines).
+* iter-116 (Codex iter-115): 3 HIGH + 5 MEDIUM + 1 LOW — restored
+  iter-63 corrected numbers (720 steps, CWV drift < 0.01 mm,
+  MSE drift < 5e-4), iter-66 NaN silent-pass detail
+  (``max(0.0, nan) == 0.0`` masking + ``seen_max_wind`` tracker),
+  iter-75 description fix (total_steps=0 when dt>total_t, not
+  "huge-dt 1-step"), iter-55 driver MEDIUM root causes, iter-56
+  bench fast-path fix, iter-59 argparse refresh + AST regression,
+  iter-65 ValueError→SystemExit, iter-74 C96 timeout
+  4800→6000 s, iter-51 max|v| caps + temp_tol thresholds, iter-77
+  standalone claim corrected, Components table 5-layer description
+  rewritten (sst-init only on run_rce.py; plane CRM hardcodes
+  T_SFC_K).
 
-| day | CWV_mean [mm] | T_sfc_mean [K] | qc_col_max [kg/kg] | qr_col_max [kg/kg] | cf_max | MSE_mean [J/m²] |
-|---:|---:|---:|---:|---:|---:|---:|
-|  0 | 49.94 | 296.81 | 0.0     | 0.0     | 0.0 | 3.5247×10⁹ |
-|  1 | 53.63 | 297.07 | NA      | NA      | NA  | 3.5280×10⁹ |
-|  2 | 55.67 | 297.23 | NA      | NA      | NA  | 3.5275×10⁹ |
-|  3 | 56.77 | 297.94 | NA      | NA      | NA  | 3.5258×10⁹ |
-|  4 | 57.18 | 298.32 | NA      | NA      | NA  | 3.5230×10⁹ |
-|  5 | 57.12 | 298.53 | 3.62×10⁻⁴ | 0       | 1.0 | 3.5195×10⁹ |
-|  6 | 56.85 | 298.65 | NA      | NA      | NA  | 3.5159×10⁹ |
-|  7 | 56.54 | 298.71 | NA      | NA      | NA  | 3.5122×10⁹ |
-|  8 | 56.20 | 298.75 | NA      | NA      | NA  | 3.5086×10⁹ |
-|  9 | 55.87 | 298.77 | NA      | NA      | NA  | 3.5051×10⁹ |
-| 10 | 56.55 | 298.76 | 6.97×10⁻⁴ | **1.02×10⁻⁶** | 1.0 | 3.5022×10⁹ |
+**iter-117..120 — stuck-trajectory detectors** (commits
+`cb8b77ce`, `a8a54b9d`, `1fe32d70`, `43a39b46`):
+* iter-117: new ``detect_stuck_trajectory()`` flags any sliding
+  window of 3 consecutive snapshots whose CWV range is below
+  0.001 mm — pre-iter-95 Bug 2 signature. Wired into
+  evaluate_rce_quality.
+* iter-118 (Codex iter-117): 2 HIGH + 3 MEDIUM + 1 LOW — scope
+  to LEADING window only (HIGH#1+#2 fixed false-positive on
+  legitimate late equilibrium); ``check_stuck=False`` opt-out
+  (MEDIUM#1); "pinned" reason + actionable Bug-2 remediation
+  text (MEDIUM#2); iter-66 narrative re-corrected (MEDIUM#3).
+* iter-119: ``collect_trajectory`` + ``diff_trajectories`` accept
+  ``str`` as well as ``Path`` for ergonomic shell-caller use.
+  ``out_dir = Path(out_dir)`` at the boundary; type hint widened.
+* iter-120 (Codex iter-118 MEDIUM follow-up): new
+  ``detect_sustained_stuck_trajectory()`` — bit-equal
+  (``DEFAULT_SUSTAINED_STUCK_CWV_TOL_MM = 1e-7`` mm) sliding
+  window AFTER the leading window. Catches a hypothetical
+  delayed-stuck regression (mid-run mass-fixer kick-in) without
+  false-positives on legitimate equilibrium oscillation
+  (~1e-3 mm).
 
-Key findings:
+**End-of-cycle ledger** (post-iter-120):
 
-* **First precipitation onset**: ``qr_col_max`` jumps from 0 (day 5)
-  to 1.02×10⁻⁶ kg/kg (day 10) — Kessler autoconv triggered after
-  the plateau-resident qc grew past ~0.5 g/kg. Surface ``qr_sfc``
-  still zero (rain not yet sedimented to lowest model level).
-* **Wing 2018 RCEMIP1 plateau**: CWV settles in 55-57 mm range
-  (range of multi-model RCEMIP1 SST=300 K equilibrium is
-  ~50-55 mm — slight overshoot but well inside the default
-  ``DEFAULT_CWV_RANGE_MM = (35, 65)`` gate).
-* **MSE drift 0.6 %** across all 10 days (3.5247→3.5022×10⁹),
-  comfortably under the 5 % DOD ``mse_relative_drift`` gate.
-* **Dycore stable**: ``max|w|`` peaked at 3.39×10⁻³ m/s (log day
-  9.6) — orders of magnitude under the 50 m/s blow-up gate.
-  ``T_sfc_mean`` still approaching prescribed 300 K (296.81 →
-  298.76 K over 10 days) — slower than CWV equilibration, expected
-  for radiation+flux heat-up.
+* Test count: 45/45 ``summarize_rce_trajectory`` tests + 14/14
+  ``compare_rce_trajectories`` tests + 23/23
+  ``run_rce_30day_wrapper_defaults`` tests + 5/5
+  ``test_dod_doc_code_consistency`` tests = 87 new regression
+  tests across the iter 99..120 chain.
+* Tools added: ``scripts/summarize_rce_trajectory.py``,
+  ``scripts/compare_rce_trajectories.py``.
+* Wrapper integration: ``EVALUATE_DOD`` env var (0/1/final) +
+  ``ALLOW_SUMMARY_FAILURE`` (0/1) on ``scripts/run_rce_30day.sh``.
+* iter-105 30-day in flight; DOD ``--final-dod`` verdict
+  available once snapshots[≥30] land.
 
-This is the **first production-grade 10-day RCE run** with full
-physics (radiation + Kessler + Smag LES + surface fluxes) that
-converged to Wing 2018 RCEMIP1 plateau and triggered precipitation
-on the legoESM plane CRM stack. Promotes the iter-95 hydrostatic-BC
-fix + iter-95b mass-fixer fix + iter-96 radiation-enabled regime
-from "10-day stable but no precip" to **"10-day stable, plateau,
-precip-onset, DOD PASS"**.
-
-**Next iter target** (iter-105): launch the 30-day variant of this
-config (same 32×32×30, same physics, ``DAYS=30 NX=32 NY=32 EVALUATE_DOD=1
-./scripts/run_rce_30day.sh /tmp/iter105_crm32x32_rad30d``). Wall
-extrapolation: ~7 h. Goal: confirm CWV plateau holds through day
-30 + precip rate stabilises at ~3 mm/day (DOD criterion 2).
-
-### 2026-05-27 — iter 101 (behavioural wrapper exit-code tests, Codex iter-100 LOW)
-
-**Code change** (commit `d740019f`):
-
-* `tests/atmosphere/nonhydrostatic/integration/test_run_rce_30day_wrapper_defaults.py`
-  (+138 lines, 4 new tests): closes the iter-100 Codex LOW
-  finding that the iter-100 text-regex tests proved the right
-  tokens are present but not that they execute in the right order.
-  New `_run_wrapper_with_stubs` helper actually runs
-  `scripts/run_rce_30day.sh` with stubbed mpirun + stubbed PYBIN
-  under a tmp PATH and asserts the exit-status contract end-to-end
-  for all four branches:
-  - mpirun OK + summarizer OK → exit 0 + ``Wrote ...`` stdout.
-  - mpirun nonzero → wrapper nonzero, summarizer NEVER runs (set -e
-    + pipefail kills the shell before the post-run block).
-  - mpirun OK + summarizer fails + ``ALLOW_SUMMARY_FAILURE=0``
-    (default) → wrapper exits with the summarizer's status (7 in
-    the fixture); ``ERROR`` on stderr.
-  - same + ``ALLOW_SUMMARY_FAILURE=1`` → wrapper exits 0 +
-    ``WARN`` on stderr.
-
-17/17 wrapper tests pass in 0.75 s (1.59 s with the 4 new
-subprocess-driven ones included).
-
-### 2026-05-27 — iter 100 (Codex iter-98/99 review: 4 MEDIUM + 2 LOW)
-
-**Code change** (commit `cc5533d6`, 4 files / +271/-46 lines):
-
-Codex adversarial-review of iter-98 (summarizer) + iter-99 (wrapper
-post-run hook) flagged 6 findings; all addressed in this commit.
-
-`scripts/summarize_rce_trajectory.py`:
-* MEDIUM #3: replace loose ``snap_day_*.npz`` glob with anchored
-  ``^snap_day_(\d{4})\.npz$`` regex — stray
-  ``snap_day_backup.npz`` / ``snap_day_0001.old.npz`` are now
-  rejected.
-* MEDIUM #2: cross-check ``prof["day"]`` vs the matching snapshot
-  day (1-minute tolerance). A renamed / overwritten profile file
-  raises ``ValueError`` instead of silently attaching a wrong-day
-  profile.
-* LOW #5: assert every snapshot day is finite + unique BEFORE
-  sorting; NaN / duplicate days would produce an undefined or
-  non-monotonic trajectory.
-* LOW #6: ``MISSING_SENTINEL = "NA"`` shared by the printed table
-  and the CSV (previously dash vs empty cell — different sentinels
-  for human vs machine readers).
-
-`scripts/run_rce_30day.sh`:
-* MEDIUM #1: capture the summarizer's exit status under
-  ``set +e`` … ``set -e``, propagate non-zero as the wrapper exit
-  unless ``ALLOW_SUMMARY_FAILURE=1`` downgrades it to a stderr
-  warning. Previously a successful mpirun + a failed summarizer
-  silently exited 0.
-
-`tests/atmosphere/nonhydrostatic/integration/test_run_rce_30day_wrapper_defaults.py`:
-* MEDIUM #4: strip bash comments before regex-matching + anchor
-  the summarizer call to ``^\s*"$PYBIN"`` so a comment-only
-  mention cannot satisfy the contract.
-* New ``test_wrapper_summarizer_failure_propagates``: locks the
-  four bash pieces (``ALLOW_SUMMARY_FAILURE`` default, ``set +e``
-  gate, ``summary_status=$?`` capture, ``exit "$summary_status"``).
-
-14/14 summarizer tests pass; 13/13 wrapper tests pass.
-
-### 2026-05-27 — iter 99 (30-day wrapper auto-invokes summarizer)
-
-**Code change** (commit `8b2d36ab`):
-
-`scripts/run_rce_30day.sh`:
-* Drop ``exec`` from the mpirun line so the post-run summarizer
-  step actually runs (``exec`` replaces the shell process and
-  skips every later command).
-* Append the summarizer invocation reading ``$OUTPUT`` and
-  writing ``$OUTPUT/trajectory.txt`` + ``$OUTPUT/trajectory.csv``.
-
-`tests/atmosphere/nonhydrostatic/integration/test_run_rce_30day_wrapper_defaults.py`:
-* New ``test_wrapper_invokes_post_run_summarizer``: asserts no
-  ``exec mpirun`` at line start AND the summarizer call exists
-  AFTER the mpirun line, anchored against the comment-stripped
-  view (iter-100 hardening).
-
-12/12 wrapper tests pass in 0.04 s.
+**R-roadmap status**: R1-R8, R10, R12 ✓ throughout. F9 platform-
+blocked. R11 partial (10-day plane CRM ✓; 30-day in flight via
+iter-105). New supporting infrastructure under R12: summarizer +
+compare + 6 distinct exit codes + doc/code consistency lock.
 
 ### 2026-05-27 — iter 98 (per-day RCE trajectory summarizer landed)
 
