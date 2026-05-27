@@ -167,11 +167,26 @@ def _time_step(model, state, n_warmup: int, n_timing: int, dt: float):
     return compile_s, warmup_s, timing_s
 
 
-def _bench_one(label: str, build_fn, key, prec: str) -> TimingResult:
+def _bench_one(label: str, build_fn, key, prec: str,
+               solver_tag: str = "default") -> TimingResult:
+    import jax, jax.numpy as jnp
     model, state, n_cells = build_fn(key, prec == "float64")
     compile_s, warmup_s, timing_s = _time_step(
         model, state, N_WARMUP, N_TIMING, DT_BAROCLINIC,
     )
+    # Stability sanity check: re-step from initial state once and verify
+    # all prognostic leaves are finite. Catches solver/numerical blow-up
+    # that would otherwise be reported as fast (NaN math is fast).
+    sanity = model.step(state, DT_BAROCLINIC)
+    leaves = jax.tree_util.tree_leaves(sanity)
+    for leaf in leaves:
+        if hasattr(leaf, "dtype") and jnp.issubdtype(leaf.dtype, jnp.floating):
+            ok = bool(jnp.all(jnp.isfinite(leaf)))
+            if not ok:
+                raise RuntimeError(
+                    f"{label}: non-finite values after 1 step "
+                    f"(solver={solver_tag})"
+                )
     step_wall_s = timing_s / N_TIMING
     ms = step_wall_s * 1000.0
     # SYPD = simulated-years per wall-clock-day. Atm bench formula
@@ -181,7 +196,10 @@ def _bench_one(label: str, build_fn, key, prec: str) -> TimingResult:
     total = n_cells * OCEAN_NLEV
     return TimingResult(
         n_gpus=1, resolution=key, n_levels=OCEAN_NLEV,
-        precision=prec, mode="ocean_strong", physics_level="none",
+        precision=prec, mode="ocean_strong",
+        # Encode solver tag in physics_level (otherwise unused for ocean)
+        # so CSVs from different solvers stay distinguishable when pooled.
+        physics_level=f"baro={solver_tag}",
         dt_seconds=DT_BAROCLINIC, n_warmup=N_WARMUP, n_timing=N_TIMING,
         compile_time_s=compile_s, warmup_time_s=warmup_s,
         timing_time_s=timing_s, time_per_step_ms=ms, sypd=sypd,
@@ -205,7 +223,10 @@ def main() -> int:
     p.add_argument("--mpas-baro-solver",
                    choices=["explicit_substep", "implicit_cn"],
                    default="explicit_substep",
-                   help="MPAS barotropic solver (implicit_cn skips 30 substeps)")
+                   help="MPAS barotropic solver. implicit_cn solves a "
+                        "Crank-Nicolson free-surface system once per "
+                        "baroclinic step; explicit_substep iterates "
+                        "n_barotropic_substeps small steps (config-defined).")
     p.add_argument("--no-cuda-graphs", action="store_true",
                    help="Disable XLA CUDA-graphs flag (default: enabled to "
                         "fix MPAS-ocean fp32 anomaly; recognised at import "
@@ -238,7 +259,8 @@ def main() -> int:
         print(f"\nLatLon C-grid ocean — resolutions {ll_res}")
         for n in ll_res:
             try:
-                r = _bench_one(f"LL{n}", _build_latlon, n, args.precision)
+                r = _bench_one(f"LL{n}", _build_latlon, n, args.precision,
+                               solver_tag="latlon_default")
                 print(f"  LL{n:4d} n_cells={r.total_cells:>10,}  "
                       f"compile={r.compile_time_s:6.2f}s  "
                       f"step={r.time_per_step_ms:7.2f}ms  "
@@ -258,7 +280,11 @@ def main() -> int:
             return _build_mpas(level, x64, baro_solver=_solver)
         for L in mp_lev:
             try:
-                r = _bench_one(f"I{L}", _mk_mpas, L, args.precision)
+                # NOTE: TimingResult.resolution is int (used as `:5d`). Tag
+                # solver via physics_level field instead so the CSV is
+                # self-describing without merging incompatible runs.
+                r = _bench_one(f"I{L}", _mk_mpas, L, args.precision,
+                               solver_tag=args.mpas_baro_solver)
                 print(f"  I{L} n_cells={r.total_cells:>10,}  "
                       f"compile={r.compile_time_s:6.2f}s  "
                       f"step={r.time_per_step_ms:7.2f}ms  "

@@ -411,6 +411,23 @@ The single-GPU theoretical limit has been reached for the structured-grid config
 - Algorithm change (replace spectral with spectral-element or GPU-native SHTns)
 - Mesh-level optimization (Hilbert reordering for MPAS) — invasive
 
+### Iter 12 — 2026-05-27 — codex review iter-11 + ico+graphs neutral
+
+Codex review of iter-11 changes flagged three things; all applied:
+- [HIGH] CSVs from different barotropic solvers can no longer be silently merged. `physics_level` field now carries `baro=<solver>` tag (was always `"none"` for ocean).
+- [HIGH] Added post-warmup `jnp.isfinite` sanity check on all float leaves. Raises if solver blew up — catches solver bugs that would otherwise be reported as fast (NaN math is fast).
+- [MEDIUM] Softened CLI help text: removed hardcoded "30 substeps" perf claim; now refers to config-defined `n_barotropic_substeps`.
+
+Atm icosahedral + CUDA graphs test (was untested combo):
+
+| res | fp32 no-flag | fp32 +graphs | delta |
+|-----|--------------|--------------|-------|
+| I4  | 349 Mc/s     | 345 Mc/s     | -1%   |
+| I5  | 428          | 427          | 0%    |
+| I6  | 276          | 275          | 0%    |
+
+Neutral. CUDA graphs neither help nor hurt ico atm. No flag change needed — ico atm script keeps default flags.
+
 ### Iter 11 — 2026-05-27 — MPAS implicit_cn barotropic = 2.6-3.1× win
 
 Profile (iter-7) showed MPAS step = 67% barotropic substep loop (30 sequential iters of div+grad+tang). Swap explicit_substep → implicit_cn (single CN solve instead of 30 substeps).
