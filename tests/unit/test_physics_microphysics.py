@@ -17,9 +17,10 @@ from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphy
 from legoesm.atmosphere.physics.microphysics.seifert_beheng import seifert_beheng_microphysics
 from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
 from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
+from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics
 from legoesm.atmosphere.physics.microphysics.config import (
     KesslerConfig, SundqvistConfig, SeifertBehengConfig, MorrisonConfig,
-    ThompsonConfig,
+    ThompsonConfig, P3Config,
 )
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState, make_zero_hydrometeors,
@@ -89,11 +90,14 @@ def _call_scheme(name, T, q_v, hydro, p_full, p_half, rho, dz, dt=300.0):
     elif name == "thompson":
         return thompson_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt,
                                       config=ThompsonConfig())
+    elif name == "p3":
+        return p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt,
+                               config=P3Config())
     else:
         raise ValueError(f"Unknown scheme: {name}")
 
 
-ALL_SCHEMES = ["kessler", "sundqvist", "seifert_beheng", "morrison", "thompson"]
+ALL_SCHEMES = ["kessler", "sundqvist", "seifert_beheng", "morrison", "thompson", "p3"]
 
 
 # ============================================================================
@@ -765,4 +769,207 @@ def test_kessler_sb_qc_does_not_go_negative_under_joint_sinks(scheme, call):
         "exceeding available q_c.  The joint donor clamp on q_c sinks "
         "(Codex audit cycle 2 follow-up) has regressed.  Pre-fix values "
         "for this fixture: Kessler ≈ -2.6e-3, SB ≈ -4.1e-3."
+    )
+
+
+# ============================================================================
+# P3-specific tests
+# ============================================================================
+
+def _make_p3_column(nlev=20, ncol=4, T_sfc=260.0, q_i_val=5e-4, q_rim_val=1e-4):
+    """Build a P3 column with ice, rime mass, and rime volume initialized."""
+    T, q_v, hydro, p_full, p_half, rho, dz = _make_column(
+        nlev=nlev, ncol=ncol, T_sfc=T_sfc, q_c_val=1e-4,
+    )
+    # B_rim = q_rim / rho_rim_init; use rho_rim_init = 200 kg/m³.
+    rho_rim_init = 200.0
+    q_rim = jnp.full((ncol, nlev), q_rim_val)
+    B_rim = q_rim / rho_rim_init   # [m³/kg_air]
+    hydro_p3 = hydro._replace(
+        q_i=jnp.full((ncol, nlev), q_i_val),
+        q_s=q_rim,      # q_s slot = q_rim
+        q_g=B_rim,      # q_g slot = B_rim
+        N_i=1e4 * jnp.ones((ncol, nlev)),
+    )
+    return T, q_v, hydro_p3, p_full, p_half, rho, dz
+
+
+def test_p3_rime_density_bounded():
+    """After one step, diagnosed rime density must stay in [rho_rim_min, rho_rim_max]."""
+    T, q_v, hydro, p_full, p_half, rho, dz = _make_p3_column()
+    cfg = P3Config()
+    out = p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, 300.0, cfg)
+    dt = 300.0
+    q_rim_new = jnp.clip(hydro.q_s + out.dq_s_dt * dt, 0.0)
+    B_rim_new  = jnp.maximum(hydro.q_g + out.dq_g_dt * dt, 1e-30)
+    rho_rim_new = jnp.clip(q_rim_new / B_rim_new, 0.0)
+    # Where there is meaningful rime, density must be within physical bounds.
+    has_rime = q_rim_new > 1e-10
+    if jnp.any(has_rime):
+        min_rho = float(jnp.min(jnp.where(has_rime, rho_rim_new, cfg.rho_rim_max)))
+        max_rho = float(jnp.max(jnp.where(has_rime, rho_rim_new, cfg.rho_rim_min)))
+        assert min_rho >= cfg.rho_rim_min * 0.9, (
+            f"P3: rime density {min_rho:.1f} kg/m³ below rho_rim_min={cfg.rho_rim_min}"
+        )
+        assert max_rho <= cfg.rho_rim_max * 1.1, (
+            f"P3: rime density {max_rho:.1f} kg/m³ above rho_rim_max={cfg.rho_rim_max}"
+        )
+
+
+def test_p3_riming_grows_qrim():
+    """With q_c > 0 and q_i > 0 below freezing, q_rim must grow (riming active)."""
+    ncol, nlev = 1, 5
+    T = jnp.full((ncol, nlev), 255.0)   # well below T_freeze
+    p_full = jnp.full((ncol, nlev), 5e4)
+    p_half = jnp.broadcast_to(
+        jnp.linspace(4e4, 6e4, nlev + 1)[None, :], (ncol, nlev + 1),
+    )
+    rho = p_full / (constants.R_d * T)
+    dz  = jnp.full((ncol, nlev), 500.0)
+    q_c = jnp.full((ncol, nlev), 5e-4)
+    q_i = jnp.full((ncol, nlev), 3e-4)
+    q_rim = jnp.zeros((ncol, nlev))
+    B_rim = jnp.zeros((ncol, nlev))
+    hydro = HydrometeorState(
+        q_c=q_c, q_r=jnp.zeros_like(q_c), q_i=q_i,
+        q_s=q_rim, q_g=B_rim,
+        N_c=1e8 * jnp.ones_like(q_c),
+        N_r=jnp.zeros_like(q_c),
+        N_i=1e4 * jnp.ones_like(q_c),
+    )
+    q_v = 0.9 * saturation_mixing_ratio(T, p_full)
+    dt  = 300.0
+    out = p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt, P3Config())
+    # dq_s_dt carries dq_rim_dt; must be positive (riming adds to q_rim)
+    max_dqrim = float(jnp.max(out.dq_s_dt))
+    assert max_dqrim > 0.0, (
+        f"P3: riming not active in mixed-phase column, max dq_rim_dt = {max_dqrim:.2e}"
+    )
+    # B_rim must also grow
+    max_dBrim = float(jnp.max(out.dq_g_dt))
+    assert max_dBrim > 0.0, (
+        f"P3: B_rim not growing during riming, max dB_rim_dt = {max_dBrim:.2e}"
+    )
+
+
+def test_p3_melt_drains_qi_and_qrim():
+    """Above T_freeze, melt_ice must drain q_i and melt_rim must drain q_rim."""
+    ncol, nlev = 1, 5
+    T = jnp.full((ncol, nlev), 280.0)   # above freezing
+    p_full = jnp.full((ncol, nlev), 5e4)
+    p_half = jnp.broadcast_to(
+        jnp.linspace(4e4, 6e4, nlev + 1)[None, :], (ncol, nlev + 1),
+    )
+    rho = p_full / (constants.R_d * T)
+    dz  = jnp.full((ncol, nlev), 10_000.0)
+    q_i = jnp.full((ncol, nlev), 5e-4)
+    q_rim = jnp.full((ncol, nlev), 2e-4)
+    B_rim = q_rim / 400.0
+    hydro = HydrometeorState(
+        q_c=jnp.zeros((ncol, nlev)), q_r=jnp.zeros((ncol, nlev)),
+        q_i=q_i, q_s=q_rim, q_g=B_rim,
+        N_c=1e8 * jnp.ones((ncol, nlev)),
+        N_r=jnp.zeros((ncol, nlev)),
+        N_i=1e4 * jnp.ones((ncol, nlev)),
+    )
+    q_v = 0.8 * saturation_mixing_ratio(T, p_full)
+    dt  = 300.0
+    out = p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt, P3Config())
+
+    # q_i must decrease (melt active)
+    assert float(jnp.min(out.dq_i_dt)) < 0.0, "P3: q_i not melting above T_freeze"
+    # q_rim must decrease
+    assert float(jnp.min(out.dq_s_dt)) < 0.0, "P3: q_rim not melting above T_freeze"
+    # q_r must increase (melt goes to rain)
+    assert float(jnp.max(out.dq_r_dt)) > 0.0, "P3: no melt reaching q_r above T_freeze"
+
+    # After one step, q_i and q_rim must not go negative.
+    q_i_after   = q_i   + out.dq_i_dt * dt
+    q_rim_after = q_rim + out.dq_s_dt * dt
+    assert float(jnp.min(q_i_after))   >= -1e-9, f"P3: q_i went negative ({float(jnp.min(q_i_after)):.3e})"
+    assert float(jnp.min(q_rim_after)) >= -1e-9, f"P3: q_rim went negative ({float(jnp.min(q_rim_after)):.3e})"
+
+
+def test_p3_no_ice_above_nucleation_temperature():
+    """Ice formation should be negligible above cooper_T_act."""
+    cfg = P3Config()
+    ncol, nlev = 1, 10
+    T = jnp.full((ncol, nlev), cfg.cooper_T_act + 10.0)  # warm column
+    p_full = jnp.full((ncol, nlev), 5e4)
+    p_half = jnp.broadcast_to(
+        jnp.linspace(4e4, 6e4, nlev + 1)[None, :], (ncol, nlev + 1),
+    )
+    rho = p_full / (constants.R_d * T)
+    dz  = jnp.full((ncol, nlev), 500.0)
+    hydro = HydrometeorState(
+        q_c=jnp.full((ncol, nlev), 1e-4),
+        q_r=jnp.zeros((ncol, nlev)),
+        q_i=jnp.zeros((ncol, nlev)),
+        q_s=jnp.zeros((ncol, nlev)),
+        q_g=jnp.zeros((ncol, nlev)),
+        N_c=1e8 * jnp.ones((ncol, nlev)),
+        N_r=jnp.zeros((ncol, nlev)),
+        N_i=jnp.zeros((ncol, nlev)),
+    )
+    q_v = 0.9 * saturation_mixing_ratio(T, p_full)
+    out = p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, 300.0, cfg)
+    max_ice_form = float(jnp.max(out.dq_i_dt))
+    assert max_ice_form <= 1e-10, (
+        f"P3: ice forms above cooper_T_act, max dq_i_dt = {max_ice_form:.2e}"
+    )
+
+
+def test_p3_grad_finite_at_zero_ice():
+    """jax.grad through p3_microphysics must be finite when q_i = B_rim = q_rim = 0."""
+    T, q_v, hydro, p_full, p_half, rho, dz = _make_column(q_c_val=1e-4)
+    # Start with zero ice/rime — the pathological case for safe_pow and safe_divide.
+    hydro_zero_ice = hydro._replace(
+        q_i=jnp.zeros_like(hydro.q_i),
+        q_s=jnp.zeros_like(hydro.q_s),   # q_rim = 0
+        q_g=jnp.zeros_like(hydro.q_g),   # B_rim = 0
+        N_i=jnp.zeros_like(hydro.N_i),
+    )
+
+    def objective(q_i):
+        h = hydro_zero_ice._replace(q_i=q_i)
+        out = p3_microphysics(T, q_v, h, p_full, p_half, rho, dz, 300.0, P3Config())
+        return jnp.sum(out.dq_i_dt + out.dq_v_dt + out.dT_dt)
+
+    g = jax.grad(objective)(jnp.zeros_like(hydro.q_i))
+    assert jnp.all(jnp.isfinite(g)), (
+        "P3: grad w.r.t. q_i at q_i=0 contains NaN/Inf — "
+        "safe_pow / safe_divide AD guards regressed."
+    )
+
+
+def test_p3_qc_does_not_go_negative_at_long_dt():
+    """P3 donor clamp on q_c: combined riming + autoconv + accretion must not
+    over-extract q_c at dt=1200 s."""
+    ncol, nlev = 1, 5
+    T = jnp.full((ncol, nlev), 255.0)   # mixed-phase
+    p_full = jnp.full((ncol, nlev), 5e4)
+    p_half = jnp.broadcast_to(
+        jnp.linspace(4e4, 6e4, nlev + 1)[None, :], (ncol, nlev + 1),
+    )
+    rho = p_full / (constants.R_d * T)
+    dz  = jnp.full((ncol, nlev), 10_000.0)
+    q_c  = jnp.full((ncol, nlev), 1e-3)
+    q_i  = jnp.full((ncol, nlev), 1e-4)
+    q_rim = jnp.full((ncol, nlev), 5e-5)
+    B_rim = q_rim / 300.0
+    hydro = HydrometeorState(
+        q_c=q_c, q_r=jnp.zeros_like(q_c), q_i=q_i,
+        q_s=q_rim, q_g=B_rim,
+        N_c=1e8 * jnp.ones_like(q_c),
+        N_r=jnp.zeros_like(q_c),
+        N_i=1e4 * jnp.ones_like(q_c),
+    )
+    q_v = 1.0 * saturation_mixing_ratio(T, p_full)
+    dt  = 1200.0
+    out = p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt, P3Config())
+    q_c_after = q_c + out.dq_c_dt * dt
+    min_qc = float(jnp.min(q_c_after))
+    assert min_qc >= -1e-9, (
+        f"P3: q_c went negative ({min_qc:.3e}) at dt=1200 s — "
+        "joint q_c donor clamp failed."
     )

@@ -84,7 +84,9 @@ class ModelDriver:
         self.state = None
         self.tracers: dict[str, jax.Array] = {}
         # Use full moisture registry for mixed-phase/two-moment microphysics
-        _ice_schemes = {"morrison", "thompson", "seifert_beheng"}
+        # (q_v,q_c,q_r,q_i,q_s,q_g,N_c,N_r,N_i). P3 reuses q_s→q_rim and
+        # q_g→B_rim but still needs the 9-slot layout.
+        _ice_schemes = {"morrison", "thompson", "seifert_beheng", "p3"}
         if config.microphysics in _ice_schemes:
             self.tracer_registry: TracerRegistry = make_full_moisture_registry()
         else:
