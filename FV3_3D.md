@@ -2378,6 +2378,128 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1042 (2026-05-27): NH compressible-Euler MPI step + lift ``cgrid_mass_flux_divergence`` halo out of ``jax.vmap``
+
+### Goal
+
+Add the NH counterpart to iter-1041's PE MPI step bit-for-bit
+test.  Surface and fix any latent NH MPI bug exposed by an
+integration-level test (not a halo-operator-only test).
+
+### Bug surfaced
+
+``cgrid_mass_flux_divergence`` (used by NH's slow-tendency path)
+takes a 4D ``h`` and ``vmap``s a per-level worker that calls
+``pad_halo`` (halo=2) internally.  Under MPI this means
+``mpi4jax.sendrecv`` is invoked INSIDE a ``vmap``.  mpi4jax's
+batching rule asserts that the send and recv buffer batch axes
+match (``mpi_sendrecv_batch_eval`` line 219).  The assertion
+fires and the NH step crashes the first time it traces fresh
+under MPI.
+
+This was a PRE-EXISTING bug — it would have been visible in any
+NH MPI run.  The iter-1040 / iter-1041 ``test_distributed_3_
+steps_matches_single_rank`` reused a local-traced JIT cache and
+never executed the MPI branch, so the failure was masked.  The
+iter-1041 fresh-trace fidelity-test pattern caught it.
+
+### Fix
+
+Refactor ``cgrid_mass_flux_divergence(h, ...)`` in
+``core/operators_cdgrid.py``:
+
+- 4D branch now pre-pads ``h`` via ``_pad_halo_auto_h2(h, cdgrid)``
+  ONCE (a ``pad_halo_4d`` call, already MPI-safe with offsets via
+  iter-1040/1041), then ``vmap``s a per-level worker that takes
+  the pre-padded slice through a new optional ``h_pad`` kwarg.
+- 2D branch accepts ``h_pad`` (default ``None`` → builds it
+  internally for backward compat).  Existing 2D callers
+  (``compressible_euler_cdgrid.py:804``, ``shallow_water_fv3_
+  cdgrid.py:671``, ``fv3_sw_core.py:1391``, ``ocean_pe_cdgrid.
+  py:153``) all pass positional args up to ``cdgrid`` or use
+  keyword flags — confirmed by Codex review.
+
+Mirrors the pre-existing pattern in ``_cgrid_fct_fluxes_2d`` in
+the same file: pad once at 4D, vmap the pad-free inner work.
+
+### Test
+
+New file ``tests/distributed/test_mpi_fv3_nh_step_fidelity.py``
+mirroring iter-1041's PE pattern.  Two distinct
+``CDGridCompressibleEulerModel`` instances → independent JIT
+caches under different backends.  3 SSP-RK3 split-explicit steps
+at C8 / L5 / dt=10s (NH acoustic CFL).  Compares
+``(u, v, w, theta_prime, rho_prime)`` at ``atol=rtol=1e-10`` over
+each rank's owned faces (Codex iter-1042 review claim-6: assert
+per-rank, not just rank 0; PE test updated to match).
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 mpirun -np 2 .venv/bin/python -m pytest \
+        tests/distributed/test_mpi_fv3_step_fidelity.py \
+        tests/distributed/test_mpi_fv3_nh_step_fidelity.py \
+        tests/distributed/test_mpi_interp_offsets.py \
+        -v
+    => 10 passed in 23.68 s
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_corner_div_damp_nh.py \
+        tests/test_damp_v_nh.py \
+        tests/test_damp_w_nh_iter193.py \
+        tests/atmosphere/nonhydrostatic/integration/test_fv_cubesphere.py \
+        -q
+    => 18 passed in 120.84 s (single-device NH fidelity unchanged)
+
+### Codex adversarial review
+
+Round 1, ``gpt-5.3-codex``: CONFIRMED across claims 1-3
+(numeric equivalence of the lift, 2D backward compat,
+recursive branch dispatch).  Flagged 3 additional vmap-around-
+pad_halo sites in the NH path that iter-1042 does NOT address;
+all are config-gated and dormant in the default test config.
+PR scope narrowed to the mass-flux divergence 4D path only.
+
+### Known open vmap-MPI sites (deferred follow-ups)
+
+iter-1042 fixes the slow-tendency mass-flux path that fires on
+every NH step.  Three more vmap-around-``pad_halo`` patterns
+remain in ``atmosphere/dynamics/compressible_euler_cdgrid.py``,
+each gated by a config flag that is off by default:
+
+1. **iter-1043 candidate**: ``zeta`` / ``theta_corner`` a2b
+   interpolation vmaps at lines 377-401, transitively calling
+   ``_interp_center_to_corner_a2b_ord4`` →
+   ``_pad_halo_auto_h2`` inside the vmap body.  Gated by
+   ``use_fv3_a2b_zeta_corner`` (iter-170) and
+   ``use_fv3_a2b_ord4_theta_corner`` (iter-697).  Fires under
+   MPI when the FV3-fidelity factory is enabled.
+2. **iter-1044 candidate**: ``_lap_per_level`` vmap at lines
+   632-638 calling ``fv3_corner_laplacian_iteration`` →
+   ``pad_halo``.  Gated by ``corner_div_damp_d2_bg > 0``.
+3. **iter-1045 candidate**: ``damp_v`` / ``damp_w`` post-step
+   vmaps at lines 1200-1204, 1391-1394 calling
+   ``_del6_vt_flux`` → ``pad_halo``.  Gated by ``damp_v > 0``
+   and ``damp_w > 0`` respectively.
+
+Each gets its own iteration: lift the halo exchange out of the
+vmap (same 4D-pre-pad pattern as iter-1042), add a fidelity test
+with the relevant flag enabled, codex-review.
+
+### Why this iteration was meaningful
+
+iter-1040 closed an operator-level gap (``pad_halo_mpi``
+nearest-copy vs Lagrange).  iter-1041 closed an integration-
+level gap on the PE side (``packed_pad_halo_mpi_4d`` ignoring
+offsets) AND surfaced the JIT-cache mirage in the pre-existing
+3-step driver test.  iter-1042 surfaces the next-deeper layer:
+NH's split-explicit slow-tendency path was structurally
+incompatible with MPI because of a ``vmap``-around-``sendrecv``
+pattern.  Each successful iteration makes the next-deeper latent
+bug visible.  Codex's adversarial pass on iter-1042 named three
+more such sites — they become iter-1043/1044/1045.
+
 ## Iteration 1041 (2026-05-27): thread ``interp_offsets`` through ``packed_pad_halo_mpi_4d`` (FV3 3D hot path) + real MPI step bit-for-bit test
 
 ### Goal

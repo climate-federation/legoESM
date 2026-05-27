@@ -118,21 +118,22 @@ class TestFV3PEStepMPIFidelity:
         from legoesm.parallel.comm import build_comm_topology
         topology = build_comm_topology(rank, size)
 
-        if rank == 0:
-            for field_name in ("T", "u_d", "v_d", "p_s"):
-                ref_arr = np.asarray(getattr(ref_state, field_name).data)
-                dist_arr = np.asarray(getattr(dist_state, field_name).data)
-                for f in topology.local_face_ids:
-                    np.testing.assert_allclose(
-                        dist_arr[f], ref_arr[f],
-                        atol=1e-10, rtol=1e-10,
-                        err_msg=(
-                            f"FV3 PE 3D step diverges from single-rank "
-                            f"reference on owned face {f}, field "
-                            f"'{field_name}'.  This means the MPI "
-                            f"halo path (packed_pad_halo_mpi_4d with "
-                            f"interp_offsets) is not producing the "
-                            f"same numerics as the local interp_offsets "
-                            f"path."
-                        ),
-                    )
+        # FV3_3D iter-1042 (codex review claim-6): assert on every rank's
+        # owned faces, not just rank 0.
+        for field_name in ("T", "u_d", "v_d", "p_s"):
+            ref_arr = np.asarray(getattr(ref_state, field_name).data)
+            dist_arr = np.asarray(getattr(dist_state, field_name).data)
+            for f in topology.local_face_ids:
+                np.testing.assert_allclose(
+                    dist_arr[f], ref_arr[f],
+                    atol=1e-10, rtol=1e-10,
+                    err_msg=(
+                        f"FV3 PE 3D step diverges from single-rank "
+                        f"reference on rank {rank} owned face {f}, "
+                        f"field '{field_name}'.  This means the MPI "
+                        f"halo path (packed_pad_halo_mpi_4d with "
+                        f"interp_offsets) is not producing the "
+                        f"same numerics as the local interp_offsets "
+                        f"path."
+                    ),
+                )

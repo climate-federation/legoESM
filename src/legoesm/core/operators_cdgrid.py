@@ -535,28 +535,43 @@ def cgrid_gradient_2d(eta, cdgrid):
 def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
                                 apply_fortran_xppm_boundary=False,
                                 fortran_faithful_ppm_left=False,
-                                fortran_faithful_ppm_right=False):
-    """Conservative mass flux divergence via PPM (Colella & Woodward 1984). Halo=2. 2D/3D."""
+                                fortran_faithful_ppm_right=False,
+                                h_pad=None):
+    """Conservative mass flux divergence via PPM (Colella & Woodward 1984). Halo=2. 2D/3D.
+
+    FV3_3D iter-1042: 3D path pre-pads halos OUTSIDE the per-level
+    ``jax.vmap`` and threads the padded array through the
+    ``h_pad`` kwarg.  Required for MPI fidelity: ``mpi4jax``'s
+    sendrecv batching rule asserts matching batch axes on the
+    send/recv buffers, which fails when ``pad_halo`` is invoked
+    inside ``vmap``.  Mirrors the pre-existing pattern in
+    :func:`_cgrid_fct_fluxes_2d` (pad-once-then-vmap).
+    """
     if h.ndim == 4:
-        # 3D: per-level via vmap
+        # 3D: pad halos ONCE for all levels (avoids MPI sendrecv inside vmap)
+        h_pad_4d = _pad_halo_auto_h2(h, cdgrid)  # (6, n+4, n+4, nlev)
         h_t = jnp.moveaxis(h, -1, 0)
         u_c_t = jnp.moveaxis(u_c, -1, 0)
         v_c_t = jnp.moveaxis(v_c, -1, 0)
+        h_pad_t = jnp.moveaxis(h_pad_4d, -1, 0)
 
         def flux_div_one(args):
-            hk, uk, vk = args
+            hk, uk, vk, hk_pad = args
             return cgrid_mass_flux_divergence(
                 hk, uk, vk, cdgrid,
                 apply_fortran_xppm_boundary=(
                     apply_fortran_xppm_boundary),
                 fortran_faithful_ppm_left=fortran_faithful_ppm_left,
-                fortran_faithful_ppm_right=fortran_faithful_ppm_right)
+                fortran_faithful_ppm_right=fortran_faithful_ppm_right,
+                h_pad=hk_pad,
+            )
 
-        result_t = jax.vmap(flux_div_one)((h_t, u_c_t, v_c_t))
+        result_t = jax.vmap(flux_div_one)((h_t, u_c_t, v_c_t, h_pad_t))
         return jnp.moveaxis(result_t, 0, -1)
 
     # 2D case: PPM face reconstruction with halo=2
-    h_pad = _pad_halo_auto_h2(h, cdgrid)  # (6, n+4, n+4)
+    if h_pad is None:
+        h_pad = _pad_halo_auto_h2(h, cdgrid)  # (6, n+4, n+4)
 
     dy = cdgrid.dy_edge_x   # (6, n+1, n)
     dx = cdgrid.dx_edge_y   # (6, n, n+1)
