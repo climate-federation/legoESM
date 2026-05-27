@@ -93,6 +93,13 @@ def initialize_distributed(
             RuntimeWarning,
             stacklevel=2,
         )
+        # FV3_3D 2026-05-27: re-assert the MPI halo backend on every call.
+        # The function contract is "set up MPI halo exchange"; an earlier
+        # `set_halo_backend("local")` (used in reference-vs-MPI bit-for-bit
+        # tests) must not silently outlive a follow-up `initialize_distributed`.
+        from legoesm.grids.halo import get_halo_backend, set_halo_backend
+        if get_halo_backend() != "mpi":
+            set_halo_backend("mpi", _active_topology)
         from legoesm.parallel.mesh import get_active_config
         config = get_active_config()
         result = [config]

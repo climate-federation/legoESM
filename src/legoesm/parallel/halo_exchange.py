@@ -79,6 +79,7 @@ from legoesm.grids.halo import (
     _fill_corners_h1,
     _fill_corners_h2,
     _fill_corners_h3,  # iter-628: needed for halo=3 MPI port
+    _interp_strip,     # FV3 3D iter (2026-05-27): duogrid Lagrange remap under MPI
 )
 from legoesm.parallel.comm import CommTopology
 from legoesm.parallel.profiling import mpi_timer
@@ -88,6 +89,45 @@ from legoesm.parallel.reductions import _mpi4jax_array_result
 _EDGES = (WEST, EAST, SOUTH, NORTH)
 _DIR_TO_EDGE = {"west": WEST, "east": EAST, "south": SOUTH, "north": NORTH}
 _OPPOSITE_EDGE = {WEST: EAST, EAST: WEST, SOUTH: NORTH, NORTH: SOUTH}
+
+
+def _maybe_interp_strip_h1(
+    strip: jax.Array,
+    interp_offsets: jax.Array | None,
+    face_global: int,
+    edge: int,
+) -> jax.Array:
+    """Apply Lagrange remap to a halo=1 strip if offsets provided.
+
+    ``interp_offsets`` has shape ``(6, 4, n)`` indexed by
+    ``[face_global, edge_idx, j]``.  ``edge`` already equals the
+    edge_idx since :data:`WEST`/:data:`EAST`/:data:`SOUTH`/:data:`NORTH`
+    are integers 0..3 matching the offsets layout produced by
+    :func:`compute_halo_interp_offsets`.
+
+    Caller must have already applied the ``is_reversed`` flip — offsets
+    are pre-baked to expect the strip in the owner's coordinate frame.
+    """
+    if interp_offsets is None:
+        return strip
+    return _interp_strip(strip, interp_offsets[face_global, edge])
+
+
+def _maybe_interp_strip_hN(
+    strip: jax.Array,
+    interp_offsets: jax.Array | None,
+    face_global: int,
+    edge: int,
+    depth: int,
+) -> jax.Array:
+    """Apply Lagrange remap to a halo>=2 strip at a given depth.
+
+    ``interp_offsets`` has shape ``(6, 4, halo, n)`` indexed by
+    ``[face_global, edge_idx, depth, j]``.
+    """
+    if interp_offsets is None:
+        return strip
+    return _interp_strip(strip, interp_offsets[face_global, edge, depth])
 
 # MPI tag computation.  Tags must be unique per (edge, rank) pair and
 # fit within MPI's tag space (guaranteed at least 2^15-1 = 32767, but
@@ -275,6 +315,7 @@ def _pad_halo_mpi_face_only(
     halo: int,
     mpi4jax,
     MPI,
+    interp_offsets: jax.Array | None = None,
 ) -> jax.Array:
     """Face-only halo exchange using batched neighbor sendrecv.
 
@@ -330,6 +371,7 @@ def _pad_halo_mpi_face_only(
             strip = _extract_edge_strip(data, nf_loc, nbr_edge)
             if is_reversed:
                 strip = strip[::-1]
+            strip = _maybe_interp_strip_h1(strip, interp_offsets, face, edge)
             padded = _place_strip(padded, f_loc, edge, strip)
         elif halo == 2:
             strip_d0 = _extract_edge_strip_at_depth(data, nf_loc, nbr_edge, 0)
@@ -337,6 +379,8 @@ def _pad_halo_mpi_face_only(
             if is_reversed:
                 strip_d0 = strip_d0[::-1]
                 strip_d1 = strip_d1[::-1]
+            strip_d0 = _maybe_interp_strip_hN(strip_d0, interp_offsets, face, edge, 0)
+            strip_d1 = _maybe_interp_strip_hN(strip_d1, interp_offsets, face, edge, 1)
             padded = _place_strip_h2(padded, f_loc, edge, strip_d0, strip_d1)
         else:  # halo == 3 (main iter-630, threaded with face-id translation)
             strip_d0 = _extract_edge_strip_at_depth(data, nf_loc, nbr_edge, 0)
@@ -346,6 +390,9 @@ def _pad_halo_mpi_face_only(
                 strip_d0 = strip_d0[::-1]
                 strip_d1 = strip_d1[::-1]
                 strip_d2 = strip_d2[::-1]
+            strip_d0 = _maybe_interp_strip_hN(strip_d0, interp_offsets, face, edge, 0)
+            strip_d1 = _maybe_interp_strip_hN(strip_d1, interp_offsets, face, edge, 1)
+            strip_d2 = _maybe_interp_strip_hN(strip_d2, interp_offsets, face, edge, 2)
             padded = _place_strip_h3(padded, f_loc, edge,
                                        strip_d0, strip_d1, strip_d2)
 
@@ -418,6 +465,7 @@ def _pad_halo_mpi_face_only(
                 offset += n
                 if is_reversed:
                     strip = strip[::-1]
+                strip = _maybe_interp_strip_h1(strip, interp_offsets, face, edge)
                 padded = _place_strip(padded, f_loc, edge, strip)
             elif halo == 2:
                 strip_d0 = recv_buf[offset:offset + n]
@@ -426,6 +474,8 @@ def _pad_halo_mpi_face_only(
                 if is_reversed:
                     strip_d0 = strip_d0[::-1]
                     strip_d1 = strip_d1[::-1]
+                strip_d0 = _maybe_interp_strip_hN(strip_d0, interp_offsets, face, edge, 0)
+                strip_d1 = _maybe_interp_strip_hN(strip_d1, interp_offsets, face, edge, 1)
                 padded = _place_strip_h2(padded, f_loc, edge, strip_d0, strip_d1)
             else:  # halo == 3 (main iter-630, threaded with face-id translation)
                 strip_d0 = recv_buf[offset:offset + n]
@@ -436,6 +486,9 @@ def _pad_halo_mpi_face_only(
                     strip_d0 = strip_d0[::-1]
                     strip_d1 = strip_d1[::-1]
                     strip_d2 = strip_d2[::-1]
+                strip_d0 = _maybe_interp_strip_hN(strip_d0, interp_offsets, face, edge, 0)
+                strip_d1 = _maybe_interp_strip_hN(strip_d1, interp_offsets, face, edge, 1)
+                strip_d2 = _maybe_interp_strip_hN(strip_d2, interp_offsets, face, edge, 2)
                 padded = _place_strip_h3(padded, f_loc, edge,
                                            strip_d0, strip_d1, strip_d2)
 
@@ -600,6 +653,7 @@ def pad_halo_mpi(
     data: jax.Array,
     topology: CommTopology,
     halo: int = 1,
+    interp_offsets: jax.Array | None = None,
 ) -> jax.Array:
     """Pad a scalar field with halo data using MPI.
 
@@ -616,6 +670,15 @@ def pad_halo_mpi(
     halo : int
         Halo width (1, 2, or 3 — halo=3 was added in iter-630 so the
         FB-chain ng=3 path works under MPI).
+    interp_offsets : jax.Array or None
+        Optional duogrid Lagrange fractional-index offsets.  Shape
+        ``(6, 4, n)`` for ``halo=1`` or ``(6, 4, halo, n)`` for
+        ``halo>=2``.  When provided, each received edge strip is
+        remapped via :func:`legoesm.grids.halo._interp_strip` before
+        placement, matching the single-device / SPMD behaviour.
+        Required to make the FV3 3D PE/NH cubed-sphere paths produce
+        bit-for-bit identical output under MPI.  Sub-face tiling is
+        not yet supported.
 
     Returns
     -------
@@ -630,10 +693,21 @@ def pad_halo_mpi(
             "Install with: pip install mpi4jax mpi4py"
         ) from exc
 
+    if interp_offsets is not None and topology.tiling != (1, 1):
+        raise NotImplementedError(
+            "pad_halo_mpi(interp_offsets=...) is only supported in "
+            "face-only mode (tiling=(1, 1)); got tiling="
+            f"{topology.tiling}.  Sub-face tiling needs tile-local "
+            "offsets which are not yet derived."
+        )
+
     with mpi_timer("pad_halo_mpi"):
         if topology.tiling != (1, 1):
             return _pad_halo_mpi_tiled(data, topology, halo, mpi4jax, MPI)
-        return _pad_halo_mpi_face_only(data, topology, halo, mpi4jax, MPI)
+        return _pad_halo_mpi_face_only(
+            data, topology, halo, mpi4jax, MPI,
+            interp_offsets=interp_offsets,
+        )
 
 
 def pad_halo_vector_mpi(
@@ -810,6 +884,7 @@ def _pad_halo_mpi_face_only_4d(
     halo: int,
     mpi4jax,
     MPI,
+    interp_offsets: jax.Array | None = None,
 ) -> jax.Array:
     """Face-only 4D halo exchange: one sendrecv per neighbor for all levels."""
     # Single Pad HLO op replaces alloc-zeros + scatter (4D face-only
@@ -849,6 +924,7 @@ def _pad_halo_mpi_face_only_4d(
             strip = _extract_edge_strip_4d(data, nf_loc, nbr_edge)
             if is_reversed:
                 strip = strip[::-1]
+            strip = _maybe_interp_strip_h1(strip, interp_offsets, face, edge)
             padded = _place_strip_4d(padded, f_loc, edge, strip)
         elif halo == 2:
             strip_d0 = _extract_edge_strip_at_depth_4d(data, nf_loc, nbr_edge, 0)
@@ -856,6 +932,8 @@ def _pad_halo_mpi_face_only_4d(
             if is_reversed:
                 strip_d0 = strip_d0[::-1]
                 strip_d1 = strip_d1[::-1]
+            strip_d0 = _maybe_interp_strip_hN(strip_d0, interp_offsets, face, edge, 0)
+            strip_d1 = _maybe_interp_strip_hN(strip_d1, interp_offsets, face, edge, 1)
             padded = _place_strip_h2_4d(padded, f_loc, edge, strip_d0, strip_d1)
         else:  # halo == 3
             strip_d0 = _extract_edge_strip_at_depth_4d(data, nf_loc, nbr_edge, 0)
@@ -865,6 +943,9 @@ def _pad_halo_mpi_face_only_4d(
                 strip_d0 = strip_d0[::-1]
                 strip_d1 = strip_d1[::-1]
                 strip_d2 = strip_d2[::-1]
+            strip_d0 = _maybe_interp_strip_hN(strip_d0, interp_offsets, face, edge, 0)
+            strip_d1 = _maybe_interp_strip_hN(strip_d1, interp_offsets, face, edge, 1)
+            strip_d2 = _maybe_interp_strip_hN(strip_d2, interp_offsets, face, edge, 2)
             padded = _place_strip_h3_4d(padded, f_loc, edge,
                                           strip_d0, strip_d1, strip_d2)
 
@@ -934,6 +1015,7 @@ def _pad_halo_mpi_face_only_4d(
                 offset += chunk
                 if is_reversed:
                     strip = strip[::-1]
+                strip = _maybe_interp_strip_h1(strip, interp_offsets, face, edge)
                 padded = _place_strip_4d(padded, f_loc, edge, strip)
             elif halo == 2:
                 strip_d0 = recv_buf[offset:offset + chunk].reshape(n, nlev)
@@ -942,6 +1024,8 @@ def _pad_halo_mpi_face_only_4d(
                 if is_reversed:
                     strip_d0 = strip_d0[::-1]
                     strip_d1 = strip_d1[::-1]
+                strip_d0 = _maybe_interp_strip_hN(strip_d0, interp_offsets, face, edge, 0)
+                strip_d1 = _maybe_interp_strip_hN(strip_d1, interp_offsets, face, edge, 1)
                 padded = _place_strip_h2_4d(padded, f_loc, edge, strip_d0, strip_d1)
             else:  # halo == 3
                 strip_d0 = recv_buf[offset:offset + chunk].reshape(n, nlev)
@@ -952,6 +1036,9 @@ def _pad_halo_mpi_face_only_4d(
                     strip_d0 = strip_d0[::-1]
                     strip_d1 = strip_d1[::-1]
                     strip_d2 = strip_d2[::-1]
+                strip_d0 = _maybe_interp_strip_hN(strip_d0, interp_offsets, face, edge, 0)
+                strip_d1 = _maybe_interp_strip_hN(strip_d1, interp_offsets, face, edge, 1)
+                strip_d2 = _maybe_interp_strip_hN(strip_d2, interp_offsets, face, edge, 2)
                 padded = _place_strip_h3_4d(padded, f_loc, edge,
                                              strip_d0, strip_d1, strip_d2)
 
@@ -1105,6 +1192,7 @@ def pad_halo_mpi_4d(
     data: jax.Array,
     topology: CommTopology,
     halo: int = 1,
+    interp_offsets: jax.Array | None = None,
 ) -> jax.Array:
     """Pad a 4D scalar field with halo data using MPI.
 
@@ -1117,6 +1205,10 @@ def pad_halo_mpi_4d(
     data : jax.Array, shape (6, n, n, nlev)
     topology : CommTopology
     halo : int
+    interp_offsets : jax.Array or None
+        Optional duogrid Lagrange fractional-index offsets, shape
+        ``(6, 4, n)`` (halo=1) or ``(6, 4, halo, n)`` (halo>=2).
+        Same contract as :func:`pad_halo_mpi`.
 
     Returns
     -------
@@ -1151,10 +1243,21 @@ def pad_halo_mpi_4d(
             "Install with: pip install mpi4jax mpi4py"
         ) from exc
 
+    if interp_offsets is not None and topology.tiling != (1, 1):
+        raise NotImplementedError(
+            "pad_halo_mpi_4d(interp_offsets=...) is only supported in "
+            "face-only mode (tiling=(1, 1)); got tiling="
+            f"{topology.tiling}.  Sub-face tiling needs tile-local "
+            "offsets which are not yet derived."
+        )
+
     with mpi_timer("pad_halo_mpi_4d"):
         if topology.tiling != (1, 1):
             return _pad_halo_mpi_tiled_4d(data, topology, halo, mpi4jax, MPI)
-        return _pad_halo_mpi_face_only_4d(data, topology, halo, mpi4jax, MPI)
+        return _pad_halo_mpi_face_only_4d(
+            data, topology, halo, mpi4jax, MPI,
+            interp_offsets=interp_offsets,
+        )
 
 
 def packed_pad_halo_mpi_4d(

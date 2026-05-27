@@ -592,26 +592,18 @@ def pad_halo(
         # all handle three halo depths, and corner cells are filled by
         # `_fill_corners_h3`.
         #
-        # Iter-631 (Codex stop-time finding on iter-630): the MPI helpers
-        # do NOT honor `interp_offsets` — they do a nearest-index copy
-        # only.  Before iter-630 this silent-drop was unreachable on the
-        # halo=3 path because of the halo=3 guard; removing that guard
-        # newly exposed the hazard.  Refuse with a clear error instead of
-        # silently producing wrong results.  `duogrid` is handled below
-        # in the MPI path via the scalar `pad_halo_mpi` + post-dispatch
-        # `cube_rmp_vectorized` (offsets is None there by construction of
-        # line 541), so it is NOT affected.
-        if offsets is not None:
-            raise NotImplementedError(
-                "pad_halo(interp_offsets=...) is not supported on the "
-                "MPI backend: `pad_halo_mpi` does a nearest-index copy "
-                "only.  If you need interpolated halo placement under "
-                "MPI, either (a) teach `pad_halo_mpi` / `pad_halo_mpi_4d` "
-                "to carry offsets and apply `_interp_strip_*` on the "
-                "receive side, or (b) pre-interpolate before calling "
-                "pad_halo.  Single-device backend supports this today.")
+        # FV3_3D 2026-05-27: option (a) implemented — `pad_halo_mpi`
+        # now carries `interp_offsets` through to the face-only receive
+        # path and applies `_interp_strip` strip-by-strip.  This brings
+        # the duogrid Lagrange-extrapolated halo to MPI, making the
+        # FV3 3D PE/NH cubed-sphere paths bit-for-bit identical to the
+        # single-device backend under MPI.  Sub-face tiling still
+        # refuses — the `(6, 4, n)` offsets are global-face-indexed,
+        # tile-local indexing has not been derived.
         from legoesm.parallel.halo_exchange import pad_halo_mpi
-        padded = pad_halo_mpi(data, _mpi_topology, halo=halo)
+        padded = pad_halo_mpi(
+            data, _mpi_topology, halo=halo, interp_offsets=offsets,
+        )
     # SPMD dispatch (explicit all_gather for multi-GPU).
     elif _halo_backend == "spmd" and _spmd_mesh is not None:
         if halo == 3:
@@ -697,14 +689,12 @@ def pad_halo_pair_h2(
         # MPI: ``packed_pad_halo_mpi_4d`` already supports halo=2 and
         # halves the MPI message count from 2 → 1 by stacking the two
         # fields along the trailing axis.  Same singleton-channel trick
-        # as the SPMD path.  ``packed_pad_halo_mpi_4d`` does not
-        # currently support ``interp_offsets`` (the underlying MPI
-        # exchange ignores them — see the explicit guard in
-        # ``pad_halo_mpi_4d``); when offsets are requested, fall back
-        # to the per-field unpacked ``pad_halo`` path which raises a
-        # clear NotImplementedError so callers know to either run with
-        # duogrid (preferred) or accept the unpacked MPI path until
-        # offset-aware MPI exchange lands.
+        # as the SPMD path.
+        # FV3_3D 2026-05-27: when ``interp_offsets`` is requested we
+        # still fall through to per-field ``pad_halo`` (now MPI-offset-
+        # aware) — that path costs 2 MPI exchanges instead of 1 but
+        # produces correct duogrid-remapped halos.  Threading offsets
+        # through ``packed_pad_halo_mpi_4d`` is a future optimisation.
         if interp_offsets is None:
             from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
             q1_4d = q1[..., None]
@@ -714,9 +704,8 @@ def pad_halo_pair_h2(
                 halo=2, duogrid=duogrid,
             )
             return q1_pad_4d[..., 0], q2_pad_4d[..., 0]
-        # offsets requested under MPI — `pad_halo` already raises a
-        # clear NotImplementedError on this combination.  Let the
-        # per-field path do that for a sharper error than ours.
+        # offsets requested under MPI — fall through to per-field
+        # ``pad_halo(halo=2)``, which is now MPI-offset-aware.
     # Local backend (or MPI-with-offsets — handled above): two
     # sequential pad_halo calls with identical arithmetic.
     q1_pad = pad_halo(q1, halo=2, interp_offsets=interp_offsets,
@@ -798,24 +787,15 @@ def pad_halo_4d(
 
     # MPI dispatch.
     if _halo_backend == "mpi":
-        # Iter-632 (Codex stop-time finding on iter-631): same silent-
-        # drop hazard as the scalar `pad_halo` MPI branch — `pad_halo_mpi_4d`
-        # does not carry or honor `interp_offsets`, so a caller passing
-        # offsets under MPI would silently get nearest-index placement.
-        # Guard mirrors the scalar version (same message for grep-
-        # locality); halo=3 is already rejected by the guard above so
-        # this fires only for halo=1/2 under MPI.
-        if offsets is not None:
-            raise NotImplementedError(
-                "pad_halo_4d(interp_offsets=...) is not supported on "
-                "the MPI backend: `pad_halo_mpi_4d` does nearest-index "
-                "copy only.  If you need interpolated halo placement "
-                "under MPI, either teach `pad_halo_mpi_4d` to carry "
-                "offsets and apply `_interp_strip_*` on the receive "
-                "side, or pre-interpolate before calling pad_halo_4d. "
-                "Single-device backend supports this today.")
+        # FV3_3D 2026-05-27: option (a) implemented — `pad_halo_mpi_4d`
+        # now carries `interp_offsets` through and applies `_interp_strip`
+        # per (face, edge[, depth]) strip on the receive side.  Sibling
+        # of the scalar `pad_halo` fix in the same iteration.  Sub-face
+        # tiling still refuses (offsets are global-face-indexed).
         from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
-        padded = pad_halo_mpi_4d(data, _mpi_topology, halo=halo)
+        padded = pad_halo_mpi_4d(
+            data, _mpi_topology, halo=halo, interp_offsets=offsets,
+        )
     # SPMD dispatch (explicit all_gather for multi-GPU).
     elif _halo_backend == "spmd" and _spmd_mesh is not None:
         if halo == 3:
@@ -1102,23 +1082,12 @@ def pad_halo_vector_4d(
     # When MPI is active, pack both components along the level axis and
     # do one exchange instead of two, halving MPI message count.
     if _halo_backend == "mpi":
-        # Iter-632/633 refused both `interp_offsets != None` and
-        # `duogrid != None`.  Iter-634 (Codex stop-time follow-up):
-        # `pad_halo_4d` already applies `cube_rmp_vectorized` +
-        # `fill_corner_region` post-dispatch regardless of backend,
-        # so per-component fallback under MPI is drop-in correct.
-        # Reinstate the duogrid path via that fallback; keep refusing
-        # `interp_offsets` because no path under MPI honors offsets.
-        if interp_offsets is not None:
-            raise NotImplementedError(
-                "pad_halo_vector_4d(interp_offsets=...) is not supported "
-                "on the MPI backend: `pad_halo_mpi_4d` does "
-                "nearest-index copy only.  If you need interpolated "
-                "halo placement under MPI, either teach `pad_halo_mpi_4d` "
-                "to carry offsets and apply `_interp_strip_*` on the "
-                "receive side, or pre-interpolate before calling "
-                "pad_halo_vector_4d.  Single-device backend supports "
-                "this today.")
+        # FV3_3D 2026-05-27: `pad_halo_mpi_4d` now honors `interp_offsets`,
+        # so the packed (u_east, v_north) exchange can apply the Lagrange
+        # remap once for both components.  This was previously a hard
+        # `NotImplementedError` blocking the FV3 3D PE step under MPI
+        # (the `hydrostatic_to_fv3` cell-center→D-grid corner lift uses
+        # this path with `interp_offsets=base.halo_interp_offsets`).
         if duogrid is not None:
             # Iter-634: per-component scalar `pad_halo_4d` fallback.
             u_east_padded = pad_halo_4d(
@@ -1134,7 +1103,10 @@ def pad_halo_vector_4d(
         else:
             from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
             packed = jnp.concatenate([u_east, v_north], axis=-1)  # (6, n, n, 2*nlev)
-            packed_padded = pad_halo_mpi_4d(packed, _mpi_topology, halo=halo)
+            packed_padded = pad_halo_mpi_4d(
+                packed, _mpi_topology, halo=halo,
+                interp_offsets=interp_offsets,
+            )
             nlev = u_data.shape[-1]
             u_east_padded = packed_padded[..., :nlev]
             v_north_padded = packed_padded[..., nlev:]
@@ -2055,16 +2027,9 @@ def pad_halo_vector(
         # fallback is correct.  The `interp_offsets` refusal stays
         # because `pad_halo_mpi` (invoked by the scalar fallback) does
         # not carry offsets either.
-        if interp_offsets is not None:
-            raise NotImplementedError(
-                "pad_halo_vector(interp_offsets=...) is not supported "
-                "on the MPI backend: `pad_halo_mpi` / `pad_halo_mpi_4d` "
-                "do nearest-index copy only.  If you need interpolated "
-                "halo placement under MPI, either teach the MPI helpers "
-                "to carry offsets and apply `_interp_strip_*` on the "
-                "receive side, or pre-interpolate before calling "
-                "pad_halo_vector.  Single-device backend supports this "
-                "today.")
+        # FV3_3D 2026-05-27: `pad_halo_mpi_4d` now honors `interp_offsets`,
+        # so the packed (u_east, v_north) MPI exchange threads offsets
+        # through.  Previously this was a hard NotImplementedError.
         if duogrid is not None:
             # Iter-634: per-component scalar fallback.  Pays 2 MPI
             # messages instead of 1 packed exchange, but exercises
@@ -2083,7 +2048,10 @@ def pad_halo_vector(
         else:
             from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
             packed = jnp.stack([u_east, v_north], axis=-1)  # (6, n, n, 2)
-            packed_padded = pad_halo_mpi_4d(packed, _mpi_topology, halo=halo)
+            packed_padded = pad_halo_mpi_4d(
+                packed, _mpi_topology, halo=halo,
+                interp_offsets=interp_offsets,
+            )
             u_east_padded = packed_padded[..., 0]
             v_north_padded = packed_padded[..., 1]
     else:

@@ -118,9 +118,11 @@ class TestMPIDriverPath:
         for _ in range(n_steps):
             dist_state = model.step(dist_state, dt)
 
-        # Compare on rank 0
+        # Compare on rank 0.  FV3HydrostaticState stores winds on the
+        # D-grid (u_d, v_d at corners); the cell-centre (u, v) name only
+        # applies to the pre-FV3 HydrostaticState fed to hydrostatic_to_fv3.
         if rank == 0:
-            for field_name in ("T", "u", "v", "p_s"):
+            for field_name in ("T", "u_d", "v_d", "p_s"):
                 ref_arr = np.asarray(getattr(ref_state, field_name).data)
                 dist_arr = np.asarray(getattr(dist_state, field_name).data)
                 np.testing.assert_allclose(

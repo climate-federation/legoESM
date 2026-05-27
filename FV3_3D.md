@@ -2378,6 +2378,183 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1040 (2026-05-27): MPI ``interp_offsets`` support — unlock FV3 3D cubed-sphere under MPI
+
+### Goal
+
+Close the last documented blocker preventing the FV3-faithful PE
+and NH 3D cubed-sphere paths from running under MPI: a hard
+``NotImplementedError`` in ``pad_halo_mpi`` / ``pad_halo_mpi_4d``
+when callers pass ``interp_offsets`` (duogrid Lagrange
+fractional-index halo placement).  Confirmed at iter-1040 start
+by running
+``tests/distributed/test_mpi_driver.py::TestMPIDriverPath::
+test_distributed_3_steps_matches_single_rank`` under
+``mpirun -np 2``, which raised::
+
+    NotImplementedError: pad_halo(interp_offsets=...) is not supported
+    on the MPI backend: `pad_halo_mpi` does a nearest-index copy only.
+    If you need interpolated halo placement under MPI, either (a) teach
+    `pad_halo_mpi` / `pad_halo_mpi_4d` to carry offsets and apply
+    `_interp_strip_*` on the receive side, or (b) pre-interpolate
+    before calling pad_halo.
+
+The PE 3D step at ``primitive_eq_cdgrid.fv3_hydrostatic_tendencies``
+calls ``pad_halo_4d(T, interp_offsets=_pe_offs, ...)`` on every
+RK3 stage when ``grid.halo_interp_offsets`` is set and
+``duogrid=None`` (the iter-1040 default path for ``create_cubed_
+sphere(n)`` without ``use_duogrid=True``).  Until iter-1040 the
+combination single-process + MPI-with-offsets did not exist.
+
+### FV3 anchor / cross-backend reference
+
+- SPMD backend in ``parallel.cubesphere_exchange``: applies
+  ``_interp_strip`` immediately after the ``is_reversed`` flip at
+  line 352-355 (h1) and 467-479 (h2).  The MPI port mirrors that
+  ordering exactly.
+- ``compute_halo_interp_offsets`` (h1) / ``_h2`` / ``_h3`` at
+  ``grids.halo``: ``offsets[face, edge_idx[, depth], j]`` is the
+  correction δ such that the **owner**'s halo cell ``j`` reads the
+  neighbour strip at fractional position ``j + δ``.  ``is_reversed``
+  is pre-baked into δ via ``frac = (n - 1) - frac`` so callers
+  must apply ``[::-1]`` to the strip first.
+
+### Implementation
+
+Option (a) from the historical error message — teach the MPI
+exchange helpers to carry and apply offsets:
+
+1. New helpers in ``parallel.halo_exchange``:
+   ``_maybe_interp_strip_h1(strip, interp_offsets, face_global, edge)``
+   and ``_maybe_interp_strip_hN(strip, interp_offsets, face_global,
+   edge, depth)`` short-circuit to identity when ``interp_offsets
+   is None`` (preserves bit-for-bit baseline).  When non-None they
+   apply ``_interp_strip(strip, interp_offsets[face_global, edge[,
+   depth]])`` — same shape contract as the local and SPMD paths.
+
+2. ``_pad_halo_mpi_face_only`` and ``_pad_halo_mpi_face_only_4d``
+   now accept ``interp_offsets`` and call the new helpers after the
+   ``is_reversed`` flip and before ``_place_strip*``.  Both local-
+   edge and remote-edge (sendrecv) paths covered, for halo ∈ {1, 2,
+   3}.  Scalar and 4D variants share the same code shape.
+
+3. Entry points ``pad_halo_mpi`` and ``pad_halo_mpi_4d`` accept
+   ``interp_offsets`` and forward to the face-only helpers.
+   Sub-face tiled mode raises ``NotImplementedError`` when offsets
+   are non-None — the ``(6, 4, n)`` global-face indexing does not
+   directly translate to tile-local slices and that derivation is
+   deferred (no current production caller uses tiling + duogrid).
+
+4. ``grids.halo.pad_halo``, ``pad_halo_4d``, and ``pad_halo_vector_4d``
+   MPI branches forward ``interp_offsets`` to the new MPI entry
+   points instead of raising.  ``pad_halo_pair_h2``'s MPI fallback
+   to per-field ``pad_halo`` now works (was unreachable behind the
+   removed raise).  ``pad_halo_vector`` (2D) similarly unblocked.
+
+5. ``parallel.distributed.initialize_distributed`` re-entry now
+   re-asserts the MPI halo backend via ``set_halo_backend("mpi",
+   _active_topology)`` whenever the current backend is not already
+   ``"mpi"``.  Previously the function was strictly idempotent —
+   any earlier ``set_halo_backend("local")`` (used by
+   reference-vs-MPI bit-for-bit tests) silently outlived the
+   follow-up call.  The pre-existing caveat (re-entry does not
+   rebuild ``_active_layout`` when ``global_n`` changes) is unchanged.
+
+### Tests
+
+New file ``tests/distributed/test_mpi_interp_offsets.py`` (8
+tests, all passing under ``mpirun -np 2``):
+
+- ``TestPadHaloMPIInterpOffsets::test_h{1,2,3}_matches_local`` —
+  scalar 2D MPI vs single-device local reference, owned-face
+  bit-for-bit at ``atol=rtol=1e-12``.
+- ``TestPadHalo4DMPIInterpOffsets::test_h{1,2,3}_matches_local``
+  — 4D analogue across all three halo widths.
+- ``TestPadHalo4DMPIInterpOffsets::test_offsets_none_unchanged_baseline``
+  — ``offsets=None`` MPI path produces array-equal output vs local
+  (regression guard for the helper short-circuit).
+- ``TestPadHaloVector4DMPIInterpOffsets::test_packed_h1_matches_local``
+  — packed (u_east, v_north) MPI exchange with offsets, exercises
+  the ``hydrostatic_to_fv3`` cell-centre → D-grid lift used by every
+  PE 3D step.
+
+The owned-face comparison helper ``_owned_faces_match`` matches the
+MPI replicated-mode contract: ``pad_halo_mpi`` only fills halos for
+``topology.local_face_ids``; non-owned face halos remain at the
+zero-pad initial state.
+
+Existing test made bit-for-bit under MPI: ``tests/distributed/
+test_mpi_driver.py::TestMPIDriverPath::test_distributed_3_steps_
+matches_single_rank`` — PE 3D cubed-sphere step at C8 / 5 levels,
+3 SSP-RK3 steps, ``atol=rtol=1e-12`` against single-rank
+reference.  Field name updated from ``u``/``v`` to ``u_d``/``v_d``
+to match ``FV3HydrostaticState`` (D-grid corner storage).
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 mpirun -np 2 .venv/bin/python -m pytest \
+        tests/distributed/test_mpi_interp_offsets.py \
+        tests/distributed/test_mpi_driver.py::TestMPIDriverPath::test_distributed_3_steps_matches_single_rank \
+        -v
+    => 9 passed in 10.36 s
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_a2b_zeta_corner_nh.py \
+        tests/test_corner_div_damp_nh.py \
+        tests/test_damp_v_nh.py \
+        -q
+    => 13 passed in 117.31 s (single-device FV3 fidelity unchanged)
+
+Two pre-existing failures in ``test_mpi_driver.py``
+(``test_initialize_distributed_sets_mpi_backend`` and
+``test_pad_halo_4d_mpi_matches_local``) were confirmed broken on
+``main`` before iter-1040 and are unrelated to this change — they
+exercise replicated-data semantics that pre-date the
+session-scoped MPI conftest.
+
+### Codex adversarial review
+
+Round 1, model ``gpt-5.3-codex``: STATUS CLEAN across all 7 focus
+areas — edge-index mapping, apply order vs SPMD, owner-vs-neighbor
+face id, halo>=2 depth ordering, ``is_reversed`` interaction with
+pre-baked offsets, ``initialize_distributed`` re-entry semantics,
+and test coverage of reversed edges (face 1/3/5).  No confirmed
+bugs, no suspects.  Verdict: ship.
+
+### Status
+
+The FV3 3D PE cubed-sphere step under MPI is now bit-for-bit
+identical to the single-device reference at the operator level
+(verified by all 8 ``test_mpi_interp_offsets`` cases) and at the
+RK3 step level (verified by the 3-step driver test).  The NH 3D
+path uses the same ``pad_halo_4d(interp_offsets=...)``,
+``packed_pad_halo_mpi_4d`` (which already supports offsets via
+this iter's underlying ``pad_halo_mpi_4d`` change), and
+``pad_halo_vector_4d`` plumbing, so NH benefits automatically once
+its driver test is added.
+
+Production runs in face-only MPI mode (1-6 ranks) can now enable
+the FV3-fidelity factories (``make_fv3_faithful_nh_config`` /
+``make_fv3_faithful_pe_config``) without falling back to the
+``duogrid=True`` post-processing path — the bare ``interp_offsets``
+remap matches the local backend exactly.  Sub-face tiling
+(``n_processes > 6``) still requires ``duogrid=True`` (or no
+offsets) and is documented as a deferred follow-up.
+
+### Why this iteration was meaningful
+
+Every iter-168..1039 FV3-fidelity port lived behind a flag wired
+into the single-device path.  The user's standing requirement —
+"Always run on MPI as this will be standard" — could not be met
+because the very first ``pad_halo`` call inside
+``fv3_hydrostatic_tendencies`` raised under MPI.  iter-1040 lifts
+that gate, so the entire iter-168..1039 toolkit now actually
+exercises under MPI.  The single line of historical guidance in
+the iter-630/631 comments — "option (a): teach `pad_halo_mpi` /
+`pad_halo_mpi_4d` to carry offsets" — is finally implemented.
+
 ## Iteration 193 (2026-05-08): port FV3 damp_w + nord_w to NH path
 
 ### Goal
