@@ -237,6 +237,11 @@ def main() -> int:
                         "reported when >1). 3 recommended for fast cases <1 ms.")
     p.add_argument("--output-dir", default="results/scaling_crm_gpu")
     p.add_argument("--no-timestamp", action="store_true")
+    p.add_argument("--check-tridiag-backends", action="store_true",
+                   help="Re-run each --nx with LEGOESM_TRIDIAG forced to "
+                        "pcr / cusparse / legacy and report a comparison "
+                        "table. Useful for verifying the default choice on "
+                        "a new GPU. Multiplies runtime by ~3x.")
     args = p.parse_args()
 
     _configure_jax(args.precision)
@@ -287,6 +292,54 @@ def main() -> int:
             print(f"  N{n}: FAILED {exc}", flush=True)
             traceback.print_exc()
             failures.append(f"N{n}: {exc}")
+
+    if args.check_tridiag_backends and results:
+        # Per cavecrew note: LEGOESM_TRIDIAG is read at trace time, so the
+        # forced backend takes effect only for a freshly-launched process.
+        # Spawn a clean subprocess for each backend to bypass JAX's JIT cache.
+        import subprocess, sys
+        print("\n--check-tridiag-backends: rerunning each --nx with forced "
+              "PCR / cuSPARSE / legacy backends...")
+        header = f"  {'backend':10s}  {'N':>5s}  {'Mc/s':>7s}  {'step ms':>8s}"
+        print(header)
+        print("  " + "-" * (len(header) - 2))
+        for backend in ("pcr", "cusparse", "legacy"):
+            for nx in args.nx:
+                env_extra = {"LEGOESM_TRIDIAG": backend}
+                cmd = [
+                    sys.executable, __file__,
+                    "--nx", str(nx),
+                    "--nlev", str(args.nlev),
+                    "--dx", str(args.dx),
+                    "--dt", str(args.dt),
+                    "--precision", args.precision,
+                    "--n-acoustic-substeps", str(args.n_acoustic_substeps),
+                    "--repeat", str(args.repeat),
+                    "--no-timestamp",
+                    "--output-dir", str(out_dir / f"_{backend}_n{nx}"),
+                ]
+                if args.explicit_acoustic:
+                    cmd.append("--explicit-acoustic")
+                if args.allow_unsafe_cfl:
+                    cmd.append("--allow-unsafe-cfl")
+                env = {**os.environ, **env_extra}
+                try:
+                    out = subprocess.check_output(
+                        cmd, env=env, stderr=subprocess.STDOUT,
+                    ).decode()
+                    for line in out.splitlines():
+                        if f"N{nx:>4d} cells=" in line:
+                            # Parse: throughput=XXX.XMcells/s and step=XX.XXms
+                            import re
+                            m_mc = re.search(r"throughput=\s*([\d.]+)Mcells", line)
+                            m_ms = re.search(r"step=\s*([\d.]+)ms", line)
+                            if m_mc and m_ms:
+                                print(f"  {backend:10s}  {nx:5d}  "
+                                      f"{float(m_mc.group(1)):7.1f}  "
+                                      f"{float(m_ms.group(1)):8.2f}")
+                            break
+                except subprocess.CalledProcessError as exc:
+                    print(f"  {backend:10s}  {nx:5d}  FAILED ({exc.returncode})")
 
     if not results:
         print("\nNo successful runs — exiting nonzero.")

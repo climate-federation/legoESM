@@ -117,6 +117,42 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 74 — 2026-05-27 — bench `--check-tridiag-backends` + fp64 PCR win
+
+Added `--check-tridiag-backends` flag to
+`scripts/bench_crm_gpu_scaling.py`. After the normal sweep, it
+re-runs each `--nx` in a fresh subprocess with `LEGOESM_TRIDIAG`
+forced to `pcr` / `cusparse` / `legacy` and prints a comparison
+table. Useful for verifying the GPU default choice on a fresh
+hardware (env var is read at JIT trace time so a fresh process
+is required for each backend).
+
+Example output on consumer mobile RTX 5090 (N=128 fp32 nsub=6):
+```
+  backend         N     Mc/s   step ms
+  ------------------------------------
+  pcr           128    437.6      1.12
+  cusparse      128    321.4      1.53
+  legacy        128     89.4      5.50
+```
+
+⇒ PCR **+36% vs cuSPARSE**, **+4.9× vs legacy fori_loop**.
+
+**fp64 PCR validation** (consumer GPU has 1:32 fp32:fp64 ALU ratio,
+so fp64 is ALU-bound; PCR's arithmetic-heavy approach should help):
+| backend  | N=96 Mc/s | N=128 Mc/s |
+|----------|-----------|-----------|
+| PCR fp64 | 68.7      | 70.0      |
+| cuSPARSE fp64 | 46.2 | 46.5      |
+
+PCR **+50% on fp64** as well. HBM only 16% utilized (ALU-bound at
+fp64), so the win comes from PCR's fused-arithmetic pipeline being
+faster than cuSPARSE's setup + serial-back-substitute overhead at
+this precision.
+
+⇒ **PCR is the right default for ALL precisions on this GPU**, not
+   just fp32 where the original measurement was done.
+
 ### Iter 73 — 2026-05-27 — bench HBM annotation + nsub=3 finding
 
 Extended `scripts/bench_crm_gpu_scaling.py` to print inline HBM
