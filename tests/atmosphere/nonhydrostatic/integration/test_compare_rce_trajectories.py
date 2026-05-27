@@ -161,6 +161,31 @@ def test_summary_reports_max_abs_delta(tmp_path, capsys, monkeypatch):
     assert "max |d cwv_mean| = 1.000000e+00" in out
 
 
+def test_quiet_suppresses_diff_table(tmp_path, capsys, monkeypatch):
+    """iter-154: ``--quiet`` must suppress the fixed-width table but
+    still print the matched-days summary line + per-column max-abs
+    rows. The pre-iter-154 test_summary_reports_max_abs_delta also
+    used ``--quiet`` but only asserted the summary text was PRESENT;
+    a regression that turned ``--quiet`` into a no-op (or that
+    always printed the table) would silently pass under that test.
+
+    This test asserts the column-header row of the diff table
+    (``day  dCWV_mean[mm]...``) is ABSENT, which only holds in
+    quiet mode (the table prints those labels per format_diff_table
+    at scripts/compare_rce_trajectories.py:219).
+    """
+    a = _make_run(tmp_path, "a", [(0.0, 50.0), (1.0, 51.0)])
+    b = _make_run(tmp_path, "b", [(0.0, 50.5), (1.0, 52.0)])
+    monkeypatch.setattr(
+        sys, "argv",
+        ["compare_rce_trajectories.py", str(a), str(b), "--quiet"],
+    )
+    compare_mod.main()
+    out = capsys.readouterr().out
+    assert "matched 2 day(s)" in out  # summary line — still printed
+    assert "dCWV_mean[mm]" not in out  # table header — suppressed
+
+
 def test_diff_against_real_iter98_baseline(tmp_path):
     """Smoke: build a synthetic 'iter-98 lookalike' (a single-day
     50.0 mm snapshot) and a 'iter-105 lookalike' identical to it.
