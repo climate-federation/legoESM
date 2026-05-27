@@ -207,6 +207,91 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 217..229 (LES F11 fix-path-1 sweep + iter-183 30-day DOD PASS)
+
+13 iterations spanning the F11 LES experiment chain and the final
+iter-183 30-day production verification.
+
+**iter-217..228 (F11 fix-path-1 LES sweep + adaptive-dt stub)**:
+documented above in F11 prose (lines 153..160). Key results:
+
+* iter-220/221: LES dx=500 m + dt=0.5 + theta_noise smooth_k1 ran
+  864 steps WITHOUT NaN — first non-NaN nonzero-theta-noise runs
+  at any iteration. Gravity-wave mode halved by 2× larger domain.
+* iter-222 control (LES + theta_noise=0): max|w| stays at 1-4e-4
+  m/s through 864 steps — confirms gravity wave is smooth_k1
+  response, not intrinsic LES instability.
+* iter-223 (LES + white theta_noise 0.01 K): **realistic-rate
+  precip 7.46 mm/day** at step 600 (order-of-magnitude match for
+  Wing 2018 ~3 mm/day) — but qc cells over-amplify (qc=0.305,
+  10× supersaturated) → NaN at step 700.
+* iter-224 (LES + theta_noise 0.001 K + Smag c_s=0.4): APPARENT
+  breakthrough at 864 steps; iter-225 follow-up to 28 sim-min
+  shows NaN at step 1250 — Smag+amp tuning only delays the qc
+  cascade. iter-226 documents the correction.
+* iter-227 (theta_noise=1e-5 K): max|w|=69 m/s by step 750 —
+  amp-independent at LES dx, F11 cascade kicks in regardless.
+* iter-228: --adaptive-dt parse-only stub added. Real
+  implementation (~80 LOC time-loop restructure) reserved for
+  follow-on PR. iter-225 feasibility note: max|w|=225 m/s at
+  iter-223 NaN corresponds to Ca_adv=0.225 (still < 1), so the
+  blow-up isn't an advective-CFL violation — adaptive dt would
+  delay but not prevent the qc buoyancy cascade.
+
+**iter-229 — iter-183 30-day production COMPLETED, DOD PASS**:
+
+The iter-183 30-day production run (PID 33311) terminated cleanly
+after 129600/129600 steps = 30.000 sim-days in 10368 s wall =
+**2 h 53 m** on a single rank (132×132×30, dx=2 km, dt=20 s, Van
+Leer horizontal advection, beta=0.2, Smag c_s=0.2, hyperdiff=5e6,
+no theta-noise — the iter-183 production contract).
+
+Final-DOD verdict via
+``summarize_rce_trajectory.py --final-dod --check-log-max-w``:
+
+```
+log max|w| = 1.0605e-02 m/s (1297 log rows; DOD threshold = 50.0 m/s)
+DOD FINAL verdict: PASS
+```
+
+Trajectory plateau (CWV, MSE, max|w|, surface precip):
+
+| day | CWV[mm] | MSE[J/m²] | log max|w|[m/s] | precip[mm/day] |
+|---|---|---|---|---|
+| 0  | 49.94 | 3.5247e9 | 0       | 0       |
+| 5  | 56.84 | 3.5186e9 | ~1e-3   | 0       |
+| 10 | 56.07 | 3.5010e9 | ~3e-3   | 0       |
+| 15 | 55.56 | 3.4892e9 | ~5e-3   | 0       |
+| 16 | 55.49 | 3.4872e9 | ~6e-3   | 7.1e-4  |
+| 20 | 54.83 | 3.4800e9 | ~6e-3   | 4.9e-4  |
+| 25 | 54.01 | 3.4725e9 | ~6e-3   | 4.3e-4  |
+| 30 | 53.33 | 3.4668e9 | 1.06e-2 | 1.19e-3 |
+
+Cumulative surface precip over days 16..30:
+~14 d × 86400 s × ~6.5e-9 mm/s ≈ **7.9e-3 mm total**, average
+**~5.6e-4 mm/day** — three OOM below Wing 2018 ~3 mm/day plateau
+target. Column-symmetric trap × Kessler under-resolution at
+dx=2 km still binds (the LES sweep above showed real cells form
+at dx=500 m but blow up in F11 qc cascade by step 700).
+
+**Net iter-183 chain wins (verified iter-229)**:
+
+* 30-day plane CRM **STABLE THROUGHOUT** (max|w|=1.06e-2 m/s
+  end-state; DOD threshold 50 m/s, safety margin ~5000×).
+* CWV plateau 49.94 → 53.33 mm (Wing 2018 range; -1.6% MSE drift
+  across 30 days, no runaway).
+* **3× wall-time speedup** confirmed at production scale
+  (iter-14 baseline ~9 h vs iter-183 2 h 53 m).
+* First end-to-end documented 30-day plane CRM run with
+  non-trivial precipitation cycles starting day 16.
+* Iter-183 production contract (dt=20 + Van Leer + beta=0.2)
+  closes the "stable" half of the DOD goal.
+
+**Outstanding**: realistic precip rates still gated by F11
+(dx ≤ 1 km LES regime); cross-grid CRM (cubed-sphere/MPAS)
+remains the "all grid types" piece (run_rce_cross_grid.sh covers
+hydrostatic RCE today, not non-hydrostatic CRM).
+
 ### 2026-05-27 — iter 212..216 (in-flight precip observation + iter-105 reanalysis)
 
 5 monitoring-loop iterations during the iter-183 production run.
