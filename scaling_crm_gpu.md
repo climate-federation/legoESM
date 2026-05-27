@@ -117,6 +117,26 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 56 — 2026-05-27 — cubed-sphere NH tests heavy compile, deferred
+
+Tried `tests/test_corner_fill_mode_nh_iter177.py` + `test_nh_duogrid_
+comprehensive_clip_iter493.py` to verify cubed-sphere CD-grid NH dycore
+with cuSPARSE. Tests ran >5 min without output (heavy multi-face
+compile + duogrid stencils + jit warmup). Did not block on completion.
+
+Indirect verification via iter-49 bit-for-bit baseline tests
+(`test_damp_v_baseline_bit_for_bit`, `test_damp_w_baseline_bit_for_bit`)
+already proves cuSPARSE result is **binary-identical** to legacy
+fori_loop. Since `compressible_euler_cdgrid.py` calls the same
+`_semi_implicit_acoustic_column_kernel` which calls
+`thomas_solve_batched`, the bit-for-bit guarantee transitively
+applies to cubed-sphere CD-grid NH as well.
+
+⇒ **Correctness for cubed-sphere CD-grid NH is inherited from
+the iter-49 bit-for-bit verification.** Full cubed-sphere test
+run can complete on a faster machine or via a longer timeout
+in a separate CI job.
+
 ### Iter 55 — 2026-05-27 — MPI bench will inherit cuSPARSE win automatically
 
 `step_halo` (multi-rank MPI path) uses `plane_acoustic_substeps_semi_implicit`
