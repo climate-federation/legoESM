@@ -561,6 +561,38 @@ def test_wrapper_evaluate_dod_allow_summary_failure_downgrades(tmp_path):
     assert "WARN" in res.stderr
 
 
+@pytest.mark.parametrize(
+    "summarizer_exit",
+    # iter-172: the iter-103 docstring promises ALLOW_SUMMARY_FAILURE
+    # covers IO error (1), DOD FAIL (3) AND INSUFFICIENT (4). iter-103
+    # only tested code 3; the 1 + 4 legs were uncovered. A regression
+    # that special-cased the downgrade only for code 3 would silently
+    # let an IO error or INSUFFICIENT propagate as a wrapper FAIL even
+    # when the caller explicitly opted out of DOD-blocking.
+    [1, 4],
+)
+def test_wrapper_allow_summary_failure_covers_all_summarizer_exits(
+    tmp_path, summarizer_exit,
+):
+    """iter-172: ALLOW_SUMMARY_FAILURE=1 downgrades EVERY non-zero
+    summarizer exit code (not just DOD FAIL=3) to wrapper exit 0
+    with WARN on stderr. Companion to
+    test_wrapper_evaluate_dod_allow_summary_failure_downgrades
+    (which exercises code 3) so the iter-103 docstring promise is
+    fully verified.
+    """
+    res = _run_wrapper_with_stubs(
+        tmp_path, mpirun_exit=0, summarizer_exit=summarizer_exit,
+        allow_summary_failure="1",
+    )
+    assert res.returncode == 0, (
+        f"ALLOW_SUMMARY_FAILURE=1 should downgrade summarizer "
+        f"exit {summarizer_exit} to wrapper exit 0; got "
+        f"{res.returncode}; stderr={res.stderr!r}"
+    )
+    assert "WARN" in res.stderr
+
+
 def test_wrapper_evaluate_dod_final_threads_final_dod_flag(tmp_path):
     """iter-113: EVALUATE_DOD=final must reach the summarizer as
     ``--final-dod``. The stub PYBIN echoes its argv so we can
