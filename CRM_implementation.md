@@ -223,7 +223,7 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
-### 2026-05-27 — iter 238..250 (cross-grid CRM smoke + state.py cherry-pick + pre-existing test fixes + 4-round Codex polish)
+### 2026-05-27 — iter 238..262 (cross-grid CRM smoke + state.py cherry-pick + 7-script untested-bench chain + helper extraction)
 
 8 iterations covering the cross-grid CRM test surface lift:
 * iter-238: first test coverage for `scripts/run_rcemip_long.py`.
@@ -352,6 +352,30 @@ xfail removal converted 0 → 9 previously-blocked validation
 tests. Total new test surface: roughly +30 test cases vs
 pre-iter-238 baseline. No regressions in any pre-existing
 test_atmosphere/nonhydrostatic/ test.
+
+**iter-261..262 (helper extraction — Codex iter-256 LOW closure)**:
+
+iter-261 extracted shared subprocess + env-setup + nonzero-fail
+formatting into
+``tests/atmosphere/nonhydrostatic/integration/_bench_smoke_helpers.py``:
+
+```python
+run_bench(script, cmd_args, *, timeout_s=180) -> CompletedProcess
+fail_on_nonzero(result, script_name, extra_kwargs="") -> None
+```
+
+7 smoke files refactored. Net delta: +85 LOC in helper (full
+docstrings), -60 LOC across 7 test files, -8 LOC overall. The
+helper uses the NOT-a-test convention (no ``test_`` prefix → pytest
+``test_*.py`` glob skips it, verified against ``pyproject.toml``
+``testpaths``).
+
+iter-262 ran Codex round-1 review of the helper extraction:
+**0 HIGH/MEDIUM/LOW findings**. Env preserved, error-message
+context preserved, parametrise ``extra_kwargs`` format intact,
+pytest collection safe, ``REPO_ROOT = parents[4]`` depth correct
+for all 7 callers. The iter-238..262 cross-grid + bench-coverage
+chain reaches a natural endpoint with zero open Codex items.
 
 **iter-246..250 (post-sweep Codex polish chain — 4 rounds)**:
 
