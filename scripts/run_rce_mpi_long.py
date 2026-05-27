@@ -337,11 +337,46 @@ def parse_args():
                         "max|w| * dt / dx`` after each outer step. "
                         "Halve dt for the next step if Ca > 0.5; "
                         "restore to nominal --dt when Ca < 0.1. "
-                        "The flag is reserved for a follow-on PR; "
-                        "today it parses correctly + raises a clear "
-                        "NotImplementedError at main() entry if set. "
-                        "The production iter-183 contract "
-                        "(theta_noise=0) doesn't need adaptive-dt.")
+                        "iter-233 REPLACEMENT: the FV3-style "
+                        "``--n-outer-split`` flag below picks a "
+                        "static substep count from a conservative "
+                        "max-wind estimate at trace time — "
+                        "scan-friendly + fully AD-safe + no "
+                        "while-loop refactor. ``--adaptive-dt`` is "
+                        "kept as a parse-only stub for back-compat "
+                        "but raises NotImplementedError; prefer "
+                        "``--n-outer-split auto`` for new code.")
+    p.add_argument("--n-outer-split", default="1",
+                   help="iter-233 FV3-style trace-time outer "
+                        "subcycle count. ``1`` (default): no outer "
+                        "subcycling, preserves iter-183 production "
+                        "contract bit-for-bit. ``N`` (positive int): "
+                        "static N inner steps per outer step, each "
+                        "of size ``--dt / N``. ``auto``: call "
+                        "``select_n_outer_split(dt, dx, "
+                        "max_wind_safe=--max-wind-safe, "
+                        "cfl_safe=--cfl-safe)`` to pick N at parse "
+                        "time from a conservative max-wind estimate. "
+                        "For iter-183 production (dt=20, dx=2000, "
+                        "wind=300, cfl=0.4) ``auto`` selects N=8. "
+                        "The chosen integer is a STATIC Python int "
+                        "— no XLA retrace, no traced control flow, "
+                        "fully reverse-differentiable through "
+                        "eqx.filter_value_and_grad.")
+    p.add_argument("--max-wind-safe", type=float, default=300.0,
+                   help="Conservative upper-bound max|w|/max|u| for "
+                        "``--n-outer-split auto`` [m/s]. Default 300 "
+                        "covers the iter-223 F11 cascade ceiling "
+                        "(max|w|=225 m/s before NaN) with 33%% "
+                        "margin. Ignored when ``--n-outer-split`` "
+                        "is a numeric value.")
+    p.add_argument("--cfl-safe", type=float, default=0.4,
+                   help="Target advective CFL for "
+                        "``--n-outer-split auto`` (dimensionless). "
+                        "Default 0.4 = SK08/FV3 standard (2.5x "
+                        "margin under the formal CFL=1 limit). "
+                        "Ignored when ``--n-outer-split`` is a "
+                        "numeric value.")
     p.add_argument("--implicit-buoyancy", action="store_true", default=False,
                    help="Klemp-Wilhelmson 1978 implicit-buoyancy treatment "
                         "of the w-equation in the SI acoustic substep. Adds "
@@ -752,10 +787,48 @@ def main():
             "error: --adaptive-dt is a parse-only stub today. The "
             "runtime CFL-monitoring + dt-shrinkage loop is reserved "
             "for a follow-on PR (see CRM_implementation.md F11 "
-            "fix-path-4 feasibility note). If you need to test it "
-            "manually, use a smaller --dt + smaller --theta-noise-amp; "
-            "the iter-183 production contract does not require it."
+            "fix-path-4 feasibility note). iter-233 added the "
+            "FV3-style replacement: use ``--n-outer-split auto`` "
+            "(or a specific integer) to subcycle the outer step "
+            "with a static, scan-friendly substep count."
         )
+    # iter-233: resolve --n-outer-split (str CLI arg) to a Python
+    # int. Three forms:
+    #   "1"   -> 1 (default, no outer subcycling, preserves
+    #            iter-183 production contract)
+    #   "N"   -> int(N), user-pinned static count (must be >= 1)
+    #   "auto" -> select_n_outer_split(dt, dx, max_wind_safe,
+    #            cfl_safe) at parse time from a conservative
+    #            max-wind estimate (FV3-style).
+    # The output ``n_outer_split`` is a STATIC Python int — used
+    # as ``range(n_outer_split)`` in the outer loop below; no
+    # tracing, no XLA retrace, fully AD-safe.
+    if args.n_outer_split == "auto":
+        from legoesm.timestepping.split_explicit import (
+            select_n_outer_split,
+        )
+        n_outer_split = select_n_outer_split(
+            args.dt, args.dx,
+            max_wind_safe=args.max_wind_safe,
+            cfl_safe=args.cfl_safe,
+        )
+    else:
+        try:
+            n_outer_split = int(args.n_outer_split)
+        except ValueError:
+            raise SystemExit(
+                f"error: --n-outer-split={args.n_outer_split!r} "
+                f"must be 'auto' or a positive integer (1 = no "
+                f"subcycling, default)."
+            )
+        if n_outer_split < 1:
+            raise SystemExit(
+                f"error: --n-outer-split={n_outer_split} must be "
+                f">= 1. Use '1' (default) for no subcycling, "
+                f"'auto' for FV3-style trace-time selection, or a "
+                f"specific integer for user-pinned subcycling."
+            )
+    dt_inner = args.dt / n_outer_split
     # iter-67/68: validate numeric CLI args reject NaN/inf with
     # concise SystemExit. iter-67 hardcoded 17 arg names; iter-68
     # auto-detects via vars(args) so a future ``--new-coeff``
@@ -1072,7 +1145,8 @@ def main():
             f"mass_fixer={'off' if args.no_mass_fixer else 'on'} "
             f"si_acoustic={'on' if args.semi_implicit_acoustic else 'off'} "
             f"n_acoustic_substeps={args.n_acoustic_substeps} "
-            f"hyperdiff={args.hyperdiff}\n"
+            f"hyperdiff={args.hyperdiff} "
+            f"n_outer_split={n_outer_split}\n"
         )
         log_f.write(
             f"# step,day,CWV_mean,CWV_max,MSE_mean,max|w|,"
@@ -1125,10 +1199,17 @@ def main():
             # ----------------------------------------------------- #
             if _maybe_fire_radiation(step):
                 rad_call_count += 1
-            state = model.step_halo(
-                state, dt=args.dt, layout=layout,
-                owned_mask=owned_mask,
-            )
+            # iter-233 FV3-style outer subcycling: ``n_outer_split``
+            # is a STATIC Python int chosen at parse_args time
+            # (auto: from a conservative max-wind CFL; explicit:
+            # user-pinned). The Python ``for`` loop unrolls at
+            # trace time so the inner ``step_halo`` JIT cache is
+            # hit once per outer step.
+            for _sub in range(n_outer_split):
+                state = model.step_halo(
+                    state, dt=dt_inner, layout=layout,
+                    owned_mask=owned_mask,
+                )
             state = physics_split(state, args.dt, args.n_physics_substeps)
             state = apply_positive_filter_state(
                 state, tracer_slots_to_filter=(0, 1, 2), mode="clip",
@@ -1148,7 +1229,11 @@ def main():
             if rank == 0:
                 if _maybe_fire_radiation(step):
                     rad_call_count += 1
-                state = model.step(state, dt=args.dt, physics_fn=None)
+                # iter-233 FV3-style outer subcycling (legacy path).
+                for _sub in range(n_outer_split):
+                    state = model.step(
+                        state, dt=dt_inner, physics_fn=None,
+                    )
                 state = physics_split(
                     state, args.dt, args.n_physics_substeps,
                 )

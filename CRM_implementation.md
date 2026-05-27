@@ -207,6 +207,85 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 233 (FV3-style trace-time n_outer_split — replaces iter-228 adaptive-dt stub)
+
+User suggestion: "FV3-style answer is split-explicit subcycling
+with a fixed n_split — the substep count is a static integer
+chosen at trace time from a conservative max wind, which is
+natively scan-friendly and fully reverse-differentiable without
+any of the above gymnastics. You can reuse it if we have it in
+our FV3 implementation".
+
+Investigation: `src/legoesm/core/fv3_*.py` (SW-core primitives:
+D-grid, divergence corner, sponge layer, del6 vt flux) has no
+n_split selector. `src/legoesm/timestepping/split_explicit.py`
+has `SplitExplicitConfig(n_substeps=6)` but only for SK08
+ACOUSTIC inner substeps within each RK3 stage — not the FV3
+OUTER subcycle the user described. So we add the missing piece
+rather than reuse.
+
+**Changes**
+
+* `src/legoesm/timestepping/split_explicit.py`: added
+  `select_n_outer_split(dt_outer, dx, max_wind_safe=300.0,
+  cfl_safe=0.4) -> int`. Pure Python float-in / int-out
+  utility. Trace-time. Reusable across dycores.
+* `scripts/run_rce_mpi_long.py`: added three CLI flags:
+  * `--n-outer-split N|auto` (default `'1'` = no subcycling,
+    preserves iter-183 production bit-equal). `auto` calls
+    `select_n_outer_split` at parse time. Integer `N` overrides.
+  * `--max-wind-safe FLOAT` (default 300.0 m/s = iter-223 F11
+    ceiling + 33%% safety margin).
+  * `--cfl-safe FLOAT` (default 0.4 = SK08/FV3 standard).
+  The chosen `n_outer_split` is a STATIC Python int used as
+  `range(n_outer_split)` in the outer loop (both DD and
+  legacy rank-0 paths). No XLA retrace, no traced control
+  flow, fully reverse-differentiable.
+* `# config:` log header now includes `n_outer_split=N` for
+  fingerprint testing.
+* `--adaptive-dt` stub help text updated to point users at the
+  iter-233 replacement.
+* `tests/unit/test_select_n_outer_split.py`: 19 unit tests.
+  Cover iter-183 production -> 8, steady opt-down -> 1, LES
+  regime -> 1, ceiling rounding (0.2 cfl -> 15 not 16),
+  Python-int return type, ValueError validation on
+  dt/dx/max_wind/cfl.
+* `tests/atmosphere/nonhydrostatic/integration/test_run_rce_mpi_long_driver_defaults.py`:
+  4 new tests:
+  * `test_n_outer_split_default_preserves_iter183_contract` —
+    default MUST be "1" (default-flip would silently invalidate
+    iter-229 DOD PASS).
+  * `test_max_wind_safe_default_300`
+  * `test_cfl_safe_default_0p4`
+  * `test_driver_imports_select_n_outer_split_from_package` —
+    AST-lock the helper-import path (mirrors iter-218 pattern).
+
+**Measurements**
+
+* iter-183 envelope test (default --n-outer-split 1) still
+  PASSES in 28.5 s — bit-equal to pre-iter-233 behavior.
+* `--n-outer-split 2` smoke (12x12 dx=2000 dt=5): exits 0,
+  log shows `n_outer_split=2`. Stable.
+* `--n-outer-split auto` smoke (12x12 dx=2000 dt=20): exits 0,
+  log shows `n_outer_split=8` (matches the docstring example
+  ceil(20·300/(0.4·2000))=8). Stable.
+* 19 unit tests + 4 AST/integration tests pass (54.9 s including
+  the 36 pre-iter-233 smoke tests).
+
+**Why not iter-228 adaptive-dt (mid-run dt halving)?**
+
+The iter-228 proposal required restructuring the time
+integration loop from `for step in range(total_steps)` to
+`while t_sim < target_t` with per-step CFL monitoring +
+dt-shrinkage. That breaks `lax.scan`-friendliness (variable
+loop length), forces XLA retrace on dt change (dt is a
+JIT-static in some code paths), and complicates AD (the
+while-condition is a traced bool). iter-233 keeps the static
+fori_loop discipline by picking N upfront from the worst-case
+wind — the cost is some wasted subcycling for steady runs (a
+user who knows max|w|<1 m/s sets `--max-wind-safe 1.0` and
+gets N=1).
+
 ### 2026-05-27 — iter 230 (iter-183 production-contract envelope regression + Codex round-1 fixes)
 
 Locked the iter-183 production contract (dt=20 + van_leer +

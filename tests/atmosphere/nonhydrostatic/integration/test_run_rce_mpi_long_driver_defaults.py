@@ -534,3 +534,65 @@ def test_vertical_theta_diffusion_production_default(driver_defaults):
     convection vertically and inflate the cloud-fraction plateau
     above the 0.4-0.5 range the iter-105 30-day run sits in."""
     assert driver_defaults["--vertical-theta-diffusion"] == 0.0
+
+
+def test_n_outer_split_default_preserves_iter183_contract(driver_defaults):
+    """iter-233: --n-outer-split default MUST be '1' (the string
+    '1', not int 1 — argparse default for the str-typed flag).
+
+    Any non-'1' default would silently change the iter-183
+    production contract: --n-outer-split=2 means 2 dycore substeps
+    per outer step at dt/2, which is bit-different from --n-outer-split=1
+    (different acoustic-substep cadence, different roundoff
+    accumulation). The iter-183 30-day production run was verified
+    at --n-outer-split=1 (implicit default); a default-flip would
+    invalidate iter-229's DOD PASS without anyone noticing.
+    """
+    assert driver_defaults["--n-outer-split"] == "1"
+
+
+def test_max_wind_safe_default_300(driver_defaults):
+    """iter-233: --max-wind-safe default = 300.0 m/s. Covers the
+    iter-223 F11 cascade ceiling (max|w|=225 m/s before NaN) with
+    33%% safety margin. Used by ``--n-outer-split auto`` to pick
+    the static n_split from the conservative max-wind CFL."""
+    assert driver_defaults["--max-wind-safe"] == 300.0
+
+
+def test_cfl_safe_default_0p4(driver_defaults):
+    """iter-233: --cfl-safe default = 0.4 (SK08/FV3 conservative
+    target, 2.5x margin under the formal CFL=1 limit)."""
+    assert driver_defaults["--cfl-safe"] == 0.4
+
+
+def test_driver_imports_select_n_outer_split_from_package():
+    """iter-233: the driver must import ``select_n_outer_split``
+    from ``legoesm.timestepping.split_explicit`` rather than
+    re-implementing the FV3-style n_split formula inline. Locking
+    the import path here so a future revert to an inline
+    implementation surfaces immediately (mirrors iter-218
+    build_smooth_k1_pattern pattern).
+
+    Note: the import is FUNCTION-SCOPE deferred (inside main(),
+    only fires when --n-outer-split=auto) to keep parse_args
+    import-time lean. The AST check therefore looks for the
+    deferred import inside any function body, not at module top.
+    """
+    import ast
+    tree = ast.parse(DRIVER.read_text())
+    target_module = "legoesm.timestepping.split_explicit"
+    target_name = "select_n_outer_split"
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.module == target_module
+        ):
+            for alias in node.names:
+                if alias.name == target_name:
+                    return
+    pytest.fail(
+        f"Driver must import {target_name} from {target_module} "
+        f"(iter-233 contract). A future revert to an inline "
+        f"n_split formula would silently bypass the iter-233 unit "
+        f"tests."
+    )
