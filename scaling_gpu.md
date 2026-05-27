@@ -661,6 +661,24 @@ Updated final ladder:
 - `scaling_gpu_weak.png` — ns/cell vs cells, flat = saturated
 - `scaling_gpu_peak_bar.png` — peak Mcells/s by grid × precision
 
+### Iter 26 — 2026-05-27 — velocity-kick stability + PR description update
+
+Stability check broadened from eta-only kick to a u-velocity kick
+(0.5 m/s gaussian over the LL192 horizontal). 200 steps × 600 s fp64:
+
+| solver / nsub                | finite | |u|_max | |eta|_max |
+|------------------------------|--------|---------|-----------|
+| explicit_substep nsub=10     | True   | 0.28    | 8.5 m     |
+| explicit_substep nsub=30     | True   | 0.26    | 6.7 m     |
+| impl_cn nsub=30              | True   | 0.47    | 7.2 m     |
+
+All 3 configurations stable. impl_cn preserves |u| ~75% better than
+explicit (less numerical dissipation in the barotropic mode);
+geostrophic-adjustment eta amplification is similar across solvers.
+
+PR #319 description updated to reflect iter 21-25 corrections
+(unit-bug walkback, CFL-validated nsub recommendations, final ladder).
+
 ### Iter 25 — 2026-05-27 — MPAS CFL stability sweep CONFIRMS iter-22 nsub=10
 
 Mirror iter-24 check on MPAS. I5 fp64 dt=600 s, 200 steps (33 h) with
