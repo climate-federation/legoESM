@@ -839,7 +839,10 @@ def test_no_plateau_check_folds_insufficient_into_pass(tmp_path):
         f"a 3-day finite trajectory; got exit {res.returncode}, "
         f"stderr={res.stderr!r}"
     )
-    assert "DOD verdict: PASS" in res.stdout
+    # iter-130 Codex MEDIUM: --no-plateau-check uses a distinct
+    # ``DOD STABILITY`` label so the verdict is not confused with a
+    # full plateau-validated PASS.
+    assert "DOD STABILITY verdict: PASS" in res.stdout
 
 
 def test_no_plateau_check_still_fails_on_blowup(tmp_path):
@@ -886,7 +889,9 @@ def test_no_plateau_check_still_fails_on_blowup(tmp_path):
         f"blow-up; got exit {res.returncode}, "
         f"stdout={res.stdout!r}"
     )
-    assert "DOD verdict: FAIL" in res.stdout
+    # iter-130 Codex MEDIUM: --no-plateau-check uses the DOD
+    # STABILITY label on both PASS and FAIL branches.
+    assert "DOD STABILITY verdict: FAIL" in res.stdout
     assert "|U|_sfc exceeded" in res.stdout
 
 

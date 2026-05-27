@@ -730,7 +730,14 @@ def main() -> None:
             verdict = evaluate_rce_quality(
                 rows, last_n_days_for_plateau=n_plateau,
             )
-            label = "DOD"
+            # iter-130 Codex MEDIUM fix: distinct label for the
+            # stability-only mode so a downstream log scraper / human
+            # reader cannot mistake it for a full plateau-validated
+            # PASS. Stability mode skips the plateau + MSE-drift
+            # checks; the verdict line MUST surface that fact.
+            label = (
+                "DOD STABILITY" if args.no_plateau_check else "DOD"
+            )
         # iter-104 Codex MEDIUM#3 + MEDIUM#7: three-way verdict +
         # distinct exit codes so automation can tell PASS from
         # INSUFFICIENT (too short for plateau check) and from a
