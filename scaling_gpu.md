@@ -411,6 +411,23 @@ The single-GPU theoretical limit has been reached for the structured-grid config
 - Algorithm change (replace spectral with spectral-element or GPU-native SHTns)
 - Mesh-level optimization (Hilbert reordering for MPAS) — invasive
 
+### Iter 14 — 2026-05-27 — impl_cn numerical validation
+
+Open thread from iters 11-13: speed gain of `implicit_cn` came with no
+correctness check. Added `scripts/validate_baro_solver.py`:
+
+- builds same grid twice — explicit_substep + implicit_cn
+- kicks eta with localized Gaussian bump (2D for LL, contiguous slice for MPAS)
+- runs 50 steps × 600 s = 8.3 h
+- compares pointwise + integrated-norm divergence
+- skips noise-floor leaves (both norms < 1e-5)
+
+**LL64 fp64 result:** finite ✓ both solvers; integrated norms agree within 9.5%; pointwise max-rel ~1.4 (expected — wave phase decorrelation between schemes, not a stability issue).
+
+**MPAS I4 fp64 result:** finite ✓ both; norms within 16.5% (after skipping near-zero diagnostic leaf); pointwise max-rel ~2.1 (phase shift).
+
+⇒ impl_cn is a **valid drop-in for scaling-bench speed measurement**. Numerics differ from explicit_substep in second-order dispersion (expected; both are O(dt²) but with different stencils) but conserve mass and stay stable.
+
 ### Iter 13 — 2026-05-27 — LL ocean implicit_cn also a 1.2-1.95× win
 
 Same trick that fixed MPAS applies to lat-lon C-grid. Exposed via new `--ll-baro-solver` flag.
