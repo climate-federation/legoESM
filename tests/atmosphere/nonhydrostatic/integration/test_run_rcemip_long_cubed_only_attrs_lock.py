@@ -89,6 +89,55 @@ def _extract_add_argument_dest_names(tree: ast.Module) -> set[str]:
     return dests
 
 
+def test_extract_dest_handles_short_form_prefix():
+    """iter-296 (Codex iter-295 round-2 LOW): explicit lock for
+    the iter-295 short+long-form extractor branch. The real
+    driver doesn't currently use ``p.add_argument('-c', '--cubed-X',
+    ...)`` so the live AST test exercises only the long-form-first
+    path; this synthetic unit test forces the short-form branch
+    to run + verifies the dest is derived from the long form.
+
+    Without this, the iter-295 fix is correct but silently
+    untested until the driver adds such a call.
+    """
+    snippet = "p.add_argument('-c', '--cubed-hyperdiff', type=float, default=1.0)"
+    tree = ast.parse(snippet)
+    dests = _extract_add_argument_dest_names(tree)
+    assert dests == {"cubed_hyperdiff"}, (
+        f"Expected dest 'cubed_hyperdiff' from short+long-form call; "
+        f"got {dests}."
+    )
+
+
+def test_extract_dest_ignores_short_only_call():
+    """iter-296: a call with ONLY a short-form ``-c`` and no
+    ``--long`` form should yield NO dest from the extractor.
+    argparse would derive ``dest='c'`` in that case but our lock
+    only cares about long-form (``--``) flags."""
+    snippet = "p.add_argument('-c', type=float, default=1.0)"
+    tree = ast.parse(snippet)
+    dests = _extract_add_argument_dest_names(tree)
+    assert dests == set(), (
+        f"short-form-only call should yield no extracted dest; "
+        f"got {dests}."
+    )
+
+
+def test_extract_dest_handles_two_long_forms():
+    """iter-296: when two ``--`` forms are passed (alias pattern),
+    argparse uses the FIRST one for dest. iter-295 added ``break``
+    after the first match to ensure this."""
+    snippet = (
+        "p.add_argument('--cubed-X', '--cubed-X-alias', "
+        "type=float, default=1.0)"
+    )
+    tree = ast.parse(snippet)
+    dests = _extract_add_argument_dest_names(tree)
+    assert dests == {"cubed_X"}, (
+        f"First --long-form should win; got {dests}."
+    )
+
+
 def test_cubed_only_attrs_matches_add_argument_registrations():
     """Lock that ``_CUBED_ONLY_ATTRS`` includes every parser dest
     starting with ``n_cubed_sphere``, ``sfc_``, or ``cubed_``. A
