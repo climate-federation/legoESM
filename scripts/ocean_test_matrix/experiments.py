@@ -814,8 +814,15 @@ def run_geostrophic_adjustment(tc: TestCase, output_dir: Path, days: float
                    ) -> tuple[str, float, str]:
     """Geostrophic adjustment: meridional temperature front relaxation."""
     from legoesm.ocean.experiments.geostrophic_adjustment import create_initial_conditions as ga_ic
+    # Match MPAS tracer advection to lat-lon's TVD default so cross-grid
+    # SSH/T comparison reflects dycore differences, not 1st-order upwind
+    # diffusion of the meridional T-front. Lat-lon path does not accept
+    # this kwarg (TVD is its only scheme), so pass only for MPAS variants.
+    setup_kwargs = {}
+    if tc.grid_type in ("mpas", "mpas_regional", "mpas_channel"):
+        setup_kwargs["tracer_advection"] = "tvd"
     grid, z_coord, config_, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc))
+        _create_ocean_setup(tc, **setup_kwargs))
     state = ga_ic(tc.grid_type, grid, z_coord)
 
     dt = config.DEFAULT_DT
