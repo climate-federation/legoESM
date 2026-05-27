@@ -156,14 +156,16 @@ def parse_args():
     p.add_argument("--c-h", type=float, default=1.5e-3)
     p.add_argument("--n-acoustic-substeps", type=int, default=12,
                    help="Number of acoustic-mode substeps per outer "
-                        "dycore step. Production contract (iter-14 + "
-                        "iter-38): N=12 at dt=5 s on the clean Wing IC "
-                        "is 132x132 1-sim-hour PASS (max|w|=6.1e-3 m/s, "
-                        "MSE drift=1.7e-4 over 725 steps). The historical "
-                        "default 24 was set for the iter-1 dt=1.0 s "
-                        "config and produced an over-stable but 2x-cost "
-                        "substep at the current dt=5.0 s default. iter-59 "
-                        "refreshed to match production.")
+                        "dycore step. iter-14 + iter-38 measured N=12 "
+                        "at dt=5 s on the clean Wing IC = 132x132 "
+                        "1-sim-hour PASS (max|w|=6.1e-3 m/s, MSE drift="
+                        "1.7e-4 over 725 steps). iter-183 kept N=12 "
+                        "while lifting outer dt to 20 s (Van Leer + "
+                        "beta=0.2 absorb the extra inner stiffness; "
+                        "Ca_substep=0.87 at the new contract vs ~0.22 "
+                        "at dt=5). The historical default 24 was set "
+                        "for the iter-1 dt=1.0 s config; iter-59 "
+                        "refreshed to 12 to match production.")
     p.add_argument("--n-physics-substeps", type=int, default=10,
                    help="Operator-split physics N x per dycore step. "
                         "Stiff sources (microphysics, surface flux) "
