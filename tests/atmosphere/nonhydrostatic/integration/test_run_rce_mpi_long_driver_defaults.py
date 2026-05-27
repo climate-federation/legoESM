@@ -411,8 +411,9 @@ def test_c_h_production_default(driver_defaults):
 
 
 def test_acoustic_off_centering_production_default(driver_defaults):
-    """iter-180 refresh: beta=0.2 is the new production default
-    pairing with dt=20 + WENO5. Stronger off-centering damps the
+    """iter-180/183 refresh: beta=0.2 is the production default
+    pairing with dt=20 + Van Leer TVD (iter-183 wall-time fix after
+    iter-180's WENO5 walked back). Stronger off-centering damps the
     acoustic mode at the larger outer dt without needing more
     substeps. iter-14's beta=0.0 (neutral) was sufficient at
     dt=5; the 4x dt increase needs the extra damping."""
