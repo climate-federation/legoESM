@@ -43,6 +43,13 @@
 #                1            = pass --evaluate (10-day SPINUP gate,
 #                               5 % MSE drift). Use on DAYS>=10
 #                               smokes / mid-run health checks.
+#                stability    = pass --evaluate --no-plateau-check.
+#                               Skips the plateau / MSE-drift gates
+#                               and folds INSUFFICIENT into PASS;
+#                               only stability (finite + max|U|_sfc
+#                               + stuck) checks fire. Use for
+#                               in-flight progress monitoring (e.g.
+#                               iter-105 day 5 of 30). iter-128.
 #                final        = pass --final-dod (30-day PRODUCTION
 #                               gate, 1 % MSE drift, requires
 #                               >=30 days of snapshots). Use on
@@ -168,15 +175,17 @@ ALLOW_SUMMARY_FAILURE="${ALLOW_SUMMARY_FAILURE:-0}"
 # most one.
 EVAL_FLAG=""
 case "$EVALUATE_DOD" in
-    0)     EVAL_FLAG="" ;;
-    1)     EVAL_FLAG="--evaluate" ;;
-    final) EVAL_FLAG="--final-dod" ;;
+    0)         EVAL_FLAG="" ;;
+    1)         EVAL_FLAG="--evaluate" ;;
+    stability) EVAL_FLAG="--evaluate --no-plateau-check" ;;
+    final)     EVAL_FLAG="--final-dod" ;;
     # iter-114 Codex MEDIUM#4: a typo like ``Final`` or ``spinup``
     # silently disabled grading pre-iter-114. Refuse instead.
     *)
         echo "ERROR: EVALUATE_DOD='$EVALUATE_DOD' not recognised." >&2
         echo "  Valid values: 0 (default, no grading), 1 (spinup gate)," >&2
-        echo "                final (30-day production gate)." >&2
+        echo "                stability (spinup gate without plateau check," >&2
+        echo "                            iter-128), final (30-day production gate)." >&2
         exit 1
         ;;
 esac

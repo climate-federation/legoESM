@@ -470,39 +470,44 @@ def test_wrapper_summarizer_fail_allow_downgrade(tmp_path):
 
 
 def test_wrapper_evaluate_dod_threads_into_summarizer(wrapper_text):
-    """iter-103 / iter-113: ``EVALUATE_DOD`` must thread the right
-    flag into the summarizer invocation. iter-113 widened to a
-    three-way case:
+    """iter-103 / iter-113 / iter-128: ``EVALUATE_DOD`` must thread
+    the right flag into the summarizer invocation. iter-128
+    widened to a four-way case:
 
-      EVALUATE_DOD=0      → no flag (default)
-      EVALUATE_DOD=1      → ``--evaluate`` (spinup gate)
-      EVALUATE_DOD=final  → ``--final-dod`` (30-day production gate)
+      EVALUATE_DOD=0         → no flag (default)
+      EVALUATE_DOD=1         → ``--evaluate`` (spinup gate)
+      EVALUATE_DOD=stability → ``--evaluate --no-plateau-check``
+      EVALUATE_DOD=final     → ``--final-dod`` (30-day production)
 
     Lock the bash ``case`` so a silent revert is caught by the
     < 1 s text test before any nightly hits it."""
     code = _strip_bash_comments(wrapper_text)
     # 1. EVAL_FLAG="" default (else EVAL_FLAG is unset under any
-    #    EVALUATE_DOD other than 1/final, which set -u would abort).
+    #    EVALUATE_DOD other than the recognised values, which
+    #    set -u would abort).
     assert re.search(r'^\s*EVAL_FLAG\s*=\s*""\s*$', code, re.MULTILINE), (
         "run_rce_30day.sh missing the ``EVAL_FLAG=\"\"`` default."
     )
-    # 2. The case statement maps 1 → --evaluate, final → --final-dod.
+    # 2. The case statement maps each EVALUATE_DOD value to the
+    #    right CLI flag. Lock 1/stability/final.
     assert re.search(
         r'case\s+"\$EVALUATE_DOD"\s+in[\s\S]*?'
         r'1\)\s*EVAL_FLAG\s*=\s*"--evaluate"[\s\S]*?'
+        r'stability\)\s*EVAL_FLAG\s*=\s*"--evaluate --no-plateau-check"[\s\S]*?'
         r'final\)\s*EVAL_FLAG\s*=\s*"--final-dod"',
         code,
     ), (
-        "run_rce_30day.sh missing the iter-113 ``case "
-        "\"$EVALUATE_DOD\" in 1) ... ; final) ... esac`` dispatch. "
-        "Without it, EVALUATE_DOD=final cannot reach the new "
-        "--final-dod summarizer flag."
+        "run_rce_30day.sh missing the iter-128 ``case "
+        "\"$EVALUATE_DOD\" in 1) ... ; stability) ... ; final) "
+        "... esac`` dispatch. Without it, EVALUATE_DOD=stability "
+        "cannot reach the iter-127 --no-plateau-check summarizer "
+        "flag."
     )
     # 3. EVAL_FLAG is threaded into the summarizer argv.
     assert re.search(r'\$EVAL_FLAG\b', code), (
         "run_rce_30day.sh defines EVAL_FLAG but does not pass it "
-        "into the summarizer invocation. EVALUATE_DOD=1/final would "
-        "be a silent no-op."
+        "into the summarizer invocation. EVALUATE_DOD=1/stability/final "
+        "would be a silent no-op."
     )
 
 
@@ -962,3 +967,41 @@ def test_wrapper_emit_trajectory_png_strict_propagates(tmp_path):
         f"got {res.returncode}; stderr={res.stderr!r}"
     )
     assert "ERROR: plot_rce_log.py failed" in res.stderr
+
+
+def test_wrapper_evaluate_dod_stability_threads_no_plateau_check(tmp_path):
+    """iter-128 / iter-129: EVALUATE_DOD=stability must reach the
+    summarizer as ``--evaluate --no-plateau-check`` (both flags,
+    not just one). The stub PYBIN echoes its argv so we can verify."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _make_stub(bin_dir / "mpirun", exit_code=0)
+    pybin = bin_dir / "fake_pybin"
+    _make_stub(pybin, exit_code=0)
+    out_dir = tmp_path / "wrapper_out"
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["PYBIN"] = str(pybin)
+    env["DAYS"] = "0"
+    env["NX"] = "4"
+    env["NY"] = "4"
+    env["RANKS"] = "1"
+    env["NO_MASS_FIXER"] = "1"
+    env["ALLOW_SUMMARY_FAILURE"] = "0"
+    env["EVALUATE_DOD"] = "stability"
+    res = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+         str(out_dir)],
+        env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
+        check=False, timeout=30,
+    )
+    traj = (out_dir / "trajectory.txt").read_text()
+    assert "--evaluate" in traj, (
+        f"EVALUATE_DOD=stability did NOT reach --evaluate; "
+        f"trajectory.txt={traj!r}"
+    )
+    assert "--no-plateau-check" in traj, (
+        f"EVALUATE_DOD=stability did NOT reach --no-plateau-check; "
+        f"trajectory.txt={traj!r}"
+    )
+    assert "--final-dod" not in traj
