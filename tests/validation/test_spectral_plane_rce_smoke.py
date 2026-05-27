@@ -172,8 +172,10 @@ def test_spectral_rce_dycore_natural_conservation():
     margin over the measurement — loose enough to absorb
     JAX/XLA/FFT version variance (the cross-version FFT
     rounding-floor can shift by O(1e-4)) but tight enough to
-    catch a fully-broken dycore (>1e-2 means lost-mass conservation
-    + the fixer would have to clamp >1% per step on production).
+    catch a fully-broken dycore (>1e-2 = >1% total mass drift
+    over the 30-step / 1-sim-min window; on production-scale
+    runs the natural drift would have to integrate to >100x the
+    iter-183 30-day measured -1.6% MSE drift to trip this gate).
 
     Without this test, ``test_spectral_rce_smoke_stable_and_conservative``
     (with fixer ON) would silently absorb any regression in the
@@ -211,8 +213,8 @@ def test_spectral_rce_dycore_natural_conservation():
     # Cap 5e-3 = ~8x margin over the measured ~6e-4 baseline drift.
     # Loose enough to absorb JAX/XLA/FFT cross-version rounding
     # variance (O(1e-4) shift across jax 0.4.x..0.8.x); tight enough
-    # to catch a fully-broken dycore (>1e-2 would mean >1% per-step
-    # mass loss on production).
+    # to catch a fully-broken dycore (>1e-2 = >1% TOTAL drift over
+    # the 30-step / 1-sim-min window — NOT per-step).
     assert mass_drift < 5.0e-3, (
         f"Dycore natural mass conservation regressed: drift="
         f"{mass_drift:.3e} > 5e-3 cap (baseline ~6e-4 on this grid)."
