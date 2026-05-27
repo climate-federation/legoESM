@@ -117,6 +117,31 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 17 — 2026-05-27 — codex iter-16 review applied
+
+Codex flagged HIGH:
+- **#4** Explicit vs semi-implicit not numerically validated — only throughput-
+  compared. **Marked explicit as THROUGHPUT-ONLY config in markdown**; full
+  field-error / conservation regression vs reference is out of scope.
+- **#8** `dz_sfc=100m` hardcoded in CFL check — replaced with `dz_min` from
+  actual `hc.dz_half`. CFL value now reflects true coord regardless of
+  `dz_sfc` arg.
+- **#7** `--allow-unsafe-cfl` refuse path tested manually:
+  - `nsub=2 dt=2 --explicit-acoustic` → REFUSE "vertical CFL = 3.22 (>0.5)"
+  - `--allow-unsafe-cfl` → proceeds → caught by post-warmup `isfinite` raise
+
+Defense-in-depth verified: CFL guard → override flag → finite assert.
+
+MEDIUM fixes applied:
+- **#6** `physics_level` now includes `L<nlev>` — no CSV pooling collision
+  across nlev sweeps.
+
+MEDIUM noted but deferred (out of "minimum code" scope):
+- #1/#2: per-repeat variance into CSV
+- #3: GPU-contention as iter-3 cause is plausible but unproven
+- #5: nlev claim needs profile evidence
+- #9: A100/H100 projection is hypothesis (already noted in iter-16)
+
 ### Iter 16 — 2026-05-27 — fp64 explicit median-3 completes precision×solver matrix
 
 Final 2×2 matrix (median-3, fp32+fp64, both solvers):

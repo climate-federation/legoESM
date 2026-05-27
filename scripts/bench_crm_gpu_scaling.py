@@ -156,7 +156,11 @@ def _bench_one(nx: int, ny: int, nlev: int, dx: float, dt: float,
         else:
             raise SystemExit(f"REFUSE: {msg}. Pass --allow-unsafe-cfl to override.")
     if not semi_implicit_acoustic:
-        dz_min = 100.0  # default stretched-coord surface dz
+        # Compute actual dz_min from the height coord (codex iter-16 #8)
+        import jax.numpy as jnp
+        from legoesm.grids.vertical import create_stretched_height_coordinate
+        _hc = create_stretched_height_coordinate(nlev, H=20_000.0, dz_sfc=100.0)
+        dz_min = float(jnp.min(_hc.dz_half))
         cfl_v = 340.0 * (dt / n_acoustic_substeps) / dz_min
         if cfl_v > 0.5:
             msg = (f"vertical acoustic CFL = {cfl_v:.2f} (>0.5) "
@@ -192,8 +196,8 @@ def _bench_one(nx: int, ny: int, nlev: int, dx: float, dt: float,
     return TimingResult(
         n_gpus=1, resolution=nx, n_levels=nlev,
         precision=prec, mode="crm_plane_strong",
-        physics_level=(f"f-plane_dx{int(dx)}m_nsub{n_acoustic_substeps}_"
-                       f"{acoustic_tag}_dt{dt}"),
+        physics_level=(f"f-plane_dx{int(dx)}m_L{nlev}_"
+                       f"nsub{n_acoustic_substeps}_{acoustic_tag}_dt{dt}"),
         dt_seconds=dt, n_warmup=N_WARMUP, n_timing=N_TIMING,
         compile_time_s=compile_s, warmup_time_s=warmup_s,
         timing_time_s=timing_s, time_per_step_ms=ms, sypd=sypd,
