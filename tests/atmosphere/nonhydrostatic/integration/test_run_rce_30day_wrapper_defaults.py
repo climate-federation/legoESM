@@ -1235,12 +1235,15 @@ def test_wrapper_help_lists_all_env_vars(tmp_path):
         check=False, timeout=10,
     )
     assert res.returncode == 0
-    # iter-144: every CONSUMED env var (all 17 ``X="${X:-VAL}"``
-    # assignments) must surface in the --help output. Add new env
-    # vars to BOTH the wrapper docstring AND the sed range AND
-    # this list in lockstep.
+    # iter-144 / iter-170: every CONSUMED env var (all 17
+    # ``X="${X:-VAL}"`` assignments in run_rce_30day.sh) must surface
+    # in the --help output. Add new env vars to BOTH the wrapper
+    # docstring AND the sed range AND this list in lockstep.
+    # iter-170: ``NY`` was missing from this list (the count comment
+    # claimed 17, list held 16) — the wrapper docstring's joint
+    # ``NX,NY  grid dims`` line satisfied substring ``NX`` only.
     for env_var in (
-        "DAYS", "RANKS", "DT", "NX", "N_ACOUSTIC", "ADVECTION",
+        "DAYS", "RANKS", "DT", "NX", "NY", "N_ACOUSTIC", "ADVECTION",
         "HYPERDIFF", "BUBBLE_K", "QV_NOISE", "USE_DD",
         "NO_MASS_FIXER", "EVALUATE_DOD", "ALLOW_SUMMARY_FAILURE",
         "EMIT_TRAJECTORY_PNG", "CHECK_LOG_MAX_W", "PYBIN",
