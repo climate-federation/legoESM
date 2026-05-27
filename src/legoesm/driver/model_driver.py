@@ -1838,32 +1838,58 @@ class ModelDriver:
             day = 0.0
             carry_aux: dict = {}
 
+            # Codex review round 4 BLOCK fix: rank 0's ``load_restart``
+            # can raise on a missing file, a corrupt npz, or a
+            # ``.meta.json`` digest mismatch.  If we let that exception
+            # propagate locally on rank 0, the non-root ranks would
+            # walk into the next ``comm.bcast`` waiting for a payload
+            # that never arrives → multi-rank MPI deadlock.  Catch on
+            # rank 0, bcast an OK/error status integer FIRST, and have
+            # every rank raise in lockstep when rank 0 failed.
+            load_error: str | None = None
             if self._mpi_rank == 0:
-                # Swap to the global grid for the load — load_restart
-                # uses ``grid`` for shape validation against the saved
-                # state, and the saved state is global-shape.
                 local_grid = self.grid
                 self.grid = self._grid_global
                 try:
                     result = load_restart(
                         path, self.grid, self.sigma, strict=True,
                     )
+                    (state_global, q_v_g, step, day,
+                     _, _, q_c_g, q_r_g, metadata, carry_aux) = result
+                    tracers_global = {"q_v": q_v_g}
+                    if q_c_g is not None:
+                        tracers_global["q_c"] = q_c_g
+                    if q_r_g is not None:
+                        tracers_global["q_r"] = q_r_g
+                    if metadata:
+                        logger.info(
+                            f"  Loaded restart: step={step}, day={day}, "
+                            f"digest={metadata.state_digest[:16]}... "
+                            f"(lat-lon MPI gathered file, will scatter to "
+                            f"{self._mpi_world_size} ranks)"
+                        )
+                except Exception as exc:  # noqa: BLE001 — collective gate
+                    load_error = f"{type(exc).__name__}: {exc}"
+                    logger.error(
+                        f"Rank 0 load_restart failed: {load_error}.  "
+                        "Will bcast error status so other ranks raise "
+                        "in lockstep instead of deadlocking on the "
+                        "next collective."
+                    )
                 finally:
                     self.grid = local_grid
-                (state_global, q_v_g, step, day,
-                 _, _, q_c_g, q_r_g, metadata, carry_aux) = result
-                tracers_global = {"q_v": q_v_g}
-                if q_c_g is not None:
-                    tracers_global["q_c"] = q_c_g
-                if q_r_g is not None:
-                    tracers_global["q_r"] = q_r_g
-                if metadata:
-                    logger.info(
-                        f"  Loaded restart: step={step}, day={day}, "
-                        f"digest={metadata.state_digest[:16]}... "
-                        f"(lat-lon MPI gathered file, will scatter to "
-                        f"{self._mpi_world_size} ranks)"
-                    )
+
+            # Bcast the rank-0 error status BEFORE any other collective.
+            # Every rank sees the same string (None on success).  If
+            # non-empty, every rank raises identically.
+            load_error = comm.bcast(load_error, root=0)
+            if load_error is not None:
+                raise RuntimeError(
+                    f"Lat-lon MPI restart aborted because rank 0 "
+                    f"load_restart failed: {load_error}.  No state "
+                    "scatter happened; every rank is at the same "
+                    "pre-load state."
+                )
 
             # Broadcast scalar / dict metadata.  State + tracer arrays
             # are scattered band-wise inside the helper, so the heavy
