@@ -38,23 +38,30 @@ summary_mod = compare_mod.summary_mod
 def _write_snapshot(path: Path, day: float, cwv_value: float,
                     mse_value: float = 3.5e9) -> None:
     """Mirror the synthetic snapshot writer the summarizer tests
-    use — same key set as ``run_rce_mpi_long.py:save_snapshot_2d``."""
+    use — same key set as ``run_rce_mpi_long.py:save_snapshot_2d``.
+
+    iter-123: replaced ``precip=arr * 0.0`` with
+    ``np.zeros((ny, nx))``; ``nan * 0.0 = nan`` propagated to the
+    precip field on the NONFINITE-test fixtures, surfacing a numpy
+    RuntimeWarning that bloated test output. Constants don't need
+    arr-shape inheritance."""
     ny, nx = 4, 4
     arr = np.full((ny, nx), cwv_value, dtype=np.float64)
+    zeros = np.zeros((ny, nx), dtype=np.float64)
     np.savez_compressed(
         path,
         t_sim=day * 86400.0,
         day=day,
         cwv=arr,
-        mse=np.full_like(arr, mse_value),
-        precip=arr * 0.0,
-        T_sfc=np.full_like(arr, 300.0),
-        qv_sfc=np.full_like(arr, 0.02),
-        qc_sfc=np.full_like(arr, 0.0),
-        qr_sfc=np.full_like(arr, 0.0),
-        u_sfc=np.full_like(arr, 0.0),
-        v_sfc=np.full_like(arr, 0.0),
-        wind_sfc=np.full_like(arr, 0.0),
+        mse=np.full((ny, nx), mse_value, dtype=np.float64),
+        precip=zeros,
+        T_sfc=np.full((ny, nx), 300.0, dtype=np.float64),
+        qv_sfc=np.full((ny, nx), 0.02, dtype=np.float64),
+        qc_sfc=zeros,
+        qr_sfc=zeros,
+        u_sfc=zeros,
+        v_sfc=zeros,
+        wind_sfc=zeros,
     )
 
 
