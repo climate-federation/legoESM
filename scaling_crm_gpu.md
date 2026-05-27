@@ -117,6 +117,38 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 8 — 2026-05-27 — explicit fp32 plateau + 200-step CFL
+
+Filled mid-range + checked long-run stability:
+
+**fp32 explicit dt=0.5 nsub=4 (plateau characterization):**
+
+| res    | ms/step | Mc/s |
+|--------|---------|------|
+| N=128  |  0.75   | 659  |
+| N=192  |  1.67   | 661  |
+| N=256  |  2.98   | 660  |
+| N=384  | 11.93   | 371  |
+| N=512  | 20.13   | 391  |
+
+**Plateau N=128-256 at 660 Mc/s** — dead-flat across 4× cell range.
+Falls past N=256 (L2 overflow); slight rebound at N=512.
+
+**200-step CFL check (100 s sim, 0.001 K kick):**
+
+| res   | finite | |θ'|_max  | |w|_max     |
+|-------|--------|-----------|-------------|
+| N=96  | ✓      | 4.6e-3 K  | 4.4e-2 m/s  |
+| N=192 | ✓      | 4.6e-3 K  | 4.1e-2 m/s  |
+
+**Explicit nsub=4 is CFL-stable for 200 steps**, unlike semi-implicit
+nsub=12 which NaN'd on identical kick (iter 2 caveat). Explicit
+respects acoustic CFL directly; semi-implicit's vertical-implicit
+treatment lets horizontal modes leak.
+
+⇒ **Final CRM config: explicit + fp32 + dt=0.5 + nsub=4. 660 Mc/s
+plateau, CFL-stable, no SYPD trade-off.**
+
 ### Iter 7 — 2026-05-27 — explicit acoustic full sweep — NEW CRM PEAK
 
 Pushed explicit acoustic to full N range, fp64 + fp32:
