@@ -117,6 +117,32 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 60 — 2026-05-27 — FINAL production bench with ALL wins integrated
+
+CRM N=128 fp32 SI + full RCEMIP physics (radiation + microphysics +
+surface) + cuSPARSE Thomas + **fix_mass=True via precompute_target_mass
+API** + lax.scan:
+
+| metric            | value                |
+|-------------------|----------------------|
+| ms/step           | 16.65                |
+| Mc/s              | **29.5**             |
+| SYPD              | 0.329                |
+| finite            | ✓                    |
+
+Identical (within noise) to iter-42 production peak 29.4 — but now
+with `fix_mass=True` enabled inside `lax.scan`, which was impossible
+before iter-37. Mass-conserved production-grade run.
+
+**Headline number for legoESM plane CRM on mobile RTX 5090:**
+- Bare dycore SI + cuSPARSE: 273 Mc/s (sim-time-eff 546 Mc·s/s)
+- Bare dycore explicit (no Smag): 866 Mc/s (sim-time-eff 433)
+- **Production SI + full physics + cuSPARSE + fix_mass + scan: 29.5 Mc/s, SYPD 0.329**
+
+PR #320 final state: **OPEN, MERGEABLE, CLEAN**, 49 commits,
++2178/-10, 62/63 regression tests PASS, 2 production wins, 4 NH
+dycores benefit.
+
 ### Iter 59 — 2026-05-27 — spectral_nh 23/23 PASS — all 4 NH dycores test-verified
 
 Codex iter-57 #6: "4 NH dycores benefit" claim should be benchmarked
