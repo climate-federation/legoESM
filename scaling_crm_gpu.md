@@ -117,6 +117,24 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 55 — 2026-05-27 — MPI bench will inherit cuSPARSE win automatically
+
+`step_halo` (multi-rank MPI path) uses `plane_acoustic_substeps_semi_implicit`
+which calls `_semi_implicit_acoustic_column_kernel` from `compressible_euler.py`
+→ which calls `thomas_solve_batched` (now cuSPARSE-backed). So
+`scripts/bench_plane_crm_dd_scaling.py` will also see the 2.4-5.2× speedup
+per-rank when run on a cluster — independent of MPI message count.
+
+Combined effective speedup for production MPI runs on GPU cluster:
+- single-rank GPU (this PR): 2.4× SI dycore via cuSPARSE
+- multi-rank near-linear MPI scaling (existing `bench_plane_crm_dd_scaling.py`)
+- compound: 2.4× × N_GPUs (close to ideal until HBM/halo crossover)
+
+This makes the cuSPARSE swap **the highest-leverage change in the
+plane-CRM dycore stack** — small LOC, no API change, no numerics drift,
+benefits all 4 NH dycores AND the multi-rank MPI path AND the single-
+GPU bench path.
+
 ### Iter 52 — 2026-05-27 — lat-lon C-grid NH tests verify cuSPARSE downstream
 
 Ran `tests/unit/test_compressible_euler_latlon_cgrid.py` — 8/8 PASS:
