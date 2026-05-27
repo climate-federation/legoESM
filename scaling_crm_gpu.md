@@ -117,6 +117,42 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 41 — 2026-05-27 — final sweep all-wins-applied: explicit vs SI reset
+
+Re-bench after cuSPARSE Thomas + scan-compatible fix_mass:
+
+**Bare dycore fp32 sweeps (median-3, in same Python session):**
+
+| res    | Explicit nsub=4 dt=0.5 | SI nsub=6 dt=2.0 +cuSPARSE |
+|--------|-------------------------|----------------------------|
+| N=48   | 0.17 ms / 402 Mc/s     | 0.44 / 157                 |
+| N=96   | 0.36 / **761**         | 1.17 / 236                 |
+| N=128  | 0.57 / **866**         | 1.80 / 273                 |
+| N=192  | 1.63 / 679             | 4.06 / 273                 |
+| N=256  | 3.79 / 519             | 7.89 / 249                 |
+
+**Sim-time-effective throughput (Mc/s × dt):**
+
+| res    | Explicit (Mc·s/s)     | SI cuSPARSE (Mc·s/s)   |
+|--------|------------------------|------------------------|
+| N=96   |  761 × 0.5 = 380       | 236 × 2.0 = **472**    |
+| N=128  |  866 × 0.5 = **433**   | 273 × 2.0 = **546**    |
+| N=192  |  679 × 0.5 = 340       | 273 × 2.0 = **546**    |
+
+**SI now wins sim-time-throughput by 1.26-1.6×** across the plateau,
+not 0.7× as iter 35 suggested before cuSPARSE. The 2.4× cuSPARSE
+speedup (iter 39) closed the dycore-step-cost gap; SI's 4× longer
+dt now amortizes both physics AND dycore cost over more sim time.
+
+**Final production CRM throughput (bare dycore, no physics):**
+- raw Mc/s: explicit fp32 866 (N=128 peak)
+- sim-time: **SI fp32 +cuSPARSE = 546 Mc·s/s** (N=128-192 plateau)
+
+⇒ **SI fp32 + cuSPARSE is now the right config** for both dycore-
+only AND production runs (with physics, SI's longer dt advantage
+amplifies further). This reverses iter 7's "explicit + fp32 = best"
+finding — that was true only before cuSPARSE.
+
 ### Iter 40 — 2026-05-27 — codex review iter-39 cuSPARSE swap
 
 Codex flagged CRITICAL/HIGH; verified + applied fixes:
