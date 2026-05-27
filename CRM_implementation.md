@@ -223,6 +223,66 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 307..308 (MPAS surface flux helper + 30-day re-attempt — NaN day 12: convective trigger flips failure mode)
+
+iter-307 closed the iter-283 deferral by adding
+`_make_mpas_surface_flux_tendency` (heat + moisture flux only,
+no momentum drag — MPAS u-on-edges + no v needs edge↔cell
+reconstruction for that). Fixed `wind_speed_proxy=5 m/s`
+decouples from dycore winds (RCEMIP no-wind convention).
+
+iter-308 launched MPAS 30-day moist+sfc to test whether the
+new helper fixes iter-282's day-15 NaN (which was from gray
+radiation cooling -2.8 K/day with no surface flux counter-
+balance).
+
+**Result**: NaN at sim-day 12 — WORSE than iter-282's day 15.
+
+```
+step    t[d]  max|w|       θ' range         q_v_max
+   1    0.00  4.07e-01    [-1e-3, 9e-1]   9.35e-3
+8640    1.00  1.41e-03    [-8.3, 2.2]    1.10e-2
+17280   2.00  1.53e-03    [-14.2, 2.4]   1.24e-2
+...
+77760   9.00  1.02e-02    [-23.8, 1.6]   1.60e-2
+86400  10.00  2.05e-02    [-25.0, 1.5]   1.59e-2
+95040  11.00  1.25e-01    [-25.5, 1.3]   1.59e-2
+103680 12.00  NaN
+```
+
+vs iter-282 (no sfc) at same days:
+- day 10 max|w|: iter-282 1.22e-2 vs iter-308 2.05e-2
+- day 11 max|w|: not in iter-282 print cadence
+- iter-282 NaN at day 15.
+
+**Diagnosis**: surface flux IS doing intended job (theta cooling
+slowed from -2.8 K/day to -2.1 K/day; q_v_max grew 9.3e-3 →
+1.6e-2 via latent heat injection). But the surface latent heat
+release destabilizes the column — convective overturning
+triggers faster than the iter-282 pure-radiation cold collapse.
+
+Cubed-sphere parallel: iter-284 C4 + sfc NaN'd at day 2
+(was 14 days at MPAS L=2 — different mesh but same physics).
+
+**Conclusion**: at the L=2 mesh, surface flux TRADES failure
+mode (cold-collapse → convective-overturning), it doesn't FIX
+30-day stability. Surface flux is necessary for closing column
+energy budget but insufficient at planetary mesh resolution
+where gridscale convection is unresolved. Two paths forward
+(both multi-day or follow-on PR):
+
+1. Mesh refinement to LES regime — multi-day HPC compute.
+2. Add sub-grid convection scheme (Tiedtke / Zhang-McFarlane /
+   etc.) to the moist composition — closes column instability
+   at coarse mesh by parameterizing rather than resolving
+   convection.
+
+iter-307 + iter-308 close the MPAS surface flux composition
+gap. Cross-grid moist physics is now SYMMETRICALLY available
+on cubed-sphere + MPAS (within the simpler heat-only MPAS
+helper). The 30-day STABILITY barrier is fundamentally
+mesh-resolution + missing-sub-grid-convection.
+
 ### 2026-05-27 — iter 300..305 (SCM RCE smoke + 5 Codex docstring polish rounds — 10th untested-script coverage)
 
 10th previously-untested CRM-adjacent script in the iter-238..273
