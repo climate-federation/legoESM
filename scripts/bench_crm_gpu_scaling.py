@@ -308,12 +308,15 @@ def main() -> int:
         # Per cavecrew note: LEGOESM_TRIDIAG is read at trace time, so the
         # forced backend takes effect only for a freshly-launched process.
         # Spawn a clean subprocess for each backend to bypass JAX's JIT cache.
-        import subprocess, sys
+        import subprocess, sys, tempfile, shutil
         print("\n--check-tridiag-backends: rerunning each --nx with forced "
               "PCR / cuSPARSE / legacy backends...")
         header = f"  {'backend':10s}  {'N':>5s}  {'Mc/s':>7s}  {'step ms':>8s}"
         print(header)
         print("  " + "-" * (len(header) - 2))
+        # Use a single auto-cleaned tempdir for all backend subprocess
+        # outputs — they're not needed after the comparison print.
+        tmpdir = tempfile.mkdtemp(prefix="bench_check_tridiag_")
         for backend in ("pcr", "cusparse", "legacy"):
             for nx in args.nx:
                 env_extra = {"LEGOESM_TRIDIAG": backend}
@@ -327,7 +330,7 @@ def main() -> int:
                     "--n-acoustic-substeps", str(args.n_acoustic_substeps),
                     "--repeat", str(args.repeat),
                     "--no-timestamp",
-                    "--output-dir", str(out_dir / f"_{backend}_n{nx}"),
+                    "--output-dir", f"{tmpdir}/{backend}_n{nx}",
                 ]
                 if args.explicit_acoustic:
                     cmd.append("--explicit-acoustic")
@@ -358,6 +361,7 @@ def main() -> int:
                                ("NaN", "RuntimeError", "FAILED N", "Error:")):
                             last_err = line.strip()[:80]
                     print(f"  {backend:10s}  {nx:5d}  FAILED ({exc.returncode}): {last_err}")
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
     if not results:
         print("\nNo successful runs — exiting nonzero.")
