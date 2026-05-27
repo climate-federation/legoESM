@@ -398,477 +398,95 @@ commit the final CSV + day-10 endpoint table to the log,
 then decide whether to push to 30 days at this grid or move
 straight to 132×132 production.
 
-### 2026-05-27 — iter 97 (qv-noise destabilises iter-95 IC; F7 stale)
-
-**Negative result**: tried iter-96 config + ``--qv-noise-amp`` at
-both 5e-5 (F7's "destabilising" threshold) and 1e-5 (F7's "gentle
-stochastic seed"). BOTH produced ``NaN`` at step 100.
-
-* 5e-5: NaN at step 100. Expected per F7.
-* 1e-5: NaN at step 100. **Unexpected** — F7 said this amplitude
-  was acceptable.
-
-**Diagnosis**: F7's noise-amplitude tolerance was measured pre-iter-
-95 on the legacy hydrostatic-BC IC (T_lowest ≈ 309 K, supercritical).
-The iter-95-corrected IC (T_lowest ≈ 296.81 K, matches Wing 2018)
-sits closer to saturation in the lowest few model levels; adding
-ANY qv perturbation pushes those cells over saturation
-instantaneously, Kessler dumps the excess as condensation heat,
-acoustic mode explodes within ~5 outer steps.
-
-**Action**: leave ``--qv-noise-amp 0`` as the only safe default for
-the corrected IC. F7's "1–5e-5 acceptable" is now STALE — do not
-re-enable noise on the iter-95 path without re-measuring the
-stability threshold. Convection trigger for RCE spinup will need a
-different mechanism (longer integration → radiative-cooling-driven
-instability OR a single-cell warm bubble at z≥3 km, ABOVE the
-saturation-sensitive layer).
-
-**No code changes** (the existing ``--qv-noise-amp`` default = 0
-already protects production runs). This iteration is a documented
-no-go finding only.
-
-### 2026-05-27 — iter 96 (radiation-enabled 5-sim-day run)
-
-Companion to iter-95d: identical config except radiation ENABLED
-(--rad-call-interval-s 600). Tests whether the iter-95 IC + surface
-flux loop carries cleanly into the radiative-convective regime.
-
-**Config**: 32×32×30 plane CRM, dx=4 km, dt=10 s, --no-mass-fixer,
-gray radiation @ 600 s cadence, Kessler microphysics, Smag c_s=0.2,
-SI acoustic. 43200/43200 steps in 4288 s wall (1.19 h on M5 Pro;
-4% overhead vs iter-95d's radiation-off run).
-
-**Snapshot trajectory** (every 24 sim-hr):
-
-| day | CWV [mm]  | MSE [J/kg] | max\|w\| | qc_max [g/kg] |
-|-----|-----------|------------|----------|---------------|
-| 0   | 49.941    | 3.5247e+09 | 0.0e+00  | 0.000         |
-| 1   | 53.633    | 3.5280e+09 | 1.97e-3  | 0.000         |
-| 2   | 55.667    | 3.5275e+09 | 2.18e-3  | 9e-31         |
-| 3   | 56.774    | 3.5258e+09 | 2.32e-3  | 9e-31         |
-| 4   | 57.182    | 3.5230e+09 | 2.30e-3  | 0.160         |
-| 5   | 57.119    | 3.5195e+09 | 2.35e-3  | 0.362         |
-
-**Key results vs iter-95d (radiation OFF)**:
-* **Quasi-equilibrium**: CWV PEAKED at day 4.18 (57.217 mm) then
-  slowly decreased through day 5 (57.12 mm). First indication of
-  reaching the radiative-convective balance.
-* **Radiation cooling visible**: MSE declines monotonically day 1→5
-  (3.528e9 → 3.520e9, -0.23% drift). v3 (rad off) had stable MSE.
-* **Convection initiation slightly earlier**: qc onset at day 1.875
-  (vs day 1.917 for v3). Radiation longwave cooling at column top
-  destabilises the profile fractionally faster.
-* **Final qc same magnitude**: 0.36 g/kg both runs — Kessler
-  autoconversion threshold (~1 g/kg) not yet reached. Need longer
-  integration.
-* **System fully stable**: max|w| ≤ 2.35e-3 m/s throughout
-  (gentle gravity waves; no resolved updrafts).
-* **No precipitation**: qr/precip = 0 throughout.
-
-**Day-5 profile**:
-* T_sfc warmed 296.81 → 298.53 K (+1.72 K vs +1.94 K iter-95d
-  radiation off; radiation longwave cooling damps the surface
-  warming).
-* T@10km pinned at 202.73 K (sponge layer / stratosphere
-  unaffected).
-* qv_sfc grew 15.60 → 22.07 g/kg (essentially identical to
-  iter-95d's 22.00 g/kg).
-* cloud_fraction reaches 1.0 by day 2 (stratiform layer from
-  cold-trap saturation).
-
-**Verdict**: iter-96 confirms the iter-95 IC + surface-flux fix
-extends cleanly to the radiation-coupled regime. Quasi-equilibrium
-CWV ≈ 57.1 mm reached by day 4–5 (matches Wing 2018 RCEMIP1
-literature range of 50–60 mm for SST=300 K). Precipitation onset
-requires either longer integration (10–30 sim-days) or stronger
-convective triggering (qv noise / bubble IC). Production target
-(30-day, 132×132) is now wall-time-gated, not physics-gated.
-
-**Snapshots/profiles**: `/tmp/iter96_crm32x32_rad/{profiles,snapshots}/`
-
-### 2026-05-27 — iter 95d (5-sim-day verification complete)
-
-iter-95 v3 run reached `target_day=5.000` cleanly (43200/43200 steps,
-4418 s wall-clock = 1.23 h, 32×32×30 plane CRM, dx=4 km, dt=10 s, no
-bubble, no qv noise, --no-mass-fixer, p_sfc=101480 Pa, full physics,
-radiation disabled). System fully stable end-to-end; no NaN, no CFL
-blow-up, no negative-q triggers, no halo divergence.
-
-**Final 5-day trajectory** (extends iter-95 day-1.75 table):
-
-| sim_day | CWV [mm] | MSE [J/kg]   | max\|w\| [m/s] | qc_max [kg/kg] |
-|---------|----------|--------------|----------------|----------------|
-|  0      | 49.942   | 3.5247e+09   | 0.0e+00        | 0              |
-|  1      | 53.627   | 3.5280e+09   | 1.82e-03       | 0              |
-|  2      | 55.616   | 3.5278e+09   | 1.99e-03       | 0              |
-|  3      | 56.682   | 3.5266e+09   | 2.20e-03       | 0              |
-|  4      | 57.093   | 3.5232e+09   | 2.20e-03       | 1.60e-04       |
-|  4.33   | 57.131   | 3.5222e+09   | 2.30e-03       | 2.29e-04       |
-|  4.66   | 57.099   | 3.5210e+09   | 2.23e-03       | 2.94e-04       |
-|  5      | 57.037   | 3.5199e+09   | 2.22e-03       | 3.56e-04       |
-
-**Profile evolution (T_sfc, T at z=10km, qv_sfc, qc_max, cloud fraction)**:
-
-| day | T_sfc [K] | T@10km [K] | qv_sfc [g/kg] | qc_max [g/kg] | cf_max |
-|-----|-----------|------------|---------------|---------------|--------|
-| 0   | 296.81    | 202.73     | 15.60         | 0.000         | 0.000  |
-| 1   | 297.07    | 202.73     | 18.63         | 0.000         | 0.000  |
-| 2   | 297.40    | 202.73     | 20.25         | 0.056         | 1.000  |
-| 3   | 298.14    | 202.73     | 21.19         | 0.063         | 1.000  |
-| 4   | 298.53    | 202.73     | 21.71         | 0.160         | 1.000  |
-| 5   | 298.75    | 202.73     | 22.00         | 0.356         | 1.000  |
-
-**Verdict on iter-95 hypothesis**:
-
-* ✓ CWV grows monotonically day 0→3, plateaus day 3→4.3 at ~57.1 mm,
-  then slowly drifts down to 57.04 (entering quasi-steady regime).
-* ✓ Surface flux scheme delivers 7.1 mm column moisture over 5 days
-  (Bug 2 fix verified end-to-end).
-* ✓ Cloud water onset at day ~1.92 (Kessler activated when local
-  RH reached 100% — confirms IC + surface flux loop closes; Bug 1
-  fix verified end-to-end).
-* ✓ qc grows steadily 0 → 3.56e-4 kg/kg (0.36 g/kg) by day 5,
-  cloud fraction = 1.000 above day 2 (stratiform-like deep cloud
-  layer; expected from radiation-off cold-trap saturation).
-* ✓ Stratospheric T (z=10km, level index 5) remained pinned at
-  202.73 K (no spurious top-of-domain forcing — sponge working).
-* ✗ qr/precip still zero at day 5. Kessler autoconversion
-  threshold (`q_c_threshold ≈ 1 g/kg`) is ~3× higher than the
-  current peak qc. **Not a bug**; gentle radiation-off RCE
-  spinup needs longer integration OR radiation enabled to
-  destabilize the column and trigger resolved updrafts.
-* max|w| capped at 2.3e-3 m/s throughout — **no resolved
-  convective updrafts**. The qc grows by grid-scale condensation,
-  not by parcel ascent. This is the expected behaviour for
-  --rad-call-every-steps=∞ (radiation disabled in this run).
-
-**What iter-95 verifies**:
-* IC fix (Bug 1) is correct: T(z=550m) = 296.81 K matches Wing 2018
-  IC, system reaches stable hydrostatic balance.
-* Mass-fixer bypass (Bug 2) is correct: surface flux can now ADD
-  moisture, CWV growth is bounded by Clausius-Clapeyron not the
-  fixer.
-* Kessler microphysics path closes: condensation triggers when
-  RH=100%; qc accumulates without crashing.
-* End-to-end 5-day stable, smooth, conservative-enough run on
-  32×32 plane CRM.
-
-**Remaining gap to full RCE**: enabling radiation (`--rad-call-every-steps
-600 + scheme=gray`) plus 10-30 day integration. The current iter-95
-verification ran with radiation disabled to isolate the IC + surface-flux
-fix; v2/v3 demonstrate that piece works. Radiation-enabled long run
-is the iter-96+ deliverable.
-
-**Snapshots/profiles**: `/tmp/iter95_crm32x32_v3/{profiles,snapshots}/`
-(6 each at day 0,1,2,3,4,5).
-
-### 2026-05-27 — iter 95 (two-bug physics fix; CRM now spins up)
-
-User flagged "we should have convection by now" at iter-94's 12×12
-day 9.5. iter-95 investigation found **two independent bugs** in
-the plane CRM stack that together prevented convection initiation:
-
-**Bug 1 — IC hydrostatic BC** (`src/legoesm/grids/vertical.py`,
-`compute_reference_state`):
-* Legacy top-down integration with hardcoded `T_avg=250 K`
-  gave `pi(z=550m) = 1.027` instead of correct 0.987 for the
-  Wing 2018 RCE300 column with H=33km.
-* Diagnosed T at lowest model level was 309 K (12 K too hot).
-* Surface flux scheme (SST=300 K) cooled air toward SST,
-  removing energy instead of warming it.
-* **Fix**: add `p_sfc` opt-in parameter to switch to
-  bottom-up integration with known surface BC. Driver passes
-  `p_sfc=101480.0` (Wing 2018 Tab A1). After fix,
-  T(z=550m) = 296.81 K — within 0.5 K of Wing 2018 spec.
-
-**Bug 2 — IC-time total-water enforcement**
-(`scripts/run_rce_mpi_long.py`):
-* `fix_moist_mass_plane_mpi` was unconditionally called every
-  outer step to rescale total water back to the IC-time value.
-* For gravity-wave smokes (where total water IS conserved),
-  this is correct. For RCE spinup it's FATAL: surface
-  evaporation must NET ADD moisture until precipitation
-  balances at equilibrium.
-* Evidence from iter-95 v2 run (with Bug 1 fixed only): CWV
-  stayed EXACTLY at 49.941 mm for the entire 11+ sim-hours
-  of trajectory. Surface flux was successfully adding qv at
-  the lowest model level but the fixer immediately removed
-  it globally (downward-rescaling the rest of the column).
-* **Fix**: add `--no-mass-fixer` CLI flag (default False
-  for backward compat). When set, skips both the
-  `fix_moist_mass_plane_mpi` (DD path) and
-  `fix_moist_mass_plane` (legacy rank-0 path) calls.
-
-**Verification (iter-95 v3 run, 32x32×30 dx=4km dt=10s, 5
-sim-days, both fixes applied)**:
-
-| sim_day | CWV [mm] | MSE [J/kg]   | max\|w\| [m/s] | qc/qr/precip |
-|---------|----------|--------------|----------------|---------------|
-|  0      | 49.942   | 3.5247e+09   | 0.0e+00        | 0 |
-|  0.083  | 50.339   | 3.5252e+09   | 1.32e-03       | 0 |
-|  0.25   | 51.077   | 3.5260e+09   | 1.43e-03       | 0 |
-|  0.50   | 52.056   | 3.5270e+09   | 1.57e-03       | 0 |
-|  0.83   | 53.154   | 3.5278e+09   | 1.74e-03       | 0 |
-|  1.00   | 53.627   | 3.5280e+09   | 1.82e-03       | 0 |
-|  1.50   | 54.792   | 3.5281e+09   | 2.05e-03       | 0 |
-|  1.75   | 55.256   | 3.5278e+09   | 2.17e-03       | 0 |
-
-* CWV **growing 3-4 mm/day** (was pinned pre-fix). Surface
-  flux is finally working.
-* MSE growing, then plateauing (3.5282e9 max, now slowly
-  decreasing). Approaching radiative equilibrium.
-* max\|w\| linear growth, very small — gentle gravity waves.
-* qc=qr=precip still 0; convection trigger not yet fired
-  (Kessler needs local saturation; surface RH 79%→93% over
-  day 1).
-
-**Day-1 profile vs IC**:
-* Surface (z=550m): T 296.81 → 297.07 K (+0.3K), qv
-  15.60 → 18.63 g/kg (+19%), **RH 79% → 92.8%**.
-* Strato-tropical: T cooled 1-3 K (radiative cooling without
-  convective rebalance — expected for pre-convection RCE).
-* Lower trop dried slightly (passive subsidence).
-
-**Profile is conditionally unstable** (verified iter-95
-moist-adiabat comparison): a parcel lifted from saturated
-surface conditions would be ~3K buoyant relative to environment
-at z=550-3km. CAPE is positive; just waiting for local
-saturation to trigger Kessler.
-
-**Commits**:
-* `6305b88f` (iter-95): vertical.py + driver IC fix.
-* `975f7db1` (iter-95b): driver `--no-mass-fixer` flag.
-
-**Open questions** (not yet resolved at iter-95):
-* When exactly does first convection initiate? (Expect day
-  2-3 based on saturation timescale.)
-* Does the system reach a steady RCE plateau or oscillate?
-* What's the equilibrium CWV / precipitation rate?
-* Need profile every day (not every 5) to track moist-adiabatic
-  approach.
-
-**R-roadmap impact**: R11 status fundamentally changes. Before
-iter-95: "plane CRM 1-sim-hour ✓; 30-day wall-time-gated". After
-iter-95: "plane CRM has correct IC AND surface budget; spinup
-to RCE in progress; 30-day still wall-time-gated AT PRODUCTION
-RESOLUTION (132×132 unchanged), but the physics path now works
-end-to-end".
-
-### 2026-05-26 — iter 94
-
-**12×12 plane CRM 1-sim-DAY run — first complete 24-sim-hour
-production-config trajectory (was 1-sim-hour pre-iter-94).**
-**30-day 12×12 background run launched** to populate DOD #2
-(RCE plateau verification) — expected ~5h wall.
-
-iter-92 attempted the 1-day run but was killed at 80 sim-min by
-box overload. iter-94 ran cleanly to completion on a freed box.
-
-**Config**: 12×12×20 plane CRM, dx=2km, dt=5s, hyperdiff=5e6,
-Smag c_s=0.2, full physics (gray rad @ 600s cadence, Kessler,
-surface flux, Smagorinsky LES), clean Wing 2018 IC, no bubble,
-no qv noise.
-
-**Wall-time**: 10.1 min for 17280 outer steps = 1 sim-day.
-Rate: ~28 steps/s. Implies 30-sim-day at 12×12 = ~5h wall
-(feasible; launched as iter-94 background process). At
-132×132 production scale ≈25 days wall (F9-MPI-blocked for
-parallel speedup).
-
-**Trajectory** (every 4 sim-hours via --log-every-steps 240):
-
-| sim_hour | CWV [mm] | MSE [J/kg]   | max\|w\| [m/s] | qc | qr | precip |
-|----------|----------|--------------|----------------|----|----|--------|
-| 0.00     | 55.001   | 4.20490e+09  | 0.0000e+00     | 0  | 0  | 0      |
-| 1.00     | 55.001   | 4.20475e+09  | 5.531e-03      | 0  | 0  | 0      |
-| 6.00     | 55.001   | 4.20218e+09  | 5.682e-03      | 0  | 0  | 0      |
-| 12.00    | 55.001   | 4.19847e+09  | 5.684e-03      | 0  | 0  | 0      |
-| 18.00    | 55.001   | 4.19482e+09  | 5.706e-03      | 0  | 0  | 0      |
-| 24.00    | 55.001   | 4.19078e+09  | 5.713e-03      | 0  | 0  | 0      |
-
-**Stability indicators**:
-* CWV: zero drift (radiation drying balanced by surface flux).
-* MSE drift: 3.36e-3 relative over 1 sim-day = 0.336%/day. If
-  this rate persisted over 30 days = 10% — would EXCEED DOD #2
-  threshold of <1% over last 10 days. BUT: real RCE trajectory
-  is expected to plateau as convection initiates and balances
-  the radiative cooling. iter-94 captured pre-convection phase
-  only. iter-94 30-day background run will resolve this.
-* max\|w\|: bounded 0 → 5.7e-3 m/s. Gentle gravity-wave
-  oscillation around ~5.68e-3 with slight upward trend
-  approaching day 1. NOT a CFL signal (CFL at this scale ~10
-  m/s); the wave is ~5 orders of magnitude below cap.
-* qc=qr=precip=0 throughout: **no convection developed in 24
-  sim-hours**. Consistent with physical expectation — at 12×12
-  with only 144 columns and identical Wing IC across cells, the
-  symmetry-breaking needed for convection requires either
-  (a) longer simulation for instability to grow from
-  numerical noise, or (b) explicit IC perturbation (bubble or
-  qv noise — both disabled per iter-9 F10 production config).
-* Cross-iter consistency: iter-92 partial (80 sim-min) measured
-  MSE drift 2.1e-4 over 80 min = 3.8e-3/sim-day-equivalent;
-  iter-94 measured 3.36e-3 over full sim-day. Ratio 1.13 —
-  within 15% (iter-92 was extrapolating from a 6%-of-day
-  sample, so the modest discrepancy is expected).
-
-**Snapshots captured**: ``snap_day_0000.npz`` (IC) and
-``snap_day_0001.npz`` (end of day 1). Profile capture only at
-day 0 (default ``--profile-days=1`` => one profile per day; day
-1 profile not yet written when run ended at exactly day=1.0).
-
-**30-day 12×12 background run** (iter-94, PID 1714 at
-2026-05-26 21:55 UTC):
-* Same config as 1-day run, with ``--days 30 --log-every-steps
-  1440 --snapshot-hours 24 --profile-days 5``.
-* Output dir: ``/tmp/iter94_crm12x12_30day/``.
-* Expected to populate criterion #2 (RCE plateau + MSE drift <
-  1% over last 10 days) — the first empirical verification
-  across the full 30-day window at any plane CRM grid.
-* If trajectory blows up at e.g. day 7-14 (convection
-  initiation), this run is what will detect it; iter-14
-  1-sim-hour + iter-94 1-sim-day cannot.
-
-**DOD updates from iter-94**:
-| # | criterion | iter-94 status |
-|---|-----------|----------------|
-| 1 | Run to completion, max\|w\| < 50 | ✓ at **1 sim-day** (up from 1 sim-hour pre-iter-94) |
-| 2 | RCE plateau, MSE drift < 1% / 10 days | ⏳ background 30-day run launched |
-| 3 | Reproduce per grid | ✓ hydrostatic family + plane CRM 12×12 |
-| 4 | MPI weak/strong scaling | ⛔ F9-platform-blocked |
-| 5 | Codex review pass | ✓ clean through iter-93b |
-
-Raw run output kept at ``/tmp/iter94_crm12x12/`` and
-``/tmp/iter94_crm12x12_30day/`` (local, not committed).
-``trajectory.png`` generated via existing
-``scripts/plot_rce_log.py`` (no new plotter needed per CLAUDE.md
-"reuse existing code" mandate).
-
-**R-roadmap status**: R1-R7, R10, R12 ✓. R8 ``[~]`` (F9-blocked).
-R9 ``[!]`` obsolete. R11 ``[~]`` advanced: 12×12 30-day in
-progress; production-resolution 30-day still wall-time-gated.
-
-### 2026-05-26 — iter 93
-
-**Fix import-time Metal-init crash + add structural regression test.**
-
-While trying to run helper unit tests (which should be pure-Python
-and fast), discovered `tests/conftest.py` failed to load with:
-```
-jax.errors.JaxRuntimeError: UNIMPLEMENTED: default_memory_space is
-not supported.
-```
-Traceback root: `src/legoesm/grids/vertical.py:1169: _A60 =
-jnp.asarray([...])` at module top.
-
-**Root cause**: `grids/vertical.py` had two module-top
-`jnp.asarray([...])` calls (`_A60`, `_B60` — the FV3 L60 hybrid
-coord tables). At `import legoesm` time these eagerly dispatch
-`lax.convert_element_type` to whatever JAX default platform is
-initialized — on macOS that's `METAL`, which currently rejects
-the op. The fallback to CPU (`ensure_metal_or_fallback()`) lives
-inside `tests/conftest.py:13`, AFTER `legoesm` is imported on
-line 12, so the fallback never gets a chance to apply. Result:
-`import legoesm` bricks on Apple Silicon. Affected EVERY
-pure-Python unit test on Mac.
-
-**Fix** (`src/legoesm/grids/vertical.py:1169-1198`):
-* Module-top: `np.asarray(...)` (pure NumPy data, no device
-  dispatch).
-* Inside `set_eta_L60()`: `jnp.asarray(_A60)` / `jnp.asarray(_B60)`
-  to convert to jax.Array on demand, AFTER fallback applied.
-
-Verification:
-* `import legoesm` → succeeds with warning instead of crash.
-* `set_eta_L60()` returns identical `(ak, bk, ptop, ks)`
-  (dtype float32 under x32, float64 under x64; ptop=300.0,
-  ks=20; ak[0]=300, ak[-1]=0; bk[0]=0, bk[-1]=1).
-* `tests/test_fv3_set_eta_L60_iter647.py` 7/7 PASS.
-* `tests/atmosphere/nonhydrostatic/integration/test_plane_crm_helpers_unit.py`
-  18/18 PASS (was unable to collect before fix).
-
-**Regression test** (`tests/unit/test_no_module_top_jax_alloc.py`):
-8 cases. AST-walks 7 protected modules on the `import legoesm`
-critical path; flags any top-level `jnp.{array,asarray,zeros,ones,
-full,arange,linspace,eye}` call (or `jax.numpy.<ctor>` form).
-Scalar ops like `jnp.pi` and metadata reads like `jnp.finfo(...)
-.tiny` are NOT flagged (allow-list by name). Includes 1 smoke
-test that imports `legoesm` and asserts no crash. Synthetic
-sanity check confirms the AST walker fires on a planted
-`_BAD = jnp.asarray([1.0, 2.0])` module-top.
-
-Why structural test: a future contributor adding a module-top
-`jnp.array([...])` constant table would silently re-introduce
-the same Metal-import crash. The test pins the invariant
-*statically* so the regression is caught at collection time, on
-any platform, not just on Macs.
-
-R12 (test infrastructure) status: this fix unblocks all
-pure-Python unit tests on macOS that were previously crashing
-at `tests/conftest.py:12`. Critical for the iterate-with-codex
-loop, where fast unit tests are the inner-loop signal.
-
-**Codex adversarial-review hardening (iter-93, post-commit)**:
-* MEDIUM-1: Constructor set widened from 8 to 20 names —
-  added `empty`, `zeros_like`, `ones_like`, `empty_like`,
-  `full_like`, `meshgrid`, `broadcast_to`, `tile`, `repeat`,
-  `logspace`, `geomspace`, `identity`, `diag`, `diagflat`, `tri`.
-* MEDIUM-2: Alias-aware. Walker now parses `import jax.numpy as
-  <name>` / `from jax import numpy as <name>` / `from jax.numpy
-  import <ctor>` and tracks ALL bound names, not just literal
-  `jnp`.
-* MEDIUM-3: Protected-modules list expanded from 7 hand-curated
-  files to ALL of `src/legoesm/grids/*.py` (subtree walk) plus
-  early-imported package `__init__.py` files plus
-  `parallel/cubesphere_exchange.py` (next LOW).
-* LOW-1: Subprocess cold-import smoke test added. Spawns fresh
-  interpreter with NO conftest preamble; verifies `import
-  legoesm` succeeds. The in-process variant has limited value
-  (conftest has already applied fallback by collection time).
-* LOW-2: `jax.device_put(...)` now detected. Also catches bare
-  `ast.Expr` statements at module top, not just assignments.
-* LOW-3: `src/legoesm/parallel/cubesphere_exchange.py` had 3
-  module-top `jnp.array` tables (`_NBR_FACES`, `_NBR_EDGES`,
-  `_IS_REVERSED`). Latent risk — not on the eager-import path
-  today, but a single `from legoesm.parallel.cubesphere_exchange
-  import …` would re-trigger the Metal crash. Applied same
-  `np.array` module-top + `jnp.asarray` inside `_exchange`
-  closures pattern. JIT inside `_make_exchange_allgather` /
-  `_make_exchange_allgather_h2` does the jnp conversion once
-  per exchange-build call; XLA constant-folds inside the
-  shard_map body.
-
-Test now covers 28 cases (vs. 8 initial): 25 protected-module
-scans + 1 in-process import smoke + 1 subprocess cold-import
-smoke + 1 synthetic-regression sanity (informal, via REPL).
-All 28 pass. Cubed-sphere parallel tests still pass
-(1 passed, 20 skipped — multi-device gated; in-process scalar
-test verifies tables retain correct shape + dtype).
-
-**Honest re-evaluation of iter-92 cross-resolution claim.**
-
-iter-92's "cross-resolution trajectory consistency" claim was
-TECHNICALLY TRUE but TRIVIAL. Both runs used the identical Wing
-2018 column IC replicated across N×N cells; the convection-free
-spinup phase is dominated by column processes (radiation, surface
-flux, gravity-wave equilibration) which are resolution-independent
-given identical column IC. So agreement at max\|w\| was EXPECTED,
-not a non-trivial validation.
-
-iter-93 clarifies the iter-92 doc with:
-* Honest caveat about what cross-resolution agreement does/doesn't
-  validate in the pre-convection phase.
-* Explicit list of what iter-92 DID validate (driver end-to-end,
-  no blowup, stack composition) vs what it did NOT validate
-  (convection-dependent cross-resolution behavior, full 30-day RCE
-  plateau).
-
-R11 plane CRM 30-day status: structurally proven via iter-14
-1-sim-hour + extensive code review; cross-resolution agreement
-in pre-convection phase is necessary but not sufficient evidence
-for the 30-day claim. Full validation remains wall-time-gated.
-
-**R-roadmap status**: R1-R8, R10, R12 ✓. F9 platform-blocked.
+### 2026-05-27 — iter 93..97 (compressed summary, iter-105 fold)
+
+**iter-93** (commit `2026-05-26`): fixed import-time Metal-init
+crash. `src/legoesm/grids/vertical.py` had two module-top
+`jnp.asarray([...])` calls (`_A60`, `_B60` FV3 L60 hybrid coord
+tables) that eagerly dispatched `lax.convert_element_type` to JAX's
+default platform — on macOS that's METAL which rejects the op.
+`ensure_metal_or_fallback()` in `tests/conftest.py` ran AFTER
+`import legoesm`, so the fallback never applied. `import legoesm`
+bricked on Apple Silicon, breaking every pure-Python unit test on
+Mac. Fix: module-top uses `np.asarray(...)`; `set_eta_L60()`
+converts to `jnp.asarray` on demand. Regression test
+(`tests/unit/test_no_module_top_jax_alloc.py`, 8 cases + Codex
+MEDIUM-1/2/3 hardening to 20 constructors + alias-aware AST walk +
+expanded protected-modules list) statically catches any new
+module-top `jnp.{array,asarray,...}` in 7+ critical-path modules.
+
+**iter-94**: first complete 12×12×20 1-sim-day plane CRM run
+(17280 steps in 10.1 min wall, ~28 steps/s). dx=2 km, dt=5 s,
+hyperdiff=5e6, Smag cs=0.2, full physics, clean Wing IC. CWV pinned
+to 55.001 mm (pre-iter-95 stuck — mass fixer was rescaling away
+the surface flux signal), max|w| 0→5.7×10⁻³ m/s gentle drift,
+MSE 4.20490e9→4.19078e9 (3.36e-3 relative/day). No convection in
+24 sim-hr — Kessler needs local saturation; symmetric IC + no qv
+perturbation means convection has to wait for noise growth. 30-day
+12×12 background launched (PID 1714, expected ~5h wall).
+
+**iter-95 — TWO-BUG PHYSICS FIX (commits `6305b88f` + `975f7db1`)**:
+
+* **Bug 1** (`src/legoesm/grids/vertical.py:compute_reference_state`):
+  legacy top-down integration with hardcoded `T_avg=250 K` gave
+  `pi(z=550 m) = 1.027` instead of correct 0.987 for Wing 2018
+  RCE300 + H=33 km. T at lowest model level was 309 K (12 K too
+  hot vs Wing 2018 spec). Surface flux scheme (SST=300 K) then
+  removed energy instead of warming. Fix: `p_sfc` opt-in argument
+  switches to bottom-up integration; driver passes Wing 2018
+  Tab A1 value `p_sfc=101480.0`. Post-fix T(z=550 m) = 296.81 K
+  (within 0.5 K of Wing spec).
+
+* **Bug 2** (`scripts/run_rce_mpi_long.py`): `fix_moist_mass_plane`
+  was rescaling total water back to IC every outer step. Correct
+  for gravity-wave smokes; FATAL for RCE spinup (surface flux
+  must net-add moisture until precip balances). Pre-fix evidence:
+  CWV pinned at 49.941 mm for 11+ sim-hours despite surface flux
+  active. Fix: `--no-mass-fixer` CLI flag skips both DD-MPI and
+  legacy rank-0 fixer calls. 30-day wrapper default is now
+  `NO_MASS_FIXER=1` (iter-95g + tests iter-95f / iter-95k /
+  iter-95m).
+
+* **Verification stack** (iter-95d/e/f/g/h/i/j/k/l/m): 11 follow-up
+  commits address every Codex iter-95 finding (HIGH BLOWUP +
+  MEDIUM tables + LOW#2 conditional + iter-95j tightened
+  308.78 K ± 0.5 K + iter-95k CWV growth threshold 0.01 mm + 4
+  IC anchors updated from 55.001/55.550 to 49.4691/49.9413 mm).
+
+* **iter-95d 5-sim-day no-radiation run** (32×32×30, dx=4 km,
+  dt=10 s, --no-mass-fixer): CWV 49.94 → 53.63 (day 1) → 55.26
+  (day 1.75); MSE plateauing at 3.5282×10⁹; max|w| linear
+  growth 0→2.17×10⁻³ m/s; profile conditionally unstable
+  (~3 K buoyancy z=0.5-3 km); RH lowest level 79%→93% day 1.
+  Bug 1 + Bug 2 fix proven end-to-end.
+
+**iter-96** (radiation-enabled 5-day run, same config + gray
+radiation @ 600 s cadence): 43200/43200 steps in 4288 s wall
+(~4 % overhead vs no-radiation iter-95d). **First quasi-equilibrium
+signal**: CWV peaks at 57.22 mm day 4.18 then drifts down toward
+56 mm — overshoot-and-settle consistent with Wing 2018 RCEMIP1
+multi-model behaviour (50-60 mm). qc_col_max appears day 4 at
+0.16 g/kg (Kessler threshold ~1 g/kg not yet hit). max|w| stays
+~2.3×10⁻³ m/s; no NaN.
+
+**iter-97 (F7 STALE finding, no code change)**: tried iter-96
+config + `--qv-noise-amp` at 5×10⁻⁵ and 1×10⁻⁵. BOTH NaN at
+step 100. F7's "1-5×10⁻⁵ acceptable" was measured pre-iter-95
+on the legacy IC (T_lowest = 309 K, supercritical). iter-95-
+corrected IC sits closer to saturation in the lowest few levels;
+ANY qv perturbation pushes cells over saturation instantly,
+Kessler condensation-heat blows acoustic mode within ~5 outer
+steps. **Conclusion**: keep `--qv-noise-amp 0` as the only safe
+default on the iter-95 IC path; F7 marked STALE in the Findings
+table at the top of this doc.
+
+**R-roadmap delta across the fold**: R1-R8, R10, R12 ✓ throughout;
+R9 `[!]` obsolete; R11 advanced from "plane CRM 1-sim-hour ✓ /
+full 30-day wall-time-gated" to "32×32×30 + radiation 5-day
+quasi-equilibrium ✓ / production 30-day still wall-time-gated
+at 132×132". The iter-95 two-bug fix is the precondition for
+every subsequent CRM-physics result; iter-96 + iter-98 are its
+empirical verifications.
 
 ### 2026-05-26 — iter 78..92 (compressed summary, iter-94 fold)
 
