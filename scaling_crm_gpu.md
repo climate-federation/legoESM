@@ -94,7 +94,30 @@ impl_cn peak (546 Mc/s) because:
 2. Plane operators (gradient, divergence) on full 3D state per substep
 3. Slow tendency RK3 outer still doubles base work
 
-**Codex iter-2 review applied:**
+### Iter 4 — 2026-05-27 — fill curve N=24/256, plot
+
+Filled small + mid-N for full saturation curve. nsub=6, both precisions:
+
+| res    | total cell-lev | fp32 ms/Mc/s   | fp64 ms/Mc/s   |
+|--------|----------------|----------------|----------------|
+| N=24   |    17,280      | 11.43 /  1.5   |  8.10 /  2.1   |
+| N=48   |    69,120      |  5.79 / 11.9   |  5.79 / 11.9   |
+| N=96   |   276,480      |  7.28 / 38     |  9.04 / 30.6   |
+| N=192  | 1,105,920      | 23.43 / 47     | 25.60 / 43.2   |
+| N=256  | 1,966,080      | 34.74 / 57     | 45.17 / 43.5   |
+| N=384  | 4,423,680      | 78.02 / 57     |164.98 / 26.8   |
+
+**fp32 plateau at 57 Mc/s spanning N=256-384** — true CRM ceiling on
+this GPU. fp64 plateaus at ~43 Mc/s and falls past N=256.
+
+Dispatch floor: ~10 ms at N=24 regardless of precision (acoustic
+substep launch × 36 + scan overhead). Same shape as atm CS, ocean
+LL — fixed launch cost dominates below 50k cell-lev.
+
+Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
+main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
+
+### Iter 3 codex review applied:
 - [HIGH] post-warmup + post-timing `jnp.isfinite` assert added —
   NaN/Inf now raises RuntimeError instead of silently fast
 - [HIGH] horizontal acoustic CFL (`c_sound·dt/nsub/dx`) computed +
