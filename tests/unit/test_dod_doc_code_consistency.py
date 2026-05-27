@@ -145,6 +145,32 @@ def test_dod_quotes_plateau_window_in_days():
     )
 
 
+def test_dod_quotes_summarizer_max_w_threshold():
+    """iter-157: DOD criterion 1 says ``max|w| < 50 m/s``; the code
+    constant is ``DEFAULT_MAX_W_THRESHOLD_MS = 50.0``. They must stay
+    in lockstep — pre-iter-157 this consistency was unverified, so
+    a code-side change to 20 or 100 m/s would silently disagree with
+    the doc.
+
+    Tolerates ``50``, ``50.0``, ``50 m/s``, ``50.0 m/s`` formatting.
+    """
+    mod = _load_summarizer_module()
+    dod = _read_dod_section()
+    threshold = mod.DEFAULT_MAX_W_THRESHOLD_MS
+    if float(threshold).is_integer():
+        # Match e.g. ``50`` or ``50.0`` followed by optional space + ``m/s``,
+        # but reject the leading-digit subset that would match 500 / 5000.
+        pat = rf"max\|w\|\s*<\s*{int(threshold)}(?:\.0+)?\s*m/s\b"
+    else:
+        pat = rf"max\|w\|\s*<\s*{re.escape(f'{threshold:g}')}\s*m/s\b"
+    assert re.search(pat, dod), (
+        f"DOD section in CRM_implementation.md must quote the active "
+        f"max|w| threshold ({threshold:g} m/s, from "
+        f"DEFAULT_MAX_W_THRESHOLD_MS = {mod.DEFAULT_MAX_W_THRESHOLD_MS}). "
+        f"DOD section does not match pattern {pat!r}."
+    )
+
+
 def test_criterion_2_cites_wing_2018():
     """iter-107: DOD criterion 2 must cite Wing 2018 (the canonical
     RCEMIP1 reference for the CWV range). A future revert that drops
