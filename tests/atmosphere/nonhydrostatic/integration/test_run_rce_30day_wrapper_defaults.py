@@ -902,6 +902,27 @@ def test_wrapper_hint_fires_on_30day_spinup_gate(tmp_path):
     )
 
 
+def test_wrapper_hint_fires_on_30day_stability_gate(tmp_path):
+    """iter-156: EVALUATE_DOD=stability (spinup gate without plateau
+    check) on a 30-day run is also not the production 1 % final-DOD
+    gate, so the hint must fire. Companion to the spinup-gate test
+    above — covers the third grading mode the wrapper accepts."""
+    res = _run_wrapper_quick(tmp_path, days="30", evaluate_dod="stability")
+    assert res.returncode == 0
+    assert "Hint: this is a >=30-day" in res.stdout, (
+        f"EVALUATE_DOD=stability on a 30-day run should still "
+        f"trigger the final-DOD hint (stability gate != production "
+        f"gate); stdout={res.stdout!r}"
+    )
+    # iter-156: hint message echoes the user's EVALUATE_DOD value so
+    # the failure mode "I set EVALUATE_DOD=stability but the hint
+    # still appears" is self-explanatory.
+    assert "EVALUATE_DOD=stability" in res.stdout, (
+        f"hint should echo the user's EVALUATE_DOD value verbatim; "
+        f"stdout={res.stdout!r}"
+    )
+
+
 def test_wrapper_hint_does_not_fire_on_decimal_days_below_30(tmp_path):
     """iter-126 LOW#1: DAYS=29.99 (floors to 29) must NOT trigger
     the hint."""
