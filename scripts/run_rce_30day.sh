@@ -130,22 +130,15 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
     # macOS BSD sed does not support ``\?``; use ``-E`` (extended
     # regex) so ``# ?`` strips the leading ``# `` (with optional
     # trailing space).
-    # iter-143/iter-144/iter-179/iter-181/iter-186: extracted range
-    # widened to cover every documented env var. iter-136 stopped at
-    # line 72 (pre-iter-138 CHECK_LOG_MAX_W docs); iter-143 widened
-    # to 77 (post-iter-138); iter-144 added HYPERDIFF/BUBBLE_K/
-    # QV_NOISE/USE_DD docs + PYBIN moved to 89. iter-179 expanded
-    # the QV_NOISE docblock (column-symmetry-trap rationale) which
-    # pushed CHECK_LOG_MAX_W + PYBIN to 93-97. iter-181 further
-    # expanded the QV_NOISE docblock (F11 radiation-feedback
-    # finding) so CHECK_LOG_MAX_W is now at 98-101 and PYBIN at 102.
-    # iter-186 (Codex LOW) refreshed the iter-183 production
-    # contract docs at the top (DT=20, ADVECTION=van_leer, beta=0.2);
-    # CHECK_LOG_MAX_W is now at 107-110 and PYBIN at 111. iter-190
-    # expanded the N_ACOUSTIC env-var docblock with the
-    # Ca_substep=0.87 measurement, pushing CHECK_LOG_MAX_W to
-    # 113-116 and PYBIN to 117 — range widened to 117 in lockstep.
-    sed -n '2,117p' "$0" | sed -E 's/^# ?//'
+    # iter-192 Codex LOW: switched from a hard-coded sed range to
+    # a sentinel-based extraction. Print every line from line 2
+    # up to (but excluding) the first ``set -euo pipefail`` line
+    # that ends the docstring block. New docblock additions no
+    # longer need a sed-range bump (was widened 4 times during
+    # iter-186 + iter-191 doc growth). The /^set -euo pipefail/q
+    # awk-style /p sed pattern halts AT the marker; we negate by
+    # piping through head -n -1 to drop that line itself.
+    sed -n '2,/^set -euo pipefail/p' "$0" | sed '$d' | sed -E 's/^# ?//'
     exit 0
 fi
 

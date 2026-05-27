@@ -54,6 +54,7 @@ from legoesm.atmosphere.dynamics.compressible_euler import (
     CompressibleEulerConfig,
 )
 from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    HORIZONTAL_ADVECTION_HALO_REQUIREMENT as _ADV_HALO_REQ,
     PlaneCompressibleEulerModel, make_flat_plane_terrain_metric,
     make_rest_state,
 )
@@ -234,16 +235,20 @@ def parse_args():
                         "perturbations [K] applied to the lowest 4 "
                         "model levels of the IC (RCEMIP / Wing 2018 "
                         "standard symmetry-breaker; +/-0.1 K is the "
-                        "Wing 2018 RCEMIP1 protocol value). Unlike "
-                        "qv noise (iter-181 finding: qv-noise + gray "
-                        "radiation produces a linear instability that "
-                        "grows ~50%/step regardless of amplitude — "
-                        "any noise > 0 destabilises by step ~30 at "
-                        "dt=10 s), theta' perturbations do NOT feed "
-                        "back through the LW optical depth and can "
-                        "safely break the iter-149 column-symmetric "
-                        "convection trap. Default 0 = clean Wing IC; "
-                        "set 0.1 (RCEMIP) to seed real cells.")
+                        "Wing 2018 RCEMIP1 protocol value). iter-181 "
+                        "added this flag as a PROPOSED alternative to "
+                        "the qv-noise symmetry-breaker; iter-182 then "
+                        "traced F11 to its root cause (inherent "
+                        "radiative-convective initiation at dx=4 km "
+                        "that the dycore cannot resolve once convection "
+                        "nucleates) and confirmed BOTH theta' AND qv "
+                        "noise hit the same wall: any nonzero "
+                        "amplitude + gray radiation -> blowup in "
+                        "25-50 outer steps. Default 0 = clean Wing "
+                        "IC; set nonzero only on the F11 fix paths "
+                        "(LES dx=1km, subgrid convection scheme, "
+                        "smooth wing perturbation, adaptive dt). "
+                        "See CRM_implementation.md F11.")
     p.add_argument("--theta-noise-seed", type=int, default=0,
                    help="RNG seed for theta' noise perturbation. Same "
                         "seed → bit-identical IC across reruns.")
@@ -273,7 +278,13 @@ def parse_args():
                         "theta_prime [m^2/s]. 0 = off. Try 1e4-5e4 to "
                         "damp the buoyancy/PG feedback that destabilises "
                         "the dycore at dt > 0.5 s on coarse vertical grids.")
-    p.add_argument("--advection", choices=["upwind1", "van_leer", "weno5"],
+    # iter-192 Codex MEDIUM#2: derive choices from the shared
+    # HORIZONTAL_ADVECTION_HALO_REQUIREMENT map so argparse +
+    # halo-dispatch + driver can never disagree on which scheme
+    # names are valid. A future fourth scheme automatically
+    # surfaces in --help once it's added to the map.
+    p.add_argument("--advection",
+                   choices=sorted(_ADV_HALO_REQ),
                    default="van_leer",
                    help="Horizontal advection scheme for theta/u/v/w. "
                         "upwind1: 1st-order, cheap, dispersive (legacy). "
@@ -776,11 +787,10 @@ def main():
     # slow-tendency call. iter-187 promoted the per-scheme halo
     # requirements to a public map in compressible_euler_plane so
     # caller (driver) + callee (halo dispatch) consult the SAME
-    # source of truth — no more silent drift.
-    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
-        HORIZONTAL_ADVECTION_HALO_REQUIREMENT,
-    )
-    _required_halo = HORIZONTAL_ADVECTION_HALO_REQUIREMENT[args.advection]
+    # source of truth — no more silent drift. iter-192 reuses the
+    # _ADV_HALO_REQ alias bound during parse_args() so the lookup
+    # cannot reference a different module / map snapshot.
+    _required_halo = _ADV_HALO_REQ[args.advection]
     layout = make_plane_pencil_layout(
         rank=rank, n_ranks=n_ranks,
         n_ranks_y=n_ranks_y, n_ranks_x=n_ranks_x,

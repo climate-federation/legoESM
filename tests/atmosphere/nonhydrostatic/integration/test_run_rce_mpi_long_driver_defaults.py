@@ -217,7 +217,7 @@ def test_qv_noise_seed_default(driver_defaults):
 
 
 def test_driver_consults_shared_halo_requirement_map():
-    """iter-187: the driver MUST source its per-scheme halo
+    """iter-187/192: the driver MUST source its per-scheme halo
     requirement from the shared
     HORIZONTAL_ADVECTION_HALO_REQUIREMENT map in
     compressible_euler_plane, not a hardcoded inline dict.
@@ -225,28 +225,52 @@ def test_driver_consults_shared_halo_requirement_map():
     Pre iter-187 the driver hardcoded
     ``{"upwind1": 1, "van_leer": 2, "weno5": 3}`` inline and the
     halo dispatch hardcoded the same values separately — classic
-    drift hazard. iter-187 collapsed to a single source of truth;
-    this test locks the driver's import-and-use pattern so a
-    future revert can't go unnoticed.
+    drift hazard. iter-187 collapsed to a single source of truth.
 
-    Scrapes the driver source for the import + dictionary lookup.
+    iter-192 (Codex LOW): the iter-187 substring scrape could
+    false-pass if the import lived in a comment, dead branch, or
+    unused helper. Switched to an AST walk that verifies the
+    import is a top-level executable statement.
     """
-    driver_text = DRIVER.read_text()
-    assert (
-        "from legoesm.atmosphere.dynamics.compressible_euler_plane "
-        "import"
-    ) in driver_text and "HORIZONTAL_ADVECTION_HALO_REQUIREMENT" in driver_text, (
-        "Driver must import HORIZONTAL_ADVECTION_HALO_REQUIREMENT "
-        "from compressible_euler_plane (iter-187 single source of "
-        "truth)."
+    import ast
+    tree = ast.parse(DRIVER.read_text())
+    # Find a top-level ImportFrom that brings in
+    # HORIZONTAL_ADVECTION_HALO_REQUIREMENT (under any local alias).
+    import_found = False
+    aliases = set()
+    for node in tree.body:  # top-level only — no commented or
+        # inside-function code paths.
+        if isinstance(node, ast.ImportFrom) and node.module == (
+            "legoesm.atmosphere.dynamics.compressible_euler_plane"
+        ):
+            for alias in node.names:
+                if alias.name == "HORIZONTAL_ADVECTION_HALO_REQUIREMENT":
+                    import_found = True
+                    aliases.add(alias.asname or alias.name)
+    assert import_found, (
+        "Driver must have a TOP-LEVEL import of "
+        "HORIZONTAL_ADVECTION_HALO_REQUIREMENT from "
+        "compressible_euler_plane (iter-192 AST check)."
     )
-    assert (
-        "HORIZONTAL_ADVECTION_HALO_REQUIREMENT[args.advection]"
-    ) in driver_text, (
+    # The runtime call must look up the required halo via the
+    # imported name (or its alias). Walk the AST for a Subscript
+    # like ``<imported>[args.advection]``.
+    lookup_found = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+            if node.value.id in aliases:
+                # Verify the subscript expression is args.advection
+                # (don't allow a hardcoded scheme name).
+                idx = node.slice
+                if isinstance(idx, ast.Attribute) and isinstance(idx.value, ast.Name):
+                    if idx.value.id == "args" and idx.attr == "advection":
+                        lookup_found = True
+                        break
+    assert lookup_found, (
         "Driver must look up the required halo via "
-        "HORIZONTAL_ADVECTION_HALO_REQUIREMENT[args.advection] so "
-        "layout halo matches the active --advection at construction "
-        "time (iter-186 Codex HIGH fix)."
+        "<imported>[args.advection] using a name imported from "
+        "HORIZONTAL_ADVECTION_HALO_REQUIREMENT (iter-186 Codex HIGH "
+        "fix). Found neither a direct nor an aliased subscript."
     )
 
 

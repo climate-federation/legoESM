@@ -433,9 +433,21 @@ def plane_compressible_euler_slow_tendencies_halo(
         adv_y = lambda f_pad, v_pad_, dy_, h_: (
             oh.van_leer_advection_y_halo(f_pad, v_pad_, dy_, h_)
         )
-    else:  # upwind1 — only remaining valid choice
+    elif scheme == "upwind1":
         adv_x = oh.upwind_advection_x_halo
         adv_y = oh.upwind_advection_y_halo
+    else:
+        # iter-192 Codex MEDIUM: a fourth scheme added to
+        # HORIZONTAL_ADVECTION_HALO_REQUIREMENT but NOT wired into
+        # this dispatch would silently fall through to upwind on the
+        # halo path. Refuse loudly so the failure mode matches the
+        # serial path (compressible_euler_plane.py raises identically).
+        raise NotImplementedError(
+            f"horizontal_advection_scheme={scheme!r} is in "
+            f"HORIZONTAL_ADVECTION_HALO_REQUIREMENT but has no halo-path "
+            f"wiring in compressible_euler_plane_halo.py. Add the "
+            f"adv_x / adv_y branch alongside upwind1 / van_leer / weno5."
+        )
     dtheta_p_dt = (
         adv_x(theta_total_pad, u_center_pad, grid.dx, h)
         + adv_y(theta_total_pad, v_center_pad, grid.dy, h)
