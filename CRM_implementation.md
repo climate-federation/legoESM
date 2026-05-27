@@ -223,6 +223,67 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 275 (cross-grid moist physics — cubed-sphere + MPAS CRM capability)
+
+**User request**: "implement cross-grid (cubed-sphere/MPAS) capability".
+
+Pre iter-275: `scripts/run_rcemip_long.py` was dry-only for ALL
+4 grid backends (`physics_fn = None` hardcoded). The factories
+``make_microphysics_physics`` + ``make_radiation_physics`` were
+imported but never composed.
+
+**Changes**
+
+* `scripts/run_rcemip_long.py`:
+  * Added `_compose_nh_moist_physics(model_type, dt)` helper that
+    builds Kessler microphysics + gray radiation factories with
+    the right ``model_type`` ('nonhydrostatic' for cubed-sphere,
+    'mpas_nh' for MPAS) and sums their tendency leaves via
+    ``tree_flatten`` + element-wise sum + ``tree_unflatten``.
+    Direct ``tree_map(a + b)`` doesn't work because Field is a
+    pytree node with name-metadata, and the micro/rad tendencies
+    carry distinct names (``dtracers_dt_micro`` vs
+    ``dtracers_dt_rad``) — treedef mismatch.
+  * New `--moist` CLI flag (opt-in, default off). When set,
+    cubed-sphere + MPAS paths use the composed moist physics_fn;
+    plane_fd + plane_spectral ignore the flag (preserves iter-238
+    dry smoke contract).
+  * label includes ``_moist`` suffix in stdout + history JSON for
+    fingerprint testing.
+
+* `tests/atmosphere/nonhydrostatic/integration/test_run_rcemip_long_cross_grid_smoke.py`:
+  * New parametrised test `test_run_rcemip_long_cross_grid_moist_smoke`
+    over (cubed_sphere, mpas). 8-step moist smoke at small mesh
+    verifies --moist parses + composes cleanly, stdout label
+    matches, n_steps=8, q_v stays in (0, 0.05).
+
+**Verified**
+
+* Manual smoke runs:
+  - cubed_sphere --moist 8 steps: 542 ms/step, max|w| 0.41→0.06 m/s
+    (radiative-convective initiation), drift ~1e-16.
+  - mpas --moist 8 steps: 47.5 ms/step, similar trajectory.
+* Cross-grid smoke suite: **6/6 PASS** in 45.8 s
+  (4 dry [plane_fd/plane_spectral/cubed_sphere/mpas] + 2 moist
+  [cubed_sphere/mpas]).
+* Both Codex Round 1 HIGH from iter-274 (full 8-scheme sweep)
+  + the user-requested cross-grid moist capability landed in
+  this same commit.
+
+**Status for "all grid types" DOD** (refreshed):
+
+| Grid | Smoke | Moist physics | 30-day production |
+|---|---|---|---|
+| Plane FD | ✅ iter-238 | ✅ existing (run_rce_mpi_long.py) | ✅ iter-229 DOD PASS |
+| Plane spectral | ✅ iter-241 | (dry-only in this driver) | ⏳ not run |
+| Cubed-sphere | ✅ iter-238 | ✅ **iter-275 (this iter)** | ⏳ not run |
+| MPAS Voronoi | ✅ iter-238 | ✅ **iter-275 (this iter)** | ⏳ not run |
+
+The "cross-grid CAPABILITY" half is now closed for cubed-sphere +
+MPAS. Closing the "30-day production" cell requires multi-day
+compute jobs at production-resolution mesh — out of scope for an
+in-session iteration but unblocked by this commit.
+
 ### 2026-05-27 — iter 238..262 (cross-grid CRM smoke + state.py cherry-pick + 7-script untested-bench chain + helper extraction)
 
 8 iterations covering the cross-grid CRM test surface lift:

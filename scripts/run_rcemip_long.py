@@ -65,7 +65,85 @@ def _build_initial_q_v(hc, shape):
 # --------------------------------------------------------------------- #
 
 
-def _run_plane_fd(days: float, dt: float, print_every: int, output: Path):
+def _compose_nh_moist_physics(model_type: str, dt: float):
+    """iter-275: compose Kessler microphysics + gray radiation
+    into a single physics_fn that the non-hydrostatic dycores
+    (cubed-sphere, MPAS NH) can pass to ``model.step``.
+
+    The two factories return tendency functions with the same
+    signature for a given ``model_type``. We sum their outputs
+    via ``jax.tree_util.tree_map`` so the dycore sees a single
+    composed tendency per call. This mirrors the
+    ``make_rcemip_physics`` pattern in
+    ``scripts/run_rcemip_plane.py`` (plane CRM) — extracted here
+    because the plane helper takes a (grid, hc, tm)
+    signature that doesn't carry to the cubed-sphere / MPAS
+    NonHydrostaticState shapes.
+
+    Parameters
+    ----------
+    model_type : str
+        'nonhydrostatic' for cubed-sphere CRM, 'mpas_nh' for MPAS.
+    dt : float
+        Outer time step [s], passed to the microphysics factory
+        for sub-step scheduling.
+
+    Returns
+    -------
+    Callable
+        ``physics_fn(state, ...)`` returning a tendency pytree of
+        the same shape as the model's state.
+    """
+    from legoesm.atmosphere.physics.microphysics.config import (
+        KesslerConfig, MicrophysicsConfig,
+    )
+    from legoesm.atmosphere.physics.microphysics.integration import (
+        make_microphysics_physics,
+    )
+    from legoesm.atmosphere.physics.radiation.config import (
+        GrayRadiationConfig, RadiationConfig,
+    )
+    from legoesm.atmosphere.physics.radiation.integration import (
+        make_radiation_physics,
+    )
+
+    micro_fn = make_microphysics_physics(
+        MicrophysicsConfig(scheme="kessler", kessler=KesslerConfig()),
+        model_type=model_type, dt=dt,
+    )
+    rad_fn = make_radiation_physics(
+        RadiationConfig(scheme="gray", gray=GrayRadiationConfig()),
+        model_type=model_type,
+    )
+
+    def physics_fn(*args, **kwargs):
+        # Both factories return tendency callables with identical
+        # *pytree shapes* but distinct Field-name metadata (e.g.
+        # ``dtracers_dt_micro`` vs ``dtracers_dt_rad``). Field is
+        # registered as a pytree node with name as treedef metadata,
+        # so ``jax.tree_util.tree_map`` refuses to pair them.
+        # Sum at the leaf-array level + rebuild with the micro
+        # treedef so downstream consumers see a single composed
+        # tendency.
+        t_micro = micro_fn(*args, **kwargs)
+        t_rad = rad_fn(*args, **kwargs)
+        leaves_m, treedef = jax.tree_util.tree_flatten(t_micro)
+        leaves_r = jax.tree_util.tree_leaves(t_rad)
+        if len(leaves_m) != len(leaves_r):
+            raise ValueError(
+                f"_compose_nh_moist_physics: micro tendency has "
+                f"{len(leaves_m)} leaves but rad has "
+                f"{len(leaves_r)} — model_type={model_type!r} factory "
+                f"contract mismatch."
+            )
+        summed = [a + b for a, b in zip(leaves_m, leaves_r)]
+        return jax.tree_util.tree_unflatten(treedef, summed)
+
+    return physics_fn
+
+
+def _run_plane_fd(days: float, dt: float, print_every: int, output: Path,
+                  *, moist: bool = False):
     from legoesm.atmosphere.dynamics.compressible_euler import (
         CompressibleEulerConfig,
     )
@@ -149,7 +227,8 @@ def _run_plane_fd(days: float, dt: float, print_every: int, output: Path):
 # --------------------------------------------------------------------- #
 
 
-def _run_plane_spectral(days: float, dt: float, print_every: int, output: Path):
+def _run_plane_spectral(days: float, dt: float, print_every: int, output: Path,
+                        *, moist: bool = False):
     from legoesm.atmosphere.dynamics.compressible_euler import (
         CompressibleEulerConfig,
     )
@@ -232,7 +311,8 @@ def _run_plane_spectral(days: float, dt: float, print_every: int, output: Path):
 # --------------------------------------------------------------------- #
 
 
-def _run_cubed_sphere(days: float, dt: float, print_every: int, output: Path):
+def _run_cubed_sphere(days: float, dt: float, print_every: int, output: Path,
+                      *, moist: bool = False):
     from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
         CDGridCompressibleEulerConfig, CDGridCompressibleEulerModel,
     )
@@ -289,8 +369,14 @@ def _run_cubed_sphere(days: float, dt: float, print_every: int, output: Path):
                       units="kg/kg"),
     )
 
-    # DRY, NO PHYSICS (see plane_fd docstring).
-    physics_fn = None
+    # iter-275: opt-in moist physics for cubed_sphere.
+    # model_type='nonhydrostatic' selects the cubed-sphere /
+    # NonHydrostaticState factory branch.
+    if moist:
+        physics_fn = _compose_nh_moist_physics(model_type="nonhydrostatic",
+                                               dt=dt)
+    else:
+        physics_fn = None
 
     def diag(s):
         return dict(
@@ -304,7 +390,8 @@ def _run_cubed_sphere(days: float, dt: float, print_every: int, output: Path):
         )
 
     return _run_loop(model, state, diag, days, dt, print_every,
-                     output, label="cubed_sphere",
+                     output,
+                     label=f"cubed_sphere{'_moist' if moist else ''}",
                      physics_fn=physics_fn)
 
 
@@ -313,7 +400,8 @@ def _run_cubed_sphere(days: float, dt: float, print_every: int, output: Path):
 # --------------------------------------------------------------------- #
 
 
-def _run_mpas(days: float, dt: float, print_every: int, output: Path):
+def _run_mpas(days: float, dt: float, print_every: int, output: Path,
+              *, moist: bool = False):
     from legoesm.atmosphere.dynamics.compressible_euler_mpas import (
         MPASCompressibleEulerConfig, MPASCompressibleEulerModel,
     )
@@ -364,8 +452,13 @@ def _run_mpas(days: float, dt: float, print_every: int, output: Path):
                       dims=("nCells", "nlev", "tracer"), units="kg/kg"),
     )
 
-    # DRY, NO PHYSICS (see plane_fd docstring).
-    physics_fn = None
+    # iter-275: opt-in moist physics for MPAS NH.
+    # model_type='mpas_nh' selects the MPASNonHydrostaticState
+    # factory branch.
+    if moist:
+        physics_fn = _compose_nh_moist_physics(model_type="mpas_nh", dt=dt)
+    else:
+        physics_fn = None
 
     def diag(s):
         return dict(
@@ -379,7 +472,7 @@ def _run_mpas(days: float, dt: float, print_every: int, output: Path):
         )
 
     return _run_loop(model, state, diag, days, dt, print_every,
-                     output, label="mpas",
+                     output, label=f"mpas{'_moist' if moist else ''}",
                      physics_fn=physics_fn)
 
 
@@ -452,6 +545,17 @@ def main():
     p.add_argument("--dt", type=float, default=DEFAULT_DT)
     p.add_argument("--print-every", type=int, default=4_320)   # ~1 sim day
     p.add_argument("--output", type=Path, required=True)
+    # iter-275: opt-in moist physics (Kessler microphysics + gray
+    # radiation) for the cubed_sphere + mpas paths. plane_fd +
+    # plane_spectral remain dry by default — the iter-238 cross-grid
+    # smoke locks the dry contract for all 4 grids.
+    p.add_argument(
+        "--moist", action="store_true", default=False,
+        help="iter-275: opt-in moist physics_fn composition "
+        "(Kessler microphysics + gray radiation) for the "
+        "cubed_sphere + mpas paths. Dry by default (preserves "
+        "iter-238 smoke contract).",
+    )
     args = p.parse_args()
 
     dispatch = {
@@ -460,7 +564,10 @@ def main():
         "cubed_sphere": _run_cubed_sphere,
         "mpas": _run_mpas,
     }
-    dispatch[args.grid](args.days, args.dt, args.print_every, args.output)
+    dispatch[args.grid](
+        args.days, args.dt, args.print_every, args.output,
+        moist=args.moist,
+    )
 
 
 if __name__ == "__main__":

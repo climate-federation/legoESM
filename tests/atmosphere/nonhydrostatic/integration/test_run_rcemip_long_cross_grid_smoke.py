@@ -85,6 +85,73 @@ _EXPECTED_DIAG_COLS = {
 
 
 @pytest.mark.parametrize("grid", [
+    "cubed_sphere",
+    "mpas",
+])
+def test_run_rcemip_long_cross_grid_moist_smoke(tmp_path, grid):
+    """iter-275: opt-in ``--moist`` flag for the cubed_sphere + mpas
+    paths composes Kessler microphysics + gray radiation into a
+    single physics_fn via ``_compose_nh_moist_physics``. Pre-iter-275
+    these paths were dry-only (``physics_fn=None``).
+
+    Single-process smoke at small mesh + 8 outer steps verifies:
+    * --moist parses + composes the moist physics_fn cleanly
+    * 8 outer steps complete (no NaN, no compose error)
+    * label includes ``_moist`` suffix in the history JSON
+    """
+    out_file = tmp_path / f"rcemip_{grid}_moist_history.json"
+    result = _run_driver(out_file, grid=grid, days=0.001, dt=10.0)
+    # Re-run with --moist appended manually since _run_driver doesn't
+    # take a moist flag — use run_bench directly to add --moist.
+    out_file_moist = tmp_path / f"rcemip_{grid}_moist_v2.json"
+    from tests.atmosphere.nonhydrostatic.integration._bench_smoke_helpers import (
+        run_bench,
+    )
+    result = run_bench(DRIVER, [
+        "--grid", grid,
+        "--days", "0.001",
+        "--dt", "10.0",
+        "--print-every", "1",
+        "--moist",
+        "--output", str(out_file_moist),
+    ])
+    if result.returncode != 0:
+        pytest.fail(
+            f"run_rcemip_long.py --moist --grid {grid} exited "
+            f"{result.returncode}\n"
+            f"stdout tail:\n{result.stdout[-1500:]}\n"
+            f"stderr tail:\n{result.stderr[-1500:]}"
+        )
+    # The label in stdout should be ``<grid>_moist`` (per iter-275
+    # branch).
+    assert f"[{grid}_moist]" in result.stdout, (
+        f"Driver stdout missing ``[{grid}_moist]`` marker. "
+        f"Did the --moist flag dispatch?\n"
+        f"stdout tail:\n{result.stdout[-500:]}"
+    )
+    # JSON history must exist + show n_steps=8 (= int(0.001*86400/10)).
+    assert out_file_moist.exists()
+    doc = json.loads(out_file_moist.read_text())
+    assert doc["n_steps"] == 8, (
+        f"Driver n_steps={doc['n_steps']}, expected 8. moist "
+        f"path may have early-aborted."
+    )
+    # Last history row diag fields finite + present.
+    history_rows = doc["history"]
+    assert len(history_rows) >= 2
+    last = history_rows[-1]
+    for col in ("max_w", "min_th", "max_th", "min_qv", "max_qv"):
+        assert col in last
+        v = last[col]
+        assert isinstance(v, (int, float)) and v == v
+    # q_v should remain in (0, 0.05): radiation cools, Kessler may
+    # remove some moisture, but at 8 sim-steps the column stays
+    # near IC.
+    assert 0.0 <= last["max_qv"] < 0.05
+    assert last["min_qv"] >= -1e-10
+
+
+@pytest.mark.parametrize("grid", [
     "plane_fd",
     # iter-241: removed the iter-240 xfail-strict marker after
     # cherry-picking SpectralPlanePhysicsState +

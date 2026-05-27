@@ -6,15 +6,13 @@ bechtold, kuo, kain_fritsch, mass_flux) on a fixed-SST lat-lon
 FV column with gray radiation + bulk BL + warm-rain microphysics.
 Pre iter-273 it had ZERO test coverage.
 
-iter-274 (Codex iter-273 round-1 HIGH#1 + MEDIUM#1) hardening:
-the smoke now uses ``--schemes kuo,mass_flux`` (CSV) instead of
-``--schemes kuo`` so we hit:
-* Two distinct factory branches (kuo's diluted plume + mass_flux's
-  shared kernel). A regression in only the mass-flux side would
-  have passed the iter-273 single-scheme smoke.
-* The argparse CSV-split path at scripts/run_rce_convection_sweep.py
-  _parse_schemes — which was advertised in the script's CLI docs
-  but never exercised in the iter-273 smoke.
+iter-275 (Codex iter-274 round-2 HIGH) hardening: switched to
+``--schemes all`` so every per-scheme factory branch fires.
+Codex iter-274 review found that mass_flux is NOT a generic
+shared-kernel test for the 6 mass-flux-based schemes; each has
+its own factory + state contract (tiedtke moisture_convergence,
+bechtold stochastic state, kain_fritsch w_grid, ...). Codex
+verified all-8-scheme wall ≈ 14-17 s (well within nightly).
 
 9th previously-untested CRM script in the iter-238..273 coverage
 chain.
@@ -45,37 +43,42 @@ _SUMMARY_RE = re.compile(
 )
 
 
-def test_run_rce_convection_sweep_csv_two_schemes_1day_smoke(tmp_path):
-    """1-day CSV-list RCE column smoke at N=6 / nlev=10 / dt=600 s
-    running BOTH kuo + mass_flux schemes. Verifies argparse + CSV
-    split + 2 distinct factory branches + column physics stack +
-    summary table emission + per-scheme snapshot .npz output.
+_ALL_SCHEMES = (
+    "sbm", "tiedtke", "zhang_mcfarlane", "emanuel",
+    "bechtold", "kuo", "kain_fritsch", "mass_flux",
+)
 
-    kuo is the fastest single-scheme of the 8; mass_flux exercises
-    the shared mass-flux kernel (used by tiedtke, zhang_mcfarlane,
-    emanuel, bechtold, kain_fritsch too). Together: ~2 s wall on
-    M5 Pro at this mesh.
+
+def test_run_rce_convection_sweep_all_schemes_1day_smoke(tmp_path):
+    """1-day all-schemes RCE column smoke at N=6 / nlev=10 / dt=600 s
+    running EVERY convection scheme. Codex iter-274 review HIGH:
+    kuo + mass_flux did NOT cover the per-scheme factory branches
+    — each scheme has its own state contract (tiedtke
+    moisture_convergence, bechtold stochastic state, kain_fritsch
+    w_grid, ...). iter-275 switches to ``--schemes all`` so every
+    factory branch fires. Codex verified all-8-scheme wall
+    ≈ 14-17 s, well within nightly budget.
     """
     out_dir = tmp_path / "sweep"
     result = run_bench(SCRIPT, [
-        "--schemes", "kuo,mass_flux",
+        "--schemes", "all",
         "--days", "1",
         "--N", "6",
         "--nlev", "10",
         "--dt", "600.0",
         "--output", str(out_dir),
-    ])
+    ], timeout_s=300)
     fail_on_nonzero(result, "run_rce_convection_sweep.py")
 
-    # Both per-scheme snapshot files should land in <output_dir>.
-    for scheme in ("kuo", "mass_flux"):
+    # Every per-scheme snapshot file should land in <output_dir>.
+    for scheme in _ALL_SCHEMES:
         snapshot = out_dir / f"snapshot_{scheme}.npz"
         assert snapshot.exists(), (
             f"Per-scheme snapshot not written at {snapshot}.\n"
             f"stdout tail:\n{result.stdout[-1500:]}"
         )
 
-    # Find summary rows for BOTH schemes.
+    # Find summary rows for ALL schemes.
     summary_matches: dict[str, re.Match] = {}
     in_summary = False
     for line in result.stdout.splitlines():
@@ -84,13 +87,13 @@ def test_run_rce_convection_sweep_csv_two_schemes_1day_smoke(tmp_path):
             continue
         if in_summary:
             stripped = line.strip()
-            for scheme in ("kuo", "mass_flux"):
+            for scheme in _ALL_SCHEMES:
                 if stripped.startswith(scheme + " ") or stripped.startswith(scheme + "\t"):
                     m = _SUMMARY_RE.match(line)
                     if m is not None:
                         summary_matches[scheme] = m
-    assert set(summary_matches) == {"kuo", "mass_flux"}, (
-        f"Expected summary rows for both kuo + mass_flux; got "
+    assert set(summary_matches) == set(_ALL_SCHEMES), (
+        f"Expected summary rows for all 8 schemes; got "
         f"{list(summary_matches)!r}.\nstdout tail:\n{result.stdout[-1500:]}"
     )
 
