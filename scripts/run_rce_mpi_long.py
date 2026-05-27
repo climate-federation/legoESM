@@ -437,19 +437,23 @@ def build_height_coord_and_state(args, grid):
     )
 
     # iter-181 theta' noise seed in the lowest 4 levels (RCEMIP /
-    # Wing 2018 standard symmetry-breaker). Distinct from qv noise:
-    # theta' does not enter the LW optical depth, so it cannot
-    # trigger the iter-181 radiation-feedback instability that
-    # destabilises qv-noise IC at any nonzero amplitude.
+    # Wing 2018 standard symmetry-breaker). iter-212 update: the
+    # original iter-181 claim that theta' was safer than qv noise
+    # because it doesn't enter the LW optical depth was REFUTED at
+    # the iter-212 smoke — theta' nonzero amplitudes blow up via a
+    # DIFFERENT mechanism (direct buoyancy injection, not radiation
+    # feedback). Same F11 dx=4 km wall, just from a different
+    # physics pathway.
     # iter-203: added --theta-noise-mode to pick the perturbation
     # pattern. "white" (default) is RCEMIP / Wing 2018 uniform
     # random; "smooth_k1" is the F11 fix-path-3 candidate — a
     # single-cosine smooth perturbation at the lowest non-trivial
     # wavenumber (kx=1, ky=1) with amplitude theta_noise_amp.
-    # Hypothesis: the F11 blowup comes from per-cell white noise
-    # generating sub-resolved convective cells at dx=4 km; a smooth
-    # large-scale perturbation may break column symmetry without
-    # nucleating sub-resolved cells.
+    # Both modes blow up at dx=4 km regardless of radiation status
+    # (iter-212 smoke at amp=0.01 + --no-radiation: NaN at step 20).
+    # Helper retained for LES-regime (dx<=1 km) experiments where
+    # smaller dx may resolve convective cells before Kessler
+    # saturates.
     theta_noise_amp = float(args.theta_noise_amp)
     if theta_noise_amp > 0.0:
         n_seed_lev = min(4, nlev)

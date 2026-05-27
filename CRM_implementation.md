@@ -132,7 +132,10 @@ iter-181 traced the qv-noise + radiation blow-up to its root cause via a direct 
 | dt=10 upwind1 β=0.1 | 0 | 0.01 K | step 50 | ~30%/step |
 | dt=20 weno5 β=0.2 | 0 | 0.1 K | step 50 | ~40%/step |
 | (any) | 0 | 0 | stable indefinitely | — |
-| (any, --no-radiation) | nonzero | nonzero | stable | — |
+| (any, --no-radiation) | nonzero qv | 0 | stable | — |
+| dt=20 vl β=0.2 --no-radiation smooth_k1 | 0 | 0.01 K | **step 20** | ~80%/step |
+
+iter-212 update: the bottom row REFUTES the prior iter-181 claim that "theta' is safer than qv because it doesn't enter the LW optical depth". theta' noise also destabilises *without* radiation, via direct buoyancy injection rather than radiation feedback. Same F11 dx=4 km wall, different physics pathway. Only qv noise specifically requires radiation to destabilise.
 
 Diagnostic — `/tmp/diag_rad_qv.py` calls `gray_radiation` directly on a column-symmetric IC and on an IC with one column perturbed by +1e-8 kg/kg in the lowest 4 levels:
 * Column-symmetric: heating rate range −3.6e-5 → +2.2e-5 K/s. Standard gray-RCE pattern (LW cooling above z~17 km absorption peak, warming below).
