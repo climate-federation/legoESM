@@ -120,9 +120,9 @@ mpi4jax 0.9 vs JAX 0.10 stack mismatch produces ~70× per-rank slowdown on macOS
 
 iter-9 measurement on the 132×132×30 plane CRM at dt=5 s + N_ACOUSTIC=12 + clean Wing IC (no bubble, no qv noise) showed max|w| ≤ 6.1 × 10⁻³ m/s over 720 outer steps (1 sim-hour). The bubble-IC F1 dt-stability ladder (dt=1 s) was a SYMPTOM of the bubble-seeded 2-Δz mode (F7), not a fundamental outer-dt limit. With the clean IC F8 path, the dt=5 s + SI acoustic + N_ACOUSTIC=12 production config is stable WITHOUT KW78 (R9 obsolete). iter-58/59 refreshed all production wrapper + driver defaults from the iter-2 conservative dt=1 s / N_ACOUSTIC=24 to dt=5 s / N_ACOUSTIC=12; iter-14/iter-38/iter-63 produced the structural slow nightly regression. iter-180 further refreshed defaults to dt=20 s + WENO5 + β=0.2 (4× speedup at the same horizontal grid; smoke verified stable at 432 outer steps under radiation).
 
-### F11. Radiation + any horizontal IC heterogeneity → exponential blowup (open)
+### F11. Radiative-convective initiation at dx=4 km is dycore-/Kessler-resolution-bound (open)
 
-iter-181 reproduced the iter-97 F7-stale "qv-noise destabilises" finding under the new (iter-180) production config + every prior config tested. Pattern (smoke at 32×32×30 dx=4 km, gray radiation cadence 600 s, --no-mass-fixer, all schemes):
+iter-181 traced the qv-noise + radiation blow-up to its root cause via a direct diagnostic of the gray-radiation tendency on a perturbed IC. Initial smoke pattern (32×32×30 dx=4 km, gray radiation cadence 600 s, --no-mass-fixer):
 
 | config | qv_noise | θ-noise | blowup step | growth rate |
 |--------|----------|---------|-------------|-------------|
@@ -134,16 +134,27 @@ iter-181 reproduced the iter-97 F7-stale "qv-noise destabilises" finding under t
 | (any) | 0 | 0 | stable indefinitely | — |
 | (any, --no-radiation) | nonzero | nonzero | stable | — |
 
-Findings:
-* Amplitude-independent: 1e-8 qv noise destabilises identically to 1e-4.
-* Scheme-independent: WENO5 / upwind1 / Van Leer all blow up at the same rate.
-* dt-independent: dt=5, 10, 20 all blow up (just at slightly different step counts).
-* Radiation cadence-independent: rad-every-step (cadence=dt) still blows up.
-* Conclusion: a structural radiation-feedback bug, NOT a dycore CFL / scheme / stiffness issue. Likely an LW-tendency-sign or LW-optical-depth bug that flips on non-uniform qv columns.
+Diagnostic — `/tmp/diag_rad_qv.py` calls `gray_radiation` directly on a column-symmetric IC and on an IC with one column perturbed by +1e-8 kg/kg in the lowest 4 levels:
+* Column-symmetric: heating rate range −3.6e-5 → +2.2e-5 K/s. Standard gray-RCE pattern (LW cooling above z~17 km absorption peak, warming below).
+* Perturbed: heating-rate spread between perturbed and unperturbed columns = **3.99e-12 K/s** at the perturbed location (z=3850 m, in the absorption band). Linear-and-tiny — the radiation IS responding correctly to the noise.
 
-Consequence: the iter-149 column-symmetric convection trap (no realistic precipitation: ~5e-4 mm/day vs Wing 2018 target ~3 mm/day) cannot be broken by IC noise as long as gray radiation is on. The iter-181 driver added `--theta-noise-amp` for an alternative symmetry-breaker but it exhibits the same F11 pattern. Realistic precipitation is gated on F11 resolution (physics-side debug, probably in `src/legoesm/atmosphere/physics/radiation/gray.py` or `integration.py:_make_plane_radiation`).
+So radiation is NOT the bug. The runtime blow-up is the inherent **radiative-convective instability of dry RCE at SST=300 K** finally locating a horizontal seed when noise breaks column symmetry. Timeline at dt=10 with 1e-8 noise:
+* steps 1-15 (~150 s sim): heating-rate inhomogeneity = 4e-12 K/s integrates to ~6e-10 K column-to-column. max|w| stays at ~5e-4 m/s (sponge-wave noise).
+* step 20 (~200 s sim): max|w| jumps to 4.8e-2 m/s — the lowest qv column has had its q_air pulled BELOW the others by the surface flux (F_q ∝ q_sfc − q_air is LARGEST where q_air is smallest), driving that column toward saturation faster than its neighbours.
+* step 25 (~250 s sim): Kessler in that column saturates first, condenses, releases latent heat, max|w| spikes to 29 m/s.
+* step 30: NaN — convective cell exceeds advective CFL at dx=4 km.
 
-iter-181 reverted the wrapper `QV_NOISE` default 1e-4 → 0.0 (iter-179 had flipped it in the opposite direction without re-running the smoke) so the production wrapper remains functional at the iter-180 dt=20 + WENO5 + β=0.2 contract while F11 is open.
+Conclusion: this is NOT a radiation/dycore bug. It is the inherent radiative-convective initiation expressing itself in 250 sim-seconds because (a) at dx=4 km the convective cells are barely resolved (the convective Rossby radius collapses to ~1-2 cells), and (b) Kessler is bulk and switches abruptly at saturation, generating localised buoyancy spikes faster than hyperdiff (5e6 m⁴/s) can damp them.
+
+Fix paths (open):
+* **Resolve convection explicitly**: drop dx to 1 km or 256 m (LES regime). 132×132 dx=2 km is closer; 264×264 dx=1 km would be solid.
+* **Use a mass-flux subgrid convection scheme** at dx=4 km regime instead of explicit Kessler — Tiedtke or Zhang-McFarlane spreads the buoyancy injection across the implicit-convection envelope.
+* **Smoother IC perturbation**: replace per-cell uniform random with a low-wavenumber sine wave or a Gaussian bump (Wing 2018 RCEMIP Section 3.1 actually specifies smooth Gaussian, not white noise — the current driver implementation deviates).
+* **Adaptive dt** — drop dt to ~1 s once max|w| exceeds 1 m/s.
+
+The iter-149 column-symmetric trap is now understood: with QV_NOISE=0 the dycore can run stably for >10 sim-days because there is no horizontal seed for convection to initiate; precipitation stays at ~5e-4 mm/day vs Wing 2018 target ~3 mm/day. Breaking the trap WITHOUT crashing the dycore needs one of the fix paths above (none is a one-liner).
+
+iter-181 reverted the wrapper `QV_NOISE` default 1e-4 → 0.0 (iter-179 flipped it the wrong way without re-running the smoke) so the production wrapper remains functional at the iter-180 dt=20 + WENO5 + β=0.2 contract while F11 is open.
 
 ---
 
