@@ -70,11 +70,15 @@ def _make_cubed_sphere_surface_flux_tendency(
     T_sfc: float = 300.0, q_sfc: float = 0.018,
 ):
     """iter-283: bulk surface flux tendency for cubed-sphere
-    NonHydrostaticState. Mirrors the plane CRM
-    ``_make_surface_flux_physics`` pattern in
-    ``scripts/run_rcemip_plane.py`` — operates on the lowest
-    model level via axis-(-1) indexing so the (face, n, n, nlev)
-    shape works identically to the plane (ny, nx, nlev) shape.
+    NonHydrostaticState ONLY. Returns a NonHydrostaticTendencies
+    (cubed-sphere tendency type), so this helper is NOT valid
+    for the plane driver despite the shape-agnostic axis-(-1)
+    indexing (iter-288 LOW#1 clarification).
+
+    Operates on the lowest model level via axis-(-1) indexing so
+    the indexing pattern matches both plane (ny, nx, nlev) and
+    cubed-sphere (face, n, n, nlev); but the EMITTED tendency
+    type is cubed-sphere-only.
 
     Why iter-283 needed this: iter-282 MPAS 30-day moist run
     blew up at day 15 with theta' cooling -2.8 K/day (gray
@@ -304,13 +308,21 @@ def _run_plane_fd(days: float, dt: float, print_every: int, output: Path,
     )
 
     def diag(s):
+        # iter-288 (Codex HIGH): cover ALL prognostic arrays.
         return dict(
             max_w=float(jnp.max(jnp.abs(s.w.data))),
             min_th=float(jnp.min(s.theta_prime.data)),
             max_th=float(jnp.max(s.theta_prime.data)),
             min_qv=float(jnp.min(s.tracers.data[..., 0])),
             max_qv=float(jnp.max(s.tracers.data[..., 0])),
-            finite=bool(jnp.all(jnp.isfinite(s.w.data))),
+            finite=bool(
+                jnp.all(jnp.isfinite(s.u.data))
+                & jnp.all(jnp.isfinite(s.v.data))
+                & jnp.all(jnp.isfinite(s.w.data))
+                & jnp.all(jnp.isfinite(s.theta_prime.data))
+                & jnp.all(jnp.isfinite(s.rho_prime.data))
+                & jnp.all(jnp.isfinite(s.tracers.data))
+            ),
             mass=float(compute_dry_mass_plane(s, grid, hc, tm)),
         )
 
@@ -502,13 +514,27 @@ def _run_cubed_sphere(days: float, dt: float, print_every: int, output: Path,
         physics_fn = None
 
     def diag(s):
+        # iter-288 (Codex iter-283..287 round-1 HIGH): the pre-iter-288
+        # finite check inspected ONLY ``s.w.data``. If moist surface
+        # flux / radiation / Kessler produces NaN in theta_prime,
+        # rho_prime, or tracers while w stays finite for a step or
+        # two, the _run_loop bail-out gate wouldn't fire and the run
+        # could record ``blowup=0``. iter-288: cover ALL prognostic
+        # arrays so a single-field NaN trips the gate immediately.
         return dict(
             max_w=float(jnp.max(jnp.abs(s.w.data))),
             min_th=float(jnp.min(s.theta_prime.data)),
             max_th=float(jnp.max(s.theta_prime.data)),
             min_qv=float(jnp.min(s.tracers.data[..., 0])),
             max_qv=float(jnp.max(s.tracers.data[..., 0])),
-            finite=bool(jnp.all(jnp.isfinite(s.w.data))),
+            finite=bool(
+                jnp.all(jnp.isfinite(s.u.data))
+                & jnp.all(jnp.isfinite(s.v.data))
+                & jnp.all(jnp.isfinite(s.w.data))
+                & jnp.all(jnp.isfinite(s.theta_prime.data))
+                & jnp.all(jnp.isfinite(s.rho_prime.data))
+                & jnp.all(jnp.isfinite(s.tracers.data))
+            ),
             mass=float(model.compute_dry_mass(s)),
         )
 
@@ -584,13 +610,21 @@ def _run_mpas(days: float, dt: float, print_every: int, output: Path,
         physics_fn = None
 
     def diag(s):
+        # iter-288 (Codex HIGH): cover ALL prognostic arrays. MPAS
+        # has no s.v (uses u-on-edges normal-only winds).
         return dict(
             max_w=float(jnp.max(jnp.abs(s.w.data))),
             min_th=float(jnp.min(s.theta_prime.data)),
             max_th=float(jnp.max(s.theta_prime.data)),
             min_qv=float(jnp.min(s.tracers.data[..., 0])),
             max_qv=float(jnp.max(s.tracers.data[..., 0])),
-            finite=bool(jnp.all(jnp.isfinite(s.w.data))),
+            finite=bool(
+                jnp.all(jnp.isfinite(s.u.data))
+                & jnp.all(jnp.isfinite(s.w.data))
+                & jnp.all(jnp.isfinite(s.theta_prime.data))
+                & jnp.all(jnp.isfinite(s.rho_prime.data))
+                & jnp.all(jnp.isfinite(s.tracers.data))
+            ),
             mass=float(model.compute_dry_mass(s)),
         )
 
@@ -695,6 +729,16 @@ def main():
         "cubed_sphere": _run_cubed_sphere,
         "mpas": _run_mpas,
     }
+    # iter-288 (Codex iter-283..287 round-1 LOW#2): validate
+    # --n-cubed-sphere is a positive integer. Argparse type=int
+    # accepts 0 / -1 which would reach grid construction and
+    # raise a cryptic shape error.
+    if args.n_cubed_sphere < 1:
+        raise SystemExit(
+            f"error: --n-cubed-sphere={args.n_cubed_sphere} must "
+            f"be >= 1. Typical values: 4 (default smoke), 12, "
+            f"24, 48, 96, 192 (production)."
+        )
     common_kwargs = dict(moist=args.moist)
     if args.grid == "cubed_sphere":
         common_kwargs["n"] = args.n_cubed_sphere
