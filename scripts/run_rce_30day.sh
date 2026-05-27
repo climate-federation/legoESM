@@ -119,12 +119,30 @@ mpirun -np "$RANKS" "$PYBIN" \
 # Reads <OUTPUT>/snapshots/snap_day_*.npz + <OUTPUT>/profiles/prof_day_*.npz
 # and writes <OUTPUT>/trajectory.csv + a one-line console table per
 # day. Pure numpy; no JAX / MPI requirement (runs on the rank-0
-# wrapper host after mpirun exits). If the production run aborted
-# before any snapshots landed the summarizer raises FileNotFoundError
-# — caught + downgraded to a warning so the wrapper exit status
-# still reflects mpirun's success/failure, not the post-processing.
+# wrapper host after mpirun exits).
+#
+# Exit status (iter-99 Codex MEDIUM#1 fix): a successful mpirun + a
+# failed summarizer used to mask each other out, so callers could
+# not rely on wrapper exit 0 to mean ``trajectory.csv exists``. Now:
+#   * mpirun nonzero  → wrapper exits nonzero (set -e + pipefail).
+#   * mpirun ok + summarizer nonzero → wrapper exits 1 by default.
+#     Set ``ALLOW_SUMMARY_FAILURE=1`` to downgrade to a warning (e.g.
+#     for runs aborted before any snapshot landed, where the
+#     summarizer's FileNotFoundError is expected).
+ALLOW_SUMMARY_FAILURE="${ALLOW_SUMMARY_FAILURE:-0}"
 echo "Computing per-day RCE trajectory summary..."
+set +e
 "$PYBIN" "$REPO_ROOT/scripts/summarize_rce_trajectory.py" "$OUTPUT" \
-    > "$OUTPUT/trajectory.txt" 2>&1 \
-    && echo "Wrote $OUTPUT/trajectory.csv" \
-    || echo "WARN: summarize_rce_trajectory.py failed; see $OUTPUT/trajectory.txt" >&2
+    > "$OUTPUT/trajectory.txt" 2>&1
+summary_status=$?
+set -e
+if [ "$summary_status" -eq 0 ]; then
+    echo "Wrote $OUTPUT/trajectory.csv"
+elif [ "$ALLOW_SUMMARY_FAILURE" = "1" ]; then
+    echo "WARN: summarize_rce_trajectory.py failed (status $summary_status); see $OUTPUT/trajectory.txt" >&2
+    echo "WARN: ALLOW_SUMMARY_FAILURE=1 — wrapper exiting 0 anyway." >&2
+else
+    echo "ERROR: summarize_rce_trajectory.py failed (status $summary_status); see $OUTPUT/trajectory.txt" >&2
+    echo "Set ALLOW_SUMMARY_FAILURE=1 to downgrade to a warning." >&2
+    exit "$summary_status"
+fi

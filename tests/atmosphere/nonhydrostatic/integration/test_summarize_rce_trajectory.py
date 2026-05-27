@@ -185,14 +185,15 @@ def test_profile_attachment_present_and_missing(synthetic_run: Path):
     assert rows[2].w_var_col_max == pytest.approx(2e-3)
 
 
-def test_format_table_renders_dash_for_none(synthetic_run: Path):
+def test_format_table_renders_na_sentinel_for_none(synthetic_run: Path):
+    """iter-99 Codex LOW#6: table + CSV share the ``NA`` sentinel."""
     rows = summary_mod.collect_trajectory(synthetic_run)
     text = summary_mod.format_table(rows)
-    # Day 1 row contains the literal dash placeholder for each of
-    # the four profile-derived columns.
     day1_line = text.splitlines()[2]  # header + day0 + day1
-    assert day1_line.count("-") >= 4, (
-        f"expected at least 4 dashes for missing profile cols on day 1, "
+    # Right-aligned NA appears at least 4 times (one per profile col).
+    assert day1_line.count(summary_mod.MISSING_SENTINEL) >= 4, (
+        f"expected at least 4 {summary_mod.MISSING_SENTINEL!r} "
+        f"placeholders for missing profile cols on day 1, "
         f"got: {day1_line!r}"
     )
 
@@ -208,11 +209,12 @@ def test_write_csv_round_trip(synthetic_run: Path, tmp_path: Path):
     # Header includes both surface and profile columns.
     assert "cwv_mean" in lines[0]
     assert "qc_col_max" in lines[0]
-    # Day 1 row's last 4 fields are empty (None → "").
+    # Day 1 row's last 4 fields are NA (None → MISSING_SENTINEL).
+    # iter-99 Codex LOW#6: CSV + table share the sentinel.
     fields = lines[2].split(",")
-    assert fields[-4:] == ["", "", "", ""], (
-        f"day 1 profile cols should serialise as empty strings; "
-        f"got {fields[-4:]!r}"
+    assert fields[-4:] == [summary_mod.MISSING_SENTINEL] * 4, (
+        f"day 1 profile cols should serialise as "
+        f"{summary_mod.MISSING_SENTINEL!r}; got {fields[-4:]!r}"
     )
 
 
@@ -223,5 +225,76 @@ def test_missing_snapshots_dir_raises(tmp_path: Path):
 
 def test_empty_snapshots_dir_raises(tmp_path: Path):
     (tmp_path / "snapshots").mkdir()
-    with pytest.raises(FileNotFoundError, match="no snap_day_"):
+    with pytest.raises(FileNotFoundError, match="no snap_day_NNNN"):
         summary_mod.collect_trajectory(tmp_path)
+
+
+# iter-99 Codex MEDIUM#3 + LOW#5 + MEDIUM#2 regression tests.
+
+
+def test_stray_filename_in_snapshots_dir_is_ignored(tmp_path: Path):
+    """iter-99 MEDIUM#3: a file named like ``snap_day_backup.npz`` or
+    ``snap_day_0001.old.npz`` must NOT be admitted as a snapshot —
+    the anchored regex requires exactly 4 digits + ``.npz``."""
+    out_dir = tmp_path / "stray"
+    snaps = out_dir / "snapshots"
+    snaps.mkdir(parents=True)
+    # One valid snapshot + two impostors.
+    _write_snapshot(snaps / "snap_day_0000.npz", day=0.0, cwv_value=50.0)
+    _write_snapshot(snaps / "snap_day_backup.npz", day=99.0, cwv_value=999.0)
+    _write_snapshot(snaps / "snap_day_0001.old.npz", day=99.0, cwv_value=999.0)
+    rows = summary_mod.collect_trajectory(out_dir)
+    assert len(rows) == 1, (
+        f"expected only the anchored snap_day_0000.npz to be admitted; "
+        f"got {len(rows)} rows: {[r.day for r in rows]}"
+    )
+    assert rows[0].day == pytest.approx(0.0)
+
+
+def test_profile_day_value_mismatch_raises(tmp_path: Path):
+    """iter-99 MEDIUM#2: if a profile file's stored ``day`` scalar
+    disagrees with the snapshot's day by more than the 1-minute
+    tolerance, ``collect_trajectory`` must raise — not silently
+    attach a wrong-day profile."""
+    out_dir = tmp_path / "profile_mismatch"
+    snaps = out_dir / "snapshots"
+    profs = out_dir / "profiles"
+    snaps.mkdir(parents=True)
+    profs.mkdir(parents=True)
+    _write_snapshot(snaps / "snap_day_0005.npz", day=5.0, cwv_value=55.0)
+    # Profile file matches by filename but stores a different day.
+    _write_profile(profs / "prof_day_0005.npz", day=10.0)
+    with pytest.raises(ValueError, match="profile day mismatch"):
+        summary_mod.collect_trajectory(out_dir)
+
+
+def test_non_finite_snapshot_day_raises(tmp_path: Path):
+    """iter-99 LOW#5: NaN / inf in a snapshot's ``day`` scalar must
+    raise before sorting (sort order on NaN is undefined)."""
+    out_dir = tmp_path / "nan_day"
+    snaps = out_dir / "snapshots"
+    snaps.mkdir(parents=True)
+    _write_snapshot(snaps / "snap_day_0000.npz", day=0.0, cwv_value=50.0)
+    _write_snapshot(snaps / "snap_day_0001.npz", day=float("nan"),
+                    cwv_value=51.0)
+    with pytest.raises(ValueError, match="non-finite snapshot day"):
+        summary_mod.collect_trajectory(out_dir)
+
+
+def test_duplicate_snapshot_days_raises(tmp_path: Path):
+    """iter-99 LOW#5: two snapshots reporting the same day value
+    indicate a re-started run over an existing dir; sort would
+    be order-stable but the trajectory loses meaning."""
+    out_dir = tmp_path / "dup_day"
+    snaps = out_dir / "snapshots"
+    snaps.mkdir(parents=True)
+    _write_snapshot(snaps / "snap_day_0000.npz", day=0.0, cwv_value=50.0)
+    _write_snapshot(snaps / "snap_day_0001.npz", day=0.0, cwv_value=51.0)
+    with pytest.raises(ValueError, match="duplicate snapshot days"):
+        summary_mod.collect_trajectory(out_dir)
+
+
+def test_missing_sentinel_value():
+    """iter-99 LOW#6: the sentinel is a documented constant, not
+    magic string. Lock it so a future rename surfaces here."""
+    assert summary_mod.MISSING_SENTINEL == "NA"

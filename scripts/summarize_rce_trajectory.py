@@ -25,10 +25,31 @@ from __future__ import annotations
 
 import argparse
 import csv
-from dataclasses import dataclass, field
+import math
+import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+
+# Sentinel emitted in BOTH the printed table and the CSV when a
+# profile-derived column is unavailable for that snapshot day. iter-99
+# Codex review LOW#6 flagged the previous CSV-empty / table-dash
+# asymmetry — one sentinel keeps human + downstream readers in sync.
+MISSING_SENTINEL = "NA"
+
+# Anchored filename pattern for snapshot + profile files. iter-99 Codex
+# MEDIUM#3 fix: the pre-iter-99 loose ``snap_day_*.npz`` glob silently
+# admitted ``snap_day_backup.npz`` / ``snap_day_0001.old.npz`` etc.
+_SNAP_FILE_RE = re.compile(r"^snap_day_(\d{4})\.npz$")
+_PROF_FILE_RE = re.compile(r"^prof_day_(\d{4})\.npz$")
+
+# Tolerance for cross-checking the ``day`` scalar stored INSIDE a
+# profile npz against the day stored in the matching snapshot. iter-99
+# Codex MEDIUM#2 fix: filename suffix alone is not enough — a renamed
+# or stale profile file with the right name but wrong contents would
+# silently corrupt the trajectory.
+_PROF_DAY_MATCH_TOL_S = 60.0 / 86400.0  # 1 minute in fractional days
 
 # CSV column order — single source of truth for both the printed
 # table and the CSV file. Each entry: (column_key, header, fmt).
@@ -102,7 +123,19 @@ def _snap_row(npz_path: Path) -> DayRow:
 
 
 def _attach_profile(row: DayRow, prof_path: Path) -> None:
+    """Populate the profile-derived fields on ``row`` from
+    ``prof_path``. Raises ``ValueError`` if the day scalar inside the
+    profile npz disagrees with the snapshot's day by more than
+    ``_PROF_DAY_MATCH_TOL_S`` (iter-99 Codex MEDIUM#2)."""
     d = np.load(prof_path)
+    prof_day = float(d["day"])
+    if not math.isfinite(prof_day) or abs(prof_day - row.day) > _PROF_DAY_MATCH_TOL_S:
+        raise ValueError(
+            f"profile day mismatch: snapshot {row.day:.6f} vs "
+            f"profile {prof_day:.6f} in {prof_path.name} "
+            f"(tolerance {_PROF_DAY_MATCH_TOL_S * 86400:.0f} s). "
+            "Did a profile file get renamed / overwritten?"
+        )
     row.qc_col_max = float(np.max(d["qc"]))
     row.qr_col_max = float(np.max(d["qr"]))
     row.cf_col_max = float(np.max(d["cloud_fraction"]))
@@ -111,32 +144,65 @@ def _attach_profile(row: DayRow, prof_path: Path) -> None:
 
 def collect_trajectory(out_dir: Path) -> list[DayRow]:
     """Read every ``snap_day_NNNN.npz`` under ``out_dir/snapshots``
-    and optionally attach matching profile data. Returns rows sorted
-    by ``day`` (snapshot file order is already day-ordered but we sort
-    defensively in case files are renamed/copied)."""
+    and optionally attach matching profile data.
+
+    Returns rows sorted by ``day``. Raises:
+
+    * ``FileNotFoundError`` if ``snapshots/`` is missing or contains
+      no anchored-name snapshot files.
+    * ``ValueError`` if any snapshot reports a non-finite or duplicate
+      ``day`` value (iter-99 Codex LOW#5).
+    * ``ValueError`` from ``_attach_profile`` if a profile file's
+      stored day disagrees with its filename's snapshot day (iter-99
+      Codex MEDIUM#2).
+    """
     snap_dir = out_dir / "snapshots"
     if not snap_dir.is_dir():
         raise FileNotFoundError(f"no snapshots dir at {snap_dir}")
-    snap_files = sorted(snap_dir.glob("snap_day_*.npz"))
+    # iter-99 Codex MEDIUM#3: anchored regex rejects stray files.
+    snap_files = sorted(
+        p for p in snap_dir.iterdir() if _SNAP_FILE_RE.match(p.name)
+    )
     if not snap_files:
-        raise FileNotFoundError(f"no snap_day_*.npz under {snap_dir}")
+        raise FileNotFoundError(
+            f"no snap_day_NNNN.npz under {snap_dir} (4-digit index)"
+        )
     prof_dir = out_dir / "profiles"
-    rows = []
+    rows: list[DayRow] = []
     for snap_path in snap_files:
+        m = _SNAP_FILE_RE.match(snap_path.name)
+        assert m is not None  # filtered above; mypy hint
+        idx = m.group(1)
         row = _snap_row(snap_path)
-        # Match profile by day index parsed from the filename.
-        idx = snap_path.stem.split("_")[-1]
         prof_path = prof_dir / f"prof_day_{idx}.npz"
         if prof_path.exists():
             _attach_profile(row, prof_path)
         rows.append(row)
+    # iter-99 Codex LOW#5: reject NaN / duplicate day values BEFORE
+    # sorting so corrupted snapshots cannot produce an undefined or
+    # non-monotonic trajectory.
+    days = [r.day for r in rows]
+    for d_val in days:
+        if not math.isfinite(d_val):
+            raise ValueError(
+                f"non-finite snapshot day {d_val!r}; one of "
+                f"{[p.name for p in snap_files]!r} has corrupted "
+                f"day metadata."
+            )
+    if len(set(days)) != len(days):
+        raise ValueError(
+            f"duplicate snapshot days {sorted(days)}; the snapshot "
+            f"writer should emit one file per day index. Did a run "
+            f"get re-started over an existing output dir?"
+        )
     rows.sort(key=lambda r: r.day)
     return rows
 
 
 def format_table(rows: list[DayRow]) -> str:
     """Format ``rows`` as a fixed-width table (header + per-day
-    lines). Missing profile columns render as ``-``."""
+    lines). Missing profile columns render as ``NA`` (matches the CSV
+    serialisation — iter-99 Codex LOW#6 fix)."""
     headers = "  ".join(h for _, h, _ in _COLUMNS)
     lines = [headers]
     for row in rows:
@@ -144,12 +210,9 @@ def format_table(rows: list[DayRow]) -> str:
         for key, _, fmt in _COLUMNS:
             value = getattr(row, key)
             if value is None:
-                # Right-align "-" inside the fixed column width
-                # extracted from the format string (e.g. "{:13.4e}"
-                # → width 13).
                 width_str = fmt.split(":")[1].split(".")[0]
                 width = int(width_str) if width_str else 6
-                cells.append(f"{'-':>{width}}")
+                cells.append(f"{MISSING_SENTINEL:>{width}}")
             else:
                 cells.append(fmt.format(value))
         lines.append("  ".join(cells))
@@ -157,13 +220,16 @@ def format_table(rows: list[DayRow]) -> str:
 
 
 def write_csv(rows: list[DayRow], csv_path: Path) -> None:
+    """Serialise ``rows`` as ``trajectory.csv``. Missing profile
+    fields use ``NA`` (matches the printed table — iter-99 Codex
+    LOW#6 fix)."""
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", newline="") as fh:
         writer = csv.writer(fh)
         writer.writerow([key for key, _, _ in _COLUMNS])
         for row in rows:
             writer.writerow([
-                "" if getattr(row, key) is None
+                MISSING_SENTINEL if getattr(row, key) is None
                 else getattr(row, key)
                 for key, _, _ in _COLUMNS
             ])

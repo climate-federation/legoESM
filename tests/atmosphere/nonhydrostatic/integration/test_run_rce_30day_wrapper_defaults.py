@@ -206,53 +206,121 @@ def test_wrapper_no_mass_fixer_actually_conditional(wrapper_text):
     )
 
 
+def _strip_bash_comments(text: str) -> str:
+    """Return ``text`` with bash comment lines removed. A line is a
+    comment when its first non-whitespace character is ``#``. iter-99
+    Codex MEDIUM#4 fix: regression tests below search for the
+    summarizer / mpirun invocations against this stripped view so a
+    comment that happens to contain the same tokens cannot satisfy
+    the contract."""
+    return "\n".join(
+        line for line in text.splitlines()
+        if not line.lstrip().startswith("#")
+    )
+
+
 def test_wrapper_invokes_post_run_summarizer(wrapper_text):
     """iter-99: ``run_rce_30day.sh`` must call
     ``scripts/summarize_rce_trajectory.py`` AFTER the mpirun line so
-    every production run emits ``<OUTPUT>/trajectory.csv``. Two
-    invariants:
+    every production run emits ``<OUTPUT>/trajectory.csv``. Three
+    invariants (iter-99 Codex review hardened):
 
     1. The mpirun line MUST NOT be prefixed by ``exec`` — ``exec``
        replaces the shell process and would silently skip every
        later command (the iter-99 mistake we are guarding against).
     2. The summarizer call MUST appear AFTER the mpirun line, point
        at the same ``$OUTPUT`` directory, and use the same
-       ``$PYBIN`` (no second venv drift).
+       ``$PYBIN`` (no second venv drift). Matched against the
+       comment-stripped view (Codex MEDIUM#4).
+    3. The summarizer line MUST start at the beginning of an
+       executable shell line (no leading non-whitespace), so a
+       commented-out invocation cannot satisfy the contract.
     """
-    # Invariant 1: no ``exec`` before the mpirun line. Regex matches
-    # ``exec mpirun`` at start-of-line (no leading non-comment text).
+    code = _strip_bash_comments(wrapper_text)
+    # Invariant 1: no ``exec`` before the mpirun line in CODE (not
+    # comments — the wrapper header documents the pre-iter-99 form).
     assert not re.search(
-        r"^\s*exec\s+mpirun\b", wrapper_text, re.MULTILINE,
+        r"^\s*exec\s+mpirun\b", code, re.MULTILINE,
     ), (
         "run_rce_30day.sh uses ``exec mpirun`` — that replaces the "
         "shell process and skips the post-run summarizer below. "
         "Drop the ``exec``; pipefail (already set) preserves "
         "mpirun's exit status through ``| tee``."
     )
-    # Invariant 2: locate both lines and verify ordering.
+    # Invariant 2: locate both lines in CODE and verify ordering.
     mpi_match = re.search(
         r"^\s*mpirun\s+-np\s+\"?\$RANKS\"?\b",
-        wrapper_text,
+        code,
         re.MULTILINE,
     )
+    # Invariant 3: anchor the summarizer call to ``^\s*"$PYBIN"`` so
+    # the line is executable, not a comment-line substring (Codex
+    # MEDIUM#4 — comments stripped above, but anchoring belt-and-
+    # braces against an executable heredoc / dead branch).
     summary_match = re.search(
-        r'"\$PYBIN"\s+"\$REPO_ROOT/scripts/summarize_rce_trajectory\.py"\s+"\$OUTPUT"',
-        wrapper_text,
+        r'^\s*"\$PYBIN"\s+"\$REPO_ROOT/scripts/summarize_rce_trajectory\.py"\s+"\$OUTPUT"',
+        code,
+        re.MULTILINE,
     )
     assert mpi_match is not None, (
         "run_rce_30day.sh missing the ``mpirun -np \"$RANKS\" ...`` "
-        "line. The wrapper structure changed; iter-99 post-run hook "
-        "needs to be re-anchored."
+        "line in executable code. The wrapper structure changed; "
+        "iter-99 post-run hook needs to be re-anchored."
     )
     assert summary_match is not None, (
         "run_rce_30day.sh missing the post-run "
         "``\"$PYBIN\" \"$REPO_ROOT/scripts/summarize_rce_trajectory.py\" "
-        "\"$OUTPUT\"`` call. Production runs would land snapshots but "
-        "no aggregated per-day trajectory CSV (iter-99 contract)."
+        "\"$OUTPUT\"`` call in executable code (only matched in "
+        "comments?). Production runs would land snapshots but no "
+        "aggregated per-day trajectory CSV (iter-99 contract)."
     )
     assert summary_match.start() > mpi_match.start(), (
         "run_rce_30day.sh calls summarize_rce_trajectory.py BEFORE "
         "the mpirun line — the snapshots/ directory would be empty "
         "at that point. Move the summarizer call below the mpirun "
         "pipeline."
+    )
+
+
+def test_wrapper_summarizer_failure_propagates(wrapper_text):
+    """iter-99 Codex MEDIUM#1 fix: a successful mpirun followed by a
+    failed summarizer must propagate as a non-zero wrapper exit
+    (unless explicitly downgraded via ``ALLOW_SUMMARY_FAILURE=1``).
+    Lock the three pieces of bash that implement this:
+
+    1. ``ALLOW_SUMMARY_FAILURE`` env default initialisation.
+    2. The summarizer call wrapped in ``set +e`` … ``set -e`` so
+       ``set -e`` does NOT auto-abort before we inspect the status.
+    3. An ``exit "$summary_status"`` on the failing branch when
+       ``ALLOW_SUMMARY_FAILURE != 1``.
+    """
+    code = _strip_bash_comments(wrapper_text)
+    assert re.search(
+        r'ALLOW_SUMMARY_FAILURE\s*=\s*"\$\{ALLOW_SUMMARY_FAILURE:-0\}"',
+        code,
+    ), (
+        "run_rce_30day.sh missing ALLOW_SUMMARY_FAILURE default. "
+        "Without it, the failure-propagation contract has no escape "
+        "hatch for runs where the summarizer is expected to fail "
+        "(e.g. mpirun aborted before any snapshot landed)."
+    )
+    assert re.search(r"^\s*set\s+\+e\s*$", code, re.MULTILINE), (
+        "run_rce_30day.sh missing ``set +e`` before the summarizer "
+        "invocation. Without it, ``set -e`` would kill the shell "
+        "the moment the summarizer fails, BEFORE the conditional "
+        "branch can decide whether to propagate the failure."
+    )
+    assert re.search(
+        r'^\s*summary_status\s*=\s*\$\?\s*$', code, re.MULTILINE,
+    ), (
+        "run_rce_30day.sh missing ``summary_status=$?`` capture "
+        "after the summarizer call. The fail-vs-warn branch can "
+        "only fire if the exit status is recorded before set -e is "
+        "re-enabled."
+    )
+    assert re.search(r'^\s*exit\s+"\$summary_status"', code, re.MULTILINE), (
+        "run_rce_30day.sh missing ``exit \"$summary_status\"`` on "
+        "the summarizer-failure / ALLOW_SUMMARY_FAILURE != 1 "
+        "branch. Without it, the wrapper exits 0 when the summarizer "
+        "fails — the exact iter-99 Codex MEDIUM#1 finding."
     )
