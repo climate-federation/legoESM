@@ -117,6 +117,32 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 16 — 2026-05-27 — fp64 explicit median-3 completes precision×solver matrix
+
+Final 2×2 matrix (median-3, fp32+fp64, both solvers):
+
+| solver / prec       | plateau Mc/s | peak res    | peak ms |
+|---------------------|--------------|-------------|---------|
+| **explicit fp32**   | **680**      | N=96-192    | 0.7-1.6 |
+| explicit fp64       | 113          | N=96-192    | 2.5-9.8 |
+| semi-implicit fp32  | 119          | N=192-256   | 9.8-17  |
+| semi-implicit fp64  |  43          | N=192       | 25.6    |
+
+Observations:
+- **fp32/fp64 ratio @ explicit = 6.0×** (680/113) → consumer fp64
+  ALU 1/64 of fp32 dominates; explicit shifts compute share enough
+  that fp64 ALU bottlenecks it
+- **fp32/fp64 ratio @ semi-implicit = 2.77×** → less ALU-bound
+  because column-Thomas is launch-overhead+memory-bound
+- **SI-fp32 (119) ≈ explicit-fp64 (113)** — different paths to the
+  same ~115 Mc/s ceiling on consumer hardware
+- **Explicit-fp32 (680) is uniquely fast** — combines fast kernel
+  (no Thomas) AND fast precision (no fp64 ALU penalty)
+
+On A100/H100 datacenter GPUs (fp64 = 1/2 fp32 nominal), explicit
+fp64 would reach ~340 Mc/s and SI fp64 ~60 — much closer to fp32
+ceilings. The 6× gap is specific to consumer Blackwell mobile.
+
 ### Iter 15 — 2026-05-27 — nlev sensitivity (vertical-dim scaling)
 
 Explicit fp32 N=128 dt=0.5 nsub=4 median-3 across nlev:
