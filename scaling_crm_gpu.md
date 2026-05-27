@@ -117,6 +117,25 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 46 — 2026-05-27 — final bottleneck audit
+
+User-directed sweep through bottleneck list (iter 36 inventory):
+
+| #  | bottleneck                          | status | iter   |
+|----|-------------------------------------|--------|--------|
+| 1  | microphysics fp32 cleanup           | INVALID — physics launch-bound | 38 |
+| 2  | radiation fp32 (RRTMGP)             | INVALID — same as #1           | 38 |
+| 3  | fix_mass + lax.scan tracer leak     | **SOLVED** — 10-15% recovery   | 37 |
+| 4  | column-Thomas → cuSPARSE            | **SOLVED** — 2.4-5.2× SI       | 39-40 |
+| 5  | consumer fp64 ALU bottleneck        | HARDWARE-ONLY                  | doc |
+| 6  | L2 overflow > N=256                 | HARDWARE-ONLY                  | doc |
+| 7  | multi-GPU MPI / SPMD                | INFRASTRUCTURE-READY, code deferred | 45 |
+
+**Solved within scope: 2 of 7.** Invalid: 2 of 7 (the "one at a time"
+attack invalidated bottleneck #1 + #2 — codex would have called this
+a misdiagnosis). Hardware-bound: 2 of 7 (can't fix on this GPU).
+Future PR: 1 of 7 (#7 — needs ~200-400 LOC halo refactor).
+
 ### Iter 45 — 2026-05-27 — multi-GPU SPMD path explored (jax.shard_map)
 
 Tested JAX virtual-device SPMD infrastructure (`XLA_FLAGS=--xla_force_host_platform_device_count=4` + `JAX_PLATFORMS=cpu` → 4 virtual CPU devices). `jax.shard_map` + `Mesh` available and discoverable.
