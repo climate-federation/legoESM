@@ -661,6 +661,30 @@ Updated final ladder:
 - `scaling_gpu_weak.png` — ns/cell vs cells, flat = saturated
 - `scaling_gpu_peak_bar.png` — peak Mcells/s by grid × precision
 
+### Iter 33 — 2026-05-27 — mixed-precision policy comparison (negative result)
+
+Tested whether `PrecisionPolicy.mixed()` (fp32 storage+compute, fp64
+accumulate+control) or `PrecisionPolicy.mixed_fp64_storage()` (fp64
+storage, fp32 compute) could beat pure-fp32 on LL192 impl_cn. Same
+ad-hoc test harness for all 4 modes (note: numbers are ~half the
+bench-reported peaks because env JAX_ENABLE_X64=1 forces all
+unannotated arithmetic to fp64 — relative comparison valid):
+
+| policy                                          | Mc/s | finite |
+|-------------------------------------------------|------|--------|
+| fp64 pure                                       |  122 | ✓      |
+| **fp32 pure**                                   |**246**| ✓      |
+| mixed (fp32 storage+compute, fp64 accum+ctrl)   |  139 | ✓      |
+| mixed_fp64_storage (fp64 storage, fp32 compute) |  125 | ✓      |
+
+⇒ Mixed-precision modes give **no win** for the implicit_cn path:
+- `mixed`: fp64 reductions in the PCG inner loop are the bottleneck
+- `mixed_fp64_storage`: doubling the HBM read width kills throughput
+
+Pure fp32 stays the throughput-optimal precision when the dycore
+tolerates it. fp64 needed only for AD-stable training / long
+multi-decade integrations. No new code lever exists in this regime.
+
 ### Iter 31 — 2026-05-27 — conservation-fixer cost at peak
 
 Tested whether the conservation fixer is a hidden cost at the
