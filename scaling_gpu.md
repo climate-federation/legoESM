@@ -661,6 +661,31 @@ Updated final ladder:
 - `scaling_gpu_weak.png` — ns/cell vs cells, flat = saturated
 - `scaling_gpu_peak_bar.png` — peak Mcells/s by grid × precision
 
+### Iter 22 — 2026-05-27 — MPAS explicit n_barotropic_substeps sweep
+
+For users who can't use impl_cn (numerical reasons), is the default
+`n_barotropic_substeps=30` over-conservative? Swept I5 fp64 explicit:
+
+| n_barotropic_substeps | ms/step | Mcells/s | vs nsub=30 |
+|-----------------------|---------|----------|------------|
+|  5                    | 1.737   | 118      | 1.68×      |
+| 10                    | 1.533   | **134**  | **1.91×**  |
+| 15                    | 1.888   | 108      | 1.54×      |
+| 20                    | 2.221   |  92      | 1.31×      |
+| 30 (default)          | 2.906   |  70      | 1.00×      |
+
+Sweet spot at nsub=10 (134 Mc/s) — **1.91× speedup** vs default
+without changing solver. nsub=5 doesn't win further (likely XLA
+fusion / compile-time scan-length trade-off; not a CFL signal at
+this dt=600 s on I5).
+
+For comparison, impl_cn at same I5 = 192 Mc/s — still 43% faster
+than tuned-explicit. impl_cn is the right default for throughput;
+explicit nsub=10 is the right backup when impl_cn is contra-indicated.
+
+CFL check needed before lowering production default — not done here
+(out of scope; documented for downstream consideration).
+
 ---
 
 ## FINAL LADDER (authoritative — supersedes prior iter tables)
