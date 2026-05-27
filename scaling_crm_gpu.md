@@ -117,6 +117,28 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 47 — 2026-05-27 — cuSPARSE win at large N (better than at peak)
+
+Tested SI fp32 with cuSPARSE at N>=256 (past L2-overflow point):
+
+| res    | legacy Mc/s | cuSPARSE Mc/s | speedup |
+|--------|-------------|---------------|---------|
+| N=128  |  78         | 273           | 3.5×    |
+| N=192  | 113         | 273           | 2.4×    |
+| **N=256** | **57**   | **250**       | **4.4×** |
+| **N=384** | **57**   | **156**       | **2.7×** |
+| N=512  | ~47 (extrap)| 149           | ~3.2×   |
+
+cuSPARSE wins **grow** past the peak (4.4× at N=256 vs 3.5× at N=128).
+Reason: the legacy `fori_loop` Thomas scaled poorly with column count
+(sequential per-iter array updates); cuSPARSE batches all columns
+into a single kernel dispatch.
+
+⇒ **cuSPARSE makes the SI dycore competitive with explicit-fp32-no-Smag
+across the full N range**, not just at peak. Cross-over with explicit
+sim-time-effective throughput is now around N=128-256 (was N>192
+before cuSPARSE).
+
 ### Iter 46 — 2026-05-27 — final bottleneck audit
 
 User-directed sweep through bottleneck list (iter 36 inventory):
