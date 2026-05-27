@@ -118,6 +118,10 @@ def main():
     p.add_argument("--dt", type=float, default=600.0)
     p.add_argument("--precision", choices=["float32", "float64"],
                    default="float64")
+    p.add_argument("--eta-amp", type=float, default=0.1,
+                   help="Eta perturbation amplitude [m]. Default 0.1; "
+                        "sweep with multiple invocations to test stability "
+                        "margin (e.g. 0.01, 0.1, 1.0, 10.0).")
     args = p.parse_args()
 
     # Set JAX x64 if needed before any JAX import via build helpers.
@@ -149,7 +153,7 @@ def main():
     import jax, jax.numpy as jnp
     eta = s1.eta.data
     shape = eta.shape
-    bump_amp = 0.1  # m
+    bump_amp = float(args.eta_amp)  # m
     if eta.ndim == 2:
         # Lat-lon: localized Gaussian bump at mid-grid
         idx = jnp.indices(shape, dtype=eta.dtype)

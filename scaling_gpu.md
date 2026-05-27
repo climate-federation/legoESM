@@ -411,6 +411,26 @@ The single-GPU theoretical limit has been reached for the structured-grid config
 - Algorithm change (replace spectral with spectral-element or GPU-native SHTns)
 - Mesh-level optimization (Hilbert reordering for MPAS) — invasive
 
+### Iter 17 — 2026-05-27 — eta-amplitude stability sweep (closes codex iter-14 #5)
+
+Added `--eta-amp` flag to `validate_baro_solver.py`. Swept LL64 fp64
+at 0.01, 0.1, 1.0, 10.0 m kicks (1000× amplitude range).
+
+| eta_amp (m) | explicit drift | impl_cn drift | finite-both | SMOKE |
+|------------:|---------------:|--------------:|------------:|------:|
+| 0.01        | 0.0            | 9.99e-08      | ✓           | OK    |
+| 0.1         | 0.0            | 9.99e-08      | ✓           | OK    |
+| 1.0         | 0.0            | 0.0           | ✓           | OK    |
+| 10.0        | 9.99e-08       | 0.0           | ✓           | OK    |
+
+impl_cn is **stable across 3 orders of magnitude of perturbation**.
+At 10 m kick (extreme tsunami-class) both solvers still mass-conserving
+and finite. CFL margin not breached at the test dt=600s × these amps.
+
+Closes codex iter-14 #5. Remaining open codex items:
+- #1: multi-day Rossby spinup regression (out of scope for smoke test)
+- #6: RMS norm loses sign info (kept — pair with max-abs already prints)
+
 ### Iter 16 — 2026-05-27 — mass conservation check (closes codex iter-14 #2)
 
 Added explicit `∫(H_bathy + eta) · area · land_mask` integral to
