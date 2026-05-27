@@ -1129,6 +1129,46 @@ def test_wrapper_check_log_max_w_subprocess_threads_flag(tmp_path):
     )
 
 
+def test_wrapper_evaluate_dod_final_plus_check_log_max_w_threads_both(tmp_path):
+    """iter-155: the wrapper hint message recommends running with
+    ``EVALUATE_DOD=final CHECK_LOG_MAX_W=1`` together. Each leg is
+    tested independently elsewhere; this asserts the COMBINED
+    case threads ``--final-dod --check-log-max-w`` correctly. A
+    bash regression like ``EVAL_FLAG="--check-log-max-w"``
+    (overwriting instead of appending) would only surface here.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _make_stub(bin_dir / "mpirun", exit_code=0)
+    pybin = bin_dir / "fake_pybin"
+    _make_stub(pybin, exit_code=0)
+    out_dir = tmp_path / "wrapper_out"
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["PYBIN"] = str(pybin)
+    env["DAYS"] = "0"
+    env["NX"] = "4"
+    env["NY"] = "4"
+    env["RANKS"] = "1"
+    env["NO_MASS_FIXER"] = "1"
+    env["ALLOW_SUMMARY_FAILURE"] = "0"
+    env["EVALUATE_DOD"] = "final"
+    env["CHECK_LOG_MAX_W"] = "1"
+    res = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+         str(out_dir)],
+        env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
+        check=False, timeout=30,
+    )
+    traj = (out_dir / "trajectory.txt").read_text()
+    assert "--final-dod" in traj, (
+        f"EVALUATE_DOD=final leg lost; trajectory.txt={traj!r}"
+    )
+    assert "--check-log-max-w" in traj, (
+        f"CHECK_LOG_MAX_W=1 leg lost; trajectory.txt={traj!r}"
+    )
+
+
 def test_wrapper_check_log_max_w_default_off(tmp_path):
     """iter-138: CHECK_LOG_MAX_W defaults to 0 → no flag passed."""
     bin_dir = tmp_path / "bin"
