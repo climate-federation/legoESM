@@ -117,6 +117,31 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 30 — 2026-05-27 — validated smooth_k1 IC also fails long-run
+
+Used the legoesm-validated `build_smooth_k1_pattern` from
+`atmosphere/idealized/rcemip_initial_conditions.py` — the IC the
+production `run_rce_mpi_long.py` driver uses for stable RCE
+long-runs. Applied as theta_p with 0.1 K peak amp + exponential
+decay aloft (low-k, smooth).
+
+| steps | sim time | result | diagnostics                            |
+|-------|----------|--------|----------------------------------------|
+|  500  |   250 s  | ✓      | |θ'|=6e-2 K, **|u|=82 m/s**, |w|=33 m/s |
+| 2000+ |  1000 s+ | NaN    | n/a                                    |
+
+Even the validated IC NaN's by 2000 steps with bench config.
+Production `run_rce_mpi_long.py` uses additional physics
+(surface fluxes, radiation, microphysics) + tuned sponge +
+smaller dt — not the throughput-only bench setup.
+
+⇒ **Definitive: bench config is throughput-only.** The 670-820 Mc/s
+plateau and ~115 Mc/s SI plateau are honest single-GPU ceilings, but
+the configuration cannot be used for production long-runs as-is.
+Production users invoke `run_rce_mpi_long.py` which sets the right
+damping/physics stack — that's where production stability lives, not
+in this scaling bench.
+
 ### Iter 29 — 2026-05-27 — semi-implicit also unstable long-run
 
 Tested whether semi-implicit (vertical-implicit acoustic) is more
