@@ -195,6 +195,36 @@ def test_wrapper_semi_implicit_acoustic_present(wrapper_text):
     )
 
 
+def test_wrapper_theta_noise_threaded(wrapper_text):
+    """iter-198: THETA_NOISE env var MUST reach the driver as
+    --theta-noise-amp \"$THETA_NOISE\" in the mpirun argv. A
+    regression that defined the env default but forgot to thread it
+    into mpirun would silently no-op (driver would default to 0.0)
+    and the F11 fix-path smokes would all silently fall back to
+    the column-symmetric trap. Mirror of
+    test_wrapper_no_mass_fixer_conditional_present for the iter-198
+    addition.
+    """
+    assert re.search(
+        r'^THETA_NOISE\s*=\s*"\$\{THETA_NOISE:-0\.0\}"',
+        wrapper_text,
+        re.MULTILINE,
+    ), (
+        "run_rce_30day.sh missing THETA_NOISE=\"${THETA_NOISE:-0.0}\" "
+        "default line. iter-198 added it as the wrapper's F11-fix-path "
+        "alternative-symmetry-breaker hook."
+    )
+    assert re.search(
+        r"\\\n\s*--theta-noise-amp\s+\"\$THETA_NOISE\"",
+        wrapper_text,
+    ), (
+        "run_rce_30day.sh defined THETA_NOISE but does not pass "
+        "--theta-noise-amp \"$THETA_NOISE\" into the mpirun argv. "
+        "The env var would be silently dropped and the iter-181 "
+        "alternative-symmetry-breaker would be wrapper-inaccessible."
+    )
+
+
 def test_wrapper_no_mass_fixer_conditional_present(wrapper_text):
     """iter-95g: --no-mass-fixer must be passed when NO_MASS_FIXER=1
     (the wrapper's default). Verify the conditional bash logic is
