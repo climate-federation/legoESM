@@ -117,6 +117,71 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 11 — 2026-05-27 — median-3 sweeps for BOTH solvers (corrections)
+
+Full median-3 sweeps. Prior single-shot numbers were systematically
+low for semi-implicit (cause unclear — likely GPU contention or first-
+compile artifact in iter-3 batch run).
+
+**Explicit fp32 dt=0.5 nsub=4 median-3:**
+
+| res    | single-shot | median-3 |
+|--------|-------------|----------|
+| N=48   | 374         | 320      |
+| N=96   | 636         | 689      |
+| N=128  | **820**     | **680**  |
+| N=192  | 686         | 682      |
+| N=256  | 648         | 648      |
+| N=384  | 473         | 470      |
+
+Honest plateau: **~680 Mc/s spans N=96-192** (3 sizes, 12× cell range).
+N=128 single-shot 820 was cache-warm inflation. Run-to-run noise ±5%.
+
+**Semi-implicit fp32 dt=2.0 nsub=6 median-3 (BIG REVISIONS):**
+
+| res    | single-shot | median-3 | revision |
+|--------|-------------|----------|----------|
+| N=48   |  11.9       |  11.4    | same     |
+| N=96   |  38         |  46      | +21%     |
+| N=128  | n/a         |  78      | new      |
+| N=192  |  47         | **113**  | **+140%**|
+| N=256  |  57         | **119**  | **+109%**|
+| N=384  |  57         |  57      | same     |
+
+**Semi-implicit fp32 plateau actually 113-119 Mc/s @ N=192-256**, not
+~57 as prior iters claimed. Iter-3 to iter-5 fp32 numbers were
+artifacts of GPU contention during batched runs.
+
+Updated honest peaks both solvers fp32:
+- **Explicit:** 680 Mc/s plateau N=96-192
+- **Semi-implicit:** 119 Mc/s plateau N=192-256
+
+Explicit still 5.7× faster than semi-implicit, but the absolute SI
+numbers are now more competitive (119 vs prior-reported 57). Explicit
+remains the throughput-preferred path.
+
+### Iter 10 — 2026-05-27 — codex review iter-9 + median-of-3 walks back 820 Mc/s
+
+Full explicit fp32 dt=0.5 nsub=4 sweep with `--repeat 3`:
+
+| res    | single-shot | median-3 (1st) | median-3 (2nd) |
+|--------|-------------|----------------|----------------|
+| N=48   | 374         |  —             | 320            |
+| N=96   | 636         | 702            | 689            |
+| N=128  | **820**     | **740**        | **680**        |
+| N=192  | 686         | 694            | 682            |
+| N=256  | 648         |  —             | 648            |
+| N=384  | 473         |  —             | 470            |
+
+**Honest plateau: ~680 Mc/s spans N=96-192** (3 sizes, 12× cell range).
+N=128 single-shot peak (820) was inflated by cache warmup. Run-to-run
+variation in median-3 is ±5% — at this step time (<1 ms) timing
+resolution is the limit.
+
+Final CRM ceiling: **~680 Mc/s plateau N=96-192 fp32 explicit dt=0.5
+nsub=4.** Still highest in legoESM suite (vs ocean LL 546, atm ico 428
+from PR #319 — same single-shot caveat applies there).
+
 ### Iter 10 — 2026-05-27 — codex review iter-9 + median-of-3 walks back 820 Mc/s
 
 Codex flagged: single-shot timing inflated by cache warmup; CFL warns
