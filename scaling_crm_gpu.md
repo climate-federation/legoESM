@@ -117,6 +117,28 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 28 — 2026-05-27 — long-stability fix attempt — needs dycore tuning beyond scope
+
+Tried two fixes for the 1000-step NaN:
+
+1. **Hyperdiff strength sweep** (hd = 1e6 / 1e8 / 1e9, all RK-stage applied):
+   - All NaN at 2000 steps with random-noise IC. Hyperdiff alone can't.
+
+2. **Smooth Gaussian thermal-bubble IC** (low-k, 0.01 K amplitude):
+   - 500 steps: finite, |θ'|=6e-3 K, **|w|=43 m/s** (still pathological)
+   - 2000+ steps: NaN
+
+⇒ The CRM dycore configuration on this f-plane needs **more than
+hyperdiff/IC tuning** to be production-stable. Other levers (sponge_coeff,
+sponge_width, smagorinsky_cs, n_acoustic_substeps, dt, dz_sfc) need a
+proper stability sweep — that's a dycore-engineering task, not a scaling
+task.
+
+**Per "minimum code production" constraint, this is out of scope.** The
+bench's 670-820 Mc/s throughput plateau is real. Production CRM stability
+requires a separate validation cycle (Wing RCEMIP IC + matching damping
+config + multi-day spin-up).
+
 ### Iter 27 — 2026-05-27 — long-integration stability — bench config NOT production-stable
 
 Codex iter-16 #4 flagged that 30-step throughput claim ≠ production
