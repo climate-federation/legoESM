@@ -661,6 +661,20 @@ Updated final ladder:
 - `scaling_gpu_weak.png` — ns/cell vs cells, flat = saturated
 - `scaling_gpu_peak_bar.png` — peak Mcells/s by grid × precision
 
+### Iter 31 — 2026-05-27 — conservation-fixer cost at peak
+
+Tested whether the conservation fixer is a hidden cost at the
+peak resolution. CS atm fp32 with `--no-conservation`:
+
+| res  | default Mc/s | no-conservation Mc/s | overhead |
+|------|--------------|----------------------|----------|
+| C48  | 298.7        | 299.8                | **0.3%** |
+| C96  | 282.8        | 286.5                | 1.3%     |
+
+Negligible at peak. Conservation fixer is **not the scaling
+bottleneck** for atm CS. Earlier (iter 8) showed same at C96
+(+1.4%). Documented for completeness — no action needed.
+
 ### Iter 30 — 2026-05-27 — final plot regen with 30-iter dataset
 
 All 4 figures regenerated with full data from iters 1-29:
