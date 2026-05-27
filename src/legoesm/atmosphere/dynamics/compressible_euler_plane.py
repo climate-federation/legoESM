@@ -35,6 +35,8 @@ staggering) is preserved. No public helper here returns a bare array.
 
 from __future__ import annotations
 
+import functools
+
 import jax
 import jax.numpy as jnp
 
@@ -47,9 +49,16 @@ from legoesm.atmosphere.dynamics.compressible_euler import (
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm.core.field import Field
-from legoesm.core.state import PlaneNonHydrostaticState
+from legoesm.core.state import (
+    PlaneNonHydrostaticState,
+    PlaneNonHydrostaticTendencies,
+)
 from legoesm.grids.plane import PlaneGrid
 from legoesm.grids.vertical import HeightCoordinate, TerrainMetric
+from legoesm.timestepping.split_explicit import (
+    SplitExplicitConfig,
+    split_explicit_step,
+)
 
 
 # --------------------------------------------------------------------- #
@@ -114,6 +123,46 @@ def laplacian_vlast(phi_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
     return _move_vertical_to_back(
         _plane_ops.laplacian_3d(_move_vertical_to_front(phi_yxz), grid)
     )
+
+
+# --------------------------------------------------------------------- #
+# Two-point centered face/cell interpolations (vertical-last).          #
+# Re-added after main merge dropped them; required by                   #
+# plane_compressible_euler_slow_tendencies (non-halo path).             #
+# Periodic in both horizontal axes (jnp.roll wrap).                     #
+# --------------------------------------------------------------------- #
+
+
+def interp_cell_to_xface_vlast(phi_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
+    """Cell-centre → x-face: average phi[i,j] with phi[i-1,j] (axis=1)."""
+    return 0.5 * (phi_yxz + jnp.roll(phi_yxz, 1, axis=1))
+
+
+def interp_cell_to_yface_vlast(phi_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
+    """Cell-centre → y-face: average phi[i,j] with phi[i,j-1] (axis=0)."""
+    return 0.5 * (phi_yxz + jnp.roll(phi_yxz, 1, axis=0))
+
+
+def interp_xface_to_cell_vlast(u_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
+    """x-face → cell-centre: average u[i,j] with u[i+1,j]."""
+    return 0.5 * (u_yxz + jnp.roll(u_yxz, -1, axis=1))
+
+
+def interp_yface_to_cell_vlast(v_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
+    """y-face → cell-centre: average v[i,j] with v[i,j+1]."""
+    return 0.5 * (v_yxz + jnp.roll(v_yxz, -1, axis=0))
+
+
+def interp_yface_to_xface_vlast(v_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
+    """y-face → x-face (4-point corner average)."""
+    v_cell = interp_yface_to_cell_vlast(v_yxz, grid)
+    return interp_cell_to_xface_vlast(v_cell, grid)
+
+
+def interp_xface_to_yface_vlast(u_yxz: jax.Array, grid: PlaneGrid) -> jax.Array:
+    """x-face → y-face (4-point corner average)."""
+    u_cell = interp_xface_to_cell_vlast(u_yxz, grid)
+    return interp_cell_to_yface_vlast(u_cell, grid)
 
 
 # --------------------------------------------------------------------- #
@@ -352,6 +401,28 @@ def make_rest_state(
 
 
 # --------------------------------------------------------------------- #
+# Horizontal advection scheme registry — single source of truth for     #
+# valid scheme names + their halo-width requirements. iter-186 added    #
+# this map after Codex flagged that --use-dd + --advection van_leer     #
+# crashed because the driver constructed a halo-1 layout while the     #
+# halo dispatch requires halo>=2 for van_leer (and >=3 for weno5).     #
+# Both the production driver (run_rce_mpi_long.py) and the halo       #
+# dispatch (compressible_euler_plane_halo.py) consult this so the      #
+# minimum-halo contract cannot drift between caller and callee.        #
+#                                                                       #
+# Stencil widths:                                                       #
+#   upwind1  — 2-cell (i-1, i+1) → halo 1.                              #
+#   van_leer — 4-cell (i-1, i, i+1, i+2) for i+1/2 face; halo 2.        #
+#   weno5    — 6-cell (i-2..i+3) for i+1/2; halo 3.                     #
+# --------------------------------------------------------------------- #
+HORIZONTAL_ADVECTION_HALO_REQUIREMENT: dict[str, int] = {
+    "upwind1": 1,
+    "van_leer": 2,
+    "weno5": 3,
+}
+
+
+# --------------------------------------------------------------------- #
 # First-order upwind on the Arakawa-C grid                              #
 # --------------------------------------------------------------------- #
 
@@ -394,6 +465,160 @@ def _upwind_advection_y(field_yxz: jax.Array, v_at_field: jax.Array,
     v_pos = jnp.maximum(v_at_field, 0.0)
     v_neg = jnp.minimum(v_at_field, 0.0)
     return -(v_pos * f_backward + v_neg * f_forward)
+
+
+# --------------------------------------------------------------------- #
+# Van Leer TVD flux-form advection (2nd-order, monotone, bounded).      #
+# Drop-in replacement for _upwind_advection_x/y with the same           #
+# co-located (field, velocity) convention. Cheaper than WENO5 (stencil  #
+# width 4 vs 6) but still 2nd-order accurate in smooth regions; falls   #
+# back to 1st-order upwind at extrema. Less numerical diffusion than    #
+# upwind1 → relaxes the advective CFL bound and lets larger dt run      #
+# stably (iter-178 motivation).                                         #
+# --------------------------------------------------------------------- #
+
+
+def _van_leer_advection_x(
+    field_yxz: jax.Array, u_at_field: jax.Array, dx: float,
+) -> jax.Array:
+    """2nd-order Van Leer TVD upwind contribution to ``-u df/dx``.
+
+    Reconstruct field at face i+1/2 from a 4-cell stencil
+    [f[i-1], f[i], f[i+1], f[i+2]] using a slope-limited 2nd-order
+    extrapolation. Upwind side selected by face velocity sign.
+    Convert flux-form divergence to advective form via the
+    ``-d(uf)/dx + f·du/dx`` identity (same trick as WENO5).
+
+    Face velocity is the 2-point centred average of ``u_at_field``
+    (consistent with the WENO5 path).
+
+    Differentiability: Van Leer's analytic ``(r+|r|)/(1+|r|)`` is
+    smooth everywhere except a single subgradient kink at ``r=0``
+    (an extremum). ``jnp.where`` for sign selection contributes a
+    second well-behaved subgradient. ``jax.grad`` flows cleanly.
+    """
+    from legoesm.core.flux_limiters import van_leer_limiter
+    eps = 1e-30
+    f = field_yxz
+    f_im1 = jnp.roll(f,  1, axis=1)  # f[i-1]
+    f_i   = f                         # f[i]
+    f_ip1 = jnp.roll(f, -1, axis=1)  # f[i+1]
+    f_ip2 = jnp.roll(f, -2, axis=1)  # f[i+2]
+    # Positive-velocity reconstruction at face i+1/2 (upwind from left).
+    # delta = f[i+1] - f[i]; r = (f[i] - f[i-1]) / delta.
+    delta_pos = f_ip1 - f_i
+    r_pos = (f_i - f_im1) / jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps)
+    phi_pos = f_i + 0.5 * van_leer_limiter(r_pos) * delta_pos
+    # Negative-velocity reconstruction at face i+1/2 (upwind from right).
+    # delta = f[i] - f[i+1]; r = (f[i+2] - f[i+1]) / delta.
+    delta_neg = f_i - f_ip1
+    r_neg = (f_ip2 - f_ip1) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
+    phi_neg = f_ip1 + 0.5 * van_leer_limiter(r_neg) * delta_neg
+    # Face velocity: 2-point centred average of co-located cell velocities.
+    u_face_R = 0.5 * (u_at_field + jnp.roll(u_at_field, -1, axis=1))
+    phi_R = jnp.where(u_face_R >= 0.0, phi_pos, phi_neg)
+    flux_R = u_face_R * phi_R
+    flux_L = jnp.roll(flux_R, 1, axis=1)
+    u_face_L = jnp.roll(u_face_R, 1, axis=1)
+    return -(flux_R - flux_L) / dx + f * (u_face_R - u_face_L) / dx
+
+
+def _van_leer_advection_y(
+    field_yxz: jax.Array, v_at_field: jax.Array, dy: float,
+) -> jax.Array:
+    """2nd-order Van Leer TVD upwind contribution to ``-v df/dy``
+    (axis=0). Same convention as :func:`_van_leer_advection_x`."""
+    from legoesm.core.flux_limiters import van_leer_limiter
+    eps = 1e-30
+    f = field_yxz
+    f_jm1 = jnp.roll(f,  1, axis=0)
+    f_j   = f
+    f_jp1 = jnp.roll(f, -1, axis=0)
+    f_jp2 = jnp.roll(f, -2, axis=0)
+    delta_pos = f_jp1 - f_j
+    r_pos = (f_j - f_jm1) / jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps)
+    phi_pos = f_j + 0.5 * van_leer_limiter(r_pos) * delta_pos
+    delta_neg = f_j - f_jp1
+    r_neg = (f_jp2 - f_jp1) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
+    phi_neg = f_jp1 + 0.5 * van_leer_limiter(r_neg) * delta_neg
+    v_face_R = 0.5 * (v_at_field + jnp.roll(v_at_field, -1, axis=0))
+    phi_R = jnp.where(v_face_R >= 0.0, phi_pos, phi_neg)
+    flux_R = v_face_R * phi_R
+    flux_L = jnp.roll(flux_R, 1, axis=0)
+    v_face_L = jnp.roll(v_face_R, 1, axis=0)
+    return -(flux_R - flux_L) / dy + f * (v_face_R - v_face_L) / dy
+
+
+# --------------------------------------------------------------------- #
+# WENO5-Z flux-form upwind advection (5th-order, monotone).             #
+# Drop-in replacements for _upwind_advection_x/y with the same          #
+# co-located (field, velocity) convention. Periodic in both axes        #
+# via jnp.roll. Stencil width 6; needs only single-rank periodic        #
+# wrap (no halo exchange on a doubly-periodic plane).                   #
+# --------------------------------------------------------------------- #
+
+
+def _weno5_advection_x(
+    field_yxz: jax.Array, u_at_field: jax.Array, dx: float,
+) -> jax.Array:
+    """5th-order WENO-Z upwind contribution to ``-u df/dx``.
+
+    Computes the face flux ``F_{i+1/2} = u_face · phi_face`` where
+    ``phi_face`` is the WENO5-Z left-/right-biased reconstruction
+    selected by the sign of the face velocity. The conservative flux
+    divergence is corrected by ``phi * div(u)`` so the returned tendency
+    is advective form ``-u dphi/dx``, matching
+    :func:`_upwind_advection_x`.
+
+    Face velocity uses a 2-point centred average of ``u_at_field``
+    (consistent with the co-located upwind it replaces). At any face
+    where ``u_face = 0`` the average of the two reconstructions is
+    used so the scheme stays smooth across zero crossings.
+    """
+    from legoesm.core.weno import weno5_z
+    f = field_yxz
+    # Stencil for face i+1/2: [f[i-2], f[i-1], f[i], f[i+1], f[i+2], f[i+3]]
+    stencil_R = [
+        jnp.roll(f,  2, axis=1),
+        jnp.roll(f,  1, axis=1),
+        f,
+        jnp.roll(f, -1, axis=1),
+        jnp.roll(f, -2, axis=1),
+        jnp.roll(f, -3, axis=1),
+    ]
+    fR_plus, fR_minus = weno5_z(stencil_R)  # at face i+1/2
+    # Face velocity = arithmetic average of co-located cell velocities.
+    u_face_R = 0.5 * (u_at_field + jnp.roll(u_at_field, -1, axis=1))
+    # Upwind selection.
+    phi_R = jnp.where(u_face_R >= 0.0, fR_plus, fR_minus)
+    flux_R = u_face_R * phi_R
+    # Face i-1/2 is just the rolled face i+1/2 of the previous cell.
+    flux_L = jnp.roll(flux_R, 1, axis=1)
+    u_face_L = jnp.roll(u_face_R, 1, axis=1)
+    return -(flux_R - flux_L) / dx + f * (u_face_R - u_face_L) / dx
+
+
+def _weno5_advection_y(
+    field_yxz: jax.Array, v_at_field: jax.Array, dy: float,
+) -> jax.Array:
+    """5th-order WENO-Z upwind contribution to ``-v df/dy`` (axis=0)."""
+    from legoesm.core.weno import weno5_z
+    f = field_yxz
+    stencil_R = [
+        jnp.roll(f,  2, axis=0),
+        jnp.roll(f,  1, axis=0),
+        f,
+        jnp.roll(f, -1, axis=0),
+        jnp.roll(f, -2, axis=0),
+        jnp.roll(f, -3, axis=0),
+    ]
+    fR_plus, fR_minus = weno5_z(stencil_R)
+    v_face_R = 0.5 * (v_at_field + jnp.roll(v_at_field, -1, axis=0))
+    phi_R = jnp.where(v_face_R >= 0.0, fR_plus, fR_minus)
+    flux_R = v_face_R * phi_R
+    flux_L = jnp.roll(flux_R, 1, axis=0)
+    v_face_L = jnp.roll(v_face_R, 1, axis=0)
+    return -(flux_R - flux_L) / dy + f * (v_face_R - v_face_L) / dy
 
 
 def _variable_K_diffusion_vlast(
@@ -805,28 +1030,53 @@ def plane_compressible_euler_slow_tendencies(
     rho_yface = interp_cell_to_yface_vlast(rho_total, grid)
     drho_p_dt = -divergence_vlast(rho_xface * u, rho_yface * v, grid)
 
-    # 5. Theta advection (advective form, first-order upwind). Theta
-    #    at cell centre; advect with the cell-centre velocity formed
-    #    by face→cell averaging of u, v.
+    # 5. Theta advection (advective form). Theta at cell centre;
+    #    advect with the cell-centre velocity formed by face→cell
+    #    averaging of u, v. Scheme selected by config.
+    #    horizontal_advection_scheme:
+    #    - "upwind1" (cheap, 1st-order, dispersive, dt-constrained).
+    #    - "van_leer" (2nd-order TVD, stencil 4, monotone — iter-183
+    #      production default: 3x wall-time speedup vs upwind1 at
+    #      dt=20 thanks to lower numerical diffusion).
+    #    - "weno5" (5th-order WENO-Z, stencil 6 — least grid-scale
+    #      dispersion but ~3x per-step cost; opt-in for sharp-front
+    #      problems where dispersion matters more than throughput).
+    scheme = getattr(config, "horizontal_advection_scheme", "upwind1")
+    if scheme == "weno5":
+        adv_x, adv_y = _weno5_advection_x, _weno5_advection_y
+    elif scheme == "van_leer":
+        adv_x, adv_y = _van_leer_advection_x, _van_leer_advection_y
+    elif scheme == "upwind1":
+        adv_x, adv_y = _upwind_advection_x, _upwind_advection_y
+    else:
+        # iter-194: list the active registry instead of a hardcoded
+        # string so a future fourth scheme in
+        # HORIZONTAL_ADVECTION_HALO_REQUIREMENT automatically surfaces
+        # in the error message.
+        raise ValueError(
+            f"Unknown horizontal_advection_scheme: {scheme!r}. "
+            f"Expected one of "
+            f"{sorted(HORIZONTAL_ADVECTION_HALO_REQUIREMENT)}."
+        )
     u_center = interp_xface_to_cell_vlast(u, grid)
     v_center = interp_yface_to_cell_vlast(v, grid)
     dtheta_p_dt = (
-        _upwind_advection_x(theta_total, u_center, grid.dx)
-        + _upwind_advection_y(theta_total, v_center, grid.dy)
+        adv_x(theta_p, u_center, grid.dx)
+        + adv_y(theta_p, v_center, grid.dy)
     )
 
-    # 6. Horizontal momentum advection — Arakawa-C upwind. u lives at
-    #    x-face; advect by (u-at-x-face, v-at-x-face). v→x-face via
-    #    4-pt corner average. Symmetric for v.
+    # 6. Horizontal momentum advection — Arakawa-C. u lives at x-face;
+    #    advect by (u-at-x-face, v-at-x-face). v→x-face via 4-pt
+    #    corner average. Symmetric for v. Same scheme as theta.
     v_at_xface = interp_yface_to_xface_vlast(v, grid)
     u_at_yface = interp_xface_to_yface_vlast(u, grid)
     du_adv = (
-        _upwind_advection_x(u, u, grid.dx)
-        + _upwind_advection_y(u, v_at_xface, grid.dy)
+        adv_x(u, u, grid.dx)
+        + adv_y(u, v_at_xface, grid.dy)
     )
     dv_adv = (
-        _upwind_advection_x(v, u_at_yface, grid.dx)
-        + _upwind_advection_y(v, v, grid.dy)
+        adv_x(v, u_at_yface, grid.dx)
+        + adv_y(v, v, grid.dy)
     )
 
     # 7. Vertical advection of u, v by full-level w.
@@ -841,8 +1091,8 @@ def plane_compressible_euler_slow_tendencies(
     #    to interface for the upwind side selection).
     w_full = 0.5 * (w[..., :-1] + w[..., 1:])
     dw_full = (
-        _upwind_advection_x(w_full, u_center, grid.dx)
-        + _upwind_advection_y(w_full, v_center, grid.dy)
+        adv_x(w_full, u_center, grid.dx)
+        + adv_y(w_full, v_center, grid.dy)
     )
     # Re-map to half levels: interior is the average of adjacent full
     # values; top and bottom interfaces stay rigid (zero) so the
@@ -871,6 +1121,7 @@ def plane_compressible_euler_slow_tendencies(
     du_dt = du_dt - sponge_full * u
     dv_dt = dv_dt - sponge_full * v
     dtheta_p_dt = dtheta_p_dt - sponge_full * theta_p
+    drho_p_dt = drho_p_dt - sponge_full * rho_p
     dw_dt = dw_dt - sponge_half * w
 
     # 10. Biharmonic hyperdiffusion. ``-coeff * ∇⁴f`` with the
@@ -905,6 +1156,29 @@ def plane_compressible_euler_slow_tendencies(
         drho_p_dt = drho_p_dt - config.hyperdiff_rho_coeff * laplacian_vlast(
             laplacian_vlast(rho_p, grid), grid,
         )
+    # Explicit vertical Laplacian dissipation on theta_p.
+    # Form: nu_v * (theta_p[k+1] - 2*theta_p[k] + theta_p[k-1]) / dz_k^2
+    # with rigid (zero-gradient → here zero-value) boundary at k=0 and
+    # k=nlev-1 via jnp.pad. Damps the buoyancy/PG feedback loop that
+    # blows up the dycore at dt > 0.5 s on dx ~ 2 km coarse-vertical
+    # grids. dz uses the full-level half-spacing for consistency with
+    # the acoustic-substep theta gradient.
+    if getattr(config, "vertical_theta_diffusion", 0.0) > 0.0:
+        nu_v = config.vertical_theta_diffusion
+        # Centred 2nd-order Laplacian on the (..., k) axis with rigid
+        # BC. dz_half[k] is the spacing between full levels k and k+1.
+        dz_half = height_coord.dz_half  # shape (nlev-1,)
+        # Compute interior 2nd derivative.
+        tp_above = theta_p[..., 2:]
+        tp_below = theta_p[..., :-2]
+        tp_centre = theta_p[..., 1:-1]
+        dz_avg = 0.5 * (dz_half[:-1] + dz_half[1:])  # (nlev-2,)
+        d2_theta_inner = (tp_above - 2.0 * tp_centre + tp_below) / (dz_avg ** 2)
+        # Pad with zeros at top/bottom so boundary tendencies are zero.
+        pad_axes_v = ((0, 0),) * (theta_p.ndim - 1)
+        d2_theta = jnp.pad(d2_theta_inner, (*pad_axes_v, (1, 1)))
+        dtheta_p_dt = dtheta_p_dt + nu_v * d2_theta
+
     if config.hyperdiff_w_coeff > 0.0:
         # ``w`` lives on half levels; the laplacian wrapper applies in
         # the horizontal only (last two axes via ``moveaxis``), so the
@@ -958,8 +1232,8 @@ def plane_compressible_euler_slow_tendencies(
     if tracers.shape[-1] > 0:
         def _tracer_tend_one(q):
             return (
-                _upwind_advection_x(q, u_center, grid.dx)
-                + _upwind_advection_y(q, v_center, grid.dy)
+                adv_x(q, u_center, grid.dx)
+                + adv_y(q, v_center, grid.dy)
                 + _vertical_advection_plane(q, w, height_coord, J)
             )
         dtracers_dt = jax.vmap(_tracer_tend_one, in_axes=-1, out_axes=-1)(
@@ -1101,6 +1375,7 @@ def plane_acoustic_substeps_semi_implicit(
     g = euler_config.g
     J = terrain_metric.jacobian
     beta = euler_config.acoustic_off_centering
+    implicit_buoyancy = euler_config.implicit_buoyancy
 
     w = state.w.data
     theta_p = state.theta_prime.data
@@ -1111,6 +1386,7 @@ def plane_acoustic_substeps_semi_implicit(
         return _semi_implicit_acoustic_column_kernel(
             w_c, theta_p_c, rho_p_c,
             height_coord, J, dt_s, beta, g,
+            implicit_buoyancy=implicit_buoyancy,
         )
 
     w_final, theta_p_final, rho_p_final = jax.lax.fori_loop(
@@ -1303,6 +1579,7 @@ class PlaneCompressibleEulerModel:
         dt: float,
         layout,
         f_pad_cached: jax.Array | None = None,
+        owned_mask: jax.Array | None = None,
     ) -> PlaneNonHydrostaticState:
         """Domain-decomposed step using halo-aware slow tendency.
 
@@ -1318,8 +1595,14 @@ class PlaneCompressibleEulerModel:
         is a global reduction — separate MPI variant needed). Single
         rank with ``fix_mass=True`` falls back to :meth:`step`.
 
-        Smagorinsky LES + fix_mass not yet supported on multi-rank
-        path (deferred to follow-up PR).
+        Smagorinsky LES + vertical-θ diffusion now supported on the
+        halo path (R4/R5 — see ``compressible_euler_plane_halo``).
+        Mass fixer R7: pass ``owned_mask`` (rank-local 0/1 mask of
+        cells the rank owns) to use the MPI-aware dry-mass fixer
+        :func:`legoesm.atmosphere.dynamics.rce_mpi.fix_mass_nonhydrostatic_plane_mpi`.
+        Without ``owned_mask`` the multi-rank fix_mass branch is
+        skipped (mass not anchored to target) — single-rank still
+        uses the serial fixer via ``step``.
         """
         from legoesm.atmosphere.dynamics.compressible_euler_plane_halo import (
             plane_compressible_euler_slow_tendencies_halo,
@@ -1334,6 +1617,22 @@ class PlaneCompressibleEulerModel:
             # for the JIT speedup. Skips packed exchange overhead +
             # gives ~14x faster per-step on small grids.
             return self.step(state_local, dt)
+
+        # Multi-rank correctness gate (Codex 2026-05 review): silently
+        # skipping the mass fixer when fix_mass=True but no owned_mask
+        # is provided lets dry mass drift unbounded across a long
+        # production run while reporting "fix_mass=True". Surface
+        # immediately so callers wire owned_mask explicitly.
+        if self.config.fix_mass and owned_mask is None:
+            raise ValueError(
+                "step_halo on multi-rank with config.fix_mass=True "
+                "requires owned_mask (shape (ny_local, nx_local), "
+                "1.0 on owned cells, 0.0 on duplicated halo rows). "
+                "Compute it once from layout.iy_start/iy_end + "
+                "layout.ix_start/ix_end and pass it via the "
+                "owned_mask kwarg, or set config.fix_mass=False to "
+                "opt out of mass anchoring on this multi-rank path."
+            )
 
         se_config = SplitExplicitConfig(
             n_substeps=self.config.n_acoustic_substeps,
@@ -1371,10 +1670,38 @@ class PlaneCompressibleEulerModel:
                     self.height_coord, self.terrain_metric, self.config,
                 )
 
-        return split_explicit_step(
+        stepped = split_explicit_step(
             state_local, slow_tendency_fn, acoustic_update_fn,
             dt, se_config,
         )
+
+        # MPI-aware dry-mass fixer (R7). Only fires when the user
+        # passes an owned_mask + config.fix_mass is True. Without the
+        # mask we can't compute a non-double-counted global mass.
+        if self.config.fix_mass and owned_mask is not None:
+            from legoesm.atmosphere.dynamics.rce_mpi import (
+                compute_dry_mass_plane_mpi,
+                fix_mass_nonhydrostatic_plane_mpi,
+            )
+            if self.config.anchor_mass_to_initial:
+                if self._target_mass is None:
+                    # Initial reduction across all ranks so every rank
+                    # captures the same anchor.
+                    self._target_mass = compute_dry_mass_plane_mpi(
+                        state_local, self.grid, self.height_coord,
+                        self.terrain_metric, layout, owned_mask,
+                    )
+                target = self._target_mass
+            else:
+                target = compute_dry_mass_plane_mpi(
+                    state_local, self.grid, self.height_coord,
+                    self.terrain_metric, layout, owned_mask,
+                )
+            stepped = fix_mass_nonhydrostatic_plane_mpi(
+                stepped, target, self.grid, self.height_coord,
+                self.terrain_metric, layout, owned_mask,
+            )
+        return stepped
 
     # ------------------------------------------------------------------
     # JIT boundary

@@ -29,12 +29,34 @@ Coverage (matches the original):
 * Biharmonic hyperdiffusion (`laplacian²`)
 * Tracer advective transport (vmap over tracer axis)
 
-Not covered here (yet — separate PR):
+Smagorinsky LES + vertical-θ diffusion (R4/R5)
+----------------------------------------------
+* Smagorinsky LES (``smagorinsky_cs > 0``) — full 3D strain tensor
+  (S11, S22, S33, S12, S13, S23) on already-halo-padded u/v/w via
+  :func:`_compute_smagorinsky_K_m_plane_halo`. K_m is exchanged once
+  before driving :func:`oh.variable_K_diffusion_vlast_halo` on each
+  prognostic at its native Arakawa-C staggering.
+* Vertical θ Laplacian (``vertical_theta_diffusion > 0``) — column-
+  local, no halo exchange. Mirrors the serial branch at
+  ``compressible_euler_plane.py:1050-1064`` and is applied in both
+  the main entry point and the split-trace phase-2 variant.
 
-* Smagorinsky LES (``smagorinsky_cs > 0``) — strain tensor uses
-  half-level w + horizontal shear with a layered halo pattern
-  that needs its own halo-aware rewrite. Raises ``NotImplementedError``
-  when ``smagorinsky_cs > 0`` so callers see a clear gate.
+Higher-order horizontal advection
+---------------------------------
+* ``config.horizontal_advection_scheme == "weno5"`` switches theta /
+  u / v / w / tracer horizontal advection to the 5th-order WENO-Z
+  stencil. Requires ``layout.halo >= 3`` (6-point WENO5 reconstruction
+  reaches ±3 cells on each axis). Single-rank build with
+  ``make_plane_pencil_layout(..., halo=3)`` is bit-identical to the
+  serial ``_weno5_advection_x/y`` (tests in
+  ``test_weno5_halo_equiv.py``).
+* ``config.horizontal_advection_scheme == "van_leer"`` (iter-184)
+  switches the same fields to the 2nd-order Van Leer TVD stencil.
+  Requires ``layout.halo >= 2`` (4-point reconstruction). Single-rank
+  build with ``make_plane_pencil_layout(..., halo=2)`` is bit-identical
+  to the serial ``_van_leer_advection_x/y`` (tests in
+  ``test_van_leer_halo_equiv.py``). This is the iter-183 production
+  default since it gives 3x wall-time speedup over upwind1 at dt=20.
 
 Single-rank equivalence
 -----------------------
@@ -54,6 +76,9 @@ from legoesm.atmosphere.dynamics import (
 )
 from legoesm.atmosphere.dynamics.compressible_euler import (
     CompressibleEulerConfig, _sponge_profile, compute_exner_perturbation,
+)
+from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    _full_level_centred_d_dz, _safe_sqrt_strain,
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm.core.state import (
@@ -89,6 +114,131 @@ def _vertical_advection_plane(
     pad_axes = ((0, 0),) * (field_yxz.ndim - 1)
     dfield_dz = jnp.pad(inner_grad, (*pad_axes, (1, 1)))
     return -w_full / J[..., None] * dfield_dz
+
+
+def _compute_smagorinsky_K_m_plane_halo(
+    u_pad: jax.Array,
+    v_pad: jax.Array,
+    w_pad_half: jax.Array,
+    grid: PlaneGrid,
+    height_coord: HeightCoordinate,
+    c_s: float,
+    halo: int = 1,
+) -> jax.Array:
+    """Halo-aware Smagorinsky-Lilly K_m at interior cell centres.
+
+    Mirror of
+    :func:`compressible_euler_plane._compute_smagorinsky_K_m_plane`
+    operating on already-halo-padded u, v, w slabs. Vertical gradients
+    are column-local — reuses :func:`_full_level_centred_d_dz` +
+    :func:`_safe_sqrt_strain` from the serial module so the inner
+    arithmetic stays in one canonical implementation.
+
+    Bit-equivalent to the serial K_m when ``layout.n_ranks == 1``:
+    ``jnp.pad(mode='wrap')`` produces the same neighbour values as
+    ``jnp.roll(±1)``, and the slice indices below pick the same
+    neighbours.
+
+    Inputs are padded as ``(ny+2h, nx+2h, nlev[+1])``; the returned
+    K_m is at the interior cell-centre shape ``(ny, nx, nlev)``.
+    """
+    h = halo
+
+    # u at x-face (i, j); +1 in x: index h+1.
+    u_int = u_pad[h:-h, h:-h, :]
+    u_xp1 = u_pad[h:-h, h + 1 : (-h + 1) if h > 1 else None, :]
+    du_dx_center = (u_xp1 - u_int) / grid.dx
+
+    v_int = v_pad[h:-h, h:-h, :]
+    v_yp1 = v_pad[h + 1 : (-h + 1) if h > 1 else None, h:-h, :]
+    dv_dy_center = (v_yp1 - v_int) / grid.dy
+
+    # S12 at SW corner (cell (i, j)):
+    # du/dy = (u[i, j] - u[i, j-1]) / dy;  dv/dx = (v[i, j] - v[i-1, j]) / dx.
+    u_ym1 = u_pad[h - 1 : -h - 1, h:-h, :]
+    v_xm1 = v_pad[h:-h, h - 1 : -h - 1, :]
+    du_dy_corner = (u_int - u_ym1) / grid.dy
+    dv_dx_corner = (v_int - v_xm1) / grid.dx
+    S12_corner = 0.5 * (du_dy_corner + dv_dx_corner)
+
+    # S12 at the SE / NW / NE corners (shifted +1 in x, +1 in y, +1 in both).
+    u_xp1_ym1 = u_pad[h - 1 : -h - 1, h + 1 : (-h + 1) if h > 1 else None, :]
+    v_xp1_int = v_pad[h:-h, h + 1 : (-h + 1) if h > 1 else None, :]
+    du_dy_xp1 = (u_xp1 - u_xp1_ym1) / grid.dy
+    dv_dx_xp1 = (v_xp1_int - v_int) / grid.dx
+    S12_corner_xp1 = 0.5 * (du_dy_xp1 + dv_dx_xp1)
+
+    u_yp1 = u_pad[h + 1 : (-h + 1) if h > 1 else None, h:-h, :]
+    v_yp1_xm1 = v_pad[h + 1 : (-h + 1) if h > 1 else None, h - 1 : -h - 1, :]
+    du_dy_yp1 = (u_yp1 - u_int) / grid.dy
+    dv_dx_yp1 = (v_yp1 - v_yp1_xm1) / grid.dx
+    S12_corner_yp1 = 0.5 * (du_dy_yp1 + dv_dx_yp1)
+
+    u_yp1_xp1 = u_pad[h + 1 : (-h + 1) if h > 1 else None,
+                      h + 1 : (-h + 1) if h > 1 else None, :]
+    v_yp1_xp1 = v_pad[h + 1 : (-h + 1) if h > 1 else None,
+                      h + 1 : (-h + 1) if h > 1 else None, :]
+    du_dy_yp1_xp1 = (u_yp1_xp1 - u_xp1) / grid.dy
+    dv_dx_yp1_xp1 = (v_yp1_xp1 - v_yp1) / grid.dx
+    S12_corner_yp1_xp1 = 0.5 * (du_dy_yp1_xp1 + dv_dx_yp1_xp1)
+
+    S12_sq_center = 0.25 * (
+        S12_corner ** 2 + S12_corner_xp1 ** 2
+        + S12_corner_yp1 ** 2 + S12_corner_yp1_xp1 ** 2
+    )
+
+    # ---- Vertical strain components (column-local) ----
+    w_int_half = w_pad_half[h:-h, h:-h, :]              # (ny, nx, nlev+1)
+    dz_full = height_coord.dz
+    dw_dz_center = (
+        w_int_half[..., 1:] - w_int_half[..., :-1]
+    ) / dz_full
+    S33_center = dw_dz_center
+
+    du_dz_int = _full_level_centred_d_dz(u_int, height_coord)
+    dv_dz_int = _full_level_centred_d_dz(v_int, height_coord)
+
+    # ∂w/∂x at x-face (i, j) needs w_full(i-1, j); ∂w/∂y at y-face needs
+    # w_full(i, j-1). Reuse the padded w to slice both shifts.
+    w_full_pad = 0.5 * (w_pad_half[..., :-1] + w_pad_half[..., 1:])
+    w_full_int = w_full_pad[h:-h, h:-h, :]
+    w_full_xm1 = w_full_pad[h:-h, h - 1 : -h - 1, :]
+    w_full_ym1 = w_full_pad[h - 1 : -h - 1, h:-h, :]
+    dw_dx_xface = (w_full_int - w_full_xm1) / grid.dx
+    dw_dy_yface = (w_full_int - w_full_ym1) / grid.dy
+
+    S13_xface = 0.5 * (du_dz_int + dw_dx_xface)
+    S23_yface = 0.5 * (dv_dz_int + dw_dy_yface)
+
+    # Face → cell-centre via two-point average. Need S13 at (i+1, j)
+    # — pull from +1-in-x shifted positions.
+    w_full_xp1 = w_full_pad[h:-h, h + 1 : (-h + 1) if h > 1 else None, :]
+    u_xp1_int = u_xp1                                   # already sliced
+    du_dz_xp1 = _full_level_centred_d_dz(u_xp1_int, height_coord)
+    dw_dx_xface_xp1 = (w_full_xp1 - w_full_int) / grid.dx
+    S13_xface_xp1 = 0.5 * (du_dz_xp1 + dw_dx_xface_xp1)
+    S13_sq_center = 0.5 * (S13_xface ** 2 + S13_xface_xp1 ** 2)
+
+    w_full_yp1 = w_full_pad[h + 1 : (-h + 1) if h > 1 else None, h:-h, :]
+    v_yp1_int = v_yp1                                   # already sliced
+    dv_dz_yp1 = _full_level_centred_d_dz(v_yp1_int, height_coord)
+    dw_dy_yface_yp1 = (w_full_yp1 - w_full_int) / grid.dy
+    S23_yface_yp1 = 0.5 * (dv_dz_yp1 + dw_dy_yface_yp1)
+    S23_sq_center = 0.5 * (S23_yface ** 2 + S23_yface_yp1 ** 2)
+
+    strain_mag_sq = 2.0 * (
+        du_dx_center ** 2 + dv_dy_center ** 2 + S33_center ** 2
+        + 2.0 * S12_sq_center + 2.0 * S13_sq_center + 2.0 * S23_sq_center
+    )
+    strain_mag = _safe_sqrt_strain(strain_mag_sq)
+
+    from legoesm import constants
+    delta = (grid.dx * grid.dy * dz_full) ** (1.0 / 3.0)
+    l_smag = c_s * delta
+    l_wall = constants.kappa_von_karman * height_coord.z_full
+    l_m = jnp.minimum(l_smag, l_wall)
+    l_m_sq = l_m ** 2
+    return l_m_sq * strain_mag
 
 
 def precompute_coriolis_halo(
@@ -136,15 +286,10 @@ def plane_compressible_euler_slow_tendencies_halo(
     mpi4jax versions; we prevent silent crashes deep in the
     compiled graph by failing early.
     """
-    if config.smagorinsky_cs > 0.0:
-        raise NotImplementedError(
-            "Halo-aware slow tendency does not yet support "
-            "Smagorinsky LES (smagorinsky_cs > 0). Use the original "
-            "plane_compressible_euler_slow_tendencies for "
-            "single-process Smag runs, or wait for the follow-up PR "
-            "that ports _compute_smagorinsky_K_m_plane to halo-aware "
-            "ops."
-        )
+    # Smag + vertical-θ-diffusion supported on the halo path; see
+    # _compute_smagorinsky_K_m_plane_halo above. Branches are gated
+    # by Python ``if`` on static config values — no traced cost when
+    # disabled.
     # Codex iter-3: multi-rank under JIT is a known crash mode on
     # some mpi4jax versions. Raise early so the failure is at the
     # call site, not deep in the compiled HLO graph.
@@ -250,9 +395,62 @@ def plane_compressible_euler_slow_tendencies_halo(
     # upwind. Re-pad the interior result.
     u_center_pad = _re_pad_halo(u_center, layout, h)
     v_center_pad = _re_pad_halo(v_center, layout, h)
+    # Choose horizontal advection scheme. iter-187 consults the
+    # public HORIZONTAL_ADVECTION_HALO_REQUIREMENT map from
+    # compressible_euler_plane so the halo-width contract lives in
+    # ONE place; the driver script (run_rce_mpi_long.py) reads the
+    # same map at layout construction.
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        HORIZONTAL_ADVECTION_HALO_REQUIREMENT,
+    )
+    scheme = getattr(config, "horizontal_advection_scheme", "upwind1")
+    if scheme not in HORIZONTAL_ADVECTION_HALO_REQUIREMENT:
+        raise ValueError(
+            f"Unknown horizontal_advection_scheme: {scheme!r}. "
+            f"Expected one of "
+            f"{sorted(HORIZONTAL_ADVECTION_HALO_REQUIREMENT)}."
+        )
+    _required_halo = HORIZONTAL_ADVECTION_HALO_REQUIREMENT[scheme]
+    if h < _required_halo:
+        raise ValueError(
+            f"horizontal_advection_scheme={scheme!r} requires "
+            f"layout.halo >= {_required_halo}; got halo={h}. "
+            f"Construct the layout with "
+            f"make_plane_pencil_layout(..., halo={_required_halo}) "
+            f"or rely on the driver's iter-187 auto-selection."
+        )
+    if scheme == "weno5":
+        adv_x = lambda f_pad, u_pad_, dx_, h_: (
+            oh.weno5_advection_x_halo(f_pad, u_pad_, dx_, h_)
+        )
+        adv_y = lambda f_pad, v_pad_, dy_, h_: (
+            oh.weno5_advection_y_halo(f_pad, v_pad_, dy_, h_)
+        )
+    elif scheme == "van_leer":
+        adv_x = lambda f_pad, u_pad_, dx_, h_: (
+            oh.van_leer_advection_x_halo(f_pad, u_pad_, dx_, h_)
+        )
+        adv_y = lambda f_pad, v_pad_, dy_, h_: (
+            oh.van_leer_advection_y_halo(f_pad, v_pad_, dy_, h_)
+        )
+    elif scheme == "upwind1":
+        adv_x = oh.upwind_advection_x_halo
+        adv_y = oh.upwind_advection_y_halo
+    else:
+        # iter-192 Codex MEDIUM: a fourth scheme added to
+        # HORIZONTAL_ADVECTION_HALO_REQUIREMENT but NOT wired into
+        # this dispatch would silently fall through to upwind on the
+        # halo path. Refuse loudly so the failure mode matches the
+        # serial path (compressible_euler_plane.py raises identically).
+        raise NotImplementedError(
+            f"horizontal_advection_scheme={scheme!r} is in "
+            f"HORIZONTAL_ADVECTION_HALO_REQUIREMENT but has no halo-path "
+            f"wiring in compressible_euler_plane_halo.py. Add the "
+            f"adv_x / adv_y branch alongside upwind1 / van_leer / weno5."
+        )
     dtheta_p_dt = (
-        oh.upwind_advection_x_halo(theta_total_pad, u_center_pad, grid.dx, h)
-        + oh.upwind_advection_y_halo(theta_total_pad, v_center_pad, grid.dy, h)
+        adv_x(theta_total_pad, u_center_pad, grid.dx, h)
+        + adv_y(theta_total_pad, v_center_pad, grid.dy, h)
     )
 
     # 6. Horizontal momentum advection — u advected by (u, v_at_xface),
@@ -262,12 +460,12 @@ def plane_compressible_euler_slow_tendencies_halo(
     v_at_xface_pad = _re_pad_halo(v_at_xface, layout, h)
     u_at_yface_pad = _re_pad_halo(u_at_yface, layout, h)
     du_adv = (
-        oh.upwind_advection_x_halo(u_pad, u_pad, grid.dx, h)
-        + oh.upwind_advection_y_halo(u_pad, v_at_xface_pad, grid.dy, h)
+        adv_x(u_pad, u_pad, grid.dx, h)
+        + adv_y(u_pad, v_at_xface_pad, grid.dy, h)
     )
     dv_adv = (
-        oh.upwind_advection_x_halo(v_pad, u_at_yface_pad, grid.dx, h)
-        + oh.upwind_advection_y_halo(v_pad, v_pad, grid.dy, h)
+        adv_x(v_pad, u_at_yface_pad, grid.dx, h)
+        + adv_y(v_pad, v_pad, grid.dy, h)
     )
 
     # 7. Vertical advection (column-local).
@@ -277,12 +475,12 @@ def plane_compressible_euler_slow_tendencies_halo(
     du_dt = du_adv + du_vert + du_pg + du_cor
     dv_dt = dv_adv + dv_vert + dv_pg + dv_cor
 
-    # 8. w slow part.
+    # 8. w slow part — same scheme as theta + momentum (set above).
     w_full = 0.5 * (w[..., :-1] + w[..., 1:])
     w_full_pad = _re_pad_halo(w_full, layout, h)
     dw_full = (
-        oh.upwind_advection_x_halo(w_full_pad, u_center_pad, grid.dx, h)
-        + oh.upwind_advection_y_halo(w_full_pad, v_center_pad, grid.dy, h)
+        adv_x(w_full_pad, u_center_pad, grid.dx, h)
+        + adv_y(w_full_pad, v_center_pad, grid.dy, h)
     )
     pad_axes = ((0, 0),) * (dw_full.ndim - 1)
     dw_dt = jnp.pad(
@@ -302,6 +500,11 @@ def plane_compressible_euler_slow_tendencies_halo(
     du_dt = du_dt - sponge_full * u
     dv_dt = dv_dt - sponge_full * v
     dtheta_p_dt = dtheta_p_dt - sponge_full * theta_p
+    # Codex iter-2026-05 finding: serial path applies rho' sponge too
+    # (compressible_euler_plane.py:1008, commit aa0a8d75); halo path
+    # was missing it which caused drho_p_dt to diverge by O(1e-4) from
+    # the serial reference.
+    drho_p_dt = drho_p_dt - sponge_full * rho_p
     dw_dt = dw_dt - sponge_half * w
 
     # 10. Biharmonic hyperdiffusion. Two laplacian passes →
@@ -341,7 +544,57 @@ def plane_compressible_euler_slow_tendencies_halo(
             oh.laplacian_vlast_halo(lap_w_pad, grid, h)
         )
 
-    # 11. Smagorinsky LES — gated above (NotImplementedError).
+    # 10b. Explicit vertical θ Laplacian dissipation (column-local,
+    #      no halo needed). Mirrors the serial branch at
+    #      compressible_euler_plane.py:1050-1064.
+    nu_v = float(getattr(config, "vertical_theta_diffusion", 0.0))
+    if nu_v > 0.0 and theta_p.shape[-1] > 2:
+        dz_half = height_coord.dz_half
+        dz_avg = 0.5 * (dz_half[:-1] + dz_half[1:])
+        d2_inner = (
+            theta_p[..., 2:] - 2.0 * theta_p[..., 1:-1] + theta_p[..., :-2]
+        ) / (dz_avg ** 2)
+        pad_axes_v = ((0, 0),) * (theta_p.ndim - 1)
+        d2_theta = jnp.pad(d2_inner, (*pad_axes_v, (1, 1)))
+        dtheta_p_dt = dtheta_p_dt + nu_v * d2_theta
+
+    # 11. Smagorinsky-Lilly LES eddy viscosity (R4 — halo port).
+    #     Computes K_m on the interior using
+    #     :func:`_compute_smagorinsky_K_m_plane_halo`, exchanges K_m
+    #     once, then drives the existing
+    #     :func:`oh.variable_K_diffusion_vlast_halo` on each prognostic
+    #     at its native Arakawa-C staggering.
+    if config.smagorinsky_cs > 0.0:
+        w_pad_half, = packed_exchange_halo_plane_yxz(w, layout=layout)
+        K_m_int = _compute_smagorinsky_K_m_plane_halo(
+            u_pad, v_pad, w_pad_half, grid, height_coord,
+            config.smagorinsky_cs, halo=h,
+        )
+        K_m_pad, = packed_exchange_halo_plane_yxz(K_m_int, layout=layout)
+        K_xface_int = oh.interp_cell_to_xface_vlast_halo(K_m_pad, grid, h)
+        K_yface_int = oh.interp_cell_to_yface_vlast_halo(K_m_pad, grid, h)
+        K_xface_pad, K_yface_pad = packed_exchange_halo_plane_yxz(
+            K_xface_int, K_yface_int, layout=layout,
+        )
+        du_dt = du_dt + oh.variable_K_diffusion_vlast_halo(
+            u_pad, K_xface_pad, grid, h,
+        )
+        dv_dt = dv_dt + oh.variable_K_diffusion_vlast_halo(
+            v_pad, K_yface_pad, grid, h,
+        )
+        K_h_pad = K_m_pad / config.smagorinsky_prandtl
+        dtheta_p_dt = dtheta_p_dt + oh.variable_K_diffusion_vlast_halo(
+            theta_p_pad, K_h_pad, grid, h,
+        )
+        # K_m at half level for w: column-local mean + rigid zero BC.
+        K_m_half_interior = 0.5 * (K_m_pad[..., :-1] + K_m_pad[..., 1:])
+        pad_axes_K = ((0, 0),) * (K_m_half_interior.ndim - 1)
+        K_m_half_pad = jnp.pad(
+            K_m_half_interior, (*pad_axes_K, (1, 1)),
+        )
+        dw_dt = dw_dt + oh.variable_K_diffusion_vlast_halo(
+            w_pad_half, K_m_half_pad, grid, h,
+        )
 
     # 12. Tracer advection.
     tracers = state.tracers.data
@@ -363,8 +616,8 @@ def plane_compressible_euler_slow_tendencies_halo(
 
         def _tracer_tend_one(q_pad, q_int):
             return (
-                oh.upwind_advection_x_halo(q_pad, u_center_pad, grid.dx, h)
-                + oh.upwind_advection_y_halo(q_pad, v_center_pad, grid.dy, h)
+                adv_x(q_pad, u_center_pad, grid.dx, h)
+                + adv_y(q_pad, v_center_pad, grid.dy, h)
                 + _vertical_advection_plane(q_int, w, height_coord, J)
             )
         dtracers_dt = jax.vmap(
@@ -584,6 +837,7 @@ def _slow_tendency_phase2_jit(
     du_dt = du_dt - sponge_full * u
     dv_dt = dv_dt - sponge_full * v
     dtheta_p_dt = dtheta_p_dt - sponge_full * theta_p
+    drho_p_dt = drho_p_dt - sponge_full * rho_p
     dw_dt = dw_dt - sponge_half * w
 
     # Hyperdiffusion (2nd laplacian pass on padded inter outputs).
@@ -601,6 +855,20 @@ def _slow_tendency_phase2_jit(
         drho_p_dt = drho_p_dt - cfg.hyperdiff_rho_coeff * (
             oh.laplacian_vlast_halo(inter_pad["lap_rho_pad"], grid, h)
         )
+
+    # Vertical θ Laplacian dissipation (column-local; matches the
+    # serial branch in compressible_euler_plane.py:1050-1064 and the
+    # main halo entry point — keep both phases in sync).
+    nu_v = float(getattr(cfg, "vertical_theta_diffusion", 0.0))
+    if nu_v > 0.0 and theta_p.shape[-1] > 2:
+        dz_half = height_coord.dz_half
+        dz_avg = 0.5 * (dz_half[:-1] + dz_half[1:])
+        d2_inner = (
+            theta_p[..., 2:] - 2.0 * theta_p[..., 1:-1] + theta_p[..., :-2]
+        ) / (dz_avg ** 2)
+        pad_axes_v = ((0, 0),) * (theta_p.ndim - 1)
+        d2_theta = jnp.pad(d2_inner, (*pad_axes_v, (1, 1)))
+        dtheta_p_dt = dtheta_p_dt + nu_v * d2_theta
 
     zero_phis = jnp.zeros_like(original_state.phis.data)
     dtracers_dt = jnp.zeros_like(original_state.tracers.data)
@@ -641,8 +909,27 @@ def slow_tendency_jit_split(
 
     Tracers + Smag NOT yet supported in this fast path; falls back
     to the eager call when needed.
+
+    iter-56 Codex review: the kernel-2 trace below also lacks branches
+    for Coriolis (HIGH#1), WENO5 advection (HIGH#2), and
+    ``hyperdiff_w_coeff`` (MEDIUM#1). Without an early-fallback those
+    features silently no-op on this fast path while running correctly
+    on ``step_halo``. Extended the fallback set so any production-
+    style config falls through to the eager path, leaving this fast
+    path correct in its narrower regime (no-Smag, no-tracer,
+    no-Coriolis, upwind1, no-hyperdiff_w bench-style runs).
+    Production driver always trips at least one of these gates
+    (Smag c_s=0.2 + 3 tracers) so behaviour is unchanged.
     """
-    if config.smagorinsky_cs > 0.0 or state.tracers.data.shape[-1] > 0:
+    _w_hyperdiff = getattr(config, "hyperdiff_w_coeff", 0.0)
+    _advection = getattr(config, "horizontal_advection_scheme", "upwind1")
+    if (
+        config.smagorinsky_cs > 0.0
+        or state.tracers.data.shape[-1] > 0
+        or config.use_coriolis
+        or _advection != "upwind1"
+        or _w_hyperdiff > 0.0
+    ):
         return plane_compressible_euler_slow_tendencies_halo(
             state, grid, height_coord, terrain_metric, config, layout,
             f_pad_cached=f_pad_cached,

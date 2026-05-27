@@ -292,3 +292,30 @@ def make_wing2018_temperature_ref_fn(
         T_sfc=T_sfc, q_sfc=q_sfc, z_t=z_t, Gamma=Gamma,
         z_q1=z_q1, z_q2=z_q2, q_t=q_t,
     )
+
+
+def build_smooth_k1_pattern(ny: int, nx: int) -> jnp.ndarray:
+    """Build the iter-203 smooth_k1 theta'-noise IC pattern.
+
+    Returns a ``(ny, nx)`` array of ``0.5 * (cos(2π x/nx) + cos(2π y/ny))``
+    with the horizontal mean explicitly subtracted to GUARANTEE zero
+    mean on degenerate grids (nx=1 → cos=1 everywhere, mean=1, not
+    zero-mean per the F11 fix-path-3 contract; iter-207 Codex MEDIUM
+    #1 fix).
+
+    Peak amplitude is 1.0 on healthy grids (nx, ny >= 2); the driver
+    multiplies by ``theta_noise_amp`` [K] to scale.
+
+    iter-208 promoted this helper from scripts/run_rce_mpi_long.py
+    to the rcemip_initial_conditions module so the unit test can
+    import it via the standard package path without loading the
+    heavy driver module (mpi4jax / jax-MPI / argparse / etc.).
+    """
+    jj = jnp.arange(ny, dtype=jnp.float64)
+    ii = jnp.arange(nx, dtype=jnp.float64)
+    yy, xx = jnp.meshgrid(jj, ii, indexing="ij")
+    two_pi = 2.0 * jnp.pi
+    pattern = 0.5 * (
+        jnp.cos(two_pi * xx / nx) + jnp.cos(two_pi * yy / ny)
+    )
+    return pattern - jnp.mean(pattern)

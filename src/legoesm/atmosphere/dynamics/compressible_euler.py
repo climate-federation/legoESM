@@ -122,6 +122,21 @@ class CompressibleEulerConfig(NamedTuple):
                                           # 0.0 = centered (neutral), 0.1 = slightly damped
                                           # Damps vertically-propagating acoustic modes
                                           # without horizontal CFL constraint (Skamarock 2008)
+    implicit_buoyancy: bool = False       # Klemp-Wilhelmson 1978 implicit-buoyancy
+                                          # in the SI acoustic substep. Substitutes
+                                          # theta_p_new = theta_p_c
+                                          #   - dt_s*w_full/J * dtheta_ref/dz
+                                          # into the buoyancy term g*theta_p/theta_0
+                                          # of the w-equation. Adds three nearest-
+                                          # neighbour bands to the existing implicit
+                                          # PG tridiagonal: kappa = 0.25*dt_s^2*g/
+                                          # (theta_0_half*J). Stabilizes the
+                                          # w-theta gravity-wave feedback that
+                                          # destabilizes the plane NH dycore at
+                                          # coarse vertical resolution
+                                          # (dz~1000 m) with stratified ICs.
+                                          # Only active when
+                                          # semi_implicit_acoustic=True.
     # ---- Plane-only fields (PR3c) ----
     # The following two knobs are consumed ONLY by the doubly-periodic
     # plane non-hydrostatic dycore
@@ -144,6 +159,42 @@ class CompressibleEulerConfig(NamedTuple):
                                           # value is ~1/3 for stable stratification.
                                           # Must be > 0 when smagorinsky_cs > 0
                                           # (validate_plane_config enforces).
+    horizontal_advection_scheme: str = "upwind1"
+                                          # Horizontal advection of theta_prime, u, v, w
+                                          # (and tracers) on the plane dycore. Three
+                                          # choices, defined by
+                                          # HORIZONTAL_ADVECTION_HALO_REQUIREMENT in
+                                          # compressible_euler_plane.py:
+                                          # "upwind1" — first-order upwind (cheap, very
+                                          # dispersive at coarse dx).
+                                          # "van_leer" — 2nd-order TVD, stencil 4
+                                          # (iter-183 production: 3x wall-time speedup
+                                          # vs upwind1 at dt=20 thanks to lower
+                                          # numerical diffusion + monotonicity).
+                                          # "weno5" — 5th-order WENO-Z, stencil 6
+                                          # (least grid-scale dispersion but ~3x
+                                          # per-step cost; opt-in for sharp-front
+                                          # problems).
+                                          # Class default stays "upwind1" for back-
+                                          # compat with iter-7 fixtures; the
+                                          # production driver overrides to van_leer
+                                          # at parse_args time (iter-183).
+                                          # Consumed by
+                                          # ``compressible_euler_plane.py`` only;
+                                          # cubed-sphere / MPAS ignore it.
+    vertical_theta_diffusion: float = 0.0
+                                          # Explicit vertical Laplacian diffusivity
+                                          # on theta_prime [m^2/s], applied per outer
+                                          # RK stage. Damps the buoyancy-driven
+                                          # gravity-wave amplification that
+                                          # destabilises the plane NH dycore at
+                                          # dx ~ 2 km / dt > 0.5 s with a coarse
+                                          # vertical grid (dz ~ 1000 m). Rigid (zero)
+                                          # boundary condition at top + bottom.
+                                          # Typical effective value: nu_v ~ 1e3-5e3
+                                          # so dt * nu_v / dz^2 stays below ~0.1
+                                          # (explicit-Euler CFL bound). 0.0 disables.
+                                          # Consumed by plane dycore only.
 
 
 # ==============================================================================
@@ -321,8 +372,11 @@ def _acoustic_column_kernel(
         dz_half_val = height_coord.dz_half  # (nlev-1,)
         dz_centered = dz_half_val[:-1] + dz_half_val[1:]  # (nlev-2,)
         inner_grad = (theta_total[..., :-2] - theta_total[..., 2:]) / dz_centered
-        pad_axes_t = ((0, 0),) * (theta_total.ndim - 1)
-        dtheta_dz = jnp.pad(inner_grad, (*pad_axes_t, (1, 1)))
+        top_grad = (theta_total[..., 0:1] - theta_total[..., 1:2]) / dz_half_val[0]
+        bottom_grad = (
+            theta_total[..., -2:-1] - theta_total[..., -1:]
+        ) / dz_half_val[-1]
+        dtheta_dz = jnp.concatenate([top_grad, inner_grad, bottom_grad], axis=-1)
     else:
         dtheta_dz = jnp.zeros_like(theta_total)
 
@@ -416,6 +470,7 @@ def _semi_implicit_acoustic_column_kernel(
     dt_s: float,
     beta: float,
     g: float,
+    implicit_buoyancy: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Single semi-implicit acoustic substep (column-local algebra).
 
@@ -427,6 +482,15 @@ def _semi_implicit_acoustic_column_kernel(
     Inputs follow the same contract as the explicit kernel:
     ``[..., nlev+1]`` w (rigid lid/bottom), ``[..., nlev]`` theta'+rho',
     ``J`` broadcastable to the horizontal leading axes.
+
+    When ``implicit_buoyancy=True`` the buoyancy contribution
+    ``g * theta_p_half / theta_0_half`` in the w-equation is treated
+    implicitly by substituting the backward theta'-update into the
+    buoyancy term (Klemp-Wilhelmson 1978). This augments the
+    tridiagonal system with three nearest-neighbour bands proportional
+    to the mean-state stratification ``dtheta_ref/dz`` and closes the
+    w<->theta gravity-wave feedback that otherwise grows at coarse
+    vertical resolution.
     """
     c_p = constants.c_pd
     R_d = constants.R_d
@@ -466,6 +530,31 @@ def _semi_implicit_acoustic_column_kernel(
     alpha_interior = jnp.pad(alpha[..., 1:-1], (*pad_axes_a, (1, 1)))
     b_tri = 1.0 + alpha + alpha_interior
     c_tri = jnp.pad(-alpha[..., :-1], (*pad_axes_a, (0, 1)))
+
+    if implicit_buoyancy and nlev > 2:
+        # Mean-state d(theta_ref)/dz at full levels (sign convention matches
+        # the backward theta'-update used downstream).
+        dz_centered = dz_half[:-1] + dz_half[1:]
+        inner_grad_ref = (theta_0[:-2] - theta_0[2:]) / dz_centered
+        top_grad_ref = (theta_0[0:1] - theta_0[1:2]) / dz_half[0]
+        bottom_grad_ref = (theta_0[-2:-1] - theta_0[-1:]) / dz_half[-1]
+        dtheta_ref_dz = jnp.concatenate(
+            [top_grad_ref, inner_grad_ref, bottom_grad_ref], axis=-1,
+        )  # shape (nlev,)
+        # kappa at interior half-levels k_int=0..nlev-2, shape (..., nlev-1)
+        kappa = 0.25 * dt_s ** 2 * g / (theta_0_half * J[..., None])
+        d_above = dtheta_ref_dz[:-1]   # dtheta_dz[k_int]   (above the half-lev)
+        d_below = dtheta_ref_dz[1:]    # dtheta_dz[k_int+1] (below the half-lev)
+        a_buoy_full = kappa * d_above
+        b_buoy_full = kappa * (d_above + d_below)
+        c_buoy_full = kappa * d_below
+        # Boundary handling: drop sub-diag at k_int=0, super-diag at k_int=-1.
+        a_buoy = jnp.pad(a_buoy_full[..., 1:], (*pad_axes_a, (1, 0)))
+        c_buoy = jnp.pad(c_buoy_full[..., :-1], (*pad_axes_a, (0, 1)))
+        a_tri = a_tri + a_buoy
+        b_tri = b_tri + b_buoy_full
+        c_tri = c_tri + c_buoy
+
     w_inner_new = thomas_solve_batched(a_tri, b_tri, c_tri, rhs)
     w_new = w_c.at[..., 1:-1].set(w_inner_new)
 
@@ -483,8 +572,9 @@ def _semi_implicit_acoustic_column_kernel(
     if nlev > 2:
         dz_centered = dz_half[:-1] + dz_half[1:]
         inner_grad = (theta_total[..., :-2] - theta_total[..., 2:]) / dz_centered
-        pad_axes_t = ((0, 0),) * (theta_total.ndim - 1)
-        dtheta_dz = jnp.pad(inner_grad, (*pad_axes_t, (1, 1)))
+        top_grad = (theta_total[..., 0:1] - theta_total[..., 1:2]) / dz_half[0]
+        bottom_grad = (theta_total[..., -2:-1] - theta_total[..., -1:]) / dz_half[-1]
+        dtheta_dz = jnp.concatenate([top_grad, inner_grad, bottom_grad], axis=-1)
     else:
         dtheta_dz = jnp.zeros_like(theta_total)
     theta_p_new = theta_p_c - dt_s * w_full / J[..., None] * dtheta_dz
@@ -547,6 +637,7 @@ def acoustic_substeps_semi_implicit(
     rho_0 = height_coord.rho_ref
     J = terrain_metric.jacobian  # (6, n, n)
     beta = euler_config.acoustic_off_centering
+    implicit_buoyancy = euler_config.implicit_buoyancy
 
     # Linearized sound speed squared: c_s^2 = gamma * R_d * T_ref
     # where T_ref = theta_0 * pi_0 and gamma = c_p / c_v
@@ -556,6 +647,7 @@ def acoustic_substeps_semi_implicit(
 
     # Sound speed at half levels (interior): average of adjacent full levels
     cs2_half = 0.5 * (cs2[:-1] + cs2[1:])  # (nlev-1,)
+    theta_0_half_static = 0.5 * (theta_0[:-1] + theta_0[1:])  # (nlev-1,)
 
     # Extract mutable arrays
     w = state.w.data       # (..., nlev+1)
@@ -563,6 +655,28 @@ def acoustic_substeps_semi_implicit(
     rho_p = state.rho_prime.data      # (..., nlev)
 
     nlev = theta_p.shape[-1]
+
+    # Precompute implicit-buoyancy tridiagonal addends (Klemp-Wilhelmson 1978).
+    # Mean-state dtheta_ref/dz at full levels, then per-half-level kappa.
+    if implicit_buoyancy and nlev > 2:
+        _dz_centered = dz_half[:-1] + dz_half[1:]
+        _inner = (theta_0[:-2] - theta_0[2:]) / _dz_centered
+        _top = (theta_0[0:1] - theta_0[1:2]) / dz_half[0]
+        _bot = (theta_0[-2:-1] - theta_0[-1:]) / dz_half[-1]
+        dtheta_ref_dz = jnp.concatenate([_top, _inner, _bot], axis=-1)  # (nlev,)
+        _kappa = 0.25 * dt_s ** 2 * g / (theta_0_half_static * J[..., None])
+        _d_above = dtheta_ref_dz[:-1]
+        _d_below = dtheta_ref_dz[1:]
+        a_buoy_full = _kappa * _d_above
+        b_buoy_full = _kappa * (_d_above + _d_below)
+        c_buoy_full = _kappa * _d_below
+        _pad_axes_buoy = ((0, 0),) * (a_buoy_full.ndim - 1)
+        a_buoy = jnp.pad(a_buoy_full[..., 1:], (*_pad_axes_buoy, (1, 0)))
+        c_buoy = jnp.pad(c_buoy_full[..., :-1], (*_pad_axes_buoy, (0, 1)))
+    else:
+        a_buoy = None
+        b_buoy_full = None
+        c_buoy = None
 
     # Precompute tridiagonal matrix coefficients for the implicit w solve.
     # The implicit equation at interior half-level k (k=1..nlev-1) is:
@@ -620,6 +734,12 @@ def acoustic_substeps_semi_implicit(
         # Pad HLO op replaces alloc-zeros + scatter.
         c_tri = jnp.pad(-alpha[..., :-1], (*pad_axes_a, (0, 1)))
 
+        # Klemp-Wilhelmson 1978: implicit-buoyancy band additions.
+        if implicit_buoyancy and nlev > 2:
+            a_tri = a_tri + a_buoy
+            b_tri = b_tri + b_buoy_full
+            c_tri = c_tri + c_buoy
+
         # Solve tridiagonal system
         w_inner_new = thomas_solve_batched(a_tri, b_tri, c_tri, rhs)
 
@@ -647,8 +767,13 @@ def acoustic_substeps_semi_implicit(
         if nlev > 2:
             dz_centered = dz_half[:-1] + dz_half[1:]
             inner_grad = (theta_total[..., :-2] - theta_total[..., 2:]) / dz_centered
-            pad_axes_t = ((0, 0),) * (theta_total.ndim - 1)
-            dtheta_dz = jnp.pad(inner_grad, (*pad_axes_t, (1, 1)))
+            top_grad = (theta_total[..., 0:1] - theta_total[..., 1:2]) / dz_half[0]
+            bottom_grad = (
+                theta_total[..., -2:-1] - theta_total[..., -1:]
+            ) / dz_half[-1]
+            dtheta_dz = jnp.concatenate(
+                [top_grad, inner_grad, bottom_grad], axis=-1,
+            )
         else:
             dtheta_dz = jnp.zeros_like(theta_total)
         theta_p_new = theta_p_c - dt_s * w_full / J[..., None] * dtheta_dz

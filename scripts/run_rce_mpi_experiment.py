@@ -103,6 +103,13 @@ def parse_args():
     p.add_argument("--H", type=float, default=20_000.0)
     p.add_argument("--dz-sfc", type=float, default=50.0)
     p.add_argument("--c-h", type=float, default=1.5e-3)
+    p.add_argument("--no-mass-fixer", action="store_true", default=False,
+                   help="iter-95b: disable fix_moist_mass_plane "
+                        "(which rescales total water to IC every step). "
+                        "Default False matches the script's conservation-"
+                        "smoke purpose; set this flag for any spin-up "
+                        "experiment >~1 sim-hour so surface flux can "
+                        "NET ADD moisture instead of being clipped.")
     p.add_argument("--n-acoustic-substeps", type=int, default=12)
     p.add_argument("--output", type=str,
                    default="results/rce_mpi_experiment.txt")
@@ -114,9 +121,15 @@ def build_height_coord_and_state(args, grid):
         T_sfc=T_SFC_K, q_sfc=Q_SFC_FRAC, z_t=Z_T, Gamma=GAMMA_TROP,
     )
     qv_fn = make_wing2018_qv_ref_fn(q_sfc=Q_SFC_FRAC, z_t=Z_T)
+    # iter-95: pass p_sfc=101480 (Wing 2018 Tab A1) so the
+    # hydrostatic reference state uses the bottom-up integration
+    # with the correct surface BC. Without this the legacy top-down
+    # BC produces ~12 K too-hot T at the lowest model level on
+    # H=33 km columns, breaking surface-flux coupling.
     hc = create_stretched_height_coordinate(
         n_levels=args.nlev, H=args.H, dz_sfc=args.dz_sfc,
         theta_ref_fn=theta_fn,
+        p_sfc=101480.0,
     )
     state = make_rest_state(grid, hc, dtype=jnp.float64)
     z = hc.z_full
@@ -232,9 +245,10 @@ def main():
     for step in range(args.steps):
         state = model.step(state, dt=args.dt)
         state = physics_step(state, hc, grid, args.dt, args.c_h)
-        state = fix_moist_mass_plane(
-            state, hc, grid, target_total_water=target_water,
-        )
+        if not args.no_mass_fixer:
+            state = fix_moist_mass_plane(
+                state, hc, grid, target_total_water=target_water,
+            )
         cwv = column_water_vapor_plane(state, hc)
         mse = column_moist_static_energy_plane(state, hc)
         cf = cloud_fraction_profile_plane(state, hc)
