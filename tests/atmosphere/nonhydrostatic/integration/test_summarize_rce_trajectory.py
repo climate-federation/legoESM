@@ -305,12 +305,20 @@ def test_missing_sentinel_value():
 
 def _row(day: float, **overrides) -> "summary_mod.DayRow":
     """Build a minimal DayRow with sensible defaults that pass every
-    criterion. Tests override only the fields they care about."""
+    criterion.
+
+    iter-117 — default CWV varies linearly with ``day`` (50.0 +
+    0.01 * day) so a series of ``_row(float(i))`` calls does NOT
+    trip the new ``detect_stuck_trajectory`` gate (which would
+    otherwise mark every "uniform 50.0 mm" synthetic fixture as a
+    Bug 2 regression). Tests that want the stuck signature pass
+    ``cwv_mean=49.9413`` (or any explicit constant) to override.
+    """
     defaults = dict(
         day=day,
-        cwv_mean=50.0,
-        cwv_min=50.0,
-        cwv_max=50.0,
+        cwv_mean=50.0 + 0.01 * day,
+        cwv_min=50.0 + 0.01 * day,
+        cwv_max=50.0 + 0.01 * day,
         cwv_std=0.0,
         mse_mean=3.5e9,
         precip_mean=0.0,
@@ -373,7 +381,11 @@ def test_evaluate_short_trajectory_marks_insufficient():
     ``verdict.evaluated`` is False. ``passed`` may still be True
     (finite + wind checks ran), but callers can distinguish a real
     plateau-PASS from an INSUFFICIENT verdict."""
-    rows = [_row(float(i), cwv_mean=10.0) for i in range(3)]
+    # iter-117: vary CWV by 0.1 mm/day so the new stuck-trajectory
+    # gate doesn't trip on this fixture (3 days of constant CWV
+    # would be a stuck signature). The plateau check is what we
+    # want to verify is skipped, not the stuck check.
+    rows = [_row(float(i), cwv_mean=10.0 + 0.1 * i) for i in range(3)]
     verdict = summary_mod.evaluate_rce_quality(rows)
     assert verdict.evaluated is False, (
         "3-day trajectory should be marked evaluated=False so "
@@ -592,4 +604,81 @@ def test_evaluate_and_final_dod_mutually_exclusive_exit_code(tmp_path):
         f"Mutually-exclusive arg violation should exit "
         f"EXIT_USAGE={summary_mod.EXIT_USAGE}, got "
         f"{res.returncode}. stderr={res.stderr!r}"
+    )
+
+
+# iter-117: detect_stuck_trajectory regression tests.
+
+
+def test_detect_stuck_trajectory_flags_pinned_cwv():
+    """Pre-iter-95 Bug 2 signature: CWV pinned at IC for 11+ hours
+    by the unconditional fix_moist_mass_plane rescaling. Synthetic
+    fixture mirrors this with 3 consecutive snapshots all at
+    49.9413 mm."""
+    rows = [
+        _row(0.0, cwv_mean=49.9413, cwv_max=49.9413),
+        _row(1.0, cwv_mean=49.9413, cwv_max=49.9413),
+        _row(2.0, cwv_mean=49.9413, cwv_max=49.9413),
+    ]
+    stuck, reason = summary_mod.detect_stuck_trajectory(rows)
+    assert stuck is True
+    assert reason is not None
+    assert "stuck" in reason
+    assert "Bug 2" in reason, (
+        f"reason should reference Bug 2 for future debuggers; "
+        f"got {reason!r}"
+    )
+
+
+def test_detect_stuck_trajectory_passes_iter98_shape():
+    """iter-98 in-flight 32x32 + radiation trajectory has CWV
+    49.94 -> 53.63 -> 55.67 ... — far from stuck. Must NOT trip."""
+    cwv = [49.9413, 53.6327, 55.6672, 56.7736, 57.1817]
+    rows = [_row(float(i), cwv_mean=v, cwv_max=v) for i, v in enumerate(cwv)]
+    stuck, _ = summary_mod.detect_stuck_trajectory(rows)
+    assert not stuck
+
+
+def test_detect_stuck_trajectory_undecided_on_short_trajectory():
+    """Fewer rows than ``consecutive_days`` returns (False, None) —
+    cannot decide yet, NOT a false negative."""
+    rows = [_row(0.0, cwv_mean=49.9413), _row(1.0, cwv_mean=49.9413)]
+    stuck, reason = summary_mod.detect_stuck_trajectory(rows)
+    assert stuck is False
+    assert reason is None
+
+
+def test_detect_stuck_trajectory_tolerates_micro_drift():
+    """A trajectory that drifts by ~1e-5 mm/day (rounding noise)
+    is still effectively stuck — the default 0.001 mm tolerance
+    catches it. Real spin-up is 3-4 mm/day so the tolerance has
+    3+ orders of magnitude margin."""
+    rows = [
+        _row(0.0, cwv_mean=49.9413000),
+        _row(1.0, cwv_mean=49.9413001),
+        _row(2.0, cwv_mean=49.9413002),
+    ]
+    stuck, _ = summary_mod.detect_stuck_trajectory(rows)
+    assert stuck is True
+
+
+def test_stuck_detector_constants_locked():
+    """Lock the defaults so a future widen is visible in code review."""
+    assert summary_mod.DEFAULT_STUCK_CONSECUTIVE_DAYS == 3
+    assert summary_mod.DEFAULT_STUCK_CWV_TOL_MM == 0.001
+
+
+def test_evaluate_quality_wires_stuck_detector():
+    """iter-117: evaluate_rce_quality must flag a stuck trajectory
+    as a FAIL reason. The full evaluator should catch Bug 2
+    regressions END-TO-END, not just via a separate diagnostic."""
+    rows = [
+        _row(float(i), cwv_mean=49.9413, cwv_max=49.9413)
+        for i in range(12)
+    ]
+    verdict = summary_mod.evaluate_rce_quality(rows)
+    assert not verdict.passed
+    assert any("stuck" in r for r in verdict.reasons), (
+        f"evaluate_rce_quality should surface the stuck detector's "
+        f"reason; got {verdict.reasons!r}"
     )

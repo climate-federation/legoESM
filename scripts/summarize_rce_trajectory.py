@@ -360,6 +360,12 @@ def evaluate_rce_quality(
         reasons.append(
             f"non-finite |U|_sfc on day(s) {nonfinite_w!r}"
         )
+    # iter-117: stuck-trajectory detector — surfaces pre-iter-95
+    # Bug 2 regressions (CWV pinned at IC by unconditional mass
+    # fixer).
+    stuck, stuck_reason = detect_stuck_trajectory(rows)
+    if stuck:
+        reasons.append(stuck_reason)  # type: ignore[arg-type]
     # Criteria 2 + 4: need at least last_n_days_for_plateau rows.
     evaluated_plateau = len(rows) >= last_n_days_for_plateau
     if evaluated_plateau:
@@ -403,6 +409,64 @@ def evaluate_rce_quality(
         reasons=reasons,
         evaluated=evaluated_plateau,
     )
+
+
+# iter-117: a "stuck trajectory" detector. Pre-iter-95 Bug 2
+# (unconditional fix_moist_mass_plane rescaling) pinned CWV at the
+# IC value (49.941 mm) for 11+ sim-hours because the mass fixer
+# undid every surface-flux moisture gain. The bug was diagnosed by
+# eyeballing the log; this detector formalises the check so a
+# regression surfaces programmatically.
+DEFAULT_STUCK_CONSECUTIVE_DAYS: int = 3
+DEFAULT_STUCK_CWV_TOL_MM: float = 0.001
+
+
+def detect_stuck_trajectory(
+    rows: list[DayRow],
+    *,
+    consecutive_days: int = DEFAULT_STUCK_CONSECUTIVE_DAYS,
+    cwv_tol_mm: float = DEFAULT_STUCK_CWV_TOL_MM,
+) -> tuple[bool, str | None]:
+    """Detect a "stuck" trajectory where CWV has not changed by
+    more than ``cwv_tol_mm`` over ``consecutive_days`` consecutive
+    snapshots.
+
+    Returns ``(True, reason)`` on detection, ``(False, None)``
+    otherwise.
+
+    Pre-iter-95 Bug 2 signature: ``cwv_mean`` reported the IC value
+    (49.941 mm) on every snapshot. Surface flux WAS adding qv at
+    the lowest model level but the unconditional
+    ``fix_moist_mass_plane`` rescaled total water back to IC every
+    outer step. ``cwv_tol_mm = 0.001`` flags a column-mean change of
+    < 1 micron — pre-iter-95 the actual stuck signal was < 1e-9 mm
+    (literally bit-for-bit identical across snapshots) so the
+    threshold has 6 orders of magnitude of margin.
+
+    Trajectories shorter than ``consecutive_days`` return
+    ``(False, None)`` (cannot decide yet — caller can re-check
+    later).
+    """
+    if len(rows) < consecutive_days:
+        return False, None
+    finite_rows = [r for r in rows if math.isfinite(r.cwv_mean)]
+    if len(finite_rows) < consecutive_days:
+        return False, None
+    # Sliding window of consecutive_days rows.
+    for i in range(len(finite_rows) - consecutive_days + 1):
+        window = finite_rows[i:i + consecutive_days]
+        cwvs = [r.cwv_mean for r in window]
+        if max(cwvs) - min(cwvs) <= cwv_tol_mm:
+            return True, (
+                f"CWV stuck within {cwv_tol_mm} mm across "
+                f"{consecutive_days} consecutive snapshots "
+                f"(days {window[0].day:.2f}..{window[-1].day:.2f}, "
+                f"CWV range {min(cwvs):.6f}..{max(cwvs):.6f} mm). "
+                f"Pre-iter-95 Bug 2 signature: surface flux gains "
+                f"undone by an unconditional mass fixer. Check "
+                f"--no-mass-fixer / fix_moist_mass_plane wiring."
+            )
+    return False, None
 
 
 # iter-112: full 30-day DOD criterion 2 evaluator. Distinct from
