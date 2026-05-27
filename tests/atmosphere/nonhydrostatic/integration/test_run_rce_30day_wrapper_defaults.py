@@ -632,3 +632,43 @@ def test_wrapper_evaluate_dod_1_threads_evaluate_flag(tmp_path):
     traj = (out_dir / "trajectory.txt").read_text()
     assert "--evaluate" in traj
     assert "--final-dod" not in traj
+
+
+def test_wrapper_evaluate_dod_rejects_typo(tmp_path):
+    """iter-114 Codex MEDIUM#4: ``EVALUATE_DOD=Final`` (or any other
+    typo / unrecognised value) used to silently disable grading.
+    The wrapper now refuses with exit 1 + a stderr error listing
+    the valid values."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _make_stub(bin_dir / "mpirun", exit_code=0)
+    pybin = bin_dir / "fake_pybin"
+    _make_stub(pybin, exit_code=0)
+    out_dir = tmp_path / "wrapper_out"
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["PYBIN"] = str(pybin)
+    env["DAYS"] = "0"
+    env["NX"] = "4"
+    env["NY"] = "4"
+    env["RANKS"] = "1"
+    env["NO_MASS_FIXER"] = "1"
+    env["ALLOW_SUMMARY_FAILURE"] = "0"
+    env["EVALUATE_DOD"] = "Final"  # typo: capital F
+    res = subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+         str(out_dir)],
+        env=env, cwd=str(REPO_ROOT), capture_output=True, text=True,
+        check=False, timeout=30,
+    )
+    assert res.returncode == 1, (
+        f"EVALUATE_DOD=Final should exit 1; got {res.returncode}. "
+        f"stderr={res.stderr!r}"
+    )
+    assert "EVALUATE_DOD='Final'" in res.stderr, (
+        f"stderr should list the offending value verbatim; "
+        f"stderr={res.stderr!r}"
+    )
+    assert "Valid values: 0" in res.stderr, (
+        "stderr should list valid values"
+    )

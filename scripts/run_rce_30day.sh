@@ -160,8 +160,17 @@ ALLOW_SUMMARY_FAILURE="${ALLOW_SUMMARY_FAILURE:-0}"
 # most one.
 EVAL_FLAG=""
 case "$EVALUATE_DOD" in
+    0)     EVAL_FLAG="" ;;
     1)     EVAL_FLAG="--evaluate" ;;
     final) EVAL_FLAG="--final-dod" ;;
+    # iter-114 Codex MEDIUM#4: a typo like ``Final`` or ``spinup``
+    # silently disabled grading pre-iter-114. Refuse instead.
+    *)
+        echo "ERROR: EVALUATE_DOD='$EVALUATE_DOD' not recognised." >&2
+        echo "  Valid values: 0 (default, no grading), 1 (spinup gate)," >&2
+        echo "                final (30-day production gate)." >&2
+        exit 1
+        ;;
 esac
 echo "Computing per-day RCE trajectory summary..."
 set +e

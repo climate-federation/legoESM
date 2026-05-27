@@ -259,9 +259,14 @@ class QualityVerdict:
 
 # iter-104 Codex MEDIUM#7 fix: distinct CLI exit codes so automation
 # can distinguish a DOD FAIL verdict from an IO / parse error.
+# iter-114 LOW#2: argparse uses exit 2 for misuse (CLI usage error);
+# don't reuse it. EXIT_USAGE is just an alias for that fact, kept here
+# so the constants table is the single source of truth.
 EXIT_OK = 0
 EXIT_IO_ERROR = 1            # raised by Python on uncaught
                               # FileNotFoundError / ValueError
+EXIT_USAGE = 2               # argparse.error / mutually-exclusive
+                              # arg violations
 EXIT_DOD_FAIL = 3            # --evaluate ran and at least one
                               # criterion failed
 EXIT_DOD_INSUFFICIENT = 4    # --evaluate ran but trajectory too
@@ -434,6 +439,16 @@ def evaluate_rce_final_dod(
     Use this once a 30-day production run finishes (iter-105 is the
     first such target). ``--evaluate`` continues to use the spinup
     gate so 10-day runs like iter-98 still get a verdict.
+
+    iter-114 Codex LOW#6 — plateau-window scoping: ``min_days`` is a
+    *data sufficiency* gate, not a full-window certification. The
+    plateau CWV + MSE drift checks only inspect the LAST
+    ``last_n_days_for_plateau`` rows (default 10). A 30-day run with a
+    transient blow-up at day 5 that subsequently recovers WILL pass
+    the final-DOD gate because the unstable window is not in the
+    final 10 days. Callers who need full-window certification should
+    additionally check ``max_w_threshold_ms`` (already covered) +
+    eyeball the trajectory.csv for the missing window.
     """
     reasons: list[str] = []
     # If the trajectory is too short, fail INSUFFICIENT without
@@ -499,7 +514,11 @@ def main() -> None:
     )
     args = p.parse_args()
     if args.evaluate and args.final_dod:
-        raise SystemExit(
+        # iter-114 Codex LOW#2: ``raise SystemExit("msg")`` exits 1,
+        # colliding with EXIT_IO_ERROR. ``argparse.error`` exits
+        # EXIT_USAGE (2), which is the POSIX convention for CLI
+        # misuse and distinct from both IO and DOD-FAIL exits.
+        p.error(
             "--evaluate (spinup gate) and --final-dod (30-day DOD "
             "gate) are mutually exclusive; pick one."
         )

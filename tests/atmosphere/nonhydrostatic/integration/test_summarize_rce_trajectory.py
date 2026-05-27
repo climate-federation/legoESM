@@ -518,27 +518,38 @@ def test_final_dod_passes_on_quiet_30_day_run():
 
 
 def test_final_dod_tighter_mse_gate_than_spinup():
-    """A 30-day trajectory with 3 % MSE drift over the last 10
-    days passes the spinup gate (5 %) but FAILS the FINAL DOD
-    gate (1 %). Both checks use the same plateau window length so
-    the only difference is the tolerance."""
+    """A 30-day trajectory whose MSE drift over the last 10 days
+    sits BETWEEN the final-DOD gate (1 %) and the spinup gate (5 %)
+    passes spinup but FAILS final-DOD.
+
+    iter-114 Codex LOW#3 — pin the synthetic drift to the active
+    constants so a future widening / tightening of either gate
+    forces the test to be re-evaluated (currently target drift =
+    geometric mean of the two gates ≈ 2.24 %, well inside the 1 %
+    vs 5 % band)."""
+    final = summary_mod.DOD_FINAL_MSE_DRIFT
+    spinup = summary_mod.DEFAULT_MSE_RELATIVE_DRIFT
+    # Geometric mean keeps the synthetic comfortably inside both
+    # gates' band regardless of how either gate moves.
+    target_drift_per_step = (final * spinup) ** 0.5 / 9.0
     rows = []
     for i in range(30):
-        # 0 days .. 19 days: flat. Days 20..29: linear ramp giving
-        # ~3 % drift on the last 10 days. Spinup gate passes,
-        # FINAL DOD fails.
         if i < 20:
             mse = 1.0e9
         else:
-            mse = 1.0e9 * (1.0 + 0.003 * (i - 20))
+            mse = 1.0e9 * (1.0 + target_drift_per_step * (i - 20))
         rows.append(_row(float(i), mse_mean=mse))
-    spinup = summary_mod.evaluate_rce_quality(rows)
-    final = summary_mod.evaluate_rce_final_dod(rows)
-    assert spinup.passed, "5 % gate should pass on this trajectory"
-    assert not final.passed, (
-        "1 % final-DOD gate should FAIL on the same trajectory"
+    spinup_verdict = summary_mod.evaluate_rce_quality(rows)
+    final_verdict = summary_mod.evaluate_rce_final_dod(rows)
+    assert spinup_verdict.passed, (
+        f"{spinup * 100:g}% spinup gate should pass on this "
+        f"trajectory; reasons: {spinup_verdict.reasons!r}"
     )
-    assert any("MSE relative drift" in r for r in final.reasons)
+    assert not final_verdict.passed, (
+        f"{final * 100:g}% final-DOD gate should FAIL on the same "
+        f"trajectory; reasons: {final_verdict.reasons!r}"
+    )
+    assert any("MSE relative drift" in r for r in final_verdict.reasons)
 
 
 def test_final_dod_constants_locked():
@@ -546,3 +557,39 @@ def test_final_dod_constants_locked():
     are constants so a future widening is visible in code review."""
     assert summary_mod.DOD_FINAL_MSE_DRIFT == 0.01
     assert summary_mod.DOD_FINAL_MIN_DAYS == 30
+
+
+def test_exit_usage_constant():
+    """iter-114 Codex LOW#2: EXIT_USAGE=2 (argparse convention) is a
+    distinct constant from EXIT_IO_ERROR=1; CLI misuse no longer
+    collides with IO errors."""
+    assert summary_mod.EXIT_USAGE == 2
+    assert summary_mod.EXIT_USAGE != summary_mod.EXIT_IO_ERROR
+    assert summary_mod.EXIT_USAGE != summary_mod.EXIT_DOD_FAIL
+    assert summary_mod.EXIT_USAGE != summary_mod.EXIT_DOD_INSUFFICIENT
+
+
+def test_evaluate_and_final_dod_mutually_exclusive_exit_code(tmp_path):
+    """iter-114 Codex LOW#2: passing both --evaluate AND --final-dod
+    must exit with EXIT_USAGE (2), not the SystemExit(str) default
+    of 1 (which collides with EXIT_IO_ERROR)."""
+    import subprocess
+    snaps = tmp_path / "snapshots"
+    snaps.mkdir()
+    _write_snapshot(snaps / "snap_day_0000.npz", day=0.0, cwv_value=50.0)
+    res = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[4]
+                / "scripts" / "summarize_rce_trajectory.py"),
+            str(tmp_path),
+            "--evaluate",
+            "--final-dod",
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    assert res.returncode == summary_mod.EXIT_USAGE, (
+        f"Mutually-exclusive arg violation should exit "
+        f"EXIT_USAGE={summary_mod.EXIT_USAGE}, got "
+        f"{res.returncode}. stderr={res.stderr!r}"
+    )
