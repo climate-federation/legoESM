@@ -230,15 +230,37 @@ def _sample_along_section(
 ):
     """Band-restricted K-NN IDW sample along an arbitrary section.
 
-    ``band_axis`` is ``"lat"`` or ``"lon"``. The KDTree is built only
-    from ocean cells inside [center - halfwidth, center + halfwidth]
-    on that axis, so a transect cannot pull values from across a
-    continent. Target points whose nearest neighbour exceeds
-    ``max_dist_deg`` (great-circle, ≈ 2-3 native cell widths) become
-    NaN — this is what carves the continents out of the section.
+    ``band_axis`` is ``"lat"`` or ``"lon"``. Two-stage logic:
+
+    1. **Land/ocean classification of target points**: nearest cell on
+       the full sphere (including land cells) decides whether each
+       target is "over land" — those become NaN unconditionally so
+       coastlines render correctly. Without this step, the K-NN
+       below would happily reach across a coastline up to
+       ``max_dist_deg`` (≈ 2.5 native cell widths) and paint ocean
+       values onto continents — particularly bad on coarse MPAS grids.
+
+    2. **K-NN IDW over band-restricted ocean cells** for the surviving
+       (ocean) targets. ``max_dist_deg`` still serves as a backstop
+       for points in narrow ocean passages.
     """
     if max_dist_deg is None:
         max_dist_deg = 2.5 * _cell_width_deg(data)
+    n_lev = field.shape[1]
+    n_tgt = len(target_lat)
+    out = np.full((n_tgt, n_lev), np.nan)
+
+    # ---- Stage 1: land/ocean classification (full-sphere nearest cell) ----
+    all_pts = _xyz(data["lat"], data["lon"])
+    tgt_pts = _xyz(np.asarray(target_lat, dtype=float),
+                   np.asarray(target_lon, dtype=float))
+    all_tree = cKDTree(all_pts)
+    _, near_idx = all_tree.query(tgt_pts, k=1)
+    target_is_ocean = data["ocean"][near_idx]
+    if not target_is_ocean.any():
+        return out
+
+    # ---- Stage 2: band-restricted K-NN IDW for ocean targets ----
     if band_axis == "lat":
         in_band = data["ocean"] & (np.abs(data["lat"] - band_center)
                                    <= band_halfwidth)
@@ -248,15 +270,11 @@ def _sample_along_section(
     else:
         raise ValueError(band_axis)
     sub_idx = np.where(in_band)[0]
-    n_lev = field.shape[1]
-    n_tgt = len(target_lat)
     if sub_idx.size == 0:
-        return np.full((n_tgt, n_lev), np.nan)
+        return out
 
     sub_pts = _xyz(data["lat"][sub_idx], data["lon"][sub_idx])
     tree = cKDTree(sub_pts)
-    tgt_pts = _xyz(np.asarray(target_lat, dtype=float),
-                   np.asarray(target_lon, dtype=float))
     k_eff = int(min(k, sub_idx.size))
     dists, ki = tree.query(tgt_pts, k=k_eff)
     if k_eff == 1:
@@ -272,8 +290,11 @@ def _sample_along_section(
     num = np.sum(vals * w3, axis=1)              # (n_tgt, n_lev)
     den = np.sum(w3, axis=1)
     with np.errstate(invalid="ignore", divide="ignore"):
-        out = num / den
-    out[den == 0] = np.nan
+        sampled = num / den
+    sampled[den == 0] = np.nan
+
+    # Apply the land mask: keep only ocean targets.
+    out[target_is_ocean, :] = sampled[target_is_ocean, :]
     return out
 
 
@@ -377,11 +398,15 @@ def main():
     p.add_argument("--set", dest="set_name", default="idealized",
                    choices=sorted(RUN_SETS.keys()),
                    help="Which run set to compare (default: idealized).")
+    p.add_argument("--out-suffix", default="",
+                   help="Optional suffix appended to the output folder "
+                        "name (use to keep prior runs side-by-side).")
     args = p.parse_args()
 
     runs = RUN_SETS[args.set_name]
     tag = f"day{int(args.day)}"
-    outdir = DATA_ROOT / f"comparison_{args.set_name}_sections_{tag}"
+    suffix = f"_{args.out_suffix}" if args.out_suffix else ""
+    outdir = DATA_ROOT / f"comparison_{args.set_name}_sections_{tag}{suffix}"
     outdir.mkdir(exist_ok=True)
 
     z = _z_star()
