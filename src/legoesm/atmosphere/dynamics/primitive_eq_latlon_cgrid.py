@@ -773,12 +773,45 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                         if name in dq:
                             dq[name] = dq[name] + dq_field.data
 
-            # Polar filter: damp high-frequency modes near poles
+            # Polar filter: damp high-frequency modes near poles for
+            # EVERY transported quantity (dT, dps, du, dv, every dq).
+            # Filtering only dT/dps/du leaves dv + tracers running at
+            # full explicit resolution near the poles, so the lifted
+            # equatorial-CFL dt (which only the filtered fields can
+            # tolerate) would crash on the unfiltered transport.
+            # Codex review of Stage 3-E BLOCK #1 + #2 caught this.
             if self._polar_mask is not None:
                 dT = fourier_filter_3d(dT, self.grid, self._polar_mask)
                 dps = fourier_filter(dps, self.grid, self._polar_mask)
+
+                # u: lon-interface, shape (n_lat, n_lon+1, nlev).  Drop
+                # the duplicated last lon column, filter, then restore
+                # the periodicity column from the filtered first column.
                 du_int = fourier_filter_3d(du[:, :-1, :], self.grid, self._polar_mask)
                 du = jnp.concatenate([du_int, du_int[:, 0:1, :]], axis=1)
+
+                # v: lat-interface, shape (n_lat+1, n_lon, nlev).  Mask
+                # has n_lat rows; filter the first n_lat lat-interface
+                # rows and re-append the final row (north-pole v-face,
+                # which the dycore BC zeros each step anyway).  Using
+                # the cell-centered mask at v-face indices introduces
+                # a half-cell lat offset in mask coefficients — the
+                # filter cutoff differs by <O(dlat) in lat, which is
+                # well within the cos(lat) tolerance the CFL margin
+                # already absorbs.
+                dv_int = fourier_filter_3d(dv[:dT.shape[0], :, :], self.grid, self._polar_mask)
+                dv = jnp.concatenate([dv_int, dv[-1:, :, :]], axis=0)
+
+                # Tracers: each transported tracer has the same
+                # (n_lat, n_lon, nlev) shape as dT, so the same mask
+                # applies directly.  Without this loop, the lifted
+                # equatorial-CFL dt would race the (un-filtered)
+                # polar tracer advection past its CFL.
+                if dq:
+                    dq = {
+                        name: fourier_filter_3d(dq_field, self.grid, self._polar_mask)
+                        for name, dq_field in dq.items()
+                    }
 
             return CGridLatLonHydrostaticState(
                 u=du, v=dv, T=dT, p_s=dps,

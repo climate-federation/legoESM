@@ -50,8 +50,15 @@ cd "${REPO_ROOT}"
 : "${START_YEAR:=1979}"
 : "${END_YEAR:=2014}"            # CMIP6 AMIP standard span
 : "${TARGET_DAYS:=36500}"        # 100 yr — restart chain handles spillover
-: "${DT:=300.0}"                 # 5-min dt at 1° (CFL-conservative)
-: "${RAD_UPDATE_STEPS:=12}"      # 1-h radiation cadence at dt=300
+: "${DT:=270.0}"                 # equatorial-CFL safe at 1° under polar filter
+: "${RAD_UPDATE_STEPS:=13}"      # ~1-h radiation cadence at dt=270 (3510 s ≈ 1 h)
+# Stage 3-E sizing note: at 1° (n_lat=180, n_lon=360),
+#   dx_equator = 2π R / n_lon ≈ 1.11e5 m
+# Advective CFL with c=300 m/s, CFL=0.8 gives dt_max ≈ 296 s.  DT=270
+# leaves ~9% margin and avoids ``component_factory``'s clamp.  The
+# polar filter handles the pole-cell CFL by truncating modes that
+# would violate it at this dt.  Without ``--use-polar-filter`` the
+# clamp would drop dt to ~5 s — 60× slowdown.
 : "${OUTPUT_DIR:=${REPO_ROOT}/results/amip_1deg_latlon_mpi}"
 : "${FORCING_DIR:=${REPO_ROOT}/forcing_amip}"
 

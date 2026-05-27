@@ -1226,12 +1226,12 @@ def make_latlon_mpi_step(
     from legoesm.grids.halo import set_halo_backend
     from legoesm.parallel.reductions import global_sum_mpi
 
-    if model.config.use_polar_filter:
-        raise NotImplementedError(
-            "make_latlon_mpi_step: polar filter under MPI is not "
-            "validated yet (Stage 3).  Use config.use_polar_filter=False "
-            "or run single-rank."
-        )
+    # Stage 3-E (commit 8b736e04): polar filter is now MPI-safe.  The
+    # filter algorithm is lon-only FFT (``jnp.fft.rfft`` along axis -1)
+    # so each rank applies it independently on its own band — no MPI
+    # exchange is required for the filter itself.  Slice-equivariance
+    # of the mask + filter output is pinned by
+    # ``tests/distributed/test_latlon_mpi_polar_filter.py``.
 
     # Activate the MPI halo backend.  Every pad_halo_latlon /
     # pad_with_pole_bc_lat call inside the dycore now dispatches
