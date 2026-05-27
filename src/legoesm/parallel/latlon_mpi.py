@@ -818,6 +818,92 @@ def strip_halos(state, layout: LatLonBandLayout, halo: int = 1):
     )
 
 
+def slice_latlon_grid_to_band(grid, layout: LatLonBandLayout):
+    """Slice a global ``LatLonGrid`` to this rank's lat band.
+
+    All latitude-dependent metric arrays (1-D: ``lat``, ``cos_lat``,
+    ``sin_lat``, ``dy``; 2-D: ``lat2d``, ``lon2d``, ``f``, ``dx``,
+    ``area``) are sliced along axis 0 to ``[lat_start:lat_end]``.
+    The scalar ``total_area`` is REPLACED with the rank's *global*
+    sphere area via ``global_sum_mpi(rank_local_band_area)`` so that
+    the mass fixer's uniform p_s correction divides by the right
+    denominator (the rank-local sum would be the band area only).
+
+    The ``n_lat`` field on the returned grid is the rank-local row
+    count (``layout.n_lat_local``), so downstream code that reads
+    ``grid.n_lat`` sees what this rank actually owns.
+
+    Used by
+    -------
+    * ``ModelDriver.setup()`` when ``grid_type=latlon`` and the
+      runtime bootstrap activated MPI — see Stage 3-B in commit
+      log.
+    * ``make_latlon_mpi_step``'s ``fixer_model`` construction —
+      same operation, kept inlined there for the wrapper-function
+      entry-point that bypasses ModelDriver.
+    * Multi-rank tests in
+      ``tests/distributed/test_latlon_mpi_step.py`` (extract from
+      the ad-hoc ``_make_local_model`` helper).
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+        Global grid covering the full sphere.
+    layout : LatLonBandLayout
+        This rank's band.
+
+    Returns
+    -------
+    LatLonGrid
+        Rank-local grid with global ``total_area`` (allreduced).
+    """
+    from legoesm.parallel.reductions import global_sum_mpi
+    s, e = layout.lat_start, layout.lat_end
+    band_area = grid.area[s:e, :]
+    band_total = jnp.sum(band_area)
+    # Allreduce → global sphere area.  Under the local backend
+    # this is a no-op (returns the local value unchanged), so the
+    # function also works correctly at single-rank.
+    global_total = global_sum_mpi(band_total)
+    return grid._replace(
+        n_lat=layout.n_lat_local,
+        lat=grid.lat[s:e],
+        lat2d=grid.lat2d[s:e, :],
+        lon2d=grid.lon2d[s:e, :],
+        cos_lat=grid.cos_lat[s:e],
+        sin_lat=grid.sin_lat[s:e],
+        dy=grid.dy[s:e],
+        f=grid.f[s:e, :],
+        dx=grid.dx[s:e, :],
+        area=band_area,
+        total_area=global_total,
+    )
+
+
+def pole_v_bc_for_layout(layout: LatLonBandLayout) -> tuple[bool, bool]:
+    """Return the ``(south_pole, north_pole)`` flags for a band.
+
+    True at an end means that end of this rank's band is the *actual*
+    global pole — the wall-BC v=0 enforcement must fire there.
+    False means that end is an interior partition cut (shared with a
+    neighbouring rank's v-row) and must NOT be zeroed.
+
+    Used to set ``CGridLatLonPrimitiveEquationConfig.pole_v_bc``.
+    """
+    return (layout.south_rank is None, layout.north_rank is None)
+
+
+def slice_latlon_state_to_band(state, layout: LatLonBandLayout):
+    """Slice a global ``CGridLatLonHydrostaticState`` to a rank-local band.
+
+    Thin alias for :func:`scatter_state_latlon` exposed at the
+    function level with a name that mirrors
+    :func:`slice_latlon_grid_to_band` — same convention for callers
+    who slice the grid + state at ModelDriver setup time.
+    """
+    return scatter_state_latlon(state, layout)
+
+
 def build_padded_grid(grid, layout: LatLonBandLayout, halo: int = 1):
     """Build a ``LatLonGrid`` for the padded local domain (interior + halos).
 

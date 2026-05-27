@@ -240,7 +240,35 @@ class ModelDriver:
             self.grid = create_gaussian_grid(gc.resolution)
         elif gc.grid_type == "latlon":
             from legoesm.grids.latlon import create_latlon_grid
-            self.grid = create_latlon_grid(gc.resolution)
+            global_grid = create_latlon_grid(gc.resolution)
+            # Stage 3-B: under lat-lon band MPI, slice the global grid
+            # to this rank's lat band.  The runtime bootstrap (Stage
+            # 3-A) already activated set_halo_backend("mpi", layout)
+            # via initialize_distributed_latlon — query that layout
+            # via the standard ``get_mpi_topology`` accessor.
+            #
+            # The global grid is preserved as ``self._grid_global``
+            # for downstream code that needs it (state init at the
+            # global grid, output gather to rank 0 — Stage 3-D).
+            from legoesm.grids.halo import get_mpi_topology
+            from legoesm.parallel.latlon_mpi import (
+                LatLonBandLayout, slice_latlon_grid_to_band,
+            )
+            _layout = get_mpi_topology()
+            if (self.config.distributed
+                    and isinstance(_layout, LatLonBandLayout)):
+                self._grid_global = global_grid
+                self.grid = slice_latlon_grid_to_band(global_grid, _layout)
+                logger.info(
+                    "  Lat-lon MPI: rank %d owns rows [%d:%d) of %d "
+                    "(n_lat_local=%d, n_lon=%d).  total_area set to "
+                    "global sphere area via allreduce.",
+                    _layout.rank, _layout.lat_start, _layout.lat_end,
+                    _layout.n_lat_global, _layout.n_lat_local,
+                    _layout.n_lon_global,
+                )
+            else:
+                self.grid = global_grid
         elif gc.grid_type == "mpas":
             # SCVT Voronoi mesh + TRiSK discretization.  Legacy aliases
             # (voronoi, icosahedral, mpas_voronoi) are normalised to
@@ -325,6 +353,37 @@ class ModelDriver:
         )
 
         self.model = create_atmosphere_dycore(self.config, self.grid, self.sigma)
+
+        # Stage 3-B: under lat-lon band MPI the dycore model needs its
+        # config's ``pole_v_bc`` flags set per this rank's pole-touch
+        # state — only the boundary rank zeros the actual global pole
+        # row; interior ranks leave their band-edge v-row alone (it's
+        # an interior v-face shared with the neighbour rank).  Apply
+        # the override after the factory built the model with default
+        # serial flags ``(True, True)``.
+        if self.config.distributed and self.config.grid.grid_type == "latlon":
+            from legoesm.grids.halo import get_mpi_topology
+            from legoesm.parallel.latlon_mpi import (
+                LatLonBandLayout, pole_v_bc_for_layout,
+            )
+            _layout = get_mpi_topology()
+            if isinstance(_layout, LatLonBandLayout):
+                # Model.config is a CGridLatLonPrimitiveEquationConfig
+                # NamedTuple — use ``_replace`` to set the rank-aware
+                # flags.  ``pole_v_bc_offset`` stays 0 because the
+                # backend-aware operator path operates on rank-local
+                # (unpadded) state, not on a pre-padded array.
+                self.model.config = self.model.config._replace(
+                    pole_v_bc=pole_v_bc_for_layout(_layout),
+                    pole_v_bc_offset=0,
+                )
+                logger.info(
+                    "  Lat-lon MPI: pole_v_bc=%s on rank %d "
+                    "(south_pole=%s, north_pole=%s).",
+                    self.model.config.pole_v_bc, _layout.rank,
+                    _layout.south_rank is None,
+                    _layout.north_rank is None,
+                )
 
         # The component factory may clamp dt for pole-cell CFL on lat-lon
         # grids.  Propagate the clamped value back into the driver config
