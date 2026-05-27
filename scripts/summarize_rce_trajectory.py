@@ -400,6 +400,73 @@ def evaluate_rce_quality(
     )
 
 
+# iter-112: full 30-day DOD criterion 2 evaluator. Distinct from
+# evaluate_rce_quality (which uses the 5 % spinup gate) because the
+# DOD production target tightens MSE drift to < 1 % over the last 10
+# days of a 30-day window — the equilibration check applied at the
+# END of a full production run.
+DOD_FINAL_MSE_DRIFT: float = 0.01
+DOD_FINAL_MIN_DAYS: int = 30
+
+
+def evaluate_rce_final_dod(
+    rows: list[DayRow],
+    *,
+    cwv_range_mm: tuple[float, float] = DEFAULT_CWV_RANGE_MM,
+    max_w_threshold_ms: float = DEFAULT_MAX_W_THRESHOLD_MS,
+    final_mse_drift: float = DOD_FINAL_MSE_DRIFT,
+    last_n_days_for_plateau: int = DEFAULT_LAST_N_DAYS_FOR_PLATEAU,
+    min_days: int = DOD_FINAL_MIN_DAYS,
+) -> QualityVerdict:
+    """Evaluate a trajectory against the FULL ``CRM_implementation.md``
+    Definition-of-done criterion 2 — the 30-day equilibration target.
+
+    Differs from ``evaluate_rce_quality`` (the spinup gate) in three
+    ways:
+
+    1. Requires ``len(rows) >= min_days`` (default 30). Anything
+       shorter returns ``evaluated=False``.
+    2. MSE relative drift tolerance defaults to **1 %** (the
+       production DOD requirement) instead of the 5 % spinup gate.
+    3. All the spinup gate's checks (finite CWV, max|U|_sfc < 50
+       m/s, plateau CWV range, runaway-evaporation max) still run.
+
+    Use this once a 30-day production run finishes (iter-105 is the
+    first such target). ``--evaluate`` continues to use the spinup
+    gate so 10-day runs like iter-98 still get a verdict.
+    """
+    reasons: list[str] = []
+    # If the trajectory is too short, fail INSUFFICIENT without
+    # running any check (different semantics from spinup gate's
+    # passed-but-not-evaluated).
+    if len(rows) < min_days:
+        return QualityVerdict(
+            passed=False,
+            reasons=[
+                f"trajectory has {len(rows)} day(s); the 30-day DOD "
+                f"check needs ≥ {min_days} days. Use --evaluate "
+                f"(spinup gate) on shorter runs."
+            ],
+            evaluated=False,
+        )
+
+    # Reuse the spinup-gate checks but pass the tighter MSE drift +
+    # the same plateau window length. Every reason on the spinup
+    # gate is also a reason on the final DOD gate.
+    spinup_verdict = evaluate_rce_quality(
+        rows,
+        cwv_range_mm=cwv_range_mm,
+        max_w_threshold_ms=max_w_threshold_ms,
+        mse_relative_drift=final_mse_drift,
+        last_n_days_for_plateau=last_n_days_for_plateau,
+    )
+    return QualityVerdict(
+        passed=spinup_verdict.passed,
+        reasons=list(spinup_verdict.reasons),
+        evaluated=True,
+    )
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
@@ -417,11 +484,25 @@ def main() -> None:
         "--evaluate",
         action="store_true",
         default=False,
-        help="Evaluate the trajectory against DOD criteria and "
-             "print a PASS/FAIL verdict + reasons. Exit code is "
-             "non-zero on FAIL so the wrapper can gate.",
+        help="Evaluate the trajectory against the DOD SPINUP gate "
+             "(10-day window, 5 %% MSE drift). Prints PASS/FAIL + "
+             "reasons; exit code non-zero on FAIL so the wrapper "
+             "can gate. Mutually exclusive with --final-dod.",
+    )
+    p.add_argument(
+        "--final-dod",
+        action="store_true",
+        default=False,
+        help="Evaluate the trajectory against the FULL 30-day DOD "
+             "criterion 2 (>=30 day rows, 1 %% MSE drift over last "
+             "10 days). Use on a finished 30-day production run.",
     )
     args = p.parse_args()
+    if args.evaluate and args.final_dod:
+        raise SystemExit(
+            "--evaluate (spinup gate) and --final-dod (30-day DOD "
+            "gate) are mutually exclusive; pick one."
+        )
 
     rows = collect_trajectory(args.out_dir)
     csv_path = args.csv or args.out_dir / "trajectory.csv"
@@ -429,25 +510,31 @@ def main() -> None:
     print(format_table(rows))
     print()
     print(f"wrote {csv_path} ({len(rows)} rows)")
-    if args.evaluate:
-        verdict = evaluate_rce_quality(rows)
+    if args.evaluate or args.final_dod:
+        if args.final_dod:
+            verdict = evaluate_rce_final_dod(rows)
+            label = "DOD FINAL"
+        else:
+            verdict = evaluate_rce_quality(rows)
+            label = "DOD"
         # iter-104 Codex MEDIUM#3 + MEDIUM#7: three-way verdict +
         # distinct exit codes so automation can tell PASS from
         # INSUFFICIENT (too short for plateau check) and from a
         # crash on IO / parse error (exit 1 from uncaught Python).
         if not verdict.evaluated:
-            print("DOD verdict: INSUFFICIENT")
-            print(
-                f"  - trajectory has {len(rows)} day(s), need "
-                f"{DEFAULT_LAST_N_DAYS_FOR_PLATEAU} for the plateau check."
-            )
+            print(f"{label} verdict: INSUFFICIENT")
+            if not verdict.reasons:
+                print(
+                    f"  - trajectory has {len(rows)} day(s), need "
+                    f"{DEFAULT_LAST_N_DAYS_FOR_PLATEAU} for the plateau check."
+                )
             for r in verdict.reasons:
                 print(f"  - {r}")
             raise SystemExit(EXIT_DOD_INSUFFICIENT)
         if verdict.passed:
-            print("DOD verdict: PASS")
+            print(f"{label} verdict: PASS")
         else:
-            print("DOD verdict: FAIL")
+            print(f"{label} verdict: FAIL")
             for r in verdict.reasons:
                 print(f"  - {r}")
             raise SystemExit(EXIT_DOD_FAIL)

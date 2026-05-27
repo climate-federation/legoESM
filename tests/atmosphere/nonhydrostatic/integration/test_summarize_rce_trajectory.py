@@ -478,3 +478,71 @@ def test_evaluate_mse_drift_denominator_uses_max_abs():
         f"MSE drift should not fire on this synthetic; reasons: "
         f"{verdict.reasons!r}"
     )
+
+
+# iter-112: evaluate_rce_final_dod regression tests.
+
+
+def test_final_dod_insufficient_under_30_days():
+    """iter-112: trajectories shorter than min_days (default 30)
+    return ``passed=False, evaluated=False`` with a reason
+    explaining why. Distinct from the spinup-gate INSUFFICIENT
+    (which returns passed=True for finite-checks-pass)."""
+    rows = [_row(float(i)) for i in range(15)]
+    verdict = summary_mod.evaluate_rce_final_dod(rows)
+    assert verdict.evaluated is False
+    assert verdict.passed is False
+    assert any("30-day DOD" in r for r in verdict.reasons), (
+        f"INSUFFICIENT should cite the 30-day requirement; got: "
+        f"{verdict.reasons!r}"
+    )
+
+
+def test_final_dod_passes_on_quiet_30_day_run():
+    """A 30-day trajectory with steady CWV around 50 mm and MSE
+    drift below 1 % should pass the FINAL DOD gate (tighter than
+    the spinup 5 %). Drift across the last 10 days = 0.057 % —
+    well under the 1 % gate."""
+    rows = []
+    for i in range(30):
+        # Linear MSE drift = 2e6 per day on a 3.5e9 base → 0.057 %
+        # over the last 10 days. Inside the 1 % gate.
+        mse = 3.5e9 + i * 2.0e6
+        rows.append(_row(float(i), mse_mean=mse))
+    verdict = summary_mod.evaluate_rce_final_dod(rows)
+    assert verdict.evaluated is True
+    assert verdict.passed, (
+        f"30-day quiet trajectory should pass FINAL DOD; reasons: "
+        f"{verdict.reasons!r}"
+    )
+
+
+def test_final_dod_tighter_mse_gate_than_spinup():
+    """A 30-day trajectory with 3 % MSE drift over the last 10
+    days passes the spinup gate (5 %) but FAILS the FINAL DOD
+    gate (1 %). Both checks use the same plateau window length so
+    the only difference is the tolerance."""
+    rows = []
+    for i in range(30):
+        # 0 days .. 19 days: flat. Days 20..29: linear ramp giving
+        # ~3 % drift on the last 10 days. Spinup gate passes,
+        # FINAL DOD fails.
+        if i < 20:
+            mse = 1.0e9
+        else:
+            mse = 1.0e9 * (1.0 + 0.003 * (i - 20))
+        rows.append(_row(float(i), mse_mean=mse))
+    spinup = summary_mod.evaluate_rce_quality(rows)
+    final = summary_mod.evaluate_rce_final_dod(rows)
+    assert spinup.passed, "5 % gate should pass on this trajectory"
+    assert not final.passed, (
+        "1 % final-DOD gate should FAIL on the same trajectory"
+    )
+    assert any("MSE relative drift" in r for r in final.reasons)
+
+
+def test_final_dod_constants_locked():
+    """iter-112: the 1 % final-DOD MSE drift and 30-day minimum
+    are constants so a future widening is visible in code review."""
+    assert summary_mod.DOD_FINAL_MSE_DRIFT == 0.01
+    assert summary_mod.DOD_FINAL_MIN_DAYS == 30
