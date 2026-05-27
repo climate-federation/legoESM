@@ -20,6 +20,8 @@ JIT/AD error deep in the spectral wrapper.
 """
 from __future__ import annotations
 
+import contextlib
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -30,13 +32,6 @@ from legoesm.core.state import (
     SpectralPlanePhysicsState,
     SpectralPlanePhysicsTendencies,
 )
-
-
-# iter-267: explicitly enable x64 at module scope so the fp64
-# parametrise rows actually run at fp64 (without this, JAX silently
-# truncates complex128 → complex64 and float64 → float32, defeating
-# the point of the parametrise).
-jax.config.update("jax_enable_x64", True)
 
 
 # iter-267 (Codex iter-264 round-1 MEDIUM#1 deferred from iter-265):
@@ -50,6 +45,25 @@ _PRECISION_PAIRS = [
     ("fp64", jnp.float64, jnp.complex128),
     ("fp32", jnp.float32, jnp.complex64),
 ]
+
+
+# iter-268 (Codex iter-267 round-1 HIGH): the iter-267 module-scope
+# ``jax.config.update("jax_enable_x64", True)`` leaked into other
+# tests run after this file — specifically broke
+# tests/test_d_con_float32_iter286.py::test_pe_d_con_runs_at_float32
+# whose guard trips on unexpected fp64 arrays. Replaced with a
+# save/restore guard local to each fp64-requiring test body.
+@contextlib.contextmanager
+def _x64_enabled():
+    """Enable jax_enable_x64 inside the with-block, restore prior
+    setting on exit. Use ONLY in the fp64 parametrise row so fp32
+    tests still run at the production default."""
+    prev = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", True)
+    try:
+        yield
+    finally:
+        jax.config.update("jax_enable_x64", prev)
 
 
 def _make_field_with_sentinel(shape, dtype, name, dims, units, sentinel):
@@ -172,8 +186,28 @@ def test_spectral_state_is_namedtuple_pytree(label, real_dtype, cplx_dtype):
     iter-267 (Codex iter-264 round-1 MEDIUM#1): parametrise across
     fp64/complex128 + fp32/complex64 (the precision-policy
     default).
+
+    iter-268 (Codex iter-267 round-1 HIGH + MEDIUM): use
+    ``_x64_enabled()`` context only for the fp64 row + assert
+    explicit dtype after construction so a future regression that
+    silently truncates fp64 → fp32 (e.g. jax_enable_x64 toggle
+    removed) fails immediately rather than passing the
+    self-referential round-trip check.
     """
-    state = _build_dummy_state(real_dtype=real_dtype, complex_dtype=cplx_dtype)
+    fp_ctx = _x64_enabled() if cplx_dtype == jnp.complex128 else contextlib.nullcontext()
+    with fp_ctx:
+        state = _build_dummy_state(real_dtype=real_dtype, complex_dtype=cplx_dtype)
+        # iter-268 MEDIUM: anchor the test against the requested
+        # precision so silent truncation fails.
+        assert state.u_hat.data.dtype == cplx_dtype, (
+            f"u_hat dtype = {state.u_hat.data.dtype}, expected "
+            f"{cplx_dtype} — JAX is silently truncating (likely "
+            f"jax_enable_x64 disabled for fp64 row)."
+        )
+        assert state.phis.data.dtype == real_dtype, (
+            f"phis dtype = {state.phis.data.dtype}, expected "
+            f"{real_dtype}."
+        )
     leaves, treedef = jax.tree_util.tree_flatten(state)
     restored = jax.tree_util.tree_unflatten(treedef, leaves)
     assert isinstance(restored, SpectralPlanePhysicsState)
@@ -197,7 +231,11 @@ def test_spectral_state_is_namedtuple_pytree(label, real_dtype, cplx_dtype):
 @pytest.mark.parametrize("label,real_dtype,cplx_dtype", _PRECISION_PAIRS)
 def test_spectral_tendencies_is_namedtuple_pytree(label, real_dtype, cplx_dtype):
     """Mirror check for SpectralPlanePhysicsTendencies."""
-    tend = _build_dummy_tendencies(real_dtype=real_dtype, complex_dtype=cplx_dtype)
+    fp_ctx = _x64_enabled() if cplx_dtype == jnp.complex128 else contextlib.nullcontext()
+    with fp_ctx:
+        tend = _build_dummy_tendencies(real_dtype=real_dtype, complex_dtype=cplx_dtype)
+        assert tend.du_hat_dt.data.dtype == cplx_dtype
+        assert tend.dphis_dt.data.dtype == real_dtype
     leaves, treedef = jax.tree_util.tree_flatten(tend)
     restored = jax.tree_util.tree_unflatten(treedef, leaves)
     assert isinstance(restored, SpectralPlanePhysicsTendencies)
@@ -223,21 +261,32 @@ def test_spectral_state_tree_map_actually_visits_each_leaf(label, real_dtype, cp
     2*0=0 — a no-op traversal or one that treated Field as opaque
     leaf passed silently. iter-265 uses unique nonzero sentinels +
     asserts new == 2*original element-wise. iter-267 adds fp32
-    parametrise.
+    parametrise; iter-268 adds the x64-context guard so fp64 isn't
+    silently truncated AND doesn't leak to other tests.
     """
-    state = _build_dummy_state(real_dtype=real_dtype, complex_dtype=cplx_dtype)
-    doubled = jax.tree_util.tree_map(lambda x: 2.0 * x, state)
-    assert isinstance(doubled, SpectralPlanePhysicsState)
-    for fld in SpectralPlanePhysicsState._fields:
-        orig = np.asarray(getattr(state, fld).data)
-        new = np.asarray(getattr(doubled, fld).data)
-        assert orig.shape == new.shape
-        assert orig.dtype == new.dtype
-        np.testing.assert_array_equal(new, 2.0 * orig, err_msg=(
-            f"tree_map(lambda x: 2*x) did not double field "
-            f"{fld!r} — either the field is being treated as an "
-            f"opaque leaf or tree_map is no-op'ing."
-        ))
+    fp_ctx = _x64_enabled() if cplx_dtype == jnp.complex128 else contextlib.nullcontext()
+    with fp_ctx:
+        state = _build_dummy_state(real_dtype=real_dtype, complex_dtype=cplx_dtype)
+        assert state.u_hat.data.dtype == cplx_dtype
+        # iter-268: ``2.0 * state.u_hat.data`` must evaluate INSIDE
+        # the with-block; outside, x64 is disabled and JAX silently
+        # truncates complex128 → complex64 mid-pipeline, breaking
+        # the dtype-equality check.
+        doubled = jax.tree_util.tree_map(lambda x: 2.0 * x, state)
+        assert isinstance(doubled, SpectralPlanePhysicsState)
+        for fld in SpectralPlanePhysicsState._fields:
+            orig = np.asarray(getattr(state, fld).data)
+            new = np.asarray(getattr(doubled, fld).data)
+            assert orig.shape == new.shape
+            assert orig.dtype == new.dtype, (
+                f"field {fld!r}: orig dtype={orig.dtype}, "
+                f"new dtype={new.dtype}"
+            )
+            np.testing.assert_array_equal(new, 2.0 * orig, err_msg=(
+                f"tree_map(lambda x: 2*x) did not double field "
+                f"{fld!r} — either the field is being treated as an "
+                f"opaque leaf or tree_map is no-op'ing."
+            ))
 
 
 _EXPECTED_STATE_FIELDS = (
