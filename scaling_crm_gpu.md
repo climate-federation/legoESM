@@ -117,6 +117,31 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 31 — 2026-05-27 — production-config bench: 410 Mc/s with Smagorinsky LES
+
+Replicated `run_rce_mpi_long.py` config (smag_cs=0.2, hyperdiff=5e6,
+sponge_width=10km, use_coriolis=False) at N=192 fp32:
+
+| metric                | bench-default | production-config |
+|-----------------------|---------------|--------------------|
+| Throughput            | 670-820 Mc/s  | **410 Mc/s** (-40%) |
+| 500-step |u|_max      | 0.04 m/s      | 70 m/s             |
+| 2000-step finite?     | NaN           | NaN                |
+
+Smagorinsky LES filter adds ~40% overhead but **doesn't fix
+long-run stability** with the smooth_k1 IC. Production driver's
+stability comes from:
+1. `fix_mass=True` (incompatible with `lax.scan` due to tracer leak;
+   driver uses Python step loop)
+2. Surface fluxes + radiation + microphysics tendencies
+3. Multi-day spin-up with smaller initial perturbation
+
+⇒ **Bench numbers are real but production-throughput is ~410 Mc/s
+on this hardware (smag_cs=0.2 overhead).** The "minimum-code"
+constraint here means we can't restructure the bench to use the
+non-scan driver path; future work could measure production-grade
+throughput properly.
+
 ### Iter 30 — 2026-05-27 — validated smooth_k1 IC also fails long-run
 
 Used the legoesm-validated `build_smooth_k1_pattern` from
