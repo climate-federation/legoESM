@@ -348,6 +348,65 @@ def test_driver_consults_shared_halo_requirement_map():
     )
 
 
+def test_driver_argparse_theta_noise_mode_choices_locked():
+    """iter-211 Codex LOW: lock the exact ``--theta-noise-mode``
+    choices list via AST so a future PR that adds a 'smooth_k2'
+    (or any other) mode without updating the iter-204
+    test_smooth_k1_pattern_zero_mean_and_bounded grid sweep
+    (or adding a sibling pattern test) surfaces here.
+
+    Unlike --advection (iter-193) the theta-noise-mode choices
+    are NOT yet derived from a shared registry — both modes are
+    hand-coded in the driver dispatch. Lock the EXACT list ``[
+    "white", "smooth_k1"]`` so introducing a new mode forces a
+    coordinated update in tests AND in build_smooth_k1_pattern's
+    sibling pattern functions.
+    """
+    import ast
+    tree = ast.parse(DRIVER.read_text())
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute)
+                and func.attr == "add_argument"):
+            continue
+        if not (node.args and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "--theta-noise-mode"):
+            continue
+        # Found the --theta-noise-mode add_argument call.
+        choices_kw = next(
+            (kw for kw in node.keywords if kw.arg == "choices"),
+            None,
+        )
+        assert choices_kw is not None, (
+            "--theta-noise-mode add_argument missing choices kwarg "
+            "(iter-211 contract: explicit list with paired tests)."
+        )
+        val = choices_kw.value
+        # Expect a List of string Constants: ["white", "smooth_k1"]
+        assert isinstance(val, ast.List), (
+            f"--theta-noise-mode choices must be a list literal; "
+            f"got ast.dump(val)={ast.dump(val)}"
+        )
+        names = [
+            elt.value for elt in val.elts
+            if isinstance(elt, ast.Constant)
+        ]
+        assert names == ["white", "smooth_k1"], (
+            f"--theta-noise-mode choices = {names}, expected "
+            f"['white', 'smooth_k1']. iter-211 contract: any new "
+            f"mode must come with paired pattern + unit test "
+            f"updates so the iter-204 four-grid coverage isn't left "
+            f"stale."
+        )
+        return
+    pytest.fail(
+        "Driver source has no ``p.add_argument(\"--theta-noise-mode\", ...)`` "
+        "call — iter-203 dispatch broken."
+    )
+
+
 def test_theta_noise_defaults(driver_defaults):
     """iter-181 added --theta-noise-amp / --theta-noise-seed for the
     RCEMIP / Wing 2018 standard theta' symmetry-breaker. Default
