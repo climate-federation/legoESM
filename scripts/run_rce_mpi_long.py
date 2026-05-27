@@ -764,14 +764,17 @@ def main():
         return
 
     # iter-186 Codex HIGH: the halo width must match the advection
-    # scheme's stencil reach. upwind1 needs halo=1 (stencil ±1),
-    # van_leer needs halo>=2 (stencil ±1 each side of face + 1
-    # extra for the +2 read), weno5 needs halo>=3 (stencil ±3).
-    # Pre-iter-186 the layout always defaulted to halo=1 so
-    # --use-dd --advection van_leer (the iter-183 production combo)
-    # crashed at the first halo slow-tendency call.
-    _SCHEME_HALO = {"upwind1": 1, "van_leer": 2, "weno5": 3}
-    _required_halo = _SCHEME_HALO[args.advection]
+    # scheme's stencil reach. Pre-iter-186 the layout always
+    # defaulted to halo=1 so --use-dd --advection van_leer (the
+    # iter-183 production combo) crashed at the first halo
+    # slow-tendency call. iter-187 promoted the per-scheme halo
+    # requirements to a public map in compressible_euler_plane so
+    # caller (driver) + callee (halo dispatch) consult the SAME
+    # source of truth — no more silent drift.
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        HORIZONTAL_ADVECTION_HALO_REQUIREMENT,
+    )
+    _required_halo = HORIZONTAL_ADVECTION_HALO_REQUIREMENT[args.advection]
     layout = make_plane_pencil_layout(
         rank=rank, n_ranks=n_ranks,
         n_ranks_y=n_ranks_y, n_ranks_x=n_ranks_x,

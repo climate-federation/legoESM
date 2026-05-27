@@ -401,6 +401,28 @@ def make_rest_state(
 
 
 # --------------------------------------------------------------------- #
+# Horizontal advection scheme registry — single source of truth for     #
+# valid scheme names + their halo-width requirements. iter-186 added    #
+# this map after Codex flagged that --use-dd + --advection van_leer     #
+# crashed because the driver constructed a halo-1 layout while the     #
+# halo dispatch requires halo>=2 for van_leer (and >=3 for weno5).     #
+# Both the production driver (run_rce_mpi_long.py) and the halo       #
+# dispatch (compressible_euler_plane_halo.py) consult this so the      #
+# minimum-halo contract cannot drift between caller and callee.        #
+#                                                                       #
+# Stencil widths:                                                       #
+#   upwind1  — 2-cell (i-1, i+1) → halo 1.                              #
+#   van_leer — 4-cell (i-1, i, i+1, i+2) for i+1/2 face; halo 2.        #
+#   weno5    — 6-cell (i-2..i+3) for i+1/2; halo 3.                     #
+# --------------------------------------------------------------------- #
+HORIZONTAL_ADVECTION_HALO_REQUIREMENT: dict[str, int] = {
+    "upwind1": 1,
+    "van_leer": 2,
+    "weno5": 3,
+}
+
+
+# --------------------------------------------------------------------- #
 # First-order upwind on the Arakawa-C grid                              #
 # --------------------------------------------------------------------- #
 

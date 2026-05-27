@@ -395,18 +395,31 @@ def plane_compressible_euler_slow_tendencies_halo(
     # upwind. Re-pad the interior result.
     u_center_pad = _re_pad_halo(u_center, layout, h)
     v_center_pad = _re_pad_halo(v_center, layout, h)
-    # Choose horizontal advection scheme. WENO5 requires layout halo
-    # >= 3; Van Leer requires halo >= 2 (iter-184 added Van Leer halo
-    # path so the iter-183 production default works under --use-dd).
+    # Choose horizontal advection scheme. iter-187 consults the
+    # public HORIZONTAL_ADVECTION_HALO_REQUIREMENT map from
+    # compressible_euler_plane so the halo-width contract lives in
+    # ONE place; the driver script (run_rce_mpi_long.py) reads the
+    # same map at layout construction.
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        HORIZONTAL_ADVECTION_HALO_REQUIREMENT,
+    )
     scheme = getattr(config, "horizontal_advection_scheme", "upwind1")
+    if scheme not in HORIZONTAL_ADVECTION_HALO_REQUIREMENT:
+        raise ValueError(
+            f"Unknown horizontal_advection_scheme: {scheme!r}. "
+            f"Expected one of "
+            f"{sorted(HORIZONTAL_ADVECTION_HALO_REQUIREMENT)}."
+        )
+    _required_halo = HORIZONTAL_ADVECTION_HALO_REQUIREMENT[scheme]
+    if h < _required_halo:
+        raise ValueError(
+            f"horizontal_advection_scheme={scheme!r} requires "
+            f"layout.halo >= {_required_halo}; got halo={h}. "
+            f"Construct the layout with "
+            f"make_plane_pencil_layout(..., halo={_required_halo}) "
+            f"or rely on the driver's iter-187 auto-selection."
+        )
     if scheme == "weno5":
-        if h < 3:
-            raise ValueError(
-                f"horizontal_advection_scheme='weno5' requires "
-                f"layout.halo >= 3; got halo={h}. Construct the layout "
-                f"with make_plane_pencil_layout(..., halo=3) when "
-                f"using WENO5 on the halo path."
-            )
         adv_x = lambda f_pad, u_pad_, dx_, h_: (
             oh.weno5_advection_x_halo(f_pad, u_pad_, dx_, h_)
         )
@@ -414,27 +427,15 @@ def plane_compressible_euler_slow_tendencies_halo(
             oh.weno5_advection_y_halo(f_pad, v_pad_, dy_, h_)
         )
     elif scheme == "van_leer":
-        if h < 2:
-            raise ValueError(
-                f"horizontal_advection_scheme='van_leer' requires "
-                f"layout.halo >= 2; got halo={h}. Construct the layout "
-                f"with make_plane_pencil_layout(..., halo=2) when "
-                f"using Van Leer on the halo path."
-            )
         adv_x = lambda f_pad, u_pad_, dx_, h_: (
             oh.van_leer_advection_x_halo(f_pad, u_pad_, dx_, h_)
         )
         adv_y = lambda f_pad, v_pad_, dy_, h_: (
             oh.van_leer_advection_y_halo(f_pad, v_pad_, dy_, h_)
         )
-    elif scheme == "upwind1":
+    else:  # upwind1 — only remaining valid choice
         adv_x = oh.upwind_advection_x_halo
         adv_y = oh.upwind_advection_y_halo
-    else:
-        raise ValueError(
-            f"Unknown horizontal_advection_scheme: {scheme!r}. "
-            "Expected 'upwind1', 'van_leer', or 'weno5'."
-        )
     dtheta_p_dt = (
         adv_x(theta_total_pad, u_center_pad, grid.dx, h)
         + adv_y(theta_total_pad, v_center_pad, grid.dy, h)

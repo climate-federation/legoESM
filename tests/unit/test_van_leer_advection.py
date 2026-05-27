@@ -203,6 +203,23 @@ def test_van_leer_grad_finite_on_zero_delta():
     )
 
 
+def test_horizontal_advection_halo_requirement_map_locked():
+    """iter-187: HORIZONTAL_ADVECTION_HALO_REQUIREMENT is the single
+    source of truth for halo widths consumed by both the driver
+    (run_rce_mpi_long.py builds the layout) and the halo dispatch
+    (compressible_euler_plane_halo.py validates the layout). Lock
+    the active values so a drift in either direction surfaces here.
+    """
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        HORIZONTAL_ADVECTION_HALO_REQUIREMENT,
+    )
+    assert HORIZONTAL_ADVECTION_HALO_REQUIREMENT == {
+        "upwind1": 1,
+        "van_leer": 2,
+        "weno5": 3,
+    }
+
+
 def test_van_leer_scheme_dispatch_in_slow_tendency():
     """The plane CRM slow-tendency entry rejects bad scheme names AND
     accepts the three supported names. Iter-179 added 'van_leer' to
