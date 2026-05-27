@@ -4,9 +4,16 @@ Validates the PR4 RCE harness skeleton — not the full RCEMIP
 equilibrium (which requires ~100 days of integration on a 100x100
 km / 1 km grid; see ``scripts/run_rcemip_plane.py``). The CI test
 just confirms the harness composes cleanly: dycore + Smag +
-hyperdiff + sponge + tracer transport + bulk-flux + Newtonian
-radiation physics_fn → stable, mass-conserving, no NaN over 10
-steps.
+hyperdiff + sponge + tracer transport + bulk-flux + gray
+radiation + Kessler microphysics physics_fn → stable,
+mass-conserving, no NaN over 10 steps.
+
+iter-247: the radiation backend was originally a 5-day Newtonian
+relaxation toward 300 K (the PR4 harness scaffold at commit
+04712098); commit 0ec1da4b swapped that for the canonical gray
+radiation factory. iter-243 silently dropped radiation entirely
+by passing ``radiation_config=None``; iter-247 restored the
+canonical gray-radiation + Kessler microphysics coverage.
 """
 
 from __future__ import annotations

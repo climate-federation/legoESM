@@ -55,7 +55,23 @@ THETA_PERT = 0.5
 Q_V_SFC = 0.012
 
 
-def _build_setup():
+def _build_setup(fix_mass: bool = True):
+    """Spectral plane setup helper.
+
+    iter-247: switched the default to ``fix_mass=True`` so the
+    ``test_spectral_rce_smoke_stable_and_conservative`` 1e-6 cap is
+    achievable (the cap was set in unmerged feature/crm-plane-spectral
+    branch edbae138 where it measured 2.56e-16 with the fixer on).
+
+    iter-248 (Codex iter-247 round-2 HIGH): the 1e-6 cap measures
+    POST-FIXER drift; a regression in natural dycore conservation
+    would be masked by the fixer's per-step clamp. The
+    ``fix_mass: bool`` parameter lets the iter-248
+    ``test_spectral_rce_dycore_natural_conservation`` test below
+    exercise the no-fixer path with a softer 1e-3 cap that catches
+    a fully-broken dycore without false-positive-firing on the
+    natural ~6e-4 drift.
+    """
     nx = ny = 6
     grid = create_plane_grid(
         nx=nx, ny=ny, nlev=NLEV, dx=4_000.0, dy=4_000.0,
@@ -69,18 +85,7 @@ def _build_setup():
         hyperdiff_rho_coeff=1.0e5,
         hyperdiff_w_coeff=1.0e5,
         semi_implicit_acoustic=False, use_coriolis=False,
-        # iter-247 (Codex iter-244 round-1 LOW): the test asserts
-        # mass_drift < 1e-6 — that's only achievable with the
-        # anchored dry-mass fixer. The pre-iter-244 test set
-        # fix_mass=False which made the 1e-6 cap unreachable; main
-        # branch never had the spectral-wrapper-internal fixer that
-        # the unmerged feature/crm-plane-spectral branch (edbae138)
-        # used. The FD-plane fixer delegated to via
-        # ``self._fd_model.step`` IS active when fix_mass=True is
-        # set on CompressibleEulerConfig (see
-        # compressible_euler_plane.py:1564-1574). Setting it here
-        # is the LOW-recommended narrower repair than xfail.
-        fix_mass=True, anchor_mass_to_initial=True,
+        fix_mass=fix_mass, anchor_mass_to_initial=fix_mass,
         smagorinsky_cs=0.2, smagorinsky_prandtl=1.0,
     )
     return grid, hc, tm, cfg
@@ -155,6 +160,56 @@ def test_spectral_rce_smoke_stable_and_conservative():
     # negative bias.
     assert min_q_v >= -1.0e-9, f"q_v negative bias: {min_q_v:.3e}"
     assert max_q_v < 0.030
+
+
+def test_spectral_rce_dycore_natural_conservation():
+    """iter-248 (Codex iter-247 round-2 HIGH): companion to the
+    1e-6 post-fixer cap above. With ``fix_mass=False`` the
+    anchored dry-mass fixer is OFF — drift reflects the dycore's
+    natural conservation alone. Cap at 1e-3 is generous enough to
+    pass the measured ~6e-4 drift over 30 steps + 1 sim-min but
+    tight enough to catch a fully-broken dycore that would
+    otherwise be masked by the fixer's per-step clamp.
+
+    Without this test, ``test_spectral_rce_smoke_stable_and_conservative``
+    (with fixer ON) would silently absorb any regression in the
+    natural conservation pathway — the fixer simply re-anchors
+    each step. The two tests together separate ``did the fixer
+    fire?`` from ``did the dycore stay close to conservative?``.
+    """
+    from scripts.run_rcemip_plane import make_rcemip_physics
+    grid, hc, tm, cfg = _build_setup(fix_mass=False)
+    spec_model = SpectralPlaneCompressibleEulerModel(
+        grid, hc, tm, cfg,
+        spectral_config=SpectralPlaneConfig(
+            use_spectral_hyperdiff=False, apply_dealias=True,
+        ),
+    )
+    phys = _build_initial_phys(grid, hc, grid.ny, grid.nx)
+    physics_fn = make_rcemip_physics(
+        grid, hc, tm,
+        radiation_config=RadiationConfig(
+            scheme="gray", gray=GrayRadiationConfig(),
+        ),
+        microphysics_config=MicrophysicsConfig(
+            scheme="kessler", kessler=KesslerConfig(),
+        ),
+        dt=DT, T_sfc=300.0, q_sfc=Q_V_SFC,
+    )
+    spec = spec_state_from_physical(phys)
+    mass_0 = float(spec_model.compute_dry_mass(spec))
+    for _ in range(N_STEPS):
+        spec = spec_model.step(spec, dt=DT, physics_fn=physics_fn)
+    mass_drift = abs(
+        float(spec_model.compute_dry_mass(spec)) - mass_0
+    ) / abs(mass_0)
+    print(f"\n[spectral_dycore_no_fixer] drift={mass_drift:.2e}")
+    # Cap 1e-3 catches a fully-broken dycore but tolerates the
+    # natural ~6e-4 drift documented in iter-247 commit.
+    assert mass_drift < 1.0e-3, (
+        f"Dycore natural mass conservation regressed: drift="
+        f"{mass_drift:.3e} > 1e-3 cap (was ~6e-4 at iter-247)."
+    )
 
 
 def test_spectral_extras_off_matches_fd_plane_within_tolerance():
