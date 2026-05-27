@@ -14,16 +14,13 @@ rank single-process smoke covering argparse + replicated step
 """
 from __future__ import annotations
 
-import os
 import re
-import subprocess
-import sys
-from pathlib import Path
 
-import pytest
+from tests.atmosphere.nonhydrostatic.integration._bench_smoke_helpers import (
+    REPO_ROOT, fail_on_nonzero, run_bench,
+)
 
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = REPO_ROOT / "scripts" / "bench_mpi_scaling.py"
 
 
@@ -43,26 +40,14 @@ def test_bench_mpi_scaling_single_rank_smoke():
     """Single-rank smoke covering argparse, replicated-dycore step
     timing, and the per-component decomposition stdout schema.
     """
-    env = os.environ.copy()
-    env["JAX_PLATFORMS"] = "cpu"
-    env["JAX_ENABLE_X64"] = "1"
-    cmd = [
-        sys.executable, str(SCRIPT),
+    result = run_bench(SCRIPT, [
         "--nx", "12", "--ny", "12", "--nlev", "8",
         "--dt", "1.0",
         "--n-warmup", "1",
         "--n-bench", "3",
         "--label", "test_smoke",
-    ]
-    result = subprocess.run(
-        cmd, env=env, capture_output=True, text=True, timeout=180,
-    )
-    if result.returncode != 0:
-        pytest.fail(
-            f"bench_mpi_scaling.py exited {result.returncode}\n"
-            f"stdout tail:\n{result.stdout[-1500:]}\n"
-            f"stderr tail:\n{result.stderr[-1500:]}"
-        )
+    ])
+    fail_on_nonzero(result, "bench_mpi_scaling.py")
     lines = [
         L for L in result.stdout.splitlines()
         if L.strip().startswith("test_smoke")

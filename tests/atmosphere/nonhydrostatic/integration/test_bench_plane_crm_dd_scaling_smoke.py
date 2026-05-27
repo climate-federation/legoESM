@@ -21,15 +21,14 @@ on the single-rank fast path. CI wall budget: ~10-20 s cold JIT.
 from __future__ import annotations
 
 import csv
-import os
-import subprocess
-import sys
-from pathlib import Path
 
 import pytest
 
+from tests.atmosphere.nonhydrostatic.integration._bench_smoke_helpers import (
+    REPO_ROOT, fail_on_nonzero, run_bench,
+)
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+
 SCRIPT = REPO_ROOT / "scripts" / "bench_plane_crm_dd_scaling.py"
 
 
@@ -45,27 +44,17 @@ def test_bench_plane_crm_dd_scaling_single_rank_smoke(tmp_path, mode):
     steps keeps wall budget ~10 s cold JIT.
     """
     out_file = tmp_path / f"bench_{mode}_smoke.csv"
-    env = os.environ.copy()
-    env["JAX_PLATFORMS"] = "cpu"
-    env["JAX_ENABLE_X64"] = "1"
-    cmd = [
-        sys.executable, str(SCRIPT),
+    result = run_bench(SCRIPT, [
         "--mode", mode,
         "--nx", "12", "--ny", "12", "--nlev", "8",
         "--warmup-steps", "1",
         "--time-steps", "3",
         "--output", str(out_file),
-    ]
-    result = subprocess.run(
-        cmd, env=env, capture_output=True, text=True, timeout=180,
+    ])
+    fail_on_nonzero(
+        result, "bench_plane_crm_dd_scaling.py",
+        extra_kwargs=f" --mode {mode}",
     )
-    if result.returncode != 0:
-        pytest.fail(
-            f"bench_plane_crm_dd_scaling.py --mode {mode} exited "
-            f"{result.returncode}\n"
-            f"stdout tail:\n{result.stdout[-1500:]}\n"
-            f"stderr tail:\n{result.stderr[-1500:]}"
-        )
     assert out_file.exists(), (
         f"Bench script did not write CSV at {out_file}.\n"
         f"stdout tail:\n{result.stdout[-500:]}"

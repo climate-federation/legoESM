@@ -39,15 +39,15 @@ dominates; the 1-step physics-off run is negligible).
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
+from tests.atmosphere.nonhydrostatic.integration._bench_smoke_helpers import (
+    REPO_ROOT, run_bench,
+)
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+
 DRIVER = REPO_ROOT / "scripts" / "run_rcemip_long.py"
 
 
@@ -57,20 +57,13 @@ def _run_driver(output_file: Path, grid: str, days: float = 0.001,
     (history JSON), not a directory — the driver does
     ``output.open("w")`` and ``output.parent.mkdir(exist_ok=True)``.
     """
-    env = os.environ.copy()
-    env["JAX_PLATFORMS"] = "cpu"
-    env["JAX_ENABLE_X64"] = "1"
-    cmd = [
-        sys.executable, str(DRIVER),
+    return run_bench(DRIVER, [
         "--grid", grid,
         "--days", repr(float(days)),
         "--dt", repr(float(dt)),
         "--print-every", "1",
         "--output", str(output_file),
-    ]
-    return subprocess.run(
-        cmd, env=env, capture_output=True, text=True, timeout=timeout_s,
-    )
+    ], timeout_s=timeout_s)
 
 
 def _read_history_json(output_dir: Path, grid: str):

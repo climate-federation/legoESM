@@ -10,15 +10,12 @@ schema (results.grid, n_ranks, exchanges.{3d,4d}.time_per_exchange_ms).
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
-from pathlib import Path
 
-import pytest
+from tests.atmosphere.nonhydrostatic.integration._bench_smoke_helpers import (
+    REPO_ROOT, fail_on_nonzero, run_bench,
+)
 
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = REPO_ROOT / "scripts" / "bench_halo_exchange.py"
 
 
@@ -28,27 +25,15 @@ def test_bench_halo_exchange_cubed_sphere_single_rank_smoke(tmp_path):
     + JSON output schema lock.
     """
     out_file = tmp_path / "bench_halo_smoke.json"
-    env = os.environ.copy()
-    env["JAX_PLATFORMS"] = "cpu"
-    env["JAX_ENABLE_X64"] = "1"
-    cmd = [
-        sys.executable, str(SCRIPT),
+    result = run_bench(SCRIPT, [
         "--grid", "cubed-sphere",
         "--n", "12",
         "--nlev", "8",
         "--n-warmup", "1",
         "--n-iters", "3",
         "--output", str(out_file),
-    ]
-    result = subprocess.run(
-        cmd, env=env, capture_output=True, text=True, timeout=180,
-    )
-    if result.returncode != 0:
-        pytest.fail(
-            f"bench_halo_exchange.py exited {result.returncode}\n"
-            f"stdout tail:\n{result.stdout[-1500:]}\n"
-            f"stderr tail:\n{result.stderr[-1500:]}"
-        )
+    ])
+    fail_on_nonzero(result, "bench_halo_exchange.py")
     assert out_file.exists(), (
         f"Bench script did not write JSON at {out_file}.\n"
         f"stdout tail:\n{result.stdout[-500:]}"

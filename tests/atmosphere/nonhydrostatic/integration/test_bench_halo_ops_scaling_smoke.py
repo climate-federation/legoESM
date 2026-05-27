@@ -18,16 +18,13 @@ that the stdout reports finite positive values for total / local
 """
 from __future__ import annotations
 
-import os
 import re
-import subprocess
-import sys
-from pathlib import Path
 
-import pytest
+from tests.atmosphere.nonhydrostatic.integration._bench_smoke_helpers import (
+    REPO_ROOT, fail_on_nonzero, run_bench,
+)
 
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = REPO_ROOT / "scripts" / "bench_halo_ops_scaling.py"
 
 
@@ -53,26 +50,13 @@ def test_bench_halo_ops_scaling_single_rank_smoke(tmp_path):
     JIT-compile errors, layout-construction bugs, and stdout-format
     drift in O(few-second) cold JIT wall.
     """
-    env = os.environ.copy()
-    env["JAX_PLATFORMS"] = "cpu"
-    env["JAX_ENABLE_X64"] = "1"
-    cmd = [
-        sys.executable, str(SCRIPT),
+    result = run_bench(SCRIPT, [
         "--nx", "12", "--ny", "12", "--nlev", "8",
         "--n-warmup", "1",
         "--n-bench", "3",
         "--label", "test_smoke",
-    ]
-    result = subprocess.run(
-        cmd, env=env, capture_output=True, text=True, timeout=180,
-    )
-    if result.returncode != 0:
-        pytest.fail(
-            f"bench_halo_ops_scaling.py exited "
-            f"{result.returncode}\n"
-            f"stdout tail:\n{result.stdout[-1500:]}\n"
-            f"stderr tail:\n{result.stderr[-1500:]}"
-        )
+    ])
+    fail_on_nonzero(result, "bench_halo_ops_scaling.py")
     # Find the bench line in stdout.
     lines = [
         L for L in result.stdout.splitlines()
