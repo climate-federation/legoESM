@@ -130,8 +130,8 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 * [~] **R8**: Bench plumbing ✓ (iter-6 `bench_plane_crm_dd_scaling.py`). Real strong/weak scaling numbers F9-platform-blocked on macOS Python 3.13 (mpi4jax 0.9 vs JAX 0.10 stack mismatch).
 * [!] **R9**: KW78 outer-step implicit buoyancy — OBSOLETE per F10 (iter-9): clean Wing IC + dt=5 s production-stable without KW78. Substep variant inert (F2). Not on critical path.
 * [x] **R10**: Cross-grid RCE validation (iter-7 wrapper; iter-12 30-day on 4 grids; iter-50/51 added V4 + LL32 + T21 30-day nightlies; iter-73 added C96 10-day nightly).
-* [~] **R11**: 30-day end-to-end with criteria 1-5. Hydrostatic family ✓ (iter-12 + iter-50/51); plane CRM 1-sim-hour ✓ (iter-14 + iter-38/63); full plane CRM 30-day wall-time gated (~8 days single-rank on M5 Pro).
-* [x] **R12**: `/codex:adversarial-review` pass — DOD item 5 holistic review (iter-55 driver + iter-56 dycore/halo + iter-57 MPI halo) all 0 HIGH + 0 MEDIUM. Iterative reviews continued through iter-80 (catch additional HIGH/MEDIUM as new code lands).
+* [~] **R11**: 30-day end-to-end with criteria 1-5. Hydrostatic family ✓ (iter-12 + iter-50/51, all 6 grids C48/C72/V4/LL32/T21 with C96 10-day per wall-time decision). Plane CRM 1-sim-hour ✓ (iter-14 + iter-38/63); **plane CRM 10-day RCE PASS ✓** at 32x32x30 + radiation (iter-98 — first precip onset day 10, CWV 49.94→57.18→56.55 mm, MSE drift 0.6 %, DOD spinup verdict PASS). Plane CRM **30-day at 32x32x30** in flight (iter-105 — bit-equal to iter-98 through overlap, ETA ~5 h post-iter-131). Plane CRM **30-day at 132x132 production** still wall-time gated (~8 days single-rank on M5 Pro; F9 MPI scaling unblocks at platform-fix time).
+* [x] **R12**: `/codex:adversarial-review` pass — DOD item 5 holistic review (iter-55 driver + iter-56 dycore/halo + iter-57 MPI halo) all 0 HIGH + 0 MEDIUM. Iterative reviews continued through iter-130 with every landed change reviewed (iter 95j/k/l/m, 100, 104, 109, 111, 114, 116, 118, 120, 122, 126, 130 — each cycle closes the cycle's HIGH/MEDIUM findings before the next feature lands).
 
 ---
 
