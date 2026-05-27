@@ -461,6 +461,14 @@ class SpectralPlanePhysicsState(NamedTuple):
     u_hat, v_hat : Field
         Horizontal-Fourier coefficients of zonal/meridional wind
         components at full levels, shape ``(ny, nx_r, nlev)`` complex.
+        Stored at the Arakawa-C ``u``-face / ``v``-face location in
+        physical space — but the rfft2 of a face-staggered field is
+        the same as the rfft2 of the cell-centred field (the
+        face/cell distinction in physical space disappears in the
+        spectral representation because the FFT basis functions are
+        already located at every position). The factor-of-``i·kx`` /
+        ``i·ky`` operators applied below ARE the C-grid PG/divergence
+        adjoint pair.
     w_hat : Field
         Vertical velocity coefficients at half levels, shape
         ``(ny, nx_r, nlev+1)`` complex.
@@ -469,7 +477,8 @@ class SpectralPlanePhysicsState(NamedTuple):
         shape ``(ny, nx_r, nlev)`` complex.
     phis : Field
         Surface geopotential — kept PHYSICAL (real) and static, shape
-        ``(ny, nx)``.
+        ``(ny, nx)``. Zero on a flat plane; included for parity with
+        the FD plane state.
     tracers_hat : Field
         Tracer mixing-ratio coefficients, shape
         ``(ny, nx_r, nlev, n_tracers)`` complex.
