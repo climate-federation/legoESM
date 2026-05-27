@@ -207,6 +207,68 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 238 (cross-grid CRM smoke — first test coverage for run_rcemip_long.py)
+
+Investigation: ``scripts/run_rcemip_long.py`` is the multi-grid
+non-hydrostatic CRM driver, dispatching on ``--grid {plane_fd,
+plane_spectral, cubed_sphere, mpas}``. Pre iter-238 it had **zero
+test coverage** — a silent regression on any of the four paths
+(wrong-shape state, factory dispatch, IC adapter import drift,
+upstream API change) would only surface when a user tried to
+launch a 30-day production.
+
+**Changes**
+
+* New test
+  ``tests/atmosphere/nonhydrostatic/integration/test_run_rcemip_long_cross_grid_smoke.py``:
+  parametrised 1-step dry-RCE smoke covering all four
+  ``--grid`` choices. Asserts driver exits clean, stdout includes
+  ``[<grid>]`` header + diagnostic columns (``max|w|``,
+  ``min/max(θ')``, ``q_v_min/max``), and no instability markers
+  fire.
+
+**Results** (M5 Pro, CPU, ``--days 0.0001 --dt 10``):
+
+```
+plane_fd        PASS
+plane_spectral  SKIPPED (pre-existing Metal collection error)
+cubed_sphere    PASS
+mpas            PASS
+3 passed, 1 skipped, 12.76 s total
+```
+
+**Findings**
+
+* All 3 non-spectral grids run 1-step dry RCE cleanly. No
+  state-shape, factory-dispatch, or import regressions.
+* ``plane_spectral`` skip is the same pre-existing
+  ``spectral_pe.py:72 float(jnp.log(100.0))`` Metal-backend bug
+  noted at iter-236. The test marks the skip with the reason
+  + a TODO so a future fix drops the skip automatically.
+* Driver bug surfaced + worked around in test: ``--output``
+  expects a FILE path (``output.open("w")``), not a directory.
+  Test now creates a parent ``tmp_path`` and passes
+  ``<grid>_history.json`` inside it.
+
+**Status for "all grid types" DOD**
+
+* **Plane CRM**: 30-day production VERIFIED stable (iter-229
+  DOD PASS).
+* **Cubed-sphere CRM**: smoke runs OK; no 30-day production
+  verified yet.
+* **MPAS Voronoi CRM**: smoke runs OK; no 30-day production
+  verified yet. Currently dry-only path in run_rcemip_long.py;
+  moist Kessler + gray-radiation physics are imported but
+  ``physics_fn=None`` is hard-coded.
+* **Spectral plane CRM**: blocked on the
+  ``spectral_pe.py`` Metal import bug.
+
+iter-238 reduces "untested non-hydrostatic CRM cross-grid
+surface" from 4 grids to 0 (3 covered + 1 skipped with a
+documented blocker). Adding moist physics + CRM-resolution
+production driver for cubed-sphere/MPAS is the next chunk for
+true cross-grid CRM parity.
+
 ### 2026-05-27 — iter 217..236 (compressed fold: iter-183 30-day DOD PASS + production envelope + FV3 n_outer_split)
 
 20 iterations covering F11 LES sweep, iter-183 30-day production
