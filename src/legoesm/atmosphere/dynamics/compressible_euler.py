@@ -644,12 +644,16 @@ def _semi_implicit_acoustic_column_kernel(
             c_tri = c_tri + c_buoy
 
     w_inner_new = thomas_solve_batched(a_tri, b_tri, c_tri, rhs)
-    w_new = w_c.at[..., 1:-1].set(w_inner_new)
+    # Rigid lid/bottom: w=0 at top and bottom interfaces. Padding with
+    # 0 fuses better than `w_c.at[..., 1:-1].set(...)` because pad is a
+    # simple HLO op without the dynamic-update-slice fusion barrier on
+    # the cuSPARSE custom-call output.
+    pad_axes_w = ((0, 0),) * (w_inner_new.ndim - 1)
+    w_new = jnp.pad(w_inner_new, (*pad_axes_w, (1, 1)))
 
     # --- Backward: update rho' using continuity ---
     rho_half = 0.5 * (rho_total[..., :-1] + rho_total[..., 1:])
-    pad_axes_w = ((0, 0),) * (w_new.ndim - 1)
-    rho_w = jnp.pad(rho_half * w_new[..., 1:-1], (*pad_axes_w, (1, 1)))
+    rho_w = jnp.pad(rho_half * w_inner_new, (*pad_axes_w, (1, 1)))
     vert_div = (rho_w[..., :-1] - rho_w[..., 1:]) / dz
     vert_div = vert_div / J[..., None]
     rho_p_new = rho_p_c - dt_s * vert_div
@@ -776,15 +780,18 @@ def acoustic_substeps_semi_implicit(
         # Solve tridiagonal system
         w_inner_new = thomas_solve_batched(a_tri, b_tri, c_tri, rhs)
 
-        # Update w (boundaries stay at 0)
-        w_new = w_c.at[..., 1:-1].set(w_inner_new)
+        # Construct full w_new via pad-with-0 (rigid lid/bottom BC),
+        # avoiding the dynamic-update-slice fusion barrier that the
+        # `w_c.at[..., 1:-1].set(...)` pattern emits on top of the
+        # cuSPARSE custom-call output.
+        pad_axes_w = ((0, 0),) * (w_inner_new.ndim - 1)
+        w_new = jnp.pad(w_inner_new, (*pad_axes_w, (1, 1)))
 
         # --- Backward: update rho' using updated w ---
         # ``rho_w`` has zero at top/bottom interfaces (rigid lid / rigid
         # bottom).  Single Pad HLO op replaces alloc-zeros + scatter.
         rho_half = 0.5 * (rho_total[..., :-1] + rho_total[..., 1:])
-        pad_axes_w = ((0, 0),) * (w_new.ndim - 1)
-        rho_w = jnp.pad(rho_half * w_new[..., 1:-1], (*pad_axes_w, (1, 1)))
+        rho_w = jnp.pad(rho_half * w_inner_new, (*pad_axes_w, (1, 1)))
         vert_div = (rho_w[..., :-1] - rho_w[..., 1:]) / dz
         vert_div = vert_div / J[..., None]
         rho_p_new = rho_p_c - dt_s * vert_div

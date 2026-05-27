@@ -117,6 +117,52 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 69 — 2026-05-27 — w_new pad-with-0 swap (eliminate DUS barrier)
+
+Both SI substep kernels (`_semi_implicit_acoustic_column_kernel`
+for plane, and `acoustic_substeps_semi_implicit.substep_body` for
+cubed-sphere) used `w_c.at[..., 1:-1].set(w_inner_new)` to build
+the full w array with rigid lid/bottom boundaries. The HLO showed
+this lowered to `loop_dynamic_update_slice_fusion` directly on top
+of the cuSPARSE custom-call output — a fusion barrier that forces
+a write+read of the entire w buffer.
+
+Change: replace with `jnp.pad(w_inner_new, ..., (1, 1))`. Since
+the rigid BC is w=0 at top/bottom interfaces (invariant — w_c
+boundaries are always 0 across substeps), pad-with-0 produces the
+exact same array but is a cleaner HLO op (no scatter, no merge
+with `w_c`). Also lets the downstream `rho_w = jnp.pad(rho_half *
+w_inner_new, ...)` skip the `w_new[..., 1:-1]` slice that was
+previously needed.
+
+Bench fp32 nsub=6 (repeat=5 each):
+| N   | iter-68     | iter-69     | Δ       |
+|-----|-------------|-------------|---------|
+| 128 | 282.0       | 286.4       | +1.6%   |
+| 192 | 274.7       | **289.5**   | +5.4%   |
+| 256 | 248.0       | 254.6       | +2.7%   |
+| 384 | 156.4       | 157.5       | noise   |
+
+Peak now **289 Mc/s @ N=192 fp32 nsub=6** (was 279 in iter-67).
+
+Regression:
+- `tests/unit/test_compressible_euler_plane.py` 15/15 PASS
+- `tests/unit/test_plane_nh_conservation.py` 3/3 PASS
+- `tests/atmosphere/nonhydrostatic/unit/test_compressible_euler.py`
+  33/33 PASS
+
+HLO ops unchanged at 4 fusions + 1 custom-call per substep — same
+kernel count, but XLA emits slightly tighter post-cuSPARSE kernels
+without the dynamic-update-slice.
+
+Cumulative iter-66..69 fp32 peak progression at N=192:
+- iter-66 (baseline vmap-rm)    : 264 Mc/s
+- iter-67 (plane tridiag hoist) : 279 Mc/s  (+5.5%)
+- iter-68 (CS parity hoist)     : 275 Mc/s  (within noise)
+- iter-69 (pad-with-0)          : 289 Mc/s  (+5.4% over 68)
+
+⇒ **Total iter-66 → iter-69: +9.5% at N=192 peak.**
+
 ### Iter 68 — 2026-05-27 — cubed-sphere SI substep parity hoist
 
 iter-67's hoist was plane-only; cubed-sphere `acoustic_substeps_semi_implicit`
