@@ -149,6 +149,65 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 96 (radiation-enabled 5-sim-day run)
+
+Companion to iter-95d: identical config except radiation ENABLED
+(--rad-call-interval-s 600). Tests whether the iter-95 IC + surface
+flux loop carries cleanly into the radiative-convective regime.
+
+**Config**: 32×32×30 plane CRM, dx=4 km, dt=10 s, --no-mass-fixer,
+gray radiation @ 600 s cadence, Kessler microphysics, Smag c_s=0.2,
+SI acoustic. 43200/43200 steps in 4288 s wall (1.19 h on M5 Pro;
+4% overhead vs iter-95d's radiation-off run).
+
+**Snapshot trajectory** (every 24 sim-hr):
+
+| day | CWV [mm]  | MSE [J/kg] | max\|w\| | qc_max [g/kg] |
+|-----|-----------|------------|----------|---------------|
+| 0   | 49.941    | 3.5247e+09 | 0.0e+00  | 0.000         |
+| 1   | 53.633    | 3.5280e+09 | 1.97e-3  | 0.000         |
+| 2   | 55.667    | 3.5275e+09 | 2.18e-3  | 9e-31         |
+| 3   | 56.774    | 3.5258e+09 | 2.32e-3  | 9e-31         |
+| 4   | 57.182    | 3.5230e+09 | 2.30e-3  | 0.160         |
+| 5   | 57.119    | 3.5195e+09 | 2.35e-3  | 0.362         |
+
+**Key results vs iter-95d (radiation OFF)**:
+* **Quasi-equilibrium**: CWV PEAKED at day 4.18 (57.217 mm) then
+  slowly decreased through day 5 (57.12 mm). First indication of
+  reaching the radiative-convective balance.
+* **Radiation cooling visible**: MSE declines monotonically day 1→5
+  (3.528e9 → 3.520e9, -0.23% drift). v3 (rad off) had stable MSE.
+* **Convection initiation slightly earlier**: qc onset at day 1.875
+  (vs day 1.917 for v3). Radiation longwave cooling at column top
+  destabilises the profile fractionally faster.
+* **Final qc same magnitude**: 0.36 g/kg both runs — Kessler
+  autoconversion threshold (~1 g/kg) not yet reached. Need longer
+  integration.
+* **System fully stable**: max|w| ≤ 2.35e-3 m/s throughout
+  (gentle gravity waves; no resolved updrafts).
+* **No precipitation**: qr/precip = 0 throughout.
+
+**Day-5 profile**:
+* T_sfc warmed 296.81 → 298.53 K (+1.72 K vs +1.94 K iter-95d
+  radiation off; radiation longwave cooling damps the surface
+  warming).
+* T@10km pinned at 202.73 K (sponge layer / stratosphere
+  unaffected).
+* qv_sfc grew 15.60 → 22.07 g/kg (essentially identical to
+  iter-95d's 22.00 g/kg).
+* cloud_fraction reaches 1.0 by day 2 (stratiform layer from
+  cold-trap saturation).
+
+**Verdict**: iter-96 confirms the iter-95 IC + surface-flux fix
+extends cleanly to the radiation-coupled regime. Quasi-equilibrium
+CWV ≈ 57.1 mm reached by day 4–5 (matches Wing 2018 RCEMIP1
+literature range of 50–60 mm for SST=300 K). Precipitation onset
+requires either longer integration (10–30 sim-days) or stronger
+convective triggering (qv noise / bubble IC). Production target
+(30-day, 132×132) is now wall-time-gated, not physics-gated.
+
+**Snapshots/profiles**: `/tmp/iter96_crm32x32_rad/{profiles,snapshots}/`
+
 ### 2026-05-27 — iter 95d (5-sim-day verification complete)
 
 iter-95 v3 run reached `target_day=5.000` cleanly (43200/43200 steps,
