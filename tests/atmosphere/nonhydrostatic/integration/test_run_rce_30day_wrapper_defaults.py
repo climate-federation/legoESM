@@ -1029,3 +1029,33 @@ def test_wrapper_mpirun_fail_propagates_even_with_allow_summary_failure(tmp_path
         "summarizer ran despite mpirun failure; ALLOW_SUMMARY_FAILURE=1 "
         "must NOT bypass the mpirun guard."
     )
+
+
+def test_wrapper_help_flag_prints_usage_and_exits_zero(tmp_path):
+    """iter-136: --help and -h must print the docstring header
+    (line 2..72) without the leading ``# `` marker and exit 0.
+    Pre-iter-136 ``--help`` was interpreted as ``OUTPUT=--help``
+    and the wrapper would write garbage to that literal path."""
+    for flag in ("--help", "-h"):
+        res = subprocess.run(
+            ["bash", str(REPO_ROOT / "scripts" / "run_rce_30day.sh"),
+             flag],
+            cwd=str(REPO_ROOT), capture_output=True, text=True,
+            check=False, timeout=10,
+        )
+        assert res.returncode == 0, (
+            f"--help should exit 0; got {res.returncode} for {flag!r}"
+        )
+        # The header text should appear without the leading ``# `` marker.
+        assert "30-day RCE @ 132x132" in res.stdout, (
+            f"{flag} stdout missing docstring header: {res.stdout!r}"
+        )
+        # Verify the docstring leading ``# `` markers are stripped
+        # (output should have a clean first line, no ``# `` prefix).
+        first_content_line = next(
+            (ln for ln in res.stdout.splitlines() if ln.strip()), "",
+        )
+        assert not first_content_line.startswith("# "), (
+            f"{flag} did not strip leading ``# ``: "
+            f"first_line={first_content_line!r}"
+        )

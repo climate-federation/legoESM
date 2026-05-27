@@ -77,6 +77,19 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# iter-136: --help / -h prints the docstring header (everything
+# above ``set -e``) and exits 0. Without this, ``run_rce_30day.sh
+# --help`` would be interpreted as ``OUTPUT=--help`` and write
+# garbage to the literal path. The header captures every env var
+# + the typical invocation patterns.
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    # macOS BSD sed does not support ``\?``; use ``-E`` (extended
+    # regex) so ``# ?`` strips the leading ``# `` (with optional
+    # trailing space).
+    sed -n '2,72p' "$0" | sed -E 's/^# ?//'
+    exit 0
+fi
+
 OUTPUT="${1:-results/rce_30day}"
 DAYS="${DAYS:-30}"
 RANKS="${RANKS:-12}"
