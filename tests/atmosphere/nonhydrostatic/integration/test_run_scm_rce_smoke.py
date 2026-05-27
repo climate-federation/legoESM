@@ -10,8 +10,11 @@ This is the canonical single-column sanity test: under
 heating/cooling balance, T_sfc should equilibrate near
 prescribed initial T_sfc ≈ 300 K, T_top near gray-radiation
 equilibrium ≈ 200 K. The script exits non-zero if final state
-fails finite + coarse RCE checks (T_sfc in [240, 320] K, T_top
-in [160, 260] K).
+fails finite + coarse RCE checks. iter-302 (Codex iter-301
+round-2 LOW): the actual gates in scripts/run_scm_rce.py are
+``240 < T_sfc < 320`` K and ``150 < T_top < 270`` K — the
+pre-iter-302 docstring incorrectly stated T_top bounds
+[160, 260].
 
 iter-300 smoke runs 0.5 sim-days (~72 outer steps at default
 dt=600 s) at default --lat 0 — verifies the harness composes
