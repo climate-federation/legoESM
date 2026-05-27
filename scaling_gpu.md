@@ -661,6 +661,33 @@ Updated final ladder:
 - `scaling_gpu_weak.png` — ns/cell vs cells, flat = saturated
 - `scaling_gpu_peak_bar.png` — peak Mcells/s by grid × precision
 
+### Iter 28 — 2026-05-27 — LL ocean impl_cn small-N regime
+
+Mirrors iter-27 (CS atm small-N) for ocean LL impl_cn fp32:
+
+| res    | total cells | ms/step | Mc/s |
+|--------|-------------|---------|------|
+| LL16   |    10,240   |  0.68   |  15  |
+| LL32   |    40,960   |  0.76   |  54  |
+| LL48   |    92,160   |  0.87   | 106  |
+| LL64   |   163,840   |  0.90   | 182  |
+| LL96   |   368,640   |  1.20   | 307  |
+| LL128  |   655,360   |  1.43   | 458  |
+| LL160  | 1,024,000   |  2.04   | 502  |
+| LL192  | 1,474,560   |  2.70   | 546  |
+| LL224  | 2,007,040   |  3.90   | 515  |
+| LL256  | 2,621,440   |  5.23   | 501  |
+| LL384  | 5,898,240   | 16.78   | 352  |
+
+LL impl_cn dispatch floor ≈ **0.65 ms** (LL16 step time). Much
+higher than CS atm's 0.18 ms — the impl_cn PCG solve has fixed
+per-step launch overhead (multiple matvec kernels per CG iteration).
+This is the price paid for the 1.36-1.95× big-N speedup (iter 13).
+
+Full LL impl_cn curve now spans **11 sizes**, LL16 → LL384, with
+all four regimes characterized (dispatch-floor / ramp / plateau /
+L2-overflow).
+
 ### Iter 27 — 2026-05-27 — atm CS small-N regime (dispatch-floor characterization)
 
 Added C12 to the cubed-sphere fp32 sweep to bound the dispatch overhead:
