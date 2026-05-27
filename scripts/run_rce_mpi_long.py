@@ -254,6 +254,20 @@ def parse_args():
     p.add_argument("--theta-noise-seed", type=int, default=0,
                    help="RNG seed for theta' noise perturbation. Same "
                         "seed → bit-identical IC across reruns.")
+    p.add_argument("--theta-noise-mode",
+                   choices=["white", "smooth_k1"], default="white",
+                   help="theta' perturbation pattern (iter-203). "
+                        "'white' (default) = RCEMIP / Wing 2018 "
+                        "uniform random ±amp K per cell — the iter-181 "
+                        "behaviour. 'smooth_k1' = single cosine wave "
+                        "at the lowest non-trivial wavenumber in x + y "
+                        "with peak amplitude amp K — F11 fix-path-3 "
+                        "candidate. Hypothesis: white noise nucleates "
+                        "sub-resolved convective cells at dx=4 km; a "
+                        "smooth large-scale perturbation may break "
+                        "column symmetry without triggering the "
+                        "iter-182 radiative-convective initiation "
+                        "runaway.")
     p.add_argument("--use-dd", action="store_true", default=False,
                    help="Switch from the legacy rank-0-dycore + "
                         "broadcast pattern to true per-rank domain "
@@ -414,20 +428,53 @@ def build_height_coord_and_state(args, grid):
     # theta' does not enter the LW optical depth, so it cannot
     # trigger the iter-181 radiation-feedback instability that
     # destabilises qv-noise IC at any nonzero amplitude.
+    # iter-203: added --theta-noise-mode to pick the perturbation
+    # pattern. "white" (default) is RCEMIP / Wing 2018 uniform
+    # random; "smooth_k1" is the F11 fix-path-3 candidate — a
+    # single-cosine smooth perturbation at the lowest non-trivial
+    # wavenumber (kx=1, ky=1) with amplitude theta_noise_amp.
+    # Hypothesis: the F11 blowup comes from per-cell white noise
+    # generating sub-resolved convective cells at dx=4 km; a smooth
+    # large-scale perturbation may break column symmetry without
+    # nucleating sub-resolved cells.
     theta_noise_amp = float(args.theta_noise_amp)
     if theta_noise_amp > 0.0:
-        key_t = jax.random.PRNGKey(int(args.theta_noise_seed))
         n_seed_lev = min(4, nlev)
-        theta_noise = jax.random.uniform(
-            key_t, shape=(grid.ny, grid.nx, n_seed_lev),
-            minval=-theta_noise_amp, maxval=theta_noise_amp,
-            dtype=jnp.float64,
-        )
-        # Subtract horizontal mean so total energy is conserved
-        # at IC (mirrors the qv-noise mean-removal pattern).
-        theta_noise = theta_noise - jnp.mean(
-            theta_noise, axis=(0, 1), keepdims=True,
-        )
+        mode = args.theta_noise_mode
+        if mode == "white":
+            key_t = jax.random.PRNGKey(int(args.theta_noise_seed))
+            theta_noise = jax.random.uniform(
+                key_t, shape=(grid.ny, grid.nx, n_seed_lev),
+                minval=-theta_noise_amp, maxval=theta_noise_amp,
+                dtype=jnp.float64,
+            )
+            # Subtract horizontal mean so total energy is conserved
+            # at IC (mirrors the qv-noise mean-removal pattern).
+            theta_noise = theta_noise - jnp.mean(
+                theta_noise, axis=(0, 1), keepdims=True,
+            )
+        elif mode == "smooth_k1":
+            # Lowest non-trivial wavenumber on the periodic plane:
+            # one full cosine wave across the domain in x AND y.
+            # Result is automatically zero-mean (cos integrates to
+            # 0 over [0, 2pi]) and smooth — no sub-cell variation.
+            jj = jnp.arange(grid.ny, dtype=jnp.float64)
+            ii = jnp.arange(grid.nx, dtype=jnp.float64)
+            yy, xx = jnp.meshgrid(jj, ii, indexing="ij")
+            two_pi = 2.0 * jnp.pi
+            # 0.5 * (cos(kx)+cos(ky)) has range [-1, 1] in 2D.
+            pattern = 0.5 * (
+                jnp.cos(two_pi * xx / grid.nx)
+                + jnp.cos(two_pi * yy / grid.ny)
+            )
+            theta_noise = theta_noise_amp * pattern[:, :, None] * jnp.ones(
+                (1, 1, n_seed_lev), dtype=jnp.float64,
+            )
+        else:
+            raise SystemExit(
+                f"error: --theta-noise-mode rejected: {mode!r}. "
+                f"Expected 'white' or 'smooth_k1'."
+            )
         new_theta_p = state.theta_prime.data
         new_theta_p = new_theta_p.at[..., -n_seed_lev:].add(theta_noise)
         state = state._replace(
