@@ -298,3 +298,94 @@ def test_missing_sentinel_value():
     """iter-99 LOW#6: the sentinel is a documented constant, not
     magic string. Lock it so a future rename surfaces here."""
     assert summary_mod.MISSING_SENTINEL == "NA"
+
+
+# iter-102: evaluate_rce_quality regression tests.
+
+
+def _row(day: float, **overrides) -> "summary_mod.DayRow":
+    """Build a minimal DayRow with sensible defaults that pass every
+    criterion. Tests override only the fields they care about."""
+    defaults = dict(
+        day=day,
+        cwv_mean=50.0,
+        cwv_min=50.0,
+        cwv_max=50.0,
+        cwv_std=0.0,
+        mse_mean=3.5e9,
+        precip_mean=0.0,
+        precip_max=0.0,
+        T_sfc_mean=300.0,
+        qv_sfc_mean=0.02,
+        qc_sfc_max=0.0,
+        qr_sfc_max=0.0,
+        wind_sfc_mean=0.0,
+        wind_sfc_max=0.01,
+    )
+    defaults.update(overrides)
+    return summary_mod.DayRow(**defaults)
+
+
+def test_evaluate_passes_on_plateau_trajectory():
+    rows = [_row(float(i)) for i in range(12)]
+    verdict = summary_mod.evaluate_rce_quality(rows)
+    assert verdict.passed, verdict.reasons
+
+
+def test_evaluate_flags_cwv_out_of_range():
+    rows = [_row(float(i), cwv_mean=10.0, cwv_max=10.0) for i in range(12)]
+    verdict = summary_mod.evaluate_rce_quality(rows)
+    assert not verdict.passed
+    assert any("plateau CWV" in r for r in verdict.reasons)
+
+
+def test_evaluate_flags_max_w_blowup():
+    rows = [_row(float(i)) for i in range(12)]
+    rows[7] = _row(7.0, wind_sfc_max=999.0)
+    verdict = summary_mod.evaluate_rce_quality(rows)
+    assert not verdict.passed
+    assert any("|U|_sfc exceeded" in r for r in verdict.reasons)
+
+
+def test_evaluate_flags_nan_cwv():
+    rows = [_row(float(i)) for i in range(12)]
+    rows[5] = _row(5.0, cwv_mean=float("nan"))
+    verdict = summary_mod.evaluate_rce_quality(rows)
+    assert not verdict.passed
+    assert any("non-finite CWV" in r for r in verdict.reasons)
+
+
+def test_evaluate_flags_mse_drift():
+    rows = []
+    for i in range(12):
+        # Drift MSE by 20% across the last 10 days — well above the
+        # 5% default threshold.
+        mse = 1.0e9 if i < 2 else 1.0e9 * (1.0 + 0.05 * (i - 2))
+        rows.append(_row(float(i), mse_mean=mse))
+    verdict = summary_mod.evaluate_rce_quality(rows)
+    assert not verdict.passed
+    assert any("MSE relative drift" in r for r in verdict.reasons)
+
+
+def test_evaluate_skips_plateau_on_short_trajectory():
+    """Fewer than ``last_n_days_for_plateau`` rows → only the
+    finite-checks fire; plateau criteria are skipped to avoid
+    false-FAIL on early spin-up."""
+    rows = [_row(float(i), cwv_mean=10.0) for i in range(3)]
+    verdict = summary_mod.evaluate_rce_quality(rows)
+    # CWV is in finite range; no plateau check fires; PASS.
+    assert verdict.passed, verdict.reasons
+
+
+def test_evaluate_iter98_inflight_trajectory_passes():
+    """Smoke against the actual iter-98 trajectory shape: CWV
+    overshoot then settle in [55, 58] mm. The defaults must accept
+    this — if they don't, the defaults are too tight."""
+    cwv = [49.94, 53.63, 55.67, 56.77, 57.18, 57.12, 56.85, 56.54, 56.20, 55.87]
+    rows = [_row(float(i), cwv_mean=v, cwv_max=v) for i, v in enumerate(cwv)]
+    verdict = summary_mod.evaluate_rce_quality(rows)
+    assert verdict.passed, (
+        "iter-98 in-flight 32x32 + radiation trajectory should pass "
+        f"the DOD evaluator with default thresholds. Reasons: "
+        f"{verdict.reasons!r}"
+    )

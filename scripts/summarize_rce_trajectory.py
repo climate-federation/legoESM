@@ -235,6 +235,106 @@ def write_csv(rows: list[DayRow], csv_path: Path) -> None:
             ])
 
 
+@dataclass
+class QualityVerdict:
+    """Result of ``evaluate_rce_quality``. ``passed`` is the
+    boolean AND of every individual criterion; ``reasons`` lists
+    one line per failed criterion so callers can surface specifics
+    in CI output."""
+
+    passed: bool
+    reasons: list[str]
+
+
+# iter-102: default thresholds drawn from Wing et al. 2018 RCEMIP1
+# multi-model statistics at SST = 300 K. Tuning history is captured
+# in the iteration log; do NOT silently widen these — drift here
+# should trigger a CRM_implementation.md update.
+DEFAULT_CWV_RANGE_MM: tuple[float, float] = (35.0, 65.0)
+DEFAULT_MAX_W_THRESHOLD_MS: float = 50.0
+DEFAULT_MSE_RELATIVE_DRIFT: float = 0.05
+DEFAULT_LAST_N_DAYS_FOR_PLATEAU: int = 10
+
+
+def evaluate_rce_quality(
+    rows: list[DayRow],
+    *,
+    cwv_range_mm: tuple[float, float] = DEFAULT_CWV_RANGE_MM,
+    max_w_threshold_ms: float = DEFAULT_MAX_W_THRESHOLD_MS,
+    mse_relative_drift: float = DEFAULT_MSE_RELATIVE_DRIFT,
+    last_n_days_for_plateau: int = DEFAULT_LAST_N_DAYS_FOR_PLATEAU,
+) -> QualityVerdict:
+    """Evaluate an RCE trajectory against the production DOD criteria.
+
+    Criteria checked (matches ``CRM_implementation.md`` ``Definition of
+    done``):
+
+    1. Every CWV value is finite (no NaN / inf in the trajectory).
+    2. Plateau CWV (mean of the last ``last_n_days_for_plateau`` rows)
+       sits inside ``cwv_range_mm``. Default range
+       ``(35, 65)`` mm covers the Wing 2018 RCEMIP1 multi-model
+       spread at SST = 300 K plus a 5 mm tolerance on either side.
+    3. ``|U|_sfc`` stays under ``max_w_threshold_ms`` everywhere.
+       Production wrapper is gravity-wave / cumulus-scale; surface
+       wind > 50 m/s is a blow-up.
+    4. MSE relative drift across the plateau window is below
+       ``mse_relative_drift`` (default 5 % — DOD criterion 2's
+       ``< 1 %`` is too tight for the 10-day spinup, so this gate
+       is the *stability* check; full DOD compliance is checked
+       separately at 30-day end-state).
+
+    ``rows`` shorter than ``last_n_days_for_plateau`` evaluates only
+    criteria 1 + 3 (not enough data for a plateau measurement).
+    """
+    reasons: list[str] = []
+    # Criterion 1: finite CWV everywhere.
+    nonfinite_days = [
+        r.day for r in rows
+        if not math.isfinite(r.cwv_mean) or not math.isfinite(r.cwv_max)
+    ]
+    if nonfinite_days:
+        reasons.append(
+            f"non-finite CWV on day(s) {nonfinite_days!r}"
+        )
+    # Criterion 3: surface wind sanity (cheap NaN-catcher too).
+    over_w = [
+        r.day for r in rows
+        if math.isfinite(r.wind_sfc_max)
+        and r.wind_sfc_max > max_w_threshold_ms
+    ]
+    if over_w:
+        reasons.append(
+            f"|U|_sfc exceeded {max_w_threshold_ms} m/s on day(s) "
+            f"{over_w!r} — production blow-up signature."
+        )
+    nonfinite_w = [r.day for r in rows if not math.isfinite(r.wind_sfc_max)]
+    if nonfinite_w:
+        reasons.append(
+            f"non-finite |U|_sfc on day(s) {nonfinite_w!r}"
+        )
+    # Criteria 2 + 4: need at least last_n_days_for_plateau rows.
+    if len(rows) >= last_n_days_for_plateau:
+        plateau = rows[-last_n_days_for_plateau:]
+        plateau_cwv = sum(r.cwv_mean for r in plateau) / len(plateau)
+        if not (cwv_range_mm[0] <= plateau_cwv <= cwv_range_mm[1]):
+            reasons.append(
+                f"plateau CWV {plateau_cwv:.3f} mm outside "
+                f"target range {cwv_range_mm} (last "
+                f"{last_n_days_for_plateau} days)."
+            )
+        mse_vals = [r.mse_mean for r in plateau if math.isfinite(r.mse_mean)]
+        if mse_vals:
+            mse_min, mse_max = min(mse_vals), max(mse_vals)
+            relative = abs(mse_max - mse_min) / max(abs(mse_max), 1e-30)
+            if relative > mse_relative_drift:
+                reasons.append(
+                    f"MSE relative drift {relative:.4e} > "
+                    f"{mse_relative_drift} over last "
+                    f"{last_n_days_for_plateau} days."
+                )
+    return QualityVerdict(passed=(not reasons), reasons=reasons)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
@@ -248,6 +348,14 @@ def main() -> None:
         default=None,
         help="CSV output path. Defaults to <out_dir>/trajectory.csv.",
     )
+    p.add_argument(
+        "--evaluate",
+        action="store_true",
+        default=False,
+        help="Evaluate the trajectory against DOD criteria and "
+             "print a PASS/FAIL verdict + reasons. Exit code is "
+             "non-zero on FAIL so the wrapper can gate.",
+    )
     args = p.parse_args()
 
     rows = collect_trajectory(args.out_dir)
@@ -256,6 +364,15 @@ def main() -> None:
     print(format_table(rows))
     print()
     print(f"wrote {csv_path} ({len(rows)} rows)")
+    if args.evaluate:
+        verdict = evaluate_rce_quality(rows)
+        if verdict.passed:
+            print("DOD verdict: PASS")
+        else:
+            print("DOD verdict: FAIL")
+            for r in verdict.reasons:
+                print(f"  - {r}")
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":
