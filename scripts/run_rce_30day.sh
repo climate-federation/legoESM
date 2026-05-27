@@ -90,7 +90,12 @@ echo "Output:  $OUTPUT"
 echo "Logs:    $LOGFILE"
 
 # JAX_PLATFORMS=cpu forces CPU (default in driver). Set to metal for GPU/Metal.
-exec mpirun -np "$RANKS" "$PYBIN" \
+# iter-99: dropped the leading ``exec`` so the post-run trajectory
+# summarizer below actually executes (``exec`` replaces the shell
+# process with mpirun and skips every later line). ``set -o
+# pipefail`` (already enabled above) preserves mpirun's exit status
+# through the ``| tee`` pipe.
+mpirun -np "$RANKS" "$PYBIN" \
     "$REPO_ROOT/scripts/run_rce_mpi_long.py" \
     --nx "$NX" --ny "$NY" \
     --days "$DAYS" --dt "$DT" \
@@ -109,3 +114,17 @@ exec mpirun -np "$RANKS" "$PYBIN" \
     --log-every-steps 100 \
     --output "$OUTPUT" \
     2>&1 | tee "$LOGFILE"
+
+# iter-99: per-day RCE trajectory summary as a post-run artefact.
+# Reads <OUTPUT>/snapshots/snap_day_*.npz + <OUTPUT>/profiles/prof_day_*.npz
+# and writes <OUTPUT>/trajectory.csv + a one-line console table per
+# day. Pure numpy; no JAX / MPI requirement (runs on the rank-0
+# wrapper host after mpirun exits). If the production run aborted
+# before any snapshots landed the summarizer raises FileNotFoundError
+# — caught + downgraded to a warning so the wrapper exit status
+# still reflects mpirun's success/failure, not the post-processing.
+echo "Computing per-day RCE trajectory summary..."
+"$PYBIN" "$REPO_ROOT/scripts/summarize_rce_trajectory.py" "$OUTPUT" \
+    > "$OUTPUT/trajectory.txt" 2>&1 \
+    && echo "Wrote $OUTPUT/trajectory.csv" \
+    || echo "WARN: summarize_rce_trajectory.py failed; see $OUTPUT/trajectory.txt" >&2
