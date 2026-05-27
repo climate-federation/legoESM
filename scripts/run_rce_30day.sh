@@ -40,17 +40,22 @@
 #   BUBBLE_K     warm-bubble IC perturbation [K] (default 0.0 = no
 #                bubble per F7/F10 — clean Wing IC). Non-zero only
 #                for bare-dycore stability probing.
-#   QV_NOISE     qv noise IC amplitude [kg/kg] (default 1e-4 per
-#                iter-179: a small qv perturbation breaks the
-#                column-symmetric convection trap iter-149 documented
-#                (Wing IC + no bubble + no qv noise + mean-wind
-#                removal → every column evolves identically → no
-#                horizontal organization → no realistic precip).
-#                iter-97 F7 found 5e-3 destabilised the legacy iter-95
-#                IC under radiation; 1e-4 is 50x smaller and lives
-#                in the noise of the IC's own thermodynamic scatter.
-#                Set 0.0 to reproduce pre-iter-179 column-symmetric
-#                runs (debug / bit-comparison only).
+#   QV_NOISE     qv noise IC amplitude [kg/kg] (default 0.0 per
+#                iter-181 F11: any qv noise > 0 + gray radiation
+#                triggers an exponential instability that blows up
+#                in 25-50 outer steps. The amplitude does not
+#                matter (1e-8, 1e-6, 1e-4 all blow up) so this is
+#                a structural radiation-feedback bug not a stiffness
+#                issue. iter-181 added --theta-noise-amp as a
+#                proposed alternative symmetry-breaker, but the
+#                same blowup pattern repeats at any nonzero theta'
+#                noise. F11 needs separate physics-side debugging
+#                (likely radiation+dycore coupling, not the dycore
+#                proper). Default 0.0 keeps the wrapper functional
+#                at the iter-180 dt=20+WENO5+beta=0.2 production
+#                contract; convection remains column-symmetric
+#                (iter-149) so realistic precipitation is gated on
+#                F11 resolution.
 #   USE_DD       1 = pass --use-dd to driver (true per-rank domain
 #                decomposition via step_halo + R7 MPI mass fixer).
 #                Default 0 keeps the legacy rank-0-broadcast pattern
@@ -110,14 +115,17 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
     # macOS BSD sed does not support ``\?``; use ``-E`` (extended
     # regex) so ``# ?`` strips the leading ``# `` (with optional
     # trailing space).
-    # iter-143/iter-144/iter-179: extracted range widened to cover every
-    # documented env var. iter-136 stopped at line 72 (pre-iter-138
-    # CHECK_LOG_MAX_W docs); iter-143 widened to 77 (post-iter-138);
-    # iter-144 added HYPERDIFF/BUBBLE_K/QV_NOISE/USE_DD docs +
-    # PYBIN moved to 89. iter-179 expanded the QV_NOISE docblock
-    # (column-symmetry-trap rationale) which pushed CHECK_LOG_MAX_W
-    # + PYBIN to 93-97 — range widened to 97 in lockstep.
-    sed -n '2,97p' "$0" | sed -E 's/^# ?//'
+    # iter-143/iter-144/iter-179/iter-181: extracted range widened to
+    # cover every documented env var. iter-136 stopped at line 72
+    # (pre-iter-138 CHECK_LOG_MAX_W docs); iter-143 widened to 77
+    # (post-iter-138); iter-144 added HYPERDIFF/BUBBLE_K/QV_NOISE/
+    # USE_DD docs + PYBIN moved to 89. iter-179 expanded the
+    # QV_NOISE docblock (column-symmetry-trap rationale) which
+    # pushed CHECK_LOG_MAX_W + PYBIN to 93-97. iter-181 further
+    # expanded the QV_NOISE docblock (F11 radiation-feedback
+    # finding) so CHECK_LOG_MAX_W is now at 98-101 and PYBIN at
+    # 102 — range widened to 102 in lockstep.
+    sed -n '2,102p' "$0" | sed -E 's/^# ?//'
     exit 0
 fi
 
@@ -131,7 +139,7 @@ N_ACOUSTIC="${N_ACOUSTIC:-12}"
 ADVECTION="${ADVECTION:-weno5}"
 HYPERDIFF="${HYPERDIFF:-5.0e6}"
 BUBBLE_K="${BUBBLE_K:-0.0}"
-QV_NOISE="${QV_NOISE:-1e-4}"
+QV_NOISE="${QV_NOISE:-0.0}"
 USE_DD="${USE_DD:-0}"
 NO_MASS_FIXER="${NO_MASS_FIXER:-1}"
 EVALUATE_DOD="${EVALUATE_DOD:-0}"

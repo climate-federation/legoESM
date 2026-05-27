@@ -88,13 +88,18 @@ def test_other_production_defaults(wrapper_text):
         "ADVECTION": "weno5",
         "HYPERDIFF": "5.0e6",
         "BUBBLE_K": "0.0",   # F7 / F10 contract: clean Wing IC
-        # iter-179: QV_NOISE flipped from 0.0 -> 1e-4 to break the
-        # iter-149 column-symmetric convection trap (Wing IC + no
-        # bubble + no qv noise + mean-wind removal made every column
-        # evolve identically → no horizontal organization → 1500x
-        # below Wing 2018 precip target). 1e-4 is 50x smaller than
-        # the iter-97 F7 destabilising 5e-3.
-        "QV_NOISE": "1e-4",
+        # iter-181 F11: QV_NOISE reverted 1e-4 -> 0.0 after the
+        # iter-179 smoke confirmed that any qv noise > 0 + gray
+        # radiation produces an exponential instability that blows
+        # up in 25-50 outer steps (independent of amplitude:
+        # 1e-8, 1e-6, 1e-4 all blow up). theta'-noise (iter-181
+        # added --theta-noise-amp) exhibits the same pattern.
+        # F11 is a structural radiation-feedback bug that needs
+        # physics-side debugging; reverting keeps the wrapper
+        # functional at the iter-180 dt=20+WENO5 production
+        # contract. Convection remains column-symmetric
+        # (iter-149) so realistic precipitation is gated on F11.
+        "QV_NOISE": "0.0",
         # iter-61 Codex MEDIUM coverage gap fix: env defaults that
         # iter-58 missed.
         "DAYS": "30",

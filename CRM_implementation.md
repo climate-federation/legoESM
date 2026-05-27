@@ -118,7 +118,32 @@ mpi4jax 0.9 vs JAX 0.10 stack mismatch produces ~70× per-rank slowdown on macOS
 
 ### F10. Clean Wing IC + dt = 5 s production-stable without KW78
 
-iter-9 measurement on the 132×132×30 plane CRM at dt=5 s + N_ACOUSTIC=12 + clean Wing IC (no bubble, no qv noise) showed max|w| ≤ 6.1 × 10⁻³ m/s over 720 outer steps (1 sim-hour). The bubble-IC F1 dt-stability ladder (dt=1 s) was a SYMPTOM of the bubble-seeded 2-Δz mode (F7), not a fundamental outer-dt limit. With the clean IC F8 path, the dt=5 s + SI acoustic + N_ACOUSTIC=12 production config is stable WITHOUT KW78 (R9 obsolete). iter-58/59 refreshed all production wrapper + driver defaults from the iter-2 conservative dt=1 s / N_ACOUSTIC=24 to dt=5 s / N_ACOUSTIC=12; iter-14/iter-38/iter-63 produced the structural slow nightly regression.
+iter-9 measurement on the 132×132×30 plane CRM at dt=5 s + N_ACOUSTIC=12 + clean Wing IC (no bubble, no qv noise) showed max|w| ≤ 6.1 × 10⁻³ m/s over 720 outer steps (1 sim-hour). The bubble-IC F1 dt-stability ladder (dt=1 s) was a SYMPTOM of the bubble-seeded 2-Δz mode (F7), not a fundamental outer-dt limit. With the clean IC F8 path, the dt=5 s + SI acoustic + N_ACOUSTIC=12 production config is stable WITHOUT KW78 (R9 obsolete). iter-58/59 refreshed all production wrapper + driver defaults from the iter-2 conservative dt=1 s / N_ACOUSTIC=24 to dt=5 s / N_ACOUSTIC=12; iter-14/iter-38/iter-63 produced the structural slow nightly regression. iter-180 further refreshed defaults to dt=20 s + WENO5 + β=0.2 (4× speedup at the same horizontal grid; smoke verified stable at 432 outer steps under radiation).
+
+### F11. Radiation + any horizontal IC heterogeneity → exponential blowup (open)
+
+iter-181 reproduced the iter-97 F7-stale "qv-noise destabilises" finding under the new (iter-180) production config + every prior config tested. Pattern (smoke at 32×32×30 dx=4 km, gray radiation cadence 600 s, --no-mass-fixer, all schemes):
+
+| config | qv_noise | θ-noise | blowup step | growth rate |
+|--------|----------|---------|-------------|-------------|
+| dt=10 upwind1 β=0.1 | 1e-8 | 0 | step 30 | ~50%/step |
+| dt=20 weno5 β=0.2 | 1e-8 | 0 | step 25 | ~50%/step |
+| dt=20 weno5 β=0.2 | 1e-4 | 0 | step 10 | ~150%/step |
+| dt=10 upwind1 β=0.1 | 0 | 0.01 K | step 50 | ~30%/step |
+| dt=20 weno5 β=0.2 | 0 | 0.1 K | step 50 | ~40%/step |
+| (any) | 0 | 0 | stable indefinitely | — |
+| (any, --no-radiation) | nonzero | nonzero | stable | — |
+
+Findings:
+* Amplitude-independent: 1e-8 qv noise destabilises identically to 1e-4.
+* Scheme-independent: WENO5 / upwind1 / Van Leer all blow up at the same rate.
+* dt-independent: dt=5, 10, 20 all blow up (just at slightly different step counts).
+* Radiation cadence-independent: rad-every-step (cadence=dt) still blows up.
+* Conclusion: a structural radiation-feedback bug, NOT a dycore CFL / scheme / stiffness issue. Likely an LW-tendency-sign or LW-optical-depth bug that flips on non-uniform qv columns.
+
+Consequence: the iter-149 column-symmetric convection trap (no realistic precipitation: ~5e-4 mm/day vs Wing 2018 target ~3 mm/day) cannot be broken by IC noise as long as gray radiation is on. The iter-181 driver added `--theta-noise-amp` for an alternative symmetry-breaker but it exhibits the same F11 pattern. Realistic precipitation is gated on F11 resolution (physics-side debug, probably in `src/legoesm/atmosphere/physics/radiation/gray.py` or `integration.py:_make_plane_radiation`).
+
+iter-181 reverted the wrapper `QV_NOISE` default 1e-4 → 0.0 (iter-179 had flipped it in the opposite direction without re-running the smoke) so the production wrapper remains functional at the iter-180 dt=20 + WENO5 + β=0.2 contract while F11 is open.
 
 ---
 

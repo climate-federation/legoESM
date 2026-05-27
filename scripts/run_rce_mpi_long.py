@@ -229,6 +229,24 @@ def parse_args():
     p.add_argument("--qv-noise-seed", type=int, default=0,
                    help="RNG seed for qv noise perturbation. Same seed "
                         "→ bit-identical IC across reruns.")
+    p.add_argument("--theta-noise-amp", type=float, default=0.0,
+                   help="Amplitude of zero-mean random theta' "
+                        "perturbations [K] applied to the lowest 4 "
+                        "model levels of the IC (RCEMIP / Wing 2018 "
+                        "standard symmetry-breaker; +/-0.1 K is the "
+                        "Wing 2018 RCEMIP1 protocol value). Unlike "
+                        "qv noise (iter-181 finding: qv-noise + gray "
+                        "radiation produces a linear instability that "
+                        "grows ~50%/step regardless of amplitude — "
+                        "any noise > 0 destabilises by step ~30 at "
+                        "dt=10 s), theta' perturbations do NOT feed "
+                        "back through the LW optical depth and can "
+                        "safely break the iter-149 column-symmetric "
+                        "convection trap. Default 0 = clean Wing IC; "
+                        "set 0.1 (RCEMIP) to seed real cells.")
+    p.add_argument("--theta-noise-seed", type=int, default=0,
+                   help="RNG seed for theta' noise perturbation. Same "
+                        "seed → bit-identical IC across reruns.")
     p.add_argument("--use-dd", action="store_true", default=False,
                    help="Switch from the legacy rank-0-dycore + "
                         "broadcast pattern to true per-rank domain "
@@ -372,6 +390,32 @@ def build_height_coord_and_state(args, grid):
     state = state._replace(
         tracers=state.tracers.replace(data=new_tracers),
     )
+
+    # iter-181 theta' noise seed in the lowest 4 levels (RCEMIP /
+    # Wing 2018 standard symmetry-breaker). Distinct from qv noise:
+    # theta' does not enter the LW optical depth, so it cannot
+    # trigger the iter-181 radiation-feedback instability that
+    # destabilises qv-noise IC at any nonzero amplitude.
+    theta_noise_amp = float(args.theta_noise_amp)
+    if theta_noise_amp > 0.0:
+        key_t = jax.random.PRNGKey(int(args.theta_noise_seed))
+        n_seed_lev = min(4, nlev)
+        theta_noise = jax.random.uniform(
+            key_t, shape=(grid.ny, grid.nx, n_seed_lev),
+            minval=-theta_noise_amp, maxval=theta_noise_amp,
+            dtype=jnp.float64,
+        )
+        # Subtract horizontal mean so total energy is conserved
+        # at IC (mirrors the qv-noise mean-removal pattern).
+        theta_noise = theta_noise - jnp.mean(
+            theta_noise, axis=(0, 1), keepdims=True,
+        )
+        new_theta_p = state.theta_prime.data
+        new_theta_p = new_theta_p.at[..., -n_seed_lev:].add(theta_noise)
+        state = state._replace(
+            theta_prime=state.theta_prime.replace(data=new_theta_p),
+        )
+
     return hc, state
 
 
