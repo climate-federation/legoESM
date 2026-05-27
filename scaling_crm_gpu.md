@@ -117,6 +117,32 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 40 — 2026-05-27 — codex review iter-39 cuSPARSE swap
+
+Codex flagged CRITICAL/HIGH; verified + applied fixes:
+
+[CRITICAL] tridiagonal_solve semantics — VERIFIED:
+  fp64 max residual: 9.99e-16 (machine precision)
+  fp32 max residual: 4.77e-7  (machine precision)
+
+[HIGH] CPU/Metal fallback — ADDED `if jax.default_backend() in
+  ('gpu','cuda'): use cusparse else: legacy_thomas`. Now safe on
+  CPU/Metal/TPU.
+
+[HIGH] fp64 correctness — VERIFIED working at full machine precision.
+
+[HIGH] Reverse-mode AD — VERIFIED via `jax.grad(sum(thomas_solve_batched(d)))`
+  → finite gradients, mean ~1.0. AD-stable training paths can use
+  the new fast solver.
+
+[MEDIUM] axis convention documented in docstring + shape consistency
+  assert added: `a.shape != b.shape` raises ValueError with clear
+  message.
+
+[MEDIUM] math.prod for n_cols (cleaner than manual loop).
+
+All fixes ~25 LOC. Bench unchanged: still 275 Mc/s SI N=192 fp32.
+
 ### Iter 39 — 2026-05-27 — BOTTLENECK #4 SOLVED: cuSPARSE Thomas = 2.4× SI win
 
 User asked: tackle column-Thomas → cuSPARSE.

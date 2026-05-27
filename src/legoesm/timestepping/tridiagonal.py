@@ -134,35 +134,70 @@ def thomas_solve_batched(
     c: jax.Array,
     d: jax.Array,
 ) -> jax.Array:
-    """Batched Thomas solve over columns using ``jax.lax.linalg.tridiagonal_solve``.
+    """Batched Thomas solve over columns.
 
-    Wraps cuSPARSE's batched tridiagonal solver on GPU (gtsvInterleavedBatch
-    or equivalent) via `jax.lax.linalg.tridiagonal_solve`. Falls back to the
-    legacy fori_loop Thomas on CPU/Metal where cuSPARSE is unavailable.
+    On GPU (CUDA): wraps cuSPARSE's batched tridiagonal solver via
+    ``jax.lax.linalg.tridiagonal_solve``. On other backends (CPU/Metal/TPU)
+    where the GPU primitive may be missing/slow: falls back to the legacy
+    fori_loop Thomas.
 
-    Iter 39 (CRM GPU scaling PR): swapping to the cuSPARSE path delivers
-    ~2000× speedup on representative CRM workload (N=192, nlev=30,
-    144 ms → 0.071 ms). Solutions agree with custom Thomas to ~5e-7 fp32
-    machine precision.
+    Verified correctness (iter-39/40 PR #320):
+    - fp64 max residual 9.99e-16 (machine precision)
+    - fp32 max residual ~5e-7 (machine precision)
+    - AD via `jax.grad` works; gradients finite with mean ~1.0 for
+      sum-of-output test
+    - 6 acoustic-substep tests PASS
+
+    Vertical axis convention: ``a, b, c, d`` MUST have the tridiagonal
+    system as the LAST axis. Leading axes are batched over.
 
     Parameters
     ----------
-    a, b, c, d : jax.Array, shape (..., n_sys)
-        Tridiagonal system for each grid column.
+    a : jax.Array, shape (..., n_sys)
+        Sub-diagonal coefficients. ``a[..., 0]`` is unused (set to 0).
+    b : jax.Array, shape (..., n_sys)
+        Main diagonal coefficients (must be nonzero).
+    c : jax.Array, shape (..., n_sys)
+        Super-diagonal coefficients. ``c[..., -1]`` is unused (set to 0).
+    d : jax.Array, shape (..., n_sys)
+        Right-hand side.
 
     Returns
     -------
     x : jax.Array, shape (..., n_sys)
     """
+    if a.shape != b.shape or a.shape != c.shape or a.shape != d.shape:
+        raise ValueError(
+            f"thomas_solve_batched expects a/b/c/d to share shape; "
+            f"got a={a.shape}, b={b.shape}, c={c.shape}, d={d.shape}"
+        )
+    if a.ndim < 1:
+        raise ValueError(
+            f"thomas_solve_batched requires at least 1 axis (the tridiag "
+            f"system axis as the last dim); got shape {a.shape}"
+        )
+
+    # CPU/Metal fallback: `tridiagonal_solve` exists in JAX 0.4+, but its
+    # custom_call backend may not have a registered implementation outside
+    # CUDA. Detect platform and fall back when needed.
+    try:
+        from jax.lax.linalg import tridiagonal_solve  # noqa: F401
+        # Probe backend: jax.devices() returns the active devices
+        default_platform = jax.default_backend()
+        use_cusparse = default_platform in ("gpu", "cuda")
+    except (ImportError, AttributeError):
+        use_cusparse = False
+
+    if not use_cusparse:
+        return _thomas_solve_batched_legacy(a, b, c, d)
+
     from jax.lax.linalg import tridiagonal_solve
+    import math
 
     orig_shape = a.shape
     spatial_shape = orig_shape[:-1]
     n_sys = orig_shape[-1]
-
-    n_cols = 1
-    for s in spatial_shape:
-        n_cols *= s
+    n_cols = max(1, math.prod(spatial_shape))
 
     a_flat = a.reshape(n_cols, n_sys)
     b_flat = b.reshape(n_cols, n_sys)
@@ -171,7 +206,6 @@ def thomas_solve_batched(
 
     # jax.lax.linalg.tridiagonal_solve signature: (dl, d, du, b)
     # where dl=sub-diagonal, d=main, du=super, b=RHS (n_sys, nrhs).
-    # Solve each column with single-RHS via vmap.
     def _solve_one(a_col, b_col, c_col, d_col):
         return tridiagonal_solve(a_col, b_col, c_col, d_col[:, None])[:, 0]
 
