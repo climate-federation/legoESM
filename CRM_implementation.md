@@ -223,6 +223,36 @@ lines in the iteration log; pre-iter-81 every box was stale `[ ]`.)
 
 **Next iter target**: investigate why physics-on destabilizes sooner than bare-dycore (separate radiation tendency mag, surface flux, Kessler q-tendency); start R3 (dt-stability regression test) + R4 (Smag in halo path).
 
+### 2026-05-27 — iter 299 (final extended regression sweep — 379/379 PASS in 9m27s)
+
+Closing-iteration sweep across the iter-229..298 cumulative
+test surface:
+
+```
+JAX_PLATFORMS=cpu pytest \
+  tests/atmosphere/nonhydrostatic/ \
+  tests/unit/test_select_n_outer_split.py \
+  tests/unit/test_spectral_plane_dycore.py \
+  tests/unit/test_spectral_plane_state_pytree.py \
+  tests/validation/test_rcemip_plane_smoke.py \
+  tests/validation/test_spectral_plane_rce_smoke.py
+→ 379 passed, 4 deselected, 9m27s wall
+```
+
+vs prior sweep checkpoints:
+- iter-236 (initial focused, 7 paths): 353 pass
+- iter-245 (extended scope): 372 pass
+- **iter-299**: 379 pass (current; cumulative iter-229..298)
+
+The 4 deselected are slow envelope tests (iter-230 iter-183
+production + iter-39 with-radiation + iter-14 baseline +
+spectral-rce-smoke iter-247) — each has its own per-iter
+targeted verification runs.
+
+iter-299 confirms the iter-229..298 chain (70 iterations) leaves
+the test suite in a uniformly green state with zero regressions
+in any pre-iter-238 test file.
+
 ### 2026-05-27 — iter 275..296 (compressed fold: cross-grid moist CAPABILITY + 6 Codex polish rounds + AST lock)
 
 22 iterations closing the user-requested cross-grid (cubed-sphere
