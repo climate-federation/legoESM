@@ -290,6 +290,26 @@ def test_csv_output_written(tmp_path):
     assert len(lines) == 3
 
 
+def test_write_csv_creates_parent_directories(tmp_path):
+    """iter-163: write_csv must create non-existent parent
+    directories (``csv_path.parent.mkdir(parents=True,
+    exist_ok=True)`` at compare_rce_trajectories.py:239). A
+    regression dropping ``parents=True`` would crash on a
+    deeply-nested CSV path; dropping ``exist_ok=True`` would
+    crash on a second write. Companion to the iter-163 test in
+    test_summarize_rce_trajectory.py.
+    """
+    a = _make_run(tmp_path, "a", [(0.0, 50.0)])
+    b = _make_run(tmp_path, "b", [(0.0, 50.5)])
+    diffs = compare_mod.diff_trajectories(a, b)
+    csv_path = tmp_path / "p" / "q" / "r" / "diff.csv"
+    assert not csv_path.parent.exists()
+    compare_mod.write_csv(diffs, csv_path)
+    assert csv_path.exists()
+    compare_mod.write_csv(diffs, csv_path)  # exist_ok=True branch
+    assert csv_path.exists()
+
+
 def test_align_rows_one_to_one(tmp_path):
     """iter-111 LOW#4: two A rows whose days are both within
     ``day_tol`` of the SAME B row must not both pair to it. The
