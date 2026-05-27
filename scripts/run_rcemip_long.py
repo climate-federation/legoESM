@@ -429,7 +429,10 @@ def _run_plane_spectral(days: float, dt: float, print_every: int, output: Path,
 def _run_cubed_sphere(days: float, dt: float, print_every: int, output: Path,
                       *, moist: bool = False, n: int = 4,
                       sfc_Cd: float = 1.0e-3, sfc_Ch: float = 1.0e-3,
-                      sfc_T: float = 300.0, sfc_q: float = 0.018):
+                      sfc_T: float = 300.0, sfc_q: float = 0.018,
+                      n_acoustic: int | None = None,
+                      coriolis: str | None = None,
+                      fix_mass: str | None = None):
     from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
         CDGridCompressibleEulerConfig, CDGridCompressibleEulerModel,
     )
@@ -461,24 +464,31 @@ def _run_cubed_sphere(days: float, dt: float, print_every: int, output: Path,
     grid = create_cubed_sphere(n, use_duogrid=True)
     hc = create_height_coordinate(NLEV, H_TOP)
     tm = compute_terrain_metric(jnp.zeros((6, n, n)), hc)
-    # iter-285: when moist=True, use a TIGHTER config at the C4
-    # mesh because iter-284 measured day-2 NaN under the default
-    # (n_acoustic=4 + use_coriolis=True + fix_mass=False). The
-    # tightened config raises n_acoustic 4→12 (more acoustic CFL
-    # margin per outer step), turns Coriolis OFF (each C4 cell
-    # spans many latitudes — gridscale Coriolis is unphysical),
-    # and turns on anchored mass-fixer (matches the plane CRM
-    # iter-183 contract). Dry path keeps the iter-238 contract.
+    # iter-285 + iter-290: when moist=True, use a TIGHTER config at
+    # the C4 mesh because iter-284 measured day-2 NaN under the
+    # default (n_acoustic=4 + use_coriolis=True + fix_mass=False).
+    # Tightened defaults: n_acoustic=12, use_coriolis=False,
+    # fix_mass=True (matches iter-183 plane CRM contract).
+    # iter-290 (Codex iter-288 MEDIUM#2): each tightened default is
+    # now CLI-override-able via n_acoustic / coriolis / fix_mass
+    # kwargs. None means "use the moist-vs-dry default".
     if moist:
-        cfg = CDGridCompressibleEulerConfig(
-            n_acoustic_substeps=12,
-            fix_mass=True, anchor_mass_to_initial=True,
-            use_coriolis=False,
-        )
+        n_acoustic_default = 12
+        coriolis_default = "off"
+        fix_mass_default = "on"
     else:
-        cfg = CDGridCompressibleEulerConfig(
-            n_acoustic_substeps=4, fix_mass=False,
-        )
+        n_acoustic_default = 4
+        coriolis_default = "on"
+        fix_mass_default = "off"
+    n_acoustic_eff = n_acoustic if n_acoustic is not None else n_acoustic_default
+    coriolis_eff = coriolis if coriolis is not None else coriolis_default
+    fix_mass_eff = fix_mass if fix_mass is not None else fix_mass_default
+    cfg = CDGridCompressibleEulerConfig(
+        n_acoustic_substeps=n_acoustic_eff,
+        fix_mass=(fix_mass_eff == "on"),
+        anchor_mass_to_initial=(fix_mass_eff == "on"),
+        use_coriolis=(coriolis_eff == "on"),
+    )
     model = CDGridCompressibleEulerModel(grid, hc, tm, cfg)
     dims_3d = ("face", "x", "y", "level")
     dims_w = ("face", "x", "y", "level_half")
@@ -760,6 +770,34 @@ def main():
         "bulk surface flux. Default 0.018 = saturation at "
         "T_sfc=300 K, p=1013 hPa.",
     )
+    # iter-290 (Codex iter-288 round-1 MEDIUM#2): cubed-sphere
+    # dycore-tuning knobs. iter-285 hardcoded these inside
+    # _run_cubed_sphere when --moist (n_acoustic=12,
+    # use_coriolis=False, fix_mass=True). Adding CLI flags so
+    # cluster users can mix moist + Coriolis + alternate
+    # acoustic-substep / mass-fixer settings without code edits.
+    # Defaults preserve the iter-285 small-mesh moist baseline.
+    p.add_argument(
+        "--cubed-n-acoustic", type=int, default=None,
+        help="iter-290: cubed-sphere n_acoustic_substeps. Default "
+        "None means: 4 when --no-moist (iter-238 smoke), 12 when "
+        "--moist (iter-285 tightened config). Override to e.g. 24 "
+        "for very small dt + safety margin, or 4 for fastest "
+        "(dry-only) runs.",
+    )
+    p.add_argument(
+        "--cubed-coriolis", choices=["on", "off"], default=None,
+        help="iter-290: cubed-sphere use_coriolis. Default None "
+        "means: 'on' when --no-moist (preserves iter-238), 'off' "
+        "when --moist (iter-285 gridscale-unphysical at C4).",
+    )
+    p.add_argument(
+        "--cubed-fix-mass", choices=["on", "off"], default=None,
+        help="iter-290: cubed-sphere fix_mass + "
+        "anchor_mass_to_initial toggle. Default None means: 'off' "
+        "when --no-moist, 'on' when --moist (matches iter-183 "
+        "plane CRM contract).",
+    )
     args = p.parse_args()
 
     dispatch = {
@@ -790,6 +828,11 @@ def main():
         common_kwargs["sfc_Ch"] = args.sfc_Ch
         common_kwargs["sfc_T"] = args.sfc_T
         common_kwargs["sfc_q"] = args.sfc_q
+        # iter-290: dycore-tuning forwards. None passthrough means
+        # _run_cubed_sphere applies the moist-vs-dry default.
+        common_kwargs["n_acoustic"] = args.cubed_n_acoustic
+        common_kwargs["coriolis"] = args.cubed_coriolis
+        common_kwargs["fix_mass"] = args.cubed_fix_mass
     dispatch[args.grid](
         args.days, args.dt, args.print_every, args.output,
         **common_kwargs,
