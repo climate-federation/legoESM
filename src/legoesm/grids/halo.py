@@ -686,26 +686,20 @@ def pad_halo_pair_h2(
         )
         return q1_pad_4d[..., 0], q2_pad_4d[..., 0]
     if _halo_backend == "mpi" and _mpi_topology is not None:
-        # MPI: ``packed_pad_halo_mpi_4d`` already supports halo=2 and
-        # halves the MPI message count from 2 → 1 by stacking the two
-        # fields along the trailing axis.  Same singleton-channel trick
-        # as the SPMD path.
-        # FV3_3D 2026-05-27: when ``interp_offsets`` is requested we
-        # still fall through to per-field ``pad_halo`` (now MPI-offset-
-        # aware) — that path costs 2 MPI exchanges instead of 1 but
-        # produces correct duogrid-remapped halos.  Threading offsets
-        # through ``packed_pad_halo_mpi_4d`` is a future optimisation.
-        if interp_offsets is None:
-            from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
-            q1_4d = q1[..., None]
-            q2_4d = q2[..., None]
-            q1_pad_4d, q2_pad_4d = packed_pad_halo_mpi_4d(
-                q1_4d, q2_4d, topology=_mpi_topology,
-                halo=2, duogrid=duogrid,
-            )
-            return q1_pad_4d[..., 0], q2_pad_4d[..., 0]
-        # offsets requested under MPI — fall through to per-field
-        # ``pad_halo(halo=2)``, which is now MPI-offset-aware.
+        # MPI: ``packed_pad_halo_mpi_4d`` supports halo=2 and halves the
+        # MPI message count from 2 → 1 by stacking the two fields along
+        # the trailing axis.  FV3_3D iter-1041: also threads
+        # ``interp_offsets``, so the single packed exchange handles both
+        # the no-offsets path and the duogrid Lagrange-remap path.
+        from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
+        q1_4d = q1[..., None]
+        q2_4d = q2[..., None]
+        q1_pad_4d, q2_pad_4d = packed_pad_halo_mpi_4d(
+            q1_4d, q2_4d, topology=_mpi_topology,
+            halo=2, duogrid=duogrid,
+            interp_offsets=interp_offsets,
+        )
+        return q1_pad_4d[..., 0], q2_pad_4d[..., 0]
     # Local backend (or MPI-with-offsets — handled above): two
     # sequential pad_halo calls with identical arithmetic.
     q1_pad = pad_halo(q1, halo=2, interp_offsets=interp_offsets,

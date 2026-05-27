@@ -1265,6 +1265,7 @@ def packed_pad_halo_mpi_4d(
     topology: CommTopology,
     halo: int = 1,
     duogrid=None,
+    interp_offsets: jax.Array | None = None,
 ) -> list[jax.Array]:
     """Exchange halos for multiple 4D fields in a single MPI round.
 
@@ -1281,6 +1282,11 @@ def packed_pad_halo_mpi_4d(
     the silent non-duogrid halo gap that the Codex stop-time review
     flagged in iter-83.
 
+    When ``interp_offsets`` is provided (FV3_3D 2026-05-27), the duogrid
+    Lagrange fractional-index remap is applied on the receive side of
+    the packed MPI exchange.  ``interp_offsets`` and ``duogrid`` are
+    mutually exclusive (same contract as ``pad_halo_4d``).
+
     Parameters
     ----------
     *fields : jax.Array
@@ -1290,23 +1296,35 @@ def packed_pad_halo_mpi_4d(
     duogrid : DuoGridData or None
         Duo-Grid remapping data. When provided, the post-exchange
         kinked-to-extended remap + corner fill is applied per field.
+    interp_offsets : jax.Array or None
+        Duogrid Lagrange offsets, shape ``(6, 4, n)`` for halo=1 or
+        ``(6, 4, halo, n)`` for halo>=2.  Forwarded to the underlying
+        ``pad_halo_mpi_4d``.
 
     Returns
     -------
     list[jax.Array]
         Padded arrays, each ``(6, n+2h, n+2h, C_i)``.
     """
+    if interp_offsets is not None and duogrid is not None:
+        raise ValueError(
+            "interp_offsets and duogrid are mutually exclusive"
+        )
     if not fields:
         return []
     if len(fields) == 1:
-        padded = pad_halo_mpi_4d(fields[0], topology, halo)
+        padded = pad_halo_mpi_4d(
+            fields[0], topology, halo, interp_offsets=interp_offsets,
+        )
         if duogrid is not None:
             padded = _apply_duogrid_4d(padded, duogrid, halo)
         return [padded]
 
     splits = [f.shape[-1] for f in fields]
     stacked = jnp.concatenate(fields, axis=-1)
-    padded = pad_halo_mpi_4d(stacked, topology, halo)
+    padded = pad_halo_mpi_4d(
+        stacked, topology, halo, interp_offsets=interp_offsets,
+    )
     import numpy as _np
     split_indices = list(_np.cumsum(splits[:-1]))
     pieces = list(jnp.split(padded, split_indices, axis=-1))

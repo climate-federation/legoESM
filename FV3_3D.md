@@ -2378,6 +2378,143 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1041 (2026-05-27): thread ``interp_offsets`` through ``packed_pad_halo_mpi_4d`` (FV3 3D hot path) + real MPI step bit-for-bit test
+
+### Goal
+
+Iter-1040 unblocked ``pad_halo_mpi`` / ``pad_halo_mpi_4d`` for
+``interp_offsets`` and added direct halo-exchange parity tests
+under MPI.  Iter-1041 closes two follow-up gaps surfaced by
+auditing the iter-1040 result:
+
+1. **Real fidelity gap** in the FV3 3D MPI hot path.
+   ``fv3_hydrostatic_tendencies`` (PE) and the NH split-explicit
+   step both call ``packed_pad_halo_mpi_4d`` to batch multiple
+   fields into a single MPI exchange.  That packed entry-point
+   accepted ``duogrid`` but NOT ``interp_offsets`` — so when the
+   user-facing config left ``duogrid=None`` (the legoESM default
+   for ``create_cubed_sphere(n)``), the MPI step silently used
+   nearest-index halo copies while the single-device step used
+   Lagrange-interpolated halos.  Same code, two different numerics.
+
+2. **Hidden JIT-cache test pass** in ``test_distributed_3_steps_
+   matches_single_rank``.  Both the reference and "MPI" steps
+   reused the same JIT trace of ``model.step`` (compiled under
+   ``set_halo_backend("local")`` the first time it ran), so the
+   MPI branch inside ``fv3_hydrostatic_tendencies`` was never
+   executed.  The "bit-for-bit match" reported by that test was
+   trivially the local path matching itself.
+
+### Implementation
+
+**Packed MPI exchange offsets** (closes gap 1):
+
+- ``parallel/halo_exchange.py::packed_pad_halo_mpi_4d`` now accepts
+  ``interp_offsets``, validates the ``offsets ⊕ duogrid`` mutex
+  (same contract as ``pad_halo_4d``), and forwards offsets to the
+  underlying ``pad_halo_mpi_4d`` (which already learned to apply
+  ``_interp_strip`` on the receive side in iter-1040).
+
+- PE call sites in ``atmosphere/dynamics/primitive_eq_cdgrid.py``
+  (zeta/B/inv_T pack at line ~366; T/u_cell/v_cell/ln_ps_3d pack
+  at line ~778) now derive
+  ``_pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets``
+  and pass that through.  This mirrors the existing single-device
+  pattern in the same file and at the same depth.
+
+- NH call site in
+  ``atmosphere/dynamics/compressible_euler_cdgrid.py`` (K/pi_prime
+  pack at line ~320) gets the same treatment with ``_nh_offs_step6``.
+
+- ``grids/halo.py::pad_halo_pair_h2`` MPI branch now uses the
+  packed exchange unconditionally (no longer falls back to two
+  sequential per-field calls when offsets are present).
+
+All four packed fields per call (zeta, B, inv_T for the slow-
+tendency pack; T, u_cell, v_cell, ln_ps_3d for the thermodynamic
+pack) are cell-centred scalars on ``(6, n, n, nlev)``, so they
+correctly share the same ``(6, 4, n)`` offsets array — the
+fractional-index correction depends only on grid geometry, not on
+field content.
+
+**Real MPI step fidelity test** (closes gap 2):
+
+New file ``tests/distributed/test_mpi_fv3_step_fidelity.py`` with
+one test, ``test_pe_3_step_owned_faces_match_single_rank``.
+
+The test instantiates TWO ``CDGridPrimitiveEquationModel``
+instances: ``ref_model`` and ``dist_model``.  The
+``@partial(jax.jit, static_argnums=(0, 3))`` decorator keys the
+JIT cache on the model identity, so distinct instances trace
+independently.
+
+- The reference run uses ``ref_model.step`` after
+  ``set_halo_backend("local")``, materialises the result via
+  ``jax.block_until_ready`` (so any subsequent backend mutation
+  cannot affect the already-cached trace), then
+- ``initialize_distributed(global_n=n)`` flips the global backend
+  to ``"mpi"`` (re-asserted via the iter-1040 re-entry fix).
+- The MPI run uses ``dist_model.step`` — first invocation under
+  the new backend, so the trace closes over ``_halo_backend ==
+  "mpi"`` and the actual MPI Python branch is compiled into HLO.
+
+Comparison is over ``topology.local_face_ids`` only (replicated-
+mode contract: ``pad_halo_mpi`` only fills halos for owned faces;
+non-owned face halos remain at their zero-pad initial state).
+
+### Tests
+
+::
+
+    JAX_ENABLE_X64=1 mpirun -np 2 .venv/bin/python -m pytest \
+        tests/distributed/test_mpi_fv3_step_fidelity.py \
+        tests/distributed/test_mpi_interp_offsets.py \
+        -v
+    => 9 passed in 12.25 s
+
+    JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_corner_div_damp_nh.py \
+        tests/test_damp_v_nh.py \
+        tests/test_damp_w_nh_iter193.py \
+        -q
+    => 14 passed in 103.02 s (single-device NH fidelity unchanged)
+
+The new fidelity test asserts ``atol=rtol=1e-10`` over owned faces
+for ``(T, u_d, v_d, p_s)`` after 3 SSP-RK3 steps at C8 / 5 levels.
+This is the FIRST test that genuinely runs the FV3 3D PE MPI hot
+path and verifies it matches the single-device reference at the
+step level (not just at the halo-operator level).
+
+### Codex adversarial review
+
+Round 1, ``gpt-5.3-codex``: STATUS CLEAN across all 5 focus areas
+— mutex semantics, per-field broadcast of shared offsets,
+``pad_halo_pair_h2`` change to packed-only, JIT trace
+isolation between ``ref_model`` and ``dist_model``, and the
+synchronous ``set_halo_backend`` mutation between traces.  No
+confirmed bugs.  Verdict: ship.
+
+### Status
+
+The FV3 PE 3D cubed-sphere step under MPI is now bit-for-bit
+identical to the single-device reference at the integration step
+level (``test_mpi_fv3_step_fidelity``), and the iter-1040
+operator-level halo-exchange tests are complemented by an
+integration-level guard.  The NH 3D path shares the same packed-
+MPI plumbing and gets the same iter-1041 fix automatically; a
+dedicated NH integration test is a natural iter-1042 follow-up.
+
+### Why this iteration was meaningful
+
+Iter-1040 reported "9 tests pass" but the most prominent of those
+— ``test_distributed_3_steps_matches_single_rank`` — was a JIT-
+cache illusion.  Iter-1041 a) detected the illusion, b) found the
+real underlying fidelity gap (``packed_pad_halo_mpi_4d`` ignoring
+offsets), c) fixed it, and d) wrote a proper test that the
+illusion cannot fool.  The Ralph loop's "trust but verify" reflex
+caught a regression-shaped success and converted it into actual
+fidelity.
+
 ## Iteration 1040 (2026-05-27): MPI ``interp_offsets`` support — unlock FV3 3D cubed-sphere under MPI
 
 ### Goal

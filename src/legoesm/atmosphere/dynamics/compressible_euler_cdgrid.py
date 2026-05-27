@@ -317,8 +317,16 @@ def cdgrid_compressible_euler_slow_tendencies(
         )
     elif _hb_step6 == "mpi":
         from legoesm.grids.halo import _mpi_topology as _mpi_topo_step6
+        # FV3_3D iter-1041: pass interp_offsets when duogrid is off so the
+        # packed MPI (K, pi_prime) exchange Lagrange-remaps halos rather
+        # than nearest-copying — matches the local path which has
+        # ``operators`` doing per-field ``pad_halo_4d(interp_offsets=...)``.
+        _nh_offs_step6 = (
+            None if _nh_dg is not None else grid.halo_interp_offsets
+        )
         _K_pad_step6, _pi_pad_step6 = packed_pad_halo_mpi_4d(
             K, pi_prime, topology=_mpi_topo_step6, duogrid=_nh_dg,
+            interp_offsets=_nh_offs_step6,
         )
     else:
         _K_pad_step6 = _pi_pad_step6 = None

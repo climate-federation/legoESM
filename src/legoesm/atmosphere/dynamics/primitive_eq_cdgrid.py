@@ -365,8 +365,14 @@ def fv3_hydrostatic_tendencies(
         )
     elif _halo_backend == "mpi":
         from legoesm.grids.halo import _mpi_topology
+        # FV3_3D iter-1041: pass interp_offsets when duogrid is off so the
+        # packed MPI exchange Lagrange-remaps halos rather than nearest-
+        # copying — matches the single-device path which threads
+        # ``grid.halo_interp_offsets`` here.
+        _pe_offs_zeta = None if _pe_dg is not None else grid.halo_interp_offsets
         _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_mpi_4d(
             zeta, B, inv_T, topology=_mpi_topology, duogrid=_pe_dg,
+            interp_offsets=_pe_offs_zeta,
         )
     else:
         _zeta_pad = _B_pad = _invT_pad = None  # operators do own exchange
@@ -774,14 +780,22 @@ def fv3_hydrostatic_tendencies(
     ln_ps_3d = ln_ps[..., jnp.newaxis]  # (6, n, n, 1)
     if _halo_backend == "mpi":
         from legoesm.grids.halo import _mpi_topology
+        # FV3_3D iter-1041: thread interp_offsets through the packed MPI
+        # exchange to match the single-device Lagrange remap when
+        # duogrid is off (the ``else`` branch below uses _pe_offs).
+        _pe_offs_tunits = (
+            None if _pe_dg is not None else grid.halo_interp_offsets
+        )
         if _needs_uv_pad:
             _T_pad, _u_cc_pad, _v_cc_pad, _lnps_pad = packed_pad_halo_mpi_4d(
                 T, u_cell, v_cell, ln_ps_3d,
                 topology=_mpi_topology, duogrid=_pe_dg,
+                interp_offsets=_pe_offs_tunits,
             )
         else:
             _T_pad, _lnps_pad = packed_pad_halo_mpi_4d(
                 T, ln_ps_3d, topology=_mpi_topology, duogrid=_pe_dg,
+                interp_offsets=_pe_offs_tunits,
             )
             _u_cc_pad = _v_cc_pad = None
     else:
