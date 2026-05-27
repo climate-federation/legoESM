@@ -117,6 +117,33 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 14 — 2026-05-27 — explicit acoustic decomposition (where time goes)
+
+Per-stage decomposition of explicit fp32 at peak (N=128, median-3):
+
+| nsub | step ms | per-substep ms | inferred slow_tend × 3 |
+|------|---------|----------------|------------------------|
+|  1   | 0.384   | n/a (1 substep × 3 = 3 calls) | 0.26 ms |
+|  2   | 0.607   | 0.041          | 0.26 ms                |
+|  4   | 0.749   | 0.041          | 0.26 ms                |
+
+Per RK3 stage at nsub=4:
+- slow_tend: 0.087 ms (**35% of stage** — much higher than semi-implicit's 5%)
+- 4 explicit substeps: 0.164 ms (65%)
+
+**Explicit substep cost = 0.041 ms (vs ~3 ms semi-implicit at same N)** — column-
+Thomas removal is the main win. Each substep is now lightweight enough that
+slow_tend (plane operators on full 3D state) becomes the larger share per
+RK3 stage.
+
+GPU kernel-launch overhead floor: ~5 μs × ~15 launches per step = 75 μs ≈ 10%
+of step at N=128. Negligible at larger N, inflates at small N.
+
+⇒ Explicit acoustic is now **near the compute-bound limit** for the plane
+operators themselves — further wins require fusing slow_tend with adjacent
+substeps (XLA already does some fusion via `fori_loop`; getting more would
+need stencil-fused custom kernels, out of scope).
+
 ### Iter 12 — 2026-05-27 — verify PR #319 ocean LL peak is not inflated
 
 Ran ocean LL192 fp32 impl_cn 3 times in series:
