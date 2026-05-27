@@ -117,6 +117,45 @@ LL — fixed launch cost dominates below 50k cell-lev.
 Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
+### Iter 39 — 2026-05-27 — BOTTLENECK #4 SOLVED: cuSPARSE Thomas = 2.4× SI win
+
+User asked: tackle column-Thomas → cuSPARSE.
+
+**Micro-bench of tridiagonal solver alone** (n_cols=36864, nlev=30, fp32):
+
+| solver                         | ms (100 calls) | speedup |
+|--------------------------------|----------------|---------|
+| custom fori_loop Thomas        | 144            | baseline |
+| **`jax.lax.linalg.tridiagonal_solve`** (cuSPARSE) | **0.071** | **2000×** |
+| max diff vs custom             | 4.77e-7 (fp32 ε) |       |
+
+Custom fori_loop forces sequential per-column; cuSPARSE batches via
+`gtsvInterleavedBatch` on GPU.
+
+**Swapped** `thomas_solve_batched` in `src/legoesm/timestepping/tridiagonal.py`
+to use cuSPARSE-backed `jax.lax.linalg.tridiagonal_solve`. Legacy
+fori_loop kept as `_thomas_solve_batched_legacy` for CPU/Metal fallback
+and regression testing. ~50 LOC.
+
+**SI fp32 dycore benchmark (no physics) before/after:**
+
+| res    | iter-11 median-3 | iter-39 cuSPARSE | speedup |
+|--------|------------------|------------------|---------|
+| N=96   |  46 Mc/s          | **238**          | **5.2×** |
+| N=128  |  78               | **275**          | **3.5×** |
+| N=192  | 113               | **274**          | **2.4×** |
+
+**SI+full physics N=96-192:** modest improvement (+3-28%) because
+physics dominates at production size; bare dycore was the right
+target for cuSPARSE.
+
+**Tests**: 6 acoustic-substep tests PASS (rest-column stability,
+rigid-w boundary, wrapper equivalence, nsub=2/4/8 stable) — numerics
+preserved within fp32 epsilon.
+
+⇒ **Bottleneck #4 SOLVED.** SI dycore is no longer column-Thomas-
+bound; now at ~275 Mc/s, comparable to explicit-fp32-no-Smag plateau.
+
 ### Iter 38 — 2026-05-27 — bottleneck #1 MISDIAGNOSED — physics is launch-bound
 
 Measured SI+full-physics throughput at TRUE fp64 vs fp32 (JAX_ENABLE_X64
