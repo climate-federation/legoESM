@@ -108,6 +108,10 @@ def test_other_production_defaults(wrapper_text):
         # iter-198: companion env var for the iter-181 theta-noise
         # alternative symmetry-breaker. Same F11 reproduction wall.
         "THETA_NOISE": "0.0",
+        # iter-205: wrapper exposes the iter-203 driver
+        # --theta-noise-mode choice. Default 'white' matches the
+        # driver default.
+        "THETA_NOISE_MODE": "white",
         # iter-61 Codex MEDIUM coverage gap fix: env defaults that
         # iter-58 missed.
         "DAYS": "30",
@@ -1381,7 +1385,8 @@ def test_wrapper_help_lists_all_env_vars(tmp_path):
     # ``NX,NY  grid dims`` line satisfied substring ``NX`` only.
     for env_var in (
         "DAYS", "RANKS", "DT", "NX", "NY", "N_ACOUSTIC", "ADVECTION",
-        "HYPERDIFF", "BUBBLE_K", "QV_NOISE", "THETA_NOISE", "USE_DD",
+        "HYPERDIFF", "BUBBLE_K", "QV_NOISE", "THETA_NOISE",
+        "THETA_NOISE_MODE", "USE_DD",
         "NO_MASS_FIXER", "EVALUATE_DOD", "ALLOW_SUMMARY_FAILURE",
         "EMIT_TRAJECTORY_PNG", "CHECK_LOG_MAX_W", "PYBIN",
     ):

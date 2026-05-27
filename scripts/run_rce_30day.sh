@@ -82,6 +82,13 @@
 #                adaptive dt). iter-198 added this env var so the
 #                F11 fix-path experiments are wrapper-accessible
 #                without manually invoking the driver.
+#   THETA_NOISE_MODE  theta' noise pattern (default 'white' =
+#                RCEMIP / Wing 2018 uniform random per cell). Set
+#                'smooth_k1' for the iter-203 single-cosine smooth
+#                perturbation — F11 fix-path-3 candidate (negative
+#                at dx=4 km; kept for LES-regime experiments where
+#                the smaller dx may resolve convective cells before
+#                Kessler saturates).
 #   USE_DD       1 = pass --use-dd to driver (true per-rank domain
 #                decomposition via step_halo + R7 MPI mass fixer).
 #                Default 0 keeps the legacy rank-0-broadcast pattern
@@ -166,6 +173,13 @@ BUBBLE_K="${BUBBLE_K:-0.0}"
 QV_NOISE="${QV_NOISE:-0.0}"
 # iter-198: THETA_NOISE wrapper env var. Default 0.0 per F11.
 THETA_NOISE="${THETA_NOISE:-0.0}"
+# iter-205: THETA_NOISE_MODE wrapper env var (iter-203 driver flag).
+# white = RCEMIP / Wing 2018 uniform random (iter-181 behaviour).
+# smooth_k1 = single-cosine smooth perturbation (F11 fix-path-3
+# candidate; iter-203 negative result at dx=4 km but kept for
+# future LES-regime experiments). Default white matches the
+# driver's --theta-noise-mode default.
+THETA_NOISE_MODE="${THETA_NOISE_MODE:-white}"
 USE_DD="${USE_DD:-0}"
 NO_MASS_FIXER="${NO_MASS_FIXER:-1}"
 EVALUATE_DOD="${EVALUATE_DOD:-0}"
@@ -217,6 +231,7 @@ mpirun -np "$RANKS" "$PYBIN" \
     --bubble-theta-pert "$BUBBLE_K" \
     --qv-noise-amp "$QV_NOISE" \
     --theta-noise-amp "$THETA_NOISE" \
+    --theta-noise-mode "$THETA_NOISE_MODE" \
     $DD_FLAG \
     $NMF_FLAG \
     --snapshot-hours 24.0 \
