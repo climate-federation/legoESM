@@ -178,6 +178,35 @@ class TestRelativeAbundanceSafeDiv:
         g = jax.grad(loss)(T)
         assert jnp.all(jnp.isfinite(g)), "∂tau/∂T must be finite when combined VMR = 0"
 
+    def test_bounded_grad_when_combined_vmr_subepsilon(self, lookup_vmr):
+        """Iter-5: gradient must stay bounded when combined_vmr is in
+        the (0, eps] band where the old ``> 0`` where would pick the
+        division branch and emit ``1/eps ~ 1e30`` gradients."""
+        lookup, vmr_lib = lookup_vmr
+        shape = (1, 1, 1)
+        # Set h2o + o3 to a tiny value to hit the (0, eps] regime.
+        tiny_vmr = jnp.full(shape, 1.0e-35)
+        vmr_fields = {lookup.idx_h2o: tiny_vmr, lookup.idx_o3: tiny_vmr}
+        T = jnp.full(shape, 250.0)
+        p = jnp.full(shape, 5e4)
+        molecules = jnp.full(shape, 1e22)
+
+        def loss(vmr):
+            v = {lookup.idx_h2o: vmr, lookup.idx_o3: vmr}
+            tau = gas_optics.compute_major_optical_depth(
+                lookup, vmr_lib, molecules, T, p, igpt=jnp.array(0),
+                vmr_fields=v,
+            )
+            return jnp.sum(tau)
+
+        g = jax.grad(loss)(tiny_vmr)
+        assert jnp.all(jnp.isfinite(g))
+        # Bounded — must be << 1e20 to confirm the safety fix.
+        assert jnp.abs(g).max() < 1e20, (
+            f"∂tau/∂vmr must stay bounded for combined_vmr in (0, eps]; "
+            f"got max |grad| = {float(jnp.abs(g).max()):.3e}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Out-of-range temperature handling

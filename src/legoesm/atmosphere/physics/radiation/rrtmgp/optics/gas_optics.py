@@ -202,9 +202,18 @@ def _compute_relative_abundance_interpolant(
   # dominant species is exactly 0.  Use a safe denominator (``jnp.maximum``
   # against ``_VMR_SAFE_DIV_EPS``) so reverse-mode AD does not propagate NaN
   # gradients through the dead ``where`` branch when ``combined_vmr == 0``.
+  #
+  # **Use the same eps for the where condition** (``combined_vmr > eps``,
+  # not ``> 0``): if combined_vmr is in (0, eps] the division
+  # ``vmr_for_interp[0] / max(combined_vmr, eps) == vmr / eps`` and its
+  # gradient ``1/eps ~ 1e30`` blow up.  Selecting the 0.5 fallback in
+  # that regime keeps both forward and backward bounded.  This matches
+  # the upstream Fortran branch ``col_mix > 2 * tiny(col_mix)``.
   safe_combined = jnp.maximum(combined_vmr, _VMR_SAFE_DIV_EPS)
   relative_abundance = jnp.where(
-      combined_vmr > 0, vmr_for_interp[0] / safe_combined, 0.5
+      combined_vmr > _VMR_SAFE_DIV_EPS,
+      vmr_for_interp[0] / safe_combined,
+      0.5,
   )
   interpolant = _mixing_fraction_interpolant(
       relative_abundance, lookup_gas_optics.n_mixing_fraction
