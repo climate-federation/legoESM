@@ -1571,8 +1571,31 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
 def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
     """FV3_3D iter 392: factory for FV3-faithful NH config.
 
-    Pair with use_duogrid=True so iter-325 halo wiring + iter-370 cross_face transfer values.
-    Enables iter-320/328/336/339/370/431/436/437/451/459/441/442.
+    Pair with ``use_duogrid=True`` so iter-325 halo wiring + iter-370
+    ``use_fv3_cross_face_du_proj`` transfer values.  Enables
+    iter-320/328/336/339/370/431/436/437/451/459/441/442.
+
+    Flags enabled by default:
+
+    - ``use_fv3_d_con_cv``: FV3 c_vd branch at d_con sites (iter-320,
+      KE→heat conversion with c_v_air instead of c_p_air).
+    - ``use_fv3_vector_halo_uv``: vector halo for u/v cell→corner
+      interp (iter-328).
+    - ``use_fv3_a2b_ord4_vector_uv``: 4th-order a2b corner interp
+      for u/v (iter-698, -25.8% θ′ edge ratio at C8).
+    - ``use_fv3_dynamic_exner``: dynamic ``Π = Π_ref + π'`` at all
+      d_con sites + delt_max caps (iter-336).
+    - ``use_fv3_metric_aware_d_con``: metric-aware d_con form
+      (iter-339, ``cosa_s/rsin2`` at all 5 d_con sites).
+    - ``use_fv3_cross_face_du_proj``: cross-face halo for damp_v
+      wind projection (iter-370; requires ``use_duogrid=True``).
+
+    Plus production knobs: ``d_con_top_zero_levels``, ``delt_max``,
+    ``nord_v``, ``corner_div_damp_nord``, ``corner_div_damp_d4_bg``,
+    ``heat_source_del2_iters``, ``use_fv3_sponge_damp_v``,
+    ``use_fv3_sponge_damp_w``.
+
+    Pass ``overrides`` kwargs to override any default.
     """
     defaults = dict(
         use_fv3_d_con_cv=True,

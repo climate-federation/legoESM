@@ -2378,6 +2378,78 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1067 (2026-05-28): fix stale FV3 factory docstring tests + improve user-facing FV3 fidelity discoverability
+
+### Goal
+
+Broader single-device FV3 test sweep surfaced 2 pre-existing
+failures in
+``tests/test_fv3_faithful_factory_docstring_iter406.py``:
+
+- ``test_pe_factory_docstring_complete``: PE factory docstring
+  missing ``use_fv3_a2b_zeta_corner`` mention.
+- ``test_nh_factory_docstring_complete``: NH factory docstring
+  missing ``use_fv3_d_con_cv`` mention.
+
+These guard the user-facing API contract that the
+``make_fv3_faithful_{pe,nh}_config()`` factory docstrings list
+every FV3 fidelity flag they enable.  Without the documentation,
+users cannot discover which flags are active and which need
+explicit ``overrides``.
+
+### Fix
+
+Expanded both factory docstrings:
+
+**PE** (``primitive_eq_cdgrid.py:1727``): now lists all 3 FV3
+flags (``use_fv3_a2b_zeta_corner``, ``use_fv3_metric_aware_d_con``,
+``use_fv3_cross_face_du_proj``) + production knobs +
+``overrides`` kwarg semantics.  Each flag has a one-line summary
+linking to the originating iter.
+
+**NH** (``compressible_euler_cdgrid.py:1571``): now lists all 6
+FV3 flags (``use_fv3_d_con_cv``, ``use_fv3_vector_halo_uv``,
+``use_fv3_a2b_ord4_vector_uv``, ``use_fv3_dynamic_exner``,
+``use_fv3_metric_aware_d_con``, ``use_fv3_cross_face_du_proj``)
++ production knobs + ``overrides`` kwarg.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv/bin/python -m pytest \
+        tests/test_fv3_faithful_factory_docstring_iter406.py
+    => 2 passed in 0.51s
+
+Broader FV3 factory test sweep: 21 passed including:
+
+- ``test_fv3_faithful_factory_overrides_iter396``
+- ``test_fv3_faithful_factory_signature_iter402``
+- ``test_fv3_faithful_factory_docstring_iter406`` (this iter)
+- ``test_fv3_faithful_factories_smoke_iter393``
+- ``test_fv3_faithful_jit_traceable_iter404``
+- ``test_fv3_faithful_passes_through_overrides_iter412``
+- ``test_fv3_fidelity_guard_sweep_iter383``
+
+MPI factory step-fidelity tests still pass (no functional change,
+just docs):
+
+::
+
+    mpirun --oversubscribe -np 2 ... test_pe_3_step_with_fv3_faithful_factory \
+                                       test_nh_3_step_with_fv3_faithful_factory
+    => 2 passed in 135.17s
+
+### Why this matters
+
+The factory docstrings are the canonical user-facing summary of
+which FV3 fidelity flags are active in legoESM's production-mode
+3D atmosphere.  Without complete docstrings, users running
+``help(make_fv3_faithful_nh_config)`` see a truncated picture —
+they may not realize that, e.g., ``use_fv3_d_con_cv`` is on by
+default and would need to explicitly disable it for non-FV3-
+faithful comparisons.  Completed docstrings close that gap.
+
 ## Iteration 1066 (2026-05-28): strict tile-vs-single-device bit-for-bit pad_halo test
 
 ### Goal

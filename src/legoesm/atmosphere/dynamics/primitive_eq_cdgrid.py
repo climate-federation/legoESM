@@ -1727,8 +1727,23 @@ def hydrostatic_to_fv3(
 def make_fv3_faithful_pe_config(**overrides) -> CDGridPrimitiveEquationConfig:
     """FV3_3D iter 392: factory for FV3-faithful PE config.
 
-    Pair with use_duogrid=True so iter-370 cross_face_du_proj has effect (iter-384).
-    Enables iter-14/338/370/433/436/437/451/459/443.
+    Pair with ``use_duogrid=True`` so ``iter-370 use_fv3_cross_face_du_proj``
+    has effect (iter-384).  Enables iter-14/338/370/433/436/437/451/459/443.
+
+    Flags enabled by default:
+
+    - ``use_fv3_a2b_zeta_corner``: FV3 4th-order A→B ζ corner interp
+      (iter-14, mirror of SW sw_core.F90:a2b_ord4).
+    - ``use_fv3_metric_aware_d_con``: metric-aware d_con form
+      (iter-338, cosa_s/rsin2 form at all 5 d_con sites).
+    - ``use_fv3_cross_face_du_proj``: cross-face halo for damp_v
+      wind projection (iter-370; requires ``use_duogrid=True``).
+
+    Plus production knobs: ``d_con_top_zero_levels``, ``delt_max``,
+    ``nord_v``, ``corner_div_damp_nord``, ``corner_div_damp_d4_bg``,
+    ``heat_source_del2_iters``, ``use_fv3_sponge_damp_v``.
+
+    Pass ``overrides`` kwargs to override any default.
     """
     defaults = dict(
         use_fv3_a2b_zeta_corner=True,
