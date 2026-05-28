@@ -113,13 +113,19 @@ def thompson_microphysics(
 
     # === ICE PHASE (Morrison processes) ===
     T_freeze = constants.T_freeze
+    # f_ice transitions around ``cooper_T_act`` (≈ 265 K by default),
+    # NOT ``T_freeze``.  See morrison.py for the rationale.
     f_ice = jax.nn.sigmoid(config.ice_sigmoid_sharpness * (config.cooper_T_act - T))
 
-    # Ice nucleation
+    # Ice nucleation (Cooper 1986).  The ``max(T_freeze − T, 0)``
+    # floor inside the exponential leaves the bare ``N_i0/rho``
+    # target active above freezing; gating with ``f_ice`` shuts
+    # nucleation off in warm columns (mirrors Morrison fix +
+    # matches the gating already applied to all other ice sources).
     N_i_target = config.N_i0 * jnp.exp(
         config.cooper_a * jnp.maximum(T_freeze - T, 0.0)
     ) / jnp.clip(rho, 0.1)
-    dN_i_nuc = jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0)
+    dN_i_nuc = jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0) * f_ice
 
     # Depositional growth.  Same heuristic form as Morrison —
     # ``q_i_min_growth`` floor only, so fresh nucleation can grow.
@@ -135,12 +141,14 @@ def thompson_microphysics(
         * f_ice
     )
 
-    # Bergeron
+    # Bergeron — sharper warm cutoff via ``f_ice`` so the loose
+    # ``melt_sharpness=2`` sigmoid tail does not leak ~1e-6 at
+    # T = 280 K (mirrors Morrison fix).
     berg_window = (
         jax.nn.sigmoid(config.melt_sharpness * (T_freeze - T))
         * jax.nn.sigmoid(config.melt_sharpness * (T - (config.T_center - config.T_width)))
     )
-    bergeron = config.bergeron_rate * jnp.clip(q_c, 0.0) * berg_window
+    bergeron = config.bergeron_rate * jnp.clip(q_c, 0.0) * berg_window * f_ice
 
     # Riming
     riming_i = config.rime_coeff * jnp.clip(q_i, 0.0) * jnp.clip(q_c, 0.0) * f_ice

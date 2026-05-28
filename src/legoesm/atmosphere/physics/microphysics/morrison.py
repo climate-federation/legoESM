@@ -92,13 +92,30 @@ def morrison_microphysics(
 
     # === ICE PHASE ===
     T_freeze = constants.T_freeze
+    # f_ice transitions around ``cooper_T_act`` (≈ 265 K by default), NOT
+    # ``T_freeze`` (273.15 K).  Cooper (1986) IN observations start at
+    # ~ −5 °C; primary nucleation is parameterised to switch on a few K
+    # below freezing, not at the melting point.  At T ≪ cooper_T_act
+    # ``f_ice → 1`` (cold nucleation fully active); at T ≫ cooper_T_act
+    # ``f_ice → 0`` (warm columns: every ice source gated off).
     f_ice = jax.nn.sigmoid(config.ice_sigmoid_sharpness * (config.cooper_T_act - T))
 
     # 1. Ice nucleation (Cooper 1986, smoothed)
+    #
+    # The Cooper (1986) target ``N_i0 · exp(cooper_a · max(T_freeze − T,
+    # 0))`` floors the temperature dependence at T = T_freeze.  Above
+    # freezing, ``max(T_freeze − T, 0) = 0`` so the exponential collapses
+    # to 1 — the bare ``N_i0/rho`` target survives.  Without the warm
+    # cutoff applied via ``f_ice``, ``dN_i_nuc`` at e.g. T = 280 K,
+    # p = 5e4 Pa gave ≈ 30 crystals / kg / s; at the model top
+    # (low rho) ≈ 170 / kg / s.  Multiplying by ``f_ice`` (which is
+    # ~0 above cooper_T_act) shuts nucleation off in warm columns,
+    # matching the gating already applied to deposition, riming, and
+    # aggregation.
     N_i_target = config.N_i0 * jnp.exp(
         config.cooper_a * jnp.maximum(T_freeze - T, 0.0)
     ) / jnp.clip(rho, 0.1)
-    dN_i_nuc = jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0)
+    dN_i_nuc = jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0) * f_ice
 
     # 2. Depositional growth.
     # Heuristic Morrison form: dq_i/dt ∝ S_i · q_i · N_i^(1/3) · f_ice.
@@ -120,12 +137,18 @@ def morrison_microphysics(
         * f_ice
     )
 
-    # 3. Bergeron process: cloud water -> ice in mixed-phase zone
+    # 3. Bergeron process: cloud water -> ice in mixed-phase zone.
+    # ``melt_sharpness`` defaults to 2.0 — the upper-bound sigmoid
+    # ``sigmoid(2 · (T_freeze − T))`` only decays to ~1e-6 at T = 280 K,
+    # leaving a non-zero ``bergeron`` (≈ 1e-13 in dq_i_dt) in warm
+    # columns.  Multiplying by ``f_ice`` collapses the tail to ~0
+    # above cooper_T_act and matches the gating used by every other
+    # ice source (deposition, riming, aggregation).
     berg_window = (
         jax.nn.sigmoid(config.melt_sharpness * (T_freeze - T))
         * jax.nn.sigmoid(config.melt_sharpness * (T - (config.T_center - config.T_width)))
     )
-    bergeron = config.bergeron_rate * jnp.clip(q_c, 0.0) * berg_window
+    bergeron = config.bergeron_rate * jnp.clip(q_c, 0.0) * berg_window * f_ice
 
     # 4. Riming: ice/snow collect cloud water
     riming_i = config.rime_coeff * jnp.clip(q_i, 0.0) * jnp.clip(q_c, 0.0) * f_ice

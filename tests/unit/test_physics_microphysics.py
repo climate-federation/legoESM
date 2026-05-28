@@ -180,18 +180,52 @@ def test_precipitation_non_negative(scheme):
 
 @pytest.mark.parametrize("scheme", ["morrison", "thompson"])
 def test_ice_no_formation_above_freezing(scheme):
-    """Above freezing (T > 273.15 K), ice formation should be negligible."""
+    """Above freezing (T > 273.15 K), ALL ice tendencies must be negligible.
+
+    Pre-fix bug (caught here as a regression): the Cooper (1986) ice
+    nucleation target ``N_i0 · exp(cooper_a · max(T_freeze − T, 0))``
+    floors the temperature dependence at T = T_freeze.  Above
+    freezing the exponential collapsed to 1 and the bare
+    ``N_i0/rho`` target survived — so ``dN_i_nuc`` nucleated ~30
+    crystals / kg / s at T = 280 K (≥ 170 / kg / s at low rho
+    near the model top) even though every other ice source
+    (deposition, riming, aggregation) was already gated by
+    ``f_ice = sigmoid(s · (cooper_T_act − T))``.  The legacy
+    assertion only checked ``dq_i_dt`` (≤ 1e-10) and missed
+    ``dN_i_dt`` entirely.
+
+    Bergeron also leaked ~1e-13 in ``dq_i_dt`` at 280 K because
+    ``melt_sharpness=2`` left a non-trivial sigmoid tail above
+    freezing.  Multiplying ``bergeron`` by ``f_ice`` collapses the
+    tail.
+    """
     T, q_v, hydro, p_full, p_half, rho, dz = _make_column(T_sfc=290.0)
     T_warm = jnp.maximum(T, 280.0)
     out = _call_scheme(scheme, T_warm, q_v, hydro, p_full, p_half, rho, dz)
 
     warm_mask = T_warm > constants.T_freeze
     if jnp.any(warm_mask):
-        ice_formation = out.dq_i_dt[warm_mask]
-        max_ice_form = float(jnp.max(ice_formation))
-        # Allow small numerical noise from sigmoid tails
-        assert max_ice_form <= 1e-10, (
-            f"{scheme}: ice forms above freezing, max dq_i_dt = {max_ice_form:.2e}"
+        # Mass-bearing ice tendencies — must be ~0 (Bergeron fix tightens
+        # tolerance from 1e-10 to 1e-15 at 280 K once f_ice gates it).
+        max_ice_form = float(jnp.max(out.dq_i_dt[warm_mask]))
+        assert max_ice_form <= 1e-12, (
+            f"{scheme}: dq_i_dt = {max_ice_form:.2e} above freezing — "
+            "Bergeron f_ice gate regressed."
+        )
+        max_snow_form = float(jnp.max(out.dq_s_dt[warm_mask]))
+        assert max_snow_form <= 1e-12, (
+            f"{scheme}: dq_s_dt = {max_snow_form:.2e} above freezing."
+        )
+        # NUMBER nucleation — pre-fix produced ~30-170 / kg / s; post-fix
+        # f_ice gate collapses dN_i_nuc to ~0 in warm columns.  Set
+        # tolerance well below any plausible signal (cold-cloud
+        # nucleation runs ~1e3-1e5 / kg / s, so 1e-3 is six orders below).
+        max_N_i_nuc = float(jnp.max(out.dN_i_dt[warm_mask]))
+        assert max_N_i_nuc <= 1e-3, (
+            f"{scheme}: dN_i_dt = {max_N_i_nuc:.2e} /kg/s above "
+            "freezing — Cooper nucleation needs the f_ice gate (no "
+            "natural T-cutoff in the Cooper target).  Pre-fix typical "
+            "values were 30-170 /kg/s at 280-290 K."
         )
 
 
@@ -1030,9 +1064,19 @@ def test_p3_no_ice_above_nucleation_temperature():
     )
     q_v = 0.9 * saturation_mixing_ratio(T, p_full)
     out = p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, 300.0, cfg)
+    # Pre-fix: Cooper nucleation in P3 had no f_ice gate (same bug as
+    # morrison.py / thompson.py).  dN_i_dt reached ~28 / kg / s at
+    # T = cooper_T_act + 25 K even though dq_i_dt stayed ~0 because no
+    # ice mass had nucleated yet (the bug only shows up in dN_i_dt
+    # until the ice number sources downstream physics).
     max_ice_form = float(jnp.max(out.dq_i_dt))
-    assert max_ice_form <= 1e-10, (
+    assert max_ice_form <= 1e-12, (
         f"P3: ice forms above cooper_T_act, max dq_i_dt = {max_ice_form:.2e}"
+    )
+    max_N_i_nuc = float(jnp.max(out.dN_i_dt))
+    assert max_N_i_nuc <= 1e-3, (
+        f"P3: dN_i_dt = {max_N_i_nuc:.2e} /kg/s above cooper_T_act — "
+        "Cooper nucleation needs the f_ice gate."
     )
 
 

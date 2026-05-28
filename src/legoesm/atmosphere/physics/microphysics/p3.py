@@ -154,12 +154,21 @@ def p3_microphysics(
     f_ice = jax.nn.sigmoid(config.ice_sigmoid_sharpness * (config.cooper_T_act - T))
 
     # 1. Ice nucleation (Cooper 1986, smoothed).
+    #
+    # The ``max(T_freeze − T, 0)`` floor inside the exponential leaves
+    # the bare ``N_i0/rho`` target active above freezing; without an
+    # ``f_ice`` gate ``dN_i_nuc`` nucleated ~28 crystals / kg / s at
+    # T = 290 K (probe).  Multiplying by ``f_ice`` (≈ 0 above
+    # cooper_T_act) shuts nucleation off in warm columns and matches
+    # the gating already applied to deposition, riming, rain-riming,
+    # and aggregation — mirrors the same fix landed in
+    # morrison.py / thompson.py.
     N_i_target = (
         config.N_i0
         * jnp.exp(config.cooper_a * jnp.maximum(T_freeze - T, 0.0))
         / jnp.clip(rho, 0.1)
     )
-    dN_i_nuc = jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0)
+    dN_i_nuc = jnp.clip(N_i_target - N_i, 0.0) / jnp.clip(dt, 1.0) * f_ice
 
     # 2. Vapour deposition on ice (subsaturated wrt ice: sublimation handled
     # by the jnp.maximum(S_i, 0) gate — only deposition grows q_i here;
