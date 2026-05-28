@@ -110,3 +110,63 @@ class TestTiledPadHaloMPI:
         assert np.all(np.isfinite(np.asarray(padded_1))), (
             f"rank{rank} pad_halo_4d (tiled) produced non-finite values"
         )
+
+    def test_scalar_2d_tiled_matches_single_device_reference(self):
+        """FV3_3D iter-1066 (codex iter-1056 WARN #3): bit-for-bit
+        tiled MPI ``pad_halo`` vs single-device reference.
+
+        Build the same global ``(6, n, n)`` data on every rank from a
+        deterministic seed, compute the full-grid reference under the
+        local backend, then ``scatter`` to tile-local data, run
+        ``pad_halo`` under MPI tiled mode, and assert each rank's
+        tile + halo slice matches the corresponding region of the
+        global reference.
+
+        Note: this test reads each tile's halo strip from the
+        single-device reference, which already contains the correctly-
+        filled cross-face/cross-tile halos.  A bug in
+        ``_pad_halo_mpi_tiled`` (e.g., dropped cross-face strip,
+        wrong tile-neighbor routing) would surface as a mismatch.
+        """
+        from legoesm.parallel.layout import scatter, make_layout
+
+        topology, rank = _require_tiled_topology()
+        size = MPI.COMM_WORLD.Get_size()
+        n_per_face = 8  # global per-face resolution
+        layout = make_layout(rank=rank, n_ranks=size, global_n=n_per_face)
+        assert layout.is_tiled, "expected tiled layout"
+
+        # Same global data on every rank (deterministic seed).
+        key = jax.random.PRNGKey(7777)
+        global_data = jax.random.normal(
+            key, (6, n_per_face, n_per_face), dtype=jnp.float64,
+        )
+
+        # Single-device reference padded array.
+        set_halo_backend("local")
+        ref_padded = pad_halo(global_data)  # (6, n+2, n+2)
+
+        # Tile-local scatter + MPI pad_halo.
+        local_data = scatter(global_data, layout)  # (1, n_tile, n_tile)
+        set_halo_backend("mpi", topology)
+        local_padded = pad_halo(local_data)  # (1, n_tile+2, n_tile+2)
+        jax.block_until_ready(local_padded)
+
+        # Extract the rank's tile + halo from the reference.
+        own = layout.ownership
+        face = own.face_ids[0]
+        ti, tj = own.tile
+        nt = own.tile_size
+        i0, j0 = ti * nt, tj * nt
+        ref_tile_with_halo = np.asarray(
+            ref_padded[face, i0:i0 + nt + 2, j0:j0 + nt + 2]
+        )
+
+        np.testing.assert_allclose(
+            np.asarray(local_padded[0]), ref_tile_with_halo,
+            atol=1e-12,
+            err_msg=(
+                f"rank{rank} (face={face}, tile=({ti},{tj})) tiled MPI "
+                f"pad_halo does not match single-device reference slice."
+            ),
+        )

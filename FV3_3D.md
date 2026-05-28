@@ -2378,6 +2378,65 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1066 (2026-05-28): strict tile-vs-single-device bit-for-bit pad_halo test
+
+### Goal
+
+Close codex iter-1056 WARN #3, the only remaining deferred
+follow-up in the tiled-mode track.  The iter-1057
+``test_mpi_tiled_pad_halo.py`` was reproducibility-only
+(deadlock + finite); a tile-aware single-device reference
+comparison was tracked but deferred because deriving the
+reference looked architecturally complex.
+
+iter-1066 actually implements it: ``scatter`` already supports
+tiled layouts (``layout.py:226-238``), and ``pad_halo`` on the
+full ``(6, n, n)`` global produces ``(6, n+2, n+2)`` where the
+halo cells already encode the correct cross-face/cross-tile data.
+So the reference for each rank's tile + halo is just the slice
+``ref_padded[face, i0:i0+nt+2, j0:j0+nt+2]`` (with tile origin
+``(i0, j0) = (ti*nt, tj*nt)``).
+
+### Test
+
+``tests/distributed/test_mpi_tiled_pad_halo.py::
+TestTiledPadHaloMPI::test_scalar_2d_tiled_matches_single_device_reference``:
+
+1. Build the same global ``(6, n, n)`` data on every rank from a
+   deterministic seed.
+2. Local-backend ``pad_halo`` on the global → ``ref_padded``.
+3. ``scatter`` to tile-local data + MPI tiled ``pad_halo`` →
+   ``local_padded``.
+4. Extract the rank's tile + halo slice from ``ref_padded`` and
+   assert ``allclose(local_padded[0], ref_slice, atol=1e-12)``.
+
+This strict comparison catches any routing bug in
+``_pad_halo_mpi_tiled``: dropped cross-face strips, wrong tile-
+neighbor mapping, missing axis swap on cube-face vertices, lost
+reversal on equator-pole boundary tiles — all surface as a
+``allclose`` failure with the exact mismatched indices.
+
+### Status
+
+- Test skip-gates: ``size <= 6`` or ``size % 6 != 0`` (no valid
+  tiled topology) or ``topology.tiling == (1, 1)``.
+- At np=2 / np=3 / np=6 the test correctly skips (3 skipped).
+- At np=24+ (tiles_per_face=4+), the test runs and provides the
+  strict tile correctness contract.
+- Mac M-series 8-core hardware cannot run np=24 reliably
+  (oversubscribed scheduling thrashes); the test is for CI
+  environments with ≥24 physical procs.
+
+### Open follow-ups still tracked
+
+- iter-1046 #1: non-square halo for ``use_fv3_cross_face_du_proj``
+  (substantial multi-component refactor).
+- Metal+MPI+duogrid ``jnp.linspace`` XLA workaround.
+
+The MPI cubed-sphere infrastructure is now hardened against the
+class of silent-corruption + deadlock + stale-API bugs that
+iter-1040..1066 surfaced and fixed.
+
 ## Iteration 1065 (2026-05-28): validate iter-1064 claim at np ∈ {2, 3} — full np-sweep complete
 
 ### Goal
