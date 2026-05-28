@@ -101,7 +101,14 @@ class GMRediConfig(NamedTuple):
     """
     kappa_GM: float = 1e3       # GM bolus transport coefficient [m^2/s]
     kappa_Redi: float = 1e3     # Redi isopycnal diffusivity [m^2/s]
-    S_max: float = 0.01         # Maximum isopycnal slope for tapering
+    S_max: float = 0.01         # Slope at which DM95 taper crosses 0.5.
+                                # Equivalent to Veros's ``iso_slopec``.
+    taper_width_frac: float = 0.1
+    # ^ Tanh transition half-width as a fraction of ``S_max``. Default
+    # 0.1 matches legoESM's pre-2026 hardcoded behavior. Veros's
+    # ``iso_dslope`` parameter maps via
+    # ``taper_width_frac = iso_dslope / iso_slopec``. For DINO's
+    # ``iso_slopec=0.01, iso_dslope=0.005`` this is ``0.5``.
     visbeck: VisbeckConfig = VisbeckConfig()
     slope_scheme: str = "triads"     # "triads" (default) or "centered"
     surface_complement: bool = True  # Add horizontal diffusion (kappa_Redi)

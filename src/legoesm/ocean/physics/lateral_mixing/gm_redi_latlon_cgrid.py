@@ -115,7 +115,7 @@ def compute_isopycnal_slopes_latlon_cgrid(
     S_y = jnp.clip(-drho_dy_half / drho_dz_safe, -cfg.S_max, cfg.S_max)
 
     # DM95 tapering via shared helper (identical formula across grids).
-    return dm95_taper(S_x, S_y, cfg.S_max, _EPS)
+    return dm95_taper(S_x, S_y, cfg.S_max, _EPS, cfg.taper_width_frac)
 
 
 # =====================================================================
@@ -327,15 +327,20 @@ def _to_vface_north(field: jnp.ndarray) -> jnp.ndarray:
     return jnp.concatenate([field, field[-1:]], axis=0)
 
 
-def _triad_taper(S: jnp.ndarray, S_max: float) -> jnp.ndarray:
+def _triad_taper(
+    S: jnp.ndarray,
+    S_max: float,
+    transition_width_frac: float = 0.1,
+) -> jnp.ndarray:
     """DM95 smooth tanh taper applied to a per-triad slope magnitude.
 
     Identical functional form to :func:`dm95_taper` but operating on a
     single scalar slope (an x-triad or y-triad sees only one direction).
-    Returns a factor in [0, 1].
+    Returns a factor in [0, 1]. See :func:`dm95_taper` for the
+    ``transition_width_frac`` ↔ Veros ``iso_dslope`` mapping.
     """
     return 0.5 * (1.0 + jnp.tanh(
-        (S_max - jnp.abs(S)) / (0.1 * S_max + _EPS)
+        (S_max - jnp.abs(S)) / (transition_width_frac * S_max + _EPS)
     ))
 
 
@@ -351,6 +356,7 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     kappa_GM,
     kappa_Redi: float,
     S_max: float,
+    taper_width_frac: float = 0.1,
 ) -> jnp.ndarray:
     """Triad-based GM+Redi tracer tendency on the lat-lon C-grid.
 
@@ -487,10 +493,10 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     S_T3 = jnp.clip(-drho_dx_u / drho_dz_T3, -S_max, S_max)
     S_T4 = jnp.clip(-drho_dx_u / drho_dz_T4, -S_max, S_max)
 
-    taper_T1 = _triad_taper(S_T1, S_max)
-    taper_T2 = _triad_taper(S_T2, S_max)
-    taper_T3 = _triad_taper(S_T3, S_max)
-    taper_T4 = _triad_taper(S_T4, S_max)
+    taper_T1 = _triad_taper(S_T1, S_max, taper_width_frac)
+    taper_T2 = _triad_taper(S_T2, S_max, taper_width_frac)
+    taper_T3 = _triad_taper(S_T3, S_max, taper_width_frac)
+    taper_T4 = _triad_taper(S_T4, S_max, taper_width_frac)
 
     N_valid_u = valid_T1 + valid_T2 + valid_T3 + valid_T4
     N_valid_u_safe = jnp.maximum(N_valid_u, 1.0)
@@ -536,10 +542,10 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     S_V3 = jnp.clip(-drho_dy_v / drho_dz_V3, -S_max, S_max)
     S_V4 = jnp.clip(-drho_dy_v / drho_dz_V4, -S_max, S_max)
 
-    taper_V1 = _triad_taper(S_V1, S_max)
-    taper_V2 = _triad_taper(S_V2, S_max)
-    taper_V3 = _triad_taper(S_V3, S_max)
-    taper_V4 = _triad_taper(S_V4, S_max)
+    taper_V1 = _triad_taper(S_V1, S_max, taper_width_frac)
+    taper_V2 = _triad_taper(S_V2, S_max, taper_width_frac)
+    taper_V3 = _triad_taper(S_V3, S_max, taper_width_frac)
+    taper_V4 = _triad_taper(S_V4, S_max, taper_width_frac)
 
     N_valid_v = valid_V1 + valid_V2 + valid_V3 + valid_V4
     N_valid_v_safe = jnp.maximum(N_valid_v, 1.0)
@@ -614,20 +620,20 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     S_Wx3 = jnp.clip(-drho_dx_west_B / drho_dz_w, -S_max, S_max)  # W,B
     S_Wx4 = jnp.clip(-drho_dx_east_B / drho_dz_w, -S_max, S_max)  # E,B
 
-    taper_Wx1 = _triad_taper(S_Wx1, S_max)
-    taper_Wx2 = _triad_taper(S_Wx2, S_max)
-    taper_Wx3 = _triad_taper(S_Wx3, S_max)
-    taper_Wx4 = _triad_taper(S_Wx4, S_max)
+    taper_Wx1 = _triad_taper(S_Wx1, S_max, taper_width_frac)
+    taper_Wx2 = _triad_taper(S_Wx2, S_max, taper_width_frac)
+    taper_Wx3 = _triad_taper(S_Wx3, S_max, taper_width_frac)
+    taper_Wx4 = _triad_taper(S_Wx4, S_max, taper_width_frac)
 
     S_Wy1 = jnp.clip(-drho_dy_south_A / drho_dz_w, -S_max, S_max)
     S_Wy2 = jnp.clip(-drho_dy_north_A / drho_dz_w, -S_max, S_max)
     S_Wy3 = jnp.clip(-drho_dy_south_B / drho_dz_w, -S_max, S_max)
     S_Wy4 = jnp.clip(-drho_dy_north_B / drho_dz_w, -S_max, S_max)
 
-    taper_Wy1 = _triad_taper(S_Wy1, S_max)
-    taper_Wy2 = _triad_taper(S_Wy2, S_max)
-    taper_Wy3 = _triad_taper(S_Wy3, S_max)
-    taper_Wy4 = _triad_taper(S_Wy4, S_max)
+    taper_Wy1 = _triad_taper(S_Wy1, S_max, taper_width_frac)
+    taper_Wy2 = _triad_taper(S_Wy2, S_max, taper_width_frac)
+    taper_Wy3 = _triad_taper(S_Wy3, S_max, taper_width_frac)
+    taper_Wy4 = _triad_taper(S_Wy4, S_max, taper_width_frac)
 
     # Per-triad full vertical-flux contribution.  For q = f(ρ) and
     # K_GM = 0, each ``flux_W*_m`` is exactly zero (per-triad
@@ -754,10 +760,12 @@ def gm_redi_tracer_tendency_latlon(
         dT_dt = gm_redi_tracer_tendency_triads_latlon_cgrid(
             T, rho, mask, u_mask, v_mask,
             z_coord, jacobian, grid, kappa_GM, cfg.kappa_Redi, cfg.S_max,
+            cfg.taper_width_frac,
         )
         dS_dt = gm_redi_tracer_tendency_triads_latlon_cgrid(
             S, rho, mask, u_mask, v_mask,
             z_coord, jacobian, grid, kappa_GM, cfg.kappa_Redi, cfg.S_max,
+            cfg.taper_width_frac,
         )
     elif scheme == "centered":
         dT_dt = gm_redi_tracer_tendency_latlon_cgrid(

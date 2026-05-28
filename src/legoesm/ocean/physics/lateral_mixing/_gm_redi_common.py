@@ -26,22 +26,29 @@ def dm95_taper(
     S_y: jnp.ndarray,
     S_max: float,
     eps: float = _EPS,
+    transition_width_frac: float = 0.1,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Apply Danabasoglu & McWilliams (1995) smooth slope tapering.
 
     Returns tapered ``(S_x, S_y, taper)`` where *taper* is a smooth
     factor in [0, 1] computed as::
 
-        taper = 0.5 * (1 + tanh((S_max - |S|) / (0.1 * S_max)))
+        taper = 0.5 * (1 + tanh((S_max - |S|) / (width_frac * S_max)))
 
     Parameters
     ----------
     S_x, S_y : array (..., nlev-1)
         Raw (clipped but un-tapered) isopycnal slopes at interfaces.
     S_max : float
-        Maximum slope for tapering.
+        Slope at which the taper crosses 0.5. Equivalent to Veros's
+        ``iso_slopec``.
     eps : float
         Small constant for sqrt regularisation.
+    transition_width_frac : float
+        Tanh transition half-width as a fraction of ``S_max``.
+        Default ``0.1`` matches the legoESM pre-2026 convention.
+        Veros's ``iso_dslope`` parameter maps via
+        ``transition_width_frac = iso_dslope / iso_slopec``.
 
     Returns
     -------
@@ -49,7 +56,7 @@ def dm95_taper(
     """
     S_mag = jnp.sqrt(S_x ** 2 + S_y ** 2 + eps)
     taper = 0.5 * (1.0 + jnp.tanh(
-        (S_max - S_mag) / (0.1 * S_max + eps)
+        (S_max - S_mag) / (transition_width_frac * S_max + eps)
     ))
     return S_x * taper, S_y * taper, taper
 
@@ -58,19 +65,22 @@ def dm95_taper_scalar(
     S: jnp.ndarray,
     S_max: float,
     eps: float = _EPS,
+    transition_width_frac: float = 0.1,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Single-component variant of :func:`dm95_taper`.
 
     Used by grids that carry a scalar slope along each face's own normal
     (e.g. MPAS/Voronoi edges).  Identical functional form, with ``|S|``
-    replaced by ``|S_n|``.
+    replaced by ``|S_n|``. See :func:`dm95_taper` for parameter
+    semantics (in particular ``transition_width_frac`` ↔ Veros's
+    ``iso_dslope / iso_slopec``).
 
     Returns
     -------
     S_tapered, taper : same shape as ``S``.
     """
     taper = 0.5 * (1.0 + jnp.tanh(
-        (S_max - jnp.abs(S)) / (0.1 * S_max + eps)
+        (S_max - jnp.abs(S)) / (transition_width_frac * S_max + eps)
     ))
     return S * taper, taper
 
