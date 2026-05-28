@@ -69,6 +69,14 @@
 - **MPI halo AD**: all `sendrecv` via `_sendrecv_vjp` (`@jax.custom_vjp` in `halo_exchange.py`) — swaps source/dest in backward. Only `allreduce(SUM)` AD-safe; `MAX`/`MIN`/`allgather`/`bcast` diagnostics only.
 - **Device mesh under MPI**: pass per-rank device count to `create_device_mesh()`, not total.
 
+## Oracle-Recipe Fidelity (ocean) — see docs/ocean_fidelity/oracle_recipe_strategy.md
+- ADDITIVE to Validation Rules: oracle work NEVER replaces unit tests, the ocean matrix, conservation checks, or visual verification. Truth tiers (conservation/equivariance/analytic) outrank oracle-matching.
+- Recipe = pure config selecting shared canonical blocks (never a bespoke `veros_*` solver). Oracle-matching numerics go in the canonical module (`eos.py`, advection/limiter dispatch, `vertical_mixing/`, integrator dispatch) as selectable options.
+- Mimicry-only glue (halo strip, axis transpose, time-level handling) lives in the fidelity harness, never the model. Test: "would a user with a different goal ever select this?" No → harness.
+- Conventions handled only in the bridge, verified by equivariance tests (`physics(φ(x))=φ(physics(x))` to tol); a "convention" that changes the wet domain/answers is physics → config, not bridge.
+- Constants are config (`ConstantsConfig`), not module-global monkey-patches (no `override_constants` in shippable paths); defaults reference `legoesm.constants`; base only, derived (κ,ε) recomputed.
+- Oracle tendency-match (tier 3) trusted only for a block that also clears truth tiers (0–2).
+
 ## Validation Rules
 - Run narrowest relevant test after edits.
 - Numerical changes: analytical/benchmark validation over unit tests alone.

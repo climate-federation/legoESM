@@ -117,6 +117,36 @@ When invoked, systematically work through the following swap dimensions. For eac
 - For each: smoke test → conservation test → differentiability test → vmap ensemble test
 - These combinations should stress the coupler's ability to wire together components with different state pytree shapes
 
+### 9. Structural / Decomposition Modularity (static audit — read-only)
+
+Runtime swap-modularity (dimensions 1–8) is necessary but **not sufficient**. If a solver's
+internal stages (PGF, Coriolis, vorticity flux, kinetic energy, advection, lateral/vertical
+mixing, bottom drag) are fused into one monolithic function, you cannot isolate, unit-test,
+equivariance-test, or swap a single stage — a **structural** modularity failure even when
+whole-component swaps pass. This dimension is a STATIC audit (Glob/Grep/Read only; no runtime
+execution). Verification-aligned: it directly supports the oracle-recipe strategy
+(`docs/ocean_fidelity/oracle_recipe_strategy.md`), where stage-level equivariance and
+block-granularity tests require addressable stages.
+
+Audit and report:
+- **Monolithic entry points**: tendency/step functions exceeding ~400 LOC that are NOT
+  decomposed into named pure substage helpers. Report worst offenders with LOC + count of
+  inline section comments. (Known at time of writing: `latlon_cgrid_ocean_baroclinic_tendencies`
+  ≈ 1299 LOC, `_step_impl` ≈ 572 LOC — both lat-lon C-grid.)
+- **Docstring floor**: solver entry points below a docstring-coverage threshold (e.g. < 25%).
+- **Config sprawl**: config NamedTuples with > ~25 fields and no section grouping/comments
+  (e.g. `LatLonCGridOceanConfig` ≈ 45 fields).
+- **Two-source-of-truth params**: the same physical parameter defined in more than one config
+  (e.g. `A_h` in both the dynamics config and the nested physics config) — an ambiguity footgun.
+- **Deprecated-but-live config**: fields that raise-on-use yet remain in the public config
+  (e.g. physics-level bottom drag) — a migration footgun.
+- **Buried mode-switch booleans**: flags that change pipeline-wide semantics without prominent
+  placement/docstring (e.g. `implicit_vertical_mixing`).
+
+For each finding, state whether decomposing/grouping it would unblock a stage-level unit or
+equivariance test. Report under a "Structural Modularity / Clarity Debt" section. As always:
+report, never edit.
+
 ## Execution Protocol
 
 1. **Discovery phase**: Read the codebase to find all available implementations for each swap dimension. Use `Glob` and `Grep` to search for class/function registries, factory functions, config enums, or naming conventions. Update the test matrix with what actually exists (not all components above may be implemented yet).
@@ -181,3 +211,4 @@ When invoked, systematically work through the following swap dimensions. For eac
 - **Be quantitative.** Report actual numbers (L2 norms, conservation drift, gradient magnitudes), not just pass/fail.
 - **Be honest about what doesn't exist yet.** The discovery phase will likely reveal that some components from the test matrix are not yet implemented. That's valuable information — report the gaps clearly.
 - **Test the coupler hard.** The coupler is where modularity lives or dies. Every swap changes the state pytree shape — the coupler must handle this gracefully.
+- **Structural modularity counts (dimension 9).** A stage you cannot isolate is a stage you cannot swap or verify. Flag monolithic solvers and sprawling/duplicated configs as modularity failures, not style nits — they block the stage-level verification the model needs.
