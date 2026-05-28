@@ -133,13 +133,15 @@ def main() -> int:
           f"veer={float(veer):.2f}°  qke_low={qke_low:.4f}")
 
     ok = True
-    # Tight neutral band would be 273.0 < T < 273.3, but legoESM's
-    # implicit-θ diffusion on a sigma-coord column has a small
-    # round-off in the θ↔T Exner conversion (~0.5 K over 6 h with
-    # default Cd/Ch).  Loose band catches actual numerical blow-up
-    # without flagging the conversion drift — Phase E2 v1 limitation.
+    # Lowest-cell T is θ · exner(p_low) where exner(p_low) < 1, so
+    # the **initial** T_low is a few tenths of a K below θ_init =
+    # 273.15 K (≈ 272.8 K at nlev=16, sigma_top=0.85).  The
+    # implicit-θ diffusion solver leaves T_low effectively unchanged
+    # (drift ~1e-5 K) because ∂θ/∂z = 0 in the neutral case ⇒ no
+    # flux divergence.  Band [272, 274] absorbs the init exner
+    # projection without flagging genuine blow-up.
     if not (272.0 < T_low < 274.0):
-        print(f"[FAIL] T_low {T_low} drifted out of neutral band [272, 274]")
+        print(f"[FAIL] T_low {T_low} out of neutral exner-projected band [272, 274]")
         ok = False
     if speed_low > _U_G:
         print(f"[FAIL] surface wind {speed_low} exceeds geostrophic {_U_G}")

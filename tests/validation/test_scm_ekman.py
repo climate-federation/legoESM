@@ -65,13 +65,34 @@ def test_ekman_finite(ekman_run):
         assert np.all(np.isfinite(arr))
 
 
-def test_ekman_neutral_temperature_does_not_blow_up(ekman_run):
-    """Neutral init θ=273.15 K everywhere.  Surface heat flux ≈ 0
-    by construction (no T_sfc/T[-1] gradient).  Lowest-cell T should
-    stay within ±1 K of the initial value — the small drift is the
-    documented Exner round-off in implicit-θ diffusion."""
+def test_ekman_neutral_temperature_in_exner_projected_band(ekman_run):
+    """Neutral init θ=273.15 K everywhere.  Lowest-cell T equals
+    θ · exner(p_low); exner(p_low) < 1 on a sigma-pressure column
+    so the **init** T_low sits a few tenths of a K below 273.15.
+    Permissive band catches genuine blow-up without flagging the
+    init exner projection."""
     T_low = float(ekman_run.state.T.data[0, 0, 0, -1])
-    assert 272.0 < T_low < 274.0, f"Neutral T drifted: {T_low}"
+    assert 272.0 < T_low < 274.0, f"Neutral T_low out of band: {T_low}"
+
+
+def test_ekman_neutral_implicit_theta_drift_under_1mK(ekman_run):
+    """The actual time-stepping drift in T_low must be < 1 mK over
+    the test window.  ∂θ/∂z = 0 ⇒ no flux divergence on θ ⇒ the
+    implicit-θ scheme conserves T_low to round-off (drift ~1e-5 K
+    measured at nlev=16, sigma_top=0.85).  A regression that breaks
+    this conservation would mean the θ↔T Exner round-trip is no
+    longer exact."""
+    runner = _import_runner()
+    init_scm = runner.build_scm(
+        nlev=TEST_NLEV, dt=TEST_DT, sigma_top=TEST_SIGMA_TOP,
+    )
+    T_init = float(init_scm.state.T.data[0, 0, 0, -1])
+    T_final = float(ekman_run.state.T.data[0, 0, 0, -1])
+    drift = abs(T_final - T_init)
+    assert drift < 1e-3, (
+        f"Implicit-θ scheme drifted T_low by {drift} K (expected "
+        "~1e-5 K under ∂θ/∂z = 0)."
+    )
 
 
 def test_ekman_surface_wind_decelerates_relative_to_geostrophic(ekman_run):
