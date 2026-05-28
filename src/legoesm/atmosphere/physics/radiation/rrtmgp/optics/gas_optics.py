@@ -195,7 +195,14 @@ def _compute_relative_abundance_interpolant(
             (temperature_idx, major_species_idx[i], troposphere_idx),
         )
     )
-  vmr_ref_ratio = vmr_ref[0] / vmr_ref[1]
+  # Defensive safe-divide for ``vmr_ref[1]`` (the second major species's
+  # reference VMR).  All shipped rte-rrtmgp gas-optics tables have positive
+  # ``vmr_ref`` entries (verified: dry air = 1.0, all real gases ≥ 1e-10),
+  # but a future table or a manually-constructed lookup might have a zero
+  # entry that would otherwise produce ``inf/NaN`` in this ratio and
+  # propagate through the reverse-mode AD path.  See iter-5 commit for the
+  # analogous fix on ``combined_vmr``.
+  vmr_ref_ratio = vmr_ref[0] / jnp.maximum(vmr_ref[1], _VMR_SAFE_DIV_EPS)
   combined_vmr = vmr_for_interp[0] + vmr_ref_ratio * vmr_for_interp[1]
   # Consistent with how the RRTM absorption coefficient tables are designed, the
   # relative abundance defaults to 0.5 when the volume mixing ratio of both
