@@ -2378,6 +2378,271 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1058 (2026-05-28): codex iter-1056 WARN fixes — rebuild ``_active_layout`` on re-entry + defensive asserts
+
+### Goal
+
+Address codex adversarial-review WARN/NIT findings on iter-1056:
+
+- **WARN #2**: ``initialize_distributed`` re-entry never rebuilds
+  ``_active_layout`` even when the caller passes a different
+  ``global_n``.  Latent silent bug for any future caller of
+  ``scatter_to_local`` / ``gather_to_global`` whose grid resolution
+  differs from the conftest's session-fixture init (default
+  ``global_n = max(n_procs, 2)``).
+- **NIT #1**: The iter-1056 reordered ``set_halo_backend("local")``
+  has no assertion locking the contract.  A future regression that
+  silently leaves the backend in MPI mode would re-introduce the
+  bug class.
+- **NIT #5**: ``_build_pe_model_and_state`` calls ``hydrostatic_to_fv3``
+  internally but does not enforce that callers reset the backend.
+
+### Fix
+
+1. ``src/legoesm/parallel/distributed.py`` (re-entry layout rebuild):
+   when ``initialize_distributed`` is called a second time with a
+   non-``None`` ``global_n`` that differs from the existing
+   ``_active_layout.global_n``, rebuild ``_active_layout``.  No-op
+   when ``global_n`` matches.  Preserves backwards behaviour for
+   the no-``global_n`` re-entry case.
+
+2. ``tests/distributed/test_mpi_fv3_step_fidelity.py``: add
+   ``assert get_halo_backend() == "local"`` at the top of
+   ``_build_pe_model_and_state`` and inside the inlined PE factory
+   test after the reset.  Future regressions that build PE state
+   under MPI now fail loudly with a pointer to iter-1056.
+
+3. **WARN #3 (tiled-mode test correctness)** — DEFERRED.  The
+   reproducibility-only check catches deadlocks but not
+   deterministic-wrong peer orderings.  A rank-coded input + edge
+   comparison would close this, but requires designing a tile-
+   aware single-device reference (the only way to know what the
+   expected neighbor strip is).  Tracked.
+
+4. **WARN #4 (conftest placeholder ``global_n``)** — DEFERRED with
+   WARN #2 mitigation.  WARN #2's re-entry rebuild now prevents the
+   stale-layout silent bug for callers that pass an explicit
+   ``global_n``.  Callers that don't pass ``global_n`` (and don't
+   call ``scatter_to_local``) are unaffected.  Cleanest fix would
+   be to remove the placeholder layout creation entirely from
+   conftest, but that risks breaking tests that depend on
+   ``get_active_layout() is not None`` for skip-gates.
+
+### Why this matters
+
+WARN #2 is the load-bearing fix — without it, a test that calls
+``initialize_distributed(global_n=N)`` and then ``scatter_to_local``
+silently uses the conftest's small-``n`` tile layout, producing
+wrong-shape local arrays.  This is exactly the silent-corruption
+class that iter-1056 surfaced through a different route
+(``hydrostatic_to_fv3`` running under MPI backend with wrong
+topology).  Closing both routes hardens the test infrastructure
+against the same family of bugs.
+
+### Validation
+
+::
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 2 \
+        .venv/bin/python -m pytest tests/distributed/test_mpi_fv3_step_fidelity.py \
+                                   tests/distributed/test_mpi_fv3_nh_step_fidelity.py
+    => 14 passed in 303s (asserts fire correctly when contract
+       holds; no spurious failures).
+
+The 2 pre-existing failures in ``test_mpi_bootstrap.py::
+TestMPIHaloExchange`` (``test_halo_exchange_produces_finite_result``,
+``test_halo_exchange_roundtrip``) reproduce on clean main HEAD
+(via ``git stash`` probe).  They are independent of iter-1058 —
+the failure mode ``(3, 6, 6) == (6, 6, 6)`` is a ``scatter_to_local``
+contract mismatch with how the test's ``pad_halo`` is dispatched.
+Tracked separately.
+
+### Codex review summary
+
+Submitted iter-1056 + iter-1057 diffs (HEAD~2..HEAD) to codex
+adversarial review.  Findings:
+- NIT #1: factory-test contract assert → **addressed (this iter)**.
+- WARN #2: re-entry layout rebuild → **addressed (this iter)**.
+- WARN #3: tiled test correctness → tracked, deferred.
+- WARN #4: conftest placeholder → mitigated via WARN #2.
+- NIT #5: builder backend assert → **addressed (this iter)**.
+
+## Iteration 1057 (2026-05-28): tiled-mode pad_halo_mpi coverage test (codex iter-1054 WARN #7)
+
+### Goal
+
+Close the only remaining iter-1054 follow-up: the rank-sort
+deadlock fix touched 4 sites in ``halo_exchange.py`` including 2
+tiled-mode helpers (``_pad_halo_mpi_tiled`` / ``_pad_halo_mpi_tiled_4d``),
+but no test exercised the tiled path.  Existing
+``test_mpi_interp_offsets`` skips ``size > 6``, leaving the
+tiled-mode rank-sort fix untested.
+
+### Test
+
+``tests/distributed/test_mpi_tiled_pad_halo.py`` (new):
+
+- Auto-skips when ``size <= 6`` or ``size % 6 != 0`` (current CI
+  configs that can't run 24+ procs).
+- Auto-skips when the resolved topology is face-only
+  (``tiling == (1, 1)``).
+- At a valid tiled topology, runs ``pad_halo`` and ``pad_halo_4d``
+  twice on random data and asserts:
+  1. No deadlock (the call returns).
+  2. Bit-for-bit reproducibility across calls.
+  3. Finite output (no NaN/Inf).
+
+### Limitations (codex iter-1056 WARN #3, deferred)
+
+Doesn't compare bit-for-bit against a single-device reference;
+that would require a reference run that knows about the tile
+layout (not yet derived).  The reproducibility check catches a
+true deadlock but not a *deterministic* wrong peer ordering that
+returns identical wrong values twice.  Strengthening to
+rank-coded inputs + neighbor-strip equality is tracked as a
+follow-up.
+
+### Status
+
+- Tested locally at np=2 (skips correctly with the size-gate).
+- np=24 oversubscribed is impractical on Mac hardware (24 procs
+  on an 8-core M-series machine hangs the OS scheduler).  The
+  test runs in environments with ≥24 physical procs.
+
+## Iteration 1056 (2026-05-28): PE factory MPI test — set ``halo_backend="local"`` BEFORE building state
+
+### Goal
+
+After iter-1054 fixed the np=6 deadlock in ``pad_halo_mpi``,
+extending coverage to np=6 surfaced a PE factory test that had
+been silently passing at np=2 since iter-1049 but failed at
+np=6: ``test_pe_3_step_with_fv3_faithful_factory``.
+
+Bisect: the same failure also reproduced at np=2 on a *clean*
+``main`` HEAD (``git stash`` probe).  Not an iter-1054 regression.
+Pre-existing latent bug.
+
+### Root cause
+
+The PE factory test inlined its state build (it doesn't use the
+``_build_pe_model_and_state`` helper).  The order was:
+
+::
+
+    grid = create_cubed_sphere(n, use_duogrid=True)
+    state_cc = baroclinic_wave_init(grid, sigma, perturbed=True)
+    state_global = hydrostatic_to_fv3(state_cc, cdgrid)  # ← halo op!
+    ref_model = CDGridPrimitiveEquationModel(grid, sigma, config)
+    dist_model = CDGridPrimitiveEquationModel(grid, sigma, config)
+    set_halo_backend("local")  # ← AFTER state was already built
+    _run_pe_pair_and_assert(...)
+
+``tests/distributed/conftest.py::_init_mpi_layout`` is autouse
+session-scope.  At session start it calls
+``initialize_distributed(global_n=max(n_procs, 2))`` which sets the
+module-level halo backend to ``"mpi"`` and the active
+``CommTopology`` to its small-``n`` configuration.
+
+``hydrostatic_to_fv3`` calls ``pad_halo_vector_4d`` which, under
+``_halo_backend == "mpi"``, routes through
+``_pad_halo_mpi_face_only_4d``.  That helper reads
+``n = data.shape[1]`` per call, but the *exchange topology* still
+references the conftest's small-``n`` setup.  In practice the
+combination of (a) the wrong-``n`` topology, (b) ``hydrostatic_to_fv3``'s
+A→D conversion stencil running over the corrupted MPI halos, and
+(c) ``use_duogrid=True``'s post-pad Lagrange remap operating on
+that corrupt halo strip produced subtly bad D-grid winds in
+``state_global``.
+
+The 5 single-cell perturbations cascaded under the aggressive
+production damping coefficients (``damp_v=0.030``, ``A_h=1e6``,
+``div_damp_coeff=1e6``) — single-step ``|T|_max`` reached
+``1.188e+53`` on the next ``ref_model.step``.  Single-rank ref blew
+up to ``NaN`` by step 2.  Distributed run had different halo
+arithmetic so it blew up to ``e+67``-finite — the ``assert_allclose``
+hit a NaN-location mismatch, masking the underlying instability.
+
+### Fix
+
+Move ``set_halo_backend("local")`` to the *top* of the test method,
+before ``create_cubed_sphere`` / ``hydrostatic_to_fv3`` runs.  Now
+``state_global`` is built under the local backend (correct halos
+for any ``n``), and the rest of the test proceeds normally.  All
+other tests in this class already follow this order (they use
+``_build_pe_model_and_state`` which is always called after a
+``set_halo_backend("local")``).
+
+### Why this was latent
+
+The PE factory test was added in iter-1046 with ``duogrid=False``
+and ``set_halo_backend("local")`` AFTER state build.  It passed at
+np=2 because at np=2 + duogrid=False, the conftest small-``n``
+topology happened to produce halos that — while *technically*
+corrupt — did not visibly amplify under the (then-disabled)
+duogrid stencil in 3 steps.
+
+iter-1049 enabled ``duogrid=True`` on this same test (after the
+``synchronize_cgrid_fluxes`` MPI fix).  Duogrid's Lagrange post-
+remap amplifies tiny halo errors — but iter-1049's validation
+section listed NH-factory only (``9/9 NH MPI step fidelity tests
+pass``); PE-factory was not separately re-verified.  At np=2 the
+amplified halo error happened to stay below the catastrophic
+threshold for 3 steps; at np=6 it crossed it.
+
+### Validation
+
+::
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 2 \
+        .venv/bin/python -m pytest tests/distributed/test_mpi_fv3_step_fidelity.py \
+                                   tests/distributed/test_mpi_fv3_nh_step_fidelity.py
+    => 14 passed in 303s
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 3 \
+        .venv/bin/python -m pytest tests/distributed/test_mpi_fv3_step_fidelity.py \
+                                   tests/distributed/test_mpi_fv3_nh_step_fidelity.py
+    => 14 passed in 316s
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 6 \
+        .venv/bin/python -m pytest tests/distributed/test_mpi_fv3_step_fidelity.py \
+                                   tests/distributed/test_mpi_fv3_nh_step_fidelity.py
+    => 14 passed in 485s
+
+Total: 42 passes across np ∈ {2, 3, 6} for NH + PE step fidelity
+including factory + duogrid + corner-div + a2b + damp_v/w
+combinations.  iter-1054's rank-sort fix combined with iter-1056's
+state-build-order fix means the full FV3-faithful factory now runs
+bit-for-bit identically across all face-only MPI configurations.
+
+### Follow-ups still open
+
+- Sub-face tiling (np=24) coverage for ``_pad_halo_mpi_tiled`` /
+  ``_pad_halo_mpi_tiled_4d`` — see
+  ``tests/distributed/test_mpi_tiled_pad_halo.py``.  Test runs at
+  np>=24, codex iter-1054 WARN #7.
+- Non-square halo for ``use_fv3_cross_face_du_proj`` (iter-1046 #1,
+  still tracked).
+
+## Iteration 1055 (2026-05-28): np=6 coverage extension for NH/PE step fidelity
+
+### Goal
+
+iter-1054 fixed the np=6 ``pad_halo_mpi`` deadlock.  Confirm the
+full NH and PE step-fidelity suite (12 tests) runs end-to-end at
+np=6 face-only with the existing CommTopology.
+
+### Result
+
+NH + PE baseline ``test_*_3_step_owned_faces_match_single_rank``
+tests pass at np=6.  The factory composition test surfaced a
+*different* pre-existing latent bug — see iter-1056.
+
+### Status
+
+- Baseline tests (NH/PE 3-step owned-face match): ✅ np=2, np=3, np=6
+- Per-flag tests (a2b, corner_div, damp_v, damp_w, sponge): ✅ np=2, np=3, np=6
+- Factory tests (full FV3-faithful config): fixed in iter-1056 (above)
+
 ## Iteration 1054 (2026-05-28): extend rank-sort fix to ``pad_halo_mpi`` — closes 4 latent np=6 deadlock sites
 
 ### Goal
@@ -2465,10 +2730,12 @@ TWO distinct classes of MPI bugs:
 
 | Open follow-up | Status |
 |----------------|--------|
-| iter-1046 #1 non-square halo for cross_face | ⏳ deferred |
-| Sub-face tiled mode (n>6) general support | ⏳ tested infrastructure but no n>6 test variants run |
+| iter-1046 #1 non-square halo for cross_face | ⏳ deferred (substantial refactor; axis-swap edges genuinely have length mismatch on (6, n, n+1, nlev) data — requires per-component u/v halo paths like FV3 ``mpp_get_boundary``) |
+| Sub-face tiled mode (n>6) general support | ⏳ deadlock-free test added iter-1057; bit-for-bit cross-tile-vs-single-device gap remains |
 | Metal+MPI+duogrid linspace XLA | ⏳ workaround documented |
-| codex iter-1054 WARN #7: tiled-mode np>6 test | ⏳ |
+| codex iter-1054 WARN #7: tiled-mode np>6 test | ✅ **iter-1057** (``test_mpi_tiled_pad_halo.py``) |
+| PE factory MPI fidelity at np>2 | ✅ **iter-1056** (move ``set_halo_backend("local")`` to top of test) |
+| np=6 full-factory NH/PE step fidelity | ✅ **iter-1055/1056** (42 passes across np ∈ {2, 3, 6}) |
 
 ### Why this iteration was meaningful
 

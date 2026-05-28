@@ -100,6 +100,26 @@ def initialize_distributed(
         from legoesm.grids.halo import get_halo_backend, set_halo_backend
         if get_halo_backend() != "mpi":
             set_halo_backend("mpi", _active_topology)
+        # FV3_3D iter-1058 (codex iter-1056 WARN #2): rebuild
+        # ``_active_layout`` when the caller's ``global_n`` differs
+        # from the first-init layout's ``global_n``.  Previously the
+        # re-entry branch silently returned the stale layout, which
+        # would feed wrong tile sizes to ``scatter_to_local`` /
+        # ``gather_to_global``.  The current FV3 step-fidelity tests
+        # never call scatter, so the stale layout was latent, but any
+        # future test or production code path that re-initializes
+        # with a different grid size needs the layout refreshed.
+        if global_n is not None:
+            need_rebuild = (
+                _active_layout is None
+                or getattr(_active_layout, "global_n", None) != global_n
+            )
+            if need_rebuild:
+                _active_layout = make_layout(
+                    rank=_active_topology.rank,
+                    n_ranks=_active_topology.n_processes,
+                    global_n=global_n,
+                )
         from legoesm.parallel.mesh import get_active_config
         config = get_active_config()
         result = [config]

@@ -46,6 +46,19 @@ def reset_halo_backend():
 
 
 def _build_pe_model_and_state(n: int = 8, nlev: int = 5, **config_overrides):
+    # FV3_3D iter-1058 (codex iter-1056 NIT #5): builder calls
+    # ``pad_halo`` (via ``create_cubed_sphere_cdgrid``) and
+    # ``pad_halo_vector_4d`` (via ``hydrostatic_to_fv3``).  Under the
+    # session-scope MPI conftest backend, the wrong-``n`` topology
+    # corrupts ``state_global``; iter-1056 surfaced this in the PE
+    # factory test.  Assert the backend is local at builder entry so
+    # any future caller that forgets to reset hits a loud failure
+    # instead of silent halo corruption.
+    assert get_halo_backend() == "local", (
+        f"_build_pe_model_and_state requires halo backend 'local' "
+        f"(got '{get_halo_backend()}'); call set_halo_backend('local') "
+        f"first.  See iter-1056 for the bug class."
+    )
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
     from legoesm.grids.vertical import create_sigma_coordinate
@@ -264,6 +277,11 @@ class TestFV3PEStepMPIFidelity:
         # this test inlines its state build so the reset has to come
         # before the inlined ``hydrostatic_to_fv3`` call.
         set_halo_backend("local")
+        assert get_halo_backend() == "local", (
+            "iter-1056 contract: state construction must happen under "
+            "the local halo backend; otherwise the conftest session "
+            "topology corrupts hydrostatic_to_fv3's vector halo."
+        )
 
         # iter-1049: duogrid=True now MPI-safe (see NH factory docstring).
         grid = create_cubed_sphere(n, use_duogrid=True)
