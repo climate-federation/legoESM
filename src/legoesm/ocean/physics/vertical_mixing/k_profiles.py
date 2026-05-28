@@ -154,6 +154,43 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg):
         )
         return out.K_v, out.A_v
 
+    if scheme == "tke":
+        from legoesm.ocean.physics.vertical_mixing.tke import (
+            tke_vertical_mixing,
+        )
+        # Interpolate u, v to cell centres for the closure on C-grid;
+        # on cubed-sphere they are already at cell centres.
+        u_data = state.u.data
+        v_data = state.v.data
+        T_data = state.T.data
+        S_data = state.S.data
+        if u_data.shape[1] != T_data.shape[1]:
+            u_data = 0.5 * (u_data[:, :-1, :] + u_data[:, 1:, :])
+            v_data = 0.5 * (v_data[:-1, :, :] + v_data[1:, :, :])
+        dz_half = jnp.broadcast_to(
+            z_coord.dz_half_ref * J[..., jnp.newaxis],
+            T_data.shape[:-1] + (z_coord.n_levels - 1,),
+        )
+        tau_x = (getattr(surface_forcing, "tau_x", None)
+                 if surface_forcing is not None else None)
+        tau_y = (getattr(surface_forcing, "tau_y", None)
+                 if surface_forcing is not None else None)
+        # Use Mode B (diagnostic / quasi-steady) iteration: ``tke_old=None``
+        # seeds at background and 3 iterations of the same backward-Euler
+        # step bring TKE to within ~few % of the prognostic equilibrium
+        # for typical ocean shear / stratification. True prognostic mode
+        # (TKE carried across timesteps via ``state.tke``) is a future
+        # upgrade tracked in the Phase G audit doc.
+        _DIAGNOSTIC_DT = 86400.0   # long dt drives implicit solve to equilibrium
+        tke_out = tke_vertical_mixing(
+            u_data, v_data, T_data, S_data, rho, dz_half,
+            tke_old=None,
+            tau_x_surface=tau_x, tau_y_surface=tau_y,
+            dt=_DIAGNOSTIC_DT, cfg=vmix_cfg.tke,
+            n_iterations=3,
+        )
+        return tke_out.K_H, tke_out.K_M
+
     if scheme == "kpp":
         from legoesm.ocean.physics.vertical_mixing.kpp import (
             kpp_vertical_mixing,

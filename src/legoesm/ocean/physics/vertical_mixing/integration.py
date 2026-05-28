@@ -53,6 +53,8 @@ def make_vertical_mixing_physics(
         return _make_richardson(config, apply_diffusion=apply_diffusion)
     elif scheme == "kpp":
         return _make_kpp(config, apply_diffusion=apply_diffusion)
+    elif scheme == "tke":
+        return _make_tke(config, apply_diffusion=apply_diffusion)
     else:
         raise ValueError(f"Unknown vertical mixing scheme: {scheme!r}")
 
@@ -192,6 +194,44 @@ def _make_kpp(config: VerticalMixingConfig,
                                 A_v=out.A_v if not apply_diffusion else None)
     return physics_fn
 
+
+
+def _make_tke(config: VerticalMixingConfig,
+              apply_diffusion: bool = True) -> Callable:
+    """Factory for the Gaspar 1990 / Burchard 2002 TKE closure
+    (Veros's canonical vertical mixing scheme).
+
+    The TKE closure requires the implicit vertical-mixing path
+    (``LatLonCGridOceanConfig.implicit_vertical_mixing=True``). The
+    actual K_M / K_H computation runs inside
+    :func:`legoesm.ocean.physics.vertical_mixing.k_profiles._vmix_K_profiles`
+    where the model timestep is available; this factory simply returns
+    a no-op physics tendency (zero everywhere, ``K_v=None``,
+    ``A_v=None``) so that the model's implicit-mixing path triggers
+    the ``compute_vertical_K_profiles`` fallback and uses the TKE
+    branch wired there.
+
+    When ``apply_diffusion`` is ``True`` (explicit-vertical-mixing
+    mode) we raise — TKE is implicit-only in legoESM v1 to match
+    Veros's ``enable_implicit_vert_friction=True`` recipe convention.
+    """
+    if apply_diffusion:
+        raise ValueError(
+            "vertical_mixing=\"tke\" requires implicit_vertical_mixing=True. "
+            "Set LatLonCGridOceanConfig.implicit_vertical_mixing=True so the "
+            "implicit vertical solver can consume the K profiles computed "
+            "by the TKE closure."
+        )
+
+    def physics_fn(state, grid, z_coord, surface_forcing=None):
+        # No-op: TKE K-profiles are computed by the implicit solver via
+        # _vmix_K_profiles (k_profiles.py). Returning K_v=None /
+        # A_v=None triggers the fallback path in
+        # _apply_implicit_vertical_mixing → compute_vertical_K_profiles.
+        return _wrap_tendencies(None, None, None, None, state,
+                                 K_v=None, A_v=None)
+
+    return physics_fn
 
 
 def _zero_tendencies(state):
