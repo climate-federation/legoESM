@@ -7,7 +7,8 @@ One entry per task attempt. Newest at the bottom of each task block.
 - [x] Q1 — Phase G density residual: FIXED (grid aligned to Veros; all-region L2 ~0.037)
 - [x] Q2 — Per-process comparison IMPLEMENTED (momentum+tracer emit metrics); density+Coriolis validate; rest documented deltas. Verification-approach fork surfaced for user.
 - [ ] Q3 — Register fidelity modules (test discovery)
-- [~] Q4 — ConstantsConfig (G-C1 done pending green; G-C2…G-C5 remaining)
+- [~] Q4 — ConstantsConfig: G-C1 + G-C2(vertical mixing) done; G-C3/G-C4/G-C5 blocked on user config-API decision
+- [~] Q7 — config readability docstring DONE; A_h footgun + field reorder = user-owned API
 - [x] Q5 — CI clarity guard (function-LOC ceiling, allow-list shrinks; two-source/deprecated detectors folded into Q7)
 - [x] Q6 — Equivariance tier expansion (bridge round-trip temp+salt, halo-strip invariance; + existing EOS-unit/vertical-flip/cumsum-order)
 - [ ] Q7 — Config regrouping + footguns
