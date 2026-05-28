@@ -103,3 +103,17 @@ def test_pcr_rejects_shape_mismatch():
     d = jnp.zeros((4, 16))  # wrong shape
     with pytest.raises(ValueError, match="matching shapes"):
         pcr_solve_batched(a, b, c, d)
+
+
+def test_pcr_round_trip_identity_system():
+    """Identity tridiag (a=0, b=1, c=0, d=x) must return x exactly.
+    Stress-tests the boundary handling — at every PCR level, a_up/c_dn
+    are 0, alpha=beta=0 (no update), b stays 1 → x = d / b = d."""
+    rng = jax.random.PRNGKey(42)
+    shape = (8, 29)
+    d = jax.random.normal(rng, shape, dtype=jnp.float64)
+    a = jnp.zeros(shape)
+    b = jnp.ones(shape)
+    c = jnp.zeros(shape)
+    x = pcr_solve_batched(a, b, c, d)
+    assert float(jnp.max(jnp.abs(x - d))) < 1.0e-15, "Identity solve failed"
