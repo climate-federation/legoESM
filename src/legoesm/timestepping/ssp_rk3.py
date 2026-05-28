@@ -68,6 +68,62 @@ def ssp_rk3_step(
     return k3
 
 
+def ssp_rk3_step_scan(
+    state: State,
+    tendency_fn: Callable[[State], State],
+    dt: float,
+) -> State:
+    """SSP-RK3 step with the 3 stages folded into a single ``lax.scan`` body.
+
+    Task #25 (JIT-compile bloat at multi-rank): the inline variant
+    above calls ``tendency_fn`` 3× sequentially, so XLA inlines THREE
+    copies of the full tendency pipeline (advection + polar filter +
+    diffusion + hydrostatic + vertical advection) into one XLA module.
+    With ``jax.lax.scan`` over a 3-iteration body XLA optimizes the
+    tendency code ONCE and loops 3×.  The math is identical
+    (bit-equivalent to ``ssp_rk3_step`` modulo scan-induced
+    associativity, which JAX's lax.scan keeps deterministic).
+
+    Stage update arithmetic:
+
+        k_{n+1} = α_n * state_init + β_n * (k_n + dt * F(k_n))
+
+    with α = (0, 0.75, 1/3), β = (1, 0.25, 2/3).  Pass coefficients
+    inside the scan-carry as JAX arrays so the body is fully
+    closed-form (no Python-side branching).
+
+    Parameters
+    ----------
+    state, tendency_fn, dt
+        Same as :func:`ssp_rk3_step`.
+
+    Returns
+    -------
+    Final state pytree, same structure as ``state``.
+    """
+    import jax.numpy as jnp
+
+    # α_n weights ``state_init`` (kept as scan carry); β_n weights the
+    # axpy ``(k_n + dt * F(k_n))``.  Build as Float arrays so they're
+    # part of the scan's xs (the only thing that differs per stage).
+    alpha = jnp.asarray([0.0, 0.75, 1.0 / 3.0])
+    beta = jnp.asarray([1.0, 0.25, 2.0 / 3.0])
+
+    def scan_body(carry, stage_idx):
+        k_curr, state_init = carry
+        tend = tendency_fn(k_curr)
+        k_axpy = _pytree_axpy(k_curr, tend, dt)
+        a = alpha[stage_idx]
+        b = beta[stage_idx]
+        k_new = _pytree_linear_combination(state_init, k_axpy, a, b)
+        return (k_new, state_init), None
+
+    (k_final, _), _ = jax.lax.scan(
+        scan_body, (state, state), jnp.arange(3),
+    )
+    return k_final
+
+
 def integrate_scan(
     state: State,
     tendency_fn: Callable[[State], State],

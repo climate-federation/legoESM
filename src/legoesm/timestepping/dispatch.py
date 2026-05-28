@@ -2,7 +2,7 @@
 
 import jax
 
-from legoesm.timestepping.ssp_rk3 import ssp_rk3_step
+from legoesm.timestepping.ssp_rk3 import ssp_rk3_step, ssp_rk3_step_scan
 from legoesm.timestepping.ssp_rk34 import ssp_rk34_step
 from legoesm.timestepping.ssp_rk54 import ssp_rk54_step
 
@@ -39,6 +39,14 @@ def _rk4_step(state, tendency_fn, dt):
 
 _INTEGRATORS = {
     "ssp_rk3": ssp_rk3_step, "ssp3": ssp_rk3_step, "rk3": ssp_rk3_step,
+    # Task #25: scan-folded SSP-RK3.  Same math as ssp_rk3, but the
+    # 3 stages are folded into a single ``lax.scan`` body so XLA
+    # optimizes the tendency pipeline ONCE instead of inlining it
+    # three times.  At lat-lon C-grid scale this cuts JIT compile
+    # time from ~2.5 h to (target) <15 min at 4 ranks.
+    "ssp_rk3_scan": ssp_rk3_step_scan,
+    "ssp3_scan": ssp_rk3_step_scan,
+    "rk3_scan": ssp_rk3_step_scan,
     "ssp_rk34": ssp_rk34_step, "ssp34": ssp_rk34_step, "rk34": ssp_rk34_step,
     "ssp_rk54": ssp_rk54_step, "ssp54": ssp_rk54_step,
     "ssp45": ssp_rk54_step, "rk54": ssp_rk54_step,
