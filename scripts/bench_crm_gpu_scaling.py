@@ -197,6 +197,12 @@ def _bench_one(nx: int, ny: int, nlev: int, dx: float, dt: float,
             last_compile_s, last_warmup_s = c_s, w_s
     timings.sort()
     timing_s = timings[len(timings) // 2]
+    # Per-repeat spread (deferred MEDIUM #1/#2 codex review): (max-min)/median
+    # quantifies measurement noise. Stable bench at spread<5%; noisy >15%.
+    if len(timings) >= 2:
+        spread_frac = (timings[-1] - timings[0]) / timing_s
+    else:
+        spread_frac = 0.0
     compile_s, warmup_s = last_compile_s, last_warmup_s
     step_wall_s = timing_s / N_TIMING
     ms = step_wall_s * 1000.0
@@ -204,7 +210,7 @@ def _bench_one(nx: int, ny: int, nlev: int, dx: float, dt: float,
     total = n_horiz * nlev
     mcells_per_s = total / step_wall_s / 1e6
     acoustic_tag = "si" if semi_implicit_acoustic else "exp"
-    return TimingResult(
+    result = TimingResult(
         n_gpus=1, resolution=nx, n_levels=nlev,
         precision=prec, mode="crm_plane_strong",
         physics_level=(f"f-plane_dx{int(dx)}m_L{nlev}_"
@@ -215,6 +221,16 @@ def _bench_one(nx: int, ny: int, nlev: int, dx: float, dt: float,
         total_cells=total, cells_per_gpu=total,
         mcells_per_s=mcells_per_s, scaling_efficiency=1.0,
     )
+    # Attach per-repeat spread as a runtime attribute — TimingResult is
+    # a shared NamedTuple (run_levante_gpu_scaling.py owner) so we don't
+    # extend its schema for this bench-only diagnostic.
+    object.__setattr__ if False else None  # noqa: E711 (NamedTuple frozen)
+    # Use a side-channel dict keyed on id — simpler than schema change.
+    _SPREAD_REGISTRY[id(result)] = spread_frac
+    return result
+
+
+_SPREAD_REGISTRY: dict = {}
 
 
 def main() -> int:
@@ -297,12 +313,15 @@ def main() -> int:
             # Display upper bound; if user wants lower-bound, see doc.
             bw_used = bw_upper
             hbm_pct = 100.0 * bw_used / 730.0
+            spread = _SPREAD_REGISTRY.get(id(r), 0.0)
+            spread_tag = f"spread={100*spread:4.1f}%" if args.repeat >= 2 else ""
             print(f"  N{n:>4d} cells={r.total_cells:>10,}  "
                   f"compile={r.compile_time_s:6.2f}s  "
                   f"step={r.time_per_step_ms:7.2f}ms  "
                   f"throughput={r.mcells_per_s:6.1f}Mcells/s  "
                   f"SYPD={r.sypd:8.2f}  "
-                  f"HBM≈{bw_used:5.0f}GB/s({hbm_pct:4.0f}%)")
+                  f"HBM≈{bw_used:5.0f}GB/s({hbm_pct:4.0f}%)  "
+                  f"{spread_tag}")
             results.append(r)
         except Exception as exc:
             import traceback
