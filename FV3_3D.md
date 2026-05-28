@@ -2378,6 +2378,59 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1065 (2026-05-28): validate iter-1064 claim at np ∈ {2, 3} — full np-sweep complete
+
+### Goal
+
+Codex adversarial review of iter-1063+1064 flagged WARN #4:
+iter-1064's documented claim "111 passing tests at np ∈ {2, 3, 6}"
+applied the three-config validation scope to all 111 tests, but
+iter-1064 only ran the 9 in-scope distributed files at np=6 (the
+42 FV3 step-fidelity tests had been run at all three configs in
+iter-1056).
+
+iter-1065 closes the gap by running the same 9 files at np=2 and
+np=3.
+
+### Validation
+
+::
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 2 \
+        .venv/bin/python -m pytest <9 in-scope distributed files>
+    => 69 passed in 28.17s
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 3 \
+        .venv/bin/python -m pytest <9 in-scope distributed files>
+    => 69 passed in 31.52s
+
+Combined with the iter-1064 np=6 run and the iter-1056 FV3 step-
+fidelity sweeps: 69 in-scope distributed tests + 42 FV3 step-
+fidelity tests, validated at np ∈ {2, 3, 6}.  The iter-1064 doc
+claim is now legitimately backed by data.
+
+The 9 in-scope distributed files:
+
+- ``test_mpi_bootstrap.py``
+- ``test_mpi_driver.py``
+- ``test_mpi_interp_offsets.py``
+- ``test_mpi_sw_sync.py``
+- ``test_mpi_synchronize_cgrid_fluxes.py``
+- ``test_halo_mpi.py``
+- ``test_scale_mpi_halo.py``
+- ``test_mpi_differentiability.py``
+- ``test_coupler_mpi.py``
+
+### Codex iter-1063 review summary
+
+NIT (all addressed or n/a):
+- 1) Fixture ordering safe — confirmed.
+- 2) Exact-zero diff correct contract under interp_offsets=None.
+- 3) No additional test_mpi_driver.py latent failure.
+- 5) No fixture race.
+
+WARN #4: iter-1064 doc overclaim → closed by this iter-1065 run.
+
 ## Iteration 1064 (2026-05-28): in-scope MPI cubed-sphere distributed test suite — clean at np=6
 
 ### Goal
