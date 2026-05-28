@@ -275,3 +275,106 @@ def pad_halo_dgrid_scalar_4d(
         padded = padded.at[dst_f, dst_i, dst_j].set(values)
 
     return padded
+
+
+# =====================================================================
+# iter-1078: DGRID_NE vector halo with axis-swap component swap
+# =====================================================================
+
+_AXIS_SWAP_TABLE = {
+    (1, NORTH): (4, EAST,  False, +1, -1),
+    (4, EAST):  (1, NORTH, False, -1, +1),
+    (1, SOUTH): (5, EAST,  True,  -1, +1),
+    (5, EAST):  (1, SOUTH, True,  +1, -1),
+    (3, NORTH): (4, WEST,  True,  -1, +1),
+    (4, WEST):  (3, NORTH, True,  +1, -1),
+    (3, SOUTH): (5, WEST,  False, +1, -1),
+    (5, WEST):  (3, SOUTH, False, -1, +1),
+}
+
+
+def _build_axis_swap_tables_h1(n):
+    n_i_u, n_j_u = n, n + 1
+    n_i_v, n_j_v = n + 1, n
+    u_dst_f, u_dst_i, u_dst_j = [], [], []
+    v_src_f, v_src_i, v_src_j = [], [], []
+    u_dst_signs = []
+    v_dst_f, v_dst_i, v_dst_j = [], [], []
+    u_src_f, u_src_i, u_src_j = [], [], []
+    v_dst_signs = []
+    for (face, edge), (nbr_face, nbr_edge, is_rev, sign_uv, sign_vu) in _AXIS_SWAP_TABLE.items():
+        u_strip_len = n_j_u if edge in _I_EDGES else n_i_u
+        v_strip_len = n_j_v if edge in _I_EDGES else n_i_v
+        for k in range(u_strip_len):
+            k_src = (u_strip_len - 1 - k) if is_rev else k
+            if nbr_edge == WEST: sf, si, sj = nbr_face, 0, k_src
+            elif nbr_edge == EAST: sf, si, sj = nbr_face, n_i_v - 1, k_src
+            elif nbr_edge == SOUTH: sf, si, sj = nbr_face, k_src, 0
+            else: sf, si, sj = nbr_face, k_src, n_j_v - 1
+            if edge == WEST: df, di, dj = face, 0, k + 1
+            elif edge == EAST: df, di, dj = face, n_i_u + 1, k + 1
+            elif edge == SOUTH: df, di, dj = face, k + 1, 0
+            else: df, di, dj = face, k + 1, n_j_u + 1
+            u_dst_f.append(df); u_dst_i.append(di); u_dst_j.append(dj)
+            v_src_f.append(sf); v_src_i.append(si); v_src_j.append(sj)
+            u_dst_signs.append(sign_uv)
+        for k in range(v_strip_len):
+            k_src = (v_strip_len - 1 - k) if is_rev else k
+            if nbr_edge == WEST: sf, si, sj = nbr_face, 0, k_src
+            elif nbr_edge == EAST: sf, si, sj = nbr_face, n_i_u - 1, k_src
+            elif nbr_edge == SOUTH: sf, si, sj = nbr_face, k_src, 0
+            else: sf, si, sj = nbr_face, k_src, n_j_u - 1
+            if edge == WEST: df, di, dj = face, 0, k + 1
+            elif edge == EAST: df, di, dj = face, n_i_v + 1, k + 1
+            elif edge == SOUTH: df, di, dj = face, k + 1, 0
+            else: df, di, dj = face, k + 1, n_j_v + 1
+            v_dst_f.append(df); v_dst_i.append(di); v_dst_j.append(dj)
+            u_src_f.append(sf); u_src_i.append(si); u_src_j.append(sj)
+            v_dst_signs.append(sign_vu)
+    return (
+        np.array(u_dst_f, dtype=np.int32), np.array(u_dst_i, dtype=np.int32), np.array(u_dst_j, dtype=np.int32),
+        np.array(v_src_f, dtype=np.int32), np.array(v_src_i, dtype=np.int32), np.array(v_src_j, dtype=np.int32),
+        np.array(u_dst_signs, dtype=np.int32),
+        np.array(v_dst_f, dtype=np.int32), np.array(v_dst_i, dtype=np.int32), np.array(v_dst_j, dtype=np.int32),
+        np.array(u_src_f, dtype=np.int32), np.array(u_src_i, dtype=np.int32), np.array(u_src_j, dtype=np.int32),
+        np.array(v_dst_signs, dtype=np.int32),
+    )
+
+
+_axis_swap_table_cache = {}
+
+
+def _get_axis_swap_tables_h1(n):
+    n = int(n)
+    if n not in _axis_swap_table_cache:
+        _axis_swap_table_cache[n] = _build_axis_swap_tables_h1(n)
+    return _axis_swap_table_cache[n]
+
+
+def pad_halo_dgrid_vector_4d(u_d, v_d):
+    """FV3-faithful DGRID_NE staggered vector halo (iter-1078).
+
+    Combines iter-1076 same-axis cross-face halo (16/24 edges) with
+    iter-1078 DGRID_NE component swap (8 axis-swap edges).  All 24
+    directed edges are bit-for-bit FV3-faithful.
+    """
+    if u_d.ndim != 4 or v_d.ndim != 4:
+        raise ValueError(f"4D inputs required; got u_d.ndim={u_d.ndim}, v_d.ndim={v_d.ndim}")
+    if u_d.shape[0] != 6 or v_d.shape[0] != 6:
+        raise ValueError(f"6 faces required")
+    n = u_d.shape[1]
+    if u_d.shape[2] != n + 1 or v_d.shape[1] != n + 1 or v_d.shape[2] != n:
+        raise ValueError(f"u_d expects (6, n, n+1, nlev), v_d (6, n+1, n, nlev); got u_d {tuple(u_d.shape)}, v_d {tuple(v_d.shape)}")
+    u_padded = pad_halo_dgrid_scalar_4d(u_d, axis_swap_fill="edge")
+    v_padded = pad_halo_dgrid_scalar_4d(v_d, axis_swap_fill="edge")
+    (u_dst_f, u_dst_i, u_dst_j,
+     v_src_f, v_src_i, v_src_j, u_dst_signs,
+     v_dst_f, v_dst_i, v_dst_j,
+     u_src_f, u_src_i, u_src_j, v_dst_signs) = _get_axis_swap_tables_h1(n)
+    if u_dst_f.size > 0:
+        v_vals = v_d[v_src_f, v_src_i, v_src_j]
+        u_padded = u_padded.at[u_dst_f, u_dst_i, u_dst_j].set(v_vals * u_dst_signs.astype(u_d.dtype)[:, None])
+    if v_dst_f.size > 0:
+        u_vals = u_d[u_src_f, u_src_i, u_src_j]
+        v_padded = v_padded.at[v_dst_f, v_dst_i, v_dst_j].set(u_vals * v_dst_signs.astype(v_d.dtype)[:, None])
+    return u_padded, v_padded
