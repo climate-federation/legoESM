@@ -148,14 +148,38 @@ def test_gabls1_profile_rmse_within_band(gabls1_run):
     theta_lego_on_oracle = np.interp(
         z_oracle[mask], z_lego_asc, theta_lego_asc,
     )
-    rmse = float(np.sqrt(np.mean(
-        (theta_lego_on_oracle - theta_oracle[mask]) ** 2
-    )))
-    assert rmse < 5.0, (
+    residual = theta_lego_on_oracle - theta_oracle[mask]
+    rmse = float(np.sqrt(np.mean(residual ** 2)))
+    max_abs = float(np.max(np.abs(residual)))
+
+    # Tight band: observed RMSE is ~0.14 K at TEST_HOURS=2 h.  Codex
+    # Phase F fix #4 review noted that a 5 K threshold passes for a
+    # flat 263 K column (RMSE 3.35 K), defeating the parity gate.
+    # 1.0 K rejects flat-column failure modes while leaving margin
+    # for legitimate vertical-coord / constants drift.
+    assert rmse < 1.0, (
         f"GABLS1 profile θ RMSE vs oracle at t≈{TEST_HOURS}h: "
-        f"{rmse:.3f} K (band: < 5 K).  Documented drivers of the "
-        "gap: vertical-coord mismatch, simplified init, constants drift."
+        f"{rmse:.3f} K (band: < 1 K).  Drivers of any gap: "
+        "vertical-coord mismatch, simplified init, constants drift."
     )
+    # Shape-sensitive guard: max-abs error catches a localised
+    # mismatch (e.g. lost inversion structure) that an averaged RMSE
+    # would smooth out.  3 K leaves headroom for the inversion edge
+    # where the legoESM linear interp + sigma stretching can amplify
+    # small θ-grid differences.
+    assert max_abs < 3.0, (
+        f"GABLS1 profile θ max-abs vs oracle at t≈{TEST_HOURS}h: "
+        f"{max_abs:.3f} K (band: < 3 K).  A high max-abs at low "
+        "RMSE signals lost vertical structure (e.g. inversion edge)."
+    )
+    # Note: the masked overlap typically starts around z=37 m
+    # because the lowest legoESM full level at (TEST_NLEV=32,
+    # TEST_SIGMA_TOP=0.7) sits at ~37.6 m via -8000·log(σ_low).
+    # The oracle's z=3.125-30 m surface layer is therefore excluded
+    # from this RMSE — surface-layer parity is exercised by the
+    # scalar `test_gabls1_surface_qke_matches_friction_velocity_bc`
+    # and `test_gabls1_lowest_cell_in_stable_band` checks.  A
+    # high-resolution near-surface profile comparison is a follow-up.
 
 
 def test_gabls1_oracle_present_and_plausible_magnitudes():

@@ -1016,6 +1016,87 @@ def test_prescribe_fluxes_with_nonzero_Ch_neutral_raises_double_count():
         )
 
 
+def test_prescribe_fluxes_with_MOST_bulk_scheme_raises():
+    """Phase F fix #2 codex iter-1 high: ``bulk_scheme='coare3'`` and
+    ``'large_yeager'`` solve MOST iteratively and ignore
+    ``Ch_neutral``, so setting ``Ch_neutral=0`` does NOT suppress the
+    bulk-formula heat flux.  SCM must reject these bulk schemes when
+    paired with ``prescribe='fluxes'``.
+    """
+    from legoesm.atmosphere.physics.turbulence.config import (
+        MYNN25Config, SurfaceLayerConfig,
+    )
+    for bs in ("coare3", "large_yeager"):
+        cfg = PhysicsConfig(
+            radiation=RadiationConfig(scheme="none"),
+            convection=ConvectionConfig(scheme="none"),
+            turbulence=TurbulenceConfig(
+                scheme="mynn25",
+                mynn25=MYNN25Config(
+                    surface=SurfaceLayerConfig(
+                        Cd_neutral=1.5e-3, Ch_neutral=0.0,
+                        bulk_scheme=bs,
+                    ),
+                ),
+            ),
+            microphysics=MicrophysicsConfig(scheme="none"),
+            gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+        )
+        forcing = SCMForcing(
+            prescribe="fluxes", w_th_s=lambda t: jnp.asarray(0.1),
+        )
+        with pytest.raises(ValueError, match="bulk_scheme"):
+            SingleColumnModel.create(
+                physics_config=cfg, nlev=NLEV, dt=10.0,
+                T_profile=jnp.linspace(270.0, 295.0, NLEV),
+                q_v_profile=jnp.zeros(NLEV),
+                forcing=forcing,
+            )
+
+
+def test_direct_constructor_requires_physics_config_for_prescribed_fluxes():
+    """Phase F fix #2 codex iter-1 medium: direct
+    ``SingleColumnModel(...)`` construction bypasses the validation
+    that ``create()`` runs.  With ``prescribe='fluxes'`` the
+    constructor must demand ``physics_config`` so the no-double-count
+    check can fire (or refuse construction)."""
+    from legoesm.atmosphere.physics.combined import make_physics
+    from legoesm.atmosphere.physics.physics_state import init_physics_state
+    from legoesm.atmosphere.scm import make_column_state, make_scm_grid
+    from legoesm.grids.vertical import create_sigma_coordinate
+    cfg = _no_physics_cfg()
+    fn = make_physics(cfg, model_type="hydrostatic", dt=10.0)
+    state = make_column_state(
+        NLEV, T_profile=jnp.full(NLEV, 280.0),
+        q_v_profile=jnp.zeros(NLEV),
+    )
+    grid = make_scm_grid(latitude_deg=0.0)
+    sigma_coord = create_sigma_coordinate(NLEV, sigma_top=0.01)
+    phys_state = init_physics_state(ncol=1, nlev=NLEV, physics_config=cfg)
+    forcing = SCMForcing(
+        prescribe="fluxes", w_th_s=lambda t: jnp.asarray(0.1),
+    )
+    # Phase F fix #2 codex iter-2 medium: direct construction is
+    # rejected outright because the constructor cannot verify that
+    # ``physics_fn`` was built from the supplied (or any) config.
+    with pytest.raises(ValueError, match="Route through|create"):
+        SingleColumnModel(
+            physics_fn=fn, state=state, phys_state=phys_state,
+            grid=grid, sigma_coord=sigma_coord, dt=10.0,
+            forcing=forcing,
+        )
+    # Even passing physics_config explicitly does not unlock direct
+    # construction — only ``create()`` can pair the validated
+    # ``physics_config`` with a config-derived ``physics_fn``.
+    with pytest.raises(ValueError, match="Route through|create"):
+        SingleColumnModel(
+            physics_fn=fn, state=state, phys_state=phys_state,
+            grid=grid, sigma_coord=sigma_coord, dt=10.0,
+            forcing=forcing,
+            physics_config=cfg,   # offered but ignored on the direct path
+        )
+
+
 def test_prescribe_fluxes_with_zero_Ch_neutral_passes():
     """Symmetric to the rejection: the documented Phase B v2 workaround
     (``Ch_neutral=0``) constructs successfully and runs without

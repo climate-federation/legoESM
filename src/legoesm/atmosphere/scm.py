@@ -542,7 +542,15 @@ class SingleColumnModel:
         time_integrator: str = "forward_euler",
         forcing: SCMForcing | None = None,
         t0_seconds: float = 0.0,
+        physics_config: PhysicsConfig | None = None,
+        _built_by_create: bool = False,
     ):
+        # Private marker set ONLY by :meth:`create`.  Direct callers
+        # leave it ``False``; used below by the
+        # ``prescribe='fluxes'`` validation to guarantee that
+        # ``physics_fn`` was built from a single validated
+        # ``physics_config`` (which only ``create`` can enforce).
+        self._built_by_create = bool(_built_by_create)
         if time_integrator not in TIME_INTEGRATORS:
             raise ValueError(
                 f"Unknown time_integrator: {time_integrator!r}. "
@@ -552,6 +560,47 @@ class SingleColumnModel:
         if forcing is not None:
             validate_forcing(forcing)
             validate_forcing_against_state(forcing, state)
+            # Direct ``SingleColumnModel(...)`` construction bypasses
+            # :meth:`create`'s ``_validate_prescribed_fluxes_no_double_count``
+            # gate.  Re-run it here when ``physics_config`` is supplied;
+            # otherwise refuse ``prescribe='fluxes'`` so the user is
+            # forced to either pass ``physics_config`` (validatable) or
+            # route through :meth:`create` (Phase F fix #2 codex iter-1
+            # medium finding).
+            if forcing.prescribe == "fluxes":
+                # ``physics_config`` is required AND must have been used
+                # to build ``physics_fn``.  Direct construction cannot
+                # verify the latter from outside, so the only safe path
+                # is to refuse direct construction with prescribe='fluxes'
+                # unless the caller routed through :meth:`create` (which
+                # owns both objects).  ``create()`` sets a private
+                # ``_built_by_create`` marker on the returned instance
+                # before this check fires — direct constructor calls
+                # never set it, so the guard cleanly distinguishes the
+                # two paths.  Phase F fix #2 codex iter-2 medium finding.
+                if not getattr(self, "_built_by_create", False):
+                    raise ValueError(
+                        "SCMForcing.prescribe='fluxes' requires that "
+                        "``physics_fn`` was built from a validated "
+                        "``physics_config`` — direct ``SingleColumnModel"
+                        "(...)`` construction cannot enforce that "
+                        "physics_fn ≡ make_physics(physics_config), so a "
+                        "caller could pass a benign physics_config to "
+                        "satisfy validation while running a physics_fn "
+                        "that double-counts the prescribed flux.  Route "
+                        "through ``SingleColumnModel.create(...)``, "
+                        "which owns construction of both objects from a "
+                        "single config."
+                    )
+                if physics_config is None:
+                    raise ValueError(
+                        "SingleColumnModel.create() must pass "
+                        "physics_config through to the constructor for "
+                        "no-double-count validation."
+                    )
+                self._validate_prescribed_fluxes_no_double_count(
+                    physics_config, forcing,
+                )
             if getattr(step_fn_obj, "_is_legacy_4arg", False):
                 raise ValueError(
                     f"time_integrator={time_integrator!r} was registered "
@@ -619,6 +668,29 @@ class SingleColumnModel:
         surf = getattr(scheme_sub, "surface", None)
         if surf is None:
             return
+
+        # MOST bulk schemes (COARE3, Large-Yeager) compute sensible /
+        # latent heat fluxes from iterative MOST scaling parameters
+        # and do NOT honour ``Ch_neutral`` — they always produce a
+        # non-zero heat flux from any non-zero
+        # ``(T_sfc − T_air)`` / ``(q_sfc − q_air)`` gradient.  Setting
+        # ``Ch_neutral=0`` does not suppress them, so the only safe
+        # combination with ``prescribe='fluxes'`` is the
+        # ``bulk_scheme='constant'`` family + ``Ch_neutral=0``.
+        # Phase F fix #2 codex iter-1 high finding.
+        bulk_scheme = getattr(surf, "bulk_scheme", "constant")
+        if bulk_scheme in ("coare3", "large_yeager"):
+            raise ValueError(
+                "SCMForcing.prescribe='fluxes' is set, but the active "
+                f"turbulence scheme {turb.scheme!r} uses "
+                f"bulk_scheme={bulk_scheme!r}, which solves MOST "
+                "iteratively for sensible / latent heat flux and does "
+                "NOT honour Ch_neutral.  The bulk formula would "
+                "double-count the prescribed surface flux.  Switch to "
+                "bulk_scheme='constant' with Ch_neutral=0, or drop "
+                "prescribe='fluxes'."
+            )
+
         Ch = getattr(surf, "Ch_neutral", 0.0)
         if Ch != 0.0:
             raise ValueError(
@@ -814,6 +886,8 @@ class SingleColumnModel:
             grid=grid, sigma_coord=sigma_coord, dt=dt,
             time_integrator=time_integrator,
             forcing=forcing, t0_seconds=t0_seconds,
+            physics_config=physics_config,
+            _built_by_create=True,
         )
 
     def set_time(self, day_of_year: float, seconds_of_day: float) -> None:
