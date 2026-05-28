@@ -314,6 +314,35 @@ factor-of-2 test at stratospheric levels could not detect.
 
 ---
 
+## Iter 5 — bound eta-fraction gradient (2026-05-28)
+
+### Bug from iter-1 review
+``_compute_relative_abundance_interpolant`` used the safe denominator
+``jnp.maximum(combined_vmr, eps)`` but kept ``combined_vmr > 0`` as
+the ``jnp.where`` condition.  In the (0, eps] band the division
+branch was *selected* but the denominator was already clamped to
+``eps``, giving::
+
+    rel = vmr / eps,                       # forward: huge but finite
+    ∂rel/∂vmr = 1 / eps ~ 1e30             # backward: training blowup
+
+### Fix
+- Tighten the where condition to ``combined_vmr > eps`` so the 0.5
+  fallback (gradient = 0) is selected when the denominator would
+  otherwise be clamped.  This matches the upstream Fortran branch
+  ``col_mix > 2 * tiny(col_mix)`` more faithfully.
+
+### New test
+- ``test_bounded_grad_when_combined_vmr_subepsilon`` pins
+  ``max |∂tau/∂vmr| < 1e20`` at ``combined_vmr ~ 1e-35`` (would have
+  been ~1e35 under the old condition).
+
+### Status
+- ✅ 38 RRTMGP-stratosphere tests pass.
+- ✅ Zero regressions.
+
+---
+
 ## Iter 4 — eliminate duplicate optics call (2026-05-28)
 
 ### Cleanup
