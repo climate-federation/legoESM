@@ -251,3 +251,65 @@ Verdict: VERDICT: FIX → addressed; ready to ship iter-2.
 - ✅ Zero regressions.
 
 ---
+
+## Iter 3.5 — codex SHIP review + tropospheric O3 baseline (2026-05-28)
+
+### Codex iter-3 review verdict: SHIP
+- C0 continuity at log_p == log_p_peak verified.
+- Skewed sigma values plausible for US Std Atm 1976 shape.
+- log(0) edge case noted (forward safe, AD undefined at p=0 — test
+  uses p > 0).
+
+### Coverage gap flagged: 200-500 hPa UT/LS not tested
+The single skewed-Gaussian alone gives <1 ppb at 500 hPa vs the real
+~25-50 ppb US Std Atm reference — a 2-3 OOM silent gap that the
+factor-of-2 test at stratospheric levels could not detect.
+
+### Iter 3.5 fix
+- ``rrtmgp.py:_standard_o3_profile``: add 20 ppb tropospheric
+  background via ``jnp.maximum(o3_gauss, 2.0e-8)``.  Sub-differentiable
+  transition at p ~ 250 hPa; finite gradients on each side.
+- Profile vs reference (1000/500/200/0.1 hPa):
+
+      1000 hPa: 20 ppb baseline vs real ~25 ppb
+       500 hPa: 20 ppb baseline vs real ~50 ppb
+       200 hPa: 35 ppb Gaussian  vs real ~100 ppb
+       0.1 hPa: 81 ppb Gaussian  vs real ~80 ppb
+
+### Iter 3.5 tests
+- ``test_extended_coverage_troposphere_and_mesosphere`` — ratio ∈
+  [0.2, 5.0] at 1000/500/200/0.1 hPa.
+- ``test_tropospheric_background_floor`` — exact 20 ppb at deep
+  tropospheric pressures.
+
+### Status
+- ✅ 28 RRTMGP-stratosphere tests pass.
+- ✅ All 10 AMIP-RRTMG integration tests pass.
+- ✅ Zero regressions vs iter-3.
+
+### Code/spec touched (cumulative, iter-1 → iter-3.5)
+- `src/legoesm/atmosphere/physics/radiation/rrtmgp/optics/gas_optics.py`
+  - `_clip_to_table_range` helper.
+  - Applied at major/minor/Rayleigh/planck_fraction/planck_sources.
+  - Safe-divide in `_compute_relative_abundance_interpolant`.
+  - Doc on minor-OD density scaling using physical T.
+- `src/legoesm/atmosphere/physics/radiation/rrtmgp/optics/lookup_gas_optics_longwave.py`
+  - Load `optimal_angle_fit` from netCDF.
+- `src/legoesm/atmosphere/physics/radiation/rrtmgp/rte/two_stream.py`
+  - `_compute_optimal_lw_secant` helper (upstream
+    `compute_optimal_angles` formula).
+  - `solve_lw(use_optimal_angle=True)` with explicit error when
+    data file lacks the fit.
+- `src/legoesm/atmosphere/physics/radiation/rrtmgp/rte/monochromatic_two_stream.py`
+  - `lw_cell_source_and_properties` accepts optional
+    `lw_diffusive_factor` (replaces hard-coded 1.66).
+- `src/legoesm/atmosphere/physics/radiation/rrtmgp/rrtmgp.py`
+  - `_standard_o3_profile` skewed Gaussian + 20 ppb baseline.
+  - `solve_columns` forwards `config.use_optimal_angle`.
+  - `_instance_cache_key` honors `use_optimal_angle`.
+- `src/legoesm/atmosphere/physics/radiation/config.py`
+  - `RRTMGPConfig.use_optimal_angle: bool = False`.
+- `tests/atmosphere/hydrostatic/unit/test_rrtmgp_stratosphere.py`
+  - 28 new tests across 6 classes.
+
+---
