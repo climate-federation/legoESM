@@ -8,7 +8,7 @@ One entry per task attempt. Newest at the bottom of each task block.
 - [x] Q2 — Per-process comparison IMPLEMENTED (momentum+tracer emit metrics); density+Coriolis validate; rest documented deltas. Verification-approach fork surfaced for user.
 - [ ] Q3 — Register fidelity modules (test discovery)
 - [~] Q4 — ConstantsConfig (G-C1 done pending green; G-C2…G-C5 remaining)
-- [ ] Q5 — CI clarity guard
+- [x] Q5 — CI clarity guard (function-LOC ceiling, allow-list shrinks; two-source/deprecated detectors folded into Q7)
 - [ ] Q6 — Equivariance tier expansion
 - [ ] Q7 — Config regrouping + footguns
 - [ ] Q8 — Decompose baroclinic_tendencies (bit-identical gate)
@@ -224,3 +224,29 @@ REMAINING G-C2: implicit-path reads (k_profiles.py 214/223, tke.py 271 — threa
 model config via the dynamics implicit-mixing solver, NOT the physics factory), mpas_integration.py,
 + module-mirror sites (eos, diagnostics, gm_redi, prescribed/bulk_formulas, shortwave). Then
 G-C3 coupler/forcing, G-C4 recipe migration + delete monkey-patch, G-C5 audit.
+
+### 2026-05-28 · iter 11 · implicit-path de-mirror committed (ab7a506c)
+k_profiles.py + tke.py de-mirrored (63 tests green). Both vertical-mixing paths now read
+config.constants. Remaining G-C2 mechanical: mpas_integration.py + module-mirror sites
+(eos re-exports used elsewhere, diagnostics._RHO_0, gm_redi {mpas,latlon}._RHO_0/_gm_redi_common,
+prescribed/bulk_formulas, shortwave, mpas_physics). Then G-C3 coupler/forcing.
+**G-C4 DESIGN FORK (record for user; surface when reached):** there are now TWO reps of
+g/rho_0 — legacy top-level config.g/config.rho_0 (read by the PE core: PGF, hydrostatic
+pressure) and the new config.constants.g/rho_0. For a recipe to pin constants purely via
+config.constants and delete the override_constants monkey-patch, these must be reconciled.
+Options: (a) PE core reads config.constants (deprecate top-level g/rho_0 — larger API change);
+(b) recipe sets BOTH (redundant footgun); (c) config.constants is source-of-truth and
+config.g/rho_0 are derived/validated against it. This is a public-config-API decision
+(CLAUDE.md: ask before edit on API changes) — will surface at G-C4. Continuing the
+unambiguous mechanical de-mirroring meanwhile.
+
+### 2026-05-28 · iter 11 (cont) · PIVOT: defer rest of Q4, do Q5 (CI guard)
+DECISION: Q4 is blocked at G-C4 on the user-owned config.constants-vs-config.g/rho_0 API
+reconciliation. The remaining G-C2 (mpas, module mirrors) + G-C3 (coupler/forcing) only
+SERVE that blocked G-C4 goal (deleting the monkey-patch), and are low-urgency cleanliness
+(the monkey-patch works today). Per "make doctrine-consistent defaults and keep going,"
+proceed to the next UNBLOCKED task rather than spin: Q5 (CI clarity guard) — independent,
+unambiguous, high-value, targeted-verifiable. Q4 stays partially done (G-C1 + G-C2
+vertical-mixing committed); resume after the user resolves the G-C4 API fork.
+Done so far on Q4: ConstantsConfig in both configs; vertical-mixing g/rho_0/c_sw (explicit +
+implicit paths) read config.constants. NEXT: Q5.
