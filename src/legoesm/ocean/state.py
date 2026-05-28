@@ -503,11 +503,18 @@ class LatLonCGridOceanConfig(NamedTuple):
     g: float = constants.g
     rho_0: float = constants.rho_ocean
     A_h: float = 1.0e4
-    A_h_lat_scaling: bool = False  # When True, A_h is scaled by cos(lat) to
+    A_h_lat_scaling: bool = False  # When True, A_h is scaled by cos(lat)^N to
                                     # keep the grid Reynolds number latitude-
                                     # independent on lat-lon grids.  Default
                                     # False to preserve bit-exact regression on
                                     # legacy configs.
+    A_h_cos_power: int = 1         # Exponent N on cos(lat) used when
+                                    # ``A_h_lat_scaling`` is True.  Equivalent
+                                    # to Veros's ``hor_friction_cosPower``.
+                                    # N=1 (constant grid Reynolds, default) is
+                                    # the production choice; N=2 (constant
+                                    # viscous CFL, legacy) preserves the
+                                    # pre-2024 convention.
     A_h_floor: float = 0.0         # Minimum effective A_h [m²/s] after latitude
                                     # scaling.  Prevents viscosity from vanishing
                                     # at extreme latitudes.  Recommended 1000.0
@@ -601,7 +608,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     differentiable_barotropic: bool = False
     freshwater_closure: str = "virtual_salt_flux"
     S_ref: float = 35.0          # Reference salinity for virtual salt flux [PSU]
-    tracer_advection: str = "tvd"  # "upwind", "tvd", "ppm_fct", "ppm", "dst3", "dst3_multidim", "som", "weno5", "weno7"
+    tracer_advection: str = "tvd"  # "upwind", "tvd" (Van Leer), "superbee" (Sweby/Veros), "ppm_fct", "ppm", "dst3", "dst3_multidim", "som", "weno5", "weno7"
     gm_redi: object = None         # GMRediConfig or None; enables GM/Redi lateral mixing
     physics: object = None
     eos: str = "wright"

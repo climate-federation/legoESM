@@ -180,11 +180,12 @@ def _compute_advection_flux_div(
         tracer_flux_v = mass_flux_v * tr_v
         div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, grid)
         vert_flux_div = _vert_fn(tr, w_baro, h_k_old, dt)
-    else:
-        # upwind or tvd
-        if tracer_advection == "tvd":
-            tr_u = _tvd_to_u_points(tr, mass_flux_u)
-            tr_v = _tvd_to_v_points(tr, mass_flux_v, grid=grid)
+    elif tracer_advection in ("tvd", "superbee", "upwind"):
+        from legoesm.ocean.dynamics._flux_limiters import resolve_tvd_limiter
+        if tracer_advection in ("tvd", "superbee"):
+            limiter_fn = resolve_tvd_limiter(tracer_advection)
+            tr_u = _tvd_to_u_points(tr, mass_flux_u, limiter_fn=limiter_fn)
+            tr_v = _tvd_to_v_points(tr, mass_flux_v, grid=grid, limiter_fn=limiter_fn)
         else:
             tr_u = _upwind_to_u_points(tr, mass_flux_u)
             tr_v = _upwind_to_v_points(tr, mass_flux_v, grid=grid)
@@ -192,11 +193,19 @@ def _compute_advection_flux_div(
         tracer_flux_v = mass_flux_v * tr_v
         div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, grid)
 
-        if tracer_advection == "tvd":
+        if tracer_advection in ("tvd", "superbee"):
             vert_flux_div = flux_form_vertical_tracer_advection_tvd(
-                tr, w_baro, h_k_old, dt)
+                tr, w_baro, h_k_old, dt,
+                limiter_fn=resolve_tvd_limiter(tracer_advection),
+            )
         else:
             vert_flux_div = flux_form_vertical_tracer_advection(tr, w_baro)
+    else:
+        raise ValueError(
+            f"Unknown tracer_advection literal {tracer_advection!r}; "
+            f"expected one of: upwind, tvd, superbee, ppm, ppm_fct, dst3, "
+            f"dst3_multidim, weno5, weno7."
+        )
 
     return div_hut, vert_flux_div
 

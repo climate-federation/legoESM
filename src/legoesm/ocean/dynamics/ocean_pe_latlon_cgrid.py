@@ -128,13 +128,21 @@ def _interp_to_v_points(f: jnp.ndarray, grid=None) -> jnp.ndarray:
     return pad_ns_zero(f_interior)
 
 
-def _van_leer_limiter(r: jnp.ndarray) -> jnp.ndarray:
-    """Van Leer flux limiter: phi(r) = (r + |r|) / (1 + |r|). Differentiable, TVD."""
-    return (r + jnp.abs(r)) / (1.0 + jnp.abs(r))
+from legoesm.ocean.dynamics._flux_limiters import van_leer_limiter as _van_leer_limiter
 
 
-def _tvd_to_u_points(f: jnp.ndarray, mass_flux_u: jnp.ndarray) -> jnp.ndarray:
-    """Van Leer TVD interpolation to u-points. Second-order, monotonic (#170)."""
+def _tvd_to_u_points(
+    f: jnp.ndarray,
+    mass_flux_u: jnp.ndarray,
+    limiter_fn=_van_leer_limiter,
+) -> jnp.ndarray:
+    """TVD interpolation to u-points. Second-order, monotonic (#170).
+
+    ``limiter_fn`` selects the flux limiter family; defaults to Van Leer
+    (used by ``tracer_advection="tvd"``). Pass
+    :func:`legoesm.ocean.dynamics._flux_limiters.sweby_limiter` for
+    Veros-compatible superbee (``tracer_advection="superbee"``).
+    """
     eps = 1e-30
     f_left = jnp.roll(f, 1, axis=1)
     f_right = f
@@ -144,8 +152,8 @@ def _tvd_to_u_points(f: jnp.ndarray, mass_flux_u: jnp.ndarray) -> jnp.ndarray:
     r_pos = (f_left - f_left2) / jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps)
     delta_neg = f_left - f_right
     r_neg = (f_right2 - f_right) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
-    f_pos = f_left + 0.5 * _van_leer_limiter(r_pos) * delta_pos
-    f_neg = f_right + 0.5 * _van_leer_limiter(r_neg) * delta_neg
+    f_pos = f_left + 0.5 * limiter_fn(r_pos) * delta_pos
+    f_neg = f_right + 0.5 * limiter_fn(r_neg) * delta_neg
     n_lon = f.shape[1]
     mf = mass_flux_u[:, :n_lon]
     f_tvd = jnp.where(mf > 0, f_pos, f_neg)
@@ -154,13 +162,19 @@ def _tvd_to_u_points(f: jnp.ndarray, mass_flux_u: jnp.ndarray) -> jnp.ndarray:
     return jnp.concatenate([f_tvd, f_tvd[:, 0:1]], axis=1)
 
 
-def _tvd_to_v_points(f: jnp.ndarray, mass_flux_v: jnp.ndarray, grid=None) -> jnp.ndarray:
-    """Van Leer TVD interpolation to v-points. Solid wall at poles (#170)."""
+def _tvd_to_v_points(
+    f: jnp.ndarray,
+    mass_flux_v: jnp.ndarray,
+    grid=None,
+    limiter_fn=_van_leer_limiter,
+) -> jnp.ndarray:
+    """TVD interpolation to v-points. Solid wall at poles (#170).
+
+    ``limiter_fn`` selects the flux limiter; see :func:`_tvd_to_u_points`.
+    """
     eps = 1e-30
     f_south = f[:-1]; f_north = f[1:]
     f_south2 = jnp.concatenate([f[:1], f[:-2]], axis=0)
-    # f_north2: 2 cells north. On tripolar, the fold row's north-2
-    # neighbor is the fold partner of the row below the fold.
     fold = getattr(grid, "fold", None) if grid is not None else None
     if fold is not None and fold.is_active:
         f_north2 = jnp.concatenate([f[2:], f[-1:, fold.perm_T]], axis=0)
@@ -170,8 +184,8 @@ def _tvd_to_v_points(f: jnp.ndarray, mass_flux_v: jnp.ndarray, grid=None) -> jnp
     r_pos = (f_south - f_south2) / jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps)
     delta_neg = f_south - f_north
     r_neg = (f_north2 - f_north) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
-    f_pos = f_south + 0.5 * _van_leer_limiter(r_pos) * delta_pos
-    f_neg = f_north + 0.5 * _van_leer_limiter(r_neg) * delta_neg
+    f_pos = f_south + 0.5 * limiter_fn(r_pos) * delta_pos
+    f_neg = f_north + 0.5 * limiter_fn(r_neg) * delta_neg
     f_tvd = jnp.where(mass_flux_v[1:-1] > 0, f_pos, f_neg)
     if grid is not None:
         return pad_ns_scalar(f_tvd, grid)
@@ -1504,7 +1518,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         if config.A_h_lat_scaling:
             _floor = config.A_h_floor / config.A_h if config.A_h_floor > 0 else 0.0
             lap_scale_u, lap_scale_v = laplacian_scaling_factor(
-                grid, power=1, floor=_floor)
+                grid, power=config.A_h_cos_power, floor=_floor)
             if config.A_h_eq_boost > 1.0:
                 eb_u, eb_v = equatorial_boost_factor(
                     grid, config.A_h_eq_sigma_deg, config.A_h_eq_boost)
@@ -1560,7 +1574,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         if config.A_h_lat_scaling:
             _floor = config.A_h_floor / config.A_h if config.A_h_floor > 0 else 0.0
             lap_scale_u, lap_scale_v = laplacian_scaling_factor(
-                grid, power=1, floor=_floor)
+                grid, power=config.A_h_cos_power, floor=_floor)
             if config.A_h_eq_boost > 1.0:
                 eb_u, eb_v = equatorial_boost_factor(
                     grid, config.A_h_eq_sigma_deg, config.A_h_eq_boost)

@@ -904,9 +904,7 @@ def flux_form_vertical_tracer_advection(
     return vert_flux_div
 
 
-def _van_leer_limiter_vert(r: jnp.ndarray) -> jnp.ndarray:
-    """Van Leer flux limiter: phi(r) = (r + |r|) / (1 + |r|)."""
-    return (r + jnp.abs(r)) / (1.0 + jnp.abs(r))
+from legoesm.ocean.dynamics._flux_limiters import van_leer_limiter as _van_leer_limiter_vert
 
 
 def flux_form_vertical_tracer_advection_tvd(
@@ -915,8 +913,14 @@ def flux_form_vertical_tracer_advection_tvd(
     h_k: jnp.ndarray,
     dt: float,
     cell_active: jnp.ndarray | None = None,
+    limiter_fn=_van_leer_limiter_vert,
 ) -> jnp.ndarray:
-    """Flux-form vertical tracer advection with TVD Van Leer scheme.
+    """Flux-form vertical tracer advection with TVD scheme.
+
+    ``limiter_fn`` selects the flux limiter family; defaults to Van Leer
+    (used by ``tracer_advection="tvd"``). Pass
+    :func:`legoesm.ocean.dynamics._flux_limiters.sweby_limiter` for
+    Veros-compatible superbee (``tracer_advection="superbee"``).
 
     Second-order accurate in smooth regions, falls back to first-order
     upwind at discontinuities.  Monotone (no new extrema).  The implicit
@@ -1011,8 +1015,8 @@ def flux_form_vertical_tracer_advection_tvd(
     # r = upwind_gradient / local_gradient
     r = delta_upwind / jnp.where(jnp.abs(delta) > eps, delta, eps)
 
-    # --- Van Leer limiter and TVD correction ---
-    phi = _van_leer_limiter_vert(r)
+    # --- Flux limiter and TVD correction ---
+    phi = limiter_fn(r)
     F_interior = F_upwind + 0.5 * jnp.abs(w_interior) * (1.0 - CFL) * phi * delta
 
     # Full flux array with zero boundaries — single Pad HLO op.

@@ -275,7 +275,7 @@ class MPASOceanConfig(NamedTuple):
                                            # When False, reverts to the legacy
                                            # explicit vertical diffusion in the
                                            # tendency function.
-    tracer_advection: str = "upwind"
+    tracer_advection: str = "upwind"  # "upwind", "tvd" (Van Leer), "superbee" (Sweby/Veros)
     # Runtime bounds checks (matching cubed-sphere ocean)
     enable_runtime_checks: bool = False
     temperature_min_c: float = -5.0

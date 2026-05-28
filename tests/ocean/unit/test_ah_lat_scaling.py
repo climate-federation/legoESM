@@ -189,3 +189,46 @@ def test_viscous_cfl_latitude_independent():
     cfl_unscaled_at_eq = cfl_unscaled[len(cfl_unscaled) // 2 - 1]
     # Pole CFL is at least 100× larger than equator CFL without scaling
     assert cfl_unscaled_at_pole / cfl_unscaled_at_eq > 100.0
+
+
+# ---------------------------------------------------------------------------
+# A_h_cos_power — configurable exponent for cos(lat) scaling. Matches
+# Veros's ``hor_friction_cosPower``; required for the Veros recipe.
+# ---------------------------------------------------------------------------
+
+def test_ah_cos_power_default_is_one():
+    """The new ``A_h_cos_power`` field defaults to 1 — the production
+    convention (constant grid Reynolds number) — so adding it does not
+    change behavior for any legacy config."""
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+    cfg = LatLonCGridOceanConfig(A_h=1e5, A_h_lat_scaling=True)
+    assert cfg.A_h_cos_power == 1
+
+
+def test_ah_cos_power_one_matches_legacy_power_one():
+    """``power=1`` matches what was hardcoded in ocean_pe_latlon_cgrid.py
+    before A_h_cos_power was exposed: bit-exact regression guard."""
+    grid = create_latlon_grid(36, 72)
+    scale_u_n1, scale_v_n1 = laplacian_scaling_factor(grid, power=1)
+    cos_u = np.asarray(grid.cos_lat)
+    np.testing.assert_allclose(np.asarray(scale_u_n1), cos_u,
+                                rtol=1e-12, atol=1e-12)
+
+
+def test_ah_cos_power_two_gives_cos_squared():
+    """``power=2`` (Veros ``hor_friction_cosPower=2``) gives cos²(lat) —
+    the legacy constant-viscous-CFL convention."""
+    grid = create_latlon_grid(36, 72)
+    scale_u_n2, _ = laplacian_scaling_factor(grid, power=2)
+    cos_u = np.asarray(grid.cos_lat)
+    np.testing.assert_allclose(np.asarray(scale_u_n2), cos_u ** 2,
+                                rtol=1e-12, atol=1e-12)
+
+
+def test_ah_cos_power_zero_is_no_scaling():
+    """``power=0`` corresponds to Veros's ``enable_hor_friction_cos_scaling
+    =False``: cos⁰(lat)=1 everywhere, so the per-row scale is identity."""
+    grid = create_latlon_grid(36, 72)
+    scale_u_n0, scale_v_n0 = laplacian_scaling_factor(grid, power=0)
+    assert jnp.allclose(scale_u_n0, 1.0)
+    assert jnp.allclose(scale_v_n0, 1.0)
