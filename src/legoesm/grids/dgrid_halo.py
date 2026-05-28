@@ -1,41 +1,41 @@
-"""Staggered D-grid vector halo for FV3 ``cross_face_du_proj`` (iter-1076).
+"""Staggered D-grid vector halo for FV3 ``cross_face_du_proj``.
 
-This module ports the equator-equator portion of FV3's
-``mpp_update_domains(u, v, DGRID_NE)`` cubed-sphere vector halo
-exchange for staggered D-grid wind tendencies / fields:
+Ports FV3's ``mpp_update_domains(u, v, DGRID_NE)`` cubed-sphere
+vector halo for staggered D-grid wind components:
 
-- ``u_d`` shape ``(6, n, n+1, nlev)`` — D-grid u at v-edges
-  (cell ``j``-edges; ``i`` stagger = ``n`` cells, ``j`` stagger = ``n+1``).
-- ``v_d`` shape ``(6, n+1, n, nlev)`` — D-grid v at u-edges
-  (cell ``i``-edges; ``i`` stagger = ``n+1``, ``j`` stagger = ``n``).
+- ``u_d`` shape ``(6, n, n+1, nlev)`` — u at v-edges
+- ``v_d`` shape ``(6, n+1, n, nlev)`` — v at u-edges
 
-The cubed-sphere ``CONNECTIVITY`` has two edge-pair classes:
+Two edge-pair classes in cubed-sphere ``CONNECTIVITY``:
 
-1. **Same-axis pairs** (i-edge ↔ i-edge OR j-edge ↔ j-edge): same
-   strip orientation, same component (u→u, v→v).  Strip lengths
-   match consistently across all 6 faces.  16 of 24 directed
-   edges fall here.
-2. **Axis-swap pairs** (i-edge ↔ j-edge): component swap (u↔v)
-   required to match strip lengths.  8 of 24 directed edges:
-   ``(1, S)↔(5, E)``, ``(1, N)↔(4, E)``, ``(3, S)↔(5, W)``,
-   ``(3, N)↔(4, W)``.
+1. **Same-axis pairs** (16/24 directed): same-component cross-face
+   halo (u→u, v→v).  Equator E-W + face 0,2 N/S + face 4,5 S/N.
+2. **Axis-swap pairs** (8/24): ``(1, S)↔(5, E)``,
+   ``(1, N)↔(4, E)``, ``(3, S)↔(5, W)``, ``(3, N)↔(4, W)``.
+   Component swap (u↔v) with face-pair-specific signs derived
+   from tangent-vector matching at the boundary corner in 3D
+   Cartesian.
 
-iter-1076 implements (1) — the same-axis subset — bit-for-bit
-faithful.  Axis-swap edges fall back to ``mode='edge'`` (matches
-the legacy iter-1072 default-disable behavior) until iter-1077
-adds the proper component swap with FV3 sign conventions.
+Public entries:
 
-Coverage:
+- ``pad_halo_dgrid_scalar_4d(data, axis_swap_fill='edge')``
+  (iter-1076) — non-square staggered scalar halo.  Same-axis
+  edges via precomputed table; axis-swap edges fall back to
+  ``axis_swap_fill`` ('edge' replicates, 'zero' leaves at 0).
+- ``pad_halo_dgrid_vector_4d(u_d, v_d)``
+  (iter-1078) — full 24/24 staggered vector halo with axis-swap
+  component swap (single-device input ``(6, ...)``).
+- ``pad_halo_dgrid_vector_4d_mpi(u_d, v_d, topology)``
+  (iter-1083) — MPI-aware variant via batched-per-peer
+  ``mpi4jax.sendrecv``.  Rank-local input ``(n_local, ...)``.
+- ``pad_halo_dgrid_vector_4d_replicated_mpi(u_d, v_d, topology)``
+  (iter-1083) — wrapper for full ``(6, ...)`` replicated state
+  (canonical cubed-sphere MPI mode).
 
-- Faces 0-3 (equator): all 4 edges are same-axis → fully covered.
-- Faces 4-5 (poles): N/S edges are same-axis; W/E edges are
-  axis-swap → only N/S covered, W/E falls back to mode='edge'.
-
-Net: 16/24 directed edges get faithful cross-face halos; 8/24 use
-mode='edge'.  This improves the iter-370 ``cross_face_du_proj``
-result on equator face boundaries (where the cube-imprint is
-strongest in baroclinic-wave tests) while leaving pole-face W/E
-halos approximate.  Tracked as iter-1077 follow-up.
+Validation: ``tests/test_dgrid_halo_iter1076.py`` (27),
+``tests/test_dgrid_vector_halo_iter1078.py`` (12),
+``tests/distributed/test_mpi_dgrid_vector_halo_iter1083.py`` (1
+strict bit-for-bit at np ∈ {2, 3, 6}).
 """
 from __future__ import annotations
 
@@ -222,10 +222,11 @@ def pad_halo_dgrid_scalar_4d(
 
     Notes
     -----
-    iter-1076 (this implementation): covers 16/24 directed edges
-    bit-for-bit faithful.  iter-1077 (deferred) adds component
-    swap with FV3 sign conventions to handle the remaining 8
-    axis-swap edges fully.
+    iter-1076 (this implementation): same-axis 16/24 directed
+    edges bit-for-bit; axis-swap 8/24 edges use
+    ``axis_swap_fill``.  iter-1078's ``pad_halo_dgrid_vector_4d``
+    handles all 24 edges (calls this function for same-axis +
+    overwrites axis-swap with component swap).
     """
     if data.ndim != 4:
         raise ValueError(
