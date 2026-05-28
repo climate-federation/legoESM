@@ -2402,6 +2402,7 @@ def _synchronize_cgrid_fluxes_mpi(fx, fy, n, topology):
     (the MPI-replicated-mode contract).
     """
     from legoesm.parallel.halo_exchange import _get_sendrecv_vjp
+    from collections import defaultdict
     try:
         import mpi4jax
         from mpi4py import MPI as _MPI
@@ -2414,56 +2415,97 @@ def _synchronize_cgrid_fluxes_mpi(fx, fy, n, topology):
     rank = topology.rank
 
     # Classify each (owned face, edge) as local or remote.
-    edge_entries = []
+    local_edges = []
+    remote_edges = []
     for face in topology.local_face_ids:
         for edge in (WEST, EAST, SOUTH, NORTH):
             nbr_face, nbr_edge, rev = CONNECTIVITY[face][edge]
             nbr_rank = topology.neighbor_ranks[(face, edge)]
-            edge_entries.append(
-                (face, edge, nbr_face, nbr_edge, rev, nbr_rank)
-            )
+            entry = (face, edge, nbr_face, nbr_edge, rev, nbr_rank)
+            if nbr_rank == rank:
+                local_edges.append(entry)
+            else:
+                remote_edges.append(entry)
 
-    # Helper: get the bare boundary strip BEFORE applying reversal or
-    # sign flip (those go on the received nbr value).
     def _bdy_strip(face, edge):
         return _extract_cgrid_boundary(fx, fy, face, edge, n)
 
-    # Pre-extract every owned-face boundary strip (local view).
-    local_strips = {(f, e): _bdy_strip(f, e) for f, e, *_ in edge_entries}
+    # FV3_3D iter-1051: batched-per-neighbour sendrecv.  The iter-1049
+    # per-edge sendrecv pattern deadlocked at runtime because each
+    # ``mpi4jax.sendrecv`` blocks on its own ``recv`` until the peer
+    # issues a matching call.  With multiple sendrecvs per neighbour
+    # rank, both ranks block on their first call's recv waiting for
+    # the other's later send → deadlock.  The pad_halo_mpi pattern
+    # packs ALL strips for a given neighbour into ONE contiguous
+    # send/recv buffer (sorted canonically: send by ``(nbr_face,
+    # nbr_edge)``, recv by ``(face, edge)``).  One sendrecv per
+    # peer rank — at most 3 peers in face-only mode, so at most 3
+    # MPI calls per sync.
 
-    # Exchange remote neighbour strips via mpi4jax.
-    nbr_strips = {}
-    # Tag scheme: ``(face * 4 + edge) * 100 + (nbr_face * 4 + nbr_edge)``.
-    # ``face`` and ``edge`` are each in [0, 5] and [0, 3] so ``face*4+edge``
-    # fits in [0, 23].  The 100-stride for the high term guarantees no
-    # carry from the low term; sender uses ``_tag(f, e, nf, ne)`` and
-    # receiver uses ``_tag(nf, ne, f, e)``, so each cross-rank pair
-    # exchanges with matching tags.  Max value 2323 < MPI's 32767
-    # required-min tag space.  24 (face, edge) → 24 unique tags.
-    def _tag(face, edge, nbr_face, nbr_edge):
-        return (face * 4 + edge) * 100 + (nbr_face * 4 + nbr_edge)
+    # Pre-extract every owned-face boundary strip.
+    local_strips = {}
+    for face in topology.local_face_ids:
+        for edge in (WEST, EAST, SOUTH, NORTH):
+            local_strips[(face, edge)] = _bdy_strip(face, edge)
 
-    for face, edge, nbr_face, nbr_edge, rev, nbr_rank in edge_entries:
-        if nbr_rank == rank:
-            # Local edge — read directly.
-            nbr_strips[(face, edge)] = _bdy_strip(nbr_face, nbr_edge)
-        else:
-            send_buf = local_strips[(face, edge)]
-            # Send our boundary strip for this (face, edge); receive
-            # the neighbour's strip for (nbr_face, nbr_edge).
-            send_tag = _tag(face, edge, nbr_face, nbr_edge)
-            recv_tag = _tag(nbr_face, nbr_edge, face, edge)
-            recv = sendrecv(
-                send_buf, jnp.zeros_like(send_buf),
-                nbr_rank, nbr_rank,
-                send_tag, recv_tag, comm,
-            )
-            nbr_strips[(face, edge)] = recv
+    # Holding place for neighbour strips fetched via MPI (remote
+    # edges).  Local-edge strips are read directly later.
+    nbr_strips_remote = {}
+
+    # Group remote edges by neighbour rank.
+    by_nbr_rank: dict[int, list] = defaultdict(list)
+    for entry in remote_edges:
+        by_nbr_rank[entry[5]].append(entry)
+
+    # Per-neighbour single sendrecv with canonically-ordered batched
+    # strips.  Send ordered by ``(nbr_face, nbr_edge)`` = the peer's
+    # local-edge identity, so the peer's recv-side canonical order
+    # (sorted by ``(face, edge)``) matches.  Tag is the peer rank
+    # itself (matches ``pad_halo_mpi_face_only`` pattern).
+    #
+    # All boundary strips share the same length ``n`` along axis 0
+    # (cell axis) and the same trailing shape (e.g., ``(nlev,)`` for
+    # 4D).  Pack by stacking on axis 0; unpack by slicing axis 0
+    # in chunks of ``n``.
+    for nbr_rank, entries in by_nbr_rank.items():
+        send_order = sorted(entries, key=lambda e: (e[2], e[3]))
+        recv_order = sorted(entries, key=lambda e: (e[0], e[1]))
+
+        send_parts = [local_strips[(f, e)] for f, e, *_ in send_order]
+        send_buf = jnp.concatenate(send_parts, axis=0)
+
+        send_tag = rank
+        recv_tag = nbr_rank
+        recv_buf = sendrecv(
+            send_buf, jnp.zeros_like(send_buf),
+            nbr_rank, nbr_rank,
+            send_tag, recv_tag, comm,
+        )
+
+        # Unpack recv_buf in canonical recv order.  Each strip is
+        # ``n`` cells along axis 0; trailing axes match the input.
+        offset = 0
+        for face, edge, nbr_face, nbr_edge, rev, _ in recv_order:
+            chunk = recv_buf[offset:offset + n]
+            offset += n
+            nbr_strips_remote[(face, edge)] = chunk
+
+    # FV3_3D iter-1051: pre-extract local-edge neighbour strips
+    # BEFORE the write loop.  Reading on-demand inside the loop
+    # picks up already-averaged values (write-before-read) on edges
+    # whose neighbour face was processed earlier in the iteration.
+    nbr_strips_local = {}
+    for face, edge, nbr_face, nbr_edge, rev, _ in local_edges:
+        nbr_strips_local[(face, edge)] = _bdy_strip(nbr_face, nbr_edge)
 
     # Compute averages and write back to owned faces.
-    for face, edge, nbr_face, nbr_edge, rev, nbr_rank in edge_entries:
+    all_entries = local_edges + remote_edges
+    for face, edge, nbr_face, nbr_edge, rev, nbr_rank in all_entries:
         local_bdy = local_strips[(face, edge)]
-        nbr_bdy = nbr_strips[(face, edge)]
+        if nbr_rank == rank:
+            nbr_bdy = nbr_strips_local[(face, edge)]
+        else:
+            nbr_bdy = nbr_strips_remote[(face, edge)]
         if rev:
             nbr_bdy = nbr_bdy[::-1]
         if (face, edge) in _FLUX_SIGN_FLIP_EDGES:

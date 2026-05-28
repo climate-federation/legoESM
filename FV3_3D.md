@@ -2378,6 +2378,116 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1051 (2026-05-28): **deadlock fix** — batched-per-neighbour sendrecv in ``_synchronize_cgrid_fluxes_mpi``
+
+### Goal
+
+Resolve a deadlock pattern in iter-1049's MPI-aware
+``synchronize_cgrid_fluxes`` discovered when running the
+iter-1050 operator-level regression test in isolation.  iter-1049's
+NH integration tests appeared to pass, but stale ``pytest`` MPI
+processes hung for hours on the iter-1050 test.
+
+### Root cause
+
+iter-1049's ``_synchronize_cgrid_fluxes_mpi`` issued ONE
+``mpi4jax.sendrecv`` per ``(face, edge)`` pair — up to 12 per
+rank in face-only mode.  ``MPI_Sendrecv`` internally posts
+``Isend + Irecv + Waitall``; ``Irecv(tag=T)`` blocks until the
+peer issues a matching ``Isend(tag=T)``.
+
+With multiple sequential ``sendrecv`` calls per rank using
+distinct tags, each rank blocks on the FIRST call's ``Irecv``
+waiting for the peer's matching ``Isend`` — which only happens
+when the peer reaches a LATER ``sendrecv`` call.  Both ranks
+stuck on their first ``Sendrecv``.  Eager-buffering helps for
+the sends but the recvs still block.
+
+The iter-1049 integration tests "passed" in the same session as
+prior cached background processes, masking the deadlock.
+
+### Fix
+
+Refactored ``_synchronize_cgrid_fluxes_mpi`` to the proven
+``_pad_halo_mpi_face_only`` pattern: **one sendrecv per peer
+rank**, packing all relevant strips into a single contiguous
+buffer in canonical order.
+
+- Group remote edges by neighbour rank.
+- Per peer: sender packs strips sorted by
+  ``(nbr_face, nbr_edge)`` (= peer's local edge identity);
+  receiver unpacks sorted by ``(face, edge)``.  Matching orders
+  guarantee correct pairing.
+- ``send_tag = rank``, ``recv_tag = nbr_rank`` (matches
+  ``_pad_halo_mpi_face_only`` convention).
+- Pre-extract LOCAL-edge neighbour strips BEFORE the write loop
+  (fixes a write-before-read bug discovered during the first
+  iter-1051 attempt — previously the loop read on-demand from
+  fx/fy that were already mutated by earlier iterations).
+- All boundary strips share length ``n`` along axis 0; pack via
+  ``jnp.concatenate(strips, axis=0)``; unpack via
+  ``recv_buf[offset:offset + n]`` chunks.
+
+In face-only mode each rank has at most 3 cross-rank peers, so
+at most 3 sendrecv calls per sync.  Deadlock-free.
+
+### Validation
+
+::
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun -np 2 --timeout 600 \
+        .venv/bin/python -m pytest \
+        tests/distributed/test_mpi_fv3_step_fidelity.py \
+        tests/distributed/test_mpi_fv3_nh_step_fidelity.py \
+        tests/distributed/test_mpi_interp_offsets.py \
+        tests/distributed/test_mpi_synchronize_cgrid_fluxes.py \
+        --no-header -q
+    => 25/25 passed in 271.75s (4:31)
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_corner_div_damp_nh.py tests/test_damp_v_nh.py \
+        tests/test_cross_face_du_proj_iter370.py \
+        tests/atmosphere/nonhydrostatic/integration/test_fv_cubesphere.py \
+        -q
+    => 19/19 single-device regression passed
+
+The iter-1050 operator-level sync test (3 tests) was the
+canary that surfaced the deadlock.  Now it completes in seconds
+instead of hanging.
+
+### Codex adversarial review
+
+``gpt-5.3-codex``: VERDICT CLEAN — 10/10 claims CONFIRMED
+including deadlock freedom, canonical ordering, tag scheme,
+strip shape, write-before-read fix, unpack offset arithmetic,
+empty-group safety, owned-face contract, reversal/sign-flip
+placement, and ``n``-consistency.
+
+### Status
+
+iter-1049's MPI-aware ``synchronize_cgrid_fluxes`` is now both
+**correct** (closed iter-1046 follow-up #2) and **deadlock-free**.
+All 22 ``mpirun -np 2`` MPI step fidelity tests + 3 operator-
+level sync tests pass.
+
+| Open follow-up | Status |
+|----------------|--------|
+| iter-1046 #1 non-square halo (cross_face) | ⏳ deferred |
+| iter-1046 #2 duogrid + factory MPI | ✅ iter-1049 + iter-1051 |
+| SW ``_sync_dgrid_boundary`` MPI port | ⏳ iter-1050 audit; no MPI tests yet |
+| Sub-face tiling (n>6) with interp_offsets | ⏳ |
+| Metal+MPI+duogrid linspace XLA | ⏳ workaround ``JAX_PLATFORMS=cpu`` |
+
+### Why this iteration was meaningful
+
+Without iter-1050's operator-level test, the iter-1049 deadlock
+would have remained latent (the integration tests happened to
+"pass" in noisy session state).  iter-1050's narrow regression
+guard surfaced the bug; iter-1051 fixed it correctly by adopting
+the same batched-per-neighbour pattern used by the rest of the
+MPI halo infrastructure.  The deadlock-prone sequential pattern
+is now removed; the proven pattern is the only one used.
+
 ## Iteration 1050 (2026-05-28): operator-level regression guard for iter-1049 + SW gap audit
 
 ### Goal
