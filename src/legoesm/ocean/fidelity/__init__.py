@@ -28,12 +28,16 @@ __all__ = (
     "compare",
     "diff",
     "metrics",
+    "recipe_constants",
     "references",
     "registry",
     "regrid_veros",
     "report_grid",
+    "tendency_probe",
     "tolerances",
+    "veros_acc_recipe",
     "veros_runner",
+    "veros_state_bridge",
 )
 
 if TYPE_CHECKING:  # pragma: no cover - import-time-only type stubs
@@ -43,12 +47,16 @@ if TYPE_CHECKING:  # pragma: no cover - import-time-only type stubs
         compare,
         diff,
         metrics,
+        recipe_constants,
         references,
         registry,
         regrid_veros,
         report_grid,
+        tendency_probe,
         tolerances,
+        veros_acc_recipe,
         veros_runner,
+        veros_state_bridge,
     )
 
 

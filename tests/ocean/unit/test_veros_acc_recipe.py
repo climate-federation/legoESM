@@ -364,3 +364,24 @@ def test_compare_momentum_emits_all_processes():
         it = mom[proc]["interior"]
         assert np.isfinite(it["L2"]), proc
         assert "weighted_sign_match" in it, proc
+
+
+# ---------------------------------------------------------------------------
+# Q3: fidelity recipe modules must be registered for discovery
+# ---------------------------------------------------------------------------
+
+
+def test_fidelity_recipe_modules_are_registered():
+    """The recipe/bridge/probe modules must be discoverable via the fidelity
+    package's lazy loader. They existed on disk but were absent from __all__,
+    so attribute access / test discovery failed (Phase G open issue)."""
+    import legoesm.ocean.fidelity as fid
+
+    for name in (
+        "recipe_constants", "veros_acc_recipe", "veros_state_bridge", "tendency_probe",
+    ):
+        assert name in fid.__all__, f"{name} not registered in fidelity __all__"
+        mod = getattr(fid, name)  # exercises the lazy __getattr__
+        assert mod is not None, name
+    assert hasattr(fid.veros_acc_recipe, "build_acc_recipe")
+    assert hasattr(fid.tendency_probe, "compare_momentum_at_centres")

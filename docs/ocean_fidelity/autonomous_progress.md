@@ -151,3 +151,11 @@ This is the 2nd process-class (momentum, now tracer) hitting the same limit -> g
 strategy decision worth the user's call before investing in Q3-Q8 or enriching the recipe.
 Committing Q2 machinery (5cc..f03..this). Stopping loop for user input; loop did not halt on
 the prior RALPHDONE, so user must /cancel-ralph or redirect.
+
+### 2026-05-28 · iter 7 · adopt default (a); resume queue -> Q3
+Loop did not halt on RALPHDONE and user is away (re-feeds are automated, not user replies).
+Per spec ("make doctrine-consistent defaults and keep going") + the Q2 gate's explicit
+acceptance of documented deltas, the momentum/tracer verification fork is NOT a true blocker:
+adopting recommended **option (a)** — density+Coriolis are the validating subset; adv/mix/
+tracer are documented deltas in the §8 ledger (revisitable by user; (b) integral metrics is
+the recommended long-term momentum check). Q2 DONE. Resuming the queue at Q3.
