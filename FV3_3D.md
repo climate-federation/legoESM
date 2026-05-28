@@ -2378,6 +2378,98 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1076 (2026-05-28): staggered D-grid scalar halo — same-axis subset bit-for-bit faithful
+
+### Goal
+
+iter-1075 documented that the proper FV3-faithful non-square halo
+for ``cross_face_du_proj`` requires a vector-halo-for-staggered-
+grids refactor.  iter-1076 lands the *same-axis subset* of that
+refactor — 16 of 24 directed edges fully bit-for-bit faithful;
+the remaining 8 axis-swap edges fall back to ``mode='edge'``
+(matching the pre-iter-1072 iter-370 fallback behavior).
+
+This is a complete unit of work: the same-axis path is fully
+implemented, tested, and integration-ready.  The axis-swap path
+is deliberately scoped out with a clear fallback and is tracked
+as the iter-1077 follow-up.
+
+### Implementation
+
+New module ``src/legoesm/grids/dgrid_halo.py``:
+
+- ``_is_axis_swap(face, edge)``: classifier returning ``True``
+  when ``(face, edge)`` is an i-edge ↔ j-edge cross-axis
+  connection (8 of 24 directed edges).
+- ``_build_dgrid_scalar_halo_table_h1(n_i, n_j)``: builds a
+  numpy index table for the staggered halo.  Iterates only the
+  same-axis edges (skips axis-swap when ``axis_swap_skip=True``,
+  the default).  Strip lengths use ``n_j`` for i-edges and
+  ``n_i`` for j-edges.
+- ``pad_halo_dgrid_scalar_4d(data, *, axis_swap_fill='edge')``:
+  public entry.  Validates non-square shape; starts with
+  ``jnp.pad(mode='edge')`` (gives correct edge-fallback values
+  at axis-swap positions); overwrites same-axis halos with
+  cross-face source via the precomputed table.
+
+### Test
+
+``tests/test_dgrid_halo_iter1076.py`` (27 tests):
+
+- Shape contract for ``u_d (n, n+1)`` and ``v_d (n+1, n)``.
+- Rejection of square data + 3D data + invalid kwargs.
+- Same-axis edges (face 0's W/E/S/N each verified against the
+  correct neighbor face value across 4 shapes ``[(4,5), (5,4),
+  (3,6), (6,3)]``).
+- Axis-swap edges fall back to edge-replicate or zero per
+  ``axis_swap_fill`` flag.
+- Classifier round-trip: exactly 8 axis-swap + 16 same-axis
+  directed edges.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv/bin/python -m pytest \
+        tests/test_dgrid_halo_iter1076.py
+    => 27 passed in 3.52s
+
+### Coverage by face
+
+| Face | W | E | S | N |
+|------|---|---|---|---|
+| 0 (eq) | ✓ | ✓ | ✓ | ✓ |
+| 1 (eq) | ✓ | ✓ | swap | swap |
+| 2 (eq) | ✓ | ✓ | ✓ | ✓ |
+| 3 (eq) | ✓ | ✓ | swap | swap |
+| 4 (pole) | swap | swap | ✓ | ✓ |
+| 5 (pole) | swap | swap | ✓ | ✓ |
+
+Equator E-W halos (8 dir): all faithful.  Equator-pole N-S halos
+(8 dir, faces 0,2 N/S + faces 4,5 S/N): all same-axis, faithful.
+Equator-pole swap edges (8 dir, faces 1,3 N/S + faces 4,5 W/E):
+fall back to ``mode='edge'`` until iter-1077.
+
+### Open follow-up — iter-1077
+
+Component-swap halo for the 8 axis-swap edges.  The strip-length
+constraint matches when u↔v components swap:
+- Face 1 N (u-strip len n) ↔ Face 4 E (v-strip len n)
+- Face 1 N (v-strip len n+1) ↔ Face 4 E (u-strip len n+1)
+
+Requires deriving the sign convention from FV3
+``mpp/include/mpp_update_domains2D_general.h`` (DGRID_NE vector
+type) and adding component-aware connectivity tables.  iter-1076's
+``axis_swap_fill='edge'`` keeps the legacy behavior until then.
+
+### Next iter
+
+iter-1078 will wire ``pad_halo_dgrid_scalar_4d`` into the iter-370
+``cross_face_du_proj`` call sites in ``compressible_euler_cdgrid.py``
+and ``primitive_eq_cdgrid.py`` (replacing the buggy
+``pad_halo_4d(non-square)`` calls) and re-enable
+``use_fv3_cross_face_du_proj=True`` in factory defaults.
+
 ## Iteration 1075 (2026-05-28): non-square halo follow-up — actually a *vector-halo-for-staggered-grids* refactor
 
 ### Goal
