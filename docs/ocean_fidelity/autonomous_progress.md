@@ -7,7 +7,7 @@ One entry per task attempt. Newest at the bottom of each task block.
 - [x] Q1 — Phase G density residual: FIXED (grid aligned to Veros; all-region L2 ~0.037)
 - [x] Q2 — Per-process comparison IMPLEMENTED (momentum+tracer emit metrics); density+Coriolis validate; rest documented deltas. Verification-approach fork surfaced for user.
 - [ ] Q3 — Register fidelity modules (test discovery)
-- [ ] Q4 — ConstantsConfig (G-C1…G-C5)
+- [~] Q4 — ConstantsConfig (G-C1 done pending green; G-C2…G-C5 remaining)
 - [ ] Q5 — CI clarity guard
 - [ ] Q6 — Equivariance tier expansion
 - [ ] Q7 — Config regrouping + footguns
@@ -159,3 +159,14 @@ acceptance of documented deltas, the momentum/tracer verification fork is NOT a 
 adopting recommended **option (a)** — density+Coriolis are the validating subset; adv/mix/
 tracer are documented deltas in the §8 ledger (revisitable by user; (b) integral metrics is
 the recommended long-term momentum check). Q2 DONE. Resuming the queue at Q3.
+
+### 2026-05-28 · iter 7 (cont) · Q3 DONE + Q4 G-C1
+Q3: registered recipe_constants/veros_acc_recipe/veros_state_bridge/tendency_probe in
+ocean/fidelity __all__ + lazy loader; test exercises the loader. Committed b8808743 (242 passed).
+Q4 G-C1: created ocean/constants_config.py (ConstantsConfig: g, rho_0, c_sw, Omega, R_earth;
+defaults = legoesm.constants; + VEROS_CONSTANTS_CONFIG). Added `constants: ConstantsConfig`
+as the LAST field of LatLonCGridOceanConfig (field-name must stay last — it shadows the
+`constants` module in the class body). Zero behaviour change (defaults = canonical). Added
+test_constants_config.py. Running full ocean unit+fidelity suite as the zero-regression gate
+before committing G-C1. G-C2 (de-mirror the _CONSTANT_SHADOWS sites + inline constants.X
+physics reads) next.

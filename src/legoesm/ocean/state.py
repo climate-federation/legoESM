@@ -11,6 +11,7 @@ from typing import NamedTuple
 
 from legoesm import constants
 from legoesm.core.field import Field
+from legoesm.ocean.constants_config import ConstantsConfig
 
 
 # ==============================================================================
@@ -727,3 +728,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     A_h_cap_lat_deg: float = 75.0
     # Half-width of the polar-cap boost tanh transition [°]; default 5°.
     A_h_cap_width_deg: float = 5.0
+    # Ocean-scoped physical constants (Phase G, G-C1). Defaults reference
+    # legoesm.constants (canonical Earth) -> zero behaviour change. A recipe
+    # pins these to a reference model (e.g. Veros) via the public config API
+    # instead of the override_constants monkey-patch. Read-through wiring
+    # (de-mirroring) is G-C2+. MUST stay the LAST field: its default assigns
+    # the class-body name `constants`, which would shadow the `constants`
+    # module for any field default declared after it.
+    constants: ConstantsConfig = ConstantsConfig()
