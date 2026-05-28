@@ -1,0 +1,405 @@
+"""Tendency probe harness for Phase G tier-2 fidelity comparison.
+
+Given a frozen ocean state on the lat-lon C-grid, this module produces a
+per-process breakdown of the legoESM tendencies — the legoESM-side input
+to a tier-2 comparison against Veros (or any other reference model that
+emits per-term diagnostics). The probe leverages the existing
+``MomentumTendencyDiagnostics`` infrastructure (closure-tested in
+``test_momentum_diagnostics_closure.py``) so by construction
+``Σ momentum components == du/dt`` to machine precision.
+
+The probe is timestepping-free: it calls
+``latlon_cgrid_ocean_baroclinic_tendencies(..., diagnose_momentum=True)``
+once on the input state, plus direct calls to ``coriolis_cgrid`` and
+``compute_ocean_rho`` for components not in the baroclinic-tendency
+breakdown.
+
+For tracer per-process comparison, the caller constructs the recipe
+config with the desired single process active (e.g.
+``lateral_mixing scheme="none"``, ``vertical_mixing scheme="none"``,
+``physics=None`` for tracer-advection-only). This is the same isolation
+strategy Veros's per-term diagnostic dumps use.
+
+Per-region metrics (``per_region_metrics``) supply the spatially-aware
+breakdown — interior vs boundary vs equator vs mixed-layer vs abyssal —
+needed because a single global L2 hides bugs that concentrate spatially.
+"""
+
+from __future__ import annotations
+
+from typing import NamedTuple
+
+import jax.numpy as jnp
+import numpy as np
+
+from legoesm.grids.latlon import LatLonGrid
+from legoesm.ocean.dynamics.latlon_cgrid_operators import coriolis_cgrid
+from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+    latlon_cgrid_ocean_baroclinic_tendencies,
+)
+from legoesm.ocean.eos import compute_ocean_rho
+from legoesm.ocean.state import LatLonCGridOceanConfig, LatLonCGridOceanState
+from legoesm.ocean.vertical import (
+    OceanZStarCoordinate,
+    compute_ocean_jacobian,
+)
+
+
+# ---------------------------------------------------------------------------
+# Probe result
+# ---------------------------------------------------------------------------
+
+
+class LatLonProbeResult(NamedTuple):
+    """Per-process tendencies on a frozen lat-lon C-grid ocean state.
+
+    Momentum components come from ``MomentumTendencyDiagnostics``.
+    Coriolis is computed separately since it is applied in the
+    forward-backward step, not inside
+    ``latlon_cgrid_ocean_baroclinic_tendencies``. Tracer tendencies
+    are returned as totals; the caller isolates a single process by
+    constructing a config in which only that process is active.
+
+    Field naming uses Veros conventions where possible
+    (``pgf_ke_u`` = KE-gradient + pressure gradient, etc.) so the
+    side-by-side comparison report reads identically regardless of
+    which side is being introspected.
+    """
+    # Momentum tendencies (du/dt, dv/dt) per process — m/s^2
+    pgf_ke_u: jnp.ndarray            # KE gradient + pressure gradient
+    pgf_ke_v: jnp.ndarray
+    coriolis_u: jnp.ndarray          # f * v_at_u
+    coriolis_v: jnp.ndarray          # -f * u_at_v
+    vortcor_u: jnp.ndarray           # relative vorticity advection
+    vortcor_v: jnp.ndarray
+    vertadv_u: jnp.ndarray           # flux-form vertical momentum advection
+    vertadv_v: jnp.ndarray
+    ah_lap_u: jnp.ndarray            # harmonic lateral viscosity
+    ah_lap_v: jnp.ndarray
+    bh_bilap_u: jnp.ndarray          # biharmonic lateral viscosity
+    bh_bilap_v: jnp.ndarray
+    botdrag_u: jnp.ndarray           # bottom drag
+    botdrag_v: jnp.ndarray
+    av_vert_u: jnp.ndarray           # vertical viscosity (explicit path)
+    av_vert_v: jnp.ndarray
+    phys_u: jnp.ndarray              # surface-forcing physics
+    phys_v: jnp.ndarray
+    total_u: jnp.ndarray             # Σ PE components (excl. Coriolis)
+    total_v: jnp.ndarray
+    # Tracer tendencies — degC/s, PSU/s
+    dT_dt_total: jnp.ndarray         # total dT/dt as the model would integrate
+    dS_dt_total: jnp.ndarray
+    # EOS-derived density at cell centres — kg/m^3
+    rho: jnp.ndarray
+
+
+def probe_latlon_cgrid(
+    state: LatLonCGridOceanState,
+    grid: LatLonGrid,
+    z_coord: OceanZStarCoordinate,
+    config: LatLonCGridOceanConfig,
+    *,
+    physics_fn=None,
+    surface_forcing=None,
+    sponge=None,
+    dt: float = 300.0,
+) -> LatLonProbeResult:
+    """Compute per-process tendencies on a frozen ocean state.
+
+    Parameters
+    ----------
+    state : LatLonCGridOceanState
+        Frozen ocean state (T, S, u, v, eta) to probe.
+    grid : LatLonGrid
+    z_coord : OceanZStarCoordinate
+    config : LatLonCGridOceanConfig
+        Determines which scheme variants apply. For per-process
+        tracer isolation, construct ``config`` with all but one
+        process disabled.
+    physics_fn : callable, optional
+    surface_forcing : optional
+    sponge : SpongeForcing, optional
+    dt : float
+        Timestep [s] — needed for the CFL-aware advection-flux build
+        even though no time integration is performed.
+
+    Returns
+    -------
+    LatLonProbeResult
+    """
+    tendencies, diag = latlon_cgrid_ocean_baroclinic_tendencies(
+        state, grid, z_coord, config,
+        physics_fn=physics_fn,
+        surface_forcing=surface_forcing,
+        sponge=sponge,
+        dt=dt,
+        diagnose_momentum=True,
+    )
+
+    cor_u, cor_v = coriolis_cgrid(
+        state.u.data, state.v.data, grid,
+        u_mask=state.u_mask.data, v_mask=state.v_mask.data,
+    )
+
+    J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
+    rho = compute_ocean_rho(state, z_coord, J)
+
+    return LatLonProbeResult(
+        pgf_ke_u=diag.KE_PGF_u.data,
+        pgf_ke_v=diag.KE_PGF_v.data,
+        coriolis_u=cor_u,
+        coriolis_v=cor_v,
+        vortcor_u=diag.vortcor_u.data,
+        vortcor_v=diag.vortcor_v.data,
+        vertadv_u=diag.vertadv_u.data,
+        vertadv_v=diag.vertadv_v.data,
+        ah_lap_u=diag.Ah_lap_u.data,
+        ah_lap_v=diag.Ah_lap_v.data,
+        bh_bilap_u=diag.Bh_bilap_u.data,
+        bh_bilap_v=diag.Bh_bilap_v.data,
+        botdrag_u=diag.botdrag_u.data,
+        botdrag_v=diag.botdrag_v.data,
+        av_vert_u=diag.Av_vert_u.data,
+        av_vert_v=diag.Av_vert_v.data,
+        phys_u=diag.phys_u.data,
+        phys_v=diag.phys_v.data,
+        total_u=diag.total_u.data,
+        total_v=diag.total_v.data,
+        dT_dt_total=tendencies.dT_dt.data,
+        dS_dt_total=tendencies.dS_dt.data,
+        rho=rho,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Region masks
+# ---------------------------------------------------------------------------
+
+
+class RegionMasks(NamedTuple):
+    """Cell-centre region masks (shape ``(n_lat, n_lon, nlev)``).
+
+    Masks are not necessarily disjoint — a cell can be both
+    ``equator`` and ``mixed_layer``. ``wet`` is the union of all
+    ocean cells (the natural denominator for a region's "share of
+    the ocean" check).
+
+    Use ``per_region_metrics`` to apply these to a tendency array; the
+    array must share the cell-centre shape.
+    """
+    interior: jnp.ndarray
+    boundary: jnp.ndarray
+    equator: jnp.ndarray
+    mixed_layer: jnp.ndarray
+    abyssal: jnp.ndarray
+    wet: jnp.ndarray
+
+
+def build_region_masks(
+    grid: LatLonGrid,
+    z_coord: OceanZStarCoordinate,
+    state: LatLonCGridOceanState,
+    *,
+    equator_lat_deg: float = 5.0,
+    mixed_layer_depth_m: float = 100.0,
+    abyssal_depth_m: float = 2000.0,
+    boundary_dist_cells: int = 1,
+) -> RegionMasks:
+    """Build per-region masks for tier-2 comparison.
+
+    Parameters
+    ----------
+    equator_lat_deg : float
+        Cells with ``|lat| <= equator_lat_deg`` are in ``equator``.
+    mixed_layer_depth_m : float
+        Cells whose centre-depth is above ``mixed_layer_depth_m`` are
+        in ``mixed_layer``.
+    abyssal_depth_m : float
+        Cells whose centre-depth is below ``abyssal_depth_m`` are in
+        ``abyssal``.
+    boundary_dist_cells : int
+        Wet cells within this many cells of a dry cell are
+        ``boundary``; remaining wet cells are ``interior``.
+
+    Returns
+    -------
+    RegionMasks
+        Boolean 3D arrays.
+    """
+    n_lat, n_lon, nlev = state.T.data.shape
+
+    mask_2d = np.asarray(state.land_mask.data) > 0.5  # (n_lat, n_lon)
+    lat_deg = np.degrees(np.asarray(grid.lat))         # (n_lat,)
+
+    wet_3d = np.broadcast_to(mask_2d[:, :, None], (n_lat, n_lon, nlev))
+
+    # Boundary: wet cells with at least one dry neighbour in (n_lat, n_lon).
+    # Use a manual neighbour count instead of scipy.ndimage to keep the
+    # dependency surface small.
+    interior_2d = mask_2d.copy()
+    for _ in range(boundary_dist_cells):
+        interior_2d = (
+            interior_2d
+            & np.roll(mask_2d, 1, axis=0)
+            & np.roll(mask_2d, -1, axis=0)
+            & np.roll(mask_2d, 1, axis=1)
+            & np.roll(mask_2d, -1, axis=1)
+        )
+    boundary_2d = mask_2d & ~interior_2d
+    boundary_3d = np.broadcast_to(boundary_2d[:, :, None], (n_lat, n_lon, nlev))
+    interior_3d = wet_3d & ~boundary_3d
+
+    equator_lat_mask = np.abs(lat_deg) <= equator_lat_deg  # (n_lat,)
+    equator_2d = equator_lat_mask[:, None] & mask_2d
+    equator_3d = np.broadcast_to(equator_2d[:, :, None], (n_lat, n_lon, nlev))
+
+    dz_ref = np.asarray(z_coord.dz_ref)
+    z_centre = np.cumsum(dz_ref) - 0.5 * dz_ref  # (nlev,) positive downward
+    ml_per_lev = z_centre <= mixed_layer_depth_m
+    ab_per_lev = z_centre >= abyssal_depth_m
+    ml_3d = wet_3d & ml_per_lev[None, None, :]
+    ab_3d = wet_3d & ab_per_lev[None, None, :]
+
+    return RegionMasks(
+        interior=jnp.asarray(interior_3d),
+        boundary=jnp.asarray(boundary_3d),
+        equator=jnp.asarray(equator_3d),
+        mixed_layer=jnp.asarray(ml_3d),
+        abyssal=jnp.asarray(ab_3d),
+        wet=jnp.asarray(wet_3d),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Comparison metrics
+# ---------------------------------------------------------------------------
+
+
+def per_region_metrics(
+    legoesm: jnp.ndarray,
+    ref: jnp.ndarray,
+    masks: RegionMasks,
+) -> dict[str, dict[str, float]]:
+    """Compute L1/L2/L∞ + sign-match + pattern correlation per region.
+
+    Both ``legoesm`` and ``ref`` must share the same shape, which must
+    match the masks (cell-centre shape ``(n_lat, n_lon, nlev)``).
+
+    Returns
+    -------
+    dict
+        ``{region_name: {"L1": ..., "L2": ..., "Linf": ...,
+        "sign_match": ..., "pattern_corr": ..., "n_cells": ...}}``.
+
+        Regions with zero wet cells return ``nan`` for every metric and
+        ``n_cells=0``.
+    """
+    if legoesm.shape != ref.shape:
+        raise ValueError(
+            f"legoesm shape {legoesm.shape} != ref shape {ref.shape}. "
+            "Both arrays must be at the same staggered position; "
+            "interpolate to a common grid before calling per_region_metrics."
+        )
+
+    out: dict[str, dict[str, float]] = {}
+    diff = np.asarray(legoesm - ref)
+    lego_np = np.asarray(legoesm)
+    ref_np = np.asarray(ref)
+
+    for region_name in masks._fields:
+        region_mask = np.asarray(getattr(masks, region_name))
+        if region_mask.shape != diff.shape:
+            raise ValueError(
+                f"Mask {region_name!r} shape {region_mask.shape} != array "
+                f"shape {diff.shape}."
+            )
+        n_cells = int(region_mask.sum())
+        if n_cells == 0:
+            out[region_name] = {
+                "L1": float("nan"), "L2": float("nan"), "Linf": float("nan"),
+                "sign_match": float("nan"),
+                "pattern_corr": float("nan"), "n_cells": 0,
+            }
+            continue
+
+        d_region = diff[region_mask]
+        l_region = lego_np[region_mask]
+        r_region = ref_np[region_mask]
+
+        L1 = float(np.mean(np.abs(d_region)))
+        L2 = float(np.sqrt(np.mean(d_region ** 2)))
+        Linf = float(np.max(np.abs(d_region)))
+
+        # Sign match: fraction of cells where the two arrays have the
+        # same sign (treating ``|x| < 1e-30`` as 'zero, agrees').
+        eps = 1e-30
+        l_sign = np.sign(np.where(np.abs(l_region) > eps, l_region, 0.0))
+        r_sign = np.sign(np.where(np.abs(r_region) > eps, r_region, 0.0))
+        sign_match = float(np.mean(l_sign == r_sign))
+
+        # Pattern correlation (Pearson). Guard against constant fields.
+        l_mean = float(np.mean(l_region))
+        r_mean = float(np.mean(r_region))
+        l_dev = l_region - l_mean
+        r_dev = r_region - r_mean
+        denom = float(np.sqrt(np.sum(l_dev ** 2) * np.sum(r_dev ** 2)))
+        if denom > 0.0:
+            pattern_corr = float(np.sum(l_dev * r_dev) / denom)
+        else:
+            pattern_corr = float("nan")
+
+        out[region_name] = {
+            "L1": L1, "L2": L2, "Linf": Linf,
+            "sign_match": sign_match,
+            "pattern_corr": pattern_corr,
+            "n_cells": n_cells,
+        }
+    return out
+
+
+def compare_probe_results(
+    legoesm: LatLonProbeResult,
+    ref: LatLonProbeResult,
+    masks: RegionMasks,
+) -> dict[str, dict[str, dict[str, float]]]:
+    """Compare every field of two ``LatLonProbeResult``s region-by-region.
+
+    Skips fields whose shape does not match the region masks (e.g.,
+    u-face quantities on a cell-centre mask) and emits a single entry
+    ``{"_skipped": True, "reason": "shape mismatch ..."}``. The caller
+    is responsible for building face-aware masks if face-staggered
+    comparison is required.
+
+    Returns
+    -------
+    dict
+        ``{field_name: {region_name: metrics_dict}}``.
+    """
+    mask_shape = masks.interior.shape  # all masks share this shape
+    out: dict[str, dict[str, dict[str, float]]] = {}
+    for name in legoesm._fields:
+        lego_arr = getattr(legoesm, name)
+        ref_arr = getattr(ref, name)
+        if lego_arr.shape != mask_shape:
+            out[name] = {
+                "_skipped": {
+                    "reason": (
+                        f"array shape {lego_arr.shape} != mask shape "
+                        f"{mask_shape} — supply face-aware masks to compare "
+                        f"this field."
+                    ),
+                }
+            }  # type: ignore[assignment]
+            continue
+        out[name] = per_region_metrics(lego_arr, ref_arr, masks)
+    return out
+
+
+__all__ = (
+    "LatLonProbeResult",
+    "RegionMasks",
+    "build_region_masks",
+    "compare_probe_results",
+    "per_region_metrics",
+    "probe_latlon_cgrid",
+)
