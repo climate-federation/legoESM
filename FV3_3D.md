@@ -2378,6 +2378,106 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1083 (2026-05-28): MPI-aware DGRID vector halo — batched-per-peer sendrecv (24/24 edges bit-for-bit FV3-faithful under MPI)
+
+### Goal
+
+Closes codex iter-1078 BLOCKER M1: replace the iter-1081
+``mode='edge'`` MPI fallback with a proper sendrecv-based dgrid
+vector halo that achieves bit-for-bit FV3 fidelity under
+cubed-sphere MPI.
+
+### Implementation
+
+3 new functions in ``src/legoesm/grids/dgrid_halo.py``:
+
+1. ``_build_dgrid_mpi_edges(topology)``: per-owned-face per-edge
+   dispatch list with axis-swap classification + iter-1078 signs.
+2. ``pad_halo_dgrid_vector_4d_mpi(u_d, v_d, topology)``: rank-local
+   input ``(n_local, n, n+1, nlev)`` / ``(n_local, n+1, n, nlev)``;
+   batched-per-peer sendrecv with packed ``[u_strip, v_strip]``
+   buffers per peer.
+3. ``pad_halo_dgrid_vector_4d_replicated_mpi(...)``: thin wrapper
+   for the canonical cubed-sphere MPI replicated state
+   (``(6, ...)`` on each rank).  Slices owned faces, runs the
+   MPI halo, places back into ``(6, ...)`` with non-owned faces
+   at edge-replicate.
+
+### Iter-370 call sites updated
+
+``compressible_euler_cdgrid.py:1245`` + ``primitive_eq_cdgrid.py:1361``:
+
+::
+
+    if cfg.use_fv3_cross_face_du_proj:
+        if get_halo_backend() == "mpi":
+            du_full, dv_full = pad_halo_dgrid_vector_4d_replicated_mpi(
+                du_normal, dv_normal, _mpi_topology,
+            )
+        else:
+            du_full, dv_full = pad_halo_dgrid_vector_4d(du_normal, dv_normal)
+
+### Batched-per-peer pattern (deadlock-free)
+
+iter-1082 attempted per-edge sendrecv → deadlocked at np=2 from
+mismatched peer order.  iter-1083 uses the proven
+``_pad_halo_mpi_face_only_4d`` pattern:
+
+- Group remote edges by neighbor rank.
+- Sort peers (deadlock-free at np ∈ {2, 3, 6}).
+- For each peer: pack ``[u_strip_0, v_strip_0, u_strip_1, ...]``
+  sorted by ``(nbr_face, nbr_edge)``; receive in
+  ``(face, edge)`` order — matches peer's send order.
+- ONE sendrecv per peer.
+- Tag scheme: ``sendtag=rank, recvtag=nbr_rank`` (same as the
+  face-only helper).
+
+### Validation
+
+::
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 2 \
+        .venv/bin/python -m pytest \
+        tests/distributed/test_mpi_dgrid_vector_halo_iter1083.py
+    => 1 passed — bit-for-bit match against single-device reference
+       on every rank's owned faces
+
+Same at np=3 and np=6.  PE+NH factory step fidelity at np=2:
+2 passed in 134s.  44 local unit tests pass.
+
+### Codex review
+
+Independent codex adversarial review returned **0 BLOCKERs / 0
+WARNs / 7 NITs**.  All 7 findings confirmed the implementation is
+structurally correct:
+
+1. Tag scheme (rank-valued) survives multi-pair simultaneity
+   because source + comm + tag disambiguate.
+2. Buffer parsing on receive uses ``nbr_edge`` correctly for
+   cross-face packing.
+3. Component swap semantics match single-device reference.
+4. Reversal-before-component-swap matches single-device order.
+5. No JIT-breaking traced conditionals introduced.
+6. Tag reuse follows existing mpi4jax-compatible pattern.
+7. Send/recv ordering symmetric via canonical sort.
+
+### Final status — all 9 FV3-fidelity flags bit-for-bit FV3-faithful in production MPI mode
+
+| Flag | Local | MPI |
+|------|-------|-----|
+| ``use_fv3_d_con_cv`` | ✅ | ✅ |
+| ``use_fv3_vector_halo_uv`` | ✅ | ✅ |
+| ``use_fv3_a2b_ord4_vector_uv`` | ✅ | ✅ |
+| ``use_fv3_dynamic_exner`` | ✅ | ✅ |
+| ``use_fv3_metric_aware_d_con`` | ✅ | ✅ |
+| ``use_fv3_a2b_zeta_corner`` | ✅ | ✅ |
+| ``use_fv3_cross_face_du_proj`` | ✅ iter-1078 | ✅ **iter-1083** |
+| ``use_fv3_sponge_damp_v`` | ✅ | ✅ |
+| ``use_fv3_sponge_damp_w`` | ✅ | ✅ |
+
+The user's "Always run on MPI as this will be standard" requirement
+is now met for the full FV3-faithful default factory.
+
 ## Iteration 1082 (2026-05-28): MPI dgrid vector halo — design notes + deferral
 
 ### Goal
