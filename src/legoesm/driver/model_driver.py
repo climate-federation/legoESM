@@ -432,6 +432,12 @@ class ModelDriver:
             dc.dt, gc.resolution, model_type=cfl_model,
             radius=getattr(self.grid, 'radius', constants.R_earth),
             grid_type=gc.grid_type,
+            # Stage 3-E: when the polar filter is on, the equatorial
+            # CFL is the actual stability limit (the filter handles
+            # the pole CFL).  Without this kwarg the driver clamp
+            # would override the factory clamp's polar-filter aware
+            # value back down to ~5 s at 1° lat-lon.
+            use_polar_filter=getattr(dc, "use_polar_filter", False),
         )
         if dt_safe < dc.dt:
             logger.warning(

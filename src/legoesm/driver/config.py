@@ -128,6 +128,25 @@ class DycoreConfig(NamedTuple):
     polar_filter_cutoff_deg: float = 60.0
     polar_filter_max_wave_speed: float = 300.0
 
+    # Task #25: time integrator override.  Lat-lon C-grid uses
+    # ``ssp_rk3`` by default — three RK3 stages unrolled with the
+    # tendency function inlined 3×.  Setting
+    # ``time_integrator="ssp_rk3_scan"`` folds the 3 stages into a
+    # single ``jax.lax.scan`` body so XLA optimises the tendency
+    # pipeline ONCE.  Same SSP coefficients (α = (0, 0.75, 1/3),
+    # β = (1, 0.25, 2/3)), same number of tendency calls per step,
+    # IEEE-identical output (pinned by
+    # tests/timestepping/test_ssp_rk3_scan_bit_equivalence.py).
+    # At the production AMIP shape (lat-lon C-grid + tracers + polar
+    # filter) profile job 8070275 measured a 1.3–1.9× JIT compile
+    # speedup — meaningful for the 100-y AMIP submission where the
+    # smoke jobs were paying ~2.5 h of compile per rank-count.
+    #
+    # Default ``"ssp_rk3"`` preserves bit-equivalent behaviour for
+    # the existing scientific validation suite.  ``"ssp_rk3_scan"``
+    # is the opt-in for production at scale.
+    time_integrator: str = "ssp_rk3"
+
 
 class OutputConfig(NamedTuple):
     """Output and diagnostics configuration."""

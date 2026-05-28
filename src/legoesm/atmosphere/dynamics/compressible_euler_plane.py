@@ -46,6 +46,7 @@ from legoesm.atmosphere.dynamics.compressible_euler import (
     _acoustic_column_kernel,
     _semi_implicit_acoustic_column_kernel,
     _sponge_profile,
+    precompute_si_tridiag_bands,
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm.core.field import Field
@@ -1327,16 +1328,14 @@ def plane_acoustic_substeps(
     theta_p = state.theta_prime.data
     rho_p = state.rho_prime.data
 
-    def substep_body(_, carry):
-        w_c, theta_p_c, rho_p_c = carry
-        return _acoustic_column_kernel(
-            w_c, theta_p_c, rho_p_c,
+    # Python-loop unroll (n_substeps is compile-time static via
+    # SplitExplicitConfig). See semi-implicit variant for full rationale.
+    w_final, theta_p_final, rho_p_final = (w, theta_p, rho_p)
+    for _ in range(int(n_substeps)):
+        w_final, theta_p_final, rho_p_final = _acoustic_column_kernel(
+            w_final, theta_p_final, rho_p_final,
             height_coord, J, dt_s, beta, g,
         )
-
-    w_final, theta_p_final, rho_p_final = jax.lax.fori_loop(
-        0, n_substeps, substep_body, (w, theta_p, rho_p),
-    )
 
     return PlaneNonHydrostaticState(
         u=state.u,
@@ -1381,17 +1380,28 @@ def plane_acoustic_substeps_semi_implicit(
     theta_p = state.theta_prime.data
     rho_p = state.rho_prime.data
 
-    def substep_body(_, carry):
-        w_c, theta_p_c, rho_p_c = carry
-        return _semi_implicit_acoustic_column_kernel(
-            w_c, theta_p_c, rho_p_c,
-            height_coord, J, dt_s, beta, g,
-            implicit_buoyancy=implicit_buoyancy,
-        )
-
-    w_final, theta_p_final, rho_p_final = jax.lax.fori_loop(
-        0, n_substeps, substep_body, (w, theta_p, rho_p),
+    # Loop-invariant tridiag bands — hoisted once, reused n_substeps times.
+    tri_bands = precompute_si_tridiag_bands(
+        height_coord, J, dt_s, g, implicit_buoyancy,
+        nlev=theta_p.shape[-1],
     )
+
+    # n_substeps is compile-time static (from SplitExplicitConfig field),
+    # so a Python for-loop fully unrolls the substep sequence — XLA then
+    # has straight-line HLO across iterations and can fuse the post-cuSPARSE
+    # tail of one substep with the pre-cuSPARSE head of the next. This
+    # replaces ``lax.fori_loop`` which kept the substeps as a while-loop and
+    # prevented inter-iteration fusion.
+    w_final, theta_p_final, rho_p_final = (w, theta_p, rho_p)
+    for _ in range(int(n_substeps)):
+        w_final, theta_p_final, rho_p_final = (
+            _semi_implicit_acoustic_column_kernel(
+                w_final, theta_p_final, rho_p_final,
+                height_coord, J, dt_s, beta, g,
+                implicit_buoyancy=implicit_buoyancy,
+                precomputed_tridiag=tri_bands,
+            )
+        )
 
     return PlaneNonHydrostaticState(
         u=state.u,
@@ -1532,6 +1542,33 @@ class PlaneCompressibleEulerModel:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def precompute_target_mass(
+        self,
+        state: PlaneNonHydrostaticState,
+    ) -> None:
+        """Cache target dry mass from ``state`` for fix_mass use under JIT.
+
+        ``step()`` lazily caches ``_target_mass`` from its first input,
+        which leaks the traced array when called inside ``jax.lax.scan``
+        with ``fix_mass=True``. Calling this method BEFORE the scan
+        pre-populates the cache with a concrete (non-traced) array, so
+        the scan body sees a closed-over constant.
+
+        Usage::
+
+            model._target_mass = None  # if already set
+            model.precompute_target_mass(initial_state)
+            out = jax.lax.scan(lambda s,_: (model.step(s, dt), None),
+                               initial_state, None, length=N)[0]
+
+        Required when fix_mass=True + anchor_mass_to_initial=True is
+        combined with lax.scan-based time integration.
+        """
+        if self.config.fix_mass:
+            self._target_mass = compute_dry_mass_plane(
+                state, self.grid, self.height_coord, self.terrain_metric,
+            )
 
     def step(
         self,

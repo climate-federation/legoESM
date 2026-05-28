@@ -167,12 +167,30 @@ def _build_spectral_config(cfg: dict[str, Any]):
     )
 
 
-def _train_variant(variant: str, cfg: dict[str, Any], cache_dir: str):
-    """Dispatch on AIMIP variant.  Returns (trained_model, loss_history)."""
+def _train_variant(
+    variant: str,
+    cfg: dict[str, Any],
+    cache_dir: str,
+    *,
+    resume: bool = False,
+):
+    """Dispatch on AIMIP variant.  Returns (trained_model, loss_history).
+
+    When ``resume`` is True the checkpoint dir
+    ``{output_dir}/{aimip_variant}`` is scanned for the highest-numbered
+    ``epoch_NNNN.eqx`` and training resumes from epoch+1.  Used by the
+    chained-resubmission SLURM driver.
+    """
     spec_cfg = _build_spectral_config(cfg)
 
+    resume_from_dir = (
+        Path(cfg["output_dir"]) / cfg["aimip_variant"] if resume else None
+    )
+
     if variant == "classical":
-        return _train_aimip_classical(spec_cfg, cache_dir, cfg=cfg)
+        return _train_aimip_classical(
+            spec_cfg, cache_dir, cfg=cfg, resume_from_dir=resume_from_dir,
+        )
 
     if variant == "column_nn":
         from legoesm.training.neural_gcm_spectral import (
@@ -184,6 +202,7 @@ def _train_variant(variant: str, cfg: dict[str, Any], cache_dir: str):
             seed=int(cfg.get("nn_seed", 0)),
             hidden_dim=int(cfg.get("nn_hidden_dim", 256)),
             n_layers=int(cfg.get("nn_n_layers", 4)),
+            resume_from_dir=resume_from_dir,
         )
 
     if variant == "sfno_physics":
@@ -194,6 +213,7 @@ def _train_variant(variant: str, cfg: dict[str, Any], cache_dir: str):
             config=spec_cfg,
             cache_dir=cache_dir,
             seed=int(cfg.get("sfno_seed", 0)),
+            resume_from_dir=resume_from_dir,
         )
 
     if variant == "sfno_full":
@@ -205,12 +225,19 @@ def _train_variant(variant: str, cfg: dict[str, Any], cache_dir: str):
             cache_dir=cache_dir,
             seed=int(cfg.get("sfno_seed", 0)),
             dt_sfno=float(cfg.get("dt_sfno", 21600.0)),
+            resume_from_dir=resume_from_dir,
         )
 
     raise ValueError(f"Unknown AIMIP variant: {variant!r}")
 
 
-def _train_aimip_classical(spec_cfg, cache_dir: str, *, cfg: dict | None = None):
+def _train_aimip_classical(
+    spec_cfg,
+    cache_dir: str,
+    *,
+    cfg: dict | None = None,
+    resume_from_dir=None,
+):
     cfg = cfg or {}
     """Train the AIMIP classical variant (Tiedtke/Louis/Surface/McFarlane/XR).
 
@@ -229,6 +256,7 @@ def _train_aimip_classical(spec_cfg, cache_dir: str, *, cfg: dict | None = None)
     from legoesm.training.neural_gcm_spectral import (
         _train_spectral_loop,
         load_training_data,
+        maybe_resume_model,
     )
 
     grid = create_gaussian_grid(spec_cfg.n_max, dealiasing="quadratic")
@@ -254,6 +282,8 @@ def _train_aimip_classical(spec_cfg, cache_dir: str, *, cfg: dict | None = None)
             if spatial_surface else ""
         )
     )
+
+    params, start_epoch = maybe_resume_model(params, resume_from_dir)
 
     ic_states, target_carries = load_training_data(
         spec_cfg, grid, sigma, cache_dir,
@@ -321,6 +351,7 @@ def _train_aimip_classical(spec_cfg, cache_dir: str, *, cfg: dict | None = None)
     return _train_spectral_loop(
         params, _make_physics_fn,
         grid, sigma, ic_states, target_carries, spec_cfg,
+        start_epoch=start_epoch,
     )
 
 
@@ -643,6 +674,15 @@ def main():
             "(overrides the suite manifest list when set)."
         ),
     )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help=(
+            "Resume each variant from the highest-numbered "
+            "epoch_NNNN.eqx in its output checkpoint dir, if one "
+            "exists.  Used by the chained-resubmit SLURM driver so a "
+            "walltime-killed job can continue from where it left off."
+        ),
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -706,7 +746,9 @@ def main():
         logger.info("=" * 60)
 
         t0 = time.time()
-        model, loss_history = _train_variant(variant, cfg, cache_dir)
+        model, loss_history = _train_variant(
+            variant, cfg, cache_dir, resume=args.resume,
+        )
         train_elapsed = time.time() - t0
 
         # Evaluate on BOTH the training windows (in-sample skill, for

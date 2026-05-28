@@ -103,7 +103,7 @@ echo "--- Reference: 4-day continuous run ---"
     --checkpoint-days 2 \
     --output "${REF_DIR}" \
     --dataset analytical \
-    --use-polar-filter
+    --use-polar-filter --time-integrator ssp_rk3_scan
 
 REF_DAY4="${REF_DIR}/checkpoint_day_0004.npz"
 if [[ ! -f "${REF_DAY4}" ]]; then
@@ -129,7 +129,7 @@ echo "--- Chain leg 1: 0 → 2 days, writes day-2 checkpoint ---"
     --checkpoint-days 2 \
     --output "${CHAIN_DIR}" \
     --dataset analytical \
-    --use-polar-filter
+    --use-polar-filter --time-integrator ssp_rk3_scan
 
 CHAIN_DAY2="${CHAIN_DIR}/checkpoint_day_0002.npz"
 if [[ ! -f "${CHAIN_DAY2}" ]]; then
@@ -159,7 +159,7 @@ echo "--- Chain leg 2: restart day-2 → day-4 ---"
     --checkpoint-days 2 \
     --output "${CHAIN_DIR}" \
     --dataset analytical \
-    --use-polar-filter \
+    --use-polar-filter --time-integrator ssp_rk3_scan \
     --restart-from "${CHAIN_DAY2}"
 
 CHAIN_DAY4="${CHAIN_DIR}/checkpoint_day_0004.npz"

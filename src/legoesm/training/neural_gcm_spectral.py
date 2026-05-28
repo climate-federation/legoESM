@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 from typing import NamedTuple
 
 import jax
@@ -159,6 +160,60 @@ class NeuralGCMSpectralConfig(NamedTuple):
     # Logging
     log_every: int = 5
     checkpoint_dir: str = "checkpoints/neural_gcm_spectral"
+
+
+# =============================================================================
+# Resume helpers: scan an output dir for the highest-numbered
+# epoch_NNNN.eqx written by ``_train_spectral_loop`` /
+# ``_train_sfno_full_loop`` (per-epoch checkpoints).  ``maybe_resume_model``
+# loads it into the supplied model template so callers can continue a
+# previously-killed training run from epoch ``last_done+1``.
+# =============================================================================
+
+def find_latest_epoch_checkpoint(ckpt_dir):
+    """Find the highest-numbered ``epoch_NNNN.eqx`` in ``ckpt_dir``.
+
+    Returns ``(epoch:int, path:Path)`` for the latest checkpoint, or
+    ``None`` if the directory is missing / empty / contains no files
+    that match the ``epoch_<int>.eqx`` pattern.
+    """
+    ckpt_dir = Path(ckpt_dir)
+    if not ckpt_dir.exists():
+        return None
+    best = None
+    for p in ckpt_dir.glob("epoch_*.eqx"):
+        try:
+            ep = int(p.stem.split("_", 1)[1])
+        except (ValueError, IndexError):
+            continue
+        if best is None or ep > best[0]:
+            best = (ep, p)
+    return best
+
+
+def maybe_resume_model(model_template, resume_from_dir):
+    """Load latest epoch checkpoint from ``resume_from_dir`` into ``model_template``.
+
+    Returns ``(model, start_epoch)``.  When no checkpoint exists or
+    ``resume_from_dir`` is ``None``, returns ``(model_template, 0)``.
+
+    The caller is responsible for constructing ``model_template`` with
+    the same pytree structure as the saved model.
+    """
+    if resume_from_dir is None:
+        return model_template, 0
+    latest = find_latest_epoch_checkpoint(resume_from_dir)
+    if latest is None:
+        return model_template, 0
+    epoch_done, ckpt_path = latest
+    from legoesm.ml.training import load_checkpoint
+    model = load_checkpoint(model_template, ckpt_path)
+    start_epoch = epoch_done + 1
+    logger.info(
+        f"Resume: loaded {ckpt_path} (last completed epoch={epoch_done}); "
+        f"continuing at epoch {start_epoch}"
+    )
+    return model, start_epoch
 
 
 # =============================================================================
@@ -1238,6 +1293,8 @@ def _train_spectral_loop(
     ic_states,
     target_carries,
     config: NeuralGCMSpectralConfig,
+    *,
+    start_epoch: int = 0,
 ):
     """Shared training loop for any learned-physics model coupled to the
     spectral PE dycore.
@@ -1507,7 +1564,14 @@ def _train_spectral_loop(
     early_stop_patience = int(getattr(config, "early_stop_patience", 0) or 0)
     early_stop_min_delta = float(getattr(config, "early_stop_min_delta", 1.0e-3))
 
-    for epoch in range(config.n_epochs):
+    if start_epoch >= config.n_epochs:
+        logger.info(
+            f"Resume: start_epoch={start_epoch} >= n_epochs={config.n_epochs}; "
+            f"skipping training loop (already complete)."
+        )
+        return model, loss_history
+
+    for epoch in range(start_epoch, config.n_epochs):
         epoch_loss = 0.0
         epoch_components = {"mse": 0.0, "bias": 0.0, "crps": 0.0, "spec_crps": 0.0}
         t0 = time.time()
@@ -1554,14 +1618,15 @@ def _train_spectral_loop(
                 f"grad_norm={grad_norm_val:.6e}, time={elapsed:.1f}s"
             )
 
-        if (epoch + 1) % 10 == 0 or epoch == config.n_epochs - 1:
-            from pathlib import Path
-            from legoesm.ml.training import save_checkpoint
-            ckpt_dir = Path(config.checkpoint_dir)
-            ckpt_dir.mkdir(parents=True, exist_ok=True)
-            ckpt_path = ckpt_dir / f"epoch_{epoch:04d}.eqx"
-            save_checkpoint(model, ckpt_path)
-            logger.info(f"Saved checkpoint: {ckpt_path}")
+        # Save a per-epoch checkpoint so the chained-resubmit driver
+        # (run_aimip.py --resume) can pick up from epoch+1 if SLURM
+        # walltime kills the job mid-training.
+        from legoesm.ml.training import save_checkpoint
+        ckpt_dir = Path(config.checkpoint_dir)
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        ckpt_path = ckpt_dir / f"epoch_{epoch:04d}.eqx"
+        save_checkpoint(model, ckpt_path)
+        logger.info(f"Saved checkpoint: {ckpt_path}")
 
         # AIMIP-style early stopping.  Stop when the rolling loss has
         # not improved by more than ``early_stop_min_delta`` for
@@ -1588,8 +1653,18 @@ def train_neural_gcm_spectral(
     config: NeuralGCMSpectralConfig = NeuralGCMSpectralConfig(),
     cache_dir: str = "data/era5_cache",
     seed: int = 0,
+    *,
+    resume_from_dir=None,
 ):
     """Train NeuralGCM: SFNO physics + spectral PE dycore.
+
+    Parameters
+    ----------
+    resume_from_dir : str | Path | None
+        If set, scan this directory for the highest-numbered
+        ``epoch_NNNN.eqx`` checkpoint and continue training from the
+        next epoch.  Used by ``scripts/run_aimip.py --resume`` for
+        chained-resubmission SLURM jobs.
 
     Returns (trained_sfno, loss_history).
     """
@@ -1613,6 +1688,8 @@ def train_neural_gcm_spectral(
     logger.info(f"SFNO: {spec.n_channels}ch, {config.sfno_embed_dim}d, "
                 f"{config.sfno_n_blocks} blocks, {n_p:,} params")
 
+    sfno, start_epoch = maybe_resume_model(sfno, resume_from_dir)
+
     ic_states, target_carries = load_training_data(
         config, grid, sigma, cache_dir, windows=config.windows,
     )
@@ -1620,6 +1697,7 @@ def train_neural_gcm_spectral(
     return _train_spectral_loop(
         sfno, make_sfno_spectral_physics,
         grid, sigma, ic_states, target_carries, config,
+        start_epoch=start_epoch,
     )
 
 
@@ -1628,6 +1706,8 @@ def train_sfno_full_spectral(
     cache_dir: str = "data/era5_cache",
     seed: int = 0,
     dt_sfno: float = 21600.0,
+    *,
+    resume_from_dir=None,
 ):
     """Train SFNO as a full atmospheric emulator (no dycore).
 
@@ -1684,6 +1764,8 @@ def train_sfno_full_spectral(
         use_normalization=False,
     )
 
+    sfno, start_epoch = maybe_resume_model(sfno, resume_from_dir)
+
     ic_states, target_carries = load_training_data(
         config, grid, sigma, cache_dir, windows=config.windows,
     )
@@ -1691,6 +1773,7 @@ def train_sfno_full_spectral(
     return _train_sfno_full_loop(
         sfno, pe_emulator_cfg, grid, sigma,
         ic_states, target_carries, config, dt_sfno,
+        start_epoch=start_epoch,
     )
 
 
@@ -1703,6 +1786,8 @@ def _train_sfno_full_loop(
     target_carries,
     config: NeuralGCMSpectralConfig,
     dt_sfno: float,
+    *,
+    start_epoch: int = 0,
 ):
     """Training loop for SFNO full-atmosphere emulator (no dycore).
 
@@ -1848,7 +1933,14 @@ def _train_sfno_full_loop(
     early_stop_patience = int(getattr(config, "early_stop_patience", 0) or 0)
     early_stop_min_delta = float(getattr(config, "early_stop_min_delta", 1.0e-3))
 
-    for epoch in range(config.n_epochs):
+    if start_epoch >= config.n_epochs:
+        logger.info(
+            f"Resume: start_epoch={start_epoch} >= n_epochs={config.n_epochs}; "
+            f"skipping training loop (already complete)."
+        )
+        return sfno, loss_history
+
+    for epoch in range(start_epoch, config.n_epochs):
         epoch_loss = 0.0
         epoch_components = {"mse": 0.0, "bias": 0.0, "crps": 0.0, "spec_crps": 0.0}
         t0 = time.time()
@@ -1892,14 +1984,15 @@ def _train_sfno_full_loop(
                 f"grad_norm={grad_norm_val:.6e}, time={elapsed:.1f}s"
             )
 
-        if (epoch + 1) % 10 == 0 or epoch == config.n_epochs - 1:
-            from pathlib import Path
-            from legoesm.ml.training import save_checkpoint
-            ckpt_dir = Path(config.checkpoint_dir)
-            ckpt_dir.mkdir(parents=True, exist_ok=True)
-            ckpt_path = ckpt_dir / f"epoch_{epoch:04d}.eqx"
-            save_checkpoint(sfno, ckpt_path)
-            logger.info(f"Saved checkpoint: {ckpt_path}")
+        # Per-epoch checkpoint: same cadence as ``_train_spectral_loop``
+        # so the run_aimip.py --resume driver can pick up after a
+        # walltime kill.
+        from legoesm.ml.training import save_checkpoint
+        ckpt_dir = Path(config.checkpoint_dir)
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        ckpt_path = ckpt_dir / f"epoch_{epoch:04d}.eqx"
+        save_checkpoint(sfno, ckpt_path)
+        logger.info(f"Saved checkpoint: {ckpt_path}")
 
         if early_stop_patience > 0:
             if best_loss - avg_loss > early_stop_min_delta:
@@ -1926,6 +2019,8 @@ def train_column_mlp_spectral(
     hidden_dim: int = 256,
     n_layers: int = 4,
     residual_scale: float = 0.01,
+    *,
+    resume_from_dir=None,
 ):
     """Train column MLP physics (Rasp 2018) + spectral PE dycore.
 
@@ -1945,6 +2040,8 @@ def train_column_mlp_spectral(
     logger.info(f"Column MLP: {config.n_levels} levels, {hidden_dim}d, "
                 f"{n_layers} layers, {n_p:,} params")
 
+    nn_phys, start_epoch = maybe_resume_model(nn_phys, resume_from_dir)
+
     ic_states, target_carries = load_training_data(
         config, grid, sigma, cache_dir, windows=config.windows,
     )
@@ -1952,6 +2049,7 @@ def train_column_mlp_spectral(
     return _train_spectral_loop(
         nn_phys, make_column_mlp_spectral_physics,
         grid, sigma, ic_states, target_carries, config,
+        start_epoch=start_epoch,
     )
 
 

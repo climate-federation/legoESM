@@ -3,15 +3,17 @@
 #SBATCH --output=results/amip_1deg_latlon_mpi/slurm_%j.out
 #SBATCH --error=results/amip_1deg_latlon_mpi/slurm_%j.err
 #SBATCH --account=glab
-#SBATCH --partition=long
+#SBATCH --partition=burst
 #SBATCH --nodes=1
-#SBATCH --ntasks=24
+#SBATCH --ntasks=32
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=120G
+#SBATCH --mem=150G
 #SBATCH --time=72:00:00
 #
 # Production AMIP run on a 1° lat-lon FV grid under latitude-band MPI
-# on 24 ranks.
+# on 32 ranks (full 32-core Ginsburg node; n_lat=180 → ~5.6 rows/rank,
+# halo overhead ≈ 35%; sweet spot before band partition becomes
+# halo-dominated).
 #
 # Resolution: ``--resolution 180`` → 180 lat × 360 lon (= 1° at the
 # equator).  For a 2° smoke-test run use ``--resolution 90``.
@@ -105,7 +107,7 @@ fi
 echo "========================================"
 echo "  AMIP 1° lat-lon MPI run"
 echo "  Job ID:        ${SLURM_JOB_ID:-<no-slurm>}"
-echo "  Nodes / tasks: ${SLURM_NNODES:-1} / ${SLURM_NTASKS:-24}"
+echo "  Nodes / tasks: ${SLURM_NNODES:-1} / ${SLURM_NTASKS:-32}"
 echo "  Resolution:    ${RES} (n_lat=${RES}, n_lon=$((2*RES)))"
 echo "  Start year:    ${START_YEAR}"
 echo "  Target days:   ${TARGET_DAYS} (100 yr ≈ 36500)"
@@ -155,7 +157,7 @@ CMD=(
 # the run can use ``--dt 300`` set by the equatorial CFL.  Without
 # this flag, 100-y at 1° lat-lon FV needs ~600 B time steps and is
 # infeasible in the 72-h × N restart-chain SLURM budget.
-EXTRA_ARGS=(--use-polar-filter)
+EXTRA_ARGS=(--use-polar-filter --time-integrator ssp_rk3_scan)
 if [[ -n "${LATEST_CKPT}" ]]; then
     EXTRA_ARGS+=(--restart-from "${LATEST_CKPT}")
 fi
@@ -175,9 +177,9 @@ CMD+=(--extra "${EXTRA_ARGS[@]}")
 # wall-time / restart accounting) is in place and reusable.
 # --------------------------------------------------------------------
 if [[ -n "${SLURM_JOB_ID:-}" ]] && command -v srun >/dev/null; then
-    MPI_LAUNCH=(srun --mpi=pmix --cpus-per-task=1 -n "${SLURM_NTASKS:-24}")
+    MPI_LAUNCH=(srun --mpi=pmix --cpus-per-task=1 -n "${SLURM_NTASKS:-32}")
 else
-    MPI_LAUNCH=(mpirun -n "${SLURM_NTASKS:-24}")
+    MPI_LAUNCH=(mpirun -n "${SLURM_NTASKS:-32}")
 fi
 
 echo "[$(date -u)] Launching: ${MPI_LAUNCH[*]} ${CMD[*]}"
