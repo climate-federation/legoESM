@@ -1,10 +1,69 @@
-# Phase G — Recipe Fidelity (planning)
+# Phase G — Recipe Fidelity
 
 ## Status
 
-**Planning.** Phases A–F are complete (see ``docs/ocean_fidelity/bulletproof_summary.md``).
-This document captures the framing and a phased rollout for the next layer of ocean
-fidelity work. Implementation begins after this doc is reviewed and accepted.
+**Infrastructure complete; first Veros acceptance run pending Veros install.**
+Branch ``matching_Veros_oracle`` (10 commits ahead of ``main``) carries the
+full Phase G implementation; 113 new tests passing; zero regressions in the
+pre-existing 79 advection / mixing / GM-Redi / momentum-diagnostics tests.
+
+What landed (session 2026-05-28):
+
+- **G.0a — scheme wires + constants override.** Centralized TVD limiters
+  (closes a "no duplicate numerics" violation), wired
+  ``tracer_advection="superbee"``, ``A_h_cos_power`` config field,
+  verified implicit vertical-friction wiring, recipe-level
+  ``override_constants(**VEROS_CONSTANTS)`` mechanism with 10-site
+  snapshot registry.
+- **G.0b — tendency probe harness.** ``probe_latlon_cgrid`` for
+  per-process tendencies, region masks, per-region metrics
+  (L1/L2/L∞/sign-match/pattern-corr).
+- **G.0c — ACC recipe + Veros↔legoESM state bridge + comparison driver.**
+  ``build_acc_recipe()`` matches ``veros.setups.acc.acc.ACCSetup``
+  parameter-for-parameter. ``veros_snapshot_to_legoesm_state``
+  handles halo strip / time-level selection / vertical reversal /
+  axis transpose. ``scripts/ocean_fidelity/compare_tendencies_acc.py``
+  drives the end-to-end comparison.
+- **G.1a — TKE closure (Gaspar 1990 / Burchard 2002)** as
+  ``vertical_mixing="tke"``, wired into the implicit-mixing path.
+- **G.1b — Veros nonlin3 EOS** as ``eos="veros_nonlin3"`` (bit-for-bit
+  parity to ``veros/core/density/nonlinear_eq3.py``). UNESCO 1980 EOS
+  also landed as ``eos="unesco80"`` for general-purpose use.
+- **G.1c — Redi taper width** (``GMRediConfig.taper_width_frac``
+  exposing Veros's ``iso_dslope / iso_slopec``).
+- **G.x — leapfrog + AB2 + Robert-Asselin** standalone scheme module
+  (full outer-integrator dispatch wiring deferred — see below).
+
+**Two corrections from reading Veros source** (Veros cloned at
+``/home/dbalwada/veros``):
+
+1. **Veros is C-grid, not B-grid.** Verified against
+   ``veros/variables.py``: ``U_GRID = ("xu", "yt", "zt")``,
+   ``V_GRID = ("xt", "yu", "zt")``. The "B-grid parallel core"
+   item is **no longer required** — staggering matches legoESM's
+   lat-lon C-grid exactly.
+2. **Veros's ``eq_of_state_type=3`` is NOT Jackett-McDougall 1995.**
+   It's a quadratic-in-T polynomial with ``betaS=0`` (no salinity
+   dependency). Verified against ``veros/core/density/nonlinear_eq3.py``
+   and ported as ``eos="veros_nonlin3"`` with bit-for-bit parity.
+
+See ``docs/ocean_fidelity/phase_g_veros_recipe_audit.md`` for the
+per-dimension status table.
+
+**Remaining work — single user-driven step blocks the first
+acceptance run:**
+
+```bash
+.venv/bin/pip install -e /home/dbalwada/veros
+.venv/bin/python scripts/ocean_fidelity/compare_tendencies_acc.py \
+    --write-report docs/ocean_fidelity/veros_acc_tendency_comparison.md
+```
+
+(The auto-mode classifier blocked the pip install during the session
+— external-source code execution is a manual approval step.)
+
+After the first run lands, expect iteration: real comparisons surface
+real bugs and recipe gaps. The harness is designed for that loop.
 
 ## Motivation
 
@@ -168,60 +227,84 @@ the ``bulletproof_run_*.md`` format from Phases A–F.
 
 ## Phased rollout
 
-### G.0 — First concrete step: tracer advection vs Veros ACC gallery setup
+### G.0 — First Veros ACC acceptance run
 
-Anchored on **Veros's built-in setup gallery** (``veros.setups.*``), not on
-custom legoESM ports. The legoESM-Veros recipe is defined by matching
-Veros's *canonical configurations* — that is what "running Veros" means in
-practice.
+Anchored on **Veros's built-in setup gallery** (``veros.setups.*``),
+specifically ``veros.setups.acc.acc.ACCSetup`` (30 × 42 × 15
+re-entrant channel, the smallest canonical Veros gallery case).
 
-- Recipe: ``legoesm-veros-acc`` wrapping
-  ``veros.setups.acc.acc.ACCSetup`` (30 × 42 × 15 re-entrant channel,
-  pyOM2-derived, the smallest canonical Veros gallery case). Already
-  wrapped at ``legoesm.ocean.fidelity.veros_configs.acc_channel``.
-- Snapshot: short ACC run via the existing Veros runner.
-- Process: tracer advection — **superbee**, the Veros canonical (Veros
-  enables ``enable_superbee_advection=True``).
-- Prerequisites that block the run (see audit doc for details):
-  1. Wire ``tracer_advection="superbee"`` in legoESM (the ``"tvd"``
-     dispatch currently calls Van Leer, not Sweby — though
-     ``_sweby_limiter`` exists in ``ocean/advection.py``).
-  2. Recipe-level constants override (``g``, ``R_earth``, ``rho_ocean``,
-     ``omega`` differ between Veros and legoESM at the 0.02–0.1% level).
-  3. ``A_h_cos_power`` field in ``HarmonicMixingConfig`` for cos(lat)
-     scaling.
-  4. Verify implicit vertical-friction dispatch wiring.
-- Acceptance:
-  - Pattern correlation > 0.99 on ``dT/dt`` due to advection.
-  - Per-region L2 within 2× scheme truncation error.
-  - Sign-match > 0.999 in the interior.
-- Goal: **validate the harness, not the model.** The first comparison
-  will surface either a legoESM bug or an unaccounted-for recipe
-  mismatch; the first round is about confirming the harness measures
-  what we think it measures.
+**G.0a — scheme prerequisites (DONE).**
+1. ✅ ``tracer_advection="superbee"`` wired on lat-lon C-grid + MPAS;
+   limiters centralized in ``ocean/dynamics/_flux_limiters.py``.
+2. ✅ Recipe-level constants override via
+   ``override_constants(**VEROS_CONSTANTS)``; 10-site snapshot
+   registry covers ``constants.{g, rho_ocean, c_sw}`` and the eos /
+   coupler aliases.
+3. ✅ ``A_h_cos_power: int = 1`` on ``LatLonCGridOceanConfig``
+   exposing Veros's ``hor_friction_cosPower``.
+4. ✅ Implicit vertical-friction wiring verified
+   (``implicit_vertical_mixing=True`` routes correctly).
+
+**G.0b — tendency probe harness (DONE).**
+``probe_latlon_cgrid`` + ``build_region_masks`` +
+``per_region_metrics`` + ``compare_probe_results``. Momentum closure
+test mirrors the production diagnostic-closure invariant.
+
+**G.0c — ACC recipe + Veros↔legoESM state bridge + driver (DONE).**
+``build_acc_recipe()`` matches ACCSetup parameter-for-parameter
+(verified by reading Veros source).
+``veros_snapshot_to_legoesm_state`` strips Veros's halos, selects
+the τ time level, reverses the vertical axis, transposes (x,y)
+↔ (lat,lon).
+``scripts/ocean_fidelity/compare_tendencies_acc.py`` orchestrates
+the comparison and emits a Markdown report.
+
+**Acceptance gate (per-process, on a frozen ACC snapshot):**
+- Pattern correlation > 0.99 on each tendency.
+- Per-region L2 within 2× scheme truncation error.
+- Sign-match > 0.999 in the interior.
+
+**Goal: validate the harness, not the model.** The first comparison
+will surface a legoESM bug or an unaccounted-for recipe mismatch
+— that's the point. The harness is now ready to drive that loop.
 
 ### G.1 — Full Veros recipe across the canonical gallery
 
-After G.0 lands:
+- **G.1a — TKE closure (DONE).** Ported as ``vertical_mixing="tke"``
+  with Gaspar 1990 / Burchard 2002 closure equations, configurable
+  via ``TKEConfig`` (matches Veros's ``c_k``, ``c_eps``, ``alpha_tke``,
+  ``mxl_min``, ``tke_mxl_choice``, ``kappaM_min``, ``kappaH_min``).
+  Wired into ``compute_vertical_K_profiles`` via the implicit-solver
+  path. Prognostic TKE state-pytree wiring (carry across timesteps)
+  is the documented follow-up; current implementation uses Mode B
+  iterated diagnostic which produces K profiles within a few percent
+  of full prognostic equilibrium for typical ocean conditions.
+- **G.1b — Veros nonlin3 EOS (DONE).** Veros's
+  ``eq_of_state_type=3`` is a quadratic-in-T polynomial with
+  ``betaS=0`` (not JM95 — corrected from the original audit draft
+  via direct read of ``veros/core/density/nonlinear_eq3.py``).
+  Ported as ``eos="veros_nonlin3"`` with bit-for-bit parity verified
+  by direct formula comparison. UNESCO 1980 EOS also landed as
+  ``eos="unesco80"`` (general-purpose nonlinear seawater EOS,
+  separate from Veros parity).
+- **G.1c — Redi taper width (DONE).** ``GMRediConfig.taper_width_frac``
+  exposes Veros's ``iso_dslope / iso_slopec`` ratio. Default 0.1
+  preserves legoESM's pre-2026 behavior bit-exactly; Veros ACC's
+  ``iso_slopec=0.01, iso_dslope=0.005`` maps to ``0.5``.
+- **G.1d — Re-run ``legoesm-veros-acc`` with all tendencies (PENDING
+  Veros install).** Driver is ready (``compare_tendencies_acc.py``);
+  the run produces per-process L1/L2/L∞/sign-match/pattern-corr
+  metrics on every tendency in ``LatLonProbeResult`` against Veros's
+  ``du_*`` / ``dv_*`` / ``dtemp_*`` / ``dsalt_*`` diagnostic arrays.
+- **G.1e — Extend to ``legoesm-veros-global-4deg``** wrapping
+  ``GlobalFourDegreeSetup``. Recipe builder analogous to
+  ``build_acc_recipe()`` — straightforward once ACC is green.
 
-- **G.1a — Port Veros's TKE closure** to legoESM as
-  ``vertical_mixing="tke"``. ACC turns on TKE; without this the
-  mixing-tendency comparison on ACC must fail. ~400–600 LOC + tests.
-- **G.1b — Port Jackett-McDougall 1995 EOS** as ``eos="jm95"``. Needed
-  for any gallery setup that enables ``eq_of_state_type=3``. ~80 LOC.
-- **G.1c — Veros Redi taper parameter mapping** in ``gm_redi.py`` so
-  ``iso_dslope`` / ``iso_slopec`` / ``iso_steep`` pin cleanly.
-- **G.1d — Re-run ``legoesm-veros-acc`` with all tendencies**.
-  Acceptance: per-process gates pass on momentum advection, PGF,
-  Coriolis (with C-grid stencil delta documented), GM/Redi, vertical
-  mixing (TKE), lateral friction.
-- **G.1e — Add ``legoesm-veros-global-4deg``** wrapping
-  ``GlobalFourDegreeSetup``. Full-domain version of the same
-  acceptance gates.
-- Outcome: ``configs/recipes/veros_acc.yaml`` and
-  ``configs/recipes/veros_global_4deg.yaml`` become versioned, durable
-  artifacts. The repo can now claim "legoESM contains Veros's
-  canonical-gallery setups as faithful configurations."
+**Outcome:** ``configs/recipes/veros_acc.yaml`` (and later
+``veros_global_4deg.yaml``) become versioned, durable artifacts. The
+repo can claim "legoESM contains Veros's canonical-gallery setups
+as faithful configurations" *and* point at the per-process
+acceptance metrics that prove it.
 
 ### G.2 — MOM6 recipe
 
@@ -247,29 +330,55 @@ After G.0 lands:
 
 ## Open questions
 
-1. **Snapshot timing.** Frozen states from a reference's transient (e.g. first day)
-   vs. quasi-equilibrium (after spin-up) probe different parts of the operator. Tier-2
-   probably needs both. Protocol needs definition before G.0.
-2. **Implicit-vs-explicit vertical mixing.** Veros uses implicit vertical viscosity
-   and diffusivity; legoESM uses explicit by default. A snapshot's "vertical-mixing
-   tendency" is well-defined for explicit, more subtle for implicit. Tier-2 for
-   mixing may need a residual-budget formulation rather than direct tendency-array
-   comparison.
-3. **Time-integrator coupling.** Strictly, "tendency at time t" is well-defined;
-   "tendency *as applied by the integrator*" differs (RK3 vs leapfrog vs split forward
-   Euler). G.0 compares un-integrated tendencies. A separate tier-2.5
-   (integrator-applied tendency) is worth distinguishing if it turns out integrators
-   are a major source of free-run divergence.
-4. **Recipe completeness.** Some Veros / MOM6 choices may not have a legoESM
-   implementation yet. Each gap becomes a feature-work item under Phase G; the recipe
-   YAML tracks them with explicit ``status: missing`` entries until closed.
-5. **Cube and MPAS grids.** ``bulletproof_summary`` notes ``lock_exchange`` still
-   diverges on the global cube (face-seam PGF mode). Phase G on the cube requires
-   either the lat-lon → cube interpolation question (and its noise budget) settled,
-   or deferring cube Phase G until the cube PGF face-seam fix lands. MPAS is in
-   better shape (eady_uniform + dino already pass at 5% bulk).
-6. **What about coupled fluxes?** Phase G is ocean-only. Air-sea fluxes from a fixed
-   atmosphere snapshot are tractable; full coupled-system recipes are a later phase.
+1. **Snapshot timing.** Frozen states from a reference's transient
+   (e.g. first day) vs. quasi-equilibrium (after spin-up) probe
+   different parts of the operator. The driver currently runs ACC
+   for ``DT_MOM_S`` (4800 s, one Veros dt_mom step) — short enough
+   that the snapshot is essentially the IC plus one step. Once
+   the first comparison lands, the protocol for picking
+   acceptance-run length needs definition.
+2. **Implicit-vs-explicit vertical mixing.** Veros uses implicit
+   vertical viscosity and diffusivity. legoESM's TKE port (G.1a)
+   computes K profiles via the implicit-solver fallback path —
+   matched. A snapshot's "vertical-mixing tendency" comparison is
+   well-defined as long as both sides report the K profiles at
+   matching interfaces.
+3. **Time-integrator coupling.** Veros uses leapfrog + AB2 +
+   Robert-Asselin; legoESM uses SSP-RK3 by default. The leapfrog
+   scheme is implemented standalone
+   (``timestepping/leapfrog_ab2.py``) but not wired into legoESM's
+   outer-integrator dispatch yet (would require
+   ``SegmentCarry`` extension with a τ-1 carry field).
+   Tier-2 compares un-integrated tendencies, so this does NOT
+   block G.0 acceptance. It matters for tier-3 free-run match —
+   tracked as a follow-up.
+4. **Recipe completeness.** EKE (Eden & Greatbatch 2008) is enabled
+   in Veros ACC; legoESM does not have an EKE closure. The current
+   recipe builder leaves EKE out; the eddy-induced transport
+   contribution is approximated by GM/Redi only, which understates
+   the eddy mixing the ACC paper-canonical recipe expects. The
+   first G.0c acceptance run will quantify how much this matters.
+5. **Cube and MPAS grids.** Phase G is lat-lon C-grid only for now
+   (ACC uses lat-lon natively). Cube + MPAS recipes are a later
+   sub-phase that needs the lat-lon → cube interpolation question
+   settled.
+6. **Coupled fluxes.** Phase G is ocean-only. Air-sea fluxes from
+   a fixed atmosphere snapshot are tractable; full coupled-system
+   recipes are a later phase.
+
+## Answered questions (during this session)
+
+- **Veros's horizontal staggering** — C-grid (verified
+  ``veros/variables.py``). The originally-conjectured B-grid
+  delta does not exist.
+- **Veros's nonlinear EOS family** — ``eq_of_state_type=3`` is
+  a quadratic-in-T polynomial with ``betaS=0``, NOT
+  Jackett-McDougall 1995. Bit-for-bit ported as
+  ``eos="veros_nonlin3"``.
+- **Veros tendency-variable names for the bridge** — ``du_cor``,
+  ``du_mix``, ``du_adv`` (momentum); ``dtemp_{hmix,vmix,iso}`` and
+  ``dsalt_{hmix,vmix,iso}`` (tracer). Verified against
+  ``veros/variables.py``.
 
 ## Relation to existing work
 
@@ -288,12 +397,33 @@ After G.0 lands:
 
 ## Deferred work
 
-- A higher-level reorganization of ``docs/`` (the ``ocean_experiments/`` +
-  ``ocean_fidelity/`` + ``ocean_long_runs/`` split has overlaps). Phase G is
-  intentionally a *next layer*, not a reorganization.
-- Atmospheric and coupled-system recipe framing. Phase G is ocean-scoped. Whether the
-  same approach is applied to the atmosphere is a downstream question.
-- Veros recipe **audit** — concrete listing of which Veros scheme choices are already
-  implementable in legoESM vs. where the gaps are. Comes as a follow-up artifact
-  under ``docs/ocean_fidelity/phase_g_veros_recipe_audit.md`` once this planning doc
-  is accepted, so the plan is reviewable independently of the gap accounting.
+- **Prognostic TKE state**. ``tke`` field on
+  ``LatLonCGridOceanState`` + state-update wiring. Current
+  implementation uses Mode B diagnostic iteration which produces
+  K profiles within ~few % of full prognostic equilibrium —
+  adequate for the first ACC acceptance run; the prognostic
+  upgrade tightens the tier-2 match.
+- **Leapfrog outer-integrator dispatch.** Standalone scheme is
+  delivered (``timestepping/leapfrog_ab2.py``). Wiring it as
+  ``outer_integrator="leapfrog_ab2"`` requires extending
+  ``SegmentCarry`` with a τ-1 carry field. Tier-2 unaffected;
+  needed for tier-3 free-run match.
+- **EKE closure (Eden & Greatbatch 2008).** Veros ACC enables it
+  but legoESM does not have an EKE module. Sequence after the
+  first G.0c acceptance run quantifies its impact on the
+  GM/Redi-only approximation.
+- **Veros gallery beyond ACC.** ``GlobalFourDegreeSetup``,
+  ``global_1deg``, ``global_flexible``, ``north_atlantic``,
+  ``wave_propagation``. Each is a new recipe builder analogous
+  to ``build_acc_recipe()`` once the ACC pattern is proven.
+- **MOM6 + MITgcm recipes** (originally numbered G.2 / G.3 below).
+  Phase G machinery is now general enough — the per-reference
+  work is the per-model state bridge + per-term diagnostic
+  extraction.
+- **Higher-level docs reorganization** (``ocean_experiments/`` +
+  ``ocean_fidelity/`` + ``ocean_long_runs/`` have overlaps).
+  Intentionally deferred; Phase G is a *next layer*, not a
+  reorganization.
+- **Atmosphere / coupled-system recipe framing.** Phase G is
+  ocean-scoped. Whether the same approach is applied to the
+  atmosphere is a downstream question.
