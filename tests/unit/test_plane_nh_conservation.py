@@ -109,3 +109,38 @@ def test_dry_mass_anchored_to_initial_under_fixer():
     mass_1 = compute_dry_mass_plane(state, grid, height_coord, terrain)
     rel_drift = float(jnp.abs(mass_1 - mass_0) / jnp.abs(mass_0))
     assert rel_drift < 1.0e-11, f"rel_drift={rel_drift}"
+
+
+def test_precompute_target_mass_enables_lax_scan_with_fix_mass():
+    """``precompute_target_mass(state)`` pre-populates ``_target_mass``
+    with a concrete (non-traced) array, so ``model.step`` inside
+    ``jax.lax.scan`` does not trigger a tracer leak.
+
+    Without precompute, the first call inside scan captures a traced
+    target_mass → UnexpectedTracerError. This test pins the API contract
+    for the iter-37 fix.
+    """
+    import jax
+    model, state, grid, height_coord, terrain = _setup(
+        fix_mass=True, anchor_mass_to_initial=True,
+    )
+    state = _seed_random_perturbation(state, amplitude=1.0e-3)
+    mass_0 = compute_dry_mass_plane(state, grid, height_coord, terrain)
+
+    # Pre-populate target_mass with concrete (non-traced) value
+    model.precompute_target_mass(state)
+    assert model._target_mass is not None
+    assert not isinstance(model._target_mass, jax.core.Tracer)
+
+    @jax.jit
+    def run(s):
+        def body(c, _):
+            return model.step(c, 0.5), None
+        return jax.lax.scan(body, s, None, length=20)[0]
+
+    out = run(state)
+    jax.block_until_ready(jax.tree.leaves(out))
+    mass_1 = compute_dry_mass_plane(out, grid, height_coord, terrain)
+    rel_drift = float(jnp.abs(mass_1 - mass_0) / jnp.abs(mass_0))
+    # fix_mass under scan should preserve mass to machine precision
+    assert rel_drift < 1.0e-11, f"rel_drift={rel_drift}"
