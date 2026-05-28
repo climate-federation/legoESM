@@ -497,8 +497,51 @@ class MomentumTendencyDiagnostics(NamedTuple):
 class LatLonCGridOceanConfig(NamedTuple):
     """Configuration for the lat-lon C-grid FV ocean model.
 
-    Same parameter set as LatLonOceanConfig; kept separate for clarity
-    since operator semantics differ (compact stencils vs centered).
+    ~45 fields. This docstring is the *map* the flat field list lacks; the
+    fields group as:
+
+    - **Physical constants**: ``g``, ``rho_0``, ``constants`` (ConstantsConfig).
+    - **Lateral (harmonic) viscosity**: ``A_h`` + ``A_h_lat_scaling``,
+      ``A_h_cos_power``, ``A_h_floor``, ``A_h_eq_boost``/``A_h_eq_sigma_deg``,
+      ``A_h_merid``, ``A_h_cap_*``.
+    - **Biharmonic viscosity**: ``B_h`` + ``B_h_lat_scaling``, ``B_h_barotropic``.
+    - **Eddy-viscosity closures**: ``C_smag``, ``C_smag_lap``, ``C_leith``,
+      ``C_leith_modified``, ``slope_foot_*``.
+    - **Tracer diffusivity / vertical mixing**: ``K_h``, ``K_bih``, ``A_v``,
+      ``K_v``, ``implicit_vertical_mixing``.
+    - **Bottom drag**: ``bottom_drag_r`` + ``bottom_drag_bbl_thickness``,
+      ``bottom_drag_bg_velocity`` (physics-level BottomDragConfig is deprecated).
+    - **Barotropic solver**: ``barotropic_solver``, ``n_barotropic_substeps``,
+      ``bebt``, ``barotropic_div_damp``, ``barotropic_diffusion_*``,
+      ``maxvel_barotropic``, ``barotropic_time_filter``, ``barotropic_implicit_*``,
+      ``differentiable_barotropic``.
+    - **Numerics choices**: ``tracer_advection``, ``momentum_advection``,
+      ``ke_gradient_scheme``, ``weno_d_term``, ``pgf_scheme``,
+      ``tracer_time_integrator``/``ab2_epsilon``, ``hyperdiff_coeff``.
+    - **EOS / eddy param / physics**: ``eos`` (+ ``eos_linear``), ``gm_redi``,
+      ``physics`` (full OceanPhysicsConfig pipeline).
+    - **Conservation & freshwater**: ``use_conservation_fixer``,
+      ``fix_volume``/``fix_heat``/``fix_salt``, ``fix_eta_drift``,
+      ``freshwater_closure``, ``S_ref``.
+    - **Runtime invariant checks**: ``enable_runtime_checks`` + bounds
+      (``min_water_column_m``, ``max_abs_eta_m``, ``temperature_min/max_c``,
+      ``salinity_min/max_psu``).
+
+    Minimal run (everything else defaults to sane Earth values)::
+
+        cfg = LatLonCGridOceanConfig()       # constant A_v/K_v, no physics pipeline
+
+    Production-style::
+
+        cfg = LatLonCGridOceanConfig(
+            A_h=3e4, A_h_lat_scaling=True, B_h=1e10, C_smag=0.15,
+            bottom_drag_r=2.5e-3, implicit_vertical_mixing=True,
+            barotropic_solver="implicit", eos="wright",
+            physics=OceanPhysicsConfig(...),  # KPP/TKE + GM/Redi
+        )
+
+    Same parameter set as LatLonOceanConfig; kept separate since operator
+    semantics differ (compact stencils vs centered).
     """
 
     g: float = constants.g
