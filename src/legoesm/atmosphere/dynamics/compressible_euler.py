@@ -363,7 +363,8 @@ def _acoustic_column_kernel(
     vert_div = vert_div / J[..., None]
 
     rho_p_new = rho_p_c - dt_s * vert_div
-    rho_p_new = (1.0 + beta) * rho_p_new - beta * rho_p_c
+    if beta != 0.0:
+        rho_p_new = (1.0 + beta) * rho_p_new - beta * rho_p_c
 
     # --- Backward: update theta' using vertical w advection ---
     w_full = 0.5 * (w_new[..., :-1] + w_new[..., 1:])
@@ -671,7 +672,8 @@ def _semi_implicit_acoustic_column_kernel(
     vert_div = (rho_w[..., :-1] - rho_w[..., 1:]) / dz
     vert_div = vert_div / J[..., None]
     rho_p_new = rho_p_c - dt_s * vert_div
-    rho_p_new = (1.0 + beta) * rho_p_new - beta * rho_p_c
+    if beta != 0.0:
+        rho_p_new = (1.0 + beta) * rho_p_new - beta * rho_p_c
 
     # --- Backward: update theta' using w-advection of theta_total ---
     w_full = 0.5 * (w_new[..., :-1] + w_new[..., 1:])
@@ -825,8 +827,11 @@ def acoustic_substeps_semi_implicit(
         vert_div = vert_div / J[..., None]
         rho_p_new = rho_p_c - dt_s * vert_div
 
-        # Off-centering: damp acoustic mode (Skamarock & Klemp 2008)
-        rho_p_new = (1.0 + beta) * rho_p_new - beta * rho_p_c
+        # Off-centering: damp acoustic mode (Skamarock & Klemp 2008).
+        # Python-guard when beta=0 (default config) — skips a kernel
+        # in the substep tail that XLA may not fully fold.
+        if beta != 0.0:
+            rho_p_new = (1.0 + beta) * rho_p_new - beta * rho_p_c
 
         # --- Backward: update theta' using vertical w advection ---
         # ``dtheta_dz`` is zero at top/bottom (one-sided would require
