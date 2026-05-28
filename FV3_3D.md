@@ -2378,6 +2378,77 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1070 (2026-05-28): delete orphan diag-script tests + FV3_3D.md compaction maintenance
+
+### Goal
+
+Broader FV3 single-device test sweep surfaced 6 more pre-existing
+failures from the iter-905-style script-removal cleanup pattern.
+Commit 95c34da4 ("remove iter files") deleted all ``scripts/
+diag_iter*.py`` files but left the smoke tests that reference
+them.  Affected:
+
+- ``tests/test_iter901_diag_smoke.py`` (3 tests) →
+  ``scripts/diag_iter901_broad_eval_fortran_faithful_left.py``
+- ``tests/unit/test_cdgrid_fv3_regression.py::
+  TestW2BoundaryErrorBudget::test_iter768_two_point_measurement_pins``
+  → ``scripts/diag_iter768_mode_a_at_t0.py``
+- ``tests/unit/test_cdgrid_fv3_regression.py::
+  TestW2BoundaryErrorBudget::test_iter775_script_is_runnable_subprocess``
+  → ``scripts/diag_iter775_w5_cross_test.py``
+- ``tests/unit/test_cdgrid_fv3_regression.py::
+  TestW2BoundaryErrorBudget::test_iter775_w5_cross_test_artifact``
+  → same ``iter775_w5_cross.txt`` artifact
+
+Each test is a smoke / subprocess / artifact check tied to a
+specific diag script (or its committed output).  With both the
+script and the artifact gone, the test cannot run.
+
+### Fix
+
+Per ``CLAUDE.md`` hygiene "Test-only modules MUST be acknowledged.
+Not wired into factory/__init__.py/prod driver: (a) wire same
+PR, (b) move to _future/ + docstring + xfail/skip, or (c)
+delete." — option (c) applies because the diag scripts were
+deliberately removed as drift cleanup.
+
+- Deleted ``tests/test_iter901_diag_smoke.py`` (entire file).
+- Removed 3 orphan methods from
+  ``tests/unit/test_cdgrid_fv3_regression.py`` (417 lines).
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv/bin/python -m pytest \
+        tests/unit/test_cdgrid_fv3_regression.py::TestW2BoundaryErrorBudget --collect-only
+    => 12 tests (was 15 — 3 orphan methods removed)
+
+    .venv/bin/python -c "import ast; ast.parse(...)"
+    => parses
+
+### Pattern observed across iter-1058..1070
+
+Two cleanup commits introduced silent test failures by removing
+helpers / scripts without auditing downstream:
+
+- **iter-aa707bda** ("Cleaned up codebase", 2026-03-31): removed
+  legacy ``partition_state``/``gather_state`` API.  iter-1058..1063
+  surfaced 9 failures across 4 distributed test files.
+- **iter-95c34da4** ("remove iter files", 2026-05-06) +
+  **iter-c1c0e42b** ("clean up Earth-system diagnostic drift",
+  2026-05-13): removed diag scripts + 12894 lines of cubed_sphere.py
+  helpers.  iter-1067..1070 surfaced 18 failures (factory
+  docstrings + multistep dt-stability + 2 missing helper defs +
+  6 orphan diag-script tests).
+
+The general lesson: a "cleanup" commit that touches >100 LOC must
+include a downstream test-suite audit in the same PR, OR the
+cleanup will silently break tests that are not in the default
+``pytest .`` invocation (the affected tests here all collected
+fine but ran with NameError / FileNotFoundError at execution
+time).
+
 ## Iteration 1069 (2026-05-28): restore missing ``coriolis_parameter_fv3`` + ``get_unit_vector_fv3``
 
 ### Goal
