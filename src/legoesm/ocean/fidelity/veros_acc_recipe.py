@@ -119,17 +119,31 @@ T_RESTORING_DAYS = 30.0
 
 
 def build_acc_grid() -> LatLonGrid:
-    """Build legoESM lat-lon C-grid matching Veros ACC.
+    """Build legoESM lat-lon C-grid whose interior centres coincide with
+    Veros ACC's xt/yt EXACTLY.
 
-    Veros ACC is x in [0, 60] (with dx=2°, nx=30) and y in [-40, +44]
-    (with dy=2°, ny=42), cyclic in x.
+    Veros's u-centred grid (verified from ``veros/core/numerics.py`` +
+    a live ``ACCSetup``): the first interior centre sits half a cell below
+    the origin, so
+        xt = [-1, 1, 3, ..., 57]   (= x_origin - dx/2 + i·dx)
+        yt = [-41, -39, ..., 41]   (= y_origin - dy/2 + j·dy)
+    ``create_regional_latlon_grid`` places interior cell ``i`` (i=1..n) at
+    ``lower + (i-0.5)·d`` and adds N/S wall rows at index 0 and -1. To make
+    the interior centres land ON Veros's xt/yt — so the analytic kbot lands
+    Veros's land cells identically AND the per-process tendency comparison
+    is at the same physical points — offset the bounds accordingly. Getting
+    this wrong (a half-cell lon offset + a one-row lat offset) was the Phase
+    G tier-2 residual: density still matched (point-wise in T,S) but the
+    western wall mis-aligned and momentum metrics (Coriolis f(lat)) were off.
     """
-    lon_east = X_ORIGIN_DEG + NX * DXT_DEG    # 60°
-    lat_north = Y_ORIGIN_DEG + NY * DYT_DEG   # +44°
+    lon_west = X_ORIGIN_DEG - DXT_DEG / 2.0        # -1  -> centres -1,1,...,57
+    lon_east = lon_west + NX * DXT_DEG             # 59
+    lat_south = Y_ORIGIN_DEG - DYT_DEG             # -42 -> interior -41,...,41
+    lat_north = lat_south + NY * DYT_DEG           # +42
     grid, _wall_mask = create_regional_latlon_grid(
         n_lat=NY, n_lon=NX,
-        lat_south=Y_ORIGIN_DEG, lat_north=lat_north,
-        lon_west=X_ORIGIN_DEG, lon_east=lon_east,
+        lat_south=lat_south, lat_north=lat_north,
+        lon_west=lon_west, lon_east=lon_east,
         periodic_x=True,
     )
     return grid
@@ -186,16 +200,14 @@ def build_acc_land_mask(grid: LatLonGrid) -> jnp.ndarray:
     wet_lon = lon_deg > 1.0                   # (n_lon,)
     wet_lat = lat_deg < -20.0                 # (n_lat,)
     wet = wet_lon[None, :] | wet_lat[:, None]  # (n_lat, n_lon)
-    # create_regional_latlon_grid pads boundary rows beyond Veros's NY=42
-    # domain (centres -41 and +45 here, OUTSIDE the ACC domain
-    # [Y_ORIGIN, Y_ORIGIN + NY*DYT] = [-40, +44]). Those padded rows must be
-    # LAND: the Veros->legoESM bridge zero-fills them (T=S=0 -> rho ~ 997),
-    # and if they are left wet they contaminate the interior density
-    # comparison (this was the ~5 kg/m^3 Phase G tier-2 residual — confirmed
-    # 840 zeroed wall cells in `interior`, predicted L2 ~ 5.8 vs observed 5.1).
-    lat_north_deg = Y_ORIGIN_DEG + NY * DYT_DEG
-    in_domain = (lat_deg >= Y_ORIGIN_DEG) & (lat_deg <= lat_north_deg)  # (n_lat,)
-    wet = wet & in_domain[:, None]
+    # build_acc_grid places the interior centres ON Veros's xt/yt, so the
+    # kbot above lands Veros's 2-wide western wall (xt=-1,1 <= 1 -> land for
+    # lat>=-20) exactly. create_regional_latlon_grid still adds non-physical
+    # N/S wall rows at index 0 and -1 (the bridge zero-fills them -> T=S=0 ->
+    # rho ~ 997); they are outside Veros's 42-row domain, so mark them LAND.
+    # Leaving any of these mis-handled was the Phase G tier-2 density residual.
+    wet[0, :] = False
+    wet[-1, :] = False
     return jnp.asarray(wet.astype(np.float64))
 
 

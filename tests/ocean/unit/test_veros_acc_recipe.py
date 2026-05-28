@@ -255,27 +255,44 @@ def test_end_to_end_recipe_probe_round_trip():
 # ---------------------------------------------------------------------------
 
 
-def test_acc_land_mask_marks_out_of_domain_padding_rows_as_land():
-    """``create_regional_latlon_grid`` pads boundary rows beyond Veros's
-    NY=42 domain (centres outside ``[Y_ORIGIN, Y_ORIGIN + NY*DYT]``). Those
-    padded rows MUST be land: the Veros->legoESM bridge zero-fills them
-    (T=S=0 -> rho ~ 997), so leaving them wet contaminates the interior
-    density comparison — the confirmed ~5 kg/m^3 Phase G tier-2 residual."""
+def test_acc_grid_centres_match_veros_xt_yt():
+    """legoESM build_acc_grid interior centres must coincide with Veros's
+    u-centred xt/yt (verified from a live ACCSetup): xt=[-1,1,...,57],
+    yt=[-41,...,41]. Getting this wrong (half-cell lon offset, one-row lat
+    offset) was the Phase G tier-2 residual — density matched point-wise but
+    the wall mis-aligned and momentum metrics f(lat) were wrong."""
+    from legoesm.ocean.fidelity.veros_acc_recipe import build_acc_grid
+
+    grid = build_acc_grid()
+    lon = np.degrees(np.asarray(grid.lon))
+    lat = np.degrees(np.asarray(grid.lat))
+    # lon (periodic, no walls) matches Veros xt. atol=1e-3 accommodates the
+    # float32 grid storage while firmly catching any real (>=1.0 half-cell)
+    # offset — the bug this guards against.
+    np.testing.assert_allclose(lon, np.arange(NX) * 2.0 - 1.0, atol=1e-3)
+    # interior lat rows (1..NY; rows 0/-1 are N/S walls) match Veros yt.
+    np.testing.assert_allclose(lat[1:-1], np.arange(NY) * 2.0 - 41.0, atol=1e-3)
+
+
+def test_acc_land_mask_matches_veros_ocean_footprint():
+    """With Veros-coincident centres, the analytic kbot must reproduce Veros's
+    ACC ocean footprint EXACTLY: the western wall is 2 lon-columns wide
+    (xt=-1,1 both <=1 -> land for lat>=-20), ocean from col 2; the channel
+    (lat<-20) is fully zonal. Over legoESM's 44 lat rows (incl 2 N/S walls)
+    the wet count per lon-col is [11, 11, 42, 42, ...]. Regression lock for the
+    Phase G grid-alignment + wall-contamination bug (no Veros dependency)."""
     from legoesm.ocean.fidelity.veros_acc_recipe import (
-        DYT_DEG, Y_ORIGIN_DEG, build_acc_grid, build_acc_land_mask,
+        build_acc_grid, build_acc_land_mask,
     )
 
     grid = build_acc_grid()
     lm = np.asarray(build_acc_land_mask(grid))
-    lat_deg = np.degrees(np.asarray(grid.lat))
-    lat_north = Y_ORIGIN_DEG + NY * DYT_DEG
-    out_of_domain = (lat_deg < Y_ORIGIN_DEG) | (lat_deg > lat_north)
-
-    assert int(out_of_domain.sum()) >= 1, "expected >=1 padded boundary row"
-    # Every out-of-domain row is fully land.
-    assert float(lm[out_of_domain].max()) == 0.0
-    # Physical rows still carry the ACC channel/basin (wet cells present).
-    assert float(lm[~out_of_domain].max()) == 1.0
+    # N/S wall rows are fully land.
+    assert float(lm[0].max()) == 0.0 and float(lm[-1].max()) == 0.0
+    # Wet count per lon-col matches Veros's ocean footprint.
+    wet_per_col = lm.sum(axis=0).astype(int)
+    expected = np.array([11, 11] + [42] * (NX - 2))
+    np.testing.assert_array_equal(wet_per_col, expected)
 
 
 def test_bridged_acc_state_has_no_zero_TS_wet_cells():
