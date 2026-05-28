@@ -50,6 +50,9 @@ docs/references/
 # package contents survive (NOT transient `.nc`, `.zarr`,
 # `__pycache__/`, etc. a user might create under the directory).
 !src/legoesm/atmosphere/physics/radiation/rrtmgp/optics/rrtmgp_data/*.nc
+# Exception: SCM jax_scm-oracle benchmark NetCDFs (committed asset; see
+# scripts/run_jax_scm_oracle.py + scripts/setup_jax_scm_oracle.sh).
+!tests/validation/scm_oracle/*.nc
 # `!src/legoesm/ml/data/` is the minimum un-ignore needed for git to
 # descend into the directory (since `data/` above ignores it).  That
 # ALONE would allow arbitrary non-`.py` files in.  Re-ignore
