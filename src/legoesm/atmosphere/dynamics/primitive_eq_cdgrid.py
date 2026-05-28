@@ -1356,19 +1356,19 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             # AND duogrid is off (the iter-370 regression test depends
             # on the non-square local diff being non-zero, so we keep
             # the call on the local backend).
-            # FV3_3D iter-1077: see NH counterpart in
-            # ``compressible_euler_cdgrid.py`` for the rationale.
-            # Route non-square staggered data through the new
-            # ``pad_halo_dgrid_scalar_4d``; same-axis edges get
-            # FV3-faithful cross-face source, axis-swap edges fall
-            # back to ``mode='edge'`` until iter-1077b.
+            # FV3_3D iter-1079: route (du_normal, dv_normal) as a
+            # vector pair through ``pad_halo_dgrid_vector_4d`` (iter-
+            # 1078) — see NH counterpart for rationale.  All 24
+            # directed edges bit-for-bit FV3-faithful via the
+            # iter-1076 same-axis + iter-1078 component-swap paths.
             if self.config.use_fv3_cross_face_du_proj:
                 from legoesm.grids.dgrid_halo import (
-                    pad_halo_dgrid_scalar_4d,
+                    pad_halo_dgrid_vector_4d,
                 )
-                du_full = pad_halo_dgrid_scalar_4d(du_normal)
+                du_full, dv_full = pad_halo_dgrid_vector_4d(
+                    du_normal, dv_normal,
+                )
                 du_pad = du_full[:, :, 1:-1, :]
-                dv_full = pad_halo_dgrid_scalar_4d(dv_normal)
                 dv_pad = dv_full[:, 1:-1, :, :]
             else:
                 du_pad = jnp.pad(

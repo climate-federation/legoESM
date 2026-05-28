@@ -1236,23 +1236,21 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
             # when the MPI backend is active without duogrid.  With
             # duogrid=True the post-pad remap reshapes correctly
             # under both backends.
-            # FV3_3D iter-1077: route ``du_normal``/``dv_normal`` (non-
-            # square staggered shapes (6, n, n+1, nlev) / (6, n+1, n,
-            # nlev)) through ``pad_halo_dgrid_scalar_4d`` (iter-1076)
-            # instead of the iter-1072-guarded ``pad_halo_4d``.  Same-
-            # axis edges (16 of 24 directed) get FV3-faithful cross-
-            # face source; axis-swap edges (8 of 24, faces 1,3 N/S +
-            # faces 4,5 W/E) fall back to ``mode='edge'`` until iter-
-            # 1077b lands DGRID_NE component swap.  Strictly better
-            # than the pre-iter-1077 ``mode='edge'`` fallback, which
-            # used edge-replicate on ALL 24 edges.
+            # FV3_3D iter-1079: route (du_normal, dv_normal) as a
+            # vector pair through ``pad_halo_dgrid_vector_4d`` (iter-
+            # 1078), which combines iter-1076 same-axis cross-face
+            # halo (16/24 edges) with iter-1078 DGRID_NE component
+            # swap (8 axis-swap edges, u↔v with face-pair signs).
+            # All 24 directed edges are now bit-for-bit FV3-faithful.
+            # Replaces the iter-1077 per-component scalar halo path.
             if self.config.use_fv3_cross_face_du_proj:
                 from legoesm.grids.dgrid_halo import (
-                    pad_halo_dgrid_scalar_4d,
+                    pad_halo_dgrid_vector_4d,
                 )
-                du_full = pad_halo_dgrid_scalar_4d(du_normal)
+                du_full, dv_full = pad_halo_dgrid_vector_4d(
+                    du_normal, dv_normal,
+                )
                 du_pad = du_full[:, :, 1:-1, :]
-                dv_full = pad_halo_dgrid_scalar_4d(dv_normal)
                 dv_pad = dv_full[:, 1:-1, :, :]
             else:
                 du_pad = jnp.pad(
