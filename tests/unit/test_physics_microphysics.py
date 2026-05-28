@@ -973,3 +973,119 @@ def test_p3_qc_does_not_go_negative_at_long_dt():
         f"P3: q_c went negative ({min_qc:.3e}) at dt=1200 s — "
         "joint q_c donor clamp failed."
     )
+
+
+def test_p3_qr_does_not_go_negative_under_joint_rain_rime_and_sedimentation():
+    """P3 q_r positivity under joint rain_rime + sedimentation drain.
+
+    Pathological column: heavy rain (q_r=5e-3) + heavy ice (q_i=1e-3)
+    below freezing in thin layers (dz=500 m) at long dt (1200 s).
+    Sinks of q_r in this step are evaporation, rain_rime (q_r is
+    collected by q_i and frozen into rime), and sedimentation flux.
+
+    Pre-fix: ``sedimentation_tendency`` for q_r received only
+    ``extra_sink=evaporation``.  The sed cap became
+    ``(q_r − evap·dt) · ρ·dz / dt`` — sedimentation removed the
+    remaining ``q_r − evap·dt`` per step while rain_rime drained
+    its own share on top, summing to ``q_r + rain_rime·dt`` and
+    driving q_r to ≈ −rain_rime·dt < 0.  Probe (PR #321 adversarial
+    review): q_r ended at −5.4e-4 kg/kg.
+
+    Post-fix: ``extra_sink`` is ``evaporation + rain_rime``, so the
+    joint per-step drain is bounded by available q_r and the
+    explicit Euler step never drives q_r below zero.
+    """
+    ncol, nlev = 1, 5
+    T = jnp.full((ncol, nlev), 260.0)
+    p_full = jnp.full((ncol, nlev), 5e4)
+    p_half = jnp.broadcast_to(
+        jnp.linspace(4e4, 6e4, nlev + 1)[None, :], (ncol, nlev + 1),
+    )
+    rho = p_full / (constants.R_d * T)
+    dz  = jnp.full((ncol, nlev), 500.0)
+    q_r = jnp.full((ncol, nlev), 5e-3)
+    q_i = jnp.full((ncol, nlev), 1e-3)
+    q_rim = jnp.full((ncol, nlev), 5e-4)
+    B_rim = q_rim / 400.0
+    hydro = HydrometeorState(
+        q_c=jnp.zeros((ncol, nlev)),
+        q_r=q_r, q_i=q_i,
+        q_s=q_rim, q_g=B_rim,
+        N_c=1e8 * jnp.ones((ncol, nlev)),
+        N_r=jnp.zeros((ncol, nlev)),
+        N_i=1e4 * jnp.ones((ncol, nlev)),
+    )
+    q_v = 0.99 * saturation_mixing_ratio(T, p_full)
+    dt  = 1200.0
+    out = p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt, P3Config())
+    q_r_after = q_r + out.dq_r_dt * dt
+    min_qr = float(jnp.min(q_r_after))
+    assert min_qr >= -1e-9, (
+        f"P3: q_r went negative ({min_qr:.3e}) at dt=1200 s under "
+        "joint rain_rime + sedimentation drain.  The sedimentation "
+        "extra_sink must include rain_rime (PR #321 adversarial review)."
+    )
+
+
+def test_p3_column_water_budget_closes():
+    """Column-integrated mass-bearing tendencies + precipitation ≈ 0.
+
+    Mass-bearing tendencies in P3: ``dq_v + dq_c + dq_r + dq_i +
+    dq_rim``.  ``dB_rim_dt`` excluded — B_rim is volume per kg air,
+    not a mass mixing ratio; summing it into the water budget is a
+    dimensional error.  Mass closure in a closed column:
+
+        ∫ (dq_v + dq_c + dq_r + dq_i + dq_rim) dp/g + precip = 0
+    """
+    ncol, nlev = 4, 20
+    T_sfc, p_s_val = 260.0, 1.0e5
+    sigma_half = jnp.linspace(0.0, 1.0, nlev + 1)
+    sigma_full = 0.5 * (sigma_half[:-1] + sigma_half[1:])
+    p_half = jnp.broadcast_to(
+        (sigma_half * p_s_val)[None, :], (ncol, nlev + 1),
+    )
+    p_full = jnp.broadcast_to(
+        (sigma_full * p_s_val)[None, :], (ncol, nlev),
+    )
+    T = jnp.broadcast_to(
+        jnp.maximum(T_sfc * jnp.clip(sigma_full, 0.01) ** 0.19, 200.0)[None, :],
+        (ncol, nlev),
+    )
+    rho = p_full / (constants.R_d * T)
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    dz = jnp.abs(constants.R_d * T * dp / (constants.g * p_mid))
+    q_sat = saturation_mixing_ratio(T, p_full)
+    q_v = 0.9 * q_sat
+    q_c = jnp.zeros((ncol, nlev)).at[..., -8:-3].set(5e-4)
+    q_r = jnp.zeros((ncol, nlev)).at[..., -3:].set(5e-4)
+    q_i = jnp.zeros((ncol, nlev)).at[..., :10].set(3e-4)
+    q_rim = q_i * 0.3
+    B_rim = q_rim / 300.0
+    hydro = HydrometeorState(
+        q_c=q_c, q_r=q_r, q_i=q_i, q_s=q_rim, q_g=B_rim,
+        N_c=1e8 * jnp.ones((ncol, nlev)),
+        N_r=jnp.zeros((ncol, nlev)),
+        N_i=1e4 * jnp.ones((ncol, nlev)),
+    )
+    dt = 300.0
+    out = p3_microphysics(T, q_v, hydro, p_full, p_half, rho, dz, dt, P3Config())
+
+    # ``out.dq_g_dt`` carries dB_rim_dt [m³/kg_air/s] — not a
+    # water-mass tendency; excluded from the budget per the
+    # moist_mass_fixer.py slot-reuse warning at lines 117-128.
+    total_dq = (
+        out.dq_v_dt + out.dq_c_dt + out.dq_r_dt
+        + out.dq_i_dt + out.dq_s_dt
+    )
+    col_tend = jnp.sum(total_dq * dp, axis=1) / constants.g
+    imbalance = col_tend + out.precipitation
+    max_imbalance = float(jnp.max(jnp.abs(imbalance)))
+    max_precip = float(jnp.max(jnp.abs(out.precipitation)))
+    # Absolute tolerance: column water tendency scale ~q/dt·column_mass
+    # ~5e-4/300·1 ≈ 1.7e-6 kg/m²/s; 1e-9 floor is six orders below
+    # per-step activity while still trapping unit-error bugs.
+    assert max_imbalance < 1e-9, (
+        f"P3: column water budget unclosed.  max |imbalance| = "
+        f"{max_imbalance:.3e} kg/m²/s, max precip = {max_precip:.3e}."
+    )
