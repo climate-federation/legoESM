@@ -313,3 +313,33 @@ factor-of-2 test at stratospheric levels could not detect.
   - 28 new tests across 6 classes.
 
 ---
+
+## Iter 4 — eliminate duplicate optics call (2026-05-28)
+
+### Cleanup
+When `use_optimal_angle=True`, the iter-2 implementation called
+`optics_lib.compute_lw_optical_properties` twice per g-point:
+once at the top of `solve_lw.step_fn` to get optical depth for the
+secant, then again inside `_compute_local_properties_lw`.  XLA's
+CSE would deduplicate identical calls under JIT, but threading the
+dict through keeps the graph compact and makes the dependency
+explicit.
+
+### Changes
+- `_compute_local_properties_lw` now accepts an optional
+  `precomputed_lw_optical_props` dict.  When provided, skips the
+  internal optics call.
+- `solve_lw.step_fn` computes the optics once at the top and feeds
+  the same dict to both:
+  1. `_compute_optimal_lw_secant` (optimal-angle path, reads
+     `optical_depth`).
+  2. `_compute_local_properties_lw` (source-and-properties solve).
+
+### Verification
+- All 37 RRTMGP+radiation unit tests pass (including
+  `test_rrtmgp_use_scan_equivalence` — most sensitive to LW solver
+  behavior).
+- AD path: gradients flow through the single shared optics call
+  rather than two duplicates — no semantic change, smaller graph.
+
+---
