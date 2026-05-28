@@ -216,6 +216,89 @@ class TestPadHaloMPIGrad:
                 ),
             )
 
+    def test_pad_halo_mpi_grad_allreduce_recovers_full(self, topology):
+        """FV3_3D iter-1062 (codex iter-1061 WARN #1): allreduce of the
+        per-rank MPI gradient must recover the full local-backend
+        gradient on ALL 6 faces.
+
+        Without this stronger test, a bug in ``_sendrecv_vjp`` that
+        zeros out non-owned-face cotangents (or fails to propagate
+        them via MPI) would pass ``test_pad_halo_mpi_grad_matches_local``
+        (which only inspects owned faces) but corrupt the canonical
+        replicated-state data-parallel training pattern where the
+        full gradient is reconstructed via ``allreduce(SUM)`` at the
+        end.
+        """
+        from legoesm.parallel.reductions import global_sum_mpi
+
+        n = 8
+        key = jax.random.PRNGKey(2026)
+        data = jax.random.normal(key, (6, n, n), dtype=jnp.float64)
+
+        def loss(d):
+            padded = pad_halo(d)
+            return jnp.sum(padded ** 2)
+
+        set_halo_backend("local")
+        g_local = jax.grad(loss)(data)
+
+        set_halo_backend("mpi", topology)
+        g_mpi = jax.grad(loss)(data)
+
+        # Mask each rank's gradient to its owned faces only, then
+        # allreduce(SUM) to assemble the full (6, n, n) gradient.
+        owned_mask = jnp.zeros((6, 1, 1), dtype=g_mpi.dtype)
+        for f in topology.local_face_ids:
+            owned_mask = owned_mask.at[f].set(1.0)
+        g_mpi_masked = g_mpi * owned_mask
+        g_mpi_full = global_sum_mpi(g_mpi_masked)
+
+        np.testing.assert_allclose(
+            np.asarray(g_mpi_full), np.asarray(g_local),
+            atol=1e-12,
+            err_msg=(
+                "Allreduced per-rank MPI gradient does not recover the "
+                "full local-backend gradient.  Likely cause: "
+                "_sendrecv_vjp drops or mis-routes non-owned-face "
+                "cotangents."
+            ),
+        )
+
+    def test_pad_halo_4d_mpi_grad_allreduce_recovers_full(self, topology):
+        """FV3_3D iter-1062 (codex iter-1061 WARN #1): 4D allreduce
+        check for full-gradient recovery.  Mirror of the 2D test.
+        """
+        from legoesm.parallel.reductions import global_sum_mpi
+
+        n, nlev = 8, 3
+        key = jax.random.PRNGKey(1234)
+        data = jax.random.normal(key, (6, n, n, nlev), dtype=jnp.float64)
+
+        def loss(d):
+            padded = pad_halo_4d(d)
+            return jnp.sum(padded ** 2)
+
+        set_halo_backend("local")
+        g_local = jax.grad(loss)(data)
+
+        set_halo_backend("mpi", topology)
+        g_mpi = jax.grad(loss)(data)
+
+        owned_mask = jnp.zeros((6, 1, 1, 1), dtype=g_mpi.dtype)
+        for f in topology.local_face_ids:
+            owned_mask = owned_mask.at[f].set(1.0)
+        g_mpi_masked = g_mpi * owned_mask
+        g_mpi_full = global_sum_mpi(g_mpi_masked)
+
+        np.testing.assert_allclose(
+            np.asarray(g_mpi_full), np.asarray(g_local),
+            atol=1e-12,
+            err_msg=(
+                "Allreduced per-rank 4D MPI gradient does not recover "
+                "the full local-backend gradient."
+            ),
+        )
+
 
 class TestConservationFixerMPIGrad:
     """Gradient through conservation fixers with MPI reductions."""

@@ -268,9 +268,30 @@ class TestCouplerMPIRegression:
             # across faces, so feeding non-local-face junk forward
             # does not pollute local-face outputs at the next step.
             local_ids = topology.local_face_ids
+            idx = jnp.asarray(list(local_ids), dtype=jnp.int32)
             _assert_surface_to_atm_close(
                 part_blended, ref_blended, face_ids=local_ids,
             )
+            # FV3_3D iter-1062 (codex iter-1061 WARN #2): also compare
+            # the persisted state fields across steps, not just the
+            # current-step blended output + total_dt scalar.  A
+            # regression in carried-state mutation (e.g., a typo in
+            # T_soil update during flush) would otherwise be silent.
+            assert jnp.allclose(
+                part_state.land.T_soil.data[idx],
+                ref_state.land.T_soil.data[idx],
+                atol=1.0e-6, rtol=1.0e-6,
+            ), f"land.T_soil drifted at dt={dt}"
+            assert jnp.allclose(
+                part_state.ice.h_ice.data[idx],
+                ref_state.ice.h_ice.data[idx],
+                atol=1.0e-6, rtol=1.0e-6,
+            ), f"ice.h_ice drifted at dt={dt}"
+            assert jnp.allclose(
+                part_state.lake.T_epi.data[idx],
+                ref_state.lake.T_epi.data[idx],
+                atol=1.0e-6, rtol=1.0e-6,
+            ), f"lake.T_epi drifted at dt={dt}"
             assert float(part_state.accumulator.total_dt) == pytest.approx(
                 float(ref_state.accumulator.total_dt),
                 abs=1.0e-9,

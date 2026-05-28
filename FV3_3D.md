@@ -2378,6 +2378,102 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1062 (2026-05-28): codex iter-1061 WARN fixes — strengthen iter-1060/1061 test coverage
+
+### Goal
+
+Codex adversarial review of iter-1059..1061 surfaced 2 WARN-grade
+test-coverage regressions:
+
+**WARN #1 (iter-1061 pad_halo grad tests)**: limiting comparison
+to ``topology.local_face_ids`` correctly handles the rank-local
+gradient contract but leaves the *full* gradient untested.  A
+``_sendrecv_vjp`` regression that drops or mis-routes non-owned-
+face cotangents would pass ``matches_local`` (which only inspects
+owned faces) while breaking the canonical replicated-state data-
+parallel training pattern: ``allreduce(SUM)`` of per-rank
+gradients should recover the full local-backend gradient.
+
+**WARN #2 (iter-1060 coupler multistep test)**: removing the
+``_mask_face_leading_pytree`` + ``gather_to_global`` block also
+dropped the carried-state assertions in the multistep loop.  The
+one-step sibling still checks ``land.T_soil``, ``ice.h_ice``,
+``lake.T_epi``, but the multistep loop only checks the current-
+step blended output + the scalar ``accumulator.total_dt``.  A
+regression in persisted state mutation across steps could pass
+silently.
+
+Codex also confirmed (NIT-grade, no action):
+- iter-1059 face-id mapping order is correct
+  (``_rank_to_faces`` is ``tuple(range(start, start+faces_per_rank))``).
+- iter-1060 default coupler config has no face-crossing update
+  path (sea ice ``dynamics="none"`` + ``transport="none"``),
+  so removing the mask is safe for the tested config.
+- iter-1061 ``2*x`` assertion is a genuine test fix, not a
+  workaround.  mpi4jax 0.9 source confirms ``allreduce(SUM)``
+  transpose returns ``[x]`` (identity passthrough).
+
+### Fix
+
+**WARN #1** — added two new tests in
+``tests/distributed/test_mpi_differentiability.py``:
+
+- ``TestPadHaloMPIGrad::test_pad_halo_mpi_grad_allreduce_recovers_full``
+- ``TestPadHaloMPIGrad::test_pad_halo_4d_mpi_grad_allreduce_recovers_full``
+
+Each:
+
+1. Computes ``g_local`` and ``g_mpi`` from ``jax.grad(loss)(data)``
+   on the local and MPI backends respectively.
+2. Masks ``g_mpi`` to the rank's owned faces only (``owned_mask``).
+3. Calls ``global_sum_mpi(g_mpi_masked)`` — allreduce(SUM)
+   reconstructs the full per-face gradient as a single output.
+4. Asserts ``g_mpi_full == g_local`` bit-for-bit on ALL 6 faces.
+
+This is the strict gradient correctness contract.  Failures
+would indicate a real bug in ``_sendrecv_vjp`` cotangent
+propagation across MPI peers — exactly what the original
+iter-1061 weakening risked masking.
+
+**WARN #2** — extended the multistep coupler test to assert
+``land.T_soil``, ``ice.h_ice``, ``lake.T_epi`` per-local-face
+equality at each dt step (matches the one-step sibling).
+
+### Validation
+
+::
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 2 \
+        .venv/bin/python -m pytest tests/distributed/test_mpi_differentiability.py \
+                                   tests/distributed/test_coupler_mpi.py
+    => 11 passed in 10.11s
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 3 \
+        .venv/bin/python -m pytest tests/distributed/test_mpi_differentiability.py \
+                                   tests/distributed/test_coupler_mpi.py
+    => 11 passed in 11.57s
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 6 \
+        .venv/bin/python -m pytest tests/distributed/test_mpi_differentiability.py \
+                                   tests/distributed/test_coupler_mpi.py
+    => 11 passed in 11.65s
+
+33 total passes.  The new allreduce-recovery tests confirm that
+``_sendrecv_vjp`` correctly propagates non-owned-face cotangents
+— the strongest possible MPI-grad correctness guarantee for
+``pad_halo`` and ``pad_halo_4d``.
+
+### Why this matters
+
+The codex review caught a genuine test-coverage regression: the
+iter-1061 narrowing to owned-face-only comparison fixed the
+*assertion* bug but did not preserve the *correctness scope* of
+the original (broken-but-aspirational) test.  Per CLAUDE.md
+mandate "End-to-end ``jax.grad`` compat = goal", the gradient
+through ``_sendrecv_vjp`` is critical infrastructure, and the
+strict allreduce-recovery contract is the canonical correctness
+test for replicated-state data-parallel training.
+
 ## Iteration 1061 (2026-05-28): fix stale MPI differentiability test contracts
 
 ### Goal
