@@ -711,6 +711,29 @@ class TestStandardO3Profile:
         g = jax.grad(loss)(p)
         assert jnp.all(jnp.isfinite(g))
 
+    def test_integrated_o3_column_in_dobson_units(self):
+        """Iter-6: integrated O3 column [DU] must be in a physically
+        reasonable range (200-400 DU spans tropics to high latitudes
+        through the annual cycle; mid-lat annual mean ≈ 300 DU).
+        Verifies the iter-3.5 skewed-Gaussian + tropospheric background
+        gives a realistic column total, not just realistic point values.
+        """
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import (
+            _standard_o3_profile,
+        )
+        # Integration ``DU = 7891 * ∫ vmr_o3 dp[Pa]`` derived from
+        # ``DU = (N_A / (g * M_air)) / 2.687e20 * ∫ vmr * dp``,
+        # using N_A=6.022e23, g=9.81 m/s², M_air=0.02897 kg/mol,
+        # 1 DU = 2.687e20 molecules/m².
+        p = jnp.logspace(0.0, jnp.log10(1.0e5), 5000)  # 1 Pa → 1e5 Pa
+        vmr = _standard_o3_profile(p)
+        integral = float(jnp.trapezoid(vmr, p))
+        du = 7891.0 * integral
+        assert 200.0 < du < 400.0, (
+            f"Std O3 column = {du:.1f} DU, expected [200, 400] "
+            f"(typical mid-lat range 250-350)."
+        )
+
 
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
