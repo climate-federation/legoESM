@@ -210,3 +210,17 @@ to the user rather than autonomously grinding it. Recommendation: do Q5 (CI clar
 independent + high-value + targeted-verifiable) and resolve the momentum decision BEFORE the
 large G-C2..G-C5 de-mirroring. State: Q1✓ Q2✓ Q3✓ Q4(G-C1+G-C2-foundation done). Loop did not
 halt on prior RALPHDONE -> user must /cancel-ralph or redirect.
+
+### 2026-05-28 · iter 10 · G-C2 increment: explicit physics-factory path de-mirrored
+Loop continuing (user away, RALPHDONE doesn't halt). Per spec "make defaults and keep going"
+-> doing the de-mirroring in safe targeted-verified increments.
+DONE this iter: integration.py _make_kpp — replaced constants.g (147/167), _RHO_0 (137/158),
+_C_SW (137) with constants_config.{g,rho_0,c_sw}; threaded constants_config through
+make_vertical_mixing_physics -> _make_kpp; combined.py make_ocean_physics passes
+config.constants; removed now-dead `from legoesm import constants` + `rho_0/c_sw as _RHO_0/_C_SW`
+imports. Zero-behaviour by construction (defaults == module constants). Targeted gate: 52 passed
+(implicit_vertical_mixing, implicit_solver/solver, mpas_physics, gm_redi_eady, constants_config).
+REMAINING G-C2: implicit-path reads (k_profiles.py 214/223, tke.py 271 — threaded from the
+model config via the dynamics implicit-mixing solver, NOT the physics factory), mpas_integration.py,
++ module-mirror sites (eos, diagnostics, gm_redi, prescribed/bulk_formulas, shortwave). Then
+G-C3 coupler/forcing, G-C4 recipe migration + delete monkey-patch, G-C5 audit.

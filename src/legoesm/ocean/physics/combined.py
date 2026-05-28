@@ -84,6 +84,7 @@ def make_ocean_physics(
         fns.append(make_vertical_mixing_physics(
             config.vertical_mixing,
             apply_diffusion=apply_vertical_diffusion,
+            constants_config=config.constants,
         ))
     if config.lateral_mixing.scheme != "none":
         fns.append(make_lateral_mixing_physics(config.lateral_mixing))
