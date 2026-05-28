@@ -2378,6 +2378,108 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1052 (2026-05-28): SW ``_sync_dgrid_boundary`` MPI port (iter-1050 audit follow-up)
+
+### Goal
+
+Close the iter-1050 SW audit gap: ``CDGridShallowWaterModel.
+_sync_dgrid_boundary`` reads ``ue[nbr_face, ...]`` /
+``vn[nbr_face, ...]`` directly — same Python-level cross-face
+read pattern as the iter-1049 ``synchronize_cgrid_fluxes`` bug
+but for SW corner-staggered wind sync.
+
+### Fix
+
+Added ``CDGridShallowWaterModel._sync_dgrid_boundary_mpi``
+method.  Dispatched from the existing ``_sync_dgrid_boundary``
+when ``_halo_backend == "mpi"``.
+
+**Edge sync**: batched-per-peer ``mpi4jax.sendrecv`` (iter-1051
+pattern).  For each peer rank, both sides pack their boundary
+``(ue, vn)`` strips for ALL cross-rank shared edges in canonical
+order — sorted by ``_canon_key(entry) = (min(face, nbr_face),
+edge_at_min_face)``.  Both ranks compute the SAME key for the
+same shared edge.  After sendrecv, only the non-owner side
+(higher face index) overwrites its local strip with the peer's
+recv strip; the owner side keeps local.  Reversal applied per
+``CONNECTIVITY[(face, edge)].is_reversed``.
+
+**Vertex sync**: ``mpi4jax.allreduce(SUM)`` on a ``(8, 2)`` array
+where each rank fills owner-face values for vertices it owns and
+zero elsewhere.  Exactly ONE rank contributes a non-zero entry
+per vertex (each vertex has exactly one owner_face → one
+owner_rank), so SUM is identity-correct at float64 precision.
+
+**Pre-extract local strips**: same write-before-read fix as
+iter-1051 — local non-owner-case neighbour strips are read into
+a dict BEFORE the write loop.
+
+**Strip length**: SW corner state has shape ``(6, n+1, n+1)``,
+so boundary strips are length ``n+1`` (not ``n`` as in the
+cgrid-flux case).
+
+### Tests
+
+New file ``tests/distributed/test_mpi_sw_sync.py`` with one
+test: ``test_sync_only_owned_faces_match`` exercises
+``_sync_dgrid_boundary`` directly (not the full SW step) under
+MPI vs single-rank.  Bit-for-bit at ``atol=rtol=1e-12`` on owned
+faces.  Includes a float64-dtype assertion (codex F-10).
+
+### Validation
+
+::
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun -np 2 --timeout 60 \
+        .venv/bin/python -m pytest \
+        tests/distributed/test_mpi_sw_sync.py -v
+    => 1/1 PASSED (6.69 s)
+
+Full PE + NH + interp_offsets + sync + SW MPI suite:
+
+::
+
+    => 26/26 PASSED in 4:29
+
+Single-device regression: 19 pre-existing failures in
+``test_cdgrid_fv3_regression.py`` were CONFIRMED present on
+``main`` before iter-1052 (via ``git stash`` probe).  Not caused
+by this iteration.
+
+### Codex adversarial review
+
+``gpt-5.3-codex``: 14/16 claims OK, 2 RISKs addressed in same PR:
+
+- **F-15 (BLOCKER-grade)**: tiled MPI not supported.  Added
+  explicit ``NotImplementedError`` guard at function entry —
+  same contract as iter-1040 ``pad_halo_mpi(interp_offsets=...)``.
+- **F-10**: float64 dtype assumption.  Added ``assert
+  dtype == jnp.float64`` to the test.
+
+Remaining minor F-14 (reversal table not unit-tested per-edge)
+and F-16 (no np=1/3/6 coverage) are improvements over the
+``main`` baseline (no MPI tests at all) and tracked as
+follow-up.
+
+### Status
+
+| Open follow-up | Status |
+|----------------|--------|
+| iter-1046 #1 non-square halo for cross_face | ⏳ deferred |
+| iter-1046 #2 duogrid + factory MPI | ✅ iter-1049 + iter-1051 |
+| iter-1050 SW ``_sync_dgrid_boundary`` MPI port | ✅ **iter-1052** |
+| Sub-face tiling (n>6) with interp_offsets / SW sync | ⏳ both refuse cleanly with NotImplementedError |
+| Metal+MPI+duogrid linspace XLA | ⏳ workaround documented |
+
+### Why this iteration was meaningful
+
+iter-1050's audit identified the SW corner-sync bug pre-
+emptively (before any MPI test exercised it).  iter-1052
+fixes it using the proven iter-1051 pattern, plus
+``allreduce(SUM)`` for the small vertex broadcast.  The
+overall MPI-aware sync infrastructure now spans 3 dycores
+(PE, NH, SW) with consistent batched-per-peer architecture.
+
 ## Iteration 1051 (2026-05-28): **deadlock fix** — batched-per-neighbour sendrecv in ``_synchronize_cgrid_fluxes_mpi``
 
 ### Goal
