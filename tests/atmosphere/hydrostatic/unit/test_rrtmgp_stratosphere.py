@@ -584,6 +584,59 @@ class TestOptimalLwSecant:
             f"expected 3 distinct secants, got {vals}"
         )
 
+    def test_solve_columns_is_column_permutation_invariant(self, lookup_vmr):
+        """Iter-11: ``solve_columns`` output for column ``k`` must
+        depend only on that column's inputs.  Permuting the column
+        axis must permute the output identically.  Catches per-column
+        state leaks (e.g. a stale ``cumulative_flux`` carry that
+        accidentally accumulates across columns instead of along the
+        vertical axis), which would break sharded MPI/GPU runs where
+        each rank holds a different column subset.
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(RRTMGPConfig())
+        ncol, nlev = 4, 8
+        # Each column gets a slightly different T profile so the
+        # outputs are distinguishable per column.
+        T = jnp.stack(
+            [jnp.linspace(220.0 + 5.0 * k, 290.0 + 5.0 * k, nlev) for k in range(ncol)]
+        )
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1)
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        sfc_T = jnp.array([295.0 + 5.0 * k for k in range(ncol)])
+        q_v = jnp.full((ncol, nlev), 5e-3)
+        cos_z = jnp.array([0.4 + 0.05 * k for k in range(ncol)])
+
+        out_orig = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+        )
+        # Reverse the column axis on every input.
+        perm = jnp.array([3, 2, 1, 0])
+        out_perm = solver.solve_columns(
+            T=T[perm],
+            p_full=p_full[perm],
+            p_half=p_half[perm],
+            sfc_temperature=sfc_T[perm],
+            q_v=q_v[perm],
+            cos_zenith=cos_z[perm],
+        )
+        for name in ("lw_flux_up", "sw_flux_up", "heating_rate"):
+            a = getattr(out_orig, name)
+            b = getattr(out_perm, name)
+            np.testing.assert_allclose(
+                np.asarray(a)[perm], np.asarray(b),
+                rtol=1e-12, atol=1e-12,
+                err_msg=(
+                    f"{name}: permuting the column axis must permute "
+                    "the output identically (column-local independence)."
+                ),
+            )
+
     def test_optimal_angle_flux_impact_bounded(self, lookup_vmr):
         """Iter-8: optimal-angle LW flux must be within ~10% of the
         fixed-1.66 result.  Establishes a sanity bound — if a future
