@@ -2378,6 +2378,63 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1064 (2026-05-28): in-scope MPI cubed-sphere distributed test suite — clean at np=6
+
+### Goal
+
+Confirm the iter-1058..1063 distributed-test repair sweep leaves
+all in-scope MPI cubed-sphere tests passing at the largest
+oversubscribed-on-Mac configuration (np=6 face-only, each rank
+owns 1 face).
+
+### Result
+
+::
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 6 \
+        .venv/bin/python -m pytest \
+            tests/distributed/test_mpi_interp_offsets.py \
+            tests/distributed/test_mpi_sw_sync.py \
+            tests/distributed/test_mpi_synchronize_cgrid_fluxes.py \
+            tests/distributed/test_halo_mpi.py \
+            tests/distributed/test_scale_mpi_halo.py \
+            tests/distributed/test_mpi_bootstrap.py \
+            tests/distributed/test_mpi_driver.py \
+            tests/distributed/test_mpi_differentiability.py \
+            tests/distributed/test_coupler_mpi.py
+    => 69 passed in 33.38s
+
+Combined with the FV3 step-fidelity suite (iter-1056 14×3=42 at
+np ∈ {2, 3, 6}), the MPI cubed-sphere distributed test suite is
+now end-to-end clean.
+
+### Out-of-scope failures (not addressed)
+
+These tests have pre-existing failures on clean ``main`` HEAD
+but fall outside the FV3 cubed-sphere scope of this Ralph loop:
+
+- ``tests/distributed/test_voronoi_mpi.py``: 2 fails (MPAS /
+  icosahedral grid, separate decomposition).
+- ``tests/distributed/test_plane_pencil_mpi.py``: 5 fails
+  (regional doubly-periodic plane domain).
+- ``tests/distributed/test_latlon_mpi_*``: likely some fails
+  (different grid type, latlon).
+
+Documented for separate follow-up.
+
+### Cumulative score across iter-1058..1064
+
+- 9 pre-existing failures fixed (assertions, contracts, API
+  drift).
+- 5 new strict tests added (codex WARN response).
+- 69 + 42 = 111 passing tests across 9 in-scope distributed
+  test files, validated at np ∈ {2, 3, 6}.
+
+All from iter-aa707bda's scatter/gather API rename without
+test-suite audit + the iter-1056 ``set_halo_backend`` ordering
+bug class.  The Ralph loop's MPI cubed-sphere infrastructure
+hardening sweep is complete.
+
 ## Iteration 1063 (2026-05-28): fix stale ``test_mpi_driver.py`` failures (precondition + full-state contract)
 
 ### Goal
