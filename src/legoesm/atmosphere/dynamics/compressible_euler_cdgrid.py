@@ -1588,7 +1588,11 @@ def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
     - ``use_fv3_metric_aware_d_con``: metric-aware d_con form
       (iter-339, ``cosa_s/rsin2`` at all 5 d_con sites).
     - ``use_fv3_cross_face_du_proj``: cross-face halo for damp_v
-      wind projection (iter-370; requires ``use_duogrid=True``).
+      wind projection (iter-370).  **Disabled by default** as of
+      iter-1072 — the non-square ``du_normal`` / ``dv_normal`` data
+      (shapes ``(6, n+1, n, nlev)`` and ``(6, n, n+1, nlev)``) is
+      silently corrupted by ``pad_halo_4d`` (probe verified: NORTH
+      halo zeros).  Tracked as iter-1046 non-square halo follow-up.
 
     Plus production knobs: ``d_con_top_zero_levels``, ``delt_max``,
     ``nord_v``, ``corner_div_damp_nord``, ``corner_div_damp_d4_bg``,
@@ -1603,7 +1607,17 @@ def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
         use_fv3_a2b_ord4_vector_uv=True,   # iter-698: -25.8% θ′ edge ratio at C8
         use_fv3_dynamic_exner=True,
         use_fv3_metric_aware_d_con=True,
-        use_fv3_cross_face_du_proj=True,
+        # FV3_3D iter-1072: use_fv3_cross_face_du_proj routes du_normal /
+        # dv_normal (non-square shapes (6, n+1, n, nlev) / (6, n, n+1,
+        # nlev)) through pad_halo_4d, which silently corrupts non-square
+        # halos (probe verified at iter-1072: NORTH halo all zeros).
+        # iter-1046 documented this as a known limitation; iter-1072
+        # turns the silent corruption into a loud ValueError at the
+        # pad_halo_4d entry.  Disable here in the factory default to
+        # avoid the loud failure for the canonical "factory + duogrid"
+        # production path.  Users can opt back in only after the
+        # non-square halo refactor lands.
+        use_fv3_cross_face_du_proj=False,
         d_con_top_zero_levels=2,
         delt_max=1.0,
         nord_v=1,

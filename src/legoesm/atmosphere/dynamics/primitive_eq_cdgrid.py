@@ -1737,7 +1737,9 @@ def make_fv3_faithful_pe_config(**overrides) -> CDGridPrimitiveEquationConfig:
     - ``use_fv3_metric_aware_d_con``: metric-aware d_con form
       (iter-338, cosa_s/rsin2 form at all 5 d_con sites).
     - ``use_fv3_cross_face_du_proj``: cross-face halo for damp_v
-      wind projection (iter-370; requires ``use_duogrid=True``).
+      wind projection (iter-370).  **Disabled by default** as of
+      iter-1072 (non-square halo silent corruption — see NH factory
+      docstring + FV3_3D.md iter-1072).
 
     Plus production knobs: ``d_con_top_zero_levels``, ``delt_max``,
     ``nord_v``, ``corner_div_damp_nord``, ``corner_div_damp_d4_bg``,
@@ -1748,7 +1750,12 @@ def make_fv3_faithful_pe_config(**overrides) -> CDGridPrimitiveEquationConfig:
     defaults = dict(
         use_fv3_a2b_zeta_corner=True,
         use_fv3_metric_aware_d_con=True,
-        use_fv3_cross_face_du_proj=True,
+        # FV3_3D iter-1072: disabled by default — see NH factory note
+        # for the silent-corruption probe.  Non-square du_normal /
+        # dv_normal data through pad_halo_4d produces zeros in the
+        # cross-face halo.  Tracked as iter-1046 non-square halo
+        # follow-up.
+        use_fv3_cross_face_du_proj=False,
         d_con_top_zero_levels=2,
         delt_max=1.0,
         nord_v=1,

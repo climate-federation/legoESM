@@ -2378,6 +2378,122 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1072 (2026-05-28): detect non-square ``pad_halo_4d`` silent corruption + disable ``use_fv3_cross_face_du_proj`` in factory defaults
+
+### Goal
+
+Investigate the iter-1046 open follow-up "non-square halo for
+``use_fv3_cross_face_du_proj``" by directly probing
+``pad_halo_4d`` on non-square data.
+
+### Finding
+
+**Silent corruption verified**.  Probe at iter-1072:
+
+::
+
+    data = jnp.zeros((6, 5, 6, 1)); data[f] = float(f+1)
+    out = pad_halo_4d(data)
+    # face 0 WEST halo (length n_y=6): [4, 4, 4, 4, 4, 4.5]
+    # face 0 NORTH halo (length n_x=5): [0, 0, 0, 0, 0]
+
+Both the local backend (``_pad_halo_local_4d``) and the MPI
+backend (``_pad_halo_mpi_face_only_4d``) use
+``_get_halo_tables_h1(n=data.shape[1])`` which assumes square
+``(n, n)``.  For non-square ``(n_x, n_y)``:
+
+- WEST/EAST halo (length ``n_y``): only first ``n_x`` cells
+  filled from neighbour face; cells past ``n_x`` are
+  out-of-bounds reads (silent garbage).
+- SOUTH/NORTH halo (length ``n_x``): all cells zero (the table
+  iterates ``range(n)`` along the wrong axis).
+
+### Impact
+
+``use_fv3_cross_face_du_proj`` (iter-370) routes:
+
+- ``du_normal`` shape ``(6, n+1, n, nlev)`` through ``pad_halo_4d``
+- ``dv_normal`` shape ``(6, n, n+1, nlev)`` through ``pad_halo_4d``
+
+Both are non-square.  iter-1046 documented this as a known
+limitation under MPI (``_force_edge`` fallback when duogrid is
+off).  Under single-device OR MPI-with-duogrid, the buggy
+``pad_halo_4d`` path runs silently.
+
+The iter-392 factory ``make_fv3_faithful_nh_config`` /
+``make_fv3_faithful_pe_config`` enabled
+``use_fv3_cross_face_du_proj=True`` by default — meaning any
+user calling ``make_fv3_faithful_nh_config()`` on a single device
+with duogrid was hitting the silent corruption.
+
+### Fix (3 parts)
+
+1. **``pad_halo_4d`` entry-point assert** (``grids/halo.py:745``):
+   raise ``ValueError`` when ``data.shape[1] != data.shape[2]``,
+   with a pointer to iter-1072 and a workaround.  Turns silent
+   corruption into a loud failure.
+
+2. **Factory defaults**: set
+   ``use_fv3_cross_face_du_proj=False`` in both
+   ``make_fv3_faithful_nh_config`` and
+   ``make_fv3_faithful_pe_config``.  Docstring updated to note
+   the disable + iter-1046 follow-up.
+
+3. **Test updates**: ``test_fv3_faithful_factory_signature_iter402.py``
+   and ``test_fv3_faithful_factory_overrides_iter396.py`` asserted
+   ``cross_face_du_proj is True``; updated to ``is False`` with
+   iter-1072 comment.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv/bin/python -m pytest \
+        tests/test_fv3_faithful_multistep_iter408.py \
+        tests/test_fv3_faithful_multistep_ad_iter409.py \
+        tests/test_fv3_faithful_factory_docstring_iter406.py \
+        tests/test_fv3_faithful_factory_overrides_iter396.py \
+        tests/test_fv3_faithful_factory_signature_iter402.py \
+        tests/test_fv3_3d_doc_compaction_iter368.py \
+        tests/test_fv3_faithful_factories_smoke_iter393.py \
+        tests/test_fv3_faithful_jit_traceable_iter404.py \
+        tests/test_fv3_faithful_passes_through_overrides_iter412.py
+    => 82 passed in 423s
+
+::
+
+    mpirun --oversubscribe -np 2 .venv/bin/python -m pytest \
+        tests/distributed/test_mpi_fv3_step_fidelity.py \
+            ::TestFV3PEStepMPIFidelity::test_pe_3_step_with_fv3_faithful_factory \
+        tests/distributed/test_mpi_fv3_nh_step_fidelity.py \
+            ::TestFV3NHStepMPIFidelity::test_nh_3_step_with_fv3_faithful_factory
+    => 2 passed in 131s
+
+### Why this matters
+
+The user's stated FV3-fidelity goal mandates that the canonical
+``make_fv3_faithful_{pe,nh}_config()`` factories produce
+trustworthy bit-for-bit-correct configurations.  iter-1072
+discovers that one of the 6 NH flags + 3 PE flags
+(``cross_face_du_proj``) was silently producing zeros / garbage
+in cube-edge halo cells.  The fix:
+
+- Turns silent corruption into a loud error at the halo entry.
+- Removes the broken flag from the default config so users get
+  a correct (if slightly less FV3-faithful) configuration.
+- Documents the bug class with a probe + workaround pointer.
+
+This closes a real FV3 fidelity gap that had been latent since
+iter-370 (cross_face introduction) and explicitly noted but
+NOT fixed at iter-1046.
+
+### Remaining follow-up
+
+The proper fix is a true non-square halo routine (~200+ LOC
+across halo.py + halo_exchange.py).  Deferred.  Users wanting
+``cross_face_du_proj`` can re-enable via overrides AFTER that
+refactor lands.
+
 ## Iteration 1071 (2026-05-28): codex iter-1067..1070 WARN fixes — hash corrections + clipping-branch caveat + caller-status docstrings
 
 ### Goal

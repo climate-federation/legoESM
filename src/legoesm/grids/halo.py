@@ -744,6 +744,29 @@ def pad_halo_4d(
     """
     if data.ndim != 4:
         raise ValueError(f"pad_halo_4d expects 4D input, got {data.ndim}D")
+    # FV3_3D iter-1072: non-square (n_x, n_y) data is silently
+    # corrupted by ``_pad_halo_local_4d`` / ``_pad_halo_mpi_face_only_4d``
+    # because both use ``_get_halo_tables_h1(n=data.shape[1])`` which
+    # assumes square shape — the y-axis halo cells past index n_x are
+    # left at the jnp.pad default of 0, and the cells filled past
+    # ``data.shape[2]`` index out-of-bounds.  Probe verified at
+    # iter-1072: pad_halo_4d on shape ``(6, 5, 6, 1)`` returns
+    # face-0 WEST halo with 6th cell corrupted, face-0 NORTH halo
+    # all zero.  Loud error here surfaces the silent bug for any
+    # caller passing non-square data (notably
+    # ``use_fv3_cross_face_du_proj`` paths on ``du_normal`` /
+    # ``dv_normal`` D-grid wind increments with shape
+    # ``(6, n+1, n, nlev)`` / ``(6, n, n+1, nlev)``).
+    if data.shape[0] >= 1 and data.shape[1] != data.shape[2]:
+        raise ValueError(
+            f"pad_halo_4d expects square (n, n) data on each face, "
+            f"got shape {tuple(data.shape)} with data.shape[1] != "
+            f"data.shape[2].  Non-square halo is a known iter-1046 "
+            f"follow-up — see FV3_3D.md iter-1072 for the silent-"
+            f"corruption probe.  Workaround: extend non-square data "
+            f"to square via jnp.pad before calling pad_halo_4d, then "
+            f"trim back, OR disable use_fv3_cross_face_du_proj."
+        )
     if interp_offsets is not None and duogrid is not None:
         raise ValueError(
             "interp_offsets and duogrid are mutually exclusive"
