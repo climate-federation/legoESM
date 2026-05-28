@@ -155,7 +155,7 @@ CMD=(
 # the run can use ``--dt 300`` set by the equatorial CFL.  Without
 # this flag, 100-y at 1° lat-lon FV needs ~600 B time steps and is
 # infeasible in the 72-h × N restart-chain SLURM budget.
-EXTRA_ARGS=(--use-polar-filter)
+EXTRA_ARGS=(--use-polar-filter --time-integrator ssp_rk3_scan)
 if [[ -n "${LATEST_CKPT}" ]]; then
     EXTRA_ARGS+=(--restart-from "${LATEST_CKPT}")
 fi

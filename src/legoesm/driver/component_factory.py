@@ -472,6 +472,9 @@ def create_atmosphere_dycore(
             polar_filter_max_wave_speed=getattr(
                 dc, "polar_filter_max_wave_speed", 300.0,
             ),
+            # Task #25: time integrator (default ssp_rk3, opt into
+            # ssp_rk3_scan for ~1.5× JIT compile speedup at scale).
+            time_integrator=getattr(dc, "time_integrator", "ssp_rk3"),
         )
         model = CGridLatLonPrimitiveEquationModel(
             grid, sigma, cfg, dt=_effective_dt)

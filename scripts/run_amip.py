@@ -114,6 +114,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Max wave speed [m/s] used to size the polar filter "
              "CFL mask (default 300.0 = external gravity wave).",
     )
+    # Task #25: JIT compile bloat at production scale.  The inline
+    # SSP-RK3 calls tendency_fn 3× sequentially → XLA inlines three
+    # copies of the entire tendency pipeline.  Folding the 3 stages
+    # into a single ``lax.scan`` body cuts the jaxpr ~2× and the
+    # compile time 1.3–1.9× (measured on lat-lon C-grid + 3 tracers
+    # + polar filter, profile job 8070275).  Same RK3 coefficients,
+    # bit-equivalent output (pinned by
+    # tests/timestepping/test_ssp_rk3_scan_bit_equivalence.py).
+    parser.add_argument(
+        "--time-integrator", type=str, default="ssp_rk3",
+        choices=["ssp_rk3", "ssp_rk3_scan", "ssp_rk34", "ssp_rk54",
+                  "rk4"],
+        help="Time integrator (default ssp_rk3 — IEEE-identical to "
+             "existing runs).  ssp_rk3_scan is the JIT-compile-time "
+             "optimised variant for production lat-lon C-grid AMIP.",
+    )
     parser.add_argument(
         "--implicit-grav-wave-use-pcg", action="store_true",
         default=False,
@@ -395,6 +411,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         use_polar_filter=args.use_polar_filter,
         polar_filter_cutoff_deg=args.polar_filter_cutoff_deg,
         polar_filter_max_wave_speed=args.polar_filter_max_wave_speed,
+        # Task #25: time integrator selection.
+        time_integrator=args.time_integrator,
     )
 
     output_config = OutputConfig(
