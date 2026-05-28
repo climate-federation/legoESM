@@ -2378,6 +2378,82 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1071 (2026-05-28): codex iter-1067..1070 WARN fixes — hash corrections + clipping-branch caveat + caller-status docstrings
+
+### Goal
+
+Codex adversarial review of iter-1067..1070 returned 3 WARNs:
+
+- **WARN-1 (iter-1068)**: ``dt=10`` exercises div_damp/A_h/damp_v
+  core code paths but does NOT saturate the adaptive ``dt_actual``
+  clipping / damping-saturation branches.  Test contract for
+  "full FV3-faithful config stability" is implicitly weakened.
+- **WARN-2 (iter-1068)**: 5 archaeology hashes in the iter-1040..1066
+  compaction ToC are wrong — ``git log`` returns "unknown revision".
+  Future bisects hit dead pointers.  Wrong hashes:
+
+  | iter | wrong | actual |
+  |------|-------|--------|
+  | 1040 | 95cbbe14 | f5a20b86 |
+  | 1048 | 16e93c45 | 1266b865 |
+  | 1050 | 2c8b8a4e | e8016d16 |
+  | 1051 | 88ac4ce4 | fb84adb2 |
+  | 1055 | cb50b3e8 | 5fc0da0f (shared with iter-1056) |
+
+- **WARN-3 (iter-1069)**: ``coriolis_parameter_fv3`` and
+  ``get_unit_vector_fv3`` callers are test-only
+  (``rotate_winds_fv3``, ``dcmip16_tc_uwind_pert``).  No production
+  refs.  Concern: should they live in test utilities instead of
+  ``grids/cubed_sphere.py``?
+
+Codex LGTM (no action) on iter-1067 (factory docstrings match
+defaults exactly) and iter-1070 (orphan deletion clean —
+``TestW2BoundaryErrorBudget`` has no shared ``setUp`` state and no
+external refs to deleted methods).
+
+### Fix
+
+- **WARN-2**: corrected the 5 wrong hashes via grep-replace.
+  Verified all 27 hashes in the compaction block now resolve via
+  ``git log --oneline -1 HASH``.
+- **WARN-1**: added a multi-line comment to
+  ``test_pe_factory_5_step_stable`` explicitly acknowledging the
+  weakened stability scope (``dt=10`` exercises core paths but
+  not delt_max / Smag-adaptive clipping; those need ``dt ~ 15-20``
+  at n=8).  Tracked as separate slow/xfail test if needed.
+- **WARN-3**: added "caller status + rationale" notes to both
+  restored functions' docstrings.  Rationale: faithful FV3 oracle
+  ports of fundamental geometric / geophysical primitives;
+  placing them in ``grids/cubed_sphere.py`` (vs. test utilities)
+  preserves availability for future production callers and is
+  consistent with the user's stated FV3-fidelity goal.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv/bin/python -m pytest \
+        tests/test_fv3_faithful_multistep_iter408.py \
+        tests/test_fv3_faithful_multistep_ad_iter409.py \
+        tests/test_fv3_rotate_winds_iter661.py \
+        tests/test_fv3_tc_uwind_pert_iter672.py \
+        tests/test_fv3_3d_doc_compaction_iter368.py \
+        tests/test_fv3_faithful_factory_docstring_iter406.py
+    => 75 passed in 368.60s
+
+::
+
+    .venv/bin/python -c "
+    import re, subprocess, pathlib
+    txt = pathlib.Path('FV3_3D.md').read_text()
+    hashes = re.findall(r'\*\*iter-(\d+)\*\* \(([0-9a-f]{8})\b', txt)
+    bad = [h for it, h in hashes
+           if subprocess.run(['git', 'log', '--oneline', '-1', h],
+                              capture_output=True).returncode]
+    print(f'{len(hashes)} scanned, {len(bad)} bad')
+    "
+    => 27 scanned, 0 bad
+
 ## Iteration 1070 (2026-05-28): delete orphan diag-script tests + FV3_3D.md compaction maintenance
 
 ### Goal

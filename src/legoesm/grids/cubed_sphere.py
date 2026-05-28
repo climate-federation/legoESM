@@ -2886,7 +2886,16 @@ def get_unit_vector_fv3(
     from p1 → p3.
 
     Faithful JAX port of FV3 ``get_unit_vector``
-    (``tools/test_cases.F90:8366-8385``).  Algorithm:
+    (``tools/test_cases.F90:8366-8385``).  Used by FV3-faithful
+    test-case wind initialization paths (``rotate_winds_fv3``,
+    ``dcmip16_tc_rotate_winds``) for the DCMIP-16 baroclinic-wave and
+    tropical-cyclone test cases.  Currently called only from those
+    test-init paths; placed here (rather than in test utilities)
+    because it is a faithful FV3 oracle port that may be reused by
+    future production code paths that perform sphere-to-cube wind
+    rotation outside the standard ``rotate_winds_geo_to_grid`` flow.
+
+    Algorithm:
 
         xyz1, xyz2, xyz3 = latlon2xyz(...)
         uvect = xyz3 - xyz1                     # chord
@@ -2925,6 +2934,13 @@ def coriolis_parameter_fv3(
     Vertical component of the planetary vorticity vector
     (``2·Ω·sin(lat)``) acting on horizontal flow.  Centred on Earth:
     ``Ω = constants.Omega`` = 7.292·10⁻⁵ rad/s.
+
+    Currently called only by ``dcmip16_tc_uwind_pert`` (the DCMIP-16
+    tropical-cyclone wind initialization).  Placed here (rather than
+    in test utilities) because it is a faithful FV3 oracle port of
+    a fundamental geophysical quantity that may be reused by future
+    production code paths (geostrophic balance, Rossby-wave
+    dispersion, Ekman pumping, etc.).
 
     Note: iter 905 (commit c1c0e42b) removed this definition during
     drift cleanup but left the caller in ``dcmip16_tc_uwind_pert``
