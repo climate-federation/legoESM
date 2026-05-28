@@ -420,7 +420,13 @@ def _pad_halo_mpi_face_only(
         # entry = (face, edge, nbr_face, nbr_edge, is_reversed, nbr_rank)
         by_nbr_rank[entry[5]].append(entry)
 
-    for nbr_rank, entries in by_nbr_rank.items():
+    # FV3_3D iter-1054: iterate peers in ascending rank order so all
+    # ranks issue sendrecv calls in the same global peer-sequence.
+    # Dict-insertion order produces cyclic-wait deadlock at np=6 face-
+    # only (4 peers per rank).  Same fix as iter-1053 for
+    # synchronize_cgrid_fluxes / _sync_dgrid_boundary.
+    for nbr_rank in sorted(by_nbr_rank.keys()):
+        entries = by_nbr_rank[nbr_rank]
         # Canonical ordering fix: the sender packs strips sorted by
         # (nbr_face, nbr_edge) which equals the receiver's (face, edge).
         # The receiver unpacks sorted by (face, edge) which equals the
@@ -576,7 +582,9 @@ def _pad_halo_mpi_tiled(
         by_nbr_rank[entry[1]].append(entry)
 
     # --- Phase 2: pack all send buffers, then exchange per neighbor ---
-    for nbr_rank, entries in by_nbr_rank.items():
+    # FV3_3D iter-1054: sorted peer iteration (deadlock-free at np=6).
+    for nbr_rank in sorted(by_nbr_rank.keys()):
+        entries = by_nbr_rank[nbr_rank]
         # Canonical ordering: send sorted by nbr_edge (receiver's local
         # edge), recv sorted by edge (sender's nbr_edge).
         # entry = (edge, nbr_rank, nbr_edge, is_reversed, is_tile_nbr)
@@ -971,7 +979,9 @@ def _pad_halo_mpi_face_only_4d(
     for entry in remote_edges:
         by_nbr_rank[entry[5]].append(entry)
 
-    for nbr_rank, entries in by_nbr_rank.items():
+    # FV3_3D iter-1054: sorted peer iteration (deadlock-free at np=6).
+    for nbr_rank in sorted(by_nbr_rank.keys()):
+        entries = by_nbr_rank[nbr_rank]
         # Canonical ordering: send sorted by (nbr_face, nbr_edge),
         # recv sorted by (face, edge). See _pad_halo_mpi_face_only.
         send_order = sorted(entries, key=lambda e: (e[2], e[3]))
@@ -1115,7 +1125,10 @@ def _pad_halo_mpi_tiled_4d(
     for entry in edge_info:
         by_nbr_rank[entry[1]].append(entry)
 
-    for nbr_rank, entries in by_nbr_rank.items():
+    # FV3_3D iter-1054 (codex follow-up #8): sorted peer iteration —
+    # 4D tiled mode site missed in the initial iter-1054 commit.
+    for nbr_rank in sorted(by_nbr_rank.keys()):
+        entries = by_nbr_rank[nbr_rank]
         # Canonical ordering: same pattern as face-only mode.
         # entry = (edge, nbr_rank, nbr_edge, is_reversed, is_tile_nbr)
         send_order = sorted(entries, key=lambda e: e[2])

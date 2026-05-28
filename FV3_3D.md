@@ -2378,6 +2378,112 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1054 (2026-05-28): extend rank-sort fix to ``pad_halo_mpi`` — closes 4 latent np=6 deadlock sites
+
+### Goal
+
+iter-1053 fixed the rank-sort deadlock in the two helpers iter-1051
+and iter-1052 introduced.  iter-1054 audits the rest of the MPI halo
+infrastructure for the same pattern.
+
+### Surfaced bugs
+
+Found the SAME dict-insertion-order peer iteration in 4 sites of
+``src/legoesm/parallel/halo_exchange.py`` — pre-existing since
+iter-1040:
+
+- ``_pad_halo_mpi_face_only`` (scalar 2D halo) line 423
+- ``_pad_halo_mpi_tiled`` (sub-face scalar) line 585
+- ``_pad_halo_mpi_face_only_4d`` (4D halo) line 982
+- ``_pad_halo_mpi_tiled_4d`` (sub-face 4D) line 1128
+  (← missed in initial iter-1054 commit; surfaced by codex review)
+
+At np=2 these were not visible: only 1 peer per rank → no cyclic
+wait.  At np=6 face-only, EVERY ``pad_halo`` / ``pad_halo_4d``
+call under MPI would have deadlocked.  The iter-1040+ MPI test
+suite passed only because it was exclusively np=2.
+
+### Fix
+
+All 4 sites updated to ``for nbr_rank in sorted(by_nbr_rank.keys
+()): entries = by_nbr_rank[nbr_rank]``.  Identical to iter-1053
+fix.  Codex confirmed the sorted-peer ordering is deadlock-free
+on the symmetric peer graph that ``build_comm_topology``
+produces.
+
+### Validation
+
+::
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun -np 6 \
+        --oversubscribe --timeout 120 .venv/bin/python -m pytest \
+        tests/distributed/test_mpi_interp_offsets.py \
+        tests/distributed/test_mpi_synchronize_cgrid_fluxes.py \
+        tests/distributed/test_mpi_sw_sync.py -q --no-header
+    => 13/13 PASSED in 14.11 s (would have hung indefinitely before iter-1054)
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun -np 2 --timeout 600 \
+        .venv/bin/python -m pytest \
+        tests/distributed/test_mpi_fv3_step_fidelity.py
+    => 5/5 PASSED
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun -np 2 --timeout 600 \
+        .venv/bin/python -m pytest \
+        tests/distributed/test_mpi_fv3_nh_step_fidelity.py
+    => 9/9 PASSED
+
+Total: 27/27 MPI tests at np=2, 13/13 at np=6.
+
+### Codex adversarial review
+
+``gpt-5.3-codex``: 5/8 PASS, 2 WARNs, **1 FAIL** — found the
+4th unfixed site (``_pad_halo_mpi_tiled_4d`` line 1128) that
+the initial commit missed.  Fixed in same iteration.  After
+re-fix, all sites use sorted peer iteration.
+
+Codex also confirmed by independent graph-theoretic argument:
+sorted peer iteration on the symmetric peer graph that
+``build_comm_topology`` produces cannot admit a wait cycle —
+"in any non-empty remaining graph the lowest active rank and
+its lowest remaining neighbor select each other".
+
+### Status
+
+The Ralph loop session (iter-1040 → iter-1054) has now closed
+TWO distinct classes of MPI bugs:
+
+1. **Cross-face Python reads under MPI** (iter-1049, iter-1052):
+   ``synchronize_cgrid_fluxes`` and ``_sync_dgrid_boundary``
+   read ``fx[nbr_face, ...]``/``ue[nbr_face, ...]`` directly
+   — wrong under replicated MPI.  Fixed via MPI-aware sendrecv.
+
+2. **Cyclic-wait deadlock in batched-per-peer sendrecv**
+   (iter-1051 dispatch fix, iter-1053 rank-sort for new
+   helpers, iter-1054 rank-sort for pre-existing
+   ``pad_halo_mpi`` helpers): dict-insertion-order peer
+   iteration deadlocks at np > 3.  Fixed with sorted ordering.
+
+| Open follow-up | Status |
+|----------------|--------|
+| iter-1046 #1 non-square halo for cross_face | ⏳ deferred |
+| Sub-face tiled mode (n>6) general support | ⏳ tested infrastructure but no n>6 test variants run |
+| Metal+MPI+duogrid linspace XLA | ⏳ workaround documented |
+| codex iter-1054 WARN #7: tiled-mode np>6 test | ⏳ |
+
+### Why this iteration was meaningful
+
+The iter-1053 multi-rank-coverage push was load-bearing — it
+exposed THE SAME deadlock pattern that had been latent in
+``pad_halo_mpi`` since iter-1040.  Without iter-1053's np=6
+coverage step, this iter-1054 audit would not have happened
+and any future MPI run at the production C96+ × np=6
+configuration would have hung silently.
+
+Codex's pattern-matching adversarial review also caught the
+4th missed site (``_pad_halo_mpi_tiled_4d``) that I overlooked
+when scanning by ``grep "by_nbr_rank.items()"``.  10 codex
+reviews this session; this one was BLOCKER-grade catch.
+
 ## Iteration 1053 (2026-05-28): rank-sorted peer iteration — fixes latent np=6 deadlock
 
 ### Goal
