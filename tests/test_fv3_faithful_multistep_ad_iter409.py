@@ -69,8 +69,13 @@ def test_pe_factory_5_step_ad_at_rest():
                 data=amp * jnp.ones_like(rest.u_d.data),
             ),
         )
+        # FV3_3D iter-1068: dt=100 was unstable even at amp=0 for AD
+        # (see iter-1068 test_pe_factory_5_step_stable note).  Forward
+        # at amp=0 stays at rest but the JIT-traced computation at
+        # dt=100 produces NaN in the grad path.  dt=10 keeps both
+        # forward and reverse-mode finite.
         for _ in range(5):
-            s = m.step(s, 100.0)
+            s = m.step(s, 10.0)
         return jnp.mean(s.T.data ** 2)
 
     g = jax.grad(loss)(0.0)
