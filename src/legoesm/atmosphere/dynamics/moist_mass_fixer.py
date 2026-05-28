@@ -117,7 +117,12 @@ def compute_total_water_mass_plane(
     water_slot_indices : tuple of int
         Tracer-axis indices counted toward the moist mass. Default
         ``(0, 1, 2)`` = q_v + q_c + q_r (warm-rain microphysics).
-        Use ``(0, 1, 2, 3, 4, 5)`` for ice schemes.
+        Use ``(0, 1, 2, 3)`` for ice schemes (q_v, q_c, q_r, q_i).
+        **P3 warning**: do NOT include slots 4–5. Slot 4 is q_rim
+        [kg/kg], which is a subset of q_i — including it double-counts
+        rime mass. Slot 5 is B_rim [m³/kg_air], which is not a mixing
+        ratio — summing it into a water-mass integral is a dimensional
+        error. Use ``(0, 1, 2, 3)`` for P3.
 
     Returns
     -------

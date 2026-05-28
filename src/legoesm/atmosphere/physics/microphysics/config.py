@@ -7,7 +7,8 @@ Provides configuration NamedTuples for:
 4. Morrison — double-moment ice+liquid
 5. Thompson — hybrid moment with graupel
 6. ML Emulator — Equinox MLP surrogate
-7. Top-level MicrophysicsConfig that selects the active scheme.
+7. P3 — Predicted Particle Properties single-category ice
+8. Top-level MicrophysicsConfig that selects the active scheme.
 
 References
 ----------
@@ -16,11 +17,16 @@ References
 - Seifert & Beheng (2001): A two-moment cloud microphysics scheme.
 - Morrison et al. (2005): A new double-moment microphysics scheme.
 - Thompson et al. (2008): Explicit forecasts of winter precipitation.
+- Morrison & Milbrandt (2015): Parameterization of cloud microphysics
+  based on the prediction of bulk ice particle properties. Part I.
+  J. Atmos. Sci., 72, 287-311.
 """
 
 from __future__ import annotations
 
 from typing import NamedTuple
+
+from legoesm import constants
 
 
 class KesslerConfig(NamedTuple):
@@ -154,6 +160,70 @@ class ThompsonConfig(NamedTuple):
     mu_r: float = 1.0                        # Rain drop shape parameter
 
 
+class P3Config(NamedTuple):
+    """Configuration for P3 (Predicted Particle Properties) microphysics.
+
+    Single ice category with predicted rime mass (q_rim) and rime volume
+    (B_rim). Liquid phase uses Seifert-Beheng warm-rain helpers.
+
+    Ice particle properties (fall speed, density) are diagnosed from
+    (q_i, N_i, q_rim, B_rim) rather than assumed from a fixed habit.
+
+    Slot reuse in HydrometeorState
+    --------------------------------
+    q_s → q_rim  [kg/kg]        rime mass mixing ratio
+    q_g → B_rim  [m³/kg_air]    rime volume per unit air mass
+
+    The rime density rho_rim = q_rim / B_rim [kg/m³] spans the full
+    range from unrimed aggregates (~50 kg/m³) to dense graupel
+    (~900 kg/m³).
+    """
+    # --- Warm rain (Seifert-Beheng liquid phase) ---
+    k_au: float = 6e2
+    x_star: float = 2.6e-10
+    Nc_0: float = 1e8
+    k_ac: float = 5.25
+    k_sc: float = 1e-3
+    D_eq: float = 1.1e-3
+    breakup_sharpness: float = 1e4
+    a_v_r: float = 130.0
+    b_v_r: float = 0.5
+    evap_coeff: float = 1.0
+    saturation_sharpness: float = 100.0
+    autoconversion_sharpness: float = 10.0
+    # --- Ice nucleation (Cooper 1986) ---
+    N_i0: float = 5e3               # Cooper base ice crystal number [1/m³]
+    cooper_a: float = 0.304         # Cooper exponent
+    cooper_T_act: float = 265.0     # Activation temperature [K]
+    ice_sigmoid_sharpness: float = 5.0
+    # --- Ice depositional growth ---
+    dep_coeff: float = 1e-3
+    q_i_min_growth: float = 1e-9    # Minimum effective q_i for deposition [kg/kg]
+    # --- Cloud riming (ice collects cloud droplets) ---
+    rime_coeff: float = 0.5         # Collection efficiency E_ri [-]
+    # --- Rain riming (ice collects rain drops, freezes) ---
+    rain_rime_coeff: float = 0.1    # Collection efficiency E_rr [-]
+    # --- Self-collection / aggregation (N_i reduction) ---
+    agg_coeff: float = 1e-3         # Aggregation rate [1/s]
+    # --- Melting ---
+    melt_rate: float = 5e-3         # Melting rate [1/s]
+    melt_sharpness: float = 2.0     # Sigmoid sharpness near T_freeze [1/K]
+    # --- P3 fall speed: V_t = a_v_i * (q_i*rho_ratio)^b_v_i * density_factor ---
+    a_v_i: float = 40.0             # Base fall speed coefficient
+    b_v_i: float = 0.3              # Fall speed exponent
+    # --- Rime density limits [kg/m³] ---
+    rho_rim_min: float = 50.0       # Minimum rime density (unrimed aggregates)
+    rho_rim_max: float = 900.0      # Maximum rime density (dense graupel)
+    # --- Fall speed density enhancement ---
+    # V_t *= (rho_rim / rho_ice_ref)^c_rim_fallspeed
+    c_rim_fallspeed: float = 0.4    # Density enhancement exponent [-]
+    rho_ice_ref: float = 500.0      # Reference rime density for scaling [kg/m³]
+    # --- Accreted rime density (for dB_rim/dt from riming) ---
+    rho_rim_accrete: float = 400.0  # Density of newly accreted rime [kg/m³]
+    # --- Bulk ice density (for B_rim from nucleation) ---
+    rho_ice: float = constants.rho_ice  # Solid ice density [kg/m³]
+
+
 class MLEmulatorConfig(NamedTuple):
     """Configuration for ML microphysics emulator (Equinox MLP)."""
     n_input: int = 9
@@ -178,12 +248,13 @@ class MicrophysicsConfig(NamedTuple):
     ------
     scheme : str
         Active scheme: "kessler", "sundqvist", "seifert_beheng",
-        "morrison", "thompson", "ml_emulator", or "none".
+        "morrison", "thompson", "p3", "ml_emulator", or "none".
     kessler : KesslerConfig
     sundqvist : SundqvistConfig
     seifert_beheng : SeifertBehengConfig
     morrison : MorrisonConfig
     thompson : ThompsonConfig
+    p3 : P3Config
     ml_emulator : MLEmulatorConfig
     """
     scheme: str = "none"
@@ -192,4 +263,5 @@ class MicrophysicsConfig(NamedTuple):
     seifert_beheng: SeifertBehengConfig = SeifertBehengConfig()
     morrison: MorrisonConfig = MorrisonConfig()
     thompson: ThompsonConfig = ThompsonConfig()
+    p3: P3Config = P3Config()
     ml_emulator: MLEmulatorConfig = MLEmulatorConfig()

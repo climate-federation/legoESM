@@ -376,6 +376,15 @@ class ExperimentConfig(NamedTuple):
                 f"cloud_scheme must be one of {_valid_cloud_schemes}, "
                 f"got {self.cloud_scheme!r}"
             )
+        _valid_microphysics = (
+            "none", "kessler", "sundqvist", "seifert_beheng",
+            "morrison", "thompson", "p3", "ml_emulator",
+        )
+        if self.microphysics not in _valid_microphysics:
+            errors.append(
+                f"microphysics must be one of {_valid_microphysics}, "
+                f"got {self.microphysics!r}"
+            )
         # Reject unsupported coupled/ESM modes with actionable errors.
         if self.carbon_cycle != "none":
             errors.append(

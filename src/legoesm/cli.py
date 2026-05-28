@@ -138,6 +138,13 @@ def cmd_test(args):
     from legoesm.runtime import bootstrap
     rc = bootstrap(precision="fp32")
 
+    # tests/ is not an installed package; add the project root so the import
+    # works whether invoked via the console-script entry point or python -m.
+    import pathlib
+    _project_root = pathlib.Path(__file__).parent.parent.parent
+    if str(_project_root) not in sys.path:
+        sys.path.insert(0, str(_project_root))
+
     import jax
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
