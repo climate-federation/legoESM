@@ -317,7 +317,7 @@ def main() -> int:
         import subprocess, sys, tempfile, shutil
         print("\n--check-tridiag-backends: rerunning each --nx with forced "
               "PCR / cuSPARSE / legacy backends...")
-        header = f"  {'backend':10s}  {'N':>5s}  {'Mc/s':>7s}  {'step ms':>8s}"
+        header = f"  {'backend':10s}  {'N':>5s}  {'Mc/s':>7s}  {'step ms':>8s}  {'HBM%':>5s}"
         print(header)
         print("  " + "-" * (len(header) - 2))
         # Use a single auto-cleaned tempdir for all backend subprocess
@@ -352,10 +352,14 @@ def main() -> int:
                             import re
                             m_mc = re.search(r"throughput=\s*([\d.]+)Mcells", line)
                             m_ms = re.search(r"step=\s*([\d.]+)ms", line)
+                            m_hbm = re.search(r"\((\s*\d+)%\)", line)
                             if m_mc and m_ms:
+                                hbm = (f"{m_hbm.group(1).strip()}%"
+                                       if m_hbm else "  -")
                                 print(f"  {backend:10s}  {nx:5d}  "
                                       f"{float(m_mc.group(1)):7.1f}  "
-                                      f"{float(m_ms.group(1)):8.2f}")
+                                      f"{float(m_ms.group(1)):8.2f}  "
+                                      f"{hbm:>5s}")
                             break
                 except subprocess.CalledProcessError as exc:
                     # Surface the underlying failure reason (NaN/CFL/etc.)
