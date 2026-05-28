@@ -170,3 +170,22 @@ as the LAST field of LatLonCGridOceanConfig (field-name must stay last — it sh
 test_constants_config.py. Running full ocean unit+fidelity suite as the zero-regression gate
 before committing G-C1. G-C2 (de-mirror the _CONSTANT_SHADOWS sites + inline constants.X
 physics reads) next.
+
+### 2026-05-28 · iter 8 · G-C1 committed (3a..? -> b8808743 was Q3; G-C1 = next commit); G-C2 foundation
+G-C1 committed (ConstantsConfig + LatLonCGridOceanConfig field; targeted gate 50 passed).
+G-C2 foundation: added `constants: ConstantsConfig` to OceanPhysicsConfig (zero behaviour;
+gives physics factories access). Targeted gate 24 passed.
+KEY INSIGHT (de-risks the rest of G-C2): ConstantsConfig defaults EXACTLY equal the module
+constants (g==constants.g, etc.), so replacing inline `constants.X` reads with
+`config.constants.X` (default config) is PROVABLY zero-behaviour by construction (identical
+float) — targeted tests only need to confirm the threading/wiring, not re-prove numerics.
+REMAINING G-C2 read-de-mirroring (next increments, each targeted-verified):
+  - vertical_mixing/{integration,k_profiles,tke,mpas_integration}.py: constants.g buoyancy
+    reads -> thread config.constants.g through the make_* factories.
+  - module-mirror sites (_CONSTANT_SHADOWS): eos.{rho_0,c_sw}, diagnostics._RHO_0,
+    _gm_redi_common._RHO_0_DEFAULT, gm_redi_{mpas,latlon}._RHO_0, prescribed/bulk_formulas,
+    shortwave, mpas_physics.
+  - G-C3 coupler/forcing; G-C4 migrate recipe to ConstantsConfig injection + delete
+    override_constants monkey-patch; G-C5 audit guard.
+Full-suite gate auto-backgrounds/times-out in this env; using targeted per-module gates +
+the zero-behaviour-by-construction argument.

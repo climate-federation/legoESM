@@ -56,3 +56,17 @@ def test_constants_field_is_overridable_via_public_api():
     cfg = LatLonCGridOceanConfig(constants=VEROS_CONSTANTS_CONFIG)
     assert cfg.constants.rho_0 == 1024.0
     assert cfg.constants.g == 9.81
+
+
+def test_physics_config_carries_default_constants():
+    """G-C2: OceanPhysicsConfig also carries a `constants` field (defaults
+    canonical, zero behaviour) so the physics factories can read recipe-pinned
+    constants for de-mirroring the inline constants.g buoyancy reads."""
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+
+    pc = OceanPhysicsConfig()
+    assert isinstance(pc.constants, ConstantsConfig)
+    assert pc.constants.g == constants.g
+    # overridable via public API
+    pc2 = OceanPhysicsConfig(constants=VEROS_CONSTANTS_CONFIG)
+    assert pc2.constants.g == 9.81

@@ -13,6 +13,7 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.state import OceanState, OceanSurfaceForcing, OceanTendencies
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
@@ -45,6 +46,11 @@ class OceanPhysicsConfig(NamedTuple):
     bottom_drag: BottomDragConfig = BottomDragConfig()
     convection: OceanConvectionConfig = OceanConvectionConfig()
     shortwave_penetration: ShortwavePenetrationConfig | None = ShortwavePenetrationConfig()
+    # Ocean-scoped physical constants (Phase G, G-C2). Defaults reference
+    # legoesm.constants -> zero behaviour change. Gives the physics factories
+    # access to recipe-pinned constants so the inline `constants.g` buoyancy
+    # reads (KPP/TKE/k_profiles) can be de-mirrored to read config.constants.g.
+    constants: ConstantsConfig = ConstantsConfig()
 
 
 def make_ocean_physics(
