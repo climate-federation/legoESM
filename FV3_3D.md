@@ -2378,6 +2378,28 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1090 + 1091 (2026-05-28): AD compat for MPI dgrid halo + strict gradient correctness tests
+
+iter-1083's raw ``mpi4jax.sendrecv`` choked on the symbolic
+``ad_util.Zero`` cotangent ``jax.grad`` emits during backward.
+iter-1090 routes through ``_get_sendrecv_vjp`` (the same custom_vjp
+wrapper the iter-1040+ MPI halo uses); ``_bwd`` swaps source↔dest
+and flows cotangents back.
+
+Codex review of iter-1090: 4 PASS + 2 WARN coverage gaps.
+
+iter-1091 closes both:
+- ``test_jit_grad_composition``: ``jax.jit(jax.grad(loss))`` survives
+  (canonical training pipeline pattern).
+- ``test_grad_allreduce_recovers_single_device_reference``: per-rank
+  MPI gradient masked to owned faces, then allreduced (SUM), equals
+  single-device reference bit-for-bit (mirrors iter-1062 pattern
+  from test_mpi_differentiability).
+
+Validation: 4 tests pass at np ∈ {2, 3, 6}.  Per CLAUDE.md
+"End-to-end jax.grad compat = goal" mandate now fully met for
+the MPI dgrid halo.
+
 ## Iteration 1083 (2026-05-28): MPI dgrid vector halo — 24/24 edges bit-for-bit FV3-faithful under MPI
 
 Closes codex iter-1078 BLOCKER M1: replaces the iter-1081
