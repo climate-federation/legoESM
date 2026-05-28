@@ -589,8 +589,20 @@ def compute_heating_rate(
       dp = 0.5 * kernel_ops.centered_difference(pressure, dim=2)
 
   # Compute the forward pressure difference of fluxes on faces (like a
-  # derivative of face_to_node).
+  # derivative of face_to_node).  This is the net upward flux out of the
+  # cell; a positive value means the cell radiates away energy and cools.
   dflux = kernel_ops.forward_difference(flux_net, dim=2)
 
-  # Compute the heating rate at the grid cell center in K/s.
-  return constants.G * dflux / dp / constants.CP_D
+  # Heating rate at the grid cell center [K/s].  **Minus sign** (restored
+  # from commit 0be22f0f after the AIMIP-#312 merge reverted it): net
+  # flux *out* cools the cell.  ``abs(dp)`` so the sign is set by the
+  # flux divergence alone, not by the vertical-axis orientation
+  # (``solve_columns`` passes positive layer thickness; the legacy
+  # ``RRTMGP.compute_heating_rate`` callpath passes a centered-difference
+  # negative ``dp`` that abs() canonicalises).
+  #
+  # Pre-fix bug symptom: free-tropospheric LW heating was +2..+5 K/day
+  # (radiative warming) instead of −1..−2 K/day (radiative cooling),
+  # driving thermal runaway in long AMIP integrations (T̄ 261 → 293 K
+  # over 120 days, NaN blowup at day 125).
+  return -constants.G * dflux / jnp.abs(dp) / constants.CP_D

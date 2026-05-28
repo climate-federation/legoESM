@@ -905,5 +905,82 @@ class TestStandardO3Profile:
         )
 
 
+class TestHeatingRateSign:
+    """Iter-13: regression guard for the sign-inverted heating rate bug.
+
+    Commit 0be22f0f (2026-05-22) fixed a sign error in
+    ``compute_heating_rate`` that was driving thermal runaway in long
+    AMIP integrations (T̄ 261 → 293 K over 120 days, NaN blowup at
+    day 125).  The fix was lost when the AIMIP-#312 merge reverted
+    ``two_stream.py``; iter-13 restores it.
+
+    Pin the sign here so any future regression is caught immediately
+    instead of after weeks of unstable runs.
+    """
+
+    def test_free_tropospheric_LW_cools(self):
+        """Free troposphere (300-800 hPa) must show LW *cooling*
+        (negative heating rate) for a US-Std-like warm surface column.
+        Pre-fix bug: this region showed +2..+5 K/day heating instead."""
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(RRTMGPConfig())
+        ncol, nlev = 1, 20
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1)
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        T = jnp.linspace(220.0, 290.0, nlev)[None, :]  # TOA-first
+        sfc_T = jnp.array([300.0])
+        q_v = jnp.full((ncol, nlev), 5e-3)
+        cos_z = jnp.array([0.5])
+
+        out = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+        )
+        p_hPa = np.asarray(p_full)[0] / 100.0
+        hr_K_per_day = np.asarray(out.lw_heating_rate)[0] * 86400.0
+        # Free-tropospheric mask: 300-800 hPa.
+        mask = (p_hPa > 300.0) & (p_hPa < 800.0)
+        assert mask.any(), "test setup error: no levels in 300-800 hPa"
+        # All free-tropospheric levels must show LW cooling.
+        assert (hr_K_per_day[mask] < 0).all(), (
+            f"Free-tropospheric LW heating rates must all be negative "
+            f"(LW cooling); got {hr_K_per_day[mask]} K/day at "
+            f"p={p_hPa[mask]} hPa.  Sign-inverted heating-rate bug "
+            f"regression — see commit 0be22f0f."
+        )
+
+    def test_clear_sky_SW_heats(self):
+        """Clear-sky daytime SW must heat the atmosphere (non-negative
+        heating rate everywhere).  Pre-fix bug had SW *cooling* layers."""
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(RRTMGPConfig())
+        ncol, nlev = 1, 20
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1)
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        T = jnp.linspace(220.0, 290.0, nlev)[None, :]
+        sfc_T = jnp.array([300.0])
+        q_v = jnp.full((ncol, nlev), 5e-3)
+        cos_z = jnp.array([0.5])  # sun overhead-ish
+
+        out = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+        )
+        sw_hr = np.asarray(out.sw_heating_rate)[0]
+        assert (sw_hr >= 0).all(), (
+            f"Clear-sky SW heating must be non-negative; got {sw_hr}.  "
+            f"Sign-inverted heating-rate bug regression — see commit "
+            f"0be22f0f."
+        )
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
