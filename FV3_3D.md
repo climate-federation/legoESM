@@ -2378,6 +2378,136 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1049 (2026-05-28): **root cause + fix** — MPI-aware ``synchronize_cgrid_fluxes``
+
+### Goal
+
+Resolve the iter-1046/1047/1048 duogrid + NH-step MPI mismatch.
+iter-1048 ruled out the halo-op layer; iter-1049 bisected the
+step-level code.
+
+### Root cause (found via 5-probe bisection)
+
+The MPI divergence is in ``cgrid_mass_flux_divergence`` when
+duogrid is on.  Specifically, the duogrid mass-conservation
+flux average step (``synchronize_cgrid_fluxes``, FV3
+``dyn_core.F90:853-900`` port) reads neighbor face flux values
+directly::
+
+    nbr_bdy = fx[nbr_face, ...]
+
+Under MPI in replicated mode, ``fx[nbr_face, ...]`` is the
+NON-OWNED face's flux value, computed by THIS rank with zero
+halos (because the MPI halo exchange only fills owned face
+halos).  The averaged result on the owned face thus incorporates
+a wrong neighbor value.
+
+Bisection probes (5 of 5 conclusive):
+
+| Probe | Result |
+|-------|--------|
+| Tendency-level diff per field | ``dtheta_prime_dt`` and ``drho_prime_dt`` diverge; du/dv/dw bit-for-bit |
+| ``cgrid_divergence`` MPI vs local | bit-for-bit |
+| ``cgrid_mass_flux_divergence`` MPI vs local | ❌ 2-3e-4 max diff |
+| 2D path vs 4D path on same backend | matches at machine eps (4D refactor clean) |
+| ``pad_halo_4d(...)`` MPI vs local | bit-for-bit |
+
+The divergence is downstream of pad_halo_4d, in the sync step.
+
+### Fix
+
+Two coordinated changes:
+
+1. ``grids/halo.py``: ``synchronize_cgrid_fluxes`` now dispatches
+   to ``_synchronize_cgrid_fluxes_mpi(fx, fy, n, topology)`` when
+   ``_halo_backend == "mpi"``.  The MPI variant:
+   - Iterates each owned face's 4 edges.
+   - For local edges (both endpoints owned by this rank), reads
+     directly (same as single-device).
+   - For remote edges, uses ``mpi4jax.sendrecv`` to swap boundary
+     flux strips with the neighbor rank.
+   - Applies the same reversal + ``_FLUX_SIGN_FLIP_EDGES`` sign
+     correction to the received strip as the local variant.
+   - Averages and writes back to OWNED face boundaries only.
+
+2. ``core/operators_cdgrid.py``: ``cgrid_mass_flux_divergence``
+   4D path refactored to lift sync OUT of the per-level vmap
+   (the new sendrecv would otherwise trigger mpi4jax's
+   sendrecv-in-vmap batch-axis assertion — same lesson as
+   iter-1042/1043/1044/1045).  New helper
+   ``_cgrid_ppm_fluxes_2d_no_sync`` computes per-level fluxes
+   only; the 4D entry stacks fluxes via ``moveaxis``,
+   synchronizes the 4D fluxes ONCE, then computes the divergence.
+
+### Tag scheme
+
+The MPI sendrecv uses ``_tag(face, edge, nbr_face, nbr_edge) =
+(face*4 + edge)*100 + (nbr_face*4 + nbr_edge)``.  ``face`` ∈
+{0..5}, ``edge`` ∈ {0..3} (W/E/S/N).  Max value 2323 (fits MPI's
+32767 required-min tag space).  Sender uses ``_tag(f, e, nf, ne)``,
+receiver uses ``_tag(nf, ne, f, e)`` — matching pair.
+
+### Validation
+
+::
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun -np 2 \
+        .venv/bin/python -m pytest \
+        tests/distributed/test_mpi_fv3_nh_step_fidelity.py -v
+    => 9/9 PASSED (including factory with duogrid=True now)
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 .venv/bin/python -m pytest \
+        tests/test_cross_face_du_proj_iter370.py \
+        tests/test_corner_div_damp_nh.py \
+        tests/test_damp_v_nh.py \
+        tests/atmosphere/nonhydrostatic/integration/test_fv_cubesphere.py \
+        -q
+    => 19/19 single-device regression PASSED
+
+Updated factory MPI tests to use ``use_duogrid=True`` per the
+factory docstring's documented pairing (was disabled in
+iter-1046/1047 due to this bug; iter-1049 enables it).
+
+### Codex adversarial review
+
+``gpt-5.3-codex``: CONFIRMED 7/7 claims (averaging semantics,
+tag uniqueness, sign-flip placement, no recursion, 4D refactor
+arithmetic-clean, vmap-lift correctness, owned-face contract).
+2 FLAGs:
+
+- Stale comment with wrong tag scheme — FIXED in iter-1049 commit.
+- Non-owned faces silently retain stale pre-sync values — by
+  design under MPI replicated mode.  Downstream divergence on
+  owned faces correctly uses only owned face fluxes (verified
+  by Codex via syntactic check + by the iter-1049 MPI bit-for-bit
+  test).  Production callers must consume owned faces only —
+  same contract as iter-1040+ MPI tests.
+
+### Status
+
+The iter-1046 known limitation "duogrid + full factory MPI in-
+suite bit-for-bit mismatch" is now CLOSED.  Factory tests run
+with ``use_duogrid=True`` (the documented production pairing)
+and match single-rank bit-for-bit on owned faces.
+
+| Open follow-up | Status |
+|----------------|--------|
+| ``use_fv3_cross_face_du_proj=True`` non-square halo (iter-1046 #1) | ⏳ deferred — substantial refactor; defensive ``mode='edge'`` fallback works under MPI |
+| duogrid + full factory MPI (iter-1046 #2) | ✅ **CLOSED iter-1049** |
+| Sub-face tiling (n>6) with interp_offsets | ⏳ tile-local offset indexing not yet derived |
+| Metal+MPI+duogrid linspace XLA error | ⏳ workaround ``JAX_PLATFORMS=cpu`` documented |
+
+### Why this iteration was meaningful
+
+iter-1046's "duogrid+factory limitation" sat in the open
+follow-up list for 2 iterations.  iter-1047 ruled out the
+hypothesis Codex flagged ("non-owned halo feedback"); iter-1048
+ruled out the entire halo-op layer.  iter-1049's 5-probe
+bisection localized the bug to a single Python-level function
+that had been silently MPI-incorrect since the duogrid feature
+was added.  The fix is small (one helper + one dispatch line
++ one 4D-lift) but unlocks the documented production config.
+
 ## Iteration 1048 (2026-05-28): minimal NH+duogrid step divergence — narrowed to non-pad_halo source
 
 ### Goal

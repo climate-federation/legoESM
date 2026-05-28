@@ -2314,6 +2314,13 @@ _FLUX_SIGN_FLIP_EDGES = frozenset({
 def synchronize_cgrid_fluxes(fx, fy, n):
     """Average C-grid fluxes at shared face boundaries (duogrid conservation fix).
 
+    FV3_3D iter-1049: under the MPI backend (``_halo_backend == "mpi"``)
+    we dispatch to :func:`_synchronize_cgrid_fluxes_mpi`, which uses
+    ``mpi4jax.sendrecv`` to swap boundary flux strips between ranks
+    before averaging.  Without that swap, ``fx[nbr_face, ...]`` reads
+    of non-owned faces return values computed with zero halos and
+    contaminate the averaged result on OWNED faces.
+
     Implements the duogrid flux averaging from FV3 dyn_core.F90:853-900.
     Each shared face boundary flux is replaced by the average of both
     faces' independently computed boundary fluxes, ensuring that the mass
@@ -2345,6 +2352,10 @@ def synchronize_cgrid_fluxes(fx, fy, n):
     fx_sync, fy_sync : jax.Array
         Fluxes with averaged boundary values.
     """
+    # FV3_3D iter-1049: MPI dispatch.
+    if _halo_backend == "mpi" and _mpi_topology is not None:
+        return _synchronize_cgrid_fluxes_mpi(fx, fy, n, _mpi_topology)
+
     # Pre-compute all boundary averages from the ORIGINAL (unsynchronized)
     # fluxes so that we read before writing.
     avgs = {}
@@ -2371,6 +2382,101 @@ def synchronize_cgrid_fluxes(fx, fy, n):
                 fy = fy.at[face, :, 0].set(avg)
             else:  # NORTH
                 fy = fy.at[face, :, n].set(avg)
+
+    return fx, fy
+
+
+def _synchronize_cgrid_fluxes_mpi(fx, fy, n, topology):
+    """MPI-aware variant of :func:`synchronize_cgrid_fluxes`.
+
+    For each owned face's edge, locate the neighbour face and its
+    cross-face edge.  If both endpoints live on this rank (local
+    edge), read directly from ``fx`` / ``fy`` — same as the
+    single-device path.  Otherwise issue an ``mpi4jax.sendrecv``
+    that swaps the local boundary flux strip with the neighbour
+    rank's strip from the corresponding edge.
+
+    The function leaves non-owned face boundary values UNCHANGED in
+    the returned arrays — only owned faces get the averaged result.
+    Callers comparing across local/MPI must compare owned faces only
+    (the MPI-replicated-mode contract).
+    """
+    from legoesm.parallel.halo_exchange import _get_sendrecv_vjp
+    try:
+        import mpi4jax
+        from mpi4py import MPI as _MPI
+    except ImportError as exc:
+        raise ImportError(
+            "MPI synchronize_cgrid_fluxes requires mpi4jax + mpi4py."
+        ) from exc
+    sendrecv = _get_sendrecv_vjp(mpi4jax)
+    comm = _MPI.COMM_WORLD
+    rank = topology.rank
+
+    # Classify each (owned face, edge) as local or remote.
+    edge_entries = []
+    for face in topology.local_face_ids:
+        for edge in (WEST, EAST, SOUTH, NORTH):
+            nbr_face, nbr_edge, rev = CONNECTIVITY[face][edge]
+            nbr_rank = topology.neighbor_ranks[(face, edge)]
+            edge_entries.append(
+                (face, edge, nbr_face, nbr_edge, rev, nbr_rank)
+            )
+
+    # Helper: get the bare boundary strip BEFORE applying reversal or
+    # sign flip (those go on the received nbr value).
+    def _bdy_strip(face, edge):
+        return _extract_cgrid_boundary(fx, fy, face, edge, n)
+
+    # Pre-extract every owned-face boundary strip (local view).
+    local_strips = {(f, e): _bdy_strip(f, e) for f, e, *_ in edge_entries}
+
+    # Exchange remote neighbour strips via mpi4jax.
+    nbr_strips = {}
+    # Tag scheme: ``(face * 4 + edge) * 100 + (nbr_face * 4 + nbr_edge)``.
+    # ``face`` and ``edge`` are each in [0, 5] and [0, 3] so ``face*4+edge``
+    # fits in [0, 23].  The 100-stride for the high term guarantees no
+    # carry from the low term; sender uses ``_tag(f, e, nf, ne)`` and
+    # receiver uses ``_tag(nf, ne, f, e)``, so each cross-rank pair
+    # exchanges with matching tags.  Max value 2323 < MPI's 32767
+    # required-min tag space.  24 (face, edge) → 24 unique tags.
+    def _tag(face, edge, nbr_face, nbr_edge):
+        return (face * 4 + edge) * 100 + (nbr_face * 4 + nbr_edge)
+
+    for face, edge, nbr_face, nbr_edge, rev, nbr_rank in edge_entries:
+        if nbr_rank == rank:
+            # Local edge — read directly.
+            nbr_strips[(face, edge)] = _bdy_strip(nbr_face, nbr_edge)
+        else:
+            send_buf = local_strips[(face, edge)]
+            # Send our boundary strip for this (face, edge); receive
+            # the neighbour's strip for (nbr_face, nbr_edge).
+            send_tag = _tag(face, edge, nbr_face, nbr_edge)
+            recv_tag = _tag(nbr_face, nbr_edge, face, edge)
+            recv = sendrecv(
+                send_buf, jnp.zeros_like(send_buf),
+                nbr_rank, nbr_rank,
+                send_tag, recv_tag, comm,
+            )
+            nbr_strips[(face, edge)] = recv
+
+    # Compute averages and write back to owned faces.
+    for face, edge, nbr_face, nbr_edge, rev, nbr_rank in edge_entries:
+        local_bdy = local_strips[(face, edge)]
+        nbr_bdy = nbr_strips[(face, edge)]
+        if rev:
+            nbr_bdy = nbr_bdy[::-1]
+        if (face, edge) in _FLUX_SIGN_FLIP_EDGES:
+            nbr_bdy = -nbr_bdy
+        avg = 0.5 * (local_bdy + nbr_bdy)
+        if edge == WEST:
+            fx = fx.at[face, 0, :].set(avg)
+        elif edge == EAST:
+            fx = fx.at[face, n, :].set(avg)
+        elif edge == SOUTH:
+            fy = fy.at[face, :, 0].set(avg)
+        else:  # NORTH
+            fy = fy.at[face, :, n].set(avg)
 
     return fx, fy
 

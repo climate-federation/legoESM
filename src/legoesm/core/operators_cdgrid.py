@@ -532,6 +532,55 @@ def cgrid_gradient_2d(eta, cdgrid):
 # C-grid mass flux with PPM transport
 # ==============================================================================
 
+def _cgrid_ppm_fluxes_2d_no_sync(
+    h, u_c, v_c, h_pad, cdgrid,
+    apply_fortran_xppm_boundary=False,
+    fortran_faithful_ppm_left=False,
+    fortran_faithful_ppm_right=False,
+):
+    """2D PPM flux computation WITHOUT duogrid synchronization.
+
+    Used by the 4D ``cgrid_mass_flux_divergence`` to compute per-level
+    fluxes inside ``jax.vmap``.  The 4D entry then synchronizes the
+    stacked 4D fluxes (one MPI sendrecv exchange total, vs ``nlev``
+    inside vmap which mpi4jax's batch-axis rule refuses).
+    """
+    n = cdgrid.n
+    dy = cdgrid.dy_edge_x
+    dx = cdgrid.dx_edge_y
+    effective_xppm_boundary = (
+        apply_fortran_xppm_boundary
+        and not cdgrid.base.bounded_domain
+    )
+    h_x_strips = h_pad[:, :, 2:-2]
+    q_L_x, q_R_x = _ppm_reconstruct_1d(
+        h_x_strips, axis=1,
+        apply_fortran_xppm_boundary=effective_xppm_boundary,
+        n_interior=n,
+        fortran_faithful_ppm_left=fortran_faithful_ppm_left,
+        fortran_faithful_ppm_right=fortran_faithful_ppm_right,
+    )
+    q_R_left = q_R_x[:, 1:n + 2, :]
+    q_L_right = q_L_x[:, 2:n + 3, :]
+    h_face_x = jnp.where(u_c > 0, q_R_left, q_L_right)
+
+    h_y_strips = h_pad[:, 2:-2, :]
+    q_L_y, q_R_y = _ppm_reconstruct_1d(
+        h_y_strips, axis=2,
+        apply_fortran_xppm_boundary=effective_xppm_boundary,
+        n_interior=n,
+        fortran_faithful_ppm_left=fortran_faithful_ppm_left,
+        fortran_faithful_ppm_right=fortran_faithful_ppm_right,
+    )
+    q_R_bottom = q_R_y[:, :, 1:n + 2]
+    q_L_top = q_L_y[:, :, 2:n + 3]
+    h_face_y = jnp.where(v_c > 0, q_R_bottom, q_L_top)
+
+    flux_x = h_face_x * u_c * dy
+    flux_y = h_face_y * v_c * dx
+    return flux_x, flux_y
+
+
 def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
                                 apply_fortran_xppm_boundary=False,
                                 fortran_faithful_ppm_left=False,
@@ -555,19 +604,41 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
         v_c_t = jnp.moveaxis(v_c, -1, 0)
         h_pad_t = jnp.moveaxis(h_pad_4d, -1, 0)
 
-        def flux_div_one(args):
+        # FV3_3D iter-1049: per-level vmap computes fluxes only (no
+        # sync, no divergence) — the duogrid flux synchronization
+        # involves an MPI sendrecv that cannot run inside ``vmap``
+        # (mpi4jax batch-axis assertion).  Lift sync + divergence to
+        # the 4D level after the vmap.
+        def flux_per_level(args):
             hk, uk, vk, hk_pad = args
-            return cgrid_mass_flux_divergence(
-                hk, uk, vk, cdgrid,
-                apply_fortran_xppm_boundary=(
-                    apply_fortran_xppm_boundary),
+            return _cgrid_ppm_fluxes_2d_no_sync(
+                hk, uk, vk, hk_pad, cdgrid,
+                apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
                 fortran_faithful_ppm_left=fortran_faithful_ppm_left,
                 fortran_faithful_ppm_right=fortran_faithful_ppm_right,
-                h_pad=hk_pad,
             )
 
-        result_t = jax.vmap(flux_div_one)((h_t, u_c_t, v_c_t, h_pad_t))
-        return jnp.moveaxis(result_t, 0, -1)
+        flux_x_t, flux_y_t = jax.vmap(flux_per_level)(
+            (h_t, u_c_t, v_c_t, h_pad_t)
+        )
+        # (nlev, 6, n+1, n) → (6, n+1, n, nlev) and (6, n, n+1, nlev)
+        flux_x_4d = jnp.moveaxis(flux_x_t, 0, -1)
+        flux_y_4d = jnp.moveaxis(flux_y_t, 0, -1)
+
+        # Duogrid flux sync at the 4D level (one MPI exchange total,
+        # not nlev of them).  ``synchronize_cgrid_fluxes`` is
+        # shape-polymorphic — operates on the trailing nlev axis via
+        # broadcasting.
+        dg = cdgrid.base.duogrid
+        n = cdgrid.n
+        if dg is not None and dg.ng >= 2:
+            flux_x_4d, flux_y_4d = synchronize_cgrid_fluxes(
+                flux_x_4d, flux_y_4d, n,
+            )
+
+        net_x_4d = flux_x_4d[:, 1:] - flux_x_4d[:, :-1]
+        net_y_4d = flux_y_4d[:, :, 1:] - flux_y_4d[:, :, :-1]
+        return -(net_x_4d + net_y_4d) / cdgrid.base.area[..., None]
 
     # 2D case: PPM face reconstruction with halo=2
     if h_pad is None:
@@ -617,6 +688,13 @@ def cgrid_mass_flux_divergence(h, u_c, v_c, cdgrid,
 
     # Duogrid flux sync: avg boundary fluxes for mass conservation (FV3 dyn_core.F90:853-900).
     # NOT for non-duogrid: PPM boundary asymmetry is a feature; sync gives 110x W2 regression.
+    # FV3_3D iter-1049: ``synchronize_cgrid_fluxes`` reads neighbor face
+    # values directly (``fx[nbr_face, ...]``).  Under MPI in replicated
+    # mode the non-owned face flux values were computed with zero halo
+    # and are WRONG, contaminating owned-face boundary averages.  The
+    # MPI-aware variant exchanges boundary flux strips across ranks
+    # before averaging, restoring bit-for-bit fidelity vs the local
+    # backend on owned faces.
     dg = cdgrid.base.duogrid
     if dg is not None and dg.ng >= 2:
         flux_x, flux_y = synchronize_cgrid_fluxes(flux_x, flux_y, n)

@@ -373,19 +373,14 @@ class TestFV3NHStepMPIFidelity:
         from legoesm.core.state import NonHydrostaticState
 
         n, nlev = 8, 5
-        # iter-1047: duogrid=True reverted (still off).  Standalone
-        # ``pad_halo_4d(duogrid=DG)`` is MPI bit-for-bit on CPU
-        # (verified by iter-1047 probe), but the FULL factory stack
-        # composed with duogrid=True shows a real ~5e-3 max-diff in
-        # the w/theta_prime fields after the first NH step.  Only
-        # reproduces when the factory test runs AFTER other NH
-        # tests in the same pytest session — passes alone.  Not a
-        # JIT cache issue (``jax.clear_caches()`` doesn't help).
-        # Suspect global device-mesh / topology state set during the
-        # earlier test's ``initialize_distributed`` interacting with
-        # the duogrid post-pad remap or sin_sg/cos_sg pads inside
-        # the slow-tendency.  Tracked as iter-1047 follow-up.
-        grid = create_cubed_sphere(n)
+        # iter-1049: duogrid=True now MPI-safe.  Root cause of the
+        # iter-1046/1047 in-suite mismatch was
+        # ``synchronize_cgrid_fluxes`` reading non-owned face flux
+        # values directly (which under MPI replicated mode were
+        # computed with zero halos).  iter-1049 added an MPI-aware
+        # sendrecv path; the factory test now passes with the
+        # documented production pairing.
+        grid = create_cubed_sphere(n, use_duogrid=True)
         z_top = 30000.0
         height_coord = create_height_coordinate(nlev, z_top)
         terrain = jnp.zeros((6, grid.n, grid.n))
