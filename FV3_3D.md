@@ -2378,6 +2378,75 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1069 (2026-05-28): restore missing ``coriolis_parameter_fv3`` + ``get_unit_vector_fv3``
+
+### Goal
+
+Broader FV3 single-device test sweep surfaced 9 pre-existing
+``NameError`` failures across 2 files:
+
+- ``test_fv3_rotate_winds_iter661.py``: 4 ``NameError:
+  'get_unit_vector_fv3' is not defined``
+- ``test_fv3_tc_uwind_pert_iter672.py``: 5 ``NameError:
+  'coriolis_parameter_fv3' is not defined``
+
+### Root cause
+
+iter 905 (commit c1c0e42b "FV3_3D iter 905: clean up Earth-system
+diagnostic drift unrelated to FV3 dycore") removed 12894 lines
+from ``src/legoesm/grids/cubed_sphere.py`` — including the
+definitions of ``coriolis_parameter_fv3`` and ``get_unit_vector_fv3``
+— BUT left the call sites in:
+
+- ``rotate_winds_fv3`` (line 2141-2142): two calls to
+  ``get_unit_vector_fv3(lon3, lat3, lon_t, lat_t, lon1, lat1)``.
+- ``dcmip16_tc_uwind_pert`` (line 2504): call to
+  ``coriolis_parameter_fv3(jnp.asarray(phip))``.
+
+Drift cleanup deleted the definitions assuming they were unused;
+in fact they were called by dycore-relevant functions
+(``rotate_winds_fv3`` for DCMIP-16 test-case wind initialization).
+
+### Fix
+
+Restore the 2 function definitions inline in
+``src/legoesm/grids/cubed_sphere.py`` right after
+``project_sphere_v`` (line 2880).  Each is a faithful JAX port of
+the FV3 Fortran original:
+
+- ``coriolis_parameter_fv3(lat, units='rad') = 2·Ω·sin(lat)``.
+- ``get_unit_vector_fv3(lon1, lat1, lon2, lat2, lon3, lat3)``:
+  unit tangent vector at ``p2`` from ``p1 → p3``, projected onto
+  the local tangent plane via ``project_sphere_v``.
+
+Both definitions have a docstring note pointing to iter 905 as
+the removal commit and iter-1069 as the restore.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv/bin/python -m pytest \
+        tests/test_fv3_rotate_winds_iter661.py \
+        tests/test_fv3_tc_uwind_pert_iter672.py
+    => 9 passed in 1.12s
+
+    JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv/bin/python -m pytest \
+        tests/test_fv3_dcmip16_bc_iter667.py \
+        tests/test_fv3_dcmip16_bc_wind_iter668.py \
+        tests/test_fv3_dcmip16_tc_iter669.py \
+        tests/test_fv3_dcmip16_tc_sphum_iter666.py \
+        tests/test_fv3_bc_uwind_pert_iter671.py \
+        tests/test_fv3_tc_uwind_pert_iter672.py \
+        tests/test_fv3_terminator_iter658.py \
+        tests/test_fv3_checker_tracers_iter657.py \
+        tests/test_fv3_case9_iter664.py \
+        tests/test_fv3_rankine_vortex_iter662.py \
+        tests/test_fv3_rotate_winds_iter661.py
+    => 62 passed in 10.25s
+
+iter-1068 doc compaction tests still pass: 60 passed.
+
 ## Iteration 1068 (2026-05-28): compact iter-1040..1066 prose + fix 2 PE factory multistep stability tests
 
 ### Goal
