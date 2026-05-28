@@ -2378,6 +2378,71 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1059 (2026-05-28): fix stale shape assertions in ``test_mpi_bootstrap.py::TestMPIHaloExchange``
+
+### Goal
+
+iter-1058 surfaced two pre-existing failures in
+``test_mpi_bootstrap.py``:
+
+- ``test_halo_exchange_produces_finite_result``: asserts
+  ``result.shape == (6, n+2, n+2)``.
+- ``test_halo_exchange_roundtrip``: indexes ``result[f, ...]`` with
+  ``f`` from ``topology.local_face_ids`` (global face ids).
+
+Both reproduce on clean ``main`` HEAD via ``git stash`` probe.
+Stale since aa707bda (2026-03-31) when ``scatter_to_local`` was
+introduced.
+
+### Root cause
+
+``scatter_to_local`` returns shape ``(n_local_faces, n, n, ...)``
+per its iter-aa707bda contract change.  Previously
+``partition_state`` returned ``(6, n, n)`` zero-masked, so the
+``(6, n+2, n+2)`` post-halo shape assertion was correct.  After
+the API change, the tests were not updated.
+
+### Fix
+
+``tests/distributed/test_mpi_bootstrap.py:197-251``:
+
+- ``test_halo_exchange_produces_finite_result``: change
+  ``(6, n+2, n+2)`` → ``(n_local, n+2, n+2)``; iterate
+  ``range(n_local)`` (local face indices) instead of
+  ``topology.local_face_ids`` (global face ids).
+- ``test_halo_exchange_roundtrip``: use ``enumerate(topology.
+  local_face_ids)`` to map local position → global face id, then
+  compare ``result[f_local]`` against ``data[f_global]``.
+
+### Validation
+
+::
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 2 \
+        .venv/bin/python -m pytest tests/distributed/test_mpi_bootstrap.py::TestMPIHaloExchange
+    => 2 passed in 1.32s
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 3 \
+        .venv/bin/python -m pytest tests/distributed/test_mpi_bootstrap.py::TestMPIHaloExchange
+    => 2 passed in 1.50s
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 6 \
+        .venv/bin/python -m pytest tests/distributed/test_mpi_bootstrap.py::TestMPIHaloExchange
+    => 2 passed in 1.53s
+
+Full ``test_mpi_bootstrap.py`` suite: 21 passed at np=2.
+
+### Why this matters
+
+The failing assertions had no recent flag, but the loop body
+*never* tested any local face on rank 1 (since rank 1's global
+face ids ∈ {3, 4, 5} and indexing ``result[3]`` on a shape-(3,...)
+array raises).  At np=2, rank 0 might have passed the finite-check
+(since ``result[0..2]`` are valid indices), but rank 1's tests
+raised IndexError and were silently miscounted.  The corrected
+tests now exercise the scattered halo on every rank's local
+faces — a true halo-correctness guard.
+
 ## Iteration 1058 (2026-05-28): codex iter-1056 WARN fixes — rebuild ``_active_layout`` on re-entry + defensive asserts
 
 ### Goal
