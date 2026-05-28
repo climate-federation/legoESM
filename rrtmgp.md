@@ -314,6 +314,55 @@ factor-of-2 test at stratospheric levels could not detect.
 
 ---
 
+## Iter 7 — optimal-angle scan/loop equivalence (2026-05-28)
+
+### Coverage gap
+The existing `test_rrtmgp_use_scan_equivalence` verifies bit-equivalent
+LW fluxes between the `lax.scan` path (GPU/TPU) and the unrolled
+for-loop path (CPU) for the fixed-1.66 diffusivity factor.  After
+iter-2 plumbed `use_optimal_angle=True` through `solve_lw`, the
+scan↔loop equivalence was not verified for the optimal-angle path.
+A regression in `_compute_optimal_lw_secant` interacting differently
+with scan vs loop would silently break the GPU scaling auto-pick.
+
+### New test
+`test_optimal_angle_use_scan_equivalence` runs `solve_columns` with
+`use_optimal_angle=True` under both `use_scan=True` and
+`use_scan=False` and asserts bit-equivalence (`rtol/atol=1e-10`) of
+`lw_flux_up`, `lw_flux_down`, and `heating_rate`.
+
+### Status
+- ✅ 31 RRTMGP-stratosphere tests pass.
+- ✅ Zero regressions.
+
+---
+
+## Iter 6 — assert O3 column integrates to 200-400 DU (2026-05-28)
+
+### Coverage gap
+The iter-3 / iter-3.5 tests pin O3 values at individual pressure
+levels (100/30/10/1 hPa with ±factor-2, 1000/500/200/0.1 hPa with
+±factor-5).  Nothing prevented a future edit from drifting the
+**integrated column** to e.g. 100 DU or 800 DU while still passing
+the point-value tests — a sneaky regression for stratospheric SW
+heating.
+
+### New test
+`test_integrated_o3_column_in_dobson_units` integrates `vmr_o3 * dp`
+from 1 Pa to 1e5 Pa on a fine log grid and converts to Dobson Units
+via the SI factor 7891 derived from
+``DU = (N_A / (g * M_air)) / (2.687e20 [molec/m²/DU]) * ∫ vmr dp``.
+Assert range [200, 400] DU (tropics → high latitudes through annual
+cycle; mid-lat annual mean ≈ 300).
+
+Current iter-3.5 profile integrates to **262 DU** ✓.
+
+### Status
+- ✅ 30 RRTMGP-stratosphere tests pass.
+- ✅ Zero regressions.
+
+---
+
 ## Iter 5 — bound eta-fraction gradient (2026-05-28)
 
 ### Bug from iter-1 review
