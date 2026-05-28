@@ -2378,6 +2378,102 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1050 (2026-05-28): operator-level regression guard for iter-1049 + SW gap audit
+
+### Goal
+
+Lock in iter-1049's MPI-aware ``synchronize_cgrid_fluxes`` with
+a focused operator-level regression test, separate from the
+integration-level factory tests.  Surface and document any
+remaining direct ``nbr_face`` cross-face Python reads elsewhere
+in the codebase.
+
+### New regression test
+
+``tests/distributed/test_mpi_synchronize_cgrid_fluxes.py`` —
+3 tests under ``mpirun -np 2``:
+
+- ``test_2d_owned_faces_match``: 3D ``(6, n+1, n)`` / ``(6, n, n+1)``
+  flux arrays.  MPI ``synchronize_cgrid_fluxes`` matches local at
+  ``atol=rtol=1e-14`` on owned faces.
+- ``test_4d_owned_faces_match``: 4D ``(6, n+1, n, nlev)`` /
+  ``(6, n, n+1, nlev)`` (the iter-1049 4D-lift path used by
+  ``cgrid_mass_flux_divergence``).
+- ``test_with_polar_sign_flip_edges``: pins the iter-808 polar
+  sign-flip table (``_FLUX_SIGN_FLIP_EDGES`` content guard).
+
+These complement the step-level tests by giving a sharper
+diagnostic if the sync helper ever regresses — a future Codex
+review pointed out that step-level tests would catch a regression
+in many fields simultaneously, making bisection harder.  The
+operator-level test fires immediately on the sync alone.
+
+### SW gap audit
+
+Searched for other Python-level ``nbr_face`` direct reads
+across the FV3 dycore stack.  Found one in
+``shallow_water_fv3_cdgrid.py:805-826``: a corner-staggered
+edge SYNC where the lower-index face owns and higher-index
+copies from owner.  Pattern is similar to iter-1049 — under
+MPI replicated mode, ``ue[nbr_face, ...]`` reads may be
+incorrect if ``nbr_face`` is non-owned by this rank.
+
+NOT fixed in iter-1050 because:
+
+- SW dycore has NO MPI integration tests in
+  ``tests/distributed/``; the bug is unreached under the
+  current test matrix.
+- SW step under MPI is not the documented production target
+  (the 3D PE/NH paths are).
+- The fix would mirror iter-1049 (sendrecv-based exchange
+  of boundary strips).  Listed as iter-1050 follow-up
+  candidate.
+
+### Validation
+
+::
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun -np 2 \
+        .venv/bin/python -m pytest \
+        tests/distributed/test_mpi_synchronize_cgrid_fluxes.py -v
+    => 3/3 PASSED
+
+Per-iter-1049 integration tests (PE+NH factory):
+
+::
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun -np 2 \
+        .venv/bin/python -m pytest \
+        tests/distributed/test_mpi_fv3_step_fidelity.py \
+        tests/distributed/test_mpi_fv3_nh_step_fidelity.py \
+        -v
+    => 14/14 PASSED (5 PE + 9 NH; all factory variants with
+    duogrid=True)
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun -np 2 \
+        .venv/bin/python -m pytest \
+        tests/distributed/test_mpi_interp_offsets.py -v
+    => 8/8 PASSED
+
+### Open follow-ups
+
+- ``shallow_water_fv3_cdgrid.py:805`` SW corner-staggered edge
+  sync — needs MPI port (iter-1049 sendrecv pattern).
+- Non-square halo for ``use_fv3_cross_face_du_proj`` (iter-1046 #1).
+- Sub-face tiling (n>6) with ``interp_offsets``.
+- Metal+MPI+duogrid linspace XLA workaround (``JAX_PLATFORMS=cpu``).
+
+### Why this iteration was meaningful
+
+iter-1049 was a real fix with codex review but the operator-
+level test guard was missing.  iter-1050 adds the dedicated
+regression test (locked at machine epsilon) so that any future
+refactor of ``synchronize_cgrid_fluxes`` or the MPI dispatch
+catches drift at the operator level rather than chasing it
+through 14 integration tests.  Also documents the next-most-
+similar gap (SW edge sync) so a future investigator doesn't
+re-discover it.
+
 ## Iteration 1049 (2026-05-28): **root cause + fix** — MPI-aware ``synchronize_cgrid_fluxes``
 
 ### Goal
