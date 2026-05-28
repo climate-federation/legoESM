@@ -2378,59 +2378,35 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
-## Iteration 1083 (2026-05-28): MPI-aware DGRID vector halo — batched-per-peer sendrecv (24/24 edges bit-for-bit FV3-faithful under MPI)
+## Iteration 1083 (2026-05-28): MPI dgrid vector halo — 24/24 edges bit-for-bit FV3-faithful under MPI
 
-### Goal
-
-Closes codex iter-1078 BLOCKER M1: replace the iter-1081
-``mode='edge'`` MPI fallback with a proper sendrecv-based dgrid
-vector halo that achieves bit-for-bit FV3 fidelity under
-cubed-sphere MPI.
-
-### Implementation
+Closes codex iter-1078 BLOCKER M1: replaces the iter-1081
+``mode='edge'`` MPI fallback with proper sendrecv-based dgrid halo.
 
 3 new functions in ``src/legoesm/grids/dgrid_halo.py``:
-``_build_dgrid_mpi_edges``, ``pad_halo_dgrid_vector_4d_mpi`` (rank-
-local input), ``pad_halo_dgrid_vector_4d_replicated_mpi`` (full
-``(6, ...)`` wrapper for canonical replicated MPI mode).
-
-Call sites updated (``compressible_euler_cdgrid.py:1245``,
-``primitive_eq_cdgrid.py:1361``): dispatch on
-``get_halo_backend()`` — local uses iter-1078, MPI uses iter-1083.
-
-### Deadlock-free pattern
+``_build_dgrid_mpi_edges``, ``pad_halo_dgrid_vector_4d_mpi``
+(rank-local input), ``pad_halo_dgrid_vector_4d_replicated_mpi``
+(``(6, ...)`` wrapper).  iter-370 call sites
+(``compressible_euler_cdgrid.py:1245`` + ``primitive_eq_cdgrid.py:1361``)
+dispatch on backend.
 
 iter-1082 attempted per-edge sendrecv → deadlocked at np=2.
 iter-1083 mirrors ``_pad_halo_mpi_face_only_4d``: group remote
-edges by neighbor rank, sort peers, ONE sendrecv per peer with
-packed ``[u_strip, v_strip]`` buffers, ``sendtag=rank``.
+edges by peer rank, sort peers, ONE sendrecv per peer with
+packed ``[u_strip, v_strip]`` buffers.
 
-### Validation
+Validation: bit-for-bit against single-device at np ∈ {2, 3, 6}.
+PE+NH factory step fidelity at np=2: 2 passed in 134s.  44 local
+unit tests pass.
 
-::
+Codex adversarial review returned 0 BLOCKERs / 0 WARNs / 7 NITs —
+all confirming structural correctness (tag scheme, ``nbr_edge``
+buffer parsing, component swap semantics, reversal order, JIT
+compat, mpi4jax tag reuse, send/recv canonical sort).
 
-    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 2 \
-        .venv/bin/python -m pytest \
-        tests/distributed/test_mpi_dgrid_vector_halo_iter1083.py
-    => 1 passed — bit-for-bit match against single-device reference
-       on every rank's owned faces
-
-Same at np=3 and np=6.  PE+NH factory step fidelity at np=2:
-2 passed in 134s.  44 local unit tests pass.
-
-### Codex review
-
-Independent codex adversarial review returned **0 BLOCKERs / 0
-WARNs / 7 NITs** — all confirming the implementation is
-structurally correct (tag scheme, buffer parsing by ``nbr_edge``,
-component swap semantics, reversal order, JIT compat, mpi4jax
-tag reuse pattern, send/recv canonical sort).
-
-### Status
-
-All 9 FV3-fidelity flags now bit-for-bit FV3-faithful under
-BOTH local AND MPI backends in the default factory.  The user's
-"Always run on MPI as this will be standard" requirement is met.
+**All 9 FV3-fidelity flags now bit-for-bit FV3-faithful under
+BOTH local AND MPI backends.**  The user's "Always run on MPI as
+this will be standard" requirement is met.
 
 ## Iteration 1082 (2026-05-28): MPI dgrid vector halo — failed per-edge sendrecv attempt
 
