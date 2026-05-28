@@ -584,6 +584,56 @@ class TestOptimalLwSecant:
             f"expected 3 distinct secants, got {vals}"
         )
 
+    def test_optimal_angle_flux_impact_bounded(self, lookup_vmr):
+        """Iter-8: optimal-angle LW flux must be within ~10% of the
+        fixed-1.66 result.  Establishes a sanity bound — if a future
+        change perturbs the optimal-angle math so the flux drifts by
+        50% or 200%, this would flag it.  Upstream comparisons (RFMIP)
+        report band-mean secants of 1.5-1.9 so the integrated LW flux
+        should differ from the 1.66 result by single-digit percent."""
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        ncol, nlev = 1, 10
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1)
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        # US Std-ish T profile: 220K aloft → 290K surface.
+        T = jnp.broadcast_to(
+            jnp.linspace(220.0, 290.0, nlev)[None, :], (ncol, nlev)
+        )
+        sfc_T = jnp.array([295.0])
+        q_v = jnp.full((ncol, nlev), 5e-3)
+        cos_z = jnp.array([0.5])
+
+        out_b = RRTMGP.from_legoesm_config(RRTMGPConfig()).solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+        )
+        out_o = RRTMGP.from_legoesm_config(
+            RRTMGPConfig(use_optimal_angle=True)
+        ).solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+        )
+
+        # Pick the surface (highest signal) upward LW flux for comparison.
+        b_sfc = float(jnp.abs(out_b.lw_flux_up[0, 0]))
+        o_sfc = float(jnp.abs(out_o.lw_flux_up[0, 0]))
+        rel = abs(o_sfc - b_sfc) / max(b_sfc, 1e-12)
+        assert rel < 0.10, (
+            f"|optimal − fixed-1.66| / fixed = {rel:.3%} at surface — "
+            f"expected < 10% (band-mean secants are 1.5-1.9); "
+            f"fixed={b_sfc:.2f} W/m², optimal={o_sfc:.2f} W/m²"
+        )
+        # Also assert it's NOT essentially zero (would mean both paths
+        # collapsed to the same constant — sign of broken plumbing).
+        assert rel > 1e-6, (
+            f"Optimal-angle path produced indistinguishable flux from "
+            f"fixed-1.66; check use_optimal_angle plumbing.  rel={rel:.3e}"
+        )
+
     def test_optimal_angle_use_scan_equivalence(self, lookup_vmr):
         """Iter-7: ``use_optimal_angle=True`` must give bit-equivalent
         results with ``use_scan=True`` and ``use_scan=False``.  This
