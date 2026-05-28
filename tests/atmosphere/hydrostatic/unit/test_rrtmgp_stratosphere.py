@@ -458,6 +458,29 @@ class TestOptimalLwSecant:
         )
         np.testing.assert_allclose(np.asarray(secant)[0, 0, 0], expected, rtol=1e-12)
 
+    def test_secant_halo_width_zero(self, lookup_vmr):
+        """Iter-12: ``_compute_optimal_lw_secant(halo_width=0)`` sums
+        over ALL z cells (no halo strip).  Guards against future
+        refactors that hard-code ``hw=1`` and silently drop layers in
+        callers that pass un-halo'd optical depth (e.g. direct unit
+        tests on the helper)."""
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rte import (
+            two_stream,
+        )
+        lookup, _ = lookup_vmr
+        # 5 interior cells, no halos.
+        tau = jnp.array([[[0.5, 1.0, 0.5, 0.5, 0.5]]], dtype=jnp.float64)
+        band_idx = jnp.array(0)
+        c0, c1 = float(lookup.optimal_angle_fit[0, 0]), float(
+            lookup.optimal_angle_fit[0, 1]
+        )
+        # Sum over all 5 cells = 3.0, trans = exp(-3) ≈ 0.04979.
+        expected = c0 * np.exp(-3.0) + c1
+        secant = two_stream._compute_optimal_lw_secant(
+            tau, band_idx, lookup.optimal_angle_fit, halo_width=0
+        )
+        np.testing.assert_allclose(np.asarray(secant)[0, 0, 0], expected, rtol=1e-12)
+
     def test_secant_grad_finite(self, lookup_vmr):
         """Gradient of secant w.r.t. tau must be finite (no NaN)."""
         from legoesm.atmosphere.physics.radiation.rrtmgp.rte import (
