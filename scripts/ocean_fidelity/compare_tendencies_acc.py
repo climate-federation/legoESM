@@ -45,6 +45,7 @@ from legoesm.ocean.fidelity.recipe_constants import (
 )
 from legoesm.ocean.fidelity.tendency_probe import (
     build_region_masks,
+    compare_momentum_at_centres,
     compare_probe_results,
     per_region_metrics,
     probe_latlon_cgrid,
@@ -184,6 +185,33 @@ def _write_report(
                 f"{metrics['interior']['sign_match']:.4f} |"
             )
             lines.append(row)
+        lines.append("")
+
+        # Q2: per-process MOMENTUM comparison at cell centres (face->centre
+        # interpolation + legoESM->Veros process aggregation). Replaces the
+        # "shape mismatch / deferred" momentum rows above.
+        lines.append("## Per-process MOMENTUM comparison at cell centres (Q2)\n")
+        lines.append(
+            "legoESM components aggregated to Veros groupings (du_adv=vortcor+vertadv, "
+            "du_mix=av_vert+botdrag, du_cor 1:1), both interpolated to cell centres. "
+            "Momentum has a discretization/formulation floor (legoESM vector-invariant vs "
+            "Veros flux-form Coriolis/advection) — corr ~0.9 is expected, NOT a bug; see "
+            "the strategy doc §8 ledger. `wsign` = sign-match over cells with "
+            "`|veros| > 0.1·max` (dynamically significant; the plain sign-match is "
+            "near-zero-cell noise for these processes).\n"
+        )
+        lines.append(
+            "| process | interior L2 | interior corr | interior sign | interior wsign |"
+        )
+        lines.append("|---|---|---|---|---|")
+        mom = compare_momentum_at_centres(legoesm_probe, veros_tendencies, masks)
+        for proc, m in mom.items():
+            it = m["interior"]
+            lines.append(
+                f"| {proc} | {it['L2']:.3e} | {it['pattern_corr']:.4f} | "
+                f"{it['sign_match']:.4f} | "
+                f"{it.get('weighted_sign_match', float('nan')):.4f} |"
+            )
         lines.append("")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

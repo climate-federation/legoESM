@@ -314,3 +314,53 @@ def test_bridged_acc_state_has_no_zero_TS_wet_cells():
     assert n_bad == 0, (
         f"{n_bad} wet cells carry zero-padded T=S=0 (wall contamination)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Q2: per-process momentum comparison (face->centre interpolation)
+# ---------------------------------------------------------------------------
+
+
+def test_face_to_centre_interpolation_reduces_shape_and_averages():
+    """Face->centre helpers drop one along the staggered axis and average
+    adjacent faces."""
+    from legoesm.ocean.fidelity.tendency_probe import (
+        u_face_to_centre, v_face_to_centre,
+    )
+
+    uf = jnp.asarray(np.arange(2 * 4 * 1, dtype=float).reshape(2, 4, 1))
+    uc = np.asarray(u_face_to_centre(uf))
+    assert uc.shape == (2, 3, 1)
+    np.testing.assert_allclose(
+        uc, 0.5 * (np.asarray(uf)[:, :-1, :] + np.asarray(uf)[:, 1:, :]),
+    )
+    vf = jnp.asarray(np.arange(3 * 2 * 1, dtype=float).reshape(3, 2, 1))
+    vc = np.asarray(v_face_to_centre(vf))
+    assert vc.shape == (2, 2, 1)
+    np.testing.assert_allclose(
+        vc, 0.5 * (np.asarray(vf)[:-1, :, :] + np.asarray(vf)[1:, :, :]),
+    )
+
+
+def test_compare_momentum_emits_all_processes():
+    """Q2 deliverable: the momentum comparison must emit per-region metrics
+    (incl. the magnitude-weighted sign-match) for all 6 Veros momentum
+    processes — no more 'shape mismatch / deferred' rows."""
+    from legoesm.ocean.fidelity.tendency_probe import compare_momentum_at_centres
+
+    with override_constants(**VEROS_CONSTANTS):
+        recipe = build_acc_recipe()
+        result = _make_synthetic_veros_result()
+        bridged = veros_snapshot_to_legoesm_state(result, recipe.initial_state)
+        probe = probe_latlon_cgrid(
+            bridged.state, recipe.grid, recipe.z_coord, recipe.model_config,
+            dt=4800.0,
+        )
+        masks = build_region_masks(recipe.grid, recipe.z_coord, bridged.state)
+    vt = extract_veros_tendencies(result)
+    mom = compare_momentum_at_centres(probe, vt, masks)
+    for proc in ("coriolis_u", "coriolis_v", "du_adv", "dv_adv", "du_mix", "dv_mix"):
+        assert proc in mom, f"missing momentum process {proc}"
+        it = mom[proc]["interior"]
+        assert np.isfinite(it["L2"]), proc
+        assert "weighted_sign_match" in it, proc

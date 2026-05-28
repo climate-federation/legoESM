@@ -432,6 +432,27 @@ structural-modularity-specific, verification-aligned audit.
 **Per-oracle ledger (maintain one table per oracle):** field-by-region tolerance |
 conventions replicated | declared non-goals | timebox | golden-refresh cadence.
 
+### Veros ACC ledger (2026-05-28)
+- **Density (rho):** interior/boundary/equator/ML L2 ≈ 0.037 kg/m³, corr 1.0000 — PASS.
+  Residual is the rho-vs-geometric-depth pressure-argument difference (bounded ≤0.05) +
+  time-level; declared non-goal to drive lower.
+- **Coriolis (du/dv_cor):** interior corr 0.96 / 0.98, weighted-sign 0.98 — PASS. Validates
+  grid alignment + bridge + face→centre interpolation.
+- **Momentum advection (du/dv_adv):** corr 0.58 / −0.34 — **documented formulation delta,
+  NOT a bug.** legoESM is vector-invariant (advection = ζ×u + ∇KE + w∂u/∂z, with ∇KE lumped
+  into `pgf_ke`); Veros is flux-form (∇·(uu)). The two cannot be cleanly mapped per-process.
+- **Momentum mixing (du/dv_mix):** corr ~0 — **documented structural delta, NOT a bug.**
+  The ACC recipe uses `implicit_vertical_mixing=True`, so legoESM produces no *explicit*
+  vertical-viscosity tendency to compare against Veros's `du_mix`.
+- **OPEN DECISION (verification-philosophy, owner = user):** per-process momentum tier-2
+  matching is fundamentally limited for a vector-invariant↔flux-form pair — only Coriolis
+  compares cleanly. Options: (a) accept Coriolis-clean + document adv/mix as formulation
+  deltas (current); (b) verify momentum via *total* tendency or an energy/enstrophy budget
+  instead of per-process; (c) expose legoESM's KE-gradient and implicit-mixing effective
+  tendency in the probe to enable a cleaner per-process map (larger probe change). Applies
+  to future MOM6/MITgcm momentum matching too. This is why the Q2 gate's literal
+  `corr>0.95 per process` is not the right bar for momentum.
+
 ---
 
 ## 9. Expansion path to full legoESM

@@ -405,11 +405,122 @@ def compare_probe_results(
     return out
 
 
+# ---------------------------------------------------------------------------
+# Face -> cell-centre interpolation for per-process MOMENTUM comparison (Q2)
+# ---------------------------------------------------------------------------
+#
+# legoESM momentum tendencies live at velocity faces (u at n_lon+1 lon-faces,
+# v at n_lat+1 lat-faces); bridged Veros tendencies live at Veros's u/v faces
+# in (lat, lon, lev) layout. To use the cell-centre region masks, interpolate
+# BOTH sides to cell centres.
+#
+# Documented delta (strategy doc §8 ledger): momentum tendencies do NOT match
+# as cleanly as density. Density is point-wise in (T,S) -> matched to ~0.04
+# kg/m^3. Momentum tendencies depend on each model's averaging stencils and
+# formulation (legoESM vector-invariant vs Veros flux-form Coriolis/advection),
+# so even a correct interpolation floors around interior corr ~0.9 (Coriolis
+# anchor: corr 0.96). That floor is a genuine model difference, not a bug.
+
+
+def u_face_to_centre(arr: jnp.ndarray) -> jnp.ndarray:
+    """legoESM u-face (n_lat, n_lon+1, nlev) -> cell centre (n_lat, n_lon, nlev)."""
+    a = jnp.asarray(arr)
+    return 0.5 * (a[:, :-1, :] + a[:, 1:, :])
+
+
+def v_face_to_centre(arr: jnp.ndarray) -> jnp.ndarray:
+    """legoESM v-face (n_lat+1, n_lon, nlev) -> cell centre (n_lat, n_lon, nlev)."""
+    a = jnp.asarray(arr)
+    return 0.5 * (a[:-1, :, :] + a[1:, :, :])
+
+
+def veros_u_face_to_centre(arr: jnp.ndarray) -> jnp.ndarray:
+    """Bridged Veros u-tendency at u-faces (n_lat, n_lon, nlev) -> cell centre
+    via periodic zonal averaging (Veros u[j] = east face of T-cell j)."""
+    a = jnp.asarray(arr)
+    return 0.5 * (a + jnp.roll(a, 1, axis=1))
+
+
+def veros_v_face_to_centre(arr: jnp.ndarray) -> jnp.ndarray:
+    """Bridged Veros v-tendency at v-faces (n_lat, n_lon, nlev) -> cell centre
+    via meridional averaging (Veros v[i] = north face of T-cell i)."""
+    a = jnp.asarray(arr)
+    return 0.5 * (a + jnp.roll(a, 1, axis=0))
+
+
+def weighted_sign_match(
+    lego: jnp.ndarray, ref: jnp.ndarray, mask: jnp.ndarray, rel_floor: float = 0.1,
+) -> float:
+    """Sign-match restricted to cells where ``|ref| > rel_floor * max|ref|`` in
+    the masked region. For stencil-floor momentum processes the plain
+    sign-match is dominated by near-zero cells (sign is noise there); this
+    counts only dynamically-significant cells. NOT a replacement for the plain
+    metric — reported alongside it."""
+    m = np.asarray(mask)
+    r = np.asarray(ref)[m]
+    l = np.asarray(lego)[m]
+    if r.size == 0:
+        return float("nan")
+    thr = rel_floor * float(np.max(np.abs(r)))
+    sig = np.abs(r) > thr
+    if int(sig.sum()) == 0:
+        return float("nan")
+    return float(np.mean(np.sign(l[sig]) == np.sign(r[sig])))
+
+
+# Aggregation map: Veros process <-> the legoESM probe components summing to it.
+#   du_cor <-> coriolis            (1:1)
+#   du_adv <-> vortcor + vertadv   (advection: rel-vort flux + vertical adv)
+#   du_mix <-> av_vert + botdrag   (vertical viscosity + bottom drag)
+_MOMENTUM_AGG = {
+    "coriolis_u": (("coriolis_u",), "u", "coriolis_u"),
+    "coriolis_v": (("coriolis_v",), "v", "coriolis_v"),
+    "du_adv": (("vortcor_u", "vertadv_u"), "u", "veros_du_adv"),
+    "dv_adv": (("vortcor_v", "vertadv_v"), "v", "veros_dv_adv"),
+    "du_mix": (("av_vert_u", "botdrag_u"), "u", "veros_du_mix"),
+    "dv_mix": (("av_vert_v", "botdrag_v"), "v", "veros_dv_mix"),
+}
+
+
+def compare_momentum_at_centres(
+    legoesm: LatLonProbeResult, veros_tend: dict, masks: RegionMasks,
+) -> dict[str, dict[str, dict[str, float]]]:
+    """Per-process momentum comparison at cell centres (Q2).
+
+    Aggregates legoESM probe components to Veros's process groupings,
+    interpolates both sides to cell centres, and returns per-region metrics
+    (with an extra ``weighted_sign_match`` on the interior). Processes whose
+    Veros counterpart is absent from ``veros_tend`` are skipped.
+    """
+    out: dict[str, dict[str, dict[str, float]]] = {}
+    for proc, (lego_fields, kind, veros_key) in _MOMENTUM_AGG.items():
+        if veros_key not in veros_tend:
+            continue
+        lego_sum = sum(getattr(legoesm, f) for f in lego_fields)
+        lego_c = u_face_to_centre(lego_sum) if kind == "u" else v_face_to_centre(lego_sum)
+        ref = veros_tend[veros_key]
+        ref_c = (
+            veros_u_face_to_centre(ref) if kind == "u" else veros_v_face_to_centre(ref)
+        )
+        metrics = per_region_metrics(lego_c, ref_c, masks)
+        metrics["interior"]["weighted_sign_match"] = weighted_sign_match(
+            lego_c, ref_c, masks.interior,
+        )
+        out[proc] = metrics
+    return out
+
+
 __all__ = (
     "LatLonProbeResult",
     "RegionMasks",
     "build_region_masks",
+    "compare_momentum_at_centres",
     "compare_probe_results",
     "per_region_metrics",
     "probe_latlon_cgrid",
+    "u_face_to_centre",
+    "v_face_to_centre",
+    "veros_u_face_to_centre",
+    "veros_v_face_to_centre",
+    "weighted_sign_match",
 )

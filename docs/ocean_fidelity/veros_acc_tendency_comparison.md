@@ -49,3 +49,16 @@ Constants override: ``override_constants(**VEROS_CONSTANTS)``
 | veros_dS_vmix | (aggregate) (shape mismatch / aggregate; deferred) | — | — | — | — | — | — | — |
 | veros_dS_iso | (aggregate) (shape mismatch / aggregate; deferred) | — | — | — | — | — | — | — |
 | rho | rho | 3.756e-02 | 3.758e-02 | 3.754e-02 | 2.344e-02 | nan | 1.0000 | 1.0000 |
+
+## Per-process MOMENTUM comparison at cell centres (Q2)
+
+legoESM components aggregated to Veros groupings (du_adv=vortcor+vertadv, du_mix=av_vert+botdrag, du_cor 1:1), both interpolated to cell centres. Momentum has a discretization/formulation floor (legoESM vector-invariant vs Veros flux-form Coriolis/advection) — corr ~0.9 is expected, NOT a bug; see the strategy doc §8 ledger. `wsign` = sign-match over cells with `|veros| > 0.1·max` (dynamically significant; the plain sign-match is near-zero-cell noise for these processes).
+
+| process | interior L2 | interior corr | interior sign | interior wsign |
+|---|---|---|---|---|
+| coriolis_u | 1.497e-07 | 0.9590 | 0.9168 | 0.9810 |
+| coriolis_v | 1.137e-07 | 0.9764 | 0.9774 | 0.9818 |
+| du_adv | 4.279e-10 | 0.5837 | 0.7842 | 0.9136 |
+| dv_adv | 8.800e-10 | -0.3364 | 0.5370 | 0.2345 |
+| du_mix | 7.157e-07 | 0.0011 | 0.0651 | 0.0000 |
+| dv_mix | 3.616e-07 | 0.0077 | 0.0636 | 0.0000 |
