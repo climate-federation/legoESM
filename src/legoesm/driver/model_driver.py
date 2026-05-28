@@ -2556,7 +2556,20 @@ class ModelDriver:
             else self._solar_weights_template
         )
 
-        step_unified = self.physics.build_step_unified()
+        # Issue #316: build two ``step_unified`` variants — one that
+        # always calls radiation (``static_need_rad=True``) and one
+        # that always uses held radiation (``static_need_rad=False``).
+        # Both elide the inner ``lax.cond``, which lets
+        # ``build_segment_fn`` run a cond-free subcycled scan and
+        # keeps XLA JIT time bounded at long ``segment_length``.
+        # When ``rad_update_steps <= 1`` the no-rad variant is unused
+        # but the rad-only variant still helps by collapsing the
+        # legacy ``lax.cond(True, _, _)`` to a single branch.
+        step_unified = self.physics.build_step_unified(static_need_rad=True)
+        step_unified_no_rad = (
+            self.physics.build_step_unified(static_need_rad=False)
+            if RAD_UPDATE_STEPS > 1 else None
+        )
 
         # Held radiation arrays — restore from carry or zero-init
         _ens = self._ensemble_size
@@ -2603,6 +2616,7 @@ class ModelDriver:
             "shape_2d": shape_2d, "shape_3d": shape_3d,
             "current_s_0": current_s_0, "solar_weights": solar_weights,
             "step_unified": step_unified,
+            "step_unified_no_rad": step_unified_no_rad,
             "held_dT_rad": held_dT_rad,
             "held_sw_net_sfc": held_sw_net_sfc,
             "held_lw_net_sfc": held_lw_net_sfc,
@@ -2671,6 +2685,7 @@ class ModelDriver:
         current_s_0 = ctx["current_s_0"]
         solar_weights = ctx["solar_weights"]
         step_unified = ctx["step_unified"]
+        step_unified_no_rad = ctx.get("step_unified_no_rad")
         held_dT_rad = ctx["held_dT_rad"]
         held_sw_net_sfc = ctx["held_sw_net_sfc"]
         held_lw_net_sfc = ctx["held_lw_net_sfc"]
@@ -2734,6 +2749,7 @@ class ModelDriver:
         run_segment = build_segment_fn(
             model=self.model,
             step_unified=step_unified,
+            step_unified_no_rad=step_unified_no_rad,
             grid=self.grid,
             sigma_full=sigma_full,
             dsigma=dsigma,
@@ -2979,6 +2995,7 @@ class ModelDriver:
                     )
                     run_segment = build_segment_fn(
                         model=self.model, step_unified=step_unified,
+                        step_unified_no_rad=step_unified_no_rad,
                         grid=self.grid, sigma_full=sigma_full, dsigma=dsigma,
                         dt=DT, rad_update_steps=RAD_UPDATE_STEPS,
                         microphysics=cfg.microphysics, fix_moisture=cfg.fix_moisture,
@@ -3051,6 +3068,17 @@ class ModelDriver:
         current_s_0 = ctx["current_s_0"]
         solar_weights = ctx["solar_weights"]
         step_unified = ctx["step_unified"]
+        # Issue #316: step_unified is the static_need_rad=True variant.
+        # The held-only variant is built lazily here when RAD_UPDATE_STEPS
+        # > 1 (otherwise need_rad_py is always True and the second
+        # variant is unused).  Python-side dispatch on need_rad_py keeps
+        # each call's HLO graph minimal and matches the cond-elided
+        # design used by _run_compiled / build_segment_fn.
+        step_unified_no_rad = ctx.get("step_unified_no_rad")
+        if RAD_UPDATE_STEPS > 1 and step_unified_no_rad is None:
+            step_unified_no_rad = self.physics.build_step_unified(
+                static_need_rad=False,
+            )
         held_dT_rad = ctx["held_dT_rad"]
         held_sw_net_sfc = ctx["held_sw_net_sfc"]
         held_lw_net_sfc = ctx["held_lw_net_sfc"]
@@ -3166,9 +3194,16 @@ class ModelDriver:
                 # CMIP GHG trajectory — already handled inside
                 # _precompute_external_forcing for transient experiments.
 
+            # Issue #316: Python-side dispatch picks rad-only or
+            # no-rad-only variant — both are cond-free; XLA only sees
+            # the active branch's HLO.
+            _step_fn = (
+                step_unified if need_rad_py or step_unified_no_rad is None
+                else step_unified_no_rad
+            )
             phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                         held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = \
-                step_unified(
+                _step_fn(
                     need_rad_jax,
                     self.state.T.data, self.state.p_s.data,
                     self.q_v, self.q_c, self.q_r, conv_prog,

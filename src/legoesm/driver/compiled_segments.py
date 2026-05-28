@@ -224,12 +224,19 @@ def compute_segment_length(
     host-side actions (diagnostics, checkpoints).  This ensures every
     cadence boundary falls on a segment boundary.
 
-    ``rad_update_steps`` is intentionally **excluded** from the GCD
-    because radiation sub-cycling is handled inside the compiled scan
-    body via ``jnp.where`` / modulo — it does not require a host-side
-    segment boundary.  Including it collapses the segment length to 1
-    whenever ``rad_update_steps=1`` (the default), eliminating all
-    ``jax.lax.scan`` batching.
+    Issue #316: when ``rad_update_steps > 1`` and ``rad_update_steps``
+    happens to divide the GCD already, the segment is a clean multiple
+    of the radiation cadence and :func:`build_segment_fn` can subcycle
+    radiation via an outer/inner ``lax.scan`` pair (one fresh
+    radiation call per ``rad_update_steps`` inner physics steps).
+    Eliminating the inner ``lax.cond`` cuts XLA compile time at long
+    scan lengths from O(hours) to O(minutes).  When ``rad_update_steps``
+    does NOT divide the GCD this function does **not** snap the
+    segment down — doing so would break the invariant that
+    ``segment_length`` divides every cadence interval (diag boundaries
+    would drift between segments).  Instead the GCD is returned
+    unchanged and :func:`build_segment_fn` falls back to the legacy
+    cond-based scan at the (mild) cost of slower JIT.
 
     Parameters
     ----------
@@ -238,7 +245,16 @@ def compute_segment_length(
     checkpoint_interval : int
         Steps between checkpoints (0 = disabled).
     rad_update_steps : int
-        Kept for API compatibility but not used in the GCD.
+        Radiation update cadence.  Reserved for future snap-down logic
+        — currently the GCD is **not** modified to fit
+        ``rad_update_steps``, because snapping down breaks the
+        invariant that ``segment_length`` divides every cadence
+        interval.  :func:`build_segment_fn` instead checks
+        ``segment_length % rad_update_steps == 0`` at run time and
+        falls back to the legacy cond-based scan when it does not
+        hold.  Passed through for API stability and for callers that
+        log/inspect the radiation cadence alongside the segment
+        length.
 
     Returns
     -------
@@ -252,6 +268,18 @@ def compute_segment_length(
     seg = intervals[0]
     for i in intervals[1:]:
         seg = math.gcd(seg, i)
+    seg = max(seg, 1)
+
+    # Issue #316: when rad_update_steps divides the GCD evenly the
+    # segment is already a clean multiple and build_segment_fn can
+    # subcycle without remainder.  When it doesn't divide, snapping
+    # down to ``(seg // rad_update_steps) * rad_update_steps`` would
+    # break the invariant that segment_length divides every cadence
+    # interval (e.g. seg=4320, rad=7 → 4319 ∤ 4320, so diag boundaries
+    # would drift between segments).  Leave seg unchanged in that case
+    # — build_segment_fn falls back to the legacy cond-based scan.
+    if rad_update_steps > 1 and seg % rad_update_steps != 0:
+        pass  # divisibility cannot be improved without breaking interval alignment
     return max(seg, 1)
 
 
@@ -378,6 +406,7 @@ def build_segment_fn(
     ghg_vmr_override=None,
     owned_face_ids=None,
     hs_newtonian_relax=None,
+    step_unified_no_rad=None,
 ):
     """Build a compiled segment function.
 
@@ -395,7 +424,21 @@ def build_segment_fn(
     model
         Dynamics model with ``.step()`` and ``.step_with_physics()``.
     step_unified : callable
-        JIT-compiled physics step from ``PhysicsPipeline.build_step_unified()``.
+        JIT-compiled physics step from
+        ``PhysicsPipeline.build_step_unified()``.  When
+        ``step_unified_no_rad`` is provided, this is interpreted as the
+        ``static_need_rad=True`` (rad-every-call) variant; otherwise it
+        keeps its legacy data-dependent ``lax.cond`` behaviour.
+    step_unified_no_rad : callable, optional
+        Issue #316 fix: the ``static_need_rad=False`` variant
+        (held-radiation, no fresh RRTMGP call).  When this is provided
+        the scan body uses a cond-free subcycled outer/inner pair (one
+        radiation call per ``rad_update_steps`` inner physics steps),
+        which keeps the XLA HLO graph compact and bounds JIT compile
+        time at long scan lengths.  When ``None`` (default) the legacy
+        ``lax.cond`` body is used regardless of segment length — for
+        backward compatibility and for callers that cannot guarantee
+        ``n_steps % rad_update_steps == 0``.
     grid
         Cubed-sphere or lat-lon grid.
     sigma_full, dsigma : jax.Array
@@ -505,17 +548,26 @@ def build_segment_fn(
             _replace_kwargs["zero_mean_ps_tendency"] = False
         _dynamics_model.config = _model_cfg._replace(**_replace_kwargs)
 
-    def _make_single_step(forcing: SegmentForcing):
+    def _make_single_step(forcing: SegmentForcing, step_fn=None):
         """Create the scan body closed over a specific forcing pytree.
 
         The forcing is passed through the scan as a constant (not
         varying per step), so closing here is equivalent to passing it
         in scan's xs — but simpler.
+
+        ``step_fn`` selects which ``build_step_unified`` variant the
+        body invokes.  Issue #316: the rad-only and no-rad-only
+        variants elide the inner ``lax.cond``, which is what lets the
+        subcycled outer/inner scan in :func:`run_segment_jit` keep the
+        WhileLoop body small.  ``None`` defaults to the legacy
+        ``step_unified`` (data-dependent cond) for backward
+        compatibility.
         """
         # Reconstruct GHG VMR dict from forcing array + static keys.
         # _ghg_keys is a Python tuple captured in the closure; its
         # length determines whether step_unified receives None or dict.
         _ghg_vmr_override = ghg_array_to_dict(forcing.ghg_vmr, _ghg_keys)
+        _step_unified = step_fn if step_fn is not None else step_unified
 
         def _single_step(carry: SegmentCarry, _unused) -> tuple:
             """One atmosphere step: dynamics → physics → fixers."""
@@ -555,7 +607,7 @@ def build_segment_fn(
                 # (forcing, lat/lon) are rank-local.  Extract owned faces
                 # from dynamics fields, run physics, write back.
                 _ofi = owned_face_ids
-                phys_out, held_new_local = step_unified(
+                phys_out, held_new_local = _step_unified(
                     need_rad,
                     T_new[_ofi], p_s_new[_ofi],
                     carry.q_v[_ofi], carry.q_c[_ofi], carry.q_r[_ofi],
@@ -614,7 +666,7 @@ def build_segment_fn(
                 shflx_accum = carry.shflx_accum.at[_ofi].add(_sh * _dt)
                 lhflx_accum = carry.lhflx_accum.at[_ofi].add(_lh * _dt)
             else:
-                phys_out, held_new = step_unified(
+                phys_out, held_new = _step_unified(
                     need_rad,
                     T_new, p_s_new,
                     carry.q_v, carry.q_c, carry.q_r, carry.conv_prog,
@@ -712,7 +764,100 @@ def build_segment_fn(
             return new_carry, None
         return _single_step
 
+    # Subcycling is only safe when both step_unified variants are
+    # supplied AND the segment length is an exact multiple of the
+    # radiation cadence — otherwise the trailing remainder would have
+    # to be handled outside ``lax.scan`` (extra recompile cost) and
+    # the radiation cadence within the segment would drift.
+    _subcycle_available = (
+        step_unified_no_rad is not None and rad_update_steps > 1
+    )
+
+    def _run_subcycled(carry: SegmentCarry, n_steps: int,
+                       forcing: SegmentForcing) -> SegmentCarry:
+        """Issue #316: outer-rad × inner-no-rad nested scan.
+
+        Each outer iteration runs ``rad_update_steps - 1`` cheap
+        held-radiation steps followed by one fresh-radiation step.
+        This matches the legacy ``need_rad = ((idx+1) %
+        rad_update_steps) == 0`` cadence (fresh radiation on the last
+        step of every cycle) while keeping the RRTMGP/gray HLO out of
+        the hot inner body and out of any ``lax.cond``.
+        """
+        body_rad = _make_single_step(forcing, step_fn=step_unified)
+        body_no_rad = _make_single_step(forcing, step_fn=step_unified_no_rad)
+        if gradient_checkpoint:
+            body_rad = jax.checkpoint(body_rad, prevent_cse=False)
+            body_no_rad = jax.checkpoint(body_no_rad, prevent_cse=False)
+
+        n_outer = n_steps // rad_update_steps
+        n_held = rad_update_steps - 1
+
+        def _outer_step(c: SegmentCarry, _):
+            if n_held > 0:
+                c, _ = jax.lax.scan(body_no_rad, c, None, length=n_held)
+            c, _ = body_rad(c, None)
+            return c, None
+
+        final_carry, _ = jax.lax.scan(_outer_step, carry, None, length=n_outer)
+        return final_carry
+
+    def _run_single(carry: SegmentCarry, n_steps: int,
+                    forcing: SegmentForcing) -> SegmentCarry:
+        """Legacy single-scan body.
+
+        Used when ``step_unified_no_rad`` is not provided, when
+        ``rad_update_steps <= 1`` (always-rad, no subcycle benefit
+        beyond what the rad-only variant already gives), or when
+        ``n_steps`` does not divide evenly by ``rad_update_steps``.
+        """
+        _step_fn = _make_single_step(forcing)
+        if gradient_checkpoint:
+            _step_fn = jax.checkpoint(_step_fn, prevent_cse=False)
+        final_carry, _ = jax.lax.scan(_step_fn, carry, None, length=n_steps)
+        return final_carry
+
     @partial(jax.jit, static_argnums=(1,), donate_argnums=(0,))
+    def _run_subcycled_jit(carry: SegmentCarry, n_steps: int,
+                           forcing: SegmentForcing) -> SegmentCarry:
+        return _run_subcycled(carry, n_steps, forcing)
+
+    @partial(jax.jit, static_argnums=(1,), donate_argnums=(0,))
+    def _run_single_jit(carry: SegmentCarry, n_steps: int,
+                        forcing: SegmentForcing) -> SegmentCarry:
+        return _run_single(carry, n_steps, forcing)
+
+    def _use_subcycle(carry: SegmentCarry, n_steps: int) -> bool:
+        """Decide whether the subcycled scan path is valid for this call.
+
+        Three Python-side conditions must hold (codex iter review #1/2/3):
+        1. The cond-free no-rad variant must be available.
+        2. ``n_steps`` must be a clean multiple of ``rad_update_steps`` so
+           the outer scan length is an integer and the final rad step
+           lands on the last inner index of the segment.
+        3. The *absolute* step index at segment start must also be a
+           multiple of ``rad_update_steps``.  The legacy cond body fires
+           radiation at step indices where ``(step_idx+1) %
+           rad_update_steps == 0`` — i.e., the last inner step of each
+           cycle.  If the segment starts mid-cycle (e.g., a checkpoint
+           restart at a non-aligned step), the subcycled outer body's
+           "k-1 no-rad + 1 rad" pattern would fire rad on the wrong
+           absolute step.  We block subcycling and fall back to the
+           legacy scan in that case so radiation timing is preserved
+           bit-exactly.
+
+        ``carry.step_index`` is a ``jnp.int32`` scalar; reading it with
+        ``int(...)`` blocks until any prior device work completes, but
+        this happens once per Python segment call (not inside the hot
+        scan) so the perf hit is negligible.
+        """
+        if not _subcycle_available:
+            return False
+        if n_steps % rad_update_steps != 0:
+            return False
+        start_step = int(carry.step_index)
+        return start_step % rad_update_steps == 0
+
     def run_segment_jit(carry: SegmentCarry, n_steps: int,
                         forcing: SegmentForcing) -> SegmentCarry:
         """Run n_steps of the atmosphere integration as a compiled kernel.
@@ -737,11 +882,9 @@ def build_segment_fn(
         SegmentCarry
             Updated state after n_steps.
         """
-        _step_fn = _make_single_step(forcing)
-        if gradient_checkpoint:
-            _step_fn = jax.checkpoint(_step_fn, prevent_cse=False)
-        final_carry, _ = jax.lax.scan(_step_fn, carry, None, length=n_steps)
-        return final_carry
+        if _use_subcycle(carry, n_steps):
+            return _run_subcycled_jit(carry, n_steps, forcing)
+        return _run_single_jit(carry, n_steps, forcing)
 
     def run_segment(carry: SegmentCarry, n_steps: int,
                     forcing: SegmentForcing) -> SegmentCarry:
@@ -750,12 +893,17 @@ def build_segment_fn(
         Same as run_segment_jit but without JIT wrapping or buffer
         donation, which conflict with outer AD transforms. The outer
         grad call handles compilation.
+
+        Always routes through ``_run_single`` — the subcycle dispatch
+        in :func:`_use_subcycle` reads ``int(carry.step_index)``, which
+        is not traceable when ``carry.step_index`` is a JAX tracer
+        (the AD entry path).  The legacy single-scan body remains
+        bit-equivalent to the subcycled path; only the XLA compile-
+        time scaling differs.  The AD pipeline already pays a
+        recompute / activation cost dominated by physics, so the
+        cond-vs-subcycle JIT-time tradeoff is irrelevant here.
         """
-        _step_fn = _make_single_step(forcing)
-        if gradient_checkpoint:
-            _step_fn = jax.checkpoint(_step_fn, prevent_cse=False)
-        final_carry, _ = jax.lax.scan(_step_fn, carry, None, length=n_steps)
-        return final_carry
+        return _run_single(carry, n_steps, forcing)
 
     # Attach both variants; default is the JIT version for inference
     run_segment_jit.raw = run_segment

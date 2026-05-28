@@ -652,13 +652,30 @@ class PhysicsPipeline:
         return (dT_dt_rad, sw_net_sfc, lw_net_sfc, sw_up_toa, lw_up_toa,
                 sw_down_toa)
 
-    def build_step_unified(self):
+    def build_step_unified(self, static_need_rad: bool | None = None):
         """Build a JIT-compiled unified physics step with radiation sub-cycling.
 
         Returns a function ``step_unified(need_rad, T, p_s, q_v, q_c, q_r,
         conv_prog, u, v, sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
         solar_weights, s_0, o3_vmr, aerosol_od, held) -> (PhysicsOutput,
         HeldRadiation)``.
+
+        Parameters
+        ----------
+        static_need_rad : bool or None, optional
+            Issue #316: ``jax.lax.cond`` inside a ``lax.scan`` body
+            materialises both branches in the HLO graph; with a large
+            radiation branch (RRTMGP: ~30 g-point band solves) the
+            Conditional inflates the WhileLoop body, and XLA
+            optimization passes (algebraic_simplifier, CSE) scale
+            poorly — XLA JIT time grew from ~50 s at scan length 1 to
+            > 2 h at scan length 4 320 in production AMIP runs.
+            When the caller knows at build time whether radiation
+            fires every step (``True``) or never (``False``) — the
+            normal case under :func:`build_segment_fn` subcycling —
+            the cond is elided here and only one branch is traced.
+            ``None`` (default) preserves the original data-dependent
+            cond for callers that still gate radiation inline.
         """
         pipeline = self
 
@@ -757,6 +774,16 @@ class PhysicsPipeline:
                     C_H, C_E, albedo_ice, albedo_ocean,
                     ghg_vmr_override)
 
+            # Issue #316 fix: when the caller knows at build time which
+            # branch to take, skip the cond — keeps only the live branch
+            # in the HLO graph and bounds XLA compile time when this
+            # function is called inside a long ``lax.scan``.
+            if static_need_rad is True:
+                del need_rad
+                return _rad_branch(args)
+            if static_need_rad is False:
+                del need_rad
+                return _no_rad_branch(args)
             return jax.lax.cond(need_rad, _rad_branch, _no_rad_branch, args)
 
         return step_unified
