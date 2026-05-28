@@ -979,7 +979,15 @@ class CDGridShallowWaterModel(IntegrationMixin):
             return (nf, ne)
 
         nbr_recv_strips = {}  # (face, edge) -> (ue_strip, vn_strip)
-        for peer_rank, entries in cross_rank_edges.items():
+        # FV3_3D iter-1053: iterate peers in ascending rank order so
+        # ALL ranks issue their sendrecv calls in the same global
+        # peer-sequence — avoids cyclic-wait deadlock at np=6 where
+        # each rank has 4 peers and dict-insertion order would
+        # otherwise produce ``rank 0 → rank 3 → rank 2 → rank 1 →
+        # rank 0`` cyclic blocking.  Sorted ordering ensures rank A
+        # talks to rank B in the same iteration on both sides.
+        for peer_rank in sorted(cross_rank_edges.keys()):
+            entries = cross_rank_edges[peer_rank]
             ordered = sorted(entries, key=_canon_key)
             # Each side packs its OWN side's strips at each shared edge.
             # Even though only owner's strip is needed, packing both

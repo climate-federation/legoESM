@@ -2467,7 +2467,11 @@ def _synchronize_cgrid_fluxes_mpi(fx, fy, n, topology):
     # (cell axis) and the same trailing shape (e.g., ``(nlev,)`` for
     # 4D).  Pack by stacking on axis 0; unpack by slicing axis 0
     # in chunks of ``n``.
-    for nbr_rank, entries in by_nbr_rank.items():
+    # FV3_3D iter-1053: iterate peers in ascending rank order so all
+    # ranks issue sendrecv calls in the same global peer-sequence
+    # (mirror of the iter-1053 fix applied to ``_sync_dgrid_boundary_mpi``).
+    for nbr_rank in sorted(by_nbr_rank.keys()):
+        entries = by_nbr_rank[nbr_rank]
         send_order = sorted(entries, key=lambda e: (e[2], e[3]))
         recv_order = sorted(entries, key=lambda e: (e[0], e[1]))
 

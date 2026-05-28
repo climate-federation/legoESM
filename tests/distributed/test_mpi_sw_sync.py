@@ -63,6 +63,28 @@ def _build_sw_model_and_state(n: int = 8):
     return ref_model, dist_model, state
 
 
+def _assert_mpi_matches_local(rank, size, ref_synced, dist_synced):
+    """Owned-face bit-for-bit check helper."""
+    from legoesm.parallel.comm import build_comm_topology
+    topology = build_comm_topology(rank, size)
+
+    assert ref_synced.u_d.dtype == jnp.float64
+    assert dist_synced.u_d.dtype == jnp.float64
+
+    for fname in ("u_d", "v_d"):
+        ref_arr = np.asarray(getattr(ref_synced, fname))
+        dist_arr = np.asarray(getattr(dist_synced, fname))
+        for f in topology.local_face_ids:
+            np.testing.assert_allclose(
+                dist_arr[f], ref_arr[f],
+                atol=1e-12, rtol=1e-12,
+                err_msg=(
+                    f"rank{rank} SW sync MPI ≠ local on owned face "
+                    f"{f}, field '{fname}'"
+                ),
+            )
+
+
 class TestSWSyncDgridBoundaryMPI:
     """MPI vs local fidelity for ``_sync_dgrid_boundary``."""
 
@@ -80,34 +102,71 @@ class TestSWSyncDgridBoundaryMPI:
         set_halo_backend("local")
         ref_model, dist_model, state = _build_sw_model_and_state()
 
-        # Local reference
         ref_synced = ref_model._sync_dgrid_boundary(state)
         jax.block_until_ready(ref_synced.u_d)
 
-        # MPI variant
         initialize_distributed(global_n=state.h.shape[1])
         assert get_halo_backend() == "mpi"
         dist_synced = dist_model._sync_dgrid_boundary(state)
         jax.block_until_ready(dist_synced.u_d)
 
-        from legoesm.parallel.comm import build_comm_topology
-        topology = build_comm_topology(rank, size)
+        _assert_mpi_matches_local(rank, size, ref_synced, dist_synced)
 
-        # iter-1052 (codex F-10): pin float64 dtype on owned-face output
-        # — the allreduce(SUM) zero-fill identity only holds at machine
-        # precision for float64; would mask drift at float32.
-        assert ref_synced.u_d.dtype == jnp.float64
-        assert dist_synced.u_d.dtype == jnp.float64
+    def test_sync_per_edge_distinct_values(self):
+        """iter-1053 (codex F-14 follow-up): every shared edge swap is
+        exercised with DISTINCT values per (face, edge).
 
-        for fname in ("u_d", "v_d"):
-            ref_arr = np.asarray(getattr(ref_synced, fname))
-            dist_arr = np.asarray(getattr(dist_synced, fname))
-            for f in topology.local_face_ids:
-                np.testing.assert_allclose(
-                    dist_arr[f], ref_arr[f],
-                    atol=1e-12, rtol=1e-12,
-                    err_msg=(
-                        f"rank{rank} SW sync MPI ≠ local on owned "
-                        f"face {f}, field '{fname}'"
-                    ),
-                )
+        The baseline test uses random init, but if any cube-edge
+        sendrecv silently picks up the wrong neighbour strip (e.g.,
+        ``is_reversed`` flag drop, swapped face indices), randomness
+        could still pass.  This test fills each face's u_d, v_d with
+        ``(face_index + 1) * 1000`` so the post-sync owned-face
+        boundary cells from a non-owner edge MUST equal the owner
+        face's marker value.  Any mis-pairing produces a wrong
+        face-index marker on the boundary.
+        """
+        rank = MPI.COMM_WORLD.Get_rank()
+        size = MPI.COMM_WORLD.Get_size()
+        if size > 6 or 6 % size != 0:
+            pytest.skip("face-only mode only (1/2/3/6 ranks)")
+
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+            CDGridShallowWaterConfig,
+            CDGridShallowWaterModel,
+            CDGridShallowWaterState,
+        )
+
+        n = 8
+        grid = create_cubed_sphere(n)
+        config = CDGridShallowWaterConfig()
+        ref_model = CDGridShallowWaterModel(grid, config)
+        dist_model = CDGridShallowWaterModel(grid, config)
+
+        # Face-distinct marker fields.
+        face_markers_u = jnp.arange(6).astype(jnp.float64)[:, None, None]
+        face_markers_v = jnp.arange(6).astype(jnp.float64)[:, None, None] + 100.0
+        # Add small spatial pattern so reversal mis-handling shows up
+        # as more than just a uniform copy.
+        u_d_init = (face_markers_u + 1) * 1000.0 + jnp.arange(
+            (n + 1) * (n + 1), dtype=jnp.float64
+        ).reshape(n + 1, n + 1)[None, :, :]
+        v_d_init = (face_markers_v + 1) * 1000.0 - jnp.arange(
+            (n + 1) * (n + 1), dtype=jnp.float64
+        ).reshape(n + 1, n + 1)[None, :, :]
+        state = CDGridShallowWaterState(
+            h=jnp.full((6, n, n), 1000.0),
+            u_d=u_d_init, v_d=v_d_init,
+            h_s=jnp.zeros((6, n, n)),
+        )
+
+        set_halo_backend("local")
+        ref_synced = ref_model._sync_dgrid_boundary(state)
+        jax.block_until_ready(ref_synced.u_d)
+
+        initialize_distributed(global_n=n)
+        dist_synced = dist_model._sync_dgrid_boundary(state)
+        jax.block_until_ready(dist_synced.u_d)
+
+        _assert_mpi_matches_local(rank, size, ref_synced, dist_synced)
+

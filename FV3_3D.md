@@ -2378,6 +2378,109 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1053 (2026-05-28): rank-sorted peer iteration — fixes latent np=6 deadlock
+
+### Goal
+
+Extend iter-1052 SW MPI sync to np=6 face-only mode (each rank
+owns 1 face) plus add codex F-14 follow-up coverage (per-edge
+distinct-marker test).
+
+### Latent bug surfaced
+
+At np=6 face-only, each rank owns 1 face and has 4 cross-rank
+peers (one per edge).  Both iter-1051's
+``_synchronize_cgrid_fluxes_mpi`` and iter-1052's
+``_sync_dgrid_boundary_mpi`` iterated ``for peer_rank, entries in
+by_nbr_rank.items()`` — Python 3.7+ dict-insertion order.  The
+insertion order depends on the per-rank face-edge iteration
+order, producing DIFFERENT peer sequences across ranks.
+
+Cyclic-wait analysis at np=6:
+
+::
+
+    rank 0 sees peers {3, 1, 5, 4}  (W, E, S, N of face 0)
+    rank 3 sees peers {2, 0, 5, 4}  (W, E, S, N of face 3)
+    rank 2 sees peers {1, 3, 5, 4}
+    rank 1 sees peers {0, 2, 5, 4}
+
+    rank 0's FIRST sendrecv → peer 3
+    rank 3's FIRST sendrecv → peer 2
+    rank 2's FIRST sendrecv → peer 1
+    rank 1's FIRST sendrecv → peer 0
+
+    Cycle: 0 → 3 → 2 → 1 → 0  →  DEADLOCK
+
+### Fix
+
+Both functions now iterate
+``for peer_rank in sorted(by_nbr_rank.keys()):``.  Sorted
+ordering ensures any pair of ranks (A, B) reaches their mutual
+sendrecv at a position consistent with both sides progressing in
+ascending peer order — pairs always complete in finite time.
+
+Applied identically to:
+
+- ``src/legoesm/grids/halo.py::_synchronize_cgrid_fluxes_mpi``
+- ``src/legoesm/atmosphere/dynamics/shallow_water_fv3_cdgrid.py::
+  _sync_dgrid_boundary_mpi``
+
+### New test
+
+``test_sync_per_edge_distinct_values`` in
+``tests/distributed/test_mpi_sw_sync.py``:
+
+Initializes each face's ``u_d, v_d`` with a face-distinct
+marker (``(face + 1) * 1000`` + spatial pattern).  Any mis-
+pairing of ``(face, edge) ↔ (nbr_face, nbr_edge)`` in the
+sendrecv pack / unpack would substitute the wrong face's
+marker into the boundary, surfacing as a large diff vs the
+single-device reference.  Catches what random init would mask.
+
+### Validation
+
+::
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun -np 2 \
+        --timeout 600 .venv/bin/python -m pytest \
+        tests/distributed/test_mpi_fv3_step_fidelity.py \
+        tests/distributed/test_mpi_fv3_nh_step_fidelity.py \
+        tests/distributed/test_mpi_interp_offsets.py \
+        tests/distributed/test_mpi_synchronize_cgrid_fluxes.py \
+        tests/distributed/test_mpi_sw_sync.py \
+        --no-header -q
+    => 27 passed in 272.54 s
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun -np 6 \
+        --oversubscribe --timeout 120 .venv/bin/python -m pytest \
+        tests/distributed/test_mpi_sw_sync.py \
+        tests/distributed/test_mpi_synchronize_cgrid_fluxes.py -v
+    => 5/5 PASSED in 7.31 s (was hanging indefinitely before iter-1053)
+
+### Status
+
+| Open follow-up | Status |
+|----------------|--------|
+| iter-1046 #1 non-square halo for cross_face | ⏳ deferred |
+| iter-1050 SW sync MPI port | ✅ iter-1052 |
+| codex F-14 SW per-edge reversal coverage | ✅ iter-1053 |
+| codex F-16 SW np=3/6 coverage | ✅ iter-1053 (rank-sort fix enables np=6) |
+| Sub-face tiling (n>6) with interp_offsets / SW sync | ⏳ refuses cleanly |
+| Metal+MPI+duogrid linspace XLA | ⏳ workaround documented |
+
+### Why this iteration was meaningful
+
+The dict-insertion-order peer iteration was a SECOND latent
+deadlock pattern beyond iter-1049/1051's per-edge sendrecv
+deadlock.  At np=2 it was hidden (only ≤2 peers per rank → no
+cyclic-wait possible).  At np=6 with 4 peers each, the cycle
+manifested.  Without the iter-1053 multi-rank coverage push
+(codex F-16 follow-up), this would have been a production
+hang on the documented 6-rank cubed-sphere config.  Now both
+the cgrid flux sync (iter-1051) and SW corner sync (iter-1052)
+are deadlock-free at all face-only ranks ∈ {1, 2, 3, 6}.
+
 ## Iteration 1052 (2026-05-28): SW ``_sync_dgrid_boundary`` MPI port (iter-1050 audit follow-up)
 
 ### Goal
