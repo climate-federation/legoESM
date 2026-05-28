@@ -2378,6 +2378,67 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1063 (2026-05-28): fix stale ``test_mpi_driver.py`` failures (precondition + full-state contract)
+
+### Goal
+
+Continuing iter-1058..1062's distributed-test repair sweep,
+``test_mpi_driver.py`` has 2 pre-existing failures:
+
+- ``test_initialize_distributed_sets_mpi_backend``: ``assert
+  get_halo_backend() == 'local'`` precondition fails because the
+  conftest session fixture pre-initializes MPI.
+- ``test_pad_halo_4d_mpi_matches_local``: same bug class as
+  iter-1061 — compares full ``(6, n+2, n+2, nlev)`` MPI vs local
+  output on rank 0, but MPI only fills owned faces' halos.
+
+### Fix
+
+1. ``reset_halo_backend`` fixture: changed to reset BEFORE the
+   yield as well, so each test starts with a clean ``local``
+   baseline regardless of prior test state or the session
+   fixture's MPI init.
+
+2. ``test_pad_halo_4d_mpi_matches_local``: loop over
+   ``topology.local_face_ids`` and compare ``result[f]`` vs
+   ``ref[f]`` per owned face — matches the FV3 step-fidelity
+   pattern.
+
+### Validation
+
+::
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 2 \
+        .venv/bin/python -m pytest tests/distributed/test_mpi_driver.py
+    => 3 passed in 8.96s
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 3 \
+        .venv/bin/python -m pytest tests/distributed/test_mpi_driver.py
+    => 3 passed in 9.56s
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 6 \
+        .venv/bin/python -m pytest tests/distributed/test_mpi_driver.py
+    => 3 passed in 11.13s
+
+### Cumulative iter-1058..1063
+
+| File | Issue | iter |
+|------|-------|------|
+| ``distributed.py`` re-entry | Stale ``_active_layout`` not rebuilt | 1058 |
+| ``test_mpi_bootstrap.py``   | Stale shape post-scatter API change | 1059 |
+| ``test_coupler_mpi.py``     | Stale ``gather_to_global`` usage | 1060 |
+| ``test_mpi_differentiability.py`` | Wrong VJP scaling + full-state cmp | 1061 |
+| ``test_mpi_differentiability.py`` | Add allreduce-recovery coverage (codex WARN) | 1062 |
+| ``test_coupler_mpi.py``     | Add carried-state assertions (codex WARN) | 1062 |
+| ``test_mpi_driver.py``      | Precondition + full-state contract | 1063 |
+
+9 pre-existing failures fixed and 5 new strict tests added across
+6 commits.  All from iter-aa707bda's scatter/gather API rename
+without test-suite audit.  Remaining distributed test files to
+survey: ``test_latlon_mpi_*``, ``test_mpas_topography_mpi``,
+``test_voronoi_*``, ``test_plane_*``, ``test_rce_mpi``,
+``test_scale_mpi_halo``, ``test_halo_mpi``.
+
 ## Iteration 1062 (2026-05-28): codex iter-1061 WARN fixes — strengthen iter-1060/1061 test coverage
 
 ### Goal
