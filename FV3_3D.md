@@ -2378,6 +2378,79 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1075 (2026-05-28): non-square halo follow-up — actually a *vector-halo-for-staggered-grids* refactor
+
+### Goal
+
+Investigate the iter-1046 "non-square halo for
+``use_fv3_cross_face_du_proj``" follow-up to scope the proper
+fix.
+
+### Finding
+
+The original framing (iter-1046, iter-1072) was: ``pad_halo_4d``
+needs non-square ``(n_x, n_y)`` support to handle ``du_normal``
+(shape ``(6, n+1, n, nlev)``) and ``dv_normal`` (shape
+``(6, n, n+1, nlev)``).
+
+That framing is **wrong** — non-square scalar halo on a
+cubed-sphere is mathematically ill-defined because of axis-swap
+edges:
+
+- Cubed-sphere ``CONNECTIVITY`` (``halo.py:50``) has axis swaps
+  on every equator-pole edge.  E.g., face 1's south
+  (``(5, EAST, True)``) maps face 1's x-axis edge (length
+  ``n_x``) to face 5's y-axis edge (length ``n_y``).
+- For ``n_x != n_y``, source and destination strip lengths
+  don't match — there's no consistent ``j ↔ k`` mapping that
+  preserves data.
+
+### Correct FV3 oracle treatment
+
+FV3 ``sw_core.F90:1948-1989`` halos ``ub`` and ``vb``
+(D-grid wind tendencies) using ``mpp_update_domains`` with
+**vector** type (``DGRID_NE`` per FV3 convention) — the vector
+halo SWAPS u ↔ v at axis-swap edges so each component continues
+into the correct local-frame axis of the neighbor face.
+
+### Proper port (deferred)
+
+For legoESM, the correct port needs:
+
+1. ``pad_halo_vector_4d`` extension to handle staggered shapes
+   (``(n+1, n)`` for u, ``(n, n+1)`` for v) with axis-swap
+   component swapping.
+2. The current iter-370 ``use_fv3_cross_face_du_proj`` code path
+   in ``compressible_euler_cdgrid.py:1248`` and
+   ``primitive_eq_cdgrid.py:1369`` must call this new vector
+   halo with the (du_normal, dv_normal) pair, not separate
+   scalar halos.
+3. Replace ``_pad_halo_4d_module(du_normal, ...)`` with a vector
+   pair halo, then re-split into du_full and dv_full.
+
+Estimated scope: ~200-500 LOC across ``halo.py``,
+``halo_exchange.py``, ``cubesphere_exchange.py``, plus updates to
+PE + NH call sites + new tests.
+
+### Status
+
+- **iter-1072**: silent corruption → loud ``ValueError`` at all 6
+  4D halo entry points.
+- **iter-1073**: factory defaults disable ``cross_face_du_proj``
+  to keep the canonical production path correct.
+- **iter-1074**: pinned the guards with dedicated tests.
+- **iter-1075** (this iter): documented the proper fix.  The
+  vector-halo-for-staggered-grids refactor is the actual gap;
+  the "non-square scalar halo" framing was a red herring.
+
+The current FV3-faithful factory enables 5/6 NH and 2/3 PE FV3
+flags bit-for-bit-correct.  The 6th NH and 3rd PE flag
+(``cross_face_du_proj``) requires the vector halo refactor and
+is opt-in only.  Per the user's "MPI faithful cubed-sphere" goal:
+the canonical default-factory path is fully FV3-faithful for
+production deployments; the one disabled flag is documented and
+tracked.
+
 ## Iteration 1074 (2026-05-28): pin iter-1073 non-square halo guards with dedicated tests
 
 ### Goal
