@@ -189,3 +189,24 @@ REMAINING G-C2 read-de-mirroring (next increments, each targeted-verified):
     override_constants monkey-patch; G-C5 audit guard.
 Full-suite gate auto-backgrounds/times-out in this env; using targeted per-module gates +
 the zero-behaviour-by-construction argument.
+
+### 2026-05-28 · iter 9 · Q4 de-mirroring scope mapped -> STOP for user prioritization
+Mapped the remaining G-C2 read-de-mirroring: it spans TWO threading paths, not one:
+  (1) explicit physics-factory path: make_ocean_physics -> make_vertical_mixing_physics ->
+      _make_kpp closure (constants.g at integration.py 147/167) — NOT ACC-relevant (ACC uses
+      implicit mixing);
+  (2) implicit DYNAMICS path (what ACC actually uses): the implicit vertical-mixing solve in
+      ocean_model_latlon_cgrid -> compute_vertical_K_profiles (k_profiles.py 214/223) +
+      tke.py 271 — threaded from the MODEL config, a different chain than the physics factory.
+  Plus the module-mirror sites (eos.{rho_0,c_sw}, diagnostics._RHO_0, _gm_redi_common,
+  gm_redi_{mpas,latlon}, prescribed/bulk_formulas, shortwave, mpas_physics) and G-C3
+  coupler/forcing. = a major multi-path refactor.
+Full-suite regression gate confirmed UN-RUNNABLE here (b5e99jzbu exit 143 / killed). For a
+refactor of this breadth, full-suite verification matters; only targeted gates run.
+DECISION: this is CLEANLINESS (the override_constants monkey-patch works today — recipe runs
+fine), it is large + multi-path, full-suite verification is unavailable, and a strategy
+decision (momentum/tracer tier-2 approach) is pending. So I'm surfacing a PRIORITIZATION fork
+to the user rather than autonomously grinding it. Recommendation: do Q5 (CI clarity guard,
+independent + high-value + targeted-verifiable) and resolve the momentum decision BEFORE the
+large G-C2..G-C5 de-mirroring. State: Q1✓ Q2✓ Q3✓ Q4(G-C1+G-C2-foundation done). Loop did not
+halt on prior RALPHDONE -> user must /cancel-ralph or redirect.
