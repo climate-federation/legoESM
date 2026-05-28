@@ -48,6 +48,7 @@ from legoesm.grids.gaussian import (
 from legoesm.atmosphere.physics.turbulence.smagorinsky import smagorinsky_turbulence
 from legoesm.atmosphere.physics.turbulence.louis import louis_turbulence
 from legoesm.atmosphere.physics.turbulence.tke import tke_turbulence
+from legoesm.atmosphere.physics.turbulence.mynn25 import mynn25_turbulence
 from legoesm.atmosphere.physics.turbulence.clubb_lite import clubb_lite_turbulence
 from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
     holtslag_boville_turbulence,
@@ -70,6 +71,8 @@ def _get_turbulence_fn(config: TurbulenceConfig):
         return "louis", louis_turbulence, config.louis
     elif config.scheme == "tke":
         return "tke", tke_turbulence, config.tke
+    elif config.scheme == "mynn25":
+        return "mynn25", mynn25_turbulence, config.mynn25
     elif config.scheme == "clubb_lite":
         return "clubb_lite", clubb_lite_turbulence, config.clubb_lite
     elif config.scheme == "holtslag_boville":
@@ -88,6 +91,30 @@ from legoesm.atmosphere.physics._shared import (
     compute_heights_from_sigma as _compute_heights_from_sigma,
     compute_rho as _compute_rho,
 )
+
+
+def _resolve_T_sfc(T_col, phys_state):
+    """Pick the surface temperature seen by the bulk-flux call.
+
+    Default convention (preserved bit-for-bit by 3-D runs): ``T_sfc ==
+    T_col[:, -1]`` — the lowest air temperature stands in for the
+    surface skin temperature.  The SCM driver may override this on a
+    per-column basis by writing ``phys_state.surface_T_sfc_override``;
+    the override uses ``NaN`` as the sentinel for "fall back".
+
+    This is what gives ``SCMForcing(prescribe="T_s")`` a non-zero
+    bulk-flux gradient when paired with a turbulence scheme: anchoring
+    only ``T[..., -1]`` to the prescribed value would collapse
+    ``T_sfc − T[..., -1]`` to zero and silently suppress the sensible
+    heat flux (Phase B codex iter-1 high finding).
+    """
+    fallback = T_col[:, -1]
+    if phys_state is None:
+        return fallback
+    override = getattr(phys_state, "surface_T_sfc_override", None)
+    if override is None:
+        return fallback
+    return jnp.where(jnp.isnan(override), fallback, override)
 
 
 def make_turbulence_physics(
@@ -170,7 +197,7 @@ def _make_hydrostatic_turbulence(
     and the moisture tendency ``dq_v_dt`` is returned via ``tracer_tendencies``.
     """
     scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
-    needs_tke = scheme_name in ("tke", "clubb_lite", "edmf")
+    needs_tke = scheme_name in ("tke", "mynn25", "clubb_lite", "edmf")
 
     def physics_fn(
         state: HydrostaticState,
@@ -235,13 +262,17 @@ def _make_hydrostatic_turbulence(
         rho = _compute_rho(T_col, p_full_col, q_v=q_v_col)
 
         # Surface conditions
-        T_sfc = T_col[:, -1]
+        T_sfc = _resolve_T_sfc(T_col, phys_state)
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
 
         if needs_tke:
             # Read TKE from explicit PhysicsState if provided.
             if phys_state is not None:
-                tke_in = phys_state.tke
+                tke_in = (
+                    phys_state.qke
+                    if scheme_name == "mynn25"
+                    else phys_state.tke
+                )
                 # Reshape if needed (PhysicsState stores flat columns).
                 if tke_in.shape != (ncol, nlev):
                     tke_in = jnp.full((ncol, nlev), scheme_config.tke_min, dtype=_state_dtype)
@@ -319,7 +350,7 @@ def _make_mpas_turbulence(
     Audit 2026-05-12 finding MEDIUM #10.
     """
     scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
-    needs_tke = scheme_name in ("tke", "clubb_lite", "edmf")
+    needs_tke = scheme_name in ("tke", "mynn25", "clubb_lite", "edmf")
 
     def physics_fn(state, mesh, sigma_coord, phys_state=None):
         from legoesm.grids.voronoi import reconstruct_cell_velocity
@@ -370,12 +401,16 @@ def _make_mpas_turbulence(
         z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col, q_v=q_v_col)
         rho = _compute_rho(T_col, p_full_col, q_v=q_v_col)
 
-        T_sfc = T_col[:, -1]
+        T_sfc = _resolve_T_sfc(T_col, phys_state)
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
 
         if needs_tke:
             if phys_state is not None:
-                tke_in = phys_state.tke
+                tke_in = (
+                    phys_state.qke
+                    if scheme_name == "mynn25"
+                    else phys_state.tke
+                )
                 if tke_in.shape != (nCells, nlev):
                     tke_in = jnp.full((nCells, nlev), scheme_config.tke_min, dtype=_state_dtype)
             else:
@@ -459,7 +494,24 @@ def _make_nonhydrostatic_turbulence(
     element of the result tuple.
     """
     scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
-    needs_tke = scheme_name in ("tke", "clubb_lite", "edmf")
+    needs_tke = scheme_name in ("tke", "mynn25", "clubb_lite", "edmf")
+    if scheme_name == "mynn25":
+        # Phase C codex iter-3 high: the nonhydrostatic CD-grid dynamics
+        # driver drops the returned ``PhysicsState`` after every
+        # physics call (see ``slow_tendency_fn`` in
+        # ``compressible_euler_cdgrid.py``), so the evolved qke would
+        # silently re-initialise from ``qke_min`` on every step.  Fail
+        # fast at factory time until phys_state is threaded through the
+        # nonhydrostatic step path (out of Phase C scope).
+        raise NotImplementedError(
+            "MYNN-2.5 turbulence requires a dynamics driver that "
+            "persists PhysicsState across steps.  The current "
+            "nonhydrostatic CD-grid driver discards the returned "
+            "phys_state, which would silently re-initialise qke on "
+            "every step.  Use ``model_type='hydrostatic'`` "
+            "for MYNN-2.5 (MPAS turbulence is not yet wired up); tracking issue: thread "
+            "PhysicsState through the nonhydrostatic step path."
+        )
 
     def physics_fn(
         state: NonHydrostaticState,
@@ -538,12 +590,16 @@ def _make_nonhydrostatic_turbulence(
         if n_tracers > 0:
             q_v_col = tracers[..., 0].reshape(ncol, nlev)
 
-        T_sfc = T_col[:, -1]
+        T_sfc = _resolve_T_sfc(T_col, phys_state)
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
 
         if needs_tke:
             if phys_state is not None:
-                tke_in = phys_state.tke
+                tke_in = (
+                    phys_state.qke
+                    if scheme_name == "mynn25"
+                    else phys_state.tke
+                )
                 if tke_in.shape != (ncol, nlev):
                     tke_in = jnp.full((ncol, nlev), scheme_config.tke_min, dtype=_state_dtype)
             else:
@@ -607,7 +663,21 @@ def _make_spectral_pe_turbulence(
     element of the result tuple.
     """
     scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
-    needs_tke = scheme_name in ("tke", "clubb_lite", "edmf")
+    needs_tke = scheme_name in ("tke", "mynn25", "clubb_lite", "edmf")
+    if scheme_name == "mynn25":
+        # Phase C codex iter-3 high: spectral PE dynamics drops the
+        # returned ``PhysicsState`` (see spectral_pe.py:1556-1557), so
+        # qke would silently re-initialise on every step.  Fail fast
+        # until phys_state is threaded through the spectral PE step.
+        raise NotImplementedError(
+            "MYNN-2.5 turbulence requires a dynamics driver that "
+            "persists PhysicsState across steps.  The current "
+            "spectral PE driver discards the returned phys_state, "
+            "which would silently re-initialise qke on every step.  "
+            "Use ``model_type='hydrostatic'`` for MYNN-2.5 (MPAS "
+            "turbulence is not yet wired up); tracking issue: thread "
+            "PhysicsState through the spectral PE step path."
+        )
 
     def physics_fn(state, grid, sigma_coord, grid_fields=None, phys_state=None):
         tke_out = None
@@ -658,12 +728,16 @@ def _make_spectral_pe_turbulence(
         z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col, q_v=q_v_col)
         rho = _compute_rho(T_col, p_full_col, q_v=q_v_col)
 
-        T_sfc = T_col[:, -1]
+        T_sfc = _resolve_T_sfc(T_col, phys_state)
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
 
         if needs_tke:
             if phys_state is not None:
-                tke_in = phys_state.tke
+                tke_in = (
+                    phys_state.qke
+                    if scheme_name == "mynn25"
+                    else phys_state.tke
+                )
                 if tke_in.shape != (ncol, nlev):
                     tke_in = jnp.full((ncol, nlev), scheme_config.tke_min, dtype=_state_dtype)
             else:

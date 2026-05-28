@@ -164,11 +164,11 @@ def test_scm_unknown_integrator_raises():
 
 def test_register_time_integrator_extends_registry():
     """Custom integrators register and become selectable by name."""
-    def double_euler(state, phys, f, dt):
+    def double_euler(state, phys, f, dt, t):
         from legoesm.atmosphere.scm import _apply_tendencies
-        tend, phys_out = f(state, phys)
+        tend, phys_out = f(state, phys, t)
         mid = _apply_tendencies(state, tend, 0.5 * dt)
-        tend2, phys_out2 = f(mid, phys_out)
+        tend2, phys_out2 = f(mid, phys_out, t + 0.5 * dt)
         return _apply_tendencies(mid, tend2, 0.5 * dt), phys_out2
 
     register_time_integrator("double_euler_test", double_euler)
@@ -400,7 +400,7 @@ def test_swap_convection_schemes(conv_scheme):
 
 @pytest.mark.parametrize(
     "turb_scheme",
-    ["smagorinsky", "louis", "tke", "clubb_lite",
+    ["smagorinsky", "louis", "tke", "mynn25", "clubb_lite",
      "holtslag_boville", "ysu", "edmf"],
 )
 def test_swap_turbulence_schemes(turb_scheme):

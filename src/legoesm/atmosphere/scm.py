@@ -9,13 +9,19 @@ boundary layer cases).
 The SCM reuses the canonical hydrostatic physics factory
 (`legoesm.atmosphere.physics.combined.make_physics`) so any scheme that
 works in the full 3-D model also works here without modification. There
-is no horizontal advection, no pressure-gradient force, and no Coriolis
-— only column tendencies from radiation, convection, turbulence,
-microphysics, and gravity-wave drag, integrated forward Euler.
+is no horizontal advection from the dynamical core, no pressure-gradient
+force, and no intrinsic Coriolis — only column tendencies from
+radiation, convection, turbulence, microphysics, and gravity-wave drag,
+optionally augmented by a user-supplied :class:`SCMForcing` that
+contributes external large-scale forcing (Coriolis + geostrophic wind,
+large-scale subsidence, prescribed horizontal-advection tendencies, and
+the Phase-B prescribed-surface-flux hooks).  Tendencies are then
+combined and integrated with forward Euler, RK2, or RK4.
 
 Example
 -------
 >>> from legoesm.atmosphere.scm import SingleColumnModel
+>>> from legoesm.atmosphere.scm_forcing import SCMForcing
 >>> from legoesm.atmosphere.physics import (
 ...     PhysicsConfig, RadiationConfig, TurbulenceConfig,
 ... )
@@ -23,15 +29,22 @@ Example
 ...     radiation=RadiationConfig(scheme="gray"),
 ...     turbulence=TurbulenceConfig(scheme="louis"),
 ... )
+>>> forcing = SCMForcing(
+...     f_c=1e-4,
+...     u_geo=lambda t: jnp.full(40, 8.0),
+... )
 >>> scm = SingleColumnModel.create(
 ...     physics_config=cfg, nlev=40, dt=300.0,
 ...     latitude_deg=0.0, T_profile=jnp.linspace(220.0, 295.0, 40),
+...     forcing=forcing,
 ... )
 >>> final_state, history = scm.run(nsteps=288, save_every=12)
 """
 
 from __future__ import annotations
 
+import inspect
+import warnings
 from typing import Callable, NamedTuple
 
 import jax
@@ -45,6 +58,15 @@ from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
 from legoesm.atmosphere.physics.physics_state import (
     PhysicsState,
     init_physics_state,
+)
+from legoesm.atmosphere.scm_forcing import (
+    SCMForcing,
+    add_tendencies,
+    compute_forcing_tendencies,
+    default_forcing,
+    inject_prescribed_T_sfc_into_phys_state,
+    validate_forcing,
+    validate_forcing_against_state,
 )
 
 
@@ -192,46 +214,111 @@ def _apply_tendencies(
     )
 
 
-def _tendency_fn(physics_fn, grid, sigma_coord):
-    """Return a closure ``(state, phys_state) -> (tend, phys_state_out)``.
+def _tendency_fn(physics_fn, grid, sigma_coord, forcing: SCMForcing | None = None):
+    """Return a closure ``(state, phys_state, t) -> (tend, phys_state_out)``.
 
     Used by the time-integrator strategies so they all share the same
     physics-evaluation interface regardless of which scheme is active.
+    ``t`` is the **stage time** in seconds since model start (RK stages
+    pass intermediate values); it is forwarded to ``forcing`` callables
+    so time-dependent geostrophic wind, prescribed surface forcing, etc.
+    are evaluated at the correct sub-step time.  ``forcing=None`` is a
+    no-op.
     """
-    def f(state, phys_state):
-        return physics_fn(state, grid, sigma_coord, phys_state=phys_state)
+    def f(state, phys_state, t):
+        # For ``prescribe="T_s"``: write the prescribed skin temperature
+        # into ``phys_state.surface_T_sfc_override`` so the turbulence
+        # scheme's bulk-flux call sees ``T_sfc != T[..., -1]`` and
+        # produces a non-zero sensible flux.  Lowest air temperature
+        # evolves freely under that flux (do NOT mutate state.T[-1] —
+        # collapses the gradient — Phase B codex iter-1 high finding).
+        # Also notify radiation via ``physics_fn.set_T_sfc_override`` so
+        # surface longwave emission uses the same prescribed value
+        # (Phase B v2 codex iter-2 high finding — without this the
+        # boundary was silently split between turbulence and radiation).
+        #
+        # The radiation hook is process-local mutable closure state on
+        # ``physics_fn``; wrap the call in try/finally so the override
+        # is always cleared, preventing leakage across SCM instances
+        # that share a ``physics_fn`` (Phase B v2 codex iter-5 high
+        # finding).
+        rad_hook = None
+        hook_armed = False
+        if forcing is not None and forcing.prescribe == "T_s":
+            phys_state = inject_prescribed_T_sfc_into_phys_state(
+                phys_state, forcing.T_s(t),
+            )
+            rad_hook = getattr(physics_fn, "set_T_sfc_override", None)
+            if callable(rad_hook):
+                rad_hook(phys_state.surface_T_sfc_override)
+                hook_armed = True
+
+        try:
+            tend, phys_out = physics_fn(
+                state, grid, sigma_coord, phys_state=phys_state,
+            )
+        finally:
+            if hook_armed:
+                rad_hook(None)
+
+        if forcing is not None:
+            ftend = compute_forcing_tendencies(state, sigma_coord, forcing, t)
+            tend = add_tendencies(tend, ftend)
+        return tend, phys_out
     return f
 
 
-def _euler_step(state, phys_state, f, dt):
+def _euler_step(state, phys_state, f, dt, t):
     """Forward Euler (1st order)."""
-    tend, phys_out = f(state, phys_state)
+    tend, phys_out = f(state, phys_state, t)
     return _apply_tendencies(state, tend, dt), phys_out
 
 
-def _rk2_step(state, phys_state, f, dt):
+def _rk2_step(state, phys_state, f, dt, t):
     """Heun's method (RK2, midpoint-correction variant).
 
     ``phys_state`` is advanced once per outer step (stage-1 update) to
     keep the prognostic-physics carry single-valued. Tendencies are
-    averaged between the predictor and corrector stages.
+    averaged between the predictor and corrector stages.  Stage time is
+    advanced to ``t + dt`` for the corrector so time-dependent forcing
+    is evaluated consistently with the Heun update.
     """
-    tend1, phys_mid = f(state, phys_state)
+    tend1, phys_mid = f(state, phys_state, t)
     mid = _apply_tendencies(state, tend1, dt)
-    tend2, _ = f(mid, phys_mid)
+    tend2, _ = f(mid, phys_mid, t + dt)
     avg = _average_tendencies(tend1, tend2, weights=(0.5, 0.5))
     return _apply_tendencies(state, avg, dt), phys_mid
 
 
-def _rk4_step(state, phys_state, f, dt):
-    """Classical RK4. Physics-state carry advanced from stage-1 only."""
-    k1, phys_mid = f(state, phys_state)
+def _ab2_step_first(state, phys_state, f, dt, t):
+    """First-step fallback for AB2 (no prev tendency yet): forward Euler.
+
+    The actual AB2 update lives in :meth:`SingleColumnModel.step` because
+    it needs a per-instance ``prev_tend`` cache that the
+    ``(state, phys, f, dt, t) -> (state', phys')`` integrator contract
+    does not expose.  This registry entry exists so ``"ab2"`` passes
+    :meth:`SingleColumnModel.__init__`'s ``time_integrator`` validation;
+    the call only fires for the very first step (when prev_tend is
+    ``None``) — subsequent steps short-circuit into the AB2 branch in
+    :meth:`SingleColumnModel.step`.
+    """
+    return _euler_step(state, phys_state, f, dt, t)
+
+
+def _rk4_step(state, phys_state, f, dt, t):
+    """Classical RK4. Physics-state carry advanced from stage-1 only.
+
+    Stage times: ``t``, ``t + dt/2``, ``t + dt/2``, ``t + dt`` — the
+    canonical RK4 abscissae, so time-dependent forcing is sampled at the
+    correct sub-step instants.
+    """
+    k1, phys_mid = f(state, phys_state, t)
     s2 = _apply_tendencies(state, k1, 0.5 * dt)
-    k2, _ = f(s2, phys_mid)
+    k2, _ = f(s2, phys_mid, t + 0.5 * dt)
     s3 = _apply_tendencies(state, k2, 0.5 * dt)
-    k3, _ = f(s3, phys_mid)
+    k3, _ = f(s3, phys_mid, t + 0.5 * dt)
     s4 = _apply_tendencies(state, k3, dt)
-    k4, _ = f(s4, phys_mid)
+    k4, _ = f(s4, phys_mid, t + dt)
     avg = _average_tendencies(k1, k2, k3, k4, weights=(1/6, 1/3, 1/3, 1/6))
     return _apply_tendencies(state, avg, dt), phys_mid
 
@@ -283,17 +370,130 @@ TIME_INTEGRATORS: dict[str, Callable] = {
     "forward_euler": _euler_step,
     "rk2": _rk2_step,
     "rk4": _rk4_step,
+    # AB2 first-step fallback (forward Euler); main AB2 update lives in
+    # :meth:`SingleColumnModel.step` to keep its prev-tendency cache
+    # isolated per SCM instance.
+    "ab2": _ab2_step_first,
 }
 
 
 def register_time_integrator(name: str, step_fn: Callable) -> None:
     """Register a custom time-integrator under ``name``.
 
-    The signature must be ``step_fn(state, phys_state, f, dt)`` where
-    ``f`` is the tendency callable returned by :func:`_tendency_fn`. The
-    integrator must return ``(new_state, new_phys_state)``.
+    The canonical signature is ``step_fn(state, phys_state, f, dt, t)``
+    where ``f`` is the tendency callable returned by :func:`_tendency_fn`
+    and expects ``f(state, phys_state, stage_t_seconds)``. ``t`` is the
+    base-step time in seconds; multi-stage integrators MUST advance
+    ``t`` to the correct sub-step abscissa for each call to ``f`` so
+    time-dependent SCM forcing is sampled consistently with the update.
+    The integrator must return ``(new_state, new_phys_state)``.
+
+    Backwards compatibility
+    -----------------------
+    Pre-forcing legacy integrators registered with the older
+    ``step_fn(state, phys_state, f, dt)`` 4-arg signature are wrapped
+    transparently: the wrapper captures the outer-step ``t`` once and
+    forwards a 2-arg tendency closure that ignores stage time.  These
+    legacy integrators therefore work correctly only when ``forcing``
+    is ``None`` or every channel is time-independent; passing
+    time-dependent forcing through them silently sees the outer-step
+    ``t`` at every sub-stage.  A ``DeprecationWarning`` flags this at
+    registration so callers can migrate.  Anything other than 4 or 5
+    positional parameters is rejected with ``TypeError`` at
+    registration rather than at first ``step()`` call.
     """
-    TIME_INTEGRATORS[name] = step_fn
+    if not callable(step_fn):
+        raise TypeError(
+            f"register_time_integrator({name!r}): step_fn must be "
+            f"callable; got {type(step_fn).__name__}."
+        )
+    try:
+        sig = inspect.signature(step_fn)
+    except (TypeError, ValueError) as exc:
+        # Fail closed: C-extensions, descriptors, and some wrappers
+        # refuse signature inspection. Refusing to register here forces
+        # callers to expose a true ``__signature__`` rather than letting
+        # an opaque object slip through and crash on the first step.
+        raise TypeError(
+            f"register_time_integrator({name!r}): cannot inspect "
+            f"step_fn signature ({exc}). Wrap the callable so it "
+            "exposes a concrete signature (e.g. ``functools.wraps`` "
+            "with ``__wrapped__`` set, or a plain ``def`` form)."
+        ) from exc
+
+    # Count parameters that can be passed positionally.  The driver
+    # invokes ``step_fn(state, phys, f, dt, t)`` positionally, so
+    # keyword-only parameters and *args / **kwargs do not satisfy the
+    # 4-or-5-arg contract and must be rejected at registration time
+    # rather than failing on first call.
+    _POSITIONAL = {
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    }
+    positional_params = [
+        p for p in sig.parameters.values() if p.kind in _POSITIONAL
+    ]
+    n_params = len(positional_params)
+    has_varargs = any(
+        p.kind is inspect.Parameter.VAR_POSITIONAL
+        for p in sig.parameters.values()
+    )
+    if has_varargs:
+        raise TypeError(
+            f"register_time_integrator({name!r}): step_fn must declare "
+            "its parameters explicitly; ``*args`` / variadic positional "
+            "signatures are rejected because arity cannot be verified."
+        )
+
+    # Reject any required keyword-only parameters — the driver invokes
+    # the integrator positionally so a required kwonly arg (commonly
+    # ``def step(state, phys, f, dt, *, t)``) would crash on the first
+    # call.  Optional kwonlys (with a default) are harmless.
+    required_kwonly = [
+        p.name for p in sig.parameters.values()
+        if p.kind is inspect.Parameter.KEYWORD_ONLY
+        and p.default is inspect.Parameter.empty
+    ]
+    if required_kwonly:
+        raise TypeError(
+            f"register_time_integrator({name!r}): step_fn declares "
+            f"required keyword-only parameter(s) {required_kwonly}; "
+            "the driver invokes integrators positionally so keyword-"
+            "only parameters cannot be supplied at call time. Move "
+            "them to positional-or-keyword."
+        )
+
+    if n_params == 5:
+        TIME_INTEGRATORS[name] = step_fn
+    elif n_params == 4:
+        warnings.warn(
+            f"Time integrator {name!r} uses the legacy 4-arg signature "
+            "``(state, phys, f, dt)``. Wrapped for compatibility, but "
+            "time-dependent SCM forcing will be sampled at the outer-"
+            "step time only — migrate to the 5-arg signature "
+            "``(state, phys, f, dt, t)`` to sample forcing at sub-step "
+            "abscissae.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+        def wrapped(state, phys, f, dt, t, _legacy=step_fn):
+            return _legacy(state, phys, lambda s, p: f(s, p, t), dt)
+
+        # Mark this integrator as a legacy shim so
+        # ``SingleColumnModel.__init__`` can hard-error if the user
+        # tries to pair it with time-dependent forcing — the wrapper
+        # would silently sample forcing at the outer-step ``t`` only,
+        # which is the exact correctness bug we just paid Phase A to
+        # avoid.  The ``forcing=None`` case is still supported.
+        wrapped._is_legacy_4arg = True
+        TIME_INTEGRATORS[name] = wrapped
+    else:
+        raise TypeError(
+            f"register_time_integrator({name!r}): step_fn must take 4 "
+            f"or 5 positionally-callable args (got {n_params} positional, "
+            f"full signature {list(sig.parameters)})."
+        )
 
 
 class SCMHistory(NamedTuple):
@@ -340,12 +540,30 @@ class SingleColumnModel:
         sigma_coord: SigmaCoordinate,
         dt: float,
         time_integrator: str = "forward_euler",
+        forcing: SCMForcing | None = None,
+        t0_seconds: float = 0.0,
     ):
         if time_integrator not in TIME_INTEGRATORS:
             raise ValueError(
                 f"Unknown time_integrator: {time_integrator!r}. "
                 f"Available: {sorted(TIME_INTEGRATORS)}."
             )
+        step_fn_obj = TIME_INTEGRATORS[time_integrator]
+        if forcing is not None:
+            validate_forcing(forcing)
+            validate_forcing_against_state(forcing, state)
+            if getattr(step_fn_obj, "_is_legacy_4arg", False):
+                raise ValueError(
+                    f"time_integrator={time_integrator!r} was registered "
+                    "with the legacy 4-arg signature and is wrapped by "
+                    "the compatibility shim.  That shim only samples "
+                    "forcing at the outer-step time, which would "
+                    "silently corrupt time-dependent SCM forcing "
+                    "(geostrophic wind drift, prescribed surface T_s "
+                    "trajectory, advective tendencies). Migrate the "
+                    "integrator to the 5-arg ``(state, phys, f, dt, t)`` "
+                    "signature, or drop the forcing argument."
+                )
         self.physics_fn = physics_fn
         self.state = state
         self.phys_state = phys_state
@@ -353,8 +571,21 @@ class SingleColumnModel:
         self.sigma_coord = sigma_coord
         self.dt = float(dt)
         self.time_integrator = time_integrator
-        self._step_fn = TIME_INTEGRATORS[time_integrator]
-        self._tend_fn = _tendency_fn(physics_fn, grid, sigma_coord)
+        self.forcing = forcing if forcing is not None else default_forcing()
+        self.t_seconds = float(t0_seconds)
+        self._step_fn = step_fn_obj
+        # AB2 stores the previous-step tendency to combine with the
+        # current step's tendency as ``1.5·tend_n − 0.5·tend_{n-1}``
+        # (second-order linear multistep).  Per-instance so multiple
+        # SCMs sharing a physics_fn cannot cross-contaminate.
+        self._ab2_prev_tend: HydrostaticTendencies | None = None
+        # Pass the *original* forcing arg (not the default sentinel) so
+        # _tendency_fn skips the forcing branch entirely when no forcing
+        # was supplied — preserves bit-exact behaviour for callers that
+        # never use forcing.
+        self._tend_fn = _tendency_fn(
+            physics_fn, grid, sigma_coord, forcing=forcing,
+        )
 
     @staticmethod
     def _validate_integrator_compatibility(
@@ -370,10 +601,23 @@ class SingleColumnModel:
         stale carry and the result would not be a true RK update of the
         coupled (state, phys_state) system.
         """
+        # Forward Euler evaluates physics once per outer step at a
+        # single ``t`` and never reuses an in-flight stage carry, so
+        # it is compatible with stateful and diurnal physics.
         if time_integrator in ("forward_euler",):
             return
+        # AB2 also evaluates ``_tend_fn`` once per outer step (no sub-
+        # stages) but the multistep formula only applies to
+        # ``HydrostaticState`` tendencies — prognostic ``PhysicsState``
+        # carries (MYNN qke, TKE, convective profile, GWD spectrum,
+        # AR1 stochastic state) are advanced by the current step's
+        # physics call alone, not by any multistep history.  That
+        # mismatch silently breaks O(dt²) accuracy and benchmark
+        # parity for any scheme with a prognostic carry, so we reject
+        # the same combinations as the RK paths until a proper coupled
+        # AB2 lands (Phase D codex iter-1 medium finding).
         stateful_turb = physics_config.turbulence.scheme in (
-            "tke", "clubb_lite", "edmf"
+            "tke", "mynn25", "clubb_lite", "edmf"
         )
         # Schemes that *read* the previous ``conv_prog_profile`` or
         # ``conv_stoch_state`` — and therefore must not be advanced
@@ -436,6 +680,8 @@ class SingleColumnModel:
         prng_seed: int = 0,
         dtype=None,
         time_integrator: str = "forward_euler",
+        forcing: SCMForcing | None = None,
+        t0_seconds: float = 0.0,
     ) -> "SingleColumnModel":
         """Build a single-column model with sensible defaults.
 
@@ -469,6 +715,15 @@ class SingleColumnModel:
             Seed for the stochastic-physics PRNG carry.
         dtype
             Optional dtype override for state arrays.
+        forcing
+            Optional :class:`SCMForcing` carrying time-dependent
+            geostrophic wind + Coriolis, large-scale subsidence,
+            horizontal-advection tendencies, and prescribed surface
+            forcing.  ``None`` (default) reproduces the pre-forcing
+            SCM behaviour bit-for-bit.
+        t0_seconds
+            Initial simulation time (seconds since model start) seen by
+            forcing callables.  Defaults to ``0.0``.
         """
         cls._validate_integrator_compatibility(physics_config, time_integrator)
         grid = make_scm_grid(latitude_deg, longitude_deg)
@@ -508,6 +763,7 @@ class SingleColumnModel:
             physics_fn=physics_fn, state=state, phys_state=phys_state,
             grid=grid, sigma_coord=sigma_coord, dt=dt,
             time_integrator=time_integrator,
+            forcing=forcing, t0_seconds=t0_seconds,
         )
 
     def set_time(self, day_of_year: float, seconds_of_day: float) -> None:
@@ -517,13 +773,55 @@ class SingleColumnModel:
             set_time(day_of_year, seconds_of_day)
 
     def step(self) -> HydrostaticState:
-        """Advance the column by one step using the selected integrator."""
-        new_state, new_phys = self._step_fn(
-            self.state, self.phys_state, self._tend_fn, self.dt,
-        )
+        """Advance the column by one step using the selected integrator.
+
+        Stage time is sampled from ``self.t_seconds`` and the simulation
+        clock is advanced by ``self.dt`` after the step.  Time-dependent
+        SCM forcing callables are evaluated at the correct stage abscissae
+        inside the integrator (see :func:`_rk2_step`, :func:`_rk4_step`).
+        """
+        if self.time_integrator == "ab2":
+            # Adams-Bashforth 2 — single ``_tend_fn`` evaluation per
+            # outer step (no sub-stages, no bootstrap re-evaluation).
+            # First step falls back to forward Euler using the *same*
+            # tendency that gets cached as ``prev_tend``; evaluating
+            # ``_tend_fn`` twice would risk side-effect divergence in
+            # forcing callables (iterators, counters, mutable hooks)
+            # and could pair the cached tendency with a different
+            # ``phys_state`` than the one actually applied — Phase D
+            # codex iter-1 high finding.
+            tend_n, new_phys = self._tend_fn(
+                self.state, self.phys_state, self.t_seconds,
+            )
+            if self._ab2_prev_tend is None:
+                tend_eff = tend_n
+            else:
+                tend_eff = _average_tendencies(
+                    tend_n, self._ab2_prev_tend, weights=(1.5, -0.5),
+                )
+            new_state = _apply_tendencies(self.state, tend_eff, self.dt)
+            self._ab2_prev_tend = tend_n
+        else:
+            new_state, new_phys = self._step_fn(
+                self.state, self.phys_state, self._tend_fn, self.dt,
+                self.t_seconds,
+            )
+        self.t_seconds += self.dt
         self.state = new_state
         if new_phys is not None:
             self.phys_state = new_phys
+        # NB: No end-of-step ``forcing.T_s`` re-stamp.  The inject
+        # inside ``_tend_fn`` (per-stage) is the single source of
+        # truth — calling ``T_s(t)`` again here would double-fire
+        # iterator / counter / file-cursor backed forcing callables
+        # for every model step (Phase D codex iter-2 high finding).
+        # The trade-off: zero-physics runs (no tagged_fns) cannot
+        # persist the override on ``self.phys_state`` between steps
+        # because ``physics_fn`` returns ``new_phys=None``.  No module
+        # reads the persistent override between stages, so this is
+        # observationally invisible; tests that need to inspect the
+        # persistent override after ``step()`` must use an
+        # active-physics config (Louis / gray rad / MYNN).
         return self.state
 
     def run(

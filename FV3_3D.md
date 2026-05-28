@@ -2700,7 +2700,7 @@ backend to ``mpi`` with wrong-``n`` topology, corrupting
 ``state_global``.  Fix: move ``set_halo_backend("local")`` to top of
 test method.  PE/NH step fidelity: 42 passed × {2, 3, 6}.
 
-**iter-1055** (cb50b3e8) — np=6 coverage extension for NH/PE step
+**iter-1055** (5fc0da0f, same commit as iter-1056) — np=6 coverage extension for NH/PE step
 fidelity.  Baseline tests pass; factory tests surface iter-1056
 latent bug.
 
@@ -2720,14 +2720,14 @@ dict-insertion order produced 4-rank cycle).
 batched-per-peer sendrecv + allreduce-SUM for 8 vertices.  Closes
 iter-1050 SW audit gap pre-emptively.
 
-**iter-1051** (88ac4ce4) — **Deadlock fix** for iter-1049's per-edge
+**iter-1051** (fb84adb2) — **Deadlock fix** for iter-1049's per-edge
 sendrecv pattern.  Each rank's Irecv blocked until peer's matching
 Isend, which came from a later sendrecv → deadlock.  Fix: batched-
 per-neighbour sendrecv mirroring ``_pad_halo_mpi_face_only`` pattern.
 Pre-extract local-edge nbr strips before write loop (write-before-
 read bug).
 
-**iter-1050** (2c8b8a4e) — Operator-level regression guard for
+**iter-1050** (e8016d16) — Operator-level regression guard for
 iter-1049 (3 new tests) + SW gap audit identifies
 ``_sync_dgrid_boundary`` MPI port needed.
 
@@ -2737,7 +2737,7 @@ under MPI replicated mode the non-owned face values were computed
 with zero halos and are wrong, contaminating owned-face boundary
 averages.  Added MPI-aware ``_synchronize_cgrid_fluxes_mpi``.
 
-**iter-1048** (16e93c45) — Minimal NH+duogrid step divergence
+**iter-1048** (1266b865) — Minimal NH+duogrid step divergence
 investigation.  Narrowed to non-pad_halo source.
 
 **iter-1047** (fab702e8) — duogrid+factory MPI investigation; 2
@@ -2764,7 +2764,7 @@ test + lift ``cgrid_mass_flux_divergence`` halo out of ``jax.vmap``.
 ``packed_pad_halo_mpi_4d`` (FV3 3D hot path) + real MPI step bit-
 for-bit test.
 
-**iter-1040** (95cbbe14) — MPI ``interp_offsets`` support in
+**iter-1040** (f5a20b86) — MPI ``interp_offsets`` support in
 ``pad_halo_mpi`` / ``pad_halo_mpi_4d``.  Closes iter-630/631
 "option (a)" historical guidance.  Unlocks FV3 3D cubed-sphere
 under MPI.

@@ -183,7 +183,18 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     if config.convection.scheme != "none":
         tagged_fns.append((make_convection_physics(config.convection, model_type, dt), True, "conv_prog_profile"))
     if config.turbulence.scheme != "none":
-        tagged_fns.append((make_turbulence_physics(config.turbulence, model_type, dt), True, "tke"))
+        # MYNN-2.5 writes its prognostic ``qke = 2·TKE`` into a
+        # dedicated PhysicsState field so a restart-time scheme switch
+        # cannot silently feed the wrong moment as energy (Phase C
+        # codex iter-1 medium finding).
+        _turb_field = (
+            "qke" if config.turbulence.scheme == "mynn25" else "tke"
+        )
+        tagged_fns.append((
+            make_turbulence_physics(config.turbulence, model_type, dt),
+            True,
+            _turb_field,
+        ))
     if config.microphysics.scheme != "none":
         tagged_fns.append((make_microphysics_physics(config.microphysics, model_type, dt), False, None))
     if config.gravity_wave_drag.scheme != "none":
@@ -308,8 +319,23 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             if callable(st):
                 st(day_of_year, seconds_of_day)
 
+    def set_T_sfc_override(value):
+        """Propagate prescribed-T_sfc override to sub-physics that honour
+        the hook (currently radiation; turbulence reads from PhysicsState).
+
+        Called by the single-column driver when
+        ``SCMForcing(prescribe="T_s")`` so the radiative surface
+        boundary stays in sync with turbulence's bulk-flux boundary
+        (Phase B v2 codex iter-2 finding).
+        """
+        for fn, _, _ in tagged_fns:
+            st = getattr(fn, "set_T_sfc_override", None)
+            if callable(st):
+                st(value)
+
     physics_fn.reset_state = reset_state
     physics_fn.set_time = set_time
+    physics_fn.set_T_sfc_override = set_T_sfc_override
     return physics_fn
 
 
@@ -324,7 +350,17 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
     if config.convection.scheme != "none":
         tagged_fns.append((make_convection_physics(config.convection, "nonhydrostatic", dt), True, "conv_prog_profile"))
     if config.turbulence.scheme != "none":
-        tagged_fns.append((make_turbulence_physics(config.turbulence, "nonhydrostatic", dt), True, "tke"))
+        # Phase C codex iter-2 high: route MYNN-2.5 to ``qke``
+        # (PhysicsState) so a non-SCM nonhydrostatic run also persists
+        # qke across steps.
+        _turb_field = (
+            "qke" if config.turbulence.scheme == "mynn25" else "tke"
+        )
+        tagged_fns.append((
+            make_turbulence_physics(config.turbulence, "nonhydrostatic", dt),
+            True,
+            _turb_field,
+        ))
     if config.microphysics.scheme != "none":
         tagged_fns.append((make_microphysics_physics(config.microphysics, "nonhydrostatic", dt), False, None))
     if config.gravity_wave_drag.scheme != "none":
@@ -421,8 +457,17 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
             if callable(st):
                 st(day_of_year, seconds_of_day)
 
+    def set_T_sfc_override(value):
+        """Propagate prescribed-T_sfc override to sub-physics radiation
+        modules (SCM Phase B v2)."""
+        for fn, _, _ in tagged_fns:
+            st = getattr(fn, "set_T_sfc_override", None)
+            if callable(st):
+                st(value)
+
     physics_fn.reset_state = reset_state
     physics_fn.set_time = set_time
+    physics_fn.set_T_sfc_override = set_T_sfc_override
     return physics_fn
 
 
@@ -437,7 +482,16 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
     if config.convection.scheme != "none":
         tagged_fns.append((make_convection_physics(config.convection, "spectral_pe", dt), True, "conv_prog_profile"))
     if config.turbulence.scheme != "none":
-        tagged_fns.append((make_turbulence_physics(config.turbulence, "spectral_pe", dt), True, "tke"))
+        # Phase C codex iter-2 high: route MYNN-2.5 to ``qke`` on the
+        # spectral PE combined path too.
+        _turb_field = (
+            "qke" if config.turbulence.scheme == "mynn25" else "tke"
+        )
+        tagged_fns.append((
+            make_turbulence_physics(config.turbulence, "spectral_pe", dt),
+            True,
+            _turb_field,
+        ))
     if config.microphysics.scheme != "none":
         tagged_fns.append((make_microphysics_physics(config.microphysics, "spectral_pe", dt), False, None))
     if config.gravity_wave_drag.scheme != "none":
@@ -581,8 +635,17 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
             if callable(st):
                 st(day_of_year, seconds_of_day)
 
+    def set_T_sfc_override(value):
+        """Propagate prescribed-T_sfc override to sub-physics radiation
+        modules (SCM Phase B v2)."""
+        for fn, _, _ in tagged_fns:
+            st = getattr(fn, "set_T_sfc_override", None)
+            if callable(st):
+                st(value)
+
     physics_fn.reset_state = reset_state
     physics_fn.set_time = set_time
+    physics_fn.set_T_sfc_override = set_T_sfc_override
     return physics_fn
 
 

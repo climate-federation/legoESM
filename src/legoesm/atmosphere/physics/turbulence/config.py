@@ -127,6 +127,48 @@ class TKEConfig(NamedTuple):
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 
+class MYNN25Config(NamedTuple):
+    """Configuration for the MYNN-2.5 turbulence scheme (Nakanishi & Niino 2009).
+
+    Default constants are taken from NN09 Table 1 / eq. 66 and match
+    jax_scm's MYNNParams so the oracle-driven SCM benchmarks (GABLS1,
+    Wangara, Ekman) can run with bit-equivalent closure coefficients.
+
+    Fields
+    ------
+    A1, A2 : float
+        Stability-function coefficients (momentum, heat).
+    B1 : float
+        Master length-scale coefficient.  Surface boundary value
+        ``qke_sfc = B1^(2/3) · u*²`` (MY82 eq. 54) flows from this.
+    B2 : float
+        Dissipation length-scale coefficient.
+    C1, C2, C3, C4, C5 : float
+        Pressure-covariance / return-to-isotropy coefficients.  ``C4`` is
+        the cross-correlation coefficient (unused at level 2.5; kept for
+        symmetry with the full NN09 closure).
+    gamma1 : float
+        Critical-flux-Richardson-number numerator coefficient
+        (NN09 below eq. A4).
+    tke_min : float
+        Minimum qke (= 2·TKE) [m²/s²] for numerical safety.
+    surface : SurfaceLayerConfig
+        Surface-layer (bulk-flux) configuration.
+    """
+    A1: float = 1.18
+    A2: float = 0.665
+    B1: float = 24.0
+    B2: float = 15.0
+    C1: float = 0.137
+    C2: float = 0.75
+    C3: float = 0.352
+    C4: float = 0.0
+    C5: float = 0.2
+    gamma1: float = 0.235
+    tke_min: float = 1e-10
+    surface: SurfaceLayerConfig = SurfaceLayerConfig()
+
+
 class CLUBBLiteConfig(NamedTuple):
     """Configuration for CLUBB-lite higher-order closure.
 
@@ -324,13 +366,16 @@ class TurbulenceConfig(NamedTuple):
     ------
     scheme : str
         Active turbulence scheme: "smagorinsky", "louis", "tke",
-        "clubb_lite", "holtslag_boville", "ysu", "edmf", or "none".
+        "mynn25", "clubb_lite", "holtslag_boville", "ysu", "edmf",
+        or "none".
     smagorinsky : SmagorinskyConfig
         Configuration for Smagorinsky scheme.
     louis : LouisConfig
         Configuration for Louis scheme.
     tke : TKEConfig
-        Configuration for TKE scheme.
+        Configuration for TKE scheme (Mellor-Yamada 1982).
+    mynn25 : MYNN25Config
+        Configuration for MYNN-2.5 scheme (Nakanishi-Niino 2009).
     clubb_lite : CLUBBLiteConfig
         Configuration for CLUBB-lite scheme.
     holtslag_boville : HoltslagBovilleConfig
@@ -346,6 +391,7 @@ class TurbulenceConfig(NamedTuple):
     smagorinsky: SmagorinskyConfig = SmagorinskyConfig()
     louis: LouisConfig = LouisConfig()
     tke: TKEConfig = TKEConfig()
+    mynn25: MYNN25Config = MYNN25Config()
     clubb_lite: CLUBBLiteConfig = CLUBBLiteConfig()
     holtslag_boville: HoltslagBovilleConfig = HoltslagBovilleConfig()
     ysu: YSUConfig = YSUConfig()

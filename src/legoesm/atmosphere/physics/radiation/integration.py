@@ -67,6 +67,64 @@ from legoesm.atmosphere.physics.thermodynamics import (
 )
 
 
+def _apply_T_sfc_override(T_sfc, override):
+    """Apply a per-column ``T_sfc`` override over an arbitrary-shape T_sfc.
+
+    The driver-supplied ``override`` is always a flat ``(ncol,)`` array
+    or ``None``.  ``T_sfc`` may be ``(face, x, y)`` (cubed sphere),
+    ``(ny, nx)`` (plane), ``(nCells,)`` (MPAS), ``(n_lat, n_lon)``
+    (spectral PE Gaussian grid), or any other shape whose flattened
+    size matches ``ncol``.  Sentinel ``NaN`` entries in ``override``
+    keep the per-column fallback ``T_sfc.reshape(-1)``; finite entries
+    win.  Output is reshaped back to ``T_sfc.shape`` so downstream code
+    sees the same layout it always saw — no broadcasting surprises.
+
+    A wrong-sized ``override`` (scalar, shape-``(1,)``, etc.) raises
+    ``ValueError`` rather than silently broadcasting across every
+    surface column (Phase B v2 codex iter-4 medium finding).  Callers
+    must supply exactly one value per surface column.
+    """
+    if override is None:
+        return T_sfc
+    orig_shape = T_sfc.shape
+    flat = T_sfc.reshape(-1)
+    ov_arr = jnp.asarray(override)
+    if ov_arr.shape != flat.shape:
+        raise ValueError(
+            f"T_sfc override shape {tuple(ov_arr.shape)} does not match "
+            f"the flattened surface-column shape {tuple(flat.shape)}.  "
+            "The driver must supply exactly one override value per "
+            "column; broadcasting from a scalar or shape-(1,) override "
+            "would silently corrupt every column with a single value."
+        )
+    out_flat = jnp.where(jnp.isnan(ov_arr), flat, ov_arr)
+    return out_flat.reshape(orig_shape)
+
+
+def _make_T_sfc_override_cell():
+    """Per-factory closure cell carrying an optional ``T_sfc`` override.
+
+    Each radiation factory creates one of these and attaches the
+    ``set_T_sfc_override`` setter to its returned ``physics_fn``.  The
+    SCM driver calls it before each physics evaluation when
+    ``SCMForcing(prescribe="T_s")`` so the radiative surface boundary
+    matches turbulence's bulk-flux boundary (Phase B v2 codex iter-2
+    high finding — without this, longwave emission used
+    ``T[..., -1]`` while turbulence saw the prescribed skin
+    temperature, producing a silent split surface boundary).
+
+    Returns ``(cell, set_fn)`` where ``cell`` is a length-1 list
+    (mutable closure), and ``set_fn(value)`` writes ``value`` (a
+    ``(ncol,)`` jax.Array or ``None`` to clear).
+    """
+    cell = [None]
+
+    def set_T_sfc_override(value):
+        cell[0] = value
+
+    return cell, set_T_sfc_override
+
+
 def _make_time_state():
     """Create a mutable time-state dict and its ``set_time`` mutator.
 
@@ -580,6 +638,7 @@ def _make_hydrostatic_radiation(
     count.
     """
     _time, set_time = _make_time_state()
+    _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
 
     def physics_fn(state, grid_or_mesh, sigma_coord) -> HydrostaticTendencies:
         T = state.T.data
@@ -596,8 +655,9 @@ def _make_hydrostatic_radiation(
         p_full = sigma_coord.pressure_at_full(p_s)
         p_half = sigma_coord.pressure_at_half(p_s)
 
-        # Surface temperature = lowest-level temperature
-        T_sfc = T[..., -1]
+        # Surface temperature = lowest-level temperature (default)
+        # with optional SCM-driver override via set_T_sfc_override hook.
+        T_sfc = _apply_T_sfc_override(T[..., -1], _T_sfc_override_cell[0])
 
         insol, cos_sza, f_day = _compute_insolation(
             lat, radiation_config,
@@ -677,6 +737,7 @@ def _make_hydrostatic_radiation(
         return _pack_hydrostatic_tendencies(dT_dt, state, shape_3d, shape_2d)
 
     physics_fn.set_time = set_time
+    physics_fn.set_T_sfc_override = set_T_sfc_override
     return physics_fn
 
 # MPAS uses the same unified hydrostatic radiation function.
@@ -697,6 +758,7 @@ def _make_nonhydrostatic_radiation(
     Signature: (state, grid, height_coord, terrain_metric) -> NonHydrostaticTendencies
     """
     _time, set_time = _make_time_state()
+    _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
 
     def physics_fn(
         state: NonHydrostaticState,
@@ -736,8 +798,9 @@ def _make_nonhydrostatic_radiation(
             z_half=terrain_metric.z_half_3d,
         )
 
-        # Surface temperature = lowest-level temperature
-        T_sfc = T[..., -1]
+        # Surface temperature = lowest-level temperature (default)
+        # with optional SCM-driver override via set_T_sfc_override hook.
+        T_sfc = _apply_T_sfc_override(T[..., -1], _T_sfc_override_cell[0])
 
         # Insolation (and optionally cos_sza for diurnal cycle).
         insol, cos_sza, f_day = _compute_insolation(
@@ -843,6 +906,7 @@ def _make_nonhydrostatic_radiation(
         )
 
     physics_fn.set_time = set_time
+    physics_fn.set_T_sfc_override = set_T_sfc_override
     return physics_fn
 
 
@@ -866,6 +930,7 @@ def _make_plane_radiation(
     PlaneNonHydrostaticTendencies``.
     """
     _time, set_time = _make_time_state()
+    _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
 
     def physics_fn(
         state: PlaneNonHydrostaticState,
@@ -896,7 +961,7 @@ def _make_plane_radiation(
             p_full=p, rho_full=rho_total,
             z_half=terrain_metric.z_half_3d,
         )
-        T_sfc = T[..., -1]
+        T_sfc = _apply_T_sfc_override(T[..., -1], _T_sfc_override_cell[0])
 
         # Plane lat/lon: PlaneGrid.grid_lat returns constant lat0 over
         # (ny, nx), already in radians (deg2rad applied in property).
@@ -996,6 +1061,7 @@ def _make_plane_radiation(
         )
 
     physics_fn.set_time = set_time
+    physics_fn.set_T_sfc_override = set_T_sfc_override
     return physics_fn
 
 
@@ -1020,6 +1086,7 @@ def _make_mpas_nh_radiation(
     MPASNonHydrostaticTendencies``.
     """
     _time, set_time = _make_time_state()
+    _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
 
     def physics_fn(
         state: MPASNonHydrostaticState,
@@ -1052,7 +1119,7 @@ def _make_mpas_nh_radiation(
             p_full=p, rho_full=rho_total,
             z_half=terrain_metric.z_half_3d,
         )
-        T_sfc = T[..., -1]
+        T_sfc = _apply_T_sfc_override(T[..., -1], _T_sfc_override_cell[0])
 
         # MPAS lat/lon at cells handled by `_get_grid_lat_lon` via the
         # `hasattr(grid_or_mesh, 'latCell')` branch.
@@ -1162,6 +1229,7 @@ def _make_mpas_nh_radiation(
         )
 
     physics_fn.set_time = set_time
+    physics_fn.set_T_sfc_override = set_T_sfc_override
     return physics_fn
 
 
@@ -1199,6 +1267,7 @@ def _make_spectral_pe_radiation(
     run finish on a single GPU.
     """
     _time, set_time = _make_time_state()
+    _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
 
     def _physics_fn_core(
         state, grid, sigma_coord, grid_fields=None,
@@ -1220,7 +1289,7 @@ def _make_spectral_pe_radiation(
         p_half = sigma_coord.pressure_at_half(p_s)
 
         # Surface temperature = lowest level
-        T_sfc = T[..., -1]  # (n_lat, n_lon)
+        T_sfc = _apply_T_sfc_override(T[..., -1], _T_sfc_override_cell[0])  # (n_lat, n_lon)
 
         # Effective time-of-day for the diurnal cycle.  ``_time`` holds
         # the *initial* day_of_year + seconds_of_day captured at module
@@ -1336,6 +1405,7 @@ def _make_spectral_pe_radiation(
         physics_fn = _physics_fn_core
 
     physics_fn.set_time = set_time
+    physics_fn.set_T_sfc_override = set_T_sfc_override
     return physics_fn
 
 
