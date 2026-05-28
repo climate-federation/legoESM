@@ -549,16 +549,17 @@ def pad_halo_dgrid_vector_4d_mpi(u_d, v_d, topology):
             send_parts.append(v_strip.reshape(-1))
         send_buf = jnp.concatenate(send_parts)
 
-        # Single sendrecv per neighbor rank.
-        recv_buf = mpi4jax.sendrecv(
+        # Single sendrecv per neighbor rank.  Use the AD-safe
+        # ``_sendrecv_vjp`` wrapper (custom_vjp) so jax.grad flows
+        # through MPI sendrecv (raw mpi4jax.sendrecv chokes on the
+        # symbolic Zero cotangent JAX emits during backward).
+        from legoesm.parallel.halo_exchange import _get_sendrecv_vjp
+        sendrecv = _get_sendrecv_vjp(mpi4jax)
+        recv_buf = sendrecv(
             send_buf, jnp.zeros_like(send_buf),
-            source=nbr_rank, dest=nbr_rank,
-            sendtag=rank, recvtag=nbr_rank, comm=comm,
+            nbr_rank, nbr_rank,
+            rank, nbr_rank, comm,
         )
-        # mpi4jax 0.9 returns array directly (newer); 0.8 returns
-        # (array, token).  Handle both:
-        if isinstance(recv_buf, tuple):
-            recv_buf = recv_buf[0]
 
         # Unpack recv buffer in recv_order.
         offset = 0
