@@ -248,3 +248,52 @@ def test_end_to_end_recipe_probe_round_trip():
         )
     # Region masks have the cell-centre shape.
     assert masks.interior.shape == bridged.state.T.data.shape
+
+
+# ---------------------------------------------------------------------------
+# Q1 regression: out-of-domain padding rows must be land (Phase G residual)
+# ---------------------------------------------------------------------------
+
+
+def test_acc_land_mask_marks_out_of_domain_padding_rows_as_land():
+    """``create_regional_latlon_grid`` pads boundary rows beyond Veros's
+    NY=42 domain (centres outside ``[Y_ORIGIN, Y_ORIGIN + NY*DYT]``). Those
+    padded rows MUST be land: the Veros->legoESM bridge zero-fills them
+    (T=S=0 -> rho ~ 997), so leaving them wet contaminates the interior
+    density comparison — the confirmed ~5 kg/m^3 Phase G tier-2 residual."""
+    from legoesm.ocean.fidelity.veros_acc_recipe import (
+        DYT_DEG, Y_ORIGIN_DEG, build_acc_grid, build_acc_land_mask,
+    )
+
+    grid = build_acc_grid()
+    lm = np.asarray(build_acc_land_mask(grid))
+    lat_deg = np.degrees(np.asarray(grid.lat))
+    lat_north = Y_ORIGIN_DEG + NY * DYT_DEG
+    out_of_domain = (lat_deg < Y_ORIGIN_DEG) | (lat_deg > lat_north)
+
+    assert int(out_of_domain.sum()) >= 1, "expected >=1 padded boundary row"
+    # Every out-of-domain row is fully land.
+    assert float(lm[out_of_domain].max()) == 0.0
+    # Physical rows still carry the ACC channel/basin (wet cells present).
+    assert float(lm[~out_of_domain].max()) == 1.0
+
+
+def test_bridged_acc_state_has_no_zero_TS_wet_cells():
+    """Q1 acceptance gate (a): after the land-mask fix, NO wet cell may carry
+    the bridge's zero-padded T=S=0 (the rho ~ 997 contamination). Regression
+    lock for the Phase G interior density residual."""
+    with override_constants(**VEROS_CONSTANTS):
+        recipe = build_acc_recipe()
+    result = _make_synthetic_veros_result()
+    bridged = veros_snapshot_to_legoesm_state(result, recipe.initial_state)
+
+    T = np.asarray(bridged.state.T.data)
+    S = np.asarray(bridged.state.S.data)
+    wet = np.broadcast_to(
+        np.asarray(bridged.state.land_mask.data)[:, :, None] > 0.5, T.shape
+    )
+    zero_TS = (T == 0.0) & (S == 0.0)
+    n_bad = int((wet & zero_TS).sum())
+    assert n_bad == 0, (
+        f"{n_bad} wet cells carry zero-padded T=S=0 (wall contamination)"
+    )

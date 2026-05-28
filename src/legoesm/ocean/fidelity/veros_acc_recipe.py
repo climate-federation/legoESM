@@ -186,6 +186,16 @@ def build_acc_land_mask(grid: LatLonGrid) -> jnp.ndarray:
     wet_lon = lon_deg > 1.0                   # (n_lon,)
     wet_lat = lat_deg < -20.0                 # (n_lat,)
     wet = wet_lon[None, :] | wet_lat[:, None]  # (n_lat, n_lon)
+    # create_regional_latlon_grid pads boundary rows beyond Veros's NY=42
+    # domain (centres -41 and +45 here, OUTSIDE the ACC domain
+    # [Y_ORIGIN, Y_ORIGIN + NY*DYT] = [-40, +44]). Those padded rows must be
+    # LAND: the Veros->legoESM bridge zero-fills them (T=S=0 -> rho ~ 997),
+    # and if they are left wet they contaminate the interior density
+    # comparison (this was the ~5 kg/m^3 Phase G tier-2 residual — confirmed
+    # 840 zeroed wall cells in `interior`, predicted L2 ~ 5.8 vs observed 5.1).
+    lat_north_deg = Y_ORIGIN_DEG + NY * DYT_DEG
+    in_domain = (lat_deg >= Y_ORIGIN_DEG) & (lat_deg <= lat_north_deg)  # (n_lat,)
+    wet = wet & in_domain[:, None]
     return jnp.asarray(wet.astype(np.float64))
 
 
