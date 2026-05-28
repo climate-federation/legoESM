@@ -606,7 +606,8 @@ class TestStandardO3Profile:
         assert 9.0 < peak_p < 11.0, f"peak at {peak_p} hPa, expected 10"
 
     def test_canonical_levels_within_factor_of_two(self):
-        """Compare new profile to US Std Atm 1976 reference at key levels."""
+        """Compare new profile to US Std Atm 1976 reference at key
+        stratospheric levels (peak ± 2 dex in log-pressure)."""
         from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import (
             _standard_o3_profile,
         )
@@ -626,6 +627,47 @@ class TestStandardO3Profile:
                 f"expected ~{expected_ppm} (ratio {ratio:.2f}, "
                 f"target [0.5, 2.0])"
             )
+
+    def test_extended_coverage_troposphere_and_mesosphere(self):
+        """Beyond the stratospheric peak ± 2 dex, the analytic fit is
+        order-of-magnitude only.  Closes codex iter-3 coverage gap on
+        the 200-500 hPa UT/LS transition and the mesosphere ~0.1 hPa.
+        Tolerance widened to ``[0.2, 5.0]`` to reflect what a single
+        skewed-Gaussian + background can deliver."""
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import (
+            _standard_o3_profile,
+        )
+        ref = {
+            1000.0: 0.025,  # surface/BL:   ~25 ppb (we cap at 20 ppb)
+            500.0:  0.050,  # mid-trop:     ~50 ppb (we have 20 ppb)
+            200.0:  0.100,  # near tropopause: ~100 ppb
+            0.1:    0.080,  # mesosphere:   ~80 ppb
+        }
+        for p_hPa_val, expected_ppm in ref.items():
+            p = jnp.array([p_hPa_val * 100.0])
+            o3_ppm = float(_standard_o3_profile(p)[0]) * 1e6
+            ratio = o3_ppm / expected_ppm
+            assert 0.2 < ratio < 5.0, (
+                f"O3 at {p_hPa_val} hPa: got {o3_ppm:.4f} ppm, "
+                f"expected ~{expected_ppm} (ratio {ratio:.2f}, "
+                f"target [0.2, 5.0] for non-peak levels)"
+            )
+
+    def test_tropospheric_background_floor(self):
+        """Below ~250 hPa the profile is capped at 20 ppb to prevent
+        the Gaussian's deep skirt from collapsing to ~ppt values."""
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import (
+            _standard_o3_profile,
+        )
+        # Deep troposphere; Gaussian alone would give << 1 ppb.
+        p = jnp.array([5e4, 8e4, 1e5])  # 500, 800, 1000 hPa
+        o3 = _standard_o3_profile(p)
+        # All three should be at the 20 ppb background.
+        np.testing.assert_allclose(
+            np.asarray(o3), 2.0e-8 * np.ones_like(np.asarray(o3)),
+            rtol=1e-12,
+            err_msg="tropospheric O3 must equal 20 ppb background",
+        )
 
     def test_grad_through_o3_profile(self):
         from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import (

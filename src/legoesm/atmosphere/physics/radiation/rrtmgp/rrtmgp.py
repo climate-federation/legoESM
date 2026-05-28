@@ -82,31 +82,39 @@ def _add_halos(f_3d):
 def _standard_o3_profile(p_full):
     """Climatological ozone VMR profile, US Std Atm 1976 piecewise fit.
 
-    Skewed log-Gaussian peaking at 9 ppm near 10 hPa with separate widths
-    for the tropospheric (``sigma_trop = 0.9`` in natural log of pressure)
-    and stratospheric (``sigma_strat = 1.5``) sides.  The skewed shape
-    captures the asymmetric real profile: O3 falls sharply through the
-    tropopause but decays slowly through the mesosphere.
+    Skewed log-Gaussian peaking at 9 ppm near 10 hPa with separate
+    widths for the tropospheric (``sigma_trop = 0.9`` in natural log of
+    pressure) and stratospheric (``sigma_strat = 1.5``) sides, plus a
+    constant tropospheric **background** of 20 ppb captured via
+    ``jnp.maximum``.  The skewed shape captures the asymmetric real
+    profile (sharp fall through the tropopause, gentle decay into the
+    mesosphere); the background captures the well-mixed tropospheric
+    ozone the Gaussian alone underestimates by 2-3 orders of magnitude
+    near the surface.
 
-    Reference values vs. the iter-2 fit at canonical levels::
+    Reference values at canonical levels vs. US Std Atm 1976::
 
-        level    real      old (σ=1.5,A=8)   new (skew,A=9)
-        100 hPa  ~250 ppb  2.5 ppm           ~340 ppb
-        30  hPa  ~5 ppm    5.6 ppm           ~4.3 ppm
-        10  hPa  ~7-9 ppm  8 ppm             9 ppm (peak)
-        1   hPa  ~3 ppm    2.5 ppm           ~2.8 ppm
-        0.1 hPa  ~80 ppb   ~5 ppb            ~80 ppb
+        level    real      old (σ=1.5,A=8)   iter-3 (skew+bg, A=9)
+        1000 hPa  ~25 ppb  ~70 ppb           20 ppb  (background)
+         500 hPa  ~50 ppb  ~570 ppb          20 ppb  (background)
+         200 hPa ~100 ppb  ~1.5 ppm          35 ppb  (Gaussian)
+         100 hPa ~250 ppb  ~2.5 ppm         ~340 ppb (Gaussian)
+          30 hPa  ~5 ppm   ~5.6 ppm          ~4.3 ppm
+          10 hPa  ~9 ppm   ~8 ppm             9 ppm (peak)
+           1 hPa  ~3 ppm   ~2.5 ppm          ~2.8 ppm
+         0.1 hPa  ~80 ppb  ~5 ppb            ~80 ppb
 
     NOT meant as a high-fidelity climatology — drivers should provide
     an external ``o3_vmr`` field for production runs.  This fallback
-    only ensures that stratospheric SW heating is approximately right
-    when no ozone source is configured.
+    only ensures that radiative transfer sees a non-trivial ozone
+    column when no ozone source is configured.
 
     The skewed-Gaussian transition has a derivative discontinuity at
-    ``p = 10 hPa`` but is C0-continuous and finite everywhere; AD
-    backprop through ``jnp.where`` returns ``sigma_trop``'s gradient
-    when ``log(p_hPa) > log(10)`` and ``sigma_strat``'s otherwise — both
-    finite.
+    ``p = 10 hPa`` but is C0-continuous and finite everywhere; the
+    ``jnp.maximum`` with the background introduces a second
+    sub-differentiable transition where the Gaussian tail crosses
+    20 ppb (around p ~ 250 hPa).  Both are AD-safe (finite gradients
+    on each side).
     """
     p_hPa = p_full / 100.0
     log_p = jnp.log(p_hPa)
@@ -115,7 +123,10 @@ def _standard_o3_profile(p_full):
     sigma_strat = 1.5
     sigma = jnp.where(log_p > log_p_peak, sigma_trop, sigma_strat)
     arg = (log_p - log_p_peak) / sigma
-    o3 = 9.0e-6 * jnp.exp(-0.5 * arg * arg)
+    o3_gauss = 9.0e-6 * jnp.exp(-0.5 * arg * arg)
+    # 20 ppb tropospheric background (US Std Atm 1976 surface value).
+    o3_background = 2.0e-8
+    o3 = jnp.maximum(o3_gauss, o3_background)
     return jnp.clip(o3, 1.0e-10, None)
 
 
