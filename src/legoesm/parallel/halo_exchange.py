@@ -1246,6 +1246,19 @@ def pad_halo_mpi_4d(
             f"pad_halo_mpi_4d supports only halo=1, 2, or 3, got "
             f"halo={halo}."
         )
+    # FV3_3D iter-1073 (codex iter-1072 BLOCKER): mirror the
+    # iter-1072 non-square guard from ``pad_halo_4d`` here so direct
+    # callers (e.g., ``pad_halo_vector_4d`` MPI no-duogrid path,
+    # ``packed_pad_halo_mpi_4d``) cannot bypass the iter-1072 silent-
+    # corruption check.  Tables use ``n = data.shape[1]`` assuming
+    # square ``(n, n)``; non-square data produces zero NORTH halos
+    # and OOB-corrupted WEST/EAST halos.
+    if data.shape[1] != data.shape[2]:
+        raise ValueError(
+            f"pad_halo_mpi_4d expects square (n, n) data on each "
+            f"face, got shape {tuple(data.shape)}.  See FV3_3D.md "
+            f"iter-1072 for the silent-corruption probe."
+        )
 
     try:
         import mpi4jax

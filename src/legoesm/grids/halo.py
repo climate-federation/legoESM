@@ -1068,6 +1068,20 @@ def pad_halo_vector_4d(
     -------
     u_padded, v_padded : jax.Array, shape (6, n+2*halo, n+2*halo, nlev)
     """
+    # FV3_3D iter-1073 (codex iter-1072 BLOCKER): mirror the iter-1072
+    # non-square guard.  Vector halo also assumes square (n, n) per
+    # face — all internal kernels and the SPMD/MPI dispatches share
+    # the same square-shape assumption.
+    if u_data.shape[1] != u_data.shape[2]:
+        raise ValueError(
+            f"pad_halo_vector_4d u_data expects square (n, n), got "
+            f"shape {tuple(u_data.shape)}.  See FV3_3D.md iter-1072."
+        )
+    if v_data.shape[1] != v_data.shape[2]:
+        raise ValueError(
+            f"pad_halo_vector_4d v_data expects square (n, n), got "
+            f"shape {tuple(v_data.shape)}.  See FV3_3D.md iter-1072."
+        )
     # SPMD dispatch: pack both components into a single collective.
     if _halo_backend == "spmd" and _spmd_mesh is not None and halo == 1:
         from legoesm.parallel.cubesphere_exchange import (

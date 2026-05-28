@@ -1575,7 +1575,9 @@ def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
     ``use_fv3_cross_face_du_proj`` transfer values.  Enables
     iter-320/328/336/339/370/431/436/437/451/459/441/442.
 
-    Flags enabled by default:
+    FV3-fidelity flags:
+
+    Enabled by default:
 
     - ``use_fv3_d_con_cv``: FV3 c_vd branch at d_con sites (iter-320,
       KE→heat conversion with c_v_air instead of c_p_air).
@@ -1587,12 +1589,15 @@ def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
       d_con sites + delt_max caps (iter-336).
     - ``use_fv3_metric_aware_d_con``: metric-aware d_con form
       (iter-339, ``cosa_s/rsin2`` at all 5 d_con sites).
+
+    Disabled by default (opt-in via ``overrides``):
+
     - ``use_fv3_cross_face_du_proj``: cross-face halo for damp_v
-      wind projection (iter-370).  **Disabled by default** as of
-      iter-1072 — the non-square ``du_normal`` / ``dv_normal`` data
-      (shapes ``(6, n+1, n, nlev)`` and ``(6, n, n+1, nlev)``) is
-      silently corrupted by ``pad_halo_4d`` (probe verified: NORTH
-      halo zeros).  Tracked as iter-1046 non-square halo follow-up.
+      wind projection (iter-370).  Disabled as of iter-1072 — the
+      non-square ``du_normal`` / ``dv_normal`` data (shapes
+      ``(6, n+1, n, nlev)`` and ``(6, n, n+1, nlev)``) is silently
+      corrupted by ``pad_halo_4d`` (probe verified: NORTH halo
+      zeros).  Tracked as iter-1046 non-square halo follow-up.
 
     Plus production knobs: ``d_con_top_zero_levels``, ``delt_max``,
     ``nord_v``, ``corner_div_damp_nord``, ``corner_div_damp_d4_bg``,

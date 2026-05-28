@@ -2378,6 +2378,88 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1073 (2026-05-28): codex iter-1072 BLOCKER — close sibling-path bypasses of the non-square guard
+
+### Goal
+
+Codex adversarial review of iter-1072 flagged a BLOCKER: the
+iter-1072 ``ValueError`` guard at the public ``pad_halo_4d`` entry
+catches scalar 4D callers but several sibling paths can reach the
+same buggy ``_pad_halo_local_4d`` / ``_pad_halo_mpi_face_only_4d``
+helpers directly, bypassing the guard:
+
+- ``pad_halo_vector_4d`` MPI no-duogrid → ``pad_halo_mpi_4d``
+- ``packed_pad_halo_mpi_4d`` → ``pad_halo_mpi_4d``
+- ``packed_pad_halo_4d`` (SPMD) → ``explicit_pad_halo_4d``
+- ``explicit_pad_halo_4d`` (SPMD halo!=1 fallback) →
+  ``_pad_halo_local_4d``
+
+A non-square caller (e.g., a hypothetical D-grid wind projection
+through the SPMD packed path) would still hit silent corruption.
+
+### Fix
+
+Added the same non-square ``shape[1] != shape[2]`` guard at every
+public 4D halo entry:
+
+- ``pad_halo_mpi_4d`` (``halo_exchange.py:1257``)
+- ``pad_halo_vector_4d`` (``halo.py:1071``) — both ``u_data`` and
+  ``v_data`` independently
+- ``explicit_pad_halo_4d`` (``cubesphere_exchange.py:747``)
+- ``packed_pad_halo_4d`` (``cubesphere_exchange.py:876``) —
+  iterates fields and validates each
+
+Each ``ValueError`` cites ``FV3_3D.md iter-1072`` for the
+silent-corruption probe.
+
+### Other codex iter-1072 findings (no action)
+
+- **WARN-1** (probe orientation): the iter-1072 probe used
+  ``n_x < n_y``; production has both orientations.  The
+  ``shape[1] != shape[2]`` guard catches both.  Confirmed.
+- **WARN-4** (docstring "Flags enabled by default" header listing
+  the now-disabled cross_face flag): factory docstrings restructured
+  to "Enabled by default" and "Disabled by default (opt-in via
+  overrides)" sub-sections.  Test docstring updated similarly.
+- **WARN-5** (the ``4.5`` cell in the probe is corner-fill
+  smoothing on already-wrong halo data, not OOB): documentation
+  only.  No code change.
+- **WARN-6** (iter-370 never tested non-square shapes or FV3
+  reference values): codex traced iter-370's tests, confirms
+  validation was internal-consistency only.  Disabling the flag
+  in iter-1072 is safe.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv/bin/python -m pytest \
+        tests/test_fv3_faithful_factory_docstring_iter406.py \
+        tests/test_fv3_faithful_factory_signature_iter402.py \
+        tests/test_fv3_faithful_factory_overrides_iter396.py \
+        tests/test_fv3_faithful_factories_smoke_iter393.py \
+        tests/test_fv3_faithful_jit_traceable_iter404.py \
+        tests/test_fv3_faithful_passes_through_overrides_iter412.py \
+        tests/test_fv3_3d_doc_compaction_iter368.py \
+        tests/test_fv3_rotate_winds_iter661.py
+    => 82 passed in 64.81s
+
+### Status
+
+The non-square silent-corruption bug class is now closed at every
+4D halo entry point:
+
+| Entry point | Guarded since |
+|-------------|---------------|
+| ``pad_halo_4d`` (scalar local) | iter-1072 |
+| ``pad_halo_mpi_4d`` | iter-1073 |
+| ``pad_halo_vector_4d`` | iter-1073 |
+| ``explicit_pad_halo_4d`` (SPMD) | iter-1073 |
+| ``packed_pad_halo_4d`` (SPMD) | iter-1073 |
+| ``packed_pad_halo_mpi_4d`` | iter-1073 (via ``pad_halo_mpi_4d``) |
+
+Closes codex iter-1072 BLOCKER.
+
 ## Iteration 1072 (2026-05-28): detect non-square ``pad_halo_4d`` silent corruption + disable ``use_fv3_cross_face_du_proj`` in factory defaults
 
 ### Goal

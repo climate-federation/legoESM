@@ -52,12 +52,13 @@ def test_nh_factory_returns_correct_type():
 
 
 def test_factory_default_flag_set_complete():
-    """Factories default to ENABLING every FV3-fidelity flag.
+    """Factories enable every FV3-fidelity flag known to be correct.
 
-    FV3_3D iter-1072: ``use_fv3_cross_face_du_proj`` is disabled by
-    default in both factories due to a non-square pad_halo_4d
-    silent-corruption bug (probe verified; tracked as iter-1046
-    non-square halo follow-up).  Other FV3 flags remain enabled.
+    FV3_3D iter-1072/1073: ``use_fv3_cross_face_du_proj`` is the
+    sole exception — disabled by default due to a non-square
+    pad_halo_4d silent-corruption bug (probe verified; tracked as
+    iter-1046 non-square halo follow-up).  All other FV3 flags
+    remain enabled.
     """
     pe = make_fv3_faithful_pe_config()
     nh = make_fv3_faithful_nh_config()

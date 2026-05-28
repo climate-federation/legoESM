@@ -744,6 +744,17 @@ def explicit_pad_halo_4d(data, mesh, halo=1, interp_offsets=None):
     See :func:`explicit_pad_halo` for the halo support matrix and the
     ``interp_offsets`` semantics.
     """
+    # FV3_3D iter-1073 (codex iter-1072 BLOCKER): mirror the iter-1072
+    # non-square guard from ``pad_halo_4d`` so SPMD callers don't
+    # bypass the silent-corruption check.  ``_pad_halo_local_4d``
+    # fallback path (``halo != 1, halo != 2``) and the SPMD exchanges
+    # all assume square ``(n, n)``.
+    if data.shape[1] != data.shape[2]:
+        raise ValueError(
+            f"explicit_pad_halo_4d expects square (n, n) data on each "
+            f"face, got shape {tuple(data.shape)}.  See FV3_3D.md "
+            f"iter-1072 for the silent-corruption probe."
+        )
     if halo == 2:
         if interp_offsets is None:
             return _get_exchange(mesh, 4, False, halo=2)(data)
@@ -861,6 +872,15 @@ def packed_pad_halo_4d(
     """
     if not fields:
         return []
+    # FV3_3D iter-1073 (codex iter-1072 BLOCKER): non-square guard
+    # mirroring ``pad_halo_4d``.  Each field must be square (n, n).
+    for i, f in enumerate(fields):
+        if f.shape[1] != f.shape[2]:
+            raise ValueError(
+                f"packed_pad_halo_4d field {i}: expects square (n, n) "
+                f"data on each face, got shape {tuple(f.shape)}.  See "
+                f"FV3_3D.md iter-1072."
+            )
 
     if len(fields) == 1:
         return [explicit_pad_halo_4d(
