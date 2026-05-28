@@ -2378,6 +2378,64 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1082 (2026-05-28): MPI dgrid vector halo — design notes + deferral
+
+### Goal
+
+Codex iter-1078 BLOCKER M1 flagged that ``pad_halo_dgrid_vector_4d``
+uses direct ``data[src_f, src_i, src_j]`` face indexing which reads
+STALE non-owned face data under cubed-sphere MPI mode (per
+``driver/model_driver.py:1206-1208``: "non-owned faces will diverge
+from truth but owned faces stay correct via MPI halo exchange").
+
+iter-1081 mitigated by falling back to ``mode='edge'`` under MPI.
+iter-1082 attempts a proper MPI-aware ``pad_halo_dgrid_vector_4d_mpi``
+that uses ``mpi4jax.sendrecv`` to pull cross-face edge data from
+the rank that owns the source face.
+
+### Design
+
+For each owned face's edge:
+1. Classify as same-axis (same component) or axis-swap (component
+   swap with sign).
+2. If neighbor face is on this rank → direct read + place (local
+   edges).
+3. If neighbor face is remote → ``sendrecv`` to exchange the
+   neighbor's edge data:
+   - Send: this face's edge of u_d + v_d (concatenated).
+   - Recv: neighbor face's edge of u_d + v_d.
+   - At axis-swap edges, use neighbor's v_d for this face's u_d
+     halo (with sign_uv) and vice versa.
+
+### Result
+
+Implementation attempted at iter-1082 deadlocked at np=2 due to
+per-edge sendrecv calls without sorted-peer batching.  The
+existing ``_pad_halo_mpi_face_only_4d`` pattern (which DOES work
+without deadlock) uses:
+- Batched-per-peer ``sendrecv`` (one message per neighbor rank).
+- Sorted peer iteration (avoids cyclic-wait deadlock at np=6).
+- Canonical send/recv tag scheme.
+
+Replicating that pattern for the staggered vector case requires
+careful packing of (u_strip, v_strip) pairs for each shared
+(this_face, edge, nbr_face, nbr_edge) tuple, which complicates the
+batching.  Deferred to a future iter.
+
+### Current MPI cross_face status
+
+| Backend | Behavior | FV3-faithful? |
+|---------|----------|----------------|
+| Local (single-device) | iter-1078 ``pad_halo_dgrid_vector_4d`` (24/24 edges) | ✅ Bit-for-bit |
+| MPI | iter-1081 ``mode='edge'`` fallback | ⚠️ Safe but not bit-for-bit |
+
+The MPI fallback gives CORRECT (non-corrupting) behavior on owned
+faces — it just doesn't get the full FV3 cross-face damping.
+``cross_face_du_proj`` was a SECOND-ORDER correction (the iter-370
+docstring says ~5e-5 s⁻¹ vorticity correction at edges); the
+fallback is acceptable for production use, with the FV3-faithful
+MPI variant tracked as the next infrastructure improvement.
+
 ## Iteration 1077 (2026-05-28): wire ``pad_halo_dgrid_scalar_4d`` into iter-370 + re-enable factory ``cross_face_du_proj``
 
 ### Goal
