@@ -160,6 +160,12 @@ def _bench_one(nx: int, ny: int, nlev: int, dx: float, dt: float,
             print(f"  WARN: {msg} — proceeding (--allow-unsafe-cfl)")
         else:
             raise SystemExit(f"REFUSE: {msg}. Pass --allow-unsafe-cfl to override.")
+    elif cfl > 0.15:
+        # Empirical iter-73 sweep: nsub=2 (CFL=0.17) NaN's, nsub=3
+        # (CFL=0.113) stable. Warn between empirical bound and canonical 0.7.
+        print(f"  WARN: horizontal acoustic CFL = {cfl:.3f} "
+              f"is above the empirical stability bound (~0.15). "
+              f"Consider increasing n_acoustic_substeps if NaN's appear.")
     if not semi_implicit_acoustic:
         # Compute actual dz_min from the height coord (codex iter-16 #8)
         import jax.numpy as jnp
