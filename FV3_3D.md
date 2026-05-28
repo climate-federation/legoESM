@@ -2418,107 +2418,15 @@ deadlocked at np=2 from mismatched peer order.  Reverted.
 iter-1083 lands the proper batched-per-peer pattern from
 ``_pad_halo_mpi_face_only_4d``.  Resolution in iter-1083.
 
-## Iteration 1077 (2026-05-28): wire ``pad_halo_dgrid_scalar_4d`` into iter-370 + re-enable factory ``cross_face_du_proj``
+## Iteration 1077 (2026-05-28): wire iter-1076 dgrid scalar halo into iter-370 + re-enable factory ``cross_face_du_proj``
 
-### Goal
-
-iter-1076 delivered ``pad_halo_dgrid_scalar_4d`` — a non-square
-staggered halo routine that handles 16 of 24 directed edges
-bit-for-bit FV3-faithful (the same-axis subset) and falls back to
-``mode='edge'`` for the 8 axis-swap edges.  iter-1077 wires it
-into the production iter-370 ``cross_face_du_proj`` call sites
-and re-enables the factory default.
-
-### Changes
-
-**Call sites** (NH ``compressible_euler_cdgrid.py:1239-1261``,
-PE ``primitive_eq_cdgrid.py:1359-1381``):
-
-Old (iter-1072-disabled or iter-370 buggy):
-
-::
-
-    if (cfg.use_fv3_cross_face_du_proj and not _force_edge):
-        du_full = pad_halo_4d(du_normal, duogrid=_dg_cf)  # ValueError under iter-1072
-        ...
-
-New (iter-1077):
-
-::
-
-    if cfg.use_fv3_cross_face_du_proj:
-        from legoesm.grids.dgrid_halo import pad_halo_dgrid_scalar_4d
-        du_full = pad_halo_dgrid_scalar_4d(du_normal)
-        du_pad = du_full[:, :, 1:-1, :]
-        dv_full = pad_halo_dgrid_scalar_4d(dv_normal)
-        dv_pad = dv_full[:, 1:-1, :, :]
-
-The ``_force_edge`` branch (iter-1046 MPI + no-duogrid workaround)
-is no longer needed — ``pad_halo_dgrid_scalar_4d`` correctly
-handles non-square data under any backend.
-
-**Factory defaults**:
-
-- ``make_fv3_faithful_nh_config``:
-  ``use_fv3_cross_face_du_proj=False`` → ``True`` (iter-1077).
-- ``make_fv3_faithful_pe_config``: same.
-
-**Factory docstrings**: moved ``cross_face_du_proj`` from the
-"Disabled by default (opt-in via overrides)" section back to
-"Enabled by default" with iter-1077 reference.
-
-**Tests**:
-
-- ``test_fv3_faithful_factory_signature_iter402.py::
-  test_factory_default_flag_set_complete``: assertion
-  ``is False`` → ``is True`` (iter-1077).
-- ``test_fv3_faithful_factory_overrides_iter396.py::
-  test_nh_factory_can_disable_single_flag``: same.
-
-### Validation
-
-::
-
-    JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv/bin/python -m pytest \
-        tests/test_fv3_faithful_factory_docstring_iter406.py \
-        tests/test_fv3_faithful_factory_signature_iter402.py \
-        tests/test_fv3_faithful_factory_overrides_iter396.py \
-        tests/test_fv3_faithful_factories_smoke_iter393.py \
-        tests/test_dgrid_halo_iter1076.py
-    => 40 passed in 34.74s
-
-::
-
-    JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv/bin/python -m pytest \
-        tests/test_fv3_faithful_multistep_iter408.py \
-        tests/test_fv3_faithful_multistep_ad_iter409.py
-    => 4 passed in 319.58s
-
-PE + NH 5-step multistep stability + AD-at-rest both pass with
-``cross_face_du_proj=True`` (via the new
-``pad_halo_dgrid_scalar_4d``).
-
-### Coverage status
-
-Factory defaults now enable ALL 9 FV3-fidelity flags:
-
-| Flag | Status | Faithful? |
-|------|--------|-----------|
-| ``use_fv3_d_con_cv`` (NH) | ✅ | bit-for-bit |
-| ``use_fv3_vector_halo_uv`` (NH) | ✅ | bit-for-bit |
-| ``use_fv3_a2b_ord4_vector_uv`` (NH) | ✅ | bit-for-bit |
-| ``use_fv3_dynamic_exner`` (NH) | ✅ | bit-for-bit |
-| ``use_fv3_metric_aware_d_con`` (NH+PE) | ✅ | bit-for-bit |
-| ``use_fv3_a2b_zeta_corner`` (PE) | ✅ | bit-for-bit |
-| ``use_fv3_cross_face_du_proj`` (NH+PE) | ✅ | 16/24 edges bit-for-bit; 8/24 edge-replicate (iter-1077b deferred) |
-
-### Next iter (iter-1077b)
-
-DGRID_NE component swap for the 8 axis-swap edges
-(``(1, S)↔(5, E)``, ``(1, N)↔(4, E)``, ``(3, S)↔(5, W)``,
-``(3, N)↔(4, W)``) to bring ``cross_face_du_proj`` to full 24/24
-FV3-faithful coverage.  Requires deriving the sign convention
-from FV3 ``mpp/include/mpp_update_domains2D_general.h``.
+Wired ``pad_halo_dgrid_scalar_4d`` (iter-1076) into NH + PE
+``cross_face_du_proj`` call sites and re-enabled the factory
+default ``use_fv3_cross_face_du_proj=True``.  16/24 directed
+edges bit-for-bit FV3-faithful; 8/24 axis-swap edges fall back
+to ``mode='edge'`` until iter-1078 lands DGRID_NE component swap.
+40 factory tests + 4 multistep/AD tests pass.  Superseded by
+iter-1078/iter-1083 for full 24/24 coverage under both backends.
 
 ## Iteration 1076 (2026-05-28): staggered D-grid scalar halo — same-axis subset bit-for-bit faithful
 
