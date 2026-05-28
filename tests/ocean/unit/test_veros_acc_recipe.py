@@ -385,3 +385,53 @@ def test_fidelity_recipe_modules_are_registered():
         assert mod is not None, name
     assert hasattr(fid.veros_acc_recipe, "build_acc_recipe")
     assert hasattr(fid.tendency_probe, "compare_momentum_at_centres")
+
+
+# ---------------------------------------------------------------------------
+# Q6: bridge equivariance tier (the bridge is a physics-preserving bijection)
+# ---------------------------------------------------------------------------
+
+
+def test_bridge_halo_strip_invariance():
+    """φ = the Veros halo-cell values. The bridge strips the 2-cell halos, so
+    the bridged INTERIOR must be independent of them — garbage in the halos
+    must not change the bridged state. Locks strip-halo as a true bijection on
+    the physical field (doctrine §4)."""
+    with override_constants(**VEROS_CONSTANTS):
+        recipe = build_acc_recipe()
+    res_clean = _make_synthetic_veros_result()
+    res_garbage = _make_synthetic_veros_result()  # same seed -> identical interior
+    halo = 2
+    for name in ("u", "v", "temp", "salt", "rho"):
+        a = np.array(res_garbage.variables[name])
+        a[:halo] = 1e30
+        a[-halo:] = 1e30
+        a[:, :halo] = 1e30
+        a[:, -halo:] = 1e30
+        res_garbage.variables[name] = a
+
+    b_clean = veros_snapshot_to_legoesm_state(res_clean, recipe.initial_state)
+    b_garb = veros_snapshot_to_legoesm_state(res_garbage, recipe.initial_state)
+    for fld in ("T", "S", "u", "v"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(b_garb.state, fld).data),
+            np.asarray(getattr(b_clean.state, fld).data),
+        )
+
+
+def test_bridge_roundtrip_salt_index_mapping():
+    """Extend the temp round-trip to salinity: strip-halo ∘ transpose(x,y ->
+    lat,lon) ∘ reverse-z must place Veros cell (i,j,k) at legoESM
+    (lat=j, lon=i, level=nz-1-k)."""
+    result = _make_synthetic_veros_result()
+    with override_constants(**VEROS_CONSTANTS):
+        recipe = build_acc_recipe()
+    bridged = veros_snapshot_to_legoesm_state(result, recipe.initial_state)
+    veros_s = result.variables["salt"][2:-2, 2:-2, :, 1]   # (nx, ny, nz), tau=1
+    expected = np.swapaxes(veros_s, 0, 1)[..., ::-1]        # (lat, lon, z-reversed)
+    n_lat = bridged.state.S.data.shape[0]
+    interior_S = (
+        np.asarray(bridged.state.S.data[1:-1, :, :]) if n_lat == NY + 2
+        else np.asarray(bridged.state.S.data)
+    )
+    np.testing.assert_allclose(interior_S, expected, rtol=1e-12)

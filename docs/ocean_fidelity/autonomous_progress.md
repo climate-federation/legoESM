@@ -9,7 +9,7 @@ One entry per task attempt. Newest at the bottom of each task block.
 - [ ] Q3 — Register fidelity modules (test discovery)
 - [~] Q4 — ConstantsConfig (G-C1 done pending green; G-C2…G-C5 remaining)
 - [x] Q5 — CI clarity guard (function-LOC ceiling, allow-list shrinks; two-source/deprecated detectors folded into Q7)
-- [ ] Q6 — Equivariance tier expansion
+- [x] Q6 — Equivariance tier expansion (bridge round-trip temp+salt, halo-strip invariance; + existing EOS-unit/vertical-flip/cumsum-order)
 - [ ] Q7 — Config regrouping + footguns
 - [ ] Q8 — Decompose baroclinic_tendencies (bit-identical gate)
 
