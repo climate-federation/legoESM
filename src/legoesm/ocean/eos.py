@@ -457,7 +457,69 @@ def unesco80_eos(
     return rho
 
 
-def make_eos_fn(eos="wright", eos_linear=None):
+# ==============================================================================
+# Veros "nonlinear EOS variant 3" — eq_of_state_type=3 in Veros.
+# Quadratic-in-T (with optional T^2 nonlinearity), zero salinity contribution,
+# zero pressure dependency. Despite Veros calling this "nonlinear", it's a
+# simple polynomial that captures the leading T-dependence of seawater
+# density without invoking UNESCO 1980 / JM95.
+#
+# Source: veros/core/density/nonlinear_eq3.py:
+#   rho = -(betaT·(T - theta0) + betaTs·(T - theta0)^2
+#           - betaS·(S - S0)) · rho_0
+# Defaults from the Veros source (used by veros.setups.acc.ACCSetup):
+#   rho_0 = 1024, theta0 = 9.85 [°C] (= 283 K - T_freeze),
+#   S0 = 35, betaT = 1.67e-4, betaTs = 5e-6, betaS = 0
+#
+# Because betaS = 0 by default, salinity is effectively a passive tracer in
+# this EOS — exactly the convention Veros ACC relies on (uniform 35 PSU init).
+# ==============================================================================
+
+
+class VerosNonlin3Config(NamedTuple):
+    """Veros eq_of_state_type=3 (nonlinear, T-only) coefficients."""
+    rho_0: float = 1024.0
+    theta0_C: float = 283.0 - 273.15      # 9.85 °C
+    S0: float = 35.0
+    betaT: float = 1.67e-4
+    betaTs: float = 5.0e-6                # = 1e-5 / 2 (Veros source convention)
+    betaS: float = 0.0                    # NOTE: zero by default in Veros nonlin3
+
+
+def veros_nonlin3_eos(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    p: jnp.ndarray,
+    cfg: VerosNonlin3Config | None = None,
+) -> jnp.ndarray:
+    """Veros ``eq_of_state_type=3`` density (quadratic in T, no S, no p).
+
+    Returns
+    -------
+    array
+        In-situ density [kg/m³]. Pressure ``p`` is accepted for API
+        symmetry but ignored — this EOS has no pressure dependence.
+
+    Notes
+    -----
+    Mirrors ``veros/core/density/nonlinear_eq3.py`` exactly. Used by
+    ``veros.setups.acc.ACCSetup``. Default coefficients match
+    Veros's module-level constants.
+    """
+    cfg = cfg if cfg is not None else VerosNonlin3Config()
+    thetas = T - cfg.theta0_C
+    rho_anom = -(
+        cfg.betaT * thetas
+        + cfg.betaTs * thetas * thetas
+        - cfg.betaS * (S - cfg.S0)
+    ) * cfg.rho_0
+    # Veros returns the density anomaly (rho - rho_0); to match the legoESM
+    # EOS API (in-situ rho) we add rho_0 back here.
+    return rho_anom + cfg.rho_0
+
+
+def make_eos_fn(eos="wright", eos_linear=None,
+                eos_veros_nonlin3: VerosNonlin3Config | None = None):
     """Return an EOS callable ``fn(T, S, p) -> rho``.
 
     Parameters
@@ -489,6 +551,11 @@ def make_eos_fn(eos="wright", eos_linear=None):
         return _linear
     elif eos == "unesco80":
         return unesco80_eos
+    elif eos == "veros_nonlin3":
+        cfg = eos_veros_nonlin3 if eos_veros_nonlin3 is not None else VerosNonlin3Config()
+        def _veros_nl3(T, S, p):
+            return veros_nonlin3_eos(T, S, p, cfg=cfg)
+        return _veros_nl3
     else:
         raise ValueError(f"Unknown EOS scheme: {eos!r}")
 

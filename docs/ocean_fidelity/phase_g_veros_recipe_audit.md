@@ -84,17 +84,24 @@ own canonical configurations.
 Drawing on the adapter files and the ACC / global_4deg gallery cases that
 they wrap:
 
-1. **Equation of state** — ``eq_of_state_type ∈ {1, 3, 5, …}``
-   (``1``: linear, hard-coded ``betaT=1.67e-4``, ``betaS=0.78e-3``,
-   ``rho_0=1024``; ``3``: nonlinear Jackett-McDougall 1995 polynomial; other
-   integer enums for other EOS variants — see Veros docs).
+1. **Equation of state** — ``eq_of_state_type ∈ {1, 2, 3, 4, 5}``.
+   Verified by reading Veros source ``veros/core/density/``:
+   ``1``: linear (``betaT=1.67e-4``, ``betaS=0.78e-3``, ``rho_0=1024``);
+   ``2``: nonlinear variant 1;
+   ``3``: nonlinear variant 3 — a **quadratic-in-T** polynomial
+   (``rho = -[βT·θ + βTs·θ² − βS·(S−S₀)]·ρ₀`` with ``βS=0`` by
+   default, i.e., **no salinity dependence**), used by ``ACCSetup``.
+   This is NOT Jackett-McDougall 1995 as the earlier draft of this
+   audit claimed.
+   ``4``: nonlinear variant 2;
+   ``5``: gsw / TEOS-10.
 2. **Tracer advection** — ``enable_superbee_advection = True`` (Sweby
    superbee flux limiter, canonical for ACC / global_4deg). Otherwise
    centred second-order.
-3. **Momentum advection** — Arakawa B-grid energy/enstrophy-conserving
-   stencil; built into the core, not configurable.
+3. **Momentum advection** — C-grid energy/enstrophy-conserving
+   stencil (Sadourny); built into the core, not configurable.
 4. **Coriolis** — ``vs.coriolis_t = 2·Ω·sin(yt)`` at velocity points;
-   B-grid stencil baked in.
+   C-grid Sadourny stencil baked in.
 5. **Lateral momentum mixing** — ``enable_hor_friction``, ``A_h``,
    ``enable_hor_friction_cos_scaling``, ``hor_friction_cosPower``
    (cos(lat)-scaled harmonic Laplacian). No built-in biharmonic.
@@ -111,7 +118,12 @@ they wrap:
    ``enable_skew_diffusion = True`` (GM-skew) with ``K_gm_0``.
 10. **Time integrator** — leapfrog + Adams-Bashforth-2 + Robert-Asselin
     time filter; not configurable.
-11. **Grid staggering** — Arakawa B-grid; not configurable.
+11. **Grid staggering** — Arakawa **C-grid** (confirmed by reading Veros
+    ``variables.py`` — ``U_GRID = ("xu", "yt", "zt")``,
+    ``V_GRID = ("xt", "yu", "zt")``). **Same staggering as legoESM's
+    lat-lon C-grid.** Earlier drafts of this audit and a comment in
+    ``scripts/ocean_fidelity/compare_legoesm_vs_veros.py`` (line 158)
+    described Veros as B-grid; that is incorrect.
 12. **Free surface** — implicit linear free-surface solver; not configurable.
 13. **Constants** — ``rho_0 = 1024`` (linear EOS), ``grav = 9.81``,
     ``omega = 7.292115e-5``, ``radius = 6.370e6``, ``betaT = 1.67e-4``,
@@ -145,16 +157,17 @@ Status legend:
 - **add** — legoESM needs to add the scheme. The match-very-well principle
   rules out substitution; this is feature work.
 - **structural** — difference cannot be expressed in legoESM's menu without a
-  deeper architectural change (e.g. parallel B-grid core). Acceptance must
-  allow the discretization-level delta or postpone the recipe.
+  deeper architectural change (rare in practice — most "structural"
+  rows turned out to be misclassifications once Veros source was
+  read; see the audit-update commit ``c5acd28-ish``).
 
 | Dimension | Veros canonical | legoESM today | Status | Action |
 |---|---|---|---|---|
 | EOS (linear) | ``eq_of_state_type=1`` + Veros hard-coded coefs | ``eos="linear"`` + ``LinearEOSConfig`` | **clean** | Pin coefficients via recipe. |
-| EOS (nonlinear, ``type=3``) | Jackett-McDougall 1995 polynomial | ``eos="wright"`` (Wright 1997, MOM6 default) only | **add** | **Add ``eos="jm95"``** to ``ocean/eos.py``. ~80 LOC + ~30 unit-test cells against Veros's tabulated reference. Required for any Veros gallery setup that turns on the nonlinear EOS (most non-trivial cases). |
+| EOS (nonlinear, ``type=3``) | **Quadratic-in-T polynomial with βS=0** (verified against ``veros/core/density/nonlinear_eq3.py``; NOT JM95 as the original audit draft claimed). Used by ``ACCSetup``. | ``eos="veros_nonlin3"`` — bit-for-bit-equivalent ``veros_nonlin3_eos`` ported into ``ocean/eos.py``. | **clean** | Pin ``VerosNonlin3Config()`` defaults. JM95 / TEOS-10 ports remain as future work for ``eq_of_state_type=4, 5`` setups. |
 | Tracer advection (superbee) | ``enable_superbee_advection=True`` (Sweby superbee limiter) | ``"tvd"`` dispatch wires ``_van_leer_limiter`` — Sweby is implemented as ``_sweby_limiter`` but not wired. | **wire** | **Either** (a) add a new ``tracer_advection="superbee"`` literal that calls ``_sweby_limiter``, or (b) add a ``tvd_limiter: Literal["van_leer", "sweby"]`` config knob with ``"van_leer"`` default. Recipe pins ``"superbee"`` / ``tvd_limiter="sweby"``. Small change. |
-| Momentum advection (B-grid energy/enstrophy form) | built-in | C-grid ``"vector_invariant"`` (default), ``"weno5"``, ``"weno7"`` | **structural** | Different grid stagger ⇒ different stencil. Recipe pins ``"vector_invariant"`` as the C-grid analogue. Tier-2 acceptance for momentum advection must allow a discretization-level delta; if it doesn't, the only path is a parallel B-grid core (see B-grid below). |
-| Coriolis (B-grid form) | built-in | C-grid energy-conserving | **structural** | Same as above. The C-grid stencil is the canonical legoESM choice; recipe documents the divergence. |
+| Momentum advection (C-grid) | built-in | C-grid ``"vector_invariant"`` (default), ``"weno5"``, ``"weno7"`` | **close** | Both C-grid (Veros confirmed via ``variables.py``). Stencil family differs (Sadourny vs vector-invariant) but staggering is identical, so tier-2 momentum-advection comparison should land at discretization-truncation level. |
+| Coriolis (C-grid) | Sadourny energy-conserving | C-grid energy-conserving | **clean** | Same staggering, same family — pin via recipe with no documented stencil delta. |
 | Lateral momentum mixing (harmonic) | ``enable_hor_friction=True``, ``A_h`` | ``lateral_mixing="harmonic"``, ``A_h`` | **clean** | Pin ``A_h``. |
 | Cos(lat) ``A_h`` scaling | ``enable_hor_friction_cos_scaling=True``, ``hor_friction_cosPower=1`` | not exposed in ``lateral_mixing/harmonic.py`` (verify) | **add** | **Add ``A_h_cos_power: float = 0.0``** field to ``HarmonicMixingConfig`` and apply ``A_h · cos(lat)^N`` inside ``harmonic.py``. Trivial change (~10 LOC + test). Required by global_4deg and DINO. |
 | Bottom drag (linear) | ``enable_bottom_friction=True``, ``r_bot`` | ``bottom_drag="linear"``, ``r_bot`` | **clean** | Pin ``r_bot``. (legoESM also has ``"quadratic"`` which Veros lacks — a legoESM superset.) |
@@ -165,7 +178,7 @@ Status legend:
 | Redi (neutral diffusion) | ``enable_neutral_diffusion=True``, ``K_iso_0``, ``K_iso_steep``, ``iso_dslope``, ``iso_slopec`` | ``lateral_mixing="gm_redi"`` (Redi component) | **clean** / **wire** | Verify legoESM's taper parameter names map cleanly to Veros's (``iso_dslope``, ``iso_slopec``, ``iso_steep``). If parameter sets differ, expose a Veros-compatible adapter in the config. Modest work. |
 | GM-skew (eddy bolus) | ``enable_skew_diffusion=True``, ``K_gm_0`` | ``lateral_mixing="gm_redi"`` (GM component) | **clean** | Pin ``K_gm_0``. |
 | Time integrator (leapfrog + AB2 + Robert-Asselin) | hard-coded in core | ``"ssp_rk3"`` / ``"ssp_rk34"`` / ``"ssp_rk54"`` / semi-implicit | **add** | **Port leapfrog + AB2 + Robert-Asselin filter** to legoESM as ``outer_integrator="leapfrog_ab2"``. Engineering questions: (1) the Robert-Asselin time blend is a linear combination of ``τ-1, τ, τ+1`` — autodiff-friendly (linear). (2) leapfrog requires a two-level state carry; integrates cleanly into ``SegmentCarry`` via an additional pytree field but it is a cross-cutting change (every direct ``SegmentCarry(...)`` constructor must learn the new field, per CLAUDE.md SegmentCarry discipline). Estimated 500–800 LOC including state-carry plumbing + tests. **Required for tier-3 match with Veros, and for tier-2 of any integrator-coupled tendency (forced drift over a step is integrator-dependent).** |
-| Grid staggering (B-grid) | hard-coded in core | C-grid only | **structural** | A parallel B-grid ocean core in legoESM is a multi-month effort and conflicts with legoESM's C-grid design choice (chosen for divergence consistency and hydrostatic-balance handling). **Recommendation**: defer the B-grid port; document the staggering delta as a tier-2 discretization-error boundary. Revisit only if tier-2 deltas concentrate on stencil-sensitive operators (Coriolis, KE-gradient form). |
+| Grid staggering | Arakawa **C-grid** (verified against ``veros/variables.py``: ``U_GRID = ("xu", "yt", "zt")``, ``V_GRID = ("xt", "yu", "zt")``) | Arakawa C-grid (lat-lon, MPAS Voronoi, cubed-sphere) | **clean** | Same staggering — no B-grid parallel core needed. The "structural delta" recorded in earlier audit drafts was based on an incorrect comment in ``compare_legoesm_vs_veros.py`` (which described Veros as B-grid). Phase G.0c verifies this against Veros source. |
 | Free surface (implicit) | hard-coded in core | ``barotropic`` dispatch with implicit barotropic available | **wire** | Pin ``barotropic="implicit"``. |
 | Cyclic-X | ``enable_cyclic_x=True`` | grid ``periodic_x=True`` | **clean** | Pin in grid factory. |
 | Constants | ``g=9.81``, ``omega=7.292115e-5``, ``radius=6.370e6``, ``rho_0=1024`` (linear EOS), ``betaT=1.67e-4``, ``betaS=0.78e-3`` | ``g=9.80616``, ``R_earth=6.371229e6``, ``rho_ocean=1025`` (verify ``omega`` value in ``constants.py``) | **wire** | **Add recipe-level constants override.** Two options: (a) monkey-patch ``legoesm.constants`` at recipe load (simple, global state); (b) plumb a ``ConstantsConfig`` NamedTuple through every leaf that reads ``constants.X`` (clean, invasive — touches dozens of modules). **Recommended: start with (a) for G.0 to validate the harness; plan (b) as a refactor once the recipe workflow is proven.** ~60 LOC + test for option (a). |
@@ -184,13 +197,13 @@ a faithful Veros recipe. Estimated work per item plus suggested ordering:
 | 5 | Tendency probe harness + per-region metrics | M (~300 LOC) | every Phase G run | G.0b |
 | 6 | First G.0 recipe ``configs/recipes/veros_acc.yaml`` + acceptance run on ``acc`` | M | gate G.0 acceptance | G.0c |
 | 7 | Port Veros TKE closure as ``vertical_mixing="tke"`` | M-L (~400–600 LOC) | ``acc``, every non-trivial setup | G.1a (before ACC tier-2 mixing match) |
-| 8 | Port Jackett-McDougall 1995 EOS as ``eos="jm95"`` | S-M (~80 LOC) | nonlinear-EOS gallery setups | G.1b |
+| 8 | Port Veros nonlin3 EOS as ``eos="veros_nonlin3"`` (the actual ACC EOS — quadratic-in-T, NOT JM95). UNESCO 1980 also landed for general-purpose use; JM95 / TEOS-10 deferred to setups that need ``eq_of_state_type=4, 5``. | S (~50 LOC + tests) | every Veros setup with ``eq_of_state_type=3`` | G.1b |
 | 9 | Veros taper-parameter mapping in ``gm_redi.py`` | S | ``acc``, every GM/Redi setup | G.1c |
 | 10 | Port leapfrog + AB2 + Robert-Asselin as ``outer_integrator="leapfrog_ab2"`` | L (~500–800 LOC + SegmentCarry plumbing) | tier-3 match across all setups; tier-2 of any integrator-coupled tendency | G.2 |
 | 11 | Port EKE (Eden & Greatbatch 2008) | M (~200–300 LOC) | gallery setups with ``enable_eke=True`` | G.3 |
 | 12 | Port IDEMIX (Olbers & Eden 2013) | M-L (~300–400 LOC) | ``global_flexible`` recipe | G.3 |
 | 13 | Wrap remaining gallery setups (``global_1deg``, ``global_flexible``, ``north_atlantic``, ``wave_propagation``) | S each (~30 LOC + test) | gallery coverage | rolling |
-| — | B-grid parallel ocean core | XL (months) | strict tier-2 match on momentum advection / Coriolis stencil | **deferred** |
+| — | ~~B-grid parallel ocean core~~ | — | — | **NOT REQUIRED** — Veros is C-grid (verified against ``veros/variables.py``). |
 
 Items 1–6 unblock G.0 (the first tier-2 acceptance run, on ``acc``).
 Item 7 (TKE port) unblocks the mixing-tendency match on ``acc`` and is the
@@ -216,7 +229,7 @@ constants:
   omega: 7.292115e-5            # ↔ veros.settings.omega
 
 grid:
-  type: latlon_cgrid_regional   # closest legoESM grid; B-grid delta documented
+  type: latlon_cgrid_regional   # both Veros and legoESM are C-grid; no staggering delta
   nx: 30
   ny: 42
   nz: 15
@@ -330,7 +343,7 @@ non-blocking mixing-tendency failure is the trigger for G.1a.
 After G.0c lands:
 
 1. **G.1a — TKE port** (item #7). Add ``vertical_mixing="tke"`` to legoESM.
-2. **G.1b — JM95 EOS** (item #8). Add ``eos="jm95"``.
+2. **G.1b — DONE**: Veros's actual ``eq_of_state_type=3`` is quadratic-T (NOT JM95). Ported as ``eos="veros_nonlin3"`` with bit-for-bit parity against ``veros/core/density/nonlinear_eq3.py``. UNESCO 1980 also landed as ``eos="unesco80"`` for setups needing a real-world nonlinear EOS.
 3. **G.1c — Re-run ``veros_acc.yaml`` with TKE wired**. Mixing tendency now
    passes the per-process gate.
 4. **G.1d — Add ``veros_global_4deg.yaml``** (uses JM95 if ``global_4deg``
