@@ -273,3 +273,16 @@ the user or verification infra this env lacks:
     verification, which this env CANNOT run reliably (exit 143) -> doing it without that
     verification would violate verification-first / anti-gaming.
 Surfacing to user; loop did not halt on RALPHDONE -> /cancel-ralph.
+
+### 2026-05-28 · iter 13-15 · Q7 readability done (86d43e0e); Q8 assessed -> verification-infra blocked
+Q7 readability: added the LatLonCGridOceanConfig field-group docstring + min/production
+examples (86d43e0e, 53 tests green). Q8 assessment: baroclinic_tendencies = 20 sequential,
+tightly-coupled stages (markers 1..12 at lines 756-2054) sharing many locals. A pure
+extraction is doable + a frozen-state bit-identity check is NECESSARY but NOT SUFFICIENT —
+the function is called by multiple grids/configs/paths, so confirming no unintended change
+needs the FULL suite, which cannot run here (exit 143). So Q8 is genuinely blocked on
+verification infra (verification-first / can't safely verify a core-solver refactor on one
+frozen state alone).
+FINAL autonomous state: Q1✓ Q2✓ Q3✓ Q5✓ Q6✓ Q7-readability✓ + Q4(G-C1,G-C2 vertical mixing).
+All remaining work needs USER (Q4 G-C4 + Q7 A_h = config-API decisions) or a FULL-SUITE-capable
+env (Q8). Genuinely out of safe autonomous-appropriate work. Holding; /cancel-ralph to stop.
