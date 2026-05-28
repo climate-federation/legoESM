@@ -466,11 +466,16 @@ class RRTMGP:
       without changing the optics tables.  Critically includes
       ``use_scan`` so the issue-#273 GPU auto-pick (``None`` ⇒ scan
       on GPU/TPU, for-loop on CPU) is honored even when an earlier
-      call cached an explicit ``False``.
+      call cached an explicit ``False``.  Also includes
+      ``use_optimal_angle`` (iter-2): the optimal-angle path traces
+      a different two-stream graph (per-band/per-column secant) than
+      the fixed-1.66 path, so a config flip must rebuild the solver
+      instance.
       """
       return (
           RRTMGP._optics_cache_key(config),
           config.use_scan,
+          getattr(config, "use_optimal_angle", False),
       )
 
   @staticmethod
@@ -826,6 +831,7 @@ class RRTMGP:
           cloud_path_ice=cpi_3d,
           cloud_fraction=cf_3d,
           use_scan=config.use_scan,
+          use_optimal_angle=getattr(config, "use_optimal_angle", False),
       )
 
       # --- 5. Solve SW ---

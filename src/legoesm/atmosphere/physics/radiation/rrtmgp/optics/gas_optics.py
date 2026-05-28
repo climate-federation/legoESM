@@ -46,6 +46,32 @@ LookupVolumeMixingRatio: TypeAlias = (
 
 _PASCAL_TO_HPASCAL_FACTOR = 0.01
 _M2_TO_CM2_FACTOR = 1e4
+# Safe-division floor for the binary-species fraction eta = vmr_1 / (vmr_1 +
+# r * vmr_2).  The upstream Fortran uses a Python-equivalent ``if mix > 2*tiny
+# else 0.5`` branch; in JAX we use ``jnp.where`` plus a safe denominator so
+# reverse-mode AD does not propagate NaN gradients through the dead branch.
+_VMR_SAFE_DIV_EPS = 1.0e-30
+
+
+def _clip_to_table_range(temperature: Array, t_ref: Array) -> Array:
+  """Clip temperature into the lookup-table reference range.
+
+  RRTMGP tables (``kmajor``, ``kminor_*``, ``krayl_*``,
+  ``planck_fraction``, ``totplnk``) are defined on
+  ``[t_ref[0], t_ref[-1]]`` (typically 160 K–355 K).  ``floor_idx`` clips
+  the integer index but ``create_linear_interpolant`` lets the weight
+  exceed [0, 1], producing linear *extrapolation* outside the table.
+  For the Planck source ``totplnk(T) ∝ T**4`` this is catastrophic at
+  cold mesospheric or top-halo temperatures.
+
+  Upstream Fortran (mo_gas_optics_rrtmgp.F90 lines 300/303/519) raises
+  an error when any tlay/tlev/tsfc lies outside the range.  legoESM
+  must remain differentiable, so we clamp the temperature into the
+  table range before interpolation.  Halo cells produced by linear
+  extrapolation (``2*T[-1]-T[-2]``) are the most common offender; they
+  are stripped from the returned fluxes anyway.
+  """
+  return jnp.clip(temperature, t_ref[0], t_ref[-1])
 
 
 def _pressure_interpolant(
@@ -173,9 +199,12 @@ def _compute_relative_abundance_interpolant(
   combined_vmr = vmr_for_interp[0] + vmr_ref_ratio * vmr_for_interp[1]
   # Consistent with how the RRTM absorption coefficient tables are designed, the
   # relative abundance defaults to 0.5 when the volume mixing ratio of both
-  # dominant species is exactly 0.
+  # dominant species is exactly 0.  Use a safe denominator (``jnp.maximum``
+  # against ``_VMR_SAFE_DIV_EPS``) so reverse-mode AD does not propagate NaN
+  # gradients through the dead ``where`` branch when ``combined_vmr == 0``.
+  safe_combined = jnp.maximum(combined_vmr, _VMR_SAFE_DIV_EPS)
   relative_abundance = jnp.where(
-      combined_vmr > 0, vmr_for_interp[0] / combined_vmr, 0.5
+      combined_vmr > 0, vmr_for_interp[0] / safe_combined, 0.5
   )
   interpolant = _mixing_fraction_interpolant(
       relative_abundance, lookup_gas_optics.n_mixing_fraction
@@ -221,8 +250,13 @@ def compute_major_optical_depth(
   # The troposphere index is 1 for levels above the troposphere limit and 0
   # otherwise.
   troposphere_idx = jnp.where(p <= lookup_gas_optics.p_ref_tropo, 1, 0)
+  # Clip temperature to the table range before interpolation; halo cells and
+  # cold mesospheric layers can sit below ``t_ref[0]=160K`` where the linear
+  # interpolant otherwise extrapolates with ``weight > 1`` (see
+  # ``_clip_to_table_range`` docstring).
+  t_for_table = _clip_to_table_range(temperature, lookup_gas_optics.t_ref)
   t_interp = optics_utils.create_linear_interpolant(
-      temperature, lookup_gas_optics.t_ref
+      t_for_table, lookup_gas_optics.t_ref
   )
   p_interp = _pressure_interpolant(
       p=p, p_ref=lookup_gas_optics.p_ref, troposphere_offset=troposphere_idx
@@ -330,8 +364,11 @@ def _compute_minor_optical_depth(
 
   ibnd = lookup.g_point_to_bnd[igpt]
   loc_in_bnd = igpt - lookup.bnd_lims_gpt[ibnd, 0]
+  # Clip temperature to the table range before interpolation.  See
+  # ``_clip_to_table_range`` docstring for rationale.
+  t_for_table = _clip_to_table_range(temperature, lookup.t_ref)
   temperature_interpolant = optics_utils.create_linear_interpolant(
-      temperature, lookup.t_ref
+      t_for_table, lookup.t_ref
   )
 
   # Working dtype — all table lookups are cast to this to ensure consistent
@@ -503,8 +540,11 @@ def compute_rayleigh_optical_depth(
   # The troposphere index is 1 for levels above the troposphere limit and 0
   # otherwise.
   tropo_idx = jnp.where(p <= lkp.p_ref_tropo, 1, 0)
+  # Clip temperature to the table range before interpolation.  See
+  # ``_clip_to_table_range`` docstring for rationale.
+  t_for_table = _clip_to_table_range(temperature, lkp.t_ref)
   temperature_interpolant = optics_utils.create_linear_interpolant(
-      temperature, lkp.t_ref
+      t_for_table, lkp.t_ref
   )
   ibnd = lkp.g_point_to_bnd[igpt]
 
@@ -565,8 +605,11 @@ def compute_planck_fraction(
   # The troposphere index is 1 for levels above the troposphere limit and 0
   # otherwise.
   tropo_idx = jnp.where(p <= lookup.p_ref_tropo, 1, 0)
+  # Clip temperature to the table range before interpolation.  See
+  # ``_clip_to_table_range`` docstring for rationale.
+  t_for_table = _clip_to_table_range(temperature, lookup.t_ref)
   temperature_interpolant = optics_utils.create_linear_interpolant(
-      temperature, lookup.t_ref
+      t_for_table, lookup.t_ref
   )
   pressure_interpolant = _pressure_interpolant(
       p, lookup.p_ref, tropo_idx
@@ -613,9 +656,16 @@ def compute_planck_sources(
   """
   ibnd = lookup.g_point_to_bnd[igpt]
 
-  # 1-D interpolation of the Planck source.
+  # 1-D interpolation of the Planck source.  Clip temperature to the
+  # ``t_planck`` table range — extrapolation here is **catastrophic**
+  # because ``totplnk(T) ∝ T**4`` and the linear interpolant produces
+  # ``weight1*table[0] + weight2*table[1]`` with ``weight1 = 1 -
+  # weight2``; for cold halo/mesospheric temperatures ``weight2 ≫ 1``
+  # and ``weight1 < 0`` gives nonsense.  Upstream errors out on
+  # out-of-range T; we clamp instead to stay differentiable.
+  t_for_planck = _clip_to_table_range(temperature, lookup.t_planck)
   interpolant = optics_utils.create_linear_interpolant(
-      temperature, lookup.t_planck
+      t_for_planck, lookup.t_planck
   )
   return planck_fraction * optics_utils.interpolate(
       lookup.totplnk[ibnd, :],

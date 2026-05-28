@@ -129,6 +129,14 @@ class RRTMGPConfig(NamedTuple):
           sometimes faster on CPU for typical atmospheric nlev.
     include_clouds : bool
         If True, include cloud optics (default False).
+    use_optimal_angle : bool
+        If True, replace the fixed Fu-Liou ``1.66`` longwave diffusivity
+        secant with the per-band, per-column optimal angle computed from
+        the ``optimal_angle_fit`` polynomial in the gas-optics file (see
+        upstream ``compute_optimal_angles``).  Default False to preserve
+        bit-reproducibility with the historical legoESM output; enable
+        for upper-troposphere/stratosphere fidelity matching upstream
+        rte-rrtmgp.
     """
     lw_gas_file: str = ""
     sw_gas_file: str = ""
@@ -144,6 +152,7 @@ class RRTMGPConfig(NamedTuple):
     aerosol_g: float = 0.70
     use_scan: bool | None = None
     include_clouds: bool = False
+    use_optimal_angle: bool = False
 
 
 class OzoneProfileConfig(NamedTuple):

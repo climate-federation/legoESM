@@ -46,6 +46,7 @@ def _compute_local_properties_lw(
     cloud_r_eff_ice: Array | None = None,
     cloud_path_ice: Array | None = None,
     cloud_fraction: Array | None = None,
+    lw_diffusive_factor: float | Array = monochromatic_two_stream._LW_DIFFUSIVE_FACTOR,
 ) -> dict[str, Array]:
   """Compute local optical properties for longwave radiative transfer."""
   if isinstance(sfc_temperature, float):
@@ -91,6 +92,7 @@ def _compute_local_properties_lw(
       combined_srcs['planck_src_bottom'],
       combined_srcs['planck_src_top'],
       lw_optical_props['asymmetry_factor'],
+      lw_diffusive_factor=lw_diffusive_factor,
   )
   src_and_properties['sfc_src'] = sfc_src
 
@@ -121,6 +123,62 @@ def _replace_top_flux(f: Array) -> Array:
   return f
 
 
+def _compute_optimal_lw_secant(
+    optical_depth: Array,
+    band_idx: Array,
+    optimal_angle_fit: Array,
+    halo_width: int = 1,
+) -> Array:
+  """Compute upstream RRTMGP's optimal longwave diffusivity secant.
+
+  Replicates ``rte-rrtmgp``'s ``compute_optimal_angles``: a per-band linear
+  fit on the column transmissivity ``trans = exp(-sum_z tau)``::
+
+      secant(col, gpt) = optimal_angle_fit[band, 0] * trans
+                       + optimal_angle_fit[band, 1]
+
+  Operates on the per-g-point optical depth slice ``(ncol, 1, nlev+2)``,
+  excluding halo cells from the sum since halos carry linearly-extrapolated
+  values that are stripped before the recurrent integration anyway.
+
+  Args:
+    optical_depth: ``(ncol, 1, nlev+2)`` per-g-point optical depth slice.
+    band_idx: 0-D scalar with the spectral band corresponding to the
+      current g-point (``g_point_to_bnd[igpt]``).
+    optimal_angle_fit: ``(n_bnd, 2)`` polynomial-fit coefficients loaded
+      from the longwave gas-optics file.
+    halo_width: Vertical halo width to exclude from the column sum.
+
+  Returns:
+    ``(ncol, 1, 1)`` secant ready to broadcast against the
+    ``(ncol, 1, nlev+2)`` optical-depth array.
+  """
+  # Interior column (halos excluded) total optical depth.
+  hw = halo_width
+  if hw > 0:
+    tau_interior = optical_depth[:, :, hw:-hw]
+  else:
+    tau_interior = optical_depth
+  # ``jnp.maximum(tau, 0.0)`` is a deliberate departure from the literal
+  # upstream formula ``tau_total = sum(tau)`` (codex iter-2 review, LOW).
+  # Upstream is invoked on freshly computed positive optical depths so the
+  # difference is zero in practice; in legoESM the same array is reused
+  # downstream after the recurrence strips halos, but during scan tracing
+  # a halo cell whose interpolated tau briefly dipped below zero would
+  # otherwise inject a negative term into ``trans_total`` and amplify
+  # ``-secant`` errors.  Clamping to zero matches the physical meaning of
+  # "no optical depth" and keeps ``exp(-tau_total) ∈ [0, 1]``.  Interior
+  # cells (the ones that actually contribute) almost always have
+  # ``tau >= 0`` from the kmajor/kminor lookup, so this clamp acts only
+  # as a guard.
+  tau_total = jnp.sum(jnp.maximum(tau_interior, 0.0), axis=-1, keepdims=True)
+  # ``tau_total`` shape ``(ncol, 1, 1)``.  Compute column transmissivity.
+  trans_total = jnp.exp(-tau_total)
+  c0 = optimal_angle_fit[band_idx, 0]
+  c1 = optimal_angle_fit[band_idx, 1]
+  return c0 * trans_total + c1
+
+
 def solve_lw(
     pressure: Array,
     temperature: Array,
@@ -135,6 +193,7 @@ def solve_lw(
     cloud_path_ice: Array | None = None,
     cloud_fraction: Array | None = None,
     use_scan: bool | None = None,
+    use_optimal_angle: bool = False,
 ) -> dict[str, Array]:
   """Solves two-stream radiative transfer equation over the longwave spectrum.
 
@@ -180,7 +239,48 @@ def solve_lw(
     # numerical identifiers.
     vmr_fields = _reindex_vmr_fields(vmr_fields, optics_lib.gas_optics_lw)
 
+  # Resolve the optimal-angle table once, outside the scan body, so the
+  # branch is selected at trace time and does not introduce a Python ``if``
+  # on a traced value inside the scan.  Raise explicitly when the caller
+  # requested ``use_optimal_angle=True`` but the gas-optics file does not
+  # ship ``optimal_angle_fit`` — silently degrading to the fixed Fu-Liou
+  # 1.66 contradicts the config contract documented on
+  # ``RRTMGPConfig.use_optimal_angle`` (codex iter-2 review, MEDIUM).
+  optimal_angle_fit = None
+  if use_optimal_angle:
+    candidate = None
+    if hasattr(optics_lib, 'gas_optics_lw'):
+      candidate = getattr(optics_lib.gas_optics_lw, 'optimal_angle_fit', None)
+    if candidate is None:
+      raise ValueError(
+          "solve_lw(use_optimal_angle=True) requires the longwave "
+          "gas-optics file to ship 'optimal_angle_fit' (added to "
+          "rrtmgp-gas-lw-* in rte-rrtmgp >= 1.7).  Either upgrade the "
+          "data file or set use_optimal_angle=False to keep the fixed "
+          "Fu-Liou 1.66 diffusivity secant."
+      )
+    optimal_angle_fit = candidate
+
   def step_fn(igpt, cumulative_flux):
+    if optimal_angle_fit is not None:
+      # Compute optical depth in a throwaway pass so the optimal-angle
+      # column sum has the actual per-g-point tau.  Cheaper than running
+      # the full optics twice would suggest because the optics library
+      # caches its lookups within a single trace.  See
+      # ``_compute_optimal_lw_secant`` for the upstream formula.
+      tau_for_secant = optics_lib.compute_lw_optical_properties(
+          pressure, temperature, molecules, igpt, vmr_fields,
+          cloud_r_eff_liq, cloud_path_liq,
+          cloud_r_eff_ice, cloud_path_ice,
+          cloud_fraction=cloud_fraction,
+      )['optical_depth']
+      band_idx = optics_lib.gas_optics_lw.g_point_to_bnd[igpt]
+      lw_diffusive_factor = _compute_optimal_lw_secant(
+          tau_for_secant, band_idx, optimal_angle_fit
+      )
+    else:
+      lw_diffusive_factor = monochromatic_two_stream._LW_DIFFUSIVE_FACTOR
+
     optical_props_2stream = _compute_local_properties_lw(
         pressure,
         temperature,
@@ -194,6 +294,7 @@ def solve_lw(
         cloud_r_eff_ice,
         cloud_path_ice,
         cloud_fraction=cloud_fraction,
+        lw_diffusive_factor=lw_diffusive_factor,
     )
 
     # Boundary conditions.

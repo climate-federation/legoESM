@@ -210,6 +210,7 @@ def lw_cell_source_and_properties(
     level_src_bottom: Array,
     level_src_top: Array,
     asymmetry_factor: Array,
+    lw_diffusive_factor: float | Array = _LW_DIFFUSIVE_FACTOR,
 ) -> StatesMap:
   """Compute the longwave two-stream reflectance, transmittance, and sources.
 
@@ -223,6 +224,13 @@ def lw_cell_source_and_properties(
     level_src_bottom: The Planck source at the bottom cell face [W / m^2 / sr].
     level_src_top: The Planck source at the top cell face [W / m^2 / sr].
     asymmetry_factor: The pointwise asymmetry factor.
+    lw_diffusive_factor: Secant of the diffusivity angle.  Scalar (e.g. the
+      Fu-Liou ``1.66`` default) or an ``Array`` broadcastable against the
+      ``(ncol, 1, nlev+2)`` shape of ``optical_depth``.  Upstream RRTMGP
+      computes a per-band, per-column value from a polynomial fit on the
+      column total optical depth (``compute_optimal_angles``); pass the
+      broadcast secant from ``solve_lw`` when the gas-optics file ships
+      ``optimal_angle_fit`` coefficients.
 
   Returns:
     A dictionary containing the following items:
@@ -238,9 +246,9 @@ def lw_cell_source_and_properties(
   optical_depth = jnp.maximum(optical_depth, 0.0)
 
   # The coefficient of the parallel irradiance in the 2-stream RTE.
-  gamma1 = _LW_DIFFUSIVE_FACTOR * (1 - 0.5 * ssa * (1 + asymmetry_factor))
+  gamma1 = lw_diffusive_factor * (1 - 0.5 * ssa * (1 + asymmetry_factor))
   # The coefficient of the antiparallel irradiance in the 2-stream RTE.
-  gamma2 = _LW_DIFFUSIVE_FACTOR * 0.5 * ssa * (1 - asymmetry_factor)
+  gamma2 = lw_diffusive_factor * 0.5 * ssa * (1 - asymmetry_factor)
 
   r_diff = _diffuse_reflectance(gamma1, gamma2, optical_depth)
   t_diff = _diffuse_transmittance(gamma1, gamma2, optical_depth)

@@ -38,6 +38,20 @@ class LookupGasOpticsLongwave(lookup_gas_optics_base.AbstractLookupGasOptics):
   t_planck: Array
   # total Planck source for each band `(n_bnd, n_t_plnk)`.
   totplnk: Array
+  # Polynomial-fit coefficients ``(n_bnd, 2)`` for the optimal longwave
+  # diffusivity-angle secant used by upstream ``compute_optimal_angles``
+  # (mo_gas_optics_rrtmgp.F90):
+  # ``secant(col, gpt) = optimal_angle_fit[band, 0] * exp(-tau_total)
+  #                      + optimal_angle_fit[band, 1]``.
+  # Fortran stores ``optimal_angle_fit(coefficient, band)`` (col-major);
+  # netCDF on disk is therefore ``(n_bnd, 2)`` in C-order so the Python
+  # access ``[band, coeff]`` matches Fortran ``(coeff, band)`` byte-for-
+  # byte.  Replaces the fixed Fu-Liou ``1.66`` factor with a per-band,
+  # per-column value that improves the diffusive integration when
+  # column optical depths vary widely (e.g. stratosphere vs deep
+  # cloud).  ``None`` when the netCDF file lacks ``optimal_angle_fit``
+  # (older data files).
+  optimal_angle_fit: Array | None = None
 
 
 def _load_data(
@@ -70,6 +84,11 @@ def _load_data(
       dtype=jnp.float_,
   )
   data['totplnk'] = tables['totplnk']
+  # ``optimal_angle_fit`` was added in recent rte-rrtmgp releases.  Tolerate
+  # older data files that lack it by emitting ``None`` — the solver falls
+  # back to the fixed ``1.66`` diffusivity factor in that case.  Loaded as
+  # ``(2, n_bnd)`` matching the upstream Fortran storage convention.
+  data['optimal_angle_fit'] = tables.get('optimal_angle_fit')
   return data
 
 
