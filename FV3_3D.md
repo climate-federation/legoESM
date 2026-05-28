@@ -2378,6 +2378,110 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1061 (2026-05-28): fix stale MPI differentiability test contracts
+
+### Goal
+
+Continuing iter-1060's pattern audit, ``test_mpi_differentiability.py``
+has 3 failures on rank 0 (1 on rank 1) on clean ``main`` HEAD:
+
+- ``TestGlobalSumMPIGrad::test_grad_nonzero``
+- ``TestPadHaloMPIGrad::test_pad_halo_mpi_grad_matches_local``
+- ``TestPadHaloMPIGrad::test_pad_halo_4d_mpi_grad_matches_local``
+
+These are critical for the differentiable-ESM goal per
+``CLAUDE.md``: "End-to-end ``jax.grad`` compat = goal."
+
+### Root cause
+
+**Test 1 (``test_grad_nonzero``)**: the assertion documents the
+"shared-replicated-x" interpretation:
+
+::
+
+    g = jax.grad(global_sum_mpi(sum(x ** 2)))(x)
+    # Expected:  2 * x * world_size
+    # Actual:    2 * x
+
+mpi4jax's ``allreduce(SUM)`` VJP is identity passthrough — each
+rank's gradient is the upstream cotangent unchanged.  Per-rank
+gradient of ``allreduce_sum(sum(x_local^2))`` is ``2 * x_local``,
+NOT scaled by ``world_size``.  The shared-x interpretation would
+require an explicit second ``allreduce(SUM)`` on the gradient
+after ``jax.grad`` — which the test never did.
+
+**Tests 2/3 (``test_pad_halo_(4d_)mpi_grad_matches_local``)**: the
+tests compare full ``(6, n, n[, nlev])`` gradients between MPI and
+local backends on rank 0 only.  Under MPI with replicated data,
+the forward fills face-local interiors from local data and cross-
+face halos via ``sendrecv``; the backward VJP propagates
+cotangents but does NOT allreduce across ranks.  So rank 0's MPI
+gradient is correct ONLY on locally-owned faces (faces 0-2 at
+np=2); faces 3-5 miss the cross-face halo contributions that the
+all-faces-local backend would have computed.
+
+Same iter-aa707bda pattern as iter-1058/1059/1060: the test
+was written assuming the legacy shared-replicated state model.
+The new scatter/gather contract treats each rank's data as
+rank-local, so gradients are per-rank too.
+
+### Fix
+
+**Test 1**: change assertion to ``g == 2 * x`` (per-rank, no
+scaling).  Comment documents the contract — callers who treat
+``x`` as a shared replicated variable must allreduce the gradient
+themselves.
+
+**Tests 2/3**: loop over ``topology.local_face_ids`` and compare
+``g_mpi[f]`` vs ``g_local[f]`` on each rank's owned faces.
+Matches the FV3 step-fidelity test pattern.
+
+### Validation
+
+::
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 2 \
+        .venv/bin/python -m pytest tests/distributed/test_mpi_differentiability.py
+    => 7 passed in 8.34s
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 3 \
+        .venv/bin/python -m pytest tests/distributed/test_mpi_differentiability.py
+    => 7 passed in 9.04s
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 6 \
+        .venv/bin/python -m pytest tests/distributed/test_mpi_differentiability.py
+    => 7 passed in 9.17s
+
+### Why this matters
+
+CLAUDE.md mandates: "End-to-end ``jax.grad`` compat = goal.  Never
+break autodiff/JIT/pytree."  These differentiability tests are
+the canonical guard against breakage of the ``jax.grad`` /
+``custom_vjp`` infrastructure under MPI.  With the assertions
+broken since iter-aa707bda, any genuine regression in the
+``_sendrecv_vjp`` or allreduce VJP path would have been masked.
+
+The corrected tests now properly verify:
+
+1. ``global_sum_mpi`` VJP is identity passthrough (per-rank
+   gradient = upstream cotangent).
+2. ``_sendrecv_vjp`` correctly propagates cotangents across MPI
+   peers, producing per-rank gradients that match the all-faces-
+   local backend on locally-owned faces.
+
+### Cumulative test repairs across iter-1058..1061
+
+| File | Failures | iter | Bug class |
+|------|----------|------|-----------|
+| ``test_mpi_bootstrap.py::TestMPIHaloExchange`` | 2 | iter-1059 | stale shape assertions post-scatter API change |
+| ``test_coupler_mpi.py::TestCouplerMPIRegression`` | 2 | iter-1060 | stale gather_to_global on full-replicated input |
+| ``test_mpi_differentiability.py::TestGlobalSumMPIGrad`` | 1 | iter-1061 | wrong VJP scaling expectation |
+| ``test_mpi_differentiability.py::TestPadHaloMPIGrad`` | 2 | iter-1061 | full-state vs local-owned-face comparison |
+
+7 pre-existing failures fixed across 4 commits.  All from
+iter-aa707bda's scatter/gather API rename without test-suite
+audit.
+
 ## Iteration 1060 (2026-05-28): fix stale ``gather_to_global`` usage in ``test_coupler_mpi.py``
 
 ### Goal

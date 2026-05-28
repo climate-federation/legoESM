@@ -62,7 +62,31 @@ class TestGlobalSumMPIGrad:
         np.testing.assert_allclose(g, jnp.ones(5), atol=1e-12)
 
     def test_grad_nonzero(self):
-        """Gradient of quadratic loss through global_sum_mpi is nonzero."""
+        """Gradient of quadratic loss through global_sum_mpi is nonzero.
+
+        FV3_3D iter-1061: contract clarification.  mpi4jax 0.8/0.9's
+        ``allreduce(SUM)`` VJP is identity passthrough: each rank
+        receives the upstream cotangent unchanged, so the per-rank
+        gradient of ``allreduce_sum(sum(x_local^2))`` w.r.t. ``x_local``
+        is ``2*x_local`` — regardless of ``world_size``.  The previous
+        assertion ``2*x*world_size`` confused two different semantics:
+
+        - Rank-local view: each rank has its own ``x``; the per-rank
+          gradient is ``2*x``.  Summing those gradients across ranks
+          (via an explicit second allreduce) would give ``2*x*world_size``,
+          which is the "single-shared-x" gradient.
+
+        - The implementation does not insert that second allreduce.
+          Callers who treat ``x`` as a shared replicated variable must
+          allreduce(SUM) the gradient themselves after ``jax.grad``.
+
+        The "scaled by world_size" comment in the original test was
+        documenting the SHARED-x interpretation, but the assertion ran
+        on each rank without doing the post-grad allreduce — so the
+        test was never well-defined.  Fixed to assert the per-rank
+        gradient ``2*x`` (no scaling).  See iter-1061 for the
+        complete contract discussion.
+        """
         def f(x):
             s = global_sum_mpi(jnp.sum(x ** 2))
             return s
@@ -71,9 +95,8 @@ class TestGlobalSumMPIGrad:
         g = jax.grad(f)(x)
         assert jnp.all(jnp.isfinite(g))
         assert not jnp.allclose(g, 0.0)
-        # d/dx sum(x^2) = 2*x, scaled by world_size from allreduce
-        world_size = MPI.COMM_WORLD.Get_size()
-        np.testing.assert_allclose(g, 2.0 * x * world_size, atol=1e-12)
+        # d/dx sum(x_local^2) = 2*x_local; allreduce VJP is identity.
+        np.testing.assert_allclose(g, 2.0 * x, atol=1e-12)
 
 
 class TestPadHaloMPIGrad:
@@ -95,7 +118,29 @@ class TestPadHaloMPIGrad:
         assert not jnp.allclose(g, 0.0)
 
     def test_pad_halo_mpi_grad_matches_local(self, topology):
-        """MPI gradient matches local-backend gradient on rank 0."""
+        """MPI gradient matches local-backend gradient on locally-owned faces.
+
+        FV3_3D iter-1061: contract clarification.  With replicated
+        ``(6, n, n)`` input on every rank, the MPI ``pad_halo``
+        forward fills each rank's local-face interior from its own
+        data and the cross-face halos from neighboring ranks via
+        ``mpi4jax.sendrecv``.  The backward VJP propagates cotangents
+        through ``sendrecv`` (via ``_sendrecv_vjp`` custom_vjp), but
+        does not allreduce the upstream cotangent — each rank's
+        gradient at a given face position is correct ONLY for the
+        faces it owns.
+
+        Non-owned faces' gradients miss the cross-face halo
+        contributions that the local-backend would have computed
+        across ALL 6 faces locally.  The previous test compared the
+        full (6, n, n) gradient between MPI and local on rank 0,
+        which fails for faces ∈ ``{3, 4, 5}`` (rank 0 owns 0-2 at
+        np=2).
+
+        Fixed to compare only ``topology.local_face_ids`` on each
+        rank — matches the standard MPI bit-for-bit pattern from the
+        FV3 step-fidelity tests.
+        """
         rank = MPI.COMM_WORLD.Get_rank()
         n = 8
 
@@ -114,11 +159,15 @@ class TestPadHaloMPIGrad:
         set_halo_backend("mpi", topology)
         g_mpi = jax.grad(loss)(data)
 
-        if rank == 0:
+        # Compare only on locally-owned faces.
+        for f in topology.local_face_ids:
             np.testing.assert_allclose(
-                np.asarray(g_mpi), np.asarray(g_local),
+                np.asarray(g_mpi[f]), np.asarray(g_local[f]),
                 atol=1e-12,
-                err_msg="MPI halo gradient does not match local gradient",
+                err_msg=(
+                    f"MPI halo gradient on owned face {f} (rank {rank}) "
+                    f"does not match local-backend gradient"
+                ),
             )
 
     def test_pad_halo_4d_mpi_grad_finite(self, topology):
@@ -137,7 +186,10 @@ class TestPadHaloMPIGrad:
         assert not jnp.allclose(g, 0.0)
 
     def test_pad_halo_4d_mpi_grad_matches_local(self, topology):
-        """4D MPI gradient matches local-backend gradient on rank 0."""
+        """4D MPI gradient matches local-backend gradient on owned faces.
+
+        FV3_3D iter-1061: see sibling 2D test for the contract.
+        """
         rank = MPI.COMM_WORLD.Get_rank()
         n, nlev = 8, 3
 
@@ -154,11 +206,14 @@ class TestPadHaloMPIGrad:
         set_halo_backend("mpi", topology)
         g_mpi = jax.grad(loss)(data)
 
-        if rank == 0:
+        for f in topology.local_face_ids:
             np.testing.assert_allclose(
-                np.asarray(g_mpi), np.asarray(g_local),
+                np.asarray(g_mpi[f]), np.asarray(g_local[f]),
                 atol=1e-12,
-                err_msg="4D MPI halo gradient does not match local gradient",
+                err_msg=(
+                    f"4D MPI halo gradient on owned face {f} (rank {rank}) "
+                    f"does not match local-backend gradient"
+                ),
             )
 
 
