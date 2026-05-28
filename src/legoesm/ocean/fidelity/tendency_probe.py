@@ -37,7 +37,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import coriolis_cgrid
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
 )
-from legoesm.ocean.eos import compute_ocean_rho
+from legoesm.ocean.eos import compute_ocean_rho, make_eos_fn
 from legoesm.ocean.state import LatLonCGridOceanConfig, LatLonCGridOceanState
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
@@ -142,7 +142,17 @@ def probe_latlon_cgrid(
     )
 
     J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
-    rho = compute_ocean_rho(state, z_coord, J)
+    # Honor the recipe's EOS choice — ``compute_ocean_rho`` defaults to
+    # Wright 1997 if no ``eos_fn`` is supplied; that's the wrong answer
+    # when the recipe pins ``eos="veros_nonlin2"`` for ACC etc. Build
+    # the EOS function from the config and pass it explicitly.
+    eos_fn = make_eos_fn(
+        eos=getattr(config, "eos", "wright"),
+        eos_linear=getattr(config, "eos_linear", None),
+        eos_veros_nonlin2=getattr(config, "eos_veros_nonlin2", None),
+        eos_veros_nonlin3=getattr(config, "eos_veros_nonlin3", None),
+    )
+    rho = compute_ocean_rho(state, z_coord, J, eos_fn=eos_fn)
 
     return LatLonProbeResult(
         pgf_ke_u=diag.KE_PGF_u.data,

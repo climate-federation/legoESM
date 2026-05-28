@@ -275,18 +275,50 @@ VEROS_TENDENCY_CAPTURE_VARS: tuple[str, ...] = (
 )
 
 
-def extract_veros_tendencies(result: VerosResult, tau: int = 1) -> dict:
+def _pad_y_walls(arr: np.ndarray) -> np.ndarray:
+    """Pad a (n_lat, ...) array with zero rows at the N + S walls so it
+    matches the legoESM lat-lon C-grid convention of ``n_lat + 2``
+    rows on a ``create_regional_latlon_grid`` output."""
+    pad = np.zeros_like(arr[:1])
+    return np.concatenate([pad, arr, pad], axis=0)
+
+
+def extract_veros_tendencies(
+    result: VerosResult,
+    tau: int = 1,
+    pad_y_walls: bool = True,
+) -> dict:
     """Pull all per-process tendency arrays from a Veros result, in
-    legoESM-shaped form (lat, lon, level)."""
+    legoESM-shaped form (lat, lon, level).
+
+    Parameters
+    ----------
+    result : VerosResult
+    tau : int
+        Veros time-level index.
+    pad_y_walls : bool
+        When ``True`` (default), pads each array with one zero row at
+        both the north and south ends so the shape matches legoESM's
+        ``create_regional_latlon_grid`` convention (``n_lat + 2``
+        rows). When ``False``, returns Veros interior shape
+        ``(NY, NX, NZ)``.
+    """
+    pad = _pad_y_walls if pad_y_walls else (lambda a: a)
     out: dict[str, np.ndarray] = {}
     for veros_name, lego_name in VEROS_TO_LEGOESM_MOMENTUM.items():
         if veros_name in result.variables:
-            out[lego_name] = _extract_veros_var(result, veros_name, tau=tau)
+            out[lego_name] = pad(_extract_veros_var(result, veros_name, tau=tau))
     for veros_name, lego_name in VEROS_TO_LEGOESM_TRACER.items():
         if veros_name in result.variables:
-            out[lego_name] = _extract_veros_var(result, veros_name, tau=tau)
+            out[lego_name] = pad(_extract_veros_var(result, veros_name, tau=tau))
     if "rho" in result.variables:
-        out["rho"] = _extract_veros_var(result, "rho", tau=tau)
+        # Veros stores ``vs.rho`` as the density ANOMALY (``rho - rho_0``)
+        # — see ``veros/core/density/nonlinear_eq{1,2,3}.py`` which all
+        # return ``rho_anom`` and ``veros/core/numerics.py:265`` which
+        # assigns ``vs.rho = get_rho(...)``. legoESM's ``probe.rho`` is
+        # the in-situ density (anomaly + ``rho_0``), so we add Veros's
+        # canonical rho_0 = 1024 here for an apples-to-apples comparison.
+        out["rho"] = pad(_extract_veros_var(result, "rho", tau=tau)) + 1024.0
     return out
 
 

@@ -32,7 +32,7 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.grids.latlon import LatLonGrid, create_regional_latlon_grid
-from legoesm.ocean.eos import VerosNonlin3Config
+from legoesm.ocean.eos import VerosNonlin2Config
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
 from legoesm.ocean.physics.combined import OceanPhysicsConfig
@@ -269,7 +269,10 @@ def build_acc_model_config() -> LatLonCGridOceanConfig:
         A_h_lat_scaling=True,
         A_h_cos_power=1,
         bottom_drag_r=R_BOT,
-        eos="veros_nonlin3",
+        # ``eq_of_state_type=3`` in Veros dispatches to nonlinear_eq2.py
+        # (Vallis 2008) — NOT nonlinear_eq3.py despite the file name.
+        # Verified against ``veros/core/density/get_rho.py``.
+        eos="veros_nonlin2",
         implicit_vertical_mixing=True,
         physics=build_acc_physics_config(),
     )

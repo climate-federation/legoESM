@@ -99,7 +99,7 @@ def test_full_recipe_builds_under_constants_override():
     ``override_constants(**VEROS_CONSTANTS)``."""
     with override_constants(**VEROS_CONSTANTS):
         recipe = build_acc_recipe()
-    assert recipe.model_config.eos == "veros_nonlin3"
+    assert recipe.model_config.eos == "veros_nonlin2"
     assert recipe.model_config.A_h_lat_scaling is True
     assert recipe.model_config.A_h_cos_power == 1
     assert recipe.model_config.implicit_vertical_mixing is True
@@ -195,22 +195,28 @@ def test_state_bridge_strips_halos_and_reverses_z():
 
 def test_extract_veros_tendencies_returns_mapped_dict():
     """The tendency extractor must produce a dict keyed by the legoESM-side
-    names from the VEROS_TO_LEGOESM_* maps, with values of legoESM
-    shape (n_lat - walls, n_lon, n_lev)."""
+    names from the VEROS_TO_LEGOESM_* maps. Default behavior pads y-walls
+    so shapes match legoESM's lat-lon C-grid convention."""
     result = _make_synthetic_veros_result()
-    tend = extract_veros_tendencies(result)
-    # Coriolis comes through as 'coriolis_u' / 'coriolis_v'
+    tend = extract_veros_tendencies(result)   # pad_y_walls=True default
     assert "coriolis_u" in tend
     assert "coriolis_v" in tend
-    # Aggregate momentum tendencies
     assert "veros_du_adv" in tend
     assert "veros_du_mix" in tend
-    # Tracer tendencies
     assert "veros_dT_hmix" in tend
     assert "veros_dT_vmix" in tend
     assert "veros_dT_iso" in tend
     assert "veros_dS_hmix" in tend
-    # All values shape (NY, NX, NZ) — pre-y-pad.
+    # With pad_y_walls=True: shape (NY + 2, NX, NZ) — matches legoESM
+    # land_mask grid.
+    for k, v in tend.items():
+        assert v.shape == (NY + 2, NX, NZ), f"{k}: {v.shape}"
+
+
+def test_extract_veros_tendencies_without_pad():
+    """``pad_y_walls=False`` returns Veros interior shape (NY, NX, NZ)."""
+    result = _make_synthetic_veros_result()
+    tend = extract_veros_tendencies(result, pad_y_walls=False)
     for k, v in tend.items():
         assert v.shape == (NY, NX, NZ), f"{k}: {v.shape}"
 

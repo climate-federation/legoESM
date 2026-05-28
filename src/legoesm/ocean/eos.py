@@ -458,7 +458,85 @@ def unesco80_eos(
 
 
 # ==============================================================================
-# Veros "nonlinear EOS variant 3" — eq_of_state_type=3 in Veros.
+# Veros "nonlinear EOS variant 2" (Vallis 2008) — eq_of_state_type=3 in
+# Veros (despite the "_eq2" file name, this is what
+# ``veros/core/density/get_rho.py`` dispatches to for type=3).
+#
+# Quadratic in T with a small T² nonlinearity, linear salinity term, and
+# pressure dependence with a coupled T·z correction:
+#
+#     rho_anom = -(grav·z/cs0² + βT·(1 - γs·grav·z·ρ0)·θ + βTs·θ²/2
+#                  - βS·(S - S0)) · ρ0
+#
+# with z = depth (positive downward), θ = T - theta0. Source:
+# ``veros/core/density/nonlinear_eq2.py``.
+# ==============================================================================
+
+
+class VerosNonlin2Config(NamedTuple):
+    """Veros eq_of_state_type=3 (Vallis 2008 nonlin2) coefficients.
+
+    Defaults taken verbatim from
+    ``veros/core/density/nonlinear_eq2.py``.
+    """
+    rho_0: float = 1024.0
+    theta0_C: float = 283.0 - 273.15   # 9.85 °C
+    S0: float = 35.0
+    grav: float = 9.81
+    cs0: float = 1490.0                  # speed of sound [m/s]
+    betaT: float = 1.67e-4
+    betaTs: float = 1.0e-5
+    betaS: float = 0.78e-3
+    gammas: float = 1.1e-8
+    z0: float = 0.0
+
+
+def veros_nonlin2_eos(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    p: jnp.ndarray,
+    cfg: VerosNonlin2Config | None = None,
+) -> jnp.ndarray:
+    """Veros ``eq_of_state_type=3`` density (Vallis 2008 nonlin2).
+
+    Parameters
+    ----------
+    T : array — potential temperature [°C]
+    S : array — salinity [g/kg or PSU]
+    p : array — **pressure in Pa** (the legoESM EOS API convention).
+        Internally converted to Veros's "depth in m" convention via
+        ``depth_m ≈ p / (rho_0 * g)``. This matches Veros's actual
+        usage which passes ``abs(vs.zt)`` (depth in meters) as the
+        ``press`` argument to ``get_rho``; that is hydrostatically
+        equivalent to ``p_Pa / (rho_0 g)``.
+
+    Returns
+    -------
+    array
+        In-situ density [kg/m³]. (Veros's
+        ``nonlin2_eq_of_state_rho`` returns the anomaly; this function
+        adds ``rho_0`` so the legoESM EOS API contract stays consistent.)
+    """
+    cfg = cfg if cfg is not None else VerosNonlin2Config()
+    # Convert pressure (Pa) → depth (m) using ``depth ≈ p / (rho_0 g)``.
+    # For a hydrostatic ocean column this is exact at the cell centre
+    # where ``p_hydro = rho_0 g z``. At depths where rho deviates from
+    # rho_0 the equivalence introduces a sub-percent error well below
+    # the discretisation noise.
+    depth_m = p / (cfg.rho_0 * cfg.grav)
+    zz = -depth_m - cfg.z0   # Veros sign convention (negative below surface)
+    thetas = T - cfg.theta0_C
+    rho_anom = -(
+        cfg.grav * zz / (cfg.cs0 * cfg.cs0)
+        + cfg.betaT * (1.0 - cfg.gammas * cfg.grav * zz * cfg.rho_0) * thetas
+        + 0.5 * cfg.betaTs * thetas * thetas
+        - cfg.betaS * (S - cfg.S0)
+    ) * cfg.rho_0
+    return rho_anom + cfg.rho_0
+
+
+# ==============================================================================
+# Veros "nonlinear EOS variant 3" — eq_of_state_type=4 in Veros.
 # Quadratic-in-T (with optional T^2 nonlinearity), zero salinity contribution,
 # zero pressure dependency. Despite Veros calling this "nonlinear", it's a
 # simple polynomial that captures the leading T-dependence of seawater
@@ -492,7 +570,7 @@ def veros_nonlin3_eos(
     p: jnp.ndarray,
     cfg: VerosNonlin3Config | None = None,
 ) -> jnp.ndarray:
-    """Veros ``eq_of_state_type=3`` density (quadratic in T, no S, no p).
+    """Veros ``eq_of_state_type=4`` density (quadratic in T, no S, no p).
 
     Returns
     -------
@@ -502,9 +580,11 @@ def veros_nonlin3_eos(
 
     Notes
     -----
-    Mirrors ``veros/core/density/nonlinear_eq3.py`` exactly. Used by
-    ``veros.setups.acc.ACCSetup``. Default coefficients match
-    Veros's module-level constants.
+    Mirrors ``veros/core/density/nonlinear_eq3.py`` exactly.
+    NOTE: Veros's ``eq_of_state_type=3`` dispatches to ``nonlin2`` (see
+    ``veros/core/density/get_rho.py``), so this function — despite
+    being a port of ``nonlinear_eq3.py`` — corresponds to ``type=4``.
+    For ``ACCSetup`` (which uses ``type=3``) see :func:`veros_nonlin2_eos`.
     """
     cfg = cfg if cfg is not None else VerosNonlin3Config()
     thetas = T - cfg.theta0_C
@@ -519,6 +599,7 @@ def veros_nonlin3_eos(
 
 
 def make_eos_fn(eos="wright", eos_linear=None,
+                eos_veros_nonlin2: VerosNonlin2Config | None = None,
                 eos_veros_nonlin3: VerosNonlin3Config | None = None):
     """Return an EOS callable ``fn(T, S, p) -> rho``.
 
@@ -551,6 +632,11 @@ def make_eos_fn(eos="wright", eos_linear=None,
         return _linear
     elif eos == "unesco80":
         return unesco80_eos
+    elif eos == "veros_nonlin2":
+        cfg = eos_veros_nonlin2 if eos_veros_nonlin2 is not None else VerosNonlin2Config()
+        def _veros_nl2(T, S, p):
+            return veros_nonlin2_eos(T, S, p, cfg=cfg)
+        return _veros_nl2
     elif eos == "veros_nonlin3":
         cfg = eos_veros_nonlin3 if eos_veros_nonlin3 is not None else VerosNonlin3Config()
         def _veros_nl3(T, S, p):
