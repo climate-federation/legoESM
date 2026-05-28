@@ -282,10 +282,19 @@ def p3_microphysics(
     )
     V_t_i = jnp.clip(V_t_i, 0.0, 10.0)
 
+    # Joint q_r sink for the sed cap: evaporation AND rain_rime both
+    # drain q_r in this step.  Including only ``evaporation`` lets
+    # sedimentation remove the remaining ``q_r - evap·dt`` while
+    # rain_rime still removes its share on top — for heavy q_i + q_r
+    # at long dt the combined drain exceeds q_r and the explicit
+    # Euler step drives q_r negative.  Empirical probe (T=260 K,
+    # q_r=5e-3, q_i=1e-3, q_rim=5e-4, dz=500 m, dt=1200 s): without
+    # rain_rime in the sed cap q_r ended at -5.4e-4 kg/kg.  With it,
+    # q_r stays >= 0.
     sed_r, precip_r = sedimentation_tendency(
         q_r, rho, V_t_r, dz, dt=dt,
         return_surface_flux=True,
-        extra_sink=evaporation,
+        extra_sink=evaporation + rain_rime,
     )
     sed_i, precip_i = sedimentation_tendency(
         q_i, rho, V_t_i, dz, dt=dt,
