@@ -378,3 +378,279 @@ def pad_halo_dgrid_vector_4d(u_d, v_d):
         u_vals = u_d[u_src_f, u_src_i, u_src_j]
         v_padded = v_padded.at[v_dst_f, v_dst_i, v_dst_j].set(u_vals * v_dst_signs.astype(v_d.dtype)[:, None])
     return u_padded, v_padded
+
+
+# =====================================================================
+# iter-1083: MPI-aware DGRID vector halo (batched-per-peer sendrecv)
+# =====================================================================
+
+
+def _build_dgrid_mpi_edges(topology):
+    """Build per-face per-edge dispatch list with axis-swap metadata."""
+    edges = []
+    for face in topology.local_face_ids:
+        for edge in (WEST, EAST, SOUTH, NORTH):
+            nbr_face, nbr_edge, is_reversed = topology.neighbor_info[
+                (face, edge)
+            ]
+            nbr_rank = topology.neighbor_ranks[(face, edge)]
+            if (face, edge) in _AXIS_SWAP_TABLE:
+                _, _, _, sign_uv, sign_vu = _AXIS_SWAP_TABLE[(face, edge)]
+                kind = "swap"
+            else:
+                sign_uv = sign_vu = 1
+                kind = "same"
+            edges.append((face, edge, nbr_face, nbr_edge, is_reversed,
+                           nbr_rank, kind, sign_uv, sign_vu))
+    return edges
+
+
+def _extract_edge_strip_dgrid(data, face_loc, edge, n_i, n_j):
+    """Extract a strip from staggered (n_i, n_j) data at the given edge."""
+    if edge == WEST:
+        return data[face_loc, 0, :, :]
+    elif edge == EAST:
+        return data[face_loc, n_i - 1, :, :]
+    elif edge == SOUTH:
+        return data[face_loc, :, 0, :]
+    else:  # NORTH
+        return data[face_loc, :, n_j - 1, :]
+
+
+def _place_strip_dgrid(padded, face_loc, edge, strip, n_i, n_j):
+    """Place a strip into halo=1 position of padded staggered array."""
+    if edge == WEST:
+        return padded.at[face_loc, 0, 1:n_j + 1, :].set(strip)
+    elif edge == EAST:
+        return padded.at[face_loc, n_i + 1, 1:n_j + 1, :].set(strip)
+    elif edge == SOUTH:
+        return padded.at[face_loc, 1:n_i + 1, 0, :].set(strip)
+    else:  # NORTH
+        return padded.at[face_loc, 1:n_i + 1, n_j + 1, :].set(strip)
+
+
+def pad_halo_dgrid_vector_4d_mpi(u_d, v_d, topology):
+    """MPI-aware DGRID vector halo with batched-per-peer sendrecv.
+
+    Mirrors the deadlock-free pattern from
+    ``_pad_halo_mpi_face_only_4d`` (sorted peer iteration, one
+    sendrecv per peer with packed multi-edge buffer).  Same-axis +
+    axis-swap edges are encoded into the strip pack/unpack and the
+    iter-1078 component-swap signs.
+
+    Each rank holds local-only u_d/v_d:
+    - u_d shape: ``(n_local, n, n+1, nlev)``
+    - v_d shape: ``(n_local, n+1, n, nlev)``
+
+    Returns padded halo arrays with the same per-face staggered
+    layout as ``pad_halo_dgrid_vector_4d``.
+
+    Parameters
+    ----------
+    u_d, v_d : jax.Array
+        Rank-local staggered D-grid wind components.
+    topology : CommTopology
+
+    Returns
+    -------
+    u_d_padded : jax.Array, shape ``(n_local, n+2, n+3, nlev)``
+    v_d_padded : jax.Array, shape ``(n_local, n+3, n+2, nlev)``
+    """
+    try:
+        import mpi4jax
+        from mpi4py import MPI
+    except ImportError as exc:
+        raise ImportError(
+            "pad_halo_dgrid_vector_4d_mpi requires mpi4jax + mpi4py."
+        ) from exc
+
+    if u_d.ndim != 4 or v_d.ndim != 4:
+        raise ValueError("4D inputs required")
+    n_local = u_d.shape[0]
+    if len(topology.local_face_ids) != n_local:
+        raise ValueError(
+            f"u_d.shape[0]={n_local} != len(local_face_ids)={len(topology.local_face_ids)}"
+        )
+    n = u_d.shape[1]
+    n_j_u, n_i_v = n + 1, n + 1
+    if u_d.shape[1:3] != (n, n + 1) or v_d.shape[1:3] != (n + 1, n):
+        raise ValueError(
+            f"Expected u_d (n_local, n, n+1, nlev), v_d (n_local, n+1, n, nlev); "
+            f"got u_d {tuple(u_d.shape)}, v_d {tuple(v_d.shape)}"
+        )
+    nlev = u_d.shape[-1]
+    g2l = {f: i for i, f in enumerate(topology.local_face_ids)}
+
+    # Initialize padded arrays with edge-replicate.
+    u_padded = jnp.pad(u_d, ((0, 0), (1, 1), (1, 1), (0, 0)), mode="edge")
+    v_padded = jnp.pad(v_d, ((0, 0), (1, 1), (1, 1), (0, 0)), mode="edge")
+
+    # Classify edges into local (same rank) vs remote.
+    edges = _build_dgrid_mpi_edges(topology)
+    local_edges = [e for e in edges if e[5] == topology.rank]
+    remote_edges = [e for e in edges if e[5] != topology.rank]
+
+    # ---- Local edges: direct read-write ----
+    for (face, edge, nbr_face, nbr_edge, is_reversed,
+         _, kind, sign_uv, sign_vu) in local_edges:
+        f_loc = g2l[face]
+        nf_loc = g2l[nbr_face]
+        # Extract from neighbor's edge.
+        u_strip = _extract_edge_strip_dgrid(u_d, nf_loc, nbr_edge, n, n + 1)
+        v_strip = _extract_edge_strip_dgrid(v_d, nf_loc, nbr_edge, n + 1, n)
+        if is_reversed:
+            u_strip = u_strip[::-1]
+            v_strip = v_strip[::-1]
+        if kind == "same":
+            u_padded = _place_strip_dgrid(
+                u_padded, f_loc, edge, u_strip, n, n + 1,
+            )
+            v_padded = _place_strip_dgrid(
+                v_padded, f_loc, edge, v_strip, n + 1, n,
+            )
+        else:  # axis-swap: u_face_halo ← sign_uv * v_nbr; v_face_halo ← sign_vu * u_nbr
+            u_padded = _place_strip_dgrid(
+                u_padded, f_loc, edge, v_strip * sign_uv, n, n + 1,
+            )
+            v_padded = _place_strip_dgrid(
+                v_padded, f_loc, edge, u_strip * sign_vu, n + 1, n,
+            )
+
+    if not remote_edges:
+        return u_padded, v_padded
+
+    # ---- Remote edges: batched-per-peer sendrecv ----
+    from collections import defaultdict
+    comm = MPI.COMM_WORLD
+    rank = topology.rank
+
+    by_nbr = defaultdict(list)
+    for entry in remote_edges:
+        by_nbr[entry[5]].append(entry)
+
+    # Sorted peer iteration (deadlock-free at np=6).
+    for nbr_rank in sorted(by_nbr.keys()):
+        entries = by_nbr[nbr_rank]
+        # Send-order: sort by (nbr_face, nbr_edge) — peer will recv in
+        # the same key order via (face, edge) on their side.
+        send_order = sorted(entries, key=lambda e: (e[2], e[3]))
+        # Recv-order: sort by (face, edge) — matches peer's send_order.
+        recv_order = sorted(entries, key=lambda e: (e[0], e[1]))
+
+        # Build send buffer: for each entry, pack [u_strip, v_strip]
+        # of THIS face's edge (the peer needs them to fill THEIR halo).
+        send_parts = []
+        for face, edge, nbr_face, nbr_edge, is_reversed, _, kind, _, _ in send_order:
+            f_loc = g2l[face]
+            u_strip = _extract_edge_strip_dgrid(u_d, f_loc, edge, n, n + 1)
+            v_strip = _extract_edge_strip_dgrid(v_d, f_loc, edge, n + 1, n)
+            send_parts.append(u_strip.reshape(-1))
+            send_parts.append(v_strip.reshape(-1))
+        send_buf = jnp.concatenate(send_parts)
+
+        # Single sendrecv per neighbor rank.
+        recv_buf = mpi4jax.sendrecv(
+            send_buf, jnp.zeros_like(send_buf),
+            source=nbr_rank, dest=nbr_rank,
+            sendtag=rank, recvtag=nbr_rank, comm=comm,
+        )
+        # mpi4jax 0.9 returns array directly (newer); 0.8 returns
+        # (array, token).  Handle both:
+        if isinstance(recv_buf, tuple):
+            recv_buf = recv_buf[0]
+
+        # Unpack recv buffer in recv_order.
+        offset = 0
+        for (face, edge, nbr_face, nbr_edge, is_reversed,
+             _, kind, sign_uv, sign_vu) in recv_order:
+            # Strip lengths on neighbor's side, sourcing peer's edge
+            # at (nbr_face, nbr_edge): same convention as u/v strips
+            # extracted in the send loop on the OTHER rank.
+            if nbr_edge in _I_EDGES:
+                u_strip_len = n + 1
+                v_strip_len = n
+            else:
+                u_strip_len = n
+                v_strip_len = n + 1
+            u_size = u_strip_len * nlev
+            v_size = v_strip_len * nlev
+            u_strip = recv_buf[offset:offset + u_size].reshape(
+                (u_strip_len, nlev)
+            )
+            offset += u_size
+            v_strip = recv_buf[offset:offset + v_size].reshape(
+                (v_strip_len, nlev)
+            )
+            offset += v_size
+            if is_reversed:
+                u_strip = u_strip[::-1]
+                v_strip = v_strip[::-1]
+
+            f_loc = g2l[face]
+            if kind == "same":
+                u_padded = _place_strip_dgrid(
+                    u_padded, f_loc, edge, u_strip, n, n + 1,
+                )
+                v_padded = _place_strip_dgrid(
+                    v_padded, f_loc, edge, v_strip, n + 1, n,
+                )
+            else:  # swap
+                u_padded = _place_strip_dgrid(
+                    u_padded, f_loc, edge, v_strip * sign_uv, n, n + 1,
+                )
+                v_padded = _place_strip_dgrid(
+                    v_padded, f_loc, edge, u_strip * sign_vu, n + 1, n,
+                )
+
+    return u_padded, v_padded
+
+
+def pad_halo_dgrid_vector_4d_replicated_mpi(u_d_full, v_d_full, topology):
+    """MPI dgrid halo on REPLICATED (6, ...) input.
+
+    Wraps ``pad_halo_dgrid_vector_4d_mpi`` for callers that hold full
+    ``(6, n, n+1, nlev)`` / ``(6, n+1, n, nlev)`` state on each rank
+    (the canonical cubed-sphere MPI mode per
+    ``driver/model_driver.py:1206``).  Returns full ``(6, n+2, n+3,
+    nlev)`` / ``(6, n+3, n+2, nlev)`` with this rank's OWNED face
+    halos correctly filled via cross-rank sendrecv; non-owned face
+    halos stay at edge-replicate (consumers should only use their
+    owned-face slices).
+
+    Parameters
+    ----------
+    u_d_full : jax.Array, shape (6, n, n+1, nlev)
+    v_d_full : jax.Array, shape (6, n+1, n, nlev)
+    topology : CommTopology
+
+    Returns
+    -------
+    u_d_padded : jax.Array, shape (6, n+2, n+3, nlev)
+    v_d_padded : jax.Array, shape (6, n+3, n+2, nlev)
+    """
+    if u_d_full.shape[0] != 6 or v_d_full.shape[0] != 6:
+        raise ValueError(
+            f"Expected 6 faces; got u {tuple(u_d_full.shape)}, "
+            f"v {tuple(v_d_full.shape)}"
+        )
+    n = u_d_full.shape[1]
+    # Slice to owned faces.
+    idx = jnp.asarray(list(topology.local_face_ids), dtype=jnp.int32)
+    u_local = u_d_full[idx]
+    v_local = v_d_full[idx]
+    # Run MPI halo on owned faces.
+    u_local_padded, v_local_padded = pad_halo_dgrid_vector_4d_mpi(
+        u_local, v_local, topology,
+    )
+    # Initialize full padded with edge-replicate (gives reasonable
+    # values on non-owned faces — consumers will use only owned).
+    u_full_padded = jnp.pad(
+        u_d_full, ((0, 0), (1, 1), (1, 1), (0, 0)), mode="edge",
+    )
+    v_full_padded = jnp.pad(
+        v_d_full, ((0, 0), (1, 1), (1, 1), (0, 0)), mode="edge",
+    )
+    # Place owned-face halos.
+    u_full_padded = u_full_padded.at[idx].set(u_local_padded)
+    v_full_padded = v_full_padded.at[idx].set(v_local_padded)
+    return u_full_padded, v_full_padded

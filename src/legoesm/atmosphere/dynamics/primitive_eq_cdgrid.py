@@ -1356,23 +1356,25 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             # AND duogrid is off (the iter-370 regression test depends
             # on the non-square local diff being non-zero, so we keep
             # the call on the local backend).
-            # FV3_3D iter-1079: route (du_normal, dv_normal) as a
-            # vector pair through ``pad_halo_dgrid_vector_4d`` (iter-
-            # 1078).  See NH counterpart for the MPI-stale-faces
-            # caveat (codex iter-1078 BLOCKER M1 — fall back to
-            # mode='edge' under MPI).
+            # FV3_3D iter-1083: see NH counterpart for the local-vs-
+            # MPI dispatch via pad_halo_dgrid_vector_4d{,_replicated_mpi}.
             from legoesm.grids.halo import get_halo_backend as _ghb_pe
-            _use_dgrid_halo_pe = (
-                self.config.use_fv3_cross_face_du_proj
-                and _ghb_pe() == "local"
-            )
-            if _use_dgrid_halo_pe:
-                from legoesm.grids.dgrid_halo import (
-                    pad_halo_dgrid_vector_4d,
-                )
-                du_full, dv_full = pad_halo_dgrid_vector_4d(
-                    du_normal, dv_normal,
-                )
+            if self.config.use_fv3_cross_face_du_proj:
+                if _ghb_pe() == "mpi":
+                    from legoesm.grids.halo import _mpi_topology
+                    from legoesm.grids.dgrid_halo import (
+                        pad_halo_dgrid_vector_4d_replicated_mpi,
+                    )
+                    du_full, dv_full = pad_halo_dgrid_vector_4d_replicated_mpi(
+                        du_normal, dv_normal, _mpi_topology,
+                    )
+                else:
+                    from legoesm.grids.dgrid_halo import (
+                        pad_halo_dgrid_vector_4d,
+                    )
+                    du_full, dv_full = pad_halo_dgrid_vector_4d(
+                        du_normal, dv_normal,
+                    )
                 du_pad = du_full[:, :, 1:-1, :]
                 dv_pad = dv_full[:, 1:-1, :, :]
             else:

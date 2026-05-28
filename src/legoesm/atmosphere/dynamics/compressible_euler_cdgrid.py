@@ -1236,32 +1236,31 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
             # when the MPI backend is active without duogrid.  With
             # duogrid=True the post-pad remap reshapes correctly
             # under both backends.
-            # FV3_3D iter-1079: route (du_normal, dv_normal) as a
-            # vector pair through ``pad_halo_dgrid_vector_4d`` (iter-
-            # 1078), which combines iter-1076 same-axis cross-face
-            # halo (16/24 edges) with iter-1078 DGRID_NE component
-            # swap (8 axis-swap edges, u↔v with face-pair signs).
-            # All 24 directed edges are bit-for-bit FV3-faithful
-            # under the *local* halo backend.  Under MPI (codex
-            # iter-1078 BLOCKER M1): the dgrid_halo functions use
-            # direct ``data[src_f, ...]`` face indexing which reads
-            # STALE non-owned face data, since cubed-sphere MPI mode
-            # is replicated-but-only-owned-faces-are-updated.  Fall
-            # back to ``mode='edge'`` under MPI to avoid silent
-            # corruption.  MPI-aware dgrid vector halo with proper
-            # sendrecv tracked for a future iter.
+            # FV3_3D iter-1083: route (du_normal, dv_normal) through
+            # the dgrid vector halo.  Local backend: iter-1078
+            # pad_halo_dgrid_vector_4d (full 24/24 bit-for-bit).
+            # MPI backend: iter-1083 pad_halo_dgrid_vector_4d_replicated_mpi
+            # (batched-per-peer sendrecv per
+            # _pad_halo_mpi_face_only_4d pattern, deadlock-free at
+            # np ∈ {2, 3, 6}; bit-for-bit against single-device
+            # reference on owned faces).
             from legoesm.grids.halo import get_halo_backend as _ghb_nh
-            _use_dgrid_halo_nh = (
-                self.config.use_fv3_cross_face_du_proj
-                and _ghb_nh() == "local"
-            )
-            if _use_dgrid_halo_nh:
-                from legoesm.grids.dgrid_halo import (
-                    pad_halo_dgrid_vector_4d,
-                )
-                du_full, dv_full = pad_halo_dgrid_vector_4d(
-                    du_normal, dv_normal,
-                )
+            if self.config.use_fv3_cross_face_du_proj:
+                if _ghb_nh() == "mpi":
+                    from legoesm.grids.halo import _mpi_topology
+                    from legoesm.grids.dgrid_halo import (
+                        pad_halo_dgrid_vector_4d_replicated_mpi,
+                    )
+                    du_full, dv_full = pad_halo_dgrid_vector_4d_replicated_mpi(
+                        du_normal, dv_normal, _mpi_topology,
+                    )
+                else:
+                    from legoesm.grids.dgrid_halo import (
+                        pad_halo_dgrid_vector_4d,
+                    )
+                    du_full, dv_full = pad_halo_dgrid_vector_4d(
+                        du_normal, dv_normal,
+                    )
                 du_pad = du_full[:, :, 1:-1, :]
                 dv_pad = dv_full[:, 1:-1, :, :]
             else:
