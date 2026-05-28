@@ -978,6 +978,78 @@ def test_prescribe_T_s_rejects_non_finite():
         scm_inf.step()
 
 
+def test_prescribe_fluxes_with_nonzero_Ch_neutral_raises_double_count():
+    """Phase F deferred-item #2: ``prescribe='fluxes'`` paired with a
+    turbulence scheme that has a non-zero ``surface.Ch_neutral``
+    double-counts the surface sensible/latent flux (once via the
+    prescribed-flux tendency, once via the bulk-formula bottom BC of
+    the implicit-diffusion solver).  SCM construction must
+    fail-fast.
+    """
+    from legoesm.atmosphere.physics.turbulence.config import (
+        MYNN25Config, SurfaceLayerConfig,
+    )
+    cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="none"),
+        convection=ConvectionConfig(scheme="none"),
+        turbulence=TurbulenceConfig(
+            scheme="mynn25",
+            mynn25=MYNN25Config(
+                surface=SurfaceLayerConfig(
+                    Cd_neutral=1.5e-3, Ch_neutral=1.5e-3,
+                ),
+            ),
+        ),
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+    )
+    forcing = SCMForcing(
+        prescribe="fluxes",
+        w_th_s=lambda t: jnp.asarray(0.1),
+    )
+    with pytest.raises(ValueError, match="double-count"):
+        SingleColumnModel.create(
+            physics_config=cfg, nlev=NLEV, dt=10.0,
+            T_profile=jnp.linspace(270.0, 295.0, NLEV),
+            q_v_profile=jnp.zeros(NLEV),
+            forcing=forcing,
+        )
+
+
+def test_prescribe_fluxes_with_zero_Ch_neutral_passes():
+    """Symmetric to the rejection: the documented Phase B v2 workaround
+    (``Ch_neutral=0``) constructs successfully and runs without
+    double-counting."""
+    from legoesm.atmosphere.physics.turbulence.config import (
+        MYNN25Config, SurfaceLayerConfig,
+    )
+    cfg = PhysicsConfig(
+        radiation=RadiationConfig(scheme="none"),
+        convection=ConvectionConfig(scheme="none"),
+        turbulence=TurbulenceConfig(
+            scheme="mynn25",
+            mynn25=MYNN25Config(
+                surface=SurfaceLayerConfig(
+                    Cd_neutral=1.5e-3, Ch_neutral=0.0,
+                ),
+            ),
+        ),
+        microphysics=MicrophysicsConfig(scheme="none"),
+        gravity_wave_drag=GravityWaveDragConfig(scheme="none"),
+    )
+    forcing = SCMForcing(
+        prescribe="fluxes",
+        w_th_s=lambda t: jnp.asarray(0.1),
+    )
+    scm = SingleColumnModel.create(
+        physics_config=cfg, nlev=NLEV, dt=10.0,
+        T_profile=jnp.linspace(270.0, 295.0, NLEV),
+        q_v_profile=jnp.zeros(NLEV),
+        forcing=forcing,
+    )
+    assert scm.forcing.prescribe == "fluxes"
+
+
 def test_prescribe_fluxes_w_qv_without_qv_tracer_raises_at_init():
     """Codex iter-1 medium #2: prescribe='fluxes' with ``w_qv_s`` but
     no ``q_v`` tracer must raise at SCM construction time (not at

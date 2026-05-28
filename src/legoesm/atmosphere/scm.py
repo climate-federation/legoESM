@@ -588,6 +588,53 @@ class SingleColumnModel:
         )
 
     @staticmethod
+    def _validate_prescribed_fluxes_no_double_count(
+        physics_config: PhysicsConfig, forcing,
+    ) -> None:
+        """Reject configurations that double-count the surface flux.
+
+        ``SCMForcing(prescribe='fluxes')`` injects user-supplied
+        kinematic surface fluxes (``w'θ'``, ``w'qv'``) as a lowest-
+        cell tendency.  If the active turbulence scheme also runs its
+        bulk-flux formula with a non-zero heat-transfer coefficient
+        ``Ch_neutral``, the sensible / latent heat flux gets counted
+        twice (once via the prescribed-flux tendency, once via the
+        turbulence's vertical-diffusion bottom-BC).  Reject at SCM
+        construction so the user gets a clear error instead of a
+        silently warmed lowest cell.
+
+        Deferred-item #2 from the Phase F summary.  Momentum drag
+        (``Cd_neutral``) is *not* checked because the prescribed-flux
+        channel injects only ``w'θ'`` / ``w'qv'`` — turbulence
+        retains responsibility for surface momentum stress.
+        """
+        if forcing is None or forcing.prescribe != "fluxes":
+            return
+        turb = physics_config.turbulence
+        if turb.scheme == "none":
+            return
+        scheme_sub = getattr(turb, turb.scheme, None)
+        if scheme_sub is None:
+            return
+        surf = getattr(scheme_sub, "surface", None)
+        if surf is None:
+            return
+        Ch = getattr(surf, "Ch_neutral", 0.0)
+        if Ch != 0.0:
+            raise ValueError(
+                "SCMForcing.prescribe='fluxes' is set, but the active "
+                f"turbulence scheme {turb.scheme!r} has a non-zero "
+                f"surface.Ch_neutral={Ch}.  The prescribed-flux "
+                "channel injects ``w'θ'`` / ``w'qv'`` at the lowest "
+                "cell; turbulence's bulk-flux formula would inject "
+                "the same flux through the implicit-diffusion bottom "
+                "BC, double-counting it.  Set "
+                f"turbulence.{turb.scheme}.surface.Ch_neutral=0.0 "
+                "(retain Cd_neutral for momentum drag) or drop the "
+                "prescribed-flux channel."
+            )
+
+    @staticmethod
     def _validate_integrator_compatibility(
         physics_config: PhysicsConfig, time_integrator: str,
     ) -> None:
@@ -726,6 +773,9 @@ class SingleColumnModel:
             forcing callables.  Defaults to ``0.0``.
         """
         cls._validate_integrator_compatibility(physics_config, time_integrator)
+        cls._validate_prescribed_fluxes_no_double_count(
+            physics_config, forcing,
+        )
         grid = make_scm_grid(latitude_deg, longitude_deg)
         sigma_coord = create_sigma_coordinate(nlev, sigma_top=sigma_top, dtype=dtype)
 

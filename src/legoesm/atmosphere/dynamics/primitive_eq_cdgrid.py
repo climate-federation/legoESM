@@ -1356,19 +1356,19 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             # AND duogrid is off (the iter-370 regression test depends
             # on the non-square local diff being non-zero, so we keep
             # the call on the local backend).
-            from legoesm.grids.halo import get_halo_backend as _ghb_pe
-            _dg_cf = self.grid.duogrid
-            _force_edge_pe = (
-                self.config.use_fv3_cross_face_du_proj
-                and _ghb_pe() == "mpi"
-                and _dg_cf is None
-            )
-            if (self.config.use_fv3_cross_face_du_proj
-                    and not _force_edge_pe):
-                from legoesm.grids.halo import pad_halo_4d as _pad_h4
-                du_full = _pad_h4(du_normal, duogrid=_dg_cf)
+            # FV3_3D iter-1077: see NH counterpart in
+            # ``compressible_euler_cdgrid.py`` for the rationale.
+            # Route non-square staggered data through the new
+            # ``pad_halo_dgrid_scalar_4d``; same-axis edges get
+            # FV3-faithful cross-face source, axis-swap edges fall
+            # back to ``mode='edge'`` until iter-1077b.
+            if self.config.use_fv3_cross_face_du_proj:
+                from legoesm.grids.dgrid_halo import (
+                    pad_halo_dgrid_scalar_4d,
+                )
+                du_full = pad_halo_dgrid_scalar_4d(du_normal)
                 du_pad = du_full[:, :, 1:-1, :]
-                dv_full = _pad_h4(dv_normal, duogrid=_dg_cf)
+                dv_full = pad_halo_dgrid_scalar_4d(dv_normal)
                 dv_pad = dv_full[:, 1:-1, :, :]
             else:
                 du_pad = jnp.pad(
@@ -1755,12 +1755,9 @@ def make_fv3_faithful_pe_config(**overrides) -> CDGridPrimitiveEquationConfig:
     defaults = dict(
         use_fv3_a2b_zeta_corner=True,
         use_fv3_metric_aware_d_con=True,
-        # FV3_3D iter-1072: disabled by default — see NH factory note
-        # for the silent-corruption probe.  Non-square du_normal /
-        # dv_normal data through pad_halo_4d produces zeros in the
-        # cross-face halo.  Tracked as iter-1046 non-square halo
-        # follow-up.
-        use_fv3_cross_face_du_proj=False,
+        # FV3_3D iter-1077: re-enabled via pad_halo_dgrid_scalar_4d
+        # (iter-1076).  See NH factory note.
+        use_fv3_cross_face_du_proj=True,
         d_con_top_zero_levels=2,
         delt_max=1.0,
         nord_v=1,

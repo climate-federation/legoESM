@@ -1236,18 +1236,23 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
             # when the MPI backend is active without duogrid.  With
             # duogrid=True the post-pad remap reshapes correctly
             # under both backends.
-            from legoesm.grids.halo import get_halo_backend as _ghb
-            _dg_cf = self.grid.duogrid
-            _force_edge = (
-                self.config.use_fv3_cross_face_du_proj
-                and _ghb() == "mpi"
-                and _dg_cf is None
-            )
-            if (self.config.use_fv3_cross_face_du_proj
-                    and not _force_edge):
-                du_full = _pad_halo_4d_module(du_normal, duogrid=_dg_cf)
+            # FV3_3D iter-1077: route ``du_normal``/``dv_normal`` (non-
+            # square staggered shapes (6, n, n+1, nlev) / (6, n+1, n,
+            # nlev)) through ``pad_halo_dgrid_scalar_4d`` (iter-1076)
+            # instead of the iter-1072-guarded ``pad_halo_4d``.  Same-
+            # axis edges (16 of 24 directed) get FV3-faithful cross-
+            # face source; axis-swap edges (8 of 24, faces 1,3 N/S +
+            # faces 4,5 W/E) fall back to ``mode='edge'`` until iter-
+            # 1077b lands DGRID_NE component swap.  Strictly better
+            # than the pre-iter-1077 ``mode='edge'`` fallback, which
+            # used edge-replicate on ALL 24 edges.
+            if self.config.use_fv3_cross_face_du_proj:
+                from legoesm.grids.dgrid_halo import (
+                    pad_halo_dgrid_scalar_4d,
+                )
+                du_full = pad_halo_dgrid_scalar_4d(du_normal)
                 du_pad = du_full[:, :, 1:-1, :]
-                dv_full = _pad_halo_4d_module(dv_normal, duogrid=_dg_cf)
+                dv_full = pad_halo_dgrid_scalar_4d(dv_normal)
                 dv_pad = dv_full[:, 1:-1, :, :]
             else:
                 du_pad = jnp.pad(
@@ -1612,17 +1617,14 @@ def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
         use_fv3_a2b_ord4_vector_uv=True,   # iter-698: -25.8% θ′ edge ratio at C8
         use_fv3_dynamic_exner=True,
         use_fv3_metric_aware_d_con=True,
-        # FV3_3D iter-1072: use_fv3_cross_face_du_proj routes du_normal /
-        # dv_normal (non-square shapes (6, n+1, n, nlev) / (6, n, n+1,
-        # nlev)) through pad_halo_4d, which silently corrupts non-square
-        # halos (probe verified at iter-1072: NORTH halo all zeros).
-        # iter-1046 documented this as a known limitation; iter-1072
-        # turns the silent corruption into a loud ValueError at the
-        # pad_halo_4d entry.  Disable here in the factory default to
-        # avoid the loud failure for the canonical "factory + duogrid"
-        # production path.  Users can opt back in only after the
-        # non-square halo refactor lands.
-        use_fv3_cross_face_du_proj=False,
+        # FV3_3D iter-1077: re-enabled via pad_halo_dgrid_scalar_4d
+        # (iter-1076).  Same-axis edges (16/24 directed) get FV3-
+        # faithful cross-face source; axis-swap edges (8/24) fall
+        # back to mode='edge' until iter-1077b adds DGRID_NE
+        # component swap.  Strictly better than the iter-1072
+        # default-disable (which used edge-replicate on ALL 24
+        # edges) and the pre-iter-1072 silent-corruption.
+        use_fv3_cross_face_du_proj=True,
         d_con_top_zero_levels=2,
         delt_max=1.0,
         nord_v=1,
