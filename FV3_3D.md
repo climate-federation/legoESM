@@ -2390,47 +2390,20 @@ cubed-sphere MPI.
 ### Implementation
 
 3 new functions in ``src/legoesm/grids/dgrid_halo.py``:
+``_build_dgrid_mpi_edges``, ``pad_halo_dgrid_vector_4d_mpi`` (rank-
+local input), ``pad_halo_dgrid_vector_4d_replicated_mpi`` (full
+``(6, ...)`` wrapper for canonical replicated MPI mode).
 
-1. ``_build_dgrid_mpi_edges(topology)``: per-owned-face per-edge
-   dispatch list with axis-swap classification + iter-1078 signs.
-2. ``pad_halo_dgrid_vector_4d_mpi(u_d, v_d, topology)``: rank-local
-   input ``(n_local, n, n+1, nlev)`` / ``(n_local, n+1, n, nlev)``;
-   batched-per-peer sendrecv with packed ``[u_strip, v_strip]``
-   buffers per peer.
-3. ``pad_halo_dgrid_vector_4d_replicated_mpi(...)``: thin wrapper
-   for the canonical cubed-sphere MPI replicated state
-   (``(6, ...)`` on each rank).  Slices owned faces, runs the
-   MPI halo, places back into ``(6, ...)`` with non-owned faces
-   at edge-replicate.
+Call sites updated (``compressible_euler_cdgrid.py:1245``,
+``primitive_eq_cdgrid.py:1361``): dispatch on
+``get_halo_backend()`` — local uses iter-1078, MPI uses iter-1083.
 
-### Iter-370 call sites updated
+### Deadlock-free pattern
 
-``compressible_euler_cdgrid.py:1245`` + ``primitive_eq_cdgrid.py:1361``:
-
-::
-
-    if cfg.use_fv3_cross_face_du_proj:
-        if get_halo_backend() == "mpi":
-            du_full, dv_full = pad_halo_dgrid_vector_4d_replicated_mpi(
-                du_normal, dv_normal, _mpi_topology,
-            )
-        else:
-            du_full, dv_full = pad_halo_dgrid_vector_4d(du_normal, dv_normal)
-
-### Batched-per-peer pattern (deadlock-free)
-
-iter-1082 attempted per-edge sendrecv → deadlocked at np=2 from
-mismatched peer order.  iter-1083 uses the proven
-``_pad_halo_mpi_face_only_4d`` pattern:
-
-- Group remote edges by neighbor rank.
-- Sort peers (deadlock-free at np ∈ {2, 3, 6}).
-- For each peer: pack ``[u_strip_0, v_strip_0, u_strip_1, ...]``
-  sorted by ``(nbr_face, nbr_edge)``; receive in
-  ``(face, edge)`` order — matches peer's send order.
-- ONE sendrecv per peer.
-- Tag scheme: ``sendtag=rank, recvtag=nbr_rank`` (same as the
-  face-only helper).
+iter-1082 attempted per-edge sendrecv → deadlocked at np=2.
+iter-1083 mirrors ``_pad_halo_mpi_face_only_4d``: group remote
+edges by neighbor rank, sort peers, ONE sendrecv per peer with
+packed ``[u_strip, v_strip]`` buffers, ``sendtag=rank``.
 
 ### Validation
 
