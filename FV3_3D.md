@@ -2378,6 +2378,99 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1060 (2026-05-28): fix stale ``gather_to_global`` usage in ``test_coupler_mpi.py``
+
+### Goal
+
+iter-1059's survey of the broader distributed-test suite at np=2
+turned up two more pre-existing failures:
+
+- ``TestCouplerMPIRegression::test_partitioned_step_matches_single_rank_reference``
+- ``TestCouplerMPIRegression::test_partitioned_multistep_flush_and_carry_matches_reference``
+
+Both fail with ``T_surface: mismatch`` on clean ``main`` HEAD (via
+``git stash`` probe).  Same iter-aa707bda root cause as iter-1059
+(legacy ``partition_state``/``gather_state`` removed in 2026-03-31,
+test was renamed-but-not-rewritten).
+
+### Root cause
+
+The old test pattern:
+
+::
+
+    # Each rank: full (6, n, n) state, partial tile_cfg
+    part_state_new, part_blended = step_fn(state_ref, ..., tile_cfg_part, ...)
+    # Mask non-local faces to zero
+    part_state_new = _mask_face_leading_pytree(part_state_new, local_face_ids)
+    # Gather → reconstruct global via allreduce-sum (legacy gather_state)
+    got_state = gather_to_global(part_state_new)
+    # Compare full ref vs full got
+    assert jnp.allclose(got_state, ref_state, ...)
+
+The new ``gather_to_global`` is designed for *scattered* input
+``(n_local, n, n, ...)``, not full-replicated zero-masked
+``(6, n, n, ...)``.  ``gather_pytree``'s shape heuristic
+(``layout.py:351-358``) silently skips gathering when
+``leaf.shape[0] != expected_leading``, returning the masked
+array unchanged.  On rank 0, ``got_state.land.T_soil.data`` had
+faces 0-2 = computed, faces 3-5 = zero; ref had real values
+on all 6 faces.  Hence ``T_surface: mismatch``.
+
+### Fix
+
+Replace the broken gather + full-state comparison with a
+per-local-face comparison on each rank — matches the FV3 step-
+fidelity test pattern (``test_mpi_fv3_step_fidelity.py``).
+Coupler processing is per-face independent, so the locally-owned
+faces' outputs depend only on the locally-owned inputs (which
+match ref); they must be bit-for-bit identical.  Non-owned
+faces ran under modified tile_cfg (all-land) and legitimately
+differ — the new test does not compare them.
+
+Drop the now-unused ``_mask_face_leading_pytree`` helper and the
+``gather_to_global`` import.
+
+Single test helper ``_assert_surface_to_atm_close`` gains an
+optional ``face_ids`` kwarg to limit comparison to the rank's
+local faces.
+
+JAX-specific gotcha: ``arr[list(face_ids)]`` raises
+``TypeError`` (non-tuple sequence for multidim indexing).  Use
+``arr[jnp.asarray(list(face_ids), dtype=jnp.int32)]`` instead.
+
+### Validation
+
+::
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 2 \
+        .venv/bin/python -m pytest tests/distributed/test_coupler_mpi.py
+    => 2 passed in 1.62s
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 3 \
+        .venv/bin/python -m pytest tests/distributed/test_coupler_mpi.py
+    => 2 passed in 1.62s
+
+    JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun --oversubscribe -np 6 \
+        .venv/bin/python -m pytest tests/distributed/test_coupler_mpi.py
+    => 2 passed in 1.83s
+
+### Pattern observed across iter-1058/1059/1060
+
+The aa707bda commit ("Cleaned up codebase") replaced the legacy
+``partition_state``/``gather_state`` zero-masked-allreduce pattern
+with ``scatter_to_local``/``gather_to_global`` scattered-shape
+API but didn't audit the test suite for callers that depended on
+the old contract.  Test failures stayed latent because the
+distributed test suite was rarely run in a clean session — the
+session-scope conftest fixture corrupts state for fresh-trace
+tests, masking other failures.  iter-1058's run-distributed-tests
+survey was the first time a clean survey was run since aa707bda.
+
+Open: ``test_mpas_topography_mpi.py``, ``test_voronoi_mpi.py``,
+``test_latlon_mpi_*`` likely OK (skip-gated or use different
+API).  Worth a full sweep once the iter-1058 bg test completes.
+
 ## Iteration 1059 (2026-05-28): fix stale shape assertions in ``test_mpi_bootstrap.py::TestMPIHaloExchange``
 
 ### Goal

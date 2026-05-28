@@ -23,7 +23,6 @@ from legoesm.grids.halo import set_halo_backend
 from legoesm.ice.config import SeaIceConfig
 from legoesm.land.config import LandConfig
 from legoesm.parallel.comm import build_comm_topology
-from legoesm.parallel.distributed import gather_to_global
 
 
 @pytest.fixture(autouse=True)
@@ -120,40 +119,33 @@ def _partition_tile_config(
     )
 
 
-def _mask_face_leading_pytree(
-    pytree,
-    local_face_ids: tuple[int, ...] | list[int],
-):
-    """Zero non-local face-leading leaves in a pytree."""
-    local_set = set(local_face_ids)
-
-    def _mask_leaf(leaf):
-        if not isinstance(leaf, (jax.Array, jnp.ndarray)):
-            return leaf
-        if leaf.ndim < 1 or leaf.shape[0] != 6:
-            return leaf
-        mask_1d = jnp.array([f in local_set for f in range(6)], dtype=bool)
-        shape = (6,) + (1,) * (leaf.ndim - 1)
-        mask = mask_1d.reshape(shape)
-        return jnp.where(mask, leaf, jnp.zeros_like(leaf))
-
-    return jax.tree.map(_mask_leaf, pytree)
-
-
 def _assert_surface_to_atm_close(
     got: SurfaceToAtm,
     ref: SurfaceToAtm,
     *,
     atol: float = 1.0e-6,
     rtol: float = 1.0e-6,
+    face_ids: tuple[int, ...] | list[int] | None = None,
 ) -> None:
-    """Assert two blended coupler outputs are numerically identical."""
+    """Assert two blended coupler outputs match on the given face ids.
+
+    If ``face_ids`` is ``None``, compare every face (legacy single-rank
+    behaviour).  Under MPI, pass the rank's local face ids so the
+    comparison ignores non-local faces whose ``tile_cfg`` was modified
+    to all-land (which legitimately changes their physics output).
+    """
     for name in SurfaceToAtm._fields:
         g = getattr(got, name)
         r = getattr(ref, name)
-        assert jnp.all(jnp.isfinite(g)), f"{name}: non-finite in distributed output"
-        assert jnp.all(jnp.isfinite(r)), f"{name}: non-finite in reference output"
-        assert jnp.allclose(g, r, atol=atol, rtol=rtol), f"{name}: mismatch"
+        if face_ids is None:
+            g_sel, r_sel = g, r
+        else:
+            idx = jnp.asarray(list(face_ids), dtype=jnp.int32)
+            g_sel = g[idx]
+            r_sel = r[idx]
+        assert jnp.all(jnp.isfinite(g_sel)), f"{name}: non-finite in distributed output"
+        assert jnp.all(jnp.isfinite(r_sel)), f"{name}: non-finite in reference output"
+        assert jnp.allclose(g_sel, r_sel, atol=atol, rtol=rtol), f"{name}: mismatch"
 
 
 class TestCouplerMPIRegression:
@@ -195,40 +187,43 @@ class TestCouplerMPIRegression:
             ocean_v,
             dt,
         )
-        part_state_new = _mask_face_leading_pytree(
-            part_state_new, topology.local_face_ids,
+        # FV3_3D iter-1060: ``part_state_new`` is shape (6, n, n) on
+        # every rank (step_fn runs on full state).  The pre-iter-1060
+        # test called ``gather_to_global(part_state_new)`` which is
+        # designed for scattered (n_local, n, n) input — the heuristic
+        # in ``gather_pytree`` skipped gathering when shape[0] != n_local,
+        # returning the masked array unchanged so faces non-owned by
+        # rank 0 stayed zero.  Direct ref-vs-got comparison then failed.
+        #
+        # Correct contract: each rank's locally-owned faces must match
+        # the single-rank reference bit-for-bit.  Non-owned faces ran
+        # under modified tile_cfg (all-land) and legitimately differ.
+        # Drop the broken gather and compare per local face on every
+        # rank (matches the FV3 step-fidelity test pattern).
+        local_ids = topology.local_face_ids
+        idx = jnp.asarray(list(local_ids), dtype=jnp.int32)
+        _assert_surface_to_atm_close(
+            part_blended, ref_blended, face_ids=local_ids,
         )
-        part_blended = _mask_face_leading_pytree(
-            part_blended, topology.local_face_ids,
+        assert jnp.allclose(
+            part_state_new.land.T_soil.data[idx],
+            ref_state_new.land.T_soil.data[idx],
+            atol=1.0e-6, rtol=1.0e-6,
         )
-
-        got_state = gather_to_global(part_state_new)
-        got_blended = gather_to_global(part_blended)
-
-        if topology.rank == 0:
-            _assert_surface_to_atm_close(got_blended, ref_blended)
-            assert jnp.allclose(
-                got_state.land.T_soil.data,
-                ref_state_new.land.T_soil.data,
-                atol=1.0e-6,
-                rtol=1.0e-6,
-            )
-            assert jnp.allclose(
-                got_state.ice.h_ice.data,
-                ref_state_new.ice.h_ice.data,
-                atol=1.0e-6,
-                rtol=1.0e-6,
-            )
-            assert jnp.allclose(
-                got_state.lake.T_epi.data,
-                ref_state_new.lake.T_epi.data,
-                atol=1.0e-6,
-                rtol=1.0e-6,
-            )
-            assert float(got_state.accumulator.total_dt) == pytest.approx(
-                float(ref_state_new.accumulator.total_dt),
-                abs=1.0e-9,
-            )
+        assert jnp.allclose(
+            part_state_new.ice.h_ice.data[idx],
+            ref_state_new.ice.h_ice.data[idx],
+            atol=1.0e-6, rtol=1.0e-6,
+        )
+        assert jnp.allclose(
+            part_state_new.lake.T_epi.data[idx],
+            ref_state_new.lake.T_epi.data[idx],
+            atol=1.0e-6, rtol=1.0e-6,
+        )
+        assert float(part_state_new.accumulator.total_dt) == pytest.approx(
+            float(ref_state_new.accumulator.total_dt),
+            abs=1.0e-9,
+        )
 
     def test_partitioned_multistep_flush_and_carry_matches_reference(self, topology):
         """Flush/carry behavior with coupling_dt should match reference exactly."""
@@ -267,21 +262,19 @@ class TestCouplerMPIRegression:
                 ocean_v,
                 dt,
             )
-            part_state = _mask_face_leading_pytree(
-                part_state, topology.local_face_ids,
+            # FV3_3D iter-1060: see sibling test for why gather +
+            # full-state comparison was broken under the iter-aa707bda
+            # gather API.  Per-face coupler processing is independent
+            # across faces, so feeding non-local-face junk forward
+            # does not pollute local-face outputs at the next step.
+            local_ids = topology.local_face_ids
+            _assert_surface_to_atm_close(
+                part_blended, ref_blended, face_ids=local_ids,
             )
-            part_blended = _mask_face_leading_pytree(
-                part_blended, topology.local_face_ids,
+            assert float(part_state.accumulator.total_dt) == pytest.approx(
+                float(ref_state.accumulator.total_dt),
+                abs=1.0e-9,
             )
-            got_state = gather_to_global(part_state)
-            got_blended = gather_to_global(part_blended)
-
-            if topology.rank == 0:
-                _assert_surface_to_atm_close(got_blended, ref_blended)
-                assert float(got_state.accumulator.total_dt) == pytest.approx(
-                    float(ref_state.accumulator.total_dt),
-                    abs=1.0e-9,
-                )
 
         if topology.rank == 0:
             # After 600 + 600 + 300 with coupling_dt=900:
