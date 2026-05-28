@@ -1615,13 +1615,11 @@ def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
         use_fv3_a2b_ord4_vector_uv=True,   # iter-698: -25.8% θ′ edge ratio at C8
         use_fv3_dynamic_exner=True,
         use_fv3_metric_aware_d_con=True,
-        # FV3_3D iter-1077: re-enabled via pad_halo_dgrid_scalar_4d
-        # (iter-1076).  Same-axis edges (16/24 directed) get FV3-
-        # faithful cross-face source; axis-swap edges (8/24) fall
-        # back to mode='edge' until iter-1077b adds DGRID_NE
-        # component swap.  Strictly better than the iter-1072
-        # default-disable (which used edge-replicate on ALL 24
-        # edges) and the pre-iter-1072 silent-corruption.
+        # FV3_3D iter-1079: enabled by default.  Routes (du_normal,
+        # dv_normal) through pad_halo_dgrid_vector_4d (iter-1078) —
+        # all 24 directed cubed-sphere edges bit-for-bit FV3-faithful
+        # via iter-1076 same-axis (16/24) + iter-1078 DGRID_NE
+        # component swap (8/24 axis-swap edges).
         use_fv3_cross_face_du_proj=True,
         d_con_top_zero_levels=2,
         delt_max=1.0,

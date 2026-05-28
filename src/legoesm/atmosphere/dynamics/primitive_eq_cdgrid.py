@@ -1755,8 +1755,9 @@ def make_fv3_faithful_pe_config(**overrides) -> CDGridPrimitiveEquationConfig:
     defaults = dict(
         use_fv3_a2b_zeta_corner=True,
         use_fv3_metric_aware_d_con=True,
-        # FV3_3D iter-1077: re-enabled via pad_halo_dgrid_scalar_4d
-        # (iter-1076).  See NH factory note.
+        # FV3_3D iter-1079: enabled.  See NH factory note —
+        # pad_halo_dgrid_vector_4d (iter-1078) gives all 24 directed
+        # edges bit-for-bit FV3-faithful.
         use_fv3_cross_face_du_proj=True,
         d_con_top_zero_levels=2,
         delt_max=1.0,
