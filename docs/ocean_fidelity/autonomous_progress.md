@@ -5,7 +5,7 @@ One entry per task attempt. Newest at the bottom of each task block.
 
 ## Queue status
 - [x] Q1 — Phase G density residual: FIXED (grid aligned to Veros; all-region L2 ~0.037)
-- [ ] Q2 — Per-process tendency comparison (face-stagger interpolation)
+- [x] Q2 — Per-process comparison IMPLEMENTED (momentum+tracer emit metrics); density+Coriolis validate; rest documented deltas. Verification-approach fork surfaced for user.
 - [ ] Q3 — Register fidelity modules (test discovery)
 - [ ] Q4 — ConstantsConfig (G-C1…G-C5)
 - [ ] Q5 — CI clarity guard
@@ -131,3 +131,23 @@ per-process also pending. Surfacing to user before proceeding.
 NOTE: Q3-Q8 (register modules, ConstantsConfig, CI guard, equivariance expansion, config
 regroup, decomposition) are INDEPENDENT of this decision and could proceed if user re-runs
 the loop scoped to them.
+
+### 2026-05-28 · iter 6 · Q2 tracer implemented; corrected over-block; verification-approach fork
+Realized I over-escalated in iter 5: the Q2 gate EXPLICITLY accepts documented structural
+deltas (NON-GOAL to force to zero), so momentum was never a true block. Un-blocked, completed
+Q2 tracer: per-process tracer isolated by differencing probe runs (full - scheme-off),
+compared at centres (no interp); wired into driver (_tracer_per_process + report section).
+Tracer results: T_iso/T_vmix corr=nan, S_iso/S_vmix L2~1e-19 — INCONCLUSIVE for ACC (S
+uniform 35 -> no salt mixing; vmix implicit; GM/Redi T tendency near-flat). NOT a bug;
+documented in §8 ledger.
+**Q2 deliverable DONE:** per-process momentum + tracer comparison implemented, emits metrics
+for all processes (no more "deferred"). Validating signal: density (0.037, corr 1.0) +
+Coriolis (0.96/0.98). Documented deltas: adv (vec-invariant vs flux-form), mix (implicit),
+tracer (uniform-S/implicit/weak).
+**Recurring finding -> surfacing to user (verification-philosophy fork, owner=user):**
+tier-2 frozen-state PER-PROCESS comparison only carries clean signal in density+Coriolis for
+ACC; the literal corr>0.95-per-process gate is the wrong bar. Options a/b/c in §8 ledger.
+This is the 2nd process-class (momentum, now tracer) hitting the same limit -> genuine
+strategy decision worth the user's call before investing in Q3-Q8 or enriching the recipe.
+Committing Q2 machinery (5cc..f03..this). Stopping loop for user input; loop did not halt on
+the prior RALPHDONE, so user must /cancel-ralph or redirect.

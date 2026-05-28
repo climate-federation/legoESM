@@ -100,12 +100,44 @@ def _run_legoesm_probe(recipe, base_state):
     return probe
 
 
+def _tracer_per_process(recipe, state):
+    """Isolate legoESM per-process tracer tendencies by differencing probe
+    runs with one mixing scheme toggled off.
+
+    legoESM exposes only ``dT_dt_total`` (advection + all active mixing), so
+    a single process is isolated as ``full - (that scheme disabled)``:
+      iso  := full - (lateral_mixing off)   (GM/Redi isoneutral)
+      vmix := full - (vertical_mixing off)   (vertical mixing)
+    Tracers live at cell centres, so no face interpolation is needed.
+    Returns a dict ``{"dT_iso","dS_iso","dT_vmix","dS_vmix"}`` of arrays.
+    """
+    phys = recipe.physics_config
+
+    def _probe(physics_cfg):
+        cfg = recipe.model_config._replace(physics=physics_cfg)
+        pr = probe_latlon_cgrid(state, recipe.grid, recipe.z_coord, cfg, dt=DT_MOM_S)
+        return np.asarray(pr.dT_dt_total), np.asarray(pr.dS_dt_total)
+
+    dT_full, dS_full = _probe(phys)
+    phys_no_lat = phys._replace(
+        lateral_mixing=phys.lateral_mixing._replace(scheme="none"))
+    phys_no_vert = phys._replace(
+        vertical_mixing=phys.vertical_mixing._replace(scheme="none"))
+    dT_no_lat, dS_no_lat = _probe(phys_no_lat)
+    dT_no_vert, dS_no_vert = _probe(phys_no_vert)
+    return {
+        "dT_iso": dT_full - dT_no_lat, "dS_iso": dS_full - dS_no_lat,
+        "dT_vmix": dT_full - dT_no_vert, "dS_vmix": dS_full - dS_no_vert,
+    }
+
+
 def _write_report(
     output_path: Path,
     legoesm_probe,
     veros_tendencies: dict | None,
     masks,
     veros_status: str | None,
+    tracer_metrics: dict | None = None,
 ) -> None:
     """Write a Markdown report with per-region metrics for each
     tendency field that has a matching Veros counterpart."""
@@ -214,6 +246,27 @@ def _write_report(
             )
         lines.append("")
 
+    if tracer_metrics:
+        # Q2: per-process TRACER comparison at cell centres (no interpolation;
+        # legoESM per-process isolated by differencing probe runs).
+        lines.append("## Per-process TRACER comparison at cell centres (Q2)\n")
+        lines.append(
+            "legoESM per-process tracer tendencies isolated by differencing probe runs "
+            "(full - scheme-off); tracers are cell-centred so no interpolation is needed. "
+            "iso = GM/Redi isoneutral, vmix = vertical mixing. vmix is IMPLICIT in the ACC "
+            "recipe, so legoESM produces no explicit vmix tendency (documented delta — see "
+            "the strategy doc §8 ledger).\n"
+        )
+        lines.append("| process | interior L2 | interior corr | interior sign |")
+        lines.append("|---|---|---|---|")
+        for label, m in tracer_metrics.items():
+            it = m["interior"]
+            lines.append(
+                f"| {label} | {it['L2']:.3e} | {it['pattern_corr']:.4f} | "
+                f"{it['sign_match']:.4f} |"
+            )
+        lines.append("")
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text("\n".join(lines))
     print(f"Report written to {output_path}")
@@ -261,6 +314,22 @@ def main() -> int:
         legoesm_probe = _run_legoesm_probe(recipe, probe_state)
         masks = build_region_masks(recipe.grid, recipe.z_coord, probe_state)
 
+        tracer_metrics = None
+        if veros_result is not None:
+            print("==> Isolating legoESM per-process tracer tendencies...")
+            tp = _tracer_per_process(recipe, probe_state)
+            tracer_metrics = {}
+            for label, lk, vk in (
+                ("T_iso", "dT_iso", "veros_dT_iso"),
+                ("T_vmix", "dT_vmix", "veros_dT_vmix"),
+                ("S_iso", "dS_iso", "veros_dS_iso"),
+                ("S_vmix", "dS_vmix", "veros_dS_vmix"),
+            ):
+                if vk in veros_tendencies:
+                    tracer_metrics[label] = per_region_metrics(
+                        jnp.asarray(tp[lk]), jnp.asarray(veros_tendencies[vk]), masks,
+                    )
+
     print("==> Writing comparison report...")
     _write_report(
         args.write_report,
@@ -268,6 +337,7 @@ def main() -> int:
         veros_tendencies=veros_tendencies,
         masks=masks,
         veros_status=veros_status,
+        tracer_metrics=tracer_metrics,
     )
 
     return 0 if veros_status is None else 2

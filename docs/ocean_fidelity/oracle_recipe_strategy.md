@@ -444,14 +444,22 @@ conventions replicated | declared non-goals | timebox | golden-refresh cadence.
 - **Momentum mixing (du/dv_mix):** corr ~0 — **documented structural delta, NOT a bug.**
   The ACC recipe uses `implicit_vertical_mixing=True`, so legoESM produces no *explicit*
   vertical-viscosity tendency to compare against Veros's `du_mix`.
-- **OPEN DECISION (verification-philosophy, owner = user):** per-process momentum tier-2
-  matching is fundamentally limited for a vector-invariant↔flux-form pair — only Coriolis
-  compares cleanly. Options: (a) accept Coriolis-clean + document adv/mix as formulation
-  deltas (current); (b) verify momentum via *total* tendency or an energy/enstrophy budget
-  instead of per-process; (c) expose legoESM's KE-gradient and implicit-mixing effective
-  tendency in the probe to enable a cleaner per-process map (larger probe change). Applies
-  to future MOM6/MITgcm momentum matching too. This is why the Q2 gate's literal
-  `corr>0.95 per process` is not the right bar for momentum.
+- **Tracer per-process (dtemp/dsalt iso, vmix):** INCONCLUSIVE for ACC — not a discrepancy.
+  S is uniform 35 (no salt gradient -> dS_iso/vmix ≈ 1e-19 ≈ 0), vmix is implicit (no
+  explicit tendency), and the GM/Redi T tendency is near-flat at 10 days (corr nan = zero
+  variance). The comparison machinery emits metrics (isolation by differencing probe runs);
+  the ACC case simply does not exercise tracer mixing. A tracer-active recipe (salinity
+  gradient + explicit mixing) is needed to test this per-process.
+- **OPEN DECISION (verification-philosophy, owner = user):** tier-2 frozen-state PER-PROCESS
+  comparison on ACC carries clean validating signal ONLY in density (0.037, corr 1.0) and
+  Coriolis (0.96–0.98). Momentum advection (vector-invariant vs flux-form), momentum mixing
+  (implicit), and tracer mixing (uniform-S/implicit/weak) are all documented deltas or
+  no-signal. So the literal Q2 gate (`corr>0.95 per process`) is the wrong bar. Options:
+  (a) accept density+Coriolis as the validating subset, document the rest (current);
+  (b) verify momentum/mixing via *total* tendency or an energy/enstrophy/tracer-variance
+  budget instead of per-process; (c) enrich the recipe (tracer-active IC, explicit mixing)
+  and/or expose legoESM's KE-gradient + implicit-mixing effective tendencies in the probe.
+  Governs future MOM6/MITgcm matching. This is the recurring crux of per-process tier-2.
 
 ---
 

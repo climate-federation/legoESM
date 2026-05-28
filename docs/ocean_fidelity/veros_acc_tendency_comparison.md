@@ -62,3 +62,14 @@ legoESM components aggregated to Veros groupings (du_adv=vortcor+vertadv, du_mix
 | dv_adv | 8.800e-10 | -0.3364 | 0.5370 | 0.2345 |
 | du_mix | 7.157e-07 | 0.0011 | 0.0651 | 0.0000 |
 | dv_mix | 3.616e-07 | 0.0077 | 0.0636 | 0.0000 |
+
+## Per-process TRACER comparison at cell centres (Q2)
+
+legoESM per-process tracer tendencies isolated by differencing probe runs (full - scheme-off); tracers are cell-centred so no interpolation is needed. iso = GM/Redi isoneutral, vmix = vertical mixing. vmix is IMPLICIT in the ACC recipe, so legoESM produces no explicit vmix tendency (documented delta — see the strategy doc §8 ledger).
+
+| process | interior L2 | interior corr | interior sign |
+|---|---|---|---|
+| T_iso | 1.543e-09 | nan | 0.0000 |
+| T_vmix | 1.431e-07 | nan | 0.0000 |
+| S_iso | 8.549e-20 | nan | 0.1315 |
+| S_vmix | 2.516e-19 | nan | 0.3870 |
