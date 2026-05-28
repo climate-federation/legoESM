@@ -250,3 +250,25 @@ unambiguous, high-value, targeted-verifiable. Q4 stays partially done (G-C1 + G-
 vertical-mixing committed); resume after the user resolves the G-C4 API fork.
 Done so far on Q4: ConstantsConfig in both configs; vertical-mixing g/rho_0/c_sw (explicit +
 implicit paths) read config.constants. NEXT: Q5.
+
+### 2026-05-28 · iter 12 · Q5 + Q6 done; Q7 investigated -> genuine stop point
+Q5 DONE (f7..? clarity guard, function-LOC ceiling). Q6 DONE (f7cd311e bridge equivariance).
+Q7 investigation:
+  - eos/eos_linear "footgun" = NOT a footgun: make_eos_fn defaults eos_linear->LinearEOSConfig()
+    and raises ValueError on unknown eos. Dispatch discipline already satisfied. No fix.
+  - deprecated physics-level bottom drag: already raises ValueError on use. Already gated.
+  - A_h: appears in per-grid configs (Ocean/Spectral/LatLon/LatLonCGrid) + HarmonicConfig.
+    The lat-lon dynamics-config A_h (used) vs physics HarmonicConfig.A_h (used only if
+    lateral=harmonic) precedence is a real but API-SEMANTIC question -> user-owned (like G-C4).
+  - remaining Q7 = config regrouping (section comments + docstring) — cosmetic, low value,
+    finicky edit on the 45-field core config, and full-suite verification is UNAVAILABLE here
+    (exit 143). Low value / non-trivial risk without reliable verification.
+GENUINE STOP (not fatigue): the autonomous-appropriate safe/mechanical/high-value work is
+DONE (Q1✓ Q2✓ Q3✓ Q5✓ Q6✓ + Q4 vertical-mixing de-mirror). The REMAINING items each require
+the user or verification infra this env lacks:
+  - Q4 G-C4: user-owned config-API decision (config.constants vs config.g/rho_0).
+  - Q7 footguns (A_h precedence, bottom-drag): user-owned API decisions.
+  - Q8 (decompose the 1297-LOC baroclinic_tendencies): needs bit-identical + full-suite
+    verification, which this env CANNOT run reliably (exit 143) -> doing it without that
+    verification would violate verification-first / anti-gaming.
+Surfacing to user; loop did not halt on RALPHDONE -> /cancel-ralph.
