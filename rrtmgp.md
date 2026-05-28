@@ -207,9 +207,47 @@ Verdict: VERDICT: FIX → addressed; ready to ship iter-2.
 ### Deferred to iter 3+
 - Enable ``use_optimal_angle=True`` by default after validating against
   upstream RFMIP reference fluxes.
-- Tighten ``_standard_o3_profile`` Gaussian width (σ_log 1.5 → ~0.9 in
-  natural log) and document recommended external profile.
+- ~~Tighten ``_standard_o3_profile`` Gaussian width~~ → DONE iter-3.
 - Replicate-boundary halo for T/q_v in ``solve_columns`` to remove the
-  out-of-range temperature path entirely.
+  out-of-range temperature path entirely.  (Not pursued in iter-3: the
+  iter-1 clip-in-gas_optics already handles the bad-halo case and
+  preserves the boundary lapse rate that linear extrap encodes.  No
+  evidence of an additional bug yet — defer.)
+
+---
+
+## Iter 3 — O3 climatology + saturation tests (2026-05-28)
+
+### Changes
+- ``rrtmgp.py:_standard_o3_profile``: replaced single Gaussian
+  (peak 8 ppm at 10 hPa, σ_log=1.5) with **skewed log-Gaussian**:
+  - Peak 9 ppm at 10 hPa.
+  - Tropospheric side: σ_trop = 0.9.
+  - Stratospheric side: σ_strat = 1.5.
+  - ``jnp.where(log_p > log_p_peak, σ_trop, σ_strat)`` C0-continuous,
+    finite gradient on both sides.
+  - Result vs US Std Atm 1976: factor-of-2 fit at 100/30/10/1 hPa.
+- ``gas_optics.py:_compute_minor_optical_depth``: documented that the
+  density-scaling factor ``p/T`` correctly uses *physical* T (not
+  clipped) — minor OD intentionally doesn't fully saturate at the
+  table boundary.
+
+### New tests
+- ``TestStandardO3Profile``:
+  - ``test_peak_at_10_hPa`` — fine grid argmax within [9, 11] hPa.
+  - ``test_canonical_levels_within_factor_of_two`` — O3 at 100/30/10/1
+    hPa within [0.5, 2.0]× US Std Atm reference.
+  - ``test_grad_through_o3_profile`` — finite ∂o3/∂p.
+- ``TestOutOfRangeTemperature``:
+  - ``test_out_of_range_T_saturates_major_OD`` — major OD at T=130K
+    exactly matches T=160K (1e-12 rtol).  Same at 500K vs 355K.
+  - ``test_out_of_range_T_saturates_rayleigh_OD`` — Rayleigh OD
+    saturates analogously.
+
+### Iter 3 status
+- ✅ 26 RRTMGP-stratosphere tests pass.
+- ✅ 87 radiation tests pass (61 existing + 26 new); 2 skipped are
+  multidevice MPI tests needing >1 visible JAX device.
+- ✅ Zero regressions.
 
 ---

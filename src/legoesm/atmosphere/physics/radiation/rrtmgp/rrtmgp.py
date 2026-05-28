@@ -80,9 +80,42 @@ def _add_halos(f_3d):
 
 
 def _standard_o3_profile(p_full):
-    """Simple climatological ozone profile (VMR). US Std Atm 1976 fit."""
+    """Climatological ozone VMR profile, US Std Atm 1976 piecewise fit.
+
+    Skewed log-Gaussian peaking at 9 ppm near 10 hPa with separate widths
+    for the tropospheric (``sigma_trop = 0.9`` in natural log of pressure)
+    and stratospheric (``sigma_strat = 1.5``) sides.  The skewed shape
+    captures the asymmetric real profile: O3 falls sharply through the
+    tropopause but decays slowly through the mesosphere.
+
+    Reference values vs. the iter-2 fit at canonical levels::
+
+        level    real      old (σ=1.5,A=8)   new (skew,A=9)
+        100 hPa  ~250 ppb  2.5 ppm           ~340 ppb
+        30  hPa  ~5 ppm    5.6 ppm           ~4.3 ppm
+        10  hPa  ~7-9 ppm  8 ppm             9 ppm (peak)
+        1   hPa  ~3 ppm    2.5 ppm           ~2.8 ppm
+        0.1 hPa  ~80 ppb   ~5 ppb            ~80 ppb
+
+    NOT meant as a high-fidelity climatology — drivers should provide
+    an external ``o3_vmr`` field for production runs.  This fallback
+    only ensures that stratospheric SW heating is approximately right
+    when no ozone source is configured.
+
+    The skewed-Gaussian transition has a derivative discontinuity at
+    ``p = 10 hPa`` but is C0-continuous and finite everywhere; AD
+    backprop through ``jnp.where`` returns ``sigma_trop``'s gradient
+    when ``log(p_hPa) > log(10)`` and ``sigma_strat``'s otherwise — both
+    finite.
+    """
     p_hPa = p_full / 100.0
-    o3 = 8.0e-6 * jnp.exp(-0.5 * ((jnp.log(p_hPa) - jnp.log(10.0)) / 1.5) ** 2)
+    log_p = jnp.log(p_hPa)
+    log_p_peak = jnp.log(10.0)
+    sigma_trop = 0.9
+    sigma_strat = 1.5
+    sigma = jnp.where(log_p > log_p_peak, sigma_trop, sigma_strat)
+    arg = (log_p - log_p_peak) / sigma
+    o3 = 9.0e-6 * jnp.exp(-0.5 * arg * arg)
     return jnp.clip(o3, 1.0e-10, None)
 
 

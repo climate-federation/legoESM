@@ -365,7 +365,15 @@ def _compute_minor_optical_depth(
   ibnd = lookup.g_point_to_bnd[igpt]
   loc_in_bnd = igpt - lookup.bnd_lims_gpt[ibnd, 0]
   # Clip temperature to the table range before interpolation.  See
-  # ``_clip_to_table_range`` docstring for rationale.
+  # ``_clip_to_table_range`` docstring for rationale.  Note: only the
+  # **kminor table lookup** uses the clipped temperature; the
+  # density-scaling factor ``p / T`` in ``scale_with_density_fn``
+  # below uses the **physical** temperature (not clipped) because the
+  # Lorentz line-shape density scaling is a real-physics relation
+  # meaningful outside the table range.  Consequence: minor OD does
+  # not fully saturate at the table boundary — see test
+  # ``test_out_of_range_T_saturates_major_OD``'s docstring for
+  # rationale.
   t_for_table = _clip_to_table_range(temperature, lookup.t_ref)
   temperature_interpolant = optics_utils.create_linear_interpolant(
       t_for_table, lookup.t_ref

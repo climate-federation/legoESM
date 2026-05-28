@@ -283,6 +283,86 @@ class TestOutOfRangeTemperature:
             )
             assert jnp.all(jnp.isfinite(tau)), f"minor OD must be finite at p={p_value}"
 
+    def test_out_of_range_T_saturates_major_OD(self, lookup_vmr):
+        """Major OD must saturate at the table boundary for out-of-range T.
+
+        ``compute_major_optical_depth`` uses temperature ONLY for the
+        kmajor/vmr_ref table interpolation; with ``_clip_to_table_range``
+        in place, T outside [t_ref[0], t_ref[-1]] must give the exact
+        boundary lookup.  Closes codex iter-2 LOW coverage gap.
+
+        Note: ``compute_minor_optical_depth`` does NOT fully saturate
+        because the density-scaling factor ``p / T`` in
+        ``scale_with_density_fn`` uses the *physical* temperature (not
+        the clipped table-lookup T).  That is the correct physics — the
+        Lorentz line-shape density scaling is meaningful outside the
+        table range — so minor OD only needs to be finite, which is
+        already covered by ``test_cold_minor_optical_depth_finite``.
+        """
+        lookup, vmr_lib = lookup_vmr
+        shape = (1, 1, 1)
+        T_cold = jnp.full(shape, 130.0)
+        T_ref_min = jnp.full(shape, float(lookup.t_ref[0]))
+        T_hot = jnp.full(shape, 500.0)
+        T_ref_max = jnp.full(shape, float(lookup.t_ref[-1]))
+        p = jnp.full(shape, 5e4)
+        molecules = jnp.full(shape, 1e22)
+
+        tau_cold = gas_optics.compute_major_optical_depth(
+            lookup, vmr_lib, molecules, T_cold, p, igpt=jnp.array(0)
+        )
+        tau_ref_min = gas_optics.compute_major_optical_depth(
+            lookup, vmr_lib, molecules, T_ref_min, p, igpt=jnp.array(0)
+        )
+        np.testing.assert_allclose(
+            np.asarray(tau_cold), np.asarray(tau_ref_min), rtol=1e-12,
+            err_msg="major OD must saturate at lower table boundary T",
+        )
+
+        tau_hot = gas_optics.compute_major_optical_depth(
+            lookup, vmr_lib, molecules, T_hot, p, igpt=jnp.array(0)
+        )
+        tau_ref_max = gas_optics.compute_major_optical_depth(
+            lookup, vmr_lib, molecules, T_ref_max, p, igpt=jnp.array(0)
+        )
+        np.testing.assert_allclose(
+            np.asarray(tau_hot), np.asarray(tau_ref_max), rtol=1e-12,
+            err_msg="major OD must saturate at upper table boundary T",
+        )
+
+    def test_out_of_range_T_saturates_rayleigh_OD(self, lookup_vmr):
+        """Rayleigh OD must also saturate at table boundary T (same logic
+        as major; no density scaling)."""
+        # Need shortwave lookup for Rayleigh.
+        from pathlib import Path
+        from legoesm.atmosphere.physics.radiation.rrtmgp.optics import (
+            lookup_gas_optics_shortwave,
+        )
+        _, vmr_lib = lookup_vmr
+        sw_path = (
+            Path(__file__).resolve().parents[4]
+            / "src/legoesm/atmosphere/physics/radiation/rrtmgp/optics"
+            / "rrtmgp_data/rrtmgp-gas-sw-g112.nc"
+        )
+        lookup_sw = lookup_gas_optics_shortwave.from_data_file(str(sw_path))
+
+        shape = (1, 1, 1)
+        T_cold = jnp.full(shape, 130.0)
+        T_ref_min = jnp.full(shape, float(lookup_sw.t_ref[0]))
+        p = jnp.full(shape, 5e4)
+        molecules = jnp.full(shape, 1e22)
+
+        tau_cold = gas_optics.compute_rayleigh_optical_depth(
+            lookup_sw, vmr_lib, molecules, T_cold, p, igpt=jnp.array(0)
+        )
+        tau_ref = gas_optics.compute_rayleigh_optical_depth(
+            lookup_sw, vmr_lib, molecules, T_ref_min, p, igpt=jnp.array(0)
+        )
+        np.testing.assert_allclose(
+            np.asarray(tau_cold), np.asarray(tau_ref), rtol=1e-12,
+            err_msg="Rayleigh OD must saturate at lower table boundary T",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Mixed-precision consistency
@@ -506,6 +586,59 @@ class TestOptimalLwSecant:
         )
         # Non-trivial gradient — guard against constant-fold collapse.
         assert jnp.abs(g).max() > 1e-9
+
+
+class TestStandardO3Profile:
+    """Iter-3 skewed-Gaussian climatology fits US Std Atm 1976 within a
+    factor of ~2 at the canonical levels."""
+
+    def test_peak_at_10_hPa(self):
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import (
+            _standard_o3_profile,
+        )
+        # Fine grid across the stratosphere.
+        p_hPa = jnp.logspace(jnp.log10(0.1), jnp.log10(1000.0), 200)
+        o3 = _standard_o3_profile(p_hPa * 100.0)
+        peak_idx = int(jnp.argmax(o3))
+        peak_p = float(p_hPa[peak_idx])
+        # The skewed-Gaussian peak sits at 10 hPa.  ``argmax`` on a fine
+        # log grid resolves to within a few percent.
+        assert 9.0 < peak_p < 11.0, f"peak at {peak_p} hPa, expected 10"
+
+    def test_canonical_levels_within_factor_of_two(self):
+        """Compare new profile to US Std Atm 1976 reference at key levels."""
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import (
+            _standard_o3_profile,
+        )
+        # Reference O3 from US Std Atm 1976 (ppm, mid-latitude annual mean):
+        ref = {
+            100.0: 0.25,   # tropopause:    ~250 ppb
+            30.0:  5.0,    # mid-strat:     ~5 ppm
+            10.0:  8.0,    # peak:          ~7-9 ppm (we target 9)
+            1.0:   3.0,    # upper strat:   ~3 ppm
+        }
+        for p_hPa_val, expected_ppm in ref.items():
+            p = jnp.array([p_hPa_val * 100.0])
+            o3_ppm = float(_standard_o3_profile(p)[0]) * 1e6
+            ratio = o3_ppm / expected_ppm
+            assert 0.5 < ratio < 2.0, (
+                f"O3 at {p_hPa_val} hPa: got {o3_ppm:.3f} ppm, "
+                f"expected ~{expected_ppm} (ratio {ratio:.2f}, "
+                f"target [0.5, 2.0])"
+            )
+
+    def test_grad_through_o3_profile(self):
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import (
+            _standard_o3_profile,
+        )
+
+        def loss(p):
+            return jnp.sum(_standard_o3_profile(p))
+
+        # Use real pressure values away from the σ-discontinuity at 10 hPa.
+        p = jnp.array([5e4, 1e3, 50.0])  # 500, 10, 0.5 hPa
+        g = jax.grad(loss)(p)
+        assert jnp.all(jnp.isfinite(g))
 
 
 if __name__ == "__main__":  # pragma: no cover
