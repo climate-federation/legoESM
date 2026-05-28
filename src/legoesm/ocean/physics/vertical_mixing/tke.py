@@ -247,6 +247,7 @@ def _vertical_shear_squared(
 
 def _compute_N2(
     rho_cell: jnp.ndarray, dz_half: jnp.ndarray, rho_0: float,
+    g: float = constants.g,
 ) -> jnp.ndarray:
     """N^2 at interfaces from cell-centre in-situ density.
 
@@ -268,7 +269,7 @@ def _compute_N2(
     dz_safe = jnp.maximum(dz_half, _EPS)
     # drho/dz with z positive upward — negative for stable stratification.
     drho_dz = (rho_cell[..., :-1] - rho_cell[..., 1:]) / dz_safe
-    N2 = -constants.g / rho_0 * drho_dz
+    N2 = -g / rho_0 * drho_dz
     return jnp.maximum(N2, 0.0)
 
 
@@ -482,6 +483,7 @@ def tke_vertical_mixing(
     dt: float,
     cfg: TKEConfig,
     rho_0: float = constants.rho_ocean,
+    g: float = constants.g,
     n_iterations: int = 1,
 ) -> TKEOutput:
     """Advance the TKE closure and return new K_M, K_H, TKE.
@@ -538,7 +540,7 @@ def tke_vertical_mixing(
         )
 
     shear_sq = _vertical_shear_squared(u_cell, v_cell, dz_half)
-    N2 = _compute_N2(rho_cell, dz_half, rho_0)
+    N2 = _compute_N2(rho_cell, dz_half, rho_0, g)
 
     if tau_x_surface is None and tau_y_surface is None:
         surface_flux = jnp.zeros(rho_cell.shape[:-1], dtype=rho_cell.dtype)

@@ -28,11 +28,9 @@ from typing import Tuple
 import jax
 import jax.numpy as jnp
 
-from legoesm import constants
+from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.eos import (
     compute_ocean_rho as _compute_rho,
-    rho_0 as _RHO_0,
-    c_sw as _C_SW,
     thermal_expansion_coeff,
     haline_contraction_coeff,
 )
@@ -86,7 +84,8 @@ def compute_vertical_K_profiles(
 
     vmix = physics_config.vertical_mixing
     if vmix.scheme != "none":
-        K_vmix, A_vmix = _vmix_K_profiles(state, z_coord, surface_forcing, vmix)
+        K_vmix, A_vmix = _vmix_K_profiles(
+            state, z_coord, surface_forcing, vmix, physics_config.constants)
         K_v_total = K_v_total + K_vmix
         A_v_total = A_v_total + A_vmix
 
@@ -121,7 +120,8 @@ def compute_vertical_K_profiles(
 # ---------------------------------------------------------------------------
 
 
-def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg):
+def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
+                     constants_config=ConstantsConfig()):
     """Re-compute K_v, A_v at interfaces for the chosen vmix scheme.
 
     For ``constant`` / ``richardson`` this duplicates only the K
@@ -187,6 +187,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg):
             tke_old=None,
             tau_x_surface=tau_x, tau_y_surface=tau_y,
             dt=_DIAGNOSTIC_DT, cfg=vmix_cfg.tke,
+            rho_0=constants_config.rho_0, g=constants_config.g,
             n_iterations=3,
         )
         return tke_out.K_H, tke_out.K_M
@@ -206,12 +207,12 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg):
         Q_sfc_T = None
         B_f = None
         if q_net is not None:
-            Q_sfc_T = q_net / (_RHO_0 * _C_SW)
+            Q_sfc_T = q_net / (constants_config.rho_0 * constants_config.c_sw)
             T_sfc = state.T.data[..., 0]
             S_sfc = state.S.data[..., 0]
             p_sfc = jnp.zeros_like(T_sfc)
             alpha = thermal_expansion_coeff(T_sfc, S_sfc, p_sfc)
-            B_f = -constants.g * alpha * Q_sfc_T
+            B_f = -constants_config.g * alpha * Q_sfc_T
 
         Q_sfc_S = None
         if fw is not None:
@@ -219,8 +220,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg):
             T_sfc = state.T.data[..., 0]
             p_sfc = jnp.zeros_like(T_sfc)
             beta = haline_contraction_coeff(T_sfc, S_sfc, p_sfc)
-            Q_sfc_S = -S_sfc * fw / _RHO_0
-            B_salt = constants.g * beta * Q_sfc_S
+            Q_sfc_S = -S_sfc * fw / constants_config.rho_0
+            B_salt = constants_config.g * beta * Q_sfc_S
             B_f = B_salt if B_f is None else (B_f + B_salt)
 
         out = kpp_vertical_mixing(
