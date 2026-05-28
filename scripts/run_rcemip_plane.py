@@ -61,10 +61,27 @@ from legoesm.atmosphere.physics.radiation.integration import (
 from legoesm.core.field import Field
 from legoesm.core.state import PlaneNonHydrostaticTendencies
 from legoesm.grids.plane import create_plane_grid
-from legoesm.grids.vertical import create_height_coordinate
+from legoesm.grids.vertical import (
+    create_height_coordinate,
+    create_stretched_height_coordinate,
+)
 
 
-jax.config.update("jax_enable_x64", True)
+def _enable_x64_if_needed(precision: str) -> None:
+    """Enable JAX x64 only when caller asked for fp64. fp32 stays
+    native (no auto-promote)."""
+    if precision == "float64":
+        jax.config.update("jax_enable_x64", True)
+
+
+# fp64 is the default for legoesm dycores; fp32 must be requested via
+# --precision float32. main() flips x64 OFF before any JAX array is
+# constructed when fp32 is chosen.
+# Default-ON here preserves import-time behavior for callers that
+# instantiate state objects WITHOUT calling main() (tests, scripts).
+import os as _os
+if _os.environ.get("LEGOESM_RCEMIP_PLANE_FP32") != "1":
+    jax.config.update("jax_enable_x64", True)
 
 
 # -------- RCEMIP1 IC (Wing 2018 Tab A1, simplified) -------- #
@@ -230,16 +247,20 @@ def make_rcemip_physics(
     Cd: float = 1.0e-3, Ch: float = 1.0e-3,
     T_sfc: float = 300.0, q_sfc: float = 0.018,
 ):
-    """Compose RCEMIP physics_fn from surface_fluxes + radiation + microphysics.
+    """Compose RCEMIP physics_fn — surface + radiation + microphysics.
 
-    Each component is built by the canonical factory (no plane-specific
-    inlining beyond surface fluxes). Pass ``radiation_config=None`` or
-    ``microphysics_config=None`` to skip either branch.
+    Returns a single ``physics_fn(state, grid, hc, tm)`` that calls each
+    branch and sums tendencies. Radiation is called every outer step
+    here; for production with RRTMGP use
+    :func:`make_rcemip_physics_gated_rad` which caches radiation across
+    a configurable interval.
     """
-    physics_fns = [_make_surface_flux_physics(
-        grid, height_coord, terrain_metric,
-        Cd=Cd, Ch=Ch, T_sfc=T_sfc, q_sfc=q_sfc,
-    )]
+    physics_fns = []
+    if Cd > 0 or Ch > 0:
+        physics_fns.append(_make_surface_flux_physics(
+            grid, height_coord, terrain_metric,
+            Cd=Cd, Ch=Ch, T_sfc=T_sfc, q_sfc=q_sfc,
+        ))
     if radiation_config is not None:
         physics_fns.append(make_radiation_physics(
             radiation_config, model_type="plane",
@@ -258,26 +279,127 @@ def make_rcemip_physics(
     return physics_fn
 
 
+def split_rad_from_other_physics(
+    grid, height_coord, terrain_metric,
+    radiation_config: RadiationConfig | None,
+    microphysics_config: MicrophysicsConfig | None,
+    dt: float,
+    Cd: float = 1.0e-3, Ch: float = 1.0e-3,
+    T_sfc: float = 300.0, q_sfc: float = 0.018,
+):
+    """Build TWO separate physics callables for the gated-radiation pattern.
+
+    Returns ``(non_rad_physics_fn, rad_physics_fn_or_None)``:
+    - non_rad_physics_fn(state) — runs every dycore outer step
+      (surface fluxes + microphysics). Cheap.
+    - rad_physics_fn(state) — runs only every ``radiation_interval``
+      outer steps; returned tendency is cached + applied as forward
+      Euler increments between refreshes. None if radiation_config is None.
+
+    Both follow the standard ``physics_fn(state, grid, hc, tm) ->
+    PlaneNonHydrostaticTendencies`` signature.
+    """
+    non_rad_fns = []
+    if Cd > 0 or Ch > 0:
+        non_rad_fns.append(_make_surface_flux_physics(
+            grid, height_coord, terrain_metric,
+            Cd=Cd, Ch=Ch, T_sfc=T_sfc, q_sfc=q_sfc,
+        ))
+    if microphysics_config is not None:
+        non_rad_fns.append(make_microphysics_physics(
+            microphysics_config, model_type="plane", dt=dt,
+        ))
+
+    def non_rad_physics_fn(state, grid_in, hc_in, tm_in):
+        if not non_rad_fns:
+            return _zero_tendencies(state)
+        tendencies = [
+            fn(state, grid_in, hc_in, tm_in) for fn in non_rad_fns
+        ]
+        return _sum_plane_tendencies(*tendencies)
+
+    rad_physics_fn = None
+    if radiation_config is not None:
+        rad_physics_fn = make_radiation_physics(
+            radiation_config, model_type="plane",
+        )
+    return non_rad_physics_fn, rad_physics_fn
+
+
+def _zero_tendencies(state):
+    """All-zero PlaneNonHydrostaticTendencies matching state's pytree shape."""
+    return PlaneNonHydrostaticTendencies(
+        du_dt=state.u.replace(data=jnp.zeros_like(state.u.data)),
+        dv_dt=state.v.replace(data=jnp.zeros_like(state.v.data)),
+        dw_dt=state.w.replace(data=jnp.zeros_like(state.w.data)),
+        dtheta_prime_dt=state.theta_prime.replace(
+            data=jnp.zeros_like(state.theta_prime.data)),
+        drho_prime_dt=state.rho_prime.replace(
+            data=jnp.zeros_like(state.rho_prime.data)),
+        dphis_dt=state.phis.replace(data=jnp.zeros_like(state.phis.data)),
+        dtracers_dt=state.tracers.replace(
+            data=jnp.zeros_like(state.tracers.data)),
+    )
+
+
+def apply_radiation_forward_euler(state, rad_tend, dt):
+    """Forward-Euler apply of cached radiation tendency over dt.
+
+    Radiation tends to be slow (~K/day in tropos, ~10K/day at strato).
+    Over a 5-min radiation interval, forward Euler error << RK3 dycore
+    error on the same fields. Standard treatment in operational CRMs
+    (SAM, WRF, CM1 all forward-Euler their radiation increment).
+    """
+    new_theta_p = state.theta_prime.data + dt * rad_tend.dtheta_prime_dt.data
+    return state._replace(
+        theta_prime=state.theta_prime.replace(data=new_theta_p),
+    )
+
+
 # -------- IC + main -------- #
 
 
-def _build_rcemip_initial_state(grid, height_coord):
-    rest = make_rest_state(grid, height_coord, dtype=jnp.float64)
+def _build_rcemip_initial_state(grid, height_coord, dtype=jnp.float64,
+                                theta_noise_amp=0.1, n_seed_lev=4,
+                                n_tracers=3):
+    """RCEMIP1 IC: rest state + q_v profile + small theta noise.
+
+    theta noise restricted to the bottom ``n_seed_lev`` levels (Wing
+    2018 symmetry breaker) — applying noise everywhere causes
+    spurious upper-tropospheric buoyancy gradients that NaN within
+    ~10 steps at dx=2 km regardless of dt. Zero-mean horizontal so
+    total energy is conserved at IC.
+
+    ``n_tracers``: 3 = q_v, q_c, q_r (Kessler/Sundqvist/Thompson layout
+    head); 9 = full Morrison/Seifert-Beheng with N_c, N_r, N_i + ice
+    classes. The microphysics integration validates the slot count.
+    """
+    rest = make_rest_state(grid, height_coord, dtype=dtype)
     ny, nx, nlev = rest.theta_prime.data.shape
-    tracers = jnp.zeros((ny, nx, nlev, 3), dtype=jnp.float64)
-    q_v = _rcemip_qv_profile(height_coord.z_full)
+    tracers = jnp.zeros((ny, nx, nlev, n_tracers), dtype=dtype)
+    q_v = _rcemip_qv_profile(height_coord.z_full).astype(dtype)
     tracers = tracers.at[..., 0].set(
         jnp.broadcast_to(q_v, (ny, nx, nlev)),
     )
+    n_seed_lev = min(n_seed_lev, nlev)
     rng_key = jax.random.PRNGKey(0)
-    theta_kick = 0.1 * jax.random.normal(rng_key, rest.theta_prime.data.shape)
+    theta_noise = jax.random.uniform(
+        rng_key, shape=(ny, nx, n_seed_lev),
+        minval=-theta_noise_amp, maxval=theta_noise_amp, dtype=dtype,
+    )
+    theta_noise = theta_noise - jnp.mean(theta_noise, axis=(0, 1),
+                                         keepdims=True)
+    theta_p = jnp.zeros_like(rest.theta_prime.data)
+    # Bottom 4 levels in top-down indexing = LAST 4 array entries.
+    theta_p = theta_p.at[..., -n_seed_lev:].set(theta_noise)
     return rest._replace(
-        theta_prime=rest.theta_prime.replace(data=theta_kick),
+        theta_prime=rest.theta_prime.replace(data=theta_p),
         tracers=rest.tracers.replace(data=tracers),
     )
 
 
-def _build_radiation_config(scheme: str) -> RadiationConfig | None:
+def _build_radiation_config(scheme: str,
+                            update_interval_steps: int = 1) -> RadiationConfig | None:
     if scheme == "none":
         return None
     if scheme not in ("gray", "rrtmgp"):
@@ -285,7 +407,9 @@ def _build_radiation_config(scheme: str) -> RadiationConfig | None:
             f"Unknown --radiation: {scheme!r}; "
             f"choose from 'gray', 'rrtmgp', 'none'."
         )
-    return RadiationConfig(scheme=scheme)
+    return RadiationConfig(
+        scheme=scheme, update_interval_steps=update_interval_steps,
+    )
 
 
 def _build_microphysics_config(scheme: str) -> MicrophysicsConfig | None:
@@ -317,6 +441,58 @@ def parse_args():
     p.add_argument("--smag-cs", type=float, default=0.2)
     p.add_argument("--sponge-coeff", type=float, default=0.05)
     p.add_argument("--sponge-width", type=float, default=5_000.0)
+    p.add_argument("--semi-implicit", action="store_true",
+                   help="Use semi-implicit acoustic substepping (lifts "
+                        "vertical CFL). Recommended for long runs at dx>=2km.")
+    p.add_argument("--n-acoustic-substeps", type=int, default=6,
+                   help="Acoustic substeps per RK3 stage. Default 6 "
+                        "matches CompressibleEulerConfig default.")
+    p.add_argument("--off-centering", type=float, default=0.1,
+                   help="Skamarock-Klemp 2008 off-centering beta for the "
+                        "acoustic mode. 0.1 = recommended for moist-convective "
+                        "stability; 0.0 = centred (less damping but can grow "
+                        "acoustic noise on long runs).")
+    p.add_argument("--implicit-buoyancy", action="store_true", default=True,
+                   help="Klemp-Wilhelmson 1978 implicit buoyancy in the "
+                        "semi-implicit acoustic substep. Closes the w<->theta "
+                        "gravity-wave feedback at coarse vertical resolution; "
+                        "default ON for RCE (was OFF in iter-78 bench config).")
+    p.add_argument("--no-implicit-buoyancy", dest="implicit_buoyancy",
+                   action="store_false")
+    p.add_argument("--theta-noise-amp", type=float, default=0.0,
+                   help="Initial theta' perturbation amplitude [K] at bottom 4 "
+                        "levels. 0 = clean Wing IC (stable at dt up to 10 s "
+                        "per iter-9/14); 0.1 = Wing 2018 standard symmetry "
+                        "breaker (blows up at dx>=2 km without LES — iter-212 "
+                        "in run_rce_mpi_long.py).")
+    p.add_argument("--no-physics", action="store_true",
+                   help="Skip the physics_fn entirely. Use for dry-dycore "
+                        "stability probes.")
+    p.add_argument("--no-surface-flux", action="store_true",
+                   help="Disable surface bulk fluxes (Cd=Ch=0). For stability "
+                        "diagnostics — without surface fluxes RCE cannot reach "
+                        "physical equilibrium but the dycore alone can be "
+                        "tested.")
+    p.add_argument("--advection",
+                   choices=["upwind1", "van_leer", "weno5"],
+                   default="van_leer",
+                   help="Horizontal advection scheme. van_leer (default) "
+                        "= 2nd-order TVD, monotone, stencil 4; needed for "
+                        "stability at dt>=10s with default hyperdiff. weno5 "
+                        "= 5th-order WENO-Z, much less grid-scale noise; "
+                        "upwind1 = 1st-order (smoke runs only).")
+    p.add_argument("--precision", choices=["float32", "float64"],
+                   default="float64",
+                   help="fp32 ~5-9x faster than fp64 on consumer GPU "
+                        "(fp64 ALU 1:32 ratio); fp32 sufficient for RCE.")
+    p.add_argument("--radiation-interval", type=int, default=150,
+                   help="Radiation update interval in outer steps. RCEMIP / "
+                        "CRM standard: refresh every 5 min sim time. At "
+                        "dt=2s, interval=150 = 5 min refresh; interval=900 = "
+                        "30 min (less aggressive). 1 = every step (heavy with "
+                        "RRTMGP). Gated mode (interval>1) applies cached "
+                        "radiation tendency as forward Euler increments "
+                        "between recomputes — standard SAM/WRF/CM1 practice.")
     p.add_argument("--radiation", choices=["gray", "rrtmgp", "none"],
                    default="gray",
                    help="Radiation scheme. 'none' skips the radiation branch.")
@@ -327,6 +503,17 @@ def parse_args():
                    default="kessler",
                    help="Microphysics scheme. 'none' skips the branch.")
     p.add_argument("--print-every", type=int, default=10)
+    p.add_argument("--snapshot-every", type=int, default=0,
+                   help="Emit a surface-snapshot PNG every N steps "
+                        "(0 = off). At dt=20s, 4320 steps = 1 sim day.")
+    p.add_argument("--stretched-vertical", action="store_true",
+                   help="Use create_stretched_height_coordinate (RCEMIP1: "
+                        "nlev=74, geometric stretching from dz_sfc=50m near "
+                        "surface to ~1500m at model top). Default uses the "
+                        "uniform create_height_coordinate.")
+    p.add_argument("--dz-sfc", type=float, default=50.0,
+                   help="Surface-layer thickness [m] for stretched vertical "
+                        "coordinate. RCEMIP1 standard = 50 m.")
     p.add_argument("--output", type=Path, default=Path("results/rcemip_plane"))
     return p.parse_args()
 
@@ -342,11 +529,17 @@ def main():
           f"smag_cs={args.smag_cs}")
     print(f"  radiation={args.radiation}, microphysics={args.microphysics}")
 
+    dtype = jnp.float32 if args.precision == "float32" else jnp.float64
     grid = create_plane_grid(
         nx=args.nx, ny=args.ny, nlev=args.nlev,
-        dx=args.dx, dy=args.dx, dtype=jnp.float64,
+        dx=args.dx, dy=args.dx, dtype=dtype,
     )
-    hc = create_height_coordinate(args.nlev, H=args.H)
+    if args.stretched_vertical:
+        hc = create_stretched_height_coordinate(
+            args.nlev, H=args.H, dz_sfc=args.dz_sfc,
+        )
+    else:
+        hc = create_height_coordinate(args.nlev, H=args.H)
     tm = make_flat_plane_terrain_metric(grid, hc)
     cfg = CompressibleEulerConfig(
         sponge_coeff=args.sponge_coeff,
@@ -354,30 +547,93 @@ def main():
         hyperdiff_coeff=args.hyperdiff,
         hyperdiff_rho_coeff=args.hyperdiff,
         hyperdiff_w_coeff=args.hyperdiff,
-        semi_implicit_acoustic=False,
+        semi_implicit_acoustic=args.semi_implicit,
+        n_acoustic_substeps=args.n_acoustic_substeps,
+        acoustic_off_centering=args.off_centering,
+        implicit_buoyancy=args.implicit_buoyancy,
+        horizontal_advection_scheme=args.advection,
         use_coriolis=False,
         fix_mass=True, anchor_mass_to_initial=True,
         smagorinsky_cs=args.smag_cs, smagorinsky_prandtl=1.0,
     )
     model = PlaneCompressibleEulerModel(grid, hc, tm, cfg)
 
-    radiation_config = _build_radiation_config(args.radiation)
-    microphysics_config = _build_microphysics_config(args.microphysics)
-    physics_fn = make_rcemip_physics(
-        grid, hc, tm,
-        radiation_config=radiation_config,
-        microphysics_config=microphysics_config,
-        dt=args.dt,
-        T_sfc=args.T_sfc,
+    radiation_config = _build_radiation_config(
+        args.radiation, update_interval_steps=args.radiation_interval,
     )
+    microphysics_config = _build_microphysics_config(args.microphysics)
+    if args.no_physics:
+        physics_fn = None
+        rad_physics_fn = None
+    elif args.radiation_interval > 1 and radiation_config is not None:
+        # Gated radiation: split heavy radiation from light per-step physics.
+        # rad_tendency cached for radiation_interval outer steps, applied as
+        # forward Euler each step. Standard CRM treatment (SAM, WRF, CM1).
+        physics_fn, rad_physics_fn = split_rad_from_other_physics(
+            grid, hc, tm,
+            radiation_config=radiation_config,
+            microphysics_config=microphysics_config,
+            dt=args.dt, T_sfc=args.T_sfc,
+            Cd=0.0 if args.no_surface_flux else 1.0e-3,
+            Ch=0.0 if args.no_surface_flux else 1.0e-3,
+        )
+        print(f"  RADIATION GATED: refresh every {args.radiation_interval} "
+              f"steps = {args.radiation_interval * args.dt:.0f} s sim time "
+              f"(RCEMIP typical 300-1800 s).")
+    else:
+        physics_fn = make_rcemip_physics(
+            grid, hc, tm,
+            radiation_config=radiation_config,
+            microphysics_config=microphysics_config,
+            dt=args.dt,
+            T_sfc=args.T_sfc,
+            Cd=0.0 if args.no_surface_flux else 1.0e-3,
+            Ch=0.0 if args.no_surface_flux else 1.0e-3,
+        )
+        rad_physics_fn = None
 
-    state = _build_rcemip_initial_state(grid, hc)
+    # Morrison + Seifert-Beheng need 9 tracer slots (q_v, q_c, q_r,
+    # q_i, q_s, q_g, N_c, N_r, N_i); 3 slots cover Kessler/Sundqvist/
+    # Thompson which only carry the warm-rain mass mixing ratios.
+    n_tracers = 9 if args.microphysics in (
+        "morrison", "seifert_beheng",
+    ) else 3
+    state = _build_rcemip_initial_state(
+        grid, hc, dtype=dtype, theta_noise_amp=args.theta_noise_amp,
+        n_tracers=n_tracers,
+    )
     mass0 = float(compute_dry_mass_plane(state, grid, hc, tm))
+
+    snap_dir = args.output / "snapshots"
+    if args.snapshot_every > 0:
+        snap_dir.mkdir(parents=True, exist_ok=True)
 
     print("\nstep    t [s]    max|w|     min(theta')   max(theta')   "
           "max(q_v)   d(mass)")
 
+    # Gated-radiation runtime state. rad_physics_fn is None when
+    # radiation is either off or runs every step inside physics_fn.
+    # Bind grid/hc/tm via closure (Python statics) — they're pytrees of
+    # arrays; passing as JIT args would require static_argnums=hashable
+    # which they aren't. Closure capture is safe: the wrapper recompiles
+    # iff the state's shape/dtype changes, not on every call.
+    if rad_physics_fn is not None:
+        def _rad_wrapper(s):
+            return rad_physics_fn(s, grid, hc, tm)
+        rad_jit = jax.jit(_rad_wrapper)
+    else:
+        rad_jit = None
+    cached_rad_tend = None
+
     for i in range(args.steps):
+        if rad_jit is not None and (
+            i % args.radiation_interval == 0 or cached_rad_tend is None
+        ):
+            cached_rad_tend = rad_jit(state)
+        if cached_rad_tend is not None:
+            state = apply_radiation_forward_euler(
+                state, cached_rad_tend, args.dt,
+            )
         state = model.step(state, dt=args.dt, physics_fn=physics_fn)
         if (i + 1) % args.print_every == 0 or i == 0:
             t = (i + 1) * args.dt
@@ -388,12 +644,58 @@ def main():
             mass = float(compute_dry_mass_plane(state, grid, hc, tm))
             rel = abs(mass - mass0) / abs(mass0)
             print(f"{i+1:5d}  {t:7.2f}  {max_w:9.3e}  {min_th:12.4e}  "
-                  f"{max_th:12.4e}  {max_qv:9.3e}  {rel:8.2e}")
+                  f"{max_th:12.4e}  {max_qv:9.3e}  {rel:8.2e}", flush=True)
             if not bool(jnp.all(jnp.isfinite(state.w.data))):
                 print("\nNON-FINITE STATE — aborting.")
                 break
+        if args.snapshot_every > 0 and (i + 1) % args.snapshot_every == 0:
+            _emit_surface_snapshot_png(
+                snap_dir, i + 1, (i + 1) * args.dt, state, grid, hc,
+            )
 
     print(f"\nOutput: {args.output}")
+
+
+def _emit_surface_snapshot_png(snap_dir: Path, step: int, t_s: float,
+                                state, grid, hc) -> None:
+    """Write a 2x2 panel PNG of surface fields at this timestep.
+
+    Panels: (q_v surface), (theta' surface), (max(w) column max),
+    (column-integrated water vapor). Top-down: k_sfc = nlev-1.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    k_sfc = state.theta_prime.data.shape[-1] - 1
+    qv_sfc = np.asarray(state.tracers.data[..., k_sfc, 0])
+    th_sfc = np.asarray(state.theta_prime.data[..., k_sfc])
+    w_col_max = np.asarray(jnp.max(jnp.abs(state.w.data), axis=-1))
+    # CWV = sum(rho_v dz) = sum(q_v * rho_dry * dz)
+    q_v = np.asarray(state.tracers.data[..., 0])  # (ny, nx, nlev)
+    rho_total = np.asarray(hc.rho_ref + state.rho_prime.data)  # (ny, nx, nlev)
+    dz = np.asarray(hc.dz)  # (nlev,)
+    cwv = np.sum(q_v * rho_total * dz, axis=-1)  # kg/m^2
+
+    day = t_s / 86400.0
+    fig, axes = plt.subplots(2, 2, figsize=(11, 9))
+    panels = [
+        (qv_sfc, "q_v surface [kg/kg]", "BrBG"),
+        (th_sfc, "theta' surface [K]", "RdBu_r"),
+        (w_col_max, "max|w| over column [m/s]", "viridis"),
+        (cwv, "column water vapor [kg/m^2]", "Blues"),
+    ]
+    for ax, (data, label, cmap) in zip(axes.flat, panels):
+        im = ax.imshow(data, origin="lower", cmap=cmap, aspect="auto")
+        ax.set_title(label)
+        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    fig.suptitle(f"RCE plane CRM — day {day:.2f} (step {step})",
+                 fontsize=12)
+    fig.tight_layout()
+    out = snap_dir / f"day_{day:07.2f}_step_{step:08d}.png"
+    fig.savefig(out, dpi=110, bbox_inches="tight")
+    plt.close(fig)
 
 
 if __name__ == "__main__":
