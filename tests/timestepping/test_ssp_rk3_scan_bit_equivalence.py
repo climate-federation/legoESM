@@ -126,6 +126,37 @@ def test_dispatch_lookup():
         np.testing.assert_array_equal(np.asarray(la), np.asarray(lb))
 
 
+def test_scan_preserves_float32_leaf_dtype():
+    """Mixed-precision state: scan body must NOT upcast float32 leaves.
+
+    Smoke 8070583 surfaced this: ``jnp.asarray([0.0, 0.75, 1/3])`` in
+    the scan body is strongly-typed float64.  Indexing the array gives
+    a float64 scalar; multiplying with a float32 state leaf upcasts the
+    result to float64.  ``jax.lax.scan`` then refuses to close the
+    body because the carry-in (float32) and carry-out (float64) dtypes
+    disagree.  This test pins the dtype-preserving fix.
+    """
+    state = {
+        "u_f32": jnp.asarray(np.zeros((4, 8), dtype=np.float32)),
+        "u_f64": jnp.asarray(np.zeros((4, 8), dtype=np.float64)),
+    }
+
+    def trivial_tendency(s):
+        return {k: jnp.zeros_like(v) for k, v in s.items()}
+
+    out = ssp_rk3_step_scan(state, trivial_tendency, 1.0)
+    assert out["u_f32"].dtype == jnp.float32, (
+        "scan-folded RK3 upcast float32 → "
+        f"{out['u_f32'].dtype}.  The dtype-preserving cast in "
+        "scan_body has regressed."
+    )
+    assert out["u_f64"].dtype == jnp.float64, (
+        "scan-folded RK3 downcast float64 → "
+        f"{out['u_f64'].dtype}; that would change AMIP scientific "
+        "validation output."
+    )
+
+
 def test_jaxpr_smaller_than_inline():
     """The scan-folded jaxpr should have FEWER equations than the inline.
 

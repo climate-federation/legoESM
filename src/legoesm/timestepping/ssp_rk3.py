@@ -115,7 +115,22 @@ def ssp_rk3_step_scan(
         k_axpy = _pytree_axpy(k_curr, tend, dt)
         a = alpha[stage_idx]
         b = beta[stage_idx]
-        k_new = _pytree_linear_combination(state_init, k_axpy, a, b)
+        # Smoke 8070583 surfaced: ``jnp.asarray([…])`` produces a
+        # STRONGLY-typed float64 array.  Indexing it gives a float64
+        # scalar; multiplying with a float32 state leaf upcasts to
+        # float64.  ``jax.lax.scan`` then refuses to close because the
+        # scan body's carry-in (float32) and carry-out (float64) types
+        # do not match.  Fix: cast ``a`` and ``b`` to each leaf's own
+        # dtype inside ``jax.tree.map`` so the linear combination
+        # preserves the leaf dtype — same arithmetic as
+        # ``_pytree_linear_combination`` but dtype-stable for mixed-
+        # precision pytrees.
+        def _comb(si, ki):
+            a_typed = a.astype(si.dtype)
+            b_typed = b.astype(si.dtype)
+            return a_typed * si + b_typed * ki
+
+        k_new = jax.tree.map(_comb, state_init, k_axpy)
         return (k_new, state_init), None
 
     (k_final, _), _ = jax.lax.scan(
