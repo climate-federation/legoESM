@@ -584,6 +584,50 @@ class TestOptimalLwSecant:
             f"expected 3 distinct secants, got {vals}"
         )
 
+    def test_optimal_angle_use_scan_equivalence(self, lookup_vmr):
+        """Iter-7: ``use_optimal_angle=True`` must give bit-equivalent
+        results with ``use_scan=True`` and ``use_scan=False``.  This
+        guards against the optimal-angle path silently breaking the
+        GPU/CPU equivalence the existing ``test_rrtmgp_use_scan_equivalence``
+        verifies for the fixed-1.66 path."""
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        ncol, nlev = 2, 8
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1)
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        T = jnp.broadcast_to(
+            jnp.linspace(220.0, 290.0, nlev)[None, :], (ncol, nlev)
+        )
+        sfc_T = jnp.full((ncol,), 295.0)
+        q_v = jnp.full((ncol, nlev), 5e-3)
+        cos_z = jnp.full((ncol,), 0.5)
+
+        cfg_loop = RRTMGPConfig(use_optimal_angle=True, use_scan=False)
+        cfg_scan = RRTMGPConfig(use_optimal_angle=True, use_scan=True)
+        out_loop = RRTMGP.from_legoesm_config(cfg_loop).solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+        )
+        out_scan = RRTMGP.from_legoesm_config(cfg_scan).solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+        )
+        for name, a, b in (
+            ("lw_flux_up",   out_loop.lw_flux_up,   out_scan.lw_flux_up),
+            ("lw_flux_down", out_loop.lw_flux_down, out_scan.lw_flux_down),
+            ("heating_rate", out_loop.heating_rate, out_scan.heating_rate),
+        ):
+            np.testing.assert_allclose(
+                np.asarray(a), np.asarray(b), rtol=1e-10, atol=1e-10,
+                err_msg=(
+                    f"{name}: use_optimal_angle=True must match between "
+                    "scan and unrolled column recurrence."
+                ),
+            )
+
     def test_solve_columns_use_optimal_angle_differentiable(self, lookup_vmr):
         """End-to-end ``jax.grad`` through ``solve_columns(..., use_optimal_angle=True)``
         must produce finite gradients w.r.t. temperature."""
