@@ -47,8 +47,19 @@ def _compute_local_properties_lw(
     cloud_path_ice: Array | None = None,
     cloud_fraction: Array | None = None,
     lw_diffusive_factor: float | Array = monochromatic_two_stream._LW_DIFFUSIVE_FACTOR,
+    precomputed_lw_optical_props: dict[str, Array] | None = None,
 ) -> dict[str, Array]:
-  """Compute local optical properties for longwave radiative transfer."""
+  """Compute local optical properties for longwave radiative transfer.
+
+  ``precomputed_lw_optical_props`` lets the caller share an already-
+  computed optics dict (e.g. the optimal-angle path in ``solve_lw``
+  needs the optical depth to derive the per-column secant, and would
+  otherwise repeat the table interpolation here).  When ``None`` the
+  function calls ``optics_lib.compute_lw_optical_properties`` itself.
+  XLA's CSE pass already deduplicates identical-input calls under
+  JIT, but threading the dict through keeps the graph compact and
+  makes the dependency explicit.
+  """
   if isinstance(sfc_temperature, float):
     # Create a plane for the surface temperature representation.
     nx, ny, _ = temperature.shape
@@ -56,19 +67,22 @@ def _compute_local_properties_lw(
         (nx, ny), dtype=temperature.dtype
     )
 
-  # Compute optical properties: `optical_depth`, `ssa`, & `asymmetry_factor`.
-  lw_optical_props = optics_lib.compute_lw_optical_properties(
-      pressure,
-      temperature,
-      molecules,
-      igpt,
-      vmr_fields,
-      cloud_r_eff_liq,
-      cloud_path_liq,
-      cloud_r_eff_ice,
-      cloud_path_ice,
-      cloud_fraction=cloud_fraction,
-  )
+  if precomputed_lw_optical_props is not None:
+    lw_optical_props = precomputed_lw_optical_props
+  else:
+    # Compute optical properties: `optical_depth`, `ssa`, & `asymmetry_factor`.
+    lw_optical_props = optics_lib.compute_lw_optical_properties(
+        pressure,
+        temperature,
+        molecules,
+        igpt,
+        vmr_fields,
+        cloud_r_eff_liq,
+        cloud_path_liq,
+        cloud_r_eff_ice,
+        cloud_path_ice,
+        cloud_fraction=cloud_fraction,
+    )
 
   # Compute Planck sources: `planck_src`, `planck_src_bottom`, `planck_src_top`,
   # and `planck_src_sfc`.
@@ -262,21 +276,22 @@ def solve_lw(
     optimal_angle_fit = candidate
 
   def step_fn(igpt, cumulative_flux):
+    # Compute the LW optics once per g-point; reuse for both the
+    # optimal-angle secant and the source-and-properties solve.
+    # Without this, the optimal-angle path would call
+    # ``compute_lw_optical_properties`` twice per igpt and rely on
+    # XLA's CSE to deduplicate — explicit reuse keeps the graph
+    # smaller and the dependency obvious.
+    precomputed_props = optics_lib.compute_lw_optical_properties(
+        pressure, temperature, molecules, igpt, vmr_fields,
+        cloud_r_eff_liq, cloud_path_liq,
+        cloud_r_eff_ice, cloud_path_ice,
+        cloud_fraction=cloud_fraction,
+    )
     if optimal_angle_fit is not None:
-      # Compute optical depth in a throwaway pass so the optimal-angle
-      # column sum has the actual per-g-point tau.  Cheaper than running
-      # the full optics twice would suggest because the optics library
-      # caches its lookups within a single trace.  See
-      # ``_compute_optimal_lw_secant`` for the upstream formula.
-      tau_for_secant = optics_lib.compute_lw_optical_properties(
-          pressure, temperature, molecules, igpt, vmr_fields,
-          cloud_r_eff_liq, cloud_path_liq,
-          cloud_r_eff_ice, cloud_path_ice,
-          cloud_fraction=cloud_fraction,
-      )['optical_depth']
       band_idx = optics_lib.gas_optics_lw.g_point_to_bnd[igpt]
       lw_diffusive_factor = _compute_optimal_lw_secant(
-          tau_for_secant, band_idx, optimal_angle_fit
+          precomputed_props['optical_depth'], band_idx, optimal_angle_fit
       )
     else:
       lw_diffusive_factor = monochromatic_two_stream._LW_DIFFUSIVE_FACTOR
@@ -295,6 +310,7 @@ def solve_lw(
         cloud_path_ice,
         cloud_fraction=cloud_fraction,
         lw_diffusive_factor=lw_diffusive_factor,
+        precomputed_lw_optical_props=precomputed_props,
     )
 
     # Boundary conditions.
