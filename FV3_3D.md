@@ -2421,93 +2421,26 @@ Same at np=3 and np=6.  PE+NH factory step fidelity at np=2:
 ### Codex review
 
 Independent codex adversarial review returned **0 BLOCKERs / 0
-WARNs / 7 NITs**.  All 7 findings confirmed the implementation is
-structurally correct:
+WARNs / 7 NITs** — all confirming the implementation is
+structurally correct (tag scheme, buffer parsing by ``nbr_edge``,
+component swap semantics, reversal order, JIT compat, mpi4jax
+tag reuse pattern, send/recv canonical sort).
 
-1. Tag scheme (rank-valued) survives multi-pair simultaneity
-   because source + comm + tag disambiguate.
-2. Buffer parsing on receive uses ``nbr_edge`` correctly for
-   cross-face packing.
-3. Component swap semantics match single-device reference.
-4. Reversal-before-component-swap matches single-device order.
-5. No JIT-breaking traced conditionals introduced.
-6. Tag reuse follows existing mpi4jax-compatible pattern.
-7. Send/recv ordering symmetric via canonical sort.
+### Status
 
-### Final status — all 9 FV3-fidelity flags bit-for-bit FV3-faithful in production MPI mode
+All 9 FV3-fidelity flags now bit-for-bit FV3-faithful under
+BOTH local AND MPI backends in the default factory.  The user's
+"Always run on MPI as this will be standard" requirement is met.
 
-| Flag | Local | MPI |
-|------|-------|-----|
-| ``use_fv3_d_con_cv`` | ✅ | ✅ |
-| ``use_fv3_vector_halo_uv`` | ✅ | ✅ |
-| ``use_fv3_a2b_ord4_vector_uv`` | ✅ | ✅ |
-| ``use_fv3_dynamic_exner`` | ✅ | ✅ |
-| ``use_fv3_metric_aware_d_con`` | ✅ | ✅ |
-| ``use_fv3_a2b_zeta_corner`` | ✅ | ✅ |
-| ``use_fv3_cross_face_du_proj`` | ✅ iter-1078 | ✅ **iter-1083** |
-| ``use_fv3_sponge_damp_v`` | ✅ | ✅ |
-| ``use_fv3_sponge_damp_w`` | ✅ | ✅ |
+## Iteration 1082 (2026-05-28): MPI dgrid vector halo — failed per-edge sendrecv attempt
 
-The user's "Always run on MPI as this will be standard" requirement
-is now met for the full FV3-faithful default factory.
-
-## Iteration 1082 (2026-05-28): MPI dgrid vector halo — design notes + deferral
-
-### Goal
-
-Codex iter-1078 BLOCKER M1 flagged that ``pad_halo_dgrid_vector_4d``
-uses direct ``data[src_f, src_i, src_j]`` face indexing which reads
-STALE non-owned face data under cubed-sphere MPI mode (per
-``driver/model_driver.py:1206-1208``: "non-owned faces will diverge
-from truth but owned faces stay correct via MPI halo exchange").
-
-iter-1081 mitigated by falling back to ``mode='edge'`` under MPI.
-iter-1082 attempts a proper MPI-aware ``pad_halo_dgrid_vector_4d_mpi``
-that uses ``mpi4jax.sendrecv`` to pull cross-face edge data from
-the rank that owns the source face.
-
-### Design
-
-For each owned face's edge:
-1. Classify as same-axis (same component) or axis-swap (component
-   swap with sign).
-2. If neighbor face is on this rank → direct read + place (local
-   edges).
-3. If neighbor face is remote → ``sendrecv`` to exchange the
-   neighbor's edge data:
-   - Send: this face's edge of u_d + v_d (concatenated).
-   - Recv: neighbor face's edge of u_d + v_d.
-   - At axis-swap edges, use neighbor's v_d for this face's u_d
-     halo (with sign_uv) and vice versa.
-
-### Result
-
-Implementation attempted at iter-1082 deadlocked at np=2 due to
-per-edge sendrecv calls without sorted-peer batching.  The
-existing ``_pad_halo_mpi_face_only_4d`` pattern (which DOES work
-without deadlock) uses:
-- Batched-per-peer ``sendrecv`` (one message per neighbor rank).
-- Sorted peer iteration (avoids cyclic-wait deadlock at np=6).
-- Canonical send/recv tag scheme.
-
-Replicating that pattern for the staggered vector case requires
-careful packing of (u_strip, v_strip) pairs for each shared
-(this_face, edge, nbr_face, nbr_edge) tuple, which complicates the
-batching.  Deferred to a future iter.
-
-### Current MPI cross_face status
-
-| Backend | Behavior | FV3-faithful? |
-|---------|----------|----------------|
-| Local (single-device) | iter-1078 ``pad_halo_dgrid_vector_4d`` (24/24 edges) | ✅ Bit-for-bit |
-| MPI | iter-1081 ``mode='edge'`` fallback | ⚠️ Safe but not bit-for-bit |
-
-The MPI fallback gives CORRECT (non-corrupting) behavior on owned
-faces — it just doesn't get the full FV3 cross-face damping.
-``cross_face_du_proj`` was a SECOND-ORDER correction (the iter-370
-docstring says ~5e-5 s⁻¹ vorticity correction at edges); the
-fallback is acceptable for production use, with the FV3-faithful
-MPI variant tracked as the next infrastructure improvement.
+Codex iter-1078 BLOCKER M1: direct face indexing under MPI reads
+stale non-owned face data.  iter-1081 mitigated via
+``mode='edge'`` fallback.  iter-1082 attempted MPI-aware
+``pad_halo_dgrid_vector_4d_mpi`` with per-edge sendrecv but
+deadlocked at np=2 from mismatched peer order.  Reverted.
+iter-1083 lands the proper batched-per-peer pattern from
+``_pad_halo_mpi_face_only_4d``.  Resolution in iter-1083.
 
 ## Iteration 1077 (2026-05-28): wire ``pad_halo_dgrid_scalar_4d`` into iter-370 + re-enable factory ``cross_face_du_proj``
 
