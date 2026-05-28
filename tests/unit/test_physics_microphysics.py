@@ -559,6 +559,123 @@ def test_freezing_releases_latent_heat_of_fusion(scheme, call):
 
 
 # ============================================================================
+# Sundqvist condensation magnitude: target is q_sat, not RH_crit * q_sat
+# ============================================================================
+
+def test_sundqvist_condensation_target_is_qsat_not_rhcrit_qsat():
+    """Sundqvist must drive q_v toward q_sat, NOT toward RH_crit * q_sat.
+
+    Pre-fix bug (line 63 of sundqvist.py): the condensation formula was
+        condensation = f * max(q_v - RH_crit * q_sat, 0.0) / dt
+    which removed any vapor above 0.8*q_sat in one step.  At RH=1.0
+    this dropped RH to ~0.80 in a single 300-s call — physically wrong
+    (should drop AT MOST to 1.0, since there is no supersaturation to
+    remove); at RH=0.95 it still over-condensed to ~0.81.
+
+    Post-fix: target is ``q_sat`` and only the supersaturation
+    (``q_v - q_sat``) is removed.  The smooth ``f = sigmoid(s * (RH -
+    RH_crit))`` gate is preserved as the *onset* control for partial-
+    cloud-fraction subgrid variance, but the *target* is the
+    thermodynamic equilibrium ``q_sat``.
+
+    Cross-scheme contract: at RH=1.0 (saturated, not super) and a
+    realistic q_c ~ 1e-4, Sundqvist must remove at most ``(q_v -
+    q_sat) * dt`` of vapor — i.e., zero.  Kessler at the same point
+    removes zero (saturation adjustment is a no-op when q_v == q_sat).
+    """
+    ncol, nlev = 1, 5
+    T = jnp.full((ncol, nlev), 290.0)
+    p_full = jnp.full((ncol, nlev), 8e4)
+    p_half = jnp.broadcast_to(
+        jnp.linspace(7e4, 9e4, nlev + 1)[None, :], (ncol, nlev + 1),
+    )
+    rho = p_full / (constants.R_d * T)
+    dz = jnp.full((ncol, nlev), 1000.0)
+    q_sat = saturation_mixing_ratio(T, p_full)
+    q_c = jnp.full((ncol, nlev), 1e-4)
+    hydro = HydrometeorState(
+        q_c=q_c, q_r=jnp.zeros_like(q_c),
+        q_i=jnp.zeros_like(q_c), q_s=jnp.zeros_like(q_c),
+        q_g=jnp.zeros_like(q_c),
+        N_c=1e8 * jnp.ones_like(q_c), N_r=jnp.zeros_like(q_c),
+        N_i=jnp.zeros_like(q_c),
+    )
+    dt = 300.0
+    cfg = SundqvistConfig()
+    k_cfg = KesslerConfig()
+
+    # Case 1: RH = 1.0 exactly (saturated, no supersat to remove).
+    q_v_sat = q_sat.copy()
+    out_s = sundqvist_microphysics(
+        T, q_v_sat, hydro, p_full, p_half, rho, dz, dt, cfg,
+    )
+    out_k = kessler_microphysics(
+        T, q_v_sat, hydro, p_full, p_half, rho, dz, dt, k_cfg,
+    )
+    # Vapor removed must be at most ``q_v - q_sat`` * f_smooth.
+    # At RH=1, q_v - q_sat = 0, so the only allowed removal is
+    # float-roundoff from ``saturation_mixing_ratio``.  Pre-fix this
+    # assertion fired with dq_v_dt ≈ -1e-5 → 3e-3 kg/kg per step (RH
+    # dropped 1.00 → 0.80); post-fix it's ~1e-9 kg/kg (f32 rounding).
+    # The 1e-7 tolerance is six orders of magnitude below the pre-fix
+    # bug magnitude and well above f32 ULP.
+    dqv_per_step = float(jnp.max(jnp.abs(out_s.dq_v_dt))) * dt
+    assert dqv_per_step < 1e-7, (
+        f"Sundqvist over-condenses at RH=1.0 with q_c=1e-4: "
+        f"|dq_v_dt| * dt = {dqv_per_step:.3e} kg/kg.  "
+        f"Pre-fix bug: condensation target was RH_crit*q_sat=0.8*q_sat "
+        f"(legoesm #316-followup); post-fix target is q_sat so "
+        f"saturated columns are left alone."
+    )
+    # Cross-scheme: Kessler removes ~0 at this point (saturation
+    # adjustment + no supersat).  Sundqvist should agree to within
+    # rounding — same physical situation, same answer.  Use a 1e-7
+    # / dt tendency floor (≡ 3e-10 kg/kg/s at dt=300 s) so f32
+    # roundoff in saturation_mixing_ratio doesn't trip the test
+    # while the pre-fix bug (|dq_v_dt|·dt ≈ 3e-3) is caught with
+    # six orders of magnitude of margin.
+    atol_tend = 1e-7 / dt
+    assert bool(jnp.all(jnp.abs(out_s.dq_v_dt) < atol_tend)), (
+        f"Sundqvist removes vapor at exactly RH=1.0 (no supersat): "
+        f"max(|dq_v_dt|)={float(jnp.max(jnp.abs(out_s.dq_v_dt))):.3e}"
+    )
+    assert bool(jnp.all(jnp.abs(out_k.dq_v_dt) < atol_tend)), (
+        f"Kessler removes vapor at exactly RH=1.0 (no supersat): "
+        f"max(|dq_v_dt|)={float(jnp.max(jnp.abs(out_k.dq_v_dt))):.3e}"
+    )
+
+    # Case 2: RH = 0.95 (sub-saturated but above RH_crit=0.8).  No
+    # supersat → no condensation.  Pre-fix Sundqvist would still
+    # over-condense and drop RH to ~0.81.
+    q_v_sub = 0.95 * q_sat
+    out_s_sub = sundqvist_microphysics(
+        T, q_v_sub, hydro, p_full, p_half, rho, dz, dt, cfg,
+    )
+    rh_after = float(
+        (q_v_sub[0, 0] + out_s_sub.dq_v_dt[0, 0] * dt) / q_sat[0, 0]
+    )
+    assert rh_after > 0.94, (
+        f"Sundqvist over-condensed in subsaturated column (RH=0.95 → "
+        f"RH_after={rh_after:.3f}).  No supersat to remove — q_v must "
+        f"stay close to 0.95*q_sat."
+    )
+
+    # Case 3: RH = 1.20 (supersaturated).  Supersat removal must
+    # bring RH back to ~1.0 (within sigmoid smoothing).
+    q_v_super = 1.20 * q_sat
+    out_s_super = sundqvist_microphysics(
+        T, q_v_super, hydro, p_full, p_half, rho, dz, dt, cfg,
+    )
+    rh_after_super = float(
+        (q_v_super[0, 0] + out_s_super.dq_v_dt[0, 0] * dt) / q_sat[0, 0]
+    )
+    assert 0.99 < rh_after_super < 1.01, (
+        f"Sundqvist failed to remove supersaturation at RH=1.20 → "
+        f"RH_after={rh_after_super:.3f} (expected ~1.0)."
+    )
+
+
+# ============================================================================
 # Sundqvist column water budget (closes against surface precipitation)
 # ============================================================================
 

@@ -58,9 +58,25 @@ def diagnose_sundqvist_process_rates(
     RH = q_v / jnp.clip(q_sat, 1e-10)
 
     # 1. Smooth condensation activation — convert increment [kg/kg] to tendency [kg/kg/s]
+    #
+    # Sundqvist (1989) gates condensation on RH > RH_crit (partial
+    # cloud-fraction regime), but the *thermodynamic target* the
+    # condensation drives ``q_v`` toward is ``q_sat``, not
+    # ``RH_crit * q_sat``.  The previous code used
+    # ``max(q_v - RH_crit * q_sat, 0.0)`` which removed any vapor
+    # above ``0.8 * q_sat`` in a single step: at RH=1.0 the column
+    # lost ``0.2 * q_sat`` of vapor per call (verified with a
+    # T=290 K, p=80 kPa probe: dq_v_dt = -1e-5 kg/kg/s, dropping RH
+    # from 1.00 → 0.80 in one 300-s step).  Kessler at the same
+    # conditions removed zero (no supersat).  The fix removes only
+    # the *supersaturation* (``q_v - q_sat``), with ``f`` keeping
+    # the smooth RH_crit *onset* gating intact — Sundqvist's
+    # partial-cloud-fraction subgrid variance is diagnosed
+    # separately by :func:`legoesm.atmosphere.physics.clouds.cloud_fraction.sundqvist_cloud_fraction`
+    # and is not the microphysics tendency's concern.
     f = jax.nn.sigmoid(sharpness * (RH - config.RH_crit))
     condensation = (
-        f * jnp.maximum(q_v - config.RH_crit * q_sat, 0.0) / dt
+        f * jnp.maximum(q_v - q_sat, 0.0) / dt
     )  # [kg/kg/s]
 
     # 2. Autoconversion
@@ -77,6 +93,17 @@ def diagnose_sundqvist_process_rates(
     P_auto = jnp.minimum(P_auto_demand, qc_avail / dt_safe)
 
     # 3. Sub-cloud evaporation
+    #
+    # legoESM column layout convention: level index 0 = TOA, level
+    # index ``nlev-1`` = surface (``sigma_full`` runs 0→1 top→bottom;
+    # ``p_full[..., 0]`` is the lowest pressure).  ``moveaxis(..., 1,
+    # 0)`` puts the vertical axis first so :func:`jax.lax.scan`
+    # iterates TOA → surface — the correct direction for falling
+    # rain: ``P_above`` starts at zero (no rain above TOA),
+    # accumulates the autoconversion source ``P_local`` layer-by-
+    # layer on the way down, and lands at the surface as the final
+    # carry ``P_final``.  Sub-cloud evaporation reduces ``P_total``
+    # in sub-saturated layers (``evap_mask`` peaks where ``RH < RH_crit``).
     evap_mask = jax.nn.sigmoid(sharpness * (config.RH_crit - RH))
     P_flux_layer = P_auto * rho * dz
 
