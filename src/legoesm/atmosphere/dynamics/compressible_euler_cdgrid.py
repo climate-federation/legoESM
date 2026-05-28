@@ -1241,9 +1241,21 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
             # 1078), which combines iter-1076 same-axis cross-face
             # halo (16/24 edges) with iter-1078 DGRID_NE component
             # swap (8 axis-swap edges, u↔v with face-pair signs).
-            # All 24 directed edges are now bit-for-bit FV3-faithful.
-            # Replaces the iter-1077 per-component scalar halo path.
-            if self.config.use_fv3_cross_face_du_proj:
+            # All 24 directed edges are bit-for-bit FV3-faithful
+            # under the *local* halo backend.  Under MPI (codex
+            # iter-1078 BLOCKER M1): the dgrid_halo functions use
+            # direct ``data[src_f, ...]`` face indexing which reads
+            # STALE non-owned face data, since cubed-sphere MPI mode
+            # is replicated-but-only-owned-faces-are-updated.  Fall
+            # back to ``mode='edge'`` under MPI to avoid silent
+            # corruption.  MPI-aware dgrid vector halo with proper
+            # sendrecv tracked for a future iter.
+            from legoesm.grids.halo import get_halo_backend as _ghb_nh
+            _use_dgrid_halo_nh = (
+                self.config.use_fv3_cross_face_du_proj
+                and _ghb_nh() == "local"
+            )
+            if _use_dgrid_halo_nh:
                 from legoesm.grids.dgrid_halo import (
                     pad_halo_dgrid_vector_4d,
                 )

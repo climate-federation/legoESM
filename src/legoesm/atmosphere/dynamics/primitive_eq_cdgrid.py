@@ -1358,10 +1358,15 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
             # the call on the local backend).
             # FV3_3D iter-1079: route (du_normal, dv_normal) as a
             # vector pair through ``pad_halo_dgrid_vector_4d`` (iter-
-            # 1078) — see NH counterpart for rationale.  All 24
-            # directed edges bit-for-bit FV3-faithful via the
-            # iter-1076 same-axis + iter-1078 component-swap paths.
-            if self.config.use_fv3_cross_face_du_proj:
+            # 1078).  See NH counterpart for the MPI-stale-faces
+            # caveat (codex iter-1078 BLOCKER M1 — fall back to
+            # mode='edge' under MPI).
+            from legoesm.grids.halo import get_halo_backend as _ghb_pe
+            _use_dgrid_halo_pe = (
+                self.config.use_fv3_cross_face_du_proj
+                and _ghb_pe() == "local"
+            )
+            if _use_dgrid_halo_pe:
                 from legoesm.grids.dgrid_halo import (
                     pad_halo_dgrid_vector_4d,
                 )
