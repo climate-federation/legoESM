@@ -314,6 +314,31 @@ factor-of-2 test at stratospheric levels could not detect.
 
 ---
 
+## Iter 8 — bound optimal-angle vs fixed-1.66 LW flux delta (2026-05-28)
+
+### Sanity bound
+Upstream RFMIP comparisons report band-mean optimal secants in the
+range 1.5-1.9.  Switching from fixed 1.66 to the optimal angle
+should perturb LW fluxes by **single-digit percent**, not 50% or
+200%.
+
+### New test
+`test_optimal_angle_flux_impact_bounded` runs `solve_columns` with
+and without `use_optimal_angle` on a synthetic US-Std-ish column
+and asserts at the surface:
+
+- `|optimal − fixed| / fixed < 10%` (must not blow up).
+- `|optimal − fixed| / fixed > 1e-6` (must make *some* difference;
+  guards against silently-no-op plumbing).
+
+Sandwiches the optimal-angle math between two regression bounds.
+
+### Status
+- ✅ 32 RRTMGP-stratosphere tests pass.
+- ✅ Zero regressions.
+
+---
+
 ## Iter 7 — optimal-angle scan/loop equivalence (2026-05-28)
 
 ### Coverage gap
