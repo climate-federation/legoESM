@@ -30,6 +30,7 @@ from typing import TypeAlias
 import jax
 import jax.numpy as jnp
 import numpy as np
+from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.radiation.rrtmgp import kernel_ops
 from legoesm.atmosphere.physics.radiation.rrtmgp.rte import rte_utils
 
@@ -77,8 +78,16 @@ def lw_combine_sources(planck_srcs: StatesMap) -> StatesMap:
   """
   planck_src_top = planck_srcs['planck_src_top']
   planck_src_bottom = planck_srcs['planck_src_bottom']
+  # AD-safe floor (restored from commit 59407953): ``maximum(x, 0.0)`` gives
+  # ``sqrt(0)`` which has ``1/sqrt(0) = inf`` in the backward VJP; combined
+  # with zero cotangents (e.g. from stop_gradient'd spinup carries) this
+  # produces ``0 * inf = NaN`` by mul.  Floor at ``_EPSILON`` (same
+  # convention as ``_k_fn``) so the VJP stays bounded at
+  # ``1/(2*sqrt(_EPSILON)) = O(500)``.  Floor is physically negligible:
+  # combined Planck source values are O(0.01-10) W/m²/sr, while
+  # ``sqrt(_EPSILON) = 1e-3``.
   combined_src_top = jnp.sqrt(jnp.maximum(
-      planck_src_top * _shift_down(planck_src_bottom), 0.0
+      planck_src_top * _shift_down(planck_src_bottom), _EPSILON
   ))
   combined_src_bottom = _shift_up(combined_src_top)
   return {
@@ -501,8 +510,17 @@ def _solve_rte_2stream(
   ) -> tuple[Array, Array]:
     """Recurrent formula for albedo solution, starting from the surface."""
     # Geometric series solution accounting for infinite reflection events.
-    # Clamp denominator away from zero for AD stability.
-    beta = 1 / jnp.maximum(1 - r_diff * albedo_below, _EPSILON)
+    # AD-safe denominator (restored from commit 59407953): ``1 /
+    # jnp.maximum(x, _EPSILON)`` has a ``-1/x**2`` VJP that overflows when
+    # ``x`` is at the floor, propagating NaN gradients into every upstream
+    # traced parameter whose state path touches the column optical depth
+    # (e.g. C_H/C_E via boundary-layer-driven T/q_v perturbations).
+    # ``safe_divide`` masks the bad branch before the divide so the
+    # backward never differentiates ``1/x`` at tiny ``x``.
+    denom = 1 - r_diff * albedo_below
+    beta = safe_divide(
+        jnp.ones_like(denom), denom, eps=_EPSILON, fill=1.0 / _EPSILON,
+    )
     out = r_diff + t_diff**2 * beta * albedo_below
     return out, out  # Carry and output are the same.
 
@@ -531,7 +549,11 @@ def _solve_rte_2stream(
   ) -> tuple[Array, Array]:
     """Recurrent formula for upward emission, starting from the surface."""
     # Geometric series solution accounting for infinite reflection events.
-    beta = 1 / jnp.maximum(1 - r_diff * albedo, _EPSILON)
+    # AD-safe denominator (see ``albedo_op`` above, restored from 59407953).
+    denom = 1 - r_diff * albedo
+    beta = safe_divide(
+        jnp.ones_like(denom), denom, eps=_EPSILON, fill=1.0 / _EPSILON,
+    )
     out = src_up + t_diff * beta * (emission_from_below + src_down * albedo)
     return out, out  # Carry and output are the same.
 
@@ -565,7 +587,11 @@ def _solve_rte_2stream(
   ) -> tuple[Array, Array]:
     """Recurrent formula for downwelling flux initiating at top boundar."""
     # Geometric series solution accounting for infinite reflection events.
-    beta = 1 / jnp.maximum(1 - r_diff * albedo, _EPSILON)
+    # AD-safe denominator (see ``albedo_op`` above, restored from 59407953).
+    denom = 1 - r_diff * albedo
+    beta = safe_divide(
+        jnp.ones_like(denom), denom, eps=_EPSILON, fill=1.0 / _EPSILON,
+    )
     out = (t_diff * flux_down_from_above + r_diff * emiss_up + src_down) * beta
     return out, out  # Carry and output are the same.
 
