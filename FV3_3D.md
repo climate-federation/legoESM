@@ -2378,6 +2378,60 @@ The iter 168-193 long-form prose (FV3-faithful damping ports to
 the NH path) follows below.  Iters 194-218 are documented via
 the Table of Contents only (no separate prose section).
 
+## Iteration 1074 (2026-05-28): pin iter-1073 non-square halo guards with dedicated tests
+
+### Goal
+
+iter-1072/1073 added ``ValueError`` guards at all 6 public 4D
+halo entry points to catch non-square cubed-sphere data at the
+call site (the underlying bug — silent corruption from
+``_get_halo_tables_h1(n=data.shape[1])`` — remains unfixed,
+tracked as the iter-1046 follow-up).
+
+These guards have no dedicated unit-test coverage; the 82 factory
+tests at iter-1073 validation pass because they all use square
+data (the production path no longer routes non-square data
+through the halo entries by default).  A future regression that
+re-enabled ``use_fv3_cross_face_du_proj`` in the factory, or that
+added a new non-square caller, would not be caught.
+
+### Test
+
+``tests/test_non_square_halo_guard_iter1073.py`` (new, 14 tests):
+
+For each of two orientations (``n_x < n_y`` and ``n_x > n_y``),
+assert that calling each of the 6 guarded entry points with
+non-square input raises ``ValueError`` with the iter-1072 pointer
+in the message:
+
+- ``pad_halo_4d`` (iter-1072 entry)
+- ``pad_halo_vector_4d`` — both ``u_data`` and ``v_data``
+  independently (iter-1073)
+- ``explicit_pad_halo_4d`` (SPMD, iter-1073)
+- ``packed_pad_halo_4d`` (SPMD packed, iter-1073)
+- ``packed_pad_halo_4d`` multi-field: mixed square + non-square
+  fields trigger the field-index-specific message
+
+Plus 2 sanity tests confirming square-data callers still work.
+
+### Validation
+
+::
+
+    JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu .venv/bin/python -m pytest \
+        tests/test_non_square_halo_guard_iter1073.py
+    => 14 passed in 0.77s
+
+### Why this matters
+
+The iter-1072/1073 guards are defensive — they catch a real
+silent-corruption bug class.  Without test coverage, the guards
+could regress silently (e.g., removed by a future refactor or
+weakened to a warning) and the underlying bug would return.  The
+iter-1074 tests pin the guard contract: any change that lets a
+non-square call through must update these tests, surfacing the
+intent.
+
 ## Iteration 1073 (2026-05-28): codex iter-1072 BLOCKER — close sibling-path bypasses of the non-square guard
 
 ### Goal
