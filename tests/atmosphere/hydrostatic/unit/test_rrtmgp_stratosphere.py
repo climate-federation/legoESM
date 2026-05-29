@@ -50,6 +50,10 @@ from legoesm.atmosphere.physics.radiation.rrtmgp.optics import (
     gas_optics,
     optics_utils,
 )
+from legoesm.atmosphere.physics.radiation.rrtmgp.rte import (
+    monochromatic_two_stream,
+    rte_utils,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -2184,6 +2188,179 @@ class TestAerosolPath:
             f"d(sum sw_flux_down)/d(AOD) should be negative for a "
             f"scattering aerosol; got {float(jnp.sum(g))}."
         )
+
+
+class TestRteRecurrenceScanEquivalence:
+    """Iter-71: pin the GPU(scan) vs CPU(for-loop) equivalence of the
+    vertical-recurrence engine that drives the monochromatic two-stream
+    solver.
+
+    ``rte_utils.recurrent_op_with_halos`` dispatches to two distinct code
+    paths: ``lax.scan`` (auto-selected on GPU/TPU, where the unrolled
+    ``dynamic_update_slice`` chain of the for-loop is slow and the scan
+    lowers to a single fused kernel) and a Python ``for`` loop
+    (auto-selected on CPU/Metal).  All four Shonk-Hogan recurrences of the
+    monochromatic LW/SW solver (direct-beam, albedo, upward-emission,
+    downward-flux) flow through it, exposed by the ``rrtmgp_use_scan``
+    config knob.
+
+    ``test_production_blockers`` already pins that the knob *routes*
+    correctly; what was untested is that the two paths return the **same
+    numbers**.  If they diverge, a GPU run silently produces different
+    fluxes (and different gradients) than the CPU reference — a
+    cross-backend break (CLAUDE.md: "Cross-backend: dtype, x64,
+    unsupported kernels, comm semantics") that no flux norm or
+    integration test would localise.  The paths run identical sequential
+    arithmetic in identical order (differing only by a ``moveaxis``
+    transpose, no reductions), so they must agree to round-off.  Forced
+    ``use_scan=`` overrides the platform auto-pick so the scan path is
+    exercised on this CPU test host.
+    """
+
+    @staticmethod
+    def _tol():
+        # The paths differ only by data movement, not arithmetic, so
+        # agreement is essentially round-off — tighten under x64, relax
+        # for an x32 conftest.  A genuine divergence is O(flux), caught
+        # by either bound.
+        if jax.config.read("jax_enable_x64"):
+            return dict(rtol=1e-11, atol=1e-12)
+        return dict(rtol=1e-5, atol=1e-6)
+
+    @staticmethod
+    def _albedo_like_op(carry, r_diff, t_diff):
+        """A Shonk-Hogan-style geometric-series recurrence (mirrors the
+        real ``albedo_op`` in ``monochromatic_two_stream``).  Non-linear
+        in the carry, so a path that mishandled carry threading or scan
+        direction would diverge immediately."""
+        denom = 1.0 - r_diff * carry
+        out = r_diff + t_diff ** 2 * carry / denom
+        return out, out
+
+    @staticmethod
+    def _halo_inputs(seed, d0=2, d1=3, nz=14):
+        """3D inputs carrying one halo layer at each z end — the
+        convention ``recurrent_op_with_halos`` strips then re-pads.
+        Ranges keep ``1 - r_diff*carry`` well away from zero."""
+        rng = np.random.default_rng(seed)
+        return (
+            {
+                "r_diff": jnp.asarray(rng.uniform(0.05, 0.40, (d0, d1, nz))),
+                "t_diff": jnp.asarray(rng.uniform(0.30, 0.55, (d0, d1, nz))),
+            },
+            jnp.asarray(rng.uniform(0.0, 0.9, (d0, d1))),
+        )
+
+    def test_recurrent_op_with_halos_scan_equals_forloop_forward(self):
+        inputs, init = self._halo_inputs(71)
+        carry_s, out_s = rte_utils.recurrent_op_with_halos(
+            self._albedo_like_op, init, inputs, forward=True, use_scan=True,
+        )
+        carry_f, out_f = rte_utils.recurrent_op_with_halos(
+            self._albedo_like_op, init, inputs, forward=True, use_scan=False,
+        )
+        np.testing.assert_allclose(
+            np.asarray(out_s), np.asarray(out_f), **self._tol(),
+            err_msg="forward recurrence: scan vs for-loop output diverged",
+        )
+        np.testing.assert_allclose(
+            np.asarray(carry_s), np.asarray(carry_f), **self._tol(),
+            err_msg="forward recurrence: scan vs for-loop carry diverged",
+        )
+
+    def test_recurrent_op_with_halos_scan_equals_forloop_reverse(self):
+        inputs, init = self._halo_inputs(72)
+        carry_s, out_s = rte_utils.recurrent_op_with_halos(
+            self._albedo_like_op, init, inputs, forward=False, use_scan=True,
+        )
+        carry_f, out_f = rte_utils.recurrent_op_with_halos(
+            self._albedo_like_op, init, inputs, forward=False, use_scan=False,
+        )
+        np.testing.assert_allclose(
+            np.asarray(out_s), np.asarray(out_f), **self._tol(),
+            err_msg="reverse recurrence: scan vs for-loop output diverged",
+        )
+        np.testing.assert_allclose(
+            np.asarray(carry_s), np.asarray(carry_f), **self._tol(),
+            err_msg="reverse recurrence: scan vs for-loop carry diverged",
+        )
+
+    def test_recurrent_op_with_halos_grad_scan_equals_forloop(self):
+        """Reverse-mode AD must agree between the two paths: training on
+        GPU (scan) must see the same gradients as the CPU reference, else
+        a differentiable run optimises against a backend-dependent
+        objective."""
+        inputs, init = self._halo_inputs(73)
+
+        def loss(r_diff, use_scan):
+            _, out = rte_utils.recurrent_op_with_halos(
+                self._albedo_like_op, init,
+                {"r_diff": r_diff, "t_diff": inputs["t_diff"]},
+                forward=True, use_scan=use_scan,
+            )
+            return jnp.sum(out ** 2)
+
+        g_s = jax.grad(lambda r: loss(r, True))(inputs["r_diff"])
+        g_f = jax.grad(lambda r: loss(r, False))(inputs["r_diff"])
+        assert jnp.all(jnp.isfinite(g_s)), f"scan-path grad not finite: {g_s}"
+        assert jnp.all(jnp.isfinite(g_f)), f"loop-path grad not finite: {g_f}"
+        np.testing.assert_allclose(
+            np.asarray(g_s), np.asarray(g_f), **self._tol(),
+            err_msg="reverse-mode AD: scan vs for-loop gradient diverged",
+        )
+
+    @staticmethod
+    def _lw_inputs(seed, d0=2, d1=3, nz=14):
+        rng = np.random.default_rng(seed)
+        sh3, sh2 = (d0, d1, nz), (d0, d1)
+        return dict(
+            t_diff=jnp.asarray(rng.uniform(0.30, 0.60, sh3)),
+            r_diff=jnp.asarray(rng.uniform(0.05, 0.30, sh3)),
+            src_up=jnp.asarray(rng.uniform(0.5, 2.0, sh3)),
+            src_down=jnp.asarray(rng.uniform(0.5, 2.0, sh3)),
+            toa_flux_down=jnp.asarray(rng.uniform(0.0, 1.0, sh2)),
+            sfc_src=jnp.asarray(rng.uniform(1.0, 3.0, sh2)),
+            sfc_emissivity=jnp.asarray(rng.uniform(0.80, 0.99, sh2)),
+        )
+
+    def test_lw_transport_scan_equals_forloop(self):
+        """End-to-end LW: all three of ``_solve_rte_2stream``'s
+        recurrences (albedo, emission, downward-flux) must give identical
+        ``flux_up`` / ``flux_down`` / ``flux_net`` on both paths."""
+        kw = self._lw_inputs(74)
+        f_scan = monochromatic_two_stream.lw_transport(**kw, use_scan=True)
+        f_loop = monochromatic_two_stream.lw_transport(**kw, use_scan=False)
+        for key in ("flux_up", "flux_down", "flux_net"):
+            np.testing.assert_allclose(
+                np.asarray(f_scan[key]), np.asarray(f_loop[key]), **self._tol(),
+                err_msg=f"lw_transport scan vs for-loop diverged in {key!r}",
+            )
+
+    @staticmethod
+    def _sw_inputs(seed, d0=2, d1=3, nz=14):
+        rng = np.random.default_rng(seed)
+        sh3, sh2 = (d0, d1, nz), (d0, d1)
+        return dict(
+            t_diff=jnp.asarray(rng.uniform(0.30, 0.60, sh3)),
+            r_diff=jnp.asarray(rng.uniform(0.05, 0.30, sh3)),
+            src_up=jnp.asarray(rng.uniform(0.0, 1.0, sh3)),
+            src_down=jnp.asarray(rng.uniform(0.0, 1.0, sh3)),
+            sfc_src=jnp.asarray(rng.uniform(0.0, 1.0, sh2)),
+            sfc_albedo=jnp.asarray(rng.uniform(0.05, 0.30, sh2)),
+            flux_down_dir=jnp.asarray(rng.uniform(0.0, 10.0, sh3)),
+        )
+
+    def test_sw_transport_scan_equals_forloop(self):
+        """End-to-end SW (including the direct-beam ``flux_down_dir`` add)
+        must be path-independent."""
+        kw = self._sw_inputs(75)
+        f_scan = monochromatic_two_stream.sw_transport(**kw, use_scan=True)
+        f_loop = monochromatic_two_stream.sw_transport(**kw, use_scan=False)
+        for key in ("flux_up", "flux_down", "flux_net"):
+            np.testing.assert_allclose(
+                np.asarray(f_scan[key]), np.asarray(f_loop[key]), **self._tol(),
+                err_msg=f"sw_transport scan vs for-loop diverged in {key!r}",
+            )
 
 
 if __name__ == "__main__":  # pragma: no cover

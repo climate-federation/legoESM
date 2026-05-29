@@ -79,7 +79,7 @@ Metal-env skip (iter-59), `recurrent_op_1d{,_scan}` (iter-60),
 `GrayAtmosphereOptics` class + config + factory branch
 (iter-61), `_shift_up` + Planck-path clarifier (iter-62).
 
-### Test coverage expansion (iter-63 → 68)
+### Test coverage expansion (iter-63 → 71)
 - iter-63: `TestMixedPrecision` — fp32-vs-fp64 numerical
   equivalence within fp32 round-off (x64-gated, skips otherwise);
   bfloat16-input finiteness.
@@ -103,29 +103,43 @@ Metal-env skip (iter-59), `recurrent_op_1d{,_scan}` (iter-60),
   index off-by-one (`argmax(p_full)` is full-level idx but flux
   arrays are interface-dim) → fixed to `[0, -1]`; (b) fp32-vs-fp64
   test needs x64 guard → added `pytest.skip` when x64 off.
+- iter-70: `TestCloudPath` ice extension — cirrus IWP reduces TOA
+  OLR (cold-cloud greenhouse), ∂(OLR)/∂(IWP) finite + column-sum
+  negative.  Closes the cloud_path_ice gap (codex iter-69 Q5).
+- iter-71: `TestRteRecurrenceScanEquivalence` — GPU(`lax.scan`) ≡
+  CPU(for-loop) for `rte_utils.recurrent_op_with_halos`: forward +
+  reverse recurrence, reverse-mode AD gradient, and end-to-end
+  `monochromatic_two_stream.{lw,sw}_transport` flux_{up,down,net}.
+  Pins the `rrtmgp_use_scan` GPU perf knob as numerically inert
+  (cross-backend safety); `test_production_blockers` only pinned
+  its config routing, not flux/gradient equality.
 
-### Test classes in `test_rrtmgp_stratosphere.py` (~60 tests)
+### Test classes in `test_rrtmgp_stratosphere.py` (~65 tests)
 `TestClipToTableRange`, `TestRelativeAbundanceSafeDiv`,
 `TestOutOfRangeTemperature`, `TestMixedPrecision`,
 `TestOptimalLwSecant`, `TestStandardO3Profile`,
 `TestTropopauseBoundary`, `TestADSafetyAtStratosphereTau`,
 `TestCloudKwargsHelper`, `TestHeatingRateSign`,
-`TestEnergyConservation`, `TestCloudPath`, `TestAerosolPath`.
+`TestEnergyConservation`, `TestCloudPath`, `TestAerosolPath`,
+`TestRteRecurrenceScanEquivalence`.
 `test_radiation.py::{TestRRTMGP,TestColumnShardedRadiation}` —
 cache-key + sharded-equivalence + iter-13/15 end-to-end pins.
 
 ---
 
-## Status (after iter-70)
+## Status (after iter-71)
 
-- ✅ 126 pass + 6 skip (3 Metal-broken + 2 multidevice +
+- ✅ 131 pass + 6 skip (3 Metal-broken + 2 multidevice +
   1 fp32-vs-fp64 x64-gated) — 0 fail.
 - ✅ AD-safe end-to-end; mixed precision via table-dtype cast;
   fp32 inputs OK; bfloat16 inputs accepted.
 - ✅ MPI/GPU: `lax.scan + jax.checkpoint` per g-point;
   column-permutation invariant; column-local invariance pinned
   (subset ≡ slice of full); shard-equivalent for default and
-  `use_optimal_angle=True` paths.
+  `use_optimal_angle=True` paths.  Vertical-recurrence GPU path
+  (`use_scan=True`, `recurrent_op_with_halos`) pinned numerically
+  identical to the CPU for-loop for fluxes **and** gradients
+  (iter-71) — the perf knob never changes answers.
 - ✅ ~1113 LOC dead swirl_jatmos code removed across iter-22 → 62.
 - ✅ Physical sign pinned: cloud-albedo on SW, cloud-greenhouse
   on LW, aerosol reduces surface SW, scattering aerosol has
@@ -139,5 +153,6 @@ cache-key + sharded-equivalence + iter-13/15 end-to-end pins.
   reference-flux validation (iter-29 gating sharded test exists).
 - LW aerosol path (currently only SW; upstream rte-rrtmgp
   supports both).
-- Cloud_path_ice / cloud_fraction / solar_spectral_fraction /
-  o3_vmr / ghg_vmr_override coverage gaps (codex iter-69 Q5).
+- cloud_fraction / solar_spectral_fraction / o3_vmr /
+  ghg_vmr_override coverage gaps (codex iter-69 Q5; cloud_path_ice
+  closed iter-70).
