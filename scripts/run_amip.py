@@ -164,8 +164,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rh-init", type=float, default=None,
                         help="Initial relative humidity (default 0.7); lower for drier IC")
     parser.add_argument("--ic", type=str, default="default",
-                        choices=["default", "era5"],
-                        help="Initial condition source: 'default' uses held_suarez_init; "
+                        choices=["default", "standard", "era5"],
+                        help="Initial condition source: 'default' uses a uniform "
+                             "T_init rest state; 'standard' uses a realistic "
+                             "constant-lapse-rate atmosphere with an equator-pole "
+                             "surface-temperature gradient (Earth-like CWV); "
                              "'era5' loads reanalysis from --ic-path")
     parser.add_argument("--ic-path", type=str, default="",
                         help="Path to ERA5 Zarr store for --ic era5")

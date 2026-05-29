@@ -498,6 +498,80 @@ class ModelDriver:
 
             self.get_sst_sic = get_sst_sic
 
+    def _apply_standard_atmosphere_ic(self) -> None:
+        """Override the scaffold temperature with a realistic standard
+        atmosphere (constant-lapse-rate troposphere + isothermal stratosphere +
+        equator-pole surface gradient).  Grid-agnostic core; the per-grid work
+        is only fetching the horizontal latitude field in the state's layout.
+
+        The equator surface temperature is taken from ``config.T_init`` so the
+        existing ``--t-init`` flag stays meaningful; the gradient, lapse rate
+        and stratospheric floor use Earth-like defaults.
+        """
+        from legoesm.atmosphere.standard_atmosphere import (
+            StandardAtmosphereConfig,
+            standard_atmosphere_temperature,
+            standard_atmosphere_zonal_wind,
+        )
+
+        cfg = self.config
+        gt = cfg.grid.grid_type
+        # Lat-lon only: the A-grid u is geographic-east, so the balanced jet
+        # (a geographic eastward wind) is assigned directly.  Cubed-sphere u/v
+        # are cube-LOCAL components that would need a grid-angle rotation first,
+        # and spectral/MPAS need other handling — all rejected up front in
+        # ExperimentConfig.validate_strict, so this is defensive.
+        if gt == "latlon":
+            lat_h = self.grid.lat2d                   # (n_lat, n_lon)
+        else:
+            raise NotImplementedError(
+                f"ic='standard' not yet wired for grid_type={gt!r} "
+                f"(discretization={cfg.dycore.discretization!r}); only 'latlon' "
+                "is supported. Use ic='default' or 'era5'."
+            )
+
+        sa_cfg = StandardAtmosphereConfig(T_sfc_equator_K=cfg.T_init)
+        lat_h = jnp.asarray(lat_h)
+        T_new = standard_atmosphere_temperature(
+            lat_h, self.sigma.sigma_full, sa_cfg,
+        ).astype(self.state.T.data.dtype)
+        self.state = self.state._replace(T=self.state.T.replace(data=T_new))
+
+        # Thermal-wind-balanced zonal wind so the imposed equator-pole
+        # temperature gradient does not launch a geostrophic-adjustment shock at
+        # startup.  v stays zero (the balance is zonal).  Reuses the grid's own
+        # radius/rotation (constants fallback per the audit rule).
+        radius = getattr(self.grid, "radius", constants.R_earth)
+        omega = getattr(self.grid, "omega", constants.Omega)
+        u_new = standard_atmosphere_zonal_wind(
+            lat_h, self.sigma.sigma_full, radius, omega, sa_cfg,
+        ).astype(self.state.u.data.dtype)
+        # Broadcast (… , nlev) to the centered u Field's layout (identical
+        # horizontal shape for the A-grid scaffold state).
+        self.state = self.state._replace(
+            u=self.state.u.replace(data=jnp.broadcast_to(u_new, self.state.u.data.shape)),
+        )
+
+        # Make surface pressure consistent with the NEW temperature over
+        # topography.  The scaffold reduced p_s hydrostatically against the
+        # uniform T_init column (p_s = p0*exp(-phis/(R_d*T_init))); with the
+        # standard column the representative surface temperature is T_sfc(lat),
+        # so re-scale to p_s = p0*exp(-phis/(R_d*T_sfc)).  Written as a relative
+        # correction of the current p_s so p0 need not be re-derived; it is an
+        # exact no-op where phis == 0 (flat topography), leaving flat-case runs
+        # bit-identical.
+        T_sfc_std = standard_atmosphere_temperature(
+            lat_h, jnp.ones((1,), dtype=self.sigma.sigma_full.dtype), sa_cfg,
+        )[..., 0]
+        phis = self.state.phis.data
+        p_s_old = self.state.p_s.data
+        p_s_new = p_s_old * jnp.exp(
+            -phis / constants.R_d * (1.0 / T_sfc_std - 1.0 / cfg.T_init)
+        )
+        self.state = self.state._replace(
+            p_s=self.state.p_s.replace(data=p_s_new.astype(p_s_old.dtype)),
+        )
+
     def _init_state(self) -> None:
         """Initialize atmospheric state and moisture."""
         from legoesm.diagnostics.column_integrals import column_water_vapor
@@ -541,6 +615,15 @@ class ModelDriver:
                     self.state = self.state._replace(
                         phis=self.state.phis.replace(data=self._phis_data),
                     )
+
+        # Physically-realistic "standard atmosphere" override: replace the
+        # uniform-T_init scaffold temperature with a constant-lapse-rate
+        # troposphere + isothermal stratosphere + equator-pole gradient, BEFORE
+        # the moisture init below so the q_v column integral comes out Earth-like
+        # (~15-30 kg/m^2) instead of ~80 kg/m^2.  ERA5 IC (handled later) takes
+        # precedence and fully overwrites the state.
+        if cfg.ic == "standard":
+            self._apply_standard_atmosphere_ic()
 
         # Initialize all tracers via registry
         self.tracers = init_tracers(self.tracer_registry, shape_3d)
