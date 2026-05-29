@@ -38,6 +38,9 @@ from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
 )
 from legoesm.ocean.eos import compute_ocean_rho, make_eos_fn
+from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+    gm_redi_tracer_tendency_latlon,
+)
 from legoesm.ocean.state import LatLonCGridOceanConfig, LatLonCGridOceanState
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
@@ -87,8 +90,14 @@ class LatLonProbeResult(NamedTuple):
     total_u: jnp.ndarray             # Σ PE components (excl. Coriolis)
     total_v: jnp.ndarray
     # Tracer tendencies — degC/s, PSU/s
-    dT_dt_total: jnp.ndarray         # total dT/dt as the model would integrate
+    dT_dt_total: jnp.ndarray         # total dT/dt incl. GM/Redi (see below)
     dS_dt_total: jnp.ndarray
+    # GM/Redi isopycnal-mixing tracer tendency. The lat-lon model applies this
+    # in its tracer step (from the top-level config.gm_redi), NOT inside
+    # baroclinic_tendencies — so the probe computes it explicitly to include it
+    # in the tier-2 comparison, and folds it into dT_dt_total/dS_dt_total.
+    dT_gm_redi: jnp.ndarray
+    dS_gm_redi: jnp.ndarray
     # EOS-derived density at cell centres — kg/m^3
     rho: jnp.ndarray
 
@@ -154,6 +163,23 @@ def probe_latlon_cgrid(
     )
     rho = compute_ocean_rho(state, z_coord, J, eos_fn=eos_fn)
 
+    # GM/Redi isopycnal mixing — the lat-lon model applies this in its tracer
+    # step (from the TOP-LEVEL config.gm_redi), not inside baroclinic_tendencies.
+    # Compute it here so it (a) is exposed for the per-process iso comparison and
+    # (b) is folded into the tracer totals to match what the model integrates.
+    if getattr(config, "gm_redi", None) is not None:
+        dT_gm, dS_gm = gm_redi_tracer_tendency_latlon(
+            state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
+            grid, z_coord, config.gm_redi,
+            eos=getattr(config, "eos", "wright"),
+            eos_linear=getattr(config, "eos_linear", None),
+            mask=state.land_mask.data,
+            u_mask=state.u_mask.data, v_mask=state.v_mask.data,
+        )
+    else:
+        dT_gm = jnp.zeros_like(tendencies.dT_dt.data)
+        dS_gm = jnp.zeros_like(tendencies.dS_dt.data)
+
     return LatLonProbeResult(
         pgf_ke_u=diag.KE_PGF_u.data,
         pgf_ke_v=diag.KE_PGF_v.data,
@@ -175,8 +201,10 @@ def probe_latlon_cgrid(
         phys_v=diag.phys_v.data,
         total_u=diag.total_u.data,
         total_v=diag.total_v.data,
-        dT_dt_total=tendencies.dT_dt.data,
-        dS_dt_total=tendencies.dS_dt.data,
+        dT_dt_total=tendencies.dT_dt.data + dT_gm,
+        dS_dt_total=tendencies.dS_dt.data + dS_gm,
+        dT_gm_redi=dT_gm,
+        dS_gm_redi=dS_gm,
         rho=rho,
     )
 

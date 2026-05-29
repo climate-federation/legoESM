@@ -100,37 +100,6 @@ def _run_legoesm_probe(recipe, base_state):
     return probe
 
 
-def _tracer_per_process(recipe, state):
-    """Isolate legoESM per-process tracer tendencies by differencing probe
-    runs with one mixing scheme toggled off.
-
-    legoESM exposes only ``dT_dt_total`` (advection + all active mixing), so
-    a single process is isolated as ``full - (that scheme disabled)``:
-      iso  := full - (lateral_mixing off)   (GM/Redi isoneutral)
-      vmix := full - (vertical_mixing off)   (vertical mixing)
-    Tracers live at cell centres, so no face interpolation is needed.
-    Returns a dict ``{"dT_iso","dS_iso","dT_vmix","dS_vmix"}`` of arrays.
-    """
-    phys = recipe.physics_config
-
-    def _probe(physics_cfg):
-        cfg = recipe.model_config._replace(physics=physics_cfg)
-        pr = probe_latlon_cgrid(state, recipe.grid, recipe.z_coord, cfg, dt=DT_MOM_S)
-        return np.asarray(pr.dT_dt_total), np.asarray(pr.dS_dt_total)
-
-    dT_full, dS_full = _probe(phys)
-    phys_no_lat = phys._replace(
-        lateral_mixing=phys.lateral_mixing._replace(scheme="none"))
-    phys_no_vert = phys._replace(
-        vertical_mixing=phys.vertical_mixing._replace(scheme="none"))
-    dT_no_lat, dS_no_lat = _probe(phys_no_lat)
-    dT_no_vert, dS_no_vert = _probe(phys_no_vert)
-    return {
-        "dT_iso": dT_full - dT_no_lat, "dS_iso": dS_full - dS_no_lat,
-        "dT_vmix": dT_full - dT_no_vert, "dS_vmix": dS_full - dS_no_vert,
-    }
-
-
 def _write_report(
     output_path: Path,
     legoesm_probe,
@@ -316,18 +285,22 @@ def main() -> int:
 
         tracer_metrics = None
         if veros_result is not None:
-            print("==> Isolating legoESM per-process tracer tendencies...")
-            tp = _tracer_per_process(recipe, probe_state)
+            # iso: legoESM GM/Redi tracer tendency (now computed directly by the
+            # probe from the top-level config.gm_redi) vs Veros dtemp_iso/dsalt_iso.
+            # NOTE: the earlier differencing approach was a no-op — the probe runs
+            # physics_fn=None so toggling config.physics changed nothing, AND
+            # GM/Redi was mis-wired into physics.lateral_mixing (inactive). Fixed
+            # in c5abe950 + the probe extension. (vmix is implicit in legoESM ->
+            # no explicit tendency to compare; documented delta, omitted.)
             tracer_metrics = {}
-            for label, lk, vk in (
-                ("T_iso", "dT_iso", "veros_dT_iso"),
-                ("T_vmix", "dT_vmix", "veros_dT_vmix"),
-                ("S_iso", "dS_iso", "veros_dS_iso"),
-                ("S_vmix", "dS_vmix", "veros_dS_vmix"),
+            for label, probe_field, vk in (
+                ("T_iso", legoesm_probe.dT_gm_redi, "veros_dT_iso"),
+                ("S_iso", legoesm_probe.dS_gm_redi, "veros_dS_iso"),
             ):
                 if vk in veros_tendencies:
                     tracer_metrics[label] = per_region_metrics(
-                        jnp.asarray(tp[lk]), jnp.asarray(veros_tendencies[vk]), masks,
+                        jnp.asarray(probe_field), jnp.asarray(veros_tendencies[vk]),
+                        masks,
                     )
 
     print("==> Writing comparison report...")

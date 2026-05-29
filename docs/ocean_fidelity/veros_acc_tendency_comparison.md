@@ -28,8 +28,10 @@ Constants override: ``override_constants(**VEROS_CONSTANTS)``
 - ``phys_v``: shape (45, 30, 15), min=0.000e+00, max=0.000e+00, L1=0.000e+00
 - ``total_u``: shape (44, 31, 15), min=-2.660e-07, max=4.716e-07, L1=5.410e-09
 - ``total_v``: shape (45, 30, 15), min=-2.085e-07, max=1.952e-07, L1=3.376e-08
-- ``dT_dt_total``: shape (44, 30, 15), min=0.000e+00, max=0.000e+00, L1=0.000e+00
-- ``dS_dt_total``: shape (44, 30, 15), min=0.000e+00, max=0.000e+00, L1=0.000e+00
+- ``dT_dt_total``: shape (44, 30, 15), min=-3.556e-09, max=3.859e-09, L1=1.206e-10
+- ``dS_dt_total``: shape (44, 30, 15), min=-2.539e-20, max=2.573e-20, L1=1.287e-21
+- ``dT_gm_redi``: shape (44, 30, 15), min=-3.556e-09, max=3.859e-09, L1=1.206e-10
+- ``dS_gm_redi``: shape (44, 30, 15), min=-2.539e-20, max=2.573e-20, L1=1.287e-21
 - ``rho``: shape (44, 30, 15), min=9.973e+02, max=1.034e+03, L1=1.025e+03
 
 ## Per-region per-process metrics (legoESM vs Veros)
@@ -69,7 +71,5 @@ legoESM per-process tracer tendencies isolated by differencing probe runs (full 
 
 | process | interior L2 | interior corr | interior sign |
 |---|---|---|---|
-| T_iso | 1.543e-09 | nan | 0.0000 |
-| T_vmix | 1.431e-07 | nan | 0.0000 |
-| S_iso | 8.549e-20 | nan | 0.1315 |
-| S_vmix | 2.516e-19 | nan | 0.3870 |
+| T_iso | 1.523e-09 | 0.1710 | 0.9451 |
+| S_iso | 8.541e-20 | 0.0452 | 0.7872 |

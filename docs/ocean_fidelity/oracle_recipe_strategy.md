@@ -444,12 +444,17 @@ conventions replicated | declared non-goals | timebox | golden-refresh cadence.
 - **Momentum mixing (du/dv_mix):** corr ~0 — **documented structural delta, NOT a bug.**
   The ACC recipe uses `implicit_vertical_mixing=True`, so legoESM produces no *explicit*
   vertical-viscosity tendency to compare against Veros's `du_mix`.
-- **Tracer per-process (dtemp/dsalt iso, vmix):** INCONCLUSIVE for ACC — not a discrepancy.
-  S is uniform 35 (no salt gradient -> dS_iso/vmix ≈ 1e-19 ≈ 0), vmix is implicit (no
-  explicit tendency), and the GM/Redi T tendency is near-flat at 10 days (corr nan = zero
-  variance). The comparison machinery emits metrics (isolation by differencing probe runs);
-  the ACC case simply does not exercise tracer mixing. A tracer-active recipe (salinity
-  gradient + explicit mixing) is needed to test this per-process.
+- **Tracer per-process (iso = GM/Redi):** CORRECTED 2026-05-29. The earlier "inconclusive /
+  uniform-S" note was wrong: GM/Redi was **mis-wired and inactive** (set only in
+  physics.lateral_mixing; the lat-lon model reads the top-level config.gm_redi). Fixed
+  (c5abe950) + the probe now computes GM/Redi directly (`gm_redi_tracer_tendency_latlon`).
+  With GM/Redi active: **T_iso L2 1.5e-9, corr 0.17** — GM/Redi IS now compared, but
+  legoESM's `gm_redi_latlon_cgrid` vs Veros's isoneutral scheme correlate poorly (a genuine
+  GM/Redi formulation/taper/triad difference — the most implementation-divergent param;
+  signal is also tiny at 10 days). Documented delta under the default acceptance approach;
+  candidate for deeper verification (integral/budget) if GM/Redi fidelity must be tightened.
+  **S_iso ≈ 0 is physically correct** (uniform S=35 → no isopycnal salt flux; Veros's is ~0
+  too). **vmix** stays out (implicit in legoESM → no explicit tendency).
 - **OPEN DECISION (verification-philosophy, owner = user):** tier-2 frozen-state PER-PROCESS
   comparison on ACC carries clean validating signal ONLY in density (0.037, corr 1.0) and
   Coriolis (0.96–0.98). Momentum advection (vector-invariant vs flux-form), momentum mixing

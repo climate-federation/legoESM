@@ -307,3 +307,17 @@ physics.lateral_mixing on lat-lon (catches this mis-wiring class). Tests updated
 (top-level wiring + guard). 25 passed.
 REMAINING (next): extend the tendency PROBE to apply gm_redi_tracer_tendency_latlon (so the
 tier-2 comparison actually SEES GM/Redi), then redo the Q2 tracer-iso comparison honestly.
+
+### 2026-05-29 · iter 17 · probe now computes GM/Redi; Q2 tracer-iso redone honestly
+User: "drive purely using ralph loop" -> continue autonomously with documented defaults.
+Extended probe_latlon_cgrid: added dT_gm_redi/dS_gm_redi fields + computes
+gm_redi_tracer_tendency_latlon from the top-level config.gm_redi (folded into the tracer
+totals to match the model). Driver tracer comparison now uses probe.dT_gm_redi vs Veros
+dtemp_iso directly (removed the no-op _tracer_per_process differencing). Re-ran comparison:
+  T_iso: L2 1.5e-9, corr 0.17 — GM/Redi NOW ACTIVE + compared (was inactive/0 before). Low
+    corr = genuine GM/Redi formulation delta (legoESM gm_redi_latlon_cgrid vs Veros isoneutral;
+    taper/triad differences; tiny 10-day signal). Documented (default acceptance).
+  S_iso: ~0 — physically correct (uniform S=35 -> no isopycnal salt flux).
+  density unchanged (0.0376, corr 1.0). 32 + 23 tests green.
+Q2 tracer-iso is now an HONEST comparison (was a no-op + GM/Redi-inactive before). §8 ledger
+updated. Default acceptance approach (a) taken per "drive with the loop".
