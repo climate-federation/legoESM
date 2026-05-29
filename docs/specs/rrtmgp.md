@@ -4,8 +4,11 @@ Goal: `src/.../rrtmgp/` faithful to
 https://github.com/earth-system-radiation/rte-rrtmgp, fully JAX-
 differentiable, mixed-precision-safe, MPI/GPU-scalable.
 
-Compression history: iter-10 / 20 / 30 / 40 / 50 / 60 / 70 (this file via
-`docs/archive/rrtmgp.{original,iter20,iter30,iter40,iter50,iter60,iter70}-backup.md`).
+Compression history: iter-10 / 20 / 30 / 40 / 50 / 60 / 70 / 80 (this file
+via `docs/archive/rrtmgp.{original,iter20,…,iter70,iter80}-backup.md`).
+
+Status: **codex-APPROVE at iter-81** — the iter-70→81 RRTMGP surface is
+shippable; core faithfulness audit complete (see Status / Deferred).
 
 ---
 
@@ -39,10 +42,10 @@ shift, `kmajor` (n_t, n_p+1, n_eta, n_gpt), tropopause boundary,
 Iter-59 audit confirms #312 touched ZERO convection/microphysics/BL
 files; no analogous losses possible outside radiation footprint.
 
-Codex SHIP verdicts: iter-3 (O3), iter-18 (iter-13→17), iter-40
-(cache work), iter-58 (dead-code series iter-50→57), iter-69
-(test series iter-63→68 — 2 blockers found + fixed), iter-79
-(series iter-70→78 — needs-attention, 2 medium found + fixed).
+Codex verdicts: SHIP iter-3 (O3), iter-18 (iter-13→17), iter-40 (cache),
+iter-58 (dead-code iter-50→57), iter-69 (tests iter-63→68 — 2 blockers
+fixed); iter-79→80 (tests iter-70→78 — needs-attention, 3 medium fixed
+across passes); **APPROVE iter-81** (iter-70→81, no material findings).
 
 ---
 
@@ -53,181 +56,95 @@ Codex SHIP verdicts: iter-3 (O3), iter-18 (iter-13→17), iter-40
 `combined_vmr` (iter-1+2/5), `vmr_ref_ratio` (iter-9), delta-scaling
 + `combine_optical_properties` (iter-19).  Load `optimal_angle_fit`,
 add `_compute_optimal_lw_secant`, opt-in via `use_optimal_angle`
-config flag; `precomputed_lw_optical_props` dedups optics call
-(iter-4).
+config flag; `precomputed_lw_optical_props` dedups optics call (iter-4).
 
 ### Cache integrity (iter-22 → 47)
-- iter-22: delete dead swirl_jatmos `compute_heating_rate` API
-  (-456 LOC).
-- iter-32: cache-key bug missing 5 baked-in fields → silent stale-
-  solver reuse.  `_hashable` shim.
-- iter-33: drop redundant `instance.atmospheric_state` field.
-- iter-36+40: `include_clouds` keyed on optics-cache; iter-40
-  conditionalised cloud-table load.
-- iter-39+42: 0-D arrays → value-hash with dtype-kind gate.
-- iter-41: cloud-optics None-guard + direct-bypass ValueError.
-- iter-45→48: trim 537 LOC dead `interpolation.py` + 5
-  `kernel_ops` + 2 constants re-exports + 4 F401 imports.
+iter-22 delete dead swirl_jatmos `compute_heating_rate` API (-456 LOC);
+iter-32 cache-key bug missing 5 baked fields → stale-solver reuse
+(`_hashable` shim); iter-33 drop redundant `atmospheric_state` field;
+iter-36+40 `include_clouds` keyed on optics-cache + conditional cloud-table
+load; iter-39+42 0-D arrays → value-hash w/ dtype-kind gate; iter-41
+cloud-optics None-guard + direct-bypass ValueError; iter-45→48 trim 537 LOC
+dead `interpolation.py` + 5 `kernel_ops` + re-exports + F401.
 
 ### Dead-code trim (iter-50 → 62)
-~1113 LOC of dead swirl_jatmos code removed across iter-22→62:
-clear-sky pin (iter-51), reconstruct_vmr_fields path (iter-52),
-from_config factories (iter-53), AtmosphericStateCfg +
-RadiativeTransfer (iter-54), utils/ subdirectory (iter-55),
-interpolate_orig + evaluate_weighted_lookup (iter-56),
-deprecated `_cache_key` alias (iter-57), AIMIP-#312 audit +
-Metal-env skip (iter-59), `recurrent_op_1d{,_scan}` (iter-60),
-`GrayAtmosphereOptics` class + config + factory branch
-(iter-61), `_shift_up` + Planck-path clarifier (iter-62).
+~1113 LOC dead swirl_jatmos removed (iter-22→62): clear-sky pin (51),
+reconstruct_vmr_fields (52), from_config factories (53), AtmosphericStateCfg
++ RadiativeTransfer (54), utils/ (55), interpolate_orig +
+evaluate_weighted_lookup (56), `_cache_key` alias (57), #312 audit +
+Metal-env skip (59), `recurrent_op_1d{,_scan}` (60), `GrayAtmosphereOptics`
+(61), `_shift_up` + Planck clarifier (62).
 
-### Test coverage expansion (iter-63 → 79)
-- iter-63: `TestMixedPrecision` — fp32-vs-fp64 numerical
-  equivalence within fp32 round-off (x64-gated, skips otherwise);
-  bfloat16-input finiteness.
-- iter-64: column-local invariance —
-  `solve_columns(global)[k:k+M] ≡ solve_columns(global[k:k+M])`.
-  Combined with iter-11 permutation-invariance, pins RRTMGP as
-  embarrassingly parallel over the column axis.
-- iter-65: `test_jax_grad_finite_at_mesosphere_pressure_boundary`
-  — AD safety for columns extending below `p_ref[-1] = 1.005 Pa`
-  (≈ 65 km altitude), exercising `_pressure_interpolant`'s
-  log-space extrapolation path.
-- iter-66: `TestAerosolPath` — AOD=zeros ≡ AOD=None, aerosol
-  reduces surface SW (sign), ∂(SW)/∂(AOD) finite + negative.
-- iter-67: `TestEnergyConservation` — combined LW+SW and LW-only
-  column flux divergence ≡ ∑(hr · dp) × c_p / g.
-- iter-68: `TestCloudPath` — LWP=zeros ≡ LWP=None, cloud-albedo
-  on SW, cloud-greenhouse on LW (sign), ∂(F)/∂(LWP) finite +
-  sign-correct for both SW and LW.
-- iter-69: codex review of iter-63→68 series.  HOLD on 2 real
-  blockers (1 prompt-only confusion ignored): (a) aerosol surface
-  index off-by-one (`argmax(p_full)` is full-level idx but flux
-  arrays are interface-dim) → fixed to `[0, -1]`; (b) fp32-vs-fp64
-  test needs x64 guard → added `pytest.skip` when x64 off.
-- iter-70: `TestCloudPath` ice extension — cirrus IWP reduces TOA
-  OLR (cold-cloud greenhouse), ∂(OLR)/∂(IWP) finite + column-sum
-  negative.  Closes the cloud_path_ice gap (codex iter-69 Q5).
-- iter-71: `TestRteRecurrenceScanEquivalence` — GPU(`lax.scan`) ≡
-  CPU(for-loop) for `rte_utils.recurrent_op_with_halos`: forward +
-  reverse recurrence, reverse-mode AD gradient, and end-to-end
-  `monochromatic_two_stream.{lw,sw}_transport` flux_{up,down,net}.
-  Pins the `rrtmgp_use_scan` GPU perf knob as numerically inert
-  (cross-backend safety); `test_production_blockers` only pinned
-  its config routing, not flux/gradient equality.
-- iter-72: `TestSolverCompilationStability` — `solve_columns` under
-  `jax.jit` compiles once per shape; a value-only change does NOT
-  retrace (only an `nlev` change does).  Pins the #1 GPU-throughput
-  property (a value-dependent retrace recompiles every step); a
-  trace-counter idiom catches it.
-- iter-73: `TestGasVmrOverride` — runtime `ghg_vmr_override`
-  (CO2/CH4/…) and the `o3_vmr` field reach gas optics and move fluxes
-  the right way: 2×CO2 lowers OLR; **5×CH4 lowers OLR** (CH4 is a
-  *minor* absorber → guards that `_compute_minor_optical_depth` reads
-  `vmr_fields`, not just the baked global mean); high O3 cuts surface
-  SW + OLR; ∂(OLR)/∂(CO2) finite + negative.  Audit confirmed the
-  precedence correct (`get_vmr` overwrites the global mean for major
-  **and** minor paths); this pins it against silent regression.
-- iter-74: `TestCloudFractionCoverage` — `cloud_fraction` linear-OD
-  scaling in `optics._combine_cloud_optics` (applied once): `cf=0` ≡
-  clear sky, `cf=1` ≡ unfractioned cloud (both exact), `cf=0.5`
-  strictly between (OLR + surface SW monotone), ∂(flux)/∂(cf) finite
-  with greenhouse/albedo signs.  Guards the optics side of the
-  iter-15/16 `cf²` double-discount (`TestCloudKwargsHelper` guards the
-  helper side).
-- iter-75: `TestSolarSpectralFraction` — per-g-point solar weights:
-  feeding the table's own `solar_fraction_by_gpt` reproduces the
-  default (None) path exactly (external ≡ built-in); weights are
-  sum-normalised (×const = no-op); redistributing across g-points
-  moves surface SW; wrong length raises; ∂(SW)/∂(weights) finite.
-  (Raw TOA-insolation budget not pinned — stripped top interface sits
-  below the halo layer; `table ≡ default` is the consistency guard.)
-- iter-76: **FEATURE** + `TestLwAerosolPath` — longwave aerosol path
-  (was SW-only).  Prescribed pure-absorbing aerosol (ssa=0) added to
-  the gas+cloud OD in `solve_lw`, injected into `precomputed_props`
-  *before* the optimal-angle secant so the diffusivity fit + the
-  source/properties solve share the aerosol-inclusive τ; exposed as
-  `solve_columns(aerosol_absorption_optical_depth_lw=…)` (renamed
-  iter-79), opt-in (None ⇒ LW byte-identical, zero regression).  Pins:
-  AOD=0 ≡ no-aerosol, elevated
-  cold absorber lowers OLR (−28 W/m²) + raises surface down-LW
-  (+6.7), ∂(OLR)/∂(AOD)<0 finite, and the optimal-angle path stays
-  consistent.
-- iter-77: `TestDeltaScaling` — SW cloud delta-Eddington forward-peak
-  removal (`_apply_delta_scaling_for_cloud`, applied to every cloudy SW
-  column, was untested).  Audit confirmed exact: f=ωg², τ'=(1−f)τ,
-  ω'=ω(1−g²)/(1−f), g'=g/(1+g).  Pins closed-form match, conservative
-  ω=1 preserved, isotropic g=0 identity, τ/g reduced, AD-finite.
-- iter-78: `TestRayleighScattering` — SW Rayleigh OD
-  (`compute_rayleigh_optical_depth`, behaviour was unpinned; only the
-  T-clip was guarded).  OD ≥ 0 all g-points; exactly linear in air
-  amount (×2 molecules → ×2 OD); spectrally resolved (max/min ≫ 10,
-  1/λ⁴); ∂(OD)/∂(molecules) finite + positive.
-- iter-79: codex adversarial review of the iter-70→78 series
-  (needs-attention).  2 medium findings, both fixed: (a) LW aerosol
-  input was a silent absorption-vs-extinction trap → renamed the
-  param to `aerosol_absorption_optical_depth_lw` (solve_lw:
-  `aerosol_absorption_optical_depth`) + docstrings state "absorption,
-  NOT extinction; scale extinction by (1−ω) first"; (b)
-  `test_lw_aerosol_with_optimal_angle` was vacuous (added absorption
-  lowers OLR even if the secant saw gas-only τ) → replaced with
-  `test_lw_aerosol_enters_optimal_angle_secant`: the optimal−fixed
-  secant correction must *change* when aerosol is added (Δ≈0.24 W/m²),
-  isolating the inject-before-secant invariant.
+### Test coverage expansion + LW-aerosol feature (iter-63 → 81)
+All in `test_rrtmgp_stratosphere.py` unless noted.  ✅ = codex-approved.
 
-### Test classes in `test_rrtmgp_stratosphere.py` (~93 tests)
-`TestClipToTableRange`, `TestRelativeAbundanceSafeDiv`,
-`TestOutOfRangeTemperature`, `TestMixedPrecision`,
-`TestOptimalLwSecant`, `TestStandardO3Profile`,
-`TestTropopauseBoundary`, `TestADSafetyAtStratosphereTau`,
-`TestCloudKwargsHelper`, `TestHeatingRateSign`,
-`TestEnergyConservation`, `TestCloudPath`, `TestAerosolPath`,
-`TestRteRecurrenceScanEquivalence`, `TestSolverCompilationStability`,
-`TestGasVmrOverride`, `TestCloudFractionCoverage`,
-`TestSolarSpectralFraction`, `TestLwAerosolPath`, `TestDeltaScaling`,
-`TestRayleighScattering`.
-`test_radiation.py::{TestRRTMGP,TestColumnShardedRadiation}` —
-cache-key + sharded-equivalence + iter-13/15 end-to-end pins.
+| iter | class / change | invariant pinned |
+|---|---|---|
+| 63 | TestMixedPrecision | fp32≡fp64 within fp32 round-off (x64-gated); bf16 inputs finite |
+| 64 | column-local invariance | `solve(global)[k:k+M] ≡ solve(global[k:k+M])`; with iter-11 perm-inv ⇒ embarrassingly parallel / column |
+| 65 | mesosphere AD | grad finite for columns below `p_ref[-1]=1.005 Pa` (log-extrap path) |
+| 66 | TestAerosolPath (SW) | AOD=0≡None; aerosol ↓ sfc SW; ∂SW/∂AOD finite<0 |
+| 67 | TestEnergyConservation | ∑(hr·dp) ≡ (g/cp)(F_net_TOA−F_net_sfc), combined + LW-only |
+| 68 | TestCloudPath | LWP=0≡None; cloud albedo(SW)+greenhouse(LW) signs; ∂F/∂LWP finite |
+| 69 | codex review 63→68 | fixed aerosol sfc index→`[0,-1]`; fp32-vs-fp64 x64 skip-guard |
+| 70 | TestCloudPath ice | cirrus IWP ↓OLR; ∂OLR/∂IWP finite, col-sum<0 |
+| 71 | TestRteRecurrenceScanEquivalence | scan≡for-loop (fwd/rev/AD + lw/sw_transport); `rrtmgp_use_scan` numerically inert (GPU↔CPU) |
+| 72 | TestSolverCompilationStability | `solve_columns` under jit compiles 1×/shape; no value-dependent retrace |
+| 73 | TestGasVmrOverride | ghg_vmr_override + o3_vmr reach **major+minor** optics (5×CH4↓OLR guards minor path); ∂OLR/∂CO2<0 |
+| 74 | TestCloudFractionCoverage | cf linear-OD ×1 (cf=0≡clear, cf=1≡None exact, cf=0.5 monotone), greenhouse/albedo ∂signs |
+| 75 | TestSolarSpectralFraction | table-weights≡default; sum-norm invariant; spectral; len-check ValueError; AD |
+| 76 | **FEATURE** TestLwAerosolPath | LW aerosol (pure-absorbing ssa=0) added to OD in `solve_lw`, injected before optimal-angle secant; opt-in, byte-identical when unused |
+| 77 | TestDeltaScaling | SW cloud delta-Eddington f=ωg²: τ'=(1−f)τ, ω'=ω(1−g²)/(1−f), g'=g/(1+g); conservative ω=1 + isotropic g=0 + AD |
+| 78 | TestRayleighScattering | Rayleigh OD≥0; ∝ molecules (exact); spectral 1/λ⁴ (max/min≫10); ∂/∂molecules>0 |
+| 79 | codex review 70→78 (needs-attn) | (a) LW aerosol param→`aerosol_absorption_optical_depth_lw` + "absorption NOT extinction" docs; (b) replaced vacuous optimal-angle test |
+| 80 | codex re-review | optimal-angle test → white-box capture: spy `_compute_optimal_lw_secant`, assert its Στ grows by exactly the injected aerosol OD per g-point |
+| 81 | codex 3rd pass → **APPROVE** | `rrtmgp_radiation()` shim now forwards `aerosol_absorption_optical_depth_lw` + `cloud_fraction` (+ reachability test); no material findings |
+
+Test classes: `TestClipToTableRange`, `TestRelativeAbundanceSafeDiv`,
+`TestOutOfRangeTemperature`, `TestMixedPrecision`, `TestOptimalLwSecant`,
+`TestStandardO3Profile`, `TestTropopauseBoundary`,
+`TestADSafetyAtStratosphereTau`, `TestCloudKwargsHelper`,
+`TestHeatingRateSign`, `TestEnergyConservation`, `TestCloudPath`,
+`TestAerosolPath`, `TestRteRecurrenceScanEquivalence`,
+`TestSolverCompilationStability`, `TestGasVmrOverride`,
+`TestCloudFractionCoverage`, `TestSolarSpectralFraction`,
+`TestLwAerosolPath`, `TestDeltaScaling`, `TestRayleighScattering`.
+`test_radiation.py::{TestRRTMGP,TestColumnShardedRadiation}` — cache-key +
+shard-equivalence + iter-13/15 end-to-end pins.
 
 ---
 
-## Status (after iter-79)
+## Status (after iter-81 — codex APPROVE)
 
-- ✅ 159 pass + 6 skip (3 Metal-broken + 2 multidevice +
-  1 fp32-vs-fp64 x64-gated) — 0 fail.
-- ✅ AD-safe end-to-end; mixed precision via table-dtype cast;
-  fp32 inputs OK; bfloat16 inputs accepted.
-- ✅ MPI/GPU: `lax.scan + jax.checkpoint` per g-point;
-  column-permutation invariant; column-local invariance pinned
-  (subset ≡ slice of full); shard-equivalent for default and
-  `use_optimal_angle=True` paths.  Vertical-recurrence GPU path
-  (`use_scan=True`, `recurrent_op_with_halos`) pinned numerically
-  identical to the CPU for-loop for fluxes **and** gradients
-  (iter-71) — the perf knob never changes answers.  `solve_columns`
-  under `jax.jit` is compilation-stable: one compile per shape, no
-  value-dependent retrace (iter-72) — no per-step recompile on GPU.
-- ✅ ~1113 LOC dead swirl_jatmos code removed across iter-22 → 62.
-- ✅ Physical sign pinned: cloud-albedo on SW, cloud-greenhouse
-  on LW, aerosol reduces surface SW, scattering aerosol has
-  negative ∂(SW)/∂(AOD).  Cloud fraction scales cloud OD once
-  (cf=0 ≡ clear, cf=1 ≡ full, monotone partial; iter-74).
-- ✅ Energy conservation pinned: ∑(hr · dp) ≡ (g/c_p) ·
-  (F_net_TOA − F_net_sfc) for both combined and LW-only.
-- ✅ Gas-VMR overrides faithful: `ghg_vmr_override`
-  (CO2/CH4/N2O/CFCs) + `o3_vmr` reach gas optics for major **and**
-  minor absorbers (`get_vmr` overwrite precedence), AD-differentiable
-  (iter-73).
-- ✅ All codex iter-69 Q5 coverage gaps closed: cloud_path_ice
-  (iter-70), o3_vmr + ghg_vmr_override (iter-73), cloud_fraction
-  (iter-74), solar_spectral_fraction (iter-75).
-- ✅ LW aerosol supported (iter-76, named iter-79): prescribed
-  `aerosol_absorption_optical_depth_lw` (absorption OD, ssa=0) in
-  `solve_lw` (was SW-only); opt-in, byte-identical when unused,
-  AD-safe, optimal-angle-consistent (secant sees aerosol τ, pinned).
+- ✅ 160 pass + 6 skip (3 Metal-broken + 2 multidevice + 1 fp32-vs-fp64
+  x64-gated) — 0 fail.  `test_radiation.py` 68p/5s.
+- ✅ AD-safe end-to-end; mixed precision via table-dtype cast; fp32 + bf16
+  inputs OK.
+- ✅ MPI/GPU: `lax.scan + jax.checkpoint` per g-point; column-permutation +
+  column-local invariant; shard-equivalent (default + `use_optimal_angle`).
+  Vertical-recurrence GPU path (`use_scan=True`) numerically ≡ CPU for-loop
+  for fluxes **and** gradients (iter-71).  `solve_columns` jit
+  compilation-stable: 1 compile/shape, no value-retrace (iter-72).
+- ✅ Physical signs: cloud albedo(SW)/greenhouse(LW); aerosol ↓ sfc SW,
+  scattering aerosol ∂SW/∂AOD<0; cloud-fraction OD scaling ×1 (iter-74);
+  delta-Eddington forward-peak removal (iter-77); Rayleigh ∝ air, 1/λ⁴
+  (iter-78).
+- ✅ Energy conservation: ∑(hr·dp) ≡ (g/cp)(F_net_TOA−F_net_sfc).
+- ✅ Gas-VMR overrides faithful (major+minor, `get_vmr` precedence), AD-diff
+  (iter-73).  All codex iter-69-Q5 coverage gaps closed (cloud_path_ice 70,
+  o3/ghg 73, cloud_fraction 74, solar_spectral_fraction 75).
+- ✅ LW aerosol supported (iter-76/79–81): `aerosol_absorption_optical_depth_lw`
+  (absorption OD, ssa=0) in `solve_lw` + `rrtmgp_radiation()` shim; opt-in,
+  byte-identical when unused, AD-safe, secant sees aerosol τ (pinned).
+- ✅ ~1113 LOC dead swirl_jatmos code removed (iter-22→62).
 
 ## Deferred
 
-- Default-enable `use_optimal_angle=True` pending upstream RFMIP
-  reference-flux validation (iter-29 gating sharded test exists).
-- LW aerosol: only the pure-absorbing (ssa=0) limit is wired; a
-  scattering LW aerosol (ssa/asymmetry inputs) and a per-band/species
-  optical-property table remain future work.
+- Default-enable `use_optimal_angle=True` — blocked on upstream RFMIP
+  reference-flux validation data (iter-29 gating sharded test exists).
+- 3-D driver lacks an LW-aerosol data source: `physics_pipeline` sources SW
+  `aerosol_od_col` + `cloud_fraction` but not LW AOD; auto-sourcing it
+  (config/state field, symmetric to SW) is future work — the path is
+  reachable via the public API/shim.
+- LW aerosol scattering (ssa/asymmetry inputs) + per-band/species optical-
+  property table (only the pure-absorbing ssa=0 limit is wired).
