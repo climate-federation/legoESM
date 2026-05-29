@@ -11,7 +11,7 @@ One entry per task attempt. Newest at the bottom of each task block.
 - [x] Q5 — CI clarity guard (function-LOC ceiling, allow-list shrinks; two-source/deprecated detectors folded into Q7)
 - [x] Q6 — Equivariance tier expansion (bridge round-trip temp+salt, halo-strip invariance; + existing EOS-unit/vertical-flip/cumsum-order)
 - [x] Q7 — readability docstring + section comments; A_h single-source guard+test; fail-fast EOS dispatch (VALID_EOS_SCHEMES) + test (9cc0b25a). See iter 21
-- [ ] Q8 — Decompose baroclinic_tendencies (bit-identical gate)
+- [x] Q8 — Decompose baroclinic_tendencies into 13 _bc_* substages (orchestrator 1299->256 LOC); bit-identical gate green (4 configs); allow-list entry removed. See iter 22-24
 
 ---
 
@@ -391,3 +391,54 @@ break for legacy callers).
 NEXT: Q8 — decompose latlon_cgrid_ocean_baroclinic_tendencies (the 1299-LOC fn in
 ocean/dynamics/ocean_pe_latlon_cgrid.py) into named substages; bit-identical-on-frozen-ACC-state
 gate; then drop its LOC_ALLOW_LIST entry in test_clarity_guards.py.
+
+### 2026-05-29 · iter 22-24 · Q8 DONE — baroclinic_tendencies decomposed (1299 -> 256 LOC), bit-identical
+**Built the gate FIRST (7e034640):** tests/ocean/unit/test_baroclinic_decomposition.py + committed
+golden (fixtures/, 46 arrays, 4 configs: centered/Hollingsworth/WENO KE, implicit/explicit mixing,
+GM/Redi, biharmonic, Smagorinsky, meridional, sponge, momentum-diagnostics path). Proven
+NON-VACUOUS (a 1e-9 g_val perturbation -> RED; reverted -> GREEN). The data/ dir is gitignored so
+the golden lives in tests/ocean/unit/fixtures/.
+**Decomposed in two committed increments** (7d7bbf71 front half, 2e995281 back half), each
+bit-identical-by-construction (verbatim region-copy, identical indentation, gate green after EVERY
+extraction):
+  front: _bc_geometry_and_density, _bc_vertical_and_depthmean_velocity, _bc_ke_and_pressure_gradients
+  back:  _bc_tracer_tendencies, _bc_pv_flux, _bc_dterm, _bc_vertical_momentum_advection,
+         _bc_horizontal_viscosity (stages 10+10b merged — meridional reuses stage-10 slope-foot
+         helper), _bc_bottom_drag, _bc_explicit_vertical_viscosity, _bc_physics_tendencies,
+         _bc_external_surface_forcing, _bc_sponge_relaxation.
+  Accumulating stages thread du_dt/dv_dt/dT_dt/dS_dt and return the per-term diagnostics; the one
+  cross-stage local (_weno_order, formerly set in stage 7b and read by stage 8) is now computed once
+  in the orchestrator and threaded. Stages 11-12 (land mask, free surface, assembly) stay inline.
+**Result:** orchestrator 256 LOC; all 13 _bc_* substages <=255 LOC. Removed the
+latlon_cgrid_ocean_baroclinic_tendencies entry from the clarity-guard LOC_ALLOW_LIST; the
+anti-stale check now enforces it stays <400. GATE green; AD-safe (differentiability suite); 61
+caller tests green (gate + diagnostics-closure + differentiability + WENO + PGF), partial-cells
+(3b/4/5/7) + tendency-probe green.
+**Pre-existing conservation-drift failures (NOT regressions) — verified by checking out the
+pre-decomposition function:** test_variable_bathymetry smooth-bathy (heat drift 3.03e-7 vs 1e-8)
+and test_realistic_coastlines island (2.76e-6 vs 1e-7) fail IDENTICALLY on the ORIGINAL function
+(same drift to all digits) -> bit-identical drift CONFIRMS the extraction changed nothing; the
+tolerances are simply tighter than the model's intrinsic drift on those setups. Flagged as a
+separate conservation-tolerance issue, out of Q8 scope.
+
+---
+
+## FINAL STATUS — 2026-05-29
+**Queue Q1-Q8: COMPLETE and committed on branch matching_Veros_oracle.** Every acceptance gate
+that is runnable in this environment is honestly green; all changes are bit-identical / zero-
+behaviour where claimed and verified by the stated gates.
+
+Two documented, spec-sanctioned non-completions:
+1. **Q4 G-C3 (coupler/forcing constants call-site threading) — DEFERRED** per the spec's explicit
+   "wrap at the ocean seam or LOG as deferred" allowance for the coupler boundary. The ACC recipe
+   (the oracle target) is fully config-pinned (G-C4 bit-identity proof); the coupler/forcing
+   applicators (runoff/omip2/ice-shelf/sss-restoring) are off all recipe paths and already use the
+   caller-overridable None-default+fallback pattern. Threading config.constants from coupled-run
+   call sites is cross-boundary coupler/runtime plumbing serving a future coupled recipe, and needs
+   full-suite + integration verification this env cannot run.
+2. **Full pytest suite not runnable here (exit-143 / OOM-kill).** Used targeted per-module gates +
+   bit-identity/audit/footgun gates + zero-behaviour-by-construction, per the spec's "say what ran,
+   what didn't, residual risk." No CHANGE I made introduced a new failure (verified). Known
+   PRE-EXISTING failures unrelated to this work: test_freshwater MPAS-coupler `T_water_init_C`
+   (T_surface naming debt), and the two conservation-drift tests above — all confirmed failing
+   independent of these changes.
