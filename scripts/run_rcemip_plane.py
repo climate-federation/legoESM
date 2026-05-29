@@ -583,12 +583,22 @@ def main():
         nx=args.nx, ny=args.ny, nlev=args.nlev,
         dx=args.dx, dy=args.dx, dtype=dtype,
     )
+    # RCEMIP1 surface pressure (Wing 2018 = 1014.8 hPa). Passing p_sfc
+    # switches compute_reference_state to the bottom-up hydrostatic BC
+    # (iter-95). Without it, the legacy top-down BC over a 33 km column
+    # gives exner_sfc=1.33 (p_sfc~2.7 atm) -> T_lowest=399 K -> surface
+    # sensible-heat flux has the WRONG SIGN (cools the air toward a
+    # ~236 K cold-biased equilibrium instead of warming toward SST).
+    # With p_sfc set: exner_sfc=1.003, T_lowest=301 K, flux correct.
+    p_sfc_rcemip = 101480.0
     if args.stretched_vertical:
         hc = create_stretched_height_coordinate(
-            args.nlev, H=args.H, dz_sfc=args.dz_sfc,
+            args.nlev, H=args.H, dz_sfc=args.dz_sfc, p_sfc=p_sfc_rcemip,
         )
     else:
-        hc = create_height_coordinate(args.nlev, H=args.H)
+        hc = create_height_coordinate(
+            args.nlev, H=args.H, p_sfc=p_sfc_rcemip,
+        )
     tm = make_flat_plane_terrain_metric(grid, hc)
     cfg = CompressibleEulerConfig(
         sponge_coeff=args.sponge_coeff,
