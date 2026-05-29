@@ -419,6 +419,46 @@ class TestMixedPrecision:
         )
         assert jnp.all(jnp.isfinite(src))
 
+    def test_solve_columns_finite_float32_inputs(self):
+        """Iter-27: end-to-end ``solve_columns`` with float32 inputs.
+
+        Tables are loaded at x64 in the test env (per conftest), but
+        ``solve_columns`` line 717 casts every input to the table
+        dtype as the first step.  Verify that this cast doesn't crash
+        the JIT compile path or produce non-finite values for a
+        physically reasonable column.
+
+        Specifically covers the mixed-precision use case where a
+        downstream callsite (e.g. a fp32 training loop) feeds the
+        RRTMGP solver fp32 atmosphere state.
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(RRTMGPConfig())
+        ncol, nlev = 1, 8
+        # All inputs explicitly float32.
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev + 1, dtype=jnp.float32)[None, :],
+            (ncol, nlev + 1),
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        T = jnp.linspace(220.0, 290.0, nlev, dtype=jnp.float32)[None, :]
+        sfc_T = jnp.array([295.0], dtype=jnp.float32)
+        q_v = jnp.full((ncol, nlev), 5e-3, dtype=jnp.float32)
+        cos_z = jnp.array([0.5], dtype=jnp.float32)
+
+        out = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+        )
+        # Internal cast promotes everything to table dtype (float64).
+        for name in ("lw_flux_up", "sw_flux_up", "heating_rate"):
+            val = getattr(out, name)
+            assert jnp.all(jnp.isfinite(val)), (
+                f"{name} contains non-finite values for fp32 inputs"
+            )
+
 
 # ---------------------------------------------------------------------------
 # Optimal LW diffusivity angle (iter-2)
