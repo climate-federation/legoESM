@@ -125,6 +125,7 @@ class TestEnsembleDiagnosticCollector:
             q_v=jnp.ones(s3) * 0.01,
             q_c=jnp.zeros(s3),
             q_r=jnp.zeros(s3),
+            conv_prog=jnp.zeros((3, 6 * 4 * 4)),
             held_dT_rad=jnp.zeros(s3),
             held_sw_net_sfc=jnp.zeros(s2),
             held_lw_net_sfc=jnp.zeros(s2),
@@ -138,6 +139,7 @@ class TestEnsembleDiagnosticCollector:
             precip_accum=jnp.zeros(s2),
             shflx_accum=jnp.zeros(s2),
             lhflx_accum=jnp.zeros(s2),
+            T_land=jnp.zeros(s2),
         )
 
         mean_carry = ensemble_mean(carry)

@@ -343,6 +343,19 @@ class ModelDriver:
                 self.grid, config=topo_config
             )
 
+        # Real land-sea mask overrides the elevation-derived land fraction
+        # (works with any ``topography`` setting, including "flat").
+        land_mask_path = getattr(self.config, "land_mask_path", "")
+        if land_mask_path:
+            from legoesm.grids.topography import load_land_fraction
+            self._f_land = load_land_fraction(
+                self.grid, land_mask_path
+            ).astype(_sd)
+            logger.info(
+                f"  Land-sea mask: {land_mask_path} "
+                f"(land fraction mean={float(jnp.mean(self._f_land)):.3f})"
+            )
+
     def _create_dycore(self) -> None:
         """Create the dynamical core model via the component factory.
 
@@ -681,6 +694,23 @@ class ModelDriver:
         rad_str = self.config.radiation or "none"
         conv_str = self.config.convection or "none"
         logger.info(f"  Physics: radiation={rad_str}, convection={conv_str}")
+
+        # Activate the slab-land surface tile when a land-sea mask was
+        # loaded in _create_topography.  f_land / albedo_land are static
+        # surface fields; the slab steps once per radiation sub-cycle.
+        if getattr(self.config, "land_mask_path", "") and self._f_land is not None:
+            from legoesm.surface_albedo import land_vegetation_albedo
+            from legoesm.core.precision import get_policy
+            _sd = get_policy().storage
+            self.physics.f_land = self._f_land.astype(_sd)
+            self.physics.albedo_land = (
+                land_vegetation_albedo(self.grid.grid_lat).astype(_sd)
+            )
+            self.physics.rad_update_steps = self.config.rad_update_steps
+            logger.info(
+                f"  Land tile: ACTIVE (slab land, C_land="
+                f"{self.physics.C_land:.1e} J/m2/K)"
+            )
 
     def _setup_external_forcing(self) -> None:
         """Configure external forcing: solar, ozone, aerosol, GHG."""
@@ -1243,6 +1273,14 @@ class ModelDriver:
                 local_adapter = ColumnAdapter(ncol=local_ncol, shape_2d=local_shape_2d)
                 if self.physics is not None:
                     self.physics.adapter = local_adapter
+                    # Scatter the slab-land surface fields to owned faces
+                    # so the rank-local physics columns match f_land /
+                    # albedo_land (the MPI ``owned_face_ids`` path).
+                    if self.physics.f_land is not None:
+                        self.physics.f_land = scatter(
+                            self.physics.f_land, layout)
+                        self.physics.albedo_land = scatter(
+                            self.physics.albedo_land, layout)
 
                 # Wrap SST/SIC forcing to return rank-local arrays
                 _global_get_sst_sic = self.get_sst_sic
@@ -1793,6 +1831,26 @@ class ModelDriver:
             # expected by ``--restart-from`` in run_amip.py and the
             # checkpoint-glob in ``run_amip_1deg_latlon_mpi.sbatch``.
             if self._is_latlon_mpi():
+                # The lat-lon MPI gather path writes a single global-shape
+                # checkpoint from rank 0's carry_aux, which holds the
+                # prognostic slab-land T_land as a rank-LOCAL latitude
+                # band.  Broadcasting that on restart would give every
+                # rank rank-0's band (wrong shape/values) and corrupt the
+                # land surface.  Banded carry-aux gather/scatter is not
+                # implemented yet, so fail fast rather than write an
+                # invalid restart (#325). The per-rank distributed format
+                # (each rank saves/loads its own band) and single-process
+                # npz are restart-exact for slab-land.
+                if (self.physics is not None
+                        and getattr(self.physics, "f_land", None) is not None):
+                    raise ValueError(
+                        "Lat-lon MPI checkpointing does not yet gather the "
+                        "banded slab-land temperature (T_land) into the "
+                        "global checkpoint — a restart would corrupt land "
+                        "surface state (#325). Use the per-rank distributed "
+                        "checkpoint format or run single-process for "
+                        "slab-land lat-lon MPI runs."
+                    )
                 state_g, tracers_g = self._gather_state_for_global_checkpoint()
                 if self._mpi_rank == 0:
                     ckpt_path = (
@@ -1841,6 +1899,26 @@ class ModelDriver:
         # Single-process path
         ckpt_path = self._output_dir / f"checkpoint_day_{int(elapsed_day):04d}.npz"
         backend = self.config.output.checkpoint_format if hasattr(self.config.output, 'checkpoint_format') else "npz"
+
+        # The zarr backend does not yet round-trip ``carry_aux`` (it is
+        # dropped on save and padded empty on load), so it cannot persist
+        # the prognostic slab-land skin temperature.  Restarting a
+        # slab-land run from a zarr checkpoint would silently reinitialize
+        # T_land from the lowest-level air temperature and branch the
+        # trajectory.  Fail fast rather than corrupt restart (#325); npz
+        # persists carry_aux (incl. T_land) and is restart-exact.
+        if (
+            backend == "zarr"
+            and self.physics is not None
+            and getattr(self.physics, "f_land", None) is not None
+        ):
+            raise ValueError(
+                "checkpoint_format='zarr' cannot persist the prognostic "
+                "slab-land temperature (T_land) — a restart would silently "
+                "reinitialize it (#325). Use checkpoint_format='npz' for "
+                "slab-land runs (or add carry_aux support to the zarr "
+                "backend)."
+            )
 
         save_restart(
             path=ckpt_path,
@@ -1932,9 +2010,14 @@ class ModelDriver:
             from legoesm.parallel.distributed import get_active_topology
             topology = get_active_topology()
             if topology is not None:
-                arrays, step, day, _, _ = load_checkpoint_distributed(
+                arrays, step, day, _, _diag_aux = load_checkpoint_distributed(
                     path, topology.rank, topology.n_processes,
                 )
+                # Restore carry auxiliaries (held radiation, conv_prog,
+                # and the prognostic slab-land T_land) so a distributed
+                # restart is trajectory-exact rather than silently
+                # reinitializing them (#325 restart-safety).
+                self._carry_aux = _diag_aux if _diag_aux else {}
                 from legoesm.core.state import HydrostaticState
                 from legoesm.core.field import Field
                 import jax.numpy as jnp
@@ -2928,6 +3011,17 @@ class ModelDriver:
             conv_prog_default = jnp.zeros(conv_shape, dtype=_sd)
         conv_prog = _aux.get("conv_prog", conv_prog_default)
 
+        # Slab-land skin temperature — restored from the checkpoint when
+        # available, otherwise initialized from the lowest model-level
+        # air temperature (the thin slab equilibrates within ~1 day).
+        # ``None`` when the land tile is inactive (ocean-only run).
+        if self.physics is not None and self.physics.f_land is not None:
+            T_land = _aux.get(
+                "T_land", self.state.T.data[..., -1].astype(_sd)
+            )
+        else:
+            T_land = None
+
         # External forcing (rank-local p_s and lat for MPI)
         _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
         o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
@@ -2954,6 +3048,7 @@ class ModelDriver:
             "held_lw_up_toa": held_lw_up_toa,
             "held_sw_down_toa": held_sw_down_toa,
             "conv_prog": conv_prog,
+            "T_land": T_land,
             "o3_vmr": o3_vmr, "aerosol_od": aerosol_od, "ghg_vmr": ghg_vmr,
             "lat_deg_grid": lat_deg_grid,
             "_sd": _sd,
@@ -3023,6 +3118,7 @@ class ModelDriver:
         held_lw_up_toa = ctx["held_lw_up_toa"]
         held_sw_down_toa = ctx["held_sw_down_toa"]
         conv_prog = ctx["conv_prog"]
+        T_land = ctx["T_land"]
         o3_vmr = ctx["o3_vmr"]
         aerosol_od = ctx["aerosol_od"]
         ghg_vmr = ctx["ghg_vmr"]
@@ -3162,6 +3258,7 @@ class ModelDriver:
                 target_moisture=_target_moisture,
                 target_mass=_target_mass,
                 precip_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                T_land=T_land,
             )
 
             # Shard carry across devices for SPMD execution
@@ -3217,6 +3314,11 @@ class ModelDriver:
                 "seg_shflx": seg_shflx,
                 "seg_lhflx": seg_lhflx,
             }
+            # Carry the slab-land temperature to the next segment and
+            # into the checkpoint (mirrors the held-radiation fields).
+            if carry.T_land is not None:
+                T_land = carry.T_land
+                self._carry_aux["T_land"] = T_land
 
             current_step = seg_end_step
 
@@ -3381,7 +3483,12 @@ class ModelDriver:
         hyperdiffusion_3d = self._hyperdiffusion_3d_fn
         from legoesm.forcing.external import get_solar_forcing_at_time
 
-        ctx = self._prepare_run_context(start_step, start_day, restore_carry=False)
+        # restore_carry=True matches the compiled path: when continuing
+        # from a checkpoint it restores held radiation, conv_prog, and the
+        # prognostic slab-land T_land from self._carry_aux; on a fresh
+        # start self._carry_aux is empty so this is a no-op (#325
+        # restart-safety for the non-compiled reference path).
+        ctx = self._prepare_run_context(start_step, start_day, restore_carry=True)
         cfg = ctx["cfg"]
         DT = ctx["DT"]
         N_DAYS = ctx["N_DAYS"]
@@ -3416,6 +3523,11 @@ class ModelDriver:
         held_lw_up_toa = ctx["held_lw_up_toa"]
         held_sw_down_toa = ctx["held_sw_down_toa"]
         conv_prog = ctx["conv_prog"]
+        # Slab-land skin temperature (#325): threaded through the
+        # non-compiled per-step path so the reference run evolves land
+        # T_sfc consistently with the compiled-segment path.  ``None``
+        # when the land tile is inactive.
+        T_land = ctx["T_land"]
         o3_vmr = ctx["o3_vmr"]
         aerosol_od = ctx["aerosol_od"]
         ghg_vmr = ctx["ghg_vmr"]
@@ -3441,7 +3553,7 @@ class ModelDriver:
         self.state = self.model.step_with_physics(self.state, DT)
 
         phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = \
+                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), T_land = \
             step_unified(
                 jnp.bool_(True),
                 self.state.T.data, self.state.p_s.data,
@@ -3454,6 +3566,7 @@ class ModelDriver:
                 held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 ghg_vmr_override=ghg_vmr,
+                T_land=T_land,
             )
         conv_prog = phys_out.conv_prog
 
@@ -3532,7 +3645,7 @@ class ModelDriver:
                 else step_unified_no_rad
             )
             phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-                        held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = \
+                        held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), T_land = \
                 _step_fn(
                     need_rad_jax,
                     self.state.T.data, self.state.p_s.data,
@@ -3545,8 +3658,11 @@ class ModelDriver:
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     ghg_vmr_override=ghg_vmr,
+                    T_land=T_land,
                 )
             conv_prog = phys_out.conv_prog
+            if T_land is not None:
+                self._carry_aux["T_land"] = T_land
 
             # (c) Update state
             new_T = self.state.T.data + DT * phys_out.dT_dt
@@ -3660,6 +3776,12 @@ class ModelDriver:
                     "conv_prog": conv_prog,
                     "seg_precip": phys_out.precip,
                 }
+                # Preserve the prognostic slab-land skin temperature
+                # across this diagnostic-step refresh so a checkpoint
+                # written on a diagnostic step still restores T_land
+                # exactly on restart (#325 restart-safety).
+                if T_land is not None:
+                    self._carry_aux["T_land"] = T_land
 
                 # Segment callback for coupled integration
                 if self._segment_callback is not None:
