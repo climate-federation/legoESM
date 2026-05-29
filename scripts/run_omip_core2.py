@@ -133,7 +133,8 @@ def compute_woa_3d(grid, z_coord, woa_t, woa_s, H_bathy, land_mask):
 
 def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   woa_init: bool = False, woa_t=None, woa_s=None,
-                  pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None):
+                  pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None,
+                  ke_gradient_scheme=None):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -157,7 +158,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
     # the requested knobs (e.g. pgf_scheme="smc03", higher A_h/B_h).
     _ovr = {k: v for k, v in (("pgf_scheme", pgf_scheme), ("A_h", A_h),
                               ("B_h", B_h), ("K_bih", K_bih),
-                              ("A_h_eq_boost", A_h_eq_boost)) if v is not None}
+                              ("A_h_eq_boost", A_h_eq_boost),
+                              ("ke_gradient_scheme", ke_gradient_scheme)) if v is not None}
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -199,7 +201,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
 def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                        n_lat: int = 180, n_lon: int = 360,
                        woa_init: bool = False, woa_t=None, woa_s=None,
-                       pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None):
+                       pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None,
+                       ke_gradient_scheme=None):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -218,13 +221,15 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
         use_bathymetry=True, pgf_scheme=pgf_scheme,
         A_h_override=A_h, B_h_override=B_h,
     )
-    if K_bih is not None:
+    _ovr = {k: v for k, v in (("K_bih", K_bih),
+                              ("ke_gradient_scheme", ke_gradient_scheme)) if v is not None}
+    if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
         )
-        config = config._replace(K_bih=K_bih)
+        config = config._replace(**_ovr)
         model = LatLonCGridOceanModel(grid, z_coord, config)
-        print(f"[setup] latlon config override: K_bih={K_bih}")
+        print(f"[setup] latlon config override: {_ovr}")
     e_mask, e_H = read_mesh_mask_bathy(mesh_path)
     ds = xr.open_dataset(mesh_path)
     src_lat = _squeeze2d(ds["gphit"].values)
@@ -338,6 +343,19 @@ def main() -> int:
                    help="Initialise T/S from WOA18 (faithful IC) vs rest state.")
     p.add_argument("--woa-t", type=str, default="data/woa18/woa18_decav_t00_01.nc")
     p.add_argument("--woa-s", type=str, default="data/woa18/woa18_decav_s00_01.nc")
+    p.add_argument("--ke-gradient-scheme", type=str, default=None,
+                   choices=["centered", "hollingsworth"],
+                   help="KE-gradient discretization for the vector-invariant "
+                        "momentum advection. 'hollingsworth' (NEMO nkeg_HW) is "
+                        "consistent with the AL81 PV-flux Coriolis term; "
+                        "'centered' is the legacy scheme. Default (None) PRESERVES "
+                        "the config default, currently 'centered' for BOTH tripole "
+                        "and latlon_bathy -- no production default is changed. This "
+                        "is a diagnostic A/B knob: job 8106193 showed hollingsworth "
+                        "does NOT fix the WOA cold-start blowup (both schemes go "
+                        "non-finite by day 0.5 on both grids). For tripole the "
+                        "hollingsworth KE stencil also still lacks a fold-aware "
+                        "north halo (see run_omip.py tripole config note).")
     p.add_argument("--pgf-scheme", type=str, default=None, choices=[None, "adcroft", "smc03"],
                    help="Override tripole PGF scheme (default: run_omip's adcroft).")
     p.add_argument("--A-h", type=float, default=None, help="Override Laplacian viscosity [m2/s].")
@@ -387,6 +405,7 @@ def main() -> int:
             woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s,
             pgf_scheme=args.pgf_scheme, A_h=args.A_h, B_h=args.B_h, K_bih=args.K_bih,
             flat_bottom=args.flat_bottom, A_h_eq_boost=args.A_h_eq_boost,
+            ke_gradient_scheme=args.ke_gradient_scheme,
         )
         app_grid_type = "tripole"
     else:
@@ -396,6 +415,7 @@ def main() -> int:
             woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s,
             pgf_scheme=args.pgf_scheme, A_h=args.A_h, B_h=args.B_h, K_bih=args.K_bih,
             flat_bottom=args.flat_bottom, A_h_eq_boost=args.A_h_eq_boost,
+            ke_gradient_scheme=args.ke_gradient_scheme,
         )
         app_grid_type = "latlon"
     lat2d, lon2d = _grid_lat2d_deg(grid, args.grid)

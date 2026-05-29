@@ -18,7 +18,10 @@ genuinely match NEMO — far off; no false DONE.
 
 ## THE BLOCKER (root cause, rigorously diagnosed)
 legoESM ocean blows up from realistic (WOA) stratification — NOT topo/IC/convection/
-dissipation/dt (ruled out via flat-bottom, static-stability, ~18 experiments).
+dissipation/dt/**KE-gradient-scheme** (ruled out via flat-bottom, static-stability,
+~19 experiments). KE scheme ruled out iter 2 (job 8106193): centered AND hollingsworth
+both go non-finite by day 0.5 on tripole AND latlon-bathy → NOT the Hollingsworth
+instability, despite the plausible centered-KE+AL81-PV inconsistency hypothesis.
 Mechanism: cold-start geostrophic adjustment from rest (u=0) overshoots to ~5-10 m/s
 → nonlinear advective feedback (u·∇u) → blowup, amplified at the **equator (f→0)**.
 - **FIX #1 DONE (kept):** WOA-IC flood-fill — NEMO mask had ~13% ocean cells WOA lacks
@@ -38,10 +41,24 @@ Mechanism: cold-start geostrophic adjustment from rest (u=0) overshoots to ~5-10
 | spectral | applicator unsupported | TODO |
 
 ## Next
-1. Stabilize realistic-stratification run (drag spin-up, else balanced init).
-2. Once a grid runs stable + free → compare to NEMO (SST/SSS, then ACC/AMOC/MOC/MLD).
-3. Extend to all grids; spectral applicator support.
-4. codex-adversarial-review each change.
+1. **Per-term tendency instrumentation** of `model.step` over steps 1-10 (WOA cold-start):
+   log max|tendency| per term (Coriolis/PV-flux, KE-grad, PGF, vert-adv, viscosity) +
+   the lat/lon of the max — find WHICH term grows first + WHERE. Blowup is grid- AND
+   KE-scheme-independent ⇒ shared `LatLonCGridOceanModel` baroclinic dynamics. This is
+   the un-done diagnostic; do it before the next blind lever.
+2. Un-ruled-out core levers (after #1 points the way): PGF density-Jacobian / EOS audit;
+   barotropic↔baroclinic split coupling; baroclinic-mode discretisation.
+3. Drag spin-up (job 8100129) is a symptom-treatment fallback if a real fix stalls.
+4. Once a grid runs stable + free → compare to NEMO (SST/SSS, then ACC/AMOC/MOC/MLD).
+5. All-grid audit (cubed_sphere/mpas/spectral) in flight (workflow wnz1vbd2y) — fold in.
+6. codex-adversarial-review each change.
+
+### Deferred (only if KE scheme ever matters)
+Hollingsworth KE stencil (`ocean_pe_latlon_cgrid.py` ~1010-1033) widens to j±1 with
+edge-replication wall halos; on the TRIPOLE it ignores the north-fold permutation/sign
+(codex high finding, iter 2). A fold-aware KE halo + active-tripole regression test is
+the prerequisite to ever making `ke_gradient_scheme="hollingsworth"` the tripole default.
+A/B knob added: `run_omip_core2.py --ke-gradient-scheme {centered,hollingsworth}`.
 
 ## Iteration log
 - **iter 1:** new loop. Drag-spinup test 8100129 queued (GPU busy). Created this tracker.
@@ -50,3 +67,15 @@ Mechanism: cold-start geostrophic adjustment from rest (u=0) overshoots to ~5-10
   → below-seafloor T/S bias; now reapplies the deep-fill (z_cen > H_bathy → deep-ocean fill).
   (2) [med] NN forcing-sampler cache key omitted dst_lon.sum() → same-shape grids could collide;
   key now signs full src+dst lat/lon checksums. Drag test 8100129 (PD) will run the fixed code.
+- **iter 2 (KE-gradient scheme RULED OUT — empirical):** Hypothesis: the realistic-IC blowup
+  is the Hollingsworth-Kållberg instability — the default `ke_gradient_scheme="centered"` KE
+  gradient pairs inconsistently with the AL81 12-point PV-flux Coriolis term; the realistic
+  DINO experiment uses `"hollingsworth"` (#263) and KE-scheme was NEVER among the ~16 prior
+  levers. Built A/B knob `run_omip_core2.py --ke-gradient-scheme` (codex-clean, 4 rounds).
+  **A/B job 8106193 (A40): tripole centered (control), tripole hollingsworth, latlon-bathy
+  hollingsworth — ALL THREE finite at step 0 (SST~13°C, |u|=0) then non-finite by step 72
+  (day 0.5). Hollingsworth ≡ centered. KE scheme is NOT the blocker.** Negative result, but a
+  real lever crossed off (19 total) + reusable A/B infra. Codex flagged [high]: the
+  hollingsworth KE stencil lacks a fold-aware north halo → reverted both config DEFAULTS
+  (kept centered), knob-only diff. Refined target: blowup is grid- AND KE-independent ⇒
+  shared baroclinic dynamics; next = per-term tendency instrumentation (steps 1-10).
