@@ -470,5 +470,48 @@ class TestInitialization(unittest.TestCase):
         self.assertGreater(p_s_range, 100.0)
 
 
+class TestLatLonAnalyticTopography(unittest.TestCase):
+    """Analytic mountain generators must work on the lat-lon grid, whose
+    ``lat``/``lon`` are 1-D axes (n_lat,) / (n_lon,) — previously they broadcast
+    ``grid.lat - grid.lon`` as (n_lat,)+(n_lon,) and crashed."""
+
+    def setUp(self):
+        from legoesm.grids.latlon import create_latlon_grid
+        self.grid = create_latlon_grid(
+            n_lat=24, radius=constants.R_earth, omega=constants.Omega)
+        self.shape = (self.grid.n_lat, self.grid.n_lon)
+
+    def test_gaussian_mountain_latlon_shape_and_nonflat(self):
+        z = gaussian_mountain(self.grid, h0=2500.0)
+        self.assertEqual(z.shape, self.shape)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(z))))
+        self.assertGreater(float(jnp.max(z)), 1000.0)
+        self.assertAlmostEqual(float(jnp.min(z)), 0.0, delta=10.0)
+
+    def test_zonal_ridge_latlon_shape_and_zonal(self):
+        from legoesm.grids.topography import zonal_ridge
+        z = zonal_ridge(self.grid, h0=2500.0)
+        self.assertEqual(z.shape, self.shape)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(z))))
+        # Zonally symmetric: each latitude row is constant in longitude
+        # (to float32 precision).
+        z = np.asarray(z)
+        self.assertLess(float(z.std(axis=1).max()), 1e-4 * float(z.max()))
+
+    def test_schaer_mountain_latlon_shape(self):
+        from legoesm.grids.topography import schaer_mountain
+        z = schaer_mountain(self.grid)
+        self.assertEqual(z.shape, self.shape)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(z))))
+
+    def test_cubed_sphere_unchanged(self):
+        # Regression: the 2-D-coordinate helper must not change cubed-sphere
+        # output (lat/lon already 2-D there).
+        grid = create_cubed_sphere(8)
+        z = gaussian_mountain(grid, h0=2500.0)
+        self.assertEqual(z.shape, (6, 8, 8))
+        self.assertGreater(float(jnp.max(z)), 1000.0)
+
+
 if __name__ == "__main__":
     unittest.main()

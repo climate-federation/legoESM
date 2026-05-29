@@ -109,5 +109,22 @@ GPU harness blocks `latlon`. Picked realism (self-contained, locally verifiable)
   exercise codex's "non-flat topo smoke" via the driver; p_s fix tested by the
   exact formula instead. Candidate fix iteration.
 
-### iter 3+ — (next) fix gaussian_mountain latlon bug; GPU harness un-block; MPI deferred (mpi4jax/JAX mismatch)
+- ADV-REVIEW #5 (MEDIUM, fixed in IC commit): T_init ≤ 40 → pole T_sfc ≤ 0 →
+  (T_strato/T_sfc)^(1/κ) NaN in wind. Fix: clamp T_sfc≥T_strato in σ_trop
+  (NaN-safe; gives u=0 for no-troposphere columns) + validate_strict requires
+  150 ≤ T_init ≤ 360 K for ic=standard. +2 tests (21 total in IC test file).
+  Round-6 review pending.
+
+### iter 3 — fix gaussian_mountain latlon bug (commit separate)
+- `gaussian_mountain`/`zonal_ridge`/`schaer_mountain` used 1-D `grid.lat`/`lon`
+  → (n_lat,)+(n_lon,) broadcast crash on latlon (worked on cubed-sphere where
+  lat/lon are 2-D). Fix: `_grid_lat_lon_2d(grid)` helper prefers lat2d/lon2d.
+  Now non-flat analytic topography AMIP works on latlon; also end-to-end
+  validates the standard-IC p_s recompute over a real 2490 m mountain
+  (driver setup ic=standard+gaussian on latlon: p_s 98062-100000 Pa, consistent).
+  +4 tests in test_topography.py (31 total). NOTE: real-topo file path
+  (load_real_topography target lat/lon) may have a similar 1-D issue — untested
+  (needs data); candidate follow-up.
+
+### iter 4+ — (next) GPU harness un-block (single-device verifiable); MPI deferred (mpi4jax↔JAX 0.10.1)
 - TBD
