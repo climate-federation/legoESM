@@ -46,3 +46,20 @@ u-momentum at u-points = -(1/(A_u·h_u))·[δ_x(Fx_uu) + δ_y(Fy_vu)] where
   fails. Symmetric construction for v-momentum at v-points.
 GATES to drive next: F3 (u=v=0 -> 0, trivial), F4 (uniform u, flat periodic -> ~0), F5
 (periodic-domain momentum integral ~ machine-eps), then F6/F7/F8/F9.
+
+**KEY DE-RISKING INSIGHT (iter 1):** F5 (momentum conservation) holds *structurally* for any
+telescoping flux-divergence form — the exact metric VALUES (A_u, dx_vtx) only affect ACCURACY
+(F4/gyre), not conservation. Proof: write du/dt = -(dFx + yp)/h_u and weight the conservation
+sum by VOLUME (A_u·h_u): Σ A_u·h_u·du/dt = -Σ A_u·(dFx + yp). The x-part dFx =
+gradient_x_cgrid(Fx_uu) = (Fx[j]-Fx[j-1])/dx_u; at fixed lat A_u/dx_u is lon-constant so it
+factors and Σ_j telescopes to 0 (periodic). The y-part yp = (Fy[i+1]·dx[i+1] - Fy[i]·dx[i])/A_u,
+so A_u·yp telescopes in i to the pole boundary = 0 (v=0 wall -> Fy=0 at poles). So the
+conservation test must weight by **area·h_u** (volume), and it passes for ANY consistent metric.
+The x-part is exactly `gradient_x_cgrid(Fx_uu_centre)` (E/W faces same lat -> dy cancels). Only
+the y-part (vertex->u-point, dx varies by lat) needs explicit `dx_vtx[i]/A_u[i]` weighting;
+SYMMETRICALLY for v-momentum the y-part is `gradient_y_cgrid` and the x-part needs the vertex
+metric. **Iter 2 first action:** read `divergence_cgrid` v-part (latlon_cgrid_operators.py ~615-660)
+to copy its exact `dx_v` (v-face zonal length) + area convention, so the vertex-metric parts are
+consistent with continuity. Guard `is_tripolar` with a clear ValueError (flux-form on tripolar is
+a follow-up; ACC/gates use regular/regional grids). Upwind vs centred u_c/v_c via
+`momentum_flux_scheme` (default "upwind"); centred is the cleanest for the F4 uniform-flow check.
