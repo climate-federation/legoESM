@@ -21,6 +21,7 @@ import logging
 import jax
 import jax.numpy as jnp
 import numpy as np
+from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.radiation.rrtmgp import kernel_ops
 from legoesm.atmosphere.physics.radiation.rrtmgp.config import radiative_transfer
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import cloud_optics
@@ -307,11 +308,17 @@ class RRTMOptics(optics_base.OpticsScheme):
     ssa = cloud_optical_props['ssa']
     g = cloud_optical_props['asymmetry_factor']
 
-    # Apply delta scaling
+    # Apply delta scaling.  Use ``safe_divide`` instead of
+    # ``num / jnp.maximum(denom, eps)`` for the two divides — the
+    # latter is forward-safe but has a ``-num / denom**2`` reverse-
+    # mode VJP that overflows when ``denom`` is at the floor
+    # (``denom**2 = eps**2 = 1e-12`` underflows to 0 under fp64).
+    # Same pattern as the iter-14 restoration of commit 59407953;
+    # codex iter-18 review flagged this as a survivor.
     wf = ssa * g**2
     cloud_tau = (1 - wf) * optical_depth
-    cloud_ssa = (ssa - wf) / jnp.maximum(1 - wf, _EPSILON)
-    cloud_asy = (g - g**2) / jnp.maximum(1 - g**2, _EPSILON)
+    cloud_ssa = safe_divide(ssa - wf, 1 - wf, eps=_EPSILON, fill=0.0)
+    cloud_asy = safe_divide(g - g**2, 1 - g**2, eps=_EPSILON, fill=0.0)
 
     return {
         'optical_depth': cloud_tau,
