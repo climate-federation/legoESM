@@ -2589,5 +2589,144 @@ class TestGasVmrOverride:
         )
 
 
+class TestCloudFractionCoverage:
+    """Iter-74: pin the ``cloud_fraction`` partial-coverage treatment.
+
+    Audit (iter-74): ``optics.RRTMOptics._combine_cloud_optics`` scales
+    the cloud optical depth by ``cloud_fraction`` exactly once
+    (``optical_depth * cloud_fraction``), keeping cloud ssa / asymmetry,
+    then combines with the gas optics.  This is a documented linear-OD
+    ("gray") cloud-fraction simplification — upstream rte-rrtmgp leaves
+    fractional/overlap handling to the host — so the contract is:
+    ``cf=0`` ≡ clear sky, ``cf=1`` ≡ the unfractioned (``cf=None``) full
+    cloud, and intermediate ``cf`` interpolates monotonically.  This is
+    the path the iter-15/16 ``cf²`` double-discount bug corrupted (cf
+    applied twice); ``TestCloudKwargsHelper`` guards the helper side, and
+    this class guards the optics side end-to-end.
+
+    Equivalences are exact (the scaling is ``×0`` / ``×1``); intermediate
+    behaviour is checked for strict monotonicity + correct sign rather
+    than a magnitude (linear-OD scaling is intentionally non-McICA).
+    """
+
+    @staticmethod
+    def _tol():
+        if jax.config.read("jax_enable_x64"):
+            return dict(rtol=1e-11, atol=1e-10)
+        return dict(rtol=1e-5, atol=1e-4)
+
+    def _setup(self, ncol=2, nlev=16):
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(RRTMGPConfig(include_clouds=True))
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1)
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        T = jnp.broadcast_to(jnp.linspace(220.0, 295.0, nlev)[None, :], (ncol, nlev))
+        base = dict(
+            T=T, p_full=p_full, p_half=p_half,
+            sfc_temperature=jnp.full((ncol,), 298.0),
+            q_v=jnp.full((ncol, nlev), 8e-3),
+            cos_zenith=jnp.full((ncol,), 0.7),
+        )
+        lwp = jnp.zeros((ncol, nlev)).at[:, 10:13].set(0.05)
+        reff = jnp.full((ncol, nlev), 1.0e-5)
+        cloud = dict(cloud_path_liq=lwp, cloud_r_eff_liq=reff)
+        return solver, base, cloud, ncol, nlev
+
+    def _cf(self, ncol, nlev, value):
+        return jnp.full((ncol, nlev), value)
+
+    def test_cf_zero_equals_clear_sky(self):
+        """cloud_fraction=0 scales cloud OD to zero ⇒ identical to a
+        cloud-free column (LW and SW)."""
+        solver, base, cloud, ncol, nlev = self._setup()
+        clear = solver.solve_columns(**base)
+        cf0 = solver.solve_columns(
+            **base, **cloud, cloud_fraction=self._cf(ncol, nlev, 0.0)
+        )
+        for field in ("lw_flux_up", "lw_flux_down", "sw_flux_up", "sw_flux_down"):
+            np.testing.assert_allclose(
+                np.asarray(getattr(cf0, field)), np.asarray(getattr(clear, field)),
+                **self._tol(),
+                err_msg=f"cf=0 must equal clear sky in {field!r} (cloud OD→0)",
+            )
+
+    def test_cf_one_equals_unfractioned(self):
+        """cloud_fraction=1 is the identity scaling ⇒ identical to passing
+        no cloud_fraction at all (full cloud)."""
+        solver, base, cloud, ncol, nlev = self._setup()
+        full = solver.solve_columns(**base, **cloud)  # cf=None
+        cf1 = solver.solve_columns(
+            **base, **cloud, cloud_fraction=self._cf(ncol, nlev, 1.0)
+        )
+        for field in ("lw_flux_up", "lw_flux_down", "sw_flux_up", "sw_flux_down"):
+            np.testing.assert_allclose(
+                np.asarray(getattr(cf1, field)), np.asarray(getattr(full, field)),
+                **self._tol(),
+                err_msg=f"cf=1 must equal the unfractioned cloud in {field!r}",
+            )
+
+    def test_cf_partial_is_monotonic_between_clear_and_full(self):
+        """A half-covered cell sits strictly between clear and full cloud:
+        OLR and surface SW both decrease monotonically as cf rises (the
+        single-application, correct-direction guard against cf² or a
+        flipped scaling)."""
+        solver, base, cloud, ncol, nlev = self._setup()
+        clear = solver.solve_columns(**base)
+        cf05 = solver.solve_columns(
+            **base, **cloud, cloud_fraction=self._cf(ncol, nlev, 0.5)
+        )
+        full = solver.solve_columns(**base, **cloud)
+
+        olr_clear = float(clear.lw_flux_up[0, 0])
+        olr_half = float(cf05.lw_flux_up[0, 0])
+        olr_full = float(full.lw_flux_up[0, 0])
+        assert olr_full < olr_half < olr_clear, (
+            f"OLR must be monotone clear>half>full; got clear={olr_clear:.2f}, "
+            f"half={olr_half:.2f}, full={olr_full:.2f}."
+        )
+
+        sw_clear = float(clear.sw_flux_down[0, -1])
+        sw_half = float(cf05.sw_flux_down[0, -1])
+        sw_full = float(full.sw_flux_down[0, -1])
+        assert sw_full < sw_half < sw_clear, (
+            f"Surface SW must be monotone clear>half>full; got "
+            f"clear={sw_clear:.2f}, half={sw_half:.2f}, full={sw_full:.2f}."
+        )
+
+    def test_cf_differentiable(self):
+        """∂(flux)/∂(cloud_fraction) finite, with column-summed signs
+        matching the physics: raising cf lowers OLR (greenhouse) and
+        lowers surface SW (albedo).  Pins AD through the cf scaling."""
+        solver, base, cloud, ncol, nlev = self._setup()
+        cf0 = self._cf(ncol, nlev, 0.5)
+
+        def olr(cf):
+            out = solver.solve_columns(**base, **cloud, cloud_fraction=cf)
+            return jnp.sum(out.lw_flux_up[:, 0])
+
+        def sfc_sw(cf):
+            out = solver.solve_columns(**base, **cloud, cloud_fraction=cf)
+            return jnp.sum(out.sw_flux_down[:, -1])
+
+        g_olr = jax.grad(olr)(cf0)
+        g_sw = jax.grad(sfc_sw)(cf0)
+        assert jnp.all(jnp.isfinite(g_olr)) and jnp.all(jnp.isfinite(g_sw)), (
+            "∂(flux)/∂(cloud_fraction) must be finite"
+        )
+        # Gradients are nonzero only in the cloudy layers (10:13).
+        assert float(jnp.sum(g_olr[:, 10:13])) < 0.0, (
+            "raising cloud fraction must lower OLR (greenhouse); got "
+            f"∑∂OLR/∂cf={float(jnp.sum(g_olr[:, 10:13])):.3e}"
+        )
+        assert float(jnp.sum(g_sw[:, 10:13])) < 0.0, (
+            "raising cloud fraction must lower surface SW (albedo); got "
+            f"∑∂SW/∂cf={float(jnp.sum(g_sw[:, 10:13])):.3e}"
+        )
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
