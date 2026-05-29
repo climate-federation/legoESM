@@ -45,3 +45,8 @@ Mechanism: cold-start geostrophic adjustment from rest (u=0) overshoots to ~5-10
 
 ## Iteration log
 - **iter 1:** new loop. Drag-spinup test 8100129 queued (GPU busy). Created this tracker.
+  codex-adversarial-review of dycore changes = needs-attention, 2 valid findings, both FIXED:
+  (1) [high] flood-fill copied donor columns without reapplying the RECEIVER bathymetry deep-fill
+  → below-seafloor T/S bias; now reapplies the deep-fill (z_cen > H_bathy → deep-ocean fill).
+  (2) [med] NN forcing-sampler cache key omitted dst_lon.sum() → same-shape grids could collide;
+  key now signs full src+dst lat/lon checksums. Drag test 8100129 (PD) will run the fixed code.

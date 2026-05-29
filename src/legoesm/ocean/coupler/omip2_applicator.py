@@ -77,11 +77,15 @@ def _nn_interp_to_points(field, src_lat_deg, src_lon_deg,
     src_lon = np.asarray(src_lon_deg, dtype=np.float64) % 360.0
     dst_lat = np.asarray(dst_lat_deg_pts, dtype=np.float64)
     dst_lon = np.asarray(dst_lon_deg_pts, dtype=np.float64) % 360.0
+    # Robust signature of BOTH source and destination coords (codex: the dst
+    # longitude checksum was missing, so two same-shape targets differing only
+    # in interior lon could collide and reuse the wrong index map).
     key = (
         src_lat.size, src_lon.size, dst_lat.size,
-        float(src_lat[0]), float(src_lon[0]),
+        float(src_lat[0]), float(src_lat[-1]), float(src_lat.sum()),
+        float(src_lon[0]), float(src_lon[-1]), float(src_lon.sum()),
         float(dst_lat[0]), float(dst_lat[-1]), float(dst_lat.sum()),
-        float(dst_lon[0]), float(dst_lon[-1]),
+        float(dst_lon[0]), float(dst_lon[-1]), float(dst_lon.sum()),
     )
     idx = _NN_INDEX_CACHE.get(key)
     if idx is None:

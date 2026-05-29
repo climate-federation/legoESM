@@ -113,6 +113,20 @@ def compute_woa_3d(grid, z_coord, woa_t, woa_s, H_bathy, land_mask):
         S_woa[jb, ib, :] = S_woa[jj[idx], ii[idx], :]
         print(f"[setup] flood-filled {int(bad.sum())} NEMO-ocean cells "
               f"lacking WOA data (S<1) from nearest valid column")
+    # Re-apply the RECEIVER bathymetry deep-fill (codex C1): a donor column
+    # copied above may carry levels below the receiver's own seafloor; replace
+    # every level deeper than the local H_bathy with the deep-ocean fill, so the
+    # filled columns match init_ocean_from_woa's bathymetry_depth treatment and
+    # do not reintroduce a hidden below-seafloor T/S bias. Idempotent for the
+    # original (already-filled) columns.
+    from legoesm import constants as _const
+    dz = np.asarray(z_coord.dz_ref, dtype=np.float64)
+    z_cen = np.cumsum(dz) - 0.5 * dz                      # (nlev,) cell-centre depths
+    below = z_cen[None, None, :] > np.asarray(H_bathy)[..., None]
+    T_fill = float(getattr(_const, "T_deep_ocean_ref_C", 1.5))
+    S_fill = float(getattr(_const, "S_deep_ocean_ref_psu", 34.7))
+    T_woa = np.where(below, T_fill, T_woa)
+    S_woa = np.where(below, S_fill, S_woa)
     m3 = m2[..., None]
     return T_woa * m3, S_woa * m3
 
