@@ -34,11 +34,34 @@ Mechanism: cold-start geostrophic adjustment from rest (u=0) overshoots to ~5-10
 ## Per-grid status
 | grid | runs stable (realistic IC)? | comparison |
 |---|---|---|
-| tripole/eORCA1 | NO (cold-start blowup; flood-fill + drag in progress) | pending |
-| latlon_bathy | NO (same; regridded NEMO bathy) | pending |
+| tripole/eORCA1 | partial-cell coord lands the worst fix; vertadv-amplified equatorial residual | pending |
+| latlon_bathy | same dynamics path; same residual | pending |
 | cubed_sphere | untested w/ CORE-II | — (applicator supports) |
 | mpas | untested w/ CORE-II | — (applicator supports) |
 | spectral | applicator unsupported | TODO |
+
+## All-grid audit (workflow wnz1vbd2y, 7 agents) — "correct all grid types" map
+- **tripole/latlon (LatLonCGridOceanModel):** vertical-coord TYPE fixed (partial-cell). Residual
+  = vertadv amplifier + equatorial PGF seed (above). Coriolis from geographic lat = correct.
+  **Follow-up [accuracy, non-blocking]:** the HW KE branch (ocean_pe_latlon_cgrid.py:1015-1018)
+  fills j±1 u-neighbour by edge-replication — WRONG at the active tripole north fold (should be
+  `vector_sign_u·u[-1:,perm_T]`). Affects `run_tripole_20yr.py:83` + any HW-on-tripole run
+  (one-row Arctic seam, NOT the equatorial blowup). Fix = fold-aware halo (mirror
+  `pad_ns_vector_u`/`_fold_row`) + synthetic-fold unit test (current test is no-fold) + VISUAL
+  verify the fold row. Centered KE is fold-safe (no j±1 reach).
+- **cubed_sphere (OceanModel/ocean_pe_cdgrid):** Coriolis correct (geographic lat, edge-synced).
+  Momentum HK-immune (vorticity-from-circulation). **[high] documented face-edge PGF instability**
+  (NaN ~2.2 d at cube-edge cells) currently MASKED by A_h≥5e5/K_h≥5e6 + FC-Gram → 5-50× heavier
+  diffusion ⇒ NOT physically comparable to NEMO. Structural fix = SMC03 + duogrid halo on T/S.
+- **mpas (MPASOceanModel/TRiSK):** **[high] split-Coriolis inconsistency (#160):** planetary f
+  zeroed in the PV flux (q=ζ/h only) + applied by separate barotropic/Matsuno ops → breaks the
+  energy-conserving TRiSK identity; q-transport (h·u_total) inconsistent w/ continuity flux;
+  default `pv_scheme='enstrophy'` non-EC. Fix = MOM6 full-PV q=(f+ζ)/h + continuity transport.
+  Also: untested w/ CORE-II (run it).
+- **spectral (spectral_ocean_pe):** **[high] OMIP applicator gap is TOTAL** — `SpectralOceanState`
+  has no grid-space u/v/T or masks, so both `apply_omip2_surface_fluxes` and
+  `compute_omip2_surface_forcing` raise. Self-flagged unsupported (Gibbs ringing #99). Fix =
+  spectral surface-forcing path (synth top layer→Gaussian grid→air_sea_fluxes→curl/div→vor/div_hat).
 
 ## Next
 1. **Per-term tendency instrumentation** of `model.step` over steps 1-10 (WOA cold-start):
