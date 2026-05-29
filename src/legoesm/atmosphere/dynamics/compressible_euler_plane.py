@@ -1514,21 +1514,36 @@ def plane_acoustic_substeps_si_horizontal(
 
         # 3. Vertical acoustic implicit (w) + vertical continuity +
         #    vertical theta advection (shared column kernel).
+        #    Pass beta=0.0 here so the kernel does NOT off-center the
+        #    vertical continuity in isolation — we apply Skamarock-Klemp
+        #    off-centering to the FULL (vertical + horizontal) divergence
+        #    below, so both legs receive consistent acoustic damping
+        #    (cavecrew review: asymmetric off-centering between the
+        #    vertical and horizontal continuity breaks the f-b stencil).
         w_new, theta_p_new, rho_p_vert = _semi_implicit_acoustic_column_kernel(
             w_c, theta_p_c, rho_p_c,
-            height_coord, J, dt_s, beta, g,
+            height_coord, J, dt_s, 0.0, g,
             implicit_buoyancy=implicit_buoyancy,
             precomputed_tridiag=tri_bands,
             si_w_vertical_filter_nu=si_w_filter_nu,
         )
 
         # 4. Horizontal mass-flux divergence (backward: uses new u, v).
+        #    rho_total reflects the pre-update rho_p_c (forward-backward
+        #    convention: the mass flux uses the state at the start of the
+        #    substep, the velocity from the just-completed forward step).
         rho_xface = interp_cell_to_xface_vlast(rho_total, grid)
         rho_yface = interp_cell_to_yface_vlast(rho_total, grid)
         horiz_div = divergence_vlast(
             rho_xface * u_new, rho_yface * v_new, grid,
         )
         rho_p_new = rho_p_vert - dt_s * horiz_div
+        # Off-center the FULL divergence update (Skamarock-Klemp 2008).
+        # rho_p_vert already carries -dt_s*vert_div (kernel, beta=0), so
+        # rho_p_new now carries the total -dt_s*(vert+horiz)_div; apply
+        # the off-centering blend once on the combined result.
+        if beta != 0.0:
+            rho_p_new = (1.0 + beta) * rho_p_new - beta * rho_p_c
 
         u_c, v_c, w_c, theta_p_c, rho_p_c = (
             u_new, v_new, w_new, theta_p_new, rho_p_new,
@@ -1783,8 +1798,27 @@ class PlaneCompressibleEulerModel:
             # Single-rank: halo path is bit-identical to the standard
             # jit'd step (proven by test_halo_equiv_*) — route to it
             # for the JIT speedup. Skips packed exchange overhead +
-            # gives ~14x faster per-step on small grids.
+            # gives ~14x faster per-step on small grids. The standard
+            # step() honours substep_horizontal_acoustic.
             return self.step(state_local, dt)
+
+        # Multi-rank gate for the horizontal-acoustic substep (cavecrew
+        # review): the full Skamarock-Klemp split needs a halo exchange
+        # of u, v, rho' on EVERY acoustic substep (the horizontal PG and
+        # mass divergence are now substepped), which the packed-exchange
+        # halo path does not yet provide. Refuse loudly rather than
+        # silently fall back to the vertical-only substep (which is
+        # unstable at fine dx with perturbed IC — the very bug this flag
+        # fixes).
+        if getattr(self.config, "substep_horizontal_acoustic", False):
+            raise NotImplementedError(
+                "substep_horizontal_acoustic is not yet wired into the "
+                "multi-rank step_halo path (it needs per-substep u/v/rho' "
+                "halo exchange). Use single-rank step()/--no domain "
+                "decomposition for fine-dx perturbed-IC runs, or extend "
+                "plane_compressible_euler_slow_tendencies_halo + the halo "
+                "substep loop first."
+            )
 
         # Multi-rank correctness gate (Codex 2026-05 review): silently
         # skipping the mass fixer when fix_mass=True but no owned_mask
