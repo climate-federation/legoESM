@@ -158,7 +158,29 @@ class CompressibleEulerConfig(NamedTuple):
                                           # (dz~1000 m) with stratified ICs.
                                           # Only active when
                                           # semi_implicit_acoustic=True.
-    # ---- Plane-only fields (PR3c) ----
+    substep_horizontal_acoustic: bool = False
+                                          # Plane SI dycore only. When True the
+                                          # horizontal pressure gradient AND the
+                                          # mass-continuity divergence are moved
+                                          # OUT of the slow tendency and INTO the
+                                          # acoustic substep loop (full Skamarock-
+                                          # Klemp split-explicit). The slow
+                                          # tendency then carries only advection +
+                                          # diffusion + Coriolis + sponge.
+                                          # WHY: with the horizontal PG in the slow
+                                          # tendency (applied once per RK3 stage at
+                                          # the OUTER dt) the horizontal acoustic
+                                          # mode is integrated at dt, not dt/nsub.
+                                          # At fine dx (<=1 km) that mode grows
+                                          # unboundedly from any perturbed-theta'
+                                          # IC (u -> O(1e4) m/s -> NaN) because the
+                                          # C-grid PG/divergence adjoint pairing is
+                                          # only energy-neutral for constant
+                                          # theta_0/rho_0. Substepping the
+                                          # horizontal acoustic terms lowers their
+                                          # effective CFL to c_s*dt/(nsub*dx) << 1.
+                                          # Default False preserves the iter-183
+                                          # coarse-grid contract bit-for-bit.
     # The following two knobs are consumed ONLY by the doubly-periodic
     # plane non-hydrostatic dycore
     # (:mod:`legoesm.atmosphere.dynamics.compressible_euler_plane`).

@@ -464,6 +464,13 @@ def parse_args():
     p.add_argument("--semi-implicit", action="store_true",
                    help="Use semi-implicit acoustic substepping (lifts "
                         "vertical CFL). Recommended for long runs at dx>=2km.")
+    p.add_argument("--substep-horizontal-acoustic", action="store_true",
+                   help="Move horizontal pressure gradient + mass continuity "
+                        "into the acoustic substep loop (full Skamarock-Klemp "
+                        "split). REQUIRED for stable runs with perturbed "
+                        "theta' IC at fine dx (<=1 km): the horizontal "
+                        "acoustic mode is otherwise integrated at the outer dt "
+                        "and blows up (u -> O(1e4) m/s -> NaN). Plane SI only.")
     p.add_argument("--n-acoustic-substeps", type=int, default=6,
                    help="Acoustic substeps per RK3 stage. Default 6 "
                         "matches CompressibleEulerConfig default.")
@@ -594,6 +601,7 @@ def main():
         acoustic_off_centering=args.off_centering,
         implicit_buoyancy=args.implicit_buoyancy,
         si_w_vertical_filter_nu=args.si_w_filter_nu,
+        substep_horizontal_acoustic=args.substep_horizontal_acoustic,
         horizontal_advection_scheme=args.advection,
         use_coriolis=False,
         fix_mass=True, anchor_mass_to_initial=True,
