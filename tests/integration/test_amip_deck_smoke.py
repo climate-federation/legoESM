@@ -53,10 +53,18 @@ def _run_deck(out_dir: Path, *, forcing_dir: Path,
               grid_type: str = "cubed_sphere",
               discretization: str = "centered",
               resolution: int = 12,
+              radiation: str = "gray",
+              days: int = 1,
               extra: list[str] | None = None,
               timeout: int = 240) -> subprocess.CompletedProcess:
     """Drive ``run_amip_cmip6_deck.py`` with a self-contained
-    auto-generated forcing deck under ``forcing_dir``."""
+    auto-generated forcing deck under ``forcing_dir``.
+
+    ``radiation`` selects the radiation backend; ``gray`` keeps the run
+    fast (dycore + SST-forcing path only), while ``rrtmg`` exercises the
+    full CMIP6 physics stack (correlated-k radiation consuming the
+    transient GHG / ozone / spectral-solar forcing channels).
+    """
     cmd = [
         sys.executable, str(_DECK_DRIVER),
         "--forcing-dir", str(forcing_dir),
@@ -64,9 +72,9 @@ def _run_deck(out_dir: Path, *, forcing_dir: Path,
         "--grid-type", grid_type,
         "--discretization", discretization,
         "--resolution", str(resolution),
-        "--days", "1",
+        "--days", str(days),
         "--diag-days", "1",
-        "--radiation", "gray",
+        "--radiation", radiation,
         "--no-aerosol", "--no-volcanic",
         "--output", str(out_dir),
     ]
@@ -160,6 +168,49 @@ def test_deck_runs_and_validates_latlon_cgrid(tmp_path):
     r = _run_deck(out, forcing_dir=forcing,
                    grid_type="latlon", discretization="latlon_cgrid",
                    resolution=24)
+    assert r.returncode == 0, (
+        f"deck driver failed (exit={r.returncode}):\n"
+        f"--- stderr (tail) ---\n{r.stderr[-2000:]}"
+    )
+    v = _validate(out)
+    assert v.returncode == 0, v.stdout
+
+
+def test_deck_runs_and_validates_latlon_finite_volume(tmp_path):
+    """Lat-lon **finite-volume** AMIP path: ``--discretization
+    finite_volume`` is the canonical CLI name for the lat-lon C-grid
+    primitive-equation dycore (``latlon_cgrid_primitive_equations``).
+    This pins the exact grid+discretization combination users select for
+    a CMIP6 AMIP run on the lat-lon FV grid."""
+    forcing = tmp_path / "forcing"
+    out = tmp_path / "amip_run"
+    r = _run_deck(out, forcing_dir=forcing,
+                   grid_type="latlon", discretization="finite_volume",
+                   resolution=24)
+    assert r.returncode == 0, (
+        f"deck driver failed (exit={r.returncode}):\n"
+        f"--- stderr (tail) ---\n{r.stderr[-2000:]}"
+    )
+    v = _validate(out)
+    assert v.returncode == 0, v.stdout
+
+
+def test_deck_runs_and_validates_latlon_finite_volume_rrtmg(tmp_path):
+    """End-to-end CMIP6 AMIP physics on the lat-lon finite-volume grid:
+    correlated-k RRTMG radiation consuming the transient GHG / ozone /
+    spectral-solar forcing channels (gray radiation leaves those inert).
+
+    Heavier than the gray-radiation cases — the RRTMG correlated-k graph
+    carries a multi-minute JIT compile that dominates wall time (the
+    integration itself is ~1 s), so it lives behind the same nightly gate
+    with an enlarged timeout.  Resolution is held at 12 (~280 s end to
+    end here); larger grids inflate the dynamics-scan compile past the
+    timeout without exercising any additional code path."""
+    forcing = tmp_path / "forcing"
+    out = tmp_path / "amip_run"
+    r = _run_deck(out, forcing_dir=forcing,
+                   grid_type="latlon", discretization="finite_volume",
+                   resolution=12, radiation="rrtmg", timeout=900)
     assert r.returncode == 0, (
         f"deck driver failed (exit={r.returncode}):\n"
         f"--- stderr (tail) ---\n{r.stderr[-2000:]}"
