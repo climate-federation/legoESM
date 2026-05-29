@@ -905,6 +905,55 @@ class TestStandardO3Profile:
         )
 
 
+class TestADSafetyAtStratosphereTau:
+    """Iter-20: end-to-end ``jax.grad`` through ``solve_columns`` for
+    a stratosphere-only column whose SW optical depth is small enough
+    that the iter-14 (commit 59407953) AD-unsafe maximum-floor pattern
+    would have triggered.  Pins the AD chain.
+
+    Pre-iter-14 symptom: ``tau_tot`` reaches the 1e-12 floor in cloud-
+    free, low-water-vapor stratospheric layers; the legacy
+    ``num / jnp.maximum(tau_tot, 1e-12)`` divide's VJP overflows to
+    NaN.  Codex iter-18 review found 4 more sites with the same
+    pattern (iter-19 fixed) — this test pins the full chain.
+    """
+
+    def test_jax_grad_finite_for_pure_stratosphere_column(self):
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(RRTMGPConfig())
+        ncol, nlev = 1, 12
+        # Pure stratosphere: pressure 1 to 200 hPa, T 220K throughout.
+        # No clouds, near-zero water vapor.
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 2.0e4, nlev + 1)[None, :], (ncol, nlev + 1)
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        T = jnp.full((ncol, nlev), 220.0)
+        sfc_T = jnp.array([230.0])
+        # 0.1 ppm water vapor — typical mid-stratosphere.
+        q_v = jnp.full((ncol, nlev), 1e-7)
+        cos_z = jnp.array([0.4])
+
+        def loss(T_in):
+            out = solver.solve_columns(
+                T=T_in, p_full=p_full, p_half=p_half,
+                sfc_temperature=sfc_T, q_v=q_v, cos_zenith=cos_z,
+            )
+            return jnp.sum(out.heating_rate)
+
+        g = jax.grad(loss)(T)
+        assert jnp.all(jnp.isfinite(g)), (
+            f"∂(heating_rate)/∂T through stratosphere column must be "
+            f"finite; got {g}.  Sign of iter-14/iter-19 AD-floor "
+            f"regression — see commits 59407953 and codex iter-18 "
+            f"survivor finding."
+        )
+        # Non-trivial gradient — guard against constant-fold collapse.
+        assert jnp.abs(g).max() > 0.0
+
+
 class TestCloudKwargsHelper:
     """Iter-17: ``CloudProperties.to_rrtmg_kwargs`` must NOT include
     cloud_fraction.  Pinning this prevents the
