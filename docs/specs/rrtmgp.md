@@ -41,7 +41,8 @@ files; no analogous losses possible outside radiation footprint.
 
 Codex SHIP verdicts: iter-3 (O3), iter-18 (iter-13→17), iter-40
 (cache work), iter-58 (dead-code series iter-50→57), iter-69
-(test series iter-63→68 — 2 blockers found + fixed).
+(test series iter-63→68 — 2 blockers found + fixed), iter-79
+(series iter-70→78 — needs-attention, 2 medium found + fixed).
 
 ---
 
@@ -79,7 +80,7 @@ Metal-env skip (iter-59), `recurrent_op_1d{,_scan}` (iter-60),
 `GrayAtmosphereOptics` class + config + factory branch
 (iter-61), `_shift_up` + Planck-path clarifier (iter-62).
 
-### Test coverage expansion (iter-63 → 78)
+### Test coverage expansion (iter-63 → 79)
 - iter-63: `TestMixedPrecision` — fp32-vs-fp64 numerical
   equivalence within fp32 round-off (x64-gated, skips otherwise);
   bfloat16-input finiteness.
@@ -145,8 +146,9 @@ Metal-env skip (iter-59), `recurrent_op_1d{,_scan}` (iter-60),
   the gas+cloud OD in `solve_lw`, injected into `precomputed_props`
   *before* the optimal-angle secant so the diffusivity fit + the
   source/properties solve share the aerosol-inclusive τ; exposed as
-  `solve_columns(aerosol_optical_depth_lw=…)`, opt-in (None ⇒ LW
-  byte-identical, zero regression).  Pins: AOD=0 ≡ no-aerosol, elevated
+  `solve_columns(aerosol_absorption_optical_depth_lw=…)` (renamed
+  iter-79), opt-in (None ⇒ LW byte-identical, zero regression).  Pins:
+  AOD=0 ≡ no-aerosol, elevated
   cold absorber lowers OLR (−28 W/m²) + raises surface down-LW
   (+6.7), ∂(OLR)/∂(AOD)<0 finite, and the optimal-angle path stays
   consistent.
@@ -160,6 +162,17 @@ Metal-env skip (iter-59), `recurrent_op_1d{,_scan}` (iter-60),
   T-clip was guarded).  OD ≥ 0 all g-points; exactly linear in air
   amount (×2 molecules → ×2 OD); spectrally resolved (max/min ≫ 10,
   1/λ⁴); ∂(OD)/∂(molecules) finite + positive.
+- iter-79: codex adversarial review of the iter-70→78 series
+  (needs-attention).  2 medium findings, both fixed: (a) LW aerosol
+  input was a silent absorption-vs-extinction trap → renamed the
+  param to `aerosol_absorption_optical_depth_lw` (solve_lw:
+  `aerosol_absorption_optical_depth`) + docstrings state "absorption,
+  NOT extinction; scale extinction by (1−ω) first"; (b)
+  `test_lw_aerosol_with_optimal_angle` was vacuous (added absorption
+  lowers OLR even if the secant saw gas-only τ) → replaced with
+  `test_lw_aerosol_enters_optimal_angle_secant`: the optimal−fixed
+  secant correction must *change* when aerosol is added (Δ≈0.24 W/m²),
+  isolating the inject-before-secant invariant.
 
 ### Test classes in `test_rrtmgp_stratosphere.py` (~93 tests)
 `TestClipToTableRange`, `TestRelativeAbundanceSafeDiv`,
@@ -177,7 +190,7 @@ cache-key + sharded-equivalence + iter-13/15 end-to-end pins.
 
 ---
 
-## Status (after iter-78)
+## Status (after iter-79)
 
 - ✅ 159 pass + 6 skip (3 Metal-broken + 2 multidevice +
   1 fp32-vs-fp64 x64-gated) — 0 fail.
@@ -206,9 +219,10 @@ cache-key + sharded-equivalence + iter-13/15 end-to-end pins.
 - ✅ All codex iter-69 Q5 coverage gaps closed: cloud_path_ice
   (iter-70), o3_vmr + ghg_vmr_override (iter-73), cloud_fraction
   (iter-74), solar_spectral_fraction (iter-75).
-- ✅ LW aerosol supported (iter-76): prescribed pure-absorbing
-  `aerosol_optical_depth_lw` in `solve_lw` (was SW-only); opt-in,
-  byte-identical when unused, AD-safe, optimal-angle-consistent.
+- ✅ LW aerosol supported (iter-76, named iter-79): prescribed
+  `aerosol_absorption_optical_depth_lw` (absorption OD, ssa=0) in
+  `solve_lw` (was SW-only); opt-in, byte-identical when unused,
+  AD-safe, optimal-angle-consistent (secant sees aerosol τ, pinned).
 
 ## Deferred
 

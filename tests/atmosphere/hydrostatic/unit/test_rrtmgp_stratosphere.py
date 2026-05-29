@@ -2874,7 +2874,7 @@ class TestLwAerosolPath:
     the combined ssa diluted, injected into ``precomputed_props`` *before*
     the optimal-angle secant so both the diffusivity fit and the
     source/properties solve see the aerosol-inclusive transmissivity.
-    Exposed via ``solve_columns(aerosol_optical_depth_lw=...)``; ``None``
+    Exposed via ``solve_columns(aerosol_absorption_optical_depth_lw=...)``; ``None``
     (default) leaves the longwave solution byte-identical (zero
     regression for every existing caller — the mixing block is skipped).
 
@@ -2915,13 +2915,13 @@ class TestLwAerosolPath:
         return jnp.zeros((ncol, nlev)).at[:, 2:5].set(value)
 
     def test_zero_lw_aod_equals_no_aerosol(self):
-        """aerosol_optical_depth_lw=0 ≡ omitting it (the pure-absorbing
+        """aerosol_absorption_optical_depth_lw=0 ≡ omitting it (the pure-absorbing
         mixing is inert at zero optical depth)."""
         solver = self._solver()
         base, ncol, nlev = self._cols()
         none = solver.solve_columns(**base)
         zero = solver.solve_columns(
-            **base, aerosol_optical_depth_lw=jnp.zeros((ncol, nlev))
+            **base, aerosol_absorption_optical_depth_lw=jnp.zeros((ncol, nlev))
         )
         for field in ("lw_flux_up", "lw_flux_down", "lw_heating_rate"):
             np.testing.assert_allclose(
@@ -2935,12 +2935,12 @@ class TestLwAerosolPath:
         base, ncol, nlev = self._cols()
         none = solver.solve_columns(**base)
         aer = solver.solve_columns(
-            **base, aerosol_optical_depth_lw=self._elevated_aod(ncol, nlev)
+            **base, aerosol_absorption_optical_depth_lw=self._elevated_aod(ncol, nlev)
         )
         drop = float(none.lw_flux_up[0, 0]) - float(aer.lw_flux_up[0, 0])
         assert drop > 1.0, (
             f"An elevated (cold) absorbing aerosol layer must reduce OLR; "
-            f"got Δ(OLR)={-drop:+.3f} W/m². Δ≈0 ⇒ aerosol_optical_depth_lw "
+            f"got Δ(OLR)={-drop:+.3f} W/m². Δ≈0 ⇒ aerosol_absorption_optical_depth_lw "
             f"not reaching the LW optical depth."
         )
         assert drop < 80.0, f"OLR drop {drop:.3f} W/m² implausibly large."
@@ -2950,7 +2950,7 @@ class TestLwAerosolPath:
         base, ncol, nlev = self._cols()
         none = solver.solve_columns(**base)
         aer = solver.solve_columns(
-            **base, aerosol_optical_depth_lw=self._elevated_aod(ncol, nlev)
+            **base, aerosol_absorption_optical_depth_lw=self._elevated_aod(ncol, nlev)
         )
         rise = float(aer.lw_flux_down[0, -1]) - float(none.lw_flux_down[0, -1])
         assert rise > 0.5, (
@@ -2965,7 +2965,7 @@ class TestLwAerosolPath:
 
         def olr(a):
             return jnp.sum(solver.solve_columns(
-                **base, aerosol_optical_depth_lw=a).lw_flux_up[:, 0])
+                **base, aerosol_absorption_optical_depth_lw=a).lw_flux_up[:, 0])
 
         g = jax.grad(olr)(aod0)
         assert jnp.all(jnp.isfinite(g)), f"∂(OLR)/∂(LW AOD) must be finite; {g}"
@@ -2974,22 +2974,42 @@ class TestLwAerosolPath:
             f"got {float(jnp.sum(g[:, 2:5])):.3f}"
         )
 
-    def test_lw_aerosol_with_optimal_angle(self):
+    def test_lw_aerosol_enters_optimal_angle_secant(self):
         """The optimal-angle diffusivity secant is fit on the column
-        transmissivity exp(-Στ); the aerosol must be in τ before the fit.
-        Pin that the optimal-angle path runs with aerosol and still
-        reduces OLR."""
-        solver = self._solver(use_optimal_angle=True)
+        transmissivity exp(-Στ), so the aerosol must enter τ *before* the
+        secant fit (not only the later source/transport solve).
+
+        A bare "aerosol reduces OLR in the optimal-angle path" assertion is
+        vacuous — added absorption lowers OLR even if the secant were
+        computed from gas-only τ (codex iter-79 review).  Instead isolate
+        the secant: the optimal-angle-vs-fixed-secant correction
+        (OLR_optimal − OLR_fixed) must itself *change* when aerosol is
+        added, since only an aerosol-aware secant shifts that correction.
+        If aerosol were injected after the secant, the correction would be
+        identical with and without aerosol (the source-side aerosol effect
+        cancels in the optimal−fixed difference)."""
+        solver_opt = self._solver(use_optimal_angle=True)
+        solver_fix = self._solver(use_optimal_angle=False)
         base, ncol, nlev = self._cols()
-        none = solver.solve_columns(**base)
-        aer = solver.solve_columns(
-            **base, aerosol_optical_depth_lw=self._elevated_aod(ncol, nlev)
+        aod = self._elevated_aod(ncol, nlev)
+
+        def olr(solver, with_aer):
+            kw = dict(base)
+            if with_aer:
+                kw["aerosol_absorption_optical_depth_lw"] = aod
+            return float(solver.solve_columns(**kw).lw_flux_up[0, 0])
+
+        corr_aer = olr(solver_opt, True) - olr(solver_fix, True)
+        corr_noaer = olr(solver_opt, False) - olr(solver_fix, False)
+        assert abs(corr_aer - corr_noaer) > 1.0e-2, (
+            f"optimal-angle correction is insensitive to aerosol "
+            f"(with={corr_aer:.4f}, without={corr_noaer:.4f} W/m²) — the "
+            f"diffusivity secant is NOT seeing aerosol τ, i.e. aerosol is "
+            f"injected after the secant fit instead of before it."
         )
-        assert jnp.all(jnp.isfinite(aer.lw_flux_up)), "optimal-angle + aerosol NaN"
-        assert float(aer.lw_flux_up[0, 0]) < float(none.lw_flux_up[0, 0]), (
-            "optimal-angle path: elevated absorbing aerosol must still "
-            "reduce OLR (aerosol τ must enter the secant fit)."
-        )
+        # And the path must of course stay finite + physical.
+        assert jnp.all(jnp.isfinite(solver_opt.solve_columns(
+            **base, aerosol_absorption_optical_depth_lw=aod).lw_flux_up))
 
 
 class TestDeltaScaling:
