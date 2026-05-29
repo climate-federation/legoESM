@@ -468,6 +468,25 @@ class LatLonCGridOceanModel:
             if value < 0.0:
                 raise ValueError(f"{name} must be >= 0, got {value!r}")
 
+        # Lateral mixing on the lat-lon C-grid is a DYNAMICS-level concern:
+        # horizontal viscosity via config.A_h/config.B_h, GM/Redi via the
+        # top-level config.gm_redi field (applied in the model step). The
+        # physics-pathway lateral-mixing factory (config.physics.lateral_mixing)
+        # is cubed-sphere-only — harmonic/biharmonic crash on lat-lon array
+        # shapes and gm_redi raises TypeError — so any non-"none" scheme there
+        # is a mis-wiring that would fail (or silently no-op via the probe) at
+        # runtime. Reject it at construction with a clear message.
+        if (config.physics is not None
+                and config.physics.lateral_mixing.scheme != "none"):
+            raise ValueError(
+                "On the lat-lon C-grid, config.physics.lateral_mixing.scheme="
+                f"{config.physics.lateral_mixing.scheme!r} is unsupported (the "
+                "physics lateral-mixing factory is cubed-sphere-only). Set "
+                "horizontal viscosity via config.A_h / config.B_h and GM/Redi "
+                "via the top-level config.gm_redi; keep "
+                "physics.lateral_mixing.scheme='none'."
+            )
+
         if config.n_barotropic_substeps < 1:
             raise ValueError(
                 f"n_barotropic_substeps must be >= 1, got "

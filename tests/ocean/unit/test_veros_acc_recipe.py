@@ -104,7 +104,11 @@ def test_full_recipe_builds_under_constants_override():
     assert recipe.model_config.A_h_cos_power == 1
     assert recipe.model_config.implicit_vertical_mixing is True
     assert recipe.physics_config.vertical_mixing.scheme == "tke"
-    assert recipe.physics_config.lateral_mixing.scheme == "gm_redi"
+    # GM/Redi on lat-lon is a top-level (dynamics) field, NOT physics-pathway
+    # lateral mixing (which is cubed-sphere-only). The physics lateral_mixing
+    # is "none"; the GM/Redi config lives at model_config.gm_redi.
+    assert recipe.physics_config.lateral_mixing.scheme == "none"
+    assert recipe.model_config.gm_redi is ACC_GM_REDI_CONFIG
     assert recipe.z_coord.n_levels == NZ
     assert recipe.initial_state.T.data.shape[-1] == NZ
     assert recipe.initial_state.land_mask.data.dtype.kind == "f"
@@ -435,3 +439,48 @@ def test_bridge_roundtrip_salt_index_mapping():
         else np.asarray(bridged.state.S.data)
     )
     np.testing.assert_allclose(interior_S, expected, rtol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# GM/Redi wiring: lat-lon GM/Redi is dynamics-level (top-level config.gm_redi),
+# NOT physics-pathway lateral mixing (which is cubed-sphere-only)
+# ---------------------------------------------------------------------------
+
+
+def test_recipe_gm_redi_wired_at_top_level_not_physics():
+    """The lat-lon model applies GM/Redi from config.gm_redi (top-level); the
+    physics-pathway lateral-mixing factory is cubed-sphere-only. The recipe
+    must set GM/Redi at the top level (else GM/Redi is silently INACTIVE:
+    config.gm_redi defaults None -> model skips it, probe never runs physics)."""
+    with override_constants(**VEROS_CONSTANTS):
+        recipe = build_acc_recipe()
+    assert recipe.model_config.gm_redi is ACC_GM_REDI_CONFIG, (
+        "GM/Redi must be at model_config.gm_redi (what the lat-lon model reads)"
+    )
+    assert recipe.model_config.physics.lateral_mixing.scheme == "none"
+
+
+def test_latlon_model_rejects_physics_lateral_mixing():
+    """Guard: a non-'none' physics.lateral_mixing scheme on the lat-lon C-grid
+    is a mis-wiring (the physics factory is cubed-sphere-only). It must raise at
+    construction with a clear message; the fixed recipe must pass."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
+    from legoesm.ocean.state import LatLonCGridOceanConfig
+
+    bad = LatLonCGridOceanConfig(
+        physics=OceanPhysicsConfig(
+            lateral_mixing=LateralMixingConfig(
+                scheme="gm_redi", gm_redi=ACC_GM_REDI_CONFIG,
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="lat-lon C-grid"):
+        LatLonCGridOceanModel._validate_config(bad)
+
+    with override_constants(**VEROS_CONSTANTS):
+        recipe = build_acc_recipe()
+    LatLonCGridOceanModel._validate_config(recipe.model_config)  # must not raise

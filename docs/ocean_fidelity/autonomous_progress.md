@@ -8,7 +8,7 @@ One entry per task attempt. Newest at the bottom of each task block.
 - [x] Q2 — Per-process comparison IMPLEMENTED (momentum+tracer emit metrics); density+Coriolis validate; rest documented deltas. Verification-approach fork surfaced for user.
 - [ ] Q3 — Register fidelity modules (test discovery)
 - [~] Q4 — ConstantsConfig: G-C1 + G-C2(vertical mixing) done; G-C3/G-C4/G-C5 blocked on user config-API decision
-- [~] Q7 — config readability docstring DONE; A_h footgun + field reorder = user-owned API
+- [~] Q7 — config readability docstring DONE; A_h check surfaced + fixed a real recipe GM/Redi mis-wiring (see iter-16)
 - [x] Q5 — CI clarity guard (function-LOC ceiling, allow-list shrinks; two-source/deprecated detectors folded into Q7)
 - [x] Q6 — Equivariance tier expansion (bridge round-trip temp+salt, halo-strip invariance; + existing EOS-unit/vertical-flip/cumsum-order)
 - [ ] Q7 — Config regrouping + footguns
@@ -286,3 +286,24 @@ frozen state alone).
 FINAL autonomous state: Q1✓ Q2✓ Q3✓ Q5✓ Q6✓ Q7-readability✓ + Q4(G-C1,G-C2 vertical mixing).
 All remaining work needs USER (Q4 G-C4 + Q7 A_h = config-API decisions) or a FULL-SUITE-capable
 env (Q8). Genuinely out of safe autonomous-appropriate work. Holding; /cancel-ralph to stop.
+
+### 2026-05-28 · iter 16 · A_h check (user-directed) surfaced + fixed a real recipe GM/Redi bug
+User picked "dynamics A_h canonical" and said "make sure you check it." The check (2 Explore
+agents DISAGREED -> resolved by direct reads) found:
+- A_h: config.A_h (dynamics, ocean_pe_latlon_cgrid §10) IS the lat-lon viscosity — recommendation
+  CONFIRMED. The physics-pathway lateral mixing is cubed-sphere-only (harmonic/biharmonic crash
+  on lat-lon shapes; gm_redi raises TypeError) — so it's a cryptic-crash footgun, not silent
+  double-application.
+- BIGGER (incidental): the lat-lon MODEL applies GM/Redi from the TOP-LEVEL config.gm_redi
+  (ocean_model_latlon_cgrid.py:998, default None), but the recipe set GM/Redi ONLY in
+  physics.lateral_mixing.gm_redi -> the model ignored it -> **the ACC recipe's GM/Redi was
+  COMPLETELY INACTIVE** (config.gm_redi=None -> skipped; probe runs physics_fn=None -> physics
+  pipeline never invoked). This also CORRECTS the Q2 tracer-iso "near-zero" attribution: it
+  wasn't "uniform S / weak GM/Redi" — GM/Redi simply wasn't running, and my Q2 tracer
+  "isolation by differencing config.physics" was a NO-OP (the probe ignores physics_fn).
+FIX (committed this iter): recipe sets gm_redi=ACC_GM_REDI_CONFIG at the TOP LEVEL +
+physics.lateral_mixing scheme="none"; added a _validate_config guard rejecting non-"none"
+physics.lateral_mixing on lat-lon (catches this mis-wiring class). Tests updated + 2 new
+(top-level wiring + guard). 25 passed.
+REMAINING (next): extend the tendency PROBE to apply gm_redi_tracer_tendency_latlon (so the
+tier-2 comparison actually SEES GM/Redi), then redo the Q2 tracer-iso comparison honestly.

@@ -271,10 +271,14 @@ def build_acc_physics_config() -> OceanPhysicsConfig:
     IDEMIX is disabled in the ACC adapter."""
     return OceanPhysicsConfig(
         vertical_mixing=VerticalMixingConfig(scheme="tke", tke=ACC_TKE_CONFIG),
-        lateral_mixing=LateralMixingConfig(
-            scheme="gm_redi",
-            gm_redi=ACC_GM_REDI_CONFIG,
-        ),
+        # GM/Redi on the lat-lon C-grid is a DYNAMICS-level process applied via
+        # the top-level config.gm_redi field (see build_acc_model_config); the
+        # physics-pathway lateral-mixing factory is cubed-sphere-only and raises
+        # on lat-lon. So lateral_mixing is "none" here. (Setting GM/Redi ONLY in
+        # physics.lateral_mixing — as before — left it INACTIVE for the ACC
+        # recipe: config.gm_redi defaults None so the model skipped it, and the
+        # tendency probe never invokes the physics pipeline.)
+        lateral_mixing=LateralMixingConfig(scheme="none"),
         surface_forcing=SurfaceForcingConfig(scheme="prescribed"),
         bottom_drag=BottomDragConfig(scheme="none"),   # see model config bottom_drag_r
         convection=OceanConvectionConfig(scheme="none"),
@@ -296,6 +300,10 @@ def build_acc_model_config() -> LatLonCGridOceanConfig:
         # Verified against ``veros/core/density/get_rho.py``.
         eos="veros_nonlin2",
         implicit_vertical_mixing=True,
+        # GM/Redi is a TOP-LEVEL (dynamics) field on the lat-lon C-grid — this
+        # is what the model actually reads (ocean_model_latlon_cgrid.py:998).
+        # Setting it only in physics.lateral_mixing left GM/Redi inactive.
+        gm_redi=ACC_GM_REDI_CONFIG,
         physics=build_acc_physics_config(),
     )
 
