@@ -1713,6 +1713,222 @@ class TestEnergyConservation:
         )
 
 
+class TestCloudPath:
+    """Iter-68: physical-sign + AD pins for the cloud path.
+
+    Pre-iter-68 cloud coverage was:
+      - ``TestCloudKwargsHelper`` (iter-17): structural — to_rrtmg_kwargs
+        does NOT include cloud_fraction (cf²-double-discount guard).
+      - ``test_iter37_include_clouds_flag_changes_flux``: on-vs-off
+        produces different flux.
+      - ``test_iter41_clear_sky_optics_raises_on_direct_cloud_call``:
+        include_clouds=False + cloud kwarg → ValueError.
+
+    No test pinned the **sign** of the cloud effect or AD safety
+    through the cloud-path inputs.  A future refactor that flipped
+    sign-of-cloud-emission would pass all 3 existing tests yet
+    produce climates dominated by cloud-greenhouse cooling.
+
+    | test | invariant |
+    |---|---|
+    | ``test_cloud_path_zero_matches_no_cloud`` | LWP=zeros ≡ LWP=None bit-for-bit |
+    | ``test_low_cloud_reduces_surface_sw`` | sign: low cloud → reduced surface SW |
+    | ``test_low_cloud_increases_surface_lw_down`` | sign: low cloud → boosted surface LW down (greenhouse) |
+    | ``test_cloud_path_liq_differentiable`` | ``jax.grad`` w.r.t. cloud_path_liq finite + sign-correct |
+    """
+
+    @staticmethod
+    def _base_inputs(ncol=1, nlev=16):
+        """Daylit tropical column ready to host a low cloud."""
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1)
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        T = jnp.linspace(220.0, 295.0, nlev)[None, :]
+        sfc_T = jnp.array([298.0] * ncol)
+        q_v = jnp.full((ncol, nlev), 8e-3)
+        cos_z = jnp.array([0.7] * ncol)
+        return T, p_full, p_half, sfc_T, q_v, cos_z
+
+    @staticmethod
+    def _low_cloud_path(T_shape, nlev):
+        """Liquid water path 0.05 kg/m² in the lowest 3 layers
+        (700-1000 hPa).  Realistic stratocumulus-deck LWP."""
+        path = jnp.zeros(T_shape)
+        path = path.at[:, -3:].set(0.05)
+        return path
+
+    def test_cloud_path_zero_matches_no_cloud(self):
+        """LWP=zeros must produce bit-identical fluxes to LWP=None.
+        Catches an unintended bias in the include_clouds branch
+        (e.g. a non-trivial cloud overhead even at zero LWP)."""
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(
+            RRTMGPConfig(include_clouds=True)
+        )
+        T, p_full, p_half, sfc_T, q_v, cos_z = self._base_inputs()
+
+        out_none = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+            cloud_path_liq=None, cloud_path_ice=None,
+        )
+        zero_path = jnp.zeros(T.shape)
+        out_zero = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+            cloud_path_liq=zero_path,
+            cloud_r_eff_liq=jnp.full(T.shape, 1.0e-5),
+            cloud_path_ice=zero_path,
+            cloud_r_eff_ice=jnp.full(T.shape, 2.0e-5),
+        )
+        for name in ("sw_flux_up", "sw_flux_down", "lw_flux_up",
+                     "lw_flux_down", "heating_rate"):
+            a = np.asarray(getattr(out_none, name))
+            b = np.asarray(getattr(out_zero, name))
+            np.testing.assert_allclose(
+                a, b, rtol=1.0e-10, atol=1.0e-9,
+                err_msg=(
+                    f"{name}: LWP=None and LWP=zeros must give bit-"
+                    f"identical fluxes (zero-cloud branch leak)."
+                ),
+            )
+
+    def test_low_cloud_reduces_surface_sw(self):
+        """Low warm cloud (LWP=0.05 kg/m² in lowest 3 layers) must
+        REDUCE the surface downwelling SW flux relative to a
+        clear-sky column.  This is the elementary cloud-albedo
+        effect.
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(
+            RRTMGPConfig(include_clouds=True)
+        )
+        T, p_full, p_half, sfc_T, q_v, cos_z = self._base_inputs()
+        cloud_path_liq = self._low_cloud_path(T.shape, T.shape[1])
+        r_eff_liq = jnp.full(T.shape, 1.0e-5)
+
+        out_clear = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+        )
+        out_cloud = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+            cloud_path_liq=cloud_path_liq, cloud_r_eff_liq=r_eff_liq,
+        )
+
+        # Surface = layer index -1 (TOA-first convention).
+        sw_down_clear = float(out_clear.sw_flux_down[0, -1])
+        sw_down_cloud = float(out_cloud.sw_flux_down[0, -1])
+        assert sw_down_cloud < sw_down_clear, (
+            f"Low warm cloud must reduce surface SW down; got "
+            f"clear={sw_down_clear:.1f}, cloud={sw_down_cloud:.1f} W/m²."
+        )
+        reduction = sw_down_clear - sw_down_cloud
+        assert 10.0 < reduction < 800.0, (
+            f"Surface SW reduction {reduction:.1f} W/m² is outside "
+            f"the plausible [10, 800] W/m² band for stratocumulus-"
+            f"deck LWP=0.05 kg/m².  Indicates broken cloud-SW optics."
+        )
+
+    def test_low_cloud_increases_surface_lw_down(self):
+        """Low warm cloud must INCREASE the surface downwelling LW
+        flux (the cloud emits Planck radiation at its temperature ≈
+        warm-cloud-base T).  This is the elementary cloud-greenhouse
+        effect.
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(
+            RRTMGPConfig(include_clouds=True)
+        )
+        T, p_full, p_half, sfc_T, q_v, cos_z = self._base_inputs()
+        cloud_path_liq = self._low_cloud_path(T.shape, T.shape[1])
+        r_eff_liq = jnp.full(T.shape, 1.0e-5)
+
+        out_clear = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+        )
+        out_cloud = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+            cloud_path_liq=cloud_path_liq, cloud_r_eff_liq=r_eff_liq,
+        )
+
+        lw_down_clear = float(out_clear.lw_flux_down[0, -1])
+        lw_down_cloud = float(out_cloud.lw_flux_down[0, -1])
+        assert lw_down_cloud > lw_down_clear, (
+            f"Low warm cloud must increase surface LW down "
+            f"(greenhouse); got clear={lw_down_clear:.1f}, "
+            f"cloud={lw_down_cloud:.1f} W/m²."
+        )
+        boost = lw_down_cloud - lw_down_clear
+        assert 5.0 < boost < 200.0, (
+            f"Surface LW-down boost {boost:.1f} W/m² is outside the "
+            f"plausible [5, 200] W/m² band for warm stratocumulus.  "
+            f"Indicates broken cloud-LW optics (sign flip, missing "
+            f"Planck source, cf²-double-discount regression)."
+        )
+
+    def test_cloud_path_liq_differentiable(self):
+        """``jax.grad`` w.r.t. ``cloud_path_liq`` must be finite +
+        sign-correct (negative for surface SW, positive for surface
+        LW down).  Catches AD-unsafe-floor regressions in cloud-
+        optics mixing inside ``cloud_optics.compute_lw/sw_optical_
+        properties``.
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(
+            RRTMGPConfig(include_clouds=True)
+        )
+        T, p_full, p_half, sfc_T, q_v, cos_z = self._base_inputs()
+        r_eff_liq = jnp.full(T.shape, 1.0e-5)
+
+        def sfc_sw_loss(lwp):
+            out = solver.solve_columns(
+                T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+                q_v=q_v, cos_zenith=cos_z,
+                cloud_path_liq=lwp, cloud_r_eff_liq=r_eff_liq,
+            )
+            return jnp.sum(out.sw_flux_down[:, -1])
+
+        def sfc_lw_loss(lwp):
+            out = solver.solve_columns(
+                T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+                q_v=q_v, cos_zenith=cos_z,
+                cloud_path_liq=lwp, cloud_r_eff_liq=r_eff_liq,
+            )
+            return jnp.sum(out.lw_flux_down[:, -1])
+
+        lwp0 = self._low_cloud_path(T.shape, T.shape[1])
+        g_sw = jax.grad(sfc_sw_loss)(lwp0)
+        g_lw = jax.grad(sfc_lw_loss)(lwp0)
+        assert jnp.all(jnp.isfinite(g_sw)), (
+            f"∂(surface SW)/∂(cloud_path_liq) must be finite; got {g_sw}"
+        )
+        assert jnp.all(jnp.isfinite(g_lw)), (
+            f"∂(surface LW down)/∂(cloud_path_liq) must be finite; got {g_lw}"
+        )
+        # Active cloud layers (last 3) must have non-zero gradient.
+        assert jnp.abs(g_sw[:, -3:]).max() > 0.0, (
+            "Active-cloud-layer ∂(SW)/∂(LWP) is identically zero — "
+            "broken AD plumbing through cloud-SW optics."
+        )
+        assert jnp.abs(g_lw[:, -3:]).max() > 0.0, (
+            "Active-cloud-layer ∂(LW down)/∂(LWP) is identically zero — "
+            "broken AD plumbing through cloud-LW optics."
+        )
+
+
 class TestAerosolPath:
     """Iter-66: regression guards for the SW aerosol path in ``solve_sw``.
 

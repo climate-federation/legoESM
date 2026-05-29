@@ -110,7 +110,9 @@ fp32 round-off** + iter-63 **bfloat16 input acceptance**),
 `TestAerosolPath` (iter-66: AOD-zero ≡ AOD-None, sign of AOD on
 SW, ∂(SW)/∂(AOD) finite),
 `TestEnergyConservation` (iter-67: combined and LW-only column
-flux divergence ≡ ∑(hr · dp) × c_p / g).
+flux divergence ≡ ∑(hr · dp) × c_p / g),
+`TestCloudPath` (iter-68: LWP-zero ≡ LWP-None, cloud-albedo on
+SW, cloud-greenhouse on LW, ∂(F)/∂(LWP) finite + sign-correct).
 
 `test_radiation.py::{TestRRTMGP,TestColumnShardedRadiation}` —
 cache-key (iter-32/36/37/39/41/42), sharded-equivalence
@@ -118,9 +120,15 @@ cache-key (iter-32/36/37/39/41/42), sharded-equivalence
 
 ---
 
-## Status (after iter-67)
+## Status (after iter-68)
 
-- ✅ 122 pass + 5 skip (3 Metal-broken + 2 multidevice) — 0 fail.
+- ✅ 126 pass + 5 skip (3 Metal-broken + 2 multidevice) — 0 fail.
+  iter-68 added new class `TestCloudPath` (4 tests): LWP=zeros ≡
+  LWP=None bit-for-bit, low cloud reduces surface SW (albedo),
+  low cloud increases surface LW down (greenhouse), AD through
+  cloud_path_liq finite + sign-correct for both SW and LW.
+  Pre-iter-68 cloud coverage was structural (kwargs schema,
+  on-vs-off-changes-flux) — no physical-sign or AD pin.
   iter-67 added new class `TestEnergyConservation` (2 tests):
   combined LW+SW and LW-only column flux-divergence ≡
   ∑(hr · dp) × c_p / g.  Pre-iter-67 only `gray_radiation` had
