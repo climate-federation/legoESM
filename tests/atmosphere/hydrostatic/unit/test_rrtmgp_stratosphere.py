@@ -2728,5 +2728,141 @@ class TestCloudFractionCoverage:
         )
 
 
+class TestSolarSpectralFraction:
+    """Iter-75: pin the ``solar_spectral_fraction`` per-g-point solar
+    source weighting.
+
+    Audit (iter-75): ``solve_columns`` clips the weights, normalises them
+    to sum 1, and validates ``len == n_gpt_sw``; ``two_stream.solve_sw``
+    then uses ``solar_flux = irrad * weight[igpt]`` where ``weight`` is
+    the external array if given **else** the table
+    ``optics_lib.solar_fraction_by_gpt[igpt]`` (a clean if/else — the
+    external array *replaces* the table, no double-application).  The
+    table's own weights already sum to 1.
+
+    ``test_amip_rrtmg`` pins that custom weights are *consumed*; these
+    pins add the faithfulness contracts: feeding back the table weights
+    reproduces the default path exactly (external ≡ default), the
+    internal sum-normalisation makes the absolute scale irrelevant, the
+    length guard fires, and the weighting is differentiable.
+
+    (The raw TOA-insolation budget is deliberately not pinned here: the
+    stripped output's top interface sits below the top halo layer, so its
+    down-flux is already g-point-dependently attenuated — not a clean
+    S₀·μ₀ probe.  The ``table ≡ default`` equivalence is the consistency
+    guarantee instead.)
+    """
+
+    @staticmethod
+    def _tol():
+        if jax.config.read("jax_enable_x64"):
+            return dict(rtol=1e-10, atol=1e-9)
+        return dict(rtol=1e-4, atol=1e-3)
+
+    def _setup(self, ncol=2, nlev=16):
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(RRTMGPConfig(include_clouds=False))
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1)
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        T = jnp.broadcast_to(jnp.linspace(220.0, 295.0, nlev)[None, :], (ncol, nlev))
+        base = dict(
+            T=T, p_full=p_full, p_half=p_half,
+            sfc_temperature=jnp.full((ncol,), 298.0),
+            q_v=jnp.full((ncol, nlev), 8e-3),
+            cos_zenith=jnp.full((ncol,), 0.7),
+        )
+        return solver, base
+
+    def test_table_weights_reproduce_default(self):
+        """Feeding the table's own ``solar_fraction_by_gpt`` as the
+        external weights must reproduce the ``None`` (default) path
+        exactly — the external override and the built-in path share one
+        formula (``irrad * weight[igpt]``)."""
+        solver, base = self._setup()
+        default = solver.solve_columns(**base)
+        table_weights = solver.optics_lib.solar_fraction_by_gpt
+        explicit = solver.solve_columns(**base, solar_spectral_fraction=table_weights)
+        for field in ("sw_flux_down", "sw_flux_up", "sw_heating_rate"):
+            np.testing.assert_allclose(
+                np.asarray(getattr(explicit, field)),
+                np.asarray(getattr(default, field)),
+                **self._tol(),
+                err_msg=(
+                    f"solar_spectral_fraction=table_weights must match the "
+                    f"default (None) path in {field!r}; divergence means the "
+                    f"external and built-in solar-source paths disagree."
+                ),
+            )
+
+    def test_normalization_invariance(self):
+        """The solver normalises the weights to sum 1, so multiplying every
+        weight by a constant is a no-op — the field is a *fraction*, not an
+        absolute flux."""
+        solver, base = self._setup()
+        ng = solver.optics_lib.n_gpt_sw
+        w = jnp.linspace(0.1, 1.0, ng)  # arbitrary positive distribution
+        out_1x = solver.solve_columns(**base, solar_spectral_fraction=w)
+        out_7x = solver.solve_columns(**base, solar_spectral_fraction=7.0 * w)
+        for field in ("sw_flux_down", "sw_flux_up"):
+            np.testing.assert_allclose(
+                np.asarray(getattr(out_7x, field)),
+                np.asarray(getattr(out_1x, field)),
+                **self._tol(),
+                err_msg=(
+                    f"scaling all solar weights by 7 changed {field!r} — the "
+                    f"internal sum-normalisation is missing or broken."
+                ),
+            )
+
+    def test_spectral_redistribution_changes_surface_sw(self):
+        """Concentrating the solar source in different g-points changes the
+        surface SW (g-points have different gas absorption) — the weighting
+        is spectrally meaningful, not a global scalar."""
+        solver, base = self._setup()
+        ng = solver.optics_lib.n_gpt_sw
+        first = jnp.zeros(ng).at[:5].set(1.0)   # energy in the first 5 g-points
+        last = jnp.zeros(ng).at[-5:].set(1.0)   # energy in the last 5 g-points
+        sw_first = solver.solve_columns(**base, solar_spectral_fraction=first)
+        sw_last = solver.solve_columns(**base, solar_spectral_fraction=last)
+        diff = abs(
+            float(sw_first.sw_flux_down[0, -1]) - float(sw_last.sw_flux_down[0, -1])
+        )
+        assert diff > 1.0, (
+            f"two different solar spectral distributions gave near-identical "
+            f"surface SW (Δ={diff:.3e} W/m²) — weights not reaching the "
+            f"per-g-point solar source."
+        )
+
+    def test_wrong_length_raises(self):
+        solver, base = self._setup()
+        ng = solver.optics_lib.n_gpt_sw
+        with pytest.raises(ValueError):
+            solver.solve_columns(
+                **base, solar_spectral_fraction=jnp.ones(ng - 1)
+            )
+
+    def test_differentiable(self):
+        """``jax.grad`` of surface SW w.r.t. the spectral weights is finite
+        and non-trivial (AD through the per-g-point solar source)."""
+        solver, base = self._setup()
+        ng = solver.optics_lib.n_gpt_sw
+        w0 = jnp.ones(ng)
+
+        def sfc_sw(w):
+            out = solver.solve_columns(**base, solar_spectral_fraction=w)
+            return jnp.sum(out.sw_flux_down[:, -1])
+
+        g = jax.grad(sfc_sw)(w0)
+        assert jnp.all(jnp.isfinite(g)), f"∂(sfc SW)/∂(weights) must be finite"
+        assert float(jnp.max(jnp.abs(g))) > 1e-6, (
+            "∂(sfc SW)/∂(weights) ≈ 0 — solar weighting constant-folded out "
+            "of the differentiable path."
+        )
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])

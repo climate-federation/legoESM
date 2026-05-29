@@ -79,7 +79,7 @@ Metal-env skip (iter-59), `recurrent_op_1d{,_scan}` (iter-60),
 `GrayAtmosphereOptics` class + config + factory branch
 (iter-61), `_shift_up` + Planck-path clarifier (iter-62).
 
-### Test coverage expansion (iter-63 → 74)
+### Test coverage expansion (iter-63 → 75)
 - iter-63: `TestMixedPrecision` — fp32-vs-fp64 numerical
   equivalence within fp32 round-off (x64-gated, skips otherwise);
   bfloat16-input finiteness.
@@ -133,8 +133,15 @@ Metal-env skip (iter-59), `recurrent_op_1d{,_scan}` (iter-60),
   with greenhouse/albedo signs.  Guards the optics side of the
   iter-15/16 `cf²` double-discount (`TestCloudKwargsHelper` guards the
   helper side).
+- iter-75: `TestSolarSpectralFraction` — per-g-point solar weights:
+  feeding the table's own `solar_fraction_by_gpt` reproduces the
+  default (None) path exactly (external ≡ built-in); weights are
+  sum-normalised (×const = no-op); redistributing across g-points
+  moves surface SW; wrong length raises; ∂(SW)/∂(weights) finite.
+  (Raw TOA-insolation budget not pinned — stripped top interface sits
+  below the halo layer; `table ≡ default` is the consistency guard.)
 
-### Test classes in `test_rrtmgp_stratosphere.py` (~74 tests)
+### Test classes in `test_rrtmgp_stratosphere.py` (~79 tests)
 `TestClipToTableRange`, `TestRelativeAbundanceSafeDiv`,
 `TestOutOfRangeTemperature`, `TestMixedPrecision`,
 `TestOptimalLwSecant`, `TestStandardO3Profile`,
@@ -142,15 +149,16 @@ Metal-env skip (iter-59), `recurrent_op_1d{,_scan}` (iter-60),
 `TestCloudKwargsHelper`, `TestHeatingRateSign`,
 `TestEnergyConservation`, `TestCloudPath`, `TestAerosolPath`,
 `TestRteRecurrenceScanEquivalence`, `TestSolverCompilationStability`,
-`TestGasVmrOverride`, `TestCloudFractionCoverage`.
+`TestGasVmrOverride`, `TestCloudFractionCoverage`,
+`TestSolarSpectralFraction`.
 `test_radiation.py::{TestRRTMGP,TestColumnShardedRadiation}` —
 cache-key + sharded-equivalence + iter-13/15 end-to-end pins.
 
 ---
 
-## Status (after iter-74)
+## Status (after iter-75)
 
-- ✅ 140 pass + 6 skip (3 Metal-broken + 2 multidevice +
+- ✅ 145 pass + 6 skip (3 Metal-broken + 2 multidevice +
   1 fp32-vs-fp64 x64-gated) — 0 fail.
 - ✅ AD-safe end-to-end; mixed precision via table-dtype cast;
   fp32 inputs OK; bfloat16 inputs accepted.
@@ -174,6 +182,9 @@ cache-key + sharded-equivalence + iter-13/15 end-to-end pins.
   (CO2/CH4/N2O/CFCs) + `o3_vmr` reach gas optics for major **and**
   minor absorbers (`get_vmr` overwrite precedence), AD-differentiable
   (iter-73).
+- ✅ All codex iter-69 Q5 coverage gaps closed: cloud_path_ice
+  (iter-70), o3_vmr + ghg_vmr_override (iter-73), cloud_fraction
+  (iter-74), solar_spectral_fraction (iter-75).
 
 ## Deferred
 
@@ -181,6 +192,3 @@ cache-key + sharded-equivalence + iter-13/15 end-to-end pins.
   reference-flux validation (iter-29 gating sharded test exists).
 - LW aerosol path (currently only SW; upstream rte-rrtmgp
   supports both).
-- solar_spectral_fraction coverage gap (codex iter-69 Q5; closed:
-  cloud_path_ice iter-70, o3_vmr + ghg_vmr_override iter-73,
-  cloud_fraction iter-74).
