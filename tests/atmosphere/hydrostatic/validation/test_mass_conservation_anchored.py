@@ -5,7 +5,7 @@ atmosphere hydrostatic dycores and asserts mass drift stays at fp64
 floor (≤ 1e-10).  The test_dycores branch ``test_dycores.md``
 log documents the iter-by-iter reductions that brought every path
 into machine precision; a regression here means one of the fixers
-(``anchor_mass_to_initial`` plumbing, ``_conservation_accumulator``
+(``anchor_mass_to_initial`` plumbing, ``conservation_accumulator``
 casts, dropped ``correction.astype`` calls) has been undone.
 
 Each grid block is small (T21 / C12 / ico4 / 36x72) and runs only

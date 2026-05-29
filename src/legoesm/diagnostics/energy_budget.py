@@ -78,8 +78,8 @@ def column_moist_static_energy(
     # L_v·q (~10^4), Φ (~10^4), 0.5(u²+v²) (~10²) summed over nlev
     # levels — the fp32 product+sum in the pre-iter-47 path leaked
     # ~7 bits of relative precision.
-    from legoesm.core.conservation import _conservation_accumulator
-    _acc_e = _conservation_accumulator()
+    from legoesm.core.conservation import conservation_accumulator
+    _acc_e = conservation_accumulator()
     T = T.astype(_acc_e)
     q_v = q_v.astype(_acc_e)
     u = u.astype(_acc_e)
@@ -165,8 +165,8 @@ def column_dry_static_energy(
     Useful for checking the dry energy budget separately.
     """
     # iter-47: fp64 budget accumulator (mirrors moist twin above).
-    from legoesm.core.conservation import _conservation_accumulator
-    _acc_d = _conservation_accumulator()
+    from legoesm.core.conservation import conservation_accumulator
+    _acc_d = conservation_accumulator()
     T = T.astype(_acc_d)
     phis = phis.astype(_acc_d)
     p_s = p_s.astype(_acc_d)

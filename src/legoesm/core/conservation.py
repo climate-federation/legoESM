@@ -18,7 +18,7 @@ def _tiny(x=None):
     """Smallest normal float for the given array's dtype (or active accumulate dtype)."""
     if x is not None and hasattr(x, 'dtype'):
         return float(jnp.finfo(x.dtype).tiny)
-    return float(jnp.finfo(_resolve_dtype(None, "accumulate")).tiny)
+    return float(jnp.finfo(resolve_dtype(None, "accumulate")).tiny)
 # Epsilon for energy fixers: prevents sqrt(0) which has infinite gradient,
 # causing 0*Inf=NaN in the backward pass when jnp.maximum clamps KE_target to 0.
 _EPS_ENERGY = 1e-20
@@ -26,7 +26,7 @@ _EPS_ENERGY = 1e-20
 from legoesm import constants
 from legoesm.core.operators import global_integral, _is_distributed
 from legoesm.core.operators_voronoi import kinetic_energy_cell
-from legoesm.core.precision import _resolve_dtype, get_policy
+from legoesm.core.precision import resolve_dtype, get_policy
 from legoesm.core.state import ShallowWaterState, HydrostaticState
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import compute_geopotential
@@ -52,7 +52,7 @@ def _accumulation_dtype():
     return target
 
 
-def _conservation_accumulator():
+def conservation_accumulator():
     """Accumulator dtype for *budget* sums (mass, energy, tracer).
 
     Distinct from :func:`_accumulation_dtype` — promotes to ``float64``
@@ -105,7 +105,7 @@ def _global_area_sum(
     - **MPI distributed** (replicated dynamics): mask to owned faces,
       local sum, then ``allreduce(SUM)``.
     """
-    acc = _conservation_accumulator()
+    acc = conservation_accumulator()
     prod = array.astype(acc) * grid.area.astype(acc)
     if owned_mask is not None:
         # Broadcast (n_faces,) → match prod shape: (6,) → (6,1,1,...)
@@ -133,7 +133,7 @@ def _batch_global_area_sums(
 
     Falls back to individual ``jnp.sum`` when not distributed.
     """
-    acc = _conservation_accumulator()
+    acc = conservation_accumulator()
     area_acc = grid.area.astype(acc)
     weight = area_acc
     if owned_mask is not None:
@@ -168,7 +168,7 @@ def _total_area(grid) -> jax.Array:
     fixer + fp64 ``mass_target``.  Cast to the conservation
     accumulator here so every fixer division sees an fp64 denominator.
     """
-    acc = _conservation_accumulator()
+    acc = conservation_accumulator()
     return grid.grid_total_area.astype(acc)
 
 
@@ -244,7 +244,7 @@ def fix_energy_shallow_water(
     # before ``_batch_global_area_sums`` ever cast to fp64 — the same
     # fp32-field bug iter-1/4/5 fixed for the mass diagnostic, just on
     # the energy path.
-    acc = _conservation_accumulator()
+    acc = conservation_accumulator()
     h_old = state_old.h.data.astype(acc)
     u_old = state_old.u.data.astype(acc)
     v_old = state_old.v.data.astype(acc)
@@ -360,7 +360,7 @@ def zero_mean_tendency(
     -------
     jax.Array : Corrected tendency with zero global integral.
     """
-    acc = _conservation_accumulator()
+    acc = conservation_accumulator()
     area = grid.area
     area_acc = area.astype(acc)
     total_area_acc = jnp.sum(area_acc)
@@ -426,7 +426,7 @@ def compute_global_moisture(
     # Column water vapor: ∫ q_v dp/g = q_v * p_s * dsigma / g
     # iter-44: promote field computation to fp64 budget accumulator
     # (same fp32-field bug as iter-42/43 energy diagnostics).
-    acc = _conservation_accumulator()
+    acc = conservation_accumulator()
     cwv = jnp.sum(
         q_v.astype(acc) * p_s.astype(acc)[..., None] * dsigma.astype(acc),
         axis=-1,
@@ -747,7 +747,7 @@ def compute_hydrostatic_energy(
     # iter-1/4/5 mass path and iter-42 SW/MPAS energy fixer — the
     # 0.5·(u²+v²) square+multiply lost ~7 bits of precision when the
     # state was stored in fp32.
-    acc = _conservation_accumulator()
+    acc = conservation_accumulator()
     u = state.u.data.astype(acc)
     v = state.v.data.astype(acc)
     T = state.T.data.astype(acc)
@@ -808,7 +808,7 @@ def compute_nh_energy(
     """
     # iter-43: promote energy fields to fp64 budget accumulator (see
     # compute_hydrostatic_energy docstring above).
-    acc = _conservation_accumulator()
+    acc = conservation_accumulator()
     u = state.u.data.astype(acc)
     v = state.v.data.astype(acc)
     w = state.w.data.astype(acc)
@@ -875,7 +875,7 @@ def compute_conservation_diagnostics(
     # the area-sum (same fp32-field bug as iter-42/43).  The mass
     # integrand (h alone) is already correct via _batch_global_area_sums
     # internal cast.
-    acc = _conservation_accumulator()
+    acc = conservation_accumulator()
     h = state.h.data.astype(acc)
     u = state.u.data.astype(acc)
     v = state.v.data.astype(acc)
@@ -910,7 +910,7 @@ def global_integral_voronoi(field, mesh) -> jax.Array:
     -------
     jax.Array : scalar
     """
-    acc = _conservation_accumulator()
+    acc = conservation_accumulator()
     return jnp.sum(field.astype(acc) * mesh.areaCell.astype(acc))
 
 
@@ -935,7 +935,7 @@ def fix_mass_mpas(state, target_mass, mesh):
     # multi-rank Voronoi sharding).  Iter-13: cast to fp64 so the
     # divisor matches the fp64 ``current_mass`` and ``target_mass``;
     # otherwise an fp32 ``total_area`` leaks ~N·eps into ``correction``.
-    total_area = mesh.grid_total_area.astype(_conservation_accumulator())
+    total_area = mesh.grid_total_area.astype(conservation_accumulator())
     correction = (target_mass - current_mass) / total_area
     h_fixed = state.h.replace(data=state.h.data + correction)
     return state._replace(h=h_fixed)
@@ -1024,7 +1024,7 @@ def _batch_global_area_sums_voronoi(
     reduces once locally, then applies the multi-rank allreduce when
     the mesh is sharded.
     """
-    acc = _conservation_accumulator()
+    acc = conservation_accumulator()
     area_acc = mesh.areaCell.astype(acc)
     stacked = jnp.stack([arr.astype(acc) for arr in arrays], axis=-1)
     summed = jnp.sum(stacked * area_acc[..., None], axis=0)  # (n_arrays,)
@@ -1059,7 +1059,7 @@ def fix_energy_mpas(state, target_energy, mesh, g=constants.g):
     # iter-42: promote energy fields to the fp64 budget accumulator
     # before the area-weighted sum (same fix as
     # ``fix_energy_shallow_water`` for the SW-on-any-grid path).
-    acc = _conservation_accumulator()
+    acc = conservation_accumulator()
     h = state.h.data.astype(acc)
     u = state.u.data.astype(acc)
     h_s = state.h_s.data.astype(acc)

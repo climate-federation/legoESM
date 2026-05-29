@@ -37,8 +37,8 @@ def column_water_vapor(q_v, p_s, dsigma):
     # every downstream diagnostic in one place.  q_v·p_s·dσ is
     # ~10⁻²·10⁵·10⁻¹ = 10² per cell, summed over nlev (~32) → ~10³
     # column total; fp32 quantum at that magnitude is ~10⁻⁴.
-    from legoesm.core.conservation import _conservation_accumulator
-    _acc = _conservation_accumulator()
+    from legoesm.core.conservation import conservation_accumulator
+    _acc = conservation_accumulator()
     return jnp.sum(
         q_v.astype(_acc)
         * p_s.astype(_acc)[..., None]

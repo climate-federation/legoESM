@@ -11,14 +11,14 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.precision import _resolve_dtype
+from legoesm.core.precision import resolve_dtype
 from legoesm.coupler.coupling_fields import SurfaceToAtm
 
 
 def _tiny(dtype=None):
     """Smallest normal float for the given dtype (or the active accumulate dtype)."""
     if dtype is None:
-        dtype = _resolve_dtype(None, "accumulate")
+        dtype = resolve_dtype(None, "accumulate")
     return float(jnp.finfo(dtype).tiny)
 
 
