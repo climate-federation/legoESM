@@ -58,9 +58,14 @@ class SFNOPrimitiveEquationConfig(NamedTuple):
     correct_mass : bool
         Apply dry air mass conservation correction.
     correct_moisture_budget : bool
-        Apply moisture budget correction.
+        Apply moisture budget correction.  NOT YET WIRED — ``correct_moisture``
+        exists in ``legoesm.ml.conservation`` but ``_apply_conservation`` does
+        not call it (moisture is a spectral tracer needing synthesis,
+        correction and re-analysis).  Defaults to ``False`` so the config does
+        not advertise a correction it does not perform.
     clip_q : bool
-        Clip negative humidity values.
+        Clip negative humidity values.  NOT YET WIRED (see above); defaults
+        to ``False``.
     use_normalization : bool
         Whether to apply Z-score normalization.
     pressure_levels : tuple
@@ -72,8 +77,8 @@ class SFNOPrimitiveEquationConfig(NamedTuple):
     mode: str = "state_update"
     dt_sfno: float = 21600.0  # 6 hours default
     correct_mass: bool = True
-    correct_moisture_budget: bool = True
-    clip_q: bool = True
+    correct_moisture_budget: bool = False  # not yet wired in _apply_conservation
+    clip_q: bool = False  # not yet wired in _apply_conservation
     use_normalization: bool = False
     pressure_levels: tuple = (
         1000, 925, 850, 700, 600, 500, 400, 300, 250, 200, 150, 100, 50
@@ -260,8 +265,13 @@ class SFNOPrimitiveEquationModel:
     ) -> SpectralHydrostaticState:
         """Apply post-hoc conservation corrections.
 
-        Corrects global dry air mass and moisture budget in grid space,
-        then transforms back to spectral space.
+        Currently corrects global dry air mass ONLY (in grid space, then
+        transforms back to spectral).  Moisture-budget correction and humidity
+        clipping are not yet wired here: ``correct_moisture`` / ``clip_humidity``
+        exist in ``legoesm.ml.conservation`` but moisture is carried as a
+        spectral tracer that would need synthesis, correction and re-analysis
+        — left as a follow-up.  ``correct_moisture_budget`` / ``clip_q`` default
+        to ``False`` so the configuration is truthful.
         """
         if not (self.config.correct_mass or self.config.correct_moisture_budget):
             return new_state

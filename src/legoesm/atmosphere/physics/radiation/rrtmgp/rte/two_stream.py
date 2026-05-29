@@ -207,7 +207,7 @@ def solve_lw(
     cloud_r_eff_ice: Array | None = None,
     cloud_path_ice: Array | None = None,
     cloud_fraction: Array | None = None,
-    aerosol_optical_depth: Array | None = None,
+    aerosol_absorption_optical_depth: Array | None = None,
     use_scan: bool | None = None,
     use_optimal_angle: bool = False,
 ) -> dict[str, Array]:
@@ -241,11 +241,14 @@ def solve_lw(
     cloud_r_eff_ice: The effective radius of cloud ice particles [m].
     cloud_path_ice: The cloud ice water path in each atmospheric grid cell
       [kg/m²].
-    aerosol_optical_depth: Optional prescribed longwave aerosol optical
-      depth per layer [-], treated as a pure absorber (single-scattering
-      albedo 0 — the dominant longwave aerosol effect; matches upstream
-      rte-rrtmgp's support for longwave aerosol optics).  ``None`` (the
-      default) leaves the longwave solution byte-identical.
+    aerosol_absorption_optical_depth: Optional prescribed longwave aerosol
+      **absorption** optical depth per layer [-] (NOT extinction): it is
+      added directly to the absorption optical depth with single-scattering
+      albedo 0.  Longwave aerosol scattering is neglected (the dominant LW
+      aerosol effect is absorption/emission); a caller holding extinction
+      optical depth must pre-multiply by the LW absorption fraction
+      (1 − ω) before passing it here.  ``None`` (the default) leaves the
+      longwave solution byte-identical.
     use_scan: Whether to use scan or for loops for the recurrent operation.
 
   Returns:
@@ -295,10 +298,10 @@ def solve_lw(
         cloud_r_eff_ice, cloud_path_ice,
         cloud_fraction=cloud_fraction,
     )
-    if aerosol_optical_depth is not None:
+    if aerosol_absorption_optical_depth is not None:
       # Prescribed longwave aerosol as a pure-absorbing layer
-      # (single-scattering albedo 0): add its optical depth to the
-      # background gas+cloud optical depth and dilute the combined ssa
+      # (single-scattering albedo 0): add its absorption optical depth to
+      # the background gas+cloud optical depth and dilute the combined ssa
       # accordingly.  The asymmetry factor of the (scattering) background
       # is unchanged because the aerosol contributes no scattering
       # (g_tot = tau_bg w_bg g_bg / (tau_tot w_tot) = g_bg).  Injected
@@ -309,7 +312,7 @@ def solve_lw(
       # ``safe_divide`` avoids the -a/b^2 VJP overflow at the tau floor
       # (same rationale as the shortwave aerosol mix in ``solve_sw``).
       tau_bg = jnp.maximum(precomputed_props['optical_depth'], 1.0e-12)
-      tau_aer = jnp.maximum(aerosol_optical_depth, 0.0)
+      tau_aer = jnp.maximum(aerosol_absorption_optical_depth, 0.0)
       tau_tot = tau_bg + tau_aer
       w_tot = jnp.clip(
           safe_divide(

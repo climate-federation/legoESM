@@ -98,6 +98,7 @@ class LouisConfig(NamedTuple):
     b_louis: float = 5.0
     c_louis: float = 16.6   # Updated from 5.0 (Louis 1979) to 16.6
     d_louis: float = 5.0
+    blend_ri_sharpness: float = 100.0  # sigmoid sharpness [1/Ri] for stable/unstable blend
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 
@@ -306,6 +307,7 @@ class YSUConfig(NamedTuple):
     louis_c: float = 5.0
     louis_d: float = 5.0
     blend_ri_sharpness: float = 100.0
+    blend_pbl_sharpness: float = 10.0  # sigmoid sharpness for K-profile->local PBL blend
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 
@@ -340,6 +342,11 @@ class EDMFConfig(NamedTuple):
         prior to the audit-driven config migration; lifting it to a
         config field lets users tune the initial buoyancy of the
         plume against scheme calibration data.
+    updraft_deactivation_sharpness : float
+        Sigmoid sharpness [s/m] for smoothly deactivating the updraft as
+        its vertical velocity falls below ``w_updraft_min`` (default 20.0).
+        Lifted from a hardcoded literal inside the ``lax.scan`` updraft
+        body so the transition width is tunable against calibration.
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
@@ -354,6 +361,7 @@ class EDMFConfig(NamedTuple):
     entrainment_rate: float = 1e-3
     detrainment_rate: float = 2e-3
     parcel_dT: float = 0.5
+    updraft_deactivation_sharpness: float = 20.0
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 

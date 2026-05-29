@@ -3,7 +3,7 @@
 Every conservation / energy / moisture diagnostic that takes
 prognostic state arrays as input must return fp64 when JAX x64 is
 enabled.  A regression that drops back to fp32 (e.g. removing an
-``astype(_conservation_accumulator())`` call from a helper) would
+``astype(conservation_accumulator())`` call from a helper) would
 re-introduce the fp32-field noise iter-42..48 eliminated.
 
 Each test calls the helper on a small fp32-input fixture and asserts

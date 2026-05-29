@@ -12,7 +12,7 @@ class LakeConfig(NamedTuple):
     h_epi: float = 5.0              # Epilimnion depth [m]
     h_hypo: float = 20.0            # Hypolimnion depth [m]
     rho_water: float = constants.rho_water
-    c_water: float = constants.c_pw
+    c_water_mass: float = constants.c_pw
     k_mix: float = 1.0e-2           # Vertical mixing coefficient [m2/s]
     wind_mix_alpha: float = 0.1     # Wind-driven mixing enhancement factor
     albedo_lake: float = 0.08

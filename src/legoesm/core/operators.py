@@ -350,8 +350,8 @@ def global_integral(field: Field, grid: CubedSphereGrid) -> jax.Array:
     -------
     scalar : The global integral.
     """
-    from legoesm.core.conservation import _conservation_accumulator
-    acc = _conservation_accumulator()
+    from legoesm.core.conservation import conservation_accumulator
+    acc = conservation_accumulator()
     prod = field.data.astype(acc) * grid.area.astype(acc)
     local_sum = jnp.sum(prod)
 

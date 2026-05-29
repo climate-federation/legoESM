@@ -2874,7 +2874,7 @@ class TestLwAerosolPath:
     the combined ssa diluted, injected into ``precomputed_props`` *before*
     the optimal-angle secant so both the diffusivity fit and the
     source/properties solve see the aerosol-inclusive transmissivity.
-    Exposed via ``solve_columns(aerosol_optical_depth_lw=...)``; ``None``
+    Exposed via ``solve_columns(aerosol_absorption_optical_depth_lw=...)``; ``None``
     (default) leaves the longwave solution byte-identical (zero
     regression for every existing caller — the mixing block is skipped).
 
@@ -2915,13 +2915,13 @@ class TestLwAerosolPath:
         return jnp.zeros((ncol, nlev)).at[:, 2:5].set(value)
 
     def test_zero_lw_aod_equals_no_aerosol(self):
-        """aerosol_optical_depth_lw=0 ≡ omitting it (the pure-absorbing
+        """aerosol_absorption_optical_depth_lw=0 ≡ omitting it (the pure-absorbing
         mixing is inert at zero optical depth)."""
         solver = self._solver()
         base, ncol, nlev = self._cols()
         none = solver.solve_columns(**base)
         zero = solver.solve_columns(
-            **base, aerosol_optical_depth_lw=jnp.zeros((ncol, nlev))
+            **base, aerosol_absorption_optical_depth_lw=jnp.zeros((ncol, nlev))
         )
         for field in ("lw_flux_up", "lw_flux_down", "lw_heating_rate"):
             np.testing.assert_allclose(
@@ -2935,12 +2935,12 @@ class TestLwAerosolPath:
         base, ncol, nlev = self._cols()
         none = solver.solve_columns(**base)
         aer = solver.solve_columns(
-            **base, aerosol_optical_depth_lw=self._elevated_aod(ncol, nlev)
+            **base, aerosol_absorption_optical_depth_lw=self._elevated_aod(ncol, nlev)
         )
         drop = float(none.lw_flux_up[0, 0]) - float(aer.lw_flux_up[0, 0])
         assert drop > 1.0, (
             f"An elevated (cold) absorbing aerosol layer must reduce OLR; "
-            f"got Δ(OLR)={-drop:+.3f} W/m². Δ≈0 ⇒ aerosol_optical_depth_lw "
+            f"got Δ(OLR)={-drop:+.3f} W/m². Δ≈0 ⇒ aerosol_absorption_optical_depth_lw "
             f"not reaching the LW optical depth."
         )
         assert drop < 80.0, f"OLR drop {drop:.3f} W/m² implausibly large."
@@ -2950,7 +2950,7 @@ class TestLwAerosolPath:
         base, ncol, nlev = self._cols()
         none = solver.solve_columns(**base)
         aer = solver.solve_columns(
-            **base, aerosol_optical_depth_lw=self._elevated_aod(ncol, nlev)
+            **base, aerosol_absorption_optical_depth_lw=self._elevated_aod(ncol, nlev)
         )
         rise = float(aer.lw_flux_down[0, -1]) - float(none.lw_flux_down[0, -1])
         assert rise > 0.5, (
@@ -2965,7 +2965,7 @@ class TestLwAerosolPath:
 
         def olr(a):
             return jnp.sum(solver.solve_columns(
-                **base, aerosol_optical_depth_lw=a).lw_flux_up[:, 0])
+                **base, aerosol_absorption_optical_depth_lw=a).lw_flux_up[:, 0])
 
         g = jax.grad(olr)(aod0)
         assert jnp.all(jnp.isfinite(g)), f"∂(OLR)/∂(LW AOD) must be finite; {g}"
@@ -2974,21 +2974,86 @@ class TestLwAerosolPath:
             f"got {float(jnp.sum(g[:, 2:5])):.3f}"
         )
 
-    def test_lw_aerosol_with_optimal_angle(self):
-        """The optimal-angle diffusivity secant is fit on the column
-        transmissivity exp(-Στ); the aerosol must be in τ before the fit.
-        Pin that the optimal-angle path runs with aerosol and still
-        reduces OLR."""
+    def test_lw_aerosol_enters_optimal_angle_secant(self, monkeypatch):
+        """White-box guard that aerosol τ reaches the optimal-angle
+        diffusivity secant (``_compute_optimal_lw_secant``, fit on the
+        column transmissivity exp(-Στ)) — not only the later
+        source/transport solve.
+
+        Codex iter-79→80 review: a flux differential cannot isolate this.
+        The optimal-secant and fixed-1.66 paths run *different* nonlinear
+        LW solves, so the optimal−fixed correction can shift when aerosol
+        is added even if the secant saw gas-only τ; the source-side effect
+        does not cancel.  So capture the exact optical depth handed to
+        ``_compute_optimal_lw_secant`` and assert its column sum grows by
+        exactly the injected aerosol OD for every g-point.  If aerosol were
+        injected *after* the secant, the captured sums would be identical
+        (Δ = 0)."""
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rte import two_stream
+
+        seen: list[float] = []
+        orig = two_stream._compute_optimal_lw_secant
+
+        def spy(optical_depth, *args, **kwargs):
+            # Defer to execution time (the scan body is traced, not run, at
+            # call time) so the concrete summed τ is captured per g-point.
+            jax.debug.callback(
+                lambda v: seen.append(float(v)), jnp.sum(optical_depth)
+            )
+            return orig(optical_depth, *args, **kwargs)
+
+        monkeypatch.setattr(two_stream, "_compute_optimal_lw_secant", spy)
         solver = self._solver(use_optimal_angle=True)
         base, ncol, nlev = self._cols()
-        none = solver.solve_columns(**base)
-        aer = solver.solve_columns(
-            **base, aerosol_optical_depth_lw=self._elevated_aod(ncol, nlev)
+        aod_value = 1.0
+        aod = jnp.zeros((ncol, nlev)).at[:, 2:5].set(aod_value)
+
+        seen.clear()
+        solver.solve_columns(**base)  # gas only
+        gas = np.array(seen)
+        seen.clear()
+        solver.solve_columns(**base, aerosol_absorption_optical_depth_lw=aod)
+        aer = np.array(seen)
+
+        assert gas.size > 0 and gas.size == aer.size, (
+            "the optimal-angle secant was not invoked once per g-point"
         )
-        assert jnp.all(jnp.isfinite(aer.lw_flux_up)), "optimal-angle + aerosol NaN"
-        assert float(aer.lw_flux_up[0, 0]) < float(none.lw_flux_up[0, 0]), (
-            "optimal-angle path: elevated absorbing aerosol must still "
-            "reduce OLR (aerosol τ must enter the secant fit)."
+        # Aerosol adds aod_value to 3 interior layers in each of ncol
+        # columns; the secant operates on the full optical-depth array, so
+        # its column sum must rise by exactly aod_value*3*ncol for EVERY
+        # g-point (Δ = 0 would mean aerosol bypasses the secant).
+        expected = aod_value * 3 * ncol
+        np.testing.assert_allclose(
+            aer - gas, np.full_like(aer, expected), rtol=0.0, atol=1e-6,
+            err_msg=(
+                "optical depth handed to _compute_optimal_lw_secant did not "
+                "grow by the injected aerosol OD — aerosol is NOT entering τ "
+                "before the secant fit."
+            ),
+        )
+
+    def test_lw_aerosol_reachable_through_public_shim(self):
+        """Iter-81 (codex review): the LW aerosol kwarg must be reachable +
+        effective through the public ``rrtmgp_radiation`` compatibility
+        entry point, not only the direct ``RRTMGP.solve_columns`` API —
+        otherwise the feature is silently absent from production callers
+        going through the shim."""
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+            rrtmgp_radiation,
+        )
+        base, ncol, nlev = self._cols()
+        cfg = RRTMGPConfig(include_clouds=False)
+        none = rrtmgp_radiation(config=cfg, **base)
+        aer = rrtmgp_radiation(
+            config=cfg, **base,
+            aerosol_absorption_optical_depth_lw=self._elevated_aod(ncol, nlev),
+        )
+        drop = float(none.lw_flux_up[0, 0]) - float(aer.lw_flux_up[0, 0])
+        assert drop > 1.0, (
+            f"LW aerosol passed through rrtmgp_radiation() did not change OLR "
+            f"(Δ={drop:+.3f} W/m²) — the shim is not forwarding "
+            f"aerosol_absorption_optical_depth_lw to solve_columns."
         )
 
 
@@ -3103,6 +3168,101 @@ class TestDeltaScaling:
 
         grad = jax.grad(tau_out)(jnp.array([0.7]))
         assert jnp.all(jnp.isfinite(grad)), f"delta-scaling grad non-finite: {grad}"
+
+
+class TestRayleighScattering:
+    """Iter-78: pin the shortwave Rayleigh (molecular) scattering optical
+    depth (``gas_optics.compute_rayleigh_optical_depth``).
+
+    Rayleigh scattering sets the clear-sky SW backscatter / planetary
+    albedo floor.  The iter-1 audit marked it faithful and
+    ``TestOutOfRangeTemperature.test_out_of_range_T_saturates_rayleigh_OD``
+    guards the table-T clip, but the physical behaviour was unpinned.  The
+    Rayleigh OD must be a non-negative scattering optical depth, scale
+    linearly with the air-column amount (∝ ``molecules`` — a fixed
+    cross-section times the number of scatterers), be spectrally resolved
+    (∝ 1/λ⁴, far stronger in the blue / high-energy g-points), and be
+    differentiable.
+    """
+
+    @staticmethod
+    def _lookup_sw():
+        from pathlib import Path
+        from legoesm.atmosphere.physics.radiation.rrtmgp.optics import (
+            lookup_gas_optics_shortwave,
+        )
+        sw_path = (
+            Path(__file__).resolve().parents[4]
+            / "src/legoesm/atmosphere/physics/radiation/rrtmgp/optics"
+            / "rrtmgp_data/rrtmgp-gas-sw-g112.nc"
+        )
+        return lookup_gas_optics_shortwave.from_data_file(str(sw_path))
+
+    @staticmethod
+    def _state(shape=(1, 1, 1)):
+        return (
+            jnp.full(shape, 288.0),   # T
+            jnp.full(shape, 5.0e4),   # p
+            jnp.full(shape, 1.0e22),  # molecules
+        )
+
+    def test_rayleigh_od_nonnegative_all_gpoints(self, lookup_vmr):
+        _, vmr_lib = lookup_vmr
+        lkp = self._lookup_sw()
+        T, p, mol = self._state()
+        ods = jnp.array([
+            gas_optics.compute_rayleigh_optical_depth(
+                lkp, vmr_lib, mol, T, p, igpt=jnp.array(i))[0, 0, 0]
+            for i in range(lkp.n_gpt)
+        ])
+        assert jnp.all(ods >= 0.0), "Rayleigh scattering OD must be >= 0"
+        assert jnp.any(ods > 0.0), "Rayleigh OD identically zero — not computed"
+
+    def test_rayleigh_od_linear_in_molecules(self, lookup_vmr):
+        _, vmr_lib = lookup_vmr
+        lkp = self._lookup_sw()
+        T, p, mol = self._state()
+        igpt = jnp.array(50)
+        od1 = gas_optics.compute_rayleigh_optical_depth(lkp, vmr_lib, mol, T, p, igpt)
+        od2 = gas_optics.compute_rayleigh_optical_depth(
+            lkp, vmr_lib, 2.0 * mol, T, p, igpt)
+        # Rayleigh OD = cross-section · air amount → exactly linear.
+        np.testing.assert_allclose(
+            np.asarray(od2), 2.0 * np.asarray(od1), rtol=1e-10, atol=0.0,
+            err_msg="Rayleigh OD must scale linearly with the air-column amount",
+        )
+
+    def test_rayleigh_od_spectrally_resolved(self, lookup_vmr):
+        _, vmr_lib = lookup_vmr
+        lkp = self._lookup_sw()
+        T, p, mol = self._state()
+        ods = np.array([
+            float(gas_optics.compute_rayleigh_optical_depth(
+                lkp, vmr_lib, mol, T, p, igpt=jnp.array(i))[0, 0, 0])
+            for i in range(lkp.n_gpt)
+        ])
+        pos = ods[ods > 0]
+        # 1/λ⁴ dependence ⇒ orders-of-magnitude spread across g-points, not
+        # a flat per-band constant.
+        assert pos.max() / pos.min() > 10.0, (
+            f"Rayleigh OD nearly flat across g-points (max/min="
+            f"{pos.max() / pos.min():.2f}) — spectral 1/λ⁴ dependence lost"
+        )
+
+    def test_rayleigh_od_differentiable(self, lookup_vmr):
+        _, vmr_lib = lookup_vmr
+        lkp = self._lookup_sw()
+        T, p, mol = self._state()
+
+        def total_od(m):
+            return gas_optics.compute_rayleigh_optical_depth(
+                lkp, vmr_lib, m, T, p, igpt=jnp.array(50)).sum()
+
+        g = jax.grad(total_od)(mol)
+        assert jnp.all(jnp.isfinite(g)), "Rayleigh OD gradient must be finite"
+        assert float(g[0, 0, 0]) > 0.0, (
+            "more air ⇒ more Rayleigh OD (∂(OD)/∂(molecules) > 0)"
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

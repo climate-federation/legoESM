@@ -132,8 +132,8 @@ def louis_turbulence(
         1.0 + 2.0 * b_louis * Ri_pos / jnp.sqrt(1.0 + d_louis * Ri_pos)
     )
 
-    # Smooth blending: sigmoid(100 * Ri) transitions from unstable to stable
-    blend = jax.nn.sigmoid(100.0 * Ri)
+    # Smooth blending: sigmoid transitions from unstable to stable
+    blend = jax.nn.sigmoid(config.blend_ri_sharpness * Ri)
     f_m = (1.0 - blend) * f_unstable + blend * f_stable
     f_h = f_m  # Same stability function for heat (Louis 1979 simplification)
 

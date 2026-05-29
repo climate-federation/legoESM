@@ -127,9 +127,9 @@ def pack_carry(state, q_v, q_c, q_r, conv_prog=None, *,
     dtype (upcasting only — never downcasts existing float64 arrays).
     Accumulation scalars use at least the accumulate dtype.
     """
-    from legoesm.core.precision import _resolve_dtype
-    storage = _resolve_dtype(None, "storage")
-    accum = _resolve_dtype(None, "accumulate")
+    from legoesm.core.precision import resolve_dtype
+    storage = resolve_dtype(None, "storage")
+    accum = resolve_dtype(None, "accumulate")
 
     def _promote(x, target_dt):
         """Cast *x* to the wider of its current dtype and *target_dt*."""

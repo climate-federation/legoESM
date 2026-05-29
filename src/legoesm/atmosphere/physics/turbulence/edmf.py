@@ -236,7 +236,9 @@ def edmf_turbulence(
         q_u_new = (q_u + eps_dz * q_env) / (1.0 + eps_dz)
 
         # Smooth deactivation where w_u -> 0
-        active = jax.nn.sigmoid(20.0 * w_u_new / config.w_updraft_min)
+        active = jax.nn.sigmoid(
+            config.updraft_deactivation_sharpness * w_u_new / config.w_updraft_min
+        )
         w_u_new = w_u_new * active
         theta_u_new = theta_u_new * active + theta_env * (1.0 - active)
         q_u_new = q_u_new * active + q_env * (1.0 - active)

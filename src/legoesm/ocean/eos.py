@@ -20,7 +20,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.core.precision import _resolve_dtype
+from legoesm.core.precision import resolve_dtype
 
 # ==============================================================================
 # Ocean constants
@@ -107,8 +107,8 @@ def wright_eos(
 
     # Promote to the EOS compute dtype (float64 in mixed mode) for
     # intermediate polynomial evaluation.  On backends that lack float64
-    # (e.g. Metal), _resolve_dtype silently returns float32.
-    hi = _resolve_dtype("equation_of_state", "compute")
+    # (e.g. Metal), resolve_dtype silently returns float32.
+    hi = resolve_dtype("equation_of_state", "compute")
     T = T.astype(hi)
     S = S.astype(hi)
     p = p.astype(hi)
@@ -165,7 +165,7 @@ def thermal_expansion_coeff(
     -------
     array : α [1/K], same shape as inputs.
     """
-    hi = _resolve_dtype("equation_of_state", "compute")
+    hi = resolve_dtype("equation_of_state", "compute")
     T64 = T.astype(hi)
     S64 = S.astype(hi)
     p64 = p.astype(hi)
@@ -194,7 +194,7 @@ def haline_contraction_coeff(
     -------
     array : β [1/PSU], same shape as inputs.
     """
-    hi = _resolve_dtype("equation_of_state", "compute")
+    hi = resolve_dtype("equation_of_state", "compute")
     T64 = T.astype(hi)
     S64 = S.astype(hi)
     p64 = p.astype(hi)

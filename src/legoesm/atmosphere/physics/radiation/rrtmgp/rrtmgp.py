@@ -371,7 +371,7 @@ class RRTMGP:
       cloud_r_eff_ice: jnp.ndarray | None = None,
       cloud_fraction: jnp.ndarray | None = None,
       aerosol_optical_depth: jnp.ndarray | None = None,
-      aerosol_optical_depth_lw: jnp.ndarray | None = None,
+      aerosol_absorption_optical_depth_lw: jnp.ndarray | None = None,
       solar_spectral_fraction: jnp.ndarray | None = None,
       ghg_vmr_override: dict | None = None,
   ):
@@ -417,10 +417,13 @@ class RRTMGP:
       aerosol_optical_depth : jnp.ndarray | None
           Prescribed shortwave aerosol optical depth per layer
           (ncol, nlev).
-      aerosol_optical_depth_lw : jnp.ndarray | None
-          Prescribed longwave aerosol optical depth per layer
-          (ncol, nlev), treated as a pure absorber (ssa=0).  ``None``
-          (default) leaves the longwave solution byte-identical.
+      aerosol_absorption_optical_depth_lw : jnp.ndarray | None
+          Prescribed longwave aerosol **absorption** optical depth per
+          layer (ncol, nlev) — NOT extinction.  Added to the absorption
+          optical depth with ssa=0 (LW scattering neglected; a caller
+          holding extinction OD must scale by the absorption fraction
+          1−ω first).  ``None`` (default) leaves the longwave solution
+          byte-identical.
       solar_spectral_fraction : jnp.ndarray | None
           Per-g-point solar source weights (ngpt_sw,).
       ghg_vmr_override : dict | None
@@ -575,9 +578,9 @@ class RRTMGP:
           aerosol_od_3d = None
 
       # Optional aerosol optical depth (longwave, pure absorber)
-      if aerosol_optical_depth_lw is not None:
+      if aerosol_absorption_optical_depth_lw is not None:
           aerosol_od_lw_3d = _add_halos(
-              jnp.clip(aerosol_optical_depth_lw, 0.0, None)[:, None, ::-1],
+              jnp.clip(aerosol_absorption_optical_depth_lw, 0.0, None)[:, None, ::-1],
           )
       else:
           aerosol_od_lw_3d = None
@@ -609,7 +612,7 @@ class RRTMGP:
           cloud_r_eff_ice=cri_3d,
           cloud_path_ice=cpi_3d,
           cloud_fraction=cf_3d,
-          aerosol_optical_depth=aerosol_od_lw_3d,
+          aerosol_absorption_optical_depth=aerosol_od_lw_3d,
           use_scan=config.use_scan,
           use_optimal_angle=getattr(config, "use_optimal_angle", False),
       )

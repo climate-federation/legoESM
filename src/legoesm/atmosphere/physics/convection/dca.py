@@ -36,6 +36,7 @@ def _adjust_one_iteration(
     p_full: jax.Array,
     dp: jax.Array,
     mixing_fraction: float,
+    instability_blend_sharpness: float,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """One bottom-to-top sweep adjusting unstable layer pairs.
 
@@ -57,6 +58,9 @@ def _adjust_one_iteration(
         Layer thickness [Pa], shape (ncol, nlev).
     mixing_fraction : float
         Fraction of adjustment per iteration.
+    instability_blend_sharpness : float
+        Sigmoid sharpness on the dimensionless superadiabatic-instability
+        metric controlling adjustment blending.
 
     Returns
     -------
@@ -111,7 +115,7 @@ def _adjust_one_iteration(
         instability = (actual_dTdp - gamma_m) / jnp.clip(gamma_dry, 1e-10, None)
 
         # Smooth trigger: sigmoid with steep transition on dimensionless metric
-        blend = jax.nn.sigmoid(10.0 * instability) * mixing_fraction
+        blend = jax.nn.sigmoid(instability_blend_sharpness * instability) * mixing_fraction
 
         # Target temperature for upper level: T_target = T_below - gamma_m * dp_pair
         T_target_upper = T_below - gamma_m * dp_pair
@@ -239,6 +243,7 @@ def dca_convection(
         T_c, q_c, prec = carry
         T_new, q_new, prec_iter = _adjust_one_iteration(
             T_c, q_c, p_full, dp, config.mixing_fraction,
+            config.instability_blend_sharpness,
         )
         return (T_new, q_new, prec + prec_iter), None
 

@@ -204,7 +204,7 @@ class TestConvectionParams:
     def _supersaturated_column(self, nlev=12, ncol=2):
         """Column with q_v > q_sat in mid-troposphere so Kuo's internal
         MC = column-integrated max(q_v − q_sat, 0) is strictly positive.
-        This unblocks the alpha_heat / tau_relax AD paths."""
+        This unblocks the alpha_heat / tau_relax_s AD paths."""
         p_s = 1.0e5
         sigma_half = jnp.linspace(0.0, 1.0, nlev + 1)
         sigma_full = 0.5 * (sigma_half[:-1] + sigma_half[1:])
@@ -230,15 +230,15 @@ class TestConvectionParams:
 
         assert_param_grad_ok(loss, KuoConfig().alpha_heat, "Kuo alpha_heat")
 
-    def test_kuo_tau_relax(self):
+    def test_kuo_tau_relax_s(self):
         T, q_v, p_full, p_half = self._supersaturated_column()
 
         def loss(t):
-            cfg = KuoConfig()._replace(tau_relax=t)
+            cfg = KuoConfig()._replace(tau_relax_s=t)
             out = kuo_convection(T, q_v, p_full, p_half, 300.0, config=cfg)
             return jnp.sum(out.dT_dt ** 2)
 
-        assert_param_grad_ok(loss, KuoConfig().tau_relax, "Kuo tau_relax")
+        assert_param_grad_ok(loss, KuoConfig().tau_relax_s, "Kuo tau_relax_s")
 
 
 # ===========================================================================
