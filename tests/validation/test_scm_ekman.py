@@ -2,7 +2,7 @@
 
 Drives the legoESM SCM with constant geostrophic wind, zero surface
 heat / moisture flux, and a neutral initial θ profile (see
-:mod:`scripts.run_scm_ekman`).  Verifies the canonical Ekman-spiral
+:mod:`scripts.scm.ekman`).  Verifies the canonical Ekman-spiral
 signatures: surface wind decelerated and veered relative to the
 geostrophic profile, qke approaching the friction-velocity surface
 BC, no spurious heat-flux drift beyond the documented Exner-
@@ -40,7 +40,7 @@ TEST_SIGMA_TOP = 0.85
 def _import_runner():
     import sys
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "scripts"))
-    import run_scm_ekman
+    from scm import ekman as run_scm_ekman
     return run_scm_ekman
 
 

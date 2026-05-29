@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="legoESM.png" alt="legoESM" width="400">
+  <img src="docs/assets/legoESM.png" alt="legoESM" width="400">
 </p>
 
 # legoESM
@@ -33,7 +33,7 @@ estimation, sensitivity analysis, and hybrid AI–physics modeling.
   - **MPAS / Voronoi icosahedral**: hydrostatic, non-hydrostatic
   - **SFNO data-driven cores**: shallow water and hydrostatic learned solvers
   - **Tracer transport** modules on cubed-sphere, lat-lon, and Voronoi, with RK3 time stepping for full 3rd-order convergence
-- **Single-column model (SCM)** (`legoesm.atmosphere.scm.SingleColumnModel`, `scripts/run_scm_rce.py`): dycore-free driver that reuses the full physics factory for RCE, GABLS-style boundary-layer cases, parameterization integration tests, and any-scheme × any-integrator swap-matrix sweeps
+- **Single-column model (SCM)** (`legoesm.atmosphere.scm.SingleColumnModel`, `scripts/run_scm_test_matrix.py`): dycore-free driver that reuses the full physics factory for RCE, GABLS-style boundary-layer cases, parameterization integration tests, and any-scheme × any-integrator swap-matrix sweeps
 - **Vertical coordinates**: pure sigma and hybrid sigma–pressure (L20–L60, sinh stretching)
 - **Physics packages** (each with a config NamedTuple, factory dispatch in `integration.py`, and direct unit tests):
   - **Radiation**: gray (Frierson-style) and RRTMGP correlated-k (LW + SW) with diurnal cycle, prescribed/transient ozone, aerosols, solar TSI, and cloud–radiation coupling
@@ -116,7 +116,7 @@ estimation, sensitivity analysis, and hybrid AI–physics modeling.
 - **`CoupledESMDriver`** — fully coupled atmosphere / ocean / sea-ice / land / lake / carbon (`scripts/run_coupled.py`) with presets: `aquaplanet`, `slab_simple`, `slab_pft`, `slab_richards`, `slab_carbon`, `full_coupled`
 - **`EarthSystemDriver`** — research orchestration for arbitrary component compositions
 - **OMIP / centennial ocean driver** (`scripts/run_omip.py`) — multi-decade JRA55-do or idealized OMIP-2 spin-up across lat-lon, tripolar (eORCA1), cubed-sphere, and MPAS Voronoi grids, with auto-restart, AMOC / OSNAP / RPE tracking, and a `jra55_3way` run set (MPAS ico5 / ico6 / tripole eORCA1)
-- **Single-column driver** (`scripts/run_scm_rce.py`) — radiative-convective equilibrium and stability sweeps with any-scheme × any-integrator swap matrix
+- **Single-column driver** (`scripts/run_scm_test_matrix.py`) — RCE, GABLS1, Ekman, Wangara, and oracle generation through one dispatcher; any-scheme × any-integrator swap matrix
 - **Offline land driver** (`scripts/run_lmip.py`) — single-point multilayer land 10-year soil spin-up before ERA5 coupling
 - **`PhysicsPipeline`** — radiation sub-cycling via `jax.lax.cond`, with cloud-radiation coupling and ML-physics dispatch
 - **`DiagnosticCollector`** — energy budget, monthly means, snapshot history
@@ -158,7 +158,7 @@ legoesm test williamson --case 2 --resolution 48 --days 5
 JAX_ENABLE_X64=1 python scripts/run_amip.py --grid-type cubed_sphere --resolution 16 --days 365
 
 # Single-column radiative-convective equilibrium (issue #277)
-JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu python scripts/run_scm_rce.py --days 50
+JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu python scripts/run_scm_test_matrix.py rce --days 50
 
 # Run a fully coupled simulation (slab ocean + bucket land)
 JAX_ENABLE_X64=1 python scripts/run_coupled.py --preset slab_simple --days 365
@@ -262,7 +262,7 @@ python -c "import jax; print(jax.default_backend())"
 
 - [docs/getting_started.md](docs/getting_started.md) — **Newbie onboarding guide** (start here)
 - [CHANGELOG.md](CHANGELOG.md) — Release notes / what changed
-- [SPECIFICATION.md](SPECIFICATION.md) — Full technical specification
+- [SPECIFICATION.md](docs/specs/SPECIFICATION.md) — Full technical specification
 - [docs/implementation_summary.md](docs/implementation_summary.md) — Comprehensive summary of implementations and tests
 - [docs/cmip_readiness.md](docs/cmip_readiness.md) — CMIP production readiness checklist
 - [docs/amip.md](docs/amip.md) — AMIP experiment guide

@@ -45,7 +45,7 @@ def _read_dod_section() -> str:
     the heading and the next ``## `` heading). Keeps the assertions
     below from accidentally matching unrelated paragraphs that
     happen to mention CWV or MSE in the iteration log."""
-    text = (REPO_ROOT / "CRM_implementation.md").read_text()
+    text = (REPO_ROOT / "docs" / "specs" / "CRM_implementation.md").read_text()
     start = text.index("## Definition of done")
     end = text.index("\n## ", start + 1)
     return text[start:end]

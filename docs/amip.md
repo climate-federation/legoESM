@@ -57,7 +57,7 @@ python scripts/smoke_test_amip_all_grids.py --days 1
 #   voronoi/mpas (--dt 60 due to MPAS hidden CFL constraint)
 ```
 
-See `AMIP.md` (in the repo root) for the iteration-by-iteration trace
+See [`forcing/AMIP.md`](forcing/AMIP.md) for the iteration-by-iteration trace
 of how this infrastructure was built.
 
 ## Overview

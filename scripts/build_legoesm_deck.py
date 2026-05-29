@@ -7,9 +7,9 @@ using ONLY the Python standard library. No pip install required.
 
 Usage
 -----
-    python3 ~/Documents/legoESM/build_legoesm_deck.py
+    python3 ~/Documents/legoESM/scripts/build_legoesm_deck.py
 
-Output: ``~/Documents/legoESM/legoESM_seminar.pptx``.
+Output: ``~/Documents/legoESM/docs/assets/legoESM_seminar.pptx``.
 """
 
 from __future__ import annotations
@@ -57,12 +57,12 @@ HEADER_FONT = "Georgia"
 BODY_FONT = "Calibri"
 MONO_FONT = "Consolas"
 
-REPO = Path(__file__).resolve().parent
+REPO = Path(__file__).resolve().parents[1]
 RESULTS = REPO / "results" / "old"
 DOCS = REPO / "docs"
 DIAG = REPO / "diagnostics" / "fv3_visual"
 DEBUG = REPO / "tests" / "debug"
-LOGO_PATH = REPO / "legoESM.png"
+LOGO_PATH = REPO / "docs" / "assets" / "legoESM.png"
 
 
 def first_existing(*candidates: Path) -> Path:
@@ -1893,7 +1893,7 @@ def build(out):
 
 
 if __name__ == "__main__":
-    out = REPO / "legoESM_seminar.pptx"
+    out = REPO / "docs" / "assets" / "legoESM_seminar.pptx"
     p = build(out)
     size_kb = p.stat().st_size / 1024
     print(f"Wrote {p}")

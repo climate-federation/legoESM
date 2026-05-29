@@ -1,7 +1,7 @@
 """GABLS1 benchmark for the legoESM single-column model.
 
 Integrates the legoESM SCM on the Cuxart et al. (2006) GABLS1 setup
-(see :mod:`scripts.run_scm_gabls1`) and compares the resulting
+(see :mod:`scripts.scm.gabls1`) and compares the resulting
 trajectory against the jax_scm oracle stored at
 ``tests/validation/scm_oracle/gabls1_Nz64.nc``.
 
@@ -50,7 +50,7 @@ TEST_SIGMA_TOP = 0.7
 def _import_runner():
     import sys
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "scripts"))
-    import run_scm_gabls1
+    from scm import gabls1 as run_scm_gabls1
     return run_scm_gabls1
 
 
@@ -188,7 +188,7 @@ def test_gabls1_oracle_present_and_plausible_magnitudes():
     before benchmark comparison runs."""
     if not ORACLE_PATH.exists():
         pytest.skip(
-            f"Oracle missing: {ORACLE_PATH}.  Run scripts/run_jax_scm_oracle.py"
+            f"Oracle missing: {ORACLE_PATH}.  Run scripts/run_scm_test_matrix.py oracle"
         )
     ds = xr.open_dataset(ORACLE_PATH)
     try:
