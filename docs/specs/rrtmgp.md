@@ -4,8 +4,8 @@ Goal: `src/.../rrtmgp/` faithful to
 https://github.com/earth-system-radiation/rte-rrtmgp, fully JAX-
 differentiable, mixed-precision-safe, MPI/GPU-scalable.
 
-Compression history: iter-10 / 20 / 30 / 40 / 50 (this file via
-`docs/archive/rrtmgp.{original,iter20,iter30,iter40,iter50}-backup.md`).
+Compression history: iter-10 / 20 / 30 / 40 / 50 / 60 (this file via
+`docs/archive/rrtmgp.{original,iter20,iter30,iter40,iter50,iter60}-backup.md`).
 
 ---
 
@@ -14,90 +14,76 @@ Compression history: iter-10 / 20 / 30 / 40 / 50 (this file via
 Reviewed `optics/{gas_optics, optics_utils, lookup_*, optics,
 optics_base, cloud_optics}.py`, `rte/{two_stream,
 monochromatic_two_stream, rte_utils}.py`, `rrtmgp.py` against
-upstream Fortran kernels + `mo_gas_optics_rrtmgp.F90` (lines
-300/303/519/1030/1354/1555).
+upstream Fortran kernels.  **Faithful**: log(p) interp, `+itropo-1`
+shift, `kmajor` (n_t, n_p+1, n_eta, n_gpt), tropopause boundary,
+`col_mix`, eta interp, Rayleigh, Planck-face geom-mean, `t_planck`.
 
-**Verified faithful**: log(p)-interp + `+itropo-1` shift; `kmajor`
-(n_t, n_p+1, n_eta, n_gpt); tropopause boundary; `col_mix`; eta
-interp; Rayleigh; Planck-face geom-mean; `t_planck`.
-
-**Bugs flagged → all fixed**:
-
-| ID | Sev | Site | Fix |
-|---|---|---|---|
-| BUG-1 | critical | planck_sources T-extrap (T^4) | iter-1+2 (clip) |
-| BUG-2 | moderate | major/minor/Rayleigh/pfrac T-extrap | iter-1+2 (clip) |
-| BUG-3 | AD | `where(combined_vmr>0,…)` NaN grad | iter-1+2/5 |
-| BUG-5 | climatology | O3 σ=1.5 → 10× tropopause O3 | iter-3 + 3.5 |
-| OPT-MISS | faithfulness | hard-coded LW_DIFFUSIVE=1.66 | iter-2 (opt-in) |
+| ID | Sev | Fix iter |
+|---|---|---|
+| T-extrap T^4 in planck/major/minor/Rayleigh/pfrac | crit/mod | 1+2 (`_clip_to_table_range`) |
+| `where(combined_vmr>0,…)` NaN grad | AD | 1+2/5 (safe-div) |
+| σ=1.5 O3 → 10× tropopause | clim | 3 + 3.5 (skewed-Gaussian σ_trop=0.9 σ_strat=1.5, 20 ppb baseline) |
+| Hard-coded LW_DIFFUSIVE=1.66 | fidelity | 2 (opt-in via `use_optimal_angle` config) |
 
 ---
 
-## Production-critical fixes silently reverted by AIMIP-#312 merge
+## AIMIP-#312 silently reverted 3 production fixes (iter-13 → 17)
 
-Three pre-merge `Fix RRTMG*` commits were wholesale-clobbered when
-`b5b5954e Aimip (#312)` replaced files instead of cherry-picking
-AIMIP additions onto current main:
-
-| Iter | Lost commit | Pre-revert impact | Restored at |
+| Iter | Lost commit | Impact | Restored site |
 |---|---|---|---|
-| 13 | `0be22f0f` heating-rate sign | Thermal runaway T̄ 261→293K/120d | `two_stream.py:compute_heating_rate` |
-| 14 | `59407953` 5 AD-unsafe max-floors | NaN grads 4/5 AMIP params | `cloud_optics.py`, `monochromatic_two_stream.py` (×4), `two_stream.py` |
-| 15 | `4c9591bb` cloud-fraction cf² | -59 W/m² OSR at cf=0.6, -113 at cf=0.3 | `driver/physics_pipeline.py` |
-| 16 | (same `4c9591bb` 2nd site) | identical | `radiation/integration.py` |
-| 17 | (centralised cf-omit) | regression at 3rd site impossible | `clouds/cloud_fraction.py::to_rrtmg_kwargs` |
+| 13 | `0be22f0f` heating-rate sign | T̄ 261→293K/120d | `two_stream.compute_heating_rate` |
+| 14 | `59407953` 5 AD-unsafe max-floors | NaN grads 4/5 AMIP | `cloud_optics`, `monochromatic_two_stream` ×4, `two_stream` |
+| 15+16 | `4c9591bb` cloud-fraction cf² (2 sites) | -59 to -113 W/m² OSR | `driver/physics_pipeline`, `radiation/integration` |
+| 17 | centralised cf-omit | 3rd-site regression impossible | `clouds.cloud_fraction.to_rrtmg_kwargs` |
 
-Codex iter-18 SHIP on iter-13 → 17 restorations.  iter-3 codex SHIP
-on skewed O3; iter-3.5 closed 200-500 hPa gap.  iter-40 codex SHIP
-on iter-32 → 40 cache work after iter-41 addressed the two FIX
-findings (cloud-optics None-guard, _hashable dtype gate).
+Iter-59 audit of `git diff --name-status b5b5954e^..b5b5954e`
+confirms the merge touched ZERO convection/microphysics/BL files;
+no analogous losses possible outside radiation footprint.
+
+Codex SHIP verdicts: iter-3 (O3), iter-18 (iter-13→17), iter-40
+(cache work), iter-58 (dead-code series iter-50→57).
 
 ---
 
 ## Iter buckets
 
 ### Stratosphere fidelity + optimal LW diffusivity (iter-1 → 9, 19)
-- `_clip_to_table_range` at every table interp; safe-div for
-  `combined_vmr` (iter-1+2/5) and `vmr_ref_ratio` (iter-9); load
-  `optimal_angle_fit`; `_compute_optimal_lw_secant`;
-  `use_optimal_angle` config flag opt-in; `precomputed_lw_optical_props`
-  to dedup optics call (iter-4); safe_divide extended to delta-scaling
-  + combine_optical_properties (iter-19).
+`_clip_to_table_range` at every table interp.  Safe-divide for
+`combined_vmr` (iter-1+2/5), `vmr_ref_ratio` (iter-9), delta-scaling
++ `combine_optical_properties` (iter-19).  Load `optimal_angle_fit`,
+add `_compute_optimal_lw_secant`, opt-in via `use_optimal_angle`
+config flag; `precomputed_lw_optical_props` dedups optics call
+(iter-4).
 
-### O3 climatology (iter-3 + 3.5)
-- Skewed-Gaussian (σ_trop=0.9, σ_strat=1.5, peak 9 ppm at 10 hPa) +
-  20 ppb tropospheric baseline.
-
-### Cache + dead code (iter-22 → 24, 32 → 47)
-- Delete dead swirl_jatmos `compute_heating_rate` API (-456 lines).
-- iter-32 cache-key bug: missing 5 baked-in config fields → silent
-  stale-solver reuse.  Added `_hashable` shim.
+### Cache integrity (iter-22 → 47)
+- iter-22: delete dead swirl_jatmos `compute_heating_rate` API
+  (-456 LOC).
+- iter-32: cache-key bug missing 5 baked-in fields → silent stale-
+  solver reuse.  `_hashable` shim.
 - iter-33: drop redundant `instance.atmospheric_state` field.
-- iter-36+40: `include_clouds` cache-key dance — eventually moved
-  back to optics key when iter-40 made cloud-table load conditional.
-- iter-39+42: 0-D arrays in `_hashable` → value-hash with dtype-kind
-  gate (`f`/`i`/`b`/`u` only).
-- iter-41: cloud-optics None-guard + clear ValueError on direct-
-  bypass.
-- iter-45+46: trim 537 lines of dead `interpolation.py` utilities +
-  5 unused `kernel_ops` functions.
-- iter-47: trim 2 unused constants re-exports.
-- iter-48: ruff F401 sweep — 4 real unused imports.
-- iter-51: clear-sky `solve_columns()` happy-path regression pin
-  (no cloud kwargs).
-- iter-52: trim dead `reconstruct_vmr_fields_from_pressure` path.
-- iter-53: drop dead `from_config` factories
-  (`AtmosphericState.from_config`, `LookupVolumeMixingRatio.from_config`).
-- iter-54: drop dead `AtmosphericStateCfg` + `RadiativeTransfer`
-  swirl_jatmos config classes.
-- iter-55: delete dead `utils/` subdirectory.
-- iter-56: drop dead `interpolate_orig` + `evaluate_weighted_lookup`
-  from `optics_utils.py` (-72 lines).
-- iter-57: drop deprecated `RRTMGP._cache_key` alias; update
-  `aimip_params.py` docstring to point to `_optics_cache_key`.
+- iter-36+40: `include_clouds` keyed on optics-cache; iter-40
+  conditionalised cloud-table load.
+- iter-39+42: 0-D arrays → value-hash with dtype-kind gate
+  (`f`/`i`/`b`/`u` only).
+- iter-41: cloud-optics None-guard + direct-bypass ValueError.
+- iter-45+46+47+48: trim 537 LOC dead `interpolation.py` + 5
+  `kernel_ops` + 2 constants re-exports + 4 F401 imports.
 
-### Regression tests (~60 tests across 10+ classes)
+### Dead-code trim (iter-50 → 60)
+- iter-51: clear-sky `solve_columns` regression pin (no cloud kwargs).
+- iter-52: `reconstruct_vmr_fields_from_pressure` path.
+- iter-53: `from_config` factories on `AtmosphericState`/`LookupVMR`.
+- iter-54: `AtmosphericStateCfg` + `RadiativeTransfer` config classes.
+- iter-55: dead `utils/` subdirectory.
+- iter-56: `interpolate_orig` + `evaluate_weighted_lookup` (-72 LOC).
+- iter-57: deprecated `RRTMGP._cache_key` alias.
+- iter-58: codex review of iter-50→57 — one docstring cross-ref fix.
+- iter-59: AIMIP-#312 cross-module audit (vacuously empty) +
+  `@_skip_if_metal_broken` for 3 JAX-Metal env failures.
+- iter-60: `recurrent_op_1d` + `recurrent_op_1d_scan` in
+  `rte_utils.py` (-83 LOC).
 
+### Regression tests (~60 across 10+ classes)
 `test_rrtmgp_stratosphere.py` — `TestClipToTableRange`,
 `TestRelativeAbundanceSafeDiv`, `TestOutOfRangeTemperature`,
 `TestMixedPrecision`, `TestOptimalLwSecant`, `TestStandardO3Profile`,
@@ -105,43 +91,22 @@ findings (cloud-optics None-guard, _hashable dtype gate).
 `TestCloudKwargsHelper`, `TestHeatingRateSign`.
 
 `test_radiation.py::{TestRRTMGP,TestColumnShardedRadiation}` —
-cache-key tests (iter-32/36/37/39/41/42), sharded-equivalence
+cache-key (iter-32/36/37/39/41/42), sharded-equivalence
 (iter-28/29), iter-13 sign / iter-15 cf end-to-end pins.
 
 ---
 
-## Status (after iter-59)
+## Status (after iter-60)
 
-- ✅ 113 tests pass + 5 skipped (3 Metal-platform-broken + 2
-  multidevice — both auto-skip via `metal_fell_back_to_cpu()`).
-- ✅ Zero regressions across iter-1 → iter-49.
-- ✅ AD-safe end-to-end (codex iter-18 + iter-40 SHIP).
-- ✅ Mixed precision via internal table-dtype cast; fp32 inputs OK.
+- ✅ 113 pass + 5 skip (3 Metal-broken + 2 multidevice) — 0 fail.
+- ✅ AD-safe end-to-end; mixed precision via table-dtype cast;
+  fp32 inputs OK.
 - ✅ MPI/GPU: `lax.scan + jax.checkpoint` per g-point;
-  embarrassingly parallel; column-permutation invariant; shard-
-  equivalent for default and `use_optimal_angle=True`.
-- ✅ ~1030 lines of dead swirl_jatmos code removed.
-- ✅ Memory: optics cache dedupes via include_clouds → cloud_optics
-  load skipped when False (~MB per cached entry).
+  column-permutation invariant; shard-equivalent for default and
+  `use_optimal_angle=True` paths.
+- ✅ ~1113 LOC dead swirl_jatmos code removed across iter-22 → 60.
 
-## Deferred to iter 60+
+## Deferred
 
-- Default-enable `use_optimal_angle=True` after upstream RFMIP
-  reference-flux validation (iter-29 added the gating sharded test).
-
-## Closed in iter-59
-
-- iter-58: codex adversarial-review of dead-code series iter-50→57
-  → SHIP after one docstring fix (interpolate_orig cross-ref).
-- iter-59: AIMIP-#312 cross-module audit — by `git diff
-  --name-status b5b5954e^..b5b5954e`, the merge touched ZERO
-  convection/microphysics/BL physics files; only 3 radiation +
-  4 training-side files (already audited iter-13/14/15/16).
-  The deferred audit is *vacuously empty*: the pattern of
-  "production fix silently reverted" cannot exist outside the
-  merge's footprint.
-- iter-59: 3 `TestColumnShardedRadiation` failures resolved as
-  environmental, not code bugs.  Added `@_skip_if_metal_broken`
-  marker keyed on `metal_fell_back_to_cpu()` — JAX-Metal/CPU-fallback
-  env hits `UNIMPLEMENTED: default_memory_space` on `device_put`
-  with a shard `Mesh`.  Tests run unchanged on CI Linux/CUDA.
+- Default-enable `use_optimal_angle=True` pending upstream RFMIP
+  reference-flux validation (iter-29 gating sharded test exists).
