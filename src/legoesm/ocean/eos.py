@@ -598,6 +598,14 @@ def veros_nonlin3_eos(
     return rho_anom + cfg.rho_0
 
 
+# Single source of truth for the dispatchable EOS scheme literals. Referenced
+# by both make_eos_fn (unknown-scheme ValueError) and config validators
+# (fail-fast at construction) so the valid set is never duplicated.
+VALID_EOS_SCHEMES = frozenset(
+    {"wright", "linear", "unesco80", "veros_nonlin2", "veros_nonlin3"}
+)
+
+
 def make_eos_fn(eos="wright", eos_linear=None,
                 eos_veros_nonlin2: VerosNonlin2Config | None = None,
                 eos_veros_nonlin3: VerosNonlin3Config | None = None):
@@ -643,7 +651,10 @@ def make_eos_fn(eos="wright", eos_linear=None,
             return veros_nonlin3_eos(T, S, p, cfg=cfg)
         return _veros_nl3
     else:
-        raise ValueError(f"Unknown EOS scheme: {eos!r}")
+        raise ValueError(
+            f"Unknown EOS scheme: {eos!r}. Valid schemes: "
+            f"{sorted(VALID_EOS_SCHEMES)}."
+        )
 
 
 def density_perturbation(

@@ -497,7 +497,7 @@ class MomentumTendencyDiagnostics(NamedTuple):
 class LatLonCGridOceanConfig(NamedTuple):
     """Configuration for the lat-lon C-grid FV ocean model.
 
-    ~45 fields. This docstring is the *map* the flat field list lacks; the
+    ~70 fields. This docstring is the *map* the flat field list lacks; the
     fields group as:
 
     - **Physical constants**: ``g``, ``rho_0``, ``constants`` (ConstantsConfig).
@@ -542,10 +542,20 @@ class LatLonCGridOceanConfig(NamedTuple):
 
     Same parameter set as LatLonOceanConfig; kept separate since operator
     semantics differ (compact stencils vs centered).
+
+    Section headers below mark the contiguous top run of fields. The trailing
+    fields (from ``n_barotropic_substeps`` on) are kept in *chronological*
+    append order to preserve positional construction for legacy callers, so
+    they span several topics — use the group-map above to locate them, not the
+    physical field order.
     """
 
+    # --- Physical constants (defaults reference legoesm.constants; pin via
+    #     ConstantsConfig for a reference-model recipe) ---
     g: float = constants.g
     rho_0: float = constants.rho_ocean
+
+    # --- Lateral (harmonic Laplacian) viscosity ---
     A_h: float = 1.0e4
     A_h_lat_scaling: bool = False  # When True, A_h is scaled by cos(lat)^N to
                                     # keep the grid Reynolds number latitude-
@@ -586,6 +596,8 @@ class LatLonCGridOceanConfig(NamedTuple):
                                     # dx/dy anisotropy makes isotropic A_h
                                     # either too strong (zonal) or too weak
                                     # (meridional).
+
+    # --- Biharmonic viscosity ---
     B_h: float = 0.0
     B_h_lat_scaling: bool = True   # Apply (cos(lat)/cos_max)⁴ scaling to B_h.
                                     # Default True (MOM6 convention) prevents
@@ -602,12 +614,16 @@ class LatLonCGridOceanConfig(NamedTuple):
                                    # baroclinic geostrophy (which lives
                                    # in u' = u_3d - U_bar).  HIM/MOM6
                                    # BIHARMONIC_BAROTROPIC analog.
+    # --- Smagorinsky eddy viscosity ---
     C_smag: float = 0.0            # Biharmonic Smagorinsky coefficient
     C_smag_lap: float = 0.0        # Laplacian Smagorinsky coefficient.
                                     # When > 0, adds flow-adaptive Laplacian
                                     # viscosity A_smag = (C·dx)²·|D| via the
                                     # energy-stable stress-tensor operator.
                                     # MOM6 OM4 uses 0.15. Additive with A_h.
+
+    # --- Bottom drag (dynamics-level; the physics-pathway BottomDragConfig is
+    #     deprecated — set drag here) ---
     bottom_drag_r: float = 0.0
     bottom_drag_bbl_thickness: float = 0.0
     bottom_drag_bg_velocity: float = 0.0  # MOM6 DRAG_BG_VEL [m/s]; when >0,
@@ -615,10 +631,18 @@ class LatLonCGridOceanConfig(NamedTuple):
                                            # tau ∝ √(u²+v²+u_bg²) · u, with
                                            # the linear-in-u limit set to
                                            # bottom_drag_r at |u|→0.
+
+    # --- Tracer diffusivity & vertical mixing (A_v/K_v are constant fallbacks
+    #     unless a physics vertical-mixing scheme / implicit_vertical_mixing
+    #     overrides them) ---
     K_h: float = 0.0
     K_bih: float = 0.0
     A_v: float = 1.0e-3
     K_v: float = 1.0e-4
+
+    # === Chronological (positional-stability) tail — grouped in the docstring
+    #     map, NOT by field order: barotropic solver, conservation, numerics
+    #     choices, runtime-check bounds, polar-cap boost, EOS/physics, constants.
     n_barotropic_substeps: int = 30
     hyperdiff_coeff: float = 0.0
     use_conservation_fixer: bool = False

@@ -508,6 +508,19 @@ class LatLonCGridOceanModel:
                 f"freshwater_closure must be one of {_valid_fw}, "
                 f"got {config.freshwater_closure!r}",
             )
+
+        # Fail-fast EOS dispatch validation (dispatch discipline: validate the
+        # static literal at construction, not lazily at the first step where
+        # make_eos_fn would raise). Uses the single VALID_EOS_SCHEMES source so
+        # the valid set is never duplicated. A linear EOS leaves eos_linear=None
+        # -> make_eos_fn supplies LinearEOSConfig() defaults (documented), so no
+        # eos/eos_linear coupling error is raised for that case.
+        from legoesm.ocean.eos import VALID_EOS_SCHEMES
+        if config.eos not in VALID_EOS_SCHEMES:
+            raise ValueError(
+                f"eos must be one of {sorted(VALID_EOS_SCHEMES)}, "
+                f"got {config.eos!r}",
+            )
         if config.max_abs_eta_m <= 0.0:
             raise ValueError(
                 f"max_abs_eta_m must be > 0, got {config.max_abs_eta_m!r}")
