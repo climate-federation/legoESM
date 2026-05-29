@@ -164,3 +164,47 @@ class TestBottomDrag:
         from legoesm.ocean.sponge import SpongeForcing, compute_sponge_gamma_latlon
         assert SpongeForcing is not None
         assert compute_sponge_gamma_latlon is not None
+
+
+class TestSharedSpongeKernel:
+    """compute_sponge_gamma is the shared kernel both grid wrappers delegate to
+    (dedup of the former per-grid loops). Locks bit-identity + that the lat-lon
+    and MPAS wrappers agree with it."""
+
+    @staticmethod
+    def _loop(lat_deg, lat_south, lat_north, width_deg, timescale_days):
+        tau = timescale_days * 86400.0
+        g = np.zeros_like(np.asarray(lat_deg, dtype=np.float64))
+        for i, lat in enumerate(lat_deg):
+            ds = lat - lat_south
+            dn = lat_north - lat
+            if ds < width_deg:
+                g[i] = (1.0 - ds / width_deg) ** 2 / tau
+            elif dn < width_deg:
+                g[i] = (1.0 - dn / width_deg) ** 2 / tau
+        return g
+
+    def test_kernel_matches_reference_loop(self):
+        from legoesm.ocean.sponge import compute_sponge_gamma
+        for ls, ln, w, td in [(-40.0, 44.0, 2.0, 1.0), (-40.0, 44.0, 5.0, 3.0),
+                              (10.0, 12.0, 2.0, 1.0)]:  # last: narrow-domain overlap
+            lat = np.linspace(ls - 1.0, ln + 1.0, 73)
+            np.testing.assert_array_equal(
+                compute_sponge_gamma(lat, ls, ln, w, td),
+                self._loop(lat, ls, ln, w, td),
+            )
+
+    def test_latlon_wrapper_is_kernel_broadcast(self):
+        from legoesm.ocean.sponge import (
+            compute_sponge_gamma, compute_sponge_gamma_latlon,
+        )
+        grid, _wall = create_regional_latlon_grid(
+            n_lat=20, n_lon=8, lat_south=-40.0, lat_north=44.0,
+            lon_west=0.0, lon_east=40.0,
+        )
+        g2d = compute_sponge_gamma_latlon(grid, -40.0, 44.0, width_deg=3.0)
+        g1d = compute_sponge_gamma(np.degrees(np.asarray(grid.lat)),
+                                   -40.0, 44.0, width_deg=3.0)
+        assert g2d.shape == (grid.n_lat, grid.n_lon)
+        np.testing.assert_array_equal(g2d, np.broadcast_to(
+            g1d[:, None], (grid.n_lat, grid.n_lon)))
