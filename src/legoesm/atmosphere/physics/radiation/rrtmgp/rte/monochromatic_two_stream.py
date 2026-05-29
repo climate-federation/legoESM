@@ -124,6 +124,15 @@ def _rt_denominator_direct(
   # Guard ssa against zero: clear-sky layers have ssa=0 and the direct
   # reflectance/transmittance is zero there (handled by downstream clipping).
   # Using safe_ssa keeps the denominator finite for reverse-mode AD.
+  #
+  # iter-30 codex-survivor audit kept the legacy ``max(ssa, _EPSILON)``
+  # form rather than swapping to ``safe_divide``: this function is
+  # called from ``_direct_reflectance`` / ``_direct_transmittance``
+  # which then divide BY this denominator, so a ``fill=0`` from
+  # safe_divide would turn the downstream divide into ``num/0 → inf``.
+  # The legacy "denominator → eps, downstream computes huge but
+  # bounded result, output clamping handles it" pattern is the
+  # correct flow here — see iter-30 commit message.
   safe_ssa = jnp.maximum(ssa, _EPSILON)
 
   # Equation 14, multiplying top and bottom by exp(-k*tau) and rearranging to
@@ -266,6 +275,16 @@ def lw_cell_source_and_properties(
   # Taylor series expansion of the Planck function in terms of the optical
   # depth.  Guard denominator for AD: when tau→0 the source is masked anyway,
   # but jnp.where evaluates both branches so the division must stay finite.
+  #
+  # iter-30 audited swapping this to ``safe_divide`` for AD-safety but
+  # reverted: ``b_1`` flows into ``c_up_top/c_up_bottom`` via simple add,
+  # which downstream subtracts other quantities — replacing the legacy
+  # "denom→eps, num/eps = large but bounded" with ``safe_divide(fill=0)``
+  # silently breaks the LW source computation for cells where
+  # ``optical_depth * (gamma1+gamma2) < _EPSILON`` because the legacy
+  # large-b_1 form is what the downstream
+  # ``cell_center_src_fn(tau > _MIN_TAU_FOR_LW_SRC, src, 0.0)`` mask is
+  # designed to handle.
   safe_denom = jnp.maximum(optical_depth * (gamma1 + gamma2), _EPSILON)
   b_1 = (level_src_bottom - level_src_top) / safe_denom
 
