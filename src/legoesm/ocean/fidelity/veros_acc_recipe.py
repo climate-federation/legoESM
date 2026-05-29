@@ -309,6 +309,13 @@ def build_acc_model_config() -> LatLonCGridOceanConfig:
         A_h=acc_A_h(VEROS_CONSTANTS_CONFIG.R_earth),
         A_h_lat_scaling=True,
         A_h_cos_power=1,
+        # Veros ACC momentum advection is flux-form (core/momentum.py), centered
+        # 2nd-order — so the recipe selects flux_form/centered for true
+        # apples-to-apples (doctrine rule H). Validated: vs the developed-flow
+        # Veros snapshot this lifts du_adv corr 0.584->0.654 and dv_adv
+        # -0.336->0.715 (vector-invariant was anti-correlated). See the §8 ledger.
+        momentum_advection="flux_form",
+        momentum_flux_scheme="centered",
         bottom_drag_r=R_BOT,
         # ``eq_of_state_type=3`` in Veros dispatches to nonlinear_eq2.py
         # (Vallis 2008) — NOT nonlinear_eq3.py despite the file name.

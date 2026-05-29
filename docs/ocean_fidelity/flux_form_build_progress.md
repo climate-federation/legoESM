@@ -112,3 +112,19 @@ a conservative FV scheme verified for: existing-paths bit-identity, dispatch dis
 zero-velocity, uniform-flow analytic, momentum conservation (machine-eps, centered+upwind),
 differentiability, idealized-gyre stability, and bit-identical regression lock. This is the first
 of the two ACC apples-to-apples must-build blocks (the other is EKE — see eke_scope.md).
+
+### 2026-05-29 · iter 4 · F9 QUANTIFIED (developed flow) + flux_form adopted in the ACC recipe
+Ran Veros ACC with developed flow (runlen 864000s = 10 days, force_recompute; bridged |u|=0.071,
+nonzero -> non-degenerate, unlike the cached 4800s rest snapshot). Per-process du_adv/dv_adv
+interior pattern-correlation vs Veros, at cell centres:
+  vector_invariant : du_adv 0.584, dv_adv -0.336 (anti-correlated!)
+  flux_form/upwind : du_adv 0.625, dv_adv  0.599
+  flux_form/centered: du_adv 0.654, dv_adv 0.715   <-- best (Veros uses centered flux-form)
+Flux-form (esp. centered) matches Veros's flux-form advection FAR better than vector-invariant —
+the headline is dv_adv flipping from -0.34 to +0.72. This is the apples-to-apples principle
+validated in numbers (Veros ACC momentum IS flux-form).
+**ADOPTED in build_acc_model_config: momentum_advection="flux_form", momentum_flux_scheme=
+"centered"** — the ACC recipe now matches Veros's momentum scheme. Recipe builds + validates;
+21 recipe tests green; density comparison is momentum-independent (unaffected). F9 is now a
+QUANTIFIED result, not just documented. (Residual <1 corr is the remaining grid/EOS-arg + 10-day
+non-equilibrium delta — a documented non-goal, not a bug.)
