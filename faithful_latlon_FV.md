@@ -126,5 +126,20 @@ GPU harness blocks `latlon`. Picked realism (self-contained, locally verifiable)
   (load_real_topography target lat/lon) may have a similar 1-D issue — untested
   (needs data); candidate follow-up.
 
-### iter 4+ — (next) GPU harness un-block (single-device verifiable); MPI deferred (mpi4jax↔JAX 0.10.1)
+### iter 4 — ADV-REVIEW #6 (HIGH): latlon scaffold p_s was flat over topography
+- Root cause: `_init_state` called `held_suarez_init_latlon` WITHOUT phis (phis
+  patched in after), so the scaffold p_s stayed flat (p_ref) over terrain. My
+  iter-2 relative p_s correction assumed the T_init reduction was already
+  applied → p_s ~33% too high over a 2500 m mountain. (My iter-2 formula test
+  tested a false premise — it constructed the reduction the driver lacked.)
+- Fix: pass `phis=self._phis_data` into `held_suarez_init_latlon` (matches the
+  cubed_sphere branch); the relative correction is then exact. Also more correct
+  for ic='default' over topography. Flat case bit-identical (phis=0 → exp(0)=1).
+- Verified via driver (gaussian topo, ic=standard): p_s over 2491 m mountain =
+  analytic p_ref·exp(−phis/(R_d·T_sfc)) = 86353 Pa (was 98062), rel err 1e-7;
+  flat region = p_ref. Replaced the formula test with a real driver+gaussian-topo
+  test (now possible after the iter-3 gaussian fix). 21 IC tests pass.
+- Round-7 review pending.
+
+### iter 5+ — (next) GPU harness un-block (single-device verifiable); MPI deferred (mpi4jax↔JAX 0.10.1)
 - TBD

@@ -239,43 +239,33 @@ class TestDriverStandardIC:
         drv.setup()
         return drv
 
-    def test_pressure_recompute_consistent_over_topography(self):
-        """The driver re-scales the scaffold p_s (reduced against uniform
-        T_init) to be balanced against the standard surface temperature.  Verify
-        the exact relative-correction the driver applies yields p_s reduced
-        against T_sfc(lat) — and is a no-op where phis == 0.  (Tested directly on
-        a synthetic mountain; the gaussian_mountain generator is independently
-        broken on lat-lon — see faithful_latlon_FV.md.)"""
-        g = create_latlon_grid(n_lat=24, radius=constants.R_earth,
-                               omega=constants.Omega)
-        sigma = create_sigma_coordinate(n_levels=30)
-        lat2d = jnp.asarray(g.lat2d)
-        T_init = 300.0
+    def test_pressure_consistent_over_topography_via_driver(self):
+        """End-to-end: with non-flat (gaussian) topography the driver's
+        ic='standard' surface pressure must match the analytic hydrostatic
+        reduction against the STANDARD surface temperature,
+        p_s = p_ref*exp(-phis/(R_d*T_sfc(lat))) — not the uniform T_init the
+        scaffold used, and not a flat p_s over terrain."""
+        drv = self._build("standard", topography="gaussian")
+        phis = np.asarray(drv.state.phis.data)
+        p_s = np.asarray(drv.state.p_s.data)
+        lat2d = np.asarray(drv.grid.lat2d)
+        assert float(np.max(phis)) > 1.0e4, "gaussian topo gave no mountain"
 
-        # Synthetic mid-latitude mountain (geopotential, m^2/s^2).
-        z_s = 2500.0 * jnp.exp(-((lat2d - jnp.deg2rad(40.0)) / jnp.deg2rad(10.0)) ** 2)
-        phis = constants.g * z_s
+        T_sfc = np.asarray(standard_atmosphere_temperature(
+            jnp.asarray(lat2d), jnp.ones((1,)),
+            StandardAtmosphereConfig(T_sfc_equator_K=300.0))[..., 0])
+        p_s_expected = constants.p_ref * np.exp(-phis / (constants.R_d * T_sfc))
 
-        # Scaffold reduction (held_suarez_init pattern, uniform T_init).
-        p_s_scaffold = constants.p_ref * jnp.exp(-phis / (constants.R_d * T_init))
-
-        # Driver's relative correction to the standard surface temperature.
-        cfg = StandardAtmosphereConfig(T_sfc_equator_K=T_init)
-        T_sfc = standard_atmosphere_temperature(
-            lat2d, jnp.ones((1,)), cfg)[..., 0]
-        p_s_corrected = p_s_scaffold * jnp.exp(
-            -phis / constants.R_d * (1.0 / T_sfc - 1.0 / T_init))
-
-        # Must equal a direct hydrostatic reduction against T_sfc(lat) (the
-        # relative correction is two exp's vs one, so allow float round-off).
-        p_s_expected = constants.p_ref * jnp.exp(-phis / (constants.R_d * T_sfc))
-        assert jnp.allclose(p_s_corrected, p_s_expected, rtol=1e-6)
-        # No-op where the mountain tail is flat (phis ~ 0).
-        flat = phis < 1e-6
-        assert jnp.allclose(p_s_corrected[flat], constants.p_ref, rtol=1e-9)
-        # Off-equator mountain genuinely uses a colder scale T than T_init.
-        i_mtn = int(jnp.argmax(phis[:, 0]))
-        assert float(T_sfc[i_mtn, 0]) < T_init - 1.0
+        # Over the mountain (where the bug was a ~33% over-pressure).
+        mask = phis > 0.2 * float(np.max(phis))
+        assert np.allclose(p_s[mask], p_s_expected[mask], rtol=1e-4), (
+            f"p_s over terrain {p_s[mask].mean():.0f} != analytic "
+            f"{p_s_expected[mask].mean():.0f}")
+        # Flat region stays at the reference pressure.
+        assert np.allclose(p_s[phis < 1e-6], constants.p_ref, rtol=1e-6)
+        # Mountain sits off-equator, so the scale T is genuinely below T_init.
+        i_mtn = np.unravel_index(int(np.argmax(phis)), phis.shape)
+        assert float(T_sfc[i_mtn]) < 299.0
 
     def test_standard_ic_realistic_cwv_and_gradient(self):
         drv = self._build("standard")

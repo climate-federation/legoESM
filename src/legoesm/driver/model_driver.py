@@ -605,16 +605,19 @@ class ModelDriver:
                     self.grid, self.sigma, T_init=cfg.T_init, phis=self._phis_data
                 )
             else:
-                # Lat-lon and Gaussian grids use (n_lat, n_lon, nlev) layout
+                # Lat-lon and Gaussian grids use (n_lat, n_lon, nlev) layout.
+                # Pass phis so p_s is hydrostatically reduced over topography
+                # (p_s = p_ref*exp(-phis/(R_d*T_init))) — matching the
+                # cubed-sphere branch above.  Previously phis was patched in
+                # *after* construction, leaving p_s flat over terrain; that is
+                # the reference state the ic='standard' p_s recompute corrects
+                # relative to, and is also more correct for ic='default'.
                 from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
                 shape_3d = (self.grid.n_lat, self.grid.n_lon, NLEV)
                 self.state = held_suarez_init_latlon(
                     self.grid, self.sigma, T_init=cfg.T_init,
+                    phis=self._phis_data,
                 )
-                if jnp.any(self._phis_data != 0):
-                    self.state = self.state._replace(
-                        phis=self.state.phis.replace(data=self._phis_data),
-                    )
 
         # Physically-realistic "standard atmosphere" override: replace the
         # uniform-T_init scaffold temperature with a constant-lapse-rate
