@@ -694,6 +694,54 @@ class TestRRTMGP:
         assert RRTMGP._instance_cache_key(cfg_loop) != RRTMGP._instance_cache_key(cfg_auto)
         assert RRTMGP._instance_cache_key(cfg_scan) != RRTMGP._instance_cache_key(cfg_auto)
 
+    def test_iter51_clear_sky_solve_columns_with_no_cloud_paths(self):
+        """iter-51: when ``RRTMOptics`` was built with
+        ``include_clouds=False`` AND the user calls ``solve_columns``
+        without any cloud_path kwargs, the run must succeed and the
+        cloud-skip optics must not be invoked.  Mirror-image of
+        iter-41's ``test_iter41_clear_sky_optics_raises_on_direct_cloud_call``.
+
+        Pins: the public solve_columns API gates clouds on
+        ``config.include_clouds AND has any cloud kwarg``, so a
+        cfg(include_clouds=False) call with no cloud_path_liq /
+        cloud_path_ice / cloud_r_eff_* should silently skip the
+        cloud branch and produce finite clear-sky fluxes.
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(
+            RRTMGPConfig(include_clouds=False)
+        )
+        ncol, nlev = 2, 8
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1)
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        T = jnp.broadcast_to(
+            jnp.linspace(220.0, 290.0, nlev)[None, :], (ncol, nlev)
+        )
+        sfc_T = jnp.full((ncol,), 295.0)
+        q_v = jnp.full((ncol, nlev), 5e-3)
+        cos_z = jnp.full((ncol,), 0.5)
+
+        out = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+        )
+        # All fluxes finite — the cloud-skip didn't sneak into the
+        # gas-only path.
+        for name in ("lw_flux_up", "lw_flux_down", "sw_flux_up",
+                     "sw_flux_down", "heating_rate"):
+            val = getattr(out, name)
+            assert jnp.all(jnp.isfinite(val)), (
+                f"{name} non-finite under cfg(include_clouds=False) + "
+                f"no cloud kwargs"
+            )
+        # Confirm the optics_lib actually has cloud_optics_*=None.
+        assert solver.optics_lib.cloud_optics_lw is None
+        assert solver.optics_lib.cloud_optics_sw is None
+
     def test_iter41_clear_sky_optics_raises_on_direct_cloud_call(self):
         """iter-41 codex review follow-up: when RRTMOptics was built
         with include_clouds=False, the cloud_optics_lw/sw attributes
