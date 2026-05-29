@@ -15,15 +15,9 @@
 """A base Dataclass for RRTMGP lookup tables."""
 
 import dataclasses
-import json
 from typing import TypeAlias
 
-from pathlib import Path
 import jax
-import jax.numpy as jnp
-from legoesm.atmosphere.physics.radiation.rrtmgp.config import radiative_transfer
-from legoesm.atmosphere.physics.radiation.rrtmgp.optics import constants
-from legoesm.atmosphere.physics.radiation.rrtmgp.utils import file_io
 
 Array: TypeAlias = jax.Array
 
@@ -36,52 +30,3 @@ class LookupVolumeMixingRatio:
   global_means: dict[str, float]
   # Volume mixing ratio profiles, keyed by chemical formula.
   profiles: dict[str, Array] | None = None
-
-
-def from_config(
-    atmospheric_state_cfg: radiative_transfer.AtmosphericStateCfg,
-) -> LookupVolumeMixingRatio:
-  """Instantiate a `LookupVolumeMixingRatio` object from config.
-
-  The proto contains atmospheric conditions, the path to a json file
-  containing globally averaged volume mixing ratio for various gas species,
-  and the path to a file containing the volume mixing ratio sounding data for
-  certain gas species. The gas species will be identified by their chemical
-  formula in lowercase (e.g., 'h2o`, 'n2o', 'o3'). Each entry of the profile
-  corresponds to the pressure level under 'p_ref', which is a required column.
-
-  Args:
-    atmospheric_state_cfg: The atmospheric state configuration.
-
-  Returns:
-    A `LookupVolumeMixingRatio` object.
-  """
-  vmr_sounding_filepath = atmospheric_state_cfg.vmr_sounding_filepath
-  if vmr_sounding_filepath:
-    vmr_sounding = file_io.parse_csv_file(vmr_sounding_filepath)
-  else:
-    vmr_sounding = None
-
-  profiles = None
-  if vmr_sounding is not None:
-    assert (
-        'p_ref' in vmr_sounding
-    ), f'Missing p_ref column in sounding file {vmr_sounding_filepath}'
-    profiles = {
-        key: jnp.array(values, dtype=jnp.float_)
-        for key, values in vmr_sounding.items()
-    }
-
-  # Dry air is a special case that always has a volume mixing ratio of 1
-  # since, by definition, vmr is normalized by the number of moles of dry air.
-  global_means = {
-      constants.DRY_AIR_KEY: constants.DRY_AIR_VMR,
-  }
-
-  vmr_global_mean_filepath = atmospheric_state_cfg.vmr_global_mean_filepath
-  if vmr_global_mean_filepath:
-    with Path(vmr_global_mean_filepath).open('r') as f:
-      global_means.update(json.loads(f.read()))
-
-  return LookupVolumeMixingRatio(global_means=global_means, profiles=profiles)
-

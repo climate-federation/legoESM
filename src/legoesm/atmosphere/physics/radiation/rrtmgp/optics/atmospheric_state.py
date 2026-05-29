@@ -18,7 +18,6 @@ import dataclasses
 
 import jax
 
-from legoesm.atmosphere.physics.radiation.rrtmgp.config import radiative_transfer
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_volume_mixing_ratio
 
 
@@ -45,26 +44,3 @@ class AtmosphericState:
   vmr: lookup_volume_mixing_ratio.LookupVolumeMixingRatio
   # The longwave incident flux at the top of the atmosphere (in W/m²).
   toa_flux_lw: float = 0.0
-
-
-def from_config(
-    atmospheric_state_cfg: radiative_transfer.AtmosphericStateCfg,
-) -> AtmosphericState:
-  """Instantiates an `AtmosphericState` object from config.
-
-  Args:
-    atmospheric_state_cfg: A `radiative_transfer.AtmosphericStateCfg` object
-      containing atmospheric conditions and the path to a file containing
-      volume mixing ratio sounding data.
-
-  Returns:
-    An `AtmosphericState` instance.
-  """
-  return AtmosphericState(
-      sfc_emis=atmospheric_state_cfg.sfc_emis,
-      sfc_alb=atmospheric_state_cfg.sfc_alb,
-      zenith=atmospheric_state_cfg.zenith,
-      irrad=atmospheric_state_cfg.irrad,
-      toa_flux_lw=atmospheric_state_cfg.toa_flux_lw,
-      vmr=lookup_volume_mixing_ratio.from_config(atmospheric_state_cfg),
-  )
