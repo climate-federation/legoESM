@@ -205,6 +205,12 @@ def _bulk_flux_dispatch(
     helper centralises the choice so both paths and the diagnostic
     ``_build_response`` produce consistent values.
     """
+    valid_schemes = ("constant", "most", "coare3", "large_yeager")
+    if config.bulk_scheme not in valid_schemes:
+        raise ValueError(
+            f"Unknown sea-ice bulk_scheme {config.bulk_scheme!r}; "
+            f"expected one of {valid_schemes}."
+        )
     wind_speed = jnp.sqrt(
         forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2
     )

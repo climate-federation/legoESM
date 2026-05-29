@@ -340,6 +340,11 @@ class EDMFConfig(NamedTuple):
         prior to the audit-driven config migration; lifting it to a
         config field lets users tune the initial buoyancy of the
         plume against scheme calibration data.
+    updraft_deactivation_sharpness : float
+        Sigmoid sharpness [s/m] for smoothly deactivating the updraft as
+        its vertical velocity falls below ``w_updraft_min`` (default 20.0).
+        Lifted from a hardcoded literal inside the ``lax.scan`` updraft
+        body so the transition width is tunable against calibration.
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
@@ -354,6 +359,7 @@ class EDMFConfig(NamedTuple):
     entrainment_rate: float = 1e-3
     detrainment_rate: float = 2e-3
     parcel_dT: float = 0.5
+    updraft_deactivation_sharpness: float = 20.0
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 

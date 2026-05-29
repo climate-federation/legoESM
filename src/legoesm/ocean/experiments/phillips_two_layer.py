@@ -95,7 +95,7 @@ class PhillipsTwoLayerConfig:
     eta_wave_lat: float = 2.0          # Latitudinal wavenumber
 
     # Relaxation parameters
-    tau_relax: float = 15.0            # Temperature relaxation timescale [days]
+    tau_relax_days: float = 15.0       # Temperature relaxation timescale [days]
     drag_timescale: float = 25.0       # Momentum damping timescale [days]
 
 
@@ -393,7 +393,7 @@ def create_forcings(grid_type: str, grid, config: PhillipsTwoLayerConfig = None)
 
     return {
         "temperature_relaxation": {
-            "tau_relax_days": config.tau_relax,
+            "tau_relax_days": config.tau_relax_days,
             "T_upper_equator": config.T_upper_equator,
             "T_upper_gradient": config.T_upper_gradient,
             "T_lower_equator": config.T_lower_equator,

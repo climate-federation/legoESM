@@ -201,6 +201,12 @@ def ocean_tile_response(
     )
     rho = forcing.rho_lowest
 
+    valid_schemes = ("constant", "coare3", "large_yeager")
+    if config.bulk_scheme not in valid_schemes:
+        raise ValueError(
+            f"Unknown coupler bulk_scheme {config.bulk_scheme!r}; "
+            f"expected one of {valid_schemes}."
+        )
     if config.bulk_scheme in ("coare3", "large_yeager"):
         # Use wind relative to ocean surface current
         u_rel = forcing.u_lowest - ocean_u

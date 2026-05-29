@@ -1158,7 +1158,7 @@ def test_lake_freezing_energy_conservation():
     Q_freeze = new_state.Q_freeze.data
 
     # Epilimnion energy budget closure
-    cap_epi = config.rho_water * config.c_water * config.h_epi
+    cap_epi = config.rho_water * config.c_water_mass * config.h_epi
     T_epi_old = state.T_epi.data
     T_epi_new = new_state.T_epi.data
 
