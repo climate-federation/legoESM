@@ -13,13 +13,9 @@ every micro-decision. Newest at the bottom.
 - [x] F4 uniform-flow analytic ⇒ zero
 - [x] F5 momentum conservation (centered + upwind; volume-weighted integral ~ machine-eps)
 - [x] F6 differentiability (jax.grad finite + nonzero)
-- [ ] F3 zero-velocity ⇒ zero
-- [ ] F4 uniform-flow analytic ⇒ zero
-- [ ] F5 momentum conservation (periodic domain)
-- [ ] F6 differentiability
 - [x] F7 idealized-gyre stability (80-step forced-flow run finite + KE bounded; vi baseline too)
 - [x] F8 regression lock (flux_form case added to the decomposition golden; 77 arrays; gate green)
-- [ ] F9 oracle confirmation (informational)
+- [x] F9 oracle confirmation (informational) — DOCUMENTED (see iter 3)
 
 ---
 
@@ -92,3 +88,27 @@ GATES GREEN: F1 F2 F3 F4 F5(centered+upwind) F6. 16 flux-form + footgun tests gr
 diagnostics closure green.
 NEXT: F7 (Munk/Stommel gyre stability with flux_form), F8 (flux_form golden case in the
 decomposition gate), F9 (ACC oracle re-run, informational).
+
+### 2026-05-29 · iter 3 · F7+F8 green; F9 documented — BUILD COMPLETE (F1-F8 green)
+F7 (gyre stability) + F8 (golden regression lock) committed (71bb972e). F9 (oracle
+confirmation, INFORMATIONAL per spec) attempted: built the recipe with
+momentum_advection="flux_form" and ran the ACC tier-2 comparison vs Veros for du_adv. Result:
+DEGENERATE — the cached Veros ACC snapshot at runlen_s=4800 (one short step from rest) has
+|u|=|v|=0 and veros_du_adv=0, so EVERY momentum process (incl. coriolis, unrelated to flux-form)
+compares as L2=0/nan. The prior "du_adv corr 0.58" baseline in the §8 ledger came from a
+developed-flow Veros run, not this rest snapshot. So the quantitative oracle number is NOT a
+flux-form issue and is deferred to a developed-flow run.
+**F9 follow-up (documented, not blocking — informational gate):** run Veros ACC with developed
+flow (compare_tendencies_acc.py --runlen-s ~864000) and momentum_advection="flux_form" to
+quantify the du_adv correlation improvement toward Veros; and ADOPT flux_form in
+build_acc_model_config for true ACC apples-to-apples (Veros ACC momentum IS flux-form — doctrine
+rule H / the apples-to-apples principle). The flux-form scheme itself is verified independently
+by F1-F8 (truth tiers), which is the trust basis; the oracle is the lowest-trust confirmation.
+
+## FINAL STATUS — flux-form momentum build COMPLETE
+Gates F1-F8 honestly GREEN and committed; F9 (informational) documented. The canonical lat-lon
+C-grid dycore now offers momentum_advection="flux_form" (+ momentum_flux_scheme upwind/centered),
+a conservative FV scheme verified for: existing-paths bit-identity, dispatch discipline,
+zero-velocity, uniform-flow analytic, momentum conservation (machine-eps, centered+upwind),
+differentiability, idealized-gyre stability, and bit-identical regression lock. This is the first
+of the two ACC apples-to-apples must-build blocks (the other is EKE — see eke_scope.md).
