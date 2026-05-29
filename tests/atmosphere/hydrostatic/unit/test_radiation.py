@@ -724,6 +724,50 @@ class TestRRTMGP:
         # collide with these — optics_cache_key still differentiates.
         assert RRTMGP._instance_cache_key(base._replace(co2_ppmv=base.co2_ppmv + 1.0)) != base_key
 
+    def test_iter32_cache_key_fix_changes_aerosol_flux(self):
+        """End-to-end pin for iter-32 cache-key fix: bumping
+        ``RRTMGPConfig.aerosol_ssa`` between two ``rrtmgp_radiation``
+        calls must change the SW flux output.  Pre-iter-32 the
+        instance cache key was missing ``aerosol_ssa`` so the second
+        call silently reused the stale solver and produced the same
+        output as the first.
+        """
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+            rrtmgp_radiation,
+            _instance_cache,
+        )
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+
+        ncol, nlev = 2, 8
+        T, p_full, p_half, T_sfc, _, _ = _make_column_data(ncol, nlev)
+        q_v = jnp.full((ncol, nlev), 5e-3)
+        cos_zen = jnp.full(ncol, 0.5)
+        # Prescribe a non-trivial aerosol AOD so the SW fluxes depend
+        # on aerosol_ssa.
+        aod = jnp.full((ncol, nlev), 0.05)
+
+        cfg_a = RRTMGPConfig(aerosol_ssa=0.93)
+        cfg_b = RRTMGPConfig(aerosol_ssa=0.98)
+
+        _instance_cache.clear()
+        out_a = rrtmgp_radiation(
+            T, p_full, p_half, T_sfc, q_v, cos_zen, cfg_a,
+            aerosol_optical_depth=aod,
+        )
+        out_b = rrtmgp_radiation(
+            T, p_full, p_half, T_sfc, q_v, cos_zen, cfg_b,
+            aerosol_optical_depth=aod,
+        )
+        # SW flux at surface MUST differ between the two configs.
+        max_diff = float(jnp.max(jnp.abs(out_a.sw_flux_down - out_b.sw_flux_down)))
+        assert max_diff > 1e-3, (
+            f"changing aerosol_ssa from 0.93 to 0.98 must change SW "
+            f"flux_down (cache key must rebuild the solver instance); "
+            f"got max_diff={max_diff:.6e} W/m², which suggests the "
+            f"iter-32 cache-key fix regressed and the second call "
+            f"silently reused the stale solver."
+        )
+
     def test_cache_keys_handle_array_valued_sfc_fields(self):
         """AIMIP populates ``config.sfc_albedo`` / ``sfc_emissivity``
         with ``(ncol,)`` arrays.  Arrays aren't hashable; the
