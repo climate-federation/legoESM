@@ -748,9 +748,11 @@ def gm_redi_tracer_tendency_latlon(
     # GM coefficient.
     if cfg.visbeck.enabled:
         if f_coriolis is None:
-            # Compute from grid latitude.
-            f_coriolis = 2.0 * constants.Omega * jnp.sin(grid.lat[:, jnp.newaxis])
-            f_coriolis = jnp.broadcast_to(f_coriolis, mask.shape)
+            # Use the grid's Coriolis field (f = 2·Ω·sin(lat), already built
+            # with the grid's pinned rotation rate) rather than re-deriving from
+            # the module constant — keeps Visbeck consistent with the pinned Ω
+            # (e.g. a Veros recipe) and avoids an inline constants.Omega read.
+            f_coriolis = jnp.broadcast_to(grid.f, mask.shape)
         kappa_GM = compute_visbeck_kappa_gm(
             rho, S_x, S_y, z_coord, jacobian, f_coriolis, cfg.visbeck,
         )
