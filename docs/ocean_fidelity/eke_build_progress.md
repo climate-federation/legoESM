@@ -11,9 +11,10 @@ every micro-decision. Newest at the bottom.
 - [x] E4 budget closure (advection + lateral diffusion conserve integral-E, machine-eps)
 - [x] E5 differentiability (grad through closure + coupling finite + nonzero)
 - [x] E6 state threading (field + step integration + restart) + zero-behaviour-when-OFF
-- [ ] E7 idealized channel (E spins up bounded; kappa_GM responds)
-- [ ] E8 regression lock (EKE-active golden case)
-- [ ] E9 oracle confirmation (informational) + recipe adoption
+- [x] E7 idealized channel (E spins up bounded; kappa_GM responds)
+- [x] E8 regression lock (EKE-active golden case)
+- [x] E9 oracle confirmation (informational): closure verified vs Veros K_gm to machine precision;
+      eke_len gap documented; recipe adoption deferred behind the eke_len variant
 
 ---
 
@@ -149,3 +150,39 @@ STALE. Document the legoESM EKE block in the §8 ledger, update that docstring, 
 ACC_GM_REDI_CONFIG / build_acc_model_config so the recipe is apples-to-apples. E9 is
 informational (not pass/fail) — record correlation-with-Veros status (Veros eke field +
 kappa_GM) if a developed-flow Veros snapshot is available; otherwise document the gap.
+
+### 2026-05-29 · iter 8 · E9 done — oracle confirmation (closure verified to machine precision)
+Ran a developed-flow Veros ACC integration (enable_eke; runlen 864000 s = 10 d) and captured
+Veros's 3-D eke / K_gm / eke_len. KEY FINDING (verified from veros/core/eke.py + acc.py):
+  Veros K_gm = min(eke_k_max, eke_c_k·eke_len·√eke)  — IDENTICAL FORM to legoESM eke_kappa_gm
+  Veros dissipation c_int = eke_c_eps·√eke/eke_len   — IDENTICAL to legoESM eps = c_eps·E^{3/2}/L
+The ACC setup sets eke_c_k=0.4, eke_c_eps=0.5, eke_k_max=1e4, eke_lmin=100, superbee advection,
+isopycnal diffusion — ALL match EKEConfig() defaults exactly. NUMERICAL CONFIRMATION: feeding
+Veros's OWN eke + eke_len into legoESM eke_kappa_gm reproduces Veros's K_gm to MACHINE PRECISION
+at the matching time level (tau=2: max_rel_err=0.0, corr=1.000000, 19560 wet cells). Reproducible:
+scripts/ocean_fidelity/compare_eke_kappa_veros.py.
+GAP SURFACED (the next must-build, NOT part of E1-E9): the MIXING LENGTH differs.
+  Veros eke_len = max(eke_lmin, min(eke_cross·L_rossby, eke_crhin·L_rhines)), eke_cross=2, with the
+    eddy-energy Rhines scale L_rhines=√(√E/β) -> developed ACC: ~8 km mean, 47 km max.
+  legoESM EKE L = the shared Visbeck first-baroclinic Rossby radius -> ~200 km (saturated), ~25x larger.
+  So the closure FORM is oracle-exact, but a STANDALONE legoESM EKE run would give kappa_GM ~25x
+  Veros's until L is reconciled. Logged as the "extend L (eke_len variant)" follow-up in the
+  strategy doc §8 EKE ledger (Rhines limiting + eke_cross/eke_crhin scaling as a selectable length).
+ADOPTION DECISION (doctrine rule H, "if validated"): EKE closure validated (form+params machine-
+exact) but NOT flipped on in build_acc_model_config yet — GMRediConfig.eke stays None — because the
+eke_len gap would make the recipe's prognostic kappa_GM ~25x too large. Adoption is deferred behind
+the eke_len variant. ALSO E9 is 2-D-vs-3-D aware: legoESM E is 2-D (depth-integrated, by design to
+match the 2-D Visbeck kappa_GM); Veros eke is 3-D — the per-cell closure match holds because the
+formula is pointwise; a 2-D field comparison would use depth-reduced Veros eke.
+Stale-doc corrections (EKE now exists): build_acc_physics_config docstring, strategy doc §8 ledger
+(EKE row -> DONE + new eke_len row) + §"apples-to-apples" must-build line, phase_g_recipe_fidelity_
+plan.md (2 notes).
+Commands: JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python scripts/ocean_fidelity/compare_eke_kappa_veros.py
+=> "reproduces Veros K_gm to MACHINE PRECISION".
+
+## FINAL STATUS
+E1-E8 honestly green + committed (E1-E5: earlier iters; E6: f07301d1; E7+E8: d4b5fd6c).
+E9 documented + oracle-verified (this iter). The EKE closure is a canonical, differentiable,
+positivity-preserving, conservative, oracle-form-exact block. Remaining for full ACC apples-to-
+apples (NEW follow-up, beyond this build spec): the eke_len mixing-length variant + then recipe
+adoption + a developed-flow eke-bridge for the tier-2 GM-tendency comparison.

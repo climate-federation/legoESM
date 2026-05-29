@@ -275,9 +275,23 @@ class ACCRecipe(NamedTuple):
 
 def build_acc_physics_config() -> OceanPhysicsConfig:
     """Veros ACC physics: TKE + GM/Redi + linear bottom drag (via model
-    config), implicit vertical viscosity. EKE / IDEMIX are NOT mapped
-    — EKE is a Veros-only closure (no legoESM equivalent yet) and
-    IDEMIX is disabled in the ACC adapter."""
+    config), implicit vertical viscosity. IDEMIX is disabled in the ACC
+    adapter (``enable_idemix=False`` in Veros) so it is not mapped.
+
+    EKE: legoESM now HAS the Eden-Greatbatch prognostic-EKE closure
+    (``lateral_mixing/eke.py`` + ``GMRediConfig.eke``), and its kappa_GM
+    formula ``c_k·L·√E`` + parameters (c_k=0.4, c_eps=0.5, k_max=1e4,
+    lmin=100, superbee advection) were verified against Veros's ``K_gm``
+    to machine precision (corr=1.0 on the developed ACC state, given
+    Veros's own ``eke``+``eke_len``; see the strategy doc §8 EKE ledger,
+    gate E9). EKE is NOT yet flipped on in the recipe (``GMRediConfig.eke``
+    stays None) because legoESM's mixing length ``L`` (Visbeck first-
+    baroclinic Rossby radius, ~200 km here) does not yet match Veros's
+    ``eke_len = max(lmin, min(eke_cross·L_rossby, eke_crhin·L_rhines))``
+    (~8 km; the eddy-energy-dependent Rhines limiting is missing) — using
+    it now would make the prognostic kappa_GM ~25× too large. ADOPTION is
+    deferred behind the documented ``eke_len`` mixing-length variant
+    (strategy doc §8, "extend L" follow-up)."""
     return OceanPhysicsConfig(
         vertical_mixing=VerticalMixingConfig(scheme="tke", tke=ACC_TKE_CONFIG),
         # GM/Redi on the lat-lon C-grid is a DYNAMICS-level process applied via
