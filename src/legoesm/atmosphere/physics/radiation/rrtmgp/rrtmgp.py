@@ -187,12 +187,22 @@ class RRTMGP:
       x64 precision (table dtype depends on it).  Solver-behavior
       fields like ``use_scan`` deliberately omitted — the tables
       themselves are independent of how the solver traverses them.
+
+      iter-36 audit: ``include_clouds`` was previously here, but
+      ``RRTMOptics.__init__`` loads cloud_optics tables
+      unconditionally (it does NOT branch on include_clouds when
+      deciding what to load).  Keeping include_clouds here meant
+      ``include_clouds=True`` and ``=False`` would build two
+      identical optics-lib entries — pure memory waste, ~2x the
+      gas+cloud tables.  ``include_clouds`` is purely a per-call
+      solve_columns gate (``has_clouds = config.include_clouds and
+      (cloud_path_liq is not None or cloud_path_ice is not None)``)
+      and now lives in the instance cache key instead.
       """
       import jax
       x64 = bool(jax.config.jax_enable_x64)
       return (config.lw_gas_file, config.sw_gas_file,
               config.lw_cloud_file, config.sw_cloud_file,
-              config.include_clouds,
               config.co2_ppmv, config.ch4_ppbv, config.n2o_ppbv,
               x64)
 
@@ -244,6 +254,7 @@ class RRTMGP:
           config.S_0,
           config.aerosol_ssa,
           config.aerosol_g,
+          config.include_clouds,  # iter-36: moved out of optics key
           _hashable(config.sfc_emissivity),
           _hashable(config.sfc_albedo),
       )

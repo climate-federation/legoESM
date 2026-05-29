@@ -694,6 +694,24 @@ class TestRRTMGP:
         assert RRTMGP._instance_cache_key(cfg_loop) != RRTMGP._instance_cache_key(cfg_auto)
         assert RRTMGP._instance_cache_key(cfg_scan) != RRTMGP._instance_cache_key(cfg_auto)
 
+    def test_iter36_optics_key_drops_include_clouds(self):
+        """iter-36: ``include_clouds`` was redundant in
+        ``_optics_cache_key`` because ``RRTMOptics.__init__`` loads
+        cloud_optics unconditionally.  Two configs that differ only
+        in ``include_clouds`` must produce the SAME optics key (so
+        they share the ~MB of gas+cloud tables) but DIFFERENT
+        instance keys (so the per-call ``has_clouds`` gate behaviour
+        is honoured)."""
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        cfg_on = RRTMGPConfig(include_clouds=True)
+        cfg_off = RRTMGPConfig(include_clouds=False)
+        # Optics key: identical -> tables shared.
+        assert RRTMGP._optics_cache_key(cfg_on) == RRTMGP._optics_cache_key(cfg_off)
+        # Instance key: distinct -> solver instances isolated.
+        assert RRTMGP._instance_cache_key(cfg_on) != RRTMGP._instance_cache_key(cfg_off)
+
     def test_cache_keys_distinguish_iter32_baked_in_config_fields(self):
         """Iter-32 audit: ``S_0``, ``aerosol_ssa``, ``aerosol_g``,
         ``sfc_emissivity``, ``sfc_albedo`` are baked into solver
