@@ -242,7 +242,14 @@ class RRTMGP:
               hash(x)
               return x
           except TypeError:
-              # Arrays: id-based key.  Safe under JAX immutability; a
+              # 0-D arrays (jnp/np scalar shape == ()): convert to
+              # Python float for stable cross-process / cross-trace
+              # cache hits, since ``id()`` would otherwise create a
+              # new cache entry every call.
+              shape = getattr(x, "shape", None)
+              if shape == ():
+                  return float(x)
+              # N-D arrays: id-based key.  Safe under JAX immutability; a
               # new array (e.g. fresh AIMIP fit per epoch) gets a new
               # id and rebuilds the cached instance.
               return id(x)
