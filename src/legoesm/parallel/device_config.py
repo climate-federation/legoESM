@@ -229,16 +229,14 @@ def detect_devices() -> HardwareConfig:
 
 
 # ============================================================================
-# XLA flags — canonical definitions live in runtime.backend;
-# re-exported here for configure_jax_for_device().
+# XLA flags — canonical definitions live in runtime.backend.  They are imported
+# *function-scope* inside the _configure_* helpers below (not at module top):
+# a top-level ``from legoesm.runtime.backend import ...`` here closes a
+# parallel->runtime->parallel import cycle (runtime.devices re-exports
+# MixedPrecisionPolicy from this module, which is defined further down), so a
+# cold import of device_config crashed with "cannot import name
+# 'MixedPrecisionPolicy' from partially initialized module".
 # ============================================================================
-
-from legoesm.runtime.backend import (          # noqa: E402
-    _TPU_XLA_FLAGS,
-    _NVIDIA_GPU_XLA_FLAGS,
-    _AMD_GPU_XLA_FLAGS,
-    _set_xla_flags,
-)
 
 
 def configure_jax_for_device(config: HardwareConfig) -> None:
@@ -269,6 +267,7 @@ def configure_jax_for_device(config: HardwareConfig) -> None:
 
 def _configure_tpu(config: HardwareConfig) -> None:
     """Apply TPU-specific JAX and XLA configuration."""
+    from legoesm.runtime.backend import _set_xla_flags, _TPU_XLA_FLAGS
     # Set XLA flags for TPU optimization.
     _set_xla_flags(_TPU_XLA_FLAGS)
 
@@ -296,7 +295,10 @@ def _configure_gpu(config: HardwareConfig) -> None:
     versions, which would defeat the latency-hiding flags critical
     for multi-GPU scaling.
     """
-    from legoesm.runtime.backend import _detect_gpu_vendor_pre_init, gpu_vendor
+    from legoesm.runtime.backend import (
+        _detect_gpu_vendor_pre_init, gpu_vendor,
+        _set_xla_flags, _NVIDIA_GPU_XLA_FLAGS, _AMD_GPU_XLA_FLAGS,
+    )
 
     # Pre-init detection (env-var only, no jax.devices()) to land
     # XLA_FLAGS on time.
@@ -364,6 +366,7 @@ def _enable_cpu_multithreading() -> None:
     """
     if "XLA_FLAGS" not in os.environ:
         try:
+            from legoesm.runtime.backend import _set_xla_flags
             # NOTE: the legacy `intra_op_parallelism_threads=N` XLA flag
             # is NOT recognized by current XLA and crashes JAX at first
             # use with a fatal `Unknown flag in XLA_FLAGS` error from

@@ -159,5 +159,25 @@ GPU harness blocks `latlon`. Picked realism (self-contained, locally verifiable)
 - No automated test: benchmark script, verified by running; the cold-import bug
   makes an in-process unit test fragile. Latlon dycore+IC already well-tested.
 
-### iter 6+ — (next) MPI: deferred (mpi4jax↔JAX 0.10.1 incompat, local hang). Consider fixing device_config circular import; real-SST CMIP6 multi-year.
+- ADV-REVIEW #8 (HIGH, fixed in GPU commit): `_valid_gpu_counts` let latlon
+  schedule multi-GPU sweep points that hit the n_gpus>1 NotImplementedError →
+  misleading. Fix: latlon returns [1] (single-GPU only). Round-9 review pending.
+
+### iter 6 — fix device_config↔runtime circular import (unblocks MPI + GPU 1st res)
+- The recurring `MixedPrecisionPolicy ... partially initialized` cold-import
+  crash (hit GPU harness 1st resolution AND the MPI reduction wrappers) was a
+  top-level `from legoesm.runtime.backend import ...` in
+  `parallel/device_config.py:236` closing a parallel→runtime→parallel cycle
+  (runtime.devices re-exports MixedPrecisionPolicy, defined at device_config:429
+  AFTER line 236). Fix: defer that import into the `_configure_tpu/_gpu/
+  _enable_cpu_multithreading` helpers (CLAUDE.md function-scope rule). Cold
+  imports of device_config / parallel.reductions / runtime.devices now succeed.
+- PAYOFF — MPI now works locally via the repo wrappers: `global_sum_mpi`=3.0
+  (correct) at np=2 (the earlier "hang" was the cold-import crash → one rank
+  dies, other waits on the collective). NOTE: reductions.py:225 warns JAX 0.10.1
+  / mpi4jax 0.9 is outside the tested range (pin JAX<0.10 for production MPI);
+  basic allreduce works here. +3 cold-import regression tests
+  (tests/test_device_config_no_circular_import.py).
+
+### iter 7+ — (next) re-test dry latlon MPI step np=2 (hang may be resolved); then MPI AMIP physics wiring; real-SST CMIP6 multi-year
 - TBD
