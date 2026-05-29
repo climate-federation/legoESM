@@ -567,6 +567,29 @@ class ModelDriver:
         else:
             logger.info(f"  State init: T={cfg.T_init}K (dry spectral)")
 
+        # MPAS Phase B: attach the moisture tracers to the dycore STATE so the
+        # primitive-equation step advects them (mass-consistently, via the
+        # shared tracer kernel + the dycore's own wind/mass-flux) and the column
+        # physics (convection/microphysics) can read + update them.  Gated on
+        # moist physics being active, so a dry radiative-dynamical MPAS run
+        # (convection=microphysics=turbulence=none) keeps tracers=None and is
+        # byte-for-byte unchanged (e.g. the 100-yr gray radiative AMIP).
+        if cfg.grid.grid_type == "mpas":
+            _moist = (cfg.microphysics != "none" or cfg.convection != "none"
+                      or cfg.turbulence != "none")
+            if _moist:
+                from legoesm.core.field import Field
+                self.state = self.state._replace(tracers={
+                    k: Field(data=v, name=k, dims=("nCells", "nlev"),
+                             units="kg/kg")
+                    for k, v in self.tracers.items()
+                })
+                logger.info(
+                    f"  MPAS moisture ON: dycore advects "
+                    f"{sorted(self.tracers.keys())} (q_v mean "
+                    f"{float(jnp.mean(self.tracers['q_v'])) * 1000:.2f} g/kg)"
+                )
+
         # ERA5 IC override — replace held-suarez rest state with ERA5 reanalysis.
         # Applied after the default moisture init so the Field metadata (dims,
         # units, names) from held_suarez_init is preserved as the template.
@@ -1698,6 +1721,44 @@ class ModelDriver:
         """
         elapsed_day = day - self.config.start_day
 
+        # MPAS path: the Voronoi hydrostatic state is ``u`` (edge-normal,
+        # shape (nEdges, nlev)) + T/p_s/phis on cells, with ``v=None`` and
+        # ``tracers=None``.  The shared ``save_restart`` assumes the
+        # cubed-sphere/lat-lon layout (it reads ``state.v.data`` and infers
+        # resolution from a (6, n, n, nlev) T-shape), so it cannot
+        # serialise an MPAS state.  Write the four prognostic arrays
+        # directly, keeping the ``checkpoint_day_NNNN.npz`` filename the
+        # restart-chain sbatch globs.  Single-process only (the _run_mpas
+        # path is not MPI-sharded).
+        #
+        # Filename uses the ABSOLUTE simulated ``day`` (not
+        # ``day - config.start_day``): across a chained 100-yr run each
+        # link resumes at the prior link's absolute day, so absolute-day
+        # filenames stay strictly monotonic and never collide even if a
+        # job is (mis)configured with a non-zero ``--start-day``.  The
+        # restart-chain launcher's ``TARGET_DAYS`` / latest-checkpoint glob
+        # are therefore in absolute simulated days.
+        if self.config.grid.grid_type == "mpas":
+            ckpt_path = self._output_dir / f"checkpoint_day_{int(round(day)):04d}.npz"
+            s = self.state
+            _save = dict(
+                u=np.asarray(s.u.data), T=np.asarray(s.T.data),
+                p_s=np.asarray(s.p_s.data), phis=np.asarray(s.phis.data),
+                step=np.asarray(int(step)), day=np.asarray(float(day)),
+            )
+            # Persist moisture tracers too (moist MPAS runs), so a chained
+            # restart does not silently drop water.  The ``trc_`` prefix avoids
+            # colliding with u/T/p_s/phis; ``tracer_names`` lets load rebuild
+            # the dict.  Dry runs (tracers=None) write neither and are
+            # byte-identical to before.
+            if s.tracers is not None:
+                _save["tracer_names"] = np.asarray(sorted(s.tracers.keys()))
+                for _k in s.tracers:
+                    _save[f"trc_{_k}"] = np.asarray(s.tracers[_k].data)
+            np.savez(ckpt_path, **_save)
+            logger.info(f"  Checkpoint: {ckpt_path.name} (mpas)")
+            return
+
         # Distributed path
         if (self._device_config is not None
                 and self._device_config.is_distributed):
@@ -1802,6 +1863,64 @@ class ModelDriver:
         and loads per-rank data when running under MPI.
         """
         path = Path(path)
+
+        # MPAS path: mirror of the dedicated MPAS branch in
+        # ``save_checkpoint``.  Reconstruct the Voronoi ``HydrostaticState``
+        # (u edge-normal, T/p_s/phis on cells; v=None, tracers=None) from
+        # the four-array npz and return (step, day) so the chained job
+        # continues from the saved absolute day.
+        if self.config.grid.grid_type == "mpas":
+            # Fail loud on a missing/dir path rather than silently falling
+            # through to the cube/lat-lon ``load_restart`` (which would
+            # raise a confusing non-MPAS error).
+            if not path.is_file():
+                raise FileNotFoundError(
+                    f"MPAS checkpoint not found (or is a directory): {path}"
+                )
+            import jax.numpy as jnp
+            from legoesm.core.state import HydrostaticState
+            from legoesm.core.field import Field
+            d = np.load(path)
+            # Shape guard on EVERY prognostic field: the mesh built from
+            # --resolution/--nlev must match the checkpoint, else the TRiSK
+            # gathers index out of range (u) or broadcasts wrong (T/p_s/phis)
+            # — both silent.  Check all four so a corrupt/mismatched file is
+            # rejected up front instead of failing deep inside a JIT trace.
+            for _name, _ck in (("u", self.state.u.data),
+                               ("T", self.state.T.data),
+                               ("p_s", self.state.p_s.data),
+                               ("phis", self.state.phis.data)):
+                if tuple(d[_name].shape) != tuple(_ck.shape):
+                    raise ValueError(
+                        f"MPAS checkpoint {path.name} {_name}-shape "
+                        f"{tuple(d[_name].shape)} != current mesh "
+                        f"{_name}-shape {tuple(_ck.shape)}; rebuild with the "
+                        f"same --resolution/--nlev."
+                    )
+            self.state = HydrostaticState(
+                u=Field(data=jnp.asarray(d["u"]), name="u",
+                        dims=("nEdges", "nlev"), units="m/s"),
+                T=Field(data=jnp.asarray(d["T"]), name="T",
+                        dims=("nCells", "nlev"), units="K"),
+                p_s=Field(data=jnp.asarray(d["p_s"]), name="p_s",
+                          dims=("nCells",), units="Pa"),
+                phis=Field(data=jnp.asarray(d["phis"]), name="phis",
+                           dims=("nCells",), units="m2/s2"),
+            )
+            # Restore moisture tracers (moist MPAS runs); absent ⇒ dry restart.
+            if "tracer_names" in d:
+                _names = [str(n) for n in d["tracer_names"]]
+                self.state = self.state._replace(tracers={
+                    _k: Field(data=jnp.asarray(d[f"trc_{_k}"]), name=_k,
+                              dims=("nCells", "nlev"), units="kg/kg")
+                    for _k in _names
+                })
+            step = int(d["step"])
+            day = float(d["day"])
+            logger.info(f"  Loaded MPAS checkpoint: step={step}, day={day:.2f}"
+                        + ("" if "tracer_names" not in d
+                           else f", tracers={[str(n) for n in d['tracer_names']]}"))
+            return step, day
 
         # Distributed path: directory with per-rank .npz files
         if (path.is_dir()
@@ -2002,6 +2121,19 @@ class ModelDriver:
         via ``_create_physics()`` (includes RRTMGP, convection, etc.).
         Falls back to bare Held-Suarez forcing only when the config
         has radiation='none'.
+
+        Restart contract (differs from the cube/lat-lon paths — read
+        before writing a chain launcher):  this loop runs ``cfg.days``
+        steps **from the (restart-loaded) state**, i.e. ``cfg.days`` is the
+        number of days *this job* advances, NOT total days since the
+        epoch.  ``start_day`` (the absolute day the checkpoint was written
+        at) sets the time origin; ``start_step`` is used only for the
+        absolute-step value stored in checkpoint metadata.  A chained
+        launcher must therefore pass ``--days = TARGET - latest_checkpoint_day``
+        (remaining days) for each link — see
+        ``run_amip_mpas_100yr_gpu.sbatch``.  The cube/lat-lon paths use
+        ``range(start_step, n_steps_total)`` and treat ``--days`` as total;
+        do not copy their launcher convention here.
         """
         import time
 
@@ -2010,6 +2142,14 @@ class ModelDriver:
         N_DAYS = cfg.days
         n_steps_total = int(N_DAYS * 86400.0 / DT)
         DIAG_INTERVAL = int(cfg.output.diag_days * 86400.0 / DT) if cfg.output.diag_days > 0 else n_steps_total
+        # ``checkpoint_days`` → step cadence.  Enables the 100-yr restart
+        # chain (run_amip_mpas_100yr_gpu.sbatch): the driver writes
+        # ``checkpoint_day_NNNN.npz`` every cadence and the launcher resumes
+        # the next SLURM link from the latest one.  0 ⇒ no checkpointing.
+        CHECKPOINT_INTERVAL = (
+            int(cfg.output.checkpoint_days * 86400.0 / DT)
+            if cfg.output.checkpoint_days > 0 else 0
+        )
         START_DAY = start_day if start_day is not None else cfg.start_day
 
         # Build MPAS-compatible physics via make_physics (same code path as
@@ -2021,9 +2161,36 @@ class ModelDriver:
         from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
         from legoesm.atmosphere.physics.microphysics.config import MicrophysicsConfig
         from legoesm.atmosphere.physics.gravity_wave_drag.config import GravityWaveDragConfig
+        from legoesm.atmosphere.physics.radiation.config import (
+            RRTMGPConfig, OzoneProfileConfig,
+        )
 
+        # Phase D: wire the CMIP6 / experiment greenhouse-gas concentrations
+        # (``cfg.co2_ppmv`` etc. — set at setup by ``ghg_at_year`` / the
+        # experiment template, i.e. the transient AMIP value for the start
+        # year) into the rrtmgp sub-config, so MPAS rrtmgp uses the prescribed
+        # GHG forcing instead of the RRTMGPConfig defaults (415/1900/332).
+        # The cube/lat-lon path does this; the MPAS path previously dropped it,
+        # so a non-default-GHG (e.g. 1979 CO2=337) MPAS run was silently forced
+        # at 415 ppmv.  Gray radiation ignores the rrtmgp sub-config, so this
+        # is a no-op there.  (Time-varying-over-the-run GHG is a follow-on:
+        # thread it through ``forcing`` like T_sfc; here it is fixed at the
+        # start-year value.)
         phys_cfg = PhysicsConfig(
-            radiation=RadiationConfig(scheme=cfg.radiation if cfg.radiation != "none" else "none"),
+            radiation=RadiationConfig(
+                scheme=cfg.radiation if cfg.radiation != "none" else "none",
+                rrtmgp=RRTMGPConfig(
+                    co2_ppmv=cfg.co2_ppmv,
+                    ch4_ppbv=cfg.ch4_ppbv,
+                    n2o_ppbv=cfg.n2o_ppbv,
+                ),
+                # Ozone source (default "standard" matches the bare default; a
+                # non-standard --ozone-source now flows to MPAS rrtmgp).  The
+                # external CMIP6 ozone FILE (source="external") additionally
+                # needs the forcing-pipeline loader — a follow-on; the
+                # parameterized sources (standard/analytical/ml) work here.
+                ozone=OzoneProfileConfig(source=cfg.ozone_source),
+            ),
             convection=ConvectionConfig(scheme=cfg.convection),
             turbulence=TurbulenceConfig(scheme=cfg.turbulence),
             microphysics=MicrophysicsConfig(scheme=cfg.microphysics),
@@ -2031,13 +2198,79 @@ class ModelDriver:
         )
         physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT)
 
+        # ---- AMIP surface boundary: anchor radiation to the prescribed SST -
+        # Without this the MPAS hydrostatic radiation falls back to using the
+        # lowest model-level temperature ``T[..., -1]`` as the surface
+        # temperature (see integration.py ``_make_hydrostatic_radiation``), so
+        # the column has NO external thermal anchor and cold-drifts toward a
+        # dry gray-radiative equilibrium fully decoupled from the prescribed
+        # SST (measured: <T_atm> 290 -> 257 K over 30 days, still falling).
+        # The cubed-sphere/lat-lon and spectral paths apply the SST every
+        # step; the MPAS path previously applied nothing — so an "AMIP" run on
+        # MPAS was not actually SST-forced.
+        #
+        # We set a FIXED (annual-mean, sea-ice-blended) per-cell surface
+        # temperature ONCE here, before the step loop.  ``model.step`` is
+        # ``jax.jit`` with ``physics_fn`` marked *static* (primitive_eq_mpas.py
+        # ``_step_jit`` static_argnums), so the override-closure cell is read
+        # at trace time and BAKED into the first compile; a per-step update
+        # would be silently ignored (stale value) unless every step paid a
+        # retrace.  A fixed climatological anchor is therefore the correct
+        # shape for the JIT'd MPAS path, is byte-identical across every
+        # restart-chain link, and captures the first-order SST -> atmosphere
+        # coupling (surface longwave).  The seasonal SST cycle and the
+        # turbulent surface fluxes are intentionally NOT applied here: the
+        # former needs traced forcing threaded through the MPAS step signature
+        # and the latter needs the edge->cell wind interp (AMIP.md Known #3).
+        # ---- AMIP surface boundary: TIME-VARYING prescribed SST ----
+        # The prescribed SST/SIC is applied as the radiative surface
+        # temperature via a per-step TRACED ``forcing={"T_sfc": (nCells,)}``
+        # threaded through ``model.step`` -> combined physics -> radiation
+        # (see primitive_eq_mpas.step + radiation integration ``_wants_forcing``).
+        # Unlike the earlier fixed-anchor ``set_T_sfc_override`` (a JIT-static
+        # closure that could only carry ONE baked value), ``forcing`` is a jit
+        # argument, so the SST can vary in time (seasonal cycle) WITHOUT
+        # retracing — matching the cube/spectral AMIP paths.  Without any
+        # surface anchor the MPAS radiation falls back to ``T[..., -1]`` (the
+        # lowest air level) and the column cold-drifts, decoupled from the SST.
+        _sst_forcing = (cfg.radiation != "none" and self.get_sst_sic is not None)
+        _compute_T_sfc = None
+        if _sst_forcing:
+            from legoesm.forcing.surface_utils import blend_surface_temperature
+            _T_ice = cfg.T_ice
+            _ncell = int(self.state.T.data.shape[0])
+
+            def _compute_T_sfc(day):
+                # Prescribed SST/SIC at the MPAS cell latitudes (get_sst_sic is
+                # built on grid.grid_lat = mesh.latCell for analytical/AMIP
+                # data), sea-ice-blended, as a (nCells,) surface temperature.
+                _sst, _sic = self.get_sst_sic(day)
+                return blend_surface_temperature(
+                    jnp.asarray(_sst), jnp.asarray(_sic), _T_ice).reshape(-1)
+
+            # Shape guard once, up front: a non-per-cell get_sst_sic would
+            # otherwise surface as an opaque error deep inside the JIT trace.
+            _ts0 = _compute_T_sfc(START_DAY)
+            if _ts0.shape != (_ncell,):
+                raise ValueError(
+                    f"MPAS SST forcing shape {tuple(_ts0.shape)} != "
+                    f"(nCells={_ncell},); get_sst_sic must return per-cell "
+                    f"arrays on the MPAS mesh (grid.grid_lat = latCell)."
+                )
+            logger.info(
+                "  AMIP SST surface forcing (time-varying): "
+                f"day {START_DAY:.1f} T_sfc=[{float(jnp.min(_ts0)):.1f},"
+                f"{float(jnp.max(_ts0)):.1f}] mean={float(jnp.mean(_ts0)):.1f} K"
+            )
+
         # Wrap with Held-Suarez forcing when enabled
         if cfg.held_suarez_forcing:
             from legoesm.atmosphere.held_suarez import held_suarez_forcing_mpas
             _rrtmgp_fn = physics_fn
 
-            def physics_fn(state, mesh, sigma_coord, phys_state=None):
-                rrtmgp_result = _rrtmgp_fn(state, mesh, sigma_coord, phys_state=phys_state)
+            def physics_fn(state, mesh, sigma_coord, phys_state=None, forcing=None):
+                rrtmgp_result = _rrtmgp_fn(
+                    state, mesh, sigma_coord, phys_state=phys_state, forcing=forcing)
                 rrtmgp_tend = rrtmgp_result[0] if isinstance(rrtmgp_result, tuple) else rrtmgp_result
                 phys_state_out = rrtmgp_result[1] if isinstance(rrtmgp_result, tuple) else None
                 hs_tend = held_suarez_forcing_mpas(state, mesh, sigma_coord)
@@ -2059,21 +2292,64 @@ class ModelDriver:
                 physics_fn.set_time = _rrtmgp_fn.set_time
             if hasattr(_rrtmgp_fn, 'reset_state'):
                 physics_fn.reset_state = _rrtmgp_fn.reset_state
+            # Forward the surface-T override too (symmetry with set_time /
+            # reset_state).  The SST anchor is already baked into _rrtmgp_fn's
+            # closure before wrapping, but forwarding keeps the hook reachable
+            # on the wrapped fn so a later set_T_sfc_override call still lands.
+            if hasattr(_rrtmgp_fn, 'set_T_sfc_override'):
+                physics_fn.set_T_sfc_override = _rrtmgp_fn.set_T_sfc_override
+            # Carry the forcing-aware marker so the dispatcher/step still
+            # forwards the traced ``forcing`` (T_sfc) through the HS wrapper.
+            if getattr(_rrtmgp_fn, '_wants_forcing', False):
+                physics_fn._wants_forcing = True
 
         run_status = "COMPLETED"
-        logger.info(f"Starting MPAS: {n_steps_total - start_step} steps, {N_DAYS} days")
+        logger.info(f"Starting MPAS: {n_steps_total} steps, {N_DAYS} days "
+                    f"(from day {START_DAY:.1f})")
 
         # Light-weight time series — see _run_spectral for the rationale
         # (the MPAS path also bypasses the unified DiagnosticCollector).
+        # ``CWV`` (column water vapor) is recorded on moist runs (NaN on dry);
+        # ``_save_lightweight_timeseries`` already persists a ``CWV`` channel
+        # and ``validate_amip_run.py`` checks its bounds.
         _ts: dict[str, list] = {
             "days": [], "T_atm": [], "T_min": [], "T_max": [],
-            "max_wind": [], "dry_mass_ps": [], "T_finite": [],
+            "max_wind": [], "dry_mass_ps": [], "T_finite": [], "CWV": [],
         }
 
         t_start = time.time()
 
-        for step in range(start_step, n_steps_total):
-            self.state = self.model.step(self.state, DT, physics_fn=physics_fn)
+        # Run ``cfg.days`` steps FROM the (possibly restart-loaded) state.
+        # ``step`` is LOCAL (0-based) to this job: the loaded state +
+        # ``START_DAY`` carry the continuation, and the launcher passes
+        # ``--days`` = remaining days.  Using ``range(start_step, …)`` here
+        # would be empty once ``start_step`` is the prior job's absolute
+        # step count, and would also break the ``day = START_DAY +
+        # (step+1)·dt`` math below (double-counting elapsed time).  The
+        # absolute step (for checkpoint metadata only) is ``start_step +
+        # step + 1``.
+        # Per-step traced SST forcing.  Rebuilt only when the simulated day
+        # changes (SST carries no sub-daily signal) so the host cost is one
+        # ``get_sst_sic`` call per day, not per step; the dict structure is
+        # constant so the jit'd step compiles once (the value is traced).
+        _forcing = None
+        _last_force_day = None
+        # Operator-split physics carry (prognostic TKE / convection state).
+        # ``model.step`` stashes the OUT state on ``self.model._phys_state``;
+        # feed it back next step.  None on the first step ⇒ physics initialises
+        # its own state.
+        _phys_state = None
+        for step in range(n_steps_total):
+            if _sst_forcing:
+                _force_day = START_DAY + step * DT / 86400.0
+                _fd_int = int(_force_day)
+                if _fd_int != _last_force_day:
+                    _forcing = {"T_sfc": _compute_T_sfc(_force_day)}
+                    _last_force_day = _fd_int
+            self.state = self.model.step(
+                self.state, DT, physics_fn=physics_fn, forcing=_forcing,
+                phys_state=_phys_state)
+            _phys_state = self.model._phys_state
 
             # Diagnostics at intervals
             if DIAG_INTERVAL > 0 and (step + 1) % DIAG_INTERVAL == 0:
@@ -2109,13 +2385,27 @@ class ModelDriver:
                 _ts["max_wind"].append(max_u)
                 _ts["dry_mass_ps"].append(mean_ps)
                 _ts["T_finite"].append(T_finite)
+                # Column water vapor on moist runs (reuse the shared integral);
+                # NaN on dry runs keeps the series aligned with ``days``.
+                if self.state.tracers is not None and "q_v" in self.state.tracers:
+                    from legoesm.diagnostics.column_integrals import (
+                        column_water_vapor,
+                    )
+                    _cwv = float(jnp.mean(column_water_vapor(
+                        self.state.tracers["q_v"].data, p_s_data,
+                        self.sigma.dsigma)))
+                else:
+                    _cwv = float("nan")
+                _ts["CWV"].append(_cwv)
 
                 elapsed = time.time() - t_start
                 rate = elapsed_day / (elapsed + 1e-10)
                 logger.info(
                     f"  Day {elapsed_day:6.1f}: T=[{T_min:.1f},{T_max:.1f}]K "
                     f"mean={mean_T:.1f}K  p_s={mean_ps/100:.1f}hPa  "
-                    f"|u|_max={max_u:.1f}m/s  ({rate:.1f} sim-days/s)"
+                    f"|u|_max={max_u:.1f}m/s"
+                    + ("" if _cwv != _cwv else f"  CWV={_cwv:.1f}kg/m2")
+                    + f"  ({rate:.1f} sim-days/s)"
                 )
 
                 # Blowup detection
@@ -2123,6 +2413,44 @@ class ModelDriver:
                     run_status = f"BLOWUP at day {elapsed_day:.1f}"
                     logger.error(run_status)
                     break
+
+            # Periodic checkpoint for the 100-yr restart chain — cadence is
+            # independent of the diagnostic interval.  ``day`` is the
+            # absolute simulated day (START_DAY + local elapsed); the
+            # filename uses that absolute day so links across SLURM jobs
+            # stay monotonic.  Absolute step (metadata only) =
+            # start_step+step+1.  Guard finiteness FIRST: the checkpoint
+            # cadence need not align with the diagnostic cadence, so a NaN
+            # could occur between two diagnostic steps — never persist a
+            # blown-up state (it would poison every subsequent chain link).
+            if CHECKPOINT_INTERVAL > 0 and (step + 1) % CHECKPOINT_INTERVAL == 0:
+                # Check EVERY prognostic, not just u: a radiation-driven NaN
+                # surfaces in T (and propagates to p_s) and can occur between
+                # diagnostic steps, so a u-only guard could persist a state
+                # with finite u but NaN T — poisoning every subsequent chain
+                # link.
+                _s = self.state
+                _finite = (jnp.all(jnp.isfinite(_s.u.data))
+                           & jnp.all(jnp.isfinite(_s.T.data))
+                           & jnp.all(jnp.isfinite(_s.p_s.data))
+                           & jnp.all(jnp.isfinite(_s.phis.data)))
+                if not bool(_finite):
+                    _bad_day = START_DAY + (step + 1) * DT / 86400.0
+                    run_status = f"BLOWUP at day {_bad_day - START_DAY:.1f}"
+                    logger.error(f"{run_status} (caught at checkpoint; not written)")
+                    break
+                _ckpt_day = START_DAY + (step + 1) * DT / 86400.0
+                self.save_checkpoint(start_step + step + 1, _ckpt_day)
+
+        # Final checkpoint so the next chain link resumes from the exact end
+        # state.  Skipped (a) on blow-up — state is non-finite — and (b) when
+        # the last loop step already hit the periodic cadence, which would
+        # re-write the identical file (wasted device→host transfer + I/O
+        # every whole-multiple job boundary).
+        if (CHECKPOINT_INTERVAL > 0 and run_status == "COMPLETED"
+                and n_steps_total % CHECKPOINT_INTERVAL != 0):
+            _final_day = START_DAY + n_steps_total * DT / 86400.0
+            self.save_checkpoint(start_step + n_steps_total, _final_day)
 
         elapsed = time.time() - t_start
         logger.info(f"MPAS run {run_status} in {elapsed:.1f}s")

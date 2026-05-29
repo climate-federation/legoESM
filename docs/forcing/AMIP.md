@@ -19,6 +19,161 @@ atmosphere-only run with:
 | Aerosol (tropospheric) | MPI-M Kinne dataset `aeropt_kinne_{sw_b14,lw_b16}_*_rast.nc` — monthly, lat × lon × lev |
 | Volcanic stratospheric | `bc_aeropt_cmip6_volc_lw_b16_sw_b14_<year>.nc` — per-band per-altitude |
 
+## MPAS 100-yr AMIP — realism + performance audit (2026-05-29)
+
+Audit of a 100-yr AMIP on the MPAS SCVT Voronoi mesh, single GPU
+(`scripts/run_amip_mpas_100yr_gpu.sbatch`).  GPU jobs 8087066 / 8087100 /
+8087144 / 8088578.  What the audit found and changed:
+
+### Findings
+
+- **The MPAS path applied NO SST boundary condition** (the defining AMIP
+  forcing).  `_run_mpas` never called `get_sst_sic` / `set_T_sfc_override`,
+  unlike `_run_spectral` and the cubed-sphere loop.  The MPAS radiation
+  therefore fell back to `T[..., -1]` (lowest air level) as the surface
+  temperature (`integration.py:_make_hydrostatic_radiation`), so the column
+  had no external thermal anchor and **cold-drifted** toward a dry gray-
+  radiative equilibrium decoupled from the 292.6 K SST: `<T_atm>` fell
+  290 → 257 K over 30 days and was still falling.  An "AMIP" run on MPAS was
+  not actually SST-forced.
+- **rrtmgp on MPAS is infeasible at 100 yr.**  A 2-day L5/nlev40 run took
+  2.5 h+ at 100 % GPU (no JIT-cache churn — genuinely compute-bound), vs
+  **18 s** for gray.  100 yr with rrtmgp ≈ years of walltime.
+- **The committed `ssp_rk3 → ssp_rk54` rationale was wrong.**  The
+  zero-dissipation sweep (job 8088578) shows BOTH integrators stable to
+  dt ≥ 600 s on L4 — there is no "undamped gravity wave on the imaginary
+  axis / hidden-CFL at ~300 s".  The ssp_rk3-vs-ssp_rk54 contrast appears
+  **only with ∇⁴ hyperdiffusion** (ssp_rk3 blows at step ~3, ssp_rk54
+  holds): a real-axis-eigenvalue/stability-region issue.  The separate
+  ~450 s dt-ceiling with the gray deck (job 8087090) is a **radiative
+  startup transient** (T=300 K isothermal IC), integrator-independent.
+  Production dt=240 s is stable for both integrators.
+- **The advective/GW CFL diagnostic over-reports `dt_max`** for the MPAS
+  PE (blesses dt=450 s at L4, CFL≈0.65, which then NaNs in a day) because
+  the real limit is the radiative transient, not a clean CFL.
+
+### Fixes (this branch)
+
+- **SST surface anchor on the MPAS path** (`_run_mpas`): a fixed annual-mean,
+  sea-ice-blended per-cell `T_sfc` set once via `set_T_sfc_override` before
+  the JIT'd step loop.  Fixed (not seasonal) because `model.step` is
+  `jax.jit` with `physics_fn` static → the override is baked at first
+  compile; a per-step update would be stale without a retrace.  Anchors the
+  surface longwave to the prescribed SST and is byte-identical across
+  restart-chain links.
+- **Integrator default kept at `ssp_rk54`** but the rationale corrected to
+  the measured truth (hyperdiffusion tolerance + spectral-PE parity), and
+  the regression tests rewritten
+  (`TestMPASHydrostaticIntegratorStability`) to encode it: zero-diss → both
+  stable; +hyperdiff → ssp_rk3 blows / ssp_rk54 holds.
+- **CFL diagnostic** (`core/cfl.py`): MPAS path now logs that the
+  advective/GW CFL is *necessary but not sufficient* and to keep a margin
+  on a cold start.  (Not retuned — the L5/dt=240 valid run sits at CFL≈0.70,
+  so a blanket coefficient change would wrongly clamp it.)
+- **Radiation default `rrtmgp → gray`** in the 100-yr launcher.
+- **Checkpoint + restart** for the MPAS state (was absent), enabling the
+  chained 100-yr run.
+
+### Validation (post-fix, GPU jobs 8088944 / 8088951 / 8088995)
+
+- **Tests**: 21/21 in `test_mpas_atmosphere.py` pass on CPU x64 (the CI
+  backend), including the rewritten integrator-stability set.
+- **SST anchor active**: 100-yr launch logs
+  `T_sfc=[273.1,300.0] mean=291.1 K` (polar ice → tropical SST) — a sane
+  zonal anchor, applied once before the JIT'd loop.
+- **The anchor fixes the cold-drift into a BOUNDED equilibrium**: the
+  column-mean cooling decelerates and levels off (`<T>` 258→247→243→242 K
+  at days 30/60/90/120, Δ shrinking) instead of the unbounded no-anchor
+  drift; warm cells hold ~293 K (tropical SST skin).  Mass exact
+  (`p_s`=1000.0 hPa).
+- **Improved dynamics**: the anchored equator–pole SST gradient spins up
+  realistic jets — `|u|`max 7→17→20→22 m/s by day 120 (vs ~9 m/s with no
+  anchor) — while staying well inside CFL.
+- **Lon-fidelity** (`_diag_lon_fidelity.py`): the forcing regrid places a
+  source-longitude marker at the matching model longitude on every grid
+  (latlon/gaussian/voronoi/cube) for lon∈{[0,360),[-180,180)} and
+  ascending/descending source latitude — `median|Δ|=0.00°`.  No flip.
+
+### Residual limits (this is an SST-anchored DRY radiative-dynamical AMIP)
+
+- No seasonal SST cycle and no turbulent surface fluxes (sensible/latent) —
+  the latter needs the edge→cell wind interp (#3); the former needs traced
+  forcing threaded through the JIT-static MPAS step.
+- Dry state (no moisture/convection/microphysics) → no hydrological cycle.
+- gray radiation → no CMIP6 GHG/ozone/aerosol/volcanic forcing.
+- For a full moist, SST + surface-flux + RRTMG CMIP6 AMIP, use the
+  cubed-sphere / lat-lon paths (which support all of the above).
+
+## MPAS → cube AMIP parity (2026-05-29, continued)
+
+Closed the dry→moist gap on the MPAS path so it runs CMIP6-style moist
+physics like the cubed sphere.  All reuse-first (extend existing code, no
+re-derivation); validated on GPU + CPU x64.
+
+- **Time-varying SST** (Phase A): a traced ``forcing={"T_sfc": ...}`` is
+  threaded ``step → combined physics → radiation`` (and turbulence), so the
+  prescribed SST is seasonal, not a fixed anchor — without retracing (jit
+  arg, not a static closure).  Reuses ``_apply_T_sfc_override`` +
+  ``blend_surface_temperature`` + the spectral ``forcing_data`` pattern.
+- **Moisture transport** (Phase B): factored a shared
+  ``tracer_horizontal_advection`` kernel (one definition, used by the
+  standalone tracer model AND the PE RHS); the RHS advects ``state.tracers``
+  with the dycore's OWN ``u``/``mass_flux``/``sigma_dot`` (mass-consistent,
+  hybrid + σ) and consumes physics ``tracer_tendencies``; the pytree
+  integrator advances them; the driver attaches moisture (gated on moist
+  physics — dry runs unchanged); checkpoint save/load carries tracers
+  (bit-consistent moist restart).
+- **Operator-split physics step** (Phase C): physics is now evaluated ONCE
+  per dt on the post-dynamics state and applied forward, instead of inside
+  the per-RK-stage tendency.  This is the correct coupling for implicit /
+  stateful physics (turbulent vertical diffusion, microphysics adjustment,
+  prognostic TKE) — and 5× cheaper for radiation.  A ``phys_state`` carry is
+  threaded in/out (stashed on the model so ``step`` still returns a bare
+  state).
+- **Un-gated MPAS turbulence**: ``_make_mpas_turbulence`` (Perot edge↔cell
+  reconstruction + column backend, already implemented) now runs; surface
+  sensible/latent fluxes are driven by the prescribed SST via
+  ``forcing["T_sfc"]``.
+
+**Validated** (gray radiation, analytical SST, L4/nlev30 unless noted):
+27 MPAS unit tests pass (uniform-tracer preserved <1e-8; advection finite;
+dry backward-compat); moist run (Sundqvist) + bit-consistent moist restart;
+**Louis turbulence**, **prognostic-TKE turbulence**, and **mass-flux
+convection** each run stable with moisture + SST.  Net: radiation +
+microphysics + convection + turbulence/surface-flux + moisture transport +
+seasonal SST all run on MPAS.
+
+**Phase D (CMIP6 radiative forcing) — partial:**
+- ✅ **GHG + ozone config wired** into MPAS rrtmgp: ``_run_mpas`` builds
+  ``RadiationConfig(rrtmgp=RRTMGPConfig(co2_ppmv=cfg.co2_ppmv, ...),
+  ozone=OzoneProfileConfig(source=cfg.ozone_source))`` from the
+  experiment / ``ghg_at_year`` values (was silently dropped to the 415/
+  1900/332 defaults).  Verified the rrtmgp solver reads
+  ``config.co2_ppmv`` (``rrtmgp/rrtmgp.py:251``).
+- ✅ **Moist diagnostics**: the MPAS lightweight time series now records
+  **CWV** (column water vapor, reusing ``column_water_vapor``) on moist runs —
+  logged per diagnostic step and persisted to ``timeseries.npz`` so
+  ``validate_amip_run.py``'s CWV bound applies.  Validated CWV≈84 kg/m²
+  (gray+Sundqvist).  A full ``DiagnosticCollector`` (zonal means,
+  energy/moisture budgets, vertical profiles for the edge-velocity state)
+  remains a follow-on.
+- ❌ **rrtmgp-on-MPAS perf is the blocker** (GPU jobs 8087144, 8089925):
+  even at L4/nlev30 under operator-split (radiation 1×/dt), a 2-day run
+  ran >32 min at 99 % GPU and did not finish — **compute-bound** (per-column
+  k-distribution × RTE solve on the unstructured mesh), not compile-bound.
+  100-yr rrtmgp-on-MPAS is infeasible without a kernel-level optimization
+  (device column-sharding via the existing ``column_mesh`` path, reduced
+  g-points, or a faster RTE) — research-grade.  **Feasible long MPAS runs
+  therefore use gray radiation** (no CMIP6 GHG); rrtmgp-on-MPAS is for
+  short / coarse experiments until the kernel is optimized.
+
+**Remaining for full CMIP6 parity** (follow-ons): the rrtmgp kernel perf
+optimization (gates GHG/ozone/transient radiative forcing on long runs);
+external-FILE forcing channels (CMIP6 ozone/aerosol/volcanic via the deck
+pipeline into ``_run_mpas``); time-varying-over-run GHG (runtime VMR
+override threaded through ``forcing`` like T_sfc); ``DiagnosticCollector``
+for the MPAS edge-velocity state.
+
 ## Iter 15–20 — adversarial-review hardening
 
 Five rounds of codex adversarial review (iter 15-20) drove a hardening
@@ -493,7 +648,7 @@ for legitimate runs.  15/15 deck tests pass.
 | # | Issue | Status | Workaround |
 |---|-------|--------|------------|
 | 1 | **Kessler microphysics blows up** (NaN winds day ~2) in the integrated AMIP path with C12-C16 / dt=600s, even with `--convection none` and no clouds.  Bug doesn't surface in the dedicated unit tests.  Latent-heating tendency from the Sigmoid saturation adjustment may interact poorly with the dycore Euler stepping.  | OPEN | Use `--microphysics sundqvist` (now the deck default). |
-| 2 | **MPAS dycore on Voronoi has a hidden CFL constraint** — at level-4 SCVT (n=2562) the run blows up at the default dt=600 s despite the CFL diagnostic reporting 0.09.  Reducing to dt=60 s makes the run stable for at least 1 day.  The CFL diagnostic and the actual stability bound disagree by ~10×; root cause likely the PV-flux closure or hydrostatic adjustment cadence.  Pre-existing. | PARTIAL | Pass `--dt 60` for voronoi runs (smoke test now does this).  Long-term fix: tighten the MPAS CFL diagnostic to match actual stability. |
+| 2 | **MPAS dycore "hidden CFL"** — DIAGNOSED (2026-05-29 audit, see top of file).  NOT a single hidden mode: (a) zero-dissipation pure dynamics is stable to dt≥600 s for both ssp_rk3 and ssp_rk54; (b) the gray-deck blow-up at dt≥450 s is a **radiative startup transient** (T=300 K isothermal IC), integrator-independent; (c) with ∇⁴ hyperdiffusion, ssp_rk3 (small stability region) blows where ssp_rk54 holds.  The advective/GW CFL diagnostic over-reports `dt_max` and now logs a "necessary-not-sufficient" advisory for MPAS. | RESOLVED for production | Use dt=240 s at L5 (validated 30-day finite run, job 8087144); keep a cold-start margin. |
 | 3 | **MPAS turbulence integration** raises `NotImplementedError` (TKE expects cell-centered winds; MPAS stores edge-normal winds — edge→cell interpolation is missing). | OPEN | Pass `--turbulence none` for voronoi runs (smoke-test now does this). |
 | 4 | **Spectral / MPAS run paths bypass `DiagnosticCollector`** so detailed diagnostics (zonal monthly means, energy/moisture residuals, vertical profiles, snapshots) are unavailable on these grids — the lightweight timeseries fix only writes scalar global means. | OPEN, low-priority | Production AMIP runs use cubed_sphere/latlon. |
 | 5 | **Synthetic forcing files are not bit-exact CMIP6** — they reproduce the schemas and physical bounds but not the actual observed time series (not feasible without network access). | EXPECTED | Replace with real input4MIPs files when running for science (drop them under `forcing_amip/` with the canonical names; `run_amip_cmip6_deck.py` will pick them up). |

@@ -639,7 +639,8 @@ def _make_hydrostatic_radiation(
     _time, set_time = _make_time_state()
     _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
 
-    def physics_fn(state, grid_or_mesh, sigma_coord) -> HydrostaticTendencies:
+    def physics_fn(state, grid_or_mesh, sigma_coord,
+                   forcing=None) -> HydrostaticTendencies:
         T = state.T.data
         p_s = state.p_s.data
 
@@ -654,9 +655,19 @@ def _make_hydrostatic_radiation(
         p_full = sigma_coord.pressure_at_full(p_s)
         p_half = sigma_coord.pressure_at_half(p_s)
 
-        # Surface temperature = lowest-level temperature (default)
-        # with optional SCM-driver override via set_T_sfc_override hook.
-        T_sfc = _apply_T_sfc_override(T[..., -1], _T_sfc_override_cell[0])
+        # Surface temperature = lowest-level temperature (default), overridable
+        # by EITHER a per-step TRACED ``forcing["T_sfc"]`` (the AMIP path —
+        # passes a time-varying prescribed SST through the JIT'd dycore step
+        # without retracing) OR the static ``set_T_sfc_override`` closure (the
+        # SCM/fixed-anchor path).  Traced forcing wins when supplied; the two
+        # never both apply per call.  Both go through ``_apply_T_sfc_override``
+        # so the (ncol,) shape contract + NaN-sentinel semantics are shared.
+        _ovr = None
+        if forcing is not None and forcing.get("T_sfc") is not None:
+            _ovr = forcing["T_sfc"]
+        else:
+            _ovr = _T_sfc_override_cell[0]
+        T_sfc = _apply_T_sfc_override(T[..., -1], _ovr)
 
         insol, cos_sza, f_day = _compute_insolation(
             lat, radiation_config,
@@ -737,6 +748,12 @@ def _make_hydrostatic_radiation(
 
     physics_fn.set_time = set_time
     physics_fn.set_T_sfc_override = set_T_sfc_override
+    # Marker: this physics_fn consumes a per-step traced ``forcing`` dict
+    # (currently ``forcing["T_sfc"]``).  The combined-physics dispatcher
+    # (_make_hydrostatic_combined) checks this attribute and forwards
+    # ``forcing`` only to fns that advertise it — so unmarked sub-physics
+    # keep their 3-arg signature unchanged.
+    physics_fn._wants_forcing = True
     return physics_fn
 
 # MPAS uses the same unified hydrostatic radiation function.
