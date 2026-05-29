@@ -6,12 +6,11 @@ One entry per task attempt. Newest at the bottom of each task block.
 ## Queue status
 - [x] Q1 — Phase G density residual: FIXED (grid aligned to Veros; all-region L2 ~0.037)
 - [x] Q2 — Per-process comparison IMPLEMENTED (momentum+tracer emit metrics); density+Coriolis validate; rest documented deltas. Verification-approach fork surfaced for user.
-- [ ] Q3 — Register fidelity modules (test discovery)
-- [~] Q4 — ConstantsConfig: G-C1 + G-C2(vertical mixing) done; G-C3/G-C4/G-C5 blocked on user config-API decision
-- [~] Q7 — config readability docstring DONE; A_h check surfaced + fixed a real recipe GM/Redi mis-wiring (see iter-16)
+- [x] Q3 — Register fidelity modules (veros_acc_recipe/veros_state_bridge/tendency_probe in __all__ + lazy loader); recipe_constants later deleted in G-C4
+- [x] Q4 — ConstantsConfig: G-C1✓ G-C2(vertical-mixing+GM/Redi)✓ G-C4✓(patch deleted, recipe self-pins, bit-identical) G-C5✓(audit guard, confirmed red-on-violation). G-C3(coupler/forcing) DEFERRED w/ rationale (off all recipe paths; already overridable; needs full-suite/integration verify) — see iter 20
 - [x] Q5 — CI clarity guard (function-LOC ceiling, allow-list shrinks; two-source/deprecated detectors folded into Q7)
 - [x] Q6 — Equivariance tier expansion (bridge round-trip temp+salt, halo-strip invariance; + existing EOS-unit/vertical-flip/cumsum-order)
-- [ ] Q7 — Config regrouping + footguns
+- [~] Q7 — readability docstring DONE; A_h check fixed a real GM/Redi mis-wiring (iter-16); REMAINING: section-grouping + eos/eos_linear dispatch test + A_h single-source check
 - [ ] Q8 — Decompose baroclinic_tendencies (bit-identical gate)
 
 ---
@@ -332,3 +331,36 @@ VERIFIED REMOVABLE: build+probe WITH vs WITHOUT override_constants is BIT-IDENTI
 NEXT: physically delete recipe_constants.py + test_recipe_constants.py; remove the (now no-op)
 override_constants wrapping from the driver + test_veros_acc_recipe + __init__ __all__; verify
 the comparison unchanged. Then G-C5 audit, Q7 regroup, Q8 decomposition.
+
+### 2026-05-29 · iter 20 · Q4 G-C4 DONE (patch deleted) + G-C5 audit guard DONE; G-C3 deferred (logged)
+**G-C4 (committed 24266bf9):** Physically deleted the override_constants monkey-patch.
+- Deleted `ocean/fidelity/recipe_constants.py` + `tests/.../test_recipe_constants.py`.
+- Removed `recipe_constants` from `fidelity/__init__.py` __all__ + lazy loader (+ Q3 reg test).
+- Driver `compare_tendencies_acc.py`: dropped the (no-op) `with override_constants(...)` wrap;
+  builds recipe directly. test_veros_acc_recipe.py: dropped all ~10 override_constants ctx mgrs
+  (build_acc_recipe self-pins). Updated stale docstrings in constants_config/state/veros_acc_recipe.
+- GATE: ACC comparison re-run end-to-end through the dedented driver → interior density L2 =
+  **3.754e-02 kg/m³, pattern-corr 1.0000, sign 1.0000** — bit-identical to pre-deletion. Targeted
+  no-regression: 114 passed / 3 skipped across fidelity+recipe+probe+equivariance+clarity; 33 on
+  directly-touched files.
+**G-C5 (committed 4bd544f1):** Added `tests/ocean/unit/test_constants_audit.py` — AST guard:
+every ConstantsConfig-scoped read (g, rho_ocean, c_sw, Omega, R_earth) in the de-mirrored
+modules (vertical_mixing/{integration,k_profiles,tke}, lateral_mixing/gm_redi_latlon_cgrid) must
+be a function-parameter default; module-level mirrors + inline body reads FAIL. Detector
+self-tested on a synthetic source (non-vacuous). GATE confirmed: injected `_RHO_0 =
+constants.rho_ocean` into tke.py → guard RED (tke.py:112); reverted → GREEN. The audit surfaced
++ fixed one inline `constants.Omega` in gm_redi's Visbeck branch → now reads the grid's pinned
+`grid.f` (numerically identical for default grids; 58 GM/Redi+Visbeck+Eady tests green).
+**G-C3 (coupler/forcing) — DEFERRED with rationale (spec explicitly permits the coupler-boundary
+deferral):** scoped reads remain only in coupler/{runoff_apply,omip2_applicator,ice_shelf_apply}
++ forcing/sss_restoring. These (a) are NOT on any oracle-recipe path — ACC uses prescribed wind
+stress only; surface_forcing/ has ZERO scoped reads; (b) already use the config-OVERRIDABLE
+pattern (`rho_0: float|None=None` → `constants.rho_ocean` only as fallback), so the constant is
+caller-overridable today; (c) G-C4's bit-identity proof shows the ACC tendency path is fully
+config-pinned WITHOUT them. The remaining valuable piece (thread config.constants from
+coupled-run call sites) is cross-boundary coupler/runtime plumbing serving a FUTURE coupled
+recipe that does not exist yet, and needs full-suite + integration verification this env cannot
+run (exit-143). Deferred per spec's "wrap at the ocean seam or LOG as deferred." Q4 is otherwise
+COMPLETE (G-C1, G-C2 vertical-mixing+GM/Redi, G-C4, G-C5 all green + committed).
+NEXT: Q7 (config section-grouping + eos/eos_linear dispatch test + A_h single-source check),
+then Q8 (decompose latlon_cgrid_ocean_baroclinic_tendencies, bit-identical gate).
