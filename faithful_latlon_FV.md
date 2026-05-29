@@ -65,9 +65,12 @@ stays.
 ## Status: verifiable scope COMPLETE + review-approved (round-13 approve)
 Lat-lon FV runs CMIP6 AMIP with physically realistic results: gray + RRTMG
 verified; realistic balanced IC (physics-consistent + topography-correct);
-analytic + real-file topography; deck `--ic standard`. 16 commits, ~120 tests
-across touched subsystems green. Adversarial review converged over 13 rounds
-(every finding fixed; round-13 = approve, no findings).
+analytic + real-file topography; deck `--ic standard`. ~120 tests across touched
+subsystems green. Adversarial review converged over 13 rounds (every finding
+fixed; round-13 = approve, no findings).
+FINAL e2e: deck latlon/finite_volume RRTMG + ic=standard — ALL CHECKS PASSED
+(T_atm 253 K, CWV 14.2 kg/m² Earth-like, jet 28.8 m/s, stable). Realistic IC +
+full CMIP6 radiation compose cleanly.
 
 ## Caveats — why `DONE` is NOT truthfully emittable here
 The task requires "good MPI and GPU **scaling**, test it". In THIS environment
