@@ -385,6 +385,35 @@ class ExperimentConfig(NamedTuple):
                 f"microphysics must be one of {_valid_microphysics}, "
                 f"got {self.microphysics!r}"
             )
+        # Physics-scheme membership (mirror the integration.py factory sets so
+        # a typo fails here, not only at JIT-compile inside integration.py).
+        _valid_convection = (
+            "sbm", "dca", "kuo", "mass_flux", "edmf", "zhang_mcfarlane",
+            "kain_fritsch", "emanuel", "tiedtke", "bechtold", "none",
+        )
+        if self.convection not in _valid_convection:
+            errors.append(
+                f"convection must be one of {_valid_convection}, "
+                f"got {self.convection!r}"
+            )
+        _valid_turbulence = (
+            "smagorinsky", "louis", "tke", "mynn25", "clubb_lite",
+            "holtslag_boville", "ysu", "edmf", "none",
+        )
+        if self.turbulence not in _valid_turbulence:
+            errors.append(
+                f"turbulence must be one of {_valid_turbulence}, "
+                f"got {self.turbulence!r}"
+            )
+        _valid_gwd = (
+            "rayleigh", "lindzen", "mcfarlane", "hines",
+            "prognostic_spectral", "ml_emulator", "none",
+        )
+        if self.gravity_wave_drag not in _valid_gwd:
+            errors.append(
+                f"gravity_wave_drag must be one of {_valid_gwd}, "
+                f"got {self.gravity_wave_drag!r}"
+            )
         # Reject unsupported coupled/ESM modes with actionable errors.
         if self.carbon_cycle != "none":
             errors.append(

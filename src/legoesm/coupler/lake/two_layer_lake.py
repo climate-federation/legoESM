@@ -63,6 +63,11 @@ def step_lake(
     # Bulk fluxes
     rho = forcing.rho_lowest
 
+    _valid_bulk = ("constant", "most", "coare3", "large_yeager")
+    if config.bulk_scheme not in _valid_bulk:
+        raise ValueError(
+            f"Unknown bulk_scheme {config.bulk_scheme!r}; expected one of {_valid_bulk}."
+        )
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
