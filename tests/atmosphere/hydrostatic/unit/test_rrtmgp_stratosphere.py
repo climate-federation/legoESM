@@ -2363,5 +2363,92 @@ class TestRteRecurrenceScanEquivalence:
             )
 
 
+class TestSolverCompilationStability:
+    """Iter-72: pin that ``RRTMGP.solve_columns`` is XLA-compilation
+    stable — recompiling only on genuine shape changes, never on
+    value-only changes.  This is the single most important property for
+    GPU throughput.
+
+    The physics pipeline runs the solver under ``jax.jit``
+    (``integration.py`` / ``physics_pipeline.py``).  A function that
+    re-traces whenever input *values* change — rather than only when
+    *shapes* change — recompiles on every step; on a GPU that compile
+    dwarfs the kernel runtime and destroys scaling.  Value-dependent
+    retraces come from Python control flow on traced values, non-static
+    config leaking into the trace, or unstable shapes (CLAUDE.md: "Perf
+    regression: retrace, host callbacks, scatters, sharding, Python
+    loops").
+
+    Mechanism: a list cell incremented inside the jitted body counts
+    *traces* — JAX runs the Python body once per compile, and a cache hit
+    does not re-run it.  Contract pinned here: two same-shape calls with
+    different data compile exactly once; only an ``nlev`` change compiles
+    again.  A future edit that introduces value-dependent retracing trips
+    the first assertion.
+    """
+
+    @staticmethod
+    def _inputs(ncol=2, nlev=16, *, seed=0):
+        rng = np.random.default_rng(seed)
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1)
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        dtype = p_full.dtype
+        # Perturb T per-call so successive same-shape calls carry genuinely
+        # different data — a constant-folded no-op would otherwise mask a
+        # retrace.  Range stays inside the table-supported band [220, 295].
+        T = jnp.asarray(
+            220.0 + 75.0 * rng.uniform(0.0, 1.0, (ncol, nlev)), dtype=dtype
+        )
+        sfc_T = jnp.full((ncol,), 298.0, dtype=dtype)
+        q_v = jnp.full((ncol, nlev), 8e-3, dtype=dtype)
+        cos_z = jnp.full((ncol,), 0.7, dtype=dtype)
+        return T, p_full, p_half, sfc_T, q_v, cos_z
+
+    def test_solve_columns_compiles_once_per_shape(self):
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(RRTMGPConfig(include_clouds=False))
+        n_traces = [0]
+
+        @jax.jit
+        def run(T, p_full, p_half, sfc_T, q_v, cos_z):
+            n_traces[0] += 1  # once per trace (compile), not per call
+            return solver.solve_columns(
+                T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+                q_v=q_v, cos_zenith=cos_z,
+            )
+
+        # Two same-shape calls with DIFFERENT data must share one compile.
+        out_a = run(*self._inputs(seed=1))
+        out_b = run(*self._inputs(seed=2))
+        jax.block_until_ready(out_a.lw_flux_up)
+        jax.block_until_ready(out_b.lw_flux_up)
+        assert n_traces[0] == 1, (
+            f"solve_columns retraced on a value-only change "
+            f"({n_traces[0]} traces for two same-shape calls) — a "
+            f"value-dependent retrace recompiles on every GPU step and "
+            f"destroys scaling."
+        )
+        assert jnp.all(jnp.isfinite(out_a.lw_flux_up))
+        # Outputs must genuinely differ, else the 2nd call was a
+        # constant-folded no-op that could hide a retrace.
+        assert not bool(jnp.allclose(out_a.lw_flux_up, out_b.lw_flux_up)), (
+            "two different-T columns produced identical LW flux — inputs "
+            "were not actually distinct, so the no-retrace check is vacuous."
+        )
+
+        # A genuine shape change (different nlev) is the ONLY thing that
+        # should trigger a second compile.
+        out_c = run(*self._inputs(nlev=20, seed=3))
+        jax.block_until_ready(out_c.lw_flux_up)
+        assert n_traces[0] == 2, (
+            f"expected exactly one additional compile on an nlev change; "
+            f"got {n_traces[0]} total traces."
+        )
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
