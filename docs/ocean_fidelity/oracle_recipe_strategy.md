@@ -179,6 +179,43 @@ replicating, the explicit **non-goals** (differences that are expected/acceptabl
 **timebox**. Without this, residual-chasing (e.g. Phase G's 0.5% density residual) becomes
 an open-ended research project that consumes the velocity the strategy was meant to create.
 
+**H. Gap → block: a missing capability revealed by an oracle goes into the canonical module,
+never a `veros_*` clone.** When matching an oracle exposes that legoESM lacks a feature, the
+fix is a new **config-selectable option in the canonical module**, gated on the truth tiers
+(§2), not on the oracle match. First **classify** the gap:
+- **Missing *method*** (a real, reusable algorithm — e.g. flux-form momentum advection) →
+  add the block (`momentum_advection="flux_form"`).
+- **Missing *variant* of a block we have** (e.g. Veros's isopycnal discretization vs our
+  triads) → extend the existing block with an option; don't fork it.
+- **Convention, not physics** (§4 φ-test) → bridge only; add nothing to the model.
+- **Oracle bug / legacy quirk** → do NOT bake into the canonical block; if a recipe must
+  reproduce it, that is a clearly-marked recipe-level compat flag.
+
+A new block is a first-class lego: it must clear the truth tiers (conservation, equivariance,
+idealized cases) **independently** — an oracle match (tier 3) alone is the lowest-trust
+evidence — pass the modularity tester, carry a direct unit test, and join the supported
+matrix. Prioritize by **real need** (a recipe's fidelity target, or a researcher), not by
+completeness: "legoESM has every block" is the destination, not a licence to preemptively
+clone every oracle closure (that breeds untested-but-live code). Track each gap in the
+per-oracle **missing-blocks ledger** (§8).
+
+**I. One concept, one name, one implementation.** Oracles name the same quantity differently
+(Veros `kappaM` ≈ legoESM `A_v`; `r_bot` = `bottom_drag_r`; `K_gm_0` = `kappa_GM`); left
+unmanaged this breeds parallel vocabularies and copy-paste numerics that "differ only in
+parameters." Two defences:
+- The **concept registry** (`ocean/fidelity/concept_registry.py`) is the canonical
+  cross-oracle map: concept → canonical legoESM name + aliases + per-oracle names + units.
+  Bridges/recipes translate oracle vocabularies **through it**, so a synonym is recognised,
+  not re-coined.
+- A **two-layer auditor** (§9) enforces it: a deterministic CI guard (registry consistency +
+  an alias ratchet that only shrinks) plus an agent-based semantic pass
+  (lego-modularity-tester **dimension 10**) that finds same-thing-different-name functions and
+  "differs-only-in-parameters, generalise" duplication no text scan can reach.
+
+Before adding any numeric helper, search for an existing one (CLAUDE.md pre-impl rule) **and
+consult the registry**; if the thing exists under another name, extend or rename — never
+re-implement.
+
 ---
 
 ## 4. Convention-invariance: criterion + equivariance tests
@@ -466,9 +503,78 @@ conventions replicated | declared non-goals | timebox | golden-refresh cadence.
   and/or expose legoESM's KE-gradient + implicit-mixing effective tendencies in the probe.
   Governs future MOM6/MITgcm matching. This is the recurring crux of per-process tier-2.
 
+### Veros ACC missing-blocks ledger (per doctrine rule H)
+
+Each documented delta is classified as **add** (new canonical block) / **extend** (variant of
+an existing block) / **bridge** (convention) / **accept** (legitimate, leave) / **defer**.
+
+| Gap (legoESM vs Veros ACC) | Class | Response | Priority |
+|---|---|---|---|
+| **Flux-form momentum advection** — legoESM lat-lon C-grid only has `vector_invariant`/`weno5`/`weno7`; Veros/MOM6/MITgcm use flux-form ∇·(uu). Drives the `du_adv` corr 0.58 delta. | Missing **method** | **Add** `momentum_advection="flux_form"` (+ `momentum_flux_scheme`) to the canonical dycore; reuse `divergence_cgrid` + the existing face-interp/limiter schemes. Gate on conservation + Stommel/Munk gyre + zero-velocity + equivariance + grad (NOT just oracle-match). See `flux_form_momentum_scope.md`. | **High** — broadly useful; closes the momentum delta |
+| **Veros isopycnal/GM-Redi discretization** — we have GM/Redi (`slope_scheme` = triads/centered); Veros's isoneutral scheme differs (T_iso corr 0.17). | Missing **variant** | **Extend** `gm_redi` with a Veros-discretization option, *or* (if our triads are the better method) keep ours and **accept** the delta with a documented justification. Decide on need. | Medium |
+| **EKE closure** — Veros eddy-kinetic-energy parameterization; no legoESM equivalent. | Missing **method** | **Add on demand** only when a recipe/researcher needs it; not preemptive. | Low |
+| **IDEMIX** — internal-wave energy/mixing; disabled in the ACC adapter anyway. | Missing **method** | **Defer.** | Low |
+| **Implicit vs explicit vertical mixing** for ACC (`du_mix` corr ~0). | — (config, already exists) | **Accept** — both paths exist; the recipe selects implicit. Not a gap. | — |
+| **Density / EOS / hydrostatic pressure** (corr 1.0). | — | **Accept** — already matches (shared discretization). | — |
+
+### Cross-oracle naming (concept registry seed)
+
+Synonyms found in the 2026-05-29 survey, now in `ocean/fidelity/concept_registry.py`:
+Veros `kappaM`/`kappaH` ≈ legoESM `A_v`/`K_v`; `r_bot` = `bottom_drag_r`; `K_gm_0`/`K_iso_0`
+= `kappa_GM`/`kappa_Redi`; `nz` = `n_levels`. Internal debt tracked there too (`nlev` vs
+`n_levels`, `T_sfc` vs `T_surface`, `c_sw` vs `c_ocean`/`c_p`, `bottom_drag_coeff`, the
+`tau_relax` days-vs-seconds and `C_water`/`c_water` unit hazards). Actionable item flagged:
+**DINO hardcodes `c_p=3991.86`** instead of pinning via `ConstantsConfig` — fix in a cleanup PR.
+
 ---
 
-## 9. Expansion path to full legoESM
+## 9. Concept registry & duplication auditor (doctrine rule I)
+
+The risk doctrine rule I addresses: as we match more oracles, the same physical thing arrives
+under many names, and near-identical numerics accumulate ("differs only in parameters"). Two
+layers, because the problem is part mechanical and part semantic.
+
+**Layer 1 — deterministic CI (every PR, no oracle install, no false positives):**
+- **`ocean/fidelity/concept_registry.py`** — the canonical map: concept → canonical legoESM
+  name + aliases (debt) + per-oracle names + units + status (`canonical` / `unit-hazard` /
+  `entrenched` / `fidelity-scoped`). The single source bridges, recipes, and the auditor read.
+- **`tests/ocean/unit/test_concept_registry.py`** — (a) registry internal consistency (no
+  canonical doubles as an alias, oracle keys known); (b) an **alias ratchet**: an
+  `ratchet=True` alias may only appear in files in a committed `ALIAS_BASELINE` — a new file
+  using it fails the gate (debt only shrinks, like `LOC_ALLOW_LIST`); (c) a non-vacuous
+  detector check. Seeded with `bottom_drag_coeff` (→ `bottom_drag_r`). Entrenched debt (`nlev`,
+  `T_sfc`) and unit hazards (`tau_relax`, `C_water`/`c_water`) are **documented but not
+  auto-ratcheted** — an identifier scan can't judge units, and a 3566-site gate is impractical;
+  those are dedicated-cleanup-PR / dimension-10 items.
+
+This layer composes with the existing guards rather than replacing them:
+`test_no_scheme_duplication.py` (shared-block use), `test_clarity_guards.py` (LOC ceiling),
+`test_constants_audit.py` (no re-mirrored constants), `test_config_footguns.py` (single-source
+config fields). The gap they share — **semantic** equivalence under different names — is layer 2.
+
+**Layer 2 — agent-based semantic audit (on-demand / nightly): lego-modularity-tester
+dimension 10.** What no text/AST-pattern scan can reach:
+- **synonym functions** — two functions computing the same thing under different names
+  (`apply_sponge` vs `restore_tracers`);
+- **parameter-only duplication** — helpers that differ only in arg names / indexing / defaults
+  and should be one generic function (the survey already found: sponge-γ
+  `compute_sponge_gamma_latlon`/`_mpas`; DM95 taper; bottom-drag padding; vertical-mixing vmap
+  stacking — all `generalizable=True`);
+- **cross-oracle naming gaps** — an oracle concept not yet in the registry → propose a registry
+  entry;
+- **orphaned decompositions** — extracted helpers re-duplicated elsewhere.
+The agent reports candidates with a generalisation suggestion + effort; a human approves the
+merge and, where appropriate, adds the new shared helper + a deterministic guard so the
+specific duplication can't recur.
+
+**Division of labour:** layer 1 stops *known* synonyms/duplication from spreading (fast,
+deterministic, ratcheted); layer 2 *discovers* new ones (semantic, adversarial). Findings from
+layer 2 graduate into layer 1 (a new registry alias + baseline, or a new shared helper + a
+`test_no_scheme_duplication` entry).
+
+---
+
+## 10. Expansion path to full legoESM
 
 The ocean is the pilot. **Gate full-ESM expansion on the ocean pattern proving successful**
 (a shipped, monkey-patch-free, fidelity-verified ACC recipe + the equivariance tier in CI).
@@ -479,7 +585,7 @@ keep this doctrine **ocean-scoped**.
 
 ---
 
-## 10. Proposed `CLAUDE.md` rules block (pending approval)
+## 11. Proposed `CLAUDE.md` rules block (pending approval)
 
 Add under the ocean rules, with a one-line pointer to this doc. Kept short on purpose —
 CLAUDE.md is always-loaded.
