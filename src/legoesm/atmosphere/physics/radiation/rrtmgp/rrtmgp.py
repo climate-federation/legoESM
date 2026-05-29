@@ -147,36 +147,6 @@ class RRTMGP:
   """
 
   @staticmethod
-  def _cache_key(config):
-      """Compute a hashable cache key from an RRTMGPConfig.
-
-      .. deprecated:: issue #273 follow-up
-         This key drives **both** the heavy optics-table cache
-         (``_legoesm_optics_cache`` — keyed only on table-shape
-         inputs) and the lighter solver-instance cache
-         (``_instance_cache`` in ``rrtmgp_radiation.py`` — needs to
-         additionally invalidate on solver-behavior fields like
-         ``use_scan``).  Sharing one key for both caches meant a
-         first call with ``use_scan=False`` would cache a solver
-         instance whose ``_config.use_scan`` is ``False``; a later
-         call with ``use_scan=True`` (or the new ``None`` auto-pick)
-         would reuse that stale instance and silently keep running
-         the for-loop path — defeating the GPU scan auto-pick this
-         module ships.
-
-         Production code should call the more specific keys:
-
-         * ``_optics_cache_key(config)`` for the optics tables
-           (omits behavior fields that don't change tables).
-         * ``_instance_cache_key(config)`` for solver instances
-           (includes behavior fields like ``use_scan``).
-
-         ``_cache_key`` remains as a backward-compatible alias for
-         ``_optics_cache_key``.
-      """
-      return RRTMGP._optics_cache_key(config)
-
-  @staticmethod
   def _optics_cache_key(config):
       """Hashable key for the optics-table cache.
 

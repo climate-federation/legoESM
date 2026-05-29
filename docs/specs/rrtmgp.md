@@ -83,6 +83,18 @@ findings (cloud-optics None-guard, _hashable dtype gate).
   5 unused `kernel_ops` functions.
 - iter-47: trim 2 unused constants re-exports.
 - iter-48: ruff F401 sweep — 4 real unused imports.
+- iter-51: clear-sky `solve_columns()` happy-path regression pin
+  (no cloud kwargs).
+- iter-52: trim dead `reconstruct_vmr_fields_from_pressure` path.
+- iter-53: drop dead `from_config` factories
+  (`AtmosphericState.from_config`, `LookupVolumeMixingRatio.from_config`).
+- iter-54: drop dead `AtmosphericStateCfg` + `RadiativeTransfer`
+  swirl_jatmos config classes.
+- iter-55: delete dead `utils/` subdirectory.
+- iter-56: drop dead `interpolate_orig` + `evaluate_weighted_lookup`
+  from `optics_utils.py` (-72 lines).
+- iter-57: drop deprecated `RRTMGP._cache_key` alias; update
+  `aimip_params.py` docstring to point to `_optics_cache_key`.
 
 ### Regression tests (~60 tests across 10+ classes)
 
