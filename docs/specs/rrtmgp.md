@@ -69,7 +69,7 @@ config flag; `precomputed_lw_optical_props` dedups optics call
 - iter-45+46+47+48: trim 537 LOC dead `interpolation.py` + 5
   `kernel_ops` + 2 constants re-exports + 4 F401 imports.
 
-### Dead-code trim (iter-50 → 60)
+### Dead-code trim (iter-50 → 61)
 - iter-51: clear-sky `solve_columns` regression pin (no cloud kwargs).
 - iter-52: `reconstruct_vmr_fields_from_pressure` path.
 - iter-53: `from_config` factories on `AtmosphericState`/`LookupVMR`.
@@ -82,6 +82,13 @@ config flag; `precomputed_lw_optical_props` dedups optics call
   `@_skip_if_metal_broken` for 3 JAX-Metal env failures.
 - iter-60: `recurrent_op_1d` + `recurrent_op_1d_scan` in
   `rte_utils.py` (-83 LOC).
+- iter-61: `GrayAtmosphereOptics` class (impl + config) — swirl_jatmos
+  RRTMGP-internal gray-radiation impl that legoESM never used
+  (legoESM has `legoesm.atmosphere.physics.radiation.gray`).  Drops
+  155 LOC class + 12 LOC config + 4 import lines + 2 cast tweaks +
+  `optics_factory` dispatch elif branch.  Net -172 LOC.  Factory's
+  unknown-scheme `raise ValueError` (per CLAUDE.md dispatch audit)
+  preserved + made the error message more informative.
 
 ### Regression tests (~60 across 10+ classes)
 `test_rrtmgp_stratosphere.py` — `TestClipToTableRange`,

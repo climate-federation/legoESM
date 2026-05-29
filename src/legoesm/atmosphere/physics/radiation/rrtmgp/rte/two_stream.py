@@ -248,7 +248,7 @@ def solve_lw(
       `flux_down`: The downwelling longwave radiative flux at face i - 1/2.
       `flux_net`: The net longwave radiative flux at face i - 1/2.
   """
-  optics_lib = cast(optics.RRTMOptics | optics.GrayAtmosphereOptics, optics_lib)
+  optics_lib = cast(optics.RRTMOptics, optics_lib)
   if vmr_fields is not None:
     # Convert the chemical formulas of the gas species to RRTM-consistent
     # numerical identifiers.
@@ -423,7 +423,7 @@ def solve_sw(
       `flux_net`: The net shortwave radiative flux at face i - 1/2.
   """
   zenith = atmos_state.zenith
-  optics_lib = cast(optics.RRTMOptics | optics.GrayAtmosphereOptics, optics_lib)
+  optics_lib = cast(optics.RRTMOptics, optics_lib)
   if vmr_fields is not None:
     # Convert the chemical formulas of the gas species to RRTM-consistent
     # numerical identifiers.

@@ -33,28 +33,14 @@ class RRTMOptics:
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
-class GrayAtmosphereOptics:
-  """Parameters for gray atmosphere optics."""
-
-  # Reference surface pressure.
-  p0: float = 1e5
-  # The ratio of the pressure scale height to the partial-pressure scale height
-  # of the infrared absorber.
-  alpha: float = 3.5
-  # Longwave optical depth of the entire gray atmosphere.
-  d0_lw: float = 0.0
-  # Shortwave optical depth of the entire gray atmosphere.
-  d0_sw: float = 0.0
-
-
-@dataclasses.dataclass(frozen=True, kw_only=True)
 class OpticsParameters(dataclasses_json.DataClassJsonMixin):
-  optics: RRTMOptics | GrayAtmosphereOptics
+  optics: RRTMOptics
 
-# iter-54 dead-code trim: removed ``AtmosphericStateCfg`` and
-# ``RadiativeTransfer`` swirl_jatmos config classes.  Both were only
-# wired through the iter-23-removed ``RRTMGP.__init__`` /
-# ``atmospheric_state.from_config`` / ``lookup_volume_mixing_ratio.from_config``
-# chain; legoESM constructs ``AtmosphericState`` and
-# ``LookupVolumeMixingRatio`` directly via ``solve_columns`` and
-# ``_build_optics_and_vmr``.
+# iter-54 / iter-61 dead-code trim: removed ``AtmosphericStateCfg``,
+# ``RadiativeTransfer``, and ``GrayAtmosphereOptics`` swirl_jatmos
+# config classes.  The first two were only wired through the
+# iter-23-removed ``RRTMGP.__init__`` / ``atmospheric_state.from_config`` /
+# ``lookup_volume_mixing_ratio.from_config`` chain.  The third was
+# the type tag for an RRTMGP-internal gray-radiation impl that
+# legoESM never used (legoESM has its own gray scheme at
+# ``legoesm.atmosphere.physics.radiation.gray``).

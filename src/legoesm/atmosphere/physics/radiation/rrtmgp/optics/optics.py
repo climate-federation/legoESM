@@ -20,12 +20,9 @@ from typing import Callable, TypeAlias, cast
 import logging
 import jax
 import jax.numpy as jnp
-import numpy as np
 from legoesm.atmosphere.physics._shared import safe_divide
-from legoesm.atmosphere.physics.radiation.rrtmgp import kernel_ops
 from legoesm.atmosphere.physics.radiation.rrtmgp.config import radiative_transfer
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import cloud_optics
-from legoesm.atmosphere.physics.radiation.rrtmgp.optics import constants
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import gas_optics
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_cloud_optics
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_gas_optics_base
@@ -649,163 +646,6 @@ class RRTMOptics(optics_base.OpticsScheme):
     return self.gas_optics_sw.solar_src_scaled
 
 
-class GrayAtmosphereOptics(optics_base.OpticsScheme):
-  """Implementation of the gray atmosphere optics scheme."""
-
-  def __init__(
-      self,
-      params: radiative_transfer.OpticsParameters,
-  ):
-    super().__init__()
-    optics = params.optics
-    assert isinstance(optics, radiative_transfer.GrayAtmosphereOptics)
-    self._p0 = optics.p0
-    self._alpha = optics.alpha
-    self._d0_lw = optics.d0_lw
-    self._d0_sw = optics.d0_sw
-
-  @override
-  def compute_lw_optical_properties(
-      self,
-      pressure: Array,
-      *args,
-      **kwargs,
-  ) -> dict[str, Array]:
-    """Compute longwave optical properties based on pressure and lapse rate.
-
-    See Schneider 2004, J. Atmos. Sci. (2004) 61 (12): 1317–1340.
-    DOI: https://doi.org/10.1175/1520-0469(2004)061<1317:TTATTS>2.0.CO;2
-    To obtain the local optical depth of the layer, the expression for
-    cumulative optical depth (from the top of the atmosphere to an arbitrary
-    pressure level) was differentiated with respect to the pressure and
-    multiplied by the pressure difference across the grid cell.
-
-    Args:
-      pressure: The pressure field [Pa].
-      *args: Miscellaneous inherited arguments.
-      **kwargs: Miscellaneous inherited keyword arguments.
-
-    Returns:
-      A dictionary containing the optical depth (`optical_depth`), the single-
-      scattering albedo (`ssa`), and the asymmetry factor (`asymmetry_factor`)
-      for longwave radiation.
-    """
-    # Compute the centered pressure difference in z: (p_{k+1} - p_{k-1}) / 2.
-    dp = 0.5 * kernel_ops.centered_difference(pressure, dim=2)
-    # Compute the pointwise optical depth as a function of pressure only.
-    alpha, d0_lw, p0 = self._alpha, self._d0_lw, self._p0
-    tau = jnp.abs(alpha * d0_lw * (pressure / p0) ** alpha / pressure * dp)
-
-    return {
-        'optical_depth': tau,
-        'ssa': jnp.zeros_like(pressure),
-        'asymmetry_factor': jnp.zeros_like(pressure),
-    }
-
-  @override
-  def compute_sw_optical_properties(
-      self,
-      pressure: Array,
-      *args,
-      **kwargs,
-  ) -> dict[str, Array]:
-    """Compute the shortwave optical properties of a gray atmosphere.
-
-    See O'Gorman 2008, Journal of Climate Vol 21, Page(s): 3815–3832.
-    DOI: https://doi.org/10.1175/2007JCLI2065.1. In particular, the cumulative
-    optical depth expression shown in equation 3 inside the exponential is
-    differentiated with respect to pressure and scaled by the pressure
-    difference across the grid cell.
-
-    Args:
-      pressure: The pressure field [Pa].
-      *args: Miscellaneous inherited arguments.
-      **kwargs: Miscellaneous inherited keyword arguments.
-
-    Returns:
-      A dictionary containing the optical depth (`optical_depth`), the single-
-      scattering albedo (`ssa`), and the asymmetry factor (`asymmetry_factor`)
-      for shortwave radiation.
-    """
-    # Compute the centered pressure difference in z:
-    #   dp_{i,j,k} = (p_{i,j,k+1} - p_{i,j,k-1}) / 2.
-    dp = 0.5 * kernel_ops.centered_difference(pressure, dim=2)
-
-    # Compute the pointwise optical depth as a function of pressure only.
-    d0_sw, p0 = self._d0_sw, self._p0
-    tau = jnp.abs(2 * d0_sw * (pressure / p0) * (dp / p0))
-
-    return {
-        'optical_depth': tau,
-        'ssa': jnp.zeros_like(pressure),
-        'asymmetry_factor': jnp.zeros_like(pressure),
-    }
-
-  @override
-  def compute_planck_sources(
-      self,
-      pressure: Array,
-      temperature: Array,
-      *args,
-      sfc_temperature: Array | None = None,
-  ) -> dict[str, Array]:
-    """Compute the Planck sources used in the longwave problem.
-
-    The computation is based on Stefan-Boltzmann's law, which states that the
-    thermal radiation emitted from a blackbody is directly proportional to the
-    4-th power of its absolute temperature.
-
-    Args:
-      pressure: The pressure field [Pa].
-      temperature: The temperature [K].
-      *args: Miscellaneous inherited arguments.
-      sfc_temperature: The optional surface temperature [K], 2D field.
-
-    Returns:
-      A dictionary containing the Planck source at the cell center
-      (`planck_src`), the top cell boundary (`planck_src_top`), and the bottom
-      cell boundary (`planck_src_bottom`).
-    """
-    del pressure
-    assert sfc_temperature is not None, 'sfc_temperature is required.'
-
-    def src_fn(t: Array) -> Array:
-      return constants.STEFAN_BOLTZMANN * t**4 / np.pi
-
-    # Interpolate temperature from (ccc) to (ccf), and also provide a shifted
-    # copy.
-    temperature_bottom, temperature_top = optics_base.reconstruct_face_values(
-        temperature, f_lower_bc=sfc_temperature
-    )
-
-    planck_srcs = {
-        'planck_src': src_fn(temperature),
-        'planck_src_top': src_fn(temperature_top),
-        'planck_src_bottom': src_fn(temperature_bottom),
-    }
-    if sfc_temperature is not None:
-      planck_srcs['planck_src_sfc'] = src_fn(sfc_temperature)
-    return planck_srcs
-
-  @property
-  @override
-  def n_gpt_lw(self) -> int:
-    """The number of g-points in the longwave bands."""
-    return 1
-
-  @property
-  @override
-  def n_gpt_sw(self) -> int:
-    """The number of g-points in the shortwave bands."""
-    return 1
-
-  @override
-  @property
-  def solar_fraction_by_gpt(self) -> Array:
-    """Mapping from g-point to the fraction of total solar radiation."""
-    return jnp.array([1.0], dtype=jnp.float_)
-
-
 def optics_factory(
     params: radiative_transfer.OpticsParameters,
     vmr_lib: LookupVolumeMixingRatio | None = None,
@@ -828,7 +668,9 @@ def optics_factory(
   if isinstance(params.optics, radiative_transfer.RRTMOptics):
     assert vmr_lib is not None, '`vmr_lib` is required for `RRTMOptics`.'
     return RRTMOptics(vmr_lib, params, include_clouds=include_clouds)
-  elif isinstance(params.optics, radiative_transfer.GrayAtmosphereOptics):
-    return GrayAtmosphereOptics(params)
-  else:
-    raise ValueError('Unsupported optics scheme.')
+  raise ValueError(
+      f'Unsupported optics scheme: {type(params.optics).__name__!r}. '
+      'Only RRTMOptics is supported in legoESM (iter-61 dropped the '
+      'swirl_jatmos GrayAtmosphereOptics path; use '
+      'legoesm.atmosphere.physics.radiation.gray for gray radiation).'
+  )
