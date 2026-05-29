@@ -2176,6 +2176,16 @@ class ModelDriver:
         # is a no-op there.  (Time-varying-over-the-run GHG is a follow-on:
         # thread it through ``forcing`` like T_sfc; here it is fixed at the
         # start-year value.)
+        # Phase D perf: run the RRTMGP optics tables + RTE solve in float32 even
+        # under JAX x64 (the dycore stays fp64).  rrtmgp-on-MPAS was the
+        # compute-bound limit that forced the moist-AMIP commit to fall back to
+        # gray for long runs; the fp64 RTE solve dominates on fp64-limited GPUs
+        # (e.g. RTX 8000, fp64 ~ 1/32 of fp32), so the fp32 path is ~2x faster
+        # with heating identical to <0.01 K/day vs fp64 (benchmarked).  Honors
+        # the ``RRTMGPConfig.compute_fp32`` contract ("the MPAS driver enables
+        # it for the long-run rrtmgp path").  Enabled ONLY for rrtmgp — gray
+        # radiation ignores the rrtmgp sub-config, so leave the default there.
+        _rrtmgp_fp32 = (cfg.radiation == "rrtmgp")
         phys_cfg = PhysicsConfig(
             radiation=RadiationConfig(
                 scheme=cfg.radiation if cfg.radiation != "none" else "none",
@@ -2183,6 +2193,7 @@ class ModelDriver:
                     co2_ppmv=cfg.co2_ppmv,
                     ch4_ppbv=cfg.ch4_ppbv,
                     n2o_ppbv=cfg.n2o_ppbv,
+                    compute_fp32=_rrtmgp_fp32,
                 ),
                 # Ozone source (default "standard" matches the bare default; a
                 # non-standard --ozone-source now flows to MPAS rrtmgp).  The
@@ -2196,7 +2207,50 @@ class ModelDriver:
             microphysics=MicrophysicsConfig(scheme=cfg.microphysics),
             gravity_wave_drag=GravityWaveDragConfig(scheme=cfg.gravity_wave_drag),
         )
-        physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT)
+        # Phase D perf: shard the per-column RRTMGP workload across all local
+        # devices (issue #273 ``column_mesh``).  rrtmgp is the dominant MPAS
+        # cost — the per-column k-distribution × RTE solve already saturates a
+        # single GPU, so sharding the ``nCells`` columns across N devices is
+        # embarrassingly parallel and scales ~linearly (the dynamics stays on
+        # the default device; only the radiation columns shard).  Enabled only
+        # for rrtmgp with >1 device AND nCells divisible by the device count —
+        # the radiation kernel requires an exact split, and padding the
+        # UNSTRUCTURED column axis is unsafe (a phantom cell has no mesh
+        # geometry), so we fall back to single-device otherwise.
+        # SINGLE-PROCESS ONLY: under MPI (``is_distributed``) every rank sees
+        # the full node device set, so a per-rank column mesh would shard each
+        # rank's already-rank-local columns across ALL node GPUs and collide
+        # with the MPI halo exchange (which works on rank-local unsharded
+        # arrays).  The MPI path does its own device distribution; column
+        # sharding is the single-process multi-GPU lever.  ``len(jax.devices())``
+        # (not ``local_device_count``) matches ``create_column_mesh``'s own
+        # ``jax.devices()`` so the divisibility check and the built mesh agree.
+        if _rrtmgp_fp32:
+            logger.info(
+                "  RRTMGP compute_fp32: optics tables + RTE solve in float32 "
+                "(dycore stays fp64)"
+            )
+        _column_mesh = None
+        _single_process = (self._device_config is None
+                           or not self._device_config.is_distributed)
+        _n_dev = len(jax.devices())
+        _ncell = int(self.state.T.data.shape[0])
+        if (cfg.radiation == "rrtmgp" and _single_process
+                and _n_dev > 1 and _ncell % _n_dev == 0):
+            from legoesm.parallel.column_shard import create_column_mesh
+            _column_mesh = create_column_mesh(_n_dev)
+            logger.info(
+                f"  RRTMGP column-sharding: {_ncell} cells / {_n_dev} devices "
+                f"= {_ncell // _n_dev} cols/device"
+            )
+        elif cfg.radiation == "rrtmgp" and _single_process and _n_dev > 1:
+            logger.warning(
+                f"  RRTMGP column-sharding skipped: nCells={_ncell} not "
+                f"divisible by n_devices={_n_dev}; running single-device "
+                f"(throughput not scaled across GPUs)"
+            )
+        physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT,
+                                  column_mesh=_column_mesh)
 
         # ---- AMIP surface boundary: anchor radiation to the prescribed SST -
         # Without this the MPAS hydrostatic radiation falls back to using the

@@ -194,7 +194,7 @@ class RRTMGP:
               config.lw_cloud_file, config.sw_cloud_file,
               config.include_clouds,
               config.co2_ppmv, config.ch4_ppbv, config.n2o_ppbv,
-              x64)
+              x64, getattr(config, "compute_fp32", False))
 
   @staticmethod
   def _instance_cache_key(config):
@@ -266,6 +266,22 @@ class RRTMGP:
           )
 
           optics_lib = optics_factory(optics_params, vmr_lib)
+          if getattr(config, "compute_fp32", False):
+              # Cast the loaded optics tables float64 -> float32 so the whole
+              # solve runs in fp32 even under JAX x64 (the dycore keeps fp64).
+              # ``solve_columns`` reads ``_table_dtype`` from these tables and
+              # promotes every input + lax.scan carry to match, so casting the
+              # tables alone flips the entire RTE path to fp32 — ~2x faster on
+              # fp64-limited GPUs, heating identical to <0.01 K/day.  Only
+              # float64 leaves are cast (integer index tables are left intact).
+              import jax as _jax
+              optics_lib = _jax.tree_util.tree_map(
+                  lambda _x: (_x.astype(jnp.float32)
+                              if (hasattr(_x, "dtype")
+                                  and _x.dtype == jnp.float64)
+                              else _x),
+                  optics_lib,
+              )
           _legoesm_optics_cache[key] = (optics_lib, vmr_lib)
       return _legoesm_optics_cache[key]
 
