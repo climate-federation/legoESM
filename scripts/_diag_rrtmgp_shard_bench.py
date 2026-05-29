@@ -65,13 +65,16 @@ def time_fn(fn, state, mesh, sigma, label, n=5):
     def _tend(r):
         return r if hasattr(r, "dT_dt") else r[0]
     jfn = jax.jit(lambda s: fn(s, mesh, sigma))
+    _tc0 = time.time()
     heat = _tend(jfn(state)).dT_dt.data
     heat.block_until_ready()
+    t_compile = time.time() - _tc0
     t0 = time.time()
     for _ in range(n):
         _tend(jfn(state)).dT_dt.data.block_until_ready()
     dt = (time.time() - t0) / n
-    print(f"[bench] {label:18s} {dt*1000:8.1f} ms/call  heat[min,max]="
+    print(f"[bench] {label:18s} compile={t_compile*1000:8.1f} ms  "
+          f"steady={dt*1000:8.1f} ms/call  heat[min,max]="
           f"[{float(jnp.min(heat))*86400:.2f},{float(jnp.max(heat))*86400:.2f}] K/day",
           flush=True)
     return heat, dt
@@ -87,6 +90,19 @@ def main():
     print(f"[bench] L{LEVEL} nCells={mesh.nCells} nlev={NLEV}", flush=True)
 
     rad_cfg = RadiationConfig(scheme="rrtmgp", rrtmgp=RRTMGPConfig())
+
+    # Direct proof the compute_fp32 cast actually flips the lookup-table dtype.
+    # The original cast was a tree_map no-op (RRTMOptics is not a registered
+    # pytree), so fp32 heating came out bit-identical to fp64.  solve_columns
+    # keys whole-solve precision off gas_optics_lw.kmajor.dtype, so probe it.
+    from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+    _s64 = RRTMGP.from_legoesm_config(RRTMGPConfig())
+    _s32 = RRTMGP.from_legoesm_config(RRTMGPConfig(compute_fp32=True))
+    _d64 = _s64.optics_lib.gas_optics_lw.kmajor.dtype
+    _d32 = _s32.optics_lib.gas_optics_lw.kmajor.dtype
+    print(f"[bench] table dtype: default-cfg={_d64}  compute_fp32-cfg={_d32} "
+          f"-> {'OK (fp32 engaged)' if _d32 == jnp.float32 else 'BROKEN (still fp64)'}",
+          flush=True)
 
     fn1 = make_radiation_physics(rad_cfg, "mpas", column_mesh=None)
     heat1, t1 = time_fn(fn1, state, mesh, sigma, "single-device")
