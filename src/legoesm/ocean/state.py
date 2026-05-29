@@ -798,8 +798,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     # Ocean-scoped physical constants (Phase G, G-C1). Defaults reference
     # legoesm.constants (canonical Earth) -> zero behaviour change. A recipe
     # pins these to a reference model (e.g. Veros) via the public config API.
-    # Read-through wiring (de-mirroring) is G-C2+. MUST stay the LAST field: its
-    # default assigns
-    # the class-body name `constants`, which would shadow the `constants`
-    # module for any field default declared after it.
+    # Read-through wiring (de-mirroring) is G-C2+. NOTE: no field whose default
+    # READS the `constants` module may be declared after this one — the default
+    # here assigns the class-body name `constants` to a ConstantsConfig
+    # instance, shadowing the module. Fields with literal defaults (e.g.
+    # momentum_flux_scheme below) are fine to append.
     constants: ConstantsConfig = ConstantsConfig()
+    # Horizontal momentum-flux reconstruction, used ONLY when
+    # momentum_advection="flux_form": "upwind" (1st-order, dissipative, stable)
+    # or "centered" (2nd-order, non-dissipative). Ignored by the
+    # vector_invariant / weno momentum paths. Literal default -> safe after
+    # `constants`.
+    momentum_flux_scheme: str = "upwind"

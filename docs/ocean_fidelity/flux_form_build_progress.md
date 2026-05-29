@@ -6,9 +6,13 @@ every micro-decision. Newest at the bottom.
 
 ## Gate status
 - [x] F1 existing paths bit-identical (gate green; unchanged by F2a)
-- [~] F2 dispatch discipline — F2a DONE (momentum_advection validated against
-      {vector_invariant,weno5,weno7}; unknown raises; was a silent fallthrough). flux_form +
-      momentum_flux_scheme validation land WITH the substage.
+- [x] F2 dispatch discipline — DONE. momentum_advection validated against
+      {vector_invariant,weno5,weno7,flux_form}; momentum_flux_scheme against {upwind,centered};
+      unknown raises (was a silent fallthrough). Tests in test_config_footguns.py.
+- [x] F3 zero-velocity ⇒ zero (test_flux_form_momentum.py)
+- [x] F4 uniform-flow analytic ⇒ zero
+- [x] F5 momentum conservation (centered + upwind; volume-weighted integral ~ machine-eps)
+- [x] F6 differentiability (jax.grad finite + nonzero)
 - [ ] F3 zero-velocity ⇒ zero
 - [ ] F4 uniform-flow analytic ⇒ zero
 - [ ] F5 momentum conservation (periodic domain)
@@ -63,3 +67,28 @@ to copy its exact `dx_v` (v-face zonal length) + area convention, so the vertex-
 consistent with continuity. Guard `is_tripolar` with a clear ValueError (flux-form on tripolar is
 a follow-up; ACC/gates use regular/regional grids). Upwind vs centred u_c/v_c via
 `momentum_flux_scheme` (default "upwind"); centred is the cleanest for the F4 uniform-flow check.
+
+### 2026-05-29 · iter 2 · substage implemented; F2-F6 green
+Implemented `_bc_horizontal_momentum_advection_flux_form` (FV form mirroring divergence_cgrid's
+metric) + `momentum_flux_scheme` config field (after `constants`, literal default -> safe) +
+"flux_form" in VALID_MOMENTUM_ADVECTION + VALID_MOMENTUM_FLUX_SCHEME + validation in
+_validate_config. Dispatch wired at stage 7b (flux_form -> new substage, else _bc_pv_flux), and
+CRITICALLY: when flux_form, the KE-gradient term (dKE_dx/dy) is zeroed before KE_PGF so it isn't
+double-counted (vector-invariant splits advection into grad-KE + PV flux; flux-form gives the
+whole thing). The substage fills the same `vortcor` diagnostic slot, so the orchestrator +
+momentum closure are unchanged.
+**Two real issues found + fixed via the gates (this is why the loop fits):**
+1. KE double-count (above) — caught by reasoning before coding.
+2. v-momentum x-flux relied on the input periodic wrap column (u[:, n_lon]==u[:, 0]); random test
+   input violated it -> conservation residual 1e-2. Fixed to roll-based periodicity (drop the u
+   wrap col), mirroring the u-momentum x-part -> telescopes EXACTLY regardless of input. The
+   u-momentum part was already roll-based (passed at 1e-18 first try).
+**Conservation nuance (documented, honest):** on a walled lat-lon domain the v-momentum
+y-advection legitimately transfers momentum to the N/S walls (y is not periodic), so the simple
+domain integral is the wall reaction, NOT zero. F5 isolates the SCHEME's conservation (flux
+telescoping) via an interior flow (v->0 in the 2 rows nearest each pole); u-momentum is periodic
+in lon and conserves unconditionally. Gate uses a float64 grid (default area is float32).
+GATES GREEN: F1 F2 F3 F4 F5(centered+upwind) F6. 16 flux-form + footgun tests green; momentum-
+diagnostics closure green.
+NEXT: F7 (Munk/Stommel gyre stability with flux_form), F8 (flux_form golden case in the
+decomposition gate), F9 (ACC oracle re-run, informational).

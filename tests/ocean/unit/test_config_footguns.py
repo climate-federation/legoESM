@@ -148,3 +148,22 @@ def test_validate_config_accepts_valid_momentum_advection():
     for scheme in VALID_MOMENTUM_ADVECTION:
         cfg = LatLonCGridOceanConfig(momentum_advection=scheme)
         LatLonCGridOceanModel._validate_config(cfg)  # must not raise
+
+
+def test_validate_config_rejects_unknown_momentum_flux_scheme():
+    """An unknown momentum_flux_scheme (used by momentum_advection='flux_form')
+    must raise at construction."""
+    bad = LatLonCGridOceanConfig(
+        momentum_advection="flux_form", momentum_flux_scheme="quadratic",
+    )
+    with pytest.raises(ValueError, match="momentum_flux_scheme must be one of"):
+        LatLonCGridOceanModel._validate_config(bad)
+
+
+def test_validate_config_accepts_flux_form_with_valid_scheme():
+    """flux_form with a valid momentum_flux_scheme passes construction."""
+    for scheme in ("upwind", "centered"):
+        cfg = LatLonCGridOceanConfig(
+            momentum_advection="flux_form", momentum_flux_scheme=scheme,
+        )
+        LatLonCGridOceanModel._validate_config(cfg)  # must not raise

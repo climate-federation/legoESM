@@ -527,12 +527,19 @@ class LatLonCGridOceanModel:
         # source: VALID_MOMENTUM_ADVECTION in ocean_pe_latlon_cgrid.
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
             VALID_MOMENTUM_ADVECTION,
+            VALID_MOMENTUM_FLUX_SCHEME,
         )
         if config.momentum_advection not in VALID_MOMENTUM_ADVECTION:
             raise ValueError(
                 f"momentum_advection must be one of "
                 f"{sorted(VALID_MOMENTUM_ADVECTION)}, "
                 f"got {config.momentum_advection!r}",
+            )
+        if config.momentum_flux_scheme not in VALID_MOMENTUM_FLUX_SCHEME:
+            raise ValueError(
+                f"momentum_flux_scheme must be one of "
+                f"{sorted(VALID_MOMENTUM_FLUX_SCHEME)}, "
+                f"got {config.momentum_flux_scheme!r}",
             )
         if config.max_abs_eta_m <= 0.0:
             raise ValueError(

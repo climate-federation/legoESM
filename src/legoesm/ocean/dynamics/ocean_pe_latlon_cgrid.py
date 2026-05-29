@@ -110,8 +110,12 @@ from legoesm.ocean.vertical import (
 # Single source of truth for the lat-lon C-grid horizontal momentum-advection
 # dispatch literals (dispatch discipline: validated at config construction;
 # unknown -> ValueError, never a silent fallthrough to vector-invariant).
-# "flux_form" is added when its substage lands (build spec gate F2).
-VALID_MOMENTUM_ADVECTION = frozenset({"vector_invariant", "weno5", "weno7"})
+VALID_MOMENTUM_ADVECTION = frozenset(
+    {"vector_invariant", "weno5", "weno7", "flux_form"}
+)
+# Reconstruction schemes for the advected velocity in the flux-form path
+# (config.momentum_flux_scheme; only used when momentum_advection="flux_form").
+VALID_MOMENTUM_FLUX_SCHEME = frozenset({"upwind", "centered"})
 
 
 def _interp_to_v_points(f: jnp.ndarray, grid=None) -> jnp.ndarray:
@@ -2009,6 +2013,114 @@ def _bc_sponge_relaxation(du_dt, dv_dt, dT_dt, dS_dt, T, S, u, v, sponge, grid):
     return du_dt, dv_dt, dT_dt, dS_dt, diag_sponge_u, diag_sponge_v
 
 
+def _bc_horizontal_momentum_advection_flux_form(
+    du_dt, dv_dt, u, v, h_u, h_v, u_mask_3d, v_mask_3d, mask, grid, config,
+):
+    """Flux-form horizontal momentum advection (alternative to the
+    vector-invariant PV flux, `_bc_pv_flux`) — the Veros/MOM6/MITgcm form
+    -div(transport (x) velocity), selected by ``momentum_advection="flux_form"``.
+
+    Conservative FV discretization mirroring ``divergence_cgrid``'s metric
+    (u-face meridional length ``dy*0.5``, v-face zonal length ``R·cos(lat_v)·dlon``,
+    cell ``area``). Momentum is conserved by flux telescoping: the cross-face
+    fluxes cancel in the domain sum (periodic in lon, v=0 wall at the poles).
+    The advected velocity is reconstructed by ``config.momentum_flux_scheme``
+    ("upwind" 1st-order / "centered" 2nd-order).
+
+    Returns ``(du_dt, dv_dt, diag_hadv_u, diag_hadv_v)`` — the horizontal-
+    advection contribution fills the same diagnostic slot the PV flux would
+    (so the orchestrator + momentum-diagnostics closure are unchanged).
+    """
+    if is_tripolar(grid):
+        raise ValueError(
+            "momentum_advection='flux_form' is not yet implemented on tripolar "
+            "grids (the vertex-metric handling needs the 2D dx_v/dy_u fields). "
+            "Use 'vector_invariant' on tripolar, or extend this substage."
+        )
+    scheme = getattr(config, "momentum_flux_scheme", "upwind")
+    n_lon = u.shape[1] - 1
+
+    # --- FV metrics (mirror divergence_cgrid) ---
+    dy_u = (grid.dy * 0.5)[:, jnp.newaxis, jnp.newaxis]            # (n_lat,1,1)
+    lat = grid.lat
+    cos_lat_v = jnp.pad(jnp.cos(0.5 * (lat[:-1] + lat[1:])), (1, 1))
+    face_dx_v = (grid.radius * cos_lat_v * grid.dlon)[:, jnp.newaxis, jnp.newaxis]  # (n_lat+1,1,1)
+    area = grid.area[..., jnp.newaxis]                            # (n_lat,n_lon,1)
+
+    # Volume transports through faces [m^3/s] (h-weighted velocity x face length).
+    Q_u = h_u * u * u_mask_3d * dy_u            # (n_lat, n_lon+1, nlev)
+    Q_v = h_v * v * v_mask_3d * face_dx_v       # (n_lat+1, n_lon, nlev)
+
+    def _upwind(adv_pos, adv_neg, transport):
+        # Upstream value: take adv_pos where transport > 0 (flow from that side).
+        if scheme == "centered":
+            return 0.5 * (adv_pos + adv_neg)
+        return jnp.where(transport > 0.0, adv_pos, adv_neg)
+
+    # ============ u-momentum at u-points (n_lat, n_lon+1) ============
+    # x-flux at cell centres: transport_x_centre * u_advected_centre.
+    Qx_c = 0.5 * (Q_u[:, :-1, :] + Q_u[:, 1:, :])                 # (n_lat,n_lon,nlev)
+    u_c = _upwind(u[:, :-1, :], u[:, 1:, :], Qx_c)               # west when Qx>0
+    Fx_uu = Qx_c * u_c                                           # (n_lat,n_lon,nlev)
+    # divergence to u-points (periodic in lon): flux[centre J] - flux[centre J-1].
+    _dx = Fx_uu - jnp.roll(Fx_uu, 1, axis=1)
+    net_zonal_u = jnp.concatenate([_dx, _dx[:, 0:1, :]], axis=1)  # (n_lat,n_lon+1,nlev)
+
+    # y-flux at vertices: transport_y_vertex * u_advected_vertex.
+    Qv_west = jnp.roll(Q_v, 1, axis=1)
+    Qy_vtx_core = 0.5 * (Q_v + Qv_west)                          # (n_lat+1,n_lon,nlev) at lon-centres? -> lon-faces
+    Qy_vtx = jnp.concatenate([Qy_vtx_core, Qy_vtx_core[:, 0:1, :]], axis=1)  # (n_lat+1,n_lon+1,nlev)
+    # u to lat-faces (vertices): interior avg of adjacent u rows; poles unused (Qy=0 there).
+    u_south = u[:-1, :, :]
+    u_north = u[1:, :, :]
+    u_vtx_int = _upwind(u_south, u_north, Qy_vtx[1:-1, :, :])    # (n_lat-1,n_lon+1,nlev)
+    zero_row = jnp.zeros_like(u[:1, :, :])
+    u_vtx = jnp.concatenate([zero_row, u_vtx_int, zero_row], axis=0)  # (n_lat+1,n_lon+1,nlev)
+    Fy_vu = Qy_vtx * u_vtx                                       # (n_lat+1,n_lon+1,nlev)
+    net_merid_u = Fy_vu[1:, :, :] - Fy_vu[:-1, :, :]            # (n_lat,n_lon+1,nlev)
+
+    # u-cell area at u-faces (avg of adjacent cell areas, periodic).
+    a_uc = 0.5 * (area[:, :, 0] + jnp.roll(area[:, :, 0], 1, axis=1))   # (n_lat,n_lon)
+    A_u = jnp.concatenate([a_uc, a_uc[:, 0:1]], axis=1)[..., jnp.newaxis]  # (n_lat,n_lon+1,1)
+    inv_Ah_u = u_mask_3d / jnp.maximum(A_u * h_u, 1.0e-12)
+    diag_hadv_u = -(net_zonal_u + net_merid_u) * inv_Ah_u
+
+    # ============ v-momentum at v-points (n_lat+1, n_lon) ============
+    # y-flux at cell centres: transport_y_centre * v_advected_centre.
+    Qy_c = 0.5 * (Q_v[:-1, :, :] + Q_v[1:, :, :])               # (n_lat,n_lon,nlev)
+    v_c = _upwind(v[:-1, :, :], v[1:, :, :], Qy_c)              # south when Qy>0
+    Fy_vv = Qy_c * v_c                                          # (n_lat,n_lon,nlev)
+    # divergence to v-points (interior lat-faces; poles are walls -> 0).
+    net_merid_v_int = Fy_vv[1:, :, :] - Fy_vv[:-1, :, :]       # (n_lat-1,n_lon,nlev)
+    zero_lon = jnp.zeros_like(v[:1, :, :])
+    net_merid_v = jnp.concatenate([zero_lon, net_merid_v_int, zero_lon], axis=0)
+
+    # x-flux at vertices (lon-faces). Use roll-based periodicity in lon (drop
+    # the u wrap column) so the divergence telescopes EXACTLY regardless of
+    # whether the input enforces u[:, n_lon] == u[:, 0] — mirrors the
+    # u-momentum x-part above.
+    Q_u_core = Q_u[:, :-1, :]                                   # (n_lat,n_lon,nlev) distinct lon-faces
+    Qx_vtx_int = 0.5 * (Q_u_core[:-1, :, :] + Q_u_core[1:, :, :])  # (n_lat-1,n_lon,nlev)
+    zero_vtx = jnp.zeros_like(Q_u_core[:1, :, :])
+    Qx_vtx = jnp.concatenate([zero_vtx, Qx_vtx_int, zero_vtx], axis=0)  # (n_lat+1,n_lon,nlev) at lon-faces
+    # v to lon-faces (vertices), periodic: west/east centres are v[:, j-1], v[:, j].
+    v_west = jnp.roll(v, 1, axis=1)
+    v_vtx = _upwind(v_west, v, Qx_vtx)                         # (n_lat+1,n_lon,nlev) west when Qx>0
+    Fx_uv = Qx_vtx * v_vtx                                     # at lon-faces 0..n_lon-1
+    # v-cell (centre j) E face = vertex j+1, W face = vertex j (periodic).
+    net_zonal_v = jnp.roll(Fx_uv, -1, axis=1) - Fx_uv          # (n_lat+1,n_lon,nlev)
+
+    # v-cell area at v-faces (avg of adjacent cell areas; poles padded edge).
+    a_vc = 0.5 * (area[:-1, :, 0] + area[1:, :, 0])           # (n_lat-1,n_lon)
+    A_v = jnp.concatenate([a_vc[:1], a_vc, a_vc[-1:]], axis=0)[..., jnp.newaxis]  # (n_lat+1,n_lon,1)
+    inv_Ah_v = v_mask_3d / jnp.maximum(A_v * h_v, 1.0e-12)
+    diag_hadv_v = -(net_zonal_v + net_merid_v) * inv_Ah_v
+
+    du_dt = du_dt + diag_hadv_u
+    dv_dt = dv_dt + diag_hadv_v
+    return du_dt, dv_dt, diag_hadv_u, diag_hadv_v
+
+
 def latlon_cgrid_ocean_baroclinic_tendencies(
     state: LatLonCGridOceanState,
     grid: LatLonGrid,
@@ -2113,6 +2225,15 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         u, v, p_prime_filled, rho_prime, grid, config, z_coord,
         eta_safe, H_bathy, g_val, mask,
     )
+    # Flux-form momentum advection (stage 7b below) provides the FULL horizontal
+    # advection -div(transport(x)u), which already includes the kinetic-energy
+    # gradient. The vector-invariant form instead splits advection into the KE
+    # gradient (here) + the PV flux (stage 7b). So under flux_form, drop the KE
+    # gradient here to avoid double-counting; KE_PGF then carries only the
+    # pressure gradient.
+    if _mom_adv == "flux_form":
+        dKE_dx = jnp.zeros_like(dKE_dx)
+        dKE_dy = jnp.zeros_like(dKE_dy)
 
     # --- 7. Momentum tendencies (non-Coriolis only) ---
     # Capture each term as a named local so the same expression feeds
@@ -2148,10 +2269,19 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     diag_sponge_u = _diag_zero_u
     diag_sponge_v = _diag_zero_v
 
-    # --- Stage 7b: potential-vorticity flux (vector-invariant advection). ---
-    du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v = _bc_pv_flux(
-        du_dt, dv_dt, u, v, h_u, h_v, h_k, u_mask_3d, v_mask_3d, mask, grid, _mom_adv,
-    )
+    # --- Stage 7b: horizontal momentum advection. Flux-form (-div(transport(x)u),
+    # Veros/MOM6 style) or the default vector-invariant PV flux. Both fill the
+    # same diagnostic slot. ---
+    if _mom_adv == "flux_form":
+        du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v = (
+            _bc_horizontal_momentum_advection_flux_form(
+                du_dt, dv_dt, u, v, h_u, h_v, u_mask_3d, v_mask_3d, mask, grid, config,
+            )
+        )
+    else:
+        du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v = _bc_pv_flux(
+            du_dt, dv_dt, u, v, h_u, h_v, h_k, u_mask_3d, v_mask_3d, mask, grid, _mom_adv,
+        )
 
     # --- Stage 7c: WENO divergence (D-term) dissipation. ---
     du_dt, dv_dt, diag_Dterm_u, diag_Dterm_v = _bc_dterm(
