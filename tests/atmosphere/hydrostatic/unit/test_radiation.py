@@ -1350,3 +1350,27 @@ class TestColumnShardedRadiation:
             np.asarray(ref.dT_dt.data),
             rtol=1.0e-12, atol=1.0e-14,
         )
+
+    def test_rrtmgp_sharded_matches_unsharded_on_single_device(self):
+        """Iter-28: same numerical-equivalence contract as the gray
+        path, but for ``scheme="rrtmgp"``.  Catches regressions that
+        break the gray path's column-shard invariance but happen to
+        only affect the RRTMGP-specific kernel (e.g. cache key bugs
+        that flip ``use_scan`` per-shard, JIT specialisation on
+        sharded vs non-sharded shapes, or the iter-13 sign fix
+        inadvertently breaking under sharded input)."""
+        from legoesm.parallel.column_shard import create_column_mesh
+        grid, sigma, state = self._make_state(n=4, nlev=8)
+        config = RadiationConfig(scheme="rrtmgp")
+        ref = make_radiation_physics(
+            config, model_type="hydrostatic",
+        )(state, grid, sigma)
+        mesh = create_column_mesh(n_devices=1)
+        out = make_radiation_physics(
+            config, model_type="hydrostatic", column_mesh=mesh,
+        )(state, grid, sigma)
+        np.testing.assert_allclose(
+            np.asarray(out.dT_dt.data),
+            np.asarray(ref.dT_dt.data),
+            rtol=1.0e-10, atol=1.0e-12,
+        )
