@@ -55,6 +55,7 @@ def _run_deck(out_dir: Path, *, forcing_dir: Path,
               resolution: int = 12,
               radiation: str = "gray",
               days: int = 1,
+              ic: str = "default",
               extra: list[str] | None = None,
               timeout: int = 240) -> subprocess.CompletedProcess:
     """Drive ``run_amip_cmip6_deck.py`` with a self-contained
@@ -75,6 +76,7 @@ def _run_deck(out_dir: Path, *, forcing_dir: Path,
         "--days", str(days),
         "--diag-days", "1",
         "--radiation", radiation,
+        "--ic", ic,
         "--no-aerosol", "--no-volcanic",
         "--output", str(out_dir),
     ]
@@ -193,6 +195,28 @@ def test_deck_runs_and_validates_latlon_finite_volume(tmp_path):
     )
     v = _validate(out)
     assert v.returncode == 0, v.stdout
+
+
+def test_deck_latlon_fv_standard_ic_realistic_cwv(tmp_path):
+    """The CMIP6 deck with ``--ic standard`` on lat-lon finite-volume must run,
+    validate, and start from an Earth-like column water vapour (~10-30 kg/m^2),
+    not the uniform-300 K default's ~84 kg/m^2."""
+    forcing = tmp_path / "forcing"
+    out = tmp_path / "amip_run"
+    r = _run_deck(out, forcing_dir=forcing,
+                   grid_type="latlon", discretization="finite_volume",
+                   resolution=24, ic="standard", days=2)
+    assert r.returncode == 0, (
+        f"deck driver failed (exit={r.returncode}):\n"
+        f"--- stderr (tail) ---\n{r.stderr[-2000:]}"
+    )
+    v = _validate(out)
+    assert v.returncode == 0, v.stdout
+    # Earth-like CWV (the realism payoff of ic=standard).
+    text = (out / "results.txt").read_text()
+    cwv_line = next(l for l in text.splitlines() if "Final <CWV>" in l)
+    cwv = float(cwv_line.split(":")[1].strip().split()[0])
+    assert 5.0 < cwv < 40.0, f"ic=standard CWV {cwv} not Earth-like"
 
 
 def test_deck_runs_and_validates_latlon_finite_volume_rrtmg(tmp_path):
