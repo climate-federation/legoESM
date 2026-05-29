@@ -135,3 +135,27 @@ A/B knob added: `run_omip_core2.py --ke-gradient-scheme {centered,hollingsworth}
     validation (job 8106781, --partial-cell, adcroft vs smc03, 30d, fine diag) PENDING:
     does the clean IC + (now-active) smc03 PGF give a stable physical multi-day forced run?
   Code committed (partial-cell coord + partial-cell-aware WOA IC, codex-clean).
+- **iter 2 (partial-cell NECESSARY but NOT SUFFICIENT — forced equatorial residual):** clean
+  forced validation 8106781 (--partial-cell, clean IC, adcroft AND smc03, WOA cold-start, no
+  drag) **blew up by day 0.5-1: max|u|=227, max|v|=124 @ EQUATOR (−1.3°N)**, then NaN day 1.
+  So partial-cell removed the catastrophic step-10 Indonesian-seas super-exponential runaway
+  (per-term 8106758 confirmed) but a FORCED equatorial instability remains. Note: per-term
+  NO-forcing partial-cell survived 16 steps (~16 m/s, mid-lat), but WITH forcing it explodes
+  at the equator ⇒ forcing now implicated (was masked on plain z* when the Indonesian
+  bottom-PGF dominated). NEXT: per-term WITH forcing + partial-cell (job below) to localise
+  the equatorial term (residual PGF? vortcor? surface-forcing `phys`? barotropic-split?).
+  Also retry the GRADUAL path (partial-cell + nudge-from-rest + drag spin-up + clean IC) —
+  the plain-z* nudge+drag run reached day 90, so gradual + partial-cell may be the stable
+  combination. Partial-cell is kept (real, NEMO-faithful, removes the worst mode).
+- **iter 2 (per-term FORCED + partial-cell, job 8106978 — AMPLIFIER = vertadv):** 40-step
+  per-term with CORE-II forcing + partial-cell. The Indonesian super-exponential seed is GONE
+  (4.4°N/123.5°E KE_PGF_v decays 6.6e-3→3.5e-3). Growth is now ~10× slower (max|u| 68 m/s @
+  step 40 vs NaN by step 5 on plain z*). **The consistent AMPLIFIER is vertical momentum
+  advection `vertadv`**: once |u|~10-20 m/s it becomes the top term and grows
+  (1.5e-3→2.2e-2 over steps 15-40) at the S-Atlantic slope (−36.3/−50.5) + W-Pacific
+  (14/136). Residual persistent spurious PGF seeds feed it: equatorial Indian (lat0.3/lon72.5/
+  k13, steady 3.46e-3) + slopes. ⇒ Two fix axes: (A) **tame the amplifier** — implicit or
+  CFL-limited flux-form vertical momentum advection (`_flux_form_vertical_momentum_advection`,
+  ocean_pe_latlon_cgrid.py ~1377) so an overshoot can't run away; (B) tame the seed via
+  gradual spin-up. Testing (B) first (no code change): partial-cell + nudge-from-rest + drag
+  (job below); the deeper (A) is next if (B) is insufficient/unfaithful.
