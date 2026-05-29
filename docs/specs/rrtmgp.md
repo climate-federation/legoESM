@@ -113,17 +113,18 @@ cache-key (iter-32/36/37/39/41/42), sharded-equivalence
 
 ---
 
-## Status (after iter-64)
+## Status (after iter-65)
 
-- ✅ 116 pass + 5 skip (3 Metal-broken + 2 multidevice) — 0 fail.
-  iter-63 added 2 mixed-precision tests (fp32-vs-fp64 numerical
-  equivalence, bfloat16-input acceptance).  iter-64 added 1 MPI-
-  shard correctness test (`test_solve_columns_subset_matches_
-  full_columns_slice`) — formal MPI-correctness invariant:
-  subset call ≡ slice of full call.  Combined with iter-11
-  permutation-invariance, this pins RRTMGP as embarrassingly
-  parallel over the column axis (no global-axis-dependent
-  normalisations).
+- ✅ 117 pass + 5 skip (3 Metal-broken + 2 multidevice) — 0 fail.
+  iter-63 added 2 mixed-precision tests.  iter-64 added 1 MPI-
+  shard correctness test (subset call ≡ slice of full call).
+  iter-65 added 1 mesospheric-pressure AD test —
+  `test_jax_grad_finite_at_mesosphere_pressure_boundary` — pinning
+  that `jax.grad` is finite for columns extending below
+  `p_ref[-1] = 1.005 Pa` (≈ 65 km altitude), the lower edge of the
+  gas-optics table.  The mesospheric (p < 1 Pa) regime exercises
+  `_pressure_interpolant`'s log-space extrapolation path; pre-iter-65
+  there was no test guarding it.
 - ✅ AD-safe end-to-end; mixed precision via table-dtype cast;
   fp32 inputs OK.
 - ✅ MPI/GPU: `lax.scan + jax.checkpoint` per g-point;

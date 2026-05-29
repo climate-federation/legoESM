@@ -1380,6 +1380,58 @@ class TestADSafetyAtStratosphereTau:
         # Non-trivial gradient — guard against constant-fold collapse.
         assert jnp.abs(g).max() > 0.0
 
+    def test_jax_grad_finite_at_mesosphere_pressure_boundary(self):
+        """Iter-65: stratosphere/mesosphere boundary AD safety.
+
+        ``p_ref`` (gas-optics table) spans ``[1.005 Pa, 109663 Pa]``
+        (≈ 0.01 hPa to 1100 hPa, ≈ surface to ~65 km).  Above 65 km
+        we cross the lowest table entry and ``_pressure_interpolant``
+        extrapolates via its log-space linear interpolant.  Because
+        the column top is the dominant LW-cooling contributor for
+        thin upper atmospheres, an AD-unsafe path here would leak
+        NaN gradients into any training loop that uses an extended
+        vertical extent (e.g. CRMs, mesospheric chemistry models).
+
+        Test exercises a column whose top sits at 0.5 Pa — ~7 layers
+        deep into the "below p_ref[-1] = 1.005 Pa" extrapolation
+        zone — and pins ``jax.grad`` finite through the full forward
+        pass.  Pre-iter-65 there was no test guarding this regime.
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(RRTMGPConfig())
+        ncol, nlev = 1, 10
+        # Column extends from 0.5 Pa (mesosphere, ~75 km) down to
+        # 1000 Pa (lower stratosphere, ~30 km).  Top half is below
+        # ``p_ref[-1]`` and exercises the extrapolation path.
+        p_half = jnp.broadcast_to(
+            jnp.geomspace(0.5, 1.0e3, nlev + 1)[None, :], (ncol, nlev + 1)
+        )
+        p_full = jnp.sqrt(p_half[:, :-1] * p_half[:, 1:])
+        # Mesopause is ~190K, mid-stratosphere ~220K → linear range.
+        T = jnp.linspace(190.0, 230.0, nlev)[None, :]
+        sfc_T = jnp.array([230.0])
+        # Mesospheric H2O is ~5 ppm (Brasseur–Solomon).
+        q_v = jnp.full((ncol, nlev), 5e-6)
+        cos_z = jnp.array([0.4])
+
+        def loss(T_in):
+            out = solver.solve_columns(
+                T=T_in, p_full=p_full, p_half=p_half,
+                sfc_temperature=sfc_T, q_v=q_v, cos_zenith=cos_z,
+            )
+            return jnp.sum(out.heating_rate)
+
+        g = jax.grad(loss)(T)
+        assert jnp.all(jnp.isfinite(g)), (
+            f"∂(heating_rate)/∂T at mesospheric column top must be "
+            f"finite; got {g}.  Likely an AD-unsafe extrapolation "
+            f"in ``_pressure_interpolant`` for p < p_ref[-1] (= 1.005 Pa)."
+        )
+        # Non-trivial gradient.
+        assert jnp.abs(g).max() > 0.0
+
 
 class TestCloudKwargsHelper:
     """Iter-17: ``CloudProperties.to_rrtmg_kwargs`` must NOT include
