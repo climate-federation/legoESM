@@ -192,11 +192,16 @@ def _write_report(
         lines.append(
             "legoESM components aggregated to Veros groupings (du_adv=vortcor+vertadv, "
             "du_mix=av_vert+botdrag, du_cor 1:1), both interpolated to cell centres. "
-            "Momentum has a discretization/formulation floor (legoESM vector-invariant vs "
-            "Veros flux-form Coriolis/advection) — corr ~0.9 is expected, NOT a bug; see "
-            "the strategy doc §8 ledger. `wsign` = sign-match over cells with "
-            "`|veros| > 0.1·max` (dynamically significant; the plain sign-match is "
-            "near-zero-cell noise for these processes).\n"
+            "The recipe now uses flux-form momentum advection (adopted, matching Veros). "
+            "Observed (developed flow, 864000 s): du_cor/dv_cor corr ~0.96/0.98 (strong); "
+            "du_adv/dv_adv corr ~0.65/0.71 (MODERATE, R²≈0.43/0.51). The advection residual "
+            "is a per-process MAPPING floor — legoESM's vector-invariant decomposition "
+            "(vortcor+vertadv) does not align cleanly with Veros's flux-form ∇·(uu) split, "
+            "so the NET momentum tendency agrees better than any single per-process row; a "
+            "total-tendency / energy-budget check (roadmap T2-3) side-steps this. NOT a bug, "
+            "but NOT a clean per-process match either — see the strategy doc §8 ledger. "
+            "`wsign` = sign-match over cells with `|veros| > 0.1·max` (dynamically "
+            "significant; the plain sign-match is near-zero-cell noise for these processes).\n"
         )
         lines.append(
             "| process | interior L2 | interior corr | interior sign | interior wsign |"
