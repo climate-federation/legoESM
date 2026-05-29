@@ -104,8 +104,11 @@ config flag; `precomputed_lw_optical_props` dedups optics call
 fp32-finite + iter-63 **fp32-vs-fp64 numerical equivalence within
 fp32 round-off** + iter-63 **bfloat16 input acceptance**),
 `TestOptimalLwSecant`, `TestStandardO3Profile`,
-`TestTropopauseBoundary`, `TestADSafetyAtStratosphereTau`,
-`TestCloudKwargsHelper`, `TestHeatingRateSign`.
+`TestTropopauseBoundary`, `TestADSafetyAtStratosphereTau`
+(iter-20 + iter-65 mesospheric-boundary),
+`TestCloudKwargsHelper`, `TestHeatingRateSign`,
+`TestAerosolPath` (iter-66: AOD-zero ≡ AOD-None, sign of AOD on
+SW, ∂(SW)/∂(AOD) finite).
 
 `test_radiation.py::{TestRRTMGP,TestColumnShardedRadiation}` —
 cache-key (iter-32/36/37/39/41/42), sharded-equivalence
@@ -113,18 +116,20 @@ cache-key (iter-32/36/37/39/41/42), sharded-equivalence
 
 ---
 
-## Status (after iter-65)
+## Status (after iter-66)
 
-- ✅ 117 pass + 5 skip (3 Metal-broken + 2 multidevice) — 0 fail.
+- ✅ 120 pass + 5 skip (3 Metal-broken + 2 multidevice) — 0 fail.
   iter-63 added 2 mixed-precision tests.  iter-64 added 1 MPI-
   shard correctness test (subset call ≡ slice of full call).
   iter-65 added 1 mesospheric-pressure AD test —
   `test_jax_grad_finite_at_mesosphere_pressure_boundary` — pinning
   that `jax.grad` is finite for columns extending below
-  `p_ref[-1] = 1.005 Pa` (≈ 65 km altitude), the lower edge of the
-  gas-optics table.  The mesospheric (p < 1 Pa) regime exercises
-  `_pressure_interpolant`'s log-space extrapolation path; pre-iter-65
-  there was no test guarding it.
+  `p_ref[-1] = 1.005 Pa` (≈ 65 km altitude).
+  iter-66 added new class `TestAerosolPath` (3 tests):
+  AOD=zeros bit-equivalence vs AOD=None, aerosol reduces surface
+  SW (sign), AD safety through AOD.  Pre-iter-66 the only aerosol
+  coverage was a cache-key test in `test_radiation.py` (iter-32) —
+  no value/sign/diff pin.
 - ✅ AD-safe end-to-end; mixed precision via table-dtype cast;
   fp32 inputs OK.
 - ✅ MPI/GPU: `lax.scan + jax.checkpoint` per g-point;

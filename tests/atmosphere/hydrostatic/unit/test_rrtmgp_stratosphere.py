@@ -1587,5 +1587,153 @@ class TestHeatingRateSign:
         )
 
 
+class TestAerosolPath:
+    """Iter-66: regression guards for the SW aerosol path in ``solve_sw``.
+
+    ``solve_sw`` accepts an optional ``aerosol_optical_depth`` array that
+    is combined band-uniformly with the gas+cloud optical depth via the
+    AD-safe SW optical-property mixing (restored from commit 59407953,
+    iter-14).  Pre-iter-66 the only aerosol coverage was a cache-key
+    test in ``test_radiation.py`` — no value, sign, or differentiability
+    pin.
+
+    | test | invariant |
+    |---|---|
+    | ``test_aerosol_zero_matches_no_aerosol`` | AOD=zeros ≡ AOD=None bit-for-bit |
+    | ``test_aerosol_reduces_toa_sw_down`` | sign: scattering aerosol decreases surface SW |
+    | ``test_aerosol_path_differentiable`` | ``jax.grad`` w.r.t. AOD is finite |
+    """
+
+    @staticmethod
+    def _base_inputs(ncol=1, nlev=12):
+        """Build a daylit tropical-like column."""
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1)
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        T = jnp.linspace(220.0, 295.0, nlev)[None, :]
+        sfc_T = jnp.array([298.0] * ncol)
+        q_v = jnp.full((ncol, nlev), 8e-3)
+        cos_z = jnp.array([0.7] * ncol)  # ~45° solar elevation
+        return T, p_full, p_half, sfc_T, q_v, cos_z
+
+    def test_aerosol_zero_matches_no_aerosol(self):
+        """``aerosol_optical_depth = zeros`` must produce bit-identical
+        fluxes to ``aerosol_optical_depth = None``.  The two paths
+        branch on a Python ``if aerosol_optical_depth is not None``
+        check; if the zero-AOD branch picks up a non-trivial code
+        path (e.g. an unintended bias from ``maximum(tau, 1e-12)``
+        applied to gas tau only in one branch), this test catches it.
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(RRTMGPConfig())
+        T, p_full, p_half, sfc_T, q_v, cos_z = self._base_inputs()
+
+        out_none = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z, aerosol_optical_depth=None,
+        )
+        out_zero = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+            aerosol_optical_depth=jnp.zeros_like(T),
+        )
+        for name in ("sw_flux_up", "sw_flux_down", "lw_flux_up",
+                     "heating_rate"):
+            a = np.asarray(getattr(out_none, name))
+            b = np.asarray(getattr(out_zero, name))
+            np.testing.assert_allclose(
+                a, b, rtol=1e-12, atol=1e-12,
+                err_msg=(
+                    f"{name}: AOD=None and AOD=zeros must give "
+                    f"bit-identical fluxes (zero-aerosol branch leak)."
+                ),
+            )
+
+    def test_aerosol_reduces_toa_sw_down(self):
+        """Adding a non-trivial AOD (τ=0.5 throughout column, SSA<1)
+        must reduce the surface downwelling SW flux relative to a
+        clear-aerosol-free column.  This is the elementary physical
+        sign of scattering+absorbing aerosol.
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(RRTMGPConfig())
+        T, p_full, p_half, sfc_T, q_v, cos_z = self._base_inputs()
+
+        # Per-layer AOD totalling τ_aer_col ≈ 0.5 (mid-range thick haze).
+        aod = jnp.full(T.shape, 0.5 / T.shape[1])
+
+        out_clear = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z, aerosol_optical_depth=None,
+        )
+        out_aero = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z, aerosol_optical_depth=aod,
+        )
+
+        # Surface = layer 0 (TOA-first convention in solve_columns
+        # output mirrors input ordering).  Match the convention by
+        # picking the layer with HIGHEST pressure.
+        sfc_layer = int(jnp.argmax(p_full[0]))
+        sw_down_clear = float(out_clear.sw_flux_down[0, sfc_layer])
+        sw_down_aero = float(out_aero.sw_flux_down[0, sfc_layer])
+
+        assert sw_down_aero < sw_down_clear, (
+            f"Aerosol (τ=0.5, SSA=0.93) should reduce surface SW "
+            f"downward flux; got clear={sw_down_clear:.2f}, "
+            f"aero={sw_down_aero:.2f} W/m²."
+        )
+        # Plausibility: a τ=0.5 absorbing column should reduce surface
+        # SW by ~10-50 W/m² (depending on solar angle).  Sanity check.
+        reduction = sw_down_clear - sw_down_aero
+        assert 1.0 < reduction < 200.0, (
+            f"Surface SW reduction {reduction:.1f} W/m² is outside "
+            f"the plausible [1, 200] W/m² band for τ=0.5 mid-range "
+            f"haze.  Indicates broken aerosol+gas optical-property "
+            f"mixing in solve_sw."
+        )
+
+    def test_aerosol_path_differentiable(self):
+        """``jax.grad`` w.r.t. ``aerosol_optical_depth`` must be finite.
+
+        The aerosol path inside ``solve_sw`` (lines 462-497) uses
+        ``safe_divide(w_num, tau_tot)`` and ``safe_divide(g_num,
+        g_denom)`` with the AD-safe ``safe_divide`` helper.  This
+        test pins the chain — if a future refactor reverts to
+        ``a / jnp.maximum(b, eps)``, the ``-a/b**2`` VJP overflows
+        for tau_tot near the 1e-12 floor and gradients leak NaN.
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(RRTMGPConfig())
+        T, p_full, p_half, sfc_T, q_v, cos_z = self._base_inputs()
+
+        def loss(aod):
+            out = solver.solve_columns(
+                T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+                q_v=q_v, cos_zenith=cos_z, aerosol_optical_depth=aod,
+            )
+            return jnp.sum(out.sw_flux_down)
+
+        aod0 = jnp.full(T.shape, 0.1 / T.shape[1])
+        g = jax.grad(loss)(aod0)
+        assert jnp.all(jnp.isfinite(g)), (
+            f"∂(sum sw_flux_down)/∂(aerosol_optical_depth) must be "
+            f"finite; got {g}.  Likely an AD-unsafe ``maximum(tau, "
+            f"eps)`` divide in solve_sw aerosol-mixing block."
+        )
+        # Adding AOD reduces sw_flux_down, so the gradient is negative.
+        assert jnp.sum(g) < 0.0, (
+            f"d(sum sw_flux_down)/d(AOD) should be negative for a "
+            f"scattering aerosol; got {float(jnp.sum(g))}."
+        )
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
