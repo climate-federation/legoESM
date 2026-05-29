@@ -247,6 +247,32 @@ class TestLoadRealTopography(unittest.TestCase):
 
         self.assertTrue(float(jnp.min(phis)) >= 0.0)
 
+    def test_load_latlon_with_smoothing(self):
+        """Load real topography onto the lat-lon grid WITH smoothing passes.
+
+        The grid was previously mis-classified as cubed-sphere (it exposes
+        ``n``), so its 2-D field hit the (6, n, n) smoother and crashed.  Now
+        classified by coordinate rank; the 2-D Gaussian smoother applies.
+        """
+        from legoesm.grids.latlon import create_latlon_grid
+        grid = create_latlon_grid(n_lat=24, radius=constants.R_earth,
+                                  omega=constants.Omega)
+        path = str(Path(self.tmpdir) / "topo.nc")
+        _make_synthetic_topo_netcdf(path)
+
+        config = TopographyConfig(
+            source="file", path=path,
+            smoothing_passes=4, edge_blend_strength=0.1,
+        )
+        phis, f_land = load_real_topography(grid, config=config)
+
+        self.assertEqual(phis.shape, (grid.n_lat, grid.n_lon))
+        self.assertEqual(f_land.shape, (grid.n_lat, grid.n_lon))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(phis))))
+        self.assertGreaterEqual(float(jnp.min(phis)), 0.0)
+        self.assertTrue(0.0 <= float(jnp.min(f_land))
+                        and float(jnp.max(f_land)) <= 1.0)
+
     def test_phis_has_mountains(self):
         """Should have nonzero phis where mountains exist."""
         path = str(Path(self.tmpdir) / "topo.nc")

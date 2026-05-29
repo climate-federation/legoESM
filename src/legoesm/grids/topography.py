@@ -551,10 +551,16 @@ def load_real_topography(
 
     ds.close()
 
-    # Use protocol for grid detection
+    # Use protocol for grid detection.  Classify by coordinate rank, not by
+    # attribute presence: cubed-sphere stores grid_lat as (6, n, n) (ndim 3);
+    # the structured lat-lon meshes — Gaussian AND the regular lat-lon grid —
+    # store it as (n_lat, n_lon) (ndim 2).  The old `hasattr(grid, 'n_lat') and
+    # not hasattr(grid, 'n')` heuristic mis-classified the lat-lon grid (which
+    # also exposes `n`) as cubed-sphere, sending its 2-D field into the
+    # cubed-sphere (6, n, n) smoother and crashing with an IndexError.
     grid_lat = np.asarray(grid.grid_lat)
     grid_lon = np.asarray(grid.grid_lon)
-    is_gaussian = hasattr(grid, 'n_lat') and not hasattr(grid, 'n')
+    is_gaussian = grid_lat.ndim == 2
 
     if is_gaussian:
         target_lat = np.asarray(grid.lat) * 180.0 / np.pi

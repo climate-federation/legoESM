@@ -50,9 +50,10 @@ topography×hybrid-coordinate edge cases) — converging.
 - Multi-GPU SPMD lat-lon (no `make_latlon_sharded_step`) — needs real GPU.
 - Real-SST CMIP6 multi-year realism vs ERA5/obs (no obs data locally).
 - cubed-sphere `ic="standard"` (needs geographic→cube-local wind rotation).
-- Pre-existing (noted, out of scope): `MixedPrecisionPolicy` cold-import 1st
-  resolution [FIXED ce065428]; real-topo file path lat/lon may share the
-  1-D-coord issue (untested, needs data).
+- Pre-existing (noted): `MixedPrecisionPolicy` cold-import [FIXED ce065428];
+  real-topo file loading on lat-lon [FIXED <topo-real commit>: was
+  mis-classified as cubed-sphere → (6,n,n) smoother IndexError; now classified
+  by grid_lat.ndim].
 
 ## Caveats
 - `DONE` is NOT truthfully emittable here: "good MPI + GPU **scaling**, tested"
