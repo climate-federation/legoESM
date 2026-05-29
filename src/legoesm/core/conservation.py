@@ -30,8 +30,11 @@ from legoesm.core.precision import _resolve_dtype, get_policy
 from legoesm.core.state import ShallowWaterState, HydrostaticState
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.vertical import compute_geopotential
-from legoesm.parallel.reductions import batch_allreduce_mpi, global_sum_mpi
-from legoesm.runtime.backend import is_x64_enabled, supports_float64
+
+# legoesm.parallel.reductions (batch_allreduce_mpi, global_sum_mpi) and
+# legoesm.runtime.backend (is_x64_enabled, supports_float64) are imported at
+# function scope below: core/ must not import parallel/ or runtime/ at module
+# top level (re-enters their __init__ mid-load, breaks isolated pytest; CLAUDE.md).
 
 
 def _accumulation_dtype():
@@ -42,6 +45,7 @@ def _accumulation_dtype():
     float64 (e.g. Apple Metal) or when JAX x64 mode is disabled, the
     result is clamped to float32 even if the policy requests float64.
     """
+    from legoesm.runtime.backend import is_x64_enabled, supports_float64
     target = get_policy().accumulate
     if target == jnp.float64 and not (supports_float64() and is_x64_enabled()):
         return jnp.float32
@@ -111,6 +115,7 @@ def _global_area_sum(
         prod = prod * mask
     local_sum = jnp.sum(prod)
     if _is_distributed():
+        from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_sum)
     return local_sum
 
@@ -147,6 +152,7 @@ def _batch_global_area_sums(
     local_sums = [summed[..., i] for i in range(len(arrays))]
 
     if _is_distributed():
+        from legoesm.parallel.reductions import batch_allreduce_mpi
         return batch_allreduce_mpi(local_sums, op="sum")
     return local_sums
 
@@ -374,6 +380,7 @@ def zero_mean_tendency(
         spatial_axes = tuple(range(area_ndim))
         level_sums = jnp.sum(prod, axis=spatial_axes)  # (nlev,)
         if _is_distributed():
+            from legoesm.parallel.reductions import global_sum_mpi
             level_sums = global_sum_mpi(level_sums)
         corrections = level_sums / total_area_acc  # (nlev,)
         # Broadcast corrections to match tendency shape
@@ -1023,6 +1030,7 @@ def _batch_global_area_sums_voronoi(
     summed = jnp.sum(stacked * area_acc[..., None], axis=0)  # (n_arrays,)
     local_sums = [summed[..., i] for i in range(len(arrays))]
     if _is_distributed():
+        from legoesm.parallel.reductions import batch_allreduce_mpi
         return batch_allreduce_mpi(local_sums, op="sum")
     return local_sums
 
