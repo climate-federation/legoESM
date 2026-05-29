@@ -1392,6 +1392,9 @@ def plane_acoustic_substeps_semi_implicit(
     # tail of one substep with the pre-cuSPARSE head of the next. This
     # replaces ``lax.fori_loop`` which kept the substeps as a while-loop and
     # prevented inter-iteration fusion.
+    si_w_filter_nu = float(getattr(
+        euler_config, "si_w_vertical_filter_nu", 0.0,
+    ))
     w_final, theta_p_final, rho_p_final = (w, theta_p, rho_p)
     for _ in range(int(n_substeps)):
         w_final, theta_p_final, rho_p_final = (
@@ -1400,6 +1403,7 @@ def plane_acoustic_substeps_semi_implicit(
                 height_coord, J, dt_s, beta, g,
                 implicit_buoyancy=implicit_buoyancy,
                 precomputed_tridiag=tri_bands,
+                si_w_vertical_filter_nu=si_w_filter_nu,
             )
         )
 

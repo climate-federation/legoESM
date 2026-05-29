@@ -479,6 +479,14 @@ def parse_args():
                         "default ON for RCE (was OFF in iter-78 bench config).")
     p.add_argument("--no-implicit-buoyancy", dest="implicit_buoyancy",
                    action="store_false")
+    p.add_argument("--si-w-filter-nu", type=float, default=0.0,
+                   help="Vertical Laplacian filter on w inside each SI "
+                        "acoustic substep. 0.0 = off (default). 0.3-0.4 "
+                        "fully damps the structural exponential mode that "
+                        "the SI scheme exhibits with perturbed theta' IC. "
+                        "0.5 = explicit-diffusion CFL bound — above NaNs. "
+                        "Recommended for RCE runs with theta_noise_amp > 0; "
+                        "leave off for clean Wing IC + active moist physics.")
     p.add_argument("--theta-noise-amp", type=float, default=0.0,
                    help="Initial theta' perturbation amplitude [K] at bottom 4 "
                         "levels. 0 = clean Wing IC (stable at dt up to 10 s "
@@ -585,6 +593,7 @@ def main():
         n_acoustic_substeps=args.n_acoustic_substeps,
         acoustic_off_centering=args.off_centering,
         implicit_buoyancy=args.implicit_buoyancy,
+        si_w_vertical_filter_nu=args.si_w_filter_nu,
         horizontal_advection_scheme=args.advection,
         use_coriolis=False,
         fix_mass=True, anchor_mass_to_initial=True,
