@@ -291,3 +291,86 @@ def test_E4_transport_conserves_integral_E():
         E, U_bar, V_bar, grid, EKEConfig(k_iso=500.0), mask, u_mask, v_mask)
     assert _int_residual(t, area) < 1e-12, "combined transport not conservative"
     assert jnp.all(jnp.isfinite(t))
+
+
+# ---------------------------------------------------------------------------
+# E6 — state threading + step integration (EKE-on integrates an eke field)
+# ---------------------------------------------------------------------------
+
+
+def test_E6_step_integrates_eke_field():
+    """With gm_redi.eke set, the model step integrates a prognostic eke field
+    that stays >= 0 + finite and evolves; EKE-off leaves eke None (zero-behaviour
+    is covered by the existing step suite)."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.vertical import create_ocean_z_star
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.state import LatLonCGridOceanConfig, Field
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    grid = create_latlon_grid(12, 24)
+    z_coord = create_ocean_z_star(n_levels=4, H_max=4000.0)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, H_max=4000.0, land_lat_threshold=85.0,
+    )
+    nlat, nlon = grid.n_lat, grid.n_lon
+    # Horizontal T perturbation -> baroclinic slopes -> nonzero Eady rate (so EKE
+    # production is active).
+    T = np.asarray(state.T.data)
+    lat = np.degrees(np.asarray(grid.lat))
+    T = T + 2.0 * np.tanh(lat / 20.0)[:, None, None]
+    state = state._replace(T=state.T.replace(data=jnp.asarray(T)))
+    # Initialise eke as a Field (stable pytree structure across steps).
+    eke0 = EKEConfig().e_min
+    state = state._replace(
+        eke=Field(data=jnp.full((nlat, nlon), eke0), name="eke",
+                  dims=("lat", "lon"), units="m^2/s^2"))
+
+    cfg = LatLonCGridOceanConfig(
+        A_h=2.0e4, bottom_drag_r=1.0e-3, implicit_vertical_mixing=True,
+        n_barotropic_substeps=8, enable_runtime_checks=False,
+        gm_redi=GMRediConfig(kappa_GM=0.0, kappa_Redi=1.0e3, eke=EKEConfig()),
+    )
+    model = LatLonCGridOceanModel(grid, z_coord, cfg)
+
+    for _ in range(15):
+        state = model.step(state, dt=1800.0)
+        assert state.eke is not None, "eke field dropped from state"
+        E = np.asarray(state.eke.data)
+        assert np.all(E >= 0.0), "eke went negative"
+        assert np.all(np.isfinite(E)), "eke non-finite"
+        assert np.all(np.isfinite(np.asarray(state.T.data)))
+    # eke evolved away from the uniform initial value (production/transport active).
+    assert float(np.max(np.asarray(state.eke.data))) > eke0
+
+
+def test_E6_restart_round_trip_eke_field():
+    """EKE-on: the eke Field round-trips bit-identically through the field-generic
+    ocean restart I/O (save_restart/load_restart serialise every Field). EKE-off
+    (eke=None) round-trip is already covered by test_restart_round_trip_bit_identical."""
+    import tempfile, os as _os
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.vertical import create_ocean_z_star
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.state import Field
+    from legoesm.ocean.restart import save_restart, load_restart
+
+    grid = create_latlon_grid(8, 16)
+    z_coord = create_ocean_z_star(n_levels=4, H_max=4000.0)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, H_max=4000.0, land_lat_threshold=85.0)
+    rng = np.random.default_rng(3)
+    E = np.abs(rng.standard_normal((grid.n_lat, grid.n_lon))) * 0.05
+    state = state._replace(
+        eke=Field(data=jnp.asarray(E), name="eke", dims=("lat", "lon"),
+                  units="m^2/s^2"))
+    with tempfile.TemporaryDirectory() as d:
+        out = _os.path.join(d, "restart_eke.npz")
+        save_restart(state, out, time_s=0.0, step=0, sha="eke")
+        state2 = load_restart(out, state)
+    assert state2.eke is not None, "eke dropped on restart round-trip"
+    np.testing.assert_array_equal(
+        np.asarray(state2.eke.data), np.asarray(state.eke.data))

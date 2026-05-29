@@ -10,7 +10,7 @@ every micro-decision. Newest at the bottom.
 - [x] E3 positivity (semi-implicit dissipation; E >= 0 by construction, no clip)
 - [x] E4 budget closure (advection + lateral diffusion conserve integral-E, machine-eps)
 - [x] E5 differentiability (grad through closure + coupling finite + nonzero)
-- [ ] E6 state threading + zero-behaviour-when-OFF (existing bit-identical)
+- [x] E6 state threading (field + step integration + restart) + zero-behaviour-when-OFF
 - [ ] E7 idealized channel (E spins up bounded; kappa_GM responds)
 - [ ] E8 regression lock (EKE-active golden case)
 - [ ] E9 oracle confirmation (informational) + recipe adoption
@@ -92,3 +92,27 @@ sigma_bar, L, dt). Gate on eke OFF -> step unchanged (existing tests), eke ON ->
 stays positive/finite (new step test). Then E6c (restart I/O for eke), E7 (channel spinup), E8/E9.
 Design note: a first version may recompute rho+slopes for eke (redundant with gm_redi's internal
 computation) — correct, flag compute-once as an optimization.
+
+### 2026-05-29 · iter 6 · E6 done — step integration (E6b) + restart round-trip (E6c)
+E6b: wired the prognostic-EKE branch into LatLonCGridOceanModel._step_impl's GM/Redi block,
+gated on `gm_cfg.eke is not None` (default None ⇒ existing constant/Visbeck path bit-identical).
+When active: E = state.eke.data (or e_min if None) → compute_eke_step_kappa(T_mid,S_mid,eta,H,E,...)
+returns (kappa_GM, sigma_bar, L); kappa_GM is passed into gm_redi_tracer_tendency_latlon via the new
+`kappa_gm_override` param (precedence override > visbeck > constant); E is integrated one step:
+E_t = E + dt·eke_horizontal_transport(E, U_bar, V_bar, ...) [U_bar/V_bar = level-mean flow, masked,
+preserves periodic wrap so ∫E telescopes] then E_new = eke_apply_local_source(E_t, sigma_bar, L, dt)
+[semi-implicit, E≥0 by construction]; state_new._replace(eke=Field(E_new·land_mask)).
+E6c: ocean restart I/O is FIELD-GENERIC (ocean/restart.py _iter_state_fields → only Fields are
+serialised), so eke=None (OFF) is skipped ⇒ existing test_restart_round_trip_bit_identical stays
+green (bit-identical), and eke=Field (ON) round-trips automatically — locked by a new test.
+SCOPE: SegmentCarry / compiled-segment ref loops + ml/channel_packing are atmosphere-PE only;
+LatLonCGridOceanState is not carried in SegmentCarry, so those E6 sub-items are N/A for ocean EKE
+(verified iter 5: only restart.py references the ocean state).
+Gates: EKE-on step test (test_E6_step_integrates_eke_field: 15 steps, E≥0 + finite + grows under
+baroclinic forcing) + restart round-trip (test_E6_restart_round_trip_eke_field) + bit-identical-OFF
+(79 green: 17 EKE + 2 decomposition + 30 GM/Redi + 30 lat-lon C-grid).
+Command: JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 pytest tests/ocean/unit/{test_eke,test_baroclinic_
+decomposition,test_gm_redi_latlon_cgrid,test_latlon_cgrid_ocean}.py → 79 passed.
+NEXT: E7 — idealized baroclinic channel with EKE on: E spins up to a BOUNDED level (no blow-up, no
+negative), kappa_GM responds to E (varies in space, ≥0), runs vs EKE-off both stable. Then E8
+(regression lock: EKE-active golden) + E9 (oracle confirmation + recipe adoption, informational).

@@ -38,6 +38,7 @@ from legoesm.ocean.dynamics.ocean_tendency_common import (
 from legoesm.ocean.eos import make_eos_fn, rho_0 as _RHO_0
 from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
     _EPS,
+    compute_eke_kappa_gm,
     compute_visbeck_kappa_gm,
     dm95_taper,
     dm95_taper_scalar,
@@ -677,6 +678,7 @@ def gm_redi_tracer_tendency_latlon(
     f_coriolis: jnp.ndarray | None = None,
     rho_0: float = _RHO_0,
     g: float = constants.g,
+    kappa_gm_override: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Top-level GM/Redi for lat-lon C-grid.
 
@@ -731,8 +733,11 @@ def gm_redi_tracer_tendency_latlon(
         rho, mask, z_coord, jacobian, grid, cfg,
     )
 
-    # GM coefficient.
-    if cfg.visbeck.enabled:
+    # GM coefficient. Precedence: prognostic-EKE override (computed by the step
+    # from the evolving eddy-energy field) > Visbeck diagnostic > constant.
+    if kappa_gm_override is not None:
+        kappa_GM = kappa_gm_override
+    elif cfg.visbeck.enabled:
         if f_coriolis is None:
             # Use the grid's Coriolis field (f = 2·Ω·sin(lat), already built
             # with the grid's pinned rotation rate) rather than re-deriving from
@@ -864,3 +869,36 @@ def eke_horizontal_transport(E, U_bar, V_bar, grid, eke_cfg, mask, u_mask, v_mas
     # Lateral diffusion (conservative).
     diff = eke_cfg.k_iso * laplacian_cgrid(E, grid, mask=mask)
     return (adv + diff) * mask
+
+
+def compute_eke_step_kappa(
+    T, S, eta, H_bathy, eke, grid, z_coord, cfg, *,
+    eos="wright", eos_linear=None, mask=None, rho_0=_RHO_0, g=constants.g,
+):
+    """Prognostic GM coefficient + Eady growth rate + mixing length from the
+    eddy-energy field, for the EKE-active model step. Returns ``(kappa_GM,
+    sigma_bar, L)`` — ``kappa_GM`` (2-D) is the override fed into the GM/Redi
+    tracer tendency; ``sigma_bar``/``L`` drive the EKE local source/sink.
+
+    Recomputes rho + isopycnal slopes with the SAME shared helpers GM/Redi uses
+    internally (a redundant recompute — correct; compute-once is a future
+    optimization), then ``compute_eke_kappa_gm`` (which reuses the shared
+    Eady-length machinery). ``cfg`` is the GMRediConfig (uses ``cfg.visbeck`` for
+    the Rossby-length params and ``cfg.eke`` for the closure params).
+    """
+    if mask is None:
+        mask = jnp.ones(T.shape[:2], dtype=T.dtype)
+    jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
+    eos_fn = make_eos_fn(eos, eos_linear)
+    fill_fn = lambda field: _neumann_fill_cgrid(field, mask)
+    rho, _rp, _pp = iterate_eos_and_pressure_anomaly(
+        T, S, mask, fill_fn, eos_fn, z_coord.dz_ref, rho_0, g, n_iter=2,
+    )
+    S_x, S_y, _taper = compute_isopycnal_slopes_latlon_cgrid(
+        rho, mask, z_coord, jacobian, grid, cfg,
+    )
+    f_coriolis = jnp.broadcast_to(grid.f, mask.shape)
+    return compute_eke_kappa_gm(
+        eke, rho, S_x, S_y, z_coord, jacobian, f_coriolis,
+        cfg.visbeck, cfg.eke, rho_ref=rho_0,
+    )

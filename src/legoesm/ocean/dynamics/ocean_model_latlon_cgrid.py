@@ -63,8 +63,11 @@ from legoesm.ocean.dynamics.barotropic_implicit_latlon_cgrid import (
 from legoesm.ocean.freshwater import freshwater_eta_tendency, virtual_salt_flux
 from legoesm.ocean.physics.combined import make_ocean_physics
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+    compute_eke_step_kappa,
+    eke_horizontal_transport,
     gm_redi_tracer_tendency_latlon,
 )
+from legoesm.ocean.physics.lateral_mixing.eke import eke_apply_local_source
 from legoesm.ocean.advection_som import som_advect_tracers
 from legoesm.ocean.advection import (
     fct_tracer_advection,
@@ -1048,17 +1051,54 @@ class LatLonCGridOceanModel:
 
         # GM/Redi isopycnal mixing (if configured)
         if self.config.gm_redi is not None:
+            gm_cfg = self.config.gm_redi
+            kappa_gm_override = None
+            eke_new = None
+            # Prognostic-EKE GM closure (Eden-Greatbatch): kappa_GM = c_k·L·√E
+            # from the evolving eddy-energy field, and integrate E one step
+            # (transport by the depth-mean flow + semi-implicit source/sink).
+            # Gated on gm_cfg.eke -> default None leaves the existing path
+            # (constant / Visbeck) bit-identical.
+            if gm_cfg.eke is not None:
+                eke_cfg = gm_cfg.eke
+                lm = state.land_mask.data
+                if state.eke is not None:
+                    E = state.eke.data
+                else:
+                    E = jnp.full(lm.shape, eke_cfg.e_min, dtype=T_mid.dtype)
+                kappa_gm_override, sigma_bar, L = compute_eke_step_kappa(
+                    T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
+                    E, self.grid, self.z_coord, gm_cfg,
+                    eos=self.config.eos, eos_linear=self.config.eos_linear,
+                    mask=lm,
+                    rho_0=self.config.constants.rho_0,
+                    g=self.config.constants.g,
+                )
+                # Depth-mean advecting flow (level-mean; preserves the periodic
+                # wrap so the transport conserves the area-integral of E).
+                U_bar = jnp.mean(state.u.data, axis=-1) * state.u_mask.data
+                V_bar = jnp.mean(state.v.data, axis=-1) * state.v_mask.data
+                E_t = E + dt * eke_horizontal_transport(
+                    E, U_bar, V_bar, self.grid, eke_cfg,
+                    lm, state.u_mask.data, state.v_mask.data,
+                )
+                E_new = eke_apply_local_source(E_t, sigma_bar, L, eke_cfg, dt)
+                eke_new = Field(data=E_new * lm, name="eke",
+                                dims=("lat", "lon"), units="m^2/s^2")
             dT_gm, dS_gm = gm_redi_tracer_tendency_latlon(
                 T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
-                self.grid, self.z_coord, self.config.gm_redi,
+                self.grid, self.z_coord, gm_cfg,
                 eos=self.config.eos, eos_linear=self.config.eos_linear,
                 mask=state.land_mask.data,
                 u_mask=state.u_mask.data,
                 v_mask=state.v_mask.data,
                 rho_0=self.config.constants.rho_0, g=self.config.constants.g,
+                kappa_gm_override=kappa_gm_override,
             )
             T_mid = T_mid + dt * dT_gm * mask_3d
             S_mid = S_mid + dt * dS_gm * mask_3d
+            if eke_new is not None:
+                state_new = state_new._replace(eke=eke_new)
 
         if self.config.tracer_advection == "som":
             # SOM (Prather 1986): Second Order Moments advection (#210).
