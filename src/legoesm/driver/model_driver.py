@@ -644,9 +644,17 @@ class ModelDriver:
 
         # Moisture initialization (spectral and MPAS use dry physics)
         if hasattr(self.state, 'p_s') and hasattr(self.state.p_s, 'data'):
-            p_full_init = self.state.p_s.data[..., None] * self.sigma.sigma_full
+            # Use the TRUE local full-level pressure (pressure_at_full handles
+            # both pure-sigma and the hybrid A*p_ref+B*p_s coordinate) so that,
+            # over topography, q_sat and the vertical humidity taper sit on the
+            # same pressure surfaces as the temperature/wind state — not the
+            # flat-reference sigma_full = A_full+B_full.  For flat topography
+            # p_full = p_s*sigma_full and the local ratio = sigma_full, so this
+            # is bit-identical to the previous formulation.
+            p_full_init = self.sigma.pressure_at_full(self.state.p_s.data)
+            sigma_local_init = p_full_init / self.state.p_s.data[..., None]
             q_sat_init = saturation_mixing_ratio(self.state.T.data, p_full_init)
-            self.tracers["q_v"] = cfg.RH_init * q_sat_init * self.sigma.sigma_full ** 2
+            self.tracers["q_v"] = cfg.RH_init * q_sat_init * sigma_local_init ** 2
             self.tracers["q_v"] = jnp.minimum(self.tracers["q_v"], q_sat_init)
 
             # Fuse the two diagnostic means into one host transfer.

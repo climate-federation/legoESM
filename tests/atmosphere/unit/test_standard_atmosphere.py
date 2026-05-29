@@ -295,6 +295,27 @@ class TestDriverStandardIC:
         # (else the test would not distinguish the fix).
         assert float(np.max(np.abs(T_local - T_AB))) > 2.0
 
+    def test_moisture_consistent_on_local_pressure_hybrid_topography(self):
+        """q_v must be initialized on the SAME local hybrid pressure surfaces as
+        T over topography: q_v <= q_sat(T, p_full_local) and RH <= RH_init,
+        evaluated at the local full-level pressure (not the flat A+B coord)."""
+        from legoesm.thermo import saturation_mixing_ratio
+        drv = self._build("standard", topography="gaussian")
+        phis = np.asarray(drv.state.phis.data)
+        i = np.unravel_index(int(np.argmax(phis)), phis.shape)  # mountain top
+        qv = np.asarray(drv.tracers["q_v"])[i]
+        T = np.asarray(drv.state.T.data)[i]
+        p_full = np.asarray(drv.sigma.pressure_at_full(drv.state.p_s.data))[i]
+        q_sat_local = np.asarray(
+            saturation_mixing_ratio(jnp.asarray(T), jnp.asarray(p_full)))
+
+        assert np.all(np.isfinite(qv))
+        # Consistent with the local-pressure saturation (never supersaturated).
+        assert np.all(qv <= q_sat_local + 1e-9)
+        # RH on local pressure must not exceed the RH_init cap (0.7 default).
+        rh = qv / np.maximum(q_sat_local, 1e-12)
+        assert float(np.max(rh)) <= 0.7 + 1e-3
+
     def test_standard_ic_realistic_cwv_and_gradient(self):
         drv = self._build("standard")
         T = drv.state.T.data            # (n_lat, n_lon, nlev)
