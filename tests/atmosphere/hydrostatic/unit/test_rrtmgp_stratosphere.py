@@ -1,26 +1,32 @@
 """Stratosphere/tropopause fidelity tests for RRTMGP.
 
-These tests pin down the iter-1 fixes to
-``legoesm.atmosphere.physics.radiation.rrtmgp.optics.gas_optics``:
+These tests grew with the ralph-loop iter-1 → iter-30 work to pin
+down behaviour the audit found drifting from upstream rte-rrtmgp.
 
-1. ``_clip_to_table_range`` keeps cold-mesospheric / hot-tropical
-   temperatures inside the absorption/Planck-lookup table range so the
-   linear interpolant cannot extrapolate.  Without the clamp, halo
-   cells produced by ``2*T[-1] - T[-2]`` can sit below ``t_ref[0]=160K``
-   where ``totplnk(T) ∝ T**4`` makes the extrapolation catastrophic.
+| Test class | Iter | Pins |
+|---|---|---|
+| ``TestClipToTableRange`` | 1+2 | ``_clip_to_table_range`` math for T outside [160, 355]K |
+| ``TestRelativeAbundanceSafeDiv`` | 1+2/5 | safe-div for combined_vmr ∈ (0, eps] band |
+| ``TestOutOfRangeTemperature`` | 1+2 | T-extrap doesn't catastrophically break planck/major/minor OD |
+| ``TestMixedPrecision`` | 1+2/27 | fp32 inputs work end-to-end through fp64 tables |
+| ``TestOptimalLwSecant`` | 2/4/7/8/11/12/21/25 | upstream ``compute_optimal_angles`` formula faithfulness + scan/loop/shard equivalence |
+| ``TestStandardO3Profile`` | 3/3.5/6 | skewed Gaussian + 20 ppb baseline + 200-400 DU column total |
+| ``TestTropopauseBoundary`` | 26 | dead-branch AD safety at all-stratosphere / all-troposphere extreme columns |
+| ``TestADSafetyAtStratosphereTau`` | 20 | iter-14/iter-19 max(d,eps) regression guard for stratospheric tau_tot |
+| ``TestCloudKwargsHelper`` | 17 | iter-15/iter-16 cf²-double-discount regression guard |
+| ``TestHeatingRateSign`` | 13 | iter-13 sign-fix regression guard (commit 0be22f0f) |
 
-2. ``_compute_relative_abundance_interpolant`` uses a safe denominator
-   (``jnp.maximum(combined_vmr, 1e-30)``) so reverse-mode AD does not
-   propagate NaN gradients through the ``combined_vmr == 0`` branch.
-
-3. ``compute_planck_sources`` / ``compute_major_optical_depth`` etc.
-   produce **finite** values and **finite gradients** when temperature
-   includes mesospheric (T < 160K) or super-hot (T > 355K) cells.
-
-These properties are required for differentiable training across the
+The properties are required for differentiable training across the
 full stratospheric column and for mixed-precision execution where
-float32 halo extrapolations can push temperatures out of the
-float64-table range.
+fp32 halo extrapolations can push temperatures out of the
+fp64-table range.
+
+A separate ``TestColumnShardedRadiation::test_rrtmgp_*`` pair in
+``test_radiation.py`` (iter-28/29) pins MPI/GPU column-shard
+invariance for both the default and ``use_optimal_angle=True``
+paths.
+
+Full chronology in ``docs/specs/rrtmgp.md``.
 """
 
 from __future__ import annotations
