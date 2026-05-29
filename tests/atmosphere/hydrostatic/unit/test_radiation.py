@@ -879,6 +879,53 @@ class TestRRTMGP:
             f"silently reused the stale solver."
         )
 
+    def test_iter42_hashable_shim_edge_dtypes(self):
+        """iter-41 codex follow-up: pin the dtype-kind gate in
+        ``_hashable``.  Verify that exotic 0-D dtypes that
+        ``RRTMGPConfig`` should never see (e.g. complex64) fall
+        through to id() instead of raising ``TypeError`` from
+        ``float()``, and that legitimate 0-D dtypes (float32, int,
+        bool) correctly value-hash."""
+        import numpy as np
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        # 0-D bool: dtype.kind='b' → value-hash (so True / False produce
+        # distinct keys via float(0.0) / float(1.0)).
+        cfg_t = RRTMGPConfig()._replace(sfc_albedo=jnp.array(True))
+        cfg_f = RRTMGPConfig()._replace(sfc_albedo=jnp.array(False))
+        assert (
+            RRTMGP._instance_cache_key(cfg_t)
+            != RRTMGP._instance_cache_key(cfg_f)
+        )
+
+        # 0-D float32: dtype.kind='f' → value-hash.
+        cfg_a = RRTMGPConfig()._replace(
+            sfc_albedo=jnp.array(0.07, dtype=jnp.float32)
+        )
+        cfg_b = RRTMGPConfig()._replace(
+            sfc_albedo=jnp.array(0.07, dtype=jnp.float32)
+        )
+        assert (
+            RRTMGP._instance_cache_key(cfg_a)
+            == RRTMGP._instance_cache_key(cfg_b)
+        ), "two equal-valued float32 0-D arrays must share cache key"
+
+        # 0-D complex (hypothetical; RRTMGPConfig should never see it):
+        # must fall through to id() without raising.
+        cfg_c = RRTMGPConfig()._replace(
+            sfc_albedo=np.array(0.07 + 0j, dtype=np.complex64)
+        )
+        try:
+            key = RRTMGP._instance_cache_key(cfg_c)
+            # Should not raise.
+            assert isinstance(key, tuple)
+        except TypeError as e:
+            raise AssertionError(
+                f"_hashable should fall through to id() for complex "
+                f"0-D arrays; got TypeError: {e}"
+            )
+
     def test_cache_keys_handle_array_valued_sfc_fields(self):
         """AIMIP populates ``config.sfc_albedo`` / ``sfc_emissivity``
         with ``(ncol,)`` arrays.  Arrays aren't hashable; the
