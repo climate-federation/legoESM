@@ -458,6 +458,34 @@ class TestOptimalLwSecant:
         )
         np.testing.assert_allclose(np.asarray(secant)[0, 0, 0], expected, rtol=1e-12)
 
+    def test_secant_physically_reasonable_range(self, lookup_vmr):
+        """Iter-21: optimal LW secant must lie in [1.0, 2.0] for all
+        bands across the full tau range [0, +inf].  The Fu-Liou 1.66
+        is the canonical default; upstream RFMIP reports band-mean
+        secants of 1.5-1.9.  Anything outside [1.0, 2.0] would imply
+        an unphysical diffusivity (<1 means no angle widening, >2
+        means more than ~60° tilt) and signals a misconfigured
+        ``optimal_angle_fit`` (e.g. via a corrupted data file or a
+        manually-constructed lookup with wrong coefficient ordering).
+        """
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rte import (
+            two_stream,
+        )
+        lookup, _ = lookup_vmr
+        fit = lookup.optimal_angle_fit
+        # For each band, eval secant at tau=0 (trans=1) and tau=inf
+        # (trans=0).  These bracket the achievable secant range.
+        c0 = np.asarray(fit[:, 0])
+        c1 = np.asarray(fit[:, 1])
+        secant_tau0 = c0 + c1     # trans=1: tau=0
+        secant_tauinf = c1        # trans=0: tau=inf
+        all_secants = np.concatenate([secant_tau0, secant_tauinf])
+        assert (all_secants >= 1.0).all() and (all_secants <= 2.0).all(), (
+            f"optimal_angle_fit secants outside [1.0, 2.0] range: "
+            f"min={all_secants.min():.3f}, max={all_secants.max():.3f}; "
+            f"per-band tau=0: {secant_tau0}, tau=inf: {secant_tauinf}"
+        )
+
     def test_secant_halo_width_zero(self, lookup_vmr):
         """Iter-12: ``_compute_optimal_lw_secant(halo_width=0)`` sums
         over ALL z cells (no halo strip).  Guards against future
