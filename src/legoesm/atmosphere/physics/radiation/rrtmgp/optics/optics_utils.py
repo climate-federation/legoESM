@@ -215,8 +215,13 @@ def interpolate_optimized(
 ) -> Array:
   """Interpolate coefficients linearly according to the `interpolant_fns`.
 
-  Optimized version of `interpolate_orig` that combines lookups.  See docstring
-  of `interpolate_orig` for more detail.
+  Multi-dimensional linear interpolation built from a chain of weighted
+  one-hot matmul operations encoded as a single `einsum` per partial
+  graph.  Topologically-ordered `interpolant_fns` declare both
+  independent and dependency-bearing variables; the latter cause the
+  graph to branch into separate upper/lower-endpoint subtrees that are
+  evaluated in parallel and reduced with `jax.tree.reduce(jnp.add, ...)`
+  at the end.
 
   Args:
     coeffs: The array of coefficients of arbitrary shape whose values will be
