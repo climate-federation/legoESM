@@ -504,6 +504,58 @@ class TestOptimalLwSecant:
         )
         np.testing.assert_allclose(np.asarray(secant)[0, 0, 0], expected, rtol=1e-12)
 
+    def test_secant_extreme_tau_limits(self, lookup_vmr):
+        """iter-43: pin numerical limits of ``_compute_optimal_lw_secant``.
+
+        Verifies the asymptotic behaviour required by the upstream
+        formula ``c0 * exp(-Σtau) + c1``:
+
+        - ``tau → +∞``: ``trans → 0``, so ``secant → c1`` (regardless
+          of c0).
+        - ``tau = inf``: same limit; no overflow / NaN.
+        - ``tau = NaN`` (pathological input): NaN propagates (no
+          silent masking that would hide an upstream bug).
+
+        Catches a regression in the ``jnp.maximum(tau, 0)`` clamp
+        or in the ``exp`` underflow behaviour that would shift the
+        asymptote.
+        """
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rte import (
+            two_stream,
+        )
+        lookup, _ = lookup_vmr
+        # Use band 5 (c0=0.20, c1=1.50 per iter-2 inspection) so the
+        # tau dependence is non-trivial in the finite range.
+        band_idx = jnp.array(5)
+        c1 = float(lookup.optimal_angle_fit[5, 1])
+
+        # tau = 1000 (large but finite).  exp(-3000) underflows to 0.
+        tau_huge = jnp.full((1, 1, 5), 1000.0, dtype=jnp.float64)
+        secant = two_stream._compute_optimal_lw_secant(
+            tau_huge, band_idx, lookup.optimal_angle_fit, halo_width=1
+        )
+        np.testing.assert_allclose(np.asarray(secant)[0, 0, 0], c1, rtol=1e-12)
+
+        # tau = +inf.
+        tau_inf = jnp.full((1, 1, 5), jnp.inf, dtype=jnp.float64)
+        secant_inf = two_stream._compute_optimal_lw_secant(
+            tau_inf, band_idx, lookup.optimal_angle_fit, halo_width=1
+        )
+        np.testing.assert_allclose(np.asarray(secant_inf)[0, 0, 0], c1, rtol=1e-12)
+        assert jnp.isfinite(secant_inf).all(), (
+            "tau=inf must produce finite secant=c1, not nan/inf"
+        )
+
+        # tau = NaN: NaN must propagate (no silent masking).
+        tau_nan = jnp.full((1, 1, 5), jnp.nan, dtype=jnp.float64)
+        secant_nan = two_stream._compute_optimal_lw_secant(
+            tau_nan, band_idx, lookup.optimal_angle_fit, halo_width=1
+        )
+        assert jnp.isnan(secant_nan).all(), (
+            "tau=NaN must propagate to secant=NaN; silent masking would "
+            "hide upstream optical-depth NaN bugs"
+        )
+
     def test_secant_constant_when_c0_is_zero(self, lookup_vmr):
         """Iter-25: when ``optimal_angle_fit[band, 0] == 0`` (most bands
         in the shipped data; per iter-2 inspection: bands 0-4, 9, 10,
