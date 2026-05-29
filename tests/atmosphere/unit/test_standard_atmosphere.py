@@ -267,6 +267,34 @@ class TestDriverStandardIC:
         i_mtn = np.unravel_index(int(np.argmax(phis)), phis.shape)
         assert float(T_sfc[i_mtn]) < 299.0
 
+    def test_temperature_uses_local_pressure_ratio_hybrid_topography(self):
+        """Default hybrid coordinate + non-flat topography: the mountain-column
+        temperature must follow the TRUE local pressure ratio p_full/p_s, not
+        the flat-reference sigma_full = A_full+B_full (which differs by ~12 K
+        over a 2.5 km mountain)."""
+        drv = self._build("standard", topography="gaussian")
+        assert type(drv.sigma).__name__ == "HybridSigmaPressureCoordinate"
+        phis = np.asarray(drv.state.phis.data)
+        p_s = np.asarray(drv.state.p_s.data)
+        T = np.asarray(drv.state.T.data)
+        lat2d = np.asarray(drv.grid.lat2d)
+        i = np.unravel_index(int(np.argmax(phis)), phis.shape)  # mountain top
+
+        sa = StandardAtmosphereConfig(T_sfc_equator_K=300.0)
+        sig_local = (np.asarray(drv.sigma.pressure_at_full(drv.state.p_s.data))[i]
+                     / p_s[i])
+        sig_AB = np.asarray(drv.sigma.sigma_full)
+        T_local = np.asarray(standard_atmosphere_temperature(
+            jnp.asarray(lat2d[i]), jnp.asarray(sig_local), sa))
+        T_AB = np.asarray(standard_atmosphere_temperature(
+            jnp.asarray(lat2d[i]), jnp.asarray(sig_AB), sa))
+
+        # Driver column matches the local-ratio profile.
+        assert np.allclose(T[i], T_local, atol=1e-2)
+        # ... and the local ratio genuinely differs from A+B over terrain
+        # (else the test would not distinguish the fix).
+        assert float(np.max(np.abs(T_local - T_AB))) > 2.0
+
     def test_standard_ic_realistic_cwv_and_gradient(self):
         drv = self._build("standard")
         T = drv.state.T.data            # (n_lat, n_lon, nlev)

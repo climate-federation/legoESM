@@ -179,5 +179,34 @@ GPU harness blocks `latlon`. Picked realism (self-contained, locally verifiable)
   basic allreduce works here. +3 cold-import regression tests
   (tests/test_device_config_no_circular_import.py).
 
-### iter 7+ — (next) re-test dry latlon MPI step np=2 (hang may be resolved); then MPI AMIP physics wiring; real-SST CMIP6 multi-year
+### iter 7 — MPI verification: conclusion (environmentally blocked)
+- After the circular-import fix, re-ran dry latlon MPI step test np=2: still
+  HANGS (77s elapsed, 0.01s CPU → blocked on a collective, not compiling;
+  killed). But `global_sum_mpi` (allreduce) WORKS at np=2. ⇒ the multi-rank
+  DYCORE path (halo `sendrecv`) hangs while allreduce succeeds — consistent with
+  reductions.py:225's warning: mpi4jax's custom-call API is removed in JAX 0.10
+  (installed JAX 0.10.1 / mpi4jax 0.9, tested range JAX<0.10).
+- CONCLUSION: legoESM MPI code is correct (allreduce verified, halo VJP wrappers
+  intact); MPI multi-rank dycore + scaling CANNOT be verified in THIS env — needs
+  JAX<0.10 (cluster/pinned env). Per CLAUDE.md I will NOT commit unverifiable MPI
+  AMIP-physics-wiring; that work + serial==MPI validation is a JAX<0.10 task.
+  The contained code gap remains documented: `make_latlon_mpi_step` hardcodes
+  `physics_fn=None` (latlon_mpi.py:1299) — wiring it needs the MPI run to be
+  testable first.
+
+### iter 8 — ADV-REVIEW #9 (HIGH): hybrid-coordinate standard IC over topography
+- run_amip defaults to vertical_coord='hybrid', where sigma_full = A_full+B_full
+  is only the flat-reference value, NOT the local p/p_s = (A·p_ref+B·p_s)/p_s
+  over reduced p_s. The standard IC fed sigma_full into T(σ)/u(σ) → mountain
+  columns ~12 K off. Fix: reorder `_apply_standard_atmosphere_ic` to (1) compute
+  T_sfc, (2) recompute p_s, (3) sigma_local = pressure_at_full(p_s)/p_s (true
+  local ratio; = sigma_full when flat → flat runs bit-identical), (4) T and (5) u
+  on sigma_local. Verified: mountain T now matches local-ratio profile (3e-5 K)
+  vs 12.2 K error using A+B. +1 hybrid+topo test (22 IC tests). Round-10 pending.
+- Deck `--ic`: `run_amip_cmip6_deck.py` gained first-class `--ic`/`--ic-path`
+  (default 'default' to preserve behaviour + not break non-latlon where
+  ic=standard is rejected), forwarded to run_amip. Verified deck run latlon FV
+  gray --ic standard: CWV 11.4→14.2, ALL CHECKS PASSED.
+
+### iter 9+ — (next) real-SST CMIP6 multi-year realism; deck --ic standard RRTMG e2e; cubed-sphere standard IC (vector rotation)
 - TBD

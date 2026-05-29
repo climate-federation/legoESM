@@ -532,37 +532,18 @@ class ModelDriver:
 
         sa_cfg = StandardAtmosphereConfig(T_sfc_equator_K=cfg.T_init)
         lat_h = jnp.asarray(lat_h)
-        T_new = standard_atmosphere_temperature(
-            lat_h, self.sigma.sigma_full, sa_cfg,
-        ).astype(self.state.T.data.dtype)
-        self.state = self.state._replace(T=self.state.T.replace(data=T_new))
 
-        # Thermal-wind-balanced zonal wind so the imposed equator-pole
-        # temperature gradient does not launch a geostrophic-adjustment shock at
-        # startup.  v stays zero (the balance is zonal).  Reuses the grid's own
-        # radius/rotation (constants fallback per the audit rule).
-        radius = getattr(self.grid, "radius", constants.R_earth)
-        omega = getattr(self.grid, "omega", constants.Omega)
-        u_new = standard_atmosphere_zonal_wind(
-            lat_h, self.sigma.sigma_full, radius, omega, sa_cfg,
-        ).astype(self.state.u.data.dtype)
-        # Broadcast (… , nlev) to the centered u Field's layout (identical
-        # horizontal shape for the A-grid scaffold state).
-        self.state = self.state._replace(
-            u=self.state.u.replace(data=jnp.broadcast_to(u_new, self.state.u.data.shape)),
-        )
-
-        # Make surface pressure consistent with the NEW temperature over
-        # topography.  The scaffold reduced p_s hydrostatically against the
-        # uniform T_init column (p_s = p0*exp(-phis/(R_d*T_init))); with the
-        # standard column the representative surface temperature is T_sfc(lat),
-        # so re-scale to p_s = p0*exp(-phis/(R_d*T_sfc)).  Written as a relative
-        # correction of the current p_s so p0 need not be re-derived; it is an
-        # exact no-op where phis == 0 (flat topography), leaving flat-case runs
-        # bit-identical.
+        # (1) Surface temperature (sigma=1 limit) — needed for the p_s reduction;
+        #     independent of the vertical coordinate.
         T_sfc_std = standard_atmosphere_temperature(
             lat_h, jnp.ones((1,), dtype=self.sigma.sigma_full.dtype), sa_cfg,
         )[..., 0]
+
+        # (2) Make surface pressure consistent with the NEW temperature over
+        #     topography FIRST.  The scaffold reduced p_s against the uniform
+        #     T_init column (p_s = p0*exp(-phis/(R_d*T_init))); rescale to the
+        #     standard surface temperature, p_s = p0*exp(-phis/(R_d*T_sfc)),
+        #     as a relative correction (exact no-op where phis == 0).
         phis = self.state.phis.data
         p_s_old = self.state.p_s.data
         p_s_new = p_s_old * jnp.exp(
@@ -570,6 +551,36 @@ class ModelDriver:
         )
         self.state = self.state._replace(
             p_s=self.state.p_s.replace(data=p_s_new.astype(p_s_old.dtype)),
+        )
+
+        # (3) Local full-level pressure ratio p_full/p_s for the FINAL p_s.  For
+        #     pure sigma this is sigma_full; for the hybrid coordinate (run_amip
+        #     default) it is (A*p_ref + B*p_s)/p_s, which over topography differs
+        #     from the flat-reference sigma_full = A_full + B_full.  Using it here
+        #     keeps the lapse-rate temperature and the thermal-wind jet on the
+        #     true local pressure surfaces over terrain.  (Flat: p_s = p_ref =>
+        #     sigma_local = sigma_full, so flat runs stay bit-identical.)
+        sigma_local = (
+            self.sigma.pressure_at_full(p_s_new) / p_s_new[..., None]
+        )
+
+        # (4) Temperature on the local pressure surfaces.
+        T_new = standard_atmosphere_temperature(
+            lat_h, sigma_local, sa_cfg,
+        ).astype(self.state.T.data.dtype)
+        self.state = self.state._replace(T=self.state.T.replace(data=T_new))
+
+        # (5) Thermal-wind-balanced zonal wind so the imposed equator-pole
+        #     temperature gradient does not launch a geostrophic-adjustment shock
+        #     at startup.  v stays zero (the balance is zonal).  Reuses the grid's
+        #     own radius/rotation (constants fallback per the audit rule).
+        radius = getattr(self.grid, "radius", constants.R_earth)
+        omega = getattr(self.grid, "omega", constants.Omega)
+        u_new = standard_atmosphere_zonal_wind(
+            lat_h, sigma_local, radius, omega, sa_cfg,
+        ).astype(self.state.u.data.dtype)
+        self.state = self.state._replace(
+            u=self.state.u.replace(data=jnp.broadcast_to(u_new, self.state.u.data.shape)),
         )
 
     def _init_state(self) -> None:
