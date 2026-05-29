@@ -348,6 +348,15 @@ def main() -> int:
                         "WOA-IC geostrophic-imbalance blowup. 0=off.")
     p.add_argument("--nudge-release-day", type=float, default=0.0,
                    help="Stop nudging after this model day (0=nudge throughout).")
+    p.add_argument("--spinup-drag-tau-days", type=float, default=0.0,
+                   help="Rayleigh velocity-damping timescale [days] during the "
+                        "spin-up phase -- bleeds off the cold-start geostrophic "
+                        "adjustment OVERSHOOT (the ~5-10 m/s transients that trip "
+                        "the nonlinear advective blowup) while the stratification "
+                        "settles. 0=off.")
+    p.add_argument("--spinup-drag-days", type=float, default=0.0,
+                   help="Duration [days] of the spin-up velocity-damping phase "
+                        "(drag removed afterwards -> free run).")
     args = p.parse_args()
 
     from legoesm.core.precision import PrecisionPolicy, set_policy
@@ -390,6 +399,11 @@ def main() -> int:
 
     nudge_tau_s = float(args.nudge_woa_tau_days) * _SEC_PER_DAY
     nudge_release_s = float(args.nudge_release_day) * _SEC_PER_DAY
+    drag_tau_s = float(args.spinup_drag_tau_days) * _SEC_PER_DAY
+    drag_days_s = float(args.spinup_drag_days) * _SEC_PER_DAY
+    if drag_tau_s > 0:
+        print(f"[setup] spin-up velocity drag: tau={args.spinup_drag_tau_days}d "
+              f"for first {args.spinup_drag_days}d")
     nudge_T = nudge_S = nudge_m3 = None
     if nudge_tau_s > 0:
         nudge_T, nudge_S = compute_woa_3d(
@@ -432,6 +446,14 @@ def main() -> int:
                         dims=state.T.dims, units=state.T.units),
                 S=Field(jnp.asarray(Sn), name=state.S.name,
                         dims=state.S.dims, units=state.S.units),
+            )
+        if drag_tau_s > 0 and step * dt < drag_days_s:
+            df = float(np.exp(-dt / drag_tau_s))   # Rayleigh decay factor
+            state = state._replace(
+                u=Field(jnp.asarray(np.asarray(state.u.data) * df),
+                        name=state.u.name, dims=state.u.dims, units=state.u.units),
+                v=Field(jnp.asarray(np.asarray(state.v.data) * df),
+                        name=state.v.name, dims=state.v.dims, units=state.v.units),
             )
         if step % diag_every == 0 or step == n_steps:
             state = jax.block_until_ready(state)
