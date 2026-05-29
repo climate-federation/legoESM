@@ -371,6 +371,7 @@ class RRTMGP:
       cloud_r_eff_ice: jnp.ndarray | None = None,
       cloud_fraction: jnp.ndarray | None = None,
       aerosol_optical_depth: jnp.ndarray | None = None,
+      aerosol_optical_depth_lw: jnp.ndarray | None = None,
       solar_spectral_fraction: jnp.ndarray | None = None,
       ghg_vmr_override: dict | None = None,
   ):
@@ -414,7 +415,12 @@ class RRTMGP:
       cloud_r_eff_ice : jnp.ndarray | None
           Ice cloud effective radius (ncol, nlev) [m].
       aerosol_optical_depth : jnp.ndarray | None
-          Prescribed aerosol optical depth per layer (ncol, nlev).
+          Prescribed shortwave aerosol optical depth per layer
+          (ncol, nlev).
+      aerosol_optical_depth_lw : jnp.ndarray | None
+          Prescribed longwave aerosol optical depth per layer
+          (ncol, nlev), treated as a pure absorber (ssa=0).  ``None``
+          (default) leaves the longwave solution byte-identical.
       solar_spectral_fraction : jnp.ndarray | None
           Per-g-point solar source weights (ngpt_sw,).
       ghg_vmr_override : dict | None
@@ -560,13 +566,21 @@ class RRTMGP:
       else:
           cpl_3d = cpi_3d = crl_3d = cri_3d = cf_3d = None
 
-      # Optional aerosol optical depth
+      # Optional aerosol optical depth (shortwave)
       if aerosol_optical_depth is not None:
           aerosol_od_3d = _add_halos(
               jnp.clip(aerosol_optical_depth, 0.0, None)[:, None, ::-1],
           )
       else:
           aerosol_od_3d = None
+
+      # Optional aerosol optical depth (longwave, pure absorber)
+      if aerosol_optical_depth_lw is not None:
+          aerosol_od_lw_3d = _add_halos(
+              jnp.clip(aerosol_optical_depth_lw, 0.0, None)[:, None, ::-1],
+          )
+      else:
+          aerosol_od_lw_3d = None
 
       # Optional spectral solar forcing
       if solar_spectral_fraction is not None:
@@ -595,6 +609,7 @@ class RRTMGP:
           cloud_r_eff_ice=cri_3d,
           cloud_path_ice=cpi_3d,
           cloud_fraction=cf_3d,
+          aerosol_optical_depth=aerosol_od_lw_3d,
           use_scan=config.use_scan,
           use_optimal_angle=getattr(config, "use_optimal_angle", False),
       )

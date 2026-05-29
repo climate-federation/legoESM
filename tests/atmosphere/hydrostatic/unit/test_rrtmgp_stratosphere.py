@@ -2864,5 +2864,133 @@ class TestSolarSpectralFraction:
         )
 
 
+class TestLwAerosolPath:
+    """Iter-76: pin the new longwave aerosol path (feature, was SW-only).
+
+    Implemented (iter-76) as a prescribed pure-absorbing aerosol
+    (single-scattering albedo 0 — the dominant LW aerosol effect, matching
+    upstream rte-rrtmgp's LW aerosol support).  In ``two_stream.solve_lw``
+    the aerosol optical depth is added to the gas+cloud optical depth and
+    the combined ssa diluted, injected into ``precomputed_props`` *before*
+    the optimal-angle secant so both the diffusivity fit and the
+    source/properties solve see the aerosol-inclusive transmissivity.
+    Exposed via ``solve_columns(aerosol_optical_depth_lw=...)``; ``None``
+    (default) leaves the longwave solution byte-identical (zero
+    regression for every existing caller — the mixing block is skipped).
+
+    Physics pinned: an elevated absorbing aerosol layer (colder than the
+    surface) reduces OLR (it replaces warm-surface emission with cold
+    aerosol emission, like a thin cloud) and raises surface downwelling LW
+    (extra atmospheric emission), and is AD-differentiable through both the
+    fixed-secant and optimal-angle paths.
+    """
+
+    @staticmethod
+    def _cols(ncol=2, nlev=16):
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1)
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        T = jnp.broadcast_to(jnp.linspace(220.0, 295.0, nlev)[None, :], (ncol, nlev))
+        base = dict(
+            T=T, p_full=p_full, p_half=p_half,
+            sfc_temperature=jnp.full((ncol,), 298.0),
+            q_v=jnp.full((ncol, nlev), 8e-3),
+            cos_zenith=jnp.full((ncol,), 0.7),
+        )
+        return base, ncol, nlev
+
+    def _solver(self, use_optimal_angle=False):
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        return RRTMGP.from_legoesm_config(
+            RRTMGPConfig(include_clouds=False, use_optimal_angle=use_optimal_angle)
+        )
+
+    @staticmethod
+    def _elevated_aod(ncol, nlev, value=0.3):
+        # Upper-troposphere layers (TOA-first input convention: low index
+        # = high altitude / cold), where absorbing aerosol most reduces OLR.
+        return jnp.zeros((ncol, nlev)).at[:, 2:5].set(value)
+
+    def test_zero_lw_aod_equals_no_aerosol(self):
+        """aerosol_optical_depth_lw=0 ≡ omitting it (the pure-absorbing
+        mixing is inert at zero optical depth)."""
+        solver = self._solver()
+        base, ncol, nlev = self._cols()
+        none = solver.solve_columns(**base)
+        zero = solver.solve_columns(
+            **base, aerosol_optical_depth_lw=jnp.zeros((ncol, nlev))
+        )
+        for field in ("lw_flux_up", "lw_flux_down", "lw_heating_rate"):
+            np.testing.assert_allclose(
+                np.asarray(getattr(zero, field)), np.asarray(getattr(none, field)),
+                rtol=1e-9, atol=1e-9,
+                err_msg=f"zero LW AOD must match no-aerosol in {field!r}",
+            )
+
+    def test_elevated_lw_aerosol_reduces_olr(self):
+        solver = self._solver()
+        base, ncol, nlev = self._cols()
+        none = solver.solve_columns(**base)
+        aer = solver.solve_columns(
+            **base, aerosol_optical_depth_lw=self._elevated_aod(ncol, nlev)
+        )
+        drop = float(none.lw_flux_up[0, 0]) - float(aer.lw_flux_up[0, 0])
+        assert drop > 1.0, (
+            f"An elevated (cold) absorbing aerosol layer must reduce OLR; "
+            f"got Δ(OLR)={-drop:+.3f} W/m². Δ≈0 ⇒ aerosol_optical_depth_lw "
+            f"not reaching the LW optical depth."
+        )
+        assert drop < 80.0, f"OLR drop {drop:.3f} W/m² implausibly large."
+
+    def test_lw_aerosol_increases_surface_downwelling(self):
+        solver = self._solver()
+        base, ncol, nlev = self._cols()
+        none = solver.solve_columns(**base)
+        aer = solver.solve_columns(
+            **base, aerosol_optical_depth_lw=self._elevated_aod(ncol, nlev)
+        )
+        rise = float(aer.lw_flux_down[0, -1]) - float(none.lw_flux_down[0, -1])
+        assert rise > 0.5, (
+            f"Absorbing aerosol adds atmospheric emission ⇒ surface "
+            f"downwelling LW must rise; got Δ={rise:+.3f} W/m²."
+        )
+
+    def test_lw_aerosol_differentiable(self):
+        solver = self._solver()
+        base, ncol, nlev = self._cols()
+        aod0 = self._elevated_aod(ncol, nlev)
+
+        def olr(a):
+            return jnp.sum(solver.solve_columns(
+                **base, aerosol_optical_depth_lw=a).lw_flux_up[:, 0])
+
+        g = jax.grad(olr)(aod0)
+        assert jnp.all(jnp.isfinite(g)), f"∂(OLR)/∂(LW AOD) must be finite; {g}"
+        assert float(jnp.sum(g[:, 2:5])) < 0.0, (
+            f"∑∂(OLR)/∂(LW AOD) over the aerosol layers must be negative; "
+            f"got {float(jnp.sum(g[:, 2:5])):.3f}"
+        )
+
+    def test_lw_aerosol_with_optimal_angle(self):
+        """The optimal-angle diffusivity secant is fit on the column
+        transmissivity exp(-Στ); the aerosol must be in τ before the fit.
+        Pin that the optimal-angle path runs with aerosol and still
+        reduces OLR."""
+        solver = self._solver(use_optimal_angle=True)
+        base, ncol, nlev = self._cols()
+        none = solver.solve_columns(**base)
+        aer = solver.solve_columns(
+            **base, aerosol_optical_depth_lw=self._elevated_aod(ncol, nlev)
+        )
+        assert jnp.all(jnp.isfinite(aer.lw_flux_up)), "optimal-angle + aerosol NaN"
+        assert float(aer.lw_flux_up[0, 0]) < float(none.lw_flux_up[0, 0]), (
+            "optimal-angle path: elevated absorbing aerosol must still "
+            "reduce OLR (aerosol τ must enter the secant fit)."
+        )
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
