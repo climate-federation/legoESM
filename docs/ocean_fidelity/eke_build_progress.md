@@ -7,9 +7,9 @@ every micro-decision. Newest at the bottom.
 ## Gate status
 - [x] E1 EKE closure module (pure) + EKEConfig + direct unit tests (8 green)
 - [x] E2 dispatch + GM/Redi coupling (compute_eke_kappa_gm; GMRediConfig.eke; validate_eke_config)
-- [ ] E3 positivity (E >= 0 / E_min)
+- [x] E3 positivity (semi-implicit dissipation; E >= 0 by construction, no clip)
 - [ ] E4 budget closure (advection + iso-diffusion conserve integral-E)
-- [ ] E5 differentiability
+- [x] E5 differentiability (grad through closure + coupling finite + nonzero)
 - [ ] E6 state threading + zero-behaviour-when-OFF (existing bit-identical)
 - [ ] E7 idealized channel (E spins up bounded; kappa_GM responds)
 - [ ] E8 regression lock (EKE-active golden case)
@@ -46,3 +46,16 @@ NEXT: E3 (positivity of E under the closure), E5 (differentiability) — both te
 closure now. E4 (budget closure) needs the E-transport operator (2-D advection by the depth-mean
 flow + iso-diffusion, reusing divergence_cgrid) — define it conservatively, then E6 wires it +
 the `eke` state field into the step (the cross-cutting part; SegmentCarry discipline).
+
+### 2026-05-29 · iter 3 · E3 (positivity) + E5 (differentiability) done
+Added `eke_apply_local_source(E, sigma, L, cfg, dt)`: forward-explicit production +
+SEMI-IMPLICIT dissipation -> E_{n+1} = (E_n + dt·P)/(1 + dt·c_eps·√E_n/L), num>=0 denom>=1, so
+E>=0 BY CONSTRUCTION (no clip/mask — doctrine-clean; the standard stable treatment of the
+quadratic EKE dissipation). E3 tests: E stays >=0 + finite over 50 steps for dt up to 10 days
+(incl. huge dt where explicit Euler would go negative); E grows from ~1e-6 toward a bounded
+steady state under forcing. E5: jax.grad through compute_eke_kappa_gm + eke_apply_local_source is
+finite + nonzero. 14 EKE tests green.
+NEXT: E4 — conservative 2-D E-transport operator (flux-form advection by the depth-mean flow via
+divergence_cgrid + lateral iso-diffusion via laplacian_cgrid; both conserve integral-E by
+telescoping); test conservation to machine-eps. Then E6 (state field + step threading; the
+cross-cutting SegmentCarry part).

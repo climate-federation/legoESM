@@ -179,3 +179,69 @@ def test_compute_eke_kappa_gm_prognostic_and_monotone():
     E0, *rest0 = _eke_coupling_inputs(0.0)
     k0, _, _ = compute_eke_kappa_gm(E0, *rest0, vcfg, ecfg)
     assert float(jnp.max(k0)) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# E3 — positivity (semi-implicit dissipation, no clipping)
+# ---------------------------------------------------------------------------
+
+
+def test_E3_positivity_preserved_over_steps():
+    """The local EKE update keeps E >= 0 over many steps for a wide range of
+    E0/sigma/dt — by construction (semi-implicit), no floor/clip needed."""
+    from legoesm.ocean.physics.lateral_mixing.eke import eke_apply_local_source
+    cfg = EKEConfig()
+    rng = np.random.default_rng(7)
+    L = jnp.asarray(rng.uniform(1e4, 5e4, (6, 8)))
+    for dt in (300.0, 3600.0, 86400.0, 10.0 * 86400.0):  # incl. huge dt
+        E = jnp.asarray(np.abs(rng.standard_normal((6, 8))) * 0.05)
+        sigma = jnp.asarray(np.abs(rng.standard_normal((6, 8))) * 1e-5)
+        for _ in range(50):
+            E = eke_apply_local_source(E, sigma, L, cfg, dt)
+            assert jnp.all(E >= 0.0), f"E went negative at dt={dt}"
+            assert jnp.all(jnp.isfinite(E))
+
+
+def test_E3_grows_from_small_E_when_forced():
+    """With production (sigma>0), E grows away from ~0 toward a bounded steady
+    state (production dominates near 0; dissipation ~ E^{3/2} caps it)."""
+    from legoesm.ocean.physics.lateral_mixing.eke import eke_apply_local_source
+    cfg = EKEConfig()
+    L = jnp.full((1,), 3.0e4)
+    sigma = jnp.full((1,), 3.0e-5)
+    E = jnp.full((1,), 1.0e-6)
+    traj = [float(E[0])]
+    for _ in range(400):
+        E = eke_apply_local_source(E, sigma, L, cfg, 3600.0)
+        traj.append(float(E[0]))
+    assert traj[-1] > traj[0], "E should grow under forcing"
+    assert jnp.isfinite(E[0]) and float(E[0]) < 1e3, "E should stay bounded"
+    # near steady state: last step changes little.
+    assert abs(traj[-1] - traj[-2]) < 0.05 * traj[-1] + 1e-9
+
+
+# ---------------------------------------------------------------------------
+# E5 — differentiability
+# ---------------------------------------------------------------------------
+
+
+def test_E5_differentiable_through_closure_and_coupling():
+    """jax.grad through the EKE local update + the prognostic kappa_GM coupling is
+    finite and nonzero."""
+    from legoesm.ocean.physics.lateral_mixing.eke import eke_apply_local_source
+    from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+        compute_eke_kappa_gm,
+    )
+    from legoesm.ocean.physics.lateral_mixing.config import VisbeckConfig
+    cfg, vcfg = EKEConfig(), VisbeckConfig()
+    E0, rho, S_x, S_y, z, jac, f = _eke_coupling_inputs(0.04)
+
+    def loss(E):
+        kappa, sigma, L = compute_eke_kappa_gm(
+            E, rho, S_x, S_y, z, jac, f, vcfg, cfg)
+        E1 = eke_apply_local_source(E, sigma, L, cfg, 3600.0)
+        return jnp.sum(kappa ** 2) + jnp.sum(E1 ** 2)
+
+    g = jax.grad(loss)(E0)
+    assert jnp.all(jnp.isfinite(g)), "non-finite grad through EKE closure/coupling"
+    assert float(jnp.max(jnp.abs(g))) > 0.0, "zero grad — path not differentiated"

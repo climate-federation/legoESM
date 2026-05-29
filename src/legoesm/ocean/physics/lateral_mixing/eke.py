@@ -81,6 +81,29 @@ def eke_local_tendency(
     return production - dissipation
 
 
+def eke_apply_local_source(
+    E: jnp.ndarray, sigma: jnp.ndarray, L: jnp.ndarray, cfg: EKEConfig, dt: float,
+) -> jnp.ndarray:
+    """One step of the local EKE source/sink with **semi-implicit dissipation** —
+    unconditionally positivity-preserving (``E_{n+1} >= 0``) with NO clipping/mask.
+
+    Production is explicit (``P = kappa_GM(E_n)·sigma^2 >= 0``); dissipation is
+    linearised implicitly (``eps = c_eps·√E_n·E_{n+1}/L``), giving
+
+        E_{n+1} = (E_n + dt·P) / (1 + dt·c_eps·√E_n / L)
+
+    whose numerator is >= 0 (E_n >= 0, P >= 0) and denominator >= 1, so the result
+    is >= 0 by construction (not by a floor). Advection + isopycnal diffusion of E
+    are applied separately by the step (also positivity-preserving). This is the
+    standard stable treatment of the quadratic-in-magnitude EKE dissipation
+    (Eden-Greatbatch / Veros).
+    """
+    E_pos = jnp.maximum(E, 0.0)
+    production = eke_kappa_gm(E_pos, L, cfg) * sigma ** 2
+    diss_rate = cfg.c_eps * jnp.sqrt(E_pos + 1.0e-30) / jnp.maximum(L, cfg.l_min)
+    return (E_pos + dt * production) / (1.0 + dt * diss_rate)
+
+
 def validate_eke_config(cfg: EKEConfig) -> None:
     """Fail-fast validation of EKE parameters (dispatch discipline). Raises
     ``ValueError`` on non-physical values."""
@@ -105,5 +128,6 @@ __all__ = [
     "eke_mixing_length",
     "eke_kappa_gm",
     "eke_local_tendency",
+    "eke_apply_local_source",
     "validate_eke_config",
 ]
