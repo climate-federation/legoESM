@@ -14,14 +14,12 @@
 
 """Implementation of a radiative transfer solver."""
 
-from collections.abc import Sequence
 from pathlib import Path
 from typing import TypeAlias
 
 import jax
 import jax.numpy as jnp
 from legoesm.atmosphere.physics.radiation.rrtmgp import constants
-from legoesm.atmosphere.physics.radiation.rrtmgp.config import radiative_transfer
 from legoesm.atmosphere.physics.radiation.rrtmgp.config.radiative_transfer import (
     OpticsParameters,
     RRTMOptics as RRTMOpticsConfig,
@@ -141,33 +139,14 @@ def standard_o3_profile(p_full):
 
 
 class RRTMGP:
-  """Rapid Radiative Transfer Model for General Circulation Models (RRTMGP)."""
+  """Rapid Radiative Transfer Model for General Circulation Models (RRTMGP).
 
-  def __init__(
-      self,
-      radiative_transfer_cfg: radiative_transfer.RadiativeTransfer,
-      dz: float,
-      diagnostic_fields: Sequence[str] = tuple(),
-  ):
-    self._dz = dz  # Store dz (only used if not using stretched grid in z).
-    self._diagnostic_fields = diagnostic_fields
-    self._save_lw_sw_heating_rates = (
-        radiative_transfer_cfg.save_lw_sw_heating_rates
-    )
-    self._do_clear_sky = radiative_transfer_cfg.do_clear_sky
-
-    # Load and store the atmospheric gas concentrations.
-    self.atmospheric_state = atmospheric_state.from_config(
-        radiative_transfer_cfg.atmospheric_state_cfg
-    )
-    # Create the optics library.
-    self.optics_lib = optics.optics_factory(
-        radiative_transfer_cfg.optics, self.atmospheric_state.vmr
-    )
-
-  # =========================================================================
-  # legoESM integration API
-  # =========================================================================
+  legoESM integration API — construct with
+  ``RRTMGP.from_legoesm_config(rrtmgp_config)`` and drive via
+  ``solve_columns(...)``.  The swirl_jatmos-style ``__init__`` and
+  ``compute_heating_rate`` API were removed in iter-22 after zero
+  callers were found across the codebase.
+  """
 
   @staticmethod
   def _cache_key(config):
@@ -318,12 +297,6 @@ class RRTMGP:
       )
       instance.optics_lib = optics_lib
       instance._config = config
-      # Unused by solve_columns() but set for compatibility with
-      # compute_heating_rate().
-      instance._dz = 0.0
-      instance._diagnostic_fields = ()
-      instance._save_lw_sw_heating_rates = False
-      instance._do_clear_sky = False
       return instance
 
   @classmethod
