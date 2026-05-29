@@ -7,6 +7,47 @@ Iter-10 compressed; original at `rrtmgp.original.md`.
 
 ---
 
+## Iter 13+14 — restore production-critical fixes lost in AIMIP merge (2026-05-29)
+
+**This is the highest-impact work in the entire session.**
+
+Investigation: while verifying iter-12 heating-rate output for a
+US-Std-like column, observed that **free-tropospheric LW heating
+was +0.5 K/day (radiative warming) instead of −1..−2 K/day
+(radiative cooling)**.  Cross-referenced git history and found:
+
+| Lost commit | Author | Date | Pre-revert impact |
+|---|---|---|---|
+| `0be22f0f` Fix sign-inverted RRTMGP radiative heating rate | Aytac Pacal | 2026-05-22 | Thermal runaway, T̄ 261→293K over 120 days, NaN at day 125 |
+| `59407953` Fix AD-unsafe maximum-floor patterns | Kevin Debeire | 2026-05-14 | 4/5 AMIP+RRTMG tunable params NaN gradients (no training) |
+
+Both were silently reverted by `b5b5954e Aimip (#312)` merge.  My
+iter-1 → iter-12 work was all happening atop this broken state.
+
+### iter-13: heating-rate sign restored
+- `two_stream.compute_heating_rate`: restored `-G * dflux / abs(dp) / Cp`.
+- New tests: `TestHeatingRateSign::test_free_tropospheric_LW_cools`
+  pins LW heating < 0 in 300-800 hPa.
+  `test_clear_sky_SW_heats` pins SW heating ≥ 0 everywhere.
+- Both tests reference commit `0be22f0f` in docstrings to make any
+  future revert traceable.
+
+### iter-14: AD-safe maximum-floor patterns restored
+- `cloud_optics.py`: ssa and asymmetry_factor combine-divide → `safe_divide`.
+- `monochromatic_two_stream.py:lw_combine_sources`: sqrt(max(x, 0)) → sqrt(max(x, _EPSILON)).
+- `monochromatic_two_stream.py:_solve_rte_2stream`: three sites
+  (`albedo_op`, `upward_emission_op`, `flux_down_op`) all
+  `1/max(1-r·a, _EPSILON)` → `safe_divide`.
+- `two_stream.py:solve_sw` aerosol path: w_tot and g_tot → `safe_divide`.
+
+### Verification
+- **107 tests pass** (61 radiation unit + 36 stratosphere + 10 AMIP-RRTMG).
+- 2 skipped multidevice MPI tests need >1 visible JAX device.
+- Free-tropospheric LW heating now -0.5 K/day (cooling) ✓
+- AMIP-RRTMG smoke test runs without thermal drift ✓
+
+---
+
 ## Iter 1 audit — initial findings (2026-05-28)
 
 Files reviewed: `optics/{gas_optics,optics_utils,lookup_*,optics}.py`,
