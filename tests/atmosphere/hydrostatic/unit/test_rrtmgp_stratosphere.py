@@ -2974,42 +2974,63 @@ class TestLwAerosolPath:
             f"got {float(jnp.sum(g[:, 2:5])):.3f}"
         )
 
-    def test_lw_aerosol_enters_optimal_angle_secant(self):
-        """The optimal-angle diffusivity secant is fit on the column
-        transmissivity exp(-Στ), so the aerosol must enter τ *before* the
-        secant fit (not only the later source/transport solve).
+    def test_lw_aerosol_enters_optimal_angle_secant(self, monkeypatch):
+        """White-box guard that aerosol τ reaches the optimal-angle
+        diffusivity secant (``_compute_optimal_lw_secant``, fit on the
+        column transmissivity exp(-Στ)) — not only the later
+        source/transport solve.
 
-        A bare "aerosol reduces OLR in the optimal-angle path" assertion is
-        vacuous — added absorption lowers OLR even if the secant were
-        computed from gas-only τ (codex iter-79 review).  Instead isolate
-        the secant: the optimal-angle-vs-fixed-secant correction
-        (OLR_optimal − OLR_fixed) must itself *change* when aerosol is
-        added, since only an aerosol-aware secant shifts that correction.
-        If aerosol were injected after the secant, the correction would be
-        identical with and without aerosol (the source-side aerosol effect
-        cancels in the optimal−fixed difference)."""
-        solver_opt = self._solver(use_optimal_angle=True)
-        solver_fix = self._solver(use_optimal_angle=False)
+        Codex iter-79→80 review: a flux differential cannot isolate this.
+        The optimal-secant and fixed-1.66 paths run *different* nonlinear
+        LW solves, so the optimal−fixed correction can shift when aerosol
+        is added even if the secant saw gas-only τ; the source-side effect
+        does not cancel.  So capture the exact optical depth handed to
+        ``_compute_optimal_lw_secant`` and assert its column sum grows by
+        exactly the injected aerosol OD for every g-point.  If aerosol were
+        injected *after* the secant, the captured sums would be identical
+        (Δ = 0)."""
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rte import two_stream
+
+        seen: list[float] = []
+        orig = two_stream._compute_optimal_lw_secant
+
+        def spy(optical_depth, *args, **kwargs):
+            # Defer to execution time (the scan body is traced, not run, at
+            # call time) so the concrete summed τ is captured per g-point.
+            jax.debug.callback(
+                lambda v: seen.append(float(v)), jnp.sum(optical_depth)
+            )
+            return orig(optical_depth, *args, **kwargs)
+
+        monkeypatch.setattr(two_stream, "_compute_optimal_lw_secant", spy)
+        solver = self._solver(use_optimal_angle=True)
         base, ncol, nlev = self._cols()
-        aod = self._elevated_aod(ncol, nlev)
+        aod_value = 1.0
+        aod = jnp.zeros((ncol, nlev)).at[:, 2:5].set(aod_value)
 
-        def olr(solver, with_aer):
-            kw = dict(base)
-            if with_aer:
-                kw["aerosol_absorption_optical_depth_lw"] = aod
-            return float(solver.solve_columns(**kw).lw_flux_up[0, 0])
+        seen.clear()
+        solver.solve_columns(**base)  # gas only
+        gas = np.array(seen)
+        seen.clear()
+        solver.solve_columns(**base, aerosol_absorption_optical_depth_lw=aod)
+        aer = np.array(seen)
 
-        corr_aer = olr(solver_opt, True) - olr(solver_fix, True)
-        corr_noaer = olr(solver_opt, False) - olr(solver_fix, False)
-        assert abs(corr_aer - corr_noaer) > 1.0e-2, (
-            f"optimal-angle correction is insensitive to aerosol "
-            f"(with={corr_aer:.4f}, without={corr_noaer:.4f} W/m²) — the "
-            f"diffusivity secant is NOT seeing aerosol τ, i.e. aerosol is "
-            f"injected after the secant fit instead of before it."
+        assert gas.size > 0 and gas.size == aer.size, (
+            "the optimal-angle secant was not invoked once per g-point"
         )
-        # And the path must of course stay finite + physical.
-        assert jnp.all(jnp.isfinite(solver_opt.solve_columns(
-            **base, aerosol_absorption_optical_depth_lw=aod).lw_flux_up))
+        # Aerosol adds aod_value to 3 interior layers in each of ncol
+        # columns; the secant operates on the full optical-depth array, so
+        # its column sum must rise by exactly aod_value*3*ncol for EVERY
+        # g-point (Δ = 0 would mean aerosol bypasses the secant).
+        expected = aod_value * 3 * ncol
+        np.testing.assert_allclose(
+            aer - gas, np.full_like(aer, expected), rtol=0.0, atol=1e-6,
+            err_msg=(
+                "optical depth handed to _compute_optimal_lw_secant did not "
+                "grow by the injected aerosol OD — aerosol is NOT entering τ "
+                "before the secant fit."
+            ),
+        )
 
 
 class TestDeltaScaling:
