@@ -380,18 +380,40 @@ def _build_rcemip_initial_state(grid, height_coord, dtype=jnp.float64,
         jnp.broadcast_to(q_v, (ny, nx, nlev)),
     )
     n_seed_lev = min(n_seed_lev, nlev)
-    rng_key = jax.random.PRNGKey(0)
-    theta_noise = jax.random.uniform(
-        rng_key, shape=(ny, nx, n_seed_lev),
-        minval=-theta_noise_amp, maxval=theta_noise_amp, dtype=dtype,
-    )
+    # SMOOTH k=1 cosine pattern (kx=ky=1) instead of white noise.
+    # White-noise IC has full power at grid scale where hyperdiff/Smag
+    # are weakest at t=0 (Smag's |S|=0 from rest state -> K_smag=0
+    # -> no damping at the first step). The grid-scale noise amplifies
+    # via buoyancy -> w response -> NaN within ~30 sim sec at dt=2s.
+    # smooth_k1 puts all energy at the lowest non-trivial wavenumber so
+    # the seed pattern is RESOLVED, not grid-scale. Standard fallback
+    # used by run_rce_mpi_long.py (iter-207 helper).
+    ix = jnp.arange(nx, dtype=dtype)
+    iy = jnp.arange(ny, dtype=dtype)
+    cos_x = jnp.cos(2 * jnp.pi * ix / nx)
+    cos_y = jnp.cos(2 * jnp.pi * iy / ny)
+    pattern_2d = cos_y[:, None] * cos_x[None, :]
+    theta_noise = (theta_noise_amp * pattern_2d[:, :, None]
+                    * jnp.ones((1, 1, n_seed_lev), dtype=dtype))
+    # Subtract horizontal mean (cosine pattern is already zero-mean for
+    # nx,ny > 1 but keep the operation for degenerate-grid safety).
     theta_noise = theta_noise - jnp.mean(theta_noise, axis=(0, 1),
                                          keepdims=True)
     theta_p = jnp.zeros_like(rest.theta_prime.data)
     # Bottom 4 levels in top-down indexing = LAST 4 array entries.
     theta_p = theta_p.at[..., -n_seed_lev:].set(theta_noise)
+    # Hydrostatic-balance IC: set rho' = -rho_0 * theta'/theta_0 so the
+    # initial pressure perturbation is zero (matches the warm-bubble
+    # convention used by tests/validation/test_plane_nh_rising_thermal.py).
+    # Without this, theta' alone breaks hydrostatic balance — pressure
+    # imbalance triggers an acoustic shock at step 1 that compounds with
+    # Smagorinsky + hyperdiff and NaN's within ~2 sim hours at dt=2s.
+    rho_0 = jnp.asarray(height_coord.rho_ref, dtype=dtype)
+    theta_0 = jnp.asarray(height_coord.theta_ref, dtype=dtype)
+    rho_p = -rho_0 * theta_p / theta_0
     return rest._replace(
         theta_prime=rest.theta_prime.replace(data=theta_p),
+        rho_prime=rest.rho_prime.replace(data=rho_p),
         tracers=rest.tracers.replace(data=tracers),
     )
 
