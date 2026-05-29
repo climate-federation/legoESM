@@ -43,8 +43,6 @@ Example
 
 from __future__ import annotations
 
-import inspect
-import warnings
 from typing import Callable, NamedTuple
 
 import jax
@@ -53,6 +51,11 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState, HydrostaticTendencies
+from legoesm.core.column_stepping import (
+    ab2_effective_tendency,
+    build_explicit_integrators,
+    register_integrator,
+)
 from legoesm.grids.vertical import SigmaCoordinate, create_sigma_coordinate
 from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
 from legoesm.atmosphere.physics.physics_state import (
@@ -268,61 +271,6 @@ def _tendency_fn(physics_fn, grid, sigma_coord, forcing: SCMForcing | None = Non
     return f
 
 
-def _euler_step(state, phys_state, f, dt, t):
-    """Forward Euler (1st order)."""
-    tend, phys_out = f(state, phys_state, t)
-    return _apply_tendencies(state, tend, dt), phys_out
-
-
-def _rk2_step(state, phys_state, f, dt, t):
-    """Heun's method (RK2, midpoint-correction variant).
-
-    ``phys_state`` is advanced once per outer step (stage-1 update) to
-    keep the prognostic-physics carry single-valued. Tendencies are
-    averaged between the predictor and corrector stages.  Stage time is
-    advanced to ``t + dt`` for the corrector so time-dependent forcing
-    is evaluated consistently with the Heun update.
-    """
-    tend1, phys_mid = f(state, phys_state, t)
-    mid = _apply_tendencies(state, tend1, dt)
-    tend2, _ = f(mid, phys_mid, t + dt)
-    avg = _average_tendencies(tend1, tend2, weights=(0.5, 0.5))
-    return _apply_tendencies(state, avg, dt), phys_mid
-
-
-def _ab2_step_first(state, phys_state, f, dt, t):
-    """First-step fallback for AB2 (no prev tendency yet): forward Euler.
-
-    The actual AB2 update lives in :meth:`SingleColumnModel.step` because
-    it needs a per-instance ``prev_tend`` cache that the
-    ``(state, phys, f, dt, t) -> (state', phys')`` integrator contract
-    does not expose.  This registry entry exists so ``"ab2"`` passes
-    :meth:`SingleColumnModel.__init__`'s ``time_integrator`` validation;
-    the call only fires for the very first step (when prev_tend is
-    ``None``) — subsequent steps short-circuit into the AB2 branch in
-    :meth:`SingleColumnModel.step`.
-    """
-    return _euler_step(state, phys_state, f, dt, t)
-
-
-def _rk4_step(state, phys_state, f, dt, t):
-    """Classical RK4. Physics-state carry advanced from stage-1 only.
-
-    Stage times: ``t``, ``t + dt/2``, ``t + dt/2``, ``t + dt`` — the
-    canonical RK4 abscissae, so time-dependent forcing is sampled at the
-    correct sub-step instants.
-    """
-    k1, phys_mid = f(state, phys_state, t)
-    s2 = _apply_tendencies(state, k1, 0.5 * dt)
-    k2, _ = f(s2, phys_mid, t + 0.5 * dt)
-    s3 = _apply_tendencies(state, k2, 0.5 * dt)
-    k3, _ = f(s3, phys_mid, t + 0.5 * dt)
-    s4 = _apply_tendencies(state, k3, dt)
-    k4, _ = f(s4, phys_mid, t + dt)
-    avg = _average_tendencies(k1, k2, k3, k4, weights=(1/6, 1/3, 1/3, 1/6))
-    return _apply_tendencies(state, avg, dt), phys_mid
-
-
 def _average_tendencies(*tends, weights):
     """Linear combination of HydrostaticTendencies with the given weights."""
     if len(weights) != len(tends):
@@ -365,135 +313,34 @@ def _average_tendencies(*tends, weights):
 
 
 # Public registry — same naming pattern as PhysicsConfig schemes so that
-# swapping integrators feels like swapping a parameterization.
-TIME_INTEGRATORS: dict[str, Callable] = {
-    "forward_euler": _euler_step,
-    "rk2": _rk2_step,
-    "rk4": _rk4_step,
-    # AB2 first-step fallback (forward Euler); main AB2 update lives in
-    # :meth:`SingleColumnModel.step` to keep its prev-tendency cache
-    # isolated per SCM instance.
-    "ab2": _ab2_step_first,
-}
+# swapping integrators feels like swapping a parameterization.  The
+# integrator numerics (Euler / RK2 / RK4 stage weights + the AB2 first-
+# step fallback) live in :mod:`legoesm.core.column_stepping` and are shared
+# with the ocean single-column model; only the atmosphere-specific
+# ``_apply_tendencies`` / ``_average_tendencies`` operators are injected
+# here.  The true AB2 multistep update lives in
+# :meth:`SingleColumnModel.step` to keep its prev-tendency cache isolated
+# per SCM instance.
+TIME_INTEGRATORS: dict[str, Callable] = build_explicit_integrators(
+    _apply_tendencies, _average_tendencies,
+)
 
 
 def register_time_integrator(name: str, step_fn: Callable) -> None:
-    """Register a custom time-integrator under ``name``.
+    """Register a custom time-integrator under ``name`` (atmosphere SCM).
 
-    The canonical signature is ``step_fn(state, phys_state, f, dt, t)``
-    where ``f`` is the tendency callable returned by :func:`_tendency_fn`
-    and expects ``f(state, phys_state, stage_t_seconds)``. ``t`` is the
-    base-step time in seconds; multi-stage integrators MUST advance
-    ``t`` to the correct sub-step abscissa for each call to ``f`` so
-    time-dependent SCM forcing is sampled consistently with the update.
-    The integrator must return ``(new_state, new_phys_state)``.
-
-    Backwards compatibility
-    -----------------------
-    Pre-forcing legacy integrators registered with the older
-    ``step_fn(state, phys_state, f, dt)`` 4-arg signature are wrapped
-    transparently: the wrapper captures the outer-step ``t`` once and
-    forwards a 2-arg tendency closure that ignores stage time.  These
-    legacy integrators therefore work correctly only when ``forcing``
-    is ``None`` or every channel is time-independent; passing
-    time-dependent forcing through them silently sees the outer-step
-    ``t`` at every sub-stage.  A ``DeprecationWarning`` flags this at
-    registration so callers can migrate.  Anything other than 4 or 5
-    positional parameters is rejected with ``TypeError`` at
-    registration rather than at first ``step()`` call.
+    Thin wrapper over
+    :func:`legoesm.core.column_stepping.register_integrator` targeting this
+    module's :data:`TIME_INTEGRATORS` registry.  The canonical signature is
+    ``step_fn(state, phys_state, f, dt, t)`` where ``f`` is the tendency
+    callable returned by :func:`_tendency_fn` and expects
+    ``f(state, phys_state, stage_t_seconds)``; the integrator must return
+    ``(new_state, new_phys_state)``.  See
+    :func:`~legoesm.core.column_stepping.register_integrator` for the 4-arg
+    legacy-shim behaviour (sampling forcing at the outer-step time only,
+    tagged ``_is_legacy_4arg``) and the full arity-validation rules.
     """
-    if not callable(step_fn):
-        raise TypeError(
-            f"register_time_integrator({name!r}): step_fn must be "
-            f"callable; got {type(step_fn).__name__}."
-        )
-    try:
-        sig = inspect.signature(step_fn)
-    except (TypeError, ValueError) as exc:
-        # Fail closed: C-extensions, descriptors, and some wrappers
-        # refuse signature inspection. Refusing to register here forces
-        # callers to expose a true ``__signature__`` rather than letting
-        # an opaque object slip through and crash on the first step.
-        raise TypeError(
-            f"register_time_integrator({name!r}): cannot inspect "
-            f"step_fn signature ({exc}). Wrap the callable so it "
-            "exposes a concrete signature (e.g. ``functools.wraps`` "
-            "with ``__wrapped__`` set, or a plain ``def`` form)."
-        ) from exc
-
-    # Count parameters that can be passed positionally.  The driver
-    # invokes ``step_fn(state, phys, f, dt, t)`` positionally, so
-    # keyword-only parameters and *args / **kwargs do not satisfy the
-    # 4-or-5-arg contract and must be rejected at registration time
-    # rather than failing on first call.
-    _POSITIONAL = {
-        inspect.Parameter.POSITIONAL_ONLY,
-        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-    }
-    positional_params = [
-        p for p in sig.parameters.values() if p.kind in _POSITIONAL
-    ]
-    n_params = len(positional_params)
-    has_varargs = any(
-        p.kind is inspect.Parameter.VAR_POSITIONAL
-        for p in sig.parameters.values()
-    )
-    if has_varargs:
-        raise TypeError(
-            f"register_time_integrator({name!r}): step_fn must declare "
-            "its parameters explicitly; ``*args`` / variadic positional "
-            "signatures are rejected because arity cannot be verified."
-        )
-
-    # Reject any required keyword-only parameters — the driver invokes
-    # the integrator positionally so a required kwonly arg (commonly
-    # ``def step(state, phys, f, dt, *, t)``) would crash on the first
-    # call.  Optional kwonlys (with a default) are harmless.
-    required_kwonly = [
-        p.name for p in sig.parameters.values()
-        if p.kind is inspect.Parameter.KEYWORD_ONLY
-        and p.default is inspect.Parameter.empty
-    ]
-    if required_kwonly:
-        raise TypeError(
-            f"register_time_integrator({name!r}): step_fn declares "
-            f"required keyword-only parameter(s) {required_kwonly}; "
-            "the driver invokes integrators positionally so keyword-"
-            "only parameters cannot be supplied at call time. Move "
-            "them to positional-or-keyword."
-        )
-
-    if n_params == 5:
-        TIME_INTEGRATORS[name] = step_fn
-    elif n_params == 4:
-        warnings.warn(
-            f"Time integrator {name!r} uses the legacy 4-arg signature "
-            "``(state, phys, f, dt)``. Wrapped for compatibility, but "
-            "time-dependent SCM forcing will be sampled at the outer-"
-            "step time only — migrate to the 5-arg signature "
-            "``(state, phys, f, dt, t)`` to sample forcing at sub-step "
-            "abscissae.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-        def wrapped(state, phys, f, dt, t, _legacy=step_fn):
-            return _legacy(state, phys, lambda s, p: f(s, p, t), dt)
-
-        # Mark this integrator as a legacy shim so
-        # ``SingleColumnModel.__init__`` can hard-error if the user
-        # tries to pair it with time-dependent forcing — the wrapper
-        # would silently sample forcing at the outer-step ``t`` only,
-        # which is the exact correctness bug we just paid Phase A to
-        # avoid.  The ``forcing=None`` case is still supported.
-        wrapped._is_legacy_4arg = True
-        TIME_INTEGRATORS[name] = wrapped
-    else:
-        raise TypeError(
-            f"register_time_integrator({name!r}): step_fn must take 4 "
-            f"or 5 positionally-callable args (got {n_params} positional, "
-            f"full signature {list(sig.parameters)})."
-        )
+    register_integrator(TIME_INTEGRATORS, name, step_fn)
 
 
 class SCMHistory(NamedTuple):
@@ -902,7 +749,8 @@ class SingleColumnModel:
         Stage time is sampled from ``self.t_seconds`` and the simulation
         clock is advanced by ``self.dt`` after the step.  Time-dependent
         SCM forcing callables are evaluated at the correct stage abscissae
-        inside the integrator (see :func:`_rk2_step`, :func:`_rk4_step`).
+        inside the integrator (see the RK2 / RK4 steps in
+        :mod:`legoesm.core.column_stepping`).
         """
         if self.time_integrator == "ab2":
             # Adams-Bashforth 2 — single ``_tend_fn`` evaluation per
@@ -920,8 +768,8 @@ class SingleColumnModel:
             if self._ab2_prev_tend is None:
                 tend_eff = tend_n
             else:
-                tend_eff = _average_tendencies(
-                    tend_n, self._ab2_prev_tend, weights=(1.5, -0.5),
+                tend_eff = ab2_effective_tendency(
+                    tend_n, self._ab2_prev_tend, _average_tendencies,
                 )
             new_state = _apply_tendencies(self.state, tend_eff, self.dt)
             self._ab2_prev_tend = tend_n
