@@ -358,4 +358,22 @@ def cfl_check_and_adjust(
     else:
         if verbose:
             logger.info(f"  CFL OK: dt={dt:.0f}s is within stability limit")
+            if grid_type == "mpas":
+                # NECESSARY, NOT SUFFICIENT for the hydrostatic TRiSK PE.
+                # This advective/gravity-wave CFL has been observed to pass
+                # ("OK") at time steps that then blow up: e.g. L4/nlev40 with
+                # the gray AMIP deck NaNs at dt=450 s (CFL~0.65 here) within a
+                # day, while dt=240/300 s run cleanly.  The extra constraints
+                # this estimate does NOT capture are (a) the cold-start
+                # radiative transient (a T=300 K isothermal IC carries a large
+                # day-0 radiative tendency that a big dt cannot absorb) and
+                # (b) the explicit ∇⁴ hyperdiffusion eigenvalues vs the
+                # integrator's stability region.  Treat this as an upper bound
+                # and keep a margin (CFL <~ 0.5) on a cold start.
+                logger.info(
+                    "  NOTE (mpas): advective/GW CFL is necessary but not "
+                    "sufficient — hydrostatic TRiSK PE can still blow up "
+                    "inside this limit (cold-start radiative transient, "
+                    "hyperdiffusion). Keep a margin on a cold start."
+                )
         return dt

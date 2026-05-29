@@ -145,30 +145,20 @@ def make_turbulence_physics(
     elif model_type == "spectral_pe":
         return _make_spectral_pe_turbulence(turbulence_config, dt)
     elif model_type == "mpas":
-        # The MPAS hydrostatic step (primitive_eq_mpas.MPASPrimitiveEquationModel.step)
-        # consumes only (du_dt, dT_dt, dp_s_dt) from the physics tendencies and
-        # does not preserve ``state.tracers`` or thread a ``PhysicsState`` for
-        # prognostic-TKE schemes.  Returning a turbulence physics_fn that
-        # carries moisture / TKE tendencies would silently drop them in the
-        # step kernel — every turbulence scheme in this package diffuses q_v
-        # and the TKE/CLUBB/EDMF backends carry a stateful TKE field.  Codex
-        # adversarial-review (2026-05-12) called this out as no-ship.  The
-        # Perot-reconstruction edge→cell wind helper lives in
-        # ``grids.voronoi.reconstruct_cell_velocity`` and is already wired
-        # into MPAS gravity-wave drag (which has no tracer/TKE outputs); the
-        # turbulence path is unblocked by extending the MPAS step to thread
-        # ``state.tracers`` and a ``PhysicsState`` carry, at which point
-        # ``_make_mpas_turbulence`` below can be enabled.
-        raise NotImplementedError(
-            "Turbulence on MPAS Voronoi mesh requires threading "
-            "state.tracers and a PhysicsState carry through "
-            "MPASPrimitiveEquationModel.step so that q_v tendencies "
-            "and prognostic TKE are not silently dropped.  Run MPAS "
-            "with turbulence='none' until that wiring lands.  "
-            "(Edge→cell wind reconstruction itself is supported — see "
-            "legoesm.grids.voronoi.reconstruct_cell_velocity and the "
-            "MPAS gravity-wave-drag bridge.)"
-        )
+        # UNBLOCKED: ``MPASPrimitiveEquationModel.step`` now (a) carries
+        # ``state.tracers`` (q_v advected by the dycore — Phase B) and (b)
+        # applies physics OPERATOR-SPLIT once per dt with a ``PhysicsState``
+        # carry threaded in/out, so the prognostic TKE field and the q_v
+        # diffusion tendency are no longer dropped.  ``_make_mpas_turbulence``
+        # (Perot edge→cell reconstruction + column backend + cell→edge
+        # projection) is the implementation; it reads the prescribed surface
+        # temperature from the per-step ``forcing["T_sfc"]`` (AMIP SST) when
+        # supplied, so the surface sensible/latent fluxes are SST-driven.
+        _mpas_turb_fn = _make_mpas_turbulence(turbulence_config, dt)
+        # Forcing-aware: the combined-physics dispatcher forwards
+        # ``forcing["T_sfc"]`` to fns advertising this (mirrors radiation).
+        _mpas_turb_fn._wants_forcing = True
+        return _mpas_turb_fn
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
@@ -352,7 +342,7 @@ def _make_mpas_turbulence(
     scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
     needs_tke = scheme_name in ("tke", "mynn25", "clubb_lite", "edmf")
 
-    def physics_fn(state, mesh, sigma_coord, phys_state=None):
+    def physics_fn(state, mesh, sigma_coord, phys_state=None, forcing=None):
         from legoesm.grids.voronoi import reconstruct_cell_velocity
 
         tke_out = None
@@ -401,7 +391,14 @@ def _make_mpas_turbulence(
         z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col, q_v=q_v_col)
         rho = _compute_rho(T_col, p_full_col, q_v=q_v_col)
 
-        T_sfc = _resolve_T_sfc(T_col, phys_state)
+        # Surface temperature for the bulk fluxes: the prescribed SST from the
+        # per-step traced ``forcing["T_sfc"]`` (AMIP path) when supplied, so
+        # the sensible/latent surface fluxes are SST-driven and consistent
+        # with the radiation surface boundary; else the SCM/phys-carry value.
+        if forcing is not None and forcing.get("T_sfc") is not None:
+            T_sfc = jnp.asarray(forcing["T_sfc"]).reshape(nCells)
+        else:
+            T_sfc = _resolve_T_sfc(T_col, phys_state)
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
 
         if needs_tke:
