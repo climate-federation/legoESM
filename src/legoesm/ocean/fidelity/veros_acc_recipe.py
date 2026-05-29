@@ -42,11 +42,15 @@ from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 from legoesm.ocean.physics.lateral_mixing.config import (
     GMRediConfig, HarmonicConfig, LateralMixingConfig,
 )
-from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
+from legoesm.ocean.physics.surface_forcing.config import (
+    RestoringConfig, SurfaceForcingConfig,
+)
 from legoesm.ocean.physics.vertical_mixing.config import (
     TKEConfig, VerticalMixingConfig,
 )
-from legoesm.ocean.state import LatLonCGridOceanConfig, LatLonCGridOceanState
+from legoesm.ocean.state import (
+    LatLonCGridOceanConfig, LatLonCGridOceanState, OceanSurfaceForcing,
+)
 from legoesm.ocean.vertical import OceanZStarCoordinate, create_ocean_z_star
 
 
@@ -116,6 +120,27 @@ ACC_GM_REDI_CONFIG = GMRediConfig(
 
 # Surface restoring timescale
 T_RESTORING_DAYS = 30.0
+_SECONDS_PER_DAY = 86400.0
+
+# Veros ACC surface-forcing profile parameters (verbatim from
+# veros/setups/acc/acc.py:126-134). Band edges in degrees latitude.
+_ACC_TAUX_AMP = 0.1          # wind-stress amplitude [N/m^2]
+_ACC_TSTAR_AMP = 15.0        # T* amplitude [degC]
+_ACC_WIND_LAT_S = -20.0      # southern edge: sin westerly band below this
+_ACC_WIND_LAT_N = 10.0       # northern edge: (1-cos) band above this
+_ACC_TSTAR_LAT_S = -20.0     # T* ramps down south of this
+_ACC_TSTAR_LAT_N = 20.0      # T* ramps down north of this
+# Veros ACC grid latitude extents INCLUDING its 2 ghost cells each side — the
+# forcing formulas reference global_min/max(yt) / (yu). Derived from the recipe
+# grid constants and VERIFIED against a live ACCSetup grid (yt in [-45, 45]
+# step 2 -> 46 cells = NY+4; yu = yt + dy/2 in [-44, 46]).
+_VEROS_YT_MIN = Y_ORIGIN_DEG - 2.5 * DYT_DEG            # -45.0
+_VEROS_YT_MAX = _VEROS_YT_MIN + (NY + 3) * DYT_DEG      # +45.0  (NY+4 cells)
+_VEROS_YU_MIN = _VEROS_YT_MIN + 0.5 * DYT_DEG           # -44.0
+_VEROS_YU_MAX = _VEROS_YT_MAX + 0.5 * DYT_DEG           # +46.0
+# Salinity is NOT restored in Veros ACC (T-only heat-flux forcing); a huge
+# timescale makes the restoring tendency negligibly small (effectively off).
+_ACC_NO_SALT_RESTORE_TAU_S = 1.0e30
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +273,92 @@ def build_acc_state(grid: LatLonGrid,
 
 
 # ---------------------------------------------------------------------------
+# Surface forcing (free-run): Veros ACC wind stress + T* restoring
+# ---------------------------------------------------------------------------
+
+
+def _acc_taux_profile(lat_deg: np.ndarray) -> np.ndarray:
+    """Veros ACC zonal wind stress ``taux`` [N/m^2] as a function of cell-centre
+    latitude, reproducing ``veros/setups/acc/acc.py:126-129`` exactly. The band
+    is selected by the T-point latitude ``yt`` (= ``lat_deg``) while the value
+    uses the v-point latitude ``yu = yt + dy/2`` (Veros's discretisation). This
+    is the OCEAN-SIDE stress (eastward-positive), applied with a ``+`` sign in
+    Veros (``du += surface_taux/(rho_0·dz)``)."""
+    yt = np.asarray(lat_deg, dtype=np.float64)
+    yu = yt + 0.5 * DYT_DEG                       # v-point lat, as Veros uses
+    taux = np.zeros_like(yt)
+    south = yt < _ACC_WIND_LAT_S
+    north = yt > _ACC_WIND_LAT_N
+    taux = np.where(
+        south,
+        _ACC_TAUX_AMP * np.sin(
+            np.pi * (yu - _VEROS_YU_MIN) / (_ACC_WIND_LAT_S - _VEROS_YT_MIN)),
+        taux)
+    taux = np.where(
+        north,
+        _ACC_TAUX_AMP * (1.0 - np.cos(
+            2.0 * np.pi * (yu - _ACC_WIND_LAT_N) / (_VEROS_YU_MAX - _ACC_WIND_LAT_N))),
+        taux)
+    return taux
+
+
+def build_acc_wind_stress(grid: LatLonGrid) -> OceanSurfaceForcing:
+    """Veros ACC surface wind stress as an :class:`OceanSurfaceForcing`.
+
+    Veros applies ``surface_taux`` (the ocean-side, eastward-positive stress)
+    with a ``+`` sign. legoESM's external surface-forcing path treats ``tau_x``
+    as the ATMOSPHERIC stress and flips it (``-tau_x``) to get the ocean
+    reaction (``ocean_pe_latlon_cgrid.py:1922``). So we pass ``tau_x = -taux``
+    here, which after legoESM's internal flip reproduces Veros's ``+taux`` —
+    i.e. westerlies (taux>0) accelerate the ACC eastward. Verified by the sign
+    of the spun-up channel jet (must be eastward)."""
+    lat_deg = np.degrees(np.asarray(grid.lat))    # cell-centre lat (n_lat,)
+    taux = _acc_taux_profile(lat_deg)             # ocean-side stress (n_lat,)
+    n_lat, n_lon = grid.n_lat, grid.n_lon
+    tau_x = jnp.asarray(
+        np.broadcast_to(-taux[:, None], (n_lat, n_lon)))   # negated: see docstring
+    tau_y = jnp.zeros((n_lat, n_lon), dtype=tau_x.dtype)
+    return OceanSurfaceForcing(tau_x=tau_x, tau_y=tau_y)
+
+
+def build_acc_t_star(grid: LatLonGrid) -> jnp.ndarray:
+    """Veros ACC surface restoring target ``t_star`` [degC] (2-D, broadcast over
+    longitude), reproducing ``veros/setups/acc/acc.py:132-134``: 15 degC in the
+    band [-20, 20], ramping linearly to 0 at the meridional walls."""
+    lat = np.degrees(np.asarray(grid.lat))
+    ts = np.full_like(lat, _ACC_TSTAR_AMP)
+    south = lat < _ACC_TSTAR_LAT_S
+    north = lat > _ACC_TSTAR_LAT_N
+    ts = np.where(
+        south,
+        _ACC_TSTAR_AMP * (lat - _VEROS_YT_MIN) / (_ACC_TSTAR_LAT_S - _VEROS_YT_MIN),
+        ts)
+    ts = np.where(
+        north,
+        _ACC_TSTAR_AMP * (1.0 - (lat - _ACC_TSTAR_LAT_N) / (_VEROS_YT_MAX - _ACC_TSTAR_LAT_N)),
+        ts)
+    n_lat, n_lon = grid.n_lat, grid.n_lon
+    return jnp.asarray(np.broadcast_to(ts[:, None], (n_lat, n_lon)))
+
+
+def build_acc_restoring_config(grid: LatLonGrid) -> RestoringConfig:
+    """Veros ACC surface heat-flux forcing as a :class:`RestoringConfig`.
+
+    Veros: ``forc_temp_surface = (dz_surf/(30 d)) · (t_star - T_surf)`` so the
+    surface tendency is ``dT/dt = (t_star - T)/(30 d)`` — the layer thickness
+    cancels, matching legoESM's ``restoring_surface_forcing`` form
+    ``-(T - T*)/tau_T`` exactly with ``tau_T = 30 d``. Salinity is NOT restored
+    in Veros ACC, so ``tau_S`` is huge (effectively off); ``S_star`` defaults to
+    35 PSU (a no-op given the huge timescale)."""
+    return RestoringConfig(
+        tau_T=T_RESTORING_DAYS * _SECONDS_PER_DAY,
+        tau_S=_ACC_NO_SALT_RESTORE_TAU_S,
+        T_star_array=build_acc_t_star(grid),
+        implicit=False,    # Veros uses explicit forward-Euler restoring; dt << 2·tau_T
+    )
+
+
+# ---------------------------------------------------------------------------
 # Configurations
 # ---------------------------------------------------------------------------
 
@@ -271,9 +382,15 @@ class ACCRecipe(NamedTuple):
     z_coord: OceanZStarCoordinate
     land_mask: jnp.ndarray
     initial_state: LatLonCGridOceanState
+    # Free-run wind stress (OceanSurfaceForcing) — passed to ``model.step`` as
+    # the ``surface_forcing`` arg. ``None`` unless built with surface forcing
+    # (the frozen-state tendency probe does not use it).
+    wind_forcing: object = None
 
 
-def build_acc_physics_config() -> OceanPhysicsConfig:
+def build_acc_physics_config(grid: LatLonGrid | None = None, *,
+                             with_surface_forcing: bool = False,
+                             ) -> OceanPhysicsConfig:
     """Veros ACC physics: TKE + GM/Redi + linear bottom drag (via model
     config), implicit vertical viscosity. IDEMIX is disabled in the ACC
     adapter (``enable_idemix=False`` in Veros) so it is not mapped.
@@ -291,7 +408,23 @@ def build_acc_physics_config() -> OceanPhysicsConfig:
     (~8 km; the eddy-energy-dependent Rhines limiting is missing) — using
     it now would make the prognostic kappa_GM ~25× too large. ADOPTION is
     deferred behind the documented ``eke_len`` mixing-length variant
-    (strategy doc §8, "extend L" follow-up)."""
+    (strategy doc §8, "extend L" follow-up).
+
+    Set ``with_surface_forcing=True`` (free-run harness) to activate Veros ACC's
+    T* surface restoring via the physics pipeline; ``grid`` is then required (for
+    the latitude-dependent T* target). Default ``False`` keeps the prior
+    prescribed-zero forcing so the frozen-state tendency probe + committed tier-2
+    report are unchanged. The wind stress is applied SEPARATELY via the
+    ``OceanSurfaceForcing`` argument to ``model.step`` (see
+    :func:`build_acc_wind_stress`), not through this config — the two paths are
+    disjoint (restoring -> dT, wind -> du/dv)."""
+    if with_surface_forcing:
+        if grid is None:
+            grid = build_acc_grid()
+        surface_forcing = SurfaceForcingConfig(
+            scheme="restoring", restoring=build_acc_restoring_config(grid))
+    else:
+        surface_forcing = SurfaceForcingConfig(scheme="prescribed")
     return OceanPhysicsConfig(
         vertical_mixing=VerticalMixingConfig(scheme="tke", tke=ACC_TKE_CONFIG),
         # GM/Redi on the lat-lon C-grid is a DYNAMICS-level process applied via
@@ -302,17 +435,22 @@ def build_acc_physics_config() -> OceanPhysicsConfig:
         # recipe: config.gm_redi defaults None so the model skipped it, and the
         # tendency probe never invokes the physics pipeline.)
         lateral_mixing=LateralMixingConfig(scheme="none"),
-        surface_forcing=SurfaceForcingConfig(scheme="prescribed"),
+        surface_forcing=surface_forcing,
         bottom_drag=BottomDragConfig(scheme="none"),   # see model config bottom_drag_r
         convection=OceanConvectionConfig(scheme="none"),
         shortwave_penetration=None,
     )
 
 
-def build_acc_model_config() -> LatLonCGridOceanConfig:
+def build_acc_model_config(grid: LatLonGrid | None = None, *,
+                           with_surface_forcing: bool = False,
+                           ) -> LatLonCGridOceanConfig:
     """Veros ACC dynamics: harmonic lateral viscosity with cos(lat)
     scaling, linear bottom drag, implicit vertical viscosity,
-    Veros's nonlin3 EOS."""
+    Veros's nonlin3 EOS.
+
+    ``with_surface_forcing`` (free-run) threads through to the physics config to
+    activate T* restoring; default ``False`` is the frozen-state-probe config."""
     return LatLonCGridOceanConfig(
         # All physical constants pinned to Veros via config (G-C4): g/rho_0 are
         # read by the PE core, the ConstantsConfig by the de-mirrored physics,
@@ -340,11 +478,12 @@ def build_acc_model_config() -> LatLonCGridOceanConfig:
         # is what the model actually reads (ocean_model_latlon_cgrid.py:998).
         # Setting it only in physics.lateral_mixing left GM/Redi inactive.
         gm_redi=ACC_GM_REDI_CONFIG,
-        physics=build_acc_physics_config(),
+        physics=build_acc_physics_config(
+            grid, with_surface_forcing=with_surface_forcing),
     )
 
 
-def build_acc_recipe() -> ACCRecipe:
+def build_acc_recipe(*, with_surface_forcing: bool = False) -> ACCRecipe:
     """One-stop constructor. Use as::
 
         from legoesm.ocean.fidelity.veros_acc_recipe import build_acc_recipe
@@ -356,18 +495,28 @@ def build_acc_recipe() -> ACCRecipe:
     pinned through config — ``build_acc_model_config`` sets ``constants=
     VEROS_CONSTANTS_CONFIG`` and the grid radius/omega — so no monkey-patch
     or ``override_constants`` context is required (G-C4).
+
+    ``with_surface_forcing=True`` (free-run harness) activates Veros ACC's
+    surface forcing: T* restoring through ``physics_config`` and the wind stress
+    as ``recipe.wind_forcing`` (pass to ``model.step(..., surface_forcing=
+    recipe.wind_forcing)``). Default ``False`` is the frozen-state-probe recipe
+    (no forcing), so the committed tier-2 tendency comparison is unchanged.
     """
     grid = build_acc_grid()
     z_coord = build_acc_z_coord()
     land_mask = build_acc_land_mask(grid)
     initial_state = build_acc_state(grid, z_coord)
+    wind_forcing = build_acc_wind_stress(grid) if with_surface_forcing else None
     return ACCRecipe(
-        model_config=build_acc_model_config(),
-        physics_config=build_acc_physics_config(),
+        model_config=build_acc_model_config(
+            grid, with_surface_forcing=with_surface_forcing),
+        physics_config=build_acc_physics_config(
+            grid, with_surface_forcing=with_surface_forcing),
         grid=grid,
         z_coord=z_coord,
         land_mask=land_mask,
         initial_state=initial_state,
+        wind_forcing=wind_forcing,
     )
 
 
@@ -391,6 +540,9 @@ __all__ = (
     "build_acc_model_config",
     "build_acc_physics_config",
     "build_acc_recipe",
+    "build_acc_restoring_config",
     "build_acc_state",
+    "build_acc_t_star",
+    "build_acc_wind_stress",
     "build_acc_z_coord",
 )

@@ -25,7 +25,9 @@ from legoesm.ocean.fidelity.tendency_probe import (
 )
 from legoesm.ocean.fidelity.veros_acc_recipe import (
     ACC_DZT, ACC_GM_REDI_CONFIG, ACC_TKE_CONFIG, NX, NY, NZ,
-    acc_A_h, build_acc_grid, build_acc_recipe, build_acc_z_coord,
+    T_RESTORING_DAYS, acc_A_h, build_acc_grid, build_acc_recipe,
+    build_acc_restoring_config, build_acc_t_star, build_acc_wind_stress,
+    build_acc_z_coord,
 )
 from legoesm.ocean.fidelity.veros_runner import VerosResult
 from legoesm.ocean.fidelity.veros_state_bridge import (
@@ -484,3 +486,71 @@ def test_latlon_model_rejects_physics_lateral_mixing():
 
     recipe = build_acc_recipe()
     LatLonCGridOceanModel._validate_config(recipe.model_config)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Free-run surface forcing (Veros ACC wind stress + T* restoring)
+# ---------------------------------------------------------------------------
+
+
+def test_acc_t_star_profile_matches_veros_bands():
+    """T* = 15 degC in [-20, 20], ramping to ~0 at the meridional walls."""
+    grid = build_acc_grid()
+    lat = np.degrees(np.asarray(grid.lat))
+    ts = np.asarray(build_acc_t_star(grid))
+    assert ts.shape == (grid.n_lat, grid.n_lon)
+    # constant across longitude (zonally symmetric forcing)
+    assert np.allclose(ts, ts[:, :1])
+    prof = ts[:, 0]
+    mid = (lat >= -20) & (lat <= 20)
+    assert np.allclose(prof[mid], 15.0, atol=1e-5)
+    # ramps DOWN toward the walls (monotone away from the plateau)
+    assert float(prof[lat > 20].max()) <= 15.0 + 1e-6
+    assert float(prof[lat < -20].max()) <= 15.0 + 1e-6
+    assert float(prof.min()) >= -1e-6        # never negative
+
+
+def test_acc_wind_stress_sign_and_bands():
+    """Wind: zero in the tropical band [-20, 10]; the supplied tau_x is NEGATIVE
+    in the southern westerly band so legoESM's internal -tau_x flip yields an
+    EASTWARD ocean stress (drives the ACC the right way)."""
+    grid = build_acc_grid()
+    lat = np.degrees(np.asarray(grid.lat))
+    sf = build_acc_wind_stress(grid)
+    tau_x = np.asarray(sf.tau_x)
+    assert tau_x.shape == (grid.n_lat, grid.n_lon)
+    assert np.all(np.asarray(sf.tau_y) == 0.0)
+    assert np.all(np.isfinite(tau_x))
+    # tropical band: no wind
+    trop = (lat >= -20) & (lat <= 10)
+    assert np.allclose(tau_x[trop, :], 0.0, atol=1e-12)
+    # southern westerly band: ocean-side stress (= -tau_x) is eastward (>0)
+    band = (lat < -20) & (lat > -42)
+    assert np.all(-tau_x[band, :] > 0.0), "ACC westerlies must push the ocean eastward"
+
+
+def test_acc_restoring_config_matches_veros():
+    grid = build_acc_grid()
+    cfg = build_acc_restoring_config(grid)
+    assert cfg.tau_T == T_RESTORING_DAYS * 86400.0      # 30-day heat restoring
+    assert cfg.tau_S >= 1.0e29                          # salinity effectively unrestored
+    assert cfg.T_star_array is not None
+    assert np.asarray(cfg.T_star_array).shape == (grid.n_lat, grid.n_lon)
+    assert cfg.implicit is False                        # match Veros explicit restoring
+
+
+def test_build_acc_recipe_surface_forcing_flag():
+    """Default recipe = no forcing (frozen-state probe unchanged). With the flag,
+    the recipe carries the wind OceanSurfaceForcing + a restoring physics scheme."""
+    off = build_acc_recipe()
+    assert off.wind_forcing is None
+    assert off.physics_config.surface_forcing.scheme == "prescribed"
+
+    on = build_acc_recipe(with_surface_forcing=True)
+    assert on.wind_forcing is not None
+    assert on.wind_forcing.tau_x is not None
+    assert on.physics_config.surface_forcing.scheme == "restoring"
+    assert on.physics_config.surface_forcing.restoring.T_star_array is not None
+    # dynamics/grid/IC unchanged by the forcing flag
+    assert on.model_config.eos == off.model_config.eos
+    assert on.grid.n_lat == off.grid.n_lat
