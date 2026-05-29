@@ -199,6 +199,22 @@ completeness: "legoESM has every block" is the destination, not a licence to pre
 clone every oracle closure (that breeds untested-but-live code). Track each gap in the
 per-oracle **missing-blocks ledger** (§8).
 
+**Apples-to-apples scoping (which blocks an experiment actually requires).** For a true
+apples-to-apples match on a *given experiment*, the must-build set is the blocks the oracle
+**activates for that experiment**, minus what legoESM already has — **not** everything the
+oracle *could* do. A block the oracle has but runs with **off** in this experiment (e.g. Veros
+ACC sets `enable_idemix=False`) is **not** built: run both models with it off — that is already
+the oracle's own config — and the comparison stays honest. So: read the oracle's experiment
+settings, list its *active* blocks, and build only the active ones legoESM lacks. (Veros ACC:
+active = neutral/skew diffusion (GM/Redi), TKE, **EKE**, bottom + horizontal + implicit-vert
+friction, nonlinear EOS type-3, and **flux-form momentum**; inactive = IDEMIX, explicit-vert
+friction, quadratic drag. legoESM has all the active ones EXCEPT EKE and flux-form momentum →
+those two are the must-build list; IDEMIX etc. are *not* needed.) Note this also applies to
+*paper* oracles: an experiment that replicates a paper pins the paper's parameter values via
+config (e.g. DINO's `c_p=3991.86`, `rho_0=1026.0` from Kamm et al. 2025) — that is the doctrine
+working correctly (oracle value, via config), **not** constant-discipline debt to "fix" toward
+`legoesm.constants`.
+
 **I. One concept, one name, one implementation.** Oracles name the same quantity differently
 (Veros `kappaM` ≈ legoESM `A_v`; `r_bot` = `bottom_drag_r`; `K_gm_0` = `kappa_GM`); left
 unmanaged this breeds parallel vocabularies and copy-paste numerics that "differ only in
@@ -503,28 +519,38 @@ conventions replicated | declared non-goals | timebox | golden-refresh cadence.
   and/or expose legoESM's KE-gradient + implicit-mixing effective tendencies in the probe.
   Governs future MOM6/MITgcm matching. This is the recurring crux of per-process tier-2.
 
-### Veros ACC missing-blocks ledger (per doctrine rule H)
+### Veros ACC missing-blocks ledger (per doctrine rule H; verified against the Veros setup 2026-05-29)
 
-Each documented delta is classified as **add** (new canonical block) / **extend** (variant of
-an existing block) / **bridge** (convention) / **accept** (legitimate, leave) / **defer**.
+Must-build = blocks **active in Veros's ACC setup** that legoESM lacks (apples-to-apples scoping,
+rule H). Veros ACC active blocks (from `veros/setups/acc/acc.py`): neutral + skew diffusion
+(GM/Redi), TKE, **EKE** (`enable_eke=True`), bottom/horizontal/implicit-vert friction, nonlinear
+EOS type-3, **flux-form momentum**. Inactive (run both with off): IDEMIX (`enable_idemix=False`),
+explicit-vert friction, quadratic drag. Each delta is classified **add** / **extend** / **bridge**
+/ **accept** / **defer**.
 
-| Gap (legoESM vs Veros ACC) | Class | Response | Priority |
-|---|---|---|---|
-| **Flux-form momentum advection** — legoESM lat-lon C-grid only has `vector_invariant`/`weno5`/`weno7`; Veros/MOM6/MITgcm use flux-form ∇·(uu). Drives the `du_adv` corr 0.58 delta. | Missing **method** | **Add** `momentum_advection="flux_form"` (+ `momentum_flux_scheme`) to the canonical dycore; reuse `divergence_cgrid` + the existing face-interp/limiter schemes. Gate on conservation + Stommel/Munk gyre + zero-velocity + equivariance + grad (NOT just oracle-match). See `flux_form_momentum_scope.md`. | **High** — broadly useful; closes the momentum delta |
-| **Veros isopycnal/GM-Redi discretization** — we have GM/Redi (`slope_scheme` = triads/centered); Veros's isoneutral scheme differs (T_iso corr 0.17). | Missing **variant** | **Extend** `gm_redi` with a Veros-discretization option, *or* (if our triads are the better method) keep ours and **accept** the delta with a documented justification. Decide on need. | Medium |
-| **EKE closure** — Veros eddy-kinetic-energy parameterization; no legoESM equivalent. | Missing **method** | **Add on demand** only when a recipe/researcher needs it; not preemptive. | Low |
-| **IDEMIX** — internal-wave energy/mixing; disabled in the ACC adapter anyway. | Missing **method** | **Defer.** | Low |
-| **Implicit vs explicit vertical mixing** for ACC (`du_mix` corr ~0). | — (config, already exists) | **Accept** — both paths exist; the recipe selects implicit. Not a gap. | — |
-| **Density / EOS / hydrostatic pressure** (corr 1.0). | — | **Accept** — already matches (shared discretization). | — |
+| Gap (legoESM vs Veros ACC) | Active in ACC? | Class | Response | Priority |
+|---|---|---|---|---|
+| **Flux-form momentum advection** — legoESM lat-lon C-grid only has `vector_invariant`/`weno5`/`weno7`; Veros uses flux-form ∇·(uu) (core/momentum.py). Drives the `du_adv` corr 0.58 delta. | **yes** | Missing **method** | **Add** `momentum_advection="flux_form"` (+ `momentum_flux_scheme`); reuse `divergence_cgrid` + existing face-interp/limiter schemes. Gate on conservation + Stommel/Munk gyre + zero-velocity + equivariance + grad (NOT just oracle-match). See `flux_form_momentum_scope.md`. | **High (must-build)** |
+| **EKE closure** — Veros eddy-kinetic-energy parameterization (`enable_eke=True`, `eke_c_k=0.4`, superbee advection + isopycnal diffusion); no legoESM equivalent. | **yes** | Missing **method** | **Add** a canonical EKE prognostic-closure block. It is REQUIRED for ACC apples-to-apples (active in Veros). Gate on its own truth tiers (EKE budget closure, positivity, equivariance). See `eke_scope.md`. | **High (must-build)** |
+| **Veros isopycnal/GM-Redi discretization** — we have GM/Redi (`slope_scheme` = triads/centered); Veros's isoneutral scheme differs (T_iso corr 0.17). | yes (have variant) | Missing **variant** | **Extend** `gm_redi` with a Veros-discretization option, *or* keep ours (if better) and **accept** the delta with justification. Decide on need. | Medium |
+| **IDEMIX** — internal-wave energy/mixing. | **no** (`enable_idemix=False`) | n/a | **Defer** — Veros runs ACC without it, so neither model needs it for apples-to-apples. | — |
+| **Implicit vs explicit vertical mixing** (`du_mix` corr ~0). | implicit | — (config exists) | **Accept** — both paths exist; recipe selects implicit. Not a gap. | — |
+| **Density / EOS / hydrostatic pressure** (corr 1.0). | yes | — | **Accept** — already matches (shared discretization). | — |
 
 ### Cross-oracle naming (concept registry seed)
 
 Synonyms found in the 2026-05-29 survey, now in `ocean/fidelity/concept_registry.py`:
-Veros `kappaM`/`kappaH` ≈ legoESM `A_v`/`K_v`; `r_bot` = `bottom_drag_r`; `K_gm_0`/`K_iso_0`
-= `kappa_GM`/`kappa_Redi`; `nz` = `n_levels`. Internal debt tracked there too (`nlev` vs
+Veros `kappaM`/`kappaH` ≈ legoESM `A_v`/`K_v`; `r_bot` = `bottom_drag_r`; `K_gm_0` = `kappa_GM`,
+`K_iso_0` = `kappa_Redi`; `nz` = `n_levels`. Internal debt tracked there too (`nlev` vs
 `n_levels`, `T_sfc` vs `T_surface`, `c_sw` vs `c_ocean`/`c_p`, `bottom_drag_coeff`, the
-`tau_relax` days-vs-seconds and `C_water`/`c_water` unit hazards). Actionable item flagged:
-**DINO hardcodes `c_p=3991.86`** instead of pinning via `ConstantsConfig` — fix in a cleanup PR.
+`tau_relax` days-vs-seconds and `C_water`/`c_water` unit hazards). **Correction (2026-05-29):**
+DINO's `c_p=3991.86` / `rho_0=1026.0` (and NeverWorld2-lite's inherited copies) are **intentional
+paper-fidelity values** (Kamm et al. 2025), correctly carried as config-field defaults — **not**
+constant-discipline debt; they must NOT be "fixed" toward `legoesm.constants` (that would break
+paper replication). The fidelity-side Veros constants in `veros_configs/eady_uniform.py` now
+reference `VEROS_CONSTANTS_CONFIG` (value-identical, done). Remaining low-priority items
+(`isomip_plus` `g_val=9.81`/`rho_sw=1028`, `held_larichev` `rho_0=1024`) have unclear intent →
+audit before touching, do not silently change.
 
 ---
 

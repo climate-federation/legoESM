@@ -106,10 +106,12 @@ CONCEPTS: tuple[ConceptDef, ...] = (
                         # c_ocean is a domain field) -> human/agent review, not
                         # an identifier scan that would false-positive.
         note="constants.c_sw = 3994.0 (Gill 1982). Slab-ocean configs use "
-             "c_ocean; budgets.py takes a c_p arg defaulting to c_sw (OK); DINO "
-             "HARDCODES c_p=3991.86 (paper value) instead of pinning via "
-             "ConstantsConfig — tracked actionable debt (CLAUDE.md constant "
-             "discipline). Flagged for dimension-10 review, not auto-ratcheted.",
+             "c_ocean; budgets.py takes a c_p arg defaulting to c_sw (OK). DINO "
+             "/ NeverWorld2-lite carry c_p=3991.86 as a config-field default — "
+             "this is the INTENTIONAL Kamm et al. (2025) paper value (an oracle "
+             "value pinned via config, per rule H), NOT debt to 'fix' toward "
+             "c_sw. The alias is informational; not auto-ratcheted (c_p/c_ocean "
+             "are context-dependent — see dimension-10 for semantic review).",
     ),
     ConceptDef(
         concept="Boussinesq reference density",
