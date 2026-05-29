@@ -470,6 +470,109 @@ class TestMixedPrecision:
                 f"{name} contains non-finite values for fp32 inputs"
             )
 
+    def test_solve_columns_fp32_matches_fp64_inputs(self):
+        """Iter-63: ``solve_columns`` fp32 vs fp64 input must give
+        numerically-equivalent fluxes.
+
+        ``solve_columns`` casts inputs to the table dtype (fp64) as
+        first step.  This test pins that the cast is dtype-only (not
+        precision-degrading): with identical physical column, calling
+        with fp32 inputs vs fp64 inputs must produce relative errors
+        no larger than ~fp32 round-off (5e-6 rtol, 1e-3 atol on
+        W/m²-scale fluxes).
+
+        Catches regressions where a future refactor accidentally
+        skips the cast or uses fp32 intermediates inside the
+        correlated-k inner loop.
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(RRTMGPConfig())
+        ncol, nlev = 1, 8
+
+        def _build_inputs(dtype):
+            p_half = jnp.broadcast_to(
+                jnp.linspace(100.0, 1.0e5, nlev + 1, dtype=dtype)[None, :],
+                (ncol, nlev + 1),
+            )
+            p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+            T = jnp.linspace(220.0, 290.0, nlev, dtype=dtype)[None, :]
+            sfc_T = jnp.array([295.0], dtype=dtype)
+            q_v = jnp.full((ncol, nlev), 5e-3, dtype=dtype)
+            cos_z = jnp.array([0.5], dtype=dtype)
+            return p_full, p_half, T, sfc_T, q_v, cos_z
+
+        p_full_64, p_half_64, T_64, sfc_64, q_64, cos_64 = (
+            _build_inputs(jnp.float64)
+        )
+        out64 = solver.solve_columns(
+            T=T_64, p_full=p_full_64, p_half=p_half_64,
+            sfc_temperature=sfc_64, q_v=q_64, cos_zenith=cos_64,
+        )
+
+        p_full_32, p_half_32, T_32, sfc_32, q_32, cos_32 = (
+            _build_inputs(jnp.float32)
+        )
+        out32 = solver.solve_columns(
+            T=T_32, p_full=p_full_32, p_half=p_half_32,
+            sfc_temperature=sfc_32, q_v=q_32, cos_zenith=cos_32,
+        )
+
+        # fp32 inputs round-trip through table (fp64) interp.  Tolerance
+        # is set by fp32 input round-off (~1e-7 rel) plus a small slack
+        # for table-interp non-linearity.
+        for name in ("lw_flux_up", "lw_flux_down", "sw_flux_up",
+                     "sw_flux_down", "heating_rate"):
+            v32 = np.asarray(getattr(out32, name))
+            v64 = np.asarray(getattr(out64, name))
+            np.testing.assert_allclose(
+                v32, v64, rtol=5e-6, atol=1e-3,
+                err_msg=(
+                    f"{name}: fp32-input vs fp64-input divergence "
+                    f"exceeds fp32-round-off tolerance.  Likely a "
+                    f"missing dtype cast in solve_columns."
+                ),
+            )
+
+    def test_solve_columns_bfloat16_inputs_finite(self):
+        """Iter-63: ``solve_columns`` must accept bfloat16 inputs
+        without crashing (covers ML/training paths that pack state in
+        bf16).  Table-dtype cast is the safety net; this test pins
+        the cast covers bf16 too.
+
+        We only assert finiteness — bfloat16 has 8-bit mantissa
+        (~2e-2 relative precision) so a fp64-comparison would be
+        meaningless.
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(RRTMGPConfig())
+        ncol, nlev = 1, 8
+        bf16 = jnp.bfloat16
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev + 1, dtype=bf16)[None, :],
+            (ncol, nlev + 1),
+        )
+        p_full = (0.5 * (p_half[:, :-1].astype(jnp.float32)
+                         + p_half[:, 1:].astype(jnp.float32))
+                  ).astype(bf16)
+        T = jnp.linspace(220.0, 290.0, nlev, dtype=bf16)[None, :]
+        sfc_T = jnp.array([295.0], dtype=bf16)
+        q_v = jnp.full((ncol, nlev), 5e-3, dtype=bf16)
+        cos_z = jnp.array([0.5], dtype=bf16)
+
+        out = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+        )
+        for name in ("lw_flux_up", "sw_flux_up", "heating_rate"):
+            val = getattr(out, name)
+            assert jnp.all(jnp.isfinite(val)), (
+                f"{name} contains non-finite values for bfloat16 inputs"
+            )
+
 
 # ---------------------------------------------------------------------------
 # Optimal LW diffusivity angle (iter-2)

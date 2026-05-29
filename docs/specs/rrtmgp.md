@@ -100,7 +100,10 @@ config flag; `precomputed_lw_optical_props` dedups optics call
 ### Regression tests (~60 across 10+ classes)
 `test_rrtmgp_stratosphere.py` — `TestClipToTableRange`,
 `TestRelativeAbundanceSafeDiv`, `TestOutOfRangeTemperature`,
-`TestMixedPrecision`, `TestOptimalLwSecant`, `TestStandardO3Profile`,
+`TestMixedPrecision` (iter-1+2/27/63: planck-fp32 + solve_columns-
+fp32-finite + iter-63 **fp32-vs-fp64 numerical equivalence within
+fp32 round-off** + iter-63 **bfloat16 input acceptance**),
+`TestOptimalLwSecant`, `TestStandardO3Profile`,
 `TestTropopauseBoundary`, `TestADSafetyAtStratosphereTau`,
 `TestCloudKwargsHelper`, `TestHeatingRateSign`.
 
@@ -110,9 +113,11 @@ cache-key (iter-32/36/37/39/41/42), sharded-equivalence
 
 ---
 
-## Status (after iter-60)
+## Status (after iter-63)
 
-- ✅ 113 pass + 5 skip (3 Metal-broken + 2 multidevice) — 0 fail.
+- ✅ 115 pass + 5 skip (3 Metal-broken + 2 multidevice) — 0 fail.
+  iter-63 added 2 mixed-precision tests (fp32-vs-fp64 numerical
+  equivalence, bfloat16-input acceptance).
 - ✅ AD-safe end-to-end; mixed precision via table-dtype cast;
   fp32 inputs OK.
 - ✅ MPI/GPU: `lax.scan + jax.checkpoint` per g-point;
