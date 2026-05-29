@@ -484,7 +484,18 @@ class TestMixedPrecision:
         Catches regressions where a future refactor accidentally
         skips the cast or uses fp32 intermediates inside the
         correlated-k inner loop.
+
+        Iter-69 codex review fix: skip when ``jax_enable_x64`` is off,
+        because JAX silently downcasts ``jnp.float64`` to fp32 in
+        that mode and the test would compare fp32-against-fp32
+        (trivial pass that would mask a real missing-cast bug).
         """
+        if not jax.config.read("jax_enable_x64"):
+            pytest.skip(
+                "fp32-vs-fp64 cast test requires JAX_ENABLE_X64=1; "
+                "without x64 enabled jnp.float64 silently downcasts to "
+                "fp32, making the comparison trivial."
+            )
         from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
         from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
 
@@ -2018,12 +2029,14 @@ class TestAerosolPath:
             q_v=q_v, cos_zenith=cos_z, aerosol_optical_depth=aod,
         )
 
-        # Surface = layer 0 (TOA-first convention in solve_columns
-        # output mirrors input ordering).  Match the convention by
-        # picking the layer with HIGHEST pressure.
-        sfc_layer = int(jnp.argmax(p_full[0]))
-        sw_down_clear = float(out_clear.sw_flux_down[0, sfc_layer])
-        sw_down_aero = float(out_aero.sw_flux_down[0, sfc_layer])
+        # Surface = interface index -1.  Flux arrays are
+        # interface-dimensioned (ncol, nlev+1) in TOA-first convention;
+        # see ``solve_columns`` docstring.  Iter-69 codex review fix:
+        # previously used ``argmax(p_full)`` which is a full-level
+        # index in [0, nlev-1] and indexes the LEVEL ABOVE SURFACE
+        # rather than the surface interface itself.
+        sw_down_clear = float(out_clear.sw_flux_down[0, -1])
+        sw_down_aero = float(out_aero.sw_flux_down[0, -1])
 
         assert sw_down_aero < sw_down_clear, (
             f"Aerosol (τ=0.5, SSA=0.93) should reduce surface SW "

@@ -120,9 +120,24 @@ cache-key (iter-32/36/37/39/41/42), sharded-equivalence
 
 ---
 
-## Status (after iter-68)
+## Status (after iter-69)
 
-- ✅ 126 pass + 5 skip (3 Metal-broken + 2 multidevice) — 0 fail.
+- ✅ 126 pass + 6 skip (3 Metal-broken + 2 multidevice + 1
+  fp32-vs-fp64 needs x64) — 0 fail.
+  iter-69: codex adversarial-review of iter-63 → iter-68 returned
+  HOLD with 2 real blockers (1 prompt-only confusion ignored).
+  Both fixed in iter-69 commit:
+  1. iter-66 ``test_aerosol_reduces_toa_sw_down`` used
+     ``argmax(p_full)`` as the surface index — but that's a full-
+     level index in [0, nlev-1] when flux arrays are interface-
+     dimensioned (ncol, nlev+1).  Fixed to ``[0, -1]`` (the
+     surface interface), matching the cloud/energy tests.
+  2. iter-63 ``test_solve_columns_fp32_matches_fp64_inputs``
+     needed an x64 guard: without ``JAX_ENABLE_X64=1`` JAX
+     silently downcasts ``jnp.float64`` to fp32, making the test
+     a trivial fp32-vs-fp32 comparison that would pass while
+     masking a real missing-cast bug.  Added
+     ``pytest.skip`` when x64 is unavailable.
   iter-68 added new class `TestCloudPath` (4 tests): LWP=zeros ≡
   LWP=None bit-for-bit, low cloud reduces surface SW (albedo),
   low cloud increases surface LW down (greenhouse), AD through
