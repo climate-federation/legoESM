@@ -15,14 +15,12 @@
 """Interpolation functionality."""
 
 import functools
-from typing import Literal, TypeAlias, TypeVar
+from typing import Literal, TypeAlias
 
 import jax
 import jax.numpy as jnp
-from legoesm.atmosphere.physics.radiation.rrtmgp import kernel_ops
 
 Array: TypeAlias = jax.Array
-T = TypeVar('T')
 #
 # iter-45 dead-code trim: kept only the WENO5-for-RRTMGP path used by
 # optics_base.reconstruct_face_values.  The original swirl_jatmos
