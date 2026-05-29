@@ -158,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
                                  # Legacy aliases for the SCVT mesh,
                                  # normalised by run_amip.py
                                  "voronoi", "icosahedral", "mpas_voronoi"])
-    parser.add_argument("--discretization", type=str, default="centered",
+    parser.add_argument("--discretization", type=str, default="finite_volume",
                         choices=["centered", "finite_volume", "cgrid",
                                   "latlon_cgrid", "cdgrid", "mpas", "spectral"])
 
