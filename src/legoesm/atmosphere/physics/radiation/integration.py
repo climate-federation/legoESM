@@ -486,12 +486,22 @@ def _call_radiation_backend(
             q_cloud=q_cloud,
             q_ice=q_ice,
         )
+        # NB: cloud_fraction deliberately NOT forwarded (iter-16 follow-up
+        # to iter-15 from commit 4c9591bb; ``physics_pipeline.py`` got the
+        # same fix in iter-15 but this call site was a second copy of
+        # the bug).  ``compute_cloud_properties`` returns GRID-MEAN water
+        # paths (``lwp = q_c * dp / g``, q_c the grid-mean prognostic)
+        # which already carry the partial-coverage discount
+        # ``LWP_grid = cf · LWP_in-cloud``.  RRTMG's optics multiplies
+        # cloud optical depth by ``cloud_fraction`` again — passing it
+        # makes τ_used = cf² · τ_in-cloud instead of cf · τ_in-cloud,
+        # losing 59-113 W/m² OSR at typical cf.  Omitting cf gives
+        # RRTMG the right grid-mean optical depth (τ linear in LWP).
         cloud_kwargs = {
             "cloud_path_liq": cloud_props.lwp,
             "cloud_path_ice": cloud_props.iwp,
             "cloud_r_eff_liq": cloud_props.r_eff_liq,
             "cloud_r_eff_ice": cloud_props.r_eff_ice,
-            "cloud_fraction": cloud_props.cloud_fraction,
         }
 
     # RRTMGP path: use solver directly (config is baked in).
