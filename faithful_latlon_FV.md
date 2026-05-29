@@ -38,11 +38,18 @@ commit messages c1e0317a..HEAD.)*
 - 9dbea7d3 test: deck --ic standard → Earth-like CWV (gated)
 - eb9b2876 init moisture on local hybrid pressure over topography
 
-Adversarial review: all committed work approved or fixed across review rounds
-1-10 (gaussian-state crash, wind imbalance, cubed-sphere vector basis→latlon-only,
-flat-p_s-over-topo, low-T_init NaN, gpu multi-count, hybrid-coord T/u, hybrid-coord
-moisture). Round-11 in flight. Findings have narrowed HIGH→MEDIUM (mostly
-topography×hybrid-coordinate edge cases) — converging.
+- 4e2fafbb real-topography file loading on lat-lon (classify by grid_lat.ndim)
+- <conv> IC uses p_s*sigma_full (physics-pipeline convention), not local hybrid p
+
+Adversarial review rounds 1-12. KEY correction (round-12): rounds 8-9 had moved
+the IC T/u/moisture onto the "true" hybrid pressure pressure_at_full(p_s); but
+the production physics/radiation/saturation pipeline builds p_full = p_s*sigma_full
+EVERYWHERE (physics_pipeline.py:183,536; compiled_segments.py:709). An IC on a
+different pressure grid than the physics → spurious condensation over terrain.
+RESOLVED by reverting the IC to sigma_full (matches physics). Lesson: the IC's
+vertical-pressure convention MUST equal the physics pipeline's; don't "improve"
+one without the other. The topography p_s reduction (iter-4) is independent and
+stays.
 
 ## Pending / not-yet-done
 - MPI AMIP physics wiring (`make_latlon_mpi_step` physics_fn=None,

@@ -267,53 +267,50 @@ class TestDriverStandardIC:
         i_mtn = np.unravel_index(int(np.argmax(phis)), phis.shape)
         assert float(T_sfc[i_mtn]) < 299.0
 
-    def test_temperature_uses_local_pressure_ratio_hybrid_topography(self):
-        """Default hybrid coordinate + non-flat topography: the mountain-column
-        temperature must follow the TRUE local pressure ratio p_full/p_s, not
-        the flat-reference sigma_full = A_full+B_full (which differs by ~12 K
-        over a 2.5 km mountain)."""
+    def test_ic_uses_physics_pressure_convention_hybrid_topography(self):
+        """The IC temperature/moisture must be built on the SAME pressure grid
+        the production physics uses (p_full = p_s*sigma_full), so a hybrid+
+        topography run does not start with the IC on one pressure grid and the
+        first radiation/convection/saturation step on another.
+
+        Over a mountain (hybrid), the model-convention grid p_s*sigma_full and
+        the "true" hybrid pressure A*p_ref+B*p_s differ materially; the IC must
+        track the former (what physics_pipeline / compiled_segments evaluate)."""
+        from legoesm.thermo import saturation_mixing_ratio
         drv = self._build("standard", topography="gaussian")
         assert type(drv.sigma).__name__ == "HybridSigmaPressureCoordinate"
         phis = np.asarray(drv.state.phis.data)
         p_s = np.asarray(drv.state.p_s.data)
         T = np.asarray(drv.state.T.data)
+        qv = np.asarray(drv.tracers["q_v"])
         lat2d = np.asarray(drv.grid.lat2d)
+        sig_full = np.asarray(drv.sigma.sigma_full)
         i = np.unravel_index(int(np.argmax(phis)), phis.shape)  # mountain top
 
         sa = StandardAtmosphereConfig(T_sfc_equator_K=300.0)
+        # (1) Temperature follows the sigma_full (physics-convention) profile,
+        #     NOT the "true" hybrid local ratio (which would differ over terrain
+        #     and disagree with the physics grid).
+        T_physics = np.asarray(standard_atmosphere_temperature(
+            jnp.asarray(lat2d[i]), jnp.asarray(sig_full), sa))
         sig_local = (np.asarray(drv.sigma.pressure_at_full(drv.state.p_s.data))[i]
                      / p_s[i])
-        sig_AB = np.asarray(drv.sigma.sigma_full)
         T_local = np.asarray(standard_atmosphere_temperature(
             jnp.asarray(lat2d[i]), jnp.asarray(sig_local), sa))
-        T_AB = np.asarray(standard_atmosphere_temperature(
-            jnp.asarray(lat2d[i]), jnp.asarray(sig_AB), sa))
+        assert np.allclose(T[i], T_physics, atol=1e-2)
+        # The two conventions genuinely differ over terrain (so the test
+        # distinguishes which one the IC uses).
+        assert float(np.max(np.abs(T_physics - T_local))) > 2.0
 
-        # Driver column matches the local-ratio profile.
-        assert np.allclose(T[i], T_local, atol=1e-2)
-        # ... and the local ratio genuinely differs from A+B over terrain
-        # (else the test would not distinguish the fix).
-        assert float(np.max(np.abs(T_local - T_AB))) > 2.0
-
-    def test_moisture_consistent_on_local_pressure_hybrid_topography(self):
-        """q_v must be initialized on the SAME local hybrid pressure surfaces as
-        T over topography: q_v <= q_sat(T, p_full_local) and RH <= RH_init,
-        evaluated at the local full-level pressure (not the flat A+B coord)."""
-        from legoesm.thermo import saturation_mixing_ratio
-        drv = self._build("standard", topography="gaussian")
-        phis = np.asarray(drv.state.phis.data)
-        i = np.unravel_index(int(np.argmax(phis)), phis.shape)  # mountain top
-        qv = np.asarray(drv.tracers["q_v"])[i]
-        T = np.asarray(drv.state.T.data)[i]
-        p_full = np.asarray(drv.sigma.pressure_at_full(drv.state.p_s.data))[i]
-        q_sat_local = np.asarray(
-            saturation_mixing_ratio(jnp.asarray(T), jnp.asarray(p_full)))
-
-        assert np.all(np.isfinite(qv))
-        # Consistent with the local-pressure saturation (never supersaturated).
-        assert np.all(qv <= q_sat_local + 1e-9)
-        # RH on local pressure must not exceed the RH_init cap (0.7 default).
-        rh = qv / np.maximum(q_sat_local, 1e-12)
+        # (2) Moisture is consistent on the physics grid: RH = q_v/q_sat(T,
+        #     p_s*sigma_full) <= RH_init and never supersaturated over the
+        #     mountain — so the first physics step sees a consistent column.
+        p_full_phys = p_s[i][..., None] * sig_full  # (nlev,)
+        q_sat_phys = np.asarray(saturation_mixing_ratio(
+            jnp.asarray(T[i]), jnp.asarray(p_full_phys)))
+        assert np.all(np.isfinite(qv[i]))
+        assert np.all(qv[i] <= q_sat_phys + 1e-9)
+        rh = qv[i] / np.maximum(q_sat_phys, 1e-12)
         assert float(np.max(rh)) <= 0.7 + 1e-3
 
     def test_standard_ic_realistic_cwv_and_gradient(self):

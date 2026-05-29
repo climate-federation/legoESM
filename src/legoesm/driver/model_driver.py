@@ -553,20 +553,22 @@ class ModelDriver:
             p_s=self.state.p_s.replace(data=p_s_new.astype(p_s_old.dtype)),
         )
 
-        # (3) Local full-level pressure ratio p_full/p_s for the FINAL p_s.  For
-        #     pure sigma this is sigma_full; for the hybrid coordinate (run_amip
-        #     default) it is (A*p_ref + B*p_s)/p_s, which over topography differs
-        #     from the flat-reference sigma_full = A_full + B_full.  Using it here
-        #     keeps the lapse-rate temperature and the thermal-wind jet on the
-        #     true local pressure surfaces over terrain.  (Flat: p_s = p_ref =>
-        #     sigma_local = sigma_full, so flat runs stay bit-identical.)
-        sigma_local = (
-            self.sigma.pressure_at_full(p_s_new) / p_s_new[..., None]
-        )
+        # (3) Vertical coordinate: use sigma_full — the SAME pressure convention
+        #     the production physics/radiation/saturation pipeline uses
+        #     (p_full = p_s * sigma_full; physics_pipeline.py, compiled_segments).
+        #     The model treats sigma_full (= A_full + B_full on the hybrid
+        #     coordinate) as the effective level coordinate everywhere, so the IC
+        #     MUST match it: initializing T/q on the "true" hybrid pressure
+        #     (A*p_ref + B*p_s) while the physics evaluates on p_s*sigma_full
+        #     would hand the first radiation/convection/saturation step a column
+        #     on a different pressure grid (spurious condensation over terrain).
+        #     The topography-adjusted p_s above is what makes the columns
+        #     physical; the level coordinate stays consistent with downstream.
+        sigma_full = self.sigma.sigma_full
 
-        # (4) Temperature on the local pressure surfaces.
+        # (4) Temperature.
         T_new = standard_atmosphere_temperature(
-            lat_h, sigma_local, sa_cfg,
+            lat_h, sigma_full, sa_cfg,
         ).astype(self.state.T.data.dtype)
         self.state = self.state._replace(T=self.state.T.replace(data=T_new))
 
@@ -577,7 +579,7 @@ class ModelDriver:
         radius = getattr(self.grid, "radius", constants.R_earth)
         omega = getattr(self.grid, "omega", constants.Omega)
         u_new = standard_atmosphere_zonal_wind(
-            lat_h, sigma_local, radius, omega, sa_cfg,
+            lat_h, sigma_full, radius, omega, sa_cfg,
         ).astype(self.state.u.data.dtype)
         self.state = self.state._replace(
             u=self.state.u.replace(data=jnp.broadcast_to(u_new, self.state.u.data.shape)),
@@ -644,17 +646,17 @@ class ModelDriver:
 
         # Moisture initialization (spectral and MPAS use dry physics)
         if hasattr(self.state, 'p_s') and hasattr(self.state.p_s, 'data'):
-            # Use the TRUE local full-level pressure (pressure_at_full handles
-            # both pure-sigma and the hybrid A*p_ref+B*p_s coordinate) so that,
-            # over topography, q_sat and the vertical humidity taper sit on the
-            # same pressure surfaces as the temperature/wind state — not the
-            # flat-reference sigma_full = A_full+B_full.  For flat topography
-            # p_full = p_s*sigma_full and the local ratio = sigma_full, so this
-            # is bit-identical to the previous formulation.
-            p_full_init = self.sigma.pressure_at_full(self.state.p_s.data)
-            sigma_local_init = p_full_init / self.state.p_s.data[..., None]
+            # Build p_full as p_s * sigma_full — the SAME convention the
+            # production physics/radiation/saturation pipeline uses
+            # (physics_pipeline.py, compiled_segments.py).  Initializing q_sat
+            # and the vertical humidity taper on this grid keeps the moisture
+            # consistent with the temperature state AND with the first physics
+            # step, so a topography+hybrid run does not start supersaturated on a
+            # mismatched pressure grid.  (Do NOT switch to pressure_at_full here
+            # unless the whole physics pipeline is migrated to it too.)
+            p_full_init = self.state.p_s.data[..., None] * self.sigma.sigma_full
             q_sat_init = saturation_mixing_ratio(self.state.T.data, p_full_init)
-            self.tracers["q_v"] = cfg.RH_init * q_sat_init * sigma_local_init ** 2
+            self.tracers["q_v"] = cfg.RH_init * q_sat_init * self.sigma.sigma_full ** 2
             self.tracers["q_v"] = jnp.minimum(self.tracers["q_v"], q_sat_init)
 
             # Fuse the two diagnostic means into one host transfer.
