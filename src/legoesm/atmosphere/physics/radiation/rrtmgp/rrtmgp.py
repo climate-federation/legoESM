@@ -316,16 +316,12 @@ class RRTMGP:
       """
       instance = object.__new__(cls)
       optics_lib, vmr_lib = cls._build_optics_and_vmr(config)
-      # Minimal atmospheric state with VMR library; zenith/albedo/emissivity
-      # are overridden per-call in solve_columns().
-      instance.atmospheric_state = atmospheric_state.AtmosphericState(
-          sfc_emis=config.sfc_emissivity,
-          sfc_alb=config.sfc_albedo,
-          zenith=0.0,
-          irrad=config.S_0,
-          vmr=vmr_lib,
-          toa_flux_lw=0.0,
-      )
+      # Store the VMR library directly — the per-call ``atmos_state``
+      # in ``solve_columns`` carries the actual zenith / albedo /
+      # emissivity for the call.  iter-33 dropped the redundant
+      # ``instance.atmospheric_state`` field (previously a default
+      # AtmosphericState whose only purpose was to expose ``vmr``).
+      instance._vmr_lib = vmr_lib
       instance.optics_lib = optics_lib
       instance._config = config
       return instance
@@ -498,7 +494,7 @@ class RRTMGP:
 
       # --- 3. Build atmospheric state ---
       optics_lib = self.optics_lib
-      vmr_lib = self.atmospheric_state.vmr
+      vmr_lib = self._vmr_lib
 
       cos_z_col = jnp.clip(cos_zenith, 0.0, 1.0)
       zenith_col = jnp.arccos(cos_z_col)[:, None, None]
