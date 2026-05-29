@@ -486,3 +486,82 @@ class TestSPMDWithOffsets:
             np.testing.assert_array_equal(np.array(out2), ref2)
         finally:
             deactivate_spmd_halo_backend()
+
+
+# =======================================================================
+# Tracer-leak-free SPMD halo under JIT (#327)
+# =======================================================================
+
+class TestTracerLeakFree:
+    """Regression test for #327.
+
+    The exchange-kernel factories (``_make_exchange_allgather``,
+    ``_make_exchange_allgather_h2``, ``_make_exchange_ppermute``) call
+    ``jnp.asarray`` in their outer bodies.  If ``_get_exchange`` is
+    first called for a key from *inside* an active JIT trace (e.g. the
+    first ``_step_cell_centre`` compilation), the resulting traced
+    values get captured in the ``_exchange`` closure and stored in the
+    module-level ``_cache`` — an ``UnexpectedTracerError`` (production
+    job 25211021 crashed after 5 min).
+
+    The fix pre-warms ``_cache`` inside ``activate_spmd_halo_backend``
+    (outside any trace) for all relevant keys, so a later call from
+    inside JIT is a cache hit and never invokes the factory.
+
+    These tests JIT-compile a function that calls the explicit pad-halo
+    exchange and assert it runs without raising.  Run under
+    ``JAX_CHECK_TRACER_LEAKS=1`` (and
+    ``XLA_FLAGS=--xla_force_host_platform_device_count=6``) for the
+    sharpest regression signal — without the pre-warm fix the jitted
+    call raises ``UnexpectedTracerError`` during tracing.
+    """
+
+    def test_no_tracer_leak_jitted_pad_halo_4d(self, mesh_6):
+        from legoesm.grids.halo import _pad_halo_local_4d
+        from legoesm.parallel.cubesphere_exchange import (
+            activate_spmd_halo_backend, deactivate_spmd_halo_backend,
+            explicit_pad_halo_4d, _cache,
+        )
+        _cache.clear()
+        # activate_spmd_halo_backend pre-warms _cache OUTSIDE any trace.
+        activate_spmd_halo_backend(mesh_6, n=8)
+        try:
+            data = jax.random.normal(jax.random.PRNGKey(327), (6, 8, 8, 5))
+            ref = np.array(_pad_halo_local_4d(data))
+            data_s = _shard_on_face(data, mesh_6)
+
+            @jax.jit
+            def jitted(d):
+                return explicit_pad_halo_4d(d, mesh_6)
+
+            # Without the pre-warm fix this raises UnexpectedTracerError
+            # while tracing (the factory's jnp.asarray runs in-trace and
+            # the result is cached); with the fix the cache hit avoids it.
+            result = np.array(jitted(data_s))
+            np.testing.assert_allclose(result, ref, rtol=1e-6, atol=1e-10)
+        finally:
+            deactivate_spmd_halo_backend()
+            _cache.clear()
+
+    def test_no_tracer_leak_jitted_pad_halo_3d(self, mesh_6):
+        from legoesm.grids.halo import _pad_halo_local
+        from legoesm.parallel.cubesphere_exchange import (
+            activate_spmd_halo_backend, deactivate_spmd_halo_backend,
+            explicit_pad_halo, _cache,
+        )
+        _cache.clear()
+        activate_spmd_halo_backend(mesh_6, n=8)
+        try:
+            data = jax.random.normal(jax.random.PRNGKey(328), (6, 8, 8))
+            ref = np.array(_pad_halo_local(data))
+            data_s = _shard_on_face(data, mesh_6)
+
+            @jax.jit
+            def jitted(d):
+                return explicit_pad_halo(d, mesh_6)
+
+            result = np.array(jitted(data_s))
+            np.testing.assert_allclose(result, ref, rtol=1e-6, atol=1e-10)
+        finally:
+            deactivate_spmd_halo_backend()
+            _cache.clear()
