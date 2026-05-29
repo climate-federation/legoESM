@@ -79,7 +79,7 @@ Metal-env skip (iter-59), `recurrent_op_1d{,_scan}` (iter-60),
 `GrayAtmosphereOptics` class + config + factory branch
 (iter-61), `_shift_up` + Planck-path clarifier (iter-62).
 
-### Test coverage expansion (iter-63 → 77)
+### Test coverage expansion (iter-63 → 78)
 - iter-63: `TestMixedPrecision` — fp32-vs-fp64 numerical
   equivalence within fp32 round-off (x64-gated, skips otherwise);
   bfloat16-input finiteness.
@@ -155,8 +155,13 @@ Metal-env skip (iter-59), `recurrent_op_1d{,_scan}` (iter-60),
   column, was untested).  Audit confirmed exact: f=ωg², τ'=(1−f)τ,
   ω'=ω(1−g²)/(1−f), g'=g/(1+g).  Pins closed-form match, conservative
   ω=1 preserved, isotropic g=0 identity, τ/g reduced, AD-finite.
+- iter-78: `TestRayleighScattering` — SW Rayleigh OD
+  (`compute_rayleigh_optical_depth`, behaviour was unpinned; only the
+  T-clip was guarded).  OD ≥ 0 all g-points; exactly linear in air
+  amount (×2 molecules → ×2 OD); spectrally resolved (max/min ≫ 10,
+  1/λ⁴); ∂(OD)/∂(molecules) finite + positive.
 
-### Test classes in `test_rrtmgp_stratosphere.py` (~89 tests)
+### Test classes in `test_rrtmgp_stratosphere.py` (~93 tests)
 `TestClipToTableRange`, `TestRelativeAbundanceSafeDiv`,
 `TestOutOfRangeTemperature`, `TestMixedPrecision`,
 `TestOptimalLwSecant`, `TestStandardO3Profile`,
@@ -165,15 +170,16 @@ Metal-env skip (iter-59), `recurrent_op_1d{,_scan}` (iter-60),
 `TestEnergyConservation`, `TestCloudPath`, `TestAerosolPath`,
 `TestRteRecurrenceScanEquivalence`, `TestSolverCompilationStability`,
 `TestGasVmrOverride`, `TestCloudFractionCoverage`,
-`TestSolarSpectralFraction`, `TestLwAerosolPath`, `TestDeltaScaling`.
+`TestSolarSpectralFraction`, `TestLwAerosolPath`, `TestDeltaScaling`,
+`TestRayleighScattering`.
 `test_radiation.py::{TestRRTMGP,TestColumnShardedRadiation}` —
 cache-key + sharded-equivalence + iter-13/15 end-to-end pins.
 
 ---
 
-## Status (after iter-77)
+## Status (after iter-78)
 
-- ✅ 155 pass + 6 skip (3 Metal-broken + 2 multidevice +
+- ✅ 159 pass + 6 skip (3 Metal-broken + 2 multidevice +
   1 fp32-vs-fp64 x64-gated) — 0 fail.
 - ✅ AD-safe end-to-end; mixed precision via table-dtype cast;
   fp32 inputs OK; bfloat16 inputs accepted.

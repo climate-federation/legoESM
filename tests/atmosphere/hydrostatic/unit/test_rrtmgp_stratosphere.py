@@ -3105,5 +3105,100 @@ class TestDeltaScaling:
         assert jnp.all(jnp.isfinite(grad)), f"delta-scaling grad non-finite: {grad}"
 
 
+class TestRayleighScattering:
+    """Iter-78: pin the shortwave Rayleigh (molecular) scattering optical
+    depth (``gas_optics.compute_rayleigh_optical_depth``).
+
+    Rayleigh scattering sets the clear-sky SW backscatter / planetary
+    albedo floor.  The iter-1 audit marked it faithful and
+    ``TestOutOfRangeTemperature.test_out_of_range_T_saturates_rayleigh_OD``
+    guards the table-T clip, but the physical behaviour was unpinned.  The
+    Rayleigh OD must be a non-negative scattering optical depth, scale
+    linearly with the air-column amount (∝ ``molecules`` — a fixed
+    cross-section times the number of scatterers), be spectrally resolved
+    (∝ 1/λ⁴, far stronger in the blue / high-energy g-points), and be
+    differentiable.
+    """
+
+    @staticmethod
+    def _lookup_sw():
+        from pathlib import Path
+        from legoesm.atmosphere.physics.radiation.rrtmgp.optics import (
+            lookup_gas_optics_shortwave,
+        )
+        sw_path = (
+            Path(__file__).resolve().parents[4]
+            / "src/legoesm/atmosphere/physics/radiation/rrtmgp/optics"
+            / "rrtmgp_data/rrtmgp-gas-sw-g112.nc"
+        )
+        return lookup_gas_optics_shortwave.from_data_file(str(sw_path))
+
+    @staticmethod
+    def _state(shape=(1, 1, 1)):
+        return (
+            jnp.full(shape, 288.0),   # T
+            jnp.full(shape, 5.0e4),   # p
+            jnp.full(shape, 1.0e22),  # molecules
+        )
+
+    def test_rayleigh_od_nonnegative_all_gpoints(self, lookup_vmr):
+        _, vmr_lib = lookup_vmr
+        lkp = self._lookup_sw()
+        T, p, mol = self._state()
+        ods = jnp.array([
+            gas_optics.compute_rayleigh_optical_depth(
+                lkp, vmr_lib, mol, T, p, igpt=jnp.array(i))[0, 0, 0]
+            for i in range(lkp.n_gpt)
+        ])
+        assert jnp.all(ods >= 0.0), "Rayleigh scattering OD must be >= 0"
+        assert jnp.any(ods > 0.0), "Rayleigh OD identically zero — not computed"
+
+    def test_rayleigh_od_linear_in_molecules(self, lookup_vmr):
+        _, vmr_lib = lookup_vmr
+        lkp = self._lookup_sw()
+        T, p, mol = self._state()
+        igpt = jnp.array(50)
+        od1 = gas_optics.compute_rayleigh_optical_depth(lkp, vmr_lib, mol, T, p, igpt)
+        od2 = gas_optics.compute_rayleigh_optical_depth(
+            lkp, vmr_lib, 2.0 * mol, T, p, igpt)
+        # Rayleigh OD = cross-section · air amount → exactly linear.
+        np.testing.assert_allclose(
+            np.asarray(od2), 2.0 * np.asarray(od1), rtol=1e-10, atol=0.0,
+            err_msg="Rayleigh OD must scale linearly with the air-column amount",
+        )
+
+    def test_rayleigh_od_spectrally_resolved(self, lookup_vmr):
+        _, vmr_lib = lookup_vmr
+        lkp = self._lookup_sw()
+        T, p, mol = self._state()
+        ods = np.array([
+            float(gas_optics.compute_rayleigh_optical_depth(
+                lkp, vmr_lib, mol, T, p, igpt=jnp.array(i))[0, 0, 0])
+            for i in range(lkp.n_gpt)
+        ])
+        pos = ods[ods > 0]
+        # 1/λ⁴ dependence ⇒ orders-of-magnitude spread across g-points, not
+        # a flat per-band constant.
+        assert pos.max() / pos.min() > 10.0, (
+            f"Rayleigh OD nearly flat across g-points (max/min="
+            f"{pos.max() / pos.min():.2f}) — spectral 1/λ⁴ dependence lost"
+        )
+
+    def test_rayleigh_od_differentiable(self, lookup_vmr):
+        _, vmr_lib = lookup_vmr
+        lkp = self._lookup_sw()
+        T, p, mol = self._state()
+
+        def total_od(m):
+            return gas_optics.compute_rayleigh_optical_depth(
+                lkp, vmr_lib, m, T, p, igpt=jnp.array(50)).sum()
+
+        g = jax.grad(total_od)(mol)
+        assert jnp.all(jnp.isfinite(g)), "Rayleigh OD gradient must be finite"
+        assert float(g[0, 0, 0]) > 0.0, (
+            "more air ⇒ more Rayleigh OD (∂(OD)/∂(molecules) > 0)"
+        )
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
