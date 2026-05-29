@@ -79,7 +79,7 @@ Metal-env skip (iter-59), `recurrent_op_1d{,_scan}` (iter-60),
 `GrayAtmosphereOptics` class + config + factory branch
 (iter-61), `_shift_up` + Planck-path clarifier (iter-62).
 
-### Test coverage expansion (iter-63 → 72)
+### Test coverage expansion (iter-63 → 73)
 - iter-63: `TestMixedPrecision` — fp32-vs-fp64 numerical
   equivalence within fp32 round-off (x64-gated, skips otherwise);
   bfloat16-input finiteness.
@@ -118,23 +118,32 @@ Metal-env skip (iter-59), `recurrent_op_1d{,_scan}` (iter-60),
   retrace (only an `nlev` change does).  Pins the #1 GPU-throughput
   property (a value-dependent retrace recompiles every step); a
   trace-counter idiom catches it.
+- iter-73: `TestGasVmrOverride` — runtime `ghg_vmr_override`
+  (CO2/CH4/…) and the `o3_vmr` field reach gas optics and move fluxes
+  the right way: 2×CO2 lowers OLR; **5×CH4 lowers OLR** (CH4 is a
+  *minor* absorber → guards that `_compute_minor_optical_depth` reads
+  `vmr_fields`, not just the baked global mean); high O3 cuts surface
+  SW + OLR; ∂(OLR)/∂(CO2) finite + negative.  Audit confirmed the
+  precedence correct (`get_vmr` overwrites the global mean for major
+  **and** minor paths); this pins it against silent regression.
 
-### Test classes in `test_rrtmgp_stratosphere.py` (~66 tests)
+### Test classes in `test_rrtmgp_stratosphere.py` (~70 tests)
 `TestClipToTableRange`, `TestRelativeAbundanceSafeDiv`,
 `TestOutOfRangeTemperature`, `TestMixedPrecision`,
 `TestOptimalLwSecant`, `TestStandardO3Profile`,
 `TestTropopauseBoundary`, `TestADSafetyAtStratosphereTau`,
 `TestCloudKwargsHelper`, `TestHeatingRateSign`,
 `TestEnergyConservation`, `TestCloudPath`, `TestAerosolPath`,
-`TestRteRecurrenceScanEquivalence`, `TestSolverCompilationStability`.
+`TestRteRecurrenceScanEquivalence`, `TestSolverCompilationStability`,
+`TestGasVmrOverride`.
 `test_radiation.py::{TestRRTMGP,TestColumnShardedRadiation}` —
 cache-key + sharded-equivalence + iter-13/15 end-to-end pins.
 
 ---
 
-## Status (after iter-72)
+## Status (after iter-73)
 
-- ✅ 132 pass + 6 skip (3 Metal-broken + 2 multidevice +
+- ✅ 136 pass + 6 skip (3 Metal-broken + 2 multidevice +
   1 fp32-vs-fp64 x64-gated) — 0 fail.
 - ✅ AD-safe end-to-end; mixed precision via table-dtype cast;
   fp32 inputs OK; bfloat16 inputs accepted.
@@ -153,6 +162,10 @@ cache-key + sharded-equivalence + iter-13/15 end-to-end pins.
   negative ∂(SW)/∂(AOD).
 - ✅ Energy conservation pinned: ∑(hr · dp) ≡ (g/c_p) ·
   (F_net_TOA − F_net_sfc) for both combined and LW-only.
+- ✅ Gas-VMR overrides faithful: `ghg_vmr_override`
+  (CO2/CH4/N2O/CFCs) + `o3_vmr` reach gas optics for major **and**
+  minor absorbers (`get_vmr` overwrite precedence), AD-differentiable
+  (iter-73).
 
 ## Deferred
 
@@ -160,6 +173,6 @@ cache-key + sharded-equivalence + iter-13/15 end-to-end pins.
   reference-flux validation (iter-29 gating sharded test exists).
 - LW aerosol path (currently only SW; upstream rte-rrtmgp
   supports both).
-- cloud_fraction / solar_spectral_fraction / o3_vmr /
-  ghg_vmr_override coverage gaps (codex iter-69 Q5; cloud_path_ice
-  closed iter-70).
+- cloud_fraction / solar_spectral_fraction coverage gaps (codex
+  iter-69 Q5; cloud_path_ice closed iter-70, o3_vmr +
+  ghg_vmr_override closed iter-73).

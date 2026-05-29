@@ -2450,5 +2450,144 @@ class TestSolverCompilationStability:
         )
 
 
+class TestGasVmrOverride:
+    """Iter-73: pin that runtime gas-VMR overrides (``ghg_vmr_override``
+    for CO2/CH4/N2O/CFCs and the ``o3_vmr`` field) actually reach the
+    gas-optics kernel and change fluxes in the physically correct
+    direction.
+
+    Audit (iter-73): ``solve_columns`` writes each override into
+    ``vmr_fields``; ``gas_optics.get_vmr`` overwrites the table global
+    mean with it via ``jnp.where(species_idx == gas_idx, field, gm)`` —
+    and this is consulted for the **major** OD path, the **minor** OD
+    path (``_compute_minor_optical_depth`` L452 for the absorber's own
+    VMR, L418 for the scaling gas), and the H2O dry-factor.  So a minor
+    absorber's override is honoured too.  Nothing tested this: a refactor
+    that dropped ``vmr_fields`` from the minor path (or had ``get_vmr``
+    prefer the baked global mean) would silently make a CO2-doubling or
+    CH4 experiment a no-op — exactly the class of regression AIMIP-#312
+    introduced elsewhere.  The CH4 test is the load-bearing guard: CH4 is
+    a *minor* absorber, so a nonzero OLR response proves the minor path
+    reads ``vmr_fields``.
+
+    Signs/magnitudes below were measured against this idealized tropical
+    column (ncol=2, nlev=16); the bands are wide enough to tolerate
+    round-off but reject a broken (Δ≈0) override.
+    """
+
+    @staticmethod
+    def _cols(ncol=2, nlev=16):
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1)
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        T = jnp.broadcast_to(jnp.linspace(220.0, 295.0, nlev)[None, :], (ncol, nlev))
+        sfc_T = jnp.full((ncol,), 298.0)
+        q_v = jnp.full((ncol, nlev), 8e-3)
+        cos_z = jnp.full((ncol,), 0.7)
+        return T, p_full, p_half, sfc_T, q_v, cos_z
+
+    def _solver(self):
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        return RRTMGP.from_legoesm_config(RRTMGPConfig(include_clouds=False))
+
+    def _olr(self, solver, **kw):
+        T, p_full, p_half, sfc_T, q_v, cos_z = self._cols()
+        out = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z, **kw,
+        )
+        return float(out.lw_flux_up[0, 0])  # TOA-first → OLR
+
+    def test_co2_doubling_reduces_olr(self):
+        solver = self._solver()
+        co2_gm = solver._vmr_lib.global_means["co2"]
+        base = self._olr(solver)
+        doubled = self._olr(solver, ghg_vmr_override={"co2": 2.0 * co2_gm})
+        drop = base - doubled
+        assert drop > 0.2, (
+            f"Doubling CO2 must reduce TOA OLR (greenhouse); got "
+            f"base={base:.3f}, 2xCO2={doubled:.3f} (Δ={drop:+.3f} W/m²). "
+            f"Δ≈0 ⇒ ghg_vmr_override silently dropped before gas optics."
+        )
+        assert drop < 10.0, (
+            f"2xCO2 OLR reduction {drop:.3f} W/m² implausibly large for "
+            f"this column — suspect a units/precedence error."
+        )
+
+    def test_minor_gas_ch4_override_changes_olr(self):
+        """Load-bearing guard for the *minor*-gas override path: CH4 is a
+        minor absorber, so a 5x override changing OLR proves
+        ``_compute_minor_optical_depth`` honours ``vmr_fields``."""
+        solver = self._solver()
+        ch4_gm = solver._vmr_lib.global_means["ch4"]
+        base = self._olr(solver)
+        enhanced = self._olr(solver, ghg_vmr_override={"ch4": 5.0 * ch4_gm})
+        drop = base - enhanced
+        assert drop > 0.1, (
+            f"5x CH4 (a MINOR absorber) must reduce OLR; got Δ={drop:+.3f} "
+            f"W/m². Δ≈0 ⇒ the minor-gas optical-depth path ignores "
+            f"vmr_fields (override silently dropped for minor species)."
+        )
+        assert drop < 8.0, f"5x CH4 OLR drop {drop:.3f} W/m² implausibly large."
+
+    def test_o3_override_changes_sw_and_lw(self):
+        """The ``o3_vmr`` field (separate plumbing from ghg_vmr_override)
+        must reach optics: high stratospheric O3 absorbs SW (less reaches
+        the surface) and adds LW greenhouse (lower OLR)."""
+        solver = self._solver()
+        T, p_full, p_half, sfc_T, q_v, cos_z = self._cols()
+        ncol, nlev = T.shape
+
+        def run(o3_val):
+            return solver.solve_columns(
+                T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+                q_v=q_v, cos_zenith=cos_z,
+                o3_vmr=jnp.full((ncol, nlev), o3_val),
+            )
+
+        lo = run(1.0e-9)   # essentially no ozone
+        hi = run(5.0e-6)   # ~5 ppmv stratospheric ozone
+        # Surface SW down: interface index -1 = surface (TOA-first).
+        sw_drop = float(lo.sw_flux_down[0, -1] - hi.sw_flux_down[0, -1])
+        olr_drop = float(lo.lw_flux_up[0, 0] - hi.lw_flux_up[0, 0])
+        assert sw_drop > 10.0, (
+            f"Raising O3 must reduce surface SW (O3 absorbs shortwave); "
+            f"got Δ(sfc SW)={sw_drop:+.3f} W/m². Δ≈0 ⇒ o3_vmr ignored."
+        )
+        assert olr_drop > 2.0, (
+            f"Raising O3 must reduce OLR (9.6 µm greenhouse); got "
+            f"Δ(OLR)={olr_drop:+.3f} W/m²."
+        )
+
+    def test_co2_override_differentiable(self):
+        """``jax.grad`` of OLR w.r.t. the CO2 override scalar is finite and
+        negative — pins AD through the override path (GHG-forcing
+        sensitivity / training)."""
+        solver = self._solver()
+        T, p_full, p_half, sfc_T, q_v, cos_z = self._cols()
+        co2_gm = solver._vmr_lib.global_means["co2"]
+
+        def sum_olr(co2):
+            out = solver.solve_columns(
+                T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+                q_v=q_v, cos_zenith=cos_z, ghg_vmr_override={"co2": co2},
+            )
+            return jnp.sum(out.lw_flux_up[:, 0])
+
+        g = jax.grad(sum_olr)(jnp.asarray(co2_gm, dtype=p_full.dtype))
+        assert jnp.isfinite(g), f"∂(OLR)/∂(CO2) must be finite; got {g}"
+        assert float(g) < 0.0, (
+            f"∂(OLR)/∂(CO2) must be negative (more CO2 → less OLR); "
+            f"got {float(g):.3e}"
+        )
+        assert abs(float(g)) > 1.0, (
+            "∂(OLR)/∂(CO2) ≈ 0 — AD likely constant-folded the override "
+            "to a non-traced value (broken differentiable GHG forcing)."
+        )
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
