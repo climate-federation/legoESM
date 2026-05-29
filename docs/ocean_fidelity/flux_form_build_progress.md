@@ -17,8 +17,8 @@ every micro-decision. Newest at the bottom.
 - [ ] F4 uniform-flow analytic ⇒ zero
 - [ ] F5 momentum conservation (periodic domain)
 - [ ] F6 differentiability
-- [ ] F7 idealized-gyre stability
-- [ ] F8 regression lock (flux_form golden case)
+- [x] F7 idealized-gyre stability (80-step forced-flow run finite + KE bounded; vi baseline too)
+- [x] F8 regression lock (flux_form case added to the decomposition golden; 77 arrays; gate green)
 - [ ] F9 oracle confirmation (informational)
 
 ---

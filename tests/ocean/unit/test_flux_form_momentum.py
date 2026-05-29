@@ -151,3 +151,57 @@ def test_F6_differentiable():
     g = jax.grad(loss)(u0)
     assert jnp.all(jnp.isfinite(g)), "non-finite grad through flux-form advection"
     assert float(jnp.max(jnp.abs(g))) > 0.0, "zero grad — path not differentiated"
+
+
+def test_F7_gyre_stability_flux_form():
+    """F7: a short forced-flow integration with momentum_advection='flux_form'
+    stays finite and KE stays bounded (does not blow up). The upwind flux-form
+    is dissipative, so KE plateaus/decays. vector_invariant runs too (baseline)."""
+    import jax
+    from legoesm.ocean.vertical import create_ocean_z_star
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    grid = create_latlon_grid(12, 24)
+    z_coord = create_ocean_z_star(n_levels=4, H_max=4000.0)
+    state0 = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, H_max=4000.0, land_lat_threshold=85.0,
+    )
+    # Active flow so horizontal momentum advection is exercised.
+    up = 0.1 * jax.random.normal(jax.random.PRNGKey(11), state0.u.data.shape,
+                                 dtype=jnp.float64)
+    vp = 0.1 * jax.random.normal(jax.random.PRNGKey(12), state0.v.data.shape,
+                                 dtype=jnp.float64)
+    state0 = state0._replace(
+        u=state0.u.replace(data=state0.u.data + up),
+        v=state0.v.replace(data=state0.v.data + vp),
+    )
+
+    def _run(scheme):
+        cfg = LatLonCGridOceanConfig(
+            momentum_advection=scheme, momentum_flux_scheme="upwind",
+            A_h=2.0e4, bottom_drag_r=1.0e-3, implicit_vertical_mixing=True,
+            n_barotropic_substeps=8, enable_runtime_checks=False,
+        )
+        model = LatLonCGridOceanModel(grid, z_coord, cfg)
+        state = state0
+        ke0 = float(jnp.sum(state.u.data ** 2) + jnp.sum(state.v.data ** 2))
+        for _ in range(80):
+            state = model.step(state, dt=600.0)
+        ke = float(jnp.sum(state.u.data ** 2) + jnp.sum(state.v.data ** 2))
+        finite = bool(
+            jnp.all(jnp.isfinite(state.u.data))
+            and jnp.all(jnp.isfinite(state.v.data))
+            and jnp.all(jnp.isfinite(state.T.data))
+        )
+        return finite, ke0, ke
+
+    fin_ff, ke0, ke_ff = _run("flux_form")
+    assert fin_ff, "flux_form integration produced non-finite state"
+    assert ke_ff < 10.0 * ke0, (
+        f"flux_form KE grew unboundedly: {ke_ff:.3e} vs initial {ke0:.3e}"
+    )
+    fin_vi, _, _ = _run("vector_invariant")
+    assert fin_vi, "vector_invariant baseline produced non-finite state"

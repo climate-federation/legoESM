@@ -158,6 +158,20 @@ def _cases():
         dt=300.0, diagnose_momentum=False,
     ))
 
+    # Case 5: flux-form horizontal momentum advection (regression-locks the
+    # _bc_horizontal_momentum_advection_flux_form path + the KE-gradient-zeroing
+    # dispatch). diagnose_momentum=True also locks the diagnostic slot.
+    cfg5 = LatLonCGridOceanConfig(
+        A_h=1.0e3, momentum_advection="flux_form", momentum_flux_scheme="upwind",
+        K_h=2.0e2, bottom_drag_r=1.0e-3, implicit_vertical_mixing=False,
+        A_v=1.0e-3, K_v=1.0e-4, n_barotropic_substeps=2,
+        enable_runtime_checks=False,
+    )
+    yield ("flux_form_momentum", dict(
+        state=state, grid=grid, z_coord=z_coord, config=cfg5,
+        dt=300.0, diagnose_momentum=True,
+    ))
+
 
 def _outputs_for_case(call_kwargs) -> dict[str, np.ndarray]:
     """Run the function and flatten its output (+ diagnostics) to a name->array
