@@ -17,6 +17,7 @@ from legoesm.atmosphere.physics.radiation.config import (
     GrayRadiationConfig,
     OzoneProfileConfig,
     RadiationConfig,
+    RRTMGPConfig,
 )
 from legoesm.atmosphere.physics.radiation.output import RadiationOutput
 from legoesm.atmosphere.physics.radiation.solar import (
@@ -1362,6 +1363,38 @@ class TestColumnShardedRadiation:
         from legoesm.parallel.column_shard import create_column_mesh
         grid, sigma, state = self._make_state(n=4, nlev=8)
         config = RadiationConfig(scheme="rrtmgp")
+        ref = make_radiation_physics(
+            config, model_type="hydrostatic",
+        )(state, grid, sigma)
+        mesh = create_column_mesh(n_devices=1)
+        out = make_radiation_physics(
+            config, model_type="hydrostatic", column_mesh=mesh,
+        )(state, grid, sigma)
+        np.testing.assert_allclose(
+            np.asarray(out.dT_dt.data),
+            np.asarray(ref.dT_dt.data),
+            rtol=1.0e-10, atol=1.0e-12,
+        )
+
+    def test_rrtmgp_optimal_angle_sharded_matches_unsharded(self):
+        """Iter-29: column-shard invariance for the optimal-angle path.
+
+        The optimal-angle code in solve_lw sums tau across all interior
+        layers per column to derive the secant; a per-rank tau sum that
+        accidentally uses sharded-only data (instead of the full column
+        tau) would silently change the secant and the LW flux when the
+        same physical column is split across shards.
+
+        Single-device mesh degenerates to no-op sharding so the
+        sharded and unsharded outputs must match exactly.  This is
+        the gating test before any future enabling of
+        ``use_optimal_angle=True`` by default."""
+        from legoesm.parallel.column_shard import create_column_mesh
+        grid, sigma, state = self._make_state(n=4, nlev=8)
+        config = RadiationConfig(
+            scheme="rrtmgp",
+            rrtmgp=RRTMGPConfig(use_optimal_angle=True),
+        )
         ref = make_radiation_physics(
             config, model_type="hydrostatic",
         )(state, grid, sigma)
