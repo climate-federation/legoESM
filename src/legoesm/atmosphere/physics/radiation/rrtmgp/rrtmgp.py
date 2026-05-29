@@ -202,19 +202,50 @@ class RRTMGP:
 
       Extends the optics key with the behavior fields that change
       the *result* of ``solve_columns`` (or its compile-time graph)
-      without changing the optics tables.  Critically includes
-      ``use_scan`` so the issue-#273 GPU auto-pick (``None`` ⇒ scan
-      on GPU/TPU, for-loop on CPU) is honored even when an earlier
-      call cached an explicit ``False``.  Also includes
-      ``use_optimal_angle`` (iter-2): the optimal-angle path traces
-      a different two-stream graph (per-band/per-column secant) than
-      the fixed-1.66 path, so a config flip must rebuild the solver
-      instance.
+      without changing the optics tables.
+
+      Includes:
+      - ``use_scan`` (issue #273): GPU auto-pick (``None`` ⇒ scan on
+        GPU/TPU, for-loop on CPU) is honored even when an earlier call
+        cached an explicit ``False``.
+      - ``use_optimal_angle`` (iter-2): the optimal-angle path traces
+        a different two-stream graph (per-band/per-column secant) than
+        the fixed-1.66 path, so a config flip must rebuild.
+      - ``S_0``, ``aerosol_ssa``, ``aerosol_g`` (iter-32 audit): these
+        are NOT overridable per-call via ``solve_columns(...)`` kwargs
+        — they are read off ``self._config`` every call.  Without
+        them in the cache key, a later config that bumps e.g.
+        ``aerosol_ssa = 0.95`` would silently reuse a solver instance
+        built with ``aerosol_ssa = 0.93`` and apply the stale value.
+      - ``sfc_emissivity``, ``sfc_albedo`` (iter-32 audit): these ARE
+        overridable per call, but ``_resolve_surface_field(override,
+        fallback)`` falls back to the config default when no override
+        is passed.  AIMIP populates these with ``(ncol,)`` arrays
+        (low-rank lat-lon expansion) — arrays aren't hashable, so we
+        use ``id(...)`` for arrays (cache-correct as long as AIMIP
+        doesn't mutate in place, which JAX immutability prevents).
+        Scalar floats hash directly.
       """
+      def _hashable(x):
+          # Float / int / None / str / bool: hashable directly.
+          try:
+              hash(x)
+              return x
+          except TypeError:
+              # Arrays: id-based key.  Safe under JAX immutability; a
+              # new array (e.g. fresh AIMIP fit per epoch) gets a new
+              # id and rebuilds the cached instance.
+              return id(x)
+
       return (
           RRTMGP._optics_cache_key(config),
           config.use_scan,
           getattr(config, "use_optimal_angle", False),
+          config.S_0,
+          config.aerosol_ssa,
+          config.aerosol_g,
+          _hashable(config.sfc_emissivity),
+          _hashable(config.sfc_albedo),
       )
 
   @staticmethod

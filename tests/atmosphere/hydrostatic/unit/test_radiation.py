@@ -694,6 +694,58 @@ class TestRRTMGP:
         assert RRTMGP._instance_cache_key(cfg_loop) != RRTMGP._instance_cache_key(cfg_auto)
         assert RRTMGP._instance_cache_key(cfg_scan) != RRTMGP._instance_cache_key(cfg_auto)
 
+    def test_cache_keys_distinguish_iter32_baked_in_config_fields(self):
+        """Iter-32 audit: ``S_0``, ``aerosol_ssa``, ``aerosol_g``,
+        ``sfc_emissivity``, ``sfc_albedo`` are baked into solver
+        instances (no per-call override for the aerosol/solar pair,
+        and the surface pair falls back to the config default).  A
+        config change in any of these must produce a different
+        instance cache key so the previous solver instance is not
+        silently reused.
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        base = RRTMGPConfig()
+        base_key = RRTMGP._instance_cache_key(base)
+        # Each tweak must change the instance key.
+        tweaks = [
+            base._replace(S_0=base.S_0 + 1.0),
+            base._replace(aerosol_ssa=base.aerosol_ssa + 0.01),
+            base._replace(aerosol_g=base.aerosol_g + 0.01),
+            base._replace(sfc_emissivity=base.sfc_emissivity - 0.01),
+            base._replace(sfc_albedo=base.sfc_albedo + 0.01),
+        ]
+        for tweak in tweaks:
+            assert RRTMGP._instance_cache_key(tweak) != base_key, (
+                f"instance cache key did not change for tweak: {tweak}"
+            )
+        # Same change to *unrelated* field (gas file path) must NOT
+        # collide with these — optics_cache_key still differentiates.
+        assert RRTMGP._instance_cache_key(base._replace(co2_ppmv=base.co2_ppmv + 1.0)) != base_key
+
+    def test_cache_keys_handle_array_valued_sfc_fields(self):
+        """AIMIP populates ``config.sfc_albedo`` / ``sfc_emissivity``
+        with ``(ncol,)`` arrays.  Arrays aren't hashable; the
+        ``_hashable`` shim falls back to ``id()`` for arrays.  Verify
+        the cache key construction does not raise."""
+        import jax.numpy as jnp
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        # NamedTuple allows _replace with any type; runtime tolerates
+        # arrays in these slots because solve_columns handles them
+        # via ``_resolve_surface_field``.
+        cfg = RRTMGPConfig()._replace(
+            sfc_albedo=jnp.array([0.06, 0.08, 0.10]),
+            sfc_emissivity=jnp.array([0.98, 0.97, 0.96]),
+        )
+        # Should not raise.
+        key = RRTMGP._instance_cache_key(cfg)
+        # Should be hashable (e.g., dict-key usable).
+        d = {key: "ok"}
+        assert d[key] == "ok"
+
     def test_use_scan_none_matches_explicit_choice(self):
         """Issue #273 GPU tuning: ``RRTMGPConfig(use_scan=None)`` (the
         new production default) must produce the same heating rates
