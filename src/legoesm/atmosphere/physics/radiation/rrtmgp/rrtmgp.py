@@ -188,21 +188,20 @@ class RRTMGP:
       fields like ``use_scan`` deliberately omitted — the tables
       themselves are independent of how the solver traverses them.
 
-      iter-36 audit: ``include_clouds`` was previously here, but
-      ``RRTMOptics.__init__`` loads cloud_optics tables
-      unconditionally (it does NOT branch on include_clouds when
-      deciding what to load).  Keeping include_clouds here meant
-      ``include_clouds=True`` and ``=False`` would build two
-      identical optics-lib entries — pure memory waste, ~2x the
-      gas+cloud tables.  ``include_clouds`` is purely a per-call
-      solve_columns gate (``has_clouds = config.include_clouds and
-      (cloud_path_liq is not None or cloud_path_ice is not None)``)
-      and now lives in the instance cache key instead.
+      Iter-40: re-introduced ``include_clouds`` here BUT for a
+      different reason than the pre-iter-36 state — iter-40 made
+      ``RRTMOptics.__init__`` skip the cloud-table load when
+      ``include_clouds=False``, so the constructed optics_lib is
+      now genuinely different across the True/False configurations
+      (one has cloud_optics_lw/sw populated, the other has them set
+      to None).  Memory: clear-sky workflows save ~MB of cloud
+      tables per cached entry.
       """
       import jax
       x64 = bool(jax.config.jax_enable_x64)
       return (config.lw_gas_file, config.sw_gas_file,
               config.lw_cloud_file, config.sw_cloud_file,
+              config.include_clouds,
               config.co2_ppmv, config.ch4_ppbv, config.n2o_ppbv,
               x64)
 
@@ -254,6 +253,11 @@ class RRTMGP:
               # id and rebuilds the cached instance.
               return id(x)
 
+      # iter-40: ``include_clouds`` is now ALSO in the optics key
+      # (because RRTMOptics conditionally loads cloud tables on it),
+      # so it's redundant here.  Keeping it would not be a
+      # correctness bug, just a minor duplicate that adds no info on
+      # top of the optics key tuple.  Dropped to reduce tuple size.
       return (
           RRTMGP._optics_cache_key(config),
           config.use_scan,
@@ -261,7 +265,6 @@ class RRTMGP:
           config.S_0,
           config.aerosol_ssa,
           config.aerosol_g,
-          config.include_clouds,  # iter-36: moved out of optics key
           _hashable(config.sfc_emissivity),
           _hashable(config.sfc_albedo),
       )
@@ -314,7 +317,12 @@ class RRTMGP:
               global_means=global_means, profiles=None,
           )
 
-          optics_lib = optics_factory(optics_params, vmr_lib)
+          # iter-40: pass include_clouds to skip cloud-table load for
+          # clear-sky-only workflows; ~MB saved per cached entry.
+          optics_lib = optics_factory(
+              optics_params, vmr_lib,
+              include_clouds=config.include_clouds,
+          )
           _legoesm_optics_cache[key] = (optics_lib, vmr_lib)
       return _legoesm_optics_cache[key]
 

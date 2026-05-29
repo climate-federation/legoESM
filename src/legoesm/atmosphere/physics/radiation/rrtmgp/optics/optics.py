@@ -60,17 +60,39 @@ class RRTMOptics(optics_base.OpticsScheme):
       self,
       vmr_lib: LookupVolumeMixingRatio,
       params: radiative_transfer.OpticsParameters,
+      include_clouds: bool = True,
   ):
+    """
+    Args:
+      vmr_lib: Lookup table of volume mixing ratios.
+      params: Optics parameters (gas + cloud NetCDF file paths).
+      include_clouds: When False, skip loading the cloud_optics_lw /
+        cloud_optics_sw tables.  iter-40 memory optimisation:
+        ``RRTMOptics`` is constructed from cached entries
+        (``_legoesm_optics_cache``), and clear-sky-only workflows
+        previously paid for the ~MB cloud-table load every time.
+        ``solve_columns`` only invokes the cloud branch when
+        ``has_clouds=config.include_clouds and (cloud_path_liq is not
+        None or cloud_path_ice is not None)``, so the cloud_optics
+        attributes are safely ``None``-able when include_clouds=False.
+    """
     super().__init__()
     assert isinstance(params.optics, radiative_transfer.RRTMOptics)
     rrtm_params = params.optics
     self.vmr_lib = vmr_lib
-    self.cloud_optics_lw = lookup_cloud_optics.from_data_file(
-        rrtm_params.cloud_longwave_nc_filepath
-    )
-    self.cloud_optics_sw = lookup_cloud_optics.from_data_file(
-        rrtm_params.cloud_shortwave_nc_filepath
-    )
+    if include_clouds:
+      self.cloud_optics_lw = lookup_cloud_optics.from_data_file(
+          rrtm_params.cloud_longwave_nc_filepath
+      )
+      self.cloud_optics_sw = lookup_cloud_optics.from_data_file(
+          rrtm_params.cloud_shortwave_nc_filepath
+      )
+    else:
+      # Clear-sky configuration: skip the cloud-table load entirely.
+      # solve_columns' has_clouds gate ensures the cloud branch is
+      # never invoked, so these attributes stay None-safe.
+      self.cloud_optics_lw = None
+      self.cloud_optics_sw = None
     self.gas_optics_lw = lookup_gas_optics_longwave.from_data_file(
         rrtm_params.longwave_nc_filepath
     )
@@ -762,6 +784,7 @@ class GrayAtmosphereOptics(optics_base.OpticsScheme):
 def optics_factory(
     params: radiative_transfer.OpticsParameters,
     vmr_lib: LookupVolumeMixingRatio | None = None,
+    include_clouds: bool = True,
 ) -> optics_base.OpticsScheme:
   """Construct an instance of `OpticsScheme`.
 
@@ -769,13 +792,17 @@ def optics_factory(
     params: The optics parameters.
     vmr_lib: An instance of `LookupVolumeMixingRatio` containing gas
       concentrations.
+    include_clouds: When False, the constructed ``RRTMOptics`` will
+      have ``cloud_optics_lw = cloud_optics_sw = None`` and skip the
+      cloud-table load.  See ``RRTMOptics.__init__`` docstring for
+      the safety argument (iter-40 memory optimisation).
 
   Returns:
     An instance of `OpticsScheme`.
   """
   if isinstance(params.optics, radiative_transfer.RRTMOptics):
     assert vmr_lib is not None, '`vmr_lib` is required for `RRTMOptics`.'
-    return RRTMOptics(vmr_lib, params)
+    return RRTMOptics(vmr_lib, params, include_clouds=include_clouds)
   elif isinstance(params.optics, radiative_transfer.GrayAtmosphereOptics):
     return GrayAtmosphereOptics(params)
   else:

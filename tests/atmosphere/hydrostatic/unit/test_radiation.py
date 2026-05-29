@@ -694,23 +694,34 @@ class TestRRTMGP:
         assert RRTMGP._instance_cache_key(cfg_loop) != RRTMGP._instance_cache_key(cfg_auto)
         assert RRTMGP._instance_cache_key(cfg_scan) != RRTMGP._instance_cache_key(cfg_auto)
 
-    def test_iter36_optics_key_drops_include_clouds(self):
-        """iter-36: ``include_clouds`` was redundant in
-        ``_optics_cache_key`` because ``RRTMOptics.__init__`` loads
-        cloud_optics unconditionally.  Two configs that differ only
-        in ``include_clouds`` must produce the SAME optics key (so
-        they share the ~MB of gas+cloud tables) but DIFFERENT
-        instance keys (so the per-call ``has_clouds`` gate behaviour
-        is honoured)."""
+    def test_iter40_include_clouds_in_optics_key_with_conditional_load(self):
+        """iter-40 supersedes the iter-36 semantics: ``include_clouds``
+        is back in ``_optics_cache_key``, but now for a *meaningful*
+        reason — iter-40 made ``RRTMOptics.__init__`` conditionally
+        skip the cloud-table load when ``include_clouds=False``, so
+        the two configurations produce genuinely different
+        optics_libs (one with cloud_optics_lw/sw populated, the other
+        with them = None).
+
+        Pin: ``include_clouds`` is in the OPTICS key now, and the
+        instance key inherits via the optics-key sub-tuple.
+        """
         from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
         from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
 
         cfg_on = RRTMGPConfig(include_clouds=True)
         cfg_off = RRTMGPConfig(include_clouds=False)
-        # Optics key: identical -> tables shared.
-        assert RRTMGP._optics_cache_key(cfg_on) == RRTMGP._optics_cache_key(cfg_off)
-        # Instance key: distinct -> solver instances isolated.
+        # Optics key: distinct (different cloud-table load).
+        assert RRTMGP._optics_cache_key(cfg_on) != RRTMGP._optics_cache_key(cfg_off)
+        # Instance key: distinct (inherits via optics key).
         assert RRTMGP._instance_cache_key(cfg_on) != RRTMGP._instance_cache_key(cfg_off)
+        # Build both optics_libs and verify the cloud-table skip.
+        optics_on, _ = RRTMGP._build_optics_and_vmr(cfg_on)
+        optics_off, _ = RRTMGP._build_optics_and_vmr(cfg_off)
+        assert optics_on.cloud_optics_lw is not None
+        assert optics_off.cloud_optics_lw is None
+        assert optics_on.cloud_optics_sw is not None
+        assert optics_off.cloud_optics_sw is None
 
     def test_iter37_include_clouds_flag_changes_flux(self):
         """iter-37: end-to-end pin for the iter-36 cache-key move.
