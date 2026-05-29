@@ -29,8 +29,8 @@ MAX_FUNCTION_LOC = 400
 # are decomposed (e.g. Q8 splits latlon_cgrid_ocean_baroclinic_tendencies into
 # named substages). Growing it requires a reviewed change here.
 LOC_ALLOW_LIST = {
-    ("latlon_cgrid_ocean_baroclinic_tendencies",
-     "ocean/dynamics/ocean_pe_latlon_cgrid.py"),
+    # latlon_cgrid_ocean_baroclinic_tendencies was decomposed into _bc_*
+    # substages (Q8) — now ~256 LOC, no longer allow-listed.
     ("mpas_ocean_baroclinic_tendencies", "ocean/dynamics/ocean_pe_mpas.py"),
     ("_step_impl", "ocean/dynamics/ocean_model_latlon_cgrid.py"),
     ("_step_impl", "ocean/dynamics/ocean_model_mpas.py"),

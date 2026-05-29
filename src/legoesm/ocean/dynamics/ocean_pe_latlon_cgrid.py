@@ -1072,141 +1072,89 @@ def _bc_ke_and_pressure_gradients(
     return dKE_dx, dp_dx, dKE_dy, dp_dy
 
 
-def latlon_cgrid_ocean_baroclinic_tendencies(
-    state: LatLonCGridOceanState,
-    grid: LatLonGrid,
-    z_coord: OceanZStarCoordinate,
-    config: LatLonCGridOceanConfig = LatLonCGridOceanConfig(),
-    physics_fn=None,
-    surface_forcing=None,
-    sponge=None,
-    dt: float = 300.0,
-    diagnose_momentum: bool = False,
-):
-    """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
+def _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord):
+    """Stage 9: horizontal (Laplacian / biharmonic) + explicit vertical tracer
+    diffusion for T and S. Pure verbatim extraction (Q8). Returns ``(dT_dt,
+    dS_dt)`` (advection + physics are added by the caller / step function)."""
+    # --- 9. Tracer tendencies (diffusion + physics only) ---
+    # Horizontal AND vertical tracer advection are handled in the step()
+    # function using barotropic-averaged transport (Hallberg 1997, #102).
+    # Vertical velocity w is diagnosed from the barotropic-averaged
+    # per-layer divergence, ensuring 3D transport consistency.
+    #
+    # The tendency here includes only: diffusion and physics.
+    # Stack T, S along a trailing tracer axis and fold it into the level
+    # axis so ``laplacian_cgrid`` (and ``bilaplacian_cgrid`` which is two
+    # laplacian calls) runs ONCE on the thicker
+    # ``(n_lat, n_lon, nlev*2)`` field — the prior vmap-over-(T,S)
+    # pattern issued separate halo pads + 5-point stencils per tracer.
+    # Vertical diffusion stays per-tracer because it hard-codes the
+    # vertical axis at -1.
+    tracer_stack = jnp.stack([T, S], axis=-1)  # (n_lat, n_lon, nlev, 2)
+    n_lat_t, n_lon_t, nlev_t, n_tracers = tracer_stack.shape
+    tracer_flat = tracer_stack.reshape(n_lat_t, n_lon_t, nlev_t * n_tracers)
 
-    Parameters
-    ----------
-    state : LatLonCGridOceanState
-    grid : LatLonGrid
-    z_coord : OceanZStarCoordinate
-    config : LatLonCGridOceanConfig
-    physics_fn : callable, optional
-    surface_forcing : optional
-    sponge : SpongeForcing, optional
-        Sponge layer relaxation fields (gamma, T_ref, S_ref, u_ref, v_ref).
-    diagnose_momentum : bool
-        If ``True``, capture each momentum-tendency component at its
-        point of computation and return a
-        ``(tendencies, MomentumTendencyDiagnostics)`` tuple instead of
-        just ``tendencies``.  Used by the budget-closure infrastructure;
-        adds memory but no recompilation.  Default ``False`` (existing
-        behavior).
-
-    Returns
-    -------
-    LatLonCGridOceanTendencies
-        When ``diagnose_momentum`` is ``False``.
-    (LatLonCGridOceanTendencies, MomentumTendencyDiagnostics)
-        When ``diagnose_momentum`` is ``True``.  The diagnostics satisfy
-        ``Σ components == du_dt`` (and v) to machine precision.
-    """
-    u = state.u.data       # (n_lat, n_lon+1, nlev)
-    v = state.v.data       # (n_lat+1, n_lon, nlev)
-    T = state.T.data       # (n_lat, n_lon, nlev)
-    S = state.S.data
-    eta = state.eta.data   # (n_lat, n_lon)
-    H_bathy = state.H_bathy.data
-    mask = state.land_mask.data
-    u_mask = state.u_mask.data
-    v_mask = state.v_mask.data
-    mask_3d = mask[..., jnp.newaxis]
-    # 3D face masks: when partial coord is active, faces are wet only
-    # where BOTH adjacent cells are wet AT THAT LEVEL — handles columns
-    # with different ``bottom_level`` correctly (the active-vs-inactive
-    # face case from Phase 3b).  For pure z\\* coord (legacy) and for
-    # partial cells with all columns having the same bottom_level,
-    # this produces identical results to broadcasting the 2D mask.
-    if isinstance(z_coord, OceanPartialCellCoordinate):
-        u_mask_3d, v_mask_3d = compute_face_masks_3d(z_coord.is_active, grid)
-    else:
-        u_mask_3d = u_mask[..., jnp.newaxis]
-        v_mask_3d = v_mask[..., jnp.newaxis]
-
-    g_val = config.g
-    rho_0 = config.rho_0
-    min_water_col = jnp.asarray(config.min_water_column_m, dtype=eta.dtype)
-    eta_floor = min_water_col - H_bathy
-    eta_safe = jnp.maximum(eta, eta_floor) * mask
-
-    n_lat = grid.n_lat
-    n_lon = grid.n_lon
-    nlev = z_coord.n_levels
-
-    # --- Stages 1-3: geometry (J, h_k) + density (rho_prime) + baroclinic
-    # pressure anomaly (p_prime_filled). ---
-    J, h_k, rho_prime, p_prime_filled = _bc_geometry_and_density(
-        eta_safe, H_bathy, z_coord, config, T, S, mask, grid, rho_0, g_val,
-    )
-
-    # --- Stages 4-4b: vertical velocity (w), face thicknesses (h_u, h_v),
-    # per-layer flux divergence, and perturbation velocities. ---
-    h_u, h_v, flux_div_k, w, u_prime, v_prime = (
-        _bc_vertical_and_depthmean_velocity(
-            h_k, u, v, u_mask_3d, v_mask_3d, grid, z_coord, u_mask, v_mask,
+    horiz_flat = jnp.zeros_like(tracer_flat)
+    if config.K_h > 0 and config.K_bih > 0:
+        # Both Laplacian and biharmonic active: bilaplacian's *inner*
+        # ∇² is identical to the K_h Laplacian, so compute ∇²(tracer_flat)
+        # ONCE and feed it to both branches.  Saves one full
+        # laplacian_cgrid call (2 gradients + 1 divergence + masking)
+        # per RHS evaluation.
+        _lap_tr = laplacian_cgrid(tracer_flat, grid, mask=mask)
+        horiz_flat = horiz_flat + config.K_h * _lap_tr
+        horiz_flat = horiz_flat - config.K_bih * laplacian_cgrid(
+            _lap_tr, grid, mask=mask,
         )
-    )
+    elif config.K_h > 0:
+        horiz_flat = horiz_flat + config.K_h * laplacian_cgrid(
+            tracer_flat, grid, mask=mask,
+        )
+    elif config.K_bih > 0:
+        horiz_flat = horiz_flat - config.K_bih * bilaplacian_cgrid(
+            tracer_flat, grid, mask=mask,
+        )
+    horiz_stack = horiz_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
 
-    # --- 5. Coriolis ---
-    # Coriolis is NOT included in the returned momentum tendencies.
-    # It is applied as a forward-backward (Matsuno) step in the step
-    # function (ocean_model_latlon_cgrid.py), which is unconditionally
-    # stable for inertial oscillations.  Forward Euler Coriolis amplifies
-    # by sqrt(1 + (f*dt)^2) per step and blows up within ~1 day at
-    # high latitudes.
+    # Vertical tracer diffusion (per-tracer; axis -1 of ``tr`` is nlev).
+    # Always applied regardless of physics pipeline state — the physics
+    # pipeline's vertical_mixing module is a separate concept (e.g.,
+    # KPP).  Baseline K_v diffusion should always be active when K_v > 0.
+    # (Fixes #150.)
+    #
+    # Skipped when ``implicit_vertical_mixing`` is enabled — the
+    # K_v floor is folded into the implicit K profile in the model step.
+    if (config.K_v > 0 and nlev_t >= 2
+            and not getattr(config, "implicit_vertical_mixing", False)):
+        jac_v = jnp.maximum(J[..., jnp.newaxis], 1e-10)  # (n_lat, n_lon, 1)
+        dz_actual_loc = z_coord.dz_ref * jac_v           # (n_lat, n_lon, nlev)
 
-    # --- Stages 6 / 6-7 / 6b: KE gradient + pressure gradient + Adcroft
-    # partial-cell PGF correction. ---
-    _mom_adv = config.momentum_advection
-    dKE_dx, dp_dx, dKE_dy, dp_dy = _bc_ke_and_pressure_gradients(
-        u, v, p_prime_filled, rho_prime, grid, config, z_coord,
-        eta_safe, H_bathy, g_val, mask,
-    )
+        def _vdiff(tr):
+            dtr_dz_half = (tr[..., :-1] - tr[..., 1:]) / (
+                z_coord.dz_half_ref * jac_v
+            )
+            flux = config.K_v * dtr_dz_half
+            _pad_axes_tr = ((0, 0),) * (flux.ndim - 1)
+            flux_full = jnp.pad(flux, (*_pad_axes_tr, (1, 1)))
+            return (flux_full[..., :-1] - flux_full[..., 1:]) / dz_actual_loc
 
-    # --- 7. Momentum tendencies (non-Coriolis only) ---
-    # Capture each term as a named local so the same expression feeds
-    # both the integration and the optional diagnostics path.
-    KE_PGF_u = -dKE_dx - dp_dx / rho_0
-    KE_PGF_v = -dKE_dy - dp_dy / rho_0
-    du_dt = KE_PGF_u
-    dv_dt = KE_PGF_v
-    # Diagnostics scaffolding: zero arrays for terms that may be
-    # inactive in this config; overwritten below where active.
-    _diag_zero_u = jnp.zeros_like(du_dt)
-    _diag_zero_v = jnp.zeros_like(dv_dt)
-    diag_vortcor_u = _diag_zero_u
-    diag_vortcor_v = _diag_zero_v
-    diag_Dterm_u = _diag_zero_u    # WENO momentum-advection D-term;
-    diag_Dterm_v = _diag_zero_v    # zero unless WENO + weno_d_term active.
-    diag_vertadv_u = _diag_zero_u
-    diag_vertadv_v = _diag_zero_v
-    diag_Ah_lap_u = _diag_zero_u
-    diag_Ah_lap_v = _diag_zero_v
-    diag_Bh_bilap_u = _diag_zero_u
-    diag_Bh_bilap_v = _diag_zero_v
-    diag_Cs_smag_u = _diag_zero_u
-    diag_Cs_smag_v = _diag_zero_v
-    diag_Cl_leith_u = _diag_zero_u
-    diag_Cl_leith_v = _diag_zero_v
-    diag_botdrag_u = _diag_zero_u
-    diag_botdrag_v = _diag_zero_v
-    diag_Av_vert_u = _diag_zero_u
-    diag_Av_vert_v = _diag_zero_v
-    diag_phys_u = _diag_zero_u
-    diag_phys_v = _diag_zero_v
-    diag_sponge_u = _diag_zero_u
-    diag_sponge_v = _diag_zero_v
+        vdiff_stack = jax.vmap(_vdiff, in_axes=-1, out_axes=-1)(tracer_stack)
+        tracer_tend_stack = horiz_stack + vdiff_stack
+    else:
+        tracer_tend_stack = horiz_stack
 
+    dT_dt = tracer_tend_stack[..., 0]
+    dS_dt = tracer_tend_stack[..., 1]
+    return dT_dt, dS_dt
+
+
+def _bc_pv_flux(
+    du_dt, dv_dt, u, v, h_u, h_v, h_k, u_mask_3d, v_mask_3d, mask, grid, _mom_adv,
+):
+    """Stage 7b: vector-invariant potential-vorticity (vorticity) flux
+    (Sadourny EC / Arakawa-Lamb-81 triad, or WENO-Z when momentum_advection is
+    weno5/weno7). Pure verbatim extraction (Q8). Threads the momentum
+    accumulators; returns ``(du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v)``."""
     # --- 7b. Potential vorticity flux (#160, Sadourny EC) ---
     # Vector-invariant advection: (u·∇)u = ∇(KE) + (f+ζ) × u.
     # Coriolis (f × u) handled in step function; here only ζ × u.
@@ -1372,7 +1320,16 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # `tests/ocean/unit/test_momentum_diagnostics_closure.py`).
     du_dt = du_dt + diag_vortcor_u
     dv_dt = dv_dt + diag_vortcor_v
+    return du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v
 
+
+def _bc_dterm(du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom_adv):
+    """Stage 7c: WENO divergence (D-term) momentum dissipation (Silvestri et al.
+    2024 Eqs. 31-32). Active only for weno5/weno7 momentum advection with
+    config.weno_d_term; otherwise the diagnostics are zero. Pure verbatim
+    extraction (Q8). Returns ``(du_dt, dv_dt, diag_Dterm_u, diag_Dterm_v)``."""
+    diag_Dterm_u = jnp.zeros_like(du_dt)
+    diag_Dterm_v = jnp.zeros_like(dv_dt)
     # --- 7c. Divergence flux (D term, Silvestri et al. 2024 Eqs. 31-32) ---
     # The two components of ∇·u are treated asymmetrically:
     #
@@ -1404,7 +1361,17 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         diag_Dterm_v = -(D_at_v * v * v_mask_3d)
         du_dt = du_dt + diag_Dterm_u
         dv_dt = dv_dt + diag_Dterm_v
+    return du_dt, dv_dt, diag_Dterm_u, diag_Dterm_v
 
+
+def _bc_vertical_momentum_advection(
+    du_dt, dv_dt, u_prime, v_prime, w, h_u, h_v, u_mask_3d, v_mask_3d,
+    grid, _mom_adv, _weno_order,
+):
+    """Stage 8: flux-form vertical advection of the perturbation momentum
+    (1st-order upwind, or WENO when momentum_advection is weno5/weno7). Pure
+    verbatim extraction (Q8). Returns ``(du_dt, dv_dt, diag_vertadv_u,
+    diag_vertadv_v)``."""
     # --- 8. Vertical advection of u, v (perturbation velocity) ---
     # Issue #171 Level-1 fix: use interface-upwind flux-form momentum
     # advection instead of the cell-centered upwind gradient form.
@@ -1449,77 +1416,26 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             v_prime, w_v, h_v_old, face_active=v_face_active)
     du_dt = du_dt + diag_vertadv_u
     dv_dt = dv_dt + diag_vertadv_v
+    return du_dt, dv_dt, diag_vertadv_u, diag_vertadv_v
 
-    # --- 9. Tracer tendencies (diffusion + physics only) ---
-    # Horizontal AND vertical tracer advection are handled in the step()
-    # function using barotropic-averaged transport (Hallberg 1997, #102).
-    # Vertical velocity w is diagnosed from the barotropic-averaged
-    # per-layer divergence, ensuring 3D transport consistency.
-    #
-    # The tendency here includes only: diffusion and physics.
-    # Stack T, S along a trailing tracer axis and fold it into the level
-    # axis so ``laplacian_cgrid`` (and ``bilaplacian_cgrid`` which is two
-    # laplacian calls) runs ONCE on the thicker
-    # ``(n_lat, n_lon, nlev*2)`` field — the prior vmap-over-(T,S)
-    # pattern issued separate halo pads + 5-point stencils per tracer.
-    # Vertical diffusion stays per-tracer because it hard-codes the
-    # vertical axis at -1.
-    tracer_stack = jnp.stack([T, S], axis=-1)  # (n_lat, n_lon, nlev, 2)
-    n_lat_t, n_lon_t, nlev_t, n_tracers = tracer_stack.shape
-    tracer_flat = tracer_stack.reshape(n_lat_t, n_lon_t, nlev_t * n_tracers)
 
-    horiz_flat = jnp.zeros_like(tracer_flat)
-    if config.K_h > 0 and config.K_bih > 0:
-        # Both Laplacian and biharmonic active: bilaplacian's *inner*
-        # ∇² is identical to the K_h Laplacian, so compute ∇²(tracer_flat)
-        # ONCE and feed it to both branches.  Saves one full
-        # laplacian_cgrid call (2 gradients + 1 divergence + masking)
-        # per RHS evaluation.
-        _lap_tr = laplacian_cgrid(tracer_flat, grid, mask=mask)
-        horiz_flat = horiz_flat + config.K_h * _lap_tr
-        horiz_flat = horiz_flat - config.K_bih * laplacian_cgrid(
-            _lap_tr, grid, mask=mask,
-        )
-    elif config.K_h > 0:
-        horiz_flat = horiz_flat + config.K_h * laplacian_cgrid(
-            tracer_flat, grid, mask=mask,
-        )
-    elif config.K_bih > 0:
-        horiz_flat = horiz_flat - config.K_bih * bilaplacian_cgrid(
-            tracer_flat, grid, mask=mask,
-        )
-    horiz_stack = horiz_flat.reshape(n_lat_t, n_lon_t, nlev_t, n_tracers)
-
-    # Vertical tracer diffusion (per-tracer; axis -1 of ``tr`` is nlev).
-    # Always applied regardless of physics pipeline state — the physics
-    # pipeline's vertical_mixing module is a separate concept (e.g.,
-    # KPP).  Baseline K_v diffusion should always be active when K_v > 0.
-    # (Fixes #150.)
-    #
-    # Skipped when ``implicit_vertical_mixing`` is enabled — the
-    # K_v floor is folded into the implicit K profile in the model step.
-    if (config.K_v > 0 and nlev_t >= 2
-            and not getattr(config, "implicit_vertical_mixing", False)):
-        jac_v = jnp.maximum(J[..., jnp.newaxis], 1e-10)  # (n_lat, n_lon, 1)
-        dz_actual_loc = z_coord.dz_ref * jac_v           # (n_lat, n_lon, nlev)
-
-        def _vdiff(tr):
-            dtr_dz_half = (tr[..., :-1] - tr[..., 1:]) / (
-                z_coord.dz_half_ref * jac_v
-            )
-            flux = config.K_v * dtr_dz_half
-            _pad_axes_tr = ((0, 0),) * (flux.ndim - 1)
-            flux_full = jnp.pad(flux, (*_pad_axes_tr, (1, 1)))
-            return (flux_full[..., :-1] - flux_full[..., 1:]) / dz_actual_loc
-
-        vdiff_stack = jax.vmap(_vdiff, in_axes=-1, out_axes=-1)(tracer_stack)
-        tracer_tend_stack = horiz_stack + vdiff_stack
-    else:
-        tracer_tend_stack = horiz_stack
-
-    dT_dt = tracer_tend_stack[..., 0]
-    dS_dt = tracer_tend_stack[..., 1]
-
+def _bc_horizontal_viscosity(
+    du_dt, dv_dt, u, v, grid, mask, u_mask, v_mask, config, z_coord, H_bathy,
+):
+    """Stages 10 + 10b: horizontal viscosity (A_h Laplacian + B_h biharmonic +
+    Smagorinsky + Leith, with cos(lat) / equatorial / polar-cap scaling and the
+    slope-foot enhancement) plus the meridional-only Laplacian viscosity. Kept
+    together because the meridional block reuses the slope-foot helper/fields
+    defined in stage 10. Pure verbatim extraction (Q8). Returns the momentum
+    accumulators plus the per-term viscosity diagnostics."""
+    diag_Ah_lap_u = jnp.zeros_like(du_dt)
+    diag_Ah_lap_v = jnp.zeros_like(dv_dt)
+    diag_Bh_bilap_u = jnp.zeros_like(du_dt)
+    diag_Bh_bilap_v = jnp.zeros_like(dv_dt)
+    diag_Cs_smag_u = jnp.zeros_like(du_dt)
+    diag_Cs_smag_v = jnp.zeros_like(dv_dt)
+    diag_Cl_leith_u = jnp.zeros_like(du_dt)
+    diag_Cl_leith_v = jnp.zeros_like(dv_dt)
     # --- 10. Mixing (viscosity on perturbation velocity) ---
     # Uses the proper vector Laplacian grad(div) - k×grad(curl) directly
     # on face velocities, avoiding the lossy cell-center detour.
@@ -1755,7 +1671,18 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         _, _merid_v = _apply_slope_foot(jnp.zeros_like(_d2v_dy2),
                                          _A_h_merid * _d2v_dy2)
         dv_dt = dv_dt + _merid_v * v_mask[:, :, jnp.newaxis]
+    return (du_dt, dv_dt, diag_Ah_lap_u, diag_Ah_lap_v, diag_Bh_bilap_u,
+            diag_Bh_bilap_v, diag_Cs_smag_u, diag_Cs_smag_v, diag_Cl_leith_u,
+            diag_Cl_leith_v)
 
+
+def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid):
+    """Bottom drag: linear or quadratic-with-floor (DRAG_BG_VEL), distributed
+    over a BBL thickness or applied at the partial-cell seafloor / deepest
+    level. Pure verbatim extraction (Q8). Returns ``(du_dt, dv_dt,
+    diag_botdrag_u, diag_botdrag_v)``."""
+    diag_botdrag_u = jnp.zeros_like(du_dt)
+    diag_botdrag_v = jnp.zeros_like(dv_dt)
     if config.bottom_drag_r > 0:
         # Drag acts on the full velocity (not perturbation) — the ocean
         # floor sees the total flow.  Consistent with MPAS and MOM6.
@@ -1882,7 +1809,15 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                 -r_eff_v_bot * v[..., -1] / dz_bot_v)
         du_dt = du_dt + diag_botdrag_u
         dv_dt = dv_dt + diag_botdrag_v
+    return du_dt, dv_dt, diag_botdrag_u, diag_botdrag_v
 
+
+def _bc_explicit_vertical_viscosity(du_dt, dv_dt, u_prime, v_prime, u, J, z_coord, config, grid):
+    """Explicit background vertical viscosity A_v on the perturbation velocity
+    (skipped when implicit_vertical_mixing is enabled). Pure verbatim extraction
+    (Q8). Returns ``(du_dt, dv_dt, diag_Av_vert_u, diag_Av_vert_v)``."""
+    diag_Av_vert_u = jnp.zeros_like(du_dt)
+    diag_Av_vert_v = jnp.zeros_like(dv_dt)
     # Skip the explicit background vertical viscosity when the host
     # dynamics requested an implicit (backward-Euler) vertical solve —
     # the LatLonCGridOceanConfig.A_v floor is folded into the implicit
@@ -1912,7 +1847,16 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             else:
                 diag_Av_vert_v = vdiff
                 dv_dt = dv_dt + vdiff
+    return du_dt, dv_dt, diag_Av_vert_u, diag_Av_vert_v
 
+
+def _bc_physics_tendencies(du_dt, dv_dt, dT_dt, dS_dt, physics_fn, state, grid, z_coord, surface_forcing, u, v):
+    """Stage 10b: the physics-pipeline tendencies (KPP/TKE vertical mixing,
+    convection, etc.) applied via a cell-centre proxy state, interpolated to
+    faces. Returns the captured K_v/A_v profiles for the implicit solve. Pure
+    verbatim extraction (Q8)."""
+    diag_phys_u = jnp.zeros_like(du_dt)
+    diag_phys_v = jnp.zeros_like(dv_dt)
     # --- 10b. Physics tendencies (surface forcing, bottom drag, etc.) ---
     # The physics pipeline expects cell-center u/v shapes (shared with
     # A-grid and cubed-sphere).  Create a cell-center proxy state so
@@ -1938,7 +1882,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # recomputing KPP in the model step).
         phys_K_v = getattr(phys, "K_v", None)
         phys_A_v = getattr(phys, "A_v", None)
+    return du_dt, dv_dt, dT_dt, dS_dt, phys_K_v, phys_A_v, diag_phys_u, diag_phys_v
 
+
+def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, z_coord, J, grid, rho_0, mask, mask_3d):
+    """Stage 10b': external surface forcing (wind stress tau_x/tau_y, net heat
+    q_net, penetrating shortwave) from a coupled / OMIP OceanSurfaceForcing,
+    with tripolar east-north -> grid-aligned rotation. Pure verbatim extraction
+    (Q8). Returns ``(du_dt, dv_dt, dT_dt, dS_dt)``."""
     # --- 10b'. External surface forcing (e.g. from JRA55 bulk fluxes) ---
     # When the caller passes an OceanSurfaceForcing carrying tau_x /
     # tau_y / q_net / sw_down, apply them here.  Mirrors
@@ -2024,7 +1975,15 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                 dT_dt = dT_dt.at[..., 0].add(
                     q_net_T * inv_rho_csw_dz * mask
                 )
+    return du_dt, dv_dt, dT_dt, dS_dt
 
+
+def _bc_sponge_relaxation(du_dt, dv_dt, dT_dt, dS_dt, T, S, u, v, sponge, grid):
+    """Stage 10c: sponge-layer relaxation of T/S (and optionally u/v) toward
+    reference fields. Pure verbatim extraction (Q8). Returns ``(du_dt, dv_dt,
+    dT_dt, dS_dt, diag_sponge_u, diag_sponge_v)``."""
+    diag_sponge_u = jnp.zeros_like(du_dt)
+    diag_sponge_v = jnp.zeros_like(dv_dt)
     # --- 10c. Sponge layer relaxation ---
     # Cast sponge arrays to state dtype to prevent float64 promotion when
     # the precision policy stores state in float32 (crashes barotropic scan).
@@ -2041,6 +2000,201 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             gamma_v = _interp_to_v_points(sponge.gamma.astype(_dt), grid=grid)[..., jnp.newaxis]
             diag_sponge_v = gamma_v * (sponge.v_ref.astype(_dt) - v)
             dv_dt = dv_dt + diag_sponge_v
+    return du_dt, dv_dt, dT_dt, dS_dt, diag_sponge_u, diag_sponge_v
+
+
+def latlon_cgrid_ocean_baroclinic_tendencies(
+    state: LatLonCGridOceanState,
+    grid: LatLonGrid,
+    z_coord: OceanZStarCoordinate,
+    config: LatLonCGridOceanConfig = LatLonCGridOceanConfig(),
+    physics_fn=None,
+    surface_forcing=None,
+    sponge=None,
+    dt: float = 300.0,
+    diagnose_momentum: bool = False,
+):
+    """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
+
+    Parameters
+    ----------
+    state : LatLonCGridOceanState
+    grid : LatLonGrid
+    z_coord : OceanZStarCoordinate
+    config : LatLonCGridOceanConfig
+    physics_fn : callable, optional
+    surface_forcing : optional
+    sponge : SpongeForcing, optional
+        Sponge layer relaxation fields (gamma, T_ref, S_ref, u_ref, v_ref).
+    diagnose_momentum : bool
+        If ``True``, capture each momentum-tendency component at its
+        point of computation and return a
+        ``(tendencies, MomentumTendencyDiagnostics)`` tuple instead of
+        just ``tendencies``.  Used by the budget-closure infrastructure;
+        adds memory but no recompilation.  Default ``False`` (existing
+        behavior).
+
+    Returns
+    -------
+    LatLonCGridOceanTendencies
+        When ``diagnose_momentum`` is ``False``.
+    (LatLonCGridOceanTendencies, MomentumTendencyDiagnostics)
+        When ``diagnose_momentum`` is ``True``.  The diagnostics satisfy
+        ``Σ components == du_dt`` (and v) to machine precision.
+    """
+    u = state.u.data       # (n_lat, n_lon+1, nlev)
+    v = state.v.data       # (n_lat+1, n_lon, nlev)
+    T = state.T.data       # (n_lat, n_lon, nlev)
+    S = state.S.data
+    eta = state.eta.data   # (n_lat, n_lon)
+    H_bathy = state.H_bathy.data
+    mask = state.land_mask.data
+    u_mask = state.u_mask.data
+    v_mask = state.v_mask.data
+    mask_3d = mask[..., jnp.newaxis]
+    # 3D face masks: when partial coord is active, faces are wet only
+    # where BOTH adjacent cells are wet AT THAT LEVEL — handles columns
+    # with different ``bottom_level`` correctly (the active-vs-inactive
+    # face case from Phase 3b).  For pure z\\* coord (legacy) and for
+    # partial cells with all columns having the same bottom_level,
+    # this produces identical results to broadcasting the 2D mask.
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        u_mask_3d, v_mask_3d = compute_face_masks_3d(z_coord.is_active, grid)
+    else:
+        u_mask_3d = u_mask[..., jnp.newaxis]
+        v_mask_3d = v_mask[..., jnp.newaxis]
+
+    g_val = config.g
+    rho_0 = config.rho_0
+    min_water_col = jnp.asarray(config.min_water_column_m, dtype=eta.dtype)
+    eta_floor = min_water_col - H_bathy
+    eta_safe = jnp.maximum(eta, eta_floor) * mask
+
+    n_lat = grid.n_lat
+    n_lon = grid.n_lon
+    nlev = z_coord.n_levels
+
+    # --- Stages 1-3: geometry (J, h_k) + density (rho_prime) + baroclinic
+    # pressure anomaly (p_prime_filled). ---
+    J, h_k, rho_prime, p_prime_filled = _bc_geometry_and_density(
+        eta_safe, H_bathy, z_coord, config, T, S, mask, grid, rho_0, g_val,
+    )
+
+    # --- Stages 4-4b: vertical velocity (w), face thicknesses (h_u, h_v),
+    # per-layer flux divergence, and perturbation velocities. ---
+    h_u, h_v, flux_div_k, w, u_prime, v_prime = (
+        _bc_vertical_and_depthmean_velocity(
+            h_k, u, v, u_mask_3d, v_mask_3d, grid, z_coord, u_mask, v_mask,
+        )
+    )
+
+    # --- 5. Coriolis ---
+    # Coriolis is NOT included in the returned momentum tendencies.
+    # It is applied as a forward-backward (Matsuno) step in the step
+    # function (ocean_model_latlon_cgrid.py), which is unconditionally
+    # stable for inertial oscillations.  Forward Euler Coriolis amplifies
+    # by sqrt(1 + (f*dt)^2) per step and blows up within ~1 day at
+    # high latitudes.
+
+    # --- Stages 6 / 6-7 / 6b: KE gradient + pressure gradient + Adcroft
+    # partial-cell PGF correction. ---
+    _mom_adv = config.momentum_advection
+    # WENO order, used only inside the WENO branches of the vertical-advection
+    # stage (None otherwise -> never dereferenced). The PV-flux stage computes
+    # its own copy internally.
+    _weno_order = {"weno5": 5, "weno7": 7}.get(_mom_adv)
+    dKE_dx, dp_dx, dKE_dy, dp_dy = _bc_ke_and_pressure_gradients(
+        u, v, p_prime_filled, rho_prime, grid, config, z_coord,
+        eta_safe, H_bathy, g_val, mask,
+    )
+
+    # --- 7. Momentum tendencies (non-Coriolis only) ---
+    # Capture each term as a named local so the same expression feeds
+    # both the integration and the optional diagnostics path.
+    KE_PGF_u = -dKE_dx - dp_dx / rho_0
+    KE_PGF_v = -dKE_dy - dp_dy / rho_0
+    du_dt = KE_PGF_u
+    dv_dt = KE_PGF_v
+    # Diagnostics scaffolding: zero arrays for terms that may be
+    # inactive in this config; overwritten below where active.
+    _diag_zero_u = jnp.zeros_like(du_dt)
+    _diag_zero_v = jnp.zeros_like(dv_dt)
+    diag_vortcor_u = _diag_zero_u
+    diag_vortcor_v = _diag_zero_v
+    diag_Dterm_u = _diag_zero_u    # WENO momentum-advection D-term;
+    diag_Dterm_v = _diag_zero_v    # zero unless WENO + weno_d_term active.
+    diag_vertadv_u = _diag_zero_u
+    diag_vertadv_v = _diag_zero_v
+    diag_Ah_lap_u = _diag_zero_u
+    diag_Ah_lap_v = _diag_zero_v
+    diag_Bh_bilap_u = _diag_zero_u
+    diag_Bh_bilap_v = _diag_zero_v
+    diag_Cs_smag_u = _diag_zero_u
+    diag_Cs_smag_v = _diag_zero_v
+    diag_Cl_leith_u = _diag_zero_u
+    diag_Cl_leith_v = _diag_zero_v
+    diag_botdrag_u = _diag_zero_u
+    diag_botdrag_v = _diag_zero_v
+    diag_Av_vert_u = _diag_zero_u
+    diag_Av_vert_v = _diag_zero_v
+    diag_phys_u = _diag_zero_u
+    diag_phys_v = _diag_zero_v
+    diag_sponge_u = _diag_zero_u
+    diag_sponge_v = _diag_zero_v
+
+    # --- Stage 7b: potential-vorticity flux (vector-invariant advection). ---
+    du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v = _bc_pv_flux(
+        du_dt, dv_dt, u, v, h_u, h_v, h_k, u_mask_3d, v_mask_3d, mask, grid, _mom_adv,
+    )
+
+    # --- Stage 7c: WENO divergence (D-term) dissipation. ---
+    du_dt, dv_dt, diag_Dterm_u, diag_Dterm_v = _bc_dterm(
+        du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom_adv,
+    )
+
+    # --- Stage 8: vertical momentum advection. ---
+    du_dt, dv_dt, diag_vertadv_u, diag_vertadv_v = _bc_vertical_momentum_advection(
+        du_dt, dv_dt, u_prime, v_prime, w, h_u, h_v, u_mask_3d, v_mask_3d,
+        grid, _mom_adv, _weno_order,
+    )
+
+    # --- Stage 9: tracer diffusion tendencies (dT_dt, dS_dt). ---
+    dT_dt, dS_dt = _bc_tracer_tendencies(T, S, config, grid, mask, J, z_coord)
+
+    # --- Stages 10 + 10b: horizontal + meridional viscosity. ---
+    (du_dt, dv_dt, diag_Ah_lap_u, diag_Ah_lap_v, diag_Bh_bilap_u,
+     diag_Bh_bilap_v, diag_Cs_smag_u, diag_Cs_smag_v, diag_Cl_leith_u,
+     diag_Cl_leith_v) = _bc_horizontal_viscosity(
+        du_dt, dv_dt, u, v, grid, mask, u_mask, v_mask, config, z_coord, H_bathy,
+    )
+
+    # --- Bottom drag. ---
+    du_dt, dv_dt, diag_botdrag_u, diag_botdrag_v = _bc_bottom_drag(
+        du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid,
+    )
+
+    # --- Explicit background vertical viscosity (A_v). ---
+    du_dt, dv_dt, diag_Av_vert_u, diag_Av_vert_v = _bc_explicit_vertical_viscosity(
+        du_dt, dv_dt, u_prime, v_prime, u, J, z_coord, config, grid,
+    )
+
+    # --- Stage 10b: physics-pipeline tendencies. ---
+    (du_dt, dv_dt, dT_dt, dS_dt, phys_K_v, phys_A_v, diag_phys_u,
+     diag_phys_v) = _bc_physics_tendencies(
+        du_dt, dv_dt, dT_dt, dS_dt, physics_fn, state, grid, z_coord,
+        surface_forcing, u, v,
+    )
+
+    # --- Stage 10b': external surface forcing (wind stress / heat / shortwave). ---
+    du_dt, dv_dt, dT_dt, dS_dt = _bc_external_surface_forcing(
+        du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, z_coord, J, grid,
+        rho_0, mask, mask_3d,
+    )
+
+    # --- Stage 10c: sponge-layer relaxation. ---
+    du_dt, dv_dt, dT_dt, dS_dt, diag_sponge_u, diag_sponge_v = _bc_sponge_relaxation(
+        du_dt, dv_dt, dT_dt, dS_dt, T, S, u, v, sponge, grid,
+    )
 
     # --- 11. Land masking ---
     du_dt = du_dt * u_mask_3d
