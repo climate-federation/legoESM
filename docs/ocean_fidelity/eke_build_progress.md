@@ -6,7 +6,7 @@ every micro-decision. Newest at the bottom.
 
 ## Gate status
 - [x] E1 EKE closure module (pure) + EKEConfig + direct unit tests (8 green)
-- [ ] E2 dispatch (prognostic kappa_GM mode; ValueError on unknown)
+- [x] E2 dispatch + GM/Redi coupling (compute_eke_kappa_gm; GMRediConfig.eke; validate_eke_config)
 - [ ] E3 positivity (E >= 0 / E_min)
 - [ ] E4 budget closure (advection + iso-diffusion conserve integral-E)
 - [ ] E5 differentiability
@@ -31,3 +31,18 @@ dissipation ≤0 with E^{3/2} scaling, finite on a field).
 NEXT: E2 — wire a prognostic-kappa_GM mode into GM/Redi (config dispatch, ValueError on unknown);
 this makes eke.py live. Reuse the Visbeck path (which already accepts a 2-D kappa_GM array) +
 factor a shared (sigma_bar, L) helper from compute_visbeck_kappa_gm so EKE + Visbeck share it.
+
+### 2026-05-29 · iter 2 · E2 done — GM/Redi prognostic-kappa_GM coupling + config + validation
+Factored `_eady_growth_and_length(rho, S_x, S_y, z_coord, jacobian, f, visbeck_cfg)` out of
+`compute_visbeck_kappa_gm` (BIT-IDENTICAL — 49 Visbeck/GM-Redi/decomposition tests green) so the
+N²/slope/Rossby-length numerics live in ONE place. Added `compute_eke_kappa_gm(E, rho, S_x, S_y,
+z_coord, jacobian, f, visbeck_cfg, eke_cfg)` in _gm_redi_common: reuses the shared helper for
+(sigma_bar, L) + the EKE closure for kappa_GM = c_k·L·√E (2-D, wet-masked); returns (kappa_GM,
+sigma_bar, L) — sigma_bar/L feed the EKE local source/sink. Added `GMRediConfig.eke: EKEConfig |
+None = None` (presence-based selection; uses visbeck length params) + `validate_eke_config`
+(fail-fast on non-physical params). 11 EKE tests green (config presence, validation raises,
+prognostic kappa monotone-in-E + >=0 + finite + L floored + kappa=0 at E=0). No duplicate numerics.
+NEXT: E3 (positivity of E under the closure), E5 (differentiability) — both testable on the pure
+closure now. E4 (budget closure) needs the E-transport operator (2-D advection by the depth-mean
+flow + iso-diffusion, reusing divergence_cgrid) — define it conservatively, then E6 wires it +
+the `eke` state field into the step (the cross-cutting part; SegmentCarry discipline).

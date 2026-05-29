@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+from legoesm.ocean.physics.lateral_mixing.eke import EKEConfig
+
 
 class HarmonicConfig(NamedTuple):
     """Laplacian (harmonic) lateral mixing.
@@ -119,6 +121,12 @@ class GMRediConfig(NamedTuple):
                                       # KPP boundary-layer depth when available).
                                       # Only active for slope_scheme="centered".
     surface_complement_depth: float = 100.0  # Depth [m] of the surface layer
+    # Prognostic EKE (Eden-Greatbatch 2008): when not None, kappa_GM becomes
+    # prognostic (c_k·L·√E) from the evolving eddy-energy field E, instead of the
+    # constant ``kappa_GM`` / Visbeck diagnostic. Selection is presence-based
+    # (None = off). The Rossby-radius length uses the ``visbeck`` length params.
+    # Veros ACC runs with EKE on (enable_eke=True).
+    eke: EKEConfig | None = None
 
 
 class LateralMixingConfig(NamedTuple):

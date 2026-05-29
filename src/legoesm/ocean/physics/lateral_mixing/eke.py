@@ -81,4 +81,29 @@ def eke_local_tendency(
     return production - dissipation
 
 
-__all__ = ["EKEConfig", "eke_mixing_length", "eke_kappa_gm", "eke_local_tendency"]
+def validate_eke_config(cfg: EKEConfig) -> None:
+    """Fail-fast validation of EKE parameters (dispatch discipline). Raises
+    ``ValueError`` on non-physical values."""
+    if cfg.c_k <= 0.0:
+        raise ValueError(f"EKEConfig.c_k must be > 0, got {cfg.c_k!r}")
+    if cfg.c_eps <= 0.0:
+        raise ValueError(f"EKEConfig.c_eps must be > 0, got {cfg.c_eps!r}")
+    if cfg.l_min <= 0.0:
+        raise ValueError(f"EKEConfig.l_min must be > 0, got {cfg.l_min!r}")
+    if cfg.k_iso < 0.0:
+        raise ValueError(f"EKEConfig.k_iso must be >= 0, got {cfg.k_iso!r}")
+    if cfg.e_min < 0.0:
+        raise ValueError(f"EKEConfig.e_min must be >= 0, got {cfg.e_min!r}")
+    if cfg.kappa_gm_max <= 0.0:
+        raise ValueError(
+            f"EKEConfig.kappa_gm_max must be > 0, got {cfg.kappa_gm_max!r}"
+        )
+
+
+__all__ = [
+    "EKEConfig",
+    "eke_mixing_length",
+    "eke_kappa_gm",
+    "eke_local_tendency",
+    "validate_eke_config",
+]

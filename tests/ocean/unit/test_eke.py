@@ -112,3 +112,70 @@ def test_tendency_finite_on_field():
     t = eke_local_tendency(E, sigma, L, cfg)
     assert t.shape == (8, 16)
     assert jnp.all(jnp.isfinite(t))
+
+
+# ---------------------------------------------------------------------------
+# E2 — GM/Redi coupling (prognostic kappa_GM) + config + validation
+# ---------------------------------------------------------------------------
+
+
+def test_gmredi_config_accepts_eke():
+    """GMRediConfig has an optional eke field (presence-based selection)."""
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+    assert GMRediConfig().eke is None
+    cfg = GMRediConfig(eke=EKEConfig())
+    assert isinstance(cfg.eke, EKEConfig)
+
+
+def test_validate_eke_config_raises_on_bad_params():
+    from legoesm.ocean.physics.lateral_mixing.eke import validate_eke_config
+    validate_eke_config(EKEConfig())  # default must pass
+    for bad in (EKEConfig(c_k=0.0), EKEConfig(c_eps=-1.0), EKEConfig(l_min=0.0),
+                EKEConfig(kappa_gm_max=0.0)):
+        try:
+            validate_eke_config(bad)
+            assert False, f"expected ValueError for {bad}"
+        except ValueError:
+            pass
+
+
+def _eke_coupling_inputs(E_val):
+    import numpy as np
+    from legoesm.ocean.vertical import create_ocean_z_star
+    nlat, nlon, nlev = 4, 6, 5
+    z = create_ocean_z_star(n_levels=nlev, H_max=4000.0)
+    # Stable stratification: rho increases with depth (k index).
+    rho = jnp.asarray(
+        1025.0 + np.linspace(0.0, 2.0, nlev)[None, None, :]
+        * np.ones((nlat, nlon, 1))
+    )
+    S_x = jnp.full((nlat, nlon, nlev - 1), 1.0e-3)
+    S_y = jnp.full((nlat, nlon, nlev - 1), 5.0e-4)
+    jac = jnp.ones((nlat, nlon))
+    f = jnp.full((nlat, nlon), 1.0e-4)
+    E = jnp.full((nlat, nlon), float(E_val))
+    return E, rho, S_x, S_y, z, jac, f
+
+
+def test_compute_eke_kappa_gm_prognostic_and_monotone():
+    """The prognostic kappa_GM is >= 0, finite, increases with E, and returns the
+    Eady rate + mixing length for the EKE source/sink. Reuses the shared
+    _eady_growth_and_length (no duplicate numerics)."""
+    from legoesm.ocean.physics.lateral_mixing.config import VisbeckConfig
+    from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+        compute_eke_kappa_gm,
+    )
+    vcfg, ecfg = VisbeckConfig(), EKEConfig()
+    E_lo, *rest = _eke_coupling_inputs(0.01)
+    k_lo, sig, L = compute_eke_kappa_gm(E_lo, *rest, vcfg, ecfg)
+    E_hi, *rest_hi = _eke_coupling_inputs(0.25)
+    k_hi, _, _ = compute_eke_kappa_gm(E_hi, *rest_hi, vcfg, ecfg)
+    assert k_lo.shape == (4, 6) and sig.shape == (4, 6) and L.shape == (4, 6)
+    assert jnp.all(jnp.isfinite(k_lo)) and jnp.all(jnp.isfinite(sig))
+    assert jnp.all(k_lo >= 0.0)
+    assert jnp.all(L >= ecfg.l_min)              # mixing length floored
+    assert float(jnp.mean(k_hi)) > float(jnp.mean(k_lo))  # kappa grows with E
+    # E=0 -> kappa_GM = 0 (no prognostic mixing without eddy energy).
+    E0, *rest0 = _eke_coupling_inputs(0.0)
+    k0, _, _ = compute_eke_kappa_gm(E0, *rest0, vcfg, ecfg)
+    assert float(jnp.max(k0)) < 1e-6

@@ -153,6 +153,34 @@ def compute_visbeck_kappa_gm(
     kappa : (...,) horizontally-varying kappa_GM [m^2/s], clamped to
         the configured bounds.
     """
+    sigma_bar, L, wet_col = _eady_growth_and_length(
+        rho, S_x, S_y, z_coord, jacobian, f_coriolis, cfg, rho_ref,
+    )
+    # Apply the wet-column mask AFTER clipping — otherwise dry columns
+    # get lifted to ``kappa_min`` rather than 0 (Codex review caught
+    # this).  A dry column should contribute exactly zero diffusivity
+    # so it cannot leak gradients through the GM/Redi tendencies.
+    kappa = jnp.clip(cfg.alpha * L ** 2 * sigma_bar, cfg.kappa_min, cfg.kappa_max)
+    return jnp.where(wet_col, kappa, 0.0)
+
+
+def _eady_growth_and_length(
+    rho: jnp.ndarray,
+    S_x: jnp.ndarray,
+    S_y: jnp.ndarray,
+    z_coord: OceanZStarCoordinate,
+    jacobian: jnp.ndarray,
+    f_coriolis: jnp.ndarray,
+    cfg,
+    rho_ref: float = _RHO_0_DEFAULT,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Depth-averaged Eady growth rate ``sigma_bar = <N|S|>_z`` and mixing length
+    ``L`` (first-baroclinic Rossby radius, or ``cfg.L_fixed``), plus the wet-column
+    mask. Shared by the Visbeck diagnostic ``kappa_GM`` (``alpha·L²·sigma_bar``) and
+    the prognostic-EKE closure (``kappa_GM = c_k·L·√E``, production ``∝ sigma_bar²``)
+    so the N²/slope/length numerics live in ONE place. ``cfg`` is a VisbeckConfig
+    (uses ``L_min``, ``L_max``, ``f_min``, ``use_rossby_radius``, ``L_fixed``).
+    """
     eps = _EPS
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
     dz_half = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])
@@ -208,9 +236,37 @@ def compute_visbeck_kappa_gm(
         )
         L = jnp.full_like(sigma_bar, cfg.L_fixed)
 
-    # Apply the wet-column mask AFTER clipping — otherwise dry columns
-    # get lifted to ``kappa_min`` rather than 0 (Codex review caught
-    # this).  A dry column should contribute exactly zero diffusivity
-    # so it cannot leak gradients through the GM/Redi tendencies.
-    kappa = jnp.clip(cfg.alpha * L ** 2 * sigma_bar, cfg.kappa_min, cfg.kappa_max)
-    return jnp.where(wet_col, kappa, 0.0)
+    return sigma_bar, L, wet_col
+
+
+def compute_eke_kappa_gm(
+    E: jnp.ndarray,
+    rho: jnp.ndarray,
+    S_x: jnp.ndarray,
+    S_y: jnp.ndarray,
+    z_coord: OceanZStarCoordinate,
+    jacobian: jnp.ndarray,
+    f_coriolis: jnp.ndarray,
+    visbeck_cfg,
+    eke_cfg,
+    rho_ref: float = _RHO_0_DEFAULT,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Prognostic GM coefficient from the eddy-energy field ``E`` (Eden-Greatbatch).
+
+    Reuses the SHARED Eady-rate/Rossby-length machinery (``_eady_growth_and_length``,
+    using ``visbeck_cfg`` for the length params) and the EKE closure
+    (``eke_mixing_length`` + ``eke_kappa_gm``). Returns ``(kappa_GM, sigma_bar, L)``:
+    ``kappa_GM = c_k·L·√E`` (2-D, masked to wet columns) for the GM/Redi tendency,
+    and ``sigma_bar`` (depth-averaged Eady growth rate) + ``L`` (floored mixing
+    length) for the EKE local source/sink (``eke_local_tendency``). Pure.
+    """
+    from legoesm.ocean.physics.lateral_mixing.eke import (
+        eke_kappa_gm, eke_mixing_length,
+    )
+
+    sigma_bar, L_rossby, wet_col = _eady_growth_and_length(
+        rho, S_x, S_y, z_coord, jacobian, f_coriolis, visbeck_cfg, rho_ref,
+    )
+    L = eke_mixing_length(L_rossby, eke_cfg)
+    kappa = eke_kappa_gm(E, L, eke_cfg)
+    return jnp.where(wet_col, kappa, 0.0), sigma_bar, L
