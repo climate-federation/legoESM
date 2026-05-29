@@ -67,18 +67,16 @@ from legoesm.grids.vertical import (
 )
 
 
-def _enable_x64_if_needed(precision: str) -> None:
-    """Enable JAX x64 only when caller asked for fp64. fp32 stays
-    native (no auto-promote)."""
-    if precision == "float64":
-        jax.config.update("jax_enable_x64", True)
-
-
-# fp64 is the default for legoesm dycores; fp32 must be requested via
-# --precision float32. main() flips x64 OFF before any JAX array is
-# constructed when fp32 is chosen.
-# Default-ON here preserves import-time behavior for callers that
-# instantiate state objects WITHOUT calling main() (tests, scripts).
+# JAX x64 toggle happens at IMPORT TIME (before argparse). Two paths:
+# 1. LEGOESM_RCEMIP_PLANE_FP32=1 in the env -> x64 stays OFF -> fp32
+#    arithmetic stays fp32. This is the supported fp32 path.
+# 2. Anything else -> x64 ON -> fp64 default (and fp32 arrays will
+#    auto-promote to fp64 if mixed with any fp64 literal).
+# Per codex iter-... HIGH#3: a previous --precision float32 flag was
+# DEAD because the module-level toggle ran before argparse. We deleted
+# the broken _enable_x64_if_needed shim and now require the env var.
+# main() will refuse --precision float32 without the env var to make
+# the contract explicit.
 import os as _os
 if _os.environ.get("LEGOESM_RCEMIP_PLANE_FP32") != "1":
     jax.config.update("jax_enable_x64", True)
@@ -529,6 +527,20 @@ def main():
           f"smag_cs={args.smag_cs}")
     print(f"  radiation={args.radiation}, microphysics={args.microphysics}")
 
+    # Per codex iter-... HIGH#3: explicit contract check. fp32 must be
+    # requested via the env var BEFORE Python import time; --precision
+    # alone is insufficient because jax.config.update("jax_enable_x64",
+    # True) runs at module load.
+    if args.precision == "float32" and _os.environ.get(
+        "LEGOESM_RCEMIP_PLANE_FP32"
+    ) != "1":
+        raise SystemExit(
+            "--precision float32 requires LEGOESM_RCEMIP_PLANE_FP32=1 in "
+            "the environment BEFORE python launch (the jax x64 toggle "
+            "runs at module import time, before argparse). Example: "
+            "LEGOESM_RCEMIP_PLANE_FP32=1 .venv/bin/python "
+            "scripts/run_rcemip_plane.py --precision float32 ..."
+        )
     dtype = jnp.float32 if args.precision == "float32" else jnp.float64
     grid = create_plane_grid(
         nx=args.nx, ny=args.ny, nlev=args.nlev,
@@ -577,9 +589,20 @@ def main():
             Cd=0.0 if args.no_surface_flux else 1.0e-3,
             Ch=0.0 if args.no_surface_flux else 1.0e-3,
         )
+        sim_refresh_s = args.radiation_interval * args.dt
         print(f"  RADIATION GATED: refresh every {args.radiation_interval} "
-              f"steps = {args.radiation_interval * args.dt:.0f} s sim time "
+              f"steps = {sim_refresh_s:.0f} s sim time "
               f"(RCEMIP typical 300-1800 s).")
+        # Per codex iter-... MEDIUM#7: warn if interval is well outside
+        # the operational CRM range (5-30 min sim).
+        if sim_refresh_s > 1800.0:
+            print(f"  WARN: radiation refresh interval {sim_refresh_s:.0f} s "
+                  f"> 1800 s (30 min). Slow-process error grows linearly "
+                  f"with interval; SAM/WRF/CM1 typical max = 30 min.")
+        elif sim_refresh_s < 60.0:
+            print(f"  WARN: radiation refresh interval {sim_refresh_s:.0f} s "
+                  f"< 60 s. RRTMGP cost dominates the run; consider "
+                  f"--radiation-interval >= {int(300 / args.dt)}.")
     else:
         physics_fn = make_rcemip_physics(
             grid, hc, tm,
@@ -592,12 +615,20 @@ def main():
         )
         rad_physics_fn = None
 
-    # Morrison + Seifert-Beheng need 9 tracer slots (q_v, q_c, q_r,
-    # q_i, q_s, q_g, N_c, N_r, N_i); 3 slots cover Kessler/Sundqvist/
-    # Thompson which only carry the warm-rain mass mixing ratios.
-    n_tracers = 9 if args.microphysics in (
-        "morrison", "seifert_beheng",
-    ) else 3
+    # Tracer slot count per scheme (codex iter-... MEDIUM#5):
+    #   morrison / seifert_beheng / p3: 9 slots (q_v, q_c, q_r, q_i,
+    #     q_s, q_g, N_c, N_r, N_i)
+    #   thompson: 7 slots (q_v, q_c, q_r, q_i, q_s, q_g, N_i)
+    #   kessler / sundqvist / ml_emulator / none: 3 slots (q_v, q_c, q_r)
+    # The microphysics integration validates the slot count at JIT time
+    # and raises ValueError if too few — but we allocate generously
+    # here to surface schema errors at parse time, not deep in JIT.
+    if args.microphysics in ("morrison", "seifert_beheng", "p3"):
+        n_tracers = 9
+    elif args.microphysics == "thompson":
+        n_tracers = 7
+    else:
+        n_tracers = 3
     state = _build_rcemip_initial_state(
         grid, hc, dtype=dtype, theta_noise_amp=args.theta_noise_amp,
         n_tracers=n_tracers,
@@ -652,8 +683,97 @@ def main():
             _emit_surface_snapshot_png(
                 snap_dir, i + 1, (i + 1) * args.dt, state, grid, hc,
             )
+            _emit_profile_npz(
+                snap_dir, i + 1, (i + 1) * args.dt, state, hc,
+            )
+
+    if args.snapshot_every > 0:
+        _render_profile_evolution_png(
+            snap_dir, args.output / "profile_evolution.png",
+        )
 
     print(f"\nOutput: {args.output}")
+
+
+def _emit_profile_npz(snap_dir: Path, step: int, t_s: float,
+                       state, hc) -> None:
+    """Save horizontal-mean vertical profiles per snapshot day.
+
+    Profiles dumped: T(z), theta'(z), q_v(z), q_c(z), w_RMS(z), CWV(z).
+    Read back by render_profile_evolution_png at end of run.
+    """
+    import numpy as np
+    import jax.numpy as _jnp
+    nlev = state.theta_prime.data.shape[-1]
+    theta_p = np.asarray(state.theta_prime.data)
+    rho_p = np.asarray(state.rho_prime.data)
+    # w lives at half levels (nlev+1); average to full levels (nlev)
+    # so the profile axis aligns with theta/qv/etc.
+    w_half = np.asarray(state.w.data)
+    w = 0.5 * (w_half[..., :-1] + w_half[..., 1:])
+    theta_0 = np.asarray(hc.theta_ref)
+    rho_0 = np.asarray(hc.rho_ref)
+    pi_0 = np.asarray(hc.exner_ref)
+    theta_total = theta_0 + theta_p
+    # Hydrostatic Exner -> Temperature at full levels (cheap diagnostic).
+    T = theta_total * pi_0
+    q_v = np.asarray(state.tracers.data[..., 0])
+    n_tr = state.tracers.data.shape[-1]
+    q_c = np.asarray(state.tracers.data[..., 1]) if n_tr > 1 else None
+    # Horizontal means over (ny, nx)
+    np.savez(snap_dir / f"profile_step_{step:08d}.npz",
+             step=step, t_s=t_s, z=np.asarray(hc.z_full),
+             T_mean=T.mean(axis=(0, 1)),
+             theta_mean=theta_total.mean(axis=(0, 1)),
+             theta_p_mean=theta_p.mean(axis=(0, 1)),
+             theta_p_std=theta_p.std(axis=(0, 1)),
+             qv_mean=q_v.mean(axis=(0, 1)),
+             qv_std=q_v.std(axis=(0, 1)),
+             qc_mean=(q_c.mean(axis=(0, 1)) if q_c is not None
+                      else np.zeros(nlev)),
+             w_RMS=np.sqrt((w ** 2).mean(axis=(0, 1))),
+             rho_mean=(rho_0 + rho_p.mean(axis=(0, 1))))
+
+
+def _render_profile_evolution_png(snap_dir: Path, out: Path) -> None:
+    """Compose a 5-panel profile-vs-day PNG from saved profile_*.npz."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+    npz_files = sorted(snap_dir.glob("profile_step_*.npz"))
+    if not npz_files:
+        print(f"  no profile npz found in {snap_dir}; skip evolution PNG")
+        return
+    data = [np.load(f) for f in npz_files]
+    days = np.array([d["t_s"] for d in data]) / 86400.0
+    z_km = data[0]["z"] / 1000.0
+    fig, axes = plt.subplots(1, 5, figsize=(18, 7), sharey=True)
+    panels = [
+        ("theta_mean", "θ(z) [K]", "viridis"),
+        ("qv_mean", "q_v(z) [kg/kg]", "plasma"),
+        ("qc_mean", "q_c(z) [kg/kg]", "Blues"),
+        ("w_RMS", "w_RMS(z) [m/s]", "magma"),
+        ("theta_p_std", "θ' std(z) [K]", "inferno"),
+    ]
+    cmap = plt.get_cmap("viridis", len(data))
+    for ax, (key, label, _cm) in zip(axes, panels):
+        for i, d in enumerate(data):
+            ax.plot(d[key], z_km, color=cmap(i / max(1, len(data) - 1)),
+                    linewidth=0.7, alpha=0.7)
+        ax.set_xlabel(label)
+        ax.grid(alpha=0.3)
+    axes[0].set_ylabel("height [km]")
+    sm = plt.cm.ScalarMappable(cmap=cmap,
+                                norm=plt.Normalize(vmin=days[0],
+                                                   vmax=days[-1]))
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=axes, fraction=0.02, pad=0.04,
+                        label="day")
+    fig.suptitle("RCE horizontal-mean profile evolution", fontsize=13)
+    fig.savefig(out, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out}")
 
 
 def _emit_surface_snapshot_png(snap_dir: Path, step: int, t_s: float,
