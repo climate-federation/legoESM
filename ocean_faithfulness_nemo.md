@@ -79,3 +79,59 @@ A/B knob added: `run_omip_core2.py --ke-gradient-scheme {centered,hollingsworth}
   hollingsworth KE stencil lacks a fold-aware north halo → reverted both config DEFAULTS
   (kept centered), knob-only diff. Refined target: blowup is grid- AND KE-independent ⇒
   shared baroclinic dynamics; next = per-term tendency instrumentation (steps 1-10).
+  **KEY CLUE (drag run 8100129: nudge tau60 + flood-fill + Rayleigh drag tau1/120d,
+  centered KE):** survives to ~day 90, NaN day 100; the unstable mode is MERIDIONAL v ≫ u,
+  pinned at the EQUATOR (umax_lat −4 to −6°): max|v| 2.7(d10)→7.8(d20)→18.1(d30) while
+  max|u| only 1.8→3.3. Grows monotonically DESPITE active spin-up drag ⇒ drag-immune
+  equatorial-v mode. At f≈0 a meridional PGF is unbalanced → prime suspect KE_PGF_v
+  (meridional pressure gradient). Per-term diag job 8106208 (WOA cold-start, no forcing)
+  will confirm which dv_dt term drives the equatorial v.
+- **iter 2 (PER-TERM tendency localisation — MECHANISM FOUND, job 8106208):** instrumented
+  `model.tendencies_with_diagnostics` every step on the WOA cold-start. No-forcing and
+  with-forcing arms are STEP-FOR-STEP IDENTICAL ⇒ **CORE-II forcing exonerated** (it is a
+  pure IC/dynamics blowup). Mechanism, decisively:
+  • **SEED (steps 1-2): equatorial meridional PGF** `KE_PGF_v ≈ 8.6e-3 m/s² @ +4.4°N` drives
+    v from rest to ~5 m/s in ONE step (8.6e-3·dt600 = 5.2). That is ~900× a physical
+    baroclinic-PGF estimate (~1e-5 m/s²) ⇒ the equatorial meridional PGF seed is SPURIOUSLY
+    LARGE. At f≈0 nothing arrests it.
+  • **AMPLIFIER (steps 3-6): vertical momentum advection** `vertadv_u/v @ −3.3°N`. The
+    PGF-driven v converges meridionally → spurious w (~0.03 m/s, ~300× physical) → flux-form
+    upwind `∂(w·u)/∂z` explodes: vertadv 2.25e-2→0.31→12→6.7e5 → NaN step 10.
+  • Explains why **dt 600/300/150 ALL failed** (growing-flow feedback, not a fixed CFL) and
+    why it is **viscosity/drag-immune**.
+  ⇒ Root = the spurious equatorial meridional PGF; vertadv turns it into the blowup. NEXT:
+  seed-localisation probe 8106261 (is KE_PGF_v at the SURFACE = IC/flood-fill artifact, or
+  DEEP = partial-cell PGF over topography? and at a specific lon?) → then fix the PGF/IC seed
+  (and/or make vertical momentum advection implicit/limited to kill the amplifier).
+- **iter 2 (ROOT CAUSE — wrong vertical-coordinate TYPE, "correct grid types"):** seed probe
+  8106261 put the spurious KE_PGF_v at **lat 4.4°N, lon 123.5°E, k=19 (bottom level)** — the
+  Indonesian seas, deepest level, steepest equatorial bathymetry; the whole cascade stays at
+  lon 123.5°E. PGF A/B 8106265 (adcroft vs smc03 on tripole) came back **BIT-IDENTICAL** ⇒
+  the `pgf_scheme` switch is a NO-OP. Cause: the Adcroft/SMC03 partial-cell PGF correction in
+  `ocean_pe_latlon_cgrid.py:1071` is gated `isinstance(z_coord, OceanPartialCellCoordinate)`,
+  but the OMIP runner passes the plain `OceanZStarCoordinate` from `_create_setup`. That coord
+  has `J=(eta+H_bathy)/H_max` → ALL levels uniformly stretched to the local depth = **sigma-
+  like / terrain-following**, NOT NEMO's z-level-with-partial-steps. So (a) the PGF correction
+  never fires AND (b) over steep equatorial topo the sigma-PGF error is huge at f≈0.
+  **`run_omip.py`'s OWN main driver (run_omip_single ~L3181) ALREADY converts to
+  `OceanPartialCellCoordinate` + thin-cell-snaps** — its comment literally describes this
+  exact "day-13 equatorial PGF instability, f≈0, thin partial cell, blow up". The OMIP-faithful
+  runner (`run_omip_core2`) BYPASSED that stable setup. This invalidates the prior "smc03
+  tested, still blew up" lever — smc03 was never actually applied.
+  **FIX (this loop's "correct grid types"): added `make_partial_cell()` + `--partial-cell` to
+  run_omip_core2 (z-level partial steps + thin-cell snap, NEMO-faithful; activates the PGF
+  correction).**
+  • **Per-term efficacy (job 8106758): CONFIRMS the mechanism.** With `--partial-cell` the
+    super-exponential vertadv runaway is GONE (finite through 16 steps vs NaN by step 10 on
+    plain z*); the equatorial KE_PGF_v seed DECAYS (8.1e-3→3.5e-3) instead of running away;
+    and `pgf_scheme` now actually matters (adcroft≠smc03 arms) — proving it was gated off.
+  • **IC bug found + fixed (codex 3 rounds → approve):** `compute_woa_3d` was deep-filling
+    ACTIVE bottom partial cells (init_ocean_from_woa's `|z_full_ref|>bathymetry` mask + the
+    re-apply pass) → corrupted IC at the topographic-step region. Now: pass
+    `bathymetry_depth=None` for partial-cell coords + mask only `~is_active`.
+  • **RESIDUAL (watch):** per-term shows partial-cell removes the catastrophic equatorial
+    blowup but a slower ~linear growth persists (mid-lat deep PGF, e.g. −36.3°N/−50.5°E South
+    Atlantic slope, ~3.5e-3 m/s²) → contaminated forced run blew up ~day 2. Clean forced
+    validation (job 8106781, --partial-cell, adcroft vs smc03, 30d, fine diag) PENDING:
+    does the clean IC + (now-active) smc03 PGF give a stable physical multi-day forced run?
+  Code committed (partial-cell coord + partial-cell-aware WOA IC, codex-clean).

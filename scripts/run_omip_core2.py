@@ -89,9 +89,18 @@ def compute_woa_3d(grid, z_coord, woa_t, woa_s, H_bathy, land_mask):
     WOA initial condition and as the nudging target. Shared so the two paths
     cannot diverge."""
     from legoesm.ocean.init_woa import init_ocean_from_woa
+    from legoesm.ocean.vertical import OceanPartialCellCoordinate
+    _is_pc = isinstance(z_coord, OceanPartialCellCoordinate)
+    # For a partial-cell coord, do NOT pass bathymetry_depth: init_ocean_from_woa
+    # masks levels by ``|z_full_ref| > bathymetry_depth`` (reference full-cell
+    # centres), which deep-fills ACTIVE bottom partial cells whose reference
+    # centre lies below the snapped bathymetry — corrupting the IC at the exact
+    # topographic-step region this coord stabilises (codex adversarial-review).
+    # Instead keep interpolated WOA at every reference level and mask only the
+    # genuinely-inactive (below-seafloor) cells with ``~z_coord.is_active`` below.
     T_woa, S_woa = init_ocean_from_woa(
         grid, z_coord, woa_t, woa_s,
-        bathymetry_depth=np.maximum(np.asarray(H_bathy), 1.0),
+        bathymetry_depth=(None if _is_pc else np.maximum(np.asarray(H_bathy), 1.0)),
     )
     T_woa = np.array(T_woa, dtype=np.float64)   # writable copy (not a view)
     S_woa = np.array(S_woa, dtype=np.float64)
@@ -120,21 +129,75 @@ def compute_woa_3d(grid, z_coord, woa_t, woa_s, H_bathy, land_mask):
     # do not reintroduce a hidden below-seafloor T/S bias. Idempotent for the
     # original (already-filled) columns.
     from legoesm import constants as _const
-    dz = np.asarray(z_coord.dz_ref, dtype=np.float64)
-    z_cen = np.cumsum(dz) - 0.5 * dz                      # (nlev,) cell-centre depths
-    below = z_cen[None, None, :] > np.asarray(H_bathy)[..., None]
     T_fill = float(getattr(_const, "T_deep_ocean_ref_C", 1.5))
     S_fill = float(getattr(_const, "S_deep_ocean_ref_psu", 34.7))
+    if _is_pc:
+        # Partial-cell coord: ``is_active`` already accounts for the active
+        # bottom PARTIAL cell. Using the reference full-cell centres
+        # (cumsum(dz_ref)) here would mark active bottom partial cells whose
+        # thickness is < 50% of dz_ref as below-seafloor and overwrite their
+        # real WOA T/S with deep fill — corrupting the IC/nudge target at the
+        # exact topographic-step region this coord is meant to stabilise
+        # (codex adversarial-review). Use the coord's own active mask.
+        below = ~np.asarray(z_coord.is_active)
+    else:
+        dz = np.asarray(z_coord.dz_ref, dtype=np.float64)
+        z_cen = np.cumsum(dz) - 0.5 * dz                  # (nlev,) cell-centre depths
+        below = z_cen[None, None, :] > np.asarray(H_bathy)[..., None]
     T_woa = np.where(below, T_fill, T_woa)
     S_woa = np.where(below, S_fill, S_woa)
     m3 = m2[..., None]
     return T_woa * m3, S_woa * m3
 
 
+def make_partial_cell(z_coord, H_bathy, land_mask, thin_threshold=0.3):
+    """Convert a z* reference coord + bathymetry to an ``OceanPartialCellCoordinate``,
+    snapping ``H_bathy`` DOWN to the interface above whenever the bottom partial cell
+    would be thinner than ``thin_threshold * dz_ref`` (MOM6/MITgcm thin-cell fix).
+
+    Mirrors the documented-stable ``run_omip.py`` partial-cell setup
+    (``run_omip_single``, ~line 3181). The OMIP-faithful runner previously passed the
+    plain ``OceanZStarCoordinate`` from ``_create_setup`` straight to the model. With
+    that coord, ``J = (eta + H_bathy)/H_max`` uniformly stretches all levels to the
+    local depth (terrain-following / sigma-like), AND the Adcroft/SMC03 partial-cell
+    PGF correction is gated OFF (``isinstance(z_coord, OceanPartialCellCoordinate)``
+    is False in ``ocean_pe_latlon_cgrid``). Over steep equatorial topography (f≈0)
+    that drives the spurious bottom meridional-PGF seed that blows up the WOA cold
+    start (per-term diag job 8106208: KE_PGF_v ~8.6e-3 m/s2 @ Indonesian seas, bottom
+    level). The z-level partial-cell coord (this function) puts levels at FIXED
+    reference depths, activates the PGF correction, and applies the thin-cell snap
+    that prior work found necessary at the equator.
+
+    Returns ``(z_coord_partial, H_snapped_np, land_mask_np)``.
+    """
+    from legoesm.ocean.vertical import create_partial_cell_coordinate
+    H_np = np.asarray(H_bathy, dtype=np.float64)
+    abs_z_half = np.abs(np.asarray(z_coord.z_half_ref))   # (nlev+1,) positive depths
+    dz_ref_np = np.asarray(z_coord.dz_ref)                # (nlev,) positive
+    H_snapped = H_np.copy()
+    n_snapped = 0
+    for k in range(z_coord.n_levels):
+        top, bot = abs_z_half[k], abs_z_half[k + 1]
+        in_layer = (H_np > top) & (H_np <= bot)
+        too_thin = in_layer & ((H_np - top) < thin_threshold * dz_ref_np[k])
+        H_snapped = np.where(too_thin, top, H_snapped)
+        n_snapped += int(np.sum(too_thin))
+    lm = np.asarray(land_mask, dtype=np.float64)
+    new_land = (H_snapped <= 0.0) & (lm > 0.5)
+    n_new_land = int(np.sum(new_land))
+    lm_out = np.where(new_land, 0.0, lm)
+    print(f"[setup] partial-cell snap (cutoff {thin_threshold*100:.0f}%): "
+          f"{n_snapped} cells snapped, {n_new_land} -> land")
+    zc = create_partial_cell_coordinate(
+        z_coord, jnp.asarray(H_snapped, dtype=jnp.float64),
+    )
+    return zc, H_snapped, lm_out
+
+
 def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   woa_init: bool = False, woa_t=None, woa_s=None,
                   pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None,
-                  ke_gradient_scheme=None):
+                  ke_gradient_scheme=None, partial_cell=False):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -176,6 +239,12 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         raise ValueError(
             f"mesh mask shape {land_mask.shape} != grid {(n_lat, n_lon)}"
         )
+    if partial_cell:
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        z_coord, H_bathy, land_mask = make_partial_cell(z_coord, H_bathy, land_mask)
+        model = LatLonCGridOceanModel(grid, z_coord, config)
     state = run_omip._init_rest_state(
         "tripole", grid, z_coord, H_max,
         H_bathy=jnp.asarray(H_bathy), land_mask=jnp.asarray(land_mask),
@@ -202,7 +271,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                        n_lat: int = 180, n_lon: int = 360,
                        woa_init: bool = False, woa_t=None, woa_s=None,
                        pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None,
-                       ke_gradient_scheme=None):
+                       ke_gradient_scheme=None, partial_cell=False):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -246,6 +315,12 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
         print("[setup] FLAT BOTTOM (topography removed -- PGF-over-topo control)")
     print(f"[setup] latlon {n_lat}x{n_lon}: ocean cells {int(land_mask.sum())}, "
           f"H_bathy [{H_bathy[land_mask>0.5].min():.0f},{H_bathy.max():.0f}] m")
+    if partial_cell:
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        z_coord, H_bathy, land_mask = make_partial_cell(z_coord, H_bathy, land_mask)
+        model = LatLonCGridOceanModel(grid, z_coord, config)
     state = run_omip._init_rest_state(
         "latlon", grid, z_coord, H_max,
         H_bathy=jnp.asarray(H_bathy), land_mask=jnp.asarray(land_mask),
@@ -356,6 +431,13 @@ def main() -> int:
                         "non-finite by day 0.5 on both grids). For tripole the "
                         "hollingsworth KE stencil also still lacks a fold-aware "
                         "north halo (see run_omip.py tripole config note).")
+    p.add_argument("--partial-cell", action="store_true",
+                   help="Use OceanPartialCellCoordinate (z-level + partial bottom "
+                        "steps, NEMO-faithful) with thin-cell snapping, instead of "
+                        "the plain sigma-like z* coord from _create_setup. Activates "
+                        "the Adcroft/SMC03 partial-cell PGF correction (gated off for "
+                        "plain z*) and matches NEMO's vertical coordinate. Fixes the "
+                        "spurious equatorial-bottom PGF cold-start blowup (job 8106208).")
     p.add_argument("--pgf-scheme", type=str, default=None, choices=[None, "adcroft", "smc03"],
                    help="Override tripole PGF scheme (default: run_omip's adcroft).")
     p.add_argument("--A-h", type=float, default=None, help="Override Laplacian viscosity [m2/s].")
@@ -406,6 +488,7 @@ def main() -> int:
             pgf_scheme=args.pgf_scheme, A_h=args.A_h, B_h=args.B_h, K_bih=args.K_bih,
             flat_bottom=args.flat_bottom, A_h_eq_boost=args.A_h_eq_boost,
             ke_gradient_scheme=args.ke_gradient_scheme,
+            partial_cell=args.partial_cell,
         )
         app_grid_type = "tripole"
     else:
@@ -416,6 +499,7 @@ def main() -> int:
             pgf_scheme=args.pgf_scheme, A_h=args.A_h, B_h=args.B_h, K_bih=args.K_bih,
             flat_bottom=args.flat_bottom, A_h_eq_boost=args.A_h_eq_boost,
             ke_gradient_scheme=args.ke_gradient_scheme,
+            partial_cell=args.partial_cell,
         )
         app_grid_type = "latlon"
     lat2d, lon2d = _grid_lat2d_deg(grid, args.grid)
