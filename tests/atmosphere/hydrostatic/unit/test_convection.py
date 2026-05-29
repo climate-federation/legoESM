@@ -390,6 +390,59 @@ class TestSBM:
         assert out.dT_dt.shape == (ncol, nlev)
         assert float(jnp.max(jnp.abs(out.dT_dt[0]))) >= float(jnp.max(jnp.abs(out.dT_dt[-1])))
 
+    def test_stratosphere_above_lnb_has_zero_adjustment(self):
+        """Regression for #326: SBM must not adjust stably stratified
+        layers above the level of neutral buoyancy.
+
+        The cloud_mask = (T_moist >= T_env) gate restricts the
+        convective relaxation to conditionally unstable levels. Without
+        it, the scheme relaxed the *entire* column — including the
+        stable stratosphere — toward the moist adiabat, producing the
+        spurious ~40 K/h cooling at the model top that drove the upper-
+        atmosphere warm bias documented in #318.
+
+        Here the deep conditionally-unstable profile from
+        ``_make_unstable_columns`` has a warm-moist lower troposphere
+        (moist adiabat warmer than the environment) and a cold upper
+        region where the moist adiabat launched from the surface parcel
+        falls below the environment (stable). The forward cloud_mask is
+        an exact hard step, so the relaxation tendency must be EXACTLY
+        zero in every layer where ``T_moist < T_env``.
+        """
+        ncol, nlev = 2, 20
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
+        config = SBMConfig()
+        out = sbm_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
+
+        # Reconstruct the convective-instability mask the scheme uses:
+        # the moist adiabat is launched from the surface parcel T[:, -1].
+        T_moist = compute_moist_adiabat(T[:, -1], p_full)
+        stable = T_moist < T  # (ncol, nlev) — layers the gate must skip
+
+        # The constructed profile must actually contain both regimes,
+        # else the test is vacuous.
+        assert bool(jnp.any(stable)), "profile has no stable layers"
+        assert bool(jnp.any(~stable)), "profile has no unstable layers"
+
+        dT = out.dT_dt
+        dq = out.dq_v_dt
+        max_stable_dT = float(jnp.max(jnp.abs(jnp.where(stable, dT, 0.0))))
+        max_stable_dq = float(jnp.max(jnp.abs(jnp.where(stable, dq, 0.0))))
+        max_unstable_dT = float(jnp.max(jnp.abs(jnp.where(stable, 0.0, dT))))
+
+        # Troposphere is convectively active …
+        assert max_unstable_dT > 1.0e-6, (
+            "conditionally unstable troposphere produced no adjustment"
+        )
+        # … but stable layers see zero adjustment (exact hard-step mask).
+        assert max_stable_dT < 1.0e-12, (
+            f"stable-layer |dT/dt|={max_stable_dT:.3e} K/s should be 0 — "
+            "cloud_mask stratosphere gate broken (#326)"
+        )
+        assert max_stable_dq < 1.0e-15, (
+            f"stable-layer |dq_v/dt|={max_stable_dq:.3e} should be 0 (#326)"
+        )
+
 
 # ===========================================================================
 # DCA convection tests
