@@ -116,3 +116,36 @@ decomposition,test_gm_redi_latlon_cgrid,test_latlon_cgrid_ocean}.py → 79 passe
 NEXT: E7 — idealized baroclinic channel with EKE on: E spins up to a BOUNDED level (no blow-up, no
 negative), kappa_GM responds to E (varies in space, ≥0), runs vs EKE-off both stable. Then E8
 (regression lock: EKE-active golden) + E9 (oracle confirmation + recipe adoption, informational).
+
+### 2026-05-29 · iter 7 · E7 (idealized channel) + E8 (regression lock) done
+E7: tests/ocean/unit/test_eke.py — a coarse re-entrant baroclinic channel
+(create_latlon_grid(16,32), 6 levels, polar walls, a meridional tanh T front ->
+baroclinic slopes -> Eady-rate forcing). EKE on (test_E7_channel_eke_spins_up_
+bounded_and_kappa_responds): over 30 steps E stays >=0 + finite, spins up above the
+floor (>5x e_min; observed ~30x), stays BOUNDED (<<1e3, no blow-up); kappa_GM read
+off the final state via compute_eke_step_kappa is >=0, finite, spatially varying
+(std>0), and DIFFERS from the baseline-at-uniform-E (it responded to the evolved E).
+NOTE: the absolute E level is small because EKE equilibrates on a multi-year
+dissipation timescale L/(c_eps·√E) while the gate runs ~hours — the gate verifies
+the SIGN of evolution + boundedness + kappa response, NOT equilibrium (documented in
+the test). EKE off (test_E7_channel_stable_with_eke_off): the same channel with a
+constant GM kappa runs finite/stable — EKE adds the prognostic closure without
+destabilising. 19 EKE tests green.
+E8: tests/ocean/unit/test_eke_regression.py + fixtures/eke_step_regression_golden.npz
+— a committed golden of the EKE-active step (5 steps, structured Gaussian-band initial
+E so transport + semi-implicit source/sink + kappa coupling are all non-degenerate),
+locked at rtol=1e-12 (mirrors test_baroclinic_decomposition). FORCED to the fp64
+precision policy (set_policy/restore) so the whole step is float64 — the model
+otherwise casts to its fp32 storage policy and a float32 golden would not hold 1e-12
+cross-platform. Locks eke + kappa_gm + sigma + L + T + S; key-set lock + golden-exists
+guard + a non-degeneracy sanity (max E > 1e-2). 23 tests green (19 EKE + 2 regression +
+2 decomposition).
+Command: JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 pytest tests/ocean/unit/{test_eke,
+test_eke_regression,test_baroclinic_decomposition}.py → 23 passed.
+NEXT: E9 — oracle confirmation (informational). The ACC recipe build_acc_physics_config
+docstring still says "EKE is a Veros-only closure (no legoESM equivalent yet)" — now
+STALE. Document the legoESM EKE block in the §8 ledger, update that docstring, and
+(doctrine rule H, since Veros ACC is enable_eke=True) ADOPT eke=EKEConfig() in
+ACC_GM_REDI_CONFIG / build_acc_model_config so the recipe is apples-to-apples. E9 is
+informational (not pass/fail) — record correlation-with-Veros status (Veros eke field +
+kappa_GM) if a developed-flow Veros snapshot is available; otherwise document the gap.

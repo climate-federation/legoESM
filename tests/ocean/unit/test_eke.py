@@ -374,3 +374,111 @@ def test_E6_restart_round_trip_eke_field():
     assert state2.eke is not None, "eke dropped on restart round-trip"
     np.testing.assert_array_equal(
         np.asarray(state2.eke.data), np.asarray(state.eke.data))
+
+
+# ---------------------------------------------------------------------------
+# E7 — idealized baroclinic channel (tier 2): EKE spins up bounded, kappa_GM
+# responds to E, and the run stays stable vs EKE-off.
+# ---------------------------------------------------------------------------
+
+
+def _baroclinic_channel(eke_on, n_steps=30, dt=1800.0):
+    """Coarse re-entrant channel (periodic-lon, polar walls) with a meridional
+    T front -> baroclinic slopes -> Eady-rate forcing for EKE. Returns the final
+    state, the model, and the GM/Redi config. EKE-off uses a constant GM kappa
+    so the two runs are a fair stability comparison."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.vertical import create_ocean_z_star
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    from legoesm.ocean.state import LatLonCGridOceanConfig, Field
+    from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    grid = create_latlon_grid(16, 32)
+    z_coord = create_ocean_z_star(n_levels=6, H_max=4000.0)
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord, H_max=4000.0, land_lat_threshold=80.0)
+    # Strong meridional T front -> baroclinic slopes (EKE production source).
+    T = np.asarray(state.T.data)
+    lat = np.degrees(np.asarray(grid.lat))
+    T = T + 4.0 * np.tanh(lat / 15.0)[:, None, None]
+    state = state._replace(T=state.T.replace(data=jnp.asarray(T)))
+    nlat, nlon = grid.n_lat, grid.n_lon
+    eke_cfg = EKEConfig()
+    state = state._replace(
+        eke=Field(data=jnp.full((nlat, nlon), eke_cfg.e_min), name="eke",
+                  dims=("lat", "lon"), units="m^2/s^2"))
+
+    gm = GMRediConfig(kappa_GM=1.0e3, kappa_Redi=1.0e3,
+                      eke=eke_cfg if eke_on else None)
+    cfg = LatLonCGridOceanConfig(
+        A_h=2.0e4, bottom_drag_r=1.0e-3, implicit_vertical_mixing=True,
+        n_barotropic_substeps=8, enable_runtime_checks=False, gm_redi=gm)
+    model = LatLonCGridOceanModel(grid, z_coord, cfg)
+
+    E_max_trace = []
+    for _ in range(n_steps):
+        state = model.step(state, dt=dt)
+        if eke_on:
+            E = np.asarray(state.eke.data)
+            assert np.all(E >= 0.0) and np.all(np.isfinite(E))
+            E_max_trace.append(float(np.max(E)))
+        assert np.all(np.isfinite(np.asarray(state.T.data)))
+        assert np.all(np.isfinite(np.asarray(state.u.data)))
+    return state, model, cfg, np.array(E_max_trace)
+
+
+def test_E7_channel_eke_spins_up_bounded_and_kappa_responds():
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        compute_eke_step_kappa,
+    )
+    state, model, cfg, E_max_trace = _baroclinic_channel(eke_on=True)
+    gm = cfg.gm_redi
+    e_min = gm.eke.e_min
+
+    # (a) E spun up above the uniform initial floor (production active). The
+    # ABSOLUTE level stays small because EKE equilibrates on a multi-year
+    # dissipation timescale (L/(c_eps·√E)) while this gate runs ~hours — the gate
+    # verifies the SIGN of the evolution (production dominant -> E grows), the
+    # boundedness, and the kappa response, NOT the equilibrium. Observed ~30x
+    # growth from the floor; assert a clear margin so this is not floor noise.
+    E_final = np.asarray(state.eke.data)
+    assert float(np.max(E_final)) > 5.0 * e_min, "EKE did not spin up"
+    # (b) ...and stays BOUNDED (no blow-up: orders of magnitude below any
+    # numerical explosion) and finite + non-negative.
+    assert float(np.max(E_final)) < 1.0e3, "EKE blew up"
+    assert np.all(np.isfinite(E_final)) and np.all(E_final >= 0.0)
+    # bounded trajectory: the running max never exploded.
+    assert np.all(np.isfinite(E_max_trace)) and float(np.max(E_max_trace)) < 1.0e3
+
+    # (c) kappa_GM RESPONDS to E: read the prognostic coefficient from the final
+    # state, assert >= 0, finite, varies in space (std > 0), and differs from the
+    # baseline computed at the uniform initial E (it evolved with E).
+    lm = state.land_mask.data
+    kappa_final, _sig, _L = compute_eke_step_kappa(
+        state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
+        state.eke.data, model.grid, model.z_coord, gm,
+        eos=cfg.eos, eos_linear=cfg.eos_linear, mask=lm,
+        rho_0=cfg.constants.rho_0, g=cfg.constants.g)
+    kf = np.asarray(kappa_final)
+    wet = np.asarray(lm) > 0
+    assert np.all(kf >= 0.0) and np.all(np.isfinite(kf))
+    assert float(np.std(kf[wet])) > 0.0, "kappa_GM is spatially uniform"
+    kappa_base, _, _ = compute_eke_step_kappa(
+        state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
+        jnp.full_like(state.eke.data, e_min), model.grid, model.z_coord, gm,
+        eos=cfg.eos, eos_linear=cfg.eos_linear, mask=lm,
+        rho_0=cfg.constants.rho_0, g=cfg.constants.g)
+    assert float(np.max(np.abs(kf - np.asarray(kappa_base)))) > 0.0, \
+        "kappa_GM did not respond to the evolved E"
+
+
+def test_E7_channel_stable_with_eke_off():
+    """The same channel with EKE off (constant GM kappa) also runs stable +
+    finite — EKE adds the prognostic closure without destabilising the run."""
+    state, _model, _cfg, _ = _baroclinic_channel(eke_on=False)
+    assert np.all(np.isfinite(np.asarray(state.T.data)))
+    assert np.all(np.isfinite(np.asarray(state.u.data)))
+    assert np.all(np.isfinite(np.asarray(state.v.data)))
