@@ -160,7 +160,7 @@ def ysu_turbulence(
     Km_local = l_mix ** 2 * S * f_m
 
     # Smooth blend from K-profile to local
-    blend_pbl = jax.nn.sigmoid(10.0 * (z_norm - 1.0))
+    blend_pbl = jax.nn.sigmoid(config.blend_pbl_sharpness * (z_norm - 1.0))
 
     # ----- Entrainment flux at PBL top -----
     # Convective velocity scale: w* = (g * h * (w'theta')_sfc / theta_bar)^(1/3)

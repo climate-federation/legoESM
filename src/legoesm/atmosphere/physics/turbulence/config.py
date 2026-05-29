@@ -98,6 +98,7 @@ class LouisConfig(NamedTuple):
     b_louis: float = 5.0
     c_louis: float = 16.6   # Updated from 5.0 (Louis 1979) to 16.6
     d_louis: float = 5.0
+    blend_ri_sharpness: float = 100.0  # sigmoid sharpness [1/Ri] for stable/unstable blend
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 
@@ -306,6 +307,7 @@ class YSUConfig(NamedTuple):
     louis_c: float = 5.0
     louis_d: float = 5.0
     blend_ri_sharpness: float = 100.0
+    blend_pbl_sharpness: float = 10.0  # sigmoid sharpness for K-profile->local PBL blend
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 
