@@ -1298,6 +1298,45 @@ class TestHeatingRateSign:
             f"regression — see commit 0be22f0f."
         )
 
+    def test_lw_cooling_finite_across_q_v_range(self):
+        """iter-49: ``solve_columns`` must produce finite-and-sensible
+        column-mean LW cooling across a wide ``q_v`` range (1e-5 to
+        1e-2 kg/kg).  The exact magnitude / sign per layer depends on
+        the optical-depth regime (thin → direct cooling to space,
+        thick → mostly local emission-absorption balance), so we only
+        pin: every column-mean LW heating rate must be negative
+        (cooling).
+
+        Pre-iter-13 sign fix this would have shown positive column-
+        mean across the entire q_v range — a louder regression than
+        the original single-profile check (test_free_tropospheric_LW_cools).
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(RRTMGPConfig())
+        ncol, nlev = 1, 20
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1)
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        T = jnp.linspace(220.0, 290.0, nlev)[None, :]
+        sfc_T = jnp.array([300.0])
+        cos_z = jnp.array([0.5])
+
+        for q_v_value in [1.0e-5, 1.0e-4, 1.0e-3, 1.0e-2]:
+            q_v = jnp.full((ncol, nlev), q_v_value)
+            out = solver.solve_columns(
+                T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+                q_v=q_v, cos_zenith=cos_z,
+            )
+            mean_hr = float(jnp.mean(out.lw_heating_rate))
+            assert mean_hr < 0, (
+                f"column-mean LW heating must be negative (cooling) at "
+                f"q_v={q_v_value}; got {mean_hr:.4e} K/s.  Pre-iter-13 "
+                f"sign fix this would be positive across the range."
+            )
+
     def test_clear_sky_SW_heats(self):
         """Clear-sky daytime SW must heat the atmosphere (non-negative
         heating rate everywhere).  Pre-fix bug had SW *cooling* layers."""
