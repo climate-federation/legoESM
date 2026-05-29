@@ -965,6 +965,101 @@ class TestStandardO3Profile:
         )
 
 
+class TestTropopauseBoundary:
+    """Iter-26: exercise solve_columns when every layer is on ONE
+    side of the tropopause (p_ref_trop ≈ 100 hPa).  Smoke-tests that
+    the lower/upper-atm dual-branch in compute_minor_optical_depth
+    and the +itropo-1 pressure shift in compute_major_optical_depth
+    don't crash when one branch contributes nothing.  Also pins the
+    differentiability across the boundary."""
+
+    def test_all_stratospheric_column(self):
+        """Column with every layer above the tropopause (p ≤ 100 hPa).
+        Upper-atm branch dominates; lower-atm branch should compute
+        zero contribution and the dead-branch gradient should still
+        be finite."""
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(RRTMGPConfig())
+        ncol, nlev = 1, 12
+        # All in stratosphere: 1 Pa → 8000 Pa (= 80 hPa).
+        p_half = jnp.broadcast_to(
+            jnp.linspace(1.0, 8000.0, nlev + 1)[None, :], (ncol, nlev + 1)
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        T = jnp.full((ncol, nlev), 240.0)
+        sfc_T = jnp.array([245.0])
+        q_v = jnp.full((ncol, nlev), 1e-6)
+        cos_z = jnp.array([0.5])
+
+        out = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+        )
+        assert jnp.all(jnp.isfinite(out.lw_flux_up))
+        assert jnp.all(jnp.isfinite(out.sw_flux_up))
+        assert jnp.all(jnp.isfinite(out.heating_rate))
+
+        # AD path must be finite — the lower-branch
+        # ``_compute_minor_optical_depth`` is evaluated everywhere via
+        # the jnp.where, so an unmasked NaN gradient from the dead
+        # branch would surface here.
+        def loss(T_in):
+            o = solver.solve_columns(
+                T=T_in, p_full=p_full, p_half=p_half,
+                sfc_temperature=sfc_T, q_v=q_v, cos_zenith=cos_z,
+            )
+            return jnp.sum(o.heating_rate)
+
+        g = jax.grad(loss)(T)
+        assert jnp.all(jnp.isfinite(g)), (
+            "all-stratosphere column gradient must be finite — "
+            "the dead lower-atm branch in compute_minor_optical_depth "
+            "must not propagate NaN cotangents."
+        )
+
+    def test_all_tropospheric_column(self):
+        """Column with every layer below the tropopause (p > 100 hPa).
+        Symmetric to the stratosphere test — lower-atm branch dominates,
+        upper-atm dead branch must not break AD."""
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(RRTMGPConfig())
+        ncol, nlev = 1, 8
+        # All in troposphere: 200 hPa → 1000 hPa (= 2e4 → 1e5 Pa).
+        p_half = jnp.broadcast_to(
+            jnp.linspace(2.0e4, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1)
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        T = jnp.linspace(220.0, 290.0, nlev)[None, :]
+        sfc_T = jnp.array([295.0])
+        q_v = jnp.linspace(1e-5, 1e-2, nlev)[None, :]
+        cos_z = jnp.array([0.5])
+
+        out = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+        )
+        assert jnp.all(jnp.isfinite(out.lw_flux_up))
+        assert jnp.all(jnp.isfinite(out.heating_rate))
+
+        def loss(T_in):
+            o = solver.solve_columns(
+                T=T_in, p_full=p_full, p_half=p_half,
+                sfc_temperature=sfc_T, q_v=q_v, cos_zenith=cos_z,
+            )
+            return jnp.sum(o.heating_rate)
+
+        g = jax.grad(loss)(T)
+        assert jnp.all(jnp.isfinite(g)), (
+            "all-troposphere column gradient must be finite — "
+            "the dead upper-atm branch must not propagate NaN "
+            "cotangents."
+        )
+
+
 class TestADSafetyAtStratosphereTau:
     """Iter-20: end-to-end ``jax.grad`` through ``solve_columns`` for
     a stratosphere-only column whose SW optical depth is small enough
