@@ -712,6 +712,58 @@ class TestRRTMGP:
         # Instance key: distinct -> solver instances isolated.
         assert RRTMGP._instance_cache_key(cfg_on) != RRTMGP._instance_cache_key(cfg_off)
 
+    def test_iter37_include_clouds_flag_changes_flux(self):
+        """iter-37: end-to-end pin for the iter-36 cache-key move.
+        Two ``rrtmgp_radiation`` calls with the same non-trivial
+        cloud_path_liq but different ``include_clouds`` settings must
+        produce different LW fluxes.  Pre-iter-36 the include_clouds
+        flag was in the OPTICS cache key, so flipping it would have
+        rebuilt the optics tables — a heavyweight no-op since the
+        tables are include_clouds-independent.  Iter-36 moved it to
+        the instance key so the optics tables are shared but the
+        solver instance is fresh, and the per-call ``has_clouds``
+        gate correctly turns cloud processing on/off."""
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+            rrtmgp_radiation,
+            _instance_cache,
+        )
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+
+        ncol, nlev = 2, 8
+        T, p_full, p_half, T_sfc, _, _ = _make_column_data(ncol, nlev)
+        q_v = jnp.full((ncol, nlev), 5e-3)
+        cos_zen = jnp.full(ncol, 0.5)
+        # Non-trivial cloud path in the lower troposphere.
+        cloud_path_liq = jnp.zeros((ncol, nlev))
+        cloud_path_liq = cloud_path_liq.at[:, -3:].set(0.1)
+        cloud_r_eff_liq = jnp.full((ncol, nlev), 1.0e-5)
+
+        cfg_off = RRTMGPConfig(include_clouds=False)
+        cfg_on = RRTMGPConfig(include_clouds=True)
+
+        _instance_cache.clear()
+        out_off = rrtmgp_radiation(
+            T, p_full, p_half, T_sfc, q_v, cos_zen, cfg_off,
+            cloud_path_liq=cloud_path_liq,
+            cloud_r_eff_liq=cloud_r_eff_liq,
+        )
+        out_on = rrtmgp_radiation(
+            T, p_full, p_half, T_sfc, q_v, cos_zen, cfg_on,
+            cloud_path_liq=cloud_path_liq,
+            cloud_r_eff_liq=cloud_r_eff_liq,
+        )
+        # Cloud effect on LW flux: TOA outgoing LW should be reduced
+        # by the cloud (the cloud absorbs LW from below + emits at
+        # cooler T).  The difference must be substantial.
+        max_diff = float(jnp.max(jnp.abs(out_off.lw_flux_up - out_on.lw_flux_up)))
+        assert max_diff > 1.0, (
+            f"flipping include_clouds must change LW flux when "
+            f"cloud_path_liq is non-zero; got max_diff={max_diff:.6e} "
+            f"W/m².  Pre-iter-36 this could have failed if the "
+            f"instance cache had silently shared the off-config solver "
+            f"with the on-config call."
+        )
+
     def test_cache_keys_distinguish_iter32_baked_in_config_fields(self):
         """Iter-32 audit: ``S_0``, ``aerosol_ssa``, ``aerosol_g``,
         ``sfc_emissivity``, ``sfc_albedo`` are baked into solver
