@@ -107,6 +107,12 @@ from legoesm.ocean.vertical import (
 
 # interp_cell_to_uface is imported from latlon_cgrid_operators (shared).
 
+# Single source of truth for the lat-lon C-grid horizontal momentum-advection
+# dispatch literals (dispatch discipline: validated at config construction;
+# unknown -> ValueError, never a silent fallthrough to vector-invariant).
+# "flux_form" is added when its substage lands (build spec gate F2).
+VALID_MOMENTUM_ADVECTION = frozenset({"vector_invariant", "weno5", "weno7"})
+
 
 def _interp_to_v_points(f: jnp.ndarray, grid=None) -> jnp.ndarray:
     """Interpolate cell-center field to v-points (lat interfaces).

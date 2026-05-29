@@ -521,6 +521,19 @@ class LatLonCGridOceanModel:
                 f"eos must be one of {sorted(VALID_EOS_SCHEMES)}, "
                 f"got {config.eos!r}",
             )
+
+        # Fail-fast momentum-advection dispatch validation (was a silent
+        # fallthrough to vector-invariant for any unknown literal). Single
+        # source: VALID_MOMENTUM_ADVECTION in ocean_pe_latlon_cgrid.
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            VALID_MOMENTUM_ADVECTION,
+        )
+        if config.momentum_advection not in VALID_MOMENTUM_ADVECTION:
+            raise ValueError(
+                f"momentum_advection must be one of "
+                f"{sorted(VALID_MOMENTUM_ADVECTION)}, "
+                f"got {config.momentum_advection!r}",
+            )
         if config.max_abs_eta_m <= 0.0:
             raise ValueError(
                 f"max_abs_eta_m must be > 0, got {config.max_abs_eta_m!r}")

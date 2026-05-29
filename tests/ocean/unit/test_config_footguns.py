@@ -125,3 +125,26 @@ def test_A_h_single_source_clean_config_passes():
     )
     LatLonCGridOceanModel._validate_config(clean)  # must not raise
     assert clean.A_h == 2.0e4
+
+
+# ---------------------------------------------------------------------------
+# Footgun 3 — momentum_advection dispatch (was a silent fallthrough)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_config_rejects_unknown_momentum_advection():
+    """An unknown momentum_advection literal must raise at construction, not
+    silently fall through to vector-invariant (the prior behaviour)."""
+    bad = LatLonCGridOceanConfig(momentum_advection="flux-form")  # typo/not-yet
+    with pytest.raises(ValueError, match="momentum_advection must be one of"):
+        LatLonCGridOceanModel._validate_config(bad)
+
+
+def test_validate_config_accepts_valid_momentum_advection():
+    """Each currently-valid momentum_advection literal passes validation."""
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        VALID_MOMENTUM_ADVECTION,
+    )
+    for scheme in VALID_MOMENTUM_ADVECTION:
+        cfg = LatLonCGridOceanConfig(momentum_advection=scheme)
+        LatLonCGridOceanModel._validate_config(cfg)  # must not raise
