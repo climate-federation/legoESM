@@ -905,6 +905,44 @@ class TestStandardO3Profile:
         )
 
 
+class TestCloudKwargsHelper:
+    """Iter-17: ``CloudProperties.to_rrtmg_kwargs`` must NOT include
+    cloud_fraction.  Pinning this prevents the
+    cf²-double-discount bug (commit 4c9591bb, lost in AIMIP-#312
+    merge, restored iter-15/16) from resurfacing.
+
+    Reference impact (from the original fix commit message):
+    - cf = 0.6: −59 W/m² OSR (radiative bias)
+    - cf = 0.3: −113 W/m² OSR
+    """
+
+    def test_kwargs_excludes_cloud_fraction(self):
+        from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+            CloudProperties,
+        )
+        shape = (4, 10)
+        props = CloudProperties(
+            cloud_fraction=jnp.full(shape, 0.5),
+            lwp=jnp.full(shape, 1e-3),
+            iwp=jnp.full(shape, 0.5e-3),
+            r_eff_liq=jnp.full(shape, 1e-5),
+            r_eff_ice=jnp.full(shape, 2e-5),
+        )
+        kwargs = props.to_rrtmg_kwargs()
+        # cloud_fraction MUST NOT be in the kwargs.  RRTMG already
+        # discounts by cf via the grid-mean LWP that comes through
+        # cloud_path_liq.
+        assert "cloud_fraction" not in kwargs, (
+            "to_rrtmg_kwargs must NOT include cloud_fraction — passing "
+            "it together with grid-mean LWP double-counts the cf "
+            "discount (commit 4c9591bb; -59..-113 W/m² OSR bias)."
+        )
+        # The legitimate kwargs are present.
+        for key in ("cloud_path_liq", "cloud_path_ice",
+                    "cloud_r_eff_liq", "cloud_r_eff_ice"):
+            assert key in kwargs, f"missing {key} in to_rrtmg_kwargs output"
+
+
 class TestHeatingRateSign:
     """Iter-13: regression guard for the sign-inverted heating rate bug.
 

@@ -57,6 +57,38 @@ class CloudProperties(NamedTuple):
     r_eff_liq: jnp.ndarray
     r_eff_ice: jnp.ndarray
 
+    def to_rrtmg_kwargs(self) -> dict:
+        """Return cloud kwargs dict for ``rrtmgp_radiation`` / ``solve_columns``.
+
+        **Deliberately omits cloud_fraction.** ``compute_cloud_properties``
+        returns GRID-MEAN water paths (``lwp = q_c * dp / g``, q_c the
+        grid-mean prognostic cloud water), which already carry the
+        partial-coverage discount ``LWP_grid = cf · LWP_in-cloud``.
+        RRTMG's optics multiplies cloud optical depth by
+        ``cloud_fraction`` again ("scale cloud optical depth by cloud
+        fraction for partial coverage", optics.py) — that scaling
+        expects IN-CLOUD paths.  Passing grid-mean LWP *and*
+        ``cloud_fraction`` double-counts the discount:
+        ``τ_used = cf² · τ_in-cloud`` instead of ``cf · τ_in-cloud``,
+        making clouds ~cf× too optically thin in both SW and LW
+        (→ OSR too low, OLR too high).  Calibration probe found the
+        bug cost 59 W/m² OSR at cf=0.6 and 113 W/m² at cf=0.3 (commit
+        4c9591bb).
+
+        Since τ is linear in LWP, "grid-mean LWP, no cf scaling" is
+        mathematically identical to the correct "in-cloud LWP × cf
+        scaling".  This helper centralises the right behaviour so the
+        bug cannot resurface at a third call site (iter-15 restored
+        it in ``physics_pipeline.py``, iter-16 fixed an independent
+        copy in ``integration.py``).
+        """
+        return {
+            "cloud_path_liq": self.lwp,
+            "cloud_path_ice": self.iwp,
+            "cloud_r_eff_liq": self.r_eff_liq,
+            "cloud_r_eff_ice": self.r_eff_ice,
+        }
+
 
 def _ice_fraction(T: jnp.ndarray, config: CloudConfig) -> jnp.ndarray:
     """Fraction of condensate that is ice, based on temperature.
