@@ -113,11 +113,17 @@ cache-key (iter-32/36/37/39/41/42), sharded-equivalence
 
 ---
 
-## Status (after iter-63)
+## Status (after iter-64)
 
-- ✅ 115 pass + 5 skip (3 Metal-broken + 2 multidevice) — 0 fail.
+- ✅ 116 pass + 5 skip (3 Metal-broken + 2 multidevice) — 0 fail.
   iter-63 added 2 mixed-precision tests (fp32-vs-fp64 numerical
-  equivalence, bfloat16-input acceptance).
+  equivalence, bfloat16-input acceptance).  iter-64 added 1 MPI-
+  shard correctness test (`test_solve_columns_subset_matches_
+  full_columns_slice`) — formal MPI-correctness invariant:
+  subset call ≡ slice of full call.  Combined with iter-11
+  permutation-invariance, this pins RRTMGP as embarrassingly
+  parallel over the column axis (no global-axis-dependent
+  normalisations).
 - ✅ AD-safe end-to-end; mixed precision via table-dtype cast;
   fp32 inputs OK.
 - ✅ MPI/GPU: `lax.scan + jax.checkpoint` per g-point;

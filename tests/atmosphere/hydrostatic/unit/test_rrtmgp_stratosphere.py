@@ -926,6 +926,72 @@ class TestOptimalLwSecant:
                 ),
             )
 
+    def test_solve_columns_subset_matches_full_columns_slice(self, lookup_vmr):
+        """Iter-64: MPI column-shard correctness condition.
+
+        ``solve_columns`` called on a column subset must produce
+        bit-identical results to the corresponding slice of a full-
+        batch call.  This is the formal MPI-correctness invariant:
+        rank ``k`` of an N-rank MPI run holds columns ``[k*M : (k+1)*M]``
+        of the global batch (where M = ncol_global / N), and its
+        ``solve_columns(local_cols)`` must equal
+        ``solve_columns(global_cols)[k*M : (k+1)*M]``.
+
+        Stronger than iter-11's permutation-invariance because it
+        rules out global-axis-dependent normalisations (e.g. an
+        accidental ``mean(over_columns)`` term that drops with ncol).
+        Combined with iter-11 permutation-invariance, this pins
+        RRTMGP as embarrassingly parallel over the column axis on
+        MPI / GPU / TPU.
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(RRTMGPConfig())
+        nlev = 8
+        # Full batch of 6 columns, each with distinguishable inputs.
+        ncol_full = 6
+        T_full = jnp.stack([
+            jnp.linspace(220.0 + 4.0 * k, 290.0 + 4.0 * k, nlev)
+            for k in range(ncol_full)
+        ])
+        p_half_full = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :],
+            (ncol_full, nlev + 1),
+        )
+        p_full_full = 0.5 * (p_half_full[:, :-1] + p_half_full[:, 1:])
+        sfc_T_full = jnp.array([293.0 + 2.0 * k for k in range(ncol_full)])
+        q_v_full = jnp.full((ncol_full, nlev), 5e-3)
+        cos_z_full = jnp.array([0.4 + 0.05 * k for k in range(ncol_full)])
+
+        out_full = solver.solve_columns(
+            T=T_full, p_full=p_full_full, p_half=p_half_full,
+            sfc_temperature=sfc_T_full, q_v=q_v_full, cos_zenith=cos_z_full,
+        )
+
+        # Now call again on the FIRST HALF (cols 0..2) — simulates
+        # rank 0 of a 2-rank MPI run.
+        sl = slice(0, 3)
+        out_subset = solver.solve_columns(
+            T=T_full[sl], p_full=p_full_full[sl], p_half=p_half_full[sl],
+            sfc_temperature=sfc_T_full[sl], q_v=q_v_full[sl],
+            cos_zenith=cos_z_full[sl],
+        )
+
+        # Subset call must match slice of full call bit-for-bit.
+        for name in ("lw_flux_up", "lw_flux_down", "sw_flux_up",
+                     "sw_flux_down", "heating_rate"):
+            a = np.asarray(getattr(out_full, name))[sl]
+            b = np.asarray(getattr(out_subset, name))
+            np.testing.assert_allclose(
+                a, b, rtol=1e-12, atol=1e-12,
+                err_msg=(
+                    f"{name}: subset call differs from slice of full "
+                    "call.  RRTMGP is leaking column-global state — "
+                    "MPI ranks would compute inconsistent fluxes."
+                ),
+            )
+
     def test_optimal_angle_flux_impact_bounded(self, lookup_vmr):
         """Iter-8: optimal-angle LW flux must be within ~10% of the
         fixed-1.66 result.  Establishes a sanity bound — if a future
