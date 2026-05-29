@@ -346,6 +346,10 @@ class LatLonCGridOceanState(NamedTuple):
     S_som: object = None
     T_flux_div_prev: object = None  # Previous advection flux divergence for T (AB2 only)
     S_flux_div_prev: object = None  # Previous advection flux divergence for S (AB2 only)
+    # Prognostic eddy kinetic energy [m^2/s^2], 2-D Field (n_lat, n_lon), used only
+    # when the prognostic-EKE GM closure is active (config.gm_redi.eke not None).
+    # Default None -> inert (no EKE): zero behaviour change for existing configs.
+    eke: object = None
 
 
 class LatLonCGridOceanDiagnostics(NamedTuple):

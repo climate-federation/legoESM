@@ -74,3 +74,21 @@ NEXT: E6 — the cross-cutting state threading. Add `eke` to LatLonCGridOceanSta
 eke_apply_local_source, using compute_eke_kappa_gm for kappa_GM into GM/Redi) + SegmentCarry +
 restart I/O + channel-packing + the compiled-segment ref loops. DEFAULT OFF (gm_redi.eke=None) ⇒
 bit-identical existing (decomposition gate + suite green). This is the largest/riskiest gate.
+
+### 2026-05-29 · iter 5 · E6a — eke state field added (inert), bit-identical existing
+KEY SCOPE REDUCTION: LatLonCGridOceanState is NOT carried in SegmentCarry (grep: only restart.py
+references it) — so the SegmentCarry / compiled-segment discipline does NOT apply to ocean EKE.
+E6 reduces to: state field + init + step integration + restart.
+E6a: added `eke: object = None` as the last field of LatLonCGridOceanState (inert; matches the
+existing T_som/S_flux_div_prev optional-None pattern). Default None -> not integrated, not read ->
+ZERO behaviour change. Verified: 47 tests green (decomposition gate + general lat-lon C-grid + EKE)
+— bit-identical existing.
+NEXT (E6b — step integration, the intricate coupling): in LatLonCGridOceanModel._step_impl, when
+config.gm_redi.eke is not None: compute (kappa_GM, sigma_bar, L) = compute_eke_kappa_gm(state.eke,
+rho, slopes, grid.f, gm_redi.visbeck, gm_redi.eke) [reusing the slope helpers], pass kappa_GM into
+gm_redi_tracer_tendency_latlon (add a `kappa_gm_override` param, default None = existing path), and
+integrate state.eke: eke_horizontal_transport(E, U_bar, V_bar, ...) + eke_apply_local_source(E,
+sigma_bar, L, dt). Gate on eke OFF -> step unchanged (existing tests), eke ON -> E integrates +
+stays positive/finite (new step test). Then E6c (restart I/O for eke), E7 (channel spinup), E8/E9.
+Design note: a first version may recompute rho+slopes for eke (redundant with gm_redi's internal
+computation) — correct, flag compute-once as an optimization.
