@@ -36,9 +36,6 @@ from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
     dm95_taper_scalar,
 )
 from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
-from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
-    _triad_taper,
-)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -63,16 +60,17 @@ def test_default_taper_width_frac_matches_legacy_dm95():
 
 
 def test_default_taper_width_frac_matches_legacy_triad():
-    """``_triad_taper`` default must also match the legacy
-    ``0.1 * S_max`` hardcoded form, since 16 caller sites in
-    ``gm_redi_latlon_cgrid.py`` now pass through ``taper_width_frac``."""
+    """The scalar triad taper (``dm95_taper_scalar``, which the 16 caller sites
+    in ``gm_redi_latlon_cgrid.py`` now use directly — the former ``_triad_taper``
+    duplicate was removed) must match the legacy ``0.1 * S_max`` hardcoded form
+    at the default ``transition_width_frac=0.1``."""
     S_max = 0.01
     eps = float(jnp.finfo(jnp.float32).eps)
     S = jnp.linspace(-0.02, 0.02, 50)
     taper_legacy = 0.5 * (1.0 + jnp.tanh(
         (S_max - jnp.abs(S)) / (0.1 * S_max + eps)
     ))
-    taper_new = _triad_taper(S, S_max)   # uses default frac=0.1
+    taper_new = dm95_taper_scalar(S, S_max)[1]   # uses default frac=0.1
     np.testing.assert_allclose(np.asarray(taper_new), np.asarray(taper_legacy),
                                 rtol=1e-15, atol=1e-15)
 
