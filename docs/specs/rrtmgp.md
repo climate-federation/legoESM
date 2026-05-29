@@ -4,8 +4,8 @@ Goal: `src/.../rrtmgp/` faithful to
 https://github.com/earth-system-radiation/rte-rrtmgp, fully JAX-
 differentiable, mixed-precision-safe, MPI/GPU-scalable.
 
-Compression history: iter-10 / 20 / 30 / 40 / 50 / 60 (this file via
-`docs/archive/rrtmgp.{original,iter20,iter30,iter40,iter50,iter60}-backup.md`).
+Compression history: iter-10 / 20 / 30 / 40 / 50 / 60 / 70 (this file via
+`docs/archive/rrtmgp.{original,iter20,iter30,iter40,iter50,iter60,iter70}-backup.md`).
 
 ---
 
@@ -36,12 +36,12 @@ shift, `kmajor` (n_t, n_p+1, n_eta, n_gpt), tropopause boundary,
 | 15+16 | `4c9591bb` cloud-fraction cf² (2 sites) | -59 to -113 W/m² OSR | `driver/physics_pipeline`, `radiation/integration` |
 | 17 | centralised cf-omit | 3rd-site regression impossible | `clouds.cloud_fraction.to_rrtmg_kwargs` |
 
-Iter-59 audit of `git diff --name-status b5b5954e^..b5b5954e`
-confirms the merge touched ZERO convection/microphysics/BL files;
-no analogous losses possible outside radiation footprint.
+Iter-59 audit confirms #312 touched ZERO convection/microphysics/BL
+files; no analogous losses possible outside radiation footprint.
 
 Codex SHIP verdicts: iter-3 (O3), iter-18 (iter-13→17), iter-40
-(cache work), iter-58 (dead-code series iter-50→57).
+(cache work), iter-58 (dead-code series iter-50→57), iter-69
+(test series iter-63→68 — 2 blockers found + fixed).
 
 ---
 
@@ -63,111 +63,81 @@ config flag; `precomputed_lw_optical_props` dedups optics call
 - iter-33: drop redundant `instance.atmospheric_state` field.
 - iter-36+40: `include_clouds` keyed on optics-cache; iter-40
   conditionalised cloud-table load.
-- iter-39+42: 0-D arrays → value-hash with dtype-kind gate
-  (`f`/`i`/`b`/`u` only).
+- iter-39+42: 0-D arrays → value-hash with dtype-kind gate.
 - iter-41: cloud-optics None-guard + direct-bypass ValueError.
-- iter-45+46+47+48: trim 537 LOC dead `interpolation.py` + 5
+- iter-45→48: trim 537 LOC dead `interpolation.py` + 5
   `kernel_ops` + 2 constants re-exports + 4 F401 imports.
 
-### Dead-code trim (iter-50 → 61)
-- iter-51: clear-sky `solve_columns` regression pin (no cloud kwargs).
-- iter-52: `reconstruct_vmr_fields_from_pressure` path.
-- iter-53: `from_config` factories on `AtmosphericState`/`LookupVMR`.
-- iter-54: `AtmosphericStateCfg` + `RadiativeTransfer` config classes.
-- iter-55: dead `utils/` subdirectory.
-- iter-56: `interpolate_orig` + `evaluate_weighted_lookup` (-72 LOC).
-- iter-57: deprecated `RRTMGP._cache_key` alias.
-- iter-58: codex review of iter-50→57 — one docstring cross-ref fix.
-- iter-59: AIMIP-#312 cross-module audit (vacuously empty) +
-  `@_skip_if_metal_broken` for 3 JAX-Metal env failures.
-- iter-60: `recurrent_op_1d` + `recurrent_op_1d_scan` in
-  `rte_utils.py` (-83 LOC).
-- iter-61: `GrayAtmosphereOptics` class (impl + config) — swirl_jatmos
-  RRTMGP-internal gray-radiation impl that legoESM never used
-  (legoESM has `legoesm.atmosphere.physics.radiation.gray`).  Drops
-  155 LOC class + 12 LOC config + 4 import lines + 2 cast tweaks +
-  `optics_factory` dispatch elif branch.  Net -172 LOC.  Factory's
-  unknown-scheme `raise ValueError` (per CLAUDE.md dispatch audit)
-  preserved + made the error message more informative.
-- iter-62: dead `_shift_up` in `optics_base.py` (0 callers; sibling
-  `_shift_down` still used by `reconstruct_face_values`).  Plus codex
-  HOLD→SHIP follow-up: added comment in `optics_factory` clarifying
-  that the removed gray-Planck (Schneider 2004 / O'Gorman 2008) is
-  NOT the RRTMGP correlated-k Planck path
-  (`RRTMOptics.compute_planck_sources` → `gas_optics.planck_source`
-  is unchanged).
+### Dead-code trim (iter-50 → 62)
+~1113 LOC of dead swirl_jatmos code removed across iter-22→62:
+clear-sky pin (iter-51), reconstruct_vmr_fields path (iter-52),
+from_config factories (iter-53), AtmosphericStateCfg +
+RadiativeTransfer (iter-54), utils/ subdirectory (iter-55),
+interpolate_orig + evaluate_weighted_lookup (iter-56),
+deprecated `_cache_key` alias (iter-57), AIMIP-#312 audit +
+Metal-env skip (iter-59), `recurrent_op_1d{,_scan}` (iter-60),
+`GrayAtmosphereOptics` class + config + factory branch
+(iter-61), `_shift_up` + Planck-path clarifier (iter-62).
 
-### Regression tests (~60 across 10+ classes)
-`test_rrtmgp_stratosphere.py` — `TestClipToTableRange`,
-`TestRelativeAbundanceSafeDiv`, `TestOutOfRangeTemperature`,
-`TestMixedPrecision` (iter-1+2/27/63: planck-fp32 + solve_columns-
-fp32-finite + iter-63 **fp32-vs-fp64 numerical equivalence within
-fp32 round-off** + iter-63 **bfloat16 input acceptance**),
+### Test coverage expansion (iter-63 → 68)
+- iter-63: `TestMixedPrecision` — fp32-vs-fp64 numerical
+  equivalence within fp32 round-off (x64-gated, skips otherwise);
+  bfloat16-input finiteness.
+- iter-64: column-local invariance —
+  `solve_columns(global)[k:k+M] ≡ solve_columns(global[k:k+M])`.
+  Combined with iter-11 permutation-invariance, pins RRTMGP as
+  embarrassingly parallel over the column axis.
+- iter-65: `test_jax_grad_finite_at_mesosphere_pressure_boundary`
+  — AD safety for columns extending below `p_ref[-1] = 1.005 Pa`
+  (≈ 65 km altitude), exercising `_pressure_interpolant`'s
+  log-space extrapolation path.
+- iter-66: `TestAerosolPath` — AOD=zeros ≡ AOD=None, aerosol
+  reduces surface SW (sign), ∂(SW)/∂(AOD) finite + negative.
+- iter-67: `TestEnergyConservation` — combined LW+SW and LW-only
+  column flux divergence ≡ ∑(hr · dp) × c_p / g.
+- iter-68: `TestCloudPath` — LWP=zeros ≡ LWP=None, cloud-albedo
+  on SW, cloud-greenhouse on LW (sign), ∂(F)/∂(LWP) finite +
+  sign-correct for both SW and LW.
+- iter-69: codex review of iter-63→68 series.  HOLD on 2 real
+  blockers (1 prompt-only confusion ignored): (a) aerosol surface
+  index off-by-one (`argmax(p_full)` is full-level idx but flux
+  arrays are interface-dim) → fixed to `[0, -1]`; (b) fp32-vs-fp64
+  test needs x64 guard → added `pytest.skip` when x64 off.
+
+### Test classes in `test_rrtmgp_stratosphere.py` (~60 tests)
+`TestClipToTableRange`, `TestRelativeAbundanceSafeDiv`,
+`TestOutOfRangeTemperature`, `TestMixedPrecision`,
 `TestOptimalLwSecant`, `TestStandardO3Profile`,
-`TestTropopauseBoundary`, `TestADSafetyAtStratosphereTau`
-(iter-20 + iter-65 mesospheric-boundary),
+`TestTropopauseBoundary`, `TestADSafetyAtStratosphereTau`,
 `TestCloudKwargsHelper`, `TestHeatingRateSign`,
-`TestAerosolPath` (iter-66: AOD-zero ≡ AOD-None, sign of AOD on
-SW, ∂(SW)/∂(AOD) finite),
-`TestEnergyConservation` (iter-67: combined and LW-only column
-flux divergence ≡ ∑(hr · dp) × c_p / g),
-`TestCloudPath` (iter-68: LWP-zero ≡ LWP-None, cloud-albedo on
-SW, cloud-greenhouse on LW, ∂(F)/∂(LWP) finite + sign-correct).
-
+`TestEnergyConservation`, `TestCloudPath`, `TestAerosolPath`.
 `test_radiation.py::{TestRRTMGP,TestColumnShardedRadiation}` —
-cache-key (iter-32/36/37/39/41/42), sharded-equivalence
-(iter-28/29), iter-13 sign / iter-15 cf end-to-end pins.
+cache-key + sharded-equivalence + iter-13/15 end-to-end pins.
 
 ---
 
-## Status (after iter-69)
+## Status (after iter-70)
 
-- ✅ 126 pass + 6 skip (3 Metal-broken + 2 multidevice + 1
-  fp32-vs-fp64 needs x64) — 0 fail.
-  iter-69: codex adversarial-review of iter-63 → iter-68 returned
-  HOLD with 2 real blockers (1 prompt-only confusion ignored).
-  Both fixed in iter-69 commit:
-  1. iter-66 ``test_aerosol_reduces_toa_sw_down`` used
-     ``argmax(p_full)`` as the surface index — but that's a full-
-     level index in [0, nlev-1] when flux arrays are interface-
-     dimensioned (ncol, nlev+1).  Fixed to ``[0, -1]`` (the
-     surface interface), matching the cloud/energy tests.
-  2. iter-63 ``test_solve_columns_fp32_matches_fp64_inputs``
-     needed an x64 guard: without ``JAX_ENABLE_X64=1`` JAX
-     silently downcasts ``jnp.float64`` to fp32, making the test
-     a trivial fp32-vs-fp32 comparison that would pass while
-     masking a real missing-cast bug.  Added
-     ``pytest.skip`` when x64 is unavailable.
-  iter-68 added new class `TestCloudPath` (4 tests): LWP=zeros ≡
-  LWP=None bit-for-bit, low cloud reduces surface SW (albedo),
-  low cloud increases surface LW down (greenhouse), AD through
-  cloud_path_liq finite + sign-correct for both SW and LW.
-  Pre-iter-68 cloud coverage was structural (kwargs schema,
-  on-vs-off-changes-flux) — no physical-sign or AD pin.
-  iter-67 added new class `TestEnergyConservation` (2 tests):
-  combined LW+SW and LW-only column flux-divergence ≡
-  ∑(hr · dp) × c_p / g.  Pre-iter-67 only `gray_radiation` had
-  this pin; RRTMGP energy conservation was unpinned despite the
-  iter-13 sign-fix territory.
-  iter-63 added 2 mixed-precision tests.  iter-64 added 1 MPI-
-  shard correctness test (subset call ≡ slice of full call).
-  iter-65 added 1 mesospheric-pressure AD test —
-  `test_jax_grad_finite_at_mesosphere_pressure_boundary` — pinning
-  that `jax.grad` is finite for columns extending below
-  `p_ref[-1] = 1.005 Pa` (≈ 65 km altitude).
-  iter-66 added new class `TestAerosolPath` (3 tests):
-  AOD=zeros bit-equivalence vs AOD=None, aerosol reduces surface
-  SW (sign), AD safety through AOD.  Pre-iter-66 the only aerosol
-  coverage was a cache-key test in `test_radiation.py` (iter-32) —
-  no value/sign/diff pin.
+- ✅ 126 pass + 6 skip (3 Metal-broken + 2 multidevice +
+  1 fp32-vs-fp64 x64-gated) — 0 fail.
 - ✅ AD-safe end-to-end; mixed precision via table-dtype cast;
-  fp32 inputs OK.
+  fp32 inputs OK; bfloat16 inputs accepted.
 - ✅ MPI/GPU: `lax.scan + jax.checkpoint` per g-point;
-  column-permutation invariant; shard-equivalent for default and
+  column-permutation invariant; column-local invariance pinned
+  (subset ≡ slice of full); shard-equivalent for default and
   `use_optimal_angle=True` paths.
-- ✅ ~1113 LOC dead swirl_jatmos code removed across iter-22 → 60.
+- ✅ ~1113 LOC dead swirl_jatmos code removed across iter-22 → 62.
+- ✅ Physical sign pinned: cloud-albedo on SW, cloud-greenhouse
+  on LW, aerosol reduces surface SW, scattering aerosol has
+  negative ∂(SW)/∂(AOD).
+- ✅ Energy conservation pinned: ∑(hr · dp) ≡ (g/c_p) ·
+  (F_net_TOA − F_net_sfc) for both combined and LW-only.
 
 ## Deferred
 
 - Default-enable `use_optimal_angle=True` pending upstream RFMIP
   reference-flux validation (iter-29 gating sharded test exists).
+- LW aerosol path (currently only SW; upstream rte-rrtmgp
+  supports both).
+- Cloud_path_ice / cloud_fraction / solar_spectral_fraction /
+  o3_vmr / ghg_vmr_override coverage gaps (codex iter-69 Q5).

@@ -1939,6 +1939,102 @@ class TestCloudPath:
             "broken AD plumbing through cloud-LW optics."
         )
 
+    def test_high_ice_cloud_increases_outgoing_lw(self):
+        """Iter-70: cirrus-deck IWP=0.005 kg/m² in the upper troposphere
+        must REDUCE outgoing LW (the cold cirrus emits less than the
+        warm surface below; classic ice-cloud greenhouse).  Catches
+        sign-flip regressions in the cloud_path_ice / r_eff_ice branch
+        of ``cloud_optics.compute_lw_optical_properties``.
+
+        Codex iter-69 Q5 follow-up: ``test_low_cloud_*`` only exercise
+        cloud_path_liq.  This test extends the sign-pin to
+        cloud_path_ice.
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(
+            RRTMGPConfig(include_clouds=True)
+        )
+        T, p_full, p_half, sfc_T, q_v, cos_z = self._base_inputs()
+        # Cirrus IWP=0.005 kg/m² in the top 3 layers (upper trop).
+        iwp = jnp.zeros(T.shape).at[:, :3].set(5.0e-3)
+        r_eff_ice = jnp.full(T.shape, 2.5e-5)
+
+        out_clear = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+        )
+        out_ice = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+            cloud_path_ice=iwp, cloud_r_eff_ice=r_eff_ice,
+        )
+
+        # TOA upward LW: index 0 (TOA-first convention).
+        olr_clear = float(out_clear.lw_flux_up[0, 0])
+        olr_ice = float(out_ice.lw_flux_up[0, 0])
+        assert olr_ice < olr_clear, (
+            f"High cold cirrus must reduce outgoing LW at TOA "
+            f"(emits at cold T_top instead of warm surface); got "
+            f"clear={olr_clear:.1f}, ice={olr_ice:.1f} W/m²."
+        )
+        reduction = olr_clear - olr_ice
+        assert 2.0 < reduction < 100.0, (
+            f"TOA OLR reduction {reduction:.1f} W/m² is outside "
+            f"the plausible [2, 100] W/m² band for cirrus "
+            f"IWP=0.005 kg/m².  Indicates broken cloud-LW ice "
+            f"optics."
+        )
+
+    def test_cloud_path_ice_differentiable(self):
+        """Iter-70: ``jax.grad`` w.r.t. ``cloud_path_ice`` finite +
+        sign-correct (negative for TOA outgoing LW since ice clouds
+        reduce OLR).  Codex iter-69 Q5 follow-up.
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(
+            RRTMGPConfig(include_clouds=True)
+        )
+        T, p_full, p_half, sfc_T, q_v, cos_z = self._base_inputs()
+        r_eff_ice = jnp.full(T.shape, 2.5e-5)
+
+        def toa_olr_loss(iwp):
+            out = solver.solve_columns(
+                T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+                q_v=q_v, cos_zenith=cos_z,
+                cloud_path_ice=iwp, cloud_r_eff_ice=r_eff_ice,
+            )
+            return jnp.sum(out.lw_flux_up[:, 0])
+
+        iwp0 = jnp.zeros(T.shape).at[:, :3].set(5.0e-3)
+        g = jax.grad(toa_olr_loss)(iwp0)
+        assert jnp.all(jnp.isfinite(g)), (
+            f"∂(TOA OLR)/∂(cloud_path_ice) must be finite; got {g}"
+        )
+        # Per-layer gradients can be mixed-sign (multi-layer cloud
+        # systems redistribute optical depth — adding IWP at one
+        # interior layer can boost the effective emission of layers
+        # above/below).  Physically the invariant is the
+        # **column-summed** gradient: increasing IWP throughout the
+        # active cloud must reduce TOA OLR (cold cloud > warm
+        # surface in Planck-source magnitude).
+        col_grad = float(jnp.sum(g[:, :3]))
+        assert col_grad < 0.0, (
+            f"∑(∂(TOA OLR)/∂(cloud_path_ice)) over active-cloud "
+            f"layers must be negative; got {col_grad:.1f} W·m²/kg.  "
+            f"Per-layer breakdown {g[:, :3]} — see test docstring "
+            f"for why per-layer signs can be mixed."
+        )
+        # Magnitude check: gradient must be non-trivial (guards
+        # against an AD constant-fold collapse to all-zeros).
+        assert jnp.abs(g[:, :3]).max() > 1.0, (
+            "Active-cloud-layer ∂(TOA OLR)/∂(IWP) is essentially "
+            "zero — broken AD plumbing through cloud-LW ice optics."
+        )
+
 
 class TestAerosolPath:
     """Iter-66: regression guards for the SW aerosol path in ``solve_sw``.
