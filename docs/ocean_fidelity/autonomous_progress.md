@@ -10,7 +10,7 @@ One entry per task attempt. Newest at the bottom of each task block.
 - [x] Q4 — ConstantsConfig: G-C1✓ G-C2(vertical-mixing+GM/Redi)✓ G-C4✓(patch deleted, recipe self-pins, bit-identical) G-C5✓(audit guard, confirmed red-on-violation). G-C3(coupler/forcing) DEFERRED w/ rationale (off all recipe paths; already overridable; needs full-suite/integration verify) — see iter 20
 - [x] Q5 — CI clarity guard (function-LOC ceiling, allow-list shrinks; two-source/deprecated detectors folded into Q7)
 - [x] Q6 — Equivariance tier expansion (bridge round-trip temp+salt, halo-strip invariance; + existing EOS-unit/vertical-flip/cumsum-order)
-- [~] Q7 — readability docstring DONE; A_h check fixed a real GM/Redi mis-wiring (iter-16); REMAINING: section-grouping + eos/eos_linear dispatch test + A_h single-source check
+- [x] Q7 — readability docstring + section comments; A_h single-source guard+test; fail-fast EOS dispatch (VALID_EOS_SCHEMES) + test (9cc0b25a). See iter 21
 - [ ] Q8 — Decompose baroclinic_tendencies (bit-identical gate)
 
 ---
@@ -364,3 +364,30 @@ run (exit-143). Deferred per spec's "wrap at the ocean seam or LOG as deferred."
 COMPLETE (G-C1, G-C2 vertical-mixing+GM/Redi, G-C4, G-C5 all green + committed).
 NEXT: Q7 (config section-grouping + eos/eos_linear dispatch test + A_h single-source check),
 then Q8 (decompose latlon_cgrid_ocean_baroclinic_tendencies, bit-identical gate).
+
+### 2026-05-29 · iter 21 · Q7 DONE — config footguns (fail-fast EOS, A_h single-source, section comments)
+Committed 9cc0b25a. Resolved without reordering the NamedTuple (positional construction must not
+break for legacy callers).
+- **EOS dispatch footgun:** added `VALID_EOS_SCHEMES` (single source of truth) to eos.py;
+  make_eos_fn's unknown-scheme ValueError now lists it. `LatLonCGridOceanModel._validate_config`
+  validates `config.eos` against the SAME set at construction (fail-fast, mirroring the existing
+  freshwater_closure check) — previously an invalid eos only raised lazily at the first step.
+- **A_h single source:** the existing _validate_config guard rejecting non-"none"
+  physics.lateral_mixing on lat-lon already makes config.A_h the sole A_h source (the competing
+  physics HarmonicConfig.A_h path is cubed-sphere-only). Documented + locked with tests. A static
+  "two fields named A_h" AST detector was REJECTED as the wrong tool — A_h legitimately appears
+  in several different grid configs (OceanConfig/LatLonOceanConfig/HarmonicConfig), so it would
+  false-positive; the meaningful single-source check is the runtime guard (per the strategy doc's
+  "curation avoids false positives" note).
+- **Readability:** section-header comments on the contiguous top field run + an honest marker that
+  the trailing fields are chronological (positional-stability) order grouped in the docstring map,
+  not by field position; fixed stale "~45 fields"->"~70".
+- New `tests/ocean/unit/test_config_footguns.py` (7 tests, all green). 35 related tests green.
+- **Pre-existing, unrelated failure noted (NOT a regression):** test_freshwater.py::
+  TestCouplerAdapter::test_compute_mpas_freshwater_basic fails with `SurfaceToAtm.__new__() got an
+  unexpected keyword argument 'T_water_init_C'` — the T_surface/T_water coupler naming debt
+  (CLAUDE.md open debt). CONFIRMED failing with my eos/model changes stashed (git stash + re-run).
+  Out of Phase-G ocean-recipe scope; flagged for the dedicated naming-cleanup PR.
+NEXT: Q8 — decompose latlon_cgrid_ocean_baroclinic_tendencies (the 1299-LOC fn in
+ocean/dynamics/ocean_pe_latlon_cgrid.py) into named substages; bit-identical-on-frozen-ACC-state
+gate; then drop its LOC_ALLOW_LIST entry in test_clarity_guards.py.
