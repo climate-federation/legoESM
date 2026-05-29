@@ -37,6 +37,23 @@ from legoesm.atmosphere.physics.clouds.cloud_fraction import (
     xu_randall_cloud_fraction,
 )
 from legoesm import constants
+from legoesm.runtime.backend import metal_fell_back_to_cpu
+
+
+# Skip marker for tests that exercise jax.device_put with a shard Mesh.
+# On Apple Silicon with JAX-Metal installed but non-functional (jax-metal /
+# JAX version mismatch), the runtime falls back to CPU for compute but the
+# Metal platform stays registered, and ``batched_copy_array_to_devices_with_sharding``
+# raises ``UNIMPLEMENTED: default_memory_space is not supported``.  Skip on
+# this exact environment; the tests still run on CI Linux/CUDA where the
+# Metal platform is absent.
+_skip_if_metal_broken = pytest.mark.skipif(
+    metal_fell_back_to_cpu(),
+    reason=(
+        "JAX-Metal/CPU fallback env: device_put with shard Mesh hits "
+        "UNIMPLEMENTED default_memory_space.  CI Linux/CUDA runs this."
+    ),
+)
 
 
 # ===========================================================================
@@ -1580,6 +1597,7 @@ class TestColumnShardedRadiation:
         sigma = create_sigma_coordinate(nlev)
         return grid, sigma, held_suarez_init(grid, sigma)
 
+    @_skip_if_metal_broken
     def test_sharded_matches_unsharded_on_single_device(self):
         """Single-device mesh degenerates to no-op sharding; output
         must still match exactly."""
@@ -1654,6 +1672,7 @@ class TestColumnShardedRadiation:
             rtol=1.0e-12, atol=1.0e-14,
         )
 
+    @_skip_if_metal_broken
     def test_rrtmgp_sharded_matches_unsharded_on_single_device(self):
         """Iter-28: same numerical-equivalence contract as the gray
         path, but for ``scheme="rrtmgp"``.  Catches regressions that
@@ -1678,6 +1697,7 @@ class TestColumnShardedRadiation:
             rtol=1.0e-10, atol=1.0e-12,
         )
 
+    @_skip_if_metal_broken
     def test_rrtmgp_optimal_angle_sharded_matches_unsharded(self):
         """Iter-29: column-shard invariance for the optimal-angle path.
 

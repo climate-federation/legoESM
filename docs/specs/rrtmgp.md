@@ -110,11 +110,10 @@ cache-key tests (iter-32/36/37/39/41/42), sharded-equivalence
 
 ---
 
-## Status (after iter-49)
+## Status (after iter-59)
 
-- ✅ ~120 tests pass (61 existing radiation + ~46 stratosphere + 14
-  cache+config + 10 AMIP-RRTMG integration); 2 multidevice MPI
-  skipped.
+- ✅ 113 tests pass + 5 skipped (3 Metal-platform-broken + 2
+  multidevice — both auto-skip via `metal_fell_back_to_cpu()`).
 - ✅ Zero regressions across iter-1 → iter-49.
 - ✅ AD-safe end-to-end (codex iter-18 + iter-40 SHIP).
 - ✅ Mixed precision via internal table-dtype cast; fp32 inputs OK.
@@ -125,10 +124,24 @@ cache-key tests (iter-32/36/37/39/41/42), sharded-equivalence
 - ✅ Memory: optics cache dedupes via include_clouds → cloud_optics
   load skipped when False (~MB per cached entry).
 
-## Deferred to iter 50+
+## Deferred to iter 60+
 
 - Default-enable `use_optimal_angle=True` after upstream RFMIP
   reference-flux validation (iter-29 added the gating sharded test).
-- Audit other physics modules for analogous AIMIP-#312-style
-  feature-merge losses (radiation fully audited;
-  convection / microphysics / BL not checked).
+
+## Closed in iter-59
+
+- iter-58: codex adversarial-review of dead-code series iter-50→57
+  → SHIP after one docstring fix (interpolate_orig cross-ref).
+- iter-59: AIMIP-#312 cross-module audit — by `git diff
+  --name-status b5b5954e^..b5b5954e`, the merge touched ZERO
+  convection/microphysics/BL physics files; only 3 radiation +
+  4 training-side files (already audited iter-13/14/15/16).
+  The deferred audit is *vacuously empty*: the pattern of
+  "production fix silently reverted" cannot exist outside the
+  merge's footprint.
+- iter-59: 3 `TestColumnShardedRadiation` failures resolved as
+  environmental, not code bugs.  Added `@_skip_if_metal_broken`
+  marker keyed on `metal_fell_back_to_cpu()` — JAX-Metal/CPU-fallback
+  env hits `UNIMPLEMENTED: default_memory_space` on `device_put`
+  with a shard `Mesh`.  Tests run unchanged on CI Linux/CUDA.
