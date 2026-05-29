@@ -89,6 +89,13 @@ config flag; `precomputed_lw_optical_props` dedups optics call
   `optics_factory` dispatch elif branch.  Net -172 LOC.  Factory's
   unknown-scheme `raise ValueError` (per CLAUDE.md dispatch audit)
   preserved + made the error message more informative.
+- iter-62: dead `_shift_up` in `optics_base.py` (0 callers; sibling
+  `_shift_down` still used by `reconstruct_face_values`).  Plus codex
+  HOLD→SHIP follow-up: added comment in `optics_factory` clarifying
+  that the removed gray-Planck (Schneider 2004 / O'Gorman 2008) is
+  NOT the RRTMGP correlated-k Planck path
+  (`RRTMOptics.compute_planck_sources` → `gas_optics.planck_source`
+  is unchanged).
 
 ### Regression tests (~60 across 10+ classes)
 `test_rrtmgp_stratosphere.py` — `TestClipToTableRange`,

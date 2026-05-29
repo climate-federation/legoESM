@@ -668,6 +668,12 @@ def optics_factory(
   if isinstance(params.optics, radiative_transfer.RRTMOptics):
     assert vmr_lib is not None, '`vmr_lib` is required for `RRTMOptics`.'
     return RRTMOptics(vmr_lib, params, include_clouds=include_clouds)
+  # iter-61 removed the ``GrayAtmosphereOptics`` impl path.  That class
+  # carried its own ``compute_planck_sources`` based on
+  # Schneider 2004 / O'Gorman 2008 gray-atmosphere lapse-rate Planck —
+  # NOT the RRTMGP correlated-k Planck source.  The RRTMGP Planck path
+  # (``RRTMOptics.compute_planck_sources`` → ``gas_optics.planck_source``)
+  # is untouched and remains the only Planck source legoESM uses.
   raise ValueError(
       f'Unsupported optics scheme: {type(params.optics).__name__!r}. '
       'Only RRTMOptics is supported in legoESM (iter-61 dropped the '
