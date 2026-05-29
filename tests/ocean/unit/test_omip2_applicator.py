@@ -174,6 +174,81 @@ def _rest_state(grid_type, res, H_max=5500.0, nlev=10):
     return state, grid, z, model
 
 
+def _uniform_wind_forcing(u_east=8.0, nlat=18, nlon=36):
+    """OceanForcing with spatially uniform eastward wind, benign heat/moisture.
+
+    Isolates wind-stress *direction*: a steady eastward wind must drive an
+    eastward (positive-u) ocean response over wet cells.
+    """
+    from legoesm.ocean.forcing.jra55_do import OceanForcing
+    lat = np.linspace(-89.0, 89.0, nlat)
+    lon = np.linspace(0.0, 360.0, nlon, endpoint=False)
+
+    def fld(val):
+        return np.full((1, nlat, nlon), float(val))
+
+    return OceanForcing(
+        lon=lon, lat=lat, time_s=np.array([0.0]),
+        u10=fld(u_east), v10=fld(0.0),
+        T_air=fld(288.0), q_air=fld(0.008),
+        sw_down=fld(0.0), lw_down=fld(0.0),
+        precip=fld(0.0), runoff=fld(0.0),
+    )
+
+
+def test_applicator_wind_stress_sign_latlon():
+    """Eastward wind must accelerate the ocean EASTWARD (u_top > 0).
+
+    Guards the ``air_sea_fluxes`` atmospheric-convention sign: it returns
+    ``tau = -rho_air Cd |U| U`` (opposing the wind), so the ocean feels ``-tau``.
+    Applying ``+tau`` (the previous applicator bug) would drive the surface
+    WESTWARD -- this test would fail under that bug.
+    """
+    from legoesm.ocean.coupler import apply_omip2_surface_fluxes
+    state, grid, z, _ = _rest_state_latlon()
+    forcing = _uniform_wind_forcing(u_east=8.0)
+    new = apply_omip2_surface_fluxes(
+        state, forcing=forcing, idx_t=0,
+        z_coord=z, grid=grid, grid_type="latlon", dt=1800.0,
+    )
+    u_top = np.asarray(new.u.data)[..., 0]
+    v_top = np.asarray(new.v.data)[..., 0]
+    u_mask = np.asarray(state.u_mask.data) > 0.5
+    assert np.isfinite(u_top).all()
+    assert u_mask.any()
+    # Eastward wind -> eastward (positive) mean u over wet faces.
+    assert u_top[u_mask].mean() > 0.0
+    assert np.abs(u_top[u_mask]).max() > 1e-6
+    # No meridional wind -> no meridional stress -> v stays at rest.
+    assert np.abs(v_top).max() < 1e-9
+
+
+def test_applicator_tripole_runs_and_sign():
+    """Tripole branch: NN-sample 2-D forcing, rotate, apply on the C-grid.
+
+    Uses a synthetic tripole (regular metrics, identity rotation), so an
+    eastward wind must give a positive-u response like the lat-lon path.
+    """
+    from legoesm.ocean.coupler import apply_omip2_surface_fluxes
+    from legoesm.grids.tripole import create_synthetic_tripole
+    from legoesm.ocean.vertical import create_ocean_z_star
+    from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+    geom = create_synthetic_tripole(n_lat=36)
+    z = create_ocean_z_star(n_levels=10, H_max=5500.0)
+    state = rest_state_latlon_cgrid_ocean(geom, z, H_max=5500.0)
+    forcing = _uniform_wind_forcing(u_east=8.0)
+    new = apply_omip2_surface_fluxes(
+        state, forcing=forcing, idx_t=0,
+        z_coord=z, grid=geom, grid_type="tripole", dt=1800.0,
+    )
+    assert type(new) is type(state)
+    u_top = np.asarray(new.u.data)[..., 0]
+    assert np.isfinite(u_top).all()
+    u_mask = np.asarray(state.u_mask.data) > 0.5
+    assert u_mask.any()
+    assert u_top[u_mask].mean() > 0.0
+
+
 @pytest.mark.parametrize("grid_type,res", [
     ("cubed_sphere", "C24"),
     ("mpas", "ico3"),

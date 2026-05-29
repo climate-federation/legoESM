@@ -8,7 +8,10 @@ climate-scale drivers use ``omip2_applicator`` to wire JRA55-do
 forcing + L&Y 2009 bulk fluxes into the ocean state.
 """
 
-from .omip2_applicator import apply_omip2_surface_fluxes
+from .omip2_applicator import (
+    apply_omip2_surface_fluxes,
+    compute_omip2_surface_forcing,
+)
 from .sss_apply import apply_sss_restoring_step, apply_sss_restoring_step_mpas
 from .runoff_apply import apply_runoff_step, apply_runoff_step_mpas
 from .ice_shelf_apply import (
@@ -19,6 +22,7 @@ from .tidal_mixing_apply import apply_tidal_mixing_step
 
 __all__ = [
     "apply_omip2_surface_fluxes",
+    "compute_omip2_surface_forcing",
     "apply_sss_restoring_step",
     "apply_sss_restoring_step_mpas",
     "apply_runoff_step",

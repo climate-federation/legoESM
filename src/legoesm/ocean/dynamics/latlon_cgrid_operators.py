@@ -2840,16 +2840,19 @@ def density_jacobian_pgf_smc03_x(
        (η=0 reference, consistent with the rest of the baroclinic
        path.)
     2. Per-column ``σ`` from ``reconstruct_harmonic_slopes``.
-    3. **Face-adaptive z_target** = ``0.5 · (z_centroid_W + z_centroid_E)``
-       (Option B from plan §2.3).  At full-cell faces this reduces to
-       the standard reference-cell centroid (both centroids equal
-       ``|z_full_ref[k]|``).  At partial-cell faces — where the
-       column-independent ``|z_full_ref[k]|`` of Option A can fall
-       below one column's seafloor when the partial cell sits in the
-       upper half of the reference cell — the per-face midpoint of
-       centroids is by construction inside both columns' partial
-       cells.  This avoids the clamp pathology that drove the BH
-       seamount blowup with Option A.
+    3. **Face-adaptive z_target** = ``min(z_centroid_W, z_centroid_E)`` — the
+       *shallower* of the two cell centroids (see the code below, which uses
+       ``jnp.minimum``).  At full-cell faces this reduces to the standard
+       reference-cell centroid (both centroids equal).  The ``min`` (NOT the
+       midpoint ``0.5·(z_c_W+z_c_E)`` once tried as "Option B") is what
+       guarantees the target lies inside BOTH columns: the midpoint can fall
+       *below* the shallower column's seafloor when its partial cell is thin
+       (``h < dz/3``), producing an asymmetric seafloor clamp and a spurious
+       ~10⁶ Pa/face pressure gradient — the C1 bug that drove the BH-seamount
+       blowup (see ``docs/ocean_experiments/pgf_smc03_code_review.md``).
+       ``min`` matches the Adcroft & Campin 2004 /
+       ``partial_cell_pgf_correction_x`` convention
+       (``face_ref = jnp.minimum(centroid_east, centroid_west)``).
     4. ``P_at_target`` per column from
        ``compute_pressure_at_target_smc03`` (each column evaluated at
        the face-pair midpoint of *its* face).
