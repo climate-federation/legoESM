@@ -458,6 +458,38 @@ class TestOptimalLwSecant:
         )
         np.testing.assert_allclose(np.asarray(secant)[0, 0, 0], expected, rtol=1e-12)
 
+    def test_secant_constant_when_c0_is_zero(self, lookup_vmr):
+        """Iter-25: when ``optimal_angle_fit[band, 0] == 0`` (most bands
+        in the shipped data; per iter-2 inspection: bands 0-4, 9, 10,
+        13, 14, 15), the secant must be exactly ``c1`` regardless of
+        the column transmissivity.  Catches a regression where a
+        future edit might inadvertently break the linear-in-trans
+        formula or sample the wrong axis."""
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rte import (
+            two_stream,
+        )
+        lookup, _ = lookup_vmr
+        zero_c0_bands = np.where(np.asarray(lookup.optimal_angle_fit[:, 0]) == 0.0)[0]
+        assert zero_c0_bands.size > 0, (
+            "expected at least one band with c0=0 in the shipped data"
+        )
+        band_idx = jnp.array(int(zero_c0_bands[0]))
+        c1 = float(lookup.optimal_angle_fit[band_idx, 1])
+        # Vary tau across a wide range; secant should be invariant.
+        for tau_val in [0.01, 0.1, 1.0, 10.0]:
+            tau = jnp.array([[[0.0, tau_val, 0.0]]], dtype=jnp.float64)
+            secant = two_stream._compute_optimal_lw_secant(
+                tau, band_idx, lookup.optimal_angle_fit, halo_width=1
+            )
+            np.testing.assert_allclose(
+                np.asarray(secant)[0, 0, 0], c1, rtol=1e-12,
+                err_msg=(
+                    f"band {band_idx} has c0=0; secant must equal c1={c1} "
+                    f"regardless of tau, got secant={float(secant[0,0,0]):.6f} "
+                    f"at tau={tau_val}"
+                ),
+            )
+
     def test_secant_physically_reasonable_range(self, lookup_vmr):
         """Iter-21: optimal LW secant must lie in [1.0, 2.0] for all
         bands across the full tau range [0, +inf].  The Fu-Liou 1.66
