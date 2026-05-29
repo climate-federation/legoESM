@@ -35,11 +35,14 @@ commit messages c1e0317a..HEAD.)*
 - ce065428 break device_config↔runtime cold-import cycle (unblocks MPI/GPU)
 - b2090266 standard IC uses local pressure ratio on hybrid coords over topo
 - 6ad4b61a expose `--ic` in the CMIP6 deck driver
+- 9dbea7d3 test: deck --ic standard → Earth-like CWV (gated)
+- eb9b2876 init moisture on local hybrid pressure over topography
 
 Adversarial review: all committed work approved or fixed across review rounds
-1-9 (gaussian-state crash, wind imbalance, cubed-sphere vector basis→latlon-only,
-flat-p_s-over-topo, low-T_init NaN, gpu multi-count, hybrid-coord). Round-10 in
-flight on the latest two commits.
+1-10 (gaussian-state crash, wind imbalance, cubed-sphere vector basis→latlon-only,
+flat-p_s-over-topo, low-T_init NaN, gpu multi-count, hybrid-coord T/u, hybrid-coord
+moisture). Round-11 in flight. Findings have narrowed HIGH→MEDIUM (mostly
+topography×hybrid-coordinate edge cases) — converging.
 
 ## Pending / not-yet-done
 - MPI AMIP physics wiring (`make_latlon_mpi_step` physics_fn=None,
