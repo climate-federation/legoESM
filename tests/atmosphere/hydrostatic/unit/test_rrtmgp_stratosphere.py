@@ -2992,5 +2992,118 @@ class TestLwAerosolPath:
         )
 
 
+class TestDeltaScaling:
+    """Iter-77: pin the shortwave cloud delta-scaling transform.
+
+    ``optics.RRTMOptics._apply_delta_scaling_for_cloud`` removes the
+    forward-scattering peak (delta-Eddington, forward fraction f = g²)
+    from the cloud optics before the two-stream solve.  It is applied to
+    every cloudy shortwave column (``_combine_cloud_optics`` for
+    ``is_lw=False``) yet had no direct test — a sign/index slip (e.g.
+    ``f = g`` instead of ``g²``, or swapping the ssa/asymmetry divides)
+    would silently bias every cloudy SW flux.
+
+    The transform is exactly (audit iter-77):
+        f  = ω g²
+        τ' = (1 − f) τ
+        ω' = ω(1 − g²) / (1 − f)        [ = (ω − f)/(1 − f) ]
+        g' = (g − g²)/(1 − g²) = g/(1+g)
+    """
+
+    def _optics(self):
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        return RRTMGP.from_legoesm_config(
+            RRTMGPConfig(include_clouds=True)
+        ).optics_lib
+
+    def test_matches_delta_eddington_formula(self):
+        optics = self._optics()
+        tau = jnp.array([10.0, 5.0, 0.7])
+        ssa = jnp.array([0.99, 0.80, 0.95])
+        g = jnp.array([0.85, 0.60, 0.70])
+        out = optics._apply_delta_scaling_for_cloud(
+            {"optical_depth": tau, "ssa": ssa, "asymmetry_factor": g}
+        )
+        f = np.asarray(ssa) * np.asarray(g) ** 2
+        tau_exp = (1 - f) * np.asarray(tau)
+        ssa_exp = np.asarray(ssa) * (1 - np.asarray(g) ** 2) / (1 - f)
+        g_exp = np.asarray(g) / (1 + np.asarray(g))
+        np.testing.assert_allclose(
+            np.asarray(out["optical_depth"]), tau_exp, rtol=1e-12, atol=1e-12,
+            err_msg="delta-scaled τ' != (1 − ω g²) τ",
+        )
+        np.testing.assert_allclose(
+            np.asarray(out["ssa"]), ssa_exp, rtol=1e-12, atol=1e-12,
+            err_msg="delta-scaled ω' != ω(1 − g²)/(1 − ω g²)",
+        )
+        np.testing.assert_allclose(
+            np.asarray(out["asymmetry_factor"]), g_exp, rtol=1e-12, atol=1e-12,
+            err_msg="delta-scaled g' != g/(1 + g)",
+        )
+
+    def test_conservative_scattering_preserved(self):
+        """ω = 1 must stay ω' = 1 — delta-scaling conserves a
+        non-absorbing cloud (else it would spuriously create absorption)."""
+        optics = self._optics()
+        tau = jnp.array([8.0, 3.0])
+        ssa = jnp.array([1.0, 1.0])
+        g = jnp.array([0.85, 0.50])
+        out = optics._apply_delta_scaling_for_cloud(
+            {"optical_depth": tau, "ssa": ssa, "asymmetry_factor": g}
+        )
+        np.testing.assert_allclose(
+            np.asarray(out["ssa"]), np.ones(2), rtol=1e-12, atol=1e-12,
+            err_msg="delta-scaling must preserve conservative scattering ω=1",
+        )
+
+    def test_isotropic_is_identity(self):
+        """g = 0 (isotropic): f = 0, so τ, ω, g are unchanged."""
+        optics = self._optics()
+        tau = jnp.array([4.0, 1.5])
+        ssa = jnp.array([0.9, 0.5])
+        g = jnp.array([0.0, 0.0])
+        out = optics._apply_delta_scaling_for_cloud(
+            {"optical_depth": tau, "ssa": ssa, "asymmetry_factor": g}
+        )
+        np.testing.assert_allclose(np.asarray(out["optical_depth"]), np.asarray(tau),
+                                   rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(out["ssa"]), np.asarray(ssa),
+                                   rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(out["asymmetry_factor"]), np.zeros(2),
+                                   atol=1e-12)
+
+    def test_reduces_tau_and_asymmetry(self):
+        """Removing the forward peak shrinks both the optical depth and the
+        asymmetry (the remaining phase function is less forward-peaked)."""
+        optics = self._optics()
+        tau = jnp.array([10.0, 5.0])
+        ssa = jnp.array([0.99, 0.9])
+        g = jnp.array([0.85, 0.7])
+        out = optics._apply_delta_scaling_for_cloud(
+            {"optical_depth": tau, "ssa": ssa, "asymmetry_factor": g}
+        )
+        assert np.all(np.asarray(out["optical_depth"]) < np.asarray(tau)), (
+            "delta-scaling must reduce optical depth (forward peak removed)"
+        )
+        assert np.all(np.asarray(out["asymmetry_factor"]) < np.asarray(g)), (
+            "delta-scaling must reduce asymmetry g → g/(1+g)"
+        )
+
+    def test_differentiable(self):
+        optics = self._optics()
+        tau = jnp.array([10.0]); ssa = jnp.array([0.95])
+
+        def tau_out(g):
+            o = optics._apply_delta_scaling_for_cloud(
+                {"optical_depth": tau, "ssa": ssa, "asymmetry_factor": g}
+            )
+            return jnp.sum(o["optical_depth"] + o["ssa"] + o["asymmetry_factor"])
+
+        grad = jax.grad(tau_out)(jnp.array([0.7]))
+        assert jnp.all(jnp.isfinite(grad)), f"delta-scaling grad non-finite: {grad}"
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
