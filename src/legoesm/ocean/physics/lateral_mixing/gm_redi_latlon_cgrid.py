@@ -29,6 +29,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     gradient_y_cgrid,
     interp_cell_to_uface,
     interp_cell_to_vface,
+    laplacian_cgrid,
 )
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _neumann_fill_cgrid
 from legoesm.ocean.dynamics.ocean_tendency_common import (
@@ -829,3 +830,37 @@ def gm_redi_lateral_mixing_latlon(
         dT_dt=dT_dt,
         dS_dt=dS_dt,
     )
+
+
+def eke_horizontal_transport(E, U_bar, V_bar, grid, eke_cfg, mask, u_mask, v_mask):
+    """Conservative 2-D EKE transport tendency [m^2/s^3]: flux-form advection of the
+    eddy-energy field ``E`` by the depth-mean flow (upwind) + lateral diffusion
+    (``k_iso``). Returns ``dE/dt|transport``.
+
+    Conserves the area-integral of E by construction: the advective flux divergence
+    telescopes (periodic in lon; v-flux = 0 at the N/S walls) and the lateral
+    diffusion is flux-form (``laplacian_cgrid`` = div of grad, no-flux walls).
+    Reuses ``divergence_cgrid`` + ``laplacian_cgrid`` — no duplicate numerics.
+
+    Parameters
+    ----------
+    E : (n_lat, n_lon) eddy kinetic energy.
+    U_bar : (n_lat, n_lon+1) depth-mean zonal velocity at u-faces.
+    V_bar : (n_lat+1, n_lon) depth-mean meridional velocity at v-faces (0 at poles).
+    grid, eke_cfg (k_iso), mask/u_mask/v_mask.
+    """
+    # E upwinded to u-faces by U_bar sign (periodic in lon).
+    E_west = jnp.roll(E, 1, axis=1)                          # E[:, j-1]
+    E_uface_core = jnp.where(U_bar[:, :-1] > 0.0, E_west, E)  # upwind
+    E_uface = jnp.concatenate([E_uface_core, E_uface_core[:, 0:1]], axis=1)
+    # E upwinded to interior v-faces by V_bar sign; poles are walls (V_bar=0).
+    E_vface_int = jnp.where(V_bar[1:-1, :] > 0.0, E[:-1, :], E[1:, :])
+    zero_row = jnp.zeros((1, E.shape[1]), dtype=E.dtype)
+    E_vface = jnp.concatenate([zero_row, E_vface_int, zero_row], axis=0)
+    # Flux-form advection (conservative).
+    flux_u = E_uface * U_bar * u_mask
+    flux_v = E_vface * V_bar * v_mask
+    adv = -divergence_cgrid(flux_u, flux_v, grid)
+    # Lateral diffusion (conservative).
+    diff = eke_cfg.k_iso * laplacian_cgrid(E, grid, mask=mask)
+    return (adv + diff) * mask

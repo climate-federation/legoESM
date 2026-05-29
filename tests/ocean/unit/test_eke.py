@@ -245,3 +245,49 @@ def test_E5_differentiable_through_closure_and_coupling():
     g = jax.grad(loss)(E0)
     assert jnp.all(jnp.isfinite(g)), "non-finite grad through EKE closure/coupling"
     assert float(jnp.max(jnp.abs(g))) > 0.0, "zero grad — path not differentiated"
+
+
+# ---------------------------------------------------------------------------
+# E4 — budget closure: E-transport conserves the area integral of E
+# ---------------------------------------------------------------------------
+
+
+def _int_residual(tend, area):
+    a = np.asarray(area)
+    t = np.asarray(tend)
+    return abs(float(np.sum(t * a))) / (float(np.sum(np.abs(t) * a)) + 1e-300)
+
+
+def test_E4_transport_conserves_integral_E():
+    """Flux-form advection + lateral diffusion of E each conserve the area-integral
+    of E to machine-eps on a periodic domain (telescoping; no-flux walls)."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        eke_horizontal_transport,
+    )
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)  # float64: measure scheme, not f32
+    nlat, nlon = grid.n_lat, grid.n_lon
+    rng = np.random.default_rng(2)
+    E = jnp.asarray(np.abs(rng.standard_normal((nlat, nlon))) * 0.05)
+    U_bar = jnp.asarray(0.1 * rng.standard_normal((nlat, nlon + 1)))
+    U_bar = U_bar.at[:, -1].set(U_bar[:, 0])               # periodic wrap (u-pt n_lon == 0)
+    V_bar = jnp.asarray(0.1 * rng.standard_normal((nlat + 1, nlon)))
+    V_bar = V_bar.at[0].set(0.0).at[-1].set(0.0)            # N/S walls
+    mask = jnp.ones((nlat, nlon))
+    u_mask = jnp.ones((nlat, nlon + 1))
+    v_mask = jnp.ones((nlat + 1, nlon))
+    area = grid.area
+    Z = jnp.zeros_like
+    # advection only
+    t_adv = eke_horizontal_transport(
+        E, U_bar, V_bar, grid, EKEConfig(k_iso=0.0), mask, u_mask, v_mask)
+    assert _int_residual(t_adv, area) < 1e-12, "advection not conservative"
+    # diffusion only (no flow)
+    t_diff = eke_horizontal_transport(
+        E, Z(U_bar), Z(V_bar), grid, EKEConfig(k_iso=1000.0), mask, u_mask, v_mask)
+    assert _int_residual(t_diff, area) < 1e-12, "lateral diffusion not conservative"
+    # combined
+    t = eke_horizontal_transport(
+        E, U_bar, V_bar, grid, EKEConfig(k_iso=500.0), mask, u_mask, v_mask)
+    assert _int_residual(t, area) < 1e-12, "combined transport not conservative"
+    assert jnp.all(jnp.isfinite(t))

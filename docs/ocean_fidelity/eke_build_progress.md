@@ -8,7 +8,7 @@ every micro-decision. Newest at the bottom.
 - [x] E1 EKE closure module (pure) + EKEConfig + direct unit tests (8 green)
 - [x] E2 dispatch + GM/Redi coupling (compute_eke_kappa_gm; GMRediConfig.eke; validate_eke_config)
 - [x] E3 positivity (semi-implicit dissipation; E >= 0 by construction, no clip)
-- [ ] E4 budget closure (advection + iso-diffusion conserve integral-E)
+- [x] E4 budget closure (advection + lateral diffusion conserve integral-E, machine-eps)
 - [x] E5 differentiability (grad through closure + coupling finite + nonzero)
 - [ ] E6 state threading + zero-behaviour-when-OFF (existing bit-identical)
 - [ ] E7 idealized channel (E spins up bounded; kappa_GM responds)
@@ -59,3 +59,18 @@ NEXT: E4 — conservative 2-D E-transport operator (flux-form advection by the d
 divergence_cgrid + lateral iso-diffusion via laplacian_cgrid; both conserve integral-E by
 telescoping); test conservation to machine-eps. Then E6 (state field + step threading; the
 cross-cutting SegmentCarry part).
+
+### 2026-05-29 · iter 4 · E4 done — conservative 2-D E-transport
+Added eke_horizontal_transport(E, U_bar, V_bar, grid, eke_cfg, mask, u_mask, v_mask) in
+gm_redi_latlon_cgrid.py: flux-form advection of E by the depth-mean flow (upwind to faces) via
+divergence_cgrid + lateral diffusion via k_iso·laplacian_cgrid — both conserve the area-integral
+of E by telescoping (periodic lon; no-flux N/S walls). Reuses the shared operators (no duplicate
+numerics). E4 test: advection-only, diffusion-only, and combined each conserve integral(E·area) to
+<1e-12 (float64 grid). NOTE: as with the flux-form F5, the test U_bar must respect the C-grid
+periodic-wrap invariant (U_bar[:,n_lon]==U_bar[:,0]) the real model maintains, else the advective
+flux doesn't telescope. 15 EKE tests green (E1-E5).
+NEXT: E6 — the cross-cutting state threading. Add `eke` to LatLonCGridOceanState + rest_state init
++ the step loop (transport via eke_horizontal_transport + local source/sink via
+eke_apply_local_source, using compute_eke_kappa_gm for kappa_GM into GM/Redi) + SegmentCarry +
+restart I/O + channel-packing + the compiled-segment ref loops. DEFAULT OFF (gm_redi.eke=None) ⇒
+bit-identical existing (decomposition gate + suite green). This is the largest/riskiest gate.
