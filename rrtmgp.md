@@ -7,7 +7,47 @@ Iter-10 compressed; original at `rrtmgp.original.md`.
 
 ---
 
-## Iter 15 — third lost AIMIP-merge fix restored (2026-05-29)
+## Iter 17+18 — centralised cloud_kwargs helper + codex review (2026-05-29)
+
+### Iter-17: centralise to_rrtmg_kwargs
+- Two duplicate cloud_kwargs build sites (iter-15 fix +
+  iter-16 fix) → moved to `CloudProperties.to_rrtmg_kwargs()` method.
+- Helper deliberately omits `cloud_fraction` with a docstring that
+  cites commit 4c9591bb's 59-113 W/m² OSR cost.
+- Both `physics_pipeline.py` and `integration.py` now call
+  `cloud_props.to_rrtmg_kwargs()` instead of building the dict
+  inline.
+- New regression test `TestCloudKwargsHelper::test_kwargs_excludes_cloud_fraction`
+  pins the contract.
+
+### Iter-18: codex adversarial review of iter-13 → iter-17 restorations
+Fresh codex thread (5-section prompt, ≤300 word report) reviewed all
+four restored production fixes.  **VERDICT: SHIP**.
+
+Codex confirmed:
+1. **Sign fix faithfulness**: `-G·dflux/abs(dp)/Cp` gives cooling for
+   positive outward flux divergence in BOTH `solve_columns` (positive
+   dp) and the legacy `RRTMGP.compute_heating_rate` callpath
+   (centered-difference negative dp canonicalised by `abs(dp)`).
+2. **AD-safety completeness**: All 5 named restoration sites present
+   (`cloud_optics.py:165`, `monochromatic_two_stream.py:89/521`,
+   `two_stream.py:478`).  Survivors (gas_optics.py:205,
+   delta-scaling divides, `optics_base` combines, `_k_fn`) are
+   pre-existing patterns unrelated to the 59407953 restoration.
+3. **Cloud-fraction logic**: τ-linear-in-LWP argument verified by
+   reading `cloud_optics.py:143` (τ = interp(ext)·cld_path·mask,
+   linear in cld_path) and `optics.py:359` (RRTMGP cf scaling only if
+   kwarg provided).
+4. **No restoration-specific bugs found**.
+
+Note: the public `solve_columns(..., cloud_fraction=...)` parameter
+still applies cf scaling when a caller passes it explicitly — that's
+the right behaviour for an in-cloud-LWP caller.  In-tree call sites
+use grid-mean LWP and now correctly omit cloud_fraction.
+
+---
+
+## Iter 15+16 — third lost AIMIP-merge fix restored (2026-05-29)
 
 After iter-13 (sign) and iter-14 (AD-safe floors) were found and
 restored, audited git history for more `Fix.*RRTMG` commits that
