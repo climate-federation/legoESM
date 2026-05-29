@@ -1587,6 +1587,132 @@ class TestHeatingRateSign:
         )
 
 
+class TestEnergyConservation:
+    """Iter-67: column energy conservation invariant for RRTMGP.
+
+    For any radiation scheme, the column-integrated heating rate
+    (converted to a flux divergence with the layer's
+    ``dp * c_p / g`` mass-times-specific-heat factor) must match
+    the net flux convergence:
+
+        F_net(sfc) - F_net(TOA) = ∫ heating_rate * c_p * dp / g
+
+    Equivalently (dimensionally cleaner):
+
+        ∑(hr * dp) = (g / c_p) · (F_net_TOA - F_net_sfc)
+
+    This is the discrete form of ``hr = g/c_p · ∂F_net/∂p``.
+
+    Pre-iter-67 only ``gray_radiation`` had this pin in
+    ``test_radiation.py::test_energy_conservation``; the
+    sign-fix iter-13 + iter-17 cf² fix make this invariant a
+    high-value RRTMGP regression guard because any future change
+    to ``compute_heating_rate`` that breaks the relation would
+    silently leak energy.
+    """
+
+    def test_column_flux_divergence_matches_heating_rate(self):
+        """Combined LW+SW: column flux convergence == column
+        integrated heating × c_p × dp / g.
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+        from legoesm import constants as const
+
+        solver = RRTMGP.from_legoesm_config(RRTMGPConfig())
+        ncol, nlev = 2, 16
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1)
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        T = jnp.broadcast_to(
+            jnp.linspace(220.0, 290.0, nlev)[None, :], (ncol, nlev)
+        )
+        sfc_T = jnp.array([298.0, 295.0])
+        q_v = jnp.full((ncol, nlev), 5e-3)
+        cos_z = jnp.array([0.6, 0.4])
+
+        out = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+        )
+
+        # Convention: index 0 = TOA, index -1 = surface (per
+        # ``solve_columns`` docstring).  Output flux arrays are
+        # interface-valued shape (ncol, nlev+1).
+        # Net flux is positive downward.
+        F_net_toa = (
+            out.lw_flux_down[:, 0] - out.lw_flux_up[:, 0]
+            + out.sw_flux_down[:, 0] - out.sw_flux_up[:, 0]
+        )
+        F_net_sfc = (
+            out.lw_flux_down[:, -1] - out.lw_flux_up[:, -1]
+            + out.sw_flux_down[:, -1] - out.sw_flux_up[:, -1]
+        )
+
+        # ``heating_rate`` is K/s, shape (ncol, nlev).  Use SAME
+        # ordering convention (TOA-first) as the flux arrays.  In
+        # TOA-first ordering the layer-thickness ``dp`` increases
+        # with index (top thin, bottom thick).
+        dp = p_half[:, 1:] - p_half[:, :-1]  # positive, TOA-first
+
+        # ∑(hr * dp) should equal (g / c_p) · (F_net_TOA - F_net_sfc).
+        lhs = jnp.sum(out.heating_rate * dp, axis=1)
+        rhs = (const.g / const.c_pd) * (F_net_toa - F_net_sfc)
+
+        np.testing.assert_allclose(
+            np.asarray(lhs), np.asarray(rhs),
+            rtol=5.0e-5, atol=1.0e-6,
+            err_msg=(
+                f"Column flux divergence does NOT match column-"
+                f"integrated heating-rate × dp.  This is a hard "
+                f"energy-conservation invariant; failure indicates "
+                f"a regression in ``compute_heating_rate`` (iter-13 "
+                f"sign-fix territory) or in the flux-net interface "
+                f"convention."
+            ),
+        )
+
+    def test_lw_only_flux_divergence_matches_lw_heating(self):
+        """LW-only: same invariant for the LW heating-rate branch."""
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+        from legoesm import constants as const
+
+        solver = RRTMGP.from_legoesm_config(RRTMGPConfig())
+        ncol, nlev = 1, 12
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1)
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        T = jnp.linspace(220.0, 290.0, nlev)[None, :]
+        sfc_T = jnp.array([298.0])
+        q_v = jnp.full((ncol, nlev), 5e-3)
+        # Nighttime → SW path zero, isolating LW.
+        cos_z = jnp.array([-0.5])
+
+        out = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+        )
+
+        F_lw_net_toa = out.lw_flux_down[:, 0] - out.lw_flux_up[:, 0]
+        F_lw_net_sfc = out.lw_flux_down[:, -1] - out.lw_flux_up[:, -1]
+        dp = p_half[:, 1:] - p_half[:, :-1]
+        lhs = jnp.sum(out.lw_heating_rate * dp, axis=1)
+        rhs = (const.g / const.c_pd) * (F_lw_net_toa - F_lw_net_sfc)
+
+        np.testing.assert_allclose(
+            np.asarray(lhs), np.asarray(rhs),
+            rtol=5.0e-5, atol=1.0e-6,
+            err_msg=(
+                "LW column flux divergence does NOT match LW "
+                "column-integrated heating rate.  Sign-fix iter-13 "
+                "regression."
+            ),
+        )
+
+
 class TestAerosolPath:
     """Iter-66: regression guards for the SW aerosol path in ``solve_sw``.
 

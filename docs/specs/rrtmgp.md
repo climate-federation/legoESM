@@ -108,7 +108,9 @@ fp32 round-off** + iter-63 **bfloat16 input acceptance**),
 (iter-20 + iter-65 mesospheric-boundary),
 `TestCloudKwargsHelper`, `TestHeatingRateSign`,
 `TestAerosolPath` (iter-66: AOD-zero ≡ AOD-None, sign of AOD on
-SW, ∂(SW)/∂(AOD) finite).
+SW, ∂(SW)/∂(AOD) finite),
+`TestEnergyConservation` (iter-67: combined and LW-only column
+flux divergence ≡ ∑(hr · dp) × c_p / g).
 
 `test_radiation.py::{TestRRTMGP,TestColumnShardedRadiation}` —
 cache-key (iter-32/36/37/39/41/42), sharded-equivalence
@@ -116,9 +118,14 @@ cache-key (iter-32/36/37/39/41/42), sharded-equivalence
 
 ---
 
-## Status (after iter-66)
+## Status (after iter-67)
 
-- ✅ 120 pass + 5 skip (3 Metal-broken + 2 multidevice) — 0 fail.
+- ✅ 122 pass + 5 skip (3 Metal-broken + 2 multidevice) — 0 fail.
+  iter-67 added new class `TestEnergyConservation` (2 tests):
+  combined LW+SW and LW-only column flux-divergence ≡
+  ∑(hr · dp) × c_p / g.  Pre-iter-67 only `gray_radiation` had
+  this pin; RRTMGP energy conservation was unpinned despite the
+  iter-13 sign-fix territory.
   iter-63 added 2 mixed-precision tests.  iter-64 added 1 MPI-
   shard correctness test (subset call ≡ slice of full call).
   iter-65 added 1 mesospheric-pressure AD test —
