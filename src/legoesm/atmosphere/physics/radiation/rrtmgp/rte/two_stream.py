@@ -545,7 +545,14 @@ def solve_sw(
         flux_down_dir=sources_2stream['flux_down_dir'],
         use_scan=use_scan,
     )
-    total_sw_fluxes = jax.tree.map(jnp.add, sw_fluxes, partial_fluxes)
+    # Cast each g-point contribution to the accumulator dtype (see solve_lw):
+    # under ``compute_fp32`` the carry (``partial_fluxes``, init
+    # ``zeros_like(temperature)``) is float32 but the transport solve
+    # re-promotes to float64, so a bare ``jnp.add`` would break the scan carry
+    # dtype invariant.  No-op on the default float64 path.
+    total_sw_fluxes = jax.tree.map(
+        lambda _f, _c: _c + _f.astype(_c.dtype), sw_fluxes, partial_fluxes,
+    )
     return total_sw_fluxes
 
   flux_keys = ['flux_up', 'flux_down', 'flux_net']
