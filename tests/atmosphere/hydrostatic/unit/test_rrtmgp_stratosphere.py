@@ -9,12 +9,17 @@ down behaviour the audit found drifting from upstream rte-rrtmgp.
 | ``TestRelativeAbundanceSafeDiv`` | 1+2/5 | safe-div for combined_vmr ∈ (0, eps] band |
 | ``TestOutOfRangeTemperature`` | 1+2 | T-extrap doesn't catastrophically break planck/major/minor OD |
 | ``TestMixedPrecision`` | 1+2/27 | fp32 inputs work end-to-end through fp64 tables |
-| ``TestOptimalLwSecant`` | 2/4/7/8/11/12/21/25 | upstream ``compute_optimal_angles`` formula faithfulness + scan/loop/shard equivalence |
+| ``TestOptimalLwSecant`` | 2/4/7/8/11/12/21/25/43 | upstream ``compute_optimal_angles`` formula faithfulness + scan/loop/shard equivalence + extreme-tau limits |
 | ``TestStandardO3Profile`` | 3/3.5/6 | skewed Gaussian + 20 ppb baseline + 200-400 DU column total |
 | ``TestTropopauseBoundary`` | 26 | dead-branch AD safety at all-stratosphere / all-troposphere extreme columns |
 | ``TestADSafetyAtStratosphereTau`` | 20 | iter-14/iter-19 max(d,eps) regression guard for stratospheric tau_tot |
 | ``TestCloudKwargsHelper`` | 17 | iter-15/iter-16 cf²-double-discount regression guard |
 | ``TestHeatingRateSign`` | 13 | iter-13 sign-fix regression guard (commit 0be22f0f) |
+
+Companion file ``test_radiation.py`` adds cache-key tests
+(iter-32/36/37/39/41/42) and sharded-equivalence tests
+(iter-28/29) under the ``TestRRTMGP`` and
+``TestColumnShardedRadiation`` classes.
 
 The properties are required for differentiable training across the
 full stratospheric column and for mixed-precision execution where
