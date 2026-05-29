@@ -7,6 +7,51 @@ Iter-10 compressed; original at `rrtmgp.original.md`.
 
 ---
 
+## Iter 15 — third lost AIMIP-merge fix restored (2026-05-29)
+
+After iter-13 (sign) and iter-14 (AD-safe floors) were found and
+restored, audited git history for more `Fix.*RRTMG` commits that
+predate `b5b5954e Aimip (#312)`.  Found:
+
+`4c9591bb Fix cloud-fraction double-discount in RRTMG cloud coupling`
+(Kevin Debeire, 2026-05-17) — also reverted by AIMIP merge.
+
+### Bug
+`compute_radiation_core` was passing cloud fraction through TWO
+independent discount paths:
+1. `compute_cloud_properties` returned **grid-mean** LWP =
+   q_c·dp/g (q_c is the grid-mean prognostic) which already
+   carries `LWP_grid = cf · LWP_in-cloud`.
+2. RRTMG optics then multiplied cloud τ by cloud_fraction AGAIN.
+
+Effective τ: `cf² · τ_in-cloud` instead of `cf · τ_in-cloud`.
+Clouds ~cf× too thin in both SW and LW.
+
+### Cost (from probe_cloud_fraction.py in calibration repo)
+- cf = 0.6: −59 W/m² OSR
+- cf = 0.3: −113 W/m² OSR
+
+### Fix
+Stop passing `cloud_fraction` from `compute_radiation_core` to
+RRTMG.  Since τ is linear in LWP, "grid-mean LWP, no cf scaling" is
+mathematically identical to the correct "in-cloud LWP × cf scaling".
+
+### Verification
+- 21 cloud-fraction + RRTMGP unit tests pass.
+- All 10 AMIP-RRTMG integration tests pass.
+
+### Cumulative lost-fix audit
+| iter | Lost commit | Author | Impact |
+|---|---|---|---|
+| 13 | `0be22f0f` | Aytac Pacal | Thermal runaway (T̄ 261→293K/120d) |
+| 14 | `59407953` | Kevin Debeire | NaN gradients in 4/5 AMIP params |
+| 15 | `4c9591bb` | Kevin Debeire | -59..-113 W/m² OSR from cf² discount |
+
+All three pre-existed in main before the `b5b5954e AIMIP-#312` merge
+silently reverted them.  All restored in iter-13/14/15.
+
+---
+
 ## Iter 13+14 — restore production-critical fixes lost in AIMIP merge (2026-05-29)
 
 **This is the highest-impact work in the entire session.**
