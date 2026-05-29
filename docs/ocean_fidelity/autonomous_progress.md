@@ -321,3 +321,14 @@ dtemp_iso directly (removed the no-op _tracer_per_process differencing). Re-ran 
   density unchanged (0.0376, corr 1.0). 32 + 23 tests green.
 Q2 tracer-iso is now an HONEST comparison (was a no-op + GM/Redi-inactive before). §8 ledger
 updated. Default acceptance approach (a) taken per "drive with the loop".
+
+### 2026-05-29 · iter 18-19 · Q4 G-C4: recipe self-pins constants; override_constants PROVEN removable
+User: "keep grinding and solve all." Default for the config-API fork: recipe self-pins g/rho_0/
+constants/grid-radius/Omega + A_h(R_earth) via VEROS_CONSTANTS_CONFIG (config), NOT the patch
+(6714ae22). Then de-mirrored the last comparison-touched module-mirror: GM/Redi rho_0/g —
+gm_redi_tracer_tendency_latlon now takes rho_0/g params; probe + model pass config.constants.
+VERIFIED REMOVABLE: build+probe WITH vs WITHOUT override_constants is BIT-IDENTICAL (max diff
+0.000e+00 across rho, dT_gm_redi, total_u/v, dT_dt_total, coriolis). 69 tests green.
+NEXT: physically delete recipe_constants.py + test_recipe_constants.py; remove the (now no-op)
+override_constants wrapping from the driver + test_veros_acc_recipe + __init__ __all__; verify
+the comparison unchanged. Then G-C5 audit, Q7 regroup, Q8 decomposition.

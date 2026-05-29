@@ -175,6 +175,7 @@ def probe_latlon_cgrid(
             eos_linear=getattr(config, "eos_linear", None),
             mask=state.land_mask.data,
             u_mask=state.u_mask.data, v_mask=state.v_mask.data,
+            rho_0=config.constants.rho_0, g=config.constants.g,
         )
     else:
         dT_gm = jnp.zeros_like(tendencies.dT_dt.data)

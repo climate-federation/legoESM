@@ -689,6 +689,8 @@ def gm_redi_tracer_tendency_latlon(
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
     f_coriolis: jnp.ndarray | None = None,
+    rho_0: float = _RHO_0,
+    g: float = constants.g,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Top-level GM/Redi for lat-lon C-grid.
 
@@ -733,7 +735,7 @@ def gm_redi_tracer_tendency_latlon(
     fill_fn = lambda field: _neumann_fill_cgrid(field, mask)
     rho, _rho_prime, _p_prime = iterate_eos_and_pressure_anomaly(
         T, S, mask, fill_fn, eos_fn,
-        z_coord.dz_ref, _RHO_0, constants.g,
+        z_coord.dz_ref, rho_0, g,
         n_iter=2,
     )
 
