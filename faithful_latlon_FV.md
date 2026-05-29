@@ -141,5 +141,23 @@ GPU harness blocks `latlon`. Picked realism (self-contained, locally verifiable)
   test (now possible after the iter-3 gaussian fix). 21 IC tests pass.
 - Round-7 review pending.
 
-### iter 5+ — (next) GPU harness un-block (single-device verifiable); MPI deferred (mpi4jax↔JAX 0.10.1)
+### iter 5 — GPU scaling harness: un-block lat-lon
+- `run_levante_gpu_scaling.py` had a stale `raise ValueError("A-grid latlon
+  removed, #115")` for grid_type=latlon — wrongly blocked the CURRENT C-grid FV
+  latlon core. Replaced with C-grid FV construction (create_latlon_grid +
+  CGridLatLonPrimitiveEquationModel, A_h via inlined CFL-safe formula to dodge a
+  device_config circular import, polar filter on, baroclinic_wave_init_latlon).
+- VERIFIED on CPU single-device: latlon now benchmarks —
+  LL128 SYPD 7.68 / 15.9 Mcells/s, LL256 SYPD 0.68 / 14.1 Mcells/s
+  (comparable to cubed-sphere ~25 Mcells/s on CPU; real GPU numbers need
+  hardware). Multi-GPU latlon raises a clear NotImplementedError (no
+  make_latlon_sharded_step yet — needs a sharded step + GPU validation).
+- PRE-EXISTING bug noted (NOT mine, affects all grids' FIRST resolution incl
+  cubed C48): cold-import circular import `MixedPrecisionPolicy` ↔
+  `parallel.device_config`; resolves after first partial init so resolutions 2+
+  work. Out of scope (fixing a runtime circular import is broad/risky).
+- No automated test: benchmark script, verified by running; the cold-import bug
+  makes an in-process unit test fragile. Latlon dycore+IC already well-tested.
+
+### iter 6+ — (next) MPI: deferred (mpi4jax↔JAX 0.10.1 incompat, local hang). Consider fixing device_config circular import; real-SST CMIP6 multi-year.
 - TBD
