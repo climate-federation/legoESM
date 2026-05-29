@@ -26,8 +26,6 @@ from legoesm.atmosphere.physics.radiation.rrtmgp.config.radiative_transfer impor
 )
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import atmospheric_state
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import constants as optics_constants
-from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_volume_mixing_ratio
-from legoesm.atmosphere.physics.radiation.rrtmgp.optics import optics
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics.lookup_volume_mixing_ratio import (
     LookupVolumeMixingRatio,
 )

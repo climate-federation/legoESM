@@ -14,7 +14,6 @@
 
 """Interpolation functionality."""
 
-import functools
 from typing import Literal, TypeAlias
 
 import jax

@@ -19,7 +19,6 @@ from collections.abc import Mapping
 from typing import TypeAlias
 
 import jax
-import jax.numpy as jnp
 from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.radiation.rrtmgp import interpolation
 from legoesm.atmosphere.physics.radiation.rrtmgp import kernel_ops
