@@ -773,9 +773,9 @@ class LatLonCGridOceanConfig(NamedTuple):
     A_h_cap_width_deg: float = 5.0
     # Ocean-scoped physical constants (Phase G, G-C1). Defaults reference
     # legoesm.constants (canonical Earth) -> zero behaviour change. A recipe
-    # pins these to a reference model (e.g. Veros) via the public config API
-    # instead of the override_constants monkey-patch. Read-through wiring
-    # (de-mirroring) is G-C2+. MUST stay the LAST field: its default assigns
+    # pins these to a reference model (e.g. Veros) via the public config API.
+    # Read-through wiring (de-mirroring) is G-C2+. MUST stay the LAST field: its
+    # default assigns
     # the class-body name `constants`, which would shadow the `constants`
     # module for any field default declared after it.
     constants: ConstantsConfig = ConstantsConfig()

@@ -3,9 +3,9 @@
 End-to-end driver that runs Veros's canonical ACC setup (``acc_channel``)
 for one short step, extracts the per-process tendency arrays from the
 Veros snapshot, builds the matching legoESM lat-lon C-grid state and
-recipe (with constants pinned to Veros values via
-``override_constants(**VEROS_CONSTANTS)``), runs the legoESM tendency
-probe, and writes a per-region comparison report.
+recipe (with all Veros constants pinned via config — see
+``build_acc_model_config`` / ``ConstantsConfig`` / ``VEROS_CONSTANTS_CONFIG``),
+runs the legoESM tendency probe, and writes a per-region comparison report.
 
 Usage
 -----
@@ -40,9 +40,6 @@ import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.ocean.fidelity.recipe_constants import (
-    VEROS_CONSTANTS, override_constants,
-)
 from legoesm.ocean.fidelity.tendency_probe import (
     build_region_masks,
     compare_momentum_at_centres,
@@ -114,7 +111,7 @@ def _write_report(
     lines.append("Source recipe: ``legoesm.ocean.fidelity.veros_acc_recipe.build_acc_recipe``.")
     lines.append("Veros snapshot: ``veros.setups.acc.acc.ACCSetup`` via")
     lines.append("``legoesm.ocean.fidelity.veros_runner.run_veros``.\n")
-    lines.append("Constants override: ``override_constants(**VEROS_CONSTANTS)``\n")
+    lines.append("Constants: pinned via config (``ConstantsConfig`` / ``VEROS_CONSTANTS_CONFIG``).\n")
 
     if veros_status is not None:
         lines.append("## Veros snapshot unavailable\n")
@@ -258,50 +255,47 @@ def main() -> int:
 
     # legoESM side — runs regardless of Veros availability so the harness
     # is exercised end-to-end.
+    # The recipe pins all Veros constants via config (G-C4: build_acc_grid
+    # radius/omega + build_acc_model_config g/rho_0/constants/A_h), so no
+    # override_constants context is needed.
     print("==> Building legoESM-Veros ACC recipe...")
-    with override_constants(**VEROS_CONSTANTS):
-        recipe = build_acc_recipe()
-        if veros_result is not None:
-            print("==> Bridging Veros snapshot to legoESM state...")
-            from legoesm.ocean.fidelity.veros_state_bridge import (
-                extract_veros_tendencies,
-                veros_snapshot_to_legoesm_state,
-            )
-            bridged = veros_snapshot_to_legoesm_state(
-                veros_result, recipe.initial_state,
-            )
-            print(
-                f"    Veros snapshot shapes: {bridged.info!r}"
-            )
-            probe_state = bridged.state
-            veros_tendencies = extract_veros_tendencies(veros_result)
-        else:
-            probe_state = recipe.initial_state
-            veros_tendencies = None
+    recipe = build_acc_recipe()
+    if veros_result is not None:
+        print("==> Bridging Veros snapshot to legoESM state...")
+        from legoesm.ocean.fidelity.veros_state_bridge import (
+            extract_veros_tendencies,
+            veros_snapshot_to_legoesm_state,
+        )
+        bridged = veros_snapshot_to_legoesm_state(
+            veros_result, recipe.initial_state,
+        )
+        print(f"    Veros snapshot shapes: {bridged.info!r}")
+        probe_state = bridged.state
+        veros_tendencies = extract_veros_tendencies(veros_result)
+    else:
+        probe_state = recipe.initial_state
+        veros_tendencies = None
 
-        print("==> Running legoESM tendency probe...")
-        legoesm_probe = _run_legoesm_probe(recipe, probe_state)
-        masks = build_region_masks(recipe.grid, recipe.z_coord, probe_state)
+    print("==> Running legoESM tendency probe...")
+    legoesm_probe = _run_legoesm_probe(recipe, probe_state)
+    masks = build_region_masks(recipe.grid, recipe.z_coord, probe_state)
 
-        tracer_metrics = None
-        if veros_result is not None:
-            # iso: legoESM GM/Redi tracer tendency (now computed directly by the
-            # probe from the top-level config.gm_redi) vs Veros dtemp_iso/dsalt_iso.
-            # NOTE: the earlier differencing approach was a no-op — the probe runs
-            # physics_fn=None so toggling config.physics changed nothing, AND
-            # GM/Redi was mis-wired into physics.lateral_mixing (inactive). Fixed
-            # in c5abe950 + the probe extension. (vmix is implicit in legoESM ->
-            # no explicit tendency to compare; documented delta, omitted.)
-            tracer_metrics = {}
-            for label, probe_field, vk in (
-                ("T_iso", legoesm_probe.dT_gm_redi, "veros_dT_iso"),
-                ("S_iso", legoesm_probe.dS_gm_redi, "veros_dS_iso"),
-            ):
-                if vk in veros_tendencies:
-                    tracer_metrics[label] = per_region_metrics(
-                        jnp.asarray(probe_field), jnp.asarray(veros_tendencies[vk]),
-                        masks,
-                    )
+    tracer_metrics = None
+    if veros_result is not None:
+        # iso: legoESM GM/Redi tracer tendency (computed by the probe from the
+        # top-level config.gm_redi) vs Veros dtemp_iso/dsalt_iso. (vmix is
+        # implicit in legoESM -> no explicit tendency to compare; documented
+        # delta in the §8 ledger, omitted.)
+        tracer_metrics = {}
+        for label, probe_field, vk in (
+            ("T_iso", legoesm_probe.dT_gm_redi, "veros_dT_iso"),
+            ("S_iso", legoesm_probe.dS_gm_redi, "veros_dS_iso"),
+        ):
+            if vk in veros_tendencies:
+                tracer_metrics[label] = per_region_metrics(
+                    jnp.asarray(probe_field), jnp.asarray(veros_tendencies[vk]),
+                    masks,
+                )
 
     print("==> Writing comparison report...")
     _write_report(

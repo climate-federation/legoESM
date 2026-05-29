@@ -20,9 +20,6 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.ocean.fidelity.recipe_constants import (
-    VEROS_CONSTANTS, override_constants,
-)
 from legoesm.ocean.fidelity.tendency_probe import (
     build_region_masks, probe_latlon_cgrid,
 )
@@ -92,12 +89,11 @@ def test_z_coord_dz_ref_in_legoesm_order():
     np.testing.assert_allclose(float(np.sum(dz)), z.H_max, atol=1e-10)
 
 
-def test_full_recipe_builds_under_constants_override():
+def test_full_recipe_builds():
     """The complete builder must produce a usable
-    (model_config, physics_config, grid, z_coord, state) tuple inside
-    ``override_constants(**VEROS_CONSTANTS)``."""
-    with override_constants(**VEROS_CONSTANTS):
-        recipe = build_acc_recipe()
+    (model_config, physics_config, grid, z_coord, state) tuple with all
+    Veros constants pinned via config (no monkey-patch)."""
+    recipe = build_acc_recipe()
     assert recipe.model_config.eos == "veros_nonlin2"
     assert recipe.model_config.A_h_lat_scaling is True
     assert recipe.model_config.A_h_cos_power == 1
@@ -158,8 +154,7 @@ def _make_synthetic_veros_result(nx=NX, ny=NY, nz=NZ):
 def test_state_bridge_strips_halos_and_reverses_z():
     """A synthetic VerosResult must round-trip through the bridge:
     halos stripped, z-axis reversed, axes transposed (x↔lat,y↔lon)."""
-    with override_constants(**VEROS_CONSTANTS):
-        recipe = build_acc_recipe()
+    recipe = build_acc_recipe()
     result = _make_synthetic_veros_result()
 
     bridged = veros_snapshot_to_legoesm_state(result, recipe.initial_state)
@@ -232,17 +227,16 @@ def test_extract_veros_tendencies_without_pad():
 def test_end_to_end_recipe_probe_round_trip():
     """Build the recipe, build a Veros-like snapshot, bridge it,
     probe the bridged state, and verify all probe fields are finite."""
-    with override_constants(**VEROS_CONSTANTS):
-        recipe = build_acc_recipe()
-        result = _make_synthetic_veros_result()
-        bridged = veros_snapshot_to_legoesm_state(result, recipe.initial_state)
-        probe = probe_latlon_cgrid(
-            bridged.state, recipe.grid, recipe.z_coord, recipe.model_config,
-            dt=4800.0,
-        )
-        masks = build_region_masks(
-            recipe.grid, recipe.z_coord, bridged.state,
-        )
+    recipe = build_acc_recipe()
+    result = _make_synthetic_veros_result()
+    bridged = veros_snapshot_to_legoesm_state(result, recipe.initial_state)
+    probe = probe_latlon_cgrid(
+        bridged.state, recipe.grid, recipe.z_coord, recipe.model_config,
+        dt=4800.0,
+    )
+    masks = build_region_masks(
+        recipe.grid, recipe.z_coord, bridged.state,
+    )
 
     for name in probe._fields:
         arr = np.asarray(getattr(probe, name))
@@ -302,8 +296,7 @@ def test_bridged_acc_state_has_no_zero_TS_wet_cells():
     """Q1 acceptance gate (a): after the land-mask fix, NO wet cell may carry
     the bridge's zero-padded T=S=0 (the rho ~ 997 contamination). Regression
     lock for the Phase G interior density residual."""
-    with override_constants(**VEROS_CONSTANTS):
-        recipe = build_acc_recipe()
+    recipe = build_acc_recipe()
     result = _make_synthetic_veros_result()
     bridged = veros_snapshot_to_legoesm_state(result, recipe.initial_state)
 
@@ -351,15 +344,14 @@ def test_compare_momentum_emits_all_processes():
     processes — no more 'shape mismatch / deferred' rows."""
     from legoesm.ocean.fidelity.tendency_probe import compare_momentum_at_centres
 
-    with override_constants(**VEROS_CONSTANTS):
-        recipe = build_acc_recipe()
-        result = _make_synthetic_veros_result()
-        bridged = veros_snapshot_to_legoesm_state(result, recipe.initial_state)
-        probe = probe_latlon_cgrid(
-            bridged.state, recipe.grid, recipe.z_coord, recipe.model_config,
-            dt=4800.0,
-        )
-        masks = build_region_masks(recipe.grid, recipe.z_coord, bridged.state)
+    recipe = build_acc_recipe()
+    result = _make_synthetic_veros_result()
+    bridged = veros_snapshot_to_legoesm_state(result, recipe.initial_state)
+    probe = probe_latlon_cgrid(
+        bridged.state, recipe.grid, recipe.z_coord, recipe.model_config,
+        dt=4800.0,
+    )
+    masks = build_region_masks(recipe.grid, recipe.z_coord, bridged.state)
     vt = extract_veros_tendencies(result)
     mom = compare_momentum_at_centres(probe, vt, masks)
     for proc in ("coriolis_u", "coriolis_v", "du_adv", "dv_adv", "du_mix", "dv_mix"):
@@ -381,7 +373,7 @@ def test_fidelity_recipe_modules_are_registered():
     import legoesm.ocean.fidelity as fid
 
     for name in (
-        "recipe_constants", "veros_acc_recipe", "veros_state_bridge", "tendency_probe",
+        "veros_acc_recipe", "veros_state_bridge", "tendency_probe",
     ):
         assert name in fid.__all__, f"{name} not registered in fidelity __all__"
         mod = getattr(fid, name)  # exercises the lazy __getattr__
@@ -400,8 +392,7 @@ def test_bridge_halo_strip_invariance():
     the bridged INTERIOR must be independent of them — garbage in the halos
     must not change the bridged state. Locks strip-halo as a true bijection on
     the physical field (doctrine §4)."""
-    with override_constants(**VEROS_CONSTANTS):
-        recipe = build_acc_recipe()
+    recipe = build_acc_recipe()
     res_clean = _make_synthetic_veros_result()
     res_garbage = _make_synthetic_veros_result()  # same seed -> identical interior
     halo = 2
@@ -427,8 +418,7 @@ def test_bridge_roundtrip_salt_index_mapping():
     lat,lon) ∘ reverse-z must place Veros cell (i,j,k) at legoESM
     (lat=j, lon=i, level=nz-1-k)."""
     result = _make_synthetic_veros_result()
-    with override_constants(**VEROS_CONSTANTS):
-        recipe = build_acc_recipe()
+    recipe = build_acc_recipe()
     bridged = veros_snapshot_to_legoesm_state(result, recipe.initial_state)
     veros_s = result.variables["salt"][2:-2, 2:-2, :, 1]   # (nx, ny, nz), tau=1
     expected = np.swapaxes(veros_s, 0, 1)[..., ::-1]        # (lat, lon, z-reversed)
@@ -451,22 +441,21 @@ def test_recipe_gm_redi_wired_at_top_level_not_physics():
     physics-pathway lateral-mixing factory is cubed-sphere-only. The recipe
     must set GM/Redi at the top level (else GM/Redi is silently INACTIVE:
     config.gm_redi defaults None -> model skips it, probe never runs physics)."""
-    with override_constants(**VEROS_CONSTANTS):
-        recipe = build_acc_recipe()
+    recipe = build_acc_recipe()
     assert recipe.model_config.gm_redi is ACC_GM_REDI_CONFIG, (
         "GM/Redi must be at model_config.gm_redi (what the lat-lon model reads)"
     )
     assert recipe.model_config.physics.lateral_mixing.scheme == "none"
 
 
-def test_recipe_self_pins_constants_without_monkey_patch():
+def test_recipe_self_pins_constants_via_config():
     """G-C4: build_acc_recipe() pins g/rho_0/constants (and grid radius/Omega +
-    A_h via R_earth) to Veros values through config — WITHOUT entering an
-    override_constants context. This is the prerequisite for removing the
-    monkey-patch."""
+    A_h via R_earth) to Veros values purely through config — no monkey-patch,
+    no module-level constant mutation. This is what let the old
+    override_constants context manager be deleted entirely."""
     from legoesm.ocean.constants_config import VEROS_CONSTANTS_CONFIG
 
-    recipe = build_acc_recipe()  # NOTE: no override_constants(...) here
+    recipe = build_acc_recipe()
     assert recipe.model_config.g == VEROS_CONSTANTS_CONFIG.g == 9.81
     assert recipe.model_config.rho_0 == VEROS_CONSTANTS_CONFIG.rho_0 == 1024.0
     assert recipe.model_config.constants is VEROS_CONSTANTS_CONFIG
@@ -493,6 +482,5 @@ def test_latlon_model_rejects_physics_lateral_mixing():
     with pytest.raises(ValueError, match="lat-lon C-grid"):
         LatLonCGridOceanModel._validate_config(bad)
 
-    with override_constants(**VEROS_CONSTANTS):
-        recipe = build_acc_recipe()
+    recipe = build_acc_recipe()
     LatLonCGridOceanModel._validate_config(recipe.model_config)  # must not raise

@@ -2,8 +2,9 @@
 
 A first-class config block for the handful of physical constants the ocean
 tendency path consumes, so a recipe can pin them to a reference model's values
-(e.g. Veros) through the public config API instead of the ``override_constants``
-monkey-patch (``ocean/fidelity/recipe_constants.py``).
+(e.g. Veros) through the public config API. This replaced an earlier
+``override_constants`` monkey-patch of the ``legoesm.constants`` module, which
+was deleted in G-C4 once the recipe pinned every constant via config.
 
 Defaults reference ``legoesm.constants`` (canonical Earth), so introducing this
 field is a **zero-behaviour change** until call sites are migrated to read from
@@ -38,9 +39,9 @@ class ConstantsConfig(NamedTuple):
     R_earth: float = constants.R_earth  # Earth radius [m] (grid-init)
 
 
-# Veros canonical values, for recipes that pin constants to Veros (replaces the
-# VEROS_CONSTANTS dict fed to the override_constants monkey-patch). Kept here so
-# the recipe can build ConstantsConfig(**VEROS_CONSTANTS) directly (G-C4).
+# Veros canonical values, for recipes that pin constants to Veros. This is the
+# single source of truth for "what Veros uses" — the ACC recipe references it
+# directly (G-C4) so no separate constants dict / monkey-patch is needed.
 VEROS_CONSTANTS_CONFIG = ConstantsConfig(
     g=9.81, rho_0=1024.0, c_sw=3994.0, Omega=7.292115e-5, R_earth=6.370e6,
 )

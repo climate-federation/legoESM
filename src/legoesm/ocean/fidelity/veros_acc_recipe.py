@@ -15,9 +15,10 @@ Builds the lat-lon C-grid equivalent of ``veros.setups.acc.acc.ACCSetup``:
   vertical viscosity, cos(lat) lateral viscosity
 
 This module returns the legoESM analog with every scheme + parameter
-pinned to the Veros source. Use it inside an
-``override_constants(**VEROS_CONSTANTS)`` context so legoESM's
-constants module also matches Veros.
+pinned to the Veros source. All physical constants (g, rho_0, Omega,
+R_earth, c_sw, and the derived A_h) are pinned through config
+(``ConstantsConfig`` / ``VEROS_CONSTANTS_CONFIG``), so no monkey-patch
+of legoESM's constants module is needed (G-C4).
 
 Source of truth: ``veros/setups/acc/acc.py`` in the
 team-ocean/veros repository.
@@ -87,8 +88,7 @@ def acc_A_h(r_earth: float = constants.R_earth) -> float:
     biharmonic-equivalent harmonic-viscosity convention used in ACC.
 
     ``r_earth`` defaults to legoESM's; build_acc_model_config passes the Veros
-    value so the grid/A_h are pinned via config rather than the
-    override_constants monkey-patch (G-C4)."""
+    value so the grid/A_h are pinned via config (G-C4)."""
     return (2.0 * _degtom(r_earth)) ** 3 * 2.0e-11
 
 # Bottom drag: linear, ``r_bot = 1e-5``
@@ -150,7 +150,7 @@ def build_acc_grid() -> LatLonGrid:
         lat_south=lat_south, lat_north=lat_north,
         lon_west=lon_west, lon_east=lon_east,
         # Pin Earth radius / rotation to Veros's values via config (so the grid
-        # metrics + Coriolis are correct without relying on override_constants).
+        # metrics + Coriolis are correct, pinned purely through config).
         radius=VEROS_CONSTANTS_CONFIG.R_earth,
         omega=VEROS_CONSTANTS_CONFIG.Omega,
         periodic_x=True,
@@ -262,8 +262,8 @@ class ACCRecipe(NamedTuple):
     - ``land_mask``: cell-centre wet mask matching Veros's kbot pattern.
     - ``initial_state``: ocean state ready for the first step.
 
-    Use inside ``override_constants(**VEROS_CONSTANTS)`` so legoESM's
-    physical constants also match Veros.
+    All Veros physical constants are pinned through ``model_config.constants``
+    (G-C4) — no monkey-patch of legoESM's constants module is needed.
     """
     model_config: LatLonCGridOceanConfig
     physics_config: OceanPhysicsConfig
@@ -302,8 +302,7 @@ def build_acc_model_config() -> LatLonCGridOceanConfig:
     return LatLonCGridOceanConfig(
         # All physical constants pinned to Veros via config (G-C4): g/rho_0 are
         # read by the PE core, the ConstantsConfig by the de-mirrored physics,
-        # and R_earth feeds acc_A_h — so the recipe no longer needs the
-        # override_constants monkey-patch for these.
+        # and R_earth feeds acc_A_h — pinned purely through config.
         g=VEROS_CONSTANTS_CONFIG.g,
         rho_0=VEROS_CONSTANTS_CONFIG.rho_0,
         constants=VEROS_CONSTANTS_CONFIG,
@@ -327,14 +326,15 @@ def build_acc_model_config() -> LatLonCGridOceanConfig:
 def build_acc_recipe() -> ACCRecipe:
     """One-stop constructor. Use as::
 
-        from legoesm.ocean.fidelity.recipe_constants import (
-            VEROS_CONSTANTS, override_constants,
-        )
         from legoesm.ocean.fidelity.veros_acc_recipe import build_acc_recipe
 
-        with override_constants(**VEROS_CONSTANTS):
-            recipe = build_acc_recipe()
-            # ... run / probe with recipe.initial_state, .model_config, etc.
+        recipe = build_acc_recipe()
+        # ... run / probe with recipe.initial_state, .model_config, etc.
+
+    All Veros constants (g, rho_0, Omega, R_earth, c_sw, derived A_h) are
+    pinned through config — ``build_acc_model_config`` sets ``constants=
+    VEROS_CONSTANTS_CONFIG`` and the grid radius/omega — so no monkey-patch
+    or ``override_constants`` context is required (G-C4).
     """
     grid = build_acc_grid()
     z_coord = build_acc_z_coord()
