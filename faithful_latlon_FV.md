@@ -62,7 +62,20 @@ stays.
   mis-classified as cubed-sphere → (6,n,n) smoother IndexError; now classified
   by grid_lat.ndim].
 
-## Caveats
-- `DONE` is NOT truthfully emittable here: "good MPI + GPU **scaling**, tested"
-  requires GPU hardware + JAX<0.10 MPI, both unavailable. Verifiable parts done +
-  reviewed; unverifiable parts documented honestly, never faked.
+## Status: verifiable scope COMPLETE + review-approved (round-13 approve)
+Lat-lon FV runs CMIP6 AMIP with physically realistic results: gray + RRTMG
+verified; realistic balanced IC (physics-consistent + topography-correct);
+analytic + real-file topography; deck `--ic standard`. 16 commits, ~120 tests
+across touched subsystems green. Adversarial review converged over 13 rounds
+(every finding fixed; round-13 = approve, no findings).
+
+## Caveats — why `DONE` is NOT truthfully emittable here
+The task requires "good MPI and GPU **scaling**, test it". In THIS environment
+that cannot be tested:
+- GPU: Metal backend broken (no CUDA hardware). Harness un-blocked + single-device
+  verified on CPU; multi-GPU SPMD needs a sharded step + real GPU.
+- MPI: mpi4jax 0.9 / JAX 0.10.1 — halo `sendrecv` (custom-call API removed in JAX
+  0.10) hangs; allreduce works. Needs a JAX<0.10 cluster.
+Verifiable parts are done + reviewed; the scaling verification is documented as
+environment-blocked and is NOT faked. The completion promise stays withheld until
+genuinely true (i.e., in an environment with GPU hardware + JAX<0.10 MPI).
