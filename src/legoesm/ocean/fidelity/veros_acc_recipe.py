@@ -32,6 +32,7 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.grids.latlon import LatLonGrid, create_regional_latlon_grid
+from legoesm.ocean.constants_config import VEROS_CONSTANTS_CONFIG
 from legoesm.ocean.eos import VerosNonlin2Config
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
@@ -77,14 +78,18 @@ DT_TRACER_S = 43200.0       # = 86400 / 2
 # 7.292115e-5 (Veros value) via the constants-override context manager.
 
 # Lateral viscosity: A_h = (2 · degtom)^3 · 2e-11, with degtom = R_earth · π / 180.
-def _degtom() -> float:
-    return constants.R_earth * float(np.pi) / 180.0
+def _degtom(r_earth: float = constants.R_earth) -> float:
+    return r_earth * float(np.pi) / 180.0
 
-def acc_A_h() -> float:
+def acc_A_h(r_earth: float = constants.R_earth) -> float:
     """Veros: ``A_h = (2 * degtom) ** 3 * 2e-11``. Units: m^4/s² × m = m²/s
     after the cos²(lat) scaling and ∇^4 stencil; matches MOM6 / MITgcm
-    biharmonic-equivalent harmonic-viscosity convention used in ACC."""
-    return (2.0 * _degtom()) ** 3 * 2.0e-11
+    biharmonic-equivalent harmonic-viscosity convention used in ACC.
+
+    ``r_earth`` defaults to legoESM's; build_acc_model_config passes the Veros
+    value so the grid/A_h are pinned via config rather than the
+    override_constants monkey-patch (G-C4)."""
+    return (2.0 * _degtom(r_earth)) ** 3 * 2.0e-11
 
 # Bottom drag: linear, ``r_bot = 1e-5``
 R_BOT = 1.0e-5
@@ -144,6 +149,10 @@ def build_acc_grid() -> LatLonGrid:
         n_lat=NY, n_lon=NX,
         lat_south=lat_south, lat_north=lat_north,
         lon_west=lon_west, lon_east=lon_east,
+        # Pin Earth radius / rotation to Veros's values via config (so the grid
+        # metrics + Coriolis are correct without relying on override_constants).
+        radius=VEROS_CONSTANTS_CONFIG.R_earth,
+        omega=VEROS_CONSTANTS_CONFIG.Omega,
         periodic_x=True,
     )
     return grid
@@ -291,7 +300,14 @@ def build_acc_model_config() -> LatLonCGridOceanConfig:
     scaling, linear bottom drag, implicit vertical viscosity,
     Veros's nonlin3 EOS."""
     return LatLonCGridOceanConfig(
-        A_h=acc_A_h(),
+        # All physical constants pinned to Veros via config (G-C4): g/rho_0 are
+        # read by the PE core, the ConstantsConfig by the de-mirrored physics,
+        # and R_earth feeds acc_A_h — so the recipe no longer needs the
+        # override_constants monkey-patch for these.
+        g=VEROS_CONSTANTS_CONFIG.g,
+        rho_0=VEROS_CONSTANTS_CONFIG.rho_0,
+        constants=VEROS_CONSTANTS_CONFIG,
+        A_h=acc_A_h(VEROS_CONSTANTS_CONFIG.R_earth),
         A_h_lat_scaling=True,
         A_h_cos_power=1,
         bottom_drag_r=R_BOT,

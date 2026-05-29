@@ -8,16 +8,16 @@ Constants override: ``override_constants(**VEROS_CONSTANTS)``
 
 ## legoESM probe summary
 
-- ``pgf_ke_u``: shape (44, 31, 15), min=-5.304e-08, max=1.952e-07, L1=1.815e-09
-- ``pgf_ke_v``: shape (45, 30, 15), min=-1.354e-07, max=1.802e-07, L1=3.204e-08
-- ``coriolis_u``: shape (44, 31, 15), min=-3.855e-06, max=9.891e-07, L1=1.326e-07
+- ``pgf_ke_u``: shape (44, 31, 15), min=-5.312e-08, max=1.955e-07, L1=1.818e-09
+- ``pgf_ke_v``: shape (45, 30, 15), min=-1.356e-07, max=1.805e-07, L1=3.209e-08
+- ``coriolis_u``: shape (44, 31, 15), min=-3.855e-06, max=9.892e-07, L1=1.326e-07
 - ``coriolis_v``: shape (45, 30, 15), min=-4.239e-06, max=3.626e-06, L1=1.754e-07
-- ``vortcor_u``: shape (44, 31, 15), min=-6.040e-09, max=3.605e-09, L1=6.316e-11
-- ``vortcor_v``: shape (45, 30, 15), min=-5.056e-09, max=5.976e-09, L1=5.496e-11
-- ``vertadv_u``: shape (44, 31, 15), min=-8.453e-09, max=6.622e-09, L1=6.279e-11
-- ``vertadv_v``: shape (45, 30, 15), min=-1.731e-08, max=1.758e-08, L1=8.760e-11
-- ``ah_lap_u``: shape (44, 31, 15), min=-2.828e-07, max=4.635e-07, L1=3.937e-09
-- ``ah_lap_v``: shape (45, 30, 15), min=-2.054e-07, max=1.955e-07, L1=3.463e-09
+- ``vortcor_u``: shape (44, 31, 15), min=-6.041e-09, max=3.606e-09, L1=6.317e-11
+- ``vortcor_v``: shape (45, 30, 15), min=-5.057e-09, max=5.977e-09, L1=5.497e-11
+- ``vertadv_u``: shape (44, 31, 15), min=-8.454e-09, max=6.624e-09, L1=6.280e-11
+- ``vertadv_v``: shape (45, 30, 15), min=-1.731e-08, max=1.758e-08, L1=8.762e-11
+- ``ah_lap_u``: shape (44, 31, 15), min=-2.829e-07, max=4.636e-07, L1=3.939e-09
+- ``ah_lap_v``: shape (45, 30, 15), min=-2.055e-07, max=1.956e-07, L1=3.464e-09
 - ``bh_bilap_u``: shape (44, 31, 15), min=0.000e+00, max=0.000e+00, L1=0.000e+00
 - ``bh_bilap_v``: shape (45, 30, 15), min=0.000e+00, max=0.000e+00, L1=0.000e+00
 - ``botdrag_u``: shape (44, 31, 15), min=-1.411e-10, max=1.229e-10, L1=3.076e-12
@@ -26,12 +26,12 @@ Constants override: ``override_constants(**VEROS_CONSTANTS)``
 - ``av_vert_v``: shape (45, 30, 15), min=0.000e+00, max=0.000e+00, L1=0.000e+00
 - ``phys_u``: shape (44, 31, 15), min=0.000e+00, max=0.000e+00, L1=0.000e+00
 - ``phys_v``: shape (45, 30, 15), min=0.000e+00, max=0.000e+00, L1=0.000e+00
-- ``total_u``: shape (44, 31, 15), min=-2.660e-07, max=4.716e-07, L1=5.410e-09
-- ``total_v``: shape (45, 30, 15), min=-2.085e-07, max=1.952e-07, L1=3.376e-08
-- ``dT_dt_total``: shape (44, 30, 15), min=-3.556e-09, max=3.859e-09, L1=1.206e-10
-- ``dS_dt_total``: shape (44, 30, 15), min=-2.539e-20, max=2.573e-20, L1=1.287e-21
-- ``dT_gm_redi``: shape (44, 30, 15), min=-3.556e-09, max=3.859e-09, L1=1.206e-10
-- ``dS_gm_redi``: shape (44, 30, 15), min=-2.539e-20, max=2.573e-20, L1=1.287e-21
+- ``total_u``: shape (44, 31, 15), min=-2.660e-07, max=4.718e-07, L1=5.414e-09
+- ``total_v``: shape (45, 30, 15), min=-2.086e-07, max=1.953e-07, L1=3.381e-08
+- ``dT_dt_total``: shape (44, 30, 15), min=-3.557e-09, max=3.860e-09, L1=1.206e-10
+- ``dS_dt_total``: shape (44, 30, 15), min=-2.540e-20, max=2.574e-20, L1=1.288e-21
+- ``dT_gm_redi``: shape (44, 30, 15), min=-3.557e-09, max=3.860e-09, L1=1.206e-10
+- ``dS_gm_redi``: shape (44, 30, 15), min=-2.540e-20, max=2.574e-20, L1=1.288e-21
 - ``rho``: shape (44, 30, 15), min=9.973e+02, max=1.034e+03, L1=1.025e+03
 
 ## Per-region per-process metrics (legoESM vs Veros)
@@ -61,7 +61,7 @@ legoESM components aggregated to Veros groupings (du_adv=vortcor+vertadv, du_mix
 | coriolis_u | 1.497e-07 | 0.9590 | 0.9168 | 0.9810 |
 | coriolis_v | 1.137e-07 | 0.9764 | 0.9774 | 0.9818 |
 | du_adv | 4.279e-10 | 0.5837 | 0.7842 | 0.9136 |
-| dv_adv | 8.800e-10 | -0.3364 | 0.5370 | 0.2345 |
+| dv_adv | 8.801e-10 | -0.3364 | 0.5370 | 0.2345 |
 | du_mix | 7.157e-07 | 0.0011 | 0.0651 | 0.0000 |
 | dv_mix | 3.616e-07 | 0.0077 | 0.0636 | 0.0000 |
 

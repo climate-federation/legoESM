@@ -59,8 +59,7 @@ def test_recipe_dzt_sums_to_2080m():
 def test_acc_A_h_value():
     """A_h = (2 * R_earth · π/180)^3 · 2e-11. Veros canonical."""
     R = 6.370e6   # Veros's radius; legoESM default differs slightly
-    with override_constants(R_earth=R):
-        A_h = acc_A_h()
+    A_h = acc_A_h(R)   # R_earth passed explicitly (recipe pins via config, not the patch)
     degtom = R * np.pi / 180.0
     expected = (2 * degtom) ** 3 * 2.0e-11
     np.testing.assert_allclose(A_h, expected, rtol=1e-12)
@@ -458,6 +457,19 @@ def test_recipe_gm_redi_wired_at_top_level_not_physics():
         "GM/Redi must be at model_config.gm_redi (what the lat-lon model reads)"
     )
     assert recipe.model_config.physics.lateral_mixing.scheme == "none"
+
+
+def test_recipe_self_pins_constants_without_monkey_patch():
+    """G-C4: build_acc_recipe() pins g/rho_0/constants (and grid radius/Omega +
+    A_h via R_earth) to Veros values through config — WITHOUT entering an
+    override_constants context. This is the prerequisite for removing the
+    monkey-patch."""
+    from legoesm.ocean.constants_config import VEROS_CONSTANTS_CONFIG
+
+    recipe = build_acc_recipe()  # NOTE: no override_constants(...) here
+    assert recipe.model_config.g == VEROS_CONSTANTS_CONFIG.g == 9.81
+    assert recipe.model_config.rho_0 == VEROS_CONSTANTS_CONFIG.rho_0 == 1024.0
+    assert recipe.model_config.constants is VEROS_CONSTANTS_CONFIG
 
 
 def test_latlon_model_rejects_physics_lateral_mixing():
