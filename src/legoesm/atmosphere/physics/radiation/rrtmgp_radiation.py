@@ -61,7 +61,9 @@ def rrtmgp_radiation(
     cloud_path_ice: jnp.ndarray | None = None,
     cloud_r_eff_liq: jnp.ndarray | None = None,
     cloud_r_eff_ice: jnp.ndarray | None = None,
+    cloud_fraction: jnp.ndarray | None = None,
     aerosol_optical_depth: jnp.ndarray | None = None,
+    aerosol_absorption_optical_depth_lw: jnp.ndarray | None = None,
     solar_spectral_fraction: jnp.ndarray | None = None,
     ghg_vmr_override: dict | None = None,
 ) -> RadiationOutput:
@@ -84,7 +86,9 @@ def rrtmgp_radiation(
         cloud_path_ice=cloud_path_ice,
         cloud_r_eff_liq=cloud_r_eff_liq,
         cloud_r_eff_ice=cloud_r_eff_ice,
+        cloud_fraction=cloud_fraction,
         aerosol_optical_depth=aerosol_optical_depth,
+        aerosol_absorption_optical_depth_lw=aerosol_absorption_optical_depth_lw,
         solar_spectral_fraction=solar_spectral_fraction,
         ghg_vmr_override=ghg_vmr_override,
     )

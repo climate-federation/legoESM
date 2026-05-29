@@ -3032,6 +3032,30 @@ class TestLwAerosolPath:
             ),
         )
 
+    def test_lw_aerosol_reachable_through_public_shim(self):
+        """Iter-81 (codex review): the LW aerosol kwarg must be reachable +
+        effective through the public ``rrtmgp_radiation`` compatibility
+        entry point, not only the direct ``RRTMGP.solve_columns`` API —
+        otherwise the feature is silently absent from production callers
+        going through the shim."""
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+            rrtmgp_radiation,
+        )
+        base, ncol, nlev = self._cols()
+        cfg = RRTMGPConfig(include_clouds=False)
+        none = rrtmgp_radiation(config=cfg, **base)
+        aer = rrtmgp_radiation(
+            config=cfg, **base,
+            aerosol_absorption_optical_depth_lw=self._elevated_aod(ncol, nlev),
+        )
+        drop = float(none.lw_flux_up[0, 0]) - float(aer.lw_flux_up[0, 0])
+        assert drop > 1.0, (
+            f"LW aerosol passed through rrtmgp_radiation() did not change OLR "
+            f"(Δ={drop:+.3f} W/m²) — the shim is not forwarding "
+            f"aerosol_absorption_optical_depth_lw to solve_columns."
+        )
+
 
 class TestDeltaScaling:
     """Iter-77: pin the shortwave cloud delta-scaling transform.
