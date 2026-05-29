@@ -694,6 +694,36 @@ class TestRRTMGP:
         assert RRTMGP._instance_cache_key(cfg_loop) != RRTMGP._instance_cache_key(cfg_auto)
         assert RRTMGP._instance_cache_key(cfg_scan) != RRTMGP._instance_cache_key(cfg_auto)
 
+    def test_iter41_clear_sky_optics_raises_on_direct_cloud_call(self):
+        """iter-41 codex review follow-up: when RRTMOptics was built
+        with include_clouds=False, the cloud_optics_lw/sw attributes
+        are None.  The public ``solve_columns`` gate prevents this
+        path from being reached, but a direct caller that bypasses
+        the gate and feeds cloud_path_liq through
+        ``compute_lw_optical_properties`` must get a clear
+        ValueError pointing at the include_clouds=False mismatch,
+        not an opaque AttributeError on ``None.cloud_optics_lw``.
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        cfg = RRTMGPConfig(include_clouds=False)
+        solver = RRTMGP.from_legoesm_config(cfg)
+        # Direct call to compute_lw_optical_properties with non-None
+        # cloud paths should raise ValueError, not AttributeError.
+        ncol, nlev = 1, 4
+        T = jnp.full((ncol, 1, nlev), 250.0)
+        p = jnp.full((ncol, 1, nlev), 5e4)
+        mol = jnp.full((ncol, 1, nlev), 1e22)
+        cloud_path = jnp.full((ncol, 1, nlev), 1e-3)
+        cloud_reff = jnp.full((ncol, 1, nlev), 1e-5)
+        with pytest.raises(ValueError, match="include_clouds=False"):
+            solver.optics_lib.compute_lw_optical_properties(
+                p, T, mol, igpt=jnp.array(0),
+                cloud_path_liq=cloud_path,
+                cloud_r_eff_liq=cloud_reff,
+            )
+
     def test_iter40_include_clouds_in_optics_key_with_conditional_load(self):
         """iter-40 supersedes the iter-36 semantics: ``include_clouds``
         is back in ``_optics_cache_key``, but now for a *meaningful*

@@ -282,6 +282,15 @@ class RRTMOptics(optics_base.OpticsScheme):
     """The actual cloud optical properties calculation."""
     logging.info('Calling cloud optical properties graph.')
     cloud_lookup = self.cloud_optics_lw if is_lw else self.cloud_optics_sw
+    # iter-41: defensive guard.  The public entry point
+    # ``_combine_gas_and_cloud_properties`` already errors out when
+    # ``cloud_optics_*`` is None (iter-40 include_clouds=False
+    # path), but ``_cloud_props`` is exposed via
+    # ``cloud_properties_fn`` so a direct caller could still hit it.
+    assert cloud_lookup is not None, (
+        "_cloud_props called with cloud_optics_lw/sw=None; "
+        "rebuild RRTMOptics with include_clouds=True."
+    )
     return cloud_optics.compute_optical_properties(
         cloud_lookup,
         cloud_path_liq,
@@ -365,6 +374,22 @@ class RRTMOptics(optics_base.OpticsScheme):
     by the fractional cloud cover so that partially-cloudy grid cells
     have proportionally reduced cloud radiative effect.
     """
+    # iter-41 codex review: explicit None-guard for the cloud-optics
+    # lookups.  When ``RRTMOptics`` was constructed with
+    # ``include_clouds=False`` (iter-40), the cloud_optics_lw/sw
+    # attributes are ``None`` and the public ``solve_columns`` gate
+    # ensures cloud paths are also None — so this branch isn't
+    # reached.  But a direct caller that bypasses ``solve_columns``
+    # and invokes ``compute_lw_optical_properties`` with cloud paths
+    # would hit ``None.cloud_optics_*`` here.  Raise a clear error
+    # instead of letting the AttributeError propagate.
+    cloud_lookup = self.cloud_optics_lw if is_lw else self.cloud_optics_sw
+    if cloud_lookup is None:
+      raise ValueError(
+          "RRTMOptics was constructed with include_clouds=False but "
+          "cloud_path_liq or cloud_path_ice is non-None.  Either rebuild "
+          "the solver with include_clouds=True or omit the cloud kwargs."
+      )
     gas_lookup = self.gas_optics_lw if is_lw else self.gas_optics_sw
     assert gas_lookup is not None  # Type narrowing.
 

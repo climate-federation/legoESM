@@ -241,16 +241,27 @@ class RRTMGP:
               hash(x)
               return x
           except TypeError:
-              # 0-D arrays (jnp/np scalar shape == ()): convert to
-              # Python float for stable cross-process / cross-trace
-              # cache hits, since ``id()`` would otherwise create a
-              # new cache entry every call.
+              # 0-D arrays (jnp/np scalar shape == ()): convert to a
+              # stable value-hashable form so two ``jnp.array(0.07)``
+              # values share the cache key.  iter-39 + codex iter-40
+              # review: ``float(x)`` fails on complex dtypes; gate
+              # on dtype kind to keep ``float()`` safe for the
+              # legitimate ``float`` / ``int`` / ``bool`` config
+              # fields and fall through to ``id()`` for exotic
+              # dtypes (e.g. complex, which RRTMGPConfig should
+              # never see).
               shape = getattr(x, "shape", None)
               if shape == ():
-                  return float(x)
-              # N-D arrays: id-based key.  Safe under JAX immutability; a
-              # new array (e.g. fresh AIMIP fit per epoch) gets a new
-              # id and rebuilds the cached instance.
+                  dtype_kind = getattr(getattr(x, "dtype", None), "kind", None)
+                  # 'f' float, 'i' int, 'b' bool, 'u' uint — all safely
+                  # coerce to Python float.  'c' complex, 'O' object,
+                  # 'U' unicode, etc. fall through to id().
+                  if dtype_kind in ("f", "i", "b", "u"):
+                      return float(x)
+              # N-D arrays (or 0-D with non-numeric dtype): id-based
+              # key.  Safe under JAX immutability; a new array (e.g.
+              # fresh AIMIP fit per epoch) gets a new id and
+              # rebuilds the cached instance.
               return id(x)
 
       # iter-40: ``include_clouds`` is now ALSO in the optics key
