@@ -138,6 +138,53 @@ def standard_o3_profile(p_full):
     return _standard_o3_profile(p_full)
 
 
+def _cast_optics_f64_to_f32(obj):
+    """Recursively cast every float64 array leaf in ``obj`` to float32.
+
+    The RRTMGP optics objects are plain Python classes (``RRTMOptics``)
+    holding stdlib ``@dataclasses.dataclass(frozen=True)`` lookup tables
+    (``gas_optics_lw/sw``, ``cloud_optics_lw/sw``) whose fields are
+    ``jax.Array`` tables.  NONE of these are registered JAX pytrees, so
+    ``jax.tree_util.tree_map`` treats each as a single opaque leaf and casts
+    NOTHING — the silent no-op this replaces (fp32 heating came out
+    bit-identical to fp64 because the tables stayed float64).  This walks the
+    structure by hand: float64 arrays are cast; frozen dataclasses are rebuilt
+    via ``dataclasses.replace``; dicts / lists / tuples are mapped; and plain
+    objects with a ``__dict__`` (e.g. ``RRTMOptics``) have each attribute cast
+    in place.  Integer index tables and non-float leaves are left untouched.
+    Used only on the ``compute_fp32`` path.
+    """
+    import dataclasses as _dc
+
+    # Array leaf (jax or numpy): cast float64 -> float32, keep everything else
+    # (int index tables, already-float32, bool) as is.
+    _dtype = getattr(obj, "dtype", None)
+    if _dtype is not None:
+        return obj.astype(jnp.float32) if _dtype == jnp.float64 else obj
+    # Frozen / plain stdlib dataclass instance: rebuild changed float fields.
+    if _dc.is_dataclass(obj) and not isinstance(obj, type):
+        changes = {}
+        for _f in _dc.fields(obj):
+            _v = getattr(obj, _f.name)
+            _nv = _cast_optics_f64_to_f32(_v)
+            if _nv is not _v:
+                changes[_f.name] = _nv
+        return _dc.replace(obj, **changes) if changes else obj
+    if isinstance(obj, dict):
+        return {_k: _cast_optics_f64_to_f32(_v) for _k, _v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_cast_optics_f64_to_f32(_v) for _v in obj)
+    # Plain object (e.g. RRTMOptics, which is mutable): cast each attribute in
+    # place and return the same object.
+    if hasattr(obj, "__dict__"):
+        for _a, _v in vars(obj).items():
+            _nv = _cast_optics_f64_to_f32(_v)
+            if _nv is not _v:
+                setattr(obj, _a, _nv)
+        return obj
+    return obj
+
+
 class RRTMGP:
   """Rapid Radiative Transfer Model for General Circulation Models (RRTMGP).
 
