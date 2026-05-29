@@ -347,6 +347,31 @@ class TestMeltPonds:
         )
         assert float(a) == 0.0
 
+    def test_pond_gradient_finite_at_empty_pond(self):
+        """d(pond)/d(melt_water) must be finite at an empty pond (V_new = 0).
+
+        Regression: ``h_pond = sqrt(max(ratio·V_new, 0))`` had sqrt'(0) = inf at
+        V_new = 0 — the common no-melt / cold-season state — giving a NaN
+        reverse-mode gradient through pond depth.  Flooring the sqrt argument
+        fixes it; the forward is unchanged (empty pond -> area 0).  Mirrors the
+        sea_ice.py pond_depth fix (iter 2).
+        """
+        def loss(melt):
+            a, d, _, _ = step_ponds(
+                pond_area=jnp.array(0.0), pond_depth=jnp.array(0.0),
+                melt_water_m=melt, rain_water_m=jnp.array(0.0),
+                ice_mask=jnp.array(True), h_snow=jnp.array(0.0),
+                T_air=jnp.array(275.0), dt=3600.0, drainage_timescale=86400.0,
+                refreeze_threshold=273.15, pond_to_ice_max_area=0.6,
+                depth_to_area_ratio=0.8,
+            )
+            return a + d
+
+        grad = jax.grad(loss)(jnp.array(0.0))  # empty pond: V_new = 0
+        assert bool(jnp.isfinite(grad)), (
+            f"pond gradient not finite at empty pond: {grad}"
+        )
+
     def test_ponds_refreeze_below_threshold(self):
         a_in = jnp.array(0.3)
         d_in = jnp.array(0.1)

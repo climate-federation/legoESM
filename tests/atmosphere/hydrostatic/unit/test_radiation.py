@@ -1373,12 +1373,23 @@ class TestCloudFraction:
         cf = sundqvist_cloud_fraction(RH, config)
         assert jnp.allclose(cf, 1.0, atol=1e-10)
 
-    def test_sundqvist_linear_ramp(self):
-        """Sundqvist should give 0.5 at RH = (1 + RH_crit) / 2."""
+    def test_sundqvist_sqrt_form(self):
+        """Faithful Sundqvist √-form: b = 1 − √((1−RH)/(1−RH_crit)).
+        At RH = (1+RH_crit)/2 the argument is 1/2 ⇒ b = 1 − √0.5 ≈ 0.293
+        (NOT 0.5 — the earlier linear-ramp value)."""
         config = CloudConfig(scheme="sundqvist", rh_crit=0.7)
-        RH_mid = jnp.array([[(1.0 + 0.7) / 2]])
+        RH_mid = jnp.array([[(1.0 + 0.7) / 2]])      # = 0.85, arg = 0.5
         cf = sundqvist_cloud_fraction(RH_mid, config)
-        assert jnp.allclose(cf, 0.5, atol=1e-6)
+        assert jnp.allclose(cf, 1.0 - jnp.sqrt(jnp.array(0.5)), atol=1e-6)
+        # Monotonic increasing in RH between RH_crit and 1.
+        RH = jnp.array([[0.7, 0.8, 0.9, 1.0]])
+        cf_seq = sundqvist_cloud_fraction(RH, config)
+        assert jnp.all(jnp.diff(cf_seq[0]) > 0)
+        # AD-safe at saturation (√ derivative would be infinite at RH=1).
+        g = jax.grad(lambda r: jnp.sum(sundqvist_cloud_fraction(r, config)))(
+            jnp.array([[1.0, 0.99]])
+        )
+        assert jnp.all(jnp.isfinite(g))
 
     def test_xu_randall_zero_without_condensate(self):
         """Xu-Randall should give 0 when condensate is zero."""
@@ -1389,6 +1400,29 @@ class TestCloudFraction:
         q_sat = jnp.full((ncol, nlev), 0.01)
         cf = xu_randall_cloud_fraction(RH, q_c, q_sat, config)
         assert jnp.allclose(cf, 0.0, atol=1e-8)
+
+    def test_xu_randall_gradient_finite_at_zero_rh(self):
+        """d(cloud fraction)/d(RH) must be finite at RH=0 (dry layer).
+
+        Regression: ``RH**p_xr`` with ``p_xr<1`` has an infinite derivative at
+        RH=0 (the clip floor was 0), so reverse-mode AD produced an inf
+        gradient d(cf)/d(q_v) for any dry layer (upper stratosphere / dry init),
+        poisoning end-to-end training that touches a dry column.  Flooring the
+        clip base fixes the gradient; the forward (cf -> 0 as condensate -> 0)
+        is unchanged.
+        """
+        config = CloudConfig(scheme="xu_randall")
+        q_sat = jnp.full((3,), 0.01)
+        q_c = jnp.full((3,), 1e-4)
+
+        def loss(RH):
+            return jnp.sum(xu_randall_cloud_fraction(RH, q_c, q_sat, config))
+
+        for rh0 in (0.0, 1e-9, 0.5):
+            grad = jax.grad(loss)(jnp.full((3,), rh0))
+            assert bool(jnp.all(jnp.isfinite(grad))), (
+                f"xu_randall cloud-fraction gradient not finite at RH={rh0}: {grad}"
+            )
 
     def test_xu_randall_increases_with_condensate(self):
         """Xu-Randall cloud fraction should increase with condensate."""
@@ -1434,8 +1468,10 @@ class TestCloudFraction:
         q_v_moist = 0.9 * q_sat  # RH = 0.9 > rh_crit
 
         props = compute_cloud_properties(T, p_full, q_v_moist, dp, config)
-        # Should have nonzero cloud fraction and water paths
-        assert float(jnp.max(props.cloud_fraction)) > 0.5
+        # Significant cloud at RH=0.9.  The faithful Sundqvist √-form gives
+        # 1 − √((1−0.9)/(1−0.7)) ≈ 0.42 here (full cloud only near
+        # saturation), vs the old linear ramp's 0.67.
+        assert float(jnp.max(props.cloud_fraction)) > 0.4
         assert float(jnp.sum(props.lwp + props.iwp)) > 0.0
 
     def test_cloud_properties_ice_at_cold_temperatures(self):

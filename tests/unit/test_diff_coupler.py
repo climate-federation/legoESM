@@ -110,6 +110,37 @@ class TestTileBlendingGrad:
         grad = jax.grad(loss)(ice_conc)
         assert_gradient_ok(grad, "Tile blending w.r.t. ice_concentration")
 
+    def test_grad_wrt_tile_fraction_finite_at_pure_ocean(self):
+        """d/d(f_land) must be finite at pure-ocean cells (f_land=f_lake=0).
+
+        Regression: the static renormalization ``where(total>1, 1/total, 1.0)``
+        differentiated the *unselected* ``1/total`` at total=0 — a pure-ocean
+        cell, the most common cell — giving ``0*inf = NaN`` gradients w.r.t. the
+        tile masks (tile-mask sensitivity / coupled adjoint).  Flooring the
+        reciprocal denominator fixes it; the forward is unchanged (the reciprocal
+        is only selected when total>1).  A mix of pure-ocean, sub-unity, and
+        over-unity cells is exercised.
+        """
+        from legoesm.coupler.tile_fractions import compute_tile_fractions
+        from legoesm.coupler.config import TileConfig
+
+        n = 4
+        shape = (6, n, n)
+        f_land0 = jnp.zeros(shape).at[0, 0, 0].set(0.3).at[0, 1, 1].set(0.7)
+        # cell (0,1,1): f_land+f_lake = 1.3 > 1 (renorm path); rest pure ocean.
+        f_lake0 = jnp.zeros(shape).at[0, 1, 1].set(0.6)
+        ice_conc = 0.2 * jnp.ones(shape)
+
+        def loss(f_land):
+            cfg = TileConfig(f_land=f_land, f_lake=f_lake0)
+            fr = compute_tile_fractions(cfg, ice_conc)
+            return jnp.sum(fr.f_ocean ** 2 + fr.f_land ** 2 + fr.f_lake ** 2)
+
+        grad = jax.grad(loss)(f_land0)
+        assert bool(jnp.all(jnp.isfinite(grad))), (
+            "tile-fraction gradient not finite at a pure-ocean cell"
+        )
+
 
 # ============================================================================
 # 6c  Full coupler step

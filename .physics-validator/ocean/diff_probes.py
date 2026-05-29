@@ -365,13 +365,27 @@ def probe_plume_convection():
         f"max|g|={float(jnp.max(jnp.abs(g))):.3e}",
     )
 
-    # Sanity: surface tendency should be zero (plume detrains below surface).
+    # Physics sanity: this column is statically UNSTABLE (cold/dense surface
+    # T=2C over warm/light deep T=14C), so convective adjustment must mix the
+    # WHOLE column — the surface warms (dT/dt > 0) and the deep cools, with the
+    # vertically-integrated heat exactly conserved (no spurious surface flux).
+    # (The earlier "surface tendency == 0" check assumed a penetrative-plume
+    # model that detrains below a fixed surface; this scheme is a heat-
+    # conserving convective-adjustment, for which a zero surface tendency on an
+    # unstable column would itself be the bug.)
+    dz_col = z_coord.dz_ref * jacobian[..., jnp.newaxis]
+    heat_resid = float(jnp.abs(jnp.sum(out.dT_dt * dz_col, axis=-1)).max())
+    heat_gross = float((jnp.abs(out.dT_dt) * dz_col).sum(axis=-1).max())
     surface_tend = float(out.dT_dt[..., 0].mean())
-    ok_surface = abs(surface_tend) < 1e-12
+    ok_surface = (
+        heat_resid <= 1e-9 * max(heat_gross, 1e-30)  # column heat conserved
+        and surface_tend > 0.0                        # cold surface warms
+    )
     report(
-        "plume_convection: surface tendency=0",
+        "plume_convection: heat-conserving mixing (sfc warms, deep cools)",
         ok_surface,
-        f"avg surface dT/dt={surface_tend:.3e}",
+        f"surface dT/dt={surface_tend:.3e}, heat_resid/gross="
+        f"{heat_resid / max(heat_gross, 1e-30):.2e}",
     )
 
 

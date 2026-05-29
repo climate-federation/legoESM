@@ -9,6 +9,10 @@ References
 ----------
 - Louis, J.-F. (1979). A parametric model of vertical eddy fluxes in the
   atmosphere. Boundary-Layer Meteorol., 17, 187-202.
+- Louis, J.-F., Tiedtke, M., & Geleyn, J.-F. (1982). A short history of
+  the operational PBL parameterization at ECMWF. ECMWF Workshop on
+  Planetary Boundary Layer Parameterization, 59-79.  (Separate momentum
+  vs heat stability functions, ``b_h/b_m = 3/2``.)
 """
 
 from __future__ import annotations
@@ -111,31 +115,41 @@ def louis_turbulence(
     N2 = (constants.g / jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz  # Brunt-Väisälä
     Ri = N2 / S2  # (ncol, nlev-1)
 
-    # Louis (1979) stability functions
-    # Smooth blending using sigmoid to avoid if/else branching
-    # Unstable (Ri < 0): f(Ri) = 1 - 2b*Ri / (1 + 3b*c * l^2 * |Ri|^0.5 / dz^2)
-    # Stable (Ri >= 0): f(Ri) = 1 / (1 + 2b*Ri / sqrt(1 + d*Ri))
+    # Louis stability functions (Louis 1979; separate heat function per
+    # Louis, Tiedtke & Geleyn 1982).  Smooth sigmoid blend avoids if/else.
+    #   Unstable (Ri<0): f = 1 - 2b·Ri / (1 + 3b·c·l²·|Ri|^½ / dz²)
+    #   Stable   (Ri≥0): f = 1 / (1 + 2b·Ri / sqrt(1 + d·Ri))
+    # Momentum uses b_m = b_louis; heat uses b_h = b_heat_ratio·b_louis
+    # (LTG82: 3b heat vs 2b momentum ⇒ ratio 1.5).  The denominators are
+    # SHARED between momentum and heat so only the numerator coefficient
+    # differs: K_m is then exactly independent of b_heat_ratio, and
+    # b_heat_ratio = 1 recovers the Louis (1979) f_h = f_m form.  The
+    # heat function is *more* enhanced when unstable (Pr_t = K_m/K_h < 1)
+    # and *more* suppressed when stable (Pr_t > 1), as observed.
     b_louis = config.b_louis
     c_louis = config.c_louis
     d_louis = config.d_louis
+    b_heat = config.b_heat_ratio * b_louis
 
-    # Unstable branch
+    # Unstable branch — denominator shared between momentum and heat.
     Ri_neg = jnp.minimum(Ri, 0.0)
-    f_unstable = 1.0 - 2.0 * b_louis * Ri_neg / (
+    denom_unstable = (
         1.0 + 3.0 * b_louis * c_louis * l_mix ** 2
         * jnp.sqrt(jnp.abs(Ri_neg) + 1e-10) / (dz_half ** 2 + 1e-10)
     )
+    f_unstable_m = 1.0 - 2.0 * b_louis * Ri_neg / denom_unstable
+    f_unstable_h = 1.0 - 2.0 * b_heat * Ri_neg / denom_unstable
 
-    # Stable branch
+    # Stable branch — sqrt denominator shared between momentum and heat.
     Ri_pos = jnp.maximum(Ri, 0.0)
-    f_stable = 1.0 / (
-        1.0 + 2.0 * b_louis * Ri_pos / jnp.sqrt(1.0 + d_louis * Ri_pos)
-    )
+    sqrt_stable = jnp.sqrt(1.0 + d_louis * Ri_pos)
+    f_stable_m = 1.0 / (1.0 + 2.0 * b_louis * Ri_pos / sqrt_stable)
+    f_stable_h = 1.0 / (1.0 + 2.0 * b_heat * Ri_pos / sqrt_stable)
 
     # Smooth blending: sigmoid transitions from unstable to stable
     blend = jax.nn.sigmoid(config.blend_ri_sharpness * Ri)
-    f_m = (1.0 - blend) * f_unstable + blend * f_stable
-    f_h = f_m  # Same stability function for heat (Louis 1979 simplification)
+    f_m = (1.0 - blend) * f_unstable_m + blend * f_stable_m
+    f_h = (1.0 - blend) * f_unstable_h + blend * f_stable_h
 
     # Eddy diffusivities at half-levels
     Km_half = l_mix ** 2 * S * f_m  # (ncol, nlev-1)

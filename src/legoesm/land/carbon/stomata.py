@@ -196,7 +196,12 @@ def farquhar_photosynthesis(
     a = config.theta_j
     b = -(config.alpha_q * APAR_umol + J_max)
     c_coeff = config.alpha_q * APAR_umol * J_max
-    disc = jnp.maximum(b ** 2 - 4.0 * a * c_coeff, 0.0)
+    # Floor the discriminant at a tiny positive rather than 0: with curvature
+    # theta_j -> 1 (some Farquhar formulations use 1.0) the co-limitation
+    # discriminant b^2 - 4ac can reach 0, where sqrt'(0) = inf gives a NaN
+    # gradient (d J / d APAR).  For the default theta_j = 0.9 the discriminant
+    # is O(1e3), so the 1e-12 floor never changes the forward value.
+    disc = jnp.maximum(b ** 2 - 4.0 * a * c_coeff, 1e-12)
     J = (-b - jnp.sqrt(disc)) / (2.0 * a + 1e-20)
 
     # RuBP-regeneration-limited rate

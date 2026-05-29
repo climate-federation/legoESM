@@ -206,11 +206,26 @@ def ysu_turbulence(
     sflx_T = shflx / constants.c_pd
     sflx_q = lhflx / constants.L_v
 
+    # ----- Nonlocal countergradient (Troen-Mahrt 1986 / Hong et al. 2006) -----
+    # γ_c = b·(w'θ')_0 / (w_s·h)  [K/m], YSU's defining nonlocal upward
+    # heat transport in the convective BL.  Gated to unstable surface
+    # forcing via max(w'θ', 0) (zero for neutral/stable), with the
+    # convective velocity scale w* in the denominator (⇒ the usual
+    # γ_c ∝ (w'θ')^{2/3} convective scaling).  Applied as an enhanced
+    # heat surface flux (same convention as the Holtslag-Boville scheme).
+    # The previous YSU had only the local K-profile + entrainment K, so
+    # the nonlocal countergradient (the whole point of the scheme) was
+    # absent.
+    counter_grad = config.countergrad_coeff * jnp.maximum(wtheta_sfc, 0.0) / (
+        jnp.clip(w_star, 1e-6, None) * h_pbl
+    )  # (ncol,) [K/m]
+    sflx_T_enhanced = sflx_T + rho[:, -1] * jnp.mean(Kh_half, axis=1) * counter_grad
+
     # Implicit vertical diffusion.  Heat in θ-space (dry-adiabat neutral).
     u_new = implicit_vertical_diffusion(u, Km_half, rho, dz_layer, dz_half, dt, sflx_u)
     v_new = implicit_vertical_diffusion(v, Km_half, rho, dz_layer, dz_half, dt, sflx_v)
     T_new = implicit_vertical_diffusion_theta(
-        T, Kh_half, rho, dz_layer, dz_half, p_full, dt, sflx_T,
+        T, Kh_half, rho, dz_layer, dz_half, p_full, dt, sflx_T_enhanced,
     )
     q_new = implicit_vertical_diffusion(q_v, Kh_half, rho, dz_layer, dz_half, dt, sflx_q)
 

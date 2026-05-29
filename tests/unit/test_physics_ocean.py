@@ -111,6 +111,50 @@ def test_richardson_prandtl_grows_with_ri():
     )
 
 
+def test_kpp_unstable_prandtl_below_one():
+    """LMD94: in a convectively-unstable boundary layer the turbulent Prandtl
+    number Pr_t = A_v/K_v < 1 — scalars mix MORE efficiently than momentum
+    (scalar velocity scale w_s exceeds the momentum scale w_m).  Executable spec
+    for the F-OCEAN-1 fix.
+
+    Non-vacuous: the current single-scale scheme gives A_v ≳ K_v in the BL (they
+    differ only by the background floors A_bg=1e-4 > K_bg=1e-5 ⇒ Pr_t ≈ 1.01,
+    verified) — so this assertion fails until ``w_s > w_m`` is implemented and the
+    tracer BL diffusivity overtakes the momentum viscosity.
+    """
+    from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
+    from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
+
+    n, nlev = 8, 12
+    grid = create_cubed_sphere(n)
+    z_coord = create_ocean_z_star(n_levels=nlev, H_max=2000.0)
+    state = rest_state_ocean(
+        grid, z_coord, T_water_init_C=18.0, T_deep=4.0, S_uniform=35.0,
+        H_max=2000.0,
+    )
+    sh = state.T.data.shape
+    rho = jnp.broadcast_to(
+        jnp.linspace(1025.0, 1028.0, nlev)[None, None, None, :], sh,
+    )  # stable background stratification
+    surf = state.eta.data.shape
+    B_f = jnp.full(surf, 5e-7)   # strong destabilizing (convective) surface buoyancy flux
+    tau_x = jnp.full(surf, 0.1)  # wind stress -> nonzero u_star
+    tau_y = jnp.zeros(surf)
+
+    out = kpp_vertical_mixing(
+        state.u.data, state.v.data, state.T.data, state.S.data, rho,
+        state.eta.data, z_coord, jnp.ones(surf), KPPConfig(),
+        tau_x=tau_x, tau_y=tau_y, B_f=B_f, apply_diffusion=False,
+    )
+    # Top-3 interfaces sit inside the convective boundary layer.
+    K_v_bl = float(jnp.mean(out.K_v[..., :3]))
+    A_v_bl = float(jnp.mean(out.A_v[..., :3]))
+    assert K_v_bl > A_v_bl, (
+        f"Unstable-BL Pr_t = A_v/K_v = {A_v_bl / K_v_bl:.3f} ≥ 1; LMD94 requires "
+        f"Pr_t < 1 (tracer must mix more than momentum)."
+    )
+
+
 @pytest.mark.parametrize("scheme", ["constant", "richardson", "kpp"])
 def test_vertical_mixing_smoke(scheme):
     """Each vertical mixing scheme produces finite outputs."""
