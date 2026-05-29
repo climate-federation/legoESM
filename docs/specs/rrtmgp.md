@@ -128,7 +128,17 @@ Sole entry points to the RRTMGP solver are now
   sharded-equivalence verified for default and `use_optimal_angle=True`.
 - ✅ ~452 lines of dead swirl_jatmos compat code removed.
 
-## Deferred to iter 30+
+## Iter 30 → 35 (latest)
+
+| Iter | What |
+|---|---|
+| 30 | Doc compressed 189→137 lines.  Investigated 2 more codex "survivors" but they were intentional ``max(d,eps)`` patterns consumed by downstream divides; documented inline as kept-on-purpose. |
+| 31 | Test file top docstring: per-class iter-coverage table (10 classes). |
+| 32 | **Cache-key bug fixed**: ``_instance_cache_key`` was missing 5 baked-in config fields (S_0, aerosol_ssa, aerosol_g, sfc_emissivity, sfc_albedo).  Calibration loops that bumped these would silently reuse a stale solver.  Added ``_hashable`` shim that uses ``id()`` for AIMIP-style array-valued sfc_*. |
+| 33 | Drop redundant ``instance.atmospheric_state`` field (7-field AtmosphericState stored just to expose ``.vmr``).  Replaced with direct ``instance._vmr_lib``. |
+| 34 | End-to-end pin for iter-32: bumping ``aerosol_ssa`` between two ``rrtmgp_radiation`` calls must change the SW flux output (pre-iter-32 cache reused the stale solver). |
+
+## Deferred to iter 35+
 
 - Default-enable `use_optimal_angle=True` after upstream RFMIP
   reference-flux validation (iter-29 added the gating sharded test).
