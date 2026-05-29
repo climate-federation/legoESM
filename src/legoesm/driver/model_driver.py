@@ -695,6 +695,9 @@ class ModelDriver:
             S_0=cfg.S_0, source=cfg.solar_source,
             path=cfg.solar_file, tsi_var=cfg.solar_tsi_var,
             spectral_var=cfg.solar_spectral_var,
+            spectral_band_order=getattr(
+                cfg, "solar_spectral_band_order", "auto",
+            ),
             start_year=cfg.start_year,
         )
         self._use_solar_spectral = (cfg.solar_source == "spectral_file")

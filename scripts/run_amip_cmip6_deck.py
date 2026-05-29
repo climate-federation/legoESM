@@ -292,6 +292,10 @@ def main(argv: list[str] | None = None) -> int:
         "--solar-file", str(files["solar"]),
         "--solar-tsi-var", "TSI",
         "--solar-spectral-var", "SSI_frac",
+        # The MPI-M CMIP6 SSI_frac file is in RRTMG-SW band order; rotate
+        # it to RRTMGP order before g-point expansion (issue #322),
+        # otherwise UV flux is dumped into the near-IR water-vapour band.
+        "--solar-spectral-band-order", "rrtmg_sw",
         # Convection / clouds / microphysics
         "--convection", args.convection,
         "--turbulence", args.turbulence,

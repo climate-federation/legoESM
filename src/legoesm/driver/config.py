@@ -220,6 +220,7 @@ class ExperimentConfig(NamedTuple):
     solar_file: str = ""
     solar_tsi_var: str = "tsi"
     solar_spectral_var: str = "solar_fraction_by_gpt"
+    solar_spectral_band_order: str = "auto"   # auto | as_is | rrtmg_sw (#322)
 
     # Aerosol
     aerosol_forcing: str = "off"        # off, external
@@ -589,6 +590,7 @@ class ExperimentConfig(NamedTuple):
             solar_file=getattr(amip_cfg, 'solar_file', ''),
             solar_tsi_var=getattr(amip_cfg, 'solar_tsi_var', 'tsi'),
             solar_spectral_var=getattr(amip_cfg, 'solar_spectral_var', 'solar_fraction_by_gpt'),
+            solar_spectral_band_order=getattr(amip_cfg, 'solar_spectral_band_order', 'auto'),
             aerosol_forcing=getattr(amip_cfg, 'aerosol_forcing', 'off'),
             aerosol_file=getattr(amip_cfg, 'aerosol_file', ''),
             aerosol_reference_aod=getattr(amip_cfg, 'aerosol_reference_aod', 0.03),
@@ -691,6 +693,7 @@ class ExperimentConfig(NamedTuple):
             solar_file=self.solar_file,
             solar_tsi_var=self.solar_tsi_var,
             solar_spectral_var=self.solar_spectral_var,
+            solar_spectral_band_order=self.solar_spectral_band_order,
             aerosol_forcing=self.aerosol_forcing,
             aerosol_file=self.aerosol_file,
             aerosol_reference_aod=self.aerosol_reference_aod,
