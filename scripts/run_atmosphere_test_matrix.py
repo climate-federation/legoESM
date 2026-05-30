@@ -1207,6 +1207,21 @@ def _run_timeloop(
 # Diagnostic saving
 # ===========================================================================
 
+# Canonical cross-grid comparison canvas.  MUST match the cube/icosa weight
+# target in ``legoesm.grids.regridding`` (regridding.py:457): latitude
+# node-centered on [-90, 90]; longitude CELL-centered on [-180, 180)
+# (``linspace(-180,180,n,endpoint=False)+180/n``).  EVERY grid's snapshot regrid,
+# the icosa KD-tree target, AND the saved lon/lat metadata go through these so
+# all grids share one registration with no half-cell drift between the data and
+# its longitude labels (or between grids).
+def _canvas_lat(n_lat: int = 181) -> np.ndarray:
+    return np.linspace(-90.0, 90.0, n_lat)
+
+
+def _canvas_lon(n_lon: int = 360) -> np.ndarray:
+    return np.linspace(-180.0, 180.0, n_lon, endpoint=False) + 180.0 / n_lon
+
+
 def _build_latlon_weights(
     lon_deg: np.ndarray,
     lat_deg: np.ndarray,
@@ -1226,8 +1241,8 @@ def _build_latlon_weights(
         np.cos(lat * d2r) * np.cos(lon * d2r),
         np.cos(lat * d2r) * np.sin(lon * d2r),
         np.sin(lat * d2r)])
-    lat_1d = np.linspace(-90.0, 90.0, n_lat)
-    lon_1d = np.linspace(-180.0, 180.0, n_lon)
+    lat_1d = _canvas_lat(n_lat)
+    lon_1d = _canvas_lon(n_lon)  # cell-centered — share the cube canvas
     lo, la = np.meshgrid(lon_1d, lat_1d)
     tgt = np.column_stack([
         np.cos(la.ravel() * d2r) * np.cos(lo.ravel() * d2r),
@@ -1309,15 +1324,13 @@ def _regrid_latlon_to_181x360(arr: np.ndarray, lon_deg: np.ndarray,
         (lat_src, lon_per), a_per, method="linear",
         bounds_error=False, fill_value=None,
     )
-    # Match the EXACT target the cube/icosa regrid uses (regridding.py): lat
-    # node-centered on [-90,90], lon CELL-centered on [-180,180) (so all grids
-    # share one canvas with no half-cell offset).  Source is [0,360); wrap the
-    # negative half of the target into [0,360) for the interpolation.
-    tgt_lat = np.linspace(-90.0, 90.0, 181)
-    tgt_lon = (np.linspace(-180.0, 180.0, 360, endpoint=False) + 180.0 / 360.0) % 360.0
+    # Target the shared canonical canvas (cell-centered lon, node-centered lat).
+    # Source is [0,360); wrap the canvas lon into [0,360) for the interpolation.
+    tgt_lat = _canvas_lat()
+    tgt_lon = _canvas_lon() % 360.0
     la, lo = np.meshgrid(tgt_lat, tgt_lon, indexing="ij")
     out = rgi(np.stack([la.ravel(), lo.ravel()], axis=-1))
-    return out.reshape((181, 360) + a.shape[2:])
+    return out.reshape((tgt_lat.size, tgt_lon.size) + a.shape[2:])
 
 
 def _regrid_2d(field: np.ndarray, lon_deg: np.ndarray, lat_deg: np.ndarray,
@@ -1688,8 +1701,8 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
         valid_steps = [valid_steps[i] for i in idx]
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    lat_axis = np.linspace(-90, 90, 181)
-    lon_axis = np.linspace(-180, 180, 360)
+    lat_axis = _canvas_lat()
+    lon_axis = _canvas_lon()  # cell-centered — match the regridded data canvas
 
     for fname, axis_vals, axis_key, mean_axis, xlabel in [
         ("latitude_vertical_cross_sections.png", lat_axis, "lat", 1, "Latitude"),
@@ -1970,8 +1983,8 @@ def _save_snapshot_data(
     # Build time-series arrays for native grid
     native_arrays = dict(common_metadata)
     latlon_arrays = dict(common_metadata)
-    latlon_arrays["lat"] = np.linspace(-90.0, 90.0, 181)
-    latlon_arrays["lon"] = np.linspace(-180.0, 180.0, 360)
+    latlon_arrays["lat"] = _canvas_lat()
+    latlon_arrays["lon"] = _canvas_lon()  # cell-centered — match the regrid data
 
     for field_key in all_field_keys:
         # Collect this field across all timesteps
@@ -2523,9 +2536,9 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             }
 
         key_array_fn = lambda s: s.h.data
-        coord_kind = "latlon"  # already regridded
-        lon_deg = np.linspace(-180, 180, 360, endpoint=False)
-        lat_deg = np.linspace(-90, 90, 181)
+        coord_kind = "latlon"  # already on the canonical (181,360) canvas
+        lon_deg = _canvas_lon()  # cell-centered -> re-regrid is identity
+        lat_deg = _canvas_lat()
 
     elif tc.grid_type == "spectral":
         from legoesm.grids.gaussian import (
@@ -3085,9 +3098,9 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
                 lon_cell, lat_cell)}
 
         key_array_fn = lambda s: s.h.data
-        coord_kind = "latlon"  # already regridded
-        lon_deg = np.linspace(-180, 180, 360, endpoint=False)
-        lat_deg = np.linspace(-90, 90, 181)
+        coord_kind = "latlon"  # already on the canonical (181,360) canvas
+        lon_deg = _canvas_lon()  # cell-centered -> re-regrid is identity
+        lat_deg = _canvas_lat()
 
         def error_fn(s, t):
             h_exact = cosine_bell_exact(mesh.lonCell, mesh.latCell,
@@ -6144,11 +6157,11 @@ def _create_atmosphere_comparison_snapshots(
             if md_lat.size == n_lat:
                 lat = md_lat
             else:
-                lat = np.linspace(-90.0, 90.0, n_lat)
+                lat = _canvas_lat(n_lat)
             if md_lon.size == n_lon:
                 lon = md_lon
             else:
-                lon = np.linspace(-180.0, 180.0, n_lon)
+                lon = _canvas_lon(n_lon)
             if have_cartopy:
                 im = ax.pcolormesh(
                     lon, lat, f2, cmap=cmap, vmin=vmin, vmax=vmax,
@@ -6295,9 +6308,9 @@ def _create_atmosphere_per_timestep_summary(
                 md_lat = np.asarray(snaps["lat"]) if "lat" in snaps.files else None
                 md_lon = np.asarray(snaps["lon"]) if "lon" in snaps.files else None
                 lat = md_lat if md_lat is not None and md_lat.size == n_lat \
-                    else np.linspace(-90.0, 90.0, n_lat)
+                    else _canvas_lat(n_lat)
                 lon = md_lon if md_lon is not None and md_lon.size == n_lon \
-                    else np.linspace(-180.0, 180.0, n_lon)
+                    else _canvas_lon(n_lon)
                 if have_cartopy:
                     im = ax.pcolormesh(
                         lon, lat, f2, cmap=cmap,
