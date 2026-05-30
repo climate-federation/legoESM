@@ -269,3 +269,8 @@ smaller mechanism, untouched.
 OPEN: topography-PGF residual (rest_state_topo, separate); MPI vector packed halo
 (single-device unaffected); ico-MPAS-baroclinic HANG (separate); held_suarez/AMIP
 broad climate verify; latlon-hybrid equatorial artifact (latlon, separate).
+
+## iter 14g — fix does NOT break climate / SW
+- cube HS (10-day, FIX): T mean 286.5K [276,309], finite, physical climate.
+- SW W2 1-day sentinel: 13/13 PASS (fix is PE-only; FV3Edge SW untouched).
+⇒ the vector-seam fix is dynamics-correct + climate-safe + SW-safe.
