@@ -2270,8 +2270,19 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             # 87% of the 1.0->2.5x improvement is captured by 1.0->2.0.
             # 2.0x retained per the iter-54/iter-55 precedent
             # (calibrated values kept unless gain exceeds noise).
+            # Damping-sensitivity knobs (default = the calibrated
+            # iter-44/iter-1030 values, so unset == unchanged).  Used to
+            # probe whether the stacked div-damp + biharmonic hyperdiff
+            # over-damps W5 wave propagation on the cube relative to
+            # latlon / MPAS.  Mirrors the LEGOESM_* env knobs used in the
+            # primitive-eq path below.
+            _sw_dd_fac = float(
+                os.environ.get("LEGOESM_SW_DIV_DAMP_FACTOR", "8.0"))
+            _sw_hd_fac = float(
+                os.environ.get("LEGOESM_SW_HYPERDIFF_FACTOR", "2.0"))
             config = iter1009_dual_target_config(
-                n, hyperdiff_coeff=2.0 * _hyperdiff_cube(n),
+                n, div_damp_factor=_sw_dd_fac,
+                hyperdiff_coeff=_sw_hd_fac * _hyperdiff_cube(n),
             )
         else:
             config = iter1009_dual_target_config(n)

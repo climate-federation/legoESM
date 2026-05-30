@@ -66,6 +66,45 @@ the **same** root cause: residual cube edge/corner imprint masked by damping.
 SW all grids PASS (mass drift O(1e-15) cube). W5 cube finite (u 0.6→25.5 m/s),
 NOT a NaN/blowup — purely over-damped propagation + the (now-fixed) plot bug.
 
+## iter 2 — W5 damping-sensitivity probe (full 15-day, `results/probe_w5`)
+Added reusable env knobs `LEGOESM_SW_DIV_DAMP_FACTOR` (def 8.0) +
+`LEGOESM_SW_HYPERDIFF_FACTOR` (def 2.0) to the cube SW W2/5/6 config (unset ==
+unchanged). Metric tool `scripts/probe_w5_metrics.py`.
+
+Day-15 eddy/propagation metrics (cube vs latlon vs MPAS/ico):
+| run | eddy_rms | eddy_down | reach_E° | spd_max |
+|-----|---------|-----------|----------|---------|
+| cube dd8/hd2 (prod) | 149.5 | 119.1 | 18.3 | 41.7 |
+| cube dd4/hd1 | 151.7 | 120.0 | 18.3 | 42.7 |
+| cube dd2/hd0.5 | 196.4 | 138.6 | 96.5 | **127.9 BLOWUP** |
+| latlon (ref) | 147.4 | 103.0 | 20.0 | 35.5 |
+| MPAS/ico (ref) | 167.2 | 148.5 | 22.3 | 45.8 |
+
+Findings:
+- At **day 15** the cube W5 is comparable to latlon/MPAS — it DOES propagate.
+- **Lowering damping does NOT fix it — it BLOWS UP** (dd2/hd0.5 → 127 m/s, noise
+  everywhere). So damping is *masking* a real cube edge-imprint instability;
+  it is not a free knob. The fix must be a better edge discretization, not
+  less damping.
+- **Day ~1.5** is where the user-visible deficit lives: cube downstream
+  h'rms = 64.8 vs latlon 74.0 / ico 74.8 (~12% under-propagation), near/down
+  ratio 8.71 vs ~8.1 (cube concentrates more at the mountain). Modest but real
+  and matches the day-1 images. spd_max ~30 m/s all (no early blowup).
+
+CONCLUSION: cube W5 is ~12% over-damped on freshly-launched downstream waves;
+root cause = residual edge/corner imprint that forces the heavy damping crutch.
+`FV3EdgeShallowWaterModel` is self-described "research path, NOT a faithful FV3
+port" (A-L 4-pt grad vs FV3 2-pt c_sw; RK3 vs forward-backward; edge-midpoint
+stagger vs tile-edge coupling; aggregated div_damp vs structured d_sw5). The
+faithful path is `FV3FBShallowWaterModel`/`fv3_fb_sw_step` + `use_fv3_dsw5_corner_damping`.
+
+## Cross-grid data note (ask D)
+Regridded `snapshots_latlon.npz` uses canonical lon[-180,180]/lat[-90,90] for
+cube+ico, BUT the **latlon** grid writes fields at NATIVE (72,144) while still
+labelling lat/lon as (181,360) — a harmless-but-confusing inconsistency; the
+cross-grid comparison plotter renders each on its own extent so continents
+align (verified day-1 SW comparison). Re-verify on AMIP/OMIP.
+
 ## Plan (next iters)
 - iter 2: damping-sensitivity probe — cube W5 downstream wave amplitude vs
   div_damp/hyperdiff factor; quantify vs latlon/ico. Confirm the lever.
