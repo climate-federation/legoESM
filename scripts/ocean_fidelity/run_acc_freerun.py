@@ -7,9 +7,9 @@ same physical duration. Both sides are reduced with the SAME legoESM diagnostic
 code (the Veros snapshot is bridged onto the legoESM grid first), so the
 comparison is apples-to-apples.
 
-This is a MEASURE-FIRST harness: it runs with the CURRENT recipe (SSP-RK3 time
-stepping, prognostic EKE on with the Rhines `eke_len` matching Veros, single dt)
-and reports deltas — it does NOT gate pass/fail. Known model-formulation
+This is a MEASURE-FIRST harness: it runs with the CURRENT recipe (forward-Euler /
+split-explicit time stepping, prognostic EKE + K_iso=K_gm matching Veros, single
+dt) and reports deltas — it does NOT gate pass/fail. Known model-formulation
 differences are printed before the table so the deltas are read in context (see
 the strategy doc §8 ledger).
 
@@ -141,19 +141,22 @@ def _run_veros_bridged(years, template_state):
 _KNOWN_DIFFERENCES = """\
 Known model-formulation differences (the deltas below should be read in this
 context; see docs/ocean_fidelity/oracle_recipe_strategy.md §8):
-  1. Time integrator: legoESM SSP-RK3 vs Veros leapfrog+AB2+Robert-Asselin
-     -> now the LARGEST remaining formulation gap (audit gap #7, not yet built).
+  1. Time integrator (the LARGEST remaining formulation gap): legoESM
+     forward-Euler / split-explicit vs Veros Adams-Bashforth-2. NB this Veros
+     version is AB2, NOT leapfrog+Robert-Asselin (audit doc was wrong): tracers
+     temp[taup1]=temp[tau]+dt_tracer*((1.5+eps)*dtemp[tau]-(0.5+eps)*dtemp[taum1]),
+     AB2 momentum, separate dt_tracer/dt_mom, AB2 eps-offset (not an Asselin
+     filter) for the computational mode. A leapfrog+RA attempt was built + REVERTED
+     (commit d1648f8e): wrong scheme + the extract-from-FE wrapper leapfrogged
+     implicit diffusion -> unstable (free-run blew up at 3 days). Correct build =
+     AB2 OUTER scheme reusing timestepping/leapfrog_ab2.py:ab2_step (next must-build).
   2. Timestep: legoESM single dt=4800 s; Veros dt_mom=4800 / dt_tracer=43200 s.
-  3. EKE GM coefficient: now ON, prognostic Eden-Greatbatch with the Rhines
-     `eke_len` (form + eke_len reproduce Veros's K_gm/eke_len to machine
-     precision, gates E9 + L4) -> the GM *skew* coefficient now MATCHES Veros.
-     EKE cold-starts at e_min and spins up, as in Veros.
-  4. EKE Redi diffusivity NOT yet matched: Veros ACC sets K_iso = K_gm
-     (enable_eke_isopycnal_diffusion) so its Redi *tracer* diffusivity is the
-     prognostic kappa (~0.3 m2/s cold); legoESM holds kappa_Redi=1000 constant
-     -> a ~3000x K_iso mismatch during the cold start, a co-contributor to the
-     deltas below alongside the integrator (item 1). Prognostic-Redi = next
-     must-build.
+  3. EKE GM coefficient: ON, prognostic Eden-Greatbatch with the Rhines `eke_len`
+     (form + eke_len reproduce Veros's K_gm/eke_len to machine precision, gates
+     E9 + L4) -> the GM *skew* coefficient MATCHES Veros. EKE cold-starts at e_min.
+  4. EKE Redi K_iso=K_gm: now MATCHED (prognostic Redi, commit 4c1ec219) -- the
+     step drives kappa_Redi from the prognostic kappa (Veros
+     enable_eke_isopycnal_diffusion), oracle machine-exact (gate R3).
   5. GM/Redi isoneutral discretization differs (tier-2 T_iso corr ~0.17).
 These are NOT bugs; they are the documented gaps a measure-first run quantifies.\
 """
