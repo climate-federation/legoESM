@@ -62,7 +62,7 @@ def main() -> int:
         eke_kappa_gm,
     )
 
-    extra = ("eke", "K_gm", "eke_len", "L_rossby", "L_rhines",
+    extra = ("eke", "K_gm", "K_iso", "eke_len", "L_rossby", "L_rhines",
              "Nsqr", "dzw", "maskW", "coriolis_t", "beta")
     print(f"Running Veros ACC (enable_eke) for {args.runlen_s:.0f} s ...")
     res = run_veros(
@@ -81,6 +81,7 @@ def main() -> int:
     V_Lrhin = np.asarray(V["L_rhines"])     # (x, y, z)
     V_ekelen = np.asarray(V["eke_len"])     # (x, y, z)
     V_Kgm = np.asarray(V["K_gm"])           # (x, y, z)
+    V_Kiso = np.asarray(V["K_iso"])         # (x, y, z) — = K_gm when enable_eke_isopycnal_diffusion
 
     print(f"  Veros L_rossby [km]: mean={np.nanmean(V_Lross)/1e3:.3g} "
           f"max={np.nanmax(V_Lross)/1e3:.3g}")
@@ -134,6 +135,22 @@ def main() -> int:
               "to MACHINE PRECISION.")
         print("   The Rhines-limited mixing-length FORM matches the oracle; EKE can "
               "be adopted apples-to-apples in the ACC recipe (L5).")
+
+    # R3: K_iso = K_gm (Veros enable_eke_isopycnal_diffusion=True). Confirm Veros's
+    # OWN K_iso == K_gm on wet cells; legoESM reproduces it because the step drives
+    # kappa_redi_override = kappa_gm_override (the prognostic kappa that L4 matched
+    # to Veros K_gm to machine precision), so legoESM K_iso == legoESM K_gm == Veros
+    # K_gm == Veros K_iso by transitivity.
+    wet = maskW > 0.5
+    rel_kiso = (np.abs(V_Kiso[wet] - V_Kgm[wet])
+                / np.maximum(np.abs(V_Kgm[wet]), 1e-12))
+    print(f"\nVeros K_iso vs K_gm (enable_eke_isopycnal_diffusion): "
+          f"max_rel_err={rel_kiso.max():.3e}, mean K_iso={np.nanmean(V_Kiso):.4g} "
+          f"m^2/s ({int(wet.sum())} wet cells)")
+    if rel_kiso.max() < 1e-12:
+        print("=> Veros K_iso == K_gm confirmed. legoESM reproduces it via "
+              "kappa_redi_override = kappa_gm_override (gate R2): K_iso=K_gm matches "
+              "the oracle to machine precision (transitive with the K_gm match above).")
     return 0
 
 

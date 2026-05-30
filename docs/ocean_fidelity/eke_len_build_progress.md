@@ -149,17 +149,52 @@ documented next must-build, and the free-run should be re-measured AFTER that la
 driver's `_KNOWN_DIFFERENCES` accordingly. Repro: `JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python
 scripts/ocean_fidelity/run_acc_freerun.py --years 0.0821918`.
 
-## FINAL STATUS
-L1–L6 complete + honestly green. The Rhines-limited `eke_len` is a canonical, differentiable,
-oracle-form-exact (L4: machine-precision vs Veros) selectable mixing-length scheme; the EKE **GM
-coefficient** is adopted apples-to-apples in the ACC recipe.
+# Follow-on build: prognostic Redi `K_iso = K_gm` (R-gates)
 
-**NEXT must-build (surfaced by the L5+L6 review, Issue 1): prognostic Redi `K_iso=K_gm`.** Veros ACC's
-`enable_eke_isopycnal_diffusion=True` sets the Redi *tracer* diffusivity to the prognostic kappa
-(veros/core/eke.py:74-75); legoESM still holds `kappa_Redi=1000` constant — only the GM skew term is
-EKE-driven. Reproducing it needs `kappa_Redi` made array-capable through the GM/Redi triad+centered
-flux builders (golden-locked core numerics — must stay bit-identical on the constant-kappa default) +
-an `EKEConfig` iso-diffusion flag (Veros `enable_eke_isopycnal_diffusion`) + the step passing a
-`kappa_redi_override = kappa_gm_override` when active. Then regenerate the rhines golden + re-measure
-the free-run (the 30-day gap interpretation depends on it). Co-open: the leapfrog+AB2 integrator
-(audit gap #7); a developed-flow eke-bridge for a tier-2 prognostic-GM-tendency comparison.
+The L5+L6 review (Issue 1) surfaced that only the GM *skew* coefficient was EKE-driven, while Veros
+ACC also sets `enable_eke_isopycnal_diffusion=True` ⇒ the Redi *tracer* diffusivity `K_iso = K_gm`.
+This makes the full EKE/GM-Redi closure apples-to-apples.
+
+### 2026-05-29 · R1 done — array-capable `kappa_Redi` + `EKEConfig.isopycnal_diffusion`
+Made `kappa_Redi` array-capable through BOTH GM/Redi flux builders, mirroring the existing `kappa_GM`
+broadcast: triad → `kappa_Redi_{c,u,v,w}` (face-interpolated via `interp_cell_to_{u,v}face`), centered →
+`kappa_Redi_b` (cell-centred). A scalar passes through unchanged ⇒ the constant-coefficient path is
+BIT-IDENTICAL. Added `EKEConfig.isopycnal_diffusion: bool = False` (Veros default; ACC = True). When
+`kappa_Redi == kappa_GM` (the K_iso=K_gm coupling) the `(kappa_Redi-kappa_GM)` horizontal off-diagonal
+cancels exactly, as in Veros. GATE: `pytest test_baroclinic_decomposition + test_gm_redi_latlon_cgrid +
+test_eke{,_regression} + test_latlon_cgrid_ocean + test_veros_acc_recipe` → **125 passed** (goldens +
+30 GM/Redi all bit-identical) + 4 new `TestKappaRediArray` tests (const-array==scalar to rtol 1e-13;
+K_iso=K_gm override changes the tendency ~2× for a non-f(ρ) tracer).
+
+### 2026-05-29 · R2 done — step `kappa_redi_override` + ACC adoption + 3rd golden
+Public `gm_redi_tracer_tendency_latlon` gains `kappa_redi_override`; `kappa_Redi_eff = override if set
+else cfg.kappa_Redi` flows to the triad/centered builders. Step (`_step_impl`) sets `kappa_redi_override
+= kappa_gm_override` when `eke.isopycnal_diffusion`. ACC recipe: `isopycnal_diffusion=True`. Added a 3rd
+regression golden `eke_step_regression_rhines_kiso_golden.npz` (rhines + K_iso=K_gm) — verified active
+(differs from the constant-Redi rhines golden by 1.1e-6 in T; small because the golden's tracer is
+≈f(ρ) so the Redi cancellation mostly holds). GATE: `pytest test_eke_regression + test_veros_acc_recipe
++ test_gm_redi_latlon_cgrid + test_baroclinic_decomposition + test_latlon_cgrid_ocean +
+test_run_acc_freerun -m "slow or not slow"` → **97 passed** (incl. the @slow EKE+Redi free-run smoke).
+
+### 2026-05-29 · R3 done — oracle (K_iso=K_gm machine-exact) + measure-first free-run
+Oracle (`compare_eke_len_veros.py` extended): Veros's OWN `K_iso == K_gm` to MACHINE PRECISION
+(max_rel_err 0.0, mean 33 m²/s, 19560 wet cells); legoESM reproduces it transitively
+(`K_iso = kappa_redi_override = kappa_gm_override` = the prognostic kappa that L4 matched to Veros
+K_gm machine-exact). The R3 oracle script ALSO captures `K_iso` and verifies Veros's own
+`K_iso == K_gm`. (Honesty note, R4 review item 6: the tier-2 frozen-state probe `tendency_probe.py`
+does NOT exercise the override — it uses the constant-kappa GM path — so K_iso=K_gm is validated
+through `model.step` + the `rhines_kiso` golden + the Veros-side oracle, NOT the per-process probe.) **MEASURE-FIRST (EKE+Redi-on 30-day free-run): the gap is UNCHANGED**
+(ACC transport +70.3%, total KE +233.2% — vs +70.4%/+232.6% GM-only at L6 and +70%/+232% EKE-off).
+With the WHOLE EKE/GM-Redi closure now apples-to-apples, the 30-day gap does not move ⇒ **conclusively
+the integrator** (SSP-RK3 vs Veros leapfrog+AB2) + the spin-up transient, NOT the eddy closure. GM/Redi
+affects the slow (multi-year) baroclinic adjustment, not the fast (days) barotropic jet spin-up.
+
+## FINAL STATUS
+The eke_len Rhines mixing length (L1–L6) AND prognostic Redi `K_iso=K_gm` (R1–R3) are complete +
+honestly green: the FULL EKE/GM-Redi closure is now apples-to-apples with Veros ACC (form, params,
+`eke_len`, `K_gm` AND `K_iso` all oracle machine-exact). The measure-first free-run, with every eddy
+knob matched, leaves the ACC-transport/KE gap unchanged at +70%/+233% — so the dominant remaining ACC
+free-run gap is **the time integrator** (legoESM SSP-RK3 vs Veros leapfrog+AB2+Robert-Asselin; audit
+gap #7). NEXT: wire `outer_integrator="leapfrog_ab2"` (the standalone `timestepping/leapfrog_ab2.py`
+exists; needs the τ-1 carry threaded through the ocean step/scan) — the I-gates. Also open: a
+developed-flow eke-bridge for a tier-2 prognostic-GM-tendency comparison.

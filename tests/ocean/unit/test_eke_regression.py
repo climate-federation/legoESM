@@ -40,6 +40,12 @@ GOLDEN_PATH = pathlib.Path(__file__).resolve().parent / "fixtures" / (
 RHINES_GOLDEN_PATH = pathlib.Path(__file__).resolve().parent / "fixtures" / (
     "eke_step_regression_rhines_golden.npz"
 )
+# Parallel golden for the ACC-adopted prognostic-Redi (K_iso=K_gm) path: rhines
+# eke_len + isopycnal_diffusion=True (Veros enable_eke_isopycnal_diffusion). Locks
+# the kappa_redi_override coupling through the model step (gate R2).
+RHINES_KISO_GOLDEN_PATH = pathlib.Path(__file__).resolve().parent / "fixtures" / (
+    "eke_step_regression_rhines_kiso_golden.npz"
+)
 
 # Tight relative tolerance: the step is deterministic + bit-identical on the
 # generating machine; allow <=1e-12 rel for cross-platform BLAS ULP drift.
@@ -149,10 +155,20 @@ def _rhines_cfg():
     return EKEConfig(mixing_length_scheme="rhines", eke_cross=2.0, eke_crhin=1.0)
 
 
+def _rhines_kiso_cfg():
+    """The full ACC EKE config (gate R2): rhines eke_len + K_iso=K_gm prognostic Redi
+    (isopycnal_diffusion=True, Veros enable_eke_isopycnal_diffusion)."""
+    from legoesm.ocean.physics.lateral_mixing.eke import EKEConfig
+    return EKEConfig(mixing_length_scheme="rhines", eke_cross=2.0, eke_crhin=1.0,
+                     isopycnal_diffusion=True)
+
+
 def regenerate_golden() -> None:
-    """Write the golden .npz files (rossby + rhines) from the CURRENT step."""
+    """Write the golden .npz files (rossby + rhines + rhines-kiso) from the CURRENT step."""
     GOLDEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-    for path, cfg in ((GOLDEN_PATH, None), (RHINES_GOLDEN_PATH, _rhines_cfg())):
+    for path, cfg in ((GOLDEN_PATH, None),
+                      (RHINES_GOLDEN_PATH, _rhines_cfg()),
+                      (RHINES_KISO_GOLDEN_PATH, _rhines_kiso_cfg())):
         blob = _produce(cfg)
         np.savez_compressed(path, **blob)
         print(f"wrote {len(blob)} golden arrays to {path}")
@@ -196,9 +212,17 @@ def test_eke_rhines_step_regression_bit_identical():
     _check_golden(RHINES_GOLDEN_PATH, _rhines_cfg())
 
 
+@pytest.mark.skipif(not RHINES_KISO_GOLDEN_PATH.exists(),
+                    reason="rhines-kiso golden not generated")
+def test_eke_rhines_kiso_step_regression_bit_identical():
+    """The full ACC EKE step (rhines + K_iso=K_gm prognostic Redi) reproduces its
+    committed golden — locks the kappa_redi_override coupling (gate R2)."""
+    _check_golden(RHINES_KISO_GOLDEN_PATH, _rhines_kiso_cfg())
+
+
 def test_golden_exists():
     """Guard against an accidental fixture deletion."""
-    for path in (GOLDEN_PATH, RHINES_GOLDEN_PATH):
+    for path in (GOLDEN_PATH, RHINES_GOLDEN_PATH, RHINES_KISO_GOLDEN_PATH):
         assert path.exists(), (
             f"missing golden {path}; regenerate with "
             f"`python {pathlib.Path(__file__).name}`"

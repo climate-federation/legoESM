@@ -1053,6 +1053,7 @@ class LatLonCGridOceanModel:
         if self.config.gm_redi is not None:
             gm_cfg = self.config.gm_redi
             kappa_gm_override = None
+            kappa_redi_override = None
             eke_new = None
             # Prognostic-EKE GM closure (Eden-Greatbatch): kappa_GM = c_k·L·√E
             # from the evolving eddy-energy field, and integrate E one step
@@ -1087,6 +1088,10 @@ class LatLonCGridOceanModel:
                 E_new = eke_apply_local_source(E_t, sigma_bar, L, eke_cfg, dt)
                 eke_new = Field(data=E_new * lm, name="eke",
                                 dims=("lat", "lon"), units="m^2/s^2")
+                # K_iso = K_gm (Veros enable_eke_isopycnal_diffusion): drive the
+                # Redi tracer diffusivity from the same prognostic kappa as GM.
+                if eke_cfg.isopycnal_diffusion:
+                    kappa_redi_override = kappa_gm_override
             dT_gm, dS_gm = gm_redi_tracer_tendency_latlon(
                 T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
                 self.grid, self.z_coord, gm_cfg,
@@ -1096,6 +1101,7 @@ class LatLonCGridOceanModel:
                 v_mask=state.v_mask.data,
                 rho_0=self.config.constants.rho_0, g=self.config.constants.g,
                 kappa_gm_override=kappa_gm_override,
+                kappa_redi_override=kappa_redi_override,
             )
             T_mid = T_mid + dt * dT_gm * mask_3d
             S_mid = S_mid + dt * dS_gm * mask_3d

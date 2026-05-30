@@ -88,6 +88,8 @@ def test_tke_and_gm_redi_configs_match_veros():
     assert eke.eke_cross == 2.0 and eke.eke_crhin == 1.0   # acc.py:71-72
     assert eke.c_k == 0.4 and eke.c_eps == 0.5             # acc.py:69-70
     assert eke.l_min == 100.0 and eke.kappa_gm_max == 1.0e4  # acc.py:73,68
+    # K_iso = K_gm: Veros enable_eke_isopycnal_diffusion=True (acc.py:75).
+    assert eke.isopycnal_diffusion is True
 
 
 def test_z_coord_dz_ref_in_legoesm_order():

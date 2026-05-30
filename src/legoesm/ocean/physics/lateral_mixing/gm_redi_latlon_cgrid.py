@@ -136,7 +136,7 @@ def gm_redi_tracer_tendency_latlon_cgrid(
     jacobian: jnp.ndarray,
     grid: LatLonGrid,
     kappa_GM,
-    kappa_Redi: float,
+    kappa_Redi,
 ) -> jnp.ndarray:
     """GM+Redi tendency for a single tracer on the lat-lon C-grid.
 
@@ -171,11 +171,17 @@ def gm_redi_tracer_tendency_latlon_cgrid(
     dz_actual = z_coord.dz_ref * jacobian[:, :, jnp.newaxis]  # (n_lat, n_lon, nlev)
     dz_half = z_coord.dz_half_ref * jacobian[:, :, jnp.newaxis]  # (n_lat, n_lon, nlev-1)
 
-    # Broadcast kappa_GM for interface-level arrays when it is per-column.
+    # Broadcast kappa_GM / kappa_Redi for interface-level arrays when per-column
+    # (a 2-D array — e.g. the prognostic-EKE override, or K_iso=K_gm). A scalar
+    # passes through unchanged, so the constant-coefficient path is bit-identical.
     if isinstance(kappa_GM, jnp.ndarray) and kappa_GM.ndim == 2:
         kappa_GM_b = kappa_GM[:, :, jnp.newaxis]
     else:
         kappa_GM_b = kappa_GM
+    if isinstance(kappa_Redi, jnp.ndarray) and kappa_Redi.ndim == 2:
+        kappa_Redi_b = kappa_Redi[:, :, jnp.newaxis]
+    else:
+        kappa_Redi_b = kappa_Redi
 
     # --- Neumann-fill tracer before computing gradients ---
     q_filled = _neumann_fill_cgrid(q, mask)
@@ -209,10 +215,10 @@ def gm_redi_tracer_tendency_latlon_cgrid(
     dq_dy_half = 0.5 * (dq_dy_center[:, :, :-1] + dq_dy_center[:, :, 1:])
 
     # Total horizontal Redi flux at interfaces (exact cancellation here).
-    F_x_half = (kappa_Redi * dq_dx_half
-                + (kappa_Redi - kappa_GM_b) * S_x * dq_dz_half)  # (n_lat, n_lon, nlev-1)
-    F_y_half = (kappa_Redi * dq_dy_half
-                + (kappa_Redi - kappa_GM_b) * S_y * dq_dz_half)
+    F_x_half = (kappa_Redi_b * dq_dx_half
+                + (kappa_Redi_b - kappa_GM_b) * S_x * dq_dz_half)  # (n_lat, n_lon, nlev-1)
+    F_y_half = (kappa_Redi_b * dq_dy_half
+                + (kappa_Redi_b - kappa_GM_b) * S_y * dq_dz_half)
 
     # Average interface fluxes to full levels (zero-pad at surface/bottom).
     z_pad = jnp.zeros((*F_x_half.shape[:2], 1), dtype=F_x_half.dtype)
@@ -243,8 +249,8 @@ def gm_redi_tracer_tendency_latlon_cgrid(
     # dq_dx_half, dq_dy_half already computed above (reused here).
 
     S2_half = S_x ** 2 + S_y ** 2
-    F_z = ((kappa_Redi + kappa_GM_b) * (S_x * dq_dx_half + S_y * dq_dy_half)
-           + kappa_Redi * S2_half * dq_dz_half)
+    F_z = ((kappa_Redi_b + kappa_GM_b) * (S_x * dq_dx_half + S_y * dq_dy_half)
+           + kappa_Redi_b * S2_half * dq_dz_half)
 
     # Vertical flux divergence via shared helper (zero-flux BCs at surface/bottom).
     dq_vert = vertical_flux_divergence(F_z, dz_actual, _EPS)
@@ -341,7 +347,7 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     jacobian: jnp.ndarray,
     grid: LatLonGrid,
     kappa_GM,
-    kappa_Redi: float,
+    kappa_Redi,
     S_max: float,
     taper_width_frac: float = 0.1,
 ) -> jnp.ndarray:
@@ -366,8 +372,10 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     z_coord, jacobian, grid : geometry.
     kappa_GM : float or (n_lat, n_lon)
         GM bolus coefficient (scalar or per-column from Visbeck).
-    kappa_Redi : float
-        Redi isopycnal diffusivity.
+    kappa_Redi : float or (n_lat, n_lon)
+        Redi isopycnal diffusivity. Scalar (constant) or per-column array — the
+        latter for the K_iso=K_gm coupling (pass kappa_Redi == kappa_GM), broadcast
+        to faces exactly like kappa_GM. A scalar keeps the path bit-identical.
     S_max : float
         Slope cap for clipping and DM95 taper.
 
@@ -389,6 +397,20 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
         kappa_GM_v = kappa_GM
     # w-face triads sit at cell-centers horizontally → cell-centered kappa.
     kappa_GM_w = kappa_GM_c
+    # kappa_Redi: same face-interpolation as kappa_GM when it is a 2-D array
+    # (the K_iso=K_gm coupling passes kappa_Redi == kappa_GM, so kappa_Redi_u ==
+    # kappa_GM_u etc. and the (kappa_Redi-kappa_GM) horizontal off-diagonal
+    # cancels, as in Veros's enable_eke_isopycnal_diffusion). A scalar passes
+    # through unchanged ⇒ the constant-coefficient path is bit-identical.
+    if isinstance(kappa_Redi, jnp.ndarray) and kappa_Redi.ndim == 2:
+        kappa_Redi_c = kappa_Redi[:, :, jnp.newaxis]
+        kappa_Redi_u = interp_cell_to_uface(kappa_Redi_c)
+        kappa_Redi_v = interp_cell_to_vface(kappa_Redi_c)
+    else:
+        kappa_Redi_c = kappa_Redi
+        kappa_Redi_u = kappa_Redi
+        kappa_Redi_v = kappa_Redi
+    kappa_Redi_w = kappa_Redi_c
 
     # Neumann-fill BOTH rho and q so the gradients across coastlines do
     # not pick up jumps between ocean and land sentinel values.  This
@@ -493,10 +515,10 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     w_T4 = valid_T4 / N_valid_u_safe
 
     # Per-triad full flux (cancels exactly when q = f(ρ)).
-    flux_T1 = kappa_Redi * dq_dx_u + (kappa_Redi - kappa_GM_u) * S_T1 * dq_dz_T1
-    flux_T2 = kappa_Redi * dq_dx_u + (kappa_Redi - kappa_GM_u) * S_T2 * dq_dz_T2
-    flux_T3 = kappa_Redi * dq_dx_u + (kappa_Redi - kappa_GM_u) * S_T3 * dq_dz_T3
-    flux_T4 = kappa_Redi * dq_dx_u + (kappa_Redi - kappa_GM_u) * S_T4 * dq_dz_T4
+    flux_T1 = kappa_Redi_u * dq_dx_u + (kappa_Redi_u - kappa_GM_u) * S_T1 * dq_dz_T1
+    flux_T2 = kappa_Redi_u * dq_dx_u + (kappa_Redi_u - kappa_GM_u) * S_T2 * dq_dz_T2
+    flux_T3 = kappa_Redi_u * dq_dx_u + (kappa_Redi_u - kappa_GM_u) * S_T3 * dq_dz_T3
+    flux_T4 = kappa_Redi_u * dq_dx_u + (kappa_Redi_u - kappa_GM_u) * S_T4 * dq_dz_T4
 
     F_x_u = (w_T1 * taper_T1 * flux_T1
            + w_T2 * taper_T2 * flux_T2
@@ -541,10 +563,10 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     w_V3 = valid_V3 / N_valid_v_safe
     w_V4 = valid_V4 / N_valid_v_safe
 
-    flux_V1 = kappa_Redi * dq_dy_v + (kappa_Redi - kappa_GM_v) * S_V1 * dq_dz_V1
-    flux_V2 = kappa_Redi * dq_dy_v + (kappa_Redi - kappa_GM_v) * S_V2 * dq_dz_V2
-    flux_V3 = kappa_Redi * dq_dy_v + (kappa_Redi - kappa_GM_v) * S_V3 * dq_dz_V3
-    flux_V4 = kappa_Redi * dq_dy_v + (kappa_Redi - kappa_GM_v) * S_V4 * dq_dz_V4
+    flux_V1 = kappa_Redi_v * dq_dy_v + (kappa_Redi_v - kappa_GM_v) * S_V1 * dq_dz_V1
+    flux_V2 = kappa_Redi_v * dq_dy_v + (kappa_Redi_v - kappa_GM_v) * S_V2 * dq_dz_V2
+    flux_V3 = kappa_Redi_v * dq_dy_v + (kappa_Redi_v - kappa_GM_v) * S_V3 * dq_dz_V3
+    flux_V4 = kappa_Redi_v * dq_dy_v + (kappa_Redi_v - kappa_GM_v) * S_V4 * dq_dz_V4
 
     F_y_v = (w_V1 * taper_V1 * flux_V1
            + w_V2 * taper_V2 * flux_V2
@@ -628,23 +650,23 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     # Multiplying each by its taper and averaging keeps that exact
     # zero while still damping the genuine GM transport in tapered
     # boundary regions.
-    flux_Wx1 = ((kappa_Redi + kappa_GM_w) * S_Wx1 * dq_dx_west_A
-                + kappa_Redi * S_Wx1 ** 2 * dq_dz_w)
-    flux_Wx2 = ((kappa_Redi + kappa_GM_w) * S_Wx2 * dq_dx_east_A
-                + kappa_Redi * S_Wx2 ** 2 * dq_dz_w)
-    flux_Wx3 = ((kappa_Redi + kappa_GM_w) * S_Wx3 * dq_dx_west_B
-                + kappa_Redi * S_Wx3 ** 2 * dq_dz_w)
-    flux_Wx4 = ((kappa_Redi + kappa_GM_w) * S_Wx4 * dq_dx_east_B
-                + kappa_Redi * S_Wx4 ** 2 * dq_dz_w)
+    flux_Wx1 = ((kappa_Redi_w + kappa_GM_w) * S_Wx1 * dq_dx_west_A
+                + kappa_Redi_w * S_Wx1 ** 2 * dq_dz_w)
+    flux_Wx2 = ((kappa_Redi_w + kappa_GM_w) * S_Wx2 * dq_dx_east_A
+                + kappa_Redi_w * S_Wx2 ** 2 * dq_dz_w)
+    flux_Wx3 = ((kappa_Redi_w + kappa_GM_w) * S_Wx3 * dq_dx_west_B
+                + kappa_Redi_w * S_Wx3 ** 2 * dq_dz_w)
+    flux_Wx4 = ((kappa_Redi_w + kappa_GM_w) * S_Wx4 * dq_dx_east_B
+                + kappa_Redi_w * S_Wx4 ** 2 * dq_dz_w)
 
-    flux_Wy1 = ((kappa_Redi + kappa_GM_w) * S_Wy1 * dq_dy_south_A
-                + kappa_Redi * S_Wy1 ** 2 * dq_dz_w)
-    flux_Wy2 = ((kappa_Redi + kappa_GM_w) * S_Wy2 * dq_dy_north_A
-                + kappa_Redi * S_Wy2 ** 2 * dq_dz_w)
-    flux_Wy3 = ((kappa_Redi + kappa_GM_w) * S_Wy3 * dq_dy_south_B
-                + kappa_Redi * S_Wy3 ** 2 * dq_dz_w)
-    flux_Wy4 = ((kappa_Redi + kappa_GM_w) * S_Wy4 * dq_dy_north_B
-                + kappa_Redi * S_Wy4 ** 2 * dq_dz_w)
+    flux_Wy1 = ((kappa_Redi_w + kappa_GM_w) * S_Wy1 * dq_dy_south_A
+                + kappa_Redi_w * S_Wy1 ** 2 * dq_dz_w)
+    flux_Wy2 = ((kappa_Redi_w + kappa_GM_w) * S_Wy2 * dq_dy_north_A
+                + kappa_Redi_w * S_Wy2 ** 2 * dq_dz_w)
+    flux_Wy3 = ((kappa_Redi_w + kappa_GM_w) * S_Wy3 * dq_dy_south_B
+                + kappa_Redi_w * S_Wy3 ** 2 * dq_dz_w)
+    flux_Wy4 = ((kappa_Redi_w + kappa_GM_w) * S_Wy4 * dq_dy_north_B
+                + kappa_Redi_w * S_Wy4 ** 2 * dq_dz_w)
 
     F_z = 0.25 * (taper_Wx1 * flux_Wx1 + taper_Wx2 * flux_Wx2
                  + taper_Wx3 * flux_Wx3 + taper_Wx4 * flux_Wx4
@@ -679,6 +701,7 @@ def gm_redi_tracer_tendency_latlon(
     rho_0: float = _RHO_0,
     g: float = constants.g,
     kappa_gm_override: jnp.ndarray | None = None,
+    kappa_redi_override: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Top-level GM/Redi for lat-lon C-grid.
 
@@ -750,26 +773,31 @@ def gm_redi_tracer_tendency_latlon(
     else:
         kappa_GM = cfg.kappa_GM
 
+    # Redi isopycnal diffusivity. K_iso = K_gm (prognostic) when the override is
+    # supplied (Veros enable_eke_isopycnal_diffusion -> the step passes
+    # kappa_redi_override = kappa_gm_override); else the constant cfg.kappa_Redi.
+    kappa_Redi_eff = cfg.kappa_Redi if kappa_redi_override is None else kappa_redi_override
+
     scheme = getattr(cfg, "slope_scheme", "triads")
     if scheme == "triads":
         dT_dt = gm_redi_tracer_tendency_triads_latlon_cgrid(
             T, rho, mask, u_mask, v_mask,
-            z_coord, jacobian, grid, kappa_GM, cfg.kappa_Redi, cfg.S_max,
+            z_coord, jacobian, grid, kappa_GM, kappa_Redi_eff, cfg.S_max,
             cfg.taper_width_frac,
         )
         dS_dt = gm_redi_tracer_tendency_triads_latlon_cgrid(
             S, rho, mask, u_mask, v_mask,
-            z_coord, jacobian, grid, kappa_GM, cfg.kappa_Redi, cfg.S_max,
+            z_coord, jacobian, grid, kappa_GM, kappa_Redi_eff, cfg.S_max,
             cfg.taper_width_frac,
         )
     elif scheme == "centered":
         dT_dt = gm_redi_tracer_tendency_latlon_cgrid(
             T, S_x, S_y, mask, u_mask, v_mask,
-            z_coord, jacobian, grid, kappa_GM, cfg.kappa_Redi,
+            z_coord, jacobian, grid, kappa_GM, kappa_Redi_eff,
         )
         dS_dt = gm_redi_tracer_tendency_latlon_cgrid(
             S, S_x, S_y, mask, u_mask, v_mask,
-            z_coord, jacobian, grid, kappa_GM, cfg.kappa_Redi,
+            z_coord, jacobian, grid, kappa_GM, kappa_Redi_eff,
         )
         # --- Near-surface horizontal diffusion complement ---
         # In the mixed layer, DM95 tapers Redi to zero, leaving no
@@ -791,7 +819,14 @@ def gm_redi_tracer_tendency_latlon(
                 q_filled = _neumann_fill_cgrid(q_field, mask)
                 dq_dx_u = gradient_x_cgrid(q_filled, grid) * u_mask[:, :, jnp.newaxis]
                 dq_dy_v = gradient_y_cgrid(q_filled, grid) * v_mask[:, :, jnp.newaxis]
-                # complement is (nlev,) — broadcasts over spatial dims.
+                # complement is (nlev,) — broadcasts over spatial dims. This
+                # boundary-layer term deliberately uses the CONSTANT cfg.kappa_Redi,
+                # NOT kappa_Redi_eff: the K_iso=K_gm override applies to the
+                # isopycnal-tensor fluxes (above); the Ferrari (2008) surface
+                # complement is a separate fixed-diffusivity term. Scoped limitation
+                # for a centered + surface_complement + prognostic-override config
+                # (making it override-aware needs cell->u/v-face interp of the
+                # array kappa); INERT for ACC, which uses slope_scheme="triads".
                 F_x = cfg.kappa_Redi * complement * dq_dx_u
                 F_y = cfg.kappa_Redi * complement * dq_dy_v
                 dq_complement = divergence_cgrid(F_x, F_y, grid) * mask[:, :, jnp.newaxis]

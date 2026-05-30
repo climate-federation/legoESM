@@ -55,6 +55,10 @@ class EKEConfig(NamedTuple):
     mixing_length_scheme: str = "rossby"
     eke_cross: float = 1.0    # deformation-radius weight in eke_len (Veros eke_cross)
     eke_crhin: float = 1.0    # Rhines-scale weight in eke_len      (Veros eke_crhin)
+    # When True (and EKE on), the Redi *tracer* isopycnal diffusivity follows the
+    # prognostic GM coefficient (K_iso = K_gm) instead of the constant kappa_Redi —
+    # Veros's ``enable_eke_isopycnal_diffusion`` (default False; Veros ACC = True).
+    isopycnal_diffusion: bool = False
 
 
 def eke_mixing_length(L_rossby: jnp.ndarray, cfg: EKEConfig) -> jnp.ndarray:

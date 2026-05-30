@@ -688,3 +688,80 @@ class TestTriadOrchestratorDispatch:
                 T, S, eta, H_bathy, grid, z_coord, cfg_bad,
                 eos="linear", mask=mask, u_mask=u_mask, v_mask=v_mask,
             )
+
+
+# =====================================================================
+# R1: array-capable kappa_Redi (for the K_iso = K_gm coupling).
+# A constant array must reproduce the scalar path bit-identically (the
+# broadcast is exact); a per-column array must take effect.
+# =====================================================================
+
+class TestKappaRediArray:
+
+    def _slopes(self, setup):
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        S_x, S_y, _ = compute_isopycnal_slopes_latlon_cgrid(
+            rho, mask, z_coord, jacobian, grid, cfg)
+        return S_x, S_y
+
+    def test_centered_const_array_redi_matches_scalar(self):
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        S_x, S_y = self._slopes(setup)
+        n_lat, n_lon, _ = T.shape
+        dT_scalar = gm_redi_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid, 1000.0, 1000.0)
+        kR = jnp.full((n_lat, n_lon), 1000.0)
+        dT_array = gm_redi_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid, 1000.0, kR)
+        assert jnp.allclose(dT_array, dT_scalar, rtol=1e-13, atol=1e-30)
+
+    def test_triad_const_array_redi_matches_scalar(self):
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        n_lat, n_lon, _ = T.shape
+        dT_scalar = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask, u_mask, v_mask, z_coord, jacobian, grid, 1000.0, 1000.0, cfg.S_max)
+        kR = jnp.full((n_lat, n_lon), 1000.0)
+        dT_array = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask, u_mask, v_mask, z_coord, jacobian, grid, 1000.0, kR, cfg.S_max)
+        assert jnp.allclose(dT_array, dT_scalar, rtol=1e-13, atol=1e-30)
+
+    def test_triad_both_const_arrays_match_both_scalars(self):
+        """K_iso=K_gm const case: kappa_GM AND kappa_Redi as equal const arrays ==
+        equal scalars (broadcast + the (kappa_Redi-kappa_GM) cancellation hold)."""
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        n_lat, n_lon, _ = T.shape
+        dT_scalar = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask, u_mask, v_mask, z_coord, jacobian, grid, 800.0, 800.0, cfg.S_max)
+        kc = jnp.full((n_lat, n_lon), 800.0)
+        dT_array = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask, u_mask, v_mask, z_coord, jacobian, grid, kc, kc, cfg.S_max)
+        assert jnp.allclose(dT_array, dT_scalar, rtol=1e-13, atol=1e-30)
+
+    def test_triad_kiso_equals_kgm_takes_effect(self):
+        """A spatially-varying K_iso=K_gm (kappa_Redi == kappa_GM array) is finite and
+        DIFFERS from holding kappa_Redi constant — the prognostic-Redi override is
+        active. Uses a passive tracer NOT aligned with density (a zonal sinusoid, while
+        rho tilts only in y) so Redi genuinely diffuses it and kappa_Redi matters; a
+        tracer q=f(rho) would cancel per-triad (flux -> kappa_GM·dq/dx, kappa_Redi
+        drops out)."""
+        setup = _stratified_with_meridional_tilt()
+        grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian, rho, T, S, cfg = setup
+        n_lat, n_lon, nlev = T.shape
+        lon = jnp.arange(n_lon, dtype=jnp.float64)
+        q = jnp.broadcast_to(
+            jnp.sin(2.0 * jnp.pi * lon / n_lon)[None, :, None], (n_lat, n_lon, nlev))
+        kGM = jnp.broadcast_to(
+            jnp.linspace(100.0, 2000.0, n_lat)[:, None], (n_lat, n_lon))
+        dq_kiso = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            q, rho, mask, u_mask, v_mask, z_coord, jacobian, grid, kGM, kGM, cfg.S_max)
+        dq_const = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            q, rho, mask, u_mask, v_mask, z_coord, jacobian, grid, kGM, 1000.0, cfg.S_max)
+        assert jnp.all(jnp.isfinite(dq_kiso))
+        # Relative difference vs the tendency magnitude (the tendencies are ~1e-10,
+        # far below jnp.allclose's default atol=1e-8, so compare relatively).
+        denom = float(jnp.max(jnp.abs(dq_const))) + 1e-30
+        rel = float(jnp.max(jnp.abs(dq_kiso - dq_const))) / denom
+        assert rel > 0.1, f"K_iso=K_gm override had negligible effect (rel={rel:.3g})"

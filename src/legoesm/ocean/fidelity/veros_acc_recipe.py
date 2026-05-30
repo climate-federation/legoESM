@@ -115,14 +115,12 @@ ACC_TKE_CONFIG = TKEConfig(
 # Veros GM/Redi knobs (verbatim from ACCSetup)
 ACC_GM_REDI_CONFIG = GMRediConfig(
     kappa_GM=1000.0,             # EKE-off fallback (overridden by the prognostic eke below)
-    kappa_Redi=1000.0,
-    # ^ KNOWN GAP (Redi NOT yet apples-to-apples): Veros ACC sets
-    #   enable_eke_isopycnal_diffusion=True ⇒ K_iso = K_gm (the Redi tracer
-    #   diffusivity FOLLOWS the prognostic GM coefficient, ~0.3 m²/s cold-start;
-    #   veros/core/eke.py:74-75). legoESM still holds kappa_Redi=1000 constant —
-    #   only kappa_GM is driven by EKE — so during a cold start legoESM K_iso (1000)
-    #   ≫ Veros K_iso (~0.3). Reproducing K_iso=K_gm (prognostic Redi) is the
-    #   documented NEXT must-build; see the strategy §8 ledger.
+    kappa_Redi=1000.0,           # EKE-off fallback (overridden by K_iso=K_gm below)
+    # ^ Veros ACC sets enable_eke_isopycnal_diffusion=True ⇒ K_iso = K_gm: the Redi
+    #   tracer diffusivity follows the prognostic GM coefficient (veros/core/eke.py:
+    #   74-75). Reproduced via EKEConfig.isopycnal_diffusion=True below (the step
+    #   passes kappa_redi_override = kappa_gm_override), so kappa_Redi=1000 is only
+    #   the EKE-off fallback.
     S_max=0.01,                  # ↔ iso_slopec
     taper_width_frac=0.5,        # = iso_dslope / iso_slopec = 0.005 / 0.01
     # Prognostic EKE (Eden-Greatbatch) with the Rhines-limited mixing length —
@@ -133,8 +131,12 @@ ACC_GM_REDI_CONFIG = GMRediConfig(
     # l_min=100, k_max=1e4, superbee advection). NB EKEConfig.k_iso=1000 is the
     # eke-FIELD diffusivity (Veros uses ~max(500,2·K_gm) — a minor approximation,
     # distinct from the tracer K_iso above). With eke set, the prognostic
-    # c_k·eke_len·√E replaces the constant kappa_GM above (the GM skew term ONLY).
-    eke=EKEConfig(mixing_length_scheme="rhines", eke_cross=2.0, eke_crhin=1.0),
+    # c_k·eke_len·√E replaces the constant kappa_GM above. isopycnal_diffusion=True
+    # additionally drives the Redi tracer diffusivity K_iso = K_gm (Veros
+    # enable_eke_isopycnal_diffusion=True, acc.py:74) — so BOTH the GM skew and the
+    # Redi diffusivity are now the prognostic kappa (apples-to-apples with Veros).
+    eke=EKEConfig(mixing_length_scheme="rhines", eke_cross=2.0, eke_crhin=1.0,
+                  isopycnal_diffusion=True),
 )
 
 # Surface restoring timescale
@@ -438,12 +440,12 @@ def build_acc_physics_config(grid: LatLonGrid | None = None, *,
     apples-to-apples with Veros, NOT the ~25×-too-large Visbeck ``L``.
     ``GMRediConfig.kappa_GM=1000`` is retained as the EKE-off fallback.
 
-    KNOWN GAP (documented, not yet built): only the GM *skew* coefficient is
-    EKE-driven here. Veros ACC also sets ``enable_eke_isopycnal_diffusion=True``
-    ⇒ ``K_iso = K_gm`` (the Redi *tracer* diffusivity follows the prognostic
-    kappa); legoESM still holds ``kappa_Redi=1000`` constant. So GM is
-    apples-to-apples but Redi is not yet — reproducing ``K_iso=K_gm`` (prognostic
-    Redi) is the documented next must-build (strategy §8).
+    Both the GM *skew* coefficient AND the Redi *tracer* diffusivity are now
+    EKE-driven: ``isopycnal_diffusion=True`` reproduces Veros's
+    ``enable_eke_isopycnal_diffusion`` (``K_iso = K_gm``), so the step drives
+    ``kappa_Redi`` from the same prognostic kappa as GM (the constant
+    ``kappa_Redi=1000`` is the EKE-off fallback). GM and Redi are both
+    apples-to-apples with Veros.
 
     Set ``with_surface_forcing=True`` (free-run harness) to activate Veros ACC's
     T* surface restoring via the physics pipeline; ``grid`` is then required (for
