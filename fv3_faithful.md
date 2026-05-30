@@ -143,6 +143,49 @@ structured damping), already largely FV3-faithful within a stabilized RK3 frame.
   KE-grad), NOT more damping (blows up). Keep 48 sentinels green.
 - `/codex:adversarial-review` on the diff + the visuals.
 
+## iter 4 — 3D baroclinic cube v-imprint (BIG find, `results/probe_hydro*`)
+Jablonowski-Williamson baroclinic wave, C36 hybrid, quick (2 d). v-wind:
+| run | t=0.2d v_rms | t=2d v_rms | t=2d v_max |
+|-----|-------------|-----------|-----------|
+| cube DEFAULT | **3.43** | 4.95 | 11.9 |
+| latlon (ref) | 0.023 | 0.066 | 0.18 |
+⇒ cube v-imprint is **~150× latlon** at early time (true J-W perturbation v is
+~0.02 m/s; cube shows 3.4 m/s of pure wavenumber-4 cube-panel grid imprint —
+visible as blocky panel-edge discontinuities in both native + regridded v plots,
+4-fold equatorial-panel symmetry). FAR worse than the SW W2 imprint. This is the
+dominant cube edge artifact in the matrix.
+
+ROOT CAUSE: `run_baroclinic` (cube) never wired FV3's B-grid corner-divergence
+damping. `run_held_suarez` exposes it via env (`LEGOESM_CDD_*`), the NH path
+hardcodes `corner_div_damp_nord=1, d4_bg=0.16` (FV3 production), but
+`run_baroclinic`'s `PrimitiveEquationConfig` had NO `corner_div_damp_*` fields
+→ no corner damping → full imprint. (Confirmed: `LEGOESM_CDD_D2BG=0.001` on the
+unpatched path was BIT-IDENTICAL — the knob wasn't read there at all.)
+
+DISAMBIGUATION: at t=0 cube v=0.0000 exactly (clean IC, NO diagnostic rotation
+error); v grows 0→3.4 m/s by t=0.2d while latlon grows 0→0.023 → the imprint is
+a **prognostic grid-seeded mode**, not a visualization artifact.
+
+PROBE RESULT (iter 4): wiring FV3 corner-divergence damping into `run_baroclinic`
+and sweeping `corner_div_damp_d2_bg ∈ {0.001, 0.003, 0.005}` → **ALL BLOW UP at
+step 100 (day 0.23), NaN at the corner divergence** (last clean max|v|=28 m/s).
+So corner damping is a **dead-end** for baroclinic (unlike held_suarez where
+d2_bg=0.001 helps). The gate is `corner_div_damp_d2_bg>0` (primitive_eq_cdgrid.py
+:535); `d4_bg`/`nord` are nested inside it, so nord=1/d4_bg=0.16 alone is inert.
+KEPT: env knobs `LEGOESM_CDD_{D2BG,D4BG,NORD}` wired into `run_baroclinic`,
+**default INERT (all 0 ⇒ bit-identical to pre-iter-4)**, for future probing of
+smaller coeffs / a metric-level fix. AST guard + W2 sentinel green.
+ALSO FIXED: iter-2 SW env-knob edit had broken
+`test_sw_cube_propagating_tests_have_hyperdiff_override` (it pinned the literal
+`2.0 * _hyperdiff_cube(n)`); updated the guard to accept the factor form with a
+default-stays-2.0 assertion. 31/31 guard tests pass.
+
+⇒ The baroclinic cube v-imprint is the LARGEST cube edge artifact and is NOT
+fixable by the existing damping knobs. Root cause is upstream — panel-edge
+metric / d2a2c discretization seeding a fast-growing mode (cf. iter-73
+rest_state_topo "cube panel-edge metric errors", 13× spurious motion). This is
+the deep target; needs metric-level work, not damping.
+
 ## Cross-grid data note (ask D)
 Regridded `snapshots_latlon.npz` uses canonical lon[-180,180]/lat[-90,90] for
 cube+ico, BUT the **latlon** grid writes fields at NATIVE (72,144) while still

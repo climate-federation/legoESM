@@ -3842,9 +3842,27 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         ah = ah * _ah_scale
         # FV3_3D iter 66 / 67: opt-in CFL-aware dt (factored helper).
         dt = _resolve_dt_cube(n, label="baroclinic")
+        # FV3-faithful B-grid corner-divergence damping (port of
+        # sw_core.F90 divergence_corner + d_sw5), exposed for PROBING the
+        # large cube baroclinic v-imprint (v_rms ~3.4 m/s at t=0.2 d vs
+        # latlon ~0.02 m/s, ~150x; grows from a clean v=0 IC, so it is a
+        # prognostic grid-seeded mode, not a diagnostic rotation error).
+        # DEFAULT INERT (all 0 => gate ``corner_div_damp_d2_bg>0`` off =>
+        # bit-identical to the pre-iter-4 config).  PROBE RESULT (iter-4):
+        # the corner damping DESTABILISES this case — d2_bg=0.001 and
+        # 0.003 both BLOW UP at step 100 (day 0.23, NaN at the corner
+        # divergence) — so it is NOT a usable fix here (unlike held_suarez,
+        # where d2_bg=0.001 helps).  Knobs retained for future probing of
+        # smaller coefficients / a metric-level fix.
+        _bcl_cdd_nord = int(os.environ.get("LEGOESM_CDD_NORD", "0"))
+        _bcl_cdd_d4_bg = float(os.environ.get("LEGOESM_CDD_D4BG", "0.0"))
+        _bcl_cdd_d2_bg = float(os.environ.get("LEGOESM_CDD_D2BG", "0.0"))
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
             div_damp_coeff=dd, A_h=ah,
+            corner_div_damp_nord=_bcl_cdd_nord,
+            corner_div_damp_d4_bg=_bcl_cdd_d4_bg,
+            corner_div_damp_d2_bg=_bcl_cdd_d2_bg,
             use_conservation_fixer=True, fix_mass=True,
             anchor_mass_to_initial=True,
             # new_test_dycores iter-18: enable PE iter-338 metric-
