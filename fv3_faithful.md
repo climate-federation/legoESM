@@ -24,6 +24,15 @@ Also unblocked latlon SW (was 0%-running: bad `_conservation_accumulator` import
 SW cosine_bell/W5/W2 all 4 grids co-located within 1 cell (visual). Test
 `tests/test_latlon_regrid_alignment.py`.
 
+## OCEAN cross-grid verification (all grids)
+- rest_state ×12 (4 cases × cube/latlon/mpas) machine-zero.
+- barotropic_wave (1 m Gaussian IC, all grids): cube fv3sw retains 0.855 m (15%
+  decay) vs latlon 0.21 / mpas 0.22 (≈79% decay) — the cube is the LEAST
+  spurious-dissipation = most accurate for the barotropic wave (FV3 SW core is
+  energy-conserving); latlon/mpas over-damp. damp_v sweep inert (no tuning need).
+- geostrophic cube max_speed 0.0142 ≈ latlon 0.0159/mpas 0.0169; phillips cube
+  max_eta 0.44 ≈ latlon 0.41/mpas 0.60. Cube close to latlon/mpas on key metrics.
+
 ## OCEAN cube
 - rest_state ×4 (cube/latlon/mpas) PASS — cube eta drift 1e-23..1e-31 (FC-Gram
   machine-zero). phillips, inertia_gravity_wave, overflow cube PASS.
