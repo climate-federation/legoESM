@@ -1130,8 +1130,8 @@ def transport_step(h, ut, vt, dt, cdgrid, mass_target=None,
     # the noise as a visible mass drift.  Promotion preserves bit-clean
     # flux closure (cube panel-edge flux is conservative when summed
     # in fp64).  Output cast back to input dtype.
-    from legoesm.core.conservation import _conservation_accumulator
-    _acc = _conservation_accumulator()
+    from legoesm.core.conservation import conservation_accumulator
+    _acc = conservation_accumulator()
     h64 = h.astype(_acc)
     fx64 = fx.astype(_acc)
     fy64 = fy.astype(_acc)
@@ -1149,8 +1149,8 @@ def transport_step(h, ut, vt, dt, cdgrid, mass_target=None,
         # in fp32 over ~6·N² cells and leaks ~N·eps noise into ``scale``,
         # which then multiplies every cell — turning O(1e-7) reduction
         # noise into a directly visible cosine_bell mass drift.
-        from legoesm.core.conservation import _conservation_accumulator
-        _acc = _conservation_accumulator()
+        from legoesm.core.conservation import conservation_accumulator
+        _acc = conservation_accumulator()
         # Step 1: clip negatives to zero
         h_pos = jnp.maximum(h_new, 0.0)
         mass_pos = jnp.sum(h_pos.astype(_acc) * area.astype(_acc))

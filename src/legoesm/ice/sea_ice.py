@@ -29,7 +29,11 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio_ice
-from legoesm.coupler.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
+from legoesm.coupler.bulk_flux import (
+    simple_bulk_fluxes,
+    compute_most_fluxes,
+    validate_bulk_scheme,
+)
 from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
 from legoesm.ice.dynamics import evp_solver, mevp_solver, free_drift_velocity
 from legoesm.ice.transport import advect_ice_tracers
@@ -205,11 +209,20 @@ def _bulk_flux_dispatch(
     helper centralises the choice so both paths and the diagnostic
     ``_build_response`` produce consistent values.
     """
+    valid_schemes = ("constant", "most", "coare3", "large_yeager")
+    if config.bulk_scheme not in valid_schemes:
+        raise ValueError(
+            f"Unknown sea-ice bulk_scheme {config.bulk_scheme!r}; "
+            f"expected one of {valid_schemes}."
+        )
     wind_speed = jnp.sqrt(
-        forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2
+        jnp.maximum(
+            forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2, 1e-12
+        )
     )
     rho = forcing.rho_lowest
     q_sfc = saturation_mixing_ratio_ice(T_ice, forcing.p_surface)
+    validate_bulk_scheme(config.bulk_scheme)
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
@@ -702,7 +715,9 @@ def _thermo_single(
     # Bulk fluxes — use caller-supplied values when available.
     if shflx is None or lhflx is None:
         wind_speed = jnp.sqrt(
-            forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2
+            jnp.maximum(
+                forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + U_min ** 2, 1e-12
+            )
         )
         rho = forcing.rho_lowest
         q_sfc = saturation_mixing_ratio_ice(T_ice, forcing.p_surface)
@@ -1592,9 +1607,15 @@ def _step_dynamic_v2(
             # pond remap is configured).
             pond_volume_cell = jnp.where(conc > 1e-12, V_pond / conc_safe, 0.0)
             # Split pond_volume into depth (assume depth follows existing
-            # depth_to_area ratio).
+            # depth_to_area ratio).  Floor the sqrt argument at a negligible
+            # 1e-14 (sqrt -> 1e-7 < the 1e-6 pond_area gate below, so no-pond
+            # cells stay no-pond) rather than 0: sqrt'(0) is infinite, so
+            # differentiating at pond_volume_cell == 0 (the common no-pond
+            # state) would inject an inf/NaN gradient via pond_depth.
             pond_depth = jnp.sqrt(
-                jnp.maximum(config.ponds.depth_to_area_ratio * pond_volume_cell, 0.0),
+                jnp.maximum(
+                    config.ponds.depth_to_area_ratio * pond_volume_cell, 1e-14
+                ),
             )
             pond_area = jnp.where(
                 pond_depth > 1e-6,

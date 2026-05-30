@@ -29,6 +29,10 @@ class CloudConfig(NamedTuple):
         Condensate scaling in Xu-Randall formula (default 100.0).
     p_xr : float
         RH exponent in Xu-Randall formula (default 0.25).
+    gamma_xr : float
+        Saturation-deficit exponent in the Xu-Randall denominator
+        ``((1−RH)·q_sat)^γ`` (default 0.49, the Xu & Randall 1996
+        best-fit value; the earlier code omitted it ⇒ γ=1).
     r_eff_liq : float
         Effective radius for liquid cloud droplets [m] (default 10e-6 = 10 um).
     r_eff_ice : float
@@ -46,6 +50,7 @@ class CloudConfig(NamedTuple):
     rh_crit: float = 0.7
     alpha_xr: float = 100.0
     p_xr: float = 0.25
+    gamma_xr: float = 0.49
     r_eff_liq: float = 10.0e-6
     r_eff_ice: float = 30.0e-6
     q_c_diagnostic: float = 0.2e-3

@@ -53,7 +53,7 @@ from legoesm.parallel.cubesphere_exchange import (
 from legoesm.parallel.halo_exchange import (
     packed_pad_halo_mpi_4d as _packed_pad_halo_4d_mpi,
 )
-from legoesm.core.precision import _resolve_dtype, cast_pytree
+from legoesm.core.precision import resolve_dtype, cast_pytree
 from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import (
@@ -414,7 +414,7 @@ def fv3_hydrostatic_tendencies(
 
     # --- 8. Pressure gradient correction at D-grid corners ---
     # Higher precision for PGF to avoid catastrophic cancellation
-    _pg_dt = jnp.result_type(ln_ps.dtype, _resolve_dtype("atm_pressure_gradient", "compute"))
+    _pg_dt = jnp.result_type(ln_ps.dtype, resolve_dtype("atm_pressure_gradient", "compute"))
     ln_ps_hi = ln_ps.astype(_pg_dt)
     # iter-59: reuse _lnps_pad from merged stage halo when dtype matches
     if _lnps_pad is not None and ln_ps.dtype == _pg_dt:

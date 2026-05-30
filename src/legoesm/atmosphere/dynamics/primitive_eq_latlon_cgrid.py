@@ -85,7 +85,7 @@ from legoesm.core.cfl import pole_cell_dx, cfl_max_dt
 from legoesm.core.conservation import (
     zero_mean_tendency,
     _batch_global_area_sums,
-    _conservation_accumulator,
+    conservation_accumulator,
 )
 from legoesm.core.precision import cast_pytree
 from legoesm.core.operators_fv_latlon import (
@@ -720,7 +720,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         anchored target and blocked sub-fp32 conservation even after
         iter-2's anchor wiring.
         """
-        acc = _conservation_accumulator()
+        acc = conservation_accumulator()
         return jnp.sum(state.p_s.astype(acc) * self.grid.area.astype(acc))
 
     def tendencies(self, state: CGridLatLonHydrostaticState):
@@ -887,7 +887,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         # Conservation fixer for mass — fp64 budget accumulator
         # (iter-12 mirrors compute_mass; see docstring there).
         if self.config.fix_mass:
-            acc = _conservation_accumulator()
+            acc = conservation_accumulator()
             # ``grid_total_area`` is a precomputed scalar on the grid;
             # avoids recomputing ``jnp.sum(area)`` every step (one
             # extra reduction in serial, one extra allreduce under
@@ -998,7 +998,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 # HS path: cell-centred Field state.  ``compute_mass``
                 # expects a CGrid state, but the integral is the same
                 # area-weighted sum of p_s.  Iter-12: fp64 budget acc.
-                acc = _conservation_accumulator()
+                acc = conservation_accumulator()
                 self._target_mass = jnp.sum(
                     state.p_s.data.astype(acc) * self.grid.area.astype(acc)
                 )

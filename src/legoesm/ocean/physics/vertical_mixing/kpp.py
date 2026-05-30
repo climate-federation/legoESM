@@ -245,6 +245,12 @@ def kpp_vertical_mixing(
     # --- Turbulent velocity scale w_s(sigma) (LMD94 Appendix B) ---
     # w_s depends on stability (B_f) and depth d = sigma * h_bl
     d = sigma_clip * h_bl[..., jnp.newaxis]
+    # LMD94 surface-layer limit: the similarity scale is evaluated only
+    # within the surface layer (σ ≤ ε) and held constant below it, i.e.
+    # the velocity-scale depth is capped at d_eff = min(d, ε·h_bl).
+    # Without this, w keeps varying through the whole boundary layer
+    # instead of holding constant beneath the surface layer (LMD94 §A/B).
+    d_eff = jnp.minimum(d, cfg.epsilon_lmd * h_bl[..., jnp.newaxis])
     # Monin-Obukhov length: L_MO = u_star^3 / (kappa * B_f)
     # Use copysign(eps, B_f) to preserve the sign of B_f near zero,
     # preventing a stability classification flip (issue #168 bug 1).
@@ -254,49 +260,56 @@ def kpp_vertical_mixing(
         jnp.copysign(eps, B_f[..., jnp.newaxis]),
     )
     L_MO = u_star[..., jnp.newaxis]**3 / (cfg.kappa_vk * B_f_safe)
-    zeta_kpp = d / L_MO
+    zeta_kpp = d_eff / L_MO
 
-    # LMD94 Appendix B turbulent velocity scales:
-    # Stable (B_f <= 0): w_s = kappa * u_star / (1 + 5*zeta)
-    # Unstable, weakly (epsilon*d < |L|): w_s = kappa * u_star * phi_m^{-1}
-    #   where phi_m^{-1} = (1 - 16*zeta)^{1/4}
-    # Unstable, strongly convective (epsilon*d > |L|):
-    #   w_s = (kappa * (u_star^3 + c_b * kappa * (-B_f) * d))^{1/3}
-    is_unstable = B_f[..., jnp.newaxis] > 0.0
-    epsilon_lmd = cfg.epsilon_lmd
-
-    # Weakly unstable: phi_m^{-1} formulation
-    w_s_weak = (cfg.kappa_vk * u_star[..., jnp.newaxis]
-                * jnp.power(jnp.maximum(1.0 + 16.0 * jnp.abs(zeta_kpp), 1.0), 0.25))
-
-    # Strongly convective: includes convective velocity scale
+    # LMD94 Appendix B SEPARATE momentum (w_m) and scalar (w_s) velocity
+    # scales (F-OCEAN-1).  They share the stable form (phi_m = phi_s =
+    # 1 + 5*zeta) but the unstable similarity functions differ — scalars
+    # mix more efficiently than momentum:
+    #   weakly unstable:  w_m = k·u*·(1+16|z|)^{1/4},
+    #                     w_s = k·u*·(1+16|z|)^{1/2}
+    #   convective:       w_x = k·(a_x·u*³ + c_x·k·B_f·d)^{1/3}
+    # joined continuously at |zeta| = zeta_{m,s}_abs (LMD94 chose
+    # a_x/c_x so the convective branch matches the weakly branch there).
+    # The previous code used the momentum 1/4 power for the single scale
+    # feeding BOTH A_v and K_v, so the boundary layer carried Pr_t ≡ 1;
+    # the steeper scalar exponent now gives K_v > A_v ⇒ Pr_t < 1 in
+    # unstable conditions, as observed.
+    kappa = cfg.kappa_vk
+    ustar_e = u_star[..., jnp.newaxis]
+    abs_zeta = jnp.abs(zeta_kpp)
     Bf_pos = jnp.maximum(B_f[..., jnp.newaxis], 0.0)
-    w_s_conv = jnp.power(
-        cfg.kappa_vk * (u_star[..., jnp.newaxis]**3
-                        + cfg.c_b * cfg.kappa_vk * Bf_pos * d),
+    is_unstable = B_f[..., jnp.newaxis] > 0.0
+
+    base16 = jnp.maximum(1.0 + 16.0 * abs_zeta, 1.0)
+    w_m_weak = kappa * ustar_e * jnp.power(base16, 0.25)
+    w_s_weak = kappa * ustar_e * jnp.power(base16, 0.5)
+    # Convective scales (kappa OUTSIDE the cube root).  The floored base
+    # keeps the cube root and its gradient finite even if the argument
+    # would dip ≤ 0 numerically near the join (F-OCEAN-2 pattern).
+    w_m_conv = kappa * jnp.power(
+        jnp.maximum(cfg.a_m * ustar_e ** 3 + cfg.c_m * kappa * Bf_pos * d_eff, 1e-30),
         1.0 / 3.0,
     )
+    w_s_conv = kappa * jnp.power(
+        jnp.maximum(cfg.a_s * ustar_e ** 3 + cfg.c_s * kappa * Bf_pos * d_eff, 1e-30),
+        1.0 / 3.0,
+    )
+    w_m_unstable = jnp.where(abs_zeta <= cfg.zeta_m_abs, w_m_weak, w_m_conv)
+    w_s_unstable = jnp.where(abs_zeta <= cfg.zeta_s_abs, w_s_weak, w_s_conv)
 
-    # Transition: use convective scale when epsilon*d > |L_MO|
-    is_strongly_convective = epsilon_lmd * d > jnp.abs(L_MO)
-    w_s_unstable = jnp.where(is_strongly_convective, w_s_conv, w_s_weak)
+    # Shared stable suppression.  Under this sign convention (B_f > 0 =
+    # unstable) ``L_MO = u*³/(kappa·B_f)`` is NEGATIVE for stable forcing,
+    # so ``zeta_kpp < 0``; ``max(-zeta_kpp, 0)`` lets the magnitude of
+    # zeta drive the suppression (codex review iter-1 finding #4).
+    w_stable = (kappa * ustar_e
+                / jnp.maximum(1.0 + 5.0 * jnp.maximum(-zeta_kpp, 0.0), 1.0))
+    w_m = jnp.maximum(jnp.where(is_unstable, w_m_unstable, w_stable), 1e-10)
+    w_s = jnp.maximum(jnp.where(is_unstable, w_s_unstable, w_stable), 1e-10)
 
-    # Stable suppression: ``phi_m = 1 + 5*|zeta|`` for |zeta| > 0 in the
-    # classical Monin-Obukhov convention.  Under the sign convention
-    # used here (B_f > 0 = unstable), ``L_MO = u*^3 / (kappa * B_f)``
-    # is NEGATIVE for stable forcing, so ``zeta_kpp = d / L_MO < 0`` for
-    # stable.  The previous form ``max(zeta_kpp, 0)`` always returned
-    # zero in stable conditions and disabled the suppression entirely.
-    # Use ``max(-zeta_kpp, 0)`` so the magnitude of zeta drives the
-    # stable suppression (codex adversarial review iter-1, finding #4).
-    w_s_stable = (cfg.kappa_vk * u_star[..., jnp.newaxis]
-                  / jnp.maximum(1.0 + 5.0 * jnp.maximum(-zeta_kpp, 0.0), 1.0))
-    w_s = jnp.where(is_unstable, w_s_unstable, w_s_stable)
-    w_s = jnp.maximum(w_s, 1e-10)
-
-    # --- BL diffusivity at full levels ---
-    K_bl_full = h_bl[..., jnp.newaxis] * w_s * G
-    K_bl_full = jnp.minimum(K_bl_full, cfg.K_max)
+    # --- BL viscosity (momentum, w_m) and diffusivity (scalar, w_s) ---
+    K_bl_m_full = jnp.minimum(h_bl[..., jnp.newaxis] * w_m * G, cfg.K_max)
+    K_bl_s_full = jnp.minimum(h_bl[..., jnp.newaxis] * w_s * G, cfg.K_max)
 
     # --- Interior mixing: Richardson-number dependent ---
     N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, jacobian)
@@ -322,8 +335,9 @@ def kpp_vertical_mixing(
     K_interior = Ri_shear_curve + cfg.K_bg + K_conv
     A_interior = Ri_shear_curve + cfg.A_bg + K_conv
 
-    # --- K at interfaces (average of full level K_bl) ---
-    K_bl_half = 0.5 * (K_bl_full[..., :-1] + K_bl_full[..., 1:])
+    # --- K at interfaces (average of full level K_bl), split m/s ---
+    K_bl_m_half = 0.5 * (K_bl_m_full[..., :-1] + K_bl_m_full[..., 1:])
+    K_bl_s_half = 0.5 * (K_bl_s_full[..., :-1] + K_bl_s_full[..., 1:])
 
     # sigma at interfaces
     z_half_depth = 0.5 * (z_depth[..., :-1] + z_depth[..., 1:])
@@ -334,8 +348,8 @@ def kpp_vertical_mixing(
     # floor (K_bg for tracers, A_bg for momentum) so the merged field
     # honors the configured background levels in BOTH the BL and the
     # interior.
-    K_v = jnp.where(in_bl, K_bl_half + cfg.K_bg, K_interior)
-    A_v = jnp.where(in_bl, K_bl_half + cfg.A_bg, A_interior)
+    K_v = jnp.where(in_bl, K_bl_s_half + cfg.K_bg, K_interior)   # scalar  ← w_s
+    A_v = jnp.where(in_bl, K_bl_m_half + cfg.A_bg, A_interior)   # momentum ← w_m
     K_v = jnp.minimum(K_v, cfg.K_max)
     A_v = jnp.minimum(A_v, cfg.K_max)
 
@@ -396,14 +410,14 @@ def kpp_vertical_mixing(
         Q_T = Q_sfc_T  # [K*m/s]
     else:
         dT_dz_sfc = (T[..., 0] - T[..., 1]) / jnp.maximum(dz_half[..., 0], eps)
-        K_sfc = K_bl_full[..., 0]
+        K_sfc = K_bl_s_full[..., 0]
         Q_T = K_sfc * dT_dz_sfc
 
     if Q_sfc_S is not None:
         Q_S = Q_sfc_S  # [PSU*m/s]
     else:
         dS_dz_sfc = (S[..., 0] - S[..., 1]) / jnp.maximum(dz_half[..., 0], eps)
-        K_sfc = K_bl_full[..., 0]
+        K_sfc = K_bl_s_full[..., 0]
         Q_S = K_sfc * dS_dz_sfc
 
     # Only apply non-local transport for unstable (convective) columns.

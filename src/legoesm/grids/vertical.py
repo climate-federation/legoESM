@@ -1566,7 +1566,7 @@ def mount_waves(
         raise ValueError(f"mount_waves requires km >= 23, got {km}")
     g = constants.g
     rdgas = constants.R_d
-    p00 = 1.0e5
+    p00 = constants.p_ref
     t0 = 300.0
 
     dz0 = 500.0 if km <= 60 else 250.0

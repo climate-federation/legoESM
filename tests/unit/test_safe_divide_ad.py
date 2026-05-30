@@ -602,3 +602,44 @@ class TestGWDADSafety:
             "non-finite gradient through prognostic_spectral_gwd in "
             "nearly neutral stratification — issue #249 regression"
         )
+
+
+# ---------------------------------------------------------------------------
+# mixing_length (Blackadar 1962) — shared by 6 turbulence closures
+# ---------------------------------------------------------------------------
+
+class TestMixingLength:
+    """``_shared.mixing_length`` factors the asymptotic master length
+    ``l = κz / (1 + κz/l_∞)`` that Louis / TKE / CLUBB-lite /
+    Holtslag-Boville / EDMF / Smagorinsky-Lilly all share."""
+
+    def test_asymptotic_limits(self):
+        from legoesm.atmosphere.physics._shared import mixing_length
+        l_inf = 100.0
+        # Near surface (κz ≪ l_∞): l → κz.
+        z_small = jnp.array([2.0, 5.0])
+        l_small = mixing_length(z_small, l_inf)
+        assert jnp.allclose(l_small, constants.kappa_vk * z_small, rtol=0.1)
+        # Far aloft (κz ≫ l_∞): l → l_∞.
+        l_high = mixing_length(jnp.array([1.0e5]), l_inf)
+        assert float(l_high[0]) > 0.9 * l_inf
+        assert float(l_high[0]) < l_inf
+
+    def test_matches_closed_form_and_monotonic(self):
+        from legoesm.atmosphere.physics._shared import mixing_length
+        l_inf = 80.0
+        z = jnp.array([10.0, 50.0, 200.0, 1000.0])
+        k = constants.kappa_vk
+        expected = k * z / (1.0 + k * z / l_inf)
+        assert jnp.allclose(mixing_length(z, l_inf), expected, rtol=1e-12)
+        # Strictly increasing with height.
+        assert jnp.all(jnp.diff(mixing_length(z, l_inf)) > 0)
+
+    def test_floor_and_ad_safe_at_zero(self):
+        from legoesm.atmosphere.physics._shared import mixing_length
+        # z = 0 is clipped to z_floor so l stays finite and differentiable.
+        assert jnp.isfinite(mixing_length(jnp.array([0.0]), 100.0)[0])
+        g = jax.grad(lambda z: jnp.sum(mixing_length(z, 100.0)))(
+            jnp.array([0.0, 1.0, 50.0])
+        )
+        assert jnp.all(jnp.isfinite(g))

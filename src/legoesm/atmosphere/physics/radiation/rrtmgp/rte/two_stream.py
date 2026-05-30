@@ -207,6 +207,7 @@ def solve_lw(
     cloud_r_eff_ice: Array | None = None,
     cloud_path_ice: Array | None = None,
     cloud_fraction: Array | None = None,
+    aerosol_absorption_optical_depth: Array | None = None,
     use_scan: bool | None = None,
     use_optimal_angle: bool = False,
 ) -> dict[str, Array]:
@@ -240,6 +241,14 @@ def solve_lw(
     cloud_r_eff_ice: The effective radius of cloud ice particles [m].
     cloud_path_ice: The cloud ice water path in each atmospheric grid cell
       [kg/m²].
+    aerosol_absorption_optical_depth: Optional prescribed longwave aerosol
+      **absorption** optical depth per layer [-] (NOT extinction): it is
+      added directly to the absorption optical depth with single-scattering
+      albedo 0.  Longwave aerosol scattering is neglected (the dominant LW
+      aerosol effect is absorption/emission); a caller holding extinction
+      optical depth must pre-multiply by the LW absorption fraction
+      (1 − ω) before passing it here.  ``None`` (the default) leaves the
+      longwave solution byte-identical.
     use_scan: Whether to use scan or for loops for the recurrent operation.
 
   Returns:
@@ -248,7 +257,7 @@ def solve_lw(
       `flux_down`: The downwelling longwave radiative flux at face i - 1/2.
       `flux_net`: The net longwave radiative flux at face i - 1/2.
   """
-  optics_lib = cast(optics.RRTMOptics | optics.GrayAtmosphereOptics, optics_lib)
+  optics_lib = cast(optics.RRTMOptics, optics_lib)
   if vmr_fields is not None:
     # Convert the chemical formulas of the gas species to RRTM-consistent
     # numerical identifiers.
@@ -289,6 +298,34 @@ def solve_lw(
         cloud_r_eff_ice, cloud_path_ice,
         cloud_fraction=cloud_fraction,
     )
+    if aerosol_absorption_optical_depth is not None:
+      # Prescribed longwave aerosol as a pure-absorbing layer
+      # (single-scattering albedo 0): add its absorption optical depth to
+      # the background gas+cloud optical depth and dilute the combined ssa
+      # accordingly.  The asymmetry factor of the (scattering) background
+      # is unchanged because the aerosol contributes no scattering
+      # (g_tot = tau_bg w_bg g_bg / (tau_tot w_tot) = g_bg).  Injected
+      # into ``precomputed_props`` *before* the optimal-angle secant so
+      # the per-band diffusivity sees the aerosol-inclusive transmissivity
+      # (the secant is fit on exp(-sum tau)); the same dict then feeds the
+      # source-and-properties solve, keeping both paths consistent.
+      # ``safe_divide`` avoids the -a/b^2 VJP overflow at the tau floor
+      # (same rationale as the shortwave aerosol mix in ``solve_sw``).
+      tau_bg = jnp.maximum(precomputed_props['optical_depth'], 1.0e-12)
+      tau_aer = jnp.maximum(aerosol_absorption_optical_depth, 0.0)
+      tau_tot = tau_bg + tau_aer
+      w_tot = jnp.clip(
+          safe_divide(
+              tau_bg * precomputed_props['ssa'], tau_tot, eps=1.0e-12, fill=0.0,
+          ),
+          0.0,
+          1.0,
+      )
+      precomputed_props = {
+          'optical_depth': tau_tot,
+          'ssa': w_tot,
+          'asymmetry_factor': precomputed_props['asymmetry_factor'],
+      }
     if optimal_angle_fit is not None:
       band_idx = optics_lib.gas_optics_lw.g_point_to_bnd[igpt]
       lw_diffusive_factor = _compute_optimal_lw_secant(
@@ -434,7 +471,7 @@ def solve_sw(
       `flux_net`: The net shortwave radiative flux at face i - 1/2.
   """
   zenith = atmos_state.zenith
-  optics_lib = cast(optics.RRTMOptics | optics.GrayAtmosphereOptics, optics_lib)
+  optics_lib = cast(optics.RRTMOptics, optics_lib)
   if vmr_fields is not None:
     # Convert the chemical formulas of the gas species to RRTM-consistent
     # numerical identifiers.

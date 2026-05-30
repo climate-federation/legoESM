@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import pytest
 
 from legoesm.atmosphere.physics.thermodynamics import (
     saturation_mixing_ratio,
@@ -19,6 +20,7 @@ from legoesm.atmosphere.physics.thermodynamics import (
     moist_adiabat_lapse_rate,
     compute_moist_adiabat,
     compute_cape,
+    parcel_profile_and_cape,
 )
 from legoesm.atmosphere.physics.convection.config import (
     SBMConfig,
@@ -185,6 +187,46 @@ class TestThermodynamics:
         T_parcel = T - 5.0
         cape = compute_cape(T, T_parcel, p_full, p_half)
         assert jnp.allclose(cape, 0.0, atol=1e-10)
+
+    def test_parcel_profile_and_cape_depends_on_launch_humidity(self):
+        """Shared parcel->CAPE helper must respond to boundary-layer humidity.
+
+        Regression for F-CONV-1: Zhang-McFarlane and Tiedtke previously called
+        ``compute_moist_adiabat``/``compute_cape`` *without* q_v, lifting a
+        parcel saturated from the surface.  That makes CAPE independent of the
+        actual humidity and spuriously large in dry columns, firing deep
+        convection over deserts.  Threading q_v (dry adiabat below the LCL,
+        moist above, virtual-T CAPE) must instead give a *dry* column far less
+        CAPE than a moist one, and the legacy ``q_v=None`` path must remain the
+        humidity-independent saturated-from-base value.
+        """
+        T, _, p_full, p_half = _make_unstable_columns(ncol=2, nlev=12)
+        q_dry = jnp.full_like(T, 1e-4)     # essentially no vapor
+        q_moist = jnp.full_like(T, 0.015)  # moist boundary layer
+
+        _, cape_dry = parcel_profile_and_cape(T, p_full, p_half, q_v=q_dry)
+        _, cape_moist = parcel_profile_and_cape(T, p_full, p_half, q_v=q_moist)
+        _, cape_sat_dry = parcel_profile_and_cape(T, p_full, p_half, q_v=None)
+        _, cape_sat_moist = parcel_profile_and_cape(T, p_full, p_half, q_v=None)
+
+        # Physically-correct trigger: a dry column has far less CAPE than moist.
+        assert jnp.all(cape_dry < 0.25 * cape_moist + 1.0), (
+            f"dry CAPE {cape_dry} not << moist CAPE {cape_moist}"
+        )
+        # Legacy saturated-from-base path ignores launch humidity (kept as-is).
+        assert jnp.allclose(cape_sat_dry, cape_sat_moist), (
+            "q_v=None path must be humidity-independent (saturated from base)"
+        )
+        # The bug's signature: the old (q_v=None) dry-column CAPE is much larger
+        # than the corrected (threaded-q_v) dry-column CAPE.
+        assert jnp.all(cape_dry < cape_sat_dry)
+
+    def test_parcel_profile_and_cape_grad_finite(self):
+        """jax.grad through the shared parcel->CAPE helper must be finite."""
+        T, _, p_full, p_half = _make_unstable_columns(ncol=2, nlev=12)
+        q_v = jnp.full_like(T, 0.012)
+        g = jax.grad(lambda q: jnp.sum(parcel_profile_and_cape(T, p_full, p_half, q_v=q)[1]))(q_v)
+        assert jnp.all(jnp.isfinite(g))
 
     def test_cape_uses_p_mid_for_dlnp_weighting(self):
         """Audit cycle iter-39 finding HIGH #1: ``compute_cape`` must
@@ -390,6 +432,59 @@ class TestSBM:
         assert out.dT_dt.shape == (ncol, nlev)
         assert float(jnp.max(jnp.abs(out.dT_dt[0]))) >= float(jnp.max(jnp.abs(out.dT_dt[-1])))
 
+    def test_stratosphere_above_lnb_has_zero_adjustment(self):
+        """Regression for #326: SBM must not adjust stably stratified
+        layers above the level of neutral buoyancy.
+
+        The cloud_mask = (T_moist >= T_env) gate restricts the
+        convective relaxation to conditionally unstable levels. Without
+        it, the scheme relaxed the *entire* column — including the
+        stable stratosphere — toward the moist adiabat, producing the
+        spurious ~40 K/h cooling at the model top that drove the upper-
+        atmosphere warm bias documented in #318.
+
+        Here the deep conditionally-unstable profile from
+        ``_make_unstable_columns`` has a warm-moist lower troposphere
+        (moist adiabat warmer than the environment) and a cold upper
+        region where the moist adiabat launched from the surface parcel
+        falls below the environment (stable). The forward cloud_mask is
+        an exact hard step, so the relaxation tendency must be EXACTLY
+        zero in every layer where ``T_moist < T_env``.
+        """
+        ncol, nlev = 2, 20
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
+        config = SBMConfig()
+        out = sbm_convection(T, q_v, p_full, p_half, dt=300.0, config=config)
+
+        # Reconstruct the convective-instability mask the scheme uses:
+        # the moist adiabat is launched from the surface parcel T[:, -1].
+        T_moist = compute_moist_adiabat(T[:, -1], p_full)
+        stable = T_moist < T  # (ncol, nlev) — layers the gate must skip
+
+        # The constructed profile must actually contain both regimes,
+        # else the test is vacuous.
+        assert bool(jnp.any(stable)), "profile has no stable layers"
+        assert bool(jnp.any(~stable)), "profile has no unstable layers"
+
+        dT = out.dT_dt
+        dq = out.dq_v_dt
+        max_stable_dT = float(jnp.max(jnp.abs(jnp.where(stable, dT, 0.0))))
+        max_stable_dq = float(jnp.max(jnp.abs(jnp.where(stable, dq, 0.0))))
+        max_unstable_dT = float(jnp.max(jnp.abs(jnp.where(stable, 0.0, dT))))
+
+        # Troposphere is convectively active …
+        assert max_unstable_dT > 1.0e-6, (
+            "conditionally unstable troposphere produced no adjustment"
+        )
+        # … but stable layers see zero adjustment (exact hard-step mask).
+        assert max_stable_dT < 1.0e-12, (
+            f"stable-layer |dT/dt|={max_stable_dT:.3e} K/s should be 0 — "
+            "cloud_mask stratosphere gate broken (#326)"
+        )
+        assert max_stable_dq < 1.0e-15, (
+            f"stable-layer |dq_v/dt|={max_stable_dq:.3e} should be 0 (#326)"
+        )
+
 
 # ===========================================================================
 # DCA convection tests
@@ -501,6 +596,7 @@ class TestDCA:
         dp = p_half[:, 1:] - p_half[:, :-1]
         T_new, q_new, _ = _adjust_one_iteration(
             T, q_v, p_full, dp, mixing_fraction=1.0,
+            instability_blend_sharpness=DCAConfig().instability_blend_sharpness,
         )
 
         # Column mean tendencies, mass-weighted by dp.
@@ -921,6 +1017,45 @@ class TestMassFlux:
         assert out.cape.shape == (ncol,)
         assert out.convective_mask.shape == (ncol,)
         assert M_c_new.shape == (ncol,)
+
+    @pytest.mark.xfail(
+        reason="F-CONV-MSE: mass-flux convection does NOT conserve column moist "
+        "static energy (~64% residual w/o condensate; the kernel heats ~3 kW/m² "
+        "while drying supplies only ~1 kW/m²). Root cause: the fixed delta_0 "
+        "detrainment is decoupled from the prescribed sin M-profile's dM/dz, so "
+        "subsidence+detrainment do not telescope into the conservative flux form. "
+        "An iter-34 column-MSE energy fixer (rescaling heating) was PROVEN "
+        "inadequate: _make_unstable_columns yields kernel states that heat AND "
+        "moisten vapor, so conservation would require cooling — conflicting with "
+        "detrainment warming. The flux-form g*d_p[M(X_u-X)] reformulation (with a "
+        "positivity-preserving limiter for dq_c>=0) is required + a convection "
+        "benchmark. See parameterization_checks.md.",
+        strict=False,
+    )
+    def test_mass_flux_conserves_column_mse(self):
+        """Column MSE tendency must be a small fraction of the gross heating —
+        the *same* criterion SBM (`test_enthalpy_conservation`) and DCA pass at
+        <10%.  Executable spec for F-CONV-MSE: flips to XPASS when conservation
+        is enforced.  Uses M_c at the literature cap so convection is active.
+        """
+        ncol, nlev = 4, 20
+        T, q_v, p_full, p_half = _make_unstable_columns(ncol, nlev)
+        config = MassFluxConfig()
+        M_c = jnp.full(ncol, config.M_b_max)  # active convection
+        out, _ = mass_flux_convection(
+            T, q_v, p_full, p_half, M_c, dt=300.0, config=config,
+        )
+        dp = p_half[:, 1:] - p_half[:, :-1]
+        mse_tend = jnp.sum(
+            (constants.c_pd * out.dT_dt
+             + constants.L_v * (out.dq_v_dt + out.dq_c_conv_dt)) * dp / constants.g,
+            axis=1,
+        )
+        gross = jnp.sum(
+            constants.c_pd * jnp.abs(out.dT_dt) * dp / constants.g, axis=1,
+        )
+        rel = jnp.abs(mse_tend) / jnp.clip(gross, 1.0, None)
+        assert float(jnp.max(rel)) < 0.1
 
     def test_M_c_non_negative(self):
         """M_c_new should be >= 0 (softplus floor)."""

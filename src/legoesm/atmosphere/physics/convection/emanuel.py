@@ -37,7 +37,8 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_dT
+from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_cape,
     compute_moist_adiabat,
@@ -60,6 +61,65 @@ from legoesm.atmosphere.physics.convection._plume import (
 
 
 __all__ = ("emanuel_convection",)
+
+
+def _mixture_buoyancy(T_e, q_e, T_u, q_u, q_c_u, p, fractions):
+    """Buoyancy of cloud–environment mixtures across a mixing spectrum
+    (Emanuel 1991 buoyancy sorting).
+
+    For an environmental mixing fraction ``χ`` the saturated,
+    condensate-laden cloud air and the (sub-saturated) environment mix
+    linearly in (T, q_v, q_c); the entrained dry air then evaporates
+    condensate in a one-step saturation adjustment, cooling the mixture.
+    The resulting virtual-temperature buoyancy ``B(χ)`` equals the
+    undilute updraft buoyancy at ``χ=0`` and decreases as χ grows,
+    **crossing zero** at a critical fraction for a sufficiently dry
+    environment — so some mixtures become negatively buoyant and
+    detrain.  That sign reversal is the feature distinguishing Emanuel
+    from a single bulk plume (the old ``B_mix = χ·B_u`` form never
+    reversed sign).
+
+    Parameters
+    ----------
+    T_e, q_e : (ncol, nlev)
+        Environment temperature [K] / water-vapor mixing ratio [kg/kg].
+    T_u, q_u, q_c_u : (ncol, nlev)
+        Updraft temperature / vapor / condensate.
+    p : (ncol, nlev)
+        Pressure [Pa].
+    fractions : (n_frac,)
+        Environmental mixing fractions χ ∈ (0, 1).
+
+    Returns
+    -------
+    (ncol, nlev, n_frac) mixture buoyancy [m/s^2].
+    """
+    chi = fractions[None, None, :]
+    pe = p[:, :, None]
+    # Linear mixing of conserved-ish variables (cloud ← χ → environment).
+    T_m0 = (1.0 - chi) * T_u[:, :, None] + chi * T_e[:, :, None]
+    q_m0 = (1.0 - chi) * q_u[:, :, None] + chi * q_e[:, :, None]
+    qc_m0 = (1.0 - chi) * q_c_u[:, :, None]          # condensate only from cloud
+    # One-step (Newton) saturation adjustment toward q_sat(T_m0).  ``Δq``
+    # is the vapor→condensate conversion: positive condenses the
+    # super-saturation (mixing saturated cloud with cooler air) and warms;
+    # negative evaporates condensate (entrained dry air) and cools.
+    # Bounded to [−q_c, q_v] so we never make negative condensate or
+    # negative vapor; ``clip`` keeps finite subgradients (AD-safe).
+    q_sat_m = saturation_mixing_ratio(T_m0, pe)
+    dqs_dT = saturation_mixing_ratio_dT(T_m0, pe)
+    L_over_cp = constants.L_v / constants.c_pd
+    delta_q = jnp.clip(
+        (q_m0 - q_sat_m) / (1.0 + L_over_cp * dqs_dT), -qc_m0, q_m0,
+    )
+    T_m = T_m0 + L_over_cp * delta_q
+    q_m = q_m0 - delta_q
+    qc_m = qc_m0 + delta_q
+    # Virtual-temperature buoyancy relative to environment, including the
+    # condensate loading term (−q_c) on the mixture.
+    Tv_m = virtual_temperature(T_m, q_m) - T_m * qc_m
+    Tv_e = virtual_temperature(T_e, q_e)[:, :, None]
+    return constants.g * (Tv_m - Tv_e) / jnp.maximum(Tv_e, 1.0)
 
 
 def emanuel_convection(
@@ -145,35 +205,33 @@ def emanuel_convection(
         eps_profile, dlt_profile, M_b,
     )
 
-    # -- Buoyancy-sorted ensemble enhancement to detrainment ---------------
-    # Build a discrete grid of mixing fractions f_i ∈ [0, 1] with N
-    # equal-weight bins.  At each level k the mixed parcel buoyancy is
-    #     B_mix_i(k) = f_i * (T_u(k) - T_env(k))
-    # and its smooth contribution to "ascending" mass is sigmoid(s *
-    # B_mix_i).  The buoyancy-sort multiplier on detrainment is the
-    # variance of the ascending-weight distribution: where all
-    # fractions agree (deep in the cloud or above LNB) it's small;
-    # where the ensemble is split (near LNB) it's large.  This acts as
-    # a per-level enhancement of the bulk detrainment, producing the
-    # height-spread that distinguishes Emanuel from a single plume.
+    # -- Buoyancy-sorted ensemble (Emanuel 1991) ---------------------------
+    # Build a discrete grid of environmental mixing fractions χ_i ∈ (0,1)
+    # with N equal-weight bins.  At each level the mixed parcel's
+    # virtual-temperature buoyancy B_mix_i is computed with a genuine
+    # evaporative saturation adjustment (``_mixture_buoyancy``), so it
+    # **crosses zero** at a critical χ for dry environments — mixtures
+    # with B>0 ascend, B<0 detrain/sink.  Its smooth ascending weight is
+    # sigmoid(s · B_mix_i).  The detrainment enhancement is the fraction
+    # of the spectrum that is negatively buoyant: ≈0 deep in the cloud
+    # (undilute parcel strongly buoyant, χ_c→1) and →1 near cloud top
+    # (undilute loses buoyancy, χ_c→0).  This reproduces the
+    # buoyancy-sorting detrainment-height spread that the old
+    # ``B_mix = χ·B_u`` (sign-definite) form could not.
     n_frac = config.n_mixing_fractions
     fractions = jnp.linspace(
         1.0 / (2 * n_frac), 1.0 - 1.0 / (2 * n_frac), n_frac
-    )  # midpoint fractions
-    B_u = plume.B_u                                       # (ncol, nlev)
-    # Outer-product: (ncol, nlev, n_frac).
-    B_mix = B_u[:, :, None] * fractions[None, None, :]
+    )  # environmental mixing-fraction bin midpoints χ
+    B_mix = _mixture_buoyancy(
+        T, q_v, plume.T_u, plume.q_u, plume.q_c_u, p_full, fractions,
+    )                                                    # (ncol, nlev, n_frac)
     ascending_weight_per_frac = jax.nn.sigmoid(
         config.smooth_trigger_sharpness * B_mix
     )                                                    # (ncol, nlev, n_frac)
-    # Mean ascending fraction at each level.
     ascending_mean = jnp.mean(ascending_weight_per_frac, axis=-1)
-    # Variance — peaks where the ensemble is split (B_u ≈ 0).
-    ascending_var = jnp.mean(
-        (ascending_weight_per_frac - ascending_mean[..., None]) ** 2, axis=-1
-    )
+    detrained_fraction = 1.0 - ascending_mean            # negatively-buoyant share
     # Buoyancy-sort detrainment multiplier in [1, 1 + cu].
-    sort_multiplier = 1.0 + 4.0 * config.cu_coefficient * ascending_var
+    sort_multiplier = 1.0 + config.cu_coefficient * detrained_fraction
 
     # Cap plume.M_u once at the source so every downstream use sees
     # the bounded value (see ZM).

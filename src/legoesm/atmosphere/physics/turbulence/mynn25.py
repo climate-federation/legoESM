@@ -285,9 +285,12 @@ def mynn25_turbulence(
     theta_v = virtual_temperature(theta, q_v)
 
     # Buoyancy flux (virtual potential temperature) at surface.  Use
-    # ``θ_v`` perturbation form ≈ w'θ' + 0.61 θ̄ w'q_v'.
+    # ``θ_v`` perturbation form ≈ w'θ' + (1/ε − 1) θ̄ w'q_v'.  The virtual-T
+    # moisture coefficient is the canonical 1/ε − 1 ≈ 0.6078 (constants.epsilon),
+    # not the rounded 0.61 (CLAUDE.md: no hardcoded physical-constant literals).
     th_low = theta[:, -1]
-    w_thv_sfc = w_th_s_kin + 0.61 * th_low * w_qv_s_kin
+    _vT_coef = 1.0 / constants.epsilon - 1.0
+    w_thv_sfc = w_th_s_kin + _vT_coef * th_low * w_qv_s_kin
 
     # Reference theta for L_B (per-column lowest virtual-θ — surrogate
     # for ``th_ref`` in jax_scm which is a constant per case).  Kept as
@@ -298,10 +301,23 @@ def mynn25_turbulence(
     th_ref = theta_v[:, -1:]   # (ncol, 1) — broadcasts to (ncol, nlev-1)
 
     # Obukhov length L = -θ_v·u*³ / (κ·g·w'θ_v').
+    #
+    # Mask the surface buoyancy flux in the divisor *before* dividing so the
+    # dead branch never forms ``num/0`` at zero buoyancy flux (w'θ_v' = 0:
+    # exact neutral, SCM-prescribed zero surface fluxes, or cold-start
+    # air-surface equilibrium).  Otherwise reverse-mode AD differentiates the
+    # unselected ``.../w_thv_sfc`` branch at 0 -> inf cotangent, and the ``where``
+    # multiplies it by a zero selector -> ``0*inf = NaN``, poisoning every
+    # tendency (zeta -> L_S -> master length -> qke).  Forward is unchanged: the
+    # outer ``where`` still returns the 1e30 neutral sentinel (L -> ∞ ⇒ ζ ≈ 0)
+    # whenever |w'θ_v'| ≤ eps.
     kappa = constants.kappa_vk
+    w_thv_safe = jnp.where(
+        jnp.abs(w_thv_sfc) > _SMOOTH_EPS, w_thv_sfc, 1.0
+    )
     L_obukhov = jnp.where(
         jnp.abs(w_thv_sfc) > _SMOOTH_EPS,
-        -(theta_v[:, -1] * ustar ** 3) / (kappa * constants.g * w_thv_sfc),
+        -(theta_v[:, -1] * ustar ** 3) / (kappa * constants.g * w_thv_safe),
         1e30,
     )
 

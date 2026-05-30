@@ -38,6 +38,7 @@ class TestSegmentCarryPytree:
             q_v=jnp.zeros(shape),
             q_c=jnp.zeros(shape),
             q_r=jnp.zeros(shape),
+            conv_prog=jnp.zeros((6 * n * n,)),
             held_dT_rad=jnp.zeros(shape),
             held_sw_net_sfc=jnp.zeros(shape2d),
             held_lw_net_sfc=jnp.zeros(shape2d),
@@ -51,6 +52,7 @@ class TestSegmentCarryPytree:
             precip_accum=jnp.zeros(shape2d),
             shflx_accum=jnp.zeros(shape2d),
             lhflx_accum=jnp.zeros(shape2d),
+            T_land=jnp.zeros(shape2d),
         )
 
     def test_is_namedtuple(self):

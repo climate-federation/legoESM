@@ -114,7 +114,7 @@ def test_moisture_conservation(scheme):
 
     ``kuo`` is intentionally excluded: by design Kuo's column water
     is non-conservative (it imports a ``(1 - alpha_heat) * MC /
-    tau_relax`` moistening source from outside the column —
+    tau_relax_s`` moistening source from outside the column —
     surface evaporation / large-scale moisture convergence). Under
     Option C, Kuo exposes the full design-intent condensation rate
     to microphysics rather than the underreporting legacy
@@ -762,7 +762,7 @@ def test_no_cloud_water_in_dry_column(scheme):
 
 
 def test_kuo_column_moistening_budget_matches_design():
-    """Kuo's design is to inject ``(1 - alpha_heat) * MC / tau_relax`` of
+    """Kuo's design is to inject ``(1 - alpha_heat) * MC / tau_relax_s`` of
     column-integrated vapor source, distributed by the subsaturation
     deficit profile.  An earlier formulation multiplied by an extra
     ``g/dp`` factor and emitted ~500× too little column moistening
@@ -823,7 +823,7 @@ def test_kuo_column_moistening_budget_matches_design():
         config.smooth_trigger_sharpness * (MC - config.me_threshold)
     )
     expected_budget = (
-        smooth_trigger * (1.0 - config.alpha_heat) * MC / config.tau_relax
+        smooth_trigger * (1.0 - config.alpha_heat) * MC / config.tau_relax_s
     )
 
     # (1) Trigger sanity-check: assert the fixture actually fires.  This

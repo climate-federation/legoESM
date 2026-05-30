@@ -63,6 +63,11 @@ class AMIPExperimentConfig(NamedTuple):
     solar_source: str = "constant"  # "constant", "file", or "spectral_file"
     solar_file: str = ""
     solar_spectral_var: str = "solar_fraction_by_gpt"
+    # Band ordering of a per-band (14-band) solar file (issue #322):
+    # "auto" rotates to RRTMGP order only for the unambiguous MPI-M
+    # CMIP6 signature (SSI_frac / swflux_14band) and leaves generic
+    # files untouched; "rrtmg_sw" always rotates; "as_is" never does.
+    solar_spectral_band_order: str = "auto"
 
     # Physics — gray radiation
     tau_equator: float = 7.2

@@ -34,7 +34,17 @@ def compute_tile_fractions(
     f_land = jnp.clip(tile_config.f_land, 0.0, 1.0)
     f_lake = jnp.clip(tile_config.f_lake, 0.0, 1.0)
     total_static = f_land + f_lake
-    static_scale = jnp.where(total_static > 1.0, 1.0 / total_static, 1.0)
+    # Floor the reciprocal denominator at 1.0 so the *dead* branch of the where
+    # never forms 1/0 at total_static = 0 (a pure-ocean cell, f_land = f_lake =
+    # 0 — the most common cell).  The reciprocal is only *selected* when
+    # total_static > 1, where ``maximum(total_static, 1.0) == total_static`` keeps
+    # it bit-identical; without the floor, reverse-mode AD differentiates
+    # ``1/total_static`` at 0 -> inf and the where injects ``0*inf = NaN`` into
+    # d/d(f_land), d/d(f_lake) for every ocean cell (tile-mask sensitivity /
+    # end-to-end adjoint).
+    static_scale = jnp.where(
+        total_static > 1.0, 1.0 / jnp.maximum(total_static, 1.0), 1.0
+    )
     f_land = f_land * static_scale
     f_lake = f_lake * static_scale
 

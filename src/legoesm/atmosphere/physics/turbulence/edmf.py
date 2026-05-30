@@ -18,7 +18,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import virtual_temperature
+from legoesm.atmosphere.physics._shared import mixing_length, virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import EDMFConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
@@ -92,10 +92,7 @@ def edmf_turbulence(
     dz_half = jnp.clip(dz_half, 1.0, None)
 
     # Mixing length
-    z_abs = jnp.clip(jnp.abs(z_full), 1.0, None)
-    l_mix = constants.kappa_vk * z_abs / (
-        1.0 + constants.kappa_vk * z_abs / config.l_mix_max
-    )
+    l_mix = mixing_length(z_full, config.l_mix_max)
 
     # Eddy diffusivities from TKE
     sqrt_tke = jnp.sqrt(tke)
@@ -236,7 +233,9 @@ def edmf_turbulence(
         q_u_new = (q_u + eps_dz * q_env) / (1.0 + eps_dz)
 
         # Smooth deactivation where w_u -> 0
-        active = jax.nn.sigmoid(20.0 * w_u_new / config.w_updraft_min)
+        active = jax.nn.sigmoid(
+            config.updraft_deactivation_sharpness * w_u_new / config.w_updraft_min
+        )
         w_u_new = w_u_new * active
         theta_u_new = theta_u_new * active + theta_env * (1.0 - active)
         q_u_new = q_u_new * active + q_env * (1.0 - active)

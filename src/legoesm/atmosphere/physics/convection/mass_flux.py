@@ -56,8 +56,7 @@ from legoesm.atmosphere.physics._shared import (
     virtual_temperature,
 )
 from legoesm.atmosphere.physics.thermodynamics import (
-    compute_moist_adiabat,
-    compute_cape,
+    parcel_profile_and_cape,
 )
 from legoesm.atmosphere.physics.convection.config import (
     EDMFConfig,
@@ -125,22 +124,9 @@ def _compute_cape_diagnostics(
     The mask is a sigmoid of ``(cape - cape_threshold) /
     cape_activation_scale``.
     """
-    T_base = T[:, -1]
-    q_v_base = None if q_v is None else q_v[:, -1]
-    T_moist = compute_moist_adiabat(T_base, p_full, q_v_base=q_v_base)
-    if q_v is None:
-        cape = compute_cape(T, T_moist, p_full, p_half)
-    else:
-        # Parcel q_v: launched humidity below the LCL, saturated above.
-        # We approximate the parcel-vapor profile by ``min(q_v_base,
-        # q_sat(T_moist, p))`` — exact below the LCL (dry-adiabatic
-        # ascent preserves mixing ratio) and tracks q_sat above.
-        q_sat_parcel = saturation_mixing_ratio(T_moist, p_full)
-        q_v_parcel = jnp.minimum(q_v_base[:, None], q_sat_parcel)
-        cape = compute_cape(
-            T, T_moist, p_full, p_half,
-            q_v_env=q_v, q_v_parcel=q_v_parcel,
-        )
+    # Shared parcel -> CAPE recipe (dry->LCL->moist lift + virtual-T CAPE when
+    # q_v is threaded; saturated-from-base legacy when q_v is None).
+    T_moist, cape = parcel_profile_and_cape(T, p_full, p_half, q_v=q_v)
     convective_mask = jax.nn.sigmoid(
         (cape - cape_threshold) / cape_activation_scale
     )
@@ -508,7 +494,12 @@ def edmf_convection(
     # small floor for numerical stability.
     B_dz_rev = jnp.clip(B * dz, 0.0, None)[:, ::-1]
     B_integral = jnp.cumsum(B_dz_rev, axis=1)[:, ::-1]
-    w_u = jnp.sqrt(2.0 * B_integral + config.w_u_min ** 2)
+    # Floor the sqrt argument at a tiny positive so the updraft velocity stays
+    # AD-safe even if a caller sets ``w_u_min = 0``: at a no-convection column
+    # ``B_integral = 0`` and ``2B + w_u_min^2 = 0`` would give sqrt'(0) = inf
+    # (NaN reverse-mode grad).  Forward is unchanged for any w_u_min > 0 or
+    # buoyant column (the 1e-12 m^2/s^2 floor is far below w_u_min^2 ~ 0.01).
+    w_u = jnp.sqrt(jnp.maximum(2.0 * B_integral + config.w_u_min ** 2, 1e-12))
 
     # Mass flux profile: M_u(z) = rho * a_u * w_u(z).
     M_profile = rho * a_u_new[:, None] * w_u

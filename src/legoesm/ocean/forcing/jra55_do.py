@@ -37,7 +37,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple, Optional
 
+import jax.numpy as jnp
 import numpy as np
+
+from legoesm import constants
+from legoesm.thermo import saturation_vapor_pressure
 
 
 # JRA55-do native grid: 0.5625 deg ~ 640 lon x 320 lat.
@@ -107,11 +111,12 @@ def synthetic_ocean_forcing(year: int, *,
         283.0 + 17.0 * cos_lat - 5.0 * seasonal + 0.0 * LON_R,
         out_shape,
     ).copy()
-    # Bolton (1980) saturation: e_s = 6.112 exp(17.67 T_C / (T_C+243.5)) hPa
-    T_C = T_air - 273.15
-    e_s = 6.112 * np.exp(17.67 * T_C / (T_C + 243.5))   # hPa
+    # Canonical saturation vapour pressure (legoesm.thermo; no re-derived
+    # Magnus/Tetens coefficients).  Specific-humidity conversion uses
+    # constants.epsilon: q = eps e / (p - (1 - eps) e).
+    e_s = np.asarray(saturation_vapor_pressure(jnp.asarray(T_air))) / 100.0  # hPa
     p_sfc = 1013.25                                      # hPa
-    q_sat = 0.622 * e_s / (p_sfc - 0.378 * e_s)
+    q_sat = constants.epsilon * e_s / (p_sfc - (1.0 - constants.epsilon) * e_s)
     q_air = 0.8 * q_sat                                  # 80 % RH
 
     sw_down = np.maximum(

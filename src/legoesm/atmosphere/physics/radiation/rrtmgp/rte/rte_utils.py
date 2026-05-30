@@ -15,95 +15,12 @@
 """Utility library for solving the radiative transfer equation (RTE)."""
 
 import inspect
-from typing import Any, Callable, TypeAlias
+from typing import Callable, TypeAlias
 
 import jax
 import jax.numpy as jnp
 
 Array: TypeAlias = jax.Array
-
-
-def recurrent_op_1d(
-    f: Callable[[Any], tuple[Array, Array]],
-    init: Array,
-    inputs: dict[str, Array],
-    forward: bool = True,
-) -> tuple[Array, Array]:
-  """Compute sequence of recurrent operations for 1D array inputs.
-
-  This version work on a 1D array and is written to have a similar style as
-  _local_recurrent_op().  It uses a for loop, not scan.  However, it returns
-  both the carry state and the accumulated output, even though these are equal
-  here, in order to match the style of jax.lax.scan().  If this is slow, we can
-  change it to only return the output.
-
-  Currently not allowing length to be an optional input; could add that.
-
-  Args:
-    f: The recurrent operation to apply.
-    init: The initial state of the recurrent operation.
-    inputs: A dictionary of inputs to the recurrent operation.
-    forward: Whether to run the recurrent operation in the forward direction.
-
-  Returns:
-    A tuple of the final carry state and the accumulated output.
-  """
-  for v in inputs:
-    break
-  n = len(inputs[v])  # pylint: disable=undefined-loop-variable, disable=unused-variable
-
-  output = jnp.zeros(n)
-  carry = init
-  for i in range(n):
-    slice_idx = i if forward else -i - 1
-    plane_args = {k: v[slice_idx] for k, v in inputs.items()}
-
-    arg_list = [
-        plane_args[k]
-        for j, k in enumerate(inspect.getfullargspec(f).args)
-        if j != 0  # Assuming the first argument is the carry state.
-    ]
-    carry, next_layer = f(carry, *arg_list)
-
-    if forward:
-      i_set = i
-    else:
-      i_set = -i - 1
-    output = output.at[i_set].set(next_layer)
-
-  return carry, output
-
-
-def recurrent_op_1d_scan(
-    f: Callable[[Any], tuple[Array, Array]],
-    init: Array,
-    inputs: dict[str, Array],
-    forward: bool = True,
-) -> tuple[Array, Array]:
-  """Compute sequence of recurrent operations for 1D array inputs using scan.
-
-  Note: jax.lax.scan() may be inefficient on GPUs, because each iteration must
-  launch a new kernel. May want to use the version with for loops on GPU.
-
-  Args:
-    f: The recurrent operation to apply.
-    init: The initial state of the recurrent operation.
-    inputs: A dictionary of inputs to the recurrent operation.
-    forward: Whether to run the recurrent operation in the forward direction.
-
-  Returns:
-    A tuple of the final carry state and the accumulated output.
-  """
-
-  # `scan()` requires a single inputs argument, so use a wrapped version of `f`
-  # that assumes the 2nd argument is a dictionary, and unpacks it and sends it
-  # on to `f`.
-  def wrapped_f_for_scan(
-      carry: Any, inputs: dict[str, Array]
-  ) -> tuple[Array, Array]:
-    return f(carry, **inputs)
-
-  return jax.lax.scan(wrapped_f_for_scan, init, inputs, reverse=not forward)
 
 
 def recurrent_op(

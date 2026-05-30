@@ -50,7 +50,7 @@ from legoesm.thermo import (
     saturation_mixing_ratio as _q_sat,
     saturation_mixing_ratio_dT as _dqsat_dT,
 )
-from legoesm.atmosphere.physics._shared import virtual_temperature
+from legoesm.atmosphere.physics._shared import mixing_length, virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import CLUBBLiteConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
@@ -139,10 +139,7 @@ def clubb_lite_turbulence(
     sqrt_wp2 = jnp.sqrt(wp2)
 
     # ===== Mixing length =====
-    z_abs = jnp.clip(jnp.abs(z_full), 1.0, None)
-    l_mix = constants.kappa_vk * z_abs / (
-        1.0 + constants.kappa_vk * z_abs / config.l_mix_max
-    )  # (ncol, nlev)
+    l_mix = mixing_length(z_full, config.l_mix_max)  # (ncol, nlev)
     l_mix_safe = jnp.clip(l_mix, 1.0, None)
 
     # iter-172 F841: removed unused ``tau_turb`` (consumed

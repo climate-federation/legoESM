@@ -87,7 +87,17 @@ def diagnose_sundqvist_process_rates(
     # ``auto_rate · dt = 1e-3·1800 = 1.8`` over ~30 min for typical
     # ``q_c ≈ 1e-4 kg/kg`` overshoots the available mass by ~80 %.
     qc_avail = jnp.maximum(q_c + condensation * dt, 0.0)
-    P_auto_demand = config.auto_rate * qc_avail
+    # Sundqvist (1989) autoconversion: P_auto = c_0·q_c·(1−exp(−(q_c/q_c,crit)²)).
+    # The threshold factor suppresses autoconversion below the critical
+    # cloud water (drizzle forms only when cloud droplets are large
+    # enough) — the previous code dropped it, autoconverting linearly at
+    # any q_c despite the docstring's "exceeds a critical threshold".
+    # The factor ∈ [0,1) is smooth + AD-safe (exp of a non-positive arg;
+    # → 0 as q_c → 0, → 1 for q_c ≫ q_c,crit).
+    threshold = 1.0 - jnp.exp(
+        -(qc_avail / jnp.maximum(config.qc_crit, 1e-12)) ** 2
+    )
+    P_auto_demand = config.auto_rate * qc_avail * threshold
     # Donor cap: rate · dt ≤ qc_avail → rate ≤ qc_avail / dt.
     dt_safe = jnp.maximum(dt, 1.0e-12)
     P_auto = jnp.minimum(P_auto_demand, qc_avail / dt_safe)

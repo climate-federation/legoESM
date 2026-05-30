@@ -269,6 +269,30 @@ class TestMcFarlane:
         assert jnp.all(jnp.isfinite(out.du_dt))
         assert jnp.all(jnp.isfinite(out.dT_dt))
 
+    def test_dissipative_and_opposes_wind(self):
+        """Orographic GWD must REMOVE kinetic energy (eps_gwd >= 0) and the drag
+        must oppose the wind (column sum u*du_dt + v*dv_dt <= 0): mountain waves
+        (c=0) always decelerate the flow.  The flux-divergence form
+        du/dt = -(1/rho) dtau/dz also makes the column momentum tendency equal
+        -(launched stress), i.e. momentum is conserved by construction.
+
+        Codifies the iter-23 conservation audit; the sibling
+        ``test_drag_opposes_wind`` only checks ``sum|du_dt| > 0``, not the sign —
+        which would not catch the F-GWD-1-style sign defect that affects the
+        spectral scheme.
+        """
+        ncol, nlev = 4, 20
+        u, v, T, p_full, p_half, z_full, z_half, rho, lat = _make_columns(ncol, nlev)
+        config = McFarlaneConfig()
+        out = mcfarlane_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config)
+        assert jnp.all(out.eps_gwd >= -1e-9), (
+            f"orographic GWD must be dissipative (eps_gwd >= 0); got {out.eps_gwd}"
+        )
+        udu = jnp.sum(u * out.du_dt + v * out.dv_dt, axis=1)
+        assert jnp.all(udu <= 1e-9), (
+            f"orographic drag must oppose the wind (sum u*du_dt <= 0); got {udu}"
+        )
+
     def test_differentiable(self):
         ncol, nlev = 4, 10
         u, v, T, p_full, p_half, z_full, z_half, rho, lat = _make_columns(ncol, nlev)

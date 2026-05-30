@@ -220,6 +220,7 @@ class ExperimentConfig(NamedTuple):
     solar_file: str = ""
     solar_tsi_var: str = "tsi"
     solar_spectral_var: str = "solar_fraction_by_gpt"
+    solar_spectral_band_order: str = "auto"   # auto | as_is | rrtmg_sw (#322)
 
     # Aerosol
     aerosol_forcing: str = "off"        # off, external
@@ -244,6 +245,10 @@ class ExperimentConfig(NamedTuple):
     topography: str = "flat"
     topo_smoothing: int = 4
     topo_edge_blend: float = 0.3
+    # Optional land-sea-mask NetCDF (CMIP6 sftlf / ERA5 lsm).  When set,
+    # the land fraction is taken from this file and the slab-land tile
+    # is activated; empty → ocean-only surface.
+    land_mask_path: str = ""
 
     # Surface
     T_init: float = 300.0
@@ -384,6 +389,35 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"microphysics must be one of {_valid_microphysics}, "
                 f"got {self.microphysics!r}"
+            )
+        # Physics-scheme membership (mirror the integration.py factory sets so
+        # a typo fails here, not only at JIT-compile inside integration.py).
+        _valid_convection = (
+            "sbm", "dca", "kuo", "mass_flux", "edmf", "zhang_mcfarlane",
+            "kain_fritsch", "emanuel", "tiedtke", "bechtold", "none",
+        )
+        if self.convection not in _valid_convection:
+            errors.append(
+                f"convection must be one of {_valid_convection}, "
+                f"got {self.convection!r}"
+            )
+        _valid_turbulence = (
+            "smagorinsky", "louis", "tke", "mynn25", "clubb_lite",
+            "holtslag_boville", "ysu", "edmf", "none",
+        )
+        if self.turbulence not in _valid_turbulence:
+            errors.append(
+                f"turbulence must be one of {_valid_turbulence}, "
+                f"got {self.turbulence!r}"
+            )
+        _valid_gwd = (
+            "rayleigh", "lindzen", "mcfarlane", "hines",
+            "prognostic_spectral", "ml_emulator", "none",
+        )
+        if self.gravity_wave_drag not in _valid_gwd:
+            errors.append(
+                f"gravity_wave_drag must be one of {_valid_gwd}, "
+                f"got {self.gravity_wave_drag!r}"
             )
         # Reject unsupported coupled/ESM modes with actionable errors.
         if self.carbon_cycle != "none":
@@ -560,6 +594,7 @@ class ExperimentConfig(NamedTuple):
             solar_file=getattr(amip_cfg, 'solar_file', ''),
             solar_tsi_var=getattr(amip_cfg, 'solar_tsi_var', 'tsi'),
             solar_spectral_var=getattr(amip_cfg, 'solar_spectral_var', 'solar_fraction_by_gpt'),
+            solar_spectral_band_order=getattr(amip_cfg, 'solar_spectral_band_order', 'auto'),
             aerosol_forcing=getattr(amip_cfg, 'aerosol_forcing', 'off'),
             aerosol_file=getattr(amip_cfg, 'aerosol_file', ''),
             aerosol_reference_aod=getattr(amip_cfg, 'aerosol_reference_aod', 0.03),
@@ -574,6 +609,7 @@ class ExperimentConfig(NamedTuple):
             topography=amip_cfg.topography,
             topo_smoothing=amip_cfg.topo_smoothing,
             topo_edge_blend=amip_cfg.topo_edge_blend,
+            land_mask_path=getattr(amip_cfg, 'land_mask_path', ''),
             T_init=amip_cfg.T_init,
             RH_init=amip_cfg.RH_init,
             dynamic_albedo=amip_cfg.dynamic_albedo,
@@ -662,6 +698,7 @@ class ExperimentConfig(NamedTuple):
             solar_file=self.solar_file,
             solar_tsi_var=self.solar_tsi_var,
             solar_spectral_var=self.solar_spectral_var,
+            solar_spectral_band_order=self.solar_spectral_band_order,
             aerosol_forcing=self.aerosol_forcing,
             aerosol_file=self.aerosol_file,
             aerosol_reference_aod=self.aerosol_reference_aod,

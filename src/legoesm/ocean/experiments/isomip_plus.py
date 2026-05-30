@@ -52,6 +52,7 @@ from typing import Any, Dict
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm import constants
 from legoesm.ocean.physics.ice_shelf_basal_melt import (
     IceShelfMeltConfig, basal_melt_rate_m_per_s,
 )
@@ -117,7 +118,7 @@ def cavity_water_column_m(x_km, y_km,
 
 def compute_basal_melt(state, *, config: ISOMIPPlusConfig | None = None,
                         rho_sw: float = 1028.0,
-                        g_val: float = 9.81) -> float:
+                        g_val: float = constants.g) -> float:
     """Domain-mean basal melt rate ``mdot`` [m/yr] from a state.
 
     Reads the top-cell T, S; computes the ice-shelf-base pressure

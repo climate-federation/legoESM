@@ -21,7 +21,9 @@ from legoesm.grids.halo import (
     pad_halo_vector_4d,
     synchronize_cgrid_fluxes,
 )
-from legoesm.parallel.async_halo import overlapped_halo_compute
+# legoesm.parallel.async_halo.overlapped_halo_compute is imported at function
+# scope in _overlapped_interp_center_to_corner below: core/ must not import
+# parallel/ at module top level (CLAUDE.md isolated-pytest rule).
 
 _EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
 
@@ -1615,6 +1617,8 @@ def _overlapped_interp_center_to_corner(field, cdgrid, masks=None):
     """_interp_center_to_corner with interior/boundary overlap (MPI only, 4D)."""
     if field.ndim == 3:
         return _interp_center_to_corner(field, cdgrid)
+
+    from legoesm.parallel.async_halo import overlapped_halo_compute
 
     def _stencil_body(f_pad):
         """4-point average on padded (6, n+2, n+2) field -> (6, n+1, n+1)."""

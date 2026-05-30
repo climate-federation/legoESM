@@ -45,14 +45,19 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.core.field import Field
+from legoesm.thermo import saturation_vapor_pressure
 from legoesm.ocean.bulk_flux_omip import air_sea_fluxes
 
 
 def _bolton_q_sat(T_K, p_hpa: float = 1013.25):
-    """Bolton (1980) saturation specific humidity at temperature T_K."""
-    T_C = T_K - 273.15
-    e_s = 6.112 * jnp.exp(17.67 * T_C / (T_C + 243.5))
-    return 0.622 * e_s / (p_hpa - 0.378 * e_s)
+    """Saturation specific humidity [kg/kg] at temperature T_K [K], pressure p_hpa [hPa].
+
+    Uses the canonical saturation vapour pressure from :mod:`legoesm.thermo`
+    (no re-derived Magnus/Tetens coefficients) and ``constants.epsilon`` for
+    the specific-humidity conversion ``q = eps e / (p - (1 - eps) e)``.
+    """
+    e_s = saturation_vapor_pressure(T_K) / 100.0  # Pa -> hPa
+    return constants.epsilon * e_s / (p_hpa - (1.0 - constants.epsilon) * e_s)
 
 
 def _nn_interp_to_points(field, src_lat_deg, src_lon_deg,
@@ -184,14 +189,14 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
     if c_p is None:
         c_p = float(constants.c_sw)
 
-    sigma_sb = float(getattr(constants, "sigma_sb", 5.67e-8))
+    sigma_sb = float(constants.sigma_sb)
     dz_0 = float(np.asarray(z_coord.dz_ref)[0])
 
     if grid_type in ("latlon", "latlon_regional"):
         lat_deg = np.degrees(np.asarray(grid.lat))
         lon_deg = np.degrees(np.asarray(grid.lon))
         forc = _sample_forcing_latlon(forcing, idx_t, lat_deg, lon_deg)
-        T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + 273.15
+        T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + constants.T_freeze
         q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)),
                            dtype=np.float64)
         tau_x, tau_y, sh, lh = air_sea_fluxes(
@@ -253,7 +258,7 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
         )
         for k, v in forc.items():
             forc[k] = v.reshape(flat_shape)
-        T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + 273.15
+        T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + constants.T_freeze
         q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)),
                            dtype=np.float64)
         tau_x, tau_y, sh, lh = air_sea_fluxes(
@@ -300,7 +305,7 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
         forc = _sample_forcing_points(
             forcing, idx_t, lat_pts, lon_pts,
         )
-        T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[:, 0] + 273.15
+        T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[:, 0] + constants.T_freeze
         q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)),
                            dtype=np.float64)
         tau_x, tau_y, sh, lh = air_sea_fluxes(
