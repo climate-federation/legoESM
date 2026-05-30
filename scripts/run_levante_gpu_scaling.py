@@ -382,9 +382,14 @@ def _valid_gpu_counts(max_gpus: int, grid_type: str = "cubed-sphere") -> list[in
     """Return valid GPU counts up to max_gpus for the given grid type.
 
     Cubed-sphere requires divisors of 6 (face sharding) or 6*k^2 (tiling).
-    Icosahedral and spectral grids support any GPU count.
+    Icosahedral and spectral grids support any GPU count.  Lat-lon is
+    single-GPU only here: the benchmark has no sharded step yet (the multi-GPU
+    branch raises NotImplementedError), so scheduling n_gpus>1 would only emit
+    failing points.
     """
-    if grid_type in ("icosahedral", "spectral", "latlon"):
+    if grid_type == "latlon":
+        return [1]
+    if grid_type in ("icosahedral", "spectral"):
         return list(range(1, max_gpus + 1))
 
     # Cubed-sphere constraints
@@ -1020,10 +1025,49 @@ def run_benchmark(
             model = MPASPrimitiveEquationModel(grid, sigma, config)
             state = baroclinic_wave_init_mpas(grid, sigma, perturbed=True)
     elif grid_type == "latlon":
-        raise ValueError(
-            "A-grid latlon atmosphere has been removed. "
-            "Use --grid cubed-sphere or --grid icosahedral instead. See #115."
+        # Lat-lon finite-volume C-grid primitive equations.  (The old A-grid
+        # lat-lon dycore referenced by #115 was removed; this is the current
+        # C-grid FV core, the same solver the driver resolves for
+        # grid=latlon/discretization=finite_volume.)
+        if n_gpus > 1:
+            raise NotImplementedError(
+                "Multi-device SPMD is not yet wired for the lat-lon grid in "
+                "this harness (there is no make_latlon_sharded_step; the lat-lon "
+                "MPI domain-decomposition path lives in "
+                "legoesm.parallel.latlon_mpi). Single-device lat-lon "
+                "benchmarking is supported; multi-GPU lat-lon scaling needs a "
+                "sharded step + real-hardware validation."
+            )
+        from legoesm import constants  # lazy: see top-of-file note on JAX init order
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+            CGridLatLonPrimitiveEquationModel,
+            CGridLatLonPrimitiveEquationConfig,
         )
+        from tests.test_cases.baroclinic_wave import baroclinic_wave_init_latlon
+
+        grid = create_latlon_grid(
+            n_lat=n_grid, radius=constants.R_earth, omega=constants.Omega,
+        )
+        n_lat, n_lon = grid.n_lat, grid.n_lon
+        total_cells = n_lat * n_lon * n_levels
+        # CFL-safe Laplacian viscosity (same form as
+        # driver.component_factory.compute_diffusion; inlined to avoid importing
+        # the driver stack here, which trips a device_config circular import in
+        # the benchmark subprocess).  grid.dx is the 2-cell zonal span, so the
+        # min cell width is half of it.  The polar filter lifts the pole-cell
+        # CFL, so dt is the equatorial CFL value that _auto_dt returns.
+        dx_min = float(jnp.min(grid.dx)) / 2.0
+        A_h = 0.05 * dx_min ** 2 / dt
+        config = CGridLatLonPrimitiveEquationConfig(
+            A_h=A_h,
+            fix_mass=not no_conservation,
+            use_polar_filter=True,
+            time_integrator="ssp_rk3",
+        )
+        model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
+        state = baroclinic_wave_init_latlon(grid, sigma, perturbed=True)
+        dev_config = create_latlon_mesh(n_devices=n_gpus)
     else:
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid

@@ -180,6 +180,15 @@ def main(argv: list[str] | None = None) -> int:
                         action="store_false")
 
     # Output
+    parser.add_argument("--ic", type=str, default="default",
+                        choices=["default", "standard", "era5"],
+                        help="Initial condition: 'default' (uniform T_init rest "
+                             "state), 'standard' (realistic lapse-rate + "
+                             "equator-pole gradient + thermal-wind jet; lat-lon "
+                             "only — Earth-like CWV), or 'era5' (reanalysis from "
+                             "--ic-path).")
+    parser.add_argument("--ic-path", type=str, default="",
+                        help="ERA5 Zarr path when --ic era5.")
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--monthly-means", action="store_true", default=True)
 
@@ -308,6 +317,12 @@ def main(argv: list[str] | None = None) -> int:
         # Diagnostics
         "--clear-sky-diag",
     ]
+    # Initial condition (default keeps the prior uniform-T_init behaviour; pass
+    # --ic standard for a physically realistic lapse-rate + balanced-jet IC on
+    # lat-lon — Earth-like column water vapour).
+    cmd += ["--ic", args.ic]
+    if args.ic == "era5":
+        cmd += ["--ic-path", args.ic_path]
     if args.diurnal_cycle:
         cmd.append("--diurnal-cycle")
     if args.monthly_means:
