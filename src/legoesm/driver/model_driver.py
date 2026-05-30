@@ -2185,7 +2185,20 @@ class ModelDriver:
         # the ``RRTMGPConfig.compute_fp32`` contract ("the MPAS driver enables
         # it for the long-run rrtmgp path").  Enabled ONLY for rrtmgp — gray
         # radiation ignores the rrtmgp sub-config, so leave the default there.
-        _rrtmgp_fp32 = (cfg.radiation == "rrtmgp")
+        # compute_fp32 is DISABLED by default: GPU validation (job 8109241,
+        # JAX_TRACEBACK_FILTERING=off) showed the fp32 path still crashes inside
+        # the RTE kernel -- the optics-table cast to float32 works, but the
+        # shortwave direct-beam recurrence (``rte_utils.recurrent_op_scan`` via
+        # ``monochromatic_two_stream.sw_cell_source``) re-promotes the scan
+        # carry to float64, tripping ``lax.scan``'s carry-dtype invariant
+        # (``float32[ncol,1]`` in vs ``float64[ncol,1]`` out).  float64 is
+        # pervasive in the RTE/optics interior, so enabling fp32 makes EVERY
+        # MPAS rrtmgp run fail at trace time.  Until a kernel-wide precision
+        # audit lands (key all constants/inputs/scan-carries off the table
+        # dtype), keep fp32 off so MPAS rrtmgp runs in fp64 (correct, just not
+        # accelerated).  The cast plumbing + the LW/SW carry-coercion fixes are
+        # retained so the audit can flip this flag and validate incrementally.
+        _rrtmgp_fp32 = False
         phys_cfg = PhysicsConfig(
             radiation=RadiationConfig(
                 scheme=cfg.radiation if cfg.radiation != "none" else "none",
