@@ -194,13 +194,29 @@ FIX (ac6a8f58): rotation-aware `center_to_dgrid_vector` (inverse of the exit
 | gravity_wave_3_1 max\|v\| | 22.4 (outlier) | **19.5 (≈ico 20)** |
 | baroclinic v-field (visual) | wavenumber-4 panel blocks | **smooth zonal bands** |
 ALL PE cube cases PASS; 22 PE tests green. 1e4× conservation gain + gravity_wave→ico
-+ smooth v confirm correctness. RESIDUAL ~10× latlon (smooth zonal, NOT an edge
-artifact) + rest_state_topo topography-PGF (separate). [git: fix briefly mis-
-committed to main by a stray checkout; cherry-picked here, local main reset.]
++ smooth v confirm correctness. [git: fix briefly mis-committed to main by a stray
+checkout; cherry-picked here, local main reset.]
+
+## iter 14c — codex-driven sweep: ALL vector-seam instances fixed (5 sites)
+Adversarial review found the SAME vector-vs-scalar seam bug at 4 more PE sites;
+fixed each (commits eb14fca0, bc068e28, fe28b11c) + regression test (4deb66ae):
+1. `_step_cell_centre` wind lift → `center_to_dgrid_vector` (ac6a8f58).
+2. `tendencies()` HydrostaticState entry wind lift → vector.
+3. `fv3_hydrostatic_tendencies` vector tendency blocks (vert_adv/lap/hyperdiff/
+   physics) center→corner lift → per-block `center_to_dgrid_vector`.
+4. wind DIFFUSION halo (∇²/∇⁴ of u_cell,v_cell) → `pad_halo_vector_4d` (was scalar
+   `_pad_halo_4d` → unrotated seam halos into the stencil).
+5. pass `duogrid=_pe_dg` to that vector halo (consistency).
+Cumulative baroclinic v_rms@2d: 4.95 → 0.77 (sites 1-3) → **0.60** (site 4) =
+**9× latlon** (was 75×). v-field VISUALLY smooth zonal bands (no panel imprint).
+52 PE/regression/AST-guard tests green. KNOWN FOLLOW-UP: MPI packed-halo path
+(`packed_pad_halo_mpi_4d`) still packs u,v scalar — needs a vector packed MPI halo
+(matrix runs single-device, so not hit).
 
 ## Pending / next
-- Codex review of the fix [running]. Broader verify (held_suarez/AMIP climate).
-- Chase residual 10× (smooth zonal — likely KE-grad or remaining metric term).
-- rest_state_topo topography-PGF (separate mechanism).
-- AMIP cube vs latlon continent-longitude check.
-- `DONE` withheld: residual + topography imprint remain, broader verify pending.
+- Codex 5th review [running]; broad PE verify [running].
+- Residual ~9× latlon is a SMOOTH zonal amplitude diff (NOT an edge artifact) —
+  the user's "no edge artifacts" is met for baroclinic; chase the smooth residual
+  (KE-grad / effective-resolution) as polish.
+- rest_state_topo topography-PGF (separate mechanism); MPI vector packed halo.
+- `DONE` withheld: residual + topography + MPI follow-ups; broader climate verify.
