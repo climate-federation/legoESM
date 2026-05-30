@@ -236,3 +236,14 @@ a consistent, FV3-faithful (vector-correct) discretization with NO edge artifact
   (KE-grad / effective-resolution) as polish.
 - rest_state_topo topography-PGF (separate mechanism); MPI vector packed halo.
 - `DONE` withheld: residual + topography + MPI follow-ups; broader climate verify.
+
+## iter 14e — cube FIX is CLEANER than latlon (apples-to-apples, hybrid)
+Baroclinic v_rms@2d, HYBRID coord: cube FIX **0.60** (v_max 1.47) vs latlon
+**7.95** (v_max 32.3). latlon hybrid develops a strong UNPHYSICAL equatorial v
+band (±50 m/s; J-W perturbation is at 40°N, equator should be quiet) — a latlon-
+hybrid artifact (separate issue; latlon SIGMA is clean at 0.066). The cube FIX
+v_max 1.47 @day2 is PHYSICALLY CORRECT (the baroclinic wave has not grown yet).
+⇒ the earlier "9× latlon" was cube-hybrid vs latlon-SIGMA; vs latlon's own hybrid
+run the cube is **13× cleaner + smooth + no edge artifact**. The cube PE atmosphere
+is now competitive with / cleaner than latlon. (latlon-hybrid equatorial artifact
+filed as a separate latlon item.)
