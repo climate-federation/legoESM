@@ -20,9 +20,12 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm.ocean.physics.lateral_mixing.eke import (
     EKEConfig,
+    eke_deformation_radius,
     eke_kappa_gm,
+    eke_len_composite,
     eke_local_tendency,
     eke_mixing_length,
+    eke_rhines_length,
 )
 
 
@@ -482,3 +485,105 @@ def test_E7_channel_stable_with_eke_off():
     assert np.all(np.isfinite(np.asarray(state.T.data)))
     assert np.all(np.isfinite(np.asarray(state.u.data)))
     assert np.all(np.isfinite(np.asarray(state.v.data)))
+
+
+# ---------------------------------------------------------------------------
+# L1 — Rhines-limited mixing length (eke_len variant), pure functions.
+# Reproduces Veros eke_len = max(lmin, min(eke_cross·L_rossby, eke_crhin·L_rhines))
+# (veros/core/eke.py:54-67). Tested as pure formulas here; wired at L2.
+# ---------------------------------------------------------------------------
+
+# Representative developed-ACC column (~ -45° latitude), used across the L1 tests:
+_ACC_BETA = 1.62e-11      # 2Ω cos45°/R [1/(m·s)]
+_ACC_FMID = 1.03e-4       # |f| at -45° [1/s]
+_ACC_INT_N_DZ = 8.0       # ∫N dz [m/s] (N~2e-3 over ~4 km) -> c1 = 8/π ≈ 2.55 m/s
+_ACC_EKE = 1.0e-6         # specific eddy energy [m²/s²] (Veros ACC eke ~1e-6)
+
+
+def test_eke_len_config_defaults_match_veros():
+    cfg = EKEConfig()
+    assert cfg.mixing_length_scheme == "rossby"   # default = legoESM pre-eke_len path
+    assert cfg.eke_cross == 1.0                    # Veros settings.py defaults
+    assert cfg.eke_crhin == 1.0
+
+
+def test_validate_eke_config_raises_on_bad_mixing_length_params():
+    from legoesm.ocean.physics.lateral_mixing.eke import validate_eke_config
+    validate_eke_config(EKEConfig(mixing_length_scheme="rhines"))   # valid scheme
+    for bad in (EKEConfig(mixing_length_scheme="bogus"),
+                EKEConfig(eke_cross=0.0), EKEConfig(eke_crhin=-1.0)):
+        try:
+            validate_eke_config(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"expected ValueError for {bad!r}")
+
+
+def test_rhines_length_matches_formula_and_monotone_in_E():
+    cfg = EKEConfig()
+    E = jnp.array([1.0e-6, 1.0e-4, 1.0e-2])
+    L = eke_rhines_length(E, jnp.array(_ACC_BETA), cfg)
+    # Exact: sqrt(sqrt(E)/beta) (the +1e-30 regulariser is negligible at these E).
+    expect = np.sqrt(np.sqrt(np.asarray(E, float)) / _ACC_BETA)
+    np.testing.assert_allclose(np.asarray(L), expect, rtol=1e-10)
+    assert float(L[0]) < float(L[1]) < float(L[2])     # monotone increasing in E
+    assert 1.0e3 < float(L[0]) < 5.0e4                  # ACC regime -> O(10 km)
+
+
+def test_rhines_length_beta_floor_finite_at_zero_beta():
+    cfg = EKEConfig()
+    L = eke_rhines_length(jnp.array(1.0e-4), jnp.array(0.0), cfg)   # beta=0 -> floor
+    assert np.isfinite(float(L)) and float(L) > 0.0
+
+
+def test_deformation_radius_matches_formula_both_branches():
+    cfg = EKEConfig()
+    c1 = _ACC_INT_N_DZ / np.pi
+    L_mid = c1 / _ACC_FMID
+    L_eq = np.sqrt(c1 / (2.0 * _ACC_BETA))
+    # Midlatitude: |f| large -> c1/|f| is the smaller branch.
+    L = eke_deformation_radius(
+        jnp.array(_ACC_INT_N_DZ), jnp.array(_ACC_FMID), jnp.array(_ACC_BETA), cfg)
+    assert L_mid < L_eq                                # midlat branch wins here
+    np.testing.assert_allclose(float(L), L_mid, rtol=1e-9)
+    # Equatorial: |f| -> 0 -> the sqrt branch caps the (otherwise huge) radius.
+    L_eqr = eke_deformation_radius(
+        jnp.array(_ACC_INT_N_DZ), jnp.array(1.0e-8), jnp.array(_ACC_BETA), cfg)
+    np.testing.assert_allclose(float(L_eqr), L_eq, rtol=1e-6)
+    assert float(L_eqr) < c1 / 1.0e-8                  # capped below the midlat value
+
+
+def test_deformation_radius_zero_at_zero_stratification():
+    cfg = EKEConfig()
+    L = eke_deformation_radius(
+        jnp.array(0.0), jnp.array(_ACC_FMID), jnp.array(_ACC_BETA), cfg)
+    assert float(L) == 0.0   # c1=0 -> midlat branch is 0 and wins the min
+
+
+def test_eke_len_composite_picks_min_and_floors():
+    cfg = EKEConfig(l_min=100.0, eke_cross=2.0, eke_crhin=1.0)   # ACC weights
+    # min(2·200km, 1·8km) = 8km, above the 100 m floor.
+    eke_len = eke_len_composite(jnp.array(200.0e3), jnp.array(8.0e3), cfg)
+    np.testing.assert_allclose(float(eke_len), 8.0e3, rtol=1e-12)
+    # Floor dominates when both candidate lengths are tiny.
+    assert float(eke_len_composite(jnp.array(10.0), jnp.array(5.0), cfg)) == 100.0
+
+
+def test_eke_len_full_acc_regime_is_order_km_not_hundreds_km():
+    """The headline gap: in the developed ACC the Rhines scale limits eke_len to
+    O(km) — far below the ~200 km the legoESM Visbeck length saturates at (the
+    "rossby" scheme), the ~25x reduction that blocked EKE adoption (E9). Shown on
+    the pure composite. (For this column the Veros-form deformation radius itself
+    is ~25 km; the ~200 km comparator below is a representative saturated Visbeck
+    L_rossby, not computed from _ACC_INT_N_DZ.)"""
+    cfg = EKEConfig(eke_cross=2.0, eke_crhin=1.0)
+    L_def = eke_deformation_radius(
+        jnp.array(_ACC_INT_N_DZ), jnp.array(_ACC_FMID), jnp.array(_ACC_BETA), cfg)
+    L_rhines = eke_rhines_length(jnp.array(_ACC_EKE), jnp.array(_ACC_BETA), cfg)
+    eke_len = eke_len_composite(L_def, L_rhines, cfg)
+    assert float(L_rhines) < float(L_def)              # Rhines is the limiter
+    np.testing.assert_allclose(float(eke_len), float(L_rhines), rtol=1e-12)
+    assert float(eke_len) < 3.0e4                      # < 30 km
+    # vs the rossby-only scheme at a representative saturated L_rossby (~200 km):
+    rossby_only = eke_mixing_length(jnp.array(2.0e5), cfg)
+    assert float(eke_len) < 0.1 * float(rossby_only)   # >10x smaller
