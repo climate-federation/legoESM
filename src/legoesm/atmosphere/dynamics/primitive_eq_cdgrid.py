@@ -876,50 +876,32 @@ def fv3_hydrostatic_tendencies(
             n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT, 3,
         )
 
-    # Build cc batch: vert_adv + lap (A_h>0) + hyperdiff (>0) + phys_cc (iter-65)
-    _uv_corner_blocks = [
-        _vert_adv_uv_cc.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2),
-    ]
-    if lap_uvT is not None:
-        _uv_corner_blocks.append(
-            lap_uvT[..., :2].reshape(n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 2)
-        )
-    if hyperdiff_uvT is not None:
-        _uv_corner_blocks.append(
-            hyperdiff_uvT[..., :2].reshape(n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 2)
-        )
-    if physics_tendency_cc is not None and physics_tendency_cc.du_dt is not None:
-        _phys_uv_cc = jnp.stack(
-            [physics_tendency_cc.du_dt.data, physics_tendency_cc.dv_dt.data],
-            axis=-1,
-        ).reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2)
-        _uv_corner_blocks.append(_phys_uv_cc)
-    _n_blocks = len(_uv_corner_blocks)
-    if _n_blocks == 1:
-        _combined_uv_cc = _uv_corner_blocks[0]
-    else:
-        _combined_uv_cc = jnp.concatenate(_uv_corner_blocks, axis=-1)
-    _combined_uv_d_flat = _interp_center_to_corner(_combined_uv_cc, cdgrid)
-    _combined_uv_d = _combined_uv_d_flat.reshape(
-        _combined_uv_d_flat.shape[0], _combined_uv_d_flat.shape[1],
-        _combined_uv_d_flat.shape[2], _n_blocks, nlev_uv, 2,
-    )  # (n_face_d, n_i_d, n_j_d, n_blocks, nlev, 2-uv)
-    _block_idx = 0
-    _vert_adv_uv_d = _combined_uv_d[:, :, :, _block_idx]
-    _block_idx += 1
+    # Lift each cc VECTOR tendency block (vert_adv + lap + hyperdiff + physics)
+    # to D-grid corners.  fv3_faithful (iter-14): these are face-local (u, v)
+    # vector increments, so the cc→corner interp must ROTATE components across
+    # cube panel seams.  The previous batched ``_interp_center_to_corner`` on
+    # the concatenated (u, v) treated them as scalars and seam-blended without
+    # rotation (the same bug fixed for the wind lift), re-injecting a cube-edge
+    # imprint into every diffusion/physics tendency.  Use ``center_to_dgrid_vector``
+    # per block.  Output convention preserved: ``_*_uv_d[..., 0]`` = u_d,
+    # ``[..., 1]`` = v_d at corners (6, n+1, n+1, nlev, 2).
+    def _lift_uv_cc(_u_cc, _v_cc):
+        _u_d, _v_d = center_to_dgrid_vector(_u_cc, _v_cc, cdgrid)
+        return jnp.stack([_u_d, _v_d], axis=-1)
+
+    _vert_adv_uv_d = _lift_uv_cc(
+        _vert_adv_uv_cc[..., 0], _vert_adv_uv_cc[..., 1])
     _lap_uv_d = None
     if lap_uvT is not None:
-        _lap_uv_d = _combined_uv_d[:, :, :, _block_idx]
-        _block_idx += 1
+        _lap_uv_d = _lift_uv_cc(lap_uvT[..., 0], lap_uvT[..., 1])
     _hd_uv_d = None
     if hyperdiff_uvT is not None:
-        _hd_uv_d = _combined_uv_d[:, :, :, _block_idx]
-        _block_idx += 1
+        _hd_uv_d = _lift_uv_cc(hyperdiff_uvT[..., 0], hyperdiff_uvT[..., 1])
     _phys_uv_d = None
     if (physics_tendency_cc is not None
             and physics_tendency_cc.du_dt is not None):
-        _phys_uv_d = _combined_uv_d[:, :, :, _block_idx]
-        _block_idx += 1
+        _phys_uv_d = _lift_uv_cc(
+            physics_tendency_cc.du_dt.data, physics_tendency_cc.dv_dt.data)
 
     # vert_adv contribution
     du_d_dt = du_d_dt + _vert_adv_uv_d[..., 0]
@@ -1636,20 +1618,13 @@ def cdgrid_hydrostatic_tendencies(
     if isinstance(state, FV3HydrostaticState):
         return fv3_hydrostatic_tendencies(state, grid, sigma_coord, cdgrid, config, physics_tendency)
 
-    # HydrostaticState path: convert cell-centre -> D-grid (batched).
-    _u_in = state.u.data
-    _v_in = state.v.data
-    _ni_face, _ni_i, _ni_j, _ni_lev = _u_in.shape
-    _uv_in = jnp.stack([_u_in, _v_in], axis=-1)
-    _uv_d_flat = _interp_center_to_corner(
-        _uv_in.reshape(_ni_face, _ni_i, _ni_j, _ni_lev * 2), cdgrid,
-    )
-    _uv_d = _uv_d_flat.reshape(
-        _uv_d_flat.shape[0], _uv_d_flat.shape[1], _uv_d_flat.shape[2],
-        _ni_lev, 2,
-    )
-    u_d = _uv_d[..., 0]
-    v_d = _uv_d[..., 1]
+    # HydrostaticState path: convert cell-centre -> D-grid.
+    # fv3_faithful (iter-14): the winds are a VECTOR — use the rotation-aware
+    # ``center_to_dgrid_vector`` (matching ``_step_cell_centre``), NOT a scalar
+    # ``_interp_center_to_corner`` on the stacked (u, v), which blends face-local
+    # components across panel seams without rotation and re-injects the
+    # cube-edge vorticity imprint.  Keeps ``step`` and ``tendencies`` consistent.
+    u_d, v_d = center_to_dgrid_vector(state.u.data, state.v.data, cdgrid)
     fv3_state = FV3HydrostaticState(
         u_d=state.u.replace(data=u_d, name="u_d"),
         v_d=state.v.replace(data=v_d, name="v_d"),
