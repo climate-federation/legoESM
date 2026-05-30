@@ -54,18 +54,26 @@ f_corner`) + `cgrid_mass_flux_divergence` (PPM continuity).
 **ATTEMPTED iter ~23 (reverted — failed validation):** new D-grid forward-
 backward barotropic (`barotropic_substeps_dgrid`) reusing those ops. rest_state
 regressed 1e-31→2e-5; geostrophic **eta→27m→NaN by 11h even with div_damp=0.25**.
-**ROOT LESSON (key):** a single-stage forward-backward only time-centers the
-**gravity wave** (eta↔u); the **Coriolis** inside the vector-invariant tendency
-is still forward-Euler → amplifies at ~(f·dt)² (same explicit-Coriolis blow-up as
-the explicit-f*v c_grid). FV3's stability comes from its **c_sw/d_sw TWO-STAGE
-time scheme** (the C-grid half-step time-centers the Coriolis), NOT single-stage
-Euler. ⇒ **Correct fix**: drive the barotropic substep through the validated FV3
-2-stage SW stepper `CDGridShallowWaterModel.step` (or replicate its c_sw→d_sw
-half/full split): build a `CDGridShallowWaterState` from (h=eta+H_bathy or eta,
-D-grid barotropic winds), step, extract eta + winds. Must reuse FV3's time scheme,
-not hand-rolled Euler. Validate: rest_state machine-zero, geostrophic nz→~mpas,
-barotropic_wave amplitude, stability, no regressions; codex review. (Never a_grid;
-never explicit f*v; never single-stage Euler.)
+**SOLUTION-SPACE MAP (empirical, iter ~23-24):**
+- explicit-f*v `a_grid`: stable but 40% non-zonal artifact.
+- explicit-f*v `c_grid`: unstable (eta→17m→NaN; root = `fv3_cc2c` rotation breaks
+  forward-backward skew-symmetry → amplifies at ~f).
+- bare vector-invariant (`cdgrid_momentum_tendencies`, NO div_damp/hyperdiff),
+  forward-backward Euler: rest 1e-31→2e-5, geostrophic→NaN.
+- bare vector-invariant, **RK3**: STILL NaN (isolated barotropic SW test, 4.2h).
+  ⇒ the time scheme alone is NOT enough.
+**KEY:** the validated atmosphere SW (`CDGridShallowWaterModel`, W2/W5 clean) is
+stable because it bundles **RK3 + divergence damping + biharmonic hyperdiffusion**
+(default `div_damp=10·_div_damp_cube`, `d4_bg=0.16`) — the bare tendency alone
+diverges. ⇒ **Correct fix is a scoped mini-project**: drive the barotropic mode
+through the full `CDGridShallowWaterModel.step` (RK3+div_damp+hyperdiff). Requires:
+(a) staggering reconcile — SW `u_d/v_d` are CORNER `(6,n+1,n+1)`, barotropic winds
+are cc/edge; (b) ocean LAND masking (the atm SW has none; geostrophic land =
+|lat|>80 caps); (c) SW state `h=H_bathy+eta`, `h_s=-H_bathy` so PGF=g·∇eta; (d)
+preserve rest_state machine-zero + the split-explicit baroclinic coupling.
+Validate: rest machine-zero, geostrophic nz→~mpas, barotropic_wave amplitude,
+stability, no regressions; codex review. (Never a_grid; never explicit f*v;
+never bare tendency without FV3 div_damp+hyperdiff.)
 
 ## SW visual verdicts
 1. cosine-bell day-1 = PPM-limiter interior diffusion (cube/ico L2 1.4×), not edge.
