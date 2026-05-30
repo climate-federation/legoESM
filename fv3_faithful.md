@@ -207,11 +207,18 @@ fixed each (commits eb14fca0, bc068e28, fe28b11c) + regression test (4deb66ae):
 4. wind DIFFUSION halo (∇²/∇⁴ of u_cell,v_cell) → `pad_halo_vector_4d` (was scalar
    `_pad_halo_4d` → unrotated seam halos into the stencil).
 5. pass `duogrid=_pe_dg` to that vector halo (consistency).
-Cumulative baroclinic v_rms@2d: 4.95 → 0.77 (sites 1-3) → **0.60** (site 4) =
+6. `hydrostatic_to_fv3` entry lift → duogrid-aware vector halo (2842d98e).
+7. wind hyperdiffusion OUTER ∇² stencil → hand-built vector ∇⁴ (4fd71710); the
+   shared `_hyperdiffusion_3d` scalar-pads the inner ∇²(u,v) result.
+Cumulative baroclinic v_rms@2d: 4.95 → 0.77 (sites 1-3) → **0.60** (sites 4-7) =
 **9× latlon** (was 75×). v-field VISUALLY smooth zonal bands (no panel imprint).
-52 PE/regression/AST-guard tests green. KNOWN FOLLOW-UP: MPI packed-halo path
+ALL 10 fast PE cube cases PASS; 21+ PE/regression/AST-guard tests green; 6 codex
+reviews drove the sweep. KNOWN FOLLOW-UP: MPI packed-halo path
 (`packed_pad_halo_mpi_4d`) still packs u,v scalar — needs a vector packed MPI halo
-(matrix runs single-device, so not hit).
+(matrix runs single-device, so not hit by the matrix).
+⇒ The cube panel-edge v-imprint (the user's "edge artifact") is ELIMINATED for
+the PE atmosphere. Residual ~9× latlon is a SMOOTH zonal amplitude diff, not an
+edge artifact.
 
 ## Pending / next
 - Codex 5th review [running]; broad PE verify [running].
