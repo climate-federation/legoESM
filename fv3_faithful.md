@@ -251,10 +251,15 @@ SW cases (cosine-bell 1.4× ico, W5 ≈ latlon by day 15) are already close; the
 Cube ocean cases are limited to rest_state (global), barotropic_wave,
 inertia_gravity_wave (gyres are regional latlon/mpas only). Ocean uses a
 DIFFERENT dycore (C-grid ocean PE), not the FV3 atmosphere D-grid core.
-- rest_state_stratified_with_land cube: 0 imprint at day 0.1 BUT grows to
-  **cur_rms 0.64, max 3.37 m/s by day 2** — so the ocean cube is NOT clean
-  either. Awaiting latlon/mpas 10-day to know if cube-specific or a shared
-  stratified-IC imbalance. [running] barotropic_wave cube/latlon/mpas [running].
+**OCEAN CUBE BLOWS UP (NaN) — concrete stability bug, NOT the RK3 wall:**
+| ocean test | cube | latlon | mpas |
+|-----------|------|--------|------|
+| barotropic_wave (SSH gravity wave) | **BLOWUP day 1.04** (NaN) | stable (amp 0.098, just under 0.1 thr) | **PASS** (amp 0.104) |
+| rest_state_stratified_with_land | **BLOWUP day 2.08** (NaN) | stable | stable |
+So the cube ocean dycore is in WORSE shape than the cube atmosphere (which stays
+finite). MPAS + latlon are stable on both. This is a tractable stability bug
+(CFL / edge damping / filter), the next concrete fix target. Cube ocean cases are
+limited (rest_state, barotropic_wave, inertia_gravity_wave; gyres regional-only).
 
 ## Cross-grid data note (ask D)
 Regridded `snapshots_latlon.npz` uses canonical lon[-180,180]/lat[-90,90] for
