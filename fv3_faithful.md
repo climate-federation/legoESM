@@ -206,10 +206,38 @@ edges as the dominant source.
 **Codex adversarial review (base 8f693690, 4 commits): CLEAN** — "did not
 identify any discrete regression or correctness issue introduced by the diff."
 
-NEXT FIX TARGET: audit the PE cube PGF — does it use the FV3-faithful Lin-2004
-finite-volume PGF (`_fv3_lin_pgf`) or a simpler form with panel-edge error?
-A faithful PGF would cut the rest_state_topo + baroclinic imprint at the source
-(not a damping crutch).
+DEFINITIVE rest_state_topo ratio (cube vs latlon, exact=0 motion):
+wind_rms 0.205 vs 0.0029 = **70×**; max 1.27 vs 0.047 = **27×**.
+
+## iter 5b — ARCHITECTURAL ROOT CAUSE (the recurring wall)
+Audited the PE cube PGF: it uses an **Arakawa-Lamb Bernoulli-gradient** PGF
+(RK3-compatible). The **FV3-faithful Lin-1997 cross-product PGF exists**
+(`_fv3_lin_pgf.py`) but `use_fv3_lin_pgf` is **INERT** — docstring/comment
+(primitive_eq_cdgrid.py:128-129,336-337): "Lin (1997) cross-product PGF not
+stable with RK3; needs forward-backward stepping."
+
+This is the SAME wall hit three times:
+1. FV3 forward-backward stepping → unstable (470× W2 gate). [iter 3]
+2. Full-strength d_sw5 corner damping → blows up the baroclinic jet. [iter 4]
+3. FV3-faithful Lin PGF → "not stable with RK3". [iter 5b]
+⇒ **Every fully-FV3-faithful component is incompatible with the RK3
+stabilization this codebase requires.** The cube panel-edge imprint (70× latlon
+at rest, 150× on the baroclinic jet, 7× on W2 v) is the *price of the RK3
+choice*. The cube is FV3-faithful in its COMPONENTS (PPM `fv_tp_2d`, d2a2c,
+A-L gradient, corner fills, metric) but cannot run the full FV3 SCHEME
+(FB + Lin PGF + structured damping) without going unstable.
+
+HONEST VERDICT on the user's "absolutely no edge artifacts": within the current
+RK3 architecture this is **not achievable** — the imprint is fundamental, not a
+tunable. Real paths forward (all large, none quick):
+  (a) make the forward-backward scheme stable (team failed over many iters);
+  (b) a new RK3-stable corner discretization that matches FB fidelity (research);
+  (c) accept the imprint as a documented cube limitation + lean on damping where
+      it doesn't destabilize.
+SW cases (cosine-bell 1.4× ico, W5 ≈ latlon by day 15) are already close; the
+3D-hydrostatic imprint is the irreducible-under-RK3 gap.
+
+## iter 6 — ocean (OMIP) matrix coverage [running]
 
 ## Cross-grid data note (ask D)
 Regridded `snapshots_latlon.npz` uses canonical lon[-180,180]/lat[-90,90] for
