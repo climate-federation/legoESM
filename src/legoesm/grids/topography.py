@@ -231,6 +231,16 @@ class TopographyConfig(NamedTuple):
         Number of grid cells from face edge to blend.
     clip_negative : bool
         If True, set negative elevations (ocean floor) to 0.
+    land_mask_path : str
+        Optional path to a separate land-sea-mask NetCDF file (e.g. CMIP6
+        ``sftlf`` or an ERA5 ``lsm`` invariant).  When set, the land
+        fraction is taken from this file instead of being derived from
+        ``elevation > 0`` — which avoids misclassifying below-sea-level
+        land (Caspian/Dead Sea/Netherlands) as ocean.
+    land_mask_var : str
+        Variable name in ``land_mask_path``.  Empty → auto-detect among
+        ``sftlf``, ``lsm``, ``land_sea_mask``, ``land``,
+        ``land_area_fraction``.
     """
     source: str = "flat"
     path: str = ""
@@ -241,6 +251,8 @@ class TopographyConfig(NamedTuple):
     edge_blend_strength: float = 0.3
     edge_blend_width: int = 2
     clip_negative: bool = True
+    land_mask_path: str = ""
+    land_mask_var: str = ""
 
 
 # ==============================================================================
@@ -417,6 +429,102 @@ def _derive_land_fraction(
     return land_frac.reshape(target_shape)
 
 
+def _load_land_fraction_file(
+    path: str,
+    var_name: str,
+    target_lat_deg: np.ndarray,
+    target_lon_deg: np.ndarray,
+) -> np.ndarray:
+    """Load a land-sea-mask file and regrid (bilinear) to the target grid.
+
+    Accepts any regular lat-lon NetCDF land-fraction field — CMIP6
+    ``sftlf`` (percent), ERA5 ``lsm`` (fraction), etc.  Percent fields
+    are auto-detected (max value > 1.5) and rescaled to [0, 1].
+
+    Parameters
+    ----------
+    path : str
+        NetCDF file containing the land-sea mask.
+    var_name : str
+        Mask variable name; empty → auto-detect.
+    target_lat_deg, target_lon_deg : np.ndarray
+        Target grid centers in degrees (any shape).
+
+    Returns
+    -------
+    np.ndarray
+        Land fraction in [0, 1], same shape as ``target_lat_deg``.
+    """
+    import xarray as xr
+
+    ds = xr.open_dataset(path)
+    try:
+        all_names = set(ds.data_vars) | set(ds.coords)
+        if var_name:
+            mask_var = var_name
+        else:
+            mask_var = None
+            for c in ("sftlf", "lsm", "land_sea_mask", "land",
+                      "land_area_fraction", "LSM"):
+                if c in all_names:
+                    mask_var = c
+                    break
+            if mask_var is None:
+                data_vars = list(ds.data_vars)
+                if not data_vars:
+                    raise KeyError(
+                        f"No data variables in land-mask file {path}"
+                    )
+                mask_var = data_vars[0]
+
+        lat_var = None
+        for c in ("lat", "latitude", "y", "Y"):
+            if c in all_names:
+                lat_var = c
+                break
+        lon_var = None
+        for c in ("lon", "longitude", "x", "X"):
+            if c in all_names:
+                lon_var = c
+                break
+        if lat_var is None or lon_var is None:
+            raise KeyError(
+                f"Cannot detect lat/lon in land-mask file {path}; "
+                f"available: {sorted(all_names)}"
+            )
+
+        lat_src = ds[lat_var].values.astype(np.float64)
+        lon_src = ds[lon_var].values.astype(np.float64)
+        mask_data = ds[mask_var].values.astype(np.float64)
+    finally:
+        ds.close()
+
+    while mask_data.ndim > 2:
+        mask_data = mask_data[0]
+
+    # Longitude in [0, 360), ascending
+    lon_src = lon_src % 360.0
+    lon_order = np.argsort(lon_src)
+    lon_src = lon_src[lon_order]
+    mask_data = mask_data[:, lon_order]
+
+    # Latitude ascending
+    if lat_src[0] > lat_src[-1]:
+        lat_src = lat_src[::-1]
+        mask_data = mask_data[::-1, :]
+
+    mask_data = np.where(np.isnan(mask_data), 0.0, mask_data)
+
+    # Percent → fraction (CMIP6 sftlf is 0-100; ERA5 lsm is 0-1)
+    if np.nanmax(mask_data) > 1.5:
+        mask_data = mask_data / 100.0
+
+    f_land = _regrid_to_target(
+        lat_src, lon_src, mask_data, target_lat_deg, target_lon_deg
+    )
+    return np.clip(f_land, 0.0, 1.0)
+
+
 def _laplacian_smooth_cubed_sphere(arr: np.ndarray, passes: int = 1) -> np.ndarray:
     """Simple Laplacian smoothing on a cubed-sphere field (6, n, n).
 
@@ -473,6 +581,94 @@ def _laplacian_smooth_gaussian(arr: np.ndarray, passes: int = 1) -> np.ndarray:
     return result
 
 
+def smooth_phis_cubed_sphere(
+    phis: jnp.ndarray,
+    smoothing_passes: int = 4,
+    edge_blend_strength: float = 0.3,
+) -> jnp.ndarray:
+    """Apply standard cubed-sphere topography smoothing to a phis field.
+
+    Applies the same Laplacian + edge-blend pipeline used by
+    :func:`load_real_topography` so that ERA5-derived or other externally
+    regridded phis fields receive equivalent gradient reduction at face
+    boundaries before being used as model initial conditions.
+
+    Parameters
+    ----------
+    phis : (6, n, n) surface geopotential [m^2/s^2]
+    smoothing_passes : int
+        Number of Laplacian smoothing passes.  Default matches
+        ``TopographyConfig.smoothing_passes = 4``.
+    edge_blend_strength : float
+        Face-edge blend strength.  Default matches
+        ``TopographyConfig.edge_blend_strength = 0.3``.
+
+    Returns
+    -------
+    (6, n, n) smoothed surface geopotential [m^2/s^2]
+    """
+    phis_np = np.asarray(phis)
+    phis_np = _laplacian_smooth_cubed_sphere(phis_np, passes=smoothing_passes)
+    return blend_scalar_cube_edges_2d(jnp.asarray(phis_np), strength=edge_blend_strength)
+
+
+def _target_grid_degrees(grid):
+    """Return target grid centers in degrees and grid metadata.
+
+    Returns ``(target_lat_2d, target_lon_2d, is_gaussian, grid_spacing)``
+    where the lat/lon arrays are in degrees and longitude is in [0, 360).
+    """
+    grid_lat = np.asarray(grid.grid_lat)
+    grid_lon = np.asarray(grid.grid_lon)
+    is_gaussian = hasattr(grid, 'n_lat') and not hasattr(grid, 'n')
+
+    if is_gaussian:
+        target_lat = np.asarray(grid.lat) * 180.0 / np.pi
+        target_lon = (np.asarray(grid.lon) * 180.0 / np.pi) % 360.0
+        target_lon_2d, target_lat_2d = np.meshgrid(target_lon, target_lat)
+        grid_spacing = 180.0 / grid.n_lat
+    else:
+        target_lat_2d = grid_lat * 180.0 / np.pi
+        target_lon_2d = (grid_lon * 180.0 / np.pi) % 360.0
+        grid_spacing = 90.0 / grid.n
+
+    return target_lat_2d, target_lon_2d, is_gaussian, grid_spacing
+
+
+def load_land_fraction(
+    grid,
+    path: str,
+    var_name: str = "",
+) -> jnp.ndarray:
+    """Load a land-sea mask from a NetCDF file, regridded to the model grid.
+
+    A standalone entry point for the land fraction alone (independent of
+    topography), so a real land-sea mask can be used with any
+    ``topography`` setting — including ``flat``.
+
+    Parameters
+    ----------
+    grid : CubedSphereGrid or GaussianGrid
+        Target model grid.
+    path : str
+        Land-sea-mask NetCDF (CMIP6 ``sftlf`` percent, ERA5 ``lsm``
+        fraction, etc.).
+    var_name : str, optional
+        Mask variable name; empty → auto-detect.
+
+    Returns
+    -------
+    jax.Array
+        Land fraction in [0, 1], shape ``(6, n, n)`` for cubed-sphere or
+        ``(n_lat, n_lon)`` for Gaussian.
+    """
+    target_lat_2d, target_lon_2d, _, _ = _target_grid_degrees(grid)
+    f_land = _load_land_fraction_file(
+        path, var_name, target_lat_2d, target_lon_2d
+    )
+    return jnp.asarray(f_land)
+
+
 def load_real_topography(
     grid,
     config: TopographyConfig | None = None,
@@ -485,8 +681,10 @@ def load_real_topography(
     to model grid centers, smoothed to remove 2Δx noise, and
     (for cubed-sphere grids) edge-blended at face boundaries.
 
-    Land fraction is derived from sub-grid sampling of the high-resolution
-    data: the fraction of sub-grid points with elevation > 0.
+    Land fraction is taken from ``config.land_mask_path`` when set (a
+    true land-sea mask such as CMIP6 ``sftlf`` or ERA5 ``lsm``);
+    otherwise it is derived from sub-grid sampling of the elevation
+    field (the fraction of sub-grid points with elevation > 0).
 
     Parameters
     ----------
@@ -551,37 +749,29 @@ def load_real_topography(
 
     ds.close()
 
-    # Use protocol for grid detection.  Classify by coordinate rank, not by
-    # attribute presence: cubed-sphere stores grid_lat as (6, n, n) (ndim 3);
-    # the structured lat-lon meshes — Gaussian AND the regular lat-lon grid —
-    # store it as (n_lat, n_lon) (ndim 2).  The old `hasattr(grid, 'n_lat') and
-    # not hasattr(grid, 'n')` heuristic mis-classified the lat-lon grid (which
-    # also exposes `n`) as cubed-sphere, sending its 2-D field into the
-    # cubed-sphere (6, n, n) smoother and crashing with an IndexError.
-    grid_lat = np.asarray(grid.grid_lat)
-    grid_lon = np.asarray(grid.grid_lon)
-    is_gaussian = grid_lat.ndim == 2
-
-    if is_gaussian:
-        target_lat = np.asarray(grid.lat) * 180.0 / np.pi
-        target_lon = np.asarray(grid.lon) * 180.0 / np.pi
-        target_lon = target_lon % 360.0
-        target_lon_2d, target_lat_2d = np.meshgrid(target_lon, target_lat)
-        grid_spacing = 180.0 / grid.n_lat
-    else:
-        target_lat_2d = grid_lat * 180.0 / np.pi
-        target_lon_2d = grid_lon * 180.0 / np.pi
-        target_lon_2d = target_lon_2d % 360.0
-        grid_spacing = 90.0 / grid.n
+    # Use protocol for grid detection (classification fixed in
+    # _target_grid_degrees: by coordinate rank, so the lat-lon grid is no longer
+    # mis-routed into the cubed-sphere smoother).
+    target_lat_2d, target_lon_2d, is_gaussian, grid_spacing = (
+        _target_grid_degrees(grid)
+    )
 
     # Regrid elevation
     z_s = _regrid_to_target(lat_src, lon_src, elev_data,
                             target_lat_2d, target_lon_2d)
 
-    # Derive land fraction from sub-grid sampling
-    f_land = _derive_land_fraction(lat_src, lon_src, elev_data,
-                                   target_lat_2d, target_lon_2d,
-                                   grid_spacing)
+    # Land fraction: prefer an explicit land-sea-mask file (true land
+    # fraction, including below-sea-level land); otherwise derive it
+    # from sub-grid elevation sampling (elevation > 0).
+    if config.land_mask_path:
+        f_land = _load_land_fraction_file(
+            config.land_mask_path, config.land_mask_var,
+            target_lat_2d, target_lon_2d,
+        )
+    else:
+        f_land = _derive_land_fraction(lat_src, lon_src, elev_data,
+                                       target_lat_2d, target_lon_2d,
+                                       grid_spacing)
 
     # Clip negative elevations if requested
     if config.clip_negative:

@@ -343,6 +343,19 @@ class ModelDriver:
                 self.grid, config=topo_config
             )
 
+        # Real land-sea mask overrides the elevation-derived land fraction
+        # (works with any ``topography`` setting, including "flat").
+        land_mask_path = getattr(self.config, "land_mask_path", "")
+        if land_mask_path:
+            from legoesm.grids.topography import load_land_fraction
+            self._f_land = load_land_fraction(
+                self.grid, land_mask_path
+            ).astype(_sd)
+            logger.info(
+                f"  Land-sea mask: {land_mask_path} "
+                f"(land fraction mean={float(jnp.mean(self._f_land)):.3f})"
+            )
+
     def _create_dycore(self) -> None:
         """Create the dynamical core model via the component factory.
 
@@ -789,6 +802,23 @@ class ModelDriver:
         conv_str = self.config.convection or "none"
         logger.info(f"  Physics: radiation={rad_str}, convection={conv_str}")
 
+        # Activate the slab-land surface tile when a land-sea mask was
+        # loaded in _create_topography.  f_land / albedo_land are static
+        # surface fields; the slab steps once per radiation sub-cycle.
+        if getattr(self.config, "land_mask_path", "") and self._f_land is not None:
+            from legoesm.surface_albedo import land_vegetation_albedo
+            from legoesm.core.precision import get_policy
+            _sd = get_policy().storage
+            self.physics.f_land = self._f_land.astype(_sd)
+            self.physics.albedo_land = (
+                land_vegetation_albedo(self.grid.grid_lat).astype(_sd)
+            )
+            self.physics.rad_update_steps = self.config.rad_update_steps
+            logger.info(
+                f"  Land tile: ACTIVE (slab land, C_land="
+                f"{self.physics.C_land:.1e} J/m2/K)"
+            )
+
     def _setup_external_forcing(self) -> None:
         """Configure external forcing: solar, ozone, aerosol, GHG."""
         from legoesm.forcing.external import (
@@ -802,6 +832,9 @@ class ModelDriver:
             S_0=cfg.S_0, source=cfg.solar_source,
             path=cfg.solar_file, tsi_var=cfg.solar_tsi_var,
             spectral_var=cfg.solar_spectral_var,
+            spectral_band_order=getattr(
+                cfg, "solar_spectral_band_order", "auto",
+            ),
             start_year=cfg.start_year,
         )
         self._use_solar_spectral = (cfg.solar_source == "spectral_file")
@@ -1350,6 +1383,14 @@ class ModelDriver:
                 local_adapter = ColumnAdapter(ncol=local_ncol, shape_2d=local_shape_2d)
                 if self.physics is not None:
                     self.physics.adapter = local_adapter
+                    # Scatter the slab-land surface fields to owned faces
+                    # so the rank-local physics columns match f_land /
+                    # albedo_land (the MPI ``owned_face_ids`` path).
+                    if self.physics.f_land is not None:
+                        self.physics.f_land = scatter(
+                            self.physics.f_land, layout)
+                        self.physics.albedo_land = scatter(
+                            self.physics.albedo_land, layout)
 
                 # Wrap SST/SIC forcing to return rank-local arrays
                 _global_get_sst_sic = self.get_sst_sic
@@ -1900,6 +1941,26 @@ class ModelDriver:
             # expected by ``--restart-from`` in run_amip.py and the
             # checkpoint-glob in ``run_amip_1deg_latlon_mpi.sbatch``.
             if self._is_latlon_mpi():
+                # The lat-lon MPI gather path writes a single global-shape
+                # checkpoint from rank 0's carry_aux, which holds the
+                # prognostic slab-land T_land as a rank-LOCAL latitude
+                # band.  Broadcasting that on restart would give every
+                # rank rank-0's band (wrong shape/values) and corrupt the
+                # land surface.  Banded carry-aux gather/scatter is not
+                # implemented yet, so fail fast rather than write an
+                # invalid restart (#325). The per-rank distributed format
+                # (each rank saves/loads its own band) and single-process
+                # npz are restart-exact for slab-land.
+                if (self.physics is not None
+                        and getattr(self.physics, "f_land", None) is not None):
+                    raise ValueError(
+                        "Lat-lon MPI checkpointing does not yet gather the "
+                        "banded slab-land temperature (T_land) into the "
+                        "global checkpoint — a restart would corrupt land "
+                        "surface state (#325). Use the per-rank distributed "
+                        "checkpoint format or run single-process for "
+                        "slab-land lat-lon MPI runs."
+                    )
                 state_g, tracers_g = self._gather_state_for_global_checkpoint()
                 if self._mpi_rank == 0:
                     ckpt_path = (
@@ -1948,6 +2009,26 @@ class ModelDriver:
         # Single-process path
         ckpt_path = self._output_dir / f"checkpoint_day_{int(elapsed_day):04d}.npz"
         backend = self.config.output.checkpoint_format if hasattr(self.config.output, 'checkpoint_format') else "npz"
+
+        # The zarr backend does not yet round-trip ``carry_aux`` (it is
+        # dropped on save and padded empty on load), so it cannot persist
+        # the prognostic slab-land skin temperature.  Restarting a
+        # slab-land run from a zarr checkpoint would silently reinitialize
+        # T_land from the lowest-level air temperature and branch the
+        # trajectory.  Fail fast rather than corrupt restart (#325); npz
+        # persists carry_aux (incl. T_land) and is restart-exact.
+        if (
+            backend == "zarr"
+            and self.physics is not None
+            and getattr(self.physics, "f_land", None) is not None
+        ):
+            raise ValueError(
+                "checkpoint_format='zarr' cannot persist the prognostic "
+                "slab-land temperature (T_land) — a restart would silently "
+                "reinitialize it (#325). Use checkpoint_format='npz' for "
+                "slab-land runs (or add carry_aux support to the zarr "
+                "backend)."
+            )
 
         save_restart(
             path=ckpt_path,
@@ -2039,9 +2120,14 @@ class ModelDriver:
             from legoesm.parallel.distributed import get_active_topology
             topology = get_active_topology()
             if topology is not None:
-                arrays, step, day, _, _ = load_checkpoint_distributed(
+                arrays, step, day, _, _diag_aux = load_checkpoint_distributed(
                     path, topology.rank, topology.n_processes,
                 )
+                # Restore carry auxiliaries (held radiation, conv_prog,
+                # and the prognostic slab-land T_land) so a distributed
+                # restart is trajectory-exact rather than silently
+                # reinitializing them (#325 restart-safety).
+                self._carry_aux = _diag_aux if _diag_aux else {}
                 from legoesm.core.state import HydrostaticState
                 from legoesm.core.field import Field
                 import jax.numpy as jnp
@@ -2283,6 +2369,19 @@ class ModelDriver:
         # is a no-op there.  (Time-varying-over-the-run GHG is a follow-on:
         # thread it through ``forcing`` like T_sfc; here it is fixed at the
         # start-year value.)
+        # compute_fp32 is DISABLED: GPU validation (job 8109241,
+        # JAX_TRACEBACK_FILTERING=off) showed the fp32 RTE path still crashes --
+        # the optics-table cast to float32 works, but the shortwave direct-beam
+        # recurrence (``rte_utils.recurrent_op_scan`` via
+        # ``monochromatic_two_stream.sw_cell_source``) re-promotes the scan
+        # carry to float64, tripping ``lax.scan``'s carry-dtype invariant
+        # (``float32[ncol,1]`` in vs ``float64[ncol,1]`` out).  float64 is
+        # pervasive in the RTE/optics interior, so enabling fp32 makes EVERY
+        # MPAS rrtmgp run fail at trace time.  Keep fp32 off (MPAS rrtmgp runs
+        # in fp64 -- correct, just not accelerated) until a kernel-wide
+        # precision audit lands; the cast plumbing + LW/SW carry-coercion fixes
+        # are retained inert so the audit can flip this flag.  See PR #343.
+        _rrtmgp_fp32 = False
         phys_cfg = PhysicsConfig(
             radiation=RadiationConfig(
                 scheme=cfg.radiation if cfg.radiation != "none" else "none",
@@ -2290,6 +2389,7 @@ class ModelDriver:
                     co2_ppmv=cfg.co2_ppmv,
                     ch4_ppbv=cfg.ch4_ppbv,
                     n2o_ppbv=cfg.n2o_ppbv,
+                    compute_fp32=_rrtmgp_fp32,
                 ),
                 # Ozone source (default "standard" matches the bare default; a
                 # non-standard --ozone-source now flows to MPAS rrtmgp).  The
@@ -2303,7 +2403,115 @@ class ModelDriver:
             microphysics=MicrophysicsConfig(scheme=cfg.microphysics),
             gravity_wave_drag=GravityWaveDragConfig(scheme=cfg.gravity_wave_drag),
         )
-        physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT)
+        # Phase D perf: shard the per-column RRTMGP workload across all local
+        # devices (issue #273 ``column_mesh``).  rrtmgp is the dominant MPAS
+        # cost — the per-column k-distribution × RTE solve already saturates a
+        # single GPU, so sharding the ``nCells`` columns across N devices is
+        # embarrassingly parallel and scales ~linearly (the dynamics stays on
+        # the default device; only the radiation columns shard).  Enabled only
+        # for rrtmgp with >1 device AND nCells divisible by the device count —
+        # the radiation kernel requires an exact split, and padding the
+        # UNSTRUCTURED column axis is unsafe (a phantom cell has no mesh
+        # geometry), so we fall back to single-device otherwise.
+        # SINGLE-PROCESS ONLY: under MPI (``is_distributed``) every rank sees
+        # the full node device set, so a per-rank column mesh would shard each
+        # rank's already-rank-local columns across ALL node GPUs and collide
+        # with the MPI halo exchange (which works on rank-local unsharded
+        # arrays).  The MPI path does its own device distribution; column
+        # sharding is the single-process multi-GPU lever.  ``len(jax.devices())``
+        # (not ``local_device_count``) matches ``create_column_mesh``'s own
+        # ``jax.devices()`` so the divisibility check and the built mesh agree.
+        if _rrtmgp_fp32:
+            logger.info(
+                "  RRTMGP compute_fp32: optics tables + RTE solve in float32 "
+                "(dycore stays fp64)"
+            )
+        _column_mesh = None
+        _single_process = (self._device_config is None
+                           or not self._device_config.is_distributed)
+        _n_dev = len(jax.devices())
+        _ncell = int(self.state.T.data.shape[0])
+        if (cfg.radiation == "rrtmgp" and _single_process
+                and _n_dev > 1 and _ncell % _n_dev == 0):
+            from legoesm.parallel.column_shard import create_column_mesh
+            _column_mesh = create_column_mesh(_n_dev)
+            logger.info(
+                f"  RRTMGP column-sharding: {_ncell} cells / {_n_dev} devices "
+                f"= {_ncell // _n_dev} cols/device"
+            )
+        elif cfg.radiation == "rrtmgp" and _single_process and _n_dev > 1:
+            logger.warning(
+                f"  RRTMGP column-sharding skipped: nCells={_ncell} not "
+                f"divisible by n_devices={_n_dev}; running single-device "
+                f"(throughput not scaled across GPUs)"
+            )
+        physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT,
+                                  column_mesh=_column_mesh)
+
+        # ---- AMIP surface boundary: anchor radiation to the prescribed SST -
+        # Without this the MPAS hydrostatic radiation falls back to using the
+        # lowest model-level temperature ``T[..., -1]`` as the surface
+        # temperature (see integration.py ``_make_hydrostatic_radiation``), so
+        # the column has NO external thermal anchor and cold-drifts toward a
+        # dry gray-radiative equilibrium fully decoupled from the prescribed
+        # SST (measured: <T_atm> 290 -> 257 K over 30 days, still falling).
+        # The cubed-sphere/lat-lon and spectral paths apply the SST every
+        # step; the MPAS path previously applied nothing — so an "AMIP" run on
+        # MPAS was not actually SST-forced.
+        #
+        # We set a FIXED (annual-mean, sea-ice-blended) per-cell surface
+        # temperature ONCE here, before the step loop.  ``model.step`` is
+        # ``jax.jit`` with ``physics_fn`` marked *static* (primitive_eq_mpas.py
+        # ``_step_jit`` static_argnums), so the override-closure cell is read
+        # at trace time and BAKED into the first compile; a per-step update
+        # would be silently ignored (stale value) unless every step paid a
+        # retrace.  A fixed climatological anchor is therefore the correct
+        # shape for the JIT'd MPAS path, is byte-identical across every
+        # restart-chain link, and captures the first-order SST -> atmosphere
+        # coupling (surface longwave).  The seasonal SST cycle and the
+        # turbulent surface fluxes are intentionally NOT applied here: the
+        # former needs traced forcing threaded through the MPAS step signature
+        # and the latter needs the edge->cell wind interp (AMIP.md Known #3).
+        # ---- AMIP surface boundary: TIME-VARYING prescribed SST ----
+        # The prescribed SST/SIC is applied as the radiative surface
+        # temperature via a per-step TRACED ``forcing={"T_sfc": (nCells,)}``
+        # threaded through ``model.step`` -> combined physics -> radiation
+        # (see primitive_eq_mpas.step + radiation integration ``_wants_forcing``).
+        # Unlike the earlier fixed-anchor ``set_T_sfc_override`` (a JIT-static
+        # closure that could only carry ONE baked value), ``forcing`` is a jit
+        # argument, so the SST can vary in time (seasonal cycle) WITHOUT
+        # retracing — matching the cube/spectral AMIP paths.  Without any
+        # surface anchor the MPAS radiation falls back to ``T[..., -1]`` (the
+        # lowest air level) and the column cold-drifts, decoupled from the SST.
+        _sst_forcing = (cfg.radiation != "none" and self.get_sst_sic is not None)
+        _compute_T_sfc = None
+        if _sst_forcing:
+            from legoesm.forcing.surface_utils import blend_surface_temperature
+            _T_ice = cfg.T_ice
+            _ncell = int(self.state.T.data.shape[0])
+
+            def _compute_T_sfc(day):
+                # Prescribed SST/SIC at the MPAS cell latitudes (get_sst_sic is
+                # built on grid.grid_lat = mesh.latCell for analytical/AMIP
+                # data), sea-ice-blended, as a (nCells,) surface temperature.
+                _sst, _sic = self.get_sst_sic(day)
+                return blend_surface_temperature(
+                    jnp.asarray(_sst), jnp.asarray(_sic), _T_ice).reshape(-1)
+
+            # Shape guard once, up front: a non-per-cell get_sst_sic would
+            # otherwise surface as an opaque error deep inside the JIT trace.
+            _ts0 = _compute_T_sfc(START_DAY)
+            if _ts0.shape != (_ncell,):
+                raise ValueError(
+                    f"MPAS SST forcing shape {tuple(_ts0.shape)} != "
+                    f"(nCells={_ncell},); get_sst_sic must return per-cell "
+                    f"arrays on the MPAS mesh (grid.grid_lat = latCell)."
+                )
+            logger.info(
+                "  AMIP SST surface forcing (time-varying): "
+                f"day {START_DAY:.1f} T_sfc=[{float(jnp.min(_ts0)):.1f},"
+                f"{float(jnp.max(_ts0)):.1f}] mean={float(jnp.mean(_ts0)):.1f} K"
+            )
 
         # ---- AMIP surface boundary: anchor radiation to the prescribed SST -
         # Without this the MPAS hydrostatic radiation falls back to using the
@@ -3035,6 +3243,17 @@ class ModelDriver:
             conv_prog_default = jnp.zeros(conv_shape, dtype=_sd)
         conv_prog = _aux.get("conv_prog", conv_prog_default)
 
+        # Slab-land skin temperature — restored from the checkpoint when
+        # available, otherwise initialized from the lowest model-level
+        # air temperature (the thin slab equilibrates within ~1 day).
+        # ``None`` when the land tile is inactive (ocean-only run).
+        if self.physics is not None and self.physics.f_land is not None:
+            T_land = _aux.get(
+                "T_land", self.state.T.data[..., -1].astype(_sd)
+            )
+        else:
+            T_land = None
+
         # External forcing (rank-local p_s and lat for MPI)
         _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
         o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
@@ -3061,6 +3280,7 @@ class ModelDriver:
             "held_lw_up_toa": held_lw_up_toa,
             "held_sw_down_toa": held_sw_down_toa,
             "conv_prog": conv_prog,
+            "T_land": T_land,
             "o3_vmr": o3_vmr, "aerosol_od": aerosol_od, "ghg_vmr": ghg_vmr,
             "lat_deg_grid": lat_deg_grid,
             "_sd": _sd,
@@ -3130,6 +3350,7 @@ class ModelDriver:
         held_lw_up_toa = ctx["held_lw_up_toa"]
         held_sw_down_toa = ctx["held_sw_down_toa"]
         conv_prog = ctx["conv_prog"]
+        T_land = ctx["T_land"]
         o3_vmr = ctx["o3_vmr"]
         aerosol_od = ctx["aerosol_od"]
         ghg_vmr = ctx["ghg_vmr"]
@@ -3269,6 +3490,7 @@ class ModelDriver:
                 target_moisture=_target_moisture,
                 target_mass=_target_mass,
                 precip_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                T_land=T_land,
             )
 
             # Shard carry across devices for SPMD execution
@@ -3324,6 +3546,11 @@ class ModelDriver:
                 "seg_shflx": seg_shflx,
                 "seg_lhflx": seg_lhflx,
             }
+            # Carry the slab-land temperature to the next segment and
+            # into the checkpoint (mirrors the held-radiation fields).
+            if carry.T_land is not None:
+                T_land = carry.T_land
+                self._carry_aux["T_land"] = T_land
 
             current_step = seg_end_step
 
@@ -3488,7 +3715,12 @@ class ModelDriver:
         hyperdiffusion_3d = self._hyperdiffusion_3d_fn
         from legoesm.forcing.external import get_solar_forcing_at_time
 
-        ctx = self._prepare_run_context(start_step, start_day, restore_carry=False)
+        # restore_carry=True matches the compiled path: when continuing
+        # from a checkpoint it restores held radiation, conv_prog, and the
+        # prognostic slab-land T_land from self._carry_aux; on a fresh
+        # start self._carry_aux is empty so this is a no-op (#325
+        # restart-safety for the non-compiled reference path).
+        ctx = self._prepare_run_context(start_step, start_day, restore_carry=True)
         cfg = ctx["cfg"]
         DT = ctx["DT"]
         N_DAYS = ctx["N_DAYS"]
@@ -3523,6 +3755,11 @@ class ModelDriver:
         held_lw_up_toa = ctx["held_lw_up_toa"]
         held_sw_down_toa = ctx["held_sw_down_toa"]
         conv_prog = ctx["conv_prog"]
+        # Slab-land skin temperature (#325): threaded through the
+        # non-compiled per-step path so the reference run evolves land
+        # T_sfc consistently with the compiled-segment path.  ``None``
+        # when the land tile is inactive.
+        T_land = ctx["T_land"]
         o3_vmr = ctx["o3_vmr"]
         aerosol_od = ctx["aerosol_od"]
         ghg_vmr = ctx["ghg_vmr"]
@@ -3548,7 +3785,7 @@ class ModelDriver:
         self.state = self.model.step_with_physics(self.state, DT)
 
         phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = \
+                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), T_land = \
             step_unified(
                 jnp.bool_(True),
                 self.state.T.data, self.state.p_s.data,
@@ -3561,6 +3798,7 @@ class ModelDriver:
                 held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 ghg_vmr_override=ghg_vmr,
+                T_land=T_land,
             )
         conv_prog = phys_out.conv_prog
 
@@ -3639,7 +3877,7 @@ class ModelDriver:
                 else step_unified_no_rad
             )
             phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-                        held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = \
+                        held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), T_land = \
                 _step_fn(
                     need_rad_jax,
                     self.state.T.data, self.state.p_s.data,
@@ -3652,8 +3890,11 @@ class ModelDriver:
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     ghg_vmr_override=ghg_vmr,
+                    T_land=T_land,
                 )
             conv_prog = phys_out.conv_prog
+            if T_land is not None:
+                self._carry_aux["T_land"] = T_land
 
             # (c) Update state
             new_T = self.state.T.data + DT * phys_out.dT_dt
@@ -3767,6 +4008,12 @@ class ModelDriver:
                     "conv_prog": conv_prog,
                     "seg_precip": phys_out.precip,
                 }
+                # Preserve the prognostic slab-land skin temperature
+                # across this diagnostic-step refresh so a checkpoint
+                # written on a diagnostic step still restores T_land
+                # exactly on restart (#325 restart-safety).
+                if T_land is not None:
+                    self._carry_aux["T_land"] = T_land
 
                 # Segment callback for coupled integration
                 if self._segment_callback is not None:

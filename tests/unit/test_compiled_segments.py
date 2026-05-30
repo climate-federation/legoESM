@@ -128,7 +128,8 @@ def _mock_step_unified(
         held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
         held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
     )
-    return phys_out, held_new
+    # Slab-land temperature passes through unchanged (mock has no land).
+    return phys_out, held_new, kwargs.get("T_land")
 
 
 # ===========================================================================
@@ -518,7 +519,7 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
         # Physics
         need_rad = jnp.bool_(True) if args["rad_update_steps"] <= 1 else \
             ((step_idx + 1) % args["rad_update_steps"]) == 0
-        phys_out, held_new = step_unified(
+        phys_out, held_new, _T_land_ref = step_unified(
             need_rad,
             T_new, p_s_new,
             carry.q_v, carry.q_c, carry.q_r, carry.conv_prog,
@@ -585,6 +586,7 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
             precip_accum=precip_accum,
             shflx_accum=carry.shflx_accum,
             lhflx_accum=carry.lhflx_accum,
+            T_land=carry.T_land,
         )
     return carry
 
@@ -1081,7 +1083,7 @@ class TestRadiationSubcycle:
                      held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                      held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                      **kwargs):
-            phys_out, _ = _mock_step_unified(
+            phys_out, _, _T_land_new = _mock_step_unified(
                 need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
                 sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
                 solar_weights, s_0, o3_vmr, aerosol_od,
@@ -1095,7 +1097,9 @@ class TestRadiationSubcycle:
                 held_sw_net_sfc, held_lw_net_sfc,
                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
             )
-            return phys_out, held_new
+            # step_unified now returns a 3-tuple incl. the slab-land
+            # skin temperature (#325); pass it through unchanged.
+            return phys_out, held_new, _T_land_new
 
         def no_rad_mock(*args, **kwargs):
             # Identical to _mock_step_unified — passes held through unchanged.
@@ -1128,6 +1132,74 @@ class TestRadiationSubcycle:
             np.asarray(out_leg.held_dT_rad), sentinel_dT_rad,
             atol=1e-9,
         )
+
+    def test_subcycle_dispatches_no_rad_body_and_accepts_2tuple(self):
+        """Regression for #325 codex review (two coupled hazards):
+
+        1. The subcycled held-radiation steps must dispatch to the
+           ``step_unified_no_rad`` body via ``step_fn``.  A prior
+           refactor called the outer ``step_unified`` directly, so the
+           expensive radiation branch (and the slab-land update) ran on
+           every step regardless of ``rad_update_steps``.
+        2. A ``step_unified`` implementation may return a legacy 2-tuple
+           ``(phys_out, held_new)`` — neural / SFNO training wrappers do
+           — and the compiled segment path must accept it (land inert),
+           not crash unpacking a 3rd value.
+
+        Both mocks tag ``held_dT_rad`` with a distinct sentinel; running a
+        single step with ``rad_update_steps=2`` (step_idx 0 ->
+        ``(0+1)%2 != 0`` -> no-rad) must leave the *no-rad* sentinel.
+        """
+        # ``_run_subcycled`` runs ``rad_update_steps - 1`` no-rad steps
+        # then one rad step per outer cycle, and is only used when
+        # ``n_steps`` divides evenly by the cadence.  Cadence 2 over 2
+        # steps => one outer cycle = 1 no-rad step + 1 rad step.  Both
+        # bodies are traced; the no-rad body sets a (trace-time) flag, so
+        # if the dispatch is wrong (outer ``step_unified`` used for the
+        # no-rad slot) the flag stays False.
+        called = {"no_rad": False}
+
+        def rad_mock(need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
+                     sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
+                     solar_weights, s_0, o3_vmr, aerosol_od,
+                     held_dT_rad, *held_rest, **kwargs):
+            phys_out, held, _T_land = _mock_step_unified(
+                need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
+                sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
+                solar_weights, s_0, o3_vmr, aerosol_od,
+                held_dT_rad, *held_rest, **kwargs)
+            return phys_out, held, _T_land  # 3-tuple (PhysicsPipeline form)
+
+        def norad_mock_2tuple(need_rad, T, p_s, q_v, q_c, q_r, conv_prog,
+                              u, v, sst, sic, lat, lon, day_of_year,
+                              seconds_of_day, dt, solar_weights, s_0,
+                              o3_vmr, aerosol_od, held_dT_rad, *held_rest,
+                              **kwargs):
+            called["no_rad"] = True  # set at trace time when dispatched
+            phys_out, held, _ = _mock_step_unified(
+                need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
+                sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
+                solar_weights, s_0, o3_vmr, aerosol_od,
+                held_dT_rad, *held_rest, **kwargs)
+            return phys_out, held  # LEGACY 2-tuple (neural / SFNO form)
+
+        args = _make_segment_fn_args()
+        args["step_unified"] = rad_mock
+        args["rad_update_steps"] = 2
+        run = build_segment_fn(**args, step_unified_no_rad=norad_mock_2tuple)
+
+        carry = self._make_init_carry()  # step_index=0
+        out = run(_copy_carry(carry), 2, _FORCING)  # 1 outer cycle
+
+        # (1) The no-rad body must have been dispatched (and not crash on
+        #     its 2-tuple return).
+        assert called["no_rad"], (
+            "subcycle held-step did not dispatch to step_unified_no_rad — "
+            "outer step_unified used instead (#325 dispatch regression)"
+        )
+        # (2) The run completes with finite prognostics (2-tuple accepted).
+        assert bool(jnp.all(jnp.isfinite(out.T)))
+        assert bool(jnp.all(jnp.isfinite(out.held_dT_rad)))
 
     def test_raw_remains_traceable_under_grad(self):
         """Codex review axis D: ``.raw`` must work under ``jax.grad``.

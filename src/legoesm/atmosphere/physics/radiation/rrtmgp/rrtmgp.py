@@ -136,6 +136,77 @@ def standard_o3_profile(p_full):
     return _standard_o3_profile(p_full)
 
 
+def _cast_optics_f64_to_f32(obj, _seen=None):
+    """Recursively cast every float64 array leaf in ``obj`` to float32.
+
+    The RRTMGP optics objects are plain Python classes (``RRTMOptics``)
+    holding stdlib ``@dataclasses.dataclass(frozen=True)`` lookup tables
+    (``gas_optics_lw/sw``, ``cloud_optics_lw/sw``) whose fields are
+    ``jax.Array`` tables.  NONE of these are registered JAX pytrees, so
+    ``jax.tree_util.tree_map`` treats each as a single opaque leaf and casts
+    NOTHING — the silent no-op this replaces (fp32 heating came out
+    bit-identical to fp64 because the tables stayed float64).  This walks the
+    structure by hand: float64 arrays are cast; frozen dataclasses are rebuilt
+    via ``dataclasses.replace``; dicts / lists / tuples are mapped; and plain
+    objects with a ``__dict__`` (e.g. ``RRTMOptics``) have each attribute cast
+    in place.  Integer index tables and non-float leaves are left untouched.
+
+    An ``id``-keyed ``_seen`` set breaks reference cycles in the plain-object
+    graph (``OpticsScheme`` subclasses bind ``functools.partial``/closures that
+    capture ``self`` and other optics objects, so a naive deep walk recurses
+    forever — the ``RecursionError`` this guards against).  Callables, modules,
+    and types are skipped (they hold no float tables and are common cycle
+    waypoints).  Used only on the ``compute_fp32`` path.
+    """
+    import dataclasses as _dc
+    import types as _types
+
+    if _seen is None:
+        _seen = set()
+
+    # Array leaf (jax or numpy): cast float64 -> float32, keep everything else
+    # (int index tables, already-float32, bool) as is.
+    _dtype = getattr(obj, "dtype", None)
+    if _dtype is not None and hasattr(obj, "astype"):
+        return obj.astype(jnp.float32) if _dtype == jnp.float64 else obj
+    # Skip leaves that hold no tables and are common cycle waypoints.
+    if (obj is None or isinstance(obj, (str, bytes, int, float, bool,
+                                        _types.ModuleType, type))
+            or callable(obj)):
+        return obj
+    # Cycle guard: only mutable containers/objects can form cycles.
+    _oid = id(obj)
+    if _oid in _seen:
+        return obj
+    _seen.add(_oid)
+
+    # Frozen / plain stdlib dataclass instance: rebuild changed float fields.
+    if _dc.is_dataclass(obj) and not isinstance(obj, type):
+        changes = {}
+        for _f in _dc.fields(obj):
+            _v = getattr(obj, _f.name)
+            _nv = _cast_optics_f64_to_f32(_v, _seen)
+            if _nv is not _v:
+                changes[_f.name] = _nv
+        return _dc.replace(obj, **changes) if changes else obj
+    if isinstance(obj, dict):
+        return {_k: _cast_optics_f64_to_f32(_v, _seen) for _k, _v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_cast_optics_f64_to_f32(_v, _seen) for _v in obj)
+    # Plain object (e.g. RRTMOptics, which is mutable): cast each data attribute
+    # in place and return the same object.  Methods/bound closures are skipped
+    # by the callable guard above when recursed into.
+    if hasattr(obj, "__dict__"):
+        for _a, _v in vars(obj).items():
+            if callable(_v):
+                continue
+            _nv = _cast_optics_f64_to_f32(_v, _seen)
+            if _nv is not _v:
+                setattr(obj, _a, _nv)
+        return obj
+    return obj
+
+
 class RRTMGP:
   """Rapid Radiative Transfer Model for General Circulation Models (RRTMGP).
 
@@ -171,7 +242,7 @@ class RRTMGP:
               config.lw_cloud_file, config.sw_cloud_file,
               config.include_clouds,
               config.co2_ppmv, config.ch4_ppbv, config.n2o_ppbv,
-              x64)
+              x64, getattr(config, "compute_fp32", False))
 
   @staticmethod
   def _instance_cache_key(config):
@@ -302,6 +373,18 @@ class RRTMGP:
               optics_params, vmr_lib,
               include_clouds=config.include_clouds,
           )
+          if getattr(config, "compute_fp32", False):
+              # Cast the optics tables float64 -> float32 (the dycore keeps
+              # fp64).  GATED OFF in production: the MPAS driver sets
+              # ``compute_fp32=False`` because the fp32 RTE path still crashes
+              # (the shortwave direct-beam recurrence re-promotes the scan carry
+              # to float64) -- see ``_run_mpas`` + PR #343.  Retained inert so a
+              # future kernel-wide precision audit can flip the flag.
+              # ``_cast_optics_f64_to_f32`` walks the RRTMOptics object + its
+              # frozen-dataclass tables by hand (they are NOT registered JAX
+              # pytrees, so ``tree_map`` would no-op).
+              vmr_lib = _cast_optics_f64_to_f32(vmr_lib)
+              optics_lib = _cast_optics_f64_to_f32(optics_lib)
           _legoesm_optics_cache[key] = (optics_lib, vmr_lib)
       return _legoesm_optics_cache[key]
 

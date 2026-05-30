@@ -153,6 +153,13 @@ class RRTMGPConfig(NamedTuple):
     use_scan: bool | None = None
     include_clouds: bool = False
     use_optimal_angle: bool = False
+    # Run the optics tables + RTE solve in float32 even when JAX x64 is on.
+    # The dycore needs fp64, but radiation (a flux calculation) does not —
+    # fp32 is ~2x faster on fp64-limited GPUs (e.g. RTX 8000, fp64 ≈ 1/32 of
+    # fp32) with negligible heating change (benchmark: heating identical to
+    # <0.01 K/day vs fp64).  Default off; the MPAS driver enables it for the
+    # long-run rrtmgp path.
+    compute_fp32: bool = False
 
 
 class OzoneProfileConfig(NamedTuple):

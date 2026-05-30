@@ -51,7 +51,7 @@ pytestmark = pytest.mark.skipif(
 
 def _run_deck(out_dir: Path, *, forcing_dir: Path,
               grid_type: str = "cubed_sphere",
-              discretization: str = "centered",
+              discretization: str = "finite_volume",
               resolution: int = 12,
               radiation: str = "gray",
               days: int = 1,

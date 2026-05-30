@@ -261,6 +261,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "(112 g-points on the default RRTMG-SW table) so the "
             "radiation solver receives one weight per g-point."
         ))
+    parser.add_argument(
+        "--solar-spectral-band-order", type=str, default="auto",
+        choices=["auto", "as_is", "rrtmg_sw"],
+        help=(
+            "Band ordering of a per-band (14-band) --solar-spectral-var "
+            "input (issue #322).  'auto' (default) rotates to RRTMGP "
+            "order only when the input carries the MPI-M CMIP6 signature "
+            "(SSI_frac variable / swflux_14band filename) and leaves "
+            "generic files untouched.  'rrtmg_sw' always rotates (file "
+            "in RRTMG-SW / CMIP order, 820-2680 cm^-1 band last); "
+            "'as_is' never rotates (file already in RRTMGP order)."
+        ))
 
     # Aerosol
     parser.add_argument("--aerosol-forcing", type=str, default="off",
@@ -321,6 +333,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--topography", type=str, default="flat")
     parser.add_argument("--topo-smoothing", type=int, default=4)
     parser.add_argument("--topo-edge-blend", type=float, default=0.3)
+    parser.add_argument("--land-mask-file", type=str, default="",
+                        help="Land-sea-mask NetCDF (CMIP6 sftlf / ERA5 lsm). "
+                             "When set, activates the slab-land surface tile "
+                             "with the land fraction from this file.")
 
     # Surface / diagnostics
     parser.add_argument("--monthly-means", action="store_true", default=False)
@@ -459,6 +475,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         solar_file=args.solar_file,
         solar_tsi_var=args.solar_tsi_var,
         solar_spectral_var=args.solar_spectral_var,
+        solar_spectral_band_order=args.solar_spectral_band_order,
         aerosol_forcing=args.aerosol_forcing,
         aerosol_file=args.aerosol_file,
         aerosol_reference_aod=args.aerosol_reference_aod,
@@ -473,6 +490,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         topography=args.topography,
         topo_smoothing=args.topo_smoothing,
         topo_edge_blend=args.topo_edge_blend,
+        land_mask_path=args.land_mask_file,
         dynamic_albedo=False,
         experiment=args.experiment,
         start_year=args.start_year,

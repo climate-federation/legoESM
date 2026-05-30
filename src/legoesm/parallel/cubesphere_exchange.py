@@ -966,6 +966,23 @@ def activate_spmd_halo_backend(mesh, n: int = 0, nlev: int = 1) -> None:
         mesh.axis_names, n_devices, n, nlev, backend_name,
     )
 
+    # Pre-warm the exchange kernel cache so the factories are never
+    # called from inside a JIT trace.  The first call to _get_exchange
+    # for a given key triggers jnp.asarray in the factory outer body;
+    # if that call happens while _step_cell_centre is being traced, the
+    # resulting jax.Array gets captured in the _exchange closure and
+    # stored in the module-level _cache — an UnexpectedTracerError
+    # (production job 25211021 crashed after 5 min).  Calling all
+    # relevant (ndim, halo, with_offsets, use_ppermute) combinations
+    # here, outside any JIT scope, populates the cache before the first
+    # compilation begins.  (Fix from bd072199 on ap/amip_upper_atm.)
+    for _ndim in (3, 4):
+        for _pp in (False, True):
+            _get_exchange(mesh, _ndim, _pp, halo=1, with_offsets=False)
+            _get_exchange(mesh, _ndim, _pp, halo=1, with_offsets=True)
+        _get_exchange(mesh, _ndim, False, halo=2, with_offsets=False)
+        _get_exchange(mesh, _ndim, False, halo=2, with_offsets=True)
+
 
 def deactivate_spmd_halo_backend() -> None:
     """Revert to the default local halo backend."""
