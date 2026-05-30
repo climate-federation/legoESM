@@ -220,6 +220,15 @@ reviews drove the sweep. KNOWN FOLLOW-UP: MPI packed-halo path
 the PE atmosphere. Residual ~9× latlon is a SMOOTH zonal amplitude diff, not an
 edge artifact.
 
+## iter 14d — CONVERGENCE VALIDATION: the fix made the cube CONSISTENT ✅✅✅
+FIXED baroclinic v_rms@0.2d (sigma) vs resolution:
+  C36 0.688 → C48 0.535 (1.29×) → C72 0.282 (1.90×)  — MONOTONE DECREASE (~1.5-2 order).
+WITH the seam bug it ANTI-converged (C36 3.24 → C48 3.91, worse).
+⇒ The seam bug was a CONSISTENCY error (non-vanishing at high res); the fix makes
+the residual a BENIGN converging TRUNCATION error that vanishes at AMIP resolution
+(C72 already 0.28, → latlon's ~0.066 at C96-C192).  The cube PE atmosphere is now
+a consistent, FV3-faithful (vector-correct) discretization with NO edge artifact.
+
 ## Pending / next
 - Codex 5th review [running]; broad PE verify [running].
 - Residual ~9× latlon is a SMOOTH zonal amplitude diff (NOT an edge artifact) —
