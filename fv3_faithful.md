@@ -38,7 +38,18 @@ density/rest, wrong for pure-wave cases.)
    L2 1.4×), NOT a grid artifact; high-lat scatter = cosmetic native render.
 2. W5 propagates ≈ latlon/MPAS by day 15; ~12% day-1 deficit (damping). lowering
    damping blows up.
-3. cross-grid longitude alignment OK (all regrid to lon[-180,180]).
+3. cross-grid longitude alignment NOW TRULY FIXED (commits 2d04a168, 882b4063,
+   418cc7de; codex re-review: "no real correctness issues", MPAS re-regrid
+   identity max-err 0.0). Was: latlon stored native 72x144 under a 360-pt label
+   (gross tens-of-deg translation); gaussian/spectral kept native ~64 lon →
+   (181,64) narrower+shifted; npz lon + icosa weights were node-centered while
+   cube data is CELL-centered (half-cell drift). Fix: one canonical canvas
+   (`_canvas_lat`/`_canvas_lon`, == regridding.py:457) for EVERY regrid + npz
+   label + plot axis. SW cosine_bell/W5/W2 all 4 grids co-located within 1 cell
+   (visual confirmed). Also fixed a HARD bug: `run_cosine_bell` imported a
+   non-existent `_conservation_accumulator` → every latlon SW case ERRORED before
+   stepping (latlon SW was silently 0% running). Now 16/16 SW PASS all grids.
+   Regression: `tests/test_latlon_regrid_alignment.py` (9 tests).
 
 ## Residuals (all distinct from the now-fixed panel-edge artifact)
 - baroclinic + topography (rest_state mountain) = SMOOTH CONVERGING gradient-
