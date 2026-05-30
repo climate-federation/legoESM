@@ -620,7 +620,17 @@ def _target_grid_degrees(grid):
     """
     grid_lat = np.asarray(grid.grid_lat)
     grid_lon = np.asarray(grid.grid_lon)
-    is_gaussian = hasattr(grid, 'n_lat') and not hasattr(grid, 'n')
+    # Classify by coordinate rank, not attribute presence.  Cubed-sphere stores
+    # grid_lat as (6, n, n) (ndim 3); the structured lat-lon meshes — Gaussian
+    # AND the regular lat-lon grid — store it as (n_lat, n_lon) (ndim 2).  The
+    # old ``hasattr(grid, 'n_lat') and not hasattr(grid, 'n')`` heuristic
+    # mis-classified the lat-lon grid (which also exposes ``n``) as
+    # cubed-sphere, so its 2-D field was routed through the cubed-sphere
+    # smoother + cube-edge blend instead of the structured lat-lon (periodic-lon,
+    # pole-clamped) smoother.  ``is_structured_latlon`` keeps the variable's
+    # downstream meaning (1-D lat/lon meshgrid + gaussian smoother, no cube-edge
+    # blend) — Gaussian and regular lat-lon share that path.
+    is_gaussian = grid_lat.ndim == 2
 
     if is_gaussian:
         target_lat = np.asarray(grid.lat) * 180.0 / np.pi
