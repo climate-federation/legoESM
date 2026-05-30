@@ -813,6 +813,7 @@ def fv3_hydrostatic_tendencies(
                 cdgrid.base.cos_angle, cdgrid.base.sin_angle,
                 cdgrid.base.cos_angle_padded, cdgrid.base.sin_angle_padded,
                 interp_offsets=_pe_offs,
+                duogrid=_pe_dg,
             )
 
     dT_dx = _gradient_x_3d(T, grid, padded=_T_pad)
