@@ -27,7 +27,10 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.operators_cdgrid import cgrid_divergence, cgrid_gradient_2d, fv3_cc2c
+from legoesm.core.operators_cdgrid import (
+    cgrid_divergence, cgrid_gradient_2d, fv3_cc2c,
+    center_to_dgrid_vector, dgrid_to_center_vector,
+)
 from legoesm.core.precision import cast
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
@@ -297,6 +300,102 @@ def barotropic_substeps_cgrid(
     u_new = cast(u_new, _M, "storage")
     v_new = cast(v_new, _M, "storage")
 
+    return state._replace(
+        eta=state.eta.replace(data=eta_f),
+        u=state.u.replace(data=u_new),
+        v=state.v.replace(data=v_new),
+    )
+
+
+# ==============================================================================
+# FV3-faithful barotropic via the validated cube SW dynamical core
+# ==============================================================================
+
+def barotropic_substeps_fv3sw(
+    state: OceanState,
+    dt_s: float,
+    n_substeps: int,
+    grid: CubedSphereGrid,
+    cdgrid: CubedSphereCDGrid,
+    z_coord: OceanZStarCoordinate,
+    config: OceanConfig,
+    sw_model,
+) -> OceanState:
+    """Barotropic substeps via the validated FV3 cube shallow-water core.
+
+    The barotropic free-surface mode is a 2-D shallow-water system.  Rather than
+    re-deriving a (provably unstable) hand-rolled C/D-grid Coriolis, this routes
+    the substeps through ``CDGridShallowWaterModel.step`` — the FV3-faithful
+    C-D-grid SW solver (vector-invariant absolute-vorticity flux Coriolis with
+    ``cdgrid.f_corner``, SSP-RK3, divergence damping + biharmonic
+    hyperdiffusion; W2/W5-validated, edge-artifact-free).  An isolated test on a
+    zonal eta initial state stays bit-stably zonal (non-zonal variance 0.0000)
+    where the A-grid solver grows a 40% wavenumber-1 imprint and the explicit-f*v
+    / bare-tendency C/D-grid solvers blow up (see ``fv3_faithful.md``).
+
+    SW height mapping: ``h = H_bathy + eta``, ``h_s = -H_bathy`` so the SW
+    pressure gradient ``g*grad(h + h_s) = g*grad(eta)`` is the free-surface PGF;
+    the full column ``H_bathy + eta`` carries the gravity-wave transport.
+    Depth-averaged velocity is lifted cc->corner D-grid via the rotation-aware
+    ``center_to_dgrid_vector`` and projected back on exit.  Land is enforced by
+    the cell mask on the returned eta/velocity (the SW core itself is global).
+    """
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        CDGridShallowWaterState,
+    )
+
+    _f64 = jnp.float64
+    H_bathy = jnp.asarray(state.H_bathy.data, _f64)
+    mask = jnp.asarray(state.land_mask.data, _f64)
+    u = jnp.asarray(state.u.data, _f64)
+    v = jnp.asarray(state.v.data, _f64)
+    eta_raw = jnp.asarray(state.eta.data, _f64)
+    min_water_col = jnp.asarray(config.min_water_column_m, _f64)
+    dt_s = jnp.asarray(dt_s, _f64)
+    eta_floor = min_water_col - H_bathy
+    eta = jnp.maximum(eta_raw, eta_floor) * mask
+
+    # Depth-averaged barotropic velocity at cell centres.
+    h_k = compute_layer_thickness(
+        eta, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
+    )
+    _bar_triple = jnp.sum(
+        jnp.stack([h_k, u * h_k, v * h_k], axis=-1), axis=-2,
+    )
+    H_total = jnp.maximum(_bar_triple[..., 0], min_water_col)
+    U_bar_cc = _bar_triple[..., 1] / H_total * mask
+    V_bar_cc = _bar_triple[..., 2] / H_total * mask
+
+    # Lift cc -> corner D-grid (rotation-aware) for the SW state.
+    u_d, v_d = center_to_dgrid_vector(U_bar_cc, V_bar_cc, cdgrid)
+    u_d = jnp.asarray(u_d, _f64)
+    v_d = jnp.asarray(v_d, _f64)
+
+    h_sw = (H_bathy + eta).astype(_f64)
+    h_s = (-H_bathy).astype(_f64)
+    sw_state = CDGridShallowWaterState(h=h_sw, u_d=u_d, v_d=v_d, h_s=h_s)
+
+    def body(i, s):
+        return sw_model.step(s, dt_s)
+
+    sw_state = jax.lax.fori_loop(0, n_substeps, body, sw_state)
+
+    eta_new = (sw_state.h - H_bathy) * mask
+    eta_new = jnp.maximum(eta_new, eta_floor) * mask
+    U_bar_cc_new, V_bar_cc_new = dgrid_to_center_vector(sw_state.u_d, sw_state.v_d)
+    U_bar_cc_new = U_bar_cc_new * mask
+    V_bar_cc_new = V_bar_cc_new * mask
+
+    # Update 3D velocity: preserve the baroclinic (deviation) structure.
+    u_baro_prime = u - U_bar_cc[..., jnp.newaxis]
+    v_baro_prime = v - V_bar_cc[..., jnp.newaxis]
+    u_new = (u_baro_prime + U_bar_cc_new[..., jnp.newaxis]) * mask[..., jnp.newaxis]
+    v_new = (v_baro_prime + V_bar_cc_new[..., jnp.newaxis]) * mask[..., jnp.newaxis]
+
+    _M = "barotropic_solver"
+    eta_f = cast(eta_new, _M, "storage")
+    u_new = cast(u_new, _M, "storage")
+    v_new = cast(v_new, _M, "storage")
     return state._replace(
         eta=state.eta.replace(data=eta_f),
         u=state.u.replace(data=u_new),

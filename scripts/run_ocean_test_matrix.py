@@ -2273,6 +2273,16 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
                 barotropic_diffusion_alpha=0.3,
                 use_conservation_fixer=True,
                 physics=physics,
+                # FV3-faithful barotropic: route the free-surface mode through
+                # the validated cube SW core (vector-invariant absolute-vorticity
+                # flux + RK3 + div-damp/hyperdiff).  Replaces the A-grid solver,
+                # whose computational pressure mode grew a 40% non-zonal
+                # geostrophic_adjustment eta artifact (a_grid forbidden by the
+                # never-A-grid / FV3-faithfulness directive).  Ocean-tuned SW
+                # barotropic damping (OceanConfig default div_damp_factor=120)
+                # so phillips_two_layer matches latlon/mpas without over-damping
+                # barotropic_wave / geostrophic_adjustment.
+                barotropic_staggering="fv3sw",
             )
             if cube_fc_light_diffusion:
                 # Wave tests (barotropic_wave, inertia_gravity_wave) carry
