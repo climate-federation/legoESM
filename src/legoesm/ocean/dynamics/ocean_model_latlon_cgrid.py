@@ -1479,106 +1479,9 @@ class LatLonCGridOceanModel:
         -------
         LatLonCGridOceanState
         """
-        _oi = getattr(self.config, "outer_integrator", "forward_euler")
-        if _oi not in ("forward_euler", "leapfrog_ab2"):
-            raise ValueError(
-                "config.outer_integrator must be 'forward_euler' or "
-                f"'leapfrog_ab2', got {_oi!r}"
-            )
-        if _oi == "leapfrog_ab2":
-            return self._leapfrog_step(
-                state, dt, freshwater=freshwater,
-                surface_forcing=surface_forcing, sponge=sponge)
         return self._step_impl(state, dt, freshwater=freshwater,
                                surface_forcing=surface_forcing,
                                sponge=sponge)
-
-    def _leapfrog_step(self, state: LatLonCGridOceanState, dt: float,
-                       freshwater=None, surface_forcing=None, sponge=None,
-                       ) -> LatLonCGridOceanState:
-        """Leapfrog + Robert-Asselin outer integrator — tracers (gate I1).
-
-        The forward-Euler step ``_step_impl`` gives ``X_FE = X^n + dt·F(X^n)``,
-        so the implied total (fully-explicit) tracer tendency is
-        ``F = (X_FE - X^n)/dt``. The fully-explicit tracers (T, S) are then
-        advanced by a centred-in-time leapfrog, and the Robert-Asselin time
-        filter (Asselin 1972) damps the leapfrog computational mode::
-
-            X^{n+1}  = X^{n-1} + 2·(X_FE - X^n)        (= X^{n-1} + 2 dt F)
-            X^n_filt = X^n + ν·(X^{n+1} - 2 X^n + X^{n-1})
-
-        ``X^{n-1}`` is carried on the state (``T_prev``/``S_prev`` and, for the
-        momentum, ``u_prev``/``v_prev``); the first step bootstraps with
-        ``X^{n-1} = X^n`` (a 2 dt forward-Euler seed — the standard leapfrog
-        start). The MOMENTUM is split into the barotropic depth-mean (kept from
-        the split-explicit free-surface solve, un-leapfrogged — as in Veros) and
-        the baroclinic deviation, and only the baroclinic deviation is
-        leapfrogged. Every op is linear in the three time levels ⇒ differentiable.
-        """
-        state_fe = self._step_impl(
-            state, dt, freshwater=freshwater,
-            surface_forcing=surface_forcing, sponge=sponge)
-        nu = self.config.asselin_nu
-        mask3 = state.land_mask.data[..., jnp.newaxis]
-        u_mask3 = state.u_mask.data[..., jnp.newaxis]
-        v_mask3 = state.v_mask.data[..., jnp.newaxis]
-
-        # --- Tracers (fully explicit -> exact leapfrog) ---
-        T_n, S_n = state.T.data, state.S.data
-        T_prev = state.T_prev.data if state.T_prev is not None else T_n
-        S_prev = state.S_prev.data if state.S_prev is not None else S_n
-        T_lf = T_prev + 2.0 * (state_fe.T.data - T_n)
-        S_lf = S_prev + 2.0 * (state_fe.S.data - S_n)
-        T_filt = T_n + nu * (T_lf - 2.0 * T_n + T_prev)
-        S_filt = S_n + nu * (S_lf - 2.0 * S_n + S_prev)
-
-        # --- Baroclinic momentum: leapfrog the depth-varying deviation; KEEP the
-        #     barotropic depth-mean from the split-explicit free-surface solve
-        #     (un-leapfrogged), as in Veros. The thickness-weighted depth mean
-        #     <u>_z is the barotropic mode; u' = u - <u>_z is the baroclinic part.
-        h_k = compute_layer_thickness(
-            state.eta.data, state.H_bathy.data, self.z_coord,
-            min_water_column_m=self.config.min_water_column_m)
-        h_u = min_cell_to_uface(h_k)
-        h_v = min_cell_to_vface(h_k, self.grid)
-
-        def _split(field, h_face):
-            bt = (jnp.sum(field * h_face, axis=-1, keepdims=True)
-                  / jnp.maximum(jnp.sum(h_face, axis=-1, keepdims=True), 1.0e-10))
-            return field - bt, bt          # (baroclinic deviation, barotropic mean)
-
-        u_n, v_n = state.u.data, state.v.data
-        u_prev = state.u_prev.data if state.u_prev is not None else u_n
-        v_prev = state.v_prev.data if state.v_prev is not None else v_n
-        ubc_n, _ = _split(u_n, h_u)
-        ubc_fe, bt_u_fe = _split(state_fe.u.data, h_u)
-        ubc_prev, _ = _split(u_prev, h_u)
-        vbc_n, _ = _split(v_n, h_v)
-        vbc_fe, bt_v_fe = _split(state_fe.v.data, h_v)
-        vbc_prev, _ = _split(v_prev, h_v)
-        # Leapfrog the baroclinic deviation; add the FE barotropic mean back.
-        u_lf = (ubc_prev + 2.0 * (ubc_fe - ubc_n) + bt_u_fe) * u_mask3
-        v_lf = (vbc_prev + 2.0 * (vbc_fe - vbc_n) + bt_v_fe) * v_mask3
-        # Periodic-lon wrap (the split-explicit step enforces u[:, -1] == u[:, 0]).
-        u_lf = u_lf.at[:, -1].set(u_lf[:, 0])
-        # Robert-Asselin filter on state^n (the new τ-1 carry) — full velocity.
-        u_filt = u_n + nu * (u_lf - 2.0 * u_n + u_prev)
-        v_filt = v_n + nu * (v_lf - 2.0 * v_n + v_prev)
-
-        return state_fe._replace(
-            T=state_fe.T.replace(data=T_lf * mask3),
-            S=state_fe.S.replace(data=S_lf * mask3),
-            u=state_fe.u.replace(data=u_lf),
-            v=state_fe.v.replace(data=v_lf),
-            T_prev=Field(data=T_filt * mask3, name="T_prev",
-                         dims=state.T.dims, units=state.T.units),
-            S_prev=Field(data=S_filt * mask3, name="S_prev",
-                         dims=state.S.dims, units=state.S.units),
-            u_prev=Field(data=u_filt * u_mask3, name="u_prev",
-                         dims=state.u.dims, units=state.u.units),
-            v_prev=Field(data=v_filt * v_mask3, name="v_prev",
-                         dims=state.v.dims, units=state.v.units),
-        )
 
     def step_checked(
         self,
@@ -1778,26 +1681,6 @@ class LatLonCGridOceanModel:
                 S_flux_div_prev=Field(
                     data=_zero, name="S_flux_div_prev",
                     dims=_dims_fd, units="m/s"),
-            )
-
-        # Leapfrog: seed the τ-1 carry (T_prev/S_prev = the initial state) so the
-        # scan carry keeps a CONSTANT pytree (None -> Field would crash lax.scan).
-        # The first step then bootstraps from X^{-1}=X^0 (a 2dt forward-Euler seed).
-        if (self.config.outer_integrator == "leapfrog_ab2"
-                and state.T_prev is None):
-            from legoesm.core.field import Field
-            # Use the SAME field metadata (name="T_prev"/"S_prev") that
-            # _leapfrog_step emits — the Field name is part of the pytree
-            # structure, so a mismatched seed name would crash lax.scan.
-            state = state._replace(
-                T_prev=Field(data=state.T.data, name="T_prev",
-                             dims=state.T.dims, units=state.T.units),
-                S_prev=Field(data=state.S.data, name="S_prev",
-                             dims=state.S.dims, units=state.S.units),
-                u_prev=Field(data=state.u.data, name="u_prev",
-                             dims=state.u.dims, units=state.u.units),
-                v_prev=Field(data=state.v.data, name="v_prev",
-                             dims=state.v.dims, units=state.v.units),
             )
 
         def scan_fn(state, _):
