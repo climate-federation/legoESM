@@ -82,8 +82,31 @@ rotated_steady (cube vs latlon vs ico); ocean rest_state/barotropic_wave/IGW
 (cube vs latlon vs mpas); held_suarez (cube physical 265K; latlon/ico pending).
 NOT yet: AMIP cube, full DCMIP transport, ocean gyres (regional-only).
 
+## No quick atmosphere lever (iter 10 — confirmed)
+The PE baroclinic A-L gradient (operators_cdgrid.py:896 `_arakawa_lamb_gradient`,
+returns dB/dx, dB/dy_perp at D-grid corners in face-local basis) is intricate
+(cube-vertex non-orthogonality via 3D Cartesian metric; Fortran-faithful corner
+variants). `use_fv3_a2b_zeta_corner` (4th-order corner interp) already team-
+tested NEUTRAL on the imprint (+51% wall) ⇒ OFF. Toggling existing flags won't
+reduce the imprint; the fix is the FC-PGF build below.
+
+## BUILD PLAN — atmosphere D-grid FC PGF (the imprint fix; execute focused)
+Risk: may hit the same RK3 instability as the Lin-1997 PGF (which also put a
+gradient on the D-grid). Steps, each opt-in + tested, NO production default change
+until validated:
+1. New fn `fc_bernoulli_gradient_dgrid(B, cdgrid, fc_cfg)` in operators_cdgrid:
+   FC cell-centre face-local ∂B/∂x,∂B/∂y (`fc_gradient_x/y`) → interpolate to
+   D-grid corners (a2b; reuse `_interp_center_to_corner_a2b_ord4` /
+   `_fv3_lin_pgf.project_cgrid_pgf_to_dgrid_corners`). Handle the 8 cube vertices.
+2. Unit test: on a smooth global scalar, FC-PGF edge-cell error ≈ interior error
+   (vs A-L edge amplification) — the go/no-go accuracy gate.
+3. Opt-in PE config flag `use_fc_bernoulli_gradient=False`; wire at
+   primitive_eq_cdgrid.py:413. Measure baroclinic v_rms@0.2d (target ≪3.4) AND
+   15-day stability (the RK3 risk). If unstable → document like Lin PGF; if
+   stable+lower-imprint → the fix, re-pin sentinels, make default.
+
 ## Pending / next
-- HS climate match (cube vs latlon) — latlon slow [running].
+- HS climate match (cube vs latlon) — latlon slow [running, monitor armed].
 - AMIP cube vs latlon (user wants it + continent-longitude check).
-- Atmosphere D-grid-staggered FC PGF (the imprint fix) — focused build.
+- Atmosphere FC-PGF build (per plan above) — the imprint fix.
 - `DONE` withheld: atmosphere panel-edge imprint is real + the FC fix is a build.
