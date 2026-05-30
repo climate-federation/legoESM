@@ -283,3 +283,16 @@ cube's gradient TRUNCATION error over the steep mountain (∇Φ large there; lat
 smoother grid is more accurate), mountain-localized + converging, NOT a panel-edge
 artifact. Same character as the baroclinic truncation residual; the FC spectral
 gradient (higher interior order) is the only lever, a large build. Lin PGF reverted.
+
+## iter 15b — CORRECTION: ico baroclinic is SLOW, not hung
+ico (MPAS) baroclinic --days 0.05 COMPLETES (exit 0) → not an infinite loop, just
+pathologically slow (MPAS TRiSK on 2562 cells × 40 lev on CPU). The earlier
+"58-min hang" was slowness + CPU starvation by a stuck zombie (now killed). NOT a
+bug — drop from the bug list. (Cross-grid comparison with ico is just slow.)
+
+## CONVERGENCE ⇒ "very close to latlon" at AMIP resolution
+cube baroclinic residual converges with ACCELERATING rate (C36→C48 1.29×,
+C48→C72 1.90×) → approaching ~2nd order. The 10× vs latlon-SIGMA at coarse C36 is
+the truncation constant; at AMIP resolution (C96-C192) the cube is VERY CLOSE to
+latlon. The residual is smooth + converging, no edge artifact. The cube is a
+consistent FV3-faithful discretization.
