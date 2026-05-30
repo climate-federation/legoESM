@@ -159,11 +159,15 @@ def _run_veros_bridged(years, template_state):
 _KNOWN_DIFFERENCES = """\
 Known model-formulation differences (the deltas below should be read in this
 context; see docs/ocean_fidelity/oracle_recipe_strategy.md §8):
-  0. Bottom drag: NOW CORRECTLY MAPPED (dissipation audit, 2026-05-29) — this was the
-     DOMINANT deficit. Veros applies r_bot=1e-5 as a RATE on the bottom cell (no /dz);
-     legoESM uses -r*u/h_bot, so the recipe now sets bottom_drag_r=r_bot*h_bot~2.76e-3.
-     The prior r=1e-5 mis-mapping made the drag ~276x too weak -> over-energetic ACC;
-     corrected: KE +233%->+27%, transport +70%->-22% @30d.
+  0. Bottom drag: now FAITHFULLY mapped (dissipation audit, 2026-05-29). Veros applies
+     r_bot=1e-5 as a RATE on the bottom cell (no /dz); legoESM uses -r*u/h_bot, so the
+     recipe now sets bottom_drag_r=r_bot*h_bot~2.76e-3 (the prior r=1e-5 was ~276x too
+     weak). BUT the faithful drag OVER-DAMPS the transport: @1yr it gives -83% (18 vs
+     110 Sv) vs the mis-mapped r=1e-5's +58% -> legoESM's barotropic transport
+     over-responds to bottom drag vs Veros. The genuine deeper difference is the
+     BAROTROPIC FORMULATION (free surface vs Veros rigid-lid/streamfunction); the old
+     r=1e-5 masked it via compensating errors. (30d looked like a fix: KE +233%->+27%;
+     1yr revealed the over-damping.)
   1. Time integrator: legoESM forward-Euler/split-explicit vs Veros Adams-Bashforth-2
      (this Veros version is AB2, NOT leapfrog+RA: tracers temp[taup1]=temp[tau]+
      dt_tracer*((1.5+eps)*dtemp[tau]-(0.5+eps)*dtemp[taum1]), separate dt_tracer/dt_mom,

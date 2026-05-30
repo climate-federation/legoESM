@@ -104,16 +104,23 @@ def acc_A_h(r_earth: float = constants.R_earth) -> float:
 # Veros's drag RATE the coefficient must be r = r_bot · h_bot. The ACC has a flat
 # bottom (deepest = thickest z-star layer, 276 m) ⇒ h_bot = max(ACC_DZT).
 #
-# DISSIPATION AUDIT (2026-05-29): the prior R_BOT=1e-5 mis-mapped Veros's r_bot — it
-# copied the numeric value without the units/÷h_bot conversion, making legoESM's
-# bottom drag ~h_bot≈276× TOO WEAK (a ~320-day timescale vs Veros's ~28 h). That
-# under-dissipation was the DOMINANT cause of the over-energetic ACC free run
-# (KE +443% @1yr); the corrected r ≈ 2.76e-3 collapses it (KE +233%→+27%, transport
-# +70%→−22% @30d). NB: r=r_bot·h_bot is exact only for the flat-bottom ACC (uniform
-# h_bot); a Veros-style RATE bottom-drag option (-r·u, no ÷h_bot) is the general
-# refinement for varying bathymetry.
+# DISSIPATION AUDIT (2026-05-29): the prior R_BOT=1e-5 mis-mapped Veros's r_bot (copied
+# the numeric value without the units/÷h_bot conversion), making legoESM's bottom drag
+# ~h_bot≈276× TOO WEAK (~320-day vs Veros's ~28 h timescale). r = r_bot·h_bot ≈ 2.76e-3
+# is the FAITHFUL mapping (legoESM's bottom-cell drag RATE then equals Veros's).
+#
+# IMPORTANT (1-year re-verify): the faithful drag does NOT reconcile the ACC transport —
+# it OVER-damps it. @30d it looked like a clean fix (KE +233%→+27%, transport +70%→−22%),
+# but @1yr the faithful drag gives transport −83% (18 vs 110 Sv) / KE −29%, whereas the
+# mis-mapped r=1e-5 gave +58% / +443%. So legoESM's barotropic transport OVER-RESPONDS to
+# bottom drag vs Veros (same bottom-cell rate → 18 Sv legoESM vs 110 Sv Veros): the
+# genuine deeper difference is the BAROTROPIC FORMULATION (legoESM split-explicit free
+# surface vs Veros rigid-lid/streamfunction `solve_stream.py`). The old r=1e-5 masked it
+# via COMPENSATING errors (under-drag ≈ cancelled the over-responsive barotropic). We keep
+# the FAITHFUL drag here (match Veros's scheme, not tune to the transport metric); the
+# transport residual is the documented barotropic-formulation delta. See strategy §8.
 _VEROS_R_BOT = 1.0e-5                       # Veros r_bot [1/s] — bottom-cell drag RATE
-R_BOT = _VEROS_R_BOT * float(max(ACC_DZT))  # legoESM bottom_drag_r [m/s] ≈ 2.76e-3
+R_BOT = _VEROS_R_BOT * float(max(ACC_DZT))  # legoESM bottom_drag_r [m/s] ≈ 2.76e-3 (faithful)
 
 # Veros TKE knobs (verbatim from ACCSetup)
 ACC_TKE_CONFIG = TKEConfig(
