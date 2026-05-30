@@ -306,6 +306,19 @@ formulations, NOT a ban on better gradients). ⇒ replacing the atmosphere A-L
 Bernoulli/PGF gradient with `fc_gradient` is the most promising un-blocked path
 to cut the baroclinic/W2 panel-edge imprint. (Big change; next deep target.)
 
+## iter 9 — ocean fix codex-APPROVED + atmosphere FC port scoped
+- Codex re-review of the ocean FC fix (decouple + IGW opt-out): **APPROVE,
+  "Ship, no material findings."** Ocean cube fix is complete + clean.
+- Atmosphere FC-gradient feasibility: A-L gradient returns **D-grid corner**
+  gradients; `fc_gradient_x/y` returns **cell-center (A-grid)** gradients →
+  NOT a drop-in swap. The ocean fix worked because the ocean had a complete
+  C-grid FC tendency; the atmosphere needs a **D-grid-staggered FC operator**
+  (significant build, multi-iteration — not architecture-blocked, just large).
+  The A-L gradient already pads via the duogrid (FV3-faithful high-order
+  corner), so a mere halo-order bump won't help.
+- HS climate (AMIP-relevance): cube T-climate physical (mean 265K, [241,308]);
+  latlon/ico pending for the match check.
+
 ## Cross-grid data note (ask D)
 Regridded `snapshots_latlon.npz` uses canonical lon[-180,180]/lat[-90,90] for
 cube+ico, BUT the **latlon** grid writes fields at NATIVE (72,144) while still
