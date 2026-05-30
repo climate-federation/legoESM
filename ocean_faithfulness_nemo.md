@@ -258,6 +258,30 @@ A/B knob added: `run_omip_core2.py --ke-gradient-scheme {centered,hollingsworth}
   the one prior-session hypothesis NEVER actually tested. Machinery exists: `references.py::
   thermal_wind_shear`, `coriolis_cgrid`, `grid.f_T`, `eady_uniform` balanced-SSH logic; reuse
   `iterate_eos_and_pressure_anomaly` for p′. Implement as a runner IC option (no dycore change).
+- **iter 12 (BAROTROPIC SOLVER — BREAKTHROUGH: blowup → saturation):** The OMIP config OVERRODE
+  legoESM's own default split-explicit barotropic (`explicit_substep` + cosine time filter,
+  dissipative for fast modes) to **`implicit_cn`** (Crank-Nicolson — NEUTRAL, no fast-gravity-
+  wave damping). The −36.3°N mode is the fast barotropic adjustment mode that CN leaves
+  undamped. Test (job 8117428, 40-step per-term + KE): switching back to `explicit_substep`
+  + cosine filter + 2D damping **converts the SUPER-EXPONENTIAL blowup to SATURATION** — with
+  n_sub=80, α=1.0: max|u| peaks ~9.6 m/s @ step30 then DECLINES to 9.5 @ step40 (vs implicit_cn
+  111.5, RK3 50.9, B_h 45.9). **FIRST config in ~16 experiments that does not run away.** Damping
+  strength matters (α=0.3/n60 → still climbing to 29; α=1.0/n80 → saturates 9.5) but the
+  qualitative fix is the SOLVER (CN→split-explicit). NEMO-FAITHFUL (NEMO uses split-explicit
+  forward-backward + AB3-AM4 fast-mode damping, never CN for ORCA1). Multi-day run 8117445
+  (α=0.5/n60 + α=1.0/n80, 60 d) testing whether ~9.5 m/s settles to physical.
+  **iter 12 UPDATE — barotropic also INSUFFICIENT (multi-day):** the 40-step saturation was a
+  TRANSIENT ARTIFACT. Multi-day: α=0.5/n60 NaN day 2; α=1.0/n80 (the "saturating" config) NaN
+  **day 5** (job 8117462). More barotropic damping DELAYS the blowup (day2→day5) but does NOT
+  cure it — same marginal pattern as RK3 (~20%) / B_h. ⇒ **the barotropic solver is the dominant
+  single lever (super-exp→saturation over 40 steps, +couple days) but, like EVERY other lever,
+  is necessary-not-sufficient.** DEFINITIVE after ~17 experiments: NO single NEMO structural
+  difference (PGF, vertadv, RK3, biharmonic, EEN, barotropic solver, IC-conditioning) cures the
+  realistic-WOA cold-start; each helps marginally. NEMO's survival = the FULL stack together
+  (split-explicit AB3-AM4 + EEN+Hollingsworth + FCT + implicit-drag + RK3 + EVD + adaptive-
+  vertadv, tuned). The clean faithful cold-start = a major MULTI-COMPONENT, multi-session dycore
+  effort. Over-damping (strong barotropic damping / persistent Rayleigh drag, day-120 proven) is
+  the SAME spectrum = the pragmatic path to a first caveated NEMO number now.
 - **iter 11 (ENERGY BUDGET + B_h + GM — the mode is a fast dissipation-immune ADJUSTMENT mode
   at Brazil-Malvinas; barotropic solver is the last untested structural lever):** Added an
   ONLINE total-KE diagnostic to the per-term probe (committed-ready). Energy budget (job

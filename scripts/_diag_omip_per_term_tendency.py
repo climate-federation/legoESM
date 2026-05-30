@@ -89,6 +89,9 @@ def main() -> int:
                         "vertadv term moves to the step level so the tendency-diag "
                         "vertadv_{u,v} read ~0; watch max|u| per step + the residual "
                         "non-vertadv driver instead.")
+    p.add_argument("--barotropic-solver", default=None, choices=[None,"explicit_substep","implicit_cn"])
+    p.add_argument("--barotropic-diffusion-alpha", type=float, default=None)
+    p.add_argument("--n-barotropic-substeps", type=int, default=None)
     p.add_argument("--B-h", type=float, default=None,
                    help="Biharmonic momentum viscosity [m4/s] -- scale-selective "
                         "damping of grid-scale (2dx) modes. tripole OMIP default is 0 (OFF).")
@@ -111,6 +114,9 @@ def main() -> int:
             B_h=args.B_h,
             adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
             momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
+            barotropic_solver=args.barotropic_solver,
+            barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
+            n_barotropic_substeps=args.n_barotropic_substeps,
         )
     else:
         nlat, nlon = (int(x) for x in args.latlon_res.split("x"))
@@ -124,6 +130,9 @@ def main() -> int:
             B_h=args.B_h,
             adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
             momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
+            barotropic_solver=args.barotropic_solver,
+            barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
+            n_barotropic_substeps=args.n_barotropic_substeps,
         )
 
     lat_T_deg = np.rad2deg(np.asarray(grid.lat_T))

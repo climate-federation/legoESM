@@ -378,7 +378,9 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None,
                   ke_gradient_scheme=None, partial_cell=False,
                   adaptive_implicit_vertadv=None, bathy_smoothing_passes=0,
-                  momentum_time_integrator=None):
+                  momentum_time_integrator=None, barotropic_solver=None,
+                  barotropic_diffusion_alpha=None, n_barotropic_substeps=None,
+                  barotropic_time_filter=None):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -406,6 +408,10 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("ke_gradient_scheme", ke_gradient_scheme),
                               ("adaptive_implicit_vertadv", adaptive_implicit_vertadv),
                               ("momentum_time_integrator", momentum_time_integrator),
+                              ("barotropic_solver", barotropic_solver),
+                              ("barotropic_diffusion_alpha", barotropic_diffusion_alpha),
+                              ("n_barotropic_substeps", n_barotropic_substeps),
+                              ("barotropic_time_filter", barotropic_time_filter),
                               ) if v is not None}
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -458,7 +464,9 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                        pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None,
                        ke_gradient_scheme=None, partial_cell=False,
                        adaptive_implicit_vertadv=None, bathy_smoothing_passes=0,
-                  momentum_time_integrator=None):
+                  momentum_time_integrator=None, barotropic_solver=None,
+                  barotropic_diffusion_alpha=None, n_barotropic_substeps=None,
+                  barotropic_time_filter=None):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -481,6 +489,10 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                               ("ke_gradient_scheme", ke_gradient_scheme),
                               ("adaptive_implicit_vertadv", adaptive_implicit_vertadv),
                               ("momentum_time_integrator", momentum_time_integrator),
+                              ("barotropic_solver", barotropic_solver),
+                              ("barotropic_diffusion_alpha", barotropic_diffusion_alpha),
+                              ("n_barotropic_substeps", n_barotropic_substeps),
+                              ("barotropic_time_filter", barotropic_time_filter),
                               ) if v is not None}
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -648,6 +660,16 @@ def main() -> int:
                         "limit so the spurious-w 'vertadv' runaway cannot amplify. The "
                         "NEMO-faithful fix for the OMIP cold-start blowup (eORCA OMIP "
                         "production runs set ln_zad_Aimp=.true.).")
+    p.add_argument("--barotropic-solver", default=None, choices=[None,"explicit_substep","implicit_cn"],
+                   help="Override barotropic solver. NEMO uses split-explicit forward-backward "
+                        "(=explicit_substep here, with a dissipative cosine time filter); OMIP "
+                        "default is implicit_cn (Crank-Nicolson, NEUTRAL -- no fast-gravity-wave damping).")
+    p.add_argument("--barotropic-diffusion-alpha", type=float, default=None,
+                   help="Barotropic 2D Laplacian damping coefficient (explicit_substep).")
+    p.add_argument("--n-barotropic-substeps", type=int, default=None,
+                   help="Number of barotropic substeps (explicit_substep).")
+    p.add_argument("--barotropic-time-filter", default=None, choices=[None,"box","cosine"],
+                   help="Barotropic time-average filter (cosine = more dissipative for fast modes).")
     p.add_argument("--momentum-rk3", action="store_true",
                    help="Use 3-stage SSP-RK3 for the outer baroclinic momentum step "
                         "(mirrors NEMO's RK3 / key_RK3) instead of forward-Euler -- the "
@@ -718,6 +740,10 @@ def main() -> int:
             adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
             bathy_smoothing_passes=args.bathy_smoothing_passes,
             momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
+            barotropic_solver=args.barotropic_solver,
+            barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
+            n_barotropic_substeps=args.n_barotropic_substeps,
+            barotropic_time_filter=args.barotropic_time_filter,
         )
         app_grid_type = "tripole"
     else:
@@ -732,6 +758,10 @@ def main() -> int:
             adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
             bathy_smoothing_passes=args.bathy_smoothing_passes,
             momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
+            barotropic_solver=args.barotropic_solver,
+            barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
+            n_barotropic_substeps=args.n_barotropic_substeps,
+            barotropic_time_filter=args.barotropic_time_filter,
         )
         app_grid_type = "latlon"
 
