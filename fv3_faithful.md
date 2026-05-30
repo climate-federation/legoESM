@@ -33,47 +33,26 @@ SW cosine_bell/W5/W2 all 4 grids co-located within 1 cell (visual). Test
   hand-built vector-∇⁴. Zonal-jet |∇²V| nz 0.59→0.38. Test
   `tests/ocean/unit/test_fc_velocity_viscosity_vector_halo.py`.
 
-### ⚠️ OPEN — geostrophic_adjustment cube non-zonal artifact (user-confirmed)
-Zonal IC (`+5°C·cos lat`) but cube eta **40% non-zonal** vs latlon 0%/mpas 0.3%.
-ROOT CAUSE (measured): cube barotropic = **A-grid** (`staggering=a_grid`); latlon
-c_grid, mpas TRiSK = immune. A-grid computational mode: eta→5% after step1, then
-a wavenumber-1 mode grows 4%→40% over ~12h (e-fold ~1.7h ≈ 1/f). Seed = FC PGF
-~2% imprint. NOT viscosity, NOT barotropic continuity div (already vector).
-**Exhausted levers**: higher A-grid diffusion makes it WORSE (over-damps zonal
-signal, nz 0.40→0.74); the C-grid solver (`barotropic_cgrid.py`) is UNSTABLE
-(eta 0.05→17m→NaN by 11.5h) — **root-caused to its explicit-f*v Coriolis**
-(f=0 test: 17m→0.84m, no blow-up; `fv3_cc2c` vector-rotation mixes u,v → destroys
-the forward-backward skew-symmetry → effectively explicit → amplifies at ~f).
-
-### FV3-FAITHFUL FIX (oracle-confirmed) — NEXT, refined by iter ~23 attempt
-FV3 `c_sw` (sw_core.F90:405-490) Coriolis = **absolute-vorticity FLUX**, NOT
-explicit f*v: `vort = fC + rarea_c·curl(uc·dxc, vc·dyc)`; transport upwind by
-contravariant transverse flux; momentum `uc += fy1·fy − rdxc·Δ(KE)`. legoESM has
-this for the atm: `cdgrid_momentum_tendencies` (vector-invariant w/ `cdgrid.
-f_corner`) + `cgrid_mass_flux_divergence` (PPM continuity).
-**ATTEMPTED iter ~23 (reverted — failed validation):** new D-grid forward-
-backward barotropic (`barotropic_substeps_dgrid`) reusing those ops. rest_state
-regressed 1e-31→2e-5; geostrophic **eta→27m→NaN by 11h even with div_damp=0.25**.
-**SOLUTION-SPACE MAP (empirical, iter ~23-24):**
-- explicit-f*v `a_grid`: stable but 40% non-zonal artifact.
-- explicit-f*v `c_grid`: unstable (eta→17m→NaN; root = `fv3_cc2c` rotation breaks
-  forward-backward skew-symmetry → amplifies at ~f).
-- bare vector-invariant (`cdgrid_momentum_tendencies`, NO div_damp/hyperdiff),
-  forward-backward Euler: rest 1e-31→2e-5, geostrophic→NaN.
-- bare vector-invariant, **RK3**: STILL NaN (isolated barotropic SW test, 4.2h).
-  ⇒ the time scheme alone is NOT enough.
-**KEY:** the validated atmosphere SW (`CDGridShallowWaterModel`, W2/W5 clean) is
-stable because it bundles **RK3 + divergence damping + biharmonic hyperdiffusion**
-(default `div_damp=10·_div_damp_cube`, `d4_bg=0.16`) — the bare tendency alone
-diverges. ⇒ **Correct fix is a scoped mini-project**: drive the barotropic mode
-through the full `CDGridShallowWaterModel.step` (RK3+div_damp+hyperdiff). Requires:
-(a) staggering reconcile — SW `u_d/v_d` are CORNER `(6,n+1,n+1)`, barotropic winds
-are cc/edge; (b) ocean LAND masking (the atm SW has none; geostrophic land =
-|lat|>80 caps); (c) SW state `h=H_bathy+eta`, `h_s=-H_bathy` so PGF=g·∇eta; (d)
-preserve rest_state machine-zero + the split-explicit baroclinic coupling.
-Validate: rest machine-zero, geostrophic nz→~mpas, barotropic_wave amplitude,
-stability, no regressions; codex review. (Never a_grid; never explicit f*v;
-never bare tendency without FV3 div_damp+hyperdiff.)
+### ✅ RESOLVED (commit bd74c45b) — geostrophic_adjustment cube non-zonal artifact
+**FV3-faithful fix, never A-grid.** The cube barotropic defaulted to an **A-grid**
+solver whose computational pressure mode grew the cube eta to **40% non-zonal**
+(zonal `+5°C·cos lat` IC; user-confirmed visually) vs latlon 0%/mpas 0.3%. Routed
+the barotropic free-surface mode (a 2-D SW system) through the validated FV3 cube
+SW core `CDGridShallowWaterModel.step` (vector-invariant absolute-vorticity-FLUX
+Coriolis w/ `cdgrid.f_corner`, SSP-RK3, div-damp + hyperdiff; W2/W5-clean).
+New `barotropic_substeps_fv3sw` + `barotropic_staggering="fv3sw"` (OceanModel),
+SW model built once in `__init__`. `h=H_bathy+eta`, `h_s=-H_bathy` ⇒ PGF=g·∇eta.
+**Result: cube eta non-zonal 40%→1.5%** (latlon 0%, mpas 0.3%; visual = clean
+zonal bands matching latlon/mpas). Cube ocean matrix **9/9 PASS** (was 8/9):
+also FIXED barotropic_wave (a_grid over-damped 0.038<0.1 → now 0.857); geostrophic
+max_speed 0.0242→0.0142 ≈ latlon 0.0159/mpas 0.0169; rest_state ×4 stay
+machine-zero. Ocean-tuned `barotropic_sw_div_damp_factor=120` (atm preset 8 too
+weak ⇒ phillips over-grew 24× → now eta_growth 8.8, max_eta 0.44 ≈ latlon 0.41).
+Test `tests/ocean/unit/test_fv3sw_barotropic.py`.
+**Solution-space (why this is THE fix):** a_grid = 40% artifact; explicit-f*v
+c_grid = NaN (`fv3_cc2c` breaks FB skew-symmetry); bare vector-invariant under
+forward-Euler OR RK3 = NaN; only the full SW core (RK3+div_damp+hyperdiff) is
+stable AND zonal (isolated zonal-eta test nz=0.0000).
 
 ## SW visual verdicts
 1. cosine-bell day-1 = PPM-limiter interior diffusion (cube/ico L2 1.4×), not edge.
