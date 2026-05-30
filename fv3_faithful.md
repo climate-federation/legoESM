@@ -274,3 +274,12 @@ broad climate verify; latlon-hybrid equatorial artifact (latlon, separate).
 - cube HS (10-day, FIX): T mean 286.5K [276,309], finite, physical climate.
 - SW W2 1-day sentinel: 13/13 PASS (fix is PE-only; FV3Edge SW untouched).
 ⇒ the vector-seam fix is dynamics-correct + climate-safe + SW-safe.
+
+## iter 15 — topography-PGF residual: NOT the gradient operator
+rest_state_topo (post vector-fix, 0.16 vs latlon 0.003): re-tested FV3's Lin PGF
+on the now-clean topography residual → wind_rms 0.168 (Lin) vs 0.164 (A-L) =
+IDENTICAL, no benefit. ⇒ the residual is NOT the PGF/gradient operator — it is the
+cube's gradient TRUNCATION error over the steep mountain (∇Φ large there; latlon's
+smoother grid is more accurate), mountain-localized + converging, NOT a panel-edge
+artifact. Same character as the baroclinic truncation residual; the FC spectral
+gradient (higher interior order) is the only lever, a large build. Lin PGF reverted.
