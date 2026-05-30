@@ -23,6 +23,7 @@ from legoesm.core.state import (
 from legoesm.core.operators_cdgrid import (
     dgrid_to_cgrid,
     dgrid_to_center_vector,
+    center_to_dgrid_vector,
     cgrid_divergence,
     dgrid_vorticity,
     _arakawa_lamb_gradient,
@@ -1586,21 +1587,21 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         physics_fn=None,
     ) -> HydrostaticState:
         """Cell-centre wrapper: cc winds → D-grid corners (entry); back to cc (exit)."""
-        # Batched cc → D-grid interp for (u, v)
+        # cc → D-grid interp for (u, v).
+        # fv3_faithful (iter-14): the winds are a VECTOR, so the cc→corner
+        # interp must rotate face-local components across panel seams.  The
+        # previous ``_interp_center_to_corner`` on the stacked (u, v) treated
+        # them as two SCALARS and blended seam-crossing components WITHOUT
+        # rotation, producing D-grid winds that were ~167×/83× rougher at
+        # panel edges than the interior → a ~229× rougher relative vorticity
+        # → the cube discrete-balance v-imprint (steady jet developed 3.4 m/s
+        # spurious v).  ``center_to_dgrid_vector`` is the rotation-aware
+        # (vector) interpolation and is the inverse of the vector-aware exit
+        # (``dgrid_to_center_vector`` in ``fv3_to_hydrostatic``); with it the
+        # wind/vorticity edge-roughness drops to ~1× (interior level).
         _u_in = state.u.data
         _v_in = state.v.data
-        _ni_face, _ni_i, _ni_j, _ni_lev = _u_in.shape
-        _uv_in = jnp.stack([_u_in, _v_in], axis=-1)
-        _uv_d_flat = _interp_center_to_corner(
-            _uv_in.reshape(_ni_face, _ni_i, _ni_j, _ni_lev * 2),
-            self.cdgrid,
-        )
-        _uv_d = _uv_d_flat.reshape(
-            _uv_d_flat.shape[0], _uv_d_flat.shape[1], _uv_d_flat.shape[2],
-            _ni_lev, 2,
-        )
-        u_d = _uv_d[..., 0]
-        v_d = _uv_d[..., 1]
+        u_d, v_d = center_to_dgrid_vector(_u_in, _v_in, self.cdgrid)
         fv3_state = FV3HydrostaticState(
             u_d=state.u.replace(data=u_d, name="u_d"),
             v_d=state.v.replace(data=v_d, name="v_d"),
