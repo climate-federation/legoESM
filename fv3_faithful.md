@@ -105,6 +105,27 @@ until validated:
    15-day stability (the RK3 risk). If unstable → document like Lin PGF; if
    stable+lower-imprint → the fix, re-pin sentinels, make default.
 
+## iter 11-12 — baroclinic imprint is DISCRETE-BALANCE error (halo-insensitive)
+- Enabling `use_duogrid=True` (FV3 high-order Lagrange halo) on the PE baroclinic
+  cube → v_rms 3.416 vs no-duogrid 3.43 = **no effect** (PASS, stable). Matches
+  the team's 33-iter duogrid study (FV3_3D.md:270-314: "PE edge ratio INSENSITIVE
+  to all factory flags; PE much less responsive than NH"; duogrid HURTS NH but
+  not PE). ⇒ the imprint is NOT a halo/corner error. Knob reverted.
+- `perturbed=False` (pure steady jet) → v_rms 3.426 = **identical** to perturbed
+  (3.43). ⇒ the imprint is NOT perturbation growth — it is the **cube's discrete
+  geostrophic-balance truncation error**: the analytic jet (continuous balance)
+  is not reproduced by the cube's discrete PGF/Coriolis/metric (latlon nearly is
+  → 0.023). Fundamental cube discretization, IC-independent.
+- ⇒ REDIRECT: the duogrid (halo) lever is out. FC-PGF would change the INTERIOR
+  gradient ORDER (2nd→spectral), distinct from the halo — still the one untried
+  lever, but a large/uncertain build, and may or may not reduce a truncation
+  error the metric geometry amplifies.
+- CLEANUP: killed a stuck `icosahedral baroclinic --quick` process (PID 39061,
+  58 min wall / 250 min CPU, hung) that was starving all runs of CPU, + a slow
+  latlon HS. SIDE BUG to file: **ico (MPAS) baroclinic --quick HANGS** (should
+  be ~1 min). HS latlon HS also pathologically slow (pole CFL). cube HS climate
+  is physical (T 265K, [241,308]) — imprint does NOT corrupt the climate.
+
 ## Pending / next
 - HS climate match (cube vs latlon) — latlon slow [running, monitor armed].
 - AMIP cube vs latlon (user wants it + continent-longitude check).
