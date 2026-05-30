@@ -237,7 +237,24 @@ tunable. Real paths forward (all large, none quick):
 SW cases (cosine-bell 1.4× ico, W5 ≈ latlon by day 15) are already close; the
 3D-hydrostatic imprint is the irreducible-under-RK3 gap.
 
-## iter 6 — ocean (OMIP) matrix coverage [running]
+## iter 6 — two DISTINCT atmosphere imprint sources (spatial inspection)
+- **rest_state_topo** imprint is **mountain-localized** (bright spot + ripples
+  at the dcmip mountain ~−90°,30°N, NOT panel-edge-distributed) ⇒ it is the
+  **sigma-coordinate PGF error at the mountain** (the thing FV3's Lin PGF fixes;
+  RK3-blocked). The dcmip mountain is analytically smooth, so terrain filtering
+  (`grids/terrain_filter.py`, which exists) would NOT help here.
+- **baroclinic / W2** imprint is **panel-edge** (wavenumber-4, the 4 equatorial
+  cube panels) ⇒ the zonal-jet discrete-balance error at panel edges
+  (d2a2c / A-L Bernoulli gradient / metric). Distinct from the PGF source.
+
+## iter 7 — ocean (OMIP) matrix coverage (`results/probe_ocean*`)
+Cube ocean cases are limited to rest_state (global), barotropic_wave,
+inertia_gravity_wave (gyres are regional latlon/mpas only). Ocean uses a
+DIFFERENT dycore (C-grid ocean PE), not the FV3 atmosphere D-grid core.
+- rest_state_stratified_with_land cube: 0 imprint at day 0.1 BUT grows to
+  **cur_rms 0.64, max 3.37 m/s by day 2** — so the ocean cube is NOT clean
+  either. Awaiting latlon/mpas 10-day to know if cube-specific or a shared
+  stratified-IC imbalance. [running] barotropic_wave cube/latlon/mpas [running].
 
 ## Cross-grid data note (ask D)
 Regridded `snapshots_latlon.npz` uses canonical lon[-180,180]/lat[-90,90] for
