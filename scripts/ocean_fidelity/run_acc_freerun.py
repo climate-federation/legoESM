@@ -85,7 +85,8 @@ def _bulk_stats(state, z_coord, grid):
     }
 
 
-def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None):
+def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None,
+                 bottom_drag_r=None):
     import jax
     import jax.numpy as jnp
     from legoesm.core.field import Field
@@ -98,6 +99,11 @@ def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None):
     cfg = recipe.model_config
     if outer_integrator is not None:
         cfg = cfg._replace(outer_integrator=outer_integrator)
+    if bottom_drag_r is not None:
+        # Dissipation-audit knob: Veros applies -r_bot·u (a RATE, 1e-5/s) at the
+        # bottom cell with NO /dz; legoESM applies -r·u/h_bot. To match Veros's
+        # ~28h drag, r ≈ r_bot·h_bot ≈ 1e-5·276 ≈ 2.8e-3 (flat-bottom ACC).
+        cfg = cfg._replace(bottom_drag_r=bottom_drag_r)
     model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, cfg)
     sf = recipe.wind_forcing
     state = recipe.initial_state
@@ -153,15 +159,17 @@ def _run_veros_bridged(years, template_state):
 _KNOWN_DIFFERENCES = """\
 Known model-formulation differences (the deltas below should be read in this
 context; see docs/ocean_fidelity/oracle_recipe_strategy.md §8):
-  1. Time integrator (the LARGEST remaining formulation gap): legoESM
-     forward-Euler / split-explicit vs Veros Adams-Bashforth-2. NB this Veros
-     version is AB2, NOT leapfrog+Robert-Asselin (audit doc was wrong): tracers
-     temp[taup1]=temp[tau]+dt_tracer*((1.5+eps)*dtemp[tau]-(0.5+eps)*dtemp[taum1]),
-     AB2 momentum, separate dt_tracer/dt_mom, AB2 eps-offset (not an Asselin
-     filter) for the computational mode. A leapfrog+RA attempt was built + REVERTED
-     (commit d1648f8e): wrong scheme + the extract-from-FE wrapper leapfrogged
-     implicit diffusion -> unstable (free-run blew up at 3 days). Correct build =
-     AB2 OUTER scheme reusing timestepping/leapfrog_ab2.py:ab2_step (next must-build).
+  0. Bottom drag: NOW CORRECTLY MAPPED (dissipation audit, 2026-05-29) — this was the
+     DOMINANT deficit. Veros applies r_bot=1e-5 as a RATE on the bottom cell (no /dz);
+     legoESM uses -r*u/h_bot, so the recipe now sets bottom_drag_r=r_bot*h_bot~2.76e-3.
+     The prior r=1e-5 mis-mapping made the drag ~276x too weak -> over-energetic ACC;
+     corrected: KE +233%->+27%, transport +70%->-22% @30d.
+  1. Time integrator: legoESM forward-Euler/split-explicit vs Veros Adams-Bashforth-2
+     (this Veros version is AB2, NOT leapfrog+RA: tracers temp[taup1]=temp[tau]+
+     dt_tracer*((1.5+eps)*dtemp[tau]-(0.5+eps)*dtemp[taum1]), separate dt_tracer/dt_mom,
+     AB2 eps-offset). An AB2 outer_integrator="ab2" option was built + is stable, but it
+     does NOT move the gap (the bottom drag, item 0, did). A leapfrog+RA attempt was
+     built + REVERTED (d1648f8e): wrong scheme + unstable. dt_tracer!=dt_mom not yet done.
   2. Timestep: legoESM single dt=4800 s; Veros dt_mom=4800 / dt_tracer=43200 s.
   3. EKE GM coefficient: ON, prognostic Eden-Greatbatch with the Rhines `eke_len`
      (form + eke_len reproduce Veros's K_gm/eke_len to machine precision, gates
@@ -189,6 +197,10 @@ def main() -> int:
                     choices=("forward_euler", "ab2"),
                     help="Override the legoESM outer time integrator (default: the "
                          "recipe's forward_euler). 'ab2' = Veros Adams-Bashforth-2.")
+    ap.add_argument("--bottom-drag-r", type=float, default=None,
+                    help="Override the linear bottom-drag coefficient [m/s] "
+                         "(dissipation audit; recipe default 1e-5). Veros's effective "
+                         "rate is r_bot·h_bot ≈ 2.8e-3 since legoESM divides by h_bot.")
     args = ap.parse_args()
 
     import jax
@@ -204,7 +216,8 @@ def main() -> int:
         print(f"== legoESM ACC free run: {years*_DAYS_PER_YEAR:.0f} days, "
               f"dt={args.dt:.0f} s (fp64), integrator={_oi} ==")
         lego_state, recipe = _run_legoesm(
-            years, args.dt, outer_integrator=args.outer_integrator)
+            years, args.dt, outer_integrator=args.outer_integrator,
+            bottom_drag_r=args.bottom_drag_r)
         lego = _bulk_stats(lego_state, recipe.z_coord, recipe.grid)
 
         veros = None

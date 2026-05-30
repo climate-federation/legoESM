@@ -97,8 +97,23 @@ def acc_A_h(r_earth: float = constants.R_earth) -> float:
     value so the grid/A_h are pinned via config (G-C4)."""
     return (2.0 * _degtom(r_earth)) ** 3 * 2.0e-11
 
-# Bottom drag: linear, ``r_bot = 1e-5``
-R_BOT = 1.0e-5
+# Bottom drag. Veros applies a linear drag as a RATE on the bottom cell only:
+# du/dt = -r_bot·u with r_bot = 1e-5 1/s and NO division by the cell thickness
+# (veros/core/friction.py:284-289). legoESM's linear bottom drag is the stress form
+# du/dt = -r·u/h_bot (stress velocity-scale ÷ bottom-cell thickness), so to reproduce
+# Veros's drag RATE the coefficient must be r = r_bot · h_bot. The ACC has a flat
+# bottom (deepest = thickest z-star layer, 276 m) ⇒ h_bot = max(ACC_DZT).
+#
+# DISSIPATION AUDIT (2026-05-29): the prior R_BOT=1e-5 mis-mapped Veros's r_bot — it
+# copied the numeric value without the units/÷h_bot conversion, making legoESM's
+# bottom drag ~h_bot≈276× TOO WEAK (a ~320-day timescale vs Veros's ~28 h). That
+# under-dissipation was the DOMINANT cause of the over-energetic ACC free run
+# (KE +443% @1yr); the corrected r ≈ 2.76e-3 collapses it (KE +233%→+27%, transport
+# +70%→−22% @30d). NB: r=r_bot·h_bot is exact only for the flat-bottom ACC (uniform
+# h_bot); a Veros-style RATE bottom-drag option (-r·u, no ÷h_bot) is the general
+# refinement for varying bathymetry.
+_VEROS_R_BOT = 1.0e-5                       # Veros r_bot [1/s] — bottom-cell drag RATE
+R_BOT = _VEROS_R_BOT * float(max(ACC_DZT))  # legoESM bottom_drag_r [m/s] ≈ 2.76e-3
 
 # Veros TKE knobs (verbatim from ACCSetup)
 ACC_TKE_CONFIG = TKEConfig(
