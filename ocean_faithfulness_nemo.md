@@ -258,6 +258,25 @@ A/B knob added: `run_omip_core2.py --ke-gradient-scheme {centered,hollingsworth}
   the one prior-session hypothesis NEVER actually tested. Machinery exists: `references.py::
   thermal_wind_shear`, `coriolis_cgrid`, `grid.f_T`, `eady_uniform` balanced-SSH logic; reuse
   `iterate_eos_and_pressure_anomaly` for p′. Implement as a runner IC option (no dycore change).
+- **iter 11 (ENERGY BUDGET + B_h + GM — the mode is a fast dissipation-immune ADJUSTMENT mode
+  at Brazil-Malvinas; barotropic solver is the last untested structural lever):** Added an
+  ONLINE total-KE diagnostic to the per-term probe (committed-ready). Energy budget (job
+  8117304): cold-start total KE grows ~LINEARLY (steady ~5e15/step = APE→KE conversion) while
+  max|u| grows super-exponentially PINNED at −36.3°N/−50.5°E (Brazil-Malvinas Confluence: sharp
+  front + Argentine slope). ⇒ **LOCALIZED mode within a globally-energizing field, NOT a global
+  spurious-energy cascade ⇒ EEN/f-split NOT warranted** (avoided the high-risk restructure;
+  Hollingsworth A/B already null). Biharmonic momentum viscosity test (job 8117343, tripole has
+  B_h=0): B_h=1e13 no effect, B_h=1e14 only ~22% slower (like RK3) ⇒ **the mode is IMMUNE to
+  scale-selective dissipation ⇒ NOT a grid-scale 2Δx mode.** GM ruled out by timescale (kappa_GM
+  =800 → ~145-day front-flattening vs hours-fast blowup). **DEFINITIVE: the −36.3°N mode is a
+  FAST, LOCALIZED, dissipation-immune geostrophic-adjustment / barotropic-gravity-wave mode at a
+  sharp front over a slope — immune to EVERY single lever tested (PGF, vertadv, RK3, biharmonic,
+  EEN, balanced-init, IC-smooth, GM); only Rayleigh drag masks it (day-120).** The ONE untested
+  NEMO structural difference: the **BAROTROPIC SOLVER** — NEMO split-explicit forward-backward
+  with AB3-AM4 weights (0.614/0.285/0.088/0.013) that DAMP the fast gravity-wave adjustment;
+  legoESM uses implicit-CN (no equivalent fast-mode damping). The cold-start adjustment is
+  barotropic-dominated ⇒ this is the next lever. Else: pragmatic persistent-weak-drag run for a
+  first caveated NEMO compare (drag proven day-120).
 - **iter 10 (RK3 implemented + tested — marginal, NOT the fix; it's a MULTI-COMPONENT gap):**
   Implemented SSP-RK3 (Shu-Osher) outer baroclinic momentum integrator (`momentum_time_integrator
   ='rk3'`, `--momentum-rk3`; config-gated, default euler bit-exact; tests pass; committed-ready).

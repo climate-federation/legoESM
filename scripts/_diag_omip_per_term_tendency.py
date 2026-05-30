@@ -89,6 +89,9 @@ def main() -> int:
                         "vertadv term moves to the step level so the tendency-diag "
                         "vertadv_{u,v} read ~0; watch max|u| per step + the residual "
                         "non-vertadv driver instead.")
+    p.add_argument("--B-h", type=float, default=None,
+                   help="Biharmonic momentum viscosity [m4/s] -- scale-selective "
+                        "damping of grid-scale (2dx) modes. tripole OMIP default is 0 (OFF).")
     p.add_argument("--momentum-rk3", action="store_true",
                    help="Use SSP-RK3 outer momentum integrator (NEMO key_RK3 mirror).")
     p.add_argument("--top-n", type=int, default=4,
@@ -105,6 +108,7 @@ def main() -> int:
             pgf_scheme=args.pgf_scheme,
             partial_cell=args.partial_cell,
             flat_bottom=args.flat_bottom,
+            B_h=args.B_h,
             adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
             momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
         )
@@ -117,6 +121,7 @@ def main() -> int:
             pgf_scheme=args.pgf_scheme,
             partial_cell=args.partial_cell,
             flat_bottom=args.flat_bottom,
+            B_h=args.B_h,
             adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
             momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
         )
@@ -164,6 +169,28 @@ def main() -> int:
         )
         print("[setup] CORE-II surface forcing applied (record 0).")
 
+    from legoesm.ocean.vertical import compute_layer_thickness
+    _area_T = np.asarray(grid.area_T)                 # (n_lat, n_lon)
+    _ocean = np.asarray(state.land_mask.data) > 0.5
+
+    def total_ke(st):
+        # Volume-integrated kinetic energy (per unit rho_0):
+        #   KE = sum_ocean 0.5*(u_c^2+v_c^2) * h * area .
+        # If KE grows super-exponentially while the (wind) energy INPUT is
+        # tiny, the discretisation is injecting energy (non-conservative) ->
+        # the EEN/f-split + KE-pairing is implicated.  If KE stays bounded /
+        # tracks the forcing work, the cascade is NOT a global energy source.
+        u = np.asarray(st.u.data); v = np.asarray(st.v.data)
+        if not (np.isfinite(u).all() and np.isfinite(v).all()):
+            return float("nan")
+        h = np.asarray(compute_layer_thickness(
+            st.eta.data, st.H_bathy.data, z_coord,
+            min_water_column_m=model.config.min_water_column_m))
+        u_c = 0.5 * (u[:, :-1, :] + u[:, 1:, :])      # (n_lat, n_lon, nlev)
+        v_c = 0.5 * (v[:-1, :, :] + v[1:, :, :])
+        ke = 0.5 * (u_c ** 2 + v_c ** 2) * h * _area_T[..., None] * _ocean[..., None]
+        return float(np.nansum(ke))
+
     def diag_state(st):
         u = np.asarray(st.u.data); v = np.asarray(st.v.data)
         umax, ulat = (float(np.nanmax(np.abs(u))), float("nan")) if u.size else (0.0, 0.0)
@@ -176,7 +203,8 @@ def main() -> int:
         return umax, ulat, vmax, fin
 
     umax0, ulat0, vmax0, fin0 = diag_state(state)
-    print(f"[step 0] max|u|={umax0:.3e} @ {ulat0}N  max|v|={vmax0:.3e}  finite={fin0}")
+    print(f"[step 0] max|u|={umax0:.3e} @ {ulat0}N  max|v|={vmax0:.3e}  "
+          f"KE={total_ke(state):.4e}  finite={fin0}")
 
     for step in range(1, args.steps + 1):
         # Per-term tendency breakdown at the START of this step.
@@ -201,7 +229,7 @@ def main() -> int:
         state = jax.block_until_ready(state)
         umax, ulat, vmax, fin = diag_state(state)
         print(f"[step {step}] max|u|={umax:.3e}@{ulat}N max|v|={vmax:.3e} "
-              f"finite={fin} | top terms: {top_str}")
+              f"KE={total_ke(state):.4e} finite={fin} | top terms: {top_str}")
         if not fin:
             print(f"[BLOWUP] non-finite at step {step}")
             return 1
