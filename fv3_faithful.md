@@ -32,6 +32,12 @@ SW cosine_bell/W5/W2 all 4 grids co-located within 1 cell (visual). Test
   energy-conserving); latlon/mpas over-damp. damp_v sweep inert (no tuning need).
 - geostrophic cube max_speed 0.0142 ≈ latlon 0.0159/mpas 0.0169; phillips cube
   max_eta 0.44 ≈ latlon 0.41/mpas 0.60. Cube close to latlon/mpas on key metrics.
+- VISUAL (phillips eta day-1): cube develops SMOOTH baroclinic-instability eddies
+  (wavenumber ~4) matching mpas — NO panel-edge imprint / seam noise / face
+  blocks. mpas showing the same wavenumber confirms it's the physical mode, not a
+  cube artifact. (latlon stays zonal = latlon under-develops the instability, a
+  latlon trait.) geostrophic eta = clean zonal bands matching latlon/mpas.
+  ⇒ ocean cube PANEL EDGES verified clean across the dynamical cases.
 
 ## OCEAN cube
 - rest_state ×4 (cube/latlon/mpas) PASS — cube eta drift 1e-23..1e-31 (FC-Gram
