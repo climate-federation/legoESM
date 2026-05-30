@@ -60,9 +60,17 @@ impermeable DURING substeps — the SW core is global/land-free, mask applied on
 AFTER the substep loop ⇒ water/momentum can cross coasts mid-loop (rest exact;
 non-rest coastal basins not perfectly closed). (2) the SW per-substep mass fixer
 conserves land-INCLUSIVE `sum(h·area)`, not wet-ocean `sum(eta·mask·area)`.
-NEXT: mask SW winds at coast corners inside the fori_loop + use the ocean's
-masked conservation domain for the fast mode. Polar-cap land at C24/1-day leaks
-below test thresholds (geostrophic PASS, nz 1.5%), so idealized cases are safe.
+**LAND refinement done (commit + codex re-review):** (2) FIXED — SW `fix_mass=
+False`, ocean masked fixer governs wet-ocean volume. (1) IMPROVED+bounded — per-
+substep corner-ocean wind mask (D-grid corner kept only if all 4 cells ocean) re-
+applied inside the fori_loop; direct test: land eta=**0 exactly**, wet volume
+conserved 1.4e-5, rest machine-zero, cube matrix still 9/9. Codex residuals for
+real-coastline OMIP (not idealized caps): leakage bounded to ONE internal SSP-RK3
+step (stages evaluate on unmasked intermediates); corner mask over-damps wet/wet
+C-faces touching a land corner (spurious coastal drag). EXACT fix = a C-FACE
+no-through-flow mask (2 adjacent cells) inside `cgrid_mass_flux_divergence`/the SW
+tendency — a deeper SW-core land integration; scoped follow-up. Idealized matrix +
+the resolved geostrophic artifact are safe.
 
 ## SW visual verdicts
 1. cosine-bell day-1 = PPM-limiter interior diffusion (cube/ico L2 1.4×), not edge.
