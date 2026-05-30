@@ -776,46 +776,38 @@ def fv3_hydrostatic_tendencies(
     _pad_halo_4d = _pad_halo_4d_module
     _pe_dg = grid.duogrid
     ln_ps_3d = ln_ps[..., jnp.newaxis]  # (6, n, n, 1)
+    # Scalars T + ln(ps): packed halo (MPI) / per-field halo (single-device).
     if _halo_backend == "mpi":
         from legoesm.grids.halo import _mpi_topology
         # FV3_3D iter-1041: thread interp_offsets through the packed MPI
-        # exchange to match the single-device Lagrange remap when
-        # duogrid is off (the ``else`` branch below uses _pe_offs).
-        _pe_offs_tunits = (
-            None if _pe_dg is not None else grid.halo_interp_offsets
+        # exchange to match the single-device Lagrange remap when duogrid off.
+        _pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets
+        _T_pad, _lnps_pad = packed_pad_halo_mpi_4d(
+            T, ln_ps_3d, topology=_mpi_topology, duogrid=_pe_dg,
+            interp_offsets=_pe_offs,
         )
-        if _needs_uv_pad:
-            _T_pad, _u_cc_pad, _v_cc_pad, _lnps_pad = packed_pad_halo_mpi_4d(
-                T, u_cell, v_cell, ln_ps_3d,
-                topology=_mpi_topology, duogrid=_pe_dg,
-                interp_offsets=_pe_offs_tunits,
-            )
-        else:
-            _T_pad, _lnps_pad = packed_pad_halo_mpi_4d(
-                T, ln_ps_3d, topology=_mpi_topology, duogrid=_pe_dg,
-                interp_offsets=_pe_offs_tunits,
-            )
-            _u_cc_pad = _v_cc_pad = None
     else:
         # Duogrid remap when active (matches _pad_halo_auto pattern)
         _pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets
         _T_pad = _pad_halo_4d(T, interp_offsets=_pe_offs, duogrid=_pe_dg)
         _lnps_pad = _pad_halo_4d(ln_ps_3d, interp_offsets=_pe_offs, duogrid=_pe_dg)
-        if _needs_uv_pad:
-            # fv3_faithful (iter-14): u_cell/v_cell are face-local VECTOR
-            # components, so pad them with the rotation-aware vector halo — the
-            # ∇²/∇⁴ diffusion stencil then reads ROTATED neighbour-face values at
-            # cube panel seams.  A scalar ``_pad_halo_4d`` would feed UNROTATED
-            # seam halos into the Laplacian/hyperdiffusion, re-injecting a
-            # panel-edge imprint into the wind diffusion (the vector center→corner
-            # lift downstream cannot undo a seam error in the stencil input).
-            _u_cc_pad, _v_cc_pad = pad_halo_vector_4d(
-                u_cell, v_cell,
-                cdgrid.base.cos_angle, cdgrid.base.sin_angle,
-                cdgrid.base.cos_angle_padded, cdgrid.base.sin_angle_padded,
-                interp_offsets=_pe_offs,
-                duogrid=_pe_dg,
-            )
+    # u_cell/v_cell are face-local VECTOR components — pad with the rotation-aware
+    # vector halo in BOTH paths.  fv3_faithful (iter-14): `pad_halo_vector_4d`
+    # auto-dispatches to the MPI/SPMD backend (rotate→pad→rotate), so the ∇²/∇⁴
+    # diffusion stencil reads ROTATED neighbour-face halos at cube panel seams on
+    # every backend.  The MPI path previously packed (u,v) as SCALARS, which fed
+    # UNROTATED seam halos into the diffusion → the cube panel-edge imprint
+    # returned under MPI (single-device was already fixed).
+    if _needs_uv_pad:
+        _u_cc_pad, _v_cc_pad = pad_halo_vector_4d(
+            u_cell, v_cell,
+            cdgrid.base.cos_angle, cdgrid.base.sin_angle,
+            cdgrid.base.cos_angle_padded, cdgrid.base.sin_angle_padded,
+            interp_offsets=_pe_offs,
+            duogrid=_pe_dg,
+        )
+    else:
+        _u_cc_pad = _v_cc_pad = None
 
     dT_dx = _gradient_x_3d(T, grid, padded=_T_pad)
     dT_dy = _gradient_y_3d(T, grid, padded=_T_pad)
