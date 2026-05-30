@@ -359,6 +359,18 @@ class LatLonCGridOceanState(NamedTuple):
     S_incr_prev: object = None
     u_incr_prev: object = None
     v_incr_prev: object = None
+    # Rigid-lid barotropic streamfunction state (config.barotropic_solver ==
+    # "rigid_lid").  ``psi`` is the vertex-point streamfunction [m^3/s], shape
+    # (n_lat+1, n_lon+1).  ``dpsi``/``dpsi_prev`` are the interior streamfunction
+    # tendencies ∂ψ/∂t at the current/previous solved step (the AB2 history +
+    # the leapfrog CG-guess history).  ``dpsin``/``dpsin_prev`` are the
+    # per-island streamfunction-constant tendencies, shape (nisle,).  All default
+    # None -> inert (free-surface path unaffected; zero behaviour change).
+    psi: object = None
+    dpsi: object = None
+    dpsi_prev: object = None
+    dpsin: object = None
+    dpsin_prev: object = None
 
 
 class LatLonCGridOceanDiagnostics(NamedTuple):
@@ -743,6 +755,19 @@ class LatLonCGridOceanConfig(NamedTuple):
     barotropic_implicit_theta_pgf: float = 0.55
     barotropic_implicit_pcg_tol: float = 1.0e-10
     barotropic_implicit_pcg_maxiter: int = 200
+    # Rigid-lid streamfunction solver knobs (only used when
+    # ``barotropic_solver = 'rigid_lid'``).  The rigid lid removes the free
+    # surface entirely: the depth-integrated flow is non-divergent and carried
+    # by a barotropic streamfunction ψ on vertex (corner) points, solved each
+    # step from the elliptic vorticity equation ∇·((1/H)∇)ψ = curl((1/H)∫F dz)
+    # (Veros core/external/solve_stream.py).  The column depth H is FIXED at the
+    # bathymetry (no eta dependence).  ψ is integrated with Adams-Bashforth-2
+    # reusing ``ab2_epsilon`` as the Veros AB_eps.  The elliptic solve is the
+    # AD-safe ``jax.scipy.sparse.linalg.cg`` (the operator is symmetric).  The
+    # net transport through multiply-connected/periodic-channel domains is set
+    # by the island line-integral constraints (see rigid_lid_islands.py).
+    rigid_lid_cg_tol: float = 1.0e-11
+    rigid_lid_cg_maxiter: int = 1000
     # Pressure-gradient force scheme on partial cells.  ``"adcroft"``
     # (default): existing centered-diff p_prime + Adcroft & Campin 2004
     # face-PGF correction.  ``"smc03"``: full Shchepetkin & McWilliams

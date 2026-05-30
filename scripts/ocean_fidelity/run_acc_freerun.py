@@ -86,7 +86,7 @@ def _bulk_stats(state, z_coord, grid):
 
 
 def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None,
-                 bottom_drag_r=None):
+                 bottom_drag_r=None, barotropic_solver=None):
     import jax
     import jax.numpy as jnp
     from legoesm.core.field import Field
@@ -104,6 +104,11 @@ def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None,
         # bottom cell with NO /dz; legoESM applies -r·u/h_bot. To match Veros's
         # ~28h drag, r ≈ r_bot·h_bot ≈ 1e-5·276 ≈ 2.8e-3 (flat-bottom ACC).
         cfg = cfg._replace(bottom_drag_r=bottom_drag_r)
+    if barotropic_solver is not None:
+        # Rigid-lid fidelity: match Veros's barotropic FORMULATION (streamfunction
+        # rather than the legoESM split-explicit free surface). The dissipation
+        # audit isolated the barotropic formulation as the genuine ACC gap.
+        cfg = cfg._replace(barotropic_solver=barotropic_solver)
     model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, cfg)
     sf = recipe.wind_forcing
     state = recipe.initial_state
@@ -115,6 +120,16 @@ def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None,
         state = state._replace(
             T_incr_prev=_z(state.T), S_incr_prev=_z(state.S),
             u_incr_prev=_z(state.u), v_incr_prev=_z(state.v))
+    # Rigid-lid: pre-build the static island/depth data (host-side flood-fill)
+    # and seed the streamfunction carry (ψ, dψ, dψ_prev, dpsin, dpsin_prev) to
+    # zero so the jitted scan keeps a constant pytree (None -> array would crash).
+    if cfg.barotropic_solver == "rigid_lid" and state.psi is None:
+        rl = model._ensure_rigid_lid_data(state)
+        _zV = jnp.zeros((recipe.grid.n_lat + 1, recipe.grid.n_lon + 1),
+                        dtype=state.u.data.dtype)
+        _zI = jnp.zeros((rl.nisle,), dtype=state.u.data.dtype)
+        state = state._replace(psi=_zV, dpsi=_zV, dpsi_prev=_zV,
+                               dpsin=_zI, dpsin_prev=_zI)
 
     total_steps = int(round(years * _DAYS_PER_YEAR * _SECONDS_PER_DAY / dt))
     # Integrate in 1-day blocks for granular NaN-checking; jit the inner scan.
@@ -167,7 +182,9 @@ context; see docs/ocean_fidelity/oracle_recipe_strategy.md §8):
      over-responds to bottom drag vs Veros. The genuine deeper difference is the
      BAROTROPIC FORMULATION (free surface vs Veros rigid-lid/streamfunction); the old
      r=1e-5 masked it via compensating errors. (30d looked like a fix: KE +233%->+27%;
-     1yr revealed the over-damping.)
+     1yr revealed the over-damping.) CONFIRMED: a rigid-lid option (--barotropic-solver
+     rigid_lid) is now built and RESTORES an O(100 Sv) ACC vs the free surface's collapsed
+     18 Sv at the SAME faithful drag -> the barotropic formulation was the dominant control.
   1. Time integrator: legoESM forward-Euler/split-explicit vs Veros Adams-Bashforth-2
      (this Veros version is AB2, NOT leapfrog+RA: tracers temp[taup1]=temp[tau]+
      dt_tracer*((1.5+eps)*dtemp[tau]-(0.5+eps)*dtemp[taum1]), separate dt_tracer/dt_mom,
@@ -205,6 +222,12 @@ def main() -> int:
                     help="Override the linear bottom-drag coefficient [m/s] "
                          "(dissipation audit; recipe default 1e-5). Veros's effective "
                          "rate is r_bot·h_bot ≈ 2.8e-3 since legoESM divides by h_bot.")
+    ap.add_argument("--barotropic-solver", default=None,
+                    choices=("explicit_substep", "implicit_cn", "rigid_lid"),
+                    help="Override the barotropic solver. 'rigid_lid' matches Veros's "
+                         "barotropic FORMULATION (streamfunction) — the dissipation "
+                         "audit isolated the free-surface-vs-rigid-lid difference as "
+                         "the genuine ACC transport gap.")
     args = ap.parse_args()
 
     import jax
@@ -217,11 +240,13 @@ def main() -> int:
     set_policy(PrecisionPolicy.fp64())
     try:
         _oi = args.outer_integrator or "recipe default (forward_euler)"
+        _bs = args.barotropic_solver or "recipe default (free surface)"
         print(f"== legoESM ACC free run: {years*_DAYS_PER_YEAR:.0f} days, "
-              f"dt={args.dt:.0f} s (fp64), integrator={_oi} ==")
+              f"dt={args.dt:.0f} s (fp64), integrator={_oi}, barotropic={_bs} ==")
         lego_state, recipe = _run_legoesm(
             years, args.dt, outer_integrator=args.outer_integrator,
-            bottom_drag_r=args.bottom_drag_r)
+            bottom_drag_r=args.bottom_drag_r,
+            barotropic_solver=args.barotropic_solver)
         lego = _bulk_stats(lego_state, recipe.z_coord, recipe.grid)
 
         veros = None

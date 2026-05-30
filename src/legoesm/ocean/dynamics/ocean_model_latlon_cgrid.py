@@ -446,6 +446,9 @@ class LatLonCGridOceanModel:
         self.config = config or LatLonCGridOceanConfig()
         self._validate_config(self.config)
         self._cfl_checked = False
+        # Static rigid-lid data (islands, basis, depths), built eagerly from the
+        # first concrete state (host-side flood-fill).  None until built.
+        self.rigid_lid_data = None
 
         if self.config.physics is not None:
             self._physics_fn = make_ocean_physics(
@@ -454,6 +457,24 @@ class LatLonCGridOceanModel:
             )
         else:
             self._physics_fn = None
+
+    def _ensure_rigid_lid_data(self, state):
+        """Build + cache the static rigid-lid data from a CONCRETE state.
+
+        The island flood-fill is host-side (numpy), so this must run eagerly on
+        concrete bathymetry/masks — ``integrate``/``integrate_scan`` pre-build it
+        before the (jitted) scan so the captured data is a compile-time
+        constant.  A standalone ``step`` on a concrete state builds it lazily.
+        """
+        if self.rigid_lid_data is not None:
+            return self.rigid_lid_data
+        from legoesm.ocean.dynamics.rigid_lid_islands import build_rigid_lid_data
+        self.rigid_lid_data = build_rigid_lid_data(
+            state.H_bathy.data, state.land_mask.data,
+            state.u_mask.data, state.v_mask.data,
+            self.config, self.grid, periodic_x=True,
+        )
+        return self.rigid_lid_data
 
     @staticmethod
     def _validate_config(config: LatLonCGridOceanConfig) -> None:
@@ -555,11 +576,18 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"salinity_min_psu ({config.salinity_min_psu}) must be "
                 f"< salinity_max_psu ({config.salinity_max_psu})")
-        _valid_solvers = {"explicit_substep", "implicit_cn"}
+        _valid_solvers = {"explicit_substep", "implicit_cn", "rigid_lid"}
         if config.barotropic_solver not in _valid_solvers:
             raise ValueError(
                 f"barotropic_solver must be one of {_valid_solvers}, "
                 f"got {config.barotropic_solver!r}")
+        if config.rigid_lid_cg_tol <= 0.0:
+            raise ValueError(
+                f"rigid_lid_cg_tol must be > 0, got {config.rigid_lid_cg_tol!r}")
+        if config.rigid_lid_cg_maxiter < 1:
+            raise ValueError(
+                f"rigid_lid_cg_maxiter must be >= 1, "
+                f"got {config.rigid_lid_cg_maxiter!r}")
         for fld in ("barotropic_implicit_theta_eta",
                     "barotropic_implicit_theta_pgf"):
             v = getattr(config, fld)
@@ -846,7 +874,20 @@ class LatLonCGridOceanModel:
                 freshwater, self.config.rho_0,
             ) * state.land_mask.data
 
-        if self.config.barotropic_solver == "implicit_cn":
+        if self.config.barotropic_solver == "rigid_lid":
+            # Rigid lid: no free surface — solve the barotropic streamfunction
+            # from the (Coriolis-augmented) slow forcing.  eta is left unchanged.
+            # Freshwater (F_slow_eta) cannot change a rigid lid's volume; it
+            # enters elsewhere as a virtual salt flux.
+            from legoesm.ocean.dynamics.rigid_lid_latlon_cgrid import (
+                barotropic_rigid_lid_latlon_cgrid,
+            )
+            rl_data = self._ensure_rigid_lid_data(state_mid)
+            state_new, (Hu_avg, Hv_avg) = barotropic_rigid_lid_latlon_cgrid(
+                state_mid, dt, self.grid, self.z_coord, self.config, rl_data,
+                F_slow_u=F_slow_u, F_slow_v=F_slow_v,
+            )
+        elif self.config.barotropic_solver == "implicit_cn":
             state_new, (Hu_avg, Hv_avg) = barotropic_implicit_latlon_cgrid(
                 state_mid, dt,
                 self.grid, self.z_coord, self.config,
@@ -1823,6 +1864,21 @@ class LatLonCGridOceanModel:
                 v_incr_prev=Field(data=_zv, name="v_incr_prev",
                                   dims=state.v.dims, units=state.v.units),
             )
+
+        # Rigid-lid: pre-build the static island/depth data (host-side
+        # flood-fill) so the scan captures it as a compile-time constant, and
+        # seed the streamfunction carry (ψ, dψ, dψ_prev, dpsin, dpsin_prev) to
+        # zero so the carry pytree is constant across iterations (None -> array
+        # would crash lax.scan).  Cold-start ψ=0 (rest); the AB2 history is 0.
+        if self.config.barotropic_solver == "rigid_lid":
+            rl = self._ensure_rigid_lid_data(state)
+            if state.psi is None:
+                _dt_rl = state.u.data.dtype
+                _zV = jnp.zeros((self.grid.n_lat + 1, self.grid.n_lon + 1),
+                                dtype=_dt_rl)
+                _zI = jnp.zeros((rl.nisle,), dtype=_dt_rl)
+                state = state._replace(
+                    psi=_zV, dpsi=_zV, dpsi_prev=_zV, dpsin=_zI, dpsin_prev=_zI)
 
         def scan_fn(state, _):
             new_state = self.step(state, dt)

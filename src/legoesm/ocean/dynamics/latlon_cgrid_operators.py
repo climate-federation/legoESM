@@ -1011,6 +1011,128 @@ def _gradient_curl_to_v(
     return pad_ns_scalar(grad_int, grid)
 
 
+def recover_velocity_from_streamfunction(
+    psi: jnp.ndarray,
+    inv_H_u: jnp.ndarray,
+    inv_H_v: jnp.ndarray,
+    grid: LatLonGrid,
+    *,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Barotropic velocity from a vertex streamfunction ``psi`` (rigid lid).
+
+    Under a rigid lid the depth-integrated transport is non-divergent and
+    carried by a streamfunction on vertex (corner) points:
+
+        (H·u_bt, H·v_bt) = ∇⊥ψ = (-∂ψ/∂y, +∂ψ/∂x)
+
+    so the barotropic velocity at the C-grid faces is
+
+        u_bt = -(1/H_u)·∂ψ/∂y      at u-faces (n_lat, n_lon+1)
+        v_bt = +(1/H_v)·∂ψ/∂x      at v-faces (n_lat+1, n_lon)
+
+    The tangential vertex-gradient stencils ``_gradient_curl_to_u`` /
+    ``_gradient_curl_to_v`` supply ∂ψ/∂y at u-faces and ∂ψ/∂x at v-faces
+    (periodic-wrap + pole/wall handling inherited).  Sign convention matches
+    ``diagnostics_streamfunction.barotropic_streamfunction`` and Veros
+    ``core/external/solve_stream.py`` (u = -1/H ∂ψ/∂y, v = +1/H ∂ψ/∂x).
+
+    Parameters
+    ----------
+    psi : (n_lat+1, n_lon+1) vertex streamfunction [m^3/s].
+    inv_H_u : (n_lat, n_lon+1) reciprocal column depth at u-faces [1/m].
+    inv_H_v : (n_lat+1, n_lon) reciprocal column depth at v-faces [1/m].
+    grid : LatLonGrid.
+    u_mask, v_mask : optional face masks (zero velocity on land faces).
+
+    Returns
+    -------
+    (u_bt, v_bt) : zonal velocity (n_lat, n_lon+1) and meridional (n_lat+1, n_lon).
+    """
+    dpsi_dy_u = _gradient_curl_to_u(psi, grid)   # (n_lat, n_lon+1) — ∂ψ/∂y at u-faces
+    dpsi_dx_v = _gradient_curl_to_v(psi, grid)   # (n_lat+1, n_lon) — ∂ψ/∂x at v-faces
+    u_bt = -inv_H_u * dpsi_dy_u
+    v_bt = inv_H_v * dpsi_dx_v
+    if u_mask is not None:
+        u_bt = u_bt * u_mask
+    if v_mask is not None:
+        v_bt = v_bt * v_mask
+    return u_bt, v_bt
+
+
+def streamfunction_vorticity_operator(
+    psi: jnp.ndarray,
+    inv_H_u: jnp.ndarray,
+    inv_H_v: jnp.ndarray,
+    grid: LatLonGrid,
+    *,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Weighted vertex Laplacian ``L(ψ) = ∇·((1/H)∇ψ)`` on the C-grid.
+
+    This is the rigid-lid elliptic operator (Veros ``poisson_matrix``): the
+    barotropic vorticity equation is ``L(∂ψ/∂t) = curl((1/H)∫F dz)``.
+
+    It is exactly the vertex curl of the recovered barotropic velocity::
+
+        L(ψ) = curl_vertex( u_bt(ψ), v_bt(ψ) )
+
+    because ``div_vertex(fx, fy) = curl_vertex(-fy, fx)`` and the velocity
+    recovery ``(-(1/H)∂ψ/∂y, +(1/H)∂ψ/∂x)`` is exactly ``(-fy, fx)`` with the
+    flux ``f = (1/H)∇ψ``.  Defining the operator as this composition (rather
+    than a separately-assembled matrix) guarantees the discrete operator and
+    the right-hand side ``curl_vertex((1/H)∫F dz)`` use *identical* stencils,
+    so there is no operator/RHS discretisation mismatch.  Self-adjoint and
+    negative semi-definite in the continuum; the discrete form reuses the
+    audited ``curl_vertex_cgrid`` + ``_gradient_curl_to_*`` stencils.
+
+    The land/Dirichlet handling (ψ = island constant on land, pinned for the
+    interior solve) lives in the solver (``rigid_lid_latlon_cgrid``), not here:
+    pass ``u_mask``/``v_mask`` to zero land-face velocities.
+
+    Returns
+    -------
+    L(ψ) : vertex field (n_lat+1, n_lon+1).
+    """
+    u_bt, v_bt = recover_velocity_from_streamfunction(
+        psi, inv_H_u, inv_H_v, grid, u_mask=u_mask, v_mask=v_mask)
+    return curl_vertex_cgrid(u_bt, v_bt, grid)
+
+
+def vertex_area_cgrid(grid: LatLonGrid) -> jnp.ndarray:
+    """Dual-cell area at vertex (corner) points, shape (n_lat+1, n_lon+1).
+
+    This is the area by which ``curl_vertex_cgrid`` divides the circulation
+    to obtain the vertex vorticity, i.e. ``A_vertex·ζ_vertex`` is the discrete
+    circulation around the vertex's dual cell.  Summing ``A_vertex·ζ_vertex``
+    over a set of vertices therefore gives (discrete Stokes) the circulation
+    around the boundary of the union of their dual cells — the basis for the
+    rigid-lid island line integrals (``rigid_lid_islands``).
+
+    Pole/wall rows (i = 0, n_lat) carry zero area (wall BC), matching the
+    pole handling in ``curl_vertex_cgrid``.
+    """
+    if is_tripolar(grid):
+        # Full 2D vertex areas; pole rows zero.
+        A_int = grid.area_q[1:-1]                       # (n_lat-1, n_lon+1)
+        n_lon1 = A_int.shape[1]
+        zero_row = jnp.zeros((1, n_lon1), dtype=A_int.dtype)
+        return jnp.concatenate([zero_row, A_int, zero_row], axis=0)
+    R = grid.radius
+    dlon = grid.dlon
+    lat = grid.lat
+    sin_lat = jnp.sin(lat)
+    sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
+    A_lat = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])   # (n_lat+1,)
+    # Interior rows carry area; pole rows (wall BC) zero — consistent with
+    # curl_vertex_cgrid computing vorticity only on interior rows.
+    A_lat = A_lat.at[0].set(0.0).at[-1].set(0.0)
+    # Broadcast to (n_lat+1, n_lon+1): regular lat-lon area varies only in lat.
+    return jnp.broadcast_to(A_lat[:, jnp.newaxis], (grid.n_lat + 1, grid.n_lon + 1))
+
+
 def vector_laplacian_cgrid(
     u: jnp.ndarray,
     v: jnp.ndarray,
