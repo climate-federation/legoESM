@@ -258,6 +258,38 @@ A/B knob added: `run_omip_core2.py --ke-gradient-scheme {centered,hollingsworth}
   the one prior-session hypothesis NEVER actually tested. Machinery exists: `references.py::
   thermal_wind_shear`, `coriolis_cgrid`, `grid.f_T`, `eady_uniform` balanced-SSH logic; reuse
   `iterate_eos_and_pressure_anomaly` for p′. Implement as a runner IC option (no dycore change).
+- **iter 15 (DEFINITIVE: no stable FREE run; constrained-only; real fix = resolution / tuned
+  WBC viscosity):** Drag-spin-up deliverable failed too: persistent drag tau=8/2.5 NaN day5,
+  tau=1d NaN day10. The prior day-120-stable run (pcellgrad) had **nudge(τ=60)+drag(τ=1d)** —
+  the NUDGE (T,S→WOA relaxation) was load-bearing, which I had dropped. But a PERSISTENTLY
+  nudged run is pinned to WOA ⇒ degenerate (SST≈WOA≈NEMO-IC, trivial comparison); and
+  RELEASING the nudge/drag blows up (the free state is the unstable one). ⇒ **legoESM's 1°
+  tripole ocean CANNOT do a stable FREE integration of the realistic global ocean — only
+  heavily-constrained (nudge+drag) runs are stable, which preclude a meaningful free NEMO
+  comparison.** EXHAUSTIVE (~23 experiments): every config lever fails or is CFL-capped; the
+  under-resolved Brazil-Malvinas WBC jet is the irreducible dt-independent instability. **THE
+  REAL FIX (a genuine dycore effort, scoped): (a) spatially-varying WBC-ENHANCED viscosity
+  (mirror NEMO's eddy_viscosity_3D; legoESM's A_h is scalar-only → needs a 2D-field code change)
+  + dt«600 to lift the Laplacian-viscosity-CFL cap (dt=150 → A_h up to ~3e7); OR (b) higher
+  resolution (~1/4°) to resolve the WBC jet; OR (c) restart from a NEMO-equilibrated state
+  (skip the cold-start — but the under-resolved jet likely still blows).** Config tuning is
+  EXHAUSTED. Science (root cause) SOLVED; the faithful free comparison needs (a)/(b). All targeted
+  dissipation fixes fail because the WBC jet hits a viscosity-CFL wall at dt=600: biharmonic
+  Smag/Leith SELF-CFL-violate at the sharp jet (NaN day1, worse than base); constant A_h capped
+  by its own Laplacian CFL (~8e6@dt600; A_h=1e7 blew); `momentum_advection=weno5` REPLACES the
+  AL81 vector-invariant scheme with flux-form WENO → destabilises (NaN day1); C_smag_lap=0.5 +
+  A_h=4e6 on top of barotropic-split → self-CFL, NaN day1. **The best stable config is
+  barotropic-split-explicit ALONE (day 5, saturation ~9.5 m/s).** Adding ANY baroclinic
+  viscosity makes it worse (CFL). IDW flood-fill (k15 seed fix) committed. ⇒ **The clean instant
+  cold-start at 1° from raw WOA is NOT achievable by config tuning within the CFL constraints —
+  the under-resolved Brazil-Malvinas jet would need either dt«600 + a tuned WBC-enhanced
+  viscosity field (NEMO's eddy_viscosity_3D, a major effort) or higher resolution.** DELIVERABLE
+  path (the working solve): **persistent Rayleigh-drag spin-up** (`−r·u` is unconditionally
+  stable — no viscosity-CFL — and damps the WBC jet directly; the prior drag run reached day 120,
+  blowing up only on RELEASE; setting drag_days > run-length = NEVER released) + barotropic-split
+  + IDW + adaptive-vertadv + partial-cell smc03. Job 8117763 (tau=8d/20d, 60 d). If stable →
+  extend 1 yr → regrid → `compare_omip_nemo.py` SST/SSS vs the NEMO 5-yr ref = the FIRST FAITHFUL
+  legoESM-vs-NEMO NUMBER (drag caveat: weaker WBCs). This is a standard robust ocean spin-up.
 - **iter 13 (ROOT CAUSE FOUND — under-damped WBC jet; dt-independent; 4-agent convergent
   diagnosis):** Comprehensive full-stack × dt sweep (job 8117533): **dt=600 day1 max|u|=39.0,
   dt=300 day1=38.3 — IDENTICAL ⇒ the blowup is dt-INDEPENDENT** = a structural/physical
