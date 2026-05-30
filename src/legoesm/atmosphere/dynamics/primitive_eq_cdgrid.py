@@ -801,8 +801,19 @@ def fv3_hydrostatic_tendencies(
         _T_pad = _pad_halo_4d(T, interp_offsets=_pe_offs, duogrid=_pe_dg)
         _lnps_pad = _pad_halo_4d(ln_ps_3d, interp_offsets=_pe_offs, duogrid=_pe_dg)
         if _needs_uv_pad:
-            _u_cc_pad = _pad_halo_4d(u_cell, interp_offsets=_pe_offs, duogrid=_pe_dg)
-            _v_cc_pad = _pad_halo_4d(v_cell, interp_offsets=_pe_offs, duogrid=_pe_dg)
+            # fv3_faithful (iter-14): u_cell/v_cell are face-local VECTOR
+            # components, so pad them with the rotation-aware vector halo — the
+            # ∇²/∇⁴ diffusion stencil then reads ROTATED neighbour-face values at
+            # cube panel seams.  A scalar ``_pad_halo_4d`` would feed UNROTATED
+            # seam halos into the Laplacian/hyperdiffusion, re-injecting a
+            # panel-edge imprint into the wind diffusion (the vector center→corner
+            # lift downstream cannot undo a seam error in the stencil input).
+            _u_cc_pad, _v_cc_pad = pad_halo_vector_4d(
+                u_cell, v_cell,
+                cdgrid.base.cos_angle, cdgrid.base.sin_angle,
+                cdgrid.base.cos_angle_padded, cdgrid.base.sin_angle_padded,
+                interp_offsets=_pe_offs,
+            )
 
     dT_dx = _gradient_x_3d(T, grid, padded=_T_pad)
     dT_dy = _gradient_y_3d(T, grid, padded=_T_pad)
