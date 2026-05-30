@@ -1329,12 +1329,56 @@ def _roll_lon_to_pm180(arr: np.ndarray, lon_deg: np.ndarray) -> np.ndarray:
     return arr
 
 
+def _regrid_latlon_to_181x360(arr: np.ndarray, lon_deg: np.ndarray,
+                              lat_deg: np.ndarray) -> np.ndarray:
+    """Regrid a native lat-lon field to the common (181, 360) [-180,180) canvas.
+
+    The lat-lon grid uses lon in ``[0, 2pi) = [0, 360)`` while cube/icosa regrid
+    to ``[-180, 180)`` at (181, 360).  Previously the lat-lon branch only ROLLED
+    (kept native 72x144) so ``snapshots_latlon.npz`` stored 144-column data under
+    a 360-point lon label — the cross-grid comparison then plotted it on the
+    360-point axis and the field appeared LONGITUDE-TRANSLATED relative to the
+    other grids (the per-grid display imshow with extent=[-180,180] was fine; the
+    npz/comparison was not).  Bilinear-interpolate (periodic in lon) onto the same
+    (181, 360) target the cube/icosa use so all grids share one canvas.  Handles
+    2D ``(nlat, nlon)`` and 3D ``(nlat, nlon, nlev)`` inputs.
+    """
+    from scipy.interpolate import RegularGridInterpolator
+    a = np.asarray(arr, dtype=np.float64)
+    lon_src = np.asarray(lon_deg, dtype=np.float64).ravel() % 360.0
+    lat_src = np.asarray(lat_deg, dtype=np.float64).ravel()
+    if lat_src[0] > lat_src[-1]:
+        lat_src = lat_src[::-1]
+        a = a[::-1]
+    order = np.argsort(lon_src)
+    lon_s = lon_src[order]
+    a = a[:, order]
+    # Periodic wrap so the [-180,180) target interpolates across the seam.
+    lon_per = np.concatenate([lon_s[-1:] - 360.0, lon_s, lon_s[:1] + 360.0])
+    a_per = np.concatenate([a[:, -1:], a, a[:, :1]], axis=1)
+    rgi = RegularGridInterpolator(
+        (lat_src, lon_per), a_per, method="linear",
+        bounds_error=False, fill_value=None,
+    )
+    # Match the EXACT target the cube/icosa regrid uses (regridding.py): lat
+    # node-centered on [-90,90], lon CELL-centered on [-180,180) (so all grids
+    # share one canvas with no half-cell offset).  Source is [0,360); wrap the
+    # negative half of the target into [0,360) for the interpolation.
+    tgt_lat = np.linspace(-90.0, 90.0, 181)
+    tgt_lon = (np.linspace(-180.0, 180.0, 360, endpoint=False) + 180.0 / 360.0) % 360.0
+    la, lo = np.meshgrid(tgt_lat, tgt_lon, indexing="ij")
+    out = rgi(np.stack([la.ravel(), lo.ravel()], axis=-1))
+    return out.reshape((181, 360) + a.shape[2:])
+
+
 def _regrid_2d(field: np.ndarray, lon_deg: np.ndarray, lat_deg: np.ndarray,
                coord_kind: str) -> np.ndarray:
     """Regrid a 2D field to (181, 360) lat-lon."""
     arr = np.asarray(field, dtype=np.float64)
     if coord_kind == "latlon":
-        return _roll_lon_to_pm180(arr, lon_deg)
+        # fv3_faithful: regrid native lat-lon ([0,360)) to the common (181,360)
+        # [-180,180) canvas so it is not longitude-translated vs cube/icosa.
+        return _regrid_latlon_to_181x360(arr, lon_deg, lat_deg)
     if coord_kind == "gaussian":
         # Gaussian grid: interpolate lat axis to regular spacing
         lat_gauss = np.asarray(lat_deg, dtype=np.float64).ravel()
@@ -1368,9 +1412,7 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
     """Regrid a 3D field (*, nlev) to (n_lat, n_lon, nlev)."""
     arr = np.asarray(field_3d, dtype=np.float64)
     if coord_kind == "latlon":
-        if arr.ndim == 2:
-            arr = arr[..., None]
-        return _roll_lon_to_pm180(arr, lon_deg)
+        return _regrid_latlon_to_181x360(arr, lon_deg, lat_deg)
     if coord_kind == "gaussian":
         if arr.ndim == 2:
             arr = arr[..., None]
