@@ -89,15 +89,8 @@ def _mixing_fraction_interpolant(
     f: Array, n_mixing_fraction: int
 ) -> Interpolant:
   """Create a mixing fraction interpolant based on desired number of points."""
-  # Build the reference grid in the working dtype taken from ``f`` (the
-  # relative-abundance field).  Using ``jnp.float_`` here forced float64 even
-  # when ``f`` is float32 (``compute_fp32`` path): ``create_linear_interpolant``
-  # mixes ``f_ref`` into the interpolation weights, so a float64 grid
-  # re-promoted the whole optical-depth lookup to float64 and broke the fp32
-  # scan-carry invariant downstream.  ``f.dtype`` is float64 on the default
-  # path -> byte-identical there.
   return optics_utils.create_linear_interpolant(
-      f, jnp.linspace(0.0, 1.0, n_mixing_fraction, dtype=f.dtype)
+      f, jnp.linspace(0.0, 1.0, n_mixing_fraction, dtype=jnp.float_)
   )
 
 
@@ -133,14 +126,8 @@ def get_vmr(
   for k, v in vmr_lib.global_means.items():
     vmr_gm[idx_gases[k]] = v
 
-  # Stack the global-mean VMRs in the optics tables' working dtype rather than
-  # ``jnp.float_``.  ``vmr`` multiplies into the optical depth, so forcing
-  # float64 here re-promoted the fp32 optics path back to float64 (and broke
-  # the float32 scan carry in the RTE solve).  ``vmr_ref`` carries the table
-  # dtype (float32 after ``_cast_optics_f64_to_f32``, float64 otherwise), so
-  # the default path stays byte-identical.
   vmr = optics_utils.lookup_values(
-      jnp.stack(vmr_gm, dtype=lookup_gas_optics.vmr_ref.dtype), (species_idx,)
+      jnp.stack(vmr_gm, dtype=jnp.float_), (species_idx,)
   )
 
   # Overwrite with available precomputed vmr.
