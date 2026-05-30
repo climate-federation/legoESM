@@ -42,8 +42,13 @@ def _particle_size_interpolant(
     f: Array, lower_bnd: float, upper_bnd: float, n_size: int
 ) -> dict[str, Callable[..., Interpolant]]:
   """Creates effective radius interpolant based on desired number of points."""
+  # Reference grid in ``f``'s working dtype.  A bare ``jnp.linspace`` defaults
+  # to float64 under ``jax_enable_x64`` and, via the interpolation weights in
+  # ``create_linear_interpolant``, would re-promote the cloud optical
+  # properties to float64 on the ``compute_fp32`` path.  ``f.dtype`` is float64
+  # on the default path -> byte-identical there.
   interp = optics_utils.create_linear_interpolant(
-      f, jnp.linspace(lower_bnd, upper_bnd, n_size)
+      f, jnp.linspace(lower_bnd, upper_bnd, n_size, dtype=f.dtype)
   )
   return collections.OrderedDict({'r': lambda: interp})
 
