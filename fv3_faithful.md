@@ -186,6 +186,31 @@ metric / d2a2c discretization seeding a fast-growing mode (cf. iter-73
 rest_state_topo "cube panel-edge metric errors", 13× spurious motion). This is
 the deep target; needs metric-level work, not damping.
 
+## iter 5 — steady-state tests isolate the metric imprint (`results/probe_steady`)
+Exact solution = no motion, so any wind = pure cube discretization imprint:
+| test (cube C36, 1-2d) | imprint | clean ref |
+|-----------------------|---------|-----------|
+| rest_state_topo (rest+topo) | wind_rms 0→0.20, max **1.27 m/s** | latlon/ico ~0.1 (iter-73) |
+| baroclinic jet (α=0, t=0.2d) | v_rms **3.4 m/s** | latlon 0.023 |
+| rotated_steady (α≠0) | v_rms **7-8 m/s** | (polar-confounded — latlon hard at poles too) |
+
+Corner-divergence damping is NOT the fix:
+- strong baroclinic jet (28 m/s): d2_bg∈{.001,.003,.005} all BLOW UP (day 0.23).
+- weak rest_state_topo: d2_bg=0.001 stays finite but only ~6% imprint cut
+  (rms 0.205→0.194) — far from held_suarez's 71%.
+⇒ the imprint is a **metric/discretization truncation error at panel edges**,
+not a divergence mode. rest_state_topo (at rest, only force = -∇Φ from topography)
+points the finger at the **pressure-gradient-force discretization** at panel
+edges as the dominant source.
+
+**Codex adversarial review (base 8f693690, 4 commits): CLEAN** — "did not
+identify any discrete regression or correctness issue introduced by the diff."
+
+NEXT FIX TARGET: audit the PE cube PGF — does it use the FV3-faithful Lin-2004
+finite-volume PGF (`_fv3_lin_pgf`) or a simpler form with panel-edge error?
+A faithful PGF would cut the rest_state_topo + baroclinic imprint at the source
+(not a damping crutch).
+
 ## Cross-grid data note (ask D)
 Regridded `snapshots_latlon.npz` uses canonical lon[-180,180]/lat[-90,90] for
 cube+ico, BUT the **latlon** grid writes fields at NATIVE (72,144) while still
