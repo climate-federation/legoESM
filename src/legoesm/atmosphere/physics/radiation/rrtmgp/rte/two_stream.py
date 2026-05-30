@@ -367,7 +367,18 @@ def solve_lw(
         use_scan,
     )
     # cumulative_flux keys: 'flux_up', 'flux_down', 'flux_net'
-    return jax.tree.map(jnp.add, fluxes, cumulative_flux)
+    # Coerce each g-point's flux to the ACCUMULATOR dtype before adding.
+    # Under ``compute_fp32`` the scan carry (``cumulative_flux``, init
+    # ``zeros_like(temperature)``) is float32, but the per-g-point transport
+    # solve re-promotes to float64 via stray x64 constants in the RTE kernel,
+    # so a bare ``jnp.add`` returns float64 and ``lax.scan`` rejects the
+    # carry-in != carry-out dtype mismatch.  Casting the contribution to the
+    # carry dtype keeps the accumulator at ``temperature``'s precision (float32
+    # for fp32 runs, float64 otherwise -> byte-identical no-op on the default
+    # path).
+    return jax.tree.map(
+        lambda _f, _c: _c + _f.astype(_c.dtype), fluxes, cumulative_flux,
+    )
 
   flux_keys = ['flux_up', 'flux_down', 'flux_net']
   init_val = {key: jnp.zeros_like(temperature) for key in flux_keys}
@@ -571,7 +582,14 @@ def solve_sw(
         flux_down_dir=sources_2stream['flux_down_dir'],
         use_scan=use_scan,
     )
-    total_sw_fluxes = jax.tree.map(jnp.add, sw_fluxes, partial_fluxes)
+    # Cast each g-point contribution to the accumulator dtype (see solve_lw):
+    # under ``compute_fp32`` the carry (``partial_fluxes``, init
+    # ``zeros_like(temperature)``) is float32 but the transport solve
+    # re-promotes to float64, so a bare ``jnp.add`` would break the scan carry
+    # dtype invariant.  No-op on the default float64 path.
+    total_sw_fluxes = jax.tree.map(
+        lambda _f, _c: _c + _f.astype(_c.dtype), sw_fluxes, partial_fluxes,
+    )
     return total_sw_fluxes
 
   flux_keys = ['flux_up', 'flux_down', 'flux_net']

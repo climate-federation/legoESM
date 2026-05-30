@@ -2262,6 +2262,19 @@ class ModelDriver:
         # is a no-op there.  (Time-varying-over-the-run GHG is a follow-on:
         # thread it through ``forcing`` like T_sfc; here it is fixed at the
         # start-year value.)
+        # compute_fp32 is DISABLED: GPU validation (job 8109241,
+        # JAX_TRACEBACK_FILTERING=off) showed the fp32 RTE path still crashes --
+        # the optics-table cast to float32 works, but the shortwave direct-beam
+        # recurrence (``rte_utils.recurrent_op_scan`` via
+        # ``monochromatic_two_stream.sw_cell_source``) re-promotes the scan
+        # carry to float64, tripping ``lax.scan``'s carry-dtype invariant
+        # (``float32[ncol,1]`` in vs ``float64[ncol,1]`` out).  float64 is
+        # pervasive in the RTE/optics interior, so enabling fp32 makes EVERY
+        # MPAS rrtmgp run fail at trace time.  Keep fp32 off (MPAS rrtmgp runs
+        # in fp64 -- correct, just not accelerated) until a kernel-wide
+        # precision audit lands; the cast plumbing + LW/SW carry-coercion fixes
+        # are retained inert so the audit can flip this flag.  See PR #343.
+        _rrtmgp_fp32 = False
         phys_cfg = PhysicsConfig(
             radiation=RadiationConfig(
                 scheme=cfg.radiation if cfg.radiation != "none" else "none",
@@ -2269,6 +2282,7 @@ class ModelDriver:
                     co2_ppmv=cfg.co2_ppmv,
                     ch4_ppbv=cfg.ch4_ppbv,
                     n2o_ppbv=cfg.n2o_ppbv,
+                    compute_fp32=_rrtmgp_fp32,
                 ),
                 # Ozone source (default "standard" matches the bare default; a
                 # non-standard --ozone-source now flows to MPAS rrtmgp).  The
@@ -2282,7 +2296,115 @@ class ModelDriver:
             microphysics=MicrophysicsConfig(scheme=cfg.microphysics),
             gravity_wave_drag=GravityWaveDragConfig(scheme=cfg.gravity_wave_drag),
         )
-        physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT)
+        # Phase D perf: shard the per-column RRTMGP workload across all local
+        # devices (issue #273 ``column_mesh``).  rrtmgp is the dominant MPAS
+        # cost — the per-column k-distribution × RTE solve already saturates a
+        # single GPU, so sharding the ``nCells`` columns across N devices is
+        # embarrassingly parallel and scales ~linearly (the dynamics stays on
+        # the default device; only the radiation columns shard).  Enabled only
+        # for rrtmgp with >1 device AND nCells divisible by the device count —
+        # the radiation kernel requires an exact split, and padding the
+        # UNSTRUCTURED column axis is unsafe (a phantom cell has no mesh
+        # geometry), so we fall back to single-device otherwise.
+        # SINGLE-PROCESS ONLY: under MPI (``is_distributed``) every rank sees
+        # the full node device set, so a per-rank column mesh would shard each
+        # rank's already-rank-local columns across ALL node GPUs and collide
+        # with the MPI halo exchange (which works on rank-local unsharded
+        # arrays).  The MPI path does its own device distribution; column
+        # sharding is the single-process multi-GPU lever.  ``len(jax.devices())``
+        # (not ``local_device_count``) matches ``create_column_mesh``'s own
+        # ``jax.devices()`` so the divisibility check and the built mesh agree.
+        if _rrtmgp_fp32:
+            logger.info(
+                "  RRTMGP compute_fp32: optics tables + RTE solve in float32 "
+                "(dycore stays fp64)"
+            )
+        _column_mesh = None
+        _single_process = (self._device_config is None
+                           or not self._device_config.is_distributed)
+        _n_dev = len(jax.devices())
+        _ncell = int(self.state.T.data.shape[0])
+        if (cfg.radiation == "rrtmgp" and _single_process
+                and _n_dev > 1 and _ncell % _n_dev == 0):
+            from legoesm.parallel.column_shard import create_column_mesh
+            _column_mesh = create_column_mesh(_n_dev)
+            logger.info(
+                f"  RRTMGP column-sharding: {_ncell} cells / {_n_dev} devices "
+                f"= {_ncell // _n_dev} cols/device"
+            )
+        elif cfg.radiation == "rrtmgp" and _single_process and _n_dev > 1:
+            logger.warning(
+                f"  RRTMGP column-sharding skipped: nCells={_ncell} not "
+                f"divisible by n_devices={_n_dev}; running single-device "
+                f"(throughput not scaled across GPUs)"
+            )
+        physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT,
+                                  column_mesh=_column_mesh)
+
+        # ---- AMIP surface boundary: anchor radiation to the prescribed SST -
+        # Without this the MPAS hydrostatic radiation falls back to using the
+        # lowest model-level temperature ``T[..., -1]`` as the surface
+        # temperature (see integration.py ``_make_hydrostatic_radiation``), so
+        # the column has NO external thermal anchor and cold-drifts toward a
+        # dry gray-radiative equilibrium fully decoupled from the prescribed
+        # SST (measured: <T_atm> 290 -> 257 K over 30 days, still falling).
+        # The cubed-sphere/lat-lon and spectral paths apply the SST every
+        # step; the MPAS path previously applied nothing — so an "AMIP" run on
+        # MPAS was not actually SST-forced.
+        #
+        # We set a FIXED (annual-mean, sea-ice-blended) per-cell surface
+        # temperature ONCE here, before the step loop.  ``model.step`` is
+        # ``jax.jit`` with ``physics_fn`` marked *static* (primitive_eq_mpas.py
+        # ``_step_jit`` static_argnums), so the override-closure cell is read
+        # at trace time and BAKED into the first compile; a per-step update
+        # would be silently ignored (stale value) unless every step paid a
+        # retrace.  A fixed climatological anchor is therefore the correct
+        # shape for the JIT'd MPAS path, is byte-identical across every
+        # restart-chain link, and captures the first-order SST -> atmosphere
+        # coupling (surface longwave).  The seasonal SST cycle and the
+        # turbulent surface fluxes are intentionally NOT applied here: the
+        # former needs traced forcing threaded through the MPAS step signature
+        # and the latter needs the edge->cell wind interp (AMIP.md Known #3).
+        # ---- AMIP surface boundary: TIME-VARYING prescribed SST ----
+        # The prescribed SST/SIC is applied as the radiative surface
+        # temperature via a per-step TRACED ``forcing={"T_sfc": (nCells,)}``
+        # threaded through ``model.step`` -> combined physics -> radiation
+        # (see primitive_eq_mpas.step + radiation integration ``_wants_forcing``).
+        # Unlike the earlier fixed-anchor ``set_T_sfc_override`` (a JIT-static
+        # closure that could only carry ONE baked value), ``forcing`` is a jit
+        # argument, so the SST can vary in time (seasonal cycle) WITHOUT
+        # retracing — matching the cube/spectral AMIP paths.  Without any
+        # surface anchor the MPAS radiation falls back to ``T[..., -1]`` (the
+        # lowest air level) and the column cold-drifts, decoupled from the SST.
+        _sst_forcing = (cfg.radiation != "none" and self.get_sst_sic is not None)
+        _compute_T_sfc = None
+        if _sst_forcing:
+            from legoesm.forcing.surface_utils import blend_surface_temperature
+            _T_ice = cfg.T_ice
+            _ncell = int(self.state.T.data.shape[0])
+
+            def _compute_T_sfc(day):
+                # Prescribed SST/SIC at the MPAS cell latitudes (get_sst_sic is
+                # built on grid.grid_lat = mesh.latCell for analytical/AMIP
+                # data), sea-ice-blended, as a (nCells,) surface temperature.
+                _sst, _sic = self.get_sst_sic(day)
+                return blend_surface_temperature(
+                    jnp.asarray(_sst), jnp.asarray(_sic), _T_ice).reshape(-1)
+
+            # Shape guard once, up front: a non-per-cell get_sst_sic would
+            # otherwise surface as an opaque error deep inside the JIT trace.
+            _ts0 = _compute_T_sfc(START_DAY)
+            if _ts0.shape != (_ncell,):
+                raise ValueError(
+                    f"MPAS SST forcing shape {tuple(_ts0.shape)} != "
+                    f"(nCells={_ncell},); get_sst_sic must return per-cell "
+                    f"arrays on the MPAS mesh (grid.grid_lat = latCell)."
+                )
+            logger.info(
+                "  AMIP SST surface forcing (time-varying): "
+                f"day {START_DAY:.1f} T_sfc=[{float(jnp.min(_ts0)):.1f},"
+                f"{float(jnp.max(_ts0)):.1f}] mean={float(jnp.mean(_ts0)):.1f} K"
+            )
 
         # ---- AMIP surface boundary: anchor radiation to the prescribed SST -
         # Without this the MPAS hydrostatic radiation falls back to using the
