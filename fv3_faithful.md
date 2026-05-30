@@ -98,6 +98,51 @@ port" (A-L 4-pt grad vs FV3 2-pt c_sw; RK3 vs forward-backward; edge-midpoint
 stagger vs tile-edge coupling; aggregated div_damp vs structured d_sw5). The
 faithful path is `FV3FBShallowWaterModel`/`fv3_fb_sw_step` + `use_fv3_dsw5_corner_damping`.
 
+## iter 3 — W2 edge-imprint + cosine-bell truth (full runs, `results/probe_cb_w2`)
+**W2 day-5 v-imprint** (W2 is steady, true v≡0, so any v = pure grid imprint):
+| grid | v_Linf | v_rms |
+|------|--------|-------|
+| cube | 0.507 | **0.093** |
+| latlon | 0.019 | 0.013 |
+| MPAS/ico | 0.470 | 0.021 |
+⇒ cube broadband v-imprint is 7× latlon / 4× ico. This is the GENUINE cube
+edge artifact (the 1-day W2 sentinel 0.119 hides the day-5 growth to 0.507).
+
+**Cosine bell (PL07, β=π/4 over corners) is PURE ADVECTION** — `model.step()`
+is never called; it runs `transport_step` (Lin-Rood PPM `fv_tp_2d`, hord=10,
+Fortran xppm boundary, n_sub=6) with frozen `_d2a2c_vect` winds. Damping config
+is declaration-only/unread. 12-day apples-to-apples L2 (in-code audit iter-61/62):
+latlon 0.133, **cube 0.865**, ico 0.620, spectral 0.382 ⇒ cube/ico = **1.4×**.
+iter-61 spatial probe: **99% of cube residual L2 is panel-INTERIOR** (bulk PPM
+limiter dissipation); panel-edge cells contribute ~0.0003. Cube is the L2
+outlier but BEST at mass conservation. ⇒ the cosine-bell "distortion" is
+resolution + PPM-limiter physics (same as FV3), NOT a cube edge/corner artifact.
+The high-lat scattered squares in the *native* plot are cosmetic scatter render.
+
+## FB path is a documented DEAD-END (do NOT rewrite the core)
+`FV3FBShallowWaterModel`/`fv3_fb_sw_step` (the bit-faithful FV3 forward-backward
+c_sw+d_sw scheme) is **fundamentally unstable** here: best W2 v_ll_Linf = 55.6
+m/s (470× the 0.119 gate), 85 m/s v-wind + 3% mass error @ 1 day; docstrings say
+"NOT PRODUCTION-READY / unstable at C16". `docs/cubed_sphere_edge_artifacts.md`
+7a-7d: forward-backward "fundamentally unstable (NaN by ~100-200 steps), gradient
+mismatch between c_sw and d_sw; A-L+RK3 baseline is locally optimal." 48/48
+production sentinels PASS on FV3Edge (`docs/fv3_fortran_fidelity_review.md`
+iter-985..1045). ⇒ faithfulness lives in the NUMERICS (PPM, d2a2c, corner fills,
+structured damping), already largely FV3-faithful within a stabilized RK3 frame.
+
+## Consolidated verdict (SW)
+- Cosine bell: NOT a grid artifact (interior PPM diffusion; cube/ico 1.4×). ✓-ish
+- W5: propagates ≈ latlon/ico by day 15; ~12% day-1.5 under-propagation (damping). 🟡
+- W2 v-imprint: the one real cube edge artifact (v_rms 7× latlon). 🔴 target.
+- Longitude alignment: OK for SW (verify AMIP/OMIP continents). 🟡
+
+## Open / next
+- Broaden coverage: hydro (baroclinic, held_suarez, AMIP) + ocean matrices on
+  all grids; visual cube-edge inspection per case.
+- Target the W2 v-imprint at its source (d2a2c non-orthogonal metric / corner
+  KE-grad), NOT more damping (blows up). Keep 48 sentinels green.
+- `/codex:adversarial-review` on the diff + the visuals.
+
 ## Cross-grid data note (ask D)
 Regridded `snapshots_latlon.npz` uses canonical lon[-180,180]/lat[-90,90] for
 cube+ico, BUT the **latlon** grid writes fields at NATIVE (72,144) while still
