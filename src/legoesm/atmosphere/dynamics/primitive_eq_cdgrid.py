@@ -33,6 +33,7 @@ from legoesm.core.operators_cdgrid import (
 from legoesm.core.operators_3d import (
     gradient_x_3d as _gradient_x_3d,
     gradient_y_3d as _gradient_y_3d,
+    divergence_3d as _divergence_3d,
     hyperdiffusion_3d as _hyperdiffusion_3d,
     laplacian_compact_3d as _laplacian_compact_3d,
 )
@@ -879,14 +880,34 @@ def fv3_hydrostatic_tendencies(
     if config.A_h > 0:
         lap_uvT = _lap_flat.reshape(n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT, 3)
     if config.hyperdiff_coeff > 0:
-        hyperdiff_flat = _hyperdiffusion_3d(
-            _uvT_flat, grid, config.hyperdiff_coeff,
-            padded=_uvT_pad_flat,
-            inner_lap=_lap_flat,  # reuse ∇² when A_h>0 (biharmonic skip)
-        )
-        hyperdiff_uvT = hyperdiff_flat.reshape(
+        # fv3_faithful (iter-14): the shared ``_hyperdiffusion_3d`` scalar-pads
+        # the inner ∇²(u,v) result for its OUTER ∇², re-injecting an UNROTATED
+        # panel-seam halo into the wind biharmonic (the inner ∇² is already
+        # vector-halo'd above).  Build ∇⁴(u,v)=∇²(∇²(u,v)) with a VECTOR halo on
+        # the inner ∇²(u,v); T keeps the scalar shared path (a true scalar).
+        _hd_offs = None if _pe_dg is not None else grid.halo_interp_offsets
+        _lap_r = _lap_flat.reshape(
             n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT, 3,
         )
+        _il_u, _il_v, _il_T = _lap_r[..., 0], _lap_r[..., 1], _lap_r[..., 2]
+        _il_u_pad, _il_v_pad = pad_halo_vector_4d(
+            _il_u, _il_v,
+            cdgrid.base.cos_angle, cdgrid.base.sin_angle,
+            cdgrid.base.cos_angle_padded, cdgrid.base.sin_angle_padded,
+            interp_offsets=_hd_offs, duogrid=_pe_dg,
+        )
+        _hd_u = -config.hyperdiff_coeff * _divergence_3d(
+            _gradient_x_3d(_il_u, grid, padded=_il_u_pad),
+            _gradient_y_3d(_il_u, grid, padded=_il_u_pad), grid,
+        )
+        _hd_v = -config.hyperdiff_coeff * _divergence_3d(
+            _gradient_x_3d(_il_v, grid, padded=_il_v_pad),
+            _gradient_y_3d(_il_v, grid, padded=_il_v_pad), grid,
+        )
+        _hd_T = _hyperdiffusion_3d(
+            T, grid, config.hyperdiff_coeff, inner_lap=_il_T,
+        )
+        hyperdiff_uvT = jnp.stack([_hd_u, _hd_v, _hd_T], axis=-1)
 
     # Lift each cc VECTOR tendency block (vert_adv + lap + hyperdiff + physics)
     # to D-grid corners.  fv3_faithful (iter-14): these are face-local (u, v)
