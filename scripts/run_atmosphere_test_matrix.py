@@ -1272,61 +1272,10 @@ def _bin_to_latlon(
     return _apply_weights(vals, idxs, w, n_lat, n_lon)
 
 
-def _interp_gaussian_to_latlon(field: np.ndarray, lat_gauss_deg: np.ndarray,
-                               n_lat_out: int = 181) -> np.ndarray:
-    """Interpolate a Gaussian-grid latitude axis to a regular lat-lon grid.
-
-    Uses linear interpolation along the latitude dimension so that
-    cross-section plots have smooth rendering instead of blocky stripes.
-
-    Parameters
-    ----------
-    field : (n_lat_gauss, ...) — data on Gaussian latitudes
-    lat_gauss_deg : (n_lat_gauss,) — Gaussian latitudes in degrees
-    n_lat_out : int — number of output latitudes (default 181 for 1-deg)
-
-    Returns
-    -------
-    out : (n_lat_out, ...) — interpolated to regular latitudes
-    """
-    from scipy.interpolate import interp1d
-    lat_out = np.linspace(-90.0, 90.0, n_lat_out)
-    lat_g = np.asarray(lat_gauss_deg, dtype=np.float64).ravel()
-    # interp1d along axis 0
-    f = interp1d(lat_g, field, axis=0, kind='linear',
-                 bounds_error=False, fill_value='extrapolate')
-    return f(lat_out)
-
-
 def _get_cs_weights(n: int, n_lat: int = 181, n_lon: int = 360):
     """Get (or compute and cache) face-aware bilinear CS→latlon weights."""
     from legoesm.grids.regridding import get_cubedsphere_to_latlon_weights
     return get_cubedsphere_to_latlon_weights(n, n_lon=n_lon, n_lat=n_lat)
-
-
-def _roll_lon_to_pm180(arr: np.ndarray, lon_deg: np.ndarray) -> np.ndarray:
-    """Roll a 2-D/3-D array so its longitude axis runs from -180 to +180.
-
-    Required because the lat-lon and Gaussian grids store ``lon`` in
-    ``[0, 360)``, but every downstream consumer (snapshot imshow,
-    snapshots_latlon.npz, cross-grid comparisons) assumes the array
-    layout matches ``[-180, 180]``.  Without rolling, the Williamson-5
-    mountain at ``lon_c = 270 E`` plots at x=+90 on a ``[-180, 180]``
-    canvas, while the cube/icos remap (which already targets
-    ``[-180, 180]``) places it at x=-90.
-    """
-    lon = np.asarray(lon_deg, dtype=np.float64).ravel()
-    if lon.size < 2:
-        return arr
-    # Detect [0, 360) convention by checking whether all values are
-    # >= 0 and the max exceeds 180.  Tolerate the ``180.0`` exact value.
-    if float(lon.min()) >= -1e-9 and float(lon.max()) > 180.0 + 1e-9:
-        n_lon = lon.size
-        # Find index where lon first crosses 180 (== -180 in pm180).
-        cross = int(np.searchsorted(lon, 180.0 + 1e-9))
-        if 0 < cross < n_lon:
-            return np.roll(arr, -cross, axis=1)
-    return arr
 
 
 def _regrid_latlon_to_181x360(arr: np.ndarray, lon_deg: np.ndarray,
@@ -1380,10 +1329,12 @@ def _regrid_2d(field: np.ndarray, lon_deg: np.ndarray, lat_deg: np.ndarray,
         # [-180,180) canvas so it is not longitude-translated vs cube/icosa.
         return _regrid_latlon_to_181x360(arr, lon_deg, lat_deg)
     if coord_kind == "gaussian":
-        # Gaussian grid: interpolate lat axis to regular spacing
+        # Gaussian grid: non-uniform lat, uniform lon in [0,360).  Regrid BOTH
+        # axes onto the common (181,360) [-180,180) canvas (linear RGI matches
+        # the old linear lat interp and additionally maps lon 64->360 so the
+        # spectral snapshot is not narrower / longitude-shifted vs the others).
         lat_gauss = np.asarray(lat_deg, dtype=np.float64).ravel()
-        return _roll_lon_to_pm180(
-            _interp_gaussian_to_latlon(arr, lat_gauss), lon_deg)
+        return _regrid_latlon_to_181x360(arr, lon_deg, lat_gauss)
     if coord_kind == "icosa":
         # Some MPAS extractors already return regular lat-lon fields for 2D
         # quantities because edge- and cell-based variables need different
@@ -1416,10 +1367,10 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
     if coord_kind == "gaussian":
         if arr.ndim == 2:
             arr = arr[..., None]
-        # Interpolate the Gaussian latitude axis to regular 1-deg spacing
+        # Regrid Gaussian (non-uniform lat, uniform lon) onto the common
+        # (181,360) [-180,180) canvas in both axes (see _regrid_2d).
         lat_gauss = np.asarray(lat_deg, dtype=np.float64).ravel()
-        return _roll_lon_to_pm180(
-            _interp_gaussian_to_latlon(arr, lat_gauss), lon_deg)
+        return _regrid_latlon_to_181x360(arr, lon_deg, lat_gauss)
     if coord_kind == "icosa":
         if arr.ndim == 1:
             arr = arr[:, None]
@@ -2981,10 +2932,8 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         _u_frozen = _u_face
         _v_frozen = _v_face
         _mass_init = _area_weighted_sum(state.h, grid.area)
-        from legoesm.core.conservation import (
-            _conservation_accumulator as _acc_iter61,
-        )
-        _acc_dt = _acc_iter61()
+        from legoesm.core.conservation import conservation_accumulator
+        _acc_dt = conservation_accumulator()
         _area64_iter61 = grid.area.astype(_acc_dt)
         _mass_target_iter61 = jnp.sum(
             state.h.astype(_acc_dt) * _area64_iter61)

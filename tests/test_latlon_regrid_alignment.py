@@ -87,6 +87,27 @@ def test_regrid_dispatch_uses_canvas_for_latlon():
     assert out3d.shape[:2] == (181, 360)
 
 
+def test_gaussian_dispatch_shares_canvas():
+    """The Gaussian/spectral branch (non-uniform lat, uniform lon) must also
+    land on the (181,360) canvas — it previously interpolated only the lat axis
+    and kept the native (~64) lon width, leaving the spectral snapshot narrower
+    and longitude-shifted vs the other grids."""
+    # Gaussian-like non-uniform latitudes, uniform lon in [0,360).
+    nlat, nlon = 32, 64
+    lat_g = np.degrees(np.arcsin(np.linspace(-0.98, 0.98, nlat)))  # clustered
+    lon = np.linspace(0.0, 360.0, nlon, endpoint=False)
+    lo, la = np.meshgrid(lon, lat_g)
+    d = np.minimum((lo - 20.0) % 360.0, (20.0 - lo) % 360.0)
+    field = np.exp(-((d / 20.0) ** 2 + ((la - 40.0) / 15.0) ** 2))
+    out2d = _regrid_2d(field, lon, lat_g, "gaussian")
+    assert out2d.shape == (181, 360), f"gaussian 2D canvas wrong: {out2d.shape}"
+    out3d = _regrid_3d_level(field[..., None], lon, lat_g, "gaussian")
+    assert out3d.shape[:2] == (181, 360)
+    j = int(np.unravel_index(np.argmax(out2d), out2d.shape)[1])
+    got = ((_CUBE_LON[j] + 180.0) % 360.0) - 180.0
+    assert abs(((got - 20.0 + 180.0) % 360.0) - 180.0) <= 6.0  # ~1 coarse cell
+
+
 def test_source_no_roll_only_latlon_branch():
     """Source guard: neither regrid dispatcher may send the lat-lon branch to a
     roll-only path — that re-introduces the gross longitude translation."""
