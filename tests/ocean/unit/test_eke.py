@@ -704,3 +704,64 @@ def test_L2_rhines_dry_column_finite_no_nan():
         return jnp.sum(k)
     g = jax.grad(_loss)(E)
     assert jnp.all(jnp.isfinite(g)), "rhines kappa grad has NaN on a dry column"
+
+
+# ---------------------------------------------------------------------------
+# L3 — differentiability of the rhines mixing length at TYPICAL values
+# (finite AND nonzero). Edge cases (E=0, dry column) are locked by L1's grad
+# probe + the L2 dry-column test; here we confirm the chain is smooth and
+# carries gradient where it should, for adjoint/DA use.
+# ---------------------------------------------------------------------------
+
+def test_L3_rhines_length_chain_differentiable_finite_and_nonzero():
+    """grad through eke_deformation_radius + eke_rhines_length + eke_len_composite
+    is finite AND nonzero in both limiting regimes (Rhines-limited vs deformation-
+    limited)."""
+    import jax
+    cfg = EKEConfig(eke_cross=2.0, eke_crhin=1.0)
+
+    # (a) Rhines-limited (small E): eke_len follows L_rhines -> d/dE > 0.
+    def eke_len_of_E(E):
+        L_def = eke_deformation_radius(
+            jnp.array(_ACC_INT_N_DZ), jnp.array(_ACC_FMID), jnp.array(_ACC_BETA), cfg)
+        L_rh = eke_rhines_length(E, jnp.array(_ACC_BETA), cfg)
+        return eke_len_composite(L_def, L_rh, cfg)
+    g_E = jax.grad(eke_len_of_E)(jnp.array(_ACC_EKE))   # 1e-6 -> Rhines limits
+    assert jnp.isfinite(g_E) and float(g_E) > 0.0
+
+    # (b) deformation-limited (large E): eke_len follows L_def -> d/d(∫N dz) > 0.
+    def eke_len_of_intN(intN):
+        L_def = eke_deformation_radius(
+            intN, jnp.array(_ACC_FMID), jnp.array(_ACC_BETA), cfg)
+        L_rh = eke_rhines_length(jnp.array(1.0e-2), jnp.array(_ACC_BETA), cfg)
+        return eke_len_composite(L_def, L_rh, cfg)
+    g_N = jax.grad(eke_len_of_intN)(jnp.array(_ACC_INT_N_DZ))
+    assert jnp.isfinite(g_N) and float(g_N) > 0.0
+
+
+def test_L3_rhines_coupling_differentiable_through_kappa():
+    """grad of the prognostic kappa_GM (rhines scheme) w.r.t. E and rho is finite +
+    nonzero — the full coupling stays differentiable (mirrors E5 for the rossby
+    path). E=0.05 puts the deformation radius as the limiter so kappa carries
+    gradient through BOTH √E and ∫N dz(rho)."""
+    import jax
+    from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+        compute_eke_kappa_gm,
+    )
+    (E, rho, S_x, S_y, z, jac, f), vcfg, beta = _coupling_with_beta(0.05)
+    ecfg = EKEConfig(mixing_length_scheme="rhines")
+
+    def loss_E(E_in):
+        k, _s, _l = compute_eke_kappa_gm(
+            E_in, rho, S_x, S_y, z, jac, f, vcfg, ecfg, beta=beta)
+        return jnp.sum(k)
+
+    def loss_rho(rho_in):
+        k, _s, _l = compute_eke_kappa_gm(
+            E, rho_in, S_x, S_y, z, jac, f, vcfg, ecfg, beta=beta)
+        return jnp.sum(k)
+
+    gE = jax.grad(loss_E)(E)
+    gR = jax.grad(loss_rho)(rho)
+    assert jnp.all(jnp.isfinite(gE)) and float(jnp.sum(jnp.abs(gE))) > 0.0
+    assert jnp.all(jnp.isfinite(gR)) and float(jnp.sum(jnp.abs(gR))) > 0.0

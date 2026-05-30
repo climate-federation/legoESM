@@ -9,8 +9,8 @@ absent on this machine).
 ## Gate status
 - [x] L1 pure mixing-length functions (rhines + deformation radius + composite) + config + unit tests
 - [x] L2 wire `int_N_dz` + β + scheme dispatch into the coupling (default bit-identical)
-- [ ] L3 differentiability (grad through the rhines length finite + nonzero)
-- [ ] L4 oracle confirmation (reproduce Veros `eke_len`/`L_rossby`/`L_rhines`/`K_gm` to machine precision)
+- [x] L3 differentiability (grad through the rhines length finite + nonzero)
+- [x] L4 oracle confirmation (reproduce Veros `eke_len`/`L_rossby`/`L_rhines`/`K_gm` to machine precision)
 - [ ] L5 recipe adoption (flip EKE on in `build_acc_model_config`)
 - [ ] L6 regression lock + measure-first free-run re-check
 
@@ -67,3 +67,32 @@ H_bathy=H_max ⇒ jacobian≈1 — so goldens passed, but a true-land global con
 flake under broad acc/veros co-execution — XLA-CPU reduction order, NOT L2; tracked as separate debt.)
 NEXT: L3 — committed grad test through the rhines length at typical values (finite + nonzero); the
 edge cases (E=0, dry column) are already locked by L1's probe + the L2 dry-column test.
+
+### 2026-05-29 · L3 done — differentiability at typical values (finite + nonzero)
+Two committed grad tests in `test_eke.py`: (a) `jax.grad` through the pure rhines chain
+(`eke_deformation_radius` + `eke_rhines_length` + `eke_len_composite`) is finite AND > 0 in BOTH
+limiting regimes — d(eke_len)/dE>0 when Rhines limits (small E), d(eke_len)/d(∫N dz)>0 when the
+deformation radius limits (large E); (b) grad of the prognostic `kappa_GM` (rhines coupling) w.r.t.
+BOTH E and rho is finite + nonzero (E=0.05 makes the deformation radius the limiter so kappa carries
+gradient through √E AND ∫N dz(rho)) — mirrors E5 for the rossby path. Edge cases (E=0, β=0, |f|=0,
+dry column) already locked by L1's grad probe + `test_L2_rhines_dry_column_finite_no_nan`.
+GATE: `JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 pytest tests/ocean/unit/test_eke.py -q` → 35 passed.
+
+### 2026-05-29 · L4 done — oracle confirmation: eke_len reproduced to MACHINE PRECISION
+`scripts/ocean_fidelity/compare_eke_len_veros.py`: ran Veros ACC (enable_eke, 864000 s), captured
+`eke,K_gm,eke_len,L_rossby,L_rhines,Nsqr,dzw,maskW,coriolis_t,beta`, and fed Veros's OWN
+`(int_N_dz=Σ√N²·dzw·maskW, |coriolis_t|, beta, eke)` into the L1 functions. At the diagnostic time
+level (tau=2):
+  L_rossby max_rel_err = 5.80e-16 (corr 1.0)   [eke_deformation_radius]
+  L_rhines max_rel_err = 0.00e+00 (corr 1.0)   [eke_rhines_length]
+  eke_len  max_rel_err = 0.00e+00 (corr 1.0)   [eke_len_composite]
+  K_gm     max_rel_err = 0.00e+00 (corr 1.0)   [eke_kappa_gm — re-confirms E9]
+Veros eke_len mean 8.3 km / max 47.3 km; Veros L_rossby mean 56.9 km / max 221 km — i.e. the Rhines
+scale (L_rhines mean 8.29 km) IS the limiter, exactly the ~25x reduction E9 flagged. This is the
+deeper analog of E9 (which matched K_gm given Veros's eke_len); now the eke_len machinery ITSELF is
+reproduced bit-exactly. The Rhines-limited mixing-length FORM matches the oracle ⇒ EKE can be adopted
+apples-to-apples in the ACC recipe (L5). Informational gate (needs Veros); repro:
+`JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python scripts/ocean_fidelity/compare_eke_len_veros.py`.
+NEXT: L5 — flip EKE on in `build_acc_model_config` (`eke=EKEConfig(mixing_length_scheme="rhines",
+eke_cross=2.0, eke_crhin=1.0)`; other params already default to ACC); update the stale
+`build_acc_physics_config` docstring + strategy §8 ledger; lock with a recipe test.
