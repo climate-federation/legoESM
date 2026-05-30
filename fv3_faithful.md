@@ -45,19 +45,27 @@ signal, nz 0.40→0.74); the C-grid solver (`barotropic_cgrid.py`) is UNSTABLE
 (f=0 test: 17m→0.84m, no blow-up; `fv3_cc2c` vector-rotation mixes u,v → destroys
 the forward-backward skew-symmetry → effectively explicit → amplifies at ~f).
 
-### ✅ FV3-FAITHFUL FIX PLAN (oracle-confirmed) — NEXT
+### FV3-FAITHFUL FIX (oracle-confirmed) — NEXT, refined by iter ~23 attempt
 FV3 `c_sw` (sw_core.F90:405-490) Coriolis = **absolute-vorticity FLUX**, NOT
 explicit f*v: `vort = fC + rarea_c·curl(uc·dxc, vc·dyc)`; transport upwind by
-contravariant transverse flux `fy1=dt2·(v−uc·cosa_u)/sina_u`; momentum
-`uc += fy1·fy − rdxc·Δ(KE)`, `vc −= fx1·fx − rdyc·Δ(KE)`. Vector-invariant,
-energy/enstrophy-stable. legoESM ALREADY has this for the atm:
-`shallow_water_fv3_cdgrid.cdgrid_shallow_water_tendencies` + `operators_cdgrid.
-fv3_vorticity`. **Fix**: replace `barotropic_cgrid.py` explicit-f*v Coriolis with
-the absolute-vorticity-flux form (reuse `fv3_vorticity` + KE-gradient), then make
-the cube ocean default to `barotropic_staggering="c_grid"`. Validate: rest_state
-stays machine-zero, geostrophic nz→~mpas level, barotropic_wave amplitude, no
-regressions. (Do NOT use a_grid; do NOT use an ad-hoc rotation — must be the
-FV3 vorticity-flux form.)
+contravariant transverse flux; momentum `uc += fy1·fy − rdxc·Δ(KE)`. legoESM has
+this for the atm: `cdgrid_momentum_tendencies` (vector-invariant w/ `cdgrid.
+f_corner`) + `cgrid_mass_flux_divergence` (PPM continuity).
+**ATTEMPTED iter ~23 (reverted — failed validation):** new D-grid forward-
+backward barotropic (`barotropic_substeps_dgrid`) reusing those ops. rest_state
+regressed 1e-31→2e-5; geostrophic **eta→27m→NaN by 11h even with div_damp=0.25**.
+**ROOT LESSON (key):** a single-stage forward-backward only time-centers the
+**gravity wave** (eta↔u); the **Coriolis** inside the vector-invariant tendency
+is still forward-Euler → amplifies at ~(f·dt)² (same explicit-Coriolis blow-up as
+the explicit-f*v c_grid). FV3's stability comes from its **c_sw/d_sw TWO-STAGE
+time scheme** (the C-grid half-step time-centers the Coriolis), NOT single-stage
+Euler. ⇒ **Correct fix**: drive the barotropic substep through the validated FV3
+2-stage SW stepper `CDGridShallowWaterModel.step` (or replicate its c_sw→d_sw
+half/full split): build a `CDGridShallowWaterState` from (h=eta+H_bathy or eta,
+D-grid barotropic winds), step, extract eta + winds. Must reuse FV3's time scheme,
+not hand-rolled Euler. Validate: rest_state machine-zero, geostrophic nz→~mpas,
+barotropic_wave amplitude, stability, no regressions; codex review. (Never a_grid;
+never explicit f*v; never single-stage Euler.)
 
 ## SW visual verdicts
 1. cosine-bell day-1 = PPM-limiter interior diffusion (cube/ico L2 1.4×), not edge.
