@@ -398,7 +398,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   barotropic_diffusion_alpha=None, n_barotropic_substeps=None,
                   barotropic_time_filter=None, bottom_drag_r=None,
                   C_smag=None, C_leith=None, C_smag_lap=None,
-                  momentum_advection=None):
+                  momentum_advection=None, slope_foot_alpha=None,
+                  slope_foot_n_levels=None, slope_foot_threshold=None):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -434,6 +435,9 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("C_smag", C_smag), ("C_leith", C_leith),
                               ("C_smag_lap", C_smag_lap),
                               ("momentum_advection", momentum_advection),
+                              ("slope_foot_alpha", slope_foot_alpha),
+                              ("slope_foot_n_levels", slope_foot_n_levels),
+                              ("slope_foot_threshold", slope_foot_threshold),
                               ) if v is not None}
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -490,7 +494,8 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   barotropic_diffusion_alpha=None, n_barotropic_substeps=None,
                   barotropic_time_filter=None, bottom_drag_r=None,
                   C_smag=None, C_leith=None, C_smag_lap=None,
-                  momentum_advection=None):
+                  momentum_advection=None, slope_foot_alpha=None,
+                  slope_foot_n_levels=None, slope_foot_threshold=None):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -521,6 +526,9 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                               ("C_smag", C_smag), ("C_leith", C_leith),
                               ("C_smag_lap", C_smag_lap),
                               ("momentum_advection", momentum_advection),
+                              ("slope_foot_alpha", slope_foot_alpha),
+                              ("slope_foot_n_levels", slope_foot_n_levels),
+                              ("slope_foot_threshold", slope_foot_threshold),
                               ) if v is not None}
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -688,6 +696,14 @@ def main() -> int:
                         "limit so the spurious-w 'vertadv' runaway cannot amplify. The "
                         "NEMO-faithful fix for the OMIP cold-start blowup (eORCA OMIP "
                         "production runs set ln_zad_Aimp=.true.).")
+    p.add_argument("--slope-foot-alpha", type=float, default=None,
+                   help="MOM6 slope-foot viscosity enhancement at topographic slopes "
+                        "(WBCs hug slopes -- the built-in WBC-enhanced-viscosity, NEMO-like). "
+                        "Multiplies A_h by ~alpha where slope>threshold. 0=off, prod 3.")
+    p.add_argument("--slope-foot-n-levels", type=int, default=None,
+                   help="Levels from bottom to apply slope-foot (default 5; set =nlev for full column).")
+    p.add_argument("--slope-foot-threshold", type=float, default=None,
+                   help="Slope r-factor threshold above which slope-foot fires (MOM6 default 0.1).")
     p.add_argument("--momentum-advection", default=None,
                    choices=[None,"vector_invariant","weno5","weno7"],
                    help="Momentum advection scheme. weno5/weno7 = upstream-biased "
@@ -789,6 +805,9 @@ def main() -> int:
             bottom_drag_r=args.bottom_drag_r,
             C_smag=args.C_smag, C_leith=args.C_leith, C_smag_lap=args.C_smag_lap,
             momentum_advection=args.momentum_advection,
+            slope_foot_alpha=args.slope_foot_alpha,
+            slope_foot_n_levels=args.slope_foot_n_levels,
+            slope_foot_threshold=args.slope_foot_threshold,
         )
         app_grid_type = "tripole"
     else:
@@ -810,6 +829,9 @@ def main() -> int:
             bottom_drag_r=args.bottom_drag_r,
             C_smag=args.C_smag, C_leith=args.C_leith, C_smag_lap=args.C_smag_lap,
             momentum_advection=args.momentum_advection,
+            slope_foot_alpha=args.slope_foot_alpha,
+            slope_foot_n_levels=args.slope_foot_n_levels,
+            slope_foot_threshold=args.slope_foot_threshold,
         )
         app_grid_type = "latlon"
 
