@@ -152,6 +152,31 @@ HONEST: "absolutely no edge artifacts" on the atmosphere cube is NOT achievable
 without a major novel advance; the cube is FV3-faithful in components + gives
 physical climates, but carries this fundamental steady-balance imprint.
 
+## iter 14 — USER DIRECTIVE: eliminate imprints via FV3. PGF RULED OUT.
+User: "get rid of the cube imprints entirely using FV3 as the oracle." Oracle
+STILL TCC-blocked (`~/Documents/Code` Operation-not-permitted even sandbox-off)
+— NEED it copied to a readable path (`/tmp/fv3oracle` or `docs/references/fv3src/`).
+
+Tested the top FV3-faithful lever — wired FV3's **Lin (1997) finite-volume PGF**
+(`_fv3_lin_pgf.fv3_lin1997_pgf_3d_cgrid` → `project_cgrid_pgf_to_dgrid_corners`,
+the cross-product `p_grad_c` that explicitly does NOT amplify cross-face halo
+error like the A-L 4-pt matrix) into the PE momentum as opt-in (B=KE-only +
+Lin PGF replaces ∇Φ+R_dT∇ln_ps). RESULTS:
+- baroclinic cube v_rms@0.2d = 3.443 vs A-L **3.43** — IDENTICAL (no imprint fix);
+- rest_state_topo wind_rms 0.210 vs 0.205 — IDENTICAL;
+- and it is **STABLE in RK3** (PASS, max|v|=38) — contradicting the codebase's
+  "Lin PGF not stable with RK3" claim. (Reverted the wiring: no benefit + slight
+  baroclinic-2d regression.)
+⇒ **The imprint is NOT the PGF/gradient operator.** Both A-L and Lin PGF give the
+same imbalance. For the balanced jet (v=0 @t=0) dv/dt = −(zeta_corner·u_d +
+dB_dy_perp − pgf_y); changing pgf_y didn't move it ⇒ the residual is on the
+**corner Coriolis-vorticity side** (`zeta_corner` = relative-vort-to-corner +
+`f_corner`) and/or the shared **cube metric** (`rdxc`, corner positions). With
+halo, IC, damping, duogrid, AND now PGF all ruled out, the imprint is in the core
+cube metric/vorticity discretization — the next target (needs the oracle to
+compare FV3's exact corner-vorticity/Coriolis stencil, `sw_core.F90:378-480`).
+AMIP cube runs physical + stable under full physics (T 279K, finite).
+
 ## Pending / next
 - HS climate match (cube vs latlon) — latlon slow [running, monitor armed].
 - AMIP cube vs latlon (user wants it + continent-longitude check).
