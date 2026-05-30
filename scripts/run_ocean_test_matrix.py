@@ -2202,7 +2202,7 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
                         A_h: float | None = None,
                         A_v: float | None = None,
                         bottom_drag_r: float | None = None,
-                        cube_use_fc: bool = False):
+                        cube_use_fc: bool | None = None):
     """Create grid, z_coord, and rest-state for any grid type.
 
     Parameters
@@ -2229,6 +2229,16 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
         nlev = DEFAULT_NLEV
     if H_max is None:
         H_max = DEFAULT_H_MAX
+    if cube_use_fc is None:
+        # Default the cubed-sphere ocean to the FC-Gram spectral
+        # baroclinic-tendency backend, which removes the face-edge PGF
+        # instability documented in
+        # docs/ocean_experiments/cubed_sphere_pgf_stability.md (RESOLVED
+        # 2026-05-20) and which scripts/run_omip.py already enables by
+        # default for cubed_sphere.  Without it the rest_state +
+        # barotropic_wave cube cases NaN around physical day 1-2 while
+        # latlon/MPAS stay stable.  Non-cube grids are unaffected.
+        cube_use_fc = (tc.grid_type == "cubed_sphere")
     from legoesm.ocean.vertical import create_ocean_z_star
 
     z_coord = create_ocean_z_star(n_levels=nlev, H_max=H_max)

@@ -261,6 +261,35 @@ finite). MPAS + latlon are stable on both. This is a tractable stability bug
 (CFL / edge damping / filter), the next concrete fix target. Cube ocean cases are
 limited (rest_state, barotropic_wave, inertia_gravity_wave; gyres regional-only).
 
+## iter 8 — OCEAN CUBE FIX (real, verified) + atmosphere FC lead
+The ocean cube NaN-blowup fix already EXISTED (FC-Gram spectral baroclinic
+tendencies, `ocean_pe_fc` + `OceanModel(fc_config=...)`, doc
+`cubed_sphere_pgf_stability.md` RESOLVED 2026-05-20; `run_omip.py` enables it by
+default) but `run_ocean_test_matrix.py` only wired it into 3 runners
+(geostrophic_adjustment/phillips/overflow). The rest_state* + barotropic_wave
+runners used the no-FC A-L corner-gradient PGF → face-edge O(Δx) error → NaN.
+
+FIX: default `cube_use_fc` to True for cubed_sphere in `_create_ocean_setup`
+(non-cube unaffected; the 3 explicit-True callers unaffected). VERIFIED:
+| ocean cube case | before | after FC |
+|----------------|--------|----------|
+| rest_state_stratified_with_land | NaN day 2.08 | **PASS** (eta drift 7e-21, stable) |
+| barotropic_wave | NaN day 1.04 | **stable** (finite, drift 8.5e-17) BUT over-damped (amp 0.016 vs latlon 0.098/mpas 0.104) |
+Strictly better (NaN→stable+conserving). FOLLOW-UP: FC over-damps the fast
+barotropic_wave — likely the cube-specific raised A_h/K_h (added to stabilize the
+OLD no-FC path) is now redundant under FC; lowering it should recover wave
+amplitude. Also verify inertia_gravity_wave cube.
+
+**ATMOSPHERE LEAD (reopens the "irreducible" verdict):** `core/operators_fc`
+provides GENERAL FC-Gram cube operators (`fc_gradient_x/y`, `fc_divergence`,
+`fc_curl_z`) that are face-boundary-accurate and **unused by the atmosphere**.
+The atmosphere PE cube imprint has the SAME root cause as the ocean's (A-L corner
+gradient reading O(Δx) halo-interp values at faces). A spectral gradient is just
+a spatial operator → RK3-compatible (the Lin-PGF/FB walls were specific
+formulations, NOT a ban on better gradients). ⇒ replacing the atmosphere A-L
+Bernoulli/PGF gradient with `fc_gradient` is the most promising un-blocked path
+to cut the baroclinic/W2 panel-edge imprint. (Big change; next deep target.)
+
 ## Cross-grid data note (ask D)
 Regridded `snapshots_latlon.npz` uses canonical lon[-180,180]/lat[-90,90] for
 cube+ico, BUT the **latlon** grid writes fields at NATIVE (72,144) while still
