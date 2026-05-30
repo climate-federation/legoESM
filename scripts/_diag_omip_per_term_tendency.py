@@ -89,6 +89,8 @@ def main() -> int:
                         "vertadv term moves to the step level so the tendency-diag "
                         "vertadv_{u,v} read ~0; watch max|u| per step + the residual "
                         "non-vertadv driver instead.")
+    p.add_argument("--momentum-rk3", action="store_true",
+                   help="Use SSP-RK3 outer momentum integrator (NEMO key_RK3 mirror).")
     p.add_argument("--top-n", type=int, default=4,
                    help="Print the N largest terms per step.")
     args = p.parse_args()
@@ -104,6 +106,7 @@ def main() -> int:
             partial_cell=args.partial_cell,
             flat_bottom=args.flat_bottom,
             adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
+            momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
         )
     else:
         nlat, nlon = (int(x) for x in args.latlon_res.split("x"))
@@ -115,6 +118,7 @@ def main() -> int:
             partial_cell=args.partial_cell,
             flat_bottom=args.flat_bottom,
             adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
+            momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
         )
 
     lat_T_deg = np.rad2deg(np.asarray(grid.lat_T))

@@ -258,6 +258,68 @@ A/B knob added: `run_omip_core2.py --ke-gradient-scheme {centered,hollingsworth}
   the one prior-session hypothesis NEVER actually tested. Machinery exists: `references.py::
   thermal_wind_shear`, `coriolis_cgrid`, `grid.f_T`, `eady_uniform` balanced-SSH logic; reuse
   `iterate_eos_and_pressure_anomaly` for p′. Implement as a runner IC option (no dycore change).
+- **iter 10 (RK3 implemented + tested — marginal, NOT the fix; it's a MULTI-COMPONENT gap):**
+  Implemented SSP-RK3 (Shu-Osher) outer baroclinic momentum integrator (`momentum_time_integrator
+  ='rk3'`, `--momentum-rk3`; config-gated, default euler bit-exact; tests pass; committed-ready).
+  Per-term A/B (job 8117140, RK3 vs euler, partial-cell smc03 + forcing + adaptive-vertadv,
+  40 steps): **RK3 WORKS (differs from euler) but the trajectory is essentially IDENTICAL** —
+  both grow super-exponentially 1.6→90-110 m/s over 40 steps (step40: RK3 86.8 vs euler 111.5,
+  only ~22% slower; same top term vertadv@−36.3N/k0). ⇒ **RK3 is NOT the fix; integrator order
+  is not the issue.** The cold-start blowup is a **nonlinear robustness gap in legoESM's
+  dynamics' response to the unbalanced transient** — every single lever (vertadv, bathy-smooth,
+  balanced-init, IC-smooth, RK3) gives the SAME super-exponential trajectory; only the Rayleigh
+  drag run reached day 120, and uniform-stratification is stable. NEMO survives the SAME (bigger,
+  dt=3600) transient only via its FULL structural stack TOGETHER: split-explicit barotropic
+  (AB3-AM4 gravity-wave damping) + EEN energy-AND-enstrophy-conserving vorticity + FCT
+  positive-definite tracers + Hollingsworth-KE (nn_dynkeg=1) + RK3 + EVD@100 + adaptive-vertadv.
+  legoESM differs structurally: barotropic_solver default `explicit_substep` (OMIP may use
+  implicit_cn), AL81 PV-flux vorticity (not EEN), centered KE (not Hollingsworth). **CONCLUSION:
+  the faithful cold-start needs MATCHING NEMO'S FULL STACK (esp. the barotropic solver + the
+  EEN-vorticity/Hollingsworth-KE energy-enstrophy pairing) — a multi-component dycore effort, NOT
+  any single lever.** Pragmatic path to a FIRST NUMBER meanwhile: persistent weak Rayleigh drag
+  (the drag run proved day-120 stability) → multi-year → caveated compare vs NEMO 5-yr ref.
+- **iter 9 (NEMO COLD-START PROCEDURE decoded — the answer is the TIME INTEGRATOR, IC ruled
+  out; workflow w42n63nni, 5 agents over the actual ORCA1 build):** NEMO ORCA1 cold-starts from
+  the SAME rest (u=v=0, η=0) + RAW pre-gridded WOCE/Gouretski IC (`woce_*_monthly_init_4p2`,
+  native eORCA1, empty weights = no on-the-fly remap) — **NO IC smoothing, NO balancing, NO
+  static-stability check, NO interior restoring (`ln_tradmp=.false.`), NO dt ramp, NO Asselin
+  (inert under RK3).** ⇒ **my IC-smoothing + balanced-init attempts were the WRONG direction;
+  NEMO conditions nothing.** NEMO survives purely via RUNTIME integration robustness:
+  **(1) RK3** time-stepping (compile-time `key_RK3` in `cpp_ORCA1.fcm`; `stprk3_stg.F90` 3-stage
+  Dt/3,Dt/2,Dt; self-starting, no computational mode) — **legoESM's outer baroclinic step is
+  forward-Euler + Matsuno, which has NO stability region for advection/Coriolis/gravity → the
+  cold-start adjustment amplifies. THE CORE GAP.** **(2) Enhanced Vertical Diffusion** (EVD,
+  `ln_zdfevd`, rn_evd=100 m²/s, tracers-only): N²<0 → K_v=100, collapses static instability from
+  step 0. **(3) adaptive-implicit vertadv** (`ln_zad_Aimp`) — ✓ ALREADY implemented (iter3).
+  (4) FCT positive-definite tracers (nn_fct_h/v=2); (5) implicit bottom drag (`ln_drgimp`);
+  (6) split-explicit barotropic (AB3-AM4 forward-backward, rn_bt_cmax=0.8). dt=3600 single-step.
+  Also: vector-form momentum advection + Hollingsworth (nn_dynkeg=1), EEN vorticity, TEOS-10.
+  **FAITHFUL FIX PLAN (ranked): (A) implement RK3 (SSP-RK3 / Wicker-Skamarock) for the OUTER
+  baroclinic momentum step — the main lift; (B) EVD convective adjustment firing on N²<0 from
+  step 0 (legoESM has ocean/physics/convection/enhanced_diffusion.py — verify active in OMIP
+  config); (C) DROP the IC crutches — test raw-WOA + rest like NEMO; (D) FCT tracers + implicit
+  drag.** A/B test NEMO predicts: RK3+EVD+aimp-vertadv on = stable, off = blowup. Implement A
+  (config-gated momentum_time_integrator='rk3') + B, test the raw-WOA cold-start, codex-review.
+- **iter 7 (BALANCED INIT implemented — doesn't fix it; narrows to SPURIOUS-SHARP IC):**
+  Committed the vertadv fix (2da957ca). Implemented `apply_balanced_init` in the runner
+  (`--balanced-init`): level-of-no-motion geostrophic velocity from the WOA p′ (fixed ~1500 m
+  reference — NOT per-column seafloor, which gave ±40 m spurious SSH; equator-tapered
+  f/(f²+f_ε²); speed-clipped). **Result: ARM A (velocity+SSH) NaN day 2, ARM B (velocity-only)
+  NaN day 1 — both FASTER than rest-IC (day 5).** KEY: the geostrophic velocity at the WOA
+  fronts is HUGE — 247 m/s at the equator (taper edge), and the clip BINDS globally at 2.5 m/s
+  (Southern Ocean + equator) ⇒ the WOA IC mapped onto the tripole (interp + flood-fill +
+  partial-cell) has **spurious grid-scale / over-sharp density fronts** implying unphysical
+  (>>2 m/s) geostrophic flow. Clipping them to "balance" just injects KE → faster blowup. ⇒
+  **refined root: the realistic IC is too ROUGH for the cold start; the dynamics are stable on
+  SMOOTH stratification (uniform-strat rest test) but not the rough mapped WOA — balanced or
+  not.** NEMO's native-grid Gouretski IC is smoother / NEMO conditions its IC.
+- **iter 8 (IC-SMOOTHING test, job 8116796 RUNNING — the indicated fix):** added
+  `smooth_woa_ts` + `--woa-smoothing-passes` (horizontal Laplacian on the WOA T,S per level,
+  ocean-only). Test: ARM A = WOA + 4 passes + rest start; ARM B = WOA + 12 passes + balanced
+  init. PASS = finite + max|u| physical (vs raw-WOA NaN day 5). If smoothing the IC toward the
+  (proven-stable) smooth regime holds the cold start ⇒ the fix is IC conditioning (+ optional
+  balance); tune the minimal smoothing for faithfulness. If not ⇒ a robust incremental /
+  digital-filter init or a damped pre-spin is needed (genuine cold-start-robustness work).
 - **iter 5 (axis B — BATHYMETRY SMOOTHING test, job 8116430 RUNNING):** NEMO/ROMS smooth their
   bathymetry to cut the slope (r-factor); the core2 runner used raw eORCA1 e3t_0 (no smoothing).
   Added `make_partial_cell(..., smoothing_passes)` + `--bathy-smoothing-passes` (reuses

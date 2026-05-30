@@ -522,6 +522,12 @@ class LatLonCGridOceanModel:
         if config.ab2_epsilon < 0.0:
             raise ValueError(
                 f"ab2_epsilon must be >= 0, got {config.ab2_epsilon!r}")
+        _valid_mom_int = {"euler", "rk3"}
+        _mom_ti = getattr(config, "momentum_time_integrator", "euler")
+        if _mom_ti not in _valid_mom_int:
+            raise ValueError(
+                f"momentum_time_integrator must be one of {_valid_mom_int}, "
+                f"got {_mom_ti!r}")
 
     def check_barotropic_cfl(self, dt: float) -> float:
         """Check barotropic CFL and warn if marginal or unstable.
@@ -741,8 +747,44 @@ class LatLonCGridOceanModel:
             F_slow_u = F_slow_u * state.u_mask.data
             F_slow_v = F_slow_v * state.v_mask.data
 
-        u_star = state.u.data + dt * du_dt_pert
-        v_star = state.v.data + dt * dv_dt_pert
+        # Outer baroclinic momentum integrator (NEMO-mirror, #RK3).  The
+        # cold-start amplifiers (pressure gradient + KE gradient + relative
+        # vorticity flux) live in ``du_dt`` and are integrated explicitly
+        # here; forward-Euler has no stability region for them, so the violent
+        # geostrophic adjustment from rest amplifies.  SSP-RK3 (Shu-Osher)
+        # mirrors NEMO's RK3 outer step.  T,S,eta + surface forcing are frozen
+        # across the 3 stages (operator-split with the Matsuno Coriolis +
+        # barotropic + tracer stages below); the barotropic slow forcing
+        # F_slow_{u,v} is the stage-1 value already computed above.  Static
+        # Python branch on the config string (no retrace / no jnp.where).
+        if getattr(self.config, "momentum_time_integrator", "euler") == "rk3":
+            u0 = state.u.data
+            v0 = state.v.data
+
+            def _mom_pert(u_in, v_in):
+                st = state._replace(
+                    u=state.u.replace(data=u_in * u_mask_3d),
+                    v=state.v.replace(data=v_in * v_mask_3d),
+                )
+                td = self.tendencies(st, surface_forcing, sponge=sponge, dt=dt)
+                _du = td.du_dt.data
+                _dv = td.dv_dt.data
+                _Fu = jnp.sum(_du * h_u_pre, axis=-1) / H_u_pre * state.u_mask.data
+                _Fv = jnp.sum(_dv * h_v_pre, axis=-1) / H_v_pre * state.v_mask.data
+                return _du - _Fu[..., jnp.newaxis], _dv - _Fv[..., jnp.newaxis]
+
+            # Stage 1 perturbation = du_dt_pert/dv_dt_pert (computed above).
+            u1 = u0 + dt * du_dt_pert
+            v1 = v0 + dt * dv_dt_pert
+            p1u, p1v = _mom_pert(u1, v1)
+            u2 = 0.75 * u0 + 0.25 * (u1 + dt * p1u)
+            v2 = 0.75 * v0 + 0.25 * (v1 + dt * p1v)
+            p2u, p2v = _mom_pert(u2, v2)
+            u_star = (1.0 / 3.0) * u0 + (2.0 / 3.0) * (u2 + dt * p2u)
+            v_star = (1.0 / 3.0) * v0 + (2.0 / 3.0) * (v2 + dt * p2v)
+        else:
+            u_star = state.u.data + dt * du_dt_pert
+            v_star = state.v.data + dt * dv_dt_pert
 
         # 4. Forward-backward Coriolis on perturbation velocity
         #

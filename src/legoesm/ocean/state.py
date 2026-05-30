@@ -746,3 +746,19 @@ class LatLonCGridOceanConfig(NamedTuple):
     # Disabled by default (False) to preserve bit-exact regression on
     # legacy lat-lon configs; real eORCA/OMIP production runs enable it.
     adaptive_implicit_vertadv: bool = False
+
+    # --- Outer baroclinic momentum time integrator ---
+    # "euler" (default): single-step forward-Euler of the momentum
+    #   perturbation tendency (legacy; bit-exact).
+    # "rk3": 3-stage SSP-RK3 (Shu-Osher) of the momentum perturbation
+    #   tendency, mirroring NEMO's RK3 outer step (compile-time key_RK3 in
+    #   ORCA1).  Forward-Euler has no stability region for the advective /
+    #   relative-vorticity / pressure-gradient terms, so the violent
+    #   cold-start geostrophic adjustment from rest amplifies; RK3's
+    #   stability region (|z| up to ~sqrt(3) on the imaginary axis) carries
+    #   it.  T,S,eta + surface forcing are frozen across the 3 stages
+    #   (operator-split with the Matsuno Coriolis + barotropic + tracer
+    #   stages); the barotropic slow forcing is taken from stage 1.  3x the
+    #   tendency cost.  Appended at the END of the NamedTuple to preserve
+    #   positional construction for legacy callers.
+    momentum_time_integrator: str = "euler"

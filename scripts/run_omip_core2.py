@@ -150,6 +150,159 @@ def compute_woa_3d(grid, z_coord, woa_t, woa_s, H_bathy, land_mask):
     return T_woa * m3, S_woa * m3
 
 
+def smooth_woa_ts(state, grid, passes):
+    """Horizontal Laplacian smoothing of the WOA T,S initial condition over
+    OCEAN cells, per level.  Removes the spurious grid-scale / over-sharp
+    fronts that interpolating + flood-filling WOA onto the tripole introduces
+    -- those imply unphysically large geostrophic velocities (>>2 m/s) and the
+    cold-start cannot carry them.  The dynamics ARE stable on a smooth
+    stratification (uniform-strat rest test), so smoothing the IC toward that
+    regime is the natural conditioning."""
+    from legoesm.ocean.bathymetry import _laplacian_smooth_2d
+    mask = np.asarray(state.land_mask.data) > 0.5
+    T = np.array(state.T.data, dtype=np.float64)
+    S = np.array(state.S.data, dtype=np.float64)
+    nlev = T.shape[-1]
+    for arr in (T, S):
+        for k in range(nlev):
+            orig_k = arr[..., k].copy()
+            cur = arr[..., k]
+            for _ in range(int(passes)):
+                sm = np.asarray(_laplacian_smooth_2d(cur, 1, is_cubed=False))
+                cur = np.where(mask, sm, orig_k)
+            arr[..., k] = cur
+    print(f"[setup] WOA T,S horizontal smoothing: {passes} Laplacian passes/level "
+          f"(removes spurious grid-scale fronts)")
+    return state._replace(
+        T=state.T.replace(data=jnp.asarray(T)),
+        S=state.S.replace(data=jnp.asarray(S)),
+    )
+
+
+def apply_balanced_init(state, grid, z_coord, config,
+                        taper_lat_deg=8.0, ref_depth_m=1500.0,
+                        max_speed=2.5, with_ssh=True):
+    """Initialise the cold-start in geostrophic / thermal-wind balance.
+
+    The OMIP WOA cold-start blows up because it starts from REST (u=0) with a
+    flat free surface (eta=0): the full baroclinic pressure-gradient force from
+    WOA's density fronts is then UNBALANCED, and the violent geostrophic
+    adjustment goes nonlinear (conclusively diagnosed -- the partial-cell PGF
+    itself is NEMO-class, ~1e-6 m/s2 on a uniform-stratification rest test).
+
+    This puts the flow in balance at t=0 so there is no adjustment shock:
+
+    1. Baroclinic pressure anomaly ``p'`` from WOA T,S (surface-referenced),
+       via the SAME ``iterate_eos_and_pressure_anomaly`` the dycore uses.
+    2. LEVEL-OF-NO-MOTION reference: subtract the deepest-active ``p'_bottom``
+       so the total pressure is flat at the seafloor (deep flow -> 0,
+       surface-intensified ~1 m/s -- physical).  ``p_ref = p' - p'_bottom``.
+    3. Geostrophic velocity from ``p_ref`` at cell centres,
+       ``u_g = -(1/rho_0 f) dp_ref/dy``, ``v_g = +(1/rho_0 f) dp_ref/dx``,
+       with the Coriolis singularity regularised near the equator
+       ``1/f -> f/(f^2 + f_eps^2)`` (``f_eps = 2 Omega sin(taper_lat)`` -> the
+       geostrophic velocity tapers smoothly to zero within ~|lat|<taper_lat).
+       Mapped to the C-grid faces with ``cell_to_cgrid_winds`` (fold-aware).
+    4. (with_ssh) Balanced free surface ``eta = -p'_bottom/(rho_0 g)`` (area-
+       demeaned), so the dycore's total PGF ``-(1/rho_0) grad(p' + rho_0 g eta)
+       = -(1/rho_0) grad(p_ref)`` exactly balances the geostrophic velocity.
+
+    Pure IC change -- no dynamics-core modification.
+    """
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        gradient_x_cgrid, gradient_y_cgrid, cell_to_cgrid_winds,
+    )
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _neumann_fill_cgrid
+    from legoesm.ocean.dynamics.ocean_tendency_common import (
+        iterate_eos_and_pressure_anomaly,
+    )
+    from legoesm.ocean.eos import make_eos_fn
+    from legoesm.ocean.vertical import OceanPartialCellCoordinate
+    from legoesm import constants
+
+    T = state.T.data
+    S = state.S.data
+    mask = state.land_mask.data
+    rho_0 = float(config.rho_0)
+    g_val = float(config.g)
+    is_pc = isinstance(z_coord, OceanPartialCellCoordinate)
+    eos_fn = make_eos_fn(config.eos, getattr(config, "eos_linear", None))
+    h_actual = z_coord.h_partial if is_pc else None
+
+    _, _, p_prime = iterate_eos_and_pressure_anomaly(
+        T, S, mask,
+        lambda fld: _neumann_fill_cgrid(fld, mask, grid=grid),
+        eos_fn, z_coord.dz_ref, rho_0, g_val,
+        n_iter=2, hi_precision_pressure=True, h_actual=h_actual,
+    )                                                    # (n_lat, n_lon, nlev)
+
+    # Reference level for the level-of-no-motion: a FIXED depth (~ref_depth_m)
+    # common to all sufficiently-deep columns -- NOT the per-column seafloor
+    # (whose depth varies with bathymetry, so a seafloor reference makes p_ref
+    # and eta scale with DEPTH instead of the dynamic steric signal -> O(100 m)
+    # spurious SSH).  Shallow columns reference their own bottom level.
+    z_full = np.asarray(z_coord.z_full_ref)                 # (nlev,), negative
+    k_ref = int(np.argmin(np.abs(z_full + ref_depth_m)))    # level nearest ref_depth
+    if is_pc:
+        bl = jnp.clip(z_coord.bottom_level, 0, z_coord.n_levels - 1)
+        k_use = jnp.minimum(bl, k_ref)                      # (n_lat, n_lon)
+    else:
+        k_use = jnp.full(p_prime.shape[:-1], k_ref, dtype=jnp.int32)
+    p_at_ref = jnp.take_along_axis(p_prime, k_use[..., None], axis=-1)  # (...,1)
+    p_ref = p_prime - p_at_ref                              # 0 at the reference
+
+    p_ref_filled = _neumann_fill_cgrid(p_ref, mask, grid=grid)
+    gx_u = gradient_x_cgrid(p_ref_filled, grid)            # (n_lat, n_lon+1, nlev)
+    gy_v = gradient_y_cgrid(p_ref_filled, grid)            # (n_lat+1, n_lon, nlev)
+    gx_T = 0.5 * (gx_u[:, :-1] + gx_u[:, 1:])              # (n_lat, n_lon, nlev)
+    gy_T = 0.5 * (gy_v[:-1] + gy_v[1:])
+
+    f_T = grid.f_T                                          # (n_lat, n_lon)
+    f_eps = 2.0 * constants.Omega * float(np.sin(np.deg2rad(taper_lat_deg)))
+    inv_f = (f_T / (f_T ** 2 + f_eps ** 2))[..., None]     # -> 0 at the equator
+
+    u_g = -(1.0 / rho_0) * inv_f * gy_T
+    v_g = +(1.0 / rho_0) * inv_f * gx_T
+    # Safety clip: geostrophy is invalid in the (tapered) equatorial band and
+    # at any residual sharp IC front (e.g. flood-fill seams); bound the speed
+    # to a physical maximum so those cells start bounded rather than at
+    # tens of m/s.  Mid-latitude balanced flow is well below this.
+    u_g = jnp.clip(u_g, -max_speed, max_speed)
+    v_g = jnp.clip(v_g, -max_speed, max_speed)
+    m3 = mask[..., None]
+    if is_pc:
+        m3 = m3 * z_coord.is_active.astype(m3.dtype)
+    u_g = u_g * m3
+    v_g = v_g * m3
+
+    u_face, v_face = cell_to_cgrid_winds(u_g, v_g, grid)
+    u_face = u_face * state.u_mask.data[..., None]
+    u_face = u_face.at[:, -1].set(u_face[:, 0])            # periodic wrap column
+    v_face = v_face * state.v_mask.data[..., None]
+
+    repl = dict(
+        u=state.u.replace(data=u_face),
+        v=state.v.replace(data=v_face),
+    )
+    umax = float(jnp.nanmax(jnp.abs(u_face)))
+    vmax = float(jnp.nanmax(jnp.abs(v_face)))
+    if with_ssh:
+        eta = -p_at_ref[..., 0] / (rho_0 * g_val)          # (n_lat, n_lon)
+        area = grid.area_T * mask
+        eta_mean = jnp.sum(eta * area) / jnp.maximum(jnp.sum(area), 1.0)
+        eta = jnp.clip(eta - eta_mean, -5.0, 5.0) * mask   # physical SSH bound
+        repl["eta"] = state.eta.replace(data=eta)
+        print(f"[setup] balanced init: ref level k={k_ref} (~{ref_depth_m:.0f} m), "
+              f"geostrophic u,v (taper {taper_lat_deg} deg, clip {max_speed} m/s) "
+              f"max|u|={umax:.3f} max|v|={vmax:.3f} m/s + SSH "
+              f"eta[{float(jnp.min(eta)):.2f},{float(jnp.max(eta)):.2f}] m")
+    else:
+        print(f"[setup] balanced init: ref level k={k_ref} (~{ref_depth_m:.0f} m), "
+              f"geostrophic u,v (taper {taper_lat_deg} deg, clip {max_speed} m/s) "
+              f"max|u|={umax:.3f} max|v|={vmax:.3f} m/s (NO balanced SSH)")
+    return state._replace(**repl)
+
+
 def make_partial_cell(z_coord, H_bathy, land_mask, thin_threshold=0.3,
                       smoothing_passes=0):
     """Convert a z* reference coord + bathymetry to an ``OceanPartialCellCoordinate``,
@@ -224,7 +377,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   woa_init: bool = False, woa_t=None, woa_s=None,
                   pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None,
                   ke_gradient_scheme=None, partial_cell=False,
-                  adaptive_implicit_vertadv=None, bathy_smoothing_passes=0):
+                  adaptive_implicit_vertadv=None, bathy_smoothing_passes=0,
+                  momentum_time_integrator=None):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -251,6 +405,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("A_h_eq_boost", A_h_eq_boost),
                               ("ke_gradient_scheme", ke_gradient_scheme),
                               ("adaptive_implicit_vertadv", adaptive_implicit_vertadv),
+                              ("momentum_time_integrator", momentum_time_integrator),
                               ) if v is not None}
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -302,7 +457,8 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                        woa_init: bool = False, woa_t=None, woa_s=None,
                        pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None,
                        ke_gradient_scheme=None, partial_cell=False,
-                       adaptive_implicit_vertadv=None, bathy_smoothing_passes=0):
+                       adaptive_implicit_vertadv=None, bathy_smoothing_passes=0,
+                  momentum_time_integrator=None):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -324,6 +480,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
     _ovr = {k: v for k, v in (("K_bih", K_bih),
                               ("ke_gradient_scheme", ke_gradient_scheme),
                               ("adaptive_implicit_vertadv", adaptive_implicit_vertadv),
+                              ("momentum_time_integrator", momentum_time_integrator),
                               ) if v is not None}
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -491,6 +648,29 @@ def main() -> int:
                         "limit so the spurious-w 'vertadv' runaway cannot amplify. The "
                         "NEMO-faithful fix for the OMIP cold-start blowup (eORCA OMIP "
                         "production runs set ln_zad_Aimp=.true.).")
+    p.add_argument("--momentum-rk3", action="store_true",
+                   help="Use 3-stage SSP-RK3 for the outer baroclinic momentum step "
+                        "(mirrors NEMO's RK3 / key_RK3) instead of forward-Euler -- the "
+                        "NEMO-faithful fix for the cold-start adjustment blowup. 3x tendency cost.")
+    p.add_argument("--woa-smoothing-passes", type=int, default=0,
+                   help="Horizontal Laplacian smoothing passes/level on the WOA T,S IC "
+                        "-- removes spurious grid-scale fronts from interpolating/flood-"
+                        "filling WOA onto the tripole that imply >>2 m/s geostrophic flow "
+                        "and break the cold start. Requires --woa-init. 0=off.")
+    p.add_argument("--balanced-init", action="store_true",
+                   help="Initialise the cold-start in geostrophic/thermal-wind balance "
+                        "(level-of-no-motion velocity from the WOA p' field, equator-tapered) "
+                        "+ balanced SSH -- removes the unbalanced-rest adjustment shock that is "
+                        "the conclusively-diagnosed cause of the WOA cold-start blowup. "
+                        "Requires --woa-init.")
+    p.add_argument("--balanced-init-taper-lat", type=float, default=8.0,
+                   help="Equatorial taper latitude [deg] for the geostrophic init: the "
+                        "1/f singularity is regularised as f/(f^2+f_eps^2) with "
+                        "f_eps=2*Omega*sin(taper_lat), so u_g,v_g taper to 0 within ~this "
+                        "latitude of the equator.")
+    p.add_argument("--no-balanced-ssh", action="store_true",
+                   help="With --balanced-init, set only the geostrophic velocity (surface-"
+                        "referenced inconsistency control); default also sets the balanced SSH.")
     p.add_argument("--bathy-smoothing-passes", type=int, default=0,
                    help="Laplacian smoothing passes on the OCEAN bathymetry before "
                         "building the partial-cell coord -- reduces the bathymetric "
@@ -537,6 +717,7 @@ def main() -> int:
             partial_cell=args.partial_cell,
             adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
             bathy_smoothing_passes=args.bathy_smoothing_passes,
+            momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
         )
         app_grid_type = "tripole"
     else:
@@ -550,8 +731,24 @@ def main() -> int:
             partial_cell=args.partial_cell,
             adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
             bathy_smoothing_passes=args.bathy_smoothing_passes,
+            momentum_time_integrator=("rk3" if args.momentum_rk3 else None),
         )
         app_grid_type = "latlon"
+
+    if args.woa_smoothing_passes and args.woa_smoothing_passes > 0:
+        if not args.woa_init:
+            raise ValueError("--woa-smoothing-passes requires --woa-init.")
+        state = smooth_woa_ts(state, grid, args.woa_smoothing_passes)
+
+    if args.balanced_init:
+        if not args.woa_init:
+            raise ValueError("--balanced-init requires --woa-init (it balances the WOA IC).")
+        state = apply_balanced_init(
+            state, grid, z_coord, model.config,
+            taper_lat_deg=args.balanced_init_taper_lat,
+            with_ssh=(not args.no_balanced_ssh),
+        )
+
     lat2d, lon2d = _grid_lat2d_deg(grid, args.grid)
     forcing = load_core2_nyf()
     n_rec = int(forcing.u10.shape[0])
