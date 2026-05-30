@@ -85,18 +85,30 @@ def _bulk_stats(state, z_coord, grid):
     }
 
 
-def _run_legoesm(years, dt, *, snapshot_every_days=None):
+def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None):
     import jax
     import jax.numpy as jnp
+    from legoesm.core.field import Field
     from legoesm.ocean.fidelity.veros_acc_recipe import build_acc_recipe
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
     )
 
     recipe = build_acc_recipe(with_surface_forcing=True)
-    model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, recipe.model_config)
+    cfg = recipe.model_config
+    if outer_integrator is not None:
+        cfg = cfg._replace(outer_integrator=outer_integrator)
+    model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, cfg)
     sf = recipe.wind_forcing
     state = recipe.initial_state
+    # AB2 needs the prior-increment carry seeded (to zero) so the scan keeps a
+    # constant pytree; the first step is then a 1.6x forward-Euler seed.
+    if cfg.outer_integrator == "ab2" and state.T_incr_prev is None:
+        _z = lambda d: Field(data=jnp.zeros_like(d.data), name=d.name + "_incr_prev",
+                             dims=d.dims, units=d.units)
+        state = state._replace(
+            T_incr_prev=_z(state.T), S_incr_prev=_z(state.S),
+            u_incr_prev=_z(state.u), v_incr_prev=_z(state.v))
 
     total_steps = int(round(years * _DAYS_PER_YEAR * _SECONDS_PER_DAY / dt))
     # Integrate in 1-day blocks for granular NaN-checking; jit the inner scan.
@@ -173,6 +185,10 @@ def main() -> int:
                     help="10-day stability smoke run (overrides --years).")
     ap.add_argument("--no-veros", action="store_true",
                     help="Skip the Veros run (legoESM-only diagnostics).")
+    ap.add_argument("--outer-integrator", default=None,
+                    choices=("forward_euler", "ab2"),
+                    help="Override the legoESM outer time integrator (default: the "
+                         "recipe's forward_euler). 'ab2' = Veros Adams-Bashforth-2.")
     args = ap.parse_args()
 
     import jax
@@ -184,9 +200,11 @@ def main() -> int:
     _prev = get_policy()
     set_policy(PrecisionPolicy.fp64())
     try:
+        _oi = args.outer_integrator or "recipe default (forward_euler)"
         print(f"== legoESM ACC free run: {years*_DAYS_PER_YEAR:.0f} days, "
-              f"dt={args.dt:.0f} s (fp64) ==")
-        lego_state, recipe = _run_legoesm(years, args.dt)
+              f"dt={args.dt:.0f} s (fp64), integrator={_oi} ==")
+        lego_state, recipe = _run_legoesm(
+            years, args.dt, outer_integrator=args.outer_integrator)
         lego = _bulk_stats(lego_state, recipe.z_coord, recipe.grid)
 
         veros = None

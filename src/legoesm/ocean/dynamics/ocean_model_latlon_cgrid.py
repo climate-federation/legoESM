@@ -1479,9 +1479,129 @@ class LatLonCGridOceanModel:
         -------
         LatLonCGridOceanState
         """
+        _oi = getattr(self.config, "outer_integrator", "forward_euler")
+        if _oi not in ("forward_euler", "ab2"):
+            raise ValueError(
+                "config.outer_integrator must be 'forward_euler' or 'ab2', "
+                f"got {_oi!r}")
+        if _oi == "ab2":
+            if self.config.tracer_time_integrator == "ab2":
+                raise ValueError(
+                    "outer_integrator='ab2' double-counts with "
+                    "tracer_time_integrator='ab2'; set the inner one to 'euler'.")
+            # Guard (adversarial-review #2): the AB2 outer scheme extrapolates the
+            # TOTAL forward-Euler increment, which INCLUDES the once-applied implicit
+            # vertical-mixing increment — so it AB2-extrapolates the implicit mixing
+            # rather than applying it once (unlike Veros). That converts unconditional
+            # vertical-mixing stability into CONDITIONAL (threshold ~ dt·K_v·4/dz²_min
+            # ≲ a few; a stiff-K_v channel blows up at ~200 steps). Reject the clearest
+            # stiff trigger — convective adjustment (large K_conv). Mild mixing (the
+            # ACC recipe: convection="none", TKE ⇒ dt·λ≈-0.2) is safe.
+            _phys = getattr(self.config, "physics", None)
+            _conv = getattr(_phys, "convection", None) if _phys is not None else None
+            if _conv is not None and getattr(_conv, "scheme", "none") != "none":
+                raise ValueError(
+                    "outer_integrator='ab2' is conditionally unstable with convective "
+                    f"adjustment (convection.scheme={_conv.scheme!r}): it AB2-extrapolates "
+                    "the implicit vertical-mixing increment. Use 'forward_euler', disable "
+                    "convective adjustment, or the faithful explicit-AB2 + implicit-once "
+                    "refinement. See docs/ocean_fidelity/oracle_recipe_strategy.md §8.")
+            return self._ab2_step(
+                state, dt, freshwater=freshwater,
+                surface_forcing=surface_forcing, sponge=sponge)
         return self._step_impl(state, dt, freshwater=freshwater,
                                surface_forcing=surface_forcing,
                                sponge=sponge)
+
+    def _ab2_step(self, state: LatLonCGridOceanState, dt: float,
+                  freshwater=None, surface_forcing=None, sponge=None,
+                  ) -> LatLonCGridOceanState:
+        """Adams-Bashforth-2 outer integrator (Veros's scheme).
+
+        The forward-Euler step ``_step_impl`` gives ``X_FE = X^n + ΔX`` (ΔX = the
+        explicit FE increment, which already includes the once-applied implicit
+        vertical mixing and the split-explicit barotropic solve). AB2 extrapolates
+        the increment::
+
+            X^{n+1} = X^n + (1.5+ε)·ΔX^n − (0.5+ε)·ΔX^{n-1}
+
+        matching Veros (``temp[taup1]=temp[tau]+dt·((1.5+ε)·dtemp[tau]
+        −(0.5+ε)·dtemp[taum1])``). For a steady increment the weights sum to 1, so
+        the implicit-mixing part is applied ~once (NOT doubled — the failure mode of
+        a leapfrog here). The prior increment ``ΔX^{n-1}`` is carried on
+        ``{T,S,u,v}_incr_prev``; a missing carry bootstraps ``ΔX^{n-1}=0`` (a 1.6×
+        first step, as the inner tracer AB2 does).
+
+        Tracers AB2 the full increment; MOMENTUM AB2s only the baroclinic deviation
+        (thickness-weighted depth-mean split), KEEPING the barotropic mode
+        ``<u_FE>_z`` from the split-explicit free-surface solve un-AB2'd (the
+        barotropic gravity wave is CFL-stiff and must not be extrapolated). Every op
+        is linear in the increments ⇒ differentiable.
+        """
+        state_fe = self._step_impl(
+            state, dt, freshwater=freshwater,
+            surface_forcing=surface_forcing, sponge=sponge)
+        eps = self.config.ab2_epsilon
+        a_n, a_p = 1.5 + eps, 0.5 + eps
+        mask3 = state.land_mask.data[..., jnp.newaxis]
+        u_mask3 = state.u_mask.data[..., jnp.newaxis]
+        v_mask3 = state.v_mask.data[..., jnp.newaxis]
+
+        # --- Tracers: AB2 the full FE increment ---
+        dT_n = state_fe.T.data - state.T.data
+        dS_n = state_fe.S.data - state.S.data
+        dT_p = (state.T_incr_prev.data if state.T_incr_prev is not None
+                else jnp.zeros_like(dT_n))
+        dS_p = (state.S_incr_prev.data if state.S_incr_prev is not None
+                else jnp.zeros_like(dS_n))
+        T_new = (state.T.data + a_n * dT_n - a_p * dT_p) * mask3
+        S_new = (state.S.data + a_n * dS_n - a_p * dS_p) * mask3
+
+        # --- Momentum: AB2 the BAROCLINIC increment; keep the FE barotropic mode ---
+        h_k = compute_layer_thickness(
+            state.eta.data, state.H_bathy.data, self.z_coord,
+            min_water_column_m=self.config.min_water_column_m)
+        h_u = min_cell_to_uface(h_k)
+        h_v = min_cell_to_vface(h_k, self.grid)
+
+        def _split(field, h_face):
+            bt = (jnp.sum(field * h_face, axis=-1, keepdims=True)
+                  / jnp.maximum(jnp.sum(h_face, axis=-1, keepdims=True), 1.0e-10))
+            return field - bt, bt          # (baroclinic deviation, barotropic mean)
+
+        # NB (adversarial-review #4, low severity): the carried du_p was depth-mean-
+        # zero under the PREVIOUS step's h_u; applying it at the current h_u injects a
+        # spurious barotropic component ≈ a_p·<du_p>_z(current h). Negligible for ACC
+        # (O(1 m) eta → O(1e-4 m/s)); fix for large free-surface motion by re-splitting
+        # du_p under the current h_u.
+        ubc_n, _ = _split(state.u.data, h_u)
+        ubc_fe, bt_u_fe = _split(state_fe.u.data, h_u)
+        vbc_n, _ = _split(state.v.data, h_v)
+        vbc_fe, bt_v_fe = _split(state_fe.v.data, h_v)
+        du_n = ubc_fe - ubc_n          # baroclinic increment
+        dv_n = vbc_fe - vbc_n
+        du_p = (state.u_incr_prev.data if state.u_incr_prev is not None
+                else jnp.zeros_like(du_n))
+        dv_p = (state.v_incr_prev.data if state.v_incr_prev is not None
+                else jnp.zeros_like(dv_n))
+        u_new = ((ubc_n + a_n * du_n - a_p * du_p) + bt_u_fe) * u_mask3
+        v_new = ((vbc_n + a_n * dv_n - a_p * dv_p) + bt_v_fe) * v_mask3
+        u_new = u_new.at[:, -1].set(u_new[:, 0])   # periodic-lon wrap
+
+        return state_fe._replace(
+            T=state_fe.T.replace(data=T_new),
+            S=state_fe.S.replace(data=S_new),
+            u=state_fe.u.replace(data=u_new),
+            v=state_fe.v.replace(data=v_new),
+            T_incr_prev=Field(data=dT_n * mask3, name="T_incr_prev",
+                              dims=state.T.dims, units=state.T.units),
+            S_incr_prev=Field(data=dS_n * mask3, name="S_incr_prev",
+                              dims=state.S.dims, units=state.S.units),
+            u_incr_prev=Field(data=du_n * u_mask3, name="u_incr_prev",
+                              dims=state.u.dims, units=state.u.units),
+            v_incr_prev=Field(data=dv_n * v_mask3, name="v_incr_prev",
+                              dims=state.v.dims, units=state.v.units),
+        )
 
     def step_checked(
         self,
@@ -1681,6 +1801,27 @@ class LatLonCGridOceanModel:
                 S_flux_div_prev=Field(
                     data=_zero, name="S_flux_div_prev",
                     dims=_dims_fd, units="m/s"),
+            )
+
+        # AB2 outer integrator: seed the prior-increment carry to ZERO so the scan
+        # keeps a constant pytree (None -> Field would crash lax.scan). The first
+        # step then uses ΔX^{n-1}=0 (a 1.6× forward-Euler seed).
+        if (getattr(self.config, "outer_integrator", "forward_euler") == "ab2"
+                and state.T_incr_prev is None):
+            from legoesm.core.field import Field
+            _z3 = jnp.zeros_like(state.T.data)
+            _zu = jnp.zeros_like(state.u.data)
+            _zv = jnp.zeros_like(state.v.data)
+            state = state._replace(
+                T_incr_prev=Field(data=_z3, name="T_incr_prev",
+                                  dims=state.T.dims, units=state.T.units),
+                S_incr_prev=Field(data=jnp.zeros_like(state.S.data),
+                                  name="S_incr_prev",
+                                  dims=state.S.dims, units=state.S.units),
+                u_incr_prev=Field(data=_zu, name="u_incr_prev",
+                                  dims=state.u.dims, units=state.u.units),
+                v_incr_prev=Field(data=_zv, name="v_incr_prev",
+                                  dims=state.v.dims, units=state.v.units),
             )
 
         def scan_fn(state, _):

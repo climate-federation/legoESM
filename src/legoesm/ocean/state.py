@@ -350,6 +350,15 @@ class LatLonCGridOceanState(NamedTuple):
     # when the prognostic-EKE GM closure is active (config.gm_redi.eke not None).
     # Default None -> inert (no EKE): zero behaviour change for existing configs.
     eke: object = None
+    # Prior forward-Euler increment ΔX^{n-1} = X_FE^{n-1} − X^{n-1} for the AB2 outer
+    # integrator (config.outer_integrator == "ab2"). Tracers store the full
+    # increment; u/v store the BAROCLINIC-deviation increment (the barotropic mode
+    # is kept from the split-explicit solve, un-AB2'd). Default None -> inert
+    # (forward-Euler): zero behaviour change.
+    T_incr_prev: object = None
+    S_incr_prev: object = None
+    u_incr_prev: object = None
+    v_incr_prev: object = None
 
 
 class LatLonCGridOceanDiagnostics(NamedTuple):
@@ -757,7 +766,23 @@ class LatLonCGridOceanConfig(NamedTuple):
     #   is NOT preserved in this form — new extrema may appear with
     #   nonlinear limiters (TVD, WENO, FCT).
     tracer_time_integrator: str = "euler"
-    ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar)
+    ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar) — also the
+    #   Adams-Bashforth ε for the OUTER integrator (Veros AB_eps=0.1).
+    # Outer (baroclinic) time integrator. "forward_euler" (default) = the existing
+    # single-step split-explicit scheme. "ab2" = Adams-Bashforth-2 on the
+    # forward-Euler increment: X^{n+1} = X^n + (1.5+ε)·ΔX^n − (0.5+ε)·ΔX^{n-1}
+    # (ΔX = X_FE − X^n), carrying the prior increment on ``{T,S,u,v}_incr_prev``.
+    # The barotropic free-surface mode is kept from the split-explicit solve
+    # (un-AB2'd); only the baroclinic momentum deviation is AB2'd.
+    # CAVEAT (NOT fully Veros-faithful): ΔX includes the once-applied IMPLICIT
+    # vertical-mixing increment, so this AB2-extrapolates that increment rather than
+    # applying it once (Veros AB2s only the EXPLICIT tendency + applies implicit
+    # vmix once). Consequence: vertical-mixing stability becomes CONDITIONAL
+    # (~dt·K_v·4/dz²_min ≲ a few; a stiff-K_v channel blows up). SAFE for mild mixing
+    # (the ACC recipe); ``step`` REJECTS "ab2" with convective adjustment. For strong
+    # implicit mixing use "forward_euler" (or the explicit-AB2 + implicit-once
+    # refinement). Do NOT combine with ``tracer_time_integrator="ab2"`` (double-AB2).
+    outer_integrator: str = "forward_euler"
     # Implicit (backward-Euler) vertical mixing.  When True (default):
     #   1. The PE tendency function skips the explicit ``A_v`` viscous
     #      block (lines tagged ``if config.A_v > 0 ...``).
