@@ -8,7 +8,7 @@ absent on this machine).
 
 ## Gate status
 - [x] L1 pure mixing-length functions (rhines + deformation radius + composite) + config + unit tests
-- [ ] L2 wire `int_N_dz` + β + scheme dispatch into the coupling (default bit-identical)
+- [x] L2 wire `int_N_dz` + β + scheme dispatch into the coupling (default bit-identical)
 - [ ] L3 differentiability (grad through the rhines length finite + nonzero)
 - [ ] L4 oracle confirmation (reproduce Veros `eke_len`/`L_rossby`/`L_rhines`/`K_gm` to machine precision)
 - [ ] L5 recipe adoption (flip EKE on in `build_acc_model_config`)
@@ -40,3 +40,30 @@ clean. Verdict PASS, no code changes; one doc-precision nit on a test comment fi
 NEXT: L2 — expose `int_N_dz` from `_eady_growth_and_length` (= Σ N·dz_half, already computed as
 `_col[...,2]`); add `beta` arg + scheme dispatch to `compute_eke_kappa_gm`; analytic β=2Ω cosφ/R (from
 config.constants + grid.cos_lat) in `compute_eke_step_kappa`. Default "rossby" must stay bit-identical.
+
+### 2026-05-29 · L2 done — β + ∫N dz + scheme dispatch wired (default bit-identical)
+- `_eady_growth_and_length` → returns `int_N_dz` (4-tuple); column reduction UNIFIED out of the
+  if/else (`_stack=[ones,sigma,N]` always) so `sigma_bar`/`L`/`wet_col` stay bit-identical while
+  `int_N_dz = ∫N dz` is exposed (reuses the shared N — no duplicate numerics). Both callers updated
+  (`compute_visbeck_kappa_gm` discards it; `compute_eke_kappa_gm` uses it).
+- `compute_eke_kappa_gm` → `beta` kwarg + dispatch on `eke_cfg.mixing_length_scheme` (static Python
+  str ⇒ trace-time): "rossby"=`max(L_rossby,l_min)` (existing), "rhines"=`eke_len_composite(
+  eke_deformation_radius(int_N_dz,|f|,β), eke_rhines_length(E,β))`; ValueError on unknown / on
+  rhines-without-beta.
+- `compute_eke_step_kappa` → analytic β=2Ω cosφ/R from `grid.cos_lat` + `omega`/`r_earth` kwargs;
+  step call site passes `config.constants.{Omega,R_earth}` (Veros-pinned).
+GATE: `pytest tests/ocean/unit/{test_eke,test_eke_regression,test_baroclinic_decomposition,
+test_gm_redi_latlon_cgrid,test_latlon_cgrid_ocean,test_veros_acc_recipe}.py` → 122 passed
+(121 prior bit-identical — Visbeck/GM-Redi + E8 EKE golden + decomposition golden all hold — + the
+L2 dry-column robustness test).
+ADVERSARIAL REVIEW (physics-validator): 6 dimensions CLEAN (bit-identical refactor proven
+ALGEBRAICALLY incl. dry column; β = df/dy exact, β>0 both hemispheres, cos_lat clamp irrelevant in
+ACC band; Ω/R from ConstantsConfig; dispatch-on-static; caller-completeness; AD-safe, no double-abs;
+eke=None regression-safe). 1 MINOR latent bug FOUND+FIXED: `int_N_dz` was returned UNMASKED → NaN
+L+grad on a fully-dry column (jacobian=0 ⇒ N²=0/0) in the rhines path (ACC never hits it — land uses
+H_bathy=H_max ⇒ jacobian≈1 — so goldens passed, but a true-land global config would). FIX: wet-mask
+`int_N_dz` like sigma_bar/N_bar (bit-identical on wet; L=l_min on land). Locked by
+`test_L2_rhines_dry_column_finite_no_nan`. (Reviewer also flagged a PRE-EXISTING decomposition-golden
+flake under broad acc/veros co-execution — XLA-CPU reduction order, NOT L2; tracked as separate debt.)
+NEXT: L3 — committed grad test through the rhines length at typical values (finite + nonzero); the
+edge cases (E=0, dry column) are already locked by L1's probe + the L2 dry-column test.

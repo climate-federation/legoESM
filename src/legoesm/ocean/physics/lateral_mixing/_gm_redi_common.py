@@ -153,7 +153,7 @@ def compute_visbeck_kappa_gm(
     kappa : (...,) horizontally-varying kappa_GM [m^2/s], clamped to
         the configured bounds.
     """
-    sigma_bar, L, wet_col = _eady_growth_and_length(
+    sigma_bar, L, wet_col, _int_N_dz = _eady_growth_and_length(
         rho, S_x, S_y, z_coord, jacobian, f_coriolis, cfg, rho_ref,
     )
     # Apply the wet-column mask AFTER clipping — otherwise dry columns
@@ -173,13 +173,17 @@ def _eady_growth_and_length(
     f_coriolis: jnp.ndarray,
     cfg,
     rho_ref: float = _RHO_0_DEFAULT,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Depth-averaged Eady growth rate ``sigma_bar = <N|S|>_z`` and mixing length
-    ``L`` (first-baroclinic Rossby radius, or ``cfg.L_fixed``), plus the wet-column
-    mask. Shared by the Visbeck diagnostic ``kappa_GM`` (``alpha·L²·sigma_bar``) and
-    the prognostic-EKE closure (``kappa_GM = c_k·L·√E``, production ``∝ sigma_bar²``)
-    so the N²/slope/length numerics live in ONE place. ``cfg`` is a VisbeckConfig
-    (uses ``L_min``, ``L_max``, ``f_min``, ``use_rossby_radius``, ``L_fixed``).
+    ``L`` (first-baroclinic Rossby radius, or ``cfg.L_fixed``), the wet-column mask,
+    and the column buoyancy integral ``int_N_dz = ∫N dz`` [m/s]. Shared by the
+    Visbeck diagnostic ``kappa_GM`` (``alpha·L²·sigma_bar``) and the prognostic-EKE
+    closure (``kappa_GM = c_k·L·√E``, production ``∝ sigma_bar²``, and — for the
+    ``"rhines"`` eke_len — the deformation radius ``c1=int_N_dz/π``) so the
+    N²/slope/length numerics live in ONE place. ``cfg`` is a VisbeckConfig (uses
+    ``L_min``, ``L_max``, ``f_min``, ``use_rossby_radius``, ``L_fixed``).
+
+    Returns ``(sigma_bar, L, wet_col, int_N_dz)``.
     """
     eps = _EPS
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
@@ -204,39 +208,38 @@ def _eady_growth_and_length(
     S_mag = jnp.sqrt(S_x ** 2 + S_y ** 2 + 1e-30)
     sigma = N * S_mag
 
-    # Depth-weighted average of sigma_Eady (and N, when needed) — fuse
-    # the column reductions that share the ``dz_half`` weight.
-    # Dry-column safeguard: when ``dz_half`` is all zero (jacobian = 0
-    # over land or in dry cells), ``w_total = 0`` and the eps-floor in
-    # the denominator yielded a garbage ``sigma_bar`` that was only
-    # masked by the final ``clip(kappa, ..., kappa_max)``.  Explicitly
-    # zero the column average when there's no wet water, so the wet
-    # mask propagates cleanly through gradients and forward values.
+    # Fused column reduction of ``ones``, ``sigma`` and ``N`` (shared ``dz_half``
+    # weight). ``int_N_dz = Σ N·dz_half = ∫N dz`` [m/s] is the column buoyancy
+    # integral (= Veros's ``C_rossby·π``); it is returned so the prognostic-EKE
+    # eke_len deformation radius (``c1 = int_N_dz/π``) reuses the shared N WITHOUT
+    # re-deriving N²/N anywhere (no duplicate numerics). The N reduction is shared by
+    # both length modes; the ``L_fixed`` branch ignores ``N_bar`` but the fused sum
+    # is identical, so ``sigma_bar``/``L``/``wet_col`` stay bit-identical to the
+    # pre-int_N_dz code.
+    #
+    # Dry-column safeguard: when ``dz_half`` is all zero (jacobian = 0 over land /
+    # dry cells), ``w_total = 0`` and N² = 0/0 = NaN, so EVERY column-reduced
+    # quantity is explicitly zeroed on dry columns via ``wet_col`` — ``sigma_bar``,
+    # ``N_bar`` AND ``int_N_dz`` alike — so the wet mask propagates cleanly through
+    # forward values and gradients. (A raw NaN ``int_N_dz`` would otherwise poison
+    # the "rhines" eke_len + its VJP on any config with true land; bit-identical on
+    # wet columns, where ``wet_col`` is True.)
+    _stack = jnp.stack([jnp.ones_like(sigma), sigma, N], axis=-1)
+    _col = jnp.sum(_stack * dz_half[..., None], axis=-2)
+    w_total = _col[..., 0]
+    w_safe = jnp.maximum(w_total, eps)
+    wet_col = w_total > eps
+    sigma_bar = jnp.where(wet_col, _col[..., 1] / w_safe, 0.0)
+    int_N_dz = jnp.where(wet_col, _col[..., 2], 0.0)  # ∫N dz [m/s]; masked like sigma_bar
     if cfg.use_rossby_radius:
-        # 3 reductions over the same axis with weight ``dz_half``:
-        # ``w_total``, ``sigma * dz_half`` and ``N * dz_half``.
-        _stack = jnp.stack([jnp.ones_like(sigma), sigma, N], axis=-1)
-        _col = jnp.sum(_stack * dz_half[..., None], axis=-2)
-        w_total = _col[..., 0]
-        w_safe = jnp.maximum(w_total, eps)
-        wet_col = w_total > eps
-        sigma_bar = jnp.where(wet_col, _col[..., 1] / w_safe, 0.0)
-        N_bar = jnp.where(wet_col, _col[..., 2] / w_safe, 0.0)
+        N_bar = jnp.where(wet_col, int_N_dz / w_safe, 0.0)
         H_col = jnp.sum(dz_actual, axis=-1)
         f_safe = jnp.maximum(jnp.abs(f_coriolis), cfg.f_min)
         L = jnp.clip(N_bar * H_col / f_safe, cfg.L_min, cfg.L_max)
     else:
-        # 2 reductions over the same axis with weight ``dz_half``.
-        _stack = jnp.stack([jnp.ones_like(sigma), sigma], axis=-1)
-        _col = jnp.sum(_stack * dz_half[..., None], axis=-2)
-        w_total = _col[..., 0]
-        wet_col = w_total > eps
-        sigma_bar = jnp.where(
-            wet_col, _col[..., 1] / jnp.maximum(w_total, eps), 0.0,
-        )
         L = jnp.full_like(sigma_bar, cfg.L_fixed)
 
-    return sigma_bar, L, wet_col
+    return sigma_bar, L, wet_col, int_N_dz
 
 
 def compute_eke_kappa_gm(
@@ -250,23 +253,56 @@ def compute_eke_kappa_gm(
     visbeck_cfg,
     eke_cfg,
     rho_ref: float = _RHO_0_DEFAULT,
+    *,
+    beta: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Prognostic GM coefficient from the eddy-energy field ``E`` (Eden-Greatbatch).
 
     Reuses the SHARED Eady-rate/Rossby-length machinery (``_eady_growth_and_length``,
-    using ``visbeck_cfg`` for the length params) and the EKE closure
-    (``eke_mixing_length`` + ``eke_kappa_gm``). Returns ``(kappa_GM, sigma_bar, L)``:
-    ``kappa_GM = c_k·L·√E`` (2-D, masked to wet columns) for the GM/Redi tendency,
-    and ``sigma_bar`` (depth-averaged Eady growth rate) + ``L`` (floored mixing
-    length) for the EKE local source/sink (``eke_local_tendency``). Pure.
+    using ``visbeck_cfg`` for the length params) and the EKE closure. Returns
+    ``(kappa_GM, sigma_bar, L)``: ``kappa_GM = c_k·L·√E`` (2-D, masked to wet
+    columns) for the GM/Redi tendency, and ``sigma_bar`` (depth-averaged Eady growth
+    rate) + ``L`` (mixing length) for the EKE local source/sink
+    (``eke_local_tendency``). Pure.
+
+    The mixing length ``L`` follows ``eke_cfg.mixing_length_scheme``:
+
+    - ``"rossby"`` (default) — ``L = max(L_rossby, l_min)``, the Visbeck
+      first-baroclinic length (legoESM's pre-eke_len behaviour). ``beta`` unused.
+    - ``"rhines"`` — Veros ``eke_len = max(l_min, min(eke_cross·L_rossby,
+      eke_crhin·L_rhines))`` from the deformation radius ``c1=int_N_dz/π`` and the
+      eddy-energy Rhines scale ``√(√E/β)``. Requires ``beta`` (df/dy); raises
+      otherwise.
+
+    Dispatch is on the static ``mixing_length_scheme`` Python string, so the
+    ``if/elif/else`` runs at trace time (not on a traced value).
     """
     from legoesm.ocean.physics.lateral_mixing.eke import (
-        eke_kappa_gm, eke_mixing_length,
+        eke_deformation_radius, eke_kappa_gm, eke_len_composite,
+        eke_mixing_length, eke_rhines_length,
     )
 
-    sigma_bar, L_rossby, wet_col = _eady_growth_and_length(
+    sigma_bar, L_rossby, wet_col, int_N_dz = _eady_growth_and_length(
         rho, S_x, S_y, z_coord, jacobian, f_coriolis, visbeck_cfg, rho_ref,
     )
-    L = eke_mixing_length(L_rossby, eke_cfg)
+    scheme = eke_cfg.mixing_length_scheme
+    if scheme == "rossby":
+        L = eke_mixing_length(L_rossby, eke_cfg)
+    elif scheme == "rhines":
+        if beta is None:
+            raise ValueError(
+                "compute_eke_kappa_gm: mixing_length_scheme='rhines' requires "
+                "`beta` (df/dy [1/(m·s)]); none was passed."
+            )
+        L = eke_len_composite(
+            eke_deformation_radius(int_N_dz, f_coriolis, beta, eke_cfg),
+            eke_rhines_length(E, beta, eke_cfg),
+            eke_cfg,
+        )
+    else:
+        raise ValueError(
+            "EKEConfig.mixing_length_scheme must be 'rossby' or 'rhines', got "
+            f"{scheme!r}"
+        )
     kappa = eke_kappa_gm(E, L, eke_cfg)
     return jnp.where(wet_col, kappa, 0.0), sigma_bar, L

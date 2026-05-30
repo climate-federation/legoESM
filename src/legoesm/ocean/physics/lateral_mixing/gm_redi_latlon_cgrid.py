@@ -874,6 +874,7 @@ def eke_horizontal_transport(E, U_bar, V_bar, grid, eke_cfg, mask, u_mask, v_mas
 def compute_eke_step_kappa(
     T, S, eta, H_bathy, eke, grid, z_coord, cfg, *,
     eos="wright", eos_linear=None, mask=None, rho_0=_RHO_0, g=constants.g,
+    omega=constants.Omega, r_earth=constants.R_earth,
 ):
     """Prognostic GM coefficient + Eady growth rate + mixing length from the
     eddy-energy field, for the EKE-active model step. Returns ``(kappa_GM,
@@ -885,6 +886,12 @@ def compute_eke_step_kappa(
     optimization), then ``compute_eke_kappa_gm`` (which reuses the shared
     Eady-length machinery). ``cfg`` is the GMRediConfig (uses ``cfg.visbeck`` for
     the Rossby-length params and ``cfg.eke`` for the closure params).
+
+    For ``cfg.eke.mixing_length_scheme == "rhines"`` the eke_len needs ``β =
+    df/dy``; it is computed analytically as ``2Ω·cosφ/R`` (exact on the sphere
+    where ``f = 2Ω sinφ``; equals Veros's discrete ``df/dy`` to O(dφ²)). ``Ω``/``R``
+    come from the model constants (``omega``/``r_earth``; Veros-pinned in the ACC
+    recipe), never literals. The ``"rossby"`` scheme ignores ``β``.
     """
     if mask is None:
         mask = jnp.ones(T.shape[:2], dtype=T.dtype)
@@ -898,7 +905,12 @@ def compute_eke_step_kappa(
         rho, mask, z_coord, jacobian, grid, cfg,
     )
     f_coriolis = jnp.broadcast_to(grid.f, mask.shape)
+    # β = df/dy = 2Ω cosφ/R (analytic; grid.cos_lat is cosφ). Broadcast (n_lat,)
+    # -> (n_lat, n_lon) to match f. Used only by the "rhines" eke_len scheme.
+    beta = jnp.broadcast_to(
+        (2.0 * omega * grid.cos_lat / r_earth)[:, None], mask.shape,
+    )
     return compute_eke_kappa_gm(
         eke, rho, S_x, S_y, z_coord, jacobian, f_coriolis,
-        cfg.visbeck, cfg.eke, rho_ref=rho_0,
+        cfg.visbeck, cfg.eke, rho_ref=rho_0, beta=beta,
     )

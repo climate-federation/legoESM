@@ -587,3 +587,120 @@ def test_eke_len_full_acc_regime_is_order_km_not_hundreds_km():
     # vs the rossby-only scheme at a representative saturated L_rossby (~200 km):
     rossby_only = eke_mixing_length(jnp.array(2.0e5), cfg)
     assert float(eke_len) < 0.1 * float(rossby_only)   # >10x smaller
+
+
+# ---------------------------------------------------------------------------
+# L2 — scheme dispatch + β + ∫N dz wired into compute_eke_kappa_gm.
+# Default "rossby" stays bit-identical (the unchanged tests above cover it);
+# here we exercise the new "rhines" branch + the dispatch guards.
+# ---------------------------------------------------------------------------
+
+def _coupling_with_beta(E_val, beta_val=1.62e-11):
+    """`_eke_coupling_inputs` plus a Visbeck cfg and a β field (df/dy at ~ -45°)."""
+    from legoesm.ocean.physics.lateral_mixing.config import VisbeckConfig
+    E, rho, S_x, S_y, z, jac, f = _eke_coupling_inputs(E_val)
+    beta = jnp.full(E.shape, float(beta_val))
+    return (E, rho, S_x, S_y, z, jac, f), VisbeckConfig(), beta
+
+
+def test_L2_eady_growth_returns_int_N_dz():
+    """_eady_growth_and_length now returns ∫N dz (4-tuple) — positive + finite on a
+    stratified column — so the rhines deformation radius reuses the shared N (no
+    duplicate numerics)."""
+    from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+        _eady_growth_and_length,
+    )
+    (E, rho, S_x, S_y, z, jac, f), vcfg, _beta = _coupling_with_beta(0.01)
+    out = _eady_growth_and_length(rho, S_x, S_y, z, jac, f, vcfg)
+    assert len(out) == 4
+    _sigma_bar, _L, _wet, int_N_dz = out
+    assert int_N_dz.shape == (4, 6)
+    assert jnp.all(int_N_dz >= 0.0) and jnp.all(jnp.isfinite(int_N_dz))
+    assert float(jnp.mean(int_N_dz)) > 0.0   # stratified -> ∫N dz > 0
+
+
+def test_L2_rhines_scheme_gives_smaller_L_than_rossby():
+    """The headline wiring effect: the rhines eke_len (deformation/Rhines-limited)
+    is strictly smaller than the Visbeck "rossby" length on the same column — the
+    ~π (and Rhines) reduction that the recipe needs (L5)."""
+    from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+        compute_eke_kappa_gm,
+    )
+    (E, rho, S_x, S_y, z, jac, f), vcfg, beta = _coupling_with_beta(0.01)
+    ecfg_ros = EKEConfig(mixing_length_scheme="rossby")
+    ecfg_rhi = EKEConfig(mixing_length_scheme="rhines")
+    _k0, _s0, L_ros = compute_eke_kappa_gm(
+        E, rho, S_x, S_y, z, jac, f, vcfg, ecfg_ros)
+    k_rhi, _s1, L_rhi = compute_eke_kappa_gm(
+        E, rho, S_x, S_y, z, jac, f, vcfg, ecfg_rhi, beta=beta)
+    assert jnp.all(jnp.isfinite(L_rhi)) and jnp.all(k_rhi >= 0.0)
+    assert float(jnp.mean(L_rhi)) < float(jnp.mean(L_ros))
+
+
+def test_L2_rhines_smaller_E_shrinks_L():
+    """Lower eddy energy -> smaller Rhines scale -> smaller eke_len once Rhines limits."""
+    from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+        compute_eke_kappa_gm,
+    )
+    ecfg = EKEConfig(mixing_length_scheme="rhines")
+    (E_hi, rho, S_x, S_y, z, jac, f), vcfg, beta = _coupling_with_beta(1.0e-2)
+    (E_lo, *_rest), _v, _b = _coupling_with_beta(1.0e-6)
+    _k0, _s0, L_hi = compute_eke_kappa_gm(
+        E_hi, rho, S_x, S_y, z, jac, f, vcfg, ecfg, beta=beta)
+    _k1, _s1, L_lo = compute_eke_kappa_gm(
+        E_lo, rho, S_x, S_y, z, jac, f, vcfg, ecfg, beta=beta)
+    assert float(jnp.mean(L_lo)) < float(jnp.mean(L_hi))
+
+
+def test_L2_rhines_requires_beta():
+    from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+        compute_eke_kappa_gm,
+    )
+    (E, rho, S_x, S_y, z, jac, f), vcfg, _beta = _coupling_with_beta(0.01)
+    ecfg = EKEConfig(mixing_length_scheme="rhines")
+    try:
+        compute_eke_kappa_gm(E, rho, S_x, S_y, z, jac, f, vcfg, ecfg)  # no beta
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError when rhines scheme has no beta")
+
+
+def test_L2_unknown_scheme_raises_in_dispatch():
+    """Dispatch discipline: an unknown scheme raises in compute_eke_kappa_gm
+    (defense-in-depth beyond validate_eke_config) — no silent fallback."""
+    from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+        compute_eke_kappa_gm,
+    )
+    (E, rho, S_x, S_y, z, jac, f), vcfg, beta = _coupling_with_beta(0.01)
+    ecfg = EKEConfig(mixing_length_scheme="bogus")
+    try:
+        compute_eke_kappa_gm(E, rho, S_x, S_y, z, jac, f, vcfg, ecfg, beta=beta)
+    except ValueError:
+        return
+    raise AssertionError("expected ValueError for unknown mixing_length_scheme")
+
+
+def test_L2_rhines_dry_column_finite_no_nan():
+    """A fully-dry column (jacobian=0 -> N²=0/0=NaN) must NOT produce NaN L, kappa,
+    or grads in the rhines path: int_N_dz is wet-masked like sigma_bar/N_bar, so the
+    column collapses to L=l_min, kappa=0. Locks the L2-review robustness fix (the
+    rossby path was already NaN-free here; rhines must match it on land columns)."""
+    import jax
+    from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+        compute_eke_kappa_gm,
+    )
+    (E, rho, S_x, S_y, z, jac, f), vcfg, beta = _coupling_with_beta(0.01)
+    jac = jac.at[0, 0].set(0.0)                      # column (0,0) fully dry
+    ecfg = EKEConfig(mixing_length_scheme="rhines")
+    kappa, sigma, L = compute_eke_kappa_gm(
+        E, rho, S_x, S_y, z, jac, f, vcfg, ecfg, beta=beta)
+    assert jnp.all(jnp.isfinite(L)), "rhines L has NaN on a dry column"
+    assert jnp.all(jnp.isfinite(kappa)) and jnp.all(jnp.isfinite(sigma))
+    assert float(kappa[0, 0]) == 0.0                 # dry column masked to 0
+    # And no NaN-grad trap: d(Σκ)/dE is finite everywhere.
+    def _loss(E_in):
+        k, _s, _l = compute_eke_kappa_gm(
+            E_in, rho, S_x, S_y, z, jac, f, vcfg, ecfg, beta=beta)
+        return jnp.sum(k)
+    g = jax.grad(_loss)(E)
+    assert jnp.all(jnp.isfinite(g)), "rhines kappa grad has NaN on a dry column"

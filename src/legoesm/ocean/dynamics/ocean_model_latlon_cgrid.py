@@ -1073,6 +1073,8 @@ class LatLonCGridOceanModel:
                     mask=lm,
                     rho_0=self.config.constants.rho_0,
                     g=self.config.constants.g,
+                    omega=self.config.constants.Omega,
+                    r_earth=self.config.constants.R_earth,
                 )
                 # Depth-mean advecting flow (level-mean; preserves the periodic
                 # wrap so the transport conserves the area-integral of E).
