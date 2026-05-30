@@ -177,8 +177,30 @@ cube metric/vorticity discretization — the next target (needs the oracle to
 compare FV3's exact corner-vorticity/Coriolis stencil, `sw_core.F90:378-480`).
 AMIP cube runs physical + stable under full physics (T 279K, finite).
 
+## iter 14b — ROOT CAUSE FOUND + FIXED (vector-aware wind interp) ✅✅
+**The cube baroclinic v-imprint was a vector-vs-scalar bug.** `_step_cell_centre`
+(primitive_eq_cdgrid.py) converted cc winds → D-grid corners EVERY step via
+`_interp_center_to_corner` on the **stacked (u,v)** — treating the D-grid winds as
+two SCALARS and blending face-local components across panel seams WITHOUT
+rotation. Chain: PGF ruled out → vorticity 229× rougher at edges → winds 167×/83×
+rougher (scalar) → **0.7×/1.3×/1.8× with vector `center_to_dgrid_vector`**.
+FIX (ac6a8f58): rotation-aware `center_to_dgrid_vector` (inverse of the exit
+`dgrid_to_center_vector`). Results (C36 quick, cube):
+| metric | before | AFTER |
+|--------|--------|-------|
+| baroclinic v_rms@2d | 4.95 (75× latlon) | **0.66 (10×)** |
+| imprint growth | 3.4→4.95 | **stops (~0.65)** |
+| mass drift | 2.6e-11 | **1.1e-15 (1e4×)** |
+| gravity_wave_3_1 max\|v\| | 22.4 (outlier) | **19.5 (≈ico 20)** |
+| baroclinic v-field (visual) | wavenumber-4 panel blocks | **smooth zonal bands** |
+ALL PE cube cases PASS; 22 PE tests green. 1e4× conservation gain + gravity_wave→ico
++ smooth v confirm correctness. RESIDUAL ~10× latlon (smooth zonal, NOT an edge
+artifact) + rest_state_topo topography-PGF (separate). [git: fix briefly mis-
+committed to main by a stray checkout; cherry-picked here, local main reset.]
+
 ## Pending / next
-- HS climate match (cube vs latlon) — latlon slow [running, monitor armed].
-- AMIP cube vs latlon (user wants it + continent-longitude check).
-- Atmosphere FC-PGF build (per plan above) — the imprint fix.
-- `DONE` withheld: atmosphere panel-edge imprint is real + the FC fix is a build.
+- Codex review of the fix [running]. Broader verify (held_suarez/AMIP climate).
+- Chase residual 10× (smooth zonal — likely KE-grad or remaining metric term).
+- rest_state_topo topography-PGF (separate mechanism).
+- AMIP cube vs latlon continent-longitude check.
+- `DONE` withheld: residual + topography imprint remain, broader verify pending.
