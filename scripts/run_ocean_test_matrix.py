@@ -2202,7 +2202,8 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
                         A_h: float | None = None,
                         A_v: float | None = None,
                         bottom_drag_r: float | None = None,
-                        cube_use_fc: bool | None = None):
+                        cube_use_fc: bool | None = None,
+                        cube_fc_light_diffusion: bool = False):
     """Create grid, z_coord, and rest-state for any grid type.
 
     Parameters
@@ -2273,11 +2274,25 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
                 use_conservation_fixer=True,
                 physics=physics,
             )
-            if A_h is None:
+            if cube_fc_light_diffusion:
+                # Wave tests (barotropic_wave, inertia_gravity_wave) carry
+                # NO horizontal density gradient, so they do not excite the
+                # face-edge baroclinic-PGF instability that the raised
+                # A_h=5e5 / K_h=5e6 exists to suppress.  The FC-Gram
+                # spectral gradient alone removes the eta-gradient face
+                # artifact that NaN'd the legacy A-L path.  Keep light
+                # lateral diffusion so the small-amplitude wave is not
+                # over-damped (raised K_h decays barotropic_wave 0.1 m ->
+                # 0.04 m; codex iter-8 flagged the coupling).  A_h/K_h fall
+                # back to the caller value / OceanConfig default.
+                if A_h is not None:
+                    kw["A_h"] = A_h
+            elif A_h is None:
                 kw["A_h"] = 5.0e5
+                kw["K_h"] = 5.0e6
             else:
                 kw["A_h"] = max(A_h, 5.0e5)
-            kw["K_h"] = 5.0e6
+                kw["K_h"] = 5.0e6
         else:
             kw = dict(n_barotropic_substeps=30, physics=physics)
             if A_h is not None:
@@ -3455,8 +3470,11 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
     if tc.grid_type == "spectral":
         raise NotImplementedError(
             "Barotropic wave skipped for spectral grid (land masking issues)")
+    # Cube: use the FC-Gram backend for face-edge stability but WITHOUT the
+    # raised A_h/K_h (no density gradient here, so the heavy diffusion only
+    # over-damps the small-amplitude wave — codex iter-8).
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc))
+        _create_ocean_setup(tc, cube_fc_light_diffusion=True))
     state = _create_rest_state(tc, grid, z_coord)
     state = _add_barotropic_wave_perturbation(
         state, tc.grid_type, grid, z_coord)
@@ -4854,8 +4872,15 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
     dispersion properties.
     """
     H_max = 1000.0  # equivalent depth (m)
+    # Cube: keep the legacy (non-FC) path.  The IGW is a single-level
+    # barotropic wave with NO horizontal density gradient, so it does NOT
+    # excite the face-edge baroclinic-PGF instability the FC-Gram backend
+    # exists to cure — it is already finite/stable on the A-L path
+    # (amp_ratio 0.068).  FC's Fourier-continuation smoothing only adds
+    # dissipation (amp_ratio 0.008), so routing IGW through the new
+    # cube-default FC backend would strictly worsen it.  Opt out.
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, nlev=2, H_max=H_max))
+        _create_ocean_setup(tc, nlev=2, H_max=H_max, cube_use_fc=False))
     state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
     state = _init_inertia_gravity_wave(state, tc.grid_type, grid, z_coord)
 

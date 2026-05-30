@@ -275,10 +275,26 @@ FIX: default `cube_use_fc` to True for cubed_sphere in `_create_ocean_setup`
 |----------------|--------|----------|
 | rest_state_stratified_with_land | NaN day 2.08 | **PASS** (eta drift 7e-21, stable) |
 | barotropic_wave | NaN day 1.04 | **stable** (finite, drift 8.5e-17) BUT over-damped (amp 0.016 vs latlon 0.098/mpas 0.104) |
-Strictly better (NaN→stable+conserving). FOLLOW-UP: FC over-damps the fast
-barotropic_wave — likely the cube-specific raised A_h/K_h (added to stabilize the
-OLD no-FC path) is now redundant under FC; lowering it should recover wave
-amplitude. Also verify inertia_gravity_wave cube.
+Strictly better (NaN→stable+conserving).
+
+iter-8b (codex follow-up — codex flagged "needs-attention": the FC default
+coupled the stability fix with density-test heavy diffusion that over-damps
+waves). Resolved by DECOUPLING + per-case principle "FC only where no-FC is
+unstable, with diffusion matched to the case":
+- `cube_fc_light_diffusion` param splits the FC backend from the raised
+  A_h/K_h. barotropic_wave uses FC + LIGHT diffusion (no density gradient).
+- IGW opted OUT of FC (`cube_use_fc=False`): it's a barotropic wave that is
+  already finite/stable on no-FC (amp 0.068); FC only over-damps it (0.008).
+FINAL cube ocean state (no regressions):
+| case | before | after |
+|------|--------|-------|
+| rest_state ×4 (stratified/uniform × land) | NaN | **PASS** (drift ~1e-29) |
+| barotropic_wave | NaN day1 | finite+conserving (amp 0.02, still < 0.1 thr — FC intrinsically over-damps fast waves; latlon also marginally fails at 0.098) |
+| inertia_gravity_wave | FAIL amp 0.068 | unchanged (no-FC, amp 0.068) |
+| geostrophic_adjustment/phillips/overflow | FC (pass) | unchanged |
+LESSON: FC-Gram cures the density-gradient face-edge PGF NaN but its Fourier-
+continuation smoothing intrinsically over-damps fast barotropic waves — so it's
+the right fix for density/rest cases, wrong for pure wave cases.
 
 **ATMOSPHERE LEAD (reopens the "irreducible" verdict):** `core/operators_fc`
 provides GENERAL FC-Gram cube operators (`fc_gradient_x/y`, `fc_divergence`,
