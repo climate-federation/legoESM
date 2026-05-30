@@ -350,6 +350,14 @@ class LatLonCGridOceanState(NamedTuple):
     # when the prognostic-EKE GM closure is active (config.gm_redi.eke not None).
     # Default None -> inert (no EKE): zero behaviour change for existing configs.
     eke: object = None
+    # τ-1 prognostic state for the leapfrog outer integrator
+    # (config.outer_integrator == "leapfrog_ab2"). Hold state^{n-1} (after the
+    # Robert-Asselin filter) so state^{n+1} = state^{n-1} + 2·dt·F(state^n).
+    # Default None -> inert (forward-Euler): zero behaviour change.
+    T_prev: object = None
+    S_prev: object = None
+    u_prev: object = None
+    v_prev: object = None
 
 
 class LatLonCGridOceanDiagnostics(NamedTuple):
@@ -758,6 +766,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     #   nonlinear limiters (TVD, WENO, FCT).
     tracer_time_integrator: str = "euler"
     ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar)
+    # Outer (baroclinic) time integrator. "forward_euler" (default) = the
+    # existing single-step split-explicit scheme. "leapfrog_ab2" = Veros's
+    # centred-in-time leapfrog with a Robert-Asselin time filter on the
+    # explicit prognostics (the barotropic free-surface solve is left
+    # unchanged — Veros does not leapfrog the free surface). The leapfrog
+    # carries the τ-1 state (``T_prev``/``S_prev``/``u_prev``/``v_prev`` on
+    # the state). See ``timestepping/leapfrog_ab2.py``.
+    outer_integrator: str = "forward_euler"
+    asselin_nu: float = 0.05  # Robert-Asselin filter strength (Veros-typical)
     # Implicit (backward-Euler) vertical mixing.  When True (default):
     #   1. The PE tendency function skips the explicit ``A_v`` viscous
     #      block (lines tagged ``if config.A_v > 0 ...``).

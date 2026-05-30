@@ -1479,9 +1479,68 @@ class LatLonCGridOceanModel:
         -------
         LatLonCGridOceanState
         """
+        _oi = getattr(self.config, "outer_integrator", "forward_euler")
+        if _oi not in ("forward_euler", "leapfrog_ab2"):
+            raise ValueError(
+                "config.outer_integrator must be 'forward_euler' or "
+                f"'leapfrog_ab2', got {_oi!r}"
+            )
+        if _oi == "leapfrog_ab2":
+            return self._leapfrog_step(
+                state, dt, freshwater=freshwater,
+                surface_forcing=surface_forcing, sponge=sponge)
         return self._step_impl(state, dt, freshwater=freshwater,
                                surface_forcing=surface_forcing,
                                sponge=sponge)
+
+    def _leapfrog_step(self, state: LatLonCGridOceanState, dt: float,
+                       freshwater=None, surface_forcing=None, sponge=None,
+                       ) -> LatLonCGridOceanState:
+        """Leapfrog + Robert-Asselin outer integrator — tracers (gate I1).
+
+        The forward-Euler step ``_step_impl`` gives ``X_FE = X^n + dt·F(X^n)``,
+        so the implied total (fully-explicit) tracer tendency is
+        ``F = (X_FE - X^n)/dt``. The fully-explicit tracers (T, S) are then
+        advanced by a centred-in-time leapfrog, and the Robert-Asselin time
+        filter (Asselin 1972) damps the leapfrog computational mode::
+
+            X^{n+1}  = X^{n-1} + 2·(X_FE - X^n)        (= X^{n-1} + 2 dt F)
+            X^n_filt = X^n + ν·(X^{n+1} - 2 X^n + X^{n-1})
+
+        ``X^{n-1}`` is carried on the state (``T_prev``/``S_prev``); the first
+        step bootstraps with ``X^{n-1} = X^n`` (a 2 dt forward-Euler seed — the
+        standard leapfrog start, matching ``initialize_leapfrog_carry``). The
+        momentum + free surface keep the forward-Euler / split-explicit result
+        (leapfrog momentum is gate I2; Veros leaves the barotropic free surface
+        un-leapfrogged). Every op is linear in the three time levels, so the
+        scheme is differentiable end-to-end.
+        """
+        state_fe = self._step_impl(
+            state, dt, freshwater=freshwater,
+            surface_forcing=surface_forcing, sponge=sponge)
+        nu = self.config.asselin_nu
+        mask3 = state.land_mask.data[..., jnp.newaxis]
+
+        T_n, S_n = state.T.data, state.S.data
+        # τ-1 (bootstrap: prev = current on the first step).
+        T_prev = state.T_prev.data if state.T_prev is not None else T_n
+        S_prev = state.S_prev.data if state.S_prev is not None else S_n
+
+        # Leapfrog the fully-explicit tracers (exact: T,S are explicit in X_FE).
+        T_lf = T_prev + 2.0 * (state_fe.T.data - T_n)
+        S_lf = S_prev + 2.0 * (state_fe.S.data - S_n)
+        # Robert-Asselin filter on state^n (the new τ-1 carry).
+        T_filt = T_n + nu * (T_lf - 2.0 * T_n + T_prev)
+        S_filt = S_n + nu * (S_lf - 2.0 * S_n + S_prev)
+
+        return state_fe._replace(
+            T=state_fe.T.replace(data=T_lf * mask3),
+            S=state_fe.S.replace(data=S_lf * mask3),
+            T_prev=Field(data=T_filt * mask3, name="T_prev",
+                         dims=state.T.dims, units=state.T.units),
+            S_prev=Field(data=S_filt * mask3, name="S_prev",
+                         dims=state.S.dims, units=state.S.units),
+        )
 
     def step_checked(
         self,
@@ -1681,6 +1740,22 @@ class LatLonCGridOceanModel:
                 S_flux_div_prev=Field(
                     data=_zero, name="S_flux_div_prev",
                     dims=_dims_fd, units="m/s"),
+            )
+
+        # Leapfrog: seed the τ-1 carry (T_prev/S_prev = the initial state) so the
+        # scan carry keeps a CONSTANT pytree (None -> Field would crash lax.scan).
+        # The first step then bootstraps from X^{-1}=X^0 (a 2dt forward-Euler seed).
+        if (self.config.outer_integrator == "leapfrog_ab2"
+                and state.T_prev is None):
+            from legoesm.core.field import Field
+            # Use the SAME field metadata (name="T_prev"/"S_prev") that
+            # _leapfrog_step emits — the Field name is part of the pytree
+            # structure, so a mismatched seed name would crash lax.scan.
+            state = state._replace(
+                T_prev=Field(data=state.T.data, name="T_prev",
+                             dims=state.T.dims, units=state.T.units),
+                S_prev=Field(data=state.S.data, name="S_prev",
+                             dims=state.S.dims, units=state.S.units),
             )
 
         def scan_fn(state, _):
