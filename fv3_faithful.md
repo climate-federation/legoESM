@@ -44,16 +44,27 @@ density/rest, wrong for pure-wave cases.)
   (mirror of the atmosphere diffusion-halo fix). Validated: zonal-jet |∇²V|
   non-zonal frac 0.59→0.38 (vector more zonally symmetric = more correct).
   Test `tests/ocean/unit/test_fc_velocity_viscosity_vector_halo.py`.
-- ⚠️ **OPEN cube-ocean artifact**: geostrophic_adjustment (zonal thermal-wind
-  IC, `+5°C·cos(lat)`) — cube eta **40% non-zonal variance** vs latlon 0.0%,
-  mpas 0.3%. IC is zonal (nz=0.0000); eta grows 0.04→0.45 by t=0.6d then
-  saturates ~0.40; equatorial faces 0-3 disagree (means -0.019..+0.054), polar
-  faces identical (N/S symmetric). NOT viscosity (fix didn't move it; A_h=1e4
-  too weak/1d) and NOT the barotropic continuity divergence (already vector via
-  `_pad_vector`). Grow-then-saturate ⇒ grid-seeded mode amplified by thermal-
-  wind shear. NEXT: C24-vs-C48 convergence study to classify truncation
-  (converges, acceptable) vs consistency error (anti-converges, bug); then the
-  inviscid momentum (Coriolis/PGF metric) or the barotropic momentum.
+- ⚠️ **OPEN cube-ocean artifact (user-confirmed visually)**: geostrophic_adjustment
+  (zonal thermal-wind IC `+5°C·cos(lat)`) — cube eta **40% non-zonal variance**
+  vs latlon 0.0%, mpas 0.3%. ROOT-CAUSED (this session):
+  - IC zonal (nz=0.0000). Inviscid FC baroclinic tendency |du,dv|/dt only **2%**
+    non-zonal (`deta_dt`=0) — FC-Gram per-face spectral PGF has a small ~2%
+    zonal-asymmetry imprint (the seed).
+  - Cube barotropic solver is **A-grid** (`staggering=a_grid`, default); latlon
+    uses **c_grid**, mpas C-grid-like TRiSK — both immune. A-grid supports a
+    computational pressure mode. Per-step: eta→5% non-zonal after step 1, holds
+    ~4% for hours, then a large-scale (wavenumber-1) mode amplifies 4%→40% over
+    ~12h. Config A_h=5e5/K_h=5e6 heavy but Laplacian (∝k²) can't damp the
+    large-scale mode; visible fine striping = under-damped small-scale A-grid mode.
+  - NOT the viscosity (fixed 4fe7108c, didn't move it) NOR the barotropic
+    continuity divergence (already vector via `_pad_vector`).
+  - The cube **C-grid barotropic solver EXISTS** (`barotropic_cgrid.py`, built "to
+    eliminate the 2·dx checkerboard null space") but `barotropic_staggering=
+    "c_grid"` **NaNs** for this density-gradient case — not a drop-in fix.
+  NEXT (substantial): stabilize the cube C-grid barotropic for density-gradient
+  cases (likely state velocity staggering / FC-baroclinic coupling / its own
+  diffusion), OR add a large-scale-mode filter to the A-grid eta solver. This is
+  a cube-ocean barotropic-discretization issue, NOT a halo bug.
 
 ## Verdict on the 3 user-flagged SW visual concerns
 1. cosine-bell day-1 = bulk PPM-limiter diffusion in the panel INTERIOR (cube/ico
