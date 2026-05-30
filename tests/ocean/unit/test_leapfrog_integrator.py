@@ -119,28 +119,63 @@ def test_leapfrog_bootstrap_is_2fe_minus_initial():
     assert s_lf.T_prev is not None  # carry now seeded
 
 
-def test_leapfrog_i1_leaves_momentum_at_forward_euler():
-    """I1 leapfrogs tracers only — the momentum + free surface match the
-    forward-Euler step (Veros leaves the barotropic free surface un-leapfrogged)."""
+def _depth_mean_u(model, state, u):
+    """Thickness-weighted depth mean of a u-face field (the barotropic mode)."""
+    from legoesm.ocean.vertical import compute_layer_thickness
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import min_cell_to_uface
+    h_k = compute_layer_thickness(
+        state.eta.data, state.H_bathy.data, model.z_coord,
+        min_water_column_m=model.config.min_water_column_m)
+    h_u = np.asarray(min_cell_to_uface(h_k))
+    u = np.asarray(u)
+    return np.sum(u * h_u, axis=-1) / np.maximum(np.sum(h_u, axis=-1), 1e-10)
+
+
+def test_leapfrog_momentum_barotropic_mean_preserved():
+    """I2 leapfrogs only the baroclinic deviation: the barotropic depth-mean of the
+    leapfrog velocity equals that of the forward-Euler/split-explicit step (Veros
+    leaves the free-surface barotropic mode un-leapfrogged)."""
     state_lf, model_lf = _channel("leapfrog_ab2")
     state_fe, model_fe = _channel("forward_euler")
     s_lf = model_lf.step(state_lf, dt=_DT)
     s_fe = model_fe.step(state_fe, dt=_DT)
-    np.testing.assert_allclose(
-        np.asarray(s_lf.u.data), np.asarray(s_fe.u.data), rtol=1e-8, atol=1e-15)
-    np.testing.assert_allclose(
-        np.asarray(s_lf.eta.data), np.asarray(s_fe.eta.data), rtol=1e-8, atol=1e-15)
+    bt_lf = _depth_mean_u(model_lf, state_lf, s_lf.u.data)
+    bt_fe = _depth_mean_u(model_fe, state_fe, s_fe.u.data)
+    np.testing.assert_allclose(bt_lf, bt_fe, rtol=1e-8, atol=1e-12)
+    # The full velocity DOES differ (the baroclinic deviation is leapfrogged).
+    assert not np.allclose(np.asarray(s_lf.u.data), np.asarray(s_fe.u.data))
 
 
-def test_leapfrog_scan_runs_stable():
-    """integrate_scan seeds the τ-1 carry (constant scan-carry pytree) and runs a
-    multi-step trajectory that stays finite."""
+def test_leapfrog_momentum_robert_asselin_invariant():
+    """The Robert-Asselin filter relation holds for u between one step's I/O."""
+    state, model = _channel("leapfrog_ab2", asselin_nu=_NU)
+    u_n = np.asarray(state.u.data)
+    state = state._replace(
+        u_prev=state.u.replace(data=jnp.asarray(u_n * 0.9)),
+        v_prev=state.v.replace(data=state.v.data),
+        T_prev=state.T.replace(data=state.T.data),
+        S_prev=state.S.replace(data=state.S.data))
+    s = model.step(state, dt=_DT)
+    u_out = np.asarray(s.u.data)
+    exp_uprev = u_n + _NU * (u_out - 2.0 * u_n + u_n * 0.9)
+    um2 = np.asarray(state.u_mask.data) > 0.5
+    um = np.broadcast_to(um2[..., None], um2.shape + (u_n.shape[-1],))
+    np.testing.assert_allclose(
+        np.asarray(s.u_prev.data)[um], exp_uprev[um], rtol=1e-10, atol=1e-18)
+
+
+def test_leapfrog_full_scan_runs_stable():
+    """integrate_scan with the full (tracer + momentum) leapfrog seeds the τ-1 carry
+    and runs a 40-step trajectory that stays finite + BOUNDED (no leapfrog
+    computational-mode blowup — the Robert-Asselin filter arrests it)."""
     state, model = _channel("leapfrog_ab2")
-    final, traj = model.integrate_scan(state, n_steps=12, dt=_DT)
-    assert np.all(np.isfinite(np.asarray(final.T.data)))
-    assert np.all(np.isfinite(np.asarray(final.u.data)))
-    assert final.T_prev is not None
-    assert np.all(np.isfinite(np.asarray(traj.T.data)))
+    final, traj = model.integrate_scan(state, n_steps=40, dt=_DT)
+    for f in (final.T.data, final.u.data, final.v.data, final.eta.data):
+        assert np.all(np.isfinite(np.asarray(f)))
+    assert final.T_prev is not None and final.u_prev is not None
+    # Bounded: no blowup over the trajectory.
+    assert float(np.max(np.abs(np.asarray(traj.u.data)))) < 10.0
+    assert float(np.max(np.abs(np.asarray(traj.T.data)))) < 100.0
 
 
 def test_leapfrog_step_differentiable():

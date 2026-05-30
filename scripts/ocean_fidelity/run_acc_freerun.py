@@ -85,18 +85,33 @@ def _bulk_stats(state, z_coord, grid):
     }
 
 
-def _run_legoesm(years, dt, *, snapshot_every_days=None):
+def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None):
     import jax
     import jax.numpy as jnp
+    from legoesm.core.field import Field
     from legoesm.ocean.fidelity.veros_acc_recipe import build_acc_recipe
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
     )
 
     recipe = build_acc_recipe(with_surface_forcing=True)
-    model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, recipe.model_config)
+    cfg = recipe.model_config
+    if outer_integrator is not None:
+        cfg = cfg._replace(outer_integrator=outer_integrator)
+    model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, cfg)
     sf = recipe.wind_forcing
     state = recipe.initial_state
+    # Leapfrog needs the τ-1 carry seeded so the scan keeps a constant pytree.
+    if cfg.outer_integrator == "leapfrog_ab2" and state.T_prev is None:
+        state = state._replace(
+            T_prev=Field(data=state.T.data, name="T_prev",
+                         dims=state.T.dims, units=state.T.units),
+            S_prev=Field(data=state.S.data, name="S_prev",
+                         dims=state.S.dims, units=state.S.units),
+            u_prev=Field(data=state.u.data, name="u_prev",
+                         dims=state.u.dims, units=state.u.units),
+            v_prev=Field(data=state.v.data, name="v_prev",
+                         dims=state.v.dims, units=state.v.units))
 
     total_steps = int(round(years * _DAYS_PER_YEAR * _SECONDS_PER_DAY / dt))
     # Integrate in 1-day blocks for granular NaN-checking; jit the inner scan.
@@ -170,6 +185,11 @@ def main() -> int:
                     help="10-day stability smoke run (overrides --years).")
     ap.add_argument("--no-veros", action="store_true",
                     help="Skip the Veros run (legoESM-only diagnostics).")
+    ap.add_argument("--outer-integrator", default=None,
+                    choices=("forward_euler", "leapfrog_ab2"),
+                    help="Override the legoESM outer time integrator "
+                         "(default: the recipe's forward_euler). "
+                         "'leapfrog_ab2' = Veros-style leapfrog+Robert-Asselin.")
     args = ap.parse_args()
 
     import jax
@@ -181,9 +201,11 @@ def main() -> int:
     _prev = get_policy()
     set_policy(PrecisionPolicy.fp64())
     try:
+        _oi = args.outer_integrator or "recipe default (forward_euler)"
         print(f"== legoESM ACC free run: {years*_DAYS_PER_YEAR:.0f} days, "
-              f"dt={args.dt:.0f} s (fp64) ==")
-        lego_state, recipe = _run_legoesm(years, args.dt)
+              f"dt={args.dt:.0f} s (fp64), integrator={_oi} ==")
+        lego_state, recipe = _run_legoesm(
+            years, args.dt, outer_integrator=args.outer_integrator)
         lego = _bulk_stats(lego_state, recipe.z_coord, recipe.grid)
 
         veros = None
