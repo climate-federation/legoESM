@@ -34,6 +34,12 @@ jax.config.update("jax_enable_x64", True)
 GOLDEN_PATH = pathlib.Path(__file__).resolve().parent / "fixtures" / (
     "eke_step_regression_golden.npz"
 )
+# Parallel golden for the Rhines-limited mixing length (the ACC-adopted scheme,
+# gate L6). Locks the rhines eke_len path through the model step independently of
+# the default "rossby" golden above.
+RHINES_GOLDEN_PATH = pathlib.Path(__file__).resolve().parent / "fixtures" / (
+    "eke_step_regression_rhines_golden.npz"
+)
 
 # Tight relative tolerance: the step is deterministic + bit-identical on the
 # generating machine; allow <=1e-12 rel for cross-platform BLAS ULP drift.
@@ -58,11 +64,14 @@ def _to_float64(state):
     return state._replace(**kw)
 
 
-def _build_case():
+def _build_case(eke_cfg=None):
     """Deterministic EKE-active baroclinic channel (x64): a fixed meridional T
     front + eke seeded with a STRUCTURED field (a meridional Gaussian band), so
     one step genuinely exercises the E transport, the semi-implicit source/sink,
-    AND the prognostic kappa_GM coupling — not a degenerate at-the-floor field."""
+    AND the prognostic kappa_GM coupling — not a degenerate at-the-floor field.
+
+    ``eke_cfg`` selects the EKE config (mixing-length scheme etc.); default is the
+    ``"rossby"`` EKEConfig() locked by the original golden."""
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.ocean.vertical import create_ocean_z_star
     from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
@@ -82,7 +91,7 @@ def _build_case():
     front = 3.0 * np.tanh(lat / 18.0)[:, None, None]
     T = state.T.data + jnp.asarray(front, dtype=jnp.float64)
     state = state._replace(T=state.T.replace(data=T))
-    eke_cfg = EKEConfig()
+    eke_cfg = EKEConfig() if eke_cfg is None else eke_cfg
     # Structured initial E: a meridional Gaussian band (deterministic), well
     # above the floor so transport + dissipation are non-degenerate from step 1.
     band = eke_cfg.e_min + 0.05 * np.exp(-((lat) / 25.0) ** 2)
@@ -98,10 +107,10 @@ def _build_case():
     return state, model, cfg
 
 
-def _produce() -> dict:
+def _produce(eke_cfg=None) -> dict:
     """Run the EKE-active step N times; return the final eke field plus the
     prognostic kappa_GM / Eady rate / mixing length read off the final state —
-    a full fingerprint of the EKE numerics.
+    a full fingerprint of the EKE numerics. ``eke_cfg`` selects the scheme.
 
     Forced to the fp64 precision policy (save/restore) so the WHOLE step runs in
     float64 — the model otherwise casts to its fp32 storage policy (finite-volume
@@ -113,7 +122,7 @@ def _produce() -> dict:
     _prev = get_policy()
     set_policy(PrecisionPolicy.fp64())
     try:
-        state, model, cfg = _build_case()
+        state, model, cfg = _build_case(eke_cfg)
         for _ in range(_N_STEPS):
             state = model.step(state, dt=_DT)
         lm = state.land_mask.data
@@ -134,20 +143,26 @@ def _produce() -> dict:
         set_policy(_prev)
 
 
+def _rhines_cfg():
+    """ACC-adopted Rhines mixing length (gate L6): eke_cross=2.0 as in Veros ACC."""
+    from legoesm.ocean.physics.lateral_mixing.eke import EKEConfig
+    return EKEConfig(mixing_length_scheme="rhines", eke_cross=2.0, eke_crhin=1.0)
+
+
 def regenerate_golden() -> None:
-    """Write the golden .npz from the CURRENT step. Run as a script."""
+    """Write the golden .npz files (rossby + rhines) from the CURRENT step."""
     GOLDEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-    blob = _produce()
-    np.savez_compressed(GOLDEN_PATH, **blob)
-    print(f"wrote {len(blob)} golden arrays to {GOLDEN_PATH}")
+    for path, cfg in ((GOLDEN_PATH, None), (RHINES_GOLDEN_PATH, _rhines_cfg())):
+        blob = _produce(cfg)
+        np.savez_compressed(path, **blob)
+        print(f"wrote {len(blob)} golden arrays to {path}")
 
 
-@pytest.mark.skipif(not GOLDEN_PATH.exists(), reason="golden not generated")
-def test_eke_step_regression_bit_identical():
-    """The EKE-active step must reproduce the committed golden to within a tight
-    relative tolerance — locks the EKE numerics against silent drift."""
-    golden = np.load(GOLDEN_PATH)
-    produced = _produce()
+def _check_golden(golden_path, eke_cfg) -> None:
+    """Compare a fresh step against the committed golden at rtol=_RTOL + a key-set
+    lock + a non-degeneracy sanity. Shared by the rossby + rhines locks."""
+    golden = np.load(golden_path)
+    produced = _produce(eke_cfg)
     for key, arr in produced.items():
         assert key in golden.files, f"golden missing {key}"
         np.testing.assert_allclose(
@@ -166,12 +181,28 @@ def test_eke_step_regression_bit_identical():
     assert np.all(produced["eke"] >= 0.0) and np.all(np.isfinite(produced["eke"]))
 
 
+@pytest.mark.skipif(not GOLDEN_PATH.exists(), reason="golden not generated")
+def test_eke_step_regression_bit_identical():
+    """The default ("rossby") EKE-active step reproduces its committed golden to a
+    tight relative tolerance — locks the EKE numerics against silent drift."""
+    _check_golden(GOLDEN_PATH, None)
+
+
+@pytest.mark.skipif(not RHINES_GOLDEN_PATH.exists(),
+                    reason="rhines golden not generated")
+def test_eke_rhines_step_regression_bit_identical():
+    """The ACC-adopted Rhines-`eke_len` EKE-active step reproduces its committed
+    golden — locks the rhines mixing-length path through the model step (gate L6)."""
+    _check_golden(RHINES_GOLDEN_PATH, _rhines_cfg())
+
+
 def test_golden_exists():
     """Guard against an accidental fixture deletion."""
-    assert GOLDEN_PATH.exists(), (
-        f"missing golden {GOLDEN_PATH}; regenerate with "
-        f"`python {pathlib.Path(__file__).name}`"
-    )
+    for path in (GOLDEN_PATH, RHINES_GOLDEN_PATH):
+        assert path.exists(), (
+            f"missing golden {path}; regenerate with "
+            f"`python {pathlib.Path(__file__).name}`"
+        )
 
 
 if __name__ == "__main__":

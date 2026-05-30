@@ -42,6 +42,8 @@ from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 from legoesm.ocean.physics.lateral_mixing.config import (
     GMRediConfig, HarmonicConfig, LateralMixingConfig,
 )
+from legoesm.ocean.physics.lateral_mixing.eke import EKEConfig
+from legoesm.core.field import Field
 from legoesm.ocean.physics.surface_forcing.config import (
     RestoringConfig, SurfaceForcingConfig,
 )
@@ -112,10 +114,27 @@ ACC_TKE_CONFIG = TKEConfig(
 
 # Veros GM/Redi knobs (verbatim from ACCSetup)
 ACC_GM_REDI_CONFIG = GMRediConfig(
-    kappa_GM=1000.0,
+    kappa_GM=1000.0,             # EKE-off fallback (overridden by the prognostic eke below)
     kappa_Redi=1000.0,
+    # ^ KNOWN GAP (Redi NOT yet apples-to-apples): Veros ACC sets
+    #   enable_eke_isopycnal_diffusion=True ⇒ K_iso = K_gm (the Redi tracer
+    #   diffusivity FOLLOWS the prognostic GM coefficient, ~0.3 m²/s cold-start;
+    #   veros/core/eke.py:74-75). legoESM still holds kappa_Redi=1000 constant —
+    #   only kappa_GM is driven by EKE — so during a cold start legoESM K_iso (1000)
+    #   ≫ Veros K_iso (~0.3). Reproducing K_iso=K_gm (prognostic Redi) is the
+    #   documented NEXT must-build; see the strategy §8 ledger.
     S_max=0.01,                  # ↔ iso_slopec
     taper_width_frac=0.5,        # = iso_dslope / iso_slopec = 0.005 / 0.01
+    # Prognostic EKE (Eden-Greatbatch) with the Rhines-limited mixing length —
+    # Veros ACC runs enable_eke=True (veros/setups/acc/acc.py:67-75). The closure
+    # FORM + params reproduce Veros's GM coefficient K_gm AND eke_len/L_rossby/
+    # L_rhines to machine precision (gates E9 + L4). ACC overrides eke_cross=2.0
+    # (acc.py:71); the other EKEConfig defaults match ACC (c_k=0.4, c_eps=0.5,
+    # l_min=100, k_max=1e4, superbee advection). NB EKEConfig.k_iso=1000 is the
+    # eke-FIELD diffusivity (Veros uses ~max(500,2·K_gm) — a minor approximation,
+    # distinct from the tracer K_iso above). With eke set, the prognostic
+    # c_k·eke_len·√E replaces the constant kappa_GM above (the GM skew term ONLY).
+    eke=EKEConfig(mixing_length_scheme="rhines", eke_cross=2.0, eke_crhin=1.0),
 )
 
 # Surface restoring timescale
@@ -269,6 +288,18 @@ def build_acc_state(grid: LatLonGrid,
         S_uniform=35.0, H_max=H_max,
         land_mask_override=land_mask,
     )
+    # Prognostic EKE: when the recipe runs EKE on (``ACC_GM_REDI_CONFIG.eke`` set),
+    # the eddy-energy field must be a Field from step 0. The model step turns ``eke``
+    # None -> Field, which would break the constant-pytree carry of a ``jax.lax.scan``
+    # forward integration (the free-run driver). Initialise it to the ``e_min`` floor
+    # on wet cells (Veros likewise starts ``eke`` at a small positive value). The
+    # frozen-state tier-2 probe does NOT read ``eke`` (it takes the constant-kappa GM
+    # path), so the committed tier-2 tendency comparison is unchanged.
+    if ACC_GM_REDI_CONFIG.eke is not None:
+        lm = state.land_mask.data
+        eke0 = ACC_GM_REDI_CONFIG.eke.e_min * lm
+        state = state._replace(
+            eke=Field(data=eke0, name="eke", dims=("lat", "lon"), units="m^2/s^2"))
     return state
 
 
@@ -395,20 +426,24 @@ def build_acc_physics_config(grid: LatLonGrid | None = None, *,
     config), implicit vertical viscosity. IDEMIX is disabled in the ACC
     adapter (``enable_idemix=False`` in Veros) so it is not mapped.
 
-    EKE: legoESM now HAS the Eden-Greatbatch prognostic-EKE closure
-    (``lateral_mixing/eke.py`` + ``GMRediConfig.eke``), and its kappa_GM
-    formula ``c_k·L·√E`` + parameters (c_k=0.4, c_eps=0.5, k_max=1e4,
-    lmin=100, superbee advection) were verified against Veros's ``K_gm``
-    to machine precision (corr=1.0 on the developed ACC state, given
-    Veros's own ``eke``+``eke_len``; see the strategy doc §8 EKE ledger,
-    gate E9). EKE is NOT yet flipped on in the recipe (``GMRediConfig.eke``
-    stays None) because legoESM's mixing length ``L`` (Visbeck first-
-    baroclinic Rossby radius, ~200 km here) does not yet match Veros's
-    ``eke_len = max(lmin, min(eke_cross·L_rossby, eke_crhin·L_rhines))``
-    (~8 km; the eddy-energy-dependent Rhines limiting is missing) — using
-    it now would make the prognostic kappa_GM ~25× too large. ADOPTION is
-    deferred behind the documented ``eke_len`` mixing-length variant
-    (strategy doc §8, "extend L" follow-up).
+    EKE: the Eden-Greatbatch prognostic-EKE closure (``lateral_mixing/eke.py``
+    + ``GMRediConfig.eke``) is ADOPTED in ``ACC_GM_REDI_CONFIG`` (Veros ACC runs
+    ``enable_eke=True``). The closure FORM + parameters reproduce Veros's
+    ``K_gm`` AND its mixing length ``eke_len``/``L_rossby``/``L_rhines`` to
+    machine precision given Veros's own state (gates E9 + L4; strategy doc §8
+    EKE ledger). The recipe uses ``mixing_length_scheme="rhines"`` — the
+    Rhines-limited ``eke_len = max(lmin, min(eke_cross·L_rossby,
+    eke_crhin·L_rhines))`` (~8 km on the developed ACC) with ``eke_cross=2.0`` —
+    so the prognostic GM coefficient ``kappa_GM = c_k·eke_len·√E`` is
+    apples-to-apples with Veros, NOT the ~25×-too-large Visbeck ``L``.
+    ``GMRediConfig.kappa_GM=1000`` is retained as the EKE-off fallback.
+
+    KNOWN GAP (documented, not yet built): only the GM *skew* coefficient is
+    EKE-driven here. Veros ACC also sets ``enable_eke_isopycnal_diffusion=True``
+    ⇒ ``K_iso = K_gm`` (the Redi *tracer* diffusivity follows the prognostic
+    kappa); legoESM still holds ``kappa_Redi=1000`` constant. So GM is
+    apples-to-apples but Redi is not yet — reproducing ``K_iso=K_gm`` (prognostic
+    Redi) is the documented next must-build (strategy §8).
 
     Set ``with_surface_forcing=True`` (free-run harness) to activate Veros ACC's
     T* surface restoring via the physics pipeline; ``grid`` is then required (for

@@ -80,6 +80,15 @@ def test_tke_and_gm_redi_configs_match_veros():
     assert ACC_GM_REDI_CONFIG.S_max == 0.01
     assert ACC_GM_REDI_CONFIG.taper_width_frac == 0.5
 
+    # EKE adopted (Veros ACC enable_eke=True, acc.py:67-75): Rhines-limited mixing
+    # length with eke_cross=2.0; other params match the EKEConfig ACC defaults.
+    eke = ACC_GM_REDI_CONFIG.eke
+    assert eke is not None, "ACC recipe must run prognostic EKE (Veros enable_eke=True)"
+    assert eke.mixing_length_scheme == "rhines"
+    assert eke.eke_cross == 2.0 and eke.eke_crhin == 1.0   # acc.py:71-72
+    assert eke.c_k == 0.4 and eke.c_eps == 0.5             # acc.py:69-70
+    assert eke.l_min == 100.0 and eke.kappa_gm_max == 1.0e4  # acc.py:73,68
+
 
 def test_z_coord_dz_ref_in_legoesm_order():
     """legoESM convention: dz_ref[0] = surface = 20 m, dz_ref[-1] =

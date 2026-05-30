@@ -11,8 +11,8 @@ absent on this machine).
 - [x] L2 wire `int_N_dz` + β + scheme dispatch into the coupling (default bit-identical)
 - [x] L3 differentiability (grad through the rhines length finite + nonzero)
 - [x] L4 oracle confirmation (reproduce Veros `eke_len`/`L_rossby`/`L_rhines`/`K_gm` to machine precision)
-- [ ] L5 recipe adoption (flip EKE on in `build_acc_model_config`)
-- [ ] L6 regression lock + measure-first free-run re-check
+- [x] L5 recipe adoption (flip EKE on in `build_acc_model_config`)
+- [x] L6 regression lock + measure-first free-run re-check
 
 ---
 
@@ -96,3 +96,70 @@ apples-to-apples in the ACC recipe (L5). Informational gate (needs Veros); repro
 NEXT: L5 — flip EKE on in `build_acc_model_config` (`eke=EKEConfig(mixing_length_scheme="rhines",
 eke_cross=2.0, eke_crhin=1.0)`; other params already default to ACC); update the stale
 `build_acc_physics_config` docstring + strategy §8 ledger; lock with a recipe test.
+
+### 2026-05-29 · L5 done — EKE flipped on in the ACC recipe (rhines)
+- `ACC_GM_REDI_CONFIG.eke = EKEConfig(mixing_length_scheme="rhines", eke_cross=2.0, eke_crhin=1.0)`
+  (other params already match ACC: c_k=0.4, c_eps=0.5, l_min=100, k_max=1e4, k_iso=1000, superbee).
+  `kappa_GM=1000` retained as the EKE-off fallback.
+- Stale `build_acc_physics_config` docstring (said "EKE NOT yet flipped on") → "ADOPTED"; strategy §8
+  ledger eke_len row → DONE+adopted, EKE-closure row → adopted.
+- **Integration bug surfaced + fixed:** the EKE-on free-run uses `jax.lax.scan`, whose carry must
+  keep a CONSTANT pytree. `initial_state.eke` was `None` but `model.step` returns it as a `Field`
+  (None→Field structure change) ⇒ scan `TypeError`. E6 only tested the step via a Python loop, so this
+  was latent. FIX: `build_acc_state` seeds `eke=Field(e_min·land_mask)` from step 0 when EKE is on
+  (Veros likewise starts eke small). VERIFIED the tier-2 frozen probe does NOT read `eke` (it calls
+  `gm_redi_tracer_tendency_latlon` WITHOUT `kappa_gm_override` ⇒ constant-kappa path), so the committed
+  tier-2 report is unchanged.
+GATE: `pytest tests/ocean/unit/test_veros_acc_recipe.py tests/ocean/fidelity/test_run_acc_freerun.py
+-m "slow or not slow"` → 27 passed (25 recipe incl. new EKE-adoption asserts + rest-IC + the @slow
+2-day EKE-on free-run: stable, finite, develops an eastward ACC — first end-to-end exercise of the
+rhines path through model.step).
+NEXT: L6 — eke_len-active regression golden (rtol=1e-12, like E8) + measure-first free-run re-check
+(re-run run_acc_freerun.py EKE-on; report whether the +232% KE / +70% transport gap moves; update the
+driver's stale "EKE OFF" known-difference note).
+
+### 2026-05-29 · L6 done — rhines regression golden + measure-first free-run re-check
+L6a (regression lock): added a parallel rhines golden `fixtures/eke_step_regression_rhines_golden.npz`
++ `test_eke_rhines_step_regression_bit_identical` (rtol=1e-12), locking the rhines `eke_len` step
+through `model.step`. Refactored `test_eke_regression.py` (`_build_case(eke_cfg)`/`_produce(eke_cfg)` +
+shared `_check_golden`) so the original "rossby" golden stays BIT-IDENTICAL (DRY, no duplicate test
+logic). Rhines golden non-degenerate: max eke 0.040, kappa_gm 12–7614 m²/s, eke_len 19–95 km, ≥0+finite.
+GATE: `pytest tests/ocean/unit/test_eke_regression.py` → 3 passed.
+
+L6b (MEASURE-FIRST free-run re-check, EKE-on 30-day vs Veros — the headline finding):
+| metric | legoESM | Veros | % diff (EKE-OFF baseline) |
+|---|---|---|---|
+| ACC_transport_Sv | 59.19 | 34.75 | **+70.4% (was +70%)** |
+| total_KE_J | 1.031e16 | 3.101e15 | **+232.6% (was +232%)** |
+| vol_mean_T_C | 6.282 | 6.364 | −1.3% (was −1.3%) |
+| T_max_C | 14.61 | 14.94 | −2.2% (was −2.2%) |
+**Turning EKE on did NOT move the transport/KE gap** — it is essentially unchanged from the EKE-OFF
+run (commit 7dad7512). WHY: over a 30-day spin-up `eke` starts at e_min and the EKE dissipation
+timescale `L/(c_eps·√E)` is multi-year, so the prognostic kappa_GM is still ~0.3 m²/s (vs the constant
+1000 it replaced) — and the gap is unchanged. This FALSIFIES the "EKE-off is what matters" hypothesis
+from 7dad7512: the GM *skew* coefficient (0.3 vs 1000) is not the 30-day lever.
+**CAVEAT (L5+L6 review, Issue 1):** the prognostic kappa replaces 1000 ONLY in the GM skew term. Veros
+ACC also sets `enable_eke_isopycnal_diffusion=True` ⇒ `K_iso = K_gm` (the Redi *tracer* diffusivity is
+the prognostic kappa, ~0.3 cold), but legoESM still holds `kappa_Redi=1000` constant — a ~3000× K_iso
+mismatch over the whole run. So the unchanged gap is consistent with BOTH the **integrator** gap
+(legoESM SSP-RK3 vs Veros leapfrog+AB2; audit gap #7) AND the **unmatched K_iso=K_gm coupling** — it
+is NOT cleanly attributable to the integrator alone. The GM coefficient is apples-to-apples (machine-
+exact form, L4); the Redi diffusivity is NOT yet — reproducing `K_iso=K_gm` (prognostic Redi) is the
+documented next must-build, and the free-run should be re-measured AFTER that lands. Updated the
+driver's `_KNOWN_DIFFERENCES` accordingly. Repro: `JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 python
+scripts/ocean_fidelity/run_acc_freerun.py --years 0.0821918`.
+
+## FINAL STATUS
+L1–L6 complete + honestly green. The Rhines-limited `eke_len` is a canonical, differentiable,
+oracle-form-exact (L4: machine-precision vs Veros) selectable mixing-length scheme; the EKE **GM
+coefficient** is adopted apples-to-apples in the ACC recipe.
+
+**NEXT must-build (surfaced by the L5+L6 review, Issue 1): prognostic Redi `K_iso=K_gm`.** Veros ACC's
+`enable_eke_isopycnal_diffusion=True` sets the Redi *tracer* diffusivity to the prognostic kappa
+(veros/core/eke.py:74-75); legoESM still holds `kappa_Redi=1000` constant — only the GM skew term is
+EKE-driven. Reproducing it needs `kappa_Redi` made array-capable through the GM/Redi triad+centered
+flux builders (golden-locked core numerics — must stay bit-identical on the constant-kappa default) +
+an `EKEConfig` iso-diffusion flag (Veros `enable_eke_isopycnal_diffusion`) + the step passing a
+`kappa_redi_override = kappa_gm_override` when active. Then regenerate the rhines golden + re-measure
+the free-run (the 30-day gap interpretation depends on it). Co-open: the leapfrog+AB2 integrator
+(audit gap #7); a developed-flow eke-bridge for a tier-2 prognostic-GM-tendency comparison.
