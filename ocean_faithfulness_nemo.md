@@ -258,6 +258,28 @@ A/B knob added: `run_omip_core2.py --ke-gradient-scheme {centered,hollingsworth}
   the one prior-session hypothesis NEVER actually tested. Machinery exists: `references.py::
   thermal_wind_shear`, `coriolis_cgrid`, `grid.f_T`, `eady_uniform` balanced-SSH logic; reuse
   `iterate_eos_and_pressure_anomaly` for p′. Implement as a runner IC option (no dycore change).
+- **iter 13 (ROOT CAUSE FOUND — under-damped WBC jet; dt-independent; 4-agent convergent
+  diagnosis):** Comprehensive full-stack × dt sweep (job 8117533): **dt=600 day1 max|u|=39.0,
+  dt=300 day1=38.3 — IDENTICAL ⇒ the blowup is dt-INDEPENDENT** = a structural/physical
+  instability (converges as dt→0), NOT numerical/CFL/integrator. Mechanism workflow wshsnjjm3
+  (4 agents CONVERGE): **the instability is nonlinear self-advection (u²) of the UNDER-DAMPED
+  Brazil-Malvinas western-boundary-current jet (−36.3°N/−50.5°E).** AL81 vector-invariant
+  momentum advection is energy-AND-enstrophy CONSERVING = NON-dissipative → cannot damp the
+  sharp-jet enstrophy → u² runaway. **ROOT vs NEMO:** NEMO ORCA1 keeps the SAME jet stable via a
+  **spatially-varying 3D eddy viscosity** (`eddy_viscosity_3D.nc`, `nn_ahm_ijk_t=-30`) ENHANCED
+  over western-boundary currents + coasts (NEMO's vorticity=EEN + advection=vector-form are
+  conservative like legoESM's — NOT the source of NEMO's stability). legoESM uses CONSTANT
+  A_h=2e5 with cos²(lat) scaling (→ ZERO extra at −38°S) + equatorial boost → the marginally-
+  resolved WBC jet is under-damped → blows up. **legoESM HAS the machinery (Smagorinsky, Leith,
+  weno5, slope-foot) but ALL DEFAULTED OFF (C_smag=0, C_leith=0, C_smag_lap only 0.15, weno
+  off).** Secondary seed: the FLOOD-FILL copies whole nearest columns wholesale → a 1-cell
+  density step at depth k15 (IC artifact, distinct from the global smoothing already ruled out).
+  **THE FIX (3 prongs): (A) self-activating viscosity — Leith ~|∇vorticity| / biharmonic Smag,
+  strong exactly at the sharpening jet (constant A_h≤1e6 already ruled out — must scale with the
+  flow); (B) weno5 upstream-biased momentum advection (dissipative, NEMO-UP3-like); (C)
+  flood-fill seam smoothing (multi-donor inverse-distance, fix the k15 artifact).** Wired
+  --C-smag/--C-leith/--C-smag-lap/--bottom-drag-r runner knobs. Test 8117627 (Leith 2.0; Smag
+  4.0+lap1.0; A_h 1e7 control) running. This is the genuine root cause + the NEMO-faithful fix.
 - **iter 12 (BAROTROPIC SOLVER — BREAKTHROUGH: blowup → saturation):** The OMIP config OVERRODE
   legoESM's own default split-explicit barotropic (`explicit_substep` + cosine time filter,
   dissipative for fast modes) to **`implicit_cn`** (Crank-Nicolson — NEUTRAL, no fast-gravity-

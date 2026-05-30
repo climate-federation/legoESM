@@ -117,11 +117,27 @@ def compute_woa_3d(grid, z_coord, woa_t, woa_s, H_bathy, land_mask):
         valid = m2 & ~bad
         jj, ii = np.where(valid)
         jb, ib = np.where(bad)
-        _, idx = cKDTree(np.c_[jj, ii]).query(np.c_[jb, ib], k=1)
-        T_woa[jb, ib, :] = T_woa[jj[idx], ii[idx], :]
-        S_woa[jb, ib, :] = S_woa[jj[idx], ii[idx], :]
+        # Multi-donor INVERSE-DISTANCE blend (k=8) instead of a wholesale
+        # nearest-COLUMN copy.  A single-donor copy leaves a 1-cell T/S step
+        # at EVERY depth (incl. the deep k15) along the flood-fill seam; from
+        # rest that step is a spurious baroclinic-PGF seed that vertadv pumps
+        # to the surface -> the Brazil-Malvinas-region cold-start runaway
+        # (mechanism workflow wshsnjjm3).  Blending the 8 nearest valid
+        # columns by inverse index-distance smooths the seam.
+        kdt = cKDTree(np.c_[jj, ii])
+        K = int(min(8, len(jj)))
+        dist, idx = kdt.query(np.c_[jb, ib], k=K)
+        if K == 1:
+            dist = dist[:, None]; idx = idx[:, None]
+        w = 1.0 / np.maximum(dist, 1e-6)              # (n_bad, K)
+        w = w / w.sum(axis=1, keepdims=True)
+        T_don = T_woa[jj[idx], ii[idx], :]            # (n_bad, K, nlev)
+        S_don = S_woa[jj[idx], ii[idx], :]
+        T_woa[jb, ib, :] = np.einsum("nk,nkl->nl", w, T_don)
+        S_woa[jb, ib, :] = np.einsum("nk,nkl->nl", w, S_don)
         print(f"[setup] flood-filled {int(bad.sum())} NEMO-ocean cells "
-              f"lacking WOA data (S<1) from nearest valid column")
+              f"lacking WOA data (S<1) via inverse-distance blend of {K} "
+              f"nearest valid columns (smooths the seam)")
     # Re-apply the RECEIVER bathymetry deep-fill (codex C1): a donor column
     # copied above may carry levels below the receiver's own seafloor; replace
     # every level deeper than the local H_bathy with the deep-ocean fill, so the
@@ -380,7 +396,9 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   adaptive_implicit_vertadv=None, bathy_smoothing_passes=0,
                   momentum_time_integrator=None, barotropic_solver=None,
                   barotropic_diffusion_alpha=None, n_barotropic_substeps=None,
-                  barotropic_time_filter=None):
+                  barotropic_time_filter=None, bottom_drag_r=None,
+                  C_smag=None, C_leith=None, C_smag_lap=None,
+                  momentum_advection=None):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -412,6 +430,10 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("barotropic_diffusion_alpha", barotropic_diffusion_alpha),
                               ("n_barotropic_substeps", n_barotropic_substeps),
                               ("barotropic_time_filter", barotropic_time_filter),
+                              ("bottom_drag_r", bottom_drag_r),
+                              ("C_smag", C_smag), ("C_leith", C_leith),
+                              ("C_smag_lap", C_smag_lap),
+                              ("momentum_advection", momentum_advection),
                               ) if v is not None}
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -466,7 +488,9 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                        adaptive_implicit_vertadv=None, bathy_smoothing_passes=0,
                   momentum_time_integrator=None, barotropic_solver=None,
                   barotropic_diffusion_alpha=None, n_barotropic_substeps=None,
-                  barotropic_time_filter=None):
+                  barotropic_time_filter=None, bottom_drag_r=None,
+                  C_smag=None, C_leith=None, C_smag_lap=None,
+                  momentum_advection=None):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -493,6 +517,10 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                               ("barotropic_diffusion_alpha", barotropic_diffusion_alpha),
                               ("n_barotropic_substeps", n_barotropic_substeps),
                               ("barotropic_time_filter", barotropic_time_filter),
+                              ("bottom_drag_r", bottom_drag_r),
+                              ("C_smag", C_smag), ("C_leith", C_leith),
+                              ("C_smag_lap", C_smag_lap),
+                              ("momentum_advection", momentum_advection),
                               ) if v is not None}
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -660,6 +688,20 @@ def main() -> int:
                         "limit so the spurious-w 'vertadv' runaway cannot amplify. The "
                         "NEMO-faithful fix for the OMIP cold-start blowup (eORCA OMIP "
                         "production runs set ln_zad_Aimp=.true.).")
+    p.add_argument("--momentum-advection", default=None,
+                   choices=[None,"vector_invariant","weno5","weno7"],
+                   help="Momentum advection scheme. weno5/weno7 = upstream-biased "
+                        "(dissipative at sharp jets, NEMO-UP3-like); vector_invariant "
+                        "(default) = energy-conserving AL81 (NON-dissipative).")
+    p.add_argument("--C-smag", type=float, default=None,
+                   help="Biharmonic Smagorinsky coeff (self-activating ~strain, scale-selective).")
+    p.add_argument("--C-leith", type=float, default=None,
+                   help="Leith biharmonic coeff (self-activating ~|grad vorticity| -- targets the sharp-jet edge).")
+    p.add_argument("--C-smag-lap", type=float, default=None,
+                   help="Laplacian Smagorinsky coeff (tripole OMIP default 0.33).")
+    p.add_argument("--bottom-drag-r", type=float, default=None,
+                   help="Linear bottom drag coefficient [m/s] (du/dt|drag=-r*u/h_bot). "
+                        "tripole OMIP default is 0 (OFF); NEMO uses implicit quadratic drag.")
     p.add_argument("--barotropic-solver", default=None, choices=[None,"explicit_substep","implicit_cn"],
                    help="Override barotropic solver. NEMO uses split-explicit forward-backward "
                         "(=explicit_substep here, with a dissipative cosine time filter); OMIP "
@@ -744,6 +786,9 @@ def main() -> int:
             barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
             n_barotropic_substeps=args.n_barotropic_substeps,
             barotropic_time_filter=args.barotropic_time_filter,
+            bottom_drag_r=args.bottom_drag_r,
+            C_smag=args.C_smag, C_leith=args.C_leith, C_smag_lap=args.C_smag_lap,
+            momentum_advection=args.momentum_advection,
         )
         app_grid_type = "tripole"
     else:
@@ -762,6 +807,9 @@ def main() -> int:
             barotropic_diffusion_alpha=args.barotropic_diffusion_alpha,
             n_barotropic_substeps=args.n_barotropic_substeps,
             barotropic_time_filter=args.barotropic_time_filter,
+            bottom_drag_r=args.bottom_drag_r,
+            C_smag=args.C_smag, C_leith=args.C_leith, C_smag_lap=args.C_smag_lap,
+            momentum_advection=args.momentum_advection,
         )
         app_grid_type = "latlon"
 
