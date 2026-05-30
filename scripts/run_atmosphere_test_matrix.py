@@ -1804,6 +1804,27 @@ def _save_native_snapshot_plots(
     # canvas.  Cubed-sphere/icos coordinates already arrive in [-180, 180].
     lon_flat = ((lon_flat + 180.0) % 360.0) - 180.0
 
+    def _native_field(snap: dict, field_key: str) -> np.ndarray:
+        """Resolve the array to plot on the *native* discretisation.
+
+        For cubed-sphere (and any grid that stores cell-centre geographic
+        winds), the snapshot dict keeps ``u``/``v``/``wind_speed`` already
+        **regridded** to the (181, 360) lat-lon canvas for the regridded
+        panels — their flat size (65160) does not match the native point
+        count (e.g. 6·n·n = 7776 at C36), so the native scatter would be
+        left blank.  The un-regridded native cell-centre winds are stored
+        under ``u_cc_east`` / ``v_cc_north``; prefer those here so the
+        native velocity (and any cube-edge imprint) is actually rendered.
+        """
+        if field_key == "wind_speed" and {"u_cc_east", "v_cc_north"} <= snap.keys():
+            ue = np.asarray(snap["u_cc_east"], dtype=np.float64)
+            vn = np.asarray(snap["v_cc_north"], dtype=np.float64)
+            return np.sqrt(ue ** 2 + vn ** 2)
+        alias = {"u": "u_cc_east", "v": "v_cc_north"}.get(field_key)
+        if alias is not None and alias in snap:
+            return np.asarray(snap[alias], dtype=np.float64)
+        return np.asarray(snap[field_key], dtype=np.float64)
+
     for field_key, field_label, cmap in field_specs:
         steps = [s for s in valid_steps if field_key in snapshots[s]]
         if not steps:
@@ -1815,7 +1836,7 @@ def _save_native_snapshot_plots(
         # Shared color limits across all snapshot panels (NOT regridded —
         # use raw native values).
         all_vals = np.concatenate([
-            np.asarray(snapshots[s][field_key], dtype=np.float64).ravel()
+            _native_field(snapshots[s], field_key).ravel()
             for s in steps
         ])
         all_vals = all_vals[np.isfinite(all_vals)]
@@ -1837,7 +1858,7 @@ def _save_native_snapshot_plots(
         for idx, step in enumerate(steps):
             r, c = divmod(idx, n_cols)
             ax = axes[r, c]
-            raw = np.asarray(snapshots[step][field_key], dtype=np.float64)
+            raw = _native_field(snapshots[step], field_key)
             vals = raw.ravel()
             if coord_kind == "latlon":
                 im = ax.imshow(
