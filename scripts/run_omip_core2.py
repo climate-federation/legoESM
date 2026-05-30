@@ -150,10 +150,19 @@ def compute_woa_3d(grid, z_coord, woa_t, woa_s, H_bathy, land_mask):
     return T_woa * m3, S_woa * m3
 
 
-def make_partial_cell(z_coord, H_bathy, land_mask, thin_threshold=0.3):
+def make_partial_cell(z_coord, H_bathy, land_mask, thin_threshold=0.3,
+                      smoothing_passes=0):
     """Convert a z* reference coord + bathymetry to an ``OceanPartialCellCoordinate``,
     snapping ``H_bathy`` DOWN to the interface above whenever the bottom partial cell
     would be thinner than ``thin_threshold * dz_ref`` (MOM6/MITgcm thin-cell fix).
+
+    ``smoothing_passes`` > 0 applies that many Laplacian smoothing passes to the
+    OCEAN ``H_bathy`` field first (land held fixed), reducing the bathymetric slope
+    (r-factor ``|H_i-H_j|/(H_i+H_j)``).  NEMO/ROMS smooth their bathymetry for exactly
+    this reason: the spurious partial-cell pressure-gradient seed that blows up the
+    WOA cold-start (per-term diag: KE_PGF at the S-Atlantic / Indonesian continental
+    SLOPES, the steepest cells) scales with the slope, so gentler topography shrinks
+    it.  The max r-factor is reported before/after so the geometry cost is explicit.
 
     Mirrors the documented-stable ``run_omip.py`` partial-cell setup
     (``run_omip_single``, ~line 3181). The OMIP-faithful runner previously passed the
@@ -172,6 +181,23 @@ def make_partial_cell(z_coord, H_bathy, land_mask, thin_threshold=0.3):
     """
     from legoesm.ocean.vertical import create_partial_cell_coordinate
     H_np = np.asarray(H_bathy, dtype=np.float64)
+    lm0 = np.asarray(land_mask, dtype=np.float64)
+
+    if smoothing_passes and smoothing_passes > 0:
+        from legoesm.ocean.bathymetry import _laplacian_smooth_2d, _r_factor_max
+        ocean = lm0 > 0.5
+        r_before = float(_r_factor_max(H_np, lm0))
+        H_s = H_np.copy()
+        # Smooth ocean cells only; hold land fixed and re-impose it each
+        # pass so the smoother never bleeds land depths into the ocean.
+        for _ in range(int(smoothing_passes)):
+            H_sm = np.asarray(_laplacian_smooth_2d(H_s, 1, is_cubed=False))
+            H_s = np.where(ocean, H_sm, H_np)
+        H_np = np.where(ocean, H_s, H_np)
+        r_after = float(_r_factor_max(H_np, lm0))
+        print(f"[setup] bathymetry smoothing: {smoothing_passes} Laplacian "
+              f"passes, max r-factor {r_before:.3f} -> {r_after:.3f}")
+
     abs_z_half = np.abs(np.asarray(z_coord.z_half_ref))   # (nlev+1,) positive depths
     dz_ref_np = np.asarray(z_coord.dz_ref)                # (nlev,) positive
     H_snapped = H_np.copy()
@@ -197,7 +223,8 @@ def make_partial_cell(z_coord, H_bathy, land_mask, thin_threshold=0.3):
 def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   woa_init: bool = False, woa_t=None, woa_s=None,
                   pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None,
-                  ke_gradient_scheme=None, partial_cell=False):
+                  ke_gradient_scheme=None, partial_cell=False,
+                  adaptive_implicit_vertadv=None, bathy_smoothing_passes=0):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -222,7 +249,9 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
     _ovr = {k: v for k, v in (("pgf_scheme", pgf_scheme), ("A_h", A_h),
                               ("B_h", B_h), ("K_bih", K_bih),
                               ("A_h_eq_boost", A_h_eq_boost),
-                              ("ke_gradient_scheme", ke_gradient_scheme)) if v is not None}
+                              ("ke_gradient_scheme", ke_gradient_scheme),
+                              ("adaptive_implicit_vertadv", adaptive_implicit_vertadv),
+                              ) if v is not None}
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -243,7 +272,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
         )
-        z_coord, H_bathy, land_mask = make_partial_cell(z_coord, H_bathy, land_mask)
+        z_coord, H_bathy, land_mask = make_partial_cell(
+            z_coord, H_bathy, land_mask, smoothing_passes=bathy_smoothing_passes)
         model = LatLonCGridOceanModel(grid, z_coord, config)
     state = run_omip._init_rest_state(
         "tripole", grid, z_coord, H_max,
@@ -271,7 +301,8 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                        n_lat: int = 180, n_lon: int = 360,
                        woa_init: bool = False, woa_t=None, woa_s=None,
                        pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None,
-                       ke_gradient_scheme=None, partial_cell=False):
+                       ke_gradient_scheme=None, partial_cell=False,
+                       adaptive_implicit_vertadv=None, bathy_smoothing_passes=0):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -291,7 +322,9 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
         A_h_override=A_h, B_h_override=B_h,
     )
     _ovr = {k: v for k, v in (("K_bih", K_bih),
-                              ("ke_gradient_scheme", ke_gradient_scheme)) if v is not None}
+                              ("ke_gradient_scheme", ke_gradient_scheme),
+                              ("adaptive_implicit_vertadv", adaptive_implicit_vertadv),
+                              ) if v is not None}
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -319,7 +352,8 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
         )
-        z_coord, H_bathy, land_mask = make_partial_cell(z_coord, H_bathy, land_mask)
+        z_coord, H_bathy, land_mask = make_partial_cell(
+            z_coord, H_bathy, land_mask, smoothing_passes=bathy_smoothing_passes)
         model = LatLonCGridOceanModel(grid, z_coord, config)
     state = run_omip._init_rest_state(
         "latlon", grid, z_coord, H_max,
@@ -451,6 +485,18 @@ def main() -> int:
     p.add_argument("--A-h-eq-boost", type=float, default=None,
                    help="Equatorial Laplacian-viscosity boost factor -- damps the f->0 "
                         "velocity growth (A_h *= 1+(boost-1)*exp(-(lat/sigma)^2)).")
+    p.add_argument("--adaptive-implicit-vertadv", action="store_true",
+                   help="Enable adaptive-implicit vertical momentum advection "
+                        "(Shchepetkin 2015 / NEMO ln_zad_Aimp) -- removes the vertical-CFL "
+                        "limit so the spurious-w 'vertadv' runaway cannot amplify. The "
+                        "NEMO-faithful fix for the OMIP cold-start blowup (eORCA OMIP "
+                        "production runs set ln_zad_Aimp=.true.).")
+    p.add_argument("--bathy-smoothing-passes", type=int, default=0,
+                   help="Laplacian smoothing passes on the OCEAN bathymetry before "
+                        "building the partial-cell coord -- reduces the bathymetric "
+                        "slope (r-factor) and hence the spurious partial-cell PGF seed "
+                        "at steep continental slopes (NEMO/ROMS smooth for this). "
+                        "Requires --partial-cell. 0=off.")
     p.add_argument("--output", type=str, default="results/omip_nemo/legoesm_tripole")
     p.add_argument("--diag-every-days", type=float, default=30.0)
     p.add_argument("--forcing-ramp-days", type=float, default=0.0,
@@ -489,6 +535,8 @@ def main() -> int:
             flat_bottom=args.flat_bottom, A_h_eq_boost=args.A_h_eq_boost,
             ke_gradient_scheme=args.ke_gradient_scheme,
             partial_cell=args.partial_cell,
+            adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
+            bathy_smoothing_passes=args.bathy_smoothing_passes,
         )
         app_grid_type = "tripole"
     else:
@@ -500,6 +548,8 @@ def main() -> int:
             flat_bottom=args.flat_bottom, A_h_eq_boost=args.A_h_eq_boost,
             ke_gradient_scheme=args.ke_gradient_scheme,
             partial_cell=args.partial_cell,
+            adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
+            bathy_smoothing_passes=args.bathy_smoothing_passes,
         )
         app_grid_type = "latlon"
     lat2d, lon2d = _grid_lat2d_deg(grid, args.grid)

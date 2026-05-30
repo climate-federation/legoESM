@@ -34,8 +34,8 @@ Mechanism: cold-start geostrophic adjustment from rest (u=0) overshoots to ~5-10
 ## Per-grid status
 | grid | runs stable (realistic IC)? | comparison |
 |---|---|---|
-| tripole/eORCA1 | partial-cell coord lands the worst fix; vertadv-amplified equatorial residual | pending |
-| latlon_bathy | same dynamics path; same residual | pending |
+| tripole/eORCA1 | partial-cell coord + adaptive-implicit vertadv (iter3) — amplifier fixed, validating (job 8115940) | pending |
+| latlon_bathy | same dynamics path; same fix applies (shared LatLonCGridOceanModel) | pending |
 | cubed_sphere | untested w/ CORE-II | — (applicator supports) |
 | mpas | untested w/ CORE-II | — (applicator supports) |
 | spectral | applicator unsupported | TODO |
@@ -64,16 +64,21 @@ Mechanism: cold-start geostrophic adjustment from rest (u=0) overshoots to ~5-10
   spectral surface-forcing path (synth top layer→Gaussian grid→air_sea_fluxes→curl/div→vor/div_hat).
 
 ## Next
-1. **Per-term tendency instrumentation** of `model.step` over steps 1-10 (WOA cold-start):
-   log max|tendency| per term (Coriolis/PV-flux, KE-grad, PGF, vert-adv, viscosity) +
-   the lat/lon of the max — find WHICH term grows first + WHERE. Blowup is grid- AND
-   KE-scheme-independent ⇒ shared `LatLonCGridOceanModel` baroclinic dynamics. This is
-   the un-done diagnostic; do it before the next blind lever.
-2. Un-ruled-out core levers (after #1 points the way): PGF density-Jacobian / EOS audit;
-   barotropic↔baroclinic split coupling; baroclinic-mode discretisation.
-3. Drag spin-up (job 8100129) is a symptom-treatment fallback if a real fix stalls.
-4. Once a grid runs stable + free → compare to NEMO (SST/SSS, then ACC/AMOC/MOC/MLD).
-5. All-grid audit (cubed_sphere/mpas/spectral) in flight (workflow wnz1vbd2y) — fold in.
+1. **BALANCED COLD-START INIT (the indicated fix, iter6 conclusive).** Implement a runner IC
+   option `--balanced-init`: geostrophic/thermal-wind velocity from the WOA p′ field
+   (u_g = −(1/ρ_0 f)∂p′/∂y at u-pts, v_g = +(1/ρ_0 f)∂p′/∂x at v-pts), equator-tapered
+   (regularise 1/f → f/(f²+f_ε²) or zero |lat|<~3-5°); optionally balanced SSH (η from the
+   depth-integrated PGF, `eady_uniform` pattern). Reuse `iterate_eos_and_pressure_anomaly` (p′),
+   `gradient_x/y_cgrid`, `grid.f_T`/`coriolis_cgrid`. NO dycore change. Test: WOA cold-start
+   stays finite + |u| physical (vs rest-IC NaN by day 5). codex-review.
+2. If balanced init stabilises → multi-year free run → `compare_omip_nemo.py` SST/SSS vs the
+   NEMO 5-yr ref → first real faithful number; then ACC/AMOC/MOC/MLD transports + runoff ungate.
+3. If a residual equatorial imbalance remains (f→0 taper region) → digital-filter / incremental
+   init, or a short strongly-damped pre-spin to settle the equatorial adjustment.
+4. (Done/kept) adaptive-implicit vertadv fix — validated + codex-SHIP; a real robustness
+   improvement, NOT the cold-start blocker. Optional follow-up: extend to tracers; fold into
+   `_apply_implicit_vertical_mixing` (NEMO trazdf/dynzdf one-solve style).
+5. All-grid audit (cubed_sphere/mpas/spectral) — fold in (workflow wnz1vbd2y findings recorded).
 6. codex-adversarial-review each change.
 
 ### Deferred (only if KE scheme ever matters)
@@ -182,3 +187,83 @@ A/B knob added: `run_omip_core2.py --ke-gradient-scheme {centered,hollingsworth}
   ocean_pe_latlon_cgrid.py ~1377) so an overshoot can't run away; (B) tame the seed via
   gradual spin-up. Testing (B) first (no code change): partial-cell + nudge-from-rest + drag
   (job below); the deeper (A) is next if (B) is insufficient/unfaithful.
+- **iter 2 (B = drag spin-up CONFIRMED a band-aid):** pcellgrad_8107306 (partial-cell + smc03 +
+  nudge60 + Rayleigh drag τ=1d/120d) stayed bounded (max|v|~6-7 m/s) through day 120 then blew
+  to 30 m/s the moment drag RELEASED at day 125; weaker drag (τ=5d) NaN'd by day 5. ⇒ drag
+  SUPPRESSES the amplifier but doesn't cure it. Pivot to axis (A) — the real, NEMO-faithful fix.
+- **iter 3 (FIX (A) IMPLEMENTED — adaptive-implicit vertical momentum advection):** Identified
+  the amplifier as the explicit 1st-order-upwind `flux_form_vertical_momentum_advection`
+  (vertical.py:740) — NO Courant limit, while the *tracer* TVD path IS Courant-clamped. NEMO's
+  exact remedy is **Shchepetkin (2015) adaptive-implicit vertical advection (`ln_zad_Aimp`,
+  ON in eORCA OMIP production)**: split w = w_exp + w_imp by a Courant ramp (Cu_min=0.15,
+  Cu_max=0.30); w_exp through the explicit scheme (Courant-capped), w_imp through a backward-
+  Euler 1st-order-upwind tridiagonal solve (M-matrix → unconditionally stable, monotone,
+  conservative). **Implemented** (codex-clean pending): new `shchepetkin_implicit_fraction`,
+  `implicit_vertical_advection_ocean` (reuses `thomas_solve`), `adaptive_implicit_vertical_
+  momentum_advection` in `ocean/vertical.py`; gated the explicit in-tendency vertadv
+  (`ocean_pe_latlon_cgrid.py` ~1357) behind `config.adaptive_implicit_vertadv`; applied the
+  operator-split at the step level post-barotropic on the baroclinic perturbation u'=u−U_bar
+  using the barotropic-consistent w_baro (`ocean_model_latlon_cgrid.py` ~984); new config flag
+  `adaptive_implicit_vertadv` (default False = bit-exact regression); runner
+  `--adaptive-implicit-vertadv`; full unit/conservation/stability/AD/flag-off-regression tests
+  (`test_adaptive_implicit_vertadv.py`); made `interp_cell_to_vface(f, grid)` fold-aware.
+  Unit tests 15/15 + regression 27/27 PASS (job 8115939). codex adversarial review hardened
+  the tests (added w=0-exact-identity, machine-precision conservation, rock-leak guards).
+- **iter 3 (CONTROLLED EXPERIMENT — vertadv is NOT the cause, RE-DIAGNOSIS):** OMIP ARM A
+  (job 8115940, the fix on the exact failing config, NO drag) went NaN by day 5. Per-term
+  probe (job 8115992, fix-OFF vs fix-ON, 60 steps, same config) is **decisive**: the max|u|
+  trajectories are NEARLY IDENTICAL (step 35: OFF 65 m/s, ON 75 m/s — fix marginally *worse*;
+  both ~107-183 m/s by step 60). ⇒ **the adaptive-implicit vertadv fix does NOT change the
+  blowup** — so **`vertadv` was a SYMPTOM, not the cause.** It was merely the largest *named*
+  tendency term in the prior no-fix diag; it is one of SEVERAL co-equal nonlinear amplifiers
+  (KE-gradient feedback −∇(½|u|²), `vertadv`, `vortcor`) that all engage once |u| is O(10).
+  With vertadv removed (ARM B), the top term becomes `KE_PGF` at the **S-Atlantic continental
+  slope (−36.3°N, −50.5°E)** growing 2.5e-3→1.7e-2 — the runaway continues at the SAME rate via
+  the KE-gradient feedback. **ROOT = the spurious PGF SEED over steep topography** (S-Atlantic /
+  Indonesian / W-Pacific slopes; ~3.5e-3 m/s² at step 1 with u=0 = pure smc03 partial-cell PGF
+  residual). Once it pushes |u| up, ALL the nonlinear terms finish the runaway — removing any
+  one (vertadv) cannot help. **The fix must reduce the SEED, not the amplifier.** The vertadv
+  fix is KEPT (correct, NEMO-faithful, tested, flag-gated robustness improvement that will
+  matter at high res / strong upwelling) but is NOT the OMIP blocker.
+- **iter 4 (flat-bottom test = CONFOUNDED; common root is DEEP PGF):** FLAT-BOTTOM WOA
+  cold-start (job 8116190) ALSO blows up, FASTER (max|v|=1169 m/s @ 46.9°N by step 10). BUT the
+  seed is at k19 (BOTTOM level) over Caspian/North-Sea cells = shallow seas mapped to the
+  5500 m flat bottom → WOA stratification extrapolated to depth → spurious deep ρ′ → large deep
+  PGF. So flat-bottom is a PATHOLOGICAL test (bad deep IC), NOT a clean topo control. The
+  amplifier here is `vortcor` (5.4e-3→0.113 over steps 7-9), NOT vertadv — **reconfirming the
+  amplifiers are INTERCHANGEABLE symptoms.** KEY COMMON PATTERN across both realistic-bathy
+  (seed at k15-18 over steep slopes) AND flat-bottom (seed at k19 over deep-mapped shelves):
+  **the spurious PGF seed always sits at the DEEPEST level** ⇒ root = spurious DEEP baroclinic
+  PGF (errors in ρ′ accumulate in p′=∫gρ′dz to the largest value + gradient at depth). Note:
+  `iterate_eos_and_pressure_anomaly` HAS an unused `use_depth_dependent_ref` (defaults False →
+  constant rho_0 reference; depth-varying ref would shrink ρ′/p′ — mainly a float32-precision
+  win, secondary in the fp64 OMIP run). For the REALISTIC case the seed = smc03 partial-cell
+  PGF residual on steep slopes (NOT precision; not the flat-bottom IC artifact).
+- **iter 6 (DEFINITIVE — PGF is FINE; root = UNBALANCED COLD-START ADJUSTMENT):** Two prior
+  axis-B probes came back: (a) bathy smoothing (job 8116430) inconclusive — Laplacian smoothing
+  only moved max r-factor 0.995→0.764 (too weak; and total-depth r is the WRONG metric — the
+  partial-cell PGF error depends on per-level centroid offsets, not total depth), both doses
+  still NaN'd ~day 2. (b) **THE decisive test — horizontally-uniform-stratification REST test on
+  the REAL eORCA1 geometry (job 8116497, true baroclinic PGF ≡ 0 ⇒ any velocity is pure
+  partial-cell PGF discretisation error): step-1 KE_PGF = 1.0e-6 m/s², max|u| = 4e-4→4e-3 m/s
+  over 30 steps, FINITE & STABLE.** Flat-bottom sanity arm = 0.0 exact. ⇒ **the partial-cell
+  smc03 PGF on real topography is EXCELLENT (~1e-6 m/s², mm/s — NEMO-class). The PGF is NOT the
+  seed.** Therefore the ~3.5e-3 m/s² "seed" in the real WOA cold-start is the **REAL baroclinic
+  PGF from WOA's horizontal density fronts**, UNBALANCED because cold-start = rest (u=0) + flat
+  SSH (η=0). **ROOT CAUSE (now conclusive): the violent cold-start GEOSTROPHIC ADJUSTMENT from
+  an unbalanced rest state** — corroborated by the drag run (damping the adjustment → stable to
+  day 120; blew up on drag release). EXONERATED: vertadv/vortcor/KE-grad amplifiers, smc03 PGF,
+  partial-cell discretisation, bathymetry steepness. **THE FIX = BALANCED INITIALISATION**
+  (thermal-wind geostrophic velocity from the WOA ρ-field, equator-tapered, + balanced SSH) —
+  the one prior-session hypothesis NEVER actually tested. Machinery exists: `references.py::
+  thermal_wind_shear`, `coriolis_cgrid`, `grid.f_T`, `eady_uniform` balanced-SSH logic; reuse
+  `iterate_eos_and_pressure_anomaly` for p′. Implement as a runner IC option (no dycore change).
+- **iter 5 (axis B — BATHYMETRY SMOOTHING test, job 8116430 RUNNING):** NEMO/ROMS smooth their
+  bathymetry to cut the slope (r-factor); the core2 runner used raw eORCA1 e3t_0 (no smoothing).
+  Added `make_partial_cell(..., smoothing_passes)` + `--bathy-smoothing-passes` (reuses
+  `_laplacian_smooth_2d`; reports max r-factor before/after). Test: WOA cold-start + partial-cell
+  + smc03 + vertadv-fix + 8 vs 20 Laplacian passes, ~36 d. PASS = max|u| physical + finite ≥30 d
+  (vs un-smoothed control NaN by day 5). If smoothing stabilises ⇒ seed = steep-slope PGF
+  confirmed + a (geometry-cost) stabiliser in hand; then tune the minimal smoothing for a
+  faithful run. If not ⇒ the deep-PGF/density-anomaly accuracy itself needs work (higher-order
+  cubic-spline PGF; depth-dependent reference profile; EOS-at-depth audit).

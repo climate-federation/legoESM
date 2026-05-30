@@ -775,8 +775,17 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     LatLonCGridOceanTendencies
         When ``diagnose_momentum`` is ``False``.
     (LatLonCGridOceanTendencies, MomentumTendencyDiagnostics)
-        When ``diagnose_momentum`` is ``True``.  The diagnostics satisfy
-        ``Σ components == du_dt`` (and v) to machine precision.
+        When ``diagnose_momentum`` is ``True``.  Closure of the per-term
+        breakdown depends on ``config.adaptive_implicit_vertadv``:
+
+        - ``False`` (default): ``Σ components == du_dt`` (and v) to
+          machine precision -- every term is part of the slow forcing.
+        - ``True``: vertical advection is applied as a separate
+          operator-split stage at the step level, so ``vertadv_{u,v}`` is
+          DIAGNOSTIC-ONLY (the start-of-step explicit estimate) and is
+          NOT in ``du_dt``.  The closure is then
+          ``Σ components == du_dt + vertadv_{u,v}`` (equivalently,
+          ``Σ (components except vertadv) == du_dt``).
     """
     u = state.u.data       # (n_lat, n_lon+1, nlev)
     v = state.v.data       # (n_lat+1, n_lon, nlev)
@@ -1350,36 +1359,74 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # equal dz_ref * J_u / J_v; for partial cells, h_k is zero below
     # the seafloor so divisions inside the flux-form vertical advection
     # do not pull thickness from inactive levels.
-    h_u_old = h_u
-    h_v_old = h_v
-    w_u = interp_cell_to_uface(w)
-    w_v = _interp_to_v_points(w, grid=grid)
-    if _mom_adv in ("weno5", "weno7"):
-        # WENO vertical momentum advection removes the implicit viscosity
-        # (~|w|*dz/2) that first-order upwind provides.  Requires
-        # compensating vertical viscosity (KPP / Richardson-A_v, #204).
-        diag_vertadv_u = _flux_form_vertical_momentum_advection_weno(
-            u_prime, w_u, h_u_old, order=_weno_order)
-        diag_vertadv_v = _flux_form_vertical_momentum_advection_weno(
-            v_prime, w_v, h_v_old, order=_weno_order)
-    else:
-        # Default: 1st-order upwind.  The implicit viscosity (~|w|*dz/2)
-        # damps baroclinic shear that explicit A_v=1e-5 cannot.
-        # Pass u/v face-activity masks so vertical momentum flux is
-        # exactly zero at faces below the seafloor — otherwise float-
-        # precision noise in w_u/w_v drives spurious tendencies inside
-        # the rock (and poorly-conditions adjoints).  ``u_mask_3d`` may
-        # be shape ``(..., 1)`` for pure z* (2D-broadcast) or
-        # ``(..., nlev)`` for partial; broadcast to the velocity shape
-        # so the helper's per-level slicing along the last axis works.
-        u_face_active = jnp.broadcast_to(u_mask_3d, u_prime.shape)
-        v_face_active = jnp.broadcast_to(v_mask_3d, v_prime.shape)
-        diag_vertadv_u = _flux_form_vertical_momentum_advection(
-            u_prime, w_u, h_u_old, face_active=u_face_active)
-        diag_vertadv_v = _flux_form_vertical_momentum_advection(
-            v_prime, w_v, h_v_old, face_active=v_face_active)
-    du_dt = du_dt + diag_vertadv_u
-    dv_dt = dv_dt + diag_vertadv_v
+    #
+    # Adaptive-implicit gate (Shchepetkin 2015 / NEMO ln_zad_Aimp): when
+    # ``config.adaptive_implicit_vertadv`` is set, the explicit vertical
+    # momentum advection here is NOT added to ``du_dt`` (the slow
+    # baroclinic forcing fed to the barotropic solver must stay
+    # vertical-advection-free, because vertadv is applied as a separate
+    # operator-split stage at the step level
+    # ``ocean_model_latlon_cgrid._step_impl`` on the barotropic-consistent
+    # ``w``).  The explicit flux-form tendency is STILL computed and
+    # stored in ``diag_vertadv_{u,v}`` as the start-of-step estimate of
+    # the (otherwise implicit) vertical-advection term, so the momentum
+    # budget reports the term being stabilised rather than a silent zero
+    # (it matches the O(dt) start-of-step semantics already documented on
+    # ``tendencies_with_diagnostics``).
+    #
+    # Closure contract:
+    #   - flag OFF: ``vertadv`` is in ``du_dt``     -> Σ(terms) == du_dt.
+    #   - flag ON : ``vertadv`` is a diagnostic only -> Σ(terms) ==
+    #     du_dt + diag_vertadv (the vertadv slice is the start-of-step
+    #     estimate of the step-level implicit operator, excluded from the
+    #     slow forcing on purpose).  ``test_momentum_diagnostics_closure``
+    #     runs with the default (flag off) config, so the strict
+    #     ``Σ == du_dt`` identity it enforces is unaffected.
+    _aimp_vertadv = getattr(config, "adaptive_implicit_vertadv", False)
+    # Compute the explicit flux-form vertadv tendency when it is either
+    # (a) part of the slow forcing (flag off), or (b) needed for the
+    # momentum budget as the start-of-step estimate (flag on AND
+    # diagnosing).  When the flag is on and we are not diagnosing, skip it
+    # entirely so the hot step path adds no extra graph nodes (the actual
+    # vertical advection is applied at the step level instead).  These are
+    # Python ``if`` on static (compile-time) flags -- the feature-gating
+    # exception, not ``jnp.where``.
+    if (not _aimp_vertadv) or diagnose_momentum:
+        h_u_old = h_u
+        h_v_old = h_v
+        w_u = interp_cell_to_uface(w)
+        w_v = _interp_to_v_points(w, grid=grid)
+        if _mom_adv in ("weno5", "weno7"):
+            # WENO vertical momentum advection removes the implicit
+            # viscosity (~|w|*dz/2) that first-order upwind provides.
+            # Requires compensating vertical viscosity (KPP / Richardson-
+            # A_v, #204).
+            diag_vertadv_u = _flux_form_vertical_momentum_advection_weno(
+                u_prime, w_u, h_u_old, order=_weno_order)
+            diag_vertadv_v = _flux_form_vertical_momentum_advection_weno(
+                v_prime, w_v, h_v_old, order=_weno_order)
+        else:
+            # Default: 1st-order upwind.  The implicit viscosity
+            # (~|w|*dz/2) damps baroclinic shear that explicit A_v=1e-5
+            # cannot.  Pass u/v face-activity masks so vertical momentum
+            # flux is exactly zero at faces below the seafloor —
+            # otherwise float-precision noise in w_u/w_v drives spurious
+            # tendencies inside the rock (and poorly-conditions
+            # adjoints).  ``u_mask_3d`` may be shape ``(..., 1)`` for
+            # pure z* (2D-broadcast) or ``(..., nlev)`` for partial;
+            # broadcast to the velocity shape so the helper's per-level
+            # slicing along the last axis works.
+            u_face_active = jnp.broadcast_to(u_mask_3d, u_prime.shape)
+            v_face_active = jnp.broadcast_to(v_mask_3d, v_prime.shape)
+            diag_vertadv_u = _flux_form_vertical_momentum_advection(
+                u_prime, w_u, h_u_old, face_active=u_face_active)
+            diag_vertadv_v = _flux_form_vertical_momentum_advection(
+                v_prime, w_v, h_v_old, face_active=v_face_active)
+        if not _aimp_vertadv:
+            # Explicit path: vertadv is part of the slow baroclinic
+            # forcing.  (Flag on: it stays a diagnostic only.)
+            du_dt = du_dt + diag_vertadv_u
+            dv_dt = dv_dt + diag_vertadv_v
 
     # --- 9. Tracer tendencies (diffusion + physics only) ---
     # Horizontal AND vertical tracer advection are handled in the step()
@@ -2011,7 +2058,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # Apply the same land mask to every diagnostic component.  Because
     # the final masking is `du_dt = du_dt * u_mask_3d` and × distributes
     # over +, applying the mask uniformly to all components preserves
-    # ``Σ components == total`` exactly.
+    # ``Σ components == total`` exactly (flag off).  With
+    # ``adaptive_implicit_vertadv`` on, ``vertadv_{u,v}`` is a
+    # diagnostic-only start-of-step estimate excluded from ``total`` /
+    # ``du_dt`` -> closure is ``Σ (components except vertadv) == total``.
     def _mu(x):
         return Field(data=x * u_mask_3d, name="diag_u", dims=dims_u, units="m/s^2")
     def _mv(x):

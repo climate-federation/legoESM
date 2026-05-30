@@ -303,22 +303,35 @@ def interp_cell_to_uface(f: jnp.ndarray) -> jnp.ndarray:
     return jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
 
 
-def interp_cell_to_vface(f: jnp.ndarray) -> jnp.ndarray:
+def interp_cell_to_vface(f: jnp.ndarray, grid=None) -> jnp.ndarray:
     """Interpolate a cell-center field to v-face (lat interface) positions.
 
     Interior faces: average of adjacent cells.
-    Pole faces (south=0, north=n_lat): copy the adjacent cell value.
-    The pole value is numerically inert since v = 0 at the wall.
+
+    Boundary faces depend on ``grid``:
+
+    - ``grid is None`` (legacy default): south/north pole faces copy the
+      adjacent cell value.  The pole value is numerically inert since
+      ``v = 0`` at the wall.  Bit-exact backwards-compat.
+    - ``grid`` provided: use :func:`pad_ns_scalar` — south = 0 and north
+      = 0 (wall) on regular lat-lon, or north = fold-reflected on a
+      tripolar grid where the north boundary is an active fold rather
+      than a wall.  This is the form needed when the v-face value at the
+      north fold is physically meaningful (e.g. interpolating a vertical
+      velocity for momentum advection on eORCA1).
 
     Parameters
     ----------
     f : (n_lat, n_lon, ...) at cell centers.
+    grid : optional LatLonGrid or LatLonCGridGeometry.
 
     Returns
     -------
     f_v : (n_lat+1, n_lon, ...) at v-faces.
     """
     f_v_interior = 0.5 * (f[:-1] + f[1:])  # (n_lat-1, ...)
+    if grid is not None:
+        return pad_ns_scalar(f_v_interior, grid)
     return jnp.concatenate([f[0:1], f_v_interior, f[-1:]], axis=0)
 
 

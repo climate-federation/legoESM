@@ -72,8 +72,23 @@ def main() -> int:
                    help="Use OceanPartialCellCoordinate (z-level + partial steps, "
                         "NEMO-faithful) instead of the plain sigma-like z* coord. "
                         "Activates the Adcroft/SMC03 PGF correction.")
+    p.add_argument("--flat-bottom", action="store_true",
+                   help="Replace bathymetry with a flat bottom (H_max) over ocean "
+                        "cells -- isolates the PGF-over-steep-topography seed from "
+                        "the core baroclinic response to realistic stratification.")
     p.add_argument("--forcing", action="store_true",
                    help="Apply CORE-II surface forcing (default: none, isolate dynamics).")
+    p.add_argument("--uniform-strat", action="store_true",
+                   help="Replace T,S with their horizontal ocean-mean profile so the "
+                        "true baroclinic PGF is zero -- step-1 KE_PGF then isolates the "
+                        "pure partial-cell PGF discretisation error on the real topography "
+                        "(BH rest test on real geometry).")
+    p.add_argument("--adaptive-implicit-vertadv", action="store_true",
+                   help="Enable adaptive-implicit vertical momentum advection "
+                        "(Shchepetkin 2015 / NEMO ln_zad_Aimp). NOTE: when on, the "
+                        "vertadv term moves to the step level so the tendency-diag "
+                        "vertadv_{u,v} read ~0; watch max|u| per step + the residual "
+                        "non-vertadv driver instead.")
     p.add_argument("--top-n", type=int, default=4,
                    help="Print the N largest terms per step.")
     args = p.parse_args()
@@ -87,6 +102,8 @@ def main() -> int:
             ke_gradient_scheme=args.ke_gradient_scheme,
             pgf_scheme=args.pgf_scheme,
             partial_cell=args.partial_cell,
+            flat_bottom=args.flat_bottom,
+            adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
         )
     else:
         nlat, nlon = (int(x) for x in args.latlon_res.split("x"))
@@ -96,11 +113,38 @@ def main() -> int:
             ke_gradient_scheme=args.ke_gradient_scheme,
             pgf_scheme=args.pgf_scheme,
             partial_cell=args.partial_cell,
+            flat_bottom=args.flat_bottom,
+            adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
         )
 
     lat_T_deg = np.rad2deg(np.asarray(grid.lat_T))
     lon_T_deg = np.rad2deg(np.asarray(grid.lon_T))
     dt = float(args.dt)
+
+    if args.uniform_strat:
+        # Replace T,S with their ocean-area-mean profile at each level so the
+        # field is HORIZONTALLY UNIFORM: the TRUE baroclinic PGF is then zero
+        # everywhere, and any step-1 KE_PGF (with u=0) is PURE partial-cell PGF
+        # discretisation error on the real eORCA1 topography -- the
+        # Beckmann-Haidvogel "rest test" extended to the realistic geometry.
+        # Distinguishes a PGF-over-steep-topo discretisation bug (seed stays
+        # ~1e-2) from the real cold-start baroclinic adjustment (seed ~1e-5).
+        T = np.array(state.T.data, dtype=np.float64)   # writable copy
+        S = np.array(state.S.data, dtype=np.float64)
+        ocean = np.asarray(state.land_mask.data) > 0.5
+        nlev = T.shape[-1]
+        for k in range(nlev):
+            tk = T[..., k]; sk = S[..., k]
+            wet = ocean & np.isfinite(tk) & (np.abs(tk) > 0)
+            if wet.any():
+                T[..., k] = np.where(ocean, float(tk[wet].mean()), tk)
+                S[..., k] = np.where(ocean, float(sk[wet].mean()), sk)
+        state = state._replace(
+            T=state.T.replace(data=jnp.asarray(T)),
+            S=state.S.replace(data=jnp.asarray(S)),
+        )
+        print("[setup] HORIZONTALLY-UNIFORM stratification (true baroclinic "
+              "PGF = 0; step-1 PGF = pure discretisation error on real topo)")
 
     # Optional CORE-II surface forcing (built once; perpetual record 0 is fine
     # for a few-step probe — the IC imbalance, not the forcing phase, is the

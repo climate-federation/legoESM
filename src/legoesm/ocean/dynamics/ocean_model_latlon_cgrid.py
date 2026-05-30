@@ -601,9 +601,15 @@ class LatLonCGridOceanModel:
         Returns
         -------
         (LatLonCGridOceanTendencies, MomentumTendencyDiagnostics)
-            The diagnostics satisfy
-            ``Σ components == du_dt`` to machine precision (verified by
-            ``tests/ocean/unit/test_momentum_diagnostics_closure.py``).
+            The diagnostics satisfy ``Σ components == du_dt`` to machine
+            precision (verified by
+            ``tests/ocean/unit/test_momentum_diagnostics_closure.py``)
+            UNLESS ``config.adaptive_implicit_vertadv`` is set, in which
+            case ``vertadv_{u,v}`` is a diagnostic-only start-of-step
+            estimate excluded from ``du_dt`` and the closure becomes
+            ``Σ (components except vertadv) == du_dt`` (see
+            ``MomentumTendencyDiagnostics`` and
+            ``latlon_cgrid_ocean_baroclinic_tendencies`` docstrings).
 
         Use the returned tendencies as the start-of-step approximation
         of what the model integrates internally; for the
@@ -981,6 +987,54 @@ class LatLonCGridOceanModel:
         w_baro = diagnose_w_from_flux_div(
             flux_div_k, self.z_coord, thickness_weighted=True,
         )
+
+        # 7b. Adaptive-implicit vertical momentum advection
+        #     (Shchepetkin 2015 / NEMO ``ln_zad_Aimp``).  The explicit
+        #     in-tendency vertical momentum advection has no vertical-CFL
+        #     limit and amplifies a spurious ``w`` super-exponentially in
+        #     thin cells (the OMIP cold-start "vertadv" runaway).  When
+        #     ``config.adaptive_implicit_vertadv`` is set, the PE tendency
+        #     skips that explicit term and it is applied here instead,
+        #     after the barotropic solve, on the barotropic-consistent
+        #     ``w_baro`` (the same vertical velocity that advects tracers).
+        #     It acts on the baroclinic perturbation ``u' = u - U_bar``
+        #     (depth-mean removed — the barotropic mode is owned by the
+        #     barotropic solver), exactly like the explicit scheme, then
+        #     restores ``U_bar``.  Unconditionally stable + conservative.
+        #     No-op (and bit-exact) when the flag is off.
+        if getattr(self.config, "adaptive_implicit_vertadv", False):
+            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                interp_cell_to_vface,
+            )
+            from legoesm.ocean.vertical import (
+                adaptive_implicit_vertical_momentum_advection,
+            )
+            # w_baro at cell centers -> momentum faces (fold-aware for v).
+            w_u_half = interp_cell_to_uface(w_baro)            # (lat, lon+1, nlev+1)
+            w_v_half = interp_cell_to_vface(w_baro, self.grid)  # (lat+1, lon, nlev+1)
+            # Depth-mean (barotropic) velocity at the faces, from the
+            # already-computed thickness-weighted transports (lines above).
+            U_bar = (Hu_3d / jnp.maximum(H_u_old, 1e-10))[..., jnp.newaxis]
+            V_bar = (Hv_3d / jnp.maximum(H_v_old, 1e-10))[..., jnp.newaxis]
+            u_face_active = jnp.broadcast_to(u_mask_3d_tracer, u_3d.shape)
+            v_face_active = jnp.broadcast_to(v_mask_3d_tracer, v_3d.shape)
+            u_adv = adaptive_implicit_vertical_momentum_advection(
+                u_3d - U_bar, w_u_half, h_u_old, dt,
+                face_active=u_face_active,
+            ) + U_bar
+            v_adv = adaptive_implicit_vertical_momentum_advection(
+                v_3d - V_bar, w_v_half, h_v_old, dt,
+                face_active=v_face_active,
+            ) + V_bar
+            # Re-apply the 2D wet mask + periodic wrap column (matches the
+            # tendency path's post-update masking at u[:, -1] = u[:, 0]).
+            u_adv = u_adv * u_mask_3d
+            u_adv = u_adv.at[:, -1].set(u_adv[:, 0])
+            v_adv = v_adv * v_mask_3d
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=u_adv),
+                v=state_new.v.replace(data=v_adv),
+            )
 
         T_mid = state_new.T.data  # tracer after diffusion+physics Euler step
         S_mid = state_new.S.data
