@@ -247,3 +247,25 @@ v_max 1.47 @day2 is PHYSICALLY CORRECT (the baroclinic wave has not grown yet).
 run the cube is **13× cleaner + smooth + no edge artifact**. The cube PE atmosphere
 is now competitive with / cleaner than latlon. (latlon-hybrid equatorial artifact
 filed as a separate latlon item.)
+
+## iter 14f — VISUAL INSPECTION (FIXED cube PE, hybrid)
+- baroclinic v: smooth zonal bands, NO panel-edge blocks ✓
+- rotated_steady v: smooth large-scale tilted-rotation flow, no panel blocks ✓
+- rest_state_topo wind_speed: residual ~1 m/s is MOUNTAIN-localized (the dcmip
+  mountain), i.e. the sigma-coord topography-PGF error — NOT a cube-edge artifact
+  (Lin-PGF-insensitive; common to all sigma-coord models over steep terrain).
+⇒ the cube PANEL-EDGE artifacts (the user's concern) are eliminated. Remaining
+residuals are (a) a smooth converging truncation error and (b) the localized
+topography-PGF over the mountain — both distinct from the panel-seam imprint.
+(Plot titles read "Baroclinic" on rotated/rest cases — generic-label bug, cosmetic.)
+
+## STATUS SUMMARY (post vector-seam fix)
+ATMOSPHERE cube PE: panel-edge v-imprint ROOT-CAUSED + FIXED (vector-vs-scalar
+cc→D-grid wind/tendency/diffusion lift, 7 sites, codex-APPROVED, convergence-
+validated 0.688→0.535→0.282, regression-guarded). Cleaner than latlon-hybrid.
+OCEAN cube: NaN→PASS (FC-Gram default, codex-approved).
+Native velocity plots fixed. SW cube W2 imprint (0.09, FV3Edge path) = separate
+smaller mechanism, untouched.
+OPEN: topography-PGF residual (rest_state_topo, separate); MPI vector packed halo
+(single-device unaffected); ico-MPAS-baroclinic HANG (separate); held_suarez/AMIP
+broad climate verify; latlon-hybrid equatorial artifact (latlon, separate).
