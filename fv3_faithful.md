@@ -33,6 +33,28 @@ decoupled FC from density-test heavy diffusion (`cube_fc_light_diffusion`), opte
 IGW out. rest_state ×4 NaN→PASS. (FC over-damps fast barotropic waves — right for
 density/rest, wrong for pure-wave cases.)
 
+## OCEAN matrix run (this session)
+- rest_state ×4 (cube/latlon/mpas) PASS — cube C24 eta drift 1e-23..1e-31
+  (machine-zero, no NaN); FC-Gram holds. geostrophic_adjustment, phillips,
+  inertia_gravity_wave, overflow cube PASS. barotropic_wave cube FAILs
+  (min_amp 0.038<0.1) — PRE-EXISTING FC over-damping (identical pre/post fix).
+- ✅ **Fixed (commit 4fe7108c)**: FC cube-ocean velocity viscosity/hyperdiff
+  halo-exchanged stacked (u,v) with SCALAR `pad_halo_4d` (no cross-face
+  rotation). Now per-component `_fc_pad_halo_vector` + hand-built vector-∇⁴
+  (mirror of the atmosphere diffusion-halo fix). Validated: zonal-jet |∇²V|
+  non-zonal frac 0.59→0.38 (vector more zonally symmetric = more correct).
+  Test `tests/ocean/unit/test_fc_velocity_viscosity_vector_halo.py`.
+- ⚠️ **OPEN cube-ocean artifact**: geostrophic_adjustment (zonal thermal-wind
+  IC, `+5°C·cos(lat)`) — cube eta **40% non-zonal variance** vs latlon 0.0%,
+  mpas 0.3%. IC is zonal (nz=0.0000); eta grows 0.04→0.45 by t=0.6d then
+  saturates ~0.40; equatorial faces 0-3 disagree (means -0.019..+0.054), polar
+  faces identical (N/S symmetric). NOT viscosity (fix didn't move it; A_h=1e4
+  too weak/1d) and NOT the barotropic continuity divergence (already vector via
+  `_pad_vector`). Grow-then-saturate ⇒ grid-seeded mode amplified by thermal-
+  wind shear. NEXT: C24-vs-C48 convergence study to classify truncation
+  (converges, acceptable) vs consistency error (anti-converges, bug); then the
+  inviscid momentum (Coriolis/PGF metric) or the barotropic momentum.
+
 ## Verdict on the 3 user-flagged SW visual concerns
 1. cosine-bell day-1 = bulk PPM-limiter diffusion in the panel INTERIOR (cube/ico
    L2 1.4×), NOT a grid artifact; high-lat scatter = cosmetic native render.
