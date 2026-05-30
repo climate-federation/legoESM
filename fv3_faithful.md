@@ -126,6 +126,32 @@ until validated:
   be ~1 min). HS latlon HS also pathologically slow (pole CFL). cube HS climate
   is physical (T 265K, [241,308]) — imprint does NOT corrupt the climate.
 
+## iter 13 — imprint ANTI-converges + comprehensive atmosphere verdict
+Baroclinic cube v_rms vs resolution (quick, hybrid): C36 3.43@0.2d/4.95@2d;
+C48 **4.32@0.2d / 8.46@2d** — HIGHER + growing faster at finer resolution. The
+imprint does NOT converge (worsens) ⇒ consistency-level error, not benign
+truncation; it persists/worsens at AMIP resolution. (Caveat: matrix scales
+hyperdiff/A_h/dt with resolution, so weaker relative damping at C48 inflates the
+2-day growth; but the robust conclusion — no convergence — matches the team's
+edge-ratio plateau 4-5× at C8/C16/C24.)
+
+**COMPREHENSIVE ATMOSPHERE VERDICT.** The cube panel-edge imprint is:
+- the cube's **discrete geostrophic-balance truncation/consistency error** (steady
+  jet, perturbation-independent; analytic continuous balance not reproduced by
+  the cube discrete PGF/Coriolis/metric — latlon nearly is, 0.023 vs cube 3.4);
+- **halo-insensitive** (duogrid no effect) and **non-converging** with resolution;
+- **deeply team-investigated** (1045+ fidelity iters + 33-iter duogrid study;
+  "PE insensitive to all factory flags");
+- with **no cheap fix** (damping → blows up; duogrid → no effect/NH-harmful;
+  existing FV3 flags → neutral; FB stepping + Lin PGF → RK3-unstable);
+- but it does **NOT corrupt the climate** (cube HS physical, T 265K Earth-like).
+The ONE untried lever is the FC-PGF (interior spectral gradient order, distinct
+from the halo), but it is a large/uncertain build — and the non-convergence
+hints the root is metric-geometry consistency, which a gradient swap may not fix.
+HONEST: "absolutely no edge artifacts" on the atmosphere cube is NOT achievable
+without a major novel advance; the cube is FV3-faithful in components + gives
+physical climates, but carries this fundamental steady-balance imprint.
+
 ## Pending / next
 - HS climate match (cube vs latlon) — latlon slow [running, monitor armed].
 - AMIP cube vs latlon (user wants it + continent-longitude check).
