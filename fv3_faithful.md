@@ -53,6 +53,16 @@ Test `tests/ocean/unit/test_fv3sw_barotropic.py`.
 c_grid = NaN (`fv3_cc2c` breaks FB skew-symmetry); bare vector-invariant under
 forward-Euler OR RK3 = NaN; only the full SW core (RK3+div_damp+hyperdiff) is
 stable AND zonal (isolated zonal-eta test nz=0.0000).
+**Codex review (confirmed correct for wet cells: height mapping, no stale-JIT,
+rest_state exactly preserved, baroclinic reconstruction OK). 2 LAND follow-ups
+for real-coastline OMIP (not the idealized 9/9 cases):** (1) coasts not
+impermeable DURING substeps — the SW core is global/land-free, mask applied only
+AFTER the substep loop ⇒ water/momentum can cross coasts mid-loop (rest exact;
+non-rest coastal basins not perfectly closed). (2) the SW per-substep mass fixer
+conserves land-INCLUSIVE `sum(h·area)`, not wet-ocean `sum(eta·mask·area)`.
+NEXT: mask SW winds at coast corners inside the fori_loop + use the ocean's
+masked conservation domain for the fast mode. Polar-cap land at C24/1-day leaks
+below test thresholds (geostrophic PASS, nz 1.5%), so idealized cases are safe.
 
 ## SW visual verdicts
 1. cosine-bell day-1 = PPM-limiter interior diffusion (cube/ico L2 1.4×), not edge.
