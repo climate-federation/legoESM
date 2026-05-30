@@ -2369,17 +2369,19 @@ class ModelDriver:
         # is a no-op there.  (Time-varying-over-the-run GHG is a follow-on:
         # thread it through ``forcing`` like T_sfc; here it is fixed at the
         # start-year value.)
-        # compute_fp32 ENABLED for the rrtmgp MPAS path: run the optics tables
-        # + RTE solve in float32 even under JAX x64 (the dycore stays fp64).
-        # The earlier fp32 crash (PR #343) was a float64 leak in the OPTICS
-        # interpolant reference grids (gas_optics / cloud_optics linspace +
-        # vmr stack allocated strong-typed float64), which re-promoted the
-        # optical depth and broke the RTE scan carry dtype.  Fixed on branch
-        # fp32_mpas by keying those grids off the input dtype; GPU-validated
-        # (job 8113954, L4 nCells=2562): fp32 heating is float32 + finite and
-        # matches fp64 to rel-diff 1.5e-3 (REAL fp32, not a no-op).  Enabled
-        # only for rrtmgp -- gray ignores the rrtmgp sub-config.
-        _rrtmgp_fp32 = (cfg.radiation == "rrtmgp")
+        # compute_fp32 is DISABLED: GPU validation (job 8109241,
+        # JAX_TRACEBACK_FILTERING=off) showed the fp32 RTE path still crashes --
+        # the optics-table cast to float32 works, but the shortwave direct-beam
+        # recurrence (``rte_utils.recurrent_op_scan`` via
+        # ``monochromatic_two_stream.sw_cell_source``) re-promotes the scan
+        # carry to float64, tripping ``lax.scan``'s carry-dtype invariant
+        # (``float32[ncol,1]`` in vs ``float64[ncol,1]`` out).  float64 is
+        # pervasive in the RTE/optics interior, so enabling fp32 makes EVERY
+        # MPAS rrtmgp run fail at trace time.  Keep fp32 off (MPAS rrtmgp runs
+        # in fp64 -- correct, just not accelerated) until a kernel-wide
+        # precision audit lands; the cast plumbing + LW/SW carry-coercion fixes
+        # are retained inert so the audit can flip this flag.  See PR #343.
+        _rrtmgp_fp32 = False
         phys_cfg = PhysicsConfig(
             radiation=RadiationConfig(
                 scheme=cfg.radiation if cfg.radiation != "none" else "none",
