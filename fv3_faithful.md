@@ -15,6 +15,14 @@ sites use `center_to_dgrid_vector` / `pad_halo_vector_4d` (commits ac6a8f58…
 mass drift 2.6e-11→1.1e-15; v-field wavenumber-4 blocks→smooth bands. Regression
 `tests/test_vector_cc_to_dgrid_wind_lift.py`. SW 16/16 all grids; HS 286K physical.
 
+## ATM baroclinic cube — fresh edge re-verification (this session)
+hydro baroclinic C36 (sigma+hybrid) + rotated_baroclinic: cube PASS, mass drift
+machine-zero (7e-15..3e-13), max|v| bounded (10.6/13.3/23.8 — no blow-up). Native
+v-wind (the CLAUDE.md imprint sentinel) = **smooth zonal bands, NO wavenumber-4
+panel blocks / seam noise** ⇒ the vector-seam imprint fix holds. (Cross-grid
+closeness comparison vs latlon/ico runs slow on CPU; cube edge-cleanliness
+confirmed independently from the native field.)
+
 ## ✅ CROSS-GRID longitude alignment — FIXED (codex clean)
 latlon stored native 72×144 under a 360-pt label (tens-of-deg translation);
 gaussian/spectral kept native lon; npz lon + icosa weights node-centered while
