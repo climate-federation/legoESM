@@ -151,7 +151,15 @@ class OceanModel:
                 n,
                 div_damp_factor=self.config.barotropic_sw_div_damp_factor,
                 damp_v=self.config.barotropic_sw_damp_v,
-            )._replace(g=self.config.g)
+            )._replace(
+                g=self.config.g,
+                # The SW core's global mass fixer conserves land-INCLUSIVE
+                # sum(h*area); the ocean invariant is wet-ocean free-surface
+                # volume.  Disable it and let the ocean's masked
+                # ocean_conservation_fixer (applied after the barotropic) handle
+                # conservation on the wet domain (codex review of bd74c45b).
+                fix_mass=False,
+            )
             self._sw_baro_model = CDGridShallowWaterModel(grid, sw_cfg)
             # Reuse the ocean cdgrid (identical for this grid) to avoid a
             # second metric build.

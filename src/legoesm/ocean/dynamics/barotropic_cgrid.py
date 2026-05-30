@@ -373,10 +373,28 @@ def barotropic_substeps_fv3sw(
 
     h_sw = (H_bathy + eta).astype(_f64)
     h_s = (-H_bathy).astype(_f64)
+
+    # Corner-ocean mask for coast impermeability: a D-grid corner wind is kept
+    # only when ALL four surrounding cells are ocean, so the normal velocity at
+    # any land-adjacent corner is zero and no mass/momentum crosses a coast
+    # DURING the substeps (the global SW core is land-free; masking only after
+    # the loop would let water leak through coasts mid-loop — codex review).
+    mask_pad = pad_halo(mask, interp_offsets=None)  # (6, n+2, n+2)
+    corner_ocean = (
+        mask_pad[:, :-1, :-1] * mask_pad[:, 1:, :-1]
+        * mask_pad[:, :-1, 1:] * mask_pad[:, 1:, 1:]
+    ).astype(_f64)  # (6, n+1, n+1)
+    u_d = u_d * corner_ocean
+    v_d = v_d * corner_ocean
     sw_state = CDGridShallowWaterState(h=h_sw, u_d=u_d, v_d=v_d, h_s=h_s)
 
     def body(i, s):
-        return sw_model.step(s, dt_s)
+        s = sw_model.step(s, dt_s)
+        # Re-impose coast impermeability each substep (the SW core has no land).
+        return s._replace(
+            u_d=s.u_d * corner_ocean,
+            v_d=s.v_d * corner_ocean,
+        )
 
     sw_state = jax.lax.fori_loop(0, n_substeps, body, sw_state)
 
