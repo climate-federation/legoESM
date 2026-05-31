@@ -85,7 +85,14 @@ seams, must use mirror construction):**
   exactly the scoped gap: must NOT gate gnomonic="ed" until `compute_halo_interp_offsets_ed`
   exists (else halo interpolates at equiangular fractional positions = wrong seam geometry)
   + a test exercising the actual `grid.halo_interp_offsets` path (not just nearest pad_halo).
-- ⏳ REMAINING: `compute_halo_interp_offsets_ed` (h1/2/3). Approach: reuse equiangular
+- ✅ `compute_halo_interp_offsets_ed` (halo.py) — position-matching each face's first-halo
+  cell to the neighbour strip on the extended defn-A centres (parabola-vertex on great-circle
+  dist). gnomonic_ed-specific (codex's gating blocker addressed), bounded (maxabs 0.223 vs
+  eq 0.498), helps vs no-offset. Tests 3/3. CAVEAT: sub-cell correction; field tests
+  dominated by cross-face linear-interp error so eq-vs-ed optimality is below noise — final
+  validation = gated W5 C96 eigenmode run. ⇒ ALL gnomonic_ed metric pieces DONE; next = GATE
+  `create_cubed_sphere(gnomonic="ed")` assembling all fields → validate → recalibrate → W5 C96.
+- (superseded) earlier `compute_halo_interp_offsets_ed` notes: reuse equiangular
   CONNECTIVITY + `_face_to_xyz_np`/`_xyz_to_gnomonic_np` (pass gnomonic_ed angles since
   tan(arctan(coord))=coord) with `frac=interp(neighbor_angle, alpha_ed, range(n))`. The
   gnomonic_ed gnomonic-angle distribution `alpha_ed` is i↔j-symmetric, spans [-π/4,π/4],
