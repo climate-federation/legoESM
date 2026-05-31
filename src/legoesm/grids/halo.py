@@ -220,81 +220,95 @@ def compute_halo_interp_offsets(n: int) -> jnp.ndarray:
     return jnp.array(offsets, dtype=jnp.float64)
 
 
-def _strip_in_array_order(arr, edge, n):
-    """In-domain boundary strip (length n) of an (n+2, n+2) padded face for
-    `edge`, in ascending array order.  arr indexed [i, j], interior [1:n+1]."""
+def _ed_indomain_boundary_strip(arr, edge, n, ext):
+    """In-domain boundary strip (length n, ascending array order) of an
+    ``(M, M)`` padded gnomonic_ed face, in-domain block ``[ext:ext+n]``."""
     if edge == WEST:
-        return arr[1, 1:n + 1]
+        return arr[ext, ext:ext + n]
     elif edge == EAST:
-        return arr[n, 1:n + 1]
+        return arr[ext + n - 1, ext:ext + n]
     elif edge == SOUTH:
-        return arr[1:n + 1, 1]
+        return arr[ext:ext + n, ext]
     else:  # NORTH
-        return arr[1:n + 1, n]
+        return arr[ext:ext + n, ext + n - 1]
 
 
-def _halo_strip_in_array_order(arr, edge, n):
-    """First halo strip (one cell beyond `edge`) of an (n+2, n+2) padded face,
-    ascending array order, length n."""
+def _ed_halo_strip(arr, edge, n, ext, depth):
+    """Halo strip at ``depth`` cells beyond ``edge`` (depth 0 = adjacent to the
+    in-domain boundary), length n, ascending array order."""
     if edge == WEST:
-        return arr[0, 1:n + 1]
+        return arr[ext - 1 - depth, ext:ext + n]
     elif edge == EAST:
-        return arr[n + 1, 1:n + 1]
+        return arr[ext + n + depth, ext:ext + n]
     elif edge == SOUTH:
-        return arr[1:n + 1, 0]
+        return arr[ext:ext + n, ext - 1 - depth]
     else:  # NORTH
-        return arr[1:n + 1, n + 1]
+        return arr[ext:ext + n, ext + n + depth]
 
 
-def compute_halo_interp_offsets_ed(n: int) -> jnp.ndarray:
-    """gnomonic_ed counterpart of :func:`compute_halo_interp_offsets`.
+def _compute_halo_interp_offsets_ed_hN(n: int, halo: int) -> jnp.ndarray:
+    """gnomonic_ed cross-face halo interp offsets, ``(6, 4, halo, n)``.
 
-    Same contract — ``(6, 4, n)`` fractional-index corrections δ for the
-    interpolated cross-face halo — but for the FV3 gnomonic_ed grid, whose
-    non-uniform equal-edge distribution makes the equiangular analytic offsets
-    wrong (codex iter67 gating blocker).  Computed by POSITION-MATCHING on the
-    actual extended gnomonic_ed cell centres (`_gnomonic_ed_padded_centers`,
-    which extend cleanly into the halo): each face's first-halo cell is matched
-    to its neighbour's in-domain edge strip via a parabola-vertex fit on
-    great-circle distance, giving the true fractional index; ``δ = frac − j``.
+    Position-matching on the actual extended gnomonic_ed cell centres
+    (`_gnomonic_ed_padded_centers`, which extend cleanly into the halo): each
+    halo cell (depth 0..halo-1 beyond an edge) is matched to its neighbour's
+    in-domain edge strip via a parabola-vertex fit on great-circle distance,
+    giving the true fractional index; ``δ = frac − j``.  gnomonic_ed-specific
+    (the equiangular analytic offsets are the wrong geometry — codex gating
+    blocker).
     """
     from legoesm.grids.cubed_sphere import _gnomonic_ed_padded_centers
 
-    # 1-halo-ring padded centres: (6, n+2, n+2)
-    lon, lat = _gnomonic_ed_padded_centers(n, 0)
+    ext = halo + 1
+    lon, lat = _gnomonic_ed_padded_centers(n, halo)  # (6, M, M), M=n+2*halo+2
     lon = np.asarray(lon)
     lat = np.asarray(lat)
     xyz = np.stack([
         np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)
-    ], axis=-1)  # (6, n+2, n+2, 3)
+    ], axis=-1)
 
     edges = [WEST, EAST, SOUTH, NORTH]
-    offsets = np.zeros((6, 4, n), dtype=np.float64)
+    offsets = np.zeros((6, 4, halo, n), dtype=np.float64)
 
     for face in range(6):
         for edge_idx, edge in enumerate(edges):
             nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
-            halo_strip = _halo_strip_in_array_order(xyz[face], edge, n)  # (n,3)
-            nbr_strip = _strip_in_array_order(xyz[nbr_face], nbr_edge, n)  # (n,3)
-            for j in range(n):
-                h = halo_strip[j]
-                # great-circle distance (chord-based) to each neighbour cell
-                d2 = np.sum((nbr_strip - h[None, :]) ** 2, axis=1)  # (n,)
-                k = int(np.argmin(d2))
-                # parabola-vertex sub-cell refinement on d² (clamp at ends)
-                if 0 < k < n - 1:
-                    dl, dc, dr = d2[k - 1], d2[k], d2[k + 1]
-                    denom = dl - 2.0 * dc + dr
-                    delta = 0.5 * (dl - dr) / denom if abs(denom) > 1e-30 else 0.0
-                    delta = float(np.clip(delta, -1.0, 1.0))
-                else:
-                    delta = 0.0
-                frac = k + delta
-                if is_reversed:
-                    frac = (n - 1) - frac
-                offsets[face, edge_idx, j] = frac - j
+            nbr_strip = _ed_indomain_boundary_strip(xyz[nbr_face], nbr_edge, n, ext)
+            for depth in range(halo):
+                halo_strip = _ed_halo_strip(xyz[face], edge, n, ext, depth)
+                for j in range(n):
+                    d2 = np.sum((nbr_strip - halo_strip[j][None, :]) ** 2, axis=1)
+                    k = int(np.argmin(d2))
+                    if 0 < k < n - 1:
+                        dl, dc, dr = d2[k - 1], d2[k], d2[k + 1]
+                        denom = dl - 2.0 * dc + dr
+                        delta = (0.5 * (dl - dr) / denom
+                                 if abs(denom) > 1e-30 else 0.0)
+                        delta = float(np.clip(delta, -1.0, 1.0))
+                    else:
+                        delta = 0.0
+                    frac = k + delta
+                    if is_reversed:
+                        frac = (n - 1) - frac
+                    offsets[face, edge_idx, depth, j] = frac - j
 
     return jnp.array(offsets, dtype=jnp.float64)
+
+
+def compute_halo_interp_offsets_ed(n: int) -> jnp.ndarray:
+    """gnomonic_ed counterpart of :func:`compute_halo_interp_offsets` —
+    ``(6, 4, n)`` (halo=1, squeezed).  See :func:`_compute_halo_interp_offsets_ed_hN`."""
+    return _compute_halo_interp_offsets_ed_hN(n, 1)[:, :, 0, :]
+
+
+def compute_halo_interp_offsets_ed_h2(n: int) -> jnp.ndarray:
+    """gnomonic_ed counterpart of :func:`compute_halo_interp_offsets_h2` — ``(6, 4, 2, n)``."""
+    return _compute_halo_interp_offsets_ed_hN(n, 2)
+
+
+def compute_halo_interp_offsets_ed_h3(n: int) -> jnp.ndarray:
+    """gnomonic_ed counterpart of :func:`compute_halo_interp_offsets_h3` — ``(6, 4, 3, n)``."""
+    return _compute_halo_interp_offsets_ed_hN(n, 3)
 
 
 def compute_halo_interp_offsets_h2(n: int) -> jnp.ndarray:
