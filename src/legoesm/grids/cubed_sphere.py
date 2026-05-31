@@ -2206,6 +2206,34 @@ def gnomonic_ed_supergrid_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
     return _gnomonic_ed_6face_from_theta(theta_sg, alpha)
 
 
+def gnomonic_ed_corner_ext_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
+    """gnomonic_ed corner grid + 1 halo, ``(6, n+3, n+3)`` create-numbered —
+    the ed source for the cdgrid corner/edge grid-angle extended grid (replaces
+    the equiangular ``linspace(-π/4-dα, π/4+dα, n+3)``).  Corner nodes at
+    ``θ = -α + (k-1)·dely`` (dely = 2α/n), k=0..n+2 — interior matches the
+    gnomonic_ed corners, ±1 halo for centred-difference grid angles.
+    """
+    rsq3 = 1.0 / jnp.sqrt(3.0)
+    alpha = float(jnp.arcsin(rsq3))
+    dely = 2.0 * alpha / n
+    theta = -alpha - dely + jnp.arange(n + 3, dtype=jnp.float64) * dely
+    return _gnomonic_ed_6face_from_theta(theta, alpha)
+
+
+def gnomonic_ed_padded_supergrid_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
+    """gnomonic_ed padded supergrid, ``(6, 2n+3, 2n+3)`` create-numbered — the
+    ed source for the cdgrid sin_sg/cos_sg (replaces the equiangular
+    ``linspace(-π/4-dα/2, π/4+dα/2, 2n+3)``).  Half-cell-spaced edge-angle nodes
+    ``θ = -α - dely/2 + m·(dely/2)`` (dely = 2α/n), m=0..2n+2 — corners at odd m,
+    cell centres at even m, ±half-cell padding for centred differences.
+    """
+    rsq3 = 1.0 / jnp.sqrt(3.0)
+    alpha = float(jnp.arcsin(rsq3))
+    dely = 2.0 * alpha / n
+    theta = -alpha - 0.5 * dely + jnp.arange(2 * n + 3, dtype=jnp.float64) * (0.5 * dely)
+    return _gnomonic_ed_6face_from_theta(theta, alpha)
+
+
 def compute_padded_half_metrics_ed(
     n: int, radius: float, halo: int = 1,
 ) -> tuple[jax.Array, jax.Array]:

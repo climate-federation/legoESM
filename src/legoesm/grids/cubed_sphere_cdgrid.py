@@ -540,6 +540,7 @@ def create_cubed_sphere_cdgrid(
     base: CubedSphereGrid,
     omega: float | None = None,
     metric_dtype=None,
+    gnomonic: str = "equiangular",
 ) -> CubedSphereCDGrid:
     """Create a C-D grid from an existing cell-centre grid.
 
@@ -571,41 +572,55 @@ def create_cubed_sphere_cdgrid(
     n = base.n
     radius = base.radius
 
-    # FV3 supergrid metrics: area_c, dxc, dyc from 2x-refined grid
-    # (same supergrid as sin_sg/cos_sg → mutual consistency).  Build the
-    # equiangular (2n+1)² supergrid node positions and pass them to the now
-    # grid-type-agnostic metric routine (iter71 refactor — the gnomonic_ed
-    # supergrid via `gnomonic_ed_supergrid_lonlat` will be threaded once all
-    # cdgrid sites are ed-consistent).
-    _alpha_sg = jnp.linspace(-jnp.pi / 4, jnp.pi / 4, 2 * n + 1)
-    _ax_sg, _ay_sg = jnp.meshgrid(_alpha_sg, _alpha_sg, indexing='ij')
-    _sg = [_face_gnomonic_to_lonlat(f, _ax_sg, _ay_sg) for f in range(6)]
-    _sg_lon = jnp.stack([s[0] for s in _sg])
-    _sg_lat = jnp.stack([s[1] for s in _sg])
+    # ------------------------------------------------------------------
+    # The C-D supergrid metrics all derive from 4 node-grids: the 2n+1
+    # supergrid, the n+1 corners, the n+3 extended-corner grid (corner/edge
+    # angles), and the 2n+3 padded supergrid (sin_sg).  Build all four for the
+    # requested grid type (iter71 cdgrid ed rework) — equiangular default
+    # BYTE-IDENTICAL; gnomonic_ed via the construct→mirror→remap helpers.
+    # ------------------------------------------------------------------
+    if gnomonic == "ed":
+        from legoesm.grids.cubed_sphere import (
+            gnomonic_ed_supergrid_lonlat, gnomonic_ed_corner_ext_lonlat,
+            gnomonic_ed_padded_supergrid_lonlat, make_fv3_native_grid,
+            _gnomonic_ed_remap_to_create)
+        _sg_lon, _sg_lat = gnomonic_ed_supergrid_lonlat(n)            # (6,2n+1,2n+1)
+        corner_lon, corner_lat = _gnomonic_ed_remap_to_create(
+            *make_fv3_native_grid(n, grid_type=0))                   # (6,n+1,n+1)
+        corner_ext_lon, corner_ext_lat = gnomonic_ed_corner_ext_lonlat(n)  # (6,n+3,n+3)
+        _psg_lon, _psg_lat = gnomonic_ed_padded_supergrid_lonlat(n)  # (6,2n+3,2n+3)
+    elif gnomonic == "equiangular":
+        _alpha_sg = jnp.linspace(-jnp.pi / 4, jnp.pi / 4, 2 * n + 1)
+        _ax_sg, _ay_sg = jnp.meshgrid(_alpha_sg, _alpha_sg, indexing='ij')
+        _sg = [_face_gnomonic_to_lonlat(f, _ax_sg, _ay_sg) for f in range(6)]
+        _sg_lon = jnp.stack([s[0] for s in _sg])
+        _sg_lat = jnp.stack([s[1] for s in _sg])
+        _alpha_edges = jnp.linspace(-jnp.pi / 4, jnp.pi / 4, n + 1)
+        _ax_e, _ay_e = jnp.meshgrid(_alpha_edges, _alpha_edges, indexing='ij')
+        _cg = [_face_gnomonic_to_lonlat(f, _ax_e, _ay_e) for f in range(6)]
+        corner_lon = jnp.stack([c[0] for c in _cg])
+        corner_lat = jnp.stack([c[1] for c in _cg])
+        _dalpha = jnp.pi / (2 * n)
+        _alpha_ext = jnp.linspace(-jnp.pi / 4 - _dalpha, jnp.pi / 4 + _dalpha, n + 3)
+        _axe, _aye = jnp.meshgrid(_alpha_ext, _alpha_ext, indexing='ij')
+        _ceg = [_face_gnomonic_to_lonlat(f, _axe, _aye) for f in range(6)]
+        corner_ext_lon = jnp.stack([c[0] for c in _ceg])
+        corner_ext_lat = jnp.stack([c[1] for c in _ceg])
+        _dasg = jnp.pi / (2 * n)
+        _alpha_psg = jnp.linspace(
+            -jnp.pi / 4 - _dasg / 2, jnp.pi / 4 + _dasg / 2, 2 * n + 3)
+        _axp, _ayp = jnp.meshgrid(_alpha_psg, _alpha_psg, indexing='ij')
+        _psg = [_face_gnomonic_to_lonlat(f, _axp, _ayp) for f in range(6)]
+        _psg_lon = jnp.stack([s[0] for s in _psg])
+        _psg_lat = jnp.stack([s[1] for s in _psg])
+    else:
+        raise ValueError(
+            f"gnomonic must be 'equiangular' or 'ed', got {gnomonic!r}")
+
+    # FV3 supergrid metrics: area_c, dxc, dyc from the 2x-refined supergrid
+    # (same supergrid as sin_sg/cos_sg → mutual consistency).
     area_c_sg, dxc_sg, dyc_sg, dxa_sg, dya_sg = _compute_supergrid_metrics(
         n, _sg_lon, _sg_lat, radius)
-
-    # Cell corner positions (gnomonic grid edges: n+1 per side).  Built as a
-    # precomputed (6, n+1, n+1) grid so the corner-derived metrics are
-    # grid-type-agnostic (iter71 refactor; equiangular via linspace+map here,
-    # gnomonic_ed via the remapped native grid once all cdgrid sites are ed).
-    _alpha_edges = jnp.linspace(-jnp.pi / 4, jnp.pi / 4, n + 1)
-    _ax_e, _ay_e = jnp.meshgrid(_alpha_edges, _alpha_edges, indexing='ij')
-    _cg = [_face_gnomonic_to_lonlat(f, _ax_e, _ay_e) for f in range(6)]
-    corner_lon = jnp.stack([c[0] for c in _cg])
-    corner_lat = jnp.stack([c[1] for c in _cg])
-
-    # Extended corner grid (n+3 = corners ±1 halo) for the analytic corner
-    # grid-angle (tangent vectors).  Precomputed (6, n+3, n+3), grid-type-
-    # agnostic (iter71); angle uses centred differences so it is robust to the
-    # distribution.  Equiangular linspace+map here (byte-identical).
-    _dalpha = jnp.pi / (2 * n)
-    _n_ext = n + 3
-    _alpha_ext = jnp.linspace(-jnp.pi / 4 - _dalpha, jnp.pi / 4 + _dalpha, _n_ext)
-    _axe, _aye = jnp.meshgrid(_alpha_ext, _alpha_ext, indexing='ij')
-    _ceg = [_face_gnomonic_to_lonlat(f, _axe, _aye) for f in range(6)]
-    corner_ext_lon = jnp.stack([c[0] for c in _ceg])
-    corner_ext_lat = jnp.stack([c[1] for c in _ceg])
 
     all_lon_c, all_lat_c = [], []
     all_angle_c = []
@@ -857,13 +872,8 @@ def create_cubed_sphere_cdgrid(
     # 0-indexed: 0=W, 1=S, 2=E, 3=N (edge midpoints); 4=center;
     #            5=SW, 6=SE, 7=NE, 8=NW (corners)
     # ------------------------------------------------------------------
-    # Padded supergrid (2n+3 per axis, ±dα/2 padding) for sin_sg/cos_sg.
-    _dasg = jnp.pi / (2 * n)
-    _alpha_psg = jnp.linspace(-jnp.pi / 4 - _dasg / 2, jnp.pi / 4 + _dasg / 2, 2 * n + 3)
-    _axp, _ayp = jnp.meshgrid(_alpha_psg, _alpha_psg, indexing='ij')
-    _psg = [_face_gnomonic_to_lonlat(f, _axp, _ayp) for f in range(6)]
-    _psg_lon = jnp.stack([s[0] for s in _psg])
-    _psg_lat = jnp.stack([s[1] for s in _psg])
+    # Padded supergrid (2n+3 per axis) for sin_sg/cos_sg — built above per
+    # grid type (`_psg_lon/_psg_lat`).
     sin_sg, cos_sg = _compute_sin_cos_sg(n, _psg_lon, _psg_lat)
 
     # ------------------------------------------------------------------
