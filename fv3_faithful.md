@@ -49,6 +49,9 @@ artifact. PNGs results/atmosphere/shallow_water/williamson2/cubed_sphere/C36/.
   mountain_rossby, inertio_gravity, rotated_steady, rest_state_topo, dcmip_11/12)
   + NH dcmip_tc1, mass machine-zero. Ocean matrix cube 9/9; rest_state ×12
   machine-zero all grids.
+- Cross-grid CLOSENESS (fresh iter ~56, W2 height L2 vs exact): cube 1.76e-4
+  BETWEEN ico 9.9e-5 and latlon 2.67e-4 — cube MORE accurate than latlon, near
+  ico, squarely in FV-family band (spectral 3.6e-8 = exponential, diff class).
 - Cross-grid CLOSENESS: gravity_wave max|v| cube 19.3≈latlon 20.2 (5%);
   geostrophic max_speed 0.0142≈latlon/mpas; phillips 0.44≈latlon 0.41;
   barotropic_wave cube least-dissipative (most accurate). Regression-clean 44/44.
