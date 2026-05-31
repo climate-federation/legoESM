@@ -288,11 +288,15 @@ def _supergrid_quad_area(px, py, pz, i0, j0, i1, j1, i2, j2, i3, j3, radius):
     return 0.5 * jnp.sqrt(cx**2 + cy**2 + cz**2) * radius**2
 
 
-def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
+def _compute_supergrid_metrics(n, supergrid_lon, supergrid_lat, radius):
     """Compute area_c and dxc/dyc from the FV3 supergrid.
 
     Uses the SAME 2x-refined supergrid as sin_sg/cos_sg to ensure all
     metrics are mutually consistent (discrete Stokes theorem).
+
+    ``supergrid_lon/lat`` are the precomputed ``(6, 2n+1, 2n+1)`` supergrid
+    node positions — equiangular or gnomonic_ed — so this metric computation
+    is grid-type-agnostic (iter71: was the equiangular parametric map).
 
     FV3 convention (fv_grid_tools.F90 line 1459):
         area_c(i,j) = sum of 4 supergrid cell areas around dual-cell corner
@@ -310,10 +314,8 @@ def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
     """
     import numpy as np
 
-    dalpha = np.pi / (2 * n)
-    n_sg = 2 * n + 1  # supergrid without extra padding
-    alpha_sg = np.linspace(-np.pi / 4, np.pi / 4, n_sg)
-    ax_sg, ay_sg = np.meshgrid(alpha_sg, alpha_sg, indexing='ij')
+    supergrid_lon = np.asarray(supergrid_lon)
+    supergrid_lat = np.asarray(supergrid_lat)
 
     all_area_c = []
     all_dxc = []
@@ -322,9 +324,8 @@ def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
     all_dya = []
 
     for face in range(6):
-        lon_sg, lat_sg = face_gnomonic_to_lonlat(face,
-            jnp.array(ax_sg), jnp.array(ay_sg))
-        lon_sg = np.asarray(lon_sg); lat_sg = np.asarray(lat_sg)
+        lon_sg = supergrid_lon[face]
+        lat_sg = supergrid_lat[face]
         cos_lat = np.cos(lat_sg)
         px = cos_lat * np.cos(lon_sg)
         py = cos_lat * np.sin(lon_sg)
@@ -571,9 +572,18 @@ def create_cubed_sphere_cdgrid(
     radius = base.radius
 
     # FV3 supergrid metrics: area_c, dxc, dyc from 2x-refined grid
-    # (same supergrid as sin_sg/cos_sg → mutual consistency)
+    # (same supergrid as sin_sg/cos_sg → mutual consistency).  Build the
+    # equiangular (2n+1)² supergrid node positions and pass them to the now
+    # grid-type-agnostic metric routine (iter71 refactor — the gnomonic_ed
+    # supergrid via `gnomonic_ed_supergrid_lonlat` will be threaded once all
+    # cdgrid sites are ed-consistent).
+    _alpha_sg = jnp.linspace(-jnp.pi / 4, jnp.pi / 4, 2 * n + 1)
+    _ax_sg, _ay_sg = jnp.meshgrid(_alpha_sg, _alpha_sg, indexing='ij')
+    _sg = [_face_gnomonic_to_lonlat(f, _ax_sg, _ay_sg) for f in range(6)]
+    _sg_lon = jnp.stack([s[0] for s in _sg])
+    _sg_lat = jnp.stack([s[1] for s in _sg])
     area_c_sg, dxc_sg, dyc_sg, dxa_sg, dya_sg = _compute_supergrid_metrics(
-        n, _face_gnomonic_to_lonlat, radius)
+        n, _sg_lon, _sg_lat, radius)
 
     # Cell corner positions (gnomonic grid edges: n+1 per side)
     alpha_edges = jnp.linspace(-jnp.pi / 4, jnp.pi / 4, n + 1)
