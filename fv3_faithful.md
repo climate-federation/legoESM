@@ -97,10 +97,18 @@ seams, must use mirror construction):**
   (cube SW 4/4 unchanged, W2 v_ll 0.339, mass machine-zero). ed grid: area=4πR², dx ratio
   1.40≈√2, cell aspect **1.05≈1.06** (vs equiangular 1.40), all fields finite, rejects
   Schmidt/shift. Gate tests 4/4 (`test_gnomonic_ed_gate_iter68`).
-- ⏳ REMAINING for the eigenmode test: the DYNAMICS use `create_cubed_sphere_cdgrid` (C/D
-  supergrid, ALSO equiangular-hardcoded `alpha_edges=linspace`) — needs an ed-consistent
-  cdgrid before running W5 C96 on the ed grid. Then validate (dynamical suite) + re-calibrate
-  + the W5 C96 eigenmode-fix test (the payoff).
+- ⏳ REMAINING for the eigenmode test — the CDGRID (next major layer, iter69 scoped):
+  `create_cubed_sphere_cdgrid(base)` takes the grid but REBUILDS its own equiangular C/D
+  supergrid (`_compute_supergrid_metrics(n, _face_gnomonic_to_lonlat,…)` + `linspace` α at
+  cubed_sphere_cdgrid.py:203/315/579/641/785/952/960) — ignores base's distribution. So the
+  ed cdgrid is a SEPARATE ~1200-line deeply-equiangular rework (supergrid area/dxc/dyc,
+  corners, edge/corner angles, sin_sg, corner gradient matrix, extended grids) — same swap
+  pattern as the A-grid gate but a much larger, more intricate structure (expect its own set
+  of verify-first subtleties). The dynamics (SW/PE dycores) consume the cdgrid, so W5 C96 on
+  ed needs it. Then dynamical-suite validation + damping re-calibration + the W5 C96 eigenmode
+  test (the payoff confirming gnomonic_ed fixes the blow-up). **A-grid gnomonic_ed gate is a
+  DELIVERED milestone; cdgrid + dynamics validation is the remaining major effort; the
+  eigenmode-fix hypothesis stays UNCONFIRMED until then.**
 - (superseded) earlier `compute_halo_interp_offsets_ed` notes: reuse equiangular
   CONNECTIVITY + `_face_to_xyz_np`/`_xyz_to_gnomonic_np` (pass gnomonic_ed angles since
   tan(arctan(coord))=coord) with `frac=interp(neighbor_angle, alpha_ed, range(n))`. The
