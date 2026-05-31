@@ -69,6 +69,13 @@ analysis bug, corrected; geographic components are seam-continuous scalars.]
 ⇒ both metrics confirm **no panel-seam artifact** (scalars continuous, winds
 continuous, edges smooth) across the verified atm+ocean dynamical cases.
 
+## Cube atmosphere full dynamical-suite sweep (iter ~36)
+ALL fast cube hydro dynamical cases PASS, mass drift ~machine-zero, bounded v:
+baroclinic, rotated_baroclinic, gravity_wave_3_1, rossby_haurwitz_6_0 (max|v|27.4),
+mountain_rossby_5_0 (10.2), inertio_gravity_3_2 (16.9), rotated_steady (23.8),
+rest_state_topo (max|v|1.2 = bounded sigma-PGF topo residual), dcmip_transport_11/12;
++ SW 16/16 + NH dcmip_tc1. Only climate (held_suarez/amip, 30-day) is CPU-bound.
+
 ## Regression health (iter ~34)
 44/44 PASS: test_vector_cc_to_dgrid_wind_lift, test_latlon_regrid_alignment,
 test_fc_velocity_viscosity_vector_halo, test_fv3sw_barotropic, test_ocean_fc,
