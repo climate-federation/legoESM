@@ -84,32 +84,34 @@ DYNAMICS CORRECT (mass drift 1e-8, max|u_d| 38.7 ✓) but steady-state h-error *
 equiangular 1.76e-4 = 8× WORSE**. Damping-INDEPENDENT (1.40→1.30→1.23e-3 over a 4× sweep) ⇒
 NOT tuning. Localized: t=0 |dh| imbalance (zero damping) max **1.79 @ face1 (i=0,j=0) = a CUBE
 CORNER**, 35× the equiangular 0.051; the 4 corners spike (~1.79) while edge-MID (1.08e-2) and
-deep interior (8.9e-4) are HEALTHY (≈equiangular). So the 8× is a CORNER-localized halo bug,
-not inherent ed truncation.
-ROOT CAUSE: the ed extended grids (`gnomonic_ed_corner_ext_lonlat`,
-`gnomonic_ed_padded_supergrid_lonlat`) build the halo by feeding halo-extended θ to
-`_gnomonic_ed_6face_from_theta`/`_gnomonic_ed_construct`. The construct hardwires the W/E edges
-to the boundary meridians (lon 0.75π/1.25π) where the gnomonic coord **pp2 = -tan(0.75π)·rsq3 =
-rsq3 is CONSTANT for all lat** — the W meridian is one i-coordinate. Index-0 is therefore the
-boundary, with **no edge-PERPENDICULAR halo row at all**; the corner halo nodes COLLAPSE onto
-the boundary (i0–i1 spacing →0 at the corners). The edge overrides mask it in-domain (matches
-grid.lon/lat to 1.4e-15, why the A-grid tests + codex layout-review passed). Equiangular's
-separable tan map extends smoothly past ±π/4 so it never hit this.
-RULED OUT (all tested, reverted): (a) NEIGHBOR-fill the halo (FV3 fill_corners; impl
-`_gnomonic_ed_extend_bgrid` via CONNECTIVITY) — REGRESSED to imbalance **58** because the
-neighbor node sits ~1 full cell off the same-face continuation (injects the cube-edge CREASE
-into the centred-difference tangent); the cdgrid metric code wants the SAME-FACE continuation,
-like equiangular. (b) full-range S/N-edge mirror — still collapses (W-meridian degeneracy is
-the cause, not the S-edge endpoints). (c) drop the edge overrides — FULL collapse.
-CORRECT FIX (pending, next iter): per-face gnomonic-PLANE same-face extrapolation — the direct
-ed analog of equiangular's `_face_gnomonic_to_lonlat(f, α_ext_mesh)`: project the in-domain ed
-corners to each face's local gnomonic angles (separable 1D arrays, non-uniform = the ed
-distribution), extrapolate the 1D arrays by `halo` nodes, rebuild via `_face_gnomonic_to_lonlat`.
-Validate by the t=0 imbalance dropping to ≈equiangular 0.05 (NOT byte-vs-equiangular — ed ≠ eq).
-STATE: source REVERTED to the construct-extension (known-good: ed builds, stable, mass-
-conserving, the 8× W2 error is the only known defect); helper removed; gnomonic_ed tests 8/8.
-⇒ ed grid is USABLE but NOT yet competitive with equiangular/latlon on W2 accuracy; the prior
-"cdgrid COMPLETE + sound" was premature — the corner halo is the open defect.
+deep interior (8.9e-4) are HEALTHY (~equiangular). The cube corners are the smallest, most
+non-orthogonal ed cells (cosa ~ -0.5).
+COLLAPSE BUG (real, latent, NOW FIXED): the ed extended grids fed halo-extended theta to
+`_gnomonic_ed_construct`, which hardwires the W/E edges to the boundary meridians (where the
+gnomonic coord pp2 = -tan(0.75pi)*rsq3 is CONSTANT for all lat) -> no edge-PERPENDICULAR halo
+row -> the corner halo nodes COLLAPSE onto the boundary (zero-width = duplicate grid nodes).
+In-domain matched grid.lon/lat to 1.4e-15 (why A-grid tests + codex layout-review passed). FIX:
+the ed grid is EXACTLY `_face_gnomonic_to_lonlat(f, meshgrid(ed_angle_1d))` (separable per face
+~1e-16, 6 faces congruent, reproduces FV3 native corners to ~3e-15). So
+`gnomonic_ed_{supergrid,corner_ext,padded_supergrid}_lonlat` now build via
+`_gnomonic_ed_faces_from_angle_1d` with the non-uniform ed 1D angle array (`_gnomonic_ed_angle_1d`
+from the native grid) extrapolated +-1 node (`_gnomonic_ed_extrap1d`, linear -> reduces EXACTLY
+to equiangular linspace for a uniform array). Halo no longer collapses; interior bit-exact vs
+corners/supergrid; consistent. Tests 29/29 + new `test_gnomonic_ed_halo_nocollapse_iter73.py` 4/4.
+RULED OUT: neighbor-fill (FV3 fill_corners via CONNECTIVITY) REGRESSED to imbalance 58 (neighbor
+node ~1 cell off the same-face continuation -> injects the cube-edge CREASE into the centred-diff
+tangent; the cdgrid wants the SAME-FACE continuation); full-range mirror + drop-overrides also
+collapse.
+**BUT W2 is UNCHANGED by the halo fix -- bit-identical 1.795 / 1.4e-3 before & after.** So the
+collapse was a real LATENT bug (would bite higher-halo / future halo consumers) but is NOT the
+W2 cause: cosa_corner normalizes the tangent -> insensitive to halo node position. ed-vs-eq
+CORNER metrics are CLOSE (cosa_corner both -0.5; cos_angle_edge_x 0.871 vs 0.872; dxc 2.19e5 vs
+2.57e5 = genuine grid diff). => the 8x W2 error is an IN-DOMAIN property of the ed corner cells
+(smallest + most non-orthogonal) x the FV3Edge SW core -- NOT a gross metric bug, NOT the halo.
+STILL OPEN: deeper SW-core / non-orthogonality analysis (or possibly inherent to ed+this scheme;
+cross-check vs the FV3 oracle's own W2-on-ed corner residual).
+STATE: ed builds, stable, mass-conserving, halo CLEAN; the 8x W2 corner error is the open defect.
+Prior "cdgrid COMPLETE + sound" still premature on W2 accuracy.
 **(prior scoping, now DONE) the CDGRID layer:** dynamics consume
 `create_cubed_sphere_cdgrid(base)`, which REBUILDS its own equiangular C/D supergrid
 (`_compute_supergrid_metrics(n, _face_gnomonic_to_lonlat,…)` + `linspace` α at cubed_sphere_

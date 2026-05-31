@@ -2186,67 +2186,99 @@ def _gnomonic_ed_padded_centers(n: int, halo: int) -> tuple[jax.Array, jax.Array
     )  # (6, n_big, n_big)
 
 
-def gnomonic_ed_supergrid_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
-    """gnomonic_ed 2×-refined SUPERGRID nodes, ``(6, 2n+1, 2n+1)`` create-numbered.
+def _gnomonic_ed_angle_1d(ncells: int) -> jax.Array:
+    """1D gnomonic-ANGLE distribution of the FV3 gnomonic_ed grid: ``ncells+1``
+    nodes, symmetric about 0, spanning ``[-π/4, π/4]``, non-uniform (cells wider
+    at the face centre, ~√2 narrower at the edges).
 
-    Building block for the gated gnomonic_ed C-D grid (`create_cubed_sphere_
-    cdgrid`, in progress) — the FV3 supergrid carries corners (even,even),
-    cell centres (odd,odd) and edge midpoints (even,odd)/(odd,even) at one
-    refinement, the source for area_c/dxc/dyc/sin_sg.  Built by the shared
-    construct→shift→mirror→remap pipeline at 2n+1 equal-great-circle-angle
-    nodes.  REFINEMENT-CONSISTENT: the even nodes ``[::2, ::2]`` reproduce the
-    gnomonic_ed corners (verified to ~1e-15), so cdgrid metrics derived from
-    this supergrid agree with the A-grid corners.  Replaces the equiangular
-    ``linspace`` supergrid that `_compute_supergrid_metrics` builds.
+    The gnomonic_ed grid is EXACTLY separable per face in gnomonic angle and all
+    6 faces are congruent, so the whole grid is
+    ``_face_gnomonic_to_lonlat(f, meshgrid(this, this))`` — verified to reproduce
+    the FV3 native ``make_fv3_native_grid(grid_type=0)`` corners to ~3e-15 over
+    all 6 faces, with per-face separability ~1e-16 (iter73).  This is the ed
+    analog of equiangular's uniform ``linspace(-π/4, π/4)``: the SAME builder,
+    only the 1D node distribution differs.  Extracting it (vs the
+    construct→mirror→remap pipeline) lets the cdgrid extended grids extend the
+    edge-PERPENDICULAR halo by simple 1D extrapolation in gnomonic angle — which
+    the construct cannot do (it pins the W/E edges to the boundary meridians,
+    collapsing the perpendicular halo at the cube corners; iter73 W2 bug).
     """
-    rsq3 = 1.0 / jnp.sqrt(3.0)
-    alpha = float(jnp.arcsin(rsq3))
-    dely2 = 2.0 * alpha / (2 * n)
-    theta_sg = -alpha + jnp.arange(2 * n + 1, dtype=jnp.float64) * dely2
-    return _gnomonic_ed_6face_from_theta(theta_sg, alpha)
+    lon0, lat0 = _gnomonic_ed_remap_to_create(
+        *make_fv3_native_grid(ncells, grid_type=0))
+    lon0 = jnp.asarray(lon0)[0]
+    lat0 = jnp.asarray(lat0)[0]
+    # face 0 (+x): tan(alpha_x) = y/x varies along i only (separable to ~1e-16)
+    x = jnp.cos(lat0) * jnp.cos(lon0)
+    y = jnp.cos(lat0) * jnp.sin(lon0)
+    return jnp.mean(jnp.arctan2(y, x), axis=1)  # (ncells+1,)
+
+
+def _gnomonic_ed_extrap1d(a: jax.Array) -> jax.Array:
+    """Linear ±1-node extrapolation of a 1D gnomonic-angle array — the smooth
+    SAME-FACE ghost node for the cdgrid centred-difference stencils.  Reduces
+    EXACTLY to equiangular's ``linspace`` extension (``±dα``) for a uniform
+    array, so this is the faithful ed analog (the halo error vs a θ-uniform
+    extension is O(cell²), and unlike the construct it never collapses)."""
+    return jnp.concatenate([2.0 * a[:1] - a[1:2], a, 2.0 * a[-1:] - a[-2:-1]])
+
+
+def _gnomonic_ed_faces_from_angle_1d(
+    ax_1d: jax.Array, ay_1d: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """Build all 6 gnomonic_ed faces from the separable 1D angle array(s) via the
+    tested forward map :func:`legoesm.grids.halo._face_gnomonic_to_lonlat` — the
+    same builder the equiangular cdgrid uses, only the 1D distribution differs."""
+    from legoesm.grids.halo import _face_gnomonic_to_lonlat
+    if ay_1d is None:
+        ay_1d = ax_1d
+    ax_mesh, ay_mesh = jnp.meshgrid(ax_1d, ay_1d, indexing="ij")
+    los, las = [], []
+    for f in range(6):
+        lo, la = _face_gnomonic_to_lonlat(f, ax_mesh, ay_mesh)
+        los.append(lo)
+        las.append(la)
+    return jnp.stack(los), jnp.stack(las)
+
+
+def gnomonic_ed_supergrid_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
+    """gnomonic_ed 2×-refined SUPERGRID nodes, ``(6, 2n+1, 2n+1)`` create-numbered
+    (area_c/dxc/dyc source).  REFINEMENT-CONSISTENT: the even nodes ``[::2, ::2]``
+    reproduce the gnomonic_ed corners (the 2n angle array's even entries ARE the
+    n-corner angles).  iter73: built from the separable 1D ed angle array via
+    :func:`_gnomonic_ed_faces_from_angle_1d` (matches the construct→mirror→remap
+    pipeline to ~3e-15) — the ed analog of equiangular's ``linspace`` supergrid.
+    """
+    return _gnomonic_ed_faces_from_angle_1d(_gnomonic_ed_angle_1d(2 * n))
 
 
 def gnomonic_ed_corner_ext_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
-    """gnomonic_ed corner grid + 1 halo, ``(6, n+3, n+3)`` create-numbered —
-    the ed source for the cdgrid corner/edge grid-angle extended grid (replaces
-    the equiangular ``linspace(-π/4-dα, π/4+dα, n+3)``).  Corner nodes at
-    ``θ = -α + (k-1)·dely`` (dely = 2α/n), k=0..n+2 — interior matches the
-    gnomonic_ed corners, ±1 halo for centred-difference grid angles.
+    """gnomonic_ed corner grid + 1 halo, ``(6, n+3, n+3)`` create-numbered — the
+    ed source for the cdgrid corner/edge grid-angle extended grid (the ed analog
+    of equiangular's ``linspace(-π/4-dα, π/4+dα, n+3)``).  Interior ``[1:-1,1:-1]``
+    = the gnomonic_ed corners; the ±1 halo is the SAME-FACE smooth continuation
+    (1D linear extrapolation in gnomonic angle), so the cube-corner centred-
+    difference stencils stay non-degenerate.
 
-    KNOWN LIMITATION (iter73): the ±1 halo ring is the same-face construct
-    extension, which COLLAPSES onto the boundary meridians at the 4 cube
-    corners (zero-width halo cells → degenerate corner metrics → a corner-
-    localized ~140× W2 t=0 imbalance / 8× W2 height error vs equiangular).  The
-    construct cannot extend the edge-PERPENDICULAR direction (it pins the W/E
-    edges to lon 0.75π/1.25π).  Neighbor-fill (FV3 fill_corners) was tried and
-    REGRESSED badly (injects the cube-edge crease into the centred-difference
-    tangent — the cdgrid metric code wants the SAME-FACE continuation, like
-    equiangular's tan).  Correct fix pending = same-face θ-uniform perpendicular
-    extension (extend the S/W-edge great circles independently, no corner pin).
+    iter73: REPLACES the construct→extended-θ halo, which collapsed the edge-
+    perpendicular halo onto the boundary meridians at the 4 cube corners (zero-
+    width cells → degenerate corner metrics → 8× W2 error vs equiangular).  See
+    :func:`_gnomonic_ed_angle_1d`.
     """
-    rsq3 = 1.0 / jnp.sqrt(3.0)
-    alpha = float(jnp.arcsin(rsq3))
-    dely = 2.0 * alpha / n
-    theta = -alpha - dely + jnp.arange(n + 3, dtype=jnp.float64) * dely
-    return _gnomonic_ed_6face_from_theta(theta, alpha)
+    return _gnomonic_ed_faces_from_angle_1d(
+        _gnomonic_ed_extrap1d(_gnomonic_ed_angle_1d(n)))
 
 
 def gnomonic_ed_padded_supergrid_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
-    """gnomonic_ed padded supergrid, ``(6, 2n+3, 2n+3)`` create-numbered — the
-    ed source for the cdgrid sin_sg/cos_sg (replaces the equiangular
-    ``linspace(-π/4-dα/2, π/4+dα/2, 2n+3)``).  Half-cell-spaced edge-angle nodes
-    ``θ = -α - dely/2 + m·(dely/2)`` (dely = 2α/n), m=0..2n+2 — corners at odd m,
-    cell centres at even m, ±half-cell padding for centred differences.
+    """gnomonic_ed padded supergrid, ``(6, 2n+3, 2n+3)`` create-numbered — the ed
+    source for the cdgrid sin_sg/cos_sg (the ed analog of equiangular's
+    ``linspace(-π/4-dα/2, π/4+dα/2, 2n+3)``).  Interior ``[1:-1,1:-1]`` = the 2×
+    supergrid; the ±1 (half-cell) halo is the SAME-FACE 1D extrapolation.
 
-    KNOWN LIMITATION (iter73): same corner halo-collapse as
-    :func:`gnomonic_ed_corner_ext_lonlat` (the construct can't extend the edge-
-    perpendicular halo); affects the sin_sg corner values.  Fix pending.
+    iter73: REPLACES the construct halo (which collapsed at the cube corners,
+    corrupting the corner sin_sg).  See :func:`_gnomonic_ed_angle_1d`.
     """
-    rsq3 = 1.0 / jnp.sqrt(3.0)
-    alpha = float(jnp.arcsin(rsq3))
-    dely = 2.0 * alpha / n
-    theta = -alpha - 0.5 * dely + jnp.arange(2 * n + 3, dtype=jnp.float64) * (0.5 * dely)
-    return _gnomonic_ed_6face_from_theta(theta, alpha)
+    return _gnomonic_ed_faces_from_angle_1d(
+        _gnomonic_ed_extrap1d(_gnomonic_ed_angle_1d(2 * n)))
 
 
 def compute_padded_half_metrics_ed(
