@@ -273,7 +273,9 @@ def apply_balanced_init(state, grid, z_coord, config,
     gx_T = 0.5 * (gx_u[:, :-1] + gx_u[:, 1:])              # (n_lat, n_lon, nlev)
     gy_T = 0.5 * (gy_v[:-1] + gy_v[1:])
 
-    f_T = grid.f_T                                          # (n_lat, n_lon)
+    # grid-agnostic Coriolis: tripole LatLonCGridGeometry -> f_T, plain
+    # LatLonGrid -> f; both expose the grid_coriolis @property -> (n_lat, n_lon).
+    f_T = grid.grid_coriolis                                # (n_lat, n_lon)
     f_eps = 2.0 * constants.Omega * float(np.sin(np.deg2rad(taper_lat_deg)))
     inv_f = (f_T / (f_T ** 2 + f_eps ** 2))[..., None]     # -> 0 at the equator
 
@@ -304,7 +306,7 @@ def apply_balanced_init(state, grid, z_coord, config,
     vmax = float(jnp.nanmax(jnp.abs(v_face)))
     if with_ssh:
         eta = -p_at_ref[..., 0] / (rho_0 * g_val)          # (n_lat, n_lon)
-        area = grid.area_T * mask
+        area = grid.area * mask   # grid-agnostic (both grids expose .area)
         eta_mean = jnp.sum(eta * area) / jnp.maximum(jnp.sum(area), 1.0)
         eta = jnp.clip(eta - eta_mean, -5.0, 5.0) * mask   # physical SSH bound
         repl["eta"] = state.eta.replace(data=eta)
