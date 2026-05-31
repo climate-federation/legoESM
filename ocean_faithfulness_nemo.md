@@ -65,7 +65,7 @@ Mechanism: cold-start geostrophic adjustment from rest (u=0) overshoots to ~5-10
 |---|---|---|
 | tripole/eORCA025 (¼°) | **STABLE cold-start** (area·cos² smag ceiling, committed abe80cdd; 2-day smoke rc=0); full compare pipeline VALIDATED end-to-end | day-2 pipeline-test: SST RMSE 13.7°C corr 0.095 (2-day-spinup confound, NOT science); real compare awaits 3mo day-90 |
 | tripole/eORCA1 (1°) | free run impossible (config exhausted); superseded by ¼° | — |
-| latlon_bathy | same dynamics path; same fix applies (shared LatLonCGridOceanModel) | pending |
+| latlon_bathy (1°) | **blows up cold-start NaN day 0.25** (N-pole singularity, convergent Arctic meridians; SSH ruled out — eORCA025 stable with same balanced-SSH). Config wired + grid-agnostic balanced-init fixed (710aa1d9). | needs pole filter / Arctic mask — confirms WHY tripole is used for global ocean |
 | cubed_sphere | untested w/ CORE-II | — (applicator supports) |
 | mpas | untested w/ CORE-II | — (applicator supports) |
 | spectral | applicator unsupported | TODO |
