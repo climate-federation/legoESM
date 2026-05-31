@@ -86,10 +86,22 @@ residual) is the tiny discretization residual, invisible to L2/mass. Baroclinic 
   + HIGH-RES setting `nord=1, d4_bg=0.075`. So FV3 controls cube grid-scale edge modes
   via the flow-aware adaptive Smagorinsky `dddmp` — which legoESM disabled in favor of
   a C36-C48-tuned aggregate that doesn't scale to C96. `_d_sw5_corner_divergence`
-  (accepts dddmp) IS wired (fv3_sw_core.py:1902). ⇒ FAITHFUL fix = enable FV3-prescribed
-  `dddmp≈0.2` (+ high-res nord=1/d4_bg=0.075), NOT dt/factor improvisation. [test next]
-- STILL MISSING: visual PNG inspection (human); test FV3 dddmp=0.2 on C96 W5 (does the
-  oracle value kill the eigenmode w/o degrading C36-C48 W2/W5?).
+  (accepts dddmp) IS wired in `_d_sw_native`/FB-chain (fv3_sw_core.py:1902).
+- [DONE iter59 — dddmp HYPOTHESIS FALSIFIED by experiment, verify-first] Tested FV3
+  `dddmp=0.2` (+ `d4_bg=0.075,nord=1`) on C96 W5: **byte-identical trajectory to the
+  dddmp=0 baseline** (blow-up 40→98→80 unchanged). ⇒ the FV3 d_sw5 structured fields
+  (`dddmp/d2_bg/d4_bg/nord`) are INERT in the production `FV3EdgeShallowWaterModel`: its
+  `.step` uses `fv3_sw_tendencies` (RK3) which does NOT call `_d_sw_native`/
+  `_d_sw5_corner_divergence` (confirmed by code comments 119-132/200-201 AND the null
+  experiment). They are live ONLY in the EXPERIMENTAL/unstable FB chain (`fv3_fb_sw_step`,
+  ~50 steps→NaN). Live production damping = pragmatic `div_damp` + biharmonic `hyperdiff`
+  + `damp_v/nord_v` del6_vt_flux. Probed: `div_damp=16×`→NaN (the "~16× blowup limit");
+  **`hyperdiff=6×`→STABLE** (C96 W5 flat 33 m/s to day5). BUT hyperdiff=6× is IMPROVISING
+  (scalar biharmonic, not FV3) — per user directive NOT committed. ⇒ FAITHFUL fix for the
+  C96 eigenmode = make the FB chain (FV3 dddmp Smagorinsky + nord del-n) STABLE + wire it
+  into production = FOUNDATIONAL (the c_sw/d_sw 2-stage work), NOT a hyperdiff/dt hack.
+- STILL MISSING: visual PNG inspection (human); foundational FB-chain stabilization to
+  bring FV3's grid-scale-aware dddmp damping into the production SW path.
 
 ## VERIFICATION
 - SW 16/16 all grids, aligned within 1 cell. Full fast cube atm dynamical suite
