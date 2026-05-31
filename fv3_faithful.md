@@ -26,22 +26,31 @@ CONFIRMED FV3 MISMATCH (codex iter109): production SW (operators_cdgrid.py:1167)
 (primitive_eq_cdgrid.py:445) use CENTERED `zeta_corner*v_d`; FV3 sw_core.F90 upwind-selects (donor-cell).
 Faithful path = the FB staggered c_sw→d_sw scheme (uses upwind `_vorticity_flux`); the FB chain has a
 RESIDUAL (W2 C36 day1 48.6 vs 38.6, day2 NaN).
-EIGEN-ANALYSIS (iter115b-121, finite-diff K=50 power iteration — jvp CPU-prohibitive):
-- **It IS a genuine growing eigenmode: per-step λ=1.0072** (K=8 was masked by the neutral W2 modes).
-- **TYPE: a 2Δx-along-edge COMPUTATIONAL MODE in u_d** at the cube panel edge (argmax face3 i=0 row,
-  alternating sign `-+-+-+` in j; 2D-checkerboard corr 0.10 ⇒ 1D-along-edge, not vertex/2D).
-- **STRUCTURAL, NOT dampable** (harness: damp_v×8→NaN over-damp limit; nord_v/hyperdiff neutral — in the
-  del-n null space at the edge; confirms iter82-83) and **NOT any single component** (all FV3-faithful:
-  d_sw zeta(114), vorticity-flux sina_u(110b), corner-vort halos(94/107), fv_tp_2d halo(115), B-grid KE
-  rsin2_corner(118), dissipation/Phase4/wind-halo(82-83); FB assembly READS structurally correct(119);
-  FV3 d_sw4/d_sw5 corner fixes are duogrid no-ops(120)).
-- ⇒ the bug is the STRUCTURAL cube-EDGE c_sw→d_sw coupling that should suppress the 2Δx-along-edge u_d
-  mode (production co-located scheme kills it via the D→A avg; the FB staggered port doesn't at the edge).
-- **FIX-VALIDATION HARNESS (iter117, validated iter120):** K=50 finite-diff power iteration → any candidate
-  fix → re-run → does per-step λ drop below 1? (~min/test). NEXT (dedicated): localize the i=0-edge d_sw
-  term injecting the 2Δx-in-j mode (decompose ke_diff_u vs fy_vort at i=0) → match the FV3 edge coupling →
-  test against λ. The FB residual eigenmode (fast, λ=1.0072, W2 C36) is SEPARATE from the production C96 W5
-  eigenmode (slow, ~1.0007). Best in a FRESH context (reading/component/metric avenues exhausted).
+EIGEN-ANALYSIS (iter115b-123, finite-diff power iteration — jvp CPU-prohibitive; codex-challenged iter123):
+- **Genuine growing mode, per-step λ≈1.007 ± 0.001 — CONDITIONING-VALIDATED (iter123, answers codex
+  [high]):** robust across eps∈{1e-2,1e-3} × K∈{30,50,70} × 4 random restarts (range 1.0058–1.0072) ⇒
+  NOT a finite-diff/float32 artifact (eps/restart-stable, real eigenvalue >1). CAVEAT: residual
+  ‖Mv−λv‖/‖λv‖≈3–5% (best: eps=1e-2, K≥50) ⇒ the DOMINANT mode in a near-unit CLUSTER (W2 has many
+  neutral λ≈1 modes), NOT a cleanly isolated 6-figure eigenvalue; eps=1e-4 too small (roundoff → resid
+  0.45). State as a BAND (1.007±0.001), never "1.0072".
+- **TYPE = HYPOTHESIS, not rigorously established (codex [medium]):** edge-localized alternating-in-j
+  component in u_d (argmax face3 i=0 row, sign `-+-+-+` in j; 2D-checkerboard corr 0.10 argues against a
+  GLOBAL 2D checkerboard — but does NOT prove a 1D mode). Full modal ID (1D Fourier along the edge, phase
+  across all equivalent cube edges, per-term linear-operator projection) NOT done ⇒ "2Δx-along-edge
+  computational mode" is the LEADING hypothesis only; could be a non-normal edge-localized transient.
+- **DAMPING doesn't kill it** (harness: damp_v×8→NaN; nord_v/hyperdiff neutral) and every COMPONENT reads
+  FV3-faithful (d_sw zeta 114, vort-flux sina_u 110b, corner-vort halos 94/107, fv_tp_2d halo 115, B-grid
+  KE rsin2 118, dissipation/Phase4/wind-halo 82-83; assembly reads correct 119; d_sw4/d_sw5 duogrid
+  no-ops 120). LEADING HYPOTHESIS (codex [medium] — "not dampable ⇒ structural" is NOT a sound inference
+  on its own): a structural cube-EDGE c_sw→d_sw coupling the FB port misses (production co-located scheme
+  kills the edge mode via the D→A avg). NOT YET RULED OUT: float32/dt/resolution stability-boundary,
+  damping that misses the mode by construction. Needs a FALSIFICATION battery before "structural" stands.
+- **HARNESS (now conditioned, iter123):** finite-diff power iteration WITH the eps/K/restart sweep +
+  residual → one diagnostic reported as a BAND, NOT a hard λ<1 pass/fail gate. NEXT (dedicated/fresh):
+  (a) falsification battery — dt/resolution scaling + a float64 FB run + a direct W2-C36 oracle step
+  comparison — to settle growing-mode-vs-stability-limit; (b) THEN localize the i=0-edge d_sw term
+  (ke_diff_u vs fy_vort) → match the FV3 edge coupling → re-test vs the λ band. Separate from the
+  production C96 W5 eigenmode (slow ~1.0007). Reading/component/metric avenues exhausted.
 
 ## CPU-PROHIBITIVE here (rely on recorded audits + representative cross-grid + t=0 probes + the λ harness)
 3D atm baroclinic cross-grid (>21 min/case); full ocean matrix --grid all (57 cases, multi-hr); climate/AMIP;
