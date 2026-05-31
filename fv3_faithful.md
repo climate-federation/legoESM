@@ -58,3 +58,20 @@ multi-hour). climate/AMIP equilibrium.
 3. human visual PNG verdict (W2 v / W5 wind_speed / cross-grid atm+ocean — surfaced); pre-existing
    17-test swamp in test_cdgrid_fv3_regression.py (deleted results/ + concurrent churn).
 State persisted: memory `cube-fv3-faithfulness-state` (codex-vetted, iter89-112).
+
+
+## iter114 — d_sw zeta is FAITHFUL (corrects iter83); ruled out as the FB residual root
+Investigated iter83's lead ("port d_sw zeta uses covariant u_d·dx with NO corner correction; oracle
+d_sw5 wk uses contravariant ut/vt + fill_corners"). READING THE ORACLE (sw_core.F90:1584-1596):
+  vt(i,j)=u(i,j)*dx(i,j); ut(i,j)=v(i,j)*dy(i,j)   ← COVARIANT circulation (NOT contravariant)
+  wk(i,j)=rarea*(vt(i,j)-vt(i,j+1)-ut(i,j)+ut(i+1,j))   ← "volume-mean" relative vorticity
+The port (_d_sw_native:1893-1898: vt_circ=u_d*dx_u, ut_circ=v_d*dy_v, zeta=rarea*(vt_circ[j]-vt_circ[j+1]
++ut_circ[i+1]-ut_circ[i])) MATCHES this EXACTLY (same covariant curl, same indices). And fill_corners
+is NOT applied to wk in the oracle (only to divg_d at 1746/1754 and vc/uc at 1762). ⇒ iter83's claim was
+WRONG on both counts; the d_sw RELATIVE VORTICITY is FV3-faithful. RULED OUT as the residual root.
+Then the d_sw transports vort=zeta+f via fv_tp_2d(hord_vt) (port Step 7, line 1931 = oracle line 1861) —
+matching. Remaining FB-residual candidates: the fv_tp_2d CUBE-CORNER halo of vort (oracle computes vort
+over isd:ied extended w/ f0 halo'd; port relies on fv_tp_2d's internal halo — the f-part cross-face at
+the cube corners is the subtle open item), the B-grid KE transport (`_bgrid_ke_transport`), the
+c_sw→d_sw coupling. Still a growth-rate eigenmode (eigen-analysis the genuine method). This iteration
+CORRECTED a stale wrong lead (iter83) + ruled out the d_sw zeta — net narrowing.
