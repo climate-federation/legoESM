@@ -334,17 +334,6 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
         return _apply_cgrid_surface_fluxes(
             state, forc, dz_0=dz_0, rho_0=rho_0, c_p=c_p,
             rho_air=rho_air, sigma_sb=sigma_sb, dt=dt, grid=grid,
-        T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + constants.T_freeze
-        q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)),
-                           dtype=np.float64)
-        tau_x, tau_y, sh, lh = air_sea_fluxes(
-            u10=jnp.asarray(forc["u10"]),
-            v10=jnp.asarray(forc["v10"]),
-            T_air_K=jnp.asarray(forc["T_air"]),
-            q_air=jnp.asarray(forc["q_air"]),
-            T_sfc_K=jnp.asarray(T_sfc_K),
-            q_sfc=jnp.asarray(q_sfc),
-            rho_air=jnp.asarray(rho_air),
         )
 
     if grid_type == "tripole":
