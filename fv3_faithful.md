@@ -66,3 +66,19 @@ the oracle, validate incrementally, codex-review.
 4. human visual PNG verdict (W2 v / W5 wind_speed / cross-grid — surfaced). pre-existing 17-test swamp.
 5. ocean/AMIP cross-grid (CPU-infeasible to block on; rely on recorded audits + t=0 probes).
 State persisted: memory `cube-fv3-faithfulness-state` (full iter89-102 resolution).
+
+
+## iter104 — staggered C-grid halo blueprint SHARPENED: it needs uc/vc on the duogrid extension
+Read `pad_halo_vector` (halo.py:2065-2134): the cross-face vector rotation works by (u_grid,v_grid)→
+(u_east,v_north) geographic→pad-as-scalars→back.  CRUCIAL: this needs BOTH components AT ONE POINT —
+but C-grid uc (i-edges) and vc (j-edges) only COEXIST at cell centres.  That is precisely WHY
+`_corner_vorticity` detours uc/vc through cell-centres (2-pt avg) before the rotation; the lossy
+averaging is INHERENT to co-locating staggered components.  ⇒ a clean staggered C-grid halo cannot
+just be a new halo function — it requires uc/vc available on the DUOGRID EXTENSION directly (compute
+the C-grid winds via `d2a2c` ON the extended grid so the halo edges carry true cross-face uc/vc, no
+co-location averaging).  That is a d2a2c/dycore structural change = the "deferred major algorithmic
+upgrade" the project flags as needing a dedicated validation budget (NOT a safe autonomous-loop hack;
+concurrent session does destructive git reset).  Confirms the FB-residual fix is structural, not a
+bounded halo.  The faithful path (staggered c_sw→d_sw with extended-grid uc/vc + upwind _vorticity_
+flux) stands as the genuine remaining SW faithfulness item, blueprinted + oracle-grounded, awaiting a
+dedicated build.
