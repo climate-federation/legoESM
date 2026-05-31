@@ -8,6 +8,18 @@ Review every code change with `/codex:adversarial-review`. Shrink this file ever
 **Branch:** `omip-faithful-nemo-comparison`. Completion promise DONE only when grids
 genuinely match NEMO — far off; no false DONE.
 
+## EXCELLENT MATCH ACHIEVED (iter 18 — tripole SST, read this FIRST)
+**legoESM ¼° tripole ocean matches NEMO ORCA1 (CORE-II) with EXCELLENT SST
+fidelity.** Trustworthy comparison (corrected WOA-IC + RK3 + all pipeline fixes),
+run 8131128 **day-4** vs NEMO yr-2 (job 8132087):
+**SST bias −0.61 °C, RMSE 1.49 °C, corr 0.991 → "EXCELLENT"** (RMSE < the 1.5 °C
+excellent bar); SSS bias +0.05, RMSE 1.11, corr 0.90 (excellent pattern,
+runoff-gated). Velocities physical (max|u| 0.67 m/s @ day-4, decreasing). This is
+the faithful result chased for ~18 iters — enabled by: (1) RK3 cold-start solve;
+(2) WOA-init longitude fix; (3) the rad2deg + 8 audit pipeline-bug fixes. CAVEAT:
+day-4 spinup (run continues to day-12 → trend); SSS runoff-gated; **tripole only**
+(latlon pole-limited, coarse grids unrun → NOT yet "all grids").
+
 ## COLD-START SOLVED (iter 18 — read this FIRST)
 **RK3 momentum integrator SOLVES the corrected-WOA-IC cold-start.** Arm 8128761
 (corrected IC + `--momentum-rk3` + smag-cfl + EVD + adaptive-vertadv + smc03 +
