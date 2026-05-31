@@ -68,6 +68,12 @@ better: slower onset, bounded vs blow-up) but has a RESIDUAL component the grid 
 fix with equiangular-tuned damping. Full fix needs ed-specific damping recalibration AND/OR
 the core c_sw/d_sw faithfulness (centered-scheme contribution). Both A-grid + C/D ed grids
 build (gnomonic="ed"; ed cdgrid dxc √2, sin_sg∈[0.866,1]).
+**CODEX iter72 (high, FIXED):** caught a corruption path — ed A-grid + model constructor
+(calls `create_cubed_sphere_cdgrid(grid)` no-flag) would silently get an equiangular C/D
+grid (mismatched metrics). CubedSphereGrid is a JAX-pytree NamedTuple (string gnomonic field
+breaks JIT), so `create_cubed_sphere_cdgrid` now defaults `gnomonic="auto"` and INFERS from
+base cell-aspect (ed<1.15, equiangular>1.25, ambiguous raises). Model constructors auto-get
+matching C/D metrics. Equiangular byte-identical. Test: auto-on-ed==explicit-ed (5/5).
 **(prior scoping, now DONE) the CDGRID layer:** dynamics consume
 `create_cubed_sphere_cdgrid(base)`, which REBUILDS its own equiangular C/D supergrid
 (`_compute_supergrid_metrics(n, _face_gnomonic_to_lonlat,…)` + `linspace` α at cubed_sphere_
