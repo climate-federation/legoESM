@@ -46,7 +46,8 @@ Mechanism: cold-start geostrophic adjustment from rest (u=0) overshoots to ~5-10
 ## Per-grid status
 | grid | runs stable (realistic IC)? | comparison |
 |---|---|---|
-| tripole/eORCA1 | partial-cell coord + adaptive-implicit vertadv (iter3) — amplifier fixed, validating (job 8115940) | pending |
+| tripole/eORCA025 (¼°) | **STABLE cold-start** (area·cos² smag ceiling, committed abe80cdd; 2-day smoke rc=0); full compare pipeline VALIDATED end-to-end | day-2 pipeline-test: SST RMSE 13.7°C corr 0.095 (2-day-spinup confound, NOT science); real compare awaits 3mo day-90 |
+| tripole/eORCA1 (1°) | free run impossible (config exhausted); superseded by ¼° | — |
 | latlon_bathy | same dynamics path; same fix applies (shared LatLonCGridOceanModel) | pending |
 | cubed_sphere | untested w/ CORE-II | — (applicator supports) |
 | mpas | untested w/ CORE-II | — (applicator supports) |
@@ -144,6 +145,18 @@ A/B knob added: `run_omip_core2.py --ke-gradient-scheme {centered,hollingsworth}
   LOCALISED equatorial velocity over-intensity (worse than the ~14 m/s WBC; the
   equator f→0 amplifier is the key remaining QUALITY gap — known not viscosity-
   dampable, tracker iters 11/13). 14 unit tests pass on the committed code.
+  **FULL ¼° COMPARE PIPELINE VALIDATED END-TO-END** (job 8127079, rc=0):
+  `compare_omip_nemo.py` now proven on the eORCA025 1206×1440 grid (cKDTree-IDW
+  regrid → 1° → SST/SSS bias/RMSE/corr + maps; only the old 332×362 tripole was
+  tested before). Day-2 smoke snapshot vs NEMO yr-2: SST bias −6.6 °C, RMSE
+  13.7 °C, corr 0.095 → "poor" — but this is a 2-day spinup, NOT climatology
+  (cold bias = tropics not yet warmed; corr≈0 = no dynamical pattern yet), so the
+  numbers are a PIPELINE check, not science. `results/omip_nemo/compare_e025_smoke/`.
+  The first MEANINGFUL number comes from the 3mo run (8124320, ~day 34/90 now).
+  **Net iter 16:** ¼° tripole path is STABLE + committed + fully wired to NEMO
+  scoring; remaining gaps to "excellent match" = (a) long-enough run for
+  climatology (3mo→multi-yr), (b) equatorial velocity over-intensity (~30 m/s),
+  (c) runoff ungate (SSS), (d) the deeper dycore gaps. NOT DONE.
 - **iter 1:** new loop. Drag-spinup test 8100129 queued (GPU busy). Created this tracker.
   codex-adversarial-review of dycore changes = needs-attention, 2 valid findings, both FIXED:
   (1) [high] flood-fill copied donor columns without reapplying the RECEIVER bathymetry deep-fill
