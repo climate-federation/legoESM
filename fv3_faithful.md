@@ -136,3 +136,24 @@ debug TRACTABLE (test fixes against λ, no need to integrate to day2-NaN). NEXT:
 structure at the faces-2/3 vertices + test candidate assembly fixes (FB time-level/sequencing, the
 ke_corner+vort-flux d_sw balance, the c_sw→d_sw uc/vc hand-off) against λ. CORRECTS the iter115b memory
 reframe.
+
+
+## iter118 — B-grid KE metric rsin2_corner FAITHFUL too; eigenmode is a pure ASSEMBLY/coupling bug
+Checked the last untested d_sw vertex term: rsin2_corner (1/sin² in `_bgrid_ke_transport` vb).
+range [1.0,1.333]; at the 8 cube vertices = 1.333 (cosa_corner=0.5 ⇒ sin²=0.75, NOT degenerate),
+only 1.06× the interior max ⇒ the B-grid KE metric is faithful + non-degenerate at the vertices.
+RULED OUT.
+⇒ DEFINITIVE: EVERY individually-checkable FB component AND metric is FV3-faithful + non-degenerate at
+the vertices (d_sw zeta(114), vorticity-flux sina_u(110b), corner-vort halos(94/107), fv_tp_2d halo(115),
+B-grid KE rsin2_corner(118), dissipation/Phase4/wind-halo(82-83)).  Yet the K=50 power iteration isolates
+a clean λ=1.0072/step growing eigenmode, 10.6× vertex-localized (iter117).  ⇒ the bug is a pure
+ASSEMBLY/COUPLING subtlety — a SIGN, TIME-LEVEL, or STAGGERING error in how the faithful terms COMBINE
+in the c_sw→p_grad_c→d_sw sequence at the 3-face vertices — NOT any single quantity (which is why every
+component-read came back faithful).
+ALSO (iter117 distinction): the FB residual eigenmode (λ=1.0072/step, fast, W2 C36) is SEPARATE from the
+production C96 W5 eigenmode (≈1.0007/step, slow) — the FB port introduced its OWN faster W2-C36
+instability that production (co-located, stable at W2 C36) does NOT have.
+TRACTABLE PATH (the iter117 harness): test candidate assembly fixes (eigenvector-inspired sign/time-level
+variations) against the K=50 λ — does λ drop below 1?  This is the dedicated fix-search, now enabled.
+Best in a FRESH context (mine is ~32 iters large); the autonomous-loop component-by-component avenue is
+DEFINITIVELY exhausted (all faithful) — only the assembly-fix-vs-λ search remains.
