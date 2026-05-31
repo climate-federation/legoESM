@@ -200,3 +200,26 @@ reformulation: compute ∇(Φ - phis) (the small per-level-ish part, ∇≈0) + 
 large Φ≈2.5e5 never enters the float32 cancellation (the standard reference-subtraction well-balanced
 PGF).  NEXT: check whether phis/sigma are float32-under-x64 by a real dtype bug (fixable cheaply) vs a
 deliberate float32 finite-volume choice; if a bug, fix → rest_state_topo → machine-zero.
+
+
+## iter101 — rest_state_topo float32 confirmed DELIBERATE; cube 3D PGF faithfulness RESOLVED
+create_sigma_coordinate defaults to FLOAT32 (vertical.py:130-135, documented: "PE and tracer
+transport models run in float32; mixing float64 sigma with float32 state triggers scatter-cast
+warnings").  So the float32 geopotential is a DELIBERATE PE precision/perf choice, NOT a dtype bug.
+⇒ the rest_state_topo 13× artifact is the float32 cost; the cube 3D hydrostatic PGF is FAITHFUL
+(exactly well-balanced in float64).  Corrected the matrix's now-disproven "panel-edge metric errors"
+audit comment (run_atmosphere_test_matrix.py:3912) to the float32 root.
+RESOLUTION: the directive's "no edge artifacts" for the 3D PGF is MET in float64; the float32 residual
+is a known precision tradeoff with an OPTIONAL well-balanced fix (reference-subtraction: gradient
+(KE+Φ-phis) and phis SEPARATELY so the large Φ≈2.5e5 never enters the float32 cancellation — exactly
+identical in float64, so float64 golds unchanged; float32 improves).  Deferred as optional (touches the
+production momentum + float32 hydro matrix; low value vs the SW thread).
+
+## STATE SUMMARY (iter89-101) — cube faithfulness is BETTER than the symptoms suggested
+DONE/faithful: area_corner (#faces) scaling (codex-approved, net-zero); gnomonic_ed grid; cross-grid SW
+(cube W2 L2 1.76e-4 ≈ latlon 2.67e-4 ≈ ico 9.9e-5); 3D PGF well-balanced in float64; baroclinic clean;
+ocean cube 9/9.  The ONE genuine remaining FAITHFULNESS gap = SW co-located CENTERED vorticity
+(`zeta_corner*v_d`, both production SW + 3D PE) vs FV3 UPWIND staggered flux — the root of the C96 W5
+eigenmode + the W2 v-imprint (0.344 m/s, a REAL discretization effect, NOT float32).  Fix = the deferred
+staggered c_sw→d_sw / `_vorticity_flux` upgrade (FB chain), which needs the staggered C-grid vector halo
+infra (iter95).  Everything else is either faithful or a deliberate precision choice.

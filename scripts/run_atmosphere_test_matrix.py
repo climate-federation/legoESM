@@ -3910,15 +3910,22 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                 grid, sigma_for_init,
                 perturbed=_rot_perturbed, alpha=_rot_alpha)
         elif _rest:
-            # new_test_dycores iter-73 audit finding: cube rest_state_topo
-            # shows ~1.3 m/s residual motion at quick-mode 1-day vs ico/latlon
-            # 0.1 m/s (13x worse).  Analytic exact solution is zero motion.
-            # Likely cube panel-edge metric errors interacting with non-trivial
-            # phis at face boundaries.  PASS by current matrix tolerance; not
-            # a regression — recorded as queued investigation.  iter-88 noted
-            # this measurement is at quick mode (1 day); full 7-day behaviour
-            # may differ.  Investigation requires probing the per-step PGF
-            # field on cube near panel corners with non-zero topography.
+            # cube rest_state_topo shows ~1.3 m/s residual motion at quick-mode
+            # 1-day vs ico/latlon 0.1 m/s (13x worse); analytic exact = zero
+            # motion.  ROOT (iter100 t=0 PGF probe): this is FLOAT32 PRECISION, NOT
+            # a cube metric/discretization/faithfulness bug.  The cube hydrostatic
+            # PGF is EXACTLY well-balanced in float64 (compute_geopotential uses
+            # only sigma-derived ln_ratio/alpha, so Phi = phis + per-level-const
+            # for uniform T => -grad Phi cancels -R_d T grad ln_ps to machine
+            # zero; forcing float64 gives (Phi_k - phis) std = 0.0 exactly).  The
+            # PE runs FLOAT32 by design (create_sigma_coordinate defaults float32),
+            # and the large Phi~2.5e5 vs phis~1.8e4 add loses ~7 digits in float32
+            # -> a spurious ~1e-7 m/s2 PGF (7x worse at the panel edges where the
+            # A-L gradient/∇phis is larger) that grows nonlinearly to ~1.3 m/s.
+            # PASS by tolerance; not a faithfulness regression.  FIX (optional,
+            # float32 only): reference-subtraction well-balanced PGF -- gradient
+            # (KE + Phi - phis) and phis SEPARATELY so the large Phi never enters
+            # the float32 cancellation (mathematically identical in float64).
             from tests.test_cases.dcmip2012.rest_state_topography import (
                 rest_state_topography_init)
             state = rest_state_topography_init(grid, sigma, h_0=_rest_h0)
