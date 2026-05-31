@@ -94,3 +94,25 @@ for the human visual verdict.  Confirms the directive's "close to MPAS and lat-l
 dynamics, as it does for atm SW dynamics (W2 cube≈latlon≈ico).  The residual SW-vorticity gap is
 atm-SW-core-specific (the co-located centered vorticity); ocean barotropic uses the gated FV3 fv3sw
 path, not the same centered-vorticity production SW.
+
+
+## iter106 — DISCOVERY: FB cross-face uc/vc halo machinery EXISTS + evolved (iter-946/947/948)
+Reading fv3_sw_core.py:87-230 (re-examining the FB chain) found the cross-face uc/vc halo problem is
+FURTHER ALONG than the iter95-104 blueprint assumed (which said "build a staggered C-grid halo from
+scratch"):
+  • `_pad_halo_uc_vc_via_d2a2c` (iter-946, line 87): computes the faithful cross-face uc/vc halo via
+    d2a2c on the duogrid extension (ng>=3) — NO co-location averaging. NEGATIVE alone (OLD time-level
+    → C36 W2 1d |v|=156 vs 81 baseline, OLD/NEW mismatch with the c_sw+p_grad_c increments).
+  • `_pad_halo_uc_vc_new_via_old_delta` (iter-947, line ~160): FIXES it — NEW(incremented) anchor +
+    OLD cross-face-rotation delta (uc_new = uc[NEW] + (uc_old_jhalo - uc_old_int)). Time-level
+    consistent. WIRED into `_d_sw1_recompute_ut_vt` (line 226, when duogrid ng>=3 + u_d_old/v_d_old).
+    iter-948: linear-extrap variant worse (75→87); the d2a2c-delta is the kept path.
+⇒ the d_sw ut/vt path ALREADY has the time-level-consistent cross-face halo. The c_sw
+`_corner_vorticity` (my iter95 vertex-residual focus) STILL uses the lossy center-avg reconstruction.
+REVISED FIX (more tractable than build-from-scratch): apply the SAME NEW+OLD-delta cross-face halo
+technique to `_corner_vorticity`'s uc/vc (replacing the lossy reconstruction). CAVEAT: c_sw is the
+HALF-step (uc/vc BEFORE the c_sw increment), so the "NEW" anchor differs from d_sw1's — need the
+c_sw time-level's uc/vc + the OLD-delta. NEXT: read `fv3_fb_sw_step` wiring (does it pass u_d_old to
+d_sw1? is the residual measured WITH the iter-947 halo?), then extend the technique to `_corner_vorticity`
++ re-measure the FB W2 C36 residual. This is a BOUNDED extension of existing validated machinery,
+not the major from-scratch build — re-prioritizes the genuine SW gap as tractable.
