@@ -650,33 +650,59 @@ def _compute_gnomonic_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
     return lon, lat
 
 
+def _gnomonic_ed_6face_from_theta(
+    theta: jax.Array, alpha: float,
+) -> tuple[jax.Array, jax.Array]:
+    """gnomonic_ed 6-face grid in create's numbering from a 1D W-edge angle
+    array ``theta`` (grid POINTS — cell centers or corners as supplied).
+
+    Shared pipeline construct → ``-π`` FV3 orientation shift → ``mirror_grid_
+    faces`` → ``_gnomonic_ed_remap_to_create``.  Both symmetrization passes are
+    machine-zero no-ops on gnomonic_ed.  This is the SINGLE source of gnomonic_ed
+    cell-center positions so grid.lon/lat and the padded metrics (angle, hx/hy)
+    refer to the SAME centers — mirroring the equiangular convention (cell-
+    centre parametric coordinate for both), unlike a cell_center2-of-corners
+    centre which differs by ~½ cell (iter67 consistency fix).
+    """
+    lon1, lat1 = _gnomonic_ed_construct(theta, alpha=alpha)
+    lon1 = lon1 - jnp.pi
+    lon6, lat6 = mirror_grid_faces(lon1, lat1)
+    return _gnomonic_ed_remap_to_create(lon6, lat6)
+
+
 def _compute_gnomonic_ed_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
     """Cell-center lon/lat for the FV3 OPERATIONAL gnomonic_ed grid (grid_type=0).
 
-    Building block for the gated ``create_cubed_sphere(gnomonic="ed")`` path
-    (the FV3-faithful grid; see fv3_faithful.md GRID section).  Drop-in
-    replacement for :func:`_compute_gnomonic_lonlat` (equiangular) — same
-    ``(6, n, n)`` cell-center return — but built from the equal-great-circle-
-    edge gnomonic_ed corners (:func:`make_fv3_native_grid`, a faithful FV3
-    port verified to 1 ULP) reduced to centers via the FV3 ``cell_center2``
-    helper (normalized 4-corner average, fv_grid_utils.F90:2700).
+    Building block for the gated ``create_cubed_sphere(gnomonic="ed")`` path.
+    Drop-in ``(6, n, n)`` replacement for :func:`_compute_gnomonic_lonlat`
+    (equiangular).  Uses the cell-centre great-circle-edge angle distribution
+    through the shared :func:`_gnomonic_ed_6face_from_theta` pipeline, so these
+    centres are CONSISTENT with the padded metric builders (same definition;
+    iter67 fixed an earlier cell_center2-of-corners centre that differed by ~½
+    cell from the padded-metric centres).
 
-    gnomonic_ed gives near-uniform cells (max aspect 1.06 vs equiangular's
-    1.40 at corners), which is why FV3 uses it operationally and why it is the
-    candidate fix for the C96 high-res cube-edge eigenmode.  NOT yet wired into
-    ``create_cubed_sphere`` (the padded metric/halo builders are still
-    parametrized for equiangular); this center routine is the first wiring
-    brick.  Tested in ``tests/grids/test_gnomonic_ed_centers_iter62.py``.
+    gnomonic_ed gives near-uniform cells (max aspect 1.06 vs equiangular's 1.40
+    at corners) — why FV3 uses it operationally and the candidate fix for the
+    C96 high-res cube-edge eigenmode.  Tested in
+    ``tests/grids/test_gnomonic_ed_centers_iter62.py``.
+
+    Centres = ``cell_center2`` of the gnomonic_ed CORNERS (the FV3 agrid
+    definition).  NOTE (iter67): constructing centres via ``construct`` at a
+    cell-centre θ distribution is WRONG for gnomonic_ed — its great-circle
+    construction is range-dependent (a θ sub-range yields a different cell
+    distribution, 1.80 vs the √2 1.31 corner-derived ratio), unlike
+    equiangular's parametric ``tan(α)``.  So corner→cell_center2 is the
+    consistent centre source; the padded metric builders must match it
+    (corner-derived), not construct-at-cell-centre-θ.
     """
     lon_c, lat_c = make_fv3_native_grid(n, grid_type=0)  # (6, n+1, n+1) corners
     lon_c, lat_c = _gnomonic_ed_remap_to_create(lon_c, lat_c)  # → create numbering
-    lon, lat = cell_center2(
+    return cell_center2(
         lon_c[:, :-1, :-1], lat_c[:, :-1, :-1],   # SW
         lon_c[:, 1:, :-1], lat_c[:, 1:, :-1],     # SE
         lon_c[:, 1:, 1:], lat_c[:, 1:, 1:],       # NE
         lon_c[:, :-1, 1:], lat_c[:, :-1, 1:],     # NW
     )
-    return lon, lat  # (6, n, n)
 
 
 # Face permutation + D4 rotation mapping make_fv3_native_grid's FV3 face
@@ -2172,10 +2198,7 @@ def compute_padded_angle_ed(n: int, halo: int = 1) -> jax.Array:
     angle (identical formula to the equiangular builder).
     """
     theta_big, alpha = _gnomonic_ed_cell_center_thetas(n, halo)  # n_big centers
-    lon1, lat1 = _gnomonic_ed_construct(theta_big, alpha=alpha)  # (n_big, n_big)
-    lon1 = lon1 - jnp.pi  # FV3 gnomonic_grids orientation shift (metric-invariant)
-    lon6, lat6 = mirror_grid_faces(lon1, lat1)                   # (6, n_big, n_big)
-    lon6, lat6 = _gnomonic_ed_remap_to_create(lon6, lat6)        # → create numbering
+    lon6, lat6 = _gnomonic_ed_6face_from_theta(theta_big, alpha)  # (6, n_big, n_big)
     all_angle = []
     for f in range(6):
         lon, lat = lon6[f], lat6[f]
