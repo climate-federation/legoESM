@@ -87,10 +87,15 @@ def _wstats(a, b, area):
 
 def _load_legoesm(path):
     s = np.load(path)
+    # lat_T/lon_T are written by run_omip_core2._save_snapshot ALREADY IN DEGREES
+    # (via _grid_lat2d_deg, which applies np.rad2deg at save time). Applying
+    # rad2deg AGAIN here corrupted the coordinates (45 deg -> 2578) -> the regrid
+    # mapped every cell to nonsense lat-lon, scrambling the SST/SSS pattern
+    # (corr ~0.1) and inflating the bias. Use the stored degrees as-is.
     return {
         "sst": np.asarray(s["T"])[..., 0], "sss": np.asarray(s["S"])[..., 0],
-        "lat": np.rad2deg(np.asarray(s["lat_T"])),
-        "lon": np.rad2deg(np.asarray(s["lon_T"])),
+        "lat": np.asarray(s["lat_T"]),
+        "lon": np.asarray(s["lon_T"]),
         "mask": np.asarray(s["land_mask"]),
     }
 
