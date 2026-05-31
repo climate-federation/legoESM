@@ -61,6 +61,11 @@ Production uses RK3 Arakawa-Lamb (works). `fv3_fb_sw_step` / `FV3FBShallowWaterM
   non-dg 2.13, v/i 5.7) yet SLOWER growth (more stable), so the residual is a GROWTH-RATE mode
   (needs multi-step / eigen analysis), not a t=0-amplitude one. FB chain: 2 high-value fixes
   extracted (PGF + duogrid, 8.5×); residual is a deep long-tail — diversify before grinding more.
+  iter81: Phase4 a2b RULED OUT as the residual cause — `_pad_halo_auto_h2` (used by
+  `_interp_center_to_corner_a2b_ord4`) IS duogrid-aware (passes `duogrid=dg`), so the Phase4 corner
+  geopotential uses the cross-face halo, consistent with the rest. Residual narrowed to the duogrid
+  `_corner_vorticity` dxc/dyc edge-mode METRIC halo (O(dx), authors judged minor) or the d2a2c
+  duogrid path / c_sw coupling subtlety — a deep eigen-analysis task, not a single-iter fix.
 
 ## gnomonic_ed GRID (FV3 operational gt=0; iter62-78) — WIRED + clean + codex-approved
 create defaulted to EQUIANGULAR (gt=2, aspect 1.40); FV3 uses gnomonic_ed (gt=0, aspect 1.06, dx √2)
@@ -95,7 +100,8 @@ ed_angle_1d))` — separable per face ~1e-16, reproduces FV3 native corners to 3
   user for the directive's human visual inspection (assistant barred from Read images).
 
 ## ACTION QUEUE
-[TODO bounded] a2b_ord4 numerical regression; human visual PNG inspection.
+[TODO bounded] human visual PNG inspection (W2 v / W5 wind_speed surfaced iter80). (a2b_ord4
+regression: DONE — covered by test_a2b_ord4_linearity_iter302 / _theta_corner_iter700 / interp_center_iter306.)
 FOUNDATIONAL (per user no-improvise, use oracle): FB chain residual (drive duogrid+Phase4 W2 to
 stable); ed in-domain corner SW-core treatment; 3D PE upwind PPM vort; thread FV3 sin_sg(5) seam
 rotation; C96 W5 eigenmode (converges on the FB-chain/SW-core work). Climate cross-grid CPU-INFEASIBLE.
