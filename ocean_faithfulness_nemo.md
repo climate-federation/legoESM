@@ -8,6 +8,19 @@ Review every code change with `/codex:adversarial-review`. Shrink this file ever
 **Branch:** `omip-faithful-nemo-comparison`. Completion promise DONE only when grids
 genuinely match NEMO — far off; no false DONE.
 
+## PIPELINE AUDIT (iter 17 — read this FIRST)
+Multi-agent adversarial audit (workflow w2gc8r1bh, 15 agents) of the compare + IC
+pipeline found **8 confirmed coordinate/unit bugs** — the rad2deg fix was not the
+only one. **[HIGH] `init_woa.py` paired 2-D lat with the WRONG 1-D longitude
+(`lon_T[0,:]`) on the tripole grid → every cell's WOA IC mis-placed median ~9° /
+up to ~155° (Arctic).** So even the corr-0.968 day-10 result was on a
+partially-corrupted IC. Fixed 6 bugs + stale test (commit e4bd00e5, codex SHIP):
+WOA-init lon→lon2d; NEMO mask `|tos|>1e-6`→isfinite; `_diag` umax_lon u-face fold;
+finite flag +S,v; `load_core2_nyf(allow_synthetic=False)`; `_idx_t` floor (−3h
+phase). **CORRECTED run 8127491 launched** (fixed pipeline) → corrected day-10 vs
+buggy day-10 (0.968) quantifies the IC-bug impact + decides the 3mo (8124320, still
+buggy IC) restart. Memory: [[omip-pipeline-coordinate-bugs]].
+
 ## BREAKTHROUGH (iter 16+ — read this FIRST)
 **The "not faithful" verdict was largely a SCORER BUG.** `compare_omip_nemo._load_legoesm`
 double-applied `rad2deg` to the snapshot lat/lon (already in degrees) → the IDW regrid
