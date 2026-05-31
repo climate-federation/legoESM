@@ -146,6 +146,19 @@ class SeaIceConfig(NamedTuple):
     T_melt_surface: float = constants.T_freeze
     T_ice_min: float = 180.0        # Lower bound for numerical stability [K]
     ocean_heat_transfer_coeff: float = 20.0  # Ocean-ice heat transfer [W/m^2/K]
+    # SKIN-ONLY gate.  The response latent (TileResponse.lhflx) and surface mass
+    # flux ALWAYS report the realized (over-ablation-capped) values -- that is
+    # the latent the atmosphere actually receives (the coupler blends the ice
+    # latent as L_s * surface_mass_flux), so the atmosphere energy<->water budget
+    # closes regardless of this flag.  This flag only controls whether the
+    # implicit SKIN TEMPERATURE T_new is RE-SOLVED with that realized latent so
+    # the returned skin temp is consistent with it.  True (default) re-solves;
+    # False leaves the skin cooled by the uncapped bulk latent (a bounded thin-
+    # ice residual, <= L_s*rho_ice*h/dt).  In practice reachable clamp cells are
+    # MELTING -> T pinned at the melt point -> the re-solve is a no-op there; its
+    # only active effect is sub-freezing clamp cells (h < h_ice_min regime).
+    # Static feature gate (Python ``if``, not a traced ``where``).
+    latent_skin_resolve: bool = True
     # Concentration dynamics
     h_new_ice: float = 0.05         # Thickness for new ice formation [m]
     # Bulk flux algorithm

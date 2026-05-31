@@ -551,7 +551,9 @@ def _step_slab(
         z0=jnp.full(h.shape, config.z0_ice, dtype=_h_dtype),
         q_surface=q_sfc_new,
         shflx=shflx,
-        lhflx=lhflx,
+        # Realized latent (== L_s * surface_mass_flux / conc): the atmosphere
+        # latent energy matches the skin solve and the moisture mass (#28).
+        lhflx=diag["lhflx_realized"],
         tau_x=tau_x,
         tau_y=tau_y,
         lw_up=lw_up_new,
@@ -779,6 +781,13 @@ def _step_dynamic(
         # conc_old[..., 0]).
         fw_exch, heat_exch, subl_exch = _ocean_exchange_from_diag(
             diag_0, conc_old[..., 0], config)
+        # Per-ice-area realized latent flux, aggregated conc-weighted over cats
+        # (the atmosphere sees the aggregate ice surface): accumulate the
+        # numerator sum_k(lhflx_realized_k * conc_k) and the conc denominator,
+        # normalise after all cats are summed.  Matches the realized sublimation
+        # mass + the skin solve so the atmosphere latent energy closes (#28).
+        lhflx_num = diag_0["lhflx_realized"] * conc_old[..., 0]
+        conc_sum_lh = conc_old[..., 0]
         if n_cat > 1:
             h_rest, T_rest, c_rest, diag_rest = jax.vmap(
                 _thermo_cat_no_lead, in_axes=0, out_axes=0,
@@ -803,10 +812,18 @@ def _step_dynamic(
             fw_exch = fw_exch + jnp.sum(fw_rest, axis=0)
             heat_exch = heat_exch + jnp.sum(heat_rest, axis=0)
             subl_exch = subl_exch + jnp.sum(subl_rest, axis=0)
+            lhflx_num = lhflx_num + jnp.sum(
+                diag_rest["lhflx_realized"]
+                * jnp.moveaxis(conc_old[..., 1:], -1, 0),
+                axis=0,
+            )
+            conc_sum_lh = conc_sum_lh + jnp.sum(conc_old[..., 1:], axis=-1)
         else:
             h = h_0[..., None]
             T_ice = T_0[..., None]
             conc = c_0[..., None]
+        # Conc-weighted aggregate per-ice-area realized latent for the response.
+        lhflx_exch = lhflx_num / jnp.maximum(conc_sum_lh, 1e-30)
 
         # Open-water ice growth should only be deposited into category 0
         # (thinnest). Zero out new-ice growth in empty higher categories
@@ -847,6 +864,8 @@ def _step_dynamic(
         # per-process diagnostics (F11) — same decomposition as the slab path.
         fw_exch, heat_exch, subl_exch = _ocean_exchange_from_diag(
             diag_sc, conc_in_sc, config)
+        # Per-ice-area realized latent (single cat: conc cancels) (#28).
+        lhflx_exch = diag_sc["lhflx_realized"]
 
     # Re-aggregate for coupler response
     if config.n_categories > 1:
@@ -874,6 +893,8 @@ def _step_dynamic(
         ocean_heat_override=heat_exch,
         # Realized (capped) per-cell ice->atmosphere sublimation mass (#28).
         surface_mass_override=subl_exch,
+        # Realized per-ice-area latent flux, conc-weighted across cats (#28).
+        lhflx_override=lhflx_exch,
     )
 
     # Legacy path: snow / brine / pond fields are pass-through (zero-
@@ -1086,6 +1107,42 @@ def _thermo_single(
     basal_melt_rate = basal_melt_rate * removal_scale
     sublim_loss_rate = sublim_loss_rate * removal_scale
     sublim_mass_per_ice_area = config.rho_ice * (sublim_loss_rate - deposition_rate)
+
+    # ---- Energy-closing latent flux + single skin re-solve (#28) ----
+    # The latent the ATMOSPHERE receives must equal L_s * the REALIZED (post
+    # removal_scale) sublimation mass, otherwise the over-ablation cap cools the
+    # skin with more latent enthalpy than the atmosphere gets and the coupled
+    # surface energy budget does not close.  Guard with ``removal_scale < 1`` so
+    # thick / deposition / no-cap cells return the bulk ``lhflx`` BITWISE (the
+    # L_s/rho_ice round-trip is bit-exact for typical |lhflx| but leaves a 1-ULP
+    # residual near zero; the guard removes it and protects validated baselines).
+    lhflx_realized = jnp.where(
+        removal_scale < 1.0,
+        constants.L_s * sublim_mass_per_ice_area,
+        lhflx,
+    )
+    if config.latent_skin_resolve:
+        # Re-solve the implicit skin balance ONCE with the realized latent so the
+        # returned T_new / F_cond / lead-freeze flux are cooled by exactly the
+        # latent the atmosphere receives.  NO iteration -- the fixed point drives
+        # the realized latent toward zero in mixed melt+sublim clamp cells
+        # (surface melt saturates its own h/dt share and starves sublimation).
+        # The melt/removal PARTITION above is kept from the first (bulk-latent)
+        # pass; that 2nd-order residual is bounded by L_s*rho_ice*h/dt (sub-cm
+        # clamped ice).  sw_net/lw_net/K_cond/T_base/cap_dt are latent-independent
+        # and reused; for thick ice lhflx_realized == lhflx so Q_sfc / T_new /
+        # F_cond / freeze_flux_open are byte-identical to the first pass.
+        Q_sfc = sw_net + lw_net - shflx - lhflx_realized
+        T_implicit = (cap_dt * T_ice + Q_sfc + K_cond * T_base) / (cap_dt + K_cond)
+        T_trial = jnp.where(ice_mask, T_implicit, T_ice)
+        T_new = jnp.where(
+            ice_mask,
+            jnp.clip(T_trial, config.T_ice_min, config.T_melt_surface),
+            jnp.full(T_ice.shape, config.T_freeze_ocean, dtype=T_ice.dtype),
+        )
+        # F_cond is NOT recomputed: the basal exchange above already consumed
+        # the first-pass F_cond; only T_new (returned skin temp -> lw_up / q_sfc)
+        # and the re-solved Q_sfc (-> freeze_flux_open below) feed downstream.
     # Net realized existing-ice thickness rate.  In the no-clamp regime
     # (removal_scale == 1) this is identically dh_dt_basal + dh_dt_surface_melt
     # + dh_dt_sublim (max(x,0) - max(-x,0) = x).  When the cap fires the removal
@@ -1196,6 +1253,11 @@ def _thermo_single(
         "ocean_heat_basal_per_ice_area": ocean_heat_basal_per_ice_area,
         # Realized ice->atmosphere sublimation mass [kg/m2(ice)/s] (#28).
         "sublim_mass_per_ice_area": sublim_mass_per_ice_area,
+        # Latent flux PER-ICE-AREA consistent with the realized sublimation mass
+        # (== L_s * sublim_mass_per_ice_area where the cap fires, else the bulk
+        # lhflx); fed to the coupler so the atmosphere latent energy matches the
+        # skin solve and the moisture mass (#28).
+        "lhflx_realized": lhflx_realized,
     }
     return h_new, T_new, conc_new, diag
 
@@ -1318,6 +1380,7 @@ def _build_response(
     freshwater_override: jnp.ndarray | None = None,
     ocean_heat_override: jnp.ndarray | None = None,
     surface_mass_override: jnp.ndarray | None = None,
+    lhflx_override: jnp.ndarray | None = None,
 ) -> TileResponse:
     """Build coupler response from aggregated ice fields.
 
@@ -1344,6 +1407,12 @@ def _build_response(
     tau_x, tau_y, shflx, lhflx = _bulk_flux_dispatch(
         T_ice, forcing, config, U_min,
     )
+    # Realized latent override (per-ice-area) from the kernel diagnostics, so
+    # the atmosphere latent energy matches the realized sublimation mass and the
+    # skin solve (#28).  Falls back to the recomputed bulk latent for external
+    # callers that do not thread it.
+    if lhflx_override is not None:
+        lhflx = lhflx_override
 
     # Ice → ocean feedbacks.  When the dynamic path threads
     # ``h_old`` + ``ocean_*`` + ``dt`` we compute the per-ice-area
@@ -1646,6 +1715,43 @@ def _thermo_v2(
         rho_ice=config.rho_ice,
         sublim_partition=config.snow.sublim_partition,
     )
+
+    # ---- Energy-closing latent flux + single skin re-solve (#28) ----
+    # The realized snow+ice sublimation mass (capped at available snow/ice by
+    # consume_sublimation_from_snow_then_ice; deposition via min(..., 0) since
+    # the helper grows snow and returns zero sub-depths under lhflx<0) is known
+    # in ONE pass.  Build the latent CONSISTENT with it so the atmosphere latent
+    # energy == L_s*realized mass and the skin is cooled by that same latent.
+    # Use snow+ice TOTAL (snow sublimation is not bounded by ice h).  GUARD: only
+    # rebase when the loss demand was not fully met, so thick / fully-supplied
+    # cells return the bulk ``lhflx`` bitwise (no-op for validated baselines).
+    realized_sublim_kg = (
+        snow_sub_m * config.snow.rho_snow
+        + ice_sub_m * config.rho_ice
+        + jnp.minimum(lhflx / constants.L_s * dt, 0.0)
+    )
+    demanded_sublim_kg = lhflx / constants.L_s * dt
+    sublim_capped = realized_sublim_kg < demanded_sublim_kg - 1e-30
+    lhflx_realized = jnp.where(
+        sublim_capped,
+        constants.L_s * realized_sublim_kg / dt,
+        lhflx,
+    )
+    if config.latent_skin_resolve:
+        # Re-solve the implicit skin balance ONCE with the realized latent (same
+        # closed form as _thermo_single; no iteration).  The melt/basal/sublim
+        # PARTITION from the first (bulk-latent) pass is kept; the re-solve only
+        # corrects the returned T_new and Q_sfc (-> lead-freeze flux).  No-op for
+        # thick ice (lhflx_realized == lhflx).  sw_absorbed / lw_net / cap_dt /
+        # K_cond / T_base_arr are latent-independent and reused.
+        Q_sfc = sw_absorbed + lw_net - shflx - lhflx_realized
+        T_implicit = (cap_dt * T_ice + Q_sfc + K_cond * T_base_arr) / (cap_dt + K_cond)
+        T_trial = jnp.where(ice_mask, T_implicit, T_ice)
+        T_new = jnp.where(
+            ice_mask,
+            jnp.clip(T_trial, config.T_ice_min, config.T_melt_surface),
+            jnp.full(T_ice.shape, config.T_freeze_ocean, dtype=T_ice.dtype),
+        )
 
     # 8. Lead freezing (open-water freeze) — only when enabled (cat 0
     #    in multi-cat).  This deposits new ice at thickness
@@ -1959,28 +2065,23 @@ def _thermo_v2(
         "alpha": alpha,
         "lw_up": lw_up,
         "shflx": shflx,
-        "lhflx": lhflx,
+        # Realized latent (== L_s * sublim_mass_to_atmos / conc): the atmosphere
+        # latent energy matches the realized sublimation mass + the skin solve
+        # (#28).  Equals the bulk lhflx where the loss demand was fully met.
+        "lhflx": lhflx_realized,
         "tau_x": tau_x,
         "tau_y": tau_y,
         "freshwater_to_ocean": freshwater_to_ocean,
         "salt_flux_to_ocean": salt_flux_to_ocean,
         "ocean_heat_extraction": ocean_heat_extraction,
         # Realized ice->atmosphere sublimation mass, PER-GRID-CELL [kg/m2/s]:
-        # snow + ice sublimated this step (already capped at available snow/ice
-        # by consume_sublimation_from_snow_then_ice) weighted by the input ice
-        # fraction.  The helper returns ZERO sub-depths under DEPOSITION (lhflx
-        # < 0) -- it grows the snow column instead -- so the deposition part is
-        # added back explicitly as ``min(lhflx/L_s*dt, 0)`` (negative = mass
-        # from atmosphere -> ice), else the atmosphere is not debited for the
-        # vapor it lost while the state gains water (codex).  Threaded to
-        # surface_mass_flux so the atmosphere water budget matches the state and
-        # survives terminal melt-out under the f_water blend (#28).
-        "sublim_mass_to_atmos": (
-            (snow_sub_m * config.snow.rho_snow
-             + ice_sub_m * config.rho_ice
-             + jnp.minimum(lhflx / constants.L_s * dt, 0.0))
-            / dt * conc
-        ),
+        # the SAME realized_sublim_kg used for lhflx_realized above (snow + ice
+        # sublimated this step, capped at available snow/ice; deposition added
+        # via min(lhflx/L_s*dt, 0) since the helper grows snow and returns zero
+        # sub-depths under lhflx<0), weighted by the input ice fraction.  Reusing
+        # the same numerator guarantees L_s*sublim_mass_to_atmos == lhflx_realized
+        # * conc exactly, so the atmosphere water + energy pair (#28).
+        "sublim_mass_to_atmos": realized_sublim_kg / dt * conc,
         # PER-GRID-CELL: weight by the INPUT ``conc`` (the ice area through
         # which shortwave penetrated DURING the step), the same snapshot used
         # for ``F_ocean * conc`` above.  This keeps the heat channel on a
@@ -2198,7 +2299,6 @@ def _step_dynamic_v2(
         delta_lead_list = []
         delta_white_list = []
         shflx_aggsum_components = []
-        lhflx_aggsum_components = []
         tau_x_components = []
         tau_y_components = []
         for k in range(n_cat):
@@ -2225,7 +2325,6 @@ def _step_dynamic_v2(
             delta_lead_list.append(result["delta_V_lead_freeze"])
             delta_white_list.append(result["delta_V_white_ice"])
             shflx_aggsum_components.append(result["shflx"] * result["conc"])
-            lhflx_aggsum_components.append(result["lhflx"] * result["conc"])
             tau_x_components.append(result["tau_x"] * result["conc"])
             tau_y_components.append(result["tau_y"] * result["conc"])
 
@@ -2267,7 +2366,13 @@ def _step_dynamic_v2(
         # surface, so the post-step fraction is the right weight.  Stored
         # already concentration-weighted, then normalised by the ice fraction.
         shflx_resp = jnp.sum(jnp.stack(shflx_aggsum_components, axis=-1), axis=-1) / sum_conc_safe
-        lhflx_resp = jnp.sum(jnp.stack(lhflx_aggsum_components, axis=-1), axis=-1) / sum_conc_safe
+        # LATENT: derive the per-ice-area latent from the REALIZED sublimation
+        # MASS (same INPUT-conc basis as ``sublim_mass_total``), NOT from the
+        # post-thermo conc-weighted result["lhflx"] -- otherwise melt/retreat/
+        # clamp cells under-report the latent and break
+        # resp.lhflx*sum_conc == L_s*sublim_mass_total (codex).  This keeps the
+        # atmosphere latent ENERGY paired to the moisture MASS on one basis.
+        lhflx_resp = constants.L_s * sublim_mass_total / sum_conc_safe
         tau_x_resp = jnp.sum(jnp.stack(tau_x_components, axis=-1), axis=-1) / sum_conc_safe
         tau_y_resp = jnp.sum(jnp.stack(tau_y_components, axis=-1), axis=-1) / sum_conc_safe
 
@@ -2301,7 +2406,15 @@ def _step_dynamic_v2(
         # Atmosphere fluxes stay per-ice-tile (blend_tiles re-multiplies by
         # the post-step f_ice).
         shflx_resp = result["shflx"]
-        lhflx_resp = result["lhflx"]
+        # LATENT on the realized-MASS basis, using the SAME conc basis as the
+        # multicat path -- max(PRE-DYNAMICS conc_pre, post-thermo conc) -- so
+        # single-cat and multicat expose an IDENTICAL latent<->mass invariant to
+        # TileResponse consumers regardless of transport: resp.lhflx *
+        # max(conc_pre, conc_post) == L_s * surface_mass_flux.  (Using the
+        # post-transport thermo-input conc here would diverge from the multicat
+        # ``sum_conc_safe`` basis under transport='advect'.)  #28, codex.
+        conc_basis = jnp.maximum(jnp.maximum(conc_pre, conc), 1e-30)
+        lhflx_resp = constants.L_s * sublim_mass_total / conc_basis
         tau_x_resp = result["tau_x"]
         tau_y_resp = result["tau_y"]
 

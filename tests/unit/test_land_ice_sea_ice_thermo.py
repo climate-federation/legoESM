@@ -594,3 +594,88 @@ class Test8m_F2FreshwaterClosure:
 
         g = jax.grad(fw_of_h)(0.8)
         assert jnp.isfinite(g), f"freshwater grad wrt h not finite: {g}"
+
+
+class Test8n_LatentSkinResolve:
+    """#28: the over-ablation latent cap is fed back into the implicit skin
+    energy balance so Q_sfc, the returned T_surface, and the atmosphere latent
+    flux all use the REALIZED (capped) latent.  Guarded byte-exact no-op for
+    thick / non-clamped ice; only sub-cm clamp cells shift."""
+
+    def test_noop_for_thick_ice_bitwise(self):
+        import numpy as np
+        state = make_ice_state(h=2.0, T_ice=263.0, conc=0.9)
+        off_cfg = CONFIG._replace(latent_skin_resolve=False)
+        # Sublimation (dry) AND deposition (humid) — both must be EXACT no-ops
+        # for thick ice (the removal_scale<1 guard returns bulk lhflx bitwise).
+        for q in (1e-4, 3e-3):
+            forcing = make_forcing(sw_down=60.0, lw_down=250.0, T_lowest=266.0,
+                                   q_lowest=q, u_lowest=6.0)
+            on, ron = step_sea_ice(state, forcing, OCEAN_SST, OCEAN_U, OCEAN_V,
+                                   CONFIG, 1.0, DT)
+            off, roff = step_sea_ice(state, forcing, OCEAN_SST, OCEAN_U, OCEAN_V,
+                                     off_cfg, 1.0, DT)
+            np.testing.assert_array_equal(on.h_ice.data, off.h_ice.data)
+            np.testing.assert_array_equal(on.T_ice.data, off.T_ice.data)
+            np.testing.assert_array_equal(ron.lhflx, roff.lhflx)
+            np.testing.assert_array_equal(ron.T_surface, roff.T_surface)
+
+    def test_clamp_pairs_energy_and_mass(self):
+        """In an over-ablation clamp cell the atmosphere latent ENERGY pairs
+        with the realized moisture MASS: response.lhflx (per-ice-area) * conc ==
+        L_s * surface_mass_flux (per-cell).  The response reports the realized
+        (capped) latent regardless of the skin-resolve gate."""
+        from legoesm import constants
+        h0, a0 = 0.012, 0.9
+        state = make_ice_state(h=h0, T_ice=272.9, conc=a0)
+        forcing = make_forcing(sw_down=1000.0, lw_down=350.0, T_lowest=295.0,
+                               q_lowest=1e-4, u_lowest=8.0)
+        warm = jnp.full(SHAPE, CONFIG.T_freeze_ocean + 8.0, jnp.float64)
+        new, resp = step_sea_ice(state, forcing, warm, OCEAN_U, OCEAN_V,
+                                 CONFIG, 1.0, DT)
+        # Confirm the over-ablation clamp regime: the column lost most of its ice
+        # volume this step (the realized removal hit the cap).
+        vol_in, vol_out = h0 * a0, float(jnp.max(new.h_ice.data * new.concentration.data))
+        assert vol_out < 0.5 * vol_in, "premise: clamp must fire (heavy ablation)"
+        # Energy <-> mass pairing (the coupled invariant this fix guarantees).
+        assert jnp.allclose(resp.lhflx * a0,
+                            constants.L_s * resp.surface_mass_flux,
+                            rtol=1e-9, atol=1e-12)
+
+    def test_skin_resolve_noop_for_melting_clamp(self):
+        """The skin re-solve is a NO-OP for MELTING clamp cells (the reachable
+        clamp regime): the surface is pinned at the melt point so re-solving the
+        implicit skin temperature with the realized latent leaves the state
+        unchanged.  Its only active effect is sub-freezing clamp cells (not
+        reachable for h > h_ice_min at physical fluxes).  Documents the
+        confinement of the bounded melt-side residual (#28)."""
+        import numpy as np
+        state = make_ice_state(h=0.012, T_ice=272.9, conc=0.9)
+        forcing = make_forcing(sw_down=1000.0, lw_down=350.0, T_lowest=295.0,
+                               q_lowest=1e-4, u_lowest=8.0)
+        warm = jnp.full(SHAPE, CONFIG.T_freeze_ocean + 8.0, jnp.float64)
+        on, ron = step_sea_ice(state, forcing, warm, OCEAN_U, OCEAN_V,
+                               CONFIG, 1.0, DT)
+        off, roff = step_sea_ice(
+            state, forcing, warm, OCEAN_U, OCEAN_V,
+            CONFIG._replace(latent_skin_resolve=False), 1.0, DT)
+        # Surface pinned at the melt point => the re-solve cannot move T_new.
+        assert float(jnp.max(jnp.abs(ron.T_surface - CONFIG.T_melt_surface))) < 1e-6
+        np.testing.assert_array_equal(on.h_ice.data, off.h_ice.data)
+        np.testing.assert_array_equal(ron.T_surface, roff.T_surface)
+        np.testing.assert_array_equal(ron.lhflx, roff.lhflx)
+
+    def test_differentiable_through_clamp(self):
+        import jax
+
+        def loss(Ta):
+            forcing = make_forcing(sw_down=1000.0, lw_down=350.0,
+                                   T_lowest=Ta, q_lowest=1e-4, u_lowest=8.0)
+            state = make_ice_state(h=0.012, T_ice=272.9, conc=0.9)
+            warm = jnp.full(SHAPE, CONFIG.T_freeze_ocean + 8.0, jnp.float64)
+            _, resp = step_sea_ice(state, forcing, warm, OCEAN_U, OCEAN_V,
+                                   CONFIG, 1.0, DT)
+            return jnp.sum(resp.lhflx) + jnp.sum(resp.surface_mass_flux)
+
+        g = jax.grad(loss)(295.0)
+        assert jnp.isfinite(g), f"grad through latent skin re-solve not finite: {g}"

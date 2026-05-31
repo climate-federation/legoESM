@@ -2537,6 +2537,63 @@ class TestMulticatTransportTracerConservation:
         raw_heat = F_ocean * jnp.sum(conc, axis=-1)
         assert jnp.all(jnp.isfinite(resp.ocean_heat_extraction))
         assert jnp.all(resp.ocean_heat_extraction <= raw_heat + 1e-6)
+        # v2 MULTICAT latent<->mass pairing: response.lhflx (per-ice-area) is
+        # derived from the realized sublimation MASS on the sum_conc_safe basis,
+        # so resp.lhflx * sum_conc_safe == L_s * surface_mass_flux exactly (it
+        # must NOT be aggregated on the post-thermo conc, codex).
+        from legoesm import constants
+        sum_conc_safe = jnp.maximum(
+            jnp.maximum(jnp.sum(conc, axis=-1),
+                        jnp.sum(new.concentration.data, axis=-1)),
+            1e-30,
+        )
+        assert jnp.allclose(resp.lhflx * sum_conc_safe,
+                            constants.L_s * resp.surface_mass_flux,
+                            rtol=1e-6, atol=1e-12)
+
+    def test_v2_single_cat_latent_basis_under_lead_freeze_growth(self):
+        """Single-cat v2: when lead-freeze GROWS the ice fraction, the response
+        latent must use the max(pre, post) conc basis (derived from the realized
+        sublimation MASS), so resp.lhflx * conc_basis == L_s * surface_mass_flux.
+        Passing result['lhflx'] through (input-conc basis) would overstate by
+        conc_new/conc_in once conc grows (#28, codex)."""
+        from legoesm.ice.config import SeaIceConfig, BrineConfig
+        from legoesm.ice.state import init_dynamic_ice_state
+        from legoesm import constants
+        n = 8
+        grid = create_cubed_sphere(n)
+        shape = (6, n, n)
+        st = init_dynamic_ice_state(shape)  # single category (no cat axis)
+        conc0 = 0.5
+        state = st._replace(
+            h_ice=st.h_ice.replace(data=jnp.full(shape, 0.5)),
+            concentration=st.concentration.replace(data=jnp.full(shape, conc0)),
+            T_ice=st.T_ice.replace(data=jnp.full(shape, 258.0)),
+        )
+        # transport='advect' so the thermo-input conc differs from the pre-step
+        # conc -- exercises that the latent basis (max(pre-dynamics, post)) is
+        # the SAME for single-cat and multicat (codex).
+        config = SeaIceConfig(
+            n_categories=1, dynamics="free_drift", transport="advect",
+            brine=BrineConfig(enabled=True),
+        )
+        # Cold + dry: strong open-water freezing grows conc (lead freeze) while
+        # some sublimation also occurs (q_sfc over cold ice > q_lowest).
+        forcing = _make_forcing(shape=shape)._replace(
+            sw_down=jnp.zeros(shape), lw_down=jnp.full(shape, 150.0),
+            T_lowest=jnp.full(shape, 245.0), q_lowest=jnp.full(shape, 1e-4),
+        )
+        sst = jnp.full(shape, config.T_freeze_ocean)
+        z = jnp.zeros(shape)
+        new, resp = step_sea_ice(state, forcing, sst, z, z, config,
+                                 U_min=1.0, dt=3600.0, grid=grid)
+        # Lead freeze grew the ice fraction (the case that breaks input-conc basis).
+        assert float(jnp.min(new.concentration.data)) > conc0
+        conc_basis = jnp.maximum(
+            jnp.maximum(state.concentration.data, new.concentration.data), 1e-30)
+        assert jnp.allclose(resp.lhflx * conc_basis,
+                            constants.L_s * resp.surface_mass_flux,
+                            rtol=1e-6, atol=1e-12)
 
     def test_transport_conserves_tracer_inventories(self):
         """The transport step advects salt / snow / pond as CONSERVED
