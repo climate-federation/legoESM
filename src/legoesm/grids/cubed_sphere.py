@@ -2159,6 +2159,35 @@ def compute_padded_half_metrics_ed(
     return hx_ext, hy_ext
 
 
+def compute_padded_angle_ed(n: int, halo: int = 1) -> jax.Array:
+    """gnomonic_ed counterpart of :func:`legoesm.grids.halo.compute_padded_angle`.
+
+    Grid angle on the padded grid, ``(6, n+2*halo, n+2*halo)`` — same contract.
+    Unlike hx/hy the angle is face-DEPENDENT (2 distinct values: equatorial
+    faces 0-3 vs polar 4-5), so it is computed on the full remapped 6-face
+    extended grid: build the extended equatorial cell-center face
+    (`_gnomonic_ed_construct`) → ``-π`` shift → `mirror_grid_faces` to 6 (both
+    symmetrization passes are machine-zero no-ops on gnomonic_ed) →
+    `_gnomonic_ed_remap_to_create` → per-face i-direction centered-difference
+    angle (identical formula to the equiangular builder).
+    """
+    theta_big, alpha = _gnomonic_ed_cell_center_thetas(n, halo)  # n_big centers
+    lon1, lat1 = _gnomonic_ed_construct(theta_big, alpha=alpha)  # (n_big, n_big)
+    lon1 = lon1 - jnp.pi  # FV3 gnomonic_grids orientation shift (metric-invariant)
+    lon6, lat6 = mirror_grid_faces(lon1, lat1)                   # (6, n_big, n_big)
+    lon6, lat6 = _gnomonic_ed_remap_to_create(lon6, lat6)        # → create numbering
+    all_angle = []
+    for f in range(6):
+        lon, lat = lon6[f], lat6[f]
+        dlon_dx = lon[2:, 1:-1] - lon[:-2, 1:-1]
+        dlat_dx = lat[2:, 1:-1] - lat[:-2, 1:-1]
+        dlon_dx = jnp.where(dlon_dx > jnp.pi, dlon_dx - 2 * jnp.pi, dlon_dx)
+        dlon_dx = jnp.where(dlon_dx < -jnp.pi, dlon_dx + 2 * jnp.pi, dlon_dx)
+        cos_lat_ext = jnp.cos(lat[1:-1, 1:-1])
+        all_angle.append(jnp.arctan2(dlat_dx, dlon_dx * cos_lat_ext))
+    return jnp.stack(all_angle, axis=0)
+
+
 def symm_ed(
     lamda: jax.Array, theta: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
