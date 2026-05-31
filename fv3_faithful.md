@@ -89,6 +89,10 @@ ed_angle_1d))` — separable per face ~1e-16, reproduces FV3 native corners to 3
   zero. Ocean matrix cube 9/9; rest_state ×12 machine-zero.
 - Cross-grid CLOSENESS (W2 height L2 vs exact): cube 1.76e-4 BETWEEN ico 9.9e-5 and latlon 2.67e-4.
   Regression-clean 44/44.
+- **iter80 re-confirm at HEAD (post gnomonic_ed/FB commits — NO regression):** cube SW matrix
+  4/4 PASS — W2 L2=1.76e-4 (unchanged), v_ll_Linf=0.339, W5/W6 mass drift ~1e-15, cosine_bell
+  L2=0.131. Visual edge-artifact PNGs (W2 v-wind + W5 wind_speed, C36 & C96) SURFACED to the
+  user for the directive's human visual inspection (assistant barred from Read images).
 
 ## ACTION QUEUE
 [TODO bounded] a2b_ord4 numerical regression; human visual PNG inspection.
