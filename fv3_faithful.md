@@ -57,7 +57,10 @@ Production uses RK3 Arakawa-Lamb (works). `fv3_fb_sw_step` / `FV3FBShallowWaterM
   **8.5× stability gain**. Earlier "FB unstable" tests used the WRONG (non-duogrid) config.
 - **RESIDUAL (open):** day1 max|u_d|=50 (vs 38), W2 err 2.5e-2, day2 NaN. Slow residual growth.
   Candidates: duogrid `_corner_vorticity` dxc/dyc edge-mode METRIC halo (lines 1209-1215, "O(dx)");
-  Phase4 a2b in the duogrid context; the d2a2c duogrid path. NEXT: drive the residual down.
+  Phase4 a2b in the duogrid context; the d2a2c duogrid path. NEXT: drive the residual down. iter79: t=0 single-step |dh| is NOT a good predictor — duogrid has LARGER t=0 dh (rms 7.13 vs
+  non-dg 2.13, v/i 5.7) yet SLOWER growth (more stable), so the residual is a GROWTH-RATE mode
+  (needs multi-step / eigen analysis), not a t=0-amplitude one. FB chain: 2 high-value fixes
+  extracted (PGF + duogrid, 8.5×); residual is a deep long-tail — diversify before grinding more.
 
 ## gnomonic_ed GRID (FV3 operational gt=0; iter62-78) — WIRED + clean + codex-approved
 create defaulted to EQUIANGULAR (gt=2, aspect 1.40); FV3 uses gnomonic_ed (gt=0, aspect 1.06, dx √2)
