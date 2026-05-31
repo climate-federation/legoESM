@@ -624,7 +624,11 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
 def _idx_t(step: int, dt: float, n_rec: int) -> int:
     """Nearest 6-hourly CORE-II record for the current model time (perpetual yr)."""
     t = (step * dt) % _YEAR_S
-    return int(round(t / _SEC_PER_6H)) % n_rec
+    # CORE-II 6-hourly records are cell-CENTRED at (k+0.5)*6h (see
+    # build_core2_nyf_zarr time_s=(arange+0.5)*6h), so the record whose centre is
+    # nearest model time t is floor(t/6h), not round(t/6h) -- the latter applies
+    # each record with a +3 h phase lead.
+    return int(t // _SEC_PER_6H) % n_rec
 
 
 def _diag(state, lat2d=None, lon2d=None) -> dict:
@@ -650,7 +654,11 @@ def _diag(state, lat2d=None, lon2d=None) -> dict:
                       np.unravel_index(np.nanargmax(au), au.shape))
         lat2d = np.asarray(lat2d)
         jj = min(ju, lat2d.shape[0] - 1)
-        ii = min(iu, lat2d.shape[1] - 1)
+        # u is a u-FACE field (n_lat, n_lon+1): column iu spans [0, n_lon]. The
+        # T-centre coord arrays have n_lon columns and the wrap column n_lon is a
+        # copy of column 0, so fold iu back with % (NOT clamp to n_lon-1, which
+        # would report the cyclic-seam max ~360 deg away at the far edge).
+        ii = iu % lat2d.shape[1]
         umax_lat = round(float(lat2d[jj, ii]), 1)
         umax_lev = ku
         if lon2d is not None:
@@ -663,7 +671,11 @@ def _diag(state, lat2d=None, lon2d=None) -> dict:
         "umax_lat": umax_lat,
         "umax_lon": umax_lon,
         "umax_lev": umax_lev,
-        "finite": bool(np.isfinite(T).all() and np.isfinite(u).all()),
+        # Guard ALL prognostic fields -- a blowup that goes non-finite first in
+        # S or v (not just T/u) must still trip the ABORT, else a NaN state is
+        # silently snapshotted.
+        "finite": bool(np.isfinite(T).all() and np.isfinite(S).all()
+                       and np.isfinite(u).all() and np.isfinite(v).all()),
     }
 
 
@@ -934,7 +946,10 @@ def main() -> int:
         )
 
     lat2d, lon2d = _grid_lat2d_deg(grid, args.grid)
-    forcing = load_core2_nyf()
+    # allow_synthetic=False: this NEMO-faithful pipeline MUST use the real
+    # 6-hourly CORE-II nyf.zarr; a silent fallback to 365 daily synthetic forcing
+    # would corrupt the comparison invisibly.
+    forcing = load_core2_nyf(allow_synthetic=False)
     n_rec = int(forcing.u10.shape[0])
     print(f"[setup] grid {lat2d.shape}, forcing records {n_rec}, dt={args.dt}s")
 

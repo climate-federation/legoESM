@@ -108,7 +108,11 @@ def _load_nemo(path, tidx):
            else np.asarray(ds[v]))
     sst = sel("tos"); sss = sel("sos")
     lat = np.asarray(ds["nav_lat"]); lon = np.asarray(ds["nav_lon"])
-    mask = (np.isfinite(sst) & (np.abs(sst) > 1e-6)).astype(np.float64)
+    # NEMO land/fill is already NaN here (xarray CF-decodes _FillValue=1e20), so
+    # finiteness alone is the correct ocean mask. The old ``& (|sst| > 1e-6)``
+    # magnitude clause was a redundant land test that would silently drop genuine
+    # near-0 C ocean cells (upwelling / near-freezing) in float32.
+    mask = np.isfinite(sst).astype(np.float64)
     return {"sst": np.nan_to_num(sst), "sss": np.nan_to_num(sss),
             "lat": lat, "lon": lon % 360.0, "mask": mask,
             "n_time": int(ds.sizes.get("time_counter", 1))}
