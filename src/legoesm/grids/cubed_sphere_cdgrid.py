@@ -348,6 +348,18 @@ def _compute_supergrid_metrics(n, supergrid_lon, supergrid_lat, radius):
 
         # Compute ALL supergrid quadrilateral areas: (2n, 2n)
         # Each quad (si, sj) has corners at (si,sj),(si+1,sj),(si+1,sj+1),(si,sj+1)
+        # NOTE: this is the PLANAR chord-cross-product area (0.5*|d1×d2|*R²), a
+        # deliberate O(dx²) approximation to FV3's spherical-excess `get_area`
+        # (fv_grid_utils.F90).  The two agree to ~1e-4 at C36 / ~1e-2 at C8 and
+        # converge as the grid refines; the entire SW-core gold-file fingerprint
+        # surface (cosine-bell, d_sw_native, production-tendencies, corner-
+        # vorticity, ...) is pinned to this chord convention.  The FV3-faithful
+        # part of `area_corner` is the (#faces)-junction SCALING below (edges ×2,
+        # vertices ×3); switching the absolute per-quadrant area to spherical
+        # get_area is a tracked follow-up (see fv3_faithful.md, requires
+        # regenerating all chord-era gold files) — NOT done here to keep the C1
+        # guard fix regression-isolated.  At C1 this chord area gives a
+        # cube-vertex area of 0.659*cell vs the spherical 0.75*cell.
         d1x = px[1:, 1:] - px[:-1, :-1]; d1y = py[1:, 1:] - py[:-1, :-1]; d1z = pz[1:, 1:] - pz[:-1, :-1]
         d2x = px[1:, :-1] - px[:-1, 1:]; d2y = py[1:, :-1] - py[:-1, 1:]; d2z = pz[1:, :-1] - pz[:-1, 1:]
         cx = d1y*d2z - d1z*d2y; cy = d1z*d2x - d1x*d2z; cz = d1x*d2y - d1y*d2x

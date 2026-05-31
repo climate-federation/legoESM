@@ -9600,12 +9600,20 @@ class TestCdgridDxcDycBoundaryIter666(unittest.TestCase):
 
         # ---- C1 corner case (iter90 codex review of d7108d48) -------------
         # At n=1 every corner is a 3-face junction (no interior, no edge nodes),
-        # so the FV3 ×3 vertex scaling must still apply even though the boundary
-        # block's edge slices are empty no-ops there.  With the on-face quadrant
-        # = gnomonic cell/4 and the base A-grid `area` the (spherical) face area,
-        # each corner = 3*(cell/4) ⇒ corner/area ≈ 0.659 (resolution-fixed).
-        # Without the ×3 (the pre-iter90 `n>=2` guard) it collapses to ≈0.220,
-        # and a mistaken ×2 edge-scaling would give ≈0.439 — both excluded.
+        # so the FV3 ×3 vertex SCALING must still apply even though the boundary
+        # block's edge slices are empty no-ops there.  legoESM uses the PLANAR
+        # chord-cross-product supergrid sub-cell area (a deliberate O(dx²)
+        # approximation to FV3's spherical-excess get_area; the whole SW-core
+        # gold-file surface is pinned to it — see cubed_sphere_cdgrid.py).  Under
+        # that chord area the on-face corner quadrant is ≈0.2195*cell (vs the
+        # spherical 0.25*cell), so each cube vertex = 3*quadrant ⇒
+        # corner/area ≈ 0.659 against the (spherical) A-grid `area`.  The point of
+        # this lock is the ×3 SCALING, which is FV3-faithful regardless of the
+        # absolute area convention: without it (the pre-iter90 `n>=2` guard) the
+        # corner collapses to ≈0.220, and a mistaken ×2 edge-scaling gives ≈0.439
+        # — both excluded.  (If the absolute area is ever upgraded chord→spherical
+        # this band moves to ≈0.75; that is a tracked follow-up requiring gold-
+        # file regeneration, see fv3_faithful.md.)
         g1 = create_cubed_sphere(n=1)
         ac1 = np.asarray(create_cubed_sphere_cdgrid(g1).area_corner)
         self.assertTrue(bool(np.all(ac1 > 0.0)),
@@ -9617,9 +9625,10 @@ class TestCdgridDxcDycBoundaryIter666(unittest.TestCase):
         r1 = float(ac1.mean()) / cell_area
         self.assertTrue(
             0.62 < r1 < 0.70,
-            msg=(f"C1 corner area/cell = {r1:.3f} not ≈0.659 (FV3 3×cell/4); "
-                 f"≈0.220 ⇒ the ×3 vertex scaling was dropped (n>=2 guard), "
-                 f"≈0.439 ⇒ mis-applied as a ×2 edge."))
+            msg=(f"C1 corner area/cell = {r1:.4f} not ≈0.659 (FV3 ×3 vertex "
+                 f"scaling with legoESM's chord supergrid area); ≈0.220 ⇒ the ×3 "
+                 f"vertex scaling was dropped (n>=2 guard), ≈0.439 ⇒ mis-applied "
+                 f"as a ×2 edge."))
 
     def test_iter667_n1_metrics_nonzero(self):
         """iter-667 regression lock: n=1 fallback gives non-zero
