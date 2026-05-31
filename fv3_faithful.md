@@ -177,3 +177,21 @@ inspection — a dedicated/fresh-context effort. The autonomous-loop READING ave
 assembly) is now FULLY exhausted: everything reads faithful/correct, yet λ=1.0072. The cube is
 comprehensively faithful otherwise (codex-vetted); this one FB-port eigenmode is the sole remaining gap,
 maximally characterized + harness-equipped for the dedicated fix.
+
+
+## iter120 — FIX-VALIDATION HARNESS validated + works; FV3 corner-fix candidate RULED OUT (duogrid no-ops)
+Used the iter117 K=50 power-iteration harness to test the first concrete candidate: enabling the
+disabled FV3 cube-vertex corner treatments (apply_legacy_d_sw4_corner_ke_fix +
+apply_legacy_d_sw5_corner_corrections, both default OFF in the config).
+RESULT: baseline λ=1.007133 vs BOTH corner-fixes-ON λ=1.007133 — IDENTICAL ⇒ NEUTRAL on the eigenmode.
+WHY: these legacy corner corrections are DUOGRID NO-OPS (boundary-zeroed by `_divergence_corner_duo`;
+FV3-duogrid relies on the cross-face halo for vertex correctness, not the corner corrections). So they
+can't be the fix on the duogrid (the FB chain's required config). RULED OUT.
+KEY: the HARNESS IS VALIDATED — it reproduces λ=1.00713 reliably (= iter117's 1.0072) and tests
+candidates DECISIVELY (a fix → re-run → does per-step λ drop below 1?).  This is a working,
+fast (~min) fix-validation tool for the dedicated fix-search.
+NEXT candidates to test against the harness (the dedicated continuation): (a) ablate Phase 4 one_grad_p
+(the iter77 a2b_ord4 corner-geopotential PGF — did it introduce this slower λ=1.0072 mode while fixing
+the faster NaN@3h?); (b) eigenvector-structure-inspired variations of the c_sw/d_sw vertex assembly;
+(c) the c_sw→d_sw uc/vc time-level. The harness makes each a quick decisive test — a dedicated/
+fresh-context fix-search, now equipped with a validated tool.
