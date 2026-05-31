@@ -66,10 +66,17 @@ UNRELIABLE both ways (gave 5.95× on W5 v where true continuity is 1.30×).
   ALL give BYTE-IDENTICAL h-drift (3228/3801/4630 @50/100/150). ⇒ the edge mode is in the
   CORE seam mass-transport / wind-convergence, NOT any exposed FV3-faithfulness knob.
   (Wind-damping `hyperdiff` controls it indirectly = the improvise path, rejected.)
-  ⇒ FAITHFUL fix is FOUNDATIONAL: wire FV3's non-orthogonal seam rotation
-  (`pad_halo_dgrid_vector_4d`) into the SW d_sw + the structured d_sw5 damping at the
-  right strength. Slow JIT FB probing stopped (each compile ~min; not converging on a
-  quick fix — it's genuinely core-dycore foundational, per user's no-improvise directive).
+- [iter61 — seam-rotation hypothesis WEAKENED, verify-first] `_d_sw1_recompute_ut_vt`
+  (the FB chain's d_sw1) ALREADY uses the non-orthogonal `cosa_u/cosa_v/rsin_u/rsin_v/
+  sin_sg` metrics — so the FB h-drift is NOT a naive-orthogonal-rotation bug. (The
+  orthogonal `pad_halo_vector_4d` sin_sg(5)-drop is in the PRODUCTION RK3 primitive-eq
+  path, a separate issue.) Every exposed knob (dddmp/xppm/d_sw5_corner) AND structural
+  hypothesis (seam rotation) on the FB edge mode has been FALSIFIED or shown inert. The
+  drift is a subtle CORE edge mode — candidates: c_sw 1st-order upwind mass diffusion at
+  the seam, or the iter-947 duogrid OLD/NEW halo delta. Pinpointing it = methodical
+  d_sw-substep-vs-FV3 line-by-line comparison = FOUNDATIONAL (multi-day), NOT a loop
+  probe. FB JIT probing STOPPED (~min/compile, diminishing returns; per user no-improvise,
+  the faithful fix is the core c_sw/d_sw rebuild, not a damping/rotation patch).
 - STILL MISSING: human visual PNG inspection (assistant barred from Read images):
   `results/atmosphere/shallow_water/williamson{2,5}/cubed_sphere/C36/snapshots_{v,wind_speed}_native.png`.
 
