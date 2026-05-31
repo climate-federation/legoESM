@@ -184,3 +184,40 @@ now halos are clean).
   T drift 7.5e-14; phillips/IGW/overflow pass). The shared-cdgrid vertex-area fix regresses NOTHING:
   atm cube SW (W2 L2 1.76e-4, 4/4) + atm W2 C96 (stable 38.6) + ocean cube (9/9, rest machine-zero).
   Fully validated FV3-faithful + regression-safe grid bug fix.
+
+  iter89-91 (codex-driven, area_corner faithfulness deep-dive) —
+  • iter89 (codex review of 4ad2fea0): the cube EDGE corners still used the iter-670 inward
+    interior-copy, NOT FV3's in-domain grid_area. Oracle (fv_grid_tools.F90:976-1033): edge =
+    2*get_area(edge-mid,edge-mid,cell-ctr,cell-ctr) = 2x the on-face half dual cell. Fixed: edges x2
+    (≈0.865*interior), vertices x3 (≈0.675*interior); resolution-stable C12/C36. W2 L2=1.76e-4
+    unchanged, ocean 9/9 rest machine-zero. Commit d7108d48.
+  • iter90 (codex review of d7108d48): the boundary block was gated `if n>=2`, so C1 (all 4 corners
+    are 3-face junctions) skipped the x3 -> area 3x too small. Fixed: guard `n>=1` (edge slices are
+    empty no-ops at n=1). Commit 5d1d273a. Regression test now covers C1/C12/C36, all 4 edges + 4
+    vertices.
+  • iter91 (codex review of 5d1d273a): the C1 oracle ≈0.659 (not 0.75) revealed legoESM's sg_area is
+    the PLANAR chord cross-product, while FV3 get_area is SPHERICAL excess (fv_grid_utils.F90) and
+    legoESM's A-grid grid.area is spherical too. Implemented spherical get_area for sg_area -> C1
+    exactly 0.75 (codex's prediction), C36 area_corner shift only ~1e-4 BUT it tripped the whole
+    chord-era SW-core gold-file fingerprint surface. DECISION: keep chord (the gold-pinned, matrix-
+    validated convention), document it honestly (the x2/x3 SCALING is FV3-faithful; the absolute
+    per-quadrant area is an O(dx^2) chord approximation), and TRACK the chord->spherical upgrade as a
+    dedicated follow-up requiring full gold-file regeneration. Commit bdc62328.
+  • Gold-file fallout, CLASSIFIED via a 9c78db6c pre-change worktree baseline (verify-first, not
+    blind-regen): the edge/vertex fix broke exactly 4 fingerprints — nord0 del2 / nord1 del4 /
+    adaptive-Smag (all via da_min_c = min(1/rarea_c), the GLOBAL min corner area; FV3 global_mx_c,
+    fv_grid_utils.F90:743; the faithful smaller vertex area lowers da_min_c -> weaker global damp ->
+    ke shifts ~30-50%, the FV3-correct behavior) and the corner-vorticity duogrid fingerprint
+    (boundary-local: interior [3,4,4] + min/max BYTE-IDENTICAL, only vertex samples shift). All 4
+    re-pinned + sanity-verified. Commit 21b12082.
+  • The other ~14 failures in test_cdgrid_fv3_regression.py (cosine_bell, production_tendencies,
+    d_sw_native gold, sina_u_v/divergence_corner_duo mutation suites, bgrid_ke, + source/file
+    sentinels test_iter778/780/matrix_script/no_future_caller/halo_gap_marker) are PRE-EXISTING at
+    9c78db6c (deleted results/*.png + concurrent-session churn) — NOT this work's regressions.
+  • IMPORTANT da_min_c insight for the eigenmode: the iter-670 interior-copy made da_min_c too LARGE
+    (missed the small vertices) -> divergence damping too weak at vertices. The faithful (smaller)
+    da_min_c gives the FV3-correct (also weaker, damp ∝ da_min_c) damping -> consistent with iter87's
+    finding that faithful vertex area EXPOSES the eigenmode more. The eigenmode root remains the
+    SW-core vertex-vorticity scheme, NOT the metric. Production-safe; matrix green.
+  OPEN: (1) chord->spherical sg_area upgrade (tracked, needs gold regen); (2) SW-core vertex-vorticity
+  eigenmode (the real edge-artifact root); (3) FB residual / 3D PE upwind PPM vorticity.
