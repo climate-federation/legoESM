@@ -14,8 +14,14 @@ Fortran as oracle; do NOT improvise.** Branch `latlon-fv-amip-verify`.
   faithful; chord→spherical is a tracked follow-up (trips the gold-fingerprint surface).
 - gnomonic_ed grid WIRED + halo-collapse fixed (iter73) + codex-approved; equiangular byte-identical.
 - cross-grid SW (iter92, 16/16 all grids): cube W2 L2 1.76e-4 ≈ latlon 2.67e-4 ≈ ico 9.9e-5 (dynamics
-  FAITHFUL). cosine_bell cube 0.131 vs latlon 0.025 (~5×, ~1.8× MPAS) = inherent cube advection cost
-  (faithful fv_tp_2d). ocean cube matrix 9/9, rest machine-zero. baroclinic clean (C36→C72 ≤1.24×).
+  FAITHFUL). ocean cube matrix 9/9, rest machine-zero. baroclinic clean (C36→C72 ≤1.24×).
+  cosine_bell cube 0.131 vs latlon 0.025 (~5×, ~1.8× MPAS) — **NOT YET ESTABLISHED as inherent**
+  (iter109 codex [high], correcting an earlier overclaim): the canonical cosine-bell path uses
+  `transport_step` with `apply_fortran_xppm_boundary=False` (the NON-oracle xppm boundary default) AND
+  clips negatives + rescales mass to compensate face-boundary flux mismatches, so 0.131 may include
+  non-faithful boundary behavior + post-hoc mass-fixing, NOT proven inherent-cube cost. TODO: re-run
+  with apply_fortran_xppm_boundary=True + separate the RAW transport error from clip/rescale before
+  concluding inherent-vs-bug.
 - **3D rest_state_topo "13× edge artifact" = FLOAT32 precision, NOT a faithfulness bug** (iter97-101):
   the cube 3D hydrostatic PGF is EXACTLY well-balanced in float64 (compute_geopotential uses only
   σ-derived ln_ratio/alpha ⇒ Φ=phis+per-level-const ⇒ −∇Φ cancels −R_d·T·∇ln_ps to machine zero;
@@ -23,14 +29,21 @@ Fortran as oracle; do NOT improvise.** Branch `latlon-fv-amip-verify`.
   loses ~7 digits → spurious ~1e-7 m/s² PGF (7× at panel edges). Optional f32-only fix: f64 geopotential
   gradient / reference-subtraction well-balanced PGF (f64-identical). Matrix audit comment corrected.
 
-## ❗ THE ONE GENUINE REMAINING FAITHFULNESS GAP — SW co-located CENTERED vorticity
-Both production SW (operators_cdgrid.py:1167) AND 3D PE (primitive_eq_cdgrid.py:445) use CENTERED
-`zeta_corner*v_d` vorticity advection (energy-conserving but dispersive), NOT FV3's UPWIND staggered
-donor-cell flux. Root of: the C96 W5 vertex eigenmode (38→79, mass-conserving, dt-independent) AND the
-W2 v-imprint (0.344 m/s — a REAL discretization effect, NOT float32: f32-of-38 ~ 4e-6). iter87: faithful
-vertex area/grid make the vertex vorticity MORE accurate → EXPOSE the mode MORE ⇒ the fix is the UPWIND
-ADVECTION (implicit dissipation), NOT vorticity accuracy or more explicit damping (sweeps ruled out
-iter82-83).
+## ❗ THE ONE LIKELY REMAINING FAITHFULNESS GAP — SW co-located CENTERED vorticity (CONFIRMED MISMATCH; root NOT proven)
+CONFIRMED FV3 MISMATCH (code+oracle, codex-validated iter109): production SW (operators_cdgrid.py:1167)
+AND 3D PE (primitive_eq_cdgrid.py:445) use CENTERED `zeta_corner*v_d` vorticity advection
+(energy-conserving but dispersive); FV3 sw_core.F90 upwind-selects the transported absolute vorticity
+(donor-cell). This IS a real algorithmic mismatch + the LEADING SUSPECT for the C96 W5 eigenmode
+(38→79, mass-conserving, dt-independent) + the W2 v-imprint (0.344 m/s — a real discretization effect,
+NOT float32: f32-of-38 ~ 4e-6).
+NOT PROVEN as the root (iter109 codex [high], correcting an earlier overclaim): the causal link to the
+eigenmode is UNVERIFIED — the `_corner_vorticity` halo hypothesis was tested+reverted (iter107), the
+residual is a growth-rate mode (iter79/108b) with eigen-analysis NOT done, and the unstable coupling
+(centered-vort vs KE vs d_sw zeta vs c_sw→d_sw corner coupling) is NOT isolated. Replacing the centered
+term with the upwind flux MIGHT still fail the growth mode. BLOCK the causal claim until an ablation
+(centered→upwind, does the W2 imprint + W5 growth vanish without a new residual?) OR the linearized-FB
+eigen-analysis settles it. iter87: faithful vertex area/grid EXPOSE the mode more (⇒ suspect the
+advection scheme, not vorticity accuracy; dissipation sweeps ruled out iter82-83).
 
 The faithful path = FV3's staggered c_sw→d_sw FB scheme (which uses the UPWIND `_vorticity_flux`,
 fv3_sw_core.py:1260, sw_core.F90:416-480: fy1=(v_d-uc*cosa_u)/sina_u contravariant, vort_x=upwind).
