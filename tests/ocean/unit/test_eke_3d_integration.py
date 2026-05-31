@@ -294,5 +294,43 @@ def test_eke_3d_step_is_differentiable():
     assert float(jnp.max(jnp.abs(g))) > 0.0
 
 
+def test_eke_av_at_interior_wfaces_placement():
+    """Locks the A_v vertical placement for the 3-D EKE implicit vertical diffusion
+    (physics-validator finding): A_v_phys may be cell-centred (nlev), at the
+    T-interfaces (nlev-1), or None.  The INTERFACE case must AVERAGE adjacent
+    interfaces to the interior T-centres (Veros 0.5*(kappaM[k]+kappaM[k+1])), NOT
+    slice them [1:nlev-1] (the latent half-level-misplacement that is dormant in
+    ACC because tend.A_v is None there)."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        _eke_av_at_interior_wfaces,
+    )
+    nlev = 6
+    prefix = (2, 3)
+    bg0 = jnp.asarray(0.0)
+    # None -> constant background, shape (*prefix, nlev-2)
+    av_none = _eke_av_at_interior_wfaces(None, jnp.asarray(1e-4), nlev, prefix)
+    assert av_none.shape == prefix + (nlev - 2,)
+    assert jnp.allclose(av_none, 1e-4)
+    # cell-centred (nlev): interior T-centres [1:nlev-1]
+    cc = jnp.arange(prefix[0] * prefix[1] * nlev, dtype=jnp.float64).reshape(prefix + (nlev,))
+    av_cc = _eke_av_at_interior_wfaces(cc, bg0, nlev, prefix)
+    assert av_cc.shape == prefix + (nlev - 2,)
+    assert jnp.allclose(av_cc, cc[..., 1:nlev - 1])
+    # interface (nlev-1): AVERAGE adjacent interfaces (the fix) ...
+    iface = jnp.arange(prefix[0] * prefix[1] * (nlev - 1), dtype=jnp.float64).reshape(prefix + (nlev - 1,))
+    av_if = _eke_av_at_interior_wfaces(iface, bg0, nlev, prefix)
+    assert av_if.shape == prefix + (nlev - 2,)
+    assert jnp.allclose(av_if, 0.5 * (iface[..., :-1] + iface[..., 1:]))
+    # ... and it must DIFFER from the wrong slice [1:nlev-1] (the guarded bug)
+    assert not jnp.allclose(av_if, iface[..., 1:nlev - 1])
+    # background floor is added
+    av_bg = _eke_av_at_interior_wfaces(cc, jnp.asarray(10.0), nlev, prefix)
+    assert jnp.allclose(av_bg, cc[..., 1:nlev - 1] + 10.0)
+    # wrong last-axis -> ValueError
+    with pytest.raises(ValueError):
+        _eke_av_at_interior_wfaces(
+            jnp.zeros(prefix + (nlev + 2,)), jnp.asarray(0.0), nlev, prefix)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

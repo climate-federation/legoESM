@@ -409,6 +409,38 @@ def _forward_backward_coriolis_3d(
     return u_new, v_new
 
 
+def _eke_av_at_interior_wfaces(A_v_phys, A_v_bg, nlev, prefix_shape):
+    """Vertical viscosity at the ``M-1 = nlev-2`` INTERIOR W-interfaces, for the
+    3-D EKE implicit vertical diffusion (the ``eke_3d`` path).
+
+    The 3-D EKE field lives on the ``nlev-1`` interior T-interfaces (the W-grid);
+    its implicit vertical diffusion needs the diffusivity at the ``nlev-2``
+    interfaces BETWEEN those W-levels, which sit at the interior T-centres
+    ``k = 1 .. nlev-2`` (interior W-interface ``k`` is at T-centre ``k+1``).
+    ``A_v_phys`` may be:
+
+    - ``None`` — use the constant background ``A_v_bg`` (the ACC case: the TKE
+      path leaves ``tend.A_v`` unset);
+    - cell-centred (last axis ``nlev``) — the interior T-centres are ``[...,1:nlev-1]``;
+    - at the T-interfaces (last axis ``nlev-1``; the shape the vertical-mixing
+      modules KPP/TKE/Richardson produce) — average adjacent T-interfaces to the
+      interior T-centres (Veros's ``0.5*(kappaM[k]+kappaM[k+1])``).
+
+    Returns ``(*prefix_shape, nlev-2)``, ``>= 0``.  ``A_v_bg`` carries the dtype.
+    """
+    if A_v_phys is None:
+        return jnp.broadcast_to(A_v_bg, tuple(prefix_shape) + (nlev - 2,))
+    A_v_p = jnp.asarray(A_v_phys, dtype=A_v_bg.dtype) + A_v_bg
+    if A_v_p.shape[-1] == nlev:                 # cell-centred -> interior T-centres
+        return A_v_p[..., 1:nlev - 1]
+    if A_v_p.shape[-1] == nlev - 1:             # T-interfaces -> avg to interior T-centres
+        return 0.5 * (A_v_p[..., :-1] + A_v_p[..., 1:])
+    raise ValueError(
+        "eke_3d vertical diffusion: A_v_phys last axis must be nlev (cell-centred) "
+        f"or nlev-1 (interfaces); got {A_v_p.shape[-1]} (nlev={nlev})."
+    )
+
+
 class LatLonCGridOceanModel:
     """Boussinesq hydrostatic ocean model on a C-grid latitude-longitude grid.
 
@@ -1521,15 +1553,12 @@ class LatLonCGridOceanModel:
         dz_cell = (self.z_coord.dz_ref * J_cell[..., jnp.newaxis]).astype(dtype)
         dz_w = build_dz_half(dz_cell)                              # (..., nlev-1) = M
         dz_half_w = build_dz_half(dz_w)                            # (..., nlev-2) = M-1
-        if A_v_phys is not None:
-            A_v_cell = jnp.asarray(A_v_phys, dtype=dtype) + jnp.asarray(
-                self.config.A_v, dtype=dtype)
-        else:
-            A_v_cell = jnp.broadcast_to(
-                jnp.asarray(self.config.A_v, dtype=dtype), dz_cell.shape)
-        # A_v at the M-1 interior W-interfaces = the cell-centred A_v at the
-        # interior T-centres k=1..nlev-2 (interior W-interface k is at T-centre k+1).
-        A_v_w = A_v_cell[..., 1:nlev - 1]
+        # A_v at the M-1 interior W-interfaces for the EKE vertical diffusion --
+        # handles A_v_phys cell-centred (nlev) / at T-interfaces (nlev-1) / None.
+        A_v_w = _eke_av_at_interior_wfaces(
+            A_v_phys, jnp.asarray(self.config.A_v, dtype=dtype), nlev,
+            dz_cell.shape[:-1],
+        )
         E = eke_3d_vertical_diffusion(E, A_v_w, dz_w, dz_half_w, dt, eke_cfg)
 
         # (3) Semi-implicit local source/sink (positivity-preserving, no clip).
@@ -1542,9 +1571,13 @@ class LatLonCGridOceanModel:
         # is dtype-stable (the step's final cast_pytree would also enforce this,
         # but keep this code path self-consistently typed).
         lm3 = lm[:, :, jnp.newaxis]
-        E_new = jnp.where(
-            lm3 > 0.5, jnp.maximum(E, eke_cfg.e_min), 0.0,
-        ).astype(dtype)
+        # The source/sink promotes E through the f64 sigma(z)/L(z); cast the final
+        # field back to the storage dtype EXPLICITLY (jax.lax.convert_element_type,
+        # not .astype) so the scan-carry pytree stays dtype-stable WITHOUT JAX's
+        # implicit-downcast FutureWarning (which a future JAX makes an error).
+        E_new = jax.lax.convert_element_type(
+            jnp.where(lm3 > 0.5, jnp.maximum(E, eke_cfg.e_min), 0.0), dtype,
+        )
         eke_new = Field(data=E_new, name="eke",
                         dims=("lat", "lon", "level"), units="m^2/s^2")
         return eke_new, kappa_gm_override
