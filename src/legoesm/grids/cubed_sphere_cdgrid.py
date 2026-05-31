@@ -595,6 +595,18 @@ def create_cubed_sphere_cdgrid(
     corner_lon = jnp.stack([c[0] for c in _cg])
     corner_lat = jnp.stack([c[1] for c in _cg])
 
+    # Extended corner grid (n+3 = corners ±1 halo) for the analytic corner
+    # grid-angle (tangent vectors).  Precomputed (6, n+3, n+3), grid-type-
+    # agnostic (iter71); angle uses centred differences so it is robust to the
+    # distribution.  Equiangular linspace+map here (byte-identical).
+    _dalpha = jnp.pi / (2 * n)
+    _n_ext = n + 3
+    _alpha_ext = jnp.linspace(-jnp.pi / 4 - _dalpha, jnp.pi / 4 + _dalpha, _n_ext)
+    _axe, _aye = jnp.meshgrid(_alpha_ext, _alpha_ext, indexing='ij')
+    _ceg = [_face_gnomonic_to_lonlat(f, _axe, _aye) for f in range(6)]
+    corner_ext_lon = jnp.stack([c[0] for c in _ceg])
+    corner_ext_lat = jnp.stack([c[1] for c in _ceg])
+
     all_lon_c, all_lat_c = [], []
     all_angle_c = []
     all_dx_ey, all_dy_ex = [], []
@@ -651,13 +663,8 @@ def create_cubed_sphere_cdgrid(
         all_dx_ey.append(dx_ey)
 
         # Grid angle at corners: computed from Cartesian tangent vectors
-        # on extended gnomonic grid (analytical, no centred-difference error).
-        dalpha = jnp.pi / (2 * n)
-        n_ext = n + 3
-        alpha_ext = jnp.linspace(
-            -jnp.pi / 4 - dalpha, jnp.pi / 4 + dalpha, n_ext)
-        ax_ext, ay_ext = jnp.meshgrid(alpha_ext, alpha_ext, indexing='ij')
-        lon_ext, lat_ext = _face_gnomonic_to_lonlat(face, ax_ext, ay_ext)
+        # on the precomputed extended grid (analytical, no centred-diff error).
+        lon_ext, lat_ext = corner_ext_lon[face], corner_ext_lat[face]
         cos_lat_ext_full = jnp.cos(lat_ext)
         # Cartesian positions on unit sphere (extended grid)
         px_ext = cos_lat_ext_full * jnp.cos(lon_ext)
