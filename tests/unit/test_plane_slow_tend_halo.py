@@ -76,6 +76,42 @@ def _setup(use_coriolis=False, hyperdiff=0.0, with_tracers=False):
     return grid, hc, tm, cfg, state, layout
 
 
+def test_momentum_advection_split_raises_in_mpi_halo_path():
+    """ADV-SPLIT #86 (codex iter-68 [S2]): the per-field momentum/scalar
+    advection split is wired ONLY in the serial slow-tendency path. The MPI
+    halo path must FAIL LOUD (NotImplementedError) — not silently apply the
+    scalar scheme to momentum, which would diverge serial≠MPI — until the
+    split is wired here too. Guards the explicit experimental limitation."""
+    grid, hc, tm, _, state, layout = _setup()
+    cfg_split = CompressibleEulerConfig(
+        sponge_coeff=0.05, sponge_width=5_000.0,
+        smagorinsky_cs=0.0, use_coriolis=False, n_acoustic_substeps=12,
+        horizontal_advection_scheme="van_leer",
+        horizontal_momentum_advection_scheme="centered",   # split ≠ scalar
+    )
+    with pytest.raises(NotImplementedError, match="ADV-SPLIT"):
+        plane_compressible_euler_slow_tendencies_halo(
+            state, grid, hc, tm, cfg_split, layout,
+        )
+
+
+def test_vertical_sgs_raises_in_mpi_halo_path():
+    """SGS-VERT #81 (iter-68): the vertical SGS flux ∂_z(K ∂_z φ) is wired only
+    in the serial path. The MPI halo path must FAIL LOUD — not silently apply
+    horizontal-only SGS (serial≠MPI divergence) — until the vertical leg is
+    wired here too. Parallels the #86 momentum-split guard."""
+    grid, hc, tm, _, state, layout = _setup()
+    cfg_vsgs = CompressibleEulerConfig(
+        sponge_coeff=0.05, sponge_width=5_000.0,
+        smagorinsky_cs=0.2, use_coriolis=False, n_acoustic_substeps=12,
+        sgs_vertical_diffusion=True,
+    )
+    with pytest.raises(NotImplementedError, match="SGS-VERT"):
+        plane_compressible_euler_slow_tendencies_halo(
+            state, grid, hc, tm, cfg_vsgs, layout,
+        )
+
+
 def _eq_tendencies(a, b, rtol=1e-12, atol=1e-12):
     for fld in (
         "du_dt", "dv_dt", "dw_dt", "dtheta_prime_dt",
@@ -158,6 +194,44 @@ def test_halo_equiv_with_smagorinsky():
     )
     actual = plane_compressible_euler_slow_tendencies_halo(
         state, grid, hc, tm, cfg_smag, layout,
+    )
+    _eq_tendencies(actual, expected, rtol=1e-11, atol=1e-11)
+
+
+def test_halo_equiv_with_smagorinsky_and_tracers():
+    """SAM-faithfulness parity (Codex iter-1 HIGH): the dosmagor
+    stratification term ``−Pr·N²`` builds N² from a MOIST virtual
+    potential temperature θ_v (vapor + condensate loading). Serial and
+    halo must compute the SAME θ_v / K_m at single rank, so the
+    moisture-laden Smag tendency stays bit-consistent across the MPI
+    decomposition. Exercises the n_tr>0 θ_v branch in BOTH paths."""
+    grid, hc, tm, cfg, state, layout = _setup(with_tracers=True)
+    cfg_smag = cfg._replace(smagorinsky_cs=0.2, smagorinsky_prandtl=1.0)
+    expected = plane_compressible_euler_slow_tendencies(
+        state, grid, hc, tm, cfg_smag,
+    )
+    actual = plane_compressible_euler_slow_tendencies_halo(
+        state, grid, hc, tm, cfg_smag, layout,
+    )
+    _eq_tendencies(actual, expected, rtol=1e-11, atol=1e-11)
+
+
+def test_halo_equiv_with_molecular_closure():
+    """DNS-LES (iter-177): the molecular closure (constant ν, no eddy model)
+    must give the SAME serial vs single-rank-halo slow tendency as Smagorinsky
+    does. A constant K_m is trivially halo-consistent; this pins the new
+    closure branch in BOTH paths, with tracers so the K_h = ν/Pr scalar leg is
+    exercised too."""
+    grid, hc, tm, cfg, state, layout = _setup(with_tracers=True)
+    cfg_mol = cfg._replace(
+        turbulence_closure="molecular", molecular_viscosity=5.0,
+        molecular_prandtl=0.71, smagorinsky_cs=0.0,
+    )
+    expected = plane_compressible_euler_slow_tendencies(
+        state, grid, hc, tm, cfg_mol,
+    )
+    actual = plane_compressible_euler_slow_tendencies_halo(
+        state, grid, hc, tm, cfg_mol, layout,
     )
     _eq_tendencies(actual, expected, rtol=1e-11, atol=1e-11)
 

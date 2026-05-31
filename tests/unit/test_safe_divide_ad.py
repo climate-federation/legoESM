@@ -261,6 +261,12 @@ class TestMicrophysicsADSafety:
         T, q_v, p_full, p_half, rho, dz = _moist_column()
         # Force a cold column so the ice fraction sigmoid sits at ≈1.
         T = jnp.full_like(T, 240.0)
+        # This guards the AD behaviour of the LEGACY heuristic dN_i_autoconv
+        # (aggregation·N_i/clip(q_i,1e-15)); the default ice_to_snow_scheme is
+        # now the SAM m2005_autoconv (a different, min-clamped form), so select
+        # the heuristic path explicitly to keep testing what it documents.
+        if "ice_to_snow_scheme" in config._fields:
+            config = config._replace(ice_to_snow_scheme="heuristic")
         ncol, nlev = T.shape
         q_i_trace = 5e-13
         N_i_value = 1e3
@@ -293,7 +299,7 @@ class TestMicrophysicsADSafety:
             agg_contribution, expected_agg, atol=0.0, rtol=0.05,
         ), (
             f"{scheme_fn.__name__}: dN_i_dt aggregation contribution "
-            f"{float(agg_contribution.flat[0]):.6e} does not match the "
+            f"{float(agg_contribution.reshape(-1)[0]):.6e} does not match the "
             f"legacy q_i→0+ limit {float(expected_agg):.6e} — "
             f"safe_divide form would have returned 0 here (issue #249 "
             f"codex round 3 regression)"
@@ -315,6 +321,10 @@ class TestMicrophysicsADSafety:
         """
         T, q_v, p_full, p_half, rho, dz = _moist_column()
         T = jnp.full_like(T, 240.0)
+        # Heuristic dN_i_autoconv path (see the trace-positive test) — the
+        # default is now m2005_autoconv.
+        if "ice_to_snow_scheme" in config._fields:
+            config = config._replace(ice_to_snow_scheme="heuristic")
         ncol, nlev = T.shape
         q_i_subfloor = 1e-16  # 1 decade below the 1e-15 clip floor
         N_i_value = 1e3
@@ -350,7 +360,7 @@ class TestMicrophysicsADSafety:
             agg_contribution, expected_agg_term, atol=1e-12, rtol=0.05,
         ), (
             f"{scheme_fn.__name__}: dN_i_dt at sub-floor q_i={q_i_subfloor:.1e} "
-            f"gave {float(agg_contribution.flat[0]):.6e}; legacy clip+divide "
+            f"gave {float(agg_contribution.reshape(-1)[0]):.6e}; legacy clip+divide "
             f"yields {float(expected_agg_term):.6e}.  A safe_divide(eps=1e-12) "
             f"or per-mass-rate rewrite would give 0 or ~1e-3 respectively "
             f"(issue #249 codex round 4 regression)."

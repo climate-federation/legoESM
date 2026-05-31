@@ -246,6 +246,7 @@ class RRTMGP:
           config.aerosol_g,
           _hashable(config.sfc_emissivity),
           _hashable(config.sfc_albedo),
+          _hashable(config.sfc_albedo_direct),
       )
 
   @staticmethod
@@ -363,6 +364,7 @@ class RRTMGP:
       q_v: jnp.ndarray,
       cos_zenith: jnp.ndarray,
       sfc_albedo: jnp.ndarray | float | None = None,
+      sfc_albedo_direct: jnp.ndarray | float | None = None,
       sfc_emissivity: jnp.ndarray | float | None = None,
       o3_vmr: jnp.ndarray | None = None,
       cloud_path_liq: jnp.ndarray | None = None,
@@ -535,10 +537,22 @@ class RRTMGP:
 
       eff_albedo = _resolve_surface_field(sfc_albedo, config.sfc_albedo)
       eff_emis = _resolve_surface_field(sfc_emissivity, config.sfc_emissivity)
+      # RAD-3 direct/diffuse albedo split: the DIRECT-beam albedo defaults to
+      # the diffuse eff_albedo (legacy single-albedo) unless a direct value is
+      # given via the param or config.sfc_albedo_direct.
+      _alb_dir_src = (
+          sfc_albedo_direct if sfc_albedo_direct is not None
+          else config.sfc_albedo_direct
+      )
+      eff_albedo_dir = (
+          None if _alb_dir_src is None
+          else _resolve_surface_field(_alb_dir_src, eff_albedo)
+      )
 
       atmos_state = atmospheric_state.AtmosphericState(
           sfc_emis=eff_emis,
           sfc_alb=eff_albedo,
+          sfc_alb_dir=eff_albedo_dir,
           zenith=zenith_col,
           irrad=config.S_0,
           vmr=vmr_lib,

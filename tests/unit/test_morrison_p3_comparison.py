@@ -84,9 +84,11 @@ def _make_column(
     return T, q_v, hydro_morrison, hydro_p3, p_full, p_half, rho, dz
 
 
-def _run_both(T, q_v, hydro_morrison, hydro_p3, p_full, p_half, rho, dz, dt=300.0):
+def _run_both(T, q_v, hydro_morrison, hydro_p3, p_full, p_half, rho, dz, dt=300.0,
+              morrison_config=None):
     out_m = morrison_microphysics(
-        T, q_v, hydro_morrison, p_full, p_half, rho, dz, dt, MorrisonConfig(),
+        T, q_v, hydro_morrison, p_full, p_half, rho, dz, dt,
+        morrison_config if morrison_config is not None else MorrisonConfig(),
     )
     out_p = p3_microphysics(
         T, q_v, hydro_p3, p_full, p_half, rho, dz, dt, P3Config(),
@@ -99,12 +101,23 @@ def _run_both(T, q_v, hydro_morrison, hydro_p3, p_full, p_half, rho, dz, dt=300.
 # ---------------------------------------------------------------------------
 
 def test_warm_rain_tendencies_agree():
-    """With no ice present both schemes use the same SB helpers, so liquid-phase
-    tendencies (dq_c_dt, dq_r_dt, dq_v_dt) should be nearly identical."""
+    """With no ice present and BOTH schemes on the Seifert-Beheng warm-rain
+    helpers, liquid-phase tendencies (dq_c_dt, dq_r_dt, dq_v_dt) should be
+    nearly identical. Morrison now DEFAULTS to KK2000 (SAM M2005), so this
+    cross-check explicitly selects ``warm_rain_scheme='seifert_beheng'`` —
+    the KK2000 path is covered by tests/unit/test_kk2000_warm_rain.py."""
     T, q_v, hm, hp, p_full, p_half, rho, dz = _make_column(
         T_sfc=295.0, q_c_val=5e-4, q_i_val=0.0,
     )
-    out_m, out_p = _run_both(T, q_v, hm, hp, p_full, p_half, rho, dz)
+    out_m, out_p = _run_both(
+        T, q_v, hm, hp, p_full, p_half, rho, dz,
+        # N_i0=0 disables Cooper nucleation so the vapour budget reflects
+        # only the (shared SB) warm-rain liquid processes, not Morrison's
+        # ice-nucleation mass sink at cold upper levels (iter-9).
+        morrison_config=MorrisonConfig(
+            warm_rain_scheme="seifert_beheng", N_i0=0.0,
+        ),
+    )
 
     for field in ("dq_c_dt", "dq_r_dt", "dq_v_dt"):
         vm = getattr(out_m, field)

@@ -1455,6 +1455,36 @@ class TestCloudFraction:
         assert jnp.all(props.cloud_fraction >= 0.0)
         assert jnp.all(props.cloud_fraction <= 1.0)
 
+    def test_liquid_reff_psd_m2005(self):
+        """RAD-1-liq: the M2005 PSD liquid effective radius
+        reffc=(PGAM+3)/(2·LAMC) (mp_graupel:495) replaces the fixed r_eff_liq
+        when N_c is supplied; pins a known case + the q_c/N_c dependence and the
+        no-N_c / liquid-free fallback to the config constant."""
+        config = CloudConfig(scheme="resolved", r_eff_liq=14.0e-6)
+        T = jnp.full((1, 1), 280.0)
+        p_full = jnp.full((1, 1), 90000.0)
+        q_v = jnp.full((1, 1), 0.005)
+        dp = jnp.full((1, 1), 1000.0)
+        q_c = jnp.full((1, 1), 5.0e-4)   # 0.5 g/kg
+        N_c = jnp.full((1, 1), 1.0e8)    # 100 /cm³ (per-VOLUME)
+
+        def reff(qc, nc):
+            return float(compute_cloud_properties(
+                T, p_full, q_v, dp, config, q_cloud=qc, n_cloud=nc
+            ).r_eff_liq[0, 0])
+
+        r = reff(q_c, N_c)
+        assert 8.0e-6 < r < 14.0e-6, f"PSD reffc out of range: {r}"
+        # more q_c ⇒ larger drops; more N_c ⇒ smaller drops.
+        assert reff(q_c * 4.0, N_c) > r
+        assert reff(q_c, N_c * 8.0) < r
+        # No N_c ⇒ fixed config constant (back-compat).
+        no_nc = float(compute_cloud_properties(
+            T, p_full, q_v, dp, config, q_cloud=q_c).r_eff_liq[0, 0])
+        assert abs(no_nc - 14.0e-6) < 1.0e-12
+        # Liquid-free cell ⇒ fall back to the constant.
+        assert abs(reff(jnp.zeros((1, 1)), N_c) - 14.0e-6) < 1.0e-12
+
     def test_cloud_properties_diagnostic_condensate(self):
         """Without explicit condensate, diagnostic q_c should scale with cf."""
         config = CloudConfig(scheme="sundqvist", rh_crit=0.7)

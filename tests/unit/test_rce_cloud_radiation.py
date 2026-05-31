@@ -115,6 +115,64 @@ def test_rrtmgp_runs_clear_sky_rce():
 
 
 @rrtmgp_data_present
+def test_direct_diffuse_albedo_split():
+    """RAD-3: the DIRECT-beam surface albedo (sfc_albedo_direct) is honoured
+    separately from the diffuse sfc_albedo. (1) sfc_albedo_direct=None is
+    bit-identical to the legacy single-albedo path; (2) the direct albedo
+    measurably changes the ATMOSPHERIC SW heating — a brighter surface
+    reflects more SW upward, so the column absorbs more on the upward pass
+    (less-negative net heating). The point is that the direct beam's
+    reflection now flows through the split, not the sign per se."""
+    from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+    from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+        rrtmgp_radiation,
+    )
+    T, p_full, p_half, T_sfc, q_v, cos_zen = _rce_radiation_column()
+
+    def col_heating(cfg):
+        out = rrtmgp_radiation(T, p_full, p_half, T_sfc, q_v, cos_zen, cfg)
+        return jnp.sum(out.heating_rate, axis=1)        # (NCOL,)
+
+    # (1) Explicit direct == diffuse reproduces the single-albedo path.
+    single = col_heating(RRTMGPConfig(sfc_albedo=0.06))
+    explicit = col_heating(
+        RRTMGPConfig(sfc_albedo=0.06, sfc_albedo_direct=0.06))
+    assert jnp.allclose(single, explicit, atol=1e-12)
+
+    # (2) A brighter direct surface ⇒ more upward SW ⇒ more atmospheric SW
+    # absorption (less-negative column heating). The split is active and the
+    # difference is far above round-off.
+    low_dir = col_heating(
+        RRTMGPConfig(sfc_albedo=0.06, sfc_albedo_direct=0.0))
+    high_dir = col_heating(
+        RRTMGPConfig(sfc_albedo=0.06, sfc_albedo_direct=0.9))
+    assert bool(jnp.all(high_dir > low_dir))
+    assert float(jnp.min(jnp.abs(high_dir - low_dir))) > 1e-6
+
+
+@rrtmgp_data_present
+def test_co2_concentration_changes_longwave():
+    """RAD-4: the trace-gas concentrations flow into the gas optics — more
+    CO2 traps more longwave, so the column heating differs measurably between
+    SAM's RCEMIP CO2 (≈355 ppm) and a much higher value. Confirms the GHG
+    knobs are live (not vestigial)."""
+    from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+    from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+        rrtmgp_radiation,
+    )
+    T, p_full, p_half, T_sfc, q_v, cos_zen = _rce_radiation_column()
+
+    def col_heating(co2):
+        cfg = RRTMGPConfig(co2_ppmv=co2)
+        out = rrtmgp_radiation(T, p_full, p_half, T_sfc, q_v, cos_zen, cfg)
+        return jnp.sum(out.heating_rate, axis=1)
+
+    sam_co2 = col_heating(355.0)        # SAM RCEMIP MLS CO2
+    high_co2 = col_heating(1000.0)      # exaggerated for a clear signal
+    assert float(jnp.min(jnp.abs(high_co2 - sam_co2))) > 1e-6
+
+
+@rrtmgp_data_present
 def test_rrtmgp_runs_with_liquid_clouds_rce():
     from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
     from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (

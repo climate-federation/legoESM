@@ -103,6 +103,34 @@ def test_van_leer_exact_on_linear_field_y_interior():
     )
 
 
+def test_van_leer_face_values_second_order_both_branches():
+    """HD-1 (codex iter-44/45): the shared face reconstruction must be 2nd-order
+    (the midpoint on a LINEAR stencil) for BOTH the positive AND negative
+    velocity branches. The negative branch was silently 1st-order (upwind cell
+    value) before the r_neg sign fix — this locks it."""
+    from legoesm.core.flux_limiters import van_leer_face_values
+    # linear stencil [10,11,12,13]: face i+1/2 = midpoint of cells i,i+1 = 11.5
+    phi_pos, phi_neg = van_leer_face_values(
+        jnp.array(10.0), jnp.array(11.0), jnp.array(12.0), jnp.array(13.0))
+    assert float(phi_pos) == 11.5          # 2nd-order from the left
+    assert float(phi_neg) == 11.5          # 2nd-order from the right
+    #                                        (the bug gave 12.0 = 1st-order upwind)
+
+
+def test_van_leer_face_values_upwind_at_extremum():
+    """At an extremum (r<=0) BOTH branches collapse to 1st-order upwind (TVD)."""
+    from legoesm.core.flux_limiters import van_leer_face_values
+    # f_i is a local max ⇒ positive branch takes the upwind cell value (no
+    # overshoot past 2.0)
+    phi_pos, _ = van_leer_face_values(
+        jnp.array(0.0), jnp.array(2.0), jnp.array(0.0), jnp.array(0.0))
+    assert float(phi_pos) == 2.0
+    # f_ip1 is a local max ⇒ negative branch takes the upwind cell i+1 value
+    _, phi_neg = van_leer_face_values(
+        jnp.array(0.0), jnp.array(0.0), jnp.array(2.0), jnp.array(0.0))
+    assert float(phi_neg) == 2.0
+
+
 def test_van_leer_tvd_no_new_extrema():
     """Forward Euler step with the Van Leer tendency must NOT introduce
     new extrema for a monotone step field. Concretely: max(f^{n+1})
