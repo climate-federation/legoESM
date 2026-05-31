@@ -14,9 +14,11 @@ from legoesm.atmosphere.dynamics.compressible_euler_plane import (
 from legoesm.atmosphere.dynamics.rce_diagnostics import (
     cloud_fraction_profile_plane,
     column_moist_static_energy_plane, column_total_water_plane,
-    column_water_vapor_plane, domain_mean_profiles_plane,
+    column_water_vapor_plane, condensate_profile_plane,
+    crm_comparison_profiles_plane, domain_mean_profiles_plane,
     precipitation_rate_proxy_plane,
     pseudo_equivalent_potential_temperature,
+    updraft_mass_flux_plane, vertical_velocity_variance_plane,
 )
 from legoesm.grids.plane import create_plane_grid
 from legoesm.grids.vertical import create_height_coordinate
@@ -125,6 +127,20 @@ def test_cloud_fraction_zero_at_zero_qc():
     )
     cf = cloud_fraction_profile_plane(state, hc)
     np.testing.assert_allclose(np.asarray(cf), np.zeros(8), rtol=0.0, atol=0.0)
+
+
+def test_cloud_fraction_counts_cloud_ice():
+    """Cloud fraction must count cloud ICE (slot 3 = anvil), not just q_c — a
+    q_c-only count misses the deep-convective anvil (RCEMIP masks q_c+q_i)."""
+    state, _, hc, _ = _setup()
+    # 4-slot tracer state (qv, qc, qr, qi) with q_c=0 but cloud ice > threshold.
+    tr = jnp.zeros((4, 4, 8, 4), dtype=jnp.float64)
+    tr = tr.at[..., 3].set(1.0e-3)            # cloud ice (slot 3) above threshold
+    state = state._replace(tracers=state.tracers.replace(data=tr))
+    cf = cloud_fraction_profile_plane(state, hc)            # default counts ice
+    np.testing.assert_allclose(np.asarray(cf), np.ones(8), rtol=0.0, atol=0.0)
+    cf_qc_only = cloud_fraction_profile_plane(state, hc, qi_slot=None)
+    np.testing.assert_allclose(np.asarray(cf_qc_only), np.zeros(8), rtol=0.0, atol=0.0)
 
 
 def test_precipitation_proxy_scales_with_q_r():
@@ -253,3 +269,132 @@ def test_diagnostics_reject_mismatched_tracer_shape():
     )
     with pytest.raises(ValueError, match="tracers shape"):
         column_water_vapor_plane(state_bad, hc)
+
+
+# ---------------------------------------------------------------------------
+# Convective-intensity diagnostics (iter-43): w'², updraft mass flux,
+# condensate profiles, full comparison bundle.
+# ---------------------------------------------------------------------------
+
+_W_CHECKER = 2.0  # m/s checkerboard updraft/downdraft amplitude
+
+
+def _setup_convective(n_tracers: int = 6):
+    """Rest state + a (i+j)-checkerboard w field (=±_W_CHECKER) and a full
+    6-slot condensate set. Checkerboard ⇒ analytic w'²=_W_CHECKER², and
+    exactly half the cells are updrafts ⇒ M_up = 0.5·rho·w."""
+    grid = create_plane_grid(
+        nx=4, ny=4, nlev=8, dx=2_000.0, dy=2_000.0, dtype=jnp.float64,
+    )
+    hc = create_height_coordinate(8, H=10_000.0)
+    tm = make_flat_plane_terrain_metric(grid, hc)
+    state = make_rest_state(grid, hc, dtype=jnp.float64)
+    tracers = jnp.zeros((4, 4, 8, n_tracers), dtype=jnp.float64)
+    vals = [0.01, 1.0e-3, 5.0e-4, 2.0e-4, 1.0e-4, 5.0e-5]
+    for s in range(n_tracers):
+        tracers = tracers.at[..., s].set(vals[s])
+    ii, jj = np.meshgrid(np.arange(4), np.arange(4), indexing="xy")
+    sign = np.where((ii + jj) % 2 == 0, 1.0, -1.0)            # (4,4), 8 +/8 −
+    w = _W_CHECKER * jnp.asarray(sign)[:, :, None] * jnp.ones((4, 4, 9))
+    state = state._replace(
+        w=state.w.replace(data=w),
+        tracers=state.tracers.replace(data=tracers),
+    )
+    return state, grid, hc, tm
+
+
+def test_w_variance_checkerboard_is_amplitude_squared():
+    """var(±W checkerboard) = W² at every level; shape on the w grid."""
+    state, _, hc, _ = _setup_convective()
+    w2 = vertical_velocity_variance_plane(state, hc)
+    assert w2.shape == (9,)                          # nlev+1, w grid
+    np.testing.assert_allclose(
+        np.asarray(w2), _W_CHECKER ** 2, rtol=1.0e-12)
+
+
+def test_w_variance_zero_for_uniform_w():
+    state, _, hc, _ = _setup_convective()
+    state = state._replace(
+        w=state.w.replace(data=jnp.full((4, 4, 9), 3.0)))
+    w2 = vertical_velocity_variance_plane(state, hc)
+    np.testing.assert_allclose(np.asarray(w2), 0.0, atol=1.0e-12)
+
+
+def test_updraft_mass_flux_half_area():
+    """M_up = <rhow·w·H(w>0)> = 0.5·rho_ref_half·W on the w grid (half the
+    cells are updrafts); SAM rhow = base-state ρ at w levels."""
+    state, _, hc, _ = _setup_convective()
+    m_up = updraft_mass_flux_plane(state, hc)
+    assert m_up.shape == (9,)                        # nlev+1, w grid
+    expected = 0.5 * np.asarray(hc.rho_ref_half) * _W_CHECKER
+    np.testing.assert_allclose(np.asarray(m_up), expected, rtol=1.0e-12)
+
+
+def test_updraft_mass_flux_threshold_excludes_all():
+    """Threshold above the updraft amplitude ⇒ no updraft cells ⇒ zero."""
+    state, _, hc, _ = _setup_convective()
+    m_up = updraft_mass_flux_plane(state, hc, w_threshold=2.0 * _W_CHECKER)
+    np.testing.assert_array_equal(np.asarray(m_up), np.zeros(9))
+
+
+def test_condensate_profile_full_morrison_slots():
+    """cloud=q_c+q_i (1,3); precip=q_r+q_s+q_g (2,4,5)."""
+    state, _, hc, _ = _setup_convective(n_tracers=6)
+    cond = condensate_profile_plane(state, hc)
+    np.testing.assert_allclose(np.asarray(cond.q_cloud), 1.0e-3 + 2.0e-4)
+    np.testing.assert_allclose(
+        np.asarray(cond.q_precip), 5.0e-4 + 1.0e-4 + 5.0e-5)
+    np.testing.assert_allclose(
+        np.asarray(cond.q_total), 1.2e-3 + 6.5e-4, rtol=1.0e-12)
+
+
+def test_condensate_profile_drops_missing_warm_rain_slots():
+    """Warm-rain (3 tracers): ice/snow/graupel slots dropped ⇒ cloud=q_c,
+    precip=q_r only."""
+    state, _, hc, _ = _setup_convective(n_tracers=3)
+    cond = condensate_profile_plane(state, hc)
+    np.testing.assert_allclose(np.asarray(cond.q_cloud), 1.0e-3)   # q_c only
+    np.testing.assert_allclose(np.asarray(cond.q_precip), 5.0e-4)  # q_r only
+
+
+def test_condensate_rejects_negative_slot():
+    """Codex iter-43 C: negative slot raises (catch a mis-specified layout)."""
+    state, _, hc, _ = _setup_convective()
+    with pytest.raises(ValueError, match="non-negative"):
+        condensate_profile_plane(state, hc, cloud_slots=(1, -3))
+
+
+def test_crm_comparison_bundle_shapes_and_consistency():
+    """Assembler matches the leaf helpers + correct grid lengths."""
+    state, _, hc, _ = _setup_convective()
+    b = crm_comparison_profiles_plane(state, hc)
+    for arr in (b.w_var_half, b.updraft_mass_flux_half, b.z_half):
+        assert arr.shape == (9,)            # w / interface grid
+    for arr in (b.T, b.q_v, b.q_cloud, b.cloud_fraction, b.z_full):
+        assert arr.shape == (8,)            # full levels
+    # consistency with the leaf helpers
+    np.testing.assert_allclose(
+        np.asarray(b.w_var_half),
+        np.asarray(vertical_velocity_variance_plane(state, hc)))
+    np.testing.assert_allclose(
+        np.asarray(b.updraft_mass_flux_half),
+        np.asarray(updraft_mass_flux_plane(state, hc)))
+    assert float(b.max_w) == pytest.approx(_W_CHECKER)
+    assert bool(jnp.all(jnp.isfinite(jnp.concatenate(
+        [b.T, b.q_v, b.q_cloud, b.q_precip, b.updraft_mass_flux_half]))))
+
+
+def test_crm_comparison_bundle_jit_and_grad():
+    """Bundle is JIT-able + differentiable (AD-safe diagnostics)."""
+    state, _, hc, _ = _setup_convective()
+    out = jax.jit(lambda s: crm_comparison_profiles_plane(s, hc))(state)
+    for arr in jax.tree_util.tree_leaves(out):
+        assert bool(jnp.all(jnp.isfinite(arr)))
+
+    def loss(w_data):
+        s = state._replace(w=state.w.replace(data=w_data))
+        return jnp.sum(crm_comparison_profiles_plane(s, hc).w_var_half)
+
+    g = jax.grad(loss)(state.w.data)
+    assert g.shape == state.w.data.shape
+    assert bool(jnp.all(jnp.isfinite(g)))

@@ -810,6 +810,60 @@ where $\beta\ge 0$ is the off-centering parameter (default 0.1).
   \frac{\max(0,\,z-z_{\mathrm{bot}})}{z_{\mathrm{top}}-z_{\mathrm{bot}}}\Bigr).
 \end{equation}
 
+\subsection{Turbulence Closure: CRM, LES, and DNS}
+\label{sec:crm-les-dns}
+
+The diffusion terms $D_u,\,D_v,\,D_w,\,D_\theta$ in
+Eqs.~\eqref{eq:nh-u}--\eqref{eq:nh-theta} are evaluated in flux form,
+$D_\phi = \rho_0^{-1}\,\partial_j\!\bigl(\rho_0\,K_\phi\,\partial_j\phi\bigr)$
+over the horizontal directions $j\in\{x,y\}$ and, optionally, the vertical
+$j=z^*$ (a mass-weighted leg matching the SAM \texttt{diffuse\_*}
+operators).  The \emph{same} discrete operator serves a hierarchy of three
+turbulence-resolving regimes that differ only in the viscosity $K_m$ and the
+grid spacing $\Delta x$; the heat and scalar diffusivity is
+$K_h = K_m/\mathrm{Pr}$.
+
+\begin{description}
+\item[CRM (convection-permitting), $\Delta x\sim 1$--$4$\,km.]
+The Smagorinsky--Lilly eddy viscosity
+\begin{equation}
+  K_m = (C_s\Delta)^2\,
+  \sqrt{\max\!\bigl(0,\;|S|^2 - \mathrm{Pr}\,N^2\bigr)},
+  \qquad \Delta = (\Delta x\,\Delta y\,\Delta z)^{1/3},
+  \label{eq:smag}
+\end{equation}
+with the full strain magnitude $|S|^2 = 2\,S_{ij}S_{ij}$ (all six
+components, including the vertical-shear terms $S_{13},S_{23},S_{33}$),
+$C_s\approx 0.19$, and the moist sub-grid stratification cutoff $N^2$ (the
+SAM \texttt{dosmagor} correction) that suppresses mixing in statically
+stable layers.  The energy-containing eddies are entirely sub-grid, so
+Eq.~\eqref{eq:smag} parameterizes \emph{all} turbulent transport.  This is
+the configuration validated against gSAM for the GATE, LBA, and RCE deep
+convection cases.
+
+\item[LES (large-eddy simulation), $\Delta x\sim 10$--$100$\,m.]
+The \emph{same} closure~\eqref{eq:smag} with $C_s\approx 0.15$ and an
+optional near-wall mixing-length limiter $\ell_m=\min(C_s\Delta,\,\kappa z)$.
+The energy-containing eddies are now resolved and $K_m$ models only the
+inertial-subrange stress.  The gSAM reference simulations of GATE and LBA
+are themselves $\Delta x=100$\,m LES, so the LES mode applies the identical
+closure at the identical resolution as the oracle.
+
+\item[DNS (direct numerical simulation), $\Delta x\to$ the Kolmogorov scale.]
+No turbulence model.  $K_m$ is replaced by the constant molecular kinematic
+viscosity $\nu$ (with $K_h=\nu/\mathrm{Pr}$ and $\mathrm{Pr}\approx 0.71$ for
+air), yielding the molecular dissipation $\nu\nabla^2\vect{u}$ directly; all
+turbulent scales down to dissipation are resolved.
+\end{description}
+
+The regime is selected by the \texttt{turbulence\_closure} parameter
+(\texttt{smagorinsky} / \texttt{molecular} / \texttt{none}).  Because the
+three regimes share the single discrete flux-form operator, LES and DNS are
+a configuration change rather than a separate code path.  The molecular
+closure has been verified to reproduce the analytical viscous decay
+$\partial_t\hat u = -\nu k^2\hat u$ of an isolated shear mode to within the
+time-integration error.
+
 
 % ---------------------------------------------------------------------------
 \section{Finite-Volume Transport}

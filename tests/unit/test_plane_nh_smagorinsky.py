@@ -135,6 +135,34 @@ def test_rest_state_with_smag_stays_at_rest():
         assert float(jnp.max(jnp.abs(field))) == 0.0, name
 
 
+def test_rest_state_with_sgs_vertical_stays_at_rest():
+    """SGS-VERT #81: with the vertical SGS flux ENABLED, a zero state must
+    still stay exactly at rest — the 3D SGS must not inject a spurious
+    source from the new vertical leg (zero fields ⇒ zero flux)."""
+    grid = create_plane_grid(
+        nx=8, ny=8, nlev=6, dx=200.0, dy=200.0, dtype=jnp.float64,
+    )
+    hc = create_height_coordinate(grid.nlev, H=3_000.0)
+    tm = make_flat_plane_terrain_metric(grid, hc)
+    cfg = CompressibleEulerConfig(
+        sponge_coeff=0.0, hyperdiff_coeff=0.0, hyperdiff_rho_coeff=0.0,
+        hyperdiff_w_coeff=0.0, semi_implicit_acoustic=False,
+        use_coriolis=False, fix_mass=False,
+        smagorinsky_cs=0.2, smagorinsky_prandtl=1.0,
+        sgs_vertical_diffusion=True,
+    )
+    model = PlaneCompressibleEulerModel(grid, hc, tm, cfg)
+    state = make_rest_state(grid, hc, dtype=jnp.float64)
+    next_state = model.step(state, dt=1.0)
+    for name, field in (
+        ("u", next_state.u.data), ("v", next_state.v.data),
+        ("w", next_state.w.data),
+        ("theta_p", next_state.theta_prime.data),
+        ("rho_p", next_state.rho_prime.data),
+    ):
+        assert float(jnp.max(jnp.abs(field))) == 0.0, name
+
+
 def test_smag_term_is_differentiable():
     """``jax.grad`` should flow through the safe-sqrt at zero strain
     and through every K_m broadcast (full-level for u/v/theta',
@@ -255,6 +283,103 @@ def test_smag_diffusion_conserves_field_under_periodic_bc():
     assert rel < 1.0e-12, (
         f"Flux-form variable-K diffusion not conservative: "
         f"sum(out) / max|out| = {rel:.3e}"
+    )
+
+
+def test_vertical_sgs_diffusion_conserves_column_integral():
+    """SGS-VERT #81: the MASS-WEIGHTED vertical flux ``(1/ρ)∂_z(ρ_w K ∂_z f)``
+    with no-flux boundaries conserves the ``ρ_ref·dz``-weighted COLUMN integral
+    (the compressible conserved measure) to machine epsilon — ``Σ_k tend_k·
+    ρ_ref[k]·dz_k = F_top − F_bot = 0`` (codex iter-64 [HIGH]: plain ``dz`` is
+    NOT the conserved measure for a density-weighted vertical flux)."""
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        _vertical_K_diffusion_full,
+    )
+    _, grid, hc, _, _ = _setup()
+    rng = np.random.default_rng(11)
+    f = jnp.asarray(rng.standard_normal((grid.ny, grid.nx, grid.nlev)))
+    K = jnp.asarray(np.abs(rng.standard_normal((grid.ny, grid.nx, grid.nlev))))
+    tend = _vertical_K_diffusion_full(f, K, hc)
+    mass = jnp.asarray(hc.rho_ref) * jnp.asarray(hc.dz)   # ρ₀·dz column weight
+    col_int = jnp.sum(tend * mass, axis=-1)        # (ny, nx) per column
+    rel = float(jnp.max(jnp.abs(col_int))) / max(
+        float(jnp.max(jnp.abs(tend * mass))), 1.0e-30,
+    )
+    assert rel < 1.0e-12, (
+        f"vertical SGS flux not mass-column-conservative: "
+        f"max|Σ tend·ρ·dz| / max|tend·ρ·dz| = {rel:.3e}"
+    )
+
+
+def test_vertical_sgs_diffusion_is_dissipative():
+    """SGS-VERT #81: ``Σ_k f_k·tend_k·ρ_ref[k]·dz_k ≤ 0`` for K≥0 (discrete
+    integration by parts ⇒ ``−Σ ρ_w·K·(∂_z f)²/dz_half ≤ 0``). Guards the
+    sign of the mass-weighted vertical flux divergence."""
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        _vertical_K_diffusion_full,
+    )
+    _, grid, hc, _, _ = _setup()
+    rng = np.random.default_rng(12)
+    f = jnp.asarray(rng.standard_normal((grid.ny, grid.nx, grid.nlev)))
+    K = jnp.asarray(np.abs(rng.standard_normal((grid.ny, grid.nx, grid.nlev))))
+    tend = _vertical_K_diffusion_full(f, K, hc)
+    mass = jnp.asarray(hc.rho_ref) * jnp.asarray(hc.dz)
+    dissipation = float(jnp.sum(f * tend * mass))
+    assert dissipation <= 0.0, (
+        f"vertical SGS flux not dissipative: Σ f·tend·ρ·dz = {dissipation:.3e}"
+    )
+
+
+def test_vertical_sgs_w_diffusion_is_dissipative_and_respects_rigid_bc():
+    """SGS-VERT #81: the dual-grid w vertical flux must (a) dissipate the
+    resolved KE and (b) leave the rigid w=0 boundary interfaces untouched.
+
+    With the interface control-volume weight ``dz_half`` the discrete
+    energy ``Σ_j w_j·tend_j·dz_half[j-1] = −Σ_k K_k(w_{k+1}−w_k)²/dz_full[k]
+    ≤ 0`` (Abel summation, w=0 at the rigid ends). Guards the half-level
+    staggering — a wrong index/sign would break the energy sign or leak a
+    boundary tendency."""
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        _vertical_K_diffusion_w,
+    )
+    _, grid, hc, _, _ = _setup()
+    nlev = grid.nlev
+    rng = np.random.default_rng(14)
+    w = rng.standard_normal((grid.ny, grid.nx, nlev + 1))
+    w[..., 0] = 0.0           # rigid bottom
+    w[..., -1] = 0.0          # rigid top
+    w = jnp.asarray(w)
+    K = jnp.asarray(np.abs(rng.standard_normal((grid.ny, grid.nx, nlev))))
+    tend = _vertical_K_diffusion_w(w, K, hc)
+    # (b) boundary interfaces untouched (w held by the rigid BC).
+    assert float(jnp.max(jnp.abs(tend[..., 0]))) == 0.0
+    assert float(jnp.max(jnp.abs(tend[..., -1]))) == 0.0
+    # (a) KE-dissipative with the MASS interface control-volume weight
+    # (ρ_w·dz_half — the mass measure SAM uses, codex iter-64 [HIGH]).
+    dz_half = jnp.asarray(hc.dz_half)             # (nlev-1,)
+    rho_iface = jnp.asarray(hc.rho_ref_half[1:-1])  # (nlev-1,) interior iface ρ₀
+    interior = jnp.sum(w[..., 1:-1] * tend[..., 1:-1] * rho_iface * dz_half)
+    assert float(interior) <= 0.0, (
+        f"w vertical SGS not KE-dissipative: Σ w·tend·ρ_w·dz_half = {float(interior):.3e}"
+    )
+
+
+def test_vertical_sgs_diffusion_zero_on_vertically_uniform_field():
+    """SGS-VERT #81: a z-constant field has ZERO vertical gradient ⇒ no
+    SGS flux ⇒ exactly zero tendency. Catches index/sign/boundary bugs
+    (a stencil that leaked a spurious top/bottom flux would fail here)."""
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        _vertical_K_diffusion_full,
+    )
+    _, grid, hc, _, _ = _setup()
+    rng = np.random.default_rng(13)
+    f = jnp.full((grid.ny, grid.nx, grid.nlev), 3.7)
+    K = jnp.asarray(np.abs(rng.standard_normal((grid.ny, grid.nx, grid.nlev))))
+    tend = _vertical_K_diffusion_full(f, K, hc)
+    assert float(jnp.max(jnp.abs(tend))) < 1.0e-13, (
+        "vertical SGS flux nonzero on a vertically-uniform field "
+        f"(max|tend|={float(jnp.max(jnp.abs(tend))):.3e}) — spurious "
+        "boundary flux or index bug"
     )
 
 
@@ -414,3 +539,259 @@ def test_full_3D_strain_picks_up_pure_dw_dz():
         "3D Smag strain returned zero K_m under pure dw/dz — S_33 "
         "term is not contributing."
     )
+
+
+def _shear_state(grid):
+    """Pure vertical shear of ``u`` (constant ∂u/∂z) → nonzero |S|²."""
+    k = jnp.arange(grid.nlev, dtype=jnp.float64)
+    u = jnp.broadcast_to(
+        2.0 * k[None, None, :], (grid.ny, grid.nx, grid.nlev),
+    )
+    v = jnp.zeros((grid.ny, grid.nx, grid.nlev))
+    w = jnp.zeros((grid.ny, grid.nx, grid.nlev + 1))
+    return u, v, w
+
+
+def test_stratification_term_shuts_off_mixing_in_stable_column():
+    """SAM ``dosmagor`` faithfulness: subtracting ``Pr·N²`` inside the
+    strain sqrt must shut mixing OFF in a strongly stable column
+    (``N² ≫ |S|²`` → ``K_m = 0``), leave a NEUTRAL column unchanged
+    (``N² = 0`` → equals the no-buoyancy baseline), and ENHANCE an
+    unstable column (``N² < 0`` → larger than baseline).  ``n2_sgs`` is
+    passed directly so this exercises the kernel's response to a given
+    stratification (the N² computation itself is covered by
+    ``test_sgs_brunt_vaisala_*``)."""
+    _, grid, hc, _, _ = _setup()
+    u, v, w = _shear_state(grid)
+    shp = (grid.ny, grid.nx, grid.nlev)
+
+    # Baseline: pure-strain closure (n2_sgs=None) → K_m > 0 under shear.
+    K_base = _compute_smagorinsky_K_m_plane(u, v, w, grid, hc, c_s=0.2)
+    assert float(jnp.max(K_base)) > 0.0
+
+    # Strongly STABLE: N² = 1 s⁻² ≫ |S|² → shutoff everywhere.
+    K_stable = _compute_smagorinsky_K_m_plane(
+        u, v, w, grid, hc, c_s=0.2, n2_sgs=jnp.ones(shp), prandtl=1.0,
+    )
+    assert float(jnp.max(K_stable)) == 0.0, (
+        "stable stratification (N² ≫ |S|²) must zero K_m exactly"
+    )
+
+    # NEUTRAL: N² = 0 → identical to the no-buoyancy path.
+    K_neutral = _compute_smagorinsky_K_m_plane(
+        u, v, w, grid, hc, c_s=0.2, n2_sgs=jnp.zeros(shp), prandtl=1.0,
+    )
+    assert jnp.allclose(K_neutral, K_base, atol=1.0e-12), (
+        "neutral N²=0 must reduce to the pure-strain baseline"
+    )
+
+    # UNSTABLE: N² < 0 → mixing enhanced above the baseline.
+    K_unstable = _compute_smagorinsky_K_m_plane(
+        u, v, w, grid, hc, c_s=0.2,
+        n2_sgs=jnp.full(shp, -1.0e-3), prandtl=1.0,
+    )
+    assert float(jnp.max(K_unstable)) > float(jnp.max(K_base)), (
+        "unstable stratification (N² < 0) must enhance K_m above the "
+        "pure-strain baseline"
+    )
+
+
+def test_stratification_term_ad_safe_at_shutoff():
+    """``jax.grad`` through the stratification subtraction must stay
+    finite even in the shut-off (``arg ≤ 0``) regime where the
+    double-``where`` safe-sqrt masks the dead branch."""
+    _, grid, hc, _, _ = _setup()
+    u, v, w = _shear_state(grid)
+    shp = (grid.ny, grid.nx, grid.nlev)
+
+    def loss(n2):
+        K = _compute_smagorinsky_K_m_plane(
+            u, v, w, grid, hc, c_s=0.2, n2_sgs=n2, prandtl=1.0,
+        )
+        return jnp.sum(K)
+
+    g = jax.grad(loss)(jnp.ones(shp))  # strongly-stable → shut off
+    assert bool(jnp.all(jnp.isfinite(g)))
+
+
+def _stable_theta(grid, hc):
+    """θ increasing with physical height z (stably stratified)."""
+    z = jnp.broadcast_to(
+        hc.z_full[None, None, :], (grid.ny, grid.nx, grid.nlev),
+    )
+    return 300.0 + 0.02 * z
+
+
+def test_sgs_brunt_vaisala_unsaturated_equals_virtual_theta_n2():
+    """In a subsaturated, condensate-free column ``_sgs_brunt_vaisala_sq``
+    must return the CLEAR branch ``N² = (g/θ_v)·∂θ_v/∂z`` with
+    ``θ_v = virtual_temperature(θ, q_v)`` (SAM unsaturated buoy_sgs)."""
+    from legoesm import constants
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        _full_level_centred_d_dz, _sgs_brunt_vaisala_sq,
+    )
+    from legoesm.atmosphere.physics._shared import virtual_temperature
+
+    _, grid, hc, _, _ = _setup()
+    theta = _stable_theta(grid, hc)
+    # Far-subsaturated vapour, no condensate → clear branch.
+    q_v = jnp.full_like(theta, 1.0e-4)
+    tracers = jnp.stack([q_v, jnp.zeros_like(q_v), jnp.zeros_like(q_v)],
+                        axis=-1)
+
+    n2 = _sgs_brunt_vaisala_sq(theta, tracers, hc)
+
+    theta_v = virtual_temperature(theta, q_v)
+    n2_expected = -(constants.g / jnp.clip(theta_v, 1.0, None)) * (
+        _full_level_centred_d_dz(theta_v, hc)
+    )
+    assert jnp.allclose(n2, n2_expected, atol=1.0e-12), (
+        "subsaturated column must take the clear virtual-θ N² branch"
+    )
+    # Stable sounding → N² > 0 in the interior.
+    assert float(jnp.min(n2[..., 1:-1])) > 0.0
+
+
+def test_sgs_brunt_vaisala_saturated_reduces_stability():
+    """SAM ``tke_full.f90:198-226``: at a SATURATED interface the moist
+    (Durran–Klemp) ``N²`` is SMALLER than the dry value for the same θ
+    sounding — latent-heat release on adiabatic ascent reduces the
+    effective static stability, so the ``dosmagor`` shutoff lets the LES
+    keep mixing inside cloud."""
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        _sgs_brunt_vaisala_sq,
+    )
+    from legoesm.thermo import saturation_mixing_ratio
+
+    _, grid, hc, _, _ = _setup()
+    theta = _stable_theta(grid, hc)
+    exner = hc.exner_ref
+    T = theta * exner
+    from legoesm import constants
+    p = constants.p_ref * exner ** (1.0 / constants.kappa)
+    q_sat = saturation_mixing_ratio(T, p)
+
+    # DRY reference: same θ, far-subsaturated, no cloud.
+    tr_dry = jnp.stack(
+        [jnp.full_like(theta, 1.0e-4),
+         jnp.zeros_like(theta), jnp.zeros_like(theta)],
+        axis=-1,
+    )
+    n2_dry = _sgs_brunt_vaisala_sq(theta, tr_dry, hc)
+
+    # SATURATED: q_v just below q_sat + cloud water pushes non-precip
+    # water well above q_sat → smooth moist blend ≈ fully moist.
+    q_v = 0.95 * q_sat
+    q_c = 0.50 * q_sat
+    tr_sat = jnp.stack([q_v, q_c, jnp.zeros_like(theta)], axis=-1)
+    n2_moist = _sgs_brunt_vaisala_sq(theta, tr_sat, hc)
+
+    # Interior levels (skip one-sided boundary gradients).
+    assert float(jnp.max(n2_moist[..., 1:-1])) < float(
+        jnp.min(n2_dry[..., 1:-1])
+    ), "saturated moist N² must be below the dry N² for the same θ"
+
+
+def test_sgs_brunt_vaisala_ad_safe_across_saturation():
+    """``jax.grad`` through ``_sgs_brunt_vaisala_sq`` must stay finite
+    even for a column straddling the clear↔moist transition — the smooth
+    sigmoid blend (not a hard ``where``) is what guarantees this (Codex
+    iter-2 adversarial-review)."""
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        _sgs_brunt_vaisala_sq,
+    )
+    from legoesm.thermo import saturation_mixing_ratio
+
+    _, grid, hc, _, _ = _setup()
+    theta = _stable_theta(grid, hc)
+    exner = hc.exner_ref
+    from legoesm import constants
+    T = theta * exner
+    p = constants.p_ref * exner ** (1.0 / constants.kappa)
+    q_sat = saturation_mixing_ratio(T, p)
+    # q_v straddles saturation across levels (some below, some above),
+    # zero cloud → gradients flow through the sigmoid edge AND the
+    # q_cloud=0 path that the old condensate-ratio ω would have broken.
+    q_v0 = 1.05 * q_sat  # near/above saturation, no cloud
+    z = jnp.zeros_like(theta)
+    tracers0 = jnp.stack([q_v0, z, z], axis=-1)
+
+    def loss(th):
+        return jnp.sum(_sgs_brunt_vaisala_sq(th, tracers0, hc))
+
+    g_theta = jax.grad(loss)(theta)
+    assert bool(jnp.all(jnp.isfinite(g_theta)))
+
+    def loss_q(qv):
+        tr = jnp.stack([qv, z, z], axis=-1)
+        return jnp.sum(_sgs_brunt_vaisala_sq(theta, tr, hc))
+
+    g_qv = jax.grad(loss_q)(q_v0)
+    assert bool(jnp.all(jnp.isfinite(g_qv)))
+
+
+def test_sgs_diffuses_tracers_conservatively():
+    """SGS-SCALAR (iter-60): SAM `sgs.f90:664-675` SGS-diffuses EVERY scalar
+    (q_v + all hydrometeors) with the eddy conductivity, not just θ'. The plane
+    dycore must add K_h diffusion to the tracers — nonzero (a horizontal tracer
+    gradient IS mixed) and CONSERVATIVE (domain-sum tendency = 0), and exactly
+    zero when c_s=0 (rest state ⇒ no advection either)."""
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        make_rest_state,
+    )
+    grid = create_plane_grid(nx=8, ny=8, nlev=6, dx=1000.0, dy=1000.0,
+                             dtype=jnp.float64)
+    hc = create_height_coordinate(6, H=6000.0)
+    tm = make_flat_plane_terrain_metric(grid, hc)
+    st = make_rest_state(grid, hc, dtype=jnp.float64)
+    tr = np.zeros((8, 8, 6, 6))
+    tr[3:5, 3:5, :, 0] = 0.01            # a q_v blob (slot 0) → horizontal grad
+    tr[..., 0] += 0.001
+    st = st._replace(tracers=st.tracers.replace(data=jnp.asarray(tr)))
+
+    cfg_on = CompressibleEulerConfig(
+        sponge_coeff=0.0, hyperdiff_coeff=0.0, hyperdiff_rho_coeff=0.0,
+        hyperdiff_w_coeff=0.0, semi_implicit_acoustic=False, use_coriolis=False,
+        fix_mass=False, smagorinsky_cs=0.19, smagorinsky_prandtl=1.0)
+    tend = plane_compressible_euler_slow_tendencies(st, grid, hc, tm, cfg_on)
+    dq = np.asarray(tend.dtracers_dt.data[..., 0])
+    assert np.max(np.abs(dq)) > 0.0                    # tracers ARE diffused
+    assert abs(float(np.sum(dq))) < 1e-18              # conservative (rest state)
+    # every tracer slot is diffused (SAM diffuses all micro_field), not just q_v
+    assert np.max(np.abs(np.asarray(tend.dtracers_dt.data))) > 0.0
+
+    cfg_off = CompressibleEulerConfig(
+        sponge_coeff=0.0, hyperdiff_coeff=0.0, hyperdiff_rho_coeff=0.0,
+        hyperdiff_w_coeff=0.0, semi_implicit_acoustic=False, use_coriolis=False,
+        fix_mass=False, smagorinsky_cs=0.0)
+    tend0 = plane_compressible_euler_slow_tendencies(st, grid, hc, tm, cfg_off)
+    assert float(np.max(np.abs(tend0.dtracers_dt.data))) == 0.0   # no SGS, rest
+
+
+def test_sgs_tracer_diffusion_preserves_positivity():
+    """codex iter-60 (MED): the SGS tracer diffusion operator (the SAME
+    `_variable_K_diffusion_vlast` my fix vmaps over tracers) must not drive a
+    non-negative tracer negative. A realistic Smagorinsky K_m + a sharp isolated
+    q_v spike: forward-Euler `q + dt·∇·(K∇q)` stays ≥0 at the CRM dt (the spike
+    loses, neighbours gain — a positive-weight stencil within the diffusion CFL
+    K·dt/dx²≪½) and is conservative (Σ tendency = 0). Advection positivity is a
+    separate (scheme-dependent) property, so this isolates the SGS operator."""
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        _variable_K_diffusion_vlast, _compute_smagorinsky_K_m_plane,
+    )
+    grid = create_plane_grid(nx=8, ny=8, nlev=6, dx=1000.0, dy=1000.0,
+                             dtype=jnp.float64)
+    hc = create_height_coordinate(6, H=6000.0)
+    rng = np.random.default_rng(11)
+    sh = (grid.ny, grid.nx, grid.nlev)
+    u = jnp.asarray(2.0 * rng.standard_normal(sh))
+    v = jnp.asarray(2.0 * rng.standard_normal(sh))
+    w = jnp.asarray(2.0 * rng.standard_normal((grid.ny, grid.nx, grid.nlev + 1)))
+    K_m = _compute_smagorinsky_K_m_plane(u, v, w, grid, hc, c_s=0.19)
+    q = np.full(sh, 1e-8)
+    q[4, 4, 2] = 0.02                                  # sharp isolated spike
+    dq = np.asarray(_variable_K_diffusion_vlast(jnp.asarray(q), K_m, grid))
+    for dt in (1.0, 2.0, 5.0):
+        assert float(np.min(q + dt * dq)) >= 0.0, f"negative at dt={dt}"
+    assert abs(float(np.sum(dq))) < 1e-18              # conservative
+    assert float(np.max(np.abs(dq))) > 0.0             # SGS actually acted

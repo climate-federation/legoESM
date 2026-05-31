@@ -2281,6 +2281,15 @@ class HeightCoordinate(NamedTuple):
         Reference Exner function at half levels [-], shape (nlev+1,).
     rho_ref_half : jax.Array
         Reference density at half levels [kg/m^3], shape (nlev+1,).
+    u_geo0, v_geo0 : jax.Array | None
+        Geostrophic reference wind profiles [m/s], shape (nlev,) or None.
+        SAM ``coriolis.f90`` applies the Coriolis force to the DEPARTURE
+        from the geostrophic wind — ``dudt += f·(v−vg0)``,
+        ``dvdt −= f·(u−ug0)`` — so the large-scale balanced mean wind is
+        not spuriously spun up by an inertial oscillation. ``None`` (the
+        default) means zero reference wind (the RCE / no-mean-wind case),
+        which reduces to applying Coriolis to the full wind. For GATE/LBA
+        these carry the prescribed initial/geostrophic sounding wind.
     """
     n_levels: int
     H: float
@@ -2293,6 +2302,8 @@ class HeightCoordinate(NamedTuple):
     exner_ref: jax.Array
     exner_ref_half: jax.Array
     rho_ref_half: jax.Array
+    u_geo0: jax.Array | None = None
+    v_geo0: jax.Array | None = None
 
 
 class TerrainMetric(NamedTuple):
@@ -2439,6 +2450,36 @@ def compute_reference_state(
             [pi_lowest + pi_increments, jnp.array([pi_lowest])]
         )
 
+    # Fail fast on a non-physical reference Exner. A constant-θ
+    # (isentropic) atmosphere reaches exner = 0 (p = T = 0) at
+    # z = c_p·θ/g (≈ 30.7 km for θ = 300 K), so a tall model top with the
+    # default constant reference silently yields exner_0 ≤ 0 → rho_0 = NaN
+    # → a step-1 NaN far from the real cause. Raise at construction
+    # instead with an actionable message. Concrete-only (skipped if z /
+    # theta_ref_fn are traced — values aren't available then).
+    try:
+        exner_host = np.asarray(exner_0)
+        z_host = np.asarray(z)
+    except jax.errors.TracerArrayConversionError:
+        exner_host = None
+    if exner_host is not None and (
+        not np.all(np.isfinite(exner_host))
+        or float(np.min(exner_host)) <= 0.0
+    ):
+        k_bad = int(np.nanargmin(exner_host))
+        raise ValueError(
+            "compute_reference_state produced a non-physical reference "
+            f"Exner (min={float(np.nanmin(exner_host)):.4g} at level index "
+            f"{k_bad}, z={float(z_host[k_bad]):.0f} m). The theta_ref "
+            "profile cannot hydrostatically support this column: a "
+            "constant potential temperature is ISENTROPIC and reaches "
+            "exner=0 at z = c_p·theta/g (~30.7 km for theta=300 K). For "
+            "deep model tops (>~30 km) pass a theta_ref_fn whose theta "
+            "increases aloft (tropopause + stratosphere sounding), e.g. "
+            "the RCEMIP/Wing-2018 profile, instead of the constant-300 K "
+            "default."
+        )
+
     # Recover density from equation of state:
     # p = p_0 * pi^(c_p/R_d)
     # rho = p / (R_d * T) = p / (R_d * theta * pi)
@@ -2478,12 +2519,44 @@ def create_height_coordinate(
     HeightCoordinate
         The vertical coordinate with precomputed reference state.
     """
-    if theta_ref_fn is None:
-        theta_ref_fn = _default_theta_ref
-
     # z* grid: top-to-bottom (z_half[0] = H, z_half[-1] = 0)
     # Use JAX default dtype (float64 when x64 is enabled, float32 otherwise)
     z_half = jnp.linspace(H, 0.0, n_levels + 1)
+    return create_height_coordinate_from_z_half(
+        z_half, theta_ref_fn=theta_ref_fn, p_sfc=p_sfc,
+    )
+
+
+def create_height_coordinate_from_z_half(
+    z_half: jax.Array,
+    theta_ref_fn: Callable[[jax.Array], jax.Array] | None = None,
+    p_sfc: float | None = None,
+) -> HeightCoordinate:
+    """HeightCoordinate from an EXPLICIT ``z_half`` interface array.
+
+    For CUSTOM vertical grids that are neither uniform
+    (:func:`create_height_coordinate`) nor geometrically stretched
+    (:func:`create_stretched_height_coordinate`) — e.g. SAM's ``grd``-file
+    levels (``read_sam_grd``), which are dz=50 m uniform in the boundary layer,
+    ~100 m uniform through the deep-convection layer, then stretched aloft.
+
+    ``z_half`` MUST be top-to-bottom (``z_half[0]`` = model top H,
+    ``z_half[-1]`` = 0 surface, strictly decreasing) — the same convention as
+    the other builders. The shared ``z_half → (z_full, dz, dz_half, reference
+    state)`` core lives here; the uniform builder above just supplies a
+    ``linspace`` ``z_half``.
+    """
+    if theta_ref_fn is None:
+        theta_ref_fn = _default_theta_ref
+    z_half = jnp.asarray(z_half)
+    if z_half.ndim != 1 or z_half.shape[0] < 3:
+        raise ValueError(
+            f"z_half must be 1-D with >=3 interfaces, got shape "
+            f"{tuple(z_half.shape)}.")
+    if not bool(jnp.all(jnp.diff(z_half) < 0.0)):
+        raise ValueError(
+            "z_half must be STRICTLY DECREASING top-to-bottom "
+            "(z_half[0]=H top, z_half[-1]=0 surface).")
     z_full = 0.5 * (z_half[:-1] + z_half[1:])  # (nlev,)
     dz = z_half[:-1] - z_half[1:]  # (nlev,) positive
     dz_half = z_full[:-1] - z_full[1:]  # (nlev-1,) positive
@@ -2497,8 +2570,8 @@ def create_height_coordinate(
     )
 
     return HeightCoordinate(
-        n_levels=n_levels,
-        H=H,
+        n_levels=int(z_full.shape[0]),
+        H=float(z_half[0]),
         z_full=z_full,
         z_half=z_half,
         dz=dz,

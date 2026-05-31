@@ -610,6 +610,11 @@ def build_slow_physics_fn(args, grid, hc, tm):
     rad_fn = make_radiation_physics(
         RadiationConfig(scheme="gray"), model_type="plane",
     )
+    # RAD-7 (iter-48): pin the surface radiative boundary to the fixed SST
+    # (SAM uses the SST for σ·ε·T_sfc⁴, not the drifting lowest-level air T =
+    # the default T[..., -1]). Local ncol per rank = grid.ny·grid.nx.
+    rad_fn.set_T_sfc_override(
+        jnp.full((int(grid.ny * grid.nx),), float(T_SFC_K), dtype=jnp.float64))
 
     def physics_fn(state, grid_in, hc_in, tm_in):
         return rad_fn(state, grid_in, hc_in, tm_in)

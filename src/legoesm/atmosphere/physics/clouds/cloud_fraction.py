@@ -188,6 +188,8 @@ def compute_cloud_properties(
     config: CloudConfig,
     q_cloud: jnp.ndarray | None = None,
     q_ice: jnp.ndarray | None = None,
+    n_ice: jnp.ndarray | None = None,
+    n_cloud: jnp.ndarray | None = None,
 ) -> CloudProperties:
     """Compute diagnostic cloud fraction and cloud optical properties.
 
@@ -225,10 +227,26 @@ def compute_cloud_properties(
         cf = xu_randall_cloud_fraction(RH, q_condensate, q_sat, config)
     elif config.scheme == "sundqvist":
         cf = sundqvist_cloud_fraction(RH, config)
+    elif config.scheme == "resolved":
+        # Cloud-resolving cloud fraction: a grid cell is (smoothly) FULLY
+        # cloudy where it holds resolved condensate — SAM's CRM convention
+        # (cf = 1 wherever qn = qcl+qci > 0), unlike Xu-Randall's sub-grid
+        # fraction that under-represents the cloud-radiative effect at CRM
+        # resolution.  Smooth saturating surrogate keeps it AD-safe.
+        if q_cloud is None and q_ice is None:
+            raise ValueError(
+                "cloud scheme 'resolved' requires explicit q_cloud/q_ice "
+                "from microphysics (it cannot diagnose condensate from RH "
+                "like 'sundqvist')."
+            )
+        q_c = jnp.zeros_like(T) if q_cloud is None else jnp.maximum(q_cloud, 0.0)
+        q_i = jnp.zeros_like(T) if q_ice is None else jnp.maximum(q_ice, 0.0)
+        q_condensate = q_c + q_i
+        cf = q_condensate / (q_condensate + config.q_cloud_resolved_ref)
     else:
         raise ValueError(
             f"Unknown cloud scheme: {config.scheme!r}. "
-            f"Valid schemes: 'sundqvist', 'xu_randall'. "
+            f"Valid schemes: 'sundqvist', 'xu_randall', 'resolved'. "
             f"(Use cloud_scheme='none' upstream to skip clouds entirely.)"
         )
 
@@ -259,12 +277,60 @@ def compute_cloud_properties(
     # broadcast form keeps the HLO graph small and avoids two
     # allocator round-trips per cloud_optics call.
     _scalar_dtype = T.dtype
-    r_eff_liq = jnp.broadcast_to(
-        jnp.asarray(config.r_eff_liq, dtype=_scalar_dtype), T.shape,
-    )
-    r_eff_ice = jnp.broadcast_to(
-        jnp.asarray(config.r_eff_ice, dtype=_scalar_dtype), T.shape,
-    )
+    if n_cloud is not None:
+        # RAD-1-liq: SAM+Morrison M2005 cloud-water effective RADIUS from the
+        # gamma PSD, ``reffc = (PGAM+3)/(2·LAMC)`` (module_mp_graupel.f90:495).
+        # PGAM = Martin et al. (1994) shape from the droplet number (:1676-1680);
+        # LAMC the PSD slope (:1691) with Γ(PGAM+4)/Γ(PGAM+1) =
+        # (PGAM+1)(PGAM+2)(PGAM+3). N_c is per-VOLUME [#/m³] in legoESM (≠ the
+        # per-mass N_i), so the #/cm³ for PGAM is N_c/1e6 and the per-MASS number
+        # for LAMC is N_c/ρ. Replaces the fixed 14 µm (= SAM's CAM OCEAN fallback;
+        # SAM-M2005 uses this PSD reffc by default, douse_reffc=.true.).
+        rho_air = p_full / (constants.R_d * jnp.maximum(T, 1.0))
+        nc_cm3 = jnp.maximum(jnp.clip(n_cloud, 0.0), 0.0) / 1.0e6
+        pgam = 0.0005714 * nc_cm3 + 0.2714
+        pgam = jnp.clip(1.0 / jnp.maximum(pgam, 1.0e-12) ** 2 - 1.0, 2.0, 10.0)
+        cons26 = jnp.pi * constants.rho_water / 6.0
+        q_c_pos = jnp.maximum(jnp.clip(q_c, 0.0), 1.0e-15)
+        nc_permass = (jnp.maximum(jnp.clip(n_cloud, 0.0), 1.0e-15)
+                      / jnp.maximum(rho_air, 0.1))
+        lamc = (cons26 * nc_permass * (pgam + 1.0) * (pgam + 2.0) * (pgam + 3.0)
+                / q_c_pos) ** (1.0 / 3.0)
+        # SAM LAMMIN/LAMMAX (1-60 µm DIAMETER, :1697-1698) bound LAMC ⇒ reffc.
+        lamc = jnp.clip(lamc, (pgam + 1.0) / 60.0e-6, (pgam + 1.0) / 1.0e-6)
+        r_eff_liq_psd = (pgam + 3.0) / (2.0 * lamc)
+        has_liq = jnp.clip(q_c, 0.0) > 1.0e-14            # SAM QSMALL
+        r_eff_liq = jnp.where(
+            has_liq, r_eff_liq_psd,
+            jnp.asarray(config.r_eff_liq, dtype=_scalar_dtype))
+    else:
+        r_eff_liq = jnp.broadcast_to(
+            jnp.asarray(config.r_eff_liq, dtype=_scalar_dtype), T.shape,
+        )
+    if n_ice is not None:
+        # RAD-1-ice: SAM+Morrison M2005 ice effective RADIUS from the ice
+        # PSD, ``EFFI = 1.5/LAMI`` (module_mp_graupel.f90:4866), with
+        # ``LAMI = (CONS12·N_i/q_i)^(1/3)``, CONS12 = ρ_ci·π (DI=3) and N_i
+        # per-mass [1/kg] — the SAME PSD as the M2005 deposition.  So
+        # ``r_eff_ice = 1.5·(q_i/(CONS12·N_i))^(1/3)`` [m].  EFFI = 25 µm in
+        # ice-free cells (SAM uses 25 µm when q_i < QSMALL = 1e-14).
+        # The radius is returned in metres; the RRTMGP cloud-optics
+        # (cloud_optics.py) converts radius→generalized DIAMETER (×2) and
+        # clamps to the ice lookup-table validity range, so NO explicit
+        # bound is imposed here. (NB: legoESM's RRTMGP omits SAM's
+        # ``ρ_ci/917`` solid-ice density rescale that its RRTM ice table
+        # needs — an accepted RRTMG↔RRTMGP generation difference.)
+        cons12 = config.rho_cloud_ice * jnp.pi
+        q_i_pos = jnp.maximum(jnp.clip(q_i, 0.0), 1.0e-15)
+        n_i_pos = jnp.maximum(jnp.clip(n_ice, 0.0), 1.0e-15)
+        lami = (cons12 * n_i_pos / q_i_pos) ** (1.0 / 3.0)
+        r_eff_ice_psd = 1.5 / jnp.clip(lami, 1.0e-30)
+        has_ice = jnp.clip(q_i, 0.0) > 1.0e-14            # SAM QSMALL
+        r_eff_ice = jnp.where(has_ice, r_eff_ice_psd, 25.0e-6)
+    else:
+        r_eff_ice = jnp.broadcast_to(
+            jnp.asarray(config.r_eff_ice, dtype=_scalar_dtype), T.shape,
+        )
 
     return CloudProperties(
         cloud_fraction=cf,

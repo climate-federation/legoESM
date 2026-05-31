@@ -418,6 +418,7 @@ def make_rest_state(
 # --------------------------------------------------------------------- #
 HORIZONTAL_ADVECTION_HALO_REQUIREMENT: dict[str, int] = {
     "upwind1": 1,
+    "centered": 1,    # 2nd-order centred (gSAM advect2_mom); momentum-leg only
     "van_leer": 2,
     "weno5": 3,
 }
@@ -498,23 +499,12 @@ def _van_leer_advection_x(
     (an extremum). ``jnp.where`` for sign selection contributes a
     second well-behaved subgradient. ``jax.grad`` flows cleanly.
     """
-    from legoesm.core.flux_limiters import van_leer_limiter
-    eps = 1e-30
+    from legoesm.core.flux_limiters import van_leer_face_values
     f = field_yxz
-    f_im1 = jnp.roll(f,  1, axis=1)  # f[i-1]
-    f_i   = f                         # f[i]
-    f_ip1 = jnp.roll(f, -1, axis=1)  # f[i+1]
-    f_ip2 = jnp.roll(f, -2, axis=1)  # f[i+2]
-    # Positive-velocity reconstruction at face i+1/2 (upwind from left).
-    # delta = f[i+1] - f[i]; r = (f[i] - f[i-1]) / delta.
-    delta_pos = f_ip1 - f_i
-    r_pos = (f_i - f_im1) / jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps)
-    phi_pos = f_i + 0.5 * van_leer_limiter(r_pos) * delta_pos
-    # Negative-velocity reconstruction at face i+1/2 (upwind from right).
-    # delta = f[i] - f[i+1]; r = (f[i+2] - f[i+1]) / delta.
-    delta_neg = f_i - f_ip1
-    r_neg = (f_ip2 - f_ip1) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
-    phi_neg = f_ip1 + 0.5 * van_leer_limiter(r_neg) * delta_neg
+    # Face i+1/2 reconstruction (HD-1-correct r sign) via the shared helper —
+    # stencil [f[i-1], f[i], f[i+1], f[i+2]].
+    phi_pos, phi_neg = van_leer_face_values(
+        jnp.roll(f, 1, axis=1), f, jnp.roll(f, -1, axis=1), jnp.roll(f, -2, axis=1))
     # Face velocity: 2-point centred average of co-located cell velocities.
     u_face_R = 0.5 * (u_at_field + jnp.roll(u_at_field, -1, axis=1))
     phi_R = jnp.where(u_face_R >= 0.0, phi_pos, phi_neg)
@@ -529,21 +519,58 @@ def _van_leer_advection_y(
 ) -> jax.Array:
     """2nd-order Van Leer TVD upwind contribution to ``-v df/dy``
     (axis=0). Same convention as :func:`_van_leer_advection_x`."""
-    from legoesm.core.flux_limiters import van_leer_limiter
-    eps = 1e-30
+    from legoesm.core.flux_limiters import van_leer_face_values
     f = field_yxz
-    f_jm1 = jnp.roll(f,  1, axis=0)
-    f_j   = f
-    f_jp1 = jnp.roll(f, -1, axis=0)
-    f_jp2 = jnp.roll(f, -2, axis=0)
-    delta_pos = f_jp1 - f_j
-    r_pos = (f_j - f_jm1) / jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps)
-    phi_pos = f_j + 0.5 * van_leer_limiter(r_pos) * delta_pos
-    delta_neg = f_j - f_jp1
-    r_neg = (f_jp2 - f_jp1) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
-    phi_neg = f_jp1 + 0.5 * van_leer_limiter(r_neg) * delta_neg
+    phi_pos, phi_neg = van_leer_face_values(
+        jnp.roll(f, 1, axis=0), f, jnp.roll(f, -1, axis=0), jnp.roll(f, -2, axis=0))
     v_face_R = 0.5 * (v_at_field + jnp.roll(v_at_field, -1, axis=0))
     phi_R = jnp.where(v_face_R >= 0.0, phi_pos, phi_neg)
+    flux_R = v_face_R * phi_R
+    flux_L = jnp.roll(flux_R, 1, axis=0)
+    v_face_L = jnp.roll(v_face_R, 1, axis=0)
+    return -(flux_R - flux_L) / dy + f * (v_face_R - v_face_L) / dy
+
+
+def _centered_advection_x(
+    field_yxz: jax.Array, u_at_field: jax.Array, dx: float,
+) -> jax.Array:
+    """2nd-order CENTERED flux-form advection ``-u df/dx`` = gSAM `advect2_mom`.
+
+    ADV-SPLIT #86 (codex iter-68): a 2nd-order CENTERED, NON-diffusive momentum
+    scheme matching SAM's face reconstruction (``advect2_mom_xy.f90:27``:
+    ``flux=0.25·(c_face)·(φ_face)`` — no upwind bias, no flux limiter). The TVD
+    van_leer default adds limiter diffusion that SUPPRESSES convective updraft
+    cores / w-variance tails (CONFIRMED: identical-IC max|w| caps ~2.6 m/s vs
+    low-diffusion ~5-15; centered restores ~5 in a gray burst). For SAM-faithful
+    convective EXTREMES the momentum legs (u/v/w) use this scheme; the SCALAR legs
+    keep van_leer (monotone ≈ MPDATA, positivity). NOTE (codex iter-68 [S1]): this
+    uses the ADVECTIVE form ``−d(uf)/dx + f·du/dx`` (same identity as van_leer/
+    weno5 — preserves a constant f under divergent flow), which is NOT proven
+    discretely KE-conserving like SAM's pure-flux ``advect2_mom`` — call it
+    "centered non-diffusive matching SAM's face reconstruction", not "energy-
+    conserving". DISPERSIVE (2Δ modes) — relies on the ∇⁴ hyperdiff + Smagorinsky
+    SGS to control grid-scale noise (as SAM relies on SGS + monotone scalars).
+    **Stability validated only to ~5 m/s (gray burst); high-k KE growth at a
+    10-15 m/s RRTM burst is UNPROVEN (codex [S2]) ⇒ OPT-IN, not a default yet.**
+    Face value = centred 2-pt avg; stencil [i-1, i, i+1] ⇒ halo 1 (≤ van_leer's 2).
+    """
+    f = field_yxz
+    phi_R = 0.5 * (f + jnp.roll(f, -1, axis=1))         # centred face i+1/2
+    u_face_R = 0.5 * (u_at_field + jnp.roll(u_at_field, -1, axis=1))
+    flux_R = u_face_R * phi_R
+    flux_L = jnp.roll(flux_R, 1, axis=1)
+    u_face_L = jnp.roll(u_face_R, 1, axis=1)
+    return -(flux_R - flux_L) / dx + f * (u_face_R - u_face_L) / dx
+
+
+def _centered_advection_y(
+    field_yxz: jax.Array, v_at_field: jax.Array, dy: float,
+) -> jax.Array:
+    """2nd-order CENTERED flux-form advection ``-v df/dy`` (axis=0). Momentum-leg
+    counterpart of :func:`_centered_advection_x` (= gSAM `advect2_mom`)."""
+    f = field_yxz
+    phi_R = 0.5 * (f + jnp.roll(f, -1, axis=0))
+    v_face_R = 0.5 * (v_at_field + jnp.roll(v_at_field, -1, axis=0))
     flux_R = v_face_R * phi_R
     flux_L = jnp.roll(flux_R, 1, axis=0)
     v_face_L = jnp.roll(v_face_R, 1, axis=0)
@@ -672,6 +699,92 @@ def _variable_K_diffusion_vlast(
     ) / (grid.dy ** 2)
 
 
+def _vertical_K_diffusion_full(
+    field_yxz: jax.Array, K_yxz: jax.Array, height_coord: HeightCoordinate,
+) -> jax.Array:
+    """Conservative vertical SGS flux ``∂_z(K ∂_z field)`` for FULL-level fields.
+
+    SGS-VERT (#81): SAM's SGS is fully 3D — ``diffuse_scalar``/``diffuse_mom``
+    add the VERTICAL flux on top of the horizontal one. The plane CRM previously
+    applied the horizontal flux (:func:`_variable_K_diffusion_vlast`) ONLY,
+    under-mixing the vertical sub-grid transport of u/v/θ'/tracers
+    (entrainment-detrainment, BL mixing).
+
+    MASS-WEIGHTED flux-form (codex iter-64 [HIGH] — confirmed against gSAM
+    ``diffuse_scalar_z.f90:56`` / ``diffuse_mom3D.f90:113,169``: SAM weights the
+    vertical flux by the reference density, ``∂_t φ = (1/ρ)·∂_z(ρ_w·K·∂_z φ)``,
+    NOT the plain ``∂_z(K ∂_z φ)``). Vertical — unlike horizontal — cannot hide
+    the ``ρ(z)`` factor, so it must be carried explicitly::
+
+        F_{k+1/2} = ρ_w[k+1/2] · K_{k+1/2} · (f_{k+1} − f_k) / dz_half[k]
+        tend_k    = (F_{k+1/2} − F_{k-1/2}) / (ρ_ref[k] · dz_full[k])
+
+    with full-level K averaged to the interface ``K_{k+1/2}=0.5(K_k+K_{k+1})``,
+    ``ρ_w`` the interface reference density (``rho_ref_half``) and ``ρ_ref`` the
+    cell density. NO-FLUX domain boundaries (``F=0`` at top+surface) — interior
+    SGS only; surface/top fluxes are injected SEPARATELY by the surface scheme,
+    matching SAM where ``diffuse_scalar`` adds ``fluxb``/``fluxt`` to the
+    boundary cell (``diffuse_scalar_z.f90:61``) rather than through the interior
+    stencil — so a no-flux interior stencil avoids double-counting.
+
+    Conservative in the MASS measure: ``Σ_k tend_k·ρ_ref[k]·dz_full[k] = F_top −
+    F_bot = 0``. Dissipative: ``Σ_k f_k·tend_k·ρ_ref[k]·dz_full[k] = −Σ ρ_w·K·
+    (f_{k+1}−f_k)²/dz_half ≤ 0`` for K≥0. (Uses the anelastic reference density
+    ρ₀(z) like SAM; the ρ' part is second-order and absent from SAM's anelastic
+    SGS.) ``field_yxz``/``K_yxz`` are full-level ``(ny, nx, nlev)``.
+    """
+    dz_full = height_coord.dz                       # (nlev,) cell thickness
+    dz_half = height_coord.dz_half                  # (nlev-1,) full→full dist
+    rho_full = height_coord.rho_ref                 # (nlev,) cell ρ₀
+    # interior interfaces sit at z_half[1..nlev-1] ⇒ rho_ref_half[1:-1].
+    rho_iface = height_coord.rho_ref_half[1:-1]     # (nlev-1,) interface ρ₀
+    # K at the nlev-1 interior interfaces (average adjacent full-level K).
+    K_iface = 0.5 * (K_yxz[..., :-1] + K_yxz[..., 1:])          # (..., nlev-1)
+    flux = rho_iface * K_iface * (
+        field_yxz[..., 1:] - field_yxz[..., :-1]) / dz_half
+    # No-flux at the top + bottom domain interfaces ⇒ pad the interface flux
+    # with a zero at each end before differencing back to full levels.
+    pad_axes = ((0, 0),) * (flux.ndim - 1)
+    flux_padded = jnp.pad(flux, (*pad_axes, (1, 1)))           # (..., nlev+1)
+    return (flux_padded[..., 1:] - flux_padded[..., :-1]) / (rho_full * dz_full)
+
+
+def _vertical_K_diffusion_w(
+    w_yxz: jax.Array, K_full: jax.Array, height_coord: HeightCoordinate,
+) -> jax.Array:
+    """Vertical SGS flux ``∂_z(K ∂_z w)`` for the HALF-level ``w`` (SGS-VERT #81).
+
+    Dual-grid counterpart of :func:`_vertical_K_diffusion_full`: ``w`` lives at
+    the ``nlev+1`` interfaces (``z_half``), ``K_m`` at the ``nlev`` cell centres
+    (``z_full``). The vertical w-gradient and its flux therefore live at the
+    CELL CENTRES, and the flux divergence returns to the interfaces. MASS-WEIGHTED
+    like SAM ``diffuse_mom3D.f90:112,179`` — the w leg weights the cell-centre
+    flux by the CELL density ρ_ref and normalises the interface divergence by the
+    INTERFACE density ρ_w (the mirror of the scalar/u/v weighting)::
+
+        F_k          = ρ_ref[k] · K_k · (w_{k+1} − w_k) / dz_full[k]   (centre k)
+        tend_{k+1/2} = (F_{k+1} − F_k) / (ρ_w[k+1/2] · dz_half[k])      (iface)
+
+    The rigid top/bottom boundaries (``w=0`` there) are preserved by padding the
+    interior-interface tendency with zeros — the boundary w is held by the BC,
+    not diffused. Dissipative for the resolved KE in the mass measure
+    (``Σ w·tend·ρ_w·dz_half ≤ 0``).
+    """
+    dz_full = height_coord.dz                       # (nlev,) cell thickness
+    dz_half = height_coord.dz_half                  # (nlev-1,) full→full dist
+    rho_full = height_coord.rho_ref                 # (nlev,) cell ρ₀
+    rho_iface = height_coord.rho_ref_half[1:-1]     # (nlev-1,) interior iface ρ₀
+    # ρ-weighted SGS flux F = ρ_ref · K · ∂_z w at cell centres.
+    flux_full = rho_full * K_full * (
+        w_yxz[..., 1:] - w_yxz[..., :-1]) / dz_full       # (..., nlev)
+    # Divergence back to the nlev-1 INTERIOR interfaces, normalised by the
+    # interface density; the two rigid boundary interfaces (w=0) get zero.
+    tend_interior = (
+        flux_full[..., 1:] - flux_full[..., :-1]) / (rho_iface * dz_half)
+    pad_axes = ((0, 0),) * (tend_interior.ndim - 1)
+    return jnp.pad(tend_interior, (*pad_axes, (1, 1)))         # (..., nlev+1)
+
+
 def _safe_sqrt_strain(strain_mag_sq: jax.Array) -> jax.Array:
     """``sqrt(strain_mag_sq)`` with AD-safe ``d/dx sqrt(0) = 0``.
 
@@ -686,6 +799,185 @@ def _safe_sqrt_strain(strain_mag_sq: jax.Array) -> jax.Array:
     return jnp.where(strain_mag_sq > 0.0, jnp.sqrt(safe), 0.0)
 
 
+def _sgs_brunt_vaisala_sq(
+    theta_total: jax.Array,
+    tracers: jax.Array,
+    height_coord: HeightCoordinate,
+    phase_blend_width_K: float = 20.0,
+    sat_blend_rel_width: float = 0.02,
+) -> jax.Array:
+    """Sub-grid Brunt–Väisälä frequency ``N²`` for the SAM ``dosmagor``
+    stratification correction, switching between a CLEAR (virtual-θ) and a
+    SATURATED (moist-adiabatic) formula per grid point.
+
+    SAM faithfulness (``SGS_TKE/tke_full.f90``)
+    -------------------------------------------
+    SAM forms ``buoy_sgs`` at each interface in two regimes and feeds it
+    to ``tk = (Cs·Δ)²·sqrt(max(0, def2 − Pr·buoy_sgs))`` (line 298):
+
+    - **Unsaturated** (``tke_full.f90:154-159``): virtual-temperature
+      buoyancy gradient with vapour + condensate loading.  In potential-
+      temperature form, ``N²_dry = (g/θ_v)·∂θ_v/∂z`` with
+      ``θ_v = θ·(1 + ε_v·q_v − Σq_cond)``, ``ε_v = 1/ε − 1 ≈ 0.61``.
+    - **Saturated** (``tke_full.f90:198-226``): when the interface total
+      water exceeds saturation, SAM switches to the moist (cloudy)
+      buoyancy that accounts for latent-heat release on adiabatic ascent.
+      SAM's ``lstarn``/``dqsat`` algebra is the discretised Durran–Klemp
+      (1982, JAS 39, Eq. 36) saturated ``N²``:
+
+          N²_moist = g·[ A·(∂lnθ/∂z + (L/(c_pd·T))·∂q_s/∂z) − ∂q_w/∂z ]
+          A = (1 + L·q_s/(R_d·T)) / (1 + ε·L²·q_s/(c_pd·R_d·T²))
+
+      ``L`` = latent heat, ``q_s`` the saturation mixing ratio, ``q_w``
+      total water.  The saturated ``N²`` is SMALLER (often negative) than
+      the dry value, so the ``dosmagor`` shutoff lets the LES MIX inside
+      cloud (conditional instability) while still damping the clear,
+      stable environment.  Without this switch the closure over-damps
+      cloudy interfaces exactly where the CRM is meant to resolve
+      convective overturning.
+
+    Deliberate departures from SAM (differentiability + robustness)
+    ---------------------------------------------------------------
+    legoESM is end-to-end differentiable, so three SAM choices that are
+    fine in a forward-only Fortran model are replaced by smooth,
+    AD-safe surrogates (Codex adversarial-review iter-2):
+
+    - **Phase split is TEMPERATURE-based**, not SAM's condensate ratio
+      ``ω = q_c/(q_c+q_i)``.  ``ω(q_c,q_i)`` has an unbounded adjoint as
+      ``q_c+q_i → 0`` and injects a spurious ``(q_sw−q_si)·∂ω/∂z``
+      hydrometeor-phase term into ``∂q_s/∂z``.  We use the shared
+      :func:`legoesm.thermo.saturation_mixing_ratio_blend` (``w_liq(T)``
+      ramp) so ``q_s`` and ``L`` are smooth functions of ``T`` and
+      ``∂q_s/∂z`` is a clean thermodynamic gradient on the moist adiabat.
+    - **Clear↔moist transition is a SMOOTH sigmoid** in fractional
+      supersaturation ``(q_nonprecip − q_s)/q_s`` (width
+      ``sat_blend_rel_width``), not SAM's hard ``qtot > qsat`` branch
+      (``tke_full.f90:198``).  A hard ``where`` branch-selects the
+      gradient at cloud edges; the narrow ramp tracks SAM's sharp switch
+      in the forward pass while keeping adjoints finite and smooth.
+
+    Known faithfulness caveats (logged, acceptable):
+    - The switch is evaluated at CELL CENTRES (legoESM stores ``N²`` at
+      centres) whereas SAM tests at INTERFACES — the transition can sit
+      within half a level of SAM's, where ``dosmagor`` is sensitive.
+    - ``T``/``p`` come from the REFERENCE Exner profile
+      (``T = θ·Π_ref``, ``p = p_ref·Π_ref^(1/κ)``; SAM uses base-state
+      ``presi``).  This ignores pressure perturbations, so ``q_s`` and
+      the switch can bias in strong cold pools / compressed regions.
+
+    ``q_s`` uses the shared :mod:`legoesm.thermo` saturation routines
+    (CLAUDE.md — no re-implemented Clausius–Clapeyron).  ``N²_moist``
+    needs only ``q_s`` and its vertical gradient, NOT ``dq_s/dT`` — the
+    Durran–Klemp ``A`` factor is algebraic in ``(L, q_s, T)``.
+
+    Parameters
+    ----------
+    theta_total : jax.Array
+        Dry potential temperature ``θ = θ_ref + θ'`` at cell centres,
+        shape ``(ny, nx, nlev)``.
+    tracers : jax.Array
+        Tracer array ``(ny, nx, nlev, n_tracers)``; slot 0 = ``q_v``,
+        slots 1.. = condensate mass (q_c, q_r, q_i, q_s, q_g) then number
+        concentrations.  Robust to ``n_tracers < 6`` (warm-rain layouts):
+        absent ice/precip slots are treated as zero.
+    height_coord : HeightCoordinate
+        Reference Exner (``exner_ref``) for T/p and ``dz_half`` for the
+        vertical gradients (via :func:`_full_level_centred_d_dz`).
+    phase_blend_width_K : float
+        Width [K] of the temperature ramp that splits liquid/ice for the
+        mixed-phase ``q_s`` and ``L`` (``w_liq = 1`` above
+        ``T_freeze``, ``0`` below ``T_freeze − width``).  Matches the
+        :func:`legoesm.thermo.saturation_mixing_ratio_blend` default so
+        ``q_s`` and ``L_eff`` use one consistent ramp.
+    sat_blend_rel_width : float
+        Fractional-supersaturation width of the smooth clear↔moist
+        sigmoid: ``f_moist = σ((q_nonprecip − q_s)/(width·q_s))``.
+        Small (default 2 %) so the forward transition stays close to
+        SAM's hard switch while the adjoint stays finite.
+
+    Returns
+    -------
+    jax.Array
+        ``N²_sgs`` at cell centres ``(ny, nx, nlev)`` [1/s²].
+    """
+    from legoesm import constants
+    from legoesm.atmosphere.physics._shared import virtual_temperature
+    from legoesm.thermo import saturation_mixing_ratio_blend
+
+    # ``_full_level_centred_d_dz`` returns the LEVEL-INDEX derivative =
+    # −∂/∂z_physical under top-down storage, so every N² carries a leading
+    # minus to recover the physical-z stratification (matches the dry term
+    # the SMAG-1 commit introduced and the kernel docstring).
+    n_tr = tracers.shape[-1]
+    if n_tr == 0:
+        dtheta_dlev = _full_level_centred_d_dz(theta_total, height_coord)
+        return -(constants.g / jnp.clip(theta_total, 1.0, None)) * dtheta_dlev
+
+    q_v = tracers[..., 0]
+    n_cond = min(n_tr, 6)                      # slots 1..5 = condensate mass
+    if n_cond > 1:
+        q_cond = jnp.sum(tracers[..., 1:n_cond], axis=-1)
+    else:
+        q_cond = jnp.zeros_like(q_v)
+    q_w = q_v + q_cond                         # total water mixing ratio
+
+    # Cloud condensate (cloud water slot 1, cloud ice slot 3) sets the
+    # non-precip total water for the saturation switch; precip slots
+    # (2,4,5) load buoyancy via q_w but do not by themselves saturate.
+    q_c = tracers[..., 1] if n_tr > 1 else jnp.zeros_like(q_v)
+    q_i = tracers[..., 3] if n_tr > 3 else jnp.zeros_like(q_v)
+
+    exner = height_coord.exner_ref                             # (nlev,)
+    T = theta_total * exner                                    # (ny,nx,nlev)
+    p = constants.p_ref * exner ** (1.0 / constants.kappa)     # (nlev,)
+
+    # Clear-air virtual-θ N² (SAM unsaturated branch).
+    theta_v = virtual_temperature(theta_total, q_v) - theta_total * q_cond
+    n2_dry = -(constants.g / jnp.clip(theta_v, 1.0, None)) * (
+        _full_level_centred_d_dz(theta_v, height_coord)
+    )
+
+    # Saturated moist-adiabatic N² (Durran–Klemp 1982).  TEMPERATURE-based
+    # mixed phase (w_liq ramp) keeps q_s / L smooth + differentiable and
+    # makes ∂q_s/∂z thermodynamic (no q_cloud-in-denominator blow-up, no
+    # hydrometeor-phase ∂ω/∂z artifact — Codex iter-2).
+    q_sat = saturation_mixing_ratio_blend(
+        T, p, T_blend_width=phase_blend_width_K,
+    )
+    w_liq = jnp.clip(
+        (T - (constants.T_freeze - phase_blend_width_K)) / phase_blend_width_K,
+        0.0, 1.0,
+    )
+    L_eff = w_liq * constants.L_v + (1.0 - w_liq) * constants.L_s
+    A_moist = (
+        1.0 + L_eff * q_sat / (constants.R_d * T)
+    ) / (
+        1.0
+        + constants.epsilon * L_eff ** 2 * q_sat
+        / (constants.c_pd * constants.R_d * T ** 2)
+    )
+    ln_theta = jnp.log(jnp.clip(theta_total, 1.0, None))
+    n2_moist = -constants.g * (
+        A_moist * (
+            _full_level_centred_d_dz(ln_theta, height_coord)
+            + (L_eff / (constants.c_pd * T))
+            * _full_level_centred_d_dz(q_sat, height_coord)
+        )
+        - _full_level_centred_d_dz(q_w, height_coord)
+    )
+
+    # Smooth clear↔moist blend (differentiable surrogate for SAM's hard
+    # qtot>qsat switch, tke_full.f90:198).  σ in fractional supersaturation
+    # so adjoints stay finite across cloud edges; narrow ramp tracks the
+    # sharp forward switch.  q_nonprecip = q_v + cloud (SAM non-precip).
+    q_nonprecip = q_v + q_c + q_i
+    q_sat_safe = jnp.clip(q_sat, 1.0e-12, None)
+    f_moist = jax.nn.sigmoid(
+        (q_nonprecip - q_sat) / (sat_blend_rel_width * q_sat_safe)
+    )
+    return f_moist * n2_moist + (1.0 - f_moist) * n2_dry
+
+
 def _compute_smagorinsky_K_m_plane(
     u_yxz: jax.Array,
     v_yxz: jax.Array,
@@ -693,13 +985,36 @@ def _compute_smagorinsky_K_m_plane(
     grid: PlaneGrid,
     height_coord: HeightCoordinate,
     c_s: float,
+    n2_sgs: jax.Array | None = None,
+    prandtl: float = 1.0,
+    wall_damping: bool = True,
+    delta_max: float = 1.0e30,
+    stability_length: bool = False,
 ) -> jax.Array:
     """Full 3D Smagorinsky-Lilly eddy viscosity on the C-grid plane.
 
-    ``K_m = (C_s · Δ)² · |S|`` with isotropic mixing length
-    ``Δ = (dx · dy · dz)^(1/3)`` and FULL strain-rate magnitude
-    ``|S| = sqrt(2 S_ij S_ij)`` including vertical-shear components
+    ``K_m = (C_s · Δ)² · sqrt(max(0, |S|² − Pr · N²))`` with isotropic
+    mixing length ``Δ = (dx · dy · dz)^(1/3)`` and FULL strain-rate
+    magnitude ``|S|² = 2 S_ij S_ij`` including vertical-shear components
     ``S_13``, ``S_23``, ``S_33``. Returned at cell centres.
+
+    Stratification (Lilly) correction — SAM faithfulness
+    ----------------------------------------------------
+    SAM's ``dosmagor`` closure forms ``tk = (Cs·Δ)² · sqrt(max(0,
+    def2 − Pr·buoy_sgs))`` (``SGS_TKE/tke_full.f90:298``), subtracting
+    the sub-grid buoyancy frequency ``N² = buoy_sgs`` inside the sqrt so
+    that mixing SHUTS OFF in stably-stratified layers (trade inversion,
+    cloud tops, free troposphere, tropopause) and is ENHANCED where the
+    column is statically unstable.  ``def2`` in SAM is ``2 S_ij S_ij``
+    — the SAME convention as ``strain_mag_sq`` here.  Pass the precomputed
+    sub-grid ``N²`` (clear-vs-moist switched) from
+    :func:`_sgs_brunt_vaisala_sq` as ``n2_sgs`` to activate the term;
+    ``n2_sgs=None`` reduces the closure to the pure-strain form (used by
+    the dry-strain unit tests).  Keeping ``N²`` in a single shared helper
+    (rather than inline here AND in the halo kernel) prevents serial/MPI
+    divergence.  Without it the closure over-mixes every stratified layer,
+    which directly corrupts the domain-mean ``θ``/``q`` profiles this CRM
+    is validated against.
 
     Energy-consistent C-grid evaluation
     -----------------------------------
@@ -737,6 +1052,17 @@ def _compute_smagorinsky_K_m_plane(
         ``(nlev,)``) and ``dz_half`` (interface-to-interface
         spacing, shape ``(nlev-1,)``) for the vertical gradients.
     c_s : float
+    n2_sgs : jax.Array | None
+        Precomputed sub-grid Brunt–Väisälä frequency ``N²`` at cell
+        centres, shape ``(ny, nx, nlev)`` (from
+        :func:`_sgs_brunt_vaisala_sq`, which switches between clear and
+        saturated stratification).  When provided, the SAM correction
+        ``− Pr · N²`` is subtracted inside the strain sqrt.  ``None``
+        (default) recovers the pure-strain Smagorinsky form.
+    prandtl : float
+        Turbulent Prandtl number ``Pr`` multiplying ``N²`` in the
+        stratification term — matches SAM's ``def2 − Pr·buoy_sgs``
+        (``Pr = 1`` in SAM ``dosmagor``).
 
     Returns
     -------
@@ -808,7 +1134,9 @@ def _compute_smagorinsky_K_m_plane(
         + 2.0 * S13_sq_center
         + 2.0 * S23_sq_center
     )
-    strain_mag = _safe_sqrt_strain(strain_mag_sq)
+    # ``strain_mag`` (the sqrt) is deferred to AFTER the optional
+    # stratification subtraction below so the SAM ``max(0, def2 −
+    # Pr·N²)`` shutoff lives inside a single AD-safe ``_safe_sqrt``.
 
     # LES boundary-layer mixing length:
     #   l_m = min(c_s · Δ, κ · z)
@@ -825,11 +1153,60 @@ def _compute_smagorinsky_K_m_plane(
     # :mod:`legoesm.constants` so callers wanting a different
     # convention (e.g. 0.41) update the central definition once.
     from legoesm import constants
-    delta = (grid.dx * grid.dy * dz_full) ** (1.0 / 3.0)   # (nlev,)
+    # SAM-faithful cap on the horizontal grid spacing in the mixing length
+    # (SGS_TKE/tke_full.f90:42 coef=min(delta_max,dx·mu)·min(delta_max,dy·ady),
+    # delta_max=1000 m): without it the isotropic Δ over-grows on coarse grids
+    # (dx>1 km) and the SGS over-mixes the resolved convective variance.
+    dx_eff = jnp.minimum(delta_max, grid.dx)
+    dy_eff = jnp.minimum(delta_max, grid.dy)
+    delta = (dx_eff * dy_eff * dz_full) ** (1.0 / 3.0)     # (nlev,)
     l_smag = c_s * delta                                   # (nlev,)
-    l_wall = constants.kappa_von_karman * height_coord.z_full   # (nlev,)
-    l_m = jnp.minimum(l_smag, l_wall)
+    # ``wall_damping`` (static config bool) caps the length at the von Kármán
+    # wall scaling (Mason 1989). SAM's ``dosmagor`` does NOT (``smix=grd``; the
+    # ``tke_full.f90`` wall correction is commented out) — so the SAM-faithful
+    # CRM runs set ``smagorinsky_wall_damping=False`` ⇒ ``l_m = c_s·Δ`` at every
+    # level (the cap is active only in the lowest cell where ``κz < c_s·Δ``).
+    if wall_damping:
+        l_wall = constants.kappa_von_karman * height_coord.z_full   # (nlev,)
+        l_m = jnp.minimum(l_smag, l_wall)
+    else:
+        l_m = l_smag
     l_m_sq = l_m ** 2                                      # (nlev,)
+
+    # --- SAM dosmagor stratification (Lilly) correction ---
+    # K_m = (Cs·Δ)² · sqrt(max(0, |S|² − Pr·N²)).  ``_safe_sqrt_strain``
+    # applies the ``max(0, ·)`` shutoff AND keeps ``d/dx sqrt(0) = 0``,
+    # so a strongly-stable column (N² ≫ |S|²) yields K_m = 0 exactly,
+    # matching SAM ``tke_full.f90:298``.  N² is precomputed by the shared
+    # ``_sgs_brunt_vaisala_sq`` helper (clear↔moist switched) so the serial
+    # and halo kernels stay bit-identical.
+    if n2_sgs is not None:
+        strain_arg = strain_mag_sq - prandtl * n2_sgs
+    else:
+        strain_arg = strain_mag_sq
+    strain_mag = _safe_sqrt_strain(strain_arg)
+    if stability_length and n2_sgs is not None:
+        # SAM dosmagor stable-layer Deardorff mixing-length limit
+        # (SGS_TKE/tke_full.f90:285-298): in STABLE layers (N²>0) shrink the
+        # mixing length smix=min(grd, max(0.1·grd, √(0.76·tk/(Ck·√N²)))) and
+        # vary Cee=Ce1+Ce2·(smix/grd); the eddy viscosity becomes
+        # tk=√(Ck³/Cee·(|S|²−Pr·N²))·smix² (Ck=0.1, Ce=Ck³/Cs⁴,
+        # Ce1=Ce/0.7·0.19, Ce2=Ce/0.7·0.51). SAM lags tk across the step; the
+        # diagnostic plane uses the same-step smix=grd estimate (predictor).
+        # In UNSTABLE layers (N²≤0) smix=grd ⇒ reduces EXACTLY to the default
+        # (Cs·grd)²·|S| form. Use with wall_damping=False (SAM dosmagor caps
+        # neither length); grd is the isotropic delta (delta_max-capped).
+        Ck = 0.1
+        Ce = Ck ** 3 / c_s ** 4
+        tk_grd = c_s ** 2 * delta ** 2 * strain_mag        # smix=grd estimate
+        n2_pos = jnp.maximum(n2_sgs, 1.0e-10)
+        smix_stable = jnp.minimum(delta, jnp.maximum(
+            0.1 * delta,
+            jnp.sqrt(0.76 * tk_grd / (Ck * jnp.sqrt(n2_pos)))))
+        smix = jnp.where(n2_sgs > 0.0, smix_stable, delta)
+        ratio = smix / jnp.clip(delta, 1.0e-12, None)
+        Cee = Ce / 0.7 * (0.19 + 0.51 * ratio)
+        return jnp.sqrt(Ck ** 3 / Cee) * smix ** 2 * strain_mag
     return l_m_sq * strain_mag
 
 
@@ -922,9 +1299,189 @@ def _vertical_advection_plane(
     return -w_full / J[:, :, None] * df_dz
 
 
+def _vertical_advection_van_leer_plane(
+    field_yxz: jax.Array,
+    w_yxz_half: jax.Array,
+    height_coord: HeightCoordinate,
+    J: jax.Array,
+) -> jax.Array:
+    """Monotone (van-Leer TVD) ``-(w/J) df/dz`` at cell centres — for SCALARS.
+
+    Drop-in monotone replacement for :func:`_vertical_advection_plane` for the
+    TRACER vertical transport (D5). The centred scheme overshoots into negative
+    tracer values at the sharp vertical gradients of a convective updraft (then
+    clipped on the microphysics read → mass loss + distorted profiles); the
+    van-Leer flux limiter forbids new extrema, so a positive tracer stays
+    positive. SAM advects scalars with a monotone scheme (ULTIMATE-MACHO /
+    MPDATA) and momentum with a centred one — so this is wired for tracers
+    only, leaving u/v on the centred scheme.
+
+    Numerics — the SAME advective form as the horizontal
+    :func:`_van_leer_advection_x` (flux→advective identity
+    ``-w·∂q/∂z = -∂(wq)/∂z + q·∂w/∂z``), so the horizontal + vertical operators
+    combine to the advective ``-u·∇q`` (not a flux/advective mix). The flux
+    reconstruction lives on the ``w`` INTERFACE grid where ``w`` natively sits
+    (no half→full averaging): at interface ``j`` (between cell ``j-1`` above and
+    cell ``j`` below) the face value ``q_face[j]`` is the slope-limited 2nd-order
+    upwind value chosen by ``sign(w[j])``, ``F[j]=w[j]·q_face[j]``, and the cell
+    tendency is ``(F[k+1]-F[k])/dz[k] + q[k]·(w[k]-w[k+1])/dz[k]``, all ``/J``.
+    Rigid boundaries (``w[...,0]=w[...,-1]=0``) ⇒ zero flux through the
+    top/surface; the field is edge-padded (zero-gradient) so the 4-cell stencil
+    degrades to 1st-order upwind at the boundary-adjacent interfaces (standard
+    TVD boundary behaviour). Reduces to the centred scheme for a smooth field
+    with uniform ``w``. AD: van-Leer's ``(r+|r|)/(1+|r|)`` is smooth except a
+    single subgradient kink at ``r=0``; the ``where``-guarded denominators flow
+    cleanly through ``jax.grad`` (same construction as ``_van_leer_advection_x``).
+    """
+    from legoesm.core.flux_limiters import van_leer_face_values
+    nlev = field_yxz.shape[-1]
+    if nlev <= 2:
+        # too few cells for the 4-point stencil — fall back to centred.
+        return _vertical_advection_plane(field_yxz, w_yxz_half, height_coord, J)
+    f = field_yxz                                   # (ny, nx, nlev)
+    w = w_yxz_half                                  # (ny, nx, nlev+1)
+    dz = height_coord.dz                            # (nlev,)
+    # Edge-pad the field by 2 cells each end so every interface j=0..nlev has
+    # its [j-2, j-1, j, j+1] stencil (zero-gradient ghosts at the rigid lids).
+    pad_axes = ((0, 0),) * (f.ndim - 1)
+    fp = jnp.pad(f, (*pad_axes, (2, 2)), mode="edge")   # (ny, nx, nlev+4)
+    f_jm2 = fp[..., 0:nlev + 1]                     # cell j-2 at interface j
+    f_jm1 = fp[..., 1:nlev + 2]                     # cell j-1 (above the face)
+    f_j = fp[..., 2:nlev + 3]                       # cell j   (below the face)
+    f_jp1 = fp[..., 3:nlev + 4]                     # cell j+1
+    # Face reconstruction at interface j (the i+1/2 face with left cell j-1,
+    # right cell j) via the shared HD-1-correct helper. Velocity along
+    # increasing-k is -w, so phi_pos (face-vel>0) is downward flow (w<=0,
+    # upwind cell j-1 above) and phi_neg (face-vel<0) is upward (w>0, cell j).
+    phi_pos, phi_neg = van_leer_face_values(f_jm2, f_jm1, f_j, f_jp1)
+    q_face = jnp.where(w <= 0.0, phi_pos, phi_neg)  # (ny, nx, nlev+1)
+    flux = w * q_face                               # F[j] at interfaces
+    # Rigid lids: explicitly enforce NO flux through the top/surface interfaces
+    # (``w`` is already 0 there by construction; this is defensive so a future
+    # non-zero-lid w cannot leak tracer mass — codex iter-44 C).
+    flux = flux.at[..., 0].set(0.0).at[..., -1].set(0.0)
+    # Advective tendency = -∂(wq)/∂z + q·∂w/∂z, both per cell thickness dz[k].
+    flux_div = (flux[..., 1:] - flux[..., :-1]) / dz       # (F[k+1]-F[k])/dz
+    dwdz = f * (w[..., :-1] - w[..., 1:]) / dz             # q·(w[k]-w[k+1])/dz
+    return (flux_div + dwdz) / J[:, :, None]
+
+
 # --------------------------------------------------------------------- #
 # Slow tendencies                                                       #
 # --------------------------------------------------------------------- #
+
+
+def _moisture_buoyancy_w_half(
+    tracers: jax.Array,
+    theta_prime: jax.Array,
+    height_coord: HeightCoordinate,
+    hmean_fn,
+) -> jax.Array:
+    """SAM moist buoyancy on ``w`` at half levels (``buoyancy.f90``).
+
+    The dry θ'-buoyancy in the acoustic substep
+    (``compressible_euler._acoustic_substep``) carries only the LEADING
+    ``g·θ'/θ₀`` (the ``×1`` thermal coefficient).  SAM's full buoyancy
+    (``buoyancy.f90:35-46``), with ``bet = g/T₀`` factored out, is
+
+        buo = g·(ε_v·q_v′ − q_cond′)                       # vapour + load
+            + g·(T′/T₀)·(1 + ε_v·q̄_v − q̄_cond)            # moist thermal
+
+    where ``′`` = deviation from the HORIZONTAL MEAN (SAM's evolving
+    ``qv0``/``qn0``/``qp0``/``tabs0`` base state) and ``ε_v = 1/ε − 1 ≈
+    0.61``.  The acoustic substep supplies the ``g·(T′/T₀)·1`` piece;
+    this helper supplies the rest:
+
+        B_moist = g·[ ε_v·q_v′ − q_cond′
+                      + (θ′−⟨θ′⟩)/θ₀ · (ε_v·q̄_v − q̄_cond) ]
+
+    — the first-order vapour-virtual + condensate loading PLUS the moist
+    modification of the thermal coefficient (``ε_v·q̄_v − q̄_cond``).  The
+    thermal correction multiplies ``θ′−⟨θ′⟩`` (deviation from the
+    horizontal mean = SAM's ``T′`` relative to ``tabs0``), so the whole
+    term has ZERO horizontal mean and adds NO spurious mean updraft
+    against legoESM's DRY reference (full ``q_v`` would inject
+    ``g·ε_v·⟨q_v⟩ ≈ 0.07 m/s²`` of unbalanced mean buoyancy in RCE).
+    Dry-substep + ``B_moist`` then reproduce SAM's full ``buoyancy.f90``
+    expression (up to the uniform-grid half-level average noted below).
+
+    Moisture is frozen across the acoustic substeps, so this is evaluated
+    ONCE per RK stage and added to the slow ``dw/dt`` (SAM likewise adds
+    buoyancy once per Adams–Bashforth step), unlike the dry θ'-buoyancy
+    re-evaluated every substep for the acoustic / gravity-wave coupling.
+
+    Faithfulness caveats (logged):
+    - Full→half interpolation is a uniform ``0.5·(b[k]+b[k+1])``, matching
+      the dry ``theta_p_half`` convention; SAM uses ``adz``-weighted
+      ``betu``/``betd`` — a parity gap only on STRETCHED vertical grids,
+      shared by the dry buoyancy (fix both together if it matters).
+    - No SAM energy-compensation term (``factor=coef·buo·w`` on the
+      prognostic ``t``); legoESM's dry buoyancy likewise omits it (that
+      correction is specific to SAM's anelastic liquid-static-energy
+      formulation — legoESM's compressible θ/ρ thermodynamics handle the
+      buoyancy work via the pressure/continuity coupling instead).
+
+    Parameters
+    ----------
+    tracers : jax.Array
+        ``(ny, nx, nlev, n_tracers)`` interior cell-centre tracers.  Slot
+        0 = ``q_v``; slots 1..min(5) = condensate mass (q_c, q_r, q_i,
+        q_s, q_g).  Robust to ``n_tracers < 6`` and ``== 0``.
+    theta_prime : jax.Array
+        ``(ny, nx, nlev)`` potential-temperature perturbation θ − θ_ref
+        (cell centres).  Only its deviation from the horizontal mean is
+        used (the moist thermal-coefficient correction).
+    height_coord : HeightCoordinate
+        Provides ``theta_ref`` (θ₀) and ``z_half`` (interface count).
+    hmean_fn : Callable[[jax.Array], jax.Array]
+        Horizontal-mean reduction of a ``(ny, nx, nlev)`` field to a
+        broadcastable mean profile.  Serial passes
+        ``lambda f: jnp.mean(f, axis=(0, 1), keepdims=True)``; the MPI
+        halo path passes a GLOBAL mean (``global_sum_mpi`` over interior /
+        global point count) — bit-identical at ``n_ranks == 1`` and
+        physically correct for ``n_ranks > 1``.
+
+    Returns
+    -------
+    jax.Array
+        ``B_moist`` at half levels ``(ny, nx, nlev+1)`` with rigid (zero)
+        top + bottom interfaces, ready to add to the slow ``dw/dt``.
+    """
+    from legoesm import constants
+
+    nlev_half = height_coord.z_half.shape[-1]
+    n_tr = tracers.shape[-1]
+    if n_tr == 0:
+        ny, nx = tracers.shape[0], tracers.shape[1]
+        return jnp.zeros((ny, nx, nlev_half), dtype=tracers.dtype)
+
+    q_v = tracers[..., 0]
+    n_cond = min(n_tr, 6)                      # slots 1..5 = condensate mass
+    if n_cond > 1:
+        q_cond = jnp.sum(tracers[..., 1:n_cond], axis=-1)
+    else:
+        q_cond = jnp.zeros_like(q_v)
+
+    eps_v = 1.0 / constants.epsilon - 1.0
+    qv_bar = hmean_fn(q_v)                     # (1,1,nlev) — SAM qv0
+    qcond_bar = hmean_fn(q_cond)              # (1,1,nlev) — SAM qn0+qp0
+    # Moist thermal-coefficient correction: (θ′−⟨θ′⟩)/θ₀ · (ε_v·q̄_v − q̄_cond).
+    # θ′−⟨θ′⟩ = θ − ⟨θ⟩ = SAM's T′ relative to the horizontal-mean base
+    # state; keeps the whole term zero-mean.
+    theta_dev = theta_prime - hmean_fn(theta_prime)
+    thermal_coef = eps_v * qv_bar - qcond_bar
+    b_full = constants.g * (
+        eps_v * (q_v - qv_bar) - (q_cond - qcond_bar)
+        + (theta_dev / height_coord.theta_ref) * thermal_coef
+    )                                          # (ny, nx, nlev)
+
+    # Full levels -> interior interfaces (two-point average); rigid (zero)
+    # top + bottom to match the w BC of the horizontal-advection dw/dt.
+    pad_axes = ((0, 0),) * (b_full.ndim - 1)
+    return jnp.pad(
+        0.5 * (b_full[..., :-1] + b_full[..., 1:]),
+        (*pad_axes, (1, 1)),
+    )
 
 
 def plane_compressible_euler_slow_tendencies(
@@ -1027,8 +1584,17 @@ def plane_compressible_euler_slow_tendencies(
         f_yface = interp_cell_to_yface_vlast(f_3d, grid)
         v_xface = interp_yface_to_xface_vlast(v, grid)
         u_yface = interp_xface_to_yface_vlast(u, grid)
-        du_cor = f_xface * v_xface
-        dv_cor = -f_yface * u_yface
+        # SAM coriolis.f90: f acts on the DEPARTURE from the geostrophic
+        # reference wind (ug0(k), vg0(k)), not the full wind — otherwise the
+        # large-scale balanced mean wind is spuriously spun up by an inertial
+        # oscillation. ug0/vg0 are (nlev,) base-state profiles on height_coord;
+        # None ⇒ zero (RCE / no-mean-wind ⇒ reduces to the full-wind form).
+        v_ref = (0.0 if height_coord.v_geo0 is None
+                 else height_coord.v_geo0[None, None, :])
+        u_ref = (0.0 if height_coord.u_geo0 is None
+                 else height_coord.u_geo0[None, None, :])
+        du_cor = f_xface * (v_xface - v_ref)
+        dv_cor = -f_yface * (u_yface - u_ref)
     else:
         du_cor = jnp.zeros_like(u)
         dv_cor = jnp.zeros_like(v)
@@ -1058,23 +1624,32 @@ def plane_compressible_euler_slow_tendencies(
     #    - "weno5" (5th-order WENO-Z, stencil 6 — least grid-scale
     #      dispersion but ~3x per-step cost; opt-in for sharp-front
     #      problems where dispersion matters more than throughput).
+    _ADV_PAIRS = {
+        "weno5": (_weno5_advection_x, _weno5_advection_y),
+        "van_leer": (_van_leer_advection_x, _van_leer_advection_y),
+        "centered": (_centered_advection_x, _centered_advection_y),
+        "upwind1": (_upwind_advection_x, _upwind_advection_y),
+    }
     scheme = getattr(config, "horizontal_advection_scheme", "upwind1")
-    if scheme == "weno5":
-        adv_x, adv_y = _weno5_advection_x, _weno5_advection_y
-    elif scheme == "van_leer":
-        adv_x, adv_y = _van_leer_advection_x, _van_leer_advection_y
-    elif scheme == "upwind1":
-        adv_x, adv_y = _upwind_advection_x, _upwind_advection_y
-    else:
-        # iter-194: list the active registry instead of a hardcoded
-        # string so a future fourth scheme in
-        # HORIZONTAL_ADVECTION_HALO_REQUIREMENT automatically surfaces
-        # in the error message.
+    if scheme not in _ADV_PAIRS:
+        # iter-194: list the active registry instead of a hardcoded string so a
+        # future scheme in HORIZONTAL_ADVECTION_HALO_REQUIREMENT auto-surfaces.
         raise ValueError(
             f"Unknown horizontal_advection_scheme: {scheme!r}. "
-            f"Expected one of "
-            f"{sorted(HORIZONTAL_ADVECTION_HALO_REQUIREMENT)}."
+            f"Expected one of {sorted(HORIZONTAL_ADVECTION_HALO_REQUIREMENT)}."
         )
+    adv_x, adv_y = _ADV_PAIRS[scheme]
+    # ADV-SPLIT (#86): MOMENTUM legs (u/v/w) may use a separate scheme (e.g.
+    # "centered" = SAM-faithful non-diffusive advect2_mom) while scalars keep the
+    # monotone van_leer. None ⇒ momentum = scalar scheme (legacy, both same).
+    mscheme = getattr(
+        config, "horizontal_momentum_advection_scheme", None) or scheme
+    if mscheme not in _ADV_PAIRS:
+        raise ValueError(
+            f"Unknown horizontal_momentum_advection_scheme: {mscheme!r}. "
+            f"Expected one of {sorted(HORIZONTAL_ADVECTION_HALO_REQUIREMENT)}."
+        )
+    madv_x, madv_y = _ADV_PAIRS[mscheme]
     u_center = interp_xface_to_cell_vlast(u, grid)
     v_center = interp_yface_to_cell_vlast(v, grid)
     dtheta_p_dt = (
@@ -1084,16 +1659,18 @@ def plane_compressible_euler_slow_tendencies(
 
     # 6. Horizontal momentum advection — Arakawa-C. u lives at x-face;
     #    advect by (u-at-x-face, v-at-x-face). v→x-face via 4-pt
-    #    corner average. Symmetric for v. Same scheme as theta.
+    #    corner average. Symmetric for v. Uses the MOMENTUM scheme
+    #    (madv; ADV-SPLIT #86 — may be centred/non-diffusive while
+    #    scalars stay monotone van_leer).
     v_at_xface = interp_yface_to_xface_vlast(v, grid)
     u_at_yface = interp_xface_to_yface_vlast(u, grid)
     du_adv = (
-        adv_x(u, u, grid.dx)
-        + adv_y(u, v_at_xface, grid.dy)
+        madv_x(u, u, grid.dx)
+        + madv_y(u, v_at_xface, grid.dy)
     )
     dv_adv = (
-        adv_x(v, u_at_yface, grid.dx)
-        + adv_y(v, v, grid.dy)
+        madv_x(v, u_at_yface, grid.dx)
+        + madv_y(v, v, grid.dy)
     )
 
     # 7. Vertical advection of u, v by full-level w.
@@ -1108,8 +1685,8 @@ def plane_compressible_euler_slow_tendencies(
     #    to interface for the upwind side selection).
     w_full = 0.5 * (w[..., :-1] + w[..., 1:])
     dw_full = (
-        adv_x(w_full, u_center, grid.dx)
-        + adv_y(w_full, v_center, grid.dy)
+        madv_x(w_full, u_center, grid.dx)
+        + madv_y(w_full, v_center, grid.dy)
     )
     # Re-map to half levels: interior is the average of adjacent full
     # values; top and bottom interfaces stay rigid (zero) so the
@@ -1120,6 +1697,16 @@ def plane_compressible_euler_slow_tendencies(
         (*pad_axes, (1, 1)),
     )
 
+    # 8b. SAM moist buoyancy on w (vapour-virtual + condensate loading),
+    #     frozen for this RK stage. The dry θ' buoyancy lives in the
+    #     acoustic substep; this adds the moist part SAM's buoyancy.f90
+    #     carries. Perturbation from the SERIAL horizontal mean.
+    if config.moist_buoyancy:
+        dw_dt = dw_dt + _moisture_buoyancy_w_half(
+            state.tracers.data, theta_p, height_coord,
+            lambda f: jnp.mean(f, axis=(0, 1), keepdims=True),
+        )
+
     # 9. Rayleigh sponge layer (top-of-model damping). Zero when
     #    ``config.sponge_coeff == 0`` — the profile evaluates to zero
     #    below ``H - sponge_width`` and reaches ``sponge_coeff`` at
@@ -1127,18 +1714,26 @@ def plane_compressible_euler_slow_tendencies(
     #    theta' at full levels and to w at half levels; this matches
     #    the MPAS NH dycore pattern in
     #    :func:`compressible_euler_mpas.mpas_compressible_euler_slow_tendencies`.
+    _sponge_shape = getattr(config, "sponge_profile_shape", "sin2")
     sponge_full = _sponge_profile(
         height_coord.z_full, height_coord.H,
-        config.sponge_width, config.sponge_coeff,
+        config.sponge_width, config.sponge_coeff, shape=_sponge_shape,
     )                                         # (nlev,)
     sponge_half = _sponge_profile(
         height_coord.z_half, height_coord.H,
-        config.sponge_width, config.sponge_coeff,
+        config.sponge_width, config.sponge_coeff, shape=_sponge_shape,
     )                                         # (nlev+1,)
-    du_dt = du_dt - sponge_full * u
-    dv_dt = dv_dt - sponge_full * v
-    dtheta_p_dt = dtheta_p_dt - sponge_full * theta_p
-    drho_p_dt = drho_p_dt - sponge_full * rho_p
+    # SAM ``damping.f90`` damps the VERTICAL velocity ONLY (``w/(1+taudamp)``);
+    # u/v/θ/ρ are untouched, so the sponge absorbs gravity waves while leaving
+    # the anvil-level horizontal wind + thermodynamics intact. With
+    # ``sponge_w_only=True`` (static config bool) legoESM matches that; the
+    # default damps all 5 fields (the MPAS-style sponge). The CRM run-scripts
+    # set True + ``sponge_width=0.4·H`` (SAM ``nub=0.6``, top 40%).
+    if not getattr(config, "sponge_w_only", False):
+        du_dt = du_dt - sponge_full * u
+        dv_dt = dv_dt - sponge_full * v
+        dtheta_p_dt = dtheta_p_dt - sponge_full * theta_p
+        drho_p_dt = drho_p_dt - sponge_full * rho_p
     dw_dt = dw_dt - sponge_half * w
 
     # 10. Biharmonic hyperdiffusion. ``-coeff * ∇⁴f`` with the
@@ -1213,13 +1808,42 @@ def plane_compressible_euler_slow_tendencies(
     #     ``K_m_half * Lap(w)`` to vertical momentum (``K_m`` averaged
     #     from full to half levels). ``c_s = 0`` skips the branch
     #     entirely (cheap Python on/off gate).
-    if config.smagorinsky_cs > 0.0:
-        # Full 3D Smag strain (replaces horizontal-only pilot). Takes
-        # half-level w so the vertical-shear components S13, S23, S33
-        # contribute to |S|. K_m lives at cell centres.
-        K_m = _compute_smagorinsky_K_m_plane(
-            u, v, w, grid, height_coord, config.smagorinsky_cs,
-        )
+    tracer_sgs_tend = None     # SGS-SCALAR: K_h diffusion on tracers (set below)
+    # Turbulence-closure mode (DNS-LES, iter-177). Both branches build a
+    # cell-centre eddy/molecular viscosity K_m + a Prandtl number; the
+    # diffusion operators below are SHARED, so LES and DNS reuse the CRM
+    # machinery unchanged — only K_m differs.
+    _closure = getattr(config, "turbulence_closure", "smagorinsky")
+    _use_smag = _closure == "smagorinsky" and config.smagorinsky_cs > 0.0
+    _use_mol = (_closure == "molecular"
+                and getattr(config, "molecular_viscosity", 0.0) > 0.0)
+    if _use_smag or _use_mol:
+        if _use_mol:
+            # DNS: CONSTANT molecular kinematic viscosity ν everywhere — no
+            # eddy model, no stratification cutoff. K_h = ν / Pr for the heat
+            # + scalar legs. Needs sgs_vertical_diffusion=True for the full
+            # 3-D ν∇²; dx must resolve ~the Kolmogorov scale.
+            K_m = jnp.full(u.shape, config.molecular_viscosity, dtype=u.dtype)
+            sgs_prandtl = config.molecular_prandtl
+        else:
+            # CRM/LES: Smagorinsky-Lilly EDDY viscosity. Full 3D strain (takes
+            # half-level w so the vertical-shear components S13, S23, S33
+            # contribute to |S|). Sub-grid N² (clear↔moist switched) applies
+            # the SAM dosmagor stratification cutoff (tke_full.f90:154-226).
+            # K_m at cell centres; shared with the halo kernel so serial/MPI
+            # stay bit-identical.
+            n2_sgs = _sgs_brunt_vaisala_sq(
+                theta_total, state.tracers.data, height_coord,
+            )
+            K_m = _compute_smagorinsky_K_m_plane(
+                u, v, w, grid, height_coord, config.smagorinsky_cs,
+                n2_sgs=n2_sgs, prandtl=config.smagorinsky_prandtl,
+                wall_damping=getattr(config, "smagorinsky_wall_damping", True),
+                delta_max=getattr(config, "smagorinsky_delta_max", 1.0e30),
+                stability_length=getattr(
+                    config, "smagorinsky_stability_length", False),
+            )
+            sgs_prandtl = config.smagorinsky_prandtl
         # u at x-face, v at y-face on the Arakawa-C grid →
         # interpolate K_m to each face before the flux-form
         # diffusion so the operand and diffusivity co-locate.
@@ -1227,10 +1851,44 @@ def plane_compressible_euler_slow_tendencies(
         K_m_yface = interp_cell_to_yface_vlast(K_m, grid)
         du_dt = du_dt + _variable_K_diffusion_vlast(u, K_m_xface, grid)
         dv_dt = dv_dt + _variable_K_diffusion_vlast(v, K_m_yface, grid)
-        K_h = K_m / config.smagorinsky_prandtl
+        K_h = K_m / sgs_prandtl
         dtheta_p_dt = dtheta_p_dt + _variable_K_diffusion_vlast(
             theta_p, K_h, grid,
         )
+        # SGS-VERT (#81): add the VERTICAL SGS flux ∂_z(K ∂_z φ) so the
+        # Smagorinsky closure is fully 3D like SAM (gated; default off).
+        # u/v use their face-co-located K (same diffusivity as the
+        # horizontal leg); θ'/tracers use K_h; w uses cell-centre K_m. The
+        # no-flux scalar BC + rigid-w BC live inside the helpers (surface
+        # fluxes are applied separately by the surface scheme).
+        if config.sgs_vertical_diffusion:
+            du_dt = du_dt + _vertical_K_diffusion_full(u, K_m_xface, height_coord)
+            dv_dt = dv_dt + _vertical_K_diffusion_full(v, K_m_yface, height_coord)
+            dtheta_p_dt = dtheta_p_dt + _vertical_K_diffusion_full(
+                theta_p, K_h, height_coord,
+            )
+        # SGS-SCALAR (iter-60): SAM `sgs.f90:664-675` SGS-diffuses EVERY scalar
+        # (`do k=1,nmicro_fields: call diffuse_scalar(micro_field(:,:,:,k),tkh)`)
+        # — q_v + all hydrometeor mass + number fields — with the same eddy
+        # conductivity as `t` (SAM Pr=1 ⇒ tkh=tk=K_m). legoESM previously diffused
+        # θ' ONLY, leaving moisture/condensate under-mixed (wrong cloud-edge
+        # dilution, q'²). Apply the SAME K_h to EVERY tracer slot — matching both
+        # the θ' treatment above AND the tracer ADVECTION below (which also vmaps
+        # all slots), so no slot is advected-but-not-diffused. SAM `flag_advect=1`
+        # for all M2005 fields with docloud+doprecip on ⇒ diffuse-all is faithful
+        # (a non-advected/padded slot, if ever added, would need masking in BOTH
+        # advection and this diffusion together). The VERTICAL leg is added below
+        # when sgs_vertical_diffusion is on (SGS-VERT #81 — now wired, was a gap).
+        if state.tracers.data.shape[-1] > 0:
+            tracer_sgs_tend = jax.vmap(
+                lambda q: _variable_K_diffusion_vlast(q, K_h, grid),
+                in_axes=-1, out_axes=-1,
+            )(state.tracers.data)
+            if config.sgs_vertical_diffusion:
+                tracer_sgs_tend = tracer_sgs_tend + jax.vmap(
+                    lambda q: _vertical_K_diffusion_full(q, K_h, height_coord),
+                    in_axes=-1, out_axes=-1,
+                )(state.tracers.data)
         # ``K_m`` at full levels; interpolate to half levels for w
         # (rigid boundary K stays zero — no spurious tendency at top
         # / bottom interfaces).
@@ -1240,24 +1898,45 @@ def plane_compressible_euler_slow_tendencies(
             K_m_half_interior, (*pad_axes, (1, 1)),
         )
         dw_dt = dw_dt + _variable_K_diffusion_vlast(w, K_m_half, grid)
+        if config.sgs_vertical_diffusion:
+            dw_dt = dw_dt + _vertical_K_diffusion_w(w, K_m, height_coord)
 
     # 12. Tracer advection. Advective form via upwind on cell-centre
     #     velocities (face-averaged from ``u``, ``v`` — the C-grid
     #     pairing for cell-centred scalars). vmap over the trailing
-    #     tracer axis.
+    #     tracer axis. The VERTICAL scheme is config-selected (D5):
+    #     "centered" (default) or monotone "van_leer" (positive-definite,
+    #     SAM-faithful for scalars). u/v momentum stay centred regardless.
+    vert_tracer_scheme = getattr(
+        config, "vertical_tracer_advection", "centered")
+    if vert_tracer_scheme == "van_leer":
+        _vertical_tracer_adv = _vertical_advection_van_leer_plane
+    elif vert_tracer_scheme == "centered":
+        _vertical_tracer_adv = _vertical_advection_plane
+    else:
+        raise ValueError(
+            f"Unknown vertical_tracer_advection: {vert_tracer_scheme!r}. "
+            f"Expected 'centered' or 'van_leer'."
+        )
     tracers = state.tracers.data
     if tracers.shape[-1] > 0:
         def _tracer_tend_one(q):
             return (
                 adv_x(q, u_center, grid.dx)
                 + adv_y(q, v_center, grid.dy)
-                + _vertical_advection_plane(q, w, height_coord, J)
+                + _vertical_tracer_adv(q, w, height_coord, J)
             )
         dtracers_dt = jax.vmap(_tracer_tend_one, in_axes=-1, out_axes=-1)(
             tracers,
         )
     else:
         dtracers_dt = jnp.zeros_like(tracers)
+    # SGS-SCALAR (iter-60): add the horizontal SGS eddy diffusion of every tracer
+    # (computed with K_h in the Smagorinsky block above) — SAM diffuses all
+    # micro_field scalars, not just θ'. Conservative flux-form ⇒ tracer mass
+    # preserved under periodic BC.
+    if tracer_sgs_tend is not None:
+        dtracers_dt = dtracers_dt + tracer_sgs_tend
     zero_phis = jnp.zeros_like(state.phis.data)
 
     return PlaneNonHydrostaticTendencies(
@@ -1351,6 +2030,9 @@ def plane_acoustic_substeps(
         w_final, theta_p_final, rho_p_final = _acoustic_column_kernel(
             w_final, theta_p_final, rho_p_final,
             height_coord, J, dt_s, beta, g,
+            theta_vert_van_leer=(
+                getattr(euler_config, "acoustic_theta_advection", "centered")
+                == "van_leer"),
         )
 
     return PlaneNonHydrostaticState(
@@ -1420,6 +2102,9 @@ def plane_acoustic_substeps_semi_implicit(
                 implicit_buoyancy=implicit_buoyancy,
                 precomputed_tridiag=tri_bands,
                 si_w_vertical_filter_nu=si_w_filter_nu,
+                theta_vert_van_leer=(
+                    getattr(euler_config, "acoustic_theta_advection", "centered")
+                    == "van_leer"),
             )
         )
 
@@ -1526,6 +2211,9 @@ def plane_acoustic_substeps_si_horizontal(
             implicit_buoyancy=implicit_buoyancy,
             precomputed_tridiag=tri_bands,
             si_w_vertical_filter_nu=si_w_filter_nu,
+            theta_vert_van_leer=(
+                getattr(euler_config, "acoustic_theta_advection", "centered")
+                == "van_leer"),
         )
 
         # 4. Horizontal mass-flux divergence (backward: uses new u, v).
@@ -1626,6 +2314,36 @@ def validate_plane_config(config: CompressibleEulerConfig) -> None:
             "be > 0 when smagorinsky_cs > 0; K_h = K_m / Pr inverts "
             "or NaNs for Pr <= 0."
         )
+    closure = getattr(config, "turbulence_closure", "smagorinsky")
+    if closure not in ("smagorinsky", "molecular", "none"):
+        raise ValueError(
+            f"turbulence_closure={closure!r} invalid; use 'smagorinsky' "
+            "(CRM/LES eddy viscosity), 'molecular' (DNS molecular viscosity), "
+            "or 'none' (inviscid)."
+        )
+    if closure == "molecular":
+        if getattr(config, "molecular_viscosity", 0.0) <= 0.0:
+            raise ValueError(
+                f"molecular_viscosity={getattr(config, 'molecular_viscosity', 0.0)!r}"
+                " must be > 0 for turbulence_closure='molecular' (DNS); set e.g."
+                " constants.nu_air = 1.5e-5 m^2/s."
+            )
+        if getattr(config, "molecular_prandtl", 0.0) <= 0.0:
+            raise ValueError(
+                f"molecular_prandtl={getattr(config, 'molecular_prandtl', 0.0)!r} "
+                "must be > 0; the DNS heat/scalar diffusivity K_h = nu / Pr "
+                "inverts or NaNs for Pr <= 0."
+            )
+        if not getattr(config, "sgs_vertical_diffusion", False):
+            import warnings
+            warnings.warn(
+                "turbulence_closure='molecular' (DNS) with "
+                "sgs_vertical_diffusion=False applies the molecular viscosity in "
+                "the HORIZONTAL only; the vertical nu d^2/dz^2 leg is OFF, so this "
+                "is NOT a full 3-D DNS. Set sgs_vertical_diffusion=True for the "
+                "complete molecular operator (1/rho) d_z(rho nu d_z phi).",
+                stacklevel=2,
+            )
 
 
 # --------------------------------------------------------------------- #

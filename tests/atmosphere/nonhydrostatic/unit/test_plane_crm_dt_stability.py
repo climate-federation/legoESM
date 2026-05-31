@@ -203,3 +203,53 @@ def test_bare_dycore_clean_ic_bit_stable_up_to_10s(dt):
         "If a stability-relevant change is intentional, update F10 "
         "and the test threshold; otherwise this is a regression."
     )
+
+
+# --------------------------------------------------------------------------
+# #82 (iter-61): substep_horizontal_acoustic=True LIFTS the dt-stability limit.
+# The F1 "dt=2 s blows up" boundary above is ENTIRELY the
+# substep_horizontal_acoustic=False default (the horizontal acoustic mode is
+# integrated at the OUTER dt). With the full Skamarock-Klemp split, dt=2 AND
+# dt=4 are STABLE (measured max|w| 0.015 / 0.025 m/s vs 182 m/s at dt=2 without
+# it). GATE/LBA drivers + the RCE driver (iter-61) default this ON.
+# --------------------------------------------------------------------------
+
+def _build_model_substep(dt: float):
+    """As ``_build_model`` but with the full horizontal-acoustic substepping."""
+    n_acoustic = max(12, int(round(dt * 24)))
+    nx = ny = 48
+    nlev = 30
+    grid = create_plane_grid(nx=nx, ny=ny, nlev=nlev, dx=2_000.0, dy=2_000.0,
+                             dtype=jnp.float64)
+    theta_fn = make_wing2018_theta_ref_fn(
+        T_sfc=300.0, q_sfc=0.0224, z_t=15_000.0, Gamma=6.7e-3)
+    hc = create_height_coordinate(n_levels=nlev, H=33_000.0,
+                                  theta_ref_fn=theta_fn)
+    terrain = make_flat_plane_terrain_metric(grid, hc)
+    cfg = CompressibleEulerConfig(
+        sponge_coeff=0.05, sponge_width=10_000.0,
+        hyperdiff_coeff=5.0e6, hyperdiff_rho_coeff=5.0e6, hyperdiff_w_coeff=5.0e6,
+        semi_implicit_acoustic=True, substep_horizontal_acoustic=True,
+        acoustic_off_centering=0.1, use_coriolis=False,
+        fix_mass=True, anchor_mass_to_initial=True,
+        smagorinsky_cs=0.2, smagorinsky_prandtl=1.0,
+        n_acoustic_substeps=n_acoustic)
+    return PlaneCompressibleEulerModel(grid, hc, terrain, config=cfg), grid, hc
+
+
+@pytest.mark.parametrize("dt", [2.0, 4.0])
+def test_substep_horizontal_acoustic_keeps_dt2_dt4_stable(dt):
+    """#82 regression: with substep_horizontal_acoustic=True a 0.5 K warm bubble
+    stays STABLE at dt=2 s AND dt=4 s — the dt limit the F1 path (substep OFF)
+    blew up at. If this regresses, the iter-61 horizontal-acoustic substep fix
+    is broken (the RCE driver would blow up at finite amplitude again)."""
+    model, grid, hc = _build_model_substep(dt)
+    state = make_rest_state(grid, hc, dtype=jnp.float64)
+    state = _seed_warm_bubble(state, hc, grid, amp_k=0.5)
+    for _ in range(100):
+        state = model.step(state, dt=dt, physics_fn=None)
+    max_w = float(jnp.max(jnp.abs(state.w.data)))
+    assert jnp.isfinite(max_w) and max_w < STABLE_MAX_W, (
+        f"dt={dt}s with substep_horizontal_acoustic=True: max|w|={max_w:.3e} "
+        f"m/s exceeds {STABLE_MAX_W} — the #82 horizontal-acoustic substep fix "
+        "regressed (without it dt=2 blows up to ~182 m/s).")

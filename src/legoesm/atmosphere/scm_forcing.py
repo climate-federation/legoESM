@@ -33,6 +33,10 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.atmosphere.large_scale_forcing import (
+    mask_inflow_endpoint_tendency as _mask_inflow_endpoint_tendency,
+    upwind_dphi_dz_top2bottom as _upwind_dphi_dz_top2bottom,
+)
 from legoesm.atmosphere.physics._shared import (
     compute_heights_from_sigma,
     compute_layer_dz,
@@ -206,83 +210,6 @@ def _eval_profile(fn, t, nlev, dtype):
             f"expected ({nlev},)."
         )
     return out
-
-
-def _upwind_dphi_dz_top2bottom(
-    phi: jax.Array,
-    z_full: jax.Array,
-    w: jax.Array,
-) -> jax.Array:
-    """First-order upwind d(phi)/dz for top-to-bottom vertical layout.
-
-    Index convention: ``k=0`` = model top, ``k=nlev-1`` = surface, so
-    ``z_full[..., k-1] > z_full[..., k]`` everywhere.  Returned gradient is
-    the standard ``d(phi)/dz`` with the **positive-z-upward** convention
-    (positive when phi increases with height).
-
-    Donor-side selection by sign of ``w`` (positive upward):
-      * ``w > 0`` (rising air): donor is *below*  → ``(phi[k] − phi[k+1]) /
-        (z[k] − z[k+1])``.
-      * ``w < 0`` (subsiding): donor is *above*  → ``(phi[k-1] − phi[k]) /
-        (z[k-1] − z[k])``.
-      * ``w == 0`` falls into the "from-above" branch but is multiplied by
-        zero downstream, so the choice is moot.
-
-    Endpoints with an *available* upstream donor use the only one-sided
-    interior stencil.  Endpoints with no upstream donor (top with
-    ``w < 0`` = downward inflow, surface with ``w > 0`` = upward inflow)
-    return whatever the duplicated interior stencil produces; the caller
-    in :func:`compute_forcing_tendencies` masks the resulting tendency
-    to zero rather than letting a fabricated boundary gradient flow into
-    the integration.  See :func:`_mask_inflow_endpoint_tendency`.
-    """
-    diff = phi[..., :-1] - phi[..., 1:]          # phi[k] - phi[k+1] at k=0..nlev-2
-    dz = z_full[..., :-1] - z_full[..., 1:]      # z[k] - z[k+1], all > 0
-    grad = diff / jnp.clip(dz, 1.0, None)        # shape (..., nlev-1)
-
-    # "From-above" gradient placed at level k for k=1..nlev-1 (uses diff[k-1]).
-    # k=0 endpoint falls back to "from-below" gradient (duplicate grad[0]).
-    grad_from_above = jnp.concatenate([grad[..., :1], grad], axis=-1)
-    # "From-below" gradient placed at level k for k=0..nlev-2 (uses diff[k]).
-    # k=nlev-1 endpoint falls back to "from-above" gradient (duplicate grad[-1]).
-    grad_from_below = jnp.concatenate([grad, grad[..., -1:]], axis=-1)
-
-    return jnp.where(w > 0.0, grad_from_below, grad_from_above)
-
-
-def _mask_inflow_endpoint_tendency(
-    tend: jax.Array, w: jax.Array,
-) -> jax.Array:
-    """Zero the advective tendency at endpoints with no upstream donor.
-
-    For a single-column model, the cell above the top level and below
-    the surface level lie outside the simulated domain.  When the
-    large-scale vertical velocity carries air *into* the domain at
-    those boundaries — top with ``w < 0`` (downward inflow) or surface
-    with ``w > 0`` (upward inflow) — the upwind stencil has no real
-    donor and the previously-returned gradient was a duplicated
-    interior value.  Masking those tendencies to zero is the only
-    boundary-condition-free option that does not silently fabricate
-    an inflow profile; callers that need a non-trivial top boundary
-    should set ``w_ls[0]`` to ``0`` explicitly (closed boundary) or
-    drive q_v / theta inflow through ``theta_adv`` / ``qv_adv`` with a
-    user-supplied profile.
-
-    Operates on the trailing vertical axis; works for any leading
-    broadcast shape so long as ``tend`` and ``w`` share the same
-    nlev.  Requires ``nlev >= 2``.
-    """
-    nlev = tend.shape[-1]
-    idx = jnp.arange(nlev)
-    is_top = (idx == 0)
-    is_surf = (idx == nlev - 1)
-    # Broadcast the axis-aligned masks against the leading dims of tend.
-    bcast_shape = (1,) * (tend.ndim - 1) + (nlev,)
-    is_top = is_top.reshape(bcast_shape)
-    is_surf = is_surf.reshape(bcast_shape)
-    tend = jnp.where(is_top & (w < 0.0), jnp.zeros_like(tend), tend)
-    tend = jnp.where(is_surf & (w > 0.0), jnp.zeros_like(tend), tend)
-    return tend
 
 
 def compute_forcing_tendencies(
