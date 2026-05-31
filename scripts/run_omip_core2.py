@@ -530,7 +530,9 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                   barotropic_time_filter=None, bottom_drag_r=None,
                   C_smag=None, C_leith=None, C_smag_lap=None,
                   momentum_advection=None, slope_foot_alpha=None,
-                  slope_foot_n_levels=None, slope_foot_threshold=None):
+                  slope_foot_n_levels=None, slope_foot_threshold=None,
+                  min_levels=1, div_damp_2=None, div_damp_4=None,
+                  smag_cfl_safety=None):
     """Build a regular lat-lon C-grid with REALISTIC bathymetry + the run_omip
     production config (smc03 PGF, biharmonic, implicit-CN barotropic, GM/Redi,
     KPP) -- documented to run STABLE 50+ yr with real geometry, unlike the
@@ -564,6 +566,9 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
                               ("slope_foot_alpha", slope_foot_alpha),
                               ("slope_foot_n_levels", slope_foot_n_levels),
                               ("slope_foot_threshold", slope_foot_threshold),
+                              ("div_damp_2", div_damp_2),
+                              ("div_damp_4", div_damp_4),
+                              ("smag_cfl_safety", smag_cfl_safety),
                               ) if v is not None}
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -593,7 +598,8 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
             LatLonCGridOceanModel,
         )
         z_coord, H_bathy, land_mask = make_partial_cell(
-            z_coord, H_bathy, land_mask, smoothing_passes=bathy_smoothing_passes)
+            z_coord, H_bathy, land_mask, smoothing_passes=bathy_smoothing_passes,
+            min_levels=min_levels)
         model = LatLonCGridOceanModel(grid, z_coord, config)
     state = run_omip._init_rest_state(
         "latlon", grid, z_coord, H_max,
@@ -905,6 +911,9 @@ def main() -> int:
             slope_foot_alpha=args.slope_foot_alpha,
             slope_foot_n_levels=args.slope_foot_n_levels,
             slope_foot_threshold=args.slope_foot_threshold,
+            min_levels=args.min_levels,
+            div_damp_2=args.div_damp_2, div_damp_4=args.div_damp_4,
+            smag_cfl_safety=args.smag_cfl_safety,
         )
         app_grid_type = "latlon"
 
