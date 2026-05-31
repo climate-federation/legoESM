@@ -74,6 +74,9 @@ grid (mismatched metrics). CubedSphereGrid is a JAX-pytree NamedTuple (string gn
 breaks JIT), so `create_cubed_sphere_cdgrid` now defaults `gnomonic="auto"` and INFERS from
 base cell-aspect (ed<1.15, equiangular>1.25, ambiguous raises). Model constructors auto-get
 matching C/D metrics. Equiangular byte-identical. Test: auto-on-ed==explicit-ed (5/5).
+Codex re-review APPROVED: corruption path closed, ed θ layouts verified line up with the
+supergrid/corner-ext/padded-supergrid indexing, no material findings. ⇒ gnomonic_ed grid
+wiring (A-grid + cdgrid + auto-infer) COMPLETE + codex-approved + corruption-safe.
 **(prior scoping, now DONE) the CDGRID layer:** dynamics consume
 `create_cubed_sphere_cdgrid(base)`, which REBUILDS its own equiangular C/D supergrid
 (`_compute_supergrid_metrics(n, _face_gnomonic_to_lonlat,…)` + `linspace` α at cubed_sphere_
