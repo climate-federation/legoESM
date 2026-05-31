@@ -484,8 +484,10 @@ def barotropic_substeps_fv3edge(
     ``barotropic_staggering="fv3edge"``.
 
     cc(face-local) -> FV3 edge-midpoint D-grid via :func:`_cc_to_edge_vector`;
-    ``h=H_bathy+eta``, ``h_s=-H_bathy`` (PGF=g*grad eta); coasts impermeable via the
-    edge masks re-applied each substep; edge->cc on exit preserves the baroclinic
+    ``h=H_bathy+eta``, ``h_s=-H_bathy`` (PGF=g*grad eta); coast edge masks re-applied
+    after each substep (cross-coast leak bounded to one internal SSP-RK3 step — the
+    SW core's RK stages still evaluate unmasked intermediates, same caveat as the
+    ``fv3sw`` wrapper; codex 19de9080 review); edge->cc on exit preserves the baroclinic
     deviation.
     """
     from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
