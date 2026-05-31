@@ -76,6 +76,19 @@ SECOND bug sets the growth RATE (corr -0.924 not -1.0; residual grows). Likely t
 backward COUPLING/time-centering (c_sw → p_grad_c → d_sw → one_grad_p sequence) or the c_sw
 half-step. Phase4 kept (correct, FB-only, no production impact). NEXT: find the growth-rate bug
 (oracle-diff workflow surfaced other discrepancies; check the FB coupling vs dyn_core.F90:489-1542).
+**iter77 — oracle-diff WORKFLOW result (11 agents, verified):** Phase4 PGF INDEPENDENTLY
+CONFIRMED correct (verify agent found it already in-tree + corroborated via the STABLE production
+scheme operators_cdgrid.py:1458 `B = KE + g*(h+h_s)` → Arakawa-Lamb gradient on D-grid winds ⇒
+FV3 SW D-grid momentum IS geopotential-forced). 5 discrepancies; 4 false (incl. C-grid `_p_grad_c`
+plain g·grad(h) = CORRECT for SW; D-grid raw-circulation vorticity = FV3-covariant-faithful).
+GROWTH-RATE candidate (the 1 flagged could_cause_growing_mode, confidence LOW): `_corner_vorticity`
+(fv3_sw_core.py:1237-1254) + `_d_sw5_corner_divergence` corner halos use `jnp.pad mode='edge'`
+(O(1) wrong at the 8 cube vertices) vs FV3 cross-face value (sw_core.F90:397-400 corner vort,
+2124-2229 divergence_corner). Matches the project's own iter-984 "_corner_vorticity halo off 6.5×
+at vertices". CAVEAT: zero-dissip also NaNs ⇒ the growth mode is INVISCID, so the divg-DAMPING-
+amplification path is NOT it; the corner VORTICITY halo (feeds fy_vort in the u_d update every
+step regardless of dissipation) is the live suspect. NEXT: fix `_corner_vorticity` cube-vertex
+halo mode='edge'→cross-face (FV3 fill_corners), retest FB W2 stability.
 
 
 ## GRID gap → gnomonic_ed wiring (LIKELY fixes the C96 eigenmode; iter62-69)
