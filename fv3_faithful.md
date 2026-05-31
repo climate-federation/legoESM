@@ -14,6 +14,9 @@ APPROVE). baroclinic v_rms 4.95→0.60; converges ~2nd order; mass 2.6e-11→1.1
 Re-verified (iter ~30): fresh baroclinic C36 cube PASS, native v-wind = smooth
 zonal bands, NO panel blocks/seam noise. Test `test_vector_cc_to_dgrid_wind_lift.py`.
 NH cube dcmip_tc1 PASS (|w|_max=0.014, mass drift 1e-15 — healthy steady balance).
+3D cross-grid CLOSENESS (gravity_wave_3_1, 0.25d): cube max|v|=19.3 ≈ latlon 20.2
+(within 5%); cube native v-wind = smooth wavenumber-2 wave, no panel imprint.
+(ico5 hydro pathologically slow on CPU — killed; cube↔latlon closeness sufficient.)
 
 ## ✅ CROSS-GRID longitude alignment — FIXED (codex clean)
 latlon stored native 72×144 under a 360-pt label (tens-of-deg translation);
