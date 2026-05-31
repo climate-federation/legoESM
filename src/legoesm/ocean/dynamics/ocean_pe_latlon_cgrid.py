@@ -739,6 +739,61 @@ def _weno_cell_to_vface(
     return jnp.concatenate([zero, phi_at_v_interior, zero], axis=0)
 
 
+def laplacian_smag_cfl_cap(grid, dt: float, safety: float):
+    """Per-cell viscous-CFL upper bound for a Laplacian eddy-viscosity coeff.
+
+    Returns ``(cap_h, cap_q)`` — the maximum coefficient that keeps explicit
+    2-D Laplacian diffusion stable on each cell, from the grid's anisotropic
+    per-cell metrics::
+
+        cap = safety / (dt * (1/dx**2 + 1/dy**2))
+
+    This is the STANDARD anisotropic explicit-diffusion CFL estimate (the
+    forward-Euler 2-D Laplacian limit is ``A * dt * (1/dx**2 + 1/dy**2)
+    <= 1/2``).  ``safety`` (~1/8) leaves a ~4x margin below that limit, which
+    also absorbs the curvilinear metric distortion not captured by the
+    rectangular ``1/dx**2 + 1/dy**2`` estimate (the discrete stress-divergence
+    operator on the tripole cap carries off-rectangular metric ratios) and the
+    headroom of the outer integrator.  Using the true per-cell ``dx``/``dy``
+    (not an equal-angle ``area * cos^2(lat)`` proxy) keeps the estimate from
+    badly over-capping on the anisotropic high-latitude / Arctic cells.
+
+    - ``cap_h`` sits at cell centres, from ``dx_T``/``dy_T``.
+    - ``cap_q`` sits at vertices, from the v-face spacings ``dx_v``/``dy_v``
+      periodically wrapped in longitude (append column 0 — the SAME cyclic
+      wrap the q-point Laplacian uses), so the seam is continuous:
+      ``cap_q[:, -1] == cap_q[:, 0]`` (no edge-replication discontinuity).
+
+    Works for both grid classes the C-grid tendencies accept: a
+    ``LatLonCGridGeometry`` (tripole or Mercator) exposes the single-cell
+    metrics ``dx_T``/``dy_T``/``dx_v``/``dy_v`` directly; the simpler
+    ``LatLonGrid`` stores 2-cell distances (``dx``/``dy``) and a v-face
+    cos-latitude (``cos_lat_v``), from which the single-cell spacings are
+    recovered.
+    """
+    if getattr(grid, "dx_T", None) is not None:
+        # LatLonCGridGeometry (tripole or Mercator): exact single-cell metrics.
+        dx_T, dy_T = grid.dx_T, grid.dy_T
+        dx_q = jnp.concatenate([grid.dx_v, grid.dx_v[:, :1]], axis=1)
+        dy_q = jnp.concatenate([grid.dy_v, grid.dy_v[:, :1]], axis=1)
+    else:
+        # LatLonGrid: dx/dy are 2-cell distances -> single cell is half.
+        n_lon = int(grid.lon.shape[0])
+        dx_T = grid.dx * 0.5                                  # (n_lat, n_lon)
+        dy_T = (grid.dy * 0.5)[:, None] * jnp.ones(
+            (1, dx_T.shape[1]), dtype=dx_T.dtype)             # (n_lat, n_lon)
+        _ones_q = jnp.ones((1, n_lon + 1), dtype=dx_T.dtype)
+        # Vertex spacings at v-face rows (n_lat+1): zonal from cos(lat_v),
+        # meridional from the (representative) latitude spacing dlat. Constant
+        # in longitude on a regular grid -> the seam is trivially periodic.
+        dx_q = (grid.radius * grid.dlon * grid.cos_lat_v)[:, None] * _ones_q
+        dy_q = jnp.full((int(grid.cos_lat_v.shape[0]), n_lon + 1),
+                        grid.radius * grid.dlat, dtype=dx_T.dtype)
+    cap_h = safety / (dt * (1.0 / jnp.square(dx_T) + 1.0 / jnp.square(dy_T)))
+    cap_q = safety / (dt * (1.0 / jnp.square(dx_q) + 1.0 / jnp.square(dy_q)))
+    return cap_h, cap_q
+
+
 def latlon_cgrid_ocean_baroclinic_tendencies(
     state: LatLonCGridOceanState,
     grid: LatLonGrid,
@@ -1684,6 +1739,25 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         A_smag_q = smagorinsky_viscosity_q_cgrid(
             D_T, D_S, grid, config.C_smag_lap, mask=mask)
+        # Per-cell viscous-CFL cap on the Laplacian-Smagorinsky coefficient.
+        # A_smag = (C*dx)^2 * |D| grows without bound at sharp jets (|D| large)
+        # and self-CFL-violates there -- the western-boundary-current cold-start
+        # blowup. Cap A_smag at the per-cell anisotropic 2-D explicit-diffusion
+        # stability estimate ``safety / (dt * (1/dx^2 + 1/dy^2))`` (see
+        # ``laplacian_smag_cfl_cap``; safety ~1/8 keeps ~4x margin that also
+        # covers curvilinear metric distortion), capping the under-resolved WBC
+        # jets while leaving the quiescent interior untouched -- a flow-aware,
+        # spatially-varying eddy viscosity, the resolution-appropriate analogue
+        # of NEMO's WBC-enhanced eddy_viscosity_3D. Using the grid's true
+        # metrics (not an area*cos^2(lat) proxy) keeps the estimate from badly
+        # over-capping the anisotropic high-lat / Arctic cells.
+        if config.smag_cfl_safety > 0.0:
+            _cap_h, _cap_q = laplacian_smag_cfl_cap(
+                grid, dt, config.smag_cfl_safety)
+            A_smag_h = jnp.minimum(
+                A_smag_h, _cap_h[..., None] if A_smag_h.ndim == 3 else _cap_h)
+            A_smag_q = jnp.minimum(
+                A_smag_q, _cap_q[..., None] if A_smag_q.ndim == 3 else _cap_q)
         _smag_lap_u, _smag_lap_v = viscous_tendency_cgrid(
             u, v, grid, A_smag_h, A_smag_q,
             mask=mask, u_mask=u_mask, v_mask=v_mask)

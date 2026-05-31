@@ -306,9 +306,15 @@ def _parse_resolution(grid_type: str, resolution: str) -> dict:
     elif grid_type == "spectral":
         return {"truncation": int(resolution.lstrip("Tt"))}
     elif grid_type == "tripole":
-        # Resolution maps to a mesh-file. Only eORCA1 supported today.
+        # Resolution maps to a mesh-file + its T-fold index convention. eORCA1
+        # (1 deg, 332x362, halo-inclusive -> n_lon-1-i) and eORCA025 (1/4 deg,
+        # 1207x1442, de-haloed -> (n_lon-i)%n_lon) -- both NEMO tripole
+        # mesh_mask files, read identically by create_tripole_grid
+        # (glamt/e1t.../tmask + fold). Passing the validated convention
+        # explicitly avoids relying on _detect_fold's auto tie-break.
         meshes = {
-            "eorca1": "data/grids/eORCA1.2_mesh_mask.nc",
+            "eorca1": ("data/grids/eORCA1.2_mesh_mask.nc", "n_lon-1-i"),
+            "eorca025": ("data/grids/eORCA025_mesh_mask.nc", "(n_lon-i)%n_lon"),
         }
         key = resolution.lower()
         if key not in meshes:
@@ -316,7 +322,8 @@ def _parse_resolution(grid_type: str, resolution: str) -> dict:
                 f"Unknown tripole resolution {resolution!r}. "
                 f"Available: {sorted(meshes)}."
             )
-        return {"mesh_path": meshes[key]}
+        mesh_path, fold_convention = meshes[key]
+        return {"mesh_path": mesh_path, "fold_convention": fold_convention}
     raise ValueError(f"Unknown grid type: {grid_type}")
 
 
@@ -739,7 +746,9 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             LateralMixingConfig, GMRediConfig, VisbeckConfig,
         )
 
-        geom = create_tripole_grid(params["mesh_path"])
+        geom = create_tripole_grid(
+            params["mesh_path"],
+            fold_convention=params.get("fold_convention", "auto"))
 
         if forcing_mode == "jra55_do_tropical":
             sf_config = SurfaceForcingConfig(scheme="none")

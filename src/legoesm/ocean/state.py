@@ -567,6 +567,16 @@ class LatLonCGridOceanConfig(NamedTuple):
                                     # viscosity A_smag = (C·dx)²·|D| via the
                                     # energy-stable stress-tensor operator.
                                     # MOM6 OM4 uses 0.15. Additive with A_h.
+    smag_cfl_safety: float = 0.0   # When > 0, cap the Laplacian-Smagorinsky
+                                    # coefficient at the per-cell anisotropic
+                                    # explicit-diffusion CFL estimate
+                                    # ``smag_cfl_safety / (dt*(1/dx^2+1/dy^2))``
+                                    # (see laplacian_smag_cfl_cap; ~4x margin)
+                                    # so it can be
+                                    # cranked high to damp western-boundary-
+                                    # current jets WITHOUT self-CFL-violating at
+                                    # the sharp jet (the WBC cold-start blowup).
+                                    # ~0.125 (1/8) is a safe 2-D Laplacian cap.
     bottom_drag_r: float = 0.0
     bottom_drag_bbl_thickness: float = 0.0
     bottom_drag_bg_velocity: float = 0.0  # MOM6 DRAG_BG_VEL [m/s]; when >0,

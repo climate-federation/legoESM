@@ -5,6 +5,8 @@ checkerboard-free results.  The C-grid eliminates the 2*dx null space
 present in the A-grid (LatLonOceanModel) formulation.
 """
 
+import math
+
 import jax
 import jax.numpy as jnp
 import pytest
@@ -15,6 +17,7 @@ from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
+    laplacian_smag_cfl_cap,
 )
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
@@ -566,3 +569,73 @@ def test_gm_redi_surface_complement_config_defaults_round_trip():
     cfg2 = GMRediConfig(surface_complement=False, surface_complement_depth=50.0)
     assert cfg2.surface_complement is False
     assert cfg2.surface_complement_depth == 50.0
+
+
+class TestSmagCFLCap:
+    """``smag_cfl_safety`` caps the Laplacian-Smagorinsky coefficient at the
+    per-cell anisotropic viscous-CFL estimate
+    ``smag_cfl_safety / (dt * (1/dx^2 + 1/dy^2))`` (``laplacian_smag_cfl_cap``)
+    so a large ``C_smag_lap`` can damp sharp western-boundary-current jets
+    without self-CFL-violating -- the eORCA025 WOA cold-start fix."""
+
+    def _sharp_jet(self, grid, z_coord):
+        st = rest_state_latlon_cgrid_ocean(
+            grid, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
+            H_max=4000.0,
+        )
+        # Grid-scale shear: alternate +/-3 m/s zonal velocity row by row so the
+        # strain rate |D| is large and the uncapped Smagorinsky coefficient
+        # A=(C*dx)^2*|D| shoots past the per-cell CFL limit.
+        nlat = st.u.data.shape[0]
+        sign = (jnp.arange(nlat) % 2 * 2 - 1).astype(st.u.data.dtype)
+        u = (st.u.data + 3.0 * sign[:, None, None]) * st.u_mask.data[..., None]
+        return st._replace(u=st.u.replace(data=u))
+
+    def test_cap_off_by_default(self):
+        assert LatLonCGridOceanConfig().smag_cfl_safety == 0.0
+
+    def test_cap_bounds_and_reduces_smag(self, grid, z_coord):
+        dt = 75.0
+        C = 100.0  # huge -> the cap is guaranteed to bind at the sharp jet
+        st = self._sharp_jet(grid, z_coord)
+        t_un = latlon_cgrid_ocean_baroclinic_tendencies(
+            st, grid, z_coord,
+            LatLonCGridOceanConfig(C_smag_lap=C, smag_cfl_safety=0.0), dt=dt,
+        )
+        t_cap = latlon_cgrid_ocean_baroclinic_tendencies(
+            st, grid, z_coord,
+            LatLonCGridOceanConfig(C_smag_lap=C, smag_cfl_safety=0.125), dt=dt,
+        )
+        # Capped tendency stays finite and viscous-Courant-bounded.
+        assert bool(jnp.all(jnp.isfinite(t_cap.du_dt.data)))
+        assert bool(jnp.all(jnp.isfinite(t_cap.dv_dt.data)))
+        peak_un = float(jnp.max(jnp.abs(t_un.du_dt.data)))
+        peak_cap = float(jnp.max(jnp.abs(t_cap.du_dt.data)))
+        assert peak_cap * dt < 50.0   # bounded near the 3 m/s jet scale
+        # The cap really bit: the uncapped peak is non-finite or >> the capped.
+        assert (not math.isfinite(peak_un)) or (peak_un > 5.0 * peak_cap)
+
+    def test_cap_helper_metric_and_cfl_safe(self, grid):
+        """``laplacian_smag_cfl_cap`` returns the anisotropic metric limit and
+        is CFL-safe. ``grid`` is a ``LatLonGrid`` (2-cell dx/dy -> single cell
+        is half), exercising that branch of the helper."""
+        dt, safety = 75.0, 0.125
+        cap_h, cap_q = laplacian_smag_cfl_cap(grid, dt, safety)
+        dx_T = grid.dx * 0.5
+        dy_T = (grid.dy * 0.5)[:, None] * jnp.ones(
+            (1, dx_T.shape[1]), dtype=dx_T.dtype)
+        s = 1.0 / dx_T ** 2 + 1.0 / dy_T ** 2
+        assert jnp.allclose(cap_h, safety / (dt * s), rtol=1e-6)
+        # CFL invariant: cap * dt * (1/dx^2 + 1/dy^2) == safety <= 1/2.
+        assert jnp.allclose(cap_h * dt * s, safety, rtol=1e-6)
+        assert safety <= 0.5
+        assert bool(jnp.all(jnp.isfinite(cap_h))) and bool(jnp.all(cap_h > 0))
+        assert bool(jnp.all(jnp.isfinite(cap_q))) and bool(jnp.all(cap_q > 0))
+        # cap_q is the vertex field (n_lat+1, n_lon+1).
+        assert cap_q.shape == (dx_T.shape[0] + 1, dx_T.shape[1] + 1)
+
+    def test_cap_q_periodic_seam(self, grid):
+        """The q-point cap wraps periodically in longitude (no edge-replication
+        discontinuity): column n_lon == column 0."""
+        _, cap_q = laplacian_smag_cfl_cap(grid, 75.0, 0.125)
+        assert jnp.array_equal(cap_q[:, -1], cap_q[:, 0])

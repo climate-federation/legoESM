@@ -320,7 +320,7 @@ def apply_balanced_init(state, grid, z_coord, config,
 
 
 def make_partial_cell(z_coord, H_bathy, land_mask, thin_threshold=0.3,
-                      smoothing_passes=0):
+                      smoothing_passes=0, min_levels=1):
     """Convert a z* reference coord + bathymetry to an ``OceanPartialCellCoordinate``,
     snapping ``H_bathy`` DOWN to the interface above whenever the bottom partial cell
     would be thinner than ``thin_threshold * dz_ref`` (MOM6/MITgcm thin-cell fix).
@@ -379,10 +379,28 @@ def make_partial_cell(z_coord, H_bathy, land_mask, thin_threshold=0.3,
         n_snapped += int(np.sum(too_thin))
     lm = np.asarray(land_mask, dtype=np.float64)
     new_land = (H_snapped <= 0.0) & (lm > 0.5)
+    # rn_hmin-style conditioning: mask ocean columns with fewer than
+    # ``min_levels`` active reference levels. Single-active-level coastal cells
+    # (H <= dz_ref[0]) are a 1/h instability seed at 1/4 deg, where resolved
+    # Arctic/coastal shelves collapse to one thin partial layer and a tiny
+    # smc03 PGF residual is amplified into a blowup (eORCA025 cold-start seed at
+    # 67N/107.5W). ``abs_z_half[k]`` is the top of level k, so n_active =
+    # #levels whose top lies above the local seafloor.
+    n_masked_shallow = 0
+    if min_levels and int(min_levels) > 1:
+        n_active = (abs_z_half[None, None, :z_coord.n_levels]
+                    < H_snapped[..., None]).sum(axis=2)
+        too_shallow = (n_active < int(min_levels)) & (lm > 0.5) & (H_snapped > 0.0)
+        n_masked_shallow = int(np.sum(too_shallow))
+        H_snapped = np.where(too_shallow, 0.0, H_snapped)
+        new_land = new_land | too_shallow
     n_new_land = int(np.sum(new_land))
     lm_out = np.where(new_land, 0.0, lm)
-    print(f"[setup] partial-cell snap (cutoff {thin_threshold*100:.0f}%): "
-          f"{n_snapped} cells snapped, {n_new_land} -> land")
+    msg = (f"[setup] partial-cell snap (cutoff {thin_threshold*100:.0f}%): "
+           f"{n_snapped} cells snapped, {n_new_land} -> land")
+    if min_levels and int(min_levels) > 1:
+        msg += f" ({n_masked_shallow} masked for <{int(min_levels)} active levels)"
+    print(msg)
     zc = create_partial_cell_coordinate(
         z_coord, jnp.asarray(H_snapped, dtype=jnp.float64),
     )
@@ -399,7 +417,9 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   barotropic_time_filter=None, bottom_drag_r=None,
                   C_smag=None, C_leith=None, C_smag_lap=None,
                   momentum_advection=None, slope_foot_alpha=None,
-                  slope_foot_n_levels=None, slope_foot_threshold=None):
+                  slope_foot_n_levels=None, slope_foot_threshold=None,
+                  min_levels=1, div_damp_2=None, div_damp_4=None,
+                  smag_cfl_safety=None):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -413,8 +433,19 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
     a close stand-in for NEMO's exact Gouretski IC, which is the further refinement.)
     """
     import run_omip
+    # Pick the tripole resolution from the mesh file: eORCA025 (1/4 deg) vs the
+    # default eORCA1 (1 deg). create_tripole_grid reads the grid (glamt/e1t.../
+    # tmask + fold) from this SAME file, so the grid and the land_mask/bathy
+    # (read below) provably come from one mesh -- assert it to kill any drift.
+    resolution = "eorca025" if "025" in Path(mesh_path).name else "eorca1"
+    _grid_mesh = run_omip._parse_resolution("tripole", resolution)["mesh_path"]
+    if Path(_grid_mesh).resolve() != Path(mesh_path).resolve():
+        raise ValueError(
+            f"tripole mesh mismatch: grid built from {_grid_mesh!r} but "
+            f"mask/bathy read from {mesh_path!r}. Pass --mesh {_grid_mesh}."
+        )
     grid, z_coord, config, model, _ = run_omip._create_setup(
-        "tripole", "eorca1", nlev, H_max,
+        "tripole", resolution, nlev, H_max,
         physics_preset="full", water_type="II",
         forcing_mode="jra55_do_tropical",
     )
@@ -438,6 +469,9 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("slope_foot_alpha", slope_foot_alpha),
                               ("slope_foot_n_levels", slope_foot_n_levels),
                               ("slope_foot_threshold", slope_foot_threshold),
+                              ("div_damp_2", div_damp_2),
+                              ("div_damp_4", div_damp_4),
+                              ("smag_cfl_safety", smag_cfl_safety),
                               ) if v is not None}
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -460,7 +494,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
             LatLonCGridOceanModel,
         )
         z_coord, H_bathy, land_mask = make_partial_cell(
-            z_coord, H_bathy, land_mask, smoothing_passes=bathy_smoothing_passes)
+            z_coord, H_bathy, land_mask, smoothing_passes=bathy_smoothing_passes,
+            min_levels=min_levels)
         model = LatLonCGridOceanModel(grid, z_coord, config)
     state = run_omip._init_rest_state(
         "tripole", grid, z_coord, H_max,
@@ -584,31 +619,42 @@ def _idx_t(step: int, dt: float, n_rec: int) -> int:
     return int(round(t / _SEC_PER_6H)) % n_rec
 
 
-def _diag(state, lat2d=None) -> dict:
+def _diag(state, lat2d=None, lon2d=None) -> dict:
     """Cheap scalar diagnostics over ocean cells (one device->host pull).
 
-    ``umax_lat`` = latitude of the surface max|u| — localises WHERE velocity
-    grows/blows up (equator f->0 vs western boundaries vs poles), the key
-    pin-point for the baroclinic-dynamics instability.
+    ``umax_lat``/``umax_lon``/``umax_lev`` = location of the 3-D max|u| —
+    localises WHERE velocity grows/blows up (equator f->0 vs western
+    boundaries vs the bipolar cap/fold vs at depth), the key pin-point for
+    the dynamics instability seed.
     """
     T = np.asarray(state.T.data)[..., 0]
     S = np.asarray(state.S.data)[..., 0]
-    u = np.asarray(state.u.data)
+    u = np.asarray(state.u.data)            # (nlat, nlon+1, nlev)
     v = np.asarray(state.v.data)
     m = np.asarray(state.land_mask.data) > 0.5
-    usurf = np.abs(u[..., 0])
-    max_speed = float(np.nanmax(usurf)) if u.size else 0.0
-    umax_lat = float("nan")
-    if lat2d is not None and np.isfinite(usurf).any():
-        ju = int(np.unravel_index(np.nanargmax(usurf), usurf.shape)[0])
+    au = np.abs(u)
+    has_u = bool(au.size and np.isfinite(au).any())
+    max_speed = float(np.nanmax(au)) if has_u else float("nan")
+    umax_lat = umax_lon = float("nan")
+    umax_lev = -1
+    if lat2d is not None and has_u:
+        ju, iu, ku = (int(x) for x in
+                      np.unravel_index(np.nanargmax(au), au.shape))
         lat2d = np.asarray(lat2d)
-        umax_lat = round(float(lat2d[min(ju, lat2d.shape[0] - 1), 0]), 1)
+        jj = min(ju, lat2d.shape[0] - 1)
+        ii = min(iu, lat2d.shape[1] - 1)
+        umax_lat = round(float(lat2d[jj, ii]), 1)
+        umax_lev = ku
+        if lon2d is not None:
+            umax_lon = round(float(np.asarray(lon2d)[jj, ii]), 1)
     return {
         "mean_sst_C": float(np.nanmean(T[m])) if m.any() else float("nan"),
         "mean_sss": float(np.nanmean(S[m])) if m.any() else float("nan"),
         "max_abs_u": max_speed,
         "max_abs_v": float(np.nanmax(np.abs(v))) if v.size else 0.0,
         "umax_lat": umax_lat,
+        "umax_lon": umax_lon,
+        "umax_lev": umax_lev,
         "finite": bool(np.isfinite(T).all() and np.isfinite(u).all()),
     }
 
@@ -762,6 +808,25 @@ def main() -> int:
     p.add_argument("--forcing-ramp-days", type=float, default=0.0,
                    help="Ramp the surface forcing 0->full over N days "
                         "(cold-start shock mitigation).")
+    p.add_argument("--min-levels", type=int, default=1,
+                   help="rn_hmin-style conditioning: mask ocean columns with "
+                        "fewer than this many active reference levels (partial-"
+                        "cell path only). 1=off. Use 2 at 1/4 deg to remove the "
+                        "single-thin-layer coastal cells that seed a 1/h blowup.")
+    p.add_argument("--div-damp-2", type=float, default=None,
+                   help="2nd-order divergence damping [m^2/s] -- suppresses "
+                        "grid-scale divergent (checkerboard) modes at small "
+                        "high-lat coastal cells. CFL: dt < dx^2/(2*nu).")
+    p.add_argument("--div-damp-4", type=float, default=None,
+                   help="4th-order (scale-selective) divergence damping [m^4/s] "
+                        "-- damps the grid-scale mode far more than the resolved "
+                        "flow; gentler CFL than 2nd-order. Try ~1e9-1e10 at 1/4 deg.")
+    p.add_argument("--smag-cfl-safety", type=float, default=None,
+                   help="Cap the Laplacian-Smagorinsky coeff at smag_cfl_safety/"
+                        "(dt*(1/dx^2+1/dy^2)) (per-cell anisotropic viscous-CFL "
+                        "estimate). Lets --C-smag-lap "
+                        "be cranked high to damp WBC jets WITHOUT self-CFL at the "
+                        "sharp jet. ~0.125 is a safe 2-D Laplacian cap.")
     p.add_argument("--nudge-woa-tau-days", type=float, default=0.0,
                    help="Nudge T,S toward WOA with this timescale [days] from a "
                         "rest start -- gradual cold-start spinup that avoids the "
@@ -808,6 +873,9 @@ def main() -> int:
             slope_foot_alpha=args.slope_foot_alpha,
             slope_foot_n_levels=args.slope_foot_n_levels,
             slope_foot_threshold=args.slope_foot_threshold,
+            min_levels=args.min_levels,
+            div_damp_2=args.div_damp_2, div_damp_4=args.div_damp_4,
+            smag_cfl_safety=args.smag_cfl_safety,
         )
         app_grid_type = "tripole"
     else:
@@ -881,7 +949,7 @@ def main() -> int:
 
     print(f"[run] {total_days:.0f} days = {n_steps} steps "
           f"(diag every {diag_every} steps)")
-    d0 = _diag(state, lat2d)
+    d0 = _diag(state, lat2d, lon2d)
     print(f"[diag] step 0: {d0}")
 
     t_wall = time.time()
@@ -922,7 +990,7 @@ def main() -> int:
             )
         if step % diag_every == 0 or step == n_steps:
             state = jax.block_until_ready(state)
-            d = _diag(state, lat2d)
+            d = _diag(state, lat2d, lon2d)
             rate = step / (time.time() - t_wall)
             print(f"[diag] step {step} (day {step*dt/_SEC_PER_DAY:.0f}): "
                   f"{d} | {rate:.2f} steps/s")
@@ -937,7 +1005,7 @@ def main() -> int:
     state = jax.block_until_ready(state)
     _save_snapshot(out_dir, "final", state, lat2d, lon2d)
     rate = n_steps / (time.time() - t_wall)
-    print(f"[done] {n_steps} steps @ {rate:.2f} steps/s; final: {_diag(state, lat2d)}")
+    print(f"[done] {n_steps} steps @ {rate:.2f} steps/s; final: {_diag(state, lat2d, lon2d)}")
     if args.smoke:
         yr_est = steps_per_year / rate / 3600.0
         print(f"[smoke] projected wall-time: {yr_est:.2f} h/yr  "

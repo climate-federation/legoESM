@@ -8,6 +8,18 @@ Review every code change with `/codex:adversarial-review`. Shrink this file ever
 **Branch:** `omip-faithful-nemo-comparison`. Completion promise DONE only when grids
 genuinely match NEMO — far off; no false DONE.
 
+## CURRENT STATUS (iter 16 — read this first)
+Free 1° run is impossible (config space exhausted: FE+Matsuno vs NEMO RK3; scalar
+A_h vs NEMO 3D WBC-enhanced viscosity). **Pivoted to ¼° (eORCA025).** A bounded —
+but WBC ~7× over-intense (viscosity-limited at dt=75) — free WOA cold-start now
+runs via the **CFL-capped anisotropic Smagorinsky** (`smag_cfl_safety`, iter 16,
+codex-hardened + committed) + `--min-levels 2` + `--balanced-init`. Winning config:
+`--mesh eORCA025 --nlev 20 --dt 75 --partial-cell --pgf-scheme smc03
+--adaptive-implicit-vertadv --woa-init --balanced-init --min-levels 2
+--C-smag-lap 3.0 --smag-cfl-safety 0.125`. **3-month run (job 8124320) in flight**
+→ first caveated SST/SSS compare vs NEMO ORCA1 yr-1. Sections below are pre-¼°
+history (iters 1–15: the diagnosis that led here). Shrink-due (file >35 KB).
+
 ## State (carried over)
 - NEMO ORCA1 5-yr reference COMPLETE (T/S/SSH/MLD/U/V/ice). Identical CORE-II
   6-hourly forcing (`nyf.zarr`), eORCA1 mesh, WOA18 all staged.
@@ -89,6 +101,27 @@ the prerequisite to ever making `ke_gradient_scheme="hollingsworth"` the tripole
 A/B knob added: `run_omip_core2.py --ke-gradient-scheme {centered,hollingsworth}`.
 
 ## Iteration log
+- **iter 16 (¼° WBC viscous-CFL cap — codex-hardened + committed; new Ralph loop):**
+  The eORCA025 cold-start stabiliser (CFL-capped Smagorinsky, `smag_cfl_safety`)
+  was uncommitted/unreviewed. 3 codex adversarial rounds → fixed + committed:
+  (1) replaced the `area·cos²(lat)` cap with the per-cell ANISOTROPIC viscous-CFL
+  estimate `safety/(dt·(1/dx²+1/dy²))` — new public helper `laplacian_smag_cfl_cap`
+  (ocean_pe_latlon_cgrid.py) using the grid's TRUE metrics (dx_T/dy_T at centres,
+  dx_v/dy_v at vertices) so it no longer over-caps the anisotropic high-lat/Arctic
+  cells; q-point cap periodic-wrapped (append col 0, matches the q-Laplacian) →
+  seam-continuous; grid-class dispatch (LatLonCGridGeometry + plain LatLonGrid).
+  `safety~1/8` = ~4× CFL margin (absorbs curvilinear distortion; rectangular
+  estimate = NEMO/MOM6 practice — did NOT chase the exact discrete-operator
+  eigenvalue). (2) tripole T-fold `fold_convention` threaded end-to-end
+  (`_detect_fold` → `create_tripole_grid` → run_omip `_parse_resolution`/
+  `_create_setup`); eORCA025 now passes its VALIDATED de-haloed perm
+  `(n_lon-i)%n_lon` instead of the auto symmetry tie-break (eORCA1.2 → `n_lon-1-i`).
+  New leaf tests: cap metric/CFL-safe/periodic-seam + fold explicit-override/
+  wrong-convention-raises → **14 unit tests pass** (CPU x64). 3mo eORCA025 FREE run
+  (job 8124320, dt=75, winning config) finite at ~6.6 h wall, no blowup snapshot →
+  bounded-WBC regime holds; final snapshot → compare vs NEMO yr-1 (caveat: WBC
+  ~7× over-intense, viscosity-limited). codex round-3 verified substance clean
+  (wiring + dispatch + no unsafe CFL); only doc-wording nits remained, fixed.
 - **iter 1:** new loop. Drag-spinup test 8100129 queued (GPU busy). Created this tracker.
   codex-adversarial-review of dycore changes = needs-attention, 2 valid findings, both FIXED:
   (1) [high] flood-fill copied donor columns without reapplying the RECEIVER bathymetry deep-fill
