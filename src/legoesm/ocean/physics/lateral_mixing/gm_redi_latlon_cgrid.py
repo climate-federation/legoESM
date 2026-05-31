@@ -991,6 +991,184 @@ def compute_isoneutral_K33_latlon(
 
 
 # =====================================================================
+# EKE SOURCE augmentation (Veros K_diss_h + realized -P_diss_skew)
+# =====================================================================
+
+def harmonic_lateral_kediss_eke_source(
+    visc_u: jnp.ndarray,
+    visc_v: jnp.ndarray,
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: LatLonGrid,
+    mask: jnp.ndarray,
+) -> jnp.ndarray:
+    """Mean-KE removal by the harmonic lateral viscosity, routed to the EKE source.
+
+    Returns the rate at which the harmonic lateral viscosity ``A_h∇²(u,v)`` removes
+    mean kinetic energy, as a NON-NEGATIVE EKE source [m²/s³] at the ``nlev-1``
+    interior interfaces (the W-grid) — legoESM's analogue of Veros's ``K_diss_h``
+    (``veros/core/friction.py`` ``harmonic_friction`` → ``calc_diss_u``/``calc_diss_v``,
+    fed into the EKE forcing at ``veros/core/eke.py:110``).
+
+    Method (mirrors Veros's ``diss = 0.5·Σ(Δu·flux)`` then ``calc_diss_u`` →
+    T-grid → W-grid):
+
+    1. The per-face KE-dissipation rate is ``-u·(A_h∇²u)`` on the u-faces and
+       ``-v·(A_h∇²v)`` on the v-faces (``visc_u``/``visc_v`` are the harmonic-
+       viscosity momentum tendencies ``A_h∇²u`` / ``A_h∇²v`` [m/s²], already
+       face-masked by the caller).  For diffusion ``u·∇²u`` integrates to
+       ``-∫|∇u|² ≤ 0``, so ``-u·∇²u`` is a (column/area-integrated) KE SINK that
+       becomes the EKE source.
+    2. Average each face product to cell centres (``0.5·(p[:,:-1]+p[:,1:])`` for u,
+       ``0.5·(p[:-1]+p[1:])`` for v — the inverse of the C-grid cell→face
+       interpolation) and sum the two contributions at full levels.
+    3. Average the full-level (``nlev``) cell-centred dissipation to the ``nlev-1``
+       interior interfaces (``0.5·(c[:,:,:-1]+c[:,:,1:])`` — the same W-grid mapping
+       Veros's ``dissipation_on_wgrid`` uses for the interior), mask to wet columns,
+       and clamp ≥ 0.
+
+    FORM vs Veros (documented approximation): legoESM uses the dynamical KE-tendency
+    form ``-u·(A_h∇²u)``, whereas Veros's ``K_diss_h`` is the POSITIVE-DEFINITE flux
+    form ``A_h|∇u|²`` (``0.5·Σ Δu·flux``, ≥ 0 pointwise by construction).  The two
+    are equal in the column/area integral (they differ by the transport divergence
+    ``-∇·(A_h u∇u)``, which integrates to ~0 over a closed/masked column), but NOT
+    pointwise: ``-u·A_h∇²u`` is NEGATIVE in the transport regions.  The per-cell
+    clamp ≥ 0 truncates those negative cells, so the domain-integrated source here
+    OVER-CREDITS the true KE dissipation by ~10–20% on the ACC channel (measured;
+    see .physics-validator/eke_source/probe_kdiss_conservation.py).  The clamp is
+    therefore NOT inactive — it is doing real work and is the source of this ~10–20%
+    over-credit.  This is an accepted approximation for the prognostic-EKE source
+    (units, sign, positivity, and order of magnitude are all correct); an exact match
+    to Veros would require routing the friction FLUXES (not the Laplacian tendency)
+    to reconstruct the positive-definite ``A_h|∇u|²``.
+
+    The energy added to EKE is the mean KE removed by ``A_h``; documenting the
+    routing: the mean-KE sink already happens in the momentum tendency (``du_dt``
+    carries ``A_h∇²u``), and this term credits that lost KE to the eddy field
+    (Veros's mean→eddy energy pathway).
+
+    Parameters
+    ----------
+    visc_u : (n_lat, n_lon+1, nlev) — harmonic-viscosity u-tendency ``A_h∇²u`` [m/s²].
+    visc_v : (n_lat+1, n_lon, nlev) — harmonic-viscosity v-tendency ``A_h∇²v`` [m/s²].
+    u : (n_lat, n_lon+1, nlev) — zonal velocity at u-faces [m/s].
+    v : (n_lat+1, n_lon, nlev) — meridional velocity at v-faces [m/s].
+    grid : LatLonGrid (unused metric-wise — the C-grid averaging is index-based; kept
+        for signature parity with the other EKE source builders).
+    mask : (n_lat, n_lon) — ocean mask (1 = ocean).
+
+    Returns
+    -------
+    K_diss_h : (n_lat, n_lon, nlev-1) — non-negative EKE source [m²/s³] at interfaces.
+    """
+    # Per-face KE-dissipation rate (the rate KE is removed from each momentum
+    # component) [m²/s³ on the face].  visc_* are already face-masked by the caller.
+    p_u = -u * visc_u                                   # (n_lat, n_lon+1, nlev)
+    p_v = -v * visc_v                                   # (n_lat+1, n_lon, nlev)
+    # Average the face products to cell centres (inverse of cell->face interp).
+    # u-face j and j+1 straddle cell j: cell value = 0.5*(p_u[:, :-1] + p_u[:, 1:]).
+    diss_cell = 0.5 * (p_u[:, :-1, :] + p_u[:, 1:, :])  # (n_lat, n_lon, nlev)
+    # v-face i and i+1 straddle cell i: cell value = 0.5*(p_v[:-1] + p_v[1:]).
+    diss_cell = diss_cell + 0.5 * (p_v[:-1, :, :] + p_v[1:, :, :])
+    diss_cell = diss_cell * mask[:, :, jnp.newaxis]
+    # Average full-level cell dissipation to the nlev-1 interior interfaces (W-grid),
+    # matching where E lives, then clamp >= 0 to make this a pure source.  NB: the
+    # clamp is NOT inactive — -u·A_h∇²u is locally negative in transport regions, so
+    # the clamp over-credits the column-integrated KE dissipation by ~10-20% vs the
+    # positive-definite A_h|∇u|² Veros uses (documented approximation; see docstring).
+    K_diss_h_w = 0.5 * (diss_cell[:, :, :-1] + diss_cell[:, :, 1:])
+    return jnp.maximum(K_diss_h_w, 0.0) * mask[:, :, jnp.newaxis]
+
+
+def compute_realized_gm_skew_conversion(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    eta: jnp.ndarray,
+    H_bathy: jnp.ndarray,
+    grid: LatLonGrid,
+    z_coord: OceanZStarCoordinate,
+    cfg: GMRediConfig,
+    kappa_gm_w: jnp.ndarray,
+    *,
+    eos: str = "wright",
+    eos_linear=None,
+    mask: jnp.ndarray | None = None,
+    rho_0: float = _RHO_0,
+    g: float = constants.g,
+) -> jnp.ndarray:
+    """Realized GM-skew buoyancy conversion ``-P_diss_skew`` as an EKE source [m²/s³].
+
+    The Gent-McWilliams skew (bolus) flux releases mean available potential energy
+    into eddy energy at the rate ``-P_diss_skew = -(g/ρ₀)·∇₃ρ·F_skew`` (Veros
+    ``veros/core/isoneutral/diffusion.py:234-281``), where ``F_skew = κ_GM·S·∂ρ/∂z``
+    is the per-triad GM skew flux of density.  Using ``S = -∇_h ρ / ∂_z ρ`` per
+    triad and contracting with ``∇₃ρ`` gives the closed W-grid form
+
+        -P_diss_skew(z) = κ_GM(z) · (g/ρ₀)·|∂ρ/∂z|_w · ( 0.25·Σ_8 taper·S² )
+                        = κ_GM(z) · N²_w · <S²>_triad,                        (≥ 0)
+
+    i.e. the GM coefficient times the true local buoyancy frequency ``N²_w =
+    (g/ρ₀)|∂ρ/∂z|`` times the per-triad slope-variance ``<S²>_triad = 0.25·Σ taper·S²``
+    (which is exactly ``K_33/κ_Redi`` from :func:`compute_isoneutral_K33_latlon`).
+
+    This is the *realized* conversion — it differs from the *parameterized* EKE
+    production ``κ_GM·σ²`` with ``σ = <N|S|>`` (a squared slope AVERAGE) because the
+    per-triad slope VARIANCE ``<S²> ≥ <S>²`` (Jensen): the realized form keeps the
+    discrete slope variance the GM tracer flux actually transports, which the
+    pre-averaged Visbeck σ under-counts.  It reuses the SHARED per-triad W-face
+    slopes/tapers (``_w_triad_slopes_tapers``) — the SAME slopes the GM/Redi skew
+    flux and the implicit ``K_33`` use — so no slope numerics are duplicated.
+
+    Sign / positivity: ``N²_w ≥ 0`` (stable-strat floor ``|∂ρ/∂z| ≥ _EPS_DIV``),
+    ``S² ≥ 0``, ``taper ≥ 0``, ``κ_GM ≥ 0`` ⇒ the source is ≥ 0 everywhere (slumping
+    isopycnals release mean APE into EKE). The energy comes from the mean APE that
+    the GM skew flux flattens — the same flux already applied to the tracer
+    tendency; documenting the routing: this credits that released APE to EKE.
+
+    Parameters
+    ----------
+    T, S, eta, H_bathy, grid, z_coord, cfg, eos/eos_linear/mask/rho_0/g : as in
+        :func:`compute_isoneutral_K33_latlon` (same rho via the 2-iteration EOS
+        coupling, same shared slopes).
+    kappa_gm_w : (n_lat, n_lon, nlev-1) — the GM coefficient ``κ_GM(z)`` at the
+        interior W-faces (the prognostic-EKE 3-D override; the SAME kappa fed to the
+        GM tracer flux), so the released APE is consistent with the applied skew flux.
+
+    Returns
+    -------
+    P_skew : (n_lat, n_lon, nlev-1) — non-negative realized GM-skew EKE source [m²/s³].
+    """
+    if mask is None:
+        mask = jnp.ones(T.shape[:2], dtype=T.dtype)
+    jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
+    eos_fn = make_eos_fn(eos, eos_linear)
+    fill_fn = lambda field: _neumann_fill_cgrid(field, mask)
+    rho, _rho_prime, _p_prime = iterate_eos_and_pressure_anomaly(
+        T, S, mask, fill_fn, eos_fn, z_coord.dz_ref, rho_0, g, n_iter=2,
+    )
+    n_lat, n_lon = mask.shape
+    rho_filled = _neumann_fill_cgrid(rho, mask)
+    drho_dx_u = gradient_x_cgrid(rho_filled, grid)
+    drho_dy_v = gradient_y_cgrid(rho_filled, grid)
+    dz_half = z_coord.dz_half_ref * jacobian[:, :, jnp.newaxis]
+    drho_dz_raw = (rho_filled[:, :, :-1] - rho_filled[:, :, 1:]) / jnp.maximum(
+        dz_half, _EPS_DIV
+    )
+    drho_dz_w = jnp.minimum(drho_dz_raw, -_EPS_DIV)        # (n_lat, n_lon, nlev-1)
+    (S_Wx1, S_Wx2, S_Wx3, S_Wx4, S_Wy1, S_Wy2, S_Wy3, S_Wy4,
+     tWx1, tWx2, tWx3, tWx4, tWy1, tWy2, tWy3, tWy4) = _w_triad_slopes_tapers(
+        drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon, cfg.S_max, cfg.taper_width_frac)
+    # Per-triad slope variance <S²>_triad = 0.25·Σ taper·S²  (= K_33/κ_Redi).
+    S2_triad = 0.25 * (
+        tWx1 * S_Wx1 ** 2 + tWx2 * S_Wx2 ** 2 + tWx3 * S_Wx3 ** 2 + tWx4 * S_Wx4 ** 2
+        + tWy1 * S_Wy1 ** 2 + tWy2 * S_Wy2 ** 2 + tWy3 * S_Wy3 ** 2 + tWy4 * S_Wy4 ** 2)
+    # True local buoyancy frequency at the W-faces: N²_w = (g/ρ₀)|∂ρ/∂z| ≥ 0.
+    N2_w = (g / rho_0) * jnp.abs(drho_dz_w)
+    P_skew = jnp.maximum(kappa_gm_w, 0.0) * N2_w * S2_triad
+    return jnp.maximum(P_skew, 0.0) * mask[:, :, jnp.newaxis]
+
+
+# =====================================================================
 # LateralMixingOutput wrapper (for future factory integration)
 # =====================================================================
 

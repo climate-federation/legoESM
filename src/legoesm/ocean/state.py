@@ -422,6 +422,13 @@ class LatLonCGridOceanTendencies(NamedTuple):
 
     K_v / A_v are optional interface-level diffusivity / viscosity
     profiles populated when ``implicit_vertical_mixing`` is enabled.
+
+    Ah_visc_u / Ah_visc_v are the harmonic LATERAL-viscosity momentum
+    tendencies (``A_h∇²u`` / ``A_h∇²v`` [m/s²], face-masked), populated
+    ONLY when the prognostic-EKE ``source_kdiss_h`` option is on (so the
+    3-D EKE step can route the mean-KE they remove into the EKE source —
+    Veros's ``K_diss_h``). ``None`` otherwise (default), keeping the
+    tendency pytree + every existing path bit-identical.
     """
     du_dt: Field
     dv_dt: Field
@@ -432,6 +439,8 @@ class LatLonCGridOceanTendencies(NamedTuple):
     dland_mask_dt: Field
     K_v: object = None
     A_v: object = None
+    Ah_visc_u: object = None
+    Ah_visc_v: object = None
 
 
 class MomentumTendencyDiagnostics(NamedTuple):

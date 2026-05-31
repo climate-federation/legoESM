@@ -74,6 +74,27 @@ class EKEConfig(NamedTuple):
     # default 1.0 in veros/settings.py; the ACC setup leaves it at the 1.0 default).
     # Only used by the 3-D path (``eke_3d_vertical_diffusion``).
     alpha_eke: float = 1.0
+    # --- EKE SOURCE augmentation (default off ⇒ existing source bit-identical) ---
+    # When True, route the mean-KE removed by the harmonic LATERAL viscosity A_h
+    # into the EKE source (Veros ``K_diss_h``; veros/core/eke.py:110, computed from
+    # the A_h∇²u momentum tendency in veros/core/friction.py:calc_diss_u/v). The
+    # legoESM EKE source omits this term, which is ~56% of Veros's ACC EKE forcing
+    # (the dominant deficit). The 3-D model step builds the [m²/s³] source from
+    # legoESM's own harmonic-viscosity tendency and adds it to the W-grid source.
+    # ACC recipe opts in; default off keeps the 2-D + existing-3-D path identical.
+    source_kdiss_h: bool = False
+    # GM mean-APE -> EKE conversion source mode:
+    #   "parameterized" (default) — P = kappa_GM·sigma² with sigma = <N|S|>_z(z) from
+    #     the DM95-tapered, S_max-clipped, face->center->interface-averaged slope
+    #     (the Visbeck-style closure; legoESM's pre-2026 behaviour, bit-identical).
+    #   "realized" — the REALIZED GM-skew buoyancy conversion -P_diss_skew =
+    #     -(g/ρ₀)∇ρ·F_skew (Veros veros/core/isoneutral/diffusion.py:234-281). Built
+    #     from the SAME per-triad W-face slopes/tapers the GM/Redi skew flux uses
+    #     (no slope pre-averaging), so it captures the per-triad slope VARIANCE
+    #     <S²> ≥ <S>² that the parameterized sigma² (a squared slope AVERAGE)
+    #     under-counts. Replaces the parameterized P in the EKE source; the GM
+    #     tracer flux itself is unchanged. ACC recipe opts in.
+    gm_source_mode: str = "parameterized"
 
 
 def eke_mixing_length(L_rossby: jnp.ndarray, cfg: EKEConfig) -> jnp.ndarray:
@@ -216,6 +237,9 @@ def eke_3d_local_tendency(
 
 def eke_apply_local_source(
     E: jnp.ndarray, sigma: jnp.ndarray, L: jnp.ndarray, cfg: EKEConfig, dt: float,
+    *,
+    production_override: jnp.ndarray | None = None,
+    extra_source: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """One step of the local EKE source/sink with **semi-implicit dissipation** —
     unconditionally positivity-preserving (``E_{n+1} >= 0``) with NO clipping/mask.
@@ -230,9 +254,27 @@ def eke_apply_local_source(
     are applied separately by the step (also positivity-preserving). This is the
     standard stable treatment of the quadratic-in-magnitude EKE dissipation
     (Eden-Greatbatch / Veros).
+
+    Optional EKE-source augmentation (both default ``None`` ⇒ bit-identical):
+
+    - ``production_override`` — replaces the parameterized GM conversion
+      ``kappa_GM·sigma²`` with a supplied source [m²/s³] (the ``gm_source_mode=
+      "realized"`` skew-flux conversion). ``sigma``/``L`` are then used only for the
+      dissipation rate (which depends on ``L``, not ``sigma``).
+    - ``extra_source`` — an additional non-negative explicit source [m²/s³] added to
+      the production (the ``source_kdiss_h`` lateral-friction term, Veros
+      ``K_diss_h``). Must be ≥ 0 to keep the positivity-by-construction guarantee.
+
+    Both enter the EXPLICIT numerator, so the result stays ≥ 0 by construction
+    (numerator ≥ 0, denominator ≥ 1) exactly as the base scheme.
     """
     E_pos = jnp.maximum(E, 0.0)
-    production = eke_kappa_gm(E_pos, L, cfg) * sigma ** 2
+    if production_override is None:
+        production = eke_kappa_gm(E_pos, L, cfg) * sigma ** 2
+    else:
+        production = jnp.maximum(production_override, 0.0)
+    if extra_source is not None:
+        production = production + jnp.maximum(extra_source, 0.0)
     diss_rate = cfg.c_eps * jnp.sqrt(E_pos + 1.0e-30) / jnp.maximum(L, cfg.l_min)
     return (E_pos + dt * production) / (1.0 + dt * diss_rate)
 
@@ -265,6 +307,11 @@ def validate_eke_config(cfg: EKEConfig) -> None:
         raise ValueError(f"EKEConfig.eke_crhin must be > 0, got {cfg.eke_crhin!r}")
     if cfg.alpha_eke < 0.0:
         raise ValueError(f"EKEConfig.alpha_eke must be >= 0, got {cfg.alpha_eke!r}")
+    if cfg.gm_source_mode not in ("parameterized", "realized"):
+        raise ValueError(
+            "EKEConfig.gm_source_mode must be 'parameterized' or 'realized', got "
+            f"{cfg.gm_source_mode!r}"
+        )
 
 
 __all__ = [

@@ -64,10 +64,12 @@ from legoesm.ocean.freshwater import freshwater_eta_tendency, virtual_salt_flux
 from legoesm.ocean.physics.combined import make_ocean_physics
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_eke_step_kappa,
+    compute_realized_gm_skew_conversion,
     eke_horizontal_transport,
     eke_3d_horizontal_transport,
     eke_3d_vertical_diffusion,
     gm_redi_tracer_tendency_latlon,
+    harmonic_lateral_kediss_eke_source,
     compute_isoneutral_K33_latlon,
 )
 from legoesm.ocean.physics.lateral_mixing.eke import eke_apply_local_source
@@ -580,6 +582,27 @@ class LatLonCGridOceanModel:
                 f"eos must be one of {sorted(VALID_EOS_SCHEMES)}, "
                 f"got {config.eos!r}",
             )
+
+        # Fail-fast EKE-config validation (dispatch discipline: the EKE literals +
+        # the source-augmentation flags are validated at construction). The EKE
+        # SOURCE augmentation (source_kdiss_h, gm_source_mode="realized") is only
+        # implemented on the 3-D (eke_3d=True) W-grid source path — reject the
+        # combination with eke_3d=False rather than silently ignoring it.
+        if config.gm_redi is not None and getattr(config.gm_redi, "eke", None) is not None:
+            from legoesm.ocean.physics.lateral_mixing.eke import validate_eke_config
+            _eke = config.gm_redi.eke
+            validate_eke_config(_eke)
+            if not _eke.eke_3d and (
+                _eke.source_kdiss_h or _eke.gm_source_mode != "parameterized"
+            ):
+                raise ValueError(
+                    "EKEConfig source augmentation (source_kdiss_h="
+                    f"{_eke.source_kdiss_h!r}, gm_source_mode="
+                    f"{_eke.gm_source_mode!r}) requires eke_3d=True (the source "
+                    "terms live on the 3-D W-grid). Set eke_3d=True or leave the "
+                    "augmentation at its defaults (source_kdiss_h=False, "
+                    "gm_source_mode='parameterized')."
+                )
 
         # Fail-fast momentum-advection dispatch validation (was a silent
         # fallthrough to vector-invariant for any unknown literal). Single
@@ -1150,6 +1173,7 @@ class LatLonCGridOceanModel:
                     eke_new, kappa_gm_override = self._eke_3d_step(
                         state, state_new, T_mid, S_mid, gm_cfg, eke_cfg, lm,
                         tend.A_v, dt,
+                        Ah_visc_u=tend.Ah_visc_u, Ah_visc_v=tend.Ah_visc_v,
                     )
                 else:
                     if state.eke is not None:
@@ -1451,6 +1475,9 @@ class LatLonCGridOceanModel:
         lm: jnp.ndarray,
         A_v_phys,
         dt: float,
+        *,
+        Ah_visc_u=None,
+        Ah_visc_v=None,
     ) -> tuple:
         """One step of the 3-D (depth-resolved) prognostic-EKE closure.
 
@@ -1477,6 +1504,22 @@ class LatLonCGridOceanModel:
         redistributed ``E`` — mirroring the 2-D path's (transport → source)
         order, with the vertical diffusion inserted between (the 2-D path has no
         vertical operator).  ``E`` is finally floored at ``e_min`` and masked.
+
+        EKE-source augmentation (Veros apples-to-apples; both default off via
+        ``eke_cfg`` flags ⇒ the existing source is bit-identical):
+
+          - ``source_kdiss_h`` — add the mean-KE removed by the harmonic LATERAL
+            viscosity (Veros ``K_diss_h``) as a non-negative source, built from the
+            harmonic-viscosity momentum tendency ``A_h∇²(u,v)`` (``Ah_visc_u/v``,
+            computed once by the tendency function) via
+            :func:`...gm_redi_latlon_cgrid.harmonic_lateral_kediss_eke_source`.
+          - ``gm_source_mode="realized"`` — REPLACE the parameterized GM conversion
+            ``kappa_GM·sigma²`` with the realized GM-skew buoyancy conversion
+            ``-(g/ρ₀)∇ρ·F_skew`` (Veros ``-P_diss_skew``) via
+            :func:`...gm_redi_latlon_cgrid.compute_realized_gm_skew_conversion`.
+
+        Both enter the EXPLICIT production of the semi-implicit update, so
+        positivity-by-construction is preserved (both are ≥ 0).
 
         W-grid metrics (subtle — documented):
 
@@ -1562,7 +1605,35 @@ class LatLonCGridOceanModel:
         E = eke_3d_vertical_diffusion(E, A_v_w, dz_w, dz_half_w, dt, eke_cfg)
 
         # (3) Semi-implicit local source/sink (positivity-preserving, no clip).
-        E = eke_apply_local_source(E, sigma3, L3, eke_cfg, dt)
+        # EKE-source augmentation (Veros apples-to-apples; both default off ⇒ the
+        # production is bit-identical to the parameterized kappa_GM·sigma² closure):
+        #   - gm_source_mode="realized": REPLACE kappa_GM·sigma² with the realized
+        #     GM-skew buoyancy conversion -(g/ρ₀)∇ρ·F_skew (Veros -P_diss_skew),
+        #     built from the SAME per-triad W-face slopes the GM tracer flux uses
+        #     and the SAME 3-D kappa_GM(z) override (kappa_gm_override).
+        #   - source_kdiss_h: ADD the mean-KE removed by the harmonic lateral
+        #     viscosity (Veros K_diss_h), from the A_h∇²(u,v) tendency.
+        # Both are ≥ 0 and enter the EXPLICIT production, so the semi-implicit
+        # update stays positivity-preserving (numerator ≥ 0, denominator ≥ 1).
+        production_override = None
+        if eke_cfg.gm_source_mode == "realized":
+            production_override = compute_realized_gm_skew_conversion(
+                T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
+                self.grid, self.z_coord, gm_cfg, kappa_gm_override,
+                eos=self.config.eos, eos_linear=self.config.eos_linear,
+                mask=lm,
+                rho_0=self.config.constants.rho_0, g=self.config.constants.g,
+            )
+        extra_source = None
+        if eke_cfg.source_kdiss_h and Ah_visc_u is not None:
+            extra_source = harmonic_lateral_kediss_eke_source(
+                Ah_visc_u.data, Ah_visc_v.data, state.u.data, state.v.data,
+                self.grid, lm,
+            )
+        E = eke_apply_local_source(
+            E, sigma3, L3, eke_cfg, dt,
+            production_override=production_override, extra_source=extra_source,
+        )
 
         # Floor at e_min on wet columns, zero on land (kappa_gm_override is
         # already wet-masked by compute_eke_kappa_gm).  Cast back to the field

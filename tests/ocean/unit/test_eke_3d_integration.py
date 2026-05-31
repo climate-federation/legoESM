@@ -193,7 +193,12 @@ def _build_acc_model_2d():
     everything else identical to the recipe. This reproduces the pre-Stage-4
     behaviour: the 2-D depth-integrated closure."""
     recipe = build_acc_recipe(with_surface_forcing=True)
-    eke_2d = recipe.model_config.gm_redi.eke._replace(eke_3d=False)
+    # Force the 2-D path. The recipe opts the 3-D-only EKE-source augmentation
+    # (source_kdiss_h / gm_source_mode="realized") in, which requires eke_3d=True —
+    # so reset those to their defaults here (the 2-D path has no W-grid source to
+    # augment; this is exactly the pre-augmentation 2-D behaviour being locked).
+    eke_2d = recipe.model_config.gm_redi.eke._replace(
+        eke_3d=False, source_kdiss_h=False, gm_source_mode="parameterized")
     gm_2d = recipe.model_config.gm_redi._replace(eke=eke_2d)
     cfg_2d = recipe.model_config._replace(gm_redi=gm_2d)
     model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, cfg_2d)

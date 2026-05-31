@@ -2346,6 +2346,22 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     dims_3d = ("lat", "lon", "level")
     dims_2d = ("lat", "lon")
 
+    # Harmonic LATERAL-viscosity tendencies for the EKE K_diss_h source — exposed
+    # ONLY when the prognostic-EKE ``source_kdiss_h`` option is on (the ACC recipe;
+    # otherwise None, so the tendency pytree + every existing path is bit-identical).
+    # diag_Ah_lap_u/v are the A_h∇²(u,v) tendencies computed ONCE in
+    # _bc_horizontal_viscosity (no recompute / no duplicate numerics); face-mask them
+    # consistently with the applied du_dt (du_dt = Σ components × u_mask_3d).
+    _eke_cfg = getattr(config.gm_redi, "eke", None) if config.gm_redi is not None else None
+    if _eke_cfg is not None and getattr(_eke_cfg, "source_kdiss_h", False):
+        Ah_visc_u = Field(data=diag_Ah_lap_u * u_mask_3d, name="Ah_visc_u",
+                          dims=dims_u, units="m/s^2")
+        Ah_visc_v = Field(data=diag_Ah_lap_v * v_mask_3d, name="Ah_visc_v",
+                          dims=dims_v, units="m/s^2")
+    else:
+        Ah_visc_u = None
+        Ah_visc_v = None
+
     tendencies = LatLonCGridOceanTendencies(
         du_dt=Field(data=du_dt, name="du_dt", dims=dims_u, units="m/s^2"),
         dv_dt=Field(data=dv_dt, name="dv_dt", dims=dims_v, units="m/s^2"),
@@ -2362,6 +2378,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         ),
         K_v=phys_K_v,
         A_v=phys_A_v,
+        Ah_visc_u=Ah_visc_u,
+        Ah_visc_v=Ah_visc_v,
     )
 
     if not diagnose_momentum:

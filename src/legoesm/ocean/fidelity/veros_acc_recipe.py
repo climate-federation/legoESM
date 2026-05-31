@@ -168,8 +168,21 @@ ACC_GM_REDI_CONFIG = GMRediConfig(
     # kappa_GM(z) and the EKE budget (depth-resolved source/sink + implicit
     # vertical EKE diffusion K=alpha_eke·A_v + per-interface horizontal
     # transport) are all depth-resolved. ``alpha_eke=1.0`` (Veros ACC default).
+    #
+    # EKE SOURCE = apples-to-apples with Veros's ACC EKE forcing
+    # (veros/core/eke.py:110 ``forc = K_diss_gm + K_diss_h - P_diss_skew``; in ACC
+    # K_diss_gm=0 + P_diss_hmix=0, so the two live terms are K_diss_h and
+    # -P_diss_skew). A budget diagnosis showed legoESM's parameterized source
+    # carried only ~16% of Veros's forcing (forc/P ≈ 6×); the two opt-ins close it:
+    #   - source_kdiss_h=True: route the mean-KE removed by the harmonic lateral
+    #     viscosity A_h into EKE (Veros K_diss_h, ~56% of the ACC forcing — the
+    #     dominant missing source).
+    #   - gm_source_mode="realized": use the REALIZED GM-skew buoyancy conversion
+    #     -(g/ρ₀)∇ρ·F_skew (Veros -P_diss_skew, ~42%) instead of the parameterized
+    #     kappa_GM·σ² (which under-counts the per-triad slope variance <S²>≥<S>²).
     eke=EKEConfig(mixing_length_scheme="rhines", eke_cross=2.0, eke_crhin=1.0,
-                  isopycnal_diffusion=True, eke_3d=True),
+                  isopycnal_diffusion=True, eke_3d=True,
+                  source_kdiss_h=True, gm_source_mode="realized"),
 )
 
 # Surface restoring timescale
