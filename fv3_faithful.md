@@ -53,6 +53,11 @@ SW cosine_bell/W5/W2 all 4 grids co-located within 1 cell. Test
   phillips eddies smooth, match mpas wavenumber, **no panel-edge imprint**.
   ⇒ ocean cube panel edges verified clean across dynamical cases.
 
+## Regression health (iter ~34)
+44/44 PASS: test_vector_cc_to_dgrid_wind_lift, test_latlon_regrid_alignment,
+test_fc_velocity_viscosity_vector_halo, test_fv3sw_barotropic, test_ocean_fc,
+test_no_scheme_duplication — all session fixes regression-clean, no duplication.
+
 ## SW visual verdicts
 1. cosine-bell day-1 = PPM-limiter interior diffusion (cube/ico L2 1.4×), not edge.
 2. W5 propagates ≈ latlon/MPAS by day 15; ~12% day-1 damping deficit.
