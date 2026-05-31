@@ -157,3 +157,23 @@ TRACTABLE PATH (the iter117 harness): test candidate assembly fixes (eigenvector
 variations) against the K=50 λ — does λ drop below 1?  This is the dedicated fix-search, now enabled.
 Best in a FRESH context (mine is ~32 iters large); the autonomous-loop component-by-component avenue is
 DEFINITIVELY exhausted (all faithful) — only the assembly-fix-vs-λ search remains.
+
+
+## iter119 — FB assembly read: structurally correct (no obvious bug) ⇒ subtle coupling, harness fix-search needed
+Read fv3_fb_sw_step's full assembly (1969-2011): Phase1 c_sw(h,u_d,v_d)→h_star,uc,vc (dt/2 half-step);
+Phase2 p_grad_c(h_star)→uc+=dp,vc+=dp (C-grid PGF); Phase3 d_sw_native(h[ORIGINAL],u_d,v_d,uc,vc,dt)→
+h_new,u_d_new,v_d_new (full-step mass from original h + half-step winds; correct FB structure); Phase4
+one_grad_p(h_new)→u_d/v_d += dt*rdx*(gz_b[i]-gz_b[i+1]) (D-grid backward PGF, iter77).
+ASSESSMENT: structurally REASONABLE — d_sw transports the ORIGINAL h (correct FB), the double PGF
+(Phase2 C-grid transport-winds uc/vc vs Phase4 D-grid prognostic u_d/v_d) is NOT double-counting (one
+feeds transport Courant numbers, one is the direct momentum forcing). No obvious sign/time-level/
+sequencing error visible by READING. ⇒ the λ=1.0072 vertex eigenmode is a SUBTLE coupling bug (a small
+inexactness in how the faithful terms combine at the 3-face vertices — e.g. the Phase4 a2b_ord4 corner
+geopotential, the c_sw KE-vs-PGF corner balance, or a vertex stencil-width subtlety), NOT catchable by
+component/assembly READING.
+⇒ DEFINITIVE HANDOFF: the FB eigenmode requires the SYSTEMATIC HARNESS FIX-SEARCH (iter117 K=50 power
+iteration → test candidate assembly variations against λ<1), with candidates from eigenvector-structure
+inspection — a dedicated/fresh-context effort. The autonomous-loop READING avenue (component + metric +
+assembly) is now FULLY exhausted: everything reads faithful/correct, yet λ=1.0072. The cube is
+comprehensively faithful otherwise (codex-vetted); this one FB-port eigenmode is the sole remaining gap,
+maximally characterized + harness-equipped for the dedicated fix.
