@@ -116,3 +116,19 @@ c_sw time-level's uc/vc + the OLD-delta. NEXT: read `fv3_fb_sw_step` wiring (doe
 d_sw1? is the residual measured WITH the iter-947 halo?), then extend the technique to `_corner_vorticity`
 + re-measure the FB W2 C36 residual. This is a BOUNDED extension of existing validated machinery,
 not the major from-scratch build — re-prioritizes the genuine SW gap as tractable.
+
+
+## iter107 — ATTEMPTED + RULED OUT: `_corner_vorticity` cross-face HALO is NOT the FB residual root
+Implemented the iter106 bounded fix: routed `_corner_vorticity`'s cross-face circulation halo through
+the faithful d2a2c-extended uc/vc (`_pad_halo_uc_vc_new_via_old_delta`, the validated d_sw1 technique)
+instead of the lossy cell-centre reconstruction; both c_sw call sites pass u_d/v_d (OLD-derived, ng=3
+confirmed). DECISIVE TEST (FB W2 C36, same harness): day1 max|u_d| = 49.71 vs edge-copy/reconstruction
+baseline 48.6 (marginally WORSE), day2 NaN. ⇒ the `_corner_vorticity` cross-face HALO (neither the
+metric iter94 NOR the circulation/uc-vc reconstruction iter107) is the FB residual root.  REVERTED
+(no benefit; FB-only + fingerprint uses the fallback, intact).
+This CORRECTS iter95-106: the residual is vertex-LOCALIZED but is NOT in `_corner_vorticity`'s halo.
+Re-narrowed to: the vorticity FLUX (`_vorticity_flux` upwind donor-cell selection at the vertex), the
+KE (`_ke_upwind`), the d_sw zeta (`_d_sw_native`:1885 covariant circulation), or the c_sw→d_sw
+coupling.  NEXT: probe which vertex-localized TERM (flux vs KE vs d_sw zeta) produces the residual —
+e.g. zero each in turn (FB-only) and re-measure the day1 vertex deviation.  The genuine SW fix remains
+open; the bounded-halo-extension hypothesis is disproven.
