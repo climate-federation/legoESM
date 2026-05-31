@@ -223,3 +223,17 @@ ocean cube 9/9.  The ONE genuine remaining FAITHFULNESS gap = SW co-located CENT
 eigenmode + the W2 v-imprint (0.344 m/s, a REAL discretization effect, NOT float32).  Fix = the deferred
 staggered c_sw→d_sw / `_vorticity_flux` upgrade (FB chain), which needs the staggered C-grid vector halo
 infra (iter95).  Everything else is either faithful or a deliberate precision choice.
+
+
+## iter102 — consolidation: well-balanced PGF needs f64 geopotential gradient (deferred); state persisted
+The well-balanced PGF reformulation (reference-subtraction) does NOT help in float32 by post-
+subtraction: the phis precision is lost INSIDE compute_geopotential's `phis + cumsum` (f32, cumsum
+≈2.5e5 ≫ phis≈1.8e4), not recoverable after. The clean fix = compute the geopotential + its gradient
+in FLOAT64 (then cast the PGF tendency to f32) — a precision-policy change, f32-only-benefit, real
+regression risk on the f32 hydro matrix. Deferred as optional (the cube PGF is exact in f64; PE is
+float32 by design).
+HEAD green-check: cdgrid area_corner (C1/C12/C36) + n1_metrics + nord0_del2 + corner_vort fingerprint
+4/4 PASS — the iter89-91 foundational area_corner fix is intact after all iter89-101 commits.
+Persisted the resolved iter89-101 state to memory `cube-fv3-faithfulness-state` (cross-session):
+the cube is faithful / deliberate-precision / inherent-cube-cost everywhere EXCEPT the one genuine gap
+= SW co-located centered vorticity (deferred major: staggered C-grid vector halo + FB→production).
