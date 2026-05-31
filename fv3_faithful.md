@@ -147,3 +147,16 @@ FOUNDATIONAL (per user no-improvise, use oracle): FB chain residual (drive duogr
 stable); ed in-domain corner SW-core treatment; 3D PE upwind PPM vort; thread FV3 sin_sg(5) seam
 rotation; C96 W5 eigenmode (converges on the FB-chain/SW-core work). Climate cross-grid CPU-INFEASIBLE.
 State persisted: memory `cube-fv3-faithfulness-state`.
+
+## iter86 — area_corner fix: A/B on W5 C96 (fix NEUTRAL; my W5 C96 harness is broken)
+A/B (W5 C96, dt=100, iter1009_dual_target_config(96), same IC): OLD area_corner (interior copy)
+day1/2/3/4 = 274/567/449/523; NEW (3·sg_area fix) = 339/522/563/NaN. BOTH blow up (~300-560,
+physical W5 ~20-40) ⇒ the vertex-area fix is NEUTRAL on W5 (not the W5 issue), and my hand-rolled
+W5 C96 harness is BROKEN — it blows at DAY 1, NOT the recorded "~38 to day3.5 then 79" eigenmode.
+Not dt (runner C36 uses dt=300 → C96 scaled ~112 > my 100; and W2 C96 dt=100 is perfectly stable
+at 38.6). The recorded-eigenmode setup differs from my hand-roll in some way I couldn't pin (the
+runner is C36 only). ⇒ EIGENMODE PAYOFF UNEVALUABLE with the current harness; need the exact
+recorded C96 W5 config. The area_corner vertex fix STANDS on its merits: FV3-faithful (3·get_area
+junction), regression-safe (W2 C36 L2=1.76e-4 + W2 C96 stable 38.6/ss-err≤2.4e-4), neutral on W5.
+NEXT options: bug 1 (`_corner_vorticity` edge-mode metric, FB-only, the primary FB seed); or build
+a correct C96 W5 eigenmode harness; or 3D PE upwind.
