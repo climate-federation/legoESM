@@ -70,11 +70,15 @@ seams, must use mirror construction):**
 - ✅ `compute_padded_half_metrics_ed` (hx/hy; dx/dy/area FACE-INDEPENDENT by cube symmetry
   ⇒ compute once + broadcast; symm_ed is a machine-zero no-op). Tests 6/6 (√2, scale).
   Grid brick tests total 15/15.
-- ⏳ REMAINING: `compute_padded_angle_ed` (angle is 2-valued: equatorial faces 0-3 / polar
-  4-5; build per remapped face via centered diffs) → gate `create_cubed_sphere(gnomonic=
-  "ed")` assembling all CubedSphereGrid fields (cartesian/Coriolis/angle_padded h1-3/
-  halo offsets) → validate (area 4πR², √2, full dynamical suite) → re-calibrate damping →
-  run W5 C96 to test the eigenmode fix. Foundational but de-risked + scaffolded.
+- ✅ `compute_padded_angle_ed` (angle 2-valued: equatorial 0-3 / polar 4-5 differ by π — a
+  REAL N/S flip, in equiangular too; within 0.076 rad of equiangular). Tests 5/5.
+- ✅ `_compute_exact_cell_areas_ed` (FV3 get_area on remapped corners; total 4πR² exact,
+  face-indep; area max/min 2.27 = √2-edge geometry, aspect still 1.06).
+- ⏳ REMAINING: `compute_halo_interp_offsets_ed` (h1/2/3) — grid-distribution-dependent
+  (the cross-face fractional-index correction; needs the INVERSE gnomonic_ed index map,
+  intricate) → gate `create_cubed_sphere(gnomonic="ed")` assembling all CubedSphereGrid
+  fields → validate (build, √2, dynamical suite) → re-calibrate damping → run W5 C96 to
+  test the eigenmode fix. Most metric bricks done; halo-offsets + gate + validate remain.
 
 ## VERIFICATION
 - SW 16/16 all grids ≤1 cell. Full fast cube atm dynamical suite PASS + NH dcmip_tc1, mass
