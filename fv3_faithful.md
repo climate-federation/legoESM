@@ -47,10 +47,22 @@ instability, and the del4/Smagorinsky dissipation does NOT damp it (heavy dissip
 explicit-stability blow-up on top). Production RK3 is stable on the SAME W2/grid ⇒ the unstable
 mode is SPECIFIC to the FB c_sw→d_sw coupling = a BUG vs the FV3 oracle (sw_core.F90 `c_sw`/
 `d_sw`), NOT a dissipation-tuning or timestep problem (FV3 runs FB stably). The long-standing
-"FB unstable, needs interface dissipation" framing was WRONG. NEXT: diff legoESM `_c_sw`/
-`_d_sw_native`/`fv3_fb_sw_step` (core/fv3_sw_core.py) against sw_core.F90 to find the coupling
-discrepancy that injects the ~3 h growing mode (the convergent root for the eigenmode + ed corner
-+ algorithmic faithfulness).
+"FB unstable, needs interface dissipation" framing was WRONG.
+**iter76 — ROOT CAUSE FOUND (oracle-diff workflow + self-confirmed): the FB step OMITS the
+D-grid backward pressure-gradient phase.** `fv3_fb_sw_step` (fv3_sw_core.py:1946) has only:
+Phase1 `_c_sw` (dt/2) → Phase2 `_p_grad_c` (adds the PGF dp_x/dp_y to **uc/vc ONLY**) → Phase3
+`_d_sw_native` (u_d_new = u_d + (ke_diff + fy_vort)·rdx). The prognostic D-grid winds u_d/v_d
+NEVER receive the pressure-gradient force — FV3's Phase4 `one_grad_p`/`grad1_p_update`
+(dyn_core.F90:2347/2483, the D-grid backward PGF using the a2b-corner geopotential) is ENTIRELY
+MISSING. For W2 geostrophic balance (Coriolis ↔ PGF) the prognostic winds have NO PGF restoring
+⇒ the balance is unbalanced ⇒ the dt-independent ~3 h growing mode. (Spatial check: by
+saturation the mode is grid-scale/~global with a weak corner seed — consistent with a global
+missing-restoring-force mode, not an edge-only artifact.) The port HAS `_p_grad_c` (C-grid) but
+NO D-grid PGF; production RK3 uses an Arakawa-Lamb D-grid PGF that works. FIX = add Phase4 to
+fv3_fb_sw_step: the FV3-faithful `one_grad_p` D-grid backward PGF on u_d/v_d (geopotential
+g·(h_new+h_s) → a2b to corners → gradient along D-grid edges → u_d += -∂x(gz)·dt etc.), backward
+time-centered on the post-d_sw height. Validate: FB W2 C36 no longer blows at ~3 h. (codex/oracle
+review the new phase.)
 
 ## GRID gap → gnomonic_ed wiring (LIKELY fixes the C96 eigenmode; iter62-69)
 create defaulted to EQUIANGULAR (gt=2, corner aspect 1.40); FV3 operational = gnomonic_ed
