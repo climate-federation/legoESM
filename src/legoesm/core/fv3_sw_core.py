@@ -1206,13 +1206,21 @@ def _corner_vorticity(uc, vc, cdgrid, use_duogrid):
         vc_halo_i_left = 0.5 * (vc_cc_pad[:, 0, :-1] + vc_cc_pad[:, 0, 1:])
         vc_halo_i_right = 0.5 * (vc_cc_pad[:, n + 1, :-1]
                                   + vc_cc_pad[:, n + 1, 1:])
-        # Metric halo: dxc/dyc continuous across seams; edge-mode for
-        # the halo row (O(dx) error, much smaller than the 15.6 % uc
-        # rotation error that mode='edge' on fx_circ produced).
-        dxc_halo_j_below = cdgrid.dxc[:, :, 0]    # (6, n+1)
-        dxc_halo_j_above = cdgrid.dxc[:, :, -1]   # (6, n+1)
-        dyc_halo_i_left = cdgrid.dyc[:, 0, :]     # (6, n+1)
-        dyc_halo_i_right = cdgrid.dyc[:, -1, :]   # (6, n+1)
+        # Metric halo: KNOWN FAITHFULNESS GAP (iter93, oracle-confirmed).  FV3 in
+        # DUOGRID mode SKIPS the edge-extrapolation+mpp_update of dxc/dyc that the
+        # non-duogrid path uses (fv_grid_tools.F90:899-916 are gated by the
+        # `.not. duogrid` block; line 1107 skips mpp_update for duogrid) — the
+        # duogrid supplies the CROSS-FACE metric halo from its extended grid.
+        # Here we still edge-copy the boundary dxc/dyc into the halo row, an O(dx)
+        # error at the seams (smaller than the 15.6% uc rotation error mode='edge'
+        # on fx_circ produced, but NOT negligible — it is a primary seed of the
+        # FB-chain W2 C36 residual).  TODO(next): compute the cross-face dxc/dyc
+        # halo from the cdgrid padded supergrid (_psg_lon/_psg_lat, the same
+        # extension that feeds sin_sg) and thread it in here.
+        dxc_halo_j_below = cdgrid.dxc[:, :, 0]    # (6, n+1)  [edge-copy; TODO cross-face]
+        dxc_halo_j_above = cdgrid.dxc[:, :, -1]   # (6, n+1)  [edge-copy; TODO cross-face]
+        dyc_halo_i_left = cdgrid.dyc[:, 0, :]     # (6, n+1)  [edge-copy; TODO cross-face]
+        dyc_halo_i_right = cdgrid.dyc[:, -1, :]   # (6, n+1)  [edge-copy; TODO cross-face]
 
         fx_halo_j_below = uc_halo_j_below * dxc_halo_j_below   # (6, n+1)
         fx_halo_j_above = uc_halo_j_above * dxc_halo_j_above   # (6, n+1)

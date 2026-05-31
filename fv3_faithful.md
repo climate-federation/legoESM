@@ -271,3 +271,28 @@ cosine_bell (does L2 drop toward latlon?) + W2 v-imprint; (4) conservation trade
 dissipates energy — check vs FV3); (5) if it fixes the eigenmode + stays mass-conserving, promote
 toward default + regenerate the centered-era gold fingerprints. HIGH regression risk (production
 dynamics core) → gated + eigenmode-validated FIRST.
+
+
+## iter93 — VERIFIED bug A is REAL (FV3-duogrid uses cross-face metric, not edge-mode)
+Investigated the convergent-root direction (centered vs upwind vorticity). Production SW is a
+CO-LOCATED Arakawa-Lamb vector-invariant form (operators_cdgrid.py:1129-1185, `zeta_corner*v_d`),
+NOT FV3's staggered c_sw->d_sw flux — so `_vorticity_flux` (the FV3 upwind donor-cell flux, which
+legoESM HAS) cannot be dropped into production without the staggered FB rewrite (the FB chain).
+The faithful path is the FB chain; its primary residual seed is bug A.
+
+bug A RE-VERIFIED against the oracle (corrects iter84's "authors judged minor"):
+  • `_corner_vorticity` duogrid path (fv3_sw_core.py:1209-1220) correctly cross-face-rotates uc/vc
+    for the halo but uses EDGE-COPIED dxc/dyc for the halo metric.
+  • FV3 fv_grid_tools.F90: the dxc/dyc edge-extrapolation (899-916) + area_c/metric mpp_update
+    (1107) are ALL gated by `if (.not. duogrid)`. In DUOGRID mode FV3 SKIPS them — the duogrid
+    supplies the CROSS-FACE metric halo from its extended grid. ⇒ edge-mode dxc/dyc on the duogrid
+    is a REAL faithfulness gap (O(dx) at seams), not "fine". Confirmed code comment corrected.
+  FIX (scoped, next iter — moderate, deferred to avoid a rushed index bug at turn-tail): compute the
+  cross-face dxc/dyc halo rows (j=-1,j=n for fx; i=-1,i=n for fy) from the cdgrid PADDED supergrid
+  (_psg_lon/_psg_lat, 2n+3, already built for sin_sg), expose as cdgrid fields, thread into
+  `_corner_vorticity`. Then re-pin the corner_vorticity duogrid fingerprint + measure the FB W2 C36
+  residual (day1 |u|=50→? toward 38, day2 NaN→?). FB-only (production uses dgrid_vorticity), so
+  production-safe. RISK: cross-face metric index mapping; mitigated by validating dxc continuity at
+  seams + the FB residual.
+  iter93 deliverable: oracle-verified diagnosis + corrected the misleading "O(dx), much smaller, fine"
+  code comment to the accurate "real faithfulness gap, TODO cross-face". Implementation next iter.
