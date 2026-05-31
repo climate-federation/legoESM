@@ -59,14 +59,21 @@ matching mpas, baroclinic v smooth — all no panel imprint.)
   core (FV3EdgeShallowWaterModel: upwind abs-vorticity flux + `_d2a2c_vect`).
   Gated; default stays validated `fv3sw` (centered). New cc↔edge lift round-trips
   0.1%. fv3edge validated: stable, rest ×4 machine-zero, geostrophic artifact
-  resolved (nz 3.3%), 8/9 (phillips needs own div_damp ~150-180, upwind less
-  dissipative). Test `test_fv3edge_barotropic.py`.
+  resolved (nz 3.3%), 8/9. phillips is the only fail: the upwind scheme
+  dissipates the baroclinic instability differently than latlon/fv3sw — REAL
+  matrix phillips eta_growth 120→12.1, 130→11.4 (slow), so fv3edge needs a much
+  higher (non-latlon-matching) div_damp to pass; NOT a clean 9/9 default
+  replacement. So fv3sw (centered, validated 9/9, phillips 0.44≈latlon) stays
+  DEFAULT; fv3edge is the available faithful upwind option. Test
+  `test_fv3edge_barotropic.py`. (Earlier ~150-180 estimate used wrong IC.)
 
 ## OPEN (sanctioned-major or CPU-bound — engineering decision: defer, don't risk
 the validated state via loop hacks against a concurrently-`git reset` tree)
 - 3D PE upwind faithfulness ⇒ FV3 2-stage c_sw/d_sw rewrite (core dycore).
-- Ocean→FV3Edge: DONE (gated, 19de9080). Remaining: phillips div_damp calibration
-  (~150-180) to make fv3edge 9/9, then could promote to default if desired.
+- Ocean→FV3Edge: faithful upwind option DONE (gated, 19de9080, validated 8/9).
+  Promotion to default blocked by phillips: upwind baroclinic-instability
+  dissipation differs from latlon → no div_damp cleanly gives 9/9 AND latlon-match.
+  fv3sw stays validated default. (fv3edge usable now for upwind-faithful runs.)
 - Climate-equilibrium cross-grid (held_suarez/AMIP): CPU-bound (latlon hydro
   ~35min/case; needs ~200-day spin-up).
 - C-face OMIP-coastline mask (coastal-BC, beyond matrix; SW-core jit-static).
