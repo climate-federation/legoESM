@@ -71,11 +71,11 @@ seams, must use mirror construction):**
   √2 1.31 ratio, seam-continuous, create-numbered). iter67: construct-at-cell-centre-θ
   (defn B) is WRONG — gnomonic_ed's construct is range-dependent (sub-range → 1.80 ratio),
   not parametric like equiangular's tan(α).
-- ⚠️ `compute_padded_{half_metrics,angle}_ed` BUILT + pass vs-equiangular tests BUT use defn
-  B (construct-at-cell-centre-θ) ⇒ INCONSISTENT with the defn-A centres (~54% of a cell).
-  MUST be reworked to corner-based (defn A): extended CORNER θ → construct → cell_center2 →
-  centres → 2-cell-chord dx + centred-diff angle, so grid.lon/lat and the metrics share one
-  centre. (7th verify-first subtlety.)
+- ✅ `compute_padded_{half_metrics,angle}_ed` + `_compute_exact_cell_areas_ed` — ALL reworked
+  to defn A (corner-based): `_gnomonic_ed_padded_centers` = cell_center2 of extended corners,
+  per-face 2-cell-chord dx + centred-diff angle. In-domain centres match grid.lon/lat to
+  1.4e-15 (consistency-lock test). Fixed the 7th subtlety (defn-B was range-dependent/~½-cell
+  off). 22/22 gnomonic_ed brick tests. grid.lon/lat + all metrics now share ONE centre defn.
 - ✅ `compute_padded_angle_ed` (angle 2-valued: equatorial 0-3 / polar 4-5 differ by π — a
   REAL N/S flip, in equiangular too; within 0.076 rad of equiangular). Tests 5/5.
 - ✅ `_compute_exact_cell_areas_ed` (FV3 get_area on remapped corners; total 4πR² exact,
