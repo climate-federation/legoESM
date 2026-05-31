@@ -202,3 +202,15 @@ the c_sw→d_sw coupling. GENUINE method: linearized-FB eigen-analysis (the grow
 the buggy coupling) — a dedicated/fresh-context effort.
 HONEST NET (codex-vetted): cube faithful everywhere except the SW upwind-vorticity FB PORT BUG (the
 eigenmode/residual root); FV3-upwind is the correct+stable target; the port bug needs eigen-analysis.
+
+
+## iter110b — `_vorticity_flux` vertex metric RULED OUT (sina_u not degenerate)
+Probed sina_u/sina_v (the non-orthogonality metric in `_vorticity_flux`, fy1=(v_d-uc*cosa_u)/sina_u):
+range [0.872,1.0], vertex min 0.872 vs interior 0.895 ⇒ 1/sina_u vertex max ~1.15 (NOT a blow-up).
+cosa_u ∈ [-0.489,0.489] (largest at vertices = the correct moderate non-orthogonality, not a bug).
+⇒ the `_vorticity_flux` vertex metric is faithful — NOT the FB residual root.  This EXHAUSTS the
+metric/halo single-step candidates (corner-vort metric iter94, circulation halo iter107, vorticity-
+flux metric iter110b; + dissipation/Phase4/wind-halo iter82-83).  Remaining candidates (KE `_ke_upwind`
+/ d_sw zeta / c_sw→d_sw coupling) are all single-step-LIMITED (the residual is a growth-rate eigenmode,
+iter79/108b) ⇒ the linearized-FB EIGEN-ANALYSIS is now the ONLY productive method (a dedicated/
+fresh-context effort; the autonomous-loop single-step probe avenue is exhausted).
