@@ -81,6 +81,26 @@ rest_state_topo (max|v|1.2 = bounded sigma-PGF topo residual), dcmip_transport_1
 test_fc_velocity_viscosity_vector_halo, test_fv3sw_barotropic, test_ocean_fc,
 test_no_scheme_duplication — all session fixes regression-clean, no duplication.
 
+## FAITHFULNESS AUDIT (codex + FV3 oracle, iter ~37)
+Codex adversarial audit of legoESM cube dycore vs FV3 sw_core.F90 c_sw/d_sw.
+Precise map (FUNCTIONAL faithfulness — FV3-like results, edge-clean, close to refs
+— holds everywhere; ALGORITHMIC line-by-line faithfulness is mixed):
+- ✅ **SW path (FV3EdgeShallowWaterModel → `fv3_sw_core`) IS faithful**: `_d2a2c_vect`
+  (full d2a2c, sin_sg upwind, adjacent-strip + corner 2×2 solve, sw_core:618-812),
+  `_d_sw1_recompute_ut_vt`. The SW matrix cube uses this.
+- ⚠️ **3D PE atm dycore** (`primitive_eq_cdgrid:445`) + **ocean barotropic**
+  (`cdgrid_momentum_tendencies:1167`) use **CENTERED** `zeta_corner*v_d`, NOT FV3's
+  UPWIND absolute-vorticity flux (sw_core:423-490); `dgrid_to_cgrid:419` is a
+  simplified d2a2c (v_c plain-averaged, no cosa_v/sina_v); div-damp is cell-center
+  continuous, not FV3 corner d_sw5/nord. These are FV3-INSPIRED vector-invariant +
+  explicit damping — validated functionally (baroclinic converges, edge-clean, all
+  cases pass) but NOT a line-by-line FV3 port.
+- SCOPED UPGRADE (major, deferred — core-dycore + re-validation risk): route the 3D
+  PE + ocean-barotropic momentum through the faithful upwind vorticity flux +
+  `_d2a2c_vect` + d_sw5 damping (the SW path already does). Current centered scheme
+  is validated; upgrade needs careful re-calibration. Not a defect — a
+  faithful-vs-functional distinction the user should know.
+
 ## SW visual verdicts
 1. cosine-bell day-1 = PPM-limiter interior diffusion (cube/ico L2 1.4×), not edge.
 2. W5 propagates ≈ latlon/MPAS by day 15; ~12% day-1 damping deficit.
