@@ -151,7 +151,7 @@ class CubedSphereCDGrid(NamedTuple):
         return self.base.radius
 
 
-def _compute_sin_cos_sg(n, face_gnomonic_to_lonlat):
+def _compute_sin_cos_sg(n, padded_supergrid_lon, padded_supergrid_lat):
     """Compute Duo-Grid sub-grid metrics at 9 positions per cell.
 
     Uses a supergrid (half the cell spacing) to evaluate the angle between
@@ -199,14 +199,14 @@ def _compute_sin_cos_sg(n, face_gnomonic_to_lonlat):
     #   2k+1: corner k        for k = 0..n
     #   2k+2: cell centre k   for k = 0..n-1
     #   2n+2: pi/4 + dalpha/2 (padding)
-    n_sg = 2 * n + 3
-    alpha_sg = jnp.linspace(-jnp.pi / 4 - dalpha / 2,
-                            jnp.pi / 4 + dalpha / 2, n_sg)
-    ax_sg, ay_sg = jnp.meshgrid(alpha_sg, alpha_sg, indexing='ij')
+    # Padded supergrid (2n+3 per axis) supplied precomputed (grid-type-agnostic,
+    # iter71); index per face instead of the equiangular parametric map.
+    padded_supergrid_lon = jnp.asarray(padded_supergrid_lon)
+    padded_supergrid_lat = jnp.asarray(padded_supergrid_lat)
 
     all_cos_sg = []
     for face in range(6):
-        lon_sg, lat_sg = face_gnomonic_to_lonlat(face, ax_sg, ay_sg)
+        lon_sg, lat_sg = padded_supergrid_lon[face], padded_supergrid_lat[face]
         cos_lat = jnp.cos(lat_sg)
         px = cos_lat * jnp.cos(lon_sg)
         py = cos_lat * jnp.sin(lon_sg)
@@ -857,7 +857,14 @@ def create_cubed_sphere_cdgrid(
     # 0-indexed: 0=W, 1=S, 2=E, 3=N (edge midpoints); 4=center;
     #            5=SW, 6=SE, 7=NE, 8=NW (corners)
     # ------------------------------------------------------------------
-    sin_sg, cos_sg = _compute_sin_cos_sg(n, _face_gnomonic_to_lonlat)
+    # Padded supergrid (2n+3 per axis, ±dα/2 padding) for sin_sg/cos_sg.
+    _dasg = jnp.pi / (2 * n)
+    _alpha_psg = jnp.linspace(-jnp.pi / 4 - _dasg / 2, jnp.pi / 4 + _dasg / 2, 2 * n + 3)
+    _axp, _ayp = jnp.meshgrid(_alpha_psg, _alpha_psg, indexing='ij')
+    _psg = [_face_gnomonic_to_lonlat(f, _axp, _ayp) for f in range(6)]
+    _psg_lon = jnp.stack([s[0] for s in _psg])
+    _psg_lat = jnp.stack([s[1] for s in _psg])
+    sin_sg, cos_sg = _compute_sin_cos_sg(n, _psg_lon, _psg_lat)
 
     # ------------------------------------------------------------------
     # C-grid face metrics from sin_sg/cos_sg (FV3 fv_grid_utils.F90:505-518)
