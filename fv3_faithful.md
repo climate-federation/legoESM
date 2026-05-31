@@ -57,8 +57,11 @@ imprint" was also overstated. TRUTH: NO large edge artifact (all physical SW fie
 continuous ≤2.2×); the same-face roughness metric is UNRELIABLE in BOTH directions and
 should not anchor the claim. Mild error-field elevation (W2 v 2.23×, sub-0.34 m/s
 residual) is the tiny discretization residual, invisible to L2/mass. Baroclinic clean.
-- STILL MISSING: visual PNG inspection (human); commit the TRUE cross-face metric as a
-  regression test; W2/W5 higher-res sweep (C48/C96 — confirm continuity holds w/ res).
+- [DONE iter58] TRUE cross-face metric committed: `compute_cross_face_continuity`
+  (halo.py) + `tests/grids/test_cross_face_continuity_metric.py` (3/3: smooth field
+  <3×, injected seam jump >10×, 3D/4D shapes). Supersedes the unreliable same-face one.
+- STILL MISSING: visual PNG inspection (human); W2/W5 higher-res sweep (C48/C96 —
+  confirm continuity holds with resolution).
 
 ## VERIFICATION
 - SW 16/16 all grids, aligned within 1 cell. Full fast cube atm dynamical suite
