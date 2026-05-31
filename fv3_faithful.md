@@ -154,9 +154,18 @@ midplane PAIRING (i,im−i) and `mirror_grid_faces`' per-face rotation. Two fait
 both substantial foundational work: (a) fixed-reference extension throughout (extend each
 edge with pinned in-domain references + symmetrize in-domain-only), or (b) TRUE cross-face
 corner-halo (halo-exchange the 6-face corners via cube corner-topology, then compute
-metrics on the halo-extended corner grid = what FV3 does). NOT a safe single loop-brick;
-needs dedicated focus. Verify-first has rejected 2 shortcuts (separable swap; naive
-theta-extension) — the depth is real.
+metrics on the halo-extended corner grid = what FV3 does). Verify-first has rejected 2 shortcuts (separable swap; naive theta-extension).
+**CRUX NOW TRACTABLE (iter65 cheap checks collapsed it):** (1) `symm_ed` is a MACHINE-ZERO
+no-op (4.4e-16 correction — the construct is already symmetric) ⇒ SKIP it, removing the
+last extent-referencing concern. (2) dx/dy/area are FACE-INDEPENDENT (0.0 across all 6 faces
+by cube symmetry) ⇒ compute hx/hy ONCE on the extended equatorial face + broadcast. (3)
+`angle` has only 2 values — equatorial (faces 0-3) vs polar (4-5) ⇒ 2 computations; the
+polar face comes from `mirror_grid_faces` (pure rot_3d rotation = extent-SAFE). (4) the
+gnomonic_grids `-π` shift is metric-invariant (great-circle + relative angle unaffected).
+⇒ the 6-face metric crux reduces to: build extended equatorial face (`_gnomonic_ed_construct`,
+interior-invariant) → hx/hy great-circle (broadcast) + angle centered-diff (equatorial); mirror
+to polar → angle. NEXT: implement `compute_padded_{angle,half_metrics}_ed` matching the
+equiangular n_big indexing, then gate `create_cubed_sphere(gnomonic="ed")` + validate.
 
 ## VERIFICATION
 - SW 16/16 all grids ≤1 cell aligned. Full fast cube atm dynamical suite PASS + NH
