@@ -53,7 +53,12 @@ matching mpas, baroclinic v smooth — all no panel imprint.)
   `_vorticity_flux` (fv3_sw_core:1260).
 - ⚠️ 3D PE dycore (`primitive_eq_cdgrid:445`) uses CENTERED `zeta_corner*v_d` —
   FV3-INSPIRED, validated, NOT FV3's upwind 2-stage. Functional faithfulness
-  (results, edge-clean) everywhere.
+  (results, edge-clean) everywhere. FV3-faithful corner d_sw5 div-damp + a2b-zeta
+  KNOBS exist (`corner_div_damp_nord/d4_bg`, `use_fv3_a2b_zeta_corner`) but default
+  OFF + are per-case-config-gated (held_suarez reads `LEGOESM_CDD_*` env;
+  run_baroclinic config doesn't) + secondary (damping, not the core upwind-flux
+  gap). Core PE upwind = major build (no drop-in faithful 3D dycore, unlike the
+  ocean's FV3Edge).
 - ✅ **Ocean barotropic NOW HAS a faithful option** (19de9080):
   `barotropic_staggering="fv3edge"` routes through the TRUE FV3 edge-staggered SW
   core (FV3EdgeShallowWaterModel: upwind abs-vorticity flux + `_d2a2c_vect`).
@@ -66,6 +71,9 @@ matching mpas, baroclinic v smooth — all no panel imprint.)
   replacement. So fv3sw (centered, validated 9/9, phillips 0.44≈latlon) stays
   DEFAULT; fv3edge is the available faithful upwind option. Test
   `test_fv3edge_barotropic.py`. (Earlier ~150-180 estimate used wrong IC.)
+  CODEX-APPROVED: review confirmed cc↔edge lift indexing, rotation signs,
+  _edge_to_cc inverse, fix_mass=False, no retrace all correct (only a doc-wording
+  fix re per-substep vs sub-RK3-stage masking).
 
 ## OPEN (sanctioned-major or CPU-bound — engineering decision: defer, don't risk
 the validated state via loop hacks against a concurrently-`git reset` tree)
