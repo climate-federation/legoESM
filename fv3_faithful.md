@@ -15,13 +15,17 @@ Fortran as oracle; do NOT improvise.** Branch `latlon-fv-amip-verify`.
 - gnomonic_ed grid WIRED + halo-collapse fixed (iter73) + codex-approved; equiangular byte-identical.
 - cross-grid SW (iter92, 16/16 all grids): cube W2 L2 1.76e-4 ≈ latlon 2.67e-4 ≈ ico 9.9e-5 (dynamics
   FAITHFUL). ocean cube matrix 9/9, rest machine-zero. baroclinic clean (C36→C72 ≤1.24×).
-  cosine_bell cube 0.131 vs latlon 0.025 (~5×, ~1.8× MPAS) — **NOT YET ESTABLISHED as inherent**
-  (iter109 codex [high], correcting an earlier overclaim): the canonical cosine-bell path uses
-  `transport_step` with `apply_fortran_xppm_boundary=False` (the NON-oracle xppm boundary default) AND
-  clips negatives + rescales mass to compensate face-boundary flux mismatches, so 0.131 may include
-  non-faithful boundary behavior + post-hoc mass-fixing, NOT proven inherent-cube cost. TODO: re-run
-  with apply_fortran_xppm_boundary=True + separate the RAW transport error from clip/rescale before
-  concluding inherent-vs-bug.
+  cosine_bell: bulk PPM-limiter dissipation on the cube grid, NOT an edge/boundary bug
+  (iter109: codex [high] worried 0.131 was inflated by a non-oracle boundary + mass-fixing; REFUTED by
+  the existing iter-61/62 evidence the run uses).  The cube CB path (run_atmosphere_test_matrix.py:2872)
+  DOES pass `apply_fortran_xppm_boundary=True` (the FV3-faithful xppm cube-edge boundary), hord=10,
+  n_sub=6.  iter-61/62 apples-to-apples 12-day audit: cube L2=0.865 | latlon 0.133 | ico 0.620 |
+  spectral 0.382 → cube/latlon 6.5×, cube/ico 1.4×, cube/spectral 2.3× (cube IS the L2 outlier but BEST
+  at mass conservation, drift 1.28e-9 ⇒ the rescale is negligible).  iter-61 spatial decomposition
+  (_probe_iter61_cb_error_map.py): 99% of the residual lives in panel-INTERIOR cells of the bell's
+  face; panel-edge cells contribute ~3e-4 ⇒ bulk PPM limiter dissipation, NOT panel-coupling/edge.
+  Resolution-independent (the cube PPM transport-accuracy plateau).  ⇒ faithful transport (oracle
+  boundary + fv_tp_2d), error is the cube PPM dissipation characteristic, cube≈ico — defensible.
 - **3D rest_state_topo "13× edge artifact" = FLOAT32 precision, NOT a faithfulness bug** (iter97-101):
   the cube 3D hydrostatic PGF is EXACTLY well-balanced in float64 (compute_geopotential uses only
   σ-derived ln_ratio/alpha ⇒ Φ=phis+per-level-const ⇒ −∇Φ cancels −R_d·T·∇ln_ps to machine zero;
