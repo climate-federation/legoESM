@@ -90,8 +90,17 @@ seams, must use mirror construction):**
   dist). gnomonic_ed-specific (codex's gating blocker addressed), bounded (maxabs 0.223 vs
   eq 0.498), helps vs no-offset. Tests 3/3. CAVEAT: sub-cell correction; field tests
   dominated by cross-face linear-interp error so eq-vs-ed optimality is below noise — final
-  validation = gated W5 C96 eigenmode run. ⇒ ALL gnomonic_ed metric pieces DONE; next = GATE
-  `create_cubed_sphere(gnomonic="ed")` assembling all fields → validate → recalibrate → W5 C96.
+  validation = gated W5 C96 eigenmode run.
+- ✅ GATE DONE (iter68): `create_cubed_sphere(gnomonic="ed")` builds the FV3 gnomonic_ed grid
+  in production — selects the *_ed builders (centres, padded angle/half-metrics h1/2/3, areas,
+  halo-offsets h1/2/3 `_compute_halo_interp_offsets_ed_hN`). Equiangular default BYTE-IDENTICAL
+  (cube SW 4/4 unchanged, W2 v_ll 0.339, mass machine-zero). ed grid: area=4πR², dx ratio
+  1.40≈√2, cell aspect **1.05≈1.06** (vs equiangular 1.40), all fields finite, rejects
+  Schmidt/shift. Gate tests 4/4 (`test_gnomonic_ed_gate_iter68`).
+- ⏳ REMAINING for the eigenmode test: the DYNAMICS use `create_cubed_sphere_cdgrid` (C/D
+  supergrid, ALSO equiangular-hardcoded `alpha_edges=linspace`) — needs an ed-consistent
+  cdgrid before running W5 C96 on the ed grid. Then validate (dynamical suite) + re-calibrate
+  + the W5 C96 eigenmode-fix test (the payoff).
 - (superseded) earlier `compute_halo_interp_offsets_ed` notes: reuse equiangular
   CONNECTIVITY + `_face_to_xyz_np`/`_xyz_to_gnomonic_np` (pass gnomonic_ed angles since
   tan(arctan(coord))=coord) with `frac=interp(neighbor_angle, alpha_ed, range(n))`. The
