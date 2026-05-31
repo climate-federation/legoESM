@@ -122,6 +122,20 @@ A/B knob added: `run_omip_core2.py --ke-gradient-scheme {centered,hollingsworth}
   bounded-WBC regime holds; final snapshot → compare vs NEMO yr-1 (caveat: WBC
   ~7× over-intense, viscosity-limited). codex round-3 verified substance clean
   (wiring + dispatch + no unsafe CFL); only doc-wording nits remained, fixed.
+  **CORRECTION (same iter, commit abe80cdd):** the metric cap (1) REGRESSED —
+  the validation smoke (job 8126978, committed code) went NaN by **day 0.25**
+  while the 3mo run (8124320, prior `area·cos²` cap, identical config) is finite
+  past 7 h. The strict rectangular CFL bound is ~20% lower at the WBC (more at
+  high lat) → STARVES the marginally-resolved jet of the viscosity it needs.
+  ⇒ codex's "area·cos² over-caps" finding was theoretically right but BACKWARDS
+  here: the cold start needs the LARGER tuned ceiling (the energy-stable stress
+  operator tolerates a coefficient above the explicit-CFL limit). **REVERTED to
+  `area·cos²(lat)·safety/dt`** (proven stable), KEEPING the two genuine review
+  fixes — periodic q-seam (vs edge-pad) + explicit fold convention. **Lesson:
+  smoke-validate numerics on the real cold-start BEFORE committing; unit tests +
+  adversarial review missed this.** Confirmation smoke 8126991 + unit re-run in
+  flight. Two extra commits this iter: af8da957 (observable runner: per-diag CSV
+  + `--snapshot-every-days`), abe80cdd (the revert).
 - **iter 1:** new loop. Drag-spinup test 8100129 queued (GPU busy). Created this tracker.
   codex-adversarial-review of dycore changes = needs-attention, 2 valid findings, both FIXED:
   (1) [high] flood-fill copied donor columns without reapplying the RECEIVER bathymetry deep-fill
