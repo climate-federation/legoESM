@@ -971,27 +971,11 @@ def create_cubed_sphere_cdgrid(
     # for y-edges at (n+1, n) positions.
     all_angle_ex = []
     all_angle_ey = []
-    dalpha_e = jnp.pi / (2 * n)
-    # Extended grid: n+4 points gives n+2 after centred diff, which is
-    # enough to slice both (n, n+1) and (n+1, n) sub-grids.
-    n_ext2 = n + 4
-    alpha_ext2 = jnp.linspace(
-        -jnp.pi / 4 - 1.5 * dalpha_e,
-        jnp.pi / 4 + 1.5 * dalpha_e,
-        n_ext2,
-    )
-    # For edge midpoints we need positions on half-integer gnomonic lines.
-    # x-edge midpoint (i+0.5, j): gnomonic alpha shifted by half a cell
-    # in the first index.  Use (n+3) points centred on half-integers.
-    alpha_centers = jnp.linspace(-jnp.pi / 4, jnp.pi / 4, n + 1)
-    alpha_half_x = 0.5 * (alpha_centers[:-1] + alpha_centers[1:])  # (n,)
-    alpha_half_y = alpha_half_x  # symmetric grid
-
-    # Build extended half-grid lines for centred differences
-    # x-edge: need alpha_half_x with one extra point on each side for
-    # centred diffs in the i-direction (for grid angle).
-    # Instead of constructing a custom half-grid, we can evaluate
-    # the tangent vectors at the Cartesian edge-midpoints directly.
+    # iter71: the edge-midpoint grid angles are computed directly from the
+    # Cartesian corner positions (xc/yc/zc, from the precomputed corner grid)
+    # and edge midpoints (mx/my) — grid-type-agnostic.  The former equiangular
+    # `alpha_ext2`/`alpha_half_*` (n+4 / half-integer linspace) were DEAD CODE
+    # (computed, never used) and are removed.
 
     for face in range(6):
         # --- Grid angle at x-edge midpoints (n, n+1) ---
