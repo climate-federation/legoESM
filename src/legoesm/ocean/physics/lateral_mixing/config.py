@@ -121,6 +121,27 @@ class GMRediConfig(NamedTuple):
                                       # KPP boundary-layer depth when available).
                                       # Only active for slope_scheme="centered".
     surface_complement_depth: float = 100.0  # Depth [m] of the surface layer
+    # --- Veros-faithful isoneutral options (oracle-matching; default off) ---
+    implicit_K33: bool = False
+    # ^ When True, the vertical isoneutral diagonal K_33 = kappa_Redi·S² (the
+    # "enhanced vertical mixing ∝ S²" noted above) is REMOVED from the explicit
+    # F_z and folded into the IMPLICIT vertical-diffusion tridiagonal solve
+    # (backward-Euler), matching Veros (core/isoneutral/diffusion.py:
+    # delta = dt/dzw·K_33). The explicit F_z then carries ONLY the off-diagonal
+    # skew. Stiff-stable; required to reproduce Veros's dtemp_iso (which folds the
+    # implicit K_33 increment into the diagnosed isoneutral tendency). Supported
+    # only by slope_scheme="triads" on the lat-lon C-grid model.
+    K_iso_steep: float = 0.0
+    # ^ Steep-slope floor on the HORIZONTAL isoneutral diffusivity: the effective
+    # along-isopycnal diffusivity becomes max(K_iso_steep, kappa·taper) (Veros
+    # K_11/K_22, isoneutral.py:128/165; NOT applied to K_33). Default 0 = no floor.
+    # NB legoESM clips the slope to S_max BEFORE the DM95 taper, so the taper
+    # bottoms at 0.5 (its value at S_max) instead of →0; the floor therefore only
+    # bites for kappa < 2·K_iso_steep. At Veros ACC (kappa≈1000, K_iso_steep=500)
+    # the clipped-taper diagonal already equals K_iso_steep at steep slopes, so the
+    # floor is correct but INERT for ACC — it matches Veros either way. (A fully
+    # Veros-faithful steep-slope taper would need the UNCLIPPED slope; that is the
+    # deeper slope-stencil difference, deferred.)
     # Prognostic EKE (Eden-Greatbatch 2008): when not None, kappa_GM becomes
     # prognostic (c_k·L·√E) from the evolving eddy-energy field E, instead of the
     # constant ``kappa_GM`` / Visbeck diagnostic. Selection is presence-based

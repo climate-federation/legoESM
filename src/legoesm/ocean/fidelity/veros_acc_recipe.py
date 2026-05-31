@@ -145,6 +145,12 @@ ACC_GM_REDI_CONFIG = GMRediConfig(
     #   the EKE-off fallback.
     S_max=0.01,                  # ↔ iso_slopec
     taper_width_frac=0.5,        # = iso_dslope / iso_slopec = 0.005 / 0.01
+    implicit_K33=True,           # Veros applies the vertical isoneutral diagonal
+    #                              K_33 IMPLICITLY (core/isoneutral/diffusion.py);
+    #                              fold it into the implicit tracer solve instead of
+    #                              the explicit F_z (the tier-2 dtemp_iso residual).
+    K_iso_steep=500.0,           # ↔ Veros K_iso_steep (acc.py:41): horizontal-
+    #                              diffusion floor on K_11/K_22 at steep slopes.
     # Prognostic EKE (Eden-Greatbatch) with the Rhines-limited mixing length —
     # Veros ACC runs enable_eke=True (veros/setups/acc/acc.py:67-75). The closure
     # FORM + params reproduce Veros's GM coefficient K_gm AND eke_len/L_rossby/

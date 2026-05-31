@@ -40,6 +40,7 @@ from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
 from legoesm.ocean.eos import compute_ocean_rho, make_eos_fn
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     gm_redi_tracer_tendency_latlon,
+    compute_isoneutral_K33_latlon,
 )
 from legoesm.ocean.state import LatLonCGridOceanConfig, LatLonCGridOceanState
 from legoesm.ocean.vertical import (
@@ -112,6 +113,7 @@ def probe_latlon_cgrid(
     surface_forcing=None,
     sponge=None,
     dt: float = 300.0,
+    dt_tracer: float | None = None,
 ) -> LatLonProbeResult:
     """Compute per-process tendencies on a frozen ocean state.
 
@@ -177,6 +179,32 @@ def probe_latlon_cgrid(
             u_mask=state.u_mask.data, v_mask=state.v_mask.data,
             rho_0=config.constants.rho_0, g=config.constants.g,
         )
+        if getattr(config.gm_redi, "implicit_K33", False):
+            # When the vertical isoneutral diagonal is applied IMPLICITLY (Veros-
+            # faithful), the explicit dT_gm above is skew-only.  Fold in the
+            # implicit K_33 increment exactly as Veros folds it into dtemp_iso
+            # ((new - old)/dt_tracer), so the per-process iso comparison stays
+            # apples-to-apples.  Backward-Euler damping is dt-dependent ⇒ use the
+            # tracer dt (Veros's dt_tracer), not the momentum dt.
+            from legoesm.ocean.physics.vertical_mixing import (
+                implicit_vertical_diffusion_ocean, build_dz_half,
+            )
+            dt_tr = dt_tracer if dt_tracer is not None else dt
+            K33 = compute_isoneutral_K33_latlon(
+                state.T.data, state.S.data, state.eta.data, state.H_bathy.data,
+                grid, z_coord, config.gm_redi,
+                eos=getattr(config, "eos", "wright"),
+                eos_linear=getattr(config, "eos_linear", None),
+                mask=state.land_mask.data,
+                rho_0=config.constants.rho_0, g=config.constants.g,
+            )
+            dz_cell = z_coord.dz_ref * J[:, :, jnp.newaxis]
+            dz_half = build_dz_half(dz_cell)
+            mask3 = state.land_mask.data[:, :, jnp.newaxis]
+            T_imp = implicit_vertical_diffusion_ocean(state.T.data, K33, dz_cell, dz_half, dt_tr)
+            S_imp = implicit_vertical_diffusion_ocean(state.S.data, K33, dz_cell, dz_half, dt_tr)
+            dT_gm = dT_gm + (T_imp - state.T.data) / dt_tr * mask3
+            dS_gm = dS_gm + (S_imp - state.S.data) / dt_tr * mask3
     else:
         dT_gm = jnp.zeros_like(tendencies.dT_dt.data)
         dS_gm = jnp.zeros_like(tendencies.dS_dt.data)

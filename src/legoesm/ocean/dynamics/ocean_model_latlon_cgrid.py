@@ -66,6 +66,7 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_eke_step_kappa,
     eke_horizontal_transport,
     gm_redi_tracer_tendency_latlon,
+    compute_isoneutral_K33_latlon,
 )
 from legoesm.ocean.physics.lateral_mixing.eke import eke_apply_local_source
 from legoesm.ocean.advection_som import som_advect_tracers
@@ -1091,6 +1092,8 @@ class LatLonCGridOceanModel:
         S_mid = state_new.S.data
 
         # GM/Redi isopycnal mixing (if configured)
+        k33_implicit = None  # vertical isoneutral diffusivity K_33 for the
+        #                      implicit tracer solve (set below iff implicit_K33).
         if self.config.gm_redi is not None:
             gm_cfg = self.config.gm_redi
             kappa_gm_override = None
@@ -1144,6 +1147,20 @@ class LatLonCGridOceanModel:
                 kappa_gm_override=kappa_gm_override,
                 kappa_redi_override=kappa_redi_override,
             )
+            if gm_cfg.implicit_K33:
+                # Veros-faithful: K_33 (the vertical isoneutral diagonal ∝ S²) was
+                # dropped from the explicit F_z above (implicit_K33=True); recompute
+                # it from the SAME density/slopes as dT_gm and fold it into the
+                # implicit vertical-diffusion solve below, so the stiff S²-enhanced
+                # vertical mixing is applied backward-Euler exactly as in Veros.
+                k33_implicit = compute_isoneutral_K33_latlon(
+                    T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
+                    self.grid, self.z_coord, gm_cfg,
+                    eos=self.config.eos, eos_linear=self.config.eos_linear,
+                    mask=state.land_mask.data,
+                    rho_0=self.config.constants.rho_0, g=self.config.constants.g,
+                    kappa_redi_override=kappa_redi_override,
+                )
             T_mid = T_mid + dt * dT_gm * mask_3d
             S_mid = S_mid + dt * dS_gm * mask_3d
             if eke_new is not None:
@@ -1331,6 +1348,7 @@ class LatLonCGridOceanModel:
             state_new = self._apply_implicit_vertical_mixing(
                 state_new, dt, surface_forcing,
                 K_v_phys=tend.K_v, A_v_phys=tend.A_v,
+                K33_iso=k33_implicit,
             )
 
         # 9. Conservation fixers
@@ -1384,6 +1402,7 @@ class LatLonCGridOceanModel:
         surface_forcing,
         K_v_phys=None,
         A_v_phys=None,
+        K33_iso=None,
     ) -> LatLonCGridOceanState:
         """Backward-Euler vertical diffusion for ``u, v, T, S``.
 
@@ -1457,6 +1476,12 @@ class LatLonCGridOceanModel:
 
         # ---- Tracers (cell-centered: K aligns with T, S directly) ----
         K_v_cell = K_v_cell.astype(state.T.data.dtype)
+        if K33_iso is not None:
+            # Fold the vertical isoneutral diffusivity K_33 into the implicit
+            # tracer solve (Veros core/isoneutral/diffusion.py:154). K_33 ≥ 0 at
+            # interfaces, same (n_lat, n_lon, nlev-1) shape as K_v_cell.  TRACERS
+            # ONLY — momentum uses A_v_cell, which is untouched.
+            K_v_cell = K_v_cell + K33_iso.astype(state.T.data.dtype)
         T_new = implicit_vertical_diffusion_ocean(
             state.T.data, K_v_cell, dz_cell, dz_half_cell, dt,
         )

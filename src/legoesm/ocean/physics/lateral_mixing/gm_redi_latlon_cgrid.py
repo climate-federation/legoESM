@@ -337,6 +337,32 @@ def _to_vface_north(field: jnp.ndarray) -> jnp.ndarray:
 
 
 
+def _w_triad_slopes_tapers(drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon,
+                           S_max, taper_width_frac):
+    """W-face (vertical-flux) triad isopycnal slopes + DM95 tapers.
+
+    Shared by the explicit ``F_z`` assembly (in
+    ``gm_redi_tracer_tendency_triads_latlon_cgrid``) and the implicit-K_33
+    diffusivity getter (``compute_isoneutral_K33_latlon``) so the two can never
+    diverge.  ``A`` = upper level k, ``B`` = lower level k+1; the x-triads use
+    the west/east u-faces, the y-triads the south/north v-faces.  Returns the 8
+    per-triad slopes followed by their 8 DM95 tapers, each at the w-faces
+    (n_lat, n_lon, nlev-1).
+    """
+    S_Wx1 = jnp.clip(-drho_dx_u[:, :n_lon, :-1] / drho_dz_w, -S_max, S_max)       # W,A
+    S_Wx2 = jnp.clip(-drho_dx_u[:, 1:n_lon + 1, :-1] / drho_dz_w, -S_max, S_max)  # E,A
+    S_Wx3 = jnp.clip(-drho_dx_u[:, :n_lon, 1:] / drho_dz_w, -S_max, S_max)        # W,B
+    S_Wx4 = jnp.clip(-drho_dx_u[:, 1:n_lon + 1, 1:] / drho_dz_w, -S_max, S_max)   # E,B
+    S_Wy1 = jnp.clip(-drho_dy_v[:n_lat, :, :-1] / drho_dz_w, -S_max, S_max)       # S,A
+    S_Wy2 = jnp.clip(-drho_dy_v[1:n_lat + 1, :, :-1] / drho_dz_w, -S_max, S_max)  # N,A
+    S_Wy3 = jnp.clip(-drho_dy_v[:n_lat, :, 1:] / drho_dz_w, -S_max, S_max)        # S,B
+    S_Wy4 = jnp.clip(-drho_dy_v[1:n_lat + 1, :, 1:] / drho_dz_w, -S_max, S_max)   # N,B
+    tw = lambda s: dm95_taper_scalar(s, S_max, transition_width_frac=taper_width_frac)[1]
+    return (S_Wx1, S_Wx2, S_Wx3, S_Wx4, S_Wy1, S_Wy2, S_Wy3, S_Wy4,
+            tw(S_Wx1), tw(S_Wx2), tw(S_Wx3), tw(S_Wx4),
+            tw(S_Wy1), tw(S_Wy2), tw(S_Wy3), tw(S_Wy4))
+
+
 def gm_redi_tracer_tendency_triads_latlon_cgrid(
     q: jnp.ndarray,
     rho: jnp.ndarray,
@@ -350,6 +376,8 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     kappa_Redi,
     S_max: float,
     taper_width_frac: float = 0.1,
+    implicit_K33: bool = False,
+    K_iso_steep: float = 0.0,
 ) -> jnp.ndarray:
     """Triad-based GM+Redi tracer tendency on the lat-lon C-grid.
 
@@ -524,6 +552,16 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
            + w_T2 * taper_T2 * flux_T2
            + w_T3 * taper_T3 * flux_T3
            + w_T4 * taper_T4 * flux_T4)
+    if K_iso_steep > 0.0:
+        # Veros K_11 steep-slope floor (isoneutral.py:128): lift the along-
+        # isopycnal diffusivity to K_iso_steep where DM95 tapered it below,
+        # reverting to horizontal diffusion at steep slopes.  Additive deficit on
+        # the diagonal (dq/dx) only; the skew is untouched.  K_iso_steep=0 ⇒ no-op.
+        F_x_u = F_x_u + dq_dx_u * (
+            w_T1 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_u * taper_T1)
+            + w_T2 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_u * taper_T2)
+            + w_T3 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_u * taper_T3)
+            + w_T4 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_u * taper_T4))
     F_x_u = F_x_u * u_mask[:, :, jnp.newaxis]
 
     # -----------------------------------------------------------------
@@ -572,6 +610,13 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
            + w_V2 * taper_V2 * flux_V2
            + w_V3 * taper_V3 * flux_V3
            + w_V4 * taper_V4 * flux_V4)
+    if K_iso_steep > 0.0:
+        # Veros K_22 steep-slope floor (isoneutral.py:165), as for F_x_u above.
+        F_y_v = F_y_v + dq_dy_v * (
+            w_V1 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_v * taper_V1)
+            + w_V2 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_v * taper_V2)
+            + w_V3 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_v * taper_V3)
+            + w_V4 * jnp.maximum(0.0, K_iso_steep - kappa_Redi_v * taper_V4))
     F_y_v = F_y_v * v_mask[:, :, jnp.newaxis]
 
     # Horizontal divergence (single conservative call).
@@ -586,87 +631,48 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     # and at level k (above the w-face) or k+1 (below).  The 4 y-triads
     # use drho_dy_v at v-face i or i+1 and at level k or k+1.
     # -----------------------------------------------------------------
-    # u-face j == drho_dx_u[:, :n_lon, :] (west face of cell j, internal index)
-    # u-face j+1 == drho_dx_u[:, 1:n_lon+1, :] (east face of cell j)
-    drho_dx_west = drho_dx_u[:, :n_lon, :]
-    drho_dx_east = drho_dx_u[:, 1:n_lon + 1, :]
-    dq_dx_west = dq_dx_u[:, :n_lon, :]
-    dq_dx_east = dq_dx_u[:, 1:n_lon + 1, :]
+    # Tracer gradients at the 8 triad positions ("A" = level k, "B" = k+1;
+    # west/east u-faces and south/north v-faces).
+    dq_dx_west_A = dq_dx_u[:, :n_lon, :-1]
+    dq_dx_west_B = dq_dx_u[:, :n_lon, 1:]
+    dq_dx_east_A = dq_dx_u[:, 1:n_lon + 1, :-1]
+    dq_dx_east_B = dq_dx_u[:, 1:n_lon + 1, 1:]
+    dq_dy_south_A = dq_dy_v[:n_lat, :, :-1]
+    dq_dy_south_B = dq_dy_v[:n_lat, :, 1:]
+    dq_dy_north_A = dq_dy_v[1:n_lat + 1, :, :-1]
+    dq_dy_north_B = dq_dy_v[1:n_lat + 1, :, 1:]
 
-    # Slice to (n_lat, n_lon, nlev-1) — "above" = level k, "below" = k+1.
-    drho_dx_west_A = drho_dx_west[:, :, :-1]
-    drho_dx_west_B = drho_dx_west[:, :, 1:]
-    drho_dx_east_A = drho_dx_east[:, :, :-1]
-    drho_dx_east_B = drho_dx_east[:, :, 1:]
+    # rho-based per-triad slopes + DM95 tapers (shared with the K_33 getter so
+    # the explicit F_z and the implicit K_33 use bit-identical slopes/tapers).
+    (S_Wx1, S_Wx2, S_Wx3, S_Wx4, S_Wy1, S_Wy2, S_Wy3, S_Wy4,
+     taper_Wx1, taper_Wx2, taper_Wx3, taper_Wx4,
+     taper_Wy1, taper_Wy2, taper_Wy3, taper_Wy4) = _w_triad_slopes_tapers(
+        drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon, S_max, taper_width_frac)
 
-    dq_dx_west_A = dq_dx_west[:, :, :-1]
-    dq_dx_west_B = dq_dx_west[:, :, 1:]
-    dq_dx_east_A = dq_dx_east[:, :, :-1]
-    dq_dx_east_B = dq_dx_east[:, :, 1:]
-
-    drho_dy_south = drho_dy_v[:n_lat, :, :]
-    drho_dy_north = drho_dy_v[1:n_lat + 1, :, :]
-    dq_dy_south = dq_dy_v[:n_lat, :, :]
-    dq_dy_north = dq_dy_v[1:n_lat + 1, :, :]
-
-    drho_dy_south_A = drho_dy_south[:, :, :-1]
-    drho_dy_south_B = drho_dy_south[:, :, 1:]
-    drho_dy_north_A = drho_dy_north[:, :, :-1]
-    drho_dy_north_B = drho_dy_north[:, :, 1:]
-
-    dq_dy_south_A = dq_dy_south[:, :, :-1]
-    dq_dy_south_B = dq_dy_south[:, :, 1:]
-    dq_dy_north_A = dq_dy_north[:, :, :-1]
-    dq_dy_north_B = dq_dy_north[:, :, 1:]
-
-    # x-triad slopes at w-face (drho_dz_w shared across all four).
-    # Same per-triad-full-flux × per-triad-taper structure as above —
-    # tapering S² before adding cross_x would re-introduce a residual
-    # ``K_R · taper · (1 − taper) · b · drho_dx² / drho_dz_w`` for
-    # ``q = f(ρ)``.
-    S_Wx1 = jnp.clip(-drho_dx_west_A / drho_dz_w, -S_max, S_max)  # W,A
-    S_Wx2 = jnp.clip(-drho_dx_east_A / drho_dz_w, -S_max, S_max)  # E,A
-    S_Wx3 = jnp.clip(-drho_dx_west_B / drho_dz_w, -S_max, S_max)  # W,B
-    S_Wx4 = jnp.clip(-drho_dx_east_B / drho_dz_w, -S_max, S_max)  # E,B
-
-    taper_Wx1 = dm95_taper_scalar(S_Wx1, S_max, transition_width_frac=taper_width_frac)[1]
-    taper_Wx2 = dm95_taper_scalar(S_Wx2, S_max, transition_width_frac=taper_width_frac)[1]
-    taper_Wx3 = dm95_taper_scalar(S_Wx3, S_max, transition_width_frac=taper_width_frac)[1]
-    taper_Wx4 = dm95_taper_scalar(S_Wx4, S_max, transition_width_frac=taper_width_frac)[1]
-
-    S_Wy1 = jnp.clip(-drho_dy_south_A / drho_dz_w, -S_max, S_max)
-    S_Wy2 = jnp.clip(-drho_dy_north_A / drho_dz_w, -S_max, S_max)
-    S_Wy3 = jnp.clip(-drho_dy_south_B / drho_dz_w, -S_max, S_max)
-    S_Wy4 = jnp.clip(-drho_dy_north_B / drho_dz_w, -S_max, S_max)
-
-    taper_Wy1 = dm95_taper_scalar(S_Wy1, S_max, transition_width_frac=taper_width_frac)[1]
-    taper_Wy2 = dm95_taper_scalar(S_Wy2, S_max, transition_width_frac=taper_width_frac)[1]
-    taper_Wy3 = dm95_taper_scalar(S_Wy3, S_max, transition_width_frac=taper_width_frac)[1]
-    taper_Wy4 = dm95_taper_scalar(S_Wy4, S_max, transition_width_frac=taper_width_frac)[1]
-
-    # Per-triad full vertical-flux contribution.  For q = f(ρ) and
-    # K_GM = 0, each ``flux_W*_m`` is exactly zero (per-triad
-    # algebraic cancellation, see derivation in module header).
-    # Multiplying each by its taper and averaging keeps that exact
-    # zero while still damping the genuine GM transport in tapered
-    # boundary regions.
-    flux_Wx1 = ((kappa_Redi_w + kappa_GM_w) * S_Wx1 * dq_dx_west_A
-                + kappa_Redi_w * S_Wx1 ** 2 * dq_dz_w)
-    flux_Wx2 = ((kappa_Redi_w + kappa_GM_w) * S_Wx2 * dq_dx_east_A
-                + kappa_Redi_w * S_Wx2 ** 2 * dq_dz_w)
-    flux_Wx3 = ((kappa_Redi_w + kappa_GM_w) * S_Wx3 * dq_dx_west_B
-                + kappa_Redi_w * S_Wx3 ** 2 * dq_dz_w)
-    flux_Wx4 = ((kappa_Redi_w + kappa_GM_w) * S_Wx4 * dq_dx_east_B
-                + kappa_Redi_w * S_Wx4 ** 2 * dq_dz_w)
-
-    flux_Wy1 = ((kappa_Redi_w + kappa_GM_w) * S_Wy1 * dq_dy_south_A
-                + kappa_Redi_w * S_Wy1 ** 2 * dq_dz_w)
-    flux_Wy2 = ((kappa_Redi_w + kappa_GM_w) * S_Wy2 * dq_dy_north_A
-                + kappa_Redi_w * S_Wy2 ** 2 * dq_dz_w)
-    flux_Wy3 = ((kappa_Redi_w + kappa_GM_w) * S_Wy3 * dq_dy_south_B
-                + kappa_Redi_w * S_Wy3 ** 2 * dq_dz_w)
-    flux_Wy4 = ((kappa_Redi_w + kappa_GM_w) * S_Wy4 * dq_dy_north_B
-                + kappa_Redi_w * S_Wy4 ** 2 * dq_dz_w)
+    # Per-triad vertical flux.  The off-diagonal skew (kR+kG)·S·dq/dx is ALWAYS
+    # explicit.  The DIAGONAL K_33 term (kR·S²·dq/dz — the "enhanced vertical
+    # mixing ∝ S²") is added here only when NOT ``implicit_K33``; otherwise it is
+    # applied implicitly by the model step (Veros core/isoneutral/diffusion.py),
+    # with ``compute_isoneutral_K33_latlon`` supplying the matching diffusivity.
+    # The per-triad algebraic cancellation for q = f(ρ) is preserved either way
+    # (each term cancels independently; taper × averaging keeps the exact zero).
+    flux_Wx1 = (kappa_Redi_w + kappa_GM_w) * S_Wx1 * dq_dx_west_A
+    flux_Wx2 = (kappa_Redi_w + kappa_GM_w) * S_Wx2 * dq_dx_east_A
+    flux_Wx3 = (kappa_Redi_w + kappa_GM_w) * S_Wx3 * dq_dx_west_B
+    flux_Wx4 = (kappa_Redi_w + kappa_GM_w) * S_Wx4 * dq_dx_east_B
+    flux_Wy1 = (kappa_Redi_w + kappa_GM_w) * S_Wy1 * dq_dy_south_A
+    flux_Wy2 = (kappa_Redi_w + kappa_GM_w) * S_Wy2 * dq_dy_north_A
+    flux_Wy3 = (kappa_Redi_w + kappa_GM_w) * S_Wy3 * dq_dy_south_B
+    flux_Wy4 = (kappa_Redi_w + kappa_GM_w) * S_Wy4 * dq_dy_north_B
+    if not implicit_K33:
+        flux_Wx1 = flux_Wx1 + kappa_Redi_w * S_Wx1 ** 2 * dq_dz_w
+        flux_Wx2 = flux_Wx2 + kappa_Redi_w * S_Wx2 ** 2 * dq_dz_w
+        flux_Wx3 = flux_Wx3 + kappa_Redi_w * S_Wx3 ** 2 * dq_dz_w
+        flux_Wx4 = flux_Wx4 + kappa_Redi_w * S_Wx4 ** 2 * dq_dz_w
+        flux_Wy1 = flux_Wy1 + kappa_Redi_w * S_Wy1 ** 2 * dq_dz_w
+        flux_Wy2 = flux_Wy2 + kappa_Redi_w * S_Wy2 ** 2 * dq_dz_w
+        flux_Wy3 = flux_Wy3 + kappa_Redi_w * S_Wy3 ** 2 * dq_dz_w
+        flux_Wy4 = flux_Wy4 + kappa_Redi_w * S_Wy4 ** 2 * dq_dz_w
 
     F_z = 0.25 * (taper_Wx1 * flux_Wx1 + taper_Wx2 * flux_Wx2
                  + taper_Wx3 * flux_Wx3 + taper_Wx4 * flux_Wx4
@@ -783,12 +789,12 @@ def gm_redi_tracer_tendency_latlon(
         dT_dt = gm_redi_tracer_tendency_triads_latlon_cgrid(
             T, rho, mask, u_mask, v_mask,
             z_coord, jacobian, grid, kappa_GM, kappa_Redi_eff, cfg.S_max,
-            cfg.taper_width_frac,
+            cfg.taper_width_frac, cfg.implicit_K33, cfg.K_iso_steep,
         )
         dS_dt = gm_redi_tracer_tendency_triads_latlon_cgrid(
             S, rho, mask, u_mask, v_mask,
             z_coord, jacobian, grid, kappa_GM, kappa_Redi_eff, cfg.S_max,
-            cfg.taper_width_frac,
+            cfg.taper_width_frac, cfg.implicit_K33, cfg.K_iso_steep,
         )
     elif scheme == "centered":
         dT_dt = gm_redi_tracer_tendency_latlon_cgrid(
@@ -841,6 +847,67 @@ def gm_redi_tracer_tendency_latlon(
         )
 
     return dT_dt, dS_dt
+
+
+def compute_isoneutral_K33_latlon(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    eta: jnp.ndarray,
+    H_bathy: jnp.ndarray,
+    grid: LatLonGrid,
+    z_coord: OceanZStarCoordinate,
+    cfg: GMRediConfig,
+    *,
+    eos: str = "wright",
+    eos_linear=None,
+    mask: jnp.ndarray | None = None,
+    rho_0: float = _RHO_0,
+    g: float = constants.g,
+    kappa_redi_override: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Vertical isoneutral diffusivity K_33 at w-faces, for the implicit solve.
+
+    ``K_33 = 0.25 · kappa_Redi · Σ_8 taper_W · S_W²``  →  (n_lat, n_lon, nlev-1), ≥ 0.
+
+    This is EXACTLY the coefficient of dq/dz in the explicit triad ``F_z`` diagonal
+    term that ``gm_redi_tracer_tendency_triads_latlon_cgrid`` drops when
+    ``implicit_K33=True`` (same rho via the 2-iteration EOS coupling, same shared
+    ``_w_triad_slopes_tapers``, same ``kappa_Redi`` cell-centred broadcast — so the
+    explicit-drop and the implicit-add are consistent).  The lat-lon C-grid model
+    step adds it to the implicit vertical-diffusion ``K_v`` (Veros
+    core/isoneutral/diffusion.py:154, ``delta = dt/dzw · K_33``), applying the
+    vertical isoneutral diffusion backward-Euler-implicitly as in Veros rather than
+    explicitly.  Density-independent of the tracer, so one call serves both T and S.
+    """
+    if mask is None:
+        mask = jnp.ones(T.shape[:2], dtype=T.dtype)
+    jacobian = compute_ocean_jacobian(eta, H_bathy, z_coord)
+    eos_fn = make_eos_fn(eos, eos_linear)
+    fill_fn = lambda field: _neumann_fill_cgrid(field, mask)
+    rho, _rho_prime, _p_prime = iterate_eos_and_pressure_anomaly(
+        T, S, mask, fill_fn, eos_fn, z_coord.dz_ref, rho_0, g, n_iter=2,
+    )
+    kappa_Redi = cfg.kappa_Redi if kappa_redi_override is None else kappa_redi_override
+    if isinstance(kappa_Redi, jnp.ndarray) and kappa_Redi.ndim == 2:
+        kappa_Redi_w = kappa_Redi[:, :, jnp.newaxis]
+    else:
+        kappa_Redi_w = kappa_Redi
+    n_lat, n_lon = mask.shape
+    rho_filled = _neumann_fill_cgrid(rho, mask)
+    drho_dx_u = gradient_x_cgrid(rho_filled, grid)
+    drho_dy_v = gradient_y_cgrid(rho_filled, grid)
+    dz_half = z_coord.dz_half_ref * jacobian[:, :, jnp.newaxis]
+    drho_dz_raw = (rho_filled[:, :, :-1] - rho_filled[:, :, 1:]) / jnp.maximum(
+        dz_half, _EPS_DIV
+    )
+    drho_dz_w = jnp.minimum(drho_dz_raw, -_EPS_DIV)
+    (S_Wx1, S_Wx2, S_Wx3, S_Wx4, S_Wy1, S_Wy2, S_Wy3, S_Wy4,
+     tWx1, tWx2, tWx3, tWx4, tWy1, tWy2, tWy3, tWy4) = _w_triad_slopes_tapers(
+        drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon, cfg.S_max, cfg.taper_width_frac)
+    K_33 = 0.25 * kappa_Redi_w * (
+        tWx1 * S_Wx1 ** 2 + tWx2 * S_Wx2 ** 2 + tWx3 * S_Wx3 ** 2 + tWx4 * S_Wx4 ** 2
+        + tWy1 * S_Wy1 ** 2 + tWy2 * S_Wy2 ** 2 + tWy3 * S_Wy3 ** 2 + tWy4 * S_Wy4 ** 2)
+    return K_33 * mask[:, :, jnp.newaxis]
 
 
 # =====================================================================

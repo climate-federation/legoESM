@@ -27,6 +27,7 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     gm_redi_tracer_tendency_triads_latlon_cgrid,
     gm_redi_tracer_tendency_latlon,
     gm_redi_lateral_mixing_latlon,
+    compute_isoneutral_K33_latlon,
 )
 
 
@@ -765,3 +766,117 @@ class TestKappaRediArray:
         denom = float(jnp.max(jnp.abs(dq_const))) + 1e-30
         rel = float(jnp.max(jnp.abs(dq_kiso - dq_const))) / denom
         assert rel > 0.1, f"K_iso=K_gm override had negligible effect (rel={rel:.3g})"
+
+
+# =====================================================================
+# 12. Implicit K_33 + K_iso_steep (Veros-faithful isoneutral options)
+# =====================================================================
+
+class TestImplicitK33AndKisoSteep:
+    """Vertical isoneutral diagonal K_33 applied implicitly + the K_iso_steep
+    horizontal-diffusion floor — config-selectable Veros-matching options
+    (GMRediConfig.implicit_K33 / K_iso_steep), matching Veros
+    core/isoneutral/diffusion.py and isoneutral.py:128/165."""
+
+    def test_config_defaults_off(self):
+        # Defaults MUST preserve the explicit, no-floor behaviour.
+        cfg = GMRediConfig()
+        assert cfg.implicit_K33 is False
+        assert cfg.K_iso_steep == 0.0
+
+    def test_K33_nonneg_and_positive_for_sloped(self):
+        setup = _stratified_with_meridional_tilt(slope=2e-3)
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy,
+         jacobian, rho, T, S, cfg) = setup
+        K33 = compute_isoneutral_K33_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg, mask=mask)
+        assert K33.shape == (T.shape[0], T.shape[1], T.shape[2] - 1)
+        assert jnp.all(jnp.isfinite(K33))
+        assert jnp.all(K33 >= 0.0), "K_33 (a vertical diffusivity) must be >= 0"
+        assert float(jnp.max(K33)) > 0.0, "sloped isopycnals must give K_33 > 0"
+
+    def test_K33_zero_for_flat_isopycnals(self):
+        # No horizontal density gradient => zero slope => K_33 == 0.
+        setup = _stratified_with_meridional_tilt(slope=0.0)
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy,
+         jacobian, rho, T, S, cfg) = setup
+        K33 = compute_isoneutral_K33_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg, mask=mask)
+        assert float(jnp.max(jnp.abs(K33))) < 1e-18, "flat isopycnals => K_33 = 0"
+
+    def test_implicit_K33_split_consistency(self):
+        # The K_33 term DROPPED from the explicit F_z (implicit_K33=True) must,
+        # for small dt, equal the implicit K_33 increment — proving the
+        # explicit->implicit move is the SAME operator (corr ~ 1).
+        from legoesm.ocean.physics.vertical_mixing import (
+            implicit_vertical_diffusion_ocean, build_dz_half,
+        )
+        setup = _stratified_with_meridional_tilt(slope=3e-3)
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy,
+         jacobian, rho, T, S, cfg) = setup
+        kw = dict(mask=mask, u_mask=u_mask, v_mask=v_mask)
+        dT_full, _ = gm_redi_tracer_tendency_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg._replace(implicit_K33=False), **kw)
+        dT_skew, _ = gm_redi_tracer_tendency_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg._replace(implicit_K33=True), **kw)
+        dT_K33_explicit = dT_full - dT_skew
+        K33 = compute_isoneutral_K33_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg._replace(implicit_K33=True), mask=mask)
+        dz_cell = z_coord.dz_ref * jacobian[:, :, None]
+        dz_half = build_dz_half(dz_cell)
+        dt_small = 1.0
+        T_imp = implicit_vertical_diffusion_ocean(T, K33, dz_cell, dz_half, dt_small)
+        dT_K33_implicit = (T_imp - T) / dt_small
+        m3 = jnp.broadcast_to((mask > 0.5)[:, :, None], dT_K33_explicit.shape)
+        a = dT_K33_explicit[m3]
+        b = dT_K33_implicit[m3]
+        assert float(jnp.sqrt(jnp.mean(a ** 2))) > 0.0, "no K_33 signal — test is vacuous"
+        corr = float(jnp.corrcoef(a, b)[0, 1])
+        assert corr > 0.999, f"explicit vs implicit K_33 mismatch (corr={corr:.5f})"
+
+    def test_implicit_K33_changes_tendency(self):
+        # implicit_K33 removes the K_33 vertical diagonal from the explicit F_z,
+        # so the explicit tendency must change (and stay finite).
+        setup = _stratified_with_meridional_tilt(slope=3e-3)
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy,
+         jacobian, rho, T, S, cfg) = setup
+        kw = dict(mask=mask, u_mask=u_mask, v_mask=v_mask)
+        dT_full, _ = gm_redi_tracer_tendency_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg._replace(implicit_K33=False), **kw)
+        dT_skew, _ = gm_redi_tracer_tendency_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg._replace(implicit_K33=True), **kw)
+        assert jnp.all(jnp.isfinite(dT_skew))
+        assert float(jnp.max(jnp.abs(dT_full - dT_skew))) > 0.0
+
+    def test_K_iso_steep_zero_is_noop(self):
+        # K_iso_steep=0 (the default) must be bit-identical to the unfloored path
+        # — the floor is gated `if K_iso_steep > 0.0`.
+        setup = _stratified_with_meridional_tilt(slope=3e-3)
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy,
+         jacobian, rho, T, S, cfg) = setup
+        base = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_GM, cfg.kappa_Redi, cfg.S_max, cfg.taper_width_frac)  # defaults
+        floored0 = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_GM, cfg.kappa_Redi, cfg.S_max, cfg.taper_width_frac, False, 0.0)
+        assert jnp.array_equal(base, floored0)
+
+    def test_K_iso_steep_floors_horizontal_diffusivity(self):
+        # K_iso_steep gives the diagonal max(K_iso_steep, kappa·taper).  legoESM
+        # clips the slope to S_max BEFORE the DM95 taper, so the taper bottoms at
+        # 0.5; the floor therefore bites only for kappa < 2·K_iso_steep.  Use
+        # kappa=800 (< 1000) + steep slopes so kappa·0.5=400 < K_iso_steep=500.
+        setup = _stratified_with_meridional_tilt(slope=0.05)  # >> S_max => steep
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy,
+         jacobian, rho, T, S, cfg) = setup
+        kappa = 800.0
+        no_floor = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            kappa, kappa, cfg.S_max, cfg.taper_width_frac, False, 0.0)
+        with_floor = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            kappa, kappa, cfg.S_max, cfg.taper_width_frac, False, 500.0)
+        assert jnp.all(jnp.isfinite(with_floor))
+        assert float(jnp.max(jnp.abs(with_floor - no_floor))) > 0.0, \
+            "K_iso_steep floor had no effect (kappa<2·K_iso_steep, steep slopes)"

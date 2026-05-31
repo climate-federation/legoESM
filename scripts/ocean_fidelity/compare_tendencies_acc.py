@@ -48,7 +48,7 @@ from legoesm.ocean.fidelity.tendency_probe import (
     probe_latlon_cgrid,
 )
 from legoesm.ocean.fidelity.veros_acc_recipe import (
-    DT_MOM_S, build_acc_recipe,
+    DT_MOM_S, DT_TRACER_S, build_acc_recipe,
 )
 
 
@@ -93,6 +93,7 @@ def _run_legoesm_probe(recipe, base_state):
         base_state,
         recipe.grid, recipe.z_coord, recipe.model_config,
         dt=DT_MOM_S,
+        dt_tracer=DT_TRACER_S,
     )
     return probe
 
