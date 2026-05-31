@@ -112,12 +112,18 @@ Clean fields unchanged (W2 u 1.56-1.60); eigenmode detection sharper (3.07→3.3
 - 3D PE D-grid vorticity/KE: LIVE non-orphaned gap. Centered `zeta_corner*v_d` (primitive_
   eq_cdgrid:445), NOT FV3 upwind PPM `hord_vt`. Docstring honestly "Research path".
 
-## GRID gap
+## GRID gap (LIKELY ROOT of the C96 eigenmode — iter62)
 legoESM cube = EQUIANGULAR gnomonic (grid_type=2). FV3 operational = `gnomonic_ed`
-(grid_type=0, √2 dx-ratio). Port + `make_fv3_native_grid` done+tested but orphaned;
-wiring needs full metric/halo re-derivation (`compute_padded_angle/half_metrics`,
-`_compute_exact_cell_areas`, C-D supergrid all hardcoded equiangular) + re-calibration.
-Foundational.
+(grid_type=0). Port + `make_fv3_native_grid` done+tested but orphaned; wiring needs full
+metric/halo re-derivation (`compute_padded_angle/half_metrics`, `_compute_exact_cell_areas`,
+C-D supergrid all hardcoded equiangular) + re-calibration. Foundational.
+**Quantified conditioning (C96):** equiangular max cell aspect **1.4027** (corners) vs
+gnomonic_ed **1.0583** (= FV3's published 1.06089; dx ratio 1.4141=√2) — equiangular is
+1.33× worse-conditioned at corners (interior median 1.097 vs 1.011). FV3 uses gnomonic_ed
+PRECISELY to suppress high-res corner/edge grid modes. ⇒ STRONG hypothesis: the C96 W5
+edge eigenmode is driven by the equiangular grid's poor corner conditioning, so wiring
+gnomonic_ed is the FAITHFUL fix for BOTH the grid gap AND the eigenmode (unifies two
+foundational items). Signature locked: `test_fv3_gnomonic_ed_signature_iter62`.
 
 ## VERIFICATION
 - SW 16/16 all grids ≤1 cell aligned. Full fast cube atm dynamical suite PASS + NH
