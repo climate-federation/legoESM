@@ -1,239 +1,68 @@
-# FV3-faithful cubed-sphere — change log (shrunk @ iter94; prior detail in git)
+# FV3-faithful cubed-sphere — change log (shrunk @ iter103; prior detail in git + memory `cube-fv3-faithfulness-state`)
 
 Goal: cube faithful to GFDL FV3 (oracle `../Code/FV3/atmos_cubed_sphere-symmetryclean/`),
-matching MPAS/ico + lat-lon FV across SW→AMIP/OMIP, **zero cube edge artifacts**, visual +
-quantitative, codex/oracle-reviewed. CPU only (Metal broken). **User directive: never A-grid;
-be FV3-faithful; use the Fortran as oracle; do NOT improvise.** Branch `latlon-fv-amip-verify`.
+≈ MPAS/ico + lat-lon FV across SW→AMIP/OMIP, **zero cube edge artifacts**, visual + quantitative,
+codex/oracle-reviewed. CPU only (Metal broken). **Directive: never A-grid; be FV3-faithful; use the
+Fortran as oracle; do NOT improvise.** Branch `latlon-fv-amip-verify`.
 
-## ✅ DONE / VALIDATED / codex-reviewed
-- ATM panel-edge imprint: cc→D-grid scalar lift (baroclinic v_rms 4.95→0.60). Cross-grid align
-  (`_canvas_lat/lon`). OCEAN geostrophic 40%→1.45% (cube barotropic → FV3 SW `fv3sw`, never A-grid).
-- gnomonic_ed grid (FV3 operational gt=0) WIRED + halo-collapse fixed (iter73, separable 1D angle)
-  + codex-approved. `create_cubed_sphere(gnomonic="ed")`; equiangular byte-identical. ed bounds the
-  C96 W5 eigenmode (saturates ~115, no NaN) but doesn't eliminate it.
-- **area_corner FV3 (#faces)-junction SCALING DONE (iter84-91, codex-APPROVED, NET-ZERO regression):**
-  edges ×2 (≈0.865·interior), vertices ×3 (≈0.675·interior), C1 guard n>=1. Replaces the iter-670
-  interior-copy (which mirrored FV3's *halo* extrapolation, not in-domain grid_area). Oracle:
-  fv_grid_tools.F90 edge=2*get_area (976-1033), vertex=3*get_area (1036-1067). Regression test
-  C1/C12/C36 all edges+vertices. W2 L2=1.76e-4 unchanged, ocean 9/9 rest machine-zero.
-  - **CHORD caveat (iter91):** legoESM `sg_area` is PLANAR chord (not FV3 spherical get_area). Only
-    the ×2/×3 SCALING is FV3-faithful; absolute area is an O(dx²) chord approx. Spherical get_area
-    gives C1=0.75 (vs chord 0.659) + trips the whole chord-era SW gold-file surface → TRACKED
-    follow-up (needs gold regen), NOT done. All test/comment wording corrected to say so (codex).
-  - **da_min_c insight:** `da_min_c=min(1/rarea_c)` (FV3 global_mx_c, fv_grid_utils.F90:743). The
-    faithful smaller vertex area lowers da_min_c → FV3-correct (weaker) divergence damping. Shifted
-    4 SW-core gold fingerprints (nord0/nord1/smag via da_min_c; corner-vort boundary-local) — all
-    re-pinned + verified (commit 21b12082). DISPROVES "area fix damps the eigenmode" — it exposes it.
+## ✅ FAITHFUL / VALIDATED / RESOLVED
+- area_corner (#faces)-junction SCALING (iter84-91, codex-APPROVED, NET-ZERO regression): edges ×2,
+  vertices ×3, C1 guard n>=1 (oracle fv_grid_tools.F90 edge=2*get_area, vertex=3*get_area). Replaces
+  the iter-670 interior-copy (which mirrored FV3's HALO extrap, not in-domain grid_area). W2 L2=1.76e-4
+  unchanged, ocean 9/9 rest machine-zero, 4 SW gold fingerprints re-pinned (da_min_c=min(1/rarea_c) now
+  = the correct smaller vertex area). CAVEAT: `sg_area` is PLANAR CHORD — only the ×2/×3 SCALING is
+  faithful; chord→spherical is a tracked follow-up (trips the gold-fingerprint surface).
+- gnomonic_ed grid WIRED + halo-collapse fixed (iter73) + codex-approved; equiangular byte-identical.
+- cross-grid SW (iter92, 16/16 all grids): cube W2 L2 1.76e-4 ≈ latlon 2.67e-4 ≈ ico 9.9e-5 (dynamics
+  FAITHFUL). cosine_bell cube 0.131 vs latlon 0.025 (~5×, ~1.8× MPAS) = inherent cube advection cost
+  (faithful fv_tp_2d). ocean cube matrix 9/9, rest machine-zero. baroclinic clean (C36→C72 ≤1.24×).
+- **3D rest_state_topo "13× edge artifact" = FLOAT32 precision, NOT a faithfulness bug** (iter97-101):
+  the cube 3D hydrostatic PGF is EXACTLY well-balanced in float64 (compute_geopotential uses only
+  σ-derived ln_ratio/alpha ⇒ Φ=phis+per-level-const ⇒ −∇Φ cancels −R_d·T·∇ln_ps to machine zero;
+  forcing f64 ⇒ (Φ_k−phis) std=0.0). PE runs FLOAT32 by design; the large Φ≈2.5e5 vs phis≈1.8e4 add
+  loses ~7 digits → spurious ~1e-7 m/s² PGF (7× at panel edges). Optional f32-only fix: f64 geopotential
+  gradient / reference-subtraction well-balanced PGF (f64-identical). Matrix audit comment corrected.
 
-## EDGE-ARTIFACT STATUS
-Reliable metric = `compute_cross_face_continuity` (halo.py). BAROCLINIC clean (C36→C72 ≤1.24×).
-SW physical fields continuous. **OPEN — C96 W5 edge eigenmode (production RK3):** max|wind| ~38 to
-day3.5 then blows 38→79 (faces 0,4); CFL-independent, mass-conserving. Working harness (iter86b):
-W5 C96 div_damp=8/hyperdiff=2·hdc reproduces recorded 26/32/33/40/80. Root = SW-core vertex-vorticity
-(NOT grid, NOT area — both proven NEUTRAL/exposing). v-imprint W2 v_ll_Linf=0.344 (~0.9%, faces).
+## ❗ THE ONE GENUINE REMAINING FAITHFULNESS GAP — SW co-located CENTERED vorticity
+Both production SW (operators_cdgrid.py:1167) AND 3D PE (primitive_eq_cdgrid.py:445) use CENTERED
+`zeta_corner*v_d` vorticity advection (energy-conserving but dispersive), NOT FV3's UPWIND staggered
+donor-cell flux. Root of: the C96 W5 vertex eigenmode (38→79, mass-conserving, dt-independent) AND the
+W2 v-imprint (0.344 m/s — a REAL discretization effect, NOT float32: f32-of-38 ~ 4e-6). iter87: faithful
+vertex area/grid make the vertex vorticity MORE accurate → EXPOSE the mode MORE ⇒ the fix is the UPWIND
+ADVECTION (implicit dissipation), NOT vorticity accuracy or more explicit damping (sweeps ruled out
+iter82-83).
 
-## FAITHFULNESS SCORECARD
-FAITHFUL: gnomonic_ed; get_area (the function); upwind vort-flux `_vorticity_flux`/`fv_tp_2d`
-(but only in the FB path). MINOR: a2b_ord4 (inert); cross-face vector halo ORTHOGONAL (drops FV3
-1/sin_sg(5), O(cosθ) seam err). **MAJOR (the convergent root, iter92):** BOTH production SW
-(operators_cdgrid.py:1167-1185) AND 3D PE (primitive_eq_cdgrid.py:445) use CENTERED `zeta_corner*v_d`
-vorticity advection (energy-conserving but dispersive), NOT FV3's UPWIND donor-cell flux
-(`_vorticity_flux`, sw_core.F90:416-480: fy1=(v_d-uc*cosa_u)/sina_u contravariant, vort_x=upwind).
-Production SW = co-located Arakawa-Lamb (not staggered c_sw→d_sw), so the upwind flux can only enter
-via the FB chain. ONE gap plausibly explains all 3 symptoms: C96 W5 eigenmode + cosine_bell 5× +
-v-imprint (no implicit upwind dissipation at vertices).
+The faithful path = FV3's staggered c_sw→d_sw FB scheme (which uses the UPWIND `_vorticity_flux`,
+fv3_sw_core.py:1260, sw_core.F90:416-480: fy1=(v_d-uc*cosa_u)/sina_u contravariant, vort_x=upwind).
+The FB chain (`fv3_fb_sw_step`/`FV3FBShallowWaterModel`) ports it; fixes done: D-grid backward PGF
+(Phase4 one_grad_p) + duogrid (8.5× stability). RESIDUAL: W2 C36 day1 max|u_d|=48.6 (vs 38.6), day2 NaN,
+VERTEX-localized from step 1 (iter95: 5-7× edge), isolated to the `_corner_vorticity` duogrid uc/vc
+RECONSTRUCTION at the 8 vertices (NOT the metric — iter94 ruled out: edge-copy vs linear-extrap dxc/dyc
+<0.2% Δ).
 
-## FB CHAIN (FV3 c_sw→d_sw FB; the faithful staggered scheme; EXPERIMENTAL, residual open)
-`fv3_fb_sw_step`/`FV3FBShallowWaterModel`. Production = RK3 Arakawa-Lamb (works, "algorithmically
-faithful"; FB = deferred upgrade). Fixes done: BUG1 missing D-grid backward PGF → Phase4 one_grad_p
-(commit 1284e71b); BUG2 needs DUOGRID (ng=3) → W2 C36 4h→33.6h (8.5×). **RESIDUAL open:** W2 C36
-day1 max|u_d|=48.6 (vs 38.6), day2 NaN. RULED OUT as residual root: dissipation (iter82), Phase4 a2b
-(iter81), wind-halo/damping (iter83), **corner-vorticity METRIC halo (iter94: edge-copy vs O(dx²)
-linear-extrap dxc/dyc → <0.2% Δ, 48.60→48.53)**. REMAINING candidates: `_corner_vorticity` uc/vc halo
-RECONSTRUCTION (2-pt center-avg+re-stagger, fv3_sw_core.py:1189-1208); d_sw zeta (covariant
-circulation, no corner correction, _d_sw_native:1885); vorticity-flux/d2a2c corner. Residual is a
-STRUCTURAL vertex-vorticity growth mode (dissipation/metric-independent).
+### BLUEPRINT — staggered C-grid vector halo (the infra blocker; oracle-grounded iter103)
+FV3 c_sw (sw_core.F90:374-408): vort = fx(i,j-1)−fx(i,j)−fy(i-1,j)+fy(i,j), fx=uc·dxc (needs j-halo
+rows js-1/je+1), fy=vc·dyc (needs i-halo rows is-1/ie+1). For DUOGRID the corner correction is SKIPPED
+(line 395) and FV3 relies on uc/vc being halo'd AT THE EDGES (mpp_update CGRID with vector rotation).
+legoESM's `_corner_vorticity` instead does a lossy uc→cell-center(2-pt avg)→pad_halo_vector→re-stagger
+detour (FORCED by `pad_halo_vector` being A-grid/cell-centred ONLY) → smears the 3-face-vertex
+circulation → the residual.
+FIX: a NEW `pad_halo_cgrid_vector` that rotates uc (i-edge, j-halo) + vc (j-edge, i-halo) across cube
+seams at their NATIVE edge staggering (the CGRID_NE rotation: at a seam the i-component maps to the
+neighbour's ±j-component etc.), reusing the duogrid cross-face mapping + the cos_theta/sin_theta
+rotation that `pad_halo_vector` already has for cell-centred vectors. Then fx_halo=uc_halo·dxc_halo
+directly (no reconstruction). Validate: FB W2 C36 residual (day1 48.6→? toward 38.6, day2 NaN→?) +
+re-pin the corner_vorticity fingerprint. Then FB-chain→production (gated, eigenmode-validated) → the
+upwind `_vorticity_flux` damps the eigenmode.
+RISK/STATUS: DEFERRED MAJOR infra (per memory: "sanctioned major-effort, needs a proper validation
+budget, NOT a safe loop-iteration hack" — concurrent session does destructive git reset). Build with
+the oracle, validate incrementally, codex-review.
 
-## VERIFICATION (current HEAD)
-- Cross-grid SW 16/16 all grids (iter92): W2 L2 cube 1.76e-4 | latlon 2.67e-4 | ico 9.9e-5 | spec
-  3.6e-8 → cube FAITHFUL ~latlon/ico. cosine_bell L2 cube 0.131 vs latlon 0.025 (~5×) → advection gap.
-- test_cdgrid_fv3_regression.py: HEAD 17 failed == pre-area-change baseline 9c78db6c (17). area work =
-  NET-ZERO. The 17 (cosine_bell, production_tendencies, d_sw_native, mutation suites, source/file
-  sentinels) are PRE-EXISTING (deleted results/*.png + concurrent-session churn) — separate cleanup.
-- Visual PNGs surfaced to user (W2 v-wind, W5 wind_speed, cross-grid comparisons) — human verdict pending.
-
-## ACTION QUEUE (FV3-faithful, oracle-driven, no improvise)
-1. SW-core vertex-vorticity eigenmode = the real edge-artifact root. Path = the FB chain (faithful
-   upwind staggered). NEXT: FB residual — test the uc/vc reconstruction; or isolate via FB-vs-prod
-   single-step tendency diff on smooth W2. Then FB→production (gated, eigenmode-validated).
-2. cosine_bell advection 5× latlon (production accuracy gap) — investigate cube tracer/vorticity transport.
-3. chord→spherical sg_area upgrade (tracked, needs gold regen). 4. 3D PE upwind PPM vort. 5. thread
-   FV3 sin_sg(5) seam rotation. 6. pre-existing 17-test swamp. 7. human visual verdict. 8. ocean/AMIP
-   cross-grid (climate CPU-infeasible). State: memory `cube-fv3-faithfulness-state`.
-
-
-## iter95 — FB residual ISOLATED: vertex-localized → `_corner_vorticity` uc/vc reconstruction
-Mapped |u_d - u_d_init| by region over FB W2 C36 steps (duogrid+Phase4, dt=300):
-  step1: max|du|=1.64; mean|du| VERTEX=0.602 vs edge=0.118 vs interior=0.084  (vertex 5× edge, 7× int)
-  step5:  vertex=6.27 vs edge=0.95 vs interior=0.44                            (vertex 6.6× edge)
-  step20: max at face4 VERTEX; vertex=12.8 vs edge=4.2 vs interior=1.5
-⇒ the FB residual is STRONGLY VERTEX-LOCALIZED from step 1.  With the METRIC halo ruled out (iter94)
-and dissipation/Phase4/wind-halo ruled out (iter82-83), the seed is the `_corner_vorticity` duogrid
-uc/vc RECONSTRUCTION at the 8 cube vertices (fv3_sw_core.py:1189-1208).
-ROOT-CAUSE SCOPED: the reconstruction's lossy detour — uc(i-edge) → uc_cc(2-pt avg to cell center)
-→ pad_halo_vector(rotate) → re-stagger(2-pt avg back to i-edge) — is a 4-pt smoothing FORCED by
-`pad_halo_vector` being A-grid (cell-centered) ONLY (halo.py:2047).  There is NO staggered C-grid
-(uc i-edge, vc j-edge) cross-face vector halo, so uc/vc cannot be rotated directly at the faces; the
-center-avg smears the vertex circulation (3-face junction) → the ~2% vertex error → the growth mode.
-FAITHFUL FIX (scoped, MAJOR infrastructure): a staggered C-grid cross-face vector halo
-(`pad_halo_cgrid_vector`) that rotates uc/vc at their native edges without the cell-center detour —
-analogous to the gated `pad_halo_dgrid_vector_4d` but for C-grid staggering.  Then thread it into
-`_corner_vorticity` (replacing 1189-1208), re-pin the corner-vort fingerprint, re-measure the FB
-residual.  This is the convergent faithful fix for the FB chain (and the C96 W5 eigenmode root).
-STRATEGIC NOTE: the FB chain is a DEFERRED upgrade (production SW = co-located Arakawa-Lamb,
-"functional-faithful"); this fix is substantial new infra.  Broader directive goals (baroclinic/
-AMIP/ocean cross-grid closeness to MPAS/latlon; cosine_bell 5× transport gap) may be more tractable
-next steps — interleave.
-
-
-## iter96 — 3D edge-artifact triage: rest_state_topo PGF panel-edge artifact = concrete prod target
-Tried baroclinic cross-grid (cube/latlon/ico) but C36×L40 3D is CPU-prohibitive (single case >21 min,
-killed). The matrix ALREADY records the 3D cube edge-artifact characterization (scripts/run_atmosphere
-_test_matrix.py:3899-3921):
-  • **rest_state_topo: cube ~1.3 m/s spurious wind vs ico/latlon 0.1 m/s (13× worse)**; analytic exact
-    = ZERO motion. Cause (recorded): cube PANEL-EDGE metric errors interacting with non-trivial phis
-    (topography) at face boundaries → imperfect hydrostatic PGF balance at the seams. PASS by matrix
-    tolerance but a clear 3D edge artifact. = the directive's "no edge artifacts" in 3D, PRODUCTION,
-    DISTINCT from the SW-core/FB vorticity thread.
-  • rotated_baroclinic: cube max|v|=31.8 vs ico 51.9 (39% lower) — but at quick 2-day the instability
-    hasn't grown (== rotated_steady), INCONCLUSIVE; needs full 10-day (heavy compute).
-PRIORITY REDIRECT: the rest_state_topo PGF panel-edge artifact is more concrete + production-relevant
-than the deferred FB chain (which needs major staggered-C-grid-halo infra). FAST PROBE (next, avoids
-slow 3D time-stepping): build the rest_state_topo IC, compute ONE t=0 momentum tendency (the PGF
-imbalance) via the 3D PE, check magnitude + whether it concentrates at panel edges/corners; compare
-the cube PGF-over-topography scheme to FV3's (the metric-aware seam PGF). This is a static balance
-property → a single RHS eval, not a 1-day integration.
-NOTE: 3D cross-grid verification on CPU is impractical to block on per-iter (single 3D case >20 min);
-rely on the matrix's recorded audits + single-tendency probes for 3D edge-artifact work.
-
-
-## iter97 — CONFIRMED + LOCALIZED rest_state_topo edge artifact (fast t=0 PGF probe)
-Built rest_state_topography_init (u=v=0 over the DCMIP 2-0-0 mountain), computed ONE t=0 momentum
-tendency via CDGridPrimitiveEquationModel.tendencies (make_fv3_faithful_pe_config, C24/L10) — at rest
-the exact tendency is ZERO, so |dV/dt| = the PGF imbalance.  NO slow time-stepping.
-RESULT: |dV/dt| concentrates at the cube SEAMS — mean CORNER=3.9e-8, EDGE=6.3e-8, INTERIOR=8.4e-9
-m/s² ⇒ edge/interior=7.5×, corner/interior=4.6×; max=2.9e-7 at face4 corner (i=0,j=0).  The interior
-itself is NOT machine-zero (8e-9) — a baseline sigma-coordinate PGF imbalance, 7.5× worse at panel
-edges.  CONFIRMS the recorded rest_state_topo 13× artifact (1.3 m/s day-1 vs ico/latlon 0.1) and
-LOCALIZES it: the cube PGF-over-topography is NOT FV3-faithfully well-balanced at the panel seams
-(t=0 ~1.3e-4 m/s/step kick → grows nonlinearly to ~1.3 m/s over a day).
-This is a CONCRETE PRODUCTION 3D edge artifact, DISTINCT from the SW-core/FB vorticity thread, and
-directly the directive's "no edge artifacts."  NEXT: compare the legoESM PE hydrostatic PGF
-(`_arakawa_lamb_gradient` of p and Φ, co-located, primitive_eq_cdgrid.py:1151-1152) to FV3's
-well-balanced finite-volume hydrostatic PGF (the geopotential-gradient / one_grad_p form that cancels
-the topographic term exactly) — the seam metric in the co-located Arakawa-Lamb gradient is the
-suspect.  Probe is the diagnostic; the fix is an FV3-faithful well-balanced PGF at the seams.
-
-
-## iter98 — SHARED ROOT: both residual edge artifacts = co-located `_arakawa_lamb_gradient` at seams
-Read the 3D PE hydrostatic momentum (fv3_hydrostatic_tendencies, primitive_eq_cdgrid.py ~415-446):
-  dB_dx = _arakawa_lamb_gradient(B, cdgrid)            # B = KE + Φ (geopotential)
-  dln_dx = _arakawa_lamb_gradient(ln_ps, cdgrid)        # ln(p_s) gradient (SEPARATE A-L call)
-  pg_corr_x = R_d * T_corner * dln_dx
-  du_d_dt = zeta_corner*v_d - dB_dx - pg_corr_x
-At REST (u=v=0, KE=0, ζ=0): du/dt = -∇Φ - R_d·T·∇ln p, which must cancel EXACTLY for a well-balanced
-scheme.  The two terms come from SEPARATE co-located `_arakawa_lamb_gradient` calls (on B=Φ and on
-ln_ps) — not discretely consistent at the panel seams (cross-face halo + cube metric) → they don't
-cancel → the iter97 7.5×-interior edge imbalance.  CONFIRMED.
-⇒ UNIFYING SYNTHESIS: BOTH remaining cube edge artifacts share ONE root — the CO-LOCATED
-`_arakawa_lamb_gradient`/`zeta_corner` operators are not SEAM-EXACT:
-  • SW C96 W5 eigenmode + v-imprint: centered `zeta_corner*v_d` (A-L), no upwind seam dissipation.
-  • 3D rest_state_topo 13×: -∇Φ vs -RT∇ln p (two A-L gradients) don't cancel at seams (not well-balanced).
-The CONVERGENT FAITHFUL FIX for both = FV3's STAGGERED finite-volume operators: upwind vorticity flux
-(`_vorticity_flux`, exists) for SW; a WELL-BALANCED finite-volume PGF (the single consistent
-geopotential-gradient/pressure-work form, FV3 `one_grad_p`/`p_grad`) for 3D, so -∇Φ and -RT∇ln p
-cancel by construction.  This is the DEFERRED co-located→staggered upgrade — now shown to be the
-single root of the residual edge artifacts, raising its priority.
-NEXT: (3D, possibly more bounded) reformulate the rest-state PGF as ONE well-balanced operator
-(compute -∇Φ and -RT∇ln p from the SAME interpolated layer values so they cancel discretely); test on
-the t=0 rest-topo probe (does the 7.5× seam imbalance → ~machine-zero?). FV3 `one_grad_p` is the oracle.
-
-
-## iter99 — rest-PGF seam imbalance ROOT pinned: inconsistent cross-face halos between PGF terms
-Ruled OUT (all preserve constants EXACTLY at seams, machine-zero): `_arakawa_lamb_gradient` of a
-constant; `_interp_center_to_corner` of a constant; T_corner=1/interp(1/T)=T_init (harmonic, exact).
-DECOMPOSED the rest D-grid PGF du/dt = -∇Φ - R_d·T_corner·∇ln_ps (C24/L10 sigma, T=300 uniform):
-  |∇Φ_x| edge 6.41e-4 ≈ |pg_corr_x| edge 6.41e-4 (terms ~equal, ~∇phis magnitude)
-  |resid=-∇Φ-pg|_x: edge 9.5e-8 vs int 1.3e-8 = 7.3× ; FRACTIONAL non-cancel 1.5e-4 edge / 2.1e-5 int.
-Since Φ = phis + per-level-const(σ) (the σ/α part is annihilated by ∇), at rest the residual reduces
-to ∇phis-via-Φ's-halo MINUS ∇phis-via-ln_ps's-halo.  Φ is 3D (per-level, pad_halo_4d path) and ln_ps
-is 2D (separate 2D halo) → the two terms bring INCONSISTENT cross-face phis at the seam → -∇Φ and
--RT∇ln_ps don't cancel (1.5e-4 at edges).  This is the well-balancedness break = the rest_state_topo
-13× artifact root, and (per iter98) the same co-located-operator seam-consistency class as the SW
-eigenmode.
-FIX direction (FV3 well-balanced PGF, oracle one_grad_p): make the two PGF terms' cross-face halos
-CONSISTENT — e.g. compute the topographic-gradient contribution ONCE (a single ∇phis with one halo),
-or reformulate -∇Φ - RT∇ln_ps as a single finite-volume operator so ∇phis appears once and cancels by
-construction.  NEXT: confirm ∇Φ[:,:,k] vs ∇phis(2D) differ at the seam (the 3D-vs-2D halo culprit),
-then reformulate + re-run the t=0 probe (does 1.5e-4 → machine-zero?).  Production-relevant (AMIP uses
-the D-grid PGF directly); fast-testable via the t=0 probe.
-
-
-## iter100 — rest_state_topo PGF artifact RECLASSIFIED: FLOAT32 precision, NOT a faithfulness bug
-compute_geopotential (sigma) uses only σ-derived ln_ratio/alpha (no p_s) ⇒ analytically
-Φ = phis + per-level-const(σ) for uniform T ⇒ ∇Φ = ∇phis ⇒ -∇Φ cancels -R_d·T·∇ln_ps EXACTLY.
-Ruled out (all machine-zero at seams): A-L gradient of const; corner-interp of const; T_corner
-(harmonic, =T_init); 2D-vs-3D A-L gradient (identical).
-ROOT: Φ.dtype=FLOAT32 (phis + sigma.ln_ratio/alpha are float32 even under JAX_ENABLE_X64=1).
-(Φ_k - phis) spatial std rel = 1.88e-7 = float32 eps (Φ≈2.5e5 vs phis≈1.8e4 → the add loses ~7
-digits → ∇ of the polluted Φ = the spurious ~1e-7 m/s² PGF, 7× worse at edges where ∇phis/the A-L
-stencil is larger).  FORCING float64 (T,p_s,phis,ln_ratio,alpha): (Φ_k - phis) std = 0.0 EXACTLY ⇒
-PGF imbalance → machine-zero.  ⇒ the cube 3D hydrostatic PGF is EXACTLY WELL-BALANCED in float64;
-the recorded rest_state_topo 13× (1.3 m/s) is a FLOAT32 round-off artifact (likely cube ran float32
-while ico/latlon float64, or the cube's larger Φ magnitude amplifies float32), NOT a cube
-discretization/faithfulness bug.  This DE-PRIORITIZES it as a "faithfulness" concern and SEPARATES
-it from the SW v-imprint (0.344 m/s ≫ float32-of-38 ~ 4e-6 ⇒ the SW v-imprint is a REAL discretization
-effect, the co-located centered-vorticity gap — NOT float32).
-FIX options: (1) ensure the geopotential is float64 under x64 (phis/ln_ratio/alpha float32-under-x64
-is itself a likely dtype bug — x64 should give float64); (2) for float32 runs, a well-balanced
-reformulation: compute ∇(Φ - phis) (the small per-level-ish part, ∇≈0) + ∇phis SEPARATELY so the
-large Φ≈2.5e5 never enters the float32 cancellation (the standard reference-subtraction well-balanced
-PGF).  NEXT: check whether phis/sigma are float32-under-x64 by a real dtype bug (fixable cheaply) vs a
-deliberate float32 finite-volume choice; if a bug, fix → rest_state_topo → machine-zero.
-
-
-## iter101 — rest_state_topo float32 confirmed DELIBERATE; cube 3D PGF faithfulness RESOLVED
-create_sigma_coordinate defaults to FLOAT32 (vertical.py:130-135, documented: "PE and tracer
-transport models run in float32; mixing float64 sigma with float32 state triggers scatter-cast
-warnings").  So the float32 geopotential is a DELIBERATE PE precision/perf choice, NOT a dtype bug.
-⇒ the rest_state_topo 13× artifact is the float32 cost; the cube 3D hydrostatic PGF is FAITHFUL
-(exactly well-balanced in float64).  Corrected the matrix's now-disproven "panel-edge metric errors"
-audit comment (run_atmosphere_test_matrix.py:3912) to the float32 root.
-RESOLUTION: the directive's "no edge artifacts" for the 3D PGF is MET in float64; the float32 residual
-is a known precision tradeoff with an OPTIONAL well-balanced fix (reference-subtraction: gradient
-(KE+Φ-phis) and phis SEPARATELY so the large Φ≈2.5e5 never enters the float32 cancellation — exactly
-identical in float64, so float64 golds unchanged; float32 improves).  Deferred as optional (touches the
-production momentum + float32 hydro matrix; low value vs the SW thread).
-
-## STATE SUMMARY (iter89-101) — cube faithfulness is BETTER than the symptoms suggested
-DONE/faithful: area_corner (#faces) scaling (codex-approved, net-zero); gnomonic_ed grid; cross-grid SW
-(cube W2 L2 1.76e-4 ≈ latlon 2.67e-4 ≈ ico 9.9e-5); 3D PGF well-balanced in float64; baroclinic clean;
-ocean cube 9/9.  The ONE genuine remaining FAITHFULNESS gap = SW co-located CENTERED vorticity
-(`zeta_corner*v_d`, both production SW + 3D PE) vs FV3 UPWIND staggered flux — the root of the C96 W5
-eigenmode + the W2 v-imprint (0.344 m/s, a REAL discretization effect, NOT float32).  Fix = the deferred
-staggered c_sw→d_sw / `_vorticity_flux` upgrade (FB chain), which needs the staggered C-grid vector halo
-infra (iter95).  Everything else is either faithful or a deliberate precision choice.
-
-
-## iter102 — consolidation: well-balanced PGF needs f64 geopotential gradient (deferred); state persisted
-The well-balanced PGF reformulation (reference-subtraction) does NOT help in float32 by post-
-subtraction: the phis precision is lost INSIDE compute_geopotential's `phis + cumsum` (f32, cumsum
-≈2.5e5 ≫ phis≈1.8e4), not recoverable after. The clean fix = compute the geopotential + its gradient
-in FLOAT64 (then cast the PGF tendency to f32) — a precision-policy change, f32-only-benefit, real
-regression risk on the f32 hydro matrix. Deferred as optional (the cube PGF is exact in f64; PE is
-float32 by design).
-HEAD green-check: cdgrid area_corner (C1/C12/C36) + n1_metrics + nord0_del2 + corner_vort fingerprint
-4/4 PASS — the iter89-91 foundational area_corner fix is intact after all iter89-101 commits.
-Persisted the resolved iter89-101 state to memory `cube-fv3-faithfulness-state` (cross-session):
-the cube is faithful / deliberate-precision / inherent-cube-cost everywhere EXCEPT the one genuine gap
-= SW co-located centered vorticity (deferred major: staggered C-grid vector halo + FB→production).
+## OPEN QUEUE (priority)
+1. Staggered C-grid vector halo → fix `_corner_vorticity` reconstruction → FB residual → FB→production
+   (the genuine SW faithfulness gap; major, oracle-grounded blueprint above).
+2. (optional) chord→spherical sg_area (gold regen); f64/well-balanced PGF (f32 rest-state).
+3. 3D PE upwind PPM vort (same upwind theme as #1, 3D). thread FV3 sin_sg(5) seam rotation.
+4. human visual PNG verdict (W2 v / W5 wind_speed / cross-grid — surfaced). pre-existing 17-test swamp.
+5. ocean/AMIP cross-grid (CPU-infeasible to block on; rely on recorded audits + t=0 probes).
+State persisted: memory `cube-fv3-faithfulness-state` (full iter89-102 resolution).
