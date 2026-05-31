@@ -303,22 +303,35 @@ def interp_cell_to_uface(f: jnp.ndarray) -> jnp.ndarray:
     return jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
 
 
-def interp_cell_to_vface(f: jnp.ndarray) -> jnp.ndarray:
+def interp_cell_to_vface(f: jnp.ndarray, grid=None) -> jnp.ndarray:
     """Interpolate a cell-center field to v-face (lat interface) positions.
 
     Interior faces: average of adjacent cells.
-    Pole faces (south=0, north=n_lat): copy the adjacent cell value.
-    The pole value is numerically inert since v = 0 at the wall.
+
+    Boundary faces depend on ``grid``:
+
+    - ``grid is None`` (legacy default): south/north pole faces copy the
+      adjacent cell value.  The pole value is numerically inert since
+      ``v = 0`` at the wall.  Bit-exact backwards-compat.
+    - ``grid`` provided: use :func:`pad_ns_scalar` — south = 0 and north
+      = 0 (wall) on regular lat-lon, or north = fold-reflected on a
+      tripolar grid where the north boundary is an active fold rather
+      than a wall.  This is the form needed when the v-face value at the
+      north fold is physically meaningful (e.g. interpolating a vertical
+      velocity for momentum advection on eORCA1).
 
     Parameters
     ----------
     f : (n_lat, n_lon, ...) at cell centers.
+    grid : optional LatLonGrid or LatLonCGridGeometry.
 
     Returns
     -------
     f_v : (n_lat+1, n_lon, ...) at v-faces.
     """
     f_v_interior = 0.5 * (f[:-1] + f[1:])  # (n_lat-1, ...)
+    if grid is not None:
+        return pad_ns_scalar(f_v_interior, grid)
     return jnp.concatenate([f[0:1], f_v_interior, f[-1:]], axis=0)
 
 
@@ -2840,16 +2853,19 @@ def density_jacobian_pgf_smc03_x(
        (η=0 reference, consistent with the rest of the baroclinic
        path.)
     2. Per-column ``σ`` from ``reconstruct_harmonic_slopes``.
-    3. **Face-adaptive z_target** = ``0.5 · (z_centroid_W + z_centroid_E)``
-       (Option B from plan §2.3).  At full-cell faces this reduces to
-       the standard reference-cell centroid (both centroids equal
-       ``|z_full_ref[k]|``).  At partial-cell faces — where the
-       column-independent ``|z_full_ref[k]|`` of Option A can fall
-       below one column's seafloor when the partial cell sits in the
-       upper half of the reference cell — the per-face midpoint of
-       centroids is by construction inside both columns' partial
-       cells.  This avoids the clamp pathology that drove the BH
-       seamount blowup with Option A.
+    3. **Face-adaptive z_target** = ``min(z_centroid_W, z_centroid_E)`` — the
+       *shallower* of the two cell centroids (see the code below, which uses
+       ``jnp.minimum``).  At full-cell faces this reduces to the standard
+       reference-cell centroid (both centroids equal).  The ``min`` (NOT the
+       midpoint ``0.5·(z_c_W+z_c_E)`` once tried as "Option B") is what
+       guarantees the target lies inside BOTH columns: the midpoint can fall
+       *below* the shallower column's seafloor when its partial cell is thin
+       (``h < dz/3``), producing an asymmetric seafloor clamp and a spurious
+       ~10⁶ Pa/face pressure gradient — the C1 bug that drove the BH-seamount
+       blowup (see ``docs/ocean_experiments/pgf_smc03_code_review.md``).
+       ``min`` matches the Adcroft & Campin 2004 /
+       ``partial_cell_pgf_correction_x`` convention
+       (``face_ref = jnp.minimum(centroid_east, centroid_west)``).
     4. ``P_at_target`` per column from
        ``compute_pressure_at_target_smc03`` (each column evaluated at
        the face-pair midpoint of *its* face).

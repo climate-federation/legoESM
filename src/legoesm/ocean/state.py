@@ -417,6 +417,12 @@ class MomentumTendencyDiagnostics(NamedTuple):
     pattern in MOM6 (``MOM_diagnostics``), MITgcm
     (``DIAGNOSTICS_PKG``), and NEMO (``trd_*``).
 
+    Exception — ``adaptive_implicit_vertadv=True``: vertical advection is
+    applied as a separate operator-split stage at the step level (NEMO
+    ``ln_zad_Aimp``), so ``vertadv_{u,v}`` is then a DIAGNOSTIC-ONLY
+    start-of-step estimate that is NOT in ``du_dt``; the closure becomes
+    ``Σ (components except vertadv) == du_dt``.
+
     All fields share the same shape as ``du_dt`` / ``dv_dt`` (3D on the
     C-grid u-/v-faces).  Terms not active in a given config (e.g.,
     biharmonic when ``B_h == 0``) are zero arrays.
@@ -435,7 +441,11 @@ class MomentumTendencyDiagnostics(NamedTuple):
         the planetary Coriolis f×u is applied in the forward-backward step
         function and is NOT included in these diagnostics)
     vertadv_u, vertadv_v : Field
-        Flux-form 1st-order upwind ∂(w·u)/∂z, ∂(w·v)/∂z
+        Flux-form 1st-order upwind ∂(w·u)/∂z, ∂(w·v)/∂z.  With
+        ``adaptive_implicit_vertadv=True`` this holds the start-of-step
+        explicit estimate only (the actual term is applied implicitly at
+        the step level and is excluded from ``du_dt``); see the class
+        docstring closure note.
     Ah_lap_u, Ah_lap_v : Field
         A_h · ∇²u_prime, A_h · ∇²v_prime  (lateral Laplacian viscosity
         on the *baroclinic perturbation*; depth integral is identically 0)
@@ -557,6 +567,16 @@ class LatLonCGridOceanConfig(NamedTuple):
                                     # viscosity A_smag = (C·dx)²·|D| via the
                                     # energy-stable stress-tensor operator.
                                     # MOM6 OM4 uses 0.15. Additive with A_h.
+    smag_cfl_safety: float = 0.0   # When > 0, cap the Laplacian-Smagorinsky
+                                    # coefficient at the per-cell tuned ceiling
+                                    # ``smag_cfl_safety * area * cos^2(lat) / dt``
+                                    # (see laplacian_smag_cfl_cap; the larger
+                                    # stricter-than-CFL ceiling the WBC cold-
+                                    # start needs) so it can be
+                                    # cranked high to damp western-boundary-
+                                    # current jets WITHOUT self-CFL-violating at
+                                    # the sharp jet (the WBC cold-start blowup).
+                                    # ~0.125 (1/8) is a safe 2-D Laplacian cap.
     bottom_drag_r: float = 0.0
     bottom_drag_bbl_thickness: float = 0.0
     bottom_drag_bg_velocity: float = 0.0  # MOM6 DRAG_BG_VEL [m/s]; when >0,
@@ -720,3 +740,35 @@ class LatLonCGridOceanConfig(NamedTuple):
     A_h_cap_lat_deg: float = 75.0
     # Half-width of the polar-cap boost tanh transition [°]; default 5°.
     A_h_cap_width_deg: float = 5.0
+
+    # --- Adaptive-implicit vertical momentum advection ---
+    # (Shchepetkin 2015 / NEMO ``ln_zad_Aimp``).  Appended at the end of
+    # the NamedTuple to preserve positional construction for legacy
+    # callers.  When True, the explicit first-order-upwind vertical
+    # momentum advection (which has no vertical-CFL limit and amplifies a
+    # spurious ``w`` super-exponentially in thin cells -- the documented
+    # OMIP cold-start "vertadv" runaway) is replaced by a Courant-split
+    # explicit/backward-Euler-implicit scheme that is unconditionally
+    # stable, monotone, and conservative.  The split uses the
+    # barotropic-consistent ``w`` at the step level, so when enabled the
+    # vertical momentum advection is applied AFTER the barotropic solve
+    # (and the in-tendency explicit ``vertadv`` term is skipped).
+    # Disabled by default (False) to preserve bit-exact regression on
+    # legacy lat-lon configs; real eORCA/OMIP production runs enable it.
+    adaptive_implicit_vertadv: bool = False
+
+    # --- Outer baroclinic momentum time integrator ---
+    # "euler" (default): single-step forward-Euler of the momentum
+    #   perturbation tendency (legacy; bit-exact).
+    # "rk3": 3-stage SSP-RK3 (Shu-Osher) of the momentum perturbation
+    #   tendency, mirroring NEMO's RK3 outer step (compile-time key_RK3 in
+    #   ORCA1).  Forward-Euler has no stability region for the advective /
+    #   relative-vorticity / pressure-gradient terms, so the violent
+    #   cold-start geostrophic adjustment from rest amplifies; RK3's
+    #   stability region (|z| up to ~sqrt(3) on the imaginary axis) carries
+    #   it.  T,S,eta + surface forcing are frozen across the 3 stages
+    #   (operator-split with the Matsuno Coriolis + barotropic + tracer
+    #   stages); the barotropic slow forcing is taken from stage 1.  3x the
+    #   tendency cost.  Appended at the END of the NamedTuple to preserve
+    #   positional construction for legacy callers.
+    momentum_time_integrator: str = "euler"

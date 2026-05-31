@@ -2369,6 +2369,15 @@ class ModelDriver:
         # is a no-op there.  (Time-varying-over-the-run GHG is a follow-on:
         # thread it through ``forcing`` like T_sfc; here it is fixed at the
         # start-year value.)
+        # Phase D perf: run the RRTMGP optics tables + RTE solve in float32 even
+        # under JAX x64 (the dycore stays fp64).  rrtmgp-on-MPAS was the
+        # compute-bound limit that forced the moist-AMIP commit to fall back to
+        # gray for long runs; the fp64 RTE solve dominates on fp64-limited GPUs
+        # (e.g. RTX 8000, fp64 ~ 1/32 of fp32), so the fp32 path is ~2x faster
+        # with heating identical to <0.01 K/day vs fp64 (benchmarked).  Honors
+        # the ``RRTMGPConfig.compute_fp32`` contract ("the MPAS driver enables
+        # it for the long-run rrtmgp path").  Enabled ONLY for rrtmgp — gray
+        # radiation ignores the rrtmgp sub-config, so leave the default there.
         # compute_fp32 ENABLED for the rrtmgp MPAS path: run the optics tables
         # + RTE solve in float32 even under JAX x64 (the dycore stays fp64).
         # The earlier fp32 crash (PR #343) was a float64 leak in the OPTICS

@@ -306,9 +306,15 @@ def _parse_resolution(grid_type: str, resolution: str) -> dict:
     elif grid_type == "spectral":
         return {"truncation": int(resolution.lstrip("Tt"))}
     elif grid_type == "tripole":
-        # Resolution maps to a mesh-file. Only eORCA1 supported today.
+        # Resolution maps to a mesh-file + its T-fold index convention. eORCA1
+        # (1 deg, 332x362, halo-inclusive -> n_lon-1-i) and eORCA025 (1/4 deg,
+        # 1207x1442, de-haloed -> (n_lon-i)%n_lon) -- both NEMO tripole
+        # mesh_mask files, read identically by create_tripole_grid
+        # (glamt/e1t.../tmask + fold). Passing the validated convention
+        # explicitly avoids relying on _detect_fold's auto tie-break.
         meshes = {
-            "eorca1": "data/grids/eORCA1.2_mesh_mask.nc",
+            "eorca1": ("data/grids/eORCA1.2_mesh_mask.nc", "n_lon-1-i"),
+            "eorca025": ("data/grids/eORCA025_mesh_mask.nc", "(n_lon-i)%n_lon"),
         }
         key = resolution.lower()
         if key not in meshes:
@@ -316,7 +322,8 @@ def _parse_resolution(grid_type: str, resolution: str) -> dict:
                 f"Unknown tripole resolution {resolution!r}. "
                 f"Available: {sorted(meshes)}."
             )
-        return {"mesh_path": meshes[key]}
+        mesh_path, fold_convention = meshes[key]
+        return {"mesh_path": mesh_path, "fold_convention": fold_convention}
     raise ValueError(f"Unknown grid type: {grid_type}")
 
 
@@ -585,6 +592,16 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 # currents at 1° shouldn't exceed ~2 m/s.
                 maxvel_barotropic=0.0,  # disabled — let physics handle it
                 implicit_vertical_mixing=implicit_vertical_mixing,
+                # NOTE: ke_gradient_scheme left at the "centered" config
+                # default.  The Hollingsworth-Kållberg KE gradient was
+                # A/B-tested on the realistic WOA cold-start (job 8106193)
+                # and made NO difference — both centered and hollingsworth
+                # go non-finite by day 0.5 on latlon-bathy AND tripole.  So
+                # the KE-gradient scheme is NOT the OMIP cold-start blocker.
+                # A/B it via ``run_omip_core2.py --ke-gradient-scheme``
+                # (that flag is NOT plumbed into run_omip.py); do not change
+                # this default without a case where it demonstrably helps +
+                # an ocean test-matrix regression run.
             )
         else:
             config = LatLonCGridOceanConfig(
@@ -729,7 +746,9 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             LateralMixingConfig, GMRediConfig, VisbeckConfig,
         )
 
-        geom = create_tripole_grid(params["mesh_path"])
+        geom = create_tripole_grid(
+            params["mesh_path"],
+            fold_convention=params.get("fold_convention", "auto"))
 
         if forcing_mode == "jra55_do_tropical":
             sf_config = SurfaceForcingConfig(scheme="none")
@@ -769,6 +788,19 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             barotropic_implicit_pcg_tol=1e-10,
             barotropic_implicit_pcg_maxiter=300,
             pgf_scheme="adcroft",
+            # NOTE: ke_gradient_scheme is intentionally left at the
+            # "centered" config default for the TRIPOLE (the latlon-bathy
+            # branch above also keeps the centered default — neither grid's
+            # production default is hollingsworth).  The Hollingsworth KE
+            # stencil (ocean_pe_latlon_cgrid.py) widens to j±1 with
+            # edge-replication wall halos and does NOT yet use the tripole
+            # north-fold permutation/sign, so defaulting it on would compute
+            # KE gradients across the wrong topology at the bipolar cap.
+            # A/B-test it explicitly via ``run_omip_core2.py
+            # --ke-gradient-scheme hollingsworth`` (the equatorial cold-start
+            # blowup is far from the fold, and job 8106193 showed it does not
+            # fix that blowup anyway).  A fold-aware KE halo + regression test
+            # is the prerequisite to ever making it the tripole default.
             implicit_vertical_mixing=True,
             tracer_advection="tvd",
             bottom_drag_r=1e-3,
