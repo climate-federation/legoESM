@@ -11410,16 +11410,31 @@ class TestInterpCenterToCornerOrderIter707(unittest.TestCase):
             d2_bg=0.0, dddmp=0.2, d4_bg=0.16, nord=1))
         self.assertEqual(ke.shape, (6, 9, 9))
         # Pinned fingerprints — will shift if _interp_center_to_corner
-        # is swapped or wk formula changes.
-        self.assertAlmostEqual(float(ke[0, 4, 4]), 93983.00383117038,
-            places=4, msg="adaptive Smag ke[0,4,4] fingerprint changed.")
-        self.assertAlmostEqual(float(ke[3, 2, 6]), 137334.72628142763,
-            places=4, msg="adaptive Smag ke[3,2,6] fingerprint changed.")
-        self.assertAlmostEqual(float(ke.sum()), -15962.03511603897,
-            places=3, msg="adaptive Smag ke.sum() fingerprint changed.")
-        self.assertAlmostEqual(float((ke ** 2).sum()),
-            11366256403441.21, places=-4,
-            msg="adaptive Smag ke L2² fingerprint changed.")
+        # is swapped or the wk formula changes.  Tolerance is RELATIVE
+        # (rtol=1e-6): a real scheme change (e.g. 2nd→4th-order corner
+        # interp) shifts these O(dx²)≈% — orders of magnitude above
+        # rtol — while harmless float-reassociation drift across XLA
+        # versions / hardware (observed ~6e-9 relative on ke[0,4,4]) does
+        # not.  The previous `places=4`/`places=3` ABSOLUTE checks
+        # demanded ~5e-10 relative on 1e5-magnitude values, which is
+        # below float64 cross-platform reproducibility and produced a
+        # spurious failure (iter ~57).
+        def _rel(actual, expected, name, scale=None):
+            # delta scaled to the field's natural magnitude (`scale`,
+            # default |expected|).  For the heavily-cancelling ke.sum()
+            # (elements ~1e5, sum ~1e4 ⇒ ~200× cancellation), use the L2
+            # magnitude so element-level float drift isn't amplified into
+            # a spurious failure.
+            ref = abs(expected) if scale is None else abs(scale)
+            self.assertAlmostEqual(
+                float(actual), expected, delta=ref * 1e-6,
+                msg=f"adaptive Smag {name} fingerprint changed "
+                    f"beyond rtol=1e-6 of its scale (real scheme change?).")
+        l2 = float((ke ** 2).sum()) ** 0.5
+        _rel(ke[0, 4, 4], 93983.00383117038, "ke[0,4,4]")
+        _rel(ke[3, 2, 6], 137334.72628142763, "ke[3,2,6]")
+        _rel(ke.sum(), -15962.03511603897, "ke.sum()", scale=l2)
+        _rel((ke ** 2).sum(), 11366256403441.21, "ke L2²")
 
     def test_interp_center_to_corner_is_4point_average(self):
         """Verify Python's _interp_center_to_corner returns the

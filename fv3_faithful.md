@@ -28,26 +28,30 @@ edge artifacts**, visual+quantitative, codex-reviewed. CPU only (Metal broken).
   max_speed 0.0143≈latlon/mpas, non-zonal fraction 1.45% (A-grid was ~40%).
 - **OCEAN FC velocity viscosity** vector-halo (4fe7108c).
 
-## ✅ EDGE-ARTIFACT PROOF (codex-reviewed, two metrics)
-(A) same-face roughness (RMS 2nd-diff edge band/interior): all cube cases ≤1.9×
-(scalar-halo bug gave 25-167×). (B) TRUE cross-face continuity (edge cell vs
-physical neighbor on adjacent face via halo): scalars (p_s,T,eta,SST) 0.5-1.8×,
-geographic winds 0.5-2.3× — all CONTINUOUS. ⇒ no panel-seam artifact, proven
-beyond visual. (Visual: geostrophic clean zonal bands, phillips smooth eddies
-matching mpas, baroclinic v smooth — all no panel imprint.)
-RE-VERIFIED iter ~56 (3D PE dycore, fresh): baroclinic cube 3/3 PASS — sigma mass
-7.4e-15 max|v|13.3, hybrid 1.4e-14, rotated_baroclinic 3.5e-13 max|v|23.8. Native
-v-wind edge-roughness: sigma 0.97×, hybrid 1.24×, rotated_baroclinic 1.22× (jet
-crosses panel seams = hardest test) — all ≤1.24×, NO edge artifacts. ⇒ centered
-FV3-inspired PE dycore is FUNCTIONALLY edge-clean; the PE caveat is algorithmic
-faithfulness (upwind 2-stage), NOT edge artifacts.
-RE-VERIFIED iter ~55 (fresh run, not cached): cube SW 4/4 PASS, mass 1e-15..1e-16,
-W2 v_ll_Linf 0.339. Fresh native-field edge-roughness (RMS 2nd-diff edge-band/
-interior): physically-dominant fields height 0.65, u 0.77 (NO edge amplification,
-<1×); v_cc_north 2.38× BUT that field is the W2 discretization error (exact v=0;
-max|v|=0.343 vs |u|=38.6, v/u rms 9.4e-4 = 0.09% of signal) so the mild edge
-concentration is the tiny error's metric-variation pattern, not a physical
-artifact. PNGs results/atmosphere/shallow_water/williamson2/cubed_sphere/C36/.
+## EDGE-ARTIFACT STATUS (CORRECTED iter ~57 by 12-agent oracle+adversarial workflow)
+**Honest verdict: NOT-YET-ESTABLISHED as a general claim. The earlier "edge-clean
+PROVEN" was OVERSTATED for shallow-water.**
+- BAROCLINIC (3D PE): genuinely clean — uniform per-face roughness, magnitude-
+  normalized roughness SHRINKS with resolution (C36→C72 in results/probe_conv_fixed),
+  converges. SUPPORTED-WITH-CAVEATS. (Fresh iter56: cube 3/3 PASS, mass 7e-15..3e-13,
+  v-wind roughness ≤1.24× incl rotated_baroclinic crossing seams.)
+- SHALLOW-WATER: REAL coherent cube-vertex/equatorial-seam imprint in v-wind /
+  wind_speed that my POOLED same-face metric HID. 4 adversarial skeptics all REFUTED
+  the clean claim: (1) same-face band=2 metric excludes the seam row + has a high
+  detection floor; (2) the committed `compute_edge_artifact_metric` (halo.py:2994) is
+  pooled same-face-ONLY (no cross-face term) and the fresh iter55/56 reverify only ran
+  metric-A, never re-ran cross-face metric-B on fresh data; (3) numbers-only violates
+  CLAUDE.md "visual REQUIRED" — native PNGs never opened; (4) pooling hides per-face
+  amplification + polar "clean" is small/large MASKING. Independently re-verified:
+  W2 v_cc_north 16/24 corner cells show 2nd-diff >2× median (coherent vertex imprint);
+  per-face magnitude-RMS edge/interior 1.34× equatorial vs 0.84× polar. W2 v is the
+  ERROR field (exact v=0, max 0.34, rms 0.03) so absolute magnitude tiny (sub-0.1 m/s,
+  invisible to L2/mass) — but it IS a real grid imprint, not noise, and it GROWS in
+  time. The skeptic's headline W5 v up-to-5.95×-per-face (W5 v = PHYSICAL mountain
+  flow, NOT error → magnitude defense breaks) is UNVERIFIED here (no W5 native saved).
+- STILL MISSING (none done): visual PNG inspection; per-face + magnitude-normalized +
+  cross-face metric as a committed regression; W2/W5 resolution+duration sweep
+  (C36/C48/C96, W2→5d W5→15d — currently C36-only, quick=1d); band=1 reporting.
 
 ## VERIFICATION
 - SW 16/16 all grids, aligned within 1 cell. Full fast cube atm dynamical suite
@@ -85,18 +89,38 @@ that grid (not a corner-swap) + re-validate ALL dynamics (calibrated on
 equiangular). Sanctioned effort; grid MATH done+tested, but the metric/halo
 construction + re-calibration remain. Real FV3-grid-variant gap.
 
-## FAITHFULNESS AUDIT (codex + Fortran oracle)
-- ✅ SW path (FV3EdgeShallowWaterModel→`fv3_sw_core`) **algorithmically faithful**:
-  `_d2a2c_vect` (sin_sg upwind, corner 2×2 solve), `_d_sw1`, upwind
-  `_vorticity_flux` (fv3_sw_core:1260).
-- ⚠️ 3D PE dycore (`primitive_eq_cdgrid:445`) uses CENTERED `zeta_corner*v_d` —
-  FV3-INSPIRED, validated, NOT FV3's upwind 2-stage. Functional faithfulness
-  (results, edge-clean) everywhere. FV3-faithful corner d_sw5 div-damp + a2b-zeta
-  KNOBS exist (`corner_div_damp_nord/d4_bg`, `use_fv3_a2b_zeta_corner`) but default
-  OFF + are per-case-config-gated (held_suarez reads `LEGOESM_CDD_*` env;
-  run_baroclinic config doesn't) + secondary (damping, not the core upwind-flux
-  gap). Core PE upwind = major build (no drop-in faithful 3D dycore, unlike the
-  ocean's FV3Edge).
+## FAITHFULNESS SCORECARD (12-agent oracle workflow, iter ~57; each verdict from
+## direct Fortran-vs-port read; synthesis cross-checked load-bearing claims)
+**FAITHFUL ports — but ORPHANED (NOT on the running model):**
+- `gnomonic_ed`/`gnomonic_grids`/`symm_ed`: **bit-faithful** (agent reimplemented FV3
+  gnomonic_ed in numpy independently → max|dlon/dlat| = 4.4e-16, 1 ULP). But ZERO
+  production callers — `create_cubed_sphere` runs EQUIANGULAR (grid_type=2). [grid gap]
+- `get_area`+`cell_center3`+`spherical_angle`: faithful; production `grid.area` uses an
+  equivalent l'Huilier split (agrees rel<1e-6) — second algorithm, not FV3's stencil.
+- upwind abs-vorticity flux / `fv_tp_2d` / xppm-yppm: line-for-line faithful (iord=9
+  limiter) — but ORPHANED (3D PE doesn't call it). Latent `hord==9` iv-mislabel
+  (fv_tp_2d.py:504, iv=1 where FV3 iord=9 is iv=0; unexercised).
+**MINOR divergence (partially wired):**
+- `d2a2c_vect`: LIVE duogrid 4th-order path faithful (FV3 also gates edge/corner
+  specials off under `dg%is_initialized`); non-duogrid corner sign-flip overrides
+  dropped (off live path). Live only in SW FV3EdgeShallowWaterModel + opt-in ocean.
+- `a2b_ord4` zeta_corner: interior PPM+Lagrange bit-faithful; INERT by default
+  (`use_fv3_a2b_zeta_corner=False`), LIVE only under `make_fv3_faithful_pe_config`.
+- cross-face vector halo rotation: LIVE `pad_halo_vector_4d` is ORTHOGONAL — DROPS
+  FV3's `1/sin_sg(:,:,5)` non-orthogonality + z12/z21 cross-projection → real O(cosθ)
+  seam error (largest AT seams). Faithful `pad_halo_dgrid_vector_4d` (12/12 tests) gated
+  behind `use_fv3_cross_face_du_proj=False`.
+**MAJOR gap:**
+- `c_sw`+`d_sw` 2-stage SW core: production `CDGridShallowWaterModel` is single-stage
+  SSP-RK3 over ONE Arakawa-Lamb centered tendency, NOT FV3 forward-backward time-split
+  (c_sw dt/2→d_sw dt). Genuine 2-stage `fv3_fb_sw_step` exists but EXPERIMENTAL/unstable
+  (~50 steps→NaN), unreachable from factory. ⇒ earlier "SW algorithmically faithful"
+  was about the GATED FV3Edge path, not the production CDGrid SW.
+- 3D PE D-grid vorticity/KE: **LIVE — the one non-orphaned major gap.** Centered
+  `zeta_corner*v_d` + centered Bernoulli grad (primitive_eq_cdgrid:445), NOT FV3 upwind
+  PPM `hord_vt`. Different algo class; legoESM compensates w/ explicit del-n damping vs
+  FV3's implicit upwind enstrophy dissipation. Module docstring honestly says "Research
+  path, not a faithful FV3 port"; factory tag "centered" is honest.
 - ✅ **Ocean barotropic NOW HAS a faithful option** (19de9080):
   `barotropic_staggering="fv3edge"` routes through the TRUE FV3 edge-staggered SW
   core (FV3EdgeShallowWaterModel: upwind abs-vorticity flux + `_d2a2c_vect`).
@@ -113,8 +137,23 @@ construction + re-calibration remain. Real FV3-grid-variant gap.
   _edge_to_cc inverse, fix_mass=False, no retrace all correct (only a doc-wording
   fix re per-substep vs sub-RK3-stage masking).
 
-## OPEN (sanctioned-major or CPU-bound — engineering decision: defer, don't risk
-the validated state via loop hacks against a concurrently-`git reset` tree)
+## ACTION QUEUE (from iter ~57 workflow synthesis)
+SAFE-BOUNDED (no risk to equiangular default; do in loop iters):
+- [DONE iter57] Fix stale failing test iter-707 (`test_cdgrid_fv3_regression.py`
+  Iter707): was `places=4` abs (~5e-10 rel) on 1e5-mag KE → spurious fail on 6e-9
+  float drift. Now rtol=1e-6, L2-scaled for the cancelling sum. NOT a 2nd→4th-order
+  switch (agent misdiagnosed; value moved 6e-9 not O(%)). 2/2 pass.
+- [TODO] Per-face + magnitude-normalized + cross-face seam-jump metric → replace
+  pooled `compute_edge_artifact_metric` (halo.py:2994) + regression test (closes
+  edge-metric lenses 1/2/4 permanently).
+- [TODO] W2/W5 resolution+duration sweep (C36/C48/C96, W2→5d W5→15d) — verify the
+  SW seam imprint grows or converges; W5 v is PHYSICAL flow (test the 5.95× claim).
+- [TODO] Visual PNG inspection (CLAUDE.md-mandated; needs human/user — assistant
+  barred from Read images): snapshots_v_native.png / snapshots_wind_speed_native.png
+  for W2 + baroclinic.
+- [TODO] Numerical regression locking the orphaned faithful ports (gnomonic_ed vs
+  numpy FV3 ref; a2b_ord4 vs hand FV3 duogrid cascade). Fix latent `hord==9` mislabel.
+FOUNDATIONAL (multi-day, re-calibration; NOT in a bounded loop iter):
 - 3D PE upwind faithfulness ⇒ FV3 2-stage c_sw/d_sw rewrite (core dycore).
 - Ocean→FV3Edge: faithful upwind option DONE (gated, 19de9080, validated 8/9).
   Promotion to default blocked by phillips: upwind baroclinic-instability
