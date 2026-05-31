@@ -71,6 +71,13 @@ Production uses RK3 Arakawa-Lamb (works). `fv3_fb_sw_step` / `FV3FBShallowWaterM
   duogrid. ⇒ the residual is a STRUCTURAL corner coupling/metric bug (vertex-seeded growth mode),
   NOT a tunable grid-scale dissipation mode. Remaining candidate = the duogrid `_corner_vorticity`
   metric halo / d2a2c-duogrid / c_sw corner coupling — a deep structural fix vs the oracle.
+  iter83: ZERO-dissip+duogrid+Phase4 STILL day2-NaN (day1 |u|=51.9, W2 err 2.48e-2 = same as with
+  dissip) ⇒ the d_sw5 DAMPING (divg_d mode='edge') is NOT the growth-rate bug — growth persists
+  with the damping path entirely SKIPPED. ⇒ the residual is the CORE FB-scheme corner (zeta
+  vorticity / vorticity-flux fv_tp_2d / c_sw corner vort / d2a2c corner), DISSIPATION-independent,
+  Phase4-independent, wind-halo-independent. Note: the port `zeta` (_d_sw_native:1885) uses the
+  COVARIANT D-grid circulation u_d·dx,v_d·dy with NO corner correction; the oracle d_sw5 wk (1596)
+  uses ut/vt + fill_corners. NEXT: focused oracle-diff workflow on the core-scheme corner.
 
 ## gnomonic_ed GRID (FV3 operational gt=0; iter62-78) — WIRED + clean + codex-approved
 create defaulted to EQUIANGULAR (gt=2, aspect 1.40); FV3 uses gnomonic_ed (gt=0, aspect 1.06, dx √2)
