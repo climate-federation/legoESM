@@ -1994,6 +1994,77 @@ def gnomonic_ed(im: int) -> tuple[jax.Array, jax.Array]:
     return lon_out, lat_out
 
 
+def _gnomonic_ed_construct(
+    theta_w: jax.Array, alpha: float | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """Generalized gnomonic_ed face-2 construction for an arbitrary W-edge
+    latitude array ``theta_w`` (the equal-great-circle-angle edge distribution).
+
+    Identical to :func:`gnomonic_ed` (FV3 fv_grid_utils.F90:1313) but with the
+    W/E-edge latitudes supplied directly instead of derived from ``im`` — so the
+    same construction builds the in-domain grid (``theta_w = -α + (2α/im)·[0..im]``,
+    α=arcsin(1/√3)) AND the HALO-extended grid (``theta_w`` spanning beyond ±α).
+    This is the reusable core for the gated gnomonic_ed padded-metric builders.
+
+    ``alpha`` fixes the SW/NE corners that define the mirror diagonal
+    (default arcsin(1/√3) = the in-domain face half-extent).  This MUST stay
+    pinned to the in-domain face even when ``theta_w`` extends into the halo —
+    otherwise the diagonal moves and the interior no longer matches the
+    in-domain grid.  The extended W-edge points are reflected across this FIXED
+    diagonal to give the (continued) S-edge great circle.
+
+    Returns the ``(m, m)`` face-2 (lon, lat), ``m = len(theta_w)``.
+    """
+    rsq3 = 1.0 / jnp.sqrt(3.0)
+    pi = jnp.pi
+    if alpha is None:
+        alpha = float(jnp.arcsin(rsq3))
+    theta_w = jnp.asarray(theta_w)
+    m = theta_w.shape[0]
+    im = m - 1
+
+    lon = jnp.zeros((m, m), dtype=jnp.float64)
+    lat = jnp.zeros((m, m), dtype=jnp.float64)
+    # W (i=0) and E (i=im) edges: constant lon, lat = theta_w
+    lon = lon.at[0, :].set(0.75 * pi)
+    lon = lon.at[im, :].set(1.25 * pi)
+    lat = lat.at[0, :].set(theta_w)
+    lat = lat.at[im, :].set(theta_w)
+
+    # S/N edges by mirror_latlon of the W-edge column across the SW–NE diagonal.
+    # The diagonal is pinned to the IN-DOMAIN corners (lat=±alpha) so the
+    # interior is invariant to halo extension of theta_w.
+    i_int = jnp.arange(1, im)
+    lon_s_row, lat_s_row = mirror_latlon(
+        0.75 * pi, -alpha, 1.25 * pi, alpha,
+        lon[0, i_int], lat[0, i_int],
+    )
+    lon = lon.at[i_int, 0].set(lon_s_row)
+    lat = lat.at[i_int, 0].set(lat_s_row)
+    lon = lon.at[i_int, im].set(lon_s_row)
+    lat = lat.at[i_int, im].set(-lat_s_row)
+
+    # Project edges onto the constant-x = -1/√3 cube face
+    x_w, y_w, z_w = latlon2xyz(lon[0, :], lat[0, :])
+    safe_x_w = jnp.where(jnp.abs(x_w) > 1e-30, x_w, 1.0)
+    pp2_i0 = -y_w * rsq3 / safe_x_w
+    pp3_i0 = -z_w * rsq3 / safe_x_w
+    x_s, y_s, z_s = latlon2xyz(lon[:, 0], lat[:, 0])
+    safe_x_s = jnp.where(jnp.abs(x_s) > 1e-30, x_s, 1.0)
+    pp2_j0 = -y_s * rsq3 / safe_x_s
+    pp3_j0 = -z_s * rsq3 / safe_x_s
+
+    pp1 = jnp.full((m, m), -rsq3)
+    pp2 = jnp.broadcast_to(pp2_j0[:, None], (m, m))
+    pp3 = jnp.broadcast_to(pp3_i0[None, :], (m, m))
+    pp3 = pp3.at[:, 0].set(pp3_j0)
+    pp2 = pp2.at[0, :].set(pp2_i0)
+    pp3 = pp3.at[:, im].set(-pp3_j0)
+    pp2 = pp2.at[im, :].set(-pp2_i0)
+
+    return xyz2latlon(pp1, pp2, pp3)
+
+
 def symm_ed(
     lamda: jax.Array, theta: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
