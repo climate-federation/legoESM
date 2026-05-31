@@ -158,5 +158,11 @@ at 38.6). The recorded-eigenmode setup differs from my hand-roll in some way I c
 runner is C36 only). ⇒ EIGENMODE PAYOFF UNEVALUABLE with the current harness; need the exact
 recorded C96 W5 config. The area_corner vertex fix STANDS on its merits: FV3-faithful (3·get_area
 junction), regression-safe (W2 C36 L2=1.76e-4 + W2 C96 stable 38.6/ss-err≤2.4e-4), neutral on W5.
-NEXT options: bug 1 (`_corner_vorticity` edge-mode metric, FB-only, the primary FB seed); or build
-a correct C96 W5 eigenmode harness; or 3D PE upwind.
+iter86b — HARNESS FIXED + eigenmode resolved for the vertex fix: my W5 C96 used the BARE
+`iter1009_dual_target_config(96)` (insufficient damping); with EXPLICIT damping (div_damp=8,
+hyperdiff=2·hdc, matching W2) W5 C96 + vertex-fix reproduces the recorded eigenmode EXACTLY:
+25.8/31.8/32.7/38.2/79.9 ≈ recorded 26/32/33/40/80. ⇒ (1) WORKING C96 W5 eigenmode harness now
+exists; (2) the area_corner vertex fix does NOT change the eigenmode (still blows to 80 @ d5) —
+bug 2 is NOT the eigenmode root (fix is correct+safe, keep). NEXT: test the clean gnomonic_ed grid
++ vertex-fix on the eigenmode (recorded ed PARTIALLY bounded it but with the OLD collapsed halo;
+now halos are clean).
