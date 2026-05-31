@@ -166,3 +166,15 @@ exists; (2) the area_corner vertex fix does NOT change the eigenmode (still blow
 bug 2 is NOT the eigenmode root (fix is correct+safe, keep). NEXT: test the clean gnomonic_ed grid
 + vertex-fix on the eigenmode (recorded ed PARTIALLY bounded it but with the OLD collapsed halo;
 now halos are clean).
+  iter87 — eigenmode is a SW-CORE issue, NOT the grid or the vertex area. With the working harness:
+  • equiangular + vertex-fix: 25.8/31.8/32.7/38.2/79.9 (≈ recorded 26/32/33/40/80) — vertex-fix
+    NEUTRAL on production eigenmode.
+  • gnomonic_ed (clean halos) + vertex-fix: 25.7/31.8/111.9/122.8/131.3/115.2 — BOUNDS it (saturates
+    ~115-131, no NaN to d6) but FASTER onset (d3=112) than the recorded ed (d3=33; old collapsed
+    halo may have ACCIDENTALLY damped the mode). ⇒ neither the FV3-operational grid nor the correct
+    vertex area FIXES the eigenmode (eq still blows to 80; ed saturates worse). The eigenmode is a
+    SW-CORE vertex-vorticity instability (production RK3 Arakawa-Lamb corner treatment / centered-vs-
+    upwind) = the convergent FB/SW-core-faithfulness root. The faithful vertex area + ed grid make
+    the vertex vorticity MORE accurate (larger) → expose the underlying instability MORE, confirming
+    it is vertex-vorticity-driven. The vertex-area fix stays (production-safe, neutral); the real
+    eigenmode fix is the SW-core corner scheme.
