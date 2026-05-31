@@ -402,23 +402,26 @@ def _compute_supergrid_metrics(n, supergrid_lon, supergrid_lat, radius):
                     total += sg_area[si, sj]
                 area_c[i, j] = total
         if n >= 2:
-            # Extrapolate edges from adjacent interior.
-            area_c[0, 1:n]    = area_c[1, 1:n]        # west edge
-            area_c[n, 1:n]    = area_c[n - 1, 1:n]    # east edge
-            area_c[1:n, 0]    = area_c[1:n, 1]        # south edge
-            area_c[1:n, n]    = area_c[1:n, n - 1]    # north edge
-            # iter84: the 8 cube VERTICES are 3-face junctions, NOT 4-quadrant
-            # interior dual cells.  FV3 (fv_grid_tools.F90:1036-1067) computes the
-            # vertex control-volume area as 3*get_area(vertex, mid_j, mid_i,
-            # cell_centre) — the on-face corner sub-quadrant (= the corner
-            # supergrid cell sg_area[corner]) times 3 for the three faces meeting
-            # at the junction.  The prior diagonal-interior copy (4-quadrant) was
-            # ~33% too large -> rarea_c ~25% too small -> a mis-scaled vertex
-            # vorticity that seeds the vertex-localized C96 W5 / FB growing mode.
-            area_c[0, 0] = 3.0 * sg_area[0, 0]
-            area_c[0, n] = 3.0 * sg_area[0, 2 * n - 1]
-            area_c[n, 0] = 3.0 * sg_area[2 * n - 1, 0]
-            area_c[n, n] = 3.0 * sg_area[2 * n - 1, 2 * n - 1]
+            # FV3 boundary corner control-volume area = (# faces meeting at the
+            # node) × (the ON-FACE sub-quadrant sum already accumulated in area_c
+            # by the loop above).  fv_grid_tools.F90:980-1067:
+            #   - interior corner: full 4-quadrant dual cell (loop value, no scale);
+            #   - cube EDGE node (2 faces meet): loop = 2 on-face quadrants → ×2
+            #     (FV3 2*get_area = 2*(sg_area[0,2j-1]+sg_area[0,2j]) etc.);
+            #   - cube VERTEX (3-face junction): loop = 1 on-face quadrant → ×3
+            #     (FV3 3*get_area, lines 1036-1067).
+            # iter84 fixed the vertices (×3); iter89 (codex review of 4ad2fea0)
+            # extends the same (#faces)-scaling to the EDGES — the prior inward
+            # interior-copy extrapolation was ~1.2% off at C96 on O(n) boundary
+            # corners (rarea_c silently low → boundary vorticity/divergence bias).
+            area_c[0, 1:n] = 2.0 * area_c[0, 1:n]    # west edge  (i=0)
+            area_c[n, 1:n] = 2.0 * area_c[n, 1:n]    # east edge  (i=n)
+            area_c[1:n, 0] = 2.0 * area_c[1:n, 0]    # south edge (j=0)
+            area_c[1:n, n] = 2.0 * area_c[1:n, n]    # north edge (j=n)
+            area_c[0, 0] = 3.0 * area_c[0, 0]        # SW vertex (= 3*sg_area[0,0])
+            area_c[0, n] = 3.0 * area_c[0, n]        # NW vertex
+            area_c[n, 0] = 3.0 * area_c[n, 0]        # SE vertex
+            area_c[n, n] = 3.0 * area_c[n, n]        # NE vertex
         all_area_c.append(area_c)
 
         # --- dxc: distance between cell centers (i-1,j) and (i,j) ---

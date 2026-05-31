@@ -9540,53 +9540,63 @@ class TestCdgridDxcDycBoundaryIter666(unittest.TestCase):
                  f"match analytic balanced {pgf_analytic:.3e} (±5%)."))
 
     def test_iter670_area_corner_boundary_matches_interior(self):
-        """Iter-670 regression lock: area_corner at cube
-        vertices/edges should NOT be underestimated from partial
-        supergrid summing.
+        """area_corner at cube edges/vertices = FV3 (#faces)×(on-face sub-cell).
 
-        Pre-iter-670: corner i=0, j=0 had only 1/4 of the 4 surrounding
-        supergrid cells on-face (the other 3 are on neighbouring
-        faces), giving area_corner ≈ 0.22× interior.  This made
-        rarea_c ≈ 4× interior at cube vertices.
+        FV3 `tools/fv_grid_tools.F90:975-1067` builds the C-grid corner
+        control-volume area from the number of faces meeting at the node times
+        the ON-FACE sub-cell area, NOT an inward interior copy:
+          * interior corner: full 4-quadrant dual cell;
+          * cube EDGE node (2 faces): ``area_c = 2*get_area(edge-mid, edge-mid,
+            cell-center, cell-center)`` — 2× the on-face HALF dual cell
+            (lines 976-1033);
+          * cube VERTEX (3-face junction): ``3*get_area(vertex, mid_j, mid_i,
+            cell_centre)`` — 3× the single on-face corner sub-quadrant
+            (lines 1036-1067).
 
-        Fortran oracle at `tools/fv_grid_tools.F90:1084-1087, 1561-
-        1564` extrapolates:
-            area_c(isd, j)       = area_c(isd+1, j)
-            area_c(isd, jsd)     = area_c(isd+1, jsd+1)
-
-        The iter-670 Python fix mirrors this.
+        Pre-iter-670 the vertices summed only the 1 on-face quadrant (no ×3) →
+        ≈0.22× interior → rarea_c ≈ 4× too large.  Iter-670 over-corrected by
+        copying the interior inward (edge==vertex==interior, ≈1.0×) — that
+        mirrors FV3's HALO-ghost extrapolation (1084-1087), not the in-domain
+        grid_area formula.  iter84/iter89 (codex review of 4ad2fea0) restore the
+        true (#faces)-scaling: with the on-face sub-cells shrinking toward the
+        boundary, this gives edge/interior ≈ 0.865 and vertex/interior ≈ 0.67,
+        resolution-stable.  These guard against BOTH the under-count (vertex
+        ≈0.22) and the iter-670 over-copy (edge==vertex==1.0).
         """
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import (
             create_cubed_sphere_cdgrid)
 
-        n = 12
-        cdgrid = create_cubed_sphere_cdgrid(create_cubed_sphere(n=n))
-        ac = np.asarray(cdgrid.area_corner)   # (6, n+1, n+1)
+        for n in (12, 36):
+            cdgrid = create_cubed_sphere_cdgrid(create_cubed_sphere(n=n))
+            ac = np.asarray(cdgrid.area_corner)   # (6, n+1, n+1)
+            self.assertTrue(bool(np.all(ac > 0.0)),
+                            msg=f"C{n}: non-positive area_corner present.")
+            interior = float(ac[:, 1:n, 1:n].mean())
 
-        # West edge (i=0) should equal i=1 for j in [1, n-1].
-        np.testing.assert_allclose(
-            ac[:, 0, 1:n], ac[:, 1, 1:n], rtol=0.0, atol=1e-10,
-            err_msg=("area_corner[i=0, 1<=j<n] != area_corner[i=1, "
-                     "1<=j<n] — iter-670 west-edge extrapolation lost."))
-        # SW cube vertex (i=0, j=0) should equal interior diagonal (1, 1).
-        np.testing.assert_allclose(
-            ac[:, 0, 0], ac[:, 1, 1], rtol=0.0, atol=1e-10,
-            err_msg=("area_corner[i=0, j=0] != area_corner[i=1, j=1] "
-                     "— iter-670 SW cube-vertex extrapolation lost."))
-        # NE cube vertex similarly.
-        np.testing.assert_allclose(
-            ac[:, n, n], ac[:, n - 1, n - 1], rtol=0.0, atol=1e-10,
-            err_msg=("area_corner[i=n, j=n] != area_corner[i=n-1, j=n-1]."))
-        # Corner/interior ratio should now be ~1, not ~0.22.
-        interior_mean = ac[:, 1:n, 1:n].mean()
-        corner_mean = ac[:, 0, 0].mean()
-        self.assertGreater(
-            corner_mean / interior_mean, 0.5,
-            msg=(f"area_corner ratio corner/interior = "
-                 f"{corner_mean/interior_mean:.3f} is still below 0.5 "
-                 f"— pre-iter-670 partial-quadrant bug has returned."))
+            # All four cube EDGES (2-face nodes): 2× on-face half dual cell
+            # ≈ 0.865× interior (NOT the iter-670 interior-copy ≈1.0).
+            for edge, name in ((ac[:, 0, 1:n], "west"), (ac[:, n, 1:n], "east"),
+                               (ac[:, 1:n, 0], "south"), (ac[:, 1:n, n], "north")):
+                r = float(edge.mean()) / interior
+                self.assertTrue(
+                    0.82 < r < 0.91,
+                    msg=(f"C{n} {name}-edge area/interior = {r:.3f} not in "
+                         f"FV3 2-face band (0.82,0.91); regression in the "
+                         f"2*get_area on-face edge area."))
+
+            # All four cube VERTICES (3-face junctions): 3× on-face corner
+            # quadrant ≈ 0.67× interior (NOT ≈0.22 under-count, NOT ≈1.0 copy).
+            for (vi, vj), name in (((0, 0), "SW"), ((0, n), "NW"),
+                                   ((n, 0), "SE"), ((n, n), "NE")):
+                r = float(ac[:, vi, vj].mean()) / interior
+                self.assertTrue(
+                    0.60 < r < 0.74,
+                    msg=(f"C{n} {name}-vertex area/interior = {r:.3f} not in "
+                         f"FV3 3-face-junction band (0.60,0.74); either the "
+                         f"under-count (~0.22) or the iter-670 over-copy "
+                         f"(~1.0) has returned."))
 
     def test_iter667_n1_metrics_nonzero(self):
         """iter-667 regression lock: n=1 fallback gives non-zero
