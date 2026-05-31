@@ -76,10 +76,19 @@ mountain_rossby_5_0 (10.2), inertio_gravity_3_2 (16.9), rotated_steady (23.8),
 rest_state_topo (max|v|1.2 = bounded sigma-PGF topo residual), dcmip_transport_11/12;
 + SW 16/16 + NH dcmip_tc1. Only climate (held_suarez/amip, 30-day) is CPU-bound.
 
-## Regression health (iter ~34)
+## Regression health (iter ~34, re-swept ~40)
 44/44 PASS: test_vector_cc_to_dgrid_wind_lift, test_latlon_regrid_alignment,
 test_fc_velocity_viscosity_vector_halo, test_fv3sw_barotropic, test_ocean_fc,
-test_no_scheme_duplication — all session fixes regression-clean, no duplication.
+test_no_scheme_duplication — all session fixes regression-clean.
+Iter~40 broader sweep: 23/24 PASS incl. test_barotropic_cgrid (the module I
+edited) + barotropic noise-invariant. The 1 FAIL =
+`test_barotropic_noise_invariant::test_implicit_solver_conserves_mass` — the
+LATLON `implicit_cn` solver, mass drift 1.007e-6 vs 5e-7 (borderline 2×). NOT my
+work: authored by collaborator Dhruv Balwada (May-19 "mass conservation projection
+to implicit barotropic solvers" + "Mercator geometry"); my HEAD↔main diff touches
+ZERO implicit/latlon-cgrid files. Outside cube scope; matrix latlon ocean (the
+cube's comparison reference) is machine-zero (different barotropic default). Not
+fixed — collaborator's active domain + concurrent-session destructive-reset risk.
 
 ## FAITHFULNESS AUDIT (codex + FV3 oracle, iter ~37)
 Codex adversarial audit of legoESM cube dycore vs FV3 sw_core.F90 c_sw/d_sw.
