@@ -53,14 +53,21 @@ SW cosine_bell/W5/W2 all 4 grids co-located within 1 cell. Test
   phillips eddies smooth, match mpas wavenumber, **no panel-edge imprint**.
   ⇒ ocean cube panel edges verified clean across dynamical cases.
 
-## QUANTITATIVE edge-artifact proof (iter ~35)
-Panel-edge roughness = RMS(2nd-diff in the 1-cell edge band of each face) /
-RMS(interior 2nd-diff), max over i/j, on cube NATIVE (6,n,n) final fields. ~1 =
-edges as smooth as interior (no seam imprint); the scalar-halo BUG gave 25-167×.
-Result (all CLEAN, <2): atm baroclinic v 1.86, rotated_baroclinic v 1.09,
-gravity_wave v 1.33; ocean geostrophic eta 0.06, phillips eta 0.06, speed 1.08.
-⇒ quantitative confirmation (beyond visual) of zero panel-edge imprint across the
-verified atm+ocean dynamical cases.
+## QUANTITATIVE edge-artifact proof (iter ~35, codex-reviewed)
+TWO complementary metrics on cube NATIVE (6,n,n) final fields:
+(A) same-face roughness = RMS(2nd-diff in the 1-cell edge band)/RMS(interior
+2nd-diff). Catches grid-scale seam noise; the scalar-halo BUG gave 25-167×.
+Result <2 (CLEAN): atm baroclinic v 1.86, rotated_baroclinic v 1.09,
+gravity_wave v 1.33; ocean geostrophic/phillips eta 0.06, speed 1.08.
+(B) TRUE cross-face continuity (codex flagged (A) alone can't see cross-panel
+jumps) = RMS(edge cell − physical neighbor on adjacent face via halo)/RMS(interior
+neighbor diff). SCALARS + geographic wind components (basis-continuous across
+seams): p_s 1.30/1.81, T_3d 1.60, eta 0.50/0.57, SST 1.01/1.33, wind u/v/speed
+0.5–2.3. All CONTINUOUS (≤2.3×). [Note: applying `pad_halo_vector` (face-local
+rotation) to the saved GEOGRAPHIC east/north winds fabricated a spurious 65× —
+analysis bug, corrected; geographic components are seam-continuous scalars.]
+⇒ both metrics confirm **no panel-seam artifact** (scalars continuous, winds
+continuous, edges smooth) across the verified atm+ocean dynamical cases.
 
 ## Regression health (iter ~34)
 44/44 PASS: test_vector_cc_to_dgrid_wind_lift, test_latlon_regrid_alignment,
