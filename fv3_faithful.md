@@ -148,3 +148,21 @@ ifying the vertex KE and re-measuring.  FB-residual candidates ruled out: dissip
 wind-halo(83), corner-vort metric halo(94), corner-vort circulation halo(107).  NEW suspect: vertex KE
 (`_ke_upwind`).  The FB residual remains a deep, slowly-narrowing structural mode — genuine SW
 faithfulness gap, needs continued isolation or a dedicated debugging budget.
+
+
+## iter108b — META: FB residual is a GROWTH-RATE eigenmode → single-step probes are at their limit
+iter79 already established the FB residual is a GROWTH-RATE mode (not a t=0 single-step amplitude:
+duogrid has LARGER t=0 dh yet SLOWER growth). So the iter94/107/108 single-step probes (metric halo,
+circulation halo, c_sw increment decomposition) can RULE OUT candidates (6 ruled out) but
+fundamentally CANNOT pinpoint a growth mode — the iter108 "KE-grad 9.7× edge" lead is a single-step
+artifact, not necessarily the growth driver.  The genuine isolation needs EIGEN-ANALYSIS of the
+linearized FB step (power-iterate the FB step on a perturbation about steady W2 → the dominant growing
+eigenvector localizes the unstable coupling).  That is the proper deep-debug method, flagged since
+iter79, and is a dedicated focused effort (not an autonomous-loop single-step probe; my context is
+also very large now — fresh-context eigen-analysis would be more effective).
+CONSOLIDATED FB STATE: vertex-localized growth-rate eigenmode in the FB c_sw→d_sw scheme; 6 single-step
+candidates ruled out (dissipation, Phase4, wind-halo, corner-vort metric+circulation halos);
+not-yet-tested via the RIGHT method (eigen-analysis): the c_sw→d_sw corner coupling / vorticity-flux /
+KE / d_sw zeta as a COUPLED growing mode.  The cube is comprehensively faithful otherwise (atm SW,
+3D PGF f64, ocean dynamics all ≈ MPAS/latlon; area_corner FV3-faithful).  The FB→production upgrade
+(the eigenmode fix) needs the eigen-analysis + a dedicated validation budget.
