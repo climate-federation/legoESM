@@ -20,6 +20,17 @@ finite flag +S,v; `load_core2_nyf(allow_synthetic=False)`; `_idx_t` floor (−3h
 phase). **CORRECTED run 8127491 launched** (fixed pipeline) → corrected day-10 vs
 buggy day-10 (0.968) quantifies the IC-bug impact + decides the 3mo (8124320, still
 buggy IC) restart. Memory: [[omip-pipeline-coordinate-bugs]].
+**OUTCOME (iter 17): the corrected WOA-init BLOWS UP the cold-start** (day 0.25–1)
+while the buggy run was stable — the wrong-longitude bug accidentally ZONALIZED
+(smoothed) the IC into the stable regime; the correct IC has the real curvilinear
+fronts that trigger the deep rough-WOA-IC instability (dt-independent; needs the
+NEMO RK3+EVD structural stack, NOT config). No quick fix: woa-smooth8 (day 0.25),
+no-balanced-ssh (day 0.25), no-smooth (day 1) all blow up. **HONEST LANDING:
+snapshots use correct coords + the IC-lon error washes out by day 10 (forcing-
+dominated) → the buggy-IC SST corr 0.968 / RMSE 2.76 is a FAIR caveated result
+(the ¼° model reproduces NEMO's SST pattern). The WOA-init fix is kept (correct in
+principle, matters for the early transient + Arctic); a stable run on the FULLY
+correct IC is documented open cold-start work, not closable by config.**
 
 ## BREAKTHROUGH (iter 16+ — read this FIRST)
 **The "not faithful" verdict was largely a SCORER BUG.** `compare_omip_nemo._load_legoesm`
