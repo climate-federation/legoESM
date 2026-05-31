@@ -99,8 +99,14 @@ Production uses RK3 Arakawa-Lamb (works). `fv3_fb_sw_step` / `FV3FBShallowWaterM
   fv_grid_tools.F90:1042-1066) instead of the diagonal-interior 4-quadrant copy (~33% too large).
   REGRESSION-SAFE: production cube SW 4/4 PASS, W2 L2=1.76e-4 UNCHANGED (8 vertices negligible in
   the global L2), W5/W6 mass ~1e-16. Shared metric ⇒ affects production + FB. C96 W5 eigenmode
-  payoff test RUNNING (was 26/32/33/40/80 blow-up); bug 1 (_corner_vorticity edge-mode metric,
-  FB-only) still pending.
+  payoff test INCONCLUSIVE; bug 1 (_corner_vorticity edge-mode
+  metric, FB-only) still pending.
+  iter85b — fix SAFE at C96: W2 C96+fix stable (max|u_d|=38.6 all 3 days, ss-err 4.7e-5/1.4e-4/
+  2.4e-4 — even lower than C36). The W5 C96 eigenmode test was MIS-CONFIGURED (day1=339 vs recorded
+  26 — broken/unbalanced W5 mountain IC, NOT the fix; W2 C96 with the same model/config/dt is
+  perfectly stable). ⇒ eigenmode payoff UNRESOLVED; need the matrix runner's balanced W5 C96 IC +
+  ~6 days to compare vs the recorded 26/32/33/40/80. The fix is FV3-faithful + regression-safe
+  (W2 C36 & C96, mass conserved) regardless — KEEP.
 
 ## gnomonic_ed GRID (FV3 operational gt=0; iter62-78) — WIRED + clean + codex-approved
 create defaulted to EQUIANGULAR (gt=2, aspect 1.40); FV3 uses gnomonic_ed (gt=0, aspect 1.06, dx √2)
