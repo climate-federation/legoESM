@@ -8090,9 +8090,16 @@ class TestCornerVorticityFortranFormula(unittest.TestCase):
             jnp.asarray(uc), jnp.asarray(vc), cdgrid, use_duogrid=True))
 
         # Iter-916b gold fingerprints (post-iter-836 production).
+        # Re-pinned iter89/iter90 (FV3-faithful area_corner): `_corner_vorticity`
+        # is `f_corner + rarea_c*vort`, so ONLY the cube boundary/vertex corners
+        # (whose area changed: edges ×2, vertices ×3) shift.  The interior
+        # ([3,4,4]) and the extrema (min/max, at interior corners) are BYTE-
+        # IDENTICAL — confirming the area fix is a purely boundary-local change
+        # here (no spurious interior effect).  The sum and the two vertex samples
+        # [0,0,0] (SW) / [5,8,8] (NE) move by the boundary rarea_c change.
         self.assertEqual(vort_abs.shape, (6, 9, 9))
         self.assertAlmostEqual(float(vort_abs.sum()),
-            -2.785074425912422e-06, places=14,
+            -4.1217444318470005e-06, places=14,
             msg=f"duogrid vort_abs.sum() drifted: {float(vort_abs.sum()):.6e}")
         self.assertAlmostEqual(float(vort_abs.min()),
             -0.00014810834183147395, places=12,
@@ -8101,13 +8108,13 @@ class TestCornerVorticityFortranFormula(unittest.TestCase):
             0.00014395187913355967, places=12,
             msg=f"duogrid vort_abs.max() drifted: {float(vort_abs.max()):.6e}")
         self.assertAlmostEqual(float(vort_abs[0, 0, 0]),
-            -8.479464389985785e-05, places=12,
+            -8.50231298536604e-05, places=12,
             msg=f"duogrid vort_abs[0,0,0] drifted: {float(vort_abs[0,0,0]):.6e}")
         self.assertAlmostEqual(float(vort_abs[3, 4, 4]),
             -2.2152548776918704e-06, places=14,
             msg=f"duogrid vort_abs[3,4,4] drifted: {float(vort_abs[3,4,4]):.6e}")
         self.assertAlmostEqual(float(vort_abs[5, 8, 8]),
-            -8.417284419787868e-05, places=12,
+            -8.41621021580045e-05, places=12,
             msg=f"duogrid vort_abs[5,8,8] drifted: {float(vort_abs[5,8,8]):.6e}")
 
     def test_corner_vorticity_duogrid_skips_corner_additions_iter638(self):
@@ -11472,11 +11479,16 @@ class TestInterpCenterToCornerOrderIter707(unittest.TestCase):
                 float(actual), expected, delta=ref * 1e-6,
                 msg=f"adaptive Smag {name} fingerprint changed "
                     f"beyond rtol=1e-6 of its scale (real scheme change?).")
+        # Re-pinned iter89/iter90 (FV3-faithful area_corner): the smaller, FV3-
+        # correct cube-vertex area (3*get_area) lowers the global da_min_c that
+        # scales BOTH the del-2 (dddmp) and del-4 (d4_bg) damping, so these
+        # adaptive-Smag fingerprints shift (ke[0,4,4] 93983.0 → 49013.5).  See
+        # the nord=0 del-2 gold-file docstring for the da_min_c mechanism.
         l2 = float((ke ** 2).sum()) ** 0.5
-        _rel(ke[0, 4, 4], 93983.00383117038, "ke[0,4,4]")
-        _rel(ke[3, 2, 6], 137334.72628142763, "ke[3,2,6]")
-        _rel(ke.sum(), -15962.03511603897, "ke.sum()", scale=l2)
-        _rel((ke ** 2).sum(), 11366256403441.21, "ke L2²")
+        _rel(ke[0, 4, 4], 49013.538501232724, "ke[0,4,4]")
+        _rel(ke[3, 2, 6], 71622.11135411877, "ke[3,2,6]")
+        _rel(ke.sum(), -3858.56053366139, "ke.sum()", scale=l2)
+        _rel((ke ** 2).sum(), 3092196932490.258, "ke L2²")
 
     def test_interp_center_to_corner_is_4point_average(self):
         """Verify Python's _interp_center_to_corner returns the
@@ -11857,7 +11869,17 @@ class TestDSw5CornerDivergenceGoldFileIter702(unittest.TestCase):
         return cdgrid, u_d, v_d, ua, va
 
     def test_nord0_del2_damping_gold_file(self):
-        """nord=0 (del-2 damping): fingerprints recorded on CPU x64."""
+        """nord=0 (del-2 damping): fingerprints recorded on CPU x64.
+
+        Re-pinned iter89/iter90 (FV3-faithful area_corner): the divergence
+        damping coefficient is `damp = da_min_c * max(d2_bg, ...)` and
+        `da_min_c = min(1/rarea_c)` is the GLOBAL minimum corner area.  Once the
+        cube vertices carry their true FV3 3-face-junction area (3*get_area,
+        ≈0.67× interior) instead of the iter-670 interior-copy, da_min_c drops to
+        the (smaller, correct) vertex area, so the global damp weakens and the
+        whole ke field shifts — e.g. ke[0,4,4] -5634.7 → -4069.2.  This matches
+        FV3's `global_mx_c(area_c)` (fv_grid_utils.F90:743).
+        """
         import numpy as np
         from legoesm.core.fv3_sw_core import _d_sw5_corner_divergence
 
@@ -11866,13 +11888,13 @@ class TestDSw5CornerDivergenceGoldFileIter702(unittest.TestCase):
             u_d, v_d, ua, va, cdgrid, dt=0.1,
             d2_bg=0.01, dddmp=0.2, d4_bg=0.0, nord=0))
         self.assertEqual(ke.shape, (6, 9, 9))
-        self.assertAlmostEqual(float(ke[0, 4, 4]), -5634.741066188088,
+        self.assertAlmostEqual(float(ke[0, 4, 4]), -4069.1838407732866,
             places=6, msg="nord=0 ke[0,4,4] fingerprint changed.")
-        self.assertAlmostEqual(float(ke[3, 2, 6]), 11590.35168441207,
+        self.assertAlmostEqual(float(ke[3, 2, 6]), 8370.086793534787,
             places=6, msg="nord=0 ke[3,2,6] fingerprint changed.")
-        self.assertAlmostEqual(float(ke.sum()), -52259.08051452633,
+        self.assertAlmostEqual(float(ke.sum()), -34165.92577958369,
             places=4, msg="nord=0 ke.sum() fingerprint changed.")
-        self.assertAlmostEqual(float((ke ** 2).sum()), 183580121358.84125,
+        self.assertAlmostEqual(float((ke ** 2).sum()), 100798232467.36038,
             places=-2, msg="nord=0 ke L2² fingerprint changed.")
 
     def test_nord1_del4_damping_gold_file(self):
@@ -11882,6 +11904,12 @@ class TestDSw5CornerDivergenceGoldFileIter702(unittest.TestCase):
         (sw_core.F90:1725-1821) including `_divergence_corner_duo`
         (iter-655 pad_halo wiring) + metric-weighted composite damping.
         A regression in ANY of these stages shifts the fingerprints.
+
+        Re-pinned iter89/iter90 (FV3-faithful area_corner): del-4 damping scales
+        as `(da_min_c*d4_bg)**(nord+1)` (sw_core.F90:1811), so the smaller, FV3-
+        correct vertex area (3*get_area) lowers the global da_min_c and weakens
+        the del-4 damping — ke[0,4,4] -73741.2 → -38457.1.  See the nord=0 test
+        docstring for the da_min_c mechanism.
         """
         import numpy as np
         from legoesm.core.fv3_sw_core import _d_sw5_corner_divergence
@@ -11891,13 +11919,13 @@ class TestDSw5CornerDivergenceGoldFileIter702(unittest.TestCase):
             u_d, v_d, ua, va, cdgrid, dt=0.1,
             d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1))
         self.assertEqual(ke.shape, (6, 9, 9))
-        self.assertAlmostEqual(float(ke[0, 4, 4]), -73741.18999227723,
+        self.assertAlmostEqual(float(ke[0, 4, 4]), -38457.129727216074,
             places=6, msg="nord=1 ke[0,4,4] fingerprint changed.")
-        self.assertAlmostEqual(float(ke[3, 2, 6]), 136135.2527804066,
+        self.assertAlmostEqual(float(ke[3, 2, 6]), 70996.56348333597,
             places=6, msg="nord=1 ke[3,2,6] fingerprint changed.")
-        self.assertAlmostEqual(float(ke.sum()), 18038.82445212739,
+        self.assertAlmostEqual(float(ke.sum()), 5592.254861923979,
             places=4, msg="nord=1 ke.sum() fingerprint changed.")
-        self.assertAlmostEqual(float((ke ** 2).sum()), 7855642704496.756,
+        self.assertAlmostEqual(float((ke ** 2).sum()), 2137431580001.7354,
             places=-4, msg="nord=1 ke L2² fingerprint changed.")
 
     def test_reacts_to_input_changes(self):
