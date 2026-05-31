@@ -65,7 +65,12 @@ Production uses RK3 Arakawa-Lamb (works). `fv3_fb_sw_step` / `FV3FBShallowWaterM
   `_interp_center_to_corner_a2b_ord4`) IS duogrid-aware (passes `duogrid=dg`), so the Phase4 corner
   geopotential uses the cross-face halo, consistent with the rest. Residual narrowed to the duogrid
   `_corner_vorticity` dxc/dyc edge-mode METRIC halo (O(dx), authors judged minor) or the d2a2c
-  duogrid path / c_sw coupling subtlety — a deep eigen-analysis task, not a single-iter fix.
+  duogrid path / c_sw coupling subtlety — a deep eigen-analysis task, not a single-iter fix. iter82: DISSIPATION RULED OUT as the residual fix — FB+Phase4+duogrid W2 C36 dissipation sweep:
+  FV3-default day2-NaN; 2× del4+Smag NaN@16 (WORSE — heavy del4 hits its own explicit-stability
+  limit at dt=300); nord=2 del6 no help. More dissipation = worse, both before & after Phase4+
+  duogrid. ⇒ the residual is a STRUCTURAL corner coupling/metric bug (vertex-seeded growth mode),
+  NOT a tunable grid-scale dissipation mode. Remaining candidate = the duogrid `_corner_vorticity`
+  metric halo / d2a2c-duogrid / c_sw corner coupling — a deep structural fix vs the oracle.
 
 ## gnomonic_ed GRID (FV3 operational gt=0; iter62-78) — WIRED + clean + codex-approved
 create defaulted to EQUIANGULAR (gt=2, aspect 1.40); FV3 uses gnomonic_ed (gt=0, aspect 1.06, dx √2)
