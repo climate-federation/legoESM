@@ -585,16 +585,22 @@ def create_cubed_sphere_cdgrid(
     area_c_sg, dxc_sg, dyc_sg, dxa_sg, dya_sg = _compute_supergrid_metrics(
         n, _sg_lon, _sg_lat, radius)
 
-    # Cell corner positions (gnomonic grid edges: n+1 per side)
-    alpha_edges = jnp.linspace(-jnp.pi / 4, jnp.pi / 4, n + 1)
-    ax_e, ay_e = jnp.meshgrid(alpha_edges, alpha_edges, indexing='ij')
+    # Cell corner positions (gnomonic grid edges: n+1 per side).  Built as a
+    # precomputed (6, n+1, n+1) grid so the corner-derived metrics are
+    # grid-type-agnostic (iter71 refactor; equiangular via linspace+map here,
+    # gnomonic_ed via the remapped native grid once all cdgrid sites are ed).
+    _alpha_edges = jnp.linspace(-jnp.pi / 4, jnp.pi / 4, n + 1)
+    _ax_e, _ay_e = jnp.meshgrid(_alpha_edges, _alpha_edges, indexing='ij')
+    _cg = [_face_gnomonic_to_lonlat(f, _ax_e, _ay_e) for f in range(6)]
+    corner_lon = jnp.stack([c[0] for c in _cg])
+    corner_lat = jnp.stack([c[1] for c in _cg])
 
     all_lon_c, all_lat_c = [], []
     all_angle_c = []
     all_dx_ey, all_dy_ex = [], []
 
     for face in range(6):
-        lon_c, lat_c = _face_gnomonic_to_lonlat(face, ax_e, ay_e)
+        lon_c, lat_c = corner_lon[face], corner_lat[face]
         all_lon_c.append(lon_c)
         all_lat_c.append(lat_c)
 
