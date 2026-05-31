@@ -60,8 +60,22 @@ residual) is the tiny discretization residual, invisible to L2/mass. Baroclinic 
 - [DONE iter58] TRUE cross-face metric committed: `compute_cross_face_continuity`
   (halo.py) + `tests/grids/test_cross_face_continuity_metric.py` (3/3: smooth field
   <3×, injected seam jump >10×, 3D/4D shapes). Supersedes the unreliable same-face one.
-- STILL MISSING: visual PNG inspection (human); W2/W5 higher-res sweep (C48/C96 —
-  confirm continuity holds with resolution).
+- [DONE iter59] C36/C48/C96 cross-face continuity sweep (5-day, my new metric):
+  W2 FLAT across res (u 1.57→1.56→1.55, height 1.62→1.60→1.61) — CONTINUOUS, no
+  res-growth. **But W5 (mountain flow) FOUND a real C96 EDGE EIGENMODE:** max|wind|
+  tracks C36/C48 (~38 m/s) until day 3.5 then BLOWS UP 38→51→78.9→62 (days 4-5),
+  edge-localized (face0 peak 78.9 at (14,94)=edge, face4 76.8 at corner); wind_speed
+  cross-seam ratio 1.58(C36)→3.07(C96). C36/C48 stay flat → genuine C96-only cube
+  edge eigenmode (matches the runner's documented iter-65/69/79 "C96 eigenmode" that
+  dt-tuning has been chasing — dt=150 NaNs day15, dt=100 NaNs day22.5).
+  **Per user directive (FV3 oracle, NO improvising): do NOT band-aid with dt/damping
+  tuning.** Root cause traces to the oracle-identified non-faithful pieces: equiangular
+  grid (worse corner distortion vs FV3 gnomonic_ed √2), orthogonal seam rotation (drops
+  FV3 sin_sg(5)), single-stage RK3 + non-FV3 del2/del4+dddmp damping (FV3's divergence
+  damping is tuned to kill these grid-scale edge modes). Faithful fix = foundational
+  FV3 work, NOT dt hacks. [oracle damping comparison = next]
+- STILL MISSING: visual PNG inspection (human); FV3-oracle SW damping comparison
+  (nord/d2_bg/d4_bg/dddmp) to ground the C96 eigenmode root-cause.
 
 ## VERIFICATION
 - SW 16/16 all grids, aligned within 1 cell. Full fast cube atm dynamical suite
