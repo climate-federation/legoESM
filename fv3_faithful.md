@@ -127,20 +127,22 @@ preservation violation at the ed corner (A-grid `grid.area` from `_compute_exact
 vs cdgrid face-lengths dxc/dyc don't close the divergence stencil); (2) the FV3Edge SW-core
 3-face-junction corner special-casing (sw/se/nw/ne_corner) calibrated for equiangular's specific
 corner angle, not ed's.
-FREESTREAM TEST (iter74, h≡const + solid-body U, analytic div(U)=0): BOTH grids stagnate
-(eq 0.82, ed 3.10 |dh|max, resolution-independent) — so the hand-rolled IC wind
-(`u_d = cos_angle_edge_x·u0·cos(lat_edge_x)`) is itself NOT discretely divergence-free (ed ~4×
-worse than eq). The freestream test is thus CONTAMINATED by the IC projection and does NOT
-cleanly isolate the metric. KEY signal still stands: full-W2 eq CONVERGES (0.039) while ed
-STAGNATES (1.79), and ed's IC is 4× more divergent ⇒ EITHER (a) the hand-rolled IC projection is
-ed-inconsistent (a HARNESS artifact — the edge-angle→D-grid covariant projection is only
-approximate and the approximation is grid-specific), OR (b) the ed edge-angle metrics
-(cos_angle_edge_x/sin_angle_edge_y from corner_ext) are inconsistent with the ed flux-divergence
-metrics (dxc/dyc/sin_sg from supergrid) — a real model bug. DISENTANGLE NEXT ITER: drive ed W2
-with the MODEL's canonical W2 init (not the hand-rolled projection), or construct a provably
-discrete-divergence-free ed IC; only if the error persists with a clean IC is it a model-metric
-bug. Also: pure-geometry metric-identity test (face-length closure, no IC) + FV3 oracle corner
-treatment.
+DISENTANGLED (iter74) — it is a REAL MODEL bug, not the harness: the IC projection
+`u_d=cos_angle_edge_x·u0·cos(lat_edge_x)` IS the canonical one (verbatim in the production W2
+runner run_w2_w5_cosine_bell_iter1030.py:77). RULED OUT as the cause: area (ed grid.area matches
+spherical-excess of corners to 5.5e-8, corner cell 1.3e-8), edge-angle metrics (lat_edge_x/
+angle_edge_x computed from EXACT in-domain corner geometry, no halo dependence), grid
+construction (clean, codex-approved), A-grid/cdgrid mismatch (bit-identical). Freestream (h≡const)
+shows BOTH grids have O(1) velocity-flux divergence (eq 0.82, ed 3.10) — eq's full-W2 cancels it
+to 0.039 via the h-flux term (discrete steady balance holds) but ed only to 1.79 (balance fails).
+PARADOX: ed is MORE uniform (aspect 1.06 vs eq 1.40) yet does WORSE ⇒ not cell distortion.
+NARROWED ROOT: the C-grid CONTRAVARIANT TRANSFORM consistency — the IC/wind uses the edge-tangent
+angle (cos_angle_edge, i-tangent→east) but the flux divergence transforms covariant→contravariant
+via cosa_u/sina_u/rsin (from sin_sg sub-grid angles); these two angle systems must be mutually
+consistent for the discrete W2 balance to cancel. Consistent for eq's separable parametric map,
+apparently NOT for ed. STRATEGIC: this + the C96 W5 eigenmode BOTH converge on SW-CORE
+FAITHFULNESS (FV3 c_sw/d_sw flux treatment) — the next big faithful effort. NEXT: test cos_angle_
+edge vs sin_sg-derived edge angle consistency on ed; or pivot to the FB chain (the convergent root).
 **(prior scoping, now DONE) the CDGRID layer:** dynamics consume
 `create_cubed_sphere_cdgrid(base)`, which REBUILDS its own equiangular C/D supergrid
 (`_compute_supergrid_metrics(n, _face_gnomonic_to_lonlat,…)` + `linspace` α at cubed_sphere_
