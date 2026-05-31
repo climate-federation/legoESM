@@ -74,6 +74,11 @@ seams, must use mirror construction):**
   REAL N/S flip, in equiangular too; within 0.076 rad of equiangular). Tests 5/5.
 - ✅ `_compute_exact_cell_areas_ed` (FV3 get_area on remapped corners; total 4πR² exact,
   face-indep; area max/min 2.27 = √2-edge geometry, aspect still 1.06).
+- CODEX-REVIEWED (iter67, base 2b17eda7^): the 6 builders (construct/remap/centers/half-
+  metrics/angle/area) found SOUND (no bug; codex ran the tests). Sole finding (high) =
+  exactly the scoped gap: must NOT gate gnomonic="ed" until `compute_halo_interp_offsets_ed`
+  exists (else halo interpolates at equiangular fractional positions = wrong seam geometry)
+  + a test exercising the actual `grid.halo_interp_offsets` path (not just nearest pad_halo).
 - ⏳ REMAINING: `compute_halo_interp_offsets_ed` (h1/2/3) — grid-distribution-dependent
   (the cross-face fractional-index correction; needs the INVERSE gnomonic_ed index map,
   intricate) → gate `create_cubed_sphere(gnomonic="ed")` assembling all CubedSphereGrid
