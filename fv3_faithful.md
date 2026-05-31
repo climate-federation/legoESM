@@ -79,11 +79,19 @@ seams, must use mirror construction):**
   exactly the scoped gap: must NOT gate gnomonic="ed" until `compute_halo_interp_offsets_ed`
   exists (else halo interpolates at equiangular fractional positions = wrong seam geometry)
   + a test exercising the actual `grid.halo_interp_offsets` path (not just nearest pad_halo).
-- ⏳ REMAINING: `compute_halo_interp_offsets_ed` (h1/2/3) — grid-distribution-dependent
-  (the cross-face fractional-index correction; needs the INVERSE gnomonic_ed index map,
-  intricate) → gate `create_cubed_sphere(gnomonic="ed")` assembling all CubedSphereGrid
-  fields → validate (build, √2, dynamical suite) → re-calibrate damping → run W5 C96 to
-  test the eigenmode fix. Most metric bricks done; halo-offsets + gate + validate remain.
+- ⏳ REMAINING: `compute_halo_interp_offsets_ed` (h1/2/3). Approach: reuse equiangular
+  CONNECTIVITY + `_face_to_xyz_np`/`_xyz_to_gnomonic_np` (pass gnomonic_ed angles since
+  tan(arctan(coord))=coord) with `frac=interp(neighbor_angle, alpha_ed, range(n))`. The
+  gnomonic_ed gnomonic-angle distribution `alpha_ed` is i↔j-symmetric, spans [-π/4,π/4],
+  spacing ratio ~1.31 (in-domain extraction validated, matches corners 2.6e-4). BUG found
+  (iter67, verify-first): extracting the angle via construct→mirror→remap→arctan2(y,x)
+  SATURATES the halo cells at ±π/4 (the mirror wraps them cross-face) instead of the
+  same-face extension BEYOND ±π/4 that the offset's across-edge halo position needs. (The
+  angle BUILDER is unaffected — it uses centered differences, robust to this.) ⇒ correct
+  approach = the DIRECT 1D cube-coord projection (gnomonic_ed edge great circle extended,
+  cube_coord beyond ±1 → arctan > π/4) OR position-matching against the neighbor's actual
+  cells. This is codex's flagged silent-corruption-risk piece — get it right, don't rush.
+  Then gate `create_cubed_sphere(gnomonic="ed")` + validate + re-calibrate + W5 C96 test.
 
 ## VERIFICATION
 - SW 16/16 all grids ≤1 cell. Full fast cube atm dynamical suite PASS + NH dcmip_tc1, mass
