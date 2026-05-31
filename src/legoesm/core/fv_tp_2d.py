@@ -502,7 +502,16 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
         dm_c = dm[:, 1:n + 3, :]
         bl, br = apply_hord8_limiter(bl, br, dm_c)
     elif hord == 9:
-        bl, br = _pert_ppm(bl, br)
+        # FV3 iord=9 → pert_ppm(iv=0) for the SCALAR/mass/vorticity transport
+        # (tp_core.F90:610: `if(iord==9 .or. iord==13) call pert_ppm(...,0)`).
+        # iv=1 (`_pert_ppm`) is FV3's BOUNDARY-only limiter (tp_core.F90:629,
+        # 648) + the MOMENTUM ytp_v/xtp_u path (handled separately in
+        # fv3_sw_core `_ppm_transport_1d`).  This `_ppm_1d` is the scalar
+        # path, so hord=9 must use iv=0 — matching the `_pert_ppm_iv0`
+        # docstring ("the limiter used by hord=9") and the hord=12 default.
+        # (Was `_pert_ppm` (iv=1): a latent mislabel; unexercised because the
+        # live scalar callers use the hord=12 default — codex/oracle iter62.)
+        bl, br = _pert_ppm_iv0(q_c, bl, br)
     elif hord == 10:
         dm_c = dm[:, 1:n + 3, :]
         bl, br = apply_hord10_limiter(bl, br, dm_c, q_c)
