@@ -59,6 +59,21 @@ class EKEConfig(NamedTuple):
     # prognostic GM coefficient (K_iso = K_gm) instead of the constant kappa_Redi —
     # Veros's ``enable_eke_isopycnal_diffusion`` (default False; Veros ACC = True).
     isopycnal_diffusion: bool = False
+    # When True, the eddy-energy field ``E`` is 3-D (depth-resolved, on the interior
+    # interfaces / W-grid) and its budget uses the depth-resolved source/sink, the
+    # implicit vertical EKE diffusion, and the per-level horizontal transport (the
+    # ``eke_3d_*`` functions) — matching Veros's 3-D ``vs.eke`` on the W-grid. When
+    # False (default) the 2-D depth-integrated closure (``eke_local_tendency`` etc.)
+    # is used, bit-identically to the pre-3-D path. The model step (a later build
+    # stage) flips this on for the ACC recipe; the closure functions are selected by
+    # the static Python bool, never traced.
+    eke_3d: bool = False
+    # Vertical-EKE-diffusion factor: the implicit vertical diffusion of ``E`` uses
+    # ``K = alpha_eke · A_v`` where ``A_v`` is the vertical viscosity at the W-grid
+    # interfaces. Matches Veros ``settings.alpha_eke`` ("factor vertical friction",
+    # default 1.0 in veros/settings.py; the ACC setup leaves it at the 1.0 default).
+    # Only used by the 3-D path (``eke_3d_vertical_diffusion``).
+    alpha_eke: float = 1.0
 
 
 def eke_mixing_length(L_rossby: jnp.ndarray, cfg: EKEConfig) -> jnp.ndarray:
@@ -166,6 +181,39 @@ def eke_local_tendency(
     return production - dissipation
 
 
+def eke_3d_local_tendency(
+    E: jnp.ndarray, sigma: jnp.ndarray, L: jnp.ndarray, cfg: EKEConfig,
+) -> jnp.ndarray:
+    """Depth-resolved EKE source minus sink ``P(z) - eps(z)`` [m^2/s^3] at the
+    interior interfaces (the 3-D ``eke_3d=True`` path; Veros W-grid).
+
+    Identical functional form to the 2-D :func:`eke_local_tendency` — and delegated
+    to it, since that function is shape-agnostic — but the inputs are 3-D fields on
+    the interior interfaces:
+
+    - ``P(z) = kappa_GM(z)·sigma(z)^2`` with ``kappa_GM(z) = c_k·L(z)·√E(z)`` (the
+      GM mean-APE -> EKE conversion at each depth, using the LOCAL Eady growth
+      ``sigma(z) = N(z)|S(z)|`` rather than its depth average);
+    - ``eps(z) = c_eps·E(z)^{3/2}/L(z)`` (Eden-Greatbatch dissipation).
+
+    All from the Stage-1 ``compute_eke_kappa_gm(depth_resolved=True)`` outputs
+    ``(kappa_GM(z), sigma(z), L(z))``. The positivity regularisation (``E`` floored
+    at 0 before the sqrt; ``L`` floored at ``l_min`` in the dissipation denominator)
+    is exactly that of the 2-D closure. Vertical diffusion, horizontal advection and
+    lateral diffusion of ``E`` are applied separately
+    (:func:`eke_3d_vertical_diffusion`, :func:`eke_3d_horizontal_transport`), so this
+    returns ONLY the local source/sink.
+
+    Parameters
+    ----------
+    E : array (n_lat, n_lon, nlev-1) — eddy kinetic energy at interior interfaces.
+    sigma : array (n_lat, n_lon, nlev-1) — LOCAL Eady growth rate N(z)|S(z)| [1/s].
+    L : array (n_lat, n_lon, nlev-1) — depth-resolved mixing length [m].
+    cfg : EKEConfig.
+    """
+    return eke_local_tendency(E, sigma, L, cfg)
+
+
 def eke_apply_local_source(
     E: jnp.ndarray, sigma: jnp.ndarray, L: jnp.ndarray, cfg: EKEConfig, dt: float,
 ) -> jnp.ndarray:
@@ -215,6 +263,8 @@ def validate_eke_config(cfg: EKEConfig) -> None:
         raise ValueError(f"EKEConfig.eke_cross must be > 0, got {cfg.eke_cross!r}")
     if cfg.eke_crhin <= 0.0:
         raise ValueError(f"EKEConfig.eke_crhin must be > 0, got {cfg.eke_crhin!r}")
+    if cfg.alpha_eke < 0.0:
+        raise ValueError(f"EKEConfig.alpha_eke must be >= 0, got {cfg.alpha_eke!r}")
 
 
 __all__ = [
@@ -225,6 +275,7 @@ __all__ = [
     "eke_len_composite",
     "eke_kappa_gm",
     "eke_local_tendency",
+    "eke_3d_local_tendency",
     "eke_apply_local_source",
     "validate_eke_config",
 ]

@@ -973,6 +973,99 @@ def eke_horizontal_transport(E, U_bar, V_bar, grid, eke_cfg, mask, u_mask, v_mas
     return (adv + diff) * mask
 
 
+def eke_3d_horizontal_transport(E, U, V, grid, eke_cfg, mask, u_mask, v_mask):
+    """Conservative 3-D EKE transport tendency [m^2/s^3] at the interior interfaces
+    (the ``eke_3d=True`` path): flux-form advection of the eddy-energy field ``E``
+    by the flow at EACH interface level (upwind) + per-level lateral diffusion
+    (``k_iso``). Returns ``dE/dt|transport`` with shape ``(n_lat, n_lon, nlev-1)``.
+
+    This is the depth-resolved generalisation of the 2-D
+    :func:`eke_horizontal_transport`: ``E`` is advected by the LOCAL flow ``u(z),
+    v(z)`` at each interface (Veros advects ``vs.eke`` by the W-grid velocities),
+    NOT by the depth-mean flow. The conservative flux-form, upwind face values,
+    and the reuse of ``divergence_cgrid`` (3-D-native) + ``laplacian_cgrid``
+    (3-D-native, per level) are identical to the 2-D path — only the arrays carry an
+    extra level axis, so the per-level numerics are bit-identical to the 2-D scheme
+    at each level and no numerics are duplicated.
+
+    Conservation: at every interface level the advective flux divergence telescopes
+    (periodic in lon; v-flux = 0 at the N/S walls) and the lateral diffusion is
+    flux-form (div of grad, no-flux walls), so the volume-integral
+    ``Σ E·area·dz`` is conserved by construction (each level's area-integral is).
+
+    NOTE (parity with Veros): Veros uses ``max(500, K_gm)·∇E`` for the lateral
+    diffusivity of EKE (``veros/core/eke.py:173,183``); legoESM keeps the validated
+    2-D path's constant ``eke_cfg.k_iso·∇E`` here for continuity (a depth-/flow-
+    independent lateral diffusivity). The W-grid VERTICAL advection of E (Veros's
+    ``adv_flux_top`` / ``flux_top`` Adams-Bashforth term) is NOT included here — see
+    the module/stage notes; it is a documented known omission (the dominant 3-D
+    effects — depth-resolved source/sink, implicit vertical diffusion, and per-level
+    horizontal advection + lateral diffusion — are all present).
+
+    Parameters
+    ----------
+    E : (n_lat, n_lon, nlev-1) eddy kinetic energy at interior interfaces.
+    U : (n_lat, n_lon+1, nlev-1) zonal velocity at u-faces, per interface level.
+    V : (n_lat+1, n_lon, nlev-1) meridional velocity at v-faces (0 at poles).
+    grid, eke_cfg (k_iso), mask/u_mask/v_mask (2-D; broadcast over levels).
+    """
+    # E upwinded to u-faces by U sign at each level (periodic in lon).
+    E_west = jnp.roll(E, 1, axis=1)                          # E[:, j-1, :]
+    E_uface_core = jnp.where(U[:, :-1, :] > 0.0, E_west, E)   # upwind, (n_lat, n_lon, nlev-1)
+    E_uface = jnp.concatenate([E_uface_core, E_uface_core[:, 0:1, :]], axis=1)
+    # E upwinded to interior v-faces by V sign; poles are walls (V=0).
+    E_vface_int = jnp.where(V[1:-1, :, :] > 0.0, E[:-1, :, :], E[1:, :, :])
+    zero_row = jnp.zeros((1, E.shape[1], E.shape[2]), dtype=E.dtype)
+    E_vface = jnp.concatenate([zero_row, E_vface_int, zero_row], axis=0)
+    # Flux-form advection (conservative); face masks broadcast over the level axis.
+    flux_u = E_uface * U * u_mask[:, :, jnp.newaxis]
+    flux_v = E_vface * V * v_mask[:, :, jnp.newaxis]
+    adv = -divergence_cgrid(flux_u, flux_v, grid)            # 3-D-native
+    # Lateral diffusion (conservative), per level (laplacian_cgrid is 3-D-native).
+    diff = eke_cfg.k_iso * laplacian_cgrid(E, grid, mask=mask)
+    return (adv + diff) * mask[:, :, jnp.newaxis]
+
+
+def eke_3d_vertical_diffusion(E, A_v_profile, dz_w, dz_half_w, dt, eke_cfg):
+    """Backward-Euler implicit vertical diffusion of the 3-D eddy-energy field ``E``
+    (the ``eke_3d=True`` path), with diffusivity ``K = alpha_eke · A_v`` — Veros's
+    ``delta = dt/dzt · 0.5(kappaM[k]+kappaM[k+1]) · alpha_eke`` (``veros/core/eke.py``
+    :134-142), here as a clean reuse of the shared
+    :func:`implicit_vertical_diffusion_ocean` (no duplicate tridiagonal numerics).
+
+    ``E`` lives on the interior interfaces (the W-grid, ``M = nlev-1`` levels), so the
+    implicit diffusion operates over those ``M`` levels with zero-flux BCs at the top
+    and bottom of the W-grid column. The caller (the model step, a later build stage)
+    supplies the W-grid metrics ``dz_w`` (M layer thicknesses) + ``dz_half_w`` (M-1
+    spacings between adjacent W-levels) and the vertical viscosity ``A_v_profile`` at
+    the ``M-1`` interior W-interfaces. ``alpha_eke`` scales it (Veros's vertical-
+    friction factor). Unconditionally stable + AD-safe (the underlying Thomas solve
+    is differentiable).
+
+    NOTE: Veros's EKE dissipation ``c_int = c_eps·√E/eke_len`` is folded into the
+    SAME tridiagonal implicit solve (its ``b_tri`` diagonal). legoESM keeps the
+    validated split treatment: the local source/sink (incl. the semi-implicit
+    dissipation, :func:`legoesm.ocean.physics.lateral_mixing.eke.eke_apply_local_source`)
+    is applied separately by the step; this function applies ONLY the vertical
+    diffusion. The two operator-split sub-steps are each unconditionally stable.
+
+    Parameters
+    ----------
+    E : (..., M) eddy kinetic energy on the W-grid (M = nlev-1 interior interfaces).
+    A_v_profile : (..., M-1) or float — vertical viscosity at the interior W-grid
+        interfaces (>= 0). Scaled by ``alpha_eke``. A scalar/profile is fine.
+    dz_w : (..., M) or (M,) — W-grid layer thicknesses [m].
+    dz_half_w : (..., M-1) or (M-1,) — spacing between adjacent W-levels [m].
+    dt : float — time step [s].
+    eke_cfg : EKEConfig (uses ``alpha_eke``).
+    """
+    from legoesm.ocean.physics.vertical_mixing import (
+        implicit_vertical_diffusion_ocean,
+    )
+    K = eke_cfg.alpha_eke * jnp.asarray(A_v_profile)
+    return implicit_vertical_diffusion_ocean(E, K, dz_w, dz_half_w, dt)
+
+
 def compute_eke_step_kappa(
     T, S, eta, H_bathy, eke, grid, z_coord, cfg, *,
     eos="wright", eos_linear=None, mask=None, rho_0=_RHO_0, g=constants.g,

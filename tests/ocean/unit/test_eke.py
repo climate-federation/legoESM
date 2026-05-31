@@ -20,6 +20,7 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm.ocean.physics.lateral_mixing.eke import (
     EKEConfig,
+    eke_3d_local_tendency,
     eke_deformation_radius,
     eke_kappa_gm,
     eke_len_composite,
@@ -774,3 +775,341 @@ def test_L3_rhines_coupling_differentiable_through_kappa():
     gR = jax.grad(loss_rho)(rho)
     assert jnp.all(jnp.isfinite(gE)) and float(jnp.sum(jnp.abs(gE))) > 0.0
     assert jnp.all(jnp.isfinite(gR)) and float(jnp.sum(jnp.abs(gR))) > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 — 3-D prognostic EKE equation (depth-resolved, on the W-grid /
+# interior interfaces), matching Veros's 3-D vs.eke. The closure functions:
+#   eke_3d_local_tendency      P(z) - eps(z)
+#   eke_3d_vertical_diffusion  implicit K = alpha_eke·A_v (reuse implicit solver)
+#   eke_3d_horizontal_transport per-level flux-form advection + lateral diffusion
+# 2-D path must stay bit-identical (regression below). See gm_redi_latlon_cgrid.
+# ---------------------------------------------------------------------------
+
+
+def test_stage2_config_alpha_eke_and_eke_3d_defaults():
+    """The new EKEConfig fields exist with the Veros-matching / off-by-default
+    values: alpha_eke = 1.0 (Veros settings.alpha_eke; ACC leaves the default),
+    eke_3d = False (the 2-D path is the default)."""
+    cfg = EKEConfig()
+    assert cfg.alpha_eke == 1.0      # Veros settings.py "factor vertical friction"
+    assert cfg.eke_3d is False       # default = 2-D depth-integrated closure
+
+
+def test_stage2_validate_eke_config_rejects_negative_alpha_eke():
+    from legoesm.ocean.physics.lateral_mixing.eke import validate_eke_config
+    validate_eke_config(EKEConfig(alpha_eke=0.0))     # >= 0 ok (0 => no vdiff)
+    validate_eke_config(EKEConfig(alpha_eke=2.5))
+    try:
+        validate_eke_config(EKEConfig(alpha_eke=-1.0))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("alpha_eke < 0 must raise ValueError")
+
+
+def _eke_3d_depth_resolved_inputs(E_val):
+    """Stage-1 depth-resolved (kappa_GM(z), sigma(z), L(z)) at interior interfaces
+    from a stably stratified, baroclinic column — the genuine 3-D source/sink
+    inputs the 3-D path receives. Returns (E3, sigma3, L3, cfg) with E3 a 3-D field
+    at the (nlev-1) interfaces."""
+    from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+        compute_eke_kappa_gm,
+    )
+    from legoesm.ocean.physics.lateral_mixing.config import VisbeckConfig
+    E2, rho, S_x, S_y, z, jac, f = _eke_coupling_inputs(E_val)  # 2-D E (n_lat,n_lon)
+    nlat, nlon = E2.shape
+    M = rho.shape[-1] - 1
+    E3 = jnp.broadcast_to(E2[:, :, None], (nlat, nlon, M)) + 0.0
+    vcfg, ecfg = VisbeckConfig(), EKEConfig(eke_3d=True)
+    kappa3, sigma3, L3 = compute_eke_kappa_gm(
+        E3, rho, S_x, S_y, z, jac, f, vcfg, ecfg, depth_resolved=True)
+    return E3, kappa3, sigma3, L3, ecfg
+
+
+# (a) 3-D source/sink shapes + signs ----------------------------------------
+
+def test_stage2_local_tendency_shape_and_signs():
+    """eke_3d_local_tendency returns (n_lat, n_lon, nlev-1) with P >= 0 and eps >= 0
+    (so the production-only and dissipation-only limits have the right sign), and is
+    bit-identical to the shape-agnostic 2-D eke_local_tendency on the same 3-D
+    inputs (no duplicate numerics)."""
+    E3, kappa3, sigma3, L3, cfg = _eke_3d_depth_resolved_inputs(0.04)
+    # E3 + the LOCAL Eady growth sigma3 carry the full vertical structure
+    # (n_lat, n_lon, nlev-1); the "rossby" mixing length L3 has no genuine depth
+    # dependence, so Stage 1 returns it as (n_lat, n_lon, 1), broadcasting over
+    # levels. kappa3 = c_k·L3·√E3 and the local-tendency output broadcast to the
+    # full 3-D (n_lat, n_lon, nlev-1).
+    assert E3.shape == (4, 6, 4) and sigma3.shape == (4, 6, 4)
+    assert L3.shape == (4, 6, 1) and kappa3.shape == (4, 6, 4)
+    tend = eke_3d_local_tendency(E3, sigma3, L3, cfg)
+    assert tend.shape == (4, 6, 4)
+    assert jnp.all(jnp.isfinite(tend))
+    # Delegates to the validated 2-D closure ⇒ bit-identical.
+    np.testing.assert_array_equal(
+        np.asarray(tend), np.asarray(eke_local_tendency(E3, sigma3, L3, cfg)))
+    # At E=0: eps=0 (E^{3/2}=0) and kappa=c_k·L·√(0+1e-30) ≈ c_k·L·1e-15, so the
+    # production P=kappa·sigma^2 is bounded by the documented sqrt-regulariser in
+    # eke_kappa_gm, NOT bit-zero. With L~3e4, sigma~5e-5 this is O(1e-22): assert it
+    # is negligibly small (well below e_min·any-rate), not exactly zero.
+    t0 = eke_3d_local_tendency(jnp.zeros_like(E3), sigma3, L3, cfg)
+    assert float(jnp.max(jnp.abs(t0))) < 1e-18, "E=0 tendency should be negligible"
+    # P >= 0 always: with sigma>0 and E>0, the production term kappa·sigma^2 >= 0.
+    P = eke_kappa_gm(E3, L3, cfg) * sigma3 ** 2
+    eps = cfg.c_eps * jnp.maximum(E3, 0.0) ** 1.5 / jnp.maximum(L3, cfg.l_min)
+    assert jnp.all(P >= 0.0), "production must be >= 0"
+    assert jnp.all(eps >= 0.0), "dissipation must be >= 0"
+    # tendency == P - eps exactly (the documented decomposition).
+    np.testing.assert_allclose(np.asarray(tend), np.asarray(P - eps), rtol=1e-12)
+
+
+def test_stage2_local_tendency_dissipation_dominates_at_large_E():
+    """At large E the depth-resolved sink (eps ~ E^{3/2}) overwhelms the source
+    (P ~ kappa·sigma^2 ~ sqrt(E)) ⇒ tendency < 0, per level."""
+    _E3, _k, sigma3, L3, cfg = _eke_3d_depth_resolved_inputs(0.04)
+    E_big = jnp.full_like(sigma3, 100.0)
+    tend = eke_3d_local_tendency(E_big, sigma3, L3, cfg)
+    assert jnp.all(tend < 0.0), "dissipation must dominate at large E"
+
+
+# (b) implicit vertical EKE diffusion: variance down + column integral conserved
+
+def _w_grid_metrics(M, H=4000.0):
+    """Uniform W-grid metrics for the M-interface EKE field: M layer thicknesses
+    and M-1 spacings (build_dz_half), plus a constant A_v at the M-1 interfaces."""
+    from legoesm.ocean.physics.vertical_mixing import build_dz_half
+    dz_w = jnp.full((M,), H / M)
+    return dz_w, build_dz_half(dz_w)
+
+
+def test_stage2_vertical_diffusion_reduces_variance_and_conserves_column():
+    """The implicit vertical EKE diffusion (K = alpha_eke·A_v, reusing
+    implicit_vertical_diffusion_ocean) reduces the vertical variance of E AND
+    conserves the column integral sum(E·dz_w) under zero-flux BCs (backward Euler
+    is conservative). Also: alpha_eke = 0 is the identity (no diffusion)."""
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        eke_3d_vertical_diffusion,
+    )
+    nlat, nlon, M = 3, 4, 6
+    dz_w, dz_half_w = _w_grid_metrics(M)
+    A_v = jnp.full((M - 1,), 5.0e-2)
+    cfg = EKEConfig(eke_3d=True)
+    # A vertically structured E (spike near the top W-level) so there is variance
+    # to remove.  Float64 to measure the scheme, not f32 round-off.
+    rng = np.random.default_rng(11)
+    base = jnp.asarray(np.abs(rng.standard_normal((nlat, nlon, M))) * 1.0e-3)
+    E0 = base.at[:, :, 0].add(0.5)
+    col0 = jnp.sum(E0 * dz_w, axis=-1)               # (n_lat, n_lon) column integral
+    var0 = jnp.var(E0, axis=-1)                       # per-column vertical variance
+    E1 = eke_3d_vertical_diffusion(E0, A_v, dz_w, dz_half_w, 86400.0, cfg)
+    assert E1.shape == E0.shape and jnp.all(jnp.isfinite(E1))
+    var1 = jnp.var(E1, axis=-1)
+    assert jnp.all(var1 <= var0 + 1e-15), "vertical diffusion must not increase variance"
+    assert float(jnp.mean(var1)) < float(jnp.mean(var0)), "variance should decrease"
+    # Column integral conserved to ~machine precision (zero-flux BCs).
+    col1 = jnp.sum(E1 * dz_w, axis=-1)
+    rel = jnp.abs(col1 - col0) / (jnp.abs(col0) + 1e-300)
+    assert float(jnp.max(rel)) < 1e-12, "column integral not conserved"
+    # alpha_eke = 0 ⇒ K = 0 ⇒ identity.
+    E_id = eke_3d_vertical_diffusion(E0, A_v, dz_w, dz_half_w, 86400.0,
+                                     EKEConfig(eke_3d=True, alpha_eke=0.0))
+    np.testing.assert_allclose(np.asarray(E_id), np.asarray(E0), rtol=0, atol=0)
+
+
+# (c) 3-D advection conserves the volume integral of E -----------------------
+
+def test_stage2_3d_advection_conserves_volume_integral():
+    """Per-level flux-form advection + lateral diffusion of the 3-D E conserve the
+    VOLUME integral sum_k(sum_xy E·area·dz_w) to ~machine precision (each level's
+    area integral telescopes: periodic lon, no-flux N/S walls; lateral diffusion is
+    div of grad).  Tested with a per-level-varying flow (u(z), v(z))."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        eke_3d_horizontal_transport,
+    )
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)  # f64: measure scheme
+    nlat, nlon = grid.n_lat, grid.n_lon
+    M = 5
+    dz_w, _ = _w_grid_metrics(M)
+    rng = np.random.default_rng(4)
+    E = jnp.asarray(np.abs(rng.standard_normal((nlat, nlon, M))) * 0.05)
+    # Per-level flow, with a depth-dependent shear so it is NOT the depth mean.
+    U = jnp.asarray(0.1 * rng.standard_normal((nlat, nlon + 1, M)))
+    U = U.at[:, -1, :].set(U[:, 0, :])                   # periodic wrap (u-pt n_lon == 0)
+    V = jnp.asarray(0.1 * rng.standard_normal((nlat + 1, nlon, M)))
+    V = V.at[0].set(0.0).at[-1].set(0.0)                 # N/S walls
+    mask = jnp.ones((nlat, nlon))
+    u_mask = jnp.ones((nlat, nlon + 1))
+    v_mask = jnp.ones((nlat + 1, nlon))
+    area = np.asarray(grid.area)
+
+    def vol_residual(tend):
+        t = np.asarray(tend)
+        num = 0.0
+        den = 0.0
+        for k in range(M):
+            w = area * float(dz_w[k])
+            num += float(np.sum(t[:, :, k] * w))
+            den += float(np.sum(np.abs(t[:, :, k]) * w))
+        return abs(num) / (den + 1e-300)
+
+    # advection only
+    t_adv = eke_3d_horizontal_transport(
+        E, U, V, grid, EKEConfig(k_iso=0.0, eke_3d=True), mask, u_mask, v_mask)
+    assert t_adv.shape == (nlat, nlon, M)
+    assert vol_residual(t_adv) < 1e-12, "3-D advection not volume-conservative"
+    # lateral diffusion only (no flow)
+    Z = jnp.zeros_like
+    t_diff = eke_3d_horizontal_transport(
+        E, Z(U), Z(V), grid, EKEConfig(k_iso=1000.0, eke_3d=True),
+        mask, u_mask, v_mask)
+    assert vol_residual(t_diff) < 1e-12, "3-D lateral diffusion not conservative"
+    # combined
+    t = eke_3d_horizontal_transport(
+        E, U, V, grid, EKEConfig(k_iso=500.0, eke_3d=True), mask, u_mask, v_mask)
+    assert vol_residual(t) < 1e-12, "combined 3-D transport not conservative"
+    assert jnp.all(jnp.isfinite(t))
+
+
+def test_stage2_3d_advection_differs_from_depthmean_under_shear():
+    """The 3-D transport advects each interface by ITS OWN flow, not the depth-mean
+    — so under vertical shear the per-level tendency differs from advecting every
+    level by the depth-averaged velocity (the key 3-D vs 2-D distinction)."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        eke_3d_horizontal_transport,
+    )
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    nlat, nlon, M = grid.n_lat, grid.n_lon, 4
+    rng = np.random.default_rng(8)
+    E = jnp.asarray(np.abs(rng.standard_normal((nlat, nlon, M))) * 0.05)
+    U = jnp.asarray(0.2 * rng.standard_normal((nlat, nlon + 1, M)))
+    U = U.at[:, -1, :].set(U[:, 0, :])
+    V = jnp.asarray(0.2 * rng.standard_normal((nlat + 1, nlon, M)))
+    V = V.at[0].set(0.0).at[-1].set(0.0)
+    mask = jnp.ones((nlat, nlon)); u_mask = jnp.ones((nlat, nlon + 1))
+    v_mask = jnp.ones((nlat + 1, nlon))
+    cfg = EKEConfig(k_iso=0.0, eke_3d=True)
+    t_per_level = eke_3d_horizontal_transport(E, U, V, grid, cfg, mask, u_mask, v_mask)
+    # Replace per-level flow with the depth mean (broadcast back over levels).
+    U_bar = jnp.broadcast_to(jnp.mean(U, axis=-1, keepdims=True), U.shape)
+    V_bar = jnp.broadcast_to(jnp.mean(V, axis=-1, keepdims=True), V.shape)
+    t_depthmean = eke_3d_horizontal_transport(
+        E, U_bar, V_bar, grid, cfg, mask, u_mask, v_mask)
+    assert float(jnp.max(jnp.abs(t_per_level - t_depthmean))) > 0.0, \
+        "3-D transport collapsed to the depth-mean advection"
+
+
+# (d) finiteness + positivity (E stays >= e_min over a stepped budget) -------
+
+def test_stage2_3d_budget_positive_and_finite_over_steps():
+    """A full operator-split 3-D EKE step (semi-implicit local source/sink +
+    per-level horizontal transport + implicit vertical diffusion) keeps E finite
+    and >= e_min over many steps, for a structured initial field + sheared flow."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.physics.lateral_mixing.eke import eke_apply_local_source
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        eke_3d_horizontal_transport, eke_3d_vertical_diffusion,
+    )
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    nlat, nlon, M = grid.n_lat, grid.n_lon, 5
+    dz_w, dz_half_w = _w_grid_metrics(M)
+    A_v = jnp.full((M - 1,), 1.0e-2)
+    cfg = EKEConfig(eke_3d=True, k_iso=500.0)
+    rng = np.random.default_rng(21)
+    sigma3 = jnp.asarray(np.abs(rng.standard_normal((nlat, nlon, M))) * 2.0e-5)
+    L3 = jnp.asarray(rng.uniform(1.0e4, 5.0e4, (nlat, nlon, M)))
+    U = jnp.asarray(0.1 * rng.standard_normal((nlat, nlon + 1, M)))
+    U = U.at[:, -1, :].set(U[:, 0, :])
+    V = jnp.asarray(0.1 * rng.standard_normal((nlat + 1, nlon, M)))
+    V = V.at[0].set(0.0).at[-1].set(0.0)
+    mask = jnp.ones((nlat, nlon)); u_mask = jnp.ones((nlat, nlon + 1))
+    v_mask = jnp.ones((nlat + 1, nlon))
+    E = jnp.full((nlat, nlon, M), cfg.e_min)
+    dt = 1800.0
+    for _ in range(40):
+        # local source/sink (semi-implicit ⇒ E >= 0 by construction).
+        E = eke_apply_local_source(E, sigma3, L3, cfg, dt)
+        # explicit per-level horizontal transport.
+        E = E + dt * eke_3d_horizontal_transport(E, U, V, grid, cfg, mask, u_mask, v_mask)
+        # implicit vertical diffusion (conserves the column integral, stays >= 0).
+        E = eke_3d_vertical_diffusion(E, A_v, dz_w, dz_half_w, dt, cfg)
+        # floor at e_min (matches the 2-D step's positivity treatment).
+        E = jnp.maximum(E, cfg.e_min)
+        assert jnp.all(jnp.isfinite(E)), "E went non-finite"
+        assert jnp.all(E >= cfg.e_min - 1e-15), "E dropped below e_min"
+    assert float(jnp.max(E)) < 1.0e3, "E blew up"
+
+
+def test_stage2_3d_budget_differentiable():
+    """jax.grad through the whole 3-D EKE budget (source/sink + per-level transport
+    + implicit vertical diffusion) is finite and nonzero — the implicit solve and
+    the advection are AD-safe."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        eke_3d_horizontal_transport, eke_3d_vertical_diffusion,
+    )
+    grid = create_latlon_grid(6, 8, dtype=jnp.float64)
+    nlat, nlon, M = grid.n_lat, grid.n_lon, 4
+    dz_w, dz_half_w = _w_grid_metrics(M)
+    A_v = jnp.full((M - 1,), 1.0e-2)
+    cfg = EKEConfig(eke_3d=True, k_iso=500.0)
+    rng = np.random.default_rng(33)
+    sigma3 = jnp.full((nlat, nlon, M), 3.0e-5)
+    L3 = jnp.full((nlat, nlon, M), 3.0e4)
+    U = jnp.asarray(0.1 * rng.standard_normal((nlat, nlon + 1, M)))
+    U = U.at[:, -1, :].set(U[:, 0, :])
+    V = jnp.asarray(0.1 * rng.standard_normal((nlat + 1, nlon, M)))
+    V = V.at[0].set(0.0).at[-1].set(0.0)
+    mask = jnp.ones((nlat, nlon)); u_mask = jnp.ones((nlat, nlon + 1))
+    v_mask = jnp.ones((nlat + 1, nlon))
+    dt = 1800.0
+
+    def loss(E):
+        src = eke_3d_local_tendency(E, sigma3, L3, cfg)
+        tr = eke_3d_horizontal_transport(E, U, V, grid, cfg, mask, u_mask, v_mask)
+        E1 = eke_3d_vertical_diffusion(E + dt * (src + tr), A_v, dz_w, dz_half_w, dt, cfg)
+        return jnp.sum(E1 ** 2)
+
+    E0 = jnp.asarray(np.abs(rng.standard_normal((nlat, nlon, M))) * 0.04)
+    g = jax.grad(loss)(E0)
+    assert jnp.all(jnp.isfinite(g)), "non-finite grad through 3-D EKE budget"
+    assert float(jnp.max(jnp.abs(g))) > 0.0, "zero grad — 3-D budget not differentiated"
+
+
+# (e) regression: the 2-D path / functions are bit-identical (unchanged) -----
+
+def test_stage2_2d_path_bit_identical_regression():
+    """Stage 2 adds the 3-D path WITHOUT changing the 2-D one. Verify the 2-D
+    closure + 2-D transport produce bit-identical results to direct re-computation
+    (the eke_3d flag defaults False and is inert for the 2-D functions), so the
+    existing validated path is untouched."""
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        eke_horizontal_transport,
+    )
+    # 2-D local tendency unchanged: a default cfg and one with eke_3d=True give the
+    # SAME 2-D result (the flag does not touch the 2-D function).
+    rng = np.random.default_rng(99)
+    E = jnp.asarray(np.abs(rng.standard_normal((5, 7))) * 0.05)
+    sigma = jnp.asarray(np.abs(rng.standard_normal((5, 7))) * 1e-5)
+    L = jnp.asarray(rng.uniform(1e4, 5e4, (5, 7)))
+    t_default = eke_local_tendency(E, sigma, L, EKEConfig())
+    t_flag = eke_local_tendency(E, sigma, L, EKEConfig(eke_3d=True, alpha_eke=2.0))
+    np.testing.assert_array_equal(np.asarray(t_default), np.asarray(t_flag))
+    # 2-D horizontal transport unchanged by the new fields.
+    grid = create_latlon_grid(8, 16, dtype=jnp.float64)
+    nlat, nlon = grid.n_lat, grid.n_lon
+    E2 = jnp.asarray(np.abs(rng.standard_normal((nlat, nlon))) * 0.05)
+    U_bar = jnp.asarray(0.1 * rng.standard_normal((nlat, nlon + 1)))
+    U_bar = U_bar.at[:, -1].set(U_bar[:, 0])
+    V_bar = jnp.asarray(0.1 * rng.standard_normal((nlat + 1, nlon)))
+    V_bar = V_bar.at[0].set(0.0).at[-1].set(0.0)
+    mask = jnp.ones((nlat, nlon)); u_mask = jnp.ones((nlat, nlon + 1))
+    v_mask = jnp.ones((nlat + 1, nlon))
+    t2_default = eke_horizontal_transport(
+        E2, U_bar, V_bar, grid, EKEConfig(k_iso=500.0), mask, u_mask, v_mask)
+    t2_flag = eke_horizontal_transport(
+        E2, U_bar, V_bar, grid, EKEConfig(k_iso=500.0, eke_3d=True, alpha_eke=2.0),
+        mask, u_mask, v_mask)
+    np.testing.assert_array_equal(np.asarray(t2_default), np.asarray(t2_flag))
