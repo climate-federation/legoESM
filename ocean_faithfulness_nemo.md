@@ -8,6 +8,21 @@ Review every code change with `/codex:adversarial-review`. Shrink this file ever
 **Branch:** `omip-faithful-nemo-comparison`. Completion promise DONE only when grids
 genuinely match NEMO — far off; no false DONE.
 
+## COLD-START SOLVED (iter 18 — read this FIRST)
+**RK3 momentum integrator SOLVES the corrected-WOA-IC cold-start.** Arm 8128761
+(corrected IC + `--momentum-rk3` + smag-cfl + EVD + adaptive-vertadv + smc03 +
+implicit_cn baro) ran STABLE with **PHYSICAL max|u| ~1 m/s, decreasing** (vs the
+forward-Euler+Matsuno runs' 30 m/s equatorial transient + the corrected-IC
+blowup). So RK3 **also fixes the velocity over-intensity**. `explicit_substep`
+barotropic DESTABILIZES (blew up alone + with RK3) → use OMIP-default implicit_cn.
+Vindicates iter-9 (RK3 + full stack); iter-10's "RK3 marginal" was pre-smag-cfl-cap.
+IC-smoothing dead (smooth_woa_ts smooths T/S separately → static instability).
+**=> RK3 is the production default.** Trustworthy run 8131128 launched (corrected
++ RK3, 12 d, snap/4 d) → first correct-IC compare vs NEMO. Memory:
+[[omip-rk3-coldstart-solve]]. WINNING CONFIG: `--woa-init --balanced-init
+--momentum-rk3 --partial-cell --pgf-scheme smc03 --adaptive-implicit-vertadv
+--min-levels 2 --C-smag-lap 3.0 --smag-cfl-safety 0.125 --dt 75`.
+
 ## PIPELINE AUDIT (iter 17 — read this FIRST)
 Multi-agent adversarial audit (workflow w2gc8r1bh, 15 agents) of the compare + IC
 pipeline found **8 confirmed coordinate/unit bugs** — the rad2deg fix was not the
