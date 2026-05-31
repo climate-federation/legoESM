@@ -70,6 +70,34 @@ def test_injected_seam_discontinuity_is_detected():
         f"{m['max_ratio']:.2f}); the cross-face metric is broken")
 
 
+def test_denominator_excludes_halo_constant_per_face():
+    """Codex iter61 guard: the interior-gradient DENOMINATOR must contain
+    ONLY same-face interior differences, never the cross-seam (halo) row/col.
+
+    A field that is CONSTANT on each face (but a different constant per face)
+    has interior gradient EXACTLY zero and a large jump at every seam.  With a
+    correct interior-only denominator the ratio is enormous (seam / ~0).  The
+    earlier bug let the N/E halo difference (`a[n+1]-a[n]`, itself a seam jump)
+    into the denominator, which would self-normalize this to ~1 and silently
+    miss the artifact.
+    """
+    n = 16
+    grid = create_cubed_sphere(n)
+    consts = np.array([0.0, 10.0, 20.0, 30.0, 40.0, 50.0])
+    field = np.broadcast_to(consts[:, None, None], (6, n, n)).astype(float)
+    m = compute_cross_face_continuity(
+        field, interp_offsets=np.asarray(grid.halo_interp_offsets))
+    # interior gradient is identically 0 on every face ⇒ every seam jump must
+    # register as a huge ratio; a halo-contaminated denominator would give ~1.
+    assert m["max_ratio"] > 100.0, (
+        f"constant-per-face seam jump under-detected (max_ratio "
+        f"{m['max_ratio']:.2f}); the interior denominator is contaminated by "
+        f"halo (cross-seam) cells.")
+    assert m["mean_ratio"] > 100.0, (
+        f"per-face ratios {m['per_face_ratio']} — some face's denominator "
+        f"absorbed its seam jump (N/E-edge halo contamination).")
+
+
 def test_metric_accepts_3d_and_4d_shapes():
     n = 16
     grid = create_cubed_sphere(n)

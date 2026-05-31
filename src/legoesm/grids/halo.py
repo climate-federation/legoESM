@@ -3080,9 +3080,14 @@ def compute_cross_face_continuity(field_data, interp_offsets=None):
     n_face = fp.shape[0]
     per_face = []
     for f in range(n_face):
-        a = fp[f]  # (n+2, n+2, nlev)
-        gx = (a[2:, 1:-1] - a[1:-1, 1:-1]).ravel()
-        gy = (a[1:-1, 2:] - a[1:-1, 1:-1]).ravel()
+        a = fp[f]  # (n+2, n+2, nlev); interior = a[1:-1, 1:-1]
+        # Interior first differences — STRICTLY between interior cells, so the
+        # halo (cross-seam) rows/cols never enter the denominator.  (Codex
+        # iter61: a[2:,...]/a[...,2:] included the N/E halo row a[n+1]-a[n],
+        # i.e. a seam jump, self-normalizing the ratio and suppressing
+        # detection of N/E-edge artifacts.)
+        gx = (a[2:-1, 1:-1] - a[1:-2, 1:-1]).ravel()   # i-diff, interior only
+        gy = (a[1:-1, 2:-1] - a[1:-1, 1:-2]).ravel()   # j-diff, interior only
         gi = float(np.sqrt(np.mean(np.concatenate([gx, gy]) ** 2)))
         seam = np.concatenate([
             (a[1, 1:-1] - a[0, 1:-1]).ravel(),
