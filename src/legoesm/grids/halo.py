@@ -3030,3 +3030,71 @@ def compute_edge_artifact_metric(field_data):
         "interior_std": i,
         "ratio": e / max(i, 1e-30),
     }
+
+
+def compute_cross_face_continuity(field_data, interp_offsets=None):
+    """TRUE cross-face seam-continuity diagnostic (iter ~58).
+
+    The reliable edge-artifact metric: pads ``field_data`` with the
+    model's *real* inter-face halo (:func:`pad_halo_4d`) and, per face,
+    compares the cross-seam first difference (edge interior cell minus
+    its physical neighbor on the adjacent face) to the same-face interior
+    first difference (the field's natural gradient)::
+
+        ratio = RMS(cross-seam Δ) / RMS(same-face interior Δ)
+
+    Interpretation: ``ratio ≈ 1`` ⇒ the field is as smooth across the
+    panel seam as it is in the interior (CONTINUOUS).  A genuine seam
+    discontinuity registers 5–50×.
+
+    This SUPERSEDES :func:`compute_edge_artifact_metric` for edge-artifact
+    claims.  That helper is a *same-face* edge-vs-interior std ratio: it
+    amplifies high-frequency edge curvature and is unreliable in BOTH
+    directions (it both over- and under-states — verified iter ~57-58:
+    same-face 2nd-diff gave 5.95× on W5 v where the true cross-face
+    continuity is 1.30×).  Use this function, applied to a *geographic*
+    (seam-continuous) field component, for the real continuity check.
+
+    Parameters
+    ----------
+    field_data : array, shape ``(6, n, n)`` or ``(6, n, n, nlev)``
+        A scalar or geographic-component field on the cubed sphere.  For
+        a vector, pass each *geographic* component (north/east) — those
+        are continuous across seams; do NOT pass face-local components.
+    interp_offsets : array, optional
+        Halo interpolation offsets (``grid.halo_interp_offsets``) for the
+        corrected cross-face interpolation; ``None`` uses the plain halo.
+
+    Returns
+    -------
+    dict with keys ``per_face_ratio`` (list, len 6), ``max_ratio``,
+    ``mean_ratio``.
+    """
+    import numpy as np
+    arr = np.asarray(field_data)
+    if arr.ndim == 3:
+        arr = arr[..., None]
+    fp = np.asarray(
+        pad_halo_4d(jnp.asarray(arr), halo=1, interp_offsets=interp_offsets)
+    )
+    n_face = fp.shape[0]
+    per_face = []
+    for f in range(n_face):
+        a = fp[f]  # (n+2, n+2, nlev)
+        gx = (a[2:, 1:-1] - a[1:-1, 1:-1]).ravel()
+        gy = (a[1:-1, 2:] - a[1:-1, 1:-1]).ravel()
+        gi = float(np.sqrt(np.mean(np.concatenate([gx, gy]) ** 2)))
+        seam = np.concatenate([
+            (a[1, 1:-1] - a[0, 1:-1]).ravel(),
+            (a[-1, 1:-1] - a[-2, 1:-1]).ravel(),
+            (a[1:-1, 1] - a[1:-1, 0]).ravel(),
+            (a[1:-1, -1] - a[1:-1, -2]).ravel(),
+        ])
+        gs = float(np.sqrt(np.mean(seam ** 2)))
+        per_face.append(gs / max(gi, 1e-30))
+    per_face = np.asarray(per_face)
+    return {
+        "per_face_ratio": per_face.tolist(),
+        "max_ratio": float(per_face.max()),
+        "mean_ratio": float(per_face.mean()),
+    }
