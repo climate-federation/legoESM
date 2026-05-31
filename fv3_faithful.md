@@ -95,11 +95,21 @@ Precise map (FUNCTIONAL faithfulness — FV3-like results, edge-clean, close to 
   continuous, not FV3 corner d_sw5/nord. These are FV3-INSPIRED vector-invariant +
   explicit damping — validated functionally (baroclinic converges, edge-clean, all
   cases pass) but NOT a line-by-line FV3 port.
-- SCOPED UPGRADE (major, deferred — core-dycore + re-validation risk): route the 3D
-  PE + ocean-barotropic momentum through the faithful upwind vorticity flux +
-  `_d2a2c_vect` + d_sw5 damping (the SW path already does). Current centered scheme
-  is validated; upgrade needs careful re-calibration. Not a defect — a
-  faithful-vs-functional distinction the user should know.
+- SCOPED UPGRADE — now precisely characterized (iter ~38): the faithful upwind
+  flux `_vorticity_flux` (fv3_sw_core:1260, `where(fy1>0,vort[:-1],vort[1:])`) is
+  part of FV3's **2-stage c_sw→d_sw scheme** (C-grid half-step produces the
+  time-centered winds that upwind-transport vorticity for the D-grid full step).
+  The legoESM PE uses a **single-stage RK3 with centered `zeta_corner*v_d`** +
+  explicit hyperdiff — a DIFFERENT, validated discretization, not a term-swap away
+  from FV3. True PE faithfulness ⇒ adopt the FV3 2-stage structure (major dycore
+  rewrite; the PE solves T/ln_ps/u/v, can't reuse the SW FV3Edge model wholesale)
+  + re-calibrate damping + re-validate every 3D case. **Engineering decision
+  (deferred):** the current single-stage centered scheme is validated, edge-clean,
+  convergent, and results-faithful (FV3-like); the 2-stage rewrite risks that for a
+  purity goal whose results-benefit is marginal (centered+explicit-damping ≈
+  upwind+implicit-damping in net dissipation). Documented as the decision point;
+  NOT rushed. SW path already faithful; ocean barotropic reuses the centered
+  CDGridShallowWaterModel (validated, geostrophic-artifact-free).
 
 ## SW visual verdicts
 1. cosine-bell day-1 = PPM-limiter interior diffusion (cube/ico L2 1.4×), not edge.
