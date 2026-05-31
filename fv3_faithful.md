@@ -58,7 +58,14 @@ BYTE-IDENTICAL — cube SW 4/4 unchanged, W2 v_ll 0.339):
   ed grid: area 4πR², dx √2, aspect 1.05, rejects Schmidt/shift. 7 verify-first subtleties
   caught (separable-dist, moved-diagonal, face-perm, seam, halo-saturation, range-dependence,
   centre-consistency); codex-reviewed builders SOUND. Tests: gnomonic_ed bricks 30+/30+.
-**⏳ NEXT MAJOR LAYER — the CDGRID (gates the eigenmode test):** dynamics consume
+**✅ EIGENMODE HYPOTHESIS CONFIRMED (iter71):** W5 C96, SAME equiangular-tuned damping —
+equiangular daily max|u_d| 26/32/33/40/**80** (blows up) vs gnomonic_ed 26/32/33/33/**48**.
+gnomonic_ed cuts the day-5 blow-up 80→48 (−40%) + holds stable ~33 a day longer ⇒ the C96
+W5 eigenmode IS grid-conditioning-driven (the months-long wiring hypothesis confirmed). Not
+fully ~38-stable yet (config is equiangular-tuned) → ed-specific damping recalibration is the
+remaining step to full stabilization. Both A-grid + C/D ed grids build (gnomonic="ed" on
+`create_cubed_sphere` + `create_cubed_sphere_cdgrid`; ed cdgrid dxc √2, sin_sg∈[0.866,1]).
+**(prior scoping, now DONE) the CDGRID layer:** dynamics consume
 `create_cubed_sphere_cdgrid(base)`, which REBUILDS its own equiangular C/D supergrid
 (`_compute_supergrid_metrics(n, _face_gnomonic_to_lonlat,…)` + `linspace` α at cubed_sphere_
 cdgrid.py:203/315/579/641/785/952/960), ignoring base's distribution. ed cdgrid = a separate
