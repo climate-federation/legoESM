@@ -164,8 +164,22 @@ polar face comes from `mirror_grid_faces` (pure rot_3d rotation = extent-SAFE). 
 gnomonic_grids `-π` shift is metric-invariant (great-circle + relative angle unaffected).
 ⇒ the 6-face metric crux reduces to: build extended equatorial face (`_gnomonic_ed_construct`,
 interior-invariant) → hx/hy great-circle (broadcast) + angle centered-diff (equatorial); mirror
-to polar → angle. NEXT: implement `compute_padded_{angle,half_metrics}_ed` matching the
-equiangular n_big indexing, then gate `create_cubed_sphere(gnomonic="ed")` + validate.
+to polar → angle. Implemented `compute_padded_half_metrics_ed` (6/6 tests: shape, √2, face-indep, scale).
+**REMAINING CRUX = FACE-NUMBERING/ORIENTATION reconciliation (iter66, definitive):**
+- `make_fv3_native_grid` (gnomonic_ed) is in FV3's numbering, PERMUTED vs create_cubed_sphere:
+  ed faces → eq positions [0,1,5,2,3,4] (ed face2=S-pole=eq face5, etc.) — verified by
+  face-center comparison. So the centers brick (`_compute_gnomonic_ed_lonlat`) is currently
+  in the WRONG numbering for create's halo tables.
+- A per-face SEPARABLE build (`_face_to_cartesian` with c_S on i, c_W on j) DOES give the
+  1.06 aspect — BUT it BREAKS SEAM CONTINUITY: face F's i-edge uses c_S while the adjacent
+  face's j-edge uses c_W≠c_S, so shared seams don't coincide. ⇒ the mirror construction
+  (make_fv3_native_grid, which derives all faces from face-1 by rotation → seams coincide)
+  is REQUIRED; the separable shortcut is definitively OUT.
+- ⇒ wiring = make_fv3_native_grid + PERMUTE/ROTATE faces to create's numbering+orientation,
+  then centers (cell_center2) + angle (centered-diff per reconciled face). hx/hy already
+  done (face-independent ⇒ numbering-agnostic ✓). This reconciliation (permutation + the
+  per-face i/j-axis rotation match) is the focused-effort crux. Validate seam continuity
+  (cross-face metric) + √2 + area before gating.
 
 ## VERIFICATION
 - SW 16/16 all grids ≤1 cell aligned. Full fast cube atm dynamical suite PASS + NH
