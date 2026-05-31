@@ -2188,6 +2188,24 @@ def compute_padded_angle_ed(n: int, halo: int = 1) -> jax.Array:
     return jnp.stack(all_angle, axis=0)
 
 
+def _compute_exact_cell_areas_ed(n: int, radius: float) -> jax.Array:
+    """gnomonic_ed counterpart of :func:`_compute_exact_cell_areas`.
+
+    Spherical-excess cell areas on the FV3 gnomonic_ed grid, ``(6, n, n)``,
+    via the faithful FV3 :func:`get_area` applied to the remapped (create-
+    numbered) gnomonic_ed corners.
+    """
+    lon_c, lat_c = make_fv3_native_grid(n, grid_type=0)
+    lon_c, lat_c = _gnomonic_ed_remap_to_create(lon_c, lat_c)  # (6, n+1, n+1)
+    return get_area(
+        lon_c[:, :-1, :-1], lat_c[:, :-1, :-1],   # SW
+        lon_c[:, 1:, :-1], lat_c[:, 1:, :-1],     # SE
+        lon_c[:, 1:, 1:], lat_c[:, 1:, 1:],       # NE
+        lon_c[:, :-1, 1:], lat_c[:, :-1, 1:],     # NW
+        radius=radius,
+    )
+
+
 def symm_ed(
     lamda: jax.Array, theta: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:

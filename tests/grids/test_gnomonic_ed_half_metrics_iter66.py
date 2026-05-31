@@ -16,7 +16,7 @@ jax = pytest.importorskip("jax")
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.grids.cubed_sphere import (  # noqa: E402
-    compute_padded_half_metrics_ed,
+    compute_padded_half_metrics_ed, _compute_exact_cell_areas_ed,
 )
 from legoesm.grids.halo import compute_padded_half_metrics  # noqa: E402
 from legoesm import constants  # noqa: E402
@@ -42,6 +42,19 @@ def test_in_domain_sqrt2_signature():
     ratio = interior.max() / interior.min()
     assert abs(ratio - np.sqrt(2.0)) < 0.03, (
         f"gnomonic_ed in-domain dx max/min {ratio:.4f} != √2 (signature)")
+
+
+def test_cell_areas_close_sphere_and_positive():
+    """gnomonic_ed cell areas: sum to 4πR² (closure), all positive,
+    face-independent (cube symmetry)."""
+    n = 48
+    a = np.asarray(_compute_exact_cell_areas_ed(n, R))
+    assert a.shape == (6, n, n)
+    assert np.all(a > 0)
+    rel = abs(a.sum() / (4 * np.pi * R ** 2) - 1.0)
+    assert rel < 1e-9, f"gnomonic_ed area sum off sphere by {rel:.2e}"
+    dev = max(np.max(np.abs(a[f] - a[0])) for f in range(6)) / a.max()
+    assert dev < 1e-9, f"gnomonic_ed areas not face-uniform ({dev:.2e})"
 
 
 def test_face_independent_broadcast():
