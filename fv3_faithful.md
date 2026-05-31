@@ -33,6 +33,13 @@ physical neighbor on adjacent face via halo): scalars (p_s,T,eta,SST) 0.5-1.8×,
 geographic winds 0.5-2.3× — all CONTINUOUS. ⇒ no panel-seam artifact, proven
 beyond visual. (Visual: geostrophic clean zonal bands, phillips smooth eddies
 matching mpas, baroclinic v smooth — all no panel imprint.)
+RE-VERIFIED iter ~55 (fresh run, not cached): cube SW 4/4 PASS, mass 1e-15..1e-16,
+W2 v_ll_Linf 0.339. Fresh native-field edge-roughness (RMS 2nd-diff edge-band/
+interior): physically-dominant fields height 0.65, u 0.77 (NO edge amplification,
+<1×); v_cc_north 2.38× BUT that field is the W2 discretization error (exact v=0;
+max|v|=0.343 vs |u|=38.6, v/u rms 9.4e-4 = 0.09% of signal) so the mild edge
+concentration is the tiny error's metric-variation pattern, not a physical
+artifact. PNGs results/atmosphere/shallow_water/williamson2/cubed_sphere/C36/.
 
 ## VERIFICATION
 - SW 16/16 all grids, aligned within 1 cell. Full fast cube atm dynamical suite
