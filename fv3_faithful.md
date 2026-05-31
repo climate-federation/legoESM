@@ -141,8 +141,19 @@ angle (cos_angle_edge, i-tangent→east) but the flux divergence transforms cova
 via cosa_u/sina_u/rsin (from sin_sg sub-grid angles); these two angle systems must be mutually
 consistent for the discrete W2 balance to cancel. Consistent for eq's separable parametric map,
 apparently NOT for ed. STRATEGIC: this + the C96 W5 eigenmode BOTH converge on SW-CORE
-FAITHFULNESS (FV3 c_sw/d_sw flux treatment) — the next big faithful effort. NEXT: test cos_angle_
-edge vs sin_sg-derived edge angle consistency on ed; or pivot to the FB chain (the convergent root).
+FAITHFULNESS (FV3 c_sw/d_sw flux treatment) — the next big faithful effort.
+iter75 — d2a2c HALO ruled out too: passing the non-orthogonal seam rotation (cos_theta/sin_theta
+= cos_sg5/sin_sg5) to the d2a2c `pad_halo_vector` (fv3_sw_core.py:602) left the W2 imbalance
+BIT-IDENTICAL (eq 0.051, ed 1.795). Reason: the t=0 dh at the literal CORNER CELL (i=0,j=0) uses
+its IN-DOMAIN contravariant transform (step-3 cos_sg5/rsin2_cell) + in-domain C-grid fluxes — the
+cross-seam halo never reaches the corner-cell dh. ⇒ the ed corner inconsistency is in the
+IN-DOMAIN corner-cell C-grid operators (the step-3 covariant→contravariant transform cos_sg5/
+rsin2 + the PPM flux + dxc/dyc at the corner), NOT any halo. Experiment reverted (inert no-op).
+STOPPING the ed-W2 micro-investigation (diminishing returns; thoroughly ruled out IC, area,
+edge-angles, grid build, A/cd mismatch, d2a2c halo — the residual fix IS the in-domain SW-core
+corner treatment = the convergent SW-core-faithfulness work, to be done vs the FV3 oracle's
+c_sw/d_sw, NOT micro-probed further). ed grid remains USABLE (stable, conservative, halo clean)
+with a known 8× W2 corner-accuracy gap vs equiangular.
 **(prior scoping, now DONE) the CDGRID layer:** dynamics consume
 `create_cubed_sphere_cdgrid(base)`, which REBUILDS its own equiangular C/D supergrid
 (`_compute_supergrid_metrics(n, _face_gnomonic_to_lonlat,…)` + `linspace` α at cubed_sphere_
