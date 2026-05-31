@@ -74,8 +74,22 @@ residual) is the tiny discretization residual, invisible to L2/mass. Baroclinic 
   FV3 sin_sg(5)), single-stage RK3 + non-FV3 del2/del4+dddmp damping (FV3's divergence
   damping is tuned to kill these grid-scale edge modes). Faithful fix = foundational
   FV3 work, NOT dt hacks. [oracle damping comparison = next]
-- STILL MISSING: visual PNG inspection (human); FV3-oracle SW damping comparison
-  (nord/d2_bg/d4_bg/dddmp) to ground the C96 eigenmode root-cause.
+- [DONE iter59 — ORACLE-GROUNDED root cause of C96 W5 eigenmode] The matrix cube SW
+  uses the FAITHFUL `FV3EdgeShallowWaterModel`, so the eigenmode is NOT a wrong-model
+  issue — it's the DAMPING CONFIG. `iter1009_dual_target_config` sets the FV3 d_sw5
+  structured fields to **`dddmp=0.0`, `d2_bg=0.0`** (FV3's adaptive-Smagorinsky del-2
+  divergence damping DISABLED), keeping only `d4_bg=0.16, nord=1`, and substitutes a
+  PRAGMATIC aggregated `div_damp=8-10×_div_damp_cube` + biharmonic `hyperdiff 2×`
+  (matrix comments: "PRAGMATIC within the aggregated-div_damp API", "Stable at C16-C48",
+  "blowup limit ~16×", "Fortran-faithful d_sw5 port is iter-759 ongoing"). FV3 ORACLE
+  (`fv_arrays.F90:360,358`): operational `dddmp=0.2` (the comment literally says "(0.2)")
+  + HIGH-RES setting `nord=1, d4_bg=0.075`. So FV3 controls cube grid-scale edge modes
+  via the flow-aware adaptive Smagorinsky `dddmp` — which legoESM disabled in favor of
+  a C36-C48-tuned aggregate that doesn't scale to C96. `_d_sw5_corner_divergence`
+  (accepts dddmp) IS wired (fv3_sw_core.py:1902). ⇒ FAITHFUL fix = enable FV3-prescribed
+  `dddmp≈0.2` (+ high-res nord=1/d4_bg=0.075), NOT dt/factor improvisation. [test next]
+- STILL MISSING: visual PNG inspection (human); test FV3 dddmp=0.2 on C96 W5 (does the
+  oracle value kill the eigenmode w/o degrading C36-C48 W2/W5?).
 
 ## VERIFICATION
 - SW 16/16 all grids, aligned within 1 cell. Full fast cube atm dynamical suite
