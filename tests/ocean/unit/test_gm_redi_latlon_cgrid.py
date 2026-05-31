@@ -880,3 +880,272 @@ class TestImplicitK33AndKisoSteep:
         assert jnp.all(jnp.isfinite(with_floor))
         assert float(jnp.max(jnp.abs(with_floor - no_floor))) > 0.0, \
             "K_iso_steep floor had no effect (kappa<2·K_iso_steep, steep slopes)"
+
+
+# =====================================================================
+# 13. interp_wface_to_center — the shared interface→center vertical
+#     interpolation helper (Stage 3 of the 3-D EKE GM/Redi kappa).
+# =====================================================================
+
+class TestInterpWfaceToCenter:
+    """Unit tests for the interface(W-grid)→cell-center vertical interp helper
+    that lifts a depth-resolved 3-D EKE kappa (nlev-1 interfaces) to cell
+    centers (nlev) for the GM/Redi horizontal flux."""
+
+    def test_shape_iface_to_center(self):
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            interp_wface_to_center,
+        )
+        f = jnp.arange(2 * 3 * 6, dtype=jnp.float64).reshape(2, 3, 6)  # nlev-1=6
+        c = interp_wface_to_center(f)
+        assert c.shape == (2, 3, 7)  # nlev = 7
+
+    def test_interior_is_average_endpoints_one_sided(self):
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            interp_wface_to_center,
+        )
+        key = jax.random.PRNGKey(0)
+        f = jax.random.normal(key, (4, 5, 8), dtype=jnp.float64)  # nlev-1=8
+        c = interp_wface_to_center(f)
+        # interior center k = 0.5*(iface[k-1] + iface[k]), 1 <= k <= nlev-2
+        assert jnp.allclose(c[:, :, 1:-1], 0.5 * (f[:, :, :-1] + f[:, :, 1:]),
+                            rtol=1e-13, atol=0.0)
+        # top/bottom centers are one-sided copies of the nearest interface.
+        assert jnp.allclose(c[:, :, 0], f[:, :, 0], rtol=1e-13, atol=0.0)
+        assert jnp.allclose(c[:, :, -1], f[:, :, -1], rtol=1e-13, atol=0.0)
+
+    def test_uniform_interface_maps_to_uniform_center(self):
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            interp_wface_to_center,
+        )
+        f = jnp.full((3, 4, 9), 1234.5, dtype=jnp.float64)  # nlev-1 = 9
+        c = interp_wface_to_center(f)
+        assert c.shape == (3, 4, 10)
+        assert jnp.allclose(c, 1234.5, rtol=1e-13, atol=0.0)
+
+    def test_grad_safe(self):
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            interp_wface_to_center,
+        )
+        f = jax.random.normal(jax.random.PRNGKey(1), (2, 2, 5), dtype=jnp.float64)
+        g = jax.grad(lambda x: jnp.sum(interp_wface_to_center(x) ** 2))(f)
+        assert g.shape == f.shape
+        assert jnp.all(jnp.isfinite(g))
+
+
+# =====================================================================
+# 14. 3-D (depth-resolved) interface kappa_GM / kappa_Redi
+#     (Stage 3: GM/Redi tracer tendency accepts a 3-D interface kappa).
+#
+# The 3-D EKE kappa lives at the nlev-1 interior interfaces (W-grid).
+# Tests use nlev=12 (>2, and nlev-1=11 is unambiguous vs the (n,n,1)
+# broadcast).  Triad scheme is the production path (slope_scheme="triads").
+# =====================================================================
+
+class TestKappa3DInterface:
+
+    NLEV = 12
+
+    def _setup(self, slope=2e-3):
+        return _stratified_with_meridional_tilt(nlev=self.NLEV, slope=slope)
+
+    def _passive_zonal_tracer(self, n_lat, n_lon, nlev):
+        # A zonal sinusoid NOT aligned with the (y-only) density tilt, so the
+        # Redi/skew flux genuinely acts and the kappa depth-structure matters.
+        lon = jnp.arange(n_lon, dtype=jnp.float64)
+        prof = jnp.linspace(1.0, 2.0, nlev)  # mild vertical structure too
+        return (jnp.sin(2.0 * jnp.pi * lon / n_lon)[None, :, None]
+                * prof[None, None, :]
+                * jnp.ones((n_lat, 1, 1)))
+
+    # --- (a) depth structure matters -------------------------------------
+    def test_triad_depth_varying_3d_differs_from_depth_mean(self):
+        """A depth-VARYING 3-D interface kappa gives a tendency that differs from
+        the tendency using a depth-uniform kappa equal to its depth mean — the
+        depth structure of the kappa genuinely changes the answer."""
+        setup = self._setup()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy,
+         jacobian, rho, T, S, cfg) = setup
+        n_lat, n_lon, nlev = T.shape
+        q = self._passive_zonal_tracer(n_lat, n_lon, nlev)
+        # Depth-varying interface kappa: large near surface, small at depth.
+        kz = jnp.linspace(2000.0, 100.0, nlev - 1)  # (nlev-1,)
+        kappa_var = jnp.broadcast_to(kz[None, None, :], (n_lat, n_lon, nlev - 1))
+        # Depth-mean-equivalent: same per-column mean, uniform with depth.
+        kbar = float(jnp.mean(kz))
+        kappa_mean = jnp.full((n_lat, n_lon, nlev - 1), kbar)
+        dq_var = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            q, rho, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            kappa_var, kappa_var, cfg.S_max)
+        dq_mean = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            q, rho, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            kappa_mean, kappa_mean, cfg.S_max)
+        assert jnp.all(jnp.isfinite(dq_var))
+        denom = float(jnp.max(jnp.abs(dq_mean))) + 1e-30
+        rel = float(jnp.max(jnp.abs(dq_var - dq_mean))) / denom
+        assert rel > 0.1, (
+            f"depth-varying 3-D kappa had negligible effect vs depth-mean "
+            f"(rel={rel:.3g}) — depth structure should matter")
+
+    # --- (b) depth-uniform 3-D == 2-D/scalar (consistency) ---------------
+    def test_triad_uniform_3d_equals_scalar(self):
+        """A depth-UNIFORM 3-D interface kappa must equal the scalar-kappa
+        tendency: interp_wface_to_center of a constant is constant, and the
+        cell→face interp of a constant is the same constant ⇒ identical to the
+        scalar broadcast at every face/interface."""
+        setup = self._setup()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy,
+         jacobian, rho, T, S, cfg) = setup
+        n_lat, n_lon, nlev = T.shape
+        k0 = 900.0
+        kappa_3d = jnp.full((n_lat, n_lon, nlev - 1), k0)
+        dq_scalar = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            k0, k0, cfg.S_max)
+        dq_3d = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            kappa_3d, kappa_3d, cfg.S_max)
+        assert jnp.allclose(dq_3d, dq_scalar, rtol=1e-12, atol=1e-30)
+
+    def test_triad_uniform_3d_equals_2d(self):
+        """A depth-uniform 3-D interface kappa equals the equivalent 2-D
+        per-column kappa (both reduce to the same constant at every face)."""
+        setup = self._setup()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy,
+         jacobian, rho, T, S, cfg) = setup
+        n_lat, n_lon, nlev = T.shape
+        k0 = 750.0
+        kappa_2d = jnp.full((n_lat, n_lon), k0)
+        kappa_3d = jnp.full((n_lat, n_lon, nlev - 1), k0)
+        dq_2d = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            kappa_2d, kappa_2d, cfg.S_max)
+        dq_3d = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            kappa_3d, kappa_3d, cfg.S_max)
+        assert jnp.allclose(dq_3d, dq_2d, rtol=1e-12, atol=1e-30)
+
+    def test_centered_uniform_3d_equals_scalar(self):
+        """Same consistency check for the centered scheme."""
+        setup = self._setup()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy,
+         jacobian, rho, T, S, cfg) = setup
+        n_lat, n_lon, nlev = T.shape
+        S_x, S_y, _ = compute_isopycnal_slopes_latlon_cgrid(
+            rho, mask, z_coord, jacobian, grid, cfg)
+        k0 = 650.0
+        kappa_3d = jnp.full((n_lat, n_lon, nlev - 1), k0)
+        dq_scalar = gm_redi_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid, k0, k0)
+        dq_3d = gm_redi_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            kappa_3d, kappa_3d)
+        assert jnp.allclose(dq_3d, dq_scalar, rtol=1e-12, atol=1e-30)
+
+    # --- (c) q = f(rho) cancellation holds with a 3-D kappa --------------
+    def test_triad_cancellation_q_eq_f_rho_with_3d_kappa(self):
+        """The per-triad cancellation (Redi flux vanishes for q = f(rho)) must
+        still hold with a depth-varying 3-D interface kappa. With kappa_Redi ==
+        kappa_GM (the K_iso=K_gm coupling) and q = T = f(rho), the whole GM/Redi
+        tendency reduces to the GM skew of T, which for q=f(rho) the triad
+        construction also cancels — the tendency must be machine-zero."""
+        setup = self._setup()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy,
+         jacobian, rho, T, S, cfg) = setup
+        n_lat, n_lon, nlev = T.shape
+        kz = jnp.linspace(2000.0, 50.0, nlev - 1)
+        kappa_var = jnp.broadcast_to(kz[None, None, :], (n_lat, n_lon, nlev - 1))
+        # T is exactly linear in rho here (see _stratified_with_meridional_tilt),
+        # so q = f(rho) per triad; kappa_Redi == kappa_GM (== kappa_var).
+        dq = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            kappa_var, kappa_var, cfg.S_max)
+        assert jnp.all(jnp.isfinite(dq))
+        # Compare against the scalar-kappa cancellation magnitude as the
+        # machine-precision reference (same fields, same tracer).
+        dq_scalar = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            1000.0, 1000.0, cfg.S_max)
+        ref = float(jnp.max(jnp.abs(dq_scalar)))
+        # The 3-D-kappa residual must be no worse than ~the scalar residual
+        # scaled by max(kappa_var)/1000 (the cancellation is per-triad, so the
+        # residual scales with kappa, not with its depth structure).
+        tol = max(ref * (float(jnp.max(kz)) / 1000.0) * 10.0, 1e-12)
+        assert float(jnp.max(jnp.abs(dq))) < tol, (
+            f"q=f(rho) cancellation broke with a 3-D kappa: "
+            f"max|dq|={float(jnp.max(jnp.abs(dq))):.3e} > tol={tol:.3e}")
+
+    # --- (d) 2-D / scalar path bit-identical (regression) ----------------
+    def test_scalar_and_2d_paths_bit_identical_regression(self):
+        """Introducing the 3-D dispatch must NOT perturb the scalar or 2-D paths:
+        they go through the unchanged broadcast branch and must be bit-identical
+        between scalar and a uniform 2-D array (the historical guarantee)."""
+        setup = self._setup()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy,
+         jacobian, rho, T, S, cfg) = setup
+        n_lat, n_lon, nlev = T.shape
+        dq_scalar = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            1000.0, 1000.0, cfg.S_max)
+        kR2d = jnp.full((n_lat, n_lon), 1000.0)
+        dq_2d = gm_redi_tracer_tendency_triads_latlon_cgrid(
+            T, rho, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            1000.0, kR2d, cfg.S_max)
+        assert jnp.allclose(dq_2d, dq_scalar, rtol=1e-13, atol=1e-30)
+        # K_33 getter: scalar vs 2-D bit-identical too.
+        K33_scalar = compute_isoneutral_K33_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg, mask=mask)
+        K33_2d = compute_isoneutral_K33_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg, mask=mask,
+            kappa_redi_override=jnp.full((n_lat, n_lon), float(cfg.kappa_Redi)))
+        assert jnp.allclose(K33_2d, K33_scalar, rtol=1e-13, atol=1e-30)
+
+    # --- (e) finiteness + jax.grad AD-safety with a 3-D kappa ------------
+    def test_3d_kappa_finite_and_grad_safe(self):
+        setup = self._setup()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy,
+         jacobian, rho, T, S, cfg) = setup
+        n_lat, n_lon, nlev = T.shape
+        q = self._passive_zonal_tracer(n_lat, n_lon, nlev)
+        kz = jnp.linspace(1500.0, 200.0, nlev - 1)
+        kappa = jnp.broadcast_to(kz[None, None, :], (n_lat, n_lon, nlev - 1))
+
+        def loss(kap):
+            dq = gm_redi_tracer_tendency_triads_latlon_cgrid(
+                q, rho, mask, u_mask, v_mask, z_coord, jacobian, grid,
+                kap, kap, cfg.S_max)
+            return jnp.sum(dq ** 2)
+
+        val = loss(kappa)
+        g = jax.grad(loss)(kappa)
+        assert jnp.isfinite(val)
+        assert g.shape == kappa.shape
+        assert jnp.all(jnp.isfinite(g))
+        # Gradient must be non-trivial (the depth-resolved kappa influences dq).
+        assert float(jnp.max(jnp.abs(g))) > 0.0
+
+    def test_3d_kappa_K33_getter_finite_and_nonneg(self):
+        """The K_33 getter accepts a 3-D interface kappa_Redi override and stays
+        finite + non-negative (it is a vertical diffusivity)."""
+        setup = self._setup(slope=3e-3)
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy,
+         jacobian, rho, T, S, cfg) = setup
+        n_lat, n_lon, nlev = T.shape
+        kz = jnp.linspace(1800.0, 100.0, nlev - 1)
+        kappa = jnp.broadcast_to(kz[None, None, :], (n_lat, n_lon, nlev - 1))
+        K33 = compute_isoneutral_K33_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg, mask=mask,
+            kappa_redi_override=kappa)
+        assert K33.shape == (n_lat, n_lon, nlev - 1)
+        assert jnp.all(jnp.isfinite(K33))
+        assert jnp.all(K33 >= 0.0)
+        assert float(jnp.max(K33)) > 0.0
+        # Depth-uniform 3-D kappa_Redi in K_33 == scalar kappa_Redi override.
+        k0 = float(jnp.mean(kz))
+        K33_3d_uniform = compute_isoneutral_K33_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg, mask=mask,
+            kappa_redi_override=jnp.full((n_lat, n_lon, nlev - 1), k0))
+        K33_scalar = compute_isoneutral_K33_latlon(
+            T, S, eta, H_bathy, grid, z_coord, cfg, mask=mask,
+            kappa_redi_override=k0)
+        assert jnp.allclose(K33_3d_uniform, K33_scalar, rtol=1e-12, atol=1e-30)

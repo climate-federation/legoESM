@@ -29,6 +29,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     gradient_y_cgrid,
     interp_cell_to_uface,
     interp_cell_to_vface,
+    interp_wface_to_center,
     laplacian_cgrid,
 )
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _neumann_fill_cgrid
@@ -51,6 +52,68 @@ from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
 # Division-guard epsilon — larger than float32 machine eps to prevent
 # intermediate blow-up in the backward pass (see plan §7, AD safety).
 _EPS_DIV = 1e-10
+
+
+def _kappa_is_interface_3d(kappa, nlev: int) -> bool:
+    """True iff ``kappa`` is a depth-resolved *interface* (W-grid) diffusivity.
+
+    The 3-D EKE closure (Stages 1-2) supplies ``kappa_GM`` / ``kappa_Redi`` at
+    the ``nlev-1`` interior interfaces.  Distinguishing this from the legacy
+    ``(n_lat, n_lon, 1)`` broadcast (a 2-D per-column kappa lifted with a
+    trailing length-1 axis) is by the last-axis length:
+
+    - last axis ``== nlev-1`` **and** ``nlev > 2`` ⇒ interface kappa (new path).
+    - last axis ``== 1`` ⇒ broadcast (legacy path), so a ``(n,n,1)`` kappa is
+      ALWAYS treated as a broadcast.
+
+    The ``nlev > 2`` guard resolves the only ambiguous case: when ``nlev == 2``
+    the interior-interface count ``nlev-1 == 1`` collides with the ``(n,n,1)``
+    broadcast shape, so we never interpret a length-1 trailing axis as an
+    interface field.  An interface kappa may therefore only be passed when
+    ``nlev > 2`` (every real ocean config has ``nlev >= 10``).  A scalar or a
+    ``(n_lat, n_lon)`` 2-D kappa is not an ndarray-with-ndim-3 and returns
+    False here, taking the bit-identical broadcast path downstream.
+    """
+    return (
+        isinstance(kappa, jnp.ndarray)
+        and kappa.ndim == 3
+        and kappa.shape[-1] == nlev - 1
+        and nlev > 2
+    )
+
+
+def _kappa_center_uvw(kappa, nlev: int):
+    """Resolve a kappa argument to its center / u-face / v-face / w-face forms.
+
+    Returns ``(kappa_c, kappa_u, kappa_v, kappa_w)`` where:
+
+    - **scalar / 2-D ``(n_lat, n_lon)``** (the legacy path) — the 2-D array is
+      lifted to ``(n_lat, n_lon, 1)`` cell-centred and interpolated to u/v-faces
+      exactly as before; ``kappa_w = kappa_c``.  A scalar passes through
+      unchanged on all four outputs.  **Bit-identical to the prior code.**
+    - **3-D interface ``(n_lat, n_lon, nlev-1)``** (the 3-D EKE path) — the
+      interface kappa is the w-face value DIRECTLY (``kappa_w = kappa``; it
+      already lives at the w-faces, so no lossy round-trip), while the
+      horizontal forms come from a vertical interface→center interpolation
+      (``interp_wface_to_center``) followed by the usual horizontal
+      cell→u/v-face interpolation.
+
+    Shared by the triad scheme, the centered scheme, and the K_33 getter so the
+    three can never diverge.
+    """
+    if _kappa_is_interface_3d(kappa, nlev):
+        kappa_w = kappa                              # (n_lat, n_lon, nlev-1)
+        kappa_c = interp_wface_to_center(kappa)      # (n_lat, n_lon, nlev)
+        kappa_u = interp_cell_to_uface(kappa_c)      # (n_lat, n_lon+1, nlev)
+        kappa_v = interp_cell_to_vface(kappa_c)      # (n_lat+1, n_lon, nlev)
+        return kappa_c, kappa_u, kappa_v, kappa_w
+    if isinstance(kappa, jnp.ndarray) and kappa.ndim == 2:
+        kappa_c = kappa[:, :, jnp.newaxis]           # (n_lat, n_lon, 1)
+        kappa_u = interp_cell_to_uface(kappa_c)      # (n_lat, n_lon+1, 1)
+        kappa_v = interp_cell_to_vface(kappa_c)      # (n_lat+1, n_lon, 1)
+        return kappa_c, kappa_u, kappa_v, kappa_c
+    # Scalar (or already a (n,n,1) broadcast array): pass through unchanged.
+    return kappa, kappa, kappa, kappa
 
 
 # =====================================================================
@@ -159,26 +222,39 @@ def gm_redi_tracer_tendency_latlon_cgrid(
     z_coord : OceanZStarCoordinate
     jacobian : (n_lat, n_lon)
     grid : LatLonGrid
-    kappa_GM : float or (n_lat, n_lon)
-        GM transport coefficient [m^2/s].
-    kappa_Redi : float
-        Redi isopycnal diffusivity [m^2/s].
+    kappa_GM : float, (n_lat, n_lon), or (n_lat, n_lon, nlev-1)
+        GM transport coefficient [m^2/s].  Scalar, per-column 2-D, or a 3-D
+        **interface** field (the 3-D EKE closure, used directly at the nlev-1
+        interfaces where the centered scheme evaluates all fluxes).
+    kappa_Redi : float, (n_lat, n_lon), or (n_lat, n_lon, nlev-1)
+        Redi isopycnal diffusivity [m^2/s].  Same three forms as ``kappa_GM``.
 
     Returns
     -------
     tendency : (n_lat, n_lon, nlev)
     """
+    nlev = q.shape[-1]
     dz_actual = z_coord.dz_ref * jacobian[:, :, jnp.newaxis]  # (n_lat, n_lon, nlev)
     dz_half = z_coord.dz_half_ref * jacobian[:, :, jnp.newaxis]  # (n_lat, n_lon, nlev-1)
 
-    # Broadcast kappa_GM / kappa_Redi for interface-level arrays when per-column
-    # (a 2-D array — e.g. the prognostic-EKE override, or K_iso=K_gm). A scalar
-    # passes through unchanged, so the constant-coefficient path is bit-identical.
-    if isinstance(kappa_GM, jnp.ndarray) and kappa_GM.ndim == 2:
+    # The centered scheme evaluates ALL fluxes (F_x/F_y/F_z) at the nlev-1
+    # interior interfaces, so kappa is needed at the interfaces (the W-grid).
+    # Three cases (see ``_kappa_is_interface_3d``):
+    #   * scalar              → pass through unchanged (bit-identical).
+    #   * 2-D (n_lat, n_lon)  → broadcast over interfaces via a trailing axis
+    #                            (the prognostic-EKE-2D / Visbeck / K_iso=K_gm
+    #                            per-column override) — bit-identical to before.
+    #   * 3-D (…, nlev-1)     → the 3-D EKE interface kappa, used DIRECTLY (it
+    #                            already lives at the interfaces).
+    if _kappa_is_interface_3d(kappa_GM, nlev):
+        kappa_GM_b = kappa_GM
+    elif isinstance(kappa_GM, jnp.ndarray) and kappa_GM.ndim == 2:
         kappa_GM_b = kappa_GM[:, :, jnp.newaxis]
     else:
         kappa_GM_b = kappa_GM
-    if isinstance(kappa_Redi, jnp.ndarray) and kappa_Redi.ndim == 2:
+    if _kappa_is_interface_3d(kappa_Redi, nlev):
+        kappa_Redi_b = kappa_Redi
+    elif isinstance(kappa_Redi, jnp.ndarray) and kappa_Redi.ndim == 2:
         kappa_Redi_b = kappa_Redi[:, :, jnp.newaxis]
     else:
         kappa_Redi_b = kappa_Redi
@@ -398,12 +474,19 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
         ``compute_isopycnal_slopes_latlon_cgrid`` expects them.
     mask, u_mask, v_mask : ocean / face masks.
     z_coord, jacobian, grid : geometry.
-    kappa_GM : float or (n_lat, n_lon)
-        GM bolus coefficient (scalar or per-column from Visbeck).
-    kappa_Redi : float or (n_lat, n_lon)
-        Redi isopycnal diffusivity. Scalar (constant) or per-column array — the
-        latter for the K_iso=K_gm coupling (pass kappa_Redi == kappa_GM), broadcast
-        to faces exactly like kappa_GM. A scalar keeps the path bit-identical.
+    kappa_GM : float, (n_lat, n_lon), or (n_lat, n_lon, nlev-1)
+        GM bolus coefficient [m^2/s].  Scalar (constant), per-column 2-D
+        (Visbeck), or a depth-resolved 3-D **interface** field (the 3-D EKE
+        closure): the interface kappa lives at the ``nlev-1`` interior
+        interfaces (W-grid) and is used DIRECTLY for the vertical flux, with a
+        vertical interface→center interpolation feeding the horizontal flux.
+        Dispatch is by ``_kappa_is_interface_3d`` (only when ``nlev > 2``).
+    kappa_Redi : float, (n_lat, n_lon), or (n_lat, n_lon, nlev-1)
+        Redi isopycnal diffusivity [m^2/s].  Same three forms as ``kappa_GM``.
+        Per-column or 3-D for the K_iso=K_gm coupling (pass kappa_Redi ==
+        kappa_GM): then the (kappa_Redi-kappa_GM) horizontal off-diagonal
+        cancels, as in Veros enable_eke_isopycnal_diffusion.  A scalar keeps the
+        path bit-identical.
     S_max : float
         Slope cap for clipping and DM95 taper.
 
@@ -415,30 +498,22 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     dz_actual = z_coord.dz_ref * jacobian[:, :, jnp.newaxis]
     dz_half = z_coord.dz_half_ref * jacobian[:, :, jnp.newaxis]
 
-    if isinstance(kappa_GM, jnp.ndarray) and kappa_GM.ndim == 2:
-        kappa_GM_c = kappa_GM[:, :, jnp.newaxis]                   # (n_lat, n_lon, 1)
-        kappa_GM_u = interp_cell_to_uface(kappa_GM_c)              # (n_lat, n_lon+1, 1)
-        kappa_GM_v = interp_cell_to_vface(kappa_GM_c)              # (n_lat+1, n_lon, 1)
-    else:
-        kappa_GM_c = kappa_GM
-        kappa_GM_u = kappa_GM
-        kappa_GM_v = kappa_GM
-    # w-face triads sit at cell-centers horizontally → cell-centered kappa.
-    kappa_GM_w = kappa_GM_c
-    # kappa_Redi: same face-interpolation as kappa_GM when it is a 2-D array
-    # (the K_iso=K_gm coupling passes kappa_Redi == kappa_GM, so kappa_Redi_u ==
-    # kappa_GM_u etc. and the (kappa_Redi-kappa_GM) horizontal off-diagonal
-    # cancels, as in Veros's enable_eke_isopycnal_diffusion). A scalar passes
-    # through unchanged ⇒ the constant-coefficient path is bit-identical.
-    if isinstance(kappa_Redi, jnp.ndarray) and kappa_Redi.ndim == 2:
-        kappa_Redi_c = kappa_Redi[:, :, jnp.newaxis]
-        kappa_Redi_u = interp_cell_to_uface(kappa_Redi_c)
-        kappa_Redi_v = interp_cell_to_vface(kappa_Redi_c)
-    else:
-        kappa_Redi_c = kappa_Redi
-        kappa_Redi_u = kappa_Redi
-        kappa_Redi_v = kappa_Redi
-    kappa_Redi_w = kappa_Redi_c
+    # Resolve kappa to its center / u-face / v-face / w-face forms (shared
+    # helper, identical dispatch for kappa_GM, kappa_Redi, and the K_33 getter):
+    #   * scalar / 2-D (n_lat, n_lon)  → cell-centred broadcast + horizontal
+    #     interp to faces, ``kappa_w = kappa_c`` — BIT-IDENTICAL to the prior
+    #     code (the K_iso=K_gm coupling passes kappa_Redi == kappa_GM, so the
+    #     (kappa_Redi-kappa_GM) horizontal off-diagonal still cancels, as in
+    #     Veros enable_eke_isopycnal_diffusion).
+    #   * 3-D interface (…, nlev-1)    → the 3-D EKE interface kappa: it is the
+    #     w-face value DIRECTLY (the faithful placement for the vertical flux —
+    #     no lossy round-trip), while the u/v-face horizontal forms come from a
+    #     vertical interface→center interp then the usual cell→face interp.
+    # The w-face triads share the SAME drho_dz_w(k+1/2) at a w-face, so a single
+    # interface-level kappa_w is the correct per-w-face coefficient.
+    kappa_GM_c, kappa_GM_u, kappa_GM_v, kappa_GM_w = _kappa_center_uvw(kappa_GM, nlev)
+    kappa_Redi_c, kappa_Redi_u, kappa_Redi_v, kappa_Redi_w = _kappa_center_uvw(
+        kappa_Redi, nlev)
 
     # Neumann-fill BOTH rho and q so the gradients across coastlines do
     # not pick up jumps between ocean and land sentinel values.  This
@@ -872,8 +947,10 @@ def compute_isoneutral_K33_latlon(
     This is EXACTLY the coefficient of dq/dz in the explicit triad ``F_z`` diagonal
     term that ``gm_redi_tracer_tendency_triads_latlon_cgrid`` drops when
     ``implicit_K33=True`` (same rho via the 2-iteration EOS coupling, same shared
-    ``_w_triad_slopes_tapers``, same ``kappa_Redi`` cell-centred broadcast — so the
-    explicit-drop and the implicit-add are consistent).  The lat-lon C-grid model
+    ``_w_triad_slopes_tapers``, same ``kappa_Redi`` w-face placement via
+    ``_kappa_center_uvw`` — so the explicit-drop and the implicit-add are
+    consistent; ``kappa_Redi`` may be a scalar, a 2-D per-column array, or a 3-D
+    interface field, just as in the triad ``F_z``).  The lat-lon C-grid model
     step adds it to the implicit vertical-diffusion ``K_v`` (Veros
     core/isoneutral/diffusion.py:154, ``delta = dt/dzw · K_33``), applying the
     vertical isoneutral diffusion backward-Euler-implicitly as in Veros rather than
@@ -888,10 +965,13 @@ def compute_isoneutral_K33_latlon(
         T, S, mask, fill_fn, eos_fn, z_coord.dz_ref, rho_0, g, n_iter=2,
     )
     kappa_Redi = cfg.kappa_Redi if kappa_redi_override is None else kappa_redi_override
-    if isinstance(kappa_Redi, jnp.ndarray) and kappa_Redi.ndim == 2:
-        kappa_Redi_w = kappa_Redi[:, :, jnp.newaxis]
-    else:
-        kappa_Redi_w = kappa_Redi
+    nlev = T.shape[-1]
+    # K_33 is evaluated at the nlev-1 w-faces, so kappa_Redi is needed there.
+    # The shared dispatch (``_kappa_center_uvw``) puts a 3-D interface kappa on
+    # the w-faces DIRECTLY (== the 4th return) and a scalar / 2-D per-column
+    # kappa as its cell-centred broadcast (bit-identical to the prior inline
+    # 2-D handling).  Take only the w-face form here.
+    kappa_Redi_w = _kappa_center_uvw(kappa_Redi, nlev)[3]
     n_lat, n_lon = mask.shape
     rho_filled = _neumann_fill_cgrid(rho, mask)
     drho_dx_u = gradient_x_cgrid(rho_filled, grid)

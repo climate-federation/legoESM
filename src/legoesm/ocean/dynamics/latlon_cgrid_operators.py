@@ -304,6 +304,49 @@ def interp_cell_to_vface(f: jnp.ndarray) -> jnp.ndarray:
     return jnp.concatenate([f[0:1], f_v_interior, f[-1:]], axis=0)
 
 
+def interp_wface_to_center(f: jnp.ndarray) -> jnp.ndarray:
+    """Interpolate an interface (w-face) field UP to full (cell-center) levels.
+
+    Inverse-direction vertical companion to ``interp_cell_to_uface`` /
+    ``interp_cell_to_vface`` (which move horizontally between cell centers
+    and u/v-faces).  Here the staggering is vertical: the input lives at the
+    ``nlev-1`` interior interfaces (w-faces, between adjacent cell centers),
+    the output at the ``nlev`` cell centers.
+
+    Convention matches the rest of this package: ``k=0`` is the surface,
+    ``k`` increases downward, and interface ``k`` (for ``k = 0 .. nlev-2``)
+    sits between full levels ``k`` and ``k+1``.  So interior center ``k``
+    (``1 <= k <= nlev-2``) is the average of the interfaces above (``k-1``)
+    and below (``k``); the top center (``k=0``) and bottom center
+    (``k=nlev-1``) have only one adjacent interface and take it one-sided::
+
+        center[0]      = iface[0]
+        center[k]      = 0.5 * (iface[k-1] + iface[k])   1 <= k <= nlev-2
+        center[nlev-1] = iface[nlev-2]
+
+    Used to lift a depth-resolved interface diffusivity (the 3-D EKE
+    ``kappa_GM`` / ``kappa_Redi``, which lives at the W-grid interfaces) to
+    cell centers before horizontal interpolation to u/v-faces in the GM/Redi
+    tracer-tendency operators — so the interface kappa is placed directly on
+    the w-faces for the vertical flux (no lossy round-trip) while the
+    horizontal flux still sees a center-then-face interpolation.
+
+    Pure slicing + concatenation: pytree-friendly, vmappable, differentiable.
+
+    Parameters
+    ----------
+    f : (n_lat, n_lon, nlev-1) at interior interfaces (w-faces).
+
+    Returns
+    -------
+    f_c : (n_lat, n_lon, nlev) at cell centers.
+    """
+    interior = 0.5 * (f[:, :, :-1] + f[:, :, 1:])  # (n_lat, n_lon, nlev-2)
+    top = f[:, :, 0:1]                              # (n_lat, n_lon, 1)
+    bottom = f[:, :, -1:]                           # (n_lat, n_lon, 1)
+    return jnp.concatenate([top, interior, bottom], axis=-1)
+
+
 def min_cell_to_uface(f: jnp.ndarray) -> jnp.ndarray:
     """Min-rule interpolation of a cell-center thickness to u-faces.
 
