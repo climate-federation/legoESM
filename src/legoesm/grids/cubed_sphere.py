@@ -2186,6 +2186,26 @@ def _gnomonic_ed_padded_centers(n: int, halo: int) -> tuple[jax.Array, jax.Array
     )  # (6, n_big, n_big)
 
 
+def gnomonic_ed_supergrid_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
+    """gnomonic_ed 2×-refined SUPERGRID nodes, ``(6, 2n+1, 2n+1)`` create-numbered.
+
+    Building block for the gated gnomonic_ed C-D grid (`create_cubed_sphere_
+    cdgrid`, in progress) — the FV3 supergrid carries corners (even,even),
+    cell centres (odd,odd) and edge midpoints (even,odd)/(odd,even) at one
+    refinement, the source for area_c/dxc/dyc/sin_sg.  Built by the shared
+    construct→shift→mirror→remap pipeline at 2n+1 equal-great-circle-angle
+    nodes.  REFINEMENT-CONSISTENT: the even nodes ``[::2, ::2]`` reproduce the
+    gnomonic_ed corners (verified to ~1e-15), so cdgrid metrics derived from
+    this supergrid agree with the A-grid corners.  Replaces the equiangular
+    ``linspace`` supergrid that `_compute_supergrid_metrics` builds.
+    """
+    rsq3 = 1.0 / jnp.sqrt(3.0)
+    alpha = float(jnp.arcsin(rsq3))
+    dely2 = 2.0 * alpha / (2 * n)
+    theta_sg = -alpha + jnp.arange(2 * n + 1, dtype=jnp.float64) * dely2
+    return _gnomonic_ed_6face_from_theta(theta_sg, alpha)
+
+
 def compute_padded_half_metrics_ed(
     n: int, radius: float, halo: int = 1,
 ) -> tuple[jax.Array, jax.Array]:
