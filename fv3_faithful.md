@@ -38,6 +38,8 @@ UNRELIABLE both ways (gave 5.95× on W5 v where true continuity is 1.30×).
 - **OPEN BUG — C96 W5 edge eigenmode:** W5 (mountain) max|wind| tracks C36/C48 (~38 m/s)
   to day3.5 then BLOWS UP 38→51→78.9→62, edge/corner-localized (faces 0,4). C36/C48 stay
   flat. Matches the runner's documented "C96 eigenmode" that dt-tuning has chased.
+  [iter61 — CFL REFUTED] C96 W5 at dt=300/150/100 all blow up to ~80/77/76 m/s at day5
+  (dt-INDEPENDENT) ⇒ NOT a CFL/dt-scaling issue; a genuine grid-scale SPATIAL eigenmode.
   ORACLE root-cause + verify-first (iter59): FV3 controls grid-scale edge modes via
   adaptive-Smagorinsky `dddmp` (oracle `fv_arrays.F90:360` → operational 0.2; hi-res
   `nord=1,d4_bg=0.075`). legoESM sets `dddmp=0.0` + pragmatic aggregate `div_damp` +
