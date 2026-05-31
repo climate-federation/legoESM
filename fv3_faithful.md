@@ -183,3 +183,22 @@ not-yet-tested via the RIGHT method (eigen-analysis): the c_sw→d_sw corner cou
 KE / d_sw zeta as a COUPLED growing mode.  The cube is comprehensively faithful otherwise (atm SW,
 3D PGF f64, ocean dynamics all ≈ MPAS/latlon; area_corner FV3-faithful).  The FB→production upgrade
 (the eigenmode fix) needs the eigen-analysis + a dedicated validation budget.
+
+
+## iter110 — codex ablation is CONFOUNDED by the FB port bug; FV3-upwind stable ⇒ findable bug
+Codex (iter109) recommended the centered→upwind ABLATION to settle the SW-vorticity root. Key insight:
+it is CONFOUNDED. The production scheme is CO-LOCATED B-grid Arakawa-Lamb (operators_cdgrid.py:1167:
+du_d_dt = zeta_corner*v_d, all at corners) — a clean co-located upwind doesn't map to FV3's STAGGERED
+upwind flux (would be an improvisation). The faithful upwind IS the FB staggered scheme (`_vorticity_
+flux`), which the FB chain ALREADY uses — and it has its OWN vertex-localized residual (W2 C36 day2
+NaN). So I cannot cleanly test "does upwind fix the eigenmode": BOTH the centered production (C96 W5
+eigenmode 38→79) AND the upwind FB port (W2 C36 NaN) are unstable, differently.
+BUT: FV3-upwind (the ORACLE) is STABLE (no eigenmode) ⇒ the FB residual is a FINDABLE PORTING BUG, not
+a fundamental scheme flaw, and the faithful fix (upwind staggered) IS correct. The blocker is the FB
+port bug. Single-step candidates still open (but single-step-limited, iter108b): the `_vorticity_flux`
+metric at the 3-face vertex (sina_u/sina_v from sin_sg may be degenerate there — NOT yet tested,
+distinct from the `_corner_vorticity` halo ruled out iter107), the KE (`_ke_upwind`), the d_sw zeta,
+the c_sw→d_sw coupling. GENUINE method: linearized-FB eigen-analysis (the growing eigenvector localizes
+the buggy coupling) — a dedicated/fresh-context effort.
+HONEST NET (codex-vetted): cube faithful everywhere except the SW upwind-vorticity FB PORT BUG (the
+eigenmode/residual root); FV3-upwind is the correct+stable target; the port bug needs eigen-analysis.
