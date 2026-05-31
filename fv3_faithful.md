@@ -133,3 +133,27 @@ directly the directive's "no edge artifacts."  NEXT: compare the legoESM PE hydr
 well-balanced finite-volume hydrostatic PGF (the geopotential-gradient / one_grad_p form that cancels
 the topographic term exactly) — the seam metric in the co-located Arakawa-Lamb gradient is the
 suspect.  Probe is the diagnostic; the fix is an FV3-faithful well-balanced PGF at the seams.
+
+
+## iter98 — SHARED ROOT: both residual edge artifacts = co-located `_arakawa_lamb_gradient` at seams
+Read the 3D PE hydrostatic momentum (fv3_hydrostatic_tendencies, primitive_eq_cdgrid.py ~415-446):
+  dB_dx = _arakawa_lamb_gradient(B, cdgrid)            # B = KE + Φ (geopotential)
+  dln_dx = _arakawa_lamb_gradient(ln_ps, cdgrid)        # ln(p_s) gradient (SEPARATE A-L call)
+  pg_corr_x = R_d * T_corner * dln_dx
+  du_d_dt = zeta_corner*v_d - dB_dx - pg_corr_x
+At REST (u=v=0, KE=0, ζ=0): du/dt = -∇Φ - R_d·T·∇ln p, which must cancel EXACTLY for a well-balanced
+scheme.  The two terms come from SEPARATE co-located `_arakawa_lamb_gradient` calls (on B=Φ and on
+ln_ps) — not discretely consistent at the panel seams (cross-face halo + cube metric) → they don't
+cancel → the iter97 7.5×-interior edge imbalance.  CONFIRMED.
+⇒ UNIFYING SYNTHESIS: BOTH remaining cube edge artifacts share ONE root — the CO-LOCATED
+`_arakawa_lamb_gradient`/`zeta_corner` operators are not SEAM-EXACT:
+  • SW C96 W5 eigenmode + v-imprint: centered `zeta_corner*v_d` (A-L), no upwind seam dissipation.
+  • 3D rest_state_topo 13×: -∇Φ vs -RT∇ln p (two A-L gradients) don't cancel at seams (not well-balanced).
+The CONVERGENT FAITHFUL FIX for both = FV3's STAGGERED finite-volume operators: upwind vorticity flux
+(`_vorticity_flux`, exists) for SW; a WELL-BALANCED finite-volume PGF (the single consistent
+geopotential-gradient/pressure-work form, FV3 `one_grad_p`/`p_grad`) for 3D, so -∇Φ and -RT∇ln p
+cancel by construction.  This is the DEFERRED co-located→staggered upgrade — now shown to be the
+single root of the residual edge artifacts, raising its priority.
+NEXT: (3D, possibly more bounded) reformulate the rest-state PGF as ONE well-balanced operator
+(compute -∇Φ and -RT∇ln p from the SAME interpolated layer values so they cancel discretely); test on
+the t=0 rest-topo probe (does the 7.5× seam imbalance → ~machine-zero?). FV3 `one_grad_p` is the oracle.
