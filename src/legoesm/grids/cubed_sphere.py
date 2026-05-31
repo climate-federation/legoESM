@@ -2065,6 +2065,66 @@ def _gnomonic_ed_construct(
     return xyz2latlon(pp1, pp2, pp3)
 
 
+def _gnomonic_ed_cell_center_thetas(n: int, halo: int) -> tuple[jax.Array, float]:
+    """W-edge cell-center angles for the gnomonic_ed padded grid.
+
+    Returns ``(theta_big, alpha)`` where ``theta_big`` has ``n_big = n+2*halo+2``
+    entries (the equiangular padded-metric convention) uniform in great-circle
+    edge angle (gnomonic_ed's defining property), cell-centered, spanning
+    ``halo+1`` cells beyond ±α on each side.  In-domain cells (k = ext..ext+n-1)
+    reproduce the gnomonic_ed face; the surrounding cells are the analytic
+    same-face halo extension (verified smooth, fv3_faithful.md).
+    """
+    rsq3 = 1.0 / jnp.sqrt(3.0)
+    alpha = float(jnp.arcsin(rsq3))
+    dely = 2.0 * alpha / n
+    ext = halo + 1
+    n_big = n + 2 * halo + 2
+    k = jnp.arange(n_big, dtype=jnp.float64)
+    theta_big = -alpha - ext * dely + (k + 0.5) * dely
+    return theta_big, alpha
+
+
+def compute_padded_half_metrics_ed(
+    n: int, radius: float, halo: int = 1,
+) -> tuple[jax.Array, jax.Array]:
+    """gnomonic_ed counterpart of :func:`legoesm.grids.halo.compute_padded_half_metrics`.
+
+    Same output contract — ``hx_ext, hy_ext`` of shape ``(6, n+2*halo, n+2*halo)``,
+    each = half the single-cell edge length (``dx/2``) on the padded grid — but
+    built on the FV3 operational gnomonic_ed grid instead of equiangular.
+
+    dx/dy/area are FACE-INDEPENDENT (cube symmetry; verified 0.0 across all 6
+    faces), so the half-metrics are computed once on the extended equatorial
+    face (``_gnomonic_ed_construct`` at the cell-center θ distribution) and
+    broadcast to all 6 faces.  The 2-cell great-circle chord matches the
+    equiangular construction exactly.
+    """
+    theta_big, alpha = _gnomonic_ed_cell_center_thetas(n, halo)
+    lon, lat = _gnomonic_ed_construct(theta_big, alpha=alpha)  # (n_big, n_big)
+    cos_lat = jnp.cos(lat)
+    x = cos_lat * jnp.cos(lon)
+    y = cos_lat * jnp.sin(lon)
+    z = jnp.sin(lat)
+    dx_chord = jnp.sqrt(
+        (x[2:, 1:-1] - x[:-2, 1:-1]) ** 2
+        + (y[2:, 1:-1] - y[:-2, 1:-1]) ** 2
+        + (z[2:, 1:-1] - z[:-2, 1:-1]) ** 2
+    )
+    dx_face = radius * 2.0 * jnp.arcsin(jnp.clip(dx_chord / 2.0, 0.0, 1.0))
+    dy_chord = jnp.sqrt(
+        (x[1:-1, 2:] - x[1:-1, :-2]) ** 2
+        + (y[1:-1, 2:] - y[1:-1, :-2]) ** 2
+        + (z[1:-1, 2:] - z[1:-1, :-2]) ** 2
+    )
+    dy_face = radius * 2.0 * jnp.arcsin(jnp.clip(dy_chord / 2.0, 0.0, 1.0))
+    hx = dx_face * 0.5
+    hy = dy_face * 0.5
+    hx_ext = jnp.broadcast_to(hx[None], (6,) + hx.shape)
+    hy_ext = jnp.broadcast_to(hy[None], (6,) + hy.shape)
+    return hx_ext, hy_ext
+
+
 def symm_ed(
     lamda: jax.Array, theta: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
