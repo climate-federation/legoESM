@@ -21,15 +21,17 @@ Fortran as oracle; do NOT improvise.** Branch `latlon-fv-amip-verify`.
 - **ocean cross-grid dynamics** (iter105/111): geostrophic cube 0.0143 ≈ latlon 0.0159 ≈ mpas 0.0169;
   IGW omega 1.09e-4 IDENTICAL all 3 grids. ocean cube 9/9 rest machine-zero. ⇒ ocean ≈ MPAS/latlon (OMIP).
 
-## ❗ THE ONE REMAINING GAP — SW FB-port edge instability = NON-NORMAL TRANSIENT growth (iter127 reframe; fix pending)
+## ❗ THE ONE REMAINING GAP — SW FB-port edge instability = WEAKLY-UNSTABLE spectrum (ρ≈1.0019) + NON-NORMAL TRANSIENT growth (iter128 Arnoldi; fix pending)
 CONFIRMED FV3 MISMATCH (codex iter109): production SW (operators_cdgrid.py:1167) + 3D PE
 (primitive_eq_cdgrid.py:445) use CENTERED `zeta_corner*v_d`; FV3 sw_core.F90 upwind-selects (donor-cell).
 Faithful path = the FB staggered c_sw→d_sw scheme (uses upwind `_vorticity_flux`); the FB chain has a
 RESIDUAL (W2 C36 day1 48.6 vs 38.6, day2 NaN).
 EIGEN-ANALYSIS (iter115b-123, finite-diff power iteration — jvp CPU-prohibitive; codex-challenged iter123):
-- **⚠ iter127 REFRAME (see the iter127 bullet below): the "per-step λ≈1.007" is a TRANSIENT non-normal
-  AMPLIFICATION rate (leading singular value of M^50), NOT a spectral eigenvalue — codex [high]'s
-  alternative, now CONFIRMED.** The single-step amplification of the dominant mode is 0.9997 (<1).
+- **⚠ COMPOSITE TRUTH (iter128 Arnoldi, see the iter128 bullet below — supersedes the iter127 "stable
+  spectrum" reframe):** the FB scheme is GENUINELY but WEAKLY UNSTABLE — Arnoldi ρ(M')≈1.0019>1 (real
+  eigenvalue cluster) — WITH strong NON-NORMAL TRANSIENT growth on top (K-window optimal ~1.007/step ≫
+  the 1.0019 eigenvalue). The quoted "per-step λ≈1.007" is the TRANSIENT rate, NOT the eigenvalue (1.0019);
+  the single-step 0.9997 was the transient singular vector, masking the weakly-projected unstable eigenvector.
 - **Growth amplitude robust, per-step λ≈1.007 ± 0.001 — CONDITIONING-VALIDATED (iter123, answers codex
   [high]):** robust across eps∈{1e-2,1e-3} × K∈{30,50,70} × 4 random restarts (range 1.0058–1.0072) ⇒
   NOT a finite-diff/float32 artifact (eps/restart-stable). The K-DEPENDENCE (1.0072@K50 → 1.0065@K70)
@@ -66,28 +68,30 @@ EIGEN-ANALYSIS (iter115b-123, finite-diff power iteration — jvp CPU-prohibitiv
   VALIDATED a single-step FB replication (calls _c_sw/_p_grad_c/_d_sw_native internals; matches model.step
   to float32-eps; runs float64). iter126 (wind-only, fixed-h) Rayleigh decomp did NOT close (wrong sign).
   iter127 FIX — full (h,u,v) coupled eigenvector + energy-norm (√g·η,√H̄·u,√H̄·v) 5-term decomposition:
-  - **NON-NORMALITY (the headline):** single-step amplification of the dominant 50-step mode = **0.9997
-    (<1, slightly DECAYING)**, closure residual only 1.1% (w IS a near-eigenvector of M'), yet the 50-step
-    amplification is **×1.42 (1.0071/step)**. A normal operator can't do that ⇒ the power iteration was
-    converging to the leading SINGULAR vector of M^50 (optimal transient growth), NOT a spectral
-    eigenvector. ⇒ the FB edge instability is **NON-NORMAL TRANSIENT growth** that pumps the edge into the
-    nonlinear regime → day2 NaN. (Confirms codex [high]; explains iter126's wrong sign.)
-  - **K-TREND CONFIRMATION (iter127b — DECISIVE, rules out an unconverged hidden eigenvalue):** per-step
-    λK MONOTONICALLY DECREASES with the window (K=50/100/150/200 → 1.0071/1.0059/1.0046/1.0031, →≤1) while
-    single-step ‖M'w‖ STAYS <1 (0.9997/0.9990/0.9983/0.9968, contractive). A true unstable eigenvalue
-    would give a K-INDEPENDENT per-step λ→λ_e>1 with ‖M'w‖→λ_e>1. The opposite trend ⇒ the spectrum is
-    asymptotically STABLE (radius ≤1); ALL the growth is finite-window non-normal transient amplification
-    (optimal ~×1.4 over a few hours). This is WHY damping can't kill it (iter125): transient growth comes
-    from eigenvector NON-ORTHOGONALITY, not eigenvalue location.
+  - **iter128 ARNOLDI RESOLUTION (genuine eigs on the linearized 1-step M' — the DEFINITIVE answer; codex
+    [high] was right AGAIN):** spectral radius **ρ(M') ≈ 1.0019 > 1** — a CLUSTER of REAL unstable
+    eigenvalues (~1.0015–1.0019; LM & LR agree). So the spectrum is GENUINELY UNSTABLE; my iter127
+    "asymptotically stable (radius ≤1)" was WRONG — the unstable eigenvalue is real but WEAKLY-PROJECTED,
+    masked by the single-step measurement (0.9997) on the dominant TRANSIENT singular vector (so "w is a
+    near-eigenvector" was also misleading — 1.1% residual ≫ the 3e-4 margin; the unstable eigenvectors are
+    different). **COMPOSITE TRUTH (reconciles iter123-127):** a WEAKLY UNSTABLE spectrum (ρ≈1.0019,
+    σ_asymp≈0.5/day, e-fold ~1.8 d) WITH strong NON-NORMAL TRANSIENT amplification layered on top
+    (K=50-window optimal ~1.0071/step ≈ ×1.4 over a few hours ≫ the 1.0019 eigenvalue). iter123-125's
+    "growing mode" is REAL (radius>1) but the eigenvalue is 1.0019 not 1.007; iter127's transient growth is
+    REAL and dominates EARLY but the spectrum is not stable. K-trend λK 1.0071→1.0031 = the optimal-window
+    rate relaxing from the transient peak toward ρ (still >1).
   - **Mode energy:** 91% v_d, 8% u_d, 1% h. Single-step term balance (decomp CLOSES, Σ=-3.95e-4 ≈ λ1-1
     =-3.38e-4): **KE-grad +1.47e-3 (Bernoulli SOURCE) ↔ PGF -1.72e-3 (SINK) dominate and nearly cancel**;
-    VORT -1.9e-4, DAMP ~0, MASS +5e-5. ⇒ a near-neutral gravity-wave KE↔PGF exchange at the panel edge
-    whose NON-NORMAL coupling transiently amplifies (so damping can't kill it — iter125, consistent).
-  - **FIX STRATEGY (revised):** target the NON-NORMALITY of the edge c_sw→d_sw KE-grad/PGF coupling
-    (over-reflection at the panel edge), NOT eigenvalue-shifting damping. The validated replication
-    (/tmp/fb_localize2.py) is the asset. NEXT (dedicated/fresh): compute the optimal-transient growth vs
-    a candidate edge-coupling fix (does the ×1.42/50-step amplification drop?) + a direct oracle W2-C36
-    step compare. Separate from the production C96 W5 eigenmode (slow ~1.0007).
+    VORT -1.9e-4, DAMP ~0, MASS +5e-5. ⇒ a near-neutral gravity-wave KE↔PGF exchange at the panel edge.
+  - **NaN MECHANISM = HYPOTHESIS (codex [medium], not demonstrated):** transient ×1.4 + the 1.0019
+    eigenvalue → nonlinear breakdown by day2 is PLAUSIBLE but not causally shown; would need projection
+    tracking onto the growth subspace during the nonlinear run + showing a fix delays/removes the NaN.
+  - **FIX STRATEGY (codex [medium] — testable, NOT pre-excluding damping):** evaluate candidate fixes by
+    BOTH ρ(M') (Arnoldi) AND max_K‖M^K‖ (transient gain); include targeted edge/Nyquist filtering AND the
+    edge c_sw→d_sw coupling change in the comparison (the damp_v×8 null was ONE config, not damping as a
+    class). Validated replication /tmp/fb_arnoldi.py (eigs) + /tmp/fb_localize2.py (decomp) are the assets.
+    NEXT (dedicated/fresh): candidate edge-coupling fix → re-run Arnoldi (does ρ drop <1?) + transient gain
+    + oracle W2-C36 step compare. Separate from the production C96 W5 eigenmode (slow ~1.0007).
 
 ## CPU-PROHIBITIVE here (rely on recorded audits + representative cross-grid + t=0 probes + the λ harness)
 3D atm baroclinic cross-grid (>21 min/case); full ocean matrix --grid all (57 cases, multi-hr); climate/AMIP;
