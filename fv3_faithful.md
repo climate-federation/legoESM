@@ -225,3 +225,14 @@ now halos are clean).
     SW-core vertex-vorticity scheme, NOT the metric. Production-safe; matrix green.
   OPEN: (1) chord->spherical sg_area upgrade (tracked, needs gold regen); (2) SW-core vertex-vorticity
   eigenmode (the real edge-artifact root); (3) FB residual / 3D PE upwind PPM vorticity.
+
+  iter91 VERIFICATION (full cdgrid file): HEAD = 17 failed / 165 passed — IDENTICAL to the
+  9c78db6c pre-area-change baseline (also 17 failed). The 4 fingerprints the edge/vertex fix
+  shifted (nord0 del2, nord1 del4, adaptive-Smag, corner-vorticity) are all re-pinned and PASS;
+  the remaining 17 (bgrid_ke, c_sw_sin_sg, cosine_bell, d_sw_native×2, d2a2c_vect, divergence_corner
+  _duo, iter778/780, matrix_script, no_future_caller, production_tendencies, sina_u_v, halo_gap
+  marker) are PRE-EXISTING (deleted results/*.png + concurrent-session churn), NOT this work. ⇒
+  area_corner FV3-faithfulness (edges ×2, vertices ×3, C1 n>=1 guard) is NET-ZERO regression +
+  codex-APPROVED (final consistency pass clean). area_corner edge/vertex/C1 SCALING = DONE.
+  (Pre-existing 17-test swamp in test_cdgrid_fv3_regression.py is a separate cleanup, not the
+  FV3-faithfulness focus.)
