@@ -75,3 +75,21 @@ over isd:ied extended w/ f0 halo'd; port relies on fv_tp_2d's internal halo — 
 the cube corners is the subtle open item), the B-grid KE transport (`_bgrid_ke_transport`), the
 c_sw→d_sw coupling. Still a growth-rate eigenmode (eigen-analysis the genuine method). This iteration
 CORRECTED a stale wrong lead (iter83) + ruled out the d_sw zeta — net narrowing.
+
+
+## iter115 — fv_tp_2d vort halo FAITHFUL too ⇒ ALL readable FB components faithful; residual is in the COUPLING
+Checked the last iter114 candidate: does fv_tp_2d cross-face-halo the transported zeta_abs at the cube
+corners?  YES — fv_tp_2d (fv_tp_2d.py:923) uses the duogrid halo (`dg=grid.duogrid; halo_dg=dg if
+use_duogrid else None`, ng=3 active in the FB chain) ⇒ the vort transport halo is FV3-faithful, NOT
+edge-mode.  RULED OUT.
+CAPSTONE of the FB-residual investigation: EVERY individually-readable/testable FB component is now
+verified FV3-FAITHFUL — d_sw zeta (iter114), vorticity-flux metric sina_u (iter110b), corner-vort
+metric (iter94) + circulation/reconstruction halo (iter107), fv_tp_2d vort halo (iter115),
+dissipation/Phase4/wind-halo (iter82-83).  Yet the W2 C36 residual (day1 48.6, day2 NaN) + the C96 W5
+eigenmode persist as a vertex-localized WIND/vorticity GROWTH-RATE mode (iter112: faces 0/4).
+⇒ DEFINITIVE CONCLUSION: the bug is NOT in any single component but in their COUPLING/ASSEMBLY (the
+c_sw→p_grad_c→d_sw forward-backward sequencing, the KE-vorticity-PGF balance at the vertices, or a
+sign/time-level subtlety) — a coupled growth mode that ONLY a linearized-FB eigen/singular-vector
+analysis can isolate (JAX jvp/vjp of FB^K about steady W2 → the optimal growing perturbation localizes
+the unstable coupling).  This is a dedicated research-level debug, best in a FRESH context (my context
+is now ~26 iterations large).  The single-component-read avenue is DEFINITIVELY exhausted.
