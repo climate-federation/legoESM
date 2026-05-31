@@ -236,3 +236,38 @@ now halos are clean).
   codex-APPROVED (final consistency pass clean). area_corner edge/vertex/C1 SCALING = DONE.
   (Pre-existing 17-test swamp in test_cdgrid_fv3_regression.py is a separate cleanup, not the
   FV3-faithfulness focus.)
+
+
+## iter92 — CROSS-GRID SW + PINPOINTED CONVERGENT ROOT (centered vs upwind vorticity)
+Cross-grid SW matrix (--only sw --grid all --quick, 16/16 PASS):
+  W2 L2 (dynamics):  cube 1.76e-4 | latlon 2.67e-4 | ico 9.9e-5 | spectral 3.6e-8  → cube FAITHFUL,
+    comparable to latlon/ico (all ~1e-4).
+  cosine_bell L2 (advection): cube 0.131 | latlon 0.025 | ico 0.074 | spectral 0.161 → cube ~5×
+    latlon, ~1.8× ico: a tracer/vorticity advection accuracy gap.
+  W2 v_ll_Linf = 0.344 (~0.9% of the 40 m/s jet) = residual cube v-IMPRINT (should be 0; the
+    directive's edge-artifact concern). latlon/ico/spectral have none.
+
+ROOT PINPOINTED: BOTH production paths use CENTERED vorticity advection —
+  • production SW: operators_cdgrid.py:1167-1185  `du_d_dt = zeta_corner * v_d - dB_dx`
+  • 3D PE:         primitive_eq_cdgrid.py:445       `du_d_dt = zeta_corner * v_d - dB_dx - pg_corr_x`
+FV3 uses UPWIND donor-cell vorticity flux (sw_core.F90:416-480): fy1=(v_d-uc*cosa_u)/sina_u
+(contravariant transporting wind), vort_x = where(fy1>0, vort[:,:,:-1], vort[:,:,1:]) (upwind),
+u += vort_x*fy1.  legoESM HAS this exact helper — `_vorticity_flux` (fv3_sw_core.py:1260-1288) —
+but it is wired ONLY into the experimental FB / `_d_sw_native` path, NOT production SW or the 3D PE.
+The centered Arakawa-Lamb form is energy-conserving but DISPERSIVE (no implicit dissipation); FV3's
+upwind form has implicit grid-scale dissipation that damps vertex/edge vorticity modes.
+
+⇒ ONE gap plausibly explains ALL THREE open symptoms: (a) the C96 W5 vertex EIGENMODE (centered =
+no upwind dissipation at the vertices → the mode grows); (b) the ~5× cosine_bell ADVECTION error;
+(c) the ~0.9% W2 v-IMPRINT.  This is the scorecard MAJOR "centered zeta_corner*v_d NOT FV3 upwind
+hord_vt" gap — now confirmed to affect BOTH production SW and the 3D PE.
+
+NEXT (major, multi-iter, the convergent FV3-faithfulness fix): wire `_vorticity_flux` (upwind) into
+production SW + 3D PE momentum. PLAN: (1) gated `use_fv3_upwind_vorticity_flux` flag (default OFF,
+zero production-regression risk, like the FB chain); (2) reconcile staggering — centered uses
+zeta_corner(corners)*v_d; upwind uses vort_x(x-faces)*fy1(contravariant) → flux-form momentum
+update; (3) VALIDATE on the W5 C96 eigenmode harness (does upwind damp the 38→80 blow-up?) +
+cosine_bell (does L2 drop toward latlon?) + W2 v-imprint; (4) conservation tradeoff (upwind
+dissipates energy — check vs FV3); (5) if it fixes the eigenmode + stays mass-conserving, promote
+toward default + regenerate the centered-era gold fingerprints. HIGH regression risk (production
+dynamics core) → gated + eigenmode-validated FIRST.
