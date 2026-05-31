@@ -51,17 +51,22 @@ matching mpas, baroclinic v smooth — all no panel imprint.)
 - ✅ SW path (FV3EdgeShallowWaterModel→`fv3_sw_core`) **algorithmically faithful**:
   `_d2a2c_vect` (sin_sg upwind, corner 2×2 solve), `_d_sw1`, upwind
   `_vorticity_flux` (fv3_sw_core:1260).
-- ⚠️ 3D PE dycore (`primitive_eq_cdgrid:445`) + ocean barotropic
-  (`cdgrid_momentum_tendencies:1167`) use CENTERED `zeta_corner*v_d` +
-  cell-center div-damp — FV3-INSPIRED, validated, NOT FV3's upwind 2-stage.
-  Functional faithfulness (results, edge-clean) everywhere.
+- ⚠️ 3D PE dycore (`primitive_eq_cdgrid:445`) uses CENTERED `zeta_corner*v_d` —
+  FV3-INSPIRED, validated, NOT FV3's upwind 2-stage. Functional faithfulness
+  (results, edge-clean) everywhere.
+- ✅ **Ocean barotropic NOW HAS a faithful option** (19de9080):
+  `barotropic_staggering="fv3edge"` routes through the TRUE FV3 edge-staggered SW
+  core (FV3EdgeShallowWaterModel: upwind abs-vorticity flux + `_d2a2c_vect`).
+  Gated; default stays validated `fv3sw` (centered). New cc↔edge lift round-trips
+  0.1%. fv3edge validated: stable, rest ×4 machine-zero, geostrophic artifact
+  resolved (nz 3.3%), 8/9 (phillips needs own div_damp ~150-180, upwind less
+  dissipative). Test `test_fv3edge_barotropic.py`.
 
 ## OPEN (sanctioned-major or CPU-bound — engineering decision: defer, don't risk
 the validated state via loop hacks against a concurrently-`git reset` tree)
 - 3D PE upwind faithfulness ⇒ FV3 2-stage c_sw/d_sw rewrite (core dycore).
-- Ocean→FV3Edge (true edge-D-grid): cdgrid HAS edge metrics (lon/cos/sin_angle_
-  edge_x/_y); needs cc→edge lift + inverse + damping re-tune. Marginal results-
-  benefit (artifact already resolved by fv3sw).
+- Ocean→FV3Edge: DONE (gated, 19de9080). Remaining: phillips div_damp calibration
+  (~150-180) to make fv3edge 9/9, then could promote to default if desired.
 - Climate-equilibrium cross-grid (held_suarez/AMIP): CPU-bound (latlon hydro
   ~35min/case; needs ~200-day spin-up).
 - C-face OMIP-coastline mask (coastal-BC, beyond matrix; SW-core jit-static).
