@@ -60,11 +60,12 @@ grid_type=0)`** (:1745) — all tested (test_fv3_gnomonic_ed/grids/mirror/native
 _iter621-629). Verified: 6-face (6,n+1,n+1), great-circle dx max/min = **1.4130 ≈
 √2** (exact FV3 signature). So the FV3 grid math is DONE + correct. **The gap is
 purely OPERATIONAL: `create_cubed_sphere` uses the equiangular path
-(_compute_gnomonic_lonlat), NOT `make_fv3_native_grid`.** Wiring = build the
-`CubedSphereGrid` (centers/areas/dx/dy/angles/cdgrid) from the gnomonic_ed corners
-+ re-validate ALL dynamics (calibrated on equiangular). Sanctioned (re-validate
-everything) but the grid math is no longer the blocker — only the wiring +
-re-calibration. Real FV3-grid-variant gap, much narrower than "implement".
+(_compute_gnomonic_lonlat), NOT `make_fv3_native_grid`.** Wiring is non-trivial: `create_cubed_sphere` derives ALL metrics + angles from the
+equiangular gnomonic centers + a PADDED gnomonic halo extension (cubed_sphere.py:
+280,319) — so gnomonic_ed needs the full metric + halo-extension re-derivation on
+that grid (not a corner-swap) + re-validate ALL dynamics (calibrated on
+equiangular). Sanctioned effort; grid MATH done+tested, but the metric/halo
+construction + re-calibration remain. Real FV3-grid-variant gap.
 
 ## FAITHFULNESS AUDIT (codex + Fortran oracle)
 - ✅ SW path (FV3EdgeShallowWaterModel→`fv3_sw_core`) **algorithmically faithful**:
