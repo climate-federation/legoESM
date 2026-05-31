@@ -178,3 +178,9 @@ now halos are clean).
     the vertex vorticity MORE accurate (larger) → expose the underlying instability MORE, confirming
     it is vertex-vorticity-driven. The vertex-area fix stays (production-safe, neutral); the real
     eigenmode fix is the SW-core corner scheme.
+
+  iter88 — area_corner fix is OCEAN-regression-safe too: ocean cube matrix 9/9 PASS (rest_state×4
+  drift machine-zero 1e-25/0/9e-15/0; barotropic_wave eta_cons 0.946 mass 9e-17; geostrophic_adj
+  T drift 7.5e-14; phillips/IGW/overflow pass). The shared-cdgrid vertex-area fix regresses NOTHING:
+  atm cube SW (W2 L2 1.76e-4, 4/4) + atm W2 C96 (stable 38.6) + ocean cube (9/9, rest machine-zero).
+  Fully validated FV3-faithful + regression-safe grid bug fix.
