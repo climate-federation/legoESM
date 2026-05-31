@@ -1,6 +1,11 @@
 """Cubed-sphere grid for legoESM.
 
-Implements a gnomonic equidistant cubed-sphere grid with 6 faces.
+Implements a gnomonic EQUIANGULAR cubed-sphere grid with 6 faces (cell-edge
+coordinates equally spaced in ANGLE alpha in [-pi/4, pi/4], projected via
+tan(alpha) — FV3's gnomonic_angl / grid_type=2).  NOTE: GFDL FV3's *operational*
+grid is gnomonic_ed (grid_type=0), a different (more cell-uniform) gnomonic
+variant — see fv_grid_utils.F90:gnomonic_ed.  Same family + same spherical-excess
+cell areas, but the cell-corner distribution differs from FV3's operational grid.
 Each face is an N x N grid of cells. The grid uses an A-grid (collocated)
 staggering for the shallow-water milestone, with all variables at cell centers.
 
@@ -601,8 +606,10 @@ def cube_transform(
 def _compute_gnomonic_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
     """Compute longitude and latitude on the gnomonic cubed-sphere.
 
-    Uses the equidistant gnomonic projection. Each face of the cube
-    is mapped to the sphere via central projection.
+    Uses the EQUIANGULAR gnomonic projection (alpha equally spaced in angle,
+    x = tan(alpha)) — i.e. FV3 gnomonic_angl / grid_type=2, NOT equidistant
+    (grid_type=1) nor FV3's operational gnomonic_ed (grid_type=0). Each face of
+    the cube is mapped to the sphere via central (gnomonic) projection.
 
     Parameters
     ----------

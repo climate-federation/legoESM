@@ -47,6 +47,18 @@ matching mpas, baroclinic v smooth — all no panel imprint.)
   latlon `implicit_cn` solver (collaborator Dhruv Balwada's Mercator/conservation
   work, NOT cube scope, memorialized).
 
+## GRID faithfulness (oracle, iter ~52)
+legoESM cube grid is **EQUIANGULAR** gnomonic (alpha equal-angle in [-π/4,π/4],
+x=tan(alpha) — FV3 `gnomonic_angl`/grid_type=2; cubed_sphere.py:618/659). FV3's
+**operational** grid is `gnomonic_ed` (grid_type=0, fv_grid_utils.F90:1296) — a
+DIFFERENT, more cell-uniform gnomonic variant. Same family + same spherical-excess
+cell areas (l'Huilier ≈ FV3 get_area; total area = 4πR² to 5e-7), but the
+cell-corner distribution differs from FV3's operational grid. Fixed the docstring
+(wrongly said "equidistant"). NOTE: switching to gnomonic_ed = change every grid
+metric → re-validate ALL tests/edge-proofs — foundational, deferred (both are
+valid gnomonic cubed-spheres; dynamics similar; gnomonic_ed only modestly more
+uniform). A real FV3-grid-variant faithfulness gap, distinct from the dynamics.
+
 ## FAITHFULNESS AUDIT (codex + Fortran oracle)
 - ✅ SW path (FV3EdgeShallowWaterModel→`fv3_sw_core`) **algorithmically faithful**:
   `_d2a2c_vect` (sin_sg upwind, corner 2×2 solve), `_d_sw1`, upwind
