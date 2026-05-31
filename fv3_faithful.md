@@ -88,10 +88,15 @@ seams, must use mirror construction):**
   SATURATES the halo cells at ±π/4 (the mirror wraps them cross-face) instead of the
   same-face extension BEYOND ±π/4 that the offset's across-edge halo position needs. (The
   angle BUILDER is unaffected — it uses centered differences, robust to this.) ⇒ correct
-  approach = the DIRECT 1D cube-coord projection (gnomonic_ed edge great circle extended,
-  cube_coord beyond ±1 → arctan > π/4) OR position-matching against the neighbor's actual
-  cells. This is codex's flagged silent-corruption-risk piece — get it right, don't rush.
-  Then gate `create_cubed_sphere(gnomonic="ed")` + validate + re-calibrate + W5 C96 test.
+  approach. ISOLATED (iter67): the CONSTRUCT extends cleanly (halo cells reach 45.02° vs
+  in-domain 43.45° — beyond the edge), so the saturation was an EXTRACTION artifact
+  (arctan2(y,x) on the mirrored/remapped face), NOT the grid. ⇒ robust offset path =
+  POSITION-MATCHING on the cleanly-extending xyz: build the extended 6-face create-numbered
+  centers (construct→shift→mirror→remap, halo=1), then for each (face,edge,j) match the
+  halo cell's xyz to the neighbour edge-strip cells via great-circle interp → fractional
+  index → offset=frac−j. No fragile analytic angle inversion. VALIDATE with cross-face
+  continuity USING the offsets (codex's required test) for halo=1/2/3. Then gate
+  `create_cubed_sphere(gnomonic="ed")` + validate + re-calibrate + W5 C96 eigenmode test.
 
 ## VERIFICATION
 - SW 16/16 all grids ≤1 cell. Full fast cube atm dynamical suite PASS + NH dcmip_tc1, mass
