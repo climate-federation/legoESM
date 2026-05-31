@@ -35,6 +35,12 @@ physical neighbor on adjacent face via halo): scalars (p_s,T,eta,SST) 0.5-1.8×,
 geographic winds 0.5-2.3× — all CONTINUOUS. ⇒ no panel-seam artifact, proven
 beyond visual. (Visual: geostrophic clean zonal bands, phillips smooth eddies
 matching mpas, baroclinic v smooth — all no panel imprint.)
+RE-VERIFIED iter ~56 (3D PE dycore, fresh): baroclinic cube 3/3 PASS — sigma mass
+7.4e-15 max|v|13.3, hybrid 1.4e-14, rotated_baroclinic 3.5e-13 max|v|23.8. Native
+v-wind edge-roughness: sigma 0.97×, hybrid 1.24×, rotated_baroclinic 1.22× (jet
+crosses panel seams = hardest test) — all ≤1.24×, NO edge artifacts. ⇒ centered
+FV3-inspired PE dycore is FUNCTIONALLY edge-clean; the PE caveat is algorithmic
+faithfulness (upwind 2-stage), NOT edge artifacts.
 RE-VERIFIED iter ~55 (fresh run, not cached): cube SW 4/4 PASS, mass 1e-15..1e-16,
 W2 v_ll_Linf 0.339. Fresh native-field edge-roughness (RMS 2nd-diff edge-band/
 interior): physically-dominant fields height 0.65, u 0.77 (NO edge amplification,
