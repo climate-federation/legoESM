@@ -21,18 +21,20 @@ Fortran as oracle; do NOT improvise.** Branch `latlon-fv-amip-verify`.
 - **ocean cross-grid dynamics** (iter105/111): geostrophic cube 0.0143 ≈ latlon 0.0159 ≈ mpas 0.0169;
   IGW omega 1.09e-4 IDENTICAL all 3 grids. ocean cube 9/9 rest machine-zero. ⇒ ocean ≈ MPAS/latlon (OMIP).
 
-## ❗ THE ONE REMAINING GAP — SW FB-port eigenmode (precisely typed; harness-equipped; structural fix pending)
+## ❗ THE ONE REMAINING GAP — SW FB-port edge instability = NON-NORMAL TRANSIENT growth (iter127 reframe; fix pending)
 CONFIRMED FV3 MISMATCH (codex iter109): production SW (operators_cdgrid.py:1167) + 3D PE
 (primitive_eq_cdgrid.py:445) use CENTERED `zeta_corner*v_d`; FV3 sw_core.F90 upwind-selects (donor-cell).
 Faithful path = the FB staggered c_sw→d_sw scheme (uses upwind `_vorticity_flux`); the FB chain has a
 RESIDUAL (W2 C36 day1 48.6 vs 38.6, day2 NaN).
 EIGEN-ANALYSIS (iter115b-123, finite-diff power iteration — jvp CPU-prohibitive; codex-challenged iter123):
-- **Genuine growing mode, per-step λ≈1.007 ± 0.001 — CONDITIONING-VALIDATED (iter123, answers codex
+- **⚠ iter127 REFRAME (see the iter127 bullet below): the "per-step λ≈1.007" is a TRANSIENT non-normal
+  AMPLIFICATION rate (leading singular value of M^50), NOT a spectral eigenvalue — codex [high]'s
+  alternative, now CONFIRMED.** The single-step amplification of the dominant mode is 0.9997 (<1).
+- **Growth amplitude robust, per-step λ≈1.007 ± 0.001 — CONDITIONING-VALIDATED (iter123, answers codex
   [high]):** robust across eps∈{1e-2,1e-3} × K∈{30,50,70} × 4 random restarts (range 1.0058–1.0072) ⇒
-  NOT a finite-diff/float32 artifact (eps/restart-stable, real eigenvalue >1). CAVEAT: residual
-  ‖Mv−λv‖/‖λv‖≈3–5% (best: eps=1e-2, K≥50) ⇒ the DOMINANT mode in a near-unit CLUSTER (W2 has many
-  neutral λ≈1 modes), NOT a cleanly isolated 6-figure eigenvalue; eps=1e-4 too small (roundoff → resid
-  0.45). State as a BAND (1.007±0.001), never "1.0072".
+  NOT a finite-diff/float32 artifact (eps/restart-stable). The K-DEPENDENCE (1.0072@K50 → 1.0065@K70)
+  was the early hint it's a transient (window-peaking) rate, not a K-independent eigenvalue (iter127
+  confirmed). State as a BAND (1.007±0.001), never "1.0072".
 - **TYPE = 2Δx GRID-SCALE EDGE MODE — PROVEN (iter125, resolves codex [medium] #2):** modal-ID across
   C24/C36/C48 (eigenvector du): argmax ALWAYS on a panel-edge row (j0, face 2/3); 1D Fourier along the
   dominant edge line peaks at the NYQUIST (2Δx) wavenumber (power frac 0.79/0.91/0.88) with sign-flip
@@ -60,18 +62,25 @@ EIGEN-ANALYSIS (iter115b-123, finite-diff power iteration — jvp CPU-prohibitiv
   D→A avg; the FB staggered port does not). All 3 codex findings resolved.
 - **HARNESS (conditioned, iter123):** finite-diff power iteration WITH the eps/K/restart sweep + residual
   → one diagnostic reported as a BAND.
-- **LOCALIZATION ATTEMPT (iter126) — the mode is a COUPLED HEIGHT-WIND mode (corrects the plan):** built +
+- **iter126→127 LOCALIZATION → the growth is NON-NORMAL TRANSIENT, not an unstable eigenvalue:** built +
   VALIDATED a single-step FB replication (calls _c_sw/_p_grad_c/_d_sw_native internals; matches model.step
-  to float32-eps). Rayleigh-decomposed per-step growth λ-1 into the 4 u_d/v_d increment pieces (KE-grad,
-  vort-flux, del6-damp, PGF) projected onto the eigenvector. It does NOT close — and with OPPOSITE sign:
-  the wind-only single-step map AT FIXED INPUT-h DECAYS (Σ=-3.6e-3) while the full K-step map GROWS
-  (λ-1=+7.1e-3). ⇒ the 2Δx edge mode's growth REQUIRES the h↔wind feedback; it is NOT attributable to a
-  single d_sw wind term. The earlier "decompose ke_diff_u vs fy_vort" plan was INSUFFICIENT (ignores the
-  essential h-coupling; KE is the biggest positive WIND piece +2.1e-3 but the wind subspace decays). NEXT
-  (dedicated/fresh): redo with the FULL (h,u,v) coupled eigenvector + an energy-norm, 5-term decomposition
-  (KE/VORT/DAMP/PGF/MASS-continuity) → verify closure (Σ=λ-1) → localize the edge-coupling term → match
-  the FV3 edge treatment → FB→production. The validated replication is the reusable asset.
-  Separate from the production C96 W5 eigenmode (slow ~1.0007).
+  to float32-eps; runs float64). iter126 (wind-only, fixed-h) Rayleigh decomp did NOT close (wrong sign).
+  iter127 FIX — full (h,u,v) coupled eigenvector + energy-norm (√g·η,√H̄·u,√H̄·v) 5-term decomposition:
+  - **NON-NORMALITY (the headline):** single-step amplification of the dominant 50-step mode = **0.9997
+    (<1, slightly DECAYING)**, closure residual only 1.1% (w IS a near-eigenvector of M'), yet the 50-step
+    amplification is **×1.42 (1.0071/step)**. A normal operator can't do that ⇒ the power iteration was
+    converging to the leading SINGULAR vector of M^50 (optimal transient growth), NOT a spectral
+    eigenvector. ⇒ the FB edge instability is **NON-NORMAL TRANSIENT growth** that pumps the edge into the
+    nonlinear regime → day2 NaN. (Confirms codex [high]; explains iter126's wrong sign.)
+  - **Mode energy:** 91% v_d, 8% u_d, 1% h. Single-step term balance (decomp CLOSES, Σ=-3.95e-4 ≈ λ1-1
+    =-3.38e-4): **KE-grad +1.47e-3 (Bernoulli SOURCE) ↔ PGF -1.72e-3 (SINK) dominate and nearly cancel**;
+    VORT -1.9e-4, DAMP ~0, MASS +5e-5. ⇒ a near-neutral gravity-wave KE↔PGF exchange at the panel edge
+    whose NON-NORMAL coupling transiently amplifies (so damping can't kill it — iter125, consistent).
+  - **FIX STRATEGY (revised):** target the NON-NORMALITY of the edge c_sw→d_sw KE-grad/PGF coupling
+    (over-reflection at the panel edge), NOT eigenvalue-shifting damping. The validated replication
+    (/tmp/fb_localize2.py) is the asset. NEXT (dedicated/fresh): compute the optimal-transient growth vs
+    a candidate edge-coupling fix (does the ×1.42/50-step amplification drop?) + a direct oracle W2-C36
+    step compare. Separate from the production C96 W5 eigenmode (slow ~1.0007).
 
 ## CPU-PROHIBITIVE here (rely on recorded audits + representative cross-grid + t=0 probes + the λ harness)
 3D atm baroclinic cross-grid (>21 min/case); full ocean matrix --grid all (57 cases, multi-hr); climate/AMIP;
