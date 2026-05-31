@@ -419,3 +419,133 @@ def barotropic_substeps_fv3sw(
         u=state.u.replace(data=u_new),
         v=state.v.replace(data=v_new),
     )
+
+
+# ==============================================================================
+# FV3-faithful barotropic via the TRUE FV3 edge-staggered SW core (FV3Edge):
+# upwind absolute-vorticity flux + _d2a2c_vect (sin_sg upwind, corner 2x2 solve).
+# Gated by barotropic_staggering="fv3edge"; the default "fv3sw" (corner-staggered
+# CDGridShallowWaterModel) is unchanged.  cc<->edge lift round-trips to 0.1% on a
+# smooth field (validated).
+# ==============================================================================
+
+def _derive_fv3edge_masks(mask):
+    """Edge masks for FV3Edge winds: u_d (6,n,n+1) x-edge ocean iff both j-flanking
+    cells ocean; v_d (6,n+1,n) y-edge ocean iff both i-flanking cells ocean."""
+    mp = pad_halo(mask, interp_offsets=None)  # (6, n+2, n+2)
+    ux_mask = mp[:, 1:-1, :-1] * mp[:, 1:-1, 1:]   # (6, n, n+1)
+    vy_mask = mp[:, :-1, 1:-1] * mp[:, 1:, 1:-1]   # (6, n+1, n)
+    return ux_mask, vy_mask
+
+
+def _cc_to_edge_vector(u_fl, v_fl, cdgrid):
+    """Face-local cell-centre (u,v) -> FV3 edge-midpoint D-grid winds
+    (u_d (6,n,n+1), v_d (6,n+1,n)).  cc->geographic (cc 4-edge angles) -> scalar
+    halo-interp to edges (geographic is seam-continuous) -> rotate into the
+    edge-local basis (cos/sin_angle_edge_x/_y).  Inverse is edge->cc averaging
+    (round-trips to ~0.1% on smooth fields)."""
+    from legoesm.grids.cubed_sphere_cdgrid import cell_centre_angles_from_4edge
+    ca, sa = cell_centre_angles_from_4edge(cdgrid)
+    ue = ca * u_fl - sa * v_fl   # geographic east at cc
+    vn = sa * u_fl + ca * v_fl   # geographic north at cc
+    uep = pad_halo(ue, halo=1, interp_offsets=cdgrid.base.halo_interp_offsets)
+    vnp = pad_halo(vn, halo=1, interp_offsets=cdgrid.base.halo_interp_offsets)
+    ue_x = 0.5 * (uep[:, 1:-1, :-1] + uep[:, 1:-1, 1:])   # (6, n, n+1)
+    vn_x = 0.5 * (vnp[:, 1:-1, :-1] + vnp[:, 1:-1, 1:])
+    ue_y = 0.5 * (uep[:, :-1, 1:-1] + uep[:, 1:, 1:-1])   # (6, n+1, n)
+    vn_y = 0.5 * (vnp[:, :-1, 1:-1] + vnp[:, 1:, 1:-1])
+    u_d = cdgrid.cos_angle_edge_x * ue_x + cdgrid.sin_angle_edge_x * vn_x
+    v_d = -cdgrid.sin_angle_edge_y * ue_y + cdgrid.cos_angle_edge_y * vn_y
+    return u_d, v_d
+
+
+def _edge_to_cc_vector(u_d, v_d):
+    """FV3 edge-midpoint D-grid winds -> face-local cell-centre (u,v) by averaging
+    the two flanking edges (inverse of :func:`_cc_to_edge_vector`)."""
+    u_cc = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])
+    v_cc = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])
+    return u_cc, v_cc
+
+
+def barotropic_substeps_fv3edge(
+    state: OceanState,
+    dt_s: float,
+    n_substeps: int,
+    grid: CubedSphereGrid,
+    cdgrid: CubedSphereCDGrid,
+    z_coord: OceanZStarCoordinate,
+    config: OceanConfig,
+    sw_edge_model,
+) -> OceanState:
+    """Barotropic substeps via the TRUE FV3 edge-staggered SW core
+    (``FV3EdgeShallowWaterModel``: upwind absolute-vorticity flux + ``_d2a2c_vect``
+    + RK3 + div-damp) — the algorithmically-faithful counterpart to
+    :func:`barotropic_substeps_fv3sw` (corner-staggered, centered).  Gated by
+    ``barotropic_staggering="fv3edge"``.
+
+    cc(face-local) -> FV3 edge-midpoint D-grid via :func:`_cc_to_edge_vector`;
+    ``h=H_bathy+eta``, ``h_s=-H_bathy`` (PGF=g*grad eta); coasts impermeable via the
+    edge masks re-applied each substep; edge->cc on exit preserves the baroclinic
+    deviation.
+    """
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        FV3EdgeShallowWaterState,
+    )
+    _f64 = jnp.float64
+    H_bathy = jnp.asarray(state.H_bathy.data, _f64)
+    mask = jnp.asarray(state.land_mask.data, _f64)
+    u = jnp.asarray(state.u.data, _f64)
+    v = jnp.asarray(state.v.data, _f64)
+    eta_raw = jnp.asarray(state.eta.data, _f64)
+    min_water_col = jnp.asarray(config.min_water_column_m, _f64)
+    dt_s = jnp.asarray(dt_s, _f64)
+    eta_floor = min_water_col - H_bathy
+    eta = jnp.maximum(eta_raw, eta_floor) * mask
+
+    h_k = compute_layer_thickness(
+        eta, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
+    )
+    _bar_triple = jnp.sum(
+        jnp.stack([h_k, u * h_k, v * h_k], axis=-1), axis=-2,
+    )
+    H_total = jnp.maximum(_bar_triple[..., 0], min_water_col)
+    U_bar_cc = _bar_triple[..., 1] / H_total * mask
+    V_bar_cc = _bar_triple[..., 2] / H_total * mask
+
+    u_d, v_d = _cc_to_edge_vector(U_bar_cc, V_bar_cc, cdgrid)
+    u_d = jnp.asarray(u_d, _f64)
+    v_d = jnp.asarray(v_d, _f64)
+    ux_mask, vy_mask = _derive_fv3edge_masks(mask)
+    u_d = u_d * ux_mask
+    v_d = v_d * vy_mask
+
+    h_sw = (H_bathy + eta).astype(_f64)
+    h_s = (-H_bathy).astype(_f64)
+    sw_state = FV3EdgeShallowWaterState(h=h_sw, u_d=u_d, v_d=v_d, h_s=h_s)
+
+    def body(i, s):
+        s = sw_edge_model.step(s, dt_s)
+        return s._replace(u_d=s.u_d * ux_mask, v_d=s.v_d * vy_mask)
+
+    sw_state = jax.lax.fori_loop(0, n_substeps, body, sw_state)
+
+    eta_new = (sw_state.h - H_bathy) * mask
+    eta_new = jnp.maximum(eta_new, eta_floor) * mask
+    U_bar_cc_new, V_bar_cc_new = _edge_to_cc_vector(sw_state.u_d, sw_state.v_d)
+    U_bar_cc_new = U_bar_cc_new * mask
+    V_bar_cc_new = V_bar_cc_new * mask
+
+    u_baro_prime = u - U_bar_cc[..., jnp.newaxis]
+    v_baro_prime = v - V_bar_cc[..., jnp.newaxis]
+    u_new = (u_baro_prime + U_bar_cc_new[..., jnp.newaxis]) * mask[..., jnp.newaxis]
+    v_new = (v_baro_prime + V_bar_cc_new[..., jnp.newaxis]) * mask[..., jnp.newaxis]
+
+    _M = "barotropic_solver"
+    eta_f = cast(eta_new, _M, "storage")
+    u_new = cast(u_new, _M, "storage")
+    v_new = cast(v_new, _M, "storage")
+    return state._replace(
+        eta=state.eta.replace(data=eta_f),
+        u=state.u.replace(data=u_new),
+        v=state.v.replace(data=v_new),
+    )

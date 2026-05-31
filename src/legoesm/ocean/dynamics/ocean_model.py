@@ -39,6 +39,7 @@ from legoesm.ocean.dynamics.barotropic import barotropic_substeps
 from legoesm.ocean.dynamics.ocean_pe_cdgrid import ocean_baroclinic_tendencies_cdgrid
 from legoesm.ocean.dynamics.barotropic_cgrid import (
     barotropic_substeps_cgrid, barotropic_substeps_fv3sw,
+    barotropic_substeps_fv3edge,
 )
 from legoesm.ocean.conservation import ocean_conservation_fixer
 from legoesm.ocean.physics.combined import make_ocean_physics
@@ -142,9 +143,10 @@ class OceanModel:
         # SW model's step is jitted on a static ``self``).  See
         # ``barotropic_substeps_fv3sw`` and ``fv3_faithful.md``.
         self._sw_baro_model = None
-        if self.config.barotropic_staggering == "fv3sw":
+        if self.config.barotropic_staggering in ("fv3sw", "fv3edge"):
             from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-                CDGridShallowWaterModel, iter1009_dual_target_config,
+                CDGridShallowWaterModel, FV3EdgeShallowWaterModel,
+                iter1009_dual_target_config,
             )
             n = self._cdgrid.n
             sw_cfg = iter1009_dual_target_config(
@@ -160,9 +162,13 @@ class OceanModel:
                 # conservation on the wet domain (codex review of bd74c45b).
                 fix_mass=False,
             )
-            self._sw_baro_model = CDGridShallowWaterModel(grid, sw_cfg)
-            # Reuse the ocean cdgrid (identical for this grid) to avoid a
-            # second metric build.
+            # "fv3sw" = corner-staggered CDGrid (centered, validated default);
+            # "fv3edge" = TRUE FV3 edge-staggered core (upwind flux + _d2a2c_vect,
+            # algorithmically faithful).
+            if self.config.barotropic_staggering == "fv3edge":
+                self._sw_baro_model = FV3EdgeShallowWaterModel(grid, sw_cfg)
+            else:
+                self._sw_baro_model = CDGridShallowWaterModel(grid, sw_cfg)
             self._sw_baro_model.cdgrid = self._cdgrid
 
         # Build physics function if configured
@@ -213,10 +219,12 @@ class OceanModel:
                 "salinity_min_psu must be <= salinity_max_psu, got "
                 f"{config.salinity_min_psu!r} > {config.salinity_max_psu!r}",
             )
-        if config.barotropic_staggering not in ("a_grid", "c_grid", "fv3sw"):
+        if config.barotropic_staggering not in (
+            "a_grid", "c_grid", "fv3sw", "fv3edge",
+        ):
             raise ValueError(
-                "barotropic_staggering must be 'a_grid', 'c_grid' or 'fv3sw', "
-                f"got {config.barotropic_staggering!r}",
+                "barotropic_staggering must be 'a_grid', 'c_grid', 'fv3sw' or "
+                f"'fv3edge', got {config.barotropic_staggering!r}",
             )
 
     def _assert_runtime_invariants(self, state: OceanState) -> None:
@@ -407,7 +415,14 @@ class OceanModel:
         # double-count the eta tendency.
         # Slow u/v tendency is already included in state_mid.
         dt_s = dt / self.config.n_barotropic_substeps
-        if self.config.barotropic_staggering == "fv3sw":
+        if self.config.barotropic_staggering == "fv3edge":
+            state_new = barotropic_substeps_fv3edge(
+                state_mid,
+                dt_s, self.config.n_barotropic_substeps,
+                self.grid, self._cdgrid, self.z_coord, self.config,
+                self._sw_baro_model,
+            )
+        elif self.config.barotropic_staggering == "fv3sw":
             state_new = barotropic_substeps_fv3sw(
                 state_mid,
                 dt_s, self.config.n_barotropic_substeps,
