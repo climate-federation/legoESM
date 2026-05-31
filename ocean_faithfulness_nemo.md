@@ -8,6 +8,21 @@ Review every code change with `/codex:adversarial-review`. Shrink this file ever
 **Branch:** `omip-faithful-nemo-comparison`. Completion promise DONE only when grids
 genuinely match NEMO — far off; no false DONE.
 
+## COLD-START SOLVED (iter 18 — read this FIRST)
+**RK3 momentum integrator SOLVES the corrected-WOA-IC cold-start.** Arm 8128761
+(corrected IC + `--momentum-rk3` + smag-cfl + EVD + adaptive-vertadv + smc03 +
+implicit_cn baro) ran STABLE with **PHYSICAL max|u| ~1 m/s, decreasing** (vs the
+forward-Euler+Matsuno runs' 30 m/s equatorial transient + the corrected-IC
+blowup). So RK3 **also fixes the velocity over-intensity**. `explicit_substep`
+barotropic DESTABILIZES (blew up alone + with RK3) → use OMIP-default implicit_cn.
+Vindicates iter-9 (RK3 + full stack); iter-10's "RK3 marginal" was pre-smag-cfl-cap.
+IC-smoothing dead (smooth_woa_ts smooths T/S separately → static instability).
+**=> RK3 is the production default.** Trustworthy run 8131128 launched (corrected
++ RK3, 12 d, snap/4 d) → first correct-IC compare vs NEMO. Memory:
+[[omip-rk3-coldstart-solve]]. WINNING CONFIG: `--woa-init --balanced-init
+--momentum-rk3 --partial-cell --pgf-scheme smc03 --adaptive-implicit-vertadv
+--min-levels 2 --C-smag-lap 3.0 --smag-cfl-safety 0.125 --dt 75`.
+
 ## PIPELINE AUDIT (iter 17 — read this FIRST)
 Multi-agent adversarial audit (workflow w2gc8r1bh, 15 agents) of the compare + IC
 pipeline found **8 confirmed coordinate/unit bugs** — the rad2deg fix was not the
@@ -20,6 +35,17 @@ finite flag +S,v; `load_core2_nyf(allow_synthetic=False)`; `_idx_t` floor (−3h
 phase). **CORRECTED run 8127491 launched** (fixed pipeline) → corrected day-10 vs
 buggy day-10 (0.968) quantifies the IC-bug impact + decides the 3mo (8124320, still
 buggy IC) restart. Memory: [[omip-pipeline-coordinate-bugs]].
+**OUTCOME (iter 17): the corrected WOA-init BLOWS UP the cold-start** (day 0.25–1)
+while the buggy run was stable — the wrong-longitude bug accidentally ZONALIZED
+(smoothed) the IC into the stable regime; the correct IC has the real curvilinear
+fronts that trigger the deep rough-WOA-IC instability (dt-independent; needs the
+NEMO RK3+EVD structural stack, NOT config). No quick fix: woa-smooth8 (day 0.25),
+no-balanced-ssh (day 0.25), no-smooth (day 1) all blow up. **HONEST LANDING:
+snapshots use correct coords + the IC-lon error washes out by day 10 (forcing-
+dominated) → the buggy-IC SST corr 0.968 / RMSE 2.76 is a FAIR caveated result
+(the ¼° model reproduces NEMO's SST pattern). The WOA-init fix is kept (correct in
+principle, matters for the early transient + Arctic); a stable run on the FULLY
+correct IC is documented open cold-start work, not closable by config.**
 
 ## BREAKTHROUGH (iter 16+ — read this FIRST)
 **The "not faithful" verdict was largely a SCORER BUG.** `compare_omip_nemo._load_legoesm`
@@ -78,7 +104,7 @@ Mechanism: cold-start geostrophic adjustment from rest (u=0) overshoots to ~5-10
 |---|---|---|
 | tripole/eORCA025 (¼°) | **STABLE cold-start** (area·cos² smag ceiling, committed abe80cdd; 2-day smoke rc=0); full compare pipeline VALIDATED end-to-end | day-2 pipeline-test: SST RMSE 13.7°C corr 0.095 (2-day-spinup confound, NOT science); real compare awaits 3mo day-90 |
 | tripole/eORCA1 (1°) | free run impossible (config exhausted); superseded by ¼° | — |
-| latlon_bathy (1°) | **blows up cold-start NaN day 0.25** (N-pole singularity, convergent Arctic meridians; SSH ruled out — eORCA025 stable with same balanced-SSH). Config wired + grid-agnostic balanced-init fixed (710aa1d9). | needs pole filter / Arctic mask — confirms WHY tripole is used for global ocean |
+| latlon_bathy (1°) | **blows up cold-start NaN day 0.25** (N-pole singularity); RK3 does NOT rescue it (8131279, same day-0.25 blowup) — GEOMETRIC, not dynamical. | needs pole filter / Arctic mask; tripole supersedes (no pole, RK3 solves its cold-start) |
 | cubed_sphere | untested w/ CORE-II | — (applicator supports) |
 | mpas | untested w/ CORE-II | — (applicator supports) |
 | spectral | applicator unsupported | TODO |
