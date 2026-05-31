@@ -16,8 +16,9 @@ jax = pytest.importorskip("jax")
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.grids.cubed_sphere import (  # noqa: E402
-    _compute_gnomonic_ed_lonlat, _compute_gnomonic_lonlat,
+    _compute_gnomonic_ed_lonlat, _compute_gnomonic_lonlat, create_cubed_sphere,
 )
+from legoesm.grids.halo import compute_cross_face_continuity  # noqa: E402
 
 
 def _gcd(la1, lo1, la2, lo2):
@@ -47,6 +48,44 @@ def test_distinct_from_equiangular():
     sep = _gcd(lat_ed, lon_ed, lat_eq, lon_eq)
     assert sep.max() > 1e-3, (
         "gnomonic_ed centers coincide with equiangular — not the operational grid")
+
+
+def test_faces_at_create_positions():
+    """After remap, gnomonic_ed faces must sit at create_cubed_sphere's face
+    positions (else the halo tables are inconsistent).  Equatorial faces 0-3
+    are checked by centre lon/lat; polar faces 4-5 by centre lat=±90 (centre
+    lon is degenerate at a pole)."""
+    n = 24
+    lon_ed, lat_ed = (np.asarray(a) for a in _compute_gnomonic_ed_lonlat(n))
+    g = create_cubed_sphere(n)
+    lon_c, lat_c = np.asarray(g.lon), np.asarray(g.lat)
+
+    def center(lon, lat, f):
+        x = np.cos(lat[f]) * np.cos(lon[f]); y = np.cos(lat[f]) * np.sin(lon[f])
+        z = np.sin(lat[f]); xm, ym, zm = x.mean(), y.mean(), z.mean()
+        r = np.sqrt(xm ** 2 + ym ** 2 + zm ** 2)
+        return np.degrees(np.arctan2(ym, xm)) % 360, np.degrees(np.arcsin(zm / r))
+
+    for f in range(4):  # equatorial: lon + lat
+        le, la = center(lon_ed, lat_ed, f); lc, lat_cc = center(lon_c, lat_c, f)
+        assert abs(((le - lc + 180) % 360) - 180) < 2.0 and abs(la - lat_cc) < 2.0, (
+            f"gnomonic_ed face {f} at ({le:.0f},{la:.0f}) != create ({lc:.0f},{lat_cc:.0f})")
+    for f in (4, 5):  # polar: lat only
+        _, la = center(lon_ed, lat_ed, f); _, lat_cc = center(lon_c, lat_c, f)
+        assert abs(la - lat_cc) < 2.0 and abs(abs(la) - 90.0) < 2.0, (
+            f"gnomonic_ed polar face {f} lat {la:.0f} != create {lat_cc:.0f}")
+
+
+def test_seam_continuous_in_create_topology():
+    """The remapped gnomonic_ed grid must be seam-continuous through create's
+    halo tables (the cross-face metric uses pad_halo_4d).  A wrong face
+    permutation/orientation would show large cross-seam jumps."""
+    n = 24
+    _, lat_ed = _compute_gnomonic_ed_lonlat(n)
+    m = compute_cross_face_continuity(np.asarray(lat_ed))  # lat = geographic-continuous
+    assert m["max_ratio"] < 2.5, (
+        f"gnomonic_ed seam continuity {m['max_ratio']:.2f} > 2.5 — face "
+        f"permutation/orientation inconsistent with create's halo topology")
 
 
 def test_center_spacing_carries_sqrt2_signature():

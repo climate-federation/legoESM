@@ -669,6 +669,7 @@ def _compute_gnomonic_ed_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
     brick.  Tested in ``tests/grids/test_gnomonic_ed_centers_iter62.py``.
     """
     lon_c, lat_c = make_fv3_native_grid(n, grid_type=0)  # (6, n+1, n+1) corners
+    lon_c, lat_c = _gnomonic_ed_remap_to_create(lon_c, lat_c)  # → create numbering
     lon, lat = cell_center2(
         lon_c[:, :-1, :-1], lat_c[:, :-1, :-1],   # SW
         lon_c[:, 1:, :-1], lat_c[:, 1:, :-1],     # SE
@@ -676,6 +677,39 @@ def _compute_gnomonic_ed_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
         lon_c[:, :-1, 1:], lat_c[:, :-1, 1:],     # NW
     )
     return lon, lat  # (6, n, n)
+
+
+# Face permutation + D4 rotation mapping make_fv3_native_grid's FV3 face
+# numbering/orientation onto create_cubed_sphere's _face_to_cartesian numbering.
+# Derived + validated iter66 by matching the EQUIANGULAR grid on both sides
+# (residual 2.46e-4 = the two equiangular constructions' diff; the integer
+# (face, rot) selection is unambiguous) and confirmed SEAM-CONTINUOUS
+# (cross-face ratio 1.22 through create's halo tables).
+_GNOMONIC_ED_FACE_PERM = (0, 1, 3, 4, 5, 2)
+_GNOMONIC_ED_FACE_ROT = (0, 0, 1, 1, 0, 3)  # k for jnp.rot90 (counter-clockwise)
+
+
+def _gnomonic_ed_remap_to_create(
+    lon: jax.Array, lat: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """Remap a 6-face grid from make_fv3_native_grid's FV3 face
+    numbering/orientation to create_cubed_sphere's convention.
+
+    Required because make_fv3_native_grid builds faces by mirroring face-1
+    (FV3 orientation) — seam-continuous but PERMUTED/ROTATED relative to
+    create's per-face ``_face_to_cartesian`` layout.  Applying this keeps the
+    seam topology consistent with create's halo tables.  Works on corner
+    ``(6, m, m)`` or centre ``(6, n, n)`` arrays.
+    """
+    lo = jnp.stack([
+        jnp.rot90(lon[_GNOMONIC_ED_FACE_PERM[F]], _GNOMONIC_ED_FACE_ROT[F])
+        for F in range(6)
+    ])
+    la = jnp.stack([
+        jnp.rot90(lat[_GNOMONIC_ED_FACE_PERM[F]], _GNOMONIC_ED_FACE_ROT[F])
+        for F in range(6)
+    ])
+    return lo, la
 
 
 def _face_to_cartesian(
