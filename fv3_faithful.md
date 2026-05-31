@@ -157,3 +157,23 @@ single root of the residual edge artifacts, raising its priority.
 NEXT: (3D, possibly more bounded) reformulate the rest-state PGF as ONE well-balanced operator
 (compute -∇Φ and -RT∇ln p from the SAME interpolated layer values so they cancel discretely); test on
 the t=0 rest-topo probe (does the 7.5× seam imbalance → ~machine-zero?). FV3 `one_grad_p` is the oracle.
+
+
+## iter99 — rest-PGF seam imbalance ROOT pinned: inconsistent cross-face halos between PGF terms
+Ruled OUT (all preserve constants EXACTLY at seams, machine-zero): `_arakawa_lamb_gradient` of a
+constant; `_interp_center_to_corner` of a constant; T_corner=1/interp(1/T)=T_init (harmonic, exact).
+DECOMPOSED the rest D-grid PGF du/dt = -∇Φ - R_d·T_corner·∇ln_ps (C24/L10 sigma, T=300 uniform):
+  |∇Φ_x| edge 6.41e-4 ≈ |pg_corr_x| edge 6.41e-4 (terms ~equal, ~∇phis magnitude)
+  |resid=-∇Φ-pg|_x: edge 9.5e-8 vs int 1.3e-8 = 7.3× ; FRACTIONAL non-cancel 1.5e-4 edge / 2.1e-5 int.
+Since Φ = phis + per-level-const(σ) (the σ/α part is annihilated by ∇), at rest the residual reduces
+to ∇phis-via-Φ's-halo MINUS ∇phis-via-ln_ps's-halo.  Φ is 3D (per-level, pad_halo_4d path) and ln_ps
+is 2D (separate 2D halo) → the two terms bring INCONSISTENT cross-face phis at the seam → -∇Φ and
+-RT∇ln_ps don't cancel (1.5e-4 at edges).  This is the well-balancedness break = the rest_state_topo
+13× artifact root, and (per iter98) the same co-located-operator seam-consistency class as the SW
+eigenmode.
+FIX direction (FV3 well-balanced PGF, oracle one_grad_p): make the two PGF terms' cross-face halos
+CONSISTENT — e.g. compute the topographic-gradient contribution ONCE (a single ∇phis with one halo),
+or reformulate -∇Φ - RT∇ln_ps as a single finite-volume operator so ∇phis appears once and cancels by
+construction.  NEXT: confirm ∇Φ[:,:,k] vs ∇phis(2D) differ at the seam (the 3D-vs-2D halo culprit),
+then reformulate + re-run the t=0 probe (does 1.5e-4 → machine-zero?).  Production-relevant (AMIP uses
+the D-grid PGF directly); fast-testable via the t=0 probe.
