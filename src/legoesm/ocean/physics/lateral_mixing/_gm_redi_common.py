@@ -153,7 +153,7 @@ def compute_visbeck_kappa_gm(
     kappa : (...,) horizontally-varying kappa_GM [m^2/s], clamped to
         the configured bounds.
     """
-    sigma_bar, L, wet_col, _int_N_dz = _eady_growth_and_length(
+    sigma_bar, L, wet_col, _int_N_dz, _sigma_local = _eady_growth_and_length(
         rho, S_x, S_y, z_coord, jacobian, f_coriolis, cfg, rho_ref,
     )
     # Apply the wet-column mask AFTER clipping — otherwise dry columns
@@ -183,7 +183,10 @@ def _eady_growth_and_length(
     N²/slope/length numerics live in ONE place. ``cfg`` is a VisbeckConfig (uses
     ``L_min``, ``L_max``, ``f_min``, ``use_rossby_radius``, ``L_fixed``).
 
-    Returns ``(sigma_bar, L, wet_col, int_N_dz)``.
+    Returns ``(sigma_bar, L, wet_col, int_N_dz, sigma)`` — ``sigma`` is the LOCAL
+    Eady growth ``N|S|`` at interfaces (n_lat, n_lon, nlev-1), used by the 3-D EKE
+    source (depth-resolved ``P = kappa_GM(z)·sigma(z)^2``); ``sigma_bar`` is its
+    depth average (the 2-D EKE source).
     """
     eps = _EPS
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
@@ -239,7 +242,7 @@ def _eady_growth_and_length(
     else:
         L = jnp.full_like(sigma_bar, cfg.L_fixed)
 
-    return sigma_bar, L, wet_col, int_N_dz
+    return sigma_bar, L, wet_col, int_N_dz, sigma
 
 
 def compute_eke_kappa_gm(
@@ -255,6 +258,7 @@ def compute_eke_kappa_gm(
     rho_ref: float = _RHO_0_DEFAULT,
     *,
     beta: jnp.ndarray | None = None,
+    depth_resolved: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Prognostic GM coefficient from the eddy-energy field ``E`` (Eden-Greatbatch).
 
@@ -282,10 +286,36 @@ def compute_eke_kappa_gm(
         eke_mixing_length, eke_rhines_length,
     )
 
-    sigma_bar, L_rossby, wet_col, int_N_dz = _eady_growth_and_length(
+    sigma_bar, L_rossby, wet_col, int_N_dz, sigma_local = _eady_growth_and_length(
         rho, S_x, S_y, z_coord, jacobian, f_coriolis, visbeck_cfg, rho_ref,
     )
     scheme = eke_cfg.mixing_length_scheme
+    if depth_resolved:
+        # 3-D (depth-resolved) closure: E, L, kappa_GM at interior interfaces
+        # (n_lat, n_lon, nlev-1), matching the LOCAL Eady growth ``sigma_local``.
+        # The 2-D deformation radius / Rossby length broadcast over levels; only the
+        # eddy Rhines scale (∝√(√E/β)) and ``kappa = c_k·L·√E`` carry the genuine 3-D
+        # structure (E is 3-D). Returns (kappa(z), sigma(z), L(z)).
+        if scheme == "rossby":
+            L3 = eke_mixing_length(L_rossby, eke_cfg)[..., jnp.newaxis]
+        elif scheme == "rhines":
+            if beta is None:
+                raise ValueError(
+                    "compute_eke_kappa_gm(depth_resolved=True): "
+                    "mixing_length_scheme='rhines' requires `beta` (df/dy)."
+                )
+            L3 = eke_len_composite(
+                eke_deformation_radius(int_N_dz, f_coriolis, beta, eke_cfg)[..., jnp.newaxis],
+                eke_rhines_length(E, beta[..., jnp.newaxis], eke_cfg),
+                eke_cfg,
+            )
+        else:
+            raise ValueError(
+                "EKEConfig.mixing_length_scheme must be 'rossby' or 'rhines', got "
+                f"{scheme!r}"
+            )
+        kappa3 = eke_kappa_gm(E, L3, eke_cfg)
+        return jnp.where(wet_col[..., jnp.newaxis], kappa3, 0.0), sigma_local, L3
     if scheme == "rossby":
         L = eke_mixing_length(L_rossby, eke_cfg)
     elif scheme == "rhines":

@@ -604,19 +604,28 @@ def _coupling_with_beta(E_val, beta_val=1.62e-11):
 
 
 def test_L2_eady_growth_returns_int_N_dz():
-    """_eady_growth_and_length now returns ∫N dz (4-tuple) — positive + finite on a
-    stratified column — so the rhines deformation radius reuses the shared N (no
-    duplicate numerics)."""
+    """_eady_growth_and_length returns ∫N dz AND the local Eady growth sigma(z)
+    (5-tuple): ∫N dz positive+finite (the rhines deformation radius reuses the
+    shared N, no duplicate numerics); sigma(z) is the depth-resolved <N|S|> at
+    interior interfaces whose depth-average is sigma_bar (drives the 3-D EKE
+    source)."""
     from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
         _eady_growth_and_length,
     )
     (E, rho, S_x, S_y, z, jac, f), vcfg, _beta = _coupling_with_beta(0.01)
     out = _eady_growth_and_length(rho, S_x, S_y, z, jac, f, vcfg)
-    assert len(out) == 4
-    _sigma_bar, _L, _wet, int_N_dz = out
+    assert len(out) == 5
+    sigma_bar, _L, _wet, int_N_dz, sigma = out
     assert int_N_dz.shape == (4, 6)
     assert jnp.all(int_N_dz >= 0.0) and jnp.all(jnp.isfinite(int_N_dz))
     assert float(jnp.mean(int_N_dz)) > 0.0   # stratified -> ∫N dz > 0
+    # local Eady growth sigma(z): interior interfaces (nlev-1), >= 0, finite;
+    # sigma_bar is its depth-average so it must lie within the column extremes.
+    nlev = int(z.dz_ref.shape[0])
+    assert sigma.shape == (4, 6, nlev - 1)
+    assert jnp.all(sigma >= 0.0) and jnp.all(jnp.isfinite(sigma))
+    assert jnp.all(sigma_bar <= jnp.max(sigma, axis=-1) + 1e-12)
+    assert jnp.all(sigma_bar >= jnp.min(sigma, axis=-1) - 1e-12)
 
 
 def test_L2_rhines_scheme_gives_smaller_L_than_rossby():
