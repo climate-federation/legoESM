@@ -59,10 +59,19 @@ EIGEN-ANALYSIS (iter115b-123, finite-diff power iteration — jvp CPU-prohibitiv
   — a structural cube-PANEL-EDGE computational mode (production co-located scheme suppresses it via the
   D→A avg; the FB staggered port does not). All 3 codex findings resolved.
 - **HARNESS (conditioned, iter123):** finite-diff power iteration WITH the eps/K/restart sweep + residual
-  → one diagnostic reported as a BAND. THE ONE REMAINING TASK (dedicated/fresh): localize the i=0/j0-edge
-  d_sw term injecting the 2Δx mode (decompose ke_diff_u vs fy_vort at the edge) → match the FV3 edge
-  coupling that suppresses it → re-test vs the λ band → FB→production. Optional: direct oracle W2-C36
-  step compare. Separate from the production C96 W5 eigenmode (slow ~1.0007).
+  → one diagnostic reported as a BAND.
+- **LOCALIZATION ATTEMPT (iter126) — the mode is a COUPLED HEIGHT-WIND mode (corrects the plan):** built +
+  VALIDATED a single-step FB replication (calls _c_sw/_p_grad_c/_d_sw_native internals; matches model.step
+  to float32-eps). Rayleigh-decomposed per-step growth λ-1 into the 4 u_d/v_d increment pieces (KE-grad,
+  vort-flux, del6-damp, PGF) projected onto the eigenvector. It does NOT close — and with OPPOSITE sign:
+  the wind-only single-step map AT FIXED INPUT-h DECAYS (Σ=-3.6e-3) while the full K-step map GROWS
+  (λ-1=+7.1e-3). ⇒ the 2Δx edge mode's growth REQUIRES the h↔wind feedback; it is NOT attributable to a
+  single d_sw wind term. The earlier "decompose ke_diff_u vs fy_vort" plan was INSUFFICIENT (ignores the
+  essential h-coupling; KE is the biggest positive WIND piece +2.1e-3 but the wind subspace decays). NEXT
+  (dedicated/fresh): redo with the FULL (h,u,v) coupled eigenvector + an energy-norm, 5-term decomposition
+  (KE/VORT/DAMP/PGF/MASS-continuity) → verify closure (Σ=λ-1) → localize the edge-coupling term → match
+  the FV3 edge treatment → FB→production. The validated replication is the reusable asset.
+  Separate from the production C96 W5 eigenmode (slow ~1.0007).
 
 ## CPU-PROHIBITIVE here (rely on recorded audits + representative cross-grid + t=0 probes + the λ harness)
 3D atm baroclinic cross-grid (>21 min/case); full ocean matrix --grid all (57 cases, multi-hr); climate/AMIP;
