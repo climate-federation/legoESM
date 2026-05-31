@@ -9549,28 +9549,36 @@ class TestCdgridDxcDycBoundaryIter666(unittest.TestCase):
                  f"match analytic balanced {pgf_analytic:.3e} (±5%)."))
 
     def test_iter670_area_corner_boundary_matches_interior(self):
-        """area_corner at cube edges/vertices = FV3 (#faces)×(on-face sub-cell).
+        """area_corner cube edge/vertex: FV3-style (#faces) SCALING of legoESM's
+        chord on-face sub-cell area (NOT the spherical-FV3 absolute area).
 
         FV3 `tools/fv_grid_tools.F90:975-1067` builds the C-grid corner
-        control-volume area from the number of faces meeting at the node times
-        the ON-FACE sub-cell area, NOT an inward interior copy:
+        control-volume area as (number of faces meeting at the node) × (the
+        ON-FACE sub-cell area), NOT an inward interior copy:
           * interior corner: full 4-quadrant dual cell;
-          * cube EDGE node (2 faces): ``area_c = 2*get_area(edge-mid, edge-mid,
-            cell-center, cell-center)`` — 2× the on-face HALF dual cell
-            (lines 976-1033);
-          * cube VERTEX (3-face junction): ``3*get_area(vertex, mid_j, mid_i,
-            cell_centre)`` — 3× the single on-face corner sub-quadrant
-            (lines 1036-1067).
+          * cube EDGE node (2 faces): FV3 `2*get_area(edge-mid, edge-mid,
+            cell-ctr, cell-ctr)` (lines 976-1033) = 2× the on-face HALF dual cell;
+          * cube VERTEX (3-face junction): FV3 `3*get_area(vertex, mid_j, mid_i,
+            cell_ctr)` (lines 1036-1067) = 3× the on-face corner sub-quadrant.
+        legoESM applies that SAME (#faces) scaling (edges ×2, vertices ×3) but to
+        its CHORD on-face sub-cell area (planar cross-product), NOT FV3's
+        spherical-excess get_area (see cubed_sphere_cdgrid.py).  This test locks
+        the SCALING — the FV3-faithful part — independent of the absolute-area
+        convention; the `get_area` citations above are FV3's spherical oracle for
+        the scaling STRUCTURE, not legoESM's current absolute-area implementation.
 
         Pre-iter-670 the vertices summed only the 1 on-face quadrant (no ×3) →
         ≈0.22× interior → rarea_c ≈ 4× too large.  Iter-670 over-corrected by
         copying the interior inward (edge==vertex==interior, ≈1.0×) — that
         mirrors FV3's HALO-ghost extrapolation (1084-1087), not the in-domain
-        grid_area formula.  iter84/iter89 (codex review of 4ad2fea0) restore the
-        true (#faces)-scaling: with the on-face sub-cells shrinking toward the
-        boundary, this gives edge/interior ≈ 0.865 and vertex/interior ≈ 0.67,
-        resolution-stable.  These guard against BOTH the under-count (vertex
-        ≈0.22) and the iter-670 over-copy (edge==vertex==1.0).
+        grid_area formula.  iter84/iter89 restore the (#faces) scaling: with the
+        on-face sub-cells shrinking toward the boundary this gives edge/interior
+        ≈ 0.865 and vertex/interior ≈ 0.67, resolution-stable.  These C12/C36
+        RATIO bands are ROBUST to chord-vs-spherical (spherical get_area gives
+        ≈0.865/0.675 too — only the degenerate C1 absolute differs, 0.659 chord
+        vs 0.75 spherical, see the C1 block), so a future chord→spherical area
+        upgrade does NOT trip them.  These guard against BOTH the under-count
+        (vertex ≈0.22) and the iter-670 over-copy (edge==vertex==1.0).
         """
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
@@ -9584,28 +9592,30 @@ class TestCdgridDxcDycBoundaryIter666(unittest.TestCase):
                             msg=f"C{n}: non-positive area_corner present.")
             interior = float(ac[:, 1:n, 1:n].mean())
 
-            # All four cube EDGES (2-face nodes): 2× on-face half dual cell
-            # ≈ 0.865× interior (NOT the iter-670 interior-copy ≈1.0).
+            # All four cube EDGES (2-face nodes): ×2 junction scaling of the
+            # on-face half dual cell ≈ 0.865× interior (NOT the iter-670
+            # interior-copy ≈1.0).  Band is chord/spherical-robust (~0.865 either).
             for edge, name in ((ac[:, 0, 1:n], "west"), (ac[:, n, 1:n], "east"),
                                (ac[:, 1:n, 0], "south"), (ac[:, 1:n, n], "north")):
                 r = float(edge.mean()) / interior
                 self.assertTrue(
                     0.82 < r < 0.91,
-                    msg=(f"C{n} {name}-edge area/interior = {r:.3f} not in "
-                         f"FV3 2-face band (0.82,0.91); regression in the "
-                         f"2*get_area on-face edge area."))
+                    msg=(f"C{n} {name}-edge area/interior = {r:.3f} not in the "
+                         f"FV3-style 2-face junction-scaling band (0.82,0.91); "
+                         f"regression in the ×2 on-face edge scaling."))
 
-            # All four cube VERTICES (3-face junctions): 3× on-face corner
-            # quadrant ≈ 0.67× interior (NOT ≈0.22 under-count, NOT ≈1.0 copy).
+            # All four cube VERTICES (3-face junctions): ×3 junction scaling of
+            # the on-face corner quadrant ≈ 0.67× interior (NOT ≈0.22 under-count,
+            # NOT ≈1.0 copy).  Band is chord/spherical-robust (~0.675 either).
             for (vi, vj), name in (((0, 0), "SW"), ((0, n), "NW"),
                                    ((n, 0), "SE"), ((n, n), "NE")):
                 r = float(ac[:, vi, vj].mean()) / interior
                 self.assertTrue(
                     0.60 < r < 0.74,
-                    msg=(f"C{n} {name}-vertex area/interior = {r:.3f} not in "
-                         f"FV3 3-face-junction band (0.60,0.74); either the "
-                         f"under-count (~0.22) or the iter-670 over-copy "
-                         f"(~1.0) has returned."))
+                    msg=(f"C{n} {name}-vertex area/interior = {r:.3f} not in the "
+                         f"FV3-style 3-face junction-scaling band (0.60,0.74); "
+                         f"either the under-count (~0.22) or the iter-670 "
+                         f"over-copy (~1.0) has returned."))
 
         # ---- C1 corner case (iter90 codex review of d7108d48) -------------
         # At n=1 every corner is a 3-face junction (no interior, no edge nodes),
