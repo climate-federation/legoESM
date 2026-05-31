@@ -257,6 +257,7 @@ def create_cubed_sphere(
     target_lat: float = -0.5 * 3.141592653589793,  # -π/2 = no rotation
     do_cube_transform: bool = False,
     shift_fac: float = 0.0,
+    gnomonic: str = "equiangular",
 ) -> CubedSphereGrid:
     """Create a cubed-sphere grid.
 
@@ -270,20 +271,52 @@ def create_cubed_sphere(
     omega : float
         Planetary rotation rate [rad/s]. Default: Earth rotation rate.
         Scale for small-Earth experiments.
+    gnomonic : str, default "equiangular"
+        Grid-line distribution.  ``"equiangular"`` = legoESM's historical
+        gnomonic_angl (FV3 grid_type=2); ``"ed"`` = FV3's OPERATIONAL
+        gnomonic_ed (grid_type=0, equal-great-circle edges, near-uniform cells,
+        max aspect 1.06).  The ``"ed"`` path swaps in the ``*_ed`` metric/halo
+        builders (centres, padded angle/half-metrics, areas, halo-interp
+        offsets) and is incompatible with the Schmidt/shift transforms.
 
     Returns
     -------
     CubedSphereGrid
         The grid with all metric terms computed.
     """
+    if gnomonic == "equiangular":
+        _lonlat, _angle_b, _half_b, _area_b = (
+            _compute_gnomonic_lonlat, compute_padded_angle,
+            compute_padded_half_metrics, _compute_exact_cell_areas)
+        _off_b, _off_h2_b, _off_h3_b = (
+            compute_halo_interp_offsets, compute_halo_interp_offsets_h2,
+            compute_halo_interp_offsets_h3)
+    elif gnomonic == "ed":
+        from legoesm.grids.halo import (
+            compute_halo_interp_offsets_ed, compute_halo_interp_offsets_ed_h2,
+            compute_halo_interp_offsets_ed_h3)
+        _lonlat, _angle_b, _half_b, _area_b = (
+            _compute_gnomonic_ed_lonlat, compute_padded_angle_ed,
+            compute_padded_half_metrics_ed, _compute_exact_cell_areas_ed)
+        _off_b, _off_h2_b, _off_h3_b = (
+            compute_halo_interp_offsets_ed, compute_halo_interp_offsets_ed_h2,
+            compute_halo_interp_offsets_ed_h3)
+    else:
+        raise ValueError(
+            f"gnomonic must be 'equiangular' or 'ed', got {gnomonic!r}")
+
     # Compute gnomonic coordinates on each face
-    lon, lat = _compute_gnomonic_lonlat(n)
+    lon, lat = _lonlat(n)
 
     # FV3_3D iter 586/589: optional Schmidt stretching.
     apply_schmidt = (
         abs(stretch_fac - 1.0) > 1e-5
         or target_lat > -0.5 * jnp.pi + 1e-5
     )
+    if gnomonic == "ed" and (apply_schmidt or shift_fac > 1e-4):
+        raise ValueError(
+            "gnomonic='ed' is incompatible with Schmidt/shift transforms "
+            "(the *_ed padded-metric builders do not apply them).")
     if apply_schmidt:
         if do_cube_transform:
             # FV3 cube_transform (fv_grid_utils.F90:920-980)
@@ -322,14 +355,14 @@ def create_cubed_sphere(
     # discontinuity at cube-face edges.  The O(Δα⁴) accuracy difference
     # vs pad_halo-based interior values is well below the O(Δα²)
     # truncation error of the 2nd-order stencils.
-    angle_padded = compute_padded_angle(n)
-    hx_ext, hy_ext = compute_padded_half_metrics(n, radius)
+    angle_padded = _angle_b(n)
+    hx_ext, hy_ext = _half_b(n, radius)
 
     # Extract interior from padded arrays (no override — single source)
     angle = angle_padded[:, 1:-1, 1:-1]
     dx = 2.0 * hx_ext[:, 1:-1, 1:-1]
     dy = 2.0 * hy_ext[:, 1:-1, 1:-1]
-    area = _compute_exact_cell_areas(n, radius)
+    area = _area_b(n, radius)
 
     # Precompute trig of grid angle for vector halo exchange
     cos_angle_val = jnp.cos(angle)
@@ -338,23 +371,23 @@ def create_cubed_sphere(
     sin_angle_padded_val = jnp.sin(angle_padded)
 
     # Halo interpolation offsets for corrected cross-face exchange
-    halo_offsets = compute_halo_interp_offsets(n)
+    halo_offsets = _off_b(n)
 
     # halo=2 quantities for higher-order reconstruction (PPM, WENO5)
-    angle_padded_h2 = compute_padded_angle(n, halo=2)
-    hx_ext_h2, hy_ext_h2 = compute_padded_half_metrics(n, radius, halo=2)
+    angle_padded_h2 = _angle_b(n, halo=2)
+    hx_ext_h2, hy_ext_h2 = _half_b(n, radius, halo=2)
     cos_angle_padded_h2_val = jnp.cos(angle_padded_h2)
     sin_angle_padded_h2_val = jnp.sin(angle_padded_h2)
-    halo_offsets_h2 = compute_halo_interp_offsets_h2(n)
+    halo_offsets_h2 = _off_h2_b(n)
 
     # halo=3 quantities for the iter-496..501 ng=3 halo extension
     # (FB-chain stability prerequisite, review-doc item #2).
-    halo_offsets_h3 = compute_halo_interp_offsets_h3(n)
+    halo_offsets_h3 = _off_h3_b(n)
     # Iter-595: add grid-angle + half-metrics at halo=3 so the vector
     # halo round-trip has the padded-angle reference needed to enable
     # `pad_halo_vector(halo=3)` on the non-MPI backend.
-    angle_padded_h3 = compute_padded_angle(n, halo=3)
-    hx_ext_h3, hy_ext_h3 = compute_padded_half_metrics(n, radius, halo=3)
+    angle_padded_h3 = _angle_b(n, halo=3)
+    hx_ext_h3, hy_ext_h3 = _half_b(n, radius, halo=3)
     cos_angle_padded_h3_val = jnp.cos(angle_padded_h3)
     sin_angle_padded_h3_val = jnp.sin(angle_padded_h3)
 
