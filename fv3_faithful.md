@@ -34,6 +34,11 @@ VALIDATED against a REAL artifact (iter61): on C96 W5 the metric tracks the eige
 onset in lockstep — wind_speed cross-seam holds 1.57-2.22 while stable (day0-3.5), then
 rises 2.29→2.76→3.07 as the eigenmode blows up (day4-5). Cleanly separates clean (≤2.2)
 from artifact (>2.5). So the metric detects genuine edge artifacts, not only synthetic ones.
+CODEX-REVIEWED iter61: adversarial-review caught a real denominator bug (interior gradient
+`gi` included the N/E halo row `a[n+1]-a[n]` = a seam jump → self-normalizing, suppressed
+N/E-edge detection). Fixed to interior-only diffs + added a constant-per-face guard test
+(interior grad=0 ⇒ ratio must be huge; the bug collapsed it to ~1). Re-review: APPROVED.
+Clean fields unchanged (W2 u 1.56-1.60); eigenmode detection sharper (3.07→3.38).
 - BAROCLINIC (3D PE): genuinely clean, converges C36→C72. v-roughness ≤1.24× incl
   rotated_baroclinic (jet crosses seams).
 - SHALLOW-WATER: all PHYSICAL fields CONTINUOUS — C36/C48/C96 cross-face FLAT: W2 u
