@@ -124,6 +124,17 @@ PRECISELY to suppress high-res corner/edge grid modes. ⇒ STRONG hypothesis: th
 edge eigenmode is driven by the equiangular grid's poor corner conditioning, so wiring
 gnomonic_ed is the FAITHFUL fix for BOTH the grid gap AND the eigenmode (unifies two
 foundational items). Signature locked: `test_fv3_gnomonic_ed_signature_iter62`.
+**WIRING DE-RISKED (iter62):** gnomonic_ed face coords = equally-spaced great-circle
+angle `θ_j=-α+dely·j` on the W/S edges (α=arcsin(1/√3)) projected to the constant-x
+(-1/√3) face (`pp3=-z·rsq3/x`) — directly analogous to equiangular's `α+tan(α)`. VERIFIED
+this extends ANALYTICALLY into the halo (θ beyond ±α: pp3 stays smooth+monotonic+finite,
+±35.3°→±44.1° at ng=3). ⇒ the halo is NOT blocked on cross-face assembly; the metric/halo
+stack (`compute_padded_angle`/`compute_padded_half_metrics`) can be PARAMETRIZED on
+grid_type (swap linspace(α)+tan for the gnomonic_ed θ+project). Scope now: `_compute_
+gnomonic_ed_lonlat(n)` centers + gnomonic_ed variants of the two padded-metric builders +
+gate `create_cubed_sphere(gnomonic="ed")` + re-calibrate damping. Tractable foundational
+(parametrization, not a from-scratch cross-face halo), same approximation level as the
+equiangular path (O(Δθ⁴) same-face extension).
 
 ## VERIFICATION
 - SW 16/16 all grids ≤1 cell aligned. Full fast cube atm dynamical suite PASS + NH
