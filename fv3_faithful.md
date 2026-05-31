@@ -72,6 +72,13 @@ EIGEN-ANALYSIS (iter115b-123, finite-diff power iteration — jvp CPU-prohibitiv
     converging to the leading SINGULAR vector of M^50 (optimal transient growth), NOT a spectral
     eigenvector. ⇒ the FB edge instability is **NON-NORMAL TRANSIENT growth** that pumps the edge into the
     nonlinear regime → day2 NaN. (Confirms codex [high]; explains iter126's wrong sign.)
+  - **K-TREND CONFIRMATION (iter127b — DECISIVE, rules out an unconverged hidden eigenvalue):** per-step
+    λK MONOTONICALLY DECREASES with the window (K=50/100/150/200 → 1.0071/1.0059/1.0046/1.0031, →≤1) while
+    single-step ‖M'w‖ STAYS <1 (0.9997/0.9990/0.9983/0.9968, contractive). A true unstable eigenvalue
+    would give a K-INDEPENDENT per-step λ→λ_e>1 with ‖M'w‖→λ_e>1. The opposite trend ⇒ the spectrum is
+    asymptotically STABLE (radius ≤1); ALL the growth is finite-window non-normal transient amplification
+    (optimal ~×1.4 over a few hours). This is WHY damping can't kill it (iter125): transient growth comes
+    from eigenvector NON-ORTHOGONALITY, not eigenvalue location.
   - **Mode energy:** 91% v_d, 8% u_d, 1% h. Single-step term balance (decomp CLOSES, Σ=-3.95e-4 ≈ λ1-1
     =-3.38e-4): **KE-grad +1.47e-3 (Bernoulli SOURCE) ↔ PGF -1.72e-3 (SINK) dominate and nearly cancel**;
     VORT -1.9e-4, DAMP ~0, MASS +5e-5. ⇒ a near-neutral gravity-wave KE↔PGF exchange at the panel edge
