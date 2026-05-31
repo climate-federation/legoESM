@@ -195,3 +195,22 @@ NEXT candidates to test against the harness (the dedicated continuation): (a) ab
 the faster NaN@3h?); (b) eigenvector-structure-inspired variations of the c_sw/d_sw vertex assembly;
 (c) the c_sw→d_sw uc/vc time-level. The harness makes each a quick decisive test — a dedicated/
 fresh-context fix-search, now equipped with a validated tool.
+
+
+## iter121 — EIGENMODE CHARACTERIZED: 2Δx ALONG-EDGE computational mode in u_d (NOT vertex/2D), damping can't kill it
+Eigenvector inspection (K=50 power iteration): the growing eigenmode's δu argmax is at face3 (i=0, j=19)
+= the cube PANEL-EDGE midpoint (i=0 boundary row), NOT a vertex. The i=0 edge row is `- + - + - +`
+(ALTERNATING sign in j) with interior rows ~0; 2D checkerboard (-1)^(i+j) corr only 0.10. ⇒ the mode is a
+1D GRID-SCALE (2Δx-in-j) oscillation ALONG the cube panel edge in u_d — the classic computational mode.
+(The iter117 "10.6× vertex" was actually the EDGE row.)
+DAMPING RULED OUT (harness): baseline λ=1.00705; damp_v×8=0.5 → NaN (over-damp hits del-6 explicit limit,
+cf. iter82); nord_v=1(del-4) → 1.00776 (worse); +hyperdiff=2 → 1.00705 (IDENTICAL, no effect). ⇒ the
+2Δx-along-edge mode is in the del-n/hyperdiff damping's NULL SPACE or not reached at the cube edge —
+NOT dampable (confirms iter82-83). The FIX is STRUCTURAL: the cube-EDGE assembly term producing the
+spurious 2Δx-in-j mode in u_d at i=0 (the d_sw u_d update ke_diff_u[i=0]+fy_vort[i=0] using the cross-
+face halo at i=-1 / the edge-row corner KE or vorticity). FV3's upwind fv_tp_2d SHOULD add implicit
+dissipation to 2Δx but evidently doesn't reach this edge mode in the port.
+NEXT (dedicated): localize which i=0-edge d_sw term injects the 2Δx-in-j mode (decompose ke_diff_u vs
+fy_vort at i=0 for a 2Δx-in-j test perturbation, against the harness). The mode is now PRECISELY typed
+(2Δx-along-edge u_d computational mode) — a structural cube-edge assembly bug, not damping/components/
+metrics (all ruled out). Harness-equipped dedicated fix-search continues.
