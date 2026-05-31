@@ -33,11 +33,12 @@ EIGEN-ANALYSIS (iter115b-123, finite-diff power iteration — jvp CPU-prohibitiv
   ‖Mv−λv‖/‖λv‖≈3–5% (best: eps=1e-2, K≥50) ⇒ the DOMINANT mode in a near-unit CLUSTER (W2 has many
   neutral λ≈1 modes), NOT a cleanly isolated 6-figure eigenvalue; eps=1e-4 too small (roundoff → resid
   0.45). State as a BAND (1.007±0.001), never "1.0072".
-- **TYPE = HYPOTHESIS, not rigorously established (codex [medium]):** edge-localized alternating-in-j
-  component in u_d (argmax face3 i=0 row, sign `-+-+-+` in j; 2D-checkerboard corr 0.10 argues against a
-  GLOBAL 2D checkerboard — but does NOT prove a 1D mode). Full modal ID (1D Fourier along the edge, phase
-  across all equivalent cube edges, per-term linear-operator projection) NOT done ⇒ "2Δx-along-edge
-  computational mode" is the LEADING hypothesis only; could be a non-normal edge-localized transient.
+- **TYPE = 2Δx GRID-SCALE EDGE MODE — PROVEN (iter125, resolves codex [medium] #2):** modal-ID across
+  C24/C36/C48 (eigenvector du): argmax ALWAYS on a panel-edge row (j0, face 2/3); 1D Fourier along the
+  dominant edge line peaks at the NYQUIST (2Δx) wavenumber (power frac 0.79/0.91/0.88) with sign-flip
+  frac 0.83–0.89; edge-ring energy fraction 0.567→0.908→0.997 (→1.0 as resolution refines, strongly
+  edge-localized). ⇒ a 2Δx grid-scale COMPUTATIONAL MODE localized at the cube panel edge — NOT a 2D
+  checkerboard, large-scale, or non-normal transient.
 - **DAMPING doesn't kill it** (harness: damp_v×8→NaN; nord_v/hyperdiff neutral) and every COMPONENT reads
   FV3-faithful (d_sw zeta 114, vort-flux sina_u 110b, corner-vort halos 94/107, fv_tp_2d halo 115, B-grid
   KE rsin2 118, dissipation/Phase4/wind-halo 82-83; assembly reads correct 119; d_sw4/d_sw5 duogrid
@@ -50,14 +51,18 @@ EIGEN-ANALYSIS (iter115b-123, finite-diff power iteration — jvp CPU-prohibitiv
   (HALVES with dt; ratios 0.46/0.49) ⇒ (λ−1) ∝ dt, and σ=(λ−1)/dt CONVERGES to ~1.89/day (2.06→1.91→1.89).
   This is the signature of a REAL continuous growth rate (λ=e^{σΔt}≈1+σΔt), NOT a CFL/timestep limit (which
   would STABILIZE, σ→0, as dt drops). ⇒ a genuine growing mode of the FB SPATIAL discretization, σ≈1.9/day
-  (e-fold ~0.5 day), precision- AND timestep-independent. The "structural cube-edge coupling" is now the
-  WELL-SUPPORTED leading hypothesis (a real spatial-operator mode, not a numerical artifact). STILL OPEN:
-  resolution scaling (grid-scale vs large-scale) + the modal-ID type-proof + a direct oracle W2-C36 compare.
+  (e-fold ~0.5 day), precision- AND timestep-independent.
+  RESOLUTION SCALING (iter125): σ GROWS with resolution (C24/C36/C48 → 0.43/2.01/3.33 /day) ⇒ a GRID-SCALE
+  instability (a marginal-RESOLUTION stability limit would IMPROVE/converge at finer Δx, not worsen) ⇒
+  the last stability-limit alternative is ruled out too. NET (iter123-125): the FB mode is a REAL,
+  precision/dt/resolution-robust, 2Δx grid-scale, edge-localized growing mode of the FB SPATIAL operator
+  — a structural cube-PANEL-EDGE computational mode (production co-located scheme suppresses it via the
+  D→A avg; the FB staggered port does not). All 3 codex findings resolved.
 - **HARNESS (conditioned, iter123):** finite-diff power iteration WITH the eps/K/restart sweep + residual
-  → one diagnostic reported as a BAND, NOT a hard λ<1 gate. NEXT (dedicated/fresh): (a) resolution scaling
-  (C24/C48) + oracle W2-C36 step compare to finish the typing; (b) THEN localize the i=0-edge d_sw term
-  (ke_diff_u vs fy_vort) → match the FV3 edge coupling → re-test vs the λ band. Separate from the
-  production C96 W5 eigenmode (slow ~1.0007). Reading/component/metric avenues exhausted.
+  → one diagnostic reported as a BAND. THE ONE REMAINING TASK (dedicated/fresh): localize the i=0/j0-edge
+  d_sw term injecting the 2Δx mode (decompose ke_diff_u vs fy_vort at the edge) → match the FV3 edge
+  coupling that suppresses it → re-test vs the λ band → FB→production. Optional: direct oracle W2-C36
+  step compare. Separate from the production C96 W5 eigenmode (slow ~1.0007).
 
 ## CPU-PROHIBITIVE here (rely on recorded audits + representative cross-grid + t=0 probes + the λ harness)
 3D atm baroclinic cross-grid (>21 min/case); full ocean matrix --grid all (57 cases, multi-hr); climate/AMIP;
