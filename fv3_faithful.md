@@ -95,8 +95,11 @@ Production uses RK3 Arakawa-Lamb (works). `fv3_fb_sw_step` / `FV3FBShallowWaterM
   → wrong vertex vorticity for BOTH the FB chain AND the PRODUCTION cube (C96 W5 eigenmode is also
   vertex/corner-localized — this is a candidate eigenmode root).
   iter85 — area_corner VERTEX FIX DONE (commit 4ad2fea0, cubed_sphere_cdgrid.py:410-414): the 8
-  cube vertices now use FV3 `3*sg_area[corner]` (= `3*get_area(vertex,mid_j,mid_i,cell_centre)`,
-  fv_grid_tools.F90:1042-1066) instead of the diagonal-interior 4-quadrant copy (~33% too large).
+  cube vertices now use FV3's ×3 junction SCALING `3*sg_area[corner]` (mirroring FV3
+  `3*get_area(vertex,mid_j,mid_i,cell_centre)`, fv_grid_tools.F90:1042-1066) instead of the
+  diagonal-interior 4-quadrant copy (~33% too large).  [SUPERSEDED-NOTE iter91: only the ×3
+  SCALING is FV3-faithful; `sg_area` is legoESM's PLANAR CHORD area, NOT FV3 spherical get_area —
+  the absolute vertex area = 3×chord-quadrant, not 3×spherical-quadrant.]
   REGRESSION-SAFE: production cube SW 4/4 PASS, W2 L2=1.76e-4 UNCHANGED (8 vertices negligible in
   the global L2), W5/W6 mass ~1e-16. Shared metric ⇒ affects production + FB. C96 W5 eigenmode
   payoff test INCONCLUSIVE; bug 1 (_corner_vorticity edge-mode
@@ -156,8 +159,9 @@ W5 C96 harness is BROKEN — it blows at DAY 1, NOT the recorded "~38 to day3.5 
 Not dt (runner C36 uses dt=300 → C96 scaled ~112 > my 100; and W2 C96 dt=100 is perfectly stable
 at 38.6). The recorded-eigenmode setup differs from my hand-roll in some way I couldn't pin (the
 runner is C36 only). ⇒ EIGENMODE PAYOFF UNEVALUABLE with the current harness; need the exact
-recorded C96 W5 config. The area_corner vertex fix STANDS on its merits: FV3-faithful (3·get_area
-junction), regression-safe (W2 C36 L2=1.76e-4 + W2 C96 stable 38.6/ss-err≤2.4e-4), neutral on W5.
+recorded C96 W5 config. The area_corner vertex fix STANDS on its merits: FV3-faithful ×3 junction
+SCALING (iter91: applied to legoESM's CHORD sg_area, NOT FV3 spherical get_area — only the scaling
+is faithful), regression-safe (W2 C36 L2=1.76e-4 + W2 C96 stable 38.6/ss-err≤2.4e-4), neutral on W5.
 iter86b — HARNESS FIXED + eigenmode resolved for the vertex fix: my W5 C96 used the BARE
 `iter1009_dual_target_config(96)` (insufficient damping); with EXPLICIT damping (div_damp=8,
 hyperdiff=2·hdc, matching W2) W5 C96 + vertex-fix reproduces the recorded eigenmode EXACTLY:
