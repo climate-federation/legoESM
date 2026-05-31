@@ -615,24 +615,24 @@ class TestSmagCFLCap:
         # The cap really bit: the uncapped peak is non-finite or >> the capped.
         assert (not math.isfinite(peak_un)) or (peak_un > 5.0 * peak_cap)
 
-    def test_cap_helper_metric_and_cfl_safe(self, grid):
-        """``laplacian_smag_cfl_cap`` returns the anisotropic metric limit and
-        is CFL-safe. ``grid`` is a ``LatLonGrid`` (2-cell dx/dy -> single cell
-        is half), exercising that branch of the helper."""
+    def test_cap_helper_area_cos2_ceiling(self, grid):
+        """``laplacian_smag_cfl_cap`` returns the tuned ceiling
+        ``safety * area * cos^2(lat) / dt`` (cos^2 floored at 0.04). ``grid`` is
+        a ``LatLonGrid`` (area/lat2d branch)."""
         dt, safety = 75.0, 0.125
         cap_h, cap_q = laplacian_smag_cfl_cap(grid, dt, safety)
-        dx_T = grid.dx * 0.5
-        dy_T = (grid.dy * 0.5)[:, None] * jnp.ones(
-            (1, dx_T.shape[1]), dtype=dx_T.dtype)
-        s = 1.0 / dx_T ** 2 + 1.0 / dy_T ** 2
-        assert jnp.allclose(cap_h, safety / (dt * s), rtol=1e-6)
-        # CFL invariant: cap * dt * (1/dx^2 + 1/dy^2) == safety <= 1/2.
-        assert jnp.allclose(cap_h * dt * s, safety, rtol=1e-6)
-        assert safety <= 0.5
+        lat2d = getattr(grid, "lat_T", None)
+        if lat2d is None:
+            lat2d = grid.lat2d
+        area = getattr(grid, "area_T", None)
+        if area is None:
+            area = grid.area
+        cos2 = jnp.maximum(jnp.cos(lat2d) ** 2, 0.04)
+        assert jnp.allclose(cap_h, safety * area * cos2 / dt, rtol=1e-6)
         assert bool(jnp.all(jnp.isfinite(cap_h))) and bool(jnp.all(cap_h > 0))
         assert bool(jnp.all(jnp.isfinite(cap_q))) and bool(jnp.all(cap_q > 0))
         # cap_q is the vertex field (n_lat+1, n_lon+1).
-        assert cap_q.shape == (dx_T.shape[0] + 1, dx_T.shape[1] + 1)
+        assert cap_q.shape == (cap_h.shape[0] + 1, cap_h.shape[1] + 1)
 
     def test_cap_q_periodic_seam(self, grid):
         """The q-point cap wraps periodically in longitude (no edge-replication

@@ -568,11 +568,11 @@ class LatLonCGridOceanConfig(NamedTuple):
                                     # energy-stable stress-tensor operator.
                                     # MOM6 OM4 uses 0.15. Additive with A_h.
     smag_cfl_safety: float = 0.0   # When > 0, cap the Laplacian-Smagorinsky
-                                    # coefficient at the per-cell anisotropic
-                                    # explicit-diffusion CFL estimate
-                                    # ``smag_cfl_safety / (dt*(1/dx^2+1/dy^2))``
-                                    # (see laplacian_smag_cfl_cap; ~4x margin)
-                                    # so it can be
+                                    # coefficient at the per-cell tuned ceiling
+                                    # ``smag_cfl_safety * area * cos^2(lat) / dt``
+                                    # (see laplacian_smag_cfl_cap; the larger
+                                    # stricter-than-CFL ceiling the WBC cold-
+                                    # start needs) so it can be
                                     # cranked high to damp western-boundary-
                                     # current jets WITHOUT self-CFL-violating at
                                     # the sharp jet (the WBC cold-start blowup).

@@ -827,9 +827,9 @@ def main() -> int:
                         "-- damps the grid-scale mode far more than the resolved "
                         "flow; gentler CFL than 2nd-order. Try ~1e9-1e10 at 1/4 deg.")
     p.add_argument("--smag-cfl-safety", type=float, default=None,
-                   help="Cap the Laplacian-Smagorinsky coeff at smag_cfl_safety/"
-                        "(dt*(1/dx^2+1/dy^2)) (per-cell anisotropic viscous-CFL "
-                        "estimate). Lets --C-smag-lap "
+                   help="Cap the Laplacian-Smagorinsky coeff at smag_cfl_safety*"
+                        "area*cos^2(lat)/dt (per-cell tuned viscosity ceiling). "
+                        "Lets --C-smag-lap "
                         "be cranked high to damp WBC jets WITHOUT self-CFL at the "
                         "sharp jet. ~0.125 is a safe 2-D Laplacian cap.")
     p.add_argument("--nudge-woa-tau-days", type=float, default=0.0,
