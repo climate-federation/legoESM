@@ -122,6 +122,27 @@ class CompressibleEulerConfig(NamedTuple):
                                           # 0.0 = centered (neutral), 0.1 = slightly damped
                                           # Damps vertically-propagating acoustic modes
                                           # without horizontal CFL constraint (Skamarock 2008)
+    si_w_vertical_filter_nu: float = 0.0  # Vertical Laplacian filter for w inside
+                                          # each SI acoustic substep:
+                                          #   w[k] += nu * (w[k-1] - 2*w[k] + w[k+1])
+                                          # Default 0.0 = off (preserves the iter-78
+                                          # contract of the SI scheme).
+                                          # Empirical: the SI dycore has a structural
+                                          # exponential mode (growth rate ~1.25/step)
+                                          # triggered by ANY perturbed theta' IC
+                                          # (warm-bubble tests xfailed at iter-65 had
+                                          # the same root). The mode saturates at
+                                          # max|w|~15 m/s with active moist physics
+                                          # (gray+Kessler at N=128 dx=2km nlev=30 ran
+                                          # 100 days stably) but blows up to NaN with
+                                          # cleaner physics (RRTMGP+Morrison) or a
+                                          # dry dycore. Setting nu>=0.4 fully damps
+                                          # the unstable mode at every dt tested
+                                          # (0.5-20 s). 0.5 = explicit-diffusion CFL
+                                          # bound; above that the filter itself NaNs.
+                                          # Recommended: 0.3-0.4 for runs with
+                                          # perturbed theta' IC; 0.0 for clean Wing
+                                          # IC + active moist physics.
     implicit_buoyancy: bool = False       # Klemp-Wilhelmson 1978 implicit-buoyancy
                                           # in the SI acoustic substep. Substitutes
                                           # theta_p_new = theta_p_c
@@ -137,7 +158,29 @@ class CompressibleEulerConfig(NamedTuple):
                                           # (dz~1000 m) with stratified ICs.
                                           # Only active when
                                           # semi_implicit_acoustic=True.
-    # ---- Plane-only fields (PR3c) ----
+    substep_horizontal_acoustic: bool = False
+                                          # Plane SI dycore only. When True the
+                                          # horizontal pressure gradient AND the
+                                          # mass-continuity divergence are moved
+                                          # OUT of the slow tendency and INTO the
+                                          # acoustic substep loop (full Skamarock-
+                                          # Klemp split-explicit). The slow
+                                          # tendency then carries only advection +
+                                          # diffusion + Coriolis + sponge.
+                                          # WHY: with the horizontal PG in the slow
+                                          # tendency (applied once per RK3 stage at
+                                          # the OUTER dt) the horizontal acoustic
+                                          # mode is integrated at dt, not dt/nsub.
+                                          # At fine dx (<=1 km) that mode grows
+                                          # unboundedly from any perturbed-theta'
+                                          # IC (u -> O(1e4) m/s -> NaN) because the
+                                          # C-grid PG/divergence adjoint pairing is
+                                          # only energy-neutral for constant
+                                          # theta_0/rho_0. Substepping the
+                                          # horizontal acoustic terms lowers their
+                                          # effective CFL to c_s*dt/(nsub*dx) << 1.
+                                          # Default False preserves the iter-183
+                                          # coarse-grid contract bit-for-bit.
     # The following two knobs are consumed ONLY by the doubly-periodic
     # plane non-hydrostatic dycore
     # (:mod:`legoesm.atmosphere.dynamics.compressible_euler_plane`).
@@ -557,6 +600,7 @@ def _semi_implicit_acoustic_column_kernel(
     g: float,
     implicit_buoyancy: bool = False,
     precomputed_tridiag: tuple[jax.Array, jax.Array, jax.Array] | None = None,
+    si_w_vertical_filter_nu: float = 0.0,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Single semi-implicit acoustic substep (column-local algebra).
 
@@ -665,6 +709,19 @@ def _semi_implicit_acoustic_column_kernel(
     # the cuSPARSE custom-call output.
     pad_axes_w = ((0, 0),) * (w_inner_new.ndim - 1)
     w_new = jnp.pad(w_inner_new, (*pad_axes_w, (1, 1)))
+
+    # SI-stability filter: vertical Laplacian damping on w. Defaults
+    # off (nu=0.0). Empirical fix for the structural exponential mode
+    # that grows in the SI scheme with perturbed theta' IC — see
+    # CompressibleEulerConfig.si_w_vertical_filter_nu docstring.
+    if si_w_vertical_filter_nu > 0.0:
+        w_above = w_new[..., :-2]
+        w_below = w_new[..., 2:]
+        w_interior = w_new[..., 1:-1]
+        w_filt = w_interior + si_w_vertical_filter_nu * (
+            w_above - 2.0 * w_interior + w_below
+        )
+        w_new = w_new.at[..., 1:-1].set(w_filt)
 
     # --- Backward: update rho' using continuity ---
     rho_half = 0.5 * (rho_total[..., :-1] + rho_total[..., 1:])

@@ -145,6 +145,40 @@ def test_emanuel_buoyancy_sort_detrainment_increases_tendency_magnitude():
     assert mag_yes >= mag_no - 1e-12
 
 
+def test_emanuel_mixture_buoyancy_sign_crosses():
+    """Faithful Emanuel-1991 buoyancy sorting: the mixture buoyancy
+    B(χ) starts positive (undilute updraft) and **crosses zero** into
+    negative for a dry environment (evaporative cooling of entrained
+    air) — the defining feature the old ``B_mix = χ·B_u`` could not
+    produce.  A saturated environment evaporates nothing, so no mixture
+    turns spuriously negative."""
+    from legoesm.atmosphere.physics.convection.emanuel import _mixture_buoyancy
+    from legoesm.thermo import saturation_mixing_ratio
+
+    T_e = jnp.array([[290.0]])
+    p = jnp.array([[8.0e4]])
+    T_u = jnp.array([[292.0]])                       # buoyant updraft
+    q_u = saturation_mixing_ratio(T_u, p)            # saturated cloud
+    q_c_u = jnp.array([[2e-3]])                      # cloud condensate
+    chi = jnp.linspace(0.02, 0.98, 25)
+
+    B_dry = _mixture_buoyancy(
+        T_e, 0.3 * saturation_mixing_ratio(T_e, p), T_u, q_u, q_c_u, p, chi,
+    )[0, 0]
+    B_sat = _mixture_buoyancy(
+        T_e, saturation_mixing_ratio(T_e, p), T_u, q_u, q_c_u, p, chi,
+    )[0, 0]
+
+    assert float(B_dry[0]) > 0.0                     # undilute is buoyant
+    assert bool(jnp.any(B_dry > 0) & jnp.any(B_dry < 0))  # genuine sign reversal
+    assert float(jnp.min(B_sat)) >= -1e-6            # saturated env: no spurious sink
+    # Gradient through the mixture buoyancy is finite (AD-safe sat-adjust).
+    g = jax.grad(lambda t: jnp.sum(_mixture_buoyancy(
+        jnp.array([[t]]), 0.3 * saturation_mixing_ratio(jnp.array([[t]]), p),
+        T_u, q_u, q_c_u, p, chi)))(290.0)
+    assert jnp.isfinite(g)
+
+
 # ---------------------------------------------------------------------------
 # Unsaturated downdraft toggle
 # ---------------------------------------------------------------------------

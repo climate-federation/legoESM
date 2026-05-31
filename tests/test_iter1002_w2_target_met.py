@@ -621,7 +621,7 @@ def test_iter61_latlon_cb_12day_mass_fixer():
     )
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.timestepping.dispatch import dispatch_integrator
-    from legoesm.core.conservation import _conservation_accumulator
+    from legoesm.core.conservation import conservation_accumulator
     from tests.test_cases.cosine_bell import cosine_bell_latlon
 
     n_lat, n_lon = 72, 144
@@ -638,7 +638,7 @@ def test_iter61_latlon_cb_12day_mass_fixer():
         h=cb.h.data, u=u_face, v=v_face,
         h_s=jnp_local.zeros_like(cb.h.data),
     )
-    _acc = _conservation_accumulator()
+    _acc = conservation_accumulator()
     area64 = grid.area.astype(_acc)
     mass_target = jnp_local.sum(state.h.astype(_acc) * area64)
 

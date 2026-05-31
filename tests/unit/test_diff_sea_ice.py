@@ -306,6 +306,39 @@ class TestRheologyGrad:
         grad = jax.grad(loss)(eps_11)
         assert_gradient_ok(grad, "EVP stress update w.r.t. eps_11")
 
+    def test_delta_deformation_zero_strain_grad(self):
+        """Delta invariant + VP/EVP stress gradients must be finite at *zero*
+        strain (rest state / cold start, eps_ij == 0).
+
+        Regression: ``max(sqrt(max(Delta_sq, 0)), Delta_min)`` returned a NaN
+        gradient at zero strain — sqrt'(0) = inf and the outer ``max`` routes a
+        zero selector into the sqrt (0*inf = NaN), poisoning every VP/EVP/mEVP
+        stress gradient on the first backward pass of a quiescent run.  Flooring
+        the sqrt *argument* at Delta_min**2 keeps the forward value (= Delta_min)
+        and yields a finite (zero) gradient.  Only finiteness is asserted: zero
+        gradient is the *correct* answer in the floored regularization band.
+        """
+        from legoesm.ice.rheology import delta_deformation, evp_stress_update
+
+        shape = (6, 4, 4)
+        zero = jnp.zeros(shape)
+
+        # Direct: Delta at exact zero strain.
+        g_delta = jax.grad(lambda e: jnp.sum(delta_deformation(e, zero, zero)))(zero)
+        assert jnp.all(jnp.isfinite(g_delta)), "delta_deformation grad NaN at zero strain"
+
+        # End-to-end: zero-strain EVP subcycle (mirrors test_evp_stress_update_grad
+        # but at the rest state that triggered the NaN).
+        def stress_loss(eps_11):
+            s11, s22, s12 = evp_stress_update(
+                zero, zero, zero, eps_11, zero, zero, P=1e4 * jnp.ones(shape),
+                e_yield=2.0, T_evp=0.36, dt_s=30.0, N_evp=120,
+            )
+            return jnp.sum(s11 ** 2 + s22 ** 2 + s12 ** 2)
+
+        g_stress = jax.grad(stress_loss)(zero)
+        assert jnp.all(jnp.isfinite(g_stress)), "EVP stress grad NaN at zero strain"
+
 
 # ============================================================================
 # 5d  Multi-category ITD — linear_remap differentiability
@@ -416,3 +449,43 @@ class TestIceAlbedoFeedback:
 
         grad = jax.grad(loss)(state.T_ice.data)
         assert_gradient_ok(grad, "Slab ice (temp-dependent albedo) w.r.t. T_ice")
+
+
+# ============================================================================
+# 5f  Shortwave thickness-ramp albedo — open-water limit differentiability
+# ============================================================================
+
+class TestIceShortwaveGrad:
+    """d(albedo)/d(h_ice) must be finite at the open-water limit h_ice == 0.
+
+    Regression: the ``sqrt(max(h_ice, 0))`` thickness ramps in
+    ``maykut_untersteiner_albedo`` and the delta-Eddington bare-ice band had an
+    *infinite* gradient at h_ice == 0 — the normal state of every ice-edge /
+    growth-from-open-water cell — because sqrt'(0) = inf.  The module docstring
+    explicitly promises a well-defined gradient for adjoint use, so this guards
+    that contract.  Flooring the sqrt argument at a negligible thickness fixes
+    it without changing the forward ramp for any physical h_ice.
+    """
+
+    @pytest.mark.parametrize("scheme", ["maykut", "delta_eddington"])
+    def test_albedo_grad_finite_at_open_water(self, scheme):
+        from legoesm.ice import shortwave
+
+        shape = (4, 4)
+        zero = jnp.zeros(shape)
+        T_sfc = 270.0 * jnp.ones(shape)
+
+        if scheme == "maykut":
+            def loss(h_ice):
+                return jnp.sum(shortwave.maykut_untersteiner_albedo(T_sfc, h_ice))
+        else:
+            def loss(h_ice):
+                a_vis, a_nir = shortwave.delta_eddington_albedo(
+                    T_sfc, h_ice, zero, zero, zero,  # no snow, no pond
+                )
+                return jnp.sum(a_vis + a_nir)
+
+        grad = jax.grad(loss)(zero)
+        assert jnp.all(jnp.isfinite(grad)), (
+            f"{scheme} albedo gradient not finite at h_ice=0 (open water)"
+        )

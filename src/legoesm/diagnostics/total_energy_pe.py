@@ -57,8 +57,8 @@ def compute_total_energy_pe(state, grid, coord) -> tuple[jax.Array, float]:
     # pre-iter-45 path did u·u + v·v, T-products, and the final
     # global sum in fp32 storage dtype — the same fp32-field bug
     # iter-42/43/44 fixed across the conservation helpers.
-    from legoesm.core.conservation import _conservation_accumulator
-    acc = _conservation_accumulator()
+    from legoesm.core.conservation import conservation_accumulator
+    acc = conservation_accumulator()
     p_s = state.p_s.data.astype(acc)                  # (6, n, n)
     phis = state.phis.data.astype(acc)                # (6, n, n)
     T = state.T.data.astype(acc)                      # (6, n, n, nlev)

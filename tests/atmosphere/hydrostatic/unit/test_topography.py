@@ -247,6 +247,32 @@ class TestLoadRealTopography(unittest.TestCase):
 
         self.assertTrue(float(jnp.min(phis)) >= 0.0)
 
+    def test_load_latlon_with_smoothing(self):
+        """Load real topography onto the lat-lon grid WITH smoothing passes.
+
+        The grid was previously mis-classified as cubed-sphere (it exposes
+        ``n``), so its 2-D field hit the (6, n, n) smoother and crashed.  Now
+        classified by coordinate rank; the 2-D Gaussian smoother applies.
+        """
+        from legoesm.grids.latlon import create_latlon_grid
+        grid = create_latlon_grid(n_lat=24, radius=constants.R_earth,
+                                  omega=constants.Omega)
+        path = str(Path(self.tmpdir) / "topo.nc")
+        _make_synthetic_topo_netcdf(path)
+
+        config = TopographyConfig(
+            source="file", path=path,
+            smoothing_passes=4, edge_blend_strength=0.1,
+        )
+        phis, f_land = load_real_topography(grid, config=config)
+
+        self.assertEqual(phis.shape, (grid.n_lat, grid.n_lon))
+        self.assertEqual(f_land.shape, (grid.n_lat, grid.n_lon))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(phis))))
+        self.assertGreaterEqual(float(jnp.min(phis)), 0.0)
+        self.assertTrue(0.0 <= float(jnp.min(f_land))
+                        and float(jnp.max(f_land)) <= 1.0)
+
     def test_phis_has_mountains(self):
         """Should have nonzero phis where mountains exist."""
         path = str(Path(self.tmpdir) / "topo.nc")
@@ -468,6 +494,49 @@ class TestInitialization(unittest.TestCase):
         p_s_grid = jnp.exp(lnps_grid)
         p_s_range = float(jnp.max(p_s_grid) - jnp.min(p_s_grid))
         self.assertGreater(p_s_range, 100.0)
+
+
+class TestLatLonAnalyticTopography(unittest.TestCase):
+    """Analytic mountain generators must work on the lat-lon grid, whose
+    ``lat``/``lon`` are 1-D axes (n_lat,) / (n_lon,) — previously they broadcast
+    ``grid.lat - grid.lon`` as (n_lat,)+(n_lon,) and crashed."""
+
+    def setUp(self):
+        from legoesm.grids.latlon import create_latlon_grid
+        self.grid = create_latlon_grid(
+            n_lat=24, radius=constants.R_earth, omega=constants.Omega)
+        self.shape = (self.grid.n_lat, self.grid.n_lon)
+
+    def test_gaussian_mountain_latlon_shape_and_nonflat(self):
+        z = gaussian_mountain(self.grid, h0=2500.0)
+        self.assertEqual(z.shape, self.shape)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(z))))
+        self.assertGreater(float(jnp.max(z)), 1000.0)
+        self.assertAlmostEqual(float(jnp.min(z)), 0.0, delta=10.0)
+
+    def test_zonal_ridge_latlon_shape_and_zonal(self):
+        from legoesm.grids.topography import zonal_ridge
+        z = zonal_ridge(self.grid, h0=2500.0)
+        self.assertEqual(z.shape, self.shape)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(z))))
+        # Zonally symmetric: each latitude row is constant in longitude
+        # (to float32 precision).
+        z = np.asarray(z)
+        self.assertLess(float(z.std(axis=1).max()), 1e-4 * float(z.max()))
+
+    def test_schaer_mountain_latlon_shape(self):
+        from legoesm.grids.topography import schaer_mountain
+        z = schaer_mountain(self.grid)
+        self.assertEqual(z.shape, self.shape)
+        self.assertTrue(bool(jnp.all(jnp.isfinite(z))))
+
+    def test_cubed_sphere_unchanged(self):
+        # Regression: the 2-D-coordinate helper must not change cubed-sphere
+        # output (lat/lon already 2-D there).
+        grid = create_cubed_sphere(8)
+        z = gaussian_mountain(grid, h0=2500.0)
+        self.assertEqual(z.shape, (6, 8, 8))
+        self.assertGreater(float(jnp.max(z)), 1000.0)
 
 
 if __name__ == "__main__":

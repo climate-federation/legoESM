@@ -435,8 +435,8 @@ class AIMIPClassicalParams(eqx.Module):
 
         Gas concentrations (CO2, CH4, N2O) are intentionally NOT
         pulled from the trained sigmoid leaves: the RRTMGP optics
-        cache (``rrtmgp.RRTMGP._cache_key``) hashes them, and a
-        traced JAX array is unhashable under
+        cache (``rrtmgp.RRTMGP._optics_cache_key``) hashes them,
+        and a traced JAX array is unhashable under
         ``eqx.filter_value_and_grad``.  Cold-bias closure under
         AIMIP is driven by cloud-LW coupling + surface
         emissivity/albedo, not by the modest gas-absorption

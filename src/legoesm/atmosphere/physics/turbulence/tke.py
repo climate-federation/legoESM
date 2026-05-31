@@ -23,7 +23,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import virtual_temperature
+from legoesm.atmosphere.physics._shared import mixing_length, virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import TKEConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
@@ -97,10 +97,7 @@ def tke_turbulence(
     dz_half = jnp.clip(dz_half, 1.0, None)
 
     # Mixing length at full levels: l = kappa * z / (1 + kappa * z / l_max)
-    z_abs = jnp.clip(jnp.abs(z_full), 1.0, None)
-    l_mix = constants.kappa_vk * z_abs / (
-        1.0 + constants.kappa_vk * z_abs / config.l_mix_max
-    )  # (ncol, nlev)
+    l_mix = mixing_length(z_full, config.l_mix_max)  # (ncol, nlev)
 
     # Eddy diffusivities at full levels
     sqrt_tke = jnp.sqrt(tke)

@@ -55,7 +55,7 @@ from legoesm.grids.polar_filter import (
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
 from legoesm.core.precision import cast_pytree
-from legoesm.core.conservation import _conservation_accumulator
+from legoesm.core.conservation import conservation_accumulator
 from legoesm import constants
 
 
@@ -343,10 +343,10 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
         budgets need higher precision than the per-step compute dtype
         (``_accumulation_dtype`` may be fp32 on fp32 policies, which
         leaks ~10^-7 reduction noise into the anchored target and
-        defeats the fixer; ``_conservation_accumulator`` promotes to
+        defeats the fixer; ``conservation_accumulator`` promotes to
         fp64 whenever x64 is enabled).
         """
-        acc = _conservation_accumulator()
+        acc = conservation_accumulator()
         return jnp.sum(state.h.astype(acc) * self.grid.area.astype(acc))
 
     def tendencies(
@@ -424,7 +424,7 @@ class CGridLatLonShallowWaterModel(IntegrationMixin):
         # error and produces spurious O(1e-6) drift even when the
         # anchored target is exact).
         if self.config.fix_mass:
-            acc = _conservation_accumulator()
+            acc = conservation_accumulator()
             area = self.grid.area.astype(acc)
             total_area = jnp.sum(area)
             if target_mass is not None:

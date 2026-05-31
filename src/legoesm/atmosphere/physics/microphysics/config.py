@@ -43,7 +43,12 @@ class SundqvistConfig(NamedTuple):
     """Configuration for Sundqvist large-scale condensation."""
     RH_crit: float = 0.8              # Critical relative humidity
     sigmoid_sharpness: float = 20.0   # Sharpness for smooth activation
-    auto_rate: float = 1e-3           # Autoconversion rate [1/s]
+    auto_rate: float = 1e-3           # Autoconversion rate c_0 [1/s]
+    # Critical cloud water for autoconversion: P_auto = c_0·q_c·
+    # (1 − exp(−(q_c/q_c,crit)²)) (Sundqvist 1989).  Suppresses
+    # autoconversion below q_c,crit (drizzle forms only once cloud water
+    # is large enough).  0 → the linear no-threshold limit.
+    qc_crit: float = 5e-4             # [kg/kg]
     evap_coeff: float = 5e-4          # Sub-cloud evaporation coefficient
 
 

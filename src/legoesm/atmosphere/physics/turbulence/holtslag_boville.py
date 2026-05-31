@@ -18,7 +18,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import virtual_temperature
+from legoesm.atmosphere.physics._shared import mixing_length, virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import HoltslagBovilleConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
@@ -143,10 +143,7 @@ def holtslag_boville_turbulence(
     )  # (ncol, nlev-1)
 
     # Local Ri-based Km above PBL (Louis-style)
-    z_abs = jnp.clip(jnp.abs(z_half_inner), 1.0, None)
-    l_mix = constants.kappa_vk * z_abs / (
-        1.0 + constants.kappa_vk * z_abs / config.l_mix_max
-    )
+    l_mix = mixing_length(z_half_inner, config.l_mix_max)
     b_louis = config.b_louis
     Ri_pos = jnp.maximum(Ri, 0.0)
     f_stable = 1.0 / (
@@ -189,14 +186,26 @@ def holtslag_boville_turbulence(
     sflx_T = shflx / constants.c_pd
     sflx_q = lhflx / constants.L_v
 
-    # ----- Counter-gradient correction for heat -----
-    # Modify effective heat surface flux to account for nonlocal transport:
-    # gamma_h * (w'theta')_sfc / (Km_max * h_pbl)
-    # Applied as an additional correction to the T diffusion RHS
+    # ----- Counter-gradient correction for heat (Holtslag-Boville 1993) -----
+    # Nonlocal transport term γ_h = a·(w'θ')_0 / (w_s·h)  [K/m], added to the
+    # effective temperature gradient.  ``w_s`` is a turbulent VELOCITY scale
+    # [m/s] — here the friction velocity u* (consistent with the u*-based
+    # K-profile above; a convective-w* enhancement would be a further
+    # refinement).
+    #
+    # FIX (audit i43): the previous code divided by ``Km_max`` — a
+    # DIFFUSIVITY [m²/s] — instead of a velocity, so γ_h carried units
+    # [K/m²] and was ~1/(κ·h) ≈ 60× too small for a typical 1 km PBL.  The
+    # nonlocal countergradient (the defining feature of the Holtslag-Boville
+    # scheme versus a purely local closure) was therefore effectively
+    # absent.  Dividing by u* restores the correct [K/m] units and the
+    # O(few K/km) countergradient magnitude.
     wtheta_sfc = shflx / (rho[:, -1] * constants.c_pd)  # kinematic heat flux (ncol,)
-    Km_max = jnp.max(Km_half, axis=1)  # (ncol,)
-    counter_grad = config.gamma_h * wtheta_sfc / (
-        jnp.clip(Km_max, 1e-6, None) * h_pbl
+    # Gate to the convective (unstable) regime: the countergradient is a
+    # convective-BL feature, so it vanishes for neutral/stable surface
+    # forcing (w'θ' ≤ 0) rather than producing a spurious negative γ_h.
+    counter_grad = config.gamma_h * jnp.maximum(wtheta_sfc, 0.0) / (
+        ustar * h_pbl
     )  # (ncol,) [K/m]
 
     # Add counter-gradient to the effective T gradient inside PBL

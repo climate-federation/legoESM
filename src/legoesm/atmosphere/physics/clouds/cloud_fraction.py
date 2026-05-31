@@ -105,7 +105,18 @@ def sundqvist_cloud_fraction(
     RH: jnp.ndarray,
     config: CloudConfig,
 ) -> jnp.ndarray:
-    """Sundqvist (1988) cloud fraction from relative humidity.
+    """Sundqvist (1989) cloud fraction from relative humidity.
+
+    Sundqvist, Berge & Kristjánsson (1989, MWR 117) relate the cloud
+    cover ``b`` to the grid-mean RH by ``(1−b)² = (1−RH)/(1−RH_crit)``,
+    i.e.
+
+        ``b = 1 − √((1−RH)/(1−RH_crit))``   for RH ≥ RH_crit, else 0.
+
+    This √-form (used by ECHAM and most Sundqvist implementations) is the
+    faithful scheme; the earlier code here used a *linear* ramp
+    ``(RH−RH_crit)/(1−RH_crit)`` mislabeled as Sundqvist — the √-form
+    rises faster just above RH_crit (e.g. 0.29 vs 0.5 at the midpoint).
 
     Parameters
     ----------
@@ -118,7 +129,14 @@ def sundqvist_cloud_fraction(
     jnp.ndarray
         Cloud fraction [0, 1], same shape as RH.
     """
-    cf = (RH - config.rh_crit) / jnp.maximum(1.0 - config.rh_crit, 1.0e-6)
+    arg = (1.0 - RH) / jnp.maximum(1.0 - config.rh_crit, 1.0e-6)
+    # Double-``where`` for the √-form: at RH ≥ 1 (arg ≤ 0) the cloud is
+    # full so b = 1 *exactly*, while keeping ``√`` off zero so its
+    # otherwise-infinite derivative cannot leak a NaN cotangent through
+    # the dead branch (same AD-safe pattern as the Smagorinsky–Lilly
+    # cutoff).  For RH < RH_crit, arg > 1 ⇒ b < 0 ⇒ clipped to 0.
+    arg_safe = jnp.where(arg > 0.0, arg, 1.0)
+    cf = jnp.where(arg > 0.0, 1.0 - jnp.sqrt(arg_safe), 1.0)
     return jnp.clip(cf, 0.0, 1.0)
 
 
@@ -145,10 +163,18 @@ def xu_randall_cloud_fraction(
     jnp.ndarray
         Cloud fraction [0, 1].
     """
-    # Avoid division by zero when RH = 1
-    denominator = jnp.maximum((1.0 - RH) * q_sat, 1.0e-10)
+    # Xu-Randall (1996) denominator ((1−RH)·q_sat)^γ.  Floor the base
+    # at 1e-10 *before* the power so the fractional γ<1 exponent never
+    # sees 0 (1e-10^γ stays finite + positive ⇒ AD-safe).
+    denominator = jnp.maximum((1.0 - RH) * q_sat, 1.0e-10) ** config.gamma_xr
     exponent = -config.alpha_xr * q_condensate / denominator
-    cf = jnp.power(jnp.clip(RH, 0.0, 1.0), config.p_xr) * (
+    # Floor the RH base of the fractional power at 1e-6 (not 0): p_xr < 1, so
+    # ``RH**p_xr`` has an infinite derivative at RH=0 (0**-0.75), giving an inf
+    # reverse-mode gradient d(cf)/d(q_v) for any dry layer (RH=0 ⇒ q_v=0, e.g.
+    # upper stratosphere / dry init).  The forward is unaffected — cf -> 0 there
+    # anyway via the (1 - exp) factor — and the clip zeroes the gradient chain
+    # below the floor.
+    cf = jnp.power(jnp.clip(RH, 1.0e-6, 1.0), config.p_xr) * (
         1.0 - jnp.exp(exponent)
     )
     return jnp.clip(cf, 0.0, 1.0)

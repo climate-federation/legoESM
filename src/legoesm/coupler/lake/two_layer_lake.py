@@ -63,6 +63,11 @@ def step_lake(
     # Bulk fluxes
     rho = forcing.rho_lowest
 
+    _valid_bulk = ("constant", "most", "coare3", "large_yeager")
+    if config.bulk_scheme not in _valid_bulk:
+        raise ValueError(
+            f"Unknown bulk_scheme {config.bulk_scheme!r}; expected one of {_valid_bulk}."
+        )
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
@@ -92,10 +97,10 @@ def step_lake(
     # Vertical mixing: wind-enhanced
     k_eff = config.k_mix * (1.0 + config.wind_mix_alpha * wind_speed)
     d_mid = 0.5 * (config.h_epi + config.h_hypo)
-    F_mix = config.rho_water * config.c_water * k_eff * (T_epi - T_hypo) / d_mid
+    F_mix = config.rho_water * config.c_water_mass * k_eff * (T_epi - T_hypo) / d_mid
 
     # Epilimnion energy balance
-    cap_epi = config.rho_water * config.c_water * config.h_epi
+    cap_epi = config.rho_water * config.c_water_mass * config.h_epi
     dT_epi_dt = (sw_net + lw_net - shflx - lhflx - F_mix) / cap_epi
     T_trial_epi = T_epi + dt * dT_epi_dt
 
@@ -108,7 +113,7 @@ def step_lake(
     Q_freeze_epi = cap_epi * jnp.maximum(T_freeze - T_trial_epi, 0.0) / dt
 
     # Hypolimnion: receives mixing flux only
-    cap_hypo = config.rho_water * config.c_water * config.h_hypo
+    cap_hypo = config.rho_water * config.c_water_mass * config.h_hypo
     dT_hypo_dt = F_mix / cap_hypo
     T_trial_hypo = T_hypo + dt * dT_hypo_dt
     T_hypo_new = jnp.maximum(T_trial_hypo, T_freeze)

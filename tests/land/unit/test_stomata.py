@@ -101,6 +101,26 @@ class TestFarquharPhotosynthesis(unittest.TestCase):
         A_net, _ = farquhar_photosynthesis(Ci, jnp.array(0.0), self.T, self.cfg)
         self.assertLess(float(A_net), 0.0)
 
+    def test_grad_finite_at_unit_curvature(self):
+        """dA/dAPAR must stay finite with theta_j = 1 (the curvature value some
+        Farquhar formulations use), where the J light-response discriminant
+        b^2-4ac can reach 0.  Regression: ``sqrt(maximum(disc, 0))`` had an
+        infinite gradient at disc=0 (sqrt'(0)); flooring the discriminant fixes
+        it.  Default theta_j=0.9 keeps disc ~ O(1e3) so the forward is unchanged.
+        """
+        cfg = StomataConfig(theta_j=1.0)
+        Ci = jnp.array(280.0)
+
+        def loss(APAR):
+            A_net, _ = farquhar_photosynthesis(Ci, APAR, self.T, cfg)
+            return jnp.sum(A_net)
+
+        # Sweep APAR through the alpha_q*APAR == J_max knife-edge.
+        for apar in (0.0, 100.0, 600.0, 2000.0):
+            g = jax.grad(loss)(jnp.array(apar))
+            self.assertTrue(bool(jnp.isfinite(g)),
+                            f"dA/dAPAR not finite at APAR={apar}, theta_j=1")
+
     def test_soil_moisture_stress(self):
         """Soil moisture stress reduces assimilation."""
         Ci = jnp.array(280.0)

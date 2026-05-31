@@ -28,6 +28,14 @@ import jax.numpy as jnp
 
 from legoesm import constants
 
+# AD-safety floor for the thickness inside the sqrt thickness-ramps.  sqrt'(0) is
+# infinite, so differentiating sqrt(h_ice) at the open-water limit h_ice == 0
+# (every ice-edge cell) yields an inf/NaN gradient even though the forward value
+# is finite.  Flooring the sqrt argument at this negligible thickness (0.1 nm)
+# keeps the forward ramp bit-identical for any physical h_ice while giving a
+# finite (zero, via the max) gradient at h_ice == 0.
+_H_SQRT_FLOOR = 1e-12  # m
+
 
 # ==============================================================================
 # Result container
@@ -89,7 +97,7 @@ def maykut_untersteiner_albedo(
         + melt_fraction * albedo_melt_bare
     )
     thickness_factor = jnp.clip(
-        jnp.sqrt(jnp.maximum(h_ice, 0.0) / jnp.maximum(h_ramp, 1e-6)),
+        jnp.sqrt(jnp.maximum(h_ice, _H_SQRT_FLOOR) / jnp.maximum(h_ramp, 1e-6)),
         0.0,
         1.0,
     )
@@ -129,7 +137,7 @@ def _band_albedo_bare_ice(
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Bare-ice two-band albedo with thickness ramp."""
     ramp = jnp.clip(
-        jnp.sqrt(jnp.maximum(h_ice, 0.0) / jnp.maximum(h_sat, 1e-6)),
+        jnp.sqrt(jnp.maximum(h_ice, _H_SQRT_FLOOR) / jnp.maximum(h_sat, 1e-6)),
         0.0,
         1.0,
     )
@@ -162,6 +170,7 @@ def delta_eddington_albedo(
     T_width: float = 1.0,
     i0_vis: float = constants.i0_vis,
     i0_nir: float = constants.i0_nir,
+    h_snow_mask: float = 0.02,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Two-band albedo following the Briegleb-Light surrogate.
 
@@ -181,6 +190,19 @@ def delta_eddington_albedo(
         / pond cover above).  Multiplied by the *non-pond* and
         *non-snow* fraction of the cell and ``i0_vis`` to get the
         net flux into the ocean.
+
+    Notes
+    -----
+    Surrogate-fidelity limitation (disclosed): ``i0_vis`` is applied as a
+    fraction of *incident* SW with no in-ice Beer-Lambert attenuation,
+    whereas full CICE6 delta-Eddington defines ``I0`` as a fraction of the
+    *net-absorbed* SW that then decays as ``exp(-κ_ice·h_ice)`` through the
+    ice.  Column energy is still conserved (``compute_ice_sw`` sets
+    ``absorbed = (1-α)·F - penetrated``), but the surface/ocean *partition*
+    is biased toward the ocean for thick bare ice.  A faithful upgrade
+    needs the CICE ``I0`` convention + an ice extinction coefficient
+    ``κ_ice`` (reference value required — not guessed) + validation.
+    Opt-in scheme; default ice SW is ``constant``.
     """
     melt_fraction = jnp.clip(0.5 + (T_sfc - T_melt) / T_width, 0.0, 1.0)
 
@@ -205,8 +227,10 @@ def delta_eddington_albedo(
     )
 
     # Coverage fractions (snow on top wins; ponds occupy a fraction of
-    # the bare-ice surface).
-    f_snow = jnp.clip(jnp.minimum(h_snow / 0.02, 1.0), 0.0, 1.0)
+    # the bare-ice surface).  ``h_snow_mask`` is the snow depth [m] at which
+    # the surface is fully snow-covered (lifted from a bare 0.02 literal — no
+    # magic numbers in the JAX albedo body; CLAUDE.md).
+    f_snow = jnp.clip(jnp.minimum(h_snow / jnp.maximum(h_snow_mask, 1e-6), 1.0), 0.0, 1.0)
     f_bare_after_snow = 1.0 - f_snow
     f_pond_on_bare = jnp.clip(pond_area, 0.0, 1.0)
     f_pond = f_bare_after_snow * f_pond_on_bare
