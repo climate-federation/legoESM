@@ -93,3 +93,26 @@ sign/time-level subtlety) — a coupled growth mode that ONLY a linearized-FB ei
 analysis can isolate (JAX jvp/vjp of FB^K about steady W2 → the optimal growing perturbation localizes
 the unstable coupling).  This is a dedicated research-level debug, best in a FRESH context (my context
 is now ~26 iterations large).  The single-component-read avenue is DEFINITIVELY exhausted.
+
+
+## iter115b — EIGEN-ANALYSIS DONE (finite-diff power iteration): FB blow-up is MARGINAL-mode forcing amp, not a fast eigenmode
+jvp eigen-analysis was CPU-prohibitive (AD graph through 8 FB steps; 32 min, killed). FINITE-DIFFERENCE
+power iteration (Mδ ≈ [FB^8(s0+εδ)-FB^8(s0)]/ε, 20 iters, C36 W2) WORKED:
+  dominant λ_8step: 0.635→0.949→0.970→0.982→0.989 (rising, per-step 0.945→0.998), converging to λ≈1.0
+  (MARGINAL — neither fast-growing nor strongly-decaying). Eigenvector: WIND mode (|u|≈|v|), vertex
+  ratio 1.8× (mild), per-face mass ~uniform [0.19,0.18,0.19,0.19,0.18,0.07] across faces 0-4 (face 5
+  low) — NOT sharply face-4-localized.
+⇒ REFRAME: the FB W2 blow-up (day2 NaN) is NOT a clean linear growing eigenmode (dominant λ≈1.0,
+marginally stable). It is the near-marginal (I-M)^-1 ≈ 1/(1-0.998) ≈ 500× AMPLIFICATION of the CONSTANT
+single-step FORCING r = FB(W2)-W2 (the c_sw+p_grad_c+d_sw ASSEMBLY inconsistency at the vertices; r is
+what iter95/108 measured as the vertex-localized deviation). The near-marginal damping is FV3-like
+CORRECT (FV3 is ~non-dissipative for balanced flow); a tiny assembly inconsistency r is amplified ~500×
+→ the offset → nonlinear NaN.
+⇒ FIX TARGET (now clear): REDUCE the single-step assembly residual r = FB(W2)-W2 at the vertices — the
+non-cancellation of (c_sw vortflux+KE) + p_grad_c PGF + d_sw, NOT any single component (all faithful,
+iter114/115) and NOT the damping (marginal is correct). Since every component is individually faithful,
+r is an ASSEMBLY/sequencing subtlety (FB time-level ordering, the half-step vs full-step staggering, or
+a sign at the vertex). NEXT (dedicated): compute the full r=FB(W2)-W2 + decompose by FB STAGE
+(c_sw vs p_grad_c vs d_sw contribution to r at the vertices) to find which stage's assembly injects r.
+Eigen-analysis avenue is now FEASIBLE (finite-diff, ~min); the marginal-amplification reframe is the
+key new understanding.
