@@ -70,3 +70,27 @@ STRUCTURAL vertex-vorticity growth mode (dissipation/metric-independent).
 3. chord→spherical sg_area upgrade (tracked, needs gold regen). 4. 3D PE upwind PPM vort. 5. thread
    FV3 sin_sg(5) seam rotation. 6. pre-existing 17-test swamp. 7. human visual verdict. 8. ocean/AMIP
    cross-grid (climate CPU-infeasible). State: memory `cube-fv3-faithfulness-state`.
+
+
+## iter95 — FB residual ISOLATED: vertex-localized → `_corner_vorticity` uc/vc reconstruction
+Mapped |u_d - u_d_init| by region over FB W2 C36 steps (duogrid+Phase4, dt=300):
+  step1: max|du|=1.64; mean|du| VERTEX=0.602 vs edge=0.118 vs interior=0.084  (vertex 5× edge, 7× int)
+  step5:  vertex=6.27 vs edge=0.95 vs interior=0.44                            (vertex 6.6× edge)
+  step20: max at face4 VERTEX; vertex=12.8 vs edge=4.2 vs interior=1.5
+⇒ the FB residual is STRONGLY VERTEX-LOCALIZED from step 1.  With the METRIC halo ruled out (iter94)
+and dissipation/Phase4/wind-halo ruled out (iter82-83), the seed is the `_corner_vorticity` duogrid
+uc/vc RECONSTRUCTION at the 8 cube vertices (fv3_sw_core.py:1189-1208).
+ROOT-CAUSE SCOPED: the reconstruction's lossy detour — uc(i-edge) → uc_cc(2-pt avg to cell center)
+→ pad_halo_vector(rotate) → re-stagger(2-pt avg back to i-edge) — is a 4-pt smoothing FORCED by
+`pad_halo_vector` being A-grid (cell-centered) ONLY (halo.py:2047).  There is NO staggered C-grid
+(uc i-edge, vc j-edge) cross-face vector halo, so uc/vc cannot be rotated directly at the faces; the
+center-avg smears the vertex circulation (3-face junction) → the ~2% vertex error → the growth mode.
+FAITHFUL FIX (scoped, MAJOR infrastructure): a staggered C-grid cross-face vector halo
+(`pad_halo_cgrid_vector`) that rotates uc/vc at their native edges without the cell-center detour —
+analogous to the gated `pad_halo_dgrid_vector_4d` but for C-grid staggering.  Then thread it into
+`_corner_vorticity` (replacing 1189-1208), re-pin the corner-vort fingerprint, re-measure the FB
+residual.  This is the convergent faithful fix for the FB chain (and the C96 W5 eigenmode root).
+STRATEGIC NOTE: the FB chain is a DEFERRED upgrade (production SW = co-located Arakawa-Lamb,
+"functional-faithful"); this fix is substantial new infra.  Broader directive goals (baroclinic/
+AMIP/ocean cross-grid closeness to MPAS/latlon; cosine_bell 5× transport gap) may be more tractable
+next steps — interleave.
