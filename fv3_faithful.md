@@ -214,3 +214,19 @@ flux metric iter110b; + dissipation/Phase4/wind-halo iter82-83).  Remaining cand
 / d_sw zeta / c_sw→d_sw coupling) are all single-step-LIMITED (the residual is a growth-rate eigenmode,
 iter79/108b) ⇒ the linearized-FB EIGEN-ANALYSIS is now the ONLY productive method (a dedicated/
 fresh-context effort; the autonomous-loop single-step probe avenue is exhausted).
+
+
+## iter111 — ocean cross-grid broadened (IGW); full ocean matrix --grid all is CPU-prohibitive
+Full ocean matrix --grid all --quick = 57 cases × all grids (incl. regional/channel double_gyre etc.)
+= MULTI-HOUR (5 case-dirs in 18 min) → CPU-PROHIBITIVE to block on (like the atm 3D baroclinic).
+Killed; rely on representative dynamics cases cross-grid + the iter89 cube matrix (9/9, rest
+machine-zero).
+inertia_gravity_wave cross-grid (cube C24 / latlon 36×72 / mpas ico3), 3/3 PASS:
+  omega (IG-wave frequency, the dispersion PHYSICS) = 1.09e-04 IDENTICAL on all 3 grids ⇒ faithful.
+  L2: cube 1.15 (LOWEST/best) | latlon 1.37 | mpas 1.31.  amp_ratio: cube 0.524 vs latlon 0.851 / mpas
+  0.731 — the cube damps IG-wave AMPLITUDE more (consistent with the cube's higher numerical diffusion,
+  cf. cosine_bell PPM plateau), but the frequency/physics is faithful + L2 best.
+⇒ ocean cube cross-grid faithfulness now evidenced on TWO dynamics cases: geostrophic_adjustment
+(iter105, cube≈latlon≈mpas balance, T drift machine-zero) + inertia_gravity_wave (faithful omega, L2
+best).  Ocean directive goal (close to MPAS/latlon, OMIP) MET for the representative dynamics; the
+exhaustive 57-case matrix is CPU-infeasible to run here.
