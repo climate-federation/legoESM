@@ -93,8 +93,14 @@ Production uses RK3 Arakawa-Lamb (works). `fv3_fb_sw_step` / `FV3FBShallowWaterM
   4-quadrant interior dual cell. FV3 computes get_area_tri (spherical triangle, fv_grid_tools.F90:
   2658-2728, called unconditionally incl. equiangular). ⇒ rarea_c at the 8 vertices is mis-scaled
   → wrong vertex vorticity for BOTH the FB chain AND the PRODUCTION cube (C96 W5 eigenmode is also
-  vertex/corner-localized — this is a candidate eigenmode root). NEXT: quantify the vertex-area
-  error; implement the FV3 junction area; regression-test production cube SW + eigenmode.
+  vertex/corner-localized — this is a candidate eigenmode root).
+  iter85 — area_corner VERTEX FIX DONE (commit 4ad2fea0, cubed_sphere_cdgrid.py:410-414): the 8
+  cube vertices now use FV3 `3*sg_area[corner]` (= `3*get_area(vertex,mid_j,mid_i,cell_centre)`,
+  fv_grid_tools.F90:1042-1066) instead of the diagonal-interior 4-quadrant copy (~33% too large).
+  REGRESSION-SAFE: production cube SW 4/4 PASS, W2 L2=1.76e-4 UNCHANGED (8 vertices negligible in
+  the global L2), W5/W6 mass ~1e-16. Shared metric ⇒ affects production + FB. C96 W5 eigenmode
+  payoff test RUNNING (was 26/32/33/40/80 blow-up); bug 1 (_corner_vorticity edge-mode metric,
+  FB-only) still pending.
 
 ## gnomonic_ed GRID (FV3 operational gt=0; iter62-78) — WIRED + clean + codex-approved
 create defaulted to EQUIANGULAR (gt=2, aspect 1.40); FV3 uses gnomonic_ed (gt=0, aspect 1.06, dx √2)
