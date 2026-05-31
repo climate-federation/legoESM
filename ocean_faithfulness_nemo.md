@@ -16,10 +16,13 @@ got garbage coordinates → scrambled pattern (corr ~0.1) + inflated −6.6 °C 
 2.76 °C** (just above the 2.5 "good" bar); SSS corr 0.79, bias −0.10 (runoff-gated). So the
 ¼° legoESM ocean **already matches NEMO's SST pattern at 0.97 correlation** after a 10-day
 spinup — far from the old "poor RMSE 13.7 corr 0.1". Native diag: lego tropics 25.4 °C /
-global 15.0 °C vs NEMO 27.4 / 17.9. Remaining gap to "good/excellent": (a) longer run
-(equilibration); (b) **freezing-point clamp / sea-ice** — legoESM has 170k sub-freezing
-cells (min −6 °C, no SI3) inflating bias/RMSE; (c) runoff (SSS). Equatorial velocity
-over-intensity is a DECAYING transient (30→21 m/s day 8→12), not sustained. **Still not
+global 15.0 °C vs NEMO 27.4 / 17.9. Remaining gap to "good/excellent": **(a) longer run (equilibration)** — the day-10
+−0.98 °C bias is mostly spinup (legoESM warming toward the forcing, lags NEMO); track via
+the day-20/30/90 trend; (c) runoff (SSS). **Freezing clamp RULED OUT** as a lever (cheap
+scorer test `--freeze-clamp-C -1.9`, job 8127390: RMSE 2.759→2.755, bias −0.98→−0.97 —
+negligible; the 44k sub-freezing cells carry tiny cos-lat weight on the common mask).
+Equatorial velocity over-intensity is a DECAYING transient (30→18 m/s day 8→14); rest-IC
+A/B (8127344) gives WORSE equatorial (41 m/s) → balanced-init helps, transient is intrinsic. **Still not
 "excellent" across all grids (the promise) — but the ¼° tripole is close on SST.**
 
 ## CURRENT STATUS (iter 16 — read this first)

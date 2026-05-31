@@ -155,6 +155,12 @@ def main() -> int:
                    help="NEMO grid_T time record (default last).")
     p.add_argument("--res-deg", type=float, default=1.0)
     p.add_argument("--output-dir", type=Path, default=Path("results/omip_nemo/compare"))
+    p.add_argument("--freeze-clamp-C", type=float, default=None,
+                   help="Floor legoESM SST at this temperature [deg C] before "
+                        "scoring, to mimic NEMO's sea-ice-capped surface "
+                        "(~-1.9 C). legoESM has no sea ice so high-lat cells "
+                        "cool below freezing; this tests how much that inflates "
+                        "the SST RMSE/bias vs NEMO.")
     args = p.parse_args()
     out = args.output_dir; out.mkdir(parents=True, exist_ok=True)
 
@@ -167,6 +173,11 @@ def main() -> int:
     tgt_lat = np.arange(-89.5, 90.0, r)
     tgt_lon = np.arange(0.5, 360.0, r)
 
+    if args.freeze_clamp_C is not None:
+        n_below = int((L["sst"] < args.freeze_clamp_C).sum())
+        L["sst"] = np.maximum(L["sst"], args.freeze_clamp_C)
+        print(f"[freeze-clamp] floored legoESM SST at {args.freeze_clamp_C} C "
+              f"({n_below} cells were below)")
     sstL, ocL = regrid_curv_to_latlon(L["sst"], L["lat"], L["lon"], L["mask"], tgt_lat, tgt_lon)
     sstN, ocN = regrid_curv_to_latlon(N["sst"], N["lat"], N["lon"], N["mask"], tgt_lat, tgt_lon)
     sssL, _ = regrid_curv_to_latlon(L["sss"], L["lat"], L["lon"], L["mask"], tgt_lat, tgt_lon)
