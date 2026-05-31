@@ -116,3 +116,23 @@ a sign at the vertex). NEXT (dedicated): compute the full r=FB(W2)-W2 + decompos
 (c_sw vs p_grad_c vs d_sw contribution to r at the vertices) to find which stage's assembly injects r.
 Eigen-analysis avenue is now FEASIBLE (finite-diff, ~min); the marginal-amplification reframe is the
 key new understanding.
+
+
+## iter117 — EIGENMODE CLEANLY ISOLATED (λ=1.0072/step, 10.6× vertex) — corrects iter115b
+iter115b's K=8 power iteration (λ→0.998, "marginal/forcing reframe") was WRONG: at K=8 the NEUTRAL
+physical W2 modes (λ=1) MASKED the true growing mode. At K=50 (the growing mode dominates the neutrals
+over 50 steps) the power iteration CLEANLY converges:
+  per-step λ = 1.00720 > 1  (λ_50step=1.431; ≈ e^2.06 ≈ 8× growth/day) — a GENUINE GROWING EIGENMODE.
+  Eigenvector: WIND mode, u_d edge/vertex ratio 10.6× (STRONGLY vertex-localized), per-face mass
+  [0.11,0.22,0.29,0.31,0.05,0.02] → concentrated on faces 2/3 (the growing eigenvector; iter112's
+  face-4 was the W2-IC transient, a different projection).
+⇒ the FB W2 instability IS a real λ>1 growing eigenmode (not marginal/forcing), strongly localized to
+the 3-face cube VERTICES. FV3 (oracle) is STABLE for W2 (λ≤1) → the port introduced this growing mode;
+since every COMPONENT reads faithful (iter114/115), it is an ASSEMBLY/sequencing/sign bug at the
+vertices that FV3 doesn't have.
+KEY ENABLER: the K=50 finite-difference power iteration is now a FIX-VALIDATION HARNESS — for any
+candidate assembly fix, re-run → does per-step λ drop below 1 (mode removed)? This makes the dedicated
+debug TRACTABLE (test fixes against λ, no need to integrate to day2-NaN). NEXT: inspect the eigenvector
+structure at the faces-2/3 vertices + test candidate assembly fixes (FB time-level/sequencing, the
+ke_corner+vort-flux d_sw balance, the c_sw→d_sw uc/vc hand-off) against λ. CORRECTS the iter115b memory
+reframe.
