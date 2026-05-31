@@ -230,6 +230,8 @@ class TestKessler:
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
         out = kessler_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0)
         for field in out:
+            if field is None:  # optional fields (e.g. 2-moment number tendencies)
+                continue
             assert jnp.all(jnp.isfinite(field)), f"Non-finite in {field}"
 
     def test_dry_air_zero_tendency(self):
@@ -335,6 +337,8 @@ class TestSundqvist:
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
         out = sundqvist_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0)
         for field in out:
+            if field is None:  # optional fields (e.g. 2-moment number tendencies)
+                continue
             assert jnp.all(jnp.isfinite(field))
 
     def test_autoconversion_does_not_drive_qc_negative(self):
@@ -418,6 +422,8 @@ class TestSeifertBeheng:
         T, q_v, h, p_full, p_half, rho, dz = _make_warm_columns()
         out = seifert_beheng_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0)
         for field in out:
+            if field is None:  # optional fields (e.g. 2-moment number tendencies)
+                continue
             assert jnp.all(jnp.isfinite(field))
 
     def test_differentiable(self):
@@ -494,6 +500,8 @@ class TestMorrison:
         T, q_v, h, p_full, p_half, rho, dz = _make_cold_columns()
         out = morrison_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0)
         for field in out:
+            if field is None:  # optional fields (e.g. 2-moment number tendencies)
+                continue
             assert jnp.all(jnp.isfinite(field))
 
     def test_ice_only_below_freezing(self):
@@ -728,6 +736,8 @@ class TestThompson:
         T, q_v, h, p_full, p_half, rho, dz = _make_cold_columns()
         out = thompson_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0)
         for field in out:
+            if field is None:  # optional fields (e.g. 2-moment number tendencies)
+                continue
             assert jnp.all(jnp.isfinite(field))
 
     def test_graupel_from_riming(self):
@@ -846,6 +856,8 @@ class TestMLEmulator:
         out = ml_microphysics(T, q_v, h, p_full, p_half, rho, dz, dt=10.0,
                               config=config, model=model)
         for field in out:
+            if field is None:  # optional fields (e.g. 2-moment number tendencies)
+                continue
             assert jnp.all(jnp.isfinite(field))
 
     def test_differentiable(self):

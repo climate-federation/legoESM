@@ -111,6 +111,8 @@ def test_all_outputs_finite(scheme):
     out = _call_scheme(scheme, T, q_v, hydro, p_full, p_half, rho, dz)
     for fname in out._fields:
         val = getattr(out, fname)
+        if val is None:        # optional field (e.g. dN_s_dt for single-moment)
+            continue
         assert jnp.all(jnp.isfinite(val)), f"{scheme}: {fname} has NaN/Inf"
 
 

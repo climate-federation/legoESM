@@ -551,8 +551,15 @@ def solve_sw(
     )
 
     # Surface albedo: broadcast per-column array or scalar to 2D plane
-    # with the same horizontal sharding as the temperature.
+    # with the same horizontal sharding as the temperature. The DIFFUSE
+    # reflection uses sfc_alb; the DIRECT beam uses sfc_alb_dir when set
+    # (RAD-3 SAM direct/diffuse split), else falls back to sfc_alb.
     sfc_albedo = atmos_state.sfc_alb * jnp.ones_like(temperature[:, :, 0])
+    _alb_dir_src = (
+        atmos_state.sfc_alb if atmos_state.sfc_alb_dir is None
+        else atmos_state.sfc_alb_dir
+    )
+    sfc_albedo_dir = _alb_dir_src * jnp.ones_like(temperature[:, :, 0])
 
     # Monochromatic top of atmosphere flux.
     if solar_fraction_by_gpt is None:
@@ -567,7 +574,7 @@ def solve_sw(
         r_dir=optical_props_2stream['r_dir'],
         optical_depth=sw_optical_props['optical_depth'],
         toa_flux=toa_flux,
-        sfc_albedo_direct=sfc_albedo,
+        sfc_albedo_direct=sfc_albedo_dir,
         zenith=safe_zenith,
         use_scan=use_scan,
     )

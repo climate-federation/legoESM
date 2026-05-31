@@ -343,13 +343,37 @@ class TestMicrophysicsParams:
         )
 
         def loss(d):
-            cfg = MorrisonConfig()._replace(dep_coeff=d)
+            # dep_coeff feeds the legacy "heuristic" deposition path
+            # (the default "m2005" path is tuned by
+            # ice_deposition_efficiency instead — iter-8).
+            cfg = MorrisonConfig()._replace(
+                dep_coeff=d, ice_deposition_scheme="heuristic",
+            )
             out = morrison_microphysics(
                 T, q_v, hydro, p_full, p_half, rho, dz, 300.0, config=cfg,
             )
             return jnp.sum(out.dq_i_dt ** 2)
 
         assert_param_grad_ok(loss, 1e-3, "Morrison dep_coeff")
+
+    def test_morrison_ice_deposition_efficiency(self):
+        # The m2005 deposition multiplier must be reachable by AD.
+        T, q_v, hydro, p_full, p_half, rho, dz = _moist_microphys_column()
+        T = jnp.full_like(T, 240.0)
+        hydro = hydro._replace(
+            N_c=jnp.full(hydro.q_c.shape, 1e8),
+            q_i=jnp.full(hydro.q_c.shape, 1e-5),
+            N_i=jnp.full(hydro.q_c.shape, 1e5),
+        )
+
+        def loss(eff):
+            cfg = MorrisonConfig()._replace(ice_deposition_efficiency=eff)
+            out = morrison_microphysics(
+                T, q_v, hydro, p_full, p_half, rho, dz, 300.0, config=cfg,
+            )
+            return jnp.sum(out.dq_i_dt ** 2)
+
+        assert_param_grad_ok(loss, 1.0, "Morrison ice_deposition_efficiency")
 
     def test_morrison_agg_coeff(self):
         T, q_v, hydro, p_full, p_half, rho, dz = _moist_microphys_column()
@@ -361,7 +385,12 @@ class TestMicrophysicsParams:
         )
 
         def loss(a):
-            cfg = MorrisonConfig()._replace(agg_coeff=a)
+            # agg_coeff is the HEURISTIC ice→snow aggregation coefficient; the
+            # default ice_to_snow_scheme is now m2005_autoconv (SAM PRCI, which
+            # ignores agg_coeff), so select the heuristic path to exercise the
+            # parameter this test is about.
+            cfg = MorrisonConfig()._replace(
+                agg_coeff=a, ice_to_snow_scheme="heuristic")
             out = morrison_microphysics(
                 T, q_v, hydro, p_full, p_half, rho, dz, 300.0, config=cfg,
             )

@@ -134,6 +134,56 @@ def test_K_m_zero_at_surface_in_limit_dz_sfc_to_zero():
     assert 50.0 < ratio_2 < 200.0
 
 
+def test_K_m_no_wall_cap_dosmagor_uses_full_smag_length():
+    """SAM-faithful CRM path (iter-46): ``wall_damping=False`` ⇒ ``smix=grd``
+    (no von-Kármán cap). The lowest cell then uses the FULL ``c_s·Δ`` length
+    (NOT ``κz``) ⇒ K_sfc equals the un-capped Smag value, strictly LARGER than
+    the wall-capped default. Matches SAM ``dosmagor`` (``tke_full.f90:286``)."""
+    grid = _grid()
+    hc = create_stretched_height_coordinate(
+        n_levels=grid.nlev, H=2_000.0, dz_sfc=50.0,
+    )
+    a = 0.01
+    u = a * jnp.broadcast_to(
+        hc.z_full[None, None, :], (grid.ny, grid.nx, grid.nlev),
+    )
+    v = jnp.zeros_like(u)
+    w = jnp.zeros((grid.ny, grid.nx, grid.nlev + 1))
+    c_s = 0.19
+    K_capped = _compute_smagorinsky_K_m_plane(
+        u, v, w, grid, hc, c_s=c_s, wall_damping=True)
+    K_nocap = _compute_smagorinsky_K_m_plane(
+        u, v, w, grid, hc, c_s=c_s, wall_damping=False)
+    delta_sfc = (grid.dx * grid.dy * float(hc.dz[-1])) ** (1.0 / 3.0)
+    expected_K_nocap = (c_s * delta_sfc) ** 2 * a
+    np.testing.assert_allclose(
+        float(jnp.max(K_nocap[..., -1])), expected_K_nocap,
+        rtol=5.0e-2, atol=1.0e-8)
+    # cap was active at the surface ⇒ no-cap K strictly larger there
+    assert float(jnp.max(K_nocap[..., -1])) > float(jnp.max(K_capped[..., -1]))
+    # ALOFT the cap was inactive ⇒ both identical (gate only touches the surface)
+    np.testing.assert_allclose(
+        np.asarray(K_nocap[..., 0]), np.asarray(K_capped[..., 0]),
+        rtol=0.0, atol=1.0e-12)
+
+
+def test_crm_run_scripts_set_dosmagor_no_wall_cap():
+    """codex iter-46 G: guard that all three SAM-faithful CRM drivers pass
+    ``smagorinsky_wall_damping=False`` to the kernel (SAM dosmagor smix=grd).
+    A regression that drops the setting (reverting to the von-Kármán cap) would
+    silently make the near-surface SGS mixing un-SAM-faithful — fail loudly
+    here instead."""
+    from pathlib import Path
+    import legoesm
+    repo = Path(legoesm.__file__).resolve().parents[2]
+    for script in ("run_gate_plane.py", "run_lba_plane.py",
+                   "run_rcemip_plane.py"):
+        src = (repo / "scripts" / script).read_text()
+        assert "smagorinsky_wall_damping=False" in src, (
+            f"{script} must pass smagorinsky_wall_damping=False "
+            f"(SAM dosmagor has no wall cap)")
+
+
 def test_rest_state_K_m_zero_with_wall_correction():
     """Wall correction must not break the bit-exact zero on rest
     state (no strain → K_m = 0 regardless of length scale)."""

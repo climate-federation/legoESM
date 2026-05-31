@@ -52,6 +52,11 @@ def _setup_with_tracers(n_tracers=2):
         hyperdiff_rho_coeff=0.0, hyperdiff_w_coeff=0.0,
         semi_implicit_acoustic=False, use_coriolis=False, fix_mass=False,
         smagorinsky_cs=0.0,
+        # These tests exercise PASSIVE tracer transport. With the default
+        # moist_buoyancy=True, slot-0 acts as q_v and a horizontally-varying
+        # tracer becomes buoyant → w → drift; disable so the tracer stays
+        # passive (moist buoyancy is covered by test_plane_nh_buoyancy).
+        moist_buoyancy=False,
     )
     model = PlaneCompressibleEulerModel(grid, hc, tm, cfg)
     rest = make_rest_state(grid, hc, dtype=jnp.float64)

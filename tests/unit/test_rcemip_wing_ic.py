@@ -16,7 +16,7 @@ import pytest
 from legoesm import constants
 from legoesm.atmosphere.idealized.rcemip_initial_conditions import (
     WING_GAMMA, WING_P_SFC, WING_Q_SFC_DEFAULT, WING_Q_T,
-    WING_T_SFC_DEFAULT, WING_Z_T, WING_Z_Q1, WING_Z_Q2,
+    WING_T_V0, WING_Z_T, WING_Z_Q1, WING_Z_Q2,
     _VIRTUAL_T_FACTOR,
     make_wing2018_pressure_ref_fn, make_wing2018_qv_ref_fn,
     make_wing2018_temperature_ref_fn, make_wing2018_theta_ref_fn,
@@ -29,35 +29,28 @@ from legoesm.grids.vertical import create_stretched_height_coordinate
 jax.config.update("jax_enable_x64", True)
 
 
-def test_virtual_T_at_surface_equals_virtual_surface_T():
-    """T_v(z=0) = T_v0 = T_sfc · (1 + ε⁻¹·q_sfc)."""
+def test_virtual_T_at_surface_equals_T_v0():
+    """T_v(z=0) = T_v0 = WING_T_V0 (RCEMIP-prescribed FIXED 295 K, Wing 2018
+    Tab 1 — NOT derived from the SST)."""
     T_v0 = float(wing2018_virtual_temperature_profile(jnp.asarray(0.0)))
-    expected = WING_T_SFC_DEFAULT * (
-        1.0 + _VIRTUAL_T_FACTOR * WING_Q_SFC_DEFAULT
-    )
-    np.testing.assert_allclose(T_v0, expected, rtol=1.0e-12)
+    np.testing.assert_allclose(T_v0, WING_T_V0, rtol=1.0e-12)
 
 
-def test_actual_T_at_surface_equals_T_sfc():
-    """Codex iter-1 fix: actual (dry-bulb) T(z=0) = T_sfc, NOT T_v0.
-    T = T_v / (1 + ε⁻¹·q_v) so at z=0 (q_v=q_sfc) the conversion
-    exactly recovers T_sfc."""
+def test_actual_T_at_surface_is_devirtualized_T_v0():
+    """Actual (dry-bulb) T(z=0) = T_v0 / (1 + ε⁻¹·q_sfc) ≈ 291.7 K for RCE300
+    (the SST=300 K is the surface boundary, NOT the initial surface air T)."""
     T0 = float(wing2018_temperature_profile(jnp.asarray(0.0)))
-    np.testing.assert_allclose(T0, WING_T_SFC_DEFAULT, rtol=1.0e-12)
+    expected = WING_T_V0 / (1.0 + _VIRTUAL_T_FACTOR * WING_Q_SFC_DEFAULT)
+    np.testing.assert_allclose(T0, expected, rtol=1.0e-12)
 
 
 def test_T_tropopause_cap_above_z_t():
-    """T_v(z > z_t) = T_v(z_t) (isothermal virtual cap). Actual T
-    above the tropopause = T_v / (1 + ε⁻¹·q_t) ≈ T_v (q_t = 10⁻¹¹)."""
+    """T_v(z > z_t) = T_v(z_t) = WING_T_V0 - Γ·z_t (isothermal virtual cap ≈
+    194.5 K). Actual T above the tropopause ≈ T_v (q_t = 10⁻¹¹)."""
     T_v_top = float(wing2018_virtual_temperature_profile(
         jnp.asarray(20_000.0),
     ))
-    T_v_cap_exact = (
-        WING_T_SFC_DEFAULT * (
-            1.0 + _VIRTUAL_T_FACTOR * WING_Q_SFC_DEFAULT
-        )
-        - WING_GAMMA * WING_Z_T
-    )
+    T_v_cap_exact = WING_T_V0 - WING_GAMMA * WING_Z_T
     np.testing.assert_allclose(T_v_top, T_v_cap_exact, rtol=1.0e-12)
     # Actual T at the same height differs by < 1e-10 K from T_v (q_t
     # is essentially zero).
@@ -123,9 +116,8 @@ def test_theta_at_surface_is_poisson_of_actual_T():
     p_sfc = 101480 Pa is slightly above p_ref = 100000 Pa so
     θ < T_sfc by the Exner correction (~0.4%)."""
     theta0 = float(wing2018_theta_profile(jnp.asarray(0.0)))
-    expected = WING_T_SFC_DEFAULT * (
-        constants.p_ref / WING_P_SFC
-    ) ** constants.kappa
+    T0 = WING_T_V0 / (1.0 + _VIRTUAL_T_FACTOR * WING_Q_SFC_DEFAULT)
+    expected = T0 * (constants.p_ref / WING_P_SFC) ** constants.kappa
     np.testing.assert_allclose(theta0, expected, rtol=1.0e-12)
 
 
@@ -155,10 +147,10 @@ def test_wing_theta_ref_fn_integrates_with_stretched_grid():
     # rho INCREASES with index).
     rho = np.asarray(hc.rho_ref)
     assert rho[-1] > rho[0]
-    # θ at surface ≈ T_sfc · (p_ref/p_sfc)^κ. With T_sfc = 300 K
-    # and p_ref/p_sfc ≈ 0.985 → θ ≈ 298.7 K.
+    # θ at surface ≈ T_actual(0)·(p_ref/p_sfc)^κ. RCEMIP T_v0=295 K ⇒
+    # T_actual(0)=T_v0/(1+0.608·q)≈291.7 K, p_ref/p_sfc≈0.985 → θ ≈ 290.5 K.
     theta_sfc = float(hc.theta_ref[-1])
-    assert 297.0 < theta_sfc < 301.0, (
+    assert 288.0 < theta_sfc < 293.0, (
         f"Wing IC surface θ unrealistic: {theta_sfc:.2f}"
     )
 

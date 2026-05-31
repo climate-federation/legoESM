@@ -147,6 +147,11 @@ class RRTMGPConfig(NamedTuple):
     n2o_ppbv: float = 332.0
     sfc_emissivity: float = 0.98
     sfc_albedo: float = 0.06
+    # Optional DIRECT-beam surface albedo (RAD-3). None ⇒ use sfc_albedo for
+    # both beams (legacy). SAM splits direct (Briegleb zenith-dependent ocean
+    # albedo) from diffuse (sfc_albedo=0.07 RCEMIP); set this to the direct
+    # value so the two-stream solver reflects the direct beam faithfully.
+    sfc_albedo_direct: float | None = None
     S_0: float = constants.S_0
     aerosol_ssa: float = 0.93
     aerosol_g: float = 0.70
@@ -179,6 +184,12 @@ class OzoneProfileConfig(NamedTuple):
         - ``"analytical"``: latitude-dependent Gaussian profile with
           configurable parameters.  Peak scaled by
           ``1 + 0.5 * sin²(lat)`` when ``lat_dependence`` is True.
+        - ``"mls"``: the SAM mid-latitude-summer (MLS) standard O3 profile,
+          bundled from gSAM's ``rrtmg_lw.nc`` and interpolated (log-log) to
+          the model levels.  Use this for SAM-faithful RCEMIP runs — it is
+          the same ozone the gSAM oracle uses (vs the Gaussian "standard",
+          which over-estimates lower-stratospheric O3 ~3x).  See
+          :mod:`legoesm.atmosphere.physics.radiation.ozone_mls`.
         - ``"none"``: zero ozone (disables ozone absorption entirely).
         - ``"ml"``: machine-learning ridge regression predictor of Ma et al.
           (UKESM-trained, per-gridpoint T -> O3 column).  Requires
@@ -238,6 +249,15 @@ class RadiationConfig(NamedTuple):
         Cloud fraction scheme for cloud-radiation coupling:
         ``"none"`` (clear-sky, default), ``"sundqvist"``, or ``"xu_randall"``.
         Only affects RRTMGP; gray radiation ignores clouds.
+    rce_fixed_cos_zenith : float or None
+        Perpetual fixed-zenith RCE insolation (SAM ``doperpetual``).  When
+        set (e.g. 0.620 = 51.7° SAM RCE, or 0.7425 = 42.05° RCEMIP), the
+        TOA insolation is ``S_0·cosθ`` UNIFORMLY (no latitude/daily-mean
+        dependence) and ``cosθ`` is used directly as the SW optical-path
+        cosine — matching SAM's fixed-sun RCE rather than the daily-mean
+        daytime-effective cos(SZA).  Pair with a reduced ``S_0`` (SAM RCE
+        uses 685 W/m² ⇒ 685·0.620 ≈ 425 W/m²).  ``None`` (default) keeps
+        the latitude-based daily-mean / perpetual-equinox path.
     """
     scheme: str = "gray"
     gray: GrayRadiationConfig = GrayRadiationConfig()
@@ -246,6 +266,7 @@ class RadiationConfig(NamedTuple):
     diurnal_cycle: bool = False
     ozone: OzoneProfileConfig = OzoneProfileConfig()
     cloud_scheme: str = "none"
+    rce_fixed_cos_zenith: float | None = None
     # Optional full ``CloudConfig`` (rh_crit, xu_p, alpha_xr, q_c_diagnostic, ...).
     # When ``None`` the integration bridge builds a default
     # ``CloudConfig(scheme=cloud_scheme)`` — backward-compatible.

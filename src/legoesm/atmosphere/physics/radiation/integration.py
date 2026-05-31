@@ -177,6 +177,13 @@ def _compute_insolation(
     S_0 = config.rrtmgp.S_0 if config.scheme == "rrtmgp" else config.gray.S_0
     obliquity = config.gray.obliquity
 
+    # SAM perpetual fixed-zenith RCE (doperpetual): uniform TOA insolation
+    # S_0·cosθ with cosθ used directly as the SW optical-path cosine — no
+    # latitude / daily-mean / daytime-effective rescaling. (RAD-2.)
+    if config.rce_fixed_cos_zenith is not None:
+        cos_zen = jnp.full_like(lat, config.rce_fixed_cos_zenith)
+        return S_0 * cos_zen, cos_zen, None
+
     if config.diurnal_cycle and lon is not None:
         hour = seconds_of_day / 3600.0
         cos_sza = cos_zenith_angle(lat, lon, day_of_year, hour, obliquity)
@@ -191,6 +198,40 @@ def _compute_insolation(
         return perpetual_equinox_insolation(lat, S_0), None, f_day
     f_day = daylight_fraction(lat, day_of_year, obliquity)
     return daily_mean_insolation(lat, day_of_year, S_0, obliquity), None, f_day
+
+
+def sam_ocean_albedo(
+    cos_zenith: jnp.ndarray | float,
+    T_sfc: jnp.ndarray | float = 300.0,
+    sea_ice_T: float = 271.0,
+) -> jnp.ndarray:
+    """SAM RAD_RRTM surface albedo over ocean (Briegleb 1986 direct beam).
+
+    Faithful to gSAM ``cam_rad_parameterizations.f90:albedo`` (the ``ocean``
+    branch). For ice-free ocean (``T_sfc > 271 K``) the DIRECT-beam albedo is
+    zenith-dependent::
+
+        a_dir = 0.026/(μ^1.7 + 0.065) + 0.15·(μ−0.1)·(μ−0.5)·(μ−1.0)
+
+    with μ = cos(zenith). SAM pairs this with a fixed DIFFUSE albedo
+    ``adif = 0.07`` (the RCEMIP value, AAW 2017). legoESM's RRTMGP applies a
+    single surface albedo to BOTH beams, so for the fixed-zenith DIRECT-beam
+    RCE this returns the direct value — the dominant reflected-SW term. Using
+    it for the (small) diffuse fraction too, rather than 0.07, is the
+    documented single-albedo approximation (RAD-3); a full direct/diffuse
+    split would thread ``sfc_albedo_direct`` separately through the solver.
+    Sea ice / snow (``T_sfc ≤ sea_ice_T``, SAM's literal 271 K ≈
+    ``constants.T_freeze_ocean``): a_dir = 0.75. Night (μ ≤ 0): 0.
+
+    Exponent 1.7 > 0 so ``μ^1.7`` is AD-finite at μ = 0 (no safe_pow needed).
+    """
+    mu = jnp.clip(cos_zenith, 0.0, 1.0)
+    a_ocean = (
+        0.026 / (mu ** 1.7 + 0.065)
+        + 0.15 * (mu - 0.1) * (mu - 0.5) * (mu - 1.0)
+    )
+    a = jnp.where(jnp.asarray(T_sfc) > sea_ice_T, a_ocean, 0.75)
+    return jnp.where(jnp.asarray(cos_zenith) > 0.0, a, 0.0)
 
 
 def _compute_ozone_vmr(
@@ -229,6 +270,15 @@ def _compute_ozone_vmr(
     if ozone_config.source == "none":
         return jnp.full_like(p_full, 1.0e-10)
 
+    if ozone_config.source == "mls":
+        # SAM RCEMIP ozone: the MLS standard profile read from gSAM's
+        # rrtmg_lw.nc, interpolated (log-log) to the model levels. Faithful
+        # to the oracle vs the built-in skewed-Gaussian _standard_o3_profile.
+        from legoesm.atmosphere.physics.radiation.ozone_mls import (
+            mls_ozone_vmr,
+        )
+        return mls_ozone_vmr(p_full)
+
     if ozone_config.source == "analytical":
         p_hPa = p_full / 100.0
         p_peak = ozone_config.p_peak_hPa
@@ -262,7 +312,7 @@ def _compute_ozone_vmr(
 
     raise ValueError(
         f"Unknown OzoneProfileConfig.source: {ozone_config.source!r}. "
-        f"Choose from 'standard', 'analytical', 'none', 'ml'."
+        f"Choose from 'standard', 'analytical', 'mls', 'none', 'ml'."
     )
 
 
@@ -400,6 +450,8 @@ def _call_radiation_backend(
     sfc_emissivity_override: jnp.ndarray | float | None = None,
     q_cloud: jnp.ndarray | None = None,
     q_ice: jnp.ndarray | None = None,
+    n_ice: jnp.ndarray | None = None,
+    n_cloud: jnp.ndarray | None = None,
     ghg_vmr_override: dict | None = None,
     f_day: jnp.ndarray | None = None,
     rrtmgp_solver=None,
@@ -485,6 +537,8 @@ def _call_radiation_backend(
             config=cloud_config,
             q_cloud=q_cloud,
             q_ice=q_ice,
+            n_ice=n_ice,
+            n_cloud=n_cloud,
         )
         # ``to_rrtmg_kwargs`` builds the kwargs without ``cloud_fraction``
         # (commit 4c9591bb, lost in AIMIP-#312 merge, restored iter-15
@@ -856,6 +910,27 @@ def _make_nonhydrostatic_radiation(
             q_ice_col = jnp.clip(
                 state.tracers.data[..., 3], 0.0, None
             ).reshape(ncol, nlev)
+        # Cloud-ice NUMBER (per-mass [1/kg]) from tracer slot 8, which is
+        # N_i ONLY in the canonical 9-slot double-moment Morrison layout
+        # (q_v,q_c,q_r,q_i,q_s,q_g,N_c,N_r,N_i). Feeds the M2005 PSD ice
+        # effective radius EFFI=1.5/LAMI (RAD-1-ice). The ``> 8`` guard keeps
+        # single-moment layouts (kessler 3, thompson 7) on the constant
+        # r_eff. CAVEAT (codex iter-12): a non-Morrison ≥9-slot layout would
+        # mis-read slot 8 — a tracer-metadata/scheme key would be more robust
+        # but is deferred; today only Morrison uses 9 slots.
+        n_ice_col = None
+        if n_tracers > 8:
+            n_ice_col = jnp.clip(
+                state.tracers.data[..., 8], 0.0, None
+            ).reshape(ncol, nlev)
+        # Cloud-droplet NUMBER (per-VOLUME [#/m³]) from slot 6 (N_c in the
+        # Morrison double-moment layout) ⇒ the M2005 PSD liquid effective radius
+        # reffc=(PGAM+3)/(2·LAMC). Same ``> 8`` (Morrison) guard as N_i.
+        n_cloud_col = None
+        if n_tracers > 8:
+            n_cloud_col = jnp.clip(
+                state.tracers.data[..., 6], 0.0, None
+            ).reshape(ncol, nlev)
 
         f_day_col = f_day.reshape(ncol) if f_day is not None else None
         rad_out = _call_radiation_backend(
@@ -870,6 +945,8 @@ def _make_nonhydrostatic_radiation(
             cos_sza=cos_sza_col,
             q_cloud=q_cloud_col,
             q_ice=q_ice_col,
+            n_ice=n_ice_col,
+            n_cloud=n_cloud_col,
             f_day=f_day_col,
             rrtmgp_solver=rrtmgp_solver,
             lon=lon_col,

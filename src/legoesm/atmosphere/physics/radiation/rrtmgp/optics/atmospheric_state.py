@@ -44,3 +44,8 @@ class AtmosphericState:
   vmr: lookup_volume_mixing_ratio.LookupVolumeMixingRatio
   # The longwave incident flux at the top of the atmosphere (in W/m²).
   toa_flux_lw: float = 0.0
+  # Optional DIRECT-beam surface albedo (RAD-3). None ⇒ the diffuse sfc_alb
+  # is used for the direct beam too (legacy single-albedo behaviour). When
+  # set, the two-stream solver reflects the direct beam at this value and the
+  # diffuse field at sfc_alb (SAM Briegleb-direct vs 0.07-diffuse split).
+  sfc_alb_dir: float | jax.Array | None = None

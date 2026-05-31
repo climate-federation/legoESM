@@ -78,7 +78,8 @@ from legoesm.atmosphere.dynamics.compressible_euler import (
     CompressibleEulerConfig, _sponge_profile, compute_exner_perturbation,
 )
 from legoesm.atmosphere.dynamics.compressible_euler_plane import (
-    _full_level_centred_d_dz, _safe_sqrt_strain,
+    _full_level_centred_d_dz, _moisture_buoyancy_w_half,
+    _safe_sqrt_strain, _sgs_brunt_vaisala_sq,
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm.core.state import (
@@ -124,6 +125,11 @@ def _compute_smagorinsky_K_m_plane_halo(
     height_coord: HeightCoordinate,
     c_s: float,
     halo: int = 1,
+    n2_sgs: jax.Array | None = None,
+    prandtl: float = 1.0,
+    wall_damping: bool = True,
+    delta_max: float = 1.0e30,
+    stability_length: bool = False,
 ) -> jax.Array:
     """Halo-aware Smagorinsky-Lilly K_m at interior cell centres.
 
@@ -133,6 +139,16 @@ def _compute_smagorinsky_K_m_plane_halo(
     are column-local — reuses :func:`_full_level_centred_d_dz` +
     :func:`_safe_sqrt_strain` from the serial module so the inner
     arithmetic stays in one canonical implementation.
+
+    The SAM ``dosmagor`` stratification correction
+    ``K_m = (Cs·Δ)²·sqrt(max(0, |S|² − Pr·N²))`` is applied identically
+    to the serial kernel.  ``N²`` is COLUMN-LOCAL (no horizontal
+    neighbours), so the precomputed sub-grid ``n2_sgs`` slab from the
+    shared :func:`compressible_euler_plane._sgs_brunt_vaisala_sq` is
+    passed at the rank-local INTERIOR shape ``(ny, nx, nlev)`` — no halo
+    exchange of N² needed.  ``n2_sgs=None`` recovers the pure-strain
+    form.  Both kernels consuming the one shared N² helper prevents
+    serial/MPI divergence (Codex iter-1 adversarial-review HIGH).
 
     Bit-equivalent to the serial K_m when ``layout.n_ranks == 1``:
     ``jnp.pad(mode='wrap')`` produces the same neighbour values as
@@ -230,14 +246,48 @@ def _compute_smagorinsky_K_m_plane_halo(
         du_dx_center ** 2 + dv_dy_center ** 2 + S33_center ** 2
         + 2.0 * S12_sq_center + 2.0 * S13_sq_center + 2.0 * S23_sq_center
     )
-    strain_mag = _safe_sqrt_strain(strain_mag_sq)
 
     from legoesm import constants
-    delta = (grid.dx * grid.dy * dz_full) ** (1.0 / 3.0)
+    # SAM-faithful horizontal-spacing cap (tke_full.f90:42 delta_max=1000 m);
+    # mirrors the serial _compute_smagorinsky_K_m_plane so serial=MPI parity holds.
+    dx_eff = jnp.minimum(delta_max, grid.dx)
+    dy_eff = jnp.minimum(delta_max, grid.dy)
+    delta = (dx_eff * dy_eff * dz_full) ** (1.0 / 3.0)
     l_smag = c_s * delta
-    l_wall = constants.kappa_von_karman * height_coord.z_full
-    l_m = jnp.minimum(l_smag, l_wall)
+    # ``wall_damping`` mirrors the serial path: SAM dosmagor uses smix=grd (no
+    # von-Kármán cap), so the SAM-faithful CRM runs pass False. Kept identical
+    # to the serial so serial==halo holds for BOTH values.
+    if wall_damping:
+        l_wall = constants.kappa_von_karman * height_coord.z_full
+        l_m = jnp.minimum(l_smag, l_wall)
+    else:
+        l_m = l_smag
     l_m_sq = l_m ** 2
+
+    # SAM dosmagor stratification (Lilly) correction — see the serial
+    # _compute_smagorinsky_K_m_plane. N² precomputed column-local by the
+    # shared _sgs_brunt_vaisala_sq helper and passed in as n2_sgs.
+    if n2_sgs is not None:
+        strain_arg = strain_mag_sq - prandtl * n2_sgs
+    else:
+        strain_arg = strain_mag_sq
+    strain_mag = _safe_sqrt_strain(strain_arg)
+    if stability_length and n2_sgs is not None:
+        # SAM dosmagor stable-layer Deardorff mixing-length limit — mirror of
+        # the serial _compute_smagorinsky_K_m_plane (SGS_TKE/tke_full.f90:
+        # 285-298): smix shrinks where N²>0, Cee=Ce1+Ce2·(smix/grd),
+        # tk=√(Ck³/Cee·(|S|²−Pr·N²))·smix². Reduces to (Cs·grd)²·|S| where N²≤0.
+        Ck = 0.1
+        Ce = Ck ** 3 / c_s ** 4
+        tk_grd = c_s ** 2 * delta ** 2 * strain_mag
+        n2_pos = jnp.maximum(n2_sgs, 1.0e-10)
+        smix_stable = jnp.minimum(delta, jnp.maximum(
+            0.1 * delta,
+            jnp.sqrt(0.76 * tk_grd / (Ck * jnp.sqrt(n2_pos)))))
+        smix = jnp.where(n2_sgs > 0.0, smix_stable, delta)
+        ratio = smix / jnp.clip(delta, 1.0e-12, None)
+        Cee = Ce / 0.7 * (0.19 + 0.51 * ratio)
+        return jnp.sqrt(Ck ** 3 / Cee) * smix ** 2 * strain_mag
     return l_m_sq * strain_mag
 
 
@@ -254,6 +304,31 @@ def precompute_coriolis_halo(
     f_3d = grid.f_y[:, :, None]
     f_pad, = packed_exchange_halo_plane_yxz(f_3d, layout=layout)
     return f_pad
+
+
+def _global_hmean_plane(f_int: jax.Array, layout: PlanePencilLayout):
+    """Global horizontal mean of an interior ``(ny, nx, nlev)`` field.
+
+    Returns a ``(1, 1, nlev)`` profile that broadcasts against the
+    interior field.  Used for the moist-buoyancy perturbation
+    (:func:`_moisture_buoyancy_w_half`) which subtracts the SAM ``qv0``
+    base state = horizontal mean.
+
+    ``n_ranks == 1`` takes the LOCAL ``jnp.sum`` path (no MPI stack
+    required, so single-process pytest works and the result is bit-
+    identical to the serial ``jnp.mean``); ``n_ranks > 1`` allreduces the
+    rank-local sum via the AD-safe ``global_sum_mpi`` (full VJP) so the
+    mean is the true global domain mean.  The Python branch on the static
+    ``layout.n_ranks`` is a compile-time constant (no traced control flow).
+    """
+    local_sum = jnp.sum(f_int, axis=(0, 1))                     # (nlev,)
+    n_global = layout.ny_global * layout.nx_global
+    if layout.n_ranks > 1:
+        from legoesm.parallel.reductions import global_sum_mpi
+        total = global_sum_mpi(local_sum)
+    else:
+        total = local_sum
+    return (total / n_global)[None, None, :]
 
 
 def plane_compressible_euler_slow_tendencies_halo(
@@ -363,8 +438,15 @@ def plane_compressible_euler_slow_tendencies_halo(
         f_yface = oh.interp_cell_to_yface_vlast_halo(f_pad, grid, h)
         v_xface = oh.interp_yface_to_xface_vlast_halo(v_pad, grid, h)
         u_yface = oh.interp_xface_to_yface_vlast_halo(u_pad, grid, h)
-        du_cor = f_xface * v_xface
-        dv_cor = -f_yface * u_yface
+        # SAM coriolis.f90: f acts on the departure from the geostrophic
+        # reference (ug0, vg0); None ⇒ 0 (RCE). See the serial
+        # compressible_euler_plane Coriolis block for the rationale.
+        v_ref = (0.0 if height_coord.v_geo0 is None
+                 else height_coord.v_geo0[None, None, :])
+        u_ref = (0.0 if height_coord.u_geo0 is None
+                 else height_coord.u_geo0[None, None, :])
+        du_cor = f_xface * (v_xface - v_ref)
+        dv_cor = -f_yface * (u_yface - u_ref)
     else:
         du_cor = jnp.zeros_like(u)
         dv_cor = jnp.zeros_like(v)
@@ -409,6 +491,29 @@ def plane_compressible_euler_slow_tendencies_halo(
             f"Unknown horizontal_advection_scheme: {scheme!r}. "
             f"Expected one of "
             f"{sorted(HORIZONTAL_ADVECTION_HALO_REQUIREMENT)}."
+        )
+    # ADV-SPLIT (#86): the per-field momentum/scalar advection split is wired in
+    # the SERIAL slow-tendency path; the MPI halo path here still applies ONE
+    # scheme to both legs. Fail LOUD rather than silently diverge serial≠MPI
+    # (CLAUDE.md: serial/MPI bit-identical) until the split is wired here too.
+    _mscheme = getattr(config, "horizontal_momentum_advection_scheme", None)
+    if _mscheme is not None and _mscheme != scheme:
+        raise NotImplementedError(
+            "horizontal_momentum_advection_scheme (ADV-SPLIT #86) is not yet "
+            "wired into the MPI halo dycore path — it would silently diverge "
+            "from the serial split. Use the serial (single-rank) path, or set "
+            "horizontal_momentum_advection_scheme=None for MPI runs."
+        )
+    # SGS-VERT (#81): the VERTICAL SGS flux ∂_z(K ∂_z φ) is wired in the serial
+    # path but NOT here. Fail LOUD rather than silently diverge serial≠MPI (the
+    # horizontal-only #80 tracer SGS IS mirrored below). Wiring needs a
+    # column-local vertical-flux call on u/v/θ'/tracers/w + a parity test.
+    if getattr(config, "sgs_vertical_diffusion", False):
+        raise NotImplementedError(
+            "sgs_vertical_diffusion (SGS-VERT #81) is not yet wired into the "
+            "MPI halo dycore path (vertical SGS flux is serial-only) — it would "
+            "silently diverge from the serial path. Use the serial (single-rank) "
+            "path, or set sgs_vertical_diffusion=False for MPI runs."
         )
     _required_halo = HORIZONTAL_ADVECTION_HALO_REQUIREMENT[scheme]
     if h < _required_halo:
@@ -488,23 +593,37 @@ def plane_compressible_euler_slow_tendencies_halo(
         (*pad_axes, (1, 1)),
     )
 
+    # 8b. SAM moist buoyancy on w (shared serial helper). Perturbation
+    #     from the GLOBAL horizontal mean (= SAM qv0/qn0/qp0), so it
+    #     matches the serial jnp.mean at n_ranks==1 and is the true domain
+    #     mean for n_ranks>1. Dry θ' buoyancy stays in the acoustic substep.
+    if config.moist_buoyancy:
+        dw_dt = dw_dt + _moisture_buoyancy_w_half(
+            state.tracers.data, theta_p, height_coord,
+            lambda f: _global_hmean_plane(f, layout),
+        )
+
     # 9. Rayleigh sponge (column-local).
+    _sponge_shape = getattr(config, "sponge_profile_shape", "sin2")
     sponge_full = _sponge_profile(
         height_coord.z_full, height_coord.H,
-        config.sponge_width, config.sponge_coeff,
+        config.sponge_width, config.sponge_coeff, shape=_sponge_shape,
     )
     sponge_half = _sponge_profile(
         height_coord.z_half, height_coord.H,
-        config.sponge_width, config.sponge_coeff,
+        config.sponge_width, config.sponge_coeff, shape=_sponge_shape,
     )
-    du_dt = du_dt - sponge_full * u
-    dv_dt = dv_dt - sponge_full * v
-    dtheta_p_dt = dtheta_p_dt - sponge_full * theta_p
-    # Codex iter-2026-05 finding: serial path applies rho' sponge too
-    # (compressible_euler_plane.py:1008, commit aa0a8d75); halo path
-    # was missing it which caused drho_p_dt to diverge by O(1e-4) from
-    # the serial reference.
-    drho_p_dt = drho_p_dt - sponge_full * rho_p
+    # ``sponge_w_only`` mirrors the serial path (SAM damping.f90 = w only) so
+    # serial==halo holds for BOTH values (iter-47 D4).
+    if not getattr(config, "sponge_w_only", False):
+        du_dt = du_dt - sponge_full * u
+        dv_dt = dv_dt - sponge_full * v
+        dtheta_p_dt = dtheta_p_dt - sponge_full * theta_p
+        # Codex iter-2026-05 finding: serial path applies rho' sponge too
+        # (compressible_euler_plane.py:1008, commit aa0a8d75); halo path
+        # was missing it which caused drho_p_dt to diverge by O(1e-4) from
+        # the serial reference.
+        drho_p_dt = drho_p_dt - sponge_full * rho_p
     dw_dt = dw_dt - sponge_half * w
 
     # 10. Biharmonic hyperdiffusion. Two laplacian passes →
@@ -564,12 +683,42 @@ def plane_compressible_euler_slow_tendencies_halo(
     #     once, then drives the existing
     #     :func:`oh.variable_K_diffusion_vlast_halo` on each prognostic
     #     at its native Arakawa-C staggering.
-    if config.smagorinsky_cs > 0.0:
+    # Turbulence-closure mode (DNS-LES, iter-177) — mirrors the serial path so
+    # closure="molecular" (DNS) and "smagorinsky" (CRM/LES) stay bit-identical
+    # serial vs MPI at n_ranks==1.
+    _closure = getattr(config, "turbulence_closure", "smagorinsky")
+    _use_smag = _closure == "smagorinsky" and config.smagorinsky_cs > 0.0
+    _use_mol = (_closure == "molecular"
+                and getattr(config, "molecular_viscosity", 0.0) > 0.0)
+    if _use_smag or _use_mol:
         w_pad_half, = packed_exchange_halo_plane_yxz(w, layout=layout)
-        K_m_int = _compute_smagorinsky_K_m_plane_halo(
-            u_pad, v_pad, w_pad_half, grid, height_coord,
-            config.smagorinsky_cs, halo=h,
-        )
+        if _use_mol:
+            # DNS: CONSTANT molecular ν on the interior; the SAME halo exchange
+            # + operators below then apply (a constant field is trivially
+            # halo-consistent, so no strain stencil / N² is needed).
+            K_m_int = jnp.full(
+                theta_total.shape, config.molecular_viscosity,
+                dtype=theta_total.dtype,
+            )
+            sgs_prandtl = config.molecular_prandtl
+        else:
+            # Interior N² for the stratification term (column-local — no halo
+            # exchange needed). Built by the SAME shared helper the serial call
+            # site uses, on the rank-local interior θ/tracers, so the clear↔
+            # moist switch and serial/MPI parity hold bit-for-bit at n_ranks==1.
+            n2_sgs_h = _sgs_brunt_vaisala_sq(
+                theta_total, state.tracers.data, height_coord,
+            )
+            K_m_int = _compute_smagorinsky_K_m_plane_halo(
+                u_pad, v_pad, w_pad_half, grid, height_coord,
+                config.smagorinsky_cs, halo=h,
+                n2_sgs=n2_sgs_h, prandtl=config.smagorinsky_prandtl,
+                wall_damping=getattr(config, "smagorinsky_wall_damping", True),
+                delta_max=getattr(config, "smagorinsky_delta_max", 1.0e30),
+                stability_length=getattr(
+                    config, "smagorinsky_stability_length", False),
+            )
+            sgs_prandtl = config.smagorinsky_prandtl
         K_m_pad, = packed_exchange_halo_plane_yxz(K_m_int, layout=layout)
         K_xface_int = oh.interp_cell_to_xface_vlast_halo(K_m_pad, grid, h)
         K_yface_int = oh.interp_cell_to_yface_vlast_halo(K_m_pad, grid, h)
@@ -582,7 +731,7 @@ def plane_compressible_euler_slow_tendencies_halo(
         dv_dt = dv_dt + oh.variable_K_diffusion_vlast_halo(
             v_pad, K_yface_pad, grid, h,
         )
-        K_h_pad = K_m_pad / config.smagorinsky_prandtl
+        K_h_pad = K_m_pad / sgs_prandtl
         dtheta_p_dt = dtheta_p_dt + oh.variable_K_diffusion_vlast_halo(
             theta_p_pad, K_h_pad, grid, h,
         )
@@ -623,6 +772,19 @@ def plane_compressible_euler_slow_tendencies_halo(
         dtracers_dt = jax.vmap(
             _tracer_tend_one, in_axes=(-1, -1), out_axes=-1,
         )(tracers_pad, tracers)
+        # SGS-SCALAR (#80): SAM `sgs.f90:664-675` SGS-diffuses EVERY scalar
+        # (q_v + all hydrometeors) with K_h, like θ'. The serial dycore does
+        # this; the MPI halo path previously diffused θ'/u/v/w but NOT the
+        # tracers ⇒ silent serial≠MPI divergence (caught by
+        # test_halo_equiv_with_smagorinsky_and_tracers). Mirror the serial
+        # leg here so the two stay bit-identical (K_h_pad is in scope only
+        # inside the closure block above — Smagorinsky OR molecular/DNS).
+        if _use_smag or _use_mol:
+            dtracers_dt = dtracers_dt + jax.vmap(
+                lambda q_pad: oh.variable_K_diffusion_vlast_halo(
+                    q_pad, K_h_pad, grid, h),
+                in_axes=-1, out_axes=-1,
+            )(tracers_pad)
     else:
         dtracers_dt = jnp.zeros_like(tracers)
     zero_phis = jnp.zeros_like(state.phis.data)
@@ -998,7 +1160,23 @@ def slow_tendency_jit_split(
         "lap_u_pad": lap_u_pad, "lap_v_pad": lap_v_pad,
         "lap_theta_pad": lap_theta_pad, "lap_rho_pad": lap_rho_pad,
     }
-    return phase2(state_pad, inter_pad, partial, f_pad_cached, state)
+    tend = phase2(state_pad, inter_pad, partial, f_pad_cached, state)
+
+    # SAM moist buoyancy on w (post-phase2). The sponge / hyperdiff / Smag
+    # legs phase2 added to dw_dt are functions of the STATE w (not dw_dt),
+    # so this extra additive forcing is bit-identical to adding it inside
+    # the monolithic kernel before those legs. Kept here (not in the jitted
+    # phase2) because the GLOBAL horizontal mean needs ``layout``, which the
+    # phase2 signature does not carry. Skipped when moisture is off.
+    if config.moist_buoyancy:
+        b_half = _moisture_buoyancy_w_half(
+            state.tracers.data, state.theta_prime.data, height_coord,
+            lambda f: _global_hmean_plane(f, layout),
+        )
+        tend = tend._replace(
+            dw_dt=tend.dw_dt.replace(data=tend.dw_dt.data + b_half),
+        )
+    return tend
 
 
 # Per-(grid id, hc id, tm id, cfg, h) closure cache for jit'd kernels.

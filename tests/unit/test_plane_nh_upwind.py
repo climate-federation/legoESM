@@ -55,6 +55,107 @@ def _setup():
 
 
 # --------------------------------------------------------------------- #
+# ADV-SPLIT #86: 2nd-order centred momentum advection (= gSAM advect2_mom) #
+# --------------------------------------------------------------------- #
+
+
+def test_centered_advection_x_reduces_to_centered_difference():
+    """For CONSTANT advecting velocity, the flux-form centred scheme reduces
+    to the classic 2nd-order centred difference ``-u·(f[i+1]-f[i-1])/(2dx)``
+    (non-diffusive, dispersive — = gSAM `advect2_mom_xy.f90`). Guards the
+    momentum-leg scheme used by the ADV-SPLIT #86 per-field split."""
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        _centered_advection_x,
+    )
+    nx = 8
+    f = jnp.asarray(
+        np.sin(2.0 * np.pi * np.arange(nx) / nx)
+    ).reshape(1, nx, 1)
+    u = jnp.full_like(f, 2.0)            # constant velocity
+    dx = 0.5
+    tend = _centered_advection_x(f, u, dx)
+    expected = -2.0 * (
+        jnp.roll(f, -1, axis=1) - jnp.roll(f, 1, axis=1)) / (2.0 * dx)
+    assert np.allclose(np.asarray(tend), np.asarray(expected), atol=1e-12), (
+        "centred advection != centred difference for constant velocity"
+    )
+
+
+def test_momentum_advection_split_is_wired_and_active():
+    """ADV-SPLIT #86: setting `horizontal_momentum_advection_scheme="centered"`
+    (van_leer scalars) must change the MOMENTUM tendency vs the all-van_leer
+    default on a sheared state — proving the split is wired to u/v/w, not a
+    no-op. (Default None ⇒ identical to all-van_leer, covered by every other
+    test passing unchanged.)"""
+    grid = create_plane_grid(
+        nx=12, ny=12, nlev=6, dx=500.0, dy=500.0, dtype=jnp.float64,
+    )
+    hc = create_height_coordinate(grid.nlev, H=6_000.0)
+    tm = make_flat_plane_terrain_metric(grid, hc)
+    rng = np.random.default_rng(3)
+    base = make_rest_state(grid, hc, dtype=jnp.float64)
+    import equinox as eqx
+    u_pert = jnp.asarray(rng.standard_normal(base.u.data.shape))
+    state = eqx.tree_at(lambda s: s.u.data, base, u_pert)
+
+    def du_dt(mscheme):
+        cfg = CompressibleEulerConfig(
+            sponge_coeff=0.0, hyperdiff_coeff=0.0, hyperdiff_rho_coeff=0.0,
+            hyperdiff_w_coeff=0.0, semi_implicit_acoustic=False,
+            use_coriolis=False, fix_mass=False,
+            horizontal_advection_scheme="van_leer",
+            horizontal_momentum_advection_scheme=mscheme,
+        )
+        tend = plane_compressible_euler_slow_tendencies(state, grid, hc, tm, cfg)
+        return np.asarray(tend.du_dt.data)
+
+    diff = np.max(np.abs(du_dt("centered") - du_dt(None)))
+    assert diff > 1.0e-8, (
+        f"momentum split inactive: centred vs van_leer du_dt identical "
+        f"(max diff {diff:.2e})"
+    )
+
+
+def test_centered_momentum_is_non_dissipative_vs_van_leer():
+    """ADV-SPLIT #86 (codex iter-68 [S1] KE-budget): the QUANTITATIVE mechanism
+    behind the split. SAM's `advect2_mom` is non-dissipative; van_leer's TVD
+    flux limiter DISSIPATES kinetic energy — which is WHY it suppresses
+    convective updraft cores / w-variance tails. For self-advection ``-u·∂u/∂x``
+    on a periodic field:
+
+    * BOTH schemes conserve momentum (``Σ tend ≈ 0``, flux-form).
+    * van_leer's KE budget ``Σ u·tend`` is large + NEGATIVE (strongly
+      dissipative); centered's is TINY (≈ the advective-form residual, NOT
+      systematic dissipation — so it PRESERVES convective KE/extremes).
+
+    This is why centered restores the updraft extremes van_leer damps."""
+    from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+        _centered_advection_x, _van_leer_advection_x,
+    )
+    rng = np.random.default_rng(5)
+    u = jnp.asarray(rng.standard_normal((2, 32, 3)))
+    dx = 1.0
+    tc = _centered_advection_x(u, u, dx)
+    tv = _van_leer_advection_x(u, u, dx)
+    norm = float(jnp.sum(u * u))
+    # momentum conservation (flux-form): Σ tend ≈ 0 for both
+    assert abs(float(jnp.sum(tc))) < 1.0e-10 * norm
+    assert abs(float(jnp.sum(tv))) < 1.0e-10 * norm
+    ke_c = abs(float(jnp.sum(u * tc))) / norm     # centered: near-conserving
+    ke_v = float(jnp.sum(u * tv)) / norm          # van_leer: dissipative (<0)
+    assert ke_c < 0.05, (
+        f"centered KE budget {ke_c:.3f} too large — should be near-conserving"
+    )
+    assert ke_v < -0.1, (
+        f"van_leer should be KE-DISSIPATIVE (negative budget); got {ke_v:.3f}"
+    )
+    # centered preserves ~10x+ more KE than van_leer dissipates (the #86 effect):
+    # van_leer ~-0.4·||u||² per step, centered ~+0.015 — the dissipation that
+    # damps van_leer's updraft cores is absent in centered.
+    assert ke_c < abs(ke_v) / 5.0
+
+
+# --------------------------------------------------------------------- #
 # Sign convention                                                       #
 # --------------------------------------------------------------------- #
 

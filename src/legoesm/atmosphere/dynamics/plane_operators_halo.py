@@ -445,36 +445,22 @@ def van_leer_advection_x_halo(
         raise ValueError(
             f"van_leer_advection_x_halo requires halo>=2; got halo={halo}."
         )
-    from legoesm.core.flux_limiters import van_leer_limiter
-    eps = 1e-30
+    from legoesm.core.flux_limiters import van_leer_face_values
     f_pad = field_pad_yxz
-    # Face i+1/2 stencil = [f[i-1], f[i], f[i+1], f[i+2]].
+    # Stencils for the i+1/2 (R) and i-1/2 (L) faces. HD-1-correct r sign lives
+    # in the shared helper, so serial and halo stay bit-identical.
+    f_im2 = _slice_axis_shift(f_pad, halo, axis=1, shift=-2)
     f_im1 = _slice_axis_shift(f_pad, halo, axis=1, shift=-1)
     f_i   = _slice_axis_shift(f_pad, halo, axis=1, shift=0)
     f_ip1 = _slice_axis_shift(f_pad, halo, axis=1, shift=1)
     f_ip2 = _slice_axis_shift(f_pad, halo, axis=1, shift=2)
-    # Positive-velocity reconstruction.
-    delta_pos = f_ip1 - f_i
-    r_pos = (f_i - f_im1) / jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps)
-    phi_pos = f_i + 0.5 * van_leer_limiter(r_pos) * delta_pos
-    # Negative-velocity reconstruction.
-    delta_neg = f_i - f_ip1
-    r_neg = (f_ip2 - f_ip1) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
-    phi_neg = f_ip1 + 0.5 * van_leer_limiter(r_neg) * delta_neg
-    # Face velocity at i+1/2.
+    phi_pos, phi_neg = van_leer_face_values(f_im1, f_i, f_ip1, f_ip2)       # i+1/2
+    phi_pos_L, phi_neg_L = van_leer_face_values(f_im2, f_im1, f_i, f_ip1)   # i-1/2
     u_int = _slice_axis_shift(u_at_field_pad_yxz, halo, axis=1, shift=0)
     u_xp1 = _slice_axis_shift(u_at_field_pad_yxz, halo, axis=1, shift=1)
     u_face_R = 0.5 * (u_int + u_xp1)
     phi_R = jnp.where(u_face_R >= 0.0, phi_pos, phi_neg)
     flux_R = u_face_R * phi_R
-    # Face i-1/2 = same reconstruction shifted left by one cell.
-    f_im2 = _slice_axis_shift(f_pad, halo, axis=1, shift=-2)
-    delta_pos_L = f_i - f_im1
-    r_pos_L = (f_im1 - f_im2) / jnp.where(jnp.abs(delta_pos_L) > eps, delta_pos_L, eps)
-    phi_pos_L = f_im1 + 0.5 * van_leer_limiter(r_pos_L) * delta_pos_L
-    delta_neg_L = f_im1 - f_i
-    r_neg_L = (f_ip1 - f_i) / jnp.where(jnp.abs(delta_neg_L) > eps, delta_neg_L, eps)
-    phi_neg_L = f_i + 0.5 * van_leer_limiter(r_neg_L) * delta_neg_L
     u_xm1 = _slice_axis_shift(u_at_field_pad_yxz, halo, axis=1, shift=-1)
     u_face_L = 0.5 * (u_xm1 + u_int)
     phi_L = jnp.where(u_face_L >= 0.0, phi_pos_L, phi_neg_L)
@@ -494,31 +480,20 @@ def van_leer_advection_y_halo(
         raise ValueError(
             f"van_leer_advection_y_halo requires halo>=2; got halo={halo}."
         )
-    from legoesm.core.flux_limiters import van_leer_limiter
-    eps = 1e-30
+    from legoesm.core.flux_limiters import van_leer_face_values
     f_pad = field_pad_yxz
+    f_jm2 = _slice_axis_shift(f_pad, halo, axis=0, shift=-2)
     f_jm1 = _slice_axis_shift(f_pad, halo, axis=0, shift=-1)
     f_j   = _slice_axis_shift(f_pad, halo, axis=0, shift=0)
     f_jp1 = _slice_axis_shift(f_pad, halo, axis=0, shift=1)
     f_jp2 = _slice_axis_shift(f_pad, halo, axis=0, shift=2)
-    delta_pos = f_jp1 - f_j
-    r_pos = (f_j - f_jm1) / jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps)
-    phi_pos = f_j + 0.5 * van_leer_limiter(r_pos) * delta_pos
-    delta_neg = f_j - f_jp1
-    r_neg = (f_jp2 - f_jp1) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
-    phi_neg = f_jp1 + 0.5 * van_leer_limiter(r_neg) * delta_neg
+    phi_pos, phi_neg = van_leer_face_values(f_jm1, f_j, f_jp1, f_jp2)       # j+1/2
+    phi_pos_L, phi_neg_L = van_leer_face_values(f_jm2, f_jm1, f_j, f_jp1)   # j-1/2
     v_int = _slice_axis_shift(v_at_field_pad_yxz, halo, axis=0, shift=0)
     v_yp1 = _slice_axis_shift(v_at_field_pad_yxz, halo, axis=0, shift=1)
     v_face_R = 0.5 * (v_int + v_yp1)
     phi_R = jnp.where(v_face_R >= 0.0, phi_pos, phi_neg)
     flux_R = v_face_R * phi_R
-    f_jm2 = _slice_axis_shift(f_pad, halo, axis=0, shift=-2)
-    delta_pos_L = f_j - f_jm1
-    r_pos_L = (f_jm1 - f_jm2) / jnp.where(jnp.abs(delta_pos_L) > eps, delta_pos_L, eps)
-    phi_pos_L = f_jm1 + 0.5 * van_leer_limiter(r_pos_L) * delta_pos_L
-    delta_neg_L = f_jm1 - f_j
-    r_neg_L = (f_jp1 - f_j) / jnp.where(jnp.abs(delta_neg_L) > eps, delta_neg_L, eps)
-    phi_neg_L = f_j + 0.5 * van_leer_limiter(r_neg_L) * delta_neg_L
     v_ym1 = _slice_axis_shift(v_at_field_pad_yxz, halo, axis=0, shift=-1)
     v_face_L = 0.5 * (v_ym1 + v_int)
     phi_L = jnp.where(v_face_L >= 0.0, phi_pos_L, phi_neg_L)
