@@ -540,7 +540,7 @@ def create_cubed_sphere_cdgrid(
     base: CubedSphereGrid,
     omega: float | None = None,
     metric_dtype=None,
-    gnomonic: str = "equiangular",
+    gnomonic: str = "auto",
 ) -> CubedSphereCDGrid:
     """Create a C-D grid from an existing cell-centre grid.
 
@@ -571,6 +571,26 @@ def create_cubed_sphere_cdgrid(
             metric_dtype = jnp.float32
     n = base.n
     radius = base.radius
+
+    # iter72 (codex finding): the base CubedSphereGrid is a JAX-pytree NamedTuple
+    # so it cannot carry a string `gnomonic` field (non-traceable leaf would
+    # break JIT/grad).  Instead INFER the grid type from `base` by its cell-
+    # aspect signature so an ed A-grid never silently gets equiangular C/D
+    # metrics (the model constructors call this with no explicit flag): FV3
+    # gnomonic_ed has near-uniform cells (max aspect ~1.06) while equiangular —
+    # incl. Schmidt-stretched — is ≥1.3.  Explicit `gnomonic="ed"/"equiangular"`
+    # overrides the inference.
+    if gnomonic == "auto":
+        _dx = jnp.asarray(base.dx); _dy = jnp.asarray(base.dy)
+        _aspect = float(jnp.max(jnp.maximum(_dx, _dy) / jnp.maximum(jnp.minimum(_dx, _dy), 1e-30)))
+        if _aspect < 1.15:
+            gnomonic = "ed"
+        elif _aspect > 1.25:
+            gnomonic = "equiangular"
+        else:
+            raise ValueError(
+                f"cannot infer grid type from base (max cell aspect {_aspect:.3f} "
+                f"in the ambiguous band [1.15,1.25]); pass gnomonic= explicitly.")
 
     # ------------------------------------------------------------------
     # The C-D supergrid metrics all derive from 4 node-grids: the 2n+1

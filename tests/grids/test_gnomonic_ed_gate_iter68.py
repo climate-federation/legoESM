@@ -54,3 +54,28 @@ def test_ed_rejects_schmidt_and_shift():
 def test_unknown_gnomonic_raises():
     with pytest.raises(ValueError):
         create_cubed_sphere(24, gnomonic="banana")
+
+
+def test_cdgrid_auto_infers_grid_type_no_second_flag():
+    """iter72 (codex finding): create_cubed_sphere_cdgrid(grid) with NO explicit
+    gnomonic flag must auto-infer the base grid's type from its cell-aspect
+    signature, so an ed A-grid never silently pairs with an equiangular C/D grid
+    (the corruption path: model constructors call it with just `grid`)."""
+    from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+
+    g_ed = create_cubed_sphere(24, dtype=np.float64, gnomonic="ed")
+    cd_auto = create_cubed_sphere_cdgrid(g_ed)                       # auto
+    cd_ed = create_cubed_sphere_cdgrid(g_ed, gnomonic="ed")          # explicit ed
+    cd_eq = create_cubed_sphere_cdgrid(g_ed, gnomonic="equiangular")  # explicit eq (wrong)
+    # auto on an ed grid must reproduce the EXPLICIT ed cdgrid exactly...
+    assert np.allclose(np.asarray(cd_auto.dxc), np.asarray(cd_ed.dxc), atol=1e-12), (
+        "auto did not infer ed on an ed base grid")
+    # ...and must DIFFER from the equiangular cdgrid (else the corruption path)
+    assert not np.allclose(np.asarray(cd_ed.dxc), np.asarray(cd_eq.dxc), atol=1.0), (
+        "ed and equiangular cdgrids are indistinguishable — inference is moot")
+
+    g_eq = create_cubed_sphere(24, dtype=np.float64)
+    cd_eq_auto = create_cubed_sphere_cdgrid(g_eq)  # auto → equiangular
+    cd_eq_ex = create_cubed_sphere_cdgrid(g_eq, gnomonic="equiangular")
+    assert np.allclose(np.asarray(cd_eq_auto.dxc), np.asarray(cd_eq_ex.dxc), atol=1e-12), (
+        "auto did not infer equiangular on an equiangular base grid")
