@@ -132,3 +132,19 @@ KE (`_ke_upwind`), the d_sw zeta (`_d_sw_native`:1885 covariant circulation), or
 coupling.  NEXT: probe which vertex-localized TERM (flux vs KE vs d_sw zeta) produces the residual —
 e.g. zero each in turn (FB-only) and re-measure the day1 vertex deviation.  The genuine SW fix remains
 open; the bounded-halo-extension hypothesis is disproven.
+
+
+## iter108 — c_sw uc-increment decomposition: KE-grad is the most VERTEX-amplified term (new lead)
+Decomposed the c_sw half-step uc increment (uc_new = uc + fy1*vort_x + dke_x) for steady W2 C36:
+  vort-flux fy1*vort_x: edge(i=0,n) 0.295 vs interior 0.126  → 2.3× edge-enhanced
+  KE-grad   dke_x:      edge        0.089 vs interior 0.0091 → 9.7× EDGE-ENHANCED (most vertex-amplified)
+The KE gradient (from `_ke_upwind`, the upwind KE at cell centres) is FAR more vertex-concentrated than
+the vorticity flux ⇒ NEW candidate for the vertex-localized FB residual: the KE reconstruction at the
+3-face junction (`_ke_upwind`).  CAVEAT (not conclusive): the c_sw HALF-step increment is NOT supposed
+to cancel alone — the C-grid PGF (`_p_grad_c`, the -∇Φ) balances it in the next FB stage; the true
+residual is the non-cancellation of (c_sw vortflux+KE) + p_grad_c PGF + d_sw.  So this localizes a
+SUSPECT (vertex KE) but the decisive test is the full c_sw+p_grad_c+d_sw balance, or zeroing/faithful-
+ifying the vertex KE and re-measuring.  FB-residual candidates ruled out: dissipation(82), Phase4(81),
+wind-halo(83), corner-vort metric halo(94), corner-vort circulation halo(107).  NEW suspect: vertex KE
+(`_ke_upwind`).  The FB residual remains a deep, slowly-narrowing structural mode — genuine SW
+faithfulness gap, needs continued isolation or a dedicated debugging budget.
