@@ -48,6 +48,18 @@ UNRELIABLE both ways (gave 5.95× on W5 v where true continuity is 1.30×).
   `hyperdiff=6×`→stabilizes C96 BUT is improvising (scalar biharmonic, not FV3) → NOT
   committed. FAITHFUL fix = stabilize+wire the FB chain so FV3's dddmp reaches production
   = FOUNDATIONAL. (Hypothesis falsified by experiment, not asserted.)
+- [iter60 — FB-chain diagnosis, oracle-aligned] Reproduced + classified the FB chain
+  (`fv3_fb_sw_step`) on W2 C24, dt=150, jitted: contrary to the "~50 steps→NaN" label it
+  is STABLE 150 steps (no NaN), BUT `max|h|` drifts UP monotonically 3104→4630 (~0.3%/step)
+  where W2 should hold ~2998. Classified: **total_mass drift = 0.00 (machine-zero, EXACTLY
+  conserved)** and max|h| is ALWAYS at the **i=0 cube EDGE** (row 0 of a face). ⇒ the FB
+  blocker is an EDGE-LOCALIZED, MASS-CONSERVING amplitude instability — height piles up at
+  seams while mass stays exact. SAME cube-edge eigenmode as the C96 W5 production blow-up.
+  `dddmp=0.2` barely changes it (4630→4506) ⇒ NOT a divergence-damping problem; and mass
+  conserves ⇒ NOT a flux-conservation bug. Root cause = the EDGE/SEAM treatment → the
+  orthogonal cross-face vector rotation that DROPS FV3 `sin_sg(:,:,5)` (scorecard). FAITHFUL
+  FIX = FV3 non-orthogonal seam rotation `pad_halo_dgrid_vector_4d` /
+  `use_fv3_cross_face_du_proj` (12/12 tests, currently gated OFF). [test next]
 - STILL MISSING: human visual PNG inspection (assistant barred from Read images):
   `results/atmosphere/shallow_water/williamson{2,5}/cubed_sphere/C36/snapshots_{v,wind_speed}_native.png`.
 
