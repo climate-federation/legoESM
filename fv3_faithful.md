@@ -82,3 +82,15 @@ concurrent session does destructive git reset).  Confirms the FB-residual fix is
 bounded halo.  The faithful path (staggered c_sw→d_sw with extended-grid uc/vc + upwind _vorticity_
 flux) stands as the genuine remaining SW faithfulness item, blueprinted + oracle-grounded, awaiting a
 dedicated build.
+
+
+## iter105 — OCEAN cross-grid (OMIP-relevant): cube dynamics faithful, close to MPAS/latlon
+geostrophic_adjustment (ocean balanced-flow test, analog of W2) cross-grid quick, 3/3 PASS:
+  max_speed_final: cube C24 0.0143 m/s | latlon 36×72 0.0159 | mpas ico3 0.0169  (all ~0.015, within
+  18%; cube LOWEST = best balance).  T drift machine-zero all 3 (7.5e-14 / 1.3e-14 / 2.6e-15).
+⇒ the ocean CUBE dynamics is FAITHFUL + CLOSE TO MPAS/latlon for OMIP-relevant geostrophic balance
+(complements the iter89 ocean cube matrix 9/9 + rest machine-zero).  Cross-grid eta/SST PNGs surfaced
+for the human visual verdict.  Confirms the directive's "close to MPAS and lat-lon" holds for ocean
+dynamics, as it does for atm SW dynamics (W2 cube≈latlon≈ico).  The residual SW-vorticity gap is
+atm-SW-core-specific (the co-located centered vorticity); ocean barotropic uses the gated FV3 fv3sw
+path, not the same centered-vorticity production SW.
