@@ -115,3 +115,21 @@ the cube PGF-over-topography scheme to FV3's (the metric-aware seam PGF). This i
 property → a single RHS eval, not a 1-day integration.
 NOTE: 3D cross-grid verification on CPU is impractical to block on per-iter (single 3D case >20 min);
 rely on the matrix's recorded audits + single-tendency probes for 3D edge-artifact work.
+
+
+## iter97 — CONFIRMED + LOCALIZED rest_state_topo edge artifact (fast t=0 PGF probe)
+Built rest_state_topography_init (u=v=0 over the DCMIP 2-0-0 mountain), computed ONE t=0 momentum
+tendency via CDGridPrimitiveEquationModel.tendencies (make_fv3_faithful_pe_config, C24/L10) — at rest
+the exact tendency is ZERO, so |dV/dt| = the PGF imbalance.  NO slow time-stepping.
+RESULT: |dV/dt| concentrates at the cube SEAMS — mean CORNER=3.9e-8, EDGE=6.3e-8, INTERIOR=8.4e-9
+m/s² ⇒ edge/interior=7.5×, corner/interior=4.6×; max=2.9e-7 at face4 corner (i=0,j=0).  The interior
+itself is NOT machine-zero (8e-9) — a baseline sigma-coordinate PGF imbalance, 7.5× worse at panel
+edges.  CONFIRMS the recorded rest_state_topo 13× artifact (1.3 m/s day-1 vs ico/latlon 0.1) and
+LOCALIZES it: the cube PGF-over-topography is NOT FV3-faithfully well-balanced at the panel seams
+(t=0 ~1.3e-4 m/s/step kick → grows nonlinearly to ~1.3 m/s over a day).
+This is a CONCRETE PRODUCTION 3D edge artifact, DISTINCT from the SW-core/FB vorticity thread, and
+directly the directive's "no edge artifacts."  NEXT: compare the legoESM PE hydrostatic PGF
+(`_arakawa_lamb_gradient` of p and Φ, co-located, primitive_eq_cdgrid.py:1151-1152) to FV3's
+well-balanced finite-volume hydrostatic PGF (the geopotential-gradient / one_grad_p form that cancels
+the topographic term exactly) — the seam metric in the co-located Arakawa-Lamb gradient is the
+suspect.  Probe is the diagnostic; the fix is an FV3-faithful well-balanced PGF at the seams.
