@@ -53,6 +53,15 @@ SW cosine_bell/W5/W2 all 4 grids co-located within 1 cell. Test
   phillips eddies smooth, match mpas wavenumber, **no panel-edge imprint**.
   ⇒ ocean cube panel edges verified clean across dynamical cases.
 
+## QUANTITATIVE edge-artifact proof (iter ~35)
+Panel-edge roughness = RMS(2nd-diff in the 1-cell edge band of each face) /
+RMS(interior 2nd-diff), max over i/j, on cube NATIVE (6,n,n) final fields. ~1 =
+edges as smooth as interior (no seam imprint); the scalar-halo BUG gave 25-167×.
+Result (all CLEAN, <2): atm baroclinic v 1.86, rotated_baroclinic v 1.09,
+gravity_wave v 1.33; ocean geostrophic eta 0.06, phillips eta 0.06, speed 1.08.
+⇒ quantitative confirmation (beyond visual) of zero panel-edge imprint across the
+verified atm+ocean dynamical cases.
+
 ## Regression health (iter ~34)
 44/44 PASS: test_vector_cc_to_dgrid_wind_lift, test_latlon_regrid_alignment,
 test_fc_velocity_viscosity_vector_halo, test_fv3sw_barotropic, test_ocean_fc,
