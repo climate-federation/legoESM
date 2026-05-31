@@ -177,3 +177,26 @@ or reformulate -∇Φ - RT∇ln_ps as a single finite-volume operator so ∇phis
 construction.  NEXT: confirm ∇Φ[:,:,k] vs ∇phis(2D) differ at the seam (the 3D-vs-2D halo culprit),
 then reformulate + re-run the t=0 probe (does 1.5e-4 → machine-zero?).  Production-relevant (AMIP uses
 the D-grid PGF directly); fast-testable via the t=0 probe.
+
+
+## iter100 — rest_state_topo PGF artifact RECLASSIFIED: FLOAT32 precision, NOT a faithfulness bug
+compute_geopotential (sigma) uses only σ-derived ln_ratio/alpha (no p_s) ⇒ analytically
+Φ = phis + per-level-const(σ) for uniform T ⇒ ∇Φ = ∇phis ⇒ -∇Φ cancels -R_d·T·∇ln_ps EXACTLY.
+Ruled out (all machine-zero at seams): A-L gradient of const; corner-interp of const; T_corner
+(harmonic, =T_init); 2D-vs-3D A-L gradient (identical).
+ROOT: Φ.dtype=FLOAT32 (phis + sigma.ln_ratio/alpha are float32 even under JAX_ENABLE_X64=1).
+(Φ_k - phis) spatial std rel = 1.88e-7 = float32 eps (Φ≈2.5e5 vs phis≈1.8e4 → the add loses ~7
+digits → ∇ of the polluted Φ = the spurious ~1e-7 m/s² PGF, 7× worse at edges where ∇phis/the A-L
+stencil is larger).  FORCING float64 (T,p_s,phis,ln_ratio,alpha): (Φ_k - phis) std = 0.0 EXACTLY ⇒
+PGF imbalance → machine-zero.  ⇒ the cube 3D hydrostatic PGF is EXACTLY WELL-BALANCED in float64;
+the recorded rest_state_topo 13× (1.3 m/s) is a FLOAT32 round-off artifact (likely cube ran float32
+while ico/latlon float64, or the cube's larger Φ magnitude amplifies float32), NOT a cube
+discretization/faithfulness bug.  This DE-PRIORITIZES it as a "faithfulness" concern and SEPARATES
+it from the SW v-imprint (0.344 m/s ≫ float32-of-38 ~ 4e-6 ⇒ the SW v-imprint is a REAL discretization
+effect, the co-located centered-vorticity gap — NOT float32).
+FIX options: (1) ensure the geopotential is float64 under x64 (phis/ln_ratio/alpha float32-under-x64
+is itself a likely dtype bug — x64 should give float64); (2) for float32 runs, a well-balanced
+reformulation: compute ∇(Φ - phis) (the small per-level-ish part, ∇≈0) + ∇phis SEPARATELY so the
+large Φ≈2.5e5 never enters the float32 cancellation (the standard reference-subtraction well-balanced
+PGF).  NEXT: check whether phis/sigma are float32-under-x64 by a real dtype bug (fixable cheaply) vs a
+deliberate float32 finite-volume choice; if a bug, fix → rest_state_topo → machine-zero.
