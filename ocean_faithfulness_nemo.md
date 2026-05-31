@@ -136,6 +136,14 @@ A/B knob added: `run_omip_core2.py --ke-gradient-scheme {centered,hollingsworth}
   adversarial review missed this.** Confirmation smoke 8126991 + unit re-run in
   flight. Two extra commits this iter: af8da957 (observable runner: per-diag CSV
   + `--snapshot-every-days`), abe80cdd (the revert).
+  **REVERT CONFIRMED (smoke 8126991, rc=0, 2-day cold-start FINITE).** New CSV
+  diagnostics: max|u| day-0.25 **17 m/s @ Brazil-Malvinas** (−36°,−51°) →
+  day-0.5–2 **30–35 m/s @ EQUATOR** (−2°,−5°, the f→0 amplifier) — bounded /
+  saturated (not growing). Mean SST 11.2 °C + SSS 34.29 **stable + physical**.
+  ⇒ tracer fields are usable for a caveated SST/SSS compare despite the
+  LOCALISED equatorial velocity over-intensity (worse than the ~14 m/s WBC; the
+  equator f→0 amplifier is the key remaining QUALITY gap — known not viscosity-
+  dampable, tracker iters 11/13). 14 unit tests pass on the committed code.
 - **iter 1:** new loop. Drag-spinup test 8100129 queued (GPU busy). Created this tracker.
   codex-adversarial-review of dycore changes = needs-attention, 2 valid findings, both FIXED:
   (1) [high] flood-fill copied donor columns without reapplying the RECEIVER bathymetry deep-fill
