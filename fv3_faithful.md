@@ -129,8 +129,13 @@ Foundational.
 
 ## ACTION QUEUE
 SAFE-BOUNDED (no risk to equiangular default):
+- [DONE iter62] `hord==9` mislabel fixed: scalar `_ppm_1d` hord=9 used `_pert_ppm` (iv=1);
+  FV3 iord=9 = pert_ppm iv=0 (tp_core.F90:610) → now `_pert_ppm_iv0`. Verify-first: the
+  branch IS unexercised (live scalar callers use hord=12 iv=0 default; momentum ytp_v/xtp_u
+  uses iv=1 deliberately + correctly). Cube SW 4/4 unchanged. Test `test_hord9_iv0_scalar`.
+- [DONE iter62] Cross-face metric denominator bug (codex high finding) fixed + guard test.
 - [TODO] Numerical regressions locking orphaned faithful ports (gnomonic_ed vs numpy FV3
-  ref; a2b_ord4 vs hand FV3 cascade). Fix latent `hord==9` mislabel.
+  ref; a2b_ord4 vs hand FV3 cascade).
 - [TODO] Human visual PNG inspection (paths above).
 FOUNDATIONAL (multi-day, re-calibration; NOT a bounded loop iter — per user, no improvise):
 - **Stabilize + wire the FB chain** (`fv3_fb_sw_step`): brings FV3's c_sw/d_sw 2-stage +
