@@ -178,8 +178,17 @@ to polar → angle. Implemented `compute_padded_half_metrics_ed` (6/6 tests: sha
 - ⇒ wiring = make_fv3_native_grid + PERMUTE/ROTATE faces to create's numbering+orientation,
   then centers (cell_center2) + angle (centered-diff per reconciled face). hx/hy already
   done (face-independent ⇒ numbering-agnostic ✓). This reconciliation (permutation + the
-  per-face i/j-axis rotation match) is the focused-effort crux. Validate seam continuity
-  (cross-face metric) + √2 + area before gating.
+  per-face i/j-axis rotation match) is the focused-effort crux.
+**RECONCILIATION SOLVED (iter66):** `_gnomonic_ed_remap_to_create` — perm [0,1,3,4,5,2] +
+D4 rot [0,0,1,1,0,3], derived by matching the equiangular grid on BOTH sides (create vs
+make_fv3_native_grid gt=2; residual 2.46e-4 = construction diff, the integer perm+rot is
+exact). `_compute_gnomonic_ed_lonlat` now remaps → create numbering. VALIDATED: 6 faces at
+create's positions + SEAM-CONTINUOUS (cross-face 1.22 through create's halo tables). 15/15
+gnomonic_ed brick tests. ⇒ wiring bricks done: centers ✓ (create-numbered, seam-continuous),
+half-metrics ✓ (face-indep), construct core ✓. REMAINING: `compute_padded_angle_ed` (per
+remapped face, equatorial+polar) → gate `create_cubed_sphere(gnomonic="ed")` assembling all
+CubedSphereGrid fields → validate (area 4πR², √2, full dynamical suite) → re-calibrate
+damping → run W5 C96 to test the eigenmode fix.
 
 ## VERIFICATION
 - SW 16/16 all grids ≤1 cell aligned. Full fast cube atm dynamical suite PASS + NH
