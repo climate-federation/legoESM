@@ -1206,21 +1206,25 @@ def _corner_vorticity(uc, vc, cdgrid, use_duogrid):
         vc_halo_i_left = 0.5 * (vc_cc_pad[:, 0, :-1] + vc_cc_pad[:, 0, 1:])
         vc_halo_i_right = 0.5 * (vc_cc_pad[:, n + 1, :-1]
                                   + vc_cc_pad[:, n + 1, 1:])
-        # Metric halo: KNOWN FAITHFULNESS GAP (iter93, oracle-confirmed).  FV3 in
-        # DUOGRID mode SKIPS the edge-extrapolation+mpp_update of dxc/dyc that the
-        # non-duogrid path uses (fv_grid_tools.F90:899-916 are gated by the
-        # `.not. duogrid` block; line 1107 skips mpp_update for duogrid) — the
-        # duogrid supplies the CROSS-FACE metric halo from its extended grid.
-        # Here we still edge-copy the boundary dxc/dyc into the halo row, an O(dx)
-        # error at the seams (smaller than the 15.6% uc rotation error mode='edge'
-        # on fx_circ produced, but NOT negligible — it is a primary seed of the
-        # FB-chain W2 C36 residual).  TODO(next): compute the cross-face dxc/dyc
-        # halo from the cdgrid padded supergrid (_psg_lon/_psg_lat, the same
-        # extension that feeds sin_sg) and thread it in here.
-        dxc_halo_j_below = cdgrid.dxc[:, :, 0]    # (6, n+1)  [edge-copy; TODO cross-face]
-        dxc_halo_j_above = cdgrid.dxc[:, :, -1]   # (6, n+1)  [edge-copy; TODO cross-face]
-        dyc_halo_i_left = cdgrid.dyc[:, 0, :]     # (6, n+1)  [edge-copy; TODO cross-face]
-        dyc_halo_i_right = cdgrid.dyc[:, -1, :]   # (6, n+1)  [edge-copy; TODO cross-face]
+        # Metric halo: edge-copy the boundary dxc/dyc into the halo row.
+        # iter93 oracle finding: FV3 in DUOGRID mode skips the dxc/dyc
+        # edge-extrapolation + mpp_update the non-duogrid path uses
+        # (fv_grid_tools.F90:899-916 + :1107 are gated `.not. duogrid`) and
+        # instead carries the exact CROSS-FACE metric halo from its extended grid,
+        # so this edge-copy is formally a faithfulness gap.  BUT iter94 RULED IT
+        # OUT as a meaningful FB-residual term: replacing edge-copy with O(dx²)
+        # linear extrapolation (2*edge - first-interior) of dxc/dyc changed the FB
+        # W2 C36 day-1 max|u_d| by <0.2% (48.60 → 48.53, still day-2 NaN).  ⇒ the
+        # FB residual is NOT in the corner-vorticity METRIC halo (consistent with
+        # iter82-83 "structural corner coupling, not metric"); the remaining
+        # candidate inside `_corner_vorticity` is the uc/vc halo RECONSTRUCTION
+        # (the 2-pt center-avg + re-stagger above), not the metric.  Kept as
+        # edge-copy — the validated baseline; the exact cross-face metric is a
+        # known-LOW-priority TODO, proven not to move the residual.
+        dxc_halo_j_below = cdgrid.dxc[:, :, 0]    # (6, n+1)
+        dxc_halo_j_above = cdgrid.dxc[:, :, -1]   # (6, n+1)
+        dyc_halo_i_left = cdgrid.dyc[:, 0, :]     # (6, n+1)
+        dyc_halo_i_right = cdgrid.dyc[:, -1, :]   # (6, n+1)
 
         fx_halo_j_below = uc_halo_j_below * dxc_halo_j_below   # (6, n+1)
         fx_halo_j_above = uc_halo_j_above * dxc_halo_j_above   # (6, n+1)

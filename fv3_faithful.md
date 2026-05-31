@@ -296,3 +296,23 @@ bug A RE-VERIFIED against the oracle (corrects iter84's "authors judged minor"):
   seams + the FB residual.
   iter93 deliverable: oracle-verified diagnosis + corrected the misleading "O(dx), much smaller, fine"
   code comment to the accurate "real faithfulness gap, TODO cross-face". Implementation next iter.
+
+
+## iter94 — EXPERIMENT: corner-vorticity METRIC halo RULED OUT as the FB residual root
+Hypothesis (iter84): the `_corner_vorticity` duogrid edge-copy dxc/dyc halo (bug A's metric part)
+is the FB W2 C36 residual's primary seed.  TESTED directly:
+  BASELINE  (edge-copy dxc/dyc):      W2 C36 FB+Phase4+duogrid, dt=300, day1 max|u_d|=48.60, day2 NaN.
+  LINEAR-EXTRAP (2*edge-interior, O(dx²) vs edge-copy O(dx), closer to FV3's exact cross-face metric):
+                                       day1 max|u_d|=48.53, day2 NaN.
+  ⇒ <0.2% change. The dxc/dyc METRIC halo is NOT a meaningful FB-residual term — bug A's metric
+  component is RULED OUT (confirms iter82-83 "structural corner coupling, not metric"; DISPROVES
+  iter84's "metric = primary seed").  Reverted to edge-copy (validated baseline, no fingerprint
+  churn); exact cross-face metric is now a known-LOW-priority TODO (proven not to move the residual).
+  REMAINING FB-residual candidate inside `_corner_vorticity`: the uc/vc halo RECONSTRUCTION (2-pt
+  center-avg + pad_halo_vector + re-stagger, lines 1189-1208) — the rotation/reconstruction, NOT the
+  metric.  Other candidates (iter83): d_sw zeta (covariant circulation, no corner correction),
+  vorticity-flux fv_tp_2d, d2a2c corner.  NEXT: test the uc/vc reconstruction (or isolate the
+  residual stage by FB-vs-production single-step tendency diff on smooth W2).
+  Also confirmed this iter: production SW = co-located Arakawa-Lamb (operators_cdgrid.py:1167), so
+  the FB chain is the only path to the FV3 staggered upwind vorticity; bug A is FB-only (production
+  uses dgrid_vorticity) → production-safe regardless.
