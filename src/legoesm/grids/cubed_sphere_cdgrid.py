@@ -803,15 +803,11 @@ def create_cubed_sphere_cdgrid(
     # the i-tangent and j-tangent vectors using Cartesian positions on
     # the unit sphere from an extended gnomonic grid.
     # ------------------------------------------------------------------
-    dalpha = jnp.pi / (2 * n)
-    # Extended grid: n+3 points → centred diffs yield (n+1) output
-    alpha_ext = jnp.linspace(
-        -jnp.pi / 4 - dalpha, jnp.pi / 4 + dalpha, n + 3)
-    ax_ext, ay_ext = jnp.meshgrid(alpha_ext, alpha_ext, indexing='ij')
-
+    # Reuse the precomputed (6, n+3, n+3) extended corner grid (same n+3
+    # layout as the corner grid-angle); grid-type-agnostic (iter71).
     all_cosa_c = []
     for face in range(6):
-        lon_ext, lat_ext = _face_gnomonic_to_lonlat(face, ax_ext, ay_ext)
+        lon_ext, lat_ext = corner_ext_lon[face], corner_ext_lat[face]
         cos_lat_ext = jnp.cos(lat_ext)
         # Cartesian positions on unit sphere
         px = cos_lat_ext * jnp.cos(lon_ext)
@@ -1036,9 +1032,8 @@ def create_cubed_sphere_cdgrid(
         # i-tangent at (i, j+0.5) ≈ avg of (corner(i+1,j)-corner(i-1,j))
         # at j and j+1.  We need padding for the boundary.
 
-        # Use extended gnomonic grid for y-edge tangent vectors
-        lon_ext_f, lat_ext_f = _face_gnomonic_to_lonlat(
-            face, ax_ext, ay_ext)
+        # Use the precomputed (6, n+3, n+3) extended grid for y-edge tangents
+        lon_ext_f, lat_ext_f = corner_ext_lon[face], corner_ext_lat[face]
         cos_lat_extf = jnp.cos(lat_ext_f)
         px_e = cos_lat_extf * jnp.cos(lon_ext_f)
         py_e = cos_lat_extf * jnp.sin(lon_ext_f)
