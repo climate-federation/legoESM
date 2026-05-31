@@ -59,7 +59,17 @@ UNRELIABLE both ways (gave 5.95× on W5 v where true continuity is 1.30×).
   conserves ⇒ NOT a flux-conservation bug. Root cause = the EDGE/SEAM treatment → the
   orthogonal cross-face vector rotation that DROPS FV3 `sin_sg(:,:,5)` (scorecard). FAITHFUL
   FIX = FV3 non-orthogonal seam rotation `pad_halo_dgrid_vector_4d` /
-  `use_fv3_cross_face_du_proj` (12/12 tests, currently gated OFF). [test next]
+  `use_fv3_cross_face_du_proj` (12/12 tests, currently gated OFF; that flag lives on the
+  NH `compressible_euler_cdgrid`, NOT the SW FB chain → wiring is a real change).
+- [iter61] Exposed-flag ablation on the FB h-drift: `apply_fortran_xppm_boundary=True`
+  (FV3 edge PPM), `apply_legacy_d_sw5_corner_corrections=True`, and (earlier) `dddmp=0.2`
+  ALL give BYTE-IDENTICAL h-drift (3228/3801/4630 @50/100/150). ⇒ the edge mode is in the
+  CORE seam mass-transport / wind-convergence, NOT any exposed FV3-faithfulness knob.
+  (Wind-damping `hyperdiff` controls it indirectly = the improvise path, rejected.)
+  ⇒ FAITHFUL fix is FOUNDATIONAL: wire FV3's non-orthogonal seam rotation
+  (`pad_halo_dgrid_vector_4d`) into the SW d_sw + the structured d_sw5 damping at the
+  right strength. Slow JIT FB probing stopped (each compile ~min; not converging on a
+  quick fix — it's genuinely core-dycore foundational, per user's no-improvise directive).
 - STILL MISSING: human visual PNG inspection (assistant barred from Read images):
   `results/atmosphere/shallow_water/williamson{2,5}/cubed_sphere/C36/snapshots_{v,wind_speed}_native.png`.
 
