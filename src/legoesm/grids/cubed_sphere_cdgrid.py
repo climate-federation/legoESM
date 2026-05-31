@@ -385,8 +385,8 @@ def _compute_supergrid_metrics(n, supergrid_lon, supergrid_lat, radius):
         # (exact match at leading order for uniform cubed-sphere; the
         # neighbour-face area is identical.)
         #
-        # For n >= 2, extrapolate interior values to the boundary.
-        # For n < 2, fall back to the partial-quadrant sum.
+        # For n >= 1, scale the boundary corners by the number of faces meeting
+        # at the node (edges ×2, vertices ×3); see the FV3 grid_area block below.
         area_c = np.zeros((n + 1, n + 1))
         for i in range(n + 1):
             for j in range(n + 1):
@@ -401,7 +401,7 @@ def _compute_supergrid_metrics(n, supergrid_lon, supergrid_lat, radius):
                 if si < 2 * n and sj < 2 * n:
                     total += sg_area[si, sj]
                 area_c[i, j] = total
-        if n >= 2:
+        if n >= 1:
             # FV3 boundary corner control-volume area = (# faces meeting at the
             # node) × (the ON-FACE sub-quadrant sum already accumulated in area_c
             # by the loop above).  fv_grid_tools.F90:980-1067:
@@ -414,6 +414,10 @@ def _compute_supergrid_metrics(n, supergrid_lon, supergrid_lat, radius):
             # extends the same (#faces)-scaling to the EDGES — the prior inward
             # interior-copy extrapolation was ~1.2% off at C96 on O(n) boundary
             # corners (rarea_c silently low → boundary vorticity/divergence bias).
+            # The edge slices are empty no-ops at n=1 (1:n is empty); the four
+            # cube vertices still need the ×3 there (all C1 corners are 3-face
+            # junctions), so the whole block runs for n >= 1 — iter90 (codex
+            # review of d7108d48), guarding C1 against a 3× corner under-count.
             area_c[0, 1:n] = 2.0 * area_c[0, 1:n]    # west edge  (i=0)
             area_c[n, 1:n] = 2.0 * area_c[n, 1:n]    # east edge  (i=n)
             area_c[1:n, 0] = 2.0 * area_c[1:n, 0]    # south edge (j=0)
