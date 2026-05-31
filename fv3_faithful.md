@@ -37,8 +37,20 @@ cell_center3 (prod uses equiv l'Huilier); upwind vort-flux/`fv_tp_2d` (3D PE doe
 vector halo `pad_halo_vector_4d` ORTHOGONAL — drops FV3 `1/sin_sg(5)` → O(cosθ) seam err;
 faithful `pad_halo_dgrid_vector_4d` (12/12) gated off.
 **MAJOR:** SW core prod = single-stage SSP-RK3 (1 Arakawa-Lamb tendency), NOT FV3 FB c_sw→d_sw
-(`fv3_fb_sw_step` exists but unstable/unreachable). 3D PE D-grid vort/KE = centered
+(`fv3_fb_sw_step` / `FV3FBShallowWaterModel` exists but unstable). 3D PE D-grid vort/KE = centered
 `zeta_corner*v_d` (primitive_eq_cdgrid:445), NOT FV3 upwind PPM `hord_vt`.
+**iter76 — FB instability REFRAMED (it's a COUPLING BUG, not tuning):** W2 C36 equiangular blows
+to NaN at a dt-INDEPENDENT physical time ≈3 h — dt=300→step43(3.6h), dt=200→step59(3.3h),
+dt=100→step108(3.0h). dt=300 ZERO-dissip NaNs at the SAME step 43 as FV3-dissip; HEAVY dissip
+(div_damp=8,d4_bg=0.5) NaNs FASTER (step 11). ⇒ a continuous-time GROWING MODE, NOT a CFL/dt
+instability, and the del4/Smagorinsky dissipation does NOT damp it (heavy dissip adds its own
+explicit-stability blow-up on top). Production RK3 is stable on the SAME W2/grid ⇒ the unstable
+mode is SPECIFIC to the FB c_sw→d_sw coupling = a BUG vs the FV3 oracle (sw_core.F90 `c_sw`/
+`d_sw`), NOT a dissipation-tuning or timestep problem (FV3 runs FB stably). The long-standing
+"FB unstable, needs interface dissipation" framing was WRONG. NEXT: diff legoESM `_c_sw`/
+`_d_sw_native`/`fv3_fb_sw_step` (core/fv3_sw_core.py) against sw_core.F90 to find the coupling
+discrepancy that injects the ~3 h growing mode (the convergent root for the eigenmode + ed corner
++ algorithmic faithfulness).
 
 ## GRID gap → gnomonic_ed wiring (LIKELY fixes the C96 eigenmode; iter62-69)
 create defaulted to EQUIANGULAR (gt=2, corner aspect 1.40); FV3 operational = gnomonic_ed
