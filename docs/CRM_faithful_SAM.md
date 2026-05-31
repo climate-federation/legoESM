@@ -10,6 +10,15 @@ toolchain + no sudo ⇒ cannot build/run gSAM (no compiler, no binary, no refere
 faithfulness vs SAM SOURCE FORMULAS, each `/codex:adversarial-review`'d. GPU runs feasible
 (RTX 5090, JAX gpu) but NOT a live two-model comparison.
 
+**✅ MERGED TO MAIN (2026-05-31):** This work committed (`7b598352`) + merged to `main` via **PR #350**
+(`gentine/legoESM`, merge commit `32ee0717`), branch `crm-faithful-sam-gsam`. Merged current `main` (was 70
+commits ahead — unrelated ocean/OMIP work) INTO the branch CLEAN: only 4 overlapping radiation/driver files,
+ZERO line-conflicts; `import legoesm` OK + 16 CRM tests green on the merged code. Commit = 92 files
+(dynamics/SGS/M2005/RRTMGP/oceflx/Wing-IC + reffc + M1b + the new CRM/M2005/SAM-case test suite + this
+tracker). **Git steps (all verified):** branch → `git add -A` (data excluded by `.gitignore`) → commit →
+push → merge `origin/main` (clean) → PR #350 (MERGEABLE/CLEAN, no CI gate) → `gh pr merge --merge`.
+Residual open = compute/oracle-bound only (RCE equilibrium ~days; gSAM unbuildable), NOT a code gap.
+
 **CURRENT (iter-204):** Faithfulness pursued vs SAM SOURCE (gSAM unbuildable ⇒ no live oracle). All major
 physics components verified/corrected vs SAM source. **Session (iter-175-216) source/realism audits found
 + fixed 10 REAL faithfulness issues:** (1) SGS missing SAM `delta_max=1000 m` mixing-length cap (over-mixed
