@@ -8090,9 +8090,11 @@ class TestCornerVorticityFortranFormula(unittest.TestCase):
             jnp.asarray(uc), jnp.asarray(vc), cdgrid, use_duogrid=True))
 
         # Iter-916b gold fingerprints (post-iter-836 production).
-        # Re-pinned iter89/iter90 (FV3-faithful area_corner): `_corner_vorticity`
-        # is `f_corner + rarea_c*vort`, so ONLY the cube boundary/vertex corners
-        # (whose area changed: edges ×2, vertices ×3) shift.  The interior
+        # Re-pinned iter89/iter90 for the FV3-faithful (#faces)-junction SCALING
+        # (edges ×2, vertices ×3; absolute area still legoESM's chord approx, not
+        # spherical get_area): `_corner_vorticity` is `f_corner + rarea_c*vort`,
+        # so ONLY the cube boundary/vertex corners (whose area changed) shift.
+        # The interior
         # ([3,4,4]) and the extrema (min/max, at interior corners) are BYTE-
         # IDENTICAL — confirming the area fix is a purely boundary-local change
         # here (no spurious interior effect).  The sum and the two vertex samples
@@ -11479,11 +11481,15 @@ class TestInterpCenterToCornerOrderIter707(unittest.TestCase):
                 float(actual), expected, delta=ref * 1e-6,
                 msg=f"adaptive Smag {name} fingerprint changed "
                     f"beyond rtol=1e-6 of its scale (real scheme change?).")
-        # Re-pinned iter89/iter90 (FV3-faithful area_corner): the smaller, FV3-
-        # correct cube-vertex area (3*get_area) lowers the global da_min_c that
-        # scales BOTH the del-2 (dddmp) and del-4 (d4_bg) damping, so these
-        # adaptive-Smag fingerprints shift (ke[0,4,4] 93983.0 → 49013.5).  See
-        # the nord=0 del-2 gold-file docstring for the da_min_c mechanism.
+        # Re-pinned iter89/iter90 for the FV3-faithful (#faces)-junction SCALING:
+        # the ×3-scaled (now smallest) cube-vertex corners lower the global
+        # da_min_c that scales BOTH the del-2 (dddmp) and del-4 (d4_bg) damping,
+        # so these adaptive-Smag fingerprints shift (ke[0,4,4] 93983.0 → 49013.5).
+        # See the nord=0 del-2 gold-file docstring for the da_min_c mechanism.
+        # The pinned values are legoESM CHORD-area numbers (the absolute
+        # per-quadrant area is a chord approximation, not FV3 spherical get_area;
+        # only the ×2/×3 junction scaling is FV3-faithful) → re-pin on a future
+        # chord→spherical upgrade.
         l2 = float((ke ** 2).sum()) ** 0.5
         _rel(ke[0, 4, 4], 49013.538501232724, "ke[0,4,4]")
         _rel(ke[3, 2, 6], 71622.11135411877, "ke[3,2,6]")
@@ -11871,14 +11877,20 @@ class TestDSw5CornerDivergenceGoldFileIter702(unittest.TestCase):
     def test_nord0_del2_damping_gold_file(self):
         """nord=0 (del-2 damping): fingerprints recorded on CPU x64.
 
-        Re-pinned iter89/iter90 (FV3-faithful area_corner): the divergence
-        damping coefficient is `damp = da_min_c * max(d2_bg, ...)` and
+        Re-pinned iter89/iter90 for the FV3-faithful edge/vertex (#faces)-junction
+        SCALING of area_corner (edges ×2, vertices ×3): the divergence damping
+        coefficient is `damp = da_min_c * max(d2_bg, ...)` and
         `da_min_c = min(1/rarea_c)` is the GLOBAL minimum corner area.  Once the
-        cube vertices carry their true FV3 3-face-junction area (3*get_area,
-        ≈0.67× interior) instead of the iter-670 interior-copy, da_min_c drops to
-        the (smaller, correct) vertex area, so the global damp weakens and the
-        whole ke field shifts — e.g. ke[0,4,4] -5634.7 → -4069.2.  This matches
-        FV3's `global_mx_c(area_c)` (fv_grid_utils.F90:743).
+        cube vertices get the ×3 junction scaling (loop value ×3) instead of the
+        iter-670 interior-copy, the vertices become the smallest corners and
+        da_min_c drops to the vertex area, so the global damp weakens and the
+        whole ke field shifts — e.g. ke[0,4,4] -5634.7 → -4069.2.  This mirrors
+        the STRUCTURE of FV3's da_min_c = global_mx_c(area_c)
+        (fv_grid_utils.F90:743), where the 3-face vertices set the minimum.
+        NOTE: the pinned numbers are legoESM CHORD-area values — the absolute
+        per-quadrant area is a chord approximation, NOT FV3 spherical get_area —
+        so a future chord→spherical area upgrade WILL re-pin them (a known oracle
+        change, not a regression).
         """
         import numpy as np
         from legoesm.core.fv3_sw_core import _d_sw5_corner_divergence
@@ -11905,11 +11917,13 @@ class TestDSw5CornerDivergenceGoldFileIter702(unittest.TestCase):
         (iter-655 pad_halo wiring) + metric-weighted composite damping.
         A regression in ANY of these stages shifts the fingerprints.
 
-        Re-pinned iter89/iter90 (FV3-faithful area_corner): del-4 damping scales
-        as `(da_min_c*d4_bg)**(nord+1)` (sw_core.F90:1811), so the smaller, FV3-
-        correct vertex area (3*get_area) lowers the global da_min_c and weakens
-        the del-4 damping — ke[0,4,4] -73741.2 → -38457.1.  See the nord=0 test
-        docstring for the da_min_c mechanism.
+        Re-pinned iter89/iter90 for the FV3-faithful (#faces)-junction SCALING:
+        del-4 damping scales as `(da_min_c*d4_bg)**(nord+1)` (sw_core.F90:1811),
+        so the ×3-scaled (now smallest) vertex corners lower the global da_min_c
+        and weaken the del-4 damping — ke[0,4,4] -73741.2 → -38457.1.  As in the
+        nord=0 test, the pinned values are legoESM CHORD-area numbers (the ×3
+        SCALING is FV3-faithful; the absolute area is a chord approximation, not
+        spherical get_area) and will re-pin on a future spherical upgrade.
         """
         import numpy as np
         from legoesm.core.fv3_sw_core import _d_sw5_corner_divergence
