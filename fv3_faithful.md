@@ -24,6 +24,8 @@ edge artifacts**, visual+quantitative, codex-reviewed. CPU only (Metal broken).
   per-substep corner-ocean wind mask (coasts impermeable, land eta=0, rest
   machine-zero). Solution-space: a_grid=40%, explicit-f*v c_grid=NaN, bare-VI
   FE/RK3=NaN; only full SW core stable+zonal. Test `test_fv3sw_barotropic.py`.
+  RE-VERIFIED iter ~55 (fresh): cube geostrophic PASS, T drift 7.5e-14,
+  max_speed 0.0143≈latlon/mpas, non-zonal fraction 1.45% (A-grid was ~40%).
 - **OCEAN FC velocity viscosity** vector-halo (4fe7108c).
 
 ## ✅ EDGE-ARTIFACT PROOF (codex-reviewed, two metrics)
