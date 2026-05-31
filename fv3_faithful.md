@@ -43,15 +43,22 @@ PROVEN" was OVERSTATED for shallow-water.**
   metric-A, never re-ran cross-face metric-B on fresh data; (3) numbers-only violates
   CLAUDE.md "visual REQUIRED" — native PNGs never opened; (4) pooling hides per-face
   amplification + polar "clean" is small/large MASKING. Independently re-verified:
-  W2 v_cc_north 16/24 corner cells show 2nd-diff >2× median (coherent vertex imprint);
-  per-face magnitude-RMS edge/interior 1.34× equatorial vs 0.84× polar. W2 v is the
-  ERROR field (exact v=0, max 0.34, rms 0.03) so absolute magnitude tiny (sub-0.1 m/s,
-  invisible to L2/mass) — but it IS a real grid imprint, not noise, and it GROWS in
-  time. The skeptic's headline W5 v up-to-5.95×-per-face (W5 v = PHYSICAL mountain
-  flow, NOT error → magnitude defense breaks) is UNVERIFIED here (no W5 native saved).
-- STILL MISSING (none done): visual PNG inspection; per-face + magnitude-normalized +
-  cross-face metric as a committed regression; W2/W5 resolution+duration sweep
-  (C36/C48/C96, W2→5d W5→15d — currently C36-only, quick=1d); band=1 reporting.
+  W2 v_cc_north 16/24 corner cells show 2nd-diff >2× median (same-face metric).
+**RESOLVED iter ~58 via the CORRECT metric (TRUE cross-face continuity through the
+model's real `pad_halo_4d`: cross-seam first-diff RMS / same-face interior first-diff
+RMS — a real discontinuity = 5-50×):**
+- W5 (PHYSICAL flow, 5-day, mass 4.9e-16): v_cc_north (max 20.2) cross-seam **1.30×**;
+  wind_speed 1.58×; height 2.19× (one face). CONTINUOUS.
+- W2: physical u 1.57×, height 1.62×; v (ERROR field, max 0.34) 2.23×. CONTINUOUS.
+⇒ BOTH overclaims corrected. The skeptic's "W5 v 5.95×" used the unreliable SAME-FACE
+2nd-diff metric (amplifies edge curvature); true cross-face continuity is 1.30× for
+physical W5 v. My earlier "PROVEN clean" was loose; the skeptic's "real coherent
+imprint" was also overstated. TRUTH: NO large edge artifact (all physical SW fields
+continuous ≤2.2×); the same-face roughness metric is UNRELIABLE in BOTH directions and
+should not anchor the claim. Mild error-field elevation (W2 v 2.23×, sub-0.34 m/s
+residual) is the tiny discretization residual, invisible to L2/mass. Baroclinic clean.
+- STILL MISSING: visual PNG inspection (human); commit the TRUE cross-face metric as a
+  regression test; W2/W5 higher-res sweep (C48/C96 — confirm continuity holds w/ res).
 
 ## VERIFICATION
 - SW 16/16 all grids, aligned within 1 cell. Full fast cube atm dynamical suite
