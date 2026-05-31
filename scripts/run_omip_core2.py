@@ -805,6 +805,11 @@ def main() -> int:
                         "Requires --partial-cell. 0=off.")
     p.add_argument("--output", type=str, default="results/omip_nemo/legoesm_tripole")
     p.add_argument("--diag-every-days", type=float, default=30.0)
+    p.add_argument("--snapshot-every-days", type=float, default=0.0,
+                   help="Write a state snapshot every N sim-days (in addition "
+                        "to yearly + final). 0=off. Lets a long run be scored "
+                        "mid-flight (e.g. day-30 SST vs NEMO) without waiting "
+                        "for the full integration.")
     p.add_argument("--forcing-ramp-days", type=float, default=0.0,
                    help="Ramp the surface forcing 0->full over N days "
                         "(cold-start shock mitigation).")
@@ -947,10 +952,31 @@ def main() -> int:
         print(f"[setup] nudging T,S -> WOA: tau={args.nudge_woa_tau_days}d, "
               f"release day={args.nudge_release_day or 'never'}")
 
+    snap_every = (int(args.snapshot_every_days * _SEC_PER_DAY / dt)
+                  if args.snapshot_every_days > 0 else 0)
+
     print(f"[run] {total_days:.0f} days = {n_steps} steps "
-          f"(diag every {diag_every} steps)")
+          f"(diag every {diag_every} steps"
+          f"{f', snapshot every {snap_every} steps' if snap_every else ''})")
     d0 = _diag(state, lat2d, lon2d)
-    print(f"[diag] step 0: {d0}")
+    print(f"[diag] step 0: {d0}", flush=True)
+
+    # Progress time-series CSV, flushed each diag -> observable mid-run even when
+    # stdout is pipe-buffered, and a record for post-hoc analysis.
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _csv_cols = ["step", "day", "mean_sst_C", "mean_sss", "max_abs_u",
+                 "max_abs_v", "umax_lat", "umax_lon", "umax_lev", "steps_per_s"]
+    _csv = open(out_dir / "diag_timeseries.csv", "w")
+    _csv.write(",".join(_csv_cols) + "\n")
+
+    def _log_diag_csv(step, day, d, rate):
+        _csv.write(
+            f"{step},{day:.3f},{d['mean_sst_C']:.4f},{d['mean_sss']:.4f},"
+            f"{d['max_abs_u']:.6e},{d['max_abs_v']:.6e},{d['umax_lat']},"
+            f"{d['umax_lon']},{d['umax_lev']},{rate:.3f}\n")
+        _csv.flush()
+
+    _log_diag_csv(0, 0.0, d0, 0.0)
 
     t_wall = time.time()
     for step in range(1, n_steps + 1):
@@ -992,18 +1018,27 @@ def main() -> int:
             state = jax.block_until_ready(state)
             d = _diag(state, lat2d, lon2d)
             rate = step / (time.time() - t_wall)
-            print(f"[diag] step {step} (day {step*dt/_SEC_PER_DAY:.0f}): "
-                  f"{d} | {rate:.2f} steps/s")
+            day = step * dt / _SEC_PER_DAY
+            print(f"[diag] step {step} (day {day:.0f}): {d} | {rate:.2f} steps/s",
+                  flush=True)
+            _log_diag_csv(step, day, d, rate)
             if not d["finite"]:
-                print("[ABORT] non-finite state"); _save_snapshot(out_dir, f"blowup_step{step}", state, lat2d, lon2d)
+                print("[ABORT] non-finite state", flush=True)
+                _save_snapshot(out_dir, f"blowup_step{step}", state, lat2d, lon2d)
+                _csv.close()
                 return 1
+        if snap_every > 0 and step % snap_every == 0 and step != n_steps:
+            day = step * dt / _SEC_PER_DAY
+            _save_snapshot(out_dir, f"day{int(round(day)):04d}", state, lat2d, lon2d)
+            print(f"[snapshot] day {day:.0f} saved", flush=True)
         if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
             yr = step // steps_per_year
             _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d)
-            print(f"[snapshot] year {yr} saved")
+            print(f"[snapshot] year {yr} saved", flush=True)
 
     state = jax.block_until_ready(state)
     _save_snapshot(out_dir, "final", state, lat2d, lon2d)
+    _csv.close()
     rate = n_steps / (time.time() - t_wall)
     print(f"[done] {n_steps} steps @ {rate:.2f} steps/s; final: {_diag(state, lat2d, lon2d)}")
     if args.smoke:
