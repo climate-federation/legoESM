@@ -30,6 +30,10 @@ Committed as `compute_cross_face_continuity` (halo.py) + `tests/grids/
 test_cross_face_continuity_metric.py` (3/3). SUPERSEDES the pooled same-face
 `compute_edge_artifact_metric` (halo.py:2994), which amplifies edge curvature and is
 UNRELIABLE both ways (gave 5.95× on W5 v where true continuity is 1.30×).
+VALIDATED against a REAL artifact (iter61): on C96 W5 the metric tracks the eigenmode
+onset in lockstep — wind_speed cross-seam holds 1.57-2.22 while stable (day0-3.5), then
+rises 2.29→2.76→3.07 as the eigenmode blows up (day4-5). Cleanly separates clean (≤2.2)
+from artifact (>2.5). So the metric detects genuine edge artifacts, not only synthetic ones.
 - BAROCLINIC (3D PE): genuinely clean, converges C36→C72. v-roughness ≤1.24× incl
   rotated_baroclinic (jet crosses seams).
 - SHALLOW-WATER: all PHYSICAL fields CONTINUOUS — C36/C48/C96 cross-face FLAT: W2 u
