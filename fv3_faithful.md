@@ -94,3 +94,24 @@ STRATEGIC NOTE: the FB chain is a DEFERRED upgrade (production SW = co-located A
 "functional-faithful"); this fix is substantial new infra.  Broader directive goals (baroclinic/
 AMIP/ocean cross-grid closeness to MPAS/latlon; cosine_bell 5× transport gap) may be more tractable
 next steps — interleave.
+
+
+## iter96 — 3D edge-artifact triage: rest_state_topo PGF panel-edge artifact = concrete prod target
+Tried baroclinic cross-grid (cube/latlon/ico) but C36×L40 3D is CPU-prohibitive (single case >21 min,
+killed). The matrix ALREADY records the 3D cube edge-artifact characterization (scripts/run_atmosphere
+_test_matrix.py:3899-3921):
+  • **rest_state_topo: cube ~1.3 m/s spurious wind vs ico/latlon 0.1 m/s (13× worse)**; analytic exact
+    = ZERO motion. Cause (recorded): cube PANEL-EDGE metric errors interacting with non-trivial phis
+    (topography) at face boundaries → imperfect hydrostatic PGF balance at the seams. PASS by matrix
+    tolerance but a clear 3D edge artifact. = the directive's "no edge artifacts" in 3D, PRODUCTION,
+    DISTINCT from the SW-core/FB vorticity thread.
+  • rotated_baroclinic: cube max|v|=31.8 vs ico 51.9 (39% lower) — but at quick 2-day the instability
+    hasn't grown (== rotated_steady), INCONCLUSIVE; needs full 10-day (heavy compute).
+PRIORITY REDIRECT: the rest_state_topo PGF panel-edge artifact is more concrete + production-relevant
+than the deferred FB chain (which needs major staggered-C-grid-halo infra). FAST PROBE (next, avoids
+slow 3D time-stepping): build the rest_state_topo IC, compute ONE t=0 momentum tendency (the PGF
+imbalance) via the 3D PE, check magnitude + whether it concentrates at panel edges/corners; compare
+the cube PGF-over-topography scheme to FV3's (the metric-aware seam PGF). This is a static balance
+property → a single RHS eval, not a 1-day integration.
+NOTE: 3D cross-grid verification on CPU is impractical to block on per-iter (single 3D case >20 min);
+rely on the matrix's recorded audits + single-tendency probes for 3D edge-artifact work.
