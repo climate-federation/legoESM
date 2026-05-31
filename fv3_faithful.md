@@ -53,15 +53,18 @@ x=tan(alpha) — FV3 `gnomonic_angl`/grid_type=2; cubed_sphere.py:618/659). FV3'
 **operational** grid is `gnomonic_ed` (grid_type=0, fv_grid_utils.F90:1313) — a
 DIFFERENT, more cell-uniform variant. Same family + same spherical-excess areas
 (total 4πR² to 5e-7). Docstring fixed (wrongly said "equidistant").
-**FV3 gnomonic_ed algorithm VALIDATED (iter ~53):** equal-θ great-circle edge
-(θ∈[-asin(1/√3),asin(1/√3)]) projected to the cube plane (x=-1/√3) + tensor
-product. Prototyped → cube-plane cell-width ratio **1.4475 ≈ √2** (vs equiangular
-1.877), matching FV3's documented `max(dx)/min(dx)=√2` more-uniform signature.
-Algorithm correct + ready. **Wiring = foundational/sanctioned:** the gated grid
-builder refactor either risks the validated default or, to be non-dead, must be
-wired into the matrix → re-validate ALL tests/edge-proofs/calibrations on the new
-grid. Deferred (both valid gnomonic; dynamics similar). Real FV3-grid-variant gap,
-algorithm now in hand for the sanctioned implementation.
+**FV3 gnomonic_ed grid ALREADY FULLY PORTED + TESTED (iter ~54):** `gnomonic_ed`
+(cubed_sphere.py:1833, faithful FV3 port), `gnomonic_grids` dispatcher (:1786),
+`mirror_grid_faces`, and the full 6-face builder **`make_fv3_native_grid(im,
+grid_type=0)`** (:1745) — all tested (test_fv3_gnomonic_ed/grids/mirror/native
+_iter621-629). Verified: 6-face (6,n+1,n+1), great-circle dx max/min = **1.4130 ≈
+√2** (exact FV3 signature). So the FV3 grid math is DONE + correct. **The gap is
+purely OPERATIONAL: `create_cubed_sphere` uses the equiangular path
+(_compute_gnomonic_lonlat), NOT `make_fv3_native_grid`.** Wiring = build the
+`CubedSphereGrid` (centers/areas/dx/dy/angles/cdgrid) from the gnomonic_ed corners
++ re-validate ALL dynamics (calibrated on equiangular). Sanctioned (re-validate
+everything) but the grid math is no longer the blocker — only the wiring +
+re-calibration. Real FV3-grid-variant gap, much narrower than "implement".
 
 ## FAITHFULNESS AUDIT (codex + Fortran oracle)
 - ✅ SW path (FV3EdgeShallowWaterModel→`fv3_sw_core`) **algorithmically faithful**:
