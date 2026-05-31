@@ -2125,24 +2125,32 @@ def _gnomonic_ed_construct(
     return xyz2latlon(pp1, pp2, pp3)
 
 
-def _gnomonic_ed_cell_center_thetas(n: int, halo: int) -> tuple[jax.Array, float]:
-    """W-edge cell-center angles for the gnomonic_ed padded grid.
+def _gnomonic_ed_padded_centers(n: int, halo: int) -> tuple[jax.Array, jax.Array]:
+    """gnomonic_ed cell CENTRES on the padded grid, ``(6, n_big, n_big)`` create-
+    numbered, ``n_big = n+2*halo+2`` (the equiangular padded-metric convention).
 
-    Returns ``(theta_big, alpha)`` where ``theta_big`` has ``n_big = n+2*halo+2``
-    entries (the equiangular padded-metric convention) uniform in great-circle
-    edge angle (gnomonic_ed's defining property), cell-centered, spanning
-    ``halo+1`` cells beyond ±α on each side.  In-domain cells (k = ext..ext+n-1)
-    reproduce the gnomonic_ed face; the surrounding cells are the analytic
-    same-face halo extension (verified smooth, fv3_faithful.md).
+    Definition-A centres (cell_center2 of the extended CORNER grid) — CONSISTENT
+    with :func:`_compute_gnomonic_ed_lonlat` (in-domain block matches to ~1e-15).
+    Corner θ are uniform in great-circle edge angle (gnomonic_ed's defining
+    property); the construct's interior is invariant to halo extension (the
+    mirror diagonal is pinned to ±α), so the in-domain centres reproduce the FV3
+    grid and the surrounding cells are the same-face halo extension.  This is
+    the single source the padded metric builders use, so grid.lon/lat and the
+    metrics share one centre definition (iter67 consistency fix; the earlier
+    construct-at-cell-centre-θ approach was range-dependent and inconsistent).
     """
     rsq3 = 1.0 / jnp.sqrt(3.0)
     alpha = float(jnp.arcsin(rsq3))
     dely = 2.0 * alpha / n
     ext = halo + 1
     n_big = n + 2 * halo + 2
-    k = jnp.arange(n_big, dtype=jnp.float64)
-    theta_big = -alpha - ext * dely + (k + 0.5) * dely
-    return theta_big, alpha
+    kc = jnp.arange(n_big + 1, dtype=jnp.float64)  # corner nodes
+    theta_c = -alpha - ext * dely + kc * dely
+    lo, la = _gnomonic_ed_6face_from_theta(theta_c, alpha)  # (6, M, M) corners
+    return cell_center2(
+        lo[:, :-1, :-1], la[:, :-1, :-1], lo[:, 1:, :-1], la[:, 1:, :-1],
+        lo[:, 1:, 1:], la[:, 1:, 1:], lo[:, :-1, 1:], la[:, :-1, 1:],
+    )  # (6, n_big, n_big)
 
 
 def compute_padded_half_metrics_ed(
@@ -2150,55 +2158,42 @@ def compute_padded_half_metrics_ed(
 ) -> tuple[jax.Array, jax.Array]:
     """gnomonic_ed counterpart of :func:`legoesm.grids.halo.compute_padded_half_metrics`.
 
-    Same output contract — ``hx_ext, hy_ext`` of shape ``(6, n+2*halo, n+2*halo)``,
-    each = half the single-cell edge length (``dx/2``) on the padded grid — but
-    built on the FV3 operational gnomonic_ed grid instead of equiangular.
-
-    dx/dy/area are FACE-INDEPENDENT (cube symmetry; verified 0.0 across all 6
-    faces), so the half-metrics are computed once on the extended equatorial
-    face (``_gnomonic_ed_construct`` at the cell-center θ distribution) and
-    broadcast to all 6 faces.  The 2-cell great-circle chord matches the
-    equiangular construction exactly.
+    ``hx_ext, hy_ext`` of shape ``(6, n+2*halo, n+2*halo)``, each = half the
+    single-cell edge length (``dx/2``) — built on the FV3 gnomonic_ed grid via
+    the 2-cell great-circle chord of the definition-A padded CENTRES
+    (:func:`_gnomonic_ed_padded_centers`), per face (CONSISTENT with grid.lon/lat;
+    the chord convention matches the equiangular builder).
     """
-    theta_big, alpha = _gnomonic_ed_cell_center_thetas(n, halo)
-    lon, lat = _gnomonic_ed_construct(theta_big, alpha=alpha)  # (n_big, n_big)
+    lon, lat = _gnomonic_ed_padded_centers(n, halo)  # (6, n_big, n_big)
     cos_lat = jnp.cos(lat)
     x = cos_lat * jnp.cos(lon)
     y = cos_lat * jnp.sin(lon)
     z = jnp.sin(lat)
     dx_chord = jnp.sqrt(
-        (x[2:, 1:-1] - x[:-2, 1:-1]) ** 2
-        + (y[2:, 1:-1] - y[:-2, 1:-1]) ** 2
-        + (z[2:, 1:-1] - z[:-2, 1:-1]) ** 2
+        (x[:, 2:, 1:-1] - x[:, :-2, 1:-1]) ** 2
+        + (y[:, 2:, 1:-1] - y[:, :-2, 1:-1]) ** 2
+        + (z[:, 2:, 1:-1] - z[:, :-2, 1:-1]) ** 2
     )
-    dx_face = radius * 2.0 * jnp.arcsin(jnp.clip(dx_chord / 2.0, 0.0, 1.0))
+    hx = radius * 2.0 * jnp.arcsin(jnp.clip(dx_chord / 2.0, 0.0, 1.0)) * 0.5
     dy_chord = jnp.sqrt(
-        (x[1:-1, 2:] - x[1:-1, :-2]) ** 2
-        + (y[1:-1, 2:] - y[1:-1, :-2]) ** 2
-        + (z[1:-1, 2:] - z[1:-1, :-2]) ** 2
+        (x[:, 1:-1, 2:] - x[:, 1:-1, :-2]) ** 2
+        + (y[:, 1:-1, 2:] - y[:, 1:-1, :-2]) ** 2
+        + (z[:, 1:-1, 2:] - z[:, 1:-1, :-2]) ** 2
     )
-    dy_face = radius * 2.0 * jnp.arcsin(jnp.clip(dy_chord / 2.0, 0.0, 1.0))
-    hx = dx_face * 0.5
-    hy = dy_face * 0.5
-    hx_ext = jnp.broadcast_to(hx[None], (6,) + hx.shape)
-    hy_ext = jnp.broadcast_to(hy[None], (6,) + hy.shape)
-    return hx_ext, hy_ext
+    hy = radius * 2.0 * jnp.arcsin(jnp.clip(dy_chord / 2.0, 0.0, 1.0)) * 0.5
+    return hx, hy  # (6, n+2*halo, n+2*halo)
 
 
 def compute_padded_angle_ed(n: int, halo: int = 1) -> jax.Array:
     """gnomonic_ed counterpart of :func:`legoesm.grids.halo.compute_padded_angle`.
 
-    Grid angle on the padded grid, ``(6, n+2*halo, n+2*halo)`` — same contract.
-    Unlike hx/hy the angle is face-DEPENDENT (2 distinct values: equatorial
-    faces 0-3 vs polar 4-5), so it is computed on the full remapped 6-face
-    extended grid: build the extended equatorial cell-center face
-    (`_gnomonic_ed_construct`) → ``-π`` shift → `mirror_grid_faces` to 6 (both
-    symmetrization passes are machine-zero no-ops on gnomonic_ed) →
-    `_gnomonic_ed_remap_to_create` → per-face i-direction centered-difference
-    angle (identical formula to the equiangular builder).
+    Grid angle on the padded grid, ``(6, n+2*halo, n+2*halo)`` — per-face
+    i-direction centered-difference angle (identical formula to the equiangular
+    builder) of the definition-A padded CENTRES (CONSISTENT with grid.lon/lat).
+    Angle is face-dependent (equatorial faces 0-3 share one value; polar 4-5
+    differ by π — a real N/S orientation flip, present in the equiangular grid).
     """
-    theta_big, alpha = _gnomonic_ed_cell_center_thetas(n, halo)  # n_big centers
-    lon6, lat6 = _gnomonic_ed_6face_from_theta(theta_big, alpha)  # (6, n_big, n_big)
+    lon6, lat6 = _gnomonic_ed_padded_centers(n, halo)  # (6, n_big, n_big)
     all_angle = []
     for f in range(6):
         lon, lat = lon6[f], lat6[f]

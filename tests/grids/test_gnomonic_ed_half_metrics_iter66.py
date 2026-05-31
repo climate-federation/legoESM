@@ -17,7 +17,29 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm.grids.cubed_sphere import (  # noqa: E402
     compute_padded_half_metrics_ed, _compute_exact_cell_areas_ed,
+    _gnomonic_ed_padded_centers, _compute_gnomonic_ed_lonlat,
 )
+
+
+def test_padded_centers_consistent_with_grid_centers():
+    """iter67 consistency lock: the padded-metric centres (defn A, cell_center2
+    of extended corners) must match grid.lon/lat centres (`_compute_gnomonic_ed_
+    lonlat`) on the in-domain block, so the metrics and lon/lat share ONE centre
+    definition.  (An earlier construct-at-cell-centre-θ approach differed ~½ cell.)"""
+    n, halo = 24, 1
+    ext = halo + 1
+    lonC, latC = (np.asarray(a) for a in _gnomonic_ed_padded_centers(n, halo))
+    lonG, latG = (np.asarray(a) for a in _compute_gnomonic_ed_lonlat(n))
+    sub_lon = lonC[:, ext:ext + n, ext:ext + n]
+    sub_lat = latC[:, ext:ext + n, ext:ext + n]
+    # geodesic separation
+    dl = sub_lon - lonG
+    a = (np.sin((sub_lat - latG) / 2) ** 2
+         + np.cos(latG) * np.cos(sub_lat) * np.sin(dl / 2) ** 2)
+    sep = 2 * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
+    assert sep.max() < 1e-10, (
+        f"padded-metric centres differ from grid centres by {sep.max():.2e} rad "
+        f"— metrics/lon-lat centre inconsistency")
 from legoesm.grids.halo import compute_padded_half_metrics  # noqa: E402
 from legoesm import constants  # noqa: E402
 
@@ -57,12 +79,16 @@ def test_cell_areas_close_sphere_and_positive():
     assert dev < 1e-9, f"gnomonic_ed areas not face-uniform ({dev:.2e})"
 
 
-def test_face_independent_broadcast():
+def test_face_uniform():
+    """hx is face-uniform to float precision (cube symmetry).  Per-face
+    computation (defn-A centres, iter67) makes faces equal to ~1e-12 rather
+    than byte-identical (the per-face remap rot90 reindexes), which is correct."""
     n, halo = 16, 1
     hx, _ = compute_padded_half_metrics_ed(n, R, halo=halo)
     hx = np.asarray(hx)
     for f in range(1, 6):
-        assert np.array_equal(hx[f], hx[0]), "half-metrics not face-uniform"
+        assert np.allclose(hx[f], hx[0], rtol=1e-9, atol=1e-3), (
+            "half-metrics not face-uniform")
 
 
 def test_scale_matches_equiangular_half_metric():
