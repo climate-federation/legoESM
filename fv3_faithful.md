@@ -89,6 +89,20 @@ at vertices". CAVEAT: zero-dissip also NaNs ⇒ the growth mode is INVISCID, so 
 amplification path is NOT it; the corner VORTICITY halo (feeds fy_vort in the u_d update every
 step regardless of dissipation) is the live suspect. NEXT: fix `_corner_vorticity` cube-vertex
 halo mode='edge'→cross-face (FV3 fill_corners), retest FB W2 stability.
+**iter78 — DUOGRID is the right FB config (8.5× stability gain); growth mode CONFIRMED corner-halo.**
+The growing mode IS vertex-seeded (FB+Phase4 zero-dissip: vertex-max 2-3× interior, argmax at the
+cube corners f5(35,35)/f3(0,1), grows exponentially outward). The non-duogrid `_corner_vorticity`
+path (fv3_sw_core.py:1234-1254) uses `mode='edge'`+linear-extrap halos for fx/fy and the
+corner-correction (sw_core.F90:397-400) then adds the WRONG (edge-extrap, not cross-face) fy at the
+4 corners → spurious vertex vorticity → the inviscid growing mode. FV3 OPERATIONAL uses the duogrid
+(ng=3) cross-face halos; the non-duogrid is a fallback. RETEST with `create_cubed_sphere(use_duogrid=
+True, duogrid_ng=3)`: FB+Phase4+duogrid W2 C36 survives DAY 1 (max|u_d|=50, was NaN@47≈4h) and NaNs
+at day2 ≈33.6h — 8.5× longer. ⇒ the earlier "FB unstable" tests used the WRONG (non-duogrid) config;
+the FB chain must run on the FV3-operational duogrid. RESIDUAL: day1 max|u_d|=50 (vs physical 38),
+W2 err 2.5e-2, day2 NaN — a slower residual growth remains (candidates: the duogrid `_corner_vorticity`
+dxc/dyc edge-mode METRIC halo lines 1209-1215 "O(dx) error"; Phase4 a2b corner PGF in the duogrid
+context; or the d2a2c duogrid path). NEXT: drive the residual down — check the duogrid metric-halo +
+Phase4-a2b consistency; consider the ed grid + duogrid together.
 
 
 ## GRID gap → gnomonic_ed wiring (LIKELY fixes the C96 eigenmode; iter62-69)
