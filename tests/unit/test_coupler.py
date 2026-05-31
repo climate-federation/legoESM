@@ -340,11 +340,16 @@ def test_slab_ocean_Q_freeze_diagnostic_populated():
 # ==============================================================================
 
 def test_sea_ice_freshwater_flux_balances_ice_mass_change():
-    """Sea-ice TileResponse.freshwater_flux must equal -rho_ice·dh/dt
-    minus the sublimation contribution (audit F4).
+    """Sea-ice TileResponse.freshwater_flux must equal the PER-GRID-CELL
+    ice melt/freeze mass rate -rho_ice·(dh/dt - sublimation)·conc (audit
+    F4 / F11).
 
-    With realistic warm forcing the ice is melting → freshwater INTO
-    ocean → flux > 0.
+    F11: the response is per-grid-cell (per-water-area), so the per-ice-area
+    thickness-rate balance is weighted by the ice fraction ``conc``; the
+    coupler's blend_tiles then applies ``f_water``.  With realistic warm
+    forcing the ice melts → freshwater INTO ocean → flux > 0.  This scenario
+    has no lead freeze and no over-ablation clamp, so the per-process budget
+    reduces exactly to the lumped thickness-rate balance times ``conc``.
     """
     from legoesm import constants
     state = _make_ice_state(h=0.5, conc=0.9, T=constants.T_freeze_ocean)
@@ -357,20 +362,90 @@ def test_sea_ice_freshwater_flux_balances_ice_mass_change():
         config, U_min=1.0, dt=DT,
     )
 
-    # Total ice mass change rate
-    dh_dt = (new_state.h_ice.data - state.h_ice.data) / DT
-    # Sublimation contribution (over ice cells only)
+    # Per-grid-cell ice VOLUME change rate.  Under the volume-based V=h*A
+    # update (#28) thermodynamic melt/growth changes BOTH h and conc, so the
+    # per-cell ice-mass budget uses d(h*conc)/dt, not conc*dh/dt.
+    dV_dt = (new_state.h_ice.data * new_state.concentration.data
+             - state.h_ice.data * state.concentration.data) / DT
+    # Sublimation thickness rate (signed; <0 for ice->atmosphere), over ice.
     sublim_rate = jnp.where(
         state.h_ice.data > config.h_ice_min,
         -resp.lhflx / (config.rho_ice * constants.L_s),
         0.0,
     )
-    expected_fw = -config.rho_ice * (dh_dt - sublim_rate)
+    # Freshwater to ocean = -(per-cell volume change going to/from the OCEAN):
+    # the total volume change minus the sublimation part (which leaves to the
+    # ATMOSPHERE, not the ocean).  Sublimation acts over the ice fraction.
+    expected_fw = -config.rho_ice * (dV_dt - sublim_rate * state.concentration.data)
     assert jnp.allclose(resp.freshwater_flux, expected_fw, rtol=1e-6, atol=1e-12)
     # Sanity: ice melting should yield positive freshwater into ocean
     assert float(jnp.mean(resp.freshwater_flux)) > 0.0, (
         "Warm-forcing scenario should melt ice → freshwater_flux > 0"
     )
+
+
+def test_sea_ice_freshwater_flux_balances_under_ablation_clamp():
+    """When the over-ablation cap fires (the per-ice-area removal demand would
+    exceed the available ice h/dt), the SAME capped process increments drive
+    BOTH the prognostic volume and the ocean-exchange diagnostics, so the
+    per-cell ice-mass budget still closes exactly (#28, codex).
+
+    Thin ice (2 cm) over a strongly super-freezing ocean for a full day: the
+    basal-melt demand alone (F_ocean/(rho*L_f)) far exceeds h/dt, forcing the
+    removal cap.  Previously the cap scaled only the returned diagnostics while
+    h advanced on the uncapped rate, so the reported freshwater no longer
+    matched d(h*conc)/dt in this branch.  (A cap that fires while basal GROWTH
+    is active is not physically reachable in a single column: basal growth
+    needs a sub-freezing skin, which also suppresses surface melt; the cap is
+    only reached under strong melt, which is what this exercises.)
+
+    Also verifies the OTHER coupled channels stay consistent in the clamp
+    branch: total water mass closes across ice + ocean + atmosphere, and the
+    ocean heat extraction is bounded in [0, F_ocean*conc] (the turbulent flux
+    operates only over the survived fraction of the step) (#28, codex).
+    """
+    from legoesm import constants
+    h0, conc0, dt = 0.02, 0.9, 86400.0
+    state = _make_ice_state(h=h0, conc=conc0, T=constants.T_freeze_ocean)
+    # Dry air (q_lowest << saturation over melting ice) so the latent flux is
+    # SUBLIMATION (atmosphere mass sink), exercising the surface_mass_flux cap.
+    forcing = _make_forcing(T_lowest=290.0, sw=600.0, lw=400.0)._replace(
+        q_lowest=jnp.full(SHAPE, 1e-4),
+    )
+    config = SeaIceConfig()
+    sst_val = 282.0
+    ocean_sst = jnp.full(SHAPE, sst_val)
+
+    new_state, resp = step_sea_ice(
+        state, forcing, ocean_sst, jnp.zeros(SHAPE), jnp.zeros(SHAPE),
+        config, U_min=1.0, dt=dt,
+    )
+
+    # Confirm the clamp regime: the UNCAPPED basal-melt thickness over the step
+    # already exceeds the 2 cm of ice present, so the removal cap MUST fire.
+    F_ocean = config.ocean_heat_transfer_coeff * (sst_val - constants.T_freeze_ocean)
+    basal_melt_thickness = F_ocean / (config.rho_ice * config.L_f) * dt
+    assert basal_melt_thickness > h0, (
+        "scenario must drive removal past h/dt to exercise the ablation clamp"
+    )
+    # TOTAL water closure across ice + ocean + atmosphere: the per-cell ice mass
+    # change equals the freshwater sent to the ocean plus the (realized, capped)
+    # sublimation mass sent to the atmosphere.  Both freshwater_flux and
+    # surface_mass_flux are PER-GRID-CELL (already weighted by the ice fraction),
+    # so no extra *conc.  Machine-exact since both reuse the capped increments.
+    dV_dt = (new_state.h_ice.data * new_state.concentration.data
+             - state.h_ice.data * state.concentration.data) / dt
+    water_residual = (config.rho_ice * dV_dt + resp.freshwater_flux
+                      + resp.surface_mass_flux)
+    assert float(jnp.max(jnp.abs(water_residual))) < 1e-9, (
+        f"ice+ocean+atmosphere water not conserved in clamp: "
+        f"max |resid| = {float(jnp.max(jnp.abs(water_residual))):.3e}"
+    )
+    # Ocean heat extraction stays in [0, F_ocean*conc]: the basal turbulent flux
+    # is scaled by the survived fraction, NOT reported in full while the state
+    # only absorbed the capped melt (the pre-fix over-extraction bug).
+    assert jnp.all(resp.ocean_heat_extraction >= -1e-9)
+    assert jnp.all(resp.ocean_heat_extraction <= F_ocean * conc0 + 1e-6)
 
 
 def test_sea_ice_ocean_heat_extraction_positive_under_warm_ocean():
@@ -398,8 +473,10 @@ def test_sea_ice_ocean_heat_extraction_positive_under_warm_ocean():
 
 def test_sea_ice_ocean_stress_opposes_ocean_ice_drag():
     """Sea-ice TileResponse.ocean_stress_x/y is the negative of
-    rho_ocean·C_oi·|U_w − U_i|·(U_w − U_i), weighted by concentration
-    (audit F9).
+    rho_ocean·C_oi·|U_w − U_i|·(U_w − U_i), returned PER-ICE-TILE (no
+    concentration factor).  The coupler's blend_tiles applies the single
+    area weight f_ice = f_water·conc; the old ``* conc`` here double-counted
+    the ice fraction (audit F9 / F11).
     """
     state = _make_ice_state(h=2.0, conc=0.8, T=265.0)
     # Use _make_forcing default winds (u=5, v=-3) — strong enough to
@@ -431,7 +508,8 @@ def test_sea_ice_ocean_stress_opposes_ocean_ice_drag():
     dv_oi = -v_ice_expected
     speed_oi = float(jnp.sqrt(du_oi ** 2 + dv_oi ** 2 + 1e-10))
     tau_oi_x = config.rho_ocean_ref * config.drag_ocean * speed_oi * du_oi
-    expected_stress_x = -tau_oi_x * 0.8  # weighted by concentration
+    # Per-ice-tile (no concentration factor): blend_tiles applies f_ice.
+    expected_stress_x = -tau_oi_x
 
     assert jnp.allclose(resp.ocean_stress_x, expected_stress_x, rtol=1e-2)
     # Wind is eastward → ice moves east → ocean→ice drag pulls ice
@@ -441,9 +519,14 @@ def test_sea_ice_ocean_stress_opposes_ocean_ice_drag():
 
 
 def test_sea_ice_surface_mass_flux_equals_lhflx_over_Ls():
-    """Sea-ice TileResponse.surface_mass_flux = lhflx / L_s exactly
-    (audit F3 — phase-aware mass flux uses sublimation latent heat
-    over ice).
+    """Sea-ice TileResponse.surface_mass_flux = (lhflx / L_s) * conc in the
+    no-clamp regime (audit F3 / #28 — phase-aware mass flux uses sublimation
+    latent heat over ice).
+
+    The sublimation mass is now returned PER-GRID-CELL (weighted by the input
+    ice fraction) so blend_tiles weights it by f_water and the atmosphere water
+    survives terminal melt-out.  Thick ice here => no over-ablation cap, so the
+    realized mass reduces exactly to lhflx/L_s * conc.
     """
     from legoesm import constants
     state = _make_ice_state(h=1.0, conc=0.7, T=263.0)
@@ -456,8 +539,93 @@ def test_sea_ice_surface_mass_flux_equals_lhflx_over_Ls():
         config, U_min=1.0, dt=DT,
     )
 
-    expected = resp.lhflx / constants.L_s
+    expected = resp.lhflx / constants.L_s * state.concentration.data
     assert jnp.allclose(resp.surface_mass_flux, expected, rtol=1e-12)
+
+
+def test_sea_ice_atmosphere_mass_survives_meltout_through_blend():
+    """Coupler-level (#28, F11-analogue): the ice's realized sublimation mass is
+    returned PER-GRID-CELL and blend_tiles weights it by f_water, so at terminal
+    melt-out (post-step f_ice -> 0) the FULL ice->atmosphere water pulse is still
+    delivered to the atmosphere instead of being zeroed by the vanished ice
+    fraction.  This is the coupled closure Codex flagged the slab test did not
+    exercise.
+    """
+    from legoesm import constants
+    from legoesm.coupler.tile_fractions import compute_tile_fractions, blend_tiles
+    # Dry, strongly-melting thin ice over a warm ocean for a day -> melt-out.
+    state = _make_ice_state(h=0.02, conc=0.9, T=constants.T_freeze_ocean)
+    forcing = _make_forcing(T_lowest=290.0, sw=600.0, lw=400.0)._replace(
+        q_lowest=jnp.full(SHAPE, 1e-4),
+    )
+    config = SeaIceConfig()
+    new_state, ice_resp = step_sea_ice(
+        state, forcing, jnp.full(SHAPE, 282.0), jnp.zeros(SHAPE), jnp.zeros(SHAPE),
+        config, U_min=1.0, dt=86400.0,
+    )
+    # The cell melted out: post-step ice fraction ~ 0.
+    assert float(jnp.max(new_state.concentration.data)) < 1e-6
+    # The ice DID lose water to the atmosphere this step (per-cell, nonzero).
+    assert float(jnp.max(jnp.abs(ice_resp.surface_mass_flux))) > 0.0
+
+    z = jnp.zeros(SHAPE)
+    zero = TileResponse(
+        T_surface=z, albedo=z, emissivity=z, z0=z, q_surface=z, shflx=z,
+        lhflx=z, tau_x=z, tau_y=z, lw_up=z, u_ocean_sfc=z, v_ocean_sfc=z,
+        co2_flux=z, freshwater_flux=z, ocean_heat_extraction=z,
+        ocean_stress_x=z, ocean_stress_y=z, surface_mass_flux=z, salt_flux=z,
+    )
+    tcfg = TileConfig(f_land=z, f_lake=z)  # pure-water cell: f_water = 1
+    # Tile fractions from the POST-step concentration (what make_coupler uses).
+    fracs = compute_tile_fractions(tcfg, new_state.concentration.data)
+    blended = blend_tiles(zero, ice_resp, zero, zero, fracs)
+    f_water = fracs.f_ocean + fracs.f_ice
+    # Delivered atmosphere mass = f_water * (per-cell ice sublimation), NOT zero,
+    # even though f_ice -> 0 at melt-out.
+    assert jnp.allclose(blended.surface_mass_flux,
+                        f_water * ice_resp.surface_mass_flux,
+                        rtol=1e-7, atol=1e-12)
+    assert float(jnp.max(jnp.abs(blended.surface_mass_flux))) > 0.0
+
+
+def test_sea_ice_latent_energy_pairs_with_moisture_and_deposition_debits():
+    """#28 finding 2 + 1: the ice latent ENERGY delivered to the atmosphere
+    equals L_s times the ice moisture MASS on the same f_water basis, and
+    DEPOSITION (lhflx < 0) debits the atmosphere with a negative moisture mass
+    (the state gains water).  Ice-only blend so the pairing is exact.
+    """
+    from legoesm import constants
+    from legoesm.coupler.tile_fractions import compute_tile_fractions, blend_tiles
+    # Cold ice + humid air => q_lowest above the (tiny) saturation over cold
+    # ice => deposition (lhflx < 0, vapor -> ice).
+    state = _make_ice_state(h=1.0, conc=0.6, T=250.0)
+    forcing = _make_forcing(T_lowest=263.0, sw=50.0, lw=240.0)._replace(
+        q_lowest=jnp.full(SHAPE, 2e-3),
+    )
+    config = SeaIceConfig()
+    new_state, ice_resp = step_sea_ice(
+        state, forcing, jnp.full(SHAPE, constants.T_freeze_ocean),
+        jnp.zeros(SHAPE), jnp.zeros(SHAPE), config, U_min=1.0, dt=DT,
+    )
+    # Deposition: ice gains water from the atmosphere => negative surface mass
+    # flux (atmosphere -> surface), so the atmosphere IS debited (not zero).
+    assert float(jnp.min(ice_resp.surface_mass_flux)) < 0.0
+
+    z = jnp.zeros(SHAPE)
+    zero = TileResponse(
+        T_surface=z, albedo=z, emissivity=z, z0=z, q_surface=z, shflx=z,
+        lhflx=z, tau_x=z, tau_y=z, lw_up=z, u_ocean_sfc=z, v_ocean_sfc=z,
+        co2_flux=z, freshwater_flux=z, ocean_heat_extraction=z,
+        ocean_stress_x=z, ocean_stress_y=z, surface_mass_flux=z, salt_flux=z,
+    )
+    tcfg = TileConfig(f_land=z, f_lake=z)
+    fracs = compute_tile_fractions(tcfg, new_state.concentration.data)
+    blended = blend_tiles(zero, ice_resp, zero, zero, fracs)
+    # Moisture-energy pairing: the blended latent ENERGY is exactly L_s times
+    # the blended moisture MASS (ice-only cell), so the atmosphere never sees
+    # vapor without its latent energy or vice-versa.
+    assert jnp.allclose(blended.lhflx, constants.L_s * blended.surface_mass_flux,
+                        rtol=1e-10, atol=1e-12)
 
 
 # ==============================================================================

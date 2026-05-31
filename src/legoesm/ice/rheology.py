@@ -201,26 +201,41 @@ def _strain_rates_latlon(
     v_ice: jnp.ndarray,
     grid: LatLonGrid,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Strain rate tensor on a lat-lon A-grid (local-Cartesian approximation).
+    """Strain rate tensor on a lat-lon A-grid with spherical metric (F10).
 
     Centered finite differences in (x = r·cosθ·dλ, y = r·dθ)
     coordinates.  ``grid.dx`` is the 2-cell zonal distance
     ``2 · r · cosθ · dλ`` and ``grid.dy`` is the 2-cell meridional
-    distance ``2 · r · dθ``, so the centered differences
+    distance ``2 · r · dθ``, so the centered differences give the
+    ``(1/h)∂/∂`` velocity-gradient terms
 
-        eps_11 = (u[i, j+1] - u[i, j-1]) / dx(i)
-        eps_22 = (v[i+1, j] - v[i-1, j]) / dy(i)
+        du_dx = (u[i, j+1] - u[i, j-1]) / dx(i)  = (1/(r cosθ)) ∂u/∂λ
+        dv_dy = (v[i+1, j] - v[i-1, j]) / dy(i)  = (1/r) ∂v/∂θ        ...
 
-    give the strain rate to leading order in the local-Cartesian
-    sense.  Full spherical-metric correction (``tanθ/r · v``) is
-    omitted — acceptable for mid- to low-latitude ice; high-
-    latitude integrations should keep using the cubed-sphere
-    backend or wait for the tripolar fold + metric terms.
+    The rate-of-strain tensor on a sphere (orthogonal curvilinear coords
+    h1 = r cosθ, h2 = r) additionally carries spherical-METRIC terms from the
+    Christoffel symbols (``∂h1/∂θ = -r sinθ``):
 
-    Polar rows: the halo padder folds across the pole; centered
-    differences then see physical neighbours.  The Coriolis /
-    drift code already treats pole columns as solid wall in the
-    coupler, so additional masking is not required here.
+        eps_11 = du_dx - (v · tanθ) / r
+        eps_22 = dv_dy                       (no metric term; ∂h2/∂λ = 0)
+        eps_12 = 0.5 (du_dy + dv_dx) + (u · tanθ) / (2 r)
+
+    These were previously omitted (valid only at low latitude); including them
+    makes divergence / shear correct away from the equator (F10).
+
+    The metric coefficient uses the EXACT ``tanθ`` (MITgcm SEAICE
+    ``k2 = -tanφ/a`` convention) on every cell-center row — it is NOT clipped,
+    so 1° and finer grids (centers at ±89.5° and beyond) get the correct
+    polar value rather than a capped one.  ``create_latlon_grid`` places cell
+    centers strictly inside the poles, so ``tanθ`` is finite; ``step_sea_ice``
+    rejects (with a clear error) any lat-lon grid whose rows reach the exact
+    pole (``cosθ → 0``) under EVP/mEVP.  NOTE: this metric correction does not
+    resolve the missing tripolar fold; very-high-latitude lat-lon EVP should
+    still be cross-checked against the cubed-sphere / MPAS backends (visual
+    ice-drift verification recommended; see CLAUDE.md spatial-artifact guidance).
+
+    Polar rows: the halo padder folds across the pole; centered differences
+    then see physical neighbours.
 
     Parameters
     ----------
@@ -242,9 +257,19 @@ def _strain_rates_latlon(
     dv_dx = (v_pad[1:-1, 2:] - v_pad[1:-1, :-2]) / dx
     dv_dy = (v_pad[2:, 1:-1] - v_pad[:-2, 1:-1]) / dy
 
-    eps_11 = du_dx
+    # Spherical-metric coefficient tanθ / r = sinθ / (r cosθ).  Computed via
+    # sin/cos with |cosθ| floored at 1e-12 ONLY at the exact pole: real
+    # cell-centered grids have cosθ >= ~0.009 even at 89.5°, so the floor never
+    # binds and the coefficient is the EXACT tanθ; it only prevents inf/NaN if a
+    # degenerate grid places a row exactly at ±90° (a NaN-safety floor, not a
+    # tunable, and NOT the rejected hard clip — it does not cap real-grid rows).
+    cos_lat = jnp.cos(grid.lat)
+    cos_safe = jnp.where(jnp.abs(cos_lat) < 1e-12, 1e-12, cos_lat)
+    metric = (jnp.sin(grid.lat) / cos_safe / grid.radius)[:, None]   # (n_lat, 1)
+
+    eps_11 = du_dx - v_ice * metric
     eps_22 = dv_dy
-    eps_12 = 0.5 * (du_dy + dv_dx)
+    eps_12 = 0.5 * (du_dy + dv_dx) + 0.5 * u_ice * metric
     return eps_11, eps_22, eps_12
 
 
@@ -397,6 +422,20 @@ def evp_stress_update(
     formulation used ``E_factor = 1 / (2 · T_evp)``, which omits the
     ``N_evp`` factor and over-relaxes by O(N_evp×) per subcycle —
     defeating the elastic regularisation that keeps EVP stable.
+
+    **Per-dynamic-step relaxation (Hunke & Dukowicz E_evp behaviour).**
+    Accumulating this subcycle map over ``N_evp`` subcycles gives a
+    total relaxation of ``1 − (1 + E_factor)**(-N_evp) ≈ 1 − exp(−1 /
+    (2·T_evp))`` toward the VP target — which is *independent of*
+    ``N_evp`` (more subcycles integrate the SAME elastic-damping ODE
+    more accurately, they do not relax further).  With the CICE default
+    ``T_evp = 0.36`` this is ≈ 0.75 per dynamic step, so the stress does
+    NOT reach the full VP/plastic solution in a single ``evp_solver``
+    call: it converges to ``σ = −P/2·I`` (rest state) over several
+    dynamic steps as ``σ`` is carried forward.  This is the intended
+    elastic-memory design, not under-convergence.  ``T_evp`` is the
+    damping ratio ``T_damp / dt_dyn``; smaller ``T_evp`` → faster
+    per-step relaxation toward plastic but stiffer elastic waves.
 
     Parameters
     ----------

@@ -547,13 +547,21 @@ def run_evp_compression(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, s
     h = jnp.ones(shape)
     A = jnp.full(shape, 0.9)
 
-    _, _, s11, s22, s12 = evp_solver(
-        jnp.zeros(shape), jnp.zeros(shape), s0, s0, s0,
-        h_ice=h, concentration=A,
-        wind_u=jnp.zeros(shape), wind_v=jnp.zeros(shape),
-        ocean_u=jnp.zeros(shape), ocean_v=jnp.zeros(shape),
-        grid=grid, dt=3600.0, N_evp=50,
-    )
+    # EVP relaxes ~1 - exp(-1/(2*T_evp)) ~ 0.75 of the VP target per
+    # DYNAMIC step (T_evp=0.36), converging to -P/2 over several steps as
+    # sigma is carried forward — it does NOT reach -P/2 in a single call.
+    # Iterate dynamic steps (matches the F-EVP validation-test fix).
+    u = jnp.zeros(shape)
+    v = jnp.zeros(shape)
+    s11 = s22 = s12 = s0
+    for _ in range(6):
+        u, v, s11, s22, s12 = evp_solver(
+            u, v, s11, s22, s12,
+            h_ice=h, concentration=A,
+            wind_u=jnp.zeros(shape), wind_v=jnp.zeros(shape),
+            ocean_u=jnp.zeros(shape), ocean_v=jnp.zeros(shape),
+            grid=grid, dt=3600.0, N_evp=50,
+        )
 
     P = ice_strength(h[0, 0, 0], A[0, 0, 0])
     target = float(-P / 2)
@@ -1055,15 +1063,16 @@ def run_multi_cat_10_steps(tc: TestCase, outdir: Path, quick: bool) -> tuple[str
     h_mc, T_mc, a_mc = distribute_to_categories(
         jnp.full(shape, 1.5), jnp.full(shape, 255.0), jnp.full(shape, 0.7), 5)
 
-    state = DynamicSeaIceState(
+    # Build a fully-formed 5-category state (all 12 fields incl. the
+    # snow / brine / pond tracers) via the canonical initializer, then
+    # overwrite h/T/conc with the distributed multi-category arrays.
+    # Hand-constructing DynamicSeaIceState here would omit the new-physics
+    # fields and raise a TypeError (state grew; this harness had not).
+    state = init_dynamic_ice_state(h_mc.shape, n_categories=5)
+    state = state._replace(
         h_ice=Field(data=h_mc, name="h_ice", dims=("face", "x", "y", "cat"), units="m"),
         T_ice=Field(data=T_mc, name="T_ice", dims=("face", "x", "y", "cat"), units="K"),
         concentration=Field(data=a_mc, name="conc", dims=("face", "x", "y", "cat"), units="1"),
-        u_ice=Field(data=jnp.zeros(shape), name="u_ice", dims=dims, units="m/s"),
-        v_ice=Field(data=jnp.zeros(shape), name="v_ice", dims=dims, units="m/s"),
-        sigma_11=Field(data=jnp.zeros(shape), name="s11", dims=dims, units="N/m"),
-        sigma_22=Field(data=jnp.zeros(shape), name="s22", dims=dims, units="N/m"),
-        sigma_12=Field(data=jnp.zeros(shape), name="s12", dims=dims, units="N/m"),
     )
 
     forcing = _make_forcing(shape, dims)
