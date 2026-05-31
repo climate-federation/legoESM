@@ -142,9 +142,21 @@ ASPECT 1.40 (equiangular-like), not gnomonic_ed's 1.06. gnomonic_ed uses MIRROR-
 S-edge (pp2) and W-edge (pp3) distributions on the −1/√3 face (not the same coord on both
 axes), so it's genuinely non-separable-by-a-single-coord. Wiring must use the full
 gnomonic_ed construction extended into the halo (`make_fv3_native_grid` extended + mirror),
-NOT a coord swap. First brick `_compute_gnomonic_ed_lonlat` (centers, make_fv3_native_grid
-+ cell_center2) done+tested. Next brick = extended-construction builder for the padded
-metrics.
+NOT a coord swap. **WIRING PROGRESS (validated bricks, equiangular default untouched):**
+- ✅ `_compute_gnomonic_ed_lonlat` (centers via make_fv3_native_grid+cell_center2).
+- ✅ `_gnomonic_ed_construct(theta_w, alpha)` — generalized halo-extensible face-2 core,
+  bit-matches gnomonic_ed; mirror diagonal PINNED to in-domain ±α so the interior is
+  invariant to halo extension (verify-first fix).
+**REMAINING CRUX = the padded-halo METRICS (`compute_padded_angle`/`half_metrics` for
+gnomonic_ed).** This is intricate: the gnomonic_ed pipeline has MULTIPLE extent-referencing
+ops that don't extend naively — the mirror diagonal (fixed ✓), but ALSO `symm_ed`'s
+midplane PAIRING (i,im−i) and `mirror_grid_faces`' per-face rotation. Two faithful routes,
+both substantial foundational work: (a) fixed-reference extension throughout (extend each
+edge with pinned in-domain references + symmetrize in-domain-only), or (b) TRUE cross-face
+corner-halo (halo-exchange the 6-face corners via cube corner-topology, then compute
+metrics on the halo-extended corner grid = what FV3 does). NOT a safe single loop-brick;
+needs dedicated focus. Verify-first has rejected 2 shortcuts (separable swap; naive
+theta-extension) — the depth is real.
 
 ## VERIFICATION
 - SW 16/16 all grids ≤1 cell aligned. Full fast cube atm dynamical suite PASS + NH
