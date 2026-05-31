@@ -19,17 +19,11 @@ from collections.abc import Mapping
 from typing import TypeAlias
 
 import jax
-import jax.numpy as jnp
 from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.radiation.rrtmgp import interpolation
 from legoesm.atmosphere.physics.radiation.rrtmgp import kernel_ops
 
 Array: TypeAlias = jax.Array
-
-
-def _shift_up(f: Array) -> Array:
-  """output_i = f_{i-1}."""
-  return kernel_ops.shift_from_minus(f, 2)
 
 
 def _shift_down(f: Array) -> Array:

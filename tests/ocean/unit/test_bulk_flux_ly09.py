@@ -320,3 +320,67 @@ def test_compute_most_fluxes_omip_path_differentiable():
     grads = jax.grad(loss)(sst)
     assert bool(jnp.all(jnp.isfinite(grads))), "Non-finite gradients"
     assert not bool(jnp.allclose(grads, 0.0)), "Zero gradients (broken AD)"
+
+
+@pytest.mark.parametrize("scheme", ["coare3", "large_yeager"])
+def test_compute_most_fluxes_neutral_gradient_finite_and_fd(scheme):
+    """Gradients must be finite at exact neutral and match FD off neutral.
+
+    With ``T_sfc == T_atm`` and ``q_sfc == q_atm`` the virtual-temperature
+    scale θ_v* is exactly zero, so the inverse Obukhov length 1/L = 0.
+
+    Regression guarded here: forming ``L = −u*²T_v/(κgθ_v*)`` and then z/L
+    drives a 0/0 at neutral.  Differentiating the dead branch of a
+    neutral-limit ``where`` injected ``0·inf = NaN`` (poisoning the whole
+    batch gradient); masking the divide with a ±1e6 L sentinel instead
+    flattened dζ/dθ_v* to zero across a narrow neutral band.  Carrying the
+    reciprocal 1/L = −κgθ_v*/(u*²T_v) directly is singularity-free
+    (denominator u*²T_v > 0 always) and yields the true finite neutral-limit
+    derivative.
+
+    Two checks:
+
+    1. *Exact* neutral — gradient is finite (the NaN regression).  Central
+       finite differences are deliberately **not** compared here: the
+       Businger-Dyer ψ functions have a legitimate slope kink at ζ = 0
+       (ψ_m ≈ −4ζ unstable vs −5ζ stable), and the Large-Yeager Stanton
+       number steps (32.7e-3 → 18.0e-3) across neutral, so the one-sided AD
+       derivative cannot equal a kink-straddling central difference.
+    2. *Off* neutral (stable and unstable sides, where ψ and the LY
+       coefficients are smooth) — jax.grad must equal central FD tightly,
+       confirming the reformulation preserves the correct sensitivity in the
+       differentiable region (no plateau, no sign error).
+    """
+    x64 = bool(jax.config.read("jax_enable_x64"))
+    rtol, atol = (1e-5, 1e-7) if x64 else (3e-2, 1e-3)
+
+    def loss(T_sfc):  # scalar in, scalar out
+        u = jnp.asarray(5.0)
+        v = jnp.asarray(0.0)
+        T_atm = jnp.asarray(290.0)
+        q_atm = jnp.asarray(0.01)
+        q_sfc = jnp.asarray(0.01)  # == q_atm ⇒ dq = 0
+        rho = jnp.asarray(1.2)
+        tau_x, tau_y, sh, lh, ustar = compute_most_fluxes(
+            u, v, T_atm, q_atm, T_sfc, q_sfc, rho, scheme=scheme, n_iter=8,
+        )
+        return sh + lh + tau_x + tau_y + ustar
+
+    grad_fn = jax.grad(loss)
+
+    # 1. Exact neutral: finite gradient and forward value (NaN regression).
+    g_neutral = grad_fn(jnp.asarray(290.0))
+    assert bool(jnp.isfinite(loss(jnp.asarray(290.0)))), "non-finite value at neutral"
+    assert bool(jnp.isfinite(g_neutral)), (
+        f"non-finite gradient at exact neutral ({scheme}): {g_neutral}"
+    )
+
+    # 2. Off neutral (stable 288 K, unstable 292 K): AD == central FD.
+    h = 1e-3
+    for T0 in (288.0, 292.0):
+        T0 = jnp.asarray(T0)
+        g = grad_fn(T0)
+        fd = (loss(T0 + h) - loss(T0 - h)) / (2.0 * h)
+        assert bool(jnp.isclose(g, fd, rtol=rtol, atol=atol)), (
+            f"grad {float(g):.6g} != FD {float(fd):.6g} at T_sfc={float(T0)} ({scheme})"
+        )

@@ -427,7 +427,13 @@ def make_hybrid_step_unified(
             held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
             held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
         ])
-        trad_out, held_new = traditional_step_unified(*trad_args, **kwargs)
+        _trad = traditional_step_unified(*trad_args, **kwargs)
+        trad_out, held_new = _trad[0], _trad[1]
+        # The traditional PhysicsPipeline step returns a 3rd value (the
+        # slab-land skin temperature, #325); propagate it so a neural-
+        # correction run with an active land tile still evolves T_land.
+        # Older 2-tuple traditional steps leave it None (land inert).
+        _trad_T_land = _trad[2] if len(_trad) > 2 else None
 
         # Neural correction
         neural_out, _ = neural_step(*trad_args)
@@ -452,7 +458,8 @@ def make_hybrid_step_unified(
             )
         )
 
-        # Held radiation comes from the traditional branch
-        return blended, held_new
+        # Held radiation comes from the traditional branch; pass the
+        # slab-land skin temperature through unchanged (#325).
+        return blended, held_new, _trad_T_land
 
     return step_unified

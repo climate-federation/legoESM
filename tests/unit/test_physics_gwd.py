@@ -447,9 +447,19 @@ def _gwd_config_with_active_drag(scheme):
     Bumping ``h_topo`` to 10 km pushes ``tau_0`` above ``tau_sat`` near
     the model top, so the saturation scan deposits real drag and the
     differentiability tests exercise a non-trivial code path.
+
+    For Hines, the default per-level drag cap ``Fmax=0.1`` Pa binds at
+    this coarse (10-level) strong-shear column — the deposition pins at
+    the limiter, so it no longer responds to the Brunt-Vaisala frequency
+    ``N`` (hence ``T``) and ``dT_dt`` becomes T-independent (grad → 0).
+    Raising ``Fmax`` lets the Doppler-spread ``(sigma_grown^2 -
+    sigma_sat^2)`` term — which carries the temperature dependence via
+    ``sigma_sat = N / m_*`` — be the binding term again.  (On
+    operational many-level grids the per-level deposition is « 0.1 Pa,
+    so the production default does not bind.)
     """
     from legoesm.atmosphere.physics.gravity_wave_drag.config import (
-        LindzenConfig, McFarlaneConfig,
+        HinesConfig, LindzenConfig, McFarlaneConfig,
     )
     if scheme == "lindzen":
         return GravityWaveDragConfig(
@@ -460,6 +470,11 @@ def _gwd_config_with_active_drag(scheme):
         return GravityWaveDragConfig(
             scheme="mcfarlane",
             mcfarlane=McFarlaneConfig(h_topo=10_000.0),
+        )
+    if scheme == "hines":
+        return GravityWaveDragConfig(
+            scheme="hines",
+            hines=HinesConfig(Fmax=100.0),
         )
     return GravityWaveDragConfig(scheme=scheme)
 

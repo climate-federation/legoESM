@@ -65,6 +65,11 @@ def bulk_formula_surface_forcing(
         + (1.0 - cfg.emissivity) * cfg.LW_down
     )
 
+    _valid_bulk = ("constant", "coare3", "large_yeager")
+    if cfg.bulk_scheme not in _valid_bulk:
+        raise ValueError(
+            f"Unknown bulk_scheme {cfg.bulk_scheme!r}; expected one of {_valid_bulk}."
+        )
     if cfg.bulk_scheme in ("coare3", "large_yeager"):
         # Wind is zonal only (prescribed), zero meridional
         u_a = jnp.full_like(T_s, cfg.U_a, dtype=dtype)

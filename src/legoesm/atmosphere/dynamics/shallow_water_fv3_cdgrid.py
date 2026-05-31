@@ -50,7 +50,7 @@ from legoesm.grids.cubed_sphere_cdgrid import (
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
-from legoesm.core.conservation import _conservation_accumulator
+from legoesm.core.conservation import conservation_accumulator
 from legoesm.core.fv3_sw_core import (
     _d2a2c_vect,
     _d_sw5_corner_divergence,
@@ -755,7 +755,7 @@ class CDGridShallowWaterModel(IntegrationMixin):
         # cubed-sphere arrays leak ~N·eps noise into the anchor and
         # produced ~10^-7 spurious "mass drift" in W5.  Matches the
         # cubed-sphere PE ``_batch_global_area_sums`` precision.
-        _acc = _conservation_accumulator()
+        _acc = conservation_accumulator()
         self._target_mass = jnp.sum(
             state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
         )
@@ -770,7 +770,7 @@ class CDGridShallowWaterModel(IntegrationMixin):
 
     def compute_mass(self, state) -> jax.Array:
         """Global ``∫ h dA`` (fp64).  iter-21: API parity with PE / NH twins."""
-        _acc = _conservation_accumulator()
+        _acc = conservation_accumulator()
         return jnp.sum(
             state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
         )
@@ -1128,7 +1128,7 @@ class CDGridShallowWaterModel(IntegrationMixin):
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
             # iter-5: fp64 budget accumulator (see set_initial_mass).
-            acc = _conservation_accumulator()
+            acc = conservation_accumulator()
             area = self.cdgrid.base.area.astype(acc)
             total_area = jnp.sum(area)
             if self._target_mass is not None:
@@ -1234,7 +1234,7 @@ class FV3FBShallowWaterModel:
         # cubed-sphere arrays leak ~N·eps noise into the anchor and
         # produced ~10^-7 spurious "mass drift" in W5.  Matches the
         # cubed-sphere PE ``_batch_global_area_sums`` precision.
-        _acc = _conservation_accumulator()
+        _acc = conservation_accumulator()
         self._target_mass = jnp.sum(
             state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
         )
@@ -1253,7 +1253,7 @@ class FV3FBShallowWaterModel:
 
     def compute_mass(self, state) -> jax.Array:
         """Global ``∫ h dA`` (fp64).  iter-21: API parity with PE / NH twins."""
-        _acc = _conservation_accumulator()
+        _acc = conservation_accumulator()
         return jnp.sum(
             state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
         )
@@ -1303,7 +1303,7 @@ class FV3FBShallowWaterModel:
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
             # iter-5: fp64 budget accumulator (see set_initial_mass).
-            acc = _conservation_accumulator()
+            acc = conservation_accumulator()
             area = self.cdgrid.base.area.astype(acc)
             total_area = jnp.sum(area)
             if self._target_mass is not None:
@@ -1373,7 +1373,7 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
         # cubed-sphere arrays leak ~N·eps noise into the anchor and
         # produced ~10^-7 spurious "mass drift" in W5.  Matches the
         # cubed-sphere PE ``_batch_global_area_sums`` precision.
-        _acc = _conservation_accumulator()
+        _acc = conservation_accumulator()
         self._target_mass = jnp.sum(
             state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
         )
@@ -1392,7 +1392,7 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
 
     def compute_mass(self, state) -> jax.Array:
         """Global ``∫ h dA`` (fp64).  iter-21: API parity with PE / NH twins."""
-        _acc = _conservation_accumulator()
+        _acc = conservation_accumulator()
         return jnp.sum(
             state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
         )
@@ -1638,7 +1638,7 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
             # iter-5: fp64 budget accumulator (see set_initial_mass).
-            acc = _conservation_accumulator()
+            acc = conservation_accumulator()
             area = self.cdgrid.base.area.astype(acc)
             total_area = jnp.sum(area)
             if self._target_mass is not None:

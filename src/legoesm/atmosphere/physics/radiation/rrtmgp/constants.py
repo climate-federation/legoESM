@@ -25,9 +25,12 @@ from legoesm.constants import (
     R_d as R_D,
     R_v as R_V,
     c_pd as CP_D,
-    c_vd as CV_D,
-    c_pv as CP_V,
     M_dry as DRY_AIR_MOL_MASS,
     M_h2o as WATER_MOL_MASS,
     N_A as AVOGADRO,
 )
+# iter-47: dropped ``c_vd as CV_D`` and ``c_pv as CP_V`` re-exports.
+# Both were imported here but referenced nowhere in the rrtmgp
+# package after the iter-22 swirl_jatmos compute_heating_rate purge.
+# RRTMGP only needs CP_D (heating-rate conversion) and the molar
+# constants; CV_D / CP_V are for moist-thermo paths in the dycore.

@@ -109,28 +109,6 @@ def lookup_values_direct_indexing(vals, idx_list: Sequence[Array]) -> Array:
   return vals[tuple(idx_list)]
 
 
-def evaluate_weighted_lookup(
-    coeffs: Array,
-    weight_idx_list: Sequence[IndexAndWeight],
-) -> Array:
-  """Perform a lookup of coefficients and scales them with pointwise weights.
-
-  Args:
-    coeffs: The array of coefficients that will be gathered.
-    weight_idx_list: A list of `IndexAndWeight`s containing a pair of index
-      array and weight array for each axis of the `coeffs` array.
-
-  Returns:
-    An array of the same shape as an element of `weight_idx_list` containing
-    the gathered coefficients scaled by the pointwise product of corresponding
-    weights.
-  """
-  vals = lookup_values(coeffs, [idx.idx for idx in weight_idx_list])
-  vals *= jax.tree.reduce(jnp.multiply, [idx.weight for idx in weight_idx_list])
-
-  return vals
-
-
 def _one_hot_weighted(
     weighted_idx: IndexAndWeight, vals: Array, axis: int
 ) -> Array:
@@ -231,64 +209,19 @@ def create_linear_interpolant(
   return Interpolant(idx_weight_low, idx_weight_high)
 
 
-def interpolate_orig(
-    coeffs: Array,
-    interpolant_fns: collections.OrderedDict[str, Callable[..., Interpolant]],
-) -> Array:
-  """Interpolate coefficients linearly according to the `interpolant_fns`.
-
-  Original interpolation method.  See docstring of `interpolate` for more
-  detail.
-
-  Args:
-    coeffs: The array of coefficients of arbitrary shape whose values will be
-      interpolated.
-    interpolant_fns: An ordered dictionary of interpolant functions keyed by the
-      name of the variable they correspond to. There should be one for each axis
-      of `coeffs` and their order should match the order of the axes. Note that
-      they should be sorted in topological order (dependent indices appearing
-      after the indices they depend on). The axes of `coeffs` are assumed to
-      already conform to this ordering.
-
-  Returns:
-    An `Array` of the same shape as any of the index arrays, but with the
-    indices replaced by the interpolated coefficients.
-  """
-  # Initial pass-through over all interpolation variables to determine
-  # dependencies between them.
-  dependency_args = {
-      k: inspect.getfullargspec(v).args for k, v in interpolant_fns.items()
-  }
-  weighted_indices = [collections.OrderedDict()]
-  for varname, interpolant_fn in interpolant_fns.items():
-    for idx_weight_dict in list(weighted_indices):
-      interpolant_fn_kwargs = {
-          k: v
-          for k, v in idx_weight_dict.items()
-          if k in dependency_args[varname]
-      }
-      interpolant = interpolant_fn(**interpolant_fn_kwargs)
-      idx_weight_dict_low = idx_weight_dict.copy()
-      idx_weight_dict_low[varname] = interpolant.interp_low
-      weighted_indices.append(idx_weight_dict_low)
-      idx_weight_dict[varname] = interpolant.interp_high
-
-  weighted_vals = [
-      evaluate_weighted_lookup(coeffs, list(x.values()))
-      for x in weighted_indices
-  ]
-  weighted_sum = jax.tree.reduce(jnp.add, weighted_vals)
-  return weighted_sum
-
-
 def interpolate_optimized(
     coeffs: Array,
     interpolant_fns: collections.OrderedDict[str, Callable[..., Interpolant]],
 ) -> Array:
   """Interpolate coefficients linearly according to the `interpolant_fns`.
 
-  Optimized version of `interpolate_orig` that combines lookups.  See docstring
-  of `interpolate_orig` for more detail.
+  Multi-dimensional linear interpolation built from a chain of weighted
+  one-hot matmul operations encoded as a single `einsum` per partial
+  graph.  Topologically-ordered `interpolant_fns` declare both
+  independent and dependency-bearing variables; the latter cause the
+  graph to branch into separate upper/lower-endpoint subtrees that are
+  evaluated in parallel and reduced with `jax.tree.reduce(jnp.add, ...)`
+  at the end.
 
   Args:
     coeffs: The array of coefficients of arbitrary shape whose values will be

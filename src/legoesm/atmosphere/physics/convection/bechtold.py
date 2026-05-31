@@ -247,9 +247,13 @@ def bechtold_convection(
     if config.enable_stochastic and prng_key is not None:
         alpha_AR1 = jnp.exp(-dt / config.stochastic_decorrelation)
         innovation = jax.random.normal(prng_key, shape=(ncol,), dtype=T.dtype)
+        # Floor the AR(1) innovation-variance sqrt argument at a tiny positive
+        # rather than 0: as dt -> 0, alpha_AR1 -> 1 and ``1 - alpha^2 -> 0``,
+        # where sqrt'(0) = inf would give a NaN gradient w.r.t. dt /
+        # stochastic_decorrelation.  Forward is unchanged for any finite dt.
         conv_stoch_state_new = (
             alpha_AR1 * conv_stoch_state
-            + jnp.sqrt(jnp.maximum(1.0 - alpha_AR1 ** 2, 0.0)) * innovation
+            + jnp.sqrt(jnp.maximum(1.0 - alpha_AR1 ** 2, 1e-12)) * innovation
         )
         stoch_factor = 1.0 + config.stochastic_amplitude * conv_stoch_state_new
     else:

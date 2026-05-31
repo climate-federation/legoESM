@@ -61,18 +61,28 @@ class SurfaceLayerConfig(NamedTuple):
 
 
 class SmagorinskyConfig(NamedTuple):
-    """Configuration for constant-Km Smagorinsky turbulence.
+    """Configuration for the Smagorinsky–Lilly turbulence closure.
+
+    Deformation-based eddy viscosity
+    ``K_m = (C_s · l)^2 · |S| · √(max(0, 1 − Ri/Pr_t))`` with ``K_h =
+    K_m / Pr_t`` (Smagorinsky 1963; Lilly 1962 buoyancy correction).
 
     Fields
     ------
-    Km : float
-        Constant eddy diffusivity for momentum [m^2/s] (default 10.0).
+    C_s : float
+        Smagorinsky constant (dimensionless); atmospheric value ~0.1–0.25
+        (default 0.2).
+    l_mix_max : float
+        Blackadar (1962) asymptotic mixing length [m] used to build the
+        length scale ``l = κz / (1 + κz / l_mix_max)`` (default 100.0;
+        shared with the other turbulence closures).
     Pr_t : float
         Turbulent Prandtl number; Kh = Km / Pr_t (default 1.0).
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
-    Km: float = 10.0
+    C_s: float = 0.2
+    l_mix_max: float = 100.0
     Pr_t: float = 1.0
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
@@ -88,6 +98,16 @@ class LouisConfig(NamedTuple):
         Mixing length coefficient (default 0.4).
     Ri_crit : float
         Critical Richardson number (default 0.25).
+    b_heat_ratio : float
+        Ratio of the heat stability-function coefficient to the momentum
+        one, ``b_h / b_m`` (Louis, Tiedtke & Geleyn 1982 use 3b for heat
+        vs 2b for momentum ⇒ 1.5).  Gives a stratification-dependent
+        turbulent Prandtl number Pr_t = K_m/K_h (>1 stable, <1 unstable);
+        ``1.0`` recovers the Louis (1979) ``f_h = f_m`` simplification.
+        Momentum K_m is independent of this ratio (default 1.5).  Must be
+        positive: like ``b_louis``/``d_louis`` it appears in the stable
+        denominator ``1 + 2·b_h·Ri/√(1+d·Ri)``, which a negative value
+        could drive through zero (singular K_h).
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
@@ -98,6 +118,8 @@ class LouisConfig(NamedTuple):
     b_louis: float = 5.0
     c_louis: float = 16.6   # Updated from 5.0 (Louis 1979) to 16.6
     d_louis: float = 5.0
+    b_heat_ratio: float = 1.5  # b_h/b_m (LTG82: 3b heat vs 2b momentum)
+    blend_ri_sharpness: float = 100.0  # sigmoid sharpness [1/Ri] for stable/unstable blend
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 
@@ -294,6 +316,11 @@ class YSUConfig(NamedTuple):
     blend_ri_sharpness : float
         Sigmoid sharpness for stable / unstable blend in
         Richardson-number space (default 100.0 1/Ri).
+    countergrad_coeff : float
+        Nonlocal countergradient coefficient ``b`` in
+        ``γ_c = b·(w'θ')_0 / (w_*·h)`` (Troen & Mahrt 1986; Hong et
+        al. 2006).  Drives YSU's defining nonlocal upward heat
+        transport in the convective BL (default 6.5).
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
@@ -306,6 +333,8 @@ class YSUConfig(NamedTuple):
     louis_c: float = 5.0
     louis_d: float = 5.0
     blend_ri_sharpness: float = 100.0
+    blend_pbl_sharpness: float = 10.0  # sigmoid sharpness for K-profile->local PBL blend
+    countergrad_coeff: float = 6.5
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 
@@ -340,6 +369,11 @@ class EDMFConfig(NamedTuple):
         prior to the audit-driven config migration; lifting it to a
         config field lets users tune the initial buoyancy of the
         plume against scheme calibration data.
+    updraft_deactivation_sharpness : float
+        Sigmoid sharpness [s/m] for smoothly deactivating the updraft as
+        its vertical velocity falls below ``w_updraft_min`` (default 20.0).
+        Lifted from a hardcoded literal inside the ``lax.scan`` updraft
+        body so the transition width is tunable against calibration.
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
@@ -354,6 +388,7 @@ class EDMFConfig(NamedTuple):
     entrainment_rate: float = 1e-3
     detrainment_rate: float = 2e-3
     parcel_dT: float = 0.5
+    updraft_deactivation_sharpness: float = 20.0
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 

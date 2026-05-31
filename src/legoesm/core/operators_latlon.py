@@ -201,7 +201,7 @@ def global_integral(field: Field, grid: LatLonGrid) -> jax.Array:
     """Compute the area-weighted global integral of a field.
 
     Uses an fp64 accumulator (via
-    ``legoesm.core.conservation._conservation_accumulator``) so the
+    ``legoesm.core.conservation.conservation_accumulator``) so the
     result is well-conditioned even when ``field.data`` and
     ``grid.area`` are stored in fp32.  A plain ``jnp.sum`` over an
     fp32 product loses ~log2(n_cells) bits of precision and produces
@@ -213,8 +213,8 @@ def global_integral(field: Field, grid: LatLonGrid) -> jax.Array:
     JAX/XLA NamedSharding multi-device path is handled implicitly
     via ``jnp.sum`` on a sharded array.
     """
-    from legoesm.core.conservation import _conservation_accumulator
-    acc = _conservation_accumulator()
+    from legoesm.core.conservation import conservation_accumulator
+    acc = conservation_accumulator()
     prod = field.data.astype(acc) * grid.area.astype(acc)
     local_sum = jnp.sum(prod)
 

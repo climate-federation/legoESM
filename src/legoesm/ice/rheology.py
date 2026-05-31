@@ -307,7 +307,15 @@ def delta_deformation(
     divergence = eps_11 + eps_22
     shear = (eps_11 - eps_22) ** 2 + 4.0 * eps_12 ** 2
     Delta_sq = divergence ** 2 + shear / (e_yield ** 2)
-    return jnp.maximum(jnp.sqrt(jnp.maximum(Delta_sq, 0.0)), Delta_min)
+    # Floor the sqrt *argument* at Delta_min**2 (not the result at Delta_min).
+    # Forward-identical — sqrt(max(Delta_sq, Delta_min**2)) == max(sqrt(Delta_sq),
+    # Delta_min) — but AD-safe: the argument is >= Delta_min**2 > 0 so sqrt is
+    # never differentiated at 0.  The previous max(sqrt(max(Delta_sq, 0)),
+    # Delta_min) form returned a NaN gradient at zero strain (rest state / cold
+    # start, eps_ij == 0): sqrt'(0) = inf and the outer max routes a zero
+    # selector into it -> 0*inf = NaN, poisoning every VP/EVP/mEVP stress
+    # gradient on the first backward pass.
+    return jnp.sqrt(jnp.maximum(Delta_sq, Delta_min ** 2))
 
 
 # ==============================================================================

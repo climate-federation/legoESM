@@ -661,6 +661,341 @@ class TestSolarBandExpansion:
         assert np.isclose(np.sum(out), 1.0)
 
 
+class TestCMIPBandOrderRemap:
+    """Issue #322: the MPI-M CMIP6 14-band ``SSI_frac`` file is in
+    RRTMG-SW band order, which differs from the RRTMGP-SW g-point-table
+    order by a one-band cyclic rotation (the 820-2680 cm^-1 overlap band
+    is last in the CMIP file but first in RRTMGP).  Expanding by array
+    index without re-ordering shifts the whole solar spectrum one band
+    toward longer wavelengths, dumping UV flux into the near-IR
+    water-vapour band (~2x clear-sky SW absorption).
+    """
+
+    def _rrtmgp_bands(self):
+        import xarray as xr
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import (
+            _DEFAULT_SW_GAS,
+        )
+        ds = (xr.open_dataset(_DEFAULT_SW_GAS)
+              if not _DEFAULT_SW_GAS.endswith(".zarr")
+              else xr.open_zarr(_DEFAULT_SW_GAS))
+        wn = ds["bnd_limits_wavenumber"].values          # (14, 2) cm^-1
+        gpt = ds["bnd_limits_gpt"].values.astype(int)    # (14, 2) 1-indexed
+        ds.close()
+        return wn, gpt, _DEFAULT_SW_GAS
+
+    def test_roll_aligns_every_band_by_wavelength(self):
+        """Each CMIP band's flux must be re-ordered into the RRTMGP band
+        covering the SAME wavenumber interval."""
+        from legoesm.forcing.external import _cmip_sw_band_order_to_rrtmgp
+        wn_rrtmgp, _, _ = self._rrtmgp_bands()
+        n = wn_rrtmgp.shape[0]
+        # CMIP order = RRTMGP order rotated the other way (820 band last).
+        wn_cmip = np.roll(wn_rrtmgp, -1, axis=0)
+        for k in range(n):
+            e_k = np.zeros(n)
+            e_k[k] = 1.0
+            out = _cmip_sw_band_order_to_rrtmgp(e_k)
+            assert np.isclose(out.sum(), 1.0)  # permutation: no flux lost
+            j = int(np.argmax(out))
+            assert np.isclose(out[j], 1.0)
+            assert np.allclose(wn_rrtmgp[j], wn_cmip[k]), (
+                f"CMIP band {k} ({wn_cmip[k]} cm^-1) re-ordered to RRTMGP "
+                f"band {j} ({wn_rrtmgp[j]} cm^-1) — wavelength mismatch"
+            )
+
+    def test_uv_flux_lands_on_uv_gpoints(self):
+        """All-UV input must end on the RRTMGP UV g-points (highest
+        wavenumber band), not the near-IR."""
+        from legoesm.forcing.external import (
+            _cmip_sw_band_order_to_rrtmgp, _expand_bands_to_gpoints,
+        )
+        wn_rrtmgp, gpt, path = self._rrtmgp_bands()
+        n = wn_rrtmgp.shape[0]
+        wn_cmip = np.roll(wn_rrtmgp, -1, axis=0)
+        uv_rrtmgp = int(np.argmax(wn_rrtmgp[:, 1]))  # highest-wavenumber band
+        uv_cmip = int(np.argmax(wn_cmip[:, 1]))
+        spec = np.zeros(n)
+        spec[uv_cmip] = 1.0
+        out = _expand_bands_to_gpoints(
+            _cmip_sw_band_order_to_rrtmgp(spec), str(path),
+        )
+        lo, hi = gpt[uv_rrtmgp]  # 1-indexed g-point range of the UV band
+        assert np.isclose(out[lo - 1:hi].sum(), 1.0), (
+            "UV flux did not land on the UV g-points"
+        )
+        mask = np.ones(out.shape[0], dtype=bool)
+        mask[lo - 1:hi] = False
+        assert np.allclose(out[mask], 0.0), "UV flux leaked outside UV band"
+
+    def test_control_without_remap_uv_misplaced(self):
+        """Control documenting the #322 bug: the bare index-map (no
+        re-order) puts UV flux in a lower-wavenumber RRTMGP band."""
+        from legoesm.forcing.external import _expand_bands_to_gpoints
+        wn_rrtmgp, gpt, path = self._rrtmgp_bands()
+        n = wn_rrtmgp.shape[0]
+        wn_cmip = np.roll(wn_rrtmgp, -1, axis=0)
+        uv_cmip = int(np.argmax(wn_cmip[:, 1]))
+        spec = np.zeros(n)
+        spec[uv_cmip] = 1.0
+        out = _expand_bands_to_gpoints(spec, str(path))  # NO re-order
+        lo, hi = gpt[uv_cmip]
+        # Index-map keeps the flux at band `uv_cmip`, whose wavenumber
+        # range is NOT the UV (max-wavenumber) band — the bug.
+        assert wn_rrtmgp[uv_cmip, 1] < wn_rrtmgp[:, 1].max()
+        assert np.isclose(out[lo - 1:hi].sum(), 1.0)
+
+    def test_end_to_end_spectral_file_preserves_uv(self, tmp_path):
+        """Through the full ``get_solar_forcing_at_time`` spectral_file
+        path: a CMIP-order file with all flux in the UV band yields a
+        per-g-point profile concentrated on the RRTMGP UV g-points."""
+        import netCDF4
+        from legoesm.forcing.external import (
+            SolarConfig, get_solar_forcing_at_time,
+        )
+        wn_rrtmgp, gpt, _ = self._rrtmgp_bands()
+        n = wn_rrtmgp.shape[0]
+        wn_cmip = np.roll(wn_rrtmgp, -1, axis=0)
+        uv_rrtmgp = int(np.argmax(wn_rrtmgp[:, 1]))
+        uv_cmip = int(np.argmax(wn_cmip[:, 1]))
+
+        path = tmp_path / "solar_uv.nc"
+        with netCDF4.Dataset(path, "w", format="NETCDF4") as ds:
+            ds.createDimension("time", 2)
+            ds.createDimension("numwl", n)
+            t = ds.createVariable("time", "f8", ("time",))
+            t[:] = [0.0, 365.0]
+            t.units = "days since 1850-01-01 00:00:00"
+            t.calendar = "noleap"
+            tsi = ds.createVariable("TSI", "f8", ("time",))
+            tsi[:] = [constants.S_0, constants.S_0]
+            ssi = ds.createVariable("SSI_frac", "f8", ("time", "numwl"))
+            band = np.zeros(n)
+            band[uv_cmip] = 1.0
+            ssi[:] = np.broadcast_to(band, (2, n))
+
+        cfg = SolarConfig(
+            S_0=constants.S_0, source="spectral_file", path=str(path),
+            tsi_var="TSI", spectral_var="SSI_frac",
+            spectral_band_order="rrtmg_sw",  # MPI-M CMIP order -> reorder
+            normalize_spectral=False,
+        )
+        out = get_solar_forcing_at_time(cfg, day=0.0)
+        gpt_frac = np.asarray(out["solar_fraction_by_gpt"])
+        assert gpt_frac.shape == (112,)
+        lo, hi = gpt[uv_rrtmgp]
+        assert np.isclose(gpt_frac[lo - 1:hi].sum(), 1.0), (
+            "spectral_file path did not place UV flux on UV g-points"
+        )
+
+    def test_explicit_as_is_never_rotates(self, tmp_path):
+        """Codex #322 review: ``spectral_band_order="as_is"`` is the
+        explicit escape hatch — even for an ``SSI_frac``-named file it
+        expands by index with NO rotation, so a file already in RRTMGP
+        order is never corrupted (overrides ``auto`` detection)."""
+        import netCDF4
+        from legoesm.forcing.external import (
+            SolarConfig, get_solar_forcing_at_time,
+        )
+        wn_rrtmgp, gpt, _ = self._rrtmgp_bands()
+        n = wn_rrtmgp.shape[0]
+        # File already in RRTMGP order: put unit flux directly in the UV
+        # (max-wavenumber) RRTMGP band.
+        uv_rrtmgp = int(np.argmax(wn_rrtmgp[:, 1]))
+        path = tmp_path / "solar_rrtmgp_order.nc"
+        with netCDF4.Dataset(path, "w", format="NETCDF4") as ds:
+            ds.createDimension("time", 2)
+            ds.createDimension("numwl", n)
+            t = ds.createVariable("time", "f8", ("time",))
+            t[:] = [0.0, 365.0]
+            t.units = "days since 1850-01-01 00:00:00"
+            t.calendar = "noleap"
+            tsi = ds.createVariable("TSI", "f8", ("time",))
+            tsi[:] = [constants.S_0, constants.S_0]
+            ssi = ds.createVariable("SSI_frac", "f8", ("time", "numwl"))
+            band = np.zeros(n)
+            band[uv_rrtmgp] = 1.0
+            ssi[:] = np.broadcast_to(band, (2, n))
+        cfg = SolarConfig(
+            S_0=constants.S_0, source="spectral_file", path=str(path),
+            tsi_var="TSI", spectral_var="SSI_frac",
+            spectral_band_order="as_is",  # explicit: never rotate
+            normalize_spectral=False,
+        )
+        out = get_solar_forcing_at_time(cfg, day=0.0)
+        gpt_frac = np.asarray(out["solar_fraction_by_gpt"])
+        lo, hi = gpt[uv_rrtmgp]
+        # No rotation: the already-RRTMGP UV band stays on the UV g-points.
+        assert np.isclose(gpt_frac[lo - 1:hi].sum(), 1.0), (
+            "explicit as_is must NOT reorder an already-RRTMGP-order file"
+        )
+
+    def test_auto_leaves_generic_14band_untouched(self, tmp_path):
+        """A generic 14-band file with no MPI-M signature (variable not
+        ``SSI_frac``, filename not ``swflux_14band``) must NOT be rotated
+        under the default ``auto`` — only files with the CMIP6 signature
+        are auto-remapped (codex #322 round-3 concern)."""
+        import netCDF4
+        from legoesm.forcing.external import (
+            SolarConfig, get_solar_forcing_at_time,
+        )
+        wn_rrtmgp, gpt, _ = self._rrtmgp_bands()
+        n = wn_rrtmgp.shape[0]
+        uv_rrtmgp = int(np.argmax(wn_rrtmgp[:, 1]))
+        path = tmp_path / "generic_spectrum.nc"
+        with netCDF4.Dataset(path, "w", format="NETCDF4") as ds:
+            ds.createDimension("time", 2)
+            ds.createDimension("numwl", n)
+            t = ds.createVariable("time", "f8", ("time",))
+            t[:] = [0.0, 365.0]
+            t.units = "days since 1850-01-01 00:00:00"
+            t.calendar = "noleap"
+            tsi = ds.createVariable("TSI", "f8", ("time",))
+            tsi[:] = [constants.S_0, constants.S_0]
+            spv = ds.createVariable("spec14", "f8", ("time", "numwl"))
+            band = np.zeros(n)
+            band[uv_rrtmgp] = 1.0
+            spv[:] = np.broadcast_to(band, (2, n))
+        cfg = SolarConfig(
+            S_0=constants.S_0, source="spectral_file", path=str(path),
+            tsi_var="TSI", spectral_var="spec14",  # no MPI-M signature
+            normalize_spectral=False,              # default order "auto"
+        )
+        out = get_solar_forcing_at_time(cfg, day=0.0)
+        gpt_frac = np.asarray(out["solar_fraction_by_gpt"])
+        lo, hi = gpt[uv_rrtmgp]
+        assert np.isclose(gpt_frac[lo - 1:hi].sum(), 1.0), (
+            "auto must NOT rotate a generic (non-SSI_frac) 14-band file"
+        )
+
+    def test_invalid_band_order_raises(self, tmp_path):
+        """Unknown ``spectral_band_order`` must raise (no silent default)."""
+        import netCDF4
+        import pytest
+        from legoesm.forcing.external import (
+            SolarConfig, get_solar_forcing_at_time,
+        )
+        path = tmp_path / "solar_bad.nc"
+        with netCDF4.Dataset(path, "w", format="NETCDF4") as ds:
+            ds.createDimension("time", 2)
+            ds.createDimension("numwl", 14)
+            t = ds.createVariable("time", "f8", ("time",))
+            t[:] = [0.0, 365.0]
+            t.units = "days since 1850-01-01 00:00:00"
+            t.calendar = "noleap"
+            tsi = ds.createVariable("TSI", "f8", ("time",))
+            tsi[:] = [constants.S_0, constants.S_0]
+            ssi = ds.createVariable("SSI_frac", "f8", ("time", "numwl"))
+            ssi[:] = np.full((2, 14), 1.0 / 14.0)
+        cfg = SolarConfig(
+            S_0=constants.S_0, source="spectral_file", path=str(path),
+            tsi_var="TSI", spectral_var="SSI_frac",
+            spectral_band_order="bogus",
+        )
+        with pytest.raises(ValueError, match="spectral_band_order"):
+            get_solar_forcing_at_time(cfg, day=0.0)
+
+    def test_cli_threads_band_order_into_experiment_config(self):
+        """Codex #322 follow-up: the run_amip CLI must thread
+        --solar-spectral-band-order all the way into ExperimentConfig
+        (which ModelDriver passes to SolarConfig), defaulting to
+        'auto'."""
+        import sys
+        from pathlib import Path
+        repo = Path(__file__).resolve().parents[2]
+        if str(repo / "scripts") not in sys.path:
+            sys.path.insert(0, str(repo / "scripts"))
+        import run_amip
+        parser = run_amip.build_arg_parser()
+        cfg_default = run_amip.build_config_from_args(parser.parse_args([]))
+        assert cfg_default.solar_spectral_band_order == "auto"
+        cfg_rrtmg = run_amip.build_config_from_args(
+            parser.parse_args(["--solar-spectral-band-order", "rrtmg_sw"]),
+        )
+        assert cfg_rrtmg.solar_spectral_band_order == "rrtmg_sw"
+
+    def test_cmip6_deck_selects_rrtmg_sw(self):
+        """The production CMIP6 deck launcher consumes the MPI-M
+        SSI_frac file, so it must forward --solar-spectral-band-order
+        rrtmg_sw to run_amip (issue #322)."""
+        from pathlib import Path
+        deck = (Path(__file__).resolve().parents[2]
+                / "scripts" / "run_amip_cmip6_deck.py").read_text()
+        assert '"--solar-spectral-band-order", "rrtmg_sw"' in deck, (
+            "CMIP6 deck must forward --solar-spectral-band-order rrtmg_sw "
+            "for the MPI-M SSI_frac file"
+        )
+
+    def test_legacy_amip_config_dict_defaults_to_auto(self):
+        """Codex #322 follow-up: a legacy AMIP config dict that predates
+        the ``solar_spectral_band_order`` field backfills to ``auto``,
+        which only rotates files carrying the MPI-M CMIP6 signature and
+        leaves generic files untouched — so legacy replay is never
+        silently corrupted."""
+        from legoesm.forcing.amip_config import config_from_dict
+        from legoesm.driver.config import ExperimentConfig
+        legacy = {
+            "solar_source": "spectral_file",
+            "solar_file": "old.nc",
+            "solar_spectral_var": "SSI_frac",
+            # no solar_spectral_band_order key (predates the field)
+        }
+        amip_cfg = config_from_dict(legacy)
+        assert amip_cfg.solar_spectral_band_order == "auto"
+        exp = ExperimentConfig.from_amip_config(amip_cfg)
+        assert exp.solar_spectral_band_order == "auto"
+
+    def test_auto_detects_ssi_frac_and_rotates(self, tmp_path, caplog):
+        """Codex #322 round-5: a canonical MPI-M ``SSI_frac`` 14-band
+        file consumed with the default ``auto`` ordering must NOT run
+        with the known-wrong order — it is auto-detected and rotated to
+        RRTMGP order (UV flux lands on the UV g-points), with an INFO log
+        recording the auto-selection.  This is the fail-safe behaviour:
+        the canonical CMIP6 file can never silently use the wrong band
+        order on any entry point."""
+        import logging
+        import netCDF4
+        from legoesm.forcing.external import (
+            SolarConfig, get_solar_forcing_at_time,
+        )
+        wn_rrtmgp, gpt, _ = self._rrtmgp_bands()
+        n = wn_rrtmgp.shape[0]
+        wn_cmip = np.roll(wn_rrtmgp, -1, axis=0)
+        uv_rrtmgp = int(np.argmax(wn_rrtmgp[:, 1]))
+        uv_cmip = int(np.argmax(wn_cmip[:, 1]))
+        path = tmp_path / "swflux_14band_cmip6.nc"
+        with netCDF4.Dataset(path, "w", format="NETCDF4") as ds:
+            ds.createDimension("time", 2)
+            ds.createDimension("numwl", n)
+            t = ds.createVariable("time", "f8", ("time",))
+            t[:] = [0.0, 365.0]
+            t.units = "days since 1850-01-01 00:00:00"
+            t.calendar = "noleap"
+            tsi = ds.createVariable("TSI", "f8", ("time",))
+            tsi[:] = [constants.S_0, constants.S_0]
+            ssi = ds.createVariable("SSI_frac", "f8", ("time", "numwl"))
+            band = np.zeros(n)
+            band[uv_cmip] = 1.0   # UV in CMIP order
+            ssi[:] = np.broadcast_to(band, (2, n))
+        cfg = SolarConfig(
+            S_0=constants.S_0, source="spectral_file", path=str(path),
+            tsi_var="TSI", spectral_var="SSI_frac",  # default order "auto"
+            normalize_spectral=False,
+        )
+        with caplog.at_level(logging.INFO, logger="legoesm.forcing.external"):
+            out = get_solar_forcing_at_time(cfg, day=0.0)
+        gpt_frac = np.asarray(out["solar_fraction_by_gpt"])
+        lo, hi = gpt[uv_rrtmgp]
+        # Auto-rotation places the UV flux on the RRTMGP UV g-points.
+        assert np.isclose(gpt_frac[lo - 1:hi].sum(), 1.0), (
+            "auto must rotate the detected SSI_frac file to RRTMGP order"
+        )
+        assert any(
+            "rrtmg_sw" in r.message or "#322" in r.message
+            for r in caplog.records
+        ), "expected an INFO log recording the auto-selected band order"
+
+
 class TestFirstDateCalendarPreservation:
     """Regression test for the iter-6 calendar-preservation fix in
     ``_extract_first_date``.

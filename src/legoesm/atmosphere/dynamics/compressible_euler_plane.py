@@ -997,12 +997,21 @@ def plane_compressible_euler_slow_tendencies(
     #    where ``u`` lives. ``theta_total`` is at cell centres;
     #    interpolate to the x-face so the PG operand co-locates with
     #    its target tendency.
-    grad_pi_x_xface = grad_x_vlast(pi_p, grid)
-    grad_pi_y_yface = grad_y_vlast(pi_p, grid)
-    theta_xface = interp_cell_to_xface_vlast(theta_total, grid)
-    theta_yface = interp_cell_to_yface_vlast(theta_total, grid)
-    du_pg = -c_p * theta_xface * grad_pi_x_xface
-    dv_pg = -c_p * theta_yface * grad_pi_y_yface
+    # When substep_horizontal_acoustic is set, the horizontal PG moves
+    # into the acoustic substep loop (full Skamarock-Klemp split). Skip
+    # it here so it is not double-counted (and not integrated at the
+    # unstable outer-dt CFL).
+    substep_horiz = getattr(config, "substep_horizontal_acoustic", False)
+    if substep_horiz:
+        du_pg = jnp.zeros_like(u)
+        dv_pg = jnp.zeros_like(v)
+    else:
+        grad_pi_x_xface = grad_x_vlast(pi_p, grid)
+        grad_pi_y_yface = grad_y_vlast(pi_p, grid)
+        theta_xface = interp_cell_to_xface_vlast(theta_total, grid)
+        theta_yface = interp_cell_to_yface_vlast(theta_total, grid)
+        du_pg = -c_p * theta_xface * grad_pi_x_xface
+        dv_pg = -c_p * theta_yface * grad_pi_y_yface
 
     # 3. Coriolis (optional). f at cell centre; interpolate to the
     #    target face so f·u_cross acts at the proper Arakawa-C
@@ -1027,9 +1036,16 @@ def plane_compressible_euler_slow_tendencies(
     # 4. Mass continuity (flux form): ``drho'/dt = -div(rho · u)``.
     #    ``rho_total`` lives at cell centres; interpolate to each face
     #    so the mass flux has the same staggering as the velocity.
-    rho_xface = interp_cell_to_xface_vlast(rho_total, grid)
-    rho_yface = interp_cell_to_yface_vlast(rho_total, grid)
-    drho_p_dt = -divergence_vlast(rho_xface * u, rho_yface * v, grid)
+    # Horizontal mass-flux divergence. With substep_horizontal_acoustic
+    # the FULL continuity (horizontal + vertical) is integrated in the
+    # acoustic substep, so the slow tendency contributes no continuity
+    # term here (only sponge/hyperdiff on rho' below).
+    if substep_horiz:
+        drho_p_dt = jnp.zeros_like(rho_p)
+    else:
+        rho_xface = interp_cell_to_xface_vlast(rho_total, grid)
+        rho_yface = interp_cell_to_yface_vlast(rho_total, grid)
+        drho_p_dt = -divergence_vlast(rho_xface * u, rho_yface * v, grid)
 
     # 5. Theta advection (advective form). Theta at cell centre;
     #    advect with the cell-centre velocity formed by face→cell
@@ -1392,6 +1408,9 @@ def plane_acoustic_substeps_semi_implicit(
     # tail of one substep with the pre-cuSPARSE head of the next. This
     # replaces ``lax.fori_loop`` which kept the substeps as a while-loop and
     # prevented inter-iteration fusion.
+    si_w_filter_nu = float(getattr(
+        euler_config, "si_w_vertical_filter_nu", 0.0,
+    ))
     w_final, theta_p_final, rho_p_final = (w, theta_p, rho_p)
     for _ in range(int(n_substeps)):
         w_final, theta_p_final, rho_p_final = (
@@ -1400,6 +1419,7 @@ def plane_acoustic_substeps_semi_implicit(
                 height_coord, J, dt_s, beta, g,
                 implicit_buoyancy=implicit_buoyancy,
                 precomputed_tridiag=tri_bands,
+                si_w_vertical_filter_nu=si_w_filter_nu,
             )
         )
 
@@ -1409,6 +1429,132 @@ def plane_acoustic_substeps_semi_implicit(
         w=state.w.replace(data=w_final),
         theta_prime=state.theta_prime.replace(data=theta_p_final),
         rho_prime=state.rho_prime.replace(data=rho_p_final),
+        phis=state.phis,
+        tracers=state.tracers,
+    )
+
+
+def plane_acoustic_substeps_si_horizontal(
+    state: PlaneNonHydrostaticState,
+    slow_tend: PlaneNonHydrostaticTendencies,
+    dt_s: float,
+    n_substeps: int,
+    config: SplitExplicitConfig,
+    height_coord: HeightCoordinate,
+    terrain_metric: TerrainMetric,
+    euler_config: CompressibleEulerConfig,
+    grid: PlaneGrid,
+) -> PlaneNonHydrostaticState:
+    """Full Skamarock-Klemp split-explicit acoustic substep on the plane.
+
+    Unlike :func:`plane_acoustic_substeps_semi_implicit` (vertical-only),
+    this integrates BOTH the horizontal and vertical acoustic terms on the
+    short substep ``dt_s = dt/n_substeps``:
+
+    Per substep (forward-backward):
+      1. pi' from (rho', theta') via the EOS perturbation.
+      2. u,v forward update by the horizontal pressure gradient
+         ``-c_p * theta_face * grad(pi')`` (the term removed from the
+         slow tendency when ``substep_horizontal_acoustic=True``).
+      3. w vertical implicit solve + vertical continuity + vertical theta
+         advection via the shared column kernel (SI in the vertical).
+      4. rho' backward update with the HORIZONTAL mass-flux divergence
+         using the just-updated u,v (the vertical part is already in the
+         column kernel).
+
+    This lowers the horizontal-acoustic CFL from ``c_s*dt/dx`` (unstable
+    at fine dx when the PG sits in the slow tendency) to
+    ``c_s*dt/(n_substeps*dx)``. Requires the caller to pass ``grid`` for
+    the horizontal C-grid operators.
+
+    ``slow_tend`` is unused here: the slow forcing is applied once per
+    RK3 stage (``_rk_stage_with_acoustics``) before the substep loop, the
+    same convention the vertical-only SI substep uses.
+    """
+    del slow_tend
+    g = euler_config.g
+    J = terrain_metric.jacobian
+    beta = euler_config.acoustic_off_centering
+    implicit_buoyancy = euler_config.implicit_buoyancy
+    c_p = _c_pd_constant()
+    theta_0 = height_coord.theta_ref
+    rho_0 = height_coord.rho_ref
+    si_w_filter_nu = float(getattr(
+        euler_config, "si_w_vertical_filter_nu", 0.0,
+    ))
+
+    u = state.u.data
+    v = state.v.data
+    w = state.w.data
+    theta_p = state.theta_prime.data
+    rho_p = state.rho_prime.data
+
+    tri_bands = precompute_si_tridiag_bands(
+        height_coord, J, dt_s, g, implicit_buoyancy,
+        nlev=theta_p.shape[-1],
+    )
+
+    from legoesm.atmosphere.dynamics.compressible_euler import (
+        compute_exner_perturbation,
+    )
+
+    u_c, v_c, w_c, theta_p_c, rho_p_c = u, v, w, theta_p, rho_p
+    for _ in range(int(n_substeps)):
+        theta_total, rho_total = sanitize_theta_rho(
+            theta_0 + theta_p_c, rho_0 + rho_p_c,
+        )
+        # 1+2. Horizontal pressure gradient -> forward u, v update.
+        pi_p = compute_exner_perturbation(rho_p_c, theta_p_c, height_coord)
+        grad_pi_x = grad_x_vlast(pi_p, grid)
+        grad_pi_y = grad_y_vlast(pi_p, grid)
+        theta_xface = interp_cell_to_xface_vlast(theta_total, grid)
+        theta_yface = interp_cell_to_yface_vlast(theta_total, grid)
+        u_new = u_c + dt_s * (-c_p * theta_xface * grad_pi_x)
+        v_new = v_c + dt_s * (-c_p * theta_yface * grad_pi_y)
+
+        # 3. Vertical acoustic implicit (w) + vertical continuity +
+        #    vertical theta advection (shared column kernel).
+        #    Pass beta=0.0 here so the kernel does NOT off-center the
+        #    vertical continuity in isolation — we apply Skamarock-Klemp
+        #    off-centering to the FULL (vertical + horizontal) divergence
+        #    below, so both legs receive consistent acoustic damping
+        #    (cavecrew review: asymmetric off-centering between the
+        #    vertical and horizontal continuity breaks the f-b stencil).
+        w_new, theta_p_new, rho_p_vert = _semi_implicit_acoustic_column_kernel(
+            w_c, theta_p_c, rho_p_c,
+            height_coord, J, dt_s, 0.0, g,
+            implicit_buoyancy=implicit_buoyancy,
+            precomputed_tridiag=tri_bands,
+            si_w_vertical_filter_nu=si_w_filter_nu,
+        )
+
+        # 4. Horizontal mass-flux divergence (backward: uses new u, v).
+        #    rho_total reflects the pre-update rho_p_c (forward-backward
+        #    convention: the mass flux uses the state at the start of the
+        #    substep, the velocity from the just-completed forward step).
+        rho_xface = interp_cell_to_xface_vlast(rho_total, grid)
+        rho_yface = interp_cell_to_yface_vlast(rho_total, grid)
+        horiz_div = divergence_vlast(
+            rho_xface * u_new, rho_yface * v_new, grid,
+        )
+        rho_p_new = rho_p_vert - dt_s * horiz_div
+        # Off-center the FULL divergence update (Skamarock-Klemp 2008).
+        # rho_p_vert already carries -dt_s*vert_div (kernel, beta=0), so
+        # rho_p_new now carries the total -dt_s*(vert+horiz)_div; apply
+        # the off-centering blend once on the combined result.
+        if beta != 0.0:
+            rho_p_new = (1.0 + beta) * rho_p_new - beta * rho_p_c
+
+        u_c, v_c, w_c, theta_p_c, rho_p_c = (
+            u_new, v_new, w_new, theta_p_new, rho_p_new,
+        )
+
+    return PlaneNonHydrostaticState(
+        u=state.u.replace(data=u_c),
+        v=state.v.replace(data=v_c),
+        w=state.w.replace(data=w_c),
+        theta_prime=state.theta_prime.replace(data=theta_p_c),
+        rho_prime=state.rho_prime.replace(data=rho_p_c),
         phis=state.phis,
         tracers=state.tracers,
     )
@@ -1652,8 +1798,27 @@ class PlaneCompressibleEulerModel:
             # Single-rank: halo path is bit-identical to the standard
             # jit'd step (proven by test_halo_equiv_*) — route to it
             # for the JIT speedup. Skips packed exchange overhead +
-            # gives ~14x faster per-step on small grids.
+            # gives ~14x faster per-step on small grids. The standard
+            # step() honours substep_horizontal_acoustic.
             return self.step(state_local, dt)
+
+        # Multi-rank gate for the horizontal-acoustic substep (cavecrew
+        # review): the full Skamarock-Klemp split needs a halo exchange
+        # of u, v, rho' on EVERY acoustic substep (the horizontal PG and
+        # mass divergence are now substepped), which the packed-exchange
+        # halo path does not yet provide. Refuse loudly rather than
+        # silently fall back to the vertical-only substep (which is
+        # unstable at fine dx with perturbed IC — the very bug this flag
+        # fixes).
+        if getattr(self.config, "substep_horizontal_acoustic", False):
+            raise NotImplementedError(
+                "substep_horizontal_acoustic is not yet wired into the "
+                "multi-rank step_halo path (it needs per-substep u/v/rho' "
+                "halo exchange). Use single-rank step()/--no domain "
+                "decomposition for fine-dx perturbed-IC runs, or extend "
+                "plane_compressible_euler_slow_tendencies_halo + the halo "
+                "substep loop first."
+            )
 
         # Multi-rank correctness gate (Codex 2026-05 review): silently
         # skipping the mass fixer when fix_mass=True but no owned_mask
@@ -1806,11 +1971,19 @@ class PlaneCompressibleEulerModel:
             )
 
         if self.config.semi_implicit_acoustic:
-            def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
-                return plane_acoustic_substeps_semi_implicit(
-                    s, slow_tend, dt_s, n_sub, cfg,
-                    self.height_coord, self.terrain_metric, self.config,
-                )
+            if getattr(self.config, "substep_horizontal_acoustic", False):
+                def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
+                    return plane_acoustic_substeps_si_horizontal(
+                        s, slow_tend, dt_s, n_sub, cfg,
+                        self.height_coord, self.terrain_metric, self.config,
+                        self.grid,
+                    )
+            else:
+                def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
+                    return plane_acoustic_substeps_semi_implicit(
+                        s, slow_tend, dt_s, n_sub, cfg,
+                        self.height_coord, self.terrain_metric, self.config,
+                    )
         else:
             def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
                 return plane_acoustic_substeps(

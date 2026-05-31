@@ -120,7 +120,13 @@ def step_ponds(
     # Recover (a_pond, h_pond) under the ratio constraint:
     #   h_pond = sqrt(depth_to_area_ratio · V_new)
     #   a_pond = V_new / max(h_pond, 1e-6)
-    h_new = jnp.sqrt(jnp.maximum(depth_to_area_ratio * V_new, 0.0))
+    # Floor the sqrt argument at a tiny positive (not 0): at an empty pond
+    # (V_new = 0 — the common no-melt / cold-season state) sqrt'(0) = inf gives
+    # a NaN reverse-mode gradient through h_new.  The forward is unchanged for
+    # any real pond (and at V_new=0 the downstream ``max(h_new, 1e-6)`` and
+    # ``a_new = V_new/h_safe = 0`` are identical).  Mirrors the sea_ice.py
+    # pond_depth fix (iter 2).
+    h_new = jnp.sqrt(jnp.maximum(depth_to_area_ratio * V_new, 1e-14))
     h_safe = jnp.maximum(h_new, 1e-6)
     a_new = V_new / h_safe
     a_new = jnp.clip(a_new, 0.0, pond_to_ice_max_area)

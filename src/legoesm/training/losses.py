@@ -180,8 +180,8 @@ def carry_mse(
     """
     lev_w = level_weights(sigma_full, config=config)
 
-    from legoesm.core.precision import _resolve_dtype
-    loss = jnp.array(0.0, dtype=_resolve_dtype(None, "accumulate"))
+    from legoesm.core.precision import resolve_dtype
+    loss = jnp.array(0.0, dtype=resolve_dtype(None, "accumulate"))
 
     def _lat_weighted_mean(sq_err: jax.Array) -> jax.Array:
         """Mean over all dims, with optional latitude weighting.

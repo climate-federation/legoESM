@@ -1640,7 +1640,7 @@ def load_mpas_mesh(path: str) -> VoronoiMesh:
     def read_int_var(name):
         return np.array(ds.variables[name][:], dtype=np.int32) - 1
 
-    radius = float(ds.sphere_radius) if hasattr(ds, 'sphere_radius') else 6371229.0
+    radius = float(ds.sphere_radius) if hasattr(ds, 'sphere_radius') else constants.R_earth
 
     import jax
     try:

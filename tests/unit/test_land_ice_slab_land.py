@@ -108,9 +108,14 @@ class Test1a_SmokeSlab:
         forcing = make_forcing()
         new_state, response, _ = step_land(state, forcing, CONFIG, U_min=1.0, dt=DT)
 
-        # LandState fields
+        # LandState fields.  Most are Field (``.data``); ``runoff`` is a
+        # raw ``jax.Array | None`` added after this test was written, so
+        # unwrap generically and skip unset optional fields.
         for name in LandState._fields:
-            arr = getattr(new_state, name).data
+            field = getattr(new_state, name)
+            if field is None:
+                continue
+            arr = field.data if hasattr(field, "data") else field
             assert jnp.all(jnp.isfinite(arr)), f"LandState.{name} has non-finite values"
 
         # TileResponse fields

@@ -39,6 +39,31 @@ KAPPA = constants.kappa_vk  # von Kármán constant (0.4)
 G = constants.g
 NU_AIR = constants.nu_air  # kinematic viscosity of air [m²/s]
 
+# Known bulk-flux scheme names (union across all surface-flux dispatchers):
+#   "constant"     — fixed neutral transfer coefficients (no iteration)
+#   "most"         — iterative MOST with fixed roughness (constant-z0 stability)
+#   "coare3"       — COARE 3.0
+#   "large_yeager" — Large & Yeager 2009 (OMIP)
+_VALID_BULK_SCHEMES = ("constant", "most", "coare3", "large_yeager")
+
+
+def validate_bulk_scheme(scheme: str) -> None:
+    """Raise ``ValueError`` on an unknown bulk-flux scheme name.
+
+    Every surface-flux dispatcher gates on ``bulk_scheme`` with
+    ``if scheme in (<MOST schemes>): ... else: <constant>``.  Without this guard
+    a *typo'd* scheme silently falls through to the constant-coefficient branch
+    and runs the wrong air-sea physics (CLAUDE.md dispatch rule: factories must
+    raise on unknown schemes).  ``scheme`` is a static Python string resolved at
+    trace time, so this validates at function entry — never inside a traced /
+    ``jit`` body.
+    """
+    if scheme not in _VALID_BULK_SCHEMES:
+        raise ValueError(
+            f"Unknown bulk_scheme {scheme!r}; expected one of "
+            f"{_VALID_BULK_SCHEMES}."
+        )
+
 
 # ============================================================================
 # Stability functions (Businger-Dyer)
@@ -199,21 +224,29 @@ def compute_most_fluxes(
         # Virtual potential temperature scale (1/ε − 1 ≈ 0.6078)
         theta_v_star = theta_star + _vT_coef * T_atm * q_star_val
 
-        # Obukhov length: L = −u*² T_v / (κ g θ_v*)
-        L_denom = KAPPA * G * theta_v_star
-        L = jnp.where(
-            jnp.abs(L_denom) > 1e-10,
-            -u_star_safe ** 2 * T_v / L_denom,
-            jnp.where(L_denom > 0.0, -1e6, 1e6),
-        )
+        # Inverse Obukhov length: 1/L = −κ g θ_v* / (u*² T_v).
+        #
+        # The stability parameter ζ = z/L is the *only* way L enters this
+        # solver, so we carry the reciprocal directly.  The reciprocal form
+        # is singularity-free: the denominator u*² T_v is strictly positive
+        # (u_star_safe ≥ 1e-6, T_v > 0), so there is no divide-by-zero and
+        # no need for a sentinel or ``safe_divide``.  Crucially it gives the
+        # correct neutral limit *and* its derivative: at exact neutral
+        # (θ_v* = 0) ⇒ 1/L = 0 ⇒ ζ = 0 with the true finite sensitivity
+        # dζ/dθ_v* = −z κ g /(u*² T_v).  Forming L = −u*²T_v/(κgθ_v*) first
+        # and then z/L would instead either inject a NaN gradient (0·∞ from
+        # the dead branch of a neutral-limit ``where``) or, if masked with a
+        # constant ±1e6 sentinel, flatten dζ/dθ_v* to zero across the
+        # neutral band and jump at the mask threshold.  Away from neutral ζ
+        # equals the textbook z/L to round-off.
+        inv_L = -KAPPA * G * theta_v_star / (u_star_safe ** 2 * T_v)
 
         # Stability parameters and ψ functions evaluated at each
         # measurement height. When z_t == z_q == z_u (single-height),
-        # zeta_t == zeta_q == zeta_u and psi_h_t == psi_h_q (so the
-        # legacy formula path is bit-identical).
-        zeta_u = jnp.clip(z_u / L, -10.0, 10.0)
-        zeta_t = jnp.clip(z_t / L, -10.0, 10.0)
-        zeta_q = jnp.clip(z_q / L, -10.0, 10.0)
+        # zeta_t == zeta_q == zeta_u and psi_h_t == psi_h_q.
+        zeta_u = jnp.clip(z_u * inv_L, -10.0, 10.0)
+        zeta_t = jnp.clip(z_t * inv_L, -10.0, 10.0)
+        zeta_q = jnp.clip(z_q * inv_L, -10.0, 10.0)
         psi_m_u = psi_m(zeta_u)
         psi_h_t = psi_h(zeta_t)
         psi_h_q = psi_h(zeta_q)
@@ -269,7 +302,7 @@ def compute_most_fluxes(
             ln_zr_u = jnp.log(z_u / 10.0)
             ln_zr_t = jnp.log(z_t / 10.0)
             ln_zr_q = jnp.log(z_q / 10.0)
-            zeta_10 = jnp.clip(10.0 / L, -10.0, 10.0)
+            zeta_10 = jnp.clip(10.0 * inv_L, -10.0, 10.0)
             psi_m_10 = psi_m(zeta_10)
             psi_h_10 = psi_h(zeta_10)
             dpsi_m = psi_m_u - psi_m_10

@@ -220,6 +220,7 @@ class ExperimentConfig(NamedTuple):
     solar_file: str = ""
     solar_tsi_var: str = "tsi"
     solar_spectral_var: str = "solar_fraction_by_gpt"
+    solar_spectral_band_order: str = "auto"   # auto | as_is | rrtmg_sw (#322)
 
     # Aerosol
     aerosol_forcing: str = "off"        # off, external
@@ -244,6 +245,10 @@ class ExperimentConfig(NamedTuple):
     topography: str = "flat"
     topo_smoothing: int = 4
     topo_edge_blend: float = 0.3
+    # Optional land-sea-mask NetCDF (CMIP6 sftlf / ERA5 lsm).  When set,
+    # the land fraction is taken from this file and the slab-land tile
+    # is activated; empty → ocean-only surface.
+    land_mask_path: str = ""
 
     # Surface
     T_init: float = 300.0
@@ -252,7 +257,7 @@ class ExperimentConfig(NamedTuple):
     carbon_cycle: str = "none"
 
     # Initial conditions
-    ic: str = "default"   # "default" (held_suarez_init) or "era5"
+    ic: str = "default"   # "default" (uniform T_init), "standard" (lapse-rate + equator-pole gradient), or "era5"
     ic_path: str = ""     # ERA5 Zarr path when ic="era5"
 
     # CMIP
@@ -385,6 +390,35 @@ class ExperimentConfig(NamedTuple):
                 f"microphysics must be one of {_valid_microphysics}, "
                 f"got {self.microphysics!r}"
             )
+        # Physics-scheme membership (mirror the integration.py factory sets so
+        # a typo fails here, not only at JIT-compile inside integration.py).
+        _valid_convection = (
+            "sbm", "dca", "kuo", "mass_flux", "edmf", "zhang_mcfarlane",
+            "kain_fritsch", "emanuel", "tiedtke", "bechtold", "none",
+        )
+        if self.convection not in _valid_convection:
+            errors.append(
+                f"convection must be one of {_valid_convection}, "
+                f"got {self.convection!r}"
+            )
+        _valid_turbulence = (
+            "smagorinsky", "louis", "tke", "mynn25", "clubb_lite",
+            "holtslag_boville", "ysu", "edmf", "none",
+        )
+        if self.turbulence not in _valid_turbulence:
+            errors.append(
+                f"turbulence must be one of {_valid_turbulence}, "
+                f"got {self.turbulence!r}"
+            )
+        _valid_gwd = (
+            "rayleigh", "lindzen", "mcfarlane", "hines",
+            "prognostic_spectral", "ml_emulator", "none",
+        )
+        if self.gravity_wave_drag not in _valid_gwd:
+            errors.append(
+                f"gravity_wave_drag must be one of {_valid_gwd}, "
+                f"got {self.gravity_wave_drag!r}"
+            )
         # Reject unsupported coupled/ESM modes with actionable errors.
         if self.carbon_cycle != "none":
             errors.append(
@@ -392,11 +426,42 @@ class ExperimentConfig(NamedTuple):
                 f"ModelDriver is atmosphere-only with prescribed SST/SIC. "
                 f"Set carbon_cycle='none' or use a coupled driver."
             )
-        _valid_ic = ("default", "era5")
+        _valid_ic = ("default", "standard", "era5")
         if self.ic not in _valid_ic:
             errors.append(f"ic must be one of {_valid_ic}, got {self.ic!r}")
         if self.ic == "era5" and not self.ic_path:
             errors.append("ic='era5' requires ic_path to be set")
+        if self.ic == "standard":
+            # The standard-atmosphere IC overrides a grid-space temperature
+            # Field AND a geographic (eastward) thermal-wind jet.  On lat-lon
+            # the A-grid u IS geographic-east, so the assignment is direct and
+            # correct.  Other grids need extra handling not yet wired:
+            #   * cubed_sphere: u/v are cube-LOCAL vector components — the
+            #     geographic jet must be rotated by the grid angle first;
+            #   * gaussian/spectral: temperature lives in spectral space (T_hat),
+            #     no grid-space T Field;
+            #   * mpas: not wired.
+            # Restrict to lat-lon here so the advertised IC is exactly the
+            # implemented+validated one — fail early, before setup.
+            _gt_std = normalize_grid_type(self.grid.grid_type)
+            if _gt_std != "latlon":
+                errors.append(
+                    f"ic='standard' is currently implemented only for "
+                    f"grid_type='latlon'; got grid_type={self.grid.grid_type!r} "
+                    f"(discretization={self.dycore.discretization!r}). "
+                    f"Use ic='default', or ic='era5' for cubed_sphere/spectral."
+                )
+            # T_init is the equator surface temperature; the pole is
+            # T_init - 40 K (StandardAtmosphereConfig.equator_pole_delta_K). A
+            # too-cold T_init drives the pole surface temperature non-positive
+            # and would NaN the thermal-wind setup, so require a physical
+            # equator surface temperature here (fail-early, before setup).
+            if not (150.0 <= self.T_init <= 360.0):
+                errors.append(
+                    f"ic='standard' requires a physical equator surface "
+                    f"temperature 150 K <= T_init <= 360 K; got "
+                    f"T_init={self.T_init} K."
+                )
 
         if self.aimip_variant not in AIMIP_VARIANTS:
             errors.append(
@@ -560,6 +625,7 @@ class ExperimentConfig(NamedTuple):
             solar_file=getattr(amip_cfg, 'solar_file', ''),
             solar_tsi_var=getattr(amip_cfg, 'solar_tsi_var', 'tsi'),
             solar_spectral_var=getattr(amip_cfg, 'solar_spectral_var', 'solar_fraction_by_gpt'),
+            solar_spectral_band_order=getattr(amip_cfg, 'solar_spectral_band_order', 'auto'),
             aerosol_forcing=getattr(amip_cfg, 'aerosol_forcing', 'off'),
             aerosol_file=getattr(amip_cfg, 'aerosol_file', ''),
             aerosol_reference_aod=getattr(amip_cfg, 'aerosol_reference_aod', 0.03),
@@ -574,6 +640,7 @@ class ExperimentConfig(NamedTuple):
             topography=amip_cfg.topography,
             topo_smoothing=amip_cfg.topo_smoothing,
             topo_edge_blend=amip_cfg.topo_edge_blend,
+            land_mask_path=getattr(amip_cfg, 'land_mask_path', ''),
             T_init=amip_cfg.T_init,
             RH_init=amip_cfg.RH_init,
             dynamic_albedo=amip_cfg.dynamic_albedo,
@@ -662,6 +729,7 @@ class ExperimentConfig(NamedTuple):
             solar_file=self.solar_file,
             solar_tsi_var=self.solar_tsi_var,
             solar_spectral_var=self.solar_spectral_var,
+            solar_spectral_band_order=self.solar_spectral_band_order,
             aerosol_forcing=self.aerosol_forcing,
             aerosol_file=self.aerosol_file,
             aerosol_reference_aod=self.aerosol_reference_aod,

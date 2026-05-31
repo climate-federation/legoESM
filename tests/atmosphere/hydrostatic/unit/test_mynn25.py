@@ -304,3 +304,44 @@ def test_mynn_cold_T_s_cools_lowest_cell():
     assert T_low < 290.0, (
         f"cold T_s=270 with MYNN did not cool lowest cell: T_low={T_low}"
     )
+
+
+def test_mynn_obukhov_gradient_finite_at_zero_buoyancy_flux():
+    """jax.grad through MYNN must be finite at zero surface buoyancy flux.
+
+    Regression: the Obukhov length ``L = -θ_v u*³ / (κ g w'θ_v')`` was written
+    as ``jnp.where(|w'θ_v'|>eps, .../w'θ_v', 1e30)``.  When the surface buoyancy
+    flux is exactly zero (T_sfc == T_lowest and q_sfc == q_lowest — neutral,
+    SCM-prescribed zero fluxes, or cold-start air-surface equilibrium), the
+    *unselected* ``.../w'θ_v'`` branch differentiates ``num/0`` -> inf, and the
+    ``where`` multiplies it by a zero selector -> ``0*inf = NaN``, poisoning
+    every tendency.  Masking the divisor before the divide keeps the forward
+    (the 1e30 neutral sentinel) and makes the gradient finite.
+    """
+    import jax
+
+    ncol, nlev = 2, 8
+    T = jnp.linspace(240.0, 290.0, nlev)[None, :].repeat(ncol, 0)
+    q = jnp.full((ncol, nlev), 5e-3)
+    u = jnp.full((ncol, nlev), 5.0)
+    v = jnp.zeros((ncol, nlev))
+    qke = jnp.full((ncol, nlev), 0.5)
+    p_half = jnp.linspace(1e4, 1.0e5, nlev + 1)[None, :].repeat(ncol, 0)
+    p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+    z_half = jnp.linspace(12000.0, 0.0, nlev + 1)[None, :].repeat(ncol, 0)
+    z_full = 0.5 * (z_half[:, 1:] + z_half[:, :-1])
+    rho = jnp.ones((ncol, nlev))
+    # Zero surface buoyancy flux: T_sfc == T_lowest and q_sfc == q_lowest.
+    q_sfc = q[:, -1]
+
+    def loss(T_sfc):
+        out, new_qke = mynn25_turbulence(
+            u, v, T, q, qke, p_full, p_half, z_full, z_half,
+            T_sfc, q_sfc, rho, dt=60.0, config=MYNN25Config(),
+        )
+        return jnp.sum(out.dT_dt ** 2) + jnp.sum(new_qke ** 2)
+
+    grad = jax.grad(loss)(T[:, -1])  # T_sfc == T_lowest => w'θ_v' == 0
+    assert bool(jnp.all(jnp.isfinite(grad))), (
+        f"MYNN gradient not finite at zero buoyancy flux: {grad}"
+    )

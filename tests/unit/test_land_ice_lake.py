@@ -83,7 +83,7 @@ class Test11e_MixingDirection:
         wind_speed = jnp.sqrt(5.0**2 + 2.0**2 + 1.0**2)
         k_eff = CONFIG.k_mix * (1.0 + CONFIG.wind_mix_alpha * wind_speed)
         d_mid = 0.5 * (CONFIG.h_epi + CONFIG.h_hypo)
-        F_mix = CONFIG.rho_water * CONFIG.c_water * k_eff * (285.0 - 285.0) / d_mid
+        F_mix = CONFIG.rho_water * CONFIG.c_water_mass * k_eff * (285.0 - 285.0) / d_mid
         assert abs(float(F_mix)) < 1e-10
 
 
@@ -195,8 +195,8 @@ class Test11h_ConvectiveOverturn:
         # h_hypo=20 (ratio 1:4), expected mean = (1·278.15 + 4·292.15)/5
         # = 289.35 K.  A broken adjustment that, e.g., uses the
         # arithmetic mean (285.15 K) would FAIL this check.
-        cap_epi = CONFIG.rho_water * CONFIG.c_water * CONFIG.h_epi
-        cap_hypo = CONFIG.rho_water * CONFIG.c_water * CONFIG.h_hypo
+        cap_epi = CONFIG.rho_water * CONFIG.c_water_mass * CONFIG.h_epi
+        cap_hypo = CONFIG.rho_water * CONFIG.c_water_mass * CONFIG.h_hypo
         T_expected_mean = (cap_epi * 278.15 + cap_hypo * 292.15) / (cap_epi + cap_hypo)
         assert abs(T_epi_after - T_expected_mean) < 0.5, (
             f"Convective overturn violates enthalpy conservation: "

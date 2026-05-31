@@ -343,6 +343,19 @@ class ModelDriver:
                 self.grid, config=topo_config
             )
 
+        # Real land-sea mask overrides the elevation-derived land fraction
+        # (works with any ``topography`` setting, including "flat").
+        land_mask_path = getattr(self.config, "land_mask_path", "")
+        if land_mask_path:
+            from legoesm.grids.topography import load_land_fraction
+            self._f_land = load_land_fraction(
+                self.grid, land_mask_path
+            ).astype(_sd)
+            logger.info(
+                f"  Land-sea mask: {land_mask_path} "
+                f"(land fraction mean={float(jnp.mean(self._f_land)):.3f})"
+            )
+
     def _create_dycore(self) -> None:
         """Create the dynamical core model via the component factory.
 
@@ -498,6 +511,93 @@ class ModelDriver:
 
             self.get_sst_sic = get_sst_sic
 
+    def _apply_standard_atmosphere_ic(self) -> None:
+        """Override the scaffold temperature with a realistic standard
+        atmosphere (constant-lapse-rate troposphere + isothermal stratosphere +
+        equator-pole surface gradient).  Grid-agnostic core; the per-grid work
+        is only fetching the horizontal latitude field in the state's layout.
+
+        The equator surface temperature is taken from ``config.T_init`` so the
+        existing ``--t-init`` flag stays meaningful; the gradient, lapse rate
+        and stratospheric floor use Earth-like defaults.
+        """
+        from legoesm.atmosphere.standard_atmosphere import (
+            StandardAtmosphereConfig,
+            standard_atmosphere_temperature,
+            standard_atmosphere_zonal_wind,
+        )
+
+        cfg = self.config
+        gt = cfg.grid.grid_type
+        # Lat-lon only: the A-grid u is geographic-east, so the balanced jet
+        # (a geographic eastward wind) is assigned directly.  Cubed-sphere u/v
+        # are cube-LOCAL components that would need a grid-angle rotation first,
+        # and spectral/MPAS need other handling — all rejected up front in
+        # ExperimentConfig.validate_strict, so this is defensive.
+        if gt == "latlon":
+            lat_h = self.grid.lat2d                   # (n_lat, n_lon)
+        else:
+            raise NotImplementedError(
+                f"ic='standard' not yet wired for grid_type={gt!r} "
+                f"(discretization={cfg.dycore.discretization!r}); only 'latlon' "
+                "is supported. Use ic='default' or 'era5'."
+            )
+
+        sa_cfg = StandardAtmosphereConfig(T_sfc_equator_K=cfg.T_init)
+        lat_h = jnp.asarray(lat_h)
+
+        # (1) Surface temperature (sigma=1 limit) — needed for the p_s reduction;
+        #     independent of the vertical coordinate.
+        T_sfc_std = standard_atmosphere_temperature(
+            lat_h, jnp.ones((1,), dtype=self.sigma.sigma_full.dtype), sa_cfg,
+        )[..., 0]
+
+        # (2) Make surface pressure consistent with the NEW temperature over
+        #     topography FIRST.  The scaffold reduced p_s against the uniform
+        #     T_init column (p_s = p0*exp(-phis/(R_d*T_init))); rescale to the
+        #     standard surface temperature, p_s = p0*exp(-phis/(R_d*T_sfc)),
+        #     as a relative correction (exact no-op where phis == 0).
+        phis = self.state.phis.data
+        p_s_old = self.state.p_s.data
+        p_s_new = p_s_old * jnp.exp(
+            -phis / constants.R_d * (1.0 / T_sfc_std - 1.0 / cfg.T_init)
+        )
+        self.state = self.state._replace(
+            p_s=self.state.p_s.replace(data=p_s_new.astype(p_s_old.dtype)),
+        )
+
+        # (3) Vertical coordinate: use sigma_full — the SAME pressure convention
+        #     the production physics/radiation/saturation pipeline uses
+        #     (p_full = p_s * sigma_full; physics_pipeline.py, compiled_segments).
+        #     The model treats sigma_full (= A_full + B_full on the hybrid
+        #     coordinate) as the effective level coordinate everywhere, so the IC
+        #     MUST match it: initializing T/q on the "true" hybrid pressure
+        #     (A*p_ref + B*p_s) while the physics evaluates on p_s*sigma_full
+        #     would hand the first radiation/convection/saturation step a column
+        #     on a different pressure grid (spurious condensation over terrain).
+        #     The topography-adjusted p_s above is what makes the columns
+        #     physical; the level coordinate stays consistent with downstream.
+        sigma_full = self.sigma.sigma_full
+
+        # (4) Temperature.
+        T_new = standard_atmosphere_temperature(
+            lat_h, sigma_full, sa_cfg,
+        ).astype(self.state.T.data.dtype)
+        self.state = self.state._replace(T=self.state.T.replace(data=T_new))
+
+        # (5) Thermal-wind-balanced zonal wind so the imposed equator-pole
+        #     temperature gradient does not launch a geostrophic-adjustment shock
+        #     at startup.  v stays zero (the balance is zonal).  Reuses the grid's
+        #     own radius/rotation (constants fallback per the audit rule).
+        radius = getattr(self.grid, "radius", constants.R_earth)
+        omega = getattr(self.grid, "omega", constants.Omega)
+        u_new = standard_atmosphere_zonal_wind(
+            lat_h, sigma_full, radius, omega, sa_cfg,
+        ).astype(self.state.u.data.dtype)
+        self.state = self.state._replace(
+            u=self.state.u.replace(data=jnp.broadcast_to(u_new, self.state.u.data.shape)),
+        )
+
     def _init_state(self) -> None:
         """Initialize atmospheric state and moisture."""
         from legoesm.diagnostics.column_integrals import column_water_vapor
@@ -531,22 +631,42 @@ class ModelDriver:
                     self.grid, self.sigma, T_init=cfg.T_init, phis=self._phis_data
                 )
             else:
-                # Lat-lon and Gaussian grids use (n_lat, n_lon, nlev) layout
+                # Lat-lon and Gaussian grids use (n_lat, n_lon, nlev) layout.
+                # Pass phis so p_s is hydrostatically reduced over topography
+                # (p_s = p_ref*exp(-phis/(R_d*T_init))) — matching the
+                # cubed-sphere branch above.  Previously phis was patched in
+                # *after* construction, leaving p_s flat over terrain; that is
+                # the reference state the ic='standard' p_s recompute corrects
+                # relative to, and is also more correct for ic='default'.
                 from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
                 shape_3d = (self.grid.n_lat, self.grid.n_lon, NLEV)
                 self.state = held_suarez_init_latlon(
                     self.grid, self.sigma, T_init=cfg.T_init,
+                    phis=self._phis_data,
                 )
-                if jnp.any(self._phis_data != 0):
-                    self.state = self.state._replace(
-                        phis=self.state.phis.replace(data=self._phis_data),
-                    )
+
+        # Physically-realistic "standard atmosphere" override: replace the
+        # uniform-T_init scaffold temperature with a constant-lapse-rate
+        # troposphere + isothermal stratosphere + equator-pole gradient, BEFORE
+        # the moisture init below so the q_v column integral comes out Earth-like
+        # (~15-30 kg/m^2) instead of ~80 kg/m^2.  ERA5 IC (handled later) takes
+        # precedence and fully overwrites the state.
+        if cfg.ic == "standard":
+            self._apply_standard_atmosphere_ic()
 
         # Initialize all tracers via registry
         self.tracers = init_tracers(self.tracer_registry, shape_3d)
 
         # Moisture initialization (spectral and MPAS use dry physics)
         if hasattr(self.state, 'p_s') and hasattr(self.state.p_s, 'data'):
+            # Build p_full as p_s * sigma_full — the SAME convention the
+            # production physics/radiation/saturation pipeline uses
+            # (physics_pipeline.py, compiled_segments.py).  Initializing q_sat
+            # and the vertical humidity taper on this grid keeps the moisture
+            # consistent with the temperature state AND with the first physics
+            # step, so a topography+hybrid run does not start supersaturated on a
+            # mismatched pressure grid.  (Do NOT switch to pressure_at_full here
+            # unless the whole physics pipeline is migrated to it too.)
             p_full_init = self.state.p_s.data[..., None] * self.sigma.sigma_full
             q_sat_init = saturation_mixing_ratio(self.state.T.data, p_full_init)
             self.tracers["q_v"] = cfg.RH_init * q_sat_init * self.sigma.sigma_full ** 2
@@ -682,6 +802,23 @@ class ModelDriver:
         conv_str = self.config.convection or "none"
         logger.info(f"  Physics: radiation={rad_str}, convection={conv_str}")
 
+        # Activate the slab-land surface tile when a land-sea mask was
+        # loaded in _create_topography.  f_land / albedo_land are static
+        # surface fields; the slab steps once per radiation sub-cycle.
+        if getattr(self.config, "land_mask_path", "") and self._f_land is not None:
+            from legoesm.surface_albedo import land_vegetation_albedo
+            from legoesm.core.precision import get_policy
+            _sd = get_policy().storage
+            self.physics.f_land = self._f_land.astype(_sd)
+            self.physics.albedo_land = (
+                land_vegetation_albedo(self.grid.grid_lat).astype(_sd)
+            )
+            self.physics.rad_update_steps = self.config.rad_update_steps
+            logger.info(
+                f"  Land tile: ACTIVE (slab land, C_land="
+                f"{self.physics.C_land:.1e} J/m2/K)"
+            )
+
     def _setup_external_forcing(self) -> None:
         """Configure external forcing: solar, ozone, aerosol, GHG."""
         from legoesm.forcing.external import (
@@ -695,6 +832,9 @@ class ModelDriver:
             S_0=cfg.S_0, source=cfg.solar_source,
             path=cfg.solar_file, tsi_var=cfg.solar_tsi_var,
             spectral_var=cfg.solar_spectral_var,
+            spectral_band_order=getattr(
+                cfg, "solar_spectral_band_order", "auto",
+            ),
             start_year=cfg.start_year,
         )
         self._use_solar_spectral = (cfg.solar_source == "spectral_file")
@@ -1243,6 +1383,14 @@ class ModelDriver:
                 local_adapter = ColumnAdapter(ncol=local_ncol, shape_2d=local_shape_2d)
                 if self.physics is not None:
                     self.physics.adapter = local_adapter
+                    # Scatter the slab-land surface fields to owned faces
+                    # so the rank-local physics columns match f_land /
+                    # albedo_land (the MPI ``owned_face_ids`` path).
+                    if self.physics.f_land is not None:
+                        self.physics.f_land = scatter(
+                            self.physics.f_land, layout)
+                        self.physics.albedo_land = scatter(
+                            self.physics.albedo_land, layout)
 
                 # Wrap SST/SIC forcing to return rank-local arrays
                 _global_get_sst_sic = self.get_sst_sic
@@ -1793,6 +1941,26 @@ class ModelDriver:
             # expected by ``--restart-from`` in run_amip.py and the
             # checkpoint-glob in ``run_amip_1deg_latlon_mpi.sbatch``.
             if self._is_latlon_mpi():
+                # The lat-lon MPI gather path writes a single global-shape
+                # checkpoint from rank 0's carry_aux, which holds the
+                # prognostic slab-land T_land as a rank-LOCAL latitude
+                # band.  Broadcasting that on restart would give every
+                # rank rank-0's band (wrong shape/values) and corrupt the
+                # land surface.  Banded carry-aux gather/scatter is not
+                # implemented yet, so fail fast rather than write an
+                # invalid restart (#325). The per-rank distributed format
+                # (each rank saves/loads its own band) and single-process
+                # npz are restart-exact for slab-land.
+                if (self.physics is not None
+                        and getattr(self.physics, "f_land", None) is not None):
+                    raise ValueError(
+                        "Lat-lon MPI checkpointing does not yet gather the "
+                        "banded slab-land temperature (T_land) into the "
+                        "global checkpoint — a restart would corrupt land "
+                        "surface state (#325). Use the per-rank distributed "
+                        "checkpoint format or run single-process for "
+                        "slab-land lat-lon MPI runs."
+                    )
                 state_g, tracers_g = self._gather_state_for_global_checkpoint()
                 if self._mpi_rank == 0:
                     ckpt_path = (
@@ -1841,6 +2009,26 @@ class ModelDriver:
         # Single-process path
         ckpt_path = self._output_dir / f"checkpoint_day_{int(elapsed_day):04d}.npz"
         backend = self.config.output.checkpoint_format if hasattr(self.config.output, 'checkpoint_format') else "npz"
+
+        # The zarr backend does not yet round-trip ``carry_aux`` (it is
+        # dropped on save and padded empty on load), so it cannot persist
+        # the prognostic slab-land skin temperature.  Restarting a
+        # slab-land run from a zarr checkpoint would silently reinitialize
+        # T_land from the lowest-level air temperature and branch the
+        # trajectory.  Fail fast rather than corrupt restart (#325); npz
+        # persists carry_aux (incl. T_land) and is restart-exact.
+        if (
+            backend == "zarr"
+            and self.physics is not None
+            and getattr(self.physics, "f_land", None) is not None
+        ):
+            raise ValueError(
+                "checkpoint_format='zarr' cannot persist the prognostic "
+                "slab-land temperature (T_land) — a restart would silently "
+                "reinitialize it (#325). Use checkpoint_format='npz' for "
+                "slab-land runs (or add carry_aux support to the zarr "
+                "backend)."
+            )
 
         save_restart(
             path=ckpt_path,
@@ -1932,9 +2120,14 @@ class ModelDriver:
             from legoesm.parallel.distributed import get_active_topology
             topology = get_active_topology()
             if topology is not None:
-                arrays, step, day, _, _ = load_checkpoint_distributed(
+                arrays, step, day, _, _diag_aux = load_checkpoint_distributed(
                     path, topology.rank, topology.n_processes,
                 )
+                # Restore carry auxiliaries (held radiation, conv_prog,
+                # and the prognostic slab-land T_land) so a distributed
+                # restart is trajectory-exact rather than silently
+                # reinitializing them (#325 restart-safety).
+                self._carry_aux = _diag_aux if _diag_aux else {}
                 from legoesm.core.state import HydrostaticState
                 from legoesm.core.field import Field
                 import jax.numpy as jnp
@@ -2185,6 +2378,16 @@ class ModelDriver:
         # the ``RRTMGPConfig.compute_fp32`` contract ("the MPAS driver enables
         # it for the long-run rrtmgp path").  Enabled ONLY for rrtmgp — gray
         # radiation ignores the rrtmgp sub-config, so leave the default there.
+        # compute_fp32 ENABLED for the rrtmgp MPAS path: run the optics tables
+        # + RTE solve in float32 even under JAX x64 (the dycore stays fp64).
+        # The earlier fp32 crash (PR #343) was a float64 leak in the OPTICS
+        # interpolant reference grids (gas_optics / cloud_optics linspace +
+        # vmr stack allocated strong-typed float64), which re-promoted the
+        # optical depth and broke the RTE scan carry dtype.  Fixed on branch
+        # fp32_mpas by keying those grids off the input dtype; GPU-validated
+        # (job 8113954, L4 nCells=2562): fp32 heating is float32 + finite and
+        # matches fp64 to rel-diff 1.5e-3 (REAL fp32, not a no-op).  Enabled
+        # only for rrtmgp -- gray ignores the rrtmgp sub-config.
         _rrtmgp_fp32 = (cfg.radiation == "rrtmgp")
         phys_cfg = PhysicsConfig(
             radiation=RadiationConfig(
@@ -2251,6 +2454,71 @@ class ModelDriver:
             )
         physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT,
                                   column_mesh=_column_mesh)
+
+        # ---- AMIP surface boundary: anchor radiation to the prescribed SST -
+        # Without this the MPAS hydrostatic radiation falls back to using the
+        # lowest model-level temperature ``T[..., -1]`` as the surface
+        # temperature (see integration.py ``_make_hydrostatic_radiation``), so
+        # the column has NO external thermal anchor and cold-drifts toward a
+        # dry gray-radiative equilibrium fully decoupled from the prescribed
+        # SST (measured: <T_atm> 290 -> 257 K over 30 days, still falling).
+        # The cubed-sphere/lat-lon and spectral paths apply the SST every
+        # step; the MPAS path previously applied nothing — so an "AMIP" run on
+        # MPAS was not actually SST-forced.
+        #
+        # We set a FIXED (annual-mean, sea-ice-blended) per-cell surface
+        # temperature ONCE here, before the step loop.  ``model.step`` is
+        # ``jax.jit`` with ``physics_fn`` marked *static* (primitive_eq_mpas.py
+        # ``_step_jit`` static_argnums), so the override-closure cell is read
+        # at trace time and BAKED into the first compile; a per-step update
+        # would be silently ignored (stale value) unless every step paid a
+        # retrace.  A fixed climatological anchor is therefore the correct
+        # shape for the JIT'd MPAS path, is byte-identical across every
+        # restart-chain link, and captures the first-order SST -> atmosphere
+        # coupling (surface longwave).  The seasonal SST cycle and the
+        # turbulent surface fluxes are intentionally NOT applied here: the
+        # former needs traced forcing threaded through the MPAS step signature
+        # and the latter needs the edge->cell wind interp (AMIP.md Known #3).
+        # ---- AMIP surface boundary: TIME-VARYING prescribed SST ----
+        # The prescribed SST/SIC is applied as the radiative surface
+        # temperature via a per-step TRACED ``forcing={"T_sfc": (nCells,)}``
+        # threaded through ``model.step`` -> combined physics -> radiation
+        # (see primitive_eq_mpas.step + radiation integration ``_wants_forcing``).
+        # Unlike the earlier fixed-anchor ``set_T_sfc_override`` (a JIT-static
+        # closure that could only carry ONE baked value), ``forcing`` is a jit
+        # argument, so the SST can vary in time (seasonal cycle) WITHOUT
+        # retracing — matching the cube/spectral AMIP paths.  Without any
+        # surface anchor the MPAS radiation falls back to ``T[..., -1]`` (the
+        # lowest air level) and the column cold-drifts, decoupled from the SST.
+        _sst_forcing = (cfg.radiation != "none" and self.get_sst_sic is not None)
+        _compute_T_sfc = None
+        if _sst_forcing:
+            from legoesm.forcing.surface_utils import blend_surface_temperature
+            _T_ice = cfg.T_ice
+            _ncell = int(self.state.T.data.shape[0])
+
+            def _compute_T_sfc(day):
+                # Prescribed SST/SIC at the MPAS cell latitudes (get_sst_sic is
+                # built on grid.grid_lat = mesh.latCell for analytical/AMIP
+                # data), sea-ice-blended, as a (nCells,) surface temperature.
+                _sst, _sic = self.get_sst_sic(day)
+                return blend_surface_temperature(
+                    jnp.asarray(_sst), jnp.asarray(_sic), _T_ice).reshape(-1)
+
+            # Shape guard once, up front: a non-per-cell get_sst_sic would
+            # otherwise surface as an opaque error deep inside the JIT trace.
+            _ts0 = _compute_T_sfc(START_DAY)
+            if _ts0.shape != (_ncell,):
+                raise ValueError(
+                    f"MPAS SST forcing shape {tuple(_ts0.shape)} != "
+                    f"(nCells={_ncell},); get_sst_sic must return per-cell "
+                    f"arrays on the MPAS mesh (grid.grid_lat = latCell)."
+                )
+            logger.info(
+                "  AMIP SST surface forcing (time-varying): "
+                f"day {START_DAY:.1f} T_sfc=[{float(jnp.min(_ts0)):.1f},"
+                f"{float(jnp.max(_ts0)):.1f}] mean={float(jnp.mean(_ts0)):.1f} K"
+            )
 
         # ---- AMIP surface boundary: anchor radiation to the prescribed SST -
         # Without this the MPAS hydrostatic radiation falls back to using the
@@ -2982,6 +3250,17 @@ class ModelDriver:
             conv_prog_default = jnp.zeros(conv_shape, dtype=_sd)
         conv_prog = _aux.get("conv_prog", conv_prog_default)
 
+        # Slab-land skin temperature — restored from the checkpoint when
+        # available, otherwise initialized from the lowest model-level
+        # air temperature (the thin slab equilibrates within ~1 day).
+        # ``None`` when the land tile is inactive (ocean-only run).
+        if self.physics is not None and self.physics.f_land is not None:
+            T_land = _aux.get(
+                "T_land", self.state.T.data[..., -1].astype(_sd)
+            )
+        else:
+            T_land = None
+
         # External forcing (rank-local p_s and lat for MPI)
         _phys_p_s, _phys_lat = self._owned_p_s_and_lat()
         o3_vmr, aerosol_od, ghg_vmr = self._precompute_external_forcing(
@@ -3008,6 +3287,7 @@ class ModelDriver:
             "held_lw_up_toa": held_lw_up_toa,
             "held_sw_down_toa": held_sw_down_toa,
             "conv_prog": conv_prog,
+            "T_land": T_land,
             "o3_vmr": o3_vmr, "aerosol_od": aerosol_od, "ghg_vmr": ghg_vmr,
             "lat_deg_grid": lat_deg_grid,
             "_sd": _sd,
@@ -3077,6 +3357,7 @@ class ModelDriver:
         held_lw_up_toa = ctx["held_lw_up_toa"]
         held_sw_down_toa = ctx["held_sw_down_toa"]
         conv_prog = ctx["conv_prog"]
+        T_land = ctx["T_land"]
         o3_vmr = ctx["o3_vmr"]
         aerosol_od = ctx["aerosol_od"]
         ghg_vmr = ctx["ghg_vmr"]
@@ -3216,6 +3497,7 @@ class ModelDriver:
                 target_moisture=_target_moisture,
                 target_mass=_target_mass,
                 precip_accum=jnp.zeros(_ens_2d, dtype=_sd),
+                T_land=T_land,
             )
 
             # Shard carry across devices for SPMD execution
@@ -3271,6 +3553,11 @@ class ModelDriver:
                 "seg_shflx": seg_shflx,
                 "seg_lhflx": seg_lhflx,
             }
+            # Carry the slab-land temperature to the next segment and
+            # into the checkpoint (mirrors the held-radiation fields).
+            if carry.T_land is not None:
+                T_land = carry.T_land
+                self._carry_aux["T_land"] = T_land
 
             current_step = seg_end_step
 
@@ -3435,7 +3722,12 @@ class ModelDriver:
         hyperdiffusion_3d = self._hyperdiffusion_3d_fn
         from legoesm.forcing.external import get_solar_forcing_at_time
 
-        ctx = self._prepare_run_context(start_step, start_day, restore_carry=False)
+        # restore_carry=True matches the compiled path: when continuing
+        # from a checkpoint it restores held radiation, conv_prog, and the
+        # prognostic slab-land T_land from self._carry_aux; on a fresh
+        # start self._carry_aux is empty so this is a no-op (#325
+        # restart-safety for the non-compiled reference path).
+        ctx = self._prepare_run_context(start_step, start_day, restore_carry=True)
         cfg = ctx["cfg"]
         DT = ctx["DT"]
         N_DAYS = ctx["N_DAYS"]
@@ -3470,6 +3762,11 @@ class ModelDriver:
         held_lw_up_toa = ctx["held_lw_up_toa"]
         held_sw_down_toa = ctx["held_sw_down_toa"]
         conv_prog = ctx["conv_prog"]
+        # Slab-land skin temperature (#325): threaded through the
+        # non-compiled per-step path so the reference run evolves land
+        # T_sfc consistently with the compiled-segment path.  ``None``
+        # when the land tile is inactive.
+        T_land = ctx["T_land"]
         o3_vmr = ctx["o3_vmr"]
         aerosol_od = ctx["aerosol_od"]
         ghg_vmr = ctx["ghg_vmr"]
@@ -3495,7 +3792,7 @@ class ModelDriver:
         self.state = self.model.step_with_physics(self.state, DT)
 
         phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = \
+                    held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), T_land = \
             step_unified(
                 jnp.bool_(True),
                 self.state.T.data, self.state.p_s.data,
@@ -3508,6 +3805,7 @@ class ModelDriver:
                 held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                 held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                 ghg_vmr_override=ghg_vmr,
+                T_land=T_land,
             )
         conv_prog = phys_out.conv_prog
 
@@ -3586,7 +3884,7 @@ class ModelDriver:
                 else step_unified_no_rad
             )
             phys_out, (held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
-                        held_sw_up_toa, held_lw_up_toa, held_sw_down_toa) = \
+                        held_sw_up_toa, held_lw_up_toa, held_sw_down_toa), T_land = \
                 _step_fn(
                     need_rad_jax,
                     self.state.T.data, self.state.p_s.data,
@@ -3599,8 +3897,11 @@ class ModelDriver:
                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
                     ghg_vmr_override=ghg_vmr,
+                    T_land=T_land,
                 )
             conv_prog = phys_out.conv_prog
+            if T_land is not None:
+                self._carry_aux["T_land"] = T_land
 
             # (c) Update state
             new_T = self.state.T.data + DT * phys_out.dT_dt
@@ -3714,6 +4015,12 @@ class ModelDriver:
                     "conv_prog": conv_prog,
                     "seg_precip": phys_out.precip,
                 }
+                # Preserve the prognostic slab-land skin temperature
+                # across this diagnostic-step refresh so a checkpoint
+                # written on a diagnostic step still restores T_land
+                # exactly on restart (#325 restart-safety).
+                if T_land is not None:
+                    self._carry_aux["T_land"] = T_land
 
                 # Segment callback for coupled integration
                 if self._segment_callback is not None:

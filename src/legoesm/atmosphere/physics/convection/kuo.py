@@ -24,10 +24,10 @@ Kuo is a *non-conservative* scheme by design: a fraction
 moistening that has no in-scheme sink — physically interpreted as
 surface evaporation or large-scale moisture convergence implicit in
 the parameterization. The column water residual is therefore
-``(1 - alpha_heat) * MC / tau_relax`` per timestep (≈0.25 ⋅ MC/τ for
+``(1 - alpha_heat) * MC / tau_relax_s`` per timestep (≈0.25 ⋅ MC/τ for
 the default ``alpha_heat = 0.75``). This was already true under the
 legacy ``ConvectionOutput.precipitation`` formulation; Option C
-preserves it and exposes the full ``alpha_heat * MC / tau_relax``
+preserves it and exposes the full ``alpha_heat * MC / tau_relax_s``
 condensation rate to microphysics rather than the column-net drying.
 
 References
@@ -110,12 +110,12 @@ def kuo_convection(
     # The smooth sigmoid trigger alone is not enough: at MC = 0 the
     # default ``(smooth_trigger_sharpness, me_threshold)`` give
     # ``trigger ≈ 0.475`` rather than zero, so a relaxation
-    # ``(T_moist - T) / tau_relax`` not gated by MC would still
+    # ``(T_moist - T) / tau_relax_s`` not gated by MC would still
     # heat (and condense, and remove vapor) in undersaturated
     # columns — destroying water with no source.
     #
     # Kuo (1965/1974) actually prescribes column heating proportional
-    # to ``alpha_heat * MC / tau_relax``; the legacy implementation
+    # to ``alpha_heat * MC / tau_relax_s``; the legacy implementation
     # drifted from that design by using a pure relaxation rate. The
     # ``tanh(MC / me_threshold)`` factor restores the MC-proportional
     # scaling smoothly: zero at MC = 0, ≈1 once ``MC >> me_threshold``,
@@ -129,7 +129,7 @@ def kuo_convection(
         trigger[:, None] * mc_gate[:, None]
         * config.alpha_heat
         * (T_moist - T)
-        / config.tau_relax
+        / config.tau_relax_s
     )  # (ncol, nlev)
 
     # 6. Moistening tendency (budget-consistent with heating)
@@ -144,7 +144,7 @@ def kuo_convection(
     #
     # We distribute the moistening budget proportional to the local
     # subsaturation deficit, then normalize so the column integral
-    # exactly equals (1 - alpha_heat) * MC / tau_relax.
+    # exactly equals (1 - alpha_heat) * MC / tau_relax_s.
 
     # Implied condensation rate from heating (moisture sink, kg/kg/s).
     # This is the per-level rate at which Kuo converts vapor to cloud
@@ -161,9 +161,9 @@ def kuo_convection(
     deficit_integral = jnp.sum(deficit * dp, axis=1, keepdims=True) / constants.g  # (ncol, 1)
     deficit_integral_safe = jnp.maximum(deficit_integral, 1e-20)
 
-    # Moistening budget: (1 - alpha_heat) * MC / tau_relax [kg/m^2/s]
+    # Moistening budget: (1 - alpha_heat) * MC / tau_relax_s [kg/m^2/s]
     moistening_budget = (
-        trigger * (1.0 - config.alpha_heat) * MC / config.tau_relax
+        trigger * (1.0 - config.alpha_heat) * MC / config.tau_relax_s
     )  # (ncol,)
 
     # Distribute moistening proportional to deficit, normalized so the
@@ -186,7 +186,7 @@ def kuo_convection(
 
     # 7. Convective source for cloud water — column integral equals
     # Kuo's design-intent condensation rate ``trigger * alpha_heat *
-    # MC / tau_relax`` (the gross condensation that microphysics
+    # MC / tau_relax_s`` (the gross condensation that microphysics
     # processes), distributed per-level by the implied-condensation
     # profile from latent heating.
     #
@@ -207,7 +207,7 @@ def kuo_convection(
     local_cond = jnp.maximum(implied_condensation, 0.0)
     col_local_cond = jnp.sum(local_cond * dp / constants.g, axis=-1, keepdims=True)
     target_col_cond = (
-        trigger * config.alpha_heat * MC / config.tau_relax
+        trigger * config.alpha_heat * MC / config.tau_relax_s
     )[:, None]
     # AD-safe column rescaling — see sbm.py for derivation; issue #249.
     dq_c_conv_dt = local_cond * safe_divide(

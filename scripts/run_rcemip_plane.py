@@ -67,18 +67,16 @@ from legoesm.grids.vertical import (
 )
 
 
-def _enable_x64_if_needed(precision: str) -> None:
-    """Enable JAX x64 only when caller asked for fp64. fp32 stays
-    native (no auto-promote)."""
-    if precision == "float64":
-        jax.config.update("jax_enable_x64", True)
-
-
-# fp64 is the default for legoesm dycores; fp32 must be requested via
-# --precision float32. main() flips x64 OFF before any JAX array is
-# constructed when fp32 is chosen.
-# Default-ON here preserves import-time behavior for callers that
-# instantiate state objects WITHOUT calling main() (tests, scripts).
+# JAX x64 toggle happens at IMPORT TIME (before argparse). Two paths:
+# 1. LEGOESM_RCEMIP_PLANE_FP32=1 in the env -> x64 stays OFF -> fp32
+#    arithmetic stays fp32. This is the supported fp32 path.
+# 2. Anything else -> x64 ON -> fp64 default (and fp32 arrays will
+#    auto-promote to fp64 if mixed with any fp64 literal).
+# Per codex iter-... HIGH#3: a previous --precision float32 flag was
+# DEAD because the module-level toggle ran before argparse. We deleted
+# the broken _enable_x64_if_needed shim and now require the env var.
+# main() will refuse --precision float32 without the env var to make
+# the contract explicit.
 import os as _os
 if _os.environ.get("LEGOESM_RCEMIP_PLANE_FP32") != "1":
     jax.config.update("jax_enable_x64", True)
@@ -382,18 +380,40 @@ def _build_rcemip_initial_state(grid, height_coord, dtype=jnp.float64,
         jnp.broadcast_to(q_v, (ny, nx, nlev)),
     )
     n_seed_lev = min(n_seed_lev, nlev)
-    rng_key = jax.random.PRNGKey(0)
-    theta_noise = jax.random.uniform(
-        rng_key, shape=(ny, nx, n_seed_lev),
-        minval=-theta_noise_amp, maxval=theta_noise_amp, dtype=dtype,
-    )
+    # SMOOTH k=1 cosine pattern (kx=ky=1) instead of white noise.
+    # White-noise IC has full power at grid scale where hyperdiff/Smag
+    # are weakest at t=0 (Smag's |S|=0 from rest state -> K_smag=0
+    # -> no damping at the first step). The grid-scale noise amplifies
+    # via buoyancy -> w response -> NaN within ~30 sim sec at dt=2s.
+    # smooth_k1 puts all energy at the lowest non-trivial wavenumber so
+    # the seed pattern is RESOLVED, not grid-scale. Standard fallback
+    # used by run_rce_mpi_long.py (iter-207 helper).
+    ix = jnp.arange(nx, dtype=dtype)
+    iy = jnp.arange(ny, dtype=dtype)
+    cos_x = jnp.cos(2 * jnp.pi * ix / nx)
+    cos_y = jnp.cos(2 * jnp.pi * iy / ny)
+    pattern_2d = cos_y[:, None] * cos_x[None, :]
+    theta_noise = (theta_noise_amp * pattern_2d[:, :, None]
+                    * jnp.ones((1, 1, n_seed_lev), dtype=dtype))
+    # Subtract horizontal mean (cosine pattern is already zero-mean for
+    # nx,ny > 1 but keep the operation for degenerate-grid safety).
     theta_noise = theta_noise - jnp.mean(theta_noise, axis=(0, 1),
                                          keepdims=True)
     theta_p = jnp.zeros_like(rest.theta_prime.data)
     # Bottom 4 levels in top-down indexing = LAST 4 array entries.
     theta_p = theta_p.at[..., -n_seed_lev:].set(theta_noise)
+    # Hydrostatic-balance IC: set rho' = -rho_0 * theta'/theta_0 so the
+    # initial pressure perturbation is zero (matches the warm-bubble
+    # convention used by tests/validation/test_plane_nh_rising_thermal.py).
+    # Without this, theta' alone breaks hydrostatic balance — pressure
+    # imbalance triggers an acoustic shock at step 1 that compounds with
+    # Smagorinsky + hyperdiff and NaN's within ~2 sim hours at dt=2s.
+    rho_0 = jnp.asarray(height_coord.rho_ref, dtype=dtype)
+    theta_0 = jnp.asarray(height_coord.theta_ref, dtype=dtype)
+    rho_p = -rho_0 * theta_p / theta_0
     return rest._replace(
         theta_prime=rest.theta_prime.replace(data=theta_p),
+        rho_prime=rest.rho_prime.replace(data=rho_p),
         tracers=rest.tracers.replace(data=tracers),
     )
 
@@ -444,6 +464,13 @@ def parse_args():
     p.add_argument("--semi-implicit", action="store_true",
                    help="Use semi-implicit acoustic substepping (lifts "
                         "vertical CFL). Recommended for long runs at dx>=2km.")
+    p.add_argument("--substep-horizontal-acoustic", action="store_true",
+                   help="Move horizontal pressure gradient + mass continuity "
+                        "into the acoustic substep loop (full Skamarock-Klemp "
+                        "split). REQUIRED for stable runs with perturbed "
+                        "theta' IC at fine dx (<=1 km): the horizontal "
+                        "acoustic mode is otherwise integrated at the outer dt "
+                        "and blows up (u -> O(1e4) m/s -> NaN). Plane SI only.")
     p.add_argument("--n-acoustic-substeps", type=int, default=6,
                    help="Acoustic substeps per RK3 stage. Default 6 "
                         "matches CompressibleEulerConfig default.")
@@ -459,6 +486,14 @@ def parse_args():
                         "default ON for RCE (was OFF in iter-78 bench config).")
     p.add_argument("--no-implicit-buoyancy", dest="implicit_buoyancy",
                    action="store_false")
+    p.add_argument("--si-w-filter-nu", type=float, default=0.0,
+                   help="Vertical Laplacian filter on w inside each SI "
+                        "acoustic substep. 0.0 = off (default). 0.3-0.4 "
+                        "fully damps the structural exponential mode that "
+                        "the SI scheme exhibits with perturbed theta' IC. "
+                        "0.5 = explicit-diffusion CFL bound — above NaNs. "
+                        "Recommended for RCE runs with theta_noise_amp > 0; "
+                        "leave off for clean Wing IC + active moist physics.")
     p.add_argument("--theta-noise-amp", type=float, default=0.0,
                    help="Initial theta' perturbation amplitude [K] at bottom 4 "
                         "levels. 0 = clean Wing IC (stable at dt up to 10 s "
@@ -529,17 +564,41 @@ def main():
           f"smag_cs={args.smag_cs}")
     print(f"  radiation={args.radiation}, microphysics={args.microphysics}")
 
+    # Per codex iter-... HIGH#3: explicit contract check. fp32 must be
+    # requested via the env var BEFORE Python import time; --precision
+    # alone is insufficient because jax.config.update("jax_enable_x64",
+    # True) runs at module load.
+    if args.precision == "float32" and _os.environ.get(
+        "LEGOESM_RCEMIP_PLANE_FP32"
+    ) != "1":
+        raise SystemExit(
+            "--precision float32 requires LEGOESM_RCEMIP_PLANE_FP32=1 in "
+            "the environment BEFORE python launch (the jax x64 toggle "
+            "runs at module import time, before argparse). Example: "
+            "LEGOESM_RCEMIP_PLANE_FP32=1 .venv/bin/python "
+            "scripts/run_rcemip_plane.py --precision float32 ..."
+        )
     dtype = jnp.float32 if args.precision == "float32" else jnp.float64
     grid = create_plane_grid(
         nx=args.nx, ny=args.ny, nlev=args.nlev,
         dx=args.dx, dy=args.dx, dtype=dtype,
     )
+    # RCEMIP1 surface pressure (Wing 2018 = 1014.8 hPa). Passing p_sfc
+    # switches compute_reference_state to the bottom-up hydrostatic BC
+    # (iter-95). Without it, the legacy top-down BC over a 33 km column
+    # gives exner_sfc=1.33 (p_sfc~2.7 atm) -> T_lowest=399 K -> surface
+    # sensible-heat flux has the WRONG SIGN (cools the air toward a
+    # ~236 K cold-biased equilibrium instead of warming toward SST).
+    # With p_sfc set: exner_sfc=1.003, T_lowest=301 K, flux correct.
+    p_sfc_rcemip = 101480.0
     if args.stretched_vertical:
         hc = create_stretched_height_coordinate(
-            args.nlev, H=args.H, dz_sfc=args.dz_sfc,
+            args.nlev, H=args.H, dz_sfc=args.dz_sfc, p_sfc=p_sfc_rcemip,
         )
     else:
-        hc = create_height_coordinate(args.nlev, H=args.H)
+        hc = create_height_coordinate(
+            args.nlev, H=args.H, p_sfc=p_sfc_rcemip,
+        )
     tm = make_flat_plane_terrain_metric(grid, hc)
     cfg = CompressibleEulerConfig(
         sponge_coeff=args.sponge_coeff,
@@ -551,6 +610,8 @@ def main():
         n_acoustic_substeps=args.n_acoustic_substeps,
         acoustic_off_centering=args.off_centering,
         implicit_buoyancy=args.implicit_buoyancy,
+        si_w_vertical_filter_nu=args.si_w_filter_nu,
+        substep_horizontal_acoustic=args.substep_horizontal_acoustic,
         horizontal_advection_scheme=args.advection,
         use_coriolis=False,
         fix_mass=True, anchor_mass_to_initial=True,
@@ -577,9 +638,20 @@ def main():
             Cd=0.0 if args.no_surface_flux else 1.0e-3,
             Ch=0.0 if args.no_surface_flux else 1.0e-3,
         )
+        sim_refresh_s = args.radiation_interval * args.dt
         print(f"  RADIATION GATED: refresh every {args.radiation_interval} "
-              f"steps = {args.radiation_interval * args.dt:.0f} s sim time "
+              f"steps = {sim_refresh_s:.0f} s sim time "
               f"(RCEMIP typical 300-1800 s).")
+        # Per codex iter-... MEDIUM#7: warn if interval is well outside
+        # the operational CRM range (5-30 min sim).
+        if sim_refresh_s > 1800.0:
+            print(f"  WARN: radiation refresh interval {sim_refresh_s:.0f} s "
+                  f"> 1800 s (30 min). Slow-process error grows linearly "
+                  f"with interval; SAM/WRF/CM1 typical max = 30 min.")
+        elif sim_refresh_s < 60.0:
+            print(f"  WARN: radiation refresh interval {sim_refresh_s:.0f} s "
+                  f"< 60 s. RRTMGP cost dominates the run; consider "
+                  f"--radiation-interval >= {int(300 / args.dt)}.")
     else:
         physics_fn = make_rcemip_physics(
             grid, hc, tm,
@@ -592,12 +664,20 @@ def main():
         )
         rad_physics_fn = None
 
-    # Morrison + Seifert-Beheng need 9 tracer slots (q_v, q_c, q_r,
-    # q_i, q_s, q_g, N_c, N_r, N_i); 3 slots cover Kessler/Sundqvist/
-    # Thompson which only carry the warm-rain mass mixing ratios.
-    n_tracers = 9 if args.microphysics in (
-        "morrison", "seifert_beheng",
-    ) else 3
+    # Tracer slot count per scheme (codex iter-... MEDIUM#5):
+    #   morrison / seifert_beheng / p3: 9 slots (q_v, q_c, q_r, q_i,
+    #     q_s, q_g, N_c, N_r, N_i)
+    #   thompson: 7 slots (q_v, q_c, q_r, q_i, q_s, q_g, N_i)
+    #   kessler / sundqvist / ml_emulator / none: 3 slots (q_v, q_c, q_r)
+    # The microphysics integration validates the slot count at JIT time
+    # and raises ValueError if too few — but we allocate generously
+    # here to surface schema errors at parse time, not deep in JIT.
+    if args.microphysics in ("morrison", "seifert_beheng", "p3"):
+        n_tracers = 9
+    elif args.microphysics == "thompson":
+        n_tracers = 7
+    else:
+        n_tracers = 3
     state = _build_rcemip_initial_state(
         grid, hc, dtype=dtype, theta_noise_amp=args.theta_noise_amp,
         n_tracers=n_tracers,
@@ -652,8 +732,97 @@ def main():
             _emit_surface_snapshot_png(
                 snap_dir, i + 1, (i + 1) * args.dt, state, grid, hc,
             )
+            _emit_profile_npz(
+                snap_dir, i + 1, (i + 1) * args.dt, state, hc,
+            )
+
+    if args.snapshot_every > 0:
+        _render_profile_evolution_png(
+            snap_dir, args.output / "profile_evolution.png",
+        )
 
     print(f"\nOutput: {args.output}")
+
+
+def _emit_profile_npz(snap_dir: Path, step: int, t_s: float,
+                       state, hc) -> None:
+    """Save horizontal-mean vertical profiles per snapshot day.
+
+    Profiles dumped: T(z), theta'(z), q_v(z), q_c(z), w_RMS(z), CWV(z).
+    Read back by render_profile_evolution_png at end of run.
+    """
+    import numpy as np
+    import jax.numpy as _jnp
+    nlev = state.theta_prime.data.shape[-1]
+    theta_p = np.asarray(state.theta_prime.data)
+    rho_p = np.asarray(state.rho_prime.data)
+    # w lives at half levels (nlev+1); average to full levels (nlev)
+    # so the profile axis aligns with theta/qv/etc.
+    w_half = np.asarray(state.w.data)
+    w = 0.5 * (w_half[..., :-1] + w_half[..., 1:])
+    theta_0 = np.asarray(hc.theta_ref)
+    rho_0 = np.asarray(hc.rho_ref)
+    pi_0 = np.asarray(hc.exner_ref)
+    theta_total = theta_0 + theta_p
+    # Hydrostatic Exner -> Temperature at full levels (cheap diagnostic).
+    T = theta_total * pi_0
+    q_v = np.asarray(state.tracers.data[..., 0])
+    n_tr = state.tracers.data.shape[-1]
+    q_c = np.asarray(state.tracers.data[..., 1]) if n_tr > 1 else None
+    # Horizontal means over (ny, nx)
+    np.savez(snap_dir / f"profile_step_{step:08d}.npz",
+             step=step, t_s=t_s, z=np.asarray(hc.z_full),
+             T_mean=T.mean(axis=(0, 1)),
+             theta_mean=theta_total.mean(axis=(0, 1)),
+             theta_p_mean=theta_p.mean(axis=(0, 1)),
+             theta_p_std=theta_p.std(axis=(0, 1)),
+             qv_mean=q_v.mean(axis=(0, 1)),
+             qv_std=q_v.std(axis=(0, 1)),
+             qc_mean=(q_c.mean(axis=(0, 1)) if q_c is not None
+                      else np.zeros(nlev)),
+             w_RMS=np.sqrt((w ** 2).mean(axis=(0, 1))),
+             rho_mean=(rho_0 + rho_p.mean(axis=(0, 1))))
+
+
+def _render_profile_evolution_png(snap_dir: Path, out: Path) -> None:
+    """Compose a 5-panel profile-vs-day PNG from saved profile_*.npz."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+    npz_files = sorted(snap_dir.glob("profile_step_*.npz"))
+    if not npz_files:
+        print(f"  no profile npz found in {snap_dir}; skip evolution PNG")
+        return
+    data = [np.load(f) for f in npz_files]
+    days = np.array([d["t_s"] for d in data]) / 86400.0
+    z_km = data[0]["z"] / 1000.0
+    fig, axes = plt.subplots(1, 5, figsize=(18, 7), sharey=True)
+    panels = [
+        ("theta_mean", "θ(z) [K]", "viridis"),
+        ("qv_mean", "q_v(z) [kg/kg]", "plasma"),
+        ("qc_mean", "q_c(z) [kg/kg]", "Blues"),
+        ("w_RMS", "w_RMS(z) [m/s]", "magma"),
+        ("theta_p_std", "θ' std(z) [K]", "inferno"),
+    ]
+    cmap = plt.get_cmap("viridis", len(data))
+    for ax, (key, label, _cm) in zip(axes, panels):
+        for i, d in enumerate(data):
+            ax.plot(d[key], z_km, color=cmap(i / max(1, len(data) - 1)),
+                    linewidth=0.7, alpha=0.7)
+        ax.set_xlabel(label)
+        ax.grid(alpha=0.3)
+    axes[0].set_ylabel("height [km]")
+    sm = plt.cm.ScalarMappable(cmap=cmap,
+                                norm=plt.Normalize(vmin=days[0],
+                                                   vmax=days[-1]))
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=axes, fraction=0.02, pad=0.04,
+                        label="day")
+    fig.suptitle("RCE horizontal-mean profile evolution", fontsize=13)
+    fig.savefig(out, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out}")
 
 
 def _emit_surface_snapshot_png(snap_dir: Path, step: int, t_s: float,

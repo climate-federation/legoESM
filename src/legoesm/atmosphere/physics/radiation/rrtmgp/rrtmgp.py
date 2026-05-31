@@ -26,8 +26,6 @@ from legoesm.atmosphere.physics.radiation.rrtmgp.config.radiative_transfer impor
 )
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import atmospheric_state
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import constants as optics_constants
-from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_volume_mixing_ratio
-from legoesm.atmosphere.physics.radiation.rrtmgp.optics import optics
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics.lookup_volume_mixing_ratio import (
     LookupVolumeMixingRatio,
 )
@@ -138,6 +136,77 @@ def standard_o3_profile(p_full):
     return _standard_o3_profile(p_full)
 
 
+def _cast_optics_f64_to_f32(obj, _seen=None):
+    """Recursively cast every float64 array leaf in ``obj`` to float32.
+
+    The RRTMGP optics objects are plain Python classes (``RRTMOptics``)
+    holding stdlib ``@dataclasses.dataclass(frozen=True)`` lookup tables
+    (``gas_optics_lw/sw``, ``cloud_optics_lw/sw``) whose fields are
+    ``jax.Array`` tables.  NONE of these are registered JAX pytrees, so
+    ``jax.tree_util.tree_map`` treats each as a single opaque leaf and casts
+    NOTHING — the silent no-op this replaces (fp32 heating came out
+    bit-identical to fp64 because the tables stayed float64).  This walks the
+    structure by hand: float64 arrays are cast; frozen dataclasses are rebuilt
+    via ``dataclasses.replace``; dicts / lists / tuples are mapped; and plain
+    objects with a ``__dict__`` (e.g. ``RRTMOptics``) have each attribute cast
+    in place.  Integer index tables and non-float leaves are left untouched.
+
+    An ``id``-keyed ``_seen`` set breaks reference cycles in the plain-object
+    graph (``OpticsScheme`` subclasses bind ``functools.partial``/closures that
+    capture ``self`` and other optics objects, so a naive deep walk recurses
+    forever — the ``RecursionError`` this guards against).  Callables, modules,
+    and types are skipped (they hold no float tables and are common cycle
+    waypoints).  Used only on the ``compute_fp32`` path.
+    """
+    import dataclasses as _dc
+    import types as _types
+
+    if _seen is None:
+        _seen = set()
+
+    # Array leaf (jax or numpy): cast float64 -> float32, keep everything else
+    # (int index tables, already-float32, bool) as is.
+    _dtype = getattr(obj, "dtype", None)
+    if _dtype is not None and hasattr(obj, "astype"):
+        return obj.astype(jnp.float32) if _dtype == jnp.float64 else obj
+    # Skip leaves that hold no tables and are common cycle waypoints.
+    if (obj is None or isinstance(obj, (str, bytes, int, float, bool,
+                                        _types.ModuleType, type))
+            or callable(obj)):
+        return obj
+    # Cycle guard: only mutable containers/objects can form cycles.
+    _oid = id(obj)
+    if _oid in _seen:
+        return obj
+    _seen.add(_oid)
+
+    # Frozen / plain stdlib dataclass instance: rebuild changed float fields.
+    if _dc.is_dataclass(obj) and not isinstance(obj, type):
+        changes = {}
+        for _f in _dc.fields(obj):
+            _v = getattr(obj, _f.name)
+            _nv = _cast_optics_f64_to_f32(_v, _seen)
+            if _nv is not _v:
+                changes[_f.name] = _nv
+        return _dc.replace(obj, **changes) if changes else obj
+    if isinstance(obj, dict):
+        return {_k: _cast_optics_f64_to_f32(_v, _seen) for _k, _v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_cast_optics_f64_to_f32(_v, _seen) for _v in obj)
+    # Plain object (e.g. RRTMOptics, which is mutable): cast each data attribute
+    # in place and return the same object.  Methods/bound closures are skipped
+    # by the callable guard above when recursed into.
+    if hasattr(obj, "__dict__"):
+        for _a, _v in vars(obj).items():
+            if callable(_v):
+                continue
+            _nv = _cast_optics_f64_to_f32(_v, _seen)
+            if _nv is not _v:
+                setattr(obj, _a, _nv)
+        return obj
+    return obj
+
+
 class RRTMGP:
   """Rapid Radiative Transfer Model for General Circulation Models (RRTMGP).
 
@@ -149,36 +218,6 @@ class RRTMGP:
   """
 
   @staticmethod
-  def _cache_key(config):
-      """Compute a hashable cache key from an RRTMGPConfig.
-
-      .. deprecated:: issue #273 follow-up
-         This key drives **both** the heavy optics-table cache
-         (``_legoesm_optics_cache`` — keyed only on table-shape
-         inputs) and the lighter solver-instance cache
-         (``_instance_cache`` in ``rrtmgp_radiation.py`` — needs to
-         additionally invalidate on solver-behavior fields like
-         ``use_scan``).  Sharing one key for both caches meant a
-         first call with ``use_scan=False`` would cache a solver
-         instance whose ``_config.use_scan`` is ``False``; a later
-         call with ``use_scan=True`` (or the new ``None`` auto-pick)
-         would reuse that stale instance and silently keep running
-         the for-loop path — defeating the GPU scan auto-pick this
-         module ships.
-
-         Production code should call the more specific keys:
-
-         * ``_optics_cache_key(config)`` for the optics tables
-           (omits behavior fields that don't change tables).
-         * ``_instance_cache_key(config)`` for solver instances
-           (includes behavior fields like ``use_scan``).
-
-         ``_cache_key`` remains as a backward-compatible alias for
-         ``_optics_cache_key``.
-      """
-      return RRTMGP._optics_cache_key(config)
-
-  @staticmethod
   def _optics_cache_key(config):
       """Hashable key for the optics-table cache.
 
@@ -187,6 +226,15 @@ class RRTMGP:
       x64 precision (table dtype depends on it).  Solver-behavior
       fields like ``use_scan`` deliberately omitted — the tables
       themselves are independent of how the solver traverses them.
+
+      Iter-40: re-introduced ``include_clouds`` here BUT for a
+      different reason than the pre-iter-36 state — iter-40 made
+      ``RRTMOptics.__init__`` skip the cloud-table load when
+      ``include_clouds=False``, so the constructed optics_lib is
+      now genuinely different across the True/False configurations
+      (one has cloud_optics_lw/sw populated, the other has them set
+      to None).  Memory: clear-sky workflows save ~MB of cloud
+      tables per cached entry.
       """
       import jax
       x64 = bool(jax.config.jax_enable_x64)
@@ -202,19 +250,73 @@ class RRTMGP:
 
       Extends the optics key with the behavior fields that change
       the *result* of ``solve_columns`` (or its compile-time graph)
-      without changing the optics tables.  Critically includes
-      ``use_scan`` so the issue-#273 GPU auto-pick (``None`` ⇒ scan
-      on GPU/TPU, for-loop on CPU) is honored even when an earlier
-      call cached an explicit ``False``.  Also includes
-      ``use_optimal_angle`` (iter-2): the optimal-angle path traces
-      a different two-stream graph (per-band/per-column secant) than
-      the fixed-1.66 path, so a config flip must rebuild the solver
-      instance.
+      without changing the optics tables.
+
+      Includes:
+      - ``use_scan`` (issue #273): GPU auto-pick (``None`` ⇒ scan on
+        GPU/TPU, for-loop on CPU) is honored even when an earlier call
+        cached an explicit ``False``.
+      - ``use_optimal_angle`` (iter-2): the optimal-angle path traces
+        a different two-stream graph (per-band/per-column secant) than
+        the fixed-1.66 path, so a config flip must rebuild.
+      - ``S_0``, ``aerosol_ssa``, ``aerosol_g`` (iter-32 audit): these
+        are NOT overridable per-call via ``solve_columns(...)`` kwargs
+        — they are read off ``self._config`` every call.  Without
+        them in the cache key, a later config that bumps e.g.
+        ``aerosol_ssa = 0.95`` would silently reuse a solver instance
+        built with ``aerosol_ssa = 0.93`` and apply the stale value.
+      - ``sfc_emissivity``, ``sfc_albedo`` (iter-32 audit): these ARE
+        overridable per call, but ``_resolve_surface_field(override,
+        fallback)`` falls back to the config default when no override
+        is passed.  AIMIP populates these with ``(ncol,)`` arrays
+        (low-rank lat-lon expansion) — arrays aren't hashable, so we
+        use ``id(...)`` for arrays (cache-correct as long as AIMIP
+        doesn't mutate in place, which JAX immutability prevents).
+        Scalar floats hash directly.
       """
+      def _hashable(x):
+          # Float / int / None / str / bool: hashable directly.
+          try:
+              hash(x)
+              return x
+          except TypeError:
+              # 0-D arrays (jnp/np scalar shape == ()): convert to a
+              # stable value-hashable form so two ``jnp.array(0.07)``
+              # values share the cache key.  iter-39 + codex iter-40
+              # review: ``float(x)`` fails on complex dtypes; gate
+              # on dtype kind to keep ``float()`` safe for the
+              # legitimate ``float`` / ``int`` / ``bool`` config
+              # fields and fall through to ``id()`` for exotic
+              # dtypes (e.g. complex, which RRTMGPConfig should
+              # never see).
+              shape = getattr(x, "shape", None)
+              if shape == ():
+                  dtype_kind = getattr(getattr(x, "dtype", None), "kind", None)
+                  # 'f' float, 'i' int, 'b' bool, 'u' uint — all safely
+                  # coerce to Python float.  'c' complex, 'O' object,
+                  # 'U' unicode, etc. fall through to id().
+                  if dtype_kind in ("f", "i", "b", "u"):
+                      return float(x)
+              # N-D arrays (or 0-D with non-numeric dtype): id-based
+              # key.  Safe under JAX immutability; a new array (e.g.
+              # fresh AIMIP fit per epoch) gets a new id and
+              # rebuilds the cached instance.
+              return id(x)
+
+      # iter-40: ``include_clouds`` is now ALSO in the optics key
+      # (because RRTMOptics conditionally loads cloud tables on it),
+      # so it's redundant here.  Keeping it would not be a
+      # correctness bug, just a minor duplicate that adds no info on
+      # top of the optics key tuple.  Dropped to reduce tuple size.
       return (
           RRTMGP._optics_cache_key(config),
           config.use_scan,
           getattr(config, "use_optimal_angle", False),
+          config.S_0,
+          config.aerosol_ssa,
+          config.aerosol_g,
+          _hashable(config.sfc_emissivity),
+          _hashable(config.sfc_albedo),
       )
 
   @staticmethod
@@ -265,23 +367,24 @@ class RRTMGP:
               global_means=global_means, profiles=None,
           )
 
-          optics_lib = optics_factory(optics_params, vmr_lib)
+          # iter-40: pass include_clouds to skip cloud-table load for
+          # clear-sky-only workflows; ~MB saved per cached entry.
+          optics_lib = optics_factory(
+              optics_params, vmr_lib,
+              include_clouds=config.include_clouds,
+          )
           if getattr(config, "compute_fp32", False):
-              # Cast the loaded optics tables float64 -> float32 so the whole
-              # solve runs in fp32 even under JAX x64 (the dycore keeps fp64).
-              # ``solve_columns`` reads ``_table_dtype`` from these tables and
-              # promotes every input + lax.scan carry to match, so casting the
-              # tables alone flips the entire RTE path to fp32 — ~2x faster on
-              # fp64-limited GPUs, heating identical to <0.01 K/day.  Only
-              # float64 leaves are cast (integer index tables are left intact).
-              import jax as _jax
-              optics_lib = _jax.tree_util.tree_map(
-                  lambda _x: (_x.astype(jnp.float32)
-                              if (hasattr(_x, "dtype")
-                                  and _x.dtype == jnp.float64)
-                              else _x),
-                  optics_lib,
-              )
+              # Cast the optics tables float64 -> float32 (the dycore keeps
+              # fp64).  GATED OFF in production: the MPAS driver sets
+              # ``compute_fp32=False`` because the fp32 RTE path still crashes
+              # (the shortwave direct-beam recurrence re-promotes the scan carry
+              # to float64) -- see ``_run_mpas`` + PR #343.  Retained inert so a
+              # future kernel-wide precision audit can flip the flag.
+              # ``_cast_optics_f64_to_f32`` walks the RRTMOptics object + its
+              # frozen-dataclass tables by hand (they are NOT registered JAX
+              # pytrees, so ``tree_map`` would no-op).
+              vmr_lib = _cast_optics_f64_to_f32(vmr_lib)
+              optics_lib = _cast_optics_f64_to_f32(optics_lib)
           _legoesm_optics_cache[key] = (optics_lib, vmr_lib)
       return _legoesm_optics_cache[key]
 
@@ -301,16 +404,12 @@ class RRTMGP:
       """
       instance = object.__new__(cls)
       optics_lib, vmr_lib = cls._build_optics_and_vmr(config)
-      # Minimal atmospheric state with VMR library; zenith/albedo/emissivity
-      # are overridden per-call in solve_columns().
-      instance.atmospheric_state = atmospheric_state.AtmosphericState(
-          sfc_emis=config.sfc_emissivity,
-          sfc_alb=config.sfc_albedo,
-          zenith=0.0,
-          irrad=config.S_0,
-          vmr=vmr_lib,
-          toa_flux_lw=0.0,
-      )
+      # Store the VMR library directly — the per-call ``atmos_state``
+      # in ``solve_columns`` carries the actual zenith / albedo /
+      # emissivity for the call.  iter-33 dropped the redundant
+      # ``instance.atmospheric_state`` field (previously a default
+      # AtmosphericState whose only purpose was to expose ``vmr``).
+      instance._vmr_lib = vmr_lib
       instance.optics_lib = optics_lib
       instance._config = config
       return instance
@@ -355,6 +454,7 @@ class RRTMGP:
       cloud_r_eff_ice: jnp.ndarray | None = None,
       cloud_fraction: jnp.ndarray | None = None,
       aerosol_optical_depth: jnp.ndarray | None = None,
+      aerosol_absorption_optical_depth_lw: jnp.ndarray | None = None,
       solar_spectral_fraction: jnp.ndarray | None = None,
       ghg_vmr_override: dict | None = None,
   ):
@@ -398,7 +498,15 @@ class RRTMGP:
       cloud_r_eff_ice : jnp.ndarray | None
           Ice cloud effective radius (ncol, nlev) [m].
       aerosol_optical_depth : jnp.ndarray | None
-          Prescribed aerosol optical depth per layer (ncol, nlev).
+          Prescribed shortwave aerosol optical depth per layer
+          (ncol, nlev).
+      aerosol_absorption_optical_depth_lw : jnp.ndarray | None
+          Prescribed longwave aerosol **absorption** optical depth per
+          layer (ncol, nlev) — NOT extinction.  Added to the absorption
+          optical depth with ssa=0 (LW scattering neglected; a caller
+          holding extinction OD must scale by the absorption fraction
+          1−ω first).  ``None`` (default) leaves the longwave solution
+          byte-identical.
       solar_spectral_fraction : jnp.ndarray | None
           Per-g-point solar source weights (ngpt_sw,).
       ghg_vmr_override : dict | None
@@ -483,7 +591,7 @@ class RRTMGP:
 
       # --- 3. Build atmospheric state ---
       optics_lib = self.optics_lib
-      vmr_lib = self.atmospheric_state.vmr
+      vmr_lib = self._vmr_lib
 
       cos_z_col = jnp.clip(cos_zenith, 0.0, 1.0)
       zenith_col = jnp.arccos(cos_z_col)[:, None, None]
@@ -544,13 +652,21 @@ class RRTMGP:
       else:
           cpl_3d = cpi_3d = crl_3d = cri_3d = cf_3d = None
 
-      # Optional aerosol optical depth
+      # Optional aerosol optical depth (shortwave)
       if aerosol_optical_depth is not None:
           aerosol_od_3d = _add_halos(
               jnp.clip(aerosol_optical_depth, 0.0, None)[:, None, ::-1],
           )
       else:
           aerosol_od_3d = None
+
+      # Optional aerosol optical depth (longwave, pure absorber)
+      if aerosol_absorption_optical_depth_lw is not None:
+          aerosol_od_lw_3d = _add_halos(
+              jnp.clip(aerosol_absorption_optical_depth_lw, 0.0, None)[:, None, ::-1],
+          )
+      else:
+          aerosol_od_lw_3d = None
 
       # Optional spectral solar forcing
       if solar_spectral_fraction is not None:
@@ -579,6 +695,7 @@ class RRTMGP:
           cloud_r_eff_ice=cri_3d,
           cloud_path_ice=cpi_3d,
           cloud_fraction=cf_3d,
+          aerosol_absorption_optical_depth=aerosol_od_lw_3d,
           use_scan=config.use_scan,
           use_optimal_angle=getattr(config, "use_optimal_angle", False),
       )
