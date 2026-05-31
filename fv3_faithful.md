@@ -230,3 +230,16 @@ inertia_gravity_wave cross-grid (cube C24 / latlon 36×72 / mpas ico3), 3/3 PASS
 (iter105, cube≈latlon≈mpas balance, T drift machine-zero) + inertia_gravity_wave (faithful omega, L2
 best).  Ocean directive goal (close to MPAS/latlon, OMIP) MET for the representative dynamics; the
 exhaustive 57-case matrix is CPU-infeasible to run here.
+
+
+## iter112 — FB residual FIELD decomposition: it's a WIND/VORTICITY vertex mode (not gravity-wave)
+FB W2 C36, 60 steps, deviation-from-init by field: |Δu_d|max=16.5 (~43% of 38 m/s), |Δv_d|max=20.4
+(~54%), |Δh|max=198 m (~8% of h). ⇒ the growing mode is PRIMARILY in the WINDS (u_d,v_d), with h
+passively following (small). Localization: u_d edge/vertex mean 5.37 vs interior 2.29 (2.3×), v_d 1.7×,
+argmax face 4 for BOTH winds (matches the recorded eigenmode "edge/corner faces 0,4"); h is smaller +
+less edge-enhanced (1.5×, face 2). ⇒ CONFIRMS the FB residual / C96 eigenmode is a ROTATIONAL
+(vorticity/momentum) vertex mode, NOT a height/gravity-wave mode — consistent with the centered-vs-
+upwind vorticity-coupling root. CONCRETE HEAD-START for the dedicated linearized-FB eigen-analysis:
+focus on the WIND/VORTICITY coupling at the FACE-4 (and 0) VERTICES; the height field is a follower.
+This + the ruled-out single-step candidates (metric/halo: iter94/107/110b; dissipation/Phase4/wind-halo:
+iter82-83) fully scope the eigen-analysis target.
