@@ -82,8 +82,12 @@ the validated state via loop hacks against a concurrently-`git reset` tree)
   Promotion to default blocked by phillips: upwind baroclinic-instability
   dissipation differs from latlon → no div_damp cleanly gives 9/9 AND latlon-match.
   fv3sw stays validated default. (fv3edge usable now for upwind-faithful runs.)
-- Climate-equilibrium cross-grid (held_suarez/AMIP): CPU-bound (latlon hydro
-  ~35min/case; needs ~200-day spin-up).
+- Climate-equilibrium cross-grid (held_suarez/AMIP): INFEASIBLE here, confirmed —
+  cube HS ~1 min/day (30-day ~30min) + spectral ~15min, AND a day-30 run is
+  non-equilibrated (HS climate needs ~200-day spin-up + time-averaging to compare
+  statistically). latlon/ico hydro worse (~35min/case). DON'T re-attempt at this
+  compute; cube climate-relevant dynamics (baroclinic eddies, gravity waves) are
+  verified clean + close via the fast cases.
 - C-face OMIP-coastline mask (coastal-BC, beyond matrix; SW-core jit-static).
 State persisted: memory `cube-fv3-faithfulness-state`. Residuals: atm
 baroclinic+topo = smooth converging truncation (cube more diffusive at C36);
