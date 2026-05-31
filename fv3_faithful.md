@@ -78,6 +78,23 @@ Production uses RK3 Arakawa-Lamb (works). `fv3_fb_sw_step` / `FV3FBShallowWaterM
   Phase4-independent, wind-halo-independent. Note: the port `zeta` (_d_sw_native:1885) uses the
   COVARIANT D-grid circulation u_d·dx,v_d·dy with NO corner correction; the oracle d_sw5 wk (1596)
   uses ut/vt + fill_corners. NEXT: focused oracle-diff workflow on the core-scheme corner.
+  iter84 — CORE-CORNER WORKFLOW (9 agents) found 2 CONFIRMED vertex-growth causes:
+  **(A, primary, FB-only):** `_corner_vorticity` (c_sw, fv3_sw_core.py:1187-1233) duogrid path
+  reconstructs the halo fx/fy from a 2-pt center-avg of uc/vc + EDGE-MODE dxc/dyc (self-admitted
+  O(dx), lines 1212-1215) — NOT the rotation-exact cross-face circulation. On the duogrid the FV3
+  corner correction (sw_core.F90:397-400) is correctly SKIPPED (relies on the exact cross-face fy),
+  but the port's reconstruction is ~2% off at the vertices (skipped tests test_corner_vorticity_
+  matches_fortran_duogrid "3e-6, 39.5% of elems" / _boundary_gates "~2% of interior"; the only
+  ACTIVE duogrid test covers INTERIOR corners only, NOT the 8 vertices). c_sw → uc_new (dissip-/
+  Phase4-independent). FIX: cross-face metric halo for dxc/dyc (or vector-halo fx_circ/fy_circ).
+  **(B, secondary-for-FB but PRODUCTION-SHARED):** `area_corner` at the 8 cube vertices is COPIED
+  from the diagonal interior cell (`area_c[0,0]=area_c[1,1]`, cubed_sphere_cdgrid.py:411-414; edges
+  406-409 extrapolated too) — but a vertex is a 3-FACE JUNCTION (3 sub-quadrants ~ -25%), not a
+  4-quadrant interior dual cell. FV3 computes get_area_tri (spherical triangle, fv_grid_tools.F90:
+  2658-2728, called unconditionally incl. equiangular). ⇒ rarea_c at the 8 vertices is mis-scaled
+  → wrong vertex vorticity for BOTH the FB chain AND the PRODUCTION cube (C96 W5 eigenmode is also
+  vertex/corner-localized — this is a candidate eigenmode root). NEXT: quantify the vertex-area
+  error; implement the FV3 junction area; regression-test production cube SW + eigenmode.
 
 ## gnomonic_ed GRID (FV3 operational gt=0; iter62-78) — WIRED + clean + codex-approved
 create defaulted to EQUIANGULAR (gt=2, aspect 1.40); FV3 uses gnomonic_ed (gt=0, aspect 1.06, dx √2)
