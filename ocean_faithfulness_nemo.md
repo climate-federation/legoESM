@@ -8,6 +8,20 @@ Review every code change with `/codex:adversarial-review`. Shrink this file ever
 **Branch:** `omip-faithful-nemo-comparison`. Completion promise DONE only when grids
 genuinely match NEMO — far off; no false DONE.
 
+## BREAKTHROUGH (iter 16+ — read this FIRST)
+**The "not faithful" verdict was largely a SCORER BUG.** `compare_omip_nemo._load_legoesm`
+double-applied `rad2deg` to the snapshot lat/lon (already in degrees) → the IDW regrid
+got garbage coordinates → scrambled pattern (corr ~0.1) + inflated −6.6 °C bias. **Fixed
+(5c0571f6).** TRUE eORCA025 **day-10** vs NEMO yr-2: **SST corr 0.968, bias −0.98 °C, RMSE
+2.76 °C** (just above the 2.5 "good" bar); SSS corr 0.79, bias −0.10 (runoff-gated). So the
+¼° legoESM ocean **already matches NEMO's SST pattern at 0.97 correlation** after a 10-day
+spinup — far from the old "poor RMSE 13.7 corr 0.1". Native diag: lego tropics 25.4 °C /
+global 15.0 °C vs NEMO 27.4 / 17.9. Remaining gap to "good/excellent": (a) longer run
+(equilibration); (b) **freezing-point clamp / sea-ice** — legoESM has 170k sub-freezing
+cells (min −6 °C, no SI3) inflating bias/RMSE; (c) runoff (SSS). Equatorial velocity
+over-intensity is a DECAYING transient (30→21 m/s day 8→12), not sustained. **Still not
+"excellent" across all grids (the promise) — but the ¼° tripole is close on SST.**
+
 ## CURRENT STATUS (iter 16 — read this first)
 Free 1° run is impossible (config space exhausted: FE+Matsuno vs NEMO RK3; scalar
 A_h vs NEMO 3D WBC-enhanced viscosity). **Pivoted to ¼° (eORCA025).** A bounded —
