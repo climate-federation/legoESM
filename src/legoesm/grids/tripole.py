@@ -110,6 +110,7 @@ def _detect_fold(
     *,
     max_fold_asym_deg: float = 0.1,
     cap_dlat_rel_deviation: float = 0.1,
+    fold_convention: str = "auto",
 ) -> FoldDescriptor:
     """Detect the tripolar fold from the T-point coordinates.
 
@@ -128,27 +129,64 @@ def _detect_fold(
     cap_dlat_rel_deviation : float, default 0.1
         Relative deviation of per-row dlat from the southern-half median
         used to detect where the bipolar cap begins (dimensionless).
+    fold_convention : {"auto", "n_lon-1-i", "(n_lon-i)%n_lon"}, default "auto"
+        Fold index convention. ``"auto"`` picks whichever convention makes the
+        fold-row latitude most self-symmetric. Auto-detection tie-breaks
+        SILENTLY to ``n_lon-1-i`` when both conventions fit equally well (e.g.
+        a near-constant fold-row latitude), which can be the WRONG origin for a
+        de-haloed mesh. Pass the convention EXPLICITLY (``"(n_lon-i)%n_lon"``
+        for de-haloed meshes such as eORCA025, ``"n_lon-1-i"`` for halo-
+        inclusive meshes such as eORCA1.2) to bypass the ambiguous tie-break;
+        the explicit choice is still verified against ``max_fold_asym_deg``.
 
     Returns
     -------
     FoldDescriptor
     """
     fold_j = n_lat - 1
-
-    # Build permutation: perm[i] = n_lon - 1 - i
-    perm_T = jnp.arange(n_lon - 1, -1, -1, dtype=jnp.int32)
-    # For v/q stagger the permutation is the same for ORCA T-fold
-    perm_v = perm_T.copy()
-
-    # Verify fold symmetry: lat at fold row should be symmetric
     lat_fold = gphit[fold_j]
-    lat_fold_rev = lat_fold[perm_T]
-    max_asym = float(jnp.max(jnp.abs(lat_fold - lat_fold_rev)))
+
+    # NEMO tripole meshes use two index conventions for the T-fold
+    # self-permutation of the fold (last) row, differing only by the cyclic
+    # E-W wrap-halo origin (both are jperio=4 T-point folds):
+    #   - halo-inclusive (e.g. the eORCA1.2 mesh_mask, which bakes in two
+    #     cyclic E-W halo columns):  perm[i] = n_lon - 1 - i
+    #   - pure / de-haloed (e.g. the eORCA025 mesh_mask): perm[i] = (n_lon - i) % n_lon
+    # Auto-detect by choosing the permutation that makes the fold-row latitude
+    # self-symmetric, so a single code path reads either mesh. perm_v shares
+    # the chosen origin (V-points stagger with T along i on the ORCA T-fold).
+    perm_candidates = {
+        "n_lon-1-i": jnp.arange(n_lon - 1, -1, -1, dtype=jnp.int32),
+        "(n_lon-i)%n_lon": (n_lon - jnp.arange(n_lon, dtype=jnp.int32)) % n_lon,
+    }
+    if fold_convention not in ("auto", *perm_candidates):
+        raise ValueError(
+            f"fold_convention must be 'auto' or one of {list(perm_candidates)}, "
+            f"got {fold_convention!r}."
+        )
+    asym_by_perm = {
+        name: float(jnp.max(jnp.abs(lat_fold - lat_fold[p])))
+        for name, p in perm_candidates.items()
+    }
+    if fold_convention == "auto":
+        # Symmetry-based auto-detect. NOTE: ties (both conventions fit, e.g. a
+        # constant fold-row latitude) break silently to the first candidate
+        # (n_lon-1-i); pass fold_convention explicitly to disambiguate.
+        best_perm = min(asym_by_perm, key=asym_by_perm.get)
+    else:
+        best_perm = fold_convention
+    max_asym = asym_by_perm[best_perm]
     if max_asym > max_fold_asym_deg:
         raise ValueError(
-            f"Fold symmetry check failed: max lat asymmetry = {max_asym:.3f} deg "
-            f"at j={fold_j}. This may not be a standard NEMO T-fold grid."
+            f"Fold symmetry check failed: lat asymmetry for perm {best_perm!r} "
+            f"= {max_asym:.3f} deg at j={fold_j} (all candidates: "
+            f"{asym_by_perm}; fold_convention={fold_convention!r}). This may "
+            f"not be a standard NEMO T-fold grid, or the explicit "
+            f"fold_convention is wrong for this mesh."
         )
+    perm_T = perm_candidates[best_perm]
+    # For v/q stagger the permutation is the same for the ORCA T-fold.
+    perm_v = perm_T
 
     # Detect cap latitude: where the grid starts deviating from regular
     # lat-lon.  On ORCA1 this is around j where gphit starts to diverge
@@ -253,6 +291,7 @@ def create_tripole_grid(
     omega: float = constants.Omega,
     dtype=None,
     min_dx_m: float = 1000.0,
+    fold_convention: str = "auto",
 ) -> LatLonCGridGeometry:
     """Load a tripolar grid from a NEMO mesh_mask NetCDF file.
 
@@ -276,6 +315,14 @@ def create_tripole_grid(
         with implicit barotropics. Default 1 000 m matches the
         runner-side floor used in the 20-yr ORCA1 production run.
         Pass 0.0 to disable.
+    fold_convention : {"auto", "n_lon-1-i", "(n_lon-i)%n_lon"}, default "auto"
+        T-fold index convention forwarded to ``_detect_fold``. ``"auto"``
+        symmetry-detects it but tie-breaks silently to ``n_lon-1-i`` on a
+        near-constant fold-row latitude. Pass it EXPLICITLY for a de-haloed
+        mesh whose fold row is too flat to disambiguate
+        (``"(n_lon-i)%n_lon"`` for eORCA025-style de-haloed meshes,
+        ``"n_lon-1-i"`` for halo-inclusive eORCA1.2-style meshes); the choice
+        is still verified against the symmetry tolerance.
 
     Returns
     -------
@@ -353,7 +400,8 @@ def create_tripole_grid(
     f_v = jnp.concatenate([f_T[0:1], f_v_inner, f_T[-1:]], axis=0)
 
     # Fold descriptor
-    fold = _detect_fold(raw["glamt"], raw["gphit"], n_lat, n_lon)
+    fold = _detect_fold(raw["glamt"], raw["gphit"], n_lat, n_lon,
+                        fold_convention=fold_convention)
 
     # Rotation angles
     glamu = raw.get("glamu", glamt)

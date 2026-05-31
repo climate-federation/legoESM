@@ -511,6 +511,93 @@ class ModelDriver:
 
             self.get_sst_sic = get_sst_sic
 
+    def _apply_standard_atmosphere_ic(self) -> None:
+        """Override the scaffold temperature with a realistic standard
+        atmosphere (constant-lapse-rate troposphere + isothermal stratosphere +
+        equator-pole surface gradient).  Grid-agnostic core; the per-grid work
+        is only fetching the horizontal latitude field in the state's layout.
+
+        The equator surface temperature is taken from ``config.T_init`` so the
+        existing ``--t-init`` flag stays meaningful; the gradient, lapse rate
+        and stratospheric floor use Earth-like defaults.
+        """
+        from legoesm.atmosphere.standard_atmosphere import (
+            StandardAtmosphereConfig,
+            standard_atmosphere_temperature,
+            standard_atmosphere_zonal_wind,
+        )
+
+        cfg = self.config
+        gt = cfg.grid.grid_type
+        # Lat-lon only: the A-grid u is geographic-east, so the balanced jet
+        # (a geographic eastward wind) is assigned directly.  Cubed-sphere u/v
+        # are cube-LOCAL components that would need a grid-angle rotation first,
+        # and spectral/MPAS need other handling — all rejected up front in
+        # ExperimentConfig.validate_strict, so this is defensive.
+        if gt == "latlon":
+            lat_h = self.grid.lat2d                   # (n_lat, n_lon)
+        else:
+            raise NotImplementedError(
+                f"ic='standard' not yet wired for grid_type={gt!r} "
+                f"(discretization={cfg.dycore.discretization!r}); only 'latlon' "
+                "is supported. Use ic='default' or 'era5'."
+            )
+
+        sa_cfg = StandardAtmosphereConfig(T_sfc_equator_K=cfg.T_init)
+        lat_h = jnp.asarray(lat_h)
+
+        # (1) Surface temperature (sigma=1 limit) — needed for the p_s reduction;
+        #     independent of the vertical coordinate.
+        T_sfc_std = standard_atmosphere_temperature(
+            lat_h, jnp.ones((1,), dtype=self.sigma.sigma_full.dtype), sa_cfg,
+        )[..., 0]
+
+        # (2) Make surface pressure consistent with the NEW temperature over
+        #     topography FIRST.  The scaffold reduced p_s against the uniform
+        #     T_init column (p_s = p0*exp(-phis/(R_d*T_init))); rescale to the
+        #     standard surface temperature, p_s = p0*exp(-phis/(R_d*T_sfc)),
+        #     as a relative correction (exact no-op where phis == 0).
+        phis = self.state.phis.data
+        p_s_old = self.state.p_s.data
+        p_s_new = p_s_old * jnp.exp(
+            -phis / constants.R_d * (1.0 / T_sfc_std - 1.0 / cfg.T_init)
+        )
+        self.state = self.state._replace(
+            p_s=self.state.p_s.replace(data=p_s_new.astype(p_s_old.dtype)),
+        )
+
+        # (3) Vertical coordinate: use sigma_full — the SAME pressure convention
+        #     the production physics/radiation/saturation pipeline uses
+        #     (p_full = p_s * sigma_full; physics_pipeline.py, compiled_segments).
+        #     The model treats sigma_full (= A_full + B_full on the hybrid
+        #     coordinate) as the effective level coordinate everywhere, so the IC
+        #     MUST match it: initializing T/q on the "true" hybrid pressure
+        #     (A*p_ref + B*p_s) while the physics evaluates on p_s*sigma_full
+        #     would hand the first radiation/convection/saturation step a column
+        #     on a different pressure grid (spurious condensation over terrain).
+        #     The topography-adjusted p_s above is what makes the columns
+        #     physical; the level coordinate stays consistent with downstream.
+        sigma_full = self.sigma.sigma_full
+
+        # (4) Temperature.
+        T_new = standard_atmosphere_temperature(
+            lat_h, sigma_full, sa_cfg,
+        ).astype(self.state.T.data.dtype)
+        self.state = self.state._replace(T=self.state.T.replace(data=T_new))
+
+        # (5) Thermal-wind-balanced zonal wind so the imposed equator-pole
+        #     temperature gradient does not launch a geostrophic-adjustment shock
+        #     at startup.  v stays zero (the balance is zonal).  Reuses the grid's
+        #     own radius/rotation (constants fallback per the audit rule).
+        radius = getattr(self.grid, "radius", constants.R_earth)
+        omega = getattr(self.grid, "omega", constants.Omega)
+        u_new = standard_atmosphere_zonal_wind(
+            lat_h, sigma_full, radius, omega, sa_cfg,
+        ).astype(self.state.u.data.dtype)
+        self.state = self.state._replace(
+            u=self.state.u.replace(data=jnp.broadcast_to(u_new, self.state.u.data.shape)),
+        )
+
     def _init_state(self) -> None:
         """Initialize atmospheric state and moisture."""
         from legoesm.diagnostics.column_integrals import column_water_vapor
@@ -544,22 +631,42 @@ class ModelDriver:
                     self.grid, self.sigma, T_init=cfg.T_init, phis=self._phis_data
                 )
             else:
-                # Lat-lon and Gaussian grids use (n_lat, n_lon, nlev) layout
+                # Lat-lon and Gaussian grids use (n_lat, n_lon, nlev) layout.
+                # Pass phis so p_s is hydrostatically reduced over topography
+                # (p_s = p_ref*exp(-phis/(R_d*T_init))) — matching the
+                # cubed-sphere branch above.  Previously phis was patched in
+                # *after* construction, leaving p_s flat over terrain; that is
+                # the reference state the ic='standard' p_s recompute corrects
+                # relative to, and is also more correct for ic='default'.
                 from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
                 shape_3d = (self.grid.n_lat, self.grid.n_lon, NLEV)
                 self.state = held_suarez_init_latlon(
                     self.grid, self.sigma, T_init=cfg.T_init,
+                    phis=self._phis_data,
                 )
-                if jnp.any(self._phis_data != 0):
-                    self.state = self.state._replace(
-                        phis=self.state.phis.replace(data=self._phis_data),
-                    )
+
+        # Physically-realistic "standard atmosphere" override: replace the
+        # uniform-T_init scaffold temperature with a constant-lapse-rate
+        # troposphere + isothermal stratosphere + equator-pole gradient, BEFORE
+        # the moisture init below so the q_v column integral comes out Earth-like
+        # (~15-30 kg/m^2) instead of ~80 kg/m^2.  ERA5 IC (handled later) takes
+        # precedence and fully overwrites the state.
+        if cfg.ic == "standard":
+            self._apply_standard_atmosphere_ic()
 
         # Initialize all tracers via registry
         self.tracers = init_tracers(self.tracer_registry, shape_3d)
 
         # Moisture initialization (spectral and MPAS use dry physics)
         if hasattr(self.state, 'p_s') and hasattr(self.state.p_s, 'data'):
+            # Build p_full as p_s * sigma_full — the SAME convention the
+            # production physics/radiation/saturation pipeline uses
+            # (physics_pipeline.py, compiled_segments.py).  Initializing q_sat
+            # and the vertical humidity taper on this grid keeps the moisture
+            # consistent with the temperature state AND with the first physics
+            # step, so a topography+hybrid run does not start supersaturated on a
+            # mismatched pressure grid.  (Do NOT switch to pressure_at_full here
+            # unless the whole physics pipeline is migrated to it too.)
             p_full_init = self.state.p_s.data[..., None] * self.sigma.sigma_full
             q_sat_init = saturation_mixing_ratio(self.state.T.data, p_full_init)
             self.tracers["q_v"] = cfg.RH_init * q_sat_init * self.sigma.sigma_full ** 2
@@ -2262,6 +2369,26 @@ class ModelDriver:
         # is a no-op there.  (Time-varying-over-the-run GHG is a follow-on:
         # thread it through ``forcing`` like T_sfc; here it is fixed at the
         # start-year value.)
+        # Phase D perf: run the RRTMGP optics tables + RTE solve in float32 even
+        # under JAX x64 (the dycore stays fp64).  rrtmgp-on-MPAS was the
+        # compute-bound limit that forced the moist-AMIP commit to fall back to
+        # gray for long runs; the fp64 RTE solve dominates on fp64-limited GPUs
+        # (e.g. RTX 8000, fp64 ~ 1/32 of fp32), so the fp32 path is ~2x faster
+        # with heating identical to <0.01 K/day vs fp64 (benchmarked).  Honors
+        # the ``RRTMGPConfig.compute_fp32`` contract ("the MPAS driver enables
+        # it for the long-run rrtmgp path").  Enabled ONLY for rrtmgp — gray
+        # radiation ignores the rrtmgp sub-config, so leave the default there.
+        # compute_fp32 ENABLED for the rrtmgp MPAS path: run the optics tables
+        # + RTE solve in float32 even under JAX x64 (the dycore stays fp64).
+        # The earlier fp32 crash (PR #343) was a float64 leak in the OPTICS
+        # interpolant reference grids (gas_optics / cloud_optics linspace +
+        # vmr stack allocated strong-typed float64), which re-promoted the
+        # optical depth and broke the RTE scan carry dtype.  Fixed on branch
+        # fp32_mpas by keying those grids off the input dtype; GPU-validated
+        # (job 8113954, L4 nCells=2562): fp32 heating is float32 + finite and
+        # matches fp64 to rel-diff 1.5e-3 (REAL fp32, not a no-op).  Enabled
+        # only for rrtmgp -- gray ignores the rrtmgp sub-config.
+        _rrtmgp_fp32 = (cfg.radiation == "rrtmgp")
         phys_cfg = PhysicsConfig(
             radiation=RadiationConfig(
                 scheme=cfg.radiation if cfg.radiation != "none" else "none",
@@ -2269,6 +2396,7 @@ class ModelDriver:
                     co2_ppmv=cfg.co2_ppmv,
                     ch4_ppbv=cfg.ch4_ppbv,
                     n2o_ppbv=cfg.n2o_ppbv,
+                    compute_fp32=_rrtmgp_fp32,
                 ),
                 # Ozone source (default "standard" matches the bare default; a
                 # non-standard --ozone-source now flows to MPAS rrtmgp).  The
@@ -2282,7 +2410,115 @@ class ModelDriver:
             microphysics=MicrophysicsConfig(scheme=cfg.microphysics),
             gravity_wave_drag=GravityWaveDragConfig(scheme=cfg.gravity_wave_drag),
         )
-        physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT)
+        # Phase D perf: shard the per-column RRTMGP workload across all local
+        # devices (issue #273 ``column_mesh``).  rrtmgp is the dominant MPAS
+        # cost — the per-column k-distribution × RTE solve already saturates a
+        # single GPU, so sharding the ``nCells`` columns across N devices is
+        # embarrassingly parallel and scales ~linearly (the dynamics stays on
+        # the default device; only the radiation columns shard).  Enabled only
+        # for rrtmgp with >1 device AND nCells divisible by the device count —
+        # the radiation kernel requires an exact split, and padding the
+        # UNSTRUCTURED column axis is unsafe (a phantom cell has no mesh
+        # geometry), so we fall back to single-device otherwise.
+        # SINGLE-PROCESS ONLY: under MPI (``is_distributed``) every rank sees
+        # the full node device set, so a per-rank column mesh would shard each
+        # rank's already-rank-local columns across ALL node GPUs and collide
+        # with the MPI halo exchange (which works on rank-local unsharded
+        # arrays).  The MPI path does its own device distribution; column
+        # sharding is the single-process multi-GPU lever.  ``len(jax.devices())``
+        # (not ``local_device_count``) matches ``create_column_mesh``'s own
+        # ``jax.devices()`` so the divisibility check and the built mesh agree.
+        if _rrtmgp_fp32:
+            logger.info(
+                "  RRTMGP compute_fp32: optics tables + RTE solve in float32 "
+                "(dycore stays fp64)"
+            )
+        _column_mesh = None
+        _single_process = (self._device_config is None
+                           or not self._device_config.is_distributed)
+        _n_dev = len(jax.devices())
+        _ncell = int(self.state.T.data.shape[0])
+        if (cfg.radiation == "rrtmgp" and _single_process
+                and _n_dev > 1 and _ncell % _n_dev == 0):
+            from legoesm.parallel.column_shard import create_column_mesh
+            _column_mesh = create_column_mesh(_n_dev)
+            logger.info(
+                f"  RRTMGP column-sharding: {_ncell} cells / {_n_dev} devices "
+                f"= {_ncell // _n_dev} cols/device"
+            )
+        elif cfg.radiation == "rrtmgp" and _single_process and _n_dev > 1:
+            logger.warning(
+                f"  RRTMGP column-sharding skipped: nCells={_ncell} not "
+                f"divisible by n_devices={_n_dev}; running single-device "
+                f"(throughput not scaled across GPUs)"
+            )
+        physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT,
+                                  column_mesh=_column_mesh)
+
+        # ---- AMIP surface boundary: anchor radiation to the prescribed SST -
+        # Without this the MPAS hydrostatic radiation falls back to using the
+        # lowest model-level temperature ``T[..., -1]`` as the surface
+        # temperature (see integration.py ``_make_hydrostatic_radiation``), so
+        # the column has NO external thermal anchor and cold-drifts toward a
+        # dry gray-radiative equilibrium fully decoupled from the prescribed
+        # SST (measured: <T_atm> 290 -> 257 K over 30 days, still falling).
+        # The cubed-sphere/lat-lon and spectral paths apply the SST every
+        # step; the MPAS path previously applied nothing — so an "AMIP" run on
+        # MPAS was not actually SST-forced.
+        #
+        # We set a FIXED (annual-mean, sea-ice-blended) per-cell surface
+        # temperature ONCE here, before the step loop.  ``model.step`` is
+        # ``jax.jit`` with ``physics_fn`` marked *static* (primitive_eq_mpas.py
+        # ``_step_jit`` static_argnums), so the override-closure cell is read
+        # at trace time and BAKED into the first compile; a per-step update
+        # would be silently ignored (stale value) unless every step paid a
+        # retrace.  A fixed climatological anchor is therefore the correct
+        # shape for the JIT'd MPAS path, is byte-identical across every
+        # restart-chain link, and captures the first-order SST -> atmosphere
+        # coupling (surface longwave).  The seasonal SST cycle and the
+        # turbulent surface fluxes are intentionally NOT applied here: the
+        # former needs traced forcing threaded through the MPAS step signature
+        # and the latter needs the edge->cell wind interp (AMIP.md Known #3).
+        # ---- AMIP surface boundary: TIME-VARYING prescribed SST ----
+        # The prescribed SST/SIC is applied as the radiative surface
+        # temperature via a per-step TRACED ``forcing={"T_sfc": (nCells,)}``
+        # threaded through ``model.step`` -> combined physics -> radiation
+        # (see primitive_eq_mpas.step + radiation integration ``_wants_forcing``).
+        # Unlike the earlier fixed-anchor ``set_T_sfc_override`` (a JIT-static
+        # closure that could only carry ONE baked value), ``forcing`` is a jit
+        # argument, so the SST can vary in time (seasonal cycle) WITHOUT
+        # retracing — matching the cube/spectral AMIP paths.  Without any
+        # surface anchor the MPAS radiation falls back to ``T[..., -1]`` (the
+        # lowest air level) and the column cold-drifts, decoupled from the SST.
+        _sst_forcing = (cfg.radiation != "none" and self.get_sst_sic is not None)
+        _compute_T_sfc = None
+        if _sst_forcing:
+            from legoesm.forcing.surface_utils import blend_surface_temperature
+            _T_ice = cfg.T_ice
+            _ncell = int(self.state.T.data.shape[0])
+
+            def _compute_T_sfc(day):
+                # Prescribed SST/SIC at the MPAS cell latitudes (get_sst_sic is
+                # built on grid.grid_lat = mesh.latCell for analytical/AMIP
+                # data), sea-ice-blended, as a (nCells,) surface temperature.
+                _sst, _sic = self.get_sst_sic(day)
+                return blend_surface_temperature(
+                    jnp.asarray(_sst), jnp.asarray(_sic), _T_ice).reshape(-1)
+
+            # Shape guard once, up front: a non-per-cell get_sst_sic would
+            # otherwise surface as an opaque error deep inside the JIT trace.
+            _ts0 = _compute_T_sfc(START_DAY)
+            if _ts0.shape != (_ncell,):
+                raise ValueError(
+                    f"MPAS SST forcing shape {tuple(_ts0.shape)} != "
+                    f"(nCells={_ncell},); get_sst_sic must return per-cell "
+                    f"arrays on the MPAS mesh (grid.grid_lat = latCell)."
+                )
+            logger.info(
+                "  AMIP SST surface forcing (time-varying): "
+                f"day {START_DAY:.1f} T_sfc=[{float(jnp.min(_ts0)):.1f},"
+                f"{float(jnp.max(_ts0)):.1f}] mean={float(jnp.mean(_ts0)):.1f} K"
+            )
 
         # ---- AMIP surface boundary: anchor radiation to the prescribed SST -
         # Without this the MPAS hydrostatic radiation falls back to using the

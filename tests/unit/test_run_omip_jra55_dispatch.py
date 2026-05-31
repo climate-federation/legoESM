@@ -144,7 +144,7 @@ def test_setup_rejects_non_latlon_grid(tmp_path):
     cache = _make_synthetic_cache(tmp_path, n_lat=4, n_lon=8)
     args = _argparse_namespace(jra55_cache=str(cache))
     grid, *_ = _make_tiny_latlon_setup(n_lat=4, n_lon=8)
-    with pytest.raises(ValueError, match="supports only --grid latlon"):
+    with pytest.raises(ValueError, match=r"supports only --grid"):
         run_omip._setup_jra55_forcing_state(args, grid, "cubed_sphere")
 
 

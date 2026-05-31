@@ -257,7 +257,7 @@ class ExperimentConfig(NamedTuple):
     carbon_cycle: str = "none"
 
     # Initial conditions
-    ic: str = "default"   # "default" (held_suarez_init) or "era5"
+    ic: str = "default"   # "default" (uniform T_init), "standard" (lapse-rate + equator-pole gradient), or "era5"
     ic_path: str = ""     # ERA5 Zarr path when ic="era5"
 
     # CMIP
@@ -426,11 +426,42 @@ class ExperimentConfig(NamedTuple):
                 f"ModelDriver is atmosphere-only with prescribed SST/SIC. "
                 f"Set carbon_cycle='none' or use a coupled driver."
             )
-        _valid_ic = ("default", "era5")
+        _valid_ic = ("default", "standard", "era5")
         if self.ic not in _valid_ic:
             errors.append(f"ic must be one of {_valid_ic}, got {self.ic!r}")
         if self.ic == "era5" and not self.ic_path:
             errors.append("ic='era5' requires ic_path to be set")
+        if self.ic == "standard":
+            # The standard-atmosphere IC overrides a grid-space temperature
+            # Field AND a geographic (eastward) thermal-wind jet.  On lat-lon
+            # the A-grid u IS geographic-east, so the assignment is direct and
+            # correct.  Other grids need extra handling not yet wired:
+            #   * cubed_sphere: u/v are cube-LOCAL vector components — the
+            #     geographic jet must be rotated by the grid angle first;
+            #   * gaussian/spectral: temperature lives in spectral space (T_hat),
+            #     no grid-space T Field;
+            #   * mpas: not wired.
+            # Restrict to lat-lon here so the advertised IC is exactly the
+            # implemented+validated one — fail early, before setup.
+            _gt_std = normalize_grid_type(self.grid.grid_type)
+            if _gt_std != "latlon":
+                errors.append(
+                    f"ic='standard' is currently implemented only for "
+                    f"grid_type='latlon'; got grid_type={self.grid.grid_type!r} "
+                    f"(discretization={self.dycore.discretization!r}). "
+                    f"Use ic='default', or ic='era5' for cubed_sphere/spectral."
+                )
+            # T_init is the equator surface temperature; the pole is
+            # T_init - 40 K (StandardAtmosphereConfig.equator_pole_delta_K). A
+            # too-cold T_init drives the pole surface temperature non-positive
+            # and would NaN the thermal-wind setup, so require a physical
+            # equator surface temperature here (fail-early, before setup).
+            if not (150.0 <= self.T_init <= 360.0):
+                errors.append(
+                    f"ic='standard' requires a physical equator surface "
+                    f"temperature 150 K <= T_init <= 360 K; got "
+                    f"T_init={self.T_init} K."
+                )
 
         if self.aimip_variant not in AIMIP_VARIANTS:
             errors.append(

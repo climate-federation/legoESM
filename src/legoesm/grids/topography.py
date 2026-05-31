@@ -20,6 +20,23 @@ from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.edge_blending import blend_scalar_cube_edges_2d
 
 
+def _grid_lat_lon_2d(grid):
+    """Per-cell (lat, lon) in the grid's native horizontal layout [rad].
+
+    Cubed-sphere exposes 2-D ``(6, n, n)`` ``lat``/``lon`` directly; the lat-lon
+    grid stores 1-D axes (``lat`` shape ``(n_lat,)``, ``lon`` shape ``(n_lon,)``)
+    plus 2-D meshes ``lat2d``/``lon2d``.  The analytic-mountain generators below
+    need per-cell 2-D fields, so prefer ``lat2d``/``lon2d`` when present and fall
+    back to ``lat``/``lon`` (already 2-D on the cubed sphere, 1-D per-cell on
+    unstructured meshes).  Without this, ``grid.lat - grid.lon`` style broadcasts
+    fail on lat-lon as ``(n_lat,) + (n_lon,)``.
+    """
+    lat = getattr(grid, "lat2d", None)
+    lon = getattr(grid, "lon2d", None)
+    return (grid.lat if lat is None else lat,
+            grid.lon if lon is None else lon)
+
+
 def gaussian_mountain(
     grid: CubedSphereGrid,
     h0: float = 2500.0,
@@ -52,8 +69,7 @@ def gaussian_mountain(
     jnp.ndarray
         Surface elevation z_s, shape (6, n, n).
     """
-    lat = grid.lat
-    lon = grid.lon
+    lat, lon = _grid_lat_lon_2d(grid)
 
     dlat = lat - lat0
 
@@ -92,7 +108,8 @@ def zonal_ridge(
     jnp.ndarray
         Surface elevation z_s, shape (6, n, n).
     """
-    dlat = grid.lat - lat0
+    lat, _ = _grid_lat_lon_2d(grid)
+    dlat = lat - lat0
     return h0 * jnp.exp(-(dlat ** 2) / (2.0 * sigma_lat ** 2))
 
 
@@ -126,8 +143,7 @@ def schaer_mountain(
     jnp.ndarray
         Surface elevation z_s, shape (6, n, n).
     """
-    lat = grid.lat
-    lon = grid.lon
+    lat, lon = _grid_lat_lon_2d(grid)
 
     # Great-circle distance via haversine
     dlat = lat - lat0
@@ -604,7 +620,17 @@ def _target_grid_degrees(grid):
     """
     grid_lat = np.asarray(grid.grid_lat)
     grid_lon = np.asarray(grid.grid_lon)
-    is_gaussian = hasattr(grid, 'n_lat') and not hasattr(grid, 'n')
+    # Classify by coordinate rank, not attribute presence.  Cubed-sphere stores
+    # grid_lat as (6, n, n) (ndim 3); the structured lat-lon meshes — Gaussian
+    # AND the regular lat-lon grid — store it as (n_lat, n_lon) (ndim 2).  The
+    # old ``hasattr(grid, 'n_lat') and not hasattr(grid, 'n')`` heuristic
+    # mis-classified the lat-lon grid (which also exposes ``n``) as
+    # cubed-sphere, so its 2-D field was routed through the cubed-sphere
+    # smoother + cube-edge blend instead of the structured lat-lon (periodic-lon,
+    # pole-clamped) smoother.  ``is_structured_latlon`` keeps the variable's
+    # downstream meaning (1-D lat/lon meshgrid + gaussian smoother, no cube-edge
+    # blend) — Gaussian and regular lat-lon share that path.
+    is_gaussian = grid_lat.ndim == 2
 
     if is_gaussian:
         target_lat = np.asarray(grid.lat) * 180.0 / np.pi
@@ -733,7 +759,9 @@ def load_real_topography(
 
     ds.close()
 
-    # Use protocol for grid detection
+    # Use protocol for grid detection (classification fixed in
+    # _target_grid_degrees: by coordinate rank, so the lat-lon grid is no longer
+    # mis-routed into the cubed-sphere smoother).
     target_lat_2d, target_lon_2d, is_gaussian, grid_spacing = (
         _target_grid_degrees(grid)
     )

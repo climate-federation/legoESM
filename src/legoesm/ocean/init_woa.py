@@ -553,10 +553,22 @@ def init_ocean_from_woa(
     # Dispatch order matters: GaussianGrid has both 'lat' and 'lat2d',
     # while CubedSphereGrid has 'lat' (3D) but no 'lat2d'.
     if hasattr(grid, 'lat2d'):
-        # GaussianGrid: lat2d in radians, shape (n_lat, n_lon)
+        # Grids exposing a 2-D lat2d (GaussianGrid, LatLonGrid, and the
+        # orthogonal-curvilinear tripole LatLonCGridGeometry). Use the grid's
+        # TRUE 2-D longitude (lon2d) -- on the tripole grid longitude varies
+        # down every i-column, and grid.lon is only the 1-D SOUTHERNMOST row
+        # (lon_T[0, :]); pairing it with the 2-D lat_T mis-sampled WOA by a
+        # median ~9 deg (up to ~155 deg in the bipolar cap) at every cell. For
+        # regular lat-lon / Gaussian grids lon2d is the meshgrid of the 1-D lon,
+        # so this is identical there (no regression); fall back to the broadcast
+        # 1-D lon only for a grid that lacks lon2d.
         lat_deg = np.asarray(grid.lat2d) * (180.0 / np.pi)
-        lon_2d = np.asarray(grid.lon) * (180.0 / np.pi)
-        lon_deg = np.broadcast_to(lon_2d[np.newaxis, :], lat_deg.shape)
+        lon2d = getattr(grid, 'lon2d', None)
+        if lon2d is not None:
+            lon_deg = np.asarray(lon2d) * (180.0 / np.pi)
+        else:
+            lon_1d = np.asarray(grid.lon) * (180.0 / np.pi)
+            lon_deg = np.broadcast_to(lon_1d[np.newaxis, :], lat_deg.shape)
     elif hasattr(grid, 'latCell'):
         # VoronoiMesh: latCell in radians, shape (nCells,)
         lat_deg = np.asarray(grid.latCell) * (180.0 / np.pi)
