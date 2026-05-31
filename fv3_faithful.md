@@ -43,12 +43,19 @@ EIGEN-ANALYSIS (iter115b-123, finite-diff power iteration — jvp CPU-prohibitiv
   KE rsin2 118, dissipation/Phase4/wind-halo 82-83; assembly reads correct 119; d_sw4/d_sw5 duogrid
   no-ops 120). LEADING HYPOTHESIS (codex [medium] — "not dampable ⇒ structural" is NOT a sound inference
   on its own): a structural cube-EDGE c_sw→d_sw coupling the FB port misses (production co-located scheme
-  kills the edge mode via the D→A avg). NOT YET RULED OUT: float32/dt/resolution stability-boundary,
-  damping that misses the mode by construction. Needs a FALSIFICATION battery before "structural" stands.
-- **HARNESS (now conditioned, iter123):** finite-diff power iteration WITH the eps/K/restart sweep +
-  residual → one diagnostic reported as a BAND, NOT a hard λ<1 pass/fail gate. NEXT (dedicated/fresh):
-  (a) falsification battery — dt/resolution scaling + a float64 FB run + a direct W2-C36 oracle step
-  comparison — to settle growing-mode-vs-stability-limit; (b) THEN localize the i=0-edge d_sw term
+  kills the edge mode via the D→A avg).
+- **FALSIFICATION BATTERY (iter124, answers codex [medium] #3 — float32 & dt stability-limit RULED OUT):**
+  (a) float64 — λ=1.0067 PERSISTS in genuine float64 (FB output dtype=float64) ⇒ NOT a float32-roundoff
+  artifact. (b) dt-scaling at fixed window K·dt=15000s, C36: dt=600/300/150 → λ−1=1.43e-2/6.64e-3/3.28e-3
+  (HALVES with dt; ratios 0.46/0.49) ⇒ (λ−1) ∝ dt, and σ=(λ−1)/dt CONVERGES to ~1.89/day (2.06→1.91→1.89).
+  This is the signature of a REAL continuous growth rate (λ=e^{σΔt}≈1+σΔt), NOT a CFL/timestep limit (which
+  would STABILIZE, σ→0, as dt drops). ⇒ a genuine growing mode of the FB SPATIAL discretization, σ≈1.9/day
+  (e-fold ~0.5 day), precision- AND timestep-independent. The "structural cube-edge coupling" is now the
+  WELL-SUPPORTED leading hypothesis (a real spatial-operator mode, not a numerical artifact). STILL OPEN:
+  resolution scaling (grid-scale vs large-scale) + the modal-ID type-proof + a direct oracle W2-C36 compare.
+- **HARNESS (conditioned, iter123):** finite-diff power iteration WITH the eps/K/restart sweep + residual
+  → one diagnostic reported as a BAND, NOT a hard λ<1 gate. NEXT (dedicated/fresh): (a) resolution scaling
+  (C24/C48) + oracle W2-C36 step compare to finish the typing; (b) THEN localize the i=0-edge d_sw term
   (ke_diff_u vs fy_vort) → match the FV3 edge coupling → re-test vs the λ band. Separate from the
   production C96 W5 eigenmode (slow ~1.0007). Reading/component/metric avenues exhausted.
 
