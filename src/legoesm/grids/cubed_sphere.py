@@ -650,6 +650,34 @@ def _compute_gnomonic_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
     return lon, lat
 
 
+def _compute_gnomonic_ed_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
+    """Cell-center lon/lat for the FV3 OPERATIONAL gnomonic_ed grid (grid_type=0).
+
+    Building block for the gated ``create_cubed_sphere(gnomonic="ed")`` path
+    (the FV3-faithful grid; see fv3_faithful.md GRID section).  Drop-in
+    replacement for :func:`_compute_gnomonic_lonlat` (equiangular) — same
+    ``(6, n, n)`` cell-center return — but built from the equal-great-circle-
+    edge gnomonic_ed corners (:func:`make_fv3_native_grid`, a faithful FV3
+    port verified to 1 ULP) reduced to centers via the FV3 ``cell_center2``
+    helper (normalized 4-corner average, fv_grid_utils.F90:2700).
+
+    gnomonic_ed gives near-uniform cells (max aspect 1.06 vs equiangular's
+    1.40 at corners), which is why FV3 uses it operationally and why it is the
+    candidate fix for the C96 high-res cube-edge eigenmode.  NOT yet wired into
+    ``create_cubed_sphere`` (the padded metric/halo builders are still
+    parametrized for equiangular); this center routine is the first wiring
+    brick.  Tested in ``tests/grids/test_gnomonic_ed_centers_iter62.py``.
+    """
+    lon_c, lat_c = make_fv3_native_grid(n, grid_type=0)  # (6, n+1, n+1) corners
+    lon, lat = cell_center2(
+        lon_c[:, :-1, :-1], lat_c[:, :-1, :-1],   # SW
+        lon_c[:, 1:, :-1], lat_c[:, 1:, :-1],     # SE
+        lon_c[:, 1:, 1:], lat_c[:, 1:, 1:],       # NE
+        lon_c[:, :-1, 1:], lat_c[:, :-1, 1:],     # NW
+    )
+    return lon, lat  # (6, n, n)
+
+
 def _face_to_cartesian(
     face: int, alpha_x: jax.Array, alpha_y: jax.Array
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
