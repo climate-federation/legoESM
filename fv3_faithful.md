@@ -112,6 +112,23 @@ STILL OPEN: deeper SW-core / non-orthogonality analysis (or possibly inherent to
 cross-check vs the FV3 oracle's own W2-on-ed corner residual).
 STATE: ed builds, stable, mass-conserving, halo CLEAN; the 8x W2 corner error is the open defect.
 Prior "cdgrid COMPLETE + sound" still premature on W2 accuracy.
+CODEX adversarial-review (commit ffad96fd): APPROVE, no material findings — confirmed the
+separable 1D angle reconstruction matches native gnomonic_ed on all 6 faces to roundoff,
+refinement-consistent for even AND odd n, equiangular branch untouched.
+CONVERGENCE TEST (iter74) — the 8x W2 error is a BUG, not inherent: t=0 |dh|max (zero damping)
+equiangular C24/36/48 = 0.073/0.051/0.039 (CONVERGES ~1st order) vs ed = 1.766/1.795/1.788
+(STAGNANT, rate ~0). A consistent scheme's truncation must vanish with resolution; ed's corner
+max is PINNED at ~1.79 at all resolutions (while rms slowly converges 0.138/0.104/0.086) ⇒ a
+LOCALIZED O(1) inconsistency at the cube corner (3-face junction), not inherent ed truncation.
+RULED OUT: A-grid/cdgrid construction mismatch (the imbalance was BIT-IDENTICAL before/after the
+cdgrid rebuild from construct→`_face_gnomonic_to_lonlat`; construct and the new path agree to
+3e-15). REMAINING HYPOTHESES for next iter: (1) discrete metric-identity / freestream-
+preservation violation at the ed corner (A-grid `grid.area` from `_compute_exact_cell_areas_ed`
+vs cdgrid face-lengths dxc/dyc don't close the divergence stencil); (2) the FV3Edge SW-core
+3-face-junction corner special-casing (sw/se/nw/ne_corner) calibrated for equiangular's specific
+corner angle, not ed's. NEXT: freestream test (discrete div of a non-divergent solid-body flow,
+h≡const) to isolate the velocity-divergence metric; compare ed corner area/face-length closure;
+read the FV3 oracle corner treatment.
 **(prior scoping, now DONE) the CDGRID layer:** dynamics consume
 `create_cubed_sphere_cdgrid(base)`, which REBUILDS its own equiangular C/D supergrid
 (`_compute_supergrid_metrics(n, _face_gnomonic_to_lonlat,…)` + `linspace` α at cubed_sphere_
