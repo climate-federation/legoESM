@@ -1150,17 +1150,33 @@ def compute_eke_step_kappa(
     T, S, eta, H_bathy, eke, grid, z_coord, cfg, *,
     eos="wright", eos_linear=None, mask=None, rho_0=_RHO_0, g=constants.g,
     omega=constants.Omega, r_earth=constants.R_earth,
+    depth_resolved=False,
 ):
     """Prognostic GM coefficient + Eady growth rate + mixing length from the
     eddy-energy field, for the EKE-active model step. Returns ``(kappa_GM,
-    sigma_bar, L)`` — ``kappa_GM`` (2-D) is the override fed into the GM/Redi
-    tracer tendency; ``sigma_bar``/``L`` drive the EKE local source/sink.
+    sigma, L)``: ``kappa_GM`` is the override fed into the GM/Redi tracer
+    tendency; ``sigma``/``L`` drive the EKE local source/sink.
+
+    Two shapes, selected by the static Python ``depth_resolved`` flag (the
+    ``EKEConfig.eke_3d`` switch in the model step):
+
+    - ``depth_resolved=False`` (default, the 2-D path): ``eke`` is 2-D
+      ``(n_lat, n_lon)`` and the return is the 2-D ``(kappa_GM, sigma_bar, L)``
+      — ``kappa_GM`` the 2-D GM override, ``sigma_bar`` the depth-AVERAGED Eady
+      growth ``<N|S|>_z``, ``L`` the 2-D mixing length. Bit-identical to before.
+    - ``depth_resolved=True`` (the 3-D ``eke_3d`` path): ``eke`` is 3-D
+      ``(n_lat, n_lon, nlev-1)`` at the interior interfaces (W-grid) and the
+      return is the depth-resolved ``(kappa_GM(z), sigma(z), L(z))`` all at the
+      ``nlev-1`` interfaces — the 3-D GM-skew override AND the per-level Eady
+      growth / mixing length the depth-resolved EKE source/sink consumes
+      (:func:`legoesm.ocean.physics.lateral_mixing.eke.eke_3d_local_tendency`).
 
     Recomputes rho + isopycnal slopes with the SAME shared helpers GM/Redi uses
     internally (a redundant recompute — correct; compute-once is a future
     optimization), then ``compute_eke_kappa_gm`` (which reuses the shared
-    Eady-length machinery). ``cfg`` is the GMRediConfig (uses ``cfg.visbeck`` for
-    the Rossby-length params and ``cfg.eke`` for the closure params).
+    Eady-length machinery and itself dispatches on ``depth_resolved``). ``cfg``
+    is the GMRediConfig (uses ``cfg.visbeck`` for the Rossby-length params and
+    ``cfg.eke`` for the closure params).
 
     For ``cfg.eke.mixing_length_scheme == "rhines"`` the eke_len needs ``β =
     df/dy``; it is computed analytically as ``2Ω·cosφ/R`` (exact on the sphere
@@ -1188,4 +1204,5 @@ def compute_eke_step_kappa(
     return compute_eke_kappa_gm(
         eke, rho, S_x, S_y, z_coord, jacobian, f_coriolis,
         cfg.visbeck, cfg.eke, rho_ref=rho_0, beta=beta,
+        depth_resolved=depth_resolved,
     )

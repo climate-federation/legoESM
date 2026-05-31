@@ -163,8 +163,13 @@ ACC_GM_REDI_CONFIG = GMRediConfig(
     # additionally drives the Redi tracer diffusivity K_iso = K_gm (Veros
     # enable_eke_isopycnal_diffusion=True, acc.py:74) — so BOTH the GM skew and the
     # Redi diffusivity are now the prognostic kappa (apples-to-apples with Veros).
+    # eke_3d=True: the 3-D (depth-resolved) prognostic EKE on the interior
+    # interfaces (W-grid), matching Veros's 3-D ``vs.eke`` — the GM coefficient
+    # kappa_GM(z) and the EKE budget (depth-resolved source/sink + implicit
+    # vertical EKE diffusion K=alpha_eke·A_v + per-interface horizontal
+    # transport) are all depth-resolved. ``alpha_eke=1.0`` (Veros ACC default).
     eke=EKEConfig(mixing_length_scheme="rhines", eke_cross=2.0, eke_crhin=1.0,
-                  isopycnal_diffusion=True),
+                  isopycnal_diffusion=True, eke_3d=True),
 )
 
 # Surface restoring timescale
@@ -325,11 +330,23 @@ def build_acc_state(grid: LatLonGrid,
     # on wet cells (Veros likewise starts ``eke`` at a small positive value). The
     # frozen-state tier-2 probe does NOT read ``eke`` (it takes the constant-kappa GM
     # path), so the committed tier-2 tendency comparison is unchanged.
-    if ACC_GM_REDI_CONFIG.eke is not None:
+    #
+    # eke_3d=True (the ACC recipe): the eddy-energy field is 3-D on the interior
+    # interfaces (n_lat, n_lon, nlev-1) (the W-grid), seeded to e_min on wet
+    # columns. Otherwise it is the 2-D depth-integrated (n_lat, n_lon) field.
+    eke_cfg = ACC_GM_REDI_CONFIG.eke
+    if eke_cfg is not None:
         lm = state.land_mask.data
-        eke0 = ACC_GM_REDI_CONFIG.eke.e_min * lm
+        if eke_cfg.eke_3d:
+            nlev = z_coord.n_levels
+            eke0 = (eke_cfg.e_min * lm)[:, :, jnp.newaxis] * jnp.ones(
+                (1, 1, nlev - 1), dtype=lm.dtype)
+            eke_dims = ("lat", "lon", "level")
+        else:
+            eke0 = eke_cfg.e_min * lm
+            eke_dims = ("lat", "lon")
         state = state._replace(
-            eke=Field(data=eke0, name="eke", dims=("lat", "lon"), units="m^2/s^2"))
+            eke=Field(data=eke0, name="eke", dims=eke_dims, units="m^2/s^2"))
     return state
 
 

@@ -65,6 +65,8 @@ from legoesm.ocean.physics.combined import make_ocean_physics
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_eke_step_kappa,
     eke_horizontal_transport,
+    eke_3d_horizontal_transport,
+    eke_3d_vertical_diffusion,
     gm_redi_tracer_tendency_latlon,
     compute_isoneutral_K33_latlon,
 )
@@ -1107,31 +1109,42 @@ class LatLonCGridOceanModel:
             if gm_cfg.eke is not None:
                 eke_cfg = gm_cfg.eke
                 lm = state.land_mask.data
-                if state.eke is not None:
-                    E = state.eke.data
+                if eke_cfg.eke_3d:
+                    # 3-D (depth-resolved) prognostic-EKE path: E lives on the
+                    # interior interfaces (W-grid, nlev-1), the GM/Redi override
+                    # kappa is a 3-D interface field, and E evolves by the
+                    # depth-resolved source/sink + implicit vertical EKE diffusion
+                    # + per-interface horizontal transport (Veros's 3-D vs.eke).
+                    eke_new, kappa_gm_override = self._eke_3d_step(
+                        state, state_new, T_mid, S_mid, gm_cfg, eke_cfg, lm,
+                        tend.A_v, dt,
+                    )
                 else:
-                    E = jnp.full(lm.shape, eke_cfg.e_min, dtype=T_mid.dtype)
-                kappa_gm_override, sigma_bar, L = compute_eke_step_kappa(
-                    T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
-                    E, self.grid, self.z_coord, gm_cfg,
-                    eos=self.config.eos, eos_linear=self.config.eos_linear,
-                    mask=lm,
-                    rho_0=self.config.constants.rho_0,
-                    g=self.config.constants.g,
-                    omega=self.config.constants.Omega,
-                    r_earth=self.config.constants.R_earth,
-                )
-                # Depth-mean advecting flow (level-mean; preserves the periodic
-                # wrap so the transport conserves the area-integral of E).
-                U_bar = jnp.mean(state.u.data, axis=-1) * state.u_mask.data
-                V_bar = jnp.mean(state.v.data, axis=-1) * state.v_mask.data
-                E_t = E + dt * eke_horizontal_transport(
-                    E, U_bar, V_bar, self.grid, eke_cfg,
-                    lm, state.u_mask.data, state.v_mask.data,
-                )
-                E_new = eke_apply_local_source(E_t, sigma_bar, L, eke_cfg, dt)
-                eke_new = Field(data=E_new * lm, name="eke",
-                                dims=("lat", "lon"), units="m^2/s^2")
+                    if state.eke is not None:
+                        E = state.eke.data
+                    else:
+                        E = jnp.full(lm.shape, eke_cfg.e_min, dtype=T_mid.dtype)
+                    kappa_gm_override, sigma_bar, L = compute_eke_step_kappa(
+                        T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
+                        E, self.grid, self.z_coord, gm_cfg,
+                        eos=self.config.eos, eos_linear=self.config.eos_linear,
+                        mask=lm,
+                        rho_0=self.config.constants.rho_0,
+                        g=self.config.constants.g,
+                        omega=self.config.constants.Omega,
+                        r_earth=self.config.constants.R_earth,
+                    )
+                    # Depth-mean advecting flow (level-mean; preserves the periodic
+                    # wrap so the transport conserves the area-integral of E).
+                    U_bar = jnp.mean(state.u.data, axis=-1) * state.u_mask.data
+                    V_bar = jnp.mean(state.v.data, axis=-1) * state.v_mask.data
+                    E_t = E + dt * eke_horizontal_transport(
+                        E, U_bar, V_bar, self.grid, eke_cfg,
+                        lm, state.u_mask.data, state.v_mask.data,
+                    )
+                    E_new = eke_apply_local_source(E_t, sigma_bar, L, eke_cfg, dt)
+                    eke_new = Field(data=E_new * lm, name="eke",
+                                    dims=("lat", "lon"), units="m^2/s^2")
                 # K_iso = K_gm (Veros enable_eke_isopycnal_diffusion): drive the
                 # Redi tracer diffusivity from the same prognostic kappa as GM.
                 if eke_cfg.isopycnal_diffusion:
@@ -1394,6 +1407,147 @@ class LatLonCGridOceanModel:
             S=state.S.replace(data=S),
             v=state.v.replace(data=v),
         )
+
+    def _eke_3d_step(
+        self,
+        state: LatLonCGridOceanState,
+        state_new: LatLonCGridOceanState,
+        T_mid: jnp.ndarray,
+        S_mid: jnp.ndarray,
+        gm_cfg,
+        eke_cfg,
+        lm: jnp.ndarray,
+        A_v_phys,
+        dt: float,
+    ) -> tuple:
+        """One step of the 3-D (depth-resolved) prognostic-EKE closure.
+
+        The eddy-energy field ``E`` lives on the ``nlev-1`` interior interfaces
+        (the W-grid), matching Veros's 3-D ``vs.eke``.  Returns
+        ``(eke_field_new, kappa_gm_override)`` where ``eke_field_new`` is the
+        updated 3-D ``Field (n_lat, n_lon, nlev-1)`` (floored at ``e_min``,
+        masked to wet columns) and ``kappa_gm_override`` is the 3-D
+        interface GM coefficient ``kappa_GM(z) = c_k·L(z)·√E`` fed to the GM/Redi
+        tracer tendency (Stage 3 consumes the 3-D interface kappa).
+
+        Operator-split (each sub-step unconditionally stable / positivity-
+        respecting), applied in the order:
+
+          1. per-interface horizontal transport (explicit upwind advection +
+             lateral diffusion), advecting ``E`` by the flow AT EACH INTERFACE
+             (the full-level u/v vertically averaged to the W-grid),
+          2. implicit (backward-Euler) vertical EKE diffusion ``K = alpha_eke·A_v``,
+          3. semi-implicit local source/sink ``P(z) - eps(z)`` (positivity-
+             preserving, no clip).
+
+        The source/sink is applied LAST so the depth-resolved production
+        ``P(z) = kappa_GM(z)·sigma(z)²`` enters after transport+diffusion have
+        redistributed ``E`` — mirroring the 2-D path's (transport → source)
+        order, with the vertical diffusion inserted between (the 2-D path has no
+        vertical operator).  ``E`` is finally floored at ``e_min`` and masked.
+
+        W-grid metrics (subtle — documented):
+
+        - ``dz_w`` = the W-cell thicknesses = ``build_dz_half(dz_cell)`` =
+          ``0.5(dz_k + dz_{k+1})`` (the distance between adjacent T-cell centres
+          = Veros's ``dzw``; the divergence divisor in the implicit solve, and
+          the weight in the conserved column integral ``Σ E·dz_w``).
+        - ``dz_half_w`` = ``build_dz_half(dz_w)`` = the midpoint spacing between
+          adjacent W-cell centres (the flux divisor in the implicit solve).  The
+          legoESM W-grid is treated as an independent ``M=nlev-1``-level column
+          with zero-flux BCs at its top/bottom, so this midpoint spacing is the
+          self-consistent flux metric (it equals Veros's ``dzt`` flux divisor on
+          a uniform grid; the 2nd-order metric difference on a stretched grid is
+          within the documented operator-split treatment).
+        - ``A_v`` at the ``M-1`` interior W-interfaces: the interior W-interface
+          ``k`` sits at the centre of T-cell ``k+1``, so the vertical viscosity
+          there is ``A_v_cell[..., 1:nlev-1]`` (Veros's
+          ``0.5(kappaM[k]+kappaM[k+1])`` averaged to the W-interfaces; the
+          jacobian-scaled cell-centred ``A_v`` is the same profile the implicit
+          momentum solve uses, plus the config background floor).
+        """
+        from legoesm.ocean.physics.vertical_mixing import build_dz_half
+        from legoesm.ocean.vertical import compute_ocean_jacobian
+
+        dtype = T_mid.dtype
+        nlev = T_mid.shape[-1]
+        # E on the interior interfaces (W-grid).  Seeded to e_min if absent so
+        # the None -> Field transition (which would break the scan-carry pytree)
+        # never happens inside the step when integrate_scan pre-seeded it.
+        if state.eke is not None:
+            E = state.eke.data
+        else:
+            E = jnp.full(lm.shape + (nlev - 1,), eke_cfg.e_min, dtype=dtype)
+
+        # Depth-resolved kappa_GM(z), Eady growth sigma(z), mixing length L(z) at
+        # the interior interfaces (Stage 1 depth_resolved path).
+        kappa_gm_override, sigma3, L3 = compute_eke_step_kappa(
+            T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
+            E, self.grid, self.z_coord, gm_cfg,
+            eos=self.config.eos, eos_linear=self.config.eos_linear,
+            mask=lm,
+            rho_0=self.config.constants.rho_0,
+            g=self.config.constants.g,
+            omega=self.config.constants.Omega,
+            r_earth=self.config.constants.R_earth,
+            depth_resolved=True,
+        )
+
+        # Per-interface advecting flow: full-level u/v (nlev) vertically averaged
+        # to the nlev-1 interior interfaces (0.5*(u[...,k]+u[...,k+1])).  Face
+        # masks (2-D) are applied so transport sees no flow through walls; the
+        # 3-D transport broadcasts them over the level axis internally.
+        u_mask = state.u_mask.data
+        v_mask = state.v_mask.data
+        U_z = 0.5 * (state.u.data[..., :-1] + state.u.data[..., 1:])
+        V_z = 0.5 * (state.v.data[..., :-1] + state.v.data[..., 1:])
+        U_z = U_z * u_mask[:, :, jnp.newaxis]
+        V_z = V_z * v_mask[:, :, jnp.newaxis]
+
+        # (1) Per-interface horizontal transport (explicit).
+        E = E + dt * eke_3d_horizontal_transport(
+            E, U_z, V_z, self.grid, eke_cfg, lm, u_mask, v_mask,
+        )
+
+        # (2) Implicit vertical EKE diffusion on the W-grid column.
+        # W-cell thicknesses dz_w (= Veros dzw) and the interior-W-interface
+        # viscosity A_v, from the jacobian-scaled cell metrics + the physics A_v.
+        J_cell = compute_ocean_jacobian(
+            state.eta.data, state.H_bathy.data, self.z_coord,
+        )
+        # dz metrics in the field dtype so the implicit solve stays consistent
+        # (dz_ref is f64 while the eddy-energy field runs at the storage policy's
+        # dtype — cast to E's dtype to avoid a f64->f32 scatter cast).
+        dz_cell = (self.z_coord.dz_ref * J_cell[..., jnp.newaxis]).astype(dtype)
+        dz_w = build_dz_half(dz_cell)                              # (..., nlev-1) = M
+        dz_half_w = build_dz_half(dz_w)                            # (..., nlev-2) = M-1
+        if A_v_phys is not None:
+            A_v_cell = jnp.asarray(A_v_phys, dtype=dtype) + jnp.asarray(
+                self.config.A_v, dtype=dtype)
+        else:
+            A_v_cell = jnp.broadcast_to(
+                jnp.asarray(self.config.A_v, dtype=dtype), dz_cell.shape)
+        # A_v at the M-1 interior W-interfaces = the cell-centred A_v at the
+        # interior T-centres k=1..nlev-2 (interior W-interface k is at T-centre k+1).
+        A_v_w = A_v_cell[..., 1:nlev - 1]
+        E = eke_3d_vertical_diffusion(E, A_v_w, dz_w, dz_half_w, dt, eke_cfg)
+
+        # (3) Semi-implicit local source/sink (positivity-preserving, no clip).
+        E = eke_apply_local_source(E, sigma3, L3, eke_cfg, dt)
+
+        # Floor at e_min on wet columns, zero on land (kappa_gm_override is
+        # already wet-masked by compute_eke_kappa_gm).  Cast back to the field
+        # dtype: the source/sink promotes through the f64 sigma(z)/L(z), but the
+        # stored eke must keep the storage-policy dtype so the scan-carry pytree
+        # is dtype-stable (the step's final cast_pytree would also enforce this,
+        # but keep this code path self-consistently typed).
+        lm3 = lm[:, :, jnp.newaxis]
+        E_new = jnp.where(
+            lm3 > 0.5, jnp.maximum(E, eke_cfg.e_min), 0.0,
+        ).astype(dtype)
+        eke_new = Field(data=E_new, name="eke",
+                        dims=("lat", "lon", "level"), units="m^2/s^2")
+        return eke_new, kappa_gm_override
 
     def _apply_implicit_vertical_mixing(
         self,
@@ -1889,6 +2043,32 @@ class LatLonCGridOceanModel:
                 v_incr_prev=Field(data=_zv, name="v_incr_prev",
                                   dims=state.v.dims, units=state.v.units),
             )
+
+        # Prognostic-EKE carry: when EKE is on but the eddy-energy field has not
+        # been seeded (state.eke is None), pre-seed it to the e_min floor so the
+        # scan keeps a constant pytree (the model step would otherwise turn
+        # eke None -> Field on the first iteration, which crashes lax.scan).  The
+        # shape is STATIC per config: 3-D (n_lat, n_lon, nlev-1) at the interior
+        # interfaces when eke_3d, else 2-D (n_lat, n_lon) — so the carried shape
+        # is fixed for the whole scan.
+        gm_redi = getattr(self.config, "gm_redi", None)
+        if (gm_redi is not None and gm_redi.eke is not None
+                and state.eke is None):
+            from legoesm.core.field import Field
+            lm = state.land_mask.data
+            e_min = gm_redi.eke.e_min
+            if gm_redi.eke.eke_3d:
+                nlev = state.T.data.shape[-1]
+                eke0 = jnp.where(
+                    lm[:, :, jnp.newaxis] > 0.5, e_min, 0.0,
+                ) * jnp.ones((1, 1, nlev - 1), dtype=lm.dtype)
+                eke_dims = ("lat", "lon", "level")
+            else:
+                eke0 = e_min * lm
+                eke_dims = ("lat", "lon")
+            state = state._replace(
+                eke=Field(data=eke0, name="eke", dims=eke_dims,
+                          units="m^2/s^2"))
 
         # Rigid-lid: pre-build the static island/depth data (host-side
         # flood-fill) so the scan captures it as a compile-time constant, and
