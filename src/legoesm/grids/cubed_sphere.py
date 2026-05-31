@@ -2212,6 +2212,17 @@ def gnomonic_ed_corner_ext_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
     the equiangular ``linspace(-π/4-dα, π/4+dα, n+3)``).  Corner nodes at
     ``θ = -α + (k-1)·dely`` (dely = 2α/n), k=0..n+2 — interior matches the
     gnomonic_ed corners, ±1 halo for centred-difference grid angles.
+
+    KNOWN LIMITATION (iter73): the ±1 halo ring is the same-face construct
+    extension, which COLLAPSES onto the boundary meridians at the 4 cube
+    corners (zero-width halo cells → degenerate corner metrics → a corner-
+    localized ~140× W2 t=0 imbalance / 8× W2 height error vs equiangular).  The
+    construct cannot extend the edge-PERPENDICULAR direction (it pins the W/E
+    edges to lon 0.75π/1.25π).  Neighbor-fill (FV3 fill_corners) was tried and
+    REGRESSED badly (injects the cube-edge crease into the centred-difference
+    tangent — the cdgrid metric code wants the SAME-FACE continuation, like
+    equiangular's tan).  Correct fix pending = same-face θ-uniform perpendicular
+    extension (extend the S/W-edge great circles independently, no corner pin).
     """
     rsq3 = 1.0 / jnp.sqrt(3.0)
     alpha = float(jnp.arcsin(rsq3))
@@ -2226,6 +2237,10 @@ def gnomonic_ed_padded_supergrid_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
     ``linspace(-π/4-dα/2, π/4+dα/2, 2n+3)``).  Half-cell-spaced edge-angle nodes
     ``θ = -α - dely/2 + m·(dely/2)`` (dely = 2α/n), m=0..2n+2 — corners at odd m,
     cell centres at even m, ±half-cell padding for centred differences.
+
+    KNOWN LIMITATION (iter73): same corner halo-collapse as
+    :func:`gnomonic_ed_corner_ext_lonlat` (the construct can't extend the edge-
+    perpendicular halo); affects the sin_sg corner values.  Fix pending.
     """
     rsq3 = 1.0 / jnp.sqrt(3.0)
     alpha = float(jnp.arcsin(rsq3))
