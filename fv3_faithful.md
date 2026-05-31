@@ -63,6 +63,20 @@ fv3_fb_sw_step: the FV3-faithful `one_grad_p` D-grid backward PGF on u_d/v_d (ge
 g·(h_new+h_s) → a2b to corners → gradient along D-grid edges → u_d += -∂x(gz)·dt etc.), backward
 time-centered on the post-d_sw height. Validate: FB W2 C36 no longer blows at ~3 h. (codex/oracle
 review the new phase.)
+**iter77 — Phase4 D-grid PGF IMPLEMENTED (correct but PARTIAL).** Added `one_grad_p` D-grid
+backward PGF to `fv3_fb_sw_step` (fv3_sw_core.py): `gz_b=a2b_ord4(g*(h_new+h_s))` corners,
+`u_d += dt*rdx_u*(gz_b[:,:-1]-gz_b[:,1:])`, `v_d += dt*rdy_v*(gz_b[:,:,:-1]-gz_b[:,:,1:])`,
+backward-centred on h_new, dt-linear to match ke_corner (verified ke_corner ∝ dt, ratio 2.0).
+DECOMPOSITION CONFIRMS CORRECT: t=0 one-step du_d (W2 steady, should be ~0): |du_dsw|(no PGF)
+rms 0.330 → |du_total|(with PGF) rms 0.126 = 2.6× SMALLER; corr(du_dsw,du_pgf)=-0.924 (PGF
+opposes the d_sw residual ✓ right sign; flipped sign worse 0.625); magnitude ratio 0.93.
+BUT FB W2 still NaNs at step 47 (was 43) — the missing PGF was a real bug + correct fix, but the
+imbalance is an EXPONENTIALLY-growing mode, so cutting the seed 2.6× only delays ~4 steps. ⇒ a
+SECOND bug sets the growth RATE (corr -0.924 not -1.0; residual grows). Likely the forward-
+backward COUPLING/time-centering (c_sw → p_grad_c → d_sw → one_grad_p sequence) or the c_sw
+half-step. Phase4 kept (correct, FB-only, no production impact). NEXT: find the growth-rate bug
+(oracle-diff workflow surfaced other discrepancies; check the FB coupling vs dyn_core.F90:489-1542).
+
 
 ## GRID gap → gnomonic_ed wiring (LIKELY fixes the C96 eigenmode; iter62-69)
 create defaulted to EQUIANGULAR (gt=2, corner aspect 1.40); FV3 operational = gnomonic_ed

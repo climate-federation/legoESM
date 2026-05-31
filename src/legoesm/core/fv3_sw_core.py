@@ -1975,4 +1975,25 @@ def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=constants.g,
             apply_legacy_d_sw5_corner_corrections),
         apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
 
+    # Phase 4: one_grad_p — D-grid BACKWARD pressure-gradient update on the
+    # prognostic winds (FV3 dyn_core.F90:2347 one_grad_p / 1529 grad1_p_update).
+    # iter77 ROOT-CAUSE FIX: pre-iter77 the FB step applied the pressure gradient
+    # ONLY at the C-grid (_p_grad_c on uc/vc, Phase 2), so the prognostic D-grid
+    # winds u_d/v_d never felt the PGF — the vector-invariant momentum eqn was
+    # missing its -∇Φ term.  For a steady geostrophic state (W2) the winds then
+    # had NO restoring force balancing Coriolis, seeding a dt-independent growing
+    # mode that NaN'd ~3 h regardless of dt or dissipation.
+    #
+    # Vector-invariant form: du = -dt·∂Φ/∂x with the geopotential Φ = g·(h+h_s)
+    # at the B-grid CORNERS (a2b_ord4, FV3's a2b(gz)), BACKWARD-centred on the
+    # post-mass-update height h_new.  Same corner-difference staggering + dt-LINEAR
+    # scaling as the d_sw KE gradient (ke_corner ∝ dt, verified), and the same
+    # sign convention (Φ[i]-Φ[i+1] mirrors ke_corner[i]-ke_corner[i+1]).
+    gz_b = _interp_center_to_corner_a2b_ord4(
+        g * (h_new + h_s), cdgrid)  # (6, n+1, n+1) geopotential at corners
+    rdx_u = 1.0 / jnp.maximum(cdgrid.dx_edge_y, _EPS)  # (6, n, n+1) — u_d edge
+    rdy_v = 1.0 / jnp.maximum(cdgrid.dy_edge_x, _EPS)  # (6, n+1, n) — v_d edge
+    u_d_new = u_d_new + dt * rdx_u * (gz_b[:, :-1, :] - gz_b[:, 1:, :])
+    v_d_new = v_d_new + dt * rdy_v * (gz_b[:, :, :-1] - gz_b[:, :, 1:])
+
     return h_new, u_d_new, v_d_new
