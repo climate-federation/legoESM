@@ -37,8 +37,14 @@ the W2 v-wind imprint (v_ll_Linf=0.34 m/s on an analytically-zero field) + a slo
   was based on a CONFOUNDED comparison — withdrawn. HIDDEN until now because the zonally-symmetric cases
   (W2/rest/geostrophic-zonal) are lon-INVARIANT (offset invisible); the localized barotropic_wave exposes it.
   NOTE: the cube IC is physically at 180°E by construction (not a physics bug) — the bug is the COMPARISON
-  regridding lon-convention. FIX NEEDED: regrid all grids to one true-physical-lon canvas → re-verify
-  cube≈MPAS/latlon for LOCALIZED features (zonally-symmetric cross-grid results stand).
+  regridding lon-convention. FIX NEEDED (harness): regrid all grids to one true-physical-lon canvas.
+  iter137 ALIGNED check (rolled cube+latlon +180°): positions now CONSISTENT (final eta peak cube 181°/
+  latlon 195°/mpas 204°, all propagating E from the 180° IC). The remaining 4× amplitude is NOT an artifact:
+  all grids start ~0.97 at t=0; the cube RETAINS 0.855 (~88%) while latlon/mpas DISSIPATE to 0.21 (~22%) —
+  and the test docstring EXPECTS amplitude retention (~1m), so the cube (less dissipative) is CLOSER to
+  expected, not worse; cube eta is interior/edge-clean. CAVEAT (no over-claim): the cross-grid dissipation/
+  propagation spread is partly resolution (C24 vs 48×72 vs ico4) — a resolution-convergence check is pending
+  before a firm verdict. Net: projection bug real + understood; the cube ocean wave looks faithful/edge-clean.
 
 ## ❗ THE ONE REMAINING GAP — experimental SW FB-port edge instability (production SW is STABLE + faithful-in-results)
 CONFIRMED FV3 MISMATCH (codex iter109): production SW (operators_cdgrid.py:1167) + 3D PE (:445) use CENTERED
