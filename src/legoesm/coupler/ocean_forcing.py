@@ -18,14 +18,25 @@ ocean P-E + ice melt + land runoff + lake P-E — using that as ``ice_fw`` would
 double-count the atmospheric terms).  A driver adds the atmosphere/ocean/land/
 lake surface forcing separately and merges.
 
-SCOPE: ``LatLonCGridOceanModel`` (its ``step`` takes a separate ``freshwater=``
-argument that drives salinity via the virtual-salt-flux closure, and applies
-``OceanSurfaceForcing.tau_x/tau_y/q_net`` unconditionally).  NOT wired for the
-cubed-sphere ``OceanModel`` (``step`` has no ``freshwater=`` arg -> ``ice_fw``
-would be dropped) nor MPAS (external ``tau``/``q_net`` are applied only inside
-its OPTIONAL physics function, so they can be silently ignored depending on
-``MPASOceanConfig.physics``).  Kept OUT of ``coupler.py`` so the coupler core
-stays ocean-model-agnostic.
+SCOPE — the returned structs are model-agnostic; consumption differs per grid:
+  - ``LatLonCGridOceanModel``: applies ``OceanSurfaceForcing.tau/q_net/salt``
+    directly in its dynamics + the separate ``freshwater=`` arg for the salinity
+    virtual-salt closure (pass BOTH returned structs).
+  - cubed-sphere ``OceanModel``: routes surface forcing through ``physics_fn`` —
+    configure
+    ``OceanPhysicsConfig(surface_forcing=SurfaceForcingConfig(scheme="external"))``
+    so the ``external`` scheme applies the SAME ``OceanSurfaceForcing``
+    (tau / q_net / freshwater / salt).  Here ``freshwater`` is a VIRTUAL salt
+    flux (salinity dilution, fixed volume) — no ``eta`` mass source yet (deferred
+    with MPAS); pass only the ``OceanSurfaceForcing`` (no ``freshwater=`` arg).
+  - ``MPASOceanModel``: builds physics through ``make_mpas_ocean_physics`` (a
+    SEPARATE factory) which does NOT yet dispatch the ``external`` scheme — MPAS
+    two-way wiring is tracked separately.  MPAS already consumes the
+    ``freshwater=`` arg for eta + salinity.
+The returned ``OceanSurfaceForcing`` carries tau/q_net/freshwater/salt and the
+``FreshwaterForcing`` carries ``ice_fw``; pass whichever the chosen model
+consumes.  Kept OUT of ``coupler.py`` so the coupler core stays
+ocean-model-agnostic.
 
 Salt: BOTH channels are wired.  The ice melt/freeze FRESHWATER (``ice_fw``)
 drives salinity via the ocean's virtual-salt-flux closure (melt dilutes, freeze

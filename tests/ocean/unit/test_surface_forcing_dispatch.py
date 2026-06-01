@@ -23,7 +23,7 @@ from legoesm.ocean.physics.surface_forcing.integration import (
 
 @pytest.mark.parametrize(
     "scheme",
-    ["none", "prescribed", "restoring", "combined", "bulk_formulas"],
+    ["none", "prescribed", "restoring", "combined", "bulk_formulas", "external"],
 )
 def test_factory_returns_callable_for_every_scheme(scheme):
     config = SurfaceForcingConfig(scheme=scheme)

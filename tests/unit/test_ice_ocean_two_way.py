@@ -171,6 +171,139 @@ def test_brine_real_salt_flux_raises_ocean_salinity():
     assert float(jnp.max(dS)) > 1e-6, "brine salt-in did not raise ocean salinity"
 
 
+def test_cubed_sphere_external_scheme_two_way():
+    """F11 two-way on the CUBED-SPHERE OceanModel via the 'external' surface-
+    forcing scheme: the SAME helper output drives FW freshening, real brine-salt
+    salinification, and ice-stress currents on the cubed sphere (#F11 phase 2)."""
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.ocean.state import OceanConfig, OceanSurfaceForcing
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.dynamics.ocean_model import OceanModel
+    from legoesm.ocean.init import rest_state_ocean
+    n = 16
+    shape = (6, n, n)
+    grid = create_cubed_sphere(n)
+    zc = create_ocean_z_star(n_levels=6, H_max=4000.0, dz_surface=10.0, dz_deep=500.0)
+    ocean = rest_state_ocean(grid, zc, S_uniform=35.0, H_max=4000.0)
+    base = OceanPhysicsConfig()
+    phys = OceanPhysicsConfig(
+        surface_forcing=type(base.surface_forcing)(scheme="external"),
+        vertical_mixing=type(base.vertical_mixing)(scheme="none"),
+        lateral_mixing=type(base.lateral_mixing)(scheme="none"),
+        shortwave_penetration=None)
+    model = OceanModel(grid, zc, config=OceanConfig(physics=phys))
+    om = (ocean.H_bathy.data > 1.0).astype(ocean.S.data.dtype)
+
+    # Synthetic ice exchange: melt (FW>0), brine (salt>0), eastward stress.
+    ice = _zero_tile(shape)._replace(
+        freshwater_flux=jnp.where(om > 0.5, 2e-4, 0.0),
+        salt_flux=jnp.where(om > 0.5, 1e-4, 0.0),
+        ocean_stress_x=jnp.where(om > 0.5, 0.1, 0.0),
+        ocean_stress_y=jnp.zeros(shape))
+    fracs = compute_tile_fractions(
+        TileConfig(f_land=(1.0 - om), f_lake=jnp.zeros(shape)),
+        jnp.where(om > 0.5, 0.8, 0.0))
+    fw, sf = ice_ocean_forcing_from_ice_response(ice, fracs)
+
+    # Cubed-sphere OceanModel.step takes only surface_forcing (external scheme).
+    S0 = ocean.S.data[..., 0]
+    o = ocean
+    for _ in range(5):
+        o = model.step(o, 1800.0, surface_forcing=sf)
+    assert jnp.all(jnp.isfinite(o.S.data)) and jnp.all(jnp.isfinite(o.u.data))
+    # Net of FW dilution (-) + brine salt (+): with these magnitudes salt wins,
+    # so salinity rises somewhere; the channels are both active + finite.
+    dS = jnp.where(om > 0.5, o.S.data[..., 0] - S0, 0.0)
+    assert float(jnp.max(jnp.abs(dS))) > 1e-6, "external scheme: no salinity response"
+    # Ice stress drove currents.
+    assert float(jnp.max(jnp.abs(o.u.data))) > 1e-5, "external scheme: no currents"
+
+
+def test_cubed_sphere_external_fw_freshens_salt_salinifies():
+    """On the cubed sphere, FW-only freshens and salt-only salinifies (isolated
+    channels through the 'external' scheme), confirming both signs."""
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.ocean.state import OceanConfig, OceanSurfaceForcing
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.dynamics.ocean_model import OceanModel
+    from legoesm.ocean.init import rest_state_ocean
+    n = 16
+    grid = create_cubed_sphere(n)
+    zc = create_ocean_z_star(n_levels=6, H_max=4000.0, dz_surface=10.0, dz_deep=500.0)
+    ocean = rest_state_ocean(grid, zc, S_uniform=35.0, H_max=4000.0)
+    base = OceanPhysicsConfig()
+    model = OceanModel(grid, zc, config=OceanConfig(physics=OceanPhysicsConfig(
+        surface_forcing=type(base.surface_forcing)(scheme="external"),
+        vertical_mixing=type(base.vertical_mixing)(scheme="none"),
+        lateral_mixing=type(base.lateral_mixing)(scheme="none"),
+        shortwave_penetration=None)))
+    om = (ocean.H_bathy.data > 1.0).astype(ocean.S.data.dtype)
+    S0 = ocean.S.data[..., 0]
+
+    o = ocean
+    for _ in range(5):
+        o = model.step(o, 1800.0, surface_forcing=OceanSurfaceForcing(
+            freshwater=jnp.where(om > 0.5, 2e-4, 0.0)))
+    dS_fw = jnp.where(om > 0.5, o.S.data[..., 0] - S0, jnp.nan)
+    assert float(jnp.nanmean(dS_fw)) < -1e-6, "FW-only did not freshen"
+
+    o = ocean
+    for _ in range(5):
+        o = model.step(o, 1800.0, surface_forcing=OceanSurfaceForcing(
+            salt_flux=jnp.where(om > 0.5, 1e-4, 0.0)))
+    dS_salt = jnp.where(om > 0.5, o.S.data[..., 0] - S0, jnp.nan)
+    assert float(jnp.nanmean(dS_salt)) > 1e-6, "salt-only did not salinify"
+
+
+def test_external_scheme_uses_atmosphere_tau_convention():
+    """The 'external' scheme applies ocean reaction = -tau (ATMOSPHERE
+    convention), the OPPOSITE of 'prescribed' (+tau on-ocean).  A raw POSITIVE
+    tau_x (NOT routed through the F11 helper's pre-negation) must therefore drive
+    a WESTWARD current.  Pins the documented sign contract directly."""
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.ocean.state import OceanConfig, OceanSurfaceForcing
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.dynamics.ocean_model import OceanModel
+    from legoesm.ocean.init import rest_state_ocean
+    n = 16
+    grid = create_cubed_sphere(n)
+    zc = create_ocean_z_star(n_levels=6, H_max=4000.0, dz_surface=10.0, dz_deep=500.0)
+    ocean = rest_state_ocean(grid, zc, S_uniform=35.0, H_max=4000.0)
+    base = OceanPhysicsConfig()
+    model = OceanModel(grid, zc, config=OceanConfig(physics=OceanPhysicsConfig(
+        surface_forcing=type(base.surface_forcing)(scheme="external"),
+        vertical_mixing=type(base.vertical_mixing)(scheme="none"),
+        lateral_mixing=type(base.lateral_mixing)(scheme="none"),
+        shortwave_penetration=None)))
+    om = (ocean.H_bathy.data > 1.0).astype(ocean.u.data.dtype)
+    o = ocean
+    # ONE step isolates the direct stress tendency before Coriolis rotates it.
+    o = model.step(o, 1800.0, surface_forcing=OceanSurfaceForcing(
+        tau_x=jnp.where(om > 0.5, 0.1, 0.0)))
+    u_top = jnp.where(om > 0.5, o.u.data[..., 0], jnp.nan)
+    assert float(jnp.nanmean(u_top)) < -1e-6, (
+        "external scheme: positive tau_x must drive WESTWARD current "
+        "(ocean reaction = -tau)")
+
+
+def test_latlon_rejects_external_scheme_to_avoid_double_apply():
+    """The lat-lon C-grid applies OceanSurfaceForcing DIRECTLY in its dynamics,
+    so routing the SAME forcing through the 'external' physics scheme would
+    double-apply momentum/heat/salt.  The model must reject that config at
+    construction (fail loud) rather than silently double-count."""
+    import pytest
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    grid = create_latlon_grid(n_lat=12, n_lon=24)
+    zc = create_ocean_z_star(n_levels=6, H_max=4000.0, dz_surface=10.0, dz_deep=500.0)
+    ocean = rest_state_latlon_cgrid_ocean(grid, zc, S_uniform=35.0)
+    base = OceanPhysicsConfig()
+    bad_phys = OceanPhysicsConfig(
+        surface_forcing=type(base.surface_forcing)(scheme="external"))
+    with pytest.raises(ValueError, match="external.*not supported on the"):
+        LatLonCGridOceanModel(
+            grid, zc, config=LatLonCGridOceanConfig(physics=bad_phys))
+
+
 def test_ice_stress_drives_currents_in_correct_direction():
     """A purely EASTWARD on-ocean ice stress must drive a net EASTWARD current.
     Guards the tau sign (helper negates ocean_stress; ocean consumer negates
