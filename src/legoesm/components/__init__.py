@@ -8,6 +8,11 @@ remains an interchangeable, individually-differentiable brick.
 See :mod:`legoesm.components.protocol`.
 """
 
+from legoesm.components.complexity import (  # noqa: F401
+    LandComplexity,
+    OceanComplexity,
+    ocean_simple_mode,
+)
 from legoesm.components.interface import (  # noqa: F401
     CouplingBrick,
     FormBrick,
@@ -36,4 +41,7 @@ __all__ = [
     "RegridBrick",
     "CouplingBrick",
     "validate_interface",
+    "OceanComplexity",
+    "LandComplexity",
+    "ocean_simple_mode",
 ]
