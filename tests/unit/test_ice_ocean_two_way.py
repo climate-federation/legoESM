@@ -143,6 +143,34 @@ def test_freeze_extracts_freshwater_raises_salinity():
     assert float(jnp.max(dS)) > 1e-6, "freeze did not raise ocean salinity"
 
 
+def test_brine_real_salt_flux_raises_ocean_salinity():
+    """The EXPLICIT sea-ice salt_flux (real brine-rejection salt mass, +into
+    ocean) must be delivered as a real top-layer salt source and RAISE salinity
+    — independent of (and in addition to) the freshwater virtual-salt path
+    (#F11 explicit brine salt-mass ocean source)."""
+    nlat, nlon = 24, 48
+    shape = (nlat, nlon)
+    grid, ocean, model = _ocean(nlat, nlon, n_levels=6)
+    om = ocean.land_mask.data
+    # Synthetic brine: salt INTO ocean (>0), ZERO freshwater (isolate salt path).
+    ice = _zero_tile(shape)._replace(
+        salt_flux=jnp.where(om > 0.5, 1e-4, 0.0),
+        freshwater_flux=jnp.zeros(shape))
+    fracs = compute_tile_fractions(
+        TileConfig(f_land=(1.0 - om), f_lake=jnp.zeros(shape)),
+        jnp.where(om > 0.5, 0.6, 0.0))
+    fw, sf = ice_ocean_forcing_from_ice_response(ice, fracs)
+    f_water = fracs.f_ocean + fracs.f_ice
+    assert jnp.allclose(sf.salt_flux, f_water * ice.salt_flux)
+    assert jnp.allclose(fw.ice_fw, 0.0)  # FW channel inactive here
+    S0 = ocean.S.data[..., 0]
+    o = ocean
+    for _ in range(6):
+        o = model.step(o, 1800.0, freshwater=fw, surface_forcing=sf)
+    dS = jnp.where(om > 0.5, o.S.data[..., 0] - S0, 0.0)
+    assert float(jnp.max(dS)) > 1e-6, "brine salt-in did not raise ocean salinity"
+
+
 def test_ice_stress_drives_currents_in_correct_direction():
     """A purely EASTWARD on-ocean ice stress must drive a net EASTWARD current.
     Guards the tau sign (helper negates ocean_stress; ocean consumer negates
@@ -206,3 +234,41 @@ def test_kpp_sees_ice_freshwater_buoyancy():
     assert jnp.all(jnp.isfinite(o.S.data)) and jnp.all(jnp.isfinite(o.u.data))
     dS = jnp.where(om > 0.5, o.S.data[..., 0] - S0, 0.0)
     assert float(jnp.min(dS)) < -1e-6, "KPP-on: ice melt did not freshen ocean"
+
+
+def test_kpp_sees_real_salt_buoyancy():
+    """With KPP enabled, the REAL brine salt flux reaches the KPP salt-buoyancy
+    path (surface_forcing.salt_flux) and raises salinity — the KPP-on analogue
+    of the freshwater-buoyancy test for the explicit salt channel (#F11)."""
+    from legoesm.ocean.physics.combined import OceanPhysicsConfig
+    from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+    nlat, nlon = 24, 48
+    shape = (nlat, nlon)
+    grid = create_latlon_grid(n_lat=nlat, n_lon=nlon)
+    zc = create_ocean_z_star(n_levels=6, H_max=4000.0, dz_surface=10.0, dz_deep=500.0)
+    base = OceanPhysicsConfig()
+    physics = OceanPhysicsConfig(
+        vertical_mixing=VerticalMixingConfig(scheme="kpp"),
+        lateral_mixing=type(base.lateral_mixing)(scheme="none"),
+        surface_forcing=type(base.surface_forcing)(scheme="none"),
+        shortwave_penetration=None,
+    )
+    ocean = rest_state_latlon_cgrid_ocean(grid, zc, S_uniform=35.0)
+    model = LatLonCGridOceanModel(
+        grid, zc, config=LatLonCGridOceanConfig(physics=physics))
+    om = ocean.land_mask.data
+    ice = _zero_tile(shape)._replace(
+        salt_flux=jnp.where(om > 0.5, 1e-4, 0.0),     # brine into ocean
+        freshwater_flux=jnp.zeros(shape))
+    fracs = compute_tile_fractions(
+        TileConfig(f_land=(1.0 - om), f_lake=jnp.zeros(shape)),
+        jnp.where(om > 0.5, 0.7, 0.0))
+    fw, sf = ice_ocean_forcing_from_ice_response(ice, fracs)
+    assert float(jnp.max(jnp.abs(sf.salt_flux))) > 0.0
+    S0 = ocean.S.data[..., 0]
+    o = ocean
+    for _ in range(6):
+        o = model.step(o, 1800.0, freshwater=fw, surface_forcing=sf)
+    assert jnp.all(jnp.isfinite(o.S.data)) and jnp.all(jnp.isfinite(o.u.data))
+    dS = jnp.where(om > 0.5, o.S.data[..., 0] - S0, 0.0)
+    assert float(jnp.max(dS)) > 1e-6, "KPP-on: brine salt did not raise salinity"

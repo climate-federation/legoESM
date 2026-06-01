@@ -1886,6 +1886,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         _sf_tau_y = getattr(surface_forcing, "tau_y", None)
         _sf_q_net = getattr(surface_forcing, "q_net", None)
         _sf_sw = getattr(surface_forcing, "sw_down", None)
+        _sf_salt = getattr(surface_forcing, "salt_flux", None)
 
         if _sf_tau_x is not None and _sf_tau_y is not None:
             # Atmosphere convention (opposes wind) -> ocean reaction.
@@ -1955,6 +1956,20 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                 dT_dt = dT_dt.at[..., 0].add(
                     q_net_T * inv_rho_csw_dz * mask
                 )
+
+        # Real salt-mass flux (e.g. sea-ice brine rejection) -> top-layer S.
+        # Distinct from the freshwater virtual-salt path (which the freshwater=
+        # argument applies); this is the explicit salt-mass channel (#F11).
+        if _sf_salt is not None:
+            from legoesm.ocean.freshwater import salt_flux_salinity_tendency
+            # Use the ACTUAL partial-cell-aware top-layer thickness h_k[...,0]
+            # (the tracer cell that carries the salinity mass), NOT
+            # dz_ref[0]*J, so the real salt source is mass-conservative on
+            # shallow top-partial columns (codex).
+            dz_0_T_s = jnp.asarray(h_k[..., 0], dtype=S.dtype)
+            dS_salt = salt_flux_salinity_tendency(
+                jnp.asarray(_sf_salt, dtype=S.dtype), dz_0_T_s, float(rho_0))
+            dS_dt = dS_dt.at[..., 0].add(dS_salt * mask)
 
     # --- 10c. Sponge layer relaxation ---
     # Cast sponge arrays to state dtype to prevent float64 promotion when

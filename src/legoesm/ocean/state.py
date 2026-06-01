@@ -89,12 +89,18 @@ class OceanSurfaceForcing(NamedTuple):
         Surface wind stress components [Pa].
     freshwater : array or None
         Net freshwater flux into ocean (P - E + R + M) [kg/m²/s].
+    salt_flux : array or None
+        REAL salt-mass flux into the ocean [kg(salt)/m²/s, positive = salt INTO
+        ocean], e.g. sea-ice brine rejection on freeze.  Applied to the top
+        layer salinity as dS/dt = salt_flux*1e3/(rho_0*dz_0); distinct from the
+        ``freshwater`` (virtual-salt dilution) channel.
     """
     sw_down: object = None       # jnp.ndarray | None
     q_net: object = None         # jnp.ndarray | None
     tau_x: object = None         # jnp.ndarray | None
     tau_y: object = None         # jnp.ndarray | None
     freshwater: object = None    # jnp.ndarray | None
+    salt_flux: object = None     # jnp.ndarray | None  (real salt mass, kg/m2/s)
 
 
 class OceanConfig(NamedTuple):

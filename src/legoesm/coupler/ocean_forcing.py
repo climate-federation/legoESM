@@ -27,11 +27,13 @@ its OPTIONAL physics function, so they can be silently ignored depending on
 ``MPASOceanConfig.physics``).  Kept OUT of ``coupler.py`` so the coupler core
 stays ocean-model-agnostic.
 
-NOTE on salt: the ice melt/freeze FRESHWATER (``ice_fw``) drives salinity via
-the ocean's virtual-salt-flux closure — melt dilutes, freeze concentrates — so
-the dominant brine effect is captured.  The EXPLICIT sea-ice ``salt_flux``
-(real brine-rejection salt mass) is NOT separately wired here; a real ocean
-salt-mass source would be needed for that refinement.
+Salt: BOTH channels are wired.  The ice melt/freeze FRESHWATER (``ice_fw``)
+drives salinity via the ocean's virtual-salt-flux closure (melt dilutes, freeze
+concentrates), AND the explicit sea-ice ``salt_flux`` (real brine-rejection
+salt mass) is delivered through ``OceanSurfaceForcing.salt_flux`` -> a real
+top-layer salt source (``salt_flux_salinity_tendency``).  An ocean model must
+apply ``OceanSurfaceForcing.salt_flux`` for the latter to take effect (the
+lat-lon C-grid does; see ``ocean_pe_latlon_cgrid.py``).
 """
 from __future__ import annotations
 
@@ -89,6 +91,11 @@ def ice_ocean_forcing_from_ice_response(
         q_net=-(f_water * ice_resp.ocean_heat_extraction),
         tau_x=-(f_ice * ice_resp.ocean_stress_x),
         tau_y=-(f_ice * ice_resp.ocean_stress_y),
+        # Real brine salt-mass flux (kg/m2/s, +into ocean on freeze / melt),
+        # per-grid-cell (f_water weight like the other exchange channels).
+        # Applied to top-layer salinity as a real salt source, distinct from the
+        # freshwater virtual-salt dilution above (#F11).
+        salt_flux=f_water * ice_resp.salt_flux,
         # Also expose the net ice freshwater on the surface-forcing channel:
         # the KPP boundary-layer scheme derives its salt-BUOYANCY flux (melt
         # stabilizes, freeze/brine destabilizes) from surface_forcing.freshwater
