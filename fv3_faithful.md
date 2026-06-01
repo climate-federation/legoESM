@@ -21,6 +21,12 @@ Fortran as oracle; do NOT improvise.** Branch `latlon-fv-amip-verify`; fv3 work 
   in float64 ((Φ_k−phis) std=0.0); PE runs f32 by design. Optional f32 fix.
 - **ocean cross-grid dynamics** (iter105/111): geostrophic cube 0.0143 ≈ latlon 0.0159 ≈ mpas 0.0169;
   IGW omega 1.09e-4 IDENTICAL all 3 grids. ocean cube 9/9 rest machine-zero. ⇒ ocean ≈ MPAS/latlon (OMIP).
+  iter136: ran ocean barotropic_wave cross-grid (3/3 PASS). Cube max|eta|=0.857 looked 4× latlon/mpas (0.21)
+  — INVESTIGATED + RULED OUT as an edge artifact: cube max|eta| is at face2 (i=11,j=11) = face INTERIOR at
+  all times, edge-ring energy frac=0.000 (zero eta near cube edges); the 4× is an IC-amplitude difference
+  across grids (cube IC ~0.97 vs latlon/mpas ~0.3), NOT a cube artifact. Cube ocean barotropic_wave is
+  EDGE-CLEAN. Surfaced eta cross-grid + cube-native PNGs to user. (Caveat: barotropic_wave IC amplitude is
+  not normalized consistently across grids — a harness comparability note, not a cube faithfulness bug.)
 
 ## ❗ THE ONE REMAINING GAP — experimental SW FB-port edge instability (production SW is STABLE + faithful-in-results)
 CONFIRMED FV3 MISMATCH (codex iter109): production SW (operators_cdgrid.py:1167) + 3D PE (:445) use CENTERED
