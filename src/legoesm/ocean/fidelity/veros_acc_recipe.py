@@ -592,6 +592,21 @@ def build_acc_model_config(grid: LatLonGrid | None = None, *,
         # -0.336->0.715 (vector-invariant was anti-correlated). See the §8 ledger.
         momentum_advection="flux_form",
         momentum_flux_scheme="centered",
+        # TRACER advection: the recipe keeps legoESM's default TVD (Van Leer)
+        # rather than matching Veros ACC's centered 2nd-order (adv_flux_2nd;
+        # enable_superbee_advection=False). This is a DELIBERATE, documented
+        # fidelity gap, not an oversight: (1) legoESM has no plain centered
+        # 2nd-order lat-lon C-grid tracer scheme (only limited / high-order:
+        # tvd/superbee/dst3/weno5/7), and an unlimited centered scheme is
+        # dispersive (tracer overshoots / negatives) -- adding it would cost
+        # robustness; (2) MEASURED -- the residual abyssal warm bias is the
+        # too-strong resolved overturning (the too-barotropic flow), and a
+        # tvd/dst3/weno5 scheme sweep showed LESS-diffusive advection runs the
+        # abyss slightly WARMER, not closer to Veros, so matching centered would
+        # not help the climate. TVD's implicit diapycnal mixing (~20x Veros's
+        # physical abyssal K_H) is a byproduct of the over-strong w, not the
+        # warming driver. The over-overturning lever is structural (vertical
+        # momentum partition / eddy form stress), not the tracer scheme.
         bottom_drag_r=R_BOT,
         # ``eq_of_state_type=3`` in Veros dispatches to nonlinear_eq2.py
         # (Vallis 2008) — NOT nonlinear_eq3.py despite the file name.
