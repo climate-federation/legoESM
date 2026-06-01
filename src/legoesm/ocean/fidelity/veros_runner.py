@@ -165,7 +165,15 @@ def _extract_state(setup, *, capture_vars: tuple[str, ...]) -> dict[str, np.ndar
     out: dict[str, np.ndarray] = {}
     variables = setup.state.variables
     for name in capture_vars:
-        value = getattr(variables, name, None)
+        try:
+            value = getattr(variables, name, None)
+        except RuntimeError:
+            # Veros RAISES RuntimeError when accessing an INACTIVE variable
+            # (e.g. ``kappa_gm`` when that EKE diagnostic is off) rather than
+            # returning None, so a plain getattr-default does not shield it.
+            # Skip it gracefully -- otherwise requesting one inactive capture
+            # var aborts the whole (already-integrated, expensive) run.
+            continue
         if value is None:
             continue
         out[name] = np.asarray(value)

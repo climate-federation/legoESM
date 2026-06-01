@@ -57,6 +57,21 @@ def thomas_solve(
     """
     n = b.shape[-1]
 
+    # Promote a/b/c/d to a common working dtype before solving. Under x64 the
+    # implicit-diffusion coefficients (a,b,c built from f64 K_v/dz/dt) are f64
+    # while the RHS d (the f32-storage tracer field) is f32; the per-row updates
+    # then promote to f64 and scatter into the f32 c_star/d_star/x buffers -> an
+    # implicit f64->f32 downcast FutureWarning (a future JAX error). Solve in the
+    # higher precision, then return the solution in the RHS dtype so callers'
+    # state stores stay dtype-stable. (The prior mixed-precision path downcast the
+    # d-derived terms to f32 anyway, so this is strictly more accurate.)
+    out_dtype = d.dtype
+    work_dtype = jnp.result_type(a, b, c, d)
+    a = jnp.asarray(a, work_dtype)
+    b = jnp.asarray(b, work_dtype)
+    c = jnp.asarray(c, work_dtype)
+    d = jnp.asarray(d, work_dtype)
+
     # Forward sweep: eliminate sub-diagonal
     def forward_step(carry, k):
         c_prev, d_prev = carry  # Modified c and d from previous row
@@ -125,7 +140,7 @@ def thomas_solve(
 
     x = jax.lax.fori_loop(0, n - 1, backward_body, x)
 
-    return x
+    return jax.lax.convert_element_type(x, out_dtype)
 
 
 def thomas_solve_batched(
