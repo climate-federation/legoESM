@@ -491,21 +491,42 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         from legoesm.ocean.physics.vertical_mixing.config import (
             VerticalMixingConfig,
         )
+        from legoesm.ocean.physics.lateral_mixing.config import (
+            LateralMixingConfig,
+        )
+        from legoesm.ocean.physics.surface_forcing.config import (
+            SurfaceForcingConfig,
+        )
+        from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
+        # CONVECTION-ONLY physics pipeline.  Every other module is
+        # explicitly disabled: the OceanPhysicsConfig defaults are NOT
+        # inert (lateral_mixing defaults to harmonic -- assumes a
+        # cubed-sphere 4-D layout and would crash on the tripole 3-D
+        # state; shortwave_penetration defaults ON -- would double-count
+        # the shortwave that the dynamics-core external-tau block already
+        # applies).  The C-grid model's own config-level A_h/B_h/K_h,
+        # bottom_drag_r and the external CORE-II forcing are untouched;
+        # the pipeline contributes ONLY the convective K.
         _ovr["physics"] = OceanPhysicsConfig(
             vertical_mixing=VerticalMixingConfig(scheme="none"),
+            lateral_mixing=LateralMixingConfig(scheme="none"),
+            surface_forcing=SurfaceForcingConfig(scheme="none"),
+            bottom_drag=BottomDragConfig(scheme="none"),
             convection=OceanConvectionConfig(
                 scheme=convection,
                 enhanced_diffusion=EnhancedDiffusionConfig(
                     K_conv=convection_K_conv, K_bg=convection_K_bg,
                 ),
             ),
+            shortwave_penetration=None,
         )
         # Convective adjustment must apply through the implicit vertical
         # solve (backward-Euler is unconditionally stable; an explicit
         # K_conv would violate CFL at ocean dt).
         _ovr["implicit_vertical_mixing"] = True
-        print(f"[setup] tripole convection ENABLED: scheme={convection} "
-              f"K_conv={convection_K_conv} K_bg={convection_K_bg}")
+        print(f"[setup] tripole convection ENABLED (convection-only physics): "
+              f"scheme={convection} K_conv={convection_K_conv} "
+              f"K_bg={convection_K_bg}")
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -1066,44 +1087,62 @@ def main() -> int:
     # (--scan-block 0) keeps the bit-identical Python loop below.
     # Diagnostics / snapshots / non-finite abort run at BLOCK BOUNDARIES.
     # ------------------------------------------------------------------
+    _tti = getattr(getattr(model, "config", None),
+                   "tracer_time_integrator", "euler")
     use_scan = (int(args.scan_block) > 0 and app_grid_type == "tripole"
-                and nudge_tau_s == 0.0 and drag_tau_s == 0.0)
+                and nudge_tau_s == 0.0 and drag_tau_s == 0.0
+                and _tti != "ab2")
     if int(args.scan_block) > 0 and not use_scan:
-        print("[scan] --scan-block ignored: needs grid=tripole and no WOA "
-              "nudging / spin-up drag (those require per-step host updates).",
-              flush=True)
+        why = ("AB2 tracer time integrator (None->Field carry breaks "
+               "lax.scan)" if _tti == "ab2"
+               else "grid!=tripole or WOA-nudging / spin-up-drag enabled "
+                    "(those need per-step host updates)")
+        print(f"[scan] --scan-block ignored: {why}.", flush=True)
     if use_scan:
         from legoesm.ocean.coupler.omip2_applicator import (
             build_core2_forcing_device_stack, build_omip2_scan_block_fn,
         )
         f_stack, nn_i, nn_j, gshape = build_core2_forcing_device_stack(
             forcing, grid, "tripole")
-        block_fn = build_omip2_scan_block_fn(
-            model, dt, f_stack, nn_i, nn_j, gshape, ramp_s=ramp_s)
+        block_fn = build_omip2_scan_block_fn(model, dt, gshape, ramp_s=ramp_s)
         bsz = int(args.scan_block)
-        print(f"[run] lax.scan block-stepping: block={bsz} steps "
-              f"(CORE-II forcing fused on-device; diagnostics at block "
-              f"boundaries)", flush=True)
+        print(f"[run] lax.scan block-stepping: block<={bsz} steps, split at "
+              f"diag/snapshot/year boundaries so output cadence matches the "
+              f"Python loop (CORE-II forcing fused on-device)", flush=True)
+
+        def _block_steps(step):
+            # Cap the block so it ENDS on the next diagnostic / snapshot /
+            # year boundary -> the modulo-gated I/O below fires at exactly
+            # the same cadence as the Python loop (codex #354 finding 2).
+            nb = min(bsz, n_steps - step)
+            for period in (diag_every, snap_every, steps_per_year):
+                if period and period > 0:
+                    nb = min(nb, period - (step % period))
+            return max(1, nb)
+
         step = 0
         while step < n_steps:
-            nb = min(bsz, n_steps - step)
+            nb = _block_steps(step)
             idx_block = jnp.asarray(
                 [_idx_t(step + 1 + k, dt, n_rec) for k in range(nb)],
                 dtype=jnp.int32)
-            state = block_fn(state, idx_block, jnp.int32(step + 1))
+            state = block_fn(state, f_stack, nn_i, nn_j, idx_block,
+                             jnp.int32(step + 1))
             step += nb
-            state = jax.block_until_ready(state)
             day = step * dt / _SEC_PER_DAY
-            d = _diag(state, lat2d, lon2d)
-            rate = step / (time.time() - t_wall)
-            print(f"[diag] step {step} (day {day:.0f}): {d} | {rate:.2f} steps/s",
-                  flush=True)
-            _log_diag_csv(step, day, d, rate)
-            if not d["finite"]:
-                print("[ABORT] non-finite state", flush=True)
-                _save_snapshot(out_dir, f"blowup_step{step}", state, lat2d, lon2d)
-                _csv.close()
-                return 1
+            if step % diag_every == 0 or step == n_steps:
+                state = jax.block_until_ready(state)
+                d = _diag(state, lat2d, lon2d)
+                rate = step / (time.time() - t_wall)
+                print(f"[diag] step {step} (day {day:.0f}): {d} | "
+                      f"{rate:.2f} steps/s", flush=True)
+                _log_diag_csv(step, day, d, rate)
+                if not d["finite"]:
+                    print("[ABORT] non-finite state", flush=True)
+                    _save_snapshot(out_dir, f"blowup_step{step}",
+                                   state, lat2d, lon2d)
+                    _csv.close()
+                    return 1
             if snap_every > 0 and step % snap_every == 0 and step != n_steps:
                 _save_snapshot(out_dir, f"day{int(round(day)):04d}",
                                state, lat2d, lon2d)
@@ -1116,7 +1155,7 @@ def main() -> int:
         _save_snapshot(out_dir, "final", state, lat2d, lon2d)
         _csv.close()
         rate = n_steps / (time.time() - t_wall)
-        print(f"[done] {n_steps} steps @ {rate:.2f} steps/s (scan block={bsz}); "
+        print(f"[done] {n_steps} steps @ {rate:.2f} steps/s (scan); "
               f"final: {_diag(state, lat2d, lon2d)}")
         if args.smoke:
             yr_est = steps_per_year / rate / 3600.0

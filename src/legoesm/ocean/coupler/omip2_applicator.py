@@ -647,18 +647,24 @@ def compute_omip2_surface_forcing_jax(
 
 
 def build_omip2_scan_block_fn(
-    model, dt, forcing_stack, nn_i, nn_j, grid_shape, *,
-    rho_air=1.225, ramp_s=0.0,
+    model, dt, grid_shape, *, rho_air=1.225, ramp_s=0.0,
 ):
     """Build a JIT-compiled ``lax.scan`` block-step function for the tripole
     OMIP time loop (issue #354).
 
-    The returned ``block_fn(state, idx_t_block, step0)`` advances ``state``
-    over ``len(idx_t_block)`` steps; each step samples the CORE-II forcing
-    on-device via :func:`compute_omip2_surface_forcing_jax`, optionally
-    applies the spin-up wind/heat ramp, and calls ``model._step_impl`` (the
-    un-wrapped core step, so no nested JIT).  Because the forcing has no
-    host roundtrip, XLA fuses the whole block.
+    The returned
+    ``block_fn(state, forcing_stack, nn_i, nn_j, idx_t_block, step0)``
+    advances ``state`` over ``len(idx_t_block)`` steps; each step samples
+    the CORE-II forcing on-device via
+    :func:`compute_omip2_surface_forcing_jax`, optionally applies the
+    spin-up wind/heat ramp, and calls ``model._step_impl`` (the un-wrapped
+    core step, so no nested JIT).  Because the forcing has no host
+    roundtrip, XLA fuses the whole block.
+
+    ``forcing_stack`` / ``nn_i`` / ``nn_j`` are explicit JIT arguments
+    (NOT closure captures), so the ~1.3 GB 1/4-deg forcing is a device
+    INPUT rather than an embedded compiled constant.  ``grid_shape`` is a
+    static (closure) shape used only in ``reshape``.
 
     Host-side per-step pieces of the Python loop (diagnostics, snapshots,
     non-finite abort, optional WOA nudging / spin-up drag) are intentionally
@@ -670,23 +676,24 @@ def build_omip2_scan_block_fn(
 
     apply_ramp = ramp_s > 0.0  # static gate (CLAUDE.md feature-gating)
 
-    def _body(carry, idx_t):
-        st, step = carry
-        sf = compute_omip2_surface_forcing_jax(
-            st, forcing_stack=forcing_stack, nn_i=nn_i, nn_j=nn_j,
-            grid_shape=grid_shape, idx_t=idx_t, rho_air=rho_air,
-        )
-        if apply_ramp:
-            ramp = jnp.minimum(1.0, (step.astype(sf.tau_x.dtype) * dt) / ramp_s)
-            sf = sf._replace(
-                tau_x=sf.tau_x * ramp, tau_y=sf.tau_y * ramp,
-                q_net=sf.q_net * ramp, sw_down=sf.sw_down * ramp,
-            )
-        st = model._step_impl(st, dt, surface_forcing=sf)
-        return (st, step + 1), None
-
     @jax.jit
-    def block_fn(state, idx_t_block, step0):
+    def block_fn(state, forcing_stack, nn_i, nn_j, idx_t_block, step0):
+        def _body(carry, idx_t):
+            st, step = carry
+            sf = compute_omip2_surface_forcing_jax(
+                st, forcing_stack=forcing_stack, nn_i=nn_i, nn_j=nn_j,
+                grid_shape=grid_shape, idx_t=idx_t, rho_air=rho_air,
+            )
+            if apply_ramp:
+                ramp = jnp.minimum(
+                    1.0, (step.astype(sf.tau_x.dtype) * dt) / ramp_s)
+                sf = sf._replace(
+                    tau_x=sf.tau_x * ramp, tau_y=sf.tau_y * ramp,
+                    q_net=sf.q_net * ramp, sw_down=sf.sw_down * ramp,
+                )
+            st = model._step_impl(st, dt, surface_forcing=sf)
+            return (st, step + 1), None
+
         (state, _), _ = lax.scan(_body, (state, step0), idx_t_block)
         return state
 

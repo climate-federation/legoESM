@@ -156,8 +156,10 @@ def test_scan_block_equals_manual_steps():
     dt = 300.0
     idx = [1, 3]
 
-    block_fn = build_omip2_scan_block_fn(model, dt, stack, nn_i, nn_j, gshape)
-    s_scan = block_fn(state, jnp.asarray(idx, dtype=jnp.int32), jnp.int32(1))
+    block_fn = build_omip2_scan_block_fn(model, dt, gshape)
+    s_scan = block_fn(
+        state, stack, nn_i, nn_j, jnp.asarray(idx, dtype=jnp.int32),
+        jnp.int32(1))
 
     s = state
     for it in idx:
