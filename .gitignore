@@ -92,3 +92,6 @@ _probe_*.py
 # anchored at the repo root to avoid catching other intentionally
 # tracked `.db` files elsewhere.
 /reviews.db
+
+# import-linter graph cache
+.import_linter_cache/

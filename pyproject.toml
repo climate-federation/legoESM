@@ -60,6 +60,7 @@ dev = [
     "ruff",
     "mypy",
     "pre-commit",
+    "import-linter>=2.0",
 ]
 docs = ["sphinx", "myst-parser"]
 all = [
@@ -90,4 +91,136 @@ testpaths = ["tests"]
 addopts = "-v --tb=short -m 'not slow'"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
+
+# ---------------------------------------------------------------------------
+# Import-boundary enforcement (the path to independent self-running packages).
+# These contracts encode the TARGET layered architecture (master plan D7):
+#   core (substrate)  <  {atmosphere, ocean, land, ice}  <  coupler  <  driver
+# Each Earth-system component must depend only on `core` (+ truly-shared bricks),
+# never on another component or on the coupler/driver — that one-way dependency
+# is exactly what lets `pip install legoesm-ocean` run standalone (Stage D carve).
+#
+# `ignore_imports` is the CURRENT-violation BASELINE: the contracts pass today,
+# and every entry removed is a real step toward independence (a ratchet).  The
+# goal is an empty ignore list = full component independence, enforced in CI.
+# Run: `.venv/bin/lint-imports`
+# ---------------------------------------------------------------------------
+[tool.importlinter]
+root_package = "legoesm"
+
+# === ROOT INVERSION — the highest-priority independence fix ===
+# A handful of low-level / shared modules import UP into atmosphere/ocean
+# component dynamics; because `grids.halo_latlon -> parallel.latlon_mpi`, that
+# single inversion cascades into nearly every cross-component and core→component
+# chain.  Fixing these collapses most of the graph:
+#   parallel.latlon_mpi  -> atmosphere.dynamics.primitive_eq_latlon_cgrid, ocean.state
+#   ml.channel_packing   -> atmosphere.dynamics.{spectral_pe,spectral_sw}, ocean.state
+# (a parallel/ML helper should receive grids/state as ARGS, not import components).
+# The remaining direct fixes: move the shared C-grid operators
+# (ocean.dynamics.latlon_cgrid_operators) and surface-flux/coupling bricks
+# (coupler.{bulk_flux,surface_energy,coupling_fields}) into `core`.
+
+[[tool.importlinter.contracts]]
+name = "core is the shared substrate (imports nothing above it)"
+type = "forbidden"
+source_modules = ["legoesm.core"]
+forbidden_modules = [
+    "legoesm.atmosphere",
+    "legoesm.ocean",
+    "legoesm.land",
+    "legoesm.ice",
+    "legoesm.coupler",
+    "legoesm.driver",
+    "legoesm.runtime",
+    "legoesm.training",
+]
+# EXACT current-violation baseline (no wildcards): alerting="error" means a
+# stale entry (coupling removed) or a missed one (coupling added) BOTH fail, so
+# the list can only shrink — a true ratchet toward zero.
+unmatched_ignore_imports_alerting = "error"
+ignore_imports = [
+    # core->runtime: intentional FUNCTION-SCOPE deferred imports (CLAUDE.md) to
+    # avoid the runtime/__init__ <-> core init cycle — not a real layering break.
+    "legoesm.core -> legoesm.runtime.backend",
+    "legoesm.core.conservation -> legoesm.runtime.backend",
+    "legoesm.core.hardware -> legoesm.runtime.backend",
+    "legoesm.core.hardware -> legoesm.runtime.config",
+    "legoesm.core.precision -> legoesm.runtime.backend",
+    # core->ocean/atmosphere is only via core->grids.halo_latlon->parallel->
+    # component (the root inversion above); baseline the core->grids hop.
+    "legoesm.core.operators_latlon -> legoesm.grids.halo_latlon",
+    "legoesm.core.operators_latlon_3d -> legoesm.grids.halo_latlon",
+    "legoesm.core.operators_fv_latlon -> legoesm.grids.halo_latlon",
+    "legoesm.core.operators_fv_latlon_3d -> legoesm.grids.halo_latlon",
+]
+
+[[tool.importlinter.contracts]]
+name = "Earth-system components are independent of each other"
+type = "independence"
+modules = [
+    "legoesm.atmosphere",
+    "legoesm.ocean",
+    "legoesm.land",
+    "legoesm.ice",
+]
+unmatched_ignore_imports_alerting = "error"
+ignore_imports = [
+    # ROOT INVERSION (fix first — collapses most chains): low-level parallel /
+    # shared ml reach UP into component dynamics. Exact edges only.
+    "legoesm.parallel.latlon_mpi -> legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid",
+    "legoesm.parallel.latlon_mpi -> legoesm.ocean.state",
+    "legoesm.ml.channel_packing -> legoesm.atmosphere.dynamics.spectral_pe",
+    "legoesm.ml.channel_packing -> legoesm.atmosphere.dynamics.spectral_sw",
+    "legoesm.ml.channel_packing -> legoesm.atmosphere.physics._shared",
+    "legoesm.ml.channel_packing -> legoesm.ocean.state",
+    # Direct atmosphere<->ocean: shared C-grid / FV3 operators -> move to core/grids.
+    "legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid -> legoesm.ocean.dynamics.latlon_cgrid_operators",
+    "legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid -> legoesm.ocean.dynamics.latlon_cgrid_operators",
+    "legoesm.atmosphere.dynamics.compressible_euler_latlon_cgrid -> legoesm.ocean.dynamics.latlon_cgrid_operators",
+    "legoesm.ocean.dynamics.ocean_model -> legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid",
+    "legoesm.ocean.dynamics.barotropic_cgrid -> legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid",
+]
+
+[[tool.importlinter.contracts]]
+# A standalone component package may use the shared SUBSTRATE that legoesm-core
+# bundles (core, runtime, parallel, grids, io, timestepping, diagnostics) — but
+# never the orchestration layers ABOVE it: the coupler, the driver, or training.
+# That one-way dependency is what makes `pip install legoesm-ocean` runnable.
+name = "Components must not import the coupler, driver, or training (layers above)"
+type = "forbidden"
+source_modules = [
+    "legoesm.atmosphere",
+    "legoesm.ocean",
+    "legoesm.land",
+    "legoesm.ice",
+]
+forbidden_modules = [
+    "legoesm.coupler",
+    "legoesm.driver",
+    "legoesm.training",
+]
+unmatched_ignore_imports_alerting = "error"
+ignore_imports = [
+    # Shared coupling pytrees -> move to core/coupling_fields (D1: shared pytrees
+    # single-sourced in core).
+    "legoesm.land.stomata_utils -> legoesm.coupler.coupling_fields",
+    "legoesm.land.slab_land -> legoesm.coupler.coupling_fields",
+    "legoesm.land.multilayer_land -> legoesm.coupler.coupling_fields",
+    "legoesm.ice.sea_ice -> legoesm.coupler.coupling_fields",
+    "legoesm.ocean.simple_ocean -> legoesm.coupler.coupling_fields",
+    # Shared surface-flux formulas / energy -> move to a shared surface module.
+    "legoesm.atmosphere.dynamics.rce_surface_flux -> legoesm.coupler.bulk_flux",
+    "legoesm.atmosphere.physics.turbulence.surface_layer -> legoesm.coupler.bulk_flux",
+    "legoesm.ocean.bulk_flux_omip -> legoesm.coupler.bulk_flux",
+    "legoesm.ocean.physics.surface_forcing.bulk_formulas -> legoesm.coupler.bulk_flux",
+    "legoesm.land.slab_land -> legoesm.coupler.bulk_flux",
+    "legoesm.land.multilayer_land -> legoesm.coupler.bulk_flux",
+    "legoesm.ice.sea_ice -> legoesm.coupler.bulk_flux",
+    "legoesm.land.slab_land -> legoesm.coupler.surface_energy",
+    "legoesm.land.multilayer_land -> legoesm.coupler.surface_energy",
+    "legoesm.ice.sea_ice -> legoesm.coupler.surface_energy",
+    # Shared physics-output type + column adapter -> move to core.
+    "legoesm.atmosphere.physics.neural_physics -> legoesm.driver.physics_pipeline",
+    "legoesm.atmosphere.physics.neural_physics -> legoesm.driver.grid_adapters",
 ]
