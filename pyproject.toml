@@ -166,15 +166,14 @@ modules = [
 ]
 unmatched_ignore_imports_alerting = "error"
 ignore_imports = [
-    # ROOT INVERSION (fix first — collapses most chains): low-level parallel /
-    # shared ml reach UP into component dynamics. Exact edges only.
-    # (parallel.latlon_mpi -> ocean.state REMOVED: the dead TYPE_CHECKING import
-    #  was deleted, eliminating the core/ice/atmosphere -> ocean cascade.)
+    # ROOT INVERSION — remaining piece. Exact edges only.
+    # RESOLVED: parallel.latlon_mpi -> ocean.state (dead TYPE_CHECKING import
+    #   removed) and the whole ml.channel_packing <-> atmosphere/ocean coupling
+    #   (the spectral-ocean packing moved to ocean.dynamics.channel_packing, so
+    #   ml no longer imports ocean and ocean no longer imports the ml hub).
+    # STILL PENDING: parallel.latlon_mpi instantiates the latlon-cgrid dycore in
+    #   an MPI-step builder (move it into atmosphere; MPI-correctness-sensitive).
     "legoesm.parallel.latlon_mpi -> legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid",
-    "legoesm.ml.channel_packing -> legoesm.atmosphere.dynamics.spectral_pe",
-    "legoesm.ml.channel_packing -> legoesm.atmosphere.dynamics.spectral_sw",
-    "legoesm.ml.channel_packing -> legoesm.atmosphere.physics._shared",
-    "legoesm.ml.channel_packing -> legoesm.ocean.state",
     # Direct atmosphere<->ocean: shared C-grid / FV3 operators -> move to core/grids.
     "legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid -> legoesm.ocean.dynamics.latlon_cgrid_operators",
     "legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid -> legoesm.ocean.dynamics.latlon_cgrid_operators",

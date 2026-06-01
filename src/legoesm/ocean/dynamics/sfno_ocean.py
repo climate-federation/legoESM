@@ -46,7 +46,10 @@ from legoesm.ml.normalization import (
     normalize,
     denormalize,
 )
-from legoesm.ml.channel_packing import pack_ocean_state, unpack_ocean_output
+from legoesm.ocean.dynamics.channel_packing import (
+    pack_ocean_state,
+    unpack_ocean_output,
+)
 from legoesm.ml.conservation import (
     correct_ocean_volume,
     correct_ocean_heat,

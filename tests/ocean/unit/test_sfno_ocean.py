@@ -15,7 +15,7 @@ from legoesm.ocean.dynamics.sfno_ocean import (
 )
 from legoesm.ocean import SFNOOceanModel as SFNOOceanModelFromInit
 from legoesm.ml.sfno import SFNOConfig
-from legoesm.ml.channel_packing import (
+from legoesm.ocean.dynamics.channel_packing import (
     OceanChannelSpec,
     pack_ocean_state,
     unpack_ocean_output,
