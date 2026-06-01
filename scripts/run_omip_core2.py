@@ -421,7 +421,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   momentum_advection=None, slope_foot_alpha=None,
                   slope_foot_n_levels=None, slope_foot_threshold=None,
                   min_levels=1, div_damp_2=None, div_damp_4=None,
-                  smag_cfl_safety=None):
+                  smag_cfl_safety=None, convection="none",
+                  convection_K_conv=1.0, convection_K_bg=1e-5):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
     Reuses run_omip's validated tripole setup. ``forcing_mode='jra55_do_tropical'``
@@ -475,6 +476,36 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("div_damp_4", div_damp_4),
                               ("smag_cfl_safety", smag_cfl_safety),
                               ) if v is not None}
+    # Grid-agnostic convective adjustment (Oceananigans-style enhanced
+    # vertical diffusivity where N^2 < 0).  The tripole base config ships
+    # physics=None; opting in attaches an OceanPhysicsConfig whose
+    # convective K flows through the SAME grid-agnostic
+    # compute_vertical_K_profiles -> implicit backward-Euler vertical solve
+    # the cubed-sphere / lat-lon-bathy paths already use.  Default "none"
+    # leaves the validated faithful config untouched.
+    if convection and convection != "none":
+        from legoesm.ocean.physics.combined import OceanPhysicsConfig
+        from legoesm.ocean.physics.convection.config import (
+            OceanConvectionConfig, EnhancedDiffusionConfig,
+        )
+        from legoesm.ocean.physics.vertical_mixing.config import (
+            VerticalMixingConfig,
+        )
+        _ovr["physics"] = OceanPhysicsConfig(
+            vertical_mixing=VerticalMixingConfig(scheme="none"),
+            convection=OceanConvectionConfig(
+                scheme=convection,
+                enhanced_diffusion=EnhancedDiffusionConfig(
+                    K_conv=convection_K_conv, K_bg=convection_K_bg,
+                ),
+            ),
+        )
+        # Convective adjustment must apply through the implicit vertical
+        # solve (backward-Euler is unconditionally stable; an explicit
+        # K_conv would violate CFL at ocean dt).
+        _ovr["implicit_vertical_mixing"] = True
+        print(f"[setup] tripole convection ENABLED: scheme={convection} "
+              f"K_conv={convection_K_conv} K_bg={convection_K_bg}")
     if _ovr:
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
             LatLonCGridOceanModel,
@@ -838,6 +869,18 @@ def main() -> int:
                         "fewer than this many active reference levels (partial-"
                         "cell path only). 1=off. Use 2 at 1/4 deg to remove the "
                         "single-thin-layer coastal cells that seed a 1/h blowup.")
+    p.add_argument("--convection", type=str, default="none",
+                   choices=["none", "enhanced_diffusion"],
+                   help="Grid-agnostic convective adjustment (Oceananigans-"
+                        "style enhanced vertical diffusivity where N^2<0), "
+                        "applied via the implicit backward-Euler vertical "
+                        "solve. Default 'none' preserves the validated "
+                        "faithful config (tripole base ships physics=None).")
+    p.add_argument("--convection-K-conv", type=float, default=1.0,
+                   help="Convective diffusivity K_conv [m^2/s] for "
+                        "--convection enhanced_diffusion (default 1.0).")
+    p.add_argument("--convection-K-bg", type=float, default=1e-5,
+                   help="Background diffusivity K_bg [m^2/s] for convection.")
     p.add_argument("--div-damp-2", type=float, default=None,
                    help="2nd-order divergence damping [m^2/s] -- suppresses "
                         "grid-scale divergent (checkerboard) modes at small "
@@ -901,6 +944,9 @@ def main() -> int:
             min_levels=args.min_levels,
             div_damp_2=args.div_damp_2, div_damp_4=args.div_damp_4,
             smag_cfl_safety=args.smag_cfl_safety,
+            convection=args.convection,
+            convection_K_conv=args.convection_K_conv,
+            convection_K_bg=args.convection_K_bg,
         )
         app_grid_type = "tripole"
     else:
