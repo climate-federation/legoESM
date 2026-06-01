@@ -50,13 +50,14 @@ day1 max|u_d| 48.6 vs 38.6, day2 NaN). Production's co-located D→A-avg scheme 
 - **PRIME REMAINING SUSPECT + FIX (iter131 CORRECTION — moved off the damping):** since both FV3 damping
   operators are faithful AND FV3 zeroes edge divergence damping yet is edge-STABLE, the bug must be in the
   **c_sw/d_sw DYNAMICS edge treatment** (FV3's dynamics are edge-stable without edge damping; the port's
-  create the weakly-unstable mode). NOT the damping-edge-halo (iter129's suspect, now ruled out). MOST
-  SPECIFIC CANDIDATE (iter132): FV3's d_sw3 vb/ub Courant loop is FACE-INTERIOR ONLY (i,j=2..npx-1,
-  sw_core.F90:1271-1274) — the panel-EDGE corners (i,j=1,npx) come from elsewhere (halo/neighbor interior);
-  my port computes vb/ub at ALL corners incl. edges with THIS-face edge metric. If the edge corner metric
-  isn't face-consistent, the KE Courant (→ the +1.47e-3 KE source) is wrong at the edge. UNCERTAIN (needs
-  FV3 vb edge-fill trace) but the narrowest lead. The decisive next step needs a field-by-field compare
-  against a RUNNING FV3 Fortran step (full GFDL build — beyond this loop) OR dedicated c_sw/d_sw edge debug. NaN mechanism (transient→nonlinear) is a
+  create the weakly-unstable mode). NOT the damping-edge-halo (iter129's suspect, ruled out). d_sw3 vb/ub
+  EDGE computation RULED OUT (iter133, decisive Arnoldi test, inlined KE validated max|diff|=0): replacing
+  the edge vb/ub (this-face edge metric) with interior extrapolation does NOT drop ρ (1.00189→1.00194). ⇒
+  the edge KE Courant is not the cause. **NET: NO single component or edge candidate localizes it** — every
+  dynamics FORMULA + both dampings + a2b + the d_sw3 vb/ub edge are all faithful/ruled-out, yet ρ=1.0019.
+  The instability is an EMERGENT assembly-level interaction. The decisive next step needs a field-by-field
+  compare against a RUNNING FV3 Fortran step (full GFDL build — beyond this loop's infrastructure); the
+  autonomous single-component localization avenue is now EXHAUSTED. NaN mechanism (transient→nonlinear) is a
   HYPOTHESIS (not causally shown). HARNESS/ASSETS (validated, all float64): /tmp/fb_arnoldi.py (eigs ρ),
   /tmp/fb_arnoldi_damp.py (ρ-vs-damping), /tmp/fb_localize2.py (energy-norm 5-term decomp), /tmp/fb_nonnormal.py
   (K-trend). FIX-VALIDATION = re-run Arnoldi (does ρ drop <1?) + transient gain. Separate from the production
