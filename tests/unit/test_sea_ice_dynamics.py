@@ -2039,6 +2039,42 @@ class TestF10LatLonSphericalMetric:
         assert float(jnp.min(north)) > 0.0
         assert float(jnp.max(south)) < 0.0
 
+    def test_solid_body_rotation_gives_zero_strain(self):
+        """DEFINITIVE physical check: rigid (solid-body) zonal rotation
+        u = U0*cos(theta), v = 0 is a pure rotation -> ZERO strain rate.  The
+        metric term cancels the du/dy shear EXACTLY, leaving only an
+        O(dtheta^2) discretization residual that converges to zero with
+        resolution.  The metric-FREE code gave a spurious eps_12 ~ U0*sin/(2R)
+        (~1e3x larger) which would drive spurious polar EVP stress / grid-scale
+        noise.  This is the test that ``passing norms NECESSARY != SUFFICIENT''
+        (CLAUDE.md) demands for a grid-metric change."""
+        from legoesm.ice.rheology import _strain_rates_latlon
+        U0 = 10.0
+        prev = None
+        for n_lat, n_lon in [(64, 128), (128, 256)]:
+            grid = self._grid(n_lat=n_lat, n_lon=n_lon)
+            lat = grid.lat[:, None]
+            u = U0 * jnp.cos(lat) * jnp.ones((n_lat, n_lon))
+            v = jnp.zeros((n_lat, n_lon))
+            e11, e22, e12 = _strain_rates_latlon(u, v, grid)
+            ii = slice(4, n_lat - 4)
+            # Normal strains vanish exactly (no longitude dependence, v = 0).
+            assert jnp.allclose(e11[ii], 0.0, atol=1e-15)
+            assert jnp.allclose(e22[ii], 0.0, atol=1e-15)
+            # Shear strain is ONLY the O(dtheta^2) residual, >100x below the
+            # metric-free spurious value 0.5*U0*sin/R.
+            max_e12 = float(jnp.max(jnp.abs(e12[ii])))
+            metric_free = float(jnp.max(jnp.abs(
+                0.5 * U0 * jnp.sin(lat[ii]) / grid.radius)))
+            assert max_e12 < 1e-8, f"solid-body shear not ~0: {max_e12:.2e}"
+            assert max_e12 < 0.01 * metric_free, (
+                f"metric term did not cancel rigid-rotation shear: "
+                f"{max_e12:.2e} vs metric-free {metric_free:.2e}")
+            if prev is not None:
+                # ~2nd-order: doubling resolution at least halves the residual.
+                assert max_e12 < 0.5 * prev
+            prev = max_e12
+
     def test_stress_div_uniform_sigma12_metric(self):
         from legoesm.ice.dynamics import _stress_divergence_latlon
         grid = self._grid()
