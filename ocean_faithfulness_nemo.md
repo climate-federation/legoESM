@@ -1,567 +1,81 @@
 # Ocean faithfulness vs NEMO — all-grid correction tracker
 
-**Goal:** correct ALL legoESM ocean grids (tripole/eORCA1, latlon, cubed_sphere,
-mpas, spectral) so each gives a faithful comparison to NEMO ORCA1 (CORE-II NYF).
-Review every code change with `/codex:adversarial-review`. Shrink this file every
-10 iters. (Detailed history: `OMIP_faithful.md`.)
+**Goal:** correct ALL legoESM ocean grids (tripole/eORCA, latlon, cubed_sphere, mpas,
+spectral) so each gives a faithful comparison to NEMO ORCA1 (CORE-II NYF). Review every
+change with `/codex:adversarial-review`. **Shrunk at iter 18** (was 567 lines). Detailed
+history: `OMIP_faithful.md`. Memories: [[omip-rk3-coldstart-solve]],
+[[omip-pipeline-coordinate-bugs]], [[omip-smag-cap-stabilizer]], [[omip-faithful-project]].
 
-**Branch:** `omip-faithful-nemo-comparison`. Completion promise DONE only when grids
-genuinely match NEMO — far off; no false DONE.
+**Branch:** `omip-faithful-nemo-comparison` (PRs #349, #352 merged to main). Completion
+promise DONE only when grids genuinely match NEMO — tripole SST done; NOT all grids.
 
-## FAITHFUL MATCH ACHIEVED (iter 18 — tripole SST, read this FIRST)
-**legoESM ¼° tripole ocean reproduces NEMO ORCA1 (CORE-II) SST with corr ~0.99.**
-Trustworthy run 8131128 (corrected WOA-IC + RK3 + all pipeline fixes) COMPLETED
-12 d stable, physical velocities (max|u| 0.67→0.47 m/s). Compare vs NEMO yr-2:
-- **day-4 (8132087): SST bias −0.61, RMSE 1.49 °C, corr 0.991 → EXCELLENT**
-- **day-12 (8134991): SST bias −0.60, RMSE 1.76 °C, corr 0.987 → GOOD**
-- SSS corr ~0.90, RMSE ~1.1, bias ~+0.06 (excellent pattern, runoff-gated).
-So **SST pattern correlation is excellent (~0.99) throughout**; RMSE drifts 1.49→
-1.76 (excellent→good) as the model settles into its OWN equilibrium (two different
-ocean cores under the same forcing diverge slightly in detail), bias steady −0.6.
-This is the faithful result chased for ~18 iters — enabled by (1) RK3 cold-start
-solve; (2) WOA-init longitude fix; (3) rad2deg + 8 audit pipeline-bug fixes.
-**Honest scope: tripole SST only** — latlon pole-limited, coarse grids unrun, SSS
-runoff-gated → NOT yet "all grids excellent".
+---
 
-## COLD-START SOLVED (iter 18 — read this FIRST)
-**RK3 momentum integrator SOLVES the corrected-WOA-IC cold-start.** Arm 8128761
-(corrected IC + `--momentum-rk3` + smag-cfl + EVD + adaptive-vertadv + smc03 +
-implicit_cn baro) ran STABLE with **PHYSICAL max|u| ~1 m/s, decreasing** (vs the
-forward-Euler+Matsuno runs' 30 m/s equatorial transient + the corrected-IC
-blowup). So RK3 **also fixes the velocity over-intensity**. `explicit_substep`
-barotropic DESTABILIZES (blew up alone + with RK3) → use OMIP-default implicit_cn.
-Vindicates iter-9 (RK3 + full stack); iter-10's "RK3 marginal" was pre-smag-cfl-cap.
-IC-smoothing dead (smooth_woa_ts smooths T/S separately → static instability).
-**=> RK3 is the production default.** Trustworthy run 8131128 launched (corrected
-+ RK3, 12 d, snap/4 d) → first correct-IC compare vs NEMO. Memory:
-[[omip-rk3-coldstart-solve]]. WINNING CONFIG: `--woa-init --balanced-init
---momentum-rk3 --partial-cell --pgf-scheme smc03 --adaptive-implicit-vertadv
---min-levels 2 --C-smag-lap 3.0 --smag-cfl-safety 0.125 --dt 75`.
+## CURRENT STATE (iter 18)
 
-## PIPELINE AUDIT (iter 17 — read this FIRST)
-Multi-agent adversarial audit (workflow w2gc8r1bh, 15 agents) of the compare + IC
-pipeline found **8 confirmed coordinate/unit bugs** — the rad2deg fix was not the
-only one. **[HIGH] `init_woa.py` paired 2-D lat with the WRONG 1-D longitude
-(`lon_T[0,:]`) on the tripole grid → every cell's WOA IC mis-placed median ~9° /
-up to ~155° (Arctic).** So even the corr-0.968 day-10 result was on a
-partially-corrupted IC. Fixed 6 bugs + stale test (commit e4bd00e5, codex SHIP):
-WOA-init lon→lon2d; NEMO mask `|tos|>1e-6`→isfinite; `_diag` umax_lon u-face fold;
-finite flag +S,v; `load_core2_nyf(allow_synthetic=False)`; `_idx_t` floor (−3h
-phase). **CORRECTED run 8127491 launched** (fixed pipeline) → corrected day-10 vs
-buggy day-10 (0.968) quantifies the IC-bug impact + decides the 3mo (8124320, still
-buggy IC) restart. Memory: [[omip-pipeline-coordinate-bugs]].
-**OUTCOME (iter 17): the corrected WOA-init BLOWS UP the cold-start** (day 0.25–1)
-while the buggy run was stable — the wrong-longitude bug accidentally ZONALIZED
-(smoothed) the IC into the stable regime; the correct IC has the real curvilinear
-fronts that trigger the deep rough-WOA-IC instability (dt-independent; needs the
-NEMO RK3+EVD structural stack, NOT config). No quick fix: woa-smooth8 (day 0.25),
-no-balanced-ssh (day 0.25), no-smooth (day 1) all blow up. **HONEST LANDING:
-snapshots use correct coords + the IC-lon error washes out by day 10 (forcing-
-dominated) → the buggy-IC SST corr 0.968 / RMSE 2.76 is a FAIR caveated result
-(the ¼° model reproduces NEMO's SST pattern). The WOA-init fix is kept (correct in
-principle, matters for the early transient + Arctic); a stable run on the FULLY
-correct IC is documented open cold-start work, not closable by config.**
+**FAITHFUL TRIPOLE SST MATCH ACHIEVED.** legoESM ¼° eORCA025 reproduces NEMO ORCA1
+(CORE-II) SST with **corr ~0.99**. Trustworthy run 8131128 (the solve config below)
+completed 12 d stable, physical max|u| 0.67→0.47 m/s. vs NEMO yr-2:
+- day-4 (8132087): SST bias −0.61, **RMSE 1.49 °C, corr 0.991 → EXCELLENT**
+- day-12 (8134991): SST bias −0.60, **RMSE 1.76 °C, corr 0.987 → GOOD**
+- SSS corr ~0.90, RMSE ~1.1, bias +0.06 (excellent pattern, runoff-gated).
 
-## BREAKTHROUGH (iter 16+ — read this FIRST)
-**The "not faithful" verdict was largely a SCORER BUG.** `compare_omip_nemo._load_legoesm`
-double-applied `rad2deg` to the snapshot lat/lon (already in degrees) → the IDW regrid
-got garbage coordinates → scrambled pattern (corr ~0.1) + inflated −6.6 °C bias. **Fixed
-(5c0571f6).** TRUE eORCA025 **day-10** vs NEMO yr-2: **SST corr 0.968, bias −0.98 °C, RMSE
-2.76 °C** (just above the 2.5 "good" bar); SSS corr 0.79, bias −0.10 (runoff-gated). So the
-¼° legoESM ocean **already matches NEMO's SST pattern at 0.97 correlation** after a 10-day
-spinup — far from the old "poor RMSE 13.7 corr 0.1". Native diag: lego tropics 25.4 °C /
-global 15.0 °C vs NEMO 27.4 / 17.9. Remaining gap to "good/excellent": **(a) longer run (equilibration)** — the day-10
-−0.98 °C bias is mostly spinup (legoESM warming toward the forcing, lags NEMO); track via
-the day-20/30/90 trend; (c) runoff (SSS). **Freezing clamp RULED OUT** as a lever (cheap
-scorer test `--freeze-clamp-C -1.9`, job 8127390: RMSE 2.759→2.755, bias −0.98→−0.97 —
-negligible; the 44k sub-freezing cells carry tiny cos-lat weight on the common mask).
-Equatorial velocity over-intensity is a DECAYING transient (30→18 m/s day 8→14); rest-IC
-A/B (8127344) gives WORSE equatorial (41 m/s) → balanced-init helps, transient is intrinsic. **Still not
-"excellent" across all grids (the promise) — but the ¼° tripole is close on SST.**
+Pattern corr stays ~0.99; RMSE drifts up as the model settles into its OWN equilibrium
+(two cores under one forcing diverge in detail). **Definitive corrected+RK3 3-month
+climatology run = 8135049** (glab1, snap/15 d) → equilibrated SST/SSS + spun-up transports.
 
-## CURRENT STATUS (iter 16 — read this first)
-Free 1° run is impossible (config space exhausted: FE+Matsuno vs NEMO RK3; scalar
-A_h vs NEMO 3D WBC-enhanced viscosity). **Pivoted to ¼° (eORCA025).** A bounded —
-but WBC ~7× over-intense (viscosity-limited at dt=75) — free WOA cold-start now
-runs via the **CFL-capped anisotropic Smagorinsky** (`smag_cfl_safety`, iter 16,
-codex-hardened + committed) + `--min-levels 2` + `--balanced-init`. Winning config:
-`--mesh eORCA025 --nlev 20 --dt 75 --partial-cell --pgf-scheme smc03
---adaptive-implicit-vertadv --woa-init --balanced-init --min-levels 2
---C-smag-lap 3.0 --smag-cfl-safety 0.125`. **3-month run (job 8124320) in flight**
-→ first caveated SST/SSS compare vs NEMO ORCA1 yr-1. Sections below are pre-¼°
-history (iters 1–15: the diagnosis that led here). Shrink-due (file >35 KB).
+### THE SOLVE (winning config)
+```
+--mesh eORCA025_mesh_mask.nc --nlev 20 --dt 75 --woa-init --balanced-init --momentum-rk3
+--partial-cell --pgf-scheme smc03 --adaptive-implicit-vertadv --min-levels 2
+--C-smag-lap 3.0 --smag-cfl-safety 0.125
+```
+**RK3 momentum integrator is the key** — it solved the corrected-WOA-IC cold-start that
+forward-Euler+Matsuno could not, AND cured the velocity over-intensity (1 m/s vs 30 m/s).
+Vindicates iter-9 "full stack together"; iter-10 "RK3 marginal" was pre-smag-cfl-cap.
+`explicit_substep` baro DESTABILIZES (use implicit_cn). IC-smoothing = dead end
+(`smooth_woa_ts` smooths T/S separately → static instability). EVD already active.
 
-## State (carried over)
-- NEMO ORCA1 5-yr reference COMPLETE (T/S/SSH/MLD/U/V/ice). Identical CORE-II
-  6-hourly forcing (`nyf.zarr`), eORCA1 mesh, WOA18 all staged.
-- Pipeline built + proven: `scripts/run_omip_core2.py` (runner, tripole + latlon_bathy),
-  `build_core2_nyf_zarr.py`, `compare_omip_nemo.py` (regrid + SST/SSS score).
-- Applicator fixes (39 tests pass): tripole branch, wind-stress sign (−tau), 6-hourly
-  flux, true periodic NN, in-step forcing (`compute_omip2_surface_forcing`).
+### Enabling fixes (all committed + merged to main)
+- **smag-cfl viscosity ceiling** (`smag_cfl_safety`): per-cell `area·cos²(lat)·safety/dt`
+  cap on Laplacian-Smagorinsky — the tuned ceiling that bounds the cold-start (NOT the
+  rectangular CFL bound, which starves the WBC → blows up). `laplacian_smag_cfl_cap`.
+- **Adaptive-implicit vertadv** (NEMO ln_zad_Aimp), **partial-cell smc03 PGF**, RK3.
+- **Pipeline coordinate/unit bugs** (corrupted ALL prior comparison numbers): scorer
+  double-`rad2deg` (corr 0.1→0.97); **WOA-init paired 2-D lat with 1-D lon on tripole**
+  (IC mis-placed ~9°/155° Arctic); NEMO mask `|tos|>1e-6`; `_diag` umax_lon u-face index;
+  finite flag +S,v; synthetic-forcing fallback; `_idx_t` +3h. (audit workflow w2gc8r1bh.)
+- **omip2_applicator merge-corruption** (unclosed paren that was breaking main).
 
-## THE BLOCKER (root cause, rigorously diagnosed)
-legoESM ocean blows up from realistic (WOA) stratification — NOT topo/IC/convection/
-dissipation/dt/**KE-gradient-scheme** (ruled out via flat-bottom, static-stability,
-~19 experiments). KE scheme ruled out iter 2 (job 8106193): centered AND hollingsworth
-both go non-finite by day 0.5 on tripole AND latlon-bathy → NOT the Hollingsworth
-instability, despite the plausible centered-KE+AL81-PV inconsistency hypothesis.
-Mechanism: cold-start geostrophic adjustment from rest (u=0) overshoots to ~5-10 m/s
-→ nonlinear advective feedback (u·∇u) → blowup, amplified at the **equator (f→0)**.
-- **FIX #1 DONE (kept):** WOA-IC flood-fill — NEMO mask had ~13% ocean cells WOA lacks
-  data for (S=0 → 40-PSU spurious gradients → 12 m/s step-1 PGF). Now filled from nearest
-  valid column (step-1 |u| 12→0.8, mean SSS 29.7→34.1).
-- **In progress:** spin-up Rayleigh velocity drag (damp the cold-start overshoot during a
-  nudged spin-up, then release) — test 8100129 pending. If insufficient → thermal-wind-
-  balanced init.
+---
 
 ## Per-grid status
-| grid | runs stable (realistic IC)? | comparison |
+| grid | cold-start | comparison vs NEMO |
 |---|---|---|
-| tripole/eORCA025 (¼°) | **STABLE cold-start** (area·cos² smag ceiling, committed abe80cdd; 2-day smoke rc=0); full compare pipeline VALIDATED end-to-end | day-2 pipeline-test: SST RMSE 13.7°C corr 0.095 (2-day-spinup confound, NOT science); real compare awaits 3mo day-90 |
-| tripole/eORCA1 (1°) | free run impossible (config exhausted); superseded by ¼° | — |
-| latlon_bathy (1°) | **blows up cold-start NaN day 0.25** (N-pole singularity); RK3 does NOT rescue it (8131279, same day-0.25 blowup) — GEOMETRIC, not dynamical. | needs pole filter / Arctic mask; tripole supersedes (no pole, RK3 solves its cold-start) |
-| cubed_sphere | untested w/ CORE-II | — (applicator supports) |
-| mpas | untested w/ CORE-II | — (applicator supports) |
-| spectral | applicator unsupported | TODO |
+| **tripole/eORCA025 (¼°)** | **STABLE** (corrected IC + RK3 + stack) | **SST corr ~0.99 (excellent/good); SSS corr 0.90 (gated)** |
+| tripole/eORCA1 (1°) | free run impossible (config exhausted) | superseded by ¼° |
+| latlon_bathy (1°) | **blows up day 0.25** — N-pole singularity (GEOMETRIC; RK3 doesn't rescue, 8131279) | needs pole filter / Arctic mask |
+| cubed_sphere | untested w/ CORE-II | **[high] face-edge PGF instab** masked by 5-50× diffusion → fix SMC03 + duogrid halo |
+| mpas | untested w/ CORE-II | **[high] split-Coriolis (#160):** f zeroed in PV flux → MOM6 full-PV q=(f+ζ)/h |
+| spectral | applicator gap TOTAL | SpectralOceanState has no grid-space u/v/T/masks → spectral forcing path |
 
-## All-grid audit (workflow wnz1vbd2y, 7 agents) — "correct all grid types" map
-- **tripole/latlon (LatLonCGridOceanModel):** vertical-coord TYPE fixed (partial-cell). Residual
-  = vertadv amplifier + equatorial PGF seed (above). Coriolis from geographic lat = correct.
-  **Follow-up [accuracy, non-blocking]:** the HW KE branch (ocean_pe_latlon_cgrid.py:1015-1018)
-  fills j±1 u-neighbour by edge-replication — WRONG at the active tripole north fold (should be
-  `vector_sign_u·u[-1:,perm_T]`). Affects `run_tripole_20yr.py:83` + any HW-on-tripole run
-  (one-row Arctic seam, NOT the equatorial blowup). Fix = fold-aware halo (mirror
-  `pad_ns_vector_u`/`_fold_row`) + synthetic-fold unit test (current test is no-fold) + VISUAL
-  verify the fold row. Centered KE is fold-safe (no j±1 reach).
-- **cubed_sphere (OceanModel/ocean_pe_cdgrid):** Coriolis correct (geographic lat, edge-synced).
-  Momentum HK-immune (vorticity-from-circulation). **[high] documented face-edge PGF instability**
-  (NaN ~2.2 d at cube-edge cells) currently MASKED by A_h≥5e5/K_h≥5e6 + FC-Gram → 5-50× heavier
-  diffusion ⇒ NOT physically comparable to NEMO. Structural fix = SMC03 + duogrid halo on T/S.
-- **mpas (MPASOceanModel/TRiSK):** **[high] split-Coriolis inconsistency (#160):** planetary f
-  zeroed in the PV flux (q=ζ/h only) + applied by separate barotropic/Matsuno ops → breaks the
-  energy-conserving TRiSK identity; q-transport (h·u_total) inconsistent w/ continuity flux;
-  default `pv_scheme='enstrophy'` non-EC. Fix = MOM6 full-PV q=(f+ζ)/h + continuity transport.
-  Also: untested w/ CORE-II (run it).
-- **spectral (spectral_ocean_pe):** **[high] OMIP applicator gap is TOTAL** — `SpectralOceanState`
-  has no grid-space u/v/T or masks, so both `apply_omip2_surface_fluxes` and
-  `compute_omip2_surface_forcing` raise. Self-flagged unsupported (Gibbs ringing #99). Fix =
-  spectral surface-forcing path (synth top layer→Gaussian grid→air_sea_fluxes→curl/div→vor/div_hat).
+---
 
-## Next
-1. **BALANCED COLD-START INIT (the indicated fix, iter6 conclusive).** Implement a runner IC
-   option `--balanced-init`: geostrophic/thermal-wind velocity from the WOA p′ field
-   (u_g = −(1/ρ_0 f)∂p′/∂y at u-pts, v_g = +(1/ρ_0 f)∂p′/∂x at v-pts), equator-tapered
-   (regularise 1/f → f/(f²+f_ε²) or zero |lat|<~3-5°); optionally balanced SSH (η from the
-   depth-integrated PGF, `eady_uniform` pattern). Reuse `iterate_eos_and_pressure_anomaly` (p′),
-   `gradient_x/y_cgrid`, `grid.f_T`/`coriolis_cgrid`. NO dycore change. Test: WOA cold-start
-   stays finite + |u| physical (vs rest-IC NaN by day 5). codex-review.
-2. If balanced init stabilises → multi-year free run → `compare_omip_nemo.py` SST/SSS vs the
-   NEMO 5-yr ref → first real faithful number; then ACC/AMOC/MOC/MLD transports + runoff ungate.
-3. If a residual equatorial imbalance remains (f→0 taper region) → digital-filter / incremental
-   init, or a short strongly-damped pre-spin to settle the equatorial adjustment.
-4. (Done/kept) adaptive-implicit vertadv fix — validated + codex-SHIP; a real robustness
-   improvement, NOT the cold-start blocker. Optional follow-up: extend to tracers; fold into
-   `_apply_implicit_vertical_mixing` (NEMO trazdf/dynzdf one-solve style).
-5. All-grid audit (cubed_sphere/mpas/spectral) — fold in (workflow wnz1vbd2y findings recorded).
-6. codex-adversarial-review each change.
+## Open work (toward "all grids" + complete faithfulness)
+1. **Score 8135049 climatology** (day-15/30/.../90) → equilibrated SST/SSS trend.
+2. **SSS runoff ungate** — wire Dai-Trenberth: `apply_runoff_step` + the staged NEMO
+   `runoff-icb_DaiTrenberth_Depoorter.nc` (eORCA1) NN-regridded to eORCA025; ungates
+   SSS/MLD/AMOC. Needs curvilinear regrid + a re-run.
+3. **Transports** (ACC@Drake ~130 Sv, AMOC@26N 15-20 Sv) — now meaningful (physical
+   velocities); needs grid metrics in the scorer + NEMO grid_U/V ref + `_streamfunction.py`.
+4. **latlon pole filter / Arctic mask** (geometric) for a 2nd-grid run.
+5. **Coarse grids** (cubed_sphere PGF, mpas split-Coriolis, spectral forcing path) — each a
+   real dycore fix (audit findings above).
+6. **HW-KE fold halo** (deferred): `ocean_pe_latlon_cgrid.py` ~1015 fills j±1 by edge-
+   replication — WRONG at the active tripole fold (should be `vector_sign_u·u[-1:,perm_T]`);
+   prerequisite to `ke_gradient_scheme="hollingsworth"` on tripole. Centered KE is fold-safe.
 
-### Deferred (only if KE scheme ever matters)
-Hollingsworth KE stencil (`ocean_pe_latlon_cgrid.py` ~1010-1033) widens to j±1 with
-edge-replication wall halos; on the TRIPOLE it ignores the north-fold permutation/sign
-(codex high finding, iter 2). A fold-aware KE halo + active-tripole regression test is
-the prerequisite to ever making `ke_gradient_scheme="hollingsworth"` the tripole default.
-A/B knob added: `run_omip_core2.py --ke-gradient-scheme {centered,hollingsworth}`.
-
-## Iteration log
-- **iter 16 (¼° WBC viscous-CFL cap — codex-hardened + committed; new Ralph loop):**
-  The eORCA025 cold-start stabiliser (CFL-capped Smagorinsky, `smag_cfl_safety`)
-  was uncommitted/unreviewed. 3 codex adversarial rounds → fixed + committed:
-  (1) replaced the `area·cos²(lat)` cap with the per-cell ANISOTROPIC viscous-CFL
-  estimate `safety/(dt·(1/dx²+1/dy²))` — new public helper `laplacian_smag_cfl_cap`
-  (ocean_pe_latlon_cgrid.py) using the grid's TRUE metrics (dx_T/dy_T at centres,
-  dx_v/dy_v at vertices) so it no longer over-caps the anisotropic high-lat/Arctic
-  cells; q-point cap periodic-wrapped (append col 0, matches the q-Laplacian) →
-  seam-continuous; grid-class dispatch (LatLonCGridGeometry + plain LatLonGrid).
-  `safety~1/8` = ~4× CFL margin (absorbs curvilinear distortion; rectangular
-  estimate = NEMO/MOM6 practice — did NOT chase the exact discrete-operator
-  eigenvalue). (2) tripole T-fold `fold_convention` threaded end-to-end
-  (`_detect_fold` → `create_tripole_grid` → run_omip `_parse_resolution`/
-  `_create_setup`); eORCA025 now passes its VALIDATED de-haloed perm
-  `(n_lon-i)%n_lon` instead of the auto symmetry tie-break (eORCA1.2 → `n_lon-1-i`).
-  New leaf tests: cap metric/CFL-safe/periodic-seam + fold explicit-override/
-  wrong-convention-raises → **14 unit tests pass** (CPU x64). 3mo eORCA025 FREE run
-  (job 8124320, dt=75, winning config) finite at ~6.6 h wall, no blowup snapshot →
-  bounded-WBC regime holds; final snapshot → compare vs NEMO yr-1 (caveat: WBC
-  ~7× over-intense, viscosity-limited). codex round-3 verified substance clean
-  (wiring + dispatch + no unsafe CFL); only doc-wording nits remained, fixed.
-  **CORRECTION (same iter, commit abe80cdd):** the metric cap (1) REGRESSED —
-  the validation smoke (job 8126978, committed code) went NaN by **day 0.25**
-  while the 3mo run (8124320, prior `area·cos²` cap, identical config) is finite
-  past 7 h. The strict rectangular CFL bound is ~20% lower at the WBC (more at
-  high lat) → STARVES the marginally-resolved jet of the viscosity it needs.
-  ⇒ codex's "area·cos² over-caps" finding was theoretically right but BACKWARDS
-  here: the cold start needs the LARGER tuned ceiling (the energy-stable stress
-  operator tolerates a coefficient above the explicit-CFL limit). **REVERTED to
-  `area·cos²(lat)·safety/dt`** (proven stable), KEEPING the two genuine review
-  fixes — periodic q-seam (vs edge-pad) + explicit fold convention. **Lesson:
-  smoke-validate numerics on the real cold-start BEFORE committing; unit tests +
-  adversarial review missed this.** Confirmation smoke 8126991 + unit re-run in
-  flight. Two extra commits this iter: af8da957 (observable runner: per-diag CSV
-  + `--snapshot-every-days`), abe80cdd (the revert).
-  **REVERT CONFIRMED (smoke 8126991, rc=0, 2-day cold-start FINITE).** New CSV
-  diagnostics: max|u| day-0.25 **17 m/s @ Brazil-Malvinas** (−36°,−51°) →
-  day-0.5–2 **30–35 m/s @ EQUATOR** (−2°,−5°, the f→0 amplifier) — bounded /
-  saturated (not growing). Mean SST 11.2 °C + SSS 34.29 **stable + physical**.
-  ⇒ tracer fields are usable for a caveated SST/SSS compare despite the
-  LOCALISED equatorial velocity over-intensity (worse than the ~14 m/s WBC; the
-  equator f→0 amplifier is the key remaining QUALITY gap — known not viscosity-
-  dampable, tracker iters 11/13). 14 unit tests pass on the committed code.
-  **FULL ¼° COMPARE PIPELINE VALIDATED END-TO-END** (job 8127079, rc=0):
-  `compare_omip_nemo.py` now proven on the eORCA025 1206×1440 grid (cKDTree-IDW
-  regrid → 1° → SST/SSS bias/RMSE/corr + maps; only the old 332×362 tripole was
-  tested before). Day-2 smoke snapshot vs NEMO yr-2: SST bias −6.6 °C, RMSE
-  13.7 °C, corr 0.095 → "poor" — but this is a 2-day spinup, NOT climatology
-  (cold bias = tropics not yet warmed; corr≈0 = no dynamical pattern yet), so the
-  numbers are a PIPELINE check, not science. `results/omip_nemo/compare_e025_smoke/`.
-  The first MEANINGFUL number comes from the 3mo run (8124320, ~day 34/90 now).
-  **Net iter 16:** ¼° tripole path is STABLE + committed + fully wired to NEMO
-  scoring; remaining gaps to "excellent match" = (a) long-enough run for
-  climatology (3mo→multi-yr), (b) equatorial velocity over-intensity (~30 m/s),
-  (c) runoff ungate (SSS), (d) the deeper dycore gaps. NOT DONE.
-- **iter 1:** new loop. Drag-spinup test 8100129 queued (GPU busy). Created this tracker.
-  codex-adversarial-review of dycore changes = needs-attention, 2 valid findings, both FIXED:
-  (1) [high] flood-fill copied donor columns without reapplying the RECEIVER bathymetry deep-fill
-  → below-seafloor T/S bias; now reapplies the deep-fill (z_cen > H_bathy → deep-ocean fill).
-  (2) [med] NN forcing-sampler cache key omitted dst_lon.sum() → same-shape grids could collide;
-  key now signs full src+dst lat/lon checksums. Drag test 8100129 (PD) will run the fixed code.
-- **iter 2 (KE-gradient scheme RULED OUT — empirical):** Hypothesis: the realistic-IC blowup
-  is the Hollingsworth-Kållberg instability — the default `ke_gradient_scheme="centered"` KE
-  gradient pairs inconsistently with the AL81 12-point PV-flux Coriolis term; the realistic
-  DINO experiment uses `"hollingsworth"` (#263) and KE-scheme was NEVER among the ~16 prior
-  levers. Built A/B knob `run_omip_core2.py --ke-gradient-scheme` (codex-clean, 4 rounds).
-  **A/B job 8106193 (A40): tripole centered (control), tripole hollingsworth, latlon-bathy
-  hollingsworth — ALL THREE finite at step 0 (SST~13°C, |u|=0) then non-finite by step 72
-  (day 0.5). Hollingsworth ≡ centered. KE scheme is NOT the blocker.** Negative result, but a
-  real lever crossed off (19 total) + reusable A/B infra. Codex flagged [high]: the
-  hollingsworth KE stencil lacks a fold-aware north halo → reverted both config DEFAULTS
-  (kept centered), knob-only diff. Refined target: blowup is grid- AND KE-independent ⇒
-  shared baroclinic dynamics; next = per-term tendency instrumentation (steps 1-10).
-  **KEY CLUE (drag run 8100129: nudge tau60 + flood-fill + Rayleigh drag tau1/120d,
-  centered KE):** survives to ~day 90, NaN day 100; the unstable mode is MERIDIONAL v ≫ u,
-  pinned at the EQUATOR (umax_lat −4 to −6°): max|v| 2.7(d10)→7.8(d20)→18.1(d30) while
-  max|u| only 1.8→3.3. Grows monotonically DESPITE active spin-up drag ⇒ drag-immune
-  equatorial-v mode. At f≈0 a meridional PGF is unbalanced → prime suspect KE_PGF_v
-  (meridional pressure gradient). Per-term diag job 8106208 (WOA cold-start, no forcing)
-  will confirm which dv_dt term drives the equatorial v.
-- **iter 2 (PER-TERM tendency localisation — MECHANISM FOUND, job 8106208):** instrumented
-  `model.tendencies_with_diagnostics` every step on the WOA cold-start. No-forcing and
-  with-forcing arms are STEP-FOR-STEP IDENTICAL ⇒ **CORE-II forcing exonerated** (it is a
-  pure IC/dynamics blowup). Mechanism, decisively:
-  • **SEED (steps 1-2): equatorial meridional PGF** `KE_PGF_v ≈ 8.6e-3 m/s² @ +4.4°N` drives
-    v from rest to ~5 m/s in ONE step (8.6e-3·dt600 = 5.2). That is ~900× a physical
-    baroclinic-PGF estimate (~1e-5 m/s²) ⇒ the equatorial meridional PGF seed is SPURIOUSLY
-    LARGE. At f≈0 nothing arrests it.
-  • **AMPLIFIER (steps 3-6): vertical momentum advection** `vertadv_u/v @ −3.3°N`. The
-    PGF-driven v converges meridionally → spurious w (~0.03 m/s, ~300× physical) → flux-form
-    upwind `∂(w·u)/∂z` explodes: vertadv 2.25e-2→0.31→12→6.7e5 → NaN step 10.
-  • Explains why **dt 600/300/150 ALL failed** (growing-flow feedback, not a fixed CFL) and
-    why it is **viscosity/drag-immune**.
-  ⇒ Root = the spurious equatorial meridional PGF; vertadv turns it into the blowup. NEXT:
-  seed-localisation probe 8106261 (is KE_PGF_v at the SURFACE = IC/flood-fill artifact, or
-  DEEP = partial-cell PGF over topography? and at a specific lon?) → then fix the PGF/IC seed
-  (and/or make vertical momentum advection implicit/limited to kill the amplifier).
-- **iter 2 (ROOT CAUSE — wrong vertical-coordinate TYPE, "correct grid types"):** seed probe
-  8106261 put the spurious KE_PGF_v at **lat 4.4°N, lon 123.5°E, k=19 (bottom level)** — the
-  Indonesian seas, deepest level, steepest equatorial bathymetry; the whole cascade stays at
-  lon 123.5°E. PGF A/B 8106265 (adcroft vs smc03 on tripole) came back **BIT-IDENTICAL** ⇒
-  the `pgf_scheme` switch is a NO-OP. Cause: the Adcroft/SMC03 partial-cell PGF correction in
-  `ocean_pe_latlon_cgrid.py:1071` is gated `isinstance(z_coord, OceanPartialCellCoordinate)`,
-  but the OMIP runner passes the plain `OceanZStarCoordinate` from `_create_setup`. That coord
-  has `J=(eta+H_bathy)/H_max` → ALL levels uniformly stretched to the local depth = **sigma-
-  like / terrain-following**, NOT NEMO's z-level-with-partial-steps. So (a) the PGF correction
-  never fires AND (b) over steep equatorial topo the sigma-PGF error is huge at f≈0.
-  **`run_omip.py`'s OWN main driver (run_omip_single ~L3181) ALREADY converts to
-  `OceanPartialCellCoordinate` + thin-cell-snaps** — its comment literally describes this
-  exact "day-13 equatorial PGF instability, f≈0, thin partial cell, blow up". The OMIP-faithful
-  runner (`run_omip_core2`) BYPASSED that stable setup. This invalidates the prior "smc03
-  tested, still blew up" lever — smc03 was never actually applied.
-  **FIX (this loop's "correct grid types"): added `make_partial_cell()` + `--partial-cell` to
-  run_omip_core2 (z-level partial steps + thin-cell snap, NEMO-faithful; activates the PGF
-  correction).**
-  • **Per-term efficacy (job 8106758): CONFIRMS the mechanism.** With `--partial-cell` the
-    super-exponential vertadv runaway is GONE (finite through 16 steps vs NaN by step 10 on
-    plain z*); the equatorial KE_PGF_v seed DECAYS (8.1e-3→3.5e-3) instead of running away;
-    and `pgf_scheme` now actually matters (adcroft≠smc03 arms) — proving it was gated off.
-  • **IC bug found + fixed (codex 3 rounds → approve):** `compute_woa_3d` was deep-filling
-    ACTIVE bottom partial cells (init_ocean_from_woa's `|z_full_ref|>bathymetry` mask + the
-    re-apply pass) → corrupted IC at the topographic-step region. Now: pass
-    `bathymetry_depth=None` for partial-cell coords + mask only `~is_active`.
-  • **RESIDUAL (watch):** per-term shows partial-cell removes the catastrophic equatorial
-    blowup but a slower ~linear growth persists (mid-lat deep PGF, e.g. −36.3°N/−50.5°E South
-    Atlantic slope, ~3.5e-3 m/s²) → contaminated forced run blew up ~day 2. Clean forced
-    validation (job 8106781, --partial-cell, adcroft vs smc03, 30d, fine diag) PENDING:
-    does the clean IC + (now-active) smc03 PGF give a stable physical multi-day forced run?
-  Code committed (partial-cell coord + partial-cell-aware WOA IC, codex-clean).
-- **iter 2 (partial-cell NECESSARY but NOT SUFFICIENT — forced equatorial residual):** clean
-  forced validation 8106781 (--partial-cell, clean IC, adcroft AND smc03, WOA cold-start, no
-  drag) **blew up by day 0.5-1: max|u|=227, max|v|=124 @ EQUATOR (−1.3°N)**, then NaN day 1.
-  So partial-cell removed the catastrophic step-10 Indonesian-seas super-exponential runaway
-  (per-term 8106758 confirmed) but a FORCED equatorial instability remains. Note: per-term
-  NO-forcing partial-cell survived 16 steps (~16 m/s, mid-lat), but WITH forcing it explodes
-  at the equator ⇒ forcing now implicated (was masked on plain z* when the Indonesian
-  bottom-PGF dominated). NEXT: per-term WITH forcing + partial-cell (job below) to localise
-  the equatorial term (residual PGF? vortcor? surface-forcing `phys`? barotropic-split?).
-  Also retry the GRADUAL path (partial-cell + nudge-from-rest + drag spin-up + clean IC) —
-  the plain-z* nudge+drag run reached day 90, so gradual + partial-cell may be the stable
-  combination. Partial-cell is kept (real, NEMO-faithful, removes the worst mode).
-- **iter 2 (per-term FORCED + partial-cell, job 8106978 — AMPLIFIER = vertadv):** 40-step
-  per-term with CORE-II forcing + partial-cell. The Indonesian super-exponential seed is GONE
-  (4.4°N/123.5°E KE_PGF_v decays 6.6e-3→3.5e-3). Growth is now ~10× slower (max|u| 68 m/s @
-  step 40 vs NaN by step 5 on plain z*). **The consistent AMPLIFIER is vertical momentum
-  advection `vertadv`**: once |u|~10-20 m/s it becomes the top term and grows
-  (1.5e-3→2.2e-2 over steps 15-40) at the S-Atlantic slope (−36.3/−50.5) + W-Pacific
-  (14/136). Residual persistent spurious PGF seeds feed it: equatorial Indian (lat0.3/lon72.5/
-  k13, steady 3.46e-3) + slopes. ⇒ Two fix axes: (A) **tame the amplifier** — implicit or
-  CFL-limited flux-form vertical momentum advection (`_flux_form_vertical_momentum_advection`,
-  ocean_pe_latlon_cgrid.py ~1377) so an overshoot can't run away; (B) tame the seed via
-  gradual spin-up. Testing (B) first (no code change): partial-cell + nudge-from-rest + drag
-  (job below); the deeper (A) is next if (B) is insufficient/unfaithful.
-- **iter 2 (B = drag spin-up CONFIRMED a band-aid):** pcellgrad_8107306 (partial-cell + smc03 +
-  nudge60 + Rayleigh drag τ=1d/120d) stayed bounded (max|v|~6-7 m/s) through day 120 then blew
-  to 30 m/s the moment drag RELEASED at day 125; weaker drag (τ=5d) NaN'd by day 5. ⇒ drag
-  SUPPRESSES the amplifier but doesn't cure it. Pivot to axis (A) — the real, NEMO-faithful fix.
-- **iter 3 (FIX (A) IMPLEMENTED — adaptive-implicit vertical momentum advection):** Identified
-  the amplifier as the explicit 1st-order-upwind `flux_form_vertical_momentum_advection`
-  (vertical.py:740) — NO Courant limit, while the *tracer* TVD path IS Courant-clamped. NEMO's
-  exact remedy is **Shchepetkin (2015) adaptive-implicit vertical advection (`ln_zad_Aimp`,
-  ON in eORCA OMIP production)**: split w = w_exp + w_imp by a Courant ramp (Cu_min=0.15,
-  Cu_max=0.30); w_exp through the explicit scheme (Courant-capped), w_imp through a backward-
-  Euler 1st-order-upwind tridiagonal solve (M-matrix → unconditionally stable, monotone,
-  conservative). **Implemented** (codex-clean pending): new `shchepetkin_implicit_fraction`,
-  `implicit_vertical_advection_ocean` (reuses `thomas_solve`), `adaptive_implicit_vertical_
-  momentum_advection` in `ocean/vertical.py`; gated the explicit in-tendency vertadv
-  (`ocean_pe_latlon_cgrid.py` ~1357) behind `config.adaptive_implicit_vertadv`; applied the
-  operator-split at the step level post-barotropic on the baroclinic perturbation u'=u−U_bar
-  using the barotropic-consistent w_baro (`ocean_model_latlon_cgrid.py` ~984); new config flag
-  `adaptive_implicit_vertadv` (default False = bit-exact regression); runner
-  `--adaptive-implicit-vertadv`; full unit/conservation/stability/AD/flag-off-regression tests
-  (`test_adaptive_implicit_vertadv.py`); made `interp_cell_to_vface(f, grid)` fold-aware.
-  Unit tests 15/15 + regression 27/27 PASS (job 8115939). codex adversarial review hardened
-  the tests (added w=0-exact-identity, machine-precision conservation, rock-leak guards).
-- **iter 3 (CONTROLLED EXPERIMENT — vertadv is NOT the cause, RE-DIAGNOSIS):** OMIP ARM A
-  (job 8115940, the fix on the exact failing config, NO drag) went NaN by day 5. Per-term
-  probe (job 8115992, fix-OFF vs fix-ON, 60 steps, same config) is **decisive**: the max|u|
-  trajectories are NEARLY IDENTICAL (step 35: OFF 65 m/s, ON 75 m/s — fix marginally *worse*;
-  both ~107-183 m/s by step 60). ⇒ **the adaptive-implicit vertadv fix does NOT change the
-  blowup** — so **`vertadv` was a SYMPTOM, not the cause.** It was merely the largest *named*
-  tendency term in the prior no-fix diag; it is one of SEVERAL co-equal nonlinear amplifiers
-  (KE-gradient feedback −∇(½|u|²), `vertadv`, `vortcor`) that all engage once |u| is O(10).
-  With vertadv removed (ARM B), the top term becomes `KE_PGF` at the **S-Atlantic continental
-  slope (−36.3°N, −50.5°E)** growing 2.5e-3→1.7e-2 — the runaway continues at the SAME rate via
-  the KE-gradient feedback. **ROOT = the spurious PGF SEED over steep topography** (S-Atlantic /
-  Indonesian / W-Pacific slopes; ~3.5e-3 m/s² at step 1 with u=0 = pure smc03 partial-cell PGF
-  residual). Once it pushes |u| up, ALL the nonlinear terms finish the runaway — removing any
-  one (vertadv) cannot help. **The fix must reduce the SEED, not the amplifier.** The vertadv
-  fix is KEPT (correct, NEMO-faithful, tested, flag-gated robustness improvement that will
-  matter at high res / strong upwelling) but is NOT the OMIP blocker.
-- **iter 4 (flat-bottom test = CONFOUNDED; common root is DEEP PGF):** FLAT-BOTTOM WOA
-  cold-start (job 8116190) ALSO blows up, FASTER (max|v|=1169 m/s @ 46.9°N by step 10). BUT the
-  seed is at k19 (BOTTOM level) over Caspian/North-Sea cells = shallow seas mapped to the
-  5500 m flat bottom → WOA stratification extrapolated to depth → spurious deep ρ′ → large deep
-  PGF. So flat-bottom is a PATHOLOGICAL test (bad deep IC), NOT a clean topo control. The
-  amplifier here is `vortcor` (5.4e-3→0.113 over steps 7-9), NOT vertadv — **reconfirming the
-  amplifiers are INTERCHANGEABLE symptoms.** KEY COMMON PATTERN across both realistic-bathy
-  (seed at k15-18 over steep slopes) AND flat-bottom (seed at k19 over deep-mapped shelves):
-  **the spurious PGF seed always sits at the DEEPEST level** ⇒ root = spurious DEEP baroclinic
-  PGF (errors in ρ′ accumulate in p′=∫gρ′dz to the largest value + gradient at depth). Note:
-  `iterate_eos_and_pressure_anomaly` HAS an unused `use_depth_dependent_ref` (defaults False →
-  constant rho_0 reference; depth-varying ref would shrink ρ′/p′ — mainly a float32-precision
-  win, secondary in the fp64 OMIP run). For the REALISTIC case the seed = smc03 partial-cell
-  PGF residual on steep slopes (NOT precision; not the flat-bottom IC artifact).
-- **iter 6 (DEFINITIVE — PGF is FINE; root = UNBALANCED COLD-START ADJUSTMENT):** Two prior
-  axis-B probes came back: (a) bathy smoothing (job 8116430) inconclusive — Laplacian smoothing
-  only moved max r-factor 0.995→0.764 (too weak; and total-depth r is the WRONG metric — the
-  partial-cell PGF error depends on per-level centroid offsets, not total depth), both doses
-  still NaN'd ~day 2. (b) **THE decisive test — horizontally-uniform-stratification REST test on
-  the REAL eORCA1 geometry (job 8116497, true baroclinic PGF ≡ 0 ⇒ any velocity is pure
-  partial-cell PGF discretisation error): step-1 KE_PGF = 1.0e-6 m/s², max|u| = 4e-4→4e-3 m/s
-  over 30 steps, FINITE & STABLE.** Flat-bottom sanity arm = 0.0 exact. ⇒ **the partial-cell
-  smc03 PGF on real topography is EXCELLENT (~1e-6 m/s², mm/s — NEMO-class). The PGF is NOT the
-  seed.** Therefore the ~3.5e-3 m/s² "seed" in the real WOA cold-start is the **REAL baroclinic
-  PGF from WOA's horizontal density fronts**, UNBALANCED because cold-start = rest (u=0) + flat
-  SSH (η=0). **ROOT CAUSE (now conclusive): the violent cold-start GEOSTROPHIC ADJUSTMENT from
-  an unbalanced rest state** — corroborated by the drag run (damping the adjustment → stable to
-  day 120; blew up on drag release). EXONERATED: vertadv/vortcor/KE-grad amplifiers, smc03 PGF,
-  partial-cell discretisation, bathymetry steepness. **THE FIX = BALANCED INITIALISATION**
-  (thermal-wind geostrophic velocity from the WOA ρ-field, equator-tapered, + balanced SSH) —
-  the one prior-session hypothesis NEVER actually tested. Machinery exists: `references.py::
-  thermal_wind_shear`, `coriolis_cgrid`, `grid.f_T`, `eady_uniform` balanced-SSH logic; reuse
-  `iterate_eos_and_pressure_anomaly` for p′. Implement as a runner IC option (no dycore change).
-- **iter 15 (DEFINITIVE: no stable FREE run; constrained-only; real fix = resolution / tuned
-  WBC viscosity):** Drag-spin-up deliverable failed too: persistent drag tau=8/2.5 NaN day5,
-  tau=1d NaN day10. The prior day-120-stable run (pcellgrad) had **nudge(τ=60)+drag(τ=1d)** —
-  the NUDGE (T,S→WOA relaxation) was load-bearing, which I had dropped. But a PERSISTENTLY
-  nudged run is pinned to WOA ⇒ degenerate (SST≈WOA≈NEMO-IC, trivial comparison); and
-  RELEASING the nudge/drag blows up (the free state is the unstable one). ⇒ **legoESM's 1°
-  tripole ocean CANNOT do a stable FREE integration of the realistic global ocean — only
-  heavily-constrained (nudge+drag) runs are stable, which preclude a meaningful free NEMO
-  comparison.** EXHAUSTIVE (~23 experiments): every config lever fails or is CFL-capped; the
-  under-resolved Brazil-Malvinas WBC jet is the irreducible dt-independent instability. **THE
-  REAL FIX (a genuine dycore effort, scoped): (a) spatially-varying WBC-ENHANCED viscosity
-  (mirror NEMO's eddy_viscosity_3D; legoESM's A_h is scalar-only → needs a 2D-field code change)
-  + dt«600 to lift the Laplacian-viscosity-CFL cap (dt=150 → A_h up to ~3e7); OR (b) higher
-  resolution (~1/4°) to resolve the WBC jet; OR (c) restart from a NEMO-equilibrated state
-  (skip the cold-start — but the under-resolved jet likely still blows).** Config tuning is
-  EXHAUSTED. Science (root cause) SOLVED; the faithful free comparison needs (a)/(b). All targeted
-  dissipation fixes fail because the WBC jet hits a viscosity-CFL wall at dt=600: biharmonic
-  Smag/Leith SELF-CFL-violate at the sharp jet (NaN day1, worse than base); constant A_h capped
-  by its own Laplacian CFL (~8e6@dt600; A_h=1e7 blew); `momentum_advection=weno5` REPLACES the
-  AL81 vector-invariant scheme with flux-form WENO → destabilises (NaN day1); C_smag_lap=0.5 +
-  A_h=4e6 on top of barotropic-split → self-CFL, NaN day1. **The best stable config is
-  barotropic-split-explicit ALONE (day 5, saturation ~9.5 m/s).** Adding ANY baroclinic
-  viscosity makes it worse (CFL). IDW flood-fill (k15 seed fix) committed. ⇒ **The clean instant
-  cold-start at 1° from raw WOA is NOT achievable by config tuning within the CFL constraints —
-  the under-resolved Brazil-Malvinas jet would need either dt«600 + a tuned WBC-enhanced
-  viscosity field (NEMO's eddy_viscosity_3D, a major effort) or higher resolution.** DELIVERABLE
-  path (the working solve): **persistent Rayleigh-drag spin-up** (`−r·u` is unconditionally
-  stable — no viscosity-CFL — and damps the WBC jet directly; the prior drag run reached day 120,
-  blowing up only on RELEASE; setting drag_days > run-length = NEVER released) + barotropic-split
-  + IDW + adaptive-vertadv + partial-cell smc03. Job 8117763 (tau=8d/20d, 60 d). If stable →
-  extend 1 yr → regrid → `compare_omip_nemo.py` SST/SSS vs the NEMO 5-yr ref = the FIRST FAITHFUL
-  legoESM-vs-NEMO NUMBER (drag caveat: weaker WBCs). This is a standard robust ocean spin-up.
-- **iter 13 (ROOT CAUSE FOUND — under-damped WBC jet; dt-independent; 4-agent convergent
-  diagnosis):** Comprehensive full-stack × dt sweep (job 8117533): **dt=600 day1 max|u|=39.0,
-  dt=300 day1=38.3 — IDENTICAL ⇒ the blowup is dt-INDEPENDENT** = a structural/physical
-  instability (converges as dt→0), NOT numerical/CFL/integrator. Mechanism workflow wshsnjjm3
-  (4 agents CONVERGE): **the instability is nonlinear self-advection (u²) of the UNDER-DAMPED
-  Brazil-Malvinas western-boundary-current jet (−36.3°N/−50.5°E).** AL81 vector-invariant
-  momentum advection is energy-AND-enstrophy CONSERVING = NON-dissipative → cannot damp the
-  sharp-jet enstrophy → u² runaway. **ROOT vs NEMO:** NEMO ORCA1 keeps the SAME jet stable via a
-  **spatially-varying 3D eddy viscosity** (`eddy_viscosity_3D.nc`, `nn_ahm_ijk_t=-30`) ENHANCED
-  over western-boundary currents + coasts (NEMO's vorticity=EEN + advection=vector-form are
-  conservative like legoESM's — NOT the source of NEMO's stability). legoESM uses CONSTANT
-  A_h=2e5 with cos²(lat) scaling (→ ZERO extra at −38°S) + equatorial boost → the marginally-
-  resolved WBC jet is under-damped → blows up. **legoESM HAS the machinery (Smagorinsky, Leith,
-  weno5, slope-foot) but ALL DEFAULTED OFF (C_smag=0, C_leith=0, C_smag_lap only 0.15, weno
-  off).** Secondary seed: the FLOOD-FILL copies whole nearest columns wholesale → a 1-cell
-  density step at depth k15 (IC artifact, distinct from the global smoothing already ruled out).
-  **THE FIX (3 prongs): (A) self-activating viscosity — Leith ~|∇vorticity| / biharmonic Smag,
-  strong exactly at the sharpening jet (constant A_h≤1e6 already ruled out — must scale with the
-  flow); (B) weno5 upstream-biased momentum advection (dissipative, NEMO-UP3-like); (C)
-  flood-fill seam smoothing (multi-donor inverse-distance, fix the k15 artifact).** Wired
-  --C-smag/--C-leith/--C-smag-lap/--bottom-drag-r runner knobs. Test 8117627 (Leith 2.0; Smag
-  4.0+lap1.0; A_h 1e7 control) running. This is the genuine root cause + the NEMO-faithful fix.
-- **iter 12 (BAROTROPIC SOLVER — BREAKTHROUGH: blowup → saturation):** The OMIP config OVERRODE
-  legoESM's own default split-explicit barotropic (`explicit_substep` + cosine time filter,
-  dissipative for fast modes) to **`implicit_cn`** (Crank-Nicolson — NEUTRAL, no fast-gravity-
-  wave damping). The −36.3°N mode is the fast barotropic adjustment mode that CN leaves
-  undamped. Test (job 8117428, 40-step per-term + KE): switching back to `explicit_substep`
-  + cosine filter + 2D damping **converts the SUPER-EXPONENTIAL blowup to SATURATION** — with
-  n_sub=80, α=1.0: max|u| peaks ~9.6 m/s @ step30 then DECLINES to 9.5 @ step40 (vs implicit_cn
-  111.5, RK3 50.9, B_h 45.9). **FIRST config in ~16 experiments that does not run away.** Damping
-  strength matters (α=0.3/n60 → still climbing to 29; α=1.0/n80 → saturates 9.5) but the
-  qualitative fix is the SOLVER (CN→split-explicit). NEMO-FAITHFUL (NEMO uses split-explicit
-  forward-backward + AB3-AM4 fast-mode damping, never CN for ORCA1). Multi-day run 8117445
-  (α=0.5/n60 + α=1.0/n80, 60 d) testing whether ~9.5 m/s settles to physical.
-  **iter 12 UPDATE — barotropic also INSUFFICIENT (multi-day):** the 40-step saturation was a
-  TRANSIENT ARTIFACT. Multi-day: α=0.5/n60 NaN day 2; α=1.0/n80 (the "saturating" config) NaN
-  **day 5** (job 8117462). More barotropic damping DELAYS the blowup (day2→day5) but does NOT
-  cure it — same marginal pattern as RK3 (~20%) / B_h. ⇒ **the barotropic solver is the dominant
-  single lever (super-exp→saturation over 40 steps, +couple days) but, like EVERY other lever,
-  is necessary-not-sufficient.** DEFINITIVE after ~17 experiments: NO single NEMO structural
-  difference (PGF, vertadv, RK3, biharmonic, EEN, barotropic solver, IC-conditioning) cures the
-  realistic-WOA cold-start; each helps marginally. NEMO's survival = the FULL stack together
-  (split-explicit AB3-AM4 + EEN+Hollingsworth + FCT + implicit-drag + RK3 + EVD + adaptive-
-  vertadv, tuned). The clean faithful cold-start = a major MULTI-COMPONENT, multi-session dycore
-  effort. Over-damping (strong barotropic damping / persistent Rayleigh drag, day-120 proven) is
-  the SAME spectrum = the pragmatic path to a first caveated NEMO number now.
-- **iter 11 (ENERGY BUDGET + B_h + GM — the mode is a fast dissipation-immune ADJUSTMENT mode
-  at Brazil-Malvinas; barotropic solver is the last untested structural lever):** Added an
-  ONLINE total-KE diagnostic to the per-term probe (committed-ready). Energy budget (job
-  8117304): cold-start total KE grows ~LINEARLY (steady ~5e15/step = APE→KE conversion) while
-  max|u| grows super-exponentially PINNED at −36.3°N/−50.5°E (Brazil-Malvinas Confluence: sharp
-  front + Argentine slope). ⇒ **LOCALIZED mode within a globally-energizing field, NOT a global
-  spurious-energy cascade ⇒ EEN/f-split NOT warranted** (avoided the high-risk restructure;
-  Hollingsworth A/B already null). Biharmonic momentum viscosity test (job 8117343, tripole has
-  B_h=0): B_h=1e13 no effect, B_h=1e14 only ~22% slower (like RK3) ⇒ **the mode is IMMUNE to
-  scale-selective dissipation ⇒ NOT a grid-scale 2Δx mode.** GM ruled out by timescale (kappa_GM
-  =800 → ~145-day front-flattening vs hours-fast blowup). **DEFINITIVE: the −36.3°N mode is a
-  FAST, LOCALIZED, dissipation-immune geostrophic-adjustment / barotropic-gravity-wave mode at a
-  sharp front over a slope — immune to EVERY single lever tested (PGF, vertadv, RK3, biharmonic,
-  EEN, balanced-init, IC-smooth, GM); only Rayleigh drag masks it (day-120).** The ONE untested
-  NEMO structural difference: the **BAROTROPIC SOLVER** — NEMO split-explicit forward-backward
-  with AB3-AM4 weights (0.614/0.285/0.088/0.013) that DAMP the fast gravity-wave adjustment;
-  legoESM uses implicit-CN (no equivalent fast-mode damping). The cold-start adjustment is
-  barotropic-dominated ⇒ this is the next lever. Else: pragmatic persistent-weak-drag run for a
-  first caveated NEMO compare (drag proven day-120).
-- **iter 10 (RK3 implemented + tested — marginal, NOT the fix; it's a MULTI-COMPONENT gap):**
-  Implemented SSP-RK3 (Shu-Osher) outer baroclinic momentum integrator (`momentum_time_integrator
-  ='rk3'`, `--momentum-rk3`; config-gated, default euler bit-exact; tests pass; committed-ready).
-  Per-term A/B (job 8117140, RK3 vs euler, partial-cell smc03 + forcing + adaptive-vertadv,
-  40 steps): **RK3 WORKS (differs from euler) but the trajectory is essentially IDENTICAL** —
-  both grow super-exponentially 1.6→90-110 m/s over 40 steps (step40: RK3 86.8 vs euler 111.5,
-  only ~22% slower; same top term vertadv@−36.3N/k0). ⇒ **RK3 is NOT the fix; integrator order
-  is not the issue.** The cold-start blowup is a **nonlinear robustness gap in legoESM's
-  dynamics' response to the unbalanced transient** — every single lever (vertadv, bathy-smooth,
-  balanced-init, IC-smooth, RK3) gives the SAME super-exponential trajectory; only the Rayleigh
-  drag run reached day 120, and uniform-stratification is stable. NEMO survives the SAME (bigger,
-  dt=3600) transient only via its FULL structural stack TOGETHER: split-explicit barotropic
-  (AB3-AM4 gravity-wave damping) + EEN energy-AND-enstrophy-conserving vorticity + FCT
-  positive-definite tracers + Hollingsworth-KE (nn_dynkeg=1) + RK3 + EVD@100 + adaptive-vertadv.
-  legoESM differs structurally: barotropic_solver default `explicit_substep` (OMIP may use
-  implicit_cn), AL81 PV-flux vorticity (not EEN), centered KE (not Hollingsworth). **CONCLUSION:
-  the faithful cold-start needs MATCHING NEMO'S FULL STACK (esp. the barotropic solver + the
-  EEN-vorticity/Hollingsworth-KE energy-enstrophy pairing) — a multi-component dycore effort, NOT
-  any single lever.** Pragmatic path to a FIRST NUMBER meanwhile: persistent weak Rayleigh drag
-  (the drag run proved day-120 stability) → multi-year → caveated compare vs NEMO 5-yr ref.
-- **iter 9 (NEMO COLD-START PROCEDURE decoded — the answer is the TIME INTEGRATOR, IC ruled
-  out; workflow w42n63nni, 5 agents over the actual ORCA1 build):** NEMO ORCA1 cold-starts from
-  the SAME rest (u=v=0, η=0) + RAW pre-gridded WOCE/Gouretski IC (`woce_*_monthly_init_4p2`,
-  native eORCA1, empty weights = no on-the-fly remap) — **NO IC smoothing, NO balancing, NO
-  static-stability check, NO interior restoring (`ln_tradmp=.false.`), NO dt ramp, NO Asselin
-  (inert under RK3).** ⇒ **my IC-smoothing + balanced-init attempts were the WRONG direction;
-  NEMO conditions nothing.** NEMO survives purely via RUNTIME integration robustness:
-  **(1) RK3** time-stepping (compile-time `key_RK3` in `cpp_ORCA1.fcm`; `stprk3_stg.F90` 3-stage
-  Dt/3,Dt/2,Dt; self-starting, no computational mode) — **legoESM's outer baroclinic step is
-  forward-Euler + Matsuno, which has NO stability region for advection/Coriolis/gravity → the
-  cold-start adjustment amplifies. THE CORE GAP.** **(2) Enhanced Vertical Diffusion** (EVD,
-  `ln_zdfevd`, rn_evd=100 m²/s, tracers-only): N²<0 → K_v=100, collapses static instability from
-  step 0. **(3) adaptive-implicit vertadv** (`ln_zad_Aimp`) — ✓ ALREADY implemented (iter3).
-  (4) FCT positive-definite tracers (nn_fct_h/v=2); (5) implicit bottom drag (`ln_drgimp`);
-  (6) split-explicit barotropic (AB3-AM4 forward-backward, rn_bt_cmax=0.8). dt=3600 single-step.
-  Also: vector-form momentum advection + Hollingsworth (nn_dynkeg=1), EEN vorticity, TEOS-10.
-  **FAITHFUL FIX PLAN (ranked): (A) implement RK3 (SSP-RK3 / Wicker-Skamarock) for the OUTER
-  baroclinic momentum step — the main lift; (B) EVD convective adjustment firing on N²<0 from
-  step 0 (legoESM has ocean/physics/convection/enhanced_diffusion.py — verify active in OMIP
-  config); (C) DROP the IC crutches — test raw-WOA + rest like NEMO; (D) FCT tracers + implicit
-  drag.** A/B test NEMO predicts: RK3+EVD+aimp-vertadv on = stable, off = blowup. Implement A
-  (config-gated momentum_time_integrator='rk3') + B, test the raw-WOA cold-start, codex-review.
-- **iter 7 (BALANCED INIT implemented — doesn't fix it; narrows to SPURIOUS-SHARP IC):**
-  Committed the vertadv fix (2da957ca). Implemented `apply_balanced_init` in the runner
-  (`--balanced-init`): level-of-no-motion geostrophic velocity from the WOA p′ (fixed ~1500 m
-  reference — NOT per-column seafloor, which gave ±40 m spurious SSH; equator-tapered
-  f/(f²+f_ε²); speed-clipped). **Result: ARM A (velocity+SSH) NaN day 2, ARM B (velocity-only)
-  NaN day 1 — both FASTER than rest-IC (day 5).** KEY: the geostrophic velocity at the WOA
-  fronts is HUGE — 247 m/s at the equator (taper edge), and the clip BINDS globally at 2.5 m/s
-  (Southern Ocean + equator) ⇒ the WOA IC mapped onto the tripole (interp + flood-fill +
-  partial-cell) has **spurious grid-scale / over-sharp density fronts** implying unphysical
-  (>>2 m/s) geostrophic flow. Clipping them to "balance" just injects KE → faster blowup. ⇒
-  **refined root: the realistic IC is too ROUGH for the cold start; the dynamics are stable on
-  SMOOTH stratification (uniform-strat rest test) but not the rough mapped WOA — balanced or
-  not.** NEMO's native-grid Gouretski IC is smoother / NEMO conditions its IC.
-- **iter 8 (IC-SMOOTHING test, job 8116796 RUNNING — the indicated fix):** added
-  `smooth_woa_ts` + `--woa-smoothing-passes` (horizontal Laplacian on the WOA T,S per level,
-  ocean-only). Test: ARM A = WOA + 4 passes + rest start; ARM B = WOA + 12 passes + balanced
-  init. PASS = finite + max|u| physical (vs raw-WOA NaN day 5). If smoothing the IC toward the
-  (proven-stable) smooth regime holds the cold start ⇒ the fix is IC conditioning (+ optional
-  balance); tune the minimal smoothing for faithfulness. If not ⇒ a robust incremental /
-  digital-filter init or a damped pre-spin is needed (genuine cold-start-robustness work).
-- **iter 5 (axis B — BATHYMETRY SMOOTHING test, job 8116430 RUNNING):** NEMO/ROMS smooth their
-  bathymetry to cut the slope (r-factor); the core2 runner used raw eORCA1 e3t_0 (no smoothing).
-  Added `make_partial_cell(..., smoothing_passes)` + `--bathy-smoothing-passes` (reuses
-  `_laplacian_smooth_2d`; reports max r-factor before/after). Test: WOA cold-start + partial-cell
-  + smc03 + vertadv-fix + 8 vs 20 Laplacian passes, ~36 d. PASS = max|u| physical + finite ≥30 d
-  (vs un-smoothed control NaN by day 5). If smoothing stabilises ⇒ seed = steep-slope PGF
-  confirmed + a (geometry-cost) stabiliser in hand; then tune the minimal smoothing for a
-  faithful run. If not ⇒ the deep-PGF/density-anomaly accuracy itself needs work (higher-order
-  cubic-spline PGF; depth-dependent reference profile; EOS-at-depth audit).
+## Pipeline (built + proven)
+NEMO ORCA1 5-yr ref + identical CORE-II 6-hourly `nyf.zarr` + WOA18 staged.
+`run_omip_core2.py` (runner, tripole + latlon, observable per-diag CSV + mid-run snapshots),
+`build_core2_nyf_zarr.py`, `compare_omip_nemo.py` (cKDTree-IDW regrid + SST/SSS score, fixed).
