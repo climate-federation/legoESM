@@ -1206,9 +1206,21 @@ def _corner_vorticity(uc, vc, cdgrid, use_duogrid):
         vc_halo_i_left = 0.5 * (vc_cc_pad[:, 0, :-1] + vc_cc_pad[:, 0, 1:])
         vc_halo_i_right = 0.5 * (vc_cc_pad[:, n + 1, :-1]
                                   + vc_cc_pad[:, n + 1, 1:])
-        # Metric halo: dxc/dyc continuous across seams; edge-mode for
-        # the halo row (O(dx) error, much smaller than the 15.6 % uc
-        # rotation error that mode='edge' on fx_circ produced).
+        # Metric halo: edge-copy the boundary dxc/dyc into the halo row.
+        # iter93 oracle finding: FV3 in DUOGRID mode skips the dxc/dyc
+        # edge-extrapolation + mpp_update the non-duogrid path uses
+        # (fv_grid_tools.F90:899-916 + :1107 are gated `.not. duogrid`) and
+        # instead carries the exact CROSS-FACE metric halo from its extended grid,
+        # so this edge-copy is formally a faithfulness gap.  BUT iter94 RULED IT
+        # OUT as a meaningful FB-residual term: replacing edge-copy with O(dx²)
+        # linear extrapolation (2*edge - first-interior) of dxc/dyc changed the FB
+        # W2 C36 day-1 max|u_d| by <0.2% (48.60 → 48.53, still day-2 NaN).  ⇒ the
+        # FB residual is NOT in the corner-vorticity METRIC halo (consistent with
+        # iter82-83 "structural corner coupling, not metric"); the remaining
+        # candidate inside `_corner_vorticity` is the uc/vc halo RECONSTRUCTION
+        # (the 2-pt center-avg + re-stagger above), not the metric.  Kept as
+        # edge-copy — the validated baseline; the exact cross-face metric is a
+        # known-LOW-priority TODO, proven not to move the residual.
         dxc_halo_j_below = cdgrid.dxc[:, :, 0]    # (6, n+1)
         dxc_halo_j_above = cdgrid.dxc[:, :, -1]   # (6, n+1)
         dyc_halo_i_left = cdgrid.dyc[:, 0, :]     # (6, n+1)
@@ -1974,5 +1986,26 @@ def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=constants.g,
         apply_legacy_d_sw5_corner_corrections=(
             apply_legacy_d_sw5_corner_corrections),
         apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
+
+    # Phase 4: one_grad_p — D-grid BACKWARD pressure-gradient update on the
+    # prognostic winds (FV3 dyn_core.F90:2347 one_grad_p / 1529 grad1_p_update).
+    # iter77 ROOT-CAUSE FIX: pre-iter77 the FB step applied the pressure gradient
+    # ONLY at the C-grid (_p_grad_c on uc/vc, Phase 2), so the prognostic D-grid
+    # winds u_d/v_d never felt the PGF — the vector-invariant momentum eqn was
+    # missing its -∇Φ term.  For a steady geostrophic state (W2) the winds then
+    # had NO restoring force balancing Coriolis, seeding a dt-independent growing
+    # mode that NaN'd ~3 h regardless of dt or dissipation.
+    #
+    # Vector-invariant form: du = -dt·∂Φ/∂x with the geopotential Φ = g·(h+h_s)
+    # at the B-grid CORNERS (a2b_ord4, FV3's a2b(gz)), BACKWARD-centred on the
+    # post-mass-update height h_new.  Same corner-difference staggering + dt-LINEAR
+    # scaling as the d_sw KE gradient (ke_corner ∝ dt, verified), and the same
+    # sign convention (Φ[i]-Φ[i+1] mirrors ke_corner[i]-ke_corner[i+1]).
+    gz_b = _interp_center_to_corner_a2b_ord4(
+        g * (h_new + h_s), cdgrid)  # (6, n+1, n+1) geopotential at corners
+    rdx_u = 1.0 / jnp.maximum(cdgrid.dx_edge_y, _EPS)  # (6, n, n+1) — u_d edge
+    rdy_v = 1.0 / jnp.maximum(cdgrid.dy_edge_x, _EPS)  # (6, n+1, n) — v_d edge
+    u_d_new = u_d_new + dt * rdx_u * (gz_b[:, :-1, :] - gz_b[:, 1:, :])
+    v_d_new = v_d_new + dt * rdy_v * (gz_b[:, :, :-1] - gz_b[:, :, 1:])
 
     return h_new, u_d_new, v_d_new

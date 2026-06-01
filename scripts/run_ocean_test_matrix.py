@@ -1081,6 +1081,23 @@ def _roll_lon_to_pm180(arr: np.ndarray, lon_deg: np.ndarray) -> np.ndarray:
     return arr
 
 
+def _assert_global_0_360_target(target_lon, n_lon: int, branch: str) -> None:
+    """Guard (codex iter141): the cube regrid branch only emits the global
+    [0,360] canvas (after the +n_lon//2 roll); it does NOT honor an arbitrary
+    target_lon.  Raise if a caller passes a target_lon that is not the supported
+    full-global [0,360] convention of the matching size, so a wrong-convention
+    request fails loud instead of silently re-introducing the 180deg offset."""
+    if target_lon is None:
+        return
+    tl = np.asarray(target_lon, dtype=np.float64).ravel()
+    if tl.size != n_lon or float(tl.min()) < -1e-6 or float(tl.max()) <= 180.0:
+        raise ValueError(
+            f"_regrid_{branch} produces a global [0,360] lon of size {n_lon}; "
+            f"target_lon (size {tl.size}, range [{tl.min():.1f},{tl.max():.1f}]) is "
+            f"not the supported [0,360] full-canvas convention -- this branch does "
+            f"not honor an arbitrary target_lon.")
+
+
 def _regrid_2d(field_arr: np.ndarray, lon_deg: np.ndarray,
                lat_deg: np.ndarray, coord_kind: str,
                target_lat: np.ndarray | None = None,
@@ -1095,8 +1112,19 @@ def _regrid_2d(field_arr: np.ndarray, lon_deg: np.ndarray,
         cells are excluded from the interpolation KDTree.
     """
     if coord_kind in ("latlon", "gaussian"):
-        return _roll_lon_to_pm180(
-            np.asarray(field_arr, dtype=np.float64), lon_deg)
+        # 180deg-fix: native lat-lon grids are already physical [0, 360).
+        # The snapshot lon axis is labelled with these same native
+        # coordinates (see save loop: latlon_arrays["lon"] = src_lon), so
+        # the data must stay in native [0, 360) order to match the label
+        # (and the now-physical cube/mpas convention).  Do NOT roll to
+        # [-180, 180) here -- that was the source of the 180deg offset
+        # between the latlon snapshot data and its own lon axis.
+        # NOTE (codex iter141): this branch is SELF-CONSISTENT (returns native
+        # data; the saved lon axis is that same native src_lon), so there is no
+        # silent-mislabel risk -- and NO size guard vs target_lon, because
+        # staggered native fields legitimately have lon size n_lon+1 (C-grid
+        # edges) which differs from the cell-centre target_lon.
+        return np.asarray(field_arr, dtype=np.float64)
     # Cubed-sphere: use face-aware bilinear interpolation (no edge artifacts).
     if coord_kind == "cube":
         from legoesm.grids.regridding import (
@@ -1108,7 +1136,23 @@ def _regrid_2d(field_arr: np.ndarray, lon_deg: np.ndarray,
             n = int(round(np.sqrt(arr.size / 6)))
             arr = arr.reshape(6, n, n)
         w = get_cubedsphere_to_latlon_weights(n)
-        return apply_cubedsphere_to_latlon(arr, w)
+        out = apply_cubedsphere_to_latlon(arr, w)
+        # 180deg-fix: apply_cubedsphere_to_latlon emits lon on
+        # [-180, 180) (lon_cent = linspace(-180,180,n_lon,endpoint=False)
+        # + 180/n_lon), so its column 0 is ~+180degE physical.  The
+        # snapshot lon axis is labelled [0, 360] (np.linspace(0,360,n_lon)).
+        # Roll by +n_lon//2 to convert the regridder output to [0, 360]
+        # ordering: physical 0degE moves to column 0 and a feature at
+        # physical 180degE lands at column n_lon//2 (lon=180 label),
+        # matching the physical mpas convention.
+        n_lon = out.shape[-1]
+        out = np.roll(out, n_lon // 2, axis=-1)
+        # Robustness guard (codex iter141): this branch ONLY produces the
+        # global [0,360] canvas; it does NOT honor an arbitrary target_lon
+        # ordering.  Fail LOUD (not silent) if a caller requests a different
+        # convention/size, so the 180deg offset cannot silently re-appear.
+        _assert_global_0_360_target(target_lon, n_lon, "cube")
+        return out
     return _bin_to_latlon(field_arr.ravel(), lon_deg.ravel(), lat_deg.ravel(),
                           target_lat=target_lat, target_lon=target_lon,
                           ocean_mask=ocean_mask)
@@ -1124,7 +1168,10 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
     if coord_kind in ("latlon", "gaussian"):
         if arr.ndim == 2:
             arr = arr[..., None]
-        return _roll_lon_to_pm180(arr, lon_deg)
+        # 180deg-fix: keep native [0, 360) ordering (see _regrid_2d).
+        # Self-consistent (native data + native label); no target_lon size
+        # guard (staggered native fields legitimately differ in lon size).
+        return arr
     # Cubed-sphere: use face-aware bilinear interpolation.
     if coord_kind == "cube":
         from legoesm.grids.regridding import (
@@ -1136,7 +1183,20 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
             n = int(round(np.sqrt(arr.size / (6 * nlev))))
             arr = arr.reshape(6, n, n, nlev)
         w = get_cubedsphere_to_latlon_weights(n)
-        return apply_cubedsphere_to_latlon_3d(arr, w)
+        out = apply_cubedsphere_to_latlon_3d(arr, w)
+        # 180deg-fix: regridder emits lon on [-180, 180); the snapshot lon
+        # axis is labelled [0, 360].  Roll +n_lon//2 along the lon axis to
+        # convert to [0, 360] ordering (see _regrid_2d for full rationale).
+        # For 3-D output (n_lat, n_lon, nlev) the lon axis is axis=1.
+        if out.ndim >= 3:
+            n_lon = out.shape[1]
+            out = np.roll(out, n_lon // 2, axis=1)
+        else:
+            n_lon = out.shape[-1]
+            out = np.roll(out, n_lon // 2, axis=-1)
+        # Robustness guard (codex iter141): global [0,360] only, see _regrid_2d.
+        _assert_global_0_360_target(target_lon, n_lon, "3d_level cube")
+        return out
     if arr.ndim == 1:
         arr = arr[:, None]
     nlev = arr.shape[-1]
@@ -2202,7 +2262,8 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
                         A_h: float | None = None,
                         A_v: float | None = None,
                         bottom_drag_r: float | None = None,
-                        cube_use_fc: bool = False):
+                        cube_use_fc: bool | None = None,
+                        cube_fc_light_diffusion: bool = False):
     """Create grid, z_coord, and rest-state for any grid type.
 
     Parameters
@@ -2229,6 +2290,16 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
         nlev = DEFAULT_NLEV
     if H_max is None:
         H_max = DEFAULT_H_MAX
+    if cube_use_fc is None:
+        # Default the cubed-sphere ocean to the FC-Gram spectral
+        # baroclinic-tendency backend, which removes the face-edge PGF
+        # instability documented in
+        # docs/ocean_experiments/cubed_sphere_pgf_stability.md (RESOLVED
+        # 2026-05-20) and which scripts/run_omip.py already enables by
+        # default for cubed_sphere.  Without it the rest_state +
+        # barotropic_wave cube cases NaN around physical day 1-2 while
+        # latlon/MPAS stay stable.  Non-cube grids are unaffected.
+        cube_use_fc = (tc.grid_type == "cubed_sphere")
     from legoesm.ocean.vertical import create_ocean_z_star
 
     z_coord = create_ocean_z_star(n_levels=nlev, H_max=H_max)
@@ -2262,12 +2333,36 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
                 barotropic_diffusion_alpha=0.3,
                 use_conservation_fixer=True,
                 physics=physics,
+                # FV3-faithful barotropic: route the free-surface mode through
+                # the validated cube SW core (vector-invariant absolute-vorticity
+                # flux + RK3 + div-damp/hyperdiff).  Replaces the A-grid solver,
+                # whose computational pressure mode grew a 40% non-zonal
+                # geostrophic_adjustment eta artifact (a_grid forbidden by the
+                # never-A-grid / FV3-faithfulness directive).  Ocean-tuned SW
+                # barotropic damping (OceanConfig default div_damp_factor=120)
+                # so phillips_two_layer matches latlon/mpas without over-damping
+                # barotropic_wave / geostrophic_adjustment.
+                barotropic_staggering="fv3sw",
             )
-            if A_h is None:
+            if cube_fc_light_diffusion:
+                # Wave tests (barotropic_wave, inertia_gravity_wave) carry
+                # NO horizontal density gradient, so they do not excite the
+                # face-edge baroclinic-PGF instability that the raised
+                # A_h=5e5 / K_h=5e6 exists to suppress.  The FC-Gram
+                # spectral gradient alone removes the eta-gradient face
+                # artifact that NaN'd the legacy A-L path.  Keep light
+                # lateral diffusion so the small-amplitude wave is not
+                # over-damped (raised K_h decays barotropic_wave 0.1 m ->
+                # 0.04 m; codex iter-8 flagged the coupling).  A_h/K_h fall
+                # back to the caller value / OceanConfig default.
+                if A_h is not None:
+                    kw["A_h"] = A_h
+            elif A_h is None:
                 kw["A_h"] = 5.0e5
+                kw["K_h"] = 5.0e6
             else:
                 kw["A_h"] = max(A_h, 5.0e5)
-            kw["K_h"] = 5.0e6
+                kw["K_h"] = 5.0e6
         else:
             kw = dict(n_barotropic_substeps=30, physics=physics)
             if A_h is not None:
@@ -3445,8 +3540,11 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
     if tc.grid_type == "spectral":
         raise NotImplementedError(
             "Barotropic wave skipped for spectral grid (land masking issues)")
+    # Cube: use the FC-Gram backend for face-edge stability but WITHOUT the
+    # raised A_h/K_h (no density gradient here, so the heavy diffusion only
+    # over-damps the small-amplitude wave — codex iter-8).
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc))
+        _create_ocean_setup(tc, cube_fc_light_diffusion=True))
     state = _create_rest_state(tc, grid, z_coord)
     state = _add_barotropic_wave_perturbation(
         state, tc.grid_type, grid, z_coord)
@@ -4844,8 +4942,15 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
     dispersion properties.
     """
     H_max = 1000.0  # equivalent depth (m)
+    # Cube: keep the legacy (non-FC) path.  The IGW is a single-level
+    # barotropic wave with NO horizontal density gradient, so it does NOT
+    # excite the face-edge baroclinic-PGF instability the FC-Gram backend
+    # exists to cure — it is already finite/stable on the A-L path
+    # (amp_ratio 0.068).  FC's Fourier-continuation smoothing only adds
+    # dissipation (amp_ratio 0.008), so routing IGW through the new
+    # cube-default FC backend would strictly worsen it.  Opt out.
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, nlev=2, H_max=H_max))
+        _create_ocean_setup(tc, nlev=2, H_max=H_max, cube_use_fc=False))
     state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
     state = _init_inertia_gravity_wave(state, tc.grid_type, grid, z_coord)
 

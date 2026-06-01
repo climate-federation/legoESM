@@ -653,7 +653,7 @@ def _build_segment_benchmark(
     # the segment-level mass fixer has a non-zero anchor.  We compute
     # the global mass via the existing budget-aware
     # ``_global_area_sum`` helper (fp64 accumulator when JAX has x64
-    # enabled — see iter 1 ``_conservation_accumulator``).
+    # enabled — see ``conservation_accumulator``).
     shape_2d = ctx["shape_2d"]
     shape_3d = ctx["shape_3d"]
     _sd = ctx["_sd"]

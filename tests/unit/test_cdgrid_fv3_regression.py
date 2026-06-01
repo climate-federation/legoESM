@@ -8090,9 +8090,18 @@ class TestCornerVorticityFortranFormula(unittest.TestCase):
             jnp.asarray(uc), jnp.asarray(vc), cdgrid, use_duogrid=True))
 
         # Iter-916b gold fingerprints (post-iter-836 production).
+        # Re-pinned iter89/iter90 for the FV3-faithful (#faces)-junction SCALING
+        # (edges ×2, vertices ×3; absolute area still legoESM's chord approx, not
+        # spherical get_area): `_corner_vorticity` is `f_corner + rarea_c*vort`,
+        # so ONLY the cube boundary/vertex corners (whose area changed) shift.
+        # The interior
+        # ([3,4,4]) and the extrema (min/max, at interior corners) are BYTE-
+        # IDENTICAL — confirming the area fix is a purely boundary-local change
+        # here (no spurious interior effect).  The sum and the two vertex samples
+        # [0,0,0] (SW) / [5,8,8] (NE) move by the boundary rarea_c change.
         self.assertEqual(vort_abs.shape, (6, 9, 9))
         self.assertAlmostEqual(float(vort_abs.sum()),
-            -2.785074425912422e-06, places=14,
+            -4.1217444318470005e-06, places=14,
             msg=f"duogrid vort_abs.sum() drifted: {float(vort_abs.sum()):.6e}")
         self.assertAlmostEqual(float(vort_abs.min()),
             -0.00014810834183147395, places=12,
@@ -8101,13 +8110,13 @@ class TestCornerVorticityFortranFormula(unittest.TestCase):
             0.00014395187913355967, places=12,
             msg=f"duogrid vort_abs.max() drifted: {float(vort_abs.max()):.6e}")
         self.assertAlmostEqual(float(vort_abs[0, 0, 0]),
-            -8.479464389985785e-05, places=12,
+            -8.50231298536604e-05, places=12,
             msg=f"duogrid vort_abs[0,0,0] drifted: {float(vort_abs[0,0,0]):.6e}")
         self.assertAlmostEqual(float(vort_abs[3, 4, 4]),
             -2.2152548776918704e-06, places=14,
             msg=f"duogrid vort_abs[3,4,4] drifted: {float(vort_abs[3,4,4]):.6e}")
         self.assertAlmostEqual(float(vort_abs[5, 8, 8]),
-            -8.417284419787868e-05, places=12,
+            -8.41621021580045e-05, places=12,
             msg=f"duogrid vort_abs[5,8,8] drifted: {float(vort_abs[5,8,8]):.6e}")
 
     def test_corner_vorticity_duogrid_skips_corner_additions_iter638(self):
@@ -9540,53 +9549,105 @@ class TestCdgridDxcDycBoundaryIter666(unittest.TestCase):
                  f"match analytic balanced {pgf_analytic:.3e} (±5%)."))
 
     def test_iter670_area_corner_boundary_matches_interior(self):
-        """Iter-670 regression lock: area_corner at cube
-        vertices/edges should NOT be underestimated from partial
-        supergrid summing.
+        """area_corner cube edge/vertex: FV3-style (#faces) SCALING of legoESM's
+        chord on-face sub-cell area (NOT the spherical-FV3 absolute area).
 
-        Pre-iter-670: corner i=0, j=0 had only 1/4 of the 4 surrounding
-        supergrid cells on-face (the other 3 are on neighbouring
-        faces), giving area_corner ≈ 0.22× interior.  This made
-        rarea_c ≈ 4× interior at cube vertices.
+        FV3 `tools/fv_grid_tools.F90:975-1067` builds the C-grid corner
+        control-volume area as (number of faces meeting at the node) × (the
+        ON-FACE sub-cell area), NOT an inward interior copy:
+          * interior corner: full 4-quadrant dual cell;
+          * cube EDGE node (2 faces): FV3 `2*get_area(edge-mid, edge-mid,
+            cell-ctr, cell-ctr)` (lines 976-1033) = 2× the on-face HALF dual cell;
+          * cube VERTEX (3-face junction): FV3 `3*get_area(vertex, mid_j, mid_i,
+            cell_ctr)` (lines 1036-1067) = 3× the on-face corner sub-quadrant.
+        legoESM applies that SAME (#faces) scaling (edges ×2, vertices ×3) but to
+        its CHORD on-face sub-cell area (planar cross-product), NOT FV3's
+        spherical-excess get_area (see cubed_sphere_cdgrid.py).  This test locks
+        the SCALING — the FV3-faithful part — independent of the absolute-area
+        convention; the `get_area` citations above are FV3's spherical oracle for
+        the scaling STRUCTURE, not legoESM's current absolute-area implementation.
 
-        Fortran oracle at `tools/fv_grid_tools.F90:1084-1087, 1561-
-        1564` extrapolates:
-            area_c(isd, j)       = area_c(isd+1, j)
-            area_c(isd, jsd)     = area_c(isd+1, jsd+1)
-
-        The iter-670 Python fix mirrors this.
+        Pre-iter-670 the vertices summed only the 1 on-face quadrant (no ×3) →
+        ≈0.22× interior → rarea_c ≈ 4× too large.  Iter-670 over-corrected by
+        copying the interior inward (edge==vertex==interior, ≈1.0×) — that
+        mirrors FV3's HALO-ghost extrapolation (1084-1087), not the in-domain
+        grid_area formula.  iter84/iter89 restore the (#faces) scaling: with the
+        on-face sub-cells shrinking toward the boundary this gives edge/interior
+        ≈ 0.865 and vertex/interior ≈ 0.67, resolution-stable.  These C12/C36
+        RATIO bands are ROBUST to chord-vs-spherical (spherical get_area gives
+        ≈0.865/0.675 too — only the degenerate C1 absolute differs, 0.659 chord
+        vs 0.75 spherical, see the C1 block), so a future chord→spherical area
+        upgrade does NOT trip them.  These guard against BOTH the under-count
+        (vertex ≈0.22) and the iter-670 over-copy (edge==vertex==1.0).
         """
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import (
             create_cubed_sphere_cdgrid)
 
-        n = 12
-        cdgrid = create_cubed_sphere_cdgrid(create_cubed_sphere(n=n))
-        ac = np.asarray(cdgrid.area_corner)   # (6, n+1, n+1)
+        for n in (12, 36):
+            cdgrid = create_cubed_sphere_cdgrid(create_cubed_sphere(n=n))
+            ac = np.asarray(cdgrid.area_corner)   # (6, n+1, n+1)
+            self.assertTrue(bool(np.all(ac > 0.0)),
+                            msg=f"C{n}: non-positive area_corner present.")
+            interior = float(ac[:, 1:n, 1:n].mean())
 
-        # West edge (i=0) should equal i=1 for j in [1, n-1].
-        np.testing.assert_allclose(
-            ac[:, 0, 1:n], ac[:, 1, 1:n], rtol=0.0, atol=1e-10,
-            err_msg=("area_corner[i=0, 1<=j<n] != area_corner[i=1, "
-                     "1<=j<n] — iter-670 west-edge extrapolation lost."))
-        # SW cube vertex (i=0, j=0) should equal interior diagonal (1, 1).
-        np.testing.assert_allclose(
-            ac[:, 0, 0], ac[:, 1, 1], rtol=0.0, atol=1e-10,
-            err_msg=("area_corner[i=0, j=0] != area_corner[i=1, j=1] "
-                     "— iter-670 SW cube-vertex extrapolation lost."))
-        # NE cube vertex similarly.
-        np.testing.assert_allclose(
-            ac[:, n, n], ac[:, n - 1, n - 1], rtol=0.0, atol=1e-10,
-            err_msg=("area_corner[i=n, j=n] != area_corner[i=n-1, j=n-1]."))
-        # Corner/interior ratio should now be ~1, not ~0.22.
-        interior_mean = ac[:, 1:n, 1:n].mean()
-        corner_mean = ac[:, 0, 0].mean()
-        self.assertGreater(
-            corner_mean / interior_mean, 0.5,
-            msg=(f"area_corner ratio corner/interior = "
-                 f"{corner_mean/interior_mean:.3f} is still below 0.5 "
-                 f"— pre-iter-670 partial-quadrant bug has returned."))
+            # All four cube EDGES (2-face nodes): ×2 junction scaling of the
+            # on-face half dual cell ≈ 0.865× interior (NOT the iter-670
+            # interior-copy ≈1.0).  Band is chord/spherical-robust (~0.865 either).
+            for edge, name in ((ac[:, 0, 1:n], "west"), (ac[:, n, 1:n], "east"),
+                               (ac[:, 1:n, 0], "south"), (ac[:, 1:n, n], "north")):
+                r = float(edge.mean()) / interior
+                self.assertTrue(
+                    0.82 < r < 0.91,
+                    msg=(f"C{n} {name}-edge area/interior = {r:.3f} not in the "
+                         f"FV3-style 2-face junction-scaling band (0.82,0.91); "
+                         f"regression in the ×2 on-face edge scaling."))
+
+            # All four cube VERTICES (3-face junctions): ×3 junction scaling of
+            # the on-face corner quadrant ≈ 0.67× interior (NOT ≈0.22 under-count,
+            # NOT ≈1.0 copy).  Band is chord/spherical-robust (~0.675 either).
+            for (vi, vj), name in (((0, 0), "SW"), ((0, n), "NW"),
+                                   ((n, 0), "SE"), ((n, n), "NE")):
+                r = float(ac[:, vi, vj].mean()) / interior
+                self.assertTrue(
+                    0.60 < r < 0.74,
+                    msg=(f"C{n} {name}-vertex area/interior = {r:.3f} not in the "
+                         f"FV3-style 3-face junction-scaling band (0.60,0.74); "
+                         f"either the under-count (~0.22) or the iter-670 "
+                         f"over-copy (~1.0) has returned."))
+
+        # ---- C1 corner case (iter90 codex review of d7108d48) -------------
+        # At n=1 every corner is a 3-face junction (no interior, no edge nodes),
+        # so the FV3 ×3 vertex SCALING must still apply even though the boundary
+        # block's edge slices are empty no-ops there.  legoESM uses the PLANAR
+        # chord-cross-product supergrid sub-cell area (a deliberate O(dx²)
+        # approximation to FV3's spherical-excess get_area; the whole SW-core
+        # gold-file surface is pinned to it — see cubed_sphere_cdgrid.py).  Under
+        # that chord area the on-face corner quadrant is ≈0.2195*cell (vs the
+        # spherical 0.25*cell), so each cube vertex = 3*quadrant ⇒
+        # corner/area ≈ 0.659 against the (spherical) A-grid `area`.  The point of
+        # this lock is the ×3 SCALING, which is FV3-faithful regardless of the
+        # absolute area convention: without it (the pre-iter90 `n>=2` guard) the
+        # corner collapses to ≈0.220, and a mistaken ×2 edge-scaling gives ≈0.439
+        # — both excluded.  (If the absolute area is ever upgraded chord→spherical
+        # this band moves to ≈0.75; that is a tracked follow-up requiring gold-
+        # file regeneration, see fv3_faithful.md.)
+        g1 = create_cubed_sphere(n=1)
+        ac1 = np.asarray(create_cubed_sphere_cdgrid(g1).area_corner)
+        self.assertTrue(bool(np.all(ac1 > 0.0)),
+                        msg="C1: non-positive area_corner present.")
+        self.assertLess(float(ac1.max() - ac1.min()) / float(ac1.mean()), 1e-10,
+                        msg="C1: the 24 cube-vertex corners are not all equal "
+                            "(3-face-junction symmetry broken).")
+        cell_area = float(np.asarray(g1.area).mean())
+        r1 = float(ac1.mean()) / cell_area
+        self.assertTrue(
+            0.62 < r1 < 0.70,
+            msg=(f"C1 corner area/cell = {r1:.4f} not ≈0.659 (FV3 ×3 vertex "
+                 f"scaling with legoESM's chord supergrid area); ≈0.220 ⇒ the ×3 "
+                 f"vertex scaling was dropped (n>=2 guard), ≈0.439 ⇒ mis-applied "
+                 f"as a ×2 edge."))
 
     def test_iter667_n1_metrics_nonzero(self):
         """iter-667 regression lock: n=1 fallback gives non-zero
@@ -11410,16 +11471,40 @@ class TestInterpCenterToCornerOrderIter707(unittest.TestCase):
             d2_bg=0.0, dddmp=0.2, d4_bg=0.16, nord=1))
         self.assertEqual(ke.shape, (6, 9, 9))
         # Pinned fingerprints — will shift if _interp_center_to_corner
-        # is swapped or wk formula changes.
-        self.assertAlmostEqual(float(ke[0, 4, 4]), 93983.00383117038,
-            places=4, msg="adaptive Smag ke[0,4,4] fingerprint changed.")
-        self.assertAlmostEqual(float(ke[3, 2, 6]), 137334.72628142763,
-            places=4, msg="adaptive Smag ke[3,2,6] fingerprint changed.")
-        self.assertAlmostEqual(float(ke.sum()), -15962.03511603897,
-            places=3, msg="adaptive Smag ke.sum() fingerprint changed.")
-        self.assertAlmostEqual(float((ke ** 2).sum()),
-            11366256403441.21, places=-4,
-            msg="adaptive Smag ke L2² fingerprint changed.")
+        # is swapped or the wk formula changes.  Tolerance is RELATIVE
+        # (rtol=1e-6): a real scheme change (e.g. 2nd→4th-order corner
+        # interp) shifts these O(dx²)≈% — orders of magnitude above
+        # rtol — while harmless float-reassociation drift across XLA
+        # versions / hardware (observed ~6e-9 relative on ke[0,4,4]) does
+        # not.  The previous `places=4`/`places=3` ABSOLUTE checks
+        # demanded ~5e-10 relative on 1e5-magnitude values, which is
+        # below float64 cross-platform reproducibility and produced a
+        # spurious failure (iter ~57).
+        def _rel(actual, expected, name, scale=None):
+            # delta scaled to the field's natural magnitude (`scale`,
+            # default |expected|).  For the heavily-cancelling ke.sum()
+            # (elements ~1e5, sum ~1e4 ⇒ ~200× cancellation), use the L2
+            # magnitude so element-level float drift isn't amplified into
+            # a spurious failure.
+            ref = abs(expected) if scale is None else abs(scale)
+            self.assertAlmostEqual(
+                float(actual), expected, delta=ref * 1e-6,
+                msg=f"adaptive Smag {name} fingerprint changed "
+                    f"beyond rtol=1e-6 of its scale (real scheme change?).")
+        # Re-pinned iter89/iter90 for the FV3-faithful (#faces)-junction SCALING:
+        # the ×3-scaled (now smallest) cube-vertex corners lower the global
+        # da_min_c that scales BOTH the del-2 (dddmp) and del-4 (d4_bg) damping,
+        # so these adaptive-Smag fingerprints shift (ke[0,4,4] 93983.0 → 49013.5).
+        # See the nord=0 del-2 gold-file docstring for the da_min_c mechanism.
+        # The pinned values are legoESM CHORD-area numbers (the absolute
+        # per-quadrant area is a chord approximation, not FV3 spherical get_area;
+        # only the ×2/×3 junction scaling is FV3-faithful) → re-pin on a future
+        # chord→spherical upgrade.
+        l2 = float((ke ** 2).sum()) ** 0.5
+        _rel(ke[0, 4, 4], 49013.538501232724, "ke[0,4,4]")
+        _rel(ke[3, 2, 6], 71622.11135411877, "ke[3,2,6]")
+        _rel(ke.sum(), -3858.56053366139, "ke.sum()", scale=l2)
+        _rel((ke ** 2).sum(), 3092196932490.258, "ke L2²")
 
     def test_interp_center_to_corner_is_4point_average(self):
         """Verify Python's _interp_center_to_corner returns the
@@ -11800,7 +11885,23 @@ class TestDSw5CornerDivergenceGoldFileIter702(unittest.TestCase):
         return cdgrid, u_d, v_d, ua, va
 
     def test_nord0_del2_damping_gold_file(self):
-        """nord=0 (del-2 damping): fingerprints recorded on CPU x64."""
+        """nord=0 (del-2 damping): fingerprints recorded on CPU x64.
+
+        Re-pinned iter89/iter90 for the FV3-faithful edge/vertex (#faces)-junction
+        SCALING of area_corner (edges ×2, vertices ×3): the divergence damping
+        coefficient is `damp = da_min_c * max(d2_bg, ...)` and
+        `da_min_c = min(1/rarea_c)` is the GLOBAL minimum corner area.  Once the
+        cube vertices get the ×3 junction scaling (loop value ×3) instead of the
+        iter-670 interior-copy, the vertices become the smallest corners and
+        da_min_c drops to the vertex area, so the global damp weakens and the
+        whole ke field shifts — e.g. ke[0,4,4] -5634.7 → -4069.2.  This mirrors
+        the STRUCTURE of FV3's da_min_c = global_mx_c(area_c)
+        (fv_grid_utils.F90:743), where the 3-face vertices set the minimum.
+        NOTE: the pinned numbers are legoESM CHORD-area values — the absolute
+        per-quadrant area is a chord approximation, NOT FV3 spherical get_area —
+        so a future chord→spherical area upgrade WILL re-pin them (a known oracle
+        change, not a regression).
+        """
         import numpy as np
         from legoesm.core.fv3_sw_core import _d_sw5_corner_divergence
 
@@ -11809,13 +11910,13 @@ class TestDSw5CornerDivergenceGoldFileIter702(unittest.TestCase):
             u_d, v_d, ua, va, cdgrid, dt=0.1,
             d2_bg=0.01, dddmp=0.2, d4_bg=0.0, nord=0))
         self.assertEqual(ke.shape, (6, 9, 9))
-        self.assertAlmostEqual(float(ke[0, 4, 4]), -5634.741066188088,
+        self.assertAlmostEqual(float(ke[0, 4, 4]), -4069.1838407732866,
             places=6, msg="nord=0 ke[0,4,4] fingerprint changed.")
-        self.assertAlmostEqual(float(ke[3, 2, 6]), 11590.35168441207,
+        self.assertAlmostEqual(float(ke[3, 2, 6]), 8370.086793534787,
             places=6, msg="nord=0 ke[3,2,6] fingerprint changed.")
-        self.assertAlmostEqual(float(ke.sum()), -52259.08051452633,
+        self.assertAlmostEqual(float(ke.sum()), -34165.92577958369,
             places=4, msg="nord=0 ke.sum() fingerprint changed.")
-        self.assertAlmostEqual(float((ke ** 2).sum()), 183580121358.84125,
+        self.assertAlmostEqual(float((ke ** 2).sum()), 100798232467.36038,
             places=-2, msg="nord=0 ke L2² fingerprint changed.")
 
     def test_nord1_del4_damping_gold_file(self):
@@ -11825,6 +11926,14 @@ class TestDSw5CornerDivergenceGoldFileIter702(unittest.TestCase):
         (sw_core.F90:1725-1821) including `_divergence_corner_duo`
         (iter-655 pad_halo wiring) + metric-weighted composite damping.
         A regression in ANY of these stages shifts the fingerprints.
+
+        Re-pinned iter89/iter90 for the FV3-faithful (#faces)-junction SCALING:
+        del-4 damping scales as `(da_min_c*d4_bg)**(nord+1)` (sw_core.F90:1811),
+        so the ×3-scaled (now smallest) vertex corners lower the global da_min_c
+        and weaken the del-4 damping — ke[0,4,4] -73741.2 → -38457.1.  As in the
+        nord=0 test, the pinned values are legoESM CHORD-area numbers (the ×3
+        SCALING is FV3-faithful; the absolute area is a chord approximation, not
+        spherical get_area) and will re-pin on a future spherical upgrade.
         """
         import numpy as np
         from legoesm.core.fv3_sw_core import _d_sw5_corner_divergence
@@ -11834,13 +11943,13 @@ class TestDSw5CornerDivergenceGoldFileIter702(unittest.TestCase):
             u_d, v_d, ua, va, cdgrid, dt=0.1,
             d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1))
         self.assertEqual(ke.shape, (6, 9, 9))
-        self.assertAlmostEqual(float(ke[0, 4, 4]), -73741.18999227723,
+        self.assertAlmostEqual(float(ke[0, 4, 4]), -38457.129727216074,
             places=6, msg="nord=1 ke[0,4,4] fingerprint changed.")
-        self.assertAlmostEqual(float(ke[3, 2, 6]), 136135.2527804066,
+        self.assertAlmostEqual(float(ke[3, 2, 6]), 70996.56348333597,
             places=6, msg="nord=1 ke[3,2,6] fingerprint changed.")
-        self.assertAlmostEqual(float(ke.sum()), 18038.82445212739,
+        self.assertAlmostEqual(float(ke.sum()), 5592.254861923979,
             places=4, msg="nord=1 ke.sum() fingerprint changed.")
-        self.assertAlmostEqual(float((ke ** 2).sum()), 7855642704496.756,
+        self.assertAlmostEqual(float((ke ** 2).sum()), 2137431580001.7354,
             places=-4, msg="nord=1 ke L2² fingerprint changed.")
 
     def test_reacts_to_input_changes(self):

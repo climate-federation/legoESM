@@ -487,9 +487,14 @@ def test_sw_cube_propagating_tests_have_hyperdiff_override():
     returns).
     """
     src = _runner_source()
+    # fv3_faithful iter-2: the literal ``2.0`` became an env-overridable
+    # factor ``LEGOESM_SW_HYPERDIFF_FACTOR`` that DEFAULTS to 2.0, so the
+    # override is preserved.  Accept either the original literal or the
+    # factor form; if the factor form is used, the default must stay 2.0.
     pat = re.search(
         r"if\s+test_num\s+in\s*\(\s*2\s*,\s*5\s*,\s*6\s*\)\s*:[^}]*?"
-        r"hyperdiff_coeff\s*=\s*2\.0\s*\*\s*_hyperdiff_cube\(\s*n\s*\)",
+        r"hyperdiff_coeff\s*=\s*(?:2\.0|_sw_hd_fac)\s*\*\s*"
+        r"_hyperdiff_cube\(\s*n\s*\)",
         src,
         re.DOTALL,
     )
@@ -500,6 +505,13 @@ def test_sw_cube_propagating_tests_have_hyperdiff_override():
         "full-duration will re-BLOWUP and cube W2 5-day v_ll_Linf "
         "will regress (latlon stable; cube parity gap reopens)."
     )
+    if "_sw_hd_fac" in pat.group(0):
+        assert re.search(
+            r'LEGOESM_SW_HYPERDIFF_FACTOR"\s*,\s*"2\.0"', src), (
+            "LEGOESM_SW_HYPERDIFF_FACTOR default must remain \"2.0\" so "
+            "the cube SW propagating-test hyperdiff override is preserved "
+            "when the env knob is unset."
+        )
 
 
 def test_sw_cube_hyperdiff_gate_matches_propagating_tests():

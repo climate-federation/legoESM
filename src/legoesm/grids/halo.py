@@ -220,6 +220,97 @@ def compute_halo_interp_offsets(n: int) -> jnp.ndarray:
     return jnp.array(offsets, dtype=jnp.float64)
 
 
+def _ed_indomain_boundary_strip(arr, edge, n, ext):
+    """In-domain boundary strip (length n, ascending array order) of an
+    ``(M, M)`` padded gnomonic_ed face, in-domain block ``[ext:ext+n]``."""
+    if edge == WEST:
+        return arr[ext, ext:ext + n]
+    elif edge == EAST:
+        return arr[ext + n - 1, ext:ext + n]
+    elif edge == SOUTH:
+        return arr[ext:ext + n, ext]
+    else:  # NORTH
+        return arr[ext:ext + n, ext + n - 1]
+
+
+def _ed_halo_strip(arr, edge, n, ext, depth):
+    """Halo strip at ``depth`` cells beyond ``edge`` (depth 0 = adjacent to the
+    in-domain boundary), length n, ascending array order."""
+    if edge == WEST:
+        return arr[ext - 1 - depth, ext:ext + n]
+    elif edge == EAST:
+        return arr[ext + n + depth, ext:ext + n]
+    elif edge == SOUTH:
+        return arr[ext:ext + n, ext - 1 - depth]
+    else:  # NORTH
+        return arr[ext:ext + n, ext + n + depth]
+
+
+def _compute_halo_interp_offsets_ed_hN(n: int, halo: int) -> jnp.ndarray:
+    """gnomonic_ed cross-face halo interp offsets, ``(6, 4, halo, n)``.
+
+    Position-matching on the actual extended gnomonic_ed cell centres
+    (`_gnomonic_ed_padded_centers`, which extend cleanly into the halo): each
+    halo cell (depth 0..halo-1 beyond an edge) is matched to its neighbour's
+    in-domain edge strip via a parabola-vertex fit on great-circle distance,
+    giving the true fractional index; ``δ = frac − j``.  gnomonic_ed-specific
+    (the equiangular analytic offsets are the wrong geometry — codex gating
+    blocker).
+    """
+    from legoesm.grids.cubed_sphere import _gnomonic_ed_padded_centers
+
+    ext = halo + 1
+    lon, lat = _gnomonic_ed_padded_centers(n, halo)  # (6, M, M), M=n+2*halo+2
+    lon = np.asarray(lon)
+    lat = np.asarray(lat)
+    xyz = np.stack([
+        np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)
+    ], axis=-1)
+
+    edges = [WEST, EAST, SOUTH, NORTH]
+    offsets = np.zeros((6, 4, halo, n), dtype=np.float64)
+
+    for face in range(6):
+        for edge_idx, edge in enumerate(edges):
+            nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
+            nbr_strip = _ed_indomain_boundary_strip(xyz[nbr_face], nbr_edge, n, ext)
+            for depth in range(halo):
+                halo_strip = _ed_halo_strip(xyz[face], edge, n, ext, depth)
+                for j in range(n):
+                    d2 = np.sum((nbr_strip - halo_strip[j][None, :]) ** 2, axis=1)
+                    k = int(np.argmin(d2))
+                    if 0 < k < n - 1:
+                        dl, dc, dr = d2[k - 1], d2[k], d2[k + 1]
+                        denom = dl - 2.0 * dc + dr
+                        delta = (0.5 * (dl - dr) / denom
+                                 if abs(denom) > 1e-30 else 0.0)
+                        delta = float(np.clip(delta, -1.0, 1.0))
+                    else:
+                        delta = 0.0
+                    frac = k + delta
+                    if is_reversed:
+                        frac = (n - 1) - frac
+                    offsets[face, edge_idx, depth, j] = frac - j
+
+    return jnp.array(offsets, dtype=jnp.float64)
+
+
+def compute_halo_interp_offsets_ed(n: int) -> jnp.ndarray:
+    """gnomonic_ed counterpart of :func:`compute_halo_interp_offsets` —
+    ``(6, 4, n)`` (halo=1, squeezed).  See :func:`_compute_halo_interp_offsets_ed_hN`."""
+    return _compute_halo_interp_offsets_ed_hN(n, 1)[:, :, 0, :]
+
+
+def compute_halo_interp_offsets_ed_h2(n: int) -> jnp.ndarray:
+    """gnomonic_ed counterpart of :func:`compute_halo_interp_offsets_h2` — ``(6, 4, 2, n)``."""
+    return _compute_halo_interp_offsets_ed_hN(n, 2)
+
+
+def compute_halo_interp_offsets_ed_h3(n: int) -> jnp.ndarray:
+    """gnomonic_ed counterpart of :func:`compute_halo_interp_offsets_h3` — ``(6, 4, 3, n)``."""
+    return _compute_halo_interp_offsets_ed_hN(n, 3)
+
+
 def compute_halo_interp_offsets_h2(n: int) -> jnp.ndarray:
     """Precompute fractional-index offsets for halo=2 exchange.
 
@@ -3029,4 +3120,77 @@ def compute_edge_artifact_metric(field_data):
         "edge_std": e,
         "interior_std": i,
         "ratio": e / max(i, 1e-30),
+    }
+
+
+def compute_cross_face_continuity(field_data, interp_offsets=None):
+    """TRUE cross-face seam-continuity diagnostic (iter ~58).
+
+    The reliable edge-artifact metric: pads ``field_data`` with the
+    model's *real* inter-face halo (:func:`pad_halo_4d`) and, per face,
+    compares the cross-seam first difference (edge interior cell minus
+    its physical neighbor on the adjacent face) to the same-face interior
+    first difference (the field's natural gradient)::
+
+        ratio = RMS(cross-seam Δ) / RMS(same-face interior Δ)
+
+    Interpretation: ``ratio ≈ 1`` ⇒ the field is as smooth across the
+    panel seam as it is in the interior (CONTINUOUS).  A genuine seam
+    discontinuity registers 5–50×.
+
+    This SUPERSEDES :func:`compute_edge_artifact_metric` for edge-artifact
+    claims.  That helper is a *same-face* edge-vs-interior std ratio: it
+    amplifies high-frequency edge curvature and is unreliable in BOTH
+    directions (it both over- and under-states — verified iter ~57-58:
+    same-face 2nd-diff gave 5.95× on W5 v where the true cross-face
+    continuity is 1.30×).  Use this function, applied to a *geographic*
+    (seam-continuous) field component, for the real continuity check.
+
+    Parameters
+    ----------
+    field_data : array, shape ``(6, n, n)`` or ``(6, n, n, nlev)``
+        A scalar or geographic-component field on the cubed sphere.  For
+        a vector, pass each *geographic* component (north/east) — those
+        are continuous across seams; do NOT pass face-local components.
+    interp_offsets : array, optional
+        Halo interpolation offsets (``grid.halo_interp_offsets``) for the
+        corrected cross-face interpolation; ``None`` uses the plain halo.
+
+    Returns
+    -------
+    dict with keys ``per_face_ratio`` (list, len 6), ``max_ratio``,
+    ``mean_ratio``.
+    """
+    import numpy as np
+    arr = np.asarray(field_data)
+    if arr.ndim == 3:
+        arr = arr[..., None]
+    fp = np.asarray(
+        pad_halo_4d(jnp.asarray(arr), halo=1, interp_offsets=interp_offsets)
+    )
+    n_face = fp.shape[0]
+    per_face = []
+    for f in range(n_face):
+        a = fp[f]  # (n+2, n+2, nlev); interior = a[1:-1, 1:-1]
+        # Interior first differences — STRICTLY between interior cells, so the
+        # halo (cross-seam) rows/cols never enter the denominator.  (Codex
+        # iter61: a[2:,...]/a[...,2:] included the N/E halo row a[n+1]-a[n],
+        # i.e. a seam jump, self-normalizing the ratio and suppressing
+        # detection of N/E-edge artifacts.)
+        gx = (a[2:-1, 1:-1] - a[1:-2, 1:-1]).ravel()   # i-diff, interior only
+        gy = (a[1:-1, 2:-1] - a[1:-1, 1:-2]).ravel()   # j-diff, interior only
+        gi = float(np.sqrt(np.mean(np.concatenate([gx, gy]) ** 2)))
+        seam = np.concatenate([
+            (a[1, 1:-1] - a[0, 1:-1]).ravel(),
+            (a[-1, 1:-1] - a[-2, 1:-1]).ravel(),
+            (a[1:-1, 1] - a[1:-1, 0]).ravel(),
+            (a[1:-1, -1] - a[1:-1, -2]).ravel(),
+        ])
+        gs = float(np.sqrt(np.mean(seam ** 2)))
+        per_face.append(gs / max(gi, 1e-30))
+    per_face = np.asarray(per_face)
+    return {
+        "per_face_ratio": per_face.tolist(),
+        "max_ratio": float(per_face.max()),
+        "mean_ratio": float(per_face.mean()),
     }

@@ -142,7 +142,16 @@ class OceanConfig(NamedTuple):
     physics: object = None  # OceanPhysicsConfig or None (legacy mode)
     eos: str = "wright"    # "wright" or "linear"
     eos_linear: object = None  # LinearEOSConfig when eos="linear"
-    barotropic_staggering: str = "a_grid"  # "a_grid" or "c_grid" (#182)
+    barotropic_staggering: str = "a_grid"  # "a_grid", "c_grid" or "fv3sw"
+    # Damping for the "fv3sw" barotropic (the validated cube SW core).  The
+    # atmosphere-calibrated iter1009 preset (div_damp_factor=8) is too weak for
+    # the slower ocean barotropic, so phillips_two_layer over-grows (eta_growth
+    # 24 vs latlon/mpas ~4.5).  div_damp_factor=120 is ocean-tuned at C24 so
+    # phillips matches latlon/mpas (max_eta 0.44 vs latlon 0.41) WHILE keeping
+    # barotropic_wave (0.86 m) and geostrophic_adjustment (max_speed 0.014 ≈
+    # latlon) un-over-damped.  Only used when barotropic_staggering=="fv3sw".
+    barotropic_sw_div_damp_factor: float = 120.0
+    barotropic_sw_damp_v: float = 0.030
 
 
 # ==============================================================================

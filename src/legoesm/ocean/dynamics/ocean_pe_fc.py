@@ -301,33 +301,27 @@ def ocean_baroclinic_tendencies_fc(
     # two separate halo MPI exchanges per call.  Vertical diffusion stays
     # per-component (axis -1 = nlev hard-coded, no halo).
     if physics_fn is None:
-        n_face_v, n_i_v, n_j_v, nlev_v = u.shape
+        # Horizontal viscosity / hyperdiffusion of the VELOCITY.  Velocity is
+        # a VECTOR on the cube: its halo must ROTATE the face-local (u, v)
+        # components across panel seams.  The previous code stacked (u, v)
+        # into a passive ``nlev*2`` axis and halo-exchanged it with the
+        # SCALAR ``pad_halo_4d`` — blending the two components across seams
+        # WITHOUT rotation.  That injected a panel-edge momentum imprint into
+        # du/dt, dv/dt every step which broke zonal symmetry (the
+        # geostrophic_adjustment cube eta grew to ~40% non-zonal variance vs
+        # ~0 on latlon/MPAS for a zonally-symmetric thermal-wind IC).  Use the
+        # rotation-aware ``_fc_pad_halo_vector`` — the same vector halo the
+        # momentum tendency above already uses, and the direct analogue of the
+        # CD-grid atmosphere diffusion-halo fix.
         if config.A_h > 0 or config.hyperdiff_coeff > 0:
-            vel_masked_stack = jnp.stack(
-                [u * mask_3d, v * mask_3d], axis=-1,
-            )  # (6, n, n, nlev, 2)
-            vel_masked_flat = vel_masked_stack.reshape(
-                n_face_v, n_i_v, n_j_v, nlev_v * 2,
-            )
-            # Pre-pad ONCE so the explicit Laplacian and the inner
-            # Laplacian of the biharmonic hyperdiffusion share the halo
-            # on ``vel_masked_flat`` instead of issuing two independent
-            # ``pad_halo_4d`` collectives on the same input.  Same
-            # halo-sharing pattern as the CD-grid ocean (Loop 133).
-            vel_masked_pad = pad_halo_4d(
-                vel_masked_flat, halo=1,
-                interp_offsets=grid.halo_interp_offsets,
-            )
+            u_visc = u * mask_3d
+            v_visc = v * mask_3d
+            u_pad_vec, v_pad_vec = _fc_pad_halo_vector(u_visc, v_visc, grid)
         if config.A_h > 0:
-            vel_lap_flat = (
-                fc_laplacian_3d(
-                    vel_masked_flat, grid, fc_config,
-                    padded=vel_masked_pad,
-                ) * config.A_h
-            )
-            vel_lap = vel_lap_flat.reshape(n_face_v, n_i_v, n_j_v, nlev_v, 2)
-            du_dt = du_dt + vel_lap[..., 0]
-            dv_dt = dv_dt + vel_lap[..., 1]
+            du_dt = du_dt + fc_laplacian_3d(
+                u_visc, grid, fc_config, padded=u_pad_vec) * config.A_h
+            dv_dt = dv_dt + fc_laplacian_3d(
+                v_visc, grid, fc_config, padded=v_pad_vec) * config.A_h
         if config.A_v > 0:
             def _vdiff_uv(q):
                 return vertical_diffusion(q, z_coord, J, config.A_v)
@@ -338,15 +332,20 @@ def ocean_baroclinic_tendencies_fc(
             dv_dt = dv_dt + vel_vdiff[..., 1]
 
         if config.hyperdiff_coeff > 0:
-            vel_hyper_flat = fc_hyperdiffusion_3d(
-                vel_masked_flat, grid, fc_config, config.hyperdiff_coeff,
-                padded=vel_masked_pad,
-            )
-            vel_hyper = vel_hyper_flat.reshape(
-                n_face_v, n_i_v, n_j_v, nlev_v, 2,
-            )
-            du_dt = du_dt + vel_hyper[..., 0]
-            dv_dt = dv_dt + vel_hyper[..., 1]
+            # Biharmonic ∇⁴ of a vector: rotate the halo for the INNER
+            # Laplacian, then RE-rotate the (∇²u, ∇²v) component pair before
+            # the OUTER Laplacian (its stencil also crosses seams).  This is
+            # the hand-built vector-∇⁴ mirror of the CD-grid wind
+            # hyperdiffusion fix; ``fc_hyperdiffusion_3d`` cannot be used
+            # directly because its outer Laplacian halos the inner result
+            # with a SCALAR pad (no rotation).
+            lap_u = fc_laplacian_3d(u_visc, grid, fc_config, padded=u_pad_vec)
+            lap_v = fc_laplacian_3d(v_visc, grid, fc_config, padded=v_pad_vec)
+            lap_u_pad, lap_v_pad = _fc_pad_halo_vector(lap_u, lap_v, grid)
+            lap2_u = fc_laplacian_3d(lap_u, grid, fc_config, padded=lap_u_pad)
+            lap2_v = fc_laplacian_3d(lap_v, grid, fc_config, padded=lap_v_pad)
+            du_dt = du_dt - config.hyperdiff_coeff * lap2_u
+            dv_dt = dv_dt - config.hyperdiff_coeff * lap2_v
     else:
         phys = physics_fn(state, grid, z_coord, surface_forcing)
         du_dt = du_dt + phys.du_dt.data
