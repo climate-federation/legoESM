@@ -96,28 +96,33 @@ def _stress_divergence_latlon(
     sigma_12: jnp.ndarray,
     grid: LatLonGrid,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Stress divergence on a lat-lon A-grid.
+    """Stress divergence on a lat-lon A-grid with spherical metric (F10).
 
-    Centered finite differences in local-Cartesian coordinates,
-    with periodic-lon + pole-fold halo.
+    Centered finite differences in local-Cartesian coordinates, with
+    periodic-lon + pole-fold halo, giving the ``(1/h)∂/∂`` gradient terms.
+    The divergence of a symmetric tensor on a sphere (h1 = r cosθ, h2 = r)
+    additionally carries spherical-METRIC terms from the Christoffel symbols:
 
-        F_x = ∂σ_11/∂x + ∂σ_12/∂y
-        F_y = ∂σ_12/∂x + ∂σ_22/∂y
+        F_x = ds11_dx + ds12_dy - (2 σ_12 tanθ) / r
+        F_y = ds12_dx + ds22_dy + ((σ_11 - σ_22) tanθ) / r
 
-    All three stress components are folded with the scalar pole
-    halo.  Justification: at the pole, the local (east, north)
-    basis is rotated by 180° relative to its image on the other
-    side of the pole.  Under a 180° basis rotation,
-    σ_11 → (−1)(−1) σ_11 = σ_11, σ_22 → σ_22, and
-    σ_12 → (−1)(−1) σ_12 = σ_12.  All three are even under the
-    fold and the scalar halo gives the correct parity.  (Velocity
-    components ``u``, ``v`` ARE odd and use ``pad_halo_vector_latlon``
-    with ``negate=True`` — see ``_strain_rates_latlon``.)
+    where ds11_dx = (1/(r cosθ)) ∂σ_11/∂λ etc.  The metric terms were
+    previously omitted (consistent with the old metric-free strain rate);
+    they are now included to match the metric-aware ``_strain_rates_latlon``
+    so the momentum balance is correct away from the equator.
 
-    Full spherical-metric correction (``tanθ/r·v``) is omitted —
-    same approximation as ``_strain_rates_latlon``; high-latitude
-    runs should use the cubed-sphere backend until the tripolar
-    fold + metric terms land.
+    All three stress components are folded with the scalar pole halo: at the
+    pole the local (east, north) basis rotates 180°, under which
+    σ_11 → σ_11, σ_22 → σ_22, σ_12 → σ_12 (all even), so the scalar halo has
+    the correct parity.  (Velocity ``u``, ``v`` are odd — see
+    ``_strain_rates_latlon``.)
+
+    The metric uses the EXACT ``tanθ`` (matching ``_strain_rates_latlon``) on
+    every cell-center row — not clipped — so the strain-rate and stress-
+    divergence metric coefficients are identical (work-conjugate).  Grids avoid
+    the exact pole; ``step_sea_ice`` rejects pole-reaching lat-lon grids under
+    EVP/mEVP.  The residual missing tripolar fold means very-high-latitude
+    lat-lon EVP should be cross-checked against the cubed-sphere / MPAS backends.
     """
     s11_pad = pad_halo_latlon(sigma_11, halo=1)
     s22_pad = pad_halo_latlon(sigma_22, halo=1)
@@ -130,8 +135,16 @@ def _stress_divergence_latlon(
     ds12_dx = (s12_pad[1:-1, 2:] - s12_pad[1:-1, :-2]) / dx
     ds22_dy = (s22_pad[2:, 1:-1] - s22_pad[:-2, 1:-1]) / dy
 
-    Fx = ds11_dx + ds12_dy
-    Fy = ds12_dx + ds22_dy
+    # Spherical-metric coefficient tanθ / r, computed as sinθ/(r cosθ) with
+    # |cosθ| floored at 1e-12 ONLY at the exact pole (never binds on real
+    # cell-centered grids -> exact tanθ; NaN-safety, identical to the strain
+    # rate so the two stay work-conjugate).
+    cos_lat = jnp.cos(grid.lat)
+    cos_safe = jnp.where(jnp.abs(cos_lat) < 1e-12, 1e-12, cos_lat)
+    metric = (jnp.sin(grid.lat) / cos_safe / grid.radius)[:, None]   # (n_lat, 1)
+
+    Fx = ds11_dx + ds12_dy - 2.0 * sigma_12 * metric
+    Fy = ds12_dx + ds22_dy + (sigma_11 - sigma_22) * metric
     return Fx, Fy
 
 

@@ -77,7 +77,10 @@ from legoesm.ocean.vertical import (
     vertical_advection_ocean,
     flux_form_vertical_momentum_advection,
 )
-from legoesm.ocean.freshwater import FreshwaterForcing
+from legoesm.ocean.freshwater import (
+    FreshwaterForcing,
+    salt_flux_salinity_tendency,
+)
 from legoesm.ocean.dynamics.ocean_tendency_common import (
     apply_freshwater_virtual_salt_top,
     apply_sponge_tracer_relaxation,
@@ -858,6 +861,41 @@ def mpas_ocean_baroclinic_tendencies(
         dS_dt_3d = apply_freshwater_virtual_salt_top(
             dS_dt_3d, freshwater, config.S_ref, h_k[:, 0], config.rho_0, mask,
         )
+
+    # ---- Real salt-mass flux (e.g. sea-ice brine rejection) ----
+    # A top-layer salinity SOURCE distinct from the freshwater virtual-salt
+    # dilution above: dS/dt = salt_flux*1e3/(rho_0*h_top).  Applied HERE (not in
+    # physics_fn) so it shares the SAME canonical floored top-layer thickness
+    # ``h_k[:, 0]`` the tracer update integrates mass against — so the injected
+    # salt MASS equals salt_flux even on shallow/floored partial-top cells, and
+    # it matches the freshwater virtual-salt scaling exactly.
+    _sf_salt = getattr(surface_forcing, "salt_flux", None) if surface_forcing else None
+    if _sf_salt is not None:
+        # Gate by surface-forcing scheme (fail closed).  ``surface_forcing`` is a
+        # multi-consumer struct (KPP also reads it for buoyancy); the real salt-
+        # mass SOURCE is only the coupler-driven path, so apply it ONLY under
+        # ``scheme="external"`` (two-way coupling) or ``"none"`` (the bare
+        # surface_forcing pass-through, e.g. OMIP).  Under prescribed/restoring/
+        # combined the ocean has its own surface forcing, so a passed salt_flux
+        # is a misconfiguration — raise rather than silently corrupt salinity.
+        _phys = getattr(config, "physics", None)
+        _sf_scheme = (
+            getattr(_phys.surface_forcing, "scheme", "none")
+            if _phys is not None and getattr(_phys, "surface_forcing", None) is not None
+            else "none"
+        )
+        if _sf_scheme not in ("none", "external"):
+            raise ValueError(
+                f"surface_forcing.salt_flux supplied under surface_forcing "
+                f"scheme {_sf_scheme!r}: the real salt-mass source is only "
+                f"consumed under the coupler-driven 'external' (or 'none') "
+                f"scheme. Use scheme='external' for two-way salt coupling, or "
+                f"omit salt_flux.",
+            )
+        dS_salt = salt_flux_salinity_tendency(
+            jnp.asarray(_sf_salt, dS_dt_3d.dtype), h_k[:, 0], config.rho_0,
+        )
+        dS_dt_3d = dS_dt_3d.at[:, 0].add(dS_salt * mask)
 
     # ---- Sponge layer relaxation ----
     # Cast sponge arrays to state dtype to prevent float64 promotion when

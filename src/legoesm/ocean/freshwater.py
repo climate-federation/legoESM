@@ -158,6 +158,39 @@ def virtual_salt_flux(
     return jnp.where(is_wet, -S_ref * F_fw / (rho_0 * dz_safe), 0.0)
 
 
+def salt_flux_salinity_tendency(salt_flux, dz_0, rho_0: float):
+    """Top-layer salinity tendency from a REAL salt-mass flux [PSU/s].
+
+    A salt mass flux ``F_salt`` [kg(salt)/m²/s, positive INTO the ocean] adds
+    salt to the top layer of thickness ``dz_0``:
+
+        d(S * 1e-3 * rho_0 * dz_0)/dt = F_salt   (PSU = g/kg -> kg/kg via 1e-3)
+        => dS/dt = F_salt * 1e3 / (rho_0 * dz_0)
+
+    Inverse of the ``sss_restoring`` convention
+    (``salt_flux = rho_0 * dz * dS/dt * 1e-3``).  This is the REAL-salt channel
+    (e.g. sea-ice brine rejection); distinct from ``virtual_salt_flux`` (the
+    freshwater dilution proxy).  Same thin-cell guard (dz_0 < 1 mm -> 0).
+
+    Parameters
+    ----------
+    salt_flux : array
+        Salt-mass flux into the ocean [kg(salt)/m²/s].
+    dz_0 : array
+        Top-layer thickness [m].
+    rho_0 : float
+        Reference seawater density [kg/m³].
+
+    Returns
+    -------
+    array
+        Top-layer salinity tendency [PSU/s].
+    """
+    is_wet = dz_0 > 1.0e-3
+    dz_safe = jnp.maximum(dz_0, 1.0e-3)
+    return jnp.where(is_wet, salt_flux * 1.0e3 / (rho_0 * dz_safe), 0.0)
+
+
 def freshwater_from_coupler(
     precip_total: jnp.ndarray,
     lhflx: jnp.ndarray,

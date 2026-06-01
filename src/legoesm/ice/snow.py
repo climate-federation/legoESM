@@ -70,10 +70,32 @@ def combined_conductive_flux(
         Smooth lower-floors on layer thickness used inside the
         resistance sum to avoid divisions by zero in JIT.
     """
+    return combined_conductance(
+        h_ice, h_snow, k_ice, k_snow, h_ice_min, h_snow_min,
+    ) * (T_base - T_surface)
+
+
+def combined_conductance(
+    h_ice: jnp.ndarray,
+    h_snow: jnp.ndarray,
+    k_ice: float,
+    k_snow: float,
+    h_ice_min: float,
+    h_snow_min: float,
+) -> jnp.ndarray:
+    """Series snow+ice thermal conductance ``K = 1 / R_total`` [W/(m^2 K)].
+
+    ``R_total = h_snow/k_snow + h_ice/k_ice`` (with smooth thickness
+    floors).  The conductive flux is ``K * (T_base - T_surface)``.  Exposed
+    separately from :func:`combined_conductive_flux` so the surface energy
+    balance can treat the conductive term semi-implicitly (evaluate it at
+    the *new* surface temperature), which is unconditionally stable for thin
+    ice where the explicit ``K*dt/skin_cap`` greatly exceeds 1.
+    """
     h_i_eff = jnp.maximum(h_ice, h_ice_min)
     h_s_eff = jnp.maximum(h_snow, h_snow_min)
     R_total = h_s_eff / k_snow + h_i_eff / k_ice
-    return (T_base - T_surface) / R_total
+    return 1.0 / R_total
 
 
 # ==============================================================================
@@ -163,15 +185,24 @@ def consume_from_snow_then_ice(
     """
     E_pos = jnp.maximum(energy_per_area, 0.0)
 
-    snow_melt_capacity_kg_m2 = h_snow * rho_snow
+    # Snow melt, capped at the available snow latent capacity.
+    snow_melt_capacity_kg_m2 = jnp.maximum(h_snow, 0.0) * rho_snow
     energy_for_snow = jnp.minimum(E_pos, snow_melt_capacity_kg_m2 * L_f)
-    snow_melt_kg_m2 = energy_for_snow / L_f
-    snow_melt_m = snow_melt_kg_m2 / rho_snow
+    snow_melt_m = (energy_for_snow / L_f) / rho_snow
     h_snow_new = jnp.maximum(h_snow - snow_melt_m, 0.0)
 
+    # Ice melt from the remaining energy, CAPPED at the available ice latent
+    # capacity.  Without the cap the *reported* ``ice_melt_m`` could exceed
+    # ``h_ice`` (while ``h_ice_new`` clamped to 0), inflating the freshwater /
+    # salt / pond diagnostics the callers build from it — reporting more ice
+    # melted than ever existed (energy/mass non-closure).  Any energy left
+    # after the column is fully ablated is not melt (no ice remains); it is
+    # left unrouted here (bounded by < h_ice_min*rho_ice*L_f per step) and
+    # the column simply melts out.
     energy_remaining = E_pos - energy_for_snow
-    ice_melt_kg_m2 = energy_remaining / L_f
-    ice_melt_m = ice_melt_kg_m2 / rho_ice
+    ice_melt_capacity_kg_m2 = jnp.maximum(h_ice, 0.0) * rho_ice
+    energy_for_ice = jnp.minimum(energy_remaining, ice_melt_capacity_kg_m2 * L_f)
+    ice_melt_m = (energy_for_ice / L_f) / rho_ice
     h_ice_new = jnp.maximum(h_ice - ice_melt_m, 0.0)
 
     return h_snow_new, h_ice_new, snow_melt_m, ice_melt_m
@@ -220,8 +251,15 @@ def consume_sublimation_from_snow_then_ice(
     snow_sublim_m = snow_sublim_kg / rho_snow
     h_snow_new = jnp.maximum(h_snow_dep - snow_sublim_m, 0.0)
 
-    ice_target_kg = sublim_pos_kg - snow_sublim_kg
-    ice_sublim_kg = jnp.maximum(ice_target_kg, 0.0)
+    # Ice sublimation from the remainder, CAPPED at the available ice mass
+    # so the reported ``ice_sublim_m`` can never exceed ``h_ice`` (same
+    # over-removal failure mode as the melt path: an uncapped value would
+    # inflate the concentration retreat and the brine delta_V_sublim budget
+    # in _thermo_v2 while h_ice_new clamps to 0).  Any sublimation demand
+    # beyond the column simply ablates it fully.
+    ice_target_kg = jnp.maximum(sublim_pos_kg - snow_sublim_kg, 0.0)
+    ice_avail_kg = jnp.maximum(h_ice, 0.0) * rho_ice
+    ice_sublim_kg = jnp.minimum(ice_target_kg, ice_avail_kg)
     ice_sublim_m = ice_sublim_kg / rho_ice
     h_ice_new = jnp.maximum(h_ice - ice_sublim_m, 0.0)
 

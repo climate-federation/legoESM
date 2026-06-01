@@ -127,6 +127,247 @@ class TestUnsupportedScheme:
             make_mpas_ocean_physics(cfg)
 
 
+class TestExternalSchemeTwoWay:
+    """F11 phase 3: the MPAS 'external' scheme applies a coupler-provided
+    OceanSurfaceForcing (tau / q_net / real salt_flux) — the MPAS analogue of
+    the cubed-sphere 'external' scheme.  Freshwater (eta + virtual salt) is the
+    step(freshwater=) arg's job, so surface_forcing.freshwater is IGNORED here
+    (no double count)."""
+
+    def _sf(self, state, **kw):
+        from legoesm.ocean.state import OceanSurfaceForcing
+        nCells = state.T.data.shape[0]
+        z = jnp.zeros(nCells)
+        return OceanSurfaceForcing(
+            sw_down=kw.get("sw_down"), q_net=kw.get("q_net"),
+            tau_x=kw.get("tau_x"), tau_y=kw.get("tau_y"),
+            freshwater=kw.get("freshwater"), salt_flux=kw.get("salt_flux"))
+
+    def test_external_scheme_is_accepted(self, mesh, z_coord, state):
+        # Must not raise NotImplementedError (was unsupported before phase 3).
+        fn = make_mpas_ocean_physics(_physics_config("external"))
+        assert callable(fn)
+
+    def test_external_without_surface_forcing_fails_closed(self, mesh, z_coord, state):
+        """scheme='external' with no OceanSurfaceForcing must RAISE, not
+        silently drop all coupling fluxes (whole-run coupling failure)."""
+        fn = make_mpas_ocean_physics(_physics_config("external"))
+        with pytest.raises(ValueError, match="external.*requires an"):
+            fn(state, mesh, z_coord, surface_forcing=None)
+
+    def test_kpp_freshwater_is_conservative_no_double_count(self, mesh, z_coord, state):
+        """With explicit KPP, surface_forcing.freshwater drives KPP buoyancy +
+        a NON-LOCAL salinity redistribution whose COLUMN INTEGRAL is zero — it
+        injects no net surface salt, so it does NOT double-count the
+        step(freshwater=) virtual-salt path.  Pins the no-double-count contract
+        on the KPP path for DEEP columns (the sea-ice coupling regime); the
+        shallow partial-seafloor case is a documented pre-existing caveat of the
+        freshwater (virtual-salt) non-local term.  (Real salt_flux is kept out
+        of the non-local term entirely — buoyancy only — so REAL salt mass stays
+        exact; see test_kpp_real_salt_is_buoyancy_only_mass_conservative.)"""
+        from legoesm.ocean.state import OceanSurfaceForcing
+        from legoesm.ocean.vertical import compute_layer_thickness
+        from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+        cfg = OceanPhysicsConfig(
+            surface_forcing=SurfaceForcingConfig(scheme="external"),
+            vertical_mixing=VerticalMixingConfig(scheme="kpp"))
+        fn = make_mpas_ocean_physics(cfg)
+        mask = state.land_mask.data
+        # Impose a vertical salinity gradient so the non-local term is active.
+        S = state.S.data * 0.0 + 35.0 + jnp.linspace(0.0, 1.0, state.S.data.shape[1])[None, :]
+        st = state._replace(S=state.S.replace(data=S))
+        sf = OceanSurfaceForcing(
+            sw_down=None, q_net=None, tau_x=None, tau_y=None,
+            freshwater=mask * 2.0e-4, salt_flux=None)
+        tend = fn(st, mesh, z_coord, surface_forcing=sf)
+        h = compute_layer_thickness(st.eta.data, st.H_bathy.data, z_coord)
+        col_int = jnp.sum(tend.dS_dt.data * h, axis=-1)
+        # KPP salinity tendency conserves column salt (redistribution only).
+        assert float(jnp.max(jnp.abs(jnp.where(mask > 0.5, col_int, 0.0)))) < 1e-12, (
+            "KPP freshwater salinity tendency must have zero column integral "
+            "(redistribution, not a net surface source) to avoid double count")
+
+    def _kpp_external_model(self, mesh, z_coord):
+        from legoesm.ocean.mpas_config import MPASOceanConfig
+        from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+        from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+        cfg = MPASOceanConfig(
+            physics=OceanPhysicsConfig(
+                surface_forcing=SurfaceForcingConfig(scheme="external"),
+                vertical_mixing=VerticalMixingConfig(scheme="kpp")),
+            implicit_vertical_mixing=False)
+        return MPASOceanModel(mesh, z_coord, config=cfg), cfg
+
+    def test_kpp_salt_only_does_not_trigger_nonlocal_salinity_fallback(
+            self, mesh, z_coord, state):
+        """Real salt_flux feeds KPP BUOYANCY only; with salt_flux but NO
+        freshwater the KPP non-local salinity flux Q_sfc_S must be an explicit
+        ZERO — NOT left None (which makes kpp_vertical_mixing DIAGNOSE a
+        non-local salinity flux from the near-surface gradient, re-injecting a
+        KPP salt term).  Discriminator on a NON-UNIFORM-S, convectively-active
+        (strong brine -> B_f>0) DEEP column: salt-only tendencies must EQUAL the
+        tendencies with an explicit ZERO freshwater field (which forces
+        Q_sfc_S=0).  A None-fallback diagnoses a nonzero non-local salt term and
+        the two diverge."""
+        from legoesm.ocean.state import OceanSurfaceForcing
+        from legoesm.ocean.vertical import compute_layer_thickness
+        mask = state.land_mask.data
+        # Non-uniform salinity so the diagnosed-fallback would be nonzero.
+        S_grad = (jnp.full_like(state.S.data, 34.0)
+                  + 1.5 * jnp.linspace(0.0, 1.0, state.S.data.shape[1])[None, :])
+        st = state._replace(S=state.S.replace(data=S_grad))
+        model, cfg = self._kpp_external_model(mesh, z_coord)
+        salt_flux = jnp.where(mask > 0.5, 5.0e-3, 0.0)  # strong brine -> unstable
+        base = dict(sw_down=None, q_net=None, tau_x=mask * 0.05,
+                    tau_y=jnp.zeros_like(mask), salt_flux=salt_flux)
+        dS_salt_only = model.tendencies(
+            st, surface_forcing=OceanSurfaceForcing(freshwater=None, **base)).dS_dt.data
+        dS_zero_fw = model.tendencies(
+            st, surface_forcing=OceanSurfaceForcing(
+                freshwater=jnp.zeros_like(mask), **base)).dS_dt.data
+        # KPP is active: it redistributes the salinity gradient (interior dS≠0).
+        assert float(jnp.max(jnp.abs(dS_salt_only[:, 1:]))) > 0.0, "KPP did not run"
+        # salt-only must NOT diagnose a non-local salt flux: it must match the
+        # explicit-zero-freshwater case (Q_sfc_S=0).
+        assert float(jnp.max(jnp.abs(dS_salt_only - dS_zero_fw))) < 1e-12, (
+            "salt-only KPP diagnosed a non-local salinity flux (Q_sfc_S left "
+            "None) instead of using an explicit zero")
+        # Real-salt mass conserved: column integral == explicit floored-h_k source.
+        h = compute_layer_thickness(
+            st.eta.data, st.H_bathy.data, z_coord,
+            min_water_column_m=cfg.min_water_column_m)
+        col_int = jnp.sum(dS_salt_only * h, axis=-1)
+        expected = salt_flux * 1.0e3 / float(cfg.rho_0)
+        rel_err = jnp.where(
+            mask > 0.5, jnp.abs(col_int - expected) / jnp.maximum(expected, 1e-30), 0.0)
+        assert float(jnp.max(rel_err)) < 1e-5, (
+            "real-salt mass not conserved: net column salt tendency must equal "
+            "the explicit floored-h_k salt source")
+
+    def test_salt_flux_fails_closed_under_non_external_scheme(self, mesh, z_coord, state):
+        """surface_forcing.salt_flux must only be consumed under the coupler-
+        driven 'external' (or 'none') scheme.  Passing it under 'restoring'
+        (the ocean has its own forcing) must RAISE, not silently inject salt."""
+        from legoesm.ocean.state import OceanSurfaceForcing
+        from legoesm.ocean.mpas_config import MPASOceanConfig
+        from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+        cfg = MPASOceanConfig(physics=_physics_config("restoring"))
+        model = MPASOceanModel(mesh, z_coord, config=cfg)
+        mask = state.land_mask.data
+        sf = self._sf(state, salt_flux=mask * 1.0e-4)
+        with pytest.raises(ValueError, match="salt_flux.*scheme"):
+            model.tendencies(state, surface_forcing=sf)
+
+    def test_kpp_sees_real_salt_buoyancy(self, mesh, z_coord, state):
+        """The MPAS KPP adapter must feed the real salt_flux into its surface
+        buoyancy (destabilizing), matching the lat-lon KPP path.  Adding brine
+        salt deepens/strengthens boundary-layer mixing, so the KPP-driven
+        INTERIOR temperature tendency (mixing the existing T gradient) changes
+        vs no salt — proving KPP 'sees' the salt buoyancy, not just the
+        surface salinity source."""
+        from legoesm.ocean.state import OceanSurfaceForcing
+        from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+        cfg = OceanPhysicsConfig(
+            surface_forcing=SurfaceForcingConfig(scheme="external"),
+            vertical_mixing=VerticalMixingConfig(scheme="kpp"))
+        fn = make_mpas_ocean_physics(cfg)
+        mask = state.land_mask.data
+        # Need some wind stress so KPP has a boundary layer to deepen.
+        base = dict(tau_x=mask * 0.05, tau_y=jnp.zeros_like(mask))
+        sf_no_salt = OceanSurfaceForcing(
+            sw_down=None, q_net=None, freshwater=None, salt_flux=None, **base)
+        sf_salt = OceanSurfaceForcing(
+            sw_down=None, q_net=None, freshwater=None,
+            salt_flux=mask * 5.0e-3, **base)  # strong brine -> destabilizing
+        dT_no = fn(state, mesh, z_coord, surface_forcing=sf_no_salt).dT_dt.data[:, 1:]
+        dT_salt = fn(state, mesh, z_coord, surface_forcing=sf_salt).dT_dt.data[:, 1:]
+        assert float(jnp.max(jnp.abs(dT_salt - dT_no))) > 1e-12, (
+            "MPAS KPP did not respond to real salt_flux buoyancy "
+            "(interior mixing unchanged)")
+
+    def _model(self, mesh, z_coord):
+        """MPAS model with external surface forcing + no KPP (isolates the real
+        salt SOURCE, which is applied in mpas_ocean_baroclinic_tendencies with
+        the canonical floored h_k[:,0])."""
+        from legoesm.ocean.mpas_config import MPASOceanConfig
+        from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+        from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
+        cfg = MPASOceanConfig(physics=OceanPhysicsConfig(
+            surface_forcing=SurfaceForcingConfig(scheme="external"),
+            vertical_mixing=VerticalMixingConfig(scheme="none")))
+        return MPASOceanModel(mesh, z_coord, config=cfg)
+
+    def test_real_salt_flux_salinifies_top_layer(self, mesh, z_coord, state):
+        model = self._model(mesh, z_coord)
+        mask = state.land_mask.data
+        sf = self._sf(state, salt_flux=mask * 1.0e-4)  # +salt into ocean
+        tend = model.tendencies(state, surface_forcing=sf)
+        dS0 = tend.dS_dt.data[:, 0]
+        # Real salt source raises SSS on ocean cells; land cells untouched.
+        assert float(jnp.max(dS0)) > 1e-9, "salt_flux did not salinify SSS"
+        assert float(jnp.max(jnp.abs(jnp.where(mask < 0.5, dS0, 0.0)))) == 0.0
+
+    def test_real_salt_flux_is_mass_conservative_on_partial_top_cell(
+            self, mesh, z_coord, state):
+        """On a partial-cell column whose TOP cell is shallow (H_bathy <
+        dz_ref[0]), the real salt source must inject exactly salt_flux of salt
+        MASS — dS_dt[0]*rho_0*h_top/1e3 == salt_flux — using the SAME canonical
+        floored top-layer thickness h_k[:,0] the tracer update integrates mass
+        against (NOT dz_ref[0]*jacobian, which would mis-scale on partial/floored
+        top cells)."""
+        from legoesm.ocean.state import OceanSurfaceForcing
+        from legoesm.ocean.vertical import (
+            create_partial_cell_coordinate, compute_layer_thickness)
+        mask = state.land_mask.data
+        # Make a few OCEAN columns shallow so their top cell is partial
+        # (5 m << dz_ref[0]=20 m); leave the rest deep.
+        H = state.H_bathy.data
+        shallow = (mask > 0.5) & (jnp.arange(H.shape[0]) % 7 == 0)
+        H_new = jnp.where(shallow, 5.0, H)
+        st = state._replace(
+            H_bathy=state.H_bathy.replace(data=H_new),
+            eta=state.eta.replace(data=jnp.zeros_like(state.eta.data)))
+        pc = create_partial_cell_coordinate(z_coord, H_new)
+        model = self._model(mesh, pc)
+        salt_flux = jnp.where(shallow, 1.0e-4, 0.0)
+        sf = OceanSurfaceForcing(
+            sw_down=None, q_net=None, tau_x=None, tau_y=None,
+            freshwater=None, salt_flux=salt_flux)
+        tend = model.tendencies(st, surface_forcing=sf)
+        # Use the SAME floored thickness the model integrates mass against.
+        h0 = compute_layer_thickness(
+            st.eta.data, H_new, pc,
+            min_water_column_m=model.config.min_water_column_m)[:, 0]
+        injected = tend.dS_dt.data[:, 0] * float(model.config.rho_0) * h0 / 1.0e3
+        err = jnp.where(shallow, jnp.abs(injected - salt_flux), 0.0)
+        assert float(jnp.max(err)) < 1e-12, (
+            "partial-top-cell salt source not mass-conservative: injected salt "
+            "mass must equal salt_flux (uses the canonical floored top thickness)")
+
+    def test_tau_and_qnet_drive_momentum_and_heat(self, mesh, z_coord, state):
+        fn = make_mpas_ocean_physics(_physics_config("external"))
+        mask = state.land_mask.data
+        sf = self._sf(state, tau_x=mask * 0.1, tau_y=jnp.zeros_like(mask),
+                      q_net=mask * 50.0)
+        tend = fn(state, mesh, z_coord, surface_forcing=sf)
+        assert float(jnp.max(jnp.abs(tend.du_dt.data))) > 0.0, "tau drove no current"
+        assert float(jnp.max(tend.dT_dt.data[:, 0])) > 1e-9, "q_net>0 did not warm"
+
+    def test_surface_forcing_freshwater_is_not_a_salinity_source(self, mesh, z_coord, state):
+        """MPAS delivers freshwater salinity via step(freshwater=); neither the
+        physics external block NOR the real-salt source may treat
+        surface_forcing.freshwater as a salinity source (else the virtual-salt
+        dilution double-counts).  With ONLY surface_forcing.freshwater set (no
+        freshwater= arg, no KPP), dS_dt must be exactly zero."""
+        model = self._model(mesh, z_coord)
+        mask = state.land_mask.data
+        sf = self._sf(state, freshwater=mask * 2.0e-4)  # ONLY freshwater set
+        tend = model.tendencies(state, surface_forcing=sf)
+        assert float(jnp.max(jnp.abs(tend.dS_dt.data))) == 0.0, (
+            "surface_forcing.freshwater must NOT be a salinity source "
+            "(freshwater salinity is the step(freshwater=) arg's job)")
+
+
 class TestRestoringMaskApplied:
     def test_dT_dt_zero_on_pure_land_cells(self, mesh, z_coord, state):
         """Restoring must respect land_mask — land cells get zero dT/dt

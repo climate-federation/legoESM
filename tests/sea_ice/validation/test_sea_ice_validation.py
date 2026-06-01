@@ -231,32 +231,52 @@ class TestEVPSanity:
     def test_zero_velocity_isotropic_stress(self):
         """If ice is still and forcing is zero, stress relaxes toward -P/2.
 
-        The VP constitutive law gives sigma = -P/2 * I when strain is zero.
-        With h=1 and A=0.9, P = P* * 1 * exp(-20*0.1) ~ 3726 N/m, so
-        sigma_11 = sigma_22 ≈ -1863 N/m and sigma_12 ≈ 0.
+        The VP constitutive law gives sigma = -P/2 * I when strain is zero
+        (h=1, A=0.9 → P = P*·exp(-20·0.1) ≈ 3726 N/m, so
+        sigma_11 = sigma_22 → -P/2 ≈ -1863 N/m, sigma_12 → 0).
+
+        EVP reaches this plastic rest state over SEVERAL dynamic steps, not
+        in one: the elastic regularisation relaxes the carried-over stress
+        toward the VP target by only ``1 - exp(-1/(2·T_evp))`` ≈ 75% per
+        dynamic step (T_evp = 0.36), by design.  So we iterate a handful of
+        dynamic steps (carrying sigma forward, as the model does) and assert
+        convergence — a single call from zero stress only reaches ~0.75·(-P/2)
+        and must NOT be expected to fully converge.
         """
         grid = _make_grid()
         n = grid.n
         shape = (6, n, n)
-        s0 = jnp.zeros(shape)
+        u = jnp.zeros(shape)
+        v = jnp.zeros(shape)
+        s11 = jnp.zeros(shape)
+        s22 = jnp.zeros(shape)
+        s12 = jnp.zeros(shape)
 
-        _, _, s11, s22, s12 = evp_solver(
-            jnp.zeros(shape), jnp.zeros(shape), s0, s0, s0,
-            h_ice=jnp.ones(shape),
-            concentration=jnp.full(shape, 0.9),
-            wind_u=jnp.zeros(shape),
-            wind_v=jnp.zeros(shape),
-            ocean_u=jnp.zeros(shape),
-            ocean_v=jnp.zeros(shape),
-            grid=grid, dt=3600.0, N_evp=10,
-        )
+        # Iterate dynamic steps, carrying the stress forward (as the coupled
+        # model does).  The elastic stress relaxes toward the VP rest state
+        # over several steps; ~6 is ample for T_evp=0.36 (per-step factor
+        # 1 - exp(-1/(2·0.36)) ≈ 0.75, so the residual after 6 steps is
+        # 0.25**6 ≈ 2e-4).
+        for _ in range(6):
+            u, v, s11, s22, s12 = evp_solver(
+                u, v, s11, s22, s12,
+                h_ice=jnp.ones(shape),
+                concentration=jnp.full(shape, 0.9),
+                wind_u=jnp.zeros(shape),
+                wind_v=jnp.zeros(shape),
+                ocean_u=jnp.zeros(shape),
+                ocean_v=jnp.zeros(shape),
+                grid=grid, dt=3600.0, N_evp=120,
+            )
         P = 2.75e4 * 1.0 * jnp.exp(-20.0 * 0.1)  # ~ 3726
-        # Normal stresses should be near -P/2 (isotropic compression)
-        assert jnp.allclose(s11, -P / 2, rtol=0.15), (
-            f"s11 should be near -P/2={float(-P/2):.1f}, got {float(s11[0,0,0]):.1f}"
+        # Converged normal stresses should be near -P/2 (isotropic
+        # compression — the VP plastic rest state).
+        assert jnp.allclose(s11, -P / 2, rtol=0.05), (
+            f"s11 should converge to -P/2={float(-P/2):.1f}, "
+            f"got {float(s11[0, 0, 0]):.1f}"
         )
-        assert jnp.allclose(s22, -P / 2, rtol=0.15)
-        # Shear stress should be near zero
+        assert jnp.allclose(s22, -P / 2, rtol=0.05)
+        # Shear stress should be near zero (isotropic state).
         assert jnp.max(jnp.abs(s12)) < 100.0
 
     def test_ice_strength_zero_when_no_ice(self):
@@ -358,6 +378,12 @@ class TestSlabDynamicFluxConsistency:
             sigma_11=Field(data=jnp.zeros(shape), name="s11", dims=dims, units="N/m"),
             sigma_22=Field(data=jnp.zeros(shape), name="s22", dims=dims, units="N/m"),
             sigma_12=Field(data=jnp.zeros(shape), name="s12", dims=dims, units="N/m"),
+            # Tier-1/2 new-physics tracer fields (snow/brine/ponds).  Pass-
+            # through zeros here; the new-physics gates are off in this test.
+            h_snow=Field(data=jnp.zeros(shape), name="h_snow", dims=dims, units="m"),
+            S_ice=Field(data=jnp.zeros(shape), name="S_ice", dims=dims, units="psu"),
+            pond_area=Field(data=jnp.zeros(shape), name="pond_area", dims=dims, units="1"),
+            pond_depth=Field(data=jnp.zeros(shape), name="pond_depth", dims=dims, units="m"),
         )
 
         forcing = _make_forcing(shape)

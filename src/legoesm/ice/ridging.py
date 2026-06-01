@@ -80,6 +80,7 @@ def _ridging_column_kernel(
     h_cat: jnp.ndarray,
     V_snow_cat: jnp.ndarray,
     S_ice_cat: jnp.ndarray,
+    V_pond_cat: jnp.ndarray,
     closing_rate: jnp.ndarray,
     lo: jnp.ndarray,
     hi: jnp.ndarray,
@@ -88,11 +89,15 @@ def _ridging_column_kernel(
     mu_rdg: float,
     H_star: float,
     snow_fraction_retained: float,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
+           jnp.ndarray, jnp.ndarray]:
     """Per-column ridging kernel.
 
-    Returns updated ``(a_cat, h_cat, V_snow_cat, S_ice_cat,
-    snow_to_ocean_kg_m2_per_s_cell)`` arrays.
+    Returns updated ``(a_cat, h_cat, V_snow_cat, S_ice_cat, V_pond_cat,
+    snow_to_ocean_kg_m2_per_s_cell, pond_to_ocean_kg_m2_per_s_cell)`` arrays.
+    Melt-pond water on ridging ice DRAINS to the ocean (deformation destroys
+    the pond surface; CICE convention) — conserving water, so ridges carry no
+    pond and the drained volume is reported as a freshwater flux.
     """
     n_cat = a_cat.shape[0]
 
@@ -121,6 +126,9 @@ def _ridging_column_kernel(
     )
     dV_per_cat = V_cat * fraction_taken
     dVsnow_per_cat = V_snow_cat * fraction_taken
+    # Melt-pond water on the ridging ice drains entirely to the ocean
+    # (ridging deformation destroys the pond surface); ridges carry no pond.
+    dVpond_per_cat = V_pond_cat * fraction_taken
     # Carry salt mass into ridged ice: per-cat salt mass = S_ice * V * rho_ice * 1e-3
     # Salt mass moves with the ice — keep S_ice on transfer (mass moves, S unchanged).
     # No explicit salt term needed here; S_ice is reconstructed below.
@@ -144,12 +152,16 @@ def _ridging_column_kernel(
     # ridge, the rest to ocean as freshwater.
     Vsnow_donated = jnp.sum(dVsnow_per_cat)
     Vsnow_in_ridge = snow_fraction_retained * Vsnow_donated
-    snow_to_ocean_m_ice_per_m2 = (1.0 - snow_fraction_retained) * Vsnow_donated
-    # Convert snow-volume-of-water-equivalent to mass per unit area
-    # per second (caller pairs with dt):
+    snow_to_ocean_m_snow_per_m2 = (1.0 - snow_fraction_retained) * Vsnow_donated
+    # Convert snow-depth volume [m of snow per m²] to mass [kg/m²] via
+    # rho_snow (caller divides by dt for a flux):
     snow_to_ocean_kg_m2 = (
-        snow_to_ocean_m_ice_per_m2 * constants.rho_snow
+        snow_to_ocean_m_snow_per_m2 * constants.rho_snow
     )
+
+    # All ridged pond water drains to the ocean as fresh liquid water.
+    pond_to_ocean_m_per_m2 = jnp.sum(dVpond_per_cat)
+    pond_to_ocean_kg_m2 = pond_to_ocean_m_per_m2 * constants.rho_water
 
     # Ridged volume — area is compressed by factor h_part / H_mean,
     # where H_mean = (H_min + H_max) / 2 — preserves volume since
@@ -197,6 +209,8 @@ def _ridging_column_kernel(
     a_after_donate = jnp.maximum(a_cat - da_per_cat, 0.0)
     V_after_donate = jnp.maximum(V_cat - dV_per_cat, 0.0)
     Vsnow_after_donate = jnp.maximum(V_snow_cat - dVsnow_per_cat, 0.0)
+    # Donor pond water is drained (not redistributed into the ridge).
+    Vpond_new = jnp.maximum(V_pond_cat - dVpond_per_cat, 0.0)
     # Salt remains with the ice mass that stays in donor cat:
     salt_old_cat = S_ice_cat * V_cat * constants.rho_ice * 1.0e-3
     salt_donated_per_cat = S_ice_cat * dV_per_cat * constants.rho_ice * 1.0e-3
@@ -221,7 +235,8 @@ def _ridging_column_kernel(
     # Clamp to physical ranges.
     a_new = jnp.clip(a_new, 0.0, 1.0)
 
-    return a_new, h_new, Vsnow_new, S_new, snow_to_ocean_kg_m2 / dt
+    return (a_new, h_new, Vsnow_new, S_new, Vpond_new,
+            snow_to_ocean_kg_m2 / dt, pond_to_ocean_kg_m2 / dt)
 
 
 def apply_ridging(
@@ -233,6 +248,7 @@ def apply_ridging(
     n_cat: int,
     dt: float,
     *,
+    V_pond_cat: jnp.ndarray | None = None,
     e_star: float = 0.36,
     mu_rdg: float = 4.0,
     H_star: float = 100.0,
@@ -284,13 +300,17 @@ def apply_ridging(
 
     closing_flat = closing_rate.reshape((n_cells,))
 
+    if V_pond_cat is None:
+        V_pond_cat = jnp.zeros_like(V_snow_cat)
+
     vmapped = jax.vmap(
         _ridging_column_kernel,
-        in_axes=(0, 0, 0, 0, 0, None, None, None, None, None, None, None),
+        in_axes=(0, 0, 0, 0, 0, 0, None, None, None, None, None, None, None),
     )
 
-    a_f, h_f, Vsnow_f, S_f, snow_to_ocean_f = vmapped(
+    a_f, h_f, Vsnow_f, S_f, Vpond_f, snow_to_ocean_f, pond_to_ocean_f = vmapped(
         _flat(a_cat), _flat(h_cat), _flat(V_snow_cat), _flat(S_ice_cat),
+        _flat(V_pond_cat),
         closing_flat,
         lo, hi, dt,
         e_star, mu_rdg, H_star, snow_fraction_retained,
@@ -302,5 +322,7 @@ def apply_ridging(
         "h": h_f.reshape(full_shape),
         "V_snow": Vsnow_f.reshape(full_shape),
         "S_ice": S_f.reshape(full_shape),
+        "V_pond": Vpond_f.reshape(full_shape),
         "snow_to_ocean": snow_to_ocean_f.reshape(spatial_shape),
+        "pond_to_ocean": pond_to_ocean_f.reshape(spatial_shape),
     }

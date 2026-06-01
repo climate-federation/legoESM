@@ -40,6 +40,7 @@ def step_ponds(
     pond_to_ice_max_area: float,
     depth_to_area_ratio: float,
     snow_block_threshold: float = 5.0e-3,
+    refreeze_width_K: float = 0.5,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Advance pond area + depth one time step.
 
@@ -72,6 +73,11 @@ def step_ponds(
     depth_to_area_ratio : float
         ``h_pond / a_pond`` ratio assumed for converting added
         volume into the (area, depth) split.
+    refreeze_width_K : float
+        Half-width [K] of the smooth linear ramp over which ponds
+        transition from fully liquid to fully refrozen as ``T_air``
+        crosses ``refreeze_threshold``.  Keeps the refreeze response
+        differentiable; smaller → sharper (CICE-like) cutoff.
 
     Returns
     -------
@@ -100,9 +106,9 @@ def step_ponds(
     V_pond = pond_area * pond_depth
 
     # Refreezing: when T_air < threshold, drain everything back to
-    # ice.  Smooth ramp over ±0.5 K for differentiability.
+    # ice.  Smooth ramp over ``refreeze_width_K`` for differentiability.
     refreeze_fraction = jnp.clip(
-        (refreeze_threshold - T_air) / 0.5,
+        (refreeze_threshold - T_air) / refreeze_width_K,
         0.0,
         1.0,
     )

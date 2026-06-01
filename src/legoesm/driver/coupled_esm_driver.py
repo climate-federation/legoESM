@@ -420,7 +420,28 @@ class CoupledESMDriver:
         )
 
     def _step_ocean(self, atm_forcing, dt):
-        """Advance the slab ocean one coupling step."""
+        """Advance the slab ocean one coupling step.
+
+        **One-way ice -> ocean coupling (intentional for the slab ocean).**
+        ``step_sea_ice`` populates ice -> ocean back-reaction channels on
+        the surface response (``freshwater_flux``, ``ocean_heat_extraction``,
+        ``salt_flux``, ``ocean_stress_x``/``ocean_stress_y``), but this
+        driver advances the :class:`SimpleOcean` slab, a thermodynamic
+        mixed-layer model with no prognostic salinity and no prognostic
+        momentum.  It therefore cannot consume those feedbacks:
+
+        * ``salt_flux`` / ``freshwater_flux`` -> no salinity prognostic;
+        * ``ocean_stress_x``/``ocean_stress_y`` -> no momentum prognostic
+          (the slab returns ``u_sfc = v_sfc = 0``);
+        * ``ocean_heat_extraction`` -> the slab already diagnoses its own
+          ``Q_freeze`` (the heat removed by its freezing clamp); adding the
+          ice's basal heat extraction on top would double-count against it.
+
+        The channels remain available on ``self._last_sfc_response`` for a
+        full prognostic ocean (salinity + momentum + a two-way
+        ``Q_freeze`` <-> ice-seeding contract), which is tracked as separate
+        feature work; they are deliberately NOT applied to the slab here.
+        """
         if self._ocean_step is None:
             return
         self._ocean_state, sst_new, u_sfc, v_sfc = self._ocean_step(

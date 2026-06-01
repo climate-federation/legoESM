@@ -126,6 +126,7 @@ def _make_kpp(config: VerticalMixingConfig,
         tau_y = getattr(surface_forcing, "tau_y", None) if surface_forcing else None
         q_net = getattr(surface_forcing, "q_net", None) if surface_forcing else None
         fw    = getattr(surface_forcing, "freshwater", None) if surface_forcing else None
+        salt  = getattr(surface_forcing, "salt_flux", None) if surface_forcing else None
 
         # Surface kinematic heat flux: Q_T = q_net / (rho_0 * c_sw)  [K m/s]
         # KPP convention: positive Q_T heats the ocean.
@@ -148,20 +149,27 @@ def _make_kpp(config: VerticalMixingConfig,
         # / rho_0  [PSU m/s].  Net P-E entering ocean (F_fw > 0) freshens
         # the surface, hence the negative sign.
         Q_sfc_S = None
-        if fw is not None:
+        if fw is not None or salt is not None:
             S_sfc = state.S.data[..., 0]
             T_sfc = state.T.data[..., 0]
             p_sfc = jnp.zeros_like(T_sfc)
             beta = haline_contraction_coeff(T_sfc, S_sfc, p_sfc)
-            Q_sfc_S = -S_sfc * fw / _RHO_0
+            # Kinematic surface salt flux [PSU·m/s] = freshwater virtual-salt
+            # (-S*fw/rho) PLUS the REAL salt-mass flux (+salt*1e3/rho).
+            Q_sfc_S = jnp.zeros_like(S_sfc)
+            if fw is not None:
+                Q_sfc_S = Q_sfc_S - S_sfc * fw / _RHO_0
+            if salt is not None:
+                Q_sfc_S = Q_sfc_S + salt * 1.0e3 / _RHO_0
             # Salt-driven surface buoyancy flux (KPP convention,
             # B_f > 0 = unstable):
             #   B_f = -g*(alpha*Q_T - beta*Q_S) = -g*alpha*Q_T + g*beta*Q_S
             # so the salt contribution is +g*beta*Q_S, NOT -g*beta*Q_S.
             # Sanity check: freshening (fw>0) gives Q_sfc_S<0 (salt flux
             # INTO ocean is negative) → B_salt = +g*beta*(neg) < 0
-            # (stabilizing, lighter water on top).  Brine rejection
-            # (fw<0) gives Q_sfc_S>0 → B_salt > 0 (destabilizing).
+            # (stabilizing, lighter water on top).  Brine rejection / a
+            # positive real salt flux gives Q_sfc_S>0 → B_salt > 0
+            # (destabilizing).
             B_salt = constants.g * beta * Q_sfc_S
             B_f = B_salt if B_f is None else (B_f + B_salt)
 

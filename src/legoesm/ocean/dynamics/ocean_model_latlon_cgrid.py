@@ -480,6 +480,20 @@ class LatLonCGridOceanModel:
                 f"freshwater_closure must be one of {_valid_fw}, "
                 f"got {config.freshwater_closure!r}",
             )
+        # The lat-lon C-grid applies OceanSurfaceForcing.tau/q_net/salt DIRECTLY
+        # in its dynamics (+ the freshwater= arg for eta + virtual salt), so it
+        # must NOT also route the same forcing through the 'external' physics
+        # scheme — that would double-apply momentum/heat/salt.  'external' is the
+        # cubed-sphere physics-path coupling route; lat-lon uses the direct path.
+        if (config.physics is not None
+                and config.physics.surface_forcing.scheme == "external"):
+            raise ValueError(
+                "surface_forcing.scheme='external' is not supported on the "
+                "lat-lon C-grid ocean: it applies OceanSurfaceForcing directly "
+                "in its dynamics, so the external physics scheme would "
+                "double-apply the forcing. Pass surface_forcing= (and "
+                "freshwater=) to step() instead.",
+            )
         if config.max_abs_eta_m <= 0.0:
             raise ValueError(
                 f"max_abs_eta_m must be > 0, got {config.max_abs_eta_m!r}")

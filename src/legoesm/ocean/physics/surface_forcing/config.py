@@ -113,9 +113,14 @@ class SurfaceForcingConfig(NamedTuple):
 
     Use ``scheme="combined"`` to apply prescribed wind stress together
     with temperature/salinity restoring — needed for realistic
-    baroclinic gyre experiments.
+    baroclinic gyre experiments.  Use ``scheme="external"`` to apply a
+    coupler-provided ``OceanSurfaceForcing`` (tau / q_net / freshwater / salt)
+    through the physics path — the cubed-sphere two-way coupling route.  NOTE
+    ``external`` uses the ATMOSPHERE tau convention (ocean reaction = -tau),
+    OPPOSITE the ``prescribed`` scheme (on-ocean +tau).  (MPAS uses a separate
+    physics factory and does not yet dispatch ``external``.)
     """
-    scheme: str = "none"  # "prescribed", "restoring", "combined", "bulk_formulas", "none"
+    scheme: str = "none"  # "prescribed","restoring","combined","bulk_formulas","external","none"
     prescribed: PrescribedForcingConfig = PrescribedForcingConfig()
     restoring: RestoringConfig = RestoringConfig()
     bulk_formulas: BulkFormulaConfig = BulkFormulaConfig()

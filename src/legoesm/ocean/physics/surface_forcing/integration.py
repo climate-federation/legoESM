@@ -6,9 +6,14 @@ from typing import Callable
 
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.state import OceanState, OceanTendencies
-from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
+from legoesm.ocean.vertical import (
+    OceanZStarCoordinate,
+    compute_layer_thickness,
+    compute_ocean_jacobian,
+)
 from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
 from legoesm.ocean.physics.surface_forcing.prescribed import prescribed_surface_forcing
+from legoesm.ocean.physics.surface_forcing.external import external_surface_forcing
 from legoesm.ocean.physics.surface_forcing.restoring import restoring_surface_forcing
 from legoesm.ocean.physics.surface_forcing.bulk_formulas import bulk_formula_surface_forcing
 
@@ -38,6 +43,8 @@ def make_surface_forcing_physics(
         return _make_combined(config)
     elif scheme == "bulk_formulas":
         return _make_bulk_formulas(config)
+    elif scheme == "external":
+        return _make_external(config)
     else:
         raise ValueError(f"Unknown surface forcing scheme: {scheme!r}")
 
@@ -60,6 +67,26 @@ def _make_prescribed(config: SurfaceForcingConfig) -> Callable:
         out = prescribed_surface_forcing(
             state.u.data, state.v.data, state.T.data, state.S.data,
             z_coord, J, grid, cfg,
+        )
+        return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
+    return physics_fn
+
+
+def _make_external(config: SurfaceForcingConfig) -> Callable:
+    """Coupler-provided surface forcing: apply the passed OceanSurfaceForcing
+    (tau / q_net / freshwater / salt) through the physics path (cubed-sphere /
+    MPAS two-way coupling)."""
+    def physics_fn(state: OceanState, grid: CubedSphereGrid,
+                   z_coord: OceanZStarCoordinate,
+                   surface_forcing=None) -> OceanTendencies:
+        if surface_forcing is None:
+            return _zero_tendencies(state)
+        # Partial-cell-aware ACTUAL top-layer thickness (not dz_ref[0]*J) so the
+        # flux-to-tendency conversion is conservative on shallow top cells.
+        h = compute_layer_thickness(state.eta.data, state.H_bathy.data, z_coord)
+        out = external_surface_forcing(
+            state.u.data, state.v.data, state.T.data, state.S.data,
+            h[..., 0], surface_forcing,
         )
         return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
     return physics_fn

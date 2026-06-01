@@ -425,7 +425,10 @@ def make_coupler(
             atm_forcing, ocean_sst, ocean_u_sfc, ocean_v_sfc,
             coupler_config)
 
-        # 5. Tile fractions (ice concentration from updated ice state)
+        # 5. Tile fractions (ice concentration from updated ice state).
+        # The ice tile's ice->ocean exchange fluxes are returned per-grid-cell
+        # and blended by f_water in blend_tiles (F11), so no pre-step
+        # concentration is needed here.
         ice_conc = ice_new.concentration.data
         # Multi-category: sum across categories for total concentration
         if ice_conc.ndim > len(atm_forcing.sw_down.shape):
