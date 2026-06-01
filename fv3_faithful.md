@@ -22,6 +22,10 @@ the W2 v-wind imprint (v_ll_Linf=0.34 m/s on an analytically-zero field) + a slo
   iter135 RE-CONFIRMED production SW matrix 4/4 PASS (W2/W5/cosine_bell/W6, unchanged); W2 v_ll_Linf=0.344
   = the known tiny v-imprint (centered-vs-upwind vort tradeoff, [[the upwind FB fix is the unstable path]]).
   Surfaced W2 v-wind native + cross-grid wind_speed PNGs to user for visual edge-artifact verdict.
+  iter139: ATM harness cross-grid projection VERIFIED CLEAN (no 180° offset like the ocean had) — ran
+  16/16 all grids; localized features ALIGN across cube/latlon/ico: cosine_bell at lon=-68° on all 3,
+  W5 mountain at -88/-90/-90° (=90°W, correct); all on consistent [-180,180). So atm cross-grid comparisons
+  (incl. iter135's) are VALID. Surfaced W5 wind_speed cross-grid (mountain-flow edge-artifact check).
 - **cosine_bell** (codex-vetted iter109): cube uses apply_fortran_xppm_boundary=True; 12-day cube/ico=1.4×
   (cube best mass-cons), 99% residual panel-INTERIOR bulk PPM dissipation ⇒ faithful PPM plateau, not a bug.
 - **3D rest_state_topo "13× artifact" = FLOAT32 precision** (iter97-101): cube 3D PGF EXACTLY well-balanced
