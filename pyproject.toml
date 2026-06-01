@@ -194,6 +194,7 @@ source_modules = [
     "legoesm.ocean",
     "legoesm.land",
     "legoesm.ice",
+    "legoesm.components",
 ]
 forbidden_modules = [
     "legoesm.coupler",
