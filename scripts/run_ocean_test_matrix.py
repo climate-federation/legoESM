@@ -1081,6 +1081,23 @@ def _roll_lon_to_pm180(arr: np.ndarray, lon_deg: np.ndarray) -> np.ndarray:
     return arr
 
 
+def _assert_global_0_360_target(target_lon, n_lon: int, branch: str) -> None:
+    """Guard (codex iter141): the cube regrid branch only emits the global
+    [0,360] canvas (after the +n_lon//2 roll); it does NOT honor an arbitrary
+    target_lon.  Raise if a caller passes a target_lon that is not the supported
+    full-global [0,360] convention of the matching size, so a wrong-convention
+    request fails loud instead of silently re-introducing the 180deg offset."""
+    if target_lon is None:
+        return
+    tl = np.asarray(target_lon, dtype=np.float64).ravel()
+    if tl.size != n_lon or float(tl.min()) < -1e-6 or float(tl.max()) <= 180.0:
+        raise ValueError(
+            f"_regrid_{branch} produces a global [0,360] lon of size {n_lon}; "
+            f"target_lon (size {tl.size}, range [{tl.min():.1f},{tl.max():.1f}]) is "
+            f"not the supported [0,360] full-canvas convention -- this branch does "
+            f"not honor an arbitrary target_lon.")
+
+
 def _regrid_2d(field_arr: np.ndarray, lon_deg: np.ndarray,
                lat_deg: np.ndarray, coord_kind: str,
                target_lat: np.ndarray | None = None,
@@ -1102,6 +1119,11 @@ def _regrid_2d(field_arr: np.ndarray, lon_deg: np.ndarray,
         # (and the now-physical cube/mpas convention).  Do NOT roll to
         # [-180, 180) here -- that was the source of the 180deg offset
         # between the latlon snapshot data and its own lon axis.
+        # NOTE (codex iter141): this branch is SELF-CONSISTENT (returns native
+        # data; the saved lon axis is that same native src_lon), so there is no
+        # silent-mislabel risk -- and NO size guard vs target_lon, because
+        # staggered native fields legitimately have lon size n_lon+1 (C-grid
+        # edges) which differs from the cell-centre target_lon.
         return np.asarray(field_arr, dtype=np.float64)
     # Cubed-sphere: use face-aware bilinear interpolation (no edge artifacts).
     if coord_kind == "cube":
@@ -1124,7 +1146,13 @@ def _regrid_2d(field_arr: np.ndarray, lon_deg: np.ndarray,
         # physical 180degE lands at column n_lon//2 (lon=180 label),
         # matching the physical mpas convention.
         n_lon = out.shape[-1]
-        return np.roll(out, n_lon // 2, axis=-1)
+        out = np.roll(out, n_lon // 2, axis=-1)
+        # Robustness guard (codex iter141): this branch ONLY produces the
+        # global [0,360] canvas; it does NOT honor an arbitrary target_lon
+        # ordering.  Fail LOUD (not silent) if a caller requests a different
+        # convention/size, so the 180deg offset cannot silently re-appear.
+        _assert_global_0_360_target(target_lon, n_lon, "cube")
+        return out
     return _bin_to_latlon(field_arr.ravel(), lon_deg.ravel(), lat_deg.ravel(),
                           target_lat=target_lat, target_lon=target_lon,
                           ocean_mask=ocean_mask)
@@ -1141,6 +1169,8 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
         if arr.ndim == 2:
             arr = arr[..., None]
         # 180deg-fix: keep native [0, 360) ordering (see _regrid_2d).
+        # Self-consistent (native data + native label); no target_lon size
+        # guard (staggered native fields legitimately differ in lon size).
         return arr
     # Cubed-sphere: use face-aware bilinear interpolation.
     if coord_kind == "cube":
@@ -1160,9 +1190,13 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
         # For 3-D output (n_lat, n_lon, nlev) the lon axis is axis=1.
         if out.ndim >= 3:
             n_lon = out.shape[1]
-            return np.roll(out, n_lon // 2, axis=1)
-        n_lon = out.shape[-1]
-        return np.roll(out, n_lon // 2, axis=-1)
+            out = np.roll(out, n_lon // 2, axis=1)
+        else:
+            n_lon = out.shape[-1]
+            out = np.roll(out, n_lon // 2, axis=-1)
+        # Robustness guard (codex iter141): global [0,360] only, see _regrid_2d.
+        _assert_global_0_360_target(target_lon, n_lon, "3d_level cube")
+        return out
     if arr.ndim == 1:
         arr = arr[:, None]
     nlev = arr.shape[-1]
