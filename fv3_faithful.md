@@ -1,11 +1,18 @@
 # FV3-faithful cubed-sphere — change log (shrunk @ iter130; prior detail in git + memory `cube-fv3-faithfulness-state`)
 
-Goal: cube faithful to GFDL FV3 (oracle `../Code/FV3/atmos_cubed_sphere-symmetryclean/`),
-≈ MPAS/ico + lat-lon FV across SW→AMIP/OMIP, **zero cube edge artifacts**, visual + quantitative,
-codex/oracle-reviewed. CPU only (Metal broken). **Directive: never A-grid; be FV3-faithful; use the
+Goal (target, NOT all achieved): cube faithful to GFDL FV3 (oracle `../Code/FV3/atmos_cubed_sphere-symmetryclean/`),
+≈ MPAS/ico + lat-lon FV across SW→AMIP/OMIP, **minimal cube edge artifacts** (small documented residuals
+remain — see below; "zero" not yet reached), visual + quantitative, codex/oracle-reviewed. CPU only (Metal broken). **Directive: never A-grid; be FV3-faithful; use the
 Fortran as oracle; do NOT improvise.** Branch `latlon-fv-amip-verify`; fv3 work pushed to `fv3-faithful-cube`.
 
-## ✅ VERIFIED FAITHFUL (codex-vetted iter109; close to MPAS/latlon across the feasible scope)
+## ✅ STABLE + CROSS-GRID-CLOSE + COMPONENT-AUDITED (NOT a measured FV3 output match — codex iter137 [high])
+**SCOPE OF THE CLAIM (codex iter137):** "faithful" here = (a) component-level oracle audits (source reads
+match the Fortran) + (b) cube ≈ MPAS/latlon/ico cross-grid + (c) stable/conservative. It is NOT a
+field-by-field match against a RUNNING FV3 — no GFDL FV3 run was done (out of infra reach). And one default
+production operator is a KNOWN mismatch (centered vs FV3-upwind vorticity). So: "stable, cross-grid-close,
+component-audited," NOT "validated FV3 port." Residual EDGE imprints exist (NOT "zero edge artifacts"):
+the W2 v-wind imprint (v_ll_Linf=0.34 m/s on an analytically-zero field) + a slow C96 W5 vertex mode
+(~1.0007); small + stable but nonzero coherent residuals.
 - **area_corner (#faces)-junction SCALING** (iter84-91, codex-APPROVED, NET-ZERO): edges ×2, vertices
   ×3, C1 guard n>=1 (oracle fv_grid_tools.F90 edge=2*get_area, vertex=3*get_area; replaces iter-670
   interior-copy). W2 L2=1.76e-4 unchanged, ocean 9/9 rest machine-zero, 4 SW gold fingerprints re-pinned.
@@ -21,12 +28,17 @@ Fortran as oracle; do NOT improvise.** Branch `latlon-fv-amip-verify`; fv3 work 
   in float64 ((Φ_k−phis) std=0.0); PE runs f32 by design. Optional f32 fix.
 - **ocean cross-grid dynamics** (iter105/111): geostrophic cube 0.0143 ≈ latlon 0.0159 ≈ mpas 0.0169;
   IGW omega 1.09e-4 IDENTICAL all 3 grids. ocean cube 9/9 rest machine-zero. ⇒ ocean ≈ MPAS/latlon (OMIP).
-  iter136: ran ocean barotropic_wave cross-grid (3/3 PASS). Cube max|eta|=0.857 looked 4× latlon/mpas (0.21)
-  — INVESTIGATED + RULED OUT as an edge artifact: cube max|eta| is at face2 (i=11,j=11) = face INTERIOR at
-  all times, edge-ring energy frac=0.000 (zero eta near cube edges); the 4× is an IC-amplitude difference
-  across grids (cube IC ~0.97 vs latlon/mpas ~0.3), NOT a cube artifact. Cube ocean barotropic_wave is
-  EDGE-CLEAN. Surfaced eta cross-grid + cube-native PNGs to user. (Caveat: barotropic_wave IC amplitude is
-  not normalized consistently across grids — a harness comparability note, not a cube faithfulness bug.)
+  iter137 ⚠ WITHDREW the iter136 barotropic_wave conclusion (user + codex flagged the comparison invalid):
+  the cross-grid comparison has a **180° LONGITUDE OFFSET** + a resolution mismatch. Putting all 3 grids on
+  one [0,360] canvas: the IC (a Gaussian at 180°E by great-circle construction on ALL grids) shows at t=0
+  on MPAS at lon=180° (correct) but on CUBE + LATLON at lon≈0° — a 180° regrid lon-LABELING offset (harness
+  `_roll_lon_to_pm180` rolls data without relabeling the lon axis; the cube regridder shares the offset).
+  Also latlon stored NATIVE 48×72, not on the common 181×360 canvas. ⇒ the iter136 "4× / edge-clean" verdict
+  was based on a CONFOUNDED comparison — withdrawn. HIDDEN until now because the zonally-symmetric cases
+  (W2/rest/geostrophic-zonal) are lon-INVARIANT (offset invisible); the localized barotropic_wave exposes it.
+  NOTE: the cube IC is physically at 180°E by construction (not a physics bug) — the bug is the COMPARISON
+  regridding lon-convention. FIX NEEDED: regrid all grids to one true-physical-lon canvas → re-verify
+  cube≈MPAS/latlon for LOCALIZED features (zonally-symmetric cross-grid results stand).
 
 ## ❗ THE ONE REMAINING GAP — experimental SW FB-port edge instability (production SW is STABLE + faithful-in-results)
 CONFIRMED FV3 MISMATCH (codex iter109): production SW (operators_cdgrid.py:1167) + 3D PE (:445) use CENTERED
