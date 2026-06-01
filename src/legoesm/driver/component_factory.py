@@ -563,8 +563,13 @@ def create_ocean_component(
         Vertical coordinate (needed for the full ocean model; ignored
         for the simple ocean).
     ocean_config
-        A ``SimpleOceanConfig`` or ``OceanConfig`` instance.  If *None*,
-        defaults to ``SimpleOceanConfig()`` (fixed SST at 300 K).
+        A ``SimpleOceanConfig``, an ``OceanConfig``, or an
+        ``OceanComplexity`` rung.  If *None*, defaults to
+        ``SimpleOceanConfig()`` (fixed SST at 300 K).  An
+        ``OceanComplexity`` selects the simple-ocean *mode* via the
+        components taxonomy (``fixed_sst``/``slab``/``slab_multilayer``);
+        ``OceanComplexity.FULL_3D`` is rejected here because the full 3D
+        model needs an explicit ``OceanConfig``.
     sst_map : array-like, optional
         Spatial SST map for fixed/slab modes.
 
@@ -574,11 +579,24 @@ def create_ocean_component(
         A callable step function (simple ocean) or an ``OceanModel``
         instance (full ocean).
     """
+    from legoesm.components import OceanComplexity, ocean_simple_mode
     from legoesm.ocean.simple_ocean import SimpleOceanConfig, make_ocean
     from legoesm.ocean.state import OceanConfig
 
     if ocean_config is None:
         ocean_config = SimpleOceanConfig()
+
+    # An OceanComplexity rung selects the simple-ocean mode via the components
+    # taxonomy (the single source for fixed_sst/slab/slab_multilayer -> mode).
+    # full_3d is a prognostic model needing a full OceanConfig, not a rung.
+    if isinstance(ocean_config, OceanComplexity):
+        if ocean_config is OceanComplexity.FULL_3D:
+            raise ValueError(
+                "full_3d ocean is a prognostic 3D model that needs its "
+                "parameters: pass ocean_config=OceanConfig(...) rather than "
+                "the OceanComplexity.FULL_3D rung."
+            )
+        ocean_config = SimpleOceanConfig(mode=ocean_simple_mode(ocean_config))
 
     if isinstance(ocean_config, SimpleOceanConfig):
         logger.info(

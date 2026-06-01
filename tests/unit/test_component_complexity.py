@@ -76,3 +76,40 @@ def test_land_complexity_models_exist() -> None:
 
     assert hasattr(land, "step_land")  # slab
     assert hasattr(land, "step_multilayer_land")  # multilayer / column
+
+
+# --- the taxonomy is load-bearing: the ocean factory consumes a rung ---
+
+
+@pytest.mark.parametrize(
+    "complexity,expected_mode",
+    [
+        (OceanComplexity.FIXED_SST, "fixed"),
+        (OceanComplexity.SLAB, "slab"),
+        (OceanComplexity.SLAB_MULTILAYER, "two_layer"),
+    ],
+)
+def test_factory_consumes_complexity_rung(complexity, expected_mode) -> None:
+    """create_ocean_component accepts an OceanComplexity and builds the mode."""
+    from unittest.mock import patch
+
+    from legoesm.driver.component_factory import create_ocean_component
+
+    # make_ocean is imported inside the factory at call time -> patch its source.
+    with patch("legoesm.ocean.simple_ocean.make_ocean") as mk:
+        mk.return_value = lambda *a, **k: None
+        step = create_ocean_component(config=None, grid=None, ocean_config=complexity)
+    assert callable(step)
+    # The rung was resolved to the right SimpleOceanConfig.mode (no drift).
+    built_cfg = mk.call_args.args[0]
+    assert built_cfg.mode == expected_mode
+
+
+def test_factory_rejects_full_3d_rung_pointing_at_oceanconfig() -> None:
+    """full_3d is not a slab rung — the factory directs to an explicit OceanConfig."""
+    from legoesm.driver.component_factory import create_ocean_component
+
+    with pytest.raises(ValueError, match="OceanConfig"):
+        create_ocean_component(
+            config=None, grid=None, ocean_config=OceanComplexity.FULL_3D
+        )
