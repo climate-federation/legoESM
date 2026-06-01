@@ -109,6 +109,10 @@ def cmd_run(args):
 
         logger.info("Initializing model driver...")
         driver = ModelDriver(experiment_config)
+        # The reproducibility run manifest (A1) is written inside driver.setup()
+        # — rank-0 guarded and using the driver's *resolved* config (after
+        # grid-type normalization and setup-time overrides), so it never races
+        # under MPI and always matches the config the run actually uses.
         driver.setup()
         logger.info("Running simulation...")
         status = driver.run()

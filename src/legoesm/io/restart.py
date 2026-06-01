@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import platform
 import subprocess
+import sys
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
@@ -158,6 +160,39 @@ def _get_git_hash() -> str:
     return ""
 
 
+def _get_git_ref() -> str:
+    """Current branch/ref name (empty string if detached or not a git repo)."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            ref = result.stdout.strip()
+            return "" if ref == "HEAD" else ref  # "HEAD" => detached
+    except Exception:
+        pass
+    return ""
+
+
+def _get_git_dirty() -> bool:
+    """True if the working tree has uncommitted changes (False if unknown)."""
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return bool(result.stdout.strip())
+    except Exception:
+        pass
+    return False
+
+
 def _state_arrays_from_checkpoint_args(state, q_v, q_c=None, q_r=None,
                                        carry_aux=None) -> dict[str, np.ndarray]:
     """Build a dict of numpy arrays mirroring save_checkpoint layout.
@@ -189,6 +224,242 @@ def _meta_path(checkpoint_path: Path) -> Path:
     # Strip .npz (and handle the case where numpy appends .npz automatically)
     stem = p.stem if p.suffix == ".npz" else p.name
     return p.with_name(stem + ".meta.json")
+
+
+# ---------------------------------------------------------------------------
+# Run manifest (Stage A1 reproducibility spine)
+# ---------------------------------------------------------------------------
+# A run manifest is written ONCE at the start of a run (driver setup / cmd_run),
+# capturing everything needed to reconstruct it — independent of any checkpoint.
+# It is the legoESM half of the unified provenance document (master plan §8.2);
+# the section layout and field names align with the legoESM-ocean-runners
+# ``experiment.tag`` so that tag is a valid [legoESM]+[reproducibility] subset:
+#
+#   [legoESM]          ref, commit                         (env layer)
+#   [reproducibility]  runner_tag, python_version, jax_version, patches
+#   [config]           resolved_config (full dict)         (config layer)
+#   [result]           state_digest, rng_seeds, dataset_provenance,
+#                      model_weights_provenance            (in-/post-run layer)
+#
+# ``legoesm reproduce`` (a follow-up) reads either a bare tag (env-only) or a
+# full manifest (env + config + bit-digest ``--check``).
+
+RUN_MANIFEST_SCHEMA_VERSION = 1
+RUN_MANIFEST_FILENAME = "run_manifest.json"
+
+
+def _json_safe(obj):
+    """Recursively coerce a manifest value tree to JSON-native types.
+
+    Preserves ``str``/``bool``/``int``/``float``/``None``; maps NumPy scalars to
+    Python scalars, ``Path`` to ``str``, and arrays to lists; recurses through
+    dicts/lists/tuples.  Raises ``TypeError`` on anything else so a *lossy*
+    manifest is never written silently — the caller (best-effort CLI wrapper)
+    warns instead.  This keeps the dict returned by :func:`build_run_manifest`
+    byte-for-byte consistent with what :func:`write_run_manifest` serialises
+    (no hidden ``default=str`` stringification that would make read-back differ,
+    e.g. an integer seed silently becoming a string).
+    """
+    # NumPy scalar checks first: np.float64 is a subclass of float, so it would
+    # otherwise pass the python-scalar check and reach json.dump unconverted.
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return [_json_safe(v) for v in obj.tolist()]
+    if obj is None or isinstance(obj, (str, bool, int, float)):
+        return obj
+    if isinstance(obj, Path):
+        return str(obj)
+    if isinstance(obj, dict):
+        # Require string keys rather than coercing with str(k): coercion would
+        # silently rewrite an unsupported key (e.g. an object) and could collapse
+        # distinct keys (1 and "1") into one — exactly the lossy behaviour this
+        # normaliser exists to prevent.  JSON keys are strings anyway.
+        out = {}
+        for k, v in obj.items():
+            if not isinstance(k, str):
+                raise TypeError(
+                    f"run-manifest dict key must be str, got "
+                    f"{type(k).__name__!r} ({k!r})"
+                )
+            out[k] = _json_safe(v)
+        return out
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    raise TypeError(
+        f"run-manifest value of type {type(obj).__name__!r} is not "
+        f"JSON-serializable (value: {obj!r})"
+    )
+
+
+def build_run_manifest(
+    config,
+    *,
+    command_line: str | None = None,
+    runner_tag: str = "",
+    patches: list | None = None,
+    rng_seeds: dict | None = None,
+    dataset_provenance: list | None = None,
+    model_weights_provenance=None,
+    state_digest: str | None = None,
+) -> dict:
+    """Assemble the run-manifest dict (pure; does no I/O).
+
+    Parameters
+    ----------
+    config
+        An ``ExperimentConfig`` (canonical) or legacy ``AMIPExperimentConfig`` —
+        serialized into ``[config].resolved_config`` so the run can be rebuilt.
+    command_line
+        The invoking command; defaults to ``" ".join(sys.argv)``.
+    state_digest
+        Filled after N steps by the reproduce/checkpoint path; ``None`` at start.
+    """
+    from legoesm._version import __version__
+
+    raw = {
+        "schema_version": RUN_MANIFEST_SCHEMA_VERSION,
+        "legoESM": {
+            "ref": _get_git_ref(),
+            "commit": _get_git_hash(),
+        },
+        "reproducibility": {
+            "runner_tag": runner_tag,
+            "python_version": platform.python_version(),
+            "jax_version": _get_jax_version(),
+            "jax_x64_enabled": _get_jax_x64(),
+            "numpy_version": np.__version__,
+            "legoesm_version": __version__,
+            "platform": _get_platform_tag(),
+            "git_dirty": _get_git_dirty(),
+            "patches": list(patches) if patches else [],
+        },
+        "config": {
+            "resolved_config": _config_to_dict_any(config),
+            "config_hash": compute_config_hash(config),
+        },
+        "result": {
+            "state_digest": state_digest,
+            "rng_seeds": dict(rng_seeds) if rng_seeds else {},
+            "dataset_provenance": list(dataset_provenance) if dataset_provenance else [],
+            "model_weights_provenance": model_weights_provenance,
+        },
+        "run": {
+            "command_line": (
+                command_line if command_line is not None else " ".join(sys.argv)
+            ),
+            "creation_time": datetime.now(timezone.utc).isoformat(),
+        },
+    }
+    # Normalise to JSON-native types up front so the returned dict matches the
+    # serialised file exactly (and unsupported provenance values fail loudly).
+    return _json_safe(raw)
+
+
+def write_run_manifest(directory, config, *, exclusive: bool = False, **kwargs) -> Path:
+    """Write ``run_manifest.json`` into *directory* and return its path.
+
+    Call this at every run start (driver ``setup()`` / ``cmd_run``), not only at
+    checkpoint time, so an interrupted or crashed run is still reconstructible.
+    Extra keyword arguments are forwarded to :func:`build_run_manifest`.
+
+    The content is always written atomically (temp file then link/rename), so a
+    reader never observes a half-written manifest.  With ``exclusive=True`` the
+    create is also *atomic-exclusive* (``os.link``): it raises ``FileExistsError``
+    if the manifest already exists, which closes the check-then-create race when
+    two processes start into the same output directory — only one wins the
+    create, the other takes the read-and-validate path.
+    """
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    manifest = build_run_manifest(config, **kwargs)  # already JSON-normalised
+    path = directory / RUN_MANIFEST_FILENAME
+    # PID-unique temp so concurrent writers never clobber each other's scratch.
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    with open(tmp, "w") as f:
+        json.dump(manifest, f, indent=2, sort_keys=True)
+    try:
+        if exclusive:
+            os.link(tmp, path)   # atomic; raises FileExistsError if path exists
+        else:
+            os.replace(tmp, path)  # atomic overwrite
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    return path
+
+
+def read_run_manifest(path) -> dict:
+    """Load a run manifest written by :func:`write_run_manifest`."""
+    path = Path(path)
+    if path.is_dir():
+        path = path / RUN_MANIFEST_FILENAME
+    with open(path) as f:
+        return json.load(f)
+
+
+_REQUIRED_MANIFEST_SECTIONS = ("legoESM", "reproducibility", "config", "result", "run")
+
+
+def validate_run_manifest(manifest: dict) -> None:
+    """Raise ``ValueError`` unless *manifest* is complete and reconstructable.
+
+    Checks the exact schema version, the presence of every provenance section,
+    and — the part that actually matters — that ``config.resolved_config``
+    rebuilds an ``ExperimentConfig`` whose hash equals the recorded
+    ``config.config_hash``.  That last check means a manifest cannot merely
+    *look* well-formed (right keys) while carrying a config that can't be
+    reconstructed or whose hash was tampered/corrupted.  Shared by the driver's
+    write-once guard and by ``reproduce`` (a follow-up).
+    """
+    if not isinstance(manifest, dict):
+        raise ValueError("run manifest is not a JSON object")
+    if manifest.get("schema_version") != RUN_MANIFEST_SCHEMA_VERSION:
+        raise ValueError(
+            f"unsupported run-manifest schema_version "
+            f"{manifest.get('schema_version')!r} "
+            f"(expected {RUN_MANIFEST_SCHEMA_VERSION})"
+        )
+    # Every provenance section must be present AND a real object (a ``null`` or
+    # missing section would leave the run unreconstructable while passing a mere
+    # name-presence check).
+    for section in _REQUIRED_MANIFEST_SECTIONS:
+        if not isinstance(manifest.get(section), dict):
+            raise ValueError(f"run manifest section [{section}] missing or not an object")
+    # Required keys within sections.  Values may be empty strings for legitimate
+    # reasons (e.g. commit/ref == "" outside a git repo), so check presence, not
+    # truthiness.
+    for key in ("ref", "commit"):
+        if key not in manifest["legoESM"]:
+            raise ValueError(f"run manifest [legoESM] missing {key!r}")
+    for key in ("python_version", "jax_version"):
+        if key not in manifest["reproducibility"]:
+            raise ValueError(f"run manifest [reproducibility] missing {key!r}")
+    for key in ("command_line", "creation_time"):
+        if key not in manifest["run"]:
+            raise ValueError(f"run manifest [run] missing {key!r}")
+    config = manifest.get("config")
+    if not isinstance(config, dict):
+        raise ValueError("run manifest [config] is not an object")
+    config_hash = config.get("config_hash")
+    if not isinstance(config_hash, str) or not config_hash:
+        raise ValueError("run manifest [config].config_hash missing or empty")
+    resolved = config.get("resolved_config")
+    if not isinstance(resolved, dict) or not resolved:
+        raise ValueError("run manifest [config].resolved_config missing or empty")
+    # Reconstructability + integrity: the resolved config must rebuild and its
+    # hash must match what was recorded.
+    from legoesm.driver.config import experiment_config_from_dict
+    rebuilt = experiment_config_from_dict(resolved)
+    if compute_config_hash(rebuilt) != config_hash:
+        raise ValueError(
+            "run manifest config_hash does not match its resolved_config "
+            "(corrupt or tampered provenance)"
+        )
 
 
 # ---------------------------------------------------------------------------

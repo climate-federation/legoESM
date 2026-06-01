@@ -227,6 +227,10 @@ class ModelDriver:
         self._setup_external_forcing()
         self._create_diagnostics()
         self._create_friction()
+        # Manifest guard runs BEFORE _save_config: an invalid or different-config
+        # existing manifest must abort setup *before* experiment_config.json is
+        # (over)written, so the two run-start provenance files never disagree.
+        self._write_run_manifest()
         self._save_config()
         self._setup_parallel()
 
@@ -1211,6 +1215,80 @@ class ModelDriver:
             return
         from legoesm.driver.config import save_experiment_config
         save_experiment_config(self.config, self._output_dir / "experiment_config.json")
+
+    def _write_run_manifest(self) -> None:
+        """Write the reproducibility run manifest (Stage A1; rank 0 only).
+
+        Captures the *resolved* runtime config (``self.config`` — after grid-type
+        normalization and any setup-time overrides) plus environment/git
+        provenance, so an interrupted or archived run is reconstructible.  Writes
+        beside ``experiment_config.json`` in the run's output directory.
+
+        * Rank-0 guarded (like ``_save_config``) so MPI ranks do not race on the
+          one file.
+        * **Write-once:** an existing *valid, same-config* manifest is preserved
+          (a legitimate resume/retry of the same run). An existing manifest that
+          is invalid, or written for a *different* config, is fatal — one output
+          directory holds one run; mixing two runs' provenance is refused.
+        * **Required, not best-effort:** a write failure aborts ``setup()``.
+          This is cheap — setup() has not yet entered the time loop — and upholds
+          the A1 guarantee that a run which proceeds is always reconstructible.
+
+        NOTE: this is a provenance guard, not a mutual-exclusion lock.  The
+        atomic-exclusive create stops two starts from both *creating* the
+        manifest, and a different-config reuse is fatal, but two *same-config*
+        concurrent invocations sharing one explicit output directory are treated
+        as a resume and both proceed — they would then collide on checkpoints /
+        diagnostics / results, exactly as the driver's other output writes
+        already do without a run lock.  Serialising concurrent same-config
+        writers needs a general active-run lease (acquire / heartbeat / stale
+        detection), which is a driver-wide feature, not the manifest's job, and
+        must not break legitimate checkpoint-restart into the same directory.
+        Tracked as a follow-up; default output dirs are uniquely timestamped, so
+        this only bites on deliberate explicit-dir reuse.
+        """
+        if self._mpi_rank is not None and self._mpi_rank != 0:
+            return
+        from legoesm.io.restart import (
+            RUN_MANIFEST_FILENAME,
+            compute_config_hash,
+            read_run_manifest,
+            validate_run_manifest,
+            write_run_manifest,
+        )
+        manifest_file = self._output_dir / RUN_MANIFEST_FILENAME
+        # Atomic-exclusive create: wins the race against a concurrent start into
+        # the same directory.  The winner creates the manifest; everyone else
+        # (this run on retry/resume, or a racing process) takes the validate path.
+        try:
+            write_run_manifest(self._output_dir, self.config, exclusive=True)
+            return
+        except FileExistsError:
+            pass
+        # An existing manifest must be valid AND for this exact config; otherwise
+        # fail CLOSED rather than proceed with mismatched/unreconstructable
+        # provenance.  Runs before _save_config so experiment_config.json is never
+        # overwritten by a start that is about to be rejected.
+        try:
+            existing = read_run_manifest(manifest_file)
+            validate_run_manifest(existing)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Existing run manifest at {manifest_file} is invalid ({exc}); "
+                f"refusing to start a run without valid run-start provenance. "
+                f"Remove or repair it to continue."
+            ) from exc
+        if existing["config"]["config_hash"] != compute_config_hash(self.config):
+            raise RuntimeError(
+                f"Output directory {self._output_dir} already holds a run "
+                f"manifest written for a DIFFERENT config; refusing to mix two "
+                f"runs' provenance in one directory. Use a fresh output "
+                f"directory, or remove the existing run_manifest.json."
+            )
+        logger.info(
+            f"Run manifest already present at {manifest_file}; preserving it "
+            f"(same config — resume/retry)."
+        )
 
     def _bootstrap_runtime(self) -> None:
         """Bootstrap the full runtime: precision, backend, devices, MPI.
