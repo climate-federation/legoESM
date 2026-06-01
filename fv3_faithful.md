@@ -53,11 +53,17 @@ D→A-avg scheme suppresses it. FULLY CHARACTERIZED (iter123-134, two codex revi
   (transient→nonlinear) is a HYPOTHESIS. Separate from the production C96 W5 mode (slow ~1.0007).
 
 ## CPU-PROHIBITIVE / OUT-OF-REACH (rely on recorded audits + representative cross-grid + the spectral harness)
-3D atm baroclinic cross-grid (>21 min/case); full ocean matrix (57 cases, multi-hr); climate/AMIP; running-
-Fortran field compare (no GFDL build).
+3D atm baroclinic cross-grid (>21 min/case); full ocean matrix (57 cases, multi-hr); climate/AMIP.
+RUNNING-FORTRAN re-assessed iter140: gfortran IS available (Homebrew GCC 15.2). A self-contained subroutine
+(e.g. divergence_corner_duo — copies its metrics to locals) is EXTRACTABLE for a bit-for-bit component
+check. But the DECISIVE assembly-level compare (full c_sw→d_sw→one_grad_p step) pulls in tp_core + a2b_edge
++ duogrid + fv_mp(fill_corners) + fv_arrays types ⇒ a standalone-dycore extraction (multiple coupled
+modules + mocked framework types, NO MPI/NetCDF needed for a single 6-tile SW step) — feasible but a
+DEDICATED multi-step Fortran-port effort, not a loop-iteration task (best delegated w/ a precise plan).
 
 ## OPEN QUEUE
-1. FB edge instability: needs a running-FV3 field compare (the decisive step) OR dedicated edge-dynamics debug.
+1. FB edge instability: DECISIVE = standalone-dycore running-FV3 step compare (gfortran avail; dedicated
+   extraction effort, see above) OR dedicated edge-dynamics debug. Emergent/assembly ⇒ needs the full step.
 2. barotropic_wave resolution-convergence check (cube amplitude vs res); chord→spherical sg_area; f32 PGF.
 3. d_ext term: optionally add to the FB code (faithfulness completeness, default-off, net-zero) — found iter134.
 State persisted: memory `cube-fv3-faithfulness-state` (codex-vetted, iter89-139).
