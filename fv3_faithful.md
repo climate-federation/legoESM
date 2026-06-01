@@ -26,8 +26,11 @@ imprints exist (NOT "zero edge artifacts"): W2 v-wind imprint (v_ll_Linf=0.34 on
   bug in the OCEAN comparison harness (cube/latlon mislabeled vs mpas) — user+codex flagged, **FIXED iter138**
   (run_ocean_test_matrix `_regrid_2d`: cube regridder [-180,180) rolled +n_lon//2 → [0,360]; latlon no longer
   mis-rolled). Post-fix IC aligns at 180°E on all grids; cube RETAINS amplitude (~0.86 vs latlon/mpas ~0.21
-  dissipated) = the test's EXPECTED retention (cube less dissipative, edge-clean), not an artifact. Pending:
-  resolution-convergence check.
+  dissipated) = the test's EXPECTED retention (cube less dissipative, edge-clean), not an artifact.
+  codex-reviewed iter141: added a loud-fail guard so the cube branch rejects a non-[0,360] target_lon
+  (prevents silent 180° re-break); latlon branch confirmed self-consistent (native data+label; staggered
+  fields legitimately differ in size, so no guard). barotropic_wave 3/3 PASS + 17/17 regrid tests post-guard.
+  Pending: resolution-convergence check.
 
 ## ❗ THE ONE REMAINING GAP — experimental SW FB-port edge instability (production SW is STABLE + faithful-in-results)
 CONFIRMED FV3 MISMATCH (codex iter109): production SW (operators_cdgrid.py:1167) + 3D PE (:445) use CENTERED
