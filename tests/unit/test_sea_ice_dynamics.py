@@ -2798,3 +2798,76 @@ class TestAllOceanGridsCoupled:
         from legoesm.grids.voronoi import create_voronoi_mesh
         mesh = create_voronoi_mesh(subdivision_level=2, lloyd_iterations=5)
         self._run_grid(mesh, (mesh.nCells,), "free_drift")
+
+
+# ==============================================================================
+# #28 multicat ITD bin-accuracy of the overfill cap + Lipscomb remap
+# ==============================================================================
+
+class TestMulticatITDBinAccuracy:
+    """The overfill cap (_cap_multicat_concentration, uniform compaction) feeds
+    the Lipscomb ITD remap.  For REALISTIC sub-CFL overfill the compacted ice is
+    re-sorted strictly within its bin bounds; for pathological LARGE overfill it
+    stays volume/salt/area conserving (ITD shape may degrade — accepted, the
+    regime is unreachable).  Verifies #28."""
+
+    def _remap(self, h, a, S_ice):
+        from legoesm.ice.sea_ice import _cap_multicat_concentration
+        from legoesm.ice.itd import lipscomb_2001_remap
+        n_cat = h.shape[-1]
+        ac, hc, _, _ = _cap_multicat_concentration(a, h)
+        rem = lipscomb_2001_remap(
+            h_old=h, a_old=a, h_new=hc, a_new=ac, n_cat=n_cat, dt=3600.0,
+            T_new=jnp.full(h.shape, 258.0), S_new=S_ice,
+            V_snow_new=jnp.zeros(h.shape), V_pond_new=jnp.zeros(h.shape),
+            T_max=273.15)
+        return ac, hc, rem
+
+    def test_cap_realistic_overfill_stays_bin_accurate(self):
+        from legoesm.ice.itd import category_bounds, upper_bounds
+        n_cat = 5
+        lo, hi = category_bounds(n_cat), upper_bounds(n_cat)
+        # Each category at a thickness inside its bin; sum_a = 1.03 (sub-CFL
+        # overfill is normally <<1% — this is already ~30x a realistic value).
+        h = jnp.array([[0.3, 1.0, 1.8, 3.0, 5.0]])
+        a = jnp.array([[0.206, 0.206, 0.206, 0.206, 0.206]])
+        S_ice = jnp.full((1, n_cat), 5.0)
+        ac, hc, rem = self._remap(h, a, S_ice)
+        hr, ar = rem["h"], rem["a"]
+        # Every occupied category sits strictly within its own bin bounds.
+        for k in range(n_cat):
+            if float(ar[0, k]) > 1e-9:
+                assert float(lo[k]) - 1e-6 <= float(hr[0, k]) <= float(hi[k]) + 1e-6, (
+                    f"cat {k} h={float(hr[0,k]):.4f} outside bin "
+                    f"[{float(lo[k]):.3f},{float(hi[k]):.3f}]")
+        # Aggregate-area capped + volume + salt conserved.
+        assert float(jnp.sum(ar)) <= 1.0 + 1e-9
+        assert float(jnp.sum(hr * ar)) == pytest.approx(float(jnp.sum(h * a)), rel=1e-3)
+        assert float(jnp.sum(rem["S"] * hr * ar)) == pytest.approx(
+            float(jnp.sum(S_ice * h * a)), rel=1e-3)
+
+    def test_cap_large_overfill_conserves(self):
+        # Pathological sum_a = 2.0 (unreachable in practice): the ITD shape may
+        # degrade but volume / salt / total area MUST stay conserved + finite.
+        n_cat = 5
+        h = jnp.array([[0.05, 0.4, 1.0, 2.2, 4.0]])
+        a = jnp.array([[0.4, 0.4, 0.4, 0.4, 0.4]])  # sum = 2.0
+        S_ice = jnp.full((1, n_cat), 5.0)
+        ac, hc, rem = self._remap(h, a, S_ice)
+        hr, ar = rem["h"], rem["a"]
+        assert jnp.all(jnp.isfinite(hr)) and jnp.all(jnp.isfinite(ar))
+        assert float(jnp.sum(ar)) <= 1.0 + 1e-9
+        assert float(jnp.sum(hr * ar)) == pytest.approx(float(jnp.sum(h * a)), rel=1e-3)
+        assert float(jnp.sum(rem["S"] * hr * ar)) == pytest.approx(
+            float(jnp.sum(S_ice * h * a)), rel=1e-3)
+
+    def test_cap_differentiable(self):
+        from legoesm.ice.sea_ice import _cap_multicat_concentration
+        a = jnp.array([[0.3, 0.3, 0.3, 0.3, 0.3]])
+
+        def loss(h_row):
+            ac, hc, _, _ = _cap_multicat_concentration(a, h_row[None, :])
+            return jnp.sum(hc * ac)  # conserved volume -> grad finite
+
+        g = jax.grad(loss)(jnp.array([0.3, 1.0, 1.8, 3.0, 5.0]))
+        assert jnp.all(jnp.isfinite(g))

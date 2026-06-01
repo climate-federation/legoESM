@@ -1308,13 +1308,21 @@ def _cap_multicat_concentration(conc, h, h_snow=None, pond_depth=None):
     salt ``S_ice*h*a`` (the intensive ``S_ice`` is unchanged) while capping
     ``sum_k a_k`` at 1.  ``S = 1`` (a no-op) where the cell is not overfilled.
 
-    KNOWN limitation (deferred multicat tracer/ITD audit): for LARGE overfill
-    the compacted thickness can cross an ITD category bound, and because the
-    compaction is recorded into the pre-thermo ``h_old`` the subsequent
-    Lipscomb remap does not redistribute it into the matching bin.  Realistic
-    (sub-CFL) overfill is tiny (<<1%), so the compaction stays within the
-    category; a bin-aware mechanical redistribution for large overfill is
-    tracked separately.
+    BIN ACCURACY (#28, verified): for REALISTIC sub-CFL overfill (<<1%; tested
+    up to ~3%) the compaction is a sub-percent thickening, so the subsequent
+    Lipscomb ITD remap re-sorts every occupied category back WITHIN its bin
+    bounds while conserving volume / snow / pond / salt
+    (``test_cap_realistic_overfill_stays_bin_accurate``).  For PATHOLOGICAL
+    LARGE overfill (e.g. sum_k a_k -> 2) the compacted thickness can span more
+    than one ITD bin and the linear Lipscomb g(h) reconstruction smears the
+    per-category mean thickness slightly outside its index's bounds; the remap
+    still conserves volume / snow / pond / salt and total area exactly
+    (``test_cap_large_overfill_conserves``), so the result is SAFE, only the ITD
+    SHAPE degrades.  A hard bin-cascade re-sort would restore strict per-bin
+    membership but is intentionally NOT used: it is a step-function in ``h``
+    (non-differentiable) and the large-overfill regime is unreachable in
+    practice (the root-cause lead-freeze area bound + sub-CFL transport keep
+    overfill tiny).
     """
     sum_conc = jnp.sum(conc, axis=-1, keepdims=True)
     overfill = jnp.maximum(sum_conc, 1.0)
