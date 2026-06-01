@@ -15,14 +15,20 @@ vertex mode (~1.0007) — small + stable but nonzero coherent residuals.
 **iter143-144 — *MEASURED* FV3 bit-matches (codex iter137's "inferred not measured" cracked):** gfortran-
 extract FV3 subroutine standalone (mocked minimal types, NO mpp/MPI/NetCDF) → feed the SAME inputs as my
 Python port → bit-compare. PROVEN TOOLCHAIN (verbatim FV3 loop bodies + identical-input + negative-control).
-MEASURED-faithful so far (both machine-precision, independently re-verified):
-  (1) iter143 `divergence_corner_duo` ↔ my `_divergence_corner_duo`: interior max|diff|=4.2e-22 (N=8/12).
-  (2) iter144 `a2b_ord4` (duogrid branch) ↔ my `_interp_center_to_corner_a2b_ord4`: max|diff|=2.2e-16=1 ULP
-      (N=24/48); cascade/coeffs(a1=9/16,a2=-1/16,b1=7/12,b2=-1/12)/corner-combine all identical. a2b_ord4 is
-      in BOTH the FB Phase-4 PGF AND the production 3D PGF gz_b. (negative control: swap a1↔a2 → 0.53 diff.)
-Assets /tmp/fv3_poc{,_a2b}/. Single self-contained subroutines = solved pattern. The full running-FV3
-ASSEMBLY compare (c_sw→d_sw→one_grad_p, where the FB edge instability lives) is now de-risked; next
-subroutines to measure: c_sw KE, the d_sw vorticity flux (build up to the coupled assembly + the halo).
+MEASURED-faithful so far (all machine-precision, independently re-verified):
+  (1) iter143 `divergence_corner_duo` ↔ `_divergence_corner_duo`: interior max|diff|=4.2e-22 (N=8/12).
+  (2) iter144 `a2b_ord4` (duogrid) ↔ `_interp_center_to_corner_a2b_ord4`: 2.2e-16=1 ULP (N=24/48); in BOTH
+      the FB Phase-4 PGF AND the production 3D PGF gz_b. (neg-control: swap a1↔a2 → 0.53 diff.)
+  (3) iter145 d_sw3 B-grid KE ↔ `_bgrid_ke_transport` (the DOMINANT FB-mode source term, +1.47e-3): full
+      ke_corner interior max|diff|=3.6e-12 (N=24/48), sub-terms vb/ub Courant 4.5e-13 + ytp_v/xtp_u PPM
+      jord=9 1.8e-15 + corner-combine all faithful. (neg-control: perturb PPM r3 1e-6 → 3e-8, 7 orders up.)
+**KEY (iter145) — FB bug MEASURED-narrowed to the CROSS-FACE EDGE coupling, NOT the interior dynamics:**
+the d_sw3 KE matches bit-for-bit to edge-distance 1; the ONLY divergence (full max|diff|≈42) is the
+OUTERMOST corner ring = the BGRID_NE cross-face sync (`synchronize_bgrid_ne_corner_geo` — my port's
+geographic-frame avg vs FV3's per-seam rotation). So the 3 dominant FB-mode formulas are all MEASURED-
+faithful on the interior ⇒ the edge instability lives in the cross-face edge coupling / halo (BGRID_NE sync
++ the duogrid cross-face fill), now the measured prime suspect. NEXT: measure the BGRID_NE sync / duogrid
+halo (multi-tile compare) vs FV3 — the crux. Assets /tmp/fv3_poc{,_a2b,_dsw3}/.
 - **area_corner #faces-scaling** (iter84-91, codex-OK, NET-ZERO): edges ×2, vertices ×3, C1 guard n>=1
   (oracle fv_grid_tools.F90). W2 L2=1.76e-4, ocean 9/9 rest machine-zero, 4 golds re-pinned. CAVEAT: sg_area
   is PLANAR CHORD (only the ×2/×3 scaling faithful; chord→spherical deferred). iter142 QUANTIFIED the chord
@@ -63,9 +69,14 @@ D→A-avg scheme suppresses it. FULLY CHARACTERIZED (iter123-134, two codex revi
   damping operators (divergence damping FAITHFUL incl. FV3's deliberate edge-zeroing iter131 — so FV3 nulls
   edge div-damp too, can't be the fix); FB Phase 1→4 assembly matches dyn_core (iter134). The ONE genuinely
   MISSING term (iter134) = d_ext external-mode div-damping in one_grad_p (FV3 d_ext=0.02); adding it reduces
-  ρ (1.00187→1.00157@0.1) but does NOT cure (edge-zeroed divg_d). ⇒ EMERGENT assembly-level; single-
-  component/assembly/missing-term avenues EXHAUSTED.
-- **NEXT (out of loop reach):** field-by-field compare vs a RUNNING FV3 Fortran step (needs a GFDL build).
+  ρ (1.00187→1.00157@0.1) but does NOT cure (edge-zeroed divg_d). ⇒ EMERGENT assembly-level — now
+  MEASURED-NARROWED (iter145, see the measured-bit-match list at top): the 3 dominant FB-mode formulas
+  (divergence damping, a2b PGF, d_sw3 KE) are all bit-for-bit faithful to FV3 on the INTERIOR; the only
+  divergence is the CROSS-FACE EDGE ring (the BGRID_NE corner sync). ⇒ the bug is in the cross-face edge
+  coupling / halo (BGRID_NE sync `synchronize_bgrid_ne_corner_geo` [geographic-frame avg vs FV3 per-seam
+  rotation] + the duogrid cross-face fill) — the MEASURED prime suspect.
+- **NEXT:** measure the BGRID_NE sync / duogrid cross-face fill vs FV3 (multi-tile compare) — the crux,
+  now de-risked by the proven toolchain.
   HARNESS/ASSETS (validated, f64): /tmp/fb_arnoldi.py (eigs ρ), fb_arnoldi_damp.py, fb_localize2.py (energy
   5-term decomp), fb_nonnormal.py (K-trend). FIX-VALIDATION = re-run Arnoldi (ρ<1?). NaN mechanism
   (transient→nonlinear) is a HYPOTHESIS. Separate from the production C96 W5 mode (slow ~1.0007).
