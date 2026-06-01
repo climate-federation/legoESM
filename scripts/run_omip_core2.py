@@ -856,6 +856,13 @@ def main() -> int:
                         "Requires --partial-cell. 0=off.")
     p.add_argument("--output", type=str, default="results/omip_nemo/legoesm_tripole")
     p.add_argument("--diag-every-days", type=float, default=30.0)
+    p.add_argument("--scan-block", type=int, default=0,
+                   help="Issue #354: wrap the time loop in jax.lax.scan, "
+                        "fusing this many steps per block (CORE-II forcing "
+                        "sampled on-device, no per-step host roundtrip). "
+                        "0 (default) = the bit-identical Python loop. "
+                        "Tripole only; incompatible with --nudge-woa / "
+                        "--spinup-drag. Diagnostics run at block boundaries.")
     p.add_argument("--snapshot-every-days", type=float, default=0.0,
                    help="Write a state snapshot every N sim-days (in addition "
                         "to yearly + final). 0=off. Lets a long run be scored "
@@ -1051,6 +1058,72 @@ def main() -> int:
     _log_diag_csv(0, 0.0, d0, 0.0)
 
     t_wall = time.time()
+
+    # ------------------------------------------------------------------
+    # Issue #354: optional lax.scan block-stepping (tripole; no nudge/drag).
+    # The CORE-II forcing is sampled on-device (no per-step host roundtrip),
+    # so XLA fuses each block of ``--scan-block`` steps.  Default
+    # (--scan-block 0) keeps the bit-identical Python loop below.
+    # Diagnostics / snapshots / non-finite abort run at BLOCK BOUNDARIES.
+    # ------------------------------------------------------------------
+    use_scan = (int(args.scan_block) > 0 and app_grid_type == "tripole"
+                and nudge_tau_s == 0.0 and drag_tau_s == 0.0)
+    if int(args.scan_block) > 0 and not use_scan:
+        print("[scan] --scan-block ignored: needs grid=tripole and no WOA "
+              "nudging / spin-up drag (those require per-step host updates).",
+              flush=True)
+    if use_scan:
+        from legoesm.ocean.coupler.omip2_applicator import (
+            build_core2_forcing_device_stack, build_omip2_scan_block_fn,
+        )
+        f_stack, nn_i, nn_j, gshape = build_core2_forcing_device_stack(
+            forcing, grid, "tripole")
+        block_fn = build_omip2_scan_block_fn(
+            model, dt, f_stack, nn_i, nn_j, gshape, ramp_s=ramp_s)
+        bsz = int(args.scan_block)
+        print(f"[run] lax.scan block-stepping: block={bsz} steps "
+              f"(CORE-II forcing fused on-device; diagnostics at block "
+              f"boundaries)", flush=True)
+        step = 0
+        while step < n_steps:
+            nb = min(bsz, n_steps - step)
+            idx_block = jnp.asarray(
+                [_idx_t(step + 1 + k, dt, n_rec) for k in range(nb)],
+                dtype=jnp.int32)
+            state = block_fn(state, idx_block, jnp.int32(step + 1))
+            step += nb
+            state = jax.block_until_ready(state)
+            day = step * dt / _SEC_PER_DAY
+            d = _diag(state, lat2d, lon2d)
+            rate = step / (time.time() - t_wall)
+            print(f"[diag] step {step} (day {day:.0f}): {d} | {rate:.2f} steps/s",
+                  flush=True)
+            _log_diag_csv(step, day, d, rate)
+            if not d["finite"]:
+                print("[ABORT] non-finite state", flush=True)
+                _save_snapshot(out_dir, f"blowup_step{step}", state, lat2d, lon2d)
+                _csv.close()
+                return 1
+            if snap_every > 0 and step % snap_every == 0 and step != n_steps:
+                _save_snapshot(out_dir, f"day{int(round(day)):04d}",
+                               state, lat2d, lon2d)
+                print(f"[snapshot] day {day:.0f} saved", flush=True)
+            if not args.smoke and steps_per_year > 0 and step % steps_per_year == 0:
+                yr = step // steps_per_year
+                _save_snapshot(out_dir, f"year{yr:03d}", state, lat2d, lon2d)
+                print(f"[snapshot] year {yr} saved", flush=True)
+        state = jax.block_until_ready(state)
+        _save_snapshot(out_dir, "final", state, lat2d, lon2d)
+        _csv.close()
+        rate = n_steps / (time.time() - t_wall)
+        print(f"[done] {n_steps} steps @ {rate:.2f} steps/s (scan block={bsz}); "
+              f"final: {_diag(state, lat2d, lon2d)}")
+        if args.smoke:
+            yr_est = steps_per_year / rate / 3600.0
+            print(f"[smoke] projected wall-time: {yr_est:.2f} h/yr  "
+                  f"({args.years:.0f}yr -> {yr_est*args.years:.1f} h)")
+        return 0
+
     for step in range(1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
         ramp = min(1.0, (step * dt) / ramp_s) if ramp_s > 0 else 1.0
