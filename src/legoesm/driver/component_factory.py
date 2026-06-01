@@ -629,14 +629,18 @@ def create_land_component(config: ExperimentConfig, grid, *, land_config=None):
     grid
         Horizontal grid object (used for determining spatial shape).
     land_config
-        A ``LandConfig`` or ``MultiLayerLandConfig``.  If *None*,
-        defaults to ``LandConfig()``.
+        A ``LandConfig``, a ``MultiLayerLandConfig``, or a
+        ``LandComplexity`` rung.  If *None*, defaults to ``LandConfig()``.
+        A ``LandComplexity`` selects the default config of that complexity
+        (``slab`` -> ``LandConfig``, ``multilayer``/column ->
+        ``MultiLayerLandConfig``).
 
     Returns
     -------
     step_fn : callable
         The land surface step function.
     """
+    from legoesm.components import LandComplexity
     from legoesm.land import (
         LandConfig, MultiLayerLandConfig,
         step_land, step_multilayer_land,
@@ -644,6 +648,17 @@ def create_land_component(config: ExperimentConfig, grid, *, land_config=None):
 
     if land_config is None:
         land_config = LandConfig()
+
+    # A LandComplexity rung selects the default config of that complexity.
+    # Land has no string "mode" (the config *type* is the complexity), so the
+    # rung -> config resolution lives here in the factory (which owns the
+    # concrete land configs) rather than in the pure components taxonomy.
+    if isinstance(land_config, LandComplexity):
+        land_config = (
+            MultiLayerLandConfig()
+            if land_config is LandComplexity.MULTILAYER
+            else LandConfig()
+        )
 
     if isinstance(land_config, MultiLayerLandConfig):
         logger.info("Land: multilayer model (n_layers=%d)", land_config.soil_grid.n_layers)

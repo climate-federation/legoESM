@@ -113,3 +113,19 @@ def test_factory_rejects_full_3d_rung_pointing_at_oceanconfig() -> None:
         create_ocean_component(
             config=None, grid=None, ocean_config=OceanComplexity.FULL_3D
         )
+
+
+@pytest.mark.parametrize(
+    "complexity,expected_step",
+    [
+        (LandComplexity.SLAB, "step_land"),
+        (LandComplexity.MULTILAYER, "step_multilayer_land"),
+    ],
+)
+def test_land_factory_consumes_complexity_rung(complexity, expected_step) -> None:
+    """create_land_component accepts a LandComplexity and returns its model."""
+    import legoesm.land as land
+    from legoesm.driver.component_factory import create_land_component
+
+    step = create_land_component(config=None, grid=None, land_config=complexity)
+    assert step is getattr(land, expected_step)
