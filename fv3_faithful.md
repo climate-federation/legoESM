@@ -6,12 +6,18 @@ remain — "zero" not reached), visual + quantitative, codex/oracle-reviewed. CP
 **Directive: never A-grid; be FV3-faithful; use the Fortran as oracle; do NOT improvise.**
 Branch `latlon-fv-amip-verify`; fv3 work pushed to `fv3-faithful-cube`.
 
-## ✅ STABLE + CROSS-GRID-CLOSE + COMPONENT-AUDITED (NOT a measured FV3 run-match — codex iter137 [high])
+## ✅ STABLE + CROSS-GRID-CLOSE + COMPONENT-AUDITED (+ FIRST MEASURED FV3 bit-match iter143)
 **SCOPE (honest):** "faithful" = (a) component oracle source-audits + (b) cube ≈ MPAS/latlon/ico cross-grid
-+ (c) stable/conservative. NOT a field-by-field match vs a RUNNING FV3 (no GFDL build — out of reach); and
-one default production operator is a KNOWN mismatch (centered vs FV3-upwind vorticity). Residual edge
-imprints exist (NOT "zero edge artifacts"): W2 v-wind imprint (v_ll_Linf=0.34 on an analytically-zero field)
-+ slow C96 W5 vertex mode (~1.0007) — small + stable but nonzero coherent residuals.
++ (c) stable/conservative. Mostly INFERRED (not yet a full field-by-field RUNNING-FV3 match); one default
+production operator is a KNOWN mismatch (centered vs FV3-upwind vorticity). Residual edge imprints exist
+(NOT "zero edge artifacts"): W2 v-wind imprint (v_ll_Linf=0.34 on an analytically-zero field) + slow C96 W5
+vertex mode (~1.0007) — small + stable but nonzero coherent residuals.
+**iter143 — FIRST *MEASURED* FV3 bit-match (codex iter137's "inferred not measured" cracked):** gfortran-
+extracted FV3 `divergence_corner_duo` (sw_core.F90) standalone (mocked types, NO mpp/MPI/NetCDF), fed the
+SAME metric+state arrays as my Python `_divergence_corner_duo`, compared interior: **max|diff|=4.2e-22 ≈ 1
+machine-eps** (signal RMS 6.2e-7), robust N=8/12, independently re-verified. ⇒ that component is now
+MEASURED-faithful (not just source-read), AND the extract→compile→run→compare TOOLCHAIN is PROVEN + reusable
+for more subroutines (assets /tmp/fv3_poc/). The path to a full running-FV3 assembly comparison is now open.
 - **area_corner #faces-scaling** (iter84-91, codex-OK, NET-ZERO): edges ×2, vertices ×3, C1 guard n>=1
   (oracle fv_grid_tools.F90). W2 L2=1.76e-4, ocean 9/9 rest machine-zero, 4 golds re-pinned. CAVEAT: sg_area
   is PLANAR CHORD (only the ×2/×3 scaling faithful; chord→spherical deferred). iter142 QUANTIFIED the chord
@@ -61,12 +67,13 @@ D→A-avg scheme suppresses it. FULLY CHARACTERIZED (iter123-134, two codex revi
 
 ## CPU-PROHIBITIVE / OUT-OF-REACH (rely on recorded audits + representative cross-grid + the spectral harness)
 3D atm baroclinic cross-grid (>21 min/case); full ocean matrix (57 cases, multi-hr); climate/AMIP.
-RUNNING-FORTRAN re-assessed iter140: gfortran IS available (Homebrew GCC 15.2). A self-contained subroutine
-(e.g. divergence_corner_duo — copies its metrics to locals) is EXTRACTABLE for a bit-for-bit component
-check. But the DECISIVE assembly-level compare (full c_sw→d_sw→one_grad_p step) pulls in tp_core + a2b_edge
-+ duogrid + fv_mp(fill_corners) + fv_arrays types ⇒ a standalone-dycore extraction (multiple coupled
-modules + mocked framework types, NO MPI/NetCDF needed for a single 6-tile SW step) — feasible but a
-DEDICATED multi-step Fortran-port effort, not a loop-iteration task (best delegated w/ a precise plan).
+RUNNING-FORTRAN: gfortran available (GCC 15.2). iter143 PROVEN the toolchain on divergence_corner_duo
+(machine-precision bit-match, /tmp/fv3_poc/). Single self-contained subroutines are now a SOLVED, reusable
+pattern (extract → mock minimal types → feed identical metrics to both → compare). The DECISIVE assembly-
+level compare (full c_sw→d_sw→one_grad_p step, where the FB instability lives) still needs the coupled
+modules (tp_core + a2b_edge + duogrid + fv_mp + fv_arrays) + the cross-face halo — a dedicated multi-step
+build, but now de-risked by the proven toolchain. Next subroutines to measure: c_sw KE, a2b_ord4, the d_sw
+vorticity flux (build up to the assembly).
 
 ## OPEN QUEUE
 1. FB edge instability: DECISIVE = standalone-dycore running-FV3 step compare (gfortran avail; dedicated
