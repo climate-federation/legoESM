@@ -170,9 +170,23 @@ def config_to_dict(config) -> dict:
     return d
 
 
-def config_from_dict(d: dict) -> AMIPExperimentConfig:
-    """Reconstruct config from a dict (e.g., loaded from JSON)."""
-    # Filter to only known fields
+def config_from_dict(d: dict):
+    """Reconstruct config from a dict (e.g., loaded from JSON / a checkpoint).
+
+    Auto-detects the schema so it round-trips whatever ``config_to_dict`` wrote:
+    an ``ExperimentConfig`` serializes with nested ``grid``/``dycore``/``output``
+    sub-config dicts (and carries fields like ``seed`` that
+    ``AMIPExperimentConfig`` lacks), so it is reconstructed through the canonical
+    ``experiment_config_from_dict`` — otherwise the dict is treated as the legacy
+    flat ``AMIPExperimentConfig``.  Without this, loading an NPZ checkpoint saved
+    from an ``ExperimentConfig`` silently dropped every field outside the AMIP
+    schema (including the master RNG ``seed``).
+    """
+    if isinstance(d.get("grid"), dict) or isinstance(d.get("dycore"), dict):
+        # Deferred import: forcing -> driver only at call time (avoids a module
+        # import cycle, since driver.config imports AMIPExperimentConfig here).
+        from legoesm.driver.config import experiment_config_from_dict
+        return experiment_config_from_dict(d)
     known = set(AMIPExperimentConfig._fields)
     filtered = {k: v for k, v in d.items() if k in known}
     return AMIPExperimentConfig(**filtered)

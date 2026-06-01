@@ -188,6 +188,8 @@ def test_driver_manifest_uses_resolved_normalized_config(tmp_path: Path) -> None
     driver._write_run_manifest()
     m = read_run_manifest(tmp_path)
     assert m["config"]["resolved_config"]["grid"]["grid_type"] == "mpas"
+    # The master RNG seed is recorded for reproducibility.
+    assert m["result"]["rng_seeds"] == {"master": driver.config.seed}
 
     # A non-zero MPI rank must NOT write (no race on the shared file).
     rank1_dir = tmp_path / "rank1"

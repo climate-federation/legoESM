@@ -261,6 +261,7 @@ class Config:
             },
             "days": int(time_cfg.get("duration_hours", 120) / 24),
             "start_day": float(time_cfg.get("start_day", 0.0)),
+            "seed": int(d.get("seed", 0)),  # master RNG seed (reproducibility)
             "dataset": forcing.get("dataset", "analytical"),
             "forcing_path": forcing.get("path", ""),
             "radiation": radiation.get("scheme", atm.get("radiation", "gray")),

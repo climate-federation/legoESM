@@ -125,6 +125,7 @@ def test_translation_field_mapping_is_pinned() -> None:
             "radiation": {"scheme": "rrtmgp"},
             "surface": {"T_init": 288.0, "RH_init": 0.8},
             "hardware": {"parallelism": {"distributed": True}},
+            "seed": 9,
         }
     )
     ec = cfg.to_experiment_config()
@@ -159,6 +160,7 @@ def test_translation_field_mapping_is_pinned() -> None:
     assert ec.T_init == 288.0
     assert ec.RH_init == 0.8
     assert ec.distributed is True
+    assert ec.seed == 9                           # master RNG seed (reproducibility)
 
 
 def test_diag_days_floor_is_at_least_one() -> None:

@@ -785,8 +785,12 @@ class ModelDriver:
             return
 
         from legoesm.parallel.ensemble import perturb_initial_conditions
+        from legoesm.runtime.rng import split_key
 
-        key = jax.random.PRNGKey(42)
+        # Central RNG: derive the ensemble-IC key from the run's master seed
+        # (config.seed) rather than a hardcoded magic seed, so the perturbation
+        # is reproducible from the seed recorded in the run manifest.
+        key = split_key(self.config.seed, "ensemble_ic")
         self.state = perturb_initial_conditions(
             self.state, key, self._ensemble_size, scale=0.01,
         )
@@ -1261,7 +1265,12 @@ class ModelDriver:
         # the same directory.  The winner creates the manifest; everyone else
         # (this run on retry/resume, or a racing process) takes the validate path.
         try:
-            write_run_manifest(self._output_dir, self.config, exclusive=True)
+            write_run_manifest(
+                self._output_dir,
+                self.config,
+                exclusive=True,
+                rng_seeds={"master": self.config.seed},
+            )
             return
         except FileExistsError:
             pass

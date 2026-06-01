@@ -93,6 +93,7 @@
   "sbm_RH_ref": 0.7,
   "sbm_cape_threshold": 70.0,
   "sbm_tau_c": 7200.0,
+  "seed": 0,
   "sfc_emissivity": 0.97,
   "shard_radiation_columns": false,
   "sic_path": "",

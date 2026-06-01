@@ -307,6 +307,11 @@ class ExperimentConfig(NamedTuple):
     gradient_checkpoint: bool = False  # wrap scan body with jax.checkpoint for AD
     debug_precision: bool = False     # log warnings when array dtypes mismatch policy
 
+    # Reproducibility (Stage A1).  Master RNG seed for the run: every random key
+    # descends from this via ``legoesm.runtime.rng.split_keys``, so the run is
+    # reproducible from the seed recorded in the run manifest.
+    seed: int = 0
+
     # Distributed
     distributed: bool = False
     ensemble_size: int = 1
@@ -375,6 +380,8 @@ class ExperimentConfig(NamedTuple):
             )
         if self.days <= 0:
             errors.append(f"days must be > 0, got {self.days}")
+        if self.seed < 0:
+            errors.append(f"seed must be >= 0, got {self.seed}")
         if self.sbm_cape_threshold < 0:
             errors.append(
                 f"sbm_cape_threshold must be >= 0, got {self.sbm_cape_threshold}"
