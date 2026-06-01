@@ -47,6 +47,7 @@ def compute_vertical_K_profiles(
     physics_config,
     A_v_background: float = 0.0,
     K_v_background: float = 0.0,
+    eos_fn=None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Compute total ``(K_v, A_v)`` at interior interfaces for an implicit solve.
 
@@ -64,6 +65,13 @@ def compute_vertical_K_profiles(
     A_v_background, K_v_background
         Optional additional floors added uniformly to all interfaces
         (typically ``LatLonCGridOceanConfig.A_v`` / ``K_v``).
+    eos_fn
+        Optional EOS ``fn(T, S, p) -> rho`` (e.g. the recipe's
+        ``veros_nonlin2``). When None, the schemes' density (and the TKE
+        static-stability N²) default to Wright 1997 — bit-identical with
+        the historical behaviour. Passing the model's EOS makes the TKE
+        N² (and, for ``n2_mode="adiabatic"``, the convective trigger)
+        consistent with the dynamical core.
 
     Returns
     -------
@@ -85,7 +93,8 @@ def compute_vertical_K_profiles(
     vmix = physics_config.vertical_mixing
     if vmix.scheme != "none":
         K_vmix, A_vmix = _vmix_K_profiles(
-            state, z_coord, surface_forcing, vmix, physics_config.constants)
+            state, z_coord, surface_forcing, vmix, physics_config.constants,
+            eos_fn=eos_fn)
         K_v_total = K_v_total + K_vmix
         A_v_total = A_v_total + A_vmix
 
@@ -121,13 +130,16 @@ def compute_vertical_K_profiles(
 
 
 def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
-                     constants_config=ConstantsConfig()):
+                     constants_config=ConstantsConfig(), eos_fn=None):
     """Re-compute K_v, A_v at interfaces for the chosen vmix scheme.
 
     For ``constant`` / ``richardson`` this duplicates only the K
     computation (cheap).  For ``kpp`` this also re-runs the boundary
     layer diagnosis, which is somewhat more expensive but still much
     cheaper than the tridiagonal solve it enables.
+
+    ``eos_fn`` (optional) overrides the density EOS used to compute N²
+    (default Wright 1997 -> bit-identical legacy).
     """
     scheme = vmix_cfg.scheme
     J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
@@ -141,7 +153,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         A_v = jnp.full(shape, cfg.A_v, dtype=dtype)
         return K_v, A_v
 
-    rho = _compute_rho(state, z_coord, J)
+    rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
 
     if scheme == "richardson":
         from legoesm.ocean.physics.vertical_mixing.richardson import (
@@ -175,6 +187,19 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                  if surface_forcing is not None else None)
         tau_y = (getattr(surface_forcing, "tau_y", None)
                  if surface_forcing is not None else None)
+        # Adiabatic static-stability N² (Veros parcel displacement) needs
+        # the cell-centre hydrostatic pressure + the same EOS as the
+        # dynamical core. Only computed when the TKE config opts in
+        # (``n2_mode="adiabatic"``) so the default path is unchanged.
+        p_cell = None
+        if getattr(vmix_cfg.tke, "n2_mode", "insitu") == "adiabatic":
+            from legoesm.ocean.eos import compute_hydrostatic_pressure
+            from legoesm.ocean.eos import _maybe_partial_h_actual
+            h_actual = _maybe_partial_h_actual(state, z_coord)
+            p_cell = compute_hydrostatic_pressure(
+                rho, state.eta.data, z_coord.dz_ref, J,
+                constants_config.rho_0, h_actual=h_actual,
+            )
         # Use Mode B (diagnostic / quasi-steady) iteration: ``tke_old=None``
         # seeds at background and 3 iterations of the same backward-Euler
         # step bring TKE to within ~few % of the prognostic equilibrium
@@ -189,6 +214,11 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             dt=_DIAGNOSTIC_DT, cfg=vmix_cfg.tke,
             rho_0=constants_config.rho_0, g=constants_config.g,
             n_iterations=3,
+            p_cell=p_cell, dz_ref=z_coord.dz_ref, jacobian=J, eos_fn=eos_fn,
+            # Interior interface depths (nlev-1) for the Bryan-Lewis kappaH
+            # floor (Veros enable_kappaH_profile); z_half_ref is negative
+            # downward, interior interfaces drop the surface (k=0) + bottom.
+            z_interface=z_coord.z_half_ref[1:-1],
         )
         return tke_out.K_H, tke_out.K_M
 

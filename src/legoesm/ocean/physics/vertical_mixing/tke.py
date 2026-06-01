@@ -186,13 +186,87 @@ def _bougeault_lacarrere_lengths(
     return l_up, l_dn
 
 
+def _veros_buoyancy_length(
+    e: jnp.ndarray,
+    N2: jnp.ndarray,
+    dz_int: jnp.ndarray,
+    mxl_min: float,
+) -> jnp.ndarray:
+    r"""Veros buoyancy mixing length (``tke_mxl_choice=2``), SIGNED-N^2 aware.
+
+    Faithful port of ``veros/core/tke.py:34,48-65``. The raw buoyancy
+    length is
+
+    .. math::
+
+        l = \sqrt{2}\,\sqrt{e} \,/\, \sqrt{\max(10^{-12},\,N^2)}
+
+    which **blows up** where ``N^2 <= 0`` (a statically unstable interface):
+    the floor ``1e-12`` makes ``l`` enormous, so the parcel mixes across
+    the whole unstable column — this is how Veros's TKE convects. The
+    growth is then bounded by the MITgcm/OPA two-pass limiter (``l`` may
+    increase by at most one cell thickness ``dz`` per level going up and
+    going down) and floored at ``mxl_min``. Crucially this is **not** the
+    legacy 2-cell hard cap (:func:`_bougeault_lacarrere_lengths`), which
+    would suppress the convective blow-up.
+
+    legoESM grid note: legoESM carries TKE at the ``nlev-1`` interior
+    interfaces (Veros's W-grid), and ``dz_int[k]`` is the spacing between
+    interface ``k`` and ``k+1`` (= the intervening cell thickness), which
+    plays the role of Veros's ``dzt`` in the MITgcm pass.
+
+    Pure ``jax`` (``lax.fori_loop`` for the two sweeps); differentiable
+    (the ``maximum``/``minimum`` floors are sub-gradient-safe).
+    """
+    n_int = e.shape[-1]
+    sqrttke = jnp.sqrt(jnp.maximum(0.0, e))
+    # Raw length: huge where N2 <= 0 (denominator -> sqrt(1e-12)).
+    mxl = jnp.sqrt(2.0) * sqrttke / jnp.sqrt(jnp.maximum(1e-12, N2))
+
+    # dz between adjacent interfaces (length n_int - 1); used as the
+    # per-step growth allowance in both sweeps.
+    dz_step = dz_int[..., :n_int - 1] if dz_int.shape[-1] >= n_int else dz_int
+
+    # Static Python loop bounds (n_int is a compile-time shape) so the
+    # fori_loop start/stop are concrete -> reverse-mode AD safe (dynamic
+    # bounds break jax.grad). The index clamps below keep dz_step in range.
+    _dz_last = dz_step.shape[-1] - 1
+
+    # Backward pass (deep -> shallow): limit growth going up. Index k runs
+    # from n_int-2 down to 0; mxl[k] <= mxl[k+1] + dz_step[k].
+    def _backward(i, m):
+        k = n_int - 2 - i
+        allow = m[..., k + 1] + dz_step[..., jnp.minimum(k, _dz_last)]
+        return m.at[..., k].set(jnp.minimum(m[..., k], allow))
+
+    mxl = jax.lax.fori_loop(0, max(n_int - 1, 0), _backward, mxl)
+
+    # Forward pass (shallow -> deep): limit growth going down.
+    def _forward(k, m):
+        allow = m[..., k - 1] + dz_step[..., jnp.minimum(k - 1, _dz_last)]
+        return m.at[..., k].set(jnp.minimum(m[..., k], allow))
+
+    mxl = jax.lax.fori_loop(1, max(n_int, 1), _forward, mxl)
+
+    return jnp.maximum(mxl, mxl_min)
+
+
 def compute_mixing_lengths(
     e: jnp.ndarray,
     N2: jnp.ndarray,
     dz_half: jnp.ndarray,
     cfg: TKEConfig,
+    *,
+    signed_n2: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute (l_k, l_eps) for the chosen ``tke_mxl_choice``.
+
+    When ``signed_n2`` is True (the ``n2_mode="adiabatic"`` convective
+    path), ``N2`` may be negative and the **Veros buoyancy length**
+    (:func:`_veros_buoyancy_length`) is used so the length blows up across
+    statically-unstable columns (convection). When False (legacy /
+    in-situ), the bit-identical Bougeault-Lacarrere closed form with the
+    2-cell cap is used.
 
     Returns
     -------
@@ -200,6 +274,11 @@ def compute_mixing_lengths(
         eps = c_eps·e^{3/2} / l_eps respectively.
     """
     if cfg.tke_mxl_choice == 2:
+        if signed_n2:
+            # Veros mxl_choice=2: a single length used for BOTH K_M
+            # (l_k) and dissipation (l_eps), as in veros/core/tke.py.
+            l_buoy = _veros_buoyancy_length(e, N2, dz_half, cfg.mxl_min)
+            return l_buoy, l_buoy
         l_up, l_dn = _bougeault_lacarrere_lengths(
             e, N2, dz_half, cfg.mxl_min,
         )
@@ -248,29 +327,71 @@ def _vertical_shear_squared(
 def _compute_N2(
     rho_cell: jnp.ndarray, dz_half: jnp.ndarray, rho_0: float,
     g: float = constants.g,
+    *,
+    T_cell: jnp.ndarray | None = None,
+    S_cell: jnp.ndarray | None = None,
+    p_cell: jnp.ndarray | None = None,
+    dz_ref: jnp.ndarray | None = None,
+    jacobian: jnp.ndarray | None = None,
+    eos_fn=None,
+    n2_mode: str = "insitu",
 ) -> jnp.ndarray:
-    """N^2 at interfaces from cell-centre in-situ density.
+    """N^2 at interfaces.
 
-    ``N^2 = -(g/rho_0) drho/dz`` with z positive upward. legoESM's
-    cell index k = 0 is the surface (top) and k = nlev-1 is the
-    bottom, so z is decreasing with k. Discretely, between
-    cell centres k and k+1 a distance ``dz_half[k]`` apart:
+    ``n2_mode="insitu"`` (default, BIT-IDENTICAL legacy): from cell-centre
+    *in-situ* density, ``N^2 = -(g/rho_0) drho/dz`` with z positive upward.
+    legoESM's cell index k = 0 is the surface (top) and k = nlev-1 is the
+    bottom, so z is decreasing with k. Discretely, between cell centres k
+    and k+1 a distance ``dz_half[k]`` apart::
 
         drho/dz = (rho[k] - rho[k+1]) / dz_half[k]
 
-    For stable stratification this is negative (light water on top),
-    so ``N^2 = -g/rho_0 * drho/dz > 0`` as expected.
+    For stable stratification this is negative (light water on top), so
+    ``N^2 = -g/rho_0 * drho/dz > 0``. The result is **clipped >= 0**: the
+    in-situ density difference carries compressibility and is biased too
+    stable, so its sign is not a reliable convection trigger — the
+    unstable case is handled by a separate convective-adjustment scheme.
+
+    ``n2_mode="adiabatic"``: the **true static stability** via adiabatic
+    parcel displacement to the upper cell's pressure (Veros
+    thermodynamics.py:99-103), delegating to the shared
+    :func:`legoesm.ocean.eos.compute_buoyancy_frequency_adiabatic` (no
+    duplicate numerics). The result is **SIGNED** (not clipped) — N^2 < 0
+    marks a statically unstable interface, which is exactly the convection
+    trigger the TKE closure needs. Requires ``T_cell``, ``S_cell``,
+    ``p_cell`` (cell-centre pressure [Pa]), the reference layer thickness
+    ``dz_ref`` (shape ``(nlev,)``) and the ``jacobian`` (shape ``(...)``)
+    so the shared helper's interface thickness
+    ``0.5*(dz_ref*J)[k] + 0.5*(dz_ref*J)[k+1]`` reproduces ``dz_half[k]``
+    exactly, plus an ``eos_fn``.
 
     Returns
     -------
-    N2 : (..., nlev-1) — clipped to >= 0 (stably stratified). The
-        unstable case is handled by convective adjustment elsewhere.
+    N2 : (..., nlev-1). Clipped >= 0 for ``"insitu"``; signed for
+        ``"adiabatic"``.
     """
-    dz_safe = jnp.maximum(dz_half, _EPS)
-    # drho/dz with z positive upward — negative for stable stratification.
-    drho_dz = (rho_cell[..., :-1] - rho_cell[..., 1:]) / dz_safe
-    N2 = -g / rho_0 * drho_dz
-    return jnp.maximum(N2, 0.0)
+    if n2_mode == "insitu":
+        dz_safe = jnp.maximum(dz_half, _EPS)
+        # drho/dz with z positive upward — negative for stable stratification.
+        drho_dz = (rho_cell[..., :-1] - rho_cell[..., 1:]) / dz_safe
+        N2 = -g / rho_0 * drho_dz
+        return jnp.maximum(N2, 0.0)
+    if n2_mode == "adiabatic":
+        if (T_cell is None or S_cell is None or p_cell is None
+                or dz_ref is None or jacobian is None):
+            raise ValueError(
+                "n2_mode='adiabatic' requires T_cell, S_cell, p_cell "
+                "(cell-centre pressure [Pa]), dz_ref and jacobian to "
+                "displace parcels through the EOS."
+            )
+        from legoesm.ocean.eos import compute_buoyancy_frequency_adiabatic
+        return compute_buoyancy_frequency_adiabatic(
+            T_cell, S_cell, p_cell, dz_ref, jacobian,
+            eos_fn=eos_fn, rho_ref=rho_0, g=g,
+        )
+    raise ValueError(
+        f"Unknown n2_mode={n2_mode!r}; expected 'insitu' or 'adiabatic'."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -364,12 +485,21 @@ def _solve_tke_backward_euler(
     e_sqrt = jnp.sqrt(jnp.maximum(e_old, cfg.tke_background))
     # Linearised dissipation rate (per unit e_new):
     diss_rate = cfg.c_eps * e_sqrt / jnp.maximum(l_eps, cfg.mxl_min)
-    # Linearised buoyancy sink (per unit e_new):
-    #   P_b = -K_H · N^2 ≈ -(c_k · l_k · sqrt(2e_old)) · N^2  per unit e
-    # We absorb the sqrt(2 e_old) factor into a rate by dividing by e_old.
-    # When N^2 = 0 (neutral / unstable), this rate vanishes.
+    # Buoyancy work ``P_b = -K_H · N^2`` split sign-aware so the implicit
+    # diagonal stays >= 1 even when N^2 < 0 (statically unstable / signed
+    # adiabatic mode):
+    #   - N^2 >= 0 (stable): P_b is a SINK, linearised implicitly per unit
+    #     e_new via the rate ``K_H · N^2 / e``.
+    #   - N^2 <  0 (unstable): P_b is a SOURCE (convective PE -> TKE);
+    #     added EXPLICITLY to the RHS (``-K_H · N^2 > 0``) so it does not
+    #     drive the diagonal non-positive.
+    # For the default in-situ N^2 (clipped >= 0) ``N2_neg`` is identically
+    # 0, so this is BIT-IDENTICAL to the prior single-sink form.
     e_safe = jnp.maximum(e_old, cfg.tke_background)
-    buoy_sink_rate = K_H_old * N2 / e_safe
+    N2_pos = jnp.maximum(N2, 0.0)
+    N2_neg = jnp.minimum(N2, 0.0)
+    buoy_sink_rate = K_H_old * N2_pos / e_safe
+    buoy_source = -K_H_old * N2_neg   # >= 0; explicit TKE production
 
     # Diffusion coefficients on the *flux faces* between interface k and
     # interface k+1 (one less than the number of interfaces).
@@ -413,8 +543,9 @@ def _solve_tke_backward_euler(
     #     + diffusion contribution = e_old + dt * P_s + flux BC
     diag = 1.0 + dt * (diss_rate + buoy_sink_rate) + b_diff
 
-    # RHS: explicit shear-production source + previous-step e.
-    rhs = e_old + dt * P_s
+    # RHS: explicit shear-production source + explicit convective buoyancy
+    # production (zero in the default in-situ mode) + previous-step e.
+    rhs = e_old + dt * (P_s + buoy_source)
 
     # Surface flux BC at interface k=0: add the flux divergence with
     # ``forc_tke_surface``-style energy input.
@@ -437,31 +568,122 @@ def _solve_tke_backward_euler(
 # ---------------------------------------------------------------------------
 
 
+def _prandtl_number(
+    N2: jnp.ndarray,
+    shear_sq: jnp.ndarray,
+    kappaM: jnp.ndarray,
+    cfg: TKEConfig,
+) -> jnp.ndarray:
+    r"""Turbulent Prandtl number for the K_H = K_M / Pr relation.
+
+    Mirrors ``veros/core/tke.py:74-90``:
+
+    - ``prandtl_mode="richardson"`` (Veros ``enable_Prandtl_tke=True``):
+      the gradient Richardson number ``Ri = N^2 / max(shear^2, eps)``
+      (Veros forms ``Ri = N^2 / max(K_diss_v / kappaM, eps)`` with
+      ``K_diss_v / kappaM = shear^2``), then
+      ``Pr = max(1, min(10, 6.6*Ri))``. In a convecting column
+      ``N^2 < 0 -> Ri < 0 -> Pr = 1`` (K_H tracks the large convective
+      K_M); in the stratified interior ``Pr -> 10`` (small abyssal K_H).
+    - ``prandtl_mode="constant"``: ``Pr = Prandtl_tke0`` (Veros
+      ``enable_Prandtl_tke=False`` fallback, default 10).
+
+    Differentiable; the ``min``/``max`` clamps are sub-gradient-safe and
+    the ``6.6`` / ``1`` / ``10`` are Veros's fixed scheme constants.
+    """
+    if cfg.prandtl_mode == "constant":
+        return jnp.full_like(kappaM, cfg.Prandtl_tke0)
+    if cfg.prandtl_mode == "richardson":
+        Ri = N2 / jnp.maximum(shear_sq, 1e-12)
+        return jnp.maximum(1.0, jnp.minimum(10.0, 6.6 * Ri))
+    raise ValueError(
+        f"Unknown prandtl_mode={cfg.prandtl_mode!r}; expected 'unit', "
+        f"'constant' or 'richardson'."
+    )
+
+
+def _bryan_lewis_kappaH_floor(z_interface: jnp.ndarray) -> jnp.ndarray:
+    r"""Bryan & Lewis (1979) depth-dependent tracer-diffusivity floor.
+
+    Veros ``enable_kappaH_profile`` (``veros/core/tke.py:94-102``):
+
+    .. math::
+
+        \kappa_H^{floor}(z) = \left(0.8 + \frac{1.05}{\pi}\,
+            \arctan\!\frac{-z - 2500}{222.2}\right) \times 10^{-4}
+
+    with ``z`` the interface position [m] (negative downward; Veros uses
+    ``-zw`` with ``zw < 0``). Mainly raises the abyssal diffusivity below
+    ~2500 m. Pure arithmetic -> differentiable.
+    """
+    # -z = depth (positive); Veros's argument is (-zw - 2500)/222.2 with
+    # zw the (negative) interface height -> here z_interface plays zw.
+    depth = -z_interface
+    return (0.8 + 1.05 / jnp.pi
+            * jnp.arctan((depth - 2500.0) / 222.2)) * 1.0e-4
+
+
 def compute_K_from_tke(
     e: jnp.ndarray,
     l_k: jnp.ndarray,
     cfg: TKEConfig,
+    *,
+    N2: jnp.ndarray | None = None,
+    shear_sq: jnp.ndarray | None = None,
+    z_interface: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Compute K_M and K_H from TKE and the mixing length.
+    r"""Compute K_M and K_H from TKE and the mixing length.
 
     .. math::
 
-        K_M = c_k \\, l_k \\, \\sqrt{2 e}
+        K_M = c_k \, l_k \, \sqrt{2 e}, \qquad
+        K_M \leftarrow \min(\kappa_{M,\max},\, K_M)
 
-    K_H equals K_M in the canonical Gaspar 1990 / Veros form
-    (turbulent Prandtl number = 1). When ``enable_kappaH_profile`` is
-    set, K_H tapers toward kappaH_min near the surface — that
-    refinement is not implemented in v1 and the option is recorded
-    but currently ignored.
+    The ``kappaM_max`` ceiling (Veros default 100 m²/s) caps the
+    convective viscosity when ``l_k`` blows up over a statically-unstable
+    column. ``K_M`` is then floored at ``kappaM_min``.
+
+    Tracer diffusivity ``K_H`` (Prandtl chain — the abyssal
+    over-diffusion fix):
+
+    - ``prandtl_mode="unit"`` (default, BIT-IDENTICAL legacy):
+      ``K_H = max(K_M, kappaH_min)`` — the MOMENTUM floor ``kappaM_min``
+      leaks into the tracer floor.
+    - ``prandtl_mode in {"constant", "richardson"}``: Veros's
+      ``K_H = max(kappaH_min, K_M / Pr)`` (see :func:`_prandtl_number`);
+      requires ``N2`` and ``shear_sq`` for the ``"richardson"`` Pr.
 
     Returns
     -------
-    K_M, K_H : (..., nlev-1) at interfaces. Both floored at
-    ``kappaM_min`` / ``kappaH_min`` respectively.
+    K_M, K_H : (..., nlev-1) at interfaces.
     """
     K_M = cfg.c_k * l_k * jnp.sqrt(2.0 * jnp.maximum(e, cfg.tke_background))
-    K_M = jnp.maximum(K_M, cfg.kappaM_min)
-    K_H = jnp.maximum(K_M, cfg.kappaH_min)
+
+    if cfg.prandtl_mode == "unit":
+        # Legacy path — BIT-IDENTICAL: no kappaM_max ceiling, tracer floor
+        # inherits the momentum floor (kappaH_min dead).
+        K_M = jnp.maximum(K_M, cfg.kappaM_min)
+        K_H = jnp.maximum(K_M, cfg.kappaH_min)
+    else:
+        # Convective ceiling BEFORE the floor (Veros: kappaM = min(kappaM_max,
+        # c_k*mxl*sqrttke) then max(kappaM_min, kappaM)). Only on the
+        # opt-in Prandtl path so the default stays bit-identical.
+        K_M = jnp.minimum(cfg.kappaM_max, K_M)
+        K_M = jnp.maximum(K_M, cfg.kappaM_min)
+        if N2 is None or shear_sq is None:
+            raise ValueError(
+                f"prandtl_mode={cfg.prandtl_mode!r} requires N2 and "
+                f"shear_sq for the Prandtl-number computation."
+            )
+        Pr = _prandtl_number(N2, shear_sq, K_M, cfg)
+        K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr)
+        # Bryan-Lewis (1979) arctan depth floor on K_H (Veros
+        # enable_kappaH_profile). Previously recorded-but-ignored; now wired
+        # on the opt-in Prandtl path. Low impact in shallow domains; raises
+        # the abyssal tracer floor below ~2500 m. Requires the interface
+        # depths.
+        if cfg.enable_kappaH_profile and z_interface is not None:
+            K_H = jnp.maximum(K_H, _bryan_lewis_kappaH_floor(z_interface))
     return K_M, K_H
 
 
@@ -485,6 +707,12 @@ def tke_vertical_mixing(
     rho_0: float = constants.rho_ocean,
     g: float = constants.g,
     n_iterations: int = 1,
+    *,
+    p_cell: jnp.ndarray | None = None,
+    dz_ref: jnp.ndarray | None = None,
+    jacobian: jnp.ndarray | None = None,
+    eos_fn=None,
+    z_interface: jnp.ndarray | None = None,
 ) -> TKEOutput:
     """Advance the TKE closure and return new K_M, K_H, TKE.
 
@@ -540,7 +768,17 @@ def tke_vertical_mixing(
         )
 
     shear_sq = _vertical_shear_squared(u_cell, v_cell, dz_half)
-    N2 = _compute_N2(rho_cell, dz_half, rho_0, g)
+
+    # Static stability N^2. ``"insitu"`` (default) is the clipped in-situ
+    # form (BIT-IDENTICAL); ``"adiabatic"`` is the SIGNED Veros parcel-
+    # displacement form that lets the TKE convect (N^2 < 0).
+    signed_n2 = cfg.n2_mode == "adiabatic"
+    N2 = _compute_N2(
+        rho_cell, dz_half, rho_0, g,
+        T_cell=T_cell, S_cell=S_cell, p_cell=p_cell,
+        dz_ref=dz_ref, jacobian=jacobian, eos_fn=eos_fn,
+        n2_mode=cfg.n2_mode,
+    )
 
     if tau_x_surface is None and tau_y_surface is None:
         surface_flux = jnp.zeros(rho_cell.shape[:-1], dtype=rho_cell.dtype)
@@ -552,8 +790,11 @@ def tke_vertical_mixing(
     # Sub-iteration loop (Mode B convergence; Mode A uses n_iterations=1).
     tke_curr = tke_old
     for _ in range(max(1, int(n_iterations))):
-        l_k, l_eps = compute_mixing_lengths(tke_curr, N2, dz_half, cfg)
-        K_M_curr, K_H_curr = compute_K_from_tke(tke_curr, l_k, cfg)
+        l_k, l_eps = compute_mixing_lengths(
+            tke_curr, N2, dz_half, cfg, signed_n2=signed_n2)
+        K_M_curr, K_H_curr = compute_K_from_tke(
+            tke_curr, l_k, cfg, N2=N2, shear_sq=shear_sq,
+            z_interface=z_interface)
         P_s_curr = K_M_curr * shear_sq
         tke_curr = _solve_tke_backward_euler(
             e_old=tke_curr,
@@ -565,8 +806,11 @@ def tke_vertical_mixing(
         )
 
     # Final K from converged TKE.
-    l_k_final, l_eps_final = compute_mixing_lengths(tke_curr, N2, dz_half, cfg)
-    K_M, K_H = compute_K_from_tke(tke_curr, l_k_final, cfg)
+    l_k_final, l_eps_final = compute_mixing_lengths(
+        tke_curr, N2, dz_half, cfg, signed_n2=signed_n2)
+    K_M, K_H = compute_K_from_tke(
+        tke_curr, l_k_final, cfg, N2=N2, shear_sq=shear_sq,
+        z_interface=z_interface)
 
     return TKEOutput(K_M=K_M, K_H=K_H, tke_new=tke_curr, l_eps=l_eps_final)
 

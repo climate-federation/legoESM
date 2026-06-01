@@ -1715,10 +1715,19 @@ class LatLonCGridOceanModel:
                 u=state.u.replace(data=u_cell),
                 v=state.v.replace(data=v_cell),
             )
+            # Use the model's own EOS for the vmix density / static-stability
+            # N² so the TKE convection trigger (n2_mode="adiabatic") is
+            # consistent with the dynamical core. None for Wright leaves the
+            # legacy behaviour bit-identical.
+            from legoesm.ocean.eos import make_eos_fn as _make_eos_fn
+            _vmix_eos_fn = _make_eos_fn(
+                eos=self.config.eos, eos_linear=self.config.eos_linear,
+            )
             K_v_cell, A_v_cell = compute_vertical_K_profiles(
                 cc_state, self.z_coord, surface_forcing, physics_config,
                 A_v_background=float(self.config.A_v),
                 K_v_background=float(self.config.K_v),
+                eos_fn=_vmix_eos_fn,
             )
 
         # dz at cell centers (jacobian-corrected so the eta-stretched

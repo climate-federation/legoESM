@@ -66,10 +66,38 @@ class TKEConfig(NamedTuple):
     mxl_min: float = 1.0e-8
     tke_mxl_choice: int = 2
     kappaM_min: float = 2.0e-4
+    kappaM_max: float = 100.0            # convective ceiling on K_M [m^2/s] (Veros default)
     kappaH_min: float = 2.0e-5
     enable_kappaH_profile: bool = True
     tke_surface_min: float = 1.0e-4      # surface TKE floor [m^2/s^2]
     tke_background: float = 1.0e-6       # interior TKE floor [m^2/s^2]
+    # ----- Static-stability N^2 mode (deep-ocean ventilation / convection) -----
+    # ``"insitu"`` (default, BIT-IDENTICAL legacy): N^2 from the in-situ
+    #   density difference at native pressures, clipped >= 0 (convection
+    #   never fires through the TKE -- a static-stability bias that leaves
+    #   the abyss unventilated).
+    # ``"adiabatic"``: N^2 by adiabatic parcel displacement to the upper
+    #   cell's pressure (Veros thermodynamics.py:99-103), SIGNED (not
+    #   clipped). With this, a statically-unstable column gives N^2 < 0, the
+    #   buoyancy length scale blows up, and K_M saturates toward
+    #   ``kappaM_max`` -- i.e. the TKE itself convects, exactly as Veros's
+    #   ``enable_tke`` path does. Requires the caller to pass T/S/pressure
+    #   + an EOS to :func:`tke_vertical_mixing`.
+    n2_mode: str = "insitu"
+    # ----- Tracer/momentum Prandtl chain (abyssal over-diffusion fix) -----
+    # ``"unit"`` (default, BIT-IDENTICAL legacy): K_H = max(K_M, kappaH_min)
+    #   -- the MOMENTUM floor ``kappaM_min`` leaks into the TRACER floor
+    #   (``kappaH_min`` is dead) -> abyssal K_H ~ kappaM_min, ~6-10x too
+    #   diffusive vs Veros.
+    # ``"constant"``: K_H = max(kappaH_min, K_M / Prandtl_tke0).
+    # ``"richardson"``: Veros ``enable_Prandtl_tke=True`` --
+    #   Prandtl = max(1, min(10, 6.6 * Ri)) with the gradient Richardson
+    #   number Ri = N^2 / max(shear^2, eps); K_H = max(kappaH_min,
+    #   K_M / Prandtl). In the stratified interior Pr -> 10 (small abyssal
+    #   K_H); in a convecting column Ri < 0 -> Pr -> 1 (K_H tracks the large
+    #   convective K_M). This is the Veros ACC default.
+    prandtl_mode: str = "unit"
+    Prandtl_tke0: float = 10.0           # constant Prandtl number (Veros Prandtl_tke0)
 
 
 class KPPConfig(NamedTuple):

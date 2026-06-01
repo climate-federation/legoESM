@@ -130,8 +130,28 @@ ACC_TKE_CONFIG = TKEConfig(
     mxl_min=1.0e-8,
     tke_mxl_choice=2,
     kappaM_min=2.0e-4,
+    kappaM_max=100.0,            # Veros default kappaM_max (convective ceiling)
     kappaH_min=2.0e-5,
     enable_kappaH_profile=True,
+    # ----- Deep-ocean ventilation fix (opt-in; default config bit-identical) -----
+    # Veros computes the static-stability N² by adiabatic parcel displacement to
+    # the upper cell's pressure (thermodynamics.py:99-103). legoESM's legacy
+    # in-situ N² is biased ~6x too stable (compressibility) and NEVER goes
+    # negative -> the abyss never convects -> the +5.3°C warm bias. The adiabatic
+    # N² recovers Veros's static instability (gate 1: N²<0 count matches Veros
+    # MACHINE-close, 2461 vs 2461 on the 60-day bridged state) so the TKE itself
+    # convects: the buoyancy length blows up over unstable columns and K_M
+    # saturates toward kappaM_max.
+    n2_mode="adiabatic",
+    # Veros tracer diffusivity K_H = max(kappaH_min, K_M/Prandtl) with the
+    # Richardson-dependent Prandtl number (enable_Prandtl_tke=True, the Veros
+    # ACC + global default): Pr = max(1, min(10, 6.6*Ri)). In the stratified
+    # interior Pr -> 10 (small abyssal K_H ~ kappaH_min, fixing the ~9x
+    # over-diffusion from the legacy K_H = max(K_M, kappaH_min) bug chain where
+    # the momentum floor kappaM_min leaked into the tracer floor); in a
+    # convecting column Ri < 0 -> Pr -> 1 so K_H tracks the large convective K_M.
+    prandtl_mode="richardson",
+    Prandtl_tke0=10.0,
 )
 
 # Veros GM/Redi knobs (verbatim from ACCSetup)
@@ -335,6 +355,10 @@ def build_acc_state(grid: LatLonGrid,
         T_water_init_C=15.0, T_deep=0.0,
         S_uniform=35.0, H_max=H_max,
         land_mask_override=land_mask,
+        # Veros ACC: T = (1 - z/z_bottom)*15 -- LINEAR, not legoESM's default
+        # exponential T(z)=T_deep+(15-T_deep)*exp(z/1000) which leaves the
+        # deepest cell ~1.16 C too warm at t=0 (acc.py:117). Gate 4.
+        stratification="linear",
     )
     # Prognostic EKE: when the recipe runs EKE on (``ACC_GM_REDI_CONFIG.eke`` set),
     # the eddy-energy field must be a Field from step 0. The model step turns ``eke``
@@ -569,6 +593,17 @@ def build_acc_model_config(grid: LatLonGrid | None = None, *,
         # Verified against ``veros/core/density/get_rho.py``.
         eos="veros_nonlin2",
         implicit_vertical_mixing=True,
+        # Drop legoESM's constant background TRACER diffusivity K_v (default
+        # 1e-4). Veros ACC has NO constant background tracer mixing -- the
+        # abyssal floor is kappaH_min=2e-5 via the TKE Prandtl chain (see
+        # ACC_TKE_CONFIG.prandtl_mode). Leaving the 1e-4 background on top of
+        # the TKE kappaM_min(2e-4) leak gave the ~9x-too-diffusive abyss
+        # (3.0e-4 vs Veros ~3.3e-5) that ventilates away the deep stratification.
+        # (A_v -- the constant background MOMENTUM viscosity, default 1e-3 -- is
+        # left at the legoESM default; Veros's momentum floor is kappaM_min=2e-4
+        # via TKE, so A_v is a separate momentum-only delta outside the deep-T
+        # warm-bias scope and is not touched here.)
+        K_v=0.0,
         # GM/Redi is a TOP-LEVEL (dynamics) field on the lat-lon C-grid — this
         # is what the model actually reads (ocean_model_latlon_cgrid.py:998).
         # Setting it only in physics.lateral_mixing left GM/Redi inactive.

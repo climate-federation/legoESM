@@ -787,6 +787,97 @@ def compute_buoyancy_frequency(
     return -(g / rho_ref) * drho_dz
 
 
+def compute_buoyancy_frequency_adiabatic(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    p_cell: jnp.ndarray,
+    dz: jnp.ndarray,
+    jacobian: jnp.ndarray,
+    eos_fn=None,
+    rho_ref: float = rho_0,
+    g: float = constants.g,
+) -> jnp.ndarray:
+    r"""Static-stability ``N^2`` via adiabatic parcel displacement.
+
+    This is the **true static stability** used by Veros
+    (``veros/core/thermodynamics.py:99-103``) and the cleaner form
+    requested for oracle fidelity: instead of differencing the *in-situ*
+    densities ``rho(T[k], S[k], p[k]) - rho(T[k+1], S[k+1], p[k+1])``
+    (which carries the compressibility difference between two different
+    reference pressures and is therefore biased ~6x too stable), both
+    parcels are evaluated at the **upper cell's reference pressure**
+    ``p_cell[k]`` so only the (potential-) density contrast remains:
+
+    .. math::
+
+        N^2[k] = -\frac{g}{\rho_0}\,
+            \frac{\rho(T_{k+1}, S_{k+1}, p_k) - \rho(T_k, S_k, p_k)}
+                 {\Delta z_{int}[k]}
+
+    With ``z`` increasing upward and legoESM's ``k=0`` at the surface,
+    a statically *unstable* column (denser water displaced over lighter)
+    gives ``N^2 < 0``. **Unlike** :func:`compute_buoyancy_frequency` and
+    the legacy ``tke._compute_N2``, this is **not** clipped at zero — the
+    sign is the convection trigger, so it must be allowed to go negative.
+
+    The choice of the *upper cell-centre* pressure ``p_cell[k]`` (rather
+    than the interface pressure) matches Veros exactly: Veros passes
+    ``press = abs(zt)`` (the cell-centre geometric depth of the upper
+    cell) and compares ``get_rho(T[k+1], S[k+1], press[k])`` against the
+    upper cell's own in-situ density ``rho[k] = get_rho(T[k], S[k],
+    press[k])`` — i.e. both at ``press[k]``.
+
+    Differentiability: the only operations are the (differentiable) EOS
+    evaluations and arithmetic — no ``where``/``cond`` on traced values —
+    so this is fully ``jax.grad``-safe (``d N^2 / dT`` etc. flow through
+    the EOS at the displaced pressure).
+
+    Parameters
+    ----------
+    T, S : array
+        Potential temperature [degC] / salinity [PSU] at cell centres,
+        shape ``(..., nlev)``.
+    p_cell : array
+        Hydrostatic pressure [Pa] at cell centres, shape ``(..., nlev)``
+        (e.g. from :func:`compute_ocean_rho_and_pressure`). The pressure
+        of the *upper* cell of each interface, ``p_cell[..., :-1]``, is
+        used as the common reference pressure for both displaced parcels.
+    dz : array
+        Reference layer thickness [m], shape ``(nlev,)``.
+    jacobian : array
+        Dynamic Jacobian, shape ``(...)``.
+    eos_fn : callable or None
+        EOS ``fn(T, S, p) -> rho``. If None, uses :func:`wright_eos`.
+    rho_ref : float
+        Reference density [kg/m^3].
+    g : float
+        Gravitational acceleration [m/s^2].
+
+    Returns
+    -------
+    array : ``N^2`` at interior interfaces [1/s^2], shape ``(..., nlev-1)``.
+        **Signed** (negative where statically unstable).
+    """
+    if eos_fn is None:
+        eos_fn = wright_eos
+
+    dz_actual = dz * jacobian[..., jnp.newaxis]
+    dz_interface = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])
+
+    # Common reference pressure = the UPPER cell's centre pressure (Veros
+    # press[k] = abs(zt[k])).
+    p_ref_int = p_cell[..., :-1]
+
+    # Upper parcel (k) and lower parcel (k+1), BOTH at the upper pressure.
+    rho_upper = eos_fn(T[..., :-1], S[..., :-1], p_ref_int)
+    rho_lower = eos_fn(T[..., 1:], S[..., 1:], p_ref_int)
+
+    # drho/dz with z positive upward; (rho_upper - rho_lower)/dz. For a
+    # stable column rho_upper < rho_lower -> drho/dz < 0 -> N^2 > 0.
+    drho_dz = (rho_upper - rho_lower) / dz_interface
+    return -(g / rho_ref) * drho_dz
+
+
 # ==============================================================================
 # Shared helpers for ocean physics integration modules
 # ==============================================================================
