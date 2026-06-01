@@ -246,15 +246,16 @@ class ModelDriver:
         """Create horizontal grid and vertical coordinate."""
         gc = self.config.grid
 
-        if gc.grid_type == "cubed_sphere":
-            from legoesm.grids.cubed_sphere import create_cubed_sphere
-            self.grid = create_cubed_sphere(gc.resolution)
-        elif gc.grid_type == "gaussian":
-            from legoesm.grids.gaussian import create_gaussian_grid
-            self.grid = create_gaussian_grid(gc.resolution)
-        elif gc.grid_type == "latlon":
-            from legoesm.grids.latlon import create_latlon_grid
-            global_grid = create_latlon_grid(gc.resolution)
+        # All global grids go through the one component-agnostic factory
+        # (legoesm.grids.factory.create_grid) — the driver owns no grid
+        # constructor dispatch of its own.  Two grid types need driver-local
+        # handling the factory cannot do: ``latlon`` is sliced to this rank's
+        # MPI band post-construction, and ``plane`` takes (nx, ny, nlev, dx,
+        # dy) rather than a single resolution.
+        from legoesm.grids.factory import create_grid
+
+        if gc.grid_type == "latlon":
+            global_grid = create_grid("latlon", gc.resolution)
             # Stage 3-B: under lat-lon band MPI, slice the global grid
             # to this rank's lat band.  The runtime bootstrap (Stage
             # 3-A) already activated set_halo_backend("mpi", layout)
@@ -283,13 +284,6 @@ class ModelDriver:
                 )
             else:
                 self.grid = global_grid
-        elif gc.grid_type == "mpas":
-            # SCVT Voronoi mesh + TRiSK discretization.  Legacy aliases
-            # (voronoi, icosahedral, mpas_voronoi) are normalised to
-            # this canonical name at the config boundary
-            # (driver.config.normalize_grid_type).
-            from legoesm.grids.voronoi import create_voronoi_mesh
-            self.grid = create_voronoi_mesh(gc.resolution, lloyd_iterations=50)
         elif gc.grid_type == "plane":
             # PR2c MVP: square ``resolution x resolution`` doubly-
             # periodic plane with default ``dx = dy = 10 km``. Users
@@ -304,10 +298,13 @@ class ModelDriver:
                 dx=10_000.0, dy=10_000.0,
             )
         else:
-            raise ValueError(
-                f"Unknown grid_type={gc.grid_type!r}. "
-                f"Supported: cubed_sphere, gaussian, latlon, voronoi, plane"
-            )
+            # cubed_sphere / gaussian / mpas.  mpas keeps the driver's
+            # 50-iteration Lloyd relaxation default; unknown grid types raise
+            # ValueError inside create_grid (with the available list).  Legacy
+            # mpas aliases (voronoi, icosahedral, mpas_voronoi) are normalised
+            # to "mpas" at the config boundary (driver.config.normalize_grid_type).
+            kwargs = {"lloyd_iterations": 50} if gc.grid_type == "mpas" else {}
+            self.grid = create_grid(gc.grid_type, gc.resolution, **kwargs)
 
         if gc.vertical_coord == "hybrid":
             from legoesm.grids.vertical import make_hybrid_levels
