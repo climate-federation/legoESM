@@ -86,12 +86,23 @@ EIGEN-ANALYSIS (iter115b-123, finite-diff power iteration — jvp CPU-prohibitiv
   - **NaN MECHANISM = HYPOTHESIS (codex [medium], not demonstrated):** transient ×1.4 + the 1.0019
     eigenvalue → nonlinear breakdown by day2 is PLAUSIBLE but not causally shown; would need projection
     tracking onto the growth subspace during the nonlinear run + showing a fix delays/removes the NaN.
-  - **FIX STRATEGY (codex [medium] — testable, NOT pre-excluding damping):** evaluate candidate fixes by
-    BOTH ρ(M') (Arnoldi) AND max_K‖M^K‖ (transient gain); include targeted edge/Nyquist filtering AND the
-    edge c_sw→d_sw coupling change in the comparison (the damp_v×8 null was ONE config, not damping as a
-    class). Validated replication /tmp/fb_arnoldi.py (eigs) + /tmp/fb_localize2.py (decomp) are the assets.
-    NEXT (dedicated/fresh): candidate edge-coupling fix → re-run Arnoldi (does ρ drop <1?) + transient gain
-    + oracle W2-C36 step compare. Separate from the production C96 W5 eigenmode (slow ~1.0007).
+  - **iter129 ROOT-NARROWING (two oracle-grounded rule-outs):** (1) **a2b_ord4 edge = FAITHFUL** — FV3
+    a2b_edge.F90:98 branches `if (bounded_domain .or. dg%is_initialized)` to the PLAIN interior 4-pt
+    stencil EVERYWHERE (no edge_w/e/s/n, no corner extrap); the edge_* path is non-duogrid ONLY. My port's
+    interior-stencil-everywhere a2b IS the FV3 duogrid path. NOT the bug. (2) **DIVERGENCE damping does NOT
+    stabilize** — Arnoldi ρ with FV3 operational dddmp=0.2 + d2_bg=0.05 = 1.00167 (vs baseline 1.00188);
+    ~11% of the excess, reaching ρ<1 needs unphysical ~10× damping. So the unstable edge eigenmode is
+    ~NULL-SPACE of the divergence damping TOO (matches iter125 vorticity-damping null-space). ⇒ a STRUCTURAL
+    edge-coupling mode in the JOINT null space of BOTH FV3 damping operators (resolves codex [medium] #4:
+    damping now properly tested via Arnoldi ρ — it can't fix it). PRIME REMAINING SUSPECT: the damping
+    stencils' EDGE HALO (the d_sw5 div-damp + del6 vort-damp fluxes may be ~zero at the panel-edge cells —
+    a halo/stencil deficiency — so the edge mode is undamped; FV3's reach the edge).
+  - **NaN MECHANISM = HYPOTHESIS (codex [medium], not demonstrated).** **FIX STRATEGY (codex [medium]):**
+    evaluate candidates by BOTH ρ(M') (Arnoldi) AND max_K‖M^K‖; the fix is a structural EDGE-COUPLING /
+    damping-edge-halo change, NOT a damping coefficient (now ruled out). Assets: /tmp/fb_arnoldi_damp.py
+    (ρ-vs-damping), /tmp/fb_arnoldi.py (eigs), /tmp/fb_localize2.py (decomp). NEXT (dedicated/fresh): probe
+    whether d_sw5/del6 damping fluxes are ~0 at the panel edge for the eigenmode → fix the damping edge
+    halo OR the c_sw→d_sw edge coupling → re-run Arnoldi (ρ<1?). Separate from the production C96 W5 mode.
 
 ## CPU-PROHIBITIVE here (rely on recorded audits + representative cross-grid + t=0 probes + the λ harness)
 3D atm baroclinic cross-grid (>21 min/case); full ocean matrix --grid all (57 cases, multi-hr); climate/AMIP;
