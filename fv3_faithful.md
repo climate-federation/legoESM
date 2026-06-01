@@ -75,8 +75,16 @@ D→A-avg scheme suppresses it. FULLY CHARACTERIZED (iter123-134, two codex revi
   divergence is the CROSS-FACE EDGE ring (the BGRID_NE corner sync). ⇒ the bug is in the cross-face edge
   coupling / halo (BGRID_NE sync `synchronize_bgrid_ne_corner_geo` [geographic-frame avg vs FV3 per-seam
   rotation] + the duogrid cross-face fill) — the MEASURED prime suspect.
-- **NEXT:** measure the BGRID_NE sync / duogrid cross-face fill vs FV3 (multi-tile compare) — the crux,
-  now de-risked by the proven toolchain.
+- **iter146 narrowing (reading-based) WITHIN the cross-face suspect:** (a) the BGRID_NE sync
+  `synchronize_bgrid_ne_corner_geo` is a geographic-frame average of the FRAME-INVARIANT (east,north)
+  components → mathematically correct for vector sync (≡ FV3 per-seam rotation if the cos/sin_angle_corner
+  are right) ⇒ the sync FORMULA is not the bug. (b) the FB wind halo `_pad_halo_dgrid_for_ppm` uses
+  `ext_vector_dgrid` WITH cos_sg5+rsin2 → it IS non-orthogonality-aware, so the memory's "dropped sin_sg(5)"
+  issue (which is in the 3D-PE `pad_halo_vector_4d`) does NOT apply to the FB SW path. ⇒ the remaining
+  unmeasured suspect = does `ext_vector_dgrid` (my duogrid cross-face wind/uc-vc halo) MATCH FV3's duogrid
+  halo (duogrid_mod: fill_corner_region + lagrange_poly_interp) bit-for-bit?
+- **NEXT:** measure `ext_vector_dgrid` vs FV3 `duogrid_mod` cross-face fill (multi-tile compare) — the crux,
+  de-risked by the proven toolchain (duogrid_mod is a Lagrange-interp module, likely extractable sans MPI).
   HARNESS/ASSETS (validated, f64): /tmp/fb_arnoldi.py (eigs ρ), fb_arnoldi_damp.py, fb_localize2.py (energy
   5-term decomp), fb_nonnormal.py (K-trend). FIX-VALIDATION = re-run Arnoldi (ρ<1?). NaN mechanism
   (transient→nonlinear) is a HYPOTHESIS. Separate from the production C96 W5 mode (slow ~1.0007).
