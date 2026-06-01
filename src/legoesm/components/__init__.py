@@ -8,6 +8,14 @@ remains an interchangeable, individually-differentiable brick.
 See :mod:`legoesm.components.protocol`.
 """
 
+from legoesm.components.interface import (  # noqa: F401
+    CouplingBrick,
+    FormBrick,
+    Interface,
+    RegridBrick,
+    TransferBrick,
+    validate_interface,
+)
 from legoesm.components.protocol import (  # noqa: F401
     AbstractComponent,
     DycoreProtocol,
@@ -22,4 +30,10 @@ __all__ = [
     "PhysicsModuleProtocol",
     "SurfaceComponentProtocol",
     "validate_dycore",
+    "Interface",
+    "FormBrick",
+    "TransferBrick",
+    "RegridBrick",
+    "CouplingBrick",
+    "validate_interface",
 ]
