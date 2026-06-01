@@ -1,121 +1,63 @@
-# FV3-faithful cubed-sphere — change log (shrunk @ iter130; prior detail in git + memory `cube-fv3-faithfulness-state`)
+# FV3-faithful cubed-sphere — change log (shrunk @ iter140; prior detail in git + memory `cube-fv3-faithfulness-state`)
 
 Goal (target, NOT all achieved): cube faithful to GFDL FV3 (oracle `../Code/FV3/atmos_cubed_sphere-symmetryclean/`),
 ≈ MPAS/ico + lat-lon FV across SW→AMIP/OMIP, **minimal cube edge artifacts** (small documented residuals
-remain — see below; "zero" not yet reached), visual + quantitative, codex/oracle-reviewed. CPU only (Metal broken). **Directive: never A-grid; be FV3-faithful; use the
-Fortran as oracle; do NOT improvise.** Branch `latlon-fv-amip-verify`; fv3 work pushed to `fv3-faithful-cube`.
+remain — "zero" not reached), visual + quantitative, codex/oracle-reviewed. CPU only (Metal broken).
+**Directive: never A-grid; be FV3-faithful; use the Fortran as oracle; do NOT improvise.**
+Branch `latlon-fv-amip-verify`; fv3 work pushed to `fv3-faithful-cube`.
 
-## ✅ STABLE + CROSS-GRID-CLOSE + COMPONENT-AUDITED (NOT a measured FV3 output match — codex iter137 [high])
-**SCOPE OF THE CLAIM (codex iter137):** "faithful" here = (a) component-level oracle audits (source reads
-match the Fortran) + (b) cube ≈ MPAS/latlon/ico cross-grid + (c) stable/conservative. It is NOT a
-field-by-field match against a RUNNING FV3 — no GFDL FV3 run was done (out of infra reach). And one default
-production operator is a KNOWN mismatch (centered vs FV3-upwind vorticity). So: "stable, cross-grid-close,
-component-audited," NOT "validated FV3 port." Residual EDGE imprints exist (NOT "zero edge artifacts"):
-the W2 v-wind imprint (v_ll_Linf=0.34 m/s on an analytically-zero field) + a slow C96 W5 vertex mode
-(~1.0007); small + stable but nonzero coherent residuals.
-- **area_corner (#faces)-junction SCALING** (iter84-91, codex-APPROVED, NET-ZERO): edges ×2, vertices
-  ×3, C1 guard n>=1 (oracle fv_grid_tools.F90 edge=2*get_area, vertex=3*get_area; replaces iter-670
-  interior-copy). W2 L2=1.76e-4 unchanged, ocean 9/9 rest machine-zero, 4 SW gold fingerprints re-pinned.
-  CAVEAT: `sg_area` is PLANAR CHORD — only the ×2/×3 SCALING is faithful; chord→spherical is a tracked follow-up.
-- **gnomonic_ed grid** WIRED + halo-collapse fixed (iter73) + codex-approved; equiangular byte-identical.
-- **atm SW cross-grid** (iter92, 16/16): cube W2 L2 1.76e-4 ≈ latlon 2.67e-4 ≈ ico 9.9e-5. baroclinic clean.
-  iter135 RE-CONFIRMED production SW matrix 4/4 PASS (W2/W5/cosine_bell/W6, unchanged); W2 v_ll_Linf=0.344
-  = the known tiny v-imprint (centered-vs-upwind vort tradeoff, [[the upwind FB fix is the unstable path]]).
-  Surfaced W2 v-wind native + cross-grid wind_speed PNGs to user for visual edge-artifact verdict.
-  iter139: ATM harness cross-grid projection VERIFIED CLEAN (no 180° offset like the ocean had) — ran
-  16/16 all grids; localized features ALIGN across cube/latlon/ico: cosine_bell at lon=-68° on all 3,
-  W5 mountain at -88/-90/-90° (=90°W, correct); all on consistent [-180,180). So atm cross-grid comparisons
-  (incl. iter135's) are VALID. Surfaced W5 wind_speed cross-grid (mountain-flow edge-artifact check).
-- **cosine_bell** (codex-vetted iter109): cube uses apply_fortran_xppm_boundary=True; 12-day cube/ico=1.4×
-  (cube best mass-cons), 99% residual panel-INTERIOR bulk PPM dissipation ⇒ faithful PPM plateau, not a bug.
+## ✅ STABLE + CROSS-GRID-CLOSE + COMPONENT-AUDITED (NOT a measured FV3 run-match — codex iter137 [high])
+**SCOPE (honest):** "faithful" = (a) component oracle source-audits + (b) cube ≈ MPAS/latlon/ico cross-grid
++ (c) stable/conservative. NOT a field-by-field match vs a RUNNING FV3 (no GFDL build — out of reach); and
+one default production operator is a KNOWN mismatch (centered vs FV3-upwind vorticity). Residual edge
+imprints exist (NOT "zero edge artifacts"): W2 v-wind imprint (v_ll_Linf=0.34 on an analytically-zero field)
++ slow C96 W5 vertex mode (~1.0007) — small + stable but nonzero coherent residuals.
+- **area_corner #faces-scaling** (iter84-91, codex-OK, NET-ZERO): edges ×2, vertices ×3, C1 guard n>=1
+  (oracle fv_grid_tools.F90). W2 L2=1.76e-4, ocean 9/9 rest machine-zero, 4 golds re-pinned. CAVEAT: sg_area
+  is PLANAR CHORD (only the ×2/×3 scaling faithful; chord→spherical deferred). gnomonic_ed grid wired (iter73).
+- **atm SW cross-grid** (iter92/135, 16/16 PASS): cube W2 L2 1.76e-4 ≈ latlon 2.67e-4 ≈ ico 9.9e-5; W5/W6/
+  cosine_bell pass. cosine_bell (codex iter109): cube xppm boundary, 99% residual = panel-INTERIOR PPM
+  dissipation plateau (cube≈ico), not edge. iter139: ATM cross-grid projection VERIFIED CLEAN (localized
+  features ALIGN: cosine_bell -68° + W5 mountain -90° on cube/latlon/ico; consistent [-180,180)).
 - **3D rest_state_topo "13× artifact" = FLOAT32 precision** (iter97-101): cube 3D PGF EXACTLY well-balanced
-  in float64 ((Φ_k−phis) std=0.0); PE runs f32 by design. Optional f32 fix.
-- **ocean cross-grid dynamics** (iter105/111): geostrophic cube 0.0143 ≈ latlon 0.0159 ≈ mpas 0.0169;
-  IGW omega 1.09e-4 IDENTICAL all 3 grids. ocean cube 9/9 rest machine-zero. ⇒ ocean ≈ MPAS/latlon (OMIP).
-  iter137 ⚠ WITHDREW the iter136 barotropic_wave conclusion (user + codex flagged the comparison invalid):
-  the cross-grid comparison has a **180° LONGITUDE OFFSET** + a resolution mismatch. Putting all 3 grids on
-  one [0,360] canvas: the IC (a Gaussian at 180°E by great-circle construction on ALL grids) shows at t=0
-  on MPAS at lon=180° (correct) but on CUBE + LATLON at lon≈0° — a 180° regrid lon-LABELING offset (harness
-  `_roll_lon_to_pm180` rolls data without relabeling the lon axis; the cube regridder shares the offset).
-  Also latlon stored NATIVE 48×72, not on the common 181×360 canvas. ⇒ the iter136 "4× / edge-clean" verdict
-  was based on a CONFOUNDED comparison — withdrawn. HIDDEN until now because the zonally-symmetric cases
-  (W2/rest/geostrophic-zonal) are lon-INVARIANT (offset invisible); the localized barotropic_wave exposes it.
-  NOTE: the cube IC is physically at 180°E by construction (not a physics bug) — the bug is the COMPARISON
-  regridding lon-convention. **FIXED iter138** (scripts/run_ocean_test_matrix.py `_regrid_2d`/`_regrid_3d_level`):
-  cube regridder output ([-180,180)) now ROLLED +n_lon//2 → [0,360]; latlon no longer mis-rolled (kept
-  native [0,360)). Verified: t=0 IC bump now at ~180°E on ALL grids (cube 182/latlon 180/mpas 179, was
-  cube/latlon≈0). Matrix still 3/3 PASS; regrid-alignment tests 17/17. Atm harness has NO such bug (uses
-  [-180,180) consistently for data+label). Root was: cube physics correct (bump physical 182°E) but the
-  COMPARISON mislabeled [-180,180) data as [0,360].
-  iter137 ALIGNED check (rolled cube+latlon +180°): positions now CONSISTENT (final eta peak cube 181°/
-  latlon 195°/mpas 204°, all propagating E from the 180° IC). The remaining 4× amplitude is NOT an artifact:
-  all grids start ~0.97 at t=0; the cube RETAINS 0.855 (~88%) while latlon/mpas DISSIPATE to 0.21 (~22%) —
-  and the test docstring EXPECTS amplitude retention (~1m), so the cube (less dissipative) is CLOSER to
-  expected, not worse; cube eta is interior/edge-clean. CAVEAT (no over-claim): the cross-grid dissipation/
-  propagation spread is partly resolution (C24 vs 48×72 vs ico4) — a resolution-convergence check is pending
-  before a firm verdict. Net: projection bug real + understood; the cube ocean wave looks faithful/edge-clean.
+  in f64; PE runs f32 by design. Optional f32 fix.
+- **ocean cross-grid** (iter105/111): geostrophic cube 0.0143 ≈ latlon 0.0159 ≈ mpas 0.0169; IGW omega
+  1.09e-4 identical 3 grids; rest 9/9 machine-zero. barotropic_wave (iter136-138): a 180° lon-projection
+  bug in the OCEAN comparison harness (cube/latlon mislabeled vs mpas) — user+codex flagged, **FIXED iter138**
+  (run_ocean_test_matrix `_regrid_2d`: cube regridder [-180,180) rolled +n_lon//2 → [0,360]; latlon no longer
+  mis-rolled). Post-fix IC aligns at 180°E on all grids; cube RETAINS amplitude (~0.86 vs latlon/mpas ~0.21
+  dissipated) = the test's EXPECTED retention (cube less dissipative, edge-clean), not an artifact. Pending:
+  resolution-convergence check.
 
 ## ❗ THE ONE REMAINING GAP — experimental SW FB-port edge instability (production SW is STABLE + faithful-in-results)
 CONFIRMED FV3 MISMATCH (codex iter109): production SW (operators_cdgrid.py:1167) + 3D PE (:445) use CENTERED
-`zeta_corner*v_d`; FV3 sw_core.F90 upwind donor-cell. The faithful staggered c_sw→d_sw port (FB chain,
-`fv3_fb_sw_step`, uses upwind `_vorticity_flux`) is EXPERIMENTAL and has a weak edge instability (W2 C36:
-day1 max|u_d| 48.6 vs 38.6, day2 NaN). Production's co-located D→A-avg scheme suppresses it.
+`zeta_corner*v_d`; FV3 upwind donor-cell. The faithful staggered c_sw→d_sw port (`fv3_fb_sw_step`, upwind
+`_vorticity_flux`) is EXPERIMENTAL + has a weak edge instability (W2 C36 day2 NaN). Production's co-located
+D→A-avg scheme suppresses it. FULLY CHARACTERIZED (iter123-134, two codex reviews drove it to ground truth):
+- **TYPE (iter128 genuine Arnoldi, dim 23760):** weakly-UNSTABLE spectrum **ρ(M')≈1.0019>1** (real eigenvalue
+  cluster) + strong NON-NORMAL TRANSIENT growth (K=50 optimal ~1.007/step ≫ the eigenvalue). The earlier
+  "λ≈1.007" was the TRANSIENT rate, NOT the eigenvalue (‖M^K‖^{1/K} ≠ spectral radius for a non-normal op —
+  codex [high] right twice: conditioning iter123 + Arnoldi iter128). 2Δx grid-scale, edge-localized (j0,
+  Nyquist power 0.79-0.91, edge-energy→0.997), 91% v_d, a near-neutral KE-grad↔PGF gravity-wave edge exchange.
+- **RULED OUT (exhaustive):** float32/dt/resolution stability-limit; EVERY component reads FV3-faithful
+  (a2b duogrid path iter129, d_sw zeta 114, vort-flux 110b, halos 94/107/115, B-grid KE 118, d_sw3 vb/ub
+  formulas 132 + the vb/ub EDGE decisively ruled out by Arnoldi iter133, assembly 119, d_sw4/5 120); BOTH
+  damping operators (divergence damping FAITHFUL incl. FV3's deliberate edge-zeroing iter131 — so FV3 nulls
+  edge div-damp too, can't be the fix); FB Phase 1→4 assembly matches dyn_core (iter134). The ONE genuinely
+  MISSING term (iter134) = d_ext external-mode div-damping in one_grad_p (FV3 d_ext=0.02); adding it reduces
+  ρ (1.00187→1.00157@0.1) but does NOT cure (edge-zeroed divg_d). ⇒ EMERGENT assembly-level; single-
+  component/assembly/missing-term avenues EXHAUSTED.
+- **NEXT (out of loop reach):** field-by-field compare vs a RUNNING FV3 Fortran step (needs a GFDL build).
+  HARNESS/ASSETS (validated, f64): /tmp/fb_arnoldi.py (eigs ρ), fb_arnoldi_damp.py, fb_localize2.py (energy
+  5-term decomp), fb_nonnormal.py (K-trend). FIX-VALIDATION = re-run Arnoldi (ρ<1?). NaN mechanism
+  (transient→nonlinear) is a HYPOTHESIS. Separate from the production C96 W5 mode (slow ~1.0007).
 
-**FULLY CHARACTERIZED (iter123-129, two codex adversarial reviews drove it to ground truth):**
-- **TYPE = weakly-UNSTABLE spectrum + NON-NORMAL TRANSIENT (iter128 genuine Arnoldi eigs on the linearized
-  1-step M', dim 23760):** spectral radius **ρ(M')≈1.0019>1** — a CLUSTER of REAL unstable eigenvalues
-  (~1.0015–1.0019) — WITH strong non-normal transient growth on top (K=50-window optimal ~1.007/step ≈ ×1.4
-  over a few hours ≫ the 1.0019 eigenvalue). σ_asymp≈0.5/day. The earlier "per-step λ≈1.007" (iter123-125)
-  is the TRANSIENT rate, NOT the eigenvalue; ‖M^K‖^(1/K) ≠ spectral radius for a non-normal operator (the
-  hard-won meta-lesson — codex [high] was right both times: conditioning iter123, Arnoldi iter128).
-- **2Δx GRID-SCALE EDGE-LOCALIZED (iter125, codex [medium] #2):** modal-ID C24/C36/C48 — argmax on a panel
-  edge row (j0, face 2/3), Nyquist(2Δx) power 0.79–0.91, edge-energy frac →0.997 as res refines, σ GROWS
-  with resolution. Mode energy 91% v_d. Driven by a near-neutral KE-grad↔PGF gravity-wave exchange at the edge.
-- **RULED OUT (robust):** float32 (survives f64), dt & resolution stability-limit (iter124-125); EVERY
-  component reads FV3-faithful (a2b_ord4 edge = FV3 duogrid plain-stencil path a2b_edge.F90:98 iter129; d_sw
-  zeta 114, vort-flux 110b, corner-vort/fv_tp_2d/circulation halos 94/107/115, B-grid KE rsin2 118 + d_sw3
-  vb/ub Courant FORMULAS faithful iter132 [sw_core.F90:1270-1275 duogrid form]; c_sw/d_sw assembly 119,
-  d_sw4/5 duogrid no-ops 120); BOTH FV3 damping operators (vorticity iter125 + divergence
-  dddmp=0.2 iter129: ρ only 1.00188→1.00167, needs unphysical ~10× to stabilize) ⇒ the mode is in their
-  JOINT NULL SPACE (resolves codex [medium] #4: damping can't fix it). **iter131: divergence damping is
-  FAITHFUL incl. the deliberate EDGE ZEROING** — `_divergence_corner_duo` matches FV3 sw_core.F90:2427-2440
-  (grid_type<3 else-branch): cross-velocity correction + face-boundary zeroing (i/j=0,n →0) + 0.25
-  attenuation (i/j=1,n-1). So FV3 ITSELF nulls the corner divergence at the panel edge ⇒ divergence damping
-  can't control an edge mode in FV3 either (faithful, NOT a bug). The iter-132 mode='edge' in the iterated
-  Laplacian has limited impact BECAUSE divg_d is already zeroed/0.25-attenuated there.
-- **PRIME REMAINING SUSPECT + FIX (iter131 CORRECTION — moved off the damping):** since both FV3 damping
-  operators are faithful AND FV3 zeroes edge divergence damping yet is edge-STABLE, the bug must be in the
-  **c_sw/d_sw DYNAMICS edge treatment** (FV3's dynamics are edge-stable without edge damping; the port's
-  create the weakly-unstable mode). NOT the damping-edge-halo (iter129's suspect, ruled out). d_sw3 vb/ub
-  EDGE computation RULED OUT (iter133, decisive Arnoldi test, inlined KE validated max|diff|=0): replacing
-  the edge vb/ub (this-face edge metric) with interior extrapolation does NOT drop ρ (1.00189→1.00194). ⇒
-  the edge KE Courant is not the cause. **NET: NO single component or edge candidate localizes it** — every
-  dynamics FORMULA + both dampings + a2b + the d_sw3 vb/ub edge are all faithful/ruled-out, yet ρ=1.0019.
-  The instability is an EMERGENT assembly-level interaction. NaN mechanism (transient→nonlinear) is a
-  HYPOTHESIS (not causally shown).
-- **iter134 ASSEMBLY AUDIT (dyn_core oracle) + a genuinely MISSING TERM:** FB Phase 1→4 sequencing is
-  FAITHFUL — FV3 dyn_core.F90 SW orchestration is c_sw(489)→p_grad_c(629)→d_sw1-6(831-1256)→one_grad_p
-  (1531), matching my FB. BUT FV3's one_grad_p adds the **d_ext EXTERNAL-MODE divergence damping**
-  (dyn_core.F90:2415-2476: u += rdx*(divg2(i,j)-divg2(i+1,j)), divg2=d_ext*da_min_c*divg_d, d_ext=0.02
-  operational fv_arrays.F90:399) — my FB Phase 4 OMITTED it. Added + Arnoldi-tested (d_ext=0 matches
-  model.step to 1e-14): ρ = 1.00187(0) → 1.00176(0.02) → 1.00157(0.1) → 1.292(0.25 over-damps). ⇒ the
-  missing d_ext term is a REAL faithfulness gap that REDUCES ρ in the right direction but does NOT stabilize
-  at operational values (divg_d is edge-zeroed → d_ext weak at the edge; 0.25 over-damps). Worth adding to
-  the FB code as a faithfulness fix, but NOT the cure for the edge mode. ⇒ single-component + assembly +
-  missing-term avenues now EXHAUSTED; decisive next step = field-by-field compare vs a RUNNING FV3 Fortran
-  step (full GFDL build, beyond this loop). HARNESS/ASSETS (validated, all float64): /tmp/fb_arnoldi.py (eigs ρ),
-  /tmp/fb_arnoldi_damp.py (ρ-vs-damping), /tmp/fb_localize2.py (energy-norm 5-term decomp), /tmp/fb_nonnormal.py
-  (K-trend). FIX-VALIDATION = re-run Arnoldi (does ρ drop <1?) + transient gain. Separate from the production
-  C96 W5 mode (slow ~1.0007).
-
-## CPU-PROHIBITIVE here (rely on recorded audits + representative cross-grid + t=0 probes + the spectral harness)
-3D atm baroclinic cross-grid (>21 min/case); full ocean matrix --grid all (57 cases, multi-hr); climate/AMIP;
-jvp-AD eigen-analysis through the FB chain (use finite-diff + Arnoldi); running-Fortran field compare (no build).
+## CPU-PROHIBITIVE / OUT-OF-REACH (rely on recorded audits + representative cross-grid + the spectral harness)
+3D atm baroclinic cross-grid (>21 min/case); full ocean matrix (57 cases, multi-hr); climate/AMIP; running-
+Fortran field compare (no GFDL build).
 
 ## OPEN QUEUE
-1. FB edge instability: structural cube-edge c_sw→d_sw coupling / damping-edge-halo fix → re-run Arnoldi
-   (ρ<1?) → FB→production. Needs running-Fortran field compare or dedicated edge-halo debug (fresh context).
-2. (optional, low-pri) chord→spherical sg_area; f64/well-balanced PGF (f32 rest-state); 3D PE upwind vort.
-3. human visual PNG verdict (W2 v / W5 wind_speed / cross-grid atm+ocean — surfaced); pre-existing 17-test
-   swamp in test_cdgrid_fv3_regression.py (deleted results/ + concurrent churn).
-State persisted: memory `cube-fv3-faithfulness-state` (codex-vetted, iter89-129).
+1. FB edge instability: needs a running-FV3 field compare (the decisive step) OR dedicated edge-dynamics debug.
+2. barotropic_wave resolution-convergence check (cube amplitude vs res); chord→spherical sg_area; f32 PGF.
+3. d_ext term: optionally add to the FB code (faithfulness completeness, default-off, net-zero) — found iter134.
+State persisted: memory `cube-fv3-faithfulness-state` (codex-vetted, iter89-139).
