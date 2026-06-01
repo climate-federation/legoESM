@@ -40,11 +40,18 @@ day1 max|u_d| 48.6 vs 38.6, day2 NaN). Production's co-located D→A-avg scheme 
   zeta 114, vort-flux 110b, corner-vort/fv_tp_2d/circulation halos 94/107/115, B-grid KE 118, c_sw/d_sw
   assembly 119, d_sw4/5 duogrid no-ops 120); BOTH FV3 damping operators (vorticity iter125 + divergence
   dddmp=0.2 iter129: ρ only 1.00188→1.00167, needs unphysical ~10× to stabilize) ⇒ the mode is in their
-  JOINT NULL SPACE (resolves codex [medium] #4: damping can't fix it).
-- **PRIME REMAINING SUSPECT + FIX:** a STRUCTURAL cube-edge c_sw→d_sw coupling (or the d_sw5/del6 damping
-  stencils' EDGE HALO being ~0 at the panel-edge cells) that the FB port misses but FV3 handles. The
-  decisive next step needs a field-by-field compare against a RUNNING FV3 Fortran step (needs a full GFDL
-  build — beyond this loop) OR dedicated edge-halo debugging. NaN mechanism (transient→nonlinear) is a
+  JOINT NULL SPACE (resolves codex [medium] #4: damping can't fix it). **iter131: divergence damping is
+  FAITHFUL incl. the deliberate EDGE ZEROING** — `_divergence_corner_duo` matches FV3 sw_core.F90:2427-2440
+  (grid_type<3 else-branch): cross-velocity correction + face-boundary zeroing (i/j=0,n →0) + 0.25
+  attenuation (i/j=1,n-1). So FV3 ITSELF nulls the corner divergence at the panel edge ⇒ divergence damping
+  can't control an edge mode in FV3 either (faithful, NOT a bug). The iter-132 mode='edge' in the iterated
+  Laplacian has limited impact BECAUSE divg_d is already zeroed/0.25-attenuated there.
+- **PRIME REMAINING SUSPECT + FIX (iter131 CORRECTION — moved off the damping):** since both FV3 damping
+  operators are faithful AND FV3 zeroes edge divergence damping yet is edge-STABLE, the bug must be in the
+  **c_sw/d_sw DYNAMICS edge treatment** (FV3's dynamics are edge-stable without edge damping; the port's
+  create the weakly-unstable mode). NOT the damping-edge-halo (iter129's suspect, now ruled out). The
+  decisive next step needs a field-by-field compare against a RUNNING FV3 Fortran step (full GFDL build —
+  beyond this loop) OR dedicated c_sw/d_sw edge-dynamics debugging. NaN mechanism (transient→nonlinear) is a
   HYPOTHESIS (not causally shown). HARNESS/ASSETS (validated, all float64): /tmp/fb_arnoldi.py (eigs ρ),
   /tmp/fb_arnoldi_damp.py (ρ-vs-damping), /tmp/fb_localize2.py (energy-norm 5-term decomp), /tmp/fb_nonnormal.py
   (K-trend). FIX-VALIDATION = re-run Arnoldi (does ρ drop <1?) + transient gain. Separate from the production
