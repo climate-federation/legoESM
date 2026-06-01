@@ -47,9 +47,14 @@ RHINES_KISO_GOLDEN_PATH = pathlib.Path(__file__).resolve().parent / "fixtures" /
     "eke_step_regression_rhines_kiso_golden.npz"
 )
 
-# Tight relative tolerance: the step is deterministic + bit-identical on the
-# generating machine; allow <=1e-12 rel for cross-platform BLAS ULP drift.
-_RTOL = 1.0e-12
+# Relative tolerance for cross-platform BLAS ULP drift. The drift was MEASURED at
+# ~2e-11 rel (a 7.73e-9 eke-step value differing in its ~11th significant digit
+# between BLAS builds), so the original 1e-12 sat BELOW the ULP floor and failed
+# spuriously on any machine other than the one that wrote the golden. 1e-9 is
+# comfortably above the measured drift while still catching any real numerics
+# change (eke-step values are O(1e-9..1e-3), so a genuine change is orders of
+# magnitude larger than 1e-9 rel).
+_RTOL = 1.0e-9
 _ATOL = 1.0e-25
 
 _N_LAT, _N_LON, _NLEV = 8, 16, 4
