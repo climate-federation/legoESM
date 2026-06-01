@@ -14,7 +14,11 @@ imprints exist (NOT "zero edge artifacts"): W2 v-wind imprint (v_ll_Linf=0.34 on
 + slow C96 W5 vertex mode (~1.0007) — small + stable but nonzero coherent residuals.
 - **area_corner #faces-scaling** (iter84-91, codex-OK, NET-ZERO): edges ×2, vertices ×3, C1 guard n>=1
   (oracle fv_grid_tools.F90). W2 L2=1.76e-4, ocean 9/9 rest machine-zero, 4 golds re-pinned. CAVEAT: sg_area
-  is PLANAR CHORD (only the ×2/×3 scaling faithful; chord→spherical deferred). gnomonic_ed grid wired (iter73).
+  is PLANAR CHORD (only the ×2/×3 scaling faithful; chord→spherical deferred). iter142 QUANTIFIED the chord
+  caveat vs FV3 get_area (spherical excess, l'Huilier): O(dx²), rel err ~2e-3 @C8 → ~1e-4 @C36 (mean);
+  cube-VERTEX quads ~7e-5 @C36 = slightly BETTER than the mean, NOT worse ⇒ the chord area is BENIGN at
+  production res + decisively RULED OUT as the vertex-artifact source (≪ the 0.34/1.0019 artifact scales).
+  Upgrade worth it only for C1-C8 fidelity/cleanliness. gnomonic_ed grid wired (iter73).
 - **atm SW cross-grid** (iter92/135, 16/16 PASS): cube W2 L2 1.76e-4 ≈ latlon 2.67e-4 ≈ ico 9.9e-5; W5/W6/
   cosine_bell pass. cosine_bell (codex iter109): cube xppm boundary, 99% residual = panel-INTERIOR PPM
   dissipation plateau (cube≈ico), not edge. iter139: ATM cross-grid projection VERIFIED CLEAN (localized
