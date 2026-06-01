@@ -55,10 +55,19 @@ day1 max|u_d| 48.6 vs 38.6, day2 NaN). Production's co-located D→A-avg scheme 
   the edge vb/ub (this-face edge metric) with interior extrapolation does NOT drop ρ (1.00189→1.00194). ⇒
   the edge KE Courant is not the cause. **NET: NO single component or edge candidate localizes it** — every
   dynamics FORMULA + both dampings + a2b + the d_sw3 vb/ub edge are all faithful/ruled-out, yet ρ=1.0019.
-  The instability is an EMERGENT assembly-level interaction. The decisive next step needs a field-by-field
-  compare against a RUNNING FV3 Fortran step (full GFDL build — beyond this loop's infrastructure); the
-  autonomous single-component localization avenue is now EXHAUSTED. NaN mechanism (transient→nonlinear) is a
-  HYPOTHESIS (not causally shown). HARNESS/ASSETS (validated, all float64): /tmp/fb_arnoldi.py (eigs ρ),
+  The instability is an EMERGENT assembly-level interaction. NaN mechanism (transient→nonlinear) is a
+  HYPOTHESIS (not causally shown).
+- **iter134 ASSEMBLY AUDIT (dyn_core oracle) + a genuinely MISSING TERM:** FB Phase 1→4 sequencing is
+  FAITHFUL — FV3 dyn_core.F90 SW orchestration is c_sw(489)→p_grad_c(629)→d_sw1-6(831-1256)→one_grad_p
+  (1531), matching my FB. BUT FV3's one_grad_p adds the **d_ext EXTERNAL-MODE divergence damping**
+  (dyn_core.F90:2415-2476: u += rdx*(divg2(i,j)-divg2(i+1,j)), divg2=d_ext*da_min_c*divg_d, d_ext=0.02
+  operational fv_arrays.F90:399) — my FB Phase 4 OMITTED it. Added + Arnoldi-tested (d_ext=0 matches
+  model.step to 1e-14): ρ = 1.00187(0) → 1.00176(0.02) → 1.00157(0.1) → 1.292(0.25 over-damps). ⇒ the
+  missing d_ext term is a REAL faithfulness gap that REDUCES ρ in the right direction but does NOT stabilize
+  at operational values (divg_d is edge-zeroed → d_ext weak at the edge; 0.25 over-damps). Worth adding to
+  the FB code as a faithfulness fix, but NOT the cure for the edge mode. ⇒ single-component + assembly +
+  missing-term avenues now EXHAUSTED; decisive next step = field-by-field compare vs a RUNNING FV3 Fortran
+  step (full GFDL build, beyond this loop). HARNESS/ASSETS (validated, all float64): /tmp/fb_arnoldi.py (eigs ρ),
   /tmp/fb_arnoldi_damp.py (ρ-vs-damping), /tmp/fb_localize2.py (energy-norm 5-term decomp), /tmp/fb_nonnormal.py
   (K-trend). FIX-VALIDATION = re-run Arnoldi (does ρ drop <1?) + transient gain. Separate from the production
   C96 W5 mode (slow ~1.0007).
