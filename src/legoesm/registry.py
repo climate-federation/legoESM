@@ -24,6 +24,16 @@ from collections.abc import Callable
 from typing import Any
 
 
+class UnknownRegistryEntryError(ValueError):
+    """Raised by :meth:`Registry.get` when *name* is not registered.
+
+    A ``ValueError`` subclass so existing ``except ValueError`` /
+    ``pytest.raises(ValueError)`` callers keep working — but a *distinct* type so
+    a true miss can be told apart from a ``ValueError`` raised while *loading* an
+    entry-point plugin (which must NOT be swallowed as a miss).
+    """
+
+
 class Registry:
     """A ``name -> factory`` registry with raise-on-unknown + entry-point plugins.
 
@@ -38,6 +48,10 @@ class Registry:
         self._kind = kind
         self._entry_group = f"legoesm.{kind}s"
         self._entries: dict[str, Callable] = {}
+        # name -> the exception its entry-point raised at load(); a broken plugin
+        # is remembered so EVERY lookup of that name re-raises it (never silently
+        # masked by a built-in fallback on a later call).
+        self._failed_entry_points: dict[str, Exception] = {}
         self._loaded_entry_points = False
 
     def register(self, name: str, factory: Callable, *, overwrite: bool = False) -> Callable:
@@ -57,10 +71,16 @@ class Registry:
         """
         if name not in self._entries and not self._loaded_entry_points:
             self._load_entry_points()
-        if name not in self._entries:
-            avail = ", ".join(self.available()) or "(none)"
-            raise ValueError(f"Unknown {self._kind} {name!r}. Available: {avail}")
-        return self._entries[name]
+        if name in self._entries:
+            return self._entries[name]
+        if name in self._failed_entry_points:
+            # A plugin claimed this name but failed to load — re-raise that error
+            # on every lookup so a broken override is never silently bypassed.
+            raise self._failed_entry_points[name]
+        avail = ", ".join(self.available()) or "(none)"
+        raise UnknownRegistryEntryError(
+            f"Unknown {self._kind} {name!r}. Available: {avail}"
+        )
 
     def available(self) -> list[str]:
         """Sorted list of registered names (loads entry-point plugins first)."""
@@ -78,8 +98,12 @@ class Registry:
             eps = entry_points().get(self._entry_group, [])  # type: ignore[call-arg]
         for ep in eps:
             # In-process registrations win over plugins of the same name.
-            if ep.name not in self._entries:
+            if ep.name in self._entries:
+                continue
+            try:
                 self._entries[ep.name] = ep.load()
+            except Exception as exc:  # one broken plugin must not abort discovery
+                self._failed_entry_points[ep.name] = exc
 
 
 # The dynamical-core registry.  Built-in solvers migrate onto this in a
@@ -91,13 +115,29 @@ def create_dycore(name: str, *args: Any, **kwargs: Any):
     """Resolve a dycore by *name*, instantiate it, and validate the contract.
 
     ``create_dycore("cdgrid_shallow_water", grid, config)`` -> a validated dycore.
-    Extra args/kwargs are forwarded to the registered factory (``Model(grid,
-    config)``).  Raises ``ValueError`` for an unknown name and ``TypeError`` for a
-    factory whose product is not a valid dycore (no callable ``step(state, dt)``).
+    Extra args/kwargs are forwarded to the resolved factory (``Model(grid,
+    config)``).
+
+    Resolution order: an explicitly-registered factory or entry-point plugin
+    first (so a plugin can override or add a dycore), then the **built-in**
+    atmosphere solvers.  The built-in lookup is a deferred import, so the registry
+    substrate stays importable without the atmosphere component (a pure-core
+    install resolves plugins only).  Raises ``ValueError`` for an unknown name and
+    ``TypeError`` for a factory whose product is not a valid dycore.
     """
     from legoesm.components import validate_dycore
 
-    factory = DYCORE_REGISTRY.get(name)
+    try:
+        factory: Callable = DYCORE_REGISTRY.get(name)
+    except UnknownRegistryEntryError:
+        # Only a genuine registry MISS falls back to the built-ins.  A ValueError
+        # raised while *loading* an entry-point plugin is NOT caught here — it
+        # propagates, so a broken plugin override is never silently replaced by
+        # the built-in.  Deferred import keeps legoesm.registry decoupled from the
+        # atmosphere component.
+        from legoesm.atmosphere.dynamics import get_solver_class
+
+        factory = get_solver_class(name)  # raises ValueError if unknown there too
     dycore = factory(*args, **kwargs)
     validate_dycore(dycore)
     return dycore

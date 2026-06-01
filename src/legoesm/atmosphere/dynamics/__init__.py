@@ -362,6 +362,51 @@ def solver_axes(name: str) -> tuple[str, str]:
     return _SOLVER_TO_AXIS[name]
 
 
+# Canonical flat solver name -> model class name (lazy-imported via _resolve_lazy).
+# Module-level so get_solver_class() can resolve a built-in dycore CLASS by name
+# (the registry uses this); create_model() instantiates using the same table.
+_SOLVER_TO_CLASS = {
+    "cdgrid_shallow_water": "CDGridShallowWaterModel",
+    "cdgrid_primitive_equations": "CDGridPrimitiveEquationModel",
+    "cdgrid_compressible_euler": "CDGridCompressibleEulerModel",
+    "spectral_shallow_water": "SpectralShallowWaterModel",
+    "spectral_primitive_equations": "SpectralPrimitiveEquationModel",
+    "spectral_compressible_euler": "SpectralCompressibleEulerModel",
+    "sfno_shallow_water": "SFNOShallowWaterModel",
+    "sfno_primitive_equations": "SFNOPrimitiveEquationModel",
+    "tracer_transport": "TracerTransportModel",
+    "tracer_transport_mpas": "TracerTransportMPASModel",
+    "tracer_transport_latlon": "TracerTransportLatLonModel",
+    "mpas_primitive_equations": "MPASPrimitiveEquationModel",
+    "mpas_compressible_euler": "MPASCompressibleEulerModel",
+    "plane_compressible_euler": "PlaneCompressibleEulerModel",
+    "latlon_cgrid_shallow_water": "CGridLatLonShallowWaterModel",
+    "latlon_cgrid_primitive_equations": "CGridLatLonPrimitiveEquationModel",
+}
+
+# Spectral solvers accept legoesm_config as a kwarg.
+_SPECTRAL_SOLVERS = {
+    "spectral_shallow_water",
+    "spectral_primitive_equations",
+    "spectral_compressible_euler",
+}
+
+
+def get_solver_class(name: str) -> type:
+    """Return the dycore CLASS registered under the canonical solver *name*.
+
+    Public companion to :func:`create_model` (which *instantiates*): lets the
+    component/dycore registry resolve a built-in dycore class by name without
+    reaching for a private symbol.  Raises ``ValueError`` on an unknown name.
+    """
+    class_name = _SOLVER_TO_CLASS.get(name)
+    if class_name is None:
+        raise ValueError(
+            f"Unknown solver: {name!r}. Available: {AVAILABLE_SOLVERS}"
+        )
+    return _resolve_lazy(class_name)
+
+
 def create_model(name: str = None, legoesm_config=None, **kwargs):
     """Create a dynamical core model by name or from config."""
     # Track whether the resolved name came from an ambiguous discretization
@@ -452,32 +497,6 @@ def create_model(name: str = None, legoesm_config=None, **kwargs):
                     kwargs["dt"] = _dt_clamped
 
     # --- Instantiate (resolves lazy imports on demand) ---
-    _SOLVER_TO_CLASS = {
-        "cdgrid_shallow_water": "CDGridShallowWaterModel",
-        "cdgrid_primitive_equations": "CDGridPrimitiveEquationModel",
-        "cdgrid_compressible_euler": "CDGridCompressibleEulerModel",
-        "spectral_shallow_water": "SpectralShallowWaterModel",
-        "spectral_primitive_equations": "SpectralPrimitiveEquationModel",
-        "spectral_compressible_euler": "SpectralCompressibleEulerModel",
-        "sfno_shallow_water": "SFNOShallowWaterModel",
-        "sfno_primitive_equations": "SFNOPrimitiveEquationModel",
-        "tracer_transport": "TracerTransportModel",
-        "tracer_transport_mpas": "TracerTransportMPASModel",
-        "tracer_transport_latlon": "TracerTransportLatLonModel",
-        "mpas_primitive_equations": "MPASPrimitiveEquationModel",
-        "mpas_compressible_euler": "MPASCompressibleEulerModel",
-        "plane_compressible_euler": "PlaneCompressibleEulerModel",
-        "latlon_cgrid_shallow_water": "CGridLatLonShallowWaterModel",
-        "latlon_cgrid_primitive_equations": "CGridLatLonPrimitiveEquationModel",
-    }
-
-    # Spectral solvers accept legoesm_config as a kwarg.
-    _SPECTRAL_SOLVERS = {
-        "spectral_shallow_water",
-        "spectral_primitive_equations",
-        "spectral_compressible_euler",
-    }
-
     class_name = _SOLVER_TO_CLASS.get(name)
     if class_name is None:
         raise ValueError(

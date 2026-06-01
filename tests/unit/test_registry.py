@@ -53,8 +53,43 @@ def test_create_dycore_resolves_validates_and_conforms() -> None:
 
 
 def test_create_dycore_unknown_raises() -> None:
-    with pytest.raises(ValueError, match="Unknown dycore"):
+    with pytest.raises(ValueError, match="Unknown"):
         create_dycore("definitely_not_registered_xyz", grid=object())
+
+
+def test_create_dycore_propagates_plugin_load_failure(monkeypatch) -> None:
+    """A broken plugin override propagates — it is NOT silently replaced by the
+    built-in (a ValueError from ep.load() is not a registry miss)."""
+    import importlib.metadata as md
+
+    import legoesm.registry as reg
+
+    class _BrokenEP:
+        name = "cdgrid_shallow_water"  # a built-in name, shadowed by a broken plugin
+
+        def load(self):
+            raise ValueError("plugin broken on load")
+
+    monkeypatch.setattr(md, "entry_points", lambda *, group: [_BrokenEP()])
+    # Fresh, isolated discovery state (restored after the test).
+    monkeypatch.setattr(reg.DYCORE_REGISTRY, "_loaded_entry_points", False)
+    monkeypatch.setattr(reg.DYCORE_REGISTRY, "_failed_entry_points", {})
+
+    # BOTH the first and a subsequent call must propagate — a broken override is
+    # never silently masked by the built-in on a later call.
+    for _ in range(2):
+        with pytest.raises(ValueError, match="plugin broken"):
+            reg.create_dycore("cdgrid_shallow_water", object())
+
+
+def test_create_dycore_resolves_builtin_atmosphere_solver() -> None:
+    """A built-in atmosphere dycore resolves via the fallback and validates."""
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+
+    grid = create_cubed_sphere(8)
+    dycore = create_dycore("cdgrid_shallow_water", grid)
+    assert isinstance(dycore, DycoreProtocol)
+    assert hasattr(dycore, "step")
 
 
 def test_create_dycore_rejects_malformed_plugin() -> None:
