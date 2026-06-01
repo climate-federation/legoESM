@@ -286,6 +286,7 @@ def initialize_distributed_latlon(
     *,
     global_n_lat: int,
     global_n_lon: int | None = None,
+    fold=None,
 ):
     """Initialize the MPI halo backend for a latitude-band lat-lon run.
 
@@ -334,6 +335,12 @@ def initialize_distributed_latlon(
     global_n_lon : int, optional
         Global number of longitude columns.  Defaults to
         ``2 * global_n_lat`` (the standard square-cell AMIP layout).
+    fold : FoldDescriptor, optional
+        Tripolar north-fold descriptor (issue #353).  When supplied
+        (and ``fold.is_active``), the returned layout carries it so the
+        northernmost rank applies the permutation-based tripolar fold at
+        the north boundary.  Pass ``geometry.fold`` for an ORCA / eORCA
+        ocean run; omit (``None``) for regular lat-lon.
 
     Returns
     -------
@@ -344,6 +351,26 @@ def initialize_distributed_latlon(
     """
     global _active_topology
     if _active_topology is not None:
+        active_fold = getattr(_active_topology, "fold", None)
+        active_on = (active_fold is not None
+                     and getattr(active_fold, "is_active", False))
+        requested_on = fold is not None and getattr(fold, "is_active", False)
+        if requested_on and not active_on:
+            # A prior fold-less init must NOT mask a later tripolar (ORCA)
+            # init — otherwise the ocean run would silently use the
+            # geographic pole-fold.  Update the active layout to carry the
+            # fold and re-arm the MPI halo backend.
+            warnings.warn(
+                "initialize_distributed_latlon() re-called with a tripolar "
+                "fold after a fold-less init; updating the active layout to "
+                "carry the fold.",
+                RuntimeWarning, stacklevel=2,
+            )
+            updated = _active_topology._replace(fold=fold)
+            _active_topology = updated
+            from legoesm.grids.halo import set_halo_backend
+            set_halo_backend("mpi", updated)
+            return updated
         warnings.warn(
             "initialize_distributed_latlon() called more than once. "
             "Returning the existing topology.",
@@ -365,6 +392,7 @@ def initialize_distributed_latlon(
     layout = make_latlon_band_layout(
         rank=rank, n_ranks=n_processes,
         n_lat=global_n_lat, n_lon=global_n_lon,
+        fold=fold,
     )
     _active_topology = layout
 

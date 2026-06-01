@@ -536,4 +536,175 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
     )
 
 
-__all__ = ["apply_omip2_surface_fluxes", "compute_omip2_surface_forcing"]
+# ===========================================================================
+# JAX-traceable / lax.scan-fusable forcing path (issue #354)
+# ===========================================================================
+#
+# ``compute_omip2_surface_forcing`` (above) pulls ``state.T`` to the host
+# every step (np.asarray) to compute the saturation humidity, which forces
+# a device sync per step and prevents wrapping the time loop in
+# ``jax.lax.scan``.  The functions below provide a pure-JAX equivalent for
+# the tripole grid: the forcing is lifted to device arrays ONCE and the
+# spatial nearest-neighbour sample is a static gather, so the whole block
+# of steps fuses on-device.  At 1/4 deg the raw CORE-II forcing
+# (1460 x 94 x 192 x 7ch, ~1.4 GB) fits on device, whereas pre-sampling all
+# records to the model grid (1206 x 1440) would not — hence the gather.
+
+
+def core2_forcing_nn_indices(forcing, lat_pts_deg, lon_pts_deg):
+    """Fixed nearest-neighbour source indices ``(i, j)`` from the CORE-II
+    forcing grid to a set of model points.
+
+    Geometry-only (time-independent), so the spatial sample inside a
+    ``lax.scan`` becomes a static gather.  Replicates the ``(i, j)``
+    computed in :func:`_nn_interp_to_points` EXACTLY (nearest latitude by
+    ``|Δlat|``; nearest longitude by periodic wrap distance).
+    """
+    src_lat = np.asarray(forcing.lat, dtype=np.float64)
+    src_lon = np.asarray(forcing.lon, dtype=np.float64) % 360.0
+    dst_lat = np.asarray(lat_pts_deg, dtype=np.float64)
+    dst_lon = np.asarray(lon_pts_deg, dtype=np.float64) % 360.0
+    i = np.argmin(np.abs(src_lat[:, None] - dst_lat[None, :]), axis=0)
+    dlon = np.abs(src_lon[:, None] - dst_lon[None, :])
+    dlon = np.minimum(dlon, 360.0 - dlon)
+    j = np.argmin(dlon, axis=0)
+    return i.astype(np.int32), j.astype(np.int32)
+
+
+def build_core2_forcing_device_stack(forcing, grid, grid_type: str):
+    """Lift CORE-II forcing to device arrays + fixed NN indices for the
+    scan kernel (issue #354).  Tripole only (the faithful OMIP path);
+    other grids keep the host per-step sampling.
+
+    Returns
+    -------
+    forcing_stack : dict[str, jax.Array]
+        6 channels (u10, v10, T_air, q_air, sw_down, lw_down), each
+        ``(n_rec, n_lat_f, n_lon_f)`` on device.
+    nn_i, nn_j : jax.Array (int32, ``(n_lat*n_lon,)``)
+        Nearest-neighbour source indices into the forcing grid.
+    grid_shape : tuple
+        ``(n_lat, n_lon)`` of the model T grid.
+    """
+    if grid_type != "tripole":
+        raise NotImplementedError(
+            "build_core2_forcing_device_stack: the lax.scan forcing path is "
+            "implemented for grid_type='tripole' (the faithful OMIP path); "
+            f"got {grid_type!r}.  Use the host compute_omip2_surface_forcing."
+        )
+    lat_pts = np.degrees(np.asarray(grid.lat_T)).reshape(-1)
+    lon_pts = np.degrees(np.asarray(grid.lon_T)).reshape(-1)
+    nn_i, nn_j = core2_forcing_nn_indices(forcing, lat_pts, lon_pts)
+    channels = ("u10", "v10", "T_air", "q_air", "sw_down", "lw_down")
+    forcing_stack = {
+        name: jnp.asarray(np.asarray(getattr(forcing, name)))
+        for name in channels
+    }
+    grid_shape = tuple(np.asarray(grid.lat_T).shape)
+    return forcing_stack, jnp.asarray(nn_i), jnp.asarray(nn_j), grid_shape
+
+
+def compute_omip2_surface_forcing_jax(
+    state, *, forcing_stack, nn_i, nn_j, grid_shape, idx_t, rho_air=1.225,
+):
+    """Pure-JAX, ``lax.scan``-traceable form of
+    :func:`compute_omip2_surface_forcing` for the tripole grid (issue #354).
+
+    ``idx_t`` is the (possibly traced) 6-hourly CORE-II record index.  The
+    spatial sample is a static nearest-neighbour gather via the fixed
+    ``(nn_i, nn_j)`` map, so there is NO host roundtrip per step.
+    Bit-equivalent (to fp tolerance) to the host function: identical
+    ``air_sea_fluxes``, ``_bolton_q_sat`` and net-heat formula, identical
+    nearest-neighbour spatial sample.
+    """
+    from legoesm.ocean.state import OceanSurfaceForcing
+    sigma_sb = float(getattr(constants, "sigma_sb", 5.67e-8))
+    T_freeze = float(constants.T_freeze)
+
+    def _sample(name):
+        rec = forcing_stack[name][idx_t]            # (n_lat_f, n_lon_f)
+        return rec[nn_i, nn_j].reshape(grid_shape)  # (n_lat, n_lon)
+
+    u10 = _sample("u10")
+    v10 = _sample("v10")
+    T_air = _sample("T_air")
+    q_air = _sample("q_air")
+    sw_down = _sample("sw_down")
+    lw_down = _sample("lw_down")
+
+    # Top-cell ocean temperature (state in degC) -> K, pure JAX (no host pull).
+    T_sfc_K = state.T.data[..., 0] + T_freeze
+    q_sfc = _bolton_q_sat(T_sfc_K)
+    tau_x, tau_y, sh, lh = air_sea_fluxes(
+        u10=u10, v10=v10, T_air_K=T_air, q_air=q_air,
+        T_sfc_K=T_sfc_K, q_sfc=q_sfc, rho_air=jnp.asarray(rho_air),
+    )
+    lw_up = 0.97 * sigma_sb * T_sfc_K ** 4
+    q_net = sh + lh + lw_down - lw_up + sw_down
+    return OceanSurfaceForcing(
+        tau_x=tau_x, tau_y=tau_y, q_net=q_net, sw_down=sw_down,
+    )
+
+
+def build_omip2_scan_block_fn(
+    model, dt, grid_shape, *, rho_air=1.225, ramp_s=0.0,
+):
+    """Build a JIT-compiled ``lax.scan`` block-step function for the tripole
+    OMIP time loop (issue #354).
+
+    The returned
+    ``block_fn(state, forcing_stack, nn_i, nn_j, idx_t_block, step0)``
+    advances ``state`` over ``len(idx_t_block)`` steps; each step samples
+    the CORE-II forcing on-device via
+    :func:`compute_omip2_surface_forcing_jax`, optionally applies the
+    spin-up wind/heat ramp, and calls ``model._step_impl`` (the un-wrapped
+    core step, so no nested JIT).  Because the forcing has no host
+    roundtrip, XLA fuses the whole block.
+
+    ``forcing_stack`` / ``nn_i`` / ``nn_j`` are explicit JIT arguments
+    (NOT closure captures), so the ~1.3 GB 1/4-deg forcing is a device
+    INPUT rather than an embedded compiled constant.  ``grid_shape`` is a
+    static (closure) shape used only in ``reshape``.
+
+    Host-side per-step pieces of the Python loop (diagnostics, snapshots,
+    non-finite abort, optional WOA nudging / spin-up drag) are intentionally
+    NOT inside the scan — the caller runs them at block boundaries and must
+    not enable nudging/drag on the scan path.
+    """
+    import jax
+    from jax import lax
+
+    apply_ramp = ramp_s > 0.0  # static gate (CLAUDE.md feature-gating)
+
+    @jax.jit
+    def block_fn(state, forcing_stack, nn_i, nn_j, idx_t_block, step0):
+        def _body(carry, idx_t):
+            st, step = carry
+            sf = compute_omip2_surface_forcing_jax(
+                st, forcing_stack=forcing_stack, nn_i=nn_i, nn_j=nn_j,
+                grid_shape=grid_shape, idx_t=idx_t, rho_air=rho_air,
+            )
+            if apply_ramp:
+                ramp = jnp.minimum(
+                    1.0, (step.astype(sf.tau_x.dtype) * dt) / ramp_s)
+                sf = sf._replace(
+                    tau_x=sf.tau_x * ramp, tau_y=sf.tau_y * ramp,
+                    q_net=sf.q_net * ramp, sw_down=sf.sw_down * ramp,
+                )
+            st = model._step_impl(st, dt, surface_forcing=sf)
+            return (st, step + 1), None
+
+        (state, _), _ = lax.scan(_body, (state, step0), idx_t_block)
+        return state
+
+    return block_fn
+
+
+__all__ = [
+    "apply_omip2_surface_fluxes",
+    "compute_omip2_surface_forcing",
+    "compute_omip2_surface_forcing_jax",
+    "build_core2_forcing_device_stack",
+    "build_omip2_scan_block_fn",
+    "core2_forcing_nn_indices",
+]
