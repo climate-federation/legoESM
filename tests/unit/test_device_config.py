@@ -22,6 +22,10 @@ from legoesm.parallel.device_config import (
     get_optimal_mesh,
     _estimate_device_memory,
     _recommended_batch_size,
+)
+# The XLA-flag helpers live in runtime.backend (device_config imports them from
+# there); import from their actual home, not the module they moved out of.
+from legoesm.runtime.backend import (
     _set_xla_flags,
     _TPU_XLA_FLAGS,
     _NVIDIA_GPU_XLA_FLAGS,
