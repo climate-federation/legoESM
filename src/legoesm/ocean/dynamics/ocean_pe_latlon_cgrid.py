@@ -70,6 +70,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     laplacian_cgrid,
     vector_bilaplacian_cgrid,
     vector_laplacian_cgrid,
+    vector_laplacian_dissipation_cgrid,
     interp_cell_to_uface,
     is_tripolar,
     min_cell_to_uface,
@@ -1440,6 +1441,21 @@ def _bc_horizontal_viscosity(
     accumulators plus the per-term viscosity diagnostics."""
     diag_Ah_lap_u = jnp.zeros_like(du_dt)
     diag_Ah_lap_v = jnp.zeros_like(dv_dt)
+    # Cell-centre A_h coefficient field [m²/s] used to build the FAITHFUL
+    # positive-definite K_diss_h EKE source (Veros analogue) — captured ONLY when
+    # the prognostic-EKE ``source_kdiss_h`` + ``kdiss_h_flux_form`` options are on
+    # (the ACC recipe).  It is the SAME ``A_h × scale`` (cos-power / eq-boost /
+    # cap-boost / slope-foot) field applied to the u vector-Laplacian tendency, so
+    # the dissipation it weights is exactly the energy that tendency removes.
+    # ``None`` otherwise (default), keeping every existing path bit-identical.
+    _eke_for_kdiss = (config.gm_redi.eke if config.gm_redi is not None
+                      and getattr(config.gm_redi, "eke", None) is not None else None)
+    _want_kdiss_flux = bool(
+        _eke_for_kdiss is not None
+        and getattr(_eke_for_kdiss, "source_kdiss_h", False)
+        and getattr(_eke_for_kdiss, "kdiss_h_flux_form", False))
+    _ah_scale_center = None   # (n_lat,) latitudinal A_h×scale at cell centres
+    _slope_E_center = None    # 3-D slope-foot enhancement at cell centres (or None)
     diag_Bh_bilap_u = jnp.zeros_like(du_dt)
     diag_Bh_bilap_v = jnp.zeros_like(dv_dt)
     diag_Cs_smag_u = jnp.zeros_like(du_dt)
@@ -1468,6 +1484,9 @@ def _bc_horizontal_viscosity(
             is_active=_is_active,
             nlev=u.shape[-1],
         )
+        if _want_kdiss_flux:
+            # Cell-centre slope-foot factor for the K_diss_h coefficient field.
+            _slope_E_center = _slope_E
         # Interpolate cell-centred enhancement to u-faces, v-faces (min-rule
         # for safety: the more conservative neighbour wins, so the boost
         # acts on the steeper of the two adjacent columns).
@@ -1513,6 +1532,8 @@ def _bc_horizontal_viscosity(
                 lap_scale_v = lap_scale_v * cap_v
             diag_Ah_lap_u = config.A_h * lap_scale_u[:, None, None] * _vlap_u
             diag_Ah_lap_v = config.A_h * lap_scale_v[:, None, None] * _vlap_v
+            if _want_kdiss_flux:
+                _ah_scale_center = config.A_h * lap_scale_u
         elif config.A_h_eq_boost > 1.0 or config.A_h_cap_boost > 1.0:
             scale_u = jnp.ones((grid.lat.shape[0],), dtype=grid.lat.dtype)
             scale_v = jnp.ones((grid.lat.shape[0] + 1,), dtype=grid.lat.dtype)
@@ -1529,9 +1550,14 @@ def _bc_horizontal_viscosity(
                 scale_v = scale_v * cap_v
             diag_Ah_lap_u = config.A_h * scale_u[:, None, None] * _vlap_u
             diag_Ah_lap_v = config.A_h * scale_v[:, None, None] * _vlap_v
+            if _want_kdiss_flux:
+                _ah_scale_center = config.A_h * scale_u
         else:
             diag_Ah_lap_u = config.A_h * _vlap_u
             diag_Ah_lap_v = config.A_h * _vlap_v
+            if _want_kdiss_flux:
+                _ah_scale_center = config.A_h * jnp.ones(
+                    (grid.lat.shape[0],), dtype=grid.lat.dtype)
         diag_Ah_lap_u, diag_Ah_lap_v = _apply_slope_foot(diag_Ah_lap_u, diag_Ah_lap_v)
         du_dt = du_dt + diag_Ah_lap_u
         dv_dt = dv_dt + diag_Ah_lap_v
@@ -1569,6 +1595,8 @@ def _bc_horizontal_viscosity(
                 lap_scale_v = lap_scale_v * cap_v
             diag_Ah_lap_u = config.A_h * lap_scale_u[:, None, None] * vlap_u
             diag_Ah_lap_v = config.A_h * lap_scale_v[:, None, None] * vlap_v
+            if _want_kdiss_flux:
+                _ah_scale_center = config.A_h * lap_scale_u
         elif config.A_h_eq_boost > 1.0 or config.A_h_cap_boost > 1.0:
             scale_u = jnp.ones((grid.lat.shape[0],), dtype=grid.lat.dtype)
             scale_v = jnp.ones((grid.lat.shape[0] + 1,), dtype=grid.lat.dtype)
@@ -1585,9 +1613,14 @@ def _bc_horizontal_viscosity(
                 scale_v = scale_v * cap_v
             diag_Ah_lap_u = config.A_h * scale_u[:, None, None] * vlap_u
             diag_Ah_lap_v = config.A_h * scale_v[:, None, None] * vlap_v
+            if _want_kdiss_flux:
+                _ah_scale_center = config.A_h * scale_u
         else:
             diag_Ah_lap_u = config.A_h * vlap_u
             diag_Ah_lap_v = config.A_h * vlap_v
+            if _want_kdiss_flux:
+                _ah_scale_center = config.A_h * jnp.ones(
+                    (grid.lat.shape[0],), dtype=grid.lat.dtype)
         diag_Ah_lap_u, diag_Ah_lap_v = _apply_slope_foot(diag_Ah_lap_u, diag_Ah_lap_v)
         du_dt = du_dt + diag_Ah_lap_u
         dv_dt = dv_dt + diag_Ah_lap_v
@@ -1681,9 +1714,33 @@ def _bc_horizontal_viscosity(
         _, _merid_v = _apply_slope_foot(jnp.zeros_like(_d2v_dy2),
                                          _A_h_merid * _d2v_dy2)
         dv_dt = dv_dt + _merid_v * v_mask[:, :, jnp.newaxis]
+
+    # FAITHFUL positive-definite K_diss_h dissipation density [m²/s³] at cell
+    # centres (Veros analogue), built ONLY when source_kdiss_h + kdiss_h_flux_form
+    # are on AND the A_h Laplacian is active (the EKE source covers the A_h lateral
+    # friction, mirroring Veros's K_diss_h from harmonic_friction; B_h/Smag/Leith
+    # are not part of Veros's ACC K_diss_h).  Uses the SAME cell-centre A_h×scale
+    # field (incl. cos-power / eq-boost / cap-boost / slope-foot) applied to the
+    # vector-Laplacian tendency, so the energy credited == the energy that tendency
+    # removes.  ``None`` otherwise → the dynamical (clamped) source path is used.
+    kdiss_h_cell = None
+    if _want_kdiss_flux and _ah_scale_center is not None:
+        _A_h_center = _ah_scale_center
+        if _slope_E_center is not None:
+            # Cell-centre slope-foot enhancement (3-D); broadcast the lat profile.
+            # NB: the applied viscous tendency uses the face-interpolated slope-foot
+            # factor (_slope_E_u/_slope_E_v), so this cell-centre form is exact for
+            # the energy only where slope-foot is inactive (factor==1) — the ACC
+            # recipe (the only oracle path using the flux form) has slope_foot_alpha
+            # =0, so it is exact there; with slope-foot on it is a localized
+            # bottom-cell approximation of the boosted dissipation.
+            _A_h_center = _A_h_center[:, jnp.newaxis, jnp.newaxis] * _slope_E_center
+        kdiss_h_cell = vector_laplacian_dissipation_cgrid(
+            u, v, grid, _A_h_center,
+            mask=mask, u_mask=u_mask, v_mask=v_mask)
     return (du_dt, dv_dt, diag_Ah_lap_u, diag_Ah_lap_v, diag_Bh_bilap_u,
             diag_Bh_bilap_v, diag_Cs_smag_u, diag_Cs_smag_v, diag_Cl_leith_u,
-            diag_Cl_leith_v)
+            diag_Cl_leith_v, kdiss_h_cell)
 
 
 def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid):
@@ -2300,7 +2357,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # --- Stages 10 + 10b: horizontal + meridional viscosity. ---
     (du_dt, dv_dt, diag_Ah_lap_u, diag_Ah_lap_v, diag_Bh_bilap_u,
      diag_Bh_bilap_v, diag_Cs_smag_u, diag_Cs_smag_v, diag_Cl_leith_u,
-     diag_Cl_leith_v) = _bc_horizontal_viscosity(
+     diag_Cl_leith_v, kdiss_h_cell) = _bc_horizontal_viscosity(
         du_dt, dv_dt, u, v, grid, mask, u_mask, v_mask, config, z_coord, H_bathy,
     )
 
@@ -2361,6 +2418,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     else:
         Ah_visc_u = None
         Ah_visc_v = None
+    # FAITHFUL positive-definite K_diss_h dissipation density [m²/s³] at cell
+    # centres — populated ONLY when source_kdiss_h + kdiss_h_flux_form are on (the
+    # ACC recipe); ``None`` otherwise so the dynamical (clamped) source path runs.
+    if kdiss_h_cell is not None:
+        Ah_kediss_cell = Field(data=kdiss_h_cell * mask_3d, name="Ah_kediss_cell",
+                               dims=dims_3d, units="m^2/s^3")
+    else:
+        Ah_kediss_cell = None
 
     tendencies = LatLonCGridOceanTendencies(
         du_dt=Field(data=du_dt, name="du_dt", dims=dims_u, units="m/s^2"),
@@ -2380,6 +2445,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         A_v=phys_A_v,
         Ah_visc_u=Ah_visc_u,
         Ah_visc_v=Ah_visc_v,
+        Ah_kediss_cell=Ah_kediss_cell,
     )
 
     if not diagnose_momentum:

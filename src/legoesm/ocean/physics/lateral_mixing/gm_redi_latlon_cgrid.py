@@ -1001,68 +1001,82 @@ def harmonic_lateral_kediss_eke_source(
     v: jnp.ndarray,
     grid: LatLonGrid,
     mask: jnp.ndarray,
+    kdiss_h_cell: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Mean-KE removal by the harmonic lateral viscosity, routed to the EKE source.
 
-    Returns the rate at which the harmonic lateral viscosity ``A_h∇²(u,v)`` removes
-    mean kinetic energy, as a NON-NEGATIVE EKE source [m²/s³] at the ``nlev-1``
-    interior interfaces (the W-grid) — legoESM's analogue of Veros's ``K_diss_h``
+    Returns the rate at which the harmonic lateral viscosity removes mean kinetic
+    energy, as a NON-NEGATIVE EKE source [m²/s³] at the ``nlev-1`` interior
+    interfaces (the W-grid) — legoESM's analogue of Veros's ``K_diss_h``
     (``veros/core/friction.py`` ``harmonic_friction`` → ``calc_diss_u``/``calc_diss_v``,
     fed into the EKE forcing at ``veros/core/eke.py:110``).
 
-    Method (mirrors Veros's ``diss = 0.5·Σ(Δu·flux)`` then ``calc_diss_u`` →
-    T-grid → W-grid):
+    TWO config-selectable discretisations (``EKEConfig.kdiss_h_flux_form``):
 
-    1. The per-face KE-dissipation rate is ``-u·(A_h∇²u)`` on the u-faces and
-       ``-v·(A_h∇²v)`` on the v-faces (``visc_u``/``visc_v`` are the harmonic-
-       viscosity momentum tendencies ``A_h∇²u`` / ``A_h∇²v`` [m/s²], already
-       face-masked by the caller).  For diffusion ``u·∇²u`` integrates to
-       ``-∫|∇u|² ≤ 0``, so ``-u·∇²u`` is a (column/area-integrated) KE SINK that
-       becomes the EKE source.
-    2. Average each face product to cell centres (``0.5·(p[:,:-1]+p[:,1:])`` for u,
-       ``0.5·(p[:-1]+p[1:])`` for v — the inverse of the C-grid cell→face
-       interpolation) and sum the two contributions at full levels.
-    3. Average the full-level (``nlev``) cell-centred dissipation to the ``nlev-1``
-       interior interfaces (``0.5·(c[:,:,:-1]+c[:,:,1:])`` — the same W-grid mapping
-       Veros's ``dissipation_on_wgrid`` uses for the interior), mask to wet columns,
-       and clamp ≥ 0.
+    **Flux form (FAITHFUL, positive-definite; ``kdiss_h_flux_form=True``, ACC recipe).**
+    ``kdiss_h_cell`` is the pre-computed cell-centre dissipation density
+    ``A_h·(div² + <ζ²>)`` [m²/s³] from
+    :func:`...latlon_cgrid_operators.vector_laplacian_dissipation_cgrid` — the
+    Helmholtz KE-removal of legoESM's VECTOR-Laplacian viscosity
+    (``-∫u·∇²_vec u = ∫(div²+|ζ|²) ≥ 0``).  This branch only averages that density
+    to the ``nlev-1`` interior interfaces (the SAME W-grid mapping Veros's
+    ``dissipation_on_wgrid`` uses for the interior).  It is ``≥ 0`` EVERYWHERE by
+    construction so NO clamp is applied, and (probe-verified on the spun-up ACC
+    state) its domain integral equals the mean KE actually removed by ``A_h`` to
+    0.3% and matches Veros's captured ``K_diss_h`` to ~7%.  This is legoESM's
+    analogue of Veros's positive-definite flux form ``A_h|∇u|²`` (``0.5·Σ Δu·flux``);
+    the squared div/curl replaces the squared one-sided gradients because legoESM's
+    viscosity is the vector Laplacian, not the componentwise scalar Laplacian.
 
-    FORM vs Veros (documented approximation): legoESM uses the dynamical KE-tendency
-    form ``-u·(A_h∇²u)``, whereas Veros's ``K_diss_h`` is the POSITIVE-DEFINITE flux
-    form ``A_h|∇u|²`` (``0.5·Σ Δu·flux``, ≥ 0 pointwise by construction).  The two
-    are equal in the column/area integral (they differ by the transport divergence
-    ``-∇·(A_h u∇u)``, which integrates to ~0 over a closed/masked column), but NOT
-    pointwise: ``-u·A_h∇²u`` is NEGATIVE in the transport regions.  The per-cell
-    clamp ≥ 0 truncates those negative cells, so the domain-integrated source here
-    OVER-CREDITS the true KE dissipation by ~10–20% on the ACC channel (measured;
-    see .physics-validator/eke_source/probe_kdiss_conservation.py).  The clamp is
-    therefore NOT inactive — it is doing real work and is the source of this ~10–20%
-    over-credit.  This is an accepted approximation for the prognostic-EKE source
-    (units, sign, positivity, and order of magnitude are all correct); an exact match
-    to Veros would require routing the friction FLUXES (not the Laplacian tendency)
-    to reconstruct the positive-definite ``A_h|∇u|²``.
+    **Dynamical form (DEFAULT, ``kdiss_h_flux_form=False``; ``kdiss_h_cell=None``).**
+    Uses the KE-tendency ``-u·(A_h∇²_vec u) - v·(A_h∇²_vec v)`` from the supplied
+    ``visc_u``/``visc_v`` momentum tendencies, averaged faces→centres→interfaces and
+    CLAMPED ``≥ 0``.  This form is NOT positive-definite (it carries the transport
+    divergence ``-∇·(A_h u∇u)`` ⇒ ~35% of wet cells negative); the per-cell clamp
+    truncates those, OVER-CREDITING the domain-integrated KE dissipation by ~11–20%
+    on the ACC channel (probe-measured; see
+    .physics-validator/eke_source/probe_kdiss_conservation.py).  Retained as the
+    default so existing runs stay BIT-IDENTICAL; the ACC recipe opts into the flux
+    form for the exact, clamp-free Veros analogue.
 
-    The energy added to EKE is the mean KE removed by ``A_h``; documenting the
-    routing: the mean-KE sink already happens in the momentum tendency (``du_dt``
-    carries ``A_h∇²u``), and this term credits that lost KE to the eddy field
-    (Veros's mean→eddy energy pathway).
+    Either way the energy added to EKE is the mean KE removed by ``A_h``: the sink
+    already happens in the momentum tendency (``du_dt`` carries ``A_h∇²_vec u``), and
+    this term credits that lost KE to the eddy field (Veros's mean→eddy pathway).
 
     Parameters
     ----------
-    visc_u : (n_lat, n_lon+1, nlev) — harmonic-viscosity u-tendency ``A_h∇²u`` [m/s²].
-    visc_v : (n_lat+1, n_lon, nlev) — harmonic-viscosity v-tendency ``A_h∇²v`` [m/s²].
-    u : (n_lat, n_lon+1, nlev) — zonal velocity at u-faces [m/s].
-    v : (n_lat+1, n_lon, nlev) — meridional velocity at v-faces [m/s].
+    visc_u : (n_lat, n_lon+1, nlev) — harmonic-viscosity u-tendency ``A_h∇²u`` [m/s²]
+        (used only by the dynamical-form / ``kdiss_h_cell=None`` path).
+    visc_v : (n_lat+1, n_lon, nlev) — harmonic-viscosity v-tendency ``A_h∇²v`` [m/s²]
+        (dynamical-form path only).
+    u : (n_lat, n_lon+1, nlev) — zonal velocity at u-faces [m/s] (dynamical-form path).
+    v : (n_lat+1, n_lon, nlev) — meridional velocity at v-faces [m/s] (dynamical path).
     grid : LatLonGrid (unused metric-wise — the C-grid averaging is index-based; kept
         for signature parity with the other EKE source builders).
     mask : (n_lat, n_lon) — ocean mask (1 = ocean).
+    kdiss_h_cell : (n_lat, n_lon, nlev) — OPTIONAL pre-computed positive-definite
+        cell-centre dissipation density ``A_h·(div²+<ζ²>)`` [m²/s³].  When provided
+        (the flux-form path), it is mapped to the W-grid with NO clamp; ``visc_*``,
+        ``u``, ``v`` are then unused.  ``None`` (default) selects the dynamical form.
 
     Returns
     -------
     K_diss_h : (n_lat, n_lon, nlev-1) — non-negative EKE source [m²/s³] at interfaces.
     """
-    # Per-face KE-dissipation rate (the rate KE is removed from each momentum
-    # component) [m²/s³ on the face].  visc_* are already face-masked by the caller.
+    if kdiss_h_cell is not None:
+        # FAITHFUL FLUX FORM: kdiss_h_cell is already the positive-definite
+        # per-cell dissipation density A_h·(div²+<ζ²>) ≥ 0 (built by
+        # vector_laplacian_dissipation_cgrid from the SAME velocities / A_h scaling
+        # the applied viscous tendency uses).  Average the full-level (nlev) cell
+        # density to the nlev-1 interior interfaces — the same interior W-grid
+        # mapping Veros's dissipation_on_wgrid uses (0.5·(c[:-1]+c[1:])).  No clamp:
+        # the density is ≥ 0 everywhere by construction, so the W-grid average is too.
+        diss_cell = kdiss_h_cell * mask[:, :, jnp.newaxis]
+        K_diss_h_w = 0.5 * (diss_cell[:, :, :-1] + diss_cell[:, :, 1:])
+        return K_diss_h_w * mask[:, :, jnp.newaxis]
+
+    # DYNAMICAL FORM (default): per-face KE-dissipation rate -u·(A_h∇²u) [m²/s³ on
+    # the face].  visc_* are already face-masked by the caller.
     p_u = -u * visc_u                                   # (n_lat, n_lon+1, nlev)
     p_v = -v * visc_v                                   # (n_lat+1, n_lon, nlev)
     # Average the face products to cell centres (inverse of cell->face interp).
@@ -1074,8 +1088,9 @@ def harmonic_lateral_kediss_eke_source(
     # Average full-level cell dissipation to the nlev-1 interior interfaces (W-grid),
     # matching where E lives, then clamp >= 0 to make this a pure source.  NB: the
     # clamp is NOT inactive — -u·A_h∇²u is locally negative in transport regions, so
-    # the clamp over-credits the column-integrated KE dissipation by ~10-20% vs the
-    # positive-definite A_h|∇u|² Veros uses (documented approximation; see docstring).
+    # the clamp over-credits the column-integrated KE dissipation by ~11-20% vs the
+    # positive-definite flux form above (set kdiss_h_flux_form=True for the exact,
+    # clamp-free Veros analogue).
     K_diss_h_w = 0.5 * (diss_cell[:, :, :-1] + diss_cell[:, :, 1:])
     return jnp.maximum(K_diss_h_w, 0.0) * mask[:, :, jnp.newaxis]
 

@@ -1253,6 +1253,109 @@ def vector_laplacian_cgrid(
     return vlap_u, vlap_v
 
 
+def vector_laplacian_dissipation_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: LatLonGrid,
+    A_h_center: jnp.ndarray,
+    *,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Positive-definite KE-dissipation density of the lateral vector-Laplacian
+    viscosity, at cell centres [m²/s³] — legoESM's analogue of Veros's flux-form
+    ``K_diss_h = 0.5·Σ(Δu·flux) = A_h|∇u|²`` (``veros/core/friction.py``
+    ``calc_diss_u``/``calc_diss_v``).
+
+    legoESM's lateral viscosity is the VECTOR Laplacian
+    ``∇²_vec(u,v) = grad(div) − k×grad(curl)`` (``vector_laplacian_cgrid``), NOT
+    the componentwise scalar Laplacian Veros uses.  For the vector Laplacian the
+    KE-removal energy identity is the Helmholtz form
+
+        −∫ (u·∇²_vec u + v·∇²_vec v) dA  =  ∫ (|div u|² + |ζ|²) dA  ≥ 0
+
+    (integration by parts on a closed/periodic domain), so the POSITIVE-DEFINITE
+    per-cell dissipation density that integrates to the SAME mean KE removed by the
+    harmonic lateral viscosity is
+
+        diss = A_h · ( div²  +  <ζ²>_corners )                                  (≥ 0)
+
+    — NOT the scalar-Laplacian energy ``A_h|∇u|²``.  This is ≥ 0 by construction
+    (squares × A_h ≥ 0), so it needs NO clamp, and (verified on the spun-up ACC
+    state) its domain integral equals the unclamped ``−u·A_h∇²_vec u`` to 0.3 %,
+    whereas the clamped dynamical form over-credits by ~11–20 %.
+
+    The divergence (cell centres) and relative vorticity ζ (vertices) are formed
+    by the SAME shared operators and with the SAME face/vertex masking that
+    ``vector_laplacian_cgrid`` uses internally (``divergence_cgrid``,
+    ``curl_vertex_cgrid``, ``_compute_vertex_mask``) — so the energy this credits is
+    exactly the energy the applied viscous tendency removes (no duplicate or
+    inconsistent numerics).  ζ² is averaged from the four surrounding vertices to
+    the cell centre (the same 4-corner stagger as ``smagorinsky_viscosity_cgrid``).
+
+    Parameters
+    ----------
+    u : (n_lat, n_lon+1[, nlev]) zonal velocity at u-faces [m/s].
+    v : (n_lat+1, n_lon[, nlev]) meridional velocity at v-faces [m/s].
+    grid : LatLonGrid.
+    A_h_center : (n_lat,) or (n_lat, n_lon) or broadcastable to the cell-centre
+        field — the lateral viscosity coefficient AT CELL CENTRES [m²/s], i.e. the
+        same ``A_h × scale`` (cos-power / eq-boost / cap-boost / slope-foot) field
+        the caller applies to the u vector-Laplacian tendency.  A 1-D ``(n_lat,)``
+        latitudinal profile is broadcast over longitude + levels.
+    mask : (n_lat, n_lon) cell-centre ocean mask (1 = ocean), optional.
+    u_mask : (n_lat, n_lon+1) u-face mask, optional.
+    v_mask : (n_lat+1, n_lon) v-face mask, optional.
+
+    Returns
+    -------
+    diss : (n_lat, n_lon[, nlev]) — non-negative KE-dissipation density [m²/s³]
+        at cell centres.
+    """
+    is_3d = u.ndim == 3
+
+    def _bcast(m, like):
+        return m[..., jnp.newaxis] if (is_3d and m.ndim == like.ndim - 1) else m
+
+    # Mask velocities exactly as vector_laplacian_cgrid does before div/curl.
+    u_eff = u if u_mask is None else u * _bcast(u_mask, u)
+    v_eff = v if v_mask is None else v * _bcast(v_mask, v)
+
+    # Divergence at cell centres (masked) — same operator + masking as the vlap.
+    div = divergence_cgrid(u_eff, v_eff, grid)
+    if mask is not None:
+        div = div * _bcast(mask, div)
+
+    # Relative vorticity at vertices (masked at land-adjacent vertices) — same.
+    zeta = curl_vertex_cgrid(u_eff, v_eff, grid)
+    if mask is not None:
+        vmask = _compute_vertex_mask(mask, grid=grid)
+        zeta = zeta * _bcast(vmask, zeta)
+
+    # ζ² averaged from the four surrounding vertices to the cell centre (the
+    # 4-corner stagger used by smagorinsky_viscosity_cgrid / strain interp).
+    z2 = zeta ** 2
+    if is_3d:
+        z2_center = 0.25 * (z2[:-1, :-1, :] + z2[1:, :-1, :]
+                            + z2[:-1, 1:, :] + z2[1:, 1:, :])
+    else:
+        z2_center = 0.25 * (z2[:-1, :-1] + z2[1:, :-1]
+                            + z2[:-1, 1:] + z2[1:, 1:])
+
+    # A_h at cell centres (1-D lat profile broadcasts over lon + levels).
+    A_c = jnp.asarray(A_h_center)
+    if A_c.ndim == 1:                       # (n_lat,) latitudinal profile
+        A_c = A_c[:, jnp.newaxis, jnp.newaxis] if is_3d else A_c[:, jnp.newaxis]
+    elif is_3d and A_c.ndim == 2:           # (n_lat, n_lon) -> add level axis
+        A_c = A_c[:, :, jnp.newaxis]
+
+    diss = A_c * (div ** 2 + z2_center)
+    if mask is not None:
+        diss = diss * _bcast(mask, diss)
+    return diss
+
+
 def vector_bilaplacian_cgrid(
     u: jnp.ndarray,
     v: jnp.ndarray,

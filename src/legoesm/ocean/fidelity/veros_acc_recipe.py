@@ -197,12 +197,17 @@ ACC_GM_REDI_CONFIG = GMRediConfig(
     #   - source_kdiss_h=True: route the mean-KE removed by the harmonic lateral
     #     viscosity A_h into EKE (Veros K_diss_h, ~56% of the ACC forcing — the
     #     dominant missing source).
+    #   - kdiss_h_flux_form=True: use the FAITHFUL positive-definite flux form
+    #     A_h·(div²+<ζ²>) (Veros's clamp-free A_h|∇u|² analogue for legoESM's
+    #     vector-Laplacian viscosity) rather than the clamped dynamical -u·A_h∇²u
+    #     (which over-credits the domain-integrated KE dissipation by ~11–20%).
     #   - gm_source_mode="realized": use the REALIZED GM-skew buoyancy conversion
     #     -(g/ρ₀)∇ρ·F_skew (Veros -P_diss_skew, ~42%) instead of the parameterized
     #     kappa_GM·σ² (which under-counts the per-triad slope variance <S²>≥<S>²).
     eke=EKEConfig(mixing_length_scheme="rhines", eke_cross=2.0, eke_crhin=1.0,
                   isopycnal_diffusion=True, eke_3d=True,
-                  source_kdiss_h=True, gm_source_mode="realized"),
+                  source_kdiss_h=True, kdiss_h_flux_form=True,
+                  gm_source_mode="realized"),
 )
 
 # Surface restoring timescale

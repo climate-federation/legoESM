@@ -83,6 +83,21 @@ class EKEConfig(NamedTuple):
     # legoESM's own harmonic-viscosity tendency and adds it to the W-grid source.
     # ACC recipe opts in; default off keeps the 2-D + existing-3-D path identical.
     source_kdiss_h: bool = False
+    # K_diss_h discretisation (only used when source_kdiss_h=True):
+    #   False (default) — the DYNAMICAL KE-tendency form ``-u·(A_h∇²_vec u)``
+    #     (``harmonic_lateral_kediss_eke_source`` fed the ``Ah_visc_u/v`` Laplacian
+    #     tendencies), which is NOT positive-definite (~35% of wet cells negative
+    #     from the transport divergence) and is CLAMPED ≥ 0. The clamp over-credits
+    #     the domain-integrated KE dissipation by ~11–20% (probe-measured on the
+    #     ACC spin-up). BIT-IDENTICAL to the pre-flux-form path.
+    #   True — the FAITHFUL POSITIVE-DEFINITE flux form (Veros K_diss_h analogue):
+    #     ``A_h·(div² + <ζ²>)`` (``vector_laplacian_dissipation_cgrid``), the
+    #     Helmholtz KE-removal of legoESM's VECTOR-Laplacian viscosity. ≥ 0
+    #     EVERYWHERE by construction (no clamp), and energy-consistent: its domain
+    #     integral equals the mean KE actually removed by A_h to 0.3% (vs the
+    #     dynamical clamp's ~11–20% over-credit), and it matches Veros's captured
+    #     K_diss_h on the bridged ACC state to ~7%. ACC recipe opts in.
+    kdiss_h_flux_form: bool = False
     # GM mean-APE -> EKE conversion source mode:
     #   "parameterized" (default) — P = kappa_GM·sigma² with sigma = <N|S|>_z(z) from
     #     the DM95-tapered, S_max-clipped, face->center->interface-averaged slope
@@ -311,6 +326,16 @@ def validate_eke_config(cfg: EKEConfig) -> None:
         raise ValueError(
             "EKEConfig.gm_source_mode must be 'parameterized' or 'realized', got "
             f"{cfg.gm_source_mode!r}"
+        )
+    if cfg.kdiss_h_flux_form and not cfg.source_kdiss_h:
+        # kdiss_h_flux_form selects the discretisation of the K_diss_h source; it
+        # is a no-op unless the source itself is enabled. Reject the silent-ignore
+        # combination rather than building an unused dissipation field.
+        raise ValueError(
+            "EKEConfig.kdiss_h_flux_form=True requires source_kdiss_h=True (it "
+            "selects the positive-definite flux-form discretisation of the "
+            "K_diss_h EKE source; with source_kdiss_h=False there is no K_diss_h "
+            "source to discretise)."
         )
 
 

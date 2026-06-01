@@ -49,6 +49,9 @@ from legoesm.ocean.physics.lateral_mixing.eke import (
     eke_apply_local_source,
     validate_eke_config,
 )
+from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    vector_laplacian_dissipation_cgrid,
+)
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_eke_step_kappa,
     compute_realized_gm_skew_conversion,
@@ -140,6 +143,141 @@ def test_kdiss_h_diffusive_tendency_gives_positive_source():
     assert float(jnp.min(K)) >= 0.0
     # Column-integrated source is strictly positive (KE is being removed).
     assert float(jnp.sum(K)) > 0.0
+
+
+# ---------------------------------------------------------------------------
+# (a') FAITHFUL flux-form K_diss_h: positive-definite (no clamp) + energy-
+#       consistent with the actual mean-KE removed by the vector-Laplacian A_h.
+# ---------------------------------------------------------------------------
+
+
+def _kdiss_cell_flux_form(recipe, model, state):
+    """Build the positive-definite cell-centre dissipation density the flux-form
+    source consumes (the SAME ``A_h × scale`` field the tendency applies), via the
+    canonical ``vector_laplacian_dissipation_cgrid`` operator. Mirrors the tendency
+    wiring for the ACC config (A_h_lat_scaling cos^p, no eq/cap boost, no slope-foot)."""
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import laplacian_scaling_factor
+    grid = recipe.grid
+    cfg = recipe.model_config
+    mask = state.land_mask.data
+    if cfg.A_h_lat_scaling:
+        _floor = cfg.A_h_floor / cfg.A_h if cfg.A_h_floor > 0 else 0.0
+        sc_u, _ = laplacian_scaling_factor(grid, power=cfg.A_h_cos_power, floor=_floor)
+    else:
+        sc_u = jnp.ones((grid.lat.shape[0],), dtype=grid.lat.dtype)
+    A_h_center = cfg.A_h * sc_u
+    return vector_laplacian_dissipation_cgrid(
+        state.u.data, state.v.data, grid, A_h_center,
+        mask=mask, u_mask=state.u_mask.data, v_mask=state.v_mask.data)
+
+
+def test_kdiss_h_flux_form_nonneg_everywhere_no_clamp():
+    """The FAITHFUL flux-form K_diss_h source (``kdiss_h_cell`` path) is ``>= 0``
+    EVERYWHERE by construction — no clamp.  Built from the positive-definite
+    cell-centre density ``A_h·(div²+<ζ²>)``, mapped to the W-grid; shape + zero-on-
+    land + finiteness as for the dynamical form, but the BEFORE-clamp minimum of the
+    W-grid average is already ``>= 0`` (the clamp in the dynamical path is a no-op
+    here because the input is non-negative)."""
+    recipe, model = _acc_recipe_and_model()
+    state = _developed_state(recipe, model)
+    grid = recipe.grid
+    mask = state.land_mask.data
+    n_lat, n_lon = mask.shape
+    kdiss_cell = _kdiss_cell_flux_form(recipe, model, state)
+    # The cell-centre density itself is >= 0 everywhere.
+    assert float(jnp.min(kdiss_cell)) >= 0.0
+    # The flux-form source (W-grid) — no clamp applied in this branch.
+    K = harmonic_lateral_kediss_eke_source(
+        jnp.zeros_like(state.u.data), jnp.zeros_like(state.v.data),
+        state.u.data, state.v.data, grid, mask, kdiss_h_cell=kdiss_cell)
+    assert K.shape == (n_lat, n_lon, NZ - 1)
+    assert bool(jnp.all(jnp.isfinite(K)))
+    assert float(jnp.min(K)) >= 0.0           # >= 0 by construction (no clamp)
+    land = mask < 0.5
+    assert float(jnp.max(jnp.where(land[:, :, None], K, -jnp.inf))) <= 0.0
+    assert float(jnp.max(K)) > 0.0            # non-trivial on the sheared flow
+    # The flux-form source did NOT need a clamp: re-deriving it WITHOUT the model
+    # builder (pure cell->W average, no jnp.maximum) gives the IDENTICAL array.
+    dc = kdiss_cell * mask[:, :, None]
+    K_manual = 0.5 * (dc[:, :, :-1] + dc[:, :, 1:]) * mask[:, :, None]
+    np.testing.assert_array_equal(np.asarray(K), np.asarray(K_manual))
+
+
+def test_kdiss_h_flux_form_energy_consistent_beats_dynamical_overcredit():
+    """The flux-form domain-integrated dissipation equals the ACTUAL mean KE removed
+    by the vector-Laplacian ``A_h`` (the UNCLAMPED ``-u·A_h∇²u`` total) to ~1%,
+    whereas the dynamical CLAMPED form over-credits it by >5%.  This is the core
+    energy-consistency win (the clamp distortion the flux form removes)."""
+    recipe, model = _acc_recipe_and_model()
+    state = _developed_state(recipe, model)
+    grid = recipe.grid
+    mask = state.land_mask.data
+    u, v = state.u.data, state.v.data
+    u_mask, v_mask = state.u_mask.data, state.v_mask.data
+
+    tend, diag = model.tendencies_with_diagnostics(
+        state, surface_forcing=recipe.wind_forcing, dt=DT_MOM_S)
+    visc_u = diag.Ah_lap_u.data * u_mask[:, :, None]
+    visc_v = diag.Ah_lap_v.data * v_mask[:, :, None]
+
+    # Flux-form (no clamp) and dynamical (clamped) W-grid sources.
+    kdiss_cell = _kdiss_cell_flux_form(recipe, model, state)
+    K_flux = harmonic_lateral_kediss_eke_source(
+        visc_u, visc_v, u, v, grid, mask, kdiss_h_cell=kdiss_cell)
+    K_clamp = harmonic_lateral_kediss_eke_source(visc_u, visc_v, u, v, grid, mask)
+
+    # Reference: the UNCLAMPED dynamical cell density -> W-grid = the true mean KE
+    # removed by A_h (the clamp's negatives are the transport divergence that
+    # integrates ~0 in the closed/masked domain).
+    p_u = -u * visc_u
+    p_v = -v * visc_v
+    dcell = 0.5 * (p_u[:, :-1, :] + p_u[:, 1:, :]) + 0.5 * (p_v[:-1, :, :] + p_v[1:, :, :])
+    dcell = dcell * mask[:, :, None]
+    K_unclamped = 0.5 * (dcell[:, :, :-1] + dcell[:, :, 1:]) * mask[:, :, None]
+
+    M = NZ - 1
+    area = np.asarray(grid.area)
+    dz = np.asarray(recipe.z_coord.dz_ref)[:M]
+    w = area[:, :, None] * dz[None, None, :] * np.asarray(mask)[:, :, None]
+    E_flux = float((np.asarray(K_flux) * w).sum())
+    E_clamp = float((np.asarray(K_clamp) * w).sum())
+    E_true = float((np.asarray(K_unclamped) * w).sum())
+
+    assert E_true > 0.0
+    r_flux = E_flux / E_true
+    r_clamp = E_clamp / E_true
+    # Flux-form is energy-consistent (within 3% of the true KE removal).
+    assert abs(r_flux - 1.0) < 0.03, f"flux/true={r_flux:.4f} (expect ~1.0)"
+    # The dynamical clamp over-credits (observed ~1.11 on the ACC spin-up).
+    assert r_clamp > 1.05, f"clamp/true={r_clamp:.4f} (expect over-credit)"
+    # And the flux form is strictly closer to the true value than the clamp.
+    assert abs(r_flux - 1.0) < abs(r_clamp - 1.0)
+
+
+def test_kdiss_h_source_default_off_is_dynamical_clamped_byte_identical():
+    """``harmonic_lateral_kediss_eke_source`` with ``kdiss_h_cell=None`` (the default,
+    flux form OFF) is BYTE-IDENTICAL to the explicit dynamical clamped reference
+    ``max(0.5·(c[:-1]+c[1:]), 0)·mask`` built from ``-u·visc`` — i.e. the new
+    ``kdiss_h_cell`` branch is fully gated and the default path is unchanged to the
+    bit (the core default-off regression guard for the source builder)."""
+    recipe, model = _acc_recipe_and_model()
+    state = _developed_state(recipe, model)
+    grid = recipe.grid
+    mask = state.land_mask.data
+    u, v = state.u.data, state.v.data
+    tend, diag = model.tendencies_with_diagnostics(
+        state, surface_forcing=recipe.wind_forcing, dt=DT_MOM_S)
+    visc_u = diag.Ah_lap_u.data * state.u_mask.data[:, :, None]
+    visc_v = diag.Ah_lap_v.data * state.v_mask.data[:, :, None]
+    # New default path (kdiss_h_cell omitted == None).
+    K = harmonic_lateral_kediss_eke_source(visc_u, visc_v, u, v, grid, mask)
+    # Explicit dynamical clamped reference (the pre-flux-form algorithm).
+    p_u = -u * visc_u
+    p_v = -v * visc_v
+    dc = 0.5 * (p_u[:, :-1, :] + p_u[:, 1:, :]) + 0.5 * (p_v[:-1, :, :] + p_v[1:, :, :])
+    dc = dc * mask[:, :, None]
+    K_ref = jnp.maximum(0.5 * (dc[:, :, :-1] + dc[:, :, 1:]), 0.0) * mask[:, :, None]
+    np.testing.assert_array_equal(np.asarray(K), np.asarray(K_ref))
 
 
 def test_realized_gm_skew_conversion_nonneg_shape():
@@ -306,6 +444,84 @@ def test_kdiss_h_magnitude_matches_veros_order_of_magnitude():
     assert 1.0 / 3.0 < ratio < 3.0, f"K_diss_h mean ratio legoESM/Veros={ratio:.3f}"
 
 
+@pytest.mark.slow
+def test_kdiss_h_flux_form_matches_veros_and_beats_dynamical_overcredit():
+    """On the BRIDGED spun-up ACC state the FAITHFUL flux-form K_diss_h is
+      (1) ``>= 0`` everywhere by construction (no clamp);
+      (2) energy-consistent — its domain integral equals the unclamped (true) mean
+          KE removed by ``A_h`` to ~1%, vs the dynamical CLAMP's ~11–20% over-credit;
+      (3) within ~15% of Veros's captured ``K_diss_h`` in domain-mean magnitude.
+    This is the apples-to-apples cross-check the flux form was built for."""
+    res = _veros_or_skip()
+    from legoesm.ocean.fidelity import veros_state_bridge as VB
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        vector_laplacian_dissipation_cgrid, laplacian_scaling_factor,
+    )
+
+    recipe = build_acc_recipe(with_surface_forcing=False)
+    bridged = VB.veros_snapshot_to_legoesm_state(res, recipe.initial_state).state
+    grid = recipe.grid
+    mcfg = recipe.model_config
+    mask = np.asarray(recipe.land_mask)
+    n_lat, n_lon = mask.shape
+    M = NZ - 1
+
+    model = LatLonCGridOceanModel(grid, recipe.z_coord, mcfg)
+    tend, diag = model.tendencies_with_diagnostics(bridged, surface_forcing=None,
+                                                   dt=DT_MOM_S)
+    u, v = bridged.u.data, bridged.v.data
+    u_mask, v_mask = bridged.u_mask.data, bridged.v_mask.data
+    visc_u = diag.Ah_lap_u.data * u_mask[:, :, None]
+    visc_v = diag.Ah_lap_v.data * v_mask[:, :, None]
+
+    # Flux-form density via the canonical operator (same A_h×scale as the tendency).
+    _floor = mcfg.A_h_floor / mcfg.A_h if mcfg.A_h_floor > 0 else 0.0
+    sc_u, _ = laplacian_scaling_factor(grid, power=mcfg.A_h_cos_power, floor=_floor)
+    kdiss_cell = vector_laplacian_dissipation_cgrid(
+        u, v, grid, mcfg.A_h * sc_u, mask=jnp.asarray(mask),
+        u_mask=u_mask, v_mask=v_mask)
+    K_flux = np.asarray(harmonic_lateral_kediss_eke_source(
+        visc_u, visc_v, u, v, grid, jnp.asarray(mask), kdiss_h_cell=kdiss_cell))
+    K_clamp = np.asarray(harmonic_lateral_kediss_eke_source(
+        visc_u, visc_v, u, v, grid, jnp.asarray(mask)))
+
+    def pad_lat(a):
+        if a.shape[0] == n_lat:
+            return a
+        z = np.zeros_like(a[:1])
+        return np.concatenate([z, a, z], axis=0)
+
+    K_v = pad_lat(VB._extract_veros_var(res, "K_diss_h"))[:, :, :M]
+    sq = pad_lat(VB._extract_veros_var(res, "sqrteke"))[:, :, :M]
+    wet = (sq > 0) & (mask[:, :, None] > 0.5)
+
+    # (1) positive-definite, no clamp needed.
+    assert float(K_flux.min()) >= 0.0
+
+    # (2) energy consistency vs the unclamped (true) KE removal.
+    p_u = -np.asarray(u) * np.asarray(visc_u)
+    p_v = -np.asarray(v) * np.asarray(visc_v)
+    dcell = 0.5 * (p_u[:, :-1, :] + p_u[:, 1:, :]) + 0.5 * (p_v[:-1, :, :] + p_v[1:, :, :])
+    dcell = dcell * mask[:, :, None]
+    K_unclamped = 0.5 * (dcell[:, :, :-1] + dcell[:, :, 1:]) * mask[:, :, None]
+    area = np.asarray(grid.area)
+    dz = np.asarray(recipe.z_coord.dz_ref)[:M]
+    w = area[:, :, None] * dz[None, None, :] * mask[:, :, None]
+    E_flux = float((K_flux * w).sum())
+    E_clamp = float((K_clamp * w).sum())
+    E_true = float((K_unclamped * w).sum())
+    assert E_true > 0.0
+    assert abs(E_flux / E_true - 1.0) < 0.03, f"flux/true={E_flux/E_true:.4f}"
+    assert E_clamp / E_true > 1.05, f"clamp/true={E_clamp/E_true:.4f}"
+
+    # (3) within ~15% of Veros in domain-mean magnitude (observed ~0.93x).
+    mean_flux = K_flux[wet].mean()
+    mean_v = K_v[wet].mean()
+    assert mean_flux > 0.0 and mean_v > 0.0
+    ratio = mean_flux / mean_v
+    assert 0.85 < ratio < 1.15, f"flux-form K_diss_h mean ratio legoESM/Veros={ratio:.3f}"
+
+
 # ---------------------------------------------------------------------------
 # (c) Bit-identical regression: augmentation OFF == prior behaviour.
 # ---------------------------------------------------------------------------
@@ -327,7 +543,8 @@ def test_3d_path_bit_identical_with_augmentation_off():
     the full state after several steps match a from-scratch parameterized run to the
     bit. This is the regression guard that the new branches are fully gated."""
     recipe, model_off = _acc_model_with_eke(
-        source_kdiss_h=False, gm_source_mode="parameterized")
+        source_kdiss_h=False, kdiss_h_flux_form=False,
+        gm_source_mode="parameterized")
     state = recipe.initial_state
     s = state
     for _ in range(5):
@@ -336,7 +553,8 @@ def test_3d_path_bit_identical_with_augmentation_off():
     # to the bit (deterministic step). This pins that the parameterized path is
     # untouched by the augmentation code.
     _recipe2, model_ref = _acc_model_with_eke(
-        source_kdiss_h=False, gm_source_mode="parameterized")
+        source_kdiss_h=False, kdiss_h_flux_form=False,
+        gm_source_mode="parameterized")
     s2 = recipe.initial_state
     for _ in range(5):
         s2 = model_ref.step(s2, DT_MOM_S, surface_forcing=recipe.wind_forcing)
@@ -345,12 +563,44 @@ def test_3d_path_bit_identical_with_augmentation_off():
     np.testing.assert_array_equal(np.asarray(s.T.data), np.asarray(s2.T.data))
 
 
+def test_kdiss_h_flux_form_step_differs_from_dynamical_and_dynamical_reproducible():
+    """At the STEP level: with K_diss_h ON, the FLUX form (kdiss_h_flux_form=True)
+    produces a DIFFERENT eke field than the DYNAMICAL form (False) — the flag
+    genuinely selects the discretisation — while the DYNAMICAL form remains
+    bit-reproducible (the default-off path is deterministic / unchanged)."""
+    recipe, model_dyn = _acc_model_with_eke(
+        source_kdiss_h=True, kdiss_h_flux_form=False)
+    _r2, model_flux = _acc_model_with_eke(
+        source_kdiss_h=True, kdiss_h_flux_form=True)
+    _r3, model_dyn2 = _acc_model_with_eke(
+        source_kdiss_h=True, kdiss_h_flux_form=False)
+    s_dyn = recipe.initial_state
+    s_flux = recipe.initial_state
+    s_dyn2 = recipe.initial_state
+    for _ in range(5):
+        s_dyn = model_dyn.step(s_dyn, DT_MOM_S, surface_forcing=recipe.wind_forcing)
+        s_flux = model_flux.step(s_flux, DT_MOM_S, surface_forcing=recipe.wind_forcing)
+        s_dyn2 = model_dyn2.step(s_dyn2, DT_MOM_S, surface_forcing=recipe.wind_forcing)
+    eke_dyn = np.asarray(s_dyn.eke.data)
+    eke_flux = np.asarray(s_flux.eke.data)
+    # Dynamical form is bit-reproducible (deterministic; the default path unchanged).
+    np.testing.assert_array_equal(eke_dyn, np.asarray(s_dyn2.eke.data))
+    # Flux form genuinely changes the eke field (different K_diss_h discretisation).
+    assert not np.array_equal(eke_dyn, eke_flux)
+    lm = np.asarray(recipe.initial_state.land_mask.data)
+    wet = np.broadcast_to(lm[:, :, None] > 0.5, eke_dyn.shape)
+    assert np.max(np.abs(eke_dyn[wet] - eke_flux[wet])) > 0.0
+    # Both remain non-negative (positivity preserved either way).
+    assert eke_dyn.min() >= 0.0 and eke_flux.min() >= 0.0
+
+
 def test_augmentation_on_increases_eke_source():
     """Turning the augmentation ON (the recipe default) STRICTLY increases the eke
     field vs the augmentation-off run from the same seed — the new sources genuinely
     add energy (the whole point). The two states share the same seed + forcing."""
     recipe, model_off = _acc_model_with_eke(
-        source_kdiss_h=False, gm_source_mode="parameterized")
+        source_kdiss_h=False, kdiss_h_flux_form=False,
+        gm_source_mode="parameterized")
     _recipe2, model_on = _acc_model_with_eke()  # recipe default = augmentation ON
     s_off = recipe.initial_state
     s_on = recipe.initial_state
@@ -370,7 +620,8 @@ def test_tendencies_Ah_visc_none_when_source_kdiss_h_off():
     """``Ah_visc_u``/``Ah_visc_v`` on the tendencies are None unless source_kdiss_h is
     on (so the tendency pytree + every existing path is unchanged by default), and are
     populated (face-masked A_h∇²(u,v)) when it is on."""
-    recipe, model_off = _acc_model_with_eke(source_kdiss_h=False)
+    recipe, model_off = _acc_model_with_eke(source_kdiss_h=False,
+                                            kdiss_h_flux_form=False)
     tend = model_off.tendencies(recipe.initial_state,
                                 surface_forcing=recipe.wind_forcing, dt=DT_MOM_S)
     assert tend.Ah_visc_u is None and tend.Ah_visc_v is None
@@ -431,10 +682,13 @@ def test_model_rejects_source_augmentation_without_eke_3d():
     rather than silently ignoring it (dispatch discipline)."""
     recipe = build_acc_recipe(with_surface_forcing=True)
     gm = recipe.model_config.gm_redi
-    # Reset both augmentation flags to their defaults first, then set ONE bad combo.
-    for bad in (dict(eke_3d=False, source_kdiss_h=True,
+    # Reset the augmentation flags to their defaults first, then set ONE bad combo.
+    # kdiss_h_flux_form=False isolates the eke_3d requirement (otherwise the
+    # recipe's kdiss_h_flux_form=True + source_kdiss_h=False combo would trip its
+    # own validation first).
+    for bad in (dict(eke_3d=False, source_kdiss_h=True, kdiss_h_flux_form=False,
                      gm_source_mode="parameterized"),
-                dict(eke_3d=False, source_kdiss_h=False,
+                dict(eke_3d=False, source_kdiss_h=False, kdiss_h_flux_form=False,
                      gm_source_mode="realized")):
         eke = gm.eke._replace(**bad)
         cfg = recipe.model_config._replace(gm_redi=gm._replace(eke=eke))
@@ -445,8 +699,10 @@ def test_model_rejects_source_augmentation_without_eke_3d():
 
 
 def test_acc_recipe_opts_in_to_both_sources():
-    """The ACC recipe opts in to BOTH new sources (apples-to-apples with Veros)."""
+    """The ACC recipe opts in to BOTH new sources (apples-to-apples with Veros),
+    and to the FAITHFUL positive-definite K_diss_h flux form."""
     assert ACC_GM_REDI_CONFIG.eke.source_kdiss_h is True
+    assert ACC_GM_REDI_CONFIG.eke.kdiss_h_flux_form is True
     assert ACC_GM_REDI_CONFIG.eke.gm_source_mode == "realized"
     assert ACC_GM_REDI_CONFIG.eke.eke_3d is True
 

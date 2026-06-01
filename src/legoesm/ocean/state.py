@@ -427,8 +427,14 @@ class LatLonCGridOceanTendencies(NamedTuple):
     tendencies (``A_h∇²u`` / ``A_h∇²v`` [m/s²], face-masked), populated
     ONLY when the prognostic-EKE ``source_kdiss_h`` option is on (so the
     3-D EKE step can route the mean-KE they remove into the EKE source —
-    Veros's ``K_diss_h``). ``None`` otherwise (default), keeping the
-    tendency pytree + every existing path bit-identical.
+    Veros's ``K_diss_h``, the DYNAMICAL-form path). ``None`` otherwise
+    (default), keeping the tendency pytree + every existing path bit-identical.
+
+    Ah_kediss_cell is the FAITHFUL positive-definite K_diss_h dissipation
+    density (``A_h·(div² + <ζ²>)`` [m²/s³] at cell centres), populated ONLY
+    when ``source_kdiss_h`` AND ``kdiss_h_flux_form`` are both on (the ACC
+    recipe). It is the Helmholtz KE-removal of the vector-Laplacian lateral
+    viscosity — ≥ 0 everywhere by construction (no clamp). ``None`` otherwise.
     """
     du_dt: Field
     dv_dt: Field
@@ -441,6 +447,7 @@ class LatLonCGridOceanTendencies(NamedTuple):
     A_v: object = None
     Ah_visc_u: object = None
     Ah_visc_v: object = None
+    Ah_kediss_cell: object = None
 
 
 class MomentumTendencyDiagnostics(NamedTuple):

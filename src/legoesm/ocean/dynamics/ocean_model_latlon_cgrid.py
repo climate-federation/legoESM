@@ -1174,6 +1174,7 @@ class LatLonCGridOceanModel:
                         state, state_new, T_mid, S_mid, gm_cfg, eke_cfg, lm,
                         tend.A_v, dt,
                         Ah_visc_u=tend.Ah_visc_u, Ah_visc_v=tend.Ah_visc_v,
+                        Ah_kediss_cell=tend.Ah_kediss_cell,
                     )
                 else:
                     if state.eke is not None:
@@ -1478,6 +1479,7 @@ class LatLonCGridOceanModel:
         *,
         Ah_visc_u=None,
         Ah_visc_v=None,
+        Ah_kediss_cell=None,
     ) -> tuple:
         """One step of the 3-D (depth-resolved) prognostic-EKE closure.
 
@@ -1626,9 +1628,15 @@ class LatLonCGridOceanModel:
             )
         extra_source = None
         if eke_cfg.source_kdiss_h and Ah_visc_u is not None:
+            # Flux form (kdiss_h_flux_form=True): pass the pre-computed positive-
+            # definite cell-centre dissipation density (Ah_kediss_cell) so the
+            # source builder maps it to the W-grid with NO clamp.  Dynamical form
+            # (Ah_kediss_cell is None): the clamped -u·A_h∇²u path.
+            _kdiss_cell = (Ah_kediss_cell.data if Ah_kediss_cell is not None
+                           else None)
             extra_source = harmonic_lateral_kediss_eke_source(
                 Ah_visc_u.data, Ah_visc_v.data, state.u.data, state.v.data,
-                self.grid, lm,
+                self.grid, lm, kdiss_h_cell=_kdiss_cell,
             )
         E = eke_apply_local_source(
             E, sigma3, L3, eke_cfg, dt,
