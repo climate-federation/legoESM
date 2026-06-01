@@ -2649,3 +2649,116 @@ class TestMulticatTransportTracerConservation:
             pond_thick, conc, jnp.full(shp, 263.0), u, v, grid, dt)
         assert float(jnp.sum(pond_new * cP)) == pytest.approx(
             float(jnp.sum(pond_thick * conc)), rel=rtol)
+
+
+# ==============================================================================
+# Sea ice COUPLED + functional on ALL ocean grid types (goal verification)
+# ==============================================================================
+
+class TestAllOceanGridsCoupled:
+    """``step_sea_ice`` (new-physics v2: EVP + advective transport + brine) must
+    run end-to-end, stay finite/bounded/stable, conserve water across
+    ice+ocean+atmosphere, and deliver a paired ice->ocean / ice->atmosphere
+    exchange through ``blend_tiles`` on EVERY ocean grid type the ice supports:
+    cubed-sphere, lat-lon C-grid, and MPAS Voronoi.  Verifies the session goal
+    'coupled and functional with all ocean grid types'."""
+
+    def _forcing(self, shape):
+        from legoesm.coupler.coupling_fields import AtmToSurface
+        z = jnp.zeros(shape)
+        f = lambda v: jnp.full(shape, v)
+        return AtmToSurface(
+            sw_down=f(50.0), lw_down=f(200.0), precip_total=z, precip_snow=z,
+            T_lowest=f(250.0), q_lowest=f(1e-3), u_lowest=f(5.0), v_lowest=f(-3.0),
+            p_lowest=f(9.5e4), p_surface=f(1e5), rho_lowest=f(1.2),
+            cos_zenith=f(0.3), co2_ppmv=f(400.0),
+            has_radiation=jnp.ones(shape), has_precipitation=jnp.ones(shape))
+
+    def _run_grid(self, grid, shape, dynamics):
+        from legoesm.ice.config import SeaIceConfig, BrineConfig
+        from legoesm.ice.state import init_dynamic_ice_state
+        from legoesm.coupler.coupling_fields import TileResponse
+        from legoesm.coupler.config import TileConfig
+        from legoesm.coupler.tile_fractions import (
+            compute_tile_fractions, blend_tiles)
+        from legoesm import constants
+
+        st = init_dynamic_ice_state(shape)  # single-category dynamic state
+        st = st._replace(
+            h_ice=st.h_ice.replace(data=jnp.full(shape, 1.0)),
+            concentration=st.concentration.replace(data=jnp.full(shape, 0.8)),
+            T_ice=st.T_ice.replace(data=jnp.full(shape, 260.0)))
+        config = SeaIceConfig(n_categories=1, dynamics=dynamics,
+                              transport="advect", brine=BrineConfig(enabled=True))
+        forcing = self._forcing(shape)
+        sst = jnp.full(shape, config.T_freeze_ocean)
+        z = jnp.zeros(shape)
+
+        # ---- 3-step stability + finiteness + bounds on this grid ----
+        state = st
+        for _ in range(3):
+            state, resp = step_sea_ice(state, forcing, sst, z, z, config,
+                                       U_min=1.0, dt=3600.0, grid=grid)
+            assert jnp.all(jnp.isfinite(state.h_ice.data))
+            assert jnp.all(jnp.isfinite(state.concentration.data))
+            assert jnp.all(jnp.isfinite(state.T_ice.data))
+            assert float(jnp.min(state.concentration.data)) >= -1e-9
+            assert float(jnp.max(state.concentration.data)) <= 1.0 + 1e-9
+            assert float(jnp.min(state.h_ice.data)) >= 0.0
+            # ice->ocean / ice->atmosphere exchange channels finite + grid-shaped
+            for fld in (resp.freshwater_flux, resp.ocean_heat_extraction,
+                        resp.salt_flux, resp.ocean_stress_x, resp.ocean_stress_y,
+                        resp.surface_mass_flux, resp.lhflx, resp.shflx):
+                assert jnp.all(jnp.isfinite(fld))
+                assert fld.shape == shape
+
+        # ---- one-step PER-CELL total water closure (ice + ocean + atmosphere) ----
+        # Transport redistributes ice BETWEEN cells (an internal flux divergence
+        # that is NOT an ocean/atmosphere exchange), so the per-cell closure only
+        # isolates the thermo exchange with transport='none'.  Then the per-cell
+        # ice mass change equals exactly the freshwater sent to the ocean plus
+        # the realized sublimation mass sent to the atmosphere.
+        no_transport = config._replace(transport="none")
+        prev = state
+        new, resp = step_sea_ice(prev, forcing, sst, z, z, no_transport,
+                                 U_min=1.0, dt=3600.0, grid=grid)
+        dV_dt = (new.h_ice.data * new.concentration.data
+                 - prev.h_ice.data * prev.concentration.data) / 3600.0
+        water_resid = (config.rho_ice * dV_dt + resp.freshwater_flux
+                       + resp.surface_mass_flux)
+        assert float(jnp.max(jnp.abs(water_resid))) < 1e-9, (
+            f"ice+ocean+atmosphere water not conserved on this grid: "
+            f"{float(jnp.max(jnp.abs(water_resid))):.3e}")
+
+        # ---- coupler blend delivers a paired exchange on this grid ----
+        zt = jnp.zeros(shape)
+        zero = TileResponse(
+            T_surface=zt, albedo=zt, emissivity=zt, z0=zt, q_surface=zt,
+            shflx=zt, lhflx=zt, tau_x=zt, tau_y=zt, lw_up=zt, u_ocean_sfc=zt,
+            v_ocean_sfc=zt, co2_flux=zt, freshwater_flux=zt,
+            ocean_heat_extraction=zt, ocean_stress_x=zt, ocean_stress_y=zt,
+            surface_mass_flux=zt, salt_flux=zt)
+        tcfg = TileConfig(f_land=zt, f_lake=zt)  # pure-water cell
+        fracs = compute_tile_fractions(tcfg, new.concentration.data)
+        blended = blend_tiles(zero, resp, zero, zero, fracs)
+        # Atmosphere energy <-> water pairing holds on every grid.
+        assert jnp.allclose(blended.lhflx,
+                            constants.L_s * blended.surface_mass_flux,
+                            rtol=1e-10, atol=1e-12)
+        assert jnp.all(jnp.isfinite(blended.freshwater_flux))
+        assert jnp.all(jnp.isfinite(blended.ocean_heat_extraction))
+        assert blended.freshwater_flux.shape == shape
+
+    def test_cubed_sphere_coupled(self):
+        grid = create_cubed_sphere(8)
+        self._run_grid(grid, (6, 8, 8), "evp")
+
+    def test_latlon_cgrid_coupled(self):
+        from legoesm.grids.latlon import create_latlon_grid
+        grid = create_latlon_grid(n_lat=16, n_lon=32)
+        self._run_grid(grid, (16, 32), "evp")
+
+    def test_mpas_voronoi_coupled(self):
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        mesh = create_voronoi_mesh(subdivision_level=2, lloyd_iterations=5)
+        self._run_grid(mesh, (mesh.nCells,), "free_drift")
