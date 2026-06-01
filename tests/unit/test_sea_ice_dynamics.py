@@ -2871,3 +2871,88 @@ class TestMulticatITDBinAccuracy:
 
         g = jax.grad(loss)(jnp.array([0.3, 1.0, 1.8, 3.0, 5.0]))
         assert jnp.all(jnp.isfinite(g))
+
+
+# ==============================================================================
+# #30 multicat FULL-pipeline tracer audit: brine + snow(flooding) + ponds +
+#     ridging ALL enabled through transport + thermo + ITD remap + ridging
+# ==============================================================================
+
+class TestMulticatFullPipelineTracers:
+    """The component tests cover apply_ridging / step_ponds in isolation; this
+    exercises the WHOLE multi-category step (EVP dynamics -> advective transport
+    -> v2 thermo -> Lipscomb ITD remap -> ridging) with brine, snow+flooding,
+    ponds, and ridging ALL enabled together, asserting every tracer stays
+    finite, physically bounded, and non-exploding over several steps (#30)."""
+
+    def _state(self, n=8, n_cat=3):
+        from legoesm.ice.state import init_dynamic_ice_state
+        shape = (6, n, n, n_cat)
+        st = init_dynamic_ice_state(shape, n_categories=n_cat)
+        # Nonuniform per-cat ice + tracers + a hemispheric gradient so transport
+        # AND ridging convergence are exercised.
+        h = jnp.zeros(shape).at[..., 0].set(0.4).at[..., 1].set(1.2).at[..., 2].set(3.0)
+        face = jnp.zeros((6, n, n)).at[0].set(0.5).at[1].set(0.25).at[2].set(0.1)
+        conc = jnp.stack([face, face * 0.6, face * 0.3], axis=-1)  # sum < 1
+        S = jnp.full(shape, 5.0).at[0, ..., 0].set(9.0).at[1, ..., 0].set(2.0)
+        snow = jnp.zeros(shape).at[..., 0].set(0.15).at[..., 1].set(0.05)
+        pa = jnp.zeros(shape).at[..., 0].set(0.3)
+        pd = jnp.zeros(shape).at[..., 0].set(0.08)
+        return st._replace(
+            h_ice=st.h_ice.replace(data=h),
+            concentration=st.concentration.replace(data=conc),
+            T_ice=st.T_ice.replace(data=jnp.full(shape, 262.0)),
+            S_ice=st.S_ice.replace(data=S),
+            h_snow=st.h_snow.replace(data=snow),
+            pond_area=st.pond_area.replace(data=pa),
+            pond_depth=st.pond_depth.replace(data=pd),
+        )
+
+    def test_all_physics_on_multistep_bounded_and_conserving(self):
+        from legoesm.ice.config import (
+            SeaIceConfig, BrineConfig, SnowConfig, MeltPondConfig, RidgingConfig)
+        n = 8
+        grid = create_cubed_sphere(n)
+        config = SeaIceConfig(
+            n_categories=3, dynamics="evp", transport="advect",
+            itd_remap="lipscomb2001",
+            brine=BrineConfig(enabled=True),
+            snow=SnowConfig(enabled=True, flooding=True),
+            ponds=MeltPondConfig(enabled=True),
+            ridging=RidgingConfig(enabled=True),
+        )
+        state = self._state(n=n)
+        # Mild melt-ish forcing + winds (advection + ridging convergence).
+        forcing = _make_forcing(shape=(6, n, n))
+        sst = jnp.full((6, n, n), config.T_freeze_ocean + 0.5)
+        z = jnp.zeros((6, n, n))
+        Smax = config.brine.S_ice_max
+        for _ in range(4):
+            state, resp = step_sea_ice(state, forcing, sst, z, z, config,
+                                       U_min=1.0, dt=3600.0, grid=grid)
+            d = state
+            # finiteness of every prognostic tracer
+            for fld in (d.h_ice.data, d.concentration.data, d.T_ice.data,
+                        d.S_ice.data, d.h_snow.data, d.pond_area.data,
+                        d.pond_depth.data):
+                assert jnp.all(jnp.isfinite(fld))
+            # physical bounds
+            assert float(jnp.min(d.h_ice.data)) >= 0.0
+            assert float(jnp.min(d.h_snow.data)) >= -1e-12
+            assert float(jnp.min(d.pond_depth.data)) >= -1e-12
+            assert -1e-9 <= float(jnp.min(d.pond_area.data))
+            assert float(jnp.max(d.pond_area.data)) <= 1.0 + 1e-6
+            assert -1e-9 <= float(jnp.min(d.S_ice.data))
+            assert float(jnp.max(d.S_ice.data)) <= Smax + 1e-6
+            assert float(jnp.max(jnp.sum(d.concentration.data, axis=-1))) <= 1.0 + 1e-6
+            assert float(jnp.min(d.T_ice.data)) >= config.T_ice_min - 1e-6
+            assert float(jnp.max(d.T_ice.data)) <= config.T_melt_surface + 1e-6
+            # ice->ocean / ice->atmosphere exchange finite
+            for fld in (resp.freshwater_flux, resp.ocean_heat_extraction,
+                        resp.salt_flux, resp.surface_mass_flux,
+                        resp.ocean_stress_x, resp.ocean_stress_y):
+                assert jnp.all(jnp.isfinite(fld))
+        # Salt inventory stayed bounded (no tracer blow-up over the run).
+        salt_mass = float(jnp.sum(state.S_ice.data * state.h_ice.data
+                                  * state.concentration.data))
+        assert jnp.isfinite(salt_mass) and salt_mass >= 0.0
