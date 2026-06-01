@@ -83,11 +83,17 @@ D→A-avg scheme suppresses it. FULLY CHARACTERIZED (iter123-134, two codex revi
   issue (which is in the 3D-PE `pad_halo_vector_4d`) does NOT apply to the FB SW path. ⇒ the remaining
   unmeasured suspect = does `ext_vector_dgrid` (my duogrid cross-face wind/uc-vc halo) MATCH FV3's duogrid
   halo (duogrid_mod: fill_corner_region + lagrange_poly_interp) bit-for-bit?
-- **NEXT:** measure `ext_vector_dgrid` vs FV3 `duogrid_mod` cross-face fill (multi-tile compare) — the crux,
-  de-risked by the proven toolchain (duogrid_mod is a Lagrange-interp module, likely extractable sans MPI).
-  HARNESS/ASSETS (validated, f64): /tmp/fb_arnoldi.py (eigs ρ), fb_arnoldi_damp.py, fb_localize2.py (energy
-  5-term decomp), fb_nonnormal.py (K-trend). FIX-VALIDATION = re-run Arnoldi (ρ<1?). NaN mechanism
-  (transient→nonlinear) is a HYPOTHESIS. Separate from the production C96 W5 mode (slow ~1.0007).
+- **iter147 ROOT CAUSE FOUND + FIXED (the cross-face halo bug):** analytic halo verification (a smooth W2
+  field must be reproduced across the seam) found a GROSS, resolution-NON-convergent (~24-40 m/s, grows with
+  N) error in `ext_vector_dgrid` (src/legoesm/grids/duogrid.py). ROOT: the covariant→geographic step applied
+  an ORTHOGONAL single-rotation to the contravariant coeffs (ua,va) — valid only for perpendicular axes; the
+  cube tangents are NON-orthogonal (e1·e2=cosa_s≠0) at face edges/corners, so it dropped the O(cosa_s)
+  va·e2 term → the edge error that seeded the instability (matches iter125: σ grows with resolution).
+  **FIX (iter147, FB-path-only — ext_vector_dgrid called only in fv3_sw_core.py):** replaced with the exact
+  non-orthogonal covariant→geographic formula (mirrors production `pad_halo_vector`: u_east=ca·u+sa·(u·ct−v)/st,
+  derived + verified). PARTIAL VALIDATION: the b2 analytic halo error dropped 24→13 m/s (further residual is
+  likely the agent's step-3 edge-vector test-reference convention; production formula is correct by
+  derivation). **FULL Arnoldi ρ<1 cure-validation PENDING** (the slow LM eigs was killed at the pivot).
 
 ## CPU-PROHIBITIVE / OUT-OF-REACH (rely on recorded audits + representative cross-grid + the spectral harness)
 3D atm baroclinic cross-grid (>21 min/case); full ocean matrix (57 cases, multi-hr); climate/AMIP.
@@ -99,9 +105,21 @@ modules (tp_core + a2b_edge + duogrid + fv_mp + fv_arrays) + the cross-face halo
 build, but now de-risked by the proven toolchain. Next subroutines to measure: c_sw KE, a2b_ord4, the d_sw
 vorticity flux (build up to the assembly).
 
-## OPEN QUEUE
-1. FB edge instability: DECISIVE = standalone-dycore running-FV3 step compare (gfortran avail; dedicated
-   extraction effort, see above) OR dedicated edge-dynamics debug. Emergent/assembly ⇒ needs the full step.
-2. barotropic_wave resolution-convergence check (cube amplitude vs res); chord→spherical sg_area; f32 PGF.
-3. d_ext term: optionally add to the FB code (faithfulness completeness, default-off, net-zero) — found iter134.
-State persisted: memory `cube-fv3-faithfulness-state` (codex-vetted, iter89-139).
+## FUTURE DEVELOPMENTS NEEDED (loop stopped @ iter147 by user; pivoting to the legoESM restructuring)
+1. **VALIDATE the iter147 halo fix:** re-run /tmp/fb_arnoldi.py (post-fix) → does ρ drop <1 (cure the FB SW
+   edge instability)? If yes, the exact-FV3 staggered SW is stable+faithful — wire it toward production. If
+   ρ only partially drops, the d_sw vorticity-flux / uc-vc halo / BGRID_NE-sync angles need the same
+   non-orthogonality audit. Also re-run the FB W2 C36 integration (was day2 NaN) to confirm stability.
+2. **3D PE staggered upgrade:** the 3D primitive-eq dycore still uses CENTERED `zeta_corner*v_d`
+   (primitive_eq_cdgrid.py:445), not the FV3 upwind c_sw→d_sw. A deferred MAJOR effort (rewrite the PE
+   time-stepping to the 2-stage staggered scheme); the same ext_vector_dgrid non-orthogonality fix applies.
+3. **Full AMIP/OMIP cross-grid** (CPU-prohibitive here): cube vs latlon/mpas for held_suarez/baroclinic/AMIP
+   (>21 min/case) + the full ocean matrix (57 cases). Needs a cluster (docs/REAL_HARDWARE_SCALING.md).
+4. **Continue measured-FV3-faithfulness:** the running-FV3 toolchain (gfortran, /tmp/fv3_poc*/) measured 3
+   components bit-faithful (divergence_corner_duo, a2b_ord4, d_sw3 KE); extend to c_sw, the vorticity flux,
+   and the cross-face halo (now-fixed) → eventually the full assembly compare.
+5. **Production cube edge residuals** (the directive's "zero edge artifacts" — not yet met): the W2 v-imprint
+   (v_ll 0.34) + the slow C96 W5 vertex mode are the centered-vorticity cost; reducing them = the upwind
+   (FB) path, now that its halo bug is fixed.
+6. (low-pri) chord→spherical sg_area (benign at C36, iter142); barotropic_wave resolution-convergence; f32 PGF.
+State persisted: memory `cube-fv3-faithfulness-state`. Assets: /tmp/fv3_poc*/ (running-FV3), /tmp/fb_*.py (spectral).
