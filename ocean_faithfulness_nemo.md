@@ -79,3 +79,18 @@ Vindicates iter-9 "full stack together"; iter-10 "RK3 marginal" was pre-smag-cfl
 NEMO ORCA1 5-yr ref + identical CORE-II 6-hourly `nyf.zarr` + WOA18 staged.
 `run_omip_core2.py` (runner, tripole + latlon, observable per-diag CSV + mid-run snapshots),
 `build_core2_nyf_zarr.py`, `compare_omip_nemo.py` (cKDTree-IDW regrid + SST/SSS score, fixed).
+
+## Session iter-19 (infra: MPI + convection + scan; all tested, codex-reviewed)
+- **#353 tripolar MPI halo** (`parallel/latlon_mpi.py`): latitude-band MPI now folds the
+  ORCA north by perm+sign (not the atmospheric 180° roll) → multi-CPU tripole ocean runs.
+  `_fold_tripolar_north` bit-exact vs serial `_fold_row`; ocean scatter/gather/geometry/zcoord
+  band-slicing. 31 serial tests pass; 7 codex findings fixed. (np=2/4 tests need mpi4jax — absent here.)
+- **Grid-agnostic convection** (`ocean/physics/column.py`): `convective_adjustment_K` (Oceananigans
+  EVD, identical per-column on any grid shape) + `extract_cell_center_velocity`. Convection on the
+  faithful tripole path is now opt-in: `run_omip_core2.py --convection enhanced_diffusion`
+  (default `none` = validated config untouched). Flows through the existing grid-agnostic
+  `compute_vertical_K_profiles` → implicit solve. **Relevant to faithfulness: deep-water formation /
+  MLD / SSS** (convective mixing was OFF on tripole, `physics=None`). 7 grid-agnostic + 3 regression pass.
+- **#354 lax.scan forcing** (`coupler/omip2_applicator.py`): `compute_omip2_surface_forcing_jax`
+  (on-device NN gather, no per-step host pull; bit-eq to host) + `build_omip2_scan_block_fn`;
+  `run_omip_core2.py --scan-block N` (opt-in; default 0 = bit-identical Python loop). 5 tests pass.
