@@ -65,7 +65,10 @@ import numpy as np
 
 if TYPE_CHECKING:
     from legoesm.grids.latlon import FoldDescriptor
-    from legoesm.ocean.state import LatLonCGridOceanState
+    # NOTE: ocean.state.LatLonCGridOceanState is referenced only in docstrings
+    # (:class: cross-refs), so it is intentionally NOT imported here — importing
+    # it would make the low-level parallel layer depend UP on the ocean
+    # component, which blocks component independence (see import-linter contracts).
 
 from legoesm.grids.halo_latlon import (
     pad_halo_latlon,

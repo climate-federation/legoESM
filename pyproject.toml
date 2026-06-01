@@ -168,8 +168,9 @@ unmatched_ignore_imports_alerting = "error"
 ignore_imports = [
     # ROOT INVERSION (fix first — collapses most chains): low-level parallel /
     # shared ml reach UP into component dynamics. Exact edges only.
+    # (parallel.latlon_mpi -> ocean.state REMOVED: the dead TYPE_CHECKING import
+    #  was deleted, eliminating the core/ice/atmosphere -> ocean cascade.)
     "legoesm.parallel.latlon_mpi -> legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid",
-    "legoesm.parallel.latlon_mpi -> legoesm.ocean.state",
     "legoesm.ml.channel_packing -> legoesm.atmosphere.dynamics.spectral_pe",
     "legoesm.ml.channel_packing -> legoesm.atmosphere.dynamics.spectral_sw",
     "legoesm.ml.channel_packing -> legoesm.atmosphere.physics._shared",
