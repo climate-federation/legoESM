@@ -12,6 +12,9 @@ Fortran as oracle; do NOT improvise.** Branch `latlon-fv-amip-verify`; fv3 work 
   CAVEAT: `sg_area` is PLANAR CHORD — only the ×2/×3 SCALING is faithful; chord→spherical is a tracked follow-up.
 - **gnomonic_ed grid** WIRED + halo-collapse fixed (iter73) + codex-approved; equiangular byte-identical.
 - **atm SW cross-grid** (iter92, 16/16): cube W2 L2 1.76e-4 ≈ latlon 2.67e-4 ≈ ico 9.9e-5. baroclinic clean.
+  iter135 RE-CONFIRMED production SW matrix 4/4 PASS (W2/W5/cosine_bell/W6, unchanged); W2 v_ll_Linf=0.344
+  = the known tiny v-imprint (centered-vs-upwind vort tradeoff, [[the upwind FB fix is the unstable path]]).
+  Surfaced W2 v-wind native + cross-grid wind_speed PNGs to user for visual edge-artifact verdict.
 - **cosine_bell** (codex-vetted iter109): cube uses apply_fortran_xppm_boundary=True; 12-day cube/ico=1.4×
   (cube best mass-cons), 99% residual panel-INTERIOR bulk PPM dissipation ⇒ faithful PPM plateau, not a bug.
 - **3D rest_state_topo "13× artifact" = FLOAT32 precision** (iter97-101): cube 3D PGF EXACTLY well-balanced
