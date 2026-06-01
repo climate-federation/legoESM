@@ -8,17 +8,20 @@ Review every code change with `/codex:adversarial-review`. Shrink this file ever
 **Branch:** `omip-faithful-nemo-comparison`. Completion promise DONE only when grids
 genuinely match NEMO — far off; no false DONE.
 
-## EXCELLENT MATCH ACHIEVED (iter 18 — tripole SST, read this FIRST)
-**legoESM ¼° tripole ocean matches NEMO ORCA1 (CORE-II) with EXCELLENT SST
-fidelity.** Trustworthy comparison (corrected WOA-IC + RK3 + all pipeline fixes),
-run 8131128 **day-4** vs NEMO yr-2 (job 8132087):
-**SST bias −0.61 °C, RMSE 1.49 °C, corr 0.991 → "EXCELLENT"** (RMSE < the 1.5 °C
-excellent bar); SSS bias +0.05, RMSE 1.11, corr 0.90 (excellent pattern,
-runoff-gated). Velocities physical (max|u| 0.67 m/s @ day-4, decreasing). This is
-the faithful result chased for ~18 iters — enabled by: (1) RK3 cold-start solve;
-(2) WOA-init longitude fix; (3) the rad2deg + 8 audit pipeline-bug fixes. CAVEAT:
-day-4 spinup (run continues to day-12 → trend); SSS runoff-gated; **tripole only**
-(latlon pole-limited, coarse grids unrun → NOT yet "all grids").
+## FAITHFUL MATCH ACHIEVED (iter 18 — tripole SST, read this FIRST)
+**legoESM ¼° tripole ocean reproduces NEMO ORCA1 (CORE-II) SST with corr ~0.99.**
+Trustworthy run 8131128 (corrected WOA-IC + RK3 + all pipeline fixes) COMPLETED
+12 d stable, physical velocities (max|u| 0.67→0.47 m/s). Compare vs NEMO yr-2:
+- **day-4 (8132087): SST bias −0.61, RMSE 1.49 °C, corr 0.991 → EXCELLENT**
+- **day-12 (8134991): SST bias −0.60, RMSE 1.76 °C, corr 0.987 → GOOD**
+- SSS corr ~0.90, RMSE ~1.1, bias ~+0.06 (excellent pattern, runoff-gated).
+So **SST pattern correlation is excellent (~0.99) throughout**; RMSE drifts 1.49→
+1.76 (excellent→good) as the model settles into its OWN equilibrium (two different
+ocean cores under the same forcing diverge slightly in detail), bias steady −0.6.
+This is the faithful result chased for ~18 iters — enabled by (1) RK3 cold-start
+solve; (2) WOA-init longitude fix; (3) rad2deg + 8 audit pipeline-bug fixes.
+**Honest scope: tripole SST only** — latlon pole-limited, coarse grids unrun, SSS
+runoff-gated → NOT yet "all grids excellent".
 
 ## COLD-START SOLVED (iter 18 — read this FIRST)
 **RK3 momentum integrator SOLVES the corrected-WOA-IC cold-start.** Arm 8128761
