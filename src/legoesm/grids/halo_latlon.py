@@ -373,6 +373,8 @@ def pad_with_pole_bc_lat(
     north_value: float = 0.0,
     *,
     is_vector_v: bool = False,
+    is_vector_u: bool = False,
+    north_fold: bool = False,
 ) -> jnp.ndarray:
     """Pad along lat axis with pole-BC constants; backend-dispatched.
 
@@ -410,6 +412,18 @@ def pad_with_pole_bc_lat(
         Forwarded to the MPI exchange's pole-fold sign-flip
         convention.  For scalar wall BC (sin, dx, df, etc.) this
         stays False.
+    is_vector_u : bool
+        Forwarded to the MPI exchange for tripolar grids (issue #353):
+        a u-face field flips sign across the north fold seam
+        (``vector_sign_u``).  No effect on the local backend or on
+        regular lat-lon (north is a wall, not a fold).
+    north_fold : bool
+        Opt-in tripolar north fold (issue #353).  Default ``False`` keeps
+        the historical WALL semantics at the north boundary even on an
+        active tripolar layout, so existing wall-BC callers are unchanged.
+        Pass ``True`` only for a quantity whose north boundary is the
+        ORCA fold seam (then ``is_vector_u`` / ``is_vector_v`` choose the
+        sign convention).  No effect on the local backend.
 
     Returns
     -------
@@ -453,4 +467,6 @@ def pad_with_pole_bc_lat(
         south_value=south_value,
         north_value=north_value,
         is_vector_v=is_vector_v,
+        is_vector_u=is_vector_u,
+        north_fold=north_fold,
     )

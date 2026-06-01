@@ -57,11 +57,15 @@ Stage 1 (TODO — explicit NotImplementedError):
 
 from __future__ import annotations
 
-from typing import Callable, NamedTuple
+from typing import TYPE_CHECKING, Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+if TYPE_CHECKING:
+    from legoesm.grids.latlon import FoldDescriptor
+    from legoesm.ocean.state import LatLonCGridOceanState
 
 from legoesm.grids.halo_latlon import (
     pad_halo_latlon,
@@ -95,6 +99,15 @@ class LatLonBandLayout(NamedTuple):
     south_rank, north_rank : int or None
         MPI ranks of the southern / northern neighbour, or ``None`` if
         this rank touches the south / north pole.
+    fold : FoldDescriptor or None
+        Tripolar north-fold descriptor (issue #353).  When non-``None``
+        and ``fold.is_active`` is True, the **northernmost** rank
+        (``north_rank is None``) applies the permutation-based tripolar
+        fold (``perm_T``/``perm_v`` + ``vector_sign_u``/``vector_sign_v``)
+        at the north boundary instead of the geographic 180°-roll
+        pole-fold.  Interior partition cuts and the south boundary are
+        unaffected.  ``None`` (the default) ⇒ regular lat-lon /
+        atmospheric pole-fold everywhere — fully backward compatible.
     """
 
     rank: int
@@ -106,6 +119,9 @@ class LatLonBandLayout(NamedTuple):
     lat_end: int
     south_rank: int | None
     north_rank: int | None
+    # Trailing field with a default so all existing constructor call
+    # sites (which never passed ``fold``) keep working unchanged.
+    fold: "FoldDescriptor | None" = None
 
 
 def make_latlon_band_layout(
@@ -113,11 +129,19 @@ def make_latlon_band_layout(
     n_ranks: int,
     n_lat: int,
     n_lon: int,
+    fold: "FoldDescriptor | None" = None,
 ) -> LatLonBandLayout:
     """Build a latitude-band decomposition layout.
 
     Divides ``n_lat`` rows as evenly as possible across ``n_ranks``;
     the first ``n_lat % n_ranks`` ranks get one extra row.
+
+    Parameters
+    ----------
+    fold : FoldDescriptor or None
+        Tripolar north-fold descriptor (issue #353).  Carried on the
+        layout so the MPI halo path can apply the permutation-based
+        fold at the northernmost rank.  ``None`` ⇒ regular lat-lon.
     """
     if n_ranks < 1:
         raise ValueError(f"n_ranks must be >=1, got {n_ranks}")
@@ -150,6 +174,7 @@ def make_latlon_band_layout(
         lat_end=lat_end,
         south_rank=rank - 1 if rank > 0 else None,
         north_rank=rank + 1 if rank < n_ranks - 1 else None,
+        fold=fold,
     )
 
 
@@ -259,11 +284,118 @@ def _pole_fold_north(field: jax.Array, halo: int, negate: bool) -> jax.Array:
     return north
 
 
+# ----------------------------------------------------------------------------
+# Tripolar north fold (issue #353)
+# ----------------------------------------------------------------------------
+#
+# A tripolar grid (ORCA / eORCA) has a *fold seam* at its northern row
+# instead of a geographic pole: cell ``(i, fold_j)`` is identified with
+# its fold partner ``(perm[i], fold_j)`` (an i-index reversal), and
+# vector components flip sign across the seam.  This is fundamentally
+# different from the atmospheric 180°-longitude-roll pole-fold above.
+#
+# These helpers replicate the serial ocean convention
+# (``legoesm.ocean.dynamics.latlon_cgrid_operators._fold_row`` /
+# ``pad_ns_scalar`` / ``pad_ns_vector_u`` / ``pad_ns_vector_v``) so the
+# MPI northernmost rank produces a north halo that is *bit-identical* to
+# the single-rank serial fold.  The descriptor (perm + signs) travels on
+# ``LatLonBandLayout.fold``.
+
+
+def _is_tripolar_layout(layout: LatLonBandLayout) -> bool:
+    """True iff ``layout`` carries an active tripolar north-fold."""
+    fold = layout.fold
+    return fold is not None and bool(fold.is_active)
+
+
+def _tripolar_fold_perm_sign(fold, *, is_vector_u: bool, is_vector_v: bool):
+    """Resolve ``(perm, sign)`` for the tripolar north fold by field kind.
+
+    - scalar  (T, S, eta, depth, mask): ``perm_T``, sign ``+1``
+    - u-comp. (zonal face velocity):    ``perm_T``, sign ``vector_sign_u``
+    - v-comp. (meridional face vel.):   ``perm_v``, sign ``vector_sign_v``
+
+    Mirrors the serial operators ``pad_ns_scalar`` / ``pad_ns_vector_u``
+    / ``pad_ns_vector_v`` in
+    :mod:`legoesm.ocean.dynamics.latlon_cgrid_operators`.
+    """
+    if is_vector_v:
+        return fold.perm_v, fold.vector_sign_v
+    if is_vector_u:
+        return fold.perm_T, fold.vector_sign_u
+    return fold.perm_T, 1.0
+
+
+def _fold_tripolar_north(field: jax.Array, halo: int, perm, sign) -> jax.Array:
+    """North tripolar-fold ghost rows: i-reversal permutation + sign flip.
+
+    The fold seam identifies cell ``(i, fold_j)`` with ``(perm[i],
+    fold_j)``.  The ghost row immediately north of the boundary row is
+    the fold partner of the boundary row; the ``k``-th ghost row north
+    is the fold partner of the ``k``-th interior row counted from the
+    boundary.  Hence reverse the last ``halo`` interior rows in latitude,
+    then apply the column permutation + sign flip.
+
+    For ``halo == 1`` this is bit-identical to the serial
+    ``latlon_cgrid_operators._fold_row(field[-1:], perm, sign, n_lon)``;
+    ``halo > 1`` is the natural multi-row generalisation.
+
+    Handles the periodic wrap column: u-face / vertex fields carry
+    ``n_lon + 1`` columns (column ``n_lon`` == column 0); scalar and
+    v-face fields carry ``n_lon`` columns.
+
+    Parameters
+    ----------
+    field : (n_lat_local, n_cols[, nlev]) — rank-local interior field.
+    halo : int
+    perm : (n_lon,) int array — ``fold.perm_T`` or ``fold.perm_v``.
+    sign : float — ``+1`` (scalar) or ``vector_sign_u``/``vector_sign_v``.
+
+    Returns
+    -------
+    (halo, n_cols[, nlev]) north ghost rows, ready to concatenate north
+    of ``field``.
+    """
+    n_lon = perm.shape[0]
+    # Reverse lat order of the last ``halo`` rows: the row closest to the
+    # boundary folds to the ghost row closest to the boundary.
+    last = field[-halo:][::-1]
+    n_cols = last.shape[1]
+    if n_cols == n_lon:
+        return sign * last[:, perm]
+    if n_cols == n_lon + 1:
+        core = sign * last[:, :n_lon][:, perm]
+        # Periodic wrap column: column n_lon == column 0 after folding.
+        return jnp.concatenate([core, core[:, 0:1]], axis=1)
+    raise ValueError(
+        f"_fold_tripolar_north: field has {n_cols} columns; expected "
+        f"n_lon={n_lon} (scalar/v) or n_lon+1={n_lon + 1} (u/vertex)."
+    )
+
+
+def _north_halo_boundary(
+    field: jax.Array, halo: int, layout: LatLonBandLayout,
+    is_vector_u: bool, is_vector_v: bool,
+) -> jax.Array:
+    """North ghost rows at a north-pole-touching rank.
+
+    Tripolar fold (``perm`` + sign) when ``layout.fold`` is active, else
+    the geographic 180°-roll pole-fold.
+    """
+    if _is_tripolar_layout(layout):
+        perm, sign = _tripolar_fold_perm_sign(
+            layout.fold, is_vector_u=is_vector_u, is_vector_v=is_vector_v,
+        )
+        return _fold_tripolar_north(field, halo, perm, sign)
+    return _pole_fold_north(field, halo, negate=is_vector_v)
+
+
 def exchange_halo_latlon(
     field: jax.Array,
     layout: LatLonBandLayout,
     halo: int = 1,
     is_vector_v: bool = False,
+    is_vector_u: bool = False,
 ) -> jax.Array:
     """Exchange ``halo`` ghost lat rows on each side via MPI sendrecv.
 
@@ -273,25 +405,49 @@ def exchange_halo_latlon(
     the first / last ``halo`` interior rows, shift by 180° in
     longitude, sign-flip for vector ``v``.
 
+    Tripolar grids (issue #353): when ``layout.fold`` is active, the
+    **northernmost** rank (``north_rank is None``) applies the
+    permutation-based tripolar fold (``perm_T``/``perm_v`` +
+    ``vector_sign_u``/``vector_sign_v``) at the north boundary instead of
+    the 180°-roll pole-fold — bit-identical to the serial ocean
+    operators ``pad_ns_scalar`` / ``pad_ns_vector_u`` /
+    ``pad_ns_vector_v``.  The south boundary and interior partition cuts
+    are unchanged (the south of an ORCA grid is a normal closed edge;
+    the ocean's south wall BC is applied separately via
+    ``pad_with_pole_bc_lat``).
+
     Periodic longitude is preserved (every rank owns all longitudes;
     no lon halo).
 
     Parameters
     ----------
     field : jax.Array, shape (n_lat_local, n_lon)  or  (n_lat_local, n_lon, nlev)
-        Rank-local interior field, no halos in input.
+        Rank-local interior field, no halos in input.  ``n_lon`` may be
+        ``n_lon+1`` for u-face / vertex fields (the wrap column is
+        preserved through the tripolar fold).
     layout : LatLonBandLayout
     halo : int, default 1
         Number of ghost rows to add on each lat side.
     is_vector_v : bool
-        Whether the field is a vector component that flips sign
-        across the pole (e.g. v-velocity, or any meridional flux).
-        Has no effect at non-pole-touching ranks.
+        Whether the field is a meridional vector component that flips
+        sign across the pole / fold (v-velocity, meridional flux).  At a
+        tripolar fold this selects ``perm_v`` + ``vector_sign_v``.
+    is_vector_u : bool
+        Whether the field is a zonal vector component (u-velocity).
+        Only meaningful at a tripolar fold, where u flips sign
+        (``perm_T`` + ``vector_sign_u``).  No effect on the atmospheric
+        pole-fold (zonal velocity does not flip there).  Mutually
+        exclusive with ``is_vector_v``.
 
     Returns
     -------
     jax.Array, shape (n_lat_local + 2*halo, n_lon[, nlev])
     """
+    if is_vector_u and is_vector_v:
+        raise ValueError(
+            "exchange_halo_latlon: is_vector_u and is_vector_v are mutually "
+            "exclusive (a field is u-type OR v-type, not both)."
+        )
     if halo <= 0:
         return field
 
@@ -313,7 +469,9 @@ def exchange_halo_latlon(
     # who haven't built the optional MPI stack.
     if layout.south_rank is None and layout.north_rank is None:
         south_halo = _pole_fold_south(field, halo, negate=is_vector_v)
-        north_halo = _pole_fold_north(field, halo, negate=is_vector_v)
+        north_halo = _north_halo_boundary(
+            field, halo, layout, is_vector_u, is_vector_v,
+        )
         return jnp.concatenate([south_halo, field, north_halo], axis=0)
 
     try:
@@ -361,7 +519,9 @@ def exchange_halo_latlon(
         )
         north_halo = recv_north.reshape((halo,) + trailing)
     else:
-        north_halo = _pole_fold_north(field, halo, negate=is_vector_v)
+        north_halo = _north_halo_boundary(
+            field, halo, layout, is_vector_u, is_vector_v,
+        )
 
     return jnp.concatenate([south_halo, field, north_halo], axis=0)
 
@@ -387,7 +547,7 @@ def exchange_halo_latlon(
 
 def _pad_halo_latlon_mpi(
     data, layout: LatLonBandLayout, halo: int = 1,
-    is_vector_v: bool = False,
+    is_vector_v: bool = False, is_vector_u: bool = False,
 ):
     """MPI variant of :func:`legoesm.grids.halo_latlon.pad_halo_latlon`.
 
@@ -478,7 +638,20 @@ def _pad_halo_latlon_mpi(
 
     # --- North halo ---
     if layout.north_rank is None:
-        if data.ndim == 2:
+        if _is_tripolar_layout(layout):
+            # Tripolar fold: permute the UNPADDED data (perm is defined on
+            # the n_lon columns), then lon-wrap-pad to match ``lon_padded``.
+            perm, sign = _tripolar_fold_perm_sign(
+                layout.fold, is_vector_u=is_vector_u, is_vector_v=is_vector_v,
+            )
+            north_unpadded = _fold_tripolar_north(data, halo, perm, sign)
+            if data.ndim == 2:
+                north_halo = jnp.pad(
+                    north_unpadded, ((0, 0), (halo, halo)), mode="wrap")
+            else:
+                north_halo = jnp.pad(
+                    north_unpadded, ((0, 0), (halo, halo), (0, 0)), mode="wrap")
+        elif data.ndim == 2:
             _, north_halo = _fold_pole_rows(lon_padded, halo, negate=is_vector_v)
         else:
             _, north_halo = _fold_pole_rows_3d(
@@ -590,7 +763,8 @@ def _pad_with_pole_bc_lat_mpi_1d(
 def _pad_with_pole_bc_lat_mpi(
     interior, layout: LatLonBandLayout, halo: int = 1,
     south_value: float = 0.0, north_value: float = 0.0,
-    is_vector_v: bool = False,
+    is_vector_v: bool = False, is_vector_u: bool = False,
+    north_fold: bool = False,
 ):
     """MPI variant of :func:`legoesm.grids.halo_latlon.pad_with_pole_bc_lat`.
 
@@ -605,6 +779,18 @@ def _pad_with_pole_bc_lat_mpi(
     to reuse the existing AD-safe sendrecv machinery — we let
     ``exchange_halo_latlon`` do the heavy lifting and then patch
     the boundary halo slabs.
+
+    Tripolar grids (issue #353): the north fold is OPT-IN via
+    ``north_fold``.  The default (``north_fold=False``) keeps the
+    historical WALL semantics at the north — even on a tripolar layout —
+    so existing wall-BC callers (``pad_ns_zero`` and the like) are
+    unchanged.  Only when ``north_fold=True`` AND ``layout.fold`` is
+    active AND this rank owns the north boundary is the north slab left
+    as the permutation-folded data from ``exchange_halo_latlon`` instead
+    of being overwritten with ``north_value``.  ``is_vector_u`` /
+    ``is_vector_v`` then select ``vector_sign_u`` / ``vector_sign_v`` at
+    the fold.  The south boundary is always a wall (an ORCA grid's south
+    is a closed edge).
     """
     if halo <= 0:
         return interior
@@ -625,22 +811,26 @@ def _pad_with_pole_bc_lat_mpi(
     # neighbour values (which is what we want — those are NOT to
     # be overwritten).
     padded = exchange_halo_latlon(
-        interior, layout, halo=halo, is_vector_v=is_vector_v,
+        interior, layout, halo=halo,
+        is_vector_v=is_vector_v, is_vector_u=is_vector_u,
     )
     # Step 2: where this rank touches a pole, replace the
     # pole-folded slab with the wall-BC constant.  Slab shapes
     # match by construction.  We use the bcast-tuple pattern so
     # this works for 1D (sin_lat), 2D (face metrics) and 3D
     # (u-on-face-with-levels) fields uniformly.
-    trailing_ones = (1,) * (interior.ndim - 1)
+    keep_north_fold = north_fold and _is_tripolar_layout(layout)
     if layout.south_rank is None:
         south_const = jnp.full(
             (halo,) + interior.shape[1:],
             jnp.asarray(south_value, dtype=interior.dtype),
         )
         padded = jnp.concatenate([south_const, padded[halo:]], axis=0)
-        del trailing_ones  # silence linter on unused alias
-    if layout.north_rank is None:
+    if layout.north_rank is None and not keep_north_fold:
+        # Regular north pole / wall-BC caller → ``north_value`` constant.
+        # Only an explicit ``north_fold=True`` request on an active
+        # tripolar layout keeps the permutation-folded north slab that
+        # ``exchange_halo_latlon`` produced above.
         north_const = jnp.full(
             (halo,) + interior.shape[1:],
             jnp.asarray(north_value, dtype=interior.dtype),
@@ -826,6 +1016,213 @@ def gather_state_latlon(local_state, layout: LatLonBandLayout):
                      else local_state.tracers),
         )
     return None
+
+
+# ============================================================================
+# Ocean C-grid state scatter / gather  (issue #353)
+# ============================================================================
+#
+# :class:`~legoesm.ocean.state.LatLonCGridOceanState` differs from the
+# atmospheric :class:`CGridLatLonHydrostaticState` in two ways that
+# matter here:
+#   * its fields are immutable ``Field`` objects (no ``__getitem__``) —
+#     slice ``.data`` and re-wrap via ``.replace(data=...)``;
+#   * it carries C-grid face masks (u_mask, v_mask) and optional moment /
+#     AB2 fields that must travel with the band.
+# The tripolar fold descriptor lives on the *grid* and is carried on
+# ``LatLonBandLayout.fold``; the halo helpers pick it up automatically.
+
+
+def _field_slice_lat(field, s: int, e: int):
+    """Slice a ``Field`` along its leading latitude axis → new ``Field``."""
+    return field.replace(data=field.data[s:e])
+
+
+def _maybe_field_slice_lat(field, s: int, e: int):
+    """Like :func:`_field_slice_lat`, but pass ``None`` through unchanged."""
+    if field is None:
+        return None
+    return field.replace(data=field.data[s:e])
+
+
+def scatter_state_latlon_cgrid_ocean(state, layout: LatLonBandLayout):
+    """Extract this rank's latitude band from a global ocean C-grid state.
+
+    Mirror of :func:`scatter_state_latlon` for
+    :class:`~legoesm.ocean.state.LatLonCGridOceanState`.  Each rank
+    slices the global ``Field`` arrays along latitude; no MPI call (the
+    global state is replicated on / broadcast to every rank, then
+    sliced — same convention as the atmospheric scatter).
+
+    Stagger-aware slicing
+    ---------------------
+    * cell-centre scalars (T, S, eta, H_bathy, land_mask, w) and the
+      u-face fields (u, u_mask) → rows ``[lat_start, lat_end)``;
+    * v-face fields (v, v_mask) → rows ``[lat_start, lat_end+1)`` so
+      neighbouring ranks duplicate the boundary v-face row (same
+      convention as :func:`scatter_state_latlon`);
+    * optional moment / AB2 fields (T_som, S_som, T_flux_div_prev,
+      S_flux_div_prev) sliced like cell-centre scalars when present.
+
+    Masks are sliced from the GLOBAL pre-computed masks (NOT recomputed
+    locally): ``v_mask`` depends on lat-adjacent cells, so a local
+    recompute would be wrong at a band's south edge — slicing the global
+    mask is exact and makes scatter∘gather a round-trip identity.
+    """
+    s, e = layout.lat_start, layout.lat_end
+    return state._replace(
+        u=_field_slice_lat(state.u, s, e),
+        v=_field_slice_lat(state.v, s, e + 1),
+        T=_field_slice_lat(state.T, s, e),
+        S=_field_slice_lat(state.S, s, e),
+        eta=_field_slice_lat(state.eta, s, e),
+        H_bathy=_field_slice_lat(state.H_bathy, s, e),
+        land_mask=_field_slice_lat(state.land_mask, s, e),
+        u_mask=_field_slice_lat(state.u_mask, s, e),
+        v_mask=_field_slice_lat(state.v_mask, s, e + 1),
+        w=_field_slice_lat(state.w, s, e),
+        T_som=_maybe_field_slice_lat(state.T_som, s, e),
+        S_som=_maybe_field_slice_lat(state.S_som, s, e),
+        T_flux_div_prev=_maybe_field_slice_lat(state.T_flux_div_prev, s, e),
+        S_flux_div_prev=_maybe_field_slice_lat(state.S_flux_div_prev, s, e),
+    )
+
+
+def _gather_field_ocean(field, layout: LatLonBandLayout, *, is_v_face=False):
+    """Gather a ``Field``'s data onto rank 0; re-wrap on rank 0, ``None``
+    on other ranks.  ``None`` field → ``None``.  When mpi4py is
+    unavailable (single process) returns the field unchanged."""
+    if field is None:
+        return None
+    gathered = gather_field_latlon(field.data, layout, is_v_face=is_v_face)
+    if gathered is None:
+        return None
+    return field.replace(data=gathered)
+
+
+def gather_state_latlon_cgrid_ocean(local_state, layout: LatLonBandLayout):
+    """Gather rank-local ocean bands onto rank 0; ``None`` elsewhere.
+
+    Inverse of :func:`scatter_state_latlon_cgrid_ocean`.  v-face fields
+    (v, v_mask) pass ``is_v_face=True`` so every rank except the
+    northernmost trims its duplicated boundary row before the gather
+    (global v shape ``(n_lat_global+1, n_lon, nlev)``).
+    """
+    u_g = _gather_field_ocean(local_state.u, layout)
+    v_g = _gather_field_ocean(local_state.v, layout, is_v_face=True)
+    T_g = _gather_field_ocean(local_state.T, layout)
+    S_g = _gather_field_ocean(local_state.S, layout)
+    eta_g = _gather_field_ocean(local_state.eta, layout)
+    H_g = _gather_field_ocean(local_state.H_bathy, layout)
+    lm_g = _gather_field_ocean(local_state.land_mask, layout)
+    um_g = _gather_field_ocean(local_state.u_mask, layout)
+    vm_g = _gather_field_ocean(local_state.v_mask, layout, is_v_face=True)
+    w_g = _gather_field_ocean(local_state.w, layout)
+    tsom_g = _gather_field_ocean(local_state.T_som, layout)
+    ssom_g = _gather_field_ocean(local_state.S_som, layout)
+    tfd_g = _gather_field_ocean(local_state.T_flux_div_prev, layout)
+    sfd_g = _gather_field_ocean(local_state.S_flux_div_prev, layout)
+    if layout.rank == 0:
+        return local_state._replace(
+            u=u_g, v=v_g, T=T_g, S=S_g, eta=eta_g, H_bathy=H_g,
+            land_mask=lm_g, u_mask=um_g, v_mask=vm_g, w=w_g,
+            T_som=tsom_g, S_som=ssom_g,
+            T_flux_div_prev=tfd_g, S_flux_div_prev=sfd_g,
+        )
+    return None
+
+
+# ============================================================================
+# Ocean geometry / vertical-coordinate band-slicing  (issue #353)
+# ============================================================================
+
+
+def slice_cgrid_geometry_to_band(geom, layout: LatLonBandLayout):
+    """Slice a global :class:`LatLonCGridGeometry` to this rank's band.
+
+    Stagger-aware (issue #353 part 5):
+      * T-point metrics (n_lat, n_lon) → ``[s:e]``;
+      * u-point metrics (n_lat, n_lon+1) → ``[s:e]``;
+      * v-point metrics (n_lat+1, n_lon) → ``[s:e+1]`` (shared boundary
+        v-row, matching the state scatter);
+      * q-point area (n_lat+1, n_lon+1) → ``[s:e+1]``;
+      * 1-D lat arrays (cos_lat, sin_lat, lat) → ``[s:e]``; lon unchanged.
+
+    ``n_lat`` becomes the rank-local row count; ``total_area`` keeps the
+    GLOBAL value (so area-weighted-mean denominators stay correct on every
+    rank).  The fold descriptor is activated ONLY on the rank that owns the
+    north boundary (``north_rank is None``); on all other ranks it is
+    replaced with an inactive fold so the serial ``pad_ns_*`` operators do
+    not fabricate a fold at the band's local north edge (interior cuts are
+    handled by the MPI halo exchange).  ``perm_T`` / ``perm_v`` are
+    longitude-only and unaffected by latitude banding.
+    """
+    s, e = layout.lat_start, layout.lat_end
+
+    def t(a):   # T-point / u-point (leading dim n_lat) → [s:e]
+        return a[s:e]
+
+    def vface(a):  # v-point / q-point (leading dim n_lat+1) → [s:e+1]
+        return a[s:e + 1]
+
+    area_T_band = t(geom.area_T)
+
+    # Fold activation is RANK-LOCAL: the serial operators (pad_ns_scalar /
+    # pad_ns_vector_*) fold using their LAST interior row, which is only the
+    # true global fold row on the rank that owns the north boundary.  On any
+    # other rank the last row is an interior partition cut handled by the MPI
+    # halo exchange, so the band geometry there must carry an INACTIVE fold or
+    # those operators would fabricate a fold at every band's local north edge.
+    if layout.north_rank is None:
+        band_fold = geom.fold  # northernmost rank owns the global fold seam
+    else:
+        from legoesm.grids.latlon import _inactive_fold
+        band_fold = _inactive_fold(geom.n_lon)
+
+    return geom._replace(
+        n_lat=layout.n_lat_local,
+        lat_T=t(geom.lat_T), lon_T=t(geom.lon_T),
+        dx_T=t(geom.dx_T), dy_T=t(geom.dy_T),
+        # total_area is the GLOBAL denominator (area-weighted means); keep the
+        # input's global value on every rank rather than a band-local sum, to
+        # match slice_latlon_grid_to_band's global-total semantics.
+        area_T=area_T_band, total_area=geom.total_area,
+        dx_u=t(geom.dx_u), dy_u=t(geom.dy_u),
+        dx_v=vface(geom.dx_v), dy_v=vface(geom.dy_v),
+        area_q=vface(geom.area_q),
+        f_T=t(geom.f_T), f_u=t(geom.f_u), f_v=vface(geom.f_v),
+        cos_alpha_u=t(geom.cos_alpha_u), sin_alpha_u=t(geom.sin_alpha_u),
+        cos_alpha_v=vface(geom.cos_alpha_v), sin_alpha_v=vface(geom.sin_alpha_v),
+        cos_lat=t(geom.cos_lat), sin_lat=t(geom.sin_lat),
+        lat=t(geom.lat),
+        fold=band_fold,
+        # lon, dlon, dlat, radius, n_lon pass through unchanged.
+    )
+
+
+def slice_zcoord_to_band(zcoord, layout: LatLonBandLayout):
+    """Slice a vertical coordinate's per-cell T-point arrays to this band.
+
+    Only the known per-cell fields of an ``OceanPartialCellCoordinate``
+    (``h_partial``, ``bottom_level``, ``is_active``) are sliced ``[s:e]``;
+    reference profiles (``z_full_ref``, ``dz_ref``, …) and scalars
+    (``n_levels``, ``H_max``) pass through unchanged.  Slicing explicit
+    field names rather than a shape heuristic avoids mis-slicing any
+    future auxiliary table whose leading dimension coincidentally equals
+    ``n_lat_global``.  A z* / z-level coordinate carrying no per-cell
+    fields is returned unchanged.  Issue #353 part 5.
+    """
+    n_lat = layout.n_lat_global
+    s, e = layout.lat_start, layout.lat_end
+    updates = {}
+    for name in ("h_partial", "bottom_level", "is_active"):
+        arr = getattr(zcoord, name, None)
+        if (isinstance(arr, (jax.Array, np.ndarray))
+                and arr.ndim >= 2 and arr.shape[0] == n_lat):
+            updates[name] = arr[s:e]
+    if not updates:
+        return zcoord
+    return zcoord._replace(**updates)
 
 
 # ============================================================================
