@@ -349,6 +349,25 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"dycore.hyperdiff_scale must be >= 0, got {d.hyperdiff_scale}")
         if d.div_damp_scale < 0:
             errors.append(f"dycore.div_damp_scale must be >= 0, got {d.div_damp_scale}")
+        # Dynamical-core axis membership.  Mirror the gate in
+        # ``atmosphere.dynamics.resolve_solver_name`` so a typo fails here, at
+        # config-validation time, instead of deep in the solver factory at JIT.
+        # Deferred import (driver -> atmosphere is the allowed direction; by the
+        # time validate_strict runs the dynamics package is loaded anyway).
+        from legoesm.atmosphere.dynamics import (
+            DISCRETIZATION_OPTIONS,
+            DYNAMICS_OPTIONS,
+        )
+        if d.model_type not in DYNAMICS_OPTIONS:
+            errors.append(
+                f"dycore.model_type must be one of {DYNAMICS_OPTIONS}, "
+                f"got {d.model_type!r}"
+            )
+        if d.discretization not in DISCRETIZATION_OPTIONS:
+            errors.append(
+                f"dycore.discretization must be one of {DISCRETIZATION_OPTIONS}, "
+                f"got {d.discretization!r}"
+            )
         _valid_precisions = ("fp32", "fp64", "mixed", "mixed_fp64_storage")
         if self.precision not in _valid_precisions:
             errors.append(
@@ -375,6 +394,14 @@ class ExperimentConfig(NamedTuple):
                 "physics_parameterization_layers must be > 0, "
                 f"got {self.physics_parameterization_layers}"
             )
+        # NOTE: a ``radiation`` membership check is deliberately NOT added here.
+        # The accepted set is currently inconsistent across three code paths —
+        # ``physics_pipeline.build_physics_pipeline`` silently maps any unknown
+        # (incl. "none" and the "rrtmg" alias) to rrtmgp; ``_get_radiation_fn``
+        # accepts only gray/rrtmgp; ``model_driver`` maps "none"->disabled.
+        # Hardening radiation safely requires first reconciling those paths
+        # (remove the silent default per the dispatch rule, fix "none"
+        # semantics), which is a dedicated change — see A1 follow-up.
         _valid_cloud_schemes = ("none", "sundqvist", "xu_randall", "resolved")
         if self.cloud_scheme not in _valid_cloud_schemes:
             errors.append(
