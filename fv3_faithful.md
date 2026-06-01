@@ -37,7 +37,12 @@ the W2 v-wind imprint (v_ll_Linf=0.34 m/s on an analytically-zero field) + a slo
   was based on a CONFOUNDED comparison — withdrawn. HIDDEN until now because the zonally-symmetric cases
   (W2/rest/geostrophic-zonal) are lon-INVARIANT (offset invisible); the localized barotropic_wave exposes it.
   NOTE: the cube IC is physically at 180°E by construction (not a physics bug) — the bug is the COMPARISON
-  regridding lon-convention. FIX NEEDED (harness): regrid all grids to one true-physical-lon canvas.
+  regridding lon-convention. **FIXED iter138** (scripts/run_ocean_test_matrix.py `_regrid_2d`/`_regrid_3d_level`):
+  cube regridder output ([-180,180)) now ROLLED +n_lon//2 → [0,360]; latlon no longer mis-rolled (kept
+  native [0,360)). Verified: t=0 IC bump now at ~180°E on ALL grids (cube 182/latlon 180/mpas 179, was
+  cube/latlon≈0). Matrix still 3/3 PASS; regrid-alignment tests 17/17. Atm harness has NO such bug (uses
+  [-180,180) consistently for data+label). Root was: cube physics correct (bump physical 182°E) but the
+  COMPARISON mislabeled [-180,180) data as [0,360].
   iter137 ALIGNED check (rolled cube+latlon +180°): positions now CONSISTENT (final eta peak cube 181°/
   latlon 195°/mpas 204°, all propagating E from the 180° IC). The remaining 4× amplitude is NOT an artifact:
   all grids start ~0.97 at t=0; the cube RETAINS 0.855 (~88%) while latlon/mpas DISSIPATE to 0.21 (~22%) —

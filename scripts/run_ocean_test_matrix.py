@@ -1095,8 +1095,14 @@ def _regrid_2d(field_arr: np.ndarray, lon_deg: np.ndarray,
         cells are excluded from the interpolation KDTree.
     """
     if coord_kind in ("latlon", "gaussian"):
-        return _roll_lon_to_pm180(
-            np.asarray(field_arr, dtype=np.float64), lon_deg)
+        # 180deg-fix: native lat-lon grids are already physical [0, 360).
+        # The snapshot lon axis is labelled with these same native
+        # coordinates (see save loop: latlon_arrays["lon"] = src_lon), so
+        # the data must stay in native [0, 360) order to match the label
+        # (and the now-physical cube/mpas convention).  Do NOT roll to
+        # [-180, 180) here -- that was the source of the 180deg offset
+        # between the latlon snapshot data and its own lon axis.
+        return np.asarray(field_arr, dtype=np.float64)
     # Cubed-sphere: use face-aware bilinear interpolation (no edge artifacts).
     if coord_kind == "cube":
         from legoesm.grids.regridding import (
@@ -1108,7 +1114,17 @@ def _regrid_2d(field_arr: np.ndarray, lon_deg: np.ndarray,
             n = int(round(np.sqrt(arr.size / 6)))
             arr = arr.reshape(6, n, n)
         w = get_cubedsphere_to_latlon_weights(n)
-        return apply_cubedsphere_to_latlon(arr, w)
+        out = apply_cubedsphere_to_latlon(arr, w)
+        # 180deg-fix: apply_cubedsphere_to_latlon emits lon on
+        # [-180, 180) (lon_cent = linspace(-180,180,n_lon,endpoint=False)
+        # + 180/n_lon), so its column 0 is ~+180degE physical.  The
+        # snapshot lon axis is labelled [0, 360] (np.linspace(0,360,n_lon)).
+        # Roll by +n_lon//2 to convert the regridder output to [0, 360]
+        # ordering: physical 0degE moves to column 0 and a feature at
+        # physical 180degE lands at column n_lon//2 (lon=180 label),
+        # matching the physical mpas convention.
+        n_lon = out.shape[-1]
+        return np.roll(out, n_lon // 2, axis=-1)
     return _bin_to_latlon(field_arr.ravel(), lon_deg.ravel(), lat_deg.ravel(),
                           target_lat=target_lat, target_lon=target_lon,
                           ocean_mask=ocean_mask)
@@ -1124,7 +1140,8 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
     if coord_kind in ("latlon", "gaussian"):
         if arr.ndim == 2:
             arr = arr[..., None]
-        return _roll_lon_to_pm180(arr, lon_deg)
+        # 180deg-fix: keep native [0, 360) ordering (see _regrid_2d).
+        return arr
     # Cubed-sphere: use face-aware bilinear interpolation.
     if coord_kind == "cube":
         from legoesm.grids.regridding import (
@@ -1136,7 +1153,16 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
             n = int(round(np.sqrt(arr.size / (6 * nlev))))
             arr = arr.reshape(6, n, n, nlev)
         w = get_cubedsphere_to_latlon_weights(n)
-        return apply_cubedsphere_to_latlon_3d(arr, w)
+        out = apply_cubedsphere_to_latlon_3d(arr, w)
+        # 180deg-fix: regridder emits lon on [-180, 180); the snapshot lon
+        # axis is labelled [0, 360].  Roll +n_lon//2 along the lon axis to
+        # convert to [0, 360] ordering (see _regrid_2d for full rationale).
+        # For 3-D output (n_lat, n_lon, nlev) the lon axis is axis=1.
+        if out.ndim >= 3:
+            n_lon = out.shape[1]
+            return np.roll(out, n_lon // 2, axis=1)
+        n_lon = out.shape[-1]
+        return np.roll(out, n_lon // 2, axis=-1)
     if arr.ndim == 1:
         arr = arr[:, None]
     nlev = arr.shape[-1]
