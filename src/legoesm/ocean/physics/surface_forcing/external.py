@@ -9,8 +9,9 @@ sea-ice -> ocean exchange via ``coupler.ocean_forcing``).
 
 Scope: the cubed-sphere ``OceanModel`` (``make_ocean_physics`` ->
 ``make_surface_forcing_physics``).  MPAS builds physics through
-``make_mpas_ocean_physics`` (a SEPARATE factory) and does NOT yet dispatch this
-scheme — MPAS two-way wiring is tracked separately.
+``make_mpas_ocean_physics`` (a SEPARATE factory) which has its OWN edge-projected
+external block (it also accepts ``scheme="external"``); MPAS does NOT route
+through this module.
 
 Sign / unit conventions match the lat-lon C-grid direct application
 (``ocean_pe_latlon_cgrid.py``) so the SAME ``OceanSurfaceForcing`` produces the

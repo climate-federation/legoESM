@@ -29,10 +29,16 @@ SCOPE — the returned structs are model-agnostic; consumption differs per grid:
     (tau / q_net / freshwater / salt).  Here ``freshwater`` is a VIRTUAL salt
     flux (salinity dilution, fixed volume) — no ``eta`` mass source yet (deferred
     with MPAS); pass only the ``OceanSurfaceForcing`` (no ``freshwater=`` arg).
-  - ``MPASOceanModel``: builds physics through ``make_mpas_ocean_physics`` (a
-    SEPARATE factory) which does NOT yet dispatch the ``external`` scheme — MPAS
-    two-way wiring is tracked separately.  MPAS already consumes the
-    ``freshwater=`` arg for eta + salinity.
+  - ``MPASOceanModel``: pass BOTH structs to ``step(freshwater=, surface_forcing=)``.
+    The ``freshwater=`` arg drives eta + virtual-salt salinity; the
+    ``surface_forcing`` drives tau / q_net AND the real ``salt_flux`` through
+    ``make_mpas_ocean_physics`` (its own external block — enabled by
+    ``SurfaceForcingConfig(scheme="external")`` or ``"none"``).  The external
+    block does NOT read ``surface_forcing.freshwater`` (the net salinity-
+    freshwater injection is the ``freshwater=`` arg's job).  KPP, if enabled,
+    DOES read ``surface_forcing.freshwater`` — but only for buoyancy and a
+    NON-LOCAL salinity redistribution whose column integral is zero (no net
+    surface salt), so it does not double-count the ``freshwater=`` virtual salt.
 The returned ``OceanSurfaceForcing`` carries tau/q_net/freshwater/salt and the
 ``FreshwaterForcing`` carries ``ice_fw``; pass whichever the chosen model
 consumes.  Kept OUT of ``coupler.py`` so the coupler core stays

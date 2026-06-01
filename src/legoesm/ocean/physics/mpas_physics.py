@@ -84,7 +84,12 @@ def make_mpas_ocean_physics(
                  else "none")
     # Bail loudly on schemes the MPAS factory does not implement, rather
     # than silently producing zero tendencies.
-    _supported_sf = ("none", "prescribed", "restoring", "combined")
+    # "external" enables the coupler-provided surface-forcing block below
+    # (tau / q_net / real salt_flux from a passed OceanSurfaceForcing) — the
+    # MPAS analogue of the cubed-sphere 'external' scheme.  It behaves like
+    # "none" plus a required OceanSurfaceForcing; freshwater (eta + virtual
+    # salt) is delivered separately through the step(freshwater=) arg.
+    _supported_sf = ("none", "prescribed", "restoring", "combined", "external")
     if sf_scheme not in _supported_sf:
         raise NotImplementedError(
             f"MPAS ocean physics does not support surface_forcing scheme "
@@ -124,6 +129,17 @@ def make_mpas_ocean_physics(
         z_coord: OceanZStarCoordinate,
         surface_forcing=None,
     ) -> MPASOceanTendencies:
+        # Fail CLOSED: 'external' exists solely to apply a coupler-provided
+        # OceanSurfaceForcing.  Silently dropping tau/q_net/salt because the
+        # struct was forgotten is a whole-run coupling failure, so require it.
+        if sf_scheme == "external" and surface_forcing is None:
+            raise ValueError(
+                "surface_forcing.scheme='external' requires an "
+                "OceanSurfaceForcing to be passed to the ocean step "
+                "(got surface_forcing=None) — otherwise tau/q_net/salt_flux "
+                "are silently dropped. Pass surface_forcing=, or use "
+                "scheme='none' for an unforced run.",
+            )
         u_3d = state.u.data        # (nEdges, nlev)
         T_3d = state.T.data        # (nCells, nlev)
         eta = state.eta.data        # (nCells,)
@@ -243,6 +259,14 @@ def make_mpas_ocean_physics(
                         rho_0_ref * c_sw * jnp.maximum(dz_0_cell_q, 1e-10))
                     dT_dt = dT_dt.at[:, 0].add(
                         _sf_q_net * inv_rho_csw_dz * mask)
+
+            # NOTE: the real brine salt_flux is NOT applied here.  It is a
+            # top-layer salinity SOURCE applied alongside the freshwater
+            # virtual-salt closure in ``mpas_ocean_baroclinic_tendencies``
+            # (ocean_pe_mpas.py), so both use the SAME canonical floored top-
+            # layer thickness ``h_k[:, 0]`` the tracer update integrates mass
+            # against — guaranteeing the injected salt MASS equals salt_flux.
+            # (KPP separately reads salt_flux for its surface buoyancy.)
 
         # --- T/S restoring (under "restoring" or "combined") ---
         if apply_restoring:
