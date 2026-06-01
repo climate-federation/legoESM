@@ -156,7 +156,7 @@ def save_state_checkpoint(
     config=None,
     *,
     prognostic_fields: set[str] | None = None,
-    model_version: str = "0.1.0",
+    model_version: str | None = None,
 ) -> None:
     """Save any state NamedTuple to ``.npz`` + companion metadata JSON.
 
@@ -177,11 +177,14 @@ def save_state_checkpoint(
     prognostic_fields : set of str, optional
         If given, only these fields are saved.  By default all fields
         are saved.
-    model_version : str
-        Version string recorded in metadata.
+    model_version : str, optional
+        Version string recorded in metadata.  When ``None`` (default) the
+        installed package version is used (single-sourced from pyproject).
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if model_version is None:
+        from legoesm._version import __version__ as model_version
 
     arrays = _extract_arrays(state)
     field_meta = _extract_field_metadata(state)

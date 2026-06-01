@@ -18,6 +18,9 @@ import logging
 import sys
 import time
 
+# Single-sourced version (importlib.metadata only — no JAX import at module scope).
+from legoesm._version import __version__
+
 logger = logging.getLogger("legoesm.cli")
 
 
@@ -89,7 +92,7 @@ def cmd_run(args):
         from legoesm.runtime import bootstrap_from_yaml_config
         rc = bootstrap_from_yaml_config(config)
 
-        logger.info(f"legoESM v0.1.0 | Loaded config from {args.config}")
+        logger.info(f"legoESM v{__version__} | Loaded config from {args.config}")
         logger.info(f"  Model: {config.get('model.name')}")
         logger.info(f"  Grid: {config.get('grid.type')} C{config.get('grid.resolution')}")
         logger.info(f"  Duration: {config.get('time.duration_hours')} hours")
@@ -157,7 +160,7 @@ def cmd_test(args):
     )
     from legoesm.core.conservation import compute_conservation_diagnostics
 
-    logger.info(f"legoESM v0.1.0 | Williamson Test Case {args.case}")
+    logger.info(f"legoESM v{__version__} | Williamson Test Case {args.case}")
     logger.info(f"  Resolution: C{args.resolution} (~{6.371229e3 / args.resolution:.0f} km)")
     logger.info(f"  Duration: {args.days} days")
     logger.info(f"  Time step: {args.dt} s")
@@ -367,7 +370,7 @@ def cmd_benchmark(args):
     from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterModel as ShallowWaterModel
     from tests.test_cases.williamson import williamson_test2
 
-    logger.info(f"legoESM v0.1.0 | Benchmark")
+    logger.info(f"legoESM v{__version__} | Benchmark")
     logger.info(f"  Resolution: C{args.resolution}")
     logger.info(f"  Steps: {args.n_steps}")
     logger.info(f"  Backend: {rc.backend}")

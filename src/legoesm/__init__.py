@@ -7,7 +7,8 @@ enables end-to-end gradient computation for data assimilation, parameter
 estimation, and hybrid AI-physics modeling.
 """
 
-__version__ = "0.1.0"
+# Version is single-sourced from pyproject.toml (read via importlib.metadata).
+from legoesm._version import __version__  # noqa: F401
 
 # Core infrastructure
 from legoesm.core.field import Field

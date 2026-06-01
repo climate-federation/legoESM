@@ -207,7 +207,7 @@ def save_restart(
     q_c=None,
     q_r=None,
     carry_aux=None,
-    model_version: str = "0.1.0",
+    model_version: str | None = None,
     backend: str = "npz",
 ) -> None:
     """Save a restart checkpoint together with reproducibility metadata.
@@ -225,8 +225,13 @@ def save_restart(
     ----------
     backend : str
         ``"npz"`` (default) or ``"zarr"``.
+    model_version : str, optional
+        Version string recorded in metadata.  When ``None`` (default) the
+        installed package version is used (single-sourced from pyproject).
     """
     path = Path(path)
+    if model_version is None:
+        from legoesm._version import __version__ as model_version
 
     # 1. Delegate to appropriate backend
     if backend == "zarr":
