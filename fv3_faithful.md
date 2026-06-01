@@ -12,12 +12,17 @@ Branch `latlon-fv-amip-verify`; fv3 work pushed to `fv3-faithful-cube`.
 production operator is a KNOWN mismatch (centered vs FV3-upwind vorticity). Residual edge imprints exist
 (NOT "zero edge artifacts"): W2 v-wind imprint (v_ll_Linf=0.34 on an analytically-zero field) + slow C96 W5
 vertex mode (~1.0007) — small + stable but nonzero coherent residuals.
-**iter143 — FIRST *MEASURED* FV3 bit-match (codex iter137's "inferred not measured" cracked):** gfortran-
-extracted FV3 `divergence_corner_duo` (sw_core.F90) standalone (mocked types, NO mpp/MPI/NetCDF), fed the
-SAME metric+state arrays as my Python `_divergence_corner_duo`, compared interior: **max|diff|=4.2e-22 ≈ 1
-machine-eps** (signal RMS 6.2e-7), robust N=8/12, independently re-verified. ⇒ that component is now
-MEASURED-faithful (not just source-read), AND the extract→compile→run→compare TOOLCHAIN is PROVEN + reusable
-for more subroutines (assets /tmp/fv3_poc/). The path to a full running-FV3 assembly comparison is now open.
+**iter143-144 — *MEASURED* FV3 bit-matches (codex iter137's "inferred not measured" cracked):** gfortran-
+extract FV3 subroutine standalone (mocked minimal types, NO mpp/MPI/NetCDF) → feed the SAME inputs as my
+Python port → bit-compare. PROVEN TOOLCHAIN (verbatim FV3 loop bodies + identical-input + negative-control).
+MEASURED-faithful so far (both machine-precision, independently re-verified):
+  (1) iter143 `divergence_corner_duo` ↔ my `_divergence_corner_duo`: interior max|diff|=4.2e-22 (N=8/12).
+  (2) iter144 `a2b_ord4` (duogrid branch) ↔ my `_interp_center_to_corner_a2b_ord4`: max|diff|=2.2e-16=1 ULP
+      (N=24/48); cascade/coeffs(a1=9/16,a2=-1/16,b1=7/12,b2=-1/12)/corner-combine all identical. a2b_ord4 is
+      in BOTH the FB Phase-4 PGF AND the production 3D PGF gz_b. (negative control: swap a1↔a2 → 0.53 diff.)
+Assets /tmp/fv3_poc{,_a2b}/. Single self-contained subroutines = solved pattern. The full running-FV3
+ASSEMBLY compare (c_sw→d_sw→one_grad_p, where the FB edge instability lives) is now de-risked; next
+subroutines to measure: c_sw KE, the d_sw vorticity flux (build up to the coupled assembly + the halo).
 - **area_corner #faces-scaling** (iter84-91, codex-OK, NET-ZERO): edges ×2, vertices ×3, C1 guard n>=1
   (oracle fv_grid_tools.F90). W2 L2=1.76e-4, ocean 9/9 rest machine-zero, 4 golds re-pinned. CAVEAT: sg_area
   is PLANAR CHORD (only the ×2/×3 scaling faithful; chord→spherical deferred). iter142 QUANTIFIED the chord
