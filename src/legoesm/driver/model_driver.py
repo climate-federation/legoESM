@@ -90,6 +90,14 @@ class ModelDriver:
                 grid=config.grid._replace(grid_type=canonical_grid_type),
             )
         self.config = config
+        # Snapshot the INPUT config (post grid-normalization, which is
+        # idempotent) before setup() mutates self.config in place — e.g. the
+        # CFL-driven dt reduction in _create_dycore.  The run manifest records
+        # THIS so `reproduce` replays the identical setup path; recording the
+        # post-mutation config (dt already reduced) would take a different path
+        # and fail to reproduce.  NamedTuple._replace rebinds self.config to new
+        # objects, so this reference stays the original input.
+        self._input_config = config
         self.grid = None
         self.sigma = None
         self.model = None
@@ -1267,9 +1275,9 @@ class ModelDriver:
         try:
             write_run_manifest(
                 self._output_dir,
-                self.config,
+                self._input_config,
                 exclusive=True,
-                rng_seeds={"master": self.config.seed},
+                rng_seeds={"master": self._input_config.seed},
             )
             return
         except FileExistsError:
@@ -1287,7 +1295,7 @@ class ModelDriver:
                 f"refusing to start a run without valid run-start provenance. "
                 f"Remove or repair it to continue."
             ) from exc
-        if existing["config"]["config_hash"] != compute_config_hash(self.config):
+        if existing["config"]["config_hash"] != compute_config_hash(self._input_config):
             raise RuntimeError(
                 f"Output directory {self._output_dir} already holds a run "
                 f"manifest written for a DIFFERENT config; refusing to mix two "
@@ -1298,6 +1306,36 @@ class ModelDriver:
             f"Run manifest already present at {manifest_file}; preserving it "
             f"(same config — resume/retry)."
         )
+
+    def _record_final_state_digest(self) -> None:
+        """Record the final-state SHA-256 digest into the run manifest (rank 0).
+
+        Fills ``result.state_digest`` so ``legoesm reproduce --check`` has a
+        reference to compare a rerun against.  Best-effort: the run has already
+        completed successfully, so a digest/layout hiccup (e.g. a backend whose
+        state pytree differs from the checkpoint layout) must not turn a good run
+        into a failure — it just leaves reproduce --check without a reference,
+        which it reports honestly.
+        """
+        if self._mpi_rank is not None and self._mpi_rank != 0:
+            return
+        try:
+            from legoesm.io.restart import (
+                RUN_MANIFEST_FILENAME,
+                pytree_state_digest,
+                record_state_digest,
+            )
+            manifest_file = self._output_dir / RUN_MANIFEST_FILENAME
+            if not manifest_file.exists():
+                return
+            # Backend-agnostic digest of the full final state (prognostic state +
+            # tracers + carry), so spectral/MPAS layouts are covered too.
+            digest = pytree_state_digest(
+                self.state, self.tracers, self._carry_aux
+            )
+            record_state_digest(manifest_file, digest)
+        except Exception as exc:  # pragma: no cover - provenance best-effort
+            logger.warning(f"Could not record final state digest: {exc}")
 
     def _bootstrap_runtime(self) -> None:
         """Bootstrap the full runtime: precision, backend, devices, MPI.
@@ -2378,12 +2416,20 @@ class ModelDriver:
             # MPAS and spectral states use different pytree layouts;
             # use dedicated simple run loops.
             if self.config.grid.grid_type == "mpas":
-                return self._run_mpas(start_step, start_day)
-            if self.config.dycore.discretization == "spectral":
-                return self._run_spectral(start_step, start_day)
-            if compiled:
-                return self._run_compiled(start_step, start_day)
-            return self._run_per_step(start_step, start_day)
+                status = self._run_mpas(start_step, start_day)
+            elif self.config.dycore.discretization == "spectral":
+                status = self._run_spectral(start_step, start_day)
+            elif compiled:
+                status = self._run_compiled(start_step, start_day)
+            else:
+                status = self._run_per_step(start_step, start_day)
+            # Record the final-state digest into the run manifest so
+            # ``legoesm reproduce --check`` has a bit-repro reference — but ONLY
+            # for a clean run: a BLOWUP/failed status must never become a valid
+            # reproducibility reference.
+            if status == "COMPLETED":
+                self._record_final_state_digest()
+            return status
         finally:
             # Idempotent — no-op if activation never happened or if
             # ``_finalize_run`` already restored the backend on the

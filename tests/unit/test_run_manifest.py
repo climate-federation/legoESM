@@ -150,6 +150,111 @@ def test_unsupported_provenance_key_raises() -> None:
         build_run_manifest(_sample_config(), rng_seeds={1: "a", "1": "b"})
 
 
+def test_pytree_state_digest_is_backend_agnostic() -> None:
+    """The final-state digest must handle any backend's pytree layout.
+
+    Covers spectral-like (complex coefficients) and MPAS-like (``None`` leaf)
+    states, not just the grid-point checkpoint layout.
+    """
+    import jax.numpy as jnp
+
+    from legoesm.io.restart import pytree_state_digest
+
+    s1 = {"T": jnp.ones((2, 3)), "T_hat": jnp.ones((2,), dtype=jnp.complex64), "v": None}
+    s2 = {"T": jnp.ones((2, 3)), "T_hat": jnp.ones((2,), dtype=jnp.complex64), "v": None}
+    assert pytree_state_digest(s1) == pytree_state_digest(s2)  # deterministic
+    s3 = {"T": jnp.zeros((2, 3)), "T_hat": jnp.ones((2,), dtype=jnp.complex64), "v": None}
+    assert pytree_state_digest(s1) != pytree_state_digest(s3)  # value-sensitive
+    # Extra trees (tracers / carry) participate in the digest.
+    assert pytree_state_digest(s1, {"q": jnp.ones(2)}) != pytree_state_digest(s1)
+
+
+def test_pytree_state_digest_captures_structure() -> None:
+    """Structure (keys / None slots), not just array bytes, is in the digest."""
+    import jax.numpy as jnp
+
+    from legoesm.io.restart import pytree_state_digest
+
+    arr = jnp.ones(2)
+    # A None slot appearing must change the digest (it is structural in JAX).
+    assert pytree_state_digest({"v": None, "a": arr}) != pytree_state_digest({"a": arr})
+    # The same array under a different key must change the digest.
+    assert pytree_state_digest({"a": arr}) != pytree_state_digest({"b": arr})
+
+
+def test_reproduce_rejects_output_equal_to_reference_dir(tmp_path: Path) -> None:
+    """`reproduce --output <reference dir>` is rejected before any rerun."""
+    import argparse
+
+    import pytest
+
+    from legoesm.cli import cmd_reproduce
+    from legoesm.io.restart import record_state_digest
+
+    write_run_manifest(tmp_path, _sample_config())
+    record_state_digest(tmp_path, "deadbeef")  # complete the reference
+    args = argparse.Namespace(
+        manifest=str(tmp_path / RUN_MANIFEST_FILENAME),
+        check=True,
+        output=str(tmp_path),
+    )
+    with pytest.raises(SystemExit) as exc:
+        cmd_reproduce(args)
+    assert exc.value.code == 2  # guard exit, before the model ever runs
+
+
+def test_no_digest_recorded_for_failed_run(tmp_path: Path, monkeypatch) -> None:
+    """A BLOWUP/failed run must not record a digest (no false reproduce reference)."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.model_driver import ModelDriver
+
+    driver = ModelDriver(ExperimentConfig())
+    driver._output_dir = tmp_path
+    driver._mpi_rank = None
+    write_run_manifest(tmp_path, driver._input_config)  # manifest with no digest yet
+    monkeypatch.setattr(driver, "_run_compiled", lambda *a, **k: "BLOWUP at day 1.0")
+
+    status = driver.run(compiled=True)
+    assert status.startswith("BLOWUP")
+    assert read_run_manifest(tmp_path)["result"]["state_digest"] is None
+
+
+def test_record_and_read_state_digest(tmp_path: Path) -> None:
+    """The post-run digest update fills result.state_digest and nothing else."""
+    import pytest
+
+    from legoesm.io.restart import (
+        record_state_digest,
+        recorded_state_digest,
+        validate_run_manifest,
+    )
+
+    write_run_manifest(tmp_path, _sample_config())
+    m0 = read_run_manifest(tmp_path)
+    # No digest yet -> reproduce --check has nothing to compare against.
+    with pytest.raises(ValueError, match="no recorded"):
+        recorded_state_digest(m0)
+
+    record_state_digest(tmp_path, "abc123")
+    m1 = read_run_manifest(tmp_path)
+    assert m1["result"]["state_digest"] == "abc123"
+    assert recorded_state_digest(m1) == "abc123"
+    # Provenance (config/env) is untouched, and the manifest stays valid.
+    assert m1["config"]["config_hash"] == m0["config"]["config_hash"]
+    assert m1["legoESM"] == m0["legoESM"]
+    validate_run_manifest(m1)
+
+
+def test_record_state_digest_rejects_invalid_manifest(tmp_path: Path) -> None:
+    import pytest
+
+    from legoesm.io.restart import RUN_MANIFEST_FILENAME, record_state_digest
+
+    (tmp_path / RUN_MANIFEST_FILENAME).write_text("not json")
+    with pytest.raises(Exception):
+        record_state_digest(tmp_path, "x")
+
+
 def test_atomic_write_leaves_no_temp_file(tmp_path: Path) -> None:
     write_run_manifest(tmp_path, _sample_config())
     assert (tmp_path / RUN_MANIFEST_FILENAME).is_file()
@@ -198,6 +303,29 @@ def test_driver_manifest_uses_resolved_normalized_config(tmp_path: Path) -> None
     driver._mpi_rank = 1
     driver._write_run_manifest()
     assert not (rank1_dir / RUN_MANIFEST_FILENAME).exists()
+
+
+def test_driver_manifest_records_input_config_not_setup_mutated(tmp_path: Path) -> None:
+    """The manifest must record the INPUT config so `reproduce` replays the run.
+
+    Regression: setup() mutates self.config in place (e.g. the CFL-driven dt
+    reduction). Recording the post-mutation config (dt already reduced) takes a
+    different setup path and fails to reproduce; the manifest must capture the
+    input (pre-mutation) config instead.
+    """
+    from legoesm.driver.config import DycoreConfig, ExperimentConfig
+    from legoesm.driver.model_driver import ModelDriver
+
+    driver = ModelDriver(ExperimentConfig(dycore=DycoreConfig(dt=1800.0)))
+    # Simulate a setup-time mutation (e.g. CFL dt reduction 1800 -> 600).
+    driver.config = driver.config._replace(
+        dycore=driver.config.dycore._replace(dt=600.0)
+    )
+    driver._output_dir = tmp_path
+    driver._mpi_rank = None
+    driver._write_run_manifest()
+    m = read_run_manifest(tmp_path)
+    assert m["config"]["resolved_config"]["dycore"]["dt"] == 1800.0  # input, not mutated
 
 
 def test_driver_manifest_is_write_once(tmp_path: Path) -> None:

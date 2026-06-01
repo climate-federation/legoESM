@@ -462,6 +462,75 @@ def validate_run_manifest(manifest: dict) -> None:
         )
 
 
+def record_state_digest(manifest_path, state_digest: str) -> Path:
+    """Record the post-run final ``state_digest`` into an existing manifest.
+
+    The run-start manifest is otherwise immutable; this is the single sanctioned
+    post-run update.  It fills ``result.state_digest`` (``None`` at run start) so
+    that ``legoesm reproduce --check`` has a reference to compare a rerun's final
+    state against.  The manifest is validated, then rewritten atomically with the
+    digest set — provenance (config/env) is never touched, only the result.
+    """
+    manifest_path = Path(manifest_path)
+    if manifest_path.is_dir():
+        manifest_path = manifest_path / RUN_MANIFEST_FILENAME
+    manifest = read_run_manifest(manifest_path)
+    validate_run_manifest(manifest)
+    manifest["result"]["state_digest"] = state_digest
+    tmp = manifest_path.with_name(f"{manifest_path.name}.{os.getpid()}.tmp")
+    with open(tmp, "w") as f:
+        json.dump(_json_safe(manifest), f, indent=2, sort_keys=True)
+    tmp.replace(manifest_path)
+    return manifest_path
+
+
+def pytree_state_digest(*trees) -> str:
+    """Backend-agnostic SHA-256 digest of one or more state pytrees.
+
+    Unlike :func:`compute_state_digest` (which assumes the grid-point checkpoint
+    array layout ``state.T``/``state.u``/...), this flattens whatever pytrees it
+    is given via ``jax.tree_util.tree_leaves`` and digests every array leaf, so it
+    works for *any* backend's state — grid-point, spectral (``T_hat`` complex
+    coefficients), or MPAS (edge-normal ``u``, ``v=None``).  Shape and dtype are
+    folded in alongside the bytes so a structural change cannot collide.
+
+    The pytree *structure* (dict keys, nesting, ``None`` placeholders) is folded
+    into the hash alongside the leaf bytes, so a layout/schema change — e.g. a
+    leaf moving keys, or a ``None`` slot appearing/disappearing — cannot collide
+    with the original even when the surviving array leaves are identical.
+    """
+    import numpy as _np
+
+    h = hashlib.sha256()
+    for tree in trees:
+        leaves, treedef = jax.tree_util.tree_flatten(tree)
+        # treedef repr encodes keys / nesting / None structure deterministically.
+        h.update(str(treedef).encode("utf-8"))
+        host = jax.device_get(leaves)  # single batched device->host transfer
+        for arr in host:
+            a = _np.asarray(arr)
+            h.update(str(a.shape).encode("utf-8"))
+            h.update(str(a.dtype).encode("utf-8"))
+            h.update(a.tobytes())
+    return h.hexdigest()
+
+
+def recorded_state_digest(manifest: dict) -> str:
+    """Return the recorded final ``state_digest``, or raise if the run never set it.
+
+    A missing digest means the *original* run did not complete (or predates digest
+    recording), so there is nothing to reproduce against — a clear error beats a
+    false ``reproduce --check`` pass.
+    """
+    digest = manifest.get("result", {}).get("state_digest")
+    if not digest:
+        raise ValueError(
+            "run manifest has no recorded result.state_digest to check against; "
+            "the original run may not have completed."
+        )
+    return digest
+
+
 # ---------------------------------------------------------------------------
 # Save / Load
 # ---------------------------------------------------------------------------
