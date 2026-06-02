@@ -94,6 +94,64 @@ def create_grid(grid_type: str, resolution: int | None = None, **kwargs: Any):
 
     raise ValueError(
         f"Unknown grid_type {grid_type!r}. Available global grids: "
-        f"{', '.join(GLOBAL_GRID_TYPES)} (for a doubly-periodic box/SCM use "
+        f"{', '.join(GLOBAL_GRID_TYPES)} (for a regional grid use "
+        f"create_regional_grid; for a doubly-periodic box/SCM use "
         f"legoesm.grids.plane.create_plane_grid)."
+    )
+
+
+#: Regional / limited-area grids instantiable via :func:`create_regional_grid`.
+REGIONAL_GRID_TYPES: tuple[str, ...] = ("latlon", "mercator", "mpas", "cubed_sphere")
+
+
+def create_regional_grid(grid_type: str, **kwargs: Any):
+    """Instantiate a REGIONAL / limited-area horizontal grid by canonical grid_type.
+
+    The regional counterpart of :func:`create_grid` (which builds the *global*
+    grids), giving the atmosphere the same uniform regional entry the ocean
+    already uses.  Regional grids are NOT sized by a single ``resolution`` — each
+    takes its own domain bounds / cell size — so per-type kwargs pass straight
+    through to the underlying constructor, which enforces its own required
+    arguments:
+
+    ============  ==============================================  =================
+    grid_type     constructor (key kwargs)                        returns
+    ============  ==============================================  =================
+    ``latlon``    ``create_regional_latlon_grid`` (n_lat, n_lon,  ``(grid, mask)``
+                  lat_south, lat_north, lon_west=, lon_east=,
+                  periodic_x=)
+    ``mercator``  ``create_mercator_grid`` (n_lon, lat_max_deg,   ``grid``
+                  lon_west_deg=, lon_east_deg=)
+    ``mpas``      ``create_regional_voronoi_mesh`` (lon_range,     ``grid``
+                  lat_range, resolution_km=, periodic_x=)
+    ``cubed_sphere`` ``create_cubed_sphere_panel`` (n, face_id=,   ``grid``
+                  return_cdgrid=)
+    ============  ==============================================  =================
+
+    Note ``latlon`` returns a ``(grid, wall_mask)`` tuple (the others return a
+    bare grid object — they carry their boundary masking differently).  Raises
+    ``ValueError`` for an unknown *grid_type*.  Doubly-periodic *idealized* boxes
+    (LES / SCM / RCE) are a distinct extent — use
+    ``legoesm.grids.plane.create_plane_grid``.
+    """
+    if grid_type == "latlon":
+        from legoesm.grids.latlon import create_regional_latlon_grid
+
+        return create_regional_latlon_grid(**kwargs)
+    if grid_type == "mercator":
+        from legoesm.grids.latlon import create_mercator_grid
+
+        return create_mercator_grid(**kwargs)
+    if grid_type == "mpas":
+        from legoesm.grids.voronoi import create_regional_voronoi_mesh
+
+        return create_regional_voronoi_mesh(**kwargs)
+    if grid_type == "cubed_sphere":
+        from legoesm.grids.cubed_sphere import create_cubed_sphere_panel
+
+        return create_cubed_sphere_panel(**kwargs)
+    raise ValueError(
+        f"Unknown regional grid_type {grid_type!r}. Available: "
+        f"{', '.join(REGIONAL_GRID_TYPES)} (global grids: create_grid; "
+        f"idealized box: legoesm.grids.plane.create_plane_grid)."
     )
