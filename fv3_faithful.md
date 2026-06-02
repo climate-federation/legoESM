@@ -122,4 +122,17 @@ vorticity flux (build up to the assembly).
    (v_ll 0.34) + the slow C96 W5 vertex mode are the centered-vorticity cost; reducing them = the upwind
    (FB) path, now that its halo bug is fixed.
 6. (low-pri) chord→spherical sg_area (benign at C36, iter142); barotropic_wave resolution-convergence; f32 PGF.
+7. **Duo-Grid halo under SUB-FACE TILING shard_map (PRE-EXISTING limitation, NOT restructure-introduced).**
+   The Duo-Grid + `interp_offsets` cross-panel halo is validated + bit-faithful for 1–6 FACE-sharded devices
+   (serial/MPI + the explicit SPMD all_gather/ppermute backends; restructure 2026-06-02 added the single-field
+   `packed_pad_halo_4d` duogrid fix + serial-vs-SPMD parity + grad-parity tests + a W2/W5 SPMD-vs-serial
+   visual: residual 2.1e-7 = float corner-avg-order noise, no cube-imprint). But >6 devices / a
+   `("face","tile_i","tile_j")` mesh is REFUSED: the `(6,4,n)` `interp_offsets` + `DuoGridData` coeffs are
+   indexed by GLOBAL face; under tiling a device owns a tile (partial face) so the global-face indices don't
+   map to tile-local — that remap "has not been derived." Gated/raised in `halo.py:691-693,902`,
+   `halo_exchange.py:708,1276` (MPI `raise` "Sub-face tiling needs tile-local indexing"), and SPMD activation
+   `sharded_dynamics.py` (requires `tiling=(1,1)`). PREDATES the restructure (last touched 2026-05-23/27/31;
+   commits b4b33727 / f5a20b86 / 9619ae5c) — the B1 restructure work neither introduced nor touched it.
+   TODO: derive tile-local duogrid edge indexing so the FC-Gram/duogrid Lagrange halo works under sub-face
+   tiling; until then high-device-count cube runs fall back to nearest-copy / XLA auto-gather at tile seams.
 State persisted: memory `cube-fv3-faithfulness-state`. Assets: /tmp/fv3_poc*/ (running-FV3), /tmp/fb_*.py (spectral).
