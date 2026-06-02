@@ -152,6 +152,10 @@ class LandColumnModel:
         the seasonal day-of-year advances from ``start_day_of_year`` (set at
         :meth:`create`) via the shared elapsed-time clock.
         """
+        if nsteps < 1:
+            raise ValueError(f"nsteps must be >= 1, got {nsteps}")
+        if save_every < 1:
+            raise ValueError(f"save_every must be >= 1, got {save_every}")
         times, t_soil_hist, shf, lhf = [], [], [], []
         for k in range(nsteps):
             response = self.step()

@@ -111,6 +111,17 @@ def test_callable_forcing_advances_with_time_and_step_matches_run() -> None:
     assert not jnp.allclose(final_run.T_soil.data, final_const.T_soil.data)
 
 
+@pytest.mark.parametrize("bad", [{"nsteps": 0}, {"nsteps": 4, "save_every": 0}])
+def test_run_rejects_nonpositive_steps(bad) -> None:
+    """run() validates nsteps/save_every rather than stacking empty history."""
+    from legoesm.land import LandConfig
+
+    scm = LandColumnModel.create(config=LandConfig(), forcing=constant_land_forcing())
+    nsteps = bad.pop("nsteps")
+    with pytest.raises(ValueError):
+        scm.run(nsteps, **bad)
+
+
 def test_unknown_config_type_raises() -> None:
     with pytest.raises(TypeError):
         LandColumnModel.create(config=object(), forcing=constant_land_forcing())
