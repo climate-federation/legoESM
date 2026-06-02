@@ -33,11 +33,18 @@ mpi4jax = pytest.importorskip("mpi4jax")
 MPI = pytest.importorskip("mpi4py.MPI")
 
 from legoesm.grids.tripole import create_synthetic_tripole
+from legoesm.grids.halo import get_halo_backend, set_halo_backend
 from legoesm.parallel.latlon_mpi import (
     _fold_tripolar_north,
     _tripolar_fold_perm_sign,
     exchange_halo_latlon,
     make_latlon_band_layout,
+    slice_cgrid_geometry_to_band,
+)
+from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    is_tripolar,
+    pad_ns_scalar,
+    _fold_is_local,
 )
 
 N_LAT, N_LON = 16, 24
@@ -124,3 +131,97 @@ class TestTripolarMPIHaloAD:
         grad_local = jax.grad(loss)(local)
         assert jnp.all(jnp.isfinite(grad_local))
         assert float(jnp.sum(jnp.abs(grad_local))) > 0.0
+
+
+class TestIssue356Bug1IsTripolarConsistent:
+    """Bug 1: is_tripolar() must return the same value on all ranks.
+
+    Before the fix, slice_cgrid_geometry_to_band set fold.is_active=False
+    on non-northernmost ranks, causing is_tripolar() to disagree →
+    different MPI call counts → MPI_ERR_TRUNCATE.
+    """
+
+    def test_is_tripolar_consistent_across_ranks(self, fold):
+        geom = create_synthetic_tripole(n_lat=N_LAT, n_lon=N_LON)
+        rank = MPI.COMM_WORLD.Get_rank()
+        n_ranks = MPI.COMM_WORLD.Get_size()
+        layout = make_latlon_band_layout(
+            rank, n_ranks, N_LAT, N_LON, fold=geom.fold)
+        band = slice_cgrid_geometry_to_band(geom, layout)
+        local_tp = int(is_tripolar(band))
+        all_tp = MPI.COMM_WORLD.allgather(local_tp)
+        assert len(set(all_tp)) == 1, (
+            f"is_tripolar() disagrees across ranks: {all_tp}")
+
+    def test_fold_is_local_only_on_northernmost(self, fold):
+        geom = create_synthetic_tripole(n_lat=N_LAT, n_lon=N_LON)
+        rank = MPI.COMM_WORLD.Get_rank()
+        n_ranks = MPI.COMM_WORLD.Get_size()
+        layout = make_latlon_band_layout(
+            rank, n_ranks, N_LAT, N_LON, fold=geom.fold)
+        band = slice_cgrid_geometry_to_band(geom, layout)
+        local_fil = int(_fold_is_local(band))
+        all_fil = MPI.COMM_WORLD.allgather(local_fil)
+        n_north = sum(all_fil)
+        assert n_north == 1, (
+            f"Exactly one rank should have fold_is_local, got {n_north}: {all_fil}")
+        assert all_fil[rank] == int(layout.north_rank is None)
+
+
+class TestIssue356Bug2InterpToVPoints:
+    """Bug 2: _interp_to_v_points must match serial at partition boundaries.
+
+    Before the fix, "average-then-pad" used only rank-local data, missing
+    the neighbor's first row at partition cuts.
+    """
+
+    def test_interp_matches_serial_at_partition_boundaries(self, fold):
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            _interp_to_v_points,
+        )
+        geom = create_synthetic_tripole(n_lat=N_LAT, n_lon=N_LON)
+        rng = np.random.default_rng(42)
+        f_global = jnp.asarray(
+            rng.standard_normal((N_LAT, N_LON), dtype=np.float64))
+        f_v_serial = _interp_to_v_points(f_global, grid=geom)
+
+        rank = MPI.COMM_WORLD.Get_rank()
+        n_ranks = MPI.COMM_WORLD.Get_size()
+        layout = make_latlon_band_layout(
+            rank, n_ranks, N_LAT, N_LON, fold=geom.fold)
+        band = slice_cgrid_geometry_to_band(geom, layout)
+        s, e = layout.lat_start, layout.lat_end
+
+        try:
+            set_halo_backend("mpi", layout)
+            f_v_local = _interp_to_v_points(f_global[s:e], grid=band)
+        finally:
+            set_halo_backend("local")
+
+        max_err = float(jnp.max(jnp.abs(f_v_local - f_v_serial[s:e + 1])))
+        all_errs = MPI.COMM_WORLD.allgather(max_err)
+        assert max(all_errs) < 1e-10, (
+            f"_interp_to_v_points max error across ranks: {all_errs}")
+
+    def test_pad_ns_scalar_consistent_mpi_calls(self, fold):
+        """pad_ns_scalar must not cause MPI call-count mismatch (Bug 1)."""
+        geom = create_synthetic_tripole(n_lat=N_LAT, n_lon=N_LON)
+        rng = np.random.default_rng(99)
+        f_global = jnp.asarray(
+            rng.standard_normal((N_LAT, N_LON), dtype=np.float64))
+
+        rank = MPI.COMM_WORLD.Get_rank()
+        n_ranks = MPI.COMM_WORLD.Get_size()
+        layout = make_latlon_band_layout(
+            rank, n_ranks, N_LAT, N_LON, fold=geom.fold)
+        band = slice_cgrid_geometry_to_band(geom, layout)
+        s, e = layout.lat_start, layout.lat_end
+
+        f_interior = 0.5 * (f_global[s:e][:-1] + f_global[s:e][1:])
+        try:
+            set_halo_backend("mpi", layout)
+            result = pad_ns_scalar(f_interior, band)
+        finally:
+            set_halo_backend("local")
+        assert jnp.all(jnp.isfinite(result)), (
+            f"pad_ns_scalar produced non-finite values on rank {rank}")

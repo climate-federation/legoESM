@@ -298,7 +298,7 @@ def barotropic_substeps_latlon_cgrid(
         # on tripolar.
         H_v_interior = jnp.minimum(H_total_c[:-1], H_total_c[1:])
         _fold = getattr(grid, "fold", None)
-        if _fold is not None and _fold.is_active:
+        if _fold is not None and _fold.is_active and _fold.fold_j >= 0:
             south = jnp.zeros_like(H_v_interior[:1])
             north = jnp.minimum(
                 H_total_c[-1:], fold_vface_row(H_total_c, grid),

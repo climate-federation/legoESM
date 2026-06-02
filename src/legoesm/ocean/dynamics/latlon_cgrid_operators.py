@@ -90,9 +90,30 @@ def is_tripolar(grid) -> bool:
     sentinel dispatch.  Tripolar geometries always carry a ``fold`` field
     with ``is_active=True``; regular/Mercator ``LatLonCGridGeometry`` have
     ``is_active=False``; the old ``LatLonGrid`` lacks the field entirely.
+
+    Under MPI latitude-band decomposition, ``is_tripolar`` returns True on
+    ALL ranks of a tripolar run (the fold is active on every rank, even
+    though the fold seam is physically present only on the northernmost
+    rank).  Use :func:`_fold_is_local` to test whether the fold seam is
+    locally present for fold-specific computations.
     """
     fold = getattr(grid, "fold", None)
     return fold is not None and bool(fold.is_active)
+
+
+def _fold_is_local(grid) -> bool:
+    """Return True if the tripolar fold seam is physically local to this rank.
+
+    Under MPI decomposition, ``is_tripolar(grid)`` is True on all ranks of
+    a tripolar run, but the fold seam (``fold_j >= 0``) exists only on the
+    northernmost rank.  Non-northernmost ranks carry a sentinel fold with
+    ``fold_j == -1`` and ``cap_j == -1`` to indicate "fold exists but is
+    not local."  This function checks that the fold is both active AND
+    locally present, which is the correct guard for fold-specific
+    computations (fold-partner lookups, fold-permutation padding, etc.).
+    """
+    fold = getattr(grid, "fold", None)
+    return fold is not None and bool(fold.is_active) and fold.fold_j >= 0
 
 
 def fold_vface_row(cell_field: jnp.ndarray, grid) -> jnp.ndarray:
@@ -117,7 +138,7 @@ def fold_vface_row(cell_field: jnp.ndarray, grid) -> jnp.ndarray:
     partner_row : (1, n_lon, ...) — fold partner values at the fold row.
     """
     fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active:
+    if fold is not None and fold.is_active and fold.fold_j >= 0:
         return cell_field[-1:, fold.perm_T]
     return jnp.zeros_like(cell_field[-1:])
 
@@ -128,6 +149,10 @@ def pad_ns_scalar(interior: jnp.ndarray, grid) -> jnp.ndarray:
     On regular lat-lon: zero-pad (wall BC).
     On tripolar (fold.is_active): south = zero, north = fold-reflected.
 
+    Under MPI, all ranks call ``pad_ns_zero`` first (ensuring consistent
+    MPI sendrecv call counts), then the northernmost rank replaces the
+    north ghost row with fold-permuted data via :func:`_fold_is_local`.
+
     Parameters
     ----------
     interior : (n_lat-1, n_lon, ...) — interior v-face or vertex rows.
@@ -137,24 +162,19 @@ def pad_ns_scalar(interior: jnp.ndarray, grid) -> jnp.ndarray:
     -------
     padded : (n_lat+1, n_lon, ...)
     """
+    padded = pad_ns_zero(interior)
     fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active:
-        south = jnp.zeros_like(interior[:1])
-        # Fold: last interior row, i-reversed via perm_T.
-        # Handle the wrap column: fields with n_lon+1 columns have a
-        # periodic wrap at column n_lon (== column 0).  Fold the first
-        # n_lon columns, then append the wrap.
-        last_row = interior[-1:]                     # (1, n_cols, ...)
+    if fold is not None and fold.is_active and fold.fold_j >= 0:
+        last_row = interior[-1:]
         n_cols = last_row.shape[1]
         n_lon = fold.perm_T.shape[0]
         if n_cols == n_lon:
             north = last_row[:, fold.perm_T]
         else:
-            # n_cols == n_lon + 1 (vertex or u-face field with wrap column)
             core = last_row[:, :n_lon][:, fold.perm_T]
             north = jnp.concatenate([core, core[:, 0:1]], axis=1)
-        return jnp.concatenate([south, interior, north], axis=0)
-    return pad_ns_zero(interior)
+        padded = jnp.concatenate([padded[:-1], north], axis=0)
+    return padded
 
 
 def _fold_row(last_row, perm, sign, n_lon):
@@ -172,14 +192,17 @@ def pad_ns_vector_u(interior: jnp.ndarray, grid) -> jnp.ndarray:
 
     On regular lat-lon: zero-pad.
     On tripolar: south = zero, north = fold-reflected with sign flip.
+
+    Under MPI, all ranks call ``pad_ns_zero`` first (consistent MPI call
+    counts), then the northernmost rank applies the fold correction.
     """
+    padded = pad_ns_zero(interior)
     fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active:
-        south = jnp.zeros_like(interior[:1])
+    if fold is not None and fold.is_active and fold.fold_j >= 0:
         n_lon = fold.perm_T.shape[0]
         north = _fold_row(interior[-1:], fold.perm_T, fold.vector_sign_u, n_lon)
-        return jnp.concatenate([south, interior, north], axis=0)
-    return pad_ns_zero(interior)
+        padded = jnp.concatenate([padded[:-1], north], axis=0)
+    return padded
 
 
 def pad_ns_vector_v(interior: jnp.ndarray, grid) -> jnp.ndarray:
@@ -187,14 +210,17 @@ def pad_ns_vector_v(interior: jnp.ndarray, grid) -> jnp.ndarray:
 
     On regular lat-lon: zero-pad.
     On tripolar: south = zero, north = fold-reflected with sign flip.
+
+    Under MPI, all ranks call ``pad_ns_zero`` first (consistent MPI call
+    counts), then the northernmost rank applies the fold correction.
     """
+    padded = pad_ns_zero(interior)
     fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active:
-        south = jnp.zeros_like(interior[:1])
+    if fold is not None and fold.is_active and fold.fold_j >= 0:
         n_lon = fold.perm_v.shape[0]
         north = _fold_row(interior[-1:], fold.perm_v, fold.vector_sign_v, n_lon)
-        return jnp.concatenate([south, interior, north], axis=0)
-    return pad_ns_zero(interior)
+        padded = jnp.concatenate([padded[:-1], north], axis=0)
+    return padded
 
 
 def pad_ns_vector_pair(
@@ -231,53 +257,44 @@ def pad_ns_vector_pair(
     (u_padded, v_padded) : each (n_lat+1, n_lon, ...)
     """
     fold = getattr(grid, "fold", None)
-    if fold is None or not fold.is_active:
+    if fold is None or not fold.is_active or fold.fold_j < 0:
         return pad_ns_zero(u_interior), pad_ns_zero(v_interior)
 
-    n_lon = fold.perm_T.shape[0]
-    south_u = jnp.zeros_like(u_interior[:1])
-    south_v = jnp.zeros_like(v_interior[:1])
+    u_padded = pad_ns_zero(u_interior)
+    v_padded = pad_ns_zero(v_interior)
 
-    # Source values at the fold partner: i-reversed last interior row
+    n_lon = fold.perm_T.shape[0]
+
     u_src = _fold_row(u_interior[-1:], fold.perm_T, 1.0, n_lon)
     v_src = _fold_row(v_interior[-1:], fold.perm_v, 1.0, n_lon)
 
-    # Check if rotation angles are available and non-trivial.
-    # cos_alpha_v has shape (n_lat+1, n_lon); the north ghost row
-    # corresponds to the last row.
     cos_alpha_v = getattr(grid, "cos_alpha_v", None)
     sin_alpha_v = getattr(grid, "sin_alpha_v", None)
 
     if cos_alpha_v is not None and sin_alpha_v is not None:
-        # Destination rotation angles at the north ghost row
-        cos_d = cos_alpha_v[-1:, :]  # (1, n_lon)
+        cos_d = cos_alpha_v[-1:, :]
         sin_d = sin_alpha_v[-1:, :]
 
-        # Source rotation angles (fold-partner's row, i-reversed)
-        cos_s_row = cos_alpha_v[-2:-1, :]  # last interior row
+        cos_s_row = cos_alpha_v[-2:-1, :]
         sin_s_row = sin_alpha_v[-2:-1, :]
         cos_s = cos_s_row[:, fold.perm_v]
         sin_s = sin_s_row[:, fold.perm_v]
 
-        # Rotation angle difference: cos(Δα) and sin(Δα)
         cos_da = cos_d * cos_s + sin_d * sin_s
         sin_da = sin_d * cos_s - cos_d * sin_s
 
-        # Broadcast for 3D fields
         if u_interior.ndim == 3:
             cos_da = cos_da[:, :, jnp.newaxis]
             sin_da = sin_da[:, :, jnp.newaxis]
 
-        # Combined fold + rotation: negate + rotate
         north_u = -cos_da * u_src - sin_da * v_src
         north_v = sin_da * u_src - cos_da * v_src
     else:
-        # No rotation angles — simple sign flip (regular lat-lon fold)
         north_u = -u_src
         north_v = -v_src
 
-    u_padded = jnp.concatenate([south_u, u_interior, north_u], axis=0)
-    v_padded = jnp.concatenate([south_v, v_interior, north_v], axis=0)
+    u_padded = jnp.concatenate([u_padded[:-1], north_u], axis=0)
+    v_padded = jnp.concatenate([v_padded[:-1], north_v], axis=0)
     return u_padded, v_padded
 
 
@@ -386,7 +403,7 @@ def min_cell_to_vface(f: jnp.ndarray, grid=None) -> jnp.ndarray:
     f_v_interior = jnp.minimum(f[:-1], f[1:])
     south = jnp.zeros_like(f_v_interior[:1])
     fold = getattr(grid, "fold", None) if grid is not None else None
-    if fold is not None and fold.is_active:
+    if fold is not None and fold.is_active and fold.fold_j >= 0:
         f_partner = f[-1:, fold.perm_T]
         north = jnp.minimum(f[-1:], f_partner)
     else:
@@ -417,7 +434,7 @@ def cell_to_cgrid_winds(
     u_face = interp_cell_to_uface(u_cell)
     v_interior = 0.5 * (v_cell[:-1] + v_cell[1:])
     fold = getattr(grid, "fold", None) if grid is not None else None
-    if fold is not None and fold.is_active:
+    if fold is not None and fold.is_active and fold.fold_j >= 0:
         v_face = pad_ns_vector_v(v_interior, grid)
     else:
         v_face = pad_ns_zero(v_interior)
@@ -2634,7 +2651,7 @@ def _compute_vertex_mask(land_mask: jnp.ndarray, grid=None) -> jnp.ndarray:
         [interior, interior[:, 0:1]], axis=1)  # (n_lat-1, n_lon+1)
 
     fold = getattr(grid, "fold", None) if grid is not None else None
-    if fold is not None and fold.is_active:
+    if fold is not None and fold.is_active and fold.fold_j >= 0:
         return pad_ns_scalar(interior_full, grid)
     return pad_ns_zero(interior_full)
 
@@ -2793,7 +2810,7 @@ def partial_cell_pgf_correction_y(
 
     # Fold face: compute correction from fold-partner centroids
     fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active:
+    if fold is not None and fold.is_active and fold.fold_j >= 0:
         centroid_partner = centroid_depth[-1:, fold.perm_T, :]
         rho_partner = rho_prime[-1:, fold.perm_T, :]
         face_ref_fold = jnp.minimum(centroid_depth[-1:], centroid_partner)
@@ -2968,7 +2985,7 @@ def density_jacobian_pgf_smc03_y(
 
     # Fold face: compute PGF from fold-partner cells
     fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active:
+    if fold is not None and fold.is_active and fold.fold_j >= 0:
         rho_F = rho_per_cell[-1:, fold.perm_T, :]
         h_F = h_partial[-1:, fold.perm_T, :]
         z_c_F = z_centroid[-1:, fold.perm_T, :]

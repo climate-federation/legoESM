@@ -532,7 +532,7 @@ def barotropic_implicit_latlon_cgrid(
     )
     v_active_3d_int = h_active_3d[:-1] * h_active_3d[1:]
     fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active:
+    if fold is not None and fold.is_active and fold.fold_j >= 0:
         south_3d = jnp.zeros_like(v_active_3d_int[:1])
         north_3d = h_active_3d[-1:] * h_active_3d[-1:, fold.perm_T, :]
         v_active_3d = jnp.concatenate(
