@@ -39,6 +39,8 @@ import jax.numpy as jnp
 from legoesm.grids.operator_adapters import latlon_cgrid_operators
 from legoesm.grids.operators_latlon_cgrid import (
     vector_laplacian_cgrid,
+    interp_cell_to_uface,
+    interp_cell_to_vface,
     cell_to_cgrid_winds,
 )
 from legoesm.core.operators_fv_latlon import cgrid_fv_flux_divergence_latlon
@@ -229,11 +231,14 @@ def cgrid_latlon_sw_tendencies(
     h, u, v, h_s = state
     g = config.g
 
-    # The grid-dispatched operator interface (B2): the dynamics flow through
-    # ``ops.divergence``/``gradient``/``interpolate`` rather than the bare free
+    # The grid-dispatched operator interface (B2): the differential operators flow
+    # through ``ops.divergence``/``gradient``/``vorticity`` rather than the bare free
     # functions, so the core calls operators without naming the grid (design L2).
     # The adapter delegates to the same lat-lon C-grid operators, so this is
-    # byte-identical to the direct calls.
+    # byte-identical to the direct calls.  The cell->face interpolations stay direct:
+    # the adapter's ``interpolate(.., "vface")`` uses the grid-aware ``pad_ns_scalar``
+    # north/south form, whereas this SW dycore uses the legacy ``grid=None`` (pole-
+    # inert) form, so routing it would change the north-fold value on a tripolar grid.
     ops = latlon_cgrid_operators(grid)
 
     # --- 1. Mass flux divergence ---
@@ -241,9 +246,9 @@ def cgrid_latlon_sw_tendencies(
         # PPM (4th-order) reconstruction of h at faces for upwind flux
         dh_dt = cgrid_fv_flux_divergence_latlon(h, u, v, grid)
     else:
-        # Simple 2nd-order averaging of h to faces
-        h_u = ops.interpolate(h, "center", "uface")
-        h_v = ops.interpolate(h, "center", "vface")
+        # Simple 2nd-order averaging of h to faces (legacy grid=None pole handling)
+        h_u = interp_cell_to_uface(h)
+        h_v = interp_cell_to_vface(h)
         F_u = h_u * u
         F_v = h_v * v
         dh_dt = -ops.divergence(F_u, F_v)

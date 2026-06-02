@@ -57,6 +57,24 @@ def test_methods_delegate_byte_identically_to_free_functions() -> None:
     assert jnp.array_equal(ops.halo_fill(scalar), pad_ns_scalar(scalar, grid))
 
 
+def test_adapter_vface_interp_is_grid_aware_not_gridless() -> None:
+    """Regression: the adapter's interpolate(.., 'vface') uses the grid-AWARE
+    pad_ns north/south form (interp_cell_to_vface(field, grid)), which DIFFERS at the
+    pole/fold from the legacy grid=None pole-inert form interp_cell_to_vface(field).
+
+    A dycore that needs the grid=None form (e.g. the lat-lon SW mass flux) must call
+    the free function directly, NOT route vface through this adapter — routing it
+    changed the north-row value (7.3 vs 0.0) and would alter dh_dt on a tripolar grid.
+    """
+    from legoesm.grids.operators_latlon_cgrid import interp_cell_to_vface
+
+    grid, ops = _grid_and_ops()
+    field = jnp.cos(grid.grid_lat) + 5.0  # non-zero pole rows so the BC shows
+    via_ops = ops.interpolate(field, "center", "vface")
+    assert jnp.array_equal(via_ops, interp_cell_to_vface(field, grid))  # grid-aware
+    assert not jnp.allclose(via_ops, interp_cell_to_vface(field))       # != grid=None
+
+
 @pytest.mark.parametrize(
     "src,dst",
     [
