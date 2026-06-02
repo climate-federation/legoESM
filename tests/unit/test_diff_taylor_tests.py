@@ -105,7 +105,7 @@ class TestTaylorLand:
         from legoesm.land.slab_land import step_land
         from legoesm.land.config import LandConfig
         from legoesm.land.state import LandState
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
 
         ncol = 32
         config = LandConfig()
@@ -146,7 +146,7 @@ class TestTaylorIce:
         from legoesm.ice.sea_ice import step_sea_ice
         from legoesm.ice.config import SeaIceConfig
         from legoesm.ice.state import SeaIceState
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
 
         config = SeaIceConfig(dynamics="none")
         shape = (6, 4, 4)

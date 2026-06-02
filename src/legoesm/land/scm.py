@@ -15,15 +15,13 @@ do — no physics is re-implemented here.
 
 The *forcing* is the per-step atmospheric state the land sees — an
 ``AtmToSurface`` (or a ``callable(elapsed_seconds) -> AtmToSurface``).  It is
-duck-typed and constructed by the caller: this module stays inside the
-component layer and so does NOT import the coupler's ``coupling_fields`` (the
-import-boundary contract forbids ``components -> coupler``).  Until those pure
-field pytrees move to ``core`` (the planned inversion), build the forcing in
-caller / test code, which may import ``coupler.coupling_fields`` freely.
+duck-typed so a caller may pass a constant field or a time-varying closure;
+``AtmToSurface`` lives in ``legoesm.core.coupling_fields`` (a core pytree any
+component may import), so this module stays boundary-clean (no ``coupler`` import).
 
 Example
 -------
->>> from legoesm.coupler.coupling_fields import AtmToSurface  # caller-side import
+>>> from legoesm.core.coupling_fields import AtmToSurface  # caller-side import
 >>> from legoesm.land.scm import LandColumnModel
 >>> from legoesm.land import LandConfig
 >>> forcing = AtmToSurface(...)  # one column's prescribed atmospheric state

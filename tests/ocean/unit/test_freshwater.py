@@ -830,7 +830,7 @@ class TestCouplerAdapter:
 
     def test_compute_mpas_freshwater_basic(self):
         from legoesm.coupler.mpas_adapter import compute_mpas_freshwater
-        from legoesm.coupler.coupling_fields import AtmToSurface, SurfaceToAtm
+        from legoesm.core.coupling_fields import AtmToSurface, SurfaceToAtm
 
         n = 10
         z = jnp.zeros(n)

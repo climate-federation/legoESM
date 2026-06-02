@@ -73,7 +73,7 @@ def _make_grid(n=8):
 
 def _make_forcing(shape=(6, 8, 8)):
     """Create minimal AtmToSurface forcing."""
-    from legoesm.coupler.coupling_fields import AtmToSurface
+    from legoesm.core.coupling_fields import AtmToSurface
     return AtmToSurface(
         sw_down=jnp.full(shape, 100.0),
         lw_down=jnp.full(shape, 200.0),
@@ -1845,7 +1845,7 @@ class TestLegacyDynamicExchangeF11:
         )
 
     def _warm_forcing(self, shape=(6, 8, 8)):
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         # Dry air (q_lowest below saturation over melting ice ~3.8e-3) so the
         # latent flux is sublimation (mass loss), not deposition.  Under the
         # volume-based V=h*A update (#28) deposition adds ice and leaves a
@@ -1897,7 +1897,7 @@ class TestLegacyDynamicExchangeF11:
         assert jnp.all(jnp.isfinite(resp.freshwater_flux))
 
     def _cold_forcing(self, shape=(6, 8, 8)):
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         return AtmToSurface(
             sw_down=jnp.zeros(shape), lw_down=jnp.full(shape, 150.0),
             precip_total=jnp.zeros(shape), precip_snow=jnp.zeros(shape),
@@ -2700,7 +2700,7 @@ class TestAllOceanGridsCoupled:
     'coupled and functional with all ocean grid types'."""
 
     def _forcing(self, shape):
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         z = jnp.zeros(shape)
         f = lambda v: jnp.full(shape, v)
         return AtmToSurface(
@@ -2713,7 +2713,7 @@ class TestAllOceanGridsCoupled:
     def _run_grid(self, grid, shape, dynamics):
         from legoesm.ice.config import SeaIceConfig, BrineConfig
         from legoesm.ice.state import init_dynamic_ice_state
-        from legoesm.coupler.coupling_fields import TileResponse
+        from legoesm.core.coupling_fields import TileResponse
         from legoesm.coupler.config import TileConfig
         from legoesm.coupler.tile_fractions import (
             compute_tile_fractions, blend_tiles)

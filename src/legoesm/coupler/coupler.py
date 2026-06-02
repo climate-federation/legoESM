@@ -31,7 +31,7 @@ from legoesm.coupler.accumulator import (
     reset_accumulator,
 )
 from legoesm.coupler.config import CouplerConfig, TileConfig
-from legoesm.coupler.coupling_fields import (
+from legoesm.core.coupling_fields import (
     AtmToSurface,
     SurfaceToAtm,
     TileResponse,

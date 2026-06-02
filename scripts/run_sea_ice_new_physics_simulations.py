@@ -40,7 +40,7 @@ from legoesm.ice import (
     step_sea_ice,
     init_dynamic_ice_state,
 )
-from legoesm.coupler.coupling_fields import AtmToSurface
+from legoesm.core.coupling_fields import AtmToSurface
 
 
 RESULTS_DIR = Path("results/sea_ice_new_physics")

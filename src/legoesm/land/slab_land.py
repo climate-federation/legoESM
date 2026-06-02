@@ -22,7 +22,7 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
 from legoesm.coupler.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
-from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
+from legoesm.core.coupling_fields import AtmToSurface, TileResponse
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
 from legoesm.land.carbon.config import CarbonState
 from legoesm.land.carbon.carbon_cycle import step_carbon

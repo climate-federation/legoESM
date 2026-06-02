@@ -208,7 +208,7 @@ class TestCouplerDifferentiability:
         from legoesm.coupler.coupler import (
             make_coupler, SurfaceState, init_surface_state,
         )
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         from legoesm.coupler.config import CouplerConfig, TileConfig
         from legoesm.land.config import LandConfig
         from legoesm.ice.config import SeaIceConfig

@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm.coupler.config import CouplerConfig
-from legoesm.coupler.coupling_fields import AtmToSurface
+from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.coupler.surface_exchange import extract_atm_to_surface
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState

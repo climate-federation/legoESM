@@ -9,7 +9,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.coupler.config import TileConfig
-from legoesm.coupler.coupling_fields import SurfaceToAtm, TileResponse
+from legoesm.core.coupling_fields import SurfaceToAtm, TileResponse
 
 
 class TileFractions(NamedTuple):

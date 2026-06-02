@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm.core.field import Field
-from legoesm.coupler.coupling_fields import AtmToSurface
+from legoesm.core.coupling_fields import AtmToSurface
 
 
 def make_forcing(shape, **overrides):

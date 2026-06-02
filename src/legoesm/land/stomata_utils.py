@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from legoesm.coupler.coupling_fields import AtmToSurface
+from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.carbon.config import CarbonState
 from legoesm.land.carbon.stomata import (
     coupled_farquhar_stomata,

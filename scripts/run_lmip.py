@@ -54,7 +54,7 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
-from legoesm.coupler.coupling_fields import AtmToSurface
+from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.config import MultiLayerLandConfig
 from legoesm.land.soil_grid import SoilGridConfig
 from legoesm.land.soil_hydraulics import SoilHydraulicsConfig

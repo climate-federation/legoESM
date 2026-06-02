@@ -11,7 +11,7 @@ import xarray as xr
 
 from legoesm import constants
 from legoesm.core.field import Field
-from legoesm.coupler.coupling_fields import AtmToSurface
+from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.ml.s2s.sfno_slab.data import (
     atmospheric_param_labels,
     denormalize_atmospheric_channels,

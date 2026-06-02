@@ -142,7 +142,7 @@ if __name__ == "__main__":
     # Test coupler integration
     print("\n--- Coupler ocean_tile_response with MOST ---")
     from legoesm.coupler.config import CouplerConfig
-    from legoesm.coupler.coupling_fields import AtmToSurface
+    from legoesm.core.coupling_fields import AtmToSurface
     from legoesm.coupler.coupler import ocean_tile_response
 
     for scheme in ["constant", "coare3", "large_yeager"]:

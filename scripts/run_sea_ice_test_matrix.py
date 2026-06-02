@@ -258,7 +258,7 @@ DIMS_CS = ("face", "x", "y")
 
 def _make_forcing(shape, dims, **kw):
     """Create AtmToSurface forcing."""
-    from legoesm.coupler.coupling_fields import AtmToSurface
+    from legoesm.core.coupling_fields import AtmToSurface
     f = jnp.float64
     defaults = dict(
         sw_down=100.0, lw_down=200.0, T_lowest=250.0, q_lowest=1e-3,

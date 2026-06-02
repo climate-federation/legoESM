@@ -322,7 +322,7 @@ class CoupledESMDriver:
 
     def _build_atm_forcing(self, day: float):
         """Build AtmToSurface from atmosphere state and physics."""
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         from legoesm.forcing.surface_utils import blend_surface_temperature
 
         state = self._atm.state

@@ -20,7 +20,7 @@ xr = pytest.importorskip("xarray")
 zarr = pytest.importorskip("zarr")
 
 from legoesm import constants
-from legoesm.coupler.coupling_fields import AtmToSurface
+from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.forcing.jra55_do import (
     JRA55_VARIABLES,
     JRA55DoConfig,

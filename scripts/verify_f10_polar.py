@@ -26,7 +26,7 @@ import matplotlib.pyplot as plt
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ice.config import SeaIceConfig
 from legoesm.ice.state import init_dynamic_ice_state
-from legoesm.coupler.coupling_fields import AtmToSurface
+from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.ice.sea_ice import step_sea_ice
 from legoesm.ice.rheology import _strain_rates_latlon
 from legoesm import constants

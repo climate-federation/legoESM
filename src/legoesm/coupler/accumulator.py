@@ -12,7 +12,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.precision import resolve_dtype
-from legoesm.coupler.coupling_fields import SurfaceToAtm
+from legoesm.core.coupling_fields import SurfaceToAtm
 
 
 def _tiny(dtype=None):

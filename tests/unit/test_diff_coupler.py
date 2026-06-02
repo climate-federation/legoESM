@@ -63,7 +63,7 @@ class TestTileBlendingGrad:
     def test_grad_wrt_ice_concentration(self):
         from legoesm.coupler.tile_fractions import compute_tile_fractions, blend_tiles
         from legoesm.coupler.config import TileConfig
-        from legoesm.coupler.coupling_fields import TileResponse
+        from legoesm.core.coupling_fields import TileResponse
 
         n = 4
         shape = (6, n, n)
@@ -152,7 +152,7 @@ class TestFullCouplerGrad:
     def setup(self):
         from legoesm.coupler.coupler import make_coupler
         from legoesm.coupler.config import CouplerConfig, TileConfig
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         from legoesm.coupler.accumulator import reset_accumulator
         from legoesm.land.config import LandConfig
         from legoesm.land.state import LandState
@@ -245,7 +245,7 @@ class TestFluxAccumulatorGrad:
         from legoesm.coupler.accumulator import (
             reset_accumulator, accumulate, mean_accumulator,
         )
-        from legoesm.coupler.coupling_fields import SurfaceToAtm
+        from legoesm.core.coupling_fields import SurfaceToAtm
 
         shape = (6, 4, 4)
         ones = jnp.ones(shape)
@@ -367,7 +367,7 @@ class TestLakeModelGrad:
 
     @staticmethod
     def _make_lake_forcing(ncol):
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         ones = jnp.ones(ncol)
         return AtmToSurface(
             sw_down=200.0 * ones,

@@ -27,7 +27,7 @@ def assert_gradient_ok(grad_array, name="", min_nonzero_frac=0.1):
 
 def make_atm_forcing(shape):
     """Minimal AtmToSurface forcing with realistic values."""
-    from legoesm.coupler.coupling_fields import AtmToSurface
+    from legoesm.core.coupling_fields import AtmToSurface
     ones = jnp.ones(shape)
     return AtmToSurface(
         sw_down=200.0 * ones,

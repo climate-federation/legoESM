@@ -14,7 +14,7 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm.components import LandComplexity, OceanComplexity
-from legoesm.coupler.coupling_fields import AtmToSurface
+from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.driver.component_factory import (
     create_land_component,
     create_ocean_component,

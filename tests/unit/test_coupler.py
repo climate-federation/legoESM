@@ -9,7 +9,7 @@ import pytest
 from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.coupler.config import CouplerConfig, TileConfig
-from legoesm.coupler.coupling_fields import AtmToSurface, SurfaceToAtm, TileResponse
+from legoesm.core.coupling_fields import AtmToSurface, SurfaceToAtm, TileResponse
 from legoesm.coupler.tile_fractions import (
     TileFractions,
     blend_tiles,

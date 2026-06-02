@@ -56,7 +56,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from legoesm.coupler.coupling_fields import TileResponse
+from legoesm.core.coupling_fields import TileResponse
 from legoesm.coupler.tile_fractions import TileFractions
 from legoesm.ocean.freshwater import FreshwaterForcing
 from legoesm.ocean.state import OceanSurfaceForcing

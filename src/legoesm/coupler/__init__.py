@@ -1,8 +1,11 @@
 """Component coupler for legoESM."""
 
+# Shared coupling pytrees now live in core (importable by any layer); the coupler
+# re-exports them for backward-compatible ``from legoesm.coupler import AtmToSurface``.
+from legoesm.core.coupling_fields import AtmToSurface, SurfaceToAtm, TileResponse
+
 # Low-level types that don't depend on land/ice (no cycle)
 from legoesm.coupler.config import CouplerConfig, TileConfig
-from legoesm.coupler.coupling_fields import AtmToSurface, SurfaceToAtm, TileResponse
 from legoesm.coupler.tile_fractions import TileFractions, compute_tile_fractions, blend_tiles
 from legoesm.coupler.accumulator import (
     FluxAccumulator, accumulate, mean_accumulator, reset_accumulator,

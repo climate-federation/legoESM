@@ -12,16 +12,15 @@ grid of neighbouring cells, so they are not a single-column concept; this driver
 runs the **thermodynamic** slab path (``SeaIceConfig.dynamics="none"``, ``grid=None``)
 on ``ncol`` independent columns.
 
-Boundary-clean: like the land SCM this stays inside the component layer and does
-NOT import the coupler's ``coupling_fields`` (the ``components -> coupler`` import
-is forbidden by contract).  The atmospheric *forcing* (an ``AtmToSurface`` or a
-``callable(elapsed_seconds) -> AtmToSurface``) is duck-typed and constructed by
-the caller; the ocean coupling (SST + surface currents) is prescribed as plain
-arrays.
+The atmospheric *forcing* (an ``AtmToSurface`` — now a core pytree in
+``legoesm.core.coupling_fields`` — or a ``callable(elapsed_seconds) ->
+AtmToSurface``) is duck-typed so a caller may pass a constant field or a
+time-varying closure; the ocean coupling (SST + surface currents) is prescribed
+as plain arrays.  This module imports no ``coupler`` (boundary-clean).
 
 Example
 -------
->>> from legoesm.coupler.coupling_fields import AtmToSurface  # caller-side import
+>>> from legoesm.core.coupling_fields import AtmToSurface  # caller-side import
 >>> from legoesm.ice.scm import IceColumnModel
 >>> forcing = AtmToSurface(...)        # a cold polar atmosphere over ``ncol`` cells
 >>> scm = IceColumnModel.create(ncol=1, dt=3600.0, forcing=forcing)

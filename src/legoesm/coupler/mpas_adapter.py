@@ -18,7 +18,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.coupler.config import CouplerConfig, TileConfig
-from legoesm.coupler.coupling_fields import AtmToSurface, SurfaceToAtm
+from legoesm.core.coupling_fields import AtmToSurface, SurfaceToAtm
 from legoesm.coupler.coupler import init_surface_state, make_coupler, LakeConfig
 from legoesm.land.config import LandConfig
 from legoesm.ice.config import SeaIceConfig

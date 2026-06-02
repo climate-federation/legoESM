@@ -515,7 +515,7 @@ class TestSlabLandIntegration(unittest.TestCase):
     """Integration of stomatal conductance with slab land model."""
 
     def _make_forcing(self, shape):
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         return AtmToSurface(
             sw_down=jnp.full(shape, 300.0),
             lw_down=jnp.full(shape, 350.0),

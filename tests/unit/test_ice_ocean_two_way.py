@@ -19,7 +19,7 @@ from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanMode
 from legoesm.ice.config import SeaIceConfig
 from legoesm.ice.state import init_dynamic_ice_state
 from legoesm.ice.sea_ice import step_sea_ice
-from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
+from legoesm.core.coupling_fields import AtmToSurface, TileResponse
 from legoesm.coupler.config import TileConfig
 from legoesm.coupler.tile_fractions import compute_tile_fractions
 from legoesm.coupler.ocean_forcing import ice_ocean_forcing_from_ice_response

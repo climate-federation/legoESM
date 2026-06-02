@@ -81,7 +81,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.atmosphere.physics.radiation.solar import cos_zenith_angle
-from legoesm.coupler.coupling_fields import AtmToSurface
+from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.forcing.time_utils import (
     NOLEAP_DAYS_PER_YEAR,
     date_to_day,

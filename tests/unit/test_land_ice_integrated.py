@@ -16,7 +16,7 @@ from legoesm.ice.state import SeaIceState
 from legoesm.coupler.lake.two_layer_lake import step_lake
 from legoesm.coupler.lake.config import LakeConfig
 from legoesm.coupler.lake.state import LakeState
-from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
+from legoesm.core.coupling_fields import AtmToSurface, TileResponse
 from legoesm.core.field import Field
 from legoesm import constants
 

@@ -34,7 +34,7 @@ from legoesm.coupler.bulk_flux import (
     compute_most_fluxes,
     validate_bulk_scheme,
 )
-from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
+from legoesm.core.coupling_fields import AtmToSurface, TileResponse
 from legoesm.ice.dynamics import evp_solver, mevp_solver, free_drift_velocity
 from legoesm.ice.transport import advect_ice_tracers
 from legoesm.ice.itd import (

@@ -24,7 +24,7 @@ def assert_gradient_ok(grad_array, name="", min_nonzero_frac=0.1):
 
 
 def make_ice_forcing(shape):
-    from legoesm.coupler.coupling_fields import AtmToSurface
+    from legoesm.core.coupling_fields import AtmToSurface
     ones = jnp.ones(shape)
     return AtmToSurface(
         sw_down=100.0 * ones,

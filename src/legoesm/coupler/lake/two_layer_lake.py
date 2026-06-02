@@ -22,7 +22,7 @@ from legoesm.thermo import (
     saturation_mixing_ratio_ice,
 )
 from legoesm.coupler.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
-from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
+from legoesm.core.coupling_fields import AtmToSurface, TileResponse
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
 from legoesm.coupler.lake.config import LakeConfig
 from legoesm.coupler.lake.state import LakeState

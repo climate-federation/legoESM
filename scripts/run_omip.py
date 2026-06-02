@@ -1657,7 +1657,7 @@ def _build_jra55_block_fn(model, jra55_state, dt):
     """
     from legoesm import constants as _const
     from legoesm.coupler.coupler import ocean_tile_response
-    from legoesm.coupler.coupling_fields import AtmToSurface
+    from legoesm.core.coupling_fields import AtmToSurface
     from legoesm.ocean.freshwater import FreshwaterForcing
     from legoesm.ocean.state import OceanSurfaceForcing
 
@@ -1824,7 +1824,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
     """
     from legoesm import constants as _const
     from legoesm.coupler.coupler import ocean_tile_response
-    from legoesm.coupler.coupling_fields import AtmToSurface
+    from legoesm.core.coupling_fields import AtmToSurface
     from legoesm.ocean.freshwater import FreshwaterForcing
     from legoesm.ocean.state import OceanSurfaceForcing
     from legoesm.atmosphere.physics.radiation.solar import (

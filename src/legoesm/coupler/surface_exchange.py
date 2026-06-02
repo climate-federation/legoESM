@@ -10,7 +10,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.coupler.config import CouplerConfig
-from legoesm.coupler.coupling_fields import AtmToSurface
+from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.core.state import HydrostaticState, NonHydrostaticState
 from legoesm.grids.vertical import SigmaCoordinate
 from legoesm.atmosphere.physics.thermodynamics import (

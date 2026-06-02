@@ -8,7 +8,7 @@ import pytest
 from legoesm.ice.sea_ice import step_sea_ice
 from legoesm.ice.config import SeaIceConfig
 from legoesm.ice.state import SeaIceState
-from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
+from legoesm.core.coupling_fields import AtmToSurface, TileResponse
 from legoesm.core.field import Field
 from legoesm import constants
 

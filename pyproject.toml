@@ -203,13 +203,10 @@ forbidden_modules = [
 ]
 unmatched_ignore_imports_alerting = "error"
 ignore_imports = [
-    # Shared coupling pytrees -> move to core/coupling_fields (D1: shared pytrees
-    # single-sourced in core).
-    "legoesm.land.stomata_utils -> legoesm.coupler.coupling_fields",
-    "legoesm.land.slab_land -> legoesm.coupler.coupling_fields",
-    "legoesm.land.multilayer_land -> legoesm.coupler.coupling_fields",
-    "legoesm.ice.sea_ice -> legoesm.coupler.coupling_fields",
-    "legoesm.ocean.simple_ocean -> legoesm.coupler.coupling_fields",
+    # NOTE: the shared coupling pytrees (AtmToSurface/TileResponse/SurfaceToAtm)
+    # have been MOVED to legoesm.core.coupling_fields, so the former
+    # land/ice/ocean -> coupler.coupling_fields edges are gone (components now
+    # import them from core, which is allowed) and their ignore entries removed.
     # Shared surface-flux formulas / energy -> move to a shared surface module.
     "legoesm.atmosphere.dynamics.rce_surface_flux -> legoesm.coupler.bulk_flux",
     "legoesm.atmosphere.physics.turbulence.surface_layer -> legoesm.coupler.bulk_flux",
