@@ -154,3 +154,108 @@ class CubedSphereCDGridOperators:
 def cubed_sphere_cdgrid_operators(cdgrid: Any) -> CubedSphereCDGridOperators:
     """Wrap a cubed-sphere C-D grid in its :class:`GridOperators` adapter."""
     return CubedSphereCDGridOperators(cdgrid)
+
+
+def _rank_route(field: Any, slice_fn: Any, column_fn: Any) -> Any:
+    """Pick the 2-D-slice vs column TRiSK kernel by field rank, rejecting rank>2.
+
+    Rank 1 (``(n*,)``) -> single horizontal slice (shallow water); rank 2
+    (``(n*, nlev)``) -> column (primitive-equation / ocean).  The ``*_3d`` kernels
+    broadcast with ``[:, None]`` and expect exactly rank 2, so a rank-3 bundle
+    (e.g. MPAS tracers ``(nCells, nlev, n_tracers)``) must be flattened by the
+    caller first — silently feeding it to a column kernel would mis-broadcast.
+    """
+    nd = field.ndim
+    if nd == 1:
+        return slice_fn
+    if nd == 2:
+        return column_fn
+    raise ValueError(
+        f"MPAS edge operator received a rank-{nd} field; supported ranks are 1 "
+        "(horizontal slice) and 2 (column '(n*, nlev)'). Flatten any trailing "
+        "channel/tracer axis to '(n*, ncol)' before calling."
+    )
+
+
+class MPASEdgeOperators:
+    """:class:`~legoesm.grids.operator_protocol.EdgeOperators` over an MPAS/Voronoi
+    mesh, delegating to the shared TRiSK free functions in
+    :mod:`legoesm.core.operators_voronoi` (identical numerics).
+
+    MPAS carries a single edge-normal velocity ``u_edge`` (not a ``(u, v)`` pair),
+    so it implements the *edge-normal* sibling contract rather than the
+    component-velocity ``GridOperators``.  ``divergence``/``vorticity`` are
+    differential operators; ``tangential`` (edge-tangential reconstruction) and
+    ``cell_to_edge`` (remap) are the TRiSK reconstruction/averaging counterparts
+    — mirroring how ``GridOperators`` groups ``interpolate`` alongside the
+    derivatives.
+
+    Each method **dispatches on field rank** so the SAME adapter backs every MPAS
+    dycore: a single horizontal slice (``(nEdges,)`` / ``(nCells,)``) routes to the
+    2-D TRiSK kernel for the shallow-water core; a column field
+    (``(nEdges, nlev)`` / ``(nCells, nlev)``) routes to the ``*_3d`` kernel for the
+    primitive-equation atmosphere (``primitive_eq_mpas``) and ocean
+    (``ocean_model_mpas``).  Rank is static at trace time, so the Python ``if`` is
+    JIT-safe.
+
+    The TRiSK kernels are imported at function scope to break the ``grids``<->
+    ``core`` import cycle (``core.operators_cdgrid`` imports ``grids.cubed_sphere_cdgrid``;
+    a module-scope ``grids.operator_adapters`` -> ``core`` edge would re-enter the
+    ``grids`` package mid-init).
+    """
+
+    def __init__(self, mesh: Any) -> None:
+        self._mesh = mesh
+
+    @property
+    def mesh(self) -> Any:
+        return self._mesh
+
+    def divergence(self, u_edge: Any) -> Any:
+        """Divergence of edge-normal velocity -> cell-centre scalar (2-D or column)."""
+        from legoesm.core.operators_voronoi import (
+            divergence_cell,
+            divergence_cell_3d,
+        )
+
+        fn = _rank_route(u_edge, divergence_cell, divergence_cell_3d)
+        return fn(u_edge, self._mesh)
+
+    def gradient(self, phi_cell: Any) -> Any:
+        """Gradient of a cell scalar -> edge-normal component (2-D or column)."""
+        from legoesm.core.operators_voronoi import gradient_edge, gradient_edge_3d
+
+        fn = _rank_route(phi_cell, gradient_edge, gradient_edge_3d)
+        return fn(phi_cell, self._mesh)
+
+    def vorticity(self, u_edge: Any) -> Any:
+        """Relative vorticity (curl) of ``u_edge`` -> vertex scalar (2-D or column)."""
+        from legoesm.core.operators_voronoi import curl_vertex, curl_vertex_3d
+
+        fn = _rank_route(u_edge, curl_vertex, curl_vertex_3d)
+        return fn(u_edge, self._mesh)
+
+    def tangential(self, u_edge: Any) -> Any:
+        """Reconstruct the edge-tangential velocity from ``u_edge`` (TRiSK; 2-D/column)."""
+        from legoesm.core.operators_voronoi import (
+            tangential_velocity,
+            tangential_velocity_3d,
+        )
+
+        fn = _rank_route(u_edge, tangential_velocity, tangential_velocity_3d)
+        return fn(u_edge, self._mesh)
+
+    def cell_to_edge(self, phi_cell: Any) -> Any:
+        """Average a cell-centre scalar onto edges (2-D or column)."""
+        from legoesm.core.operators_voronoi import (
+            cell_to_edge_avg,
+            cell_to_edge_avg_3d,
+        )
+
+        fn = _rank_route(phi_cell, cell_to_edge_avg, cell_to_edge_avg_3d)
+        return fn(phi_cell, self._mesh)
+
+
+def mpas_edge_operators(mesh: Any) -> MPASEdgeOperators:
+    """Wrap an MPAS/Voronoi mesh in its :class:`EdgeOperators` adapter."""
+    return MPASEdgeOperators(mesh)

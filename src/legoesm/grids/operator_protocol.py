@@ -76,14 +76,9 @@ _REQUIRED_OPERATORS: tuple[tuple[str, int], ...] = (
 )
 
 
-def validate_grid_operators(grid: Any) -> None:
-    """Raise ``TypeError`` unless *grid* implements every operator with its arity.
-
-    Stronger than ``isinstance(grid, GridOperators)`` — a ``runtime_checkable``
-    Protocol only proves attribute presence (it would pass ``divergence = 1``).
-    Stage B2's grid registry uses this to validate an adapter-wrapped grid.
-    """
-    for method_name, n_args in _REQUIRED_OPERATORS:
+def _validate_operators(grid: Any, required: tuple[tuple[str, int], ...]) -> None:
+    """Raise ``TypeError`` unless *grid* exposes every ``(name, arity)`` operator."""
+    for method_name, n_args in required:
         fn = getattr(grid, method_name, None)
         if not callable(fn):
             raise TypeError(
@@ -102,3 +97,66 @@ def validate_grid_operators(grid: Any) -> None:
                 f"grid.{method_name} must accept {n_args} positional argument(s) "
                 f"(signature {sig}): {exc}"
             ) from exc
+
+
+def validate_grid_operators(grid: Any) -> None:
+    """Raise ``TypeError`` unless *grid* implements every operator with its arity.
+
+    Stronger than ``isinstance(grid, GridOperators)`` — a ``runtime_checkable``
+    Protocol only proves attribute presence (it would pass ``divergence = 1``).
+    Stage B2's grid registry uses this to validate an adapter-wrapped grid.
+    """
+    _validate_operators(grid, _REQUIRED_OPERATORS)
+
+
+# --- Edge-normal (TRiSK) operator interface -------------------------------
+#
+# MPAS/Voronoi meshes carry a SINGLE edge-normal velocity ``u_edge`` rather than
+# a component pair ``(u, v)``, so the component-velocity ``GridOperators``
+# contract (``divergence(u, v)``) does not fit them.  ``EdgeOperators`` is the
+# sibling contract for edge-normal grids: the differential operators
+# ``divergence(u_edge)`` -> cell, ``gradient(phi_cell)`` -> edge,
+# ``vorticity(u_edge)`` -> vertex, plus the TRiSK ``tangential`` reconstruction and
+# ``cell_to_edge`` remap (grouped here as ``GridOperators`` groups ``interpolate``
+# alongside its derivatives).  Spectral and SFNO grids operate through global
+# transforms / neural maps, not grid-local stencils, so they expose NEITHER
+# contract and share their grid through the dynamical-core modules directly.
+
+
+@runtime_checkable
+class EdgeOperators(Protocol):
+    """Grid-dispatched TRiSK operators for an edge-normal velocity ``u_edge``."""
+
+    def divergence(self, u_edge: Any) -> Any:
+        """Divergence of edge-normal velocity -> cell-centre scalar."""
+        ...
+
+    def gradient(self, phi_cell: Any) -> Any:
+        """Gradient of a cell scalar -> edge-normal component."""
+        ...
+
+    def vorticity(self, u_edge: Any) -> Any:
+        """Relative vorticity (curl) of ``u_edge`` -> vertex scalar."""
+        ...
+
+    def tangential(self, u_edge: Any) -> Any:
+        """Reconstruct the edge-tangential velocity from ``u_edge`` (TRiSK)."""
+        ...
+
+    def cell_to_edge(self, phi_cell: Any) -> Any:
+        """Average a cell-centre scalar onto edges."""
+        ...
+
+
+_REQUIRED_EDGE_OPERATORS: tuple[tuple[str, int], ...] = (
+    ("divergence", 1),
+    ("gradient", 1),
+    ("vorticity", 1),
+    ("tangential", 1),
+    ("cell_to_edge", 1),
+)
+
+
+def validate_edge_operators(grid: Any) -> None:
+    """Raise ``TypeError`` unless *grid* implements every edge-normal operator."""
+    _validate_operators(grid, _REQUIRED_EDGE_OPERATORS)

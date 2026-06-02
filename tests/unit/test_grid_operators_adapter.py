@@ -126,3 +126,93 @@ def test_cube_unsupported_interpolation_raises() -> None:
     _grid, _cdgrid, ops = _cube_grid_and_ops()
     with pytest.raises(ValueError, match="unsupported interpolation"):
         ops.interpolate(jnp.zeros((6, 8, 8)), "center", "uface")
+
+
+# --- MPAS/Voronoi edge-normal (TRiSK) adapter (B2 replication) ---
+
+def _mpas_mesh_and_ops():
+    from legoesm.grids.operator_adapters import MPASEdgeOperators
+    from legoesm.grids.voronoi import create_voronoi_mesh
+
+    mesh = create_voronoi_mesh(2)
+    return mesh, MPASEdgeOperators(mesh)
+
+
+def _eq(a, b):
+    return jnp.array_equal(a, b, equal_nan=True)
+
+
+def test_mpas_edge_adapter_satisfies_edge_contract() -> None:
+    from legoesm.grids.operator_adapters import mpas_edge_operators
+    from legoesm.grids.operator_protocol import (
+        EdgeOperators,
+        validate_edge_operators,
+        validate_grid_operators,
+    )
+
+    mesh, ops = _mpas_mesh_and_ops()
+    validate_edge_operators(ops)            # satisfies the edge-normal contract
+    assert isinstance(ops, EdgeOperators)
+    assert mpas_edge_operators(mesh).mesh is mesh
+    # ... and does NOT satisfy the component-velocity GridOperators contract
+    # (divergence is 1-arg edge-normal, not 2-arg (u, v)).
+    with pytest.raises(TypeError):
+        validate_grid_operators(ops)
+
+
+def test_mpas_edge_methods_delegate_byte_identically() -> None:
+    from legoesm.core.operators_voronoi import (
+        cell_to_edge_avg,
+        curl_vertex,
+        divergence_cell,
+        gradient_edge,
+        tangential_velocity,
+    )
+
+    mesh, ops = _mpas_mesh_and_ops()
+    # smooth edge-normal velocity + cell scalar from mesh coordinates
+    u_edge = jnp.sin(mesh.lonEdge) * jnp.cos(mesh.latEdge)
+    phi_cell = jnp.cos(mesh.lonCell) * jnp.sin(mesh.latCell)
+
+    assert _eq(ops.divergence(u_edge), divergence_cell(u_edge, mesh))
+    assert _eq(ops.gradient(phi_cell), gradient_edge(phi_cell, mesh))
+    assert _eq(ops.vorticity(u_edge), curl_vertex(u_edge, mesh))
+    assert _eq(ops.tangential(u_edge), tangential_velocity(u_edge, mesh))
+    assert _eq(ops.cell_to_edge(phi_cell), cell_to_edge_avg(phi_cell, mesh))
+
+
+def test_mpas_edge_methods_dispatch_to_3d_for_columns() -> None:
+    """A column field (nEdges/nCells, nlev) routes to the *_3d TRiSK kernels —
+    the SAME adapter backs the SW (2-D) and PE/ocean (3-D) MPAS dycores."""
+    from legoesm.core.operators_voronoi import (
+        cell_to_edge_avg_3d,
+        curl_vertex_3d,
+        divergence_cell_3d,
+        gradient_edge_3d,
+        tangential_velocity_3d,
+    )
+
+    mesh, ops = _mpas_mesh_and_ops()
+    nlev = 5
+    sigma = jnp.linspace(0.1, 1.0, nlev)
+    u3 = (jnp.sin(mesh.lonEdge) * jnp.cos(mesh.latEdge))[:, None] * sigma[None, :]
+    phi3 = (jnp.cos(mesh.lonCell) * jnp.sin(mesh.latCell))[:, None] * sigma[None, :]
+
+    assert ops.divergence(u3).ndim == 2  # column output, not a slice
+    assert _eq(ops.divergence(u3), divergence_cell_3d(u3, mesh))
+    assert _eq(ops.gradient(phi3), gradient_edge_3d(phi3, mesh))
+    assert _eq(ops.vorticity(u3), curl_vertex_3d(u3, mesh))
+    assert _eq(ops.tangential(u3), tangential_velocity_3d(u3, mesh))
+    assert _eq(ops.cell_to_edge(phi3), cell_to_edge_avg_3d(phi3, mesh))
+
+
+def test_mpas_edge_rejects_rank3_bundle() -> None:
+    """A rank-3 tracer/channel bundle must be flattened by the caller — the
+    column kernels broadcast assuming rank 2, so the adapter raises instead of
+    silently mis-broadcasting."""
+    mesh, ops = _mpas_mesh_and_ops()
+    tracers = jnp.zeros((mesh.nCells, 5, 3))  # (nCells, nlev, n_tracers)
+    with pytest.raises(ValueError, match="rank-3"):
+        ops.gradient(tracers)
+    with pytest.raises(ValueError, match="rank-3"):
+        ops.cell_to_edge(tracers)
