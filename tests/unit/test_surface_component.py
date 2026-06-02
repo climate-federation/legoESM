@@ -1,4 +1,4 @@
-"""SurfaceComponentAdapter — live land/ice surface steps as AbstractComponent bricks."""
+"""SurfaceComponentAdapter — live land/ice/ocean surface steps as StepComponent bricks."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from legoesm.components import AbstractComponent
+from legoesm.components import AbstractComponent, StepComponent
 from legoesm.components.surface_component import SurfaceComponentAdapter
 from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.core.field import Field
@@ -18,6 +18,7 @@ _needs_x64 = pytest.mark.skipif(
 
 _SHAPE = (6, 4, 4)
 _DIMS = ("face", "x", "y")
+_DT = 3600.0
 
 
 def _forcing() -> AtmToSurface:
@@ -46,8 +47,8 @@ def _land_brick():
         snow_age=Field(jnp.zeros(_SHAPE), name="snow_age", dims=_DIMS, units="s"),
     )
 
-    def step_fn(grid, st, frc):
-        new_state, resp, _carbon = step_land(st, frc, config, U_min=1.0, dt=3600.0)
+    def step_fn(grid, st, frc, dt):
+        new_state, resp, _carbon = step_land(st, frc, config, U_min=1.0, dt=dt)
         return new_state, resp
 
     brick = SurfaceComponentAdapter(
@@ -56,7 +57,7 @@ def _land_brick():
         required_forcing=("atm_forcing",),
         provided_fluxes=("shflx", "lhflx", "lw_up", "T_surface"),
     )
-    return brick, state, "T_soil"
+    return brick, state, "T_soil", lambda r: r.shflx
 
 
 def _ice_brick():
@@ -75,8 +76,8 @@ def _ice_brick():
     sst = jnp.full(_SHAPE, constants.T_freeze_ocean)
     zero = jnp.zeros(_SHAPE)
 
-    def step_fn(grid, st, frc):
-        return step_sea_ice(st, frc, sst, zero, zero, config, 1.0, 3600.0)
+    def step_fn(grid, st, frc, dt):
+        return step_sea_ice(st, frc, sst, zero, zero, config, 1.0, dt)
 
     brick = SurfaceComponentAdapter(
         step_fn,
@@ -84,7 +85,7 @@ def _ice_brick():
         required_forcing=("atm_forcing", "ocean_state"),
         provided_fluxes=("shflx", "lhflx", "tau_x", "tau_y", "lw_up", "T_surface"),
     )
-    return brick, state, "T_ice"
+    return brick, state, "T_ice", lambda r: r.shflx
 
 
 def _ocean_brick():
@@ -97,10 +98,10 @@ def _ocean_brick():
     ocean_step = make_ocean(SimpleOceanConfig(mode="slab"))
     state = init_slab_state(_SHAPE, T_sfc_init=290.0)
 
-    def step_fn(grid, st, frc):
-        # make_ocean returns (state, sst, u_sfc, v_sfc) — repackage the provided
-        # surface fields as the brick's named TileResponse-style handoff.
-        new_state, sst, u_sfc, v_sfc = ocean_step(st, frc, 3600.0)
+    def step_fn(grid, st, frc, dt):
+        # make_ocean returns (state, sst, u_sfc, v_sfc); repackage the surface
+        # fields the coupler turns into atmospheric fluxes as the named handoff.
+        new_state, sst, u_sfc, v_sfc = ocean_step(st, frc, dt)
         return new_state, {"sst": sst, "u_ocean_sfc": u_sfc, "v_ocean_sfc": v_sfc}
 
     brick = SurfaceComponentAdapter(
@@ -109,54 +110,55 @@ def _ocean_brick():
         required_forcing=("atm_forcing",),
         provided_fluxes=("sst", "u_ocean_sfc", "v_ocean_sfc"),
     )
-    return brick, state, "T_sfc"
+    return brick, state, "T_sfc", lambda r: r["sst"]
 
 
 _BUILDERS = [_land_brick, _ice_brick, _ocean_brick]
 
 
 @pytest.mark.parametrize("builder", _BUILDERS)
-def test_surface_brick_is_abstractcomponent_with_metadata(builder) -> None:
-    brick, _state, _gf = builder()
-    assert isinstance(brick, AbstractComponent)
+def test_surface_brick_is_stepcomponent_with_metadata(builder) -> None:
+    brick, _state, _gf, _flux = builder()
+    assert isinstance(brick, StepComponent)
+    # implicit-step brick, NOT the explicit-RHS kind (no faked tendency)
+    assert not isinstance(brick, AbstractComponent)
     assert brick.prognostic_variables  # evolves a surface state
     assert brick.required_forcing       # needs atmospheric forcing
-    assert brick.provided_fluxes        # provides TileResponse channels
+    assert brick.provided_fluxes        # provides surface fluxes/fields
 
 
 @_needs_x64
 @pytest.mark.parametrize("builder", _BUILDERS)
-def test_surface_brick_steps_and_is_differentiable(builder) -> None:
-    """The wrapped live step runs as the brick's uniform seam and is jax.grad
-    differentiable through the implicit surface energy balance (D1/D3)."""
-    brick, state, grad_field = builder()
+def test_surface_brick_flux_is_differentiable(builder) -> None:
+    """The wrapped live step runs as the brick's uniform step(.., dt) seam, and the
+    PROVIDED FLUX is jax.grad differentiable wrt the surface temperature through the
+    implicit energy balance (D1/D3) — proving the flux path, not just the state."""
+    brick, state, grad_field, flux = builder()
     forcing = _forcing()
 
-    out = brick.step(None, state, forcing)
-    leaves = jax.tree.leaves(out)
+    new_state, resp = brick.step(None, state, forcing, _DT)
+    leaves = jax.tree.leaves((new_state, resp))
     assert leaves and all(jnp.all(jnp.isfinite(x)) for x in leaves)
 
-    # d(step output)/d(surface temperature): finite AND non-zero -> the gradient
-    # flows through the brick's step seam (the implicit energy balance included).
-    # Response-agnostic (land/ice return a TileResponse, ocean a named dict).
     fld = getattr(state, grad_field)
 
     def loss(arr):
         st = state._replace(**{grad_field: fld.replace(data=arr)})
-        return sum(jnp.sum(x ** 2)
-                   for x in jax.tree.leaves(brick.step(None, st, forcing)))
+        _ns, r = brick.step(None, st, forcing, _DT)
+        return jnp.sum(flux(r) ** 2)
 
     g = jax.grad(loss)(fld.data)
     assert jnp.all(jnp.isfinite(g)) and jnp.max(jnp.abs(g)) > 0.0
 
 
-@_needs_x64
-@pytest.mark.parametrize("builder", _BUILDERS)
-def test_surface_brick_tendency_raises(builder) -> None:
-    """The explicit-RHS tendency seam is not applicable to an implicit surface step."""
-    brick, state, _gf = builder()
-    with pytest.raises(NotImplementedError, match="implicitly-STEPPED"):
-        brick.tendency(None, state, _forcing(), None)
+def test_response_validation_catches_a_missing_declared_flux() -> None:
+    """A step omitting a declared flux fails loudly (no silent metadata drift)."""
+    bad = SurfaceComponentAdapter(
+        lambda grid, state, forcing, dt: (state, {"sst": jnp.zeros(2)}),
+        prognostic_variables=("x",), required_forcing=(),
+        provided_fluxes=("sst", "missing"))
+    with pytest.raises(ValueError, match="missing"):
+        bad.step(None, None, None, 1.0)
 
 
 def test_non_callable_step_fn_rejected() -> None:

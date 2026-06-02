@@ -31,12 +31,14 @@ from legoesm.components.protocol import (  # noqa: F401
     AbstractComponent,
     DycoreProtocol,
     PhysicsModuleProtocol,
+    StepComponent,
     SurfaceComponentProtocol,
     validate_dycore,
 )
 
 __all__ = [
     "AbstractComponent",
+    "StepComponent",
     "DycoreProtocol",
     "PhysicsModuleProtocol",
     "SurfaceComponentProtocol",

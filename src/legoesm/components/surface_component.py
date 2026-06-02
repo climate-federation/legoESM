@@ -1,53 +1,62 @@
-"""Wrap a live surface model's step as an ``AbstractComponent`` brick (Stage B).
+"""Wrap a live surface model's step as a ``StepComponent`` brick (Stage B).
 
-The atmosphere/ocean *dynamical cores* expose an explicit right-hand side
+The atmosphere / 3-D ocean *dynamical cores* expose an explicit right-hand side
 (``tendencies(state)``) and migrate onto :class:`AbstractComponent` through the
 :mod:`~legoesm.components.dycore_component` wrappers.  The *surface tiles*
 (slab / multilayer land, slab / dynamic sea ice, slab ocean) are different: they
 advance by an **implicit step** — the per-column surface energy balance is solved
-(D3) — returning ``(new_state, TileResponse)`` rather than an explicit continuous
-tendency.  :class:`SurfaceComponentAdapter` migrates those live surface steps onto
-the component seam WITHOUT rewriting the physics: it wraps the existing step
-(same numerics, same ``jax.grad`` path), declares the brick metadata, and exposes
-a uniform :meth:`step`.
+(D3) — returning ``(new_state, response)`` rather than an explicit continuous
+tendency.  They therefore migrate onto :class:`StepComponent` (the implicit-step
+sibling of ``AbstractComponent``), NOT a faked ``tendency``.
 
-Because a surface update is an implicit *step*, the explicit-RHS
-:meth:`tendency` seam (used by dycores) is not applicable and raises with a
-pointer to :meth:`step` — the coupler advances a surface brick by stepping it.
+:class:`SurfaceComponentAdapter` migrates those live surface steps onto the
+component seam WITHOUT rewriting the physics: it wraps the existing step (same
+numerics, same ``jax.grad`` path), declares the brick metadata, and exposes the
+uniform ``step(grid, state, forcing, dt)``.
+
+**Static wrapper (not a pytree).**  Like the other component bricks this is a plain
+Python wrapper, not an Equinox/pytree module: the wrapped ``step_fn`` (and any
+config it closes over) is a static attribute.  ``dt`` is an explicit ``step``
+argument — NOT closed over — so a variable timestep flows through the seam without
+rebuilding the wrapper or risking a stale captured ``dt``.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
-from legoesm.components.protocol import AbstractComponent
+from legoesm.components.protocol import StepComponent
 
 
-class SurfaceComponentAdapter(AbstractComponent):
-    """An :class:`AbstractComponent` over a live surface model's implicit step.
+class SurfaceComponentAdapter(StepComponent):
+    """A :class:`StepComponent` over a live surface model's implicit step.
 
     Parameters
     ----------
     step_fn
-        The surface step as a pure ``callable(grid, state, forcing) -> (new_state,
-        response)`` with its static config / ``dt`` bound by the caller — mirroring
-        the coupler's per-tile closures (``_step_land_tile`` etc.).  Must be
-        ``jax.grad``-compatible (D1).
+        The surface step as a pure ``callable(grid, state, forcing, dt) ->
+        (new_state, response)`` with its static config bound by the caller —
+        mirroring the coupler's per-tile closures (``_step_land_tile`` etc.).  Must
+        be ``jax.grad``-compatible (D1).
     prognostic_variables
         Names of the surface state fields this tile evolves.
     required_forcing
-        Names of the forcing it needs from the atmosphere (e.g. ``"atm_forcing"``
-        for the :class:`AtmToSurface` bundle, plus partner inputs like
-        ``"ocean_state"`` for sea ice).
+        Names of the forcing it needs (e.g. ``"atm_forcing"`` for the
+        :class:`AtmToSurface` bundle, plus partner inputs like ``"ocean_state"`` for
+        sea ice).
     provided_fluxes
-        Names of the :class:`~legoesm.core.coupling_fields.TileResponse` channels it
-        hands back to the atmosphere (``shflx``, ``lhflx``, ``lw_up``, ...).
+        Names of what it hands to its partners.  For land/ice these are
+        :class:`~legoesm.core.coupling_fields.TileResponse` channels (``shflx``,
+        ``lhflx``, ``lw_up``, ...); for the ocean *model* they are the surface fields
+        the coupler turns into atmospheric fluxes (``sst``, ``u_ocean_sfc``,
+        ``v_ocean_sfc``).  Validated against the ``response`` on each :meth:`step`
+        (present as attributes for a ``NamedTuple`` response, or keys for a mapping).
     """
 
     def __init__(
         self,
-        step_fn: Callable[[Any, Any, Any], Any],
+        step_fn: Callable[[Any, Any, Any, Any], Any],
         *,
         prognostic_variables: tuple[str, ...],
         required_forcing: tuple[str, ...],
@@ -56,7 +65,7 @@ class SurfaceComponentAdapter(AbstractComponent):
         if not callable(step_fn):
             raise TypeError(
                 f"SurfaceComponentAdapter needs a callable step_fn(grid, state, "
-                f"forcing) -> (new_state, response); got {step_fn!r}"
+                f"forcing, dt) -> (new_state, response); got {step_fn!r}"
             )
         self._step_fn = step_fn
         self._prognostic_variables = tuple(prognostic_variables)
@@ -75,26 +84,27 @@ class SurfaceComponentAdapter(AbstractComponent):
     def provided_fluxes(self) -> tuple[str, ...]:
         return self._provided_fluxes
 
-    def step(self, grid: Any, state: Any, forcing: Any) -> Any:
-        """Advance the surface state one implicit step.
+    def _check_response(self, response: Any) -> None:
+        """Verify the wrapped step actually hands back every declared flux."""
+        if isinstance(response, Mapping):
+            present = set(response.keys())
+        else:
+            present = {f for f in self._provided_fluxes if hasattr(response, f)}
+        missing = set(self._provided_fluxes) - present
+        if missing:
+            raise ValueError(
+                f"SurfaceComponentAdapter declares provided_fluxes "
+                f"{self._provided_fluxes} but the step response is missing "
+                f"{sorted(missing)} ({type(response).__name__})"
+            )
 
-        Returns ``(new_state, response)`` from the wrapped surface model — pure, so
-        ``jax.grad`` flows through the step (D1); the ``response`` is the
-        :class:`~legoesm.core.coupling_fields.TileResponse` of fluxes back to the
-        atmosphere.
+    def step(self, grid: Any, state: Any, forcing: Any, dt: Any) -> Any:
+        """Advance the surface state one implicit step -> ``(new_state, response)``.
+
+        Pure, so ``jax.grad`` flows through the step (D1); ``response`` carries the
+        fluxes/fields the brick hands its partners (validated against
+        :attr:`provided_fluxes`).
         """
-        return self._step_fn(grid, state, forcing)
-
-    def tendency(self, grid: Any, state: Any, forcing: Any, params: Any) -> Any:
-        """Not applicable — a surface tile advances by an implicit :meth:`step`.
-
-        The surface energy balance is solved implicitly (D3), so the component has no
-        explicit continuous tendency; advance it via ``step(grid, state, forcing)``.
-        ``AbstractComponent.tendency`` is the explicit-RHS seam used by dycores.
-        """
-        raise NotImplementedError(
-            "SurfaceComponentAdapter wraps an implicitly-STEPPED surface model "
-            "(surface energy balance, D3); advance it via step(grid, state, "
-            "forcing), not tendency().  The tendency seam is for explicit-RHS "
-            "components such as dynamical cores."
-        )
+        new_state, response = self._step_fn(grid, state, forcing, dt)
+        self._check_response(response)
+        return new_state, response

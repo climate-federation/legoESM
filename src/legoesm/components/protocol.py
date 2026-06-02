@@ -109,14 +109,15 @@ class SurfaceComponentProtocol(Protocol):
         ...
 
 
-class AbstractComponent(ABC):
-    """An interchangeable Earth-system 'lego' brick (design L4).
+class _ComponentBase(ABC):
+    """Shared metadata of an interchangeable Earth-system 'lego' brick (design L4).
 
     A component declares what it needs (``required_forcing``), what it evolves
     (``prognostic_variables``), and what it hands back to its partners
-    (``provided_fluxes``), and computes a pure ``tendency``.  **Hard rule:** every
-    component must run standalone on a single-column grid — its cheapest
-    gradient-check harness — with partners supplied by ``Prescribed*`` bricks.
+    (``provided_fluxes``).  Two update flavours subclass this base — explicit-RHS
+    :class:`AbstractComponent` (computes a ``tendency``) and implicitly-stepped
+    :class:`StepComponent` (advances via ``step``) — so a brick is never forced to
+    fake the seam it does not have.
     """
 
     @property
@@ -137,7 +138,39 @@ class AbstractComponent(ABC):
         """Names of the fluxes this component provides back to its partners."""
         ...
 
+
+class AbstractComponent(_ComponentBase):
+    """An explicit-RHS Earth-system 'lego' brick (design L4).
+
+    Computes a pure ``tendency`` (``dstate = f(...)``) — the dynamical cores
+    (atmosphere / 3-D ocean).  **Hard rule:** every component must run standalone on
+    a single-column grid — its cheapest gradient-check harness — with partners
+    supplied by ``Prescribed*`` bricks.  Implicitly-stepped components (surface
+    tiles whose energy balance is solved per column) use :class:`StepComponent`
+    instead, so they never fake a ``tendency``.
+    """
+
     @abstractmethod
     def tendency(self, grid: Any, state: Any, forcing: Any, params: Any) -> Any:
         """Pure ``dstate = f(grid, state, forcing, params)`` (D1)."""
+        ...
+
+
+class StepComponent(_ComponentBase):
+    """An implicitly-stepped Earth-system 'lego' brick (design L4).
+
+    The surface tiles (slab / multilayer land, slab / dynamic sea ice, slab ocean)
+    advance by an **implicit step** — the per-column surface energy balance is solved
+    (D3) — returning ``(new_state, response)``, not an explicit continuous tendency.
+    A ``StepComponent`` exposes that as ``step(grid, state, forcing, dt)`` and carries
+    the SAME metadata as :class:`AbstractComponent`, so the two are interchangeable
+    bricks that differ only in their update seam (no faked ``tendency``).
+    """
+
+    @abstractmethod
+    def step(self, grid: Any, state: Any, forcing: Any, dt: Any) -> Any:
+        """Advance one step: ``(new_state, response) = step(grid, state, forcing, dt)``.
+
+        Pure (D1); the per-column surface energy balance is solved implicitly (D3).
+        """
         ...
