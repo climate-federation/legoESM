@@ -103,6 +103,71 @@ def preset_slab_simple(**overrides) -> CoupledConfig:
     return CoupledConfig(**defaults)
 
 
+#: CoupledConfig.ocean_mode is a coarse, decorative *log label* (only logged by
+#: the coupled driver, never dispatched — the real ocean is make_ocean(ocean_config)).
+#: Map each simple-ocean mode onto the field's documented domain {slab, two_layer}.
+_OCEAN_MODE_LABEL = {"fixed": "slab", "slab": "slab", "two_layer": "two_layer"}
+
+
+def preset_complexity(level, **overrides) -> CoupledConfig:
+    """Build a ``CoupledConfig`` from a model-wide ``ModelComplexity`` level.
+
+    The model-wide complexity dial reaching the coupled driver: a user writes
+    ``preset_complexity("idealized")`` instead of hand-assembling
+    ``ocean_config`` + ``land_mode`` + ``land_config``.  Maps the level's ocean
+    and land rungs (``components.model_complexity_rungs``) onto the coupled
+    config:
+
+    ===============  =================================  =========================
+    level            ocean                              land
+    ===============  =================================  =========================
+    ``idealized``    fixed-SST slab                     slab bucket
+    ``intermediate`` slab mixed layer                   multi-layer Richards column
+    ===============  =================================  =========================
+
+    Scoped to the simple-ocean levels: the coupled driver's ocean is ALWAYS the
+    simple ocean (``_init_ocean`` calls ``make_ocean(ocean_config)``;
+    ``CoupledConfig.ocean_config`` is a ``SimpleOceanConfig``), so ``full`` (a
+    prognostic 3-D ``OceanModel``) is NOT representable here and raises — build a
+    full-3-D ocean run via ``driver.component_factory.resolve_model_complexity``
+    + the ocean component factory instead.  ``overrides`` are applied last (e.g.
+    ``carbon_active=True``, ``f_land_mode=``).
+    """
+    from legoesm.components import (
+        LandComplexity,
+        ModelComplexity,
+        OceanComplexity,
+        model_complexity_rungs,
+        ocean_simple_mode,
+    )
+
+    rungs = model_complexity_rungs(level)
+    if rungs.ocean is OceanComplexity.FULL_3D:
+        raise ValueError(
+            f"{ModelComplexity(level)!s} complexity has a full-3D ocean that is not "
+            "representable in CoupledConfig (which holds a SimpleOceanConfig; the "
+            "coupled driver's ocean is always make_ocean).  Build a full-3D ocean "
+            "run via driver.component_factory.resolve_model_complexity + the ocean "
+            "component factory instead."
+        )
+
+    ocean_mode = ocean_simple_mode(rungs.ocean)  # "fixed" | "slab" | "two_layer"
+    ocean_config = SimpleOceanConfig(mode=ocean_mode)
+    if rungs.land is LandComplexity.MULTILAYER:
+        land_mode, land_config = "multilayer", MultiLayerLandConfig()
+    else:
+        land_mode, land_config = "slab", LandConfig()
+
+    defaults = dict(
+        ocean_mode=_OCEAN_MODE_LABEL[ocean_mode],
+        ocean_config=ocean_config,
+        land_mode=land_mode,
+        land_config=land_config,
+    )
+    defaults.update(overrides)
+    return CoupledConfig(**defaults)
+
+
 def preset_slab_pft(**overrides) -> CoupledConfig:
     """Slab ocean + slab land with PFT-weighted parameters."""
     defaults = dict(
