@@ -30,7 +30,7 @@ and ``1.18e-3`` for stable -- a single-coefficient approximation
 of the original Eq. 25 / 26 that is good to ~10 % in typical
 mid-latitude conditions.
 
-The implementation reuses :func:`legoesm.coupler.bulk_flux.simple_bulk_fluxes`
+The implementation reuses :func:`legoesm.core.bulk_flux.simple_bulk_fluxes`
 for the actual flux assembly so the unit-test surface stays the same
 as the atmosphere-coupled path.
 """
@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from legoesm.coupler import bulk_flux as _bulk
+from legoesm.core import bulk_flux as _bulk
 from legoesm import constants
 
 

@@ -29,7 +29,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio_ice
-from legoesm.coupler.bulk_flux import (
+from legoesm.core.bulk_flux import (
     simple_bulk_fluxes,
     compute_most_fluxes,
     validate_bulk_scheme,
@@ -54,7 +54,7 @@ from legoesm.ice.brine import update_salinity_and_salt_flux, PSU_TO_KG_PER_KG
 from legoesm.ice.ridging import apply_ridging
 from legoesm.ice.shortwave import compute_ice_sw
 from legoesm.ice.ponds import step_ponds
-from legoesm.coupler.surface_energy import surface_radiation_fluxes
+from legoesm.core.surface_energy import surface_radiation_fluxes
 from legoesm.ice.config import SeaIceConfig
 from legoesm.ice.state import (
     SeaIceState,

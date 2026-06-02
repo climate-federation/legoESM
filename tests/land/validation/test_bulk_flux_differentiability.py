@@ -8,7 +8,7 @@ Verifies that jax.grad works through the Obukhov length iteration
 import jax
 import jax.numpy as jnp
 
-from legoesm.coupler.bulk_flux import compute_most_fluxes, psi_m, psi_h
+from legoesm.core.bulk_flux import compute_most_fluxes, psi_m, psi_h
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ RCEMIP-style radiative-convective equilibrium on the plane
 non-hydrostatic dycore (PR2b-PR3d) wired with the same factory
 dispatch the cubed-sphere / MPAS NH harnesses use:
 
-- Bulk surface fluxes via :func:`legoesm.coupler.bulk_flux.simple_bulk_fluxes`
+- Bulk surface fluxes via :func:`legoesm.core.bulk_flux.simple_bulk_fluxes`
 - Radiation via :func:`legoesm.atmosphere.physics.radiation.integration.make_radiation_physics`
   with ``model_type="plane"`` (selects gray or RRTMGP from the
   RadiationConfig scheme literal)
@@ -143,7 +143,7 @@ def _make_surface_flux_physics(
     model level (``k = nlev - 1`` under top-down indexing).
 
     Uses the faithful SAM bulk scheme
-    :func:`legoesm.coupler.bulk_flux.compute_sam_oceflx_fluxes`
+    :func:`legoesm.core.bulk_flux.compute_sam_oceflx_fluxes`
     (iterative Monin–Obukhov, SAM Stanton/Dalton/cdn coefficients) with
     the SAM ocean surface humidity ``q_sfc = 0.981·qsat(SST)``
     (:func:`sam_ocean_surface_q`) — replacing the previous fixed-Cd/Ch
@@ -152,7 +152,7 @@ def _make_surface_flux_physics(
     the WISHE feedback). Gust ``wd = 0`` reproduces SAM's
     ``vmag = max(1, |U|)`` (NOT the Wing-2018 5 m/s gust floor — SF-3).
     """
-    from legoesm.coupler.bulk_flux import (
+    from legoesm.core.bulk_flux import (
         compute_sam_oceflx_fluxes, sam_ocean_surface_q,
     )
 

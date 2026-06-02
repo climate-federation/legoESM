@@ -187,7 +187,7 @@ class TestTaylorIce:
 class TestTaylorCoupler:
 
     def test_coare3(self):
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
+        from legoesm.core.bulk_flux import compute_most_fluxes
 
         ncol = 32
         T_sfc = 300.0 * jnp.ones(ncol)

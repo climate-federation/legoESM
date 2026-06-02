@@ -133,7 +133,7 @@ def _make_cubed_sphere_surface_flux_tendency(
     heat+moisture only).
     """
     from legoesm import constants as legoesm_constants
-    from legoesm.coupler.bulk_flux import simple_bulk_fluxes
+    from legoesm.core.bulk_flux import simple_bulk_fluxes
     from legoesm.core.state import NonHydrostaticTendencies
 
     def physics_fn(state, grid_in, hc_in, tm_in):
@@ -223,7 +223,7 @@ def _make_mpas_surface_flux_tendency(
     column energy budget for MPAS.
     """
     from legoesm import constants as legoesm_constants
-    from legoesm.coupler.bulk_flux import simple_bulk_fluxes
+    from legoesm.core.bulk_flux import simple_bulk_fluxes
     from legoesm.core.state import MPASNonHydrostaticTendencies
 
     def physics_fn(state, mesh_in, hc_in, tm_in):

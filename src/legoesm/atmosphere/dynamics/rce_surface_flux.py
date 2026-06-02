@@ -13,7 +13,7 @@ All three share the convention that ``state.theta_prime`` and
 ``state.tracers`` carries ``(..., nlev, n_tracers)`` — so the surface
 slab extraction ``arr[..., k_sfc=-1]`` is identical across layouts.
 
-Bulk formulas reused from :mod:`legoesm.coupler.bulk_flux`
+Bulk formulas reused from :mod:`legoesm.core.bulk_flux`
 (``simple_bulk_fluxes``) — no re-derivation.
 
 Scope
@@ -34,7 +34,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.coupler.bulk_flux import simple_bulk_fluxes
+from legoesm.core.bulk_flux import simple_bulk_fluxes
 
 
 def _validate_nh_state_shape(state, height_coord) -> None:

@@ -28,7 +28,7 @@ import numpy as np
 import pytest
 
 from legoesm import constants
-from legoesm.coupler.bulk_flux import compute_most_fluxes
+from legoesm.core.bulk_flux import compute_most_fluxes
 from legoesm.coupler.config import CouplerConfig
 from legoesm.coupler.coupler import _Q_SAT_SALINE_FACTOR, ocean_tile_response
 from legoesm.core.coupling_fields import AtmToSurface

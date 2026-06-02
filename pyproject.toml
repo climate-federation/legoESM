@@ -203,22 +203,12 @@ forbidden_modules = [
 ]
 unmatched_ignore_imports_alerting = "error"
 ignore_imports = [
-    # NOTE: the shared coupling pytrees (AtmToSurface/TileResponse/SurfaceToAtm)
-    # have been MOVED to legoesm.core.coupling_fields, so the former
-    # land/ice/ocean -> coupler.coupling_fields edges are gone (components now
-    # import them from core, which is allowed) and their ignore entries removed.
-    # Shared surface-flux formulas / energy -> move to a shared surface module.
-    "legoesm.atmosphere.dynamics.rce_surface_flux -> legoesm.coupler.bulk_flux",
-    "legoesm.atmosphere.physics.turbulence.surface_layer -> legoesm.coupler.bulk_flux",
-    "legoesm.ocean.bulk_flux_omip -> legoesm.coupler.bulk_flux",
-    "legoesm.ocean.physics.surface_forcing.bulk_formulas -> legoesm.coupler.bulk_flux",
-    "legoesm.land.slab_land -> legoesm.coupler.bulk_flux",
-    "legoesm.land.multilayer_land -> legoesm.coupler.bulk_flux",
-    "legoesm.ice.sea_ice -> legoesm.coupler.bulk_flux",
-    "legoesm.land.slab_land -> legoesm.coupler.surface_energy",
-    "legoesm.land.multilayer_land -> legoesm.coupler.surface_energy",
-    "legoesm.ice.sea_ice -> legoesm.coupler.surface_energy",
-    # Shared physics-output type + column adapter -> move to core.
+    # NOTE: the shared coupling pytrees (coupling_fields) AND the shared
+    # surface-flux / surface-energy formulas (bulk_flux, surface_energy) have been
+    # MOVED to legoesm.core, so ALL former component -> coupler edges are gone
+    # (components now import them from core, which is allowed) and their ignore
+    # entries removed.  The components->COUPLER boundary is now ZERO-ignore.
+    # Remaining: shared physics-output type + column adapter -> move to core.
     "legoesm.atmosphere.physics.neural_physics -> legoesm.driver.physics_pipeline",
     "legoesm.atmosphere.physics.neural_physics -> legoesm.driver.grid_adapters",
 ]

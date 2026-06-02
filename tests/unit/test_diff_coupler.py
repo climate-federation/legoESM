@@ -32,7 +32,7 @@ class TestBulkFluxGrad:
     @pytest.mark.parametrize("scheme", ["coare3", "large_yeager"])
     @pytest.mark.parametrize("n_iter", [1, 5])
     def test_grad_wrt_T_sfc(self, scheme, n_iter):
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
+        from legoesm.core.bulk_flux import compute_most_fluxes
 
         ncol = 32
         T_sfc = 300.0 * jnp.ones(ncol)
@@ -295,7 +295,7 @@ class TestCrossComponentAtmOcean:
 
     def test_grad_T_atm_to_shflx(self):
         """Gradient of sensible heat flux w.r.t. atmospheric temperature."""
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
+        from legoesm.core.bulk_flux import compute_most_fluxes
 
         ncol = 32
         sst = 295.0 * jnp.ones(ncol)

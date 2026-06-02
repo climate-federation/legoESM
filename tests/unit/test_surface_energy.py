@@ -1,4 +1,4 @@
-"""Unit tests for legoesm.coupler.surface_energy (UNTESTED-LIVE).
+"""Unit tests for legoesm.core.surface_energy (UNTESTED-LIVE).
 
 Exercises every public function directly, covering output shapes/dtypes,
 Stefan-Boltzmann magnitudes, sign conventions, albedo limits, and
@@ -18,7 +18,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.coupler.surface_energy import surface_radiation_fluxes
+from legoesm.core.surface_energy import surface_radiation_fluxes
 
 
 # ---------------------------------------------------------------------------

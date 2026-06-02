@@ -141,7 +141,7 @@ class TestAtmCouplerLand:
 class TestSSTToFlux:
 
     def test_grad_sst_to_shflx(self):
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
+        from legoesm.core.bulk_flux import compute_most_fluxes
 
         ncol = 32
         T_atm = 290.0 * jnp.ones(ncol)  # cooler air than SST

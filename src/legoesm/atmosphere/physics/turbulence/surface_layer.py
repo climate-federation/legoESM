@@ -18,7 +18,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.atmosphere.physics.turbulence.config import SurfaceLayerConfig
-from legoesm.coupler.bulk_flux import compute_most_fluxes, validate_bulk_scheme
+from legoesm.core.bulk_flux import compute_most_fluxes, validate_bulk_scheme
 
 
 def compute_surface_fluxes(

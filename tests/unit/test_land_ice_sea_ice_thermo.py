@@ -235,8 +235,8 @@ class Test8l_ThinIceStiffStability:
         input (Q_sfc + conductive) over dt, to within a tight tolerance.
         """
         from legoesm import constants
-        from legoesm.coupler.surface_energy import surface_radiation_fluxes
-        from legoesm.coupler.bulk_flux import simple_bulk_fluxes
+        from legoesm.core.surface_energy import surface_radiation_fluxes
+        from legoesm.core.bulk_flux import simple_bulk_fluxes
         from legoesm.thermo import saturation_mixing_ratio_ice
 
         h0, T0, a0 = 0.05, 272.5, 1.0   # thin ice, near melt

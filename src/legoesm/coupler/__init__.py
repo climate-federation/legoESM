@@ -14,8 +14,8 @@ from legoesm.coupler.accumulator import (
 from legoesm.coupler.surface_exchange import (
     extract_atm_to_surface, extract_atm_to_surface_nh,
 )
-from legoesm.coupler.bulk_flux import compute_most_fluxes, simple_bulk_fluxes, psi_m, psi_h
-from legoesm.coupler.surface_energy import surface_radiation_fluxes
+from legoesm.core.bulk_flux import compute_most_fluxes, simple_bulk_fluxes, psi_m, psi_h
+from legoesm.core.surface_energy import surface_radiation_fluxes
 from legoesm.coupler.lake import LakeConfig, LakeState, step_lake
 
 
