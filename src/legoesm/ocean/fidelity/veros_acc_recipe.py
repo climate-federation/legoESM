@@ -585,6 +585,16 @@ def build_acc_model_config(grid: LatLonGrid | None = None, *,
         A_h=acc_A_h(VEROS_CONSTANTS_CONFIG.R_earth),
         A_h_lat_scaling=True,
         A_h_cos_power=1,
+        # Veros ACC lateral viscosity is the component-wise FLUX-DIVERGENCE harmonic
+        # friction ∇·(A_h∇u) (core/friction.py harmonic_friction), with the cos(lat)
+        # A_h scaling applied inside the flux (enable_hor_friction_cos_scaling,
+        # hor_friction_cosPower) — NOT legoESM's default vector Laplacian
+        # grad(div)−k×grad(curl) (which carries curvature coupling between u,v that
+        # the component-wise form omits). Select flux_divergence for apples-to-apples
+        # (doctrine rule H). The paired K_diss_h EKE source automatically follows
+        # (the energy-consistent component-wise A_h|∇u|² = Veros calc_diss_u/v),
+        # since kdiss_h_flux_form=True is also set on the EKE config below.
+        lateral_viscosity_operator="flux_divergence",
         # Veros ACC momentum advection is flux-form (core/momentum.py), centered
         # 2nd-order — so the recipe selects flux_form/centered for true
         # apples-to-apples (doctrine rule H). Validated: vs the developed-flow

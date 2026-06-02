@@ -64,8 +64,15 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
 # ---------------------------------------------------------------------------
 
 
-def _acc_recipe_and_model():
+def _acc_recipe_and_model(*, lateral_viscosity_operator=None):
     recipe = build_acc_recipe(with_surface_forcing=True)
+    if lateral_viscosity_operator is not None:
+        # Some tests pin the lateral-viscosity OPERATOR (the ACC recipe defaults to
+        # "flux_divergence"; the #41 vector-Laplacian energy-consistency tests pin
+        # "vector_laplacian"). Override on the model config + rebuild the model.
+        cfg = recipe.model_config._replace(
+            lateral_viscosity_operator=lateral_viscosity_operator)
+        recipe = recipe._replace(model_config=cfg)
     model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, recipe.model_config)
     return recipe, model
 
@@ -207,8 +214,16 @@ def test_kdiss_h_flux_form_energy_consistent_beats_dynamical_overcredit():
     """The flux-form domain-integrated dissipation equals the ACTUAL mean KE removed
     by the vector-Laplacian ``A_h`` (the UNCLAMPED ``-u·A_h∇²u`` total) to ~1%,
     whereas the dynamical CLAMPED form over-credits it by >5%.  This is the core
-    energy-consistency win (the clamp distortion the flux form removes)."""
-    recipe, model = _acc_recipe_and_model()
+    energy-consistency win (the clamp distortion the flux form removes).
+
+    Pins ``lateral_viscosity_operator='vector_laplacian'`` because this test verifies
+    the VECTOR-Laplacian Helmholtz dissipation (``vector_laplacian_dissipation_cgrid``,
+    #41) — the ``A_h·(div²+ζ²)`` energy-match to ``-u·∇²_vec u``.  The ACC recipe now
+    defaults to ``flux_divergence`` (Veros harmonic friction), whose component-wise
+    dissipation ``A_h·|∇u|²`` differs from ``-u·∇·(A_h∇u)`` by the spherical curvature
+    term (~10-15% on the sphere — see ``test_flux_divergence_viscosity.py``), so the
+    two operators' energy-consistency are tested separately."""
+    recipe, model = _acc_recipe_and_model(lateral_viscosity_operator="vector_laplacian")
     state = _developed_state(recipe, model)
     grid = recipe.grid
     mask = state.land_mask.data

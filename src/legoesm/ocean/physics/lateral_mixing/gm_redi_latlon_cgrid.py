@@ -1014,19 +1014,24 @@ def harmonic_lateral_kediss_eke_source(
     TWO config-selectable discretisations (``EKEConfig.kdiss_h_flux_form``):
 
     **Flux form (FAITHFUL, positive-definite; ``kdiss_h_flux_form=True``, ACC recipe).**
-    ``kdiss_h_cell`` is the pre-computed cell-centre dissipation density
-    ``A_h·(div² + <ζ²>)`` [m²/s³] from
-    :func:`...latlon_cgrid_operators.vector_laplacian_dissipation_cgrid` — the
-    Helmholtz KE-removal of legoESM's VECTOR-Laplacian viscosity
-    (``-∫u·∇²_vec u = ∫(div²+|ζ|²) ≥ 0``).  This branch only averages that density
-    to the ``nlev-1`` interior interfaces (the SAME W-grid mapping Veros's
-    ``dissipation_on_wgrid`` uses for the interior).  It is ``≥ 0`` EVERYWHERE by
-    construction so NO clamp is applied, and (probe-verified on the spun-up ACC
-    state) its domain integral equals the mean KE actually removed by ``A_h`` to
-    0.3% and matches Veros's captured ``K_diss_h`` to ~7%.  This is legoESM's
-    analogue of Veros's positive-definite flux form ``A_h|∇u|²`` (``0.5·Σ Δu·flux``);
-    the squared div/curl replaces the squared one-sided gradients because legoESM's
-    viscosity is the vector Laplacian, not the componentwise scalar Laplacian.
+    ``kdiss_h_cell`` is the pre-computed cell-centre positive-definite dissipation
+    density [m²/s³], MATCHED to the selected lateral-viscosity operator (each is the
+    exact KE-removal of its own operator, so it pairs with whichever viscosity the
+    config selects):
+      * VECTOR Laplacian → ``A_h·(div² + <ζ²>)`` — the Helmholtz KE-removal
+        ``-∫u·∇²_vec u = ∫(div²+|ζ|²) ≥ 0`` — from
+        :func:`...latlon_cgrid_operators.vector_laplacian_dissipation_cgrid`.
+      * FLUX-DIVERGENCE → the componentwise ``A_h·|∇u|² = 0.5·Σ(Δu·flux)``
+        (Veros ``calc_diss_u/v``) from
+        :func:`...latlon_cgrid_operators.flux_divergence_viscosity_cgrid`.
+    This branch only averages that density to the ``nlev-1`` interior interfaces (the
+    SAME W-grid mapping Veros's ``dissipation_on_wgrid`` uses for the interior).  It is
+    ``≥ 0`` EVERYWHERE by construction so NO clamp is applied, and (probe-verified on
+    the spun-up ACC state) its domain integral equals the mean KE actually removed by
+    ``A_h`` to ~0.3% and matches Veros's captured ``K_diss_h`` to ~7%.  (The
+    flux-divergence operator IS Veros's componentwise form exactly; the vector-Laplacian
+    form replaces the squared one-sided gradients with squared div/curl because that
+    operator carries the metric/curvature coupling the componentwise form omits.)
 
     **Dynamical form (DEFAULT, ``kdiss_h_flux_form=False``; ``kdiss_h_cell=None``).**
     Uses the KE-tendency ``-u·(A_h∇²_vec u) - v·(A_h∇²_vec v)`` from the supplied
@@ -1055,19 +1060,21 @@ def harmonic_lateral_kediss_eke_source(
         for signature parity with the other EKE source builders).
     mask : (n_lat, n_lon) — ocean mask (1 = ocean).
     kdiss_h_cell : (n_lat, n_lon, nlev) — OPTIONAL pre-computed positive-definite
-        cell-centre dissipation density ``A_h·(div²+<ζ²>)`` [m²/s³].  When provided
-        (the flux-form path), it is mapped to the W-grid with NO clamp; ``visc_*``,
-        ``u``, ``v`` are then unused.  ``None`` (default) selects the dynamical form.
+        cell-centre dissipation density [m²/s³], matched to the lateral-viscosity
+        operator (``A_h(div²+<ζ²>)`` vector Laplacian / ``A_h|∇u|²`` flux-divergence).
+        When provided (the flux-form path), it is mapped to the W-grid with NO clamp;
+        ``visc_*``, ``u``, ``v`` are then unused.  ``None`` (default) = dynamical form.
 
     Returns
     -------
     K_diss_h : (n_lat, n_lon, nlev-1) — non-negative EKE source [m²/s³] at interfaces.
     """
     if kdiss_h_cell is not None:
-        # FAITHFUL FLUX FORM: kdiss_h_cell is already the positive-definite
-        # per-cell dissipation density A_h·(div²+<ζ²>) ≥ 0 (built by
-        # vector_laplacian_dissipation_cgrid from the SAME velocities / A_h scaling
-        # the applied viscous tendency uses).  Average the full-level (nlev) cell
+        # FAITHFUL FLUX FORM: kdiss_h_cell is already the positive-definite per-cell
+        # dissipation density ≥ 0 matched to the operator (A_h·(div²+<ζ²>) from
+        # vector_laplacian_dissipation_cgrid, or A_h·|∇u|² from
+        # flux_divergence_viscosity_cgrid) — built from the SAME velocities / A_h
+        # scaling the applied viscous tendency uses.  Average the full-level (nlev) cell
         # density to the nlev-1 interior interfaces — the same interior W-grid
         # mapping Veros's dissipation_on_wgrid uses (0.5·(c[:-1]+c[1:])).  No clamp:
         # the density is ≥ 0 everywhere by construction, so the W-grid average is too.

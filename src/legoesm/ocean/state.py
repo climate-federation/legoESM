@@ -880,3 +880,23 @@ class LatLonCGridOceanConfig(NamedTuple):
     # vector_invariant / weno momentum paths. Literal default -> safe after
     # `constants`.
     momentum_flux_scheme: str = "upwind"
+    # Lateral (harmonic) momentum-viscosity OPERATOR form. Selects how the A_h
+    # Laplacian viscosity acts on the vector velocity field:
+    #   "vector_laplacian" (default) — legoESM's VECTOR Laplacian
+    #     ∇²_vec(u,v) = grad(div) − k×grad(curl) (``vector_laplacian_cgrid``),
+    #     which carries the spherical curvature coupling between u and v. The
+    #     paired K_diss_h (when source_kdiss_h+kdiss_h_flux_form) is the Helmholtz
+    #     form A_h·(div²+ζ²) (``vector_laplacian_dissipation_cgrid``). DEFAULT ⇒
+    #     every existing run is BIT-IDENTICAL.
+    #   "flux_divergence" — Veros's component-wise FLUX-DIVERGENCE harmonic
+    #     friction ∇·(A_h∇u), ∇·(A_h∇v) per velocity component, with NO
+    #     curvature coupling (``flux_divergence_viscosity_cgrid``; matches
+    #     ``veros/core/friction.py`` ``harmonic_friction``). The same cos(lat)
+    #     A_h scaling (``A_h_lat_scaling``/``A_h_cos_power``) is applied INSIDE the
+    #     flux as Veros's ``enable_hor_friction_cos_scaling``/``hor_friction_cosPower``.
+    #     The paired K_diss_h is the energy-consistent component-wise A_h·|∇u|²
+    #     (Veros ``calc_diss_u``/``calc_diss_v``), built from the SAME face fluxes.
+    #     B_h biharmonic / Smagorinsky / Leith are unaffected (they still use the
+    #     vector operators). The ACC recipe opts in. Literal default -> safe after
+    #     `constants`.
+    lateral_viscosity_operator: str = "vector_laplacian"

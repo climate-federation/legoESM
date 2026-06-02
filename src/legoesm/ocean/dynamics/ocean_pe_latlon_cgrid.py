@@ -71,6 +71,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     vector_bilaplacian_cgrid,
     vector_laplacian_cgrid,
     vector_laplacian_dissipation_cgrid,
+    flux_divergence_viscosity_cgrid,
     interp_cell_to_uface,
     is_tripolar,
     min_cell_to_uface,
@@ -117,6 +118,11 @@ VALID_MOMENTUM_ADVECTION = frozenset(
 # Reconstruction schemes for the advected velocity in the flux-form path
 # (config.momentum_flux_scheme; only used when momentum_advection="flux_form").
 VALID_MOMENTUM_FLUX_SCHEME = frozenset({"upwind", "centered"})
+# Lateral (harmonic) momentum-viscosity operator form (config.lateral_viscosity_operator):
+# the default VECTOR Laplacian grad(div)−k×grad(curl), or Veros's component-wise
+# FLUX-DIVERGENCE harmonic friction ∇·(A_h∇u). Validated at config construction;
+# unknown -> ValueError (dispatch discipline).
+VALID_LATERAL_VISCOSITY_OPERATOR = frozenset({"vector_laplacian", "flux_divergence"})
 
 
 def _interp_to_v_points(f: jnp.ndarray, grid=None) -> jnp.ndarray:
@@ -1503,7 +1509,62 @@ def _bc_horizontal_viscosity(
         # No-op when slope_foot_alpha = 0 (factors are 1.0 scalars).
         return t_u * _slope_E_u, t_v * _slope_E_v
 
-    if config.A_h > 0 and config.B_h > 0:
+    # Lateral A_h-viscosity OPERATOR dispatch (dispatch discipline: unknown ->
+    # ValueError). "flux_divergence" = Veros's component-wise harmonic friction
+    # ∇·(A_h∇u); "vector_laplacian" (default) = the grad(div)−k×grad(curl) form
+    # below (bit-identical to the historical path).
+    _visc_op = getattr(config, "lateral_viscosity_operator", "vector_laplacian")
+    if _visc_op not in ("vector_laplacian", "flux_divergence"):
+        raise ValueError(
+            "lateral_viscosity_operator must be 'vector_laplacian' or "
+            f"'flux_divergence', got {_visc_op!r}"
+        )
+    _use_flux_div = _visc_op == "flux_divergence"
+    _kdiss_fluxdiv_cell = None  # set by the flux-div A_h branch when _want_kdiss_flux
+
+    if _use_flux_div and config.A_h > 0:
+        # Veros component-wise harmonic friction (``flux_divergence_viscosity_cgrid``)
+        # applies the cos(lat) A_h scaling INSIDE the flux (Veros
+        # ``enable_hor_friction_cos_scaling`` / ``hor_friction_cosPower``).  The
+        # legoESM-specific A_h boosts (eq / polar-cap) and the A_h_floor are NOT part
+        # of Veros's harmonic friction, so reject those combinations rather than
+        # silently ignoring them (they would change answers without effect here).
+        if config.A_h_eq_boost > 1.0 or config.A_h_cap_boost > 1.0 or config.A_h_floor > 0.0:
+            raise ValueError(
+                "lateral_viscosity_operator='flux_divergence' (Veros harmonic "
+                "friction) does not support A_h_eq_boost / A_h_cap_boost / A_h_floor "
+                "(those are legoESM vector-Laplacian extensions, not part of Veros's "
+                "operator). Set them to their defaults, or use "
+                "lateral_viscosity_operator='vector_laplacian'."
+            )
+        _cos_p = config.A_h_cos_power if config.A_h_lat_scaling else 0
+        diag_Ah_lap_u, diag_Ah_lap_v, _kdiss_fluxdiv_cell = (
+            flux_divergence_viscosity_cgrid(
+                u, v, grid, config.A_h, cos_power=_cos_p,
+                mask=mask, u_mask=u_mask, v_mask=v_mask,
+                want_dissipation=_want_kdiss_flux,
+            )
+        )
+        diag_Ah_lap_u, diag_Ah_lap_v = _apply_slope_foot(diag_Ah_lap_u, diag_Ah_lap_v)
+        du_dt = du_dt + diag_Ah_lap_u
+        dv_dt = dv_dt + diag_Ah_lap_v
+        if config.B_h > 0:
+            # Biharmonic is a separate (vector-Laplacian) operator, unaffected by the
+            # A_h operator choice: ∇⁴ = ∇²_vec(∇²_vec).
+            bilap_u, bilap_v = vector_bilaplacian_cgrid(
+                u, v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask)
+            if config.B_h_lat_scaling:
+                scale_u, scale_v = biharmonic_scaling_factor(grid)
+                diag_Bh_bilap_u = -config.B_h * scale_u[:, None, None] * bilap_u
+                diag_Bh_bilap_v = -config.B_h * scale_v[:, None, None] * bilap_v
+            else:
+                diag_Bh_bilap_u = -config.B_h * bilap_u
+                diag_Bh_bilap_v = -config.B_h * bilap_v
+            diag_Bh_bilap_u, diag_Bh_bilap_v = _apply_slope_foot(
+                diag_Bh_bilap_u, diag_Bh_bilap_v)
+            du_dt = du_dt + diag_Bh_bilap_u
+            dv_dt = dv_dt + diag_Bh_bilap_v
+    elif config.A_h > 0 and config.B_h > 0:
         # Both A_h Laplacian and B_h biharmonic active: the biharmonic's
         # *inner* vector Laplacian is identical to the explicit A_h
         # vector Laplacian, so compute ∇²(u, v) ONCE and feed it to
@@ -1719,12 +1780,25 @@ def _bc_horizontal_viscosity(
     # centres (Veros analogue), built ONLY when source_kdiss_h + kdiss_h_flux_form
     # are on AND the A_h Laplacian is active (the EKE source covers the A_h lateral
     # friction, mirroring Veros's K_diss_h from harmonic_friction; B_h/Smag/Leith
-    # are not part of Veros's ACC K_diss_h).  Uses the SAME cell-centre A_h×scale
-    # field (incl. cos-power / eq-boost / cap-boost / slope-foot) applied to the
-    # vector-Laplacian tendency, so the energy credited == the energy that tendency
-    # removes.  ``None`` otherwise → the dynamical (clamped) source path is used.
+    # are not part of Veros's ACC K_diss_h).  The dissipation form is PAIRED to the
+    # operator (consistency with #41):
+    #   - "flux_divergence": the component-wise A_h·|∇u|² = 0.5·Σ(Δu·flux)
+    #     (Veros ``calc_diss_u``/``calc_diss_v``), built from the SAME face fluxes the
+    #     flux-div operator forms (``_kdiss_fluxdiv_cell`` above) — so selecting the
+    #     operator gives Veros's EXACT friction AND its EXACT EKE source.
+    #   - "vector_laplacian" (default): the Helmholtz A_h·(div²+ζ²)
+    #     (``vector_laplacian_dissipation_cgrid``), using the SAME cell-centre A_h×scale
+    #     field (cos-power / eq-boost / cap-boost / slope-foot) applied to the vector
+    #     tendency.  ``None`` otherwise → the dynamical (clamped) source path is used.
     kdiss_h_cell = None
-    if _want_kdiss_flux and _ah_scale_center is not None:
+    if _want_kdiss_flux and _use_flux_div:
+        # Component-wise dissipation already built by the flux-div operator from its
+        # own face fluxes (None if the A_h Laplacian was inactive).  Slope-foot: the
+        # ACC recipe (the only flux-form-K_diss_h path) has slope_foot_alpha=0, so no
+        # slope-foot rescaling is needed; with slope-foot on the boosted dissipation
+        # would be a localized approximation (same caveat as the vector path).
+        kdiss_h_cell = _kdiss_fluxdiv_cell
+    elif _want_kdiss_flux and _ah_scale_center is not None:
         _A_h_center = _ah_scale_center
         if _slope_E_center is not None:
             # Cell-centre slope-foot enhancement (3-D); broadcast the lat profile.

@@ -610,6 +610,7 @@ class LatLonCGridOceanModel:
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
             VALID_MOMENTUM_ADVECTION,
             VALID_MOMENTUM_FLUX_SCHEME,
+            VALID_LATERAL_VISCOSITY_OPERATOR,
         )
         if config.momentum_advection not in VALID_MOMENTUM_ADVECTION:
             raise ValueError(
@@ -622,6 +623,12 @@ class LatLonCGridOceanModel:
                 f"momentum_flux_scheme must be one of "
                 f"{sorted(VALID_MOMENTUM_FLUX_SCHEME)}, "
                 f"got {config.momentum_flux_scheme!r}",
+            )
+        if config.lateral_viscosity_operator not in VALID_LATERAL_VISCOSITY_OPERATOR:
+            raise ValueError(
+                f"lateral_viscosity_operator must be one of "
+                f"{sorted(VALID_LATERAL_VISCOSITY_OPERATOR)}, "
+                f"got {config.lateral_viscosity_operator!r}",
             )
         if config.max_abs_eta_m <= 0.0:
             raise ValueError(

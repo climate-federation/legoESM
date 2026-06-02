@@ -90,13 +90,20 @@ class EKEConfig(NamedTuple):
     #     from the transport divergence) and is CLAMPED ≥ 0. The clamp over-credits
     #     the domain-integrated KE dissipation by ~11–20% (probe-measured on the
     #     ACC spin-up). BIT-IDENTICAL to the pre-flux-form path.
-    #   True — the FAITHFUL POSITIVE-DEFINITE flux form (Veros K_diss_h analogue):
-    #     ``A_h·(div² + <ζ²>)`` (``vector_laplacian_dissipation_cgrid``), the
-    #     Helmholtz KE-removal of legoESM's VECTOR-Laplacian viscosity. ≥ 0
-    #     EVERYWHERE by construction (no clamp), and energy-consistent: its domain
-    #     integral equals the mean KE actually removed by A_h to 0.3% (vs the
-    #     dynamical clamp's ~11–20% over-credit), and it matches Veros's captured
-    #     K_diss_h on the bridged ACC state to ~7%. ACC recipe opts in.
+    #   True — the FAITHFUL POSITIVE-DEFINITE flux form (Veros K_diss_h analogue),
+    #     PAIRED to ``LatLonCGridOceanConfig.lateral_viscosity_operator`` so the EKE
+    #     source is the exact energy the SELECTED viscosity operator removes:
+    #       - "vector_laplacian" (default operator): the Helmholtz
+    #         ``A_h·(div² + <ζ²>)`` (``vector_laplacian_dissipation_cgrid``), the
+    #         KE-removal of legoESM's VECTOR-Laplacian viscosity. Energy-consistent to
+    #         0.3% on the ACC spin-up; matches Veros's captured K_diss_h to ~7%.
+    #       - "flux_divergence" (Veros harmonic friction; ACC recipe): the
+    #         component-wise ``A_h·|∇u|² = 0.5·Σ(Δu·flux)``
+    #         (``flux_divergence_viscosity_cgrid``, Veros ``calc_diss_u``/``calc_diss_v``),
+    #         built from the SAME face fluxes the operator forms — Veros's EXACT EKE
+    #         source for its EXACT friction.
+    #     Either way ≥ 0 EVERYWHERE by construction (no clamp), vs the dynamical
+    #     clamp's ~11–20% over-credit. ACC recipe opts in.
     kdiss_h_flux_form: bool = False
     # GM mean-APE -> EKE conversion source mode:
     #   "parameterized" (default) — P = kappa_GM·sigma² with sigma = <N|S|>_z(z) from
