@@ -192,23 +192,18 @@ def test_ice_complexity_config_resolves(
 
 
 def test_ice_factory_consumes_complexity_rung() -> None:
-    """create_ice_component routes an IceComplexity rung through the resolver."""
-    from unittest.mock import patch
-
-    import legoesm.driver.component_factory as cf
+    """create_ice_component returns the step bound to the resolved rung config."""
     import legoesm.ice as ice
+    from legoesm.driver.component_factory import create_ice_component
 
-    # wraps=real fn → keep behaviour while proving the rung was actually resolved
-    # via ice_complexity_config (not merely accepted). Resolution *correctness* is
-    # pinned by test_ice_complexity_config_resolves.
-    with patch.object(
-        cf, "ice_complexity_config", wraps=cf.ice_complexity_config
-    ) as spy:
-        step = cf.create_ice_component(
-            config=None, grid=None, ice_config=IceComplexity.DYNAMIC
-        )
-    assert step is ice.step_sea_ice
-    spy.assert_called_once_with(IceComplexity.DYNAMIC)
+    component = create_ice_component(
+        config=None, grid=None, ice_config=IceComplexity.DYNAMIC
+    )
+    assert component.step is ice.step_sea_ice
+    # The dynamic rung is CAPTURED in the returned config — not silently dropped,
+    # so the caller cannot accidentally run thermodynamic defaults downstream.
+    assert component.config.dynamics == "evp"
+    assert component.config.n_categories == 5
 
 
 def test_unknown_ice_complexity_raises() -> None:
@@ -257,30 +252,62 @@ def test_model_complexity_rungs_per_level(level, atm, ocn, lnd, ice) -> None:
 
 
 @pytest.mark.parametrize("level", list(ModelComplexity))
-def test_dial_rungs_are_live(level) -> None:
-    """Every rung the dial emits is a real, consumable rung for its factory."""
+def test_resolve_model_complexity_builds_every_component(level) -> None:
+    """The driver resolver's spec is consumable by the real factories at EVERY
+    level — full_3d ocean included (it builds a real OceanModel, the rung the
+    ocean factory alone rejects). This is the end-to-end proof that the top
+    complexity level is load-bearing, not just nameable."""
     from legoesm.atmosphere.dynamics import DYNAMICS_OPTIONS
     from legoesm.driver.component_factory import (
         create_land_component,
-        ice_complexity_config,
+        create_ocean_component,
+        resolve_model_complexity,
+    )
+    from legoesm.grids.factory import create_grid
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    spec = resolve_model_complexity(level, grid_type="cubed_sphere")
+
+    # atmosphere: the resolved model_type is a real dycore option
+    assert spec.atmosphere_model_type in DYNAMICS_OPTIONS
+
+    # ocean: the spec's config builds a real component for every level — a step
+    # closure for the simple rungs, a prognostic OceanModel for full_3d (which
+    # needs a real ocean z-star coordinate; the simple rungs ignore it).
+    grid = create_grid("cubed_sphere", 8)
+    z_coord = create_ocean_z_star(n_levels=4)
+    ocean = create_ocean_component(
+        config=None, grid=grid, vertical_coord=z_coord, ocean_config=spec.ocean_config
+    )
+    assert ocean is not None
+
+    # land: the rung builds a real land step fn
+    assert callable(
+        create_land_component(config=None, grid=None, land_config=spec.land_config)
     )
 
-    rungs = model_complexity_rungs(level)
-    # atmosphere rung -> a real dycore model_type
-    assert atmosphere_model_type(rungs.atmosphere) in DYNAMICS_OPTIONS
-    # ocean: simple rungs map to a make_ocean mode; full_3d is the prognostic model
-    if rungs.ocean is OceanComplexity.FULL_3D:
-        assert level is ModelComplexity.FULL
-    else:
-        assert ocean_simple_mode(rungs.ocean) in ("fixed", "slab", "two_layer")
-    # land rung -> a real land step fn
-    assert callable(
-        create_land_component(config=None, grid=None, land_config=rungs.land)
-    )
-    # ice rung -> a real SeaIceConfig
-    assert ice_complexity_config(rungs.ice).dynamics in ("none", "evp")
+    # ice: the spec carries a concrete, already-resolved SeaIceConfig
+    assert spec.ice_config.dynamics in ("none", "evp")
+
+
+@pytest.mark.parametrize("grid_type", ["latlon", "mpas"])
+def test_full_complexity_off_cubed_sphere_is_scoped(grid_type) -> None:
+    """full_3d ocean is wired only for cubed_sphere; other grid families fail
+    loudly rather than silently building the wrong (cubed-sphere) ocean class.
+    The simple-ocean levels stay grid-agnostic and resolve fine everywhere."""
+    from legoesm.driver.component_factory import resolve_model_complexity
+
+    with pytest.raises(ValueError, match="cubed_sphere"):
+        resolve_model_complexity(ModelComplexity.FULL, grid_type=grid_type)
+    for level in (ModelComplexity.IDEALIZED, ModelComplexity.INTERMEDIATE):
+        spec = resolve_model_complexity(level, grid_type=grid_type)
+        assert spec.ocean_config is not None
 
 
 def test_unknown_model_complexity_raises() -> None:
+    from legoesm.driver.component_factory import resolve_model_complexity
+
     with pytest.raises(ValueError):
         model_complexity_rungs("kitchen_sink")
+    with pytest.raises(ValueError):
+        resolve_model_complexity("kitchen_sink")

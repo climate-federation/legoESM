@@ -607,8 +607,14 @@ def create_ocean_component(
 
     if isinstance(ocean_config, OceanConfig):
         from legoesm.ocean import OceanModel
+        if vertical_coord is None:
+            raise ValueError(
+                "full OceanModel needs a vertical_coord (an ocean z-star "
+                "coordinate from legoesm.ocean.vertical.create_ocean_z_star)."
+            )
         logger.info("Ocean: full OceanModel")
-        return OceanModel(grid=grid, vertical_coord=vertical_coord, config=ocean_config)
+        # OceanModel's vertical-coordinate parameter is named ``z_coord``.
+        return OceanModel(grid=grid, z_coord=vertical_coord, config=ocean_config)
 
     raise TypeError(
         f"ocean_config must be SimpleOceanConfig or OceanConfig, "
@@ -674,11 +680,24 @@ def create_land_component(config: ExperimentConfig, grid, *, land_config=None):
     )
 
 
+class SeaIceComponent(NamedTuple):
+    """A built sea-ice brick: the step function bound to its resolved config.
+
+    Unlike the ocean (whose step closure binds its config) and land (whose two
+    distinct step functions encode the rung), the sea-ice model has a *single*
+    step function that takes its config at call time.  Returning the resolved
+    ``SeaIceConfig`` alongside ``step`` keeps the selected complexity from being
+    silently dropped: the caller wires ``component.step`` with
+    ``component.config`` and a dynamic rung cannot degrade to thermodynamic
+    defaults downstream.
+    """
+
+    step: object  # step_sea_ice(state, forcing, config, dt) -> SeaIceState
+    config: object  # the resolved SeaIceConfig to pass to step
+
+
 def create_ice_component(config: ExperimentConfig, grid, *, ice_config=None):
     """Create the configured sea-ice model.
-
-    Returns the ``step_sea_ice`` function from ``legoesm.ice``.
-    The caller should also construct a ``SeaIceState`` for initialization.
 
     Parameters
     ----------
@@ -694,8 +713,9 @@ def create_ice_component(config: ExperimentConfig, grid, *, ice_config=None):
 
     Returns
     -------
-    step_fn : callable
-        ``step_sea_ice(state, forcing, config, dt) -> SeaIceState``.
+    SeaIceComponent
+        ``(step, config)`` — ``step_sea_ice`` and the *resolved* ``SeaIceConfig``
+        the caller must pass to it (so the selected rung is never dropped).
     """
     from legoesm.components import IceComplexity
     from legoesm.ice import SeaIceConfig, step_sea_ice
@@ -709,7 +729,7 @@ def create_ice_component(config: ExperimentConfig, grid, *, ice_config=None):
         "Ice: dynamics=%s, n_categories=%d",
         ice_config.dynamics, ice_config.n_categories,
     )
-    return step_sea_ice
+    return SeaIceComponent(step=step_sea_ice, config=ice_config)
 
 
 def ice_complexity_config(complexity):
@@ -734,6 +754,88 @@ def ice_complexity_config(complexity):
     # Explicit branches (no implicit default): a future IceComplexity rung added
     # without a mapping here must fail loudly, not silently fall back to slab.
     raise ValueError(f"unhandled IceComplexity rung: {c!r}")
+
+
+class ModelComplexitySpec(NamedTuple):
+    """Concrete, factory-ready inputs for every component at one complexity level.
+
+    The pure components taxonomy (``model_complexity_rungs``) yields complexity
+    *enums*; this driver-level resolver turns them into values the component
+    factories actually accept — crucially a concrete ``OceanConfig`` for the
+    ``full_3d`` ocean (``create_ocean_component`` rejects the bare ``FULL_3D``
+    rung because the 3-D model needs its parameters).  So a driver builds every
+    component at a chosen complexity through one resolution, full ocean included.
+    """
+
+    atmosphere_model_type: str  # -> ExperimentConfig.dycore.model_type
+    ocean_config: object  # create_ocean_component accepts: OceanComplexity rung | OceanConfig
+    land_config: object  # create_land_component accepts: LandComplexity rung
+    ice_config: object  # the resolved SeaIceConfig (pass to step_sea_ice)
+
+
+#: Grid families whose full-3-D ocean is wired through ``create_ocean_component``
+#: today (``OceanConfig`` -> cubed-sphere ``OceanModel``).  Lat-lon C-grid and
+#: MPAS full ocean use their own grid-specific models/configs
+#: (``LatLonCGridOceanModel`` / MPAS) that are not yet routed through this
+#: resolver — see :func:`resolve_model_complexity`.
+_FULL_OCEAN_GRID_TYPES: frozenset[str] = frozenset({"cubed_sphere"})
+
+
+def resolve_model_complexity(level, *, grid_type: str = "cubed_sphere"):
+    """Resolve a model-wide complexity *level* to concrete, factory-ready configs.
+
+    ``resolve_model_complexity("full")`` -> a :class:`ModelComplexitySpec` whose
+    ``ocean_config`` is an ``OceanConfig`` (the default 3-D ocean; pass an
+    explicit ``OceanConfig`` for custom parameters), so every field can be handed
+    straight to its factory:
+
+        spec = resolve_model_complexity(level, grid_type=cfg.grid.grid_type)
+        dycore   = create_atmosphere_dycore(cfg_with(spec.atmosphere_model_type), grid, sigma)
+        ocean    = create_ocean_component(cfg, grid, z_coord, ocean_config=spec.ocean_config)
+        land     = create_land_component(cfg, grid, land_config=spec.land_config)
+        ice      = create_ice_component(cfg, grid, ice_config=spec.ice_config)
+
+    The simple-ocean and land fields stay as their complexity *rungs* (which the
+    factories already resolve), so this resolver does not duplicate that logic; it
+    only synthesises the one concrete config the factory cannot derive from a bare
+    rung (the full 3-D ocean).
+
+    *grid_type* selects which full-3-D ocean to synthesise.  The full ocean MODEL
+    is grid-dependent: only ``"cubed_sphere"`` is wired through
+    ``create_ocean_component`` (``OceanConfig`` -> ``OceanModel``, the cdgrid
+    ocean).  Lat-lon C-grid and MPAS full ocean use their own grid-specific
+    models/configs not yet routed here, so ``full`` complexity on those grids
+    raises ``ValueError`` rather than silently synthesising a cubed-sphere
+    ``OceanConfig`` that would build the wrong ocean class.  Simple ocean rungs
+    are grid-agnostic, so ``idealized``/``intermediate`` work on any grid.  Also
+    raises ``ValueError`` on an unknown *level*.
+    """
+    from legoesm.components import (
+        OceanComplexity,
+        atmosphere_model_type,
+        model_complexity_rungs,
+    )
+    from legoesm.ocean.state import OceanConfig
+
+    rungs = model_complexity_rungs(level)
+    if rungs.ocean is OceanComplexity.FULL_3D:
+        if grid_type not in _FULL_OCEAN_GRID_TYPES:
+            raise ValueError(
+                f"full_3d ocean via resolve_model_complexity is currently wired "
+                f"only for grid_type in {sorted(_FULL_OCEAN_GRID_TYPES)} "
+                f"(OceanConfig -> cubed-sphere OceanModel); got {grid_type!r}. "
+                f"Lat-lon and MPAS full ocean use their grid-specific "
+                f"models/configs — build them explicitly."
+            )
+        ocean_config = OceanConfig()
+    else:
+        ocean_config = rungs.ocean  # simple rung — grid-agnostic, factory resolves
+    return ModelComplexitySpec(
+        atmosphere_model_type=atmosphere_model_type(rungs.atmosphere),
+        ocean_config=ocean_config,
+        land_config=rungs.land,
+        ice_config=ice_complexity_config(rungs.ice),
+    )
 
 
 def create_coupler(
