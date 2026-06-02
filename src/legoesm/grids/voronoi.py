@@ -193,8 +193,14 @@ def _bisect_mesh(vertices, triangles, level):
     return np.array(verts_list, dtype=np.float64), triangles
 
 
-def _lloyd_relaxation(points, n_iter=50):
-    """Lloyd relaxation to produce a centroidal Voronoi tessellation (SCVT)."""
+def _lloyd_relaxation(points, n_iter=50, density_fn=None):
+    """Lloyd relaxation to produce a centroidal Voronoi tessellation (SCVT).
+
+    With ``density_fn`` the centroid of each Voronoi cell is **density-weighted**
+    (Du–Faber–Gunzburger), so generators drift toward the high-density region and
+    the converged mesh is refined there.  ``density_fn=None`` reproduces the
+    uniform area-weighted SCVT exactly.
+    """
     pts = points.copy()
     for _ in range(n_iter):
         try:
@@ -208,20 +214,38 @@ def _lloyd_relaxation(points, n_iter=50):
                 new_pts[i] = pts[i]
                 continue
             poly_verts = sv.vertices[region]
-            # Spherical centroid: area-weighted mean projected to sphere
-            centroid = _spherical_polygon_centroid(poly_verts)
+            # Spherical centroid: (density-weighted) area mean projected to sphere
+            centroid = _spherical_polygon_centroid(poly_verts, density_fn=density_fn)
             new_pts[i] = centroid
         pts = new_pts
     return pts
 
 
-def _spherical_polygon_centroid(vertices):
-    """Centroid of a spherical polygon on the unit sphere."""
+def _density_at(point_xyz, density_fn):
+    """Evaluate a (lat, lon)[rad] density function at a unit-sphere xyz point."""
+    p = point_xyz / np.linalg.norm(point_xyz)
+    lat = np.arcsin(np.clip(p[2], -1.0, 1.0))
+    lon = np.arctan2(p[1], p[0])
+    rho = float(density_fn(lat, lon))
+    if not np.isfinite(rho) or rho <= 0.0:
+        raise ValueError(
+            f"density_fn must return a finite positive value; got {rho} at "
+            f"(lat={lat:.3f}, lon={lon:.3f}) rad"
+        )
+    return rho
+
+
+def _spherical_polygon_centroid(vertices, density_fn=None):
+    """Centroid of a spherical polygon on the unit sphere.
+
+    When ``density_fn`` is given each sub-triangle is weighted by
+    ``area * density(centre)`` instead of ``area`` alone (density-weighted SCVT).
+    """
     n = len(vertices)
     if n < 3:
         c = vertices.mean(axis=0)
         return c / np.linalg.norm(c)
-    # Decompose into triangles from v0 and compute area-weighted centroid
+    # Decompose into triangles from v0 and compute (density-)area-weighted centroid
     v0 = vertices[0]
     total_area = 0.0
     centroid = np.zeros(3)
@@ -230,8 +254,14 @@ def _spherical_polygon_centroid(vertices):
         # True spherical triangle area via spherical excess
         area = _spherical_triangle_area(v0, v1, v2, radius=1.0)
         tri_center = (v0 + v1 + v2) / 3.0
-        centroid += area * tri_center
-        total_area += area
+        weight = area
+        if density_fn is not None:
+            # A density-weighted CVT relaxes cell area ~ weight**(-1/2); weighting by
+            # density**2 therefore drives cell AREA ~ 1/density, i.e. a region with
+            # density d gets ~d x smaller cells (the intuitive resolution control).
+            weight = area * _density_at(tri_center, density_fn) ** 2
+        centroid += weight * tri_center
+        total_area += weight
     if total_area > 0:
         centroid /= total_area
     else:
@@ -1037,6 +1067,7 @@ def create_voronoi_mesh(
     radius: float = constants.R_earth,
     lloyd_iterations: int = 50,
     omega: float = constants.Omega,
+    density_fn=None,
 ) -> VoronoiMesh:
     """Create a centroidal Voronoi tessellation (SCVT) on the sphere.
 
@@ -1055,6 +1086,19 @@ def create_voronoi_mesh(
         Number of Lloyd relaxation iterations. Default: 50.
     omega : float
         Rotation rate [rad/s]. Default: Earth rotation.
+    density_fn : callable(lat, lon) -> float, optional
+        Relative mesh-density function (``lat``, ``lon`` in radians; larger =>
+        finer cells).  When provided, the Lloyd relaxation is **density-weighted**
+        (Du–Faber–Gunzburger SCVT): generators concentrate where the density is
+        high, yielding a VARIABLE-RESOLUTION mesh refined over the high-density
+        region (the MPAS variable-resolution capability).  Cell area relaxes toward
+        ``~ 1/density`` (weighting by ``density**2``), so a region with relative
+        density ``d`` gets roughly ``d`` x smaller cells.  ``None`` (default) =>
+        the uniform quasi-uniform SCVT (unchanged).  Host-side mesh generation —
+        the callable is plain NumPy, never traced.  NOTE: Lloyd relaxation converges
+        linearly, so the achieved refinement contrast grows with
+        ``lloyd_iterations``; for strong/precise variable resolution prefer a
+        JIGSAW-built mesh loaded via :func:`load_mpas_mesh`.
 
     Returns
     -------
@@ -1075,9 +1119,16 @@ def create_voronoi_mesh(
     if subdivision_level > 0:
         verts, triangles = _bisect_mesh(verts, triangles, subdivision_level)
 
-    # Step 3: Lloyd relaxation for SCVT
+    # Step 3: Lloyd relaxation for SCVT (density-weighted when density_fn given)
     if lloyd_iterations > 0 and subdivision_level > 0:
-        cell_points = _lloyd_relaxation(verts, n_iter=lloyd_iterations)
+        cell_points = _lloyd_relaxation(
+            verts, n_iter=lloyd_iterations, density_fn=density_fn)
+    elif density_fn is not None:
+        raise ValueError(
+            "density_fn requires lloyd_iterations > 0 and subdivision_level > 0 "
+            "(the variable-resolution mesh is produced by density-weighted Lloyd "
+            "relaxation; with no relaxation the icosahedral seed stays uniform)."
+        )
     else:
         cell_points = verts
 
