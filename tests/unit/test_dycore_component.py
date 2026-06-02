@@ -7,7 +7,10 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm.components import AbstractComponent
-from legoesm.components.dycore_component import DycoreComponent
+from legoesm.components.dycore_component import (
+    DycoreComponent,
+    ForcedDycoreComponent,
+)
 
 _needs_x64 = pytest.mark.skipif(
     not jax.config.read("jax_enable_x64"),
@@ -183,3 +186,128 @@ def test_wrap_mpas_sw_as_differentiable_component() -> None:
     for loss, x in ((loss_h, state.h.data), (loss_u, state.u.data)):
         g = jax.grad(loss)(x)
         assert jnp.all(jnp.isfinite(g)) and jnp.max(jnp.abs(g)) > 0.0
+
+
+# --- ForcedDycoreComponent: physics-tendency-coupled cores (B4 forcing variant) ---
+
+def _cdgrid_pe_model_and_state():
+    from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+        CDGridPrimitiveEquationModel,
+    )
+    from legoesm.core.field import Field
+    from legoesm.core.state import FV3HydrostaticState
+    from legoesm.grids.cubed_sphere import create_cubed_sphere
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    # n=8: at n=4 create_cubed_sphere_cdgrid's gnomonic="auto" inference is
+    # ambiguous (cell aspect ~1.16 in the [1.15,1.25] band); n=8 equiangular
+    # is unambiguous.
+    n, nlev = 8, 5
+    base = create_cubed_sphere(n)
+    sigma = create_sigma_coordinate(nlev)
+    model = CDGridPrimitiveEquationModel(base, sigma)
+    t_data = 250.0 * jnp.ones((6, n, n, nlev)) + jax.random.normal(
+        jax.random.PRNGKey(10), (6, n, n, nlev))
+    state = FV3HydrostaticState(
+        u_d=Field(jnp.zeros((6, n + 1, n + 1, nlev)), name="u_d"),
+        v_d=Field(jnp.zeros((6, n + 1, n + 1, nlev)), name="v_d"),
+        T=Field(t_data, name="T"),
+        p_s=Field(1e5 * jnp.ones((6, n, n)), name="p_s"),
+        phis=Field(jnp.zeros((6, n, n)), name="phis"),
+    )
+    return base, model, state
+
+
+def _mpas_pe_model_and_state():
+    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
+        MPASPrimitiveEquationModel,
+    )
+    from legoesm.core.field import Field
+    from legoesm.core.state import MPASHydrostaticState
+    from legoesm.grids.vertical import create_sigma_coordinate
+    from legoesm.grids.voronoi import create_voronoi_mesh
+
+    nlev = 5
+    mesh = create_voronoi_mesh(2, lloyd_iterations=5)
+    sigma = create_sigma_coordinate(nlev)
+    model = MPASPrimitiveEquationModel(mesh, sigma)
+    t_data = 250.0 * jnp.ones((mesh.nCells, nlev)) + jax.random.normal(
+        jax.random.PRNGKey(11), (mesh.nCells, nlev))
+    state = MPASHydrostaticState(
+        u=Field(jnp.zeros((mesh.nEdges, nlev)), name="u",
+                dims=("nEdges", "nlev"), units="m/s"),
+        T=Field(t_data, name="T", dims=("nCells", "nlev"), units="K"),
+        p_s=Field(1e5 * jnp.ones((mesh.nCells,)), name="p_s",
+                  dims=("nCells",), units="Pa"),
+        phis=Field(jnp.zeros((mesh.nCells,)), name="phis",
+                   dims=("nCells",), units="m^2/s^2"),
+    )
+    return mesh, model, state
+
+
+def test_forced_wrapper_rejects_a_dry_core() -> None:
+    """A DRY core (tendencies without physics_tendency) is rejected with a pointer
+    back to DycoreComponent — the forcing-coupled wrapper is not a silent fallback."""
+    _grid, model, _state = _sw_model_and_state()  # cube SW: tendencies(state) only
+    with pytest.raises(TypeError, match="physics_tendency"):
+        ForcedDycoreComponent(model, prognostic_variables=("h",))
+
+
+def test_forced_wrapper_metadata_and_param_rejection() -> None:
+    grid, model, state = _cdgrid_pe_model_and_state()
+    comp = ForcedDycoreComponent(model, prognostic_variables=("u_d", "v_d", "T", "p_s"))
+
+    assert isinstance(comp, AbstractComponent)
+    assert comp.required_forcing == ("physics_tendency",)
+    assert comp.provided_fluxes == ()
+    assert comp.model is model
+    # params has no seam → rejected, never silently dropped
+    with pytest.raises(ValueError, match="no tunable-parameter seam"):
+        comp.tendency(grid, state, None, {"k": 1.0})
+
+
+def _tree_allclose(a, b) -> bool:
+    la, lb = jax.tree.leaves(a), jax.tree.leaves(b)
+    return len(la) == len(lb) and all(
+        jnp.allclose(x, y) for x, y in zip(la, lb))
+
+
+def _assert_forced_core(grid, model, state) -> None:
+    """Zero forcing == pure dynamics; non-zero forcing changes the RHS and is
+    differentiable through the forcing seam (D1)."""
+    comp = ForcedDycoreComponent(
+        model, prognostic_variables=("u", "T", "p_s"))
+
+    dyn = model.tendencies(state)                       # pure dynamical RHS
+    # forcing=None routes physics_tendency=None → identical to pure dynamics
+    assert _tree_allclose(comp.tendency(grid, state, None, None), dyn)
+    # an explicit ZERO physics tendency is a no-op (added leaf-wise)
+    zero_phys = jax.tree.map(jnp.zeros_like, dyn)
+    assert _tree_allclose(comp.tendency(grid, state, zero_phys, None), dyn)
+    # a NON-zero physics tendency changes the RHS (forcing is genuinely consumed)
+    pert = jax.tree.map(lambda x: 1e-2 * jnp.ones_like(x), dyn)
+    forced = comp.tendency(grid, state, pert, None)
+    assert all(jnp.all(jnp.isfinite(x)) for x in jax.tree.leaves(forced))
+    assert not _tree_allclose(forced, dyn)
+
+    # d(forced RHS)/d(forcing magnitude): finite AND non-zero → the physics
+    # tendency flows differentiably through the brick's forcing seam.
+    def loss(scale):
+        phys = jax.tree.map(lambda x: scale * jnp.ones_like(x), dyn)
+        t = comp.tendency(grid, state, phys, None)
+        return sum(jnp.sum(x ** 2) for x in jax.tree.leaves(t))
+
+    g = jax.grad(loss)(1e-2)
+    assert jnp.isfinite(g) and jnp.abs(g) > 0.0
+
+
+@_needs_x64
+def test_forced_cdgrid_pe_couples_and_differentiates() -> None:
+    grid, model, state = _cdgrid_pe_model_and_state()
+    _assert_forced_core(grid, model, state)
+
+
+@_needs_x64
+def test_forced_mpas_pe_couples_and_differentiates() -> None:
+    mesh, model, state = _mpas_pe_model_and_state()
+    _assert_forced_core(mesh, model, state)
