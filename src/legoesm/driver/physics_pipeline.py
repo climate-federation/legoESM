@@ -18,32 +18,8 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.thermo import saturation_specific_humidity
 from legoesm.forcing.surface_utils import blend_surface_temperature
-from legoesm.driver.grid_adapters import ColumnAdapter, make_adapter
-
-
-class PhysicsOutput(NamedTuple):
-    """Output from a single physics step."""
-    dT_dt: jax.Array
-    dq_v_dt: jax.Array
-    dq_c_dt: jax.Array
-    dq_r_dt: jax.Array
-    precip: jax.Array
-    sw_net_sfc: jax.Array
-    lw_net_sfc: jax.Array
-    sw_up_toa: jax.Array
-    lw_up_toa: jax.Array
-    sw_down_toa: jax.Array
-    du_dt: jax.Array
-    dv_dt: jax.Array
-    dq_i_dt: jax.Array
-    dq_s_dt: jax.Array
-    dq_g_dt: jax.Array
-    dN_c_dt: jax.Array
-    dN_r_dt: jax.Array
-    dN_i_dt: jax.Array
-    conv_prog: jax.Array
-    shflx: jax.Array | None = None   # surface sensible heat flux [W/m2]
-    lhflx: jax.Array | None = None   # surface latent heat flux [W/m2]
+from legoesm.core.grid_adapters import ColumnAdapter, make_adapter
+from legoesm.core.physics_output import PhysicsOutput  # shared tendency pytree (moved to core)
 
 
 class HeldRadiation(NamedTuple):

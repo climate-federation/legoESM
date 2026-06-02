@@ -1497,7 +1497,7 @@ class ModelDriver:
                 self._physics_lon = scatter(self._grid_lon, layout)
 
                 # Rebuild physics adapter for rank-local column count
-                from legoesm.driver.grid_adapters import ColumnAdapter
+                from legoesm.core.grid_adapters import ColumnAdapter
                 local_shape_2d = tuple(int(s) for s in self._physics_lat.shape)
                 local_ncol = 1
                 for s in local_shape_2d:

@@ -245,7 +245,7 @@ def train_neural_gcm(
     list[float] — loss history
     """
     from legoesm.atmosphere.physics.neural_physics import make_neural_step_unified
-    from legoesm.driver.grid_adapters import make_adapter
+    from legoesm.core.grid_adapters import make_adapter
 
     sigma_full = jnp.asarray(sigma.sigma_full)
     adapter = make_adapter(grid)

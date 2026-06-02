@@ -35,8 +35,8 @@ import jax.numpy as jnp
 import equinox as eqx
 
 from legoesm import constants
-from legoesm.driver.physics_pipeline import PhysicsOutput
-from legoesm.driver.grid_adapters import ColumnAdapter
+from legoesm.core.physics_output import PhysicsOutput
+from legoesm.core.grid_adapters import ColumnAdapter
 
 
 _OPTIONAL_3D_OUTPUT_FIELDS = (

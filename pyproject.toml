@@ -203,12 +203,11 @@ forbidden_modules = [
 ]
 unmatched_ignore_imports_alerting = "error"
 ignore_imports = [
-    # NOTE: the shared coupling pytrees (coupling_fields) AND the shared
-    # surface-flux / surface-energy formulas (bulk_flux, surface_energy) have been
-    # MOVED to legoesm.core, so ALL former component -> coupler edges are gone
-    # (components now import them from core, which is allowed) and their ignore
-    # entries removed.  The components->COUPLER boundary is now ZERO-ignore.
-    # Remaining: shared physics-output type + column adapter -> move to core.
-    "legoesm.atmosphere.physics.neural_physics -> legoesm.driver.physics_pipeline",
-    "legoesm.atmosphere.physics.neural_physics -> legoesm.driver.grid_adapters",
+    # The shared coupling pytrees (coupling_fields), surface-flux/energy formulas
+    # (bulk_flux, surface_energy), the PhysicsOutput tendency pytree, and the
+    # grid ColumnAdapter have ALL been MOVED to legoesm.core, so every former
+    # component -> coupler / component -> driver edge is gone (components now
+    # import them from core, which is allowed).  This contract is now
+    # ZERO-IGNORE: the components are genuinely independent of the coupler,
+    # driver, and training layers, not merely suppressed.
 ]
