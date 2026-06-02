@@ -20,6 +20,15 @@ therefore empty, and :meth:`tendency` rejects any ``forcing``/``params`` payload
 rather than silently dropping it.  A physics/forcing-coupled component (e.g. a
 primitive-equation core whose ``tendencies`` takes a ``physics_tendency``) needs a
 distinct wrapper that maps the forcing into that signature — NOT this one.
+
+**Instantaneous (dt-independent) RHS.**  :meth:`tendency` calls
+``model.tendencies(state)`` with no time step, so a core whose ``tendencies`` takes
+an optional ``dt`` (e.g. MPAS shallow water, whose anticipated-potential-vorticity
+APVM stabilizer is gated on ``dt > 0``) yields its continuous, ``dt``-independent
+right-hand side.  This is the correct seam for an ``AbstractComponent`` tendency:
+``dt``-scaled *numerical* stabilizers belong to the time-discrete ``step``, not the
+continuous dynamics, and are intentionally excluded here — by contract, not by
+silent drop.
 """
 
 from __future__ import annotations
