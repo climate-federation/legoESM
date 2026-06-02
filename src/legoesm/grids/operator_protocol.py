@@ -55,7 +55,15 @@ class GridOperators(Protocol):
         ...
 
     def halo_fill(self, field: Any) -> Any:
-        """Fill halo/ghost cells (cubed-sphere cross-panel; lat-lon wrap; ...)."""
+        """Fill the halo/ghost cells of a CELL-CENTRE field (cubed-sphere
+        cross-panel; lat-lon pole/wrap; ...).
+
+        ``halo_fill`` is the cell-centre operator-contract halo: a single field
+        argument cannot disambiguate stagger, so the *staggered* (face / corner /
+        edge) halos a dycore needs are filled by stagger-specific routines inside
+        the core, not through this generic seam.  An adapter therefore documents
+        ``halo_fill`` as cell-centre-only.
+        """
         ...
 
 

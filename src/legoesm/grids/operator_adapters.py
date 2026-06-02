@@ -75,10 +75,82 @@ class LatLonCGridOperators:
         )
 
     def halo_fill(self, field: Any) -> Any:
-        """Fill the N/S halo rows of a cell-centre scalar (lat-lon pole/wall BC)."""
+        """Fill the N/S halo rows of a CELL-CENTRE scalar (lat-lon pole/wall BC).
+
+        Cell-centre only (the GridOperators ``halo_fill`` contract); the
+        staggered face-velocity halos are filled inside the dycore.
+        """
         return pad_ns_scalar(field, self._grid)
 
 
 def latlon_cgrid_operators(grid: Any) -> LatLonCGridOperators:
     """Wrap a lat-lon C-grid in its :class:`GridOperators` adapter."""
     return LatLonCGridOperators(grid)
+
+
+class CubedSphereCDGridOperators:
+    """:class:`GridOperators` over a cubed-sphere C-D grid, delegating to the
+    shared ``core.operators_cdgrid`` free functions (identical numerics).
+
+    Wraps a ``CubedSphereCDGrid``.  Cube velocity is staggered: divergence acts
+    on C-grid winds ``(u_c, v_c)``; vorticity on D-grid (corner) winds
+    ``(u_d, v_d)`` — the same convention the cube dycores use.
+    """
+
+    def __init__(self, cdgrid: Any) -> None:
+        self._cdgrid = cdgrid
+
+    @property
+    def cdgrid(self) -> Any:
+        return self._cdgrid
+
+    def divergence(self, u: Any, v: Any) -> Any:
+        """C-grid flux divergence of ``(u_c, v_c)`` -> cell-centre scalar."""
+        from legoesm.core.operators_cdgrid import cgrid_divergence
+
+        return cgrid_divergence(u, v, self._cdgrid)
+
+    def gradient(self, scalar: Any) -> Any:
+        """C-grid gradient of a cell-centre scalar -> face-normal components."""
+        from legoesm.core.operators_cdgrid import cgrid_gradient_2d
+
+        return cgrid_gradient_2d(scalar, self._cdgrid)
+
+    def vorticity(self, u: Any, v: Any) -> Any:
+        """Relative vorticity of D-grid (corner) winds ``(u_d, v_d)``."""
+        from legoesm.core.operators_cdgrid import dgrid_vorticity
+
+        return dgrid_vorticity(u, v, self._cdgrid)
+
+    def interpolate(self, field: Any, src_location: Any, dst_location: Any) -> Any:
+        """Cell-centre <-> corner stagger interpolation (the cube's scalar stagger)."""
+        # Authorized use of the cubed-sphere interp helpers.
+        from legoesm.core.operators_cdgrid import (
+            _interp_center_to_corner,
+            _interp_corner_to_center,
+        )
+
+        if (src_location, dst_location) == ("center", "corner"):
+            return _interp_center_to_corner(field, self._cdgrid)
+        if (src_location, dst_location) == ("corner", "center"):
+            return _interp_corner_to_center(field)
+        raise ValueError(
+            f"unsupported interpolation {src_location!r}->{dst_location!r}; "
+            "the cubed-sphere adapter supports 'center'<->'corner'"
+        )
+
+    def halo_fill(self, field: Any) -> Any:
+        """Fill the cross-panel halo of a CELL-CENTRE cubed-sphere field.
+
+        Cell-centre only (the GridOperators ``halo_fill`` contract; ``_pad_halo_auto``
+        auto-selects 2-D/3-D, NOT stagger).  The C-grid face and D-grid corner
+        halos are filled by stagger-specific routines inside the cube dycore.
+        """
+        from legoesm.core.operators_cdgrid import _pad_halo_auto
+
+        return _pad_halo_auto(field, self._cdgrid)
+
+
+def cubed_sphere_cdgrid_operators(cdgrid: Any) -> CubedSphereCDGridOperators:
+    """Wrap a cubed-sphere C-D grid in its :class:`GridOperators` adapter."""
+    return CubedSphereCDGridOperators(cdgrid)
