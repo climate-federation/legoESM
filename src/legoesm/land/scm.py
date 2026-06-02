@@ -21,11 +21,10 @@ component may import), so this module stays boundary-clean (no ``coupler`` impor
 
 Example
 -------
->>> from legoesm.core.coupling_fields import AtmToSurface  # caller-side import
->>> from legoesm.land.scm import LandColumnModel
+>>> from legoesm.land.scm import LandColumnModel, constant_land_forcing
 >>> from legoesm.land import LandConfig
->>> forcing = AtmToSurface(...)  # one column's prescribed atmospheric state
->>> scm = LandColumnModel.create(config=LandConfig(), ncol=1, dt=3600.0, forcing=forcing)
+>>> scm = LandColumnModel.create(
+...     config=LandConfig(), ncol=1, dt=3600.0, forcing=constant_land_forcing(ncol=1))
 >>> final_state, history = scm.run(nsteps=240, save_every=24)  # 10-day spin-up
 """
 
@@ -35,6 +34,41 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+
+from legoesm.core.coupling_fields import AtmToSurface
+
+
+def constant_land_forcing(
+    ncol: int = 1,
+    *,
+    sw_down: float = 200.0,
+    lw_down: float = 300.0,
+    precip_total: float = 1e-5,
+    T_lowest: float = 280.0,  # noqa: N803 (physical symbol, project T_ convention)
+    q_lowest: float = 5e-3,
+    u_lowest: float = 3.0,
+    v_lowest: float = 0.0,
+    p_surface: float = 1.0e5,
+) -> AtmToSurface:
+    """A spatially-uniform, time-constant :class:`AtmToSurface` over ``ncol`` columns.
+
+    A convenience for land spin-up / process studies; pass any ``AtmToSurface``
+    (or a ``callable(elapsed) -> AtmToSurface``) to :meth:`LandColumnModel.create`
+    for full control.  Lives here (not the test) because ``AtmToSurface`` is now a
+    core pytree any component may import — the SCM ships its own forcing.
+    """
+
+    def full(v: float) -> jax.Array:
+        return jnp.full((ncol,), v)
+
+    return AtmToSurface(
+        sw_down=full(sw_down), lw_down=full(lw_down), precip_total=full(precip_total),
+        precip_snow=full(0.0), T_lowest=full(T_lowest), q_lowest=full(q_lowest),
+        u_lowest=full(u_lowest), v_lowest=full(v_lowest), p_lowest=full(0.95 * p_surface),
+        p_surface=full(p_surface), rho_lowest=full(1.15), cos_zenith=full(0.5),
+        co2_ppmv=jnp.asarray(400.0), has_radiation=jnp.asarray(1.0),
+        has_precipitation=jnp.asarray(1.0),
+    )
 
 
 class LandColumnHistory(NamedTuple):

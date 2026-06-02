@@ -20,10 +20,8 @@ as plain arrays.  This module imports no ``coupler`` (boundary-clean).
 
 Example
 -------
->>> from legoesm.core.coupling_fields import AtmToSurface  # caller-side import
->>> from legoesm.ice.scm import IceColumnModel
->>> forcing = AtmToSurface(...)        # a cold polar atmosphere over ``ncol`` cells
->>> scm = IceColumnModel.create(ncol=1, dt=3600.0, forcing=forcing)
+>>> from legoesm.ice.scm import IceColumnModel, cold_polar_forcing
+>>> scm = IceColumnModel.create(ncol=1, dt=3600.0, forcing=cold_polar_forcing(ncol=1))
 >>> final_state, history = scm.run(nsteps=240, save_every=24)  # 10-day growth
 """
 
@@ -35,6 +33,36 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.coupling_fields import AtmToSurface
+
+
+def cold_polar_forcing(
+    ncol: int = 1,
+    *,
+    sw_down: float = 0.0,
+    lw_down: float = 200.0,
+    T_lowest: float = 250.0,  # noqa: N803 (physical symbol, project T_ convention)
+    u_lowest: float = 6.0,
+) -> AtmToSurface:
+    """A cold, dark (polar-night) :class:`AtmToSurface` over ``ncol`` ice cells.
+
+    A convenience for thermodynamic ice growth/melt studies; pass any
+    ``AtmToSurface`` (or a ``callable(elapsed) -> AtmToSurface``) to
+    :meth:`IceColumnModel.create` for full control.  Lives here because
+    ``AtmToSurface`` is now a core pytree any component may import.
+    """
+
+    def full(v: float) -> jax.Array:
+        return jnp.full((ncol,), v)
+
+    return AtmToSurface(
+        sw_down=full(sw_down), lw_down=full(lw_down), precip_total=full(0.0),
+        precip_snow=full(0.0), T_lowest=full(T_lowest), q_lowest=full(1e-3),
+        u_lowest=full(u_lowest), v_lowest=full(0.0), p_lowest=full(9.7e4),
+        p_surface=full(1.0e5), rho_lowest=full(1.3), cos_zenith=full(0.0),
+        co2_ppmv=jnp.asarray(400.0), has_radiation=jnp.asarray(1.0),
+        has_precipitation=jnp.asarray(1.0),
+    )
 
 
 class IceColumnHistory(NamedTuple):
