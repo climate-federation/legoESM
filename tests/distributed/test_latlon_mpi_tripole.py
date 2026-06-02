@@ -45,6 +45,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     is_tripolar,
     pad_ns_scalar,
     _fold_is_local,
+    gradient_y_cgrid,
 )
 
 N_LAT, N_LON = 16, 24
@@ -225,3 +226,62 @@ class TestIssue356Bug2InterpToVPoints:
             set_halo_backend("local")
         assert jnp.all(jnp.isfinite(result)), (
             f"pad_ns_scalar produced non-finite values on rank {rank}")
+
+
+class TestIssue356GradientYPartitionCut:
+    """gradient_y_cgrid must match serial at partition boundaries.
+
+    Before the fix, the tripolar code path used rank-local data only
+    and zeroed the south v-face unconditionally — both wrong at
+    partition cuts under MPI.
+    """
+
+    def test_gradient_y_matches_serial_at_partition_boundaries(self, fold):
+        geom = create_synthetic_tripole(n_lat=N_LAT, n_lon=N_LON)
+        rng = np.random.default_rng(77)
+        f_global = jnp.asarray(
+            rng.standard_normal((N_LAT, N_LON), dtype=np.float64))
+        df_serial = gradient_y_cgrid(f_global, geom)
+
+        rank = MPI.COMM_WORLD.Get_rank()
+        n_ranks = MPI.COMM_WORLD.Get_size()
+        layout = make_latlon_band_layout(
+            rank, n_ranks, N_LAT, N_LON, fold=geom.fold)
+        band = slice_cgrid_geometry_to_band(geom, layout)
+        s, e = layout.lat_start, layout.lat_end
+
+        try:
+            set_halo_backend("mpi", layout)
+            df_local = gradient_y_cgrid(f_global[s:e], band)
+        finally:
+            set_halo_backend("local")
+
+        max_err = float(jnp.max(jnp.abs(df_local - df_serial[s:e + 1])))
+        all_errs = MPI.COMM_WORLD.allgather(max_err)
+        assert max(all_errs) < 1e-10, (
+            f"gradient_y_cgrid max error across ranks: {all_errs}")
+
+    def test_gradient_y_3d_matches_serial(self, fold):
+        geom = create_synthetic_tripole(n_lat=N_LAT, n_lon=N_LON)
+        rng = np.random.default_rng(88)
+        f_global = jnp.asarray(
+            rng.standard_normal((N_LAT, N_LON, 3), dtype=np.float64))
+        df_serial = gradient_y_cgrid(f_global, geom)
+
+        rank = MPI.COMM_WORLD.Get_rank()
+        n_ranks = MPI.COMM_WORLD.Get_size()
+        layout = make_latlon_band_layout(
+            rank, n_ranks, N_LAT, N_LON, fold=geom.fold)
+        band = slice_cgrid_geometry_to_band(geom, layout)
+        s, e = layout.lat_start, layout.lat_end
+
+        try:
+            set_halo_backend("mpi", layout)
+            df_local = gradient_y_cgrid(f_global[s:e], band)
+        finally:
+            set_halo_backend("local")
+
+        max_err = float(jnp.max(jnp.abs(df_local - df_serial[s:e + 1])))
+        all_errs = MPI.COMM_WORLD.allgather(max_err)
+        assert max(all_errs) < 1e-10, (
+            f"gradient_y_cgrid 3D max error across ranks: {all_errs}")
