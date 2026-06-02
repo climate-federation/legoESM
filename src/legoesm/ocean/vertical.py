@@ -904,6 +904,79 @@ def flux_form_vertical_tracer_advection(
     return vert_flux_div
 
 
+def flux_form_vertical_tracer_advection_centered(
+    field: jnp.ndarray,
+    w_half: jnp.ndarray,
+    cell_active: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Flux-form vertical tracer advection with UNLIMITED centered 2nd order.
+
+    Veros ``adv_flux_2nd`` vertical flux (``veros/core/advection.py``):
+    the interface tracer flux uses the plain 2-cell average
+    ``T_face[k] = 0.5*(field[k-1] + field[k])`` rather than the upwind /
+    TVD-limited value.  This is the Veros ACC tracer scheme
+    (``enable_superbee_advection=False``).
+
+    Same level convention and output semantics as
+    :func:`flux_form_vertical_tracer_advection` (the 1st-order upwind
+    version): k=0 surface, interface k sits ABOVE level k, surface and
+    bottom interface fluxes are zero, and the returned ``vert_flux_div``
+    is ``F_top[k] - F_bot[k]`` in units ``[tracer]*[m/s]`` (NOT divided
+    by layer thickness).
+
+    DISPERSION
+    ----------
+    The centered face value is UNLIMITED, so this scheme is dispersive:
+    it can produce over/undershoots (new local extrema, locally negative
+    tracer) near sharp gradients.  It carries zero implicit diapycnal
+    diffusion in smooth regions (unlike upwind/TVD).  Used for the
+    Veros-faithful ACC comparison (``tracer_advection="centered"``);
+    legoESM's production default stays TVD (Van Leer), which is monotone.
+
+    Parameters
+    ----------
+    field : array, shape (..., nlev)
+        Tracer at full levels.
+    w_half : array, shape (..., nlev+1)
+        Vertical velocity on half (interface) levels [m/s]; positive =
+        upward; zero at surface and bottom.
+    cell_active : array | None, shape (..., nlev)
+        Optional per-cell activity mask (1 = wet, 0 = below seafloor).
+        When provided, the flux at any interface bordering an inactive
+        cell is gated to exactly zero (same role as in
+        :func:`flux_form_vertical_tracer_advection`).
+
+    Returns
+    -------
+    vert_flux_div : array, shape (..., nlev)
+        Vertical flux divergence ``F_top[k] - F_bot[k]`` for each level.
+    """
+    nlev = field.shape[-1]
+
+    # Interior interface k (1 <= k <= nlev-1) is between level k-1 (above)
+    # and level k (below).  Centered face value = unlimited 2-cell average.
+    w_interior = w_half[..., 1:nlev]    # (..., nlev-1)
+    T_below = field[..., 1:]            # field[k]   for k=1..nlev-1
+    T_above = field[..., :-1]           # field[k-1] for k=1..nlev-1
+    T_face_interior = 0.5 * (T_above + T_below)
+    F_interior = w_interior * T_face_interior  # (..., nlev-1)
+
+    # Gate the flux at interfaces bordering any inactive cell (matches the
+    # upwind version: both bordering cells must be active to be physical).
+    if cell_active is not None:
+        active_above = cell_active[..., :-1]   # cells k-1 for k=1..nlev-1
+        active_below = cell_active[..., 1:]    # cells k   for k=1..nlev-1
+        F_interior = F_interior * (active_above * active_below)
+
+    # Zero surface/bottom interface fluxes via a single Pad HLO op.
+    pad_axes_f = ((0, 0),) * (F_interior.ndim - 1)
+    F = jnp.pad(F_interior, (*pad_axes_f, (1, 1)))  # (..., nlev+1)
+
+    # Flux divergence: F_top[k] - F_bot[k] = F[k] - F[k+1]
+    vert_flux_div = F[..., :-1] - F[..., 1:]
+    return vert_flux_div
+
+
 from legoesm.ocean.dynamics._flux_limiters import van_leer_limiter as _van_leer_limiter_vert
 
 

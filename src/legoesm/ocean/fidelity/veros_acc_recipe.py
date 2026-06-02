@@ -602,21 +602,31 @@ def build_acc_model_config(grid: LatLonGrid | None = None, *,
         # -0.336->0.715 (vector-invariant was anti-correlated). See the §8 ledger.
         momentum_advection="flux_form",
         momentum_flux_scheme="centered",
-        # TRACER advection: the recipe keeps legoESM's default TVD (Van Leer)
-        # rather than matching Veros ACC's centered 2nd-order (adv_flux_2nd;
-        # enable_superbee_advection=False). This is a DELIBERATE, documented
-        # fidelity gap, not an oversight: (1) legoESM has no plain centered
-        # 2nd-order lat-lon C-grid tracer scheme (only limited / high-order:
-        # tvd/superbee/dst3/weno5/7), and an unlimited centered scheme is
-        # dispersive (tracer overshoots / negatives) -- adding it would cost
-        # robustness; (2) MEASURED -- the residual abyssal warm bias is the
-        # too-strong resolved overturning (the too-barotropic flow), and a
-        # tvd/dst3/weno5 scheme sweep showed LESS-diffusive advection runs the
-        # abyss slightly WARMER, not closer to Veros, so matching centered would
-        # not help the climate. TVD's implicit diapycnal mixing (~20x Veros's
-        # physical abyssal K_H) is a byproduct of the over-strong w, not the
-        # warming driver. The over-overturning lever is structural (vertical
-        # momentum partition / eddy form stress), not the tracer scheme.
+        # TRACER advection: the recipe selects legoESM's "centered" scheme to
+        # match Veros ACC's UNLIMITED centered 2nd-order tracer flux
+        # (``veros/core/advection.py`` ``adv_flux_2nd``;
+        # ``enable_superbee_advection=False``) -- horizontal
+        # F = 0.5*(T[i]+T[i+1])*(h*u), vertical F = 0.5*(T[k]+T[k+1])*w -- for a
+        # true apples-to-apples dycore comparison (doctrine rule H: finish the
+        # Veros-numerics options). This SUPERSEDES the prior "documented gap,
+        # won't add" framing (commit 7915f6eb): legoESM previously had only
+        # limited / high-order lat-lon C-grid tracer schemes
+        # (tvd/superbee/dst3/weno5/7); the plain centered 2nd-order option is now
+        # added (reusing the same flux-form divergence machinery) and selected
+        # here.
+        #
+        # HONEST CAVEAT (unchanged from the prior note): centered 2nd-order is
+        # unlimited and therefore DISPERSIVE -- it can over/undershoot near sharp
+        # gradients (non-monotone, locally negative tracers) and carries no
+        # implicit diapycnal mixing. legoESM's production default stays TVD (Van
+        # Leer), which is robust/monotone. And the climate lever is structural:
+        # the residual abyssal warm bias is the too-strong resolved overturning
+        # (the too-barotropic flow), and a prior tvd/dst3/weno5 scheme sweep
+        # showed LESS-diffusive advection runs the abyss slightly WARMER, not
+        # closer to Veros -- so the tracer scheme is matched for FIDELITY, not as
+        # a fix for the climate delta (the over-overturning is the vertical
+        # momentum partition / eddy form stress, not the tracer scheme).
+        tracer_advection="centered",
         bottom_drag_r=R_BOT,
         # ``eq_of_state_type=3`` in Veros dispatches to nonlinear_eq2.py
         # (Vallis 2008) — NOT nonlinear_eq3.py despite the file name.

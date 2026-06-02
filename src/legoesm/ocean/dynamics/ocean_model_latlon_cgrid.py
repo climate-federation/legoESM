@@ -34,6 +34,7 @@ from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div,
     flux_form_vertical_tracer_advection,
     flux_form_vertical_tracer_advection_tvd,
+    flux_form_vertical_tracer_advection_centered,
 )
 from legoesm.ocean.state import (
     LatLonCGridOceanState,
@@ -42,6 +43,7 @@ from legoesm.ocean.state import (
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
     _interp_to_v_points,
+    _centered_cell_to_uface,
     _upwind_to_u_points,
     _upwind_to_v_points,
     _tvd_to_u_points,
@@ -188,6 +190,34 @@ def _compute_advection_flux_div(
         tracer_flux_v = mass_flux_v * tr_v
         div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, grid)
         vert_flux_div = _vert_fn(tr, w_baro, h_k_old, dt)
+    elif tracer_advection == "centered":
+        # Veros ``adv_flux_2nd`` (veros/core/advection.py;
+        # enable_superbee_advection=False): UNLIMITED centered 2nd-order
+        # tracer flux. The face value is the plain 2-cell average
+        #   horizontal: T_face = 0.5*(T[i] + T[i+1])
+        #   vertical:   T_face = 0.5*(T[k] + T[k+1])
+        # and the flux is F = T_face * (h*u) on the C-grid faces. This
+        # REUSES the same flux-form divergence machinery as the TVD /
+        # WENO / DST3 paths (build a face value -> mass_flux*tr_face ->
+        # divergence_cgrid); "centered" is simply the unlimited face
+        # value. The horizontal face values come from the canonical
+        # centered cell->face interpolations (``_centered_cell_to_uface``,
+        # periodic in longitude; ``_interp_to_v_points``, the centered
+        # cell->v-face interp with the solid-wall / tripolar-fold BC).
+        # Wall masking is carried by ``mass_flux_u``/``mass_flux_v``
+        # (zero through walls) — the analogue of Veros's maskU/maskV.
+        #
+        # DISPERSION: centered 2nd order is unlimited, hence dispersive —
+        # it can over/undershoot near sharp gradients (non-monotone,
+        # locally negative tracers) with zero implicit diapycnal mixing.
+        # Used for the Veros-faithful ACC comparison; legoESM's production
+        # default stays TVD (Van Leer), which is monotone.
+        tr_u = _centered_cell_to_uface(tr)
+        tr_v = _interp_to_v_points(tr, grid)
+        tracer_flux_u = mass_flux_u * tr_u
+        tracer_flux_v = mass_flux_v * tr_v
+        div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, grid)
+        vert_flux_div = flux_form_vertical_tracer_advection_centered(tr, w_baro)
     elif tracer_advection in ("tvd", "superbee", "upwind"):
         from legoesm.ocean.dynamics._flux_limiters import resolve_tvd_limiter
         if tracer_advection in ("tvd", "superbee"):
@@ -211,8 +241,8 @@ def _compute_advection_flux_div(
     else:
         raise ValueError(
             f"Unknown tracer_advection literal {tracer_advection!r}; "
-            f"expected one of: upwind, tvd, superbee, ppm, ppm_fct, dst3, "
-            f"dst3_multidim, weno5, weno7."
+            f"expected one of: upwind, centered, tvd, superbee, ppm, "
+            f"ppm_fct, dst3, dst3_multidim, weno5, weno7."
         )
 
     return div_hut, vert_flux_div
