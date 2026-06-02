@@ -70,7 +70,7 @@ def test_plane_is_directed_elsewhere() -> None:
 @_needs_x64
 def test_atmosphere_component_builds_on_a_factory_grid() -> None:
     """A factory-created grid feeds a real component (atmosphere dycore)."""
-    from legoesm.registry import create_dycore
+    from legoesm.dycore_factory import create_dycore
 
     grid = create_grid("cubed_sphere", 8)
     dycore = create_dycore("cdgrid_shallow_water", grid)

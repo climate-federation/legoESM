@@ -1644,3 +1644,60 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
             state_new = state_new._replace(h=h_fixed)
 
         return cast_pytree(state_new, None, "storage")
+
+
+# ==============================================================================
+# Shared shallow-water barotropic core providers (registered for the 3-D ocean).
+#
+# The 3-D ocean's barotropic (free-surface) substep is itself a shallow-water
+# problem and runs through this validated FV3 SW core.  These builders are
+# REGISTERED in the foundational ``legoesm.registry.SW_BAROTROPIC_REGISTRY`` so
+# ``ocean.dynamics.ocean_model`` can RESOLVE one by ``barotropic_staggering``
+# name and reuse the SW dycore WITHOUT importing the atmosphere component — the
+# sharing flows through the registry, keeping the components independent.
+# ==============================================================================
+
+def _build_fv3sw_barotropic_model(grid, cdgrid, ocean_config):
+    """Build the corner-staggered (C-D grid) SW core for the ocean barotropic."""
+    sw_cfg = iter1009_dual_target_config(
+        cdgrid.n,
+        div_damp_factor=ocean_config.barotropic_sw_div_damp_factor,
+        damp_v=ocean_config.barotropic_sw_damp_v,
+    )._replace(g=ocean_config.g, fix_mass=False)
+    model = CDGridShallowWaterModel(grid, sw_cfg)
+    model.cdgrid = cdgrid
+    return model
+
+
+def _build_fv3edge_barotropic_model(grid, cdgrid, ocean_config):
+    """Build the FV3 edge-staggered SW core for the ocean barotropic."""
+    sw_cfg = iter1009_dual_target_config(
+        cdgrid.n,
+        div_damp_factor=ocean_config.barotropic_sw_div_damp_factor,
+        damp_v=ocean_config.barotropic_sw_damp_v,
+    )._replace(g=ocean_config.g, fix_mass=False)
+    model = FV3EdgeShallowWaterModel(grid, sw_cfg)
+    model.cdgrid = cdgrid
+    return model
+
+
+_SW_BAROTROPIC_REGISTERED = False
+
+
+def _register_sw_barotropic_builders() -> None:
+    """Register the SW barotropic-core builders (idempotent; called on import)."""
+    global _SW_BAROTROPIC_REGISTERED
+    if _SW_BAROTROPIC_REGISTERED:
+        return
+    from legoesm.registry import SW_BAROTROPIC_REGISTRY
+
+    SW_BAROTROPIC_REGISTRY.register(
+        "fv3sw", _build_fv3sw_barotropic_model, overwrite=True
+    )
+    SW_BAROTROPIC_REGISTRY.register(
+        "fv3edge", _build_fv3edge_barotropic_model, overwrite=True
+    )
+    _SW_BAROTROPIC_REGISTERED = True
+
+
+_register_sw_barotropic_builders()

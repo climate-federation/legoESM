@@ -144,32 +144,31 @@ class OceanModel:
         # ``barotropic_substeps_fv3sw`` and ``fv3_faithful.md``.
         self._sw_baro_model = None
         if self.config.barotropic_staggering in ("fv3sw", "fv3edge"):
-            from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-                CDGridShallowWaterModel, FV3EdgeShallowWaterModel,
-                iter1009_dual_target_config,
+            # Resolve the SHARED shallow-water barotropic core by name from the
+            # foundational registry.  The atmosphere SW dycore registers its
+            # "fv3sw" (corner-staggered C-D grid) and "fv3edge" (FV3 edge-
+            # staggered, algorithmically faithful) builders on import, so the
+            # ocean reuses the validated SW dycore WITHOUT importing the
+            # atmosphere component — the SW-core sharing flows through the
+            # registry (mass-fixer disabled in the builder: the ocean's masked
+            # conservation fixer handles the wet domain).
+            from legoesm.registry import (
+                SW_BAROTROPIC_REGISTRY,
+                UnknownRegistryEntryError,
             )
-            n = self._cdgrid.n
-            sw_cfg = iter1009_dual_target_config(
-                n,
-                div_damp_factor=self.config.barotropic_sw_div_damp_factor,
-                damp_v=self.config.barotropic_sw_damp_v,
-            )._replace(
-                g=self.config.g,
-                # The SW core's global mass fixer conserves land-INCLUSIVE
-                # sum(h*area); the ocean invariant is wet-ocean free-surface
-                # volume.  Disable it and let the ocean's masked
-                # ocean_conservation_fixer (applied after the barotropic) handle
-                # conservation on the wet domain (codex review of bd74c45b).
-                fix_mass=False,
-            )
-            # "fv3sw" = corner-staggered CDGrid (centered, validated default);
-            # "fv3edge" = TRUE FV3 edge-staggered core (upwind flux + _d2a2c_vect,
-            # algorithmically faithful).
-            if self.config.barotropic_staggering == "fv3edge":
-                self._sw_baro_model = FV3EdgeShallowWaterModel(grid, sw_cfg)
-            else:
-                self._sw_baro_model = CDGridShallowWaterModel(grid, sw_cfg)
-            self._sw_baro_model.cdgrid = self._cdgrid
+            try:
+                _build_sw = SW_BAROTROPIC_REGISTRY.get(
+                    self.config.barotropic_staggering
+                )
+            except UnknownRegistryEntryError as exc:
+                raise UnknownRegistryEntryError(
+                    f"No {self.config.barotropic_staggering!r} shallow-water "
+                    "barotropic-core provider is registered.  Import the FV3 SW "
+                    "core provider before building a cube ocean with this "
+                    "barotropic_staggering, e.g. `import "
+                    "legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid`."
+                ) from exc
+            self._sw_baro_model = _build_sw(grid, self._cdgrid, self.config)
 
         # Build physics function if configured
         if self.config.physics is not None:

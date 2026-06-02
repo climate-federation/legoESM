@@ -70,6 +70,17 @@ all = [
 [project.scripts]
 legoesm = "legoesm.cli:main"
 
+# Shallow-water barotropic-core providers, discovered LAZILY by
+# legoesm.registry.SW_BAROTROPIC_REGISTRY on first lookup.  This is the
+# substrate-owned bootstrap: the 3-D ocean's barotropic solver resolves an SW
+# core by name and the registry loads the provider at runtime (importlib.metadata
+# — NOT a static import), so the ocean reuses the atmosphere shallow-water dycore
+# without importing the atmosphere component AND without any caller import-order
+# dependence (a fresh process building a cube ocean works without preloading atm).
+[project.entry-points."legoesm.sw_barotropics"]
+fv3sw = "legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid:_build_fv3sw_barotropic_model"
+fv3edge = "legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid:_build_fv3edge_barotropic_model"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/legoesm"]
 
@@ -165,27 +176,20 @@ modules = [
     "legoesm.ice",
 ]
 unmatched_ignore_imports_alerting = "error"
-ignore_imports = [
-    # ROOT INVERSION — remaining piece. Exact edges only.
-    # RESOLVED: parallel.latlon_mpi -> ocean.state (dead TYPE_CHECKING import
-    #   removed) and the whole ml.channel_packing <-> atmosphere/ocean coupling
-    #   (the spectral-ocean packing moved to ocean.dynamics.channel_packing, so
-    #   ml no longer imports ocean and ocean no longer imports the ml hub).
-    # STILL PENDING: parallel.latlon_mpi instantiates the latlon-cgrid dycore in
-    #   an MPI-step builder (move it into atmosphere; MPI-correctness-sensitive).
-    # RESOLVED (Group C): parallel.latlon_mpi re-instantiates the MPI dycore via
-    # type(model) from the passed-in model instance instead of importing the
-    # atmosphere dycore class — so parallel no longer reaches up into atmosphere.
-    # RESOLVED (Group A): the shared lat-lon C-grid differential operators moved to
-    # legoesm.grids.operators_latlon_cgrid, so the 3 atmosphere -> ocean operator
-    # edges are gone (both atm dycores and ocean import them from grids now).
-    # Group B PARTIAL: the SW state pytrees moved to core/shallow_water_state, so
-    # ocean.barotropic_cgrid (which used only the states) no longer imports the atm
-    # dycore.  STILL PENDING: ocean_model instantiates the atm FV3 SW *model* for
-    # the cube barotropic solver (legitimate shared physics) -> dependency-inject
-    # the SW model builder (the remaining edge).
-    "legoesm.ocean.dynamics.ocean_model -> legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid",
-]
+# ZERO-IGNORE: the atmosphere/ocean/land/ice components are now genuinely
+# independent of one another.  The shared dycore functions are shared through
+# the SUBSTRATE, not component->component imports:
+#   * lat-lon C-grid differential operators -> legoesm.grids.operators_latlon_cgrid
+#     (Group A: both the atm cgrid dycores and the ocean import them from grids);
+#   * the FV3 shallow-water STATE pytrees -> legoesm.core.shallow_water_state
+#     (Group B pt1: shared by the atm SW dycore and the ocean barotropic solver);
+#   * the FV3 shallow-water DYCORE itself is shared via the foundational
+#     legoesm.registry.SW_BAROTROPIC_REGISTRY — the atmosphere registers its
+#     "fv3sw"/"fv3edge" builders on import and the ocean barotropic RESOLVES one
+#     by name (Group B pt2), so neither component imports the other;
+#   * parallel.latlon_mpi re-instantiates the MPI dycore via type(model) from the
+#     passed-in instance (Group C), not an atmosphere import.
+ignore_imports = []
 
 [[tool.importlinter.contracts]]
 # A standalone component package may use the shared SUBSTRATE that legoesm-core

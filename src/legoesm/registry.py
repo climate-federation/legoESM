@@ -6,8 +6,9 @@ A small name -> factory registry with three properties the architecture needs:
   never silently falls through to a default (the dispatch-discipline rule);
 * **plugin discovery** — third-party dycores/components register via
   ``importlib.metadata`` entry points (group ``legoesm.<kind>s``), so
-  ``pip install legoesm-mycore`` makes ``create_dycore("mycore", ...)`` work with
-  no edit to legoESM;
+  ``pip install legoesm-mycore`` makes ``dycore_factory.create_dycore("mycore",
+  ...)`` work with no edit to legoESM (the resolver lives in
+  :mod:`legoesm.dycore_factory`; THIS module stays free of any component import);
 * **contract validation** — a resolved dycore is checked with
   :func:`legoesm.components.validate_dycore` (``isinstance(.., DycoreProtocol)``
   alone is not enough — see that function), so a malformed plugin fails at
@@ -21,7 +22,6 @@ module is additive and changes no existing dispatch.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
 
 
 class UnknownRegistryEntryError(ValueError):
@@ -111,33 +111,18 @@ class Registry:
 DYCORE_REGISTRY = Registry("dycore")
 
 
-def create_dycore(name: str, *args: Any, **kwargs: Any):
-    """Resolve a dycore by *name*, instantiate it, and validate the contract.
+# Builders for the shallow-water core a 3-D ocean's barotropic (free-surface)
+# substep runs through.  The atmosphere SW dycore module REGISTERS its
+# ``"fv3sw"`` / ``"fv3edge"`` builders here on import; ``ocean.dynamics.ocean_model``
+# RESOLVES one by name -> so the ocean reuses the shared shallow-water core
+# WITHOUT importing the atmosphere component (the barotropic ocean is a
+# shallow-water problem, but the dependency flows through this foundational
+# registry, not a component->component import).  Each builder has signature
+# ``builder(grid, cdgrid, ocean_config) -> sw_model``.
+SW_BAROTROPIC_REGISTRY = Registry("sw_barotropic")
 
-    ``create_dycore("cdgrid_shallow_water", grid, config)`` -> a validated dycore.
-    Extra args/kwargs are forwarded to the resolved factory (``Model(grid,
-    config)``).
 
-    Resolution order: an explicitly-registered factory or entry-point plugin
-    first (so a plugin can override or add a dycore), then the **built-in**
-    atmosphere solvers.  The built-in lookup is a deferred import, so the registry
-    substrate stays importable without the atmosphere component (a pure-core
-    install resolves plugins only).  Raises ``ValueError`` for an unknown name and
-    ``TypeError`` for a factory whose product is not a valid dycore.
-    """
-    from legoesm.components import validate_dycore
-
-    try:
-        factory: Callable = DYCORE_REGISTRY.get(name)
-    except UnknownRegistryEntryError:
-        # Only a genuine registry MISS falls back to the built-ins.  A ValueError
-        # raised while *loading* an entry-point plugin is NOT caught here — it
-        # propagates, so a broken plugin override is never silently replaced by
-        # the built-in.  Deferred import keeps legoesm.registry decoupled from the
-        # atmosphere component.
-        from legoesm.atmosphere.dynamics import get_solver_class
-
-        factory = get_solver_class(name)  # raises ValueError if unknown there too
-    dycore = factory(*args, **kwargs)
-    validate_dycore(dycore)
-    return dycore
+# ``create_dycore`` (registry/plugin -> built-in atmosphere fallback) lives in
+# ``legoesm.dycore_factory`` so THIS module carries no atmosphere import and stays
+# importable by every component (the ocean barotropic resolves an SW core from
+# ``SW_BAROTROPIC_REGISTRY`` here without transitively reaching the atmosphere).

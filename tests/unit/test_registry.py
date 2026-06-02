@@ -5,7 +5,8 @@ from __future__ import annotations
 import pytest
 
 from legoesm.components import DycoreProtocol
-from legoesm.registry import DYCORE_REGISTRY, Registry, create_dycore
+from legoesm.dycore_factory import create_dycore
+from legoesm.registry import DYCORE_REGISTRY, Registry
 
 
 class _ToyDycore:
@@ -79,7 +80,9 @@ def test_create_dycore_propagates_plugin_load_failure(monkeypatch) -> None:
     # never silently masked by the built-in on a later call.
     for _ in range(2):
         with pytest.raises(ValueError, match="plugin broken"):
-            reg.create_dycore("cdgrid_shallow_water", object())
+            # create_dycore uses the same DYCORE_REGISTRY instance monkeypatched
+            # via ``reg`` above (imported by reference), so the patch still applies.
+            create_dycore("cdgrid_shallow_water", object())
 
 
 def test_create_dycore_resolves_builtin_atmosphere_solver() -> None:
@@ -121,3 +124,32 @@ def test_entry_point_plugin_discovery(monkeypatch) -> None:
 
     reg = Registry("dycore")
     assert reg.get("plugin_dycore") is _ToyDycore  # discovered via entry point
+
+
+def test_sw_barotropic_provider_resolves_in_fresh_process_without_atmosphere():
+    """Substrate-owned bootstrap: in a FRESH interpreter with the atmosphere NOT
+    preloaded, the 3-D ocean's shallow-water barotropic provider resolves via
+    entry-point discovery (importlib.metadata) — so a cube ocean builds without
+    any caller import-order dependence and without the ocean importing atmosphere.
+    """
+    import os
+    import subprocess
+    import sys
+
+    code = (
+        "import sys\n"
+        "from legoesm.registry import SW_BAROTROPIC_REGISTRY\n"
+        "assert 'legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid' "
+        "not in sys.modules, 'atmosphere preloaded'\n"
+        "b = SW_BAROTROPIC_REGISTRY.get('fv3sw')\n"
+        "assert callable(b)\n"
+        "assert SW_BAROTROPIC_REGISTRY.get('fv3edge') is not None\n"
+        "print('OK')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True,
+        env={**os.environ, "JAX_PLATFORMS": "cpu"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout
