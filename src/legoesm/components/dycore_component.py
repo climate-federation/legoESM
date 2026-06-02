@@ -150,15 +150,16 @@ class ForcedDycoreComponent(AbstractComponent):
                 f"dycore {model!r}.tendencies signature could not be inspected "
                 f"({exc}); cannot confirm it accepts a physics tendency"
             ) from exc
-        if "physics_tendency" not in sig.parameters:
+        forcing_name = str(forcing_name)
+        if forcing_name not in sig.parameters:
             raise TypeError(
                 f"ForcedDycoreComponent requires a core whose tendencies(...) accepts "
-                f"a 'physics_tendency' parameter; {model!r} does not (signature "
+                f"a {forcing_name!r} parameter; {model!r} does not (signature "
                 f"{sig}).  Use DycoreComponent for a DRY core."
             )
         self._model = model
         self._prognostic_variables = tuple(prognostic_variables)
-        self._forcing_name = str(forcing_name)
+        self._forcing_name = forcing_name
 
     @property
     def model(self) -> Any:
@@ -180,12 +181,14 @@ class ForcedDycoreComponent(AbstractComponent):
         """The dynamical RHS plus the supplied physics tendency (pure, D1).
 
         ``forcing`` is the physics tendency (or ``None`` for pure dynamics) and is
-        routed into ``model.tendencies(state, physics_tendency=forcing)``.  ``grid``
-        is carried by the model; ``params`` MUST be ``None`` (no tunable-param seam).
+        routed into ``model.tendencies(state, <forcing_name>=forcing)`` using the
+        configured ``forcing_name`` (the same keyword validated at construction and
+        advertised by :attr:`required_forcing`).  ``grid`` is carried by the model;
+        ``params`` MUST be ``None`` (no tunable-param seam).
         """
         if params is not None:
             raise ValueError(
                 "ForcedDycoreComponent exposes no tunable-parameter seam; got "
                 "non-None params.  Pass the physics tendency via `forcing`."
             )
-        return self._model.tendencies(state, physics_tendency=forcing)
+        return self._model.tendencies(state, **{self._forcing_name: forcing})

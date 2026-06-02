@@ -272,11 +272,12 @@ def _tree_allclose(a, b) -> bool:
         jnp.allclose(x, y) for x, y in zip(la, lb))
 
 
-def _assert_forced_core(grid, model, state) -> None:
+def _assert_forced_core(grid, model, state, prognostic_variables) -> None:
     """Zero forcing == pure dynamics; non-zero forcing changes the RHS and is
     differentiable through the forcing seam (D1)."""
     comp = ForcedDycoreComponent(
-        model, prognostic_variables=("u", "T", "p_s"))
+        model, prognostic_variables=prognostic_variables)
+    assert comp.prognostic_variables == prognostic_variables
 
     dyn = model.tendencies(state)                       # pure dynamical RHS
     # forcing=None routes physics_tendency=None → identical to pure dynamics
@@ -319,10 +320,25 @@ def _assert_forced_core(grid, model, state) -> None:
 @_needs_x64
 def test_forced_cdgrid_pe_couples_and_differentiates() -> None:
     grid, model, state = _cdgrid_pe_model_and_state()
-    _assert_forced_core(grid, model, state)
+    # cdgrid PE (FV3HydrostaticState) evolves D-grid winds u_d/v_d, not 'u'.
+    _assert_forced_core(grid, model, state, ("u_d", "v_d", "T", "p_s"))
 
 
 @_needs_x64
 def test_forced_mpas_pe_couples_and_differentiates() -> None:
     mesh, model, state = _mpas_pe_model_and_state()
-    _assert_forced_core(mesh, model, state)
+    # MPAS PE evolves a single edge-normal wind 'u'.
+    _assert_forced_core(mesh, model, state, ("u", "T", "p_s"))
+
+
+@_needs_x64
+def test_forced_wrapper_validates_the_configured_forcing_name() -> None:
+    """forcing_name is functional: the construction gate validates THAT name (not
+    a hardcoded 'physics_tendency'), so a name the core's tendencies does not
+    accept is rejected — and required_forcing advertises the configured name."""
+    _grid, model, _state = _cdgrid_pe_model_and_state()
+    comp = ForcedDycoreComponent(model, prognostic_variables=("u_d",))
+    assert comp.required_forcing == ("physics_tendency",)
+    with pytest.raises(TypeError, match="nonexistent_forcing"):
+        ForcedDycoreComponent(model, prognostic_variables=("u_d",),
+                              forcing_name="nonexistent_forcing")
