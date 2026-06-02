@@ -173,7 +173,9 @@ ignore_imports = [
     #   ml no longer imports ocean and ocean no longer imports the ml hub).
     # STILL PENDING: parallel.latlon_mpi instantiates the latlon-cgrid dycore in
     #   an MPI-step builder (move it into atmosphere; MPI-correctness-sensitive).
-    "legoesm.parallel.latlon_mpi -> legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid",
+    # RESOLVED (Group C): parallel.latlon_mpi re-instantiates the MPI dycore via
+    # type(model) from the passed-in model instance instead of importing the
+    # atmosphere dycore class — so parallel no longer reaches up into atmosphere.
     # RESOLVED (Group A): the shared lat-lon C-grid differential operators moved to
     # legoesm.grids.operators_latlon_cgrid, so the 3 atmosphere -> ocean operator
     # edges are gone (both atm dycores and ocean import them from grids now).

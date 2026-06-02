@@ -1624,12 +1624,11 @@ def make_latlon_mpi_step(
     kwarg is retained for signature stability with existing test
     fixtures and the (now legacy) tests/parallel/test_latlon_mpi_step_serial.py.
     """
-    # Local imports keep this module importable without the dycore on
-    # the path (important for the Stage-0 halo tests which don't need
-    # the heavy dycore stack).
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
-        CGridLatLonPrimitiveEquationModel,
-    )
+    # The MPI model is re-instantiated from the SAME class as the passed-in
+    # ``model`` via ``type(model)`` — so this shared-substrate ``parallel`` module
+    # does NOT import the atmosphere dycore (preserving component independence;
+    # parallel must not reach up into a component).  The Stage-0 halo tests also
+    # stay importable without the heavy dycore stack.
     from legoesm.grids.halo import set_halo_backend
     from legoesm.parallel.reductions import global_sum_mpi
 
@@ -1678,7 +1677,8 @@ def make_latlon_mpi_step(
     )
     if _mpi_dt is None:
         _mpi_dt = getattr(model, "_max_dt", 600.0)
-    mpi_model = CGridLatLonPrimitiveEquationModel(
+    # Same class as the passed-in model — no atmosphere-dycore import needed.
+    mpi_model = type(model)(
         grid=mpi_grid,
         sigma_coord=model.sigma_coord,
         config=mpi_config,
