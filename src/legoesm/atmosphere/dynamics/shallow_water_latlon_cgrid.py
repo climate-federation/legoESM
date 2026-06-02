@@ -36,14 +36,9 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from legoesm.grids.operator_adapters import latlon_cgrid_operators
 from legoesm.grids.operators_latlon_cgrid import (
-    gradient_x_cgrid,
-    gradient_y_cgrid,
-    divergence_cgrid,
-    curl_vertex_cgrid,
     vector_laplacian_cgrid,
-    interp_cell_to_uface,
-    interp_cell_to_vface,
     cell_to_cgrid_winds,
 )
 from legoesm.core.operators_fv_latlon import cgrid_fv_flux_divergence_latlon
@@ -124,8 +119,8 @@ def absolute_vorticity_coriolis(
     n_lat = grid.n_lat
     n_lon = grid.n_lon
 
-    # --- Relative vorticity at vertices ---
-    zeta = curl_vertex_cgrid(u, v, grid)  # (n_lat+1, n_lon+1[, nlev])
+    # --- Relative vorticity at vertices (via the B2 operator interface) ---
+    zeta = latlon_cgrid_operators(grid).vorticity(u, v)  # (n_lat+1, n_lon+1[, nlev])
 
     # --- Planetary vorticity at vertices ---
     # sin(±π/2) = ±1 exactly, so build f_vert directly from the
@@ -234,25 +229,33 @@ def cgrid_latlon_sw_tendencies(
     h, u, v, h_s = state
     g = config.g
 
+    # The grid-dispatched operator interface (B2): the dynamics flow through
+    # ``ops.divergence``/``gradient``/``interpolate`` rather than the bare free
+    # functions, so the core calls operators without naming the grid (design L2).
+    # The adapter delegates to the same lat-lon C-grid operators, so this is
+    # byte-identical to the direct calls.
+    ops = latlon_cgrid_operators(grid)
+
     # --- 1. Mass flux divergence ---
     if config.use_ppm_transport:
         # PPM (4th-order) reconstruction of h at faces for upwind flux
         dh_dt = cgrid_fv_flux_divergence_latlon(h, u, v, grid)
     else:
         # Simple 2nd-order averaging of h to faces
-        h_u = interp_cell_to_uface(h)
-        h_v = interp_cell_to_vface(h)
+        h_u = ops.interpolate(h, "center", "uface")
+        h_v = ops.interpolate(h, "center", "vface")
         F_u = h_u * u
         F_v = h_v * v
-        dh_dt = -divergence_cgrid(F_u, F_v, grid)
+        dh_dt = -ops.divergence(F_u, F_v)
 
     # --- 2. Bernoulli function at cell centers ---
     KE = _kinetic_energy_cgrid(u, v)   # (n_lat, n_lon)
     B = g * (h + h_s) + KE             # (n_lat, n_lon)
 
     # --- 3. Pressure gradient + KE gradient (Bernoulli gradient) ---
-    du_dt = -gradient_x_cgrid(B, grid)   # (n_lat, n_lon+1)
-    dv_dt = -gradient_y_cgrid(B, grid)   # (n_lat+1, n_lon)
+    grad_x, grad_y = ops.gradient(B)
+    du_dt = -grad_x   # (n_lat, n_lon+1)
+    dv_dt = -grad_y   # (n_lat+1, n_lon)
 
     # --- 4. Coriolis using absolute vorticity (ζ+f) ---
     cor_u, cor_v = absolute_vorticity_coriolis(u, v, grid)
