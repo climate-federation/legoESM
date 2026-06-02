@@ -97,7 +97,7 @@ from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
 from legoesm.core.state import NonHydrostaticState, NonHydrostaticTendencies
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.grids.vertical import HeightCoordinate, TerrainMetric
-from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+from legoesm.grids.operators_latlon_cgrid import (
     divergence_cgrid,
     gradient_x_cgrid,
     gradient_y_cgrid,

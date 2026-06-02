@@ -43,7 +43,7 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState
-from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+from legoesm.grids.operators_latlon_cgrid import (
     gradient_x_cgrid,
     gradient_y_cgrid,
     divergence_cgrid,

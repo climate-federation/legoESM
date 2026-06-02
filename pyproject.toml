@@ -174,10 +174,11 @@ ignore_imports = [
     # STILL PENDING: parallel.latlon_mpi instantiates the latlon-cgrid dycore in
     #   an MPI-step builder (move it into atmosphere; MPI-correctness-sensitive).
     "legoesm.parallel.latlon_mpi -> legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid",
-    # Direct atmosphere<->ocean: shared C-grid / FV3 operators -> move to core/grids.
-    "legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid -> legoesm.ocean.dynamics.latlon_cgrid_operators",
-    "legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid -> legoesm.ocean.dynamics.latlon_cgrid_operators",
-    "legoesm.atmosphere.dynamics.compressible_euler_latlon_cgrid -> legoesm.ocean.dynamics.latlon_cgrid_operators",
+    # RESOLVED (Group A): the shared lat-lon C-grid differential operators moved to
+    # legoesm.grids.operators_latlon_cgrid, so the 3 atmosphere -> ocean operator
+    # edges are gone (both atm dycores and ocean import them from grids now).
+    # Direct atmosphere<->ocean STILL PENDING: ocean barotropic reuses the atm FV3
+    # shallow-water dycore (Group B) -> relocate the shared SW core to a shared layer.
     "legoesm.ocean.dynamics.ocean_model -> legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid",
     "legoesm.ocean.dynamics.barotropic_cgrid -> legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid",
 ]
