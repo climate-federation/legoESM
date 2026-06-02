@@ -883,9 +883,16 @@ def packed_pad_halo_4d(
             )
 
     if len(fields) == 1:
-        return [explicit_pad_halo_4d(
+        out = explicit_pad_halo_4d(
             fields[0], mesh, halo=halo, interp_offsets=interp_offsets,
-        )]
+        )
+        # Single field still owes the duogrid post-remap — the multi-field path
+        # below applies it per piece, so a 1-field call must too (otherwise
+        # `packed_pad_halo_4d(f, duogrid=dg)` silently returned a nearest-copy
+        # halo while the unpacked `pad_halo_4d(f, duogrid=dg)` applied the remap).
+        if duogrid is not None:
+            out = _apply_duogrid_4d(out, duogrid, halo=halo)
+        return [out]
 
     # Use plain Python ints for split indices so JAX treats them as
     # static constants — passing a traced ``jnp.cumsum`` to ``jnp.split``
