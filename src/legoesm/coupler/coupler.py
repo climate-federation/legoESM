@@ -8,7 +8,7 @@ full atmospheric state — only AtmToSurface.
 from __future__ import annotations
 
 import math
-from typing import NamedTuple
+from typing import Any, NamedTuple
 import warnings
 
 import jax
@@ -65,6 +65,24 @@ class SurfaceState(NamedTuple):
     lake: LakeState
     accumulator: FluxAccumulator
     carbon: CarbonState | None = None
+
+
+class _TileContext(NamedTuple):
+    """Per-step inputs shared by every surface-tile step (see :func:`make_coupler`).
+
+    The coupler iterates a uniform catalog of tile-step closures; each closure
+    receives this context and returns ``(TileResponse, state_updates)``, so the
+    surface tiles are a data-driven set rather than hardcoded inline pairs.
+    """
+
+    sfc_state: SurfaceState
+    atm_forcing: AtmToSurface
+    doy: float
+    dt: float
+    ocean_sst: jnp.ndarray
+    ocean_u: jnp.ndarray
+    ocean_v: jnp.ndarray
+    land_params: Any  # materialized LandSurfaceParams, or None
 
 
 def _validate_coupler_config(config: CouplerConfig) -> None:
@@ -343,6 +361,72 @@ def make_coupler(
     _land_param_provider = land_param_provider
     _land_features = land_features
 
+    # --- Surface-tile catalog -------------------------------------------------
+    # Each tile is a step closure ``(ctx) -> (TileResponse, state_updates)``.  The
+    # four Earth-system surface tiles step INDEPENDENTLY of one another (no tile
+    # reads another's freshly-stepped state; ice concentration is consumed only
+    # afterwards, by tile-fraction blending), so the coupler can iterate this
+    # catalog in any order and assemble the result uniformly — replacing the
+    # former hardcoded inline land/ice/lake/ocean stepping with a data-driven set.
+
+    def _step_land_tile(ctx: _TileContext):
+        if _use_multilayer:
+            # Multi-layer land operates on columnar (ncol,) arrays.
+            # Flatten (6,n,n) forcing to (ncol,) and unflatten response.
+            _spatial_shape = ctx.atm_forcing.sw_down.shape
+            _flat_forcing = jax.tree.map(
+                lambda x: x.reshape(-1) if hasattr(x, 'reshape') else x,
+                ctx.atm_forcing,
+            )
+            _flat_lat = (_lat.reshape(-1)
+                         if _lat is not None and hasattr(_lat, 'reshape')
+                         else _lat)
+            land_new, land_resp_flat, carbon_new = step_multilayer_land(
+                ctx.sfc_state.land, _flat_forcing, land_config, U_min, ctx.dt,
+                lat=_flat_lat, carbon_state=ctx.sfc_state.carbon, doy=ctx.doy,
+                land_params=ctx.land_params,
+            )
+            # Unflatten TileResponse fields back to spatial shape
+            land_resp = jax.tree.map(
+                lambda x: (x.reshape(_spatial_shape)
+                           if hasattr(x, 'reshape') and x.ndim == 1
+                              and x.shape[0] == math.prod(_spatial_shape)
+                           else x),
+                land_resp_flat,
+            )
+        else:
+            land_new, land_resp, carbon_new = step_land(
+                ctx.sfc_state.land, ctx.atm_forcing, land_config, U_min, ctx.dt,
+                lat=_lat, carbon_state=ctx.sfc_state.carbon, doy=ctx.doy,
+                land_params=ctx.land_params,
+            )
+        return land_resp, {"land": land_new, "carbon": carbon_new}
+
+    def _step_ice_tile(ctx: _TileContext):
+        ice_new, ice_resp = step_sea_ice(
+            ctx.sfc_state.ice, ctx.atm_forcing, ctx.ocean_sst, ctx.ocean_u,
+            ctx.ocean_v, ice_config, U_min, ctx.dt, grid=_grid)
+        return ice_resp, {"ice": ice_new}
+
+    def _step_lake_tile(ctx: _TileContext):
+        lake_new, lake_resp = step_lake(
+            ctx.sfc_state.lake, ctx.atm_forcing, lake_config, U_min, ctx.dt)
+        return lake_resp, {"lake": lake_new}
+
+    def _step_ocean_tile(ctx: _TileContext):
+        # Diagnostic tile — the ocean model handles its own state, so no update.
+        ocean_resp = ocean_tile_response(
+            ctx.atm_forcing, ctx.ocean_sst, ctx.ocean_u, ctx.ocean_v,
+            coupler_config)
+        return ocean_resp, {}
+
+    _tile_catalog = (
+        ("ocean", _step_ocean_tile),
+        ("ice", _step_ice_tile),
+        ("land", _step_land_tile),
+        ("lake", _step_lake_tile),
+    )
+
     def step_surface(
         sfc_state: SurfaceState,
         atm_forcing: AtmToSurface,
@@ -379,64 +463,35 @@ def make_coupler(
         else:
             _lp = None
 
-        # 2. Step land (dispatch slab vs multi-layer)
-        if _use_multilayer:
-            # Multi-layer land operates on columnar (ncol,) arrays.
-            # Flatten (6,n,n) forcing to (ncol,) and unflatten response.
-            _spatial_shape = atm_forcing.sw_down.shape
-            _flat_forcing = jax.tree.map(
-                lambda x: x.reshape(-1) if hasattr(x, 'reshape') else x,
-                atm_forcing,
-            )
-            _flat_lat = (_lat.reshape(-1)
-                         if _lat is not None and hasattr(_lat, 'reshape')
-                         else _lat)
-            land_new, land_resp_flat, carbon_new = step_multilayer_land(
-                sfc_state.land, _flat_forcing, land_config, U_min, dt,
-                lat=_flat_lat, carbon_state=sfc_state.carbon, doy=doy,
-                land_params=_lp,
-            )
-            # Unflatten TileResponse fields back to spatial shape
-            land_resp = jax.tree.map(
-                lambda x: (x.reshape(_spatial_shape)
-                           if hasattr(x, 'reshape') and x.ndim == 1
-                              and x.shape[0] == math.prod(_spatial_shape)
-                           else x),
-                land_resp_flat,
-            )
-        else:
-            land_new, land_resp, carbon_new = step_land(
-                sfc_state.land, atm_forcing, land_config, U_min, dt,
-                lat=_lat, carbon_state=sfc_state.carbon, doy=doy,
-                land_params=_lp,
-            )
+        # 2. Step every surface tile via the uniform catalog.  Each closure
+        # returns its TileResponse and its state updates; the tiles step
+        # independently so iteration order does not affect the result.
+        ctx = _TileContext(
+            sfc_state=sfc_state, atm_forcing=atm_forcing, doy=doy, dt=dt,
+            ocean_sst=ocean_sst, ocean_u=ocean_u_sfc, ocean_v=ocean_v_sfc,
+            land_params=_lp,
+        )
+        responses: dict = {}
+        updates: dict = {}
+        for _name, _tile_step in _tile_catalog:
+            _resp, _upd = _tile_step(ctx)
+            responses[_name] = _resp
+            updates.update(_upd)
 
-        # 2. Step sea ice
-        ice_new, ice_resp = step_sea_ice(
-            sfc_state.ice, atm_forcing, ocean_sst, ocean_u_sfc,
-            ocean_v_sfc, ice_config, U_min, dt, grid=_grid)
-
-        # 3. Step lake
-        lake_new, lake_resp = step_lake(
-            sfc_state.lake, atm_forcing, lake_config, U_min, dt)
-
-        # 4. Ocean tile (diagnostic — ocean model handles its own state)
-        ocean_resp = ocean_tile_response(
-            atm_forcing, ocean_sst, ocean_u_sfc, ocean_v_sfc,
-            coupler_config)
-
-        # 5. Tile fractions (ice concentration from updated ice state).
+        # 3. Tile fractions (ice concentration from the updated ice state).
         # The ice tile's ice->ocean exchange fluxes are returned per-grid-cell
         # and blended by f_water in blend_tiles (F11), so no pre-step
         # concentration is needed here.
-        ice_conc = ice_new.concentration.data
+        ice_conc = updates["ice"].concentration.data
         # Multi-category: sum across categories for total concentration
         if ice_conc.ndim > len(atm_forcing.sw_down.shape):
             ice_conc = jnp.sum(ice_conc, axis=-1)
         fracs = compute_tile_fractions(tile_config, ice_conc)
 
-        # 6. Blend
-        blended = blend_tiles(ocean_resp, ice_resp, land_resp, lake_resp, fracs)
+        # 4. Blend the tile responses (area-weighted; conservation unchanged).
+        blended = blend_tiles(
+            responses["ocean"], responses["ice"], responses["land"],
+            responses["lake"], fracs)
 
         # 7. Accumulate
         acc_new = accumulate(sfc_state.accumulator, blended, dt)
@@ -477,8 +532,8 @@ def make_coupler(
         )
 
         new_state = SurfaceState(
-            land=land_new, ice=ice_new, lake=lake_new, accumulator=acc_next,
-            carbon=carbon_new)
+            land=updates["land"], ice=updates["ice"], lake=updates["lake"],
+            accumulator=acc_next, carbon=updates["carbon"])
 
         return new_state, blended_out
 
