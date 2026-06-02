@@ -687,24 +687,53 @@ def create_ice_component(config: ExperimentConfig, grid, *, ice_config=None):
     grid
         Horizontal grid object (needed when ice dynamics are enabled).
     ice_config
-        A ``SeaIceConfig`` instance.  If *None*, defaults to
-        ``SeaIceConfig()``.
+        A ``SeaIceConfig`` instance, or an ``IceComplexity`` rung.  If *None*,
+        defaults to ``SeaIceConfig()`` (thermodynamic slab).  An
+        ``IceComplexity`` is resolved to a ``SeaIceConfig`` via
+        :func:`ice_complexity_config`.
 
     Returns
     -------
     step_fn : callable
         ``step_sea_ice(state, forcing, config, dt) -> SeaIceState``.
     """
+    from legoesm.components import IceComplexity
     from legoesm.ice import SeaIceConfig, step_sea_ice
 
     if ice_config is None:
         ice_config = SeaIceConfig()
+    if isinstance(ice_config, IceComplexity):
+        ice_config = ice_complexity_config(ice_config)
 
     logger.info(
         "Ice: dynamics=%s, n_categories=%d",
         ice_config.dynamics, ice_config.n_categories,
     )
     return step_sea_ice
+
+
+def ice_complexity_config(complexity):
+    """Resolve an :class:`~legoesm.components.IceComplexity` rung to a SeaIceConfig.
+
+    ``thermodynamic`` -> the default single-category slab (``SeaIceConfig()``,
+    ``dynamics="none"``); ``dynamic`` -> EVP rheology + 5-category CICE ITD
+    (``dynamics="evp", n_categories=5``).  Orthogonal sub-physics
+    (snow/brine/ridging/ponds) stay at their opt-in defaults — they are gates,
+    not rungs.  Lives here (not the pure components taxonomy) because it builds a
+    concrete ``SeaIceConfig``, which the driver owns.  Raises ``ValueError`` on an
+    unknown rung.
+    """
+    from legoesm.components import IceComplexity
+    from legoesm.ice import SeaIceConfig
+
+    c = IceComplexity(complexity)  # raises ValueError on an unknown rung
+    if c is IceComplexity.THERMODYNAMIC:
+        return SeaIceConfig()  # default single-category slab (dynamics="none")
+    if c is IceComplexity.DYNAMIC:
+        return SeaIceConfig(dynamics="evp", n_categories=5)
+    # Explicit branches (no implicit default): a future IceComplexity rung added
+    # without a mapping here must fail loudly, not silently fall back to slab.
+    raise ValueError(f"unhandled IceComplexity rung: {c!r}")
 
 
 def create_coupler(

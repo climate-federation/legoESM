@@ -27,6 +27,31 @@ level           implementation
 ``multilayer``  multi-layer soil column          (``land.multilayer_land``)
 ==============  ===============================================================
 
+**Atmosphere** (dynamical complexity = the dycore ``model_type``; the numerical
+discretization cdgrid/spectral/mpas/... is an orthogonal *method* choice, not a
+fidelity rung):
+
+=================  ============================================================
+level              implementation
+=================  ============================================================
+``shallow_water``  barotropic shallow water        (single-layer)
+``hydrostatic``    hydrostatic primitive equations (3D)
+``nonhydrostatic`` fully compressible nonhydrostatic Euler (3D)
+=================  ============================================================
+
+**Sea ice**:
+
+================  ===========================================================
+level             implementation
+================  ===========================================================
+``thermodynamic`` single-category slab thermodynamics, diagnostic free drift
+``dynamic``       EVP rheology + 5-category CICE ice-thickness distribution
+================  ===========================================================
+
+Sea-ice sub-physics (snow / brine / ridging / ponds) are independent opt-in
+gates on ``SeaIceConfig``, NOT complexity rungs, so they are not selected by
+:class:`IceComplexity`.
+
 ``full_3d`` ocean is a prognostic 3D model (MPAS or lat-lon C-grid core), built by
 the driver's ocean component factory
 (``driver.component_factory.create_ocean_component``) — NOT a ``make_ocean`` slab
@@ -81,3 +106,54 @@ def ocean_simple_mode(complexity: str | OceanComplexity) -> str:
             "factory (driver.component_factory.create_ocean_component)."
         )
     return _OCEAN_SIMPLE_MODE[c]
+
+
+class AtmosphereComplexity(StrEnum):
+    """Atmosphere dynamical-complexity rungs: barotropic shallow water ->
+    hydrostatic primitive equations -> fully compressible nonhydrostatic.
+
+    This is the *physical* complexity (the dycore ``model_type``), distinct from
+    the numerical *discretization* (cdgrid / spectral / mpas / latlon_cgrid /
+    finite_volume / sfno), which is an orthogonal choice of method, not of
+    fidelity.  The rung values deliberately equal the ``model_type`` strings.
+    """
+
+    SHALLOW_WATER = "shallow_water"
+    HYDROSTATIC = "hydrostatic"
+    NONHYDROSTATIC = "nonhydrostatic"
+
+
+def atmosphere_model_type(complexity: str | AtmosphereComplexity) -> str:
+    """Return the dycore ``model_type`` string for an atmosphere complexity.
+
+    ``atmosphere_model_type("hydrostatic") -> "hydrostatic"``.  The rung values
+    equal the ``model_type`` strings (``atmosphere.dynamics.DYNAMICS_OPTIONS``),
+    so this is the typed, validated entry to that axis.  Raises ``ValueError``
+    for an unknown rung.  (Pure taxonomy: it returns a string and does not import
+    the atmosphere package; a unit test grounds the rungs against the live
+    ``DYNAMICS_OPTIONS`` so the two cannot drift.)
+
+    Note the deliberate asymmetry with ocean/land/ice: the atmosphere dycore
+    already selects its physical complexity through the ``model_type`` *config
+    field* (read by ``create_atmosphere_dycore`` from ``ExperimentConfig.dycore``),
+    so there is no separate ``atmosphere_complexity`` factory argument — this
+    resolver is the typed way to set that field, and it becomes load-bearing in
+    the model-wide complexity dial (``ModelComplexity``).
+    """
+    return AtmosphereComplexity(complexity).value
+
+
+class IceComplexity(StrEnum):
+    """Sea-ice complexity rungs: thermodynamic slab -> dynamic multi-category.
+
+    ``thermodynamic`` is the default single-category slab with diagnostic free
+    drift (no momentum rheology); ``dynamic`` adds EVP rheology + a 5-category
+    CICE-standard ice-thickness distribution.  Orthogonal sub-physics (snow /
+    brine / ridging / ponds) are independent opt-in gates on ``SeaIceConfig``,
+    NOT complexity rungs, so they are not selected here.  The rung -> config
+    resolution lives in the driver's ice factory (which owns ``SeaIceConfig``),
+    not in this pure taxonomy.
+    """
+
+    THERMODYNAMIC = "thermodynamic"
+    DYNAMIC = "dynamic"

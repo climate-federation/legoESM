@@ -8,7 +8,14 @@ from __future__ import annotations
 
 import pytest
 
-from legoesm.components import LandComplexity, OceanComplexity, ocean_simple_mode
+from legoesm.components import (
+    AtmosphereComplexity,
+    IceComplexity,
+    LandComplexity,
+    OceanComplexity,
+    atmosphere_model_type,
+    ocean_simple_mode,
+)
 
 
 def test_ocean_complexity_rungs() -> None:
@@ -129,3 +136,81 @@ def test_land_factory_consumes_complexity_rung(complexity, expected_step) -> Non
 
     step = create_land_component(config=None, grid=None, land_config=complexity)
     assert step is getattr(land, expected_step)
+
+
+# --- atmosphere complexity ladder (model_type), grounded vs the live options ---
+
+
+def test_atmosphere_complexity_rungs() -> None:
+    assert [c.value for c in AtmosphereComplexity] == [
+        "shallow_water",
+        "hydrostatic",
+        "nonhydrostatic",
+    ]
+
+
+@pytest.mark.parametrize("rung", list(AtmosphereComplexity))
+def test_atmosphere_model_type_grounds_against_dynamics_options(rung) -> None:
+    """Each rung resolves to a real dycore model_type — no drift from the source."""
+    from legoesm.atmosphere.dynamics import DYNAMICS_OPTIONS
+
+    model_type = atmosphere_model_type(rung)
+    assert model_type == rung.value  # rung values ARE the model_type strings
+    assert model_type in DYNAMICS_OPTIONS
+
+
+def test_unknown_atmosphere_complexity_raises() -> None:
+    with pytest.raises(ValueError):
+        atmosphere_model_type("quasi_geostrophic")
+
+
+# --- sea-ice complexity ladder: thermodynamic slab -> dynamic multi-category ---
+
+
+def test_ice_complexity_rungs() -> None:
+    assert [c.value for c in IceComplexity] == ["thermodynamic", "dynamic"]
+
+
+@pytest.mark.parametrize(
+    "complexity,expected_dynamics,expected_ncat",
+    [
+        (IceComplexity.THERMODYNAMIC, "none", 1),
+        (IceComplexity.DYNAMIC, "evp", 5),
+    ],
+)
+def test_ice_complexity_config_resolves(
+    complexity, expected_dynamics, expected_ncat
+) -> None:
+    """Each ice rung builds a SeaIceConfig with the right dynamics + ITD."""
+    from legoesm.driver.component_factory import ice_complexity_config
+
+    cfg = ice_complexity_config(complexity)
+    assert cfg.dynamics == expected_dynamics
+    assert cfg.n_categories == expected_ncat
+
+
+def test_ice_factory_consumes_complexity_rung() -> None:
+    """create_ice_component routes an IceComplexity rung through the resolver."""
+    from unittest.mock import patch
+
+    import legoesm.driver.component_factory as cf
+    import legoesm.ice as ice
+
+    # wraps=real fn → keep behaviour while proving the rung was actually resolved
+    # via ice_complexity_config (not merely accepted). Resolution *correctness* is
+    # pinned by test_ice_complexity_config_resolves.
+    with patch.object(
+        cf, "ice_complexity_config", wraps=cf.ice_complexity_config
+    ) as spy:
+        step = cf.create_ice_component(
+            config=None, grid=None, ice_config=IceComplexity.DYNAMIC
+        )
+    assert step is ice.step_sea_ice
+    spy.assert_called_once_with(IceComplexity.DYNAMIC)
+
+
+def test_unknown_ice_complexity_raises() -> None:
+    from legoesm.driver.component_factory import ice_complexity_config
+
+    with pytest.raises(ValueError):
+        ice_complexity_config("pancake")
