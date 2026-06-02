@@ -872,6 +872,15 @@ def packed_pad_halo_4d(
     """
     if not fields:
         return []
+    # Mirror pad_halo_4d (halo.py): duogrid (nearest-copy + Lagrange remap) and
+    # interp_offsets (in-kernel 3-point Lagrange) are mutually exclusive — applying
+    # both would silently run "offsets first, duogrid remap second".  Reject up
+    # front rather than corrupt the halo.
+    if interp_offsets is not None and duogrid is not None:
+        raise ValueError(
+            "interp_offsets and duogrid are mutually exclusive in "
+            "packed_pad_halo_4d (mirrors pad_halo_4d); pass one or the other."
+        )
     # FV3_3D iter-1073 (codex iter-1072 BLOCKER): non-square guard
     # mirroring ``pad_halo_4d``.  Each field must be square (n, n).
     for i, f in enumerate(fields):

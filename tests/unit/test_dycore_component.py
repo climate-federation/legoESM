@@ -284,21 +284,36 @@ def _assert_forced_core(grid, model, state) -> None:
     # an explicit ZERO physics tendency is a no-op (added leaf-wise)
     zero_phys = jax.tree.map(jnp.zeros_like, dyn)
     assert _tree_allclose(comp.tendency(grid, state, zero_phys, None), dyn)
-    # a NON-zero physics tendency changes the RHS (forcing is genuinely consumed)
+    # The core ADDS physics_tendency leaf-wise, so a NON-zero forcing reaches the
+    # RHS EXACTLY: every consumed leaf gains the forcing identically (forced - dyn
+    # == pert), every unconsumed leaf is unchanged.  This is stronger than an
+    # aggregate "RHS changed" check — it pins the per-leaf identity-add and proves
+    # at least one leaf is genuinely consumed.
     pert = jax.tree.map(lambda x: 1e-2 * jnp.ones_like(x), dyn)
     forced = comp.tendency(grid, state, pert, None)
-    assert all(jnp.all(jnp.isfinite(x)) for x in jax.tree.leaves(forced))
-    assert not _tree_allclose(forced, dyn)
+    consumed = 0
+    for fl, dl, pl in zip(jax.tree.leaves(forced), jax.tree.leaves(dyn),
+                          jax.tree.leaves(pert)):
+        assert jnp.all(jnp.isfinite(fl))
+        diff = fl - dl
+        dropped = bool(jnp.allclose(diff, 0.0))
+        added = bool(jnp.allclose(diff, pl))
+        assert dropped or added, (
+            "a forcing leaf was neither dropped nor added identically — the "
+            "wrapper must not scale/transform the supplied physics tendency")
+        consumed += int(added and not dropped)
+    assert consumed > 0, "no forcing leaf was consumed by the core"
 
-    # d(forced RHS)/d(forcing magnitude): finite AND non-zero → the physics
-    # tendency flows differentiably through the brick's forcing seam.
-    def loss(scale):
-        phys = jax.tree.map(lambda x: scale * jnp.ones_like(x), dyn)
+    # Differentiate wrt the FULL forcing pytree (not an aggregate scalar): the
+    # gradient is finite and at least one consumed leaf carries a non-zero
+    # gradient — the physics tendency flows differentiably through the seam (D1).
+    def loss(phys):
         t = comp.tendency(grid, state, phys, None)
         return sum(jnp.sum(x ** 2) for x in jax.tree.leaves(t))
 
-    g = jax.grad(loss)(1e-2)
-    assert jnp.isfinite(g) and jnp.abs(g) > 0.0
+    g_leaves = jax.tree.leaves(jax.grad(loss)(pert))
+    assert g_leaves and all(jnp.all(jnp.isfinite(x)) for x in g_leaves)
+    assert any(float(jnp.max(jnp.abs(x))) > 0.0 for x in g_leaves)
 
 
 @_needs_x64

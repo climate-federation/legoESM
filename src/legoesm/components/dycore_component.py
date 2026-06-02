@@ -114,6 +114,12 @@ class ForcedDycoreComponent(AbstractComponent):
       ``physics_tendency`` parameter is left at its default).  A non-``None``
       ``forcing`` is passed through unmodified — the core adds it leaf-wise, so it
       must match the core's tendency structure (the caller/coupler owns that).
+      The wrapper deliberately does NOT validate the forcing structure (that would
+      mean running the dynamics to materialise the reference tendency).  **Caveat:**
+      a core may merge *optional* sub-structures permissively — e.g. MPAS adds
+      tracer tendencies only for keys present in ``physics_tendency.tracer_tendencies``
+      — so an omitted key is silently dropped *by the core*.  Supply a complete
+      forcing (every prognostic the state evolves) to avoid that.
     * ``params`` MUST be ``None`` — this wrapper exposes no tunable-parameter seam
       and rejects a payload rather than silently dropping it.
     * Same **instantaneous (dt-independent) RHS** contract as
