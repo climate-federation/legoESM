@@ -179,10 +179,12 @@ ignore_imports = [
     # RESOLVED (Group A): the shared lat-lon C-grid differential operators moved to
     # legoesm.grids.operators_latlon_cgrid, so the 3 atmosphere -> ocean operator
     # edges are gone (both atm dycores and ocean import them from grids now).
-    # Direct atmosphere<->ocean STILL PENDING: ocean barotropic reuses the atm FV3
-    # shallow-water dycore (Group B) -> relocate the shared SW core to a shared layer.
+    # Group B PARTIAL: the SW state pytrees moved to core/shallow_water_state, so
+    # ocean.barotropic_cgrid (which used only the states) no longer imports the atm
+    # dycore.  STILL PENDING: ocean_model instantiates the atm FV3 SW *model* for
+    # the cube barotropic solver (legitimate shared physics) -> dependency-inject
+    # the SW model builder (the remaining edge).
     "legoesm.ocean.dynamics.ocean_model -> legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid",
-    "legoesm.ocean.dynamics.barotropic_cgrid -> legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid",
 ]
 
 [[tool.importlinter.contracts]]

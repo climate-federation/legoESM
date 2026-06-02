@@ -29,6 +29,11 @@ import jax.numpy as jnp
 
 from legoesm.core.fv3_sw_core import fv3_fb_sw_step
 from legoesm.core.precision import cast_pytree
+# SW state pytrees now live in core (shared with the ocean barotropic solver).
+from legoesm.core.shallow_water_state import (
+    CDGridShallowWaterState,
+    FV3EdgeShallowWaterState,
+)
 from legoesm.core.operators_cdgrid import (
     dgrid_to_cgrid,
     cgrid_mass_flux_divergence,
@@ -65,18 +70,7 @@ from legoesm import constants
 # State and Config
 # ==============================================================================
 
-class CDGridShallowWaterState(NamedTuple):
-    """Shallow water state on the FV3 C-D grid.
-
-    h : (6, n, n) -- height at cell centres
-    u_d : (6, n+1, n+1) -- x-velocity at cell corners (D-grid)
-    v_d : (6, n+1, n+1) -- y-velocity at cell corners (D-grid)
-    h_s : (6, n, n) -- surface topography at cell centres
-    """
-    h: jax.Array
-    u_d: jax.Array
-    v_d: jax.Array
-    h_s: jax.Array
+# CDGridShallowWaterState moved to legoesm.core.shallow_water_state (imported above).
 
 
 class CDGridShallowWaterConfig(NamedTuple):
@@ -1332,18 +1326,7 @@ class FV3FBShallowWaterModel:
 # FV3 edge-midpoint D-grid shallow water model
 # ==============================================================================
 
-class FV3EdgeShallowWaterState(NamedTuple):
-    """Shallow water state with FV3 edge-midpoint D-grid stagger.
-
-    h   : (6, n, n)   -- height at cell centres
-    u_d : (6, n, n+1) -- x-velocity at x-edge midpoints
-    v_d : (6, n+1, n) -- y-velocity at y-edge midpoints
-    h_s : (6, n, n)   -- surface topography at cell centres
-    """
-    h: jax.Array
-    u_d: jax.Array
-    v_d: jax.Array
-    h_s: jax.Array
+# FV3EdgeShallowWaterState moved to legoesm.core.shallow_water_state (imported above).
 
 
 class FV3EdgeShallowWaterModel(IntegrationMixin):

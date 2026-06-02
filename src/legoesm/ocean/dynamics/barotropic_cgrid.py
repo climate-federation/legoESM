@@ -340,7 +340,7 @@ def barotropic_substeps_fv3sw(
     ``center_to_dgrid_vector`` and projected back on exit.  Land is enforced by
     the cell mask on the returned eta/velocity (the SW core itself is global).
     """
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.core.shallow_water_state import (
         CDGridShallowWaterState,
     )
 
@@ -490,7 +490,7 @@ def barotropic_substeps_fv3edge(
     ``fv3sw`` wrapper; codex 19de9080 review); edge->cc on exit preserves the baroclinic
     deviation.
     """
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+    from legoesm.core.shallow_water_state import (
         FV3EdgeShallowWaterState,
     )
     _f64 = jnp.float64
