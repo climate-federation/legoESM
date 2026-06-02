@@ -12,8 +12,10 @@ from legoesm.components import (
     AtmosphereComplexity,
     IceComplexity,
     LandComplexity,
+    ModelComplexity,
     OceanComplexity,
     atmosphere_model_type,
+    model_complexity_rungs,
     ocean_simple_mode,
 )
 
@@ -214,3 +216,71 @@ def test_unknown_ice_complexity_raises() -> None:
 
     with pytest.raises(ValueError):
         ice_complexity_config("pancake")
+
+
+# --- the model-wide complexity dial: one level -> all four component rungs ---
+
+
+def test_model_complexity_levels() -> None:
+    assert [c.value for c in ModelComplexity] == ["idealized", "intermediate", "full"]
+
+
+@pytest.mark.parametrize(
+    "level,atm,ocn,lnd,ice",
+    [
+        (
+            ModelComplexity.IDEALIZED,
+            AtmosphereComplexity.SHALLOW_WATER,
+            OceanComplexity.FIXED_SST,
+            LandComplexity.SLAB,
+            IceComplexity.THERMODYNAMIC,
+        ),
+        (
+            ModelComplexity.INTERMEDIATE,
+            AtmosphereComplexity.HYDROSTATIC,
+            OceanComplexity.SLAB,
+            LandComplexity.MULTILAYER,
+            IceComplexity.THERMODYNAMIC,
+        ),
+        (
+            ModelComplexity.FULL,
+            AtmosphereComplexity.HYDROSTATIC,
+            OceanComplexity.FULL_3D,
+            LandComplexity.MULTILAYER,
+            IceComplexity.DYNAMIC,
+        ),
+    ],
+)
+def test_model_complexity_rungs_per_level(level, atm, ocn, lnd, ice) -> None:
+    rungs = model_complexity_rungs(level)
+    assert (rungs.atmosphere, rungs.ocean, rungs.land, rungs.ice) == (atm, ocn, lnd, ice)
+
+
+@pytest.mark.parametrize("level", list(ModelComplexity))
+def test_dial_rungs_are_live(level) -> None:
+    """Every rung the dial emits is a real, consumable rung for its factory."""
+    from legoesm.atmosphere.dynamics import DYNAMICS_OPTIONS
+    from legoesm.driver.component_factory import (
+        create_land_component,
+        ice_complexity_config,
+    )
+
+    rungs = model_complexity_rungs(level)
+    # atmosphere rung -> a real dycore model_type
+    assert atmosphere_model_type(rungs.atmosphere) in DYNAMICS_OPTIONS
+    # ocean: simple rungs map to a make_ocean mode; full_3d is the prognostic model
+    if rungs.ocean is OceanComplexity.FULL_3D:
+        assert level is ModelComplexity.FULL
+    else:
+        assert ocean_simple_mode(rungs.ocean) in ("fixed", "slab", "two_layer")
+    # land rung -> a real land step fn
+    assert callable(
+        create_land_component(config=None, grid=None, land_config=rungs.land)
+    )
+    # ice rung -> a real SeaIceConfig
+    assert ice_complexity_config(rungs.ice).dynamics in ("none", "evp")
+
+
+def test_unknown_model_complexity_raises() -> None:
+    with pytest.raises(ValueError):
+        model_complexity_rungs("kitchen_sink")

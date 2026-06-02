@@ -65,6 +65,7 @@ their exact call signatures are owned there, not pinned here.)
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import NamedTuple
 
 
 class OceanComplexity(StrEnum):
@@ -157,3 +158,72 @@ class IceComplexity(StrEnum):
 
     THERMODYNAMIC = "thermodynamic"
     DYNAMIC = "dynamic"
+
+
+class ComponentComplexities(NamedTuple):
+    """The per-component complexity rungs of one model-wide complexity level."""
+
+    atmosphere: AtmosphereComplexity
+    ocean: OceanComplexity
+    land: LandComplexity
+    ice: IceComplexity
+
+
+class ModelComplexity(StrEnum):
+    """A single model-wide complexity dial climbing the Held hierarchy of models.
+
+    One level resolves all four components to a coherent rung at once
+    (:func:`model_complexity_rungs`), so a user dials ``complexity="idealized"``
+    instead of hand-assembling four enums:
+
+    ===============  =============  ==========  ============  ==============
+    level            atmosphere     ocean       land          ice
+    ===============  =============  ==========  ============  ==============
+    ``idealized``    shallow_water  fixed_sst   slab          thermodynamic
+    ``intermediate`` hydrostatic    slab        multilayer    thermodynamic
+    ``full``         hydrostatic    full_3d     multilayer    dynamic
+    ===============  =============  ==========  ============  ==============
+
+    The ``full`` atmosphere is hydrostatic primitive equations — the standard
+    *global-climate* dycore.  ``nonhydrostatic`` is a specialised km-scale
+    CRM/LES choice (not "more Earth" at climate resolution), reached directly via
+    :class:`AtmosphereComplexity`, so it is intentionally NOT on this Earth dial.
+    """
+
+    IDEALIZED = "idealized"
+    INTERMEDIATE = "intermediate"
+    FULL = "full"
+
+
+_MODEL_COMPLEXITY: dict[ModelComplexity, ComponentComplexities] = {
+    ModelComplexity.IDEALIZED: ComponentComplexities(
+        atmosphere=AtmosphereComplexity.SHALLOW_WATER,
+        ocean=OceanComplexity.FIXED_SST,
+        land=LandComplexity.SLAB,
+        ice=IceComplexity.THERMODYNAMIC,
+    ),
+    ModelComplexity.INTERMEDIATE: ComponentComplexities(
+        atmosphere=AtmosphereComplexity.HYDROSTATIC,
+        ocean=OceanComplexity.SLAB,
+        land=LandComplexity.MULTILAYER,
+        ice=IceComplexity.THERMODYNAMIC,
+    ),
+    ModelComplexity.FULL: ComponentComplexities(
+        atmosphere=AtmosphereComplexity.HYDROSTATIC,
+        ocean=OceanComplexity.FULL_3D,
+        land=LandComplexity.MULTILAYER,
+        ice=IceComplexity.DYNAMIC,
+    ),
+}
+
+
+def model_complexity_rungs(level: str | ModelComplexity) -> ComponentComplexities:
+    """Resolve a model-wide complexity *level* to each component's rung.
+
+    ``model_complexity_rungs("full").ocean is OceanComplexity.FULL_3D``.  Pure
+    taxonomy: returns the component-complexity enums (all owned by this module);
+    a driver feeds each to its factory.  Raises ``ValueError`` on an unknown
+    level; the table covers every :class:`ModelComplexity` member (a unit test
+    asserts totality, so a newly added level without a mapping fails loudly).
+    """
+    return _MODEL_COMPLEXITY[ModelComplexity(level)]

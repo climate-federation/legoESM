@@ -10,10 +10,13 @@ See :mod:`legoesm.components.protocol`.
 
 from legoesm.components.complexity import (  # noqa: F401
     AtmosphereComplexity,
+    ComponentComplexities,
     IceComplexity,
     LandComplexity,
+    ModelComplexity,
     OceanComplexity,
     atmosphere_model_type,
+    model_complexity_rungs,
     ocean_simple_mode,
 )
 from legoesm.components.interface import (  # noqa: F401
@@ -48,6 +51,9 @@ __all__ = [
     "LandComplexity",
     "AtmosphereComplexity",
     "IceComplexity",
+    "ModelComplexity",
+    "ComponentComplexities",
     "ocean_simple_mode",
     "atmosphere_model_type",
+    "model_complexity_rungs",
 ]
