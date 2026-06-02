@@ -342,3 +342,40 @@ def test_forced_wrapper_validates_the_configured_forcing_name() -> None:
     with pytest.raises(TypeError, match="nonexistent_forcing"):
         ForcedDycoreComponent(model, prognostic_variables=("u_d",),
                               forcing_name="nonexistent_forcing")
+
+
+@_needs_x64
+def test_prescribed_brick_drives_forced_dycore() -> None:
+    """The independent-OR-coupled component seam, end-to-end: a PrescribedComponent
+    PRODUCES the physics tendency a ForcedDycoreComponent CONSUMES — the producer's
+    provided_fluxes matches the consumer's required_forcing, the coupling is the
+    exact additive RHS, and a gradient flows producer -> consumer (D1)."""
+    from legoesm.components.prescribed_component import PrescribedComponent
+
+    grid, model, state = _cdgrid_pe_model_and_state()
+    forced = ForcedDycoreComponent(
+        model, prognostic_variables=("u_d", "v_d", "T", "p_s"))
+    dyn = model.tendencies(state)
+    phys = jax.tree.map(lambda x: 1e-2 * jnp.ones_like(x), dyn)
+    prescribed = PrescribedComponent(phys, provided_fluxes=("physics_tendency",))
+
+    # the producer provides exactly what the consumer requires
+    assert set(forced.required_forcing) <= set(prescribed.provided_fluxes)
+
+    # couple: the consumer's RHS = dynamics + the prescribed forcing (exact add)
+    coupled = forced.tendency(grid, state, prescribed.provide(grid, state), None)
+    for cl, dl, pl in zip(jax.tree.leaves(coupled), jax.tree.leaves(dyn),
+                          jax.tree.leaves(phys)):
+        diff = cl - dl
+        assert bool(jnp.allclose(diff, 0.0)) or bool(jnp.allclose(diff, pl))
+
+    # differentiable producer -> consumer: grad of the consumer loss wrt the
+    # prescribed payload is finite and non-zero somewhere.
+    def loss(payload):
+        pc = PrescribedComponent(payload, provided_fluxes=("physics_tendency",))
+        t = forced.tendency(grid, state, pc.provide(grid, state), None)
+        return sum(jnp.sum(x ** 2) for x in jax.tree.leaves(t))
+
+    g_leaves = jax.tree.leaves(jax.grad(loss)(phys))
+    assert g_leaves and all(jnp.all(jnp.isfinite(x)) for x in g_leaves)
+    assert any(float(jnp.max(jnp.abs(x))) > 0.0 for x in g_leaves)
