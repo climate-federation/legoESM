@@ -11,15 +11,24 @@ prescribed physics tendency driving a forcing-coupled dycore
 It is the *producer* half of the component seam (the dycore wrappers are the
 *consumer* half): ``prognostic_variables`` is empty (no state advances),
 ``required_forcing`` is empty (it needs no partner), and its value is
-``provided_fluxes`` — the names of what it hands over, returned by :meth:`provide`.
-Because :meth:`provide` simply returns a pytree (or calls a pure closure), a
-gradient flows from the consumer's loss back through the prescribed payload (D1),
-so an end-to-end ``producer -> consumer`` assembly stays differentiable.
+``provided_fluxes`` — the names of what it hands over.  The payload is a **mapping
+keyed by ``provided_fluxes``**, so :attr:`provided_fluxes` is load-bearing: a
+consumer routes by name (``producer.provide(grid, state)[flux_name]``), and that
+name is exactly what the consumer lists in its ``required_forcing``.
+
+**Differentiability (D1).**  :meth:`provide` is a pure passthrough, so a gradient
+flows back through the payload values *when they are traced* — i.e. the component
+is constructed inside the differentiated scope, or ``fluxes`` is a pure closure
+over the traced inputs.  ``PrescribedComponent`` is NOT an Equinox/pytree module:
+its payload is a plain Python attribute, so a component built OUTSIDE and captured
+by ``jit``/``scan`` holds the payload as a *static constant* (not a trainable leaf).
+Pass the payload through as a traced value (or via a closure) to differentiate it.
+Treat the payload as **immutable** — :meth:`provide` returns it without copying.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from legoesm.components.protocol import AbstractComponent
@@ -31,21 +40,43 @@ class PrescribedComponent(AbstractComponent):
     Parameters
     ----------
     fluxes
-        The prescribed payload handed to partners — either a pytree (static) or a
-        pure ``callable(grid, state) -> pytree`` (e.g. time/space-varying SST).
+        The prescribed payload — a ``Mapping`` ``{flux_name: value}`` keyed EXACTLY
+        by *provided_fluxes*, or a pure ``callable(grid, state) -> such a mapping``
+        (e.g. a time/space-varying SST closure).
     provided_fluxes
-        Names of what this brick provides (its :attr:`provided_fluxes`).  These are
-        what a partner lists in its ``required_forcing``.
+        Names of what this brick provides (its :attr:`provided_fluxes`); a partner
+        lists these in its ``required_forcing``.
+
+    A static (non-callable) payload is validated at construction — its keys must
+    equal *provided_fluxes* — so a misdeclared producer fails loudly rather than
+    handing a partner a flux it never named.  A callable payload must return the
+    same key set (validated lazily on the first :meth:`provide`).
     """
 
     def __init__(
         self,
-        fluxes: Any | Callable[[Any, Any], Any],
+        fluxes: Mapping[str, Any] | Callable[[Any, Any], Mapping[str, Any]],
         *,
         provided_fluxes: tuple[str, ...],
     ) -> None:
-        self._fluxes = fluxes
         self._provided_fluxes = tuple(provided_fluxes)
+        self._fluxes = fluxes
+        if not callable(fluxes):
+            self._check_keys(fluxes)
+
+    def _check_keys(self, payload: Any) -> None:
+        if not isinstance(payload, Mapping):
+            raise TypeError(
+                "PrescribedComponent payload must be a Mapping "
+                "{flux_name: value} keyed by provided_fluxes (or a callable "
+                f"returning one); got {type(payload).__name__}"
+            )
+        keys = set(payload.keys())
+        if keys != set(self._provided_fluxes):
+            raise ValueError(
+                f"PrescribedComponent payload keys {sorted(keys)} must equal "
+                f"provided_fluxes {sorted(self._provided_fluxes)}"
+            )
 
     @property
     def prognostic_variables(self) -> tuple[str, ...]:
@@ -59,21 +90,30 @@ class PrescribedComponent(AbstractComponent):
     def provided_fluxes(self) -> tuple[str, ...]:
         return self._provided_fluxes
 
-    def provide(self, grid: Any = None, state: Any = None) -> Any:
-        """Return the prescribed payload (calls the closure if ``fluxes`` is one).
+    def provide(self, grid: Any = None, state: Any = None) -> Mapping[str, Any]:
+        """Return the prescribed ``{flux_name: value}`` mapping (the producer handoff).
 
-        This is the producer handoff a partner consumes — e.g. feed the result as
-        the ``forcing`` argument of a consumer component's ``tendency``.  Pure, so
-        a gradient flows back through it (D1).
+        A partner routes by name — ``provide(grid, state)[flux_name]`` — and feeds
+        that into its consuming ``tendency``.  Pure, so a gradient flows back
+        through the payload values (D1).  Treat the result as immutable.
         """
+        payload = self._fluxes(grid, state) if callable(self._fluxes) else self._fluxes
         if callable(self._fluxes):
-            return self._fluxes(grid, state)
-        return self._fluxes
+            self._check_keys(payload)  # a callable's output must match the names too
+        return payload
 
     def tendency(self, grid: Any, state: Any, forcing: Any, params: Any) -> Any:
-        """A no-op: a prescribed brick advances no state, so ``dstate`` is empty.
+        """A no-op: a prescribed brick advances no state, so ``dstate`` is the empty
+        pytree ``()`` (matching ``prognostic_variables == ()``).
 
-        ``forcing``/``params`` are ignored (a producer is inert to them — nothing
-        that should be used is silently dropped, because it evolves nothing).
+        An inert producer takes no ``forcing``/``params`` — a non-``None`` payload is
+        rejected rather than silently dropped (its output is read via
+        :meth:`provide`, not produced through this seam).
         """
+        if forcing is not None or params is not None:
+            raise ValueError(
+                "PrescribedComponent is an inert producer (it evolves nothing and "
+                "consumes no forcing/params); got a non-None forcing/params.  Read "
+                "its prescribed output via provide()."
+            )
         return ()

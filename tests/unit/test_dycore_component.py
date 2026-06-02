@@ -357,23 +357,29 @@ def test_prescribed_brick_drives_forced_dycore() -> None:
         model, prognostic_variables=("u_d", "v_d", "T", "p_s"))
     dyn = model.tendencies(state)
     phys = jax.tree.map(lambda x: 1e-2 * jnp.ones_like(x), dyn)
-    prescribed = PrescribedComponent(phys, provided_fluxes=("physics_tendency",))
+    name = forced.required_forcing[0]                       # "physics_tendency"
+    prescribed = PrescribedComponent({name: phys}, provided_fluxes=(name,))
 
-    # the producer provides exactly what the consumer requires
+    # the producer provides (at least) what the consumer requires
     assert set(forced.required_forcing) <= set(prescribed.provided_fluxes)
 
-    # couple: the consumer's RHS = dynamics + the prescribed forcing (exact add)
-    coupled = forced.tendency(grid, state, prescribed.provide(grid, state), None)
+    # couple by ROUTING the named flux (provided_fluxes is load-bearing): the
+    # consumer's RHS = dynamics + the prescribed forcing (exact additive add).
+    forcing = prescribed.provide(grid, state)[name]
+    coupled = forced.tendency(grid, state, forcing, None)
+    consumed = 0
     for cl, dl, pl in zip(jax.tree.leaves(coupled), jax.tree.leaves(dyn),
                           jax.tree.leaves(phys)):
         diff = cl - dl
         assert bool(jnp.allclose(diff, 0.0)) or bool(jnp.allclose(diff, pl))
+        consumed += int(bool(jnp.allclose(diff, pl)) and not bool(jnp.allclose(pl, 0.0)))
+    assert consumed > 0, "the consumer dropped the entire prescribed forcing"
 
     # differentiable producer -> consumer: grad of the consumer loss wrt the
-    # prescribed payload is finite and non-zero somewhere.
+    # prescribed payload (routed by name) is finite and non-zero somewhere.
     def loss(payload):
-        pc = PrescribedComponent(payload, provided_fluxes=("physics_tendency",))
-        t = forced.tendency(grid, state, pc.provide(grid, state), None)
+        pc = PrescribedComponent({name: payload}, provided_fluxes=(name,))
+        t = forced.tendency(grid, state, pc.provide(grid, state)[name], None)
         return sum(jnp.sum(x ** 2) for x in jax.tree.leaves(t))
 
     g_leaves = jax.tree.leaves(jax.grad(loss)(phys))
