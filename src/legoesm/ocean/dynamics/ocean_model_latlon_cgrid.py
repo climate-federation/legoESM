@@ -808,7 +808,7 @@ class LatLonCGridOceanModel:
 
     def _step_impl(self, state: LatLonCGridOceanState, dt: float,
                    freshwater=None, surface_forcing=None,
-                   sponge=None) -> LatLonCGridOceanState:
+                   sponge=None, *, _apply_implicit_vmix: bool = True):
         """Core step logic — no JIT wrapper.
 
         Use this directly inside an outer ``@jax.jit`` context (e.g.
@@ -816,6 +816,18 @@ class LatLonCGridOceanModel:
         that can cause numerical divergence with partial-cell
         coordinates.  For standalone calls, use ``step()`` which wraps
         this in ``@jax.jit``.
+
+        ``_apply_implicit_vmix`` (private): when ``False`` the final implicit
+        vertical-mixing solve and the conservation fixer are skipped and the
+        method returns ``(state_explicit, (tend.K_v, tend.A_v, K33))`` — the
+        explicit-only forward-Euler state plus the implicit-mixing diffusivity
+        profiles from the tendencies (``tend.K_v``/``tend.A_v`` may be ``None`` for
+        schemes, e.g. TKE, that don't surface them — then the consumer recomputes,
+        as the forward-Euler path does).  Used ONLY by the faithful AB2 path
+        (``_ab2_step``), which AB2-extrapolates the explicit increment and then
+        applies implicit vertical mixing ONCE (Veros core/thermodynamics.py +
+        core/external/solve_stream.py).  The default ``True`` leaves every other
+        caller bit-identical.
         """
         state = cast_pytree(state, None, "compute")
 
@@ -1451,7 +1463,7 @@ class LatLonCGridOceanModel:
         # and bottom and is split-stepped (Lie splitting, 1st-order)
         # after tracer advection, GM/Redi, and the freshwater virtual
         # salt flux — matching MOM6's diabatic-process ordering.
-        if self.config.implicit_vertical_mixing:
+        if self.config.implicit_vertical_mixing and _apply_implicit_vmix:
             state_new = self._apply_implicit_vertical_mixing(
                 state_new, dt, surface_forcing,
                 K_v_phys=tend.K_v, A_v_phys=tend.A_v,
@@ -1459,12 +1471,20 @@ class LatLonCGridOceanModel:
             )
 
         # 9. Conservation fixers
-        if self.config.use_conservation_fixer:
+        if self.config.use_conservation_fixer and _apply_implicit_vmix:
             state_new = ocean_conservation_fixer(
                 state_new, state, self.grid, self.z_coord, self.config,
             )
 
-        return cast_pytree(state_new, None, "storage", allow_downcast=True)
+        state_new = cast_pytree(state_new, None, "storage", allow_downcast=True)
+        if not _apply_implicit_vmix:
+            # Faithful AB2 path: return the explicit-only state plus the
+            # implicit-mixing diffusivity profiles (evaluated from u^n, like
+            # Veros's du_mix / kappaH).  ``_ab2_step`` applies implicit vertical
+            # mixing ONCE after the AB2 extrapolation and runs the conservation
+            # fixer once on the final state.
+            return state_new, (tend.K_v, tend.A_v, k33_implicit)
+        return state_new
 
     @staticmethod
     def _symmetrize_fold(state, fold):
@@ -1867,23 +1887,11 @@ class LatLonCGridOceanModel:
                 raise ValueError(
                     "outer_integrator='ab2' double-counts with "
                     "tracer_time_integrator='ab2'; set the inner one to 'euler'.")
-            # Guard (adversarial-review #2): the AB2 outer scheme extrapolates the
-            # TOTAL forward-Euler increment, which INCLUDES the once-applied implicit
-            # vertical-mixing increment — so it AB2-extrapolates the implicit mixing
-            # rather than applying it once (unlike Veros). That converts unconditional
-            # vertical-mixing stability into CONDITIONAL (threshold ~ dt·K_v·4/dz²_min
-            # ≲ a few; a stiff-K_v channel blows up at ~200 steps). Reject the clearest
-            # stiff trigger — convective adjustment (large K_conv). Mild mixing (the
-            # ACC recipe: convection="none", TKE ⇒ dt·λ≈-0.2) is safe.
-            _phys = getattr(self.config, "physics", None)
-            _conv = getattr(_phys, "convection", None) if _phys is not None else None
-            if _conv is not None and getattr(_conv, "scheme", "none") != "none":
-                raise ValueError(
-                    "outer_integrator='ab2' is conditionally unstable with convective "
-                    f"adjustment (convection.scheme={_conv.scheme!r}): it AB2-extrapolates "
-                    "the implicit vertical-mixing increment. Use 'forward_euler', disable "
-                    "convective adjustment, or the faithful explicit-AB2 + implicit-once "
-                    "refinement. See docs/ocean_fidelity/oracle_recipe_strategy.md §8.")
+            # The faithful AB2 path (``_ab2_step``) AB2-extrapolates ONLY the
+            # explicit tendency and applies implicit vertical mixing ONCE
+            # afterward (Veros core/thermodynamics.py + core/external/
+            # solve_stream.py), so it is unconditionally stable in the vertical
+            # and compatible with convective adjustment — no convection guard.
             return self._ab2_step(
                 state, dt, freshwater=freshwater,
                 surface_forcing=surface_forcing, sponge=sponge)
@@ -1894,48 +1902,74 @@ class LatLonCGridOceanModel:
     def _ab2_step(self, state: LatLonCGridOceanState, dt: float,
                   freshwater=None, surface_forcing=None, sponge=None,
                   ) -> LatLonCGridOceanState:
-        """Adams-Bashforth-2 outer integrator (Veros's scheme).
+        """Adams-Bashforth-2 outer integrator (Veros's faithful scheme).
 
-        The forward-Euler step ``_step_impl`` gives ``X_FE = X^n + ΔX`` (ΔX = the
-        explicit FE increment, which already includes the once-applied implicit
-        vertical mixing and the split-explicit barotropic solve). AB2 extrapolates
-        the increment::
+        Veros AB2-extrapolates only the EXPLICIT tendency and applies implicit
+        vertical mixing ONCE afterward (``core/thermodynamics.py`` tracers,
+        ``core/external/solve_stream.py`` momentum)::
 
-            X^{n+1} = X^n + (1.5+ε)·ΔX^n − (0.5+ε)·ΔX^{n-1}
+            X*       = X^n + (1.5+ε)·ΔX_expl^n − (0.5+ε)·ΔX_expl^{n-1}
+            X^{n+1}  = ImplicitVertMix(X*)
 
-        matching Veros (``temp[taup1]=temp[tau]+dt·((1.5+ε)·dtemp[tau]
-        −(0.5+ε)·dtemp[taum1])``). For a steady increment the weights sum to 1, so
-        the implicit-mixing part is applied ~once (NOT doubled — the failure mode of
-        a leapfrog here). The prior increment ``ΔX^{n-1}`` is carried on
-        ``{T,S,u,v}_incr_prev``; a missing carry bootstraps ``ΔX^{n-1}=0`` (a 1.6×
-        first step, as the inner tracer AB2 does).
+        where ``ΔX_expl`` is the explicit-only forward-Euler increment
+        (advection, GM/Redi, lateral friction, Coriolis, the split-explicit /
+        rigid-lid barotropic solve, freshwater) — NOT including the implicit
+        vertical mixing.  This is the FAITHFUL refinement of the prior scheme,
+        which AB2-extrapolated the TOTAL increment (implicit mixing included)
+        and so was only conditionally stable in the vertical and had to reject
+        convective adjustment.  Applying implicit mixing once (it is a
+        backward-Euler solve, unconditionally stable) restores unconditional
+        vertical stability ⇒ compatible with convective adjustment.
 
-        Tracers AB2 the full increment; MOMENTUM AB2s only the baroclinic deviation
-        (thickness-weighted depth-mean split), KEEPING the barotropic mode
-        ``<u_FE>_z`` from the split-explicit free-surface solve un-AB2'd (the
-        barotropic gravity wave is CFL-stiff and must not be extrapolated). Every op
-        is linear in the increments ⇒ differentiable.
+        The prior EXPLICIT increment ``ΔX_expl^{n-1}`` is carried on
+        ``{T,S,u,v}_incr_prev``; a missing carry bootstraps ``ΔX_expl^{n-1}=0``
+        (a 1.6× first step).  Tracers AB2 the full explicit increment; MOMENTUM
+        AB2s only the baroclinic deviation (thickness-weighted depth-mean
+        split), KEEPING the barotropic mode from the barotropic solve un-AB2'd
+        (the barotropic gravity wave is CFL-stiff and must not be extrapolated).
+        Every op is linear in the increments ⇒ differentiable.
+
+        CONSERVATION: like Veros (and like the prior AB2 scheme), this extrapolates
+        the tracer CONCENTRATION ``T``, so the area·thickness-weighted heat/salt
+        content ``Σ(T·h·area)`` is conserved EXACTLY only when the layer thickness is
+        fixed — under ``barotropic_solver="rigid_lid"`` (Veros's streamfunction rigid
+        lid; the faithful ACC config) or with ``use_conservation_fixer=True``. Under a
+        moving free surface (z*) the concentration extrapolation carries an O(Δη)
+        tracer-content drift (small: heat ~1e-7 over 200 closed-channel steps, salt at
+        round-off). The forward-Euler path conserves to machine zero regardless.
+
+        K-PROFILE FIDELITY: the implicit-once solve reuses the diffusivity profiles
+        returned by ``tendencies`` (from the pre-step state u^n) when the vmix scheme
+        surfaces them on ``tend.K_v``/``tend.A_v``; for schemes that don't (e.g. TKE),
+        ``_apply_implicit_vertical_mixing`` recomputes them from the state it acts on —
+        exactly as the forward-Euler path does (a 2nd-order difference, not a regression).
         """
-        state_fe = self._step_impl(
+        # Explicit-only forward-Euler step (skips implicit vertical mixing AND the
+        # conservation fixer) + the implicit-mixing diffusivity profiles from the
+        # tendencies (pre-step state u^n where the vmix scheme surfaces them; else
+        # None ⇒ recomputed in _apply_implicit_vertical_mixing, as the FE path).
+        state_expl, (K_v_phys, A_v_phys, k33_implicit) = self._step_impl(
             state, dt, freshwater=freshwater,
-            surface_forcing=surface_forcing, sponge=sponge)
+            surface_forcing=surface_forcing, sponge=sponge,
+            _apply_implicit_vmix=False)
         eps = self.config.ab2_epsilon
         a_n, a_p = 1.5 + eps, 0.5 + eps
         mask3 = state.land_mask.data[..., jnp.newaxis]
         u_mask3 = state.u_mask.data[..., jnp.newaxis]
         v_mask3 = state.v_mask.data[..., jnp.newaxis]
 
-        # --- Tracers: AB2 the full FE increment ---
-        dT_n = state_fe.T.data - state.T.data
-        dS_n = state_fe.S.data - state.S.data
+        # --- Tracers: AB2 the full EXPLICIT increment ---
+        dT_n = state_expl.T.data - state.T.data
+        dS_n = state_expl.S.data - state.S.data
         dT_p = (state.T_incr_prev.data if state.T_incr_prev is not None
                 else jnp.zeros_like(dT_n))
         dS_p = (state.S_incr_prev.data if state.S_incr_prev is not None
                 else jnp.zeros_like(dS_n))
-        T_new = (state.T.data + a_n * dT_n - a_p * dT_p) * mask3
-        S_new = (state.S.data + a_n * dS_n - a_p * dS_p) * mask3
+        T_ab2 = (state.T.data + a_n * dT_n - a_p * dT_p) * mask3
+        S_ab2 = (state.S.data + a_n * dS_n - a_p * dS_p) * mask3
 
-        # --- Momentum: AB2 the BAROCLINIC increment; keep the FE barotropic mode ---
+        # --- Momentum: AB2 the BAROCLINIC increment; keep the explicit
+        #     barotropic mode (CFL-stiff, set by the barotropic solver) ---
         h_k = compute_layer_thickness(
             state.eta.data, state.H_bathy.data, self.z_coord,
             min_water_column_m=self.config.min_water_column_m)
@@ -1950,27 +1984,47 @@ class LatLonCGridOceanModel:
         # NB (adversarial-review #4, low severity): the carried du_p was depth-mean-
         # zero under the PREVIOUS step's h_u; applying it at the current h_u injects a
         # spurious barotropic component ≈ a_p·<du_p>_z(current h). Negligible for ACC
-        # (O(1 m) eta → O(1e-4 m/s)); fix for large free-surface motion by re-splitting
-        # du_p under the current h_u.
+        # (O(1 m) eta → O(1e-4 m/s)), and exactly zero under rigid-lid (fixed h);
+        # fix for large free-surface motion by re-splitting du_p under the current h_u.
         ubc_n, _ = _split(state.u.data, h_u)
-        ubc_fe, bt_u_fe = _split(state_fe.u.data, h_u)
+        ubc_e, bt_u_e = _split(state_expl.u.data, h_u)
         vbc_n, _ = _split(state.v.data, h_v)
-        vbc_fe, bt_v_fe = _split(state_fe.v.data, h_v)
-        du_n = ubc_fe - ubc_n          # baroclinic increment
-        dv_n = vbc_fe - vbc_n
+        vbc_e, bt_v_e = _split(state_expl.v.data, h_v)
+        du_n = ubc_e - ubc_n          # baroclinic explicit increment
+        dv_n = vbc_e - vbc_n
         du_p = (state.u_incr_prev.data if state.u_incr_prev is not None
                 else jnp.zeros_like(du_n))
         dv_p = (state.v_incr_prev.data if state.v_incr_prev is not None
                 else jnp.zeros_like(dv_n))
-        u_new = ((ubc_n + a_n * du_n - a_p * du_p) + bt_u_fe) * u_mask3
-        v_new = ((vbc_n + a_n * dv_n - a_p * dv_p) + bt_v_fe) * v_mask3
-        u_new = u_new.at[:, -1].set(u_new[:, 0])   # periodic-lon wrap
+        u_ab2 = ((ubc_n + a_n * du_n - a_p * du_p) + bt_u_e) * u_mask3
+        v_ab2 = ((vbc_n + a_n * dv_n - a_p * dv_p) + bt_v_e) * v_mask3
+        u_ab2 = u_ab2.at[:, -1].set(u_ab2[:, 0])   # periodic-lon wrap
 
-        return state_fe._replace(
-            T=state_fe.T.replace(data=T_new),
-            S=state_fe.S.replace(data=S_new),
-            u=state_fe.u.replace(data=u_new),
-            v=state_fe.v.replace(data=v_new),
+        state_ab2 = state_expl._replace(
+            T=state_expl.T.replace(data=T_ab2),
+            S=state_expl.S.replace(data=S_ab2),
+            u=state_expl.u.replace(data=u_ab2),
+            v=state_expl.v.replace(data=v_ab2),
+        )
+
+        # --- Implicit vertical mixing applied ONCE to the AB2 state (Veros
+        #     thermodynamics.py vertmix / solve_stream.py du_mix), with the
+        #     diffusivity profiles from the tendencies (see docstring) ---
+        if self.config.implicit_vertical_mixing:
+            state_ab2 = self._apply_implicit_vertical_mixing(
+                state_ab2, dt, surface_forcing,
+                K_v_phys=K_v_phys, A_v_phys=A_v_phys, K33_iso=k33_implicit,
+            )
+
+        # --- Conservation fixer once, on the final state ---
+        if self.config.use_conservation_fixer:
+            state_ab2 = ocean_conservation_fixer(
+                state_ab2, state, self.grid, self.z_coord, self.config,
+            )
+
+        # Carry the EXPLICIT increments for the next AB2 step (NOT the
+        # post-implicit-mixing increment — that is the prior scheme's bug).
+        return state_ab2._replace(
             T_incr_prev=Field(data=dT_n * mask3, name="T_incr_prev",
                               dims=state.T.dims, units=state.T.units),
             S_incr_prev=Field(data=dS_n * mask3, name="S_incr_prev",

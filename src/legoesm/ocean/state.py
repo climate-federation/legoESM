@@ -350,10 +350,13 @@ class LatLonCGridOceanState(NamedTuple):
     # when the prognostic-EKE GM closure is active (config.gm_redi.eke not None).
     # Default None -> inert (no EKE): zero behaviour change for existing configs.
     eke: object = None
-    # Prior forward-Euler increment ΔX^{n-1} = X_FE^{n-1} − X^{n-1} for the AB2 outer
-    # integrator (config.outer_integrator == "ab2"). Tracers store the full
-    # increment; u/v store the BAROCLINIC-deviation increment (the barotropic mode
-    # is kept from the split-explicit solve, un-AB2'd). Default None -> inert
+    # Prior EXPLICIT increment ΔX_expl^{n-1} for the AB2 outer integrator
+    # (config.outer_integrator == "ab2"): the explicit-only forward-Euler increment
+    # (advection, GM/Redi, lateral friction, Coriolis, barotropic solve, freshwater)
+    # WITHOUT the implicit vertical mixing — implicit mixing is applied once, after
+    # the AB2 extrapolation, and is NOT carried. Tracers store the full explicit
+    # increment; u/v store the BAROCLINIC-deviation explicit increment (the barotropic
+    # mode is kept from the barotropic solve, un-AB2'd). Default None -> inert
     # (forward-Euler): zero behaviour change.
     T_incr_prev: object = None
     S_incr_prev: object = None
@@ -810,19 +813,23 @@ class LatLonCGridOceanConfig(NamedTuple):
     ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar) — also the
     #   Adams-Bashforth ε for the OUTER integrator (Veros AB_eps=0.1).
     # Outer (baroclinic) time integrator. "forward_euler" (default) = the existing
-    # single-step split-explicit scheme. "ab2" = Adams-Bashforth-2 on the
-    # forward-Euler increment: X^{n+1} = X^n + (1.5+ε)·ΔX^n − (0.5+ε)·ΔX^{n-1}
-    # (ΔX = X_FE − X^n), carrying the prior increment on ``{T,S,u,v}_incr_prev``.
-    # The barotropic free-surface mode is kept from the split-explicit solve
-    # (un-AB2'd); only the baroclinic momentum deviation is AB2'd.
-    # CAVEAT (NOT fully Veros-faithful): ΔX includes the once-applied IMPLICIT
-    # vertical-mixing increment, so this AB2-extrapolates that increment rather than
-    # applying it once (Veros AB2s only the EXPLICIT tendency + applies implicit
-    # vmix once). Consequence: vertical-mixing stability becomes CONDITIONAL
-    # (~dt·K_v·4/dz²_min ≲ a few; a stiff-K_v channel blows up). SAFE for mild mixing
-    # (the ACC recipe); ``step`` REJECTS "ab2" with convective adjustment. For strong
-    # implicit mixing use "forward_euler" (or the explicit-AB2 + implicit-once
-    # refinement). Do NOT combine with ``tracer_time_integrator="ab2"`` (double-AB2).
+    # single-step split-explicit scheme. "ab2" = Adams-Bashforth-2 on the EXPLICIT
+    # tendency with implicit vertical mixing applied ONCE afterward (Veros-faithful;
+    # core/thermodynamics.py tracers + core/external/solve_stream.py momentum):
+    #   X*      = X^n + (1.5+ε)·ΔX_expl^n − (0.5+ε)·ΔX_expl^{n-1}
+    #   X^{n+1} = ImplicitVertMix(X*)
+    # where ΔX_expl is the explicit-only forward-Euler increment (NOT including the
+    # implicit vertical mixing), carried on ``{T,S,u,v}_incr_prev``. The barotropic
+    # mode is kept from the barotropic solve (un-AB2'd); only the baroclinic momentum
+    # deviation is AB2'd. Because implicit vertical mixing is applied once (a
+    # backward-Euler solve), the scheme is UNCONDITIONALLY stable in the vertical and
+    # compatible with convective adjustment. Do NOT combine with
+    # ``tracer_time_integrator="ab2"`` (double-AB2 of the explicit tracer tendency).
+    # CONSERVATION: AB2 extrapolates the tracer CONCENTRATION (like Veros), so the
+    # area·thickness-weighted heat/salt content is conserved EXACTLY only with fixed
+    # layer thickness — ``barotropic_solver="rigid_lid"`` (the faithful ACC config) or
+    # ``use_conservation_fixer=True``. Under a moving free surface it has a small
+    # O(Δη) tracer-content drift; "forward_euler" conserves to machine zero.
     outer_integrator: str = "forward_euler"
     # Implicit (backward-Euler) vertical mixing.  When True (default):
     #   1. The PE tendency function skips the explicit ``A_v`` viscous

@@ -1,11 +1,20 @@
 """Adams-Bashforth-2 outer time integrator (config.outer_integrator="ab2").
 
-This is Veros's actual outer scheme (AB2 on the explicit tendency, NOT leapfrog —
+This is Veros's actual outer scheme (AB2 on the EXPLICIT tendency, NOT leapfrog —
 see the strategy §8 integrator row). The default "forward_euler" path is unchanged;
-the AB2 path extrapolates the forward-Euler increment
-``X^{n+1}=X^n+(1.5+ε)·ΔX^n−(0.5+ε)·ΔX^{n-1}``, carrying ΔX^{n-1} on
-``{T,S,u,v}_incr_prev``, keeping the barotropic free-surface mode from the
-split-explicit solve, and bootstrapping ΔX^{n-1}=0.
+the AB2 path extrapolates the EXPLICIT-only forward-Euler increment
+``X*=X^n+(1.5+ε)·ΔX_expl^n−(0.5+ε)·ΔX_expl^{n-1}`` and then applies implicit
+vertical mixing ONCE, ``X^{n+1}=ImplicitVertMix(X*)`` (Veros core/thermodynamics.py
++ core/external/solve_stream.py). It carries the EXPLICIT increment ΔX_expl^{n-1} on
+``{T,S,u,v}_incr_prev``, keeps the barotropic mode from the barotropic solve, and
+bootstraps ΔX_expl^{n-1}=0.  Because implicit mixing is applied once (backward-Euler),
+the scheme is UNCONDITIONALLY stable in the vertical and compatible with convective
+adjustment.
+
+The exact algebraic-identity tests set ``implicit_vertical_mixing=False`` so the
+explicit increment IS the full increment (then the closed-form AB2 relation holds to
+rtol ~1e-11); the stability tests keep implicit mixing ON to exercise the
+implicit-once property.
 
 Includes a LONG (300-step) stability run — the prior leapfrog attempt's 40-step
 test masked a slow blowup, so AB2 is validated over many steps + the real-ACC
@@ -58,8 +67,9 @@ def _channel(outer_integrator="forward_euler", n_lat=8, n_lon=16, **cfg_kw):
     lat = np.degrees(np.asarray(grid.lat))
     T = np.asarray(state.T.data) + 4.0 * np.tanh(lat / 15.0)[:, None, None]
     state = state._replace(T=state.T.replace(data=jnp.asarray(T)))
+    cfg_kw.setdefault("implicit_vertical_mixing", True)
     cfg = LatLonCGridOceanConfig(
-        A_h=2.0e4, bottom_drag_r=1.0e-3, implicit_vertical_mixing=True,
+        A_h=2.0e4, bottom_drag_r=1.0e-3,
         n_barotropic_substeps=8, enable_runtime_checks=False,
         outer_integrator=outer_integrator, **cfg_kw)
     return state, LatLonCGridOceanModel(grid, z_coord, cfg)
@@ -96,9 +106,12 @@ def test_double_ab2_rejected():
 
 
 def test_ab2_tracer_invariant_exact():
-    """AB2 relation holds EXACTLY from one step's I/O: the stored increment equals
-    ΔX^n and T^{n+1}=T^n+(1.5+ε)·ΔX^n−(0.5+ε)·ΔX^{n-1} (verified on wet cells)."""
-    state, model = _channel("ab2")
+    """AB2 relation holds EXACTLY from one step's I/O: the stored increment is the
+    EXPLICIT-only increment ΔX_expl^n and T^{n+1}=T^n+(1.5+ε)·ΔX_expl^n
+    −(0.5+ε)·ΔX_expl^{n-1} (verified on wet cells).  ``implicit_vertical_mixing=False``
+    so the explicit increment is the full increment and the closed form is exact;
+    this also pins the carry-identity (the carry is the explicit-only increment)."""
+    state, model = _channel("ab2", implicit_vertical_mixing=False)
     wet = np.broadcast_to(
         (np.asarray(state.land_mask.data) > 0.5)[..., None],
         np.asarray(state.T.data).shape)
@@ -118,10 +131,12 @@ def test_ab2_tracer_invariant_exact():
 
 
 def test_ab2_bootstrap_is_1p6_fe():
-    """Bootstrap (incr_prev None ⇒ ΔX^{n-1}=0): first AB2 step is X^n+(1.5+ε)·ΔX^n
-    (a 1.6× forward-Euler seed, as the inner tracer AB2 does)."""
-    state_ab2, model_ab2 = _channel("ab2")
-    state_fe, model_fe = _channel("forward_euler")
+    """Bootstrap (incr_prev None ⇒ ΔX_expl^{n-1}=0): first AB2 step is
+    X^n+(1.5+ε)·ΔX_expl^n (a 1.6× forward-Euler seed).  ``implicit_vertical_mixing=
+    False`` on both so the explicit increment is the full increment and the 1.6×
+    identity is exact (no implicit-once smoothing of the AB2 state)."""
+    state_ab2, model_ab2 = _channel("ab2", implicit_vertical_mixing=False)
+    state_fe, model_fe = _channel("forward_euler", implicit_vertical_mixing=False)
     wet = np.broadcast_to(
         (np.asarray(state_ab2.land_mask.data) > 0.5)[..., None],
         np.asarray(state_ab2.T.data).shape)
@@ -161,10 +176,10 @@ def test_ab2_long_run_stable_300_steps():
     assert final.T_incr_prev is not None
 
 
-def test_ab2_rejects_convective_adjustment():
-    """The step guard rejects ab2 + convective adjustment — ab2 AB2-extrapolates the
-    implicit vertical-mixing increment, which is conditionally unstable for stiff
-    mixing (adversarial-review #2). The ACC recipe (convection="none") is unaffected."""
+def test_ab2_accepts_convective_adjustment():
+    """The faithful AB2 (implicit vertical mixing applied ONCE, not extrapolated) is
+    unconditionally stable in the vertical, so ab2 + convective adjustment is now
+    ALLOWED (the prior conditional-instability guard is removed).  Runs finite."""
     from legoesm.ocean.physics.combined import OceanPhysicsConfig
     from legoesm.ocean.physics.convection.config import OceanConvectionConfig
     from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
@@ -172,28 +187,56 @@ def test_ab2_rejects_convective_adjustment():
         lateral_mixing=LateralMixingConfig(scheme="none"),   # lat-lon: physics factory is none
         convection=OceanConvectionConfig(scheme="enhanced_diffusion"))
     state, model = _channel("ab2", physics=physics)
-    with pytest.raises(ValueError, match="convective adjustment"):
-        model.step(state, dt=_DT)
+    f, _ = model.integrate_scan(state, n_steps=20, dt=_DT)   # no raise
+    for arr in (f.T.data, f.S.data, f.u.data, f.v.data, f.eta.data):
+        assert np.all(np.isfinite(np.asarray(arr))), "ab2 + convection went non-finite"
 
 
-def test_ab2_conditional_stability_with_stiff_vertical_mixing():
-    """Locks the review-found regression: AB2-extrapolating the implicit
-    vertical-mixing increment is CONDITIONALLY stable — a stiff constant K_v makes
-    ab2 grow unboundedly while forward_euler (implicit applied once) stays bounded.
-    This is WHY the guard + the not-Veros-faithful caveat exist."""
+def test_ab2_unconditional_stability_with_stiff_vertical_mixing():
+    """Proves the scheme is fixed (inverts the prior conditional-stability test):
+    with the implicit vertical-mixing increment applied ONCE (not AB2-extrapolated),
+    a stiff constant K_v that previously made ab2 blow up at ~120 steps now stays
+    bounded — comparable to forward_euler — over a long run."""
     state_ab2, model_ab2 = _channel("ab2", K_v=2000.0, A_v=2000.0)
     state_fe, model_fe = _channel("forward_euler", K_v=2000.0, A_v=2000.0)
-    f_ab2, _ = model_ab2.integrate_scan(state_ab2, n_steps=120, dt=_DT)
-    f_fe, _ = model_fe.integrate_scan(state_fe, n_steps=120, dt=_DT)
+    f_ab2, _ = model_ab2.integrate_scan(state_ab2, n_steps=300, dt=_DT)
+    f_fe, _ = model_fe.integrate_scan(state_fe, n_steps=300, dt=_DT)
     fe_arr = np.asarray(f_fe.T.data)
     ab2_arr = np.asarray(f_ab2.T.data)
     assert np.all(np.isfinite(fe_arr))                    # forward_euler stays stable
+    assert np.all(np.isfinite(ab2_arr)), "faithful ab2 must stay finite with stiff K_v"
     fe_max = float(np.max(np.abs(fe_arr)))
     ab2_max = float(np.max(np.abs(ab2_arr)))
-    # ab2 either blew up (non-finite) or grew >> forward_euler.
-    assert (not np.all(np.isfinite(ab2_arr))) or ab2_max > 10.0 * fe_max, (
-        f"expected ab2 conditional-stability blowup with stiff K_v; "
+    # ab2 now stays bounded, of the same order as forward_euler (no >10x blowup).
+    assert ab2_max < 5.0 * fe_max + 1.0, (
+        f"faithful ab2 should be bounded like forward_euler with stiff K_v; "
         f"ab2_max={ab2_max:.3g} fe_max={fe_max:.3g}")
+
+
+def test_ab2_implicit_mixing_is_applied_once():
+    """The implicit vertical mixing is actually APPLIED in the faithful AB2 path:
+    one AB2 step with a stiff background K_v smooths the vertical T profile (lower
+    vertical variance) relative to K_v=0.  Confirms implicit-once runs (not skipped)."""
+    # Stratified column: impose a sharp vertical T gradient.
+    state0, _ = _channel("ab2")
+    T = np.asarray(state0.T.data)
+    nlev = T.shape[-1]
+    T = T + np.linspace(6.0, -6.0, nlev)[None, None, :]   # strong vertical gradient
+    state0 = state0._replace(T=state0.T.replace(data=jnp.asarray(T)))
+
+    s_mix, model_mix = _channel("ab2", K_v=2000.0)
+    s_nomix, model_nomix = _channel("ab2", K_v=0.0, A_v=0.0)
+    s_mix = s_mix._replace(T=s_mix.T.replace(data=jnp.asarray(T)))
+    s_nomix = s_nomix._replace(T=s_nomix.T.replace(data=jnp.asarray(T)))
+
+    out_mix = np.asarray(model_mix.step(s_mix, dt=_DT).T.data)
+    out_nomix = np.asarray(model_nomix.step(s_nomix, dt=_DT).T.data)
+    wet = np.asarray(state0.land_mask.data) > 0.5
+    var_mix = float(np.var(out_mix[wet], axis=-1).mean())
+    var_nomix = float(np.var(out_nomix[wet], axis=-1).mean())
+    assert var_mix < 0.95 * var_nomix, (
+        f"implicit vertical mixing not applied in AB2 path: "
+        f"var(K_v=2000)={var_mix:.4g} not < var(K_v=0)={var_nomix:.4g}")
 
 
 def test_ab2_step_differentiable():
