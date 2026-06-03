@@ -1322,7 +1322,7 @@ class EnsembleDiagnosticCollector:
         Each member is saved as a separate checkpoint file:
         ``ensemble_member_NNN_day_DDDD.npz``.
         """
-        from legoesm.io.restart import save_restart
+        from legoesm.driver.restart import save_restart
         from legoesm.core.field import Field
         from legoesm.core.state import HydrostaticState
 

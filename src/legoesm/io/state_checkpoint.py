@@ -2,12 +2,12 @@
 
 Works for any NamedTuple whose fields are :class:`~legoesm.core.field.Field`
 objects or plain ``jax.Array`` / ``numpy.ndarray``.  Unlike
-:mod:`legoesm.io.restart` (atmosphere-specific), this module knows nothing
-about ``T``, ``u``, ``v``, or ``q_v`` — it iterates over
-``state._fields`` generically.
+:mod:`legoesm.driver.restart` (atmosphere-specific, driver-level), this module
+knows nothing about ``T``, ``u``, ``v``, or ``q_v`` — it iterates over
+``state._fields`` generically, and stays in the legoesm-core substrate.
 
-Reuses the hashing, metadata, and platform helpers from
-:mod:`legoesm.io.restart`.
+Shares the pure SHA-256 state digest with the rest of the substrate via
+:mod:`legoesm.io.state_digest`.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import jax
 import numpy as np
 
 from legoesm.core.field import Field
-from legoesm.io.restart import compute_state_digest
+from legoesm.io.state_digest import compute_state_digest
 
 
 # ---------------------------------------------------------------------------

@@ -166,7 +166,7 @@ def cmd_reproduce(args):
     )
     try:
         from legoesm.driver.config import experiment_config_from_dict
-        from legoesm.io.restart import (
+        from legoesm.driver.restart import (
             read_run_manifest,
             recorded_state_digest,
             validate_run_manifest,

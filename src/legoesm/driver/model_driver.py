@@ -27,7 +27,7 @@ from legoesm.core.tracers import (
 from legoesm.driver.config import ExperimentConfig
 from legoesm.driver.physics_pipeline import build_physics_pipeline
 from legoesm.driver.diagnostics import DiagnosticCollector
-from legoesm.io.restart import save_restart, load_restart
+from legoesm.driver.restart import save_restart, load_restart
 
 logger = logging.getLogger("legoesm.driver")
 
@@ -1258,7 +1258,7 @@ class ModelDriver:
         """
         if self._mpi_rank is not None and self._mpi_rank != 0:
             return
-        from legoesm.io.restart import (
+        from legoesm.driver.restart import (
             RUN_MANIFEST_FILENAME,
             compute_config_hash,
             read_run_manifest,
@@ -1317,7 +1317,7 @@ class ModelDriver:
         if self._mpi_rank is not None and self._mpi_rank != 0:
             return
         try:
-            from legoesm.io.restart import (
+            from legoesm.driver.restart import (
                 RUN_MANIFEST_FILENAME,
                 pytree_state_digest,
                 record_state_digest,
@@ -2036,7 +2036,7 @@ class ModelDriver:
             # Partitioned state: each rank writes its own partition
             if self._layout is not None and self._owned_face_ids is not None:
                 ckpt_dir = self._output_dir / f"checkpoint_day_{int(elapsed_day):04d}"
-                from legoesm.io.distributed_checkpoint import save_checkpoint_distributed
+                from legoesm.driver.distributed_checkpoint import save_checkpoint_distributed
                 save_checkpoint_distributed(
                     path=ckpt_dir,
                     state=self.state,
@@ -2236,7 +2236,7 @@ class ModelDriver:
         if (path.is_dir()
                 and self._device_config is not None
                 and self._device_config.is_distributed):
-            from legoesm.io.distributed_checkpoint import (
+            from legoesm.driver.distributed_checkpoint import (
                 load_checkpoint_distributed,
             )
             from legoesm.parallel.distributed import get_active_topology

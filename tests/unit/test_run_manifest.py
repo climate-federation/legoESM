@@ -18,7 +18,7 @@ from legoesm.driver.config import (
     GridConfig,
     experiment_config_from_dict,
 )
-from legoesm.io.restart import (
+from legoesm.driver.restart import (
     RUN_MANIFEST_FILENAME,
     RUN_MANIFEST_SCHEMA_VERSION,
     build_run_manifest,
@@ -158,7 +158,7 @@ def test_pytree_state_digest_is_backend_agnostic() -> None:
     """
     import jax.numpy as jnp
 
-    from legoesm.io.restart import pytree_state_digest
+    from legoesm.driver.restart import pytree_state_digest
 
     s1 = {"T": jnp.ones((2, 3)), "T_hat": jnp.ones((2,), dtype=jnp.complex64), "v": None}
     s2 = {"T": jnp.ones((2, 3)), "T_hat": jnp.ones((2,), dtype=jnp.complex64), "v": None}
@@ -173,7 +173,7 @@ def test_pytree_state_digest_captures_structure() -> None:
     """Structure (keys / None slots), not just array bytes, is in the digest."""
     import jax.numpy as jnp
 
-    from legoesm.io.restart import pytree_state_digest
+    from legoesm.driver.restart import pytree_state_digest
 
     arr = jnp.ones(2)
     # A None slot appearing must change the digest (it is structural in JAX).
@@ -189,7 +189,7 @@ def test_reproduce_rejects_output_equal_to_reference_dir(tmp_path: Path) -> None
     import pytest
 
     from legoesm.cli import cmd_reproduce
-    from legoesm.io.restart import record_state_digest
+    from legoesm.driver.restart import record_state_digest
 
     write_run_manifest(tmp_path, _sample_config())
     record_state_digest(tmp_path, "deadbeef")  # complete the reference
@@ -223,7 +223,7 @@ def test_record_and_read_state_digest(tmp_path: Path) -> None:
     """The post-run digest update fills result.state_digest and nothing else."""
     import pytest
 
-    from legoesm.io.restart import (
+    from legoesm.driver.restart import (
         record_state_digest,
         recorded_state_digest,
         validate_run_manifest,
@@ -248,7 +248,7 @@ def test_record_and_read_state_digest(tmp_path: Path) -> None:
 def test_record_state_digest_rejects_invalid_manifest(tmp_path: Path) -> None:
     import pytest
 
-    from legoesm.io.restart import RUN_MANIFEST_FILENAME, record_state_digest
+    from legoesm.driver.restart import RUN_MANIFEST_FILENAME, record_state_digest
 
     (tmp_path / RUN_MANIFEST_FILENAME).write_text("not json")
     with pytest.raises(Exception):
@@ -367,7 +367,7 @@ def test_driver_manifest_failure_is_fatal(tmp_path: Path, monkeypatch) -> None:
     """A manifest write failure aborts setup rather than silently continuing."""
     import pytest
 
-    import legoesm.io.restart as restart_mod
+    import legoesm.driver.restart as restart_mod
     from legoesm.driver.config import ExperimentConfig
     from legoesm.driver.model_driver import ModelDriver
 
@@ -418,7 +418,7 @@ def test_driver_manifest_fails_closed_on_schema_invalid_existing(tmp_path: Path)
 
 
 def test_validate_run_manifest_accepts_a_real_manifest() -> None:
-    from legoesm.io.restart import validate_run_manifest
+    from legoesm.driver.restart import validate_run_manifest
 
     validate_run_manifest(build_run_manifest(_sample_config()))  # no raise
 
@@ -426,7 +426,7 @@ def test_validate_run_manifest_accepts_a_real_manifest() -> None:
 def test_validate_run_manifest_rejects_bad_schema_version() -> None:
     import pytest
 
-    from legoesm.io.restart import validate_run_manifest
+    from legoesm.driver.restart import validate_run_manifest
 
     m = build_run_manifest(_sample_config())
     m["schema_version"] = 999
@@ -437,7 +437,7 @@ def test_validate_run_manifest_rejects_bad_schema_version() -> None:
 def test_validate_run_manifest_rejects_missing_resolved_config() -> None:
     import pytest
 
-    from legoesm.io.restart import validate_run_manifest
+    from legoesm.driver.restart import validate_run_manifest
 
     m = build_run_manifest(_sample_config())
     m["config"]["resolved_config"] = {}
@@ -448,7 +448,7 @@ def test_validate_run_manifest_rejects_missing_resolved_config() -> None:
 def test_validate_run_manifest_rejects_null_section() -> None:
     import pytest
 
-    from legoesm.io.restart import validate_run_manifest
+    from legoesm.driver.restart import validate_run_manifest
 
     m = build_run_manifest(_sample_config())
     m["run"] = None  # present name, but not an object
@@ -459,7 +459,7 @@ def test_validate_run_manifest_rejects_null_section() -> None:
 def test_validate_run_manifest_rejects_section_missing_keys() -> None:
     import pytest
 
-    from legoesm.io.restart import validate_run_manifest
+    from legoesm.driver.restart import validate_run_manifest
 
     m = build_run_manifest(_sample_config())
     m["legoESM"] = {}  # an object, but lacks ref/commit
@@ -479,7 +479,7 @@ def test_validate_run_manifest_rejects_hash_config_mismatch() -> None:
     """A config_hash that does not match its resolved_config is rejected."""
     import pytest
 
-    from legoesm.io.restart import validate_run_manifest
+    from legoesm.driver.restart import validate_run_manifest
 
     m = build_run_manifest(_sample_config())
     m["config"]["config_hash"] = "deadbeef"  # no longer matches resolved_config

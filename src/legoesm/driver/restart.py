@@ -27,6 +27,12 @@ from legoesm.forcing.amip_config import (
     save_checkpoint,
 )
 
+# Pure state-digest helpers live in the legoesm-core substrate (io.state_digest)
+# so io.state_checkpoint can share them without importing this driver-level
+# module (federation carve, Step 3).  Re-exported here for back-compat callers
+# of ``legoesm.driver.restart.{compute_state_digest,pytree_state_digest}``.
+from legoesm.io.state_digest import compute_state_digest, pytree_state_digest
+
 # Lazy imports to avoid circular dependency:
 #   io.restart → driver.config → driver.__init__ → model_driver → io.restart
 # We import ExperimentConfig and its serializer at function level instead.
@@ -81,16 +87,8 @@ class ReproducibilityReport(NamedTuple):
 # Hashing helpers
 # ---------------------------------------------------------------------------
 
-def compute_state_digest(state_arrays: dict[str, np.ndarray]) -> str:
-    """SHA-256 of the concatenated raw bytes of *state_arrays*.
-
-    Keys are sorted so that the digest is independent of insertion order.
-    """
-    h = hashlib.sha256()
-    for key in sorted(state_arrays.keys()):
-        arr = np.asarray(state_arrays[key])
-        h.update(arr.tobytes())
-    return h.hexdigest()
+# compute_state_digest / pytree_state_digest now live in io.state_digest
+# (imported above) — single source in the legoesm-core substrate.
 
 
 def _config_to_dict_any(config) -> dict:
@@ -484,37 +482,6 @@ def record_state_digest(manifest_path, state_digest: str) -> Path:
     return manifest_path
 
 
-def pytree_state_digest(*trees) -> str:
-    """Backend-agnostic SHA-256 digest of one or more state pytrees.
-
-    Unlike :func:`compute_state_digest` (which assumes the grid-point checkpoint
-    array layout ``state.T``/``state.u``/...), this flattens whatever pytrees it
-    is given via ``jax.tree_util.tree_leaves`` and digests every array leaf, so it
-    works for *any* backend's state — grid-point, spectral (``T_hat`` complex
-    coefficients), or MPAS (edge-normal ``u``, ``v=None``).  Shape and dtype are
-    folded in alongside the bytes so a structural change cannot collide.
-
-    The pytree *structure* (dict keys, nesting, ``None`` placeholders) is folded
-    into the hash alongside the leaf bytes, so a layout/schema change — e.g. a
-    leaf moving keys, or a ``None`` slot appearing/disappearing — cannot collide
-    with the original even when the surviving array leaves are identical.
-    """
-    import numpy as _np
-
-    h = hashlib.sha256()
-    for tree in trees:
-        leaves, treedef = jax.tree_util.tree_flatten(tree)
-        # treedef repr encodes keys / nesting / None structure deterministically.
-        h.update(str(treedef).encode("utf-8"))
-        host = jax.device_get(leaves)  # single batched device->host transfer
-        for arr in host:
-            a = _np.asarray(arr)
-            h.update(str(a.shape).encode("utf-8"))
-            h.update(str(a.dtype).encode("utf-8"))
-            h.update(a.tobytes())
-    return h.hexdigest()
-
-
 def recorded_state_digest(manifest: dict) -> str:
     """Return the recorded final ``state_digest``, or raise if the run never set it.
 
@@ -575,7 +542,7 @@ def save_restart(
 
     # 1. Delegate to appropriate backend
     if backend == "zarr":
-        from legoesm.io.checkpoint import save_checkpoint_zarr
+        from legoesm.driver.checkpoint import save_checkpoint_zarr
 
         save_checkpoint_zarr(
             path,
@@ -673,7 +640,7 @@ def load_restart(
     # 1. Delegate to auto-detecting loader (handles both .npz and .zarr).
     #    load_checkpoint_auto returns ExperimentConfig regardless of
     #    whether the checkpoint used the legacy AMIP or new format.
-    from legoesm.io.checkpoint import load_checkpoint_auto
+    from legoesm.driver.checkpoint import load_checkpoint_auto
 
     state, q_v, step, day, loaded_config, diag_accumulators, q_c, q_r, carry_aux = (
         load_checkpoint_auto(path, grid, sigma)

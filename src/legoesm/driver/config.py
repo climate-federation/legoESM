@@ -862,6 +862,39 @@ def experiment_config_from_dict(d: dict) -> ExperimentConfig:
     return ExperimentConfig(**filtered)
 
 
+def config_to_dict(config) -> dict:
+    """Generic config -> JSON-safe dict codec (canonical home).
+
+    Accepts an ``ExperimentConfig`` or the legacy flat ``AMIPExperimentConfig``;
+    nested sub-config NamedTuples (grid/dycore/output) are inlined as dicts.
+    This is the codec the experiment-level checkpoint/restart I/O in
+    ``driver`` uses, so that layer no longer reaches up into
+    ``forcing.amip_config`` for serialization (federation carve, Step 3).
+    """
+    d = config._asdict()
+    for key, val in d.items():
+        if hasattr(val, "_asdict"):
+            d[key] = val._asdict()
+    return d
+
+
+def config_from_dict(d: dict):
+    """Reconstruct a config from a dict written by :func:`config_to_dict`.
+
+    Auto-detects the schema: an ``ExperimentConfig`` serializes with nested
+    ``grid``/``dycore`` sub-config dicts (and fields like ``seed`` that the AMIP
+    schema lacks), so it round-trips through ``experiment_config_from_dict``;
+    otherwise the dict is the legacy flat ``AMIPExperimentConfig``.  The AMIP
+    type is imported lazily so this module needs no top-level ``forcing`` import.
+    """
+    if isinstance(d.get("grid"), dict) or isinstance(d.get("dycore"), dict):
+        return experiment_config_from_dict(d)
+    from legoesm.forcing.amip_config import AMIPExperimentConfig
+
+    known = set(AMIPExperimentConfig._fields)
+    return AMIPExperimentConfig(**{k: v for k, v in d.items() if k in known})
+
+
 def save_experiment_config(config: ExperimentConfig, path: Path | str) -> None:
     """Save ExperimentConfig to JSON file."""
     with open(path, "w") as f:

@@ -277,11 +277,10 @@ ignore_imports = [
     # resolve it via a registry.  This is a function-scope import, so it does NOT
     # block import-time independence — only the standalone-runtime MPAS-sharded path.
     "legoesm.parallel.sharded_dynamics -> legoesm.atmosphere.dynamics.primitive_eq_mpas",
-    # io config-aware checkpoint/restart -> forcing/driver: fixed via io re-scope
-    # (config-aware modules move to a higher member; pure-array io stays in core).
-    "legoesm.io.checkpoint -> legoesm.forcing.amip_config",
-    "legoesm.io.distributed_checkpoint -> legoesm.forcing.amip_config",
-    "legoesm.io.restart -> legoesm.forcing.amip_config",
-    "legoesm.io.checkpoint -> legoesm.driver.config",
-    "legoesm.io.restart -> legoesm.driver.config",
+    # io config-aware checkpoint/restart: FIXED via re-scope (Step 3) — the
+    # experiment-aware modules moved to driver.{restart,checkpoint,
+    # distributed_checkpoint}; io keeps only pure-array I/O (cmor_output,
+    # state_checkpoint) + the pure state-digest (io.state_digest), and the
+    # config codec now lives canonically in driver.config.  io imports nothing
+    # above it.
 ]
