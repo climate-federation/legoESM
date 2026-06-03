@@ -90,14 +90,14 @@ def compute_surface_fluxes(
     # Friction velocity
     ustar = jnp.sqrt(Cd) * wind_speed
 
-    # Momentum fluxes (stress)
-    tau_x = -rho * Cd * wind_speed * u
-    tau_y = -rho * Cd * wind_speed * v
+    # Momentum + sensible/latent heat fluxes — the shared constant-coefficient
+    # bulk formula (redundancy audit): tau = -rho*Cd*|U|*u, shflx =
+    # rho*c_pd*Ch*|U|*(T_sfc-T), lhflx = rho*L_v*Ch*|U|*(q_sfc-q_v).  Identical to
+    # legoesm.core.bulk_flux.simple_bulk_fluxes, so use it instead of re-deriving.
+    from legoesm.core.bulk_flux import simple_bulk_fluxes
 
-    # Sensible heat flux (positive upward = surface warmer than air)
-    shflx = rho * constants.c_pd * Ch * wind_speed * (T_sfc - T)
-
-    # Latent heat flux (positive upward = surface moister than air)
-    lhflx = rho * constants.L_v * Ch * wind_speed * (q_sfc - q_v)
+    tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
+        u, v, T, q_v, T_sfc, q_sfc, rho, wind_speed, Cd, Ch,
+    )
 
     return tau_x, tau_y, shflx, lhflx, ustar
