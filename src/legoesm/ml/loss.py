@@ -46,18 +46,59 @@ def area_weighted_mse(
     if mask is not None:
         sq_err = sq_err * mask[..., None]
 
-    # Weight by latitude: weights has shape (n_lat,)
+    # Weight by latitude.  ``weights`` are Gauss-Legendre weights on
+    # μ = sin(lat) summing to 2.0 — they encode the cos(lat) area
+    # element directly.  The proper area-weighted mean is
+    #     Σ(sq·w) / (B · Σw · n_lon · n_channels)
+    # whereas ``jnp.mean(sq·w)`` divides by the full array size
+    # (= B · n_lat · n_lon · n_channels).  Correcting by the ratio
+    # ``n_lat / Σw`` gives the resolution-independent weighted mean.
     w = weights[:, None, None]  # (n_lat, 1, 1)
     weighted = sq_err * w
+    n_lat = weights.shape[0]
+    return jnp.mean(weighted) * n_lat / jnp.sum(weights)
 
-    return jnp.mean(weighted)
+
+def latitude_weighted_rmse(
+    pred: jnp.ndarray,
+    target: jnp.ndarray,
+    lat_weights: jnp.ndarray,
+) -> jnp.ndarray:
+    """Zonal-mean square-error, then latitude-weighted RMSE.
+
+    Used by the AIMIP scorecard and per-variant evaluation scripts. Takes
+    a 2D ``(n_lat, n_lon)`` field (a single mid-level slice or surface
+    field), computes the zonal-mean square error per latitude row, then
+    forms the latitude-weighted mean and returns its square root.
+
+    Equivalent to ``sqrt(area_weighted_mse(...))`` for a 2D field, but
+    keeps the explicit zonal-then-meridional formula used in WeatherBench
+    scorecards.
+    """
+    sq_zonal = jnp.mean((pred - target) ** 2, axis=-1)
+    return jnp.sqrt(jnp.sum(sq_zonal * lat_weights) / jnp.sum(lat_weights))
+
+
+def latitude_weighted_bias(
+    pred: jnp.ndarray,
+    target: jnp.ndarray,
+    lat_weights: jnp.ndarray,
+) -> jnp.ndarray:
+    """Zonal-mean bias, then latitude-weighted mean.
+
+    Companion to :func:`latitude_weighted_rmse` for the AIMIP scorecard.
+    Returns the signed area-weighted mean error of a 2D
+    ``(n_lat, n_lon)`` field.
+    """
+    diff_zonal = jnp.mean(pred - target, axis=-1)
+    return jnp.sum(diff_zonal * lat_weights) / jnp.sum(lat_weights)
 
 
 def per_variable_mse(
     pred: jnp.ndarray,
     target: jnp.ndarray,
     weights: jnp.ndarray,
-    _channel_weights: jnp.ndarray | None = None,
+    channel_weights: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Per-channel area-weighted MSE for monitoring.
 
@@ -70,23 +111,35 @@ def per_variable_mse(
     weights : array, shape (n_lat,)
         Gaussian quadrature weights.
     channel_weights : array, optional, shape (n_channels,)
-        Per-channel importance weights for the total loss.
+        Per-channel importance weights — multiply each channel's
+        area-weighted MSE before returning.  When None, all
+        channels are reported with weight 1.
 
     Returns
     -------
     per_channel : array, shape (n_channels,)
-        MSE for each channel.
+        MSE for each channel (multiplied by channel_weights when
+        provided).  Each entry is a true area-weighted mean
+        independent of grid resolution.
     """
     sq_err = (pred - target) ** 2
 
-    # Average over batch, longitude (and optionally batch dims)
-    # keeping channel dimension
+    # Average over batch, longitude, leaving (n_lat, n_channels)
     w = weights[:, None, None]
     weighted = sq_err * w
 
-    # Average over all spatial dims, keep channels
     axes = tuple(range(weighted.ndim - 1))
-    per_channel = jnp.mean(weighted, axis=axes)
+    # Use the same correction factor as ``area_weighted_mse``
+    # (iter-63 fix) so the per-channel MSE is a proper area-
+    # weighted mean: Σ(sq·w)/(B·Σw·n_lon) instead of mean(sq·w).
+    n_lat = weights.shape[0]
+    per_channel = jnp.mean(weighted, axis=axes) * n_lat / jnp.sum(weights)
+
+    # Apply optional per-channel weights.  Previously the argument
+    # was ``_channel_weights`` (leading underscore) and never read,
+    # silently dropping any caller-supplied weighting.  Iter-64 fix.
+    if channel_weights is not None:
+        per_channel = per_channel * channel_weights
 
     return per_channel
 

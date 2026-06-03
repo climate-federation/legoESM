@@ -14,9 +14,10 @@
 
 """Commonly used physical constants.
 
-Thermodynamic constants are imported from the central ``legoesm.constants``
-module to guarantee consistency in heating rates and column density
-calculations between RRTMGP and the host model.
+All values are re-exports from the central ``legoesm.constants`` module to
+guarantee bit-identical agreement in heating rates and column density
+calculations between RRTMGP and the host model.  No values are defined
+locally — any drift would silently bias radiative transfer.
 """
 
 from legoesm.constants import (
@@ -24,11 +25,12 @@ from legoesm.constants import (
     R_d as R_D,
     R_v as R_V,
     c_pd as CP_D,
-    c_vd as CV_D,
-    c_pv as CP_V,
+    M_dry as DRY_AIR_MOL_MASS,
+    M_h2o as WATER_MOL_MASS,
+    N_A as AVOGADRO,
 )
-
-# Molecular constants specific to RRTMGP spectral calculations.
-DRY_AIR_MOL_MASS = 0.0289647  # The molecular mass of dry air (kg/mol).
-WATER_MOL_MASS = 0.0180153  # The molecular mass of water (kg/mol).
-AVOGADRO = 6.022e23  # Avogadro's number.
+# iter-47: dropped ``c_vd as CV_D`` and ``c_pv as CP_V`` re-exports.
+# Both were imported here but referenced nowhere in the rrtmgp
+# package after the iter-22 swirl_jatmos compute_heating_rate purge.
+# RRTMGP only needs CP_D (heating-rate conversion) and the molar
+# constants; CV_D / CP_V are for moist-thermo paths in the dycore.

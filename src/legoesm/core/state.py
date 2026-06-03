@@ -362,6 +362,170 @@ class MPASNonHydrostaticTendencies(NamedTuple):
 
 
 # ==============================================================================
+# Doubly-periodic Cartesian plane non-hydrostatic state (CRM rollout)
+# ==============================================================================
+#
+# Staged-not-integrated: this state pytree is the prognostic container for
+# the future plane non-hydrostatic dycore (CRM rollout, PR2b). PR2a ships
+# the state class plus mass-integral helpers consumed by the column-kernel
+# refactor; the dycore body that produces and consumes the state lands in
+# PR2b. Until then no public factory dispatches into it.
+#
+# Convention
+# ----------
+# Vertical-LAST axis layout, matching ``NonHydrostaticState`` (cubed-sphere)
+# and ``MPASNonHydrostaticState``. All ``Field`` wrappers carry ``.data``
+# JAX arrays of the listed shapes; tendency objects share the same pytree
+# shape so ``jax.tree_util.tree_map`` works through SSP-RK3 averaging.
+#
+# Arakawa-C staggering (matches PR1 ``PlaneGrid`` + ``plane_operators``):
+#   - scalar / cell centre: ``(ny, nx, nlev)``
+#   - u at x-faces: ``(ny, nx, nlev)`` — no duplicated periodic endpoint
+#   - v at y-faces: ``(ny, nx, nlev)`` — no duplicated periodic endpoint
+#   - w at z-interfaces (Lorenz): ``(ny, nx, nlev+1)``
+#   - phis: ``(ny, nx)``
+#   - tracers: ``(ny, nx, nlev, n_tracers)``
+
+class PlaneNonHydrostaticState(NamedTuple):
+    """State for the non-hydrostatic compressible Euler equations on a
+    doubly-periodic Cartesian plane.
+
+    Uses reference-state subtraction: prognostic variables are
+    perturbations from a 1D hydrostatically balanced reference state
+    ``rho_0(z)``, ``theta_0(z)``.
+
+    All horizontal arrays have shape ``(ny, nx, ...)`` with no
+    duplicated periodic endpoint — periodic neighbours come from
+    ``jnp.roll`` / ``jnp.pad(..., mode='wrap')`` in
+    ``plane_operators``.
+
+    Fields
+    ------
+    u : Field
+        Zonal wind [m/s] at x-faces (Arakawa-C).
+        Shape ``(ny, nx, nlev)``.
+    v : Field
+        Meridional wind [m/s] at y-faces (Arakawa-C).
+        Shape ``(ny, nx, nlev)``.
+    w : Field
+        Vertical velocity [m/s] at half (interface) levels.
+        Shape ``(ny, nx, nlev+1)``. Lorenz staggering.
+        Rigid boundary conditions: ``w = 0`` at model top and bottom
+        (the plane is flat — surface geopotential ``phis`` is zero).
+    theta_prime : Field
+        Potential temperature perturbation [K]. ``theta' = theta - theta_0(z)``.
+        Shape ``(ny, nx, nlev)``.
+    rho_prime : Field
+        Dry density perturbation [kg/m^3]. ``rho' = rho - rho_0(z)``.
+        Shape ``(ny, nx, nlev)``.
+    phis : Field
+        Surface geopotential [m^2/s^2]. Static (not time-stepped).
+        Shape ``(ny, nx)``. Zero on a flat plane.
+    tracers : Field
+        Tracer mixing ratios [kg/kg]. Shape ``(ny, nx, nlev, n_tracers)``.
+        PR2a accepts ``n_tracers == 0`` only (empty last axis). Tracer
+        transport on the plane lands in PR3 together with microphysics.
+    """
+    u: Field
+    v: Field
+    w: Field
+    theta_prime: Field
+    rho_prime: Field
+    phis: Field
+    tracers: Field
+
+
+# iter-241: cherry-picked from feature/crm-plane-spectral commit
+# edbae138 ("Spectral plane CRM: state pytree + filter wrapper around
+# FD dycore", 2026-05-24). That branch was never merged into main,
+# leaving src/legoesm/atmosphere/dynamics/spectral_plane.py with
+# broken ``from legoesm.core.state import SpectralPlanePhysicsState,
+# SpectralPlanePhysicsTendencies`` imports. The two pytree classes
+# below are the minimum required to unblock the spectral_plane
+# import + restore plane_spectral coverage in
+# tests/atmosphere/nonhydrostatic/integration/test_run_rcemip_long_cross_grid_smoke.py
+# (which still has an xfail-strict marker that will fire as XPASS
+# once the runtime ``float(jnp.log(100.0))`` Metal bug in
+# spectral_pe.py is also resolved).
+class SpectralPlanePhysicsState(NamedTuple):
+    """Spectral (2D-Fourier xy + physical z) plane non-hydrostatic state.
+
+    Pseudo-spectral counterpart of :class:`PlaneNonHydrostaticState`.
+    Horizontal axes (y, x) are stored as ``rfft2`` complex coefficients
+    of shape ``(ny, nx_r)`` with ``nx_r = nx // 2 + 1``; the vertical
+    axis is unchanged (physical-space full levels at cell centres,
+    half levels for ``w``).
+
+    Fields
+    ------
+    u_hat, v_hat : Field
+        Horizontal-Fourier coefficients of zonal/meridional wind
+        components at full levels, shape ``(ny, nx_r, nlev)`` complex.
+        Stored at the Arakawa-C ``u``-face / ``v``-face location in
+        physical space — but the rfft2 of a face-staggered field is
+        the same as the rfft2 of the cell-centred field (the
+        face/cell distinction in physical space disappears in the
+        spectral representation because the FFT basis functions are
+        already located at every position). The factor-of-``i·kx`` /
+        ``i·ky`` operators applied below ARE the C-grid PG/divergence
+        adjoint pair.
+    w_hat : Field
+        Vertical velocity coefficients at half levels, shape
+        ``(ny, nx_r, nlev+1)`` complex.
+    theta_prime_hat, rho_prime_hat : Field
+        Perturbation potential temperature / density at full levels,
+        shape ``(ny, nx_r, nlev)`` complex.
+    phis : Field
+        Surface geopotential — kept PHYSICAL (real) and static, shape
+        ``(ny, nx)``. Zero on a flat plane; included for parity with
+        the FD plane state.
+    tracers_hat : Field
+        Tracer mixing-ratio coefficients, shape
+        ``(ny, nx_r, nlev, n_tracers)`` complex.
+    """
+    u_hat: Field
+    v_hat: Field
+    w_hat: Field
+    theta_prime_hat: Field
+    rho_prime_hat: Field
+    phis: Field
+    tracers_hat: Field
+
+
+class SpectralPlanePhysicsTendencies(NamedTuple):
+    """Tendencies for the spectral plane non-hydrostatic equations.
+
+    Same pytree shape as :class:`SpectralPlanePhysicsState` so
+    ``jax.tree_util.tree_map`` works for SSP-RK3 averaging.
+    """
+    du_hat_dt: Field
+    dv_hat_dt: Field
+    dw_hat_dt: Field
+    dtheta_prime_hat_dt: Field
+    drho_prime_hat_dt: Field
+    dphis_dt: Field
+    dtracers_hat_dt: Field
+
+
+class PlaneNonHydrostaticTendencies(NamedTuple):
+    """Tendencies (time derivatives) for the plane non-hydrostatic equations.
+
+    Same pytree structure as :class:`PlaneNonHydrostaticState` so
+    ``jax.tree_util.tree_map`` works for SSP-RK3 averaging and physics
+    coupling. ``dphis_dt`` is always zero because the plane surface is
+    static; it is kept for pytree shape compatibility with the existing
+    NH tendency interface.
+    """
+    du_dt: Field
+    dv_dt: Field
+    dw_dt: Field
+    dtheta_prime_dt: Field
+    drho_prime_dt: Field
+    dphis_dt: Field
+    dtracers_dt: Field
+
+
+# ==============================================================================
 # MPAS Voronoi Mesh Ocean States
 # ==============================================================================
 
@@ -381,25 +545,42 @@ class MPASOceanState(NamedTuple):
         Salinity [PSU]. Shape (nCells, nlev). Prognostic.
     eta : Field
         Sea surface height [m]. Shape (nCells,). Prognostic.
+    w : Field
+        Vertical velocity [m/s]. Shape (nCells, nlev+1). Diagnostic field
+        computed from flux divergence on half levels (surface first,
+        bottom = 0).
     H_bathy : Field
         Bathymetry depth [m]. Shape (nCells,). Positive downward. Static.
     land_mask : Field
         Ocean mask. Shape (nCells,). 1=ocean, 0=land. Static.
+    rho_ref_z : Field or None
+        Optional horizontally-uniform reference density profile [kg/m³].
+        Shape (nlev,). Frozen at init time from ``EOS(T_init, S_init,
+        p_hydro)`` averaged over wet cells.  When present, the
+        baroclinic PGF uses ``ρ' = ρ − ρ_ref(z)`` instead of
+        ``ρ' = ρ − ρ_0``, attacking the partial-cell PGF residual at
+        the seed (project_mpas_etopo_instability.md §"Option B").
+        Static — never updated during integration.  None disables.
     """
     u: Field
     T: Field
     S: Field
     eta: Field
+    w: Field
     H_bathy: Field
     land_mask: Field
+    rho_ref_z: Field | None = None
 
 
 class MPASOceanTendencies(NamedTuple):
     """Tendencies for MPAS ocean primitive equations.
 
-    Only prognostic fields have tendencies.
+    F_slow_u is the depth-mean of the full nonlinear momentum tendency
+    (Coriolis via PV flux + PGF + KE).  Passed to the barotropic solver
+    as slow forcing (MOM6 pattern, Hallberg & Adcroft 2009).  Issue #160.
     """
     du_dt: Field
     dT_dt: Field
     dS_dt: Field
     deta_dt: Field
+    F_slow_u: Field | None = None

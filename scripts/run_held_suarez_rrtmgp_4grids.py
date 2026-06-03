@@ -25,6 +25,8 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
@@ -128,29 +130,20 @@ def _make_rrtmgp_physics(model_type: str, dt: float, hs_fn=None):
 
 # Diffusion coefficient helpers (match test matrix)
 def _hyperdiff_cube(n):
-    dx = 6.371e6 * np.pi / (2 * n)
+    dx = constants.R_earth * np.pi / (2 * n)
     tau = 3600.0
     return dx ** 4 / tau
 
 def _div_damp_cube(n):
-    dx = 6.371e6 * np.pi / (2 * n)
+    dx = constants.R_earth * np.pi / (2 * n)
     return 0.15 * dx ** 2
 
 def _laplacian_visc_cube(n):
-    dx = 6.371e6 * np.pi / (2 * n)
+    dx = constants.R_earth * np.pi / (2 * n)
     return 0.01 * dx ** 2
 
-def _hyperdiff_latlon(n_lat):
-    dx = 6.371e6 * np.pi / n_lat
-    tau = 3600.0
-    return dx ** 4 / tau
-
-def _div_damp_latlon(n_lat):
-    dx = 6.371e6 * np.pi / n_lat
-    return 0.15 * dx ** 2
-
 def _laplacian_visc_latlon(n_lat):
-    dx = 6.371e6 * np.pi / n_lat
+    dx = constants.R_earth * np.pi / n_lat
     return 0.01 * dx ** 2
 
 def _hyperdiff_ico(mesh):
@@ -224,7 +217,7 @@ def run_cubed_sphere(days, nlev, vertical_coord):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig)
-    from tests.test_cases.held_suarez import (
+    from legoesm.atmosphere.held_suarez import (
         held_suarez_init, held_suarez_forcing)
     from legoesm.core.operators import global_integral
 
@@ -267,41 +260,52 @@ def run_cubed_sphere(days, nlev, vertical_coord):
 
 def run_latlon(days, nlev, vertical_coord):
     """Run Held-Suarez + RRTMGP on lat-lon 72x144."""
+    import math as _m
     from legoesm.grids.latlon import create_latlon_grid
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
-        LatLonPrimitiveEquationModel, LatLonPrimitiveEquationConfig)
-    from tests.test_cases.held_suarez import (
+    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig)
+    from legoesm.atmosphere.held_suarez import (
         held_suarez_init_latlon, held_suarez_forcing_latlon)
-    from legoesm.core.operators_latlon import global_integral as global_integral_ll
 
     n_lat, n_lon = 72, 144
     grid = create_latlon_grid(n_lat, n_lon)
     sigma = _create_vertical(nlev, vertical_coord)
-    dt = 200.0
 
-    config = LatLonPrimitiveEquationConfig(
-        hyperdiff_coeff=_hyperdiff_latlon(n_lat),
-        hyperdiff_ps_coeff=_hyperdiff_latlon(n_lat),
-        div_damp_coeff=_div_damp_latlon(n_lat),
-        A_h=_laplacian_visc_latlon(n_lat),
-        use_conservation_fixer=True, fix_mass=True)
-    model = LatLonPrimitiveEquationModel(grid, sigma, config)
-    state = held_suarez_init_latlon(grid, sigma)
+    # Pole-cell CFL-safe dt and A_h for the explicit C-grid solver.
+    R = float(grid.radius)
+    dx_pole = R * grid.dlon * _m.cos(_m.pi / 2 - grid.dlat / 2)
+    dt = min(200.0, 0.8 * dx_pole / 300.0)  # advective CFL
+    A_h_max = 0.4 * dx_pole ** 2 / dt
+    A_h = min(_laplacian_visc_latlon(n_lat), A_h_max)
+
+    config = CGridLatLonPrimitiveEquationConfig(
+        A_h=A_h,
+        fix_mass=True)
+    model = CGridLatLonPrimitiveEquationModel(grid, sigma, config)
+
+    # Convert to native C-grid state once; step natively to avoid
+    # lossy face↔cell re-projection every timestep.
+    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        hydrostatic_to_cgrid)
+    hs_init = held_suarez_init_latlon(grid, sigma)
+    state = hydrostatic_to_cgrid(hs_init, grid)
 
     physics_fn = _make_rrtmgp_physics("hydrostatic", dt, hs_fn=held_suarez_forcing_latlon)
 
     def step_fn(s, dt_):
-        return model.step_with_physics(s, dt_, physics_fn)
+        return model.step(s, dt_, physics_fn=physics_fn)
 
     def check_fn(s):
-        return (check_finite({"T": s.T.data, "u": s.u.data}),
-                float(jnp.max(jnp.abs(s.u.data))))
+        return (check_finite({"T": s.T}),
+                float(jnp.max(jnp.abs(s.u))))
 
     def scalar_fn(s):
         return {
-            "mass": float(global_integral_ll(s.p_s, grid)),
-            "max_wind": float(jnp.max(jnp.sqrt(s.u.data**2 + s.v.data**2))),
-            "mean_T": float(jnp.mean(s.T.data)),
+            "mass": float(jnp.sum(s.p_s * grid.area)),
+            "max_wind": float(jnp.max(jnp.sqrt(
+                (0.5 * (s.u[:, :-1] + s.u[:, 1:]))**2
+                + (0.5 * (s.v[:-1] + s.v[1:]))**2))),
+            "mean_T": float(jnp.mean(s.T)),
         }
 
     n_steps = int(days * 86400 / dt)
@@ -317,7 +321,7 @@ def run_icosahedral(days, nlev):
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
         MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
-    from tests.test_cases.held_suarez import (
+    from legoesm.atmosphere.held_suarez import (
         held_suarez_init_mpas, held_suarez_forcing_mpas)
 
     level = 5
@@ -361,7 +365,7 @@ def run_spectral(days, nlev, vertical_coord):
     from legoesm.atmosphere.dynamics.spectral_pe import (
         SpectralPrimitiveEquationModel, SpectralPEConfig,
         isothermal_rest_state_spectral, spectral_pe_to_grid)
-    from tests.test_cases.held_suarez import held_suarez_forcing_spectral
+    from legoesm.atmosphere.held_suarez import held_suarez_forcing_spectral
 
     n_max = 21
     grid = create_gaussian_grid(n_max)
@@ -417,17 +421,43 @@ def compare_results(results: dict, output_dir: Path):
           f"{'max_wind':<12} {'mass_drift':<14} {'wall(s)':<10}")
     print("-" * 70)
 
+    # iter-119 codex iter-118-followup MEDIUM-2: apply the
+    # iter-117 mass-drift tolerance to this 4-grid HS+RRTMGP
+    # runner too.  Pre-iter-119 ``status = "PASS" if ok else
+    # "FAIL"`` only checked finiteness + non-blown-up,
+    # allowing arbitrary mass drift to PASS — same gap that
+    # iter-117 closed for the matrix runner's HS branch.
+    HS_RRTMGP_MASS_DRIFT_TOL = 1e-2
+    import numpy as _np_iter119
+
     summary = {}
     for grid_name, (state, diag, wall, ok) in results.items():
-        status = "PASS" if ok else "FAIL"
         mean_T = diag.get("mean_T", [0])[-1] if diag.get("mean_T") else 0
         max_wind = diag.get("max_wind", [0])[-1] if diag.get("max_wind") else 0
 
-        mass_vals = diag.get("mass", [])
-        if len(mass_vals) >= 2:
-            mass_drift = abs(mass_vals[-1] - mass_vals[0]) / abs(mass_vals[0] + 1e-30)
-        else:
-            mass_drift = 0
+        # iter-88: delegate to the shared baseline-zero-safe
+        # helper (factored out of the iter-83 / iter-87 inline
+        # implementations).  See
+        # ``legoesm.diagnostics.conservation_drift`` for history.
+        from legoesm.diagnostics.conservation_drift import compute_relative_drift
+        mass_drift = compute_relative_drift(diag.get("mass", []))
+
+        # iter-119 mass-drift gate: NaN- and threshold-aware.
+        # Update both the local ``ok`` AND the entry in
+        # ``results`` because ``main()`` aggregates via
+        # ``all(r[3] for r in results.values())`` — relying on
+        # ``r[3]`` (the original ok) to reflect the iter-119
+        # mass-drift gate too.
+        if ok and (
+            not _np_iter119.isfinite(mass_drift)
+            or mass_drift > HS_RRTMGP_MASS_DRIFT_TOL
+        ):
+            ok = False
+            # Persist back to the results dict so main()'s
+            # all_ok aggregation picks up the iter-119 fail.
+            results[grid_name] = (state, diag, wall, ok)
+
+        status = "PASS" if ok else "FAIL"
 
         print(f"  {grid_name:<20} {status:<8} {mean_T:<12.2f} "
               f"{max_wind:<12.1f} {mass_drift:<14.2e} {wall:<10.1f}")

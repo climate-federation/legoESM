@@ -8,7 +8,24 @@ from legoesm.grids.cubed_sphere_cdgrid import (
 )
 from legoesm.grids.halo import pad_halo, pad_halo_vector
 from legoesm.grids.gaussian import GaussianGrid, create_gaussian_grid
-from legoesm.grids.latlon import LatLonGrid, create_latlon_grid
+from legoesm.grids.latlon import (
+    LatLonGrid,
+    create_latlon_grid,
+    LatLonCGridGeometry,
+    FoldDescriptor,
+    create_latlon_geometry,
+    ensure_geometry,
+    create_mercator_grid,
+    create_regional_latlon_grid,
+)
+# Experimental, staged-not-integrated. Plane NH dycore lands in a
+# follow-up PR (CRM rollout, PR2). For now PlaneGrid is consumed only
+# by ``plane_operators`` and its direct unit tests.
+from legoesm.grids.plane import PlaneGrid, create_plane_grid
+from legoesm.grids.tripole import (
+    create_tripole_grid,
+    create_synthetic_tripole,
+)
 from legoesm.grids.vertical import (
     SigmaCoordinate,
     create_sigma_coordinate,

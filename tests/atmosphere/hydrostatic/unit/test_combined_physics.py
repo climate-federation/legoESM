@@ -27,7 +27,7 @@ def _make_hydrostatic_setup():
     """Create a minimal hydrostatic state, grid, sigma for testing."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from tests.test_cases.held_suarez import held_suarez_init
+    from legoesm.atmosphere.held_suarez import held_suarez_init
 
     grid = create_cubed_sphere(8)
     sigma = create_sigma_coordinate(10)
@@ -37,6 +37,37 @@ def _make_hydrostatic_setup():
     state = state._replace(
         u=Field(data=jnp.ones((6, n, n, nlev)) * 10.0,
                 name="u", dims=("face", "x", "y", "level"), units="m/s"),
+    )
+    return state, grid, sigma
+
+
+def _make_turbulent_setup():
+    """Active boundary-layer column for the faithful turbulence closures.
+
+    ``held_suarez_init`` gives a near-isothermal (hence θ-stably
+    stratified) column; the deformation-based Smagorinsky–Lilly closure
+    *correctly* produces ~zero interior diffusivity there (hard Lilly
+    cutoff at Ri ≥ Pr_t), so it would generate no heat tendency.  To
+    exercise the schemes in their intended regime we add (1) vertical
+    shear so |S| > 0 and (2) a super-adiabatic surface layer so the
+    near-surface gradient Richardson number is negative — the canonical
+    convective-boundary-layer state where turbulence mixes heat.
+    """
+    state, grid, sigma = _make_hydrostatic_setup()
+    n, nlev = grid.n, sigma.n_levels
+    # Vertical shear: wind grows from ~5 m/s aloft toward the surface.
+    lev = jnp.arange(nlev)
+    u_shear = (5.0 + 3.0 * lev)[None, None, None, :] * jnp.ones((6, n, n, nlev))
+    # Super-adiabatic surface layer: warm the lowest three levels (warmest
+    # at the surface) so the near-surface stratification is unstable.
+    T_active = state.T.data.at[..., nlev - 3:].add(
+        jnp.array([10.0, 22.0, 40.0])
+    )
+    state = state._replace(
+        u=Field(data=u_shear, name="u",
+                dims=("face", "x", "y", "level"), units="m/s"),
+        T=Field(data=T_active, name="T",
+                dims=("face", "x", "y", "level"), units="K"),
     )
     return state, grid, sigma
 
@@ -108,8 +139,13 @@ class TestCombinedHydrostatic:
         assert jnp.allclose(tend.du_dt.data, 0.0)
 
     def test_turbulence_only(self):
-        """Turbulence only should give nonzero wind and T tendencies."""
-        state, grid, sigma = _make_hydrostatic_setup()
+        """Turbulence only should give nonzero wind and T tendencies.
+
+        Uses an active (sheared + super-adiabatic) column so the faithful
+        Smagorinsky–Lilly closure mixes heat — on a quiescent stable
+        column its hard Lilly cutoff correctly yields zero dT_dt.
+        """
+        state, grid, sigma = _make_turbulent_setup()
         cfg = PhysicsConfig(
             radiation=RadiationConfig(scheme="none"),
             convection=ConvectionConfig(scheme="none"),
@@ -239,8 +275,14 @@ class TestCombinedHydrostatic:
         assert not jnp.allclose(tend_gray.dT_dt.data, tend_none.dT_dt.data)
 
     def test_scheme_selection_turbulence(self):
-        """Switching turbulence scheme should change the result."""
-        state, grid, sigma = _make_hydrostatic_setup()
+        """Switching turbulence scheme should change the result.
+
+        Uses an active (sheared + super-adiabatic) column: the
+        deformation-based Smagorinsky–Lilly and stability-function Louis
+        closures only diverge meaningfully where interior mixing is
+        actually switched on.
+        """
+        state, grid, sigma = _make_turbulent_setup()
 
         cfg_smag = PhysicsConfig(
             radiation=RadiationConfig(scheme="none"),
@@ -479,15 +521,19 @@ class TestCombinedSpectralPE:
         )
         physics_fn = make_physics(cfg, "spectral_pe", dt=300.0)
 
-        import legoesm.atmosphere.dynamics.spectral_pe as spectral_pe_mod
-        original = spectral_pe_mod.spectral_pe_to_grid
+        # Patch the binding the orchestrator actually uses — combined.py
+        # imports ``spectral_pe_to_grid`` directly via ``from … import``
+        # so monkeypatching the source module's attribute would not
+        # intercept the local binding the call site sees.
+        import legoesm.atmosphere.physics.combined as combined_mod
+        original = combined_mod.spectral_pe_to_grid
         n_calls = {"count": 0}
 
         def wrapped(*args, **kwargs):
             n_calls["count"] += 1
             return original(*args, **kwargs)
 
-        monkeypatch.setattr(spectral_pe_mod, "spectral_pe_to_grid", wrapped)
+        monkeypatch.setattr(combined_mod, "spectral_pe_to_grid", wrapped)
         _ = physics_fn(state, grid, sigma)
 
         assert n_calls["count"] == 1

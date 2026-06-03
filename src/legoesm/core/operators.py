@@ -19,7 +19,26 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.grids.halo import pad_halo, pad_halo_vector
+from legoesm.grids.halo import pad_halo, pad_halo_vector, get_halo_backend
+
+
+def _pad_scalar(data, grid):
+    """Pad scalar field with duogrid-aware halo exchange."""
+    dg = getattr(grid, 'duogrid', None)
+    offsets = None if dg is not None else grid.halo_interp_offsets
+    return pad_halo(data, interp_offsets=offsets, duogrid=dg)
+
+
+def _pad_vector(u, v, grid):
+    """Pad vector field with duogrid-aware halo exchange."""
+    dg = getattr(grid, 'duogrid', None)
+    offsets = None if dg is not None else grid.halo_interp_offsets
+    return pad_halo_vector(
+        u, v,
+        grid.cos_angle, grid.sin_angle,
+        grid.cos_angle_padded, grid.sin_angle_padded,
+        interp_offsets=offsets, duogrid=dg,
+    )
 
 
 # ==============================================================================
@@ -43,7 +62,7 @@ def gradient_x(field: Field, grid: CubedSphereGrid) -> Field:
     -------
     Field : d(field)/dx, shape (6, n, n).
     """
-    padded = pad_halo(field.data, interp_offsets=grid.halo_interp_offsets)
+    padded = _pad_scalar(field.data, grid)
     # Centered difference: (f[i+1,j] - f[i-1,j]) / (2*dx)
     # In padded array: i+1 = padded[:, 2:, 1:-1], i-1 = padded[:, :-2, 1:-1]
     df_dx = (padded[:, 2:, 1:-1] - padded[:, :-2, 1:-1]) / grid.dx
@@ -55,7 +74,7 @@ def gradient_y(field: Field, grid: CubedSphereGrid) -> Field:
 
     Same as gradient_x but along axis=2 (y-direction).
     """
-    padded = pad_halo(field.data, interp_offsets=grid.halo_interp_offsets)
+    padded = _pad_scalar(field.data, grid)
     # j+1 = padded[:, 1:-1, 2:], j-1 = padded[:, 1:-1, :-2]
     df_dy = (padded[:, 1:-1, 2:] - padded[:, 1:-1, :-2]) / grid.dy
     return field.replace(data=df_dy, name=f"d{field.name}_dy", units=f"{field.units}/m")
@@ -100,12 +119,7 @@ def divergence(u_field: Field, v_field: Field, grid: CubedSphereGrid) -> Field:
     #
     # This avoids assuming dx == dy across face boundaries; on this grid,
     # anisotropy can be significant near edges/corners.
-    u_pad, v_pad = pad_halo_vector(
-        u, v,
-        grid.cos_angle, grid.sin_angle,
-        grid.cos_angle_padded, grid.sin_angle_padded,
-        interp_offsets=grid.halo_interp_offsets,
-    )
+    u_pad, v_pad = _pad_vector(u, v, grid)
 
     flux_x_pad = u_pad * grid.hy_ext
     flux_y_pad = v_pad * grid.hx_ext
@@ -145,12 +159,7 @@ def curl_z(u_field: Field, v_field: Field, grid: CubedSphereGrid) -> Field:
     v = v_field.data
 
     # Pad vector components with proper rotation (using precomputed trig)
-    u_pad, v_pad = pad_halo_vector(
-        u, v,
-        grid.cos_angle, grid.sin_angle,
-        grid.cos_angle_padded, grid.sin_angle_padded,
-        interp_offsets=grid.halo_interp_offsets,
-    )
+    u_pad, v_pad = _pad_vector(u, v, grid)
 
     # Orthogonal-curvilinear finite-volume form:
     # zeta = (1/area) * [d(v*h_y)/di - d(u*h_x)/dj] / 2
@@ -210,7 +219,9 @@ def laplacian_compact(data: jax.Array, grid: CubedSphereGrid) -> jax.Array:
     -------
     jax.Array : ∇²f, shape (6, n, n)
     """
-    padded = pad_halo(data, interp_offsets=grid.halo_interp_offsets)
+    dg = getattr(grid, 'duogrid', None)
+    offsets = None if dg is not None else grid.halo_interp_offsets
+    padded = pad_halo(data, interp_offsets=offsets, duogrid=dg)
 
     # Compact second differences using ADJACENT cells:
     # d²f/dx² ≈ (f[i+1] - 2*f[i] + f[i-1]) / (dx/2)²
@@ -236,7 +247,7 @@ def advect_upwind(
 
     -u * dq/dx - v * dq/dy, using upwind differencing for stability.
     """
-    q_pad = pad_halo(q.data, interp_offsets=grid.halo_interp_offsets)
+    q_pad = _pad_scalar(q.data, grid)
     u_data = u.data
     v_data = v.data
     q_data = q.data
@@ -339,12 +350,17 @@ def global_integral(field: Field, grid: CubedSphereGrid) -> jax.Array:
     -------
     scalar : The global integral.
     """
-    from legoesm.core.conservation import _accumulation_dtype
-    acc = _accumulation_dtype()
+    from legoesm.core.conservation import conservation_accumulator
+    acc = conservation_accumulator()
     prod = field.data.astype(acc) * grid.area.astype(acc)
     local_sum = jnp.sum(prod)
 
     if _is_distributed():
+        # iter-169: deferred import (avoids eager top-level
+        # cross-package import per CLAUDE.md "Audit lessons —
+        # 2026-05-03 cycle" — and fixes the F821 lint failure
+        # that the previous code path would hit at runtime as
+        # NameError).
         from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_sum)
 
@@ -357,12 +373,14 @@ def global_integral(field: Field, grid: CubedSphereGrid) -> jax.Array:
 
 def _is_distributed() -> bool:
     """Check if the MPI halo backend is active."""
-    from legoesm.grids.halo import get_halo_backend
     return get_halo_backend() == "mpi"
 
 
 def _get_device_config():
     """Return the active DeviceConfig, or None."""
+    # iter-169: deferred import (CLAUDE.md "Audit lessons":
+    # avoid eager top-level cross-package imports from low-level
+    # ``core/`` modules into higher-level ``parallel/``).
     from legoesm.parallel.mesh import get_active_config
     return get_active_config()
 

@@ -63,8 +63,13 @@ def gradient_y(field: Field, grid: LatLonGrid) -> Field:
     Field : d(field)/dy, shape (n_lat, n_lon).
     """
     padded = pad_halo_latlon(field.data)
-    # Centered difference: (f[j+1, i] - f[j-1, i]) / dy
-    df_dy = (padded[2:, 1:-1] - padded[:-2, 1:-1]) / grid.dy
+    # Centred difference: (f[j+1, i] - f[j-1, i]) / dy.
+    # The denominator is twice the cell-row's single-cell height.
+    # For uniform-dlat (the only setting this A-grid path is used in;
+    # Mercator is C-grid-only) this equals the cell-centre-to-cell-
+    # centre distance from row j-1 to j+1 exactly. On non-uniform
+    # grids it is a leading-order approximation.
+    df_dy = (padded[2:, 1:-1] - padded[:-2, 1:-1]) / grid.dy[:, None]
     return field.replace(data=df_dy, name=f"d{field.name}_dy", units=f"{field.units}/m")
 
 
@@ -99,9 +104,10 @@ def divergence(u_field: Field, v_field: Field, grid: LatLonGrid) -> Field:
     u = u_field.data
     v = v_field.data
 
-    # Form fluxes: multiply by single-cell edge length (half of 2-cell span)
-    flux_x = u * (grid.dy * 0.5)    # (n_lat, n_lon), dy is constant
-    flux_y = v * (grid.dx * 0.5)    # (n_lat, n_lon), dx varies with lat
+    # Form fluxes: multiply by single-cell edge length (half of 2-cell span).
+    # grid.dy is (n_lat,) — broadcast over longitude.
+    flux_x = u * (grid.dy[:, None] * 0.5)  # (n_lat, n_lon)
+    flux_y = v * (grid.dx * 0.5)            # (n_lat, n_lon), dx varies with lat
 
     flux_x_pad, flux_y_pad = pad_halo_vector_latlon(flux_x, flux_y)
 
@@ -136,9 +142,9 @@ def curl_z(u_field: Field, v_field: Field, grid: LatLonGrid) -> Field:
     u = u_field.data
     v = v_field.data
 
-    # Form metric-weighted fields
-    v_metric = v * (grid.dy * 0.5)   # v * single-cell dy
-    u_metric = u * (grid.dx * 0.5)   # u * single-cell dx (varies with lat)
+    # Form metric-weighted fields. grid.dy is (n_lat,) — broadcast over lon.
+    v_metric = v * (grid.dy[:, None] * 0.5)   # v * single-cell dy
+    u_metric = u * (grid.dx * 0.5)             # u * single-cell dx (varies with lat)
 
     v_pad = pad_halo_latlon_vector(v_metric)
     u_pad = pad_halo_latlon_vector(u_metric)
@@ -166,10 +172,14 @@ def laplacian(field: Field, grid: LatLonGrid) -> Field:
         padded[1:-1, 2:] - 2.0 * data + padded[1:-1, :-2]
     ) / (grid.dx**2 / 4.0)
 
-    # d^2f/dy^2
+    # d²f/dy² — grid.dy is (n_lat,), broadcast over longitude. The
+    # ``(grid.dy/2)²`` denominator is the uniform-dlat formula; this
+    # A-grid Laplacian is used only on uniform global lat-lon grids
+    # (Mercator is C-grid-only). On non-uniform grids it is a leading-
+    # order approximation.
     d2f_dy2 = (
         padded[2:, 1:-1] - 2.0 * data + padded[:-2, 1:-1]
-    ) / (grid.dy**2 / 4.0)
+    ) / (grid.dy[:, None]**2 / 4.0)
 
     lap_data = d2f_dx2 + d2f_dy2
 
@@ -190,20 +200,32 @@ def hyperdiffusion(field: Field, grid: LatLonGrid, coeff: float) -> Field:
 def global_integral(field: Field, grid: LatLonGrid) -> jax.Array:
     """Compute the area-weighted global integral of a field.
 
-    Parameters
-    ----------
-    field : Field
-        Scalar field at cell centers, shape (n_lat, n_lon).
-    grid : LatLonGrid
-        The grid with cell areas.
+    Uses an fp64 accumulator (via
+    ``legoesm.core.conservation.conservation_accumulator``) so the
+    result is well-conditioned even when ``field.data`` and
+    ``grid.area`` are stored in fp32.  A plain ``jnp.sum`` over an
+    fp32 product loses ~log2(n_cells) bits of precision and produces
+    spurious O(0.1%-1%) "mass drift" on N=720x1440 lat-lon grids,
+    while the cubed-sphere path (``operators.global_integral``)
+    already promotes to fp64 before summing.
 
-    Returns
-    -------
-    scalar : The global integral.
+    Supports single-device and MPI distributed execution; the
+    JAX/XLA NamedSharding multi-device path is handled implicitly
+    via ``jnp.sum`` on a sharded array.
     """
-    return jnp.sum(field.data * grid.area)
+    from legoesm.core.conservation import conservation_accumulator
+    acc = conservation_accumulator()
+    prod = field.data.astype(acc) * grid.area.astype(acc)
+    local_sum = jnp.sum(prod)
+
+    from legoesm.core.operators import _is_distributed
+    if _is_distributed():
+        from legoesm.parallel.reductions import global_sum_mpi
+        return global_sum_mpi(local_sum)
+    return local_sum
 
 
 def global_mean(field: Field, grid: LatLonGrid) -> jax.Array:
     """Compute the area-weighted global mean of a field."""
-    return global_integral(field, grid) / grid.total_area
+    integ = global_integral(field, grid)
+    return integ / grid.total_area.astype(integ.dtype)

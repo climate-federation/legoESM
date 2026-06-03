@@ -128,6 +128,136 @@ def thomas_solve(
     return x
 
 
+def pcr_solve_batched(
+    a: jax.Array,
+    b: jax.Array,
+    c: jax.Array,
+    d: jax.Array,
+) -> jax.Array:
+    """Parallel cyclic reduction for batched tridiagonal systems.
+
+    Pure-JAX. Unlike :func:`thomas_solve_batched` which calls cuSPARSE
+    via a custom_call (fusion barrier), PCR is a sequence of elementwise
+    ops that XLA can fuse into surrounding compute. For the small
+    nlev (~30) used in the SI acoustic substep this is comparable in
+    raw speed to cuSPARSE but enables single-kernel substep bodies.
+
+    Algorithm: at level k (stride = 2^k), each row eliminates its
+    sub/super-diagonal contributions from the row stride positions
+    away. After log2(n_pad) levels, every row is decoupled and
+    ``x = d / b`` solves the system trivially.
+
+    Shape ``(..., n)`` for a/b/c/d (n is the tridiag system size, last
+    axis); leading axes are batched over. n need not be a power of 2 —
+    the system is padded to the next power of 2 with identity rows
+    (``b=1, a=c=d=0``) which decouple from the original system.
+
+    Stability assumption
+    --------------------
+    PCR is pivot-free; roundoff growth depends on diagonal dominance.
+    The SI acoustic system has ``b ~ 1 + alpha`` (alpha > 0), so b is
+    bounded away from zero — PCR is stable in this regime. Empirically
+    (iter-73 sweep at dt=2s, dx=2km, plane CRM):
+    - n_substeps=2 (acoustic CFL ≈ 0.17): **NaN** within 30 steps
+    - n_substeps=3 (CFL ≈ 0.113): stable
+    The practical stability bound under default off-centering
+    (``beta=0``) is between CFL=0.113 and 0.17 — narrower than the
+    canonical 0.7 acoustic CFL because of off-centering + buoyancy +
+    advection coupling. For weakly-diagonal-dominant systems or to
+    A/B-validate, fall back via ``LEGOESM_TRIDIAG=legacy`` or
+    ``=cusparse``.
+
+    AD memory cost
+    --------------
+    Each PCR level materializes ~12 intermediate arrays (a, b, c, d
+    plus a_up, b_up, c_up, d_up, alpha, beta, new a/b/c/d). For
+    n_sys=29 → 5 levels → ~60 intermediates per substep call.
+    Reverse-mode AD captures all forward ops, so peak AD memory
+    grows with substep count × levels × state size. Compared to
+    cuSPARSE (which has a single custom_call with internal-only
+    state), PCR's AD footprint is larger by roughly 5-10× per
+    substep. Training with ``jax.grad`` on large grids may require
+    activation checkpointing.
+
+    Division-in-graph caveat
+    ------------------------
+    ``jnp.where`` does NOT short-circuit. ``alpha = jnp.where(has_above,
+    -a / b_up, 0.0)`` evaluates the division at all rows including those
+    masked out. ``b_up`` is set to 1.0 at masked rows via constant-pad,
+    so the division is safe. If a future caller introduces a real row
+    with b==0, the graph will propagate NaN even where masked.
+
+    Compile-time
+    ------------
+    The Python for-loop unrolls log2(n_pad) levels at trace time. Each
+    level adds ~12 elementwise ops to the traced graph. For n=29
+    (5 levels) × 6 substeps × 3 RK3 stages × outer jit = ~5s compile
+    in practice. Acceptable for JIT-once workloads.
+    """
+    if a.shape != b.shape or a.shape != c.shape or a.shape != d.shape:
+        raise ValueError(
+            f"pcr_solve_batched expects matching shapes; got a={a.shape}, "
+            f"b={b.shape}, c={c.shape}, d={d.shape}"
+        )
+    if a.ndim < 1:
+        raise ValueError(
+            f"pcr_solve_batched requires at least 1 axis (the tridiag "
+            f"system axis as the last dim); got shape {a.shape}"
+        )
+    if a.shape[-1] < 2:
+        raise ValueError(
+            f"pcr_solve_batched requires n>=2 on trailing axis; got {a.shape[-1]}"
+        )
+
+    import math
+    n = a.shape[-1]
+    pad_axes = ((0, 0),) * (a.ndim - 1)
+    n_pad = 1 << max(1, (n - 1).bit_length())
+    pad_n = n_pad - n
+
+    if pad_n > 0:
+        a = jnp.pad(a, (*pad_axes, (0, pad_n)))
+        b = jnp.pad(b, (*pad_axes, (0, pad_n)), constant_values=1.0)
+        c = jnp.pad(c, (*pad_axes, (0, pad_n)))
+        d = jnp.pad(d, (*pad_axes, (0, pad_n)))
+
+    idx = jnp.arange(n_pad)
+    n_levels = int(math.log2(n_pad))
+
+    for k in range(n_levels):
+        stride = 1 << k
+        has_above = idx >= stride
+        has_below = idx < n_pad - stride
+
+        a_up = jnp.pad(a[..., :-stride], (*pad_axes, (stride, 0)))
+        b_up = jnp.pad(
+            b[..., :-stride], (*pad_axes, (stride, 0)), constant_values=1.0,
+        )
+        c_up = jnp.pad(c[..., :-stride], (*pad_axes, (stride, 0)))
+        d_up = jnp.pad(d[..., :-stride], (*pad_axes, (stride, 0)))
+
+        a_dn = jnp.pad(a[..., stride:], (*pad_axes, (0, stride)))
+        b_dn = jnp.pad(
+            b[..., stride:], (*pad_axes, (0, stride)), constant_values=1.0,
+        )
+        c_dn = jnp.pad(c[..., stride:], (*pad_axes, (0, stride)))
+        d_dn = jnp.pad(d[..., stride:], (*pad_axes, (0, stride)))
+
+        alpha = jnp.where(has_above, -a / b_up, 0.0)
+        beta = jnp.where(has_below, -c / b_dn, 0.0)
+
+        a = alpha * a_up
+        c = beta * c_dn
+        b_new = b + alpha * c_up + beta * a_dn
+        d = d + alpha * d_up + beta * d_dn
+        b = b_new
+
+    x = d / b
+    if pad_n > 0:
+        x = x[..., :n]
+    return x
+
+
 def thomas_solve_batched(
     a: jax.Array,
     b: jax.Array,
@@ -136,24 +266,140 @@ def thomas_solve_batched(
 ) -> jax.Array:
     """Batched Thomas solve over columns.
 
-    Same as :func:`thomas_solve` but uses vmap over the first two
-    dimensions for cubed-sphere fields.
+    On GPU (CUDA): wraps cuSPARSE's batched tridiagonal solver via
+    ``jax.lax.linalg.tridiagonal_solve``. On other backends (CPU/Metal/TPU)
+    where the GPU primitive may be missing/slow: falls back to the legacy
+    fori_loop Thomas.
+
+    Verified correctness (iter-39/40 PR #320):
+    - fp64 max residual 9.99e-16 (machine precision)
+    - fp32 max residual ~5e-7 (machine precision)
+    - AD via `jax.grad` works; gradients finite with mean ~1.0 for
+      sum-of-output test
+    - 6 acoustic-substep tests PASS
+
+    Vertical axis convention: ``a, b, c, d`` MUST have the tridiagonal
+    system as the LAST axis. Leading axes are batched over.
 
     Parameters
     ----------
-    a, b, c, d : jax.Array, shape (6, n, n, nlev)
-        Tridiagonal system for each grid column.
+    a : jax.Array, shape (..., n_sys)
+        Sub-diagonal coefficients. ``a[..., 0]`` is unused (set to 0).
+    b : jax.Array, shape (..., n_sys)
+        Main diagonal coefficients (must be nonzero).
+    c : jax.Array, shape (..., n_sys)
+        Super-diagonal coefficients. ``c[..., -1]`` is unused (set to 0).
+    d : jax.Array, shape (..., n_sys)
+        Right-hand side.
 
     Returns
     -------
-    x : jax.Array, shape (6, n, n, nlev)
+    x : jax.Array, shape (..., n_sys)
     """
-    # Flatten spatial dims, solve, reshape
+    # Stronger argument validation per codex iter-57 review:
+    if a.shape != b.shape or a.shape != c.shape or a.shape != d.shape:
+        raise ValueError(
+            f"thomas_solve_batched expects a/b/c/d to share shape; "
+            f"got a={a.shape}, b={b.shape}, c={c.shape}, d={d.shape}"
+        )
+    if a.dtype != b.dtype or a.dtype != c.dtype or a.dtype != d.dtype:
+        raise ValueError(
+            f"thomas_solve_batched expects a/b/c/d to share dtype; "
+            f"got a={a.dtype}, b={b.dtype}, c={c.dtype}, d={d.dtype}"
+        )
+    if a.ndim < 1:
+        raise ValueError(
+            f"thomas_solve_batched requires at least 1 axis (the tridiag "
+            f"system axis as the last dim); got shape {a.shape}"
+        )
+    if a.shape[-1] < 2:
+        raise ValueError(
+            f"thomas_solve_batched requires n_sys >= 2 on the trailing "
+            f"axis; got n_sys={a.shape[-1]}"
+        )
+
+    # Backend selection priority (post iter-72):
+    #   1. env LEGOESM_TRIDIAG=pcr      -> pure-JAX PCR (default on GPU)
+    #   2. env LEGOESM_TRIDIAG=cusparse -> jax.lax.linalg.tridiagonal_solve (custom_call)
+    #   3. env LEGOESM_TRIDIAG=legacy   -> fori_loop Thomas (debug)
+    #   4. CUDA backend                  -> PCR (new default; +51% throughput
+    #                                       over cuSPARSE at peak via XLA fusion)
+    #   5. Else                          -> legacy fori_loop
+    #
+    # NOTE: the env var is read at JIT trace time and baked into the
+    # compiled graph; changing the env var after JIT compile has no
+    # effect on a cached compilation. Set it BEFORE importing legoesm
+    # in your driver script.
+    import os
+    forced = os.environ.get("LEGOESM_TRIDIAG", "").lower()
+    if forced == "pcr":
+        return pcr_solve_batched(a, b, c, d)
+    if forced == "cusparse":
+        try:
+            from jax.lax.linalg import tridiagonal_solve  # noqa: F401
+            on_gpu = jax.default_backend() in ("gpu", "cuda")
+        except (ImportError, AttributeError):
+            on_gpu = False
+        if on_gpu:
+            return _cusparse_solve(a, b, c, d)
+        return _thomas_solve_batched_legacy(a, b, c, d)
+    if forced == "legacy":
+        return _thomas_solve_batched_legacy(a, b, c, d)
+
+    # No env override: prefer PCR on GPU (best perf), legacy on CPU/Metal/TPU
+    # (PCR has more elementwise ops; on CPU the simpler Thomas is competitive
+    # and PCR's pad-heavy structure may not lower as cleanly).
+    try:
+        on_gpu = jax.default_backend() in ("gpu", "cuda")
+    except AttributeError:
+        on_gpu = False
+    if on_gpu:
+        return pcr_solve_batched(a, b, c, d)
+    return _thomas_solve_batched_legacy(a, b, c, d)
+
+
+def _cusparse_solve(
+    a: jax.Array,
+    b: jax.Array,
+    c: jax.Array,
+    d: jax.Array,
+) -> jax.Array:
+    """Batched cuSPARSE tridiagonal solve via jax.lax.linalg.tridiagonal_solve.
+
+    Lowering: single batched cuSPARSE invocation via the natively-batched
+    primitive. Same numerical behavior as :func:`pcr_solve_batched` and
+    :func:`_thomas_solve_batched_legacy` to machine epsilon.
+    """
+    from jax.lax.linalg import tridiagonal_solve
+    import math
+
     orig_shape = a.shape
     spatial_shape = orig_shape[:-1]
     n_sys = orig_shape[-1]
+    n_cols = max(1, math.prod(spatial_shape))
 
-    # Reshape to (N_columns, n_sys) for batch processing
+    a_flat = a.reshape(n_cols, n_sys)
+    b_flat = b.reshape(n_cols, n_sys)
+    c_flat = c.reshape(n_cols, n_sys)
+    d_flat = d.reshape(n_cols, n_sys)
+
+    x_flat = tridiagonal_solve(
+        a_flat, b_flat, c_flat, d_flat[..., None],
+    )[..., 0]
+    return x_flat.reshape(orig_shape)
+
+
+def _thomas_solve_batched_legacy(
+    a: jax.Array,
+    b: jax.Array,
+    c: jax.Array,
+    d: jax.Array,
+) -> jax.Array:
+    """Legacy fori_loop-based batched Thomas. Kept for CPU fallback /
+    regression testing. ~2000× slower than the cuSPARSE-backed default."""
+    orig_shape = a.shape
+    spatial_shape = orig_shape[:-1]
+    n_sys = orig_shape[-1]
     n_cols = 1
     for s in spatial_shape:
         n_cols *= s
@@ -162,8 +408,5 @@ def thomas_solve_batched(
     b_flat = b.reshape(n_cols, n_sys)
     c_flat = c.reshape(n_cols, n_sys)
     d_flat = d.reshape(n_cols, n_sys)
-
-    # vmap thomas_solve over columns
     x_flat = jax.vmap(thomas_solve)(a_flat, b_flat, c_flat, d_flat)
-
     return x_flat.reshape(orig_shape)

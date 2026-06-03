@@ -304,3 +304,275 @@ class TestDefaultBehavior:
 
         from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import CDGridPrimitiveEquationModel
         assert isinstance(model, CDGridPrimitiveEquationModel)
+
+
+# =========================================================================
+# 7. Lat-lon C-grid conservation_fixer=False
+# =========================================================================
+
+class TestLatLonConservationFixer:
+    """conservation_fixer=False must disable the mass fixer."""
+
+    def test_conservation_fixer_false_disables_fix_mass(self):
+        """conservation_fixer=False should produce fix_mass=False."""
+        from legoesm.grids.latlon import create_latlon_grid
+        grid = create_latlon_grid(16)
+        sigma = _make_sigma(5)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
+            dycore=DycoreConfig(
+                model_type="hydrostatic",
+                discretization="finite_volume",
+                conservation_fixer=False,
+                fix_mass=True,
+            ),
+        )
+        model = create_atmosphere_dycore(config, grid, sigma)
+        assert model.config.fix_mass is False, (
+            "conservation_fixer=False must override fix_mass to False"
+        )
+
+    def test_conservation_fixer_true_preserves_fix_mass(self):
+        """conservation_fixer=True (default) should keep fix_mass=True."""
+        from legoesm.grids.latlon import create_latlon_grid
+        grid = create_latlon_grid(16)
+        sigma = _make_sigma(5)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
+            dycore=DycoreConfig(
+                model_type="hydrostatic",
+                discretization="finite_volume",
+                fix_mass=True,
+            ),
+        )
+        model = create_atmosphere_dycore(config, grid, sigma)
+        assert model.config.fix_mass is True
+
+    def test_conservation_fixer_false_propagates_to_driver_config(self):
+        """conservation_fixer=False must also set fix_mass=False in the
+        driver's DycoreConfig so that the compiled-segment driver-level
+        mass fixer (fix_ps_mass_target) is also disabled."""
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.driver.model_driver import ModelDriver
+        grid = create_latlon_grid(16)
+        sigma = _make_sigma(5)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
+            dycore=DycoreConfig(
+                model_type="hydrostatic",
+                discretization="finite_volume",
+                conservation_fixer=False,
+                fix_mass=True,
+            ),
+            days=1,
+        )
+        driver = ModelDriver.__new__(ModelDriver)
+        driver.config = config
+        driver.grid = grid
+        driver.sigma = sigma
+        driver._create_dycore()
+        # After _create_dycore, the driver config must have fix_mass=False
+        assert driver.config.dycore.fix_mass is False, (
+            "conservation_fixer=False must propagate to "
+            "cfg.dycore.fix_mass=False for the compiled driver path"
+        )
+
+
+# =========================================================================
+# 8. Lat-lon pole-cell CFL safeguards
+# =========================================================================
+
+class TestLatLonUnsupportedKnobs:
+    """Factory must reject unsupported hyperdiff/div_damp on latlon_cgrid."""
+
+    def test_hyperdiff_scale_accepted(self):
+        """hyperdiff_scale is used by the driver for moisture smoothing,
+        not by the lat-lon dycore.  It should not be rejected."""
+        from legoesm.grids.latlon import create_latlon_grid
+        grid = create_latlon_grid(16)
+        sigma = _make_sigma(5)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
+            dycore=DycoreConfig(
+                model_type="hydrostatic",
+                discretization="finite_volume",
+                hyperdiff_scale=2.0,
+            ),
+        )
+        model = create_atmosphere_dycore(config, grid, sigma)
+        assert model is not None
+
+    def test_div_damp_scale_rejected(self):
+        from legoesm.grids.latlon import create_latlon_grid
+        grid = create_latlon_grid(16)
+        sigma = _make_sigma(5)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
+            dycore=DycoreConfig(
+                model_type="hydrostatic",
+                discretization="finite_volume",
+                div_damp_scale=2.0,
+            ),
+        )
+        with pytest.raises(ValueError, match="divergence"):
+            create_atmosphere_dycore(config, grid, sigma)
+
+    def test_default_scales_accepted(self):
+        """Default hyperdiff_scale=1.0, div_damp_scale=1.0 must not raise."""
+        from legoesm.grids.latlon import create_latlon_grid
+        grid = create_latlon_grid(16)
+        sigma = _make_sigma(5)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
+            dycore=DycoreConfig(
+                model_type="hydrostatic",
+                discretization="finite_volume",
+            ),
+        )
+        model = create_atmosphere_dycore(config, grid, sigma)
+        assert model is not None
+
+    def test_zero_scales_accepted(self):
+        """hyperdiff_scale=0.0, div_damp_scale=0.0 (disabled) must not raise."""
+        from legoesm.grids.latlon import create_latlon_grid
+        grid = create_latlon_grid(16)
+        sigma = _make_sigma(5)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
+            dycore=DycoreConfig(
+                model_type="hydrostatic",
+                discretization="finite_volume",
+                hyperdiff_scale=0.0,
+                div_damp_scale=0.0,
+            ),
+        )
+        model = create_atmosphere_dycore(config, grid, sigma)
+        assert model is not None
+
+
+class TestLatLonPoleCFL:
+    """Factory must clamp dt and A_h for the explicit C-grid lat-lon solver."""
+
+    def test_unsafe_dt_is_clamped(self):
+        """dt=600 on a 16x32 grid must be clamped to the pole-cell limit."""
+        from legoesm.grids.latlon import create_latlon_grid
+        grid = create_latlon_grid(16)
+        sigma = _make_sigma(5)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
+            dycore=DycoreConfig(
+                model_type="hydrostatic",
+                discretization="finite_volume",
+                dt=600.0,
+            ),
+        )
+        model = create_atmosphere_dycore(config, grid, sigma)
+        assert hasattr(model, "effective_dt")
+        assert model.effective_dt < 600.0, (
+            f"dt should have been clamped but effective_dt={model.effective_dt}"
+        )
+
+    def test_A_h_is_clamped(self):
+        """A_h must not exceed the pole-cell diffusive CFL limit."""
+        from legoesm.core.cfl import pole_cell_dx, max_laplacian_viscosity
+        from legoesm.grids.latlon import create_latlon_grid
+        grid = create_latlon_grid(16)
+        sigma = _make_sigma(5)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
+            dycore=DycoreConfig(
+                model_type="hydrostatic",
+                discretization="finite_volume",
+                dt=600.0,
+            ),
+        )
+        model = create_atmosphere_dycore(config, grid, sigma)
+        dx_pole = pole_cell_dx(grid)
+        A_h_max = max_laplacian_viscosity(dx_pole, model.effective_dt)
+        assert model.config.A_h <= A_h_max * 1.01, (
+            f"A_h={model.config.A_h:.2e} exceeds limit {A_h_max:.2e}"
+        )
+
+    def test_clamped_model_runs_stable(self):
+        """Multi-step stability with factory-clamped parameters."""
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
+        grid = create_latlon_grid(16)
+        sigma = _make_sigma(5)
+        config = ExperimentConfig(
+            grid=GridConfig(grid_type="latlon", resolution=16, nlev=5),
+            dycore=DycoreConfig(
+                model_type="hydrostatic",
+                discretization="finite_volume",
+                dt=600.0,
+            ),
+        )
+        model = create_atmosphere_dycore(config, grid, sigma)
+        state = held_suarez_init_latlon(grid, sigma)
+        dt = model.effective_dt
+        for _ in range(10):
+            state = model.step_with_physics(state, dt)
+        assert jnp.all(jnp.isfinite(state.T.data))
+
+
+# =========================================================================
+# 9. create_model() grid-aware routing for lat-lon finite_volume
+# =========================================================================
+
+class TestCreateModelGridAware:
+    """create_model() grid-aware routing for lat-lon."""
+
+    def test_axis_resolution_reroutes_on_latlon(self):
+        """Axis-based resolution (name=None, config with finite_volume)
+        on LatLonGrid must produce CGridLatLon, not CDGrid.
+        """
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.dynamics import create_model
+
+        grid = create_latlon_grid(16)
+        sigma = create_sigma_coordinate(5)
+        # name=None triggers axis resolution → reroute on LatLonGrid
+        model = create_model(
+            legoesm_config={
+                "atmosphere.dynamics": "hydrostatic",
+                "atmosphere.discretization": "finite_volume",
+            },
+            grid=grid, sigma_coord=sigma,
+        )
+        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+            CGridLatLonPrimitiveEquationModel,
+        )
+        assert isinstance(model, CGridLatLonPrimitiveEquationModel), (
+            f"Expected CGridLatLonPrimitiveEquationModel, got {type(model).__name__}"
+        )
+
+    def test_explicit_cdgrid_name_not_rerouted(self):
+        """Explicit name='cdgrid_primitive_equations' must NOT be rerouted
+        even when grid is LatLonGrid — the caller asked for that solver.
+        """
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.dynamics import create_model
+        from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
+            CDGridPrimitiveEquationModel,
+        )
+
+        grid = create_latlon_grid(16)
+        sigma = create_sigma_coordinate(5)
+        # Explicit name= → no rerouting.  CDGrid model will get a
+        # LatLonGrid it can't handle, which is the caller's problem;
+        # the point is that the factory does not silently swap solvers.
+        # We test the type check path by catching the expected error.
+        try:
+            model = create_model(
+                name="cdgrid_primitive_equations",
+                grid=grid, sigma_coord=sigma,
+            )
+            # If it succeeds, it must be the CDGrid model, not lat-lon.
+            assert isinstance(model, CDGridPrimitiveEquationModel), (
+                f"Explicit cdgrid request rerouted to {type(model).__name__}"
+            )
+        except (TypeError, AttributeError, ValueError):
+            # Expected: CDGrid model can't handle LatLonGrid.
+            pass

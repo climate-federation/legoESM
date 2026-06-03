@@ -27,11 +27,12 @@
 \newcommand{\Rv}{R_v}
 \newcommand{\pref}{p_0}
 \newcommand{\SB}{\sigma_{\mathrm{SB}}}
+\DeclareMathOperator{\Var}{Var}
 
 \title{\textbf{legoESM: A Differentiable Earth System Model in JAX}\\[6pt]
 \large Technical Documentation of Equations and Implementations}
 \author{legoESM Development Team}
-\date{April 2026}
+\date{May 2026}
 
 \begin{document}
 
@@ -107,6 +108,17 @@ Scalar fields are exchanged directly across the six-face connectivity table.  Ve
 Two halo widths are supported.  \textbf{Halo\,=\,1} (one ghost cell per side) suffices for second-order centred differences and MUSCL reconstruction.  \textbf{Halo\,=\,2} (two ghost cells per side) is required by higher-order reconstruction stencils (PPM, WENO5).  The halo exchange interpolates neighbour-face strips to the correct gnomonic position at each depth, removing the O($\Delta\alpha$) mismatch near cube corners.
 
 Under MPI, the native \textbf{4D halo exchange} path (\texttt{pad\_halo\_4d}, \texttt{pad\_halo\_vector\_4d}) exchanges all vertical levels in a single MPI message per neighbour, replacing the earlier per-level \texttt{vmap(pad\_halo)} path.  All \texttt{sendrecv} calls go through a \texttt{@jax.custom\_vjp} wrapper that swaps source/dest in the backward pass, enabling \texttt{jax.grad} through distributed halo exchange for differentiable MPI simulations.
+
+The May 2026 GPU-scaling branch (\#228) further compresses per-RK3-step
+collectives across all dycore backends: cubed-sphere allreduces fuse
+$4\to 1$ (halo bandwidth reduced ${\sim}36\text{--}144\times$ at
+high resolution), the spectral PE FFT and Legendre transforms fuse
+into a single pass with stacked per-tracer SH analyses, and MPAS
+\texttt{sendrecv}s drop $12\to 6$ with mass-fix payloads $3\to 2$.
+Fifteen SPMD-correctness unit tests gate the changes.  Real-hardware
+Levante-cluster validation is described in
+\texttt{docs/REAL\_HARDWARE\_SCALING.md} and
+\texttt{docs/GPU\_SCALING\_BRANCH.md}.
 
 %-----------------------------------------------------------------------------
 \subsection{Gaussian Grid and Spectral Transforms}
@@ -511,6 +523,15 @@ where $\beta\ge 0$ is the off-centering parameter (\texttt{acoustic\_off\_center
   r(z) = r_{\max}\sin^2\!\Bigl(\frac{\pi}{2}\,\frac{\max(0,\,z-z_{\mathrm{bot}})}{z_{\mathrm{top}}-z_{\mathrm{bot}}}\Bigr).
 \end{equation}
 
+\subsubsection{Turbulence closure: CRM, LES, and DNS}
+The diffusion terms $D_u,D_v,D_w,D_\theta$ are evaluated in flux form, $D_\phi = \rho_0^{-1}\,\partial_j\!\bigl(\rho_0\,K_\phi\,\partial_j\phi\bigr)$, over the horizontal directions and (optionally) a mass-weighted vertical leg.  The same discrete operator spans three turbulence-resolving regimes that differ only in the viscosity $K_m$ and the grid spacing $\Delta x$ (heat and scalars use $K_h=K_m/\mathrm{Pr}$), selected by the \texttt{turbulence\_closure} parameter:
+\begin{itemize}
+  \item \textbf{CRM} (convection-permitting, $\Delta x\sim1$--$4$\,km; \texttt{smagorinsky}): the 3-D Smagorinsky--Lilly eddy viscosity $K_m=(C_s\Delta)^2\sqrt{\max(0,\,|S|^2-\mathrm{Pr}\,N^2)}$ with $\Delta=(\Delta x\,\Delta y\,\Delta z)^{1/3}$, the full strain $|S|^2=2S_{ij}S_{ij}$, $C_s\approx0.19$, and the SAM \texttt{dosmagor} moist stratification cutoff $N^2$.  The energy-containing eddies are entirely sub-grid; this is the regime validated against gSAM for the GATE, LBA, and RCE cases.
+  \item \textbf{LES} (large-eddy simulation, $\Delta x\sim10$--$100$\,m; \texttt{smagorinsky}): the same closure with $C_s\approx0.15$ and an optional near-wall limiter $\ell_m=\min(C_s\Delta,\kappa z)$; the energy-containing eddies are resolved.  gSAM's GATE and LBA references are themselves $100$\,m LES, so this mode uses the identical closure at the identical resolution.
+  \item \textbf{DNS} (direct numerical simulation, $\Delta x\to$ the Kolmogorov scale; \texttt{molecular}): no turbulence model; $K_m$ is the constant molecular kinematic viscosity $\nu$ with $K_h=\nu/\mathrm{Pr}$ ($\mathrm{Pr}\approx0.71$ for air), giving the molecular dissipation $\nu\nabla^2\bm u$ directly.
+\end{itemize}
+Because the three regimes share one discrete flux-form operator, LES and DNS are configuration changes rather than separate code paths; the molecular closure reproduces the analytical viscous decay $\partial_t\hat u=-\nu k^2\hat u$ of an isolated shear mode to within the time-integration error.
+
 %=============================================================================
 \section{Atmospheric Physics}
 %=============================================================================
@@ -802,6 +823,13 @@ Five microphysics schemes:
   \item \textbf{Thompson}: Hybrid-moment scheme with ice crystal habits.
   \item \textbf{Sundqvist (1988)} and \textbf{Xu--Randall (1996)} cloud fraction diagnostics.
 \end{itemize}
+\texttt{cloud\_fraction.compute\_cloud\_properties} dispatches on
+\texttt{config.scheme} and accepts only \texttt{"sundqvist"} or
+\texttt{"xu\_randall"}; any other literal raises \texttt{ValueError}
+(no silent fallback).  To disable cloud diagnostics, set
+\texttt{cloud\_scheme="none"} on the caller's config so that
+\texttt{compute\_cloud\_properties} is skipped entirely upstream;
+\texttt{"none"} is not itself a valid scheme inside the dispatch.
 
 %=============================================================================
 \section{Ocean Dynamics}
@@ -975,6 +1003,41 @@ Entraining mass-flux ocean convection with entrainment rate $\alpha_{\mathrm{plu
 Grid-specific volume, heat, and salt conservation fixers for cubed-sphere, lat-lon, and MPAS grids.  Uniform additive correction per unit volume after each timestep.  All three grids compute corrections simultaneously from the original pre-fix state (avoiding order-dependent bias) and upcast to accumulation precision before global reductions to prevent catastrophic cancellation in float32.
 
 \textbf{Limitation:} These are uniform additive fixers that violate local conservation and act as spurious globally-uniform diapycnal mixing.  The proper solution is flux-form tracer advection with barotropic--baroclinic flux reconciliation (Hallberg 1997, Higdon 2005).
+
+%-----------------------------------------------------------------------------
+\subsection{Tracer Advection Schemes}
+%-----------------------------------------------------------------------------
+
+Tracer transport in \texttt{src/legoesm/ocean/advection.py} and
+\texttt{advection\_som.py} provides upwind, TVD (Van Leer / Sweby),
+DST3, PPM, PPM-FCT, WENO5/7, and Prather (1986) Second-Order Moments
+(SOM) schemes.  The volume-weighted variance $\Var(T)$ on the Eady
+uniform channel ranks them: \texttt{som}\,+\,Smagorinsky
+($C_{\mathrm{Smag}}{=}0.2$) preserves $97.1\%$ of $\Var(T)$ at
+600~d in the weak-forcing regime; \texttt{tvd} preserves $94\%$ at
+$\le 2\%$ runtime overhead vs. \texttt{upwind} (recommended
+production default); \texttt{ppm\_fct} is gated on the sign-split
+Zalesak/Kuzmin limiter (open issue \#9).  Forcing regime (strong
+$U{=}0.8\,\mathrm{m\,s^{-1}}$ vs.\ weak $U{=}0.2$) dominates absolute
+mixing; the weak-forcing setup is the scientifically defensible
+ocean-interior benchmark.
+
+%-----------------------------------------------------------------------------
+\subsection{Realistic-Geometry Spinup}
+%-----------------------------------------------------------------------------
+
+Global Wolfe--Cessi spinups on real ETOPO/GEBCO bathymetry are
+supported on the lat-lon C-grid via \texttt{src/legoesm/ocean/bathymetry.py}
+(auto-detect ETOPO/GEBCO/ERDDAP/CF, Laplacian smoothing, MEO
+$r$-cap, polar-cap mask, isolated-basin filling, strait
+enforcement).  Stability conditioners: AL81 12-corner-triad
+PV-flux closure with Le Sommer (2009) partial-cell extension
+(\texttt{pv\_flux\_al81\_partial\_cell}); MOM6-style $\cos^4\phi$
+biharmonic-viscosity scaling (\texttt{biharmonic\_scaling\_factor},
+Griffies \& Hallberg 2000); SMC03 pressure-gradient force; implicit
+Crank--Nicolson barotropic solver.  Validated 20-yr global-overturning
+spinup at $1^\circ$ delivers canonical thermohaline structure
+(branch \texttt{realistic-geometry-full}, PR \#224).
 
 %=============================================================================
 \section{Time Integration}
@@ -1285,6 +1348,39 @@ where $\mu_P = \mu_{\max}\,f(T)\,\min(L_N,L_I)$ with Michaelis-Menten nutrient l
 \subsection{CF/CMOR-Compliant Output}
 
 The \texttt{CFWriter} class produces CF-1.8 NetCDF4 files with CMIP6 Data Reference Syntax (DRS) filenames: \texttt{<var>\_<table>\_<model>\_<expt>\_<variant>\_<grid>.nc}.  Four CMOR tables are provided: \texttt{Amon} (33 atmospheric variables including clear-sky radiative fluxes, cloud condensate, and relative humidity), \texttt{Lmon} (6 land variables), \texttt{Omon} (2 ocean variables: SST and sea-ice fraction), and \texttt{Aday} (5 daily atmospheric variables).  3-D fields are interpolated to a standard CMIP6 19-level pressure grid.
+
+\subsection{AMIP CMIP6 Forcing Deck}
+
+The script \texttt{scripts/run\_amip\_cmip6\_deck.py} drives the full
+CMIP6 AMIP protocol with six prescribed-forcing channels:
+SST/SIC (HadISST/COBE monthly), annual GHG (\texttt{greenhouse\_historical\_plus.nc}
+schema, year-indexed CO$_2$/CH$_4$/N$_2$O/CFC-11/CFC-12; consumed by
+RRTMGP only --- gray radiation does not respond), ozone
+($\mathrm{vmro3}$ on $(t,\phi,p)$ either as monthly climatology or
+multi-decadal CMIP6 transient via the loader's non-cyclic dispatch),
+solar TSI plus 14-band fractions (\texttt{swflux\_14band\_cmip6\_*}
+expanded to 112 RRTMG-SW $g$-points), aerosol AOD (Kinne zonal monthly),
+and volcanic AOD (CMIP6 \texttt{bc\_aeropt\_cmip6\_volc\_*} with
+1982/1991 eruptions sampled at correct calendar months).  The configs
+\texttt{GHGConfig}, \texttt{OzoneConfig}, \texttt{SolarConfig},
+\texttt{AerosolConfig} (\texttt{src/legoesm/forcing/external.py})
+all carry \texttt{start\_year} so simulation days map onto file
+absolute time axes via \texttt{\_simday\_to\_file\_day}.
+
+The deck physics defaults are RRTMG\,+\,Sundqvist cloud fraction\,+\,
+Sundqvist large-scale condensation\,+\,SBM\,+\,Louis (Kessler
+microphysics is currently disabled in this path because it produces
+NaN winds at day ${\sim}2$).  When forcing files are absent the user
+must pass \texttt{--auto-generate} to invoke
+\texttt{scripts/generate\_amip\_forcing.py} for synthetic
+CMIP6-shape replacements.  \texttt{scripts/smoke\_test\_amip\_all\_grids.py}
+exercises the dispatch path on cubed-sphere (centred / FV3 / C-D),
+lat-lon (centred / FV3 / C-grid), Gaussian spectral, and Voronoi/MPAS
+using gray radiation with aerosol/volcanic disabled; it does not
+validate the full forcing stack on every grid.  Voronoi/MPAS
+additionally requires \texttt{--turbulence none} (TKE/MPAS edge-wind
+mismatch) and \texttt{--dt 60} (hidden hydrostatic-dycore CFL).
+Spectral and MPAS paths bypass \texttt{DiagnosticCollector}.
 
 \subsection{Experiment Templates}
 

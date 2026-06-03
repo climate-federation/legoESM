@@ -23,6 +23,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.atmosphere.physics._shared import mixing_length, virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import TKEConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
@@ -31,6 +32,7 @@ from legoesm.atmosphere.physics.turbulence.surface_layer import (
 )
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
+    implicit_vertical_diffusion_theta,
 )
 
 
@@ -95,10 +97,7 @@ def tke_turbulence(
     dz_half = jnp.clip(dz_half, 1.0, None)
 
     # Mixing length at full levels: l = kappa * z / (1 + kappa * z / l_max)
-    z_abs = jnp.clip(jnp.abs(z_full), 1.0, None)
-    l_mix = constants.kappa_vk * z_abs / (
-        1.0 + constants.kappa_vk * z_abs / config.l_mix_max
-    )  # (ncol, nlev)
+    l_mix = mixing_length(z_full, config.l_mix_max)  # (ncol, nlev)
 
     # Eddy diffusivities at full levels
     sqrt_tke = jnp.sqrt(tke)
@@ -116,23 +115,24 @@ def tke_turbulence(
     S2_half = du_dz ** 2 + dv_dz ** 2  # (ncol, nlev-1)
 
     # Brunt-Väisälä at half-levels
-    theta_v = T * (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa * (
-        1.0 + 0.61 * q_v
-    )
+    exner = (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
+    theta_v = virtual_temperature(T, q_v) * exner
     theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
     dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
     N2_half = (constants.g / jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
 
-    # Interpolate S2 and N2 to full levels
-    S2 = jnp.zeros((ncol, nlev))
-    S2 = S2.at[:, 1:-1].set(0.5 * (S2_half[:, :-1] + S2_half[:, 1:]))
-    S2 = S2.at[:, 0].set(S2_half[:, 0])
-    S2 = S2.at[:, -1].set(S2_half[:, -1])
-
-    N2 = jnp.zeros((ncol, nlev))
-    N2 = N2.at[:, 1:-1].set(0.5 * (N2_half[:, :-1] + N2_half[:, 1:]))
-    N2 = N2.at[:, 0].set(N2_half[:, 0])
-    N2 = N2.at[:, -1].set(N2_half[:, -1])
+    # Interpolate S2 and N2 to full levels.  Single ``concatenate`` of
+    # the centered interior with the two endpoint half-values lowers
+    # to one HLO op vs the previous ``zeros + 3 .at[].set`` triple
+    # scatter (3 wasted scatter ops per field, fired every TKE step).
+    S2_interior = 0.5 * (S2_half[:, :-1] + S2_half[:, 1:])
+    S2 = jnp.concatenate(
+        [S2_half[:, :1], S2_interior, S2_half[:, -1:]], axis=1,
+    )
+    N2_interior = 0.5 * (N2_half[:, :-1] + N2_half[:, 1:])
+    N2 = jnp.concatenate(
+        [N2_half[:, :1], N2_interior, N2_half[:, -1:]], axis=1,
+    )
 
     # Production and buoyancy at full levels
     shear_prod = Km_full * S2        # P = Km * S^2
@@ -148,10 +148,13 @@ def tke_turbulence(
     dz_layer = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
     dz_layer = jnp.clip(dz_layer, 1.0, None)
 
-    # Diffuse TKE (no surface flux for TKE)
+    # Diffuse TKE (no surface flux for TKE).  Pin the surface_flux dtype
+    # to the column dtype so ``rhs.at[:, -1].add(...)`` inside the
+    # tridiagonal solve does not see an x64-default zero clashing with
+    # the f32 state.
     tke_diffused = implicit_vertical_diffusion(
         tke, Km_half, rho, dz_layer, dz_half, dt,
-        surface_flux=jnp.zeros(ncol),
+        surface_flux=jnp.zeros(ncol, dtype=tke.dtype),
     )
 
     # Semi-implicit TKE update:
@@ -173,7 +176,9 @@ def tke_turbulence(
 
     u_new = implicit_vertical_diffusion(u, Km_half, rho, dz_layer, dz_half, dt, sflx_u)
     v_new = implicit_vertical_diffusion(v, Km_half, rho, dz_layer, dz_half, dt, sflx_v)
-    T_new = implicit_vertical_diffusion(T, Kh_half, rho, dz_layer, dz_half, dt, sflx_T)
+    T_new = implicit_vertical_diffusion_theta(
+        T, Kh_half, rho, dz_layer, dz_half, p_full, dt, sflx_T,
+    )
     q_new = implicit_vertical_diffusion(q_v, Kh_half, rho, dz_layer, dz_half, dt, sflx_q)
 
     h_pbl = diagnose_pbl_height(T, q_v, u, v, p_full, z_full)

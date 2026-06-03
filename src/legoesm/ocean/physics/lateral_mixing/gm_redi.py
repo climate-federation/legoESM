@@ -33,17 +33,34 @@ References
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 
 from legoesm.core.operators_3d import gradient_x_3d, gradient_y_3d, divergence_3d
 from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
+
+
+def _pad_for_gradient(field, grid):
+    """Single-call pad for gradient_x_3d/gradient_y_3d sharing.
+
+    Both gradient operators accept ``padded=`` to skip their internal
+    halo exchange.  Pre-padding here lets paired (∂/∂x, ∂/∂y) calls on
+    the same input issue ONE ``pad_halo_4d`` MPI exchange instead of
+    two.
+    """
+    dg = getattr(grid, 'duogrid', None)
+    offsets = None if dg is not None else grid.halo_interp_offsets
+    return _pad_halo_4d(field, interp_offsets=offsets, duogrid=dg)
 from legoesm.ocean.physics.mixing import laplacian_viscosity_3d
 from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
 from legoesm.ocean.physics.lateral_mixing.output import LateralMixingOutput
+from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+    _EPS,
+    compute_visbeck_kappa_gm,
+    dm95_taper,
+    vertical_flux_divergence,
+)
 from legoesm.ocean.vertical import OceanZStarCoordinate
-
-_EPS = float(jnp.finfo(jnp.float32).eps)  # Float32 machine epsilon (~1.19e-7)
 
 
 def _compute_tapered_slopes(
@@ -65,9 +82,11 @@ def _compute_tapered_slopes(
     eps = _EPS
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
 
-    # Horizontal density gradients at full levels
-    drho_dx = gradient_x_3d(rho, grid)
-    drho_dy = gradient_y_3d(rho, grid)
+    # Horizontal density gradients at full levels.
+    # Pre-pad once so both gradients share the halo MPI exchange.
+    rho_pad = _pad_for_gradient(rho, grid)
+    drho_dx = gradient_x_3d(rho, grid, padded=rho_pad)
+    drho_dy = gradient_y_3d(rho, grid, padded=rho_pad)
 
     # Average to interfaces
     drho_dx_half = 0.5 * (drho_dx[..., :-1] + drho_dx[..., 1:])
@@ -85,13 +104,7 @@ def _compute_tapered_slopes(
     S_y = jnp.clip(-drho_dy_half / drho_dz_safe, -cfg.S_max, cfg.S_max)
 
     # DM95 tapering: smooth taper near S_max
-    S_mag = jnp.sqrt(S_x**2 + S_y**2 + eps)
-    taper = 0.5 * (1.0 + jnp.tanh((cfg.S_max - S_mag) / (0.1 * cfg.S_max + eps)))
-
-    S_x = S_x * taper
-    S_y = S_y * taper
-
-    return S_x, S_y, taper
+    return dm95_taper(S_x, S_y, cfg.S_max, eps)
 
 
 def _tracer_tendency_gm_redi(
@@ -101,7 +114,7 @@ def _tracer_tendency_gm_redi(
     z_coord: OceanZStarCoordinate,
     jacobian: jnp.ndarray,
     grid: CubedSphereGrid,
-    kappa_GM: float,
+    kappa_GM,
     kappa_Redi: float,
 ) -> jnp.ndarray:
     """Compute GM+Redi tendency for a single tracer.
@@ -125,9 +138,21 @@ def _tracer_tendency_gm_redi(
     nlev = q.shape[-1]
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
 
-    # Horizontal tracer gradients at full levels
-    dq_dx = gradient_x_3d(q, grid)
-    dq_dy = gradient_y_3d(q, grid)
+    # Accept ``kappa_GM`` as either a scalar or an array.  When it is a
+    # per-column field (shape matching ``jacobian``) add a trailing
+    # singleton so it broadcasts against the (..., nlev-1) slope and
+    # flux arrays; scalar and arrays that already carry the nlev axis
+    # are left unchanged.
+    if isinstance(kappa_GM, jnp.ndarray) and kappa_GM.ndim == jacobian.ndim:
+        kappa_GM_b = kappa_GM[..., jnp.newaxis]
+    else:
+        kappa_GM_b = kappa_GM
+
+    # Horizontal tracer gradients at full levels.
+    # Pre-pad once so both gradients share the halo MPI exchange.
+    q_pad = _pad_for_gradient(q, grid)
+    dq_dx = gradient_x_3d(q, grid, padded=q_pad)
+    dq_dy = gradient_y_3d(q, grid, padded=q_pad)
 
     # Vertical tracer gradient at interfaces
     dz_half = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])
@@ -147,18 +172,20 @@ def _tracer_tendency_gm_redi(
     # When kappa_GM == kappa_Redi the off-diagonal vanishes identically.
 
     # Off-diagonal flux at interfaces: (kR - kG) * S * dq/dz
-    off_diag_x = (kappa_Redi - kappa_GM) * S_x * dq_dz_half
-    off_diag_y = (kappa_Redi - kappa_GM) * S_y * dq_dz_half
+    off_diag_x = (kappa_Redi - kappa_GM_b) * S_x * dq_dz_half
+    off_diag_y = (kappa_Redi - kappa_GM_b) * S_y * dq_dz_half
 
-    # Average interface values to full levels (pad boundaries with zero)
-    z_pad = jnp.zeros((*off_diag_x.shape[:-1], 1), dtype=off_diag_x.dtype)
+    # Average interface values to full levels (pad boundaries with zero).
+    # ``jnp.pad`` lowers to one Pad HLO op per pad and avoids the
+    # alloc-zeros + concatenate pair (2 HLO ops each).
+    pad_axes = ((0, 0),) * (off_diag_x.ndim - 1)
     off_diag_x_full = 0.5 * (
-        jnp.concatenate([z_pad, off_diag_x], axis=-1)
-        + jnp.concatenate([off_diag_x, z_pad], axis=-1)
+        jnp.pad(off_diag_x, (*pad_axes, (1, 0)))
+        + jnp.pad(off_diag_x, (*pad_axes, (0, 1)))
     )
     off_diag_y_full = 0.5 * (
-        jnp.concatenate([z_pad, off_diag_y], axis=-1)
-        + jnp.concatenate([off_diag_y, z_pad], axis=-1)
+        jnp.pad(off_diag_y, (*pad_axes, (1, 0)))
+        + jnp.pad(off_diag_y, (*pad_axes, (0, 1)))
     )
 
     # Diagonal: kappa_Redi * nabla^2(q)
@@ -170,14 +197,12 @@ def _tracer_tendency_gm_redi(
     # === Vertical flux ===
     # F_z at interfaces = (kR + kG) * (Sx*dq/dx + Sy*dq/dy) + kR * S^2 * dq/dz
     S2_half = S_x**2 + S_y**2
-    F_z = ((kappa_Redi + kappa_GM) * (S_x * dq_dx_half + S_y * dq_dy_half)
+    F_z = ((kappa_Redi + kappa_GM_b) * (S_x * dq_dx_half + S_y * dq_dy_half)
            + kappa_Redi * S2_half * dq_dz_half)
 
-    # Vertical flux divergence at full levels: dF_z/dz
-    # dq/dt_vert[k] = (F_z[k-1/2] - F_z[k+1/2]) / dz[k]
-    # with F_z = 0 at surface and bottom boundaries
-    F_z_ext = jnp.concatenate([z_pad, F_z, z_pad], axis=-1)
-    dq_vert = (F_z_ext[..., :-1] - F_z_ext[..., 1:]) / jnp.maximum(dz_actual, eps)
+    # Vertical flux divergence at full levels (uses jnp.pad inside the
+    # shared helper for a single Pad HLO op vs alloc-zeros + concatenate).
+    dq_vert = vertical_flux_divergence(F_z, dz_actual, eps)
 
     return dq_h + dq_vert
 
@@ -212,12 +237,21 @@ def gm_redi_lateral_mixing(
     # Compute tapered isopycnal slopes at interfaces
     S_x, S_y, taper = _compute_tapered_slopes(rho, z_coord, jacobian, grid, cfg)
 
+    # GM coefficient: scalar from config, or Visbeck-adaptive field.
+    if cfg.visbeck.enabled:
+        f_coriolis = jnp.asarray(grid.grid_coriolis)
+        kappa_GM = compute_visbeck_kappa_gm(
+            rho, S_x, S_y, z_coord, jacobian, f_coriolis, cfg.visbeck,
+        )
+    else:
+        kappa_GM = cfg.kappa_GM
+
     # Tracer tendencies with full GM+Redi tensor
     dT_dt = _tracer_tendency_gm_redi(
-        T, S_x, S_y, z_coord, jacobian, grid, cfg.kappa_GM, cfg.kappa_Redi
+        T, S_x, S_y, z_coord, jacobian, grid, kappa_GM, cfg.kappa_Redi
     )
     dS_dt = _tracer_tendency_gm_redi(
-        S, S_x, S_y, z_coord, jacobian, grid, cfg.kappa_GM, cfg.kappa_Redi
+        S, S_x, S_y, z_coord, jacobian, grid, kappa_GM, cfg.kappa_Redi
     )
 
     # GM/Redi does not produce momentum tendencies

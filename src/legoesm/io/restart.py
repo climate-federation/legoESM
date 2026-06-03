@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple
 
+import jax
 import numpy as np
 
 from legoesm.forcing.amip_config import (
@@ -159,23 +160,27 @@ def _get_git_hash() -> str:
 
 def _state_arrays_from_checkpoint_args(state, q_v, q_c=None, q_r=None,
                                        carry_aux=None) -> dict[str, np.ndarray]:
-    """Build a dict of numpy arrays mirroring save_checkpoint layout."""
-    arrays: dict[str, np.ndarray] = {
-        "T": np.asarray(state.T.data),
-        "u": np.asarray(state.u.data),
-        "v": np.asarray(state.v.data),
-        "p_s": np.asarray(state.p_s.data),
-        "phis": np.asarray(state.phis.data),
-        "q_v": np.asarray(q_v),
-    }
+    """Build a dict of numpy arrays mirroring save_checkpoint layout.
+
+    Pulls every device array in a single ``jax.device_get`` so the
+    runtime can pipeline the device→host transfers in parallel.
+    The previous per-leaf ``np.asarray`` chain forced N serial
+    transfers, blocking the GPU at every restart write.
+    """
+    names = ["T", "u", "v", "p_s", "phis", "q_v"]
+    values = [
+        state.T.data, state.u.data, state.v.data,
+        state.p_s.data, state.phis.data, q_v,
+    ]
     if q_c is not None:
-        arrays["q_c"] = np.asarray(q_c)
+        names.append("q_c"); values.append(q_c)
     if q_r is not None:
-        arrays["q_r"] = np.asarray(q_r)
+        names.append("q_r"); values.append(q_r)
     if carry_aux:
         for k, v in carry_aux.items():
-            arrays[f"carry_{k}"] = np.asarray(v)
-    return arrays
+            names.append(f"carry_{k}"); values.append(v)
+    host = jax.device_get(values)
+    return {n: np.asarray(v) for n, v in zip(names, host)}
 
 
 def _meta_path(checkpoint_path: Path) -> Path:

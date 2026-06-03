@@ -1,8 +1,15 @@
-"""Smagorinsky (constant Km) turbulence scheme.
+"""Smagorinsky–Lilly turbulence scheme.
 
-The simplest boundary layer parameterization: uses a constant eddy
-diffusivity for momentum (Km) and derives heat diffusivity from
-the turbulent Prandtl number (Kh = Km / Pr_t).
+Strain-dependent (deformation-based) eddy viscosity
+
+    K_m = (C_s · l)^2 · |S| · √(max(0, 1 − Ri/Pr_t)),   K_h = K_m / Pr_t
+
+following Smagorinsky (1963) with the Lilly (1962) buoyancy correction
+that shuts mixing off in strongly stable layers (Ri ≥ Pr_t).  The
+deformation is the resolved vertical shear of the horizontal wind,
+|S| = √((∂u/∂z)² + (∂v/∂z)²), the only strain component available in a
+single-column model; the mixing length ``l`` is the Blackadar (1962)
+asymptotic form shared with the other turbulence closures.
 
 Vertical mixing is applied implicitly using the Thomas algorithm
 to ensure numerical stability at any time step.
@@ -14,7 +21,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.atmosphere.physics._shared import mixing_length, virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import SmagorinskyConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
@@ -23,6 +30,7 @@ from legoesm.atmosphere.physics.turbulence.surface_layer import (
 )
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
+    implicit_vertical_diffusion_theta,
 )
 
 
@@ -75,23 +83,60 @@ def smagorinsky_turbulence(
     """
     ncol, nlev = T.shape
 
-    # Constant diffusivities
-    Km_val = config.Km
-    Kh_val = Km_val / config.Pr_t
+    # --- Strain-dependent Smagorinsky–Lilly eddy viscosity ---------------
+    # Heights and shear at the (nlev-1) interior half-level interfaces.
+    z_half_inner = 0.5 * (z_full[:, :-1] + z_full[:, 1:])  # (ncol, nlev-1)
+    l_mix = mixing_length(z_half_inner, config.l_mix_max)   # Blackadar (1962)
 
-    # Km, Kh at full levels for diagnostics
-    Km_full = jnp.full((ncol, nlev), Km_val)
-    Kh_full = jnp.full((ncol, nlev), Kh_val)
+    dz_half = jnp.abs(z_full[:, :-1] - z_full[:, 1:])       # (ncol, nlev-1)
+    dz_half = jnp.clip(dz_half, 1.0, None)
 
-    # K at half-levels (interfaces): average of adjacent full levels
-    K_half_m = jnp.full((ncol, nlev - 1), Km_val)
-    K_half_h = jnp.full((ncol, nlev - 1), Kh_val)
+    # Resolved deformation = vertical shear of the horizontal wind, the
+    # only strain component a single-column model carries.  Floor S2 so
+    # both ``S = √S2`` and ``Ri = N²/S2`` stay finite and differentiable.
+    du_dz = (u[:, :-1] - u[:, 1:]) / dz_half
+    dv_dz = (v[:, :-1] - v[:, 1:]) / dz_half
+    S2 = du_dz ** 2 + dv_dz ** 2 + 1e-10
+    S = jnp.sqrt(S2)
+
+    # Gradient Richardson number at the interfaces (virtual θ buoyancy).
+    exner = (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
+    theta_v = virtual_temperature(T, q_v) * exner
+    theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
+    dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
+    N2 = (constants.g / jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz
+    Ri = N2 / S2
+
+    # Lilly (1962) buoyancy factor √(max(0, 1 − Ri/Pr_t)): enhances mixing
+    # when unstable (Ri<0), shuts it off at Ri ≥ Pr_t.  Double-``where``
+    # keeps the cutoff exact AND the gradient finite at Ri = Pr_t (a bare
+    # √(max(·,0)) leaks a 0·∞ NaN cotangent through the dead branch).
+    buoy_arg = 1.0 - Ri / config.Pr_t
+    buoy_safe = jnp.where(buoy_arg > 0.0, buoy_arg, 1.0)
+    f_buoy = jnp.where(buoy_arg > 0.0, jnp.sqrt(buoy_safe), 0.0)
+
+    # K_m = (C_s · l)^2 · |S| · f_buoy ;  K_h = K_m / Pr_t.
+    Km_half = (config.C_s * l_mix) ** 2 * S * f_buoy        # (ncol, nlev-1)
+    Kh_half = Km_half / config.Pr_t
+
+    # Interpolate to full levels for diagnostics (single concat; same
+    # pattern as Louis/TKE/Holtslag-Boville/YSU).
+    Km_interior = 0.5 * (Km_half[:, :-1] + Km_half[:, 1:])
+    Km_full = jnp.concatenate(
+        [Km_half[:, :1], Km_interior, Km_half[:, -1:]], axis=1,
+    )
+    Kh_interior = 0.5 * (Kh_half[:, :-1] + Kh_half[:, 1:])
+    Kh_full = jnp.concatenate(
+        [Kh_half[:, :1], Kh_interior, Kh_half[:, -1:]], axis=1,
+    )
+
+    # Aliases for the implicit-diffusion solve below.
+    K_half_m = Km_half
+    K_half_h = Kh_half
 
     # Layer thicknesses
     dz = jnp.abs(z_half[:, :-1] - z_half[:, 1:])  # (ncol, nlev)
     dz = jnp.clip(dz, 1.0, None)
-    dz_half = jnp.abs(z_full[:, :-1] - z_full[:, 1:])  # (ncol, nlev-1)
-    dz_half = jnp.clip(dz_half, 1.0, None)
 
     # Surface fluxes
     tau_x, tau_y, shflx, lhflx, ustar = compute_surface_fluxes(
@@ -112,10 +157,14 @@ def smagorinsky_turbulence(
     # Moisture: lhflx = rho * L_v * Ch * |V| * (q_sfc - q_v) [W/m^2]
     sflx_q = lhflx / constants.L_v
 
-    # Apply implicit vertical diffusion
+    # Apply implicit vertical diffusion.  Heat is mixed in θ-space so a
+    # dry adiabat stays neutral; momentum and moisture are conserved on
+    # adiabatic motion and use raw T-style diffusion.
     u_new = implicit_vertical_diffusion(u, K_half_m, rho, dz, dz_half, dt, sflx_u)
     v_new = implicit_vertical_diffusion(v, K_half_m, rho, dz, dz_half, dt, sflx_v)
-    T_new = implicit_vertical_diffusion(T, K_half_h, rho, dz, dz_half, dt, sflx_T)
+    T_new = implicit_vertical_diffusion_theta(
+        T, K_half_h, rho, dz, dz_half, p_full, dt, sflx_T,
+    )
     q_new = implicit_vertical_diffusion(q_v, K_half_h, rho, dz, dz_half, dt, sflx_q)
 
     # Tendencies

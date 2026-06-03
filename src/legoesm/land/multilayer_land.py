@@ -184,10 +184,19 @@ def _step_multilayer_land_impl(
 
     root_frac = jnp.exp(-z_centers[None, :] / root_depth_c[:, None])
     root_frac = root_frac / jnp.sum(root_frac, axis=-1, keepdims=True)
+    # Audit #6 / Iter-65: floor the (theta_fc - theta_wp) range at 1e-3
+    # m³/m³ (~1 % of theta_sat).  Earlier ``+ 1e-10`` only protected against
+    # exact equality; a misconfigured cell with theta_fc ≈ theta_wp (e.g. a
+    # pathological PFT lookup row) still produced exploding beta_root because
+    # the denominator could go ~O(theta).  Ported from main during the
+    # jianing/land ↔ main sync (2026-06-03).
+    _denom = jnp.maximum(
+        theta_fc_c[:, None] - theta_wp_c[:, None], 1e-3,
+    )
     beta_root = jnp.clip(
-        (theta - theta_wp_c[:, None])
-        / (theta_fc_c[:, None] - theta_wp_c[:, None] + 1e-10),
-        0.0, 1.0)
+        (theta - theta_wp_c[:, None]) / _denom,
+        0.0, 1.0,
+    )
     w_frac_rz = jnp.clip(jnp.sum(root_frac * beta_root, axis=-1), 0.0, 1.0)
 
     beta_soil = config.beta_min + (1.0 - config.beta_min) * w_frac_rz
@@ -261,8 +270,19 @@ def _step_multilayer_land_impl(
     tau_y = surface_out.tau_y
     G_surface = surface_out.G_soil
 
+    # --- Snow phase (iter-68 — consistent with simple_seb's flux calc) ---
+    # Reuse the same warm-surface-snowfall gate as simple_seb.py so
+    # downstream latent-mass partition (sublimation vs soil evap) is
+    # consistent with the L_eff that produced the demand.  Ported from
+    # main during the jianing/land ↔ main sync 2026-06-03.
+    fresh_snow_mass = forcing.precip_snow * dt
+    has_existing_snow = snow > 1e-6
+    has_surviving_fresh_snow = (
+        (fresh_snow_mass > 1e-6) & (T_surface < constants.T_freeze)
+    )
+    has_snow = has_existing_snow | has_surviving_fresh_snow
+
     # --- Snow budget (energy-limited melt) ---
-    has_snow = snow > 1e-6
     snow_new, snow_age_new, snow_melt = update_snow(
         snow, snow_age, T_surface, forcing.precip_snow, dt,
         Q_net=G_surface,
@@ -299,9 +319,23 @@ def _step_multilayer_land_impl(
     lhflx_actual = evap_rate * L_eff
 
     # --- Root water uptake partition ---
+    # iter-23 + dew handling (ported from main 2026-06-03):
+    # (a) Snow gate: the snowpack already swallowed sublim_actual upstream
+    #     (line above), so the soil should NOT see any latent flux when
+    #     ``has_snow`` is True — routing snow deposition through
+    #     ``flux_top`` would double-count the mass (codex iter-23
+    #     stop-time review).
+    # (b) Dew handling: within the snow-free regime, negative ``evap_rate``
+    #     (dew / downward deposition on bare soil) routes ENTIRELY to
+    #     ``flux_top`` so the column water budget closes; transpiration
+    #     sink is set to 0.  Vegetated-fraction dew on a snow-free cell
+    #     is treated as bare-soil input (no separate canopy-storage
+    #     reservoir in this model).
     f_veg = jnp.clip(w_frac_rz, 0.0, 1.0)
-    evap_bare = evap_rate * (1.0 - f_veg)
-    evap_transp = evap_rate * f_veg
+    soil_flux = jnp.where(has_snow, 0.0, evap_rate)
+    is_dew = soil_flux < 0.0
+    evap_bare = jnp.where(is_dew, soil_flux, soil_flux * (1.0 - f_veg))
+    evap_transp = jnp.where(is_dew, 0.0, soil_flux * f_veg)
     flux_top = (precip_rain + melt_rate - evap_bare) / rho_w
 
     E_pot_transp = jnp.maximum(evap_transp, 0.0) / rho_w
@@ -365,11 +399,17 @@ def _step_multilayer_land_impl(
     )
 
     # --- Post-step q_surface ---
+    # Reuse the same Audit #6 / Iter-65 1e-3 floor as the pre-step branch
+    # above so degenerate PFT cells cannot blow up beta_root_new propagating
+    # into the q_surface reported back to the atmosphere.
     theta_new = richards_out.theta_new
+    _denom_new = jnp.maximum(
+        theta_fc_c[:, None] - theta_wp_c[:, None], 1e-3,
+    )
     beta_root_new = jnp.clip(
-        (theta_new - theta_wp_c[:, None])
-        / (theta_fc_c[:, None] - theta_wp_c[:, None] + 1e-10),
-        0.0, 1.0)
+        (theta_new - theta_wp_c[:, None]) / _denom_new,
+        0.0, 1.0,
+    )
     w_frac_rz_new = jnp.clip(
         jnp.sum(root_frac * beta_root_new, axis=-1), 0.0, 1.0)
     beta_soil_new = config.beta_min + (1.0 - config.beta_min) * w_frac_rz_new

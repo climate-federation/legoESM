@@ -1,0 +1,14 @@
+# OAT-optimum classical physics combo selected by the stage-1 T21
+# sweep (results/aimip_classical_sweep_stage1).  Each scheme listed
+# here beat the baseline (tiedtke/louis/mcfarlane/sundqvist) on the
+# composite eval loss when varied one-at-a-time.  See
+# config/aimip/sweep/stage2/stage1_winners.json for full scoring.
+#
+# Note: combo_turb_edmf scored 6.2969 in the rerun (job 8033395)
+# after fixing the forward-Euler θ_u/q_u/w² instability at coarse
+# T21 vertical spacing — beats smagorinsky (6.5334) and is the
+# overall best single-scheme result of the sweep.
+aimip_convection: zhang_mcfarlane
+aimip_turbulence: edmf
+aimip_gwd: hines
+aimip_microphysics: sundqvist

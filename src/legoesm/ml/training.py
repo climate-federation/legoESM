@@ -1,7 +1,7 @@
 """Training loop for SFNO.
 
 Provides a complete training pipeline with:
-- AdamW optimizer with warmup + cosine decay schedule
+- AdamW / Adam / MUON optimizer dispatch with warmup + cosine decay schedule
 - Gradient clipping
 - JIT-compiled training step using equinox
 - Checkpoint save/load via equinox serialization
@@ -9,6 +9,7 @@ Provides a complete training pipeline with:
 References
 ----------
 - Watt-Meyer et al. (2023). ACE. arXiv:2310.02074.
+- Jordan et al. (2024). MUON: Momentum Orthogonalized via Newton-Schulz.
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ class TrainingConfig(NamedTuple):
     total_steps : int
         Total training steps (for cosine decay).
     weight_decay : float
-        AdamW weight decay.
+        AdamW weight decay (ignored when optimizer='adam' or 'muon').
     batch_size : int
         Training batch size.
     n_autoregressive_steps : int
@@ -48,6 +49,13 @@ class TrainingConfig(NamedTuple):
         Directory for saving checkpoints.
     checkpoint_every : int
         Save checkpoint every N steps.
+    optimizer : str
+        Optimizer kind: 'adamw' (default, preserves SFNO behavior),
+        'adam' (no weight decay), or 'muon' (Momentum Orthogonalized
+        via Newton-Schulz; uses ``optax.contrib.muon``).  Muon
+        orthogonalizes matrix-shaped parameters and is a no-op on
+        scalar leaves, so it composes cleanly with mixed
+        scheme-scalar + neural-weight parameter pytrees.
     """
     lr: float = 5e-4
     warmup_steps: int = 1000
@@ -58,12 +66,34 @@ class TrainingConfig(NamedTuple):
     grad_clip_norm: float = 1.0
     checkpoint_dir: str = "checkpoints"
     checkpoint_every: int = 1000
+    optimizer: str = "adamw"
 
 
 def create_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
     """Create optimizer with warmup, cosine decay, and gradient clipping.
 
-    Schedule: linear warmup → cosine decay to 0.
+    Schedule: linear warmup -> cosine decay to 0.
+
+    Optimizer selected by ``config.optimizer``:
+
+    - ``adamw`` (default): legacy SFNO behavior, uses ``config.weight_decay``.
+    - ``adam``: plain Adam (weight_decay ignored).
+    - ``muon``: Momentum Orthogonalized via Newton-Schulz
+      (``optax.contrib.muon``).  Applies the orthogonalized update to
+      *every* parameter leaf, which is the historical default but
+      destabilizes SFNO training during early steps because the
+      Newton-Schulz iteration is poorly conditioned on the
+      randomly-initialized decoder weights -- this is the
+      ``epoch-1 silent exit`` regression the AIMIP suite hit on 34M-
+      parameter SFNO under the 20-day windowed setup.
+    - ``muon_partitioned``: MUON applied only to 2-D weight matrices
+      whose smaller dimension is at least ``muon_min_dim`` (default
+      32); AdamW handles 1-D biases, scalars, and small matrices.
+      This is the recommended SFNO-safe deployment pattern from the
+      original MUON paper (Jordan et al. 2024 sec. 5) and the one
+      legoESM should use when ``aimip_optimizer: muon`` is requested.
+      Use this in place of ``muon`` once you trust the SFNO branch
+      again.
 
     Parameters
     ----------
@@ -74,6 +104,11 @@ def create_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
     -------
     optax.GradientTransformation
         Composed optimizer.
+
+    Raises
+    ------
+    ValueError
+        If ``config.optimizer`` is not one of the supported names.
     """
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.0,
@@ -83,13 +118,83 @@ def create_optimizer(config: TrainingConfig) -> optax.GradientTransformation:
         end_value=0.0,
     )
 
+    if config.optimizer == "adamw":
+        core = optax.adamw(
+            learning_rate=schedule, weight_decay=config.weight_decay,
+        )
+    elif config.optimizer == "adam":
+        core = optax.adam(learning_rate=schedule)
+    elif config.optimizer == "muon":
+        try:
+            from optax.contrib import muon
+        except ImportError as exc:
+            raise ImportError(
+                "config.optimizer='muon' requires a version of optax that "
+                "ships optax.contrib.muon (>= 0.2.4). Upgrade optax or "
+                "select optimizer='adamw'/'adam'."
+            ) from exc
+        core = muon(learning_rate=schedule)
+    elif config.optimizer == "muon_partitioned":
+        core = _muon_partitioned_optimizer(
+            schedule=schedule,
+            weight_decay=config.weight_decay,
+        )
+    else:
+        raise ValueError(
+            f"Unknown optimizer {config.optimizer!r}; "
+            f"expected one of 'adamw', 'adam', 'muon', 'muon_partitioned'."
+        )
+
     return optax.chain(
         optax.clip_by_global_norm(config.grad_clip_norm),
-        optax.adamw(learning_rate=schedule, weight_decay=config.weight_decay),
+        core,
     )
 
 
-@eqx.filter_jit
+# Minimum smaller-axis dimension for a parameter leaf to receive the
+# MUON update under ``muon_partitioned``.  Smaller matrices, 1-D bias
+# vectors, and scalar physics knobs route to AdamW instead, where the
+# Newton-Schulz orthogonalization is either degenerate (1-D leaves) or
+# numerically unstable on randomly-initialized very small matrices.
+_MUON_MIN_DIM_DEFAULT = 32
+
+
+def _muon_partitioned_optimizer(
+    schedule, weight_decay: float, min_dim: int = _MUON_MIN_DIM_DEFAULT,
+) -> optax.GradientTransformation:
+    """Build a multi-transform optimizer routing MUON / AdamW per leaf.
+
+    The MUON branch only fires on 2-D weight matrices with both
+    dimensions at least ``min_dim``; everything else (biases, scalars,
+    embedding tables narrower than ``min_dim``) flows through AdamW.
+
+    This pairing is the SFNO-safe MUON deployment from the original
+    Jordan et al. (2024) recipe -- applying Newton-Schulz to small or
+    1-D leaves is what broke the AIMIP suite (silent epoch-1 NaN
+    under MUON-on-all-leaves).
+    """
+    from optax.contrib import muon
+    import jax
+
+    muon_tx = muon(learning_rate=schedule)
+    adam_tx = optax.adamw(learning_rate=schedule, weight_decay=weight_decay)
+
+    def _label(params):
+        def _classify(leaf):
+            if not hasattr(leaf, "ndim"):
+                return "adam"
+            if leaf.ndim == 2 and min(leaf.shape) >= min_dim:
+                return "muon"
+            return "adam"
+        return jax.tree_util.tree_map(_classify, params)
+
+    return optax.multi_transform(
+        {"muon": muon_tx, "adam": adam_tx},
+        _label,
+    )
+
+
+@eqx.filter_jit(donate="warn")
 def train_step(
     model: eqx.Module,
     opt_state: optax.OptState,
@@ -99,6 +204,15 @@ def train_step(
     grid: GaussianGrid,
 ) -> tuple[eqx.Module, optax.OptState, jnp.ndarray]:
     """Single JIT-compiled training step.
+
+    Donates the input ``model`` and ``opt_state`` buffers (``donate="warn"``)
+    so XLA can reuse the underlying device memory for the updated values
+    instead of holding both copies live until reassignment.  For SFNO with
+    typical (embed_dim=256, n_blocks=8) this halves the peak weight +
+    optimiser-state memory at every step on Levante.  The Equinox
+    ``"warn"`` mode preserves correctness if the caller ever needs to
+    keep the inputs (it falls back to non-donation with a runtime warning
+    instead of silently stale buffers).
 
     Parameters
     ----------

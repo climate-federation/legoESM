@@ -19,6 +19,8 @@ from functools import lru_cache
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
+
 jax.config.update("jax_enable_x64", True)
 
 
@@ -35,7 +37,7 @@ def _make_grid_and_cdgrid(n):
     return grid, cdgrid
 
 
-def _make_solid_body_edge(cdgrid, Omega=7.292e-5):
+def _make_solid_body_edge(cdgrid, Omega=constants.Omega):
     """Solid-body rotation at FV3 edge-midpoint D-grid positions."""
     R = cdgrid.radius
     cos_lat_x = jnp.cos(cdgrid.lat_edge_x)
@@ -45,7 +47,7 @@ def _make_solid_body_edge(cdgrid, Omega=7.292e-5):
     return u_d, v_d
 
 
-def _make_tc2_state_edge(cdgrid, g=9.80616, Omega=7.292e-5, H0=2.94e4 / 9.80616):
+def _make_tc2_state_edge(cdgrid, g=constants.g, Omega=constants.Omega, H0=2.94e4 / constants.g):
     """Solid-body TC2-like state at edge-midpoint stagger (Earth rotation speed).
 
     WARNING: This uses Omega*R ≈ 465 m/s winds — only for instantaneous tendency
@@ -67,8 +69,8 @@ def _make_williamson_tc2_edge(cdgrid):
     Standard TC2 parameters: u_0 = 2*pi*R/(12 days) ≈ 38.6 m/s.
     Height field in exact geostrophic balance with the flow.
     """
-    g = 9.80616
-    Omega = 7.292e-5
+    g = constants.g
+    Omega = constants.Omega
     R = cdgrid.radius
     n = cdgrid.n
 
@@ -112,20 +114,45 @@ class TestMetricIdentities(unittest.TestCase):
         self.assertLess(max_err, 2e-7, f"cosa^2+sina^2 at corners: max err = {max_err:.2e}")
 
     def test_cosa_sina_identity_at_u_edges(self):
-        """cosa_u^2 + sina_u^2 ≈ 1 where sina_u = 1/rsin_u."""
+        """cosa_u^2 + sina_u^2 ≈ 1 with FV3's mixed rsin_u convention.
+
+        Per Fortran fv_grid_utils.F90:509,548-554 (non-duogrid cubed sphere):
+          - Interior u-faces: rsin_u = 1/sina_u²  → sina_u² = 1/rsin_u
+          - Panel edges (i=0, i=n): rsin_u = 1/sina_u → sina_u = 1/rsin_u
+        """
         _, cdgrid = _make_grid_and_cdgrid(16)
-        sina_u = 1.0 / cdgrid.rsin_u
-        identity = cdgrid.cosa_u**2 + sina_u**2
-        max_err = float(jnp.max(jnp.abs(identity - 1.0)))
-        self.assertLess(max_err, 1e-6, f"cosa^2+sina^2 at u-edges: max err = {max_err:.2e}")
+        n = cdgrid.n
+        # Interior slice [:, 1:n, :] → sina² = 1/rsin_u
+        rsin_u_int = cdgrid.rsin_u[:, 1:n, :]
+        id_int = cdgrid.cosa_u[:, 1:n, :]**2 + 1.0 / rsin_u_int
+        err_int = float(jnp.max(jnp.abs(id_int - 1.0)))
+        self.assertLess(err_int, 1e-6, f"interior: max err = {err_int:.2e}")
+        # Panel edges i=0, i=n → sina = 1/rsin_u
+        for i in (0, n):
+            sina_edge = 1.0 / cdgrid.rsin_u[:, i, :]
+            id_edge = cdgrid.cosa_u[:, i, :]**2 + sina_edge**2
+            err = float(jnp.max(jnp.abs(id_edge - 1.0)))
+            self.assertLess(err, 1e-6,
+                            f"panel edge i={i}: max err = {err:.2e}")
 
     def test_cosa_sina_identity_at_v_edges(self):
-        """cosa_v^2 + sina_v^2 ≈ 1 where sina_v = 1/rsin_v."""
+        """cosa_v^2 + sina_v^2 ≈ 1 with FV3's mixed rsin_v convention.
+
+        See :meth:`test_cosa_sina_identity_at_u_edges` for the interior/
+        panel-edge split. Same rule along the j-axis for v-faces.
+        """
         _, cdgrid = _make_grid_and_cdgrid(16)
-        sina_v = 1.0 / cdgrid.rsin_v
-        identity = cdgrid.cosa_v**2 + sina_v**2
-        max_err = float(jnp.max(jnp.abs(identity - 1.0)))
-        self.assertLess(max_err, 1e-6, f"cosa^2+sina^2 at v-edges: max err = {max_err:.2e}")
+        n = cdgrid.n
+        rsin_v_int = cdgrid.rsin_v[:, :, 1:n]
+        id_int = cdgrid.cosa_v[:, :, 1:n]**2 + 1.0 / rsin_v_int
+        err_int = float(jnp.max(jnp.abs(id_int - 1.0)))
+        self.assertLess(err_int, 1e-6, f"interior: max err = {err_int:.2e}")
+        for j in (0, n):
+            sina_edge = 1.0 / cdgrid.rsin_v[:, :, j]
+            id_edge = cdgrid.cosa_v[:, :, j]**2 + sina_edge**2
+            err = float(jnp.max(jnp.abs(id_edge - 1.0)))
+            self.assertLess(err, 1e-6,
+                            f"panel edge j={j}: max err = {err:.2e}")
 
     def test_cosa_sina_identity_at_cells(self):
         """cosa_cell^2 + sina_cell^2 ≈ 1."""
@@ -212,7 +239,7 @@ class TestSolidBodyDivergence(unittest.TestCase):
         _, cdgrid = _make_grid_and_cdgrid(n)
         h, u_d, v_d, h_s = _make_tc2_state_edge(cdgrid)
         # Use fv3_sw_tendencies to get dh_dt which is the mass flux divergence
-        dh_dt, _, _ = fv3_sw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616)
+        dh_dt, _, _ = fv3_sw_tendencies(h, u_d, v_d, h_s, cdgrid, g=constants.g)
         return float(jnp.sqrt(jnp.mean(dh_dt**2)))
 
     def test_divergence_small_c8(self):
@@ -248,8 +275,8 @@ class TestTC2BalancedResidual(unittest.TestCase):
         _, cdgrid = _make_grid_and_cdgrid(n)
         h, u_d, v_d, h_s = _make_tc2_state_edge(cdgrid)
         dh_dt, du_dt, dv_dt = fv3_sw_tendencies(
-            h, u_d, v_d, h_s, cdgrid, g=9.80616)
-        Omega = 7.292e-5
+            h, u_d, v_d, h_s, cdgrid, g=constants.g)
+        Omega = constants.Omega
         R = cdgrid.radius
         u_scale = Omega * R
         return (float(jnp.max(jnp.abs(du_dt))) / u_scale,
@@ -271,7 +298,7 @@ class TestTC2BalancedResidual(unittest.TestCase):
         _, cdgrid = _make_grid_and_cdgrid(8)
         h, u_d, v_d, h_s = _make_tc2_state_edge(cdgrid)
         dh_dt, du_dt, dv_dt = fv3_sw_tendencies(
-            h, u_d, v_d, h_s, cdgrid, g=9.80616)
+            h, u_d, v_d, h_s, cdgrid, g=constants.g)
         self.assertTrue(jnp.all(jnp.isfinite(dh_dt)))
         self.assertTrue(jnp.all(jnp.isfinite(du_dt)))
         self.assertTrue(jnp.all(jnp.isfinite(dv_dt)))

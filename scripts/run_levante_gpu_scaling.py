@@ -10,6 +10,13 @@ Supported grids:
   icosahedral   -- MPAS Voronoi mesh + TRiSK PE dycore
   latlon        -- Lat-lon finite-volume grid + FV PE dycore
 
+Multi-rank MPI scaling support (iter-13/14 honest-sweep guards):
+  icosahedral   -- domain-decomposed (validated multi-rank path)
+  cubed-sphere  -- single-rank only (replicated dynamics under MPI;
+                   refused at runtime with a clear error)
+  latlon        -- single-rank only (NotImplementedError, see #115)
+  spectral      -- single-rank only (no MPI path)
+
 Two modes:
   weak   -- fix problem size per GPU, increase resolution with GPU count
             (replicates Yatunin et al. 2026 JAMES Figure 11 left panel)
@@ -18,17 +25,15 @@ Two modes:
 
 Usage
 -----
-Single-node (4 A100s)::
+Single-node SPMD (1-6 face-sharded devices on a single process,
+``shard_map`` backend, no MPI)::
 
     python scripts/run_levante_gpu_scaling.py --mode weak --precision float32
-    python scripts/run_levante_gpu_scaling.py --grid cubed-sphere --mode strong --precision both
+    python scripts/run_levante_gpu_scaling.py --grid cubed-sphere \\
+        --mode strong --precision both
 
-Multi-node via MPI (set up by the companion SLURM script)::
+Multi-node via MPI -- icosahedral only (validated path)::
 
-    mpirun -np 8 python scripts/run_levante_gpu_scaling.py \\
-        --grid cubed-sphere --mode strong --precision float64 --n-gpus 8
-    mpirun -np 4 python scripts/run_levante_gpu_scaling.py \\
-        --grid latlon --mode strong --n-gpus 4
     mpirun -np 4 python scripts/run_levante_gpu_scaling.py \\
         --grid icosahedral --mode strong --n-gpus 4
 
@@ -48,6 +53,13 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+# NOTE: do NOT import ``legoesm.constants`` at module load — it eagerly
+# imports ``jax.numpy``, which initialises JAX before ``_configure_jax`` /
+# ``_configure_mpi_gpu_affinity`` have a chance to set ``JAX_ENABLE_X64``,
+# ``JAX_PLATFORMS``, ``CUDA_VISIBLE_DEVICES``, and ``XLA_FLAGS``.  Lazy
+# imports inside the functions that consume ``constants.X`` keep the
+# JAX-startup invariant intact.
 
 # ---------------------------------------------------------------------------
 # JAX configuration -- must happen before jax import
@@ -71,17 +83,32 @@ def _configure_mpi_gpu_affinity() -> None:
 
 
 def _configure_jax(precision: str) -> None:
-    """Set JAX env vars before import."""
+    """Set JAX env vars before import.
+
+    Iter 21: stop *forcing* ``JAX_PLATFORMS=gpu,cpu`` as the default —
+    JAX 0.10+ uses backend names ``cuda`` / ``rocm`` / ``cpu`` and
+    rejects the generic ``gpu`` token, raising
+    "Backend 'rocm' is not in the list of known backends" before any
+    benchmark code runs.  Leave the variable unset by default and let
+    JAX pick its default backend; respect any value the user / SLURM
+    wrapper has already set.
+    """
     if precision == "float64":
         os.environ["JAX_ENABLE_X64"] = "1"
-    os.environ.setdefault("JAX_PLATFORMS", "gpu,cpu")
     os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.90")
     # Enable XLA GPU scheduling optimizations for multi-device scaling.
-    # Only set GPU-specific flags when JAX_PLATFORMS includes "gpu" to
-    # avoid crashes on CPU-only runs.
-    platforms = os.environ.get("JAX_PLATFORMS", "gpu,cpu")
-    if "gpu" in platforms:
+    # Apply when ``JAX_PLATFORMS`` is unset (auto-detect) or names a
+    # GPU vendor — ``gpu`` (legacy alias), ``cuda`` (JAX 0.10 NVIDIA),
+    # or ``rocm`` (AMD).  Skip when the user explicitly set ``cpu`` or
+    # ``tpu`` to avoid pinging XLA flags that the chosen backend
+    # rejects.
+    platforms = os.environ.get("JAX_PLATFORMS", "")
+    is_gpu_run = (
+        not platforms
+        or any(tok in platforms for tok in ("gpu", "cuda", "rocm"))
+    )
+    if is_gpu_run:
         xla_flags = os.environ.get("XLA_FLAGS", "")
         for flag in [
             "--xla_gpu_enable_latency_hiding_scheduler=true",
@@ -146,9 +173,12 @@ def _maybe_init_distributed(
         except ImportError:
             pass
 
-    # Check for SLURM multi-node
+    # Check for SLURM-launched multi-process jobs.  A plain sbatch allocation
+    # may set SLURM_NTASKS>1 even when this script is executed once for a
+    # single-process, multi-device run, so require a per-task rank variable.
     slurm_ntasks = os.environ.get("SLURM_NTASKS")
-    if slurm_ntasks and int(slurm_ntasks) > 1:
+    slurm_procid = os.environ.get("SLURM_PROCID")
+    if slurm_ntasks and slurm_procid is not None and int(slurm_ntasks) > 1:
         import jax
         jax.distributed.initialize()
         return jax.process_index(), jax.process_count()
@@ -171,10 +201,18 @@ _SUPPORTED_PHYSICS = {
     "spectral": {"none", "held_suarez"},
 }
 
-# MPI distributed benchmark support.  All three finite-volume grids have
-# validated MPI paths: cubed-sphere (via distributed.py), lat-lon (via
-# latlon_mpi.py), and icosahedral/Voronoi (via voronoi_mpi.py).
-_MPI_SUPPORTED_GRIDS = {"cubed-sphere", "latlon", "icosahedral"}
+# MPI distributed benchmark support.  Only finite-volume grids with
+# validated local-domain operators are listed here.  Iter 13 honest-
+# sweep update: cubed-sphere MPI is excluded because the dycore still
+# keeps full (6, n, n, ...) state on every rank — multi-rank
+# wall-clock measurements would not be true weak/strong scaling but
+# replicated-dynamics noise.  Halo-side scattered face indexing
+# landed in iter 3 (``halo_exchange.py``); the remaining piece is
+# scattering state in ``model_driver.py`` and the scaling driver.
+# Lat-lon MPI is also intentionally excluded — its C-grid operators
+# have not been ported to latitude sub-domains
+# (``make_latlon_mpi_step`` raises NotImplementedError, see #115).
+_MPI_SUPPORTED_GRIDS = {"icosahedral"}
 
 
 @dataclass
@@ -303,7 +341,7 @@ _MIN_TIMING_SECONDS = 2.0
 
 
 def _auto_n_timing(n_timing_base: int, total_cells: int, n_gpus: int,
-                    max_timing: int = 2000) -> int:
+                    max_timing: int = 1000) -> int:
     """Scale timing steps up for small grids to ensure stable measurements.
 
     For sub-millisecond step times (small cells/GPU), the default 100
@@ -312,6 +350,12 @@ def _auto_n_timing(n_timing_base: int, total_cells: int, n_gpus: int,
     bumps n_timing so the timed window is ≥ _MIN_TIMING_SECONDS.
 
     Capped at *max_timing* to keep total benchmark runtime practical.
+    A ``lax.scan(length=N)`` that times a single step compiles roughly
+    proportional to *N*; pushing *max_timing* much past 1000 makes
+    compile time dominate wall-clock for small grids without improving
+    the precision of the timing measurement.  For sub-50-µs step times
+    we further clamp to 200 steps — that's still ~10 ms of timed work,
+    well above per-step jitter at that scale.
     """
     cells_per_gpu = total_cells // max(n_gpus, 1)
     # Rough model: step time ~ 0.01 ms per 1000 cells/GPU (from I4–I6 data)
@@ -320,9 +364,13 @@ def _auto_n_timing(n_timing_base: int, total_cells: int, n_gpus: int,
     if est_total_s >= _MIN_TIMING_SECONDS:
         return n_timing_base
     needed = int(math.ceil(_MIN_TIMING_SECONDS / (est_ms / 1000.0)))
-    # Round up to nearest 100 for clean reporting, capped
+    if est_ms < 0.05:
+        # Sub-50µs steps: 200 scan iterations is enough timed work and
+        # avoids paying a long XLA compile for a 2000-iteration scan.
+        needed = min(needed, 200)
     needed = max(needed, n_timing_base)
     needed = min(needed, max_timing)
+    # Round up to nearest 100 for clean reporting
     needed = ((needed + 99) // 100) * 100
     return needed
 
@@ -334,9 +382,14 @@ def _valid_gpu_counts(max_gpus: int, grid_type: str = "cubed-sphere") -> list[in
     """Return valid GPU counts up to max_gpus for the given grid type.
 
     Cubed-sphere requires divisors of 6 (face sharding) or 6*k^2 (tiling).
-    Icosahedral and spectral grids support any GPU count.
+    Icosahedral and spectral grids support any GPU count.  Lat-lon is
+    single-GPU only here: the benchmark has no sharded step yet (the multi-GPU
+    branch raises NotImplementedError), so scheduling n_gpus>1 would only emit
+    failing points.
     """
-    if grid_type in ("icosahedral", "spectral", "latlon"):
+    if grid_type == "latlon":
+        return [1]
+    if grid_type in ("icosahedral", "spectral"):
         return list(range(1, max_gpus + 1))
 
     # Cubed-sphere constraints
@@ -367,7 +420,9 @@ def _auto_dt(n_grid: int, grid_type: str = "cubed-sphere") -> float:
     both the advective speed (~60 m/s) and the external gravity wave
     speed (~300 m/s):  dt < cfl * dx_min / (u_max + c_grav).
     """
-    R = 6.371229e6
+    from legoesm import constants  # lazy: see top-of-file note on JAX init order
+
+    R = constants.R_earth
     if grid_type == "spectral":
         # Gaussian grid: dx_min ~ pi * R / n_lon at equator, n_lon = 2*(n_max+1)
         n_lon = 2 * (n_grid + 1)
@@ -405,7 +460,9 @@ def _hyperdiff_coeff(n_grid: int, grid_type: str = "cubed-sphere") -> float:
     elif grid_type == "icosahedral":
         # For icosahedral, n_grid is a subdivision level.  Scale the
         # coefficient with dx^4 relative to level 5 (~120 km).
-        R = 6.371229e6
+        from legoesm import constants  # lazy: see top-of-file note on JAX init order
+
+        R = constants.R_earth
         ref_cells = 10 * 4 ** 5 + 2
         cur_cells = 10 * 4 ** n_grid + 2
         dx_ref = R * math.sqrt(4.0 * math.pi / ref_cells)
@@ -589,16 +646,32 @@ def _build_segment_benchmark(
     # Use the non-donating variant for benchmarking (safe with scan)
     run_segment = run_segment_obj.raw
 
-    # Pack initial carry
+    # Pack initial carry.  Iter 10: route the held_* arrays through
+    # keyword args (``pack_carry`` makes them keyword-only after the
+    # ``*,`` marker — passing them positionally collided with the
+    # ``conv_prog`` slot and would raise) and seed ``target_mass`` so
+    # the segment-level mass fixer has a non-zero anchor.  We compute
+    # the global mass via the existing budget-aware
+    # ``_global_area_sum`` helper (fp64 accumulator when JAX has x64
+    # enabled — see ``conservation_accumulator``).
     shape_2d = ctx["shape_2d"]
     shape_3d = ctx["shape_3d"]
     _sd = ctx["_sd"]
 
+    from legoesm.core.conservation import _global_area_sum
+    _target_mass = _global_area_sum(driver.state.p_s.data, driver.grid)
+
     carry = pack_carry(
         driver.state, driver.q_v, driver.q_c, driver.q_r,
-        ctx["held_dT_rad"], ctx["held_sw_net_sfc"], ctx["held_lw_net_sfc"],
-        ctx["held_sw_up_toa"], ctx["held_lw_up_toa"], ctx["held_sw_down_toa"],
+        conv_prog=ctx.get("conv_prog"),
+        held_dT_rad=ctx["held_dT_rad"],
+        held_sw_net_sfc=ctx["held_sw_net_sfc"],
+        held_lw_net_sfc=ctx["held_lw_net_sfc"],
+        held_sw_up_toa=ctx["held_sw_up_toa"],
+        held_lw_up_toa=ctx["held_lw_up_toa"],
+        held_sw_down_toa=ctx["held_sw_down_toa"],
         step_index=0,
+        target_mass=_target_mass,
     )
 
     # Pack forcing (constant during benchmark)
@@ -694,10 +767,14 @@ def _run_segment_benchmark(
     input_dtypes = jax.tree.map(
         lambda x: x.dtype if hasattr(x, "dtype") else None, carry)
 
+    # dt is captured in the closure as a Python float so dycore step
+    # methods that do `if dt == cached_dt` checks see a concrete value.
+    _dt_static = float(dt_used)
+
     @jax.jit
-    def _scan_run(c, dt_val):
+    def _scan_run(c):
         def _body(carry, _):
-            new = step_fn(carry, dt_val)
+            new = step_fn(carry, _dt_static)
             new = jax.tree.map(
                 lambda x, d: x.astype(d)
                 if d is not None and hasattr(x, "astype") else x,
@@ -706,9 +783,13 @@ def _run_segment_benchmark(
             return new, None
         return jax.lax.scan(_body, c, None, length=n_timing)[0]
 
-    # Pre-compile scan
-    carry = _scan_run(carry, dt_used)
-    jax.block_until_ready(jax.tree.leaves(carry))
+    # Pre-compile scan against a leaf-cloned carry so the timed run
+    # starts from the post-warmup state rather than state advanced by
+    # ``n_timing`` extra steps.  Iter 1 made this fix in the bare-dycore
+    # benchmark; iter 3 extends it to the segment-driver path here.
+    _precompile_carry = jax.tree.map(lambda x: x, carry)
+    _precompile_out = _scan_run(_precompile_carry)
+    jax.block_until_ready(jax.tree.leaves(_precompile_out))
 
     # MPI barrier before timing
     try:
@@ -720,7 +801,7 @@ def _run_segment_benchmark(
         pass
 
     t0 = time.perf_counter()
-    carry = _scan_run(carry, dt_used)
+    carry = _scan_run(carry)
     jax.block_until_ready(jax.tree.leaves(carry))
 
     try:
@@ -810,6 +891,22 @@ def run_benchmark(
     import jax
     import jax.numpy as jnp
 
+    # Spectral guard: the Gaussian/spectral pathway requires x64 (the
+    # spherical-harmonic transforms operate on complex128).  A
+    # float32 sweep step can land here after a float64 step has already
+    # enabled x64, and JAX cannot disable x64 once it has been turned on
+    # — so we silently get float64 internally regardless.  Surface the
+    # mismatch immediately so benchmark CSVs do not record bogus
+    # "float32 spectral" entries that are really running in float64.
+    if grid_type == "spectral" and precision != "float64":
+        import warnings
+        warnings.warn(
+            "Spectral dycore requires float64; coercing precision to float64 "
+            "for this run.  Use --precision float64 to silence this warning.",
+            stacklevel=2,
+        )
+        precision = "float64"
+
     # Set precision
     if precision == "float64":
         jax.config.update("jax_enable_x64", True)
@@ -838,7 +935,6 @@ def run_benchmark(
     _is_mpi = _n_ranks > 1
 
     # Grid-specific MPI layouts (populated in grid branches below).
-    _latlon_layout = None
     _voronoi_layout = None
 
     if grid_type == "spectral":
@@ -847,7 +943,7 @@ def run_benchmark(
             SpectralPrimitiveEquationModel,
             SpectralPEConfig,
         )
-        from legoesm.atmosphere.baroclinic_wave import baroclinic_wave_init_spectral
+        from tests.test_cases.baroclinic_wave import baroclinic_wave_init_spectral
 
         grid = create_gaussian_grid(n_grid)
         hd = _hyperdiff_coeff(n_grid, grid_type)
@@ -871,7 +967,7 @@ def run_benchmark(
             MPASPrimitiveEquationModel,
             MPASPrimitiveEquationConfig,
         )
-        from legoesm.atmosphere.baroclinic_wave import baroclinic_wave_init_mpas
+        from tests.test_cases.baroclinic_wave import baroclinic_wave_init_mpas
 
         grid = create_voronoi_mesh(subdivision_level=n_grid)
 
@@ -929,23 +1025,49 @@ def run_benchmark(
             model = MPASPrimitiveEquationModel(grid, sigma, config)
             state = baroclinic_wave_init_mpas(grid, sigma, perturbed=True)
     elif grid_type == "latlon":
-        raise ValueError(
-            "A-grid latlon atmosphere has been removed. "
-            "Use --grid cubed-sphere or --grid icosahedral instead. See #115."
+        # Lat-lon finite-volume C-grid primitive equations.  (The old A-grid
+        # lat-lon dycore referenced by #115 was removed; this is the current
+        # C-grid FV core, the same solver the driver resolves for
+        # grid=latlon/discretization=finite_volume.)
+        if n_gpus > 1:
+            raise NotImplementedError(
+                "Multi-device SPMD is not yet wired for the lat-lon grid in "
+                "this harness (there is no make_latlon_sharded_step; the lat-lon "
+                "MPI domain-decomposition path lives in "
+                "legoesm.parallel.latlon_mpi). Single-device lat-lon "
+                "benchmarking is supported; multi-GPU lat-lon scaling needs a "
+                "sharded step + real-hardware validation."
+            )
+        from legoesm import constants  # lazy: see top-of-file note on JAX init order
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+            CGridLatLonPrimitiveEquationModel,
+            CGridLatLonPrimitiveEquationConfig,
         )
-        if _is_mpi:
-            # MPI distributed: 1D latitude-band decomposition.
-            # State is scattered to rank-local bands after cast.
-            from legoesm.parallel.latlon_mpi import (
-                make_latlon_band_layout,
-            )
-            _latlon_layout = make_latlon_band_layout(
-                _rank, _n_ranks, n_lat, n_lon,
-            )
-            # Each MPI rank uses 1 GPU.
-            dev_config = create_latlon_mesh(n_devices=1)
-        else:
-            dev_config = create_latlon_mesh(n_devices=n_gpus)
+        from tests.test_cases.baroclinic_wave import baroclinic_wave_init_latlon
+
+        grid = create_latlon_grid(
+            n_lat=n_grid, radius=constants.R_earth, omega=constants.Omega,
+        )
+        n_lat, n_lon = grid.n_lat, grid.n_lon
+        total_cells = n_lat * n_lon * n_levels
+        # CFL-safe Laplacian viscosity (same form as
+        # driver.component_factory.compute_diffusion; inlined to avoid importing
+        # the driver stack here, which trips a device_config circular import in
+        # the benchmark subprocess).  grid.dx is the 2-cell zonal span, so the
+        # min cell width is half of it.  The polar filter lifts the pole-cell
+        # CFL, so dt is the equatorial CFL value that _auto_dt returns.
+        dx_min = float(jnp.min(grid.dx)) / 2.0
+        A_h = 0.05 * dx_min ** 2 / dt
+        config = CGridLatLonPrimitiveEquationConfig(
+            A_h=A_h,
+            fix_mass=not no_conservation,
+            use_polar_filter=True,
+            time_integrator="ssp_rk3",
+        )
+        model = CGridLatLonPrimitiveEquationModel(grid, sigma, config, dt=dt)
+        state = baroclinic_wave_init_latlon(grid, sigma, perturbed=True)
+        dev_config = create_latlon_mesh(n_devices=n_gpus)
     else:
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
@@ -954,18 +1076,27 @@ def run_benchmark(
             CDGridPrimitiveEquationConfig,
             hydrostatic_to_fv3,
         )
-        from legoesm.atmosphere.baroclinic_wave import baroclinic_wave_init
+        from tests.test_cases.baroclinic_wave import baroclinic_wave_init
 
         grid = create_cubed_sphere(n_grid)
         cdgrid = create_cubed_sphere_cdgrid(grid)
         hd = _hyperdiff_coeff(n_grid, grid_type)
+        # When mass anchoring (``fix_mass_hydrostatic_target``) is active
+        # we already get exact mass conservation via a single post-step
+        # allreduce.  The per-stage ``zero_mean_ps_tendency`` correction
+        # adds 3 allreduces per RK3 step (one per ``tendency_fn`` call)
+        # for what is, with ``anchor_mass_to_initial=True``, a redundant
+        # safety net at the cost of three extra latency-gated round-trips
+        # per step.  Disable it in the scaling benchmark — the comment
+        # in ``CDGridPrimitiveEquationConfig`` explicitly recommends this
+        # for "pure performance benchmarks".
         config = CDGridPrimitiveEquationConfig(
             hyperdiff_coeff=hd,
             hyperdiff_ps_coeff=hd,
             use_conservation_fixer=not no_conservation,
             fix_mass=not no_conservation,
             anchor_mass_to_initial=not no_conservation,
-            zero_mean_ps_tendency=not no_conservation,
+            zero_mean_ps_tendency=False,
         )
         model = CDGridPrimitiveEquationModel(grid, sigma, config)
         state_cc = baroclinic_wave_init(grid, sigma, perturbed=True)
@@ -1000,13 +1131,10 @@ def run_benchmark(
         return x
     state = jax.tree.map(_cast, state)
 
-    # --- MPI scatter for lat-lon and icosahedral ---
-    # (cubed-sphere MPI keeps full state on all ranks; lat-lon and
-    # icosahedral scatter to rank-local)
-    if _latlon_layout is not None:
-        from legoesm.parallel.latlon_mpi import scatter_state_latlon
-        state = scatter_state_latlon(state, _latlon_layout)
-    elif _voronoi_layout is not None:
+    # --- MPI scatter for rank-local grids ---
+    # Cubed-sphere MPI still keeps full state on all ranks; icosahedral
+    # scatters to rank-local domains.
+    if _voronoi_layout is not None:
         from legoesm.parallel.voronoi_mpi import scatter_state_voronoi
         state = scatter_state_voronoi(state, _voronoi_layout.partition)
 
@@ -1025,34 +1153,29 @@ def run_benchmark(
     if dev_config.n_devices > 1 and not _is_cs_distributed and not _is_mpi:
         state = shard_pytree(state, dev_config)
 
-    # Verify sharding is effective (not accidentally replicated)
+    # Verify sharding is effective (not accidentally replicated).
+    # ``NamedSharding`` has no ``.shape`` attribute, so the previous
+    # ``getattr(..., 'shape', (1,))`` always returned ``(1,)`` and the
+    # warning fired for every multi-device cubed-sphere run, masking any
+    # real replication issue.  Use the existing diagnostic helper which
+    # inspects ``sharding.spec``.
     if dev_config.n_devices > 1 and not _is_mpi:
-        sample_leaf = jax.tree.leaves(state)[0]
-        if hasattr(sample_leaf, 'sharding'):
-            is_replicated = all(
-                s == 1 for s in getattr(sample_leaf.sharding, 'shape', (1,))
+        from legoesm.parallel.sharded_dynamics import check_sharding
+        sr = check_sharding(state, dev_config)
+        if sr["n_sharded"] == 0 and grid_type != "icosahedral":
+            print(
+                f"    WARNING: State appears fully replicated — sharding "
+                f"may not be effective ({sr['n_replicated']} replicated, "
+                f"{sr['n_unsharded']} unsharded leaves)",
+                flush=True,
             )
-            if is_replicated and grid_type != "icosahedral":
-                print("    WARNING: State appears fully replicated — "
-                      "sharding may not be effective", flush=True)
 
     # Build physics function (None for dycore-only and moist tiers).
     physics_fn = _build_physics_fn(physics_level, grid_type)
 
     # --- Step function selection ---
-    # MPI distributed step functions (lat-lon and icosahedral) take
-    # priority over SPMD sharded steps.
-    if _latlon_layout is not None:
-        from legoesm.parallel.latlon_mpi import make_latlon_mpi_step
-        # Physics wrapping: MPI step calls model.step per RK stage.
-        if physics_fn is not None:
-            _phys = physics_fn
-            _orig_step = model.step
-            model.step = lambda s, dt, physics_fn=None: _orig_step(
-                s, dt, physics_fn=_phys,
-            )
-        step_fn = make_latlon_mpi_step(model, grid, _latlon_layout, sigma, config)
-    elif _voronoi_layout is not None:
+    # MPI distributed step functions take priority over SPMD sharded steps.
+    if _voronoi_layout is not None:
         from legoesm.parallel.voronoi_mpi import make_voronoi_mpi_step
         step_fn = make_voronoi_mpi_step(model, _voronoi_layout, sigma, config)
     # SPMD sharded step functions (single-node multi-GPU).
@@ -1062,24 +1185,16 @@ def run_benchmark(
     elif grid_type == "cubed-sphere" and dev_config.n_devices > 1:
         from legoesm.parallel.sharded_dynamics import make_sharded_step
         step_fn = make_sharded_step(model, dev_config, n=n_grid, nlev=n_levels)
-    elif grid_type == "latlon" and dev_config.n_devices > 1:
-        from legoesm.parallel.latlon_sharded import make_latlon_sharded_step
-        step_fn = make_latlon_sharded_step(model, dev_config, physics_fn=physics_fn)
     else:
         step_fn = model.step
 
-    # Wrap step_fn to include physics for non-MPI, non-latlon grids.
-    # MPI lat-lon already has physics baked in above.
+    # Wrap step_fn to include physics for non-MPI grids.
     # MPI icosahedral: make_voronoi_mpi_step handles dycore only
     #   (physics integration requires extending make_voronoi_mpi_step).
-    # Lat-lon sharded step already has physics baked in via closure.
     # For cubed-sphere and icosahedral SPMD, physics_fn is passed to __call__.
     # For single-GPU all grids, physics_fn is passed to model.step.
-    if physics_fn is not None and _latlon_layout is None and _voronoi_layout is None:
-        if grid_type == "latlon" and dev_config.n_devices > 1:
-            # Physics already baked into the sharded step
-            pass
-        elif dev_config.n_devices > 1 and grid_type in ("cubed-sphere", "icosahedral"):
+    if physics_fn is not None and _voronoi_layout is None:
+        if dev_config.n_devices > 1 and grid_type in ("cubed-sphere", "icosahedral"):
             # CompiledShardedStep / VoronoiShardedStep accept physics_fn
             _sharded_step = step_fn
             _phys = physics_fn
@@ -1138,11 +1253,20 @@ def run_benchmark(
     input_dtypes = jax.tree.map(
         lambda x: x.dtype if hasattr(x, "dtype") else None, state)
 
-    def _make_scan_runner(n):
+    # Capture dt as a Python float in the closure rather than passing
+    # it through scan as a traced argument.  Several dycore step methods
+    # (e.g. SpectralPrimitiveEquationModel._ensure_tracer_filter, the SI
+    # matrix cache, the sponge-factor cache) do Python `==` / `if dt > 0`
+    # checks against the cached dt — those require a concrete value.
+    # Treating dt as static also lets XLA fold dt into compiled constants,
+    # which is the right behaviour for a fixed-dt benchmark.
+    _dt_static = float(dt)
+
+    def _make_scan_runner(n, dt_const):
         @jax.jit
-        def _run(st, dt_val):
+        def _run(st):
             def _body(carry, _):
-                new = step_fn(carry, dt_val)
+                new = step_fn(carry, dt_const)
                 new = jax.tree.map(
                     lambda x, d: x.astype(d)
                     if d is not None and hasattr(x, "astype") else x,
@@ -1152,11 +1276,21 @@ def run_benchmark(
             return jax.lax.scan(_body, st, None, length=n)[0]
         return _run
 
-    scan_runner = _make_scan_runner(n_timing)
+    scan_runner = _make_scan_runner(n_timing, _dt_static)
 
-    # Pre-compile the scan runner
-    state = scan_runner(state, dt)
-    jax.block_until_ready(jax.tree.leaves(state))
+    # Pre-compile the scan runner without mutating the timed state.
+    # The previous implementation re-bound ``state`` to the precompile
+    # output, so the *timing* run started from state advanced by
+    # ``n_timing`` steps — biasing finite-time comparisons.  We clone
+    # the leaves so XLA still compiles and warms caches against
+    # identical input shapes/dtypes/sharding, but the original state
+    # remains the seed for the timed scan.  IMPORTANT: block on the
+    # *output* leaves, not the input — blocking the input does not
+    # wait for the queued kernel to finish, so XLA work could overlap
+    # with the timed region and bias measurements.  Iter 5 fix.
+    _precompile_state = jax.tree.map(lambda x: x, state)
+    _precompile_out = scan_runner(_precompile_state)
+    jax.block_until_ready(jax.tree.leaves(_precompile_out))
 
     # Synchronize all ranks before timing for fair measurement
     try:
@@ -1168,7 +1302,7 @@ def run_benchmark(
         pass
 
     t0 = time.perf_counter()
-    state = scan_runner(state, dt)
+    state = scan_runner(state)
     jax.block_until_ready(jax.tree.leaves(state))
 
     # Synchronize all ranks after timing for fair measurement
@@ -1891,6 +2025,26 @@ def main() -> int:
     # Disable sweep by pinning to the actual count.
     fixed = max_gpus if world_size > 1 else None
 
+    # Iter 13/17 honest-sweep guard: refuse multi-rank MPI for any
+    # grid that is *not* in the validated MPI-supported set.  The set
+    # is currently ``{icosahedral}`` — cubed-sphere keeps full state
+    # per rank (replicated dynamics, not real scaling), lat-lon raises
+    # NotImplementedError, spectral has no MPI path.  This catches all
+    # three with one branch and one consistent error message.
+    if world_size > 1 and grid_type not in _MPI_SUPPORTED_GRIDS:
+        if is_rank0:
+            print(
+                f"ERROR: {grid_type} MPI multi-rank scaling is not "
+                f"validated in this script. Supported MPI grids are "
+                f"{sorted(_MPI_SUPPORTED_GRIDS)}.  cubed-sphere is "
+                "replicated-dynamics-only (driver scatter pending); "
+                "lat-lon raises NotImplementedError (#115); spectral "
+                "has no MPI path.  Run with a single MPI rank or use "
+                "``--grid icosahedral`` for genuine multi-rank scaling.",
+                flush=True,
+            )
+        raise SystemExit(2)
+
     all_results: list[TimingResult] = []
 
     # ---------------------------------------------------------------
@@ -1973,7 +2127,7 @@ def main() -> int:
             "backend": backend,
             "hostname": hostname,
             "max_gpus": max_gpus,
-            "valid_gpu_counts": _valid_gpu_counts(max_gpus),
+            "valid_gpu_counts": _valid_gpu_counts(max_gpus, grid_type),
             "precisions": precisions,
             "modes": modes,
             "n_levels": args.n_levels,

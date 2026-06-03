@@ -1,0 +1,2 @@
+column_nn_hidden_dim: 256
+column_nn_n_layers: 4

@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.forcing.external import (
     GHGConfig,
     OzoneConfig,
@@ -216,8 +217,8 @@ class TestGHG:
 
 class TestSolar:
     def test_constant_mode(self):
-        cfg = SolarConfig(S_0=1361.0)
-        assert get_tsi_at_time(cfg, day=100.0) == 1361.0
+        cfg = SolarConfig(S_0=constants.S_0)
+        assert get_tsi_at_time(cfg, day=100.0) == constants.S_0
 
     def test_file_interpolation(self, tmp_path):
         nc_path = str(tmp_path / "tsi.nc")
@@ -228,7 +229,7 @@ class TestSolar:
         cfg = SolarConfig(source="file", path=nc_path)
         assert abs(get_tsi_at_time(cfg, day=0.0) - 1360.0) < 1e-6
         assert abs(get_tsi_at_time(cfg, day=365.0) - 1362.0) < 1e-6
-        assert abs(get_tsi_at_time(cfg, day=182.5) - 1361.0) < 1e-6
+        assert abs(get_tsi_at_time(cfg, day=182.5) - constants.S_0) < 1e-6
 
     def test_file_missing_path_raises(self):
         cfg = SolarConfig(source="file", path="")
@@ -249,7 +250,7 @@ class TestSolar:
 
         cfg = SolarConfig(source="spectral_file", path=nc_path)
         forcing = get_solar_forcing_at_time(cfg, day=182.5)
-        assert abs(forcing["tsi"] - 1361.0) < 1.0e-6
+        assert abs(forcing["tsi"] - constants.S_0) < 1.0e-6
         weights = np.asarray(forcing["solar_fraction_by_gpt"])
         np.testing.assert_allclose(np.sum(weights), 1.0, atol=1.0e-12)
         np.testing.assert_allclose(weights, np.array([0.45, 0.55]), atol=1.0e-6)
@@ -347,6 +348,82 @@ class TestAerosol:
         out = get_aerosol_at_time(cfg, day=40.0)
         np.testing.assert_allclose(out["aod"], 0.02 + 0.5 * 0.04, atol=1.0e-6)
 
+    def test_3d_aerosol_file_averaged_to_zonal(self, tmp_path):
+        """3D Kinne-style (time, band, lat) AOD is averaged to zonal mean (#178).
+
+        The loader averages over non-(time, lat) dimensions before
+        interpolation. Uses off-grid latitudes for real interpolation.
+        """
+        import netCDF4
+        nc_path = str(tmp_path / "aod_3d.nc")
+        lat_src = np.linspace(-90, 90, 19)
+        nband = 14
+        # AOD varies linearly with latitude: 0.0 at south pole, 0.1 at north
+        aod_lat = np.linspace(0.0, 0.1, 19)  # (19,)
+        # Shape (12, nband, 19) — the loader averages over band
+        data_3d = np.broadcast_to(
+            aod_lat[None, None, :], (12, nband, 19),
+        ).copy()
+        mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
+        with netCDF4.Dataset(nc_path, "w") as ds:
+            ds.createDimension("time", 12)
+            ds.createDimension("lat", 19)
+            ds.createDimension("lnwl", nband)
+            ds.createVariable("time", "f8", ("time",))[:] = mid_days
+            ds.createVariable("lat", "f8", ("lat",))[:] = lat_src
+            ds.createVariable("aod", "f8", ("time", "lnwl", "lat"))[:] = data_3d
+
+        cfg = AerosolConfig(enabled=True, path=nc_path)
+        # Off-grid latitudes to force actual interpolation
+        lat_grid = jnp.radians(jnp.array([-45.0, 25.0]))
+        result = get_aerosol_at_time(cfg, day=100.0, lat_grid=lat_grid)
+        assert result.shape == lat_grid.shape, f"Expected {lat_grid.shape}, got {result.shape}"
+        # Loader averages over band → same as per-cell AOD
+        expected = np.array([0.025, 0.1 * 115 / 180])
+        np.testing.assert_allclose(result, expected, atol=1e-3)
+
+    def test_3d_volcanic_file_averaged_to_zonal(self, tmp_path):
+        """3D volcanic file is also averaged to zonal mean (#178)."""
+        import netCDF4
+        lat_src = np.linspace(-90, 90, 19)
+        nband = 3
+
+        # Base: simple 2D
+        nc_base = str(tmp_path / "aod_base.nc")
+        base_lat = np.linspace(0.01, 0.03, 19)
+        _make_monthly_zonal_nc(
+            nc_base, "aod", lat_src,
+            np.broadcast_to(base_lat[None, :], (12, 19)).copy(),
+        )
+
+        # Volcanic: 3D (time, band, lat)
+        nc_volc = str(tmp_path / "aod_volc.nc")
+        volc_lat = np.linspace(0.0, 0.06, 19)
+        data_volc = np.broadcast_to(
+            volc_lat[None, None, :], (12, nband, 19),
+        ).copy()
+        mid_days = np.array([15.5 + 30.4375 * m for m in range(12)])
+        with netCDF4.Dataset(nc_volc, "w") as ds:
+            ds.createDimension("time", 12)
+            ds.createDimension("lat", 19)
+            ds.createDimension("lnwl", nband)
+            ds.createVariable("time", "f8", ("time",))[:] = mid_days
+            ds.createVariable("lat", "f8", ("lat",))[:] = lat_src
+            ds.createVariable("aod", "f8", ("time", "lnwl", "lat"))[:] = data_volc
+
+        cfg = AerosolConfig(
+            enabled=True, path=nc_base,
+            volcanic_enabled=True, volcanic_path=nc_volc, volcanic_scale=1.0,
+        )
+        lat_grid = jnp.radians(jnp.array([35.0]))
+        result = get_aerosol_at_time(cfg, day=100.0, lat_grid=lat_grid)
+        assert result.shape == lat_grid.shape
+        # base at 35°: interp ≈ 0.01 + 0.02*(125/180)
+        # volcanic at 35°: averaged over band → 0.06*(125/180)
+        expected_base = 0.01 + 0.02 * (125.0 / 180.0)
+        expected_volc = 0.06 * (125.0 / 180.0)
+        np.testing.assert_allclose(result, expected_base + expected_volc, atol=1e-2)
+
 
 # ==============================================================================
 # ExternalForcingConfig integration
@@ -364,3 +441,322 @@ class TestExternalForcingConfig:
 
         assert get_ozone_at_time(cfg.ozone, day=0.0) is None
         assert get_aerosol_at_time(cfg.aerosol, day=0.0) is None
+
+
+# ==============================================================================
+# Issue #207 regression tests — CMIP6 real-file ingestion bug fixes
+# ==============================================================================
+
+class TestCFTimeUnitsBug1:
+    """Issue #207 bug 1: ``_to_days_float`` must decode CF 'X since Y' units.
+
+    Without this, a CMIP6 ozone axis ``"months since 1850-01-01"`` with
+    1980 values [0.5, 1.5, ...] collapses from 165 years of data into a
+    2-year window (days [0..1980]) and the interpolator draws nonsense.
+    """
+
+    def test_months_since_scales_to_days(self):
+        from legoesm.forcing.external import _to_days_float
+        import numpy as np
+        vals = np.array([0.5, 1.5, 600.5], dtype=np.float64)
+        days = _to_days_float(vals, units="months since 1850-01-01",
+                              calendar="standard")
+        # 30.4375 = 365.25 / 12 (the CMIP6 month-midpoint convention).
+        assert np.allclose(days[0], 0.0)
+        assert np.allclose(days[1], 30.4375)
+        assert np.allclose(days[-1], 600.0 * 30.4375)  # ≈ 18262.5 ≈ 50 yr
+
+    def test_hours_since_scales_to_days(self):
+        from legoesm.forcing.external import _to_days_float
+        import numpy as np
+        vals = np.array([0.0, 24.0, 720.0], dtype=np.float64)
+        days = _to_days_float(vals, units="hours since 2000-01-01",
+                              calendar="standard")
+        assert np.allclose(days, [0.0, 1.0, 30.0])
+
+    def test_unitless_numeric_passthrough(self):
+        """Files without CF ``units`` are treated as raw days (legacy)."""
+        from legoesm.forcing.external import _to_days_float
+        import numpy as np
+        vals = np.array([0.0, 15.5, 365.0])
+        assert np.allclose(_to_days_float(vals), vals)
+
+    def test_malformed_units_falls_back(self):
+        """Unparseable CF units must not crash; fall back to raw numeric."""
+        from legoesm.forcing.external import _to_days_float
+        import numpy as np
+        vals = np.array([1.0, 2.0])
+        assert np.allclose(
+            _to_days_float(vals, units="not-a-cf-units-string"), vals,
+        )
+
+    def test_360_day_calendar_uses_exact_month(self):
+        """On the ``360_day`` calendar months are exactly 30 days."""
+        from legoesm.forcing.external import _to_days_float
+        import numpy as np
+        vals = np.array([0.0, 1.0, 12.0, 24.0])
+        days = _to_days_float(vals, units="months since 2000-01-01",
+                              calendar="360_day")
+        np.testing.assert_allclose(days, [0.0, 30.0, 360.0, 720.0])
+
+    def test_first_record_includes_fractional_offset(self):
+        """``_extract_first_date`` must capture the fractional-month
+        offset, so mid-month sample files anchor to the mid-month date
+        rather than the units reference (fix per Codex 2026-04-24)."""
+        from legoesm.forcing.external import _extract_first_date
+        import numpy as np
+        vals = np.array([0.5, 1.5, 2.5])
+        first = _extract_first_date(
+            vals, units="months since 1850-01-01", calendar="standard",
+        )
+        # First record = anchor + 0.5 months ≈ mid-January 1850.
+        assert first.year == 1850
+        assert first.month == 1
+        # ``anchor + 0.5 * 30.4375 d`` = Jan 16 @ 05:15 UTC.
+        assert first.day == 16
+
+
+class TestInterannualOzoneBug2:
+    """Issue #207 bug 2: ozone files with >12 months must use the non-
+    cyclic interannual branch instead of the 365.25-day cyclic interp.
+    """
+
+    def test_twelve_months_uses_cyclic_path(self, tmp_path):
+        """A 12-month file is a climatology — expect annual periodicity."""
+        import netCDF4, numpy as np
+        nc_path = str(tmp_path / "ozone_clim.nc")
+        lat = np.linspace(-90, 90, 9)
+        months = np.arange(12).astype(float)
+        data = np.stack([np.full_like(lat, 1.0e-6 * (m + 1)) for m in range(12)])
+        with netCDF4.Dataset(nc_path, "w") as ds:
+            ds.createDimension("time", 12)
+            ds.createDimension("lat", len(lat))
+            t = ds.createVariable("time", "f8", ("time",))
+            t[:] = np.array([15.5 + 30.4375 * m for m in range(12)])
+            la = ds.createVariable("lat", "f8", ("lat",))
+            la[:] = lat
+            v = ds.createVariable("ozone", "f8", ("time", "lat"))
+            v[:] = data
+        cfg = OzoneConfig(enabled=True, path=nc_path, start_year=2000)
+        # day=0.0 and day=365.25 should give nearly the same value (cyclic).
+        lat_rad = jnp.radians(jnp.array(lat))
+        v0 = np.asarray(get_ozone_at_time(cfg, day=0.0, lat_grid=lat_rad))
+        v365 = np.asarray(get_ozone_at_time(cfg, day=365.25, lat_grid=lat_rad))
+        np.testing.assert_allclose(v0, v365, atol=1e-12)
+
+    def test_multiyear_file_interannual_path(self, tmp_path):
+        """A >12-month file must expose interannual variation."""
+        import netCDF4, numpy as np
+        # Build a 2-year ozone file where year 1 is half the value of year 2.
+        nc_path = str(tmp_path / "ozone_interannual.nc")
+        lat = np.linspace(-90, 90, 9)
+        n_months = 24
+        months_axis = np.arange(n_months).astype(float) + 0.5
+        data = np.zeros((n_months, len(lat)))
+        data[:12] = 1.0e-6  # year 1
+        data[12:] = 2.0e-6  # year 2
+        with netCDF4.Dataset(nc_path, "w") as ds:
+            ds.createDimension("time", n_months)
+            ds.createDimension("lat", len(lat))
+            t = ds.createVariable("time", "f8", ("time",))
+            t[:] = months_axis
+            t.units = "months since 1850-01-01"
+            t.calendar = "standard"
+            la = ds.createVariable("lat", "f8", ("lat",))
+            la[:] = lat
+            v = ds.createVariable("ozone", "f8", ("time", "lat"))
+            v[:] = data
+        lat_rad = jnp.radians(jnp.array(lat))
+        # start_year=1850: sim day 0 → file day 0 → year 1 (ozone ≈ 1e-6).
+        cfg_y1 = OzoneConfig(enabled=True, path=nc_path, start_year=1850)
+        v_y1 = np.asarray(get_ozone_at_time(cfg_y1, day=60.0, lat_grid=lat_rad))
+        assert np.allclose(v_y1, 1.0e-6, atol=1e-10)
+        # start_year=1851: sim day 60 → file day 365.25+60 → year 2 (≈ 2e-6).
+        cfg_y2 = OzoneConfig(enabled=True, path=nc_path, start_year=1851)
+        v_y2 = np.asarray(get_ozone_at_time(cfg_y2, day=60.0, lat_grid=lat_rad))
+        assert np.allclose(v_y2, 2.0e-6, atol=1e-10)
+        # Without the fix, cyclic interp would return the same value for
+        # both start years (year-1 climatology always sampled).
+        assert not np.allclose(v_y1, v_y2)
+
+
+class TestCaseInsensitiveTSIBug4:
+    """Issue #207 bug 4: ``_load_time_gpt`` must do case-insensitive
+    variable lookup so that the MPI-M CMIP6 solar file (which stores
+    ``TSI`` / ``SSI_frac``) is readable with the in-tree default
+    config using lowercase names.
+    """
+
+    def test_uppercase_variables_resolved(self, tmp_path):
+        import netCDF4, numpy as np
+        nc_path = str(tmp_path / "solar_upper.nc")
+        times = np.array([0.0, 365.0])
+        tsi_vals = np.array([1360.0, 1362.0])
+        spec = np.array([[0.6, 0.4], [0.3, 0.7]])
+        with netCDF4.Dataset(nc_path, "w") as ds:
+            ds.createDimension("time", 2)
+            ds.createDimension("band", 2)
+            t = ds.createVariable("time", "f8", ("time",))
+            t[:] = times
+            TSI = ds.createVariable("TSI", "f8", ("time",))
+            TSI[:] = tsi_vals
+            sfrac = ds.createVariable("SSI_frac", "f8", ("time", "band"))
+            sfrac[:] = spec
+        from legoesm.forcing.external import _load_time_gpt
+        # Request lowercase names — must still succeed via case-insensitive lookup.
+        _load_time_gpt.cache_clear()  # lru_cache
+        out_times, out_tsi, out_spec = _load_time_gpt(nc_path, "tsi", "ssi_frac")
+        assert out_tsi is not None
+        np.testing.assert_allclose(out_tsi, tsi_vals)
+        np.testing.assert_allclose(out_spec, spec)
+
+
+class TestDescendingLatBug6:
+    """Issue #207 bug 6: ``_interp_zonal_to_grid`` must handle descending
+    source latitudes (Kinne aerosol convention) instead of silently
+    producing a constant at the endpoint.
+    """
+
+    def test_descending_lat_matches_ascending_flip(self):
+        from legoesm.forcing.external import _interp_zonal_to_grid
+        import numpy as np
+        lat_asc = np.linspace(-90.0, 90.0, 181)
+        lat_desc = lat_asc[::-1]
+        # Linear ramp field so interpolation is trivially exact.
+        field_asc = lat_asc.astype(np.float64)
+        field_desc = lat_desc.astype(np.float64)
+        lat_grid = jnp.radians(jnp.array([-45.0, 0.0, 60.0]))
+        out_asc = np.asarray(_interp_zonal_to_grid(lat_asc, field_asc, lat_grid))
+        out_desc = np.asarray(_interp_zonal_to_grid(lat_desc, field_desc, lat_grid))
+        np.testing.assert_allclose(out_desc, out_asc, atol=1e-12)
+        np.testing.assert_allclose(out_desc, [-45.0, 0.0, 60.0], atol=1e-12)
+
+    def test_descending_lat_2d_field(self):
+        """Same for the 2D/3D path (flattens trailing dims)."""
+        from legoesm.forcing.external import _interp_zonal_to_grid
+        import numpy as np
+        lat_desc = np.linspace(90.0, -90.0, 19)
+        field = np.tile(lat_desc[:, None], (1, 4))  # (nlat, nband)
+        lat_grid = jnp.radians(jnp.array([-30.0, 30.0]))
+        out = np.asarray(_interp_zonal_to_grid(lat_desc, field, lat_grid))
+        assert out.shape == (2, 4)
+        np.testing.assert_allclose(out[:, 0], [-30.0, 30.0], atol=1e-12)
+
+
+class TestCMIP6VolcanicBug3:
+    """Issue #207 bug 3: CMIP6 MPI-M volcanic files carry
+    ``ext_sun(solar_bands, lat, altitude, month)`` in [1/km], not a
+    flat ``aod(time, lat)``.  The auto-dispatcher must integrate over
+    altitude and reshape to ``(time, lat, [band])`` transparently.
+    """
+
+    def test_cmip6_volcanic_dispatch(self, tmp_path):
+        import netCDF4, numpy as np
+        nc_path = str(tmp_path / "cmip6_volc.nc")
+        nbands, nlat, nalt, nm = 3, 5, 4, 12
+        lat = np.linspace(-80, 80, nlat)
+        alt = np.linspace(10.0, 25.0, nalt)  # km
+        # Constant 0.02 /km extinction across all dims → AOD per band =
+        # 0.02 * (25-10) = 0.3 after altitude integration.  After the
+        # mean-over-bands collapse, the returned AOD is also 0.3 (same
+        # value for every band → mean == any band value).
+        ext = np.full((nbands, nlat, nalt, nm), 0.02, dtype=np.float64)
+        with netCDF4.Dataset(nc_path, "w") as ds:
+            ds.createDimension("solar_bands", nbands)
+            ds.createDimension("lat", nlat)
+            ds.createDimension("altitude", nalt)
+            ds.createDimension("month", nm)
+            la = ds.createVariable("lat", "f8", ("lat",))
+            la[:] = lat
+            a = ds.createVariable("altitude", "f8", ("altitude",))
+            a[:] = alt
+            v = ds.createVariable(
+                "ext_sun", "f8", ("solar_bands", "lat", "altitude", "month"),
+            )
+            v[:] = ext
+        from legoesm.forcing.external import _load_volcanic_auto
+        _load_volcanic_auto.cache_clear()
+        mid_days, out_lat, out_aod = _load_volcanic_auto(nc_path)
+        assert mid_days.shape == (nm,)
+        np.testing.assert_allclose(out_lat, lat)
+        # Shape: (time, lat) after mean-over-bands collapse.
+        assert out_aod.shape == (nm, nlat)
+        np.testing.assert_allclose(out_aod, 0.3, atol=1e-12)
+
+    def test_cmip6_volcanic_mean_not_sum(self, tmp_path):
+        """Ensure the band collapse is MEAN, not SUM (Codex review).
+
+        14 SW bands each with the same per-band AOD must yield that
+        per-band AOD as the returned broadband value — not 14x that.
+        """
+        import netCDF4, numpy as np
+        nc_path = str(tmp_path / "cmip6_volc_mean.nc")
+        nbands, nlat, nalt, nm = 14, 4, 5, 12
+        lat = np.linspace(-60, 60, nlat)
+        alt = np.linspace(15.0, 30.0, nalt)
+        ext = np.full((nbands, nlat, nalt, nm), 0.01, dtype=np.float64)
+        with netCDF4.Dataset(nc_path, "w") as ds:
+            ds.createDimension("solar_bands", nbands)
+            ds.createDimension("lat", nlat)
+            ds.createDimension("altitude", nalt)
+            ds.createDimension("month", nm)
+            la = ds.createVariable("lat", "f8", ("lat",))
+            la[:] = lat
+            a = ds.createVariable("altitude", "f8", ("altitude",))
+            a[:] = alt
+            v = ds.createVariable(
+                "ext_sun", "f8", ("solar_bands", "lat", "altitude", "month"),
+            )
+            v[:] = ext
+        from legoesm.forcing.external import _load_volcanic_auto
+        _load_volcanic_auto.cache_clear()
+        _, _, out_aod = _load_volcanic_auto(nc_path)
+        # Per-band AOD = 0.01 /km * (30-15) km = 0.15.  MEAN over 14
+        # identical bands is still 0.15.  SUM would give 0.15 * 14 = 2.1.
+        np.testing.assert_allclose(out_aod, 0.15, atol=1e-12)
+
+    def test_ext_earth_only_rejected(self, tmp_path):
+        """CMIP6 files with only ``ext_earth`` (LW) must not be accepted
+        as a SW AOD source."""
+        import netCDF4, numpy as np, pytest
+        nc_path = str(tmp_path / "cmip6_lw_only.nc")
+        with netCDF4.Dataset(nc_path, "w") as ds:
+            ds.createDimension("terrestrial_bands", 2)
+            ds.createDimension("lat", 3)
+            ds.createDimension("altitude", 2)
+            ds.createDimension("month", 12)
+            la = ds.createVariable("lat", "f8", ("lat",))
+            la[:] = np.array([-60.0, 0.0, 60.0])
+            a = ds.createVariable("altitude", "f8", ("altitude",))
+            a[:] = np.array([15.0, 30.0])
+            v = ds.createVariable(
+                "ext_earth", "f8",
+                ("terrestrial_bands", "lat", "altitude", "month"),
+            )
+            v[:] = 0.01
+        from legoesm.forcing.external import _load_volcanic_auto
+        _load_volcanic_auto.cache_clear()
+        with pytest.raises(ValueError, match="ext_sun"):
+            _load_volcanic_auto(nc_path)
+
+    def test_auto_dispatch_legacy_aod_still_works(self, tmp_path):
+        """Files that carry the legacy ``aod`` variable still route through
+        :func:`_load_monthly_zonal` unchanged."""
+        import netCDF4, numpy as np
+        nc_path = str(tmp_path / "legacy_aod.nc")
+        lat = np.linspace(-90, 90, 7)
+        data = np.stack([np.full_like(lat, 0.05 + 0.01 * m) for m in range(12)])
+        with netCDF4.Dataset(nc_path, "w") as ds:
+            ds.createDimension("time", 12)
+            ds.createDimension("lat", len(lat))
+            t = ds.createVariable("time", "f8", ("time",))
+            t[:] = np.array([15.5 + 30.4375 * m for m in range(12)])
+            la = ds.createVariable("lat", "f8", ("lat",))
+            la[:] = lat
+            v = ds.createVariable("aod", "f8", ("time", "lat"))
+            v[:] = data
+        from legoesm.forcing.external import _load_volcanic_auto
+        mid_days, out_lat, out_data = _load_volcanic_auto(nc_path)
+        assert mid_days.shape == (12,)
+        np.testing.assert_allclose(out_lat, lat)
+        np.testing.assert_allclose(out_data, data)

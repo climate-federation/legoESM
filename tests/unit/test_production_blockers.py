@@ -189,7 +189,7 @@ class TestCloudRadiationCoupling:
         from legoesm.driver.physics_pipeline import _build_rrtmgp_radiation_fn
         import inspect
 
-        ec = ExperimentConfig(radiation="rrtmgp", cloud_scheme="simple")
+        ec = ExperimentConfig(radiation="rrtmgp", cloud_scheme="sundqvist")
         rad_fn = _build_rrtmgp_radiation_fn(ec)
 
         # Check signature includes cloud parameters
@@ -206,7 +206,7 @@ class TestCloudRadiationCoupling:
         from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import RRTMGPConfig
 
         # With cloud scheme
-        ec_clouds = ExperimentConfig(radiation="rrtmgp", cloud_scheme="simple")
+        ec_clouds = ExperimentConfig(radiation="rrtmgp", cloud_scheme="sundqvist")
         # Without cloud scheme
         ec_clear = ExperimentConfig(radiation="rrtmgp", cloud_scheme="none")
 
@@ -216,6 +216,83 @@ class TestCloudRadiationCoupling:
         fn_clear = _build_rrtmgp_radiation_fn(ec_clear)
         assert fn_clouds is not None
         assert fn_clear is not None
+
+
+# =========================================================================
+# 3b. RRTMGP GPU performance knob: use_scan routing
+# =========================================================================
+
+class TestRRTMGPUseScanRouting:
+    """ExperimentConfig.rrtmgp_use_scan must flow into the RRTMGP wrapper.
+
+    Hardcoding ``use_scan=True`` in ``_build_rrtmgp_radiation_fn`` forces
+    ``jax.lax.scan`` on every backend, which launches one kernel per
+    atmospheric layer on GPU.  The builder must honour the ExperimentConfig
+    field so GPU deployments can pick the unrolled Python for-loop path
+    (use_scan=False) without editing driver code.
+    """
+
+    def test_rrtmgp_use_scan_field_exists_and_defaults_false(self):
+        ec = ExperimentConfig()
+        assert hasattr(ec, "rrtmgp_use_scan")
+        assert ec.rrtmgp_use_scan is False
+
+    def _capture_rrtmg_config(self, ec):
+        """Build wrapper with RRTMGPConfig captured for inspection.
+
+        Patches optics loading so the test doesn't read NetCDF data.
+        """
+        from legoesm.driver import physics_pipeline as pp
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+
+        captured: dict = {}
+
+        def _capture(*args, **kwargs):
+            captured.update(kwargs)
+            return RRTMGPConfig(*args, **kwargs)
+
+        with patch(
+            "legoesm.atmosphere.physics.radiation.config.RRTMGPConfig",
+            side_effect=_capture,
+        ), patch(
+            "legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp.RRTMGP.from_legoesm_config",
+            return_value=MagicMock(),
+        ):
+            _ = pp._build_rrtmgp_radiation_fn(ec)
+
+        return captured
+
+    def test_rrtmgp_builder_honors_use_scan_false(self):
+        """Builder must not silently override user-selected use_scan=False."""
+        captured = self._capture_rrtmg_config(
+            ExperimentConfig(radiation="rrtmgp", rrtmgp_use_scan=False)
+        )
+        assert captured.get("use_scan") is False
+
+    def test_rrtmgp_builder_honors_use_scan_true(self):
+        """Training workflows must still be able to opt into scan."""
+        captured = self._capture_rrtmg_config(
+            ExperimentConfig(radiation="rrtmgp", rrtmgp_use_scan=True)
+        )
+        assert captured.get("use_scan") is True
+
+    def test_rrtmgp_use_scan_roundtrips_through_json(self):
+        """Serialization must round-trip the new field (explicit + default)."""
+        from legoesm.driver.config import (
+            experiment_config_from_dict,
+            experiment_config_to_dict,
+        )
+
+        ec = ExperimentConfig(radiation="rrtmgp", rrtmgp_use_scan=True)
+        d = experiment_config_to_dict(ec)
+        assert d["rrtmgp_use_scan"] is True
+        restored = experiment_config_from_dict(d)
+        assert restored.rrtmgp_use_scan is True
+
+        # Older checkpoints without the field must still load (default False).
+        d.pop("rrtmgp_use_scan")
+        restored_default = experiment_config_from_dict(d)
+        assert restored_default.rrtmgp_use_scan is False
 
 
 # =========================================================================

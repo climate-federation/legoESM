@@ -8,12 +8,100 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.precision import get_policy
 from legoesm.core.state import MPASOceanState
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ocean.eos import scale_depth as _SCALE_DEPTH
-from legoesm.ocean.vertical import OceanZStarCoordinate
+from legoesm.ocean.vertical import (
+    OceanPartialCellCoordinate,
+    OceanZStarCoordinate,
+)
+
+
+def partial_periodic_seam_wall_mpas(
+    mesh: VoronoiMesh,
+    open_lat_south_deg: float,
+    open_lat_north_deg: float,
+    seam_lon_deg: float | None = None,
+    seam_strip_width_deg: float | None = None,
+    base_mask: jnp.ndarray | None = None,
+):
+    """Build a per-cell land mask that creates a wall along a periodic
+    seam everywhere EXCEPT in a specified latitude band.
+
+    Use case: a regional Voronoi mesh constructed with
+    ``periodic_x=True`` represents a basin whose east-west boundaries
+    should be CLOSED everywhere except in a re-entrant channel band
+    (Drake passage, Bering strait, ACC channel, etc.). Without
+    intervention the periodicity makes flow wrap around at every
+    latitude, including the subtropical / subpolar gyre region — which
+    is non-physical for a closed basin. This helper marks cells within
+    one cell-width of the periodic seam as LAND outside the open band,
+    creating a wall there while leaving the band open.
+
+    Parameters
+    ----------
+    mesh : VoronoiMesh
+        Created by ``create_regional_voronoi_mesh(..., periodic_x=True)``.
+    open_lat_south_deg, open_lat_north_deg : float
+        Latitude band [°N] in which the seam stays open (no wall).
+    seam_lon_deg : float, optional
+        Longitude [°E] of the periodic seam (= ``lon_west`` of the
+        regional mesh). Defaults to the minimum lon of the mesh.
+    seam_strip_width_deg : float, optional
+        Width of the wall strip in degrees of longitude. Defaults to
+        one nominal cell width estimated from the mesh's median
+        ``dcEdge``. Set explicitly for reproducibility.
+    base_mask : array, optional
+        Optional pre-existing land mask (e.g., to also mask buffer
+        cells outside a lat-domain). The seam wall is intersected
+        with this mask: cells already land stay land; cells that
+        were ocean become land where the seam strip + outside-band
+        condition holds.
+
+    Returns
+    -------
+    land_mask : jax array, shape (nCells,)
+        1.0 = ocean, 0.0 = land.
+
+    Examples
+    --------
+    Drake-passage-like channel between -65°S and -45°N::
+
+        mask = partial_periodic_seam_wall_mpas(
+            mesh,
+            open_lat_south_deg=-65.0,
+            open_lat_north_deg=-45.0,
+        )
+    """
+    lon_deg = (jnp.degrees(mesh.lonCell) + 180.0) % 360.0 - 180.0
+    lat_deg = jnp.degrees(mesh.latCell)
+
+    if seam_lon_deg is None:
+        seam_lon_deg = float(jnp.min(lon_deg))
+
+    if seam_strip_width_deg is None:
+        median_dc_m = float(jnp.median(mesh.dcEdge))
+        seam_strip_width_deg = (
+            (median_dc_m / mesh.radius) * float(constants.RAD_TO_DEG)
+        )
+
+    # Modulo wrap so cells near the antipodal side of the periodic seam
+    # don't get false-positive matches via negative differences.
+    seam_dist = (lon_deg - seam_lon_deg) % 360.0
+    near_seam = seam_dist < seam_strip_width_deg
+    in_open_band = (
+        (lat_deg >= open_lat_south_deg) & (lat_deg <= open_lat_north_deg)
+    )
+    seam_wall = near_seam & ~in_open_band
+
+    if base_mask is None:
+        is_ocean = ~seam_wall
+    else:
+        is_ocean = (base_mask > 0.5) & ~seam_wall
+    return is_ocean.astype(jnp.float32)
 
 
 def idealized_bathymetry_mpas(
@@ -51,11 +139,12 @@ def idealized_bathymetry_mpas(
 def rest_state_mpas_ocean(
     mesh: VoronoiMesh,
     z_coord: OceanZStarCoordinate,
-    T_surface: float = 20.0,
+    T_water_init_C: float = 20.0,
     T_deep: float = 2.0,
     S_uniform: float = 35.0,
     H_max: float = 5500.0,
     land_lat_threshold: float = 80.0,
+    bathymetry=None,
 ) -> MPASOceanState:
     """Create a rest-state initial condition on Voronoi mesh.
 
@@ -66,16 +155,25 @@ def rest_state_mpas_ocean(
     ----------
     mesh : VoronoiMesh
     z_coord : OceanZStarCoordinate
-    T_surface : float
+    T_water_init_C : float
         Surface temperature [degC].
     T_deep : float
         Deep temperature [degC].
     S_uniform : float
         Uniform salinity [PSU].
     H_max : float
-        Ocean depth [m].
+        Ocean depth [m]. Used by the idealized bathymetry path.
     land_lat_threshold : float
-        Land above this latitude [deg].
+        Land above this latitude [deg]. Used by the idealized
+        bathymetry path.
+    bathymetry : BathymetryConfig or None, optional
+        Realistic bathymetry config. When provided with
+        ``source="file"``, ``H_bathy`` and ``land_mask`` are loaded
+        from a NetCDF file (ETOPO/GEBCO style) via
+        :func:`load_bathymetry_mpas` instead of the idealized path.
+        ``H_max``/``land_lat_threshold`` are ignored in that case.
+        Default ``None`` keeps the idealized behavior for backwards
+        compatibility.
 
     Returns
     -------
@@ -85,13 +183,23 @@ def rest_state_mpas_ocean(
     nEdges = mesh.nEdges
     nlev = z_coord.n_levels
 
-    H_bathy, land_mask = idealized_bathymetry_mpas(mesh, H_max, land_lat_threshold)
+    use_realistic = (
+        bathymetry is not None and getattr(bathymetry, "source", None) == "file"
+    )
+    if use_realistic:
+        # Lazy import to avoid pulling xarray into idealized-only callers.
+        from legoesm.ocean.bathymetry import load_bathymetry_mpas
+        H_bathy, land_mask = load_bathymetry_mpas(mesh, bathymetry)
+    else:
+        H_bathy, land_mask = idealized_bathymetry_mpas(
+            mesh, H_max, land_lat_threshold,
+        )
 
     dtype = get_policy().storage
 
     # Temperature: exponential profile
     z_full = z_coord.z_full_ref  # (nlev,), negative values
-    T_profile = T_deep + (T_surface - T_deep) * jnp.exp(z_full / _SCALE_DEPTH)
+    T_profile = T_deep + (T_water_init_C - T_deep) * jnp.exp(z_full / _SCALE_DEPTH)
     T_data = jnp.broadcast_to(T_profile[jnp.newaxis, :], (nCells, nlev)).astype(dtype)
 
     # Salinity: uniform
@@ -103,12 +211,15 @@ def rest_state_mpas_ocean(
     # SSH: zero
     eta_data = jnp.zeros(nCells, dtype=dtype)
 
+    w_data = jnp.zeros((nCells, nlev + 1), dtype=dtype)
+
     return MPASOceanState(
         u=Field(data=u_data, name="u", dims=("nEdges", "nlev"), units="m/s",
                 staggering="edge"),
         T=Field(data=T_data, name="T", dims=("nCells", "nlev"), units="degC"),
         S=Field(data=S_data, name="S", dims=("nCells", "nlev"), units="PSU"),
         eta=Field(data=eta_data, name="eta", dims=("nCells",), units="m"),
+        w=Field(data=w_data, name="w", dims=("nCells", "nlev+1"), units="m/s"),
         H_bathy=Field(data=H_bathy, name="H_bathy", dims=("nCells",), units="m"),
         land_mask=Field(data=land_mask, name="land_mask", dims=("nCells",), units="1"),
     )
@@ -166,13 +277,20 @@ def wind_driven_gyre_mpas(
     # Uniform depth everywhere (smooth Jacobian at coastlines)
     H_bathy = jnp.full(nCells, H_max, dtype=dtype)
 
-    # Uniform T and S
+    # Uniform T and S - apply land masking to set land cells to 0.0°C
     T_data = jnp.full((nCells, nlev), T_uniform, dtype=dtype)
     S_data = jnp.full((nCells, nlev), S_uniform, dtype=dtype)
+
+    # Apply land masking: land cells (mask <= 0.5) set to 0.0°C
+    mask_3d = land_mask[:, jnp.newaxis]  # Broadcast to 3D
+    T_data = jnp.where(mask_3d > 0.5, T_data, 0.0)
+    S_data = jnp.where(mask_3d > 0.5, S_data, 0.0)
 
     # Zero velocity and SSH
     u_data = jnp.zeros((nEdges, nlev), dtype=dtype)
     eta_data = jnp.zeros(nCells, dtype=dtype)
+
+    w_data = jnp.zeros((nCells, nlev + 1), dtype=dtype)
 
     return MPASOceanState(
         u=Field(data=u_data, name="u", dims=("nEdges", "nlev"), units="m/s",
@@ -180,9 +298,118 @@ def wind_driven_gyre_mpas(
         T=Field(data=T_data, name="T", dims=("nCells", "nlev"), units="degC"),
         S=Field(data=S_data, name="S", dims=("nCells", "nlev"), units="PSU"),
         eta=Field(data=eta_data, name="eta", dims=("nCells",), units="m"),
+        w=Field(data=w_data, name="w", dims=("nCells", "nlev+1"), units="m/s"),
         H_bathy=Field(data=H_bathy, name="H_bathy", dims=("nCells",), units="m"),
         land_mask=Field(data=land_mask, name="land_mask", dims=("nCells",), units="1"),
     )
+
+
+def attach_static_rho_ref_z(
+    state: MPASOceanState,
+    mesh: VoronoiMesh,
+    z_coord,
+    config,
+) -> MPASOceanState:
+    """Compute and freeze a per-level reference density profile on the state.
+
+    Runs the same 2-pass EOS+hydrostatic-pressure iteration that the
+    runtime baroclinic tendency uses (via
+    :func:`iterate_eos_and_pressure_anomaly`) on the *initial* T and S,
+    averages the resulting in-situ density over wet cells per level,
+    and writes the resulting ``(nlev,)`` profile to ``state.rho_ref_z``.
+
+    Once attached, the runtime baroclinic PGF iteration uses
+    ``ρ' = ρ − ρ_ref(z)`` instead of ``ρ' = ρ − ρ_0``.  The profile is
+    NEVER recomputed during integration — that was the
+    positive-feedback failure mode of the dynamic recomputed-mean
+    version (``use_baroclinic_rho_ref=True``).  See
+    project_mpas_etopo_instability.md §"Option B" for context.
+
+    Parameters
+    ----------
+    state : MPASOceanState
+        Must already carry the initial T, S, ``H_bathy``, ``land_mask``.
+    mesh : VoronoiMesh
+    z_coord : OceanZStarCoordinate or OceanPartialCellCoordinate
+        On a partial-cell coordinate, ``is_active`` and ``h_actual`` are
+        used so that step-edge cells (zero-thickness layers below the
+        seafloor) do not pollute the per-level wet-cell mean.
+    config : MPASOceanConfig
+        Used for ``eos``, ``eos_linear``, ``rho_0``, ``g``,
+        ``min_water_column_m`` (for the partial-cell h_actual), and the
+        switches ``use_h_actual_pgf`` / ``use_static_baroclinic_rho_ref``.
+        When ``use_static_baroclinic_rho_ref`` is False, returns
+        ``state`` unchanged (no-op).
+
+    Returns
+    -------
+    MPASOceanState
+        A new state with ``rho_ref_z`` populated when the config switch
+        is on; otherwise the input state unchanged.
+    """
+    if not getattr(config, "use_static_baroclinic_rho_ref", False):
+        return state
+    if getattr(config, "use_baroclinic_rho_ref", False):
+        raise ValueError(
+            "use_static_baroclinic_rho_ref and use_baroclinic_rho_ref "
+            "are mutually exclusive: the static frozen profile and the "
+            "dynamic recomputed-mean profile cannot both be active. "
+            "Set only one of them in MPASOceanConfig."
+        )
+
+    # Lazy imports to avoid a hard dependency from the init module on
+    # the dynamics tendency stack.
+    from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
+    from legoesm.ocean.dynamics.ocean_tendency_common import (
+        compute_static_rho_ref_z,
+    )
+    from legoesm.ocean.eos import make_eos_fn
+    from legoesm.ocean.vertical import compute_layer_thickness
+
+    T_3d = state.T.data
+    S_3d = state.S.data
+    eta_2d = state.eta.data
+    H_bathy = state.H_bathy.data
+    mask = state.land_mask.data
+
+    c1 = mesh.cellsOnEdge[0]
+    c2 = mesh.cellsOnEdge[1]
+
+    def _fill(field_cell):
+        return fill_land_cells_mpas(field_cell, mask, c1, c2)
+
+    eos_fn = make_eos_fn(
+        config.eos, getattr(config, "eos_linear", None),
+    )
+
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        is_active_3d = z_coord.is_active.astype(T_3d.dtype)
+        if getattr(config, "use_h_actual_pgf", False):
+            h_actual = compute_layer_thickness(
+                eta_2d, H_bathy, z_coord,
+                min_water_column_m=config.min_water_column_m,
+            )
+        else:
+            h_actual = None
+    else:
+        is_active_3d = None
+        h_actual = None
+
+    rho_ref_z = compute_static_rho_ref_z(
+        T_3d, S_3d, mask, _fill, eos_fn,
+        z_coord.dz_ref, config.rho_0, config.g,
+        n_iter=2,
+        h_actual=h_actual,
+        is_active_3d=is_active_3d,
+    )
+
+    rho_ref_field = Field(
+        data=rho_ref_z,
+        name="rho_ref_z",
+        dims=("nlev",),
+        units="kg/m^3",
+    )
+    return state._replace(rho_ref_z=rho_ref_field)
 
 
 def reconstruct_cell_velocity(u_edge, mesh):
@@ -230,11 +457,21 @@ def reconstruct_cell_velocity(u_edge, mesh):
     if is_3d:
         u_gathered = u_edge[eoc_safe] * mask[..., jnp.newaxis]
         w3d = weight[..., jnp.newaxis]
-        u_east = jnp.sum(u_gathered * w3d * cos_a[..., jnp.newaxis], axis=0)
-        v_north = jnp.sum(u_gathered * w3d * sin_a[..., jnp.newaxis], axis=0)
+        # Both reductions share ``u_gathered * w3d`` weighting along the
+        # ``maxEdges`` axis — fuse into one stacked sum.
+        _stack = (u_gathered * w3d)[..., jnp.newaxis] * jnp.stack(
+            [cos_a, sin_a], axis=-1,
+        )[..., jnp.newaxis, :]
+        _uv = jnp.sum(_stack, axis=0)
+        u_east = _uv[..., 0]
+        v_north = _uv[..., 1]
     else:
         u_gathered = u_edge[eoc_safe] * mask
-        u_east = jnp.sum(u_gathered * weight * cos_a, axis=0)
-        v_north = jnp.sum(u_gathered * weight * sin_a, axis=0)
+        _stack = (u_gathered * weight)[..., jnp.newaxis] * jnp.stack(
+            [cos_a, sin_a], axis=-1,
+        )
+        _uv = jnp.sum(_stack, axis=0)
+        u_east = _uv[..., 0]
+        v_north = _uv[..., 1]
 
     return u_east, v_north

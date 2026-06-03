@@ -113,12 +113,12 @@ def williamson_test5(grid: CubedSphereGrid) -> ShallowWaterState:
     Notes
     -----
     Mountain specification:
-        h_s = h_s0 * (1 - r/R_m) for r < R_m, else 0
+        h_s = h_s0 * (1 - r/R_m)
     where:
         h_s0 = 2000 m
         R_m = pi/9 (20 degrees)
         center: (lon_c, lat_c) = (3*pi/2, pi/6) = (270E, 30N)
-        r = great-circle angular distance from center
+        r = min(R_m, sqrt((lon - lon_c)^2 + (lat - lat_c)^2))
     """
     R = grid.radius
     Omega = constants.Omega
@@ -147,14 +147,14 @@ def williamson_test5(grid: CubedSphereGrid) -> ShallowWaterState:
     R_m = jnp.pi / 9.0            # Mountain radius (20 degrees)
     h_s0 = 2000.0                  # Mountain peak height [m]
 
-    # Great-circle angular distance from mountain center
-    r = jnp.arccos(jnp.clip(
-        jnp.sin(lat_c) * jnp.sin(lat) +
-        jnp.cos(lat_c) * jnp.cos(lat) * jnp.cos(lon - lon_c),
-        -1.0, 1.0
-    ))
-
-    h_s_data = jnp.where(r < R_m, h_s0 * (1.0 - r / R_m), 0.0)
+    # FV3 test_cases.F90 uses a clipped lon/lat-plane radius rather than
+    # great-circle distance. Our grid stores lon in [-pi, pi], so wrap the
+    # longitude delta to the nearest periodic image before applying the
+    # Fortran planar formula.
+    dlon = jnp.mod(lon - lon_c + jnp.pi, 2.0 * jnp.pi) - jnp.pi
+    dlat = lat - lat_c
+    r = jnp.minimum(R_m, jnp.sqrt(dlon**2 + dlat**2))
+    h_s_data = h_s0 * (1.0 - r / R_m)
 
     # Height field: h is fluid depth (column above topography).
     # Free-surface height h_free is in geostrophic balance; the solver

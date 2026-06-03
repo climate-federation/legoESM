@@ -45,6 +45,8 @@ from legoesm.core.operators_voronoi import (
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
+from legoesm.core.precision import cast_pytree
+from legoesm.parallel.reductions import global_sum_mpi
 from legoesm import constants
 
 
@@ -57,6 +59,7 @@ class MPASShallowWaterConfig(NamedTuple):
     thickness_order: int = 2    # 2 (centered) or 3 (upwind-biased)
     apvm_scale: float = 0.0    # APVM upwinding (0 = off, 1 = full)
     fix_mass: bool = True
+    anchor_mass_to_initial: bool = False  # Mirror PE/SW: anchor fixer to initial mass
     fix_energy: bool = False
     time_integrator: str = "rk4"  # "rk4", "ssp_rk3"
 
@@ -150,6 +153,24 @@ class MPASShallowWaterModel(IntegrationMixin):
     ):
         self.mesh = mesh
         self.config = config or MPASShallowWaterConfig()
+        # iter-6: anchored mass target (fp64, lazy).  Mirrors
+        # ``CGridLatLonShallowWaterModel._target_mass``.
+        self._target_mass: jax.Array | None = None
+
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (iter-18; see iter-4 SW twin)."""
+        self._target_mass = None
+
+    def set_target_mass(self, target_mass) -> None:
+        """Explicitly set the anchored mass target (iter-19)."""
+        self._target_mass = target_mass
+
+    def compute_mass(self, state: MPASShallowWaterState) -> jax.Array:
+        """Compute total dry mass ``∫ h dA`` in the fp64 budget acc."""
+        return jnp.sum(
+            state.h.data.astype(jnp.float64)
+            * self.mesh.areaCell.astype(jnp.float64),
+        )
 
     def tendencies(
         self,
@@ -159,10 +180,23 @@ class MPASShallowWaterModel(IntegrationMixin):
         return mpas_shallow_water_tendencies(
             state, self.mesh, self.config, dt=dt)
 
-    @partial(jax.jit, static_argnums=(0,))
     def step(self, state: MPASShallowWaterState, dt: float) -> MPASShallowWaterState:
+        """Outer wrapper: snapshots initial mass on first call when
+        ``anchor_mass_to_initial`` is on (fp64, outside JIT)."""
+        if (self.config.fix_mass
+                and self.config.anchor_mass_to_initial
+                and self._target_mass is None):
+            self._target_mass = self.compute_mass(state)
+        return self._step_jit(state, dt, self._target_mass)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def _step_jit(
+        self,
+        state: MPASShallowWaterState,
+        dt: float,
+        target_mass: jax.Array | None = None,
+    ) -> MPASShallowWaterState:
         """Advance one time step."""
-        from legoesm.core.precision import cast_pytree
         state = cast_pytree(state, None, "compute")
 
         def tendency_fn(s):
@@ -181,7 +215,9 @@ class MPASShallowWaterModel(IntegrationMixin):
 
         # Conservation fixers
         if self.config.fix_mass:
-            state_new = _fix_mass_mpas(state_new, state, self.mesh)
+            state_new = _fix_mass_mpas(
+                state_new, state, self.mesh, target_mass=target_mass,
+            )
         if self.config.fix_energy:
             state_new = _fix_energy_mpas(
                 state_new, state, self.mesh, self.config.g)
@@ -195,42 +231,87 @@ class MPASShallowWaterModel(IntegrationMixin):
 # Conservation fixers
 # ============================================================================
 
-def _fix_mass_mpas(state_new, state_old, mesh):
-    """Fix mass conservation: uniform additive correction to h."""
-    area = mesh.areaCell
-    mass_old = jnp.sum(state_old.h.data * area)
-    mass_new = jnp.sum(state_new.h.data * area)
-    total_area = jnp.sum(area)
+def _fix_mass_mpas(state_new, state_old, mesh, target_mass=None):
+    """Fix mass conservation: uniform additive correction to h.
+
+    Upcasts to float64 for the global reduction to avoid catastrophic
+    cancellation in the mass difference (float32 sums lose ~7 digits).
+    Two-or-three sums batched into one allreduce for multi-rank scaling.
+
+    iter-6: when ``target_mass`` is provided (anchor-to-initial mode),
+    skip the ``state_old.h`` sum — only ``mass_new`` and ``total_area``
+    need a reduction.  The pre-state path is preserved for back-compat.
+    """
+    area = mesh.areaCell.astype(jnp.float64)
+    if target_mass is not None:
+        _h_stack = jnp.stack(
+            [
+                state_new.h.data.astype(jnp.float64),
+                jnp.ones_like(state_new.h.data, dtype=jnp.float64),
+            ],
+            axis=-1,
+        ) * area[..., None]
+        local = jnp.sum(_h_stack, axis=tuple(range(area.ndim)))
+        if jax.process_count() > 1:
+            local = global_sum_mpi(local)
+        mass_new, total_area = local[0], local[1]
+        mass_old = target_mass
+    else:
+        _h_stack = jnp.stack(
+            [
+                state_old.h.data.astype(jnp.float64),
+                state_new.h.data.astype(jnp.float64),
+                jnp.ones_like(state_new.h.data, dtype=jnp.float64),
+            ],
+            axis=-1,
+        ) * area[..., None]
+        local = jnp.sum(_h_stack, axis=tuple(range(area.ndim)))
+        if jax.process_count() > 1:
+            local = global_sum_mpi(local)
+        mass_old, mass_new, total_area = local[0], local[1], local[2]
     correction = (mass_old - mass_new) / total_area
-    h_fixed = state_new.h.replace(data=state_new.h.data + correction)
+    # iter-6: drop ``.astype(state_new.h.data.dtype)`` so the fp64
+    # correction promotes the add (matches the iter-2/4/5 SW fixers).
+    h_fixed = state_new.h.replace(
+        data=state_new.h.data + correction,
+    )
     return state_new._replace(h=h_fixed)
 
 
 def _fix_energy_mpas(state_new, state_old, mesh, g):
-    """Fix energy conservation: velocity scaling."""
-    area = mesh.areaCell
-    dc = mesh.dcEdge
-    dv = mesh.dvEdge
+    """Fix energy conservation: velocity scaling.
 
-    def total_energy(state):
+    The four contributing sums (E_old, KE_new, PE_new, plus KE_old +
+    PE_old that go into E_old) are computed locally and reduced
+    together — one MPI allreduce instead of four when the mesh is
+    sharded across ranks.
+    """
+    area = mesh.areaCell
+
+    def _ke_pe_terms(state):
         h = state.h.data
         u = state.u.data
         h_s = state.h_s.data
-        # KE at cells
-        ke = kinetic_energy_cell(u, mesh) * h
-        pe = 0.5 * g * (h + h_s) ** 2
-        return jnp.sum((ke + pe) * area)
+        # KE and PE share ``area`` on the same horizontal axes — stack
+        # the two integrands and reduce locally once.
+        _stack = jnp.stack(
+            [kinetic_energy_cell(u, mesh) * h, 0.5 * g * (h + h_s) ** 2],
+            axis=-1,
+        ) * area[..., None]
+        _pair = jnp.sum(_stack, axis=tuple(range(area.ndim)))
+        return _pair[0], _pair[1]
 
-    E_old = total_energy(state_old)
+    KE_old, PE_old = _ke_pe_terms(state_old)
+    KE_new, PE_new = _ke_pe_terms(state_new)
 
-    h_new = state_new.h.data
-    u_new = state_new.u.data
-    KE_cells = kinetic_energy_cell(u_new, mesh)
-    KE_new = jnp.sum(KE_cells * h_new * area)
-    PE_new = jnp.sum(0.5 * g * (h_new + state_new.h_s.data) ** 2 * area)
+    local = jnp.stack([KE_old, PE_old, KE_new, PE_new])
+    if jax.process_count() > 1:
+        local = global_sum_mpi(local)
+    KE_old, PE_old, KE_new, PE_new = local[0], local[1], local[2], local[3]
+    E_old = KE_old + PE_old
 
     KE_target = jnp.maximum(E_old - PE_new, 0.0)
     scale = jnp.where(KE_new > _TINY, jnp.sqrt(KE_target / KE_new), 1.0)
 
-    u_fixed = state_new.u.replace(data=u_new * scale)
+    u_fixed = state_new.u.replace(data=state_new.u.data * scale)
     return state_new._replace(u=u_fixed)

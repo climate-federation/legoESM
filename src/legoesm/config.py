@@ -28,9 +28,11 @@ from typing import Any
 # The YAML layer accepts deprecated aliases for backward compatibility
 # and maps them to the canonical names here, at the boundary.
 
+# "centered" and "finite_volume" are NOT legacy — they are valid
+# ambiguous names resolved grid-aware by the driver factory (cdgrid on
+# cubed-sphere, latlon_cgrid on lat-lon).  Only truly defunct names
+# are rewritten here at the YAML boundary.
 _LEGACY_DISCRETIZATION: dict[str, str] = {
-    "centered": "cdgrid",
-    "finite_volume": "cdgrid",
     "cgrid": "cdgrid",
     "fv": "cdgrid",
 }

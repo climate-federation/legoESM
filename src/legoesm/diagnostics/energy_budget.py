@@ -22,8 +22,10 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm import constants
+from legoesm.diagnostics.column_integrals import column_water_vapor
 
 
 # ======================================================================
@@ -71,10 +73,26 @@ def column_moist_static_energy(
     E : array, shape (...)
         Column-integrated energy [J/m²].
     """
-    g = constants.g
-    c_p = constants.c_pd
-    L_v = constants.L_v
-    R_d = constants.R_d
+    # iter-47: promote to fp64 budget accumulator (see iter-42..46
+    # fp64-field convention).  Column MSE involves c_p·T (~10^5),
+    # L_v·q (~10^4), Φ (~10^4), 0.5(u²+v²) (~10²) summed over nlev
+    # levels — the fp32 product+sum in the pre-iter-47 path leaked
+    # ~7 bits of relative precision.
+    from legoesm.core.conservation import conservation_accumulator
+    _acc_e = conservation_accumulator()
+    T = T.astype(_acc_e)
+    q_v = q_v.astype(_acc_e)
+    u = u.astype(_acc_e)
+    v = v.astype(_acc_e)
+    phis = phis.astype(_acc_e)
+    p_s = p_s.astype(_acc_e)
+    dsigma = dsigma.astype(_acc_e)
+    sigma_full = sigma_full.astype(_acc_e)
+
+    g = jnp.asarray(constants.g, dtype=_acc_e)
+    c_p = jnp.asarray(constants.c_pd, dtype=_acc_e)
+    L_v = jnp.asarray(constants.L_v, dtype=_acc_e)
+    R_d = jnp.asarray(constants.R_d, dtype=_acc_e)
 
     # Compute geopotential at full levels (hydrostatic, bottom-up)
     # Φ_k = phis + R_d * Σ_{j>k} T_j * dln(p)_j + R_d * T_k * 0.5 * dln(p)_k
@@ -146,9 +164,17 @@ def column_dry_static_energy(
 
     Useful for checking the dry energy budget separately.
     """
-    g = constants.g
-    c_p = constants.c_pd
-    R_d = constants.R_d
+    # iter-47: fp64 budget accumulator (mirrors moist twin above).
+    from legoesm.core.conservation import conservation_accumulator
+    _acc_d = conservation_accumulator()
+    T = T.astype(_acc_d)
+    phis = phis.astype(_acc_d)
+    p_s = p_s.astype(_acc_d)
+    dsigma = dsigma.astype(_acc_d)
+    sigma_full = sigma_full.astype(_acc_d)
+    g = jnp.asarray(constants.g, dtype=_acc_d)
+    c_p = jnp.asarray(constants.c_pd, dtype=_acc_d)
+    R_d = jnp.asarray(constants.R_d, dtype=_acc_d)
 
     dp = p_s[..., None] * dsigma
     nlev = T.shape[-1]
@@ -343,21 +369,28 @@ class EnergyBudgetTracker:
         EnergyBudget
             Snapshot of global-mean energy budget diagnostics.
         """
-        # Column energy (global mean)
+        # Column energy + TOA + surface fluxes — fuse all six means
+        # into one ``jnp.stack`` + ``np.asarray`` host transfer.  The
+        # previous chain serialised six GPU stalls per energy-budget
+        # check.
         E = column_moist_static_energy(
             T, q_v, u, v, phis, p_s, dsigma, sigma_full,
         )
-        mean_E = float(jnp.mean(E))
-
-        # TOA fluxes (global mean)
-        mean_sw_down_toa = float(jnp.mean(sw_down_toa))
-        mean_sw_up_toa = float(jnp.mean(sw_up_toa))
-        mean_lw_up_toa = float(jnp.mean(lw_up_toa))
+        _h = np.asarray(jnp.stack([
+            jnp.mean(E),
+            jnp.mean(sw_down_toa),
+            jnp.mean(sw_up_toa),
+            jnp.mean(lw_up_toa),
+            jnp.mean(sw_net_sfc),
+            jnp.mean(lw_net_sfc),
+        ]))
+        mean_E = float(_h[0])
+        mean_sw_down_toa = float(_h[1])
+        mean_sw_up_toa = float(_h[2])
+        mean_lw_up_toa = float(_h[3])
+        mean_sw_sfc = float(_h[4])
+        mean_lw_sfc = float(_h[5])
         mean_toa_net = mean_sw_down_toa - mean_sw_up_toa - mean_lw_up_toa
-
-        # Surface fluxes (global mean)
-        mean_sw_sfc = float(jnp.mean(sw_net_sfc))
-        mean_lw_sfc = float(jnp.mean(lw_net_sfc))
         mean_sfc_net = mean_sw_sfc + mean_lw_sfc
 
         # Energy tendency and residual
@@ -522,13 +555,12 @@ class MoistureBudgetTracker:
         -------
         MoistureBudget
         """
-        from legoesm.diagnostics.column_integrals import column_water_vapor
-
         W = column_water_vapor(q_v, p_s, dsigma)
-        mean_W = float(jnp.mean(W))
-
-        # Precipitation in mm/day
-        mean_P = float(jnp.mean(precip)) * 86400.0  # kg/m²/s → mm/day
+        # Fuse the column-water-vapor + precipitation means into one
+        # host transfer.
+        _h = np.asarray(jnp.stack([jnp.mean(W), jnp.mean(precip)]))
+        mean_W = float(_h[0])
+        mean_P = float(_h[1]) * 86400.0  # kg/m²/s → mm/day
 
         # Tendency
         if self._prev_water is not None and self._prev_time is not None:

@@ -1,0 +1,113 @@
+"""Tests for the tripolar polar-cap viscosity boost factor."""
+
+from __future__ import annotations
+
+import jax.numpy as jnp
+import numpy as np
+
+from legoesm.grids.latlon import create_latlon_grid
+from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    polar_cap_boost_factor,
+    equatorial_boost_factor,
+    laplacian_scaling_factor,
+)
+
+
+# ==============================================================================
+# polar_cap_boost_factor
+# ==============================================================================
+
+class TestPolarCapBoost:
+
+    def _grid(self, n_lat=180, n_lon=360):
+        return create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+
+    def test_disabled_returns_ones(self):
+        g = self._grid()
+        bu, bv = polar_cap_boost_factor(g, cap_lat_deg=75.0, boost=1.0)
+        assert jnp.allclose(bu, 1.0)
+        assert jnp.allclose(bv, 1.0)
+        assert bu.shape == (g.n_lat,)
+        assert bv.shape == (g.n_lat + 1,)
+
+    def test_boost_at_cap_latitude(self):
+        g = self._grid()
+        bu, bv = polar_cap_boost_factor(
+            g, cap_lat_deg=75.0, boost=10.0, width_deg=5.0,
+        )
+        # At |lat| = cap_lat_deg the ramp is at 0.5 → boost = 1 + 9*0.5 = 5.5.
+        lat_deg = np.degrees(np.asarray(g.lat))
+        idx_75n = int(np.argmin(np.abs(lat_deg - 75.0)))
+        assert 5.0 < float(bu[idx_75n]) < 6.0
+
+    def test_deep_cap_approaches_boost(self):
+        g = self._grid()
+        bu, _ = polar_cap_boost_factor(
+            g, cap_lat_deg=75.0, boost=10.0, width_deg=5.0,
+        )
+        lat_deg = np.degrees(np.asarray(g.lat))
+        idx_89n = int(np.argmin(np.abs(lat_deg - 89.0)))
+        # 89° is 14° into the cap (14°/5° = 2.8 sigma).
+        # 0.5*(1 + tanh(2.8)) ≈ 0.995; boost ≈ 1 + 9*0.995 = 9.95.
+        assert float(bu[idx_89n]) > 9.5
+
+    def test_low_latitude_unchanged(self):
+        g = self._grid()
+        bu, _ = polar_cap_boost_factor(
+            g, cap_lat_deg=75.0, boost=10.0, width_deg=5.0,
+        )
+        lat_deg = np.degrees(np.asarray(g.lat))
+        idx_equator = int(np.argmin(np.abs(lat_deg - 0.0)))
+        # At equator, ramp is essentially zero → factor ≈ 1.
+        assert float(bu[idx_equator]) < 1.01
+
+    def test_symmetric_across_equator(self):
+        """Cap boost uses ``|lat|`` so northern + southern caps both boost."""
+        g = self._grid()
+        bu, _ = polar_cap_boost_factor(
+            g, cap_lat_deg=75.0, boost=10.0, width_deg=5.0,
+        )
+        lat_deg = np.degrees(np.asarray(g.lat))
+        idx_80n = int(np.argmin(np.abs(lat_deg - 80.0)))
+        idx_80s = int(np.argmin(np.abs(lat_deg + 80.0)))
+        assert jnp.isclose(bu[idx_80n], bu[idx_80s], rtol=1e-3)
+
+
+# ==============================================================================
+# Combined with cos(lat) scaling
+# ==============================================================================
+
+class TestPolarCapBoostCombined:
+
+    def test_combined_with_cos_scaling_dominates_in_cap(self):
+        """cos(lat) → 0 at high lat but cap boost lifts the effective A_h."""
+        g = create_latlon_grid(n_lat=180, n_lon=360)
+        cos_u, cos_v = laplacian_scaling_factor(g, power=1, floor=0.01)
+        cap_u, cap_v = polar_cap_boost_factor(
+            g, cap_lat_deg=75.0, boost=20.0, width_deg=5.0,
+        )
+        eff_u = cos_u * cap_u
+        # At 85°N: cos(85°) ≈ 0.087, floored at 0.01 by default 0.
+        # Cap boost ≈ 20 → effective ≈ 0.087 * 20 ≈ 1.74 (above mid-lat
+        # baseline of ~0.7).
+        lat_deg = np.degrees(np.asarray(g.lat))
+        idx_85n = int(np.argmin(np.abs(lat_deg - 85.0)))
+        idx_45n = int(np.argmin(np.abs(lat_deg - 45.0)))
+        assert float(eff_u[idx_85n]) > float(cos_u[idx_45n])
+
+    def test_combined_with_equatorial_boost_independent(self):
+        """Equatorial and polar boosts are multiplicative + independent."""
+        g = create_latlon_grid(n_lat=180, n_lon=360)
+        eq_u, eq_v = equatorial_boost_factor(g, sigma_deg=5.0, boost=5.0)
+        cap_u, cap_v = polar_cap_boost_factor(
+            g, cap_lat_deg=75.0, boost=10.0, width_deg=5.0,
+        )
+        lat_deg = np.degrees(np.asarray(g.lat))
+        idx_eq = int(np.argmin(np.abs(lat_deg - 0.0)))
+        idx_85 = int(np.argmin(np.abs(lat_deg - 85.0)))
+        # Equator: eq=5, cap=1.
+        assert float(eq_u[idx_eq]) > 4.5
+        assert float(cap_u[idx_eq]) < 1.05
+        # Polar: eq=1, cap=10.
+        assert float(eq_u[idx_85]) < 1.05
+        assert float(cap_u[idx_85]) > 9.0

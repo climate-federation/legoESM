@@ -1,11 +1,18 @@
 """Implicit vertical diffusion using the Thomas algorithm.
 
-Solves the 1D diffusion equation:
+Solves the 1D diffusion equation in flux form:
 
-    dφ/dt = (1/ρ) d/dz [K dφ/dz]
+    dφ/dt = (1/ρ) d/dz [ρ K dφ/dz]
 
 using backward Euler time stepping, producing a tridiagonal system
 solved via forward-sweep / back-substitution with jax.lax.scan.
+
+The flux F = ρ K dφ/dz is evaluated on half-levels (interfaces) using
+arithmetic-mean interface density ρ_half = 0.5 (ρ[k] + ρ[k+1]).  Without
+the interface density the scheme reduces to a kinematic diffusivity
+``K/(ρ dz dz_half)`` discretization that is inconsistent with the
+surface-flux boundary condition ``F_sfc = ρ K dφ/dz`` and silently mixes
+mass-weighted and kinematic fluxes (audit 2026-05-12 finding HIGH #1).
 
 The bottom boundary condition applies a prescribed surface flux.
 The top boundary condition is zero flux (no diffusion through the top).
@@ -15,6 +22,8 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+
+from legoesm import constants
 
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
 
@@ -61,19 +70,24 @@ def implicit_vertical_diffusion(
     dtype = phi.dtype
     dt = jnp.asarray(dt, dtype=dtype)
 
+    # Interface density for the flux ρ_half K_half dφ/dz on half-levels.
+    rho_half = 0.5 * (rho[:, :-1] + rho[:, 1:])
+
     # Build tridiagonal coefficients (all positive).
     # The system is: -a[k]*phi[k-1] + b[k]*phi[k] - c[k]*phi[k+1] = rhs[k]
+    # with F_{k-1/2} = rho_half[k-1/2] * K_half[k-1/2] * (phi[k]-phi[k-1]) / dz_half[k-1/2]
+    # and -dphi/dt[k] = (F_{k+1/2} - F_{k-1/2}) / (rho[k] dz[k]).
 
-    # a[k] = dt * K_half[k-1] / (rho[k] * dz[k] * dz_half[k-1])  for k=1..nlev-1
+    # a[k] = dt * rho_half[k-1] * K_half[k-1] / (rho[k] * dz[k] * dz_half[k-1])
     a = jnp.zeros((ncol, nlev), dtype=dtype)
     a = a.at[:, 1:].set(
-        dt * K_half / (rho[:, 1:] * dz[:, 1:] * dz_half)
+        dt * rho_half * K_half / (rho[:, 1:] * dz[:, 1:] * dz_half)
     )
 
-    # c[k] = dt * K_half[k] / (rho[k] * dz[k] * dz_half[k])  for k=0..nlev-2
+    # c[k] = dt * rho_half[k] * K_half[k] / (rho[k] * dz[k] * dz_half[k])
     c = jnp.zeros((ncol, nlev), dtype=dtype)
     c = c.at[:, :-1].set(
-        dt * K_half / (rho[:, :-1] * dz[:, :-1] * dz_half)
+        dt * rho_half * K_half / (rho[:, :-1] * dz[:, :-1] * dz_half)
     )
 
     # Diagonal: b[k] = 1 + a[k] + c[k]
@@ -141,3 +155,71 @@ def implicit_vertical_diffusion(
     phi_new = jnp.concatenate([phi_upper, phi_bottom[None]], axis=0)  # (nlev, ncol)
 
     return jnp.moveaxis(phi_new, 0, 1)  # (ncol, nlev)
+
+
+def implicit_vertical_diffusion_theta(
+    T: jax.Array,
+    K_half: jax.Array,
+    rho: jax.Array,
+    dz: jax.Array,
+    dz_half: jax.Array,
+    p_full: jax.Array,
+    dt: float,
+    surface_flux_T: jax.Array,
+) -> jax.Array:
+    """Implicit vertical diffusion of temperature via potential temperature.
+
+    Diffusing absolute T is unphysical: even a dry adiabat (dθ/dz = 0)
+    has dT/dz ≈ -g/c_p ≈ -9.8 K/km, so applying ``K dT/dz`` mixes a
+    neutrally stratified column into an unphysical isothermal state.
+    The correct conserved variable for dry mixing is potential temperature
+    θ = T (p_ref/p)^κ — its gradient vanishes on a dry adiabat.
+
+    This helper:
+
+    1. Converts T → θ using the column pressure.
+    2. Converts the surface T flux to a θ flux at the lowest interface,
+       ``F_θ_sfc = F_T_sfc / exner_sfc`` where ``exner_sfc =
+       (p_low/p_ref)^κ`` is the Exner function at the lowest full level
+       (a column-bottom proxy when ``p_sfc`` is not threaded through).
+    3. Diffuses θ via :func:`implicit_vertical_diffusion`.
+    4. Converts the diffused θ back to T using the same Exner factor.
+
+    Parameters
+    ----------
+    T : jax.Array, shape (ncol, nlev)
+        Temperature [K].
+    K_half : jax.Array, shape (ncol, nlev-1)
+        Eddy heat diffusivity on interfaces [m²/s].
+    rho : jax.Array, shape (ncol, nlev)
+        Full-level air density [kg/m³].
+    dz : jax.Array, shape (ncol, nlev)
+        Full-level layer thickness [m].
+    dz_half : jax.Array, shape (ncol, nlev-1)
+        Distance between adjacent full-level centers [m].
+    p_full : jax.Array, shape (ncol, nlev)
+        Full-level pressure [Pa].
+    dt : float
+        Time step [s].
+    surface_flux_T : jax.Array, shape (ncol,)
+        Surface sensible-heat flux divided by ``c_pd`` [K kg/m²/s],
+        positive upward.  ``shflx [W/m²] / c_pd`` is what the surface
+        layer already returns.
+
+    Returns
+    -------
+    jax.Array, shape (ncol, nlev)
+        Diffused temperature [K].
+    """
+    p_safe = jnp.clip(p_full, 1.0, None)
+    exner = (p_safe / constants.p_ref) ** constants.kappa
+    exner_safe = jnp.clip(exner, 1.0e-6, None)
+    theta = T / exner_safe
+    exner_sfc = exner_safe[:, -1]
+    # F_T_sfc has units [K · kg/m²/s] = ρ K dT/dz.  Diffusing θ requires
+    # the surface θ flux F_θ_sfc = F_T_sfc / exner_sfc.
+    surface_flux_theta = surface_flux_T / exner_sfc
+    theta_new = implicit_vertical_diffusion(
+        theta, K_half, rho, dz, dz_half, dt, surface_flux_theta,
+    )
+    return theta_new * exner

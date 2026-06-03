@@ -6,17 +6,24 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
+from legoesm.coupler.bulk_flux import compute_most_fluxes
 from legoesm.ocean.eos import rho_0 as rho_0_ref, c_sw
 from legoesm.ocean.physics.surface_forcing.config import BulkFormulaConfig
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
-_P_ATM = 101325.0  # Standard atmosphere [Pa]
-
-
 def _saturation_specific_humidity(T_K: jnp.ndarray) -> jnp.ndarray:
-    """Saturation specific humidity at standard atmosphere pressure."""
-    return saturation_mixing_ratio(T_K, jnp.full_like(T_K, _P_ATM))
+    """Saturation SPECIFIC humidity at standard atmosphere pressure.
+
+    Converts the mixing ratio ``r_sat = ε e_sat / (p − e_sat)`` (kg
+    vapour / kg DRY air) to specific humidity ``q_sat = r_sat /
+    (1 + r_sat)`` (kg vapour / kg MOIST air).  ``compute_most_fluxes``
+    and ``cfg.q_a`` both use specific humidity, so feeding them the
+    mixing ratio biased the latent flux high by ``1 + r_sat`` (~3 %
+    in the tropics).  Codex iter-41 #1.
+    """
+    r_sat = saturation_mixing_ratio(T_K, jnp.full_like(T_K, constants.p_atm_std))
+    return r_sat / (1.0 + r_sat)
 
 
 def bulk_formula_surface_forcing(
@@ -45,16 +52,25 @@ def bulk_formula_surface_forcing(
     shape_3d = T.shape
     dtype = T.dtype
 
-    # SST in Kelvin
-    T_s = T[..., 0] + 273.15  # (6, n, n)
+    T_s = T[..., 0] + constants.T_freeze  # (6, n, n)
     q_sat = _saturation_specific_humidity(T_s)
 
-    # Upward longwave: Q_lw_up = epsilon * sigma * T_s^4
-    emissivity = 0.97
-    Q_lw_up = emissivity * constants.sigma_sb * T_s ** 4
+    # Upward longwave from a grey surface: surface emission PLUS the
+    # reflected component of the incident longwave.  An earlier form
+    # used only ``ε σ T_s^4`` and absorbed the spurious ``(1-ε)·LW_down``
+    # into Q_net, biasing the ocean heat flux when emissivity < 1.
+    # Codex iter-41 #2 (mirrors the iter-13 sea-ice fix).
+    Q_lw_up = (
+        cfg.emissivity * constants.sigma_sb * T_s ** 4
+        + (1.0 - cfg.emissivity) * cfg.LW_down
+    )
 
+    _valid_bulk = ("constant", "coare3", "large_yeager")
+    if cfg.bulk_scheme not in _valid_bulk:
+        raise ValueError(
+            f"Unknown bulk_scheme {cfg.bulk_scheme!r}; expected one of {_valid_bulk}."
+        )
     if cfg.bulk_scheme in ("coare3", "large_yeager"):
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
         # Wind is zonal only (prescribed), zero meridional
         u_a = jnp.full_like(T_s, cfg.U_a, dtype=dtype)
         v_a = jnp.zeros_like(T_s)
@@ -74,11 +90,18 @@ def bulk_formula_surface_forcing(
     else:
         # Constant coefficients: wind is zonal-only (u_a = U_a, v_a = 0)
         # to match the directional convention used in the MOST path.
-        Q_sh = cfg.rho_a * cfg.c_pa * cfg.C_H * cfg.U_a * (T_s - cfg.T_a)
-        Q_lh = cfg.rho_a * cfg.L_v * cfg.C_E * cfg.U_a * (q_sat - cfg.q_a)
+        # Heat fluxes scale with WIND SPEED |U_a| (the air-sea exchange
+        # rate is set by how vigorously the air is moving, not by the
+        # signed zonal component).  The previous code used signed
+        # ``cfg.U_a``, which would invert the sign of Q_sh and Q_lh
+        # under easterlies (cfg.U_a < 0) — i.e. a strong easterly would
+        # falsely *warm* a cool ocean.  Stress, on the other hand, IS
+        # directional: tau_x = rho_a · C_D · |U| · u.
+        U_a_speed = jnp.abs(cfg.U_a)
+        Q_sh = cfg.rho_a * cfg.c_pa * cfg.C_H * U_a_speed * (T_s - cfg.T_a)
+        Q_lh = cfg.rho_a * cfg.L_v * cfg.C_E * U_a_speed * (q_sat - cfg.q_a)
 
         # tau = rho_a * C_D * |U_a| * (u_a, v_a)  — directional stress
-        U_a_speed = jnp.abs(cfg.U_a)
         tau_x = jnp.full_like(T_s, cfg.rho_a * cfg.C_D * U_a_speed * cfg.U_a, dtype=dtype)
         tau_y = jnp.zeros_like(T_s)
 
@@ -90,14 +113,20 @@ def bulk_formula_surface_forcing(
     inv_rho_dz = 1.0 / (rho_0_ref * jnp.maximum(dz_0, 1e-10))
     inv_rho_csw_dz = 1.0 / (rho_0_ref * c_sw * jnp.maximum(dz_0, 1e-10))
 
-    du_dt = jnp.zeros(shape_3d, dtype=dtype)
-    dv_dt = jnp.zeros(shape_3d, dtype=dtype)
-    du_dt = du_dt.at[..., 0].set(tau_x * inv_rho_dz)
-    dv_dt = dv_dt.at[..., 0].set(tau_y * inv_rho_dz)
-
-    dT_dt = jnp.zeros(shape_3d, dtype=dtype)
-    dT_dt = dT_dt.at[..., 0].set(Q_net * inv_rho_csw_dz)
-
+    # Pad with zero on trailing axis instead of alloc-zeros +
+    # scatter — single Pad HLO op per field.  Same pattern as the
+    # ``prescribed.py`` and ``restoring.py`` rewrites.
+    nlev = shape_3d[-1]
+    pad_axes = ((0, 0),) * (len(shape_3d) - 1)
+    du_dt = jnp.pad(
+        (tau_x * inv_rho_dz)[..., None], (*pad_axes, (0, nlev - 1)),
+    )
+    dv_dt = jnp.pad(
+        (tau_y * inv_rho_dz)[..., None], (*pad_axes, (0, nlev - 1)),
+    )
+    dT_dt = jnp.pad(
+        (Q_net * inv_rho_csw_dz)[..., None], (*pad_axes, (0, nlev - 1)),
+    )
     # No freshwater forcing in basic bulk formulation
     dS_dt = jnp.zeros(shape_3d, dtype=dtype)
 

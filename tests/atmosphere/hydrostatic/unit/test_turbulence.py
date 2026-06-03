@@ -25,7 +25,6 @@ from legoesm.atmosphere.physics.turbulence.config import (
     HoltslagBovilleConfig,
     YSUConfig,
     EDMFConfig,
-    MLTurbulenceEmulatorConfig,
     TurbulenceConfig,
 )
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
@@ -49,10 +48,6 @@ from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
 )
 from legoesm.atmosphere.physics.turbulence.ysu import ysu_turbulence
 from legoesm.atmosphere.physics.turbulence.edmf import edmf_turbulence
-from legoesm.atmosphere.physics.turbulence.ml_emulator import (
-    ml_turbulence,
-    TurbulenceEmulator,
-)
 from legoesm.atmosphere.physics.turbulence.integration import (
     make_turbulence_physics,
 )
@@ -271,7 +266,7 @@ class TestSurfaceLayer:
 # ===========================================================================
 
 class TestSmagorinsky:
-    """Tests for constant-Km Smagorinsky turbulence."""
+    """Tests for the Smagorinsky–Lilly turbulence closure."""
 
     def test_output_shapes(self):
         """Smagorinsky output should have correct shapes."""
@@ -330,6 +325,73 @@ class TestSmagorinsky:
         grad_T = jax.grad(loss)(T)
         assert jnp.all(jnp.isfinite(grad_T))
         assert grad_T.shape == T.shape
+
+    def test_strain_dependent_and_lilly_cutoff(self):
+        """Faithful Smagorinsky–Lilly: K_m grows with deformation |S|,
+        is enhanced when unstable, and shuts off exactly at Ri ≥ Pr_t —
+        with the cutoff gradient finite (the √(max(·,0)) AD trap)."""
+        ncol, nlev = 2, 12
+        z_half = jnp.linspace(2000.0, 0.0, nlev + 1)[None, :].repeat(ncol, 0)
+        z_full = 0.5 * (z_half[:, 1:] + z_half[:, :-1])
+        p_half = jnp.linspace(8e4, 1.0e5, nlev + 1)[None, :].repeat(ncol, 0)
+        p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+        rho = p_full / (constants.R_d * 280.0)
+        cfg = SmagorinskyConfig()
+
+        def run(shear, dTdz):
+            u = shear * z_full
+            v = jnp.zeros_like(u)
+            T = 288.0 + dTdz * z_full
+            q_v = jnp.full_like(T, 1e-3)
+            T_sfc = T[:, -1]
+            q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
+            return smagorinsky_turbulence(
+                u, v, T, q_v, p_full, p_half, z_full, z_half,
+                T_sfc, q_sfc, rho, dt=300.0, config=cfg,
+            )
+
+        # (1) strain-dependence: stronger shear lowers Ri -> more mixing
+        assert float(jnp.mean(run(0.02, -0.002).Km)) > \
+            float(jnp.mean(run(0.002, -0.002).Km))
+        # (2) Lilly cutoff: a strong inversion (Ri >= Pr_t) zeroes K_m
+        assert float(jnp.max(run(0.01, +0.05).Km)) < 1e-9
+        # (3) unstable enhances mixing over the stable case
+        assert float(jnp.mean(run(0.01, -0.02).Km)) > \
+            float(jnp.mean(run(0.01, +0.05).Km))
+        # (4) gradient finite straddling the Ri = Pr_t cutoff
+        g = jax.grad(lambda d: jnp.sum(run(0.01, d).Km))(0.0098)
+        assert jnp.isfinite(g)
+
+    def test_free_convection_limit(self):
+        """At zero resolved shear the floored S² + Lilly factor give a
+        well-defined buoyancy-driven free-convection limit
+        K_m → (C_s·l)²·√(|N²|/Pr_t) when unstable, but K_m = 0 when stable
+        (Lilly cutoff).  Guards the limit against the AD-safety floor
+        value (it must be O(1), not O(√floor))."""
+        ncol, nlev = 2, 12
+        z_half = jnp.linspace(2000.0, 0.0, nlev + 1)[None, :].repeat(ncol, 0)
+        z_full = 0.5 * (z_half[:, 1:] + z_half[:, :-1])
+        p_half = jnp.linspace(8e4, 1.0e5, nlev + 1)[None, :].repeat(ncol, 0)
+        p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+        rho = p_full / (constants.R_d * 280.0)
+        cfg = SmagorinskyConfig()
+        u = jnp.zeros((ncol, nlev))            # ZERO resolved shear
+        v = jnp.zeros((ncol, nlev))
+        q_v = jnp.full((ncol, nlev), 1e-3)
+
+        def run(dTdz):
+            T = 288.0 + dTdz * z_full
+            T_sfc = T[:, -1]
+            q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
+            return smagorinsky_turbulence(
+                u, v, T, q_v, p_full, p_half, z_full, z_half,
+                T_sfc, q_sfc, rho, dt=300.0, config=cfg,
+            )
+
+        Km_unstable = run(-0.02).Km            # super-adiabatic (unstable in θ)
+        Km_stable = run(+0.005).Km             # inversion (stable)
+        assert 1e-3 < float(jnp.max(Km_unstable)) < 1e2  # O(1), not floor-tied
+        assert float(jnp.max(Km_stable)) < 1e-9          # Lilly cutoff
 
 
 # ===========================================================================
@@ -404,6 +466,44 @@ class TestLouis:
 
         grad_T = jax.grad(loss)(T)
         assert jnp.all(jnp.isfinite(grad_T))
+
+    def test_separate_heat_function_prandtl(self):
+        """Faithful Louis: heat function f_h ≠ f_m (b_h/b_m = 1.5), giving
+        a stratification-dependent Pr_t = K_m/K_h > 1 stable, < 1 unstable;
+        ``b_heat_ratio=1`` recovers the old f_h=f_m (Pr_t≡1).  Momentum K_m
+        must be unaffected by the ratio."""
+        ncol, nlev = 2, 10
+        z_half = jnp.linspace(2000.0, 0.0, nlev + 1)[None, :].repeat(ncol, 0)
+        z_full = 0.5 * (z_half[:, 1:] + z_half[:, :-1])
+        p_half = jnp.linspace(8.0e4, 1.0e5, nlev + 1)[None, :].repeat(ncol, 0)
+        p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+        u = 0.01 * z_full
+        v = jnp.zeros_like(u)
+        q_v = jnp.full((ncol, nlev), 5e-3)
+
+        def mean_prandtl(dTdz, ratio=1.5):
+            T = 290.0 + dTdz * z_full
+            rho = p_full / (constants.R_d * T)
+            T_sfc = T[:, -1]
+            q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
+            out = louis_turbulence(
+                u, v, T, q_v, p_full, p_half, z_full, z_half,
+                T_sfc, q_sfc, rho, dt=300.0,
+                config=LouisConfig()._replace(b_heat_ratio=ratio),
+            )
+            mask = out.Km > 1e-8
+            Pr = jnp.where(mask, out.Km / jnp.clip(out.Kh, 1e-12, None), jnp.nan)
+            return float(jnp.nanmean(Pr)), out
+
+        pr_unstable, _ = mean_prandtl(-0.012)   # super-adiabatic
+        pr_stable, out_stable = mean_prandtl(+0.005)  # inversion
+        assert pr_unstable < 1.0
+        assert pr_stable > 1.0
+
+        # b_heat_ratio = 1.0 collapses to Pr_t ≡ 1, and K_m is identical.
+        _, out_ratio1 = mean_prandtl(+0.005, ratio=1.0)
+        assert jnp.allclose(out_ratio1.Km, out_ratio1.Kh)
+        assert jnp.allclose(out_stable.Km, out_ratio1.Km)  # momentum unaffected
 
 
 # ===========================================================================
@@ -510,7 +610,7 @@ class TestIntegration:
         """Hydrostatic turbulence tendencies should have correct shapes."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -531,7 +631,7 @@ class TestIntegration:
         """Hydrostatic turbulence should produce nonzero wind tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
         from legoesm.core.field import Field
 
         grid = create_cubed_sphere(8)
@@ -558,11 +658,28 @@ class TestIntegration:
         """Hydrostatic turbulence should produce nonzero T tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
         state = held_suarez_init(grid, sigma)
+
+        # Smagorinsky-Lilly is a shear-driven closure with a Lilly
+        # buoyancy factor, so the resting, stably-stratified Held-Suarez
+        # init gives K_m≈0.  Impose vertical shear and a super-adiabatic
+        # bottom layer (unstable interface → f_buoy>1) so the deformation
+        # actually drives interior mixing of the θ-gradient.
+        from legoesm.core.field import Field
+        n = grid.n
+        nlev = sigma.n_levels
+        u_prof = jnp.linspace(2.0, 25.0, nlev)  # sheared (level 0 = top)
+        T_unstable = state.T.data.at[:, :, :, -1].add(30.0)
+        state = state._replace(
+            T=Field(data=T_unstable, name="T",
+                    dims=("face", "x", "y", "level"), units="K"),
+            u=Field(data=jnp.broadcast_to(u_prof, (6, n, n, nlev)),
+                    name="u", dims=("face", "x", "y", "level"), units="m/s"),
+        )
 
         config = TurbulenceConfig(scheme="smagorinsky")
         physics_fn = make_turbulence_physics(config, model_type="hydrostatic", dt=300.0)
@@ -616,7 +733,7 @@ class TestIntegration:
         """jax.grad should work through hydrostatic turbulence physics."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -637,17 +754,20 @@ class TestIntegration:
         """Different schemes should produce different tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
         from legoesm.core.field import Field
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
         state = held_suarez_init(grid, sigma)
 
-        # Give state some wind
+        # Give state vertically-sheared wind so both deformation-based
+        # (Smagorinsky) and stability-function (Louis) closures produce
+        # nonzero — and distinct — interior diffusivities.  A uniform
+        # u would give |S|≈0 and K≈0 for both, masking the difference.
         n = grid.n
         nlev = sigma.n_levels
-        u_data = jnp.ones((6, n, n, nlev)) * 10.0
+        u_data = jnp.broadcast_to(jnp.linspace(2.0, 25.0, nlev), (6, n, n, nlev))
         state = state._replace(
             u=Field(data=u_data, name="u", dims=("face", "x", "y", "level"), units="m/s"),
         )
@@ -668,10 +788,10 @@ class TestIntegration:
         assert not jnp.allclose(tend_smag.du_dt.data, tend_louis.du_dt.data, atol=1e-10)
 
     def test_all_scheme_strings_accepted(self):
-        """All 8 scheme strings + 'none' should be accepted by the factory."""
+        """All supported scheme strings plus 'none' should be accepted."""
         schemes = [
             "smagorinsky", "louis", "tke", "clubb_lite",
-            "holtslag_boville", "ysu", "edmf", "ml_emulator", "none",
+            "holtslag_boville", "ysu", "edmf", "none",
         ]
         for scheme in schemes:
             config = TurbulenceConfig(scheme=scheme)
@@ -682,7 +802,7 @@ class TestIntegration:
         """scheme='none' should produce zero tendencies."""
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.vertical import create_sigma_coordinate
-        from tests.test_cases.held_suarez import held_suarez_init
+        from legoesm.atmosphere.held_suarez import held_suarez_init
 
         grid = create_cubed_sphere(8)
         sigma = create_sigma_coordinate(10)
@@ -695,7 +815,6 @@ class TestIntegration:
         assert jnp.allclose(tendencies.dT_dt.data, 0.0)
         assert jnp.allclose(tendencies.du_dt.data, 0.0)
         assert jnp.allclose(tendencies.dv_dt.data, 0.0)
-
 
 # ===========================================================================
 # Holtslag-Boville tests
@@ -885,6 +1004,86 @@ class TestYSU:
         assert jnp.all(jnp.isfinite(out.dT_dt))
         assert jnp.all(jnp.isfinite(out.Km))
 
+    def test_louis_constants_are_config_driven(self):
+        """The Louis (1982) ``b``, ``c``, ``d`` stability constants and
+        the Ri-blend sharpness must all come from ``YSUConfig`` and not
+        be hardcoded inside ``ysu.py``.
+
+        Why each sub-check is non-vacuous: each constant controls a
+        distinct part of the f_stable / f_unstable / blend formula.  If
+        ``ysu.py`` ignored any of them (i.e. they remained hardcoded),
+        the corresponding sensitivity output would be bit-identical to
+        the default — the tests below would fail by construction.
+
+        - louis_b: enters both branches → affects all Ri regimes.
+        - louis_d: stable-branch sqrt coefficient → affects only Ri > 0.
+        - louis_c: unstable-branch denominator coefficient → only Ri < 0.
+        - blend_ri_sharpness: stable/unstable blend smoothness → only
+          materially affects |Ri| ≲ 1/sharpness regions.
+        """
+        ncol, nlev = 2, 10
+        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
+        T_sfc = T[:, -1] + 5.0
+        q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
+
+        out_default = ysu_turbulence(
+            u, v, T, q_v, p_full, p_half, z_full, z_half,
+            T_sfc, q_sfc, rho, dt=300.0, config=YSUConfig(),
+        )
+
+        # Sub-check A: doubling louis_b must change Km (both branches)
+        out_b = ysu_turbulence(
+            u, v, T, q_v, p_full, p_half, z_full, z_half,
+            T_sfc, q_sfc, rho, dt=300.0, config=YSUConfig(louis_b=10.0),
+        )
+        assert not jnp.allclose(out_default.Km, out_b.Km, atol=1e-12), (
+            "Km did not change under config.louis_b doubling — louis_b "
+            "is still hardcoded inside ysu.py."
+        )
+
+        # Sub-check B: doubling louis_d must change Km (stable branch)
+        out_d = ysu_turbulence(
+            u, v, T, q_v, p_full, p_half, z_full, z_half,
+            T_sfc, q_sfc, rho, dt=300.0, config=YSUConfig(louis_d=10.0),
+        )
+        assert not jnp.allclose(out_default.Km, out_d.Km, atol=1e-12), (
+            "Km did not change under config.louis_d doubling — louis_d "
+            "(stable-branch sqrt coefficient) is still hardcoded."
+        )
+
+        # Sub-check C (louis_c): louis_c controls f_unstable in
+        # ``Km_local = l_mix² · S · f_m``, but Km_local is only weighted
+        # ABOVE the PBL (where blend_pbl ≈ 1).  In a normally-stratified
+        # atmosphere, Ri > 0 above the PBL — so f_unstable is gated to
+        # zero (Ri_neg = min(Ri, 0) = 0) at every contributing level.
+        # We therefore verify louis_c is consumed at the source level
+        # rather than through the full Km output.  Reading the file
+        # contents and asserting the literal token ``config.louis_c`` is
+        # used in ysu.py is non-vacuous: the prior hardcoded version had
+        # no such reference.
+        from pathlib import Path
+        ysu_src = Path(__file__).resolve().parent.parent.parent.parent.parent / (
+            "src/legoesm/atmosphere/physics/turbulence/ysu.py"
+        )
+        ysu_text = ysu_src.read_text()
+        assert "config.louis_c" in ysu_text, (
+            "ysu.py must consume config.louis_c (the unstable-branch "
+            "Louis denominator coefficient).  The previous hardcoded "
+            "literal ``5.0`` would not match this assertion."
+        )
+
+        # Sub-check D (blend_ri_sharpness): like louis_c, this only
+        # affects ``Km_local`` (the local Richardson-based diffusivity
+        # ABOVE the PBL).  In a normally-stratified column with
+        # Ri > 0 above the PBL, blend_ri (= sigmoid(s · Ri)) is already
+        # saturated to 1.0 at any reasonable sharpness, so changing s
+        # from 10 → 100 has no measurable effect on the full Km output.
+        # Verify code-level consumption instead.
+        assert "config.blend_ri_sharpness" in ysu_text, (
+            "ysu.py must consume config.blend_ri_sharpness.  The "
+            "previous hardcoded ``100.0`` literal would not match this."
+        )
+
     def test_entrainment_near_pbl_top(self):
         """YSU with entrainment should differ from zero-entrainment."""
         ncol, nlev = 2, 20
@@ -1039,118 +1238,6 @@ class TestEDMF:
         assert not jnp.allclose(out_mf.dT_dt, out_no_mf.dT_dt, atol=1e-10)
 
 
-# ===========================================================================
-# ML Turbulence Emulator tests
-# ===========================================================================
-
-class TestMLTurbulenceEmulator:
-    """Tests for ML turbulence emulator."""
-
-    def _make_model(self, config=None):
-        if config is None:
-            config = MLTurbulenceEmulatorConfig()
-        key = jax.random.PRNGKey(config.seed)
-        return TurbulenceEmulator(
-            config.n_input, config.n_hidden,
-            config.n_layers, config.n_output, key=key,
-        )
-
-    def test_output_shapes(self):
-        """ML emulator output should have correct shapes."""
-        ncol, nlev = 4, 10
-        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
-        T_sfc = T[:, -1] + 5.0
-        q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
-        config = MLTurbulenceEmulatorConfig()
-        model = self._make_model(config)
-
-        out = ml_turbulence(
-            u, v, T, q_v, p_full, p_half, z_full, z_half,
-            T_sfc, q_sfc, rho, dt=300.0, config=config, model=model,
-        )
-
-        assert out.du_dt.shape == (ncol, nlev)
-        assert out.dv_dt.shape == (ncol, nlev)
-        assert out.dT_dt.shape == (ncol, nlev)
-        assert out.dq_v_dt.shape == (ncol, nlev)
-        assert out.Km.shape == (ncol, nlev)
-        assert out.Kh.shape == (ncol, nlev)
-        assert out.shflx.shape == (ncol,)
-
-    def test_nonzero_tendencies(self):
-        """ML emulator should produce nonzero (even if small) tendencies."""
-        ncol, nlev = 2, 10
-        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
-        T_sfc = T[:, -1] + 5.0
-        q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
-        config = MLTurbulenceEmulatorConfig()
-        model = self._make_model(config)
-
-        out = ml_turbulence(
-            u, v, T, q_v, p_full, p_half, z_full, z_half,
-            T_sfc, q_sfc, rho, dt=300.0, config=config, model=model,
-        )
-
-        # Km/Kh should always be positive via softplus
-        assert jnp.all(out.Km > 0)
-        assert jnp.all(out.Kh > 0)
-
-    def test_differentiable(self):
-        """jax.grad should work through ML turbulence emulator."""
-        ncol, nlev = 2, 8
-        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
-        T_sfc = T[:, -1] + 5.0
-        q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
-        config = MLTurbulenceEmulatorConfig()
-        model = self._make_model(config)
-
-        def loss(T_in):
-            out = ml_turbulence(
-                u, v, T_in, q_v, p_full, p_half, z_full, z_half,
-                T_sfc, q_sfc, rho, dt=300.0, config=config, model=model,
-            )
-            return jnp.sum(out.dT_dt ** 2)
-
-        grad_T = jax.grad(loss)(T)
-        assert jnp.all(jnp.isfinite(grad_T))
-        assert grad_T.shape == T.shape
-
-    def test_finite_outputs(self):
-        """All outputs should be finite."""
-        ncol, nlev = 4, 10
-        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
-        T_sfc = T[:, -1] + 5.0
-        q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
-        config = MLTurbulenceEmulatorConfig()
-        model = self._make_model(config)
-
-        out = ml_turbulence(
-            u, v, T, q_v, p_full, p_half, z_full, z_half,
-            T_sfc, q_sfc, rho, dt=300.0, config=config, model=model,
-        )
-
-        assert jnp.all(jnp.isfinite(out.du_dt))
-        assert jnp.all(jnp.isfinite(out.dT_dt))
-        assert jnp.all(jnp.isfinite(out.Km))
-        assert jnp.all(jnp.isfinite(out.Kh))
-
-    def test_untrained_near_zero(self):
-        """Untrained model with residual scaling should produce small tendencies."""
-        ncol, nlev = 2, 10
-        u, v, T, q_v, p_full, p_half, z_full, z_half, rho = _make_column_data(ncol, nlev)
-        T_sfc = T[:, -1] + 5.0
-        q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
-        config = MLTurbulenceEmulatorConfig(use_residual=True)
-        model = self._make_model(config)
-
-        out = ml_turbulence(
-            u, v, T, q_v, p_full, p_half, z_full, z_half,
-            T_sfc, q_sfc, rho, dt=300.0, config=config, model=model,
-        )
-
-        # Tendencies should be small (residual scaling ×0.01)
-        assert float(jnp.max(jnp.abs(out.dT_dt))) < 1.0
-        assert float(jnp.max(jnp.abs(out.du_dt))) < 1.0
 
 
 # ===========================================================================

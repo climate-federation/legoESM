@@ -40,6 +40,100 @@ class SplitExplicitConfig(NamedTuple):
     outer_integrator: str = "ssp_rk3"  # "ssp_rk3" | "ssp_rk34"/"ssp34" | "ssp_rk54"/"ssp45"
 
 
+def select_n_outer_split(
+    dt_outer: float,
+    dx: float,
+    max_wind_safe: float = 300.0,
+    cfl_safe: float = 0.4,
+) -> int:
+    """Trace-time FV3-style outer-subcycle count from a conservative
+    max-wind estimate.
+
+    FV3's atmospheric solver picks ``n_split`` once at startup from a
+    conservative max wind (the worst-case advective velocity expected
+    over the run, not the instantaneous max). The chosen integer
+    is then used for the entire run as a STATIC Python int — no
+    while-loop, no traced control flow, no XLA retrace, fully
+    reverse-differentiable through ``eqx.filter_value_and_grad``
+    because the integer is a compile-time constant from JAX's
+    perspective.
+
+    This is the scan-friendly alternative to mid-run dt-shrinkage
+    (iter-228 ``--adaptive-dt`` stub): instead of monitoring
+    Ca_adv post-step and halving dt on violation (which requires
+    a while-loop refactor + breaks the fori_loop), we pick a
+    sufficiently-large static n_split upfront that covers the
+    worst-case wind we expect.
+
+    Parameters
+    ----------
+    dt_outer : float
+        User-requested outer time step [s] (e.g. 20.0 for iter-183).
+    dx : float
+        Grid spacing [m] (e.g. 2000.0 for iter-183).
+    max_wind_safe : float, default 300.0
+        Conservative upper bound on max|w| or max|u| over the run
+        [m/s]. iter-223 F11 cascade hit max|w|=225 m/s before NaN;
+        300 m/s adds a 33% safety margin.
+    cfl_safe : float, default 0.4
+        Target advective CFL (dimensionless). 0.4 is the standard
+        SK08 / FV3 conservative target (advective CFL=1 is the
+        formal stability limit; 0.4 gives 2.5× margin for
+        accuracy).
+
+    Returns
+    -------
+    n_split : int
+        Number of inner sub-steps to run per outer step. Always
+        ``>= 1``. The inner step size is ``dt_outer / n_split``.
+
+    Examples
+    --------
+    iter-183 production (dt=20, dx=2000):
+        select_n_outer_split(20.0, 2000.0) = ceil(20·300/(0.4·2000))
+        = ceil(7.5) = 8
+
+    Steady plateau iter-183 (max|w| < 0.05 m/s):
+        select_n_outer_split(20.0, 2000.0, max_wind_safe=1.0) = 1
+        (the user knows the wind ceiling, opts down)
+
+    LES dx=500 m, dt=0.5 s, F11-cascade ceiling:
+        select_n_outer_split(0.5, 500.0) = ceil(0.5·300/(0.4·500))
+        = ceil(0.75) = 1
+
+    Notes
+    -----
+    The output is a Python ``int``, NOT a ``jnp.array``: callers
+    must use it as a static argument (e.g. ``range(n_split)`` in
+    Python or ``static_argnums`` in JIT). Passing it as a traced
+    int forces a retrace per call.
+
+    Reference: SHiELD / FV3 atmos_top.F90 ``n_split`` calc;
+    Skamarock & Klemp 2008 split-explicit CFL discussion.
+    """
+    if dt_outer <= 0.0:
+        raise ValueError(
+            f"select_n_outer_split: dt_outer={dt_outer} must be > 0."
+        )
+    if dx <= 0.0:
+        raise ValueError(
+            f"select_n_outer_split: dx={dx} must be > 0."
+        )
+    if max_wind_safe <= 0.0:
+        raise ValueError(
+            f"select_n_outer_split: max_wind_safe={max_wind_safe} "
+            f"must be > 0."
+        )
+    if not (0.0 < cfl_safe <= 1.0):
+        raise ValueError(
+            f"select_n_outer_split: cfl_safe={cfl_safe} must be in "
+            f"(0, 1]."
+        )
+    import math
+    raw = dt_outer * max_wind_safe / (cfl_safe * dx)
+    return max(1, int(math.ceil(raw)))
+
+
 def split_explicit_step(
     state: State,
     slow_tendency_fn: Callable[[State], State],

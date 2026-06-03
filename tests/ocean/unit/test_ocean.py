@@ -21,6 +21,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.ocean.eos import (
     wright_eos,
@@ -82,7 +83,7 @@ def ocean_state(ocean_grid, ocean_z_coord):
     """Rest-state ocean initial condition."""
     return rest_state_ocean(
         ocean_grid, ocean_z_coord,
-        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=4000.0,
     )
 
@@ -145,10 +146,10 @@ class TestWrightEOS:
     def test_density_perturbation(self):
         """density_perturbation should subtract reference density."""
         rho_p = density_perturbation(
-            jnp.array(10.0), jnp.array(35.0), jnp.array(0.0), rho_ref=1025.0,
+            jnp.array(10.0), jnp.array(35.0), jnp.array(0.0), rho_ref=constants.rho_ocean,
         )
         rho = wright_eos(jnp.array(10.0), jnp.array(35.0), jnp.array(0.0))
-        assert float(rho_p) == pytest.approx(float(rho) - 1025.0, abs=1e-6)
+        assert float(rho_p) == pytest.approx(float(rho) - constants.rho_ocean, abs=1e-6)
 
     def test_jit_compatible(self):
         """EOS should work under jax.jit."""
@@ -164,21 +165,41 @@ class TestWrightEOS:
         assert jnp.isfinite(g)
         assert float(g) != 0.0
 
-    def test_grad_zero_outside_valid_range(self):
-        """Gradient should be zero outside the clipped range [-2, 40] degC.
+    def test_grad_finite_nonzero_outside_valid_range(self):
+        """Gradient must be finite and nonzero outside [-2, 40] degC.
 
-        This documents the piecewise-differentiable behavior: the Wright
-        polynomial is not valid outside its range, so inputs are clipped
-        and the gradient is exactly zero at the boundaries.
+        Wright (1997) extrapolates smoothly outside its nominal validity
+        box. The EOS must not clip inputs — silent clipping zeros grads at
+        the boundary and masks upstream state bugs. See issue #165.
         """
         def rho_of_T(T):
             return wright_eos(T, jnp.array(35.0), jnp.array(0.0))
-        # Well above the valid range
+        # Well above the nominal valid range
         g_hot = jax.grad(rho_of_T)(jnp.array(45.0))
-        assert float(g_hot) == 0.0, f"Expected zero grad at T=45C, got {float(g_hot)}"
-        # Well below the valid range
+        assert jnp.isfinite(g_hot)
+        assert float(g_hot) != 0.0, f"Expected nonzero grad at T=45C, got {float(g_hot)}"
+        # Well below the nominal valid range
         g_cold = jax.grad(rho_of_T)(jnp.array(-5.0))
-        assert float(g_cold) == 0.0, f"Expected zero grad at T=-5C, got {float(g_cold)}"
+        assert jnp.isfinite(g_cold)
+        assert float(g_cold) != 0.0, f"Expected nonzero grad at T=-5C, got {float(g_cold)}"
+
+        # And same story for S outside [0, 42] PSU.
+        def rho_of_S(S):
+            return wright_eos(jnp.array(10.0), S, jnp.array(0.0))
+        g_fresh = jax.grad(rho_of_S)(jnp.array(-1.0))
+        assert jnp.isfinite(g_fresh) and float(g_fresh) != 0.0
+        g_brine = jax.grad(rho_of_S)(jnp.array(45.0))
+        assert jnp.isfinite(g_brine) and float(g_brine) != 0.0
+
+    def test_density_finite_outside_valid_range(self):
+        """Density itself must also be finite outside the nominal box."""
+        # Mild overshoot (advection / diffusion style)
+        rho_mild = wright_eos(jnp.array(-3.0), jnp.array(43.0), jnp.array(0.0))
+        assert jnp.isfinite(rho_mild)
+        assert 900.0 < float(rho_mild) < 1100.0
+        # Larger excursion — should still be finite, may be unphysical.
+        rho_wild = wright_eos(jnp.array(50.0), jnp.array(-2.0), jnp.array(0.0))
+        assert jnp.isfinite(rho_wild)
 
 
 class TestLinearEOS:
@@ -188,9 +209,9 @@ class TestLinearEOS:
         """At T=T_ref, S=S_ref, density should be rho_ref."""
         rho = linear_eos(
             jnp.array(10.0), jnp.array(35.0), jnp.array(0.0),
-            rho_ref=1025.0, T_ref=10.0, S_ref=35.0,
+            rho_ref=constants.rho_ocean, T_ref=10.0, S_ref=35.0,
         )
-        assert float(rho) == pytest.approx(1025.0)
+        assert float(rho) == pytest.approx(constants.rho_ocean)
 
     def test_warm_water_lighter(self):
         """Warmer water should be less dense (positive alpha_T)."""
@@ -216,10 +237,10 @@ class TestLinearEOS:
         #     = 1025 * (1 - 0.002 + 0.00074) = 1025 * 0.99874 = 1023.7085
         rho = linear_eos(
             jnp.array(20.0), jnp.array(36.0), jnp.array(0.0),
-            rho_ref=1025.0, alpha_T=2e-4, beta_S=7.4e-4,
+            rho_ref=constants.rho_ocean, alpha_T=2e-4, beta_S=7.4e-4,
             T_ref=10.0, S_ref=35.0,
         )
-        assert float(rho) == pytest.approx(1025.0 * 0.99874, rel=1e-6)
+        assert float(rho) == pytest.approx(constants.rho_ocean * 0.99874, rel=1e-6)
 
     def test_vectorized(self):
         """Linear EOS should work with array inputs."""
@@ -239,7 +260,7 @@ class TestLinearEOS:
         g = jax.grad(lambda T: linear_eos(T, jnp.array(35.0), jnp.array(0.0)))
         drho_dT = g(jnp.array(10.0))
         # drho/dT = -rho_ref * alpha_T = -1025 * 2e-4 = -0.205
-        assert float(drho_dT) == pytest.approx(-1025.0 * 2e-4, rel=1e-6)
+        assert float(drho_dT) == pytest.approx(-constants.rho_ocean * 2e-4, rel=1e-6)
 
 
 class TestMakeEosFn:
@@ -516,7 +537,7 @@ class TestOceanTendencies:
         """FV tendencies should include planetary Coriolis on shear flow."""
         state = rest_state_ocean(
             ocean_grid, ocean_z_coord, H_max=4000.0, land_lat_threshold=90.0,
-            T_surface=15.0, T_deep=15.0,
+            T_water_init_C=15.0, T_deep=15.0,
         )
         nlev = ocean_z_coord.n_levels
         shear_profile = jnp.linspace(-1.0, 1.0, nlev, dtype=jnp.float32)
@@ -578,6 +599,148 @@ class TestVerticalAdvection:
         assert float(adv[0, 0, 0, -1]) == pytest.approx(0.0, abs=1e-8)
 
 
+class TestFluxFormVerticalMomentumAdvection:
+    """Tests for ``flux_form_vertical_momentum_advection`` (issue #171)."""
+
+    def _helper(self):
+        from legoesm.ocean.vertical import (
+            flux_form_vertical_momentum_advection,
+            flux_form_vertical_tracer_advection,
+        )
+        return flux_form_vertical_momentum_advection, flux_form_vertical_tracer_advection
+
+    def test_rest_state_zero(self):
+        """u=0 gives zero tendency trivially."""
+        helper, _ = self._helper()
+        nlev = 5
+        u = jnp.zeros(nlev)
+        w_half = jnp.concatenate([jnp.array([0.0]), jnp.array([0.1, -0.2, 0.05, -0.1]), jnp.array([0.0])])
+        h_u = jnp.full((nlev,), 100.0)
+
+        tendency = helper(u, w_half, h_u)
+        assert jnp.allclose(tendency, 0.0, atol=1e-15)
+
+    def test_zero_w_zero_tendency(self):
+        """w_half = 0 gives zero tendency for any u."""
+        helper, _ = self._helper()
+        nlev = 5
+        u = jnp.array([1.0, 2.0, -0.5, 0.3, -1.2])
+        w_half = jnp.zeros(nlev + 1)
+        h_u = jnp.full((nlev,), 50.0)
+
+        tendency = helper(u, w_half, h_u)
+        assert jnp.allclose(tendency, 0.0, atol=1e-15)
+
+    def test_column_momentum_conserved_in_closed_column(self):
+        """h-weighted column integral of tendency is zero to round-off.
+
+        For any u and any w_half with w_half[0] = w_half[nlev] = 0
+        (closed column), the flux-form tendency must satisfy
+            sum_k(tendency[k] * h_u[k]) == 0
+        exactly. This is the column momentum flux balance property
+        that the old cell-upwind form did not have.
+        """
+        helper, _ = self._helper()
+        nlev = 6
+        u = jnp.array([0.5, 1.2, -0.3, 0.8, -0.4, 0.1])
+        # Non-trivial w profile with zero boundary values.
+        w_half = jnp.array([0.0, 0.15, -0.05, 0.1, -0.08, 0.02, 0.0])
+        h_u = jnp.array([10.0, 20.0, 30.0, 40.0, 30.0, 20.0])
+
+        tendency = helper(u, w_half, h_u)
+        column_integral = float(jnp.sum(tendency * h_u))
+        assert abs(column_integral) < 1e-12, (
+            f"Column momentum flux balance violated: sum(tend*h) = {column_integral}"
+        )
+
+    def test_matches_tracer_flux_form_divided_by_h(self):
+        """Identity: tendency = -flux_form_tracer(u, w) / h_u."""
+        helper, tracer_helper = self._helper()
+        nlev = 5
+        u = jnp.array([1.0, 2.0, 3.0, 2.5, 1.5])
+        w_half = jnp.array([0.0, 0.1, -0.05, 0.08, -0.02, 0.0])
+        h_u = jnp.array([15.0, 25.0, 35.0, 25.0, 15.0])
+
+        tendency = helper(u, w_half, h_u)
+        tracer_flux_div = tracer_helper(u, w_half)
+        expected = -tracer_flux_div / h_u
+        assert jnp.allclose(tendency, expected, atol=1e-14)
+
+    def test_interface_upwind_upward_picks_below(self):
+        """Upward flow at an interior interface picks the below cell."""
+        helper, _ = self._helper()
+        # 3 levels: u = [10, 20, 30]. All boundaries closed except
+        # interface 1 is upward (w_half[1] = +1 m/s). h_u = 1 everywhere.
+        u = jnp.array([10.0, 20.0, 30.0])
+        w_half = jnp.array([0.0, 1.0, 0.0, 0.0])
+        h_u = jnp.array([1.0, 1.0, 1.0])
+
+        tendency = helper(u, w_half, h_u)
+        # F[0]=0, F[1] = w[1] * u_below = 1 * 20 = 20 (upward → from below = u[1])
+        # F[2] = 0, F[3] = 0
+        # vert_flux_div = [F[0]-F[1], F[1]-F[2], F[2]-F[3]] = [-20, 20, 0]
+        # tendency = -vert_flux_div / h_u = [20, -20, 0]
+        assert float(tendency[0]) == pytest.approx(20.0, abs=1e-10)
+        assert float(tendency[1]) == pytest.approx(-20.0, abs=1e-10)
+        assert float(tendency[2]) == pytest.approx(0.0, abs=1e-10)
+
+    def test_interface_upwind_downward_picks_above(self):
+        """Downward flow at an interior interface picks the above cell."""
+        helper, _ = self._helper()
+        # 3 levels: u = [10, 20, 30]. Interface 2 is downward (w_half[2] = -1).
+        u = jnp.array([10.0, 20.0, 30.0])
+        w_half = jnp.array([0.0, 0.0, -1.0, 0.0])
+        h_u = jnp.array([1.0, 1.0, 1.0])
+
+        tendency = helper(u, w_half, h_u)
+        # F[0]=0, F[1]=0, F[2] = w[2] * u_above = -1 * 20 = -20
+        # F[3]=0. vert_flux_div = [0, -(-20), -20] = [0, 20, -20]
+        # tendency = [0, -20, 20]
+        assert float(tendency[0]) == pytest.approx(0.0, abs=1e-10)
+        assert float(tendency[1]) == pytest.approx(-20.0, abs=1e-10)
+        assert float(tendency[2]) == pytest.approx(20.0, abs=1e-10)
+
+    def test_constant_u_column_integral_zero(self):
+        """For spatially-constant u, column momentum flux balance is zero
+        even though per-layer tendencies are not.
+
+        Flux-form under dynamic h preserves ``sum(h*u)`` exactly when the
+        boundary fluxes vanish — per-layer u values can shift, but the
+        vertically integrated momentum is conserved.
+        """
+        helper, _ = self._helper()
+        nlev = 5
+        u = jnp.full((nlev,), 1.5)  # constant
+        w_half = jnp.array([0.0, 0.3, -0.1, 0.2, -0.05, 0.0])
+        h_u = jnp.array([10.0, 20.0, 30.0, 20.0, 10.0])
+
+        tendency = helper(u, w_half, h_u)
+        column_integral = float(jnp.sum(tendency * h_u))
+        assert abs(column_integral) < 1e-12
+
+    def test_boundary_not_hard_zeroed(self):
+        """Top and bottom levels receive nonzero tendency from adjacent
+        interface flux, unlike the cell-upwind gradient form which
+        forced ``grad = 0`` at k=0 and k=nlev-1.
+
+        With interior upward w at interface 1 only, the surface level
+        (k=0) and level k=1 both see the flux; other levels don't.
+        """
+        helper, _ = self._helper()
+        u = jnp.array([1.0, 2.0, 3.0, 4.0])
+        w_half = jnp.array([0.0, 0.5, 0.0, 0.0, 0.0])
+        h_u = jnp.full((4,), 1.0)
+
+        tendency = helper(u, w_half, h_u)
+        # F[1] = 0.5 * u[1] = 1 (upward → below). All other F = 0.
+        # vert_flux_div = [0-1, 1-0, 0-0, 0-0] = [-1, 1, 0, 0]
+        # tendency = [1, -1, 0, 0]
+        assert float(tendency[0]) == pytest.approx(1.0, abs=1e-10)
+        assert float(tendency[1]) == pytest.approx(-1.0, abs=1e-10)
+        # The surface cell's tendency is NOT forced to zero.
+        assert float(tendency[0]) != 0.0
+
+
 class TestVerticalMixing:
     """Tests for vertical diffusion operator."""
 
@@ -600,6 +763,98 @@ class TestVerticalMixing:
 
         assert tendency.dtype == field.dtype
         assert jnp.all(jnp.isfinite(tendency))
+
+    def test_vertical_diffusion_cfl_cap_keeps_step_stable(self, ocean_z_coord):
+        """With dt supplied, the CFL cap keeps explicit Euler stable.
+
+        A diffusivity of 10 m²/s on dz ~ 10 m and dt = 3600 s gives a
+        bare Courant number K·dt/dz² ≈ 360 — single explicit step
+        explodes.  The cap should bring it down to ≤ 0.5 so a single
+        explicit step is bounded.
+        """
+        nlev = ocean_z_coord.n_levels
+        field = jnp.linspace(0.0, 1.0, nlev, dtype=jnp.float64)[
+            jnp.newaxis, jnp.newaxis, jnp.newaxis, :
+        ]
+        jac = jnp.ones((1, 1, 1), dtype=jnp.float64)
+        dt = 3600.0
+
+        tendency = vertical_diffusion(
+            field, ocean_z_coord, jac, coeff=10.0, dt=dt,
+        )
+        field_new = field + dt * tendency
+
+        # With the cap K·dt/dz² ≤ cfl_safety < 1, the explicit update
+        # cannot blow up beyond ~2× the initial range.
+        assert jnp.all(jnp.isfinite(field_new))
+        assert jnp.max(jnp.abs(field_new)) < 5.0  # well-bounded
+        # Without the cap (passing the same 10 m²/s with no dt arg)
+        # the same step would overshoot dramatically — sanity check.
+        tendency_uncapped = vertical_diffusion(
+            field, ocean_z_coord, jac, coeff=10.0,
+        )
+        field_new_uncapped = field + dt * tendency_uncapped
+        assert jnp.max(jnp.abs(field_new_uncapped)) > jnp.max(
+            jnp.abs(field_new)
+        )
+
+    def test_vertical_diffusion_variable_K_dry_column_scrubs_nan_input(
+        self, ocean_z_coord,
+    ):
+        """Variable-K dry-column path must scrub NaN inputs (codex
+        iter-58 stop-time review).
+
+        Upstream KPP / Richardson callers can produce NaN K_half on
+        dry columns (e.g. ``h_bl·w_s·G(σ)`` with ``h_bl = 0``).  The
+        leaf operator must SUBSTITUTE the dry-cell value before the
+        flux multiplication so neither forward nor backward leaks NaN.
+        """
+        from legoesm.ocean.physics.mixing import vertical_diffusion_variable_K
+
+        nlev = ocean_z_coord.n_levels
+        # Field has NaN sentinel on the dry column (col 1).
+        field = jnp.linspace(0.0, 1.0, nlev, dtype=jnp.float64)
+        field_wet = jnp.broadcast_to(field, (1, nlev))
+        field_dry = jnp.full((1, nlev), jnp.nan, dtype=jnp.float64)
+        field2 = jnp.concatenate([field_wet, field_dry], axis=0)
+        # K_half also NaN on dry column (mimicking KPP output).
+        K_half_wet = jnp.full((1, nlev - 1), 1.0e-4, dtype=jnp.float64)
+        K_half_dry = jnp.full((1, nlev - 1), jnp.nan, dtype=jnp.float64)
+        K_half = jnp.concatenate([K_half_wet, K_half_dry], axis=0)
+        jac = jnp.array([1.0, 0.0], dtype=jnp.float64)
+        tendency = vertical_diffusion_variable_K(
+            field2, ocean_z_coord, jac, K_half,
+        )
+        assert jnp.all(jnp.isfinite(tendency)), \
+            "Variable-K leaf must scrub NaN inputs on dry columns"
+        assert jnp.allclose(tendency[1, :], 0.0)
+
+    def test_vertical_diffusion_dry_column_gives_zero_finite_tendency(
+        self, ocean_z_coord,
+    ):
+        """Dry / land columns (jacobian = 0) must yield zero, finite tendency.
+
+        Before the iter-58 fix, ``vertical_diffusion`` divided by
+        ``dz_actual = dz_ref · jacobian`` directly.  For dry columns
+        ``dz_actual = 0`` so ``0/0 = NaN`` in IEEE; downstream
+        summation propagated NaN into the tendency.  Mirrors the
+        iter-56 shortwave_penetration fix.
+        """
+        nlev = ocean_z_coord.n_levels
+        field = jnp.linspace(0.0, 1.0, nlev, dtype=jnp.float64)[
+            jnp.newaxis, :
+        ]  # (1, nlev)
+        # Two-column case: wet (J=1), dry (J=0).
+        jac = jnp.array([[1.0], [0.0]], dtype=jnp.float64)
+        field2 = jnp.broadcast_to(field, (2, nlev))
+        tendency = vertical_diffusion(
+            field2, ocean_z_coord, jac.squeeze(-1), coeff=1.0e-4,
+        )
+        assert jnp.all(jnp.isfinite(tendency))
+        # Dry row: zero everywhere.
+        assert jnp.allclose(tendency[1, :], 0.0)
+        # Wet row: non-zero somewhere (smoothing of a non-uniform field).
+        assert float(jnp.max(jnp.abs(tendency[0, :]))) > 0.0
 
 
 # ==============================================================================
@@ -874,7 +1129,7 @@ class TestHydrostaticPressure:
     def test_pressure_increases_with_depth(self, ocean_z_coord):
         """Pressure should increase with depth."""
         nlev = ocean_z_coord.n_levels
-        rho = jnp.full((1, 1, 1, nlev), 1025.0)
+        rho = jnp.full((1, 1, 1, nlev), constants.rho_ocean)
         eta = jnp.zeros((1, 1, 1))
         J = jnp.ones((1, 1, 1))
         p = compute_hydrostatic_pressure(
@@ -887,7 +1142,7 @@ class TestHydrostaticPressure:
     def test_surface_pressure_from_eta(self, ocean_z_coord):
         """Positive eta should increase all pressures."""
         nlev = ocean_z_coord.n_levels
-        rho = jnp.full((1, 1, 1, nlev), 1025.0)
+        rho = jnp.full((1, 1, 1, nlev), constants.rho_ocean)
         J = jnp.ones((1, 1, 1))
         p_zero = compute_hydrostatic_pressure(
             rho, jnp.zeros((1, 1, 1)), ocean_z_coord.dz_ref, J,
@@ -1077,8 +1332,8 @@ class TestSpectralOcean:
             rest_state_spectral_ocean(grid, z_coord, land_lat_threshold=-1.0)
         with pytest.raises(ValueError, match="land_lat_threshold"):
             rest_state_spectral_ocean(grid, z_coord, land_lat_threshold=91.0)
-        with pytest.raises(ValueError, match="T_surface"):
-            rest_state_spectral_ocean(grid, z_coord, T_surface=float("inf"))
+        with pytest.raises(ValueError, match="T_water_init_C"):
+            rest_state_spectral_ocean(grid, z_coord, T_water_init_C=float("inf"))
 
     def test_model_warns_for_ignored_barotropic_substeps(self):
         from legoesm.grids.gaussian import create_gaussian_grid
@@ -1163,7 +1418,7 @@ class TestLongRunConservation:
         grid = create_cubed_sphere(8)
         z_coord = create_ocean_z_star(n_levels=10, H_max=4000.0)
         state = rest_state_ocean(
-            grid, z_coord, T_surface=20.0, T_deep=2.0,
+            grid, z_coord, T_water_init_C=20.0, T_deep=2.0,
             S_uniform=35.0, H_max=4000.0,
         )
         config = OceanConfig(
@@ -1183,10 +1438,17 @@ class TestLongRunConservation:
         # With the conservation fixer, mean eta drift should be very small.
         assert abs(eta1 - eta0) < 1e-8, \
             f"Mean eta drift: {abs(eta1 - eta0):.2e}"
-        # Heat and salt: relative errors should be small.
-        assert abs(heat1 - heat0) / max(abs(heat0), 1.0) < 1e-8, \
+        # Heat and salt: relative errors should be bounded by the
+        # cumulative fp32 storage-precision floor.  Heat ~ 1e19 J,
+        # fp32 ULP ~ heat * 1.2e-7, so per-step quantization is ~ 1e12;
+        # over 50 steps the drift accumulates to ~5e13 = ~5e-6 relative.
+        # 1e-5 is the operational ceiling for an fp32-storage Boussinesq
+        # ocean with the conservation fixer (was 1e-8 — only achievable
+        # with bit-exact fp64 storage, which the default precision
+        # policy no longer provides).
+        assert abs(heat1 - heat0) / max(abs(heat0), 1.0) < 1e-5, \
             f"Heat drift: {abs(heat1 - heat0) / max(abs(heat0), 1.0):.2e}"
-        assert abs(salt1 - salt0) / max(abs(salt0), 1.0) < 1e-8, \
+        assert abs(salt1 - salt0) / max(abs(salt0), 1.0) < 1e-5, \
             f"Salt drift: {abs(salt1 - salt0) / max(abs(salt0), 1.0):.2e}"
 
         # Check fields remain finite and bounded.
@@ -1205,7 +1467,7 @@ class TestLongRunConservation:
         grid = create_cubed_sphere(8)
         z_coord = create_ocean_z_star(n_levels=10, H_max=4000.0)
         state = rest_state_ocean(
-            grid, z_coord, T_surface=20.0, T_deep=2.0,
+            grid, z_coord, T_water_init_C=20.0, T_deep=2.0,
             S_uniform=35.0, H_max=4000.0,
         )
         config = OceanConfig(

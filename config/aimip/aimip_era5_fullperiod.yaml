@@ -1,0 +1,105 @@
+# AIMIP full-period training (multi-year coverage with early stopping).
+#
+# Used after the architecture sweep identifies the winning column_nn /
+# sfno configs.  Differences from ``aimip_era5_multistep.yaml``:
+#   - Train windows now span 2010-2016 (7 years) with both winter and
+#     summer windows -> 14 windows x 7 days = 98 days of training ICs.
+#     At 4 IC/day cadence that is ~390 IC/target sequences, ~32x more
+#     diversity than the 12-day production setup.
+#   - Eval windows still 2017 only (held out, never seen during
+#     training).
+#   - ``aimip_n_epochs`` bumped to 30 with ``aimip_patience=4`` so
+#     early stopping can terminate when the held-out loss plateaus.
+#
+# Loss + multi-step + CRPS + humidity weights inherited from the
+# original multi-step config.
+
+era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
+cache_dir: ".cache/aimip_era5"
+
+# 7-year coverage with both winter and summer windows.  ICA stride
+# inside each window remains 6h so each window of n_days contributes
+# n_days * 4 IC/target tuples.
+train_windows:
+  - [2010,   0,  7]
+  - [2010, 180,  7]
+  - [2011,   0,  7]
+  - [2011, 180,  7]
+  - [2012,   0,  7]
+  - [2012, 180,  7]
+  - [2013,   0,  7]
+  - [2013, 180,  7]
+  - [2014,   0,  7]
+  - [2014, 180,  7]
+  - [2015,   0,  7]
+  - [2015, 180,  7]
+  - [2016,   0,  7]
+  - [2016, 180,  7]
+
+eval_windows:
+  - [2017,   0,  5]
+  - [2017, 180,  5]
+
+train_year: 2010
+eval_year:  2017
+train_period: ["2010-01-01", "2016-12-31"]
+eval_period:  ["2017-01-01", "2017-12-31"]
+
+n_train_days: 98
+n_eval_days:  10
+
+aimip_grid: "gaussian"
+n_max: 21
+nlev: 8
+dt: 1200.0
+
+# Early stopping: cap at 30 epochs but bail out after 4 consecutive
+# epochs with no >min_delta improvement.  With ~98 days x 4 IC/day =
+# 392 train tuples per epoch, each epoch is ~5-8 min on RTX 8000, so
+# the typical run is 15-25 epochs (~1.5-3 h per variant).
+aimip_n_epochs: 30
+aimip_patience: 4
+aimip_min_delta: 1.0e-3
+aimip_lr: 3.0e-4
+aimip_warmup: 50
+aimip_weight_decay: 1.0e-5
+aimip_grad_clip: 1.0
+aimip_optimizer: "adamw"
+
+aimip_radiation: "gray"
+aimip_rad_update_interval: 6
+
+aimip_spatial_surface: false
+aimip_spatial_init_std: 0.0
+aimip_spatial_seed: 0
+aimip_spatial_lr_scale: 1.0
+
+aimip_rollout_days: 1
+aimip_rollout_hours: 6
+
+loss:
+  w_T: 1.0
+  w_u: 0.5
+  w_v: 0.5
+  w_q: 0.3
+  w_ps: 0.3
+  w_bias_T: 100.0
+  w_bias_u: 1.0
+  w_bias_v: 1.0
+  w_bias_ps: 1.0
+  w_crps_T: 0.5
+  w_crps_u: 0.25
+  w_crps_v: 0.25
+  w_crps_q: 0.5
+  w_crps_ps: 0.15
+  multi_step_hours: [6, 12, 18, 24]
+  multi_step_weights: [1.0, 1.0, 1.0, 1.0]
+  spectral_weight: 0.3
+  level_weighting: "pressure"
+  normalize_by_scale: true
+  T_scale: 30.0
+  wind_scale: 20.0
+  q_scale: 5.0e-3
+  ps_scale: 1000.0
+
+output_dir: "results/aimip_fullperiod_001"

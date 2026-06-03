@@ -33,6 +33,15 @@ from typing import NamedTuple, Sequence
 import jax
 import jax.numpy as jnp
 
+# Deferred import to break cycle: runtime/__init__.py imports
+# runtime.precision, which re-exports from this module — so
+# importing runtime.backend at module load time would mid-init
+# this very file. Both helpers are only called from function
+# bodies, so a lazy import is safe.
+def _backend():
+    from legoesm.runtime import backend as _b
+    return _b
+
 
 # ---------------------------------------------------------------------------
 # Dtype parsing helper
@@ -159,7 +168,7 @@ def set_policy(policy: PrecisionPolicy) -> None:
     Also enables JAX x64 if any dtype is float64.  On backends that
     lack float64 hardware (e.g. Apple Metal), x64 is still enabled
     because spectral solvers route computation to CPU and need float64
-    there.  ``_resolve_dtype`` handles clamping float64 → float32 for
+    there.  ``resolve_dtype`` handles clamping float64 → float32 for
     non-spectral code that runs on the default (Metal) device.
     """
     _ACTIVE_POLICY[0] = policy
@@ -178,7 +187,7 @@ def validate_policy(policy: PrecisionPolicy | None = None) -> None:
     """Verify the active precision policy is actually achievable.
 
     On backends that lack float64 (e.g. Metal), float64 requests in the
-    policy are silently clamped to float32 by ``_resolve_dtype``, so the
+    policy are silently clamped to float32 by ``resolve_dtype``, so the
     policy is always achievable — this function is a no-op in that case.
 
     Raises
@@ -194,9 +203,8 @@ def validate_policy(policy: PrecisionPolicy | None = None) -> None:
     )
     if not needs_x64:
         return
-    from legoesm.runtime.backend import supports_float64
-    if not supports_float64():
-        # Backend cannot do float64; _resolve_dtype will clamp to float32.
+    if not _backend().supports_float64():
+        # Backend cannot do float64; resolve_dtype will clamp to float32.
         return
     if not jax.config.jax_enable_x64:
         raise RuntimeError(
@@ -260,13 +268,13 @@ def _clamp_to_backend(dtype: jnp.dtype) -> jnp.dtype:
     the precision policy never requests an impossible dtype.
     """
     if dtype == jnp.float64:
-        from legoesm.runtime.backend import supports_float64, is_x64_enabled
-        if not (supports_float64() and is_x64_enabled()):
+        b = _backend()
+        if not (b.supports_float64() and b.is_x64_enabled()):
             return jnp.float32
     return dtype
 
 
-def _resolve_dtype(module: str | None, role: str) -> jnp.dtype:
+def resolve_dtype(module: str | None, role: str) -> jnp.dtype:
     """Resolve the effective dtype for a (module, role) pair.
 
     Priority: module override > global policy > fallback to float32.
@@ -317,7 +325,7 @@ def cast(x: jax.Array, module: str | None, role: str, *,
     jax.Array
         Array cast to the resolved dtype. Same object if no cast needed.
     """
-    target = _resolve_dtype(module, role)
+    target = resolve_dtype(module, role)
     if x.dtype == target:
         return x
     if allow_downcast or jnp.dtype(x.dtype).itemsize <= jnp.dtype(target).itemsize:
@@ -342,7 +350,7 @@ def const(value: float, module: str | None, role: str) -> jax.Array:
     jax.Array
         Scalar array in the resolved dtype.
     """
-    target = _resolve_dtype(module, role)
+    target = resolve_dtype(module, role)
     return jnp.array(value, dtype=target)
 
 
@@ -357,7 +365,7 @@ def cast_pytree(pytree, module: str | None, role: str, *,
     This prevents silent precision loss when the default fp32 policy is
     active but arrays were created in float64 (e.g. under JAX_ENABLE_X64).
     """
-    target = _resolve_dtype(module, role)
+    target = resolve_dtype(module, role)
     target_size = jnp.dtype(target).itemsize
 
     def _maybe_cast(leaf):
@@ -381,7 +389,7 @@ def global_sum(x: jax.Array, module: str | None = None) -> jax.Array:
 
     Upcasts to accumulation dtype, sums, then returns in that dtype.
     """
-    acc_dtype = _resolve_dtype(module, "accumulate")
+    acc_dtype = resolve_dtype(module, "accumulate")
     return jnp.sum(x.astype(acc_dtype))
 
 
@@ -407,7 +415,7 @@ def norm(x: jax.Array, module: str | None = None, ord: int = 2) -> jax.Array:
     jax.Array
         Scalar norm value in accumulation dtype.
     """
-    acc_dtype = _resolve_dtype(module, "accumulate")
+    acc_dtype = resolve_dtype(module, "accumulate")
     x_acc = x.astype(acc_dtype)
     if ord == 1:
         return jnp.sum(jnp.abs(x_acc))
@@ -423,7 +431,7 @@ def weighted_mean(
     module: str | None = None,
 ) -> jax.Array:
     """Area-weighted mean with accumulation precision."""
-    acc_dtype = _resolve_dtype(module, "accumulate")
+    acc_dtype = resolve_dtype(module, "accumulate")
     x_acc = x.astype(acc_dtype)
     w_acc = weights.astype(acc_dtype)
     return jnp.sum(x_acc * w_acc) / jnp.sum(w_acc)
@@ -483,8 +491,8 @@ def with_precision(module: str):
     def decorator(fn):
         def wrapper(*args, **kwargs):
             # Cast all array args to compute dtype.
-            compute_dtype = _resolve_dtype(module, "compute")
-            storage_dtype = _resolve_dtype(module, "storage")
+            compute_dtype = resolve_dtype(module, "compute")
+            storage_dtype = resolve_dtype(module, "storage")
 
             def _to_compute(leaf):
                 if isinstance(leaf, jax.Array) and jnp.issubdtype(
@@ -647,7 +655,7 @@ def verify_dtypes(
     pytree
         Any JAX-compatible pytree (state, carry, dict, NamedTuple, ...).
     module : str or None
-        Module name for ``_resolve_dtype`` lookup.
+        Module name for ``resolve_dtype`` lookup.
     role : str
         Precision role (``"storage"``, ``"compute"``, ``"accumulate"``, ``"control"``).
     label : str
@@ -658,7 +666,7 @@ def verify_dtypes(
     list[str]
         Mismatch descriptions (empty if everything matches).
     """
-    expected = _resolve_dtype(module, role)
+    expected = resolve_dtype(module, role)
     mismatches: list[str] = []
 
     leaves = jax.tree.leaves(pytree)

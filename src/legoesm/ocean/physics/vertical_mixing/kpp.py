@@ -82,8 +82,14 @@ def _boundary_layer_depth(
     max_depth = z_depth[..., -1]
     h_est = max_depth if h_bl_prev is None else h_bl_prev
     h_safe = jnp.maximum(h_est[..., jnp.newaxis], eps)
-    V_t2 = (cfg.Cv * jnp.sqrt(jnp.maximum(jnp.abs(N2_full), 0.0))
-            / jnp.sqrt(jnp.maximum(cfg.c_s * 0.1, eps))
+    # ``sqrt(0)`` has an infinite backward derivative; combined with
+    # ``maximum(., 0)`` whose VJP is zero on the masked side, JAX
+    # produces ``0 * inf = NaN``.  Use a tiny positive floor instead
+    # so the gradient is finite (very large) and gets multiplied by
+    # zero through ``maximum`` to a well-defined zero.  Forward
+    # error is at most ``sqrt(1e-30) ≈ 1e-15``, negligible.
+    V_t2 = (cfg.Cv * jnp.sqrt(jnp.maximum(jnp.abs(N2_full), 1e-30))
+            / jnp.sqrt(jnp.maximum(cfg.c_s * cfg.epsilon_lmd, eps))
             * jnp.maximum(cfg.Ri_crit * h_safe - z_depth, 0.0)
             * z_depth / h_safe)
 
@@ -100,14 +106,24 @@ def _boundary_layer_depth(
     # Weight at level k = sigmoid(sharpness * (Ri_b[k] - Ri_crit))
     #                    - sigmoid(sharpness * (Ri_b[k-1] - Ri_crit))
     # This is ~1 at the crossing level and ~0 elsewhere.
-    sharpness = 20.0
+    sharpness = cfg.crossing_sharpness
     sig = jax.nn.sigmoid(sharpness * (Ri_b - cfg.Ri_crit))  # (..., nlev)
 
-    # Crossing weight: difference of adjacent sigmoid values
-    sig_prev = jnp.concatenate([jnp.zeros_like(sig[..., :1]), sig[..., :-1]], axis=-1)
+    # Crossing weight: difference of adjacent sigmoid values.  ``jnp.pad``
+    # along the trailing axis is one HLO op; the previous
+    # ``concatenate([zeros_like(sig[..., :1]), sig[..., :-1]])`` allocated
+    # a fresh zero buffer and concatenated.
+    pad_axes = ((0, 0),) * (sig.ndim - 1)
+    sig_prev = jnp.pad(sig[..., :-1], (*pad_axes, (1, 0)))
     w_cross = sig - sig_prev  # (..., nlev), peaks at crossing level
     w_cross = jnp.maximum(w_cross, 0.0)
-    w_sum = jnp.sum(w_cross, axis=-1, keepdims=True)
+    # ``w_sum`` and the column-stability mean both reduce over the
+    # level axis — fuse into one stacked sum so XLA fires a single
+    # column-axis kernel.
+    _nlev = sig.shape[-1]
+    _stack_pair = jnp.sum(jnp.stack([w_cross, sig], axis=-1), axis=-2)
+    w_sum = _stack_pair[..., 0:1]  # keepdims=True equivalent
+    column_stability = _stack_pair[..., 1] / _nlev  # mean = sum / nlev
     w_norm = w_cross / jnp.maximum(w_sum, eps)
 
     # Crossing-based depth estimate
@@ -116,14 +132,14 @@ def _boundary_layer_depth(
     # Fallback for columns where Ri_b never crosses Ri_crit:
     # - If column is mostly unstable (sig ≈ 0): BL extends to full depth
     # - If column is mostly stable (sig ≈ 1): BL is one layer
-    column_stability = jnp.mean(sig, axis=-1)  # 0 = all unstable, 1 = all stable
+    # ``column_stability`` already computed above (~0 = all unstable, ~1 = all stable).
     max_depth = z_depth[..., -1]
     min_depth = dz_actual[..., 0]
     h_fallback = (1.0 - column_stability) * max_depth + column_stability * min_depth
 
     # Blend: use crossing depth when crossing signal is strong, fallback otherwise
     crossing_strength = w_sum[..., 0]
-    blend = jax.nn.sigmoid(20.0 * (crossing_strength - 0.1))
+    blend = jax.nn.sigmoid(cfg.crossing_sharpness * (crossing_strength - cfg.crossing_threshold))
     h = blend * h_crossing + (1.0 - blend) * h_fallback
 
     # At least one layer thick
@@ -146,6 +162,11 @@ def kpp_vertical_mixing(
     tau_x: jnp.ndarray | None = None,
     tau_y: jnp.ndarray | None = None,
     B_f: jnp.ndarray | None = None,
+    Q_sfc_T: jnp.ndarray | None = None,
+    Q_sfc_S: jnp.ndarray | None = None,
+    h_bl_prev: jnp.ndarray | None = None,
+    apply_diffusion: bool = True,
+    dt: float | None = None,
 ) -> VerticalMixingOutput:
     """Apply LMD94-style KPP vertical mixing.
 
@@ -164,6 +185,15 @@ def kpp_vertical_mixing(
     B_f : array (6, n, n) or None
         Surface buoyancy flux [m^2/s^3], positive = destabilizing (convective).
         If None, estimated from surface density gradient.
+    Q_sfc_T : array (6, n, n) or None
+        Surface kinematic heat flux [K*m/s] for non-local transport (LMD94
+        Eq. 19).  If None, falls back to diagnosed K_sfc * dT/dz proxy.
+    Q_sfc_S : array (6, n, n) or None
+        Surface kinematic salt flux [PSU*m/s]. Same convention as Q_sfc_T.
+    h_bl_prev : array (6, n, n) or None
+        BL depth from the previous time step [m, positive downward].
+        Used to break the implicit V_t-h_bl coupling in the Ri_b diagnosis
+        (LMD94 Eq. 23).  If None, uses the full column depth as estimate.
 
     Returns
     -------
@@ -186,12 +216,23 @@ def kpp_vertical_mixing(
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
     dz_half0 = 0.5 * (dz_actual[..., 0] + dz_actual[..., 1])
     if B_f is None:
-        # Estimate from near-surface density gradient
-        drho_dz_sfc = (rho[..., 0] - rho[..., 1]) / jnp.maximum(dz_half0, eps)
-        B_f = -g / rho_0_ref * cfg.K_bg * drho_dz_sfc  # simplified proxy
+        # When the caller does not supply a surface buoyancy flux, set
+        # B_f = 0 (no convective non-local transport).  The previous
+        # ``K_bg · g/ρ₀ · drho_dz_sfc`` proxy is ~1e-10 m²/s³ for
+        # realistic density gradients (~1e-3 kg/m⁴), which is 2-4
+        # orders of magnitude below realistic destabilizing B_f
+        # (1e-8 to 1e-7 m²/s³).  A wrong-magnitude fallback masks
+        # missing surface forcing without the user noticing — a
+        # zero-flux fallback fails closed (forward integration is
+        # consistent with no surface buoyancy forcing) and forces the
+        # caller to provide B_f explicitly when convective KPP matters.
+        B_f = jnp.zeros_like(rho[..., 0])
 
     # --- Boundary layer depth ---
-    h_bl = _boundary_layer_depth(rho, u, v, z_coord, jacobian, u_star, B_f, cfg, g)
+    h_bl = _boundary_layer_depth(
+        rho, u, v, z_coord, jacobian, u_star, B_f, cfg, g,
+        h_bl_prev=h_bl_prev,
+    )
 
     # --- Depth coordinate ---
     z_depth = jnp.cumsum(dz_actual, axis=-1) - 0.5 * dz_actual
@@ -204,47 +245,71 @@ def kpp_vertical_mixing(
     # --- Turbulent velocity scale w_s(sigma) (LMD94 Appendix B) ---
     # w_s depends on stability (B_f) and depth d = sigma * h_bl
     d = sigma_clip * h_bl[..., jnp.newaxis]
+    # LMD94 surface-layer limit: the similarity scale is evaluated only
+    # within the surface layer (σ ≤ ε) and held constant below it, i.e.
+    # the velocity-scale depth is capped at d_eff = min(d, ε·h_bl).
+    # Without this, w keeps varying through the whole boundary layer
+    # instead of holding constant beneath the surface layer (LMD94 §A/B).
+    d_eff = jnp.minimum(d, cfg.epsilon_lmd * h_bl[..., jnp.newaxis])
     # Monin-Obukhov length: L_MO = u_star^3 / (kappa * B_f)
-    L_MO = u_star[..., jnp.newaxis]**3 / (
-        cfg.kappa_vk * jnp.where(jnp.abs(B_f[..., jnp.newaxis]) > eps,
-                                  B_f[..., jnp.newaxis], eps)
+    # Use copysign(eps, B_f) to preserve the sign of B_f near zero,
+    # preventing a stability classification flip (issue #168 bug 1).
+    B_f_safe = jnp.where(
+        jnp.abs(B_f[..., jnp.newaxis]) > eps,
+        B_f[..., jnp.newaxis],
+        jnp.copysign(eps, B_f[..., jnp.newaxis]),
     )
-    zeta_kpp = d / L_MO
+    L_MO = u_star[..., jnp.newaxis]**3 / (cfg.kappa_vk * B_f_safe)
+    zeta_kpp = d_eff / L_MO
 
-    # LMD94 Appendix B turbulent velocity scales:
-    # Stable (B_f <= 0): w_s = kappa * u_star / (1 + 5*zeta)
-    # Unstable, weakly (epsilon*d < |L|): w_s = kappa * u_star * phi_m^{-1}
-    #   where phi_m^{-1} = (1 - 16*zeta)^{1/4}
-    # Unstable, strongly convective (epsilon*d > |L|):
-    #   w_s = (kappa * (u_star^3 + c_b * kappa * (-B_f) * d))^{1/3}
-    is_unstable = B_f[..., jnp.newaxis] > 0.0
-    epsilon_lmd = 0.1  # LMD94 surface layer fraction
-
-    # Weakly unstable: phi_m^{-1} formulation
-    w_s_weak = (cfg.kappa_vk * u_star[..., jnp.newaxis]
-                * jnp.power(jnp.maximum(1.0 + 16.0 * jnp.abs(zeta_kpp), 1.0), 0.25))
-
-    # Strongly convective: includes convective velocity scale
+    # LMD94 Appendix B SEPARATE momentum (w_m) and scalar (w_s) velocity
+    # scales (F-OCEAN-1).  They share the stable form (phi_m = phi_s =
+    # 1 + 5*zeta) but the unstable similarity functions differ — scalars
+    # mix more efficiently than momentum:
+    #   weakly unstable:  w_m = k·u*·(1+16|z|)^{1/4},
+    #                     w_s = k·u*·(1+16|z|)^{1/2}
+    #   convective:       w_x = k·(a_x·u*³ + c_x·k·B_f·d)^{1/3}
+    # joined continuously at |zeta| = zeta_{m,s}_abs (LMD94 chose
+    # a_x/c_x so the convective branch matches the weakly branch there).
+    # The previous code used the momentum 1/4 power for the single scale
+    # feeding BOTH A_v and K_v, so the boundary layer carried Pr_t ≡ 1;
+    # the steeper scalar exponent now gives K_v > A_v ⇒ Pr_t < 1 in
+    # unstable conditions, as observed.
+    kappa = cfg.kappa_vk
+    ustar_e = u_star[..., jnp.newaxis]
+    abs_zeta = jnp.abs(zeta_kpp)
     Bf_pos = jnp.maximum(B_f[..., jnp.newaxis], 0.0)
-    w_s_conv = jnp.power(
-        cfg.kappa_vk * (u_star[..., jnp.newaxis]**3
-                        + cfg.c_b * cfg.kappa_vk * Bf_pos * d),
+    is_unstable = B_f[..., jnp.newaxis] > 0.0
+
+    base16 = jnp.maximum(1.0 + 16.0 * abs_zeta, 1.0)
+    w_m_weak = kappa * ustar_e * jnp.power(base16, 0.25)
+    w_s_weak = kappa * ustar_e * jnp.power(base16, 0.5)
+    # Convective scales (kappa OUTSIDE the cube root).  The floored base
+    # keeps the cube root and its gradient finite even if the argument
+    # would dip ≤ 0 numerically near the join (F-OCEAN-2 pattern).
+    w_m_conv = kappa * jnp.power(
+        jnp.maximum(cfg.a_m * ustar_e ** 3 + cfg.c_m * kappa * Bf_pos * d_eff, 1e-30),
         1.0 / 3.0,
     )
+    w_s_conv = kappa * jnp.power(
+        jnp.maximum(cfg.a_s * ustar_e ** 3 + cfg.c_s * kappa * Bf_pos * d_eff, 1e-30),
+        1.0 / 3.0,
+    )
+    w_m_unstable = jnp.where(abs_zeta <= cfg.zeta_m_abs, w_m_weak, w_m_conv)
+    w_s_unstable = jnp.where(abs_zeta <= cfg.zeta_s_abs, w_s_weak, w_s_conv)
 
-    # Transition: use convective scale when epsilon*d > |L_MO|
-    is_strongly_convective = epsilon_lmd * d > jnp.abs(L_MO)
-    w_s_unstable = jnp.where(is_strongly_convective, w_s_conv, w_s_weak)
+    # Shared stable suppression.  Under this sign convention (B_f > 0 =
+    # unstable) ``L_MO = u*³/(kappa·B_f)`` is NEGATIVE for stable forcing,
+    # so ``zeta_kpp < 0``; ``max(-zeta_kpp, 0)`` lets the magnitude of
+    # zeta drive the suppression (codex review iter-1 finding #4).
+    w_stable = (kappa * ustar_e
+                / jnp.maximum(1.0 + 5.0 * jnp.maximum(-zeta_kpp, 0.0), 1.0))
+    w_m = jnp.maximum(jnp.where(is_unstable, w_m_unstable, w_stable), 1e-10)
+    w_s = jnp.maximum(jnp.where(is_unstable, w_s_unstable, w_stable), 1e-10)
 
-    # Stable: standard suppression
-    w_s_stable = (cfg.kappa_vk * u_star[..., jnp.newaxis]
-                  / jnp.maximum(1.0 + 5.0 * jnp.maximum(zeta_kpp, 0.0), 1.0))
-    w_s = jnp.where(is_unstable, w_s_unstable, w_s_stable)
-    w_s = jnp.maximum(w_s, 1e-10)
-
-    # --- BL diffusivity at full levels ---
-    K_bl_full = h_bl[..., jnp.newaxis] * w_s * G
-    K_bl_full = jnp.minimum(K_bl_full, cfg.K_max)
+    # --- BL viscosity (momentum, w_m) and diffusivity (scalar, w_s) ---
+    K_bl_m_full = jnp.minimum(h_bl[..., jnp.newaxis] * w_m * G, cfg.K_max)
+    K_bl_s_full = jnp.minimum(h_bl[..., jnp.newaxis] * w_s * G, cfg.K_max)
 
     # --- Interior mixing: Richardson-number dependent ---
     N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, jacobian)
@@ -256,38 +321,70 @@ def kpp_vertical_mixing(
     # LMD94 interior shear instability: K = K_0 * (1 - (Ri/Ri_0)^2)^3
     # for Ri < Ri_0, zero above.
     Ri_ratio = jnp.clip(Ri_int / cfg.Ri_0, 0.0, 1.0)
-    K_interior = cfg.K_0_shear * (1.0 - Ri_ratio**2) ** 3 + cfg.K_bg
+    Ri_shear_curve = cfg.K_0_shear * (1.0 - Ri_ratio**2) ** 3
 
     # Interior static instability: enhanced mixing where N2 < 0
     K_conv = jnp.where(N2 < cfg.Ri_conv, cfg.K_conv, 0.0)
-    K_interior = K_interior + K_conv
 
-    # --- K at interfaces (average of full level K_bl) ---
-    K_bl_half = 0.5 * (K_bl_full[..., :-1] + K_bl_full[..., 1:])
+    # Build separate interior floors for tracer (K_v) and momentum (A_v).
+    # The shear-instability + convective enhancement is shared, but the
+    # background floors differ (K_bg = 1e-5 for tracers, A_bg = 1e-4 for
+    # momentum).  Previously both branches used cfg.K_bg, which dropped
+    # the momentum interior viscosity by an order of magnitude (codex
+    # adversarial review iter-1, finding #6).
+    K_interior = Ri_shear_curve + cfg.K_bg + K_conv
+    A_interior = Ri_shear_curve + cfg.A_bg + K_conv
+
+    # --- K at interfaces (average of full level K_bl), split m/s ---
+    K_bl_m_half = 0.5 * (K_bl_m_full[..., :-1] + K_bl_m_full[..., 1:])
+    K_bl_s_half = 0.5 * (K_bl_s_full[..., :-1] + K_bl_s_full[..., 1:])
 
     # sigma at interfaces
     z_half_depth = 0.5 * (z_depth[..., :-1] + z_depth[..., 1:])
     sigma_half = z_half_depth / jnp.maximum(h_bl[..., jnp.newaxis], eps)
     in_bl = sigma_half < 1.0
 
-    # Combine BL and interior
-    K_v = jnp.where(in_bl, K_bl_half, K_interior) + cfg.K_bg
-    A_v = jnp.where(in_bl, K_bl_half * 1.0, K_interior) + cfg.A_bg
+    # Combine BL and interior.  Each branch uses its own background
+    # floor (K_bg for tracers, A_bg for momentum) so the merged field
+    # honors the configured background levels in BOTH the BL and the
+    # interior.
+    K_v = jnp.where(in_bl, K_bl_s_half + cfg.K_bg, K_interior)   # scalar  ← w_s
+    A_v = jnp.where(in_bl, K_bl_m_half + cfg.A_bg, A_interior)   # momentum ← w_m
     K_v = jnp.minimum(K_v, cfg.K_max)
     A_v = jnp.minimum(A_v, cfg.K_max)
 
     # --- Apply diffusion ---
-    vel = jnp.stack([u, v], axis=0)
-    vel_tend = jax.vmap(
-        lambda q: vertical_diffusion_variable_K(q, z_coord, jacobian, A_v),
-        in_axes=0, out_axes=0,
-    )(vel)
+    # When ``apply_diffusion`` is False, the local diffusion tendency is
+    # zeroed; the caller is expected to apply the K_v/A_v profiles via an
+    # implicit (backward-Euler) solver after the explicit step.  The
+    # non-local KPP transport (counter-gradient flux) below is *not* a
+    # diffusion and is always returned in dT/dS.
+    if apply_diffusion:
+        # Pass ``dt`` (when provided) so the explicit-Euler CFL cap
+        # added in clean_physics iter-5 fires inside
+        # ``vertical_diffusion_variable_K``.  KPP's own ``cfg.K_max``
+        # bounds K from above but cannot enforce ``K·dt/dz²≤½`` on
+        # thin upper layers; the leaf cap is the safety net.
+        vel = jnp.stack([u, v], axis=0)
+        vel_tend = jax.vmap(
+            lambda q: vertical_diffusion_variable_K(
+                q, z_coord, jacobian, A_v, dt=dt,
+            ),
+            in_axes=0, out_axes=0,
+        )(vel)
 
-    tracers = jnp.stack([T, S], axis=0)
-    tr_tend = jax.vmap(
-        lambda q: vertical_diffusion_variable_K(q, z_coord, jacobian, K_v),
-        in_axes=0, out_axes=0,
-    )(tracers)
+        tracers = jnp.stack([T, S], axis=0)
+        tr_tend = jax.vmap(
+            lambda q: vertical_diffusion_variable_K(
+                q, z_coord, jacobian, K_v, dt=dt,
+            ),
+            in_axes=0, out_axes=0,
+        )(tracers)
+    else:
+        zero_uv = jnp.zeros_like(u)
+        vel_tend = jnp.stack([zero_uv, zero_uv], axis=0)
+        zero_T = jnp.zeros_like(T)
+        tr_tend = jnp.stack([zero_T, zero_T], axis=0)
 
     # --- Non-local flux for T, S (LMD94 Eq. 19) ---
     #
@@ -305,14 +402,23 @@ def kpp_vertical_mixing(
     # We discretize this as the vertical divergence of the non-local
     # flux F_nl = C_s * Q_0 * G(sigma) evaluated at interfaces.
 
-    # Surface kinematic heat flux proxy: Q_0 = K_sfc * dT/dz  [K*m/s]
-    # Use the BL diffusivity at the surface as the flux velocity scale.
-    dT_dz_sfc = (T[..., 0] - T[..., 1]) / jnp.maximum(dz_half[..., 0], eps)
-    K_sfc = K_bl_full[..., 0]  # BL diffusivity at surface level [m^2/s]
-    Q_T = K_sfc * dT_dz_sfc    # [K*m/s]
+    # Surface kinematic heat/salt flux for non-local transport (LMD94 Eq. 19).
+    # Use the IMPOSED surface flux when available (from bulk formulas or
+    # prescribed forcing).  Fall back to diagnosed K_sfc * dT/dz proxy
+    # only when no external flux is provided (issue #168 bug 2).
+    if Q_sfc_T is not None:
+        Q_T = Q_sfc_T  # [K*m/s]
+    else:
+        dT_dz_sfc = (T[..., 0] - T[..., 1]) / jnp.maximum(dz_half[..., 0], eps)
+        K_sfc = K_bl_s_full[..., 0]
+        Q_T = K_sfc * dT_dz_sfc
 
-    dS_dz_sfc = (S[..., 0] - S[..., 1]) / jnp.maximum(dz_half[..., 0], eps)
-    Q_S = K_sfc * dS_dz_sfc    # [psu*m/s]
+    if Q_sfc_S is not None:
+        Q_S = Q_sfc_S  # [PSU*m/s]
+    else:
+        dS_dz_sfc = (S[..., 0] - S[..., 1]) / jnp.maximum(dz_half[..., 0], eps)
+        K_sfc = K_bl_s_full[..., 0]
+        Q_S = K_sfc * dS_dz_sfc
 
     # Only apply non-local transport for unstable (convective) columns.
     is_unstable_col = B_f > 0.0
@@ -322,32 +428,47 @@ def kpp_vertical_mixing(
     sigma_half_clip = jnp.clip(sigma_half_full, 0.0, 1.0)
     G_half = sigma_half_clip * (1.0 - sigma_half_clip) ** 2  # (..., nlev-1)
 
-    in_bl_full = sigma < 1.0
-
     # --- Temperature non-local tendency ---
     # Non-local flux at interfaces: F_nl = C_s * Q_T * G_half  [K*m/s]
+    # G_half = 0 for sigma_half >= 1 (outside BL) so F_T automatically
+    # vanishes below the BL — the divergence ``-dF/dz`` is naturally
+    # restricted to the BL.  The previous in-BL mask
+    # ``in_bl_full & is_unstable_col`` zeroed the compensating
+    # tendency in the layer whose CENTER sigma >= 1 but whose TOP
+    # interface sigma_half < 1, breaking column conservation when h_bl
+    # cut through a grid cell (codex adversarial review iter-1,
+    # finding #1).  Keep only the column-level ``is_unstable_col``
+    # gate.
     F_T = cfg.gamma_T * Q_T[..., jnp.newaxis] * G_half  # (..., nlev-1)
-    # Tendency = -dF/dz at full levels (zero-flux BCs at surface and bottom)
-    dT_nonlocal_top = -F_T[..., :1] / dz_actual[..., :1]
-    dT_nonlocal_int = (F_T[..., :-1] - F_T[..., 1:]) / dz_actual[..., 1:-1]
-    dT_nonlocal_bot = F_T[..., -1:] / dz_actual[..., -1:]
+    # Tendency = -dF/dz at full levels (zero-flux BCs at surface and bottom).
+    # AD-safe divisor: dry columns have ``dz_actual = 0`` and the
+    # column-level ``is_unstable_col`` mask scrubs the forward value,
+    # but the 0/0 division produces NaN gradients in the backward
+    # pass.  Safe denominator (``where dz>0, dz, 1``) gives clean
+    # gradients while the where-mask still zeroes the forward output.
+    dz_safe = jnp.where(dz_actual > 0.0, dz_actual, 1.0)
+    dT_nonlocal_top = -F_T[..., :1] / dz_safe[..., :1]
+    dT_nonlocal_int = (F_T[..., :-1] - F_T[..., 1:]) / dz_safe[..., 1:-1]
+    dT_nonlocal_bot = F_T[..., -1:] / dz_safe[..., -1:]
     dT_nonlocal = jnp.concatenate(
         [dT_nonlocal_top, dT_nonlocal_int, dT_nonlocal_bot], axis=-1
     )  # (..., nlev)  [K/s]
     dT_nonlocal = jnp.where(
-        in_bl_full & is_unstable_col[..., jnp.newaxis], dT_nonlocal, 0.0
+        is_unstable_col[..., jnp.newaxis] & (dz_actual > 0.0),
+        dT_nonlocal, 0.0,
     )
 
     # --- Salinity non-local tendency ---
     F_S = cfg.gamma_S * Q_S[..., jnp.newaxis] * G_half  # (..., nlev-1)
-    dS_nonlocal_top = -F_S[..., :1] / dz_actual[..., :1]
-    dS_nonlocal_int = (F_S[..., :-1] - F_S[..., 1:]) / dz_actual[..., 1:-1]
-    dS_nonlocal_bot = F_S[..., -1:] / dz_actual[..., -1:]
+    dS_nonlocal_top = -F_S[..., :1] / dz_safe[..., :1]
+    dS_nonlocal_int = (F_S[..., :-1] - F_S[..., 1:]) / dz_safe[..., 1:-1]
+    dS_nonlocal_bot = F_S[..., -1:] / dz_safe[..., -1:]
     dS_nonlocal = jnp.concatenate(
         [dS_nonlocal_top, dS_nonlocal_int, dS_nonlocal_bot], axis=-1
     )  # (..., nlev)  [psu/s]
     dS_nonlocal = jnp.where(
-        in_bl_full & is_unstable_col[..., jnp.newaxis], dS_nonlocal, 0.0
+        is_unstable_col[..., jnp.newaxis] & (dz_actual > 0.0),
+        dS_nonlocal, 0.0,
     )
 
     return VerticalMixingOutput(

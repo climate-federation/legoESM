@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "tier": 4,
+  "description": "Wind-driven gyres vs Stommel / Munk western-boundary widths and Sverdrup interior balance",
+  "common": {
+    "precision": "x64",
+    "grid": "latlon_cgrid",
+    "resolution": "2p5deg"
+  },
+  "cases": {
+    "regional_gyre_boundary_width_over_munk": {
+      "metric": "boundary_width_over_munk",
+      "tolerance_window": [0.6, 1.6],
+      "reference": {
+        "kind": "analytical",
+        "fn": "legoesm.ocean.fidelity.references:munk_width"
+      },
+      "ci_marker": "fast",
+      "expected_runtime_s": 120
+    },
+    "regional_gyre_peak_psi_over_sverdrup": {
+      "metric": "peak_psi_bt_over_sverdrup",
+      "tolerance_window": [0.5, 1.5],
+      "reference": {
+        "kind": "analytical",
+        "fn": "legoesm.ocean.fidelity.references:sverdrup_transport"
+      },
+      "ci_marker": "fast",
+      "expected_runtime_s": 120
+    },
+    "global_barotropic_wind_sverdrup_residual": {
+      "metric": "sverdrup_residual_relative",
+      "tolerance_window": [0.0, 0.25],
+      "reference": {"kind": "analytical", "value": 0.0},
+      "ci_marker": "nightly",
+      "expected_runtime_s": 600
+    }
+  }
+}

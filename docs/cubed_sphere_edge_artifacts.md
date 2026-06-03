@@ -534,3 +534,48 @@ The dist=1 ring's A-L gradient uses only face-INTERIOR B values (no halo data to
 - Putman & Lin (2007): Finite-volume transport on various cubed-sphere grids
 - Mouallem, Harris & Chen (2023): Implementation of the Novel Duo-Grid in GFDL's FV3
 - GFDL sw_core.F90: c_sw (lines 79-488), d2a2c_vect (lines 3006-3345)
+
+## Iter-1009/1021/1030 dual-target calibration (Ralph-loop session)
+
+The iter-893 boundary_fix path achieves W2 1-day v_ll_Linf=0.132 m/s.
+A follow-up Ralph-loop session (iter-985..1034) further refined the
+calibration via fine-grained sweeps to find a config that satisfies
+**BOTH** the W2 acceptance threshold (v_ll ≤ 0.119) AND W5 day-5
+artifact-free stability simultaneously.
+
+### Calibration evolution
+
+| iter      | (div_factor, damp_v) | W2 v_ll | W5 day-5 spd | W5 margin |
+|-----------|----------------------|---------|---------------|-----------|
+| iter-893  | (8, 0.060)           | 0.1319  | 49.0          | 39%       |
+| iter-1009 | (10, 0.040)          | 0.1147  | 68.6          | 14%       |
+| iter-1021 | (9, 0.035)           | 0.1137  | 53.3          | 33%       |
+| iter-1030 | (8, 0.030)           | 0.1138  | **45.1**      | **44%**   |
+
+iter-1030 has the best **dual** margin: W2 ≤ 0.119 (4% margin) AND
+W5 day-5 speed_max well under 80 m/s (44% margin).
+
+### Public preset
+
+The iter-1030 calibration is exposed as a documented public
+factory:
+
+```python
+from legoesm.atmosphere.dynamics import iter1009_dual_target_config
+
+cfg = iter1009_dual_target_config(36)  # div_damp_factor=8, damp_v=0.030
+model = FV3EdgeShallowWaterModel(grid, cfg)
+```
+
+The function emits a `UserWarning` for non-C36 calls — calibration
+is validated only at N=36 (iter-1012/1018 confirmed C24/C48 fail
+one or both targets).
+
+### Verification
+
+Pinned by `tests/test_iter1032_dual_target_full_matrix.py` (3
+tests) and exposed via runnable
+`scripts/run_w2_w5_cosine_bell_iter1030.py`.
+
+Full session details in `docs/fv3_fortran_fidelity_review.md`
+(iter-985..1034 entries).

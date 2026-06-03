@@ -18,6 +18,7 @@ from typing import NamedTuple
 import numpy as np
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.ml.data.era5_loader import (
     ERA5Config,
     WB2_ERA5_ZARR,
@@ -293,7 +294,7 @@ def era5_to_spectral_carry(
 
     # ERA5 is on 1440x721 lat-lon; regrid to Gaussian grid via simple
     # nearest-neighbor or linear interpolation in lat-lon space
-    T_ll, u_ll, v_ll, q_ll, p_s_ll = _regrid_latlon_to_gaussian(
+    T_ll, u_ll, v_ll, q_ll, p_s_ll = regrid_latlon_to_gaussian(
         era5, grid,
     )
 
@@ -305,13 +306,23 @@ def era5_to_spectral_carry(
     T_model = interp_pressure_to_sigma(jnp.asarray(T_ll), plev, p_s_jax, sigma_f)
     u_model = interp_pressure_to_sigma(jnp.asarray(u_ll), plev, p_s_jax, sigma_f)
     v_model = interp_pressure_to_sigma(jnp.asarray(v_ll), plev, p_s_jax, sigma_f)
-    q_model = jnp.maximum(
+    # ERA5 q is SPECIFIC HUMIDITY (mass vapor / mass moist air).  The
+    # legoesm physics path treats q_v as MASS MIXING RATIO (mass vapor
+    # / mass dry air) — saturation_mixing_ratio in thermo.py returns
+    # the mixing-ratio convention, and atmosphere/physics modules
+    # consume q_v under that convention.  Convert at the ERA5
+    # boundary: r = q / (1 − q).  In the tropical PBL (q ≈ 0.025) the
+    # bias from skipping this conversion is ~3% of q.  Clip to avoid
+    # division blow-up at q = 1.
+    q_specific = jnp.maximum(
         interp_pressure_to_sigma(jnp.asarray(q_ll), plev, p_s_jax, sigma_f),
         0.0,
     )
+    q_specific = jnp.clip(q_specific, 0.0, 0.99)
+    q_model = q_specific / (1.0 - q_specific)
 
     # Surface geopotential (regrid to Gaussian)
-    phis_ll = _regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
+    phis_ll = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
     phis_jax = jnp.asarray(phis_ll)
 
     # Build HydrostaticState
@@ -397,7 +408,14 @@ def era5_to_cubedsphere_carry(
     T_model = interp_pressure_to_sigma(T_cs, plev, p_s_cs, sigma_f)
     u_model = interp_pressure_to_sigma(u_cs, plev, p_s_cs, sigma_f)
     v_model = interp_pressure_to_sigma(v_cs, plev, p_s_cs, sigma_f)
-    q_model = jnp.maximum(interp_pressure_to_sigma(q_cs, plev, p_s_cs, sigma_f), 0.0)
+    # ERA5 q is SPECIFIC HUMIDITY; legoesm physics expects MIXING
+    # RATIO (see comment at the lat-lon path above).  Convert
+    # r = q / (1 − q) at the boundary.
+    q_specific = jnp.maximum(
+        interp_pressure_to_sigma(q_cs, plev, p_s_cs, sigma_f), 0.0,
+    )
+    q_specific = jnp.clip(q_specific, 0.0, 0.99)
+    q_model = q_specific / (1.0 - q_specific)
 
     dims_3d = ("face", "x", "y", "level")
     dims_2d = ("face", "x", "y")
@@ -433,7 +451,7 @@ def era5_sst_to_forcing(
     grid,
     day_of_year: float = 1.0,
     seconds_of_day: float = 0.0,
-    s_0: float = 1361.0,
+    s_0: float = constants.S_0,
 ):
     """Extract SST/SIC forcing from ERA5 for SegmentForcing.
 
@@ -453,7 +471,7 @@ def era5_sst_to_forcing(
     # SST from skin temperature, SIC = 0 (ERA5 skin temp approximation)
     if hasattr(grid, 'n_lat'):
         # Gaussian grid
-        sst = jnp.asarray(_regrid_2d_to_gaussian(
+        sst = jnp.asarray(regrid_2d_to_gaussian(
             era5.sst, era5.lat, era5.lon, grid,
         ))
         sic = jnp.zeros_like(sst)
@@ -484,7 +502,7 @@ def era5_sst_to_forcing(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _regrid_latlon_to_gaussian(era5: ERA5Slice, grid):
+def regrid_latlon_to_gaussian(era5: ERA5Slice, grid):
     """Regrid ERA5 lat-lon fields to the model's Gaussian grid.
 
     Uses scipy linear interpolation for simplicity.  This runs at
@@ -531,7 +549,7 @@ def _regrid_latlon_to_gaussian(era5: ERA5Slice, grid):
     )
 
 
-def _regrid_2d_to_gaussian(field_2d, era5_lat, era5_lon, grid):
+def regrid_2d_to_gaussian(field_2d, era5_lat, era5_lon, grid):
     """Regrid a 2D field from ERA5 lat-lon to Gaussian grid."""
     from scipy.interpolate import RegularGridInterpolator
 
@@ -545,3 +563,64 @@ def _regrid_2d_to_gaussian(field_2d, era5_lat, era5_lon, grid):
         method='linear', bounds_error=False, fill_value=None,
     )
     return interp((lat_g, lon_g)).astype(np.float32)
+
+
+def load_era5_ic(
+    zarr_path: str,
+    year: int,
+    month: int = 1,
+    day: int = 1,
+    hour: int = 0,
+) -> ERA5Slice:
+    """Load a single ERA5 time slice for use as AMIP initial conditions.
+
+    Unlike ``load_era5_slice``, this function does not require a
+    ``TrainingERA5Config``.  It auto-detects available pressure levels
+    from the Zarr store and selects the timestamp nearest to the
+    requested date.
+
+    Parameters
+    ----------
+    zarr_path : str
+        Path to a local Zarr store or GCS URI containing ERA5 data.
+    year, month, day, hour : int
+        Target datetime for IC (default: 1 January of *year* at 00:00 UTC).
+
+    Returns
+    -------
+    ERA5Slice
+        Single time slice ready to pass to ``era5_to_cubedsphere_carry``
+        or ``era5_to_spectral_carry``.
+    """
+    import pandas as pd
+
+    ds = _open_era5_zarr(zarr_path)
+
+    # --- locate nearest time index ---
+    times = ds.time.values
+    try:
+        target = pd.Timestamp(year=year, month=month, day=day, hour=hour)
+        time_series = pd.DatetimeIndex(times)
+        time_idx = int(np.argmin(np.abs(time_series - target)))
+    except Exception:
+        # cftime objects (e.g. noleap calendar)
+        import cftime
+        target_cf = cftime.datetime(year, month, day, hour)
+        diffs = np.array(
+            [abs((t - target_cf).total_seconds()) for t in times],
+            dtype=np.float64,
+        )
+        time_idx = int(np.argmin(diffs))
+
+    # --- auto-detect pressure levels ---
+    level_dim = "level" if "level" in ds.dims else "pressure_level"
+    levels_hPa = tuple(
+        int(v) for v in sorted(ds[level_dim].values.tolist())
+    )
+
+    cfg = TrainingERA5Config(
+        zarr_store=zarr_path,
+        levels=levels_hPa,
+        local_cache_dir="",
+    )
+    return load_era5_slice(cfg, time_idx)

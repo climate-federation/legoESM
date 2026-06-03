@@ -61,18 +61,28 @@ class SurfaceLayerConfig(NamedTuple):
 
 
 class SmagorinskyConfig(NamedTuple):
-    """Configuration for constant-Km Smagorinsky turbulence.
+    """Configuration for the Smagorinsky–Lilly turbulence closure.
+
+    Deformation-based eddy viscosity
+    ``K_m = (C_s · l)^2 · |S| · √(max(0, 1 − Ri/Pr_t))`` with ``K_h =
+    K_m / Pr_t`` (Smagorinsky 1963; Lilly 1962 buoyancy correction).
 
     Fields
     ------
-    Km : float
-        Constant eddy diffusivity for momentum [m^2/s] (default 10.0).
+    C_s : float
+        Smagorinsky constant (dimensionless); atmospheric value ~0.1–0.25
+        (default 0.2).
+    l_mix_max : float
+        Blackadar (1962) asymptotic mixing length [m] used to build the
+        length scale ``l = κz / (1 + κz / l_mix_max)`` (default 100.0;
+        shared with the other turbulence closures).
     Pr_t : float
         Turbulent Prandtl number; Kh = Km / Pr_t (default 1.0).
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
-    Km: float = 10.0
+    C_s: float = 0.2
+    l_mix_max: float = 100.0
     Pr_t: float = 1.0
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
@@ -88,6 +98,16 @@ class LouisConfig(NamedTuple):
         Mixing length coefficient (default 0.4).
     Ri_crit : float
         Critical Richardson number (default 0.25).
+    b_heat_ratio : float
+        Ratio of the heat stability-function coefficient to the momentum
+        one, ``b_h / b_m`` (Louis, Tiedtke & Geleyn 1982 use 3b for heat
+        vs 2b for momentum ⇒ 1.5).  Gives a stratification-dependent
+        turbulent Prandtl number Pr_t = K_m/K_h (>1 stable, <1 unstable);
+        ``1.0`` recovers the Louis (1979) ``f_h = f_m`` simplification.
+        Momentum K_m is independent of this ratio (default 1.5).  Must be
+        positive: like ``b_louis``/``d_louis`` it appears in the stable
+        denominator ``1 + 2·b_h·Ri/√(1+d·Ri)``, which a negative value
+        could drive through zero (singular K_h).
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
@@ -98,6 +118,8 @@ class LouisConfig(NamedTuple):
     b_louis: float = 5.0
     c_louis: float = 16.6   # Updated from 5.0 (Louis 1979) to 16.6
     d_louis: float = 5.0
+    b_heat_ratio: float = 1.5  # b_h/b_m (LTG82: 3b heat vs 2b momentum)
+    blend_ri_sharpness: float = 100.0  # sigmoid sharpness [1/Ri] for stable/unstable blend
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 
@@ -124,6 +146,48 @@ class TKEConfig(NamedTuple):
     Ce: float = 0.19
     tke_min: float = 1e-6
     Pr_t: float = 0.33
+    surface: SurfaceLayerConfig = SurfaceLayerConfig()
+
+
+class MYNN25Config(NamedTuple):
+    """Configuration for the MYNN-2.5 turbulence scheme (Nakanishi & Niino 2009).
+
+    Default constants are taken from NN09 Table 1 / eq. 66 and match
+    jax_scm's MYNNParams so the oracle-driven SCM benchmarks (GABLS1,
+    Wangara, Ekman) can run with bit-equivalent closure coefficients.
+
+    Fields
+    ------
+    A1, A2 : float
+        Stability-function coefficients (momentum, heat).
+    B1 : float
+        Master length-scale coefficient.  Surface boundary value
+        ``qke_sfc = B1^(2/3) · u*²`` (MY82 eq. 54) flows from this.
+    B2 : float
+        Dissipation length-scale coefficient.
+    C1, C2, C3, C4, C5 : float
+        Pressure-covariance / return-to-isotropy coefficients.  ``C4`` is
+        the cross-correlation coefficient (unused at level 2.5; kept for
+        symmetry with the full NN09 closure).
+    gamma1 : float
+        Critical-flux-Richardson-number numerator coefficient
+        (NN09 below eq. A4).
+    tke_min : float
+        Minimum qke (= 2·TKE) [m²/s²] for numerical safety.
+    surface : SurfaceLayerConfig
+        Surface-layer (bulk-flux) configuration.
+    """
+    A1: float = 1.18
+    A2: float = 0.665
+    B1: float = 24.0
+    B2: float = 15.0
+    C1: float = 0.137
+    C2: float = 0.75
+    C3: float = 0.352
+    C4: float = 0.0
+    C5: float = 0.2
+    gamma1: float = 0.235
+    tke_min: float = 1e-10
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 
@@ -192,6 +256,13 @@ class HoltslagBovilleConfig(NamedTuple):
         Counter-gradient momentum coefficient (default 0.0).
     Ri_crit : float
         Critical Richardson number (default 0.25).
+    b_louis : float
+        Louis (1979) stability-function coefficient (default 5.0).
+        Used in both the stable branch
+        ``f_stable = 1 / (1 + 2*b_louis*Ri / sqrt(1 + 5*Ri))`` and the
+        unstable branch via the ``3*b_louis*5*l_mix^2*sqrt(|Ri|)``
+        denominator term.  Was hardcoded as ``5.0`` in the scheme body
+        prior to the audit-driven config migration.
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
@@ -200,6 +271,17 @@ class HoltslagBovilleConfig(NamedTuple):
     gamma_h: float = 10.0
     gamma_m: float = 0.0
     Ri_crit: float = 0.25
+    b_louis: float = 5.0
+    # Sigmoid sharpness for the Ri_crit transition-zone weighting
+    # used in the bulk-Ri PBL-height diagnostic (default 20.0 1/Ri).
+    pbl_sharpness: float = 20.0
+    # Sigmoid sharpness for stable/unstable Ri-branch blend in the
+    # local Louis Km calculation (default 100.0 1/Ri).
+    blend_ri_sharpness: float = 100.0
+    # Sigmoid sharpness for the smooth profile-to-local transition
+    # at the PBL top in the Km blend (default 10.0; sigmoid(10·1) ≈ 1
+    # one PBL-height above the top, sigmoid(10·-1) ≈ 5e-5 below).
+    blend_pbl_sharpness: float = 10.0
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 
@@ -218,6 +300,27 @@ class YSUConfig(NamedTuple):
         Critical Richardson number (default 0.25).
     pbl_smooth_sharpness : float
         Sigmoid sharpness for smooth PBL-top detection (default 20.0).
+    louis_b : float
+        Louis (1982) stability-function ``b`` constant
+        (default 5.0).  Used in YSU local-Ri f_stable / f_unstable.
+    louis_c : float
+        Louis (1982) UNSTABLE-branch denominator coefficient
+        (default 5.0).  Multiplies the ``b · l_mix² · sqrt(|Ri|)``
+        denominator term in f_unstable.  The repository's louis.py
+        distinguishes this from louis_d; YSU now follows the same
+        convention.
+    louis_d : float
+        Louis (1982) STABLE-branch sqrt coefficient (a.k.a. ``b'``)
+        (default 5.0).  Appears only in ``sqrt(1 + d · Ri)`` of
+        f_stable.
+    blend_ri_sharpness : float
+        Sigmoid sharpness for stable / unstable blend in
+        Richardson-number space (default 100.0 1/Ri).
+    countergrad_coeff : float
+        Nonlocal countergradient coefficient ``b`` in
+        ``γ_c = b·(w'θ')_0 / (w_*·h)`` (Troen & Mahrt 1986; Hong et
+        al. 2006).  Drives YSU's defining nonlocal upward heat
+        transport in the convective BL (default 6.5).
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
@@ -226,6 +329,12 @@ class YSUConfig(NamedTuple):
     entrainment_coeff: float = 0.2
     Ri_crit: float = 0.25
     pbl_smooth_sharpness: float = 20.0
+    louis_b: float = 5.0
+    louis_c: float = 5.0
+    louis_d: float = 5.0
+    blend_ri_sharpness: float = 100.0
+    blend_pbl_sharpness: float = 10.0  # sigmoid sharpness for K-profile->local PBL blend
+    countergrad_coeff: float = 6.5
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 
@@ -254,6 +363,17 @@ class EDMFConfig(NamedTuple):
         Lateral entrainment rate [1/m] (default 1e-3).
     detrainment_rate : float
         Lateral detrainment rate [1/m] (default 2e-3).
+    parcel_dT : float
+        Initial updraft potential-temperature perturbation [K]
+        (default 0.5).  Was hardcoded as ``+0.5`` in the scan body
+        prior to the audit-driven config migration; lifting it to a
+        config field lets users tune the initial buoyancy of the
+        plume against scheme calibration data.
+    updraft_deactivation_sharpness : float
+        Sigmoid sharpness [s/m] for smoothly deactivating the updraft as
+        its vertical velocity falls below ``w_updraft_min`` (default 20.0).
+        Lifted from a hardcoded literal inside the ``lax.scan`` updraft
+        body so the transition width is tunable against calibration.
     surface : SurfaceLayerConfig
         Surface layer parameters.
     """
@@ -267,35 +387,8 @@ class EDMFConfig(NamedTuple):
     w_updraft_min: float = 0.1
     entrainment_rate: float = 1e-3
     detrainment_rate: float = 2e-3
-    surface: SurfaceLayerConfig = SurfaceLayerConfig()
-
-
-class MLTurbulenceEmulatorConfig(NamedTuple):
-    """Configuration for ML turbulence emulator (Equinox MLP).
-
-    Fields
-    ------
-    n_input : int
-        Number of input features per level (default 8).
-    n_hidden : int
-        Hidden layer width (default 128).
-    n_layers : int
-        Number of MLP layers (default 3).
-    n_output : int
-        Number of output features per level (default 9).
-    seed : int
-        Random seed for model initialization (default 0).
-    use_residual : bool
-        Apply residual scaling for near-zero untrained output (default True).
-    surface : SurfaceLayerConfig
-        Surface layer parameters.
-    """
-    n_input: int = 8
-    n_hidden: int = 128
-    n_layers: int = 3
-    n_output: int = 9
-    seed: int = 0
-    use_residual: bool = True
+    parcel_dT: float = 0.5
+    updraft_deactivation_sharpness: float = 20.0
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 
@@ -308,14 +401,16 @@ class TurbulenceConfig(NamedTuple):
     ------
     scheme : str
         Active turbulence scheme: "smagorinsky", "louis", "tke",
-        "clubb_lite", "holtslag_boville", "ysu", "edmf",
-        "ml_emulator", or "none".
+        "mynn25", "clubb_lite", "holtslag_boville", "ysu", "edmf",
+        or "none".
     smagorinsky : SmagorinskyConfig
         Configuration for Smagorinsky scheme.
     louis : LouisConfig
         Configuration for Louis scheme.
     tke : TKEConfig
-        Configuration for TKE scheme.
+        Configuration for TKE scheme (Mellor-Yamada 1982).
+    mynn25 : MYNN25Config
+        Configuration for MYNN-2.5 scheme (Nakanishi-Niino 2009).
     clubb_lite : CLUBBLiteConfig
         Configuration for CLUBB-lite scheme.
     holtslag_boville : HoltslagBovilleConfig
@@ -324,8 +419,6 @@ class TurbulenceConfig(NamedTuple):
         Configuration for YSU scheme.
     edmf : EDMFConfig
         Configuration for EDMF scheme.
-    ml_emulator : MLTurbulenceEmulatorConfig
-        Configuration for ML emulator scheme.
     update_interval_steps : int
         Recompute turbulence every N time steps (1 = every step).
     """
@@ -333,9 +426,9 @@ class TurbulenceConfig(NamedTuple):
     smagorinsky: SmagorinskyConfig = SmagorinskyConfig()
     louis: LouisConfig = LouisConfig()
     tke: TKEConfig = TKEConfig()
+    mynn25: MYNN25Config = MYNN25Config()
     clubb_lite: CLUBBLiteConfig = CLUBBLiteConfig()
     holtslag_boville: HoltslagBovilleConfig = HoltslagBovilleConfig()
     ysu: YSUConfig = YSUConfig()
     edmf: EDMFConfig = EDMFConfig()
-    ml_emulator: MLTurbulenceEmulatorConfig = MLTurbulenceEmulatorConfig()
     update_interval_steps: int = 1

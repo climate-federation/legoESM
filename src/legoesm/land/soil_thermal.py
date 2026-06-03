@@ -24,9 +24,16 @@ from legoesm.land.tridiag import thomas_solve_batch
 
 
 class SoilThermalConfig(NamedTuple):
-    """Configuration for soil thermal properties."""
+    """Configuration for soil thermal properties.
+
+    All heat capacities are **volumetric** (J/m³/K), not specific
+    (J/kg/K).  ``C_water_vol = 4.18e6`` derives from
+    ``constants.rho_water · constants.c_pw = 1000 · 4180 ≈ 4.18e6``.
+    Storing volumetric values directly avoids per-cell multiplication
+    by density inside the heat-capacity mixing formula.
+    """
     C_soil: float = 2.0e6         # mineral soil heat capacity [J/m3/K]
-    C_water: float = 4.18e6       # water heat capacity [J/m3/K]
+    C_water_vol: float = 4.18e6       # water heat capacity [J/m3/K] (= rho_water · c_pw)
     C_air: float = 1.25e3         # air heat capacity [J/m3/K]
     k_solid: float = 2.0          # mineral soil thermal conductivity [W/m/K]
     k_water: float = 0.57         # water thermal conductivity [W/m/K]
@@ -42,11 +49,11 @@ def compute_heat_capacity(
 ) -> jnp.ndarray:
     """Compute effective volumetric heat capacity [J/m3/K].
 
-    C_eff = (1 - θ_sat)·C_soil + θ·C_water + (θ_sat - θ)·C_air
+    C_eff = (1 - θ_sat)·C_soil + θ·C_water_vol + (θ_sat - θ)·C_air
     """
     theta_sat = hydro_config.theta_sat
     return ((1.0 - theta_sat) * thermal_config.C_soil
-            + theta * thermal_config.C_water
+            + theta * thermal_config.C_water_vol
             + (theta_sat - theta) * thermal_config.C_air)
 
 
@@ -159,11 +166,10 @@ def solve_soil_thermal(
     # Bottom BC: geothermal heat flux (Neumann, positive into soil)
     rhs = rhs.at[:, -1].add(thermal_config.Q_geothermal)
 
-    # Assemble full arrays
-    a = jnp.zeros((ncol, nlayers))
-    a = a.at[:, 1:].set(sub)
-    c = jnp.zeros((ncol, nlayers))
-    c = c.at[:, :-1].set(sup)
+    # Assemble full arrays via ``jnp.pad`` — one Pad HLO op per
+    # diagonal vs ``zeros + .at[].set`` (alloc + scatter).
+    a = jnp.pad(sub, ((0, 0), (1, 0)))
+    c = jnp.pad(sup, ((0, 0), (0, 1)))
 
     T_new = thomas_solve_batch(a, diag, c, rhs)
     return T_new

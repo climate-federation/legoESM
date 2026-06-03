@@ -101,9 +101,20 @@ def solve_richards(
     theta_n = theta  # θ at time level n (saved for mass conservation)
 
     # --- Infiltration capacity ---
+    # Darcy: q_max = K_top · (1 − dpsi/dz), with the head gradient
+    # taken across the half-distance from the surface (assumed psi=0)
+    # to the first node at depth ``z_node[0] = 0.5 · dz[0]``:
+    #     grad = (psi[0] − 0) / (0.5 · dz[0]) = psi[0] / (0.5 · dz[0]).
+    # For unsaturated soil (psi[0] < 0) the gradient is negative and
+    # capacity > K_top (suction draws water down).  For ponded /
+    # saturated surfaces (psi[0] ≥ 0) the gradient is positive and the
+    # capacity is reduced — clamping to 0 prevents a positive head from
+    # producing artificially-enhanced infiltration.  Using ``abs(psi)``
+    # would always increase the capacity, which is wrong for ponded
+    # cells (Codex GPT-5 review caught the sign).
     K_top = hydraulic_conductivity(psi[:, 0], theta[:, 0], hydro_config)
-    psi_top_abs = jnp.abs(psi[:, 0])
-    infil_capacity = K_top * (1.0 + psi_top_abs / dz[0])  # Darcy infiltration limit
+    head_grad = psi[:, 0] / (0.5 * dz[0])
+    infil_capacity = jnp.maximum(K_top * (1.0 - head_grad), 0.0)
 
     # Surface runoff: excess over Darcy infiltration capacity.
     # Do NOT additionally cap by top-layer saturation — the implicit Picard
@@ -145,14 +156,38 @@ def solve_richards(
         # Super-diagonal: -K_{k+1/2} / (dz_if * dz_k)
         sup = -coeff / dz[:-1]  # (ncol, nlayers-1)
 
-        # RHS: -(theta_m - theta_n)/dt - sink + gravity flux divergence
+        # RHS for the Picard iteration on dpsi = psi^{m+1} - psi^m:
+        #   [C/dt - L^m] · dpsi = L^m psi^m - (theta^m - theta^n)/dt
+        #                         + grav_div - sink + BCs
+        # The previous formulation omitted the L^m psi^m term, so the
+        # converged solution satisfied (theta - theta^n)/dt = grav_div
+        # − sink + BCs — i.e. *gravity-drainage only*, with no capillary
+        # redistribution.  Adding L^m psi^m closes the equation back to
+        # the full Richards form (Celia 1990, eq. 17).
         rhs = -(theta_m - theta_n) / dt - sink
 
-        # Gravitational flux: K_{k+1/2} enters from above, exits below
-        grav_flux_in = jnp.zeros((ncol, nlayers))
-        grav_flux_out = jnp.zeros((ncol, nlayers))
-        grav_flux_in = grav_flux_in.at[:, 1:].set(K_half / dz[1:])
-        grav_flux_out = grav_flux_out.at[:, :-1].set(K_half / dz[:-1])
+        # L^m psi^m as a flux divergence using the same coefficients
+        # as the LHS matrix.  Express as
+        #     (L psi)_k = (F_in_k − F_out_k) / dz_k
+        # with F_{k+1/2} = coeff_k · (psi_k − psi_{k+1}) the upward
+        # Darcy flux at interface k+1/2.  Boundary cells (k=0 and
+        # k=N-1) naturally pick up only one flux contribution (the
+        # missing interface flux is replaced by the explicit Neumann
+        # BCs added below).  Two pads + one subtraction keeps the
+        # trace size minimal vs. computing each flux side separately.
+        F_iface = coeff * (psi_m[:, :-1] - psi_m[:, 1:])  # (ncol, N-1)
+        F_in = jnp.pad(F_iface, ((0, 0), (1, 0)))
+        F_out = jnp.pad(F_iface, ((0, 0), (0, 1)))
+        rhs = rhs + (F_in - F_out) / dz
+
+        # Gravitational flux: K_{k+1/2} enters from above, exits below.
+        # Use ``jnp.pad`` instead of ``zeros + .at[].set`` — one Pad
+        # HLO op vs alloc-then-scatter.  This block fires every Picard
+        # iteration (up to 10) inside the land step.
+        K_half_in = K_half / dz[1:]
+        K_half_out = K_half / dz[:-1]
+        grav_flux_in = jnp.pad(K_half_in, ((0, 0), (1, 0)))
+        grav_flux_out = jnp.pad(K_half_out, ((0, 0), (0, 1)))
         rhs = rhs + (grav_flux_in - grav_flux_out)
 
         # Top BC: flux = flux_infiltrated (Neumann)
@@ -166,11 +201,10 @@ def solve_richards(
         # zero_flux: no additional term (natural BC)
 
         # Solve tridiagonal system: a*dpsi[k-1] + b*dpsi[k] + c*dpsi[k+1] = rhs
-        # Assemble full arrays for Thomas algorithm
-        a_full = jnp.zeros((ncol, nlayers))
-        a_full = a_full.at[:, 1:].set(sub)
-        c_full = jnp.zeros((ncol, nlayers))
-        c_full = c_full.at[:, :-1].set(sup)
+        # Assemble full arrays for Thomas algorithm via ``jnp.pad``
+        # (one HLO op each vs ``zeros + .at[].set``).
+        a_full = jnp.pad(sub, ((0, 0), (1, 0)))
+        c_full = jnp.pad(sup, ((0, 0), (0, 1)))
 
         dpsi = thomas_solve_batch(a_full, diag, c_full, rhs)
 

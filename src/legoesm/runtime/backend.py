@@ -187,6 +187,12 @@ _NVIDIA_GPU_XLA_FLAGS = {
     # until completion, leaving the GPU idle during communication.
     "xla_gpu_enable_async_collectives": "true",
     "xla_gpu_enable_highest_priority_async_stream": "true",
+    # CUDA Graphs / command buffers — XLA can capture sequences of
+    # kernel launches and replay them as a single command buffer, which
+    # eliminates the ~5-10μs per-launch overhead that dominates
+    # small-grain step kernels.  Requires CUDA ≥ 12.3 (XLA falls back
+    # silently on older runtimes, so always-on is safe).
+    "xla_gpu_enable_command_buffer": "FUSION,CUSTOM_CALL,COLLECTIVES",
 }
 
 _AMD_GPU_XLA_FLAGS: dict[str, str] = {
@@ -205,6 +211,49 @@ def _set_xla_flags(flags: dict[str, str]) -> None:
     if new_parts:
         combined = (existing + " " + " ".join(new_parts)).strip()
         os.environ["XLA_FLAGS"] = combined
+
+
+def _detect_gpu_vendor_pre_init() -> str | None:
+    """Detect GPU vendor *without* triggering ``jax.devices()``.
+
+    Once ``jax.devices()`` runs, the XLA client is initialised and any
+    further mutations of ``os.environ['XLA_FLAGS']`` no longer take
+    effect.  The latency-hiding scheduler flags applied below
+    (``_NVIDIA_GPU_XLA_FLAGS``, ``_AMD_GPU_XLA_FLAGS``) are critical for
+    multi-GPU scaling, so we must set them before JAX is initialised.
+
+    Returns ``"nvidia"`` / ``"amd"`` if a vendor is unambiguously
+    identifiable from environment hints, otherwise ``None`` and the
+    caller should fall back to the post-init JAX-based detection (which
+    will at least pick the right matmul precision even if ``XLA_FLAGS``
+    is too late to alter).
+    """
+    # SLURM and Nvidia commonly set ``CUDA_VISIBLE_DEVICES=-1`` or
+    # ``CUDA_VISIBLE_DEVICES=NoDevFiles`` to mask GPUs on CPU-only
+    # allocations.  Those values are non-empty strings, so a naive
+    # truthiness check would mis-detect NVIDIA and inject GPU XLA flags
+    # into the CPU backend.  Reject them explicitly.
+    _CUDA_DISABLED = {"-1", "NoDevFiles", ""}
+
+    cuda = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    hip = os.environ.get("HIP_VISIBLE_DEVICES", "")
+    rocr = os.environ.get("ROCR_VISIBLE_DEVICES", "")
+
+    has_cuda = cuda not in _CUDA_DISABLED and not cuda.startswith("-")
+    has_hip = (hip not in _CUDA_DISABLED and not hip.startswith("-")) or (
+        rocr not in _CUDA_DISABLED and not rocr.startswith("-")
+    )
+
+    if has_cuda and not has_hip:
+        return "nvidia"
+    if has_hip:
+        return "amd"
+    platforms = os.environ.get("JAX_PLATFORMS", "").lower()
+    if platforms.startswith("cuda"):
+        return "nvidia"
+    if platforms.startswith("rocm"):
+        return "amd"
+    return None
 
 
 def _is_nvidia_gpu() -> bool:
@@ -239,38 +288,124 @@ def gpu_vendor() -> str:
     return "unknown"
 
 
+def _detect_backend_pre_init() -> str | None:
+    """Detect the backend without calling ``jax.default_backend()``.
+
+    Mirrors :func:`_detect_gpu_vendor_pre_init`: we cannot afford to
+    initialise the PJRT client (via ``jax.default_backend()`` or
+    ``jax.devices()``) before the GPU-specific XLA scheduler flags are
+    set, otherwise ``XLA_FLAGS`` mutations no-op.  Returns one of
+    ``"tpu"``, ``"gpu"``, ``"metal"``, ``"cpu"``, or ``None`` when no
+    hint is available (caller must fall back to ``get_backend()``).
+    """
+    platforms = os.environ.get("JAX_PLATFORMS", "").lower()
+    if platforms:
+        if platforms.startswith("tpu"):
+            return "tpu"
+        if platforms.startswith(("cuda", "rocm", "gpu")):
+            return "gpu"
+        if platforms.startswith("metal"):
+            return "metal"
+        if platforms.startswith("cpu"):
+            return "cpu"
+    if _detect_gpu_vendor_pre_init() is not None:
+        return "gpu"
+    if os.environ.get("TPU_NAME") or os.environ.get("COLAB_TPU_ADDR"):
+        return "tpu"
+    return None
+
+
 def configure_backend(backend: str | None = None) -> str:
     """Apply backend-specific XLA flags and JAX options.
 
     This should be called **once at startup**, before any JAX computation.
-    If *backend* is ``None`` the current default backend is detected.
+    If *backend* is ``None`` the current default backend is detected
+    from environment hints (``JAX_PLATFORMS``, ``CUDA_VISIBLE_DEVICES``,
+    ``TPU_NAME``).  We deliberately avoid ``jax.default_backend()`` /
+    ``jax.devices()`` until **after** the GPU XLA scheduler flags are
+    set — otherwise PJRT initialises with the wrong flags.
 
     Returns the resolved backend name (lowercase).
     """
     import jax
 
     if backend is None:
+        backend = _detect_backend_pre_init()
+    if backend is None:
+        # No hint at all — fall through to the JAX default.  We still
+        # try to apply NVIDIA flags pre-init in case the heuristic
+        # missed something (env var weirdness).  This branch is the
+        # last resort and will warn from the GPU path below if the
+        # client is already up.
         backend = get_backend()
     backend = backend.lower()
 
     if backend == "tpu":
         _set_xla_flags(_TPU_XLA_FLAGS)
         jax.config.update("jax_default_matmul_precision", "bfloat16")
-        num_hosts = jax.process_count()
-        if num_hosts > 1:
-            jax.config.update("jax_spmd_mode", "allow_all")
+        # NOTE: the legacy `jax_spmd_mode='allow_all'` toggle was removed
+        # in modern JAX (0.9+) — `jax.config.update("jax_spmd_mode", ...)`
+        # raises `AttributeError: Unrecognized config option: jax_spmd_mode`,
+        # which would crash the canonical TPU bootstrap on multi-host pods.
+        # Under the unified sharding model SPMD partitioning is automatic
+        # for sharded arrays, so no explicit toggle is required.
 
     elif backend == "gpu":
-        devices = jax.devices()
-        vendor = gpu_vendor()
-        # Apply XLA flags unconditionally — latency hiding and GEMM fusion
-        # benefit single-GPU and MPI-per-rank setups too.
-        if vendor == "nvidia":
-            _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
-        elif vendor == "amd":
-            _set_xla_flags(_AMD_GPU_XLA_FLAGS)
+        # Detect vendor BEFORE ``jax.devices()`` so the XLA scheduler
+        # flags below land in the env var that the XLA client will
+        # consume on first init.  Once ``jax.devices()`` runs, mutating
+        # ``os.environ['XLA_FLAGS']`` is silently ineffective on most
+        # JAX versions — the latency-hiding flags are critical for
+        # multi-GPU scaling, so we cannot afford that race.
         if "XLA_PYTHON_CLIENT_MEM_FRACTION" not in os.environ:
             os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.90"
+        # On multi-process MPI runs (the standard case for legoESM at
+        # scale), several ranks share the same physical GPU under
+        # ``MPS`` or co-located workers.  XLA's default
+        # ``XLA_PYTHON_CLIENT_PREALLOCATE=true`` then OOMs because
+        # each process tries to grab 90 % of HBM.  Disable
+        # preallocation when MPI is detected; keep it on for
+        # single-process runs (preallocation reduces fragmentation
+        # over a long simulation).  User overrides win.
+        if "XLA_PYTHON_CLIENT_PREALLOCATE" not in os.environ:
+            _multi_proc = (
+                int(os.environ.get("OMPI_COMM_WORLD_SIZE", "1")) > 1
+                or int(os.environ.get("PMI_SIZE", "1")) > 1
+                or int(os.environ.get("SLURM_NTASKS_PER_NODE", "1")) > 1
+            )
+            if _multi_proc:
+                os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
+        pre_init_vendor = _detect_gpu_vendor_pre_init()
+        if pre_init_vendor == "nvidia":
+            _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
+        elif pre_init_vendor == "amd":
+            _set_xla_flags(_AMD_GPU_XLA_FLAGS)
+
+        devices = jax.devices()
+        vendor = gpu_vendor()
+        if pre_init_vendor is None:
+            # Vendor was only known after JAX init; XLA_FLAGS already
+            # locked in.  Still apply best-effort matmul precision
+            # below, and warn so the user can pre-set ``CUDA_VISIBLE_DEVICES``
+            # / ``HIP_VISIBLE_DEVICES`` for the next run.
+            if vendor == "nvidia":
+                _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
+                logger.warning(
+                    "GPU vendor detected post-init; XLA scheduler flags "
+                    "may not take effect this run.  Set "
+                    "CUDA_VISIBLE_DEVICES or JAX_PLATFORMS=cuda before "
+                    "import to enable latency-hiding flags.",
+                )
+            elif vendor == "amd":
+                _set_xla_flags(_AMD_GPU_XLA_FLAGS)
+                logger.warning(
+                    "GPU vendor detected post-init; XLA scheduler flags "
+                    "may not take effect this run.  Set "
+                    "HIP_VISIBLE_DEVICES before import to enable "
+                    "latency-hiding flags.",
+                )
+
         # TensorFloat32 is an NVIDIA Ampere+ feature (19-bit mantissa).
         # AMD GPUs do not have TF32 hardware; use default float32.
         if vendor == "nvidia":
@@ -285,16 +420,129 @@ def configure_backend(backend: str | None = None) -> str:
     else:  # cpu
         if "XLA_FLAGS" not in os.environ:
             try:
-                n_cores = os.cpu_count() or 4
+                # NOTE: the legacy `intra_op_parallelism_threads` flag is
+                # NOT recognized by the current XLA parse_flags_from_env
+                # and crashes at first JAX use with:
+                #   F parse_flags_from_env.cc:234]
+                #     Unknown flag in XLA_FLAGS: --intra_op_parallelism_threads=N
+                # Drop it; rely on the default XLA thread-pool autoscaling
+                # driven by `os.cpu_count()`.  `xla_cpu_multi_thread_eigen`
+                # remains valid and meaningful for multi-core CPUs.
                 _set_xla_flags({
                     "xla_cpu_multi_thread_eigen": "true",
-                    "intra_op_parallelism_threads": str(n_cores),
                 })
             except Exception:
                 pass
+            # XLA no longer accepts ``--intra_op_parallelism_threads`` since
+            # jaxlib 0.10. Eigen pulls its worker count from ``OMP_NUM_THREADS``
+            # (falling back to the hardware concurrency), so set that instead.
+            if "OMP_NUM_THREADS" not in os.environ:
+                try:
+                    os.environ["OMP_NUM_THREADS"] = str(os.cpu_count() or 4)
+                except Exception:
+                    pass
+
+    # JAX persistent JIT-compile cache.  Off by default in upstream
+    # JAX; legoESM's compiled segment (~2600 s cold-compile, ~600 s
+    # warm) is the dominant per-job overhead for AMIP / OMIP runs.
+    # Re-using the XLA cache across runs cuts subsequent jobs to a
+    # few seconds of cache-lookup.  Turn it on whenever the backend
+    # is GPU/CPU; Metal/TPU paths often have their own compile
+    # caches and we leave them alone.
+    if backend in ("gpu", "cpu"):
+        _configure_persistent_jit_cache()
 
     logger.info("Configured XLA for %s backend", backend)
     return backend
+
+
+def _configure_persistent_jit_cache() -> None:
+    """Activate JAX's persistent JIT-compile cache.
+
+    Respects two environment variables:
+
+    * ``LEGOESM_JIT_CACHE_DIR`` — directory to store cached compiles.
+      Defaults to ``${XDG_CACHE_HOME:-~/.cache}/legoesm/jit_cache``.
+      Set to ``""`` (empty) to disable caching for this process
+      without code changes (handy for clean-room benchmark runs).
+    * ``LEGOESM_JIT_CACHE_MIN_SECS`` — only cache compiles slower
+      than this many seconds.  Default ``1.0`` matches the JAX
+      upstream convention and keeps short compiles out of the cache.
+
+    Idempotent: a second call in the same process is a no-op.
+    Safe to call before or after ``jax.devices()``.
+    """
+    import jax
+
+    if getattr(_configure_persistent_jit_cache, "_done", False):
+        return
+
+    env_dir = os.environ.get("LEGOESM_JIT_CACHE_DIR", None)
+    if env_dir == "":
+        # Explicit opt-out.
+        _configure_persistent_jit_cache._done = True  # type: ignore[attr-defined]
+        return
+    if env_dir is None:
+        # The XDG base-directory contract requires an absolute path;
+        # treat empty / relative ``XDG_CACHE_HOME`` as unset so we do
+        # not silently scatter caches into the job working directory
+        # on Slurm / container setups that leave the variable set to
+        # a value like "".
+        xdg = os.environ.get("XDG_CACHE_HOME") or ""
+        if not xdg or not os.path.isabs(xdg):
+            xdg = os.path.join(os.path.expanduser("~"), ".cache")
+        cache_dir = os.path.join(xdg, "legoesm", "jit_cache")
+    else:
+        cache_dir = os.path.expanduser(env_dir)
+
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "Could not create JIT cache dir %s (%s); persistent cache "
+            "disabled this run.", cache_dir, exc,
+        )
+        _configure_persistent_jit_cache._done = True  # type: ignore[attr-defined]
+        return
+
+    try:
+        min_secs = float(os.environ.get("LEGOESM_JIT_CACHE_MIN_SECS", "1.0"))
+    except ValueError:
+        min_secs = 1.0
+
+    # Catch only the narrow class of "this JAX build does not know
+    # about the persistent-cache options" failures.  Anything else
+    # (e.g. a typed-argument programming error introduced by a future
+    # refactor) must propagate so the regression is visible — this
+    # whole helper exists *because* the cache being silently off is
+    # the regression we are trying to fix.  ``LEGOESM_JIT_CACHE_DIR=""``
+    # is the explicit escape hatch for users on older JAX.
+    try:
+        jax.config.update("jax_compilation_cache_dir", cache_dir)
+        # ``jax_persistent_cache_min_entry_size_bytes`` defaults to 0 in
+        # current JAX (cache everything that meets the time threshold).
+        jax.config.update(
+            "jax_persistent_cache_min_compile_time_secs", min_secs,
+        )
+    except AttributeError as exc:
+        # JAX < 0.4.18 (or a vendored fork) is missing these options
+        # entirely.  Skip with a single warning so legoESM still runs;
+        # the user can drop the persistent-cache flags by setting
+        # LEGOESM_JIT_CACHE_DIR="".
+        logger.warning(
+            "JAX persistent cache options not available in this JAX "
+            "build (%s); legoESM will run without compile caching.  "
+            "Upgrade JAX to 0.4.18+ or set LEGOESM_JIT_CACHE_DIR=\"\" "
+            "to silence this warning.", exc,
+        )
+        _configure_persistent_jit_cache._done = True  # type: ignore[attr-defined]
+        return
+
+    logger.info(
+        "JAX persistent JIT cache: dir=%s, min_compile_secs=%.1f",
+        cache_dir, min_secs,
+    )
+    _configure_persistent_jit_cache._done = True  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------

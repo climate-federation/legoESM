@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from typing import Callable
 
-import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
@@ -37,19 +36,25 @@ from legoesm.grids.vertical import (
 from legoesm import constants
 
 from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+from legoesm.atmosphere.dynamics.spectral_pe import (
+    SpectralHydrostaticState,
+    spectral_pe_to_grid,
+)
+from legoesm.grids.gaussian import (
+    sh_analysis_3d,
+    sh_analysis_oc2_3d,
+    sh_analysis_dmu_3d,
+)
 from legoesm.atmosphere.physics.turbulence.smagorinsky import smagorinsky_turbulence
 from legoesm.atmosphere.physics.turbulence.louis import louis_turbulence
 from legoesm.atmosphere.physics.turbulence.tke import tke_turbulence
+from legoesm.atmosphere.physics.turbulence.mynn25 import mynn25_turbulence
 from legoesm.atmosphere.physics.turbulence.clubb_lite import clubb_lite_turbulence
 from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
     holtslag_boville_turbulence,
 )
 from legoesm.atmosphere.physics.turbulence.ysu import ysu_turbulence
 from legoesm.atmosphere.physics.turbulence.edmf import edmf_turbulence
-from legoesm.atmosphere.physics.turbulence.ml_emulator import (
-    ml_turbulence,
-    TurbulenceEmulator,
-)
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.thermodynamics import (
     pressure_from_eos,
@@ -66,6 +71,8 @@ def _get_turbulence_fn(config: TurbulenceConfig):
         return "louis", louis_turbulence, config.louis
     elif config.scheme == "tke":
         return "tke", tke_turbulence, config.tke
+    elif config.scheme == "mynn25":
+        return "mynn25", mynn25_turbulence, config.mynn25
     elif config.scheme == "clubb_lite":
         return "clubb_lite", clubb_lite_turbulence, config.clubb_lite
     elif config.scheme == "holtslag_boville":
@@ -74,8 +81,6 @@ def _get_turbulence_fn(config: TurbulenceConfig):
         return "ysu", ysu_turbulence, config.ysu
     elif config.scheme == "edmf":
         return "edmf", edmf_turbulence, config.edmf
-    elif config.scheme == "ml_emulator":
-        return "ml_emulator", ml_turbulence, config.ml_emulator
     elif config.scheme == "none":
         return "none", None, None
     else:
@@ -86,6 +91,30 @@ from legoesm.atmosphere.physics._shared import (
     compute_heights_from_sigma as _compute_heights_from_sigma,
     compute_rho as _compute_rho,
 )
+
+
+def _resolve_T_sfc(T_col, phys_state):
+    """Pick the surface temperature seen by the bulk-flux call.
+
+    Default convention (preserved bit-for-bit by 3-D runs): ``T_sfc ==
+    T_col[:, -1]`` — the lowest air temperature stands in for the
+    surface skin temperature.  The SCM driver may override this on a
+    per-column basis by writing ``phys_state.surface_T_sfc_override``;
+    the override uses ``NaN`` as the sentinel for "fall back".
+
+    This is what gives ``SCMForcing(prescribe="T_s")`` a non-zero
+    bulk-flux gradient when paired with a turbulence scheme: anchoring
+    only ``T[..., -1]`` to the prescribed value would collapse
+    ``T_sfc − T[..., -1]`` to zero and silently suppress the sensible
+    heat flux (Phase B codex iter-1 high finding).
+    """
+    fallback = T_col[:, -1]
+    if phys_state is None:
+        return fallback
+    override = getattr(phys_state, "surface_T_sfc_override", None)
+    if override is None:
+        return fallback
+    return jnp.where(jnp.isnan(override), fallback, override)
 
 
 def make_turbulence_physics(
@@ -115,10 +144,25 @@ def make_turbulence_physics(
         return _make_nonhydrostatic_turbulence(turbulence_config, dt)
     elif model_type == "spectral_pe":
         return _make_spectral_pe_turbulence(turbulence_config, dt)
+    elif model_type == "mpas":
+        # UNBLOCKED: ``MPASPrimitiveEquationModel.step`` now (a) carries
+        # ``state.tracers`` (q_v advected by the dycore — Phase B) and (b)
+        # applies physics OPERATOR-SPLIT once per dt with a ``PhysicsState``
+        # carry threaded in/out, so the prognostic TKE field and the q_v
+        # diffusion tendency are no longer dropped.  ``_make_mpas_turbulence``
+        # (Perot edge→cell reconstruction + column backend + cell→edge
+        # projection) is the implementation; it reads the prescribed surface
+        # temperature from the per-step ``forcing["T_sfc"]`` (AMIP SST) when
+        # supplied, so the surface sensible/latent fluxes are SST-driven.
+        _mpas_turb_fn = _make_mpas_turbulence(turbulence_config, dt)
+        # Forcing-aware: the combined-physics dispatcher forwards
+        # ``forcing["T_sfc"]`` to fns advertising this (mirrors radiation).
+        _mpas_turb_fn._wants_forcing = True
+        return _mpas_turb_fn
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
-            f"Choose from 'hydrostatic', 'nonhydrostatic', 'spectral_pe'."
+            f"Choose from 'hydrostatic', 'nonhydrostatic', 'spectral_pe', 'mpas'."
         )
 
 
@@ -143,11 +187,7 @@ def _make_hydrostatic_turbulence(
     and the moisture tendency ``dq_v_dt`` is returned via ``tracer_tendencies``.
     """
     scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
-    needs_tke = scheme_name in ("tke", "clubb_lite", "edmf")
-    is_ml = scheme_name == "ml_emulator"
-    # ML model weights are static (initialized once, deterministic from seed).
-    # They stay in a closure because they are not simulation state.
-    _ml_model_cache = [None]
+    needs_tke = scheme_name in ("tke", "mynn25", "clubb_lite", "edmf")
 
     def physics_fn(
         state: HydrostaticState,
@@ -178,42 +218,56 @@ def _make_hydrostatic_turbulence(
         p_half_col = p_half.reshape(ncol, nlev + 1)
 
         # Extract water vapor from tracers if available; else assume dry.
+        # Pin all defaulted allocations to the state precision so we never
+        # silently promote an x64 zero into a float32 column path (which
+        # poisons downstream scan carries with mixed-precision dtypes).
+        _state_dtype = T.dtype
         if state.tracers is not None and "q_v" in state.tracers:
             _qv_raw = state.tracers["q_v"]
             _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
             q_v_col = _qv_data.reshape(ncol, nlev)
         else:
-            q_v_col = jnp.zeros((ncol, nlev))
+            q_v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
 
         dims_3d = ("face", "x", "y", "level")
         dims_2d = ("face", "x", "y")
 
         if turb_fn is None:
             return HydrostaticTendencies(
-                du_dt=Field(data=jnp.zeros(shape_3d), name="du_dt_turb", dims=dims_3d, units="m/s^2"),
-                dv_dt=Field(data=jnp.zeros(shape_3d), name="dv_dt_turb", dims=dims_3d, units="m/s^2"),
-                dT_dt=Field(data=jnp.zeros(shape_3d), name="dT_dt_turb", dims=dims_3d, units="K/s"),
-                dp_s_dt=Field(data=jnp.zeros(shape_2d), name="dp_s_dt_turb", dims=dims_2d, units="Pa/s"),
-                dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
+                du_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="du_dt_turb", dims=dims_3d, units="m/s^2"),
+                dv_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dv_dt_turb", dims=dims_3d, units="m/s^2"),
+                dT_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dT_dt_turb", dims=dims_3d, units="K/s"),
+                dp_s_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dp_s_dt_turb", dims=dims_2d, units="Pa/s"),
+                dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
             ), tke_out
 
-        # Heights and density
-        z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col)
-        rho = _compute_rho(T_col, p_full_col)
+        # Heights and density.  Use the moist (virtual-temperature)
+        # forms when q_v is available so that hydrostatic layer
+        # thicknesses and ρ in the diffusion solver are consistent
+        # with the actual column moisture (audit 2026-05-12
+        # MEDIUM #8 — dry forms drift ~1 % in tropical moist
+        # columns and produce inconsistent K · ∂φ/∂z fluxes vs the
+        # mass-weighted surface BC).
+        z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col, q_v=q_v_col)
+        rho = _compute_rho(T_col, p_full_col, q_v=q_v_col)
 
         # Surface conditions
-        T_sfc = T_col[:, -1]
+        T_sfc = _resolve_T_sfc(T_col, phys_state)
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
 
         if needs_tke:
             # Read TKE from explicit PhysicsState if provided.
             if phys_state is not None:
-                tke_in = phys_state.tke
+                tke_in = (
+                    phys_state.qke
+                    if scheme_name == "mynn25"
+                    else phys_state.tke
+                )
                 # Reshape if needed (PhysicsState stores flat columns).
                 if tke_in.shape != (ncol, nlev):
-                    tke_in = jnp.full((ncol, nlev), scheme_config.tke_min)
+                    tke_in = jnp.full((ncol, nlev), scheme_config.tke_min, dtype=_state_dtype)
             else:
-                tke_in = jnp.full((ncol, nlev), scheme_config.tke_min)
+                tke_in = jnp.full((ncol, nlev), scheme_config.tke_min, dtype=_state_dtype)
 
             turb_out, tke_new = turb_fn(
                 u_col, v_col, T_col, q_v_col, tke_in,
@@ -221,20 +275,6 @@ def _make_hydrostatic_turbulence(
                 T_sfc, q_sfc, rho, dt, scheme_config,
             )
             tke_out = tke_new
-        elif is_ml:
-            if _ml_model_cache[0] is None:
-                key = jax.random.PRNGKey(scheme_config.seed)
-                _ml_model_cache[0] = TurbulenceEmulator(
-                    scheme_config.n_input, scheme_config.n_hidden,
-                    scheme_config.n_layers, scheme_config.n_output,
-                    key=key,
-                )
-            turb_out = turb_fn(
-                u_col, v_col, T_col, q_v_col,
-                p_full_col, p_half_col, z_full, z_half,
-                T_sfc, q_sfc, rho, dt, scheme_config,
-                _ml_model_cache[0],
-            )
         else:
             turb_out = turb_fn(
                 u_col, v_col, T_col, q_v_col,
@@ -259,14 +299,175 @@ def _make_hydrostatic_turbulence(
             du_dt=Field(data=du_dt, name="du_dt_turb", dims=dims_3d, units="m/s^2"),
             dv_dt=Field(data=dv_dt, name="dv_dt_turb", dims=dims_3d, units="m/s^2"),
             dT_dt=Field(data=dT_dt, name="dT_dt_turb", dims=dims_3d, units="K/s"),
-            dp_s_dt=Field(data=jnp.zeros(shape_2d), name="dp_s_dt_turb", dims=dims_2d, units="Pa/s"),
-            dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
+            dp_s_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dp_s_dt_turb", dims=dims_2d, units="Pa/s"),
+            dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=p_s.dtype), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
             tracer_tendencies=tracer_tends,
         )
         return tendencies, tke_out
 
     def reset_state():
-        _ml_model_cache[0] = None
+        return None
+
+    physics_fn.reset_state = reset_state
+    return physics_fn
+
+
+# ===========================================================================
+# MPAS Voronoi (hydrostatic primitive eqn)
+# ===========================================================================
+
+def _make_mpas_turbulence(
+    turbulence_config: TurbulenceConfig,
+    dt: float,
+) -> Callable:
+    """Create turbulence physics_fn for MPASPrimitiveEquationModel.
+
+    Signature: ``(state, mesh, sigma_coord, phys_state=None) -> (HydrostaticTendencies, tke_out)``.
+
+    MPAS stores the prognostic horizontal velocity as the edge-normal
+    component ``state.u`` of shape ``(nEdges, nlev)`` with ``state.v is None``.
+    Column physics needs cell-centered ``u``/``v`` to compute shear and
+    eddy diffusivities.  We use the Perot (2000) area-weighted
+    edge→cell reconstruction (:func:`legoesm.grids.voronoi.reconstruct_cell_velocity`)
+    to recover ``(u_east, v_north)`` at cells, run the existing
+    column turbulence backend, then convert the cell-centered wind
+    tendencies back to edge-normal tendencies via
+    ``du_normal = du_east * cosθ + dv_north * sinθ`` where θ is
+    ``mesh.angleEdge``.  The averaging cells-flanking-edge is the
+    canonical MPAS C-grid projection; round-trip on a uniform field
+    is the identity to within floating-point error.
+
+    Audit 2026-05-12 finding MEDIUM #10.
+    """
+    scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
+    needs_tke = scheme_name in ("tke", "mynn25", "clubb_lite", "edmf")
+
+    def physics_fn(state, mesh, sigma_coord, phys_state=None, forcing=None):
+        from legoesm.grids.voronoi import reconstruct_cell_velocity
+
+        tke_out = None
+        if turb_fn is None:
+            # Build zero-tendency in MPAS layout (edge-centric u).
+            zero_edges = jnp.zeros_like(state.u.data)
+            zero_cells = jnp.zeros_like(state.T.data)
+            zero_ps = jnp.zeros_like(state.p_s.data)
+            tendencies = HydrostaticTendencies(
+                du_dt=state.u.replace(data=zero_edges),
+                dv_dt=None,
+                dT_dt=state.T.replace(data=zero_cells),
+                dp_s_dt=state.p_s.replace(data=zero_ps),
+                dphis_dt=state.phis.replace(data=zero_ps),
+            )
+            return tendencies, tke_out
+
+        u_edge = state.u.data       # (nEdges, nlev)
+        T = state.T.data            # (nCells, nlev)
+        p_s = state.p_s.data        # (nCells,)
+        nlev = sigma_coord.n_levels
+        nCells = T.shape[0]
+
+        # Edge → cell wind reconstruction (Perot 2000).
+        u_cell, v_cell = reconstruct_cell_velocity(u_edge, mesh)
+
+        # Pressures
+        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)  # (nCells, nlev)
+        p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)  # (nCells, nlev+1)
+
+        # Column-format inputs (already 1D × nlev, so reshape is a no-op).
+        T_col = T.reshape(nCells, nlev)
+        u_col = u_cell.reshape(nCells, nlev)
+        v_col = v_cell.reshape(nCells, nlev)
+        p_full_col = p_full.reshape(nCells, nlev)
+        p_half_col = p_half.reshape(nCells, nlev + 1)
+
+        _state_dtype = T.dtype
+        if state.tracers is not None and "q_v" in state.tracers:
+            _qv_raw = state.tracers["q_v"]
+            _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
+            q_v_col = _qv_data.reshape(nCells, nlev)
+        else:
+            q_v_col = jnp.zeros((nCells, nlev), dtype=_state_dtype)
+
+        z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col, q_v=q_v_col)
+        rho = _compute_rho(T_col, p_full_col, q_v=q_v_col)
+
+        # Surface temperature for the bulk fluxes: the prescribed SST from the
+        # per-step traced ``forcing["T_sfc"]`` (AMIP path) when supplied, so
+        # the sensible/latent surface fluxes are SST-driven and consistent
+        # with the radiation surface boundary; else the SCM/phys-carry value.
+        if forcing is not None and forcing.get("T_sfc") is not None:
+            T_sfc = jnp.asarray(forcing["T_sfc"]).reshape(nCells)
+        else:
+            T_sfc = _resolve_T_sfc(T_col, phys_state)
+        q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
+
+        if needs_tke:
+            if phys_state is not None:
+                tke_in = (
+                    phys_state.qke
+                    if scheme_name == "mynn25"
+                    else phys_state.tke
+                )
+                if tke_in.shape != (nCells, nlev):
+                    tke_in = jnp.full((nCells, nlev), scheme_config.tke_min, dtype=_state_dtype)
+            else:
+                tke_in = jnp.full((nCells, nlev), scheme_config.tke_min, dtype=_state_dtype)
+            turb_out, tke_new = turb_fn(
+                u_col, v_col, T_col, q_v_col, tke_in,
+                p_full_col, p_half_col, z_full, z_half,
+                T_sfc, q_sfc, rho, dt, scheme_config,
+            )
+            tke_out = tke_new
+        else:
+            turb_out = turb_fn(
+                u_col, v_col, T_col, q_v_col,
+                p_full_col, p_half_col, z_full, z_half,
+                T_sfc, q_sfc, rho, dt, scheme_config,
+            )
+
+        # Cell → edge tendency projection.  Average the cell tendencies
+        # of the two cells flanking each edge, then project onto the
+        # edge normal via ``angleEdge`` (eastward = 0).
+        # ``mesh.cellsOnEdge`` has shape ``(2, nEdges)`` in the MPAS
+        # layout: slice along axis 0 to get the per-edge cell-index
+        # vectors (``cellsOnEdge[0]`` and ``cellsOnEdge[1]``).
+        du_cell = turb_out.du_dt  # (nCells, nlev)
+        dv_cell = turb_out.dv_dt
+        c0 = mesh.cellsOnEdge[0]  # (nEdges,)
+        c1 = mesh.cellsOnEdge[1]  # (nEdges,)
+        du_e_east = 0.5 * (du_cell[c0] + du_cell[c1])
+        dv_e_north = 0.5 * (dv_cell[c0] + dv_cell[c1])
+        angle = mesh.angleEdge[:, None]
+        du_edge_normal = du_e_east * jnp.cos(angle) + dv_e_north * jnp.sin(angle)
+
+        dT_cell = turb_out.dT_dt
+
+        # Moisture tendency stays at cells (tracer pytree).
+        tracer_tends = {}
+        if state.tracers is not None and "q_v" in state.tracers:
+            _qv_raw = state.tracers["q_v"]
+            _name = "dq_v_dt_turb"
+            if hasattr(_qv_raw, "replace"):
+                tracer_tends["q_v"] = _qv_raw.replace(
+                    data=turb_out.dq_v_dt.reshape(_qv_raw.data.shape),
+                    name=_name,
+                )
+            else:
+                tracer_tends["q_v"] = turb_out.dq_v_dt.reshape(_qv_raw.shape)
+
+        zero_ps = jnp.zeros_like(p_s)
+        tendencies = HydrostaticTendencies(
+            du_dt=state.u.replace(data=du_edge_normal, name="du_dt_turb"),
+            dv_dt=None,
+            dT_dt=state.T.replace(data=dT_cell, name="dT_dt_turb"),
+            dp_s_dt=state.p_s.replace(data=zero_ps, name="dp_s_dt_turb"),
+            dphis_dt=state.phis.replace(data=zero_ps, name="dphis_dt_turb"),
+            tracer_tendencies=tracer_tends if tracer_tends else None,
+        )
+        return tendencies, tke_out
+
+    def reset_state():
+        return None
 
     physics_fn.reset_state = reset_state
     return physics_fn
@@ -290,9 +491,24 @@ def _make_nonhydrostatic_turbulence(
     element of the result tuple.
     """
     scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
-    needs_tke = scheme_name in ("tke", "clubb_lite", "edmf")
-    is_ml = scheme_name == "ml_emulator"
-    _ml_model_cache = [None]
+    needs_tke = scheme_name in ("tke", "mynn25", "clubb_lite", "edmf")
+    if scheme_name == "mynn25":
+        # Phase C codex iter-3 high: the nonhydrostatic CD-grid dynamics
+        # driver drops the returned ``PhysicsState`` after every
+        # physics call (see ``slow_tendency_fn`` in
+        # ``compressible_euler_cdgrid.py``), so the evolved qke would
+        # silently re-initialise from ``qke_min`` on every step.  Fail
+        # fast at factory time until phys_state is threaded through the
+        # nonhydrostatic step path (out of Phase C scope).
+        raise NotImplementedError(
+            "MYNN-2.5 turbulence requires a dynamics driver that "
+            "persists PhysicsState across steps.  The current "
+            "nonhydrostatic CD-grid driver discards the returned "
+            "phys_state, which would silently re-initialise qke on "
+            "every step.  Use ``model_type='hydrostatic'`` "
+            "for MYNN-2.5 (MPAS turbulence is not yet wired up); tracking issue: thread "
+            "PhysicsState through the nonhydrostatic step path."
+        )
 
     def physics_fn(
         state: NonHydrostaticState,
@@ -332,15 +548,20 @@ def _make_nonhydrostatic_turbulence(
         dims_tr = ("face", "x", "y", "level", "tracer")
 
         ncol = shape_2d[0] * shape_2d[1] * shape_2d[2]
+        # Mirror the hydrostatic bridge: pin defaulted allocations to the
+        # state precision so x64-default zeros do not poison the column
+        # path.
+        _state_dtype = T.dtype
+        _phis_dtype = state.phis.data.dtype
 
         if turb_fn is None:
             return NonHydrostaticTendencies(
-                du_dt=Field(data=jnp.zeros(shape_3d), name="du_dt_turb", dims=dims_3d, units="m/s^2"),
-                dv_dt=Field(data=jnp.zeros(shape_3d), name="dv_dt_turb", dims=dims_3d, units="m/s^2"),
-                dw_dt=Field(data=jnp.zeros(shape_w), name="dw_dt_turb", dims=dims_w, units="m/s^2"),
-                dtheta_prime_dt=Field(data=jnp.zeros(shape_3d), name="dtheta_prime_dt_turb", dims=dims_3d, units="K/s"),
-                drho_prime_dt=Field(data=jnp.zeros(shape_3d), name="drho_prime_dt_turb", dims=dims_3d, units="kg/m^3/s"),
-                dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
+                du_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="du_dt_turb", dims=dims_3d, units="m/s^2"),
+                dv_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dv_dt_turb", dims=dims_3d, units="m/s^2"),
+                dw_dt=Field(data=jnp.zeros(shape_w, dtype=_state_dtype), name="dw_dt_turb", dims=dims_w, units="m/s^2"),
+                dtheta_prime_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="dtheta_prime_dt_turb", dims=dims_3d, units="K/s"),
+                drho_prime_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="drho_prime_dt_turb", dims=dims_3d, units="kg/m^3/s"),
+                dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=_phis_dtype), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
                 dtracers_dt=Field(data=jnp.zeros_like(tracers), name="dtracers_dt_turb", dims=dims_tr, units="1/s"),
             ), tke_out
 
@@ -362,40 +583,30 @@ def _make_nonhydrostatic_turbulence(
         p_full_col = p.reshape(ncol, nlev)
         rho_col = rho_total.reshape(ncol, nlev)
 
-        q_v_col = jnp.zeros((ncol, nlev))
+        q_v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
         if n_tracers > 0:
             q_v_col = tracers[..., 0].reshape(ncol, nlev)
 
-        T_sfc = T_col[:, -1]
+        T_sfc = _resolve_T_sfc(T_col, phys_state)
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
 
         if needs_tke:
             if phys_state is not None:
-                tke_in = phys_state.tke
+                tke_in = (
+                    phys_state.qke
+                    if scheme_name == "mynn25"
+                    else phys_state.tke
+                )
                 if tke_in.shape != (ncol, nlev):
-                    tke_in = jnp.full((ncol, nlev), scheme_config.tke_min)
+                    tke_in = jnp.full((ncol, nlev), scheme_config.tke_min, dtype=_state_dtype)
             else:
-                tke_in = jnp.full((ncol, nlev), scheme_config.tke_min)
+                tke_in = jnp.full((ncol, nlev), scheme_config.tke_min, dtype=_state_dtype)
             turb_out, tke_new = turb_fn(
                 u_col, v_col, T_col, q_v_col, tke_in,
                 p_full_col, p_half, z_full, z_half,
                 T_sfc, q_sfc, rho_col, dt, scheme_config,
             )
             tke_out = tke_new
-        elif is_ml:
-            if _ml_model_cache[0] is None:
-                key = jax.random.PRNGKey(scheme_config.seed)
-                _ml_model_cache[0] = TurbulenceEmulator(
-                    scheme_config.n_input, scheme_config.n_hidden,
-                    scheme_config.n_layers, scheme_config.n_output,
-                    key=key,
-                )
-            turb_out = turb_fn(
-                u_col, v_col, T_col, q_v_col,
-                p_full_col, p_half, z_full, z_half,
-                T_sfc, q_sfc, rho_col, dt, scheme_config,
-                _ml_model_cache[0],
-            )
         else:
             turb_out = turb_fn(
                 u_col, v_col, T_col, q_v_col,
@@ -416,16 +627,16 @@ def _make_nonhydrostatic_turbulence(
         tendencies = NonHydrostaticTendencies(
             du_dt=Field(data=du_dt, name="du_dt_turb", dims=dims_3d, units="m/s^2"),
             dv_dt=Field(data=dv_dt, name="dv_dt_turb", dims=dims_3d, units="m/s^2"),
-            dw_dt=Field(data=jnp.zeros(shape_w), name="dw_dt_turb", dims=dims_w, units="m/s^2"),
+            dw_dt=Field(data=jnp.zeros(shape_w, dtype=_state_dtype), name="dw_dt_turb", dims=dims_w, units="m/s^2"),
             dtheta_prime_dt=Field(data=dtheta_prime_dt, name="dtheta_prime_dt_turb", dims=dims_3d, units="K/s"),
-            drho_prime_dt=Field(data=jnp.zeros(shape_3d), name="drho_prime_dt_turb", dims=dims_3d, units="kg/m^3/s"),
-            dphis_dt=Field(data=jnp.zeros(shape_2d), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
+            drho_prime_dt=Field(data=jnp.zeros(shape_3d, dtype=_state_dtype), name="drho_prime_dt_turb", dims=dims_3d, units="kg/m^3/s"),
+            dphis_dt=Field(data=jnp.zeros(shape_2d, dtype=_phis_dtype), name="dphis_dt_turb", dims=dims_2d, units="m^2/s^3"),
             dtracers_dt=Field(data=dtracers, name="dtracers_dt_turb", dims=dims_tr, units="1/s"),
         )
         return tendencies, tke_out
 
     def reset_state():
-        _ml_model_cache[0] = None
+        return None
 
     physics_fn.reset_state = reset_state
     return physics_fn
@@ -449,21 +660,23 @@ def _make_spectral_pe_turbulence(
     element of the result tuple.
     """
     scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
-    needs_tke = scheme_name in ("tke", "clubb_lite", "edmf")
-    is_ml = scheme_name == "ml_emulator"
-    _ml_model_cache = [None]
+    needs_tke = scheme_name in ("tke", "mynn25", "clubb_lite", "edmf")
+    if scheme_name == "mynn25":
+        # Phase C codex iter-3 high: spectral PE dynamics drops the
+        # returned ``PhysicsState`` (see spectral_pe.py:1556-1557), so
+        # qke would silently re-initialise on every step.  Fail fast
+        # until phys_state is threaded through the spectral PE step.
+        raise NotImplementedError(
+            "MYNN-2.5 turbulence requires a dynamics driver that "
+            "persists PhysicsState across steps.  The current "
+            "spectral PE driver discards the returned phys_state, "
+            "which would silently re-initialise qke on every step.  "
+            "Use ``model_type='hydrostatic'`` for MYNN-2.5 (MPAS "
+            "turbulence is not yet wired up); tracking issue: thread "
+            "PhysicsState through the spectral PE step path."
+        )
 
     def physics_fn(state, grid, sigma_coord, grid_fields=None, phys_state=None):
-        from legoesm.atmosphere.dynamics.spectral_pe import (
-            SpectralHydrostaticState,
-            spectral_pe_to_grid,
-        )
-        from legoesm.grids.gaussian import (
-            sh_analysis_3d,
-            sh_analysis_oc2_3d,
-            sh_analysis_dmu_3d,
-        )
-
         tke_out = None
 
         # Transform spectral state to grid space (or reuse precomputed fields).
@@ -491,7 +704,10 @@ def _make_spectral_pe_turbulence(
         v_col = v.reshape(ncol, nlev)
         p_full_col = p_full.reshape(ncol, nlev)
         p_half_col = p_half.reshape(ncol, nlev + 1)
-        q_v_col = jnp.zeros((ncol, nlev))
+        # Pin the column-physics dtype to the gridded state precision so
+        # we never silently flow x64 zeros into the column path.
+        _state_dtype = T.dtype
+        q_v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
 
         zero_3d = jnp.zeros_like(state.vor_hat.data)
         zero_2d = jnp.zeros_like(state.lnps_hat.data)
@@ -505,40 +721,30 @@ def _make_spectral_pe_turbulence(
                 phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
             ), tke_out
 
-        # Heights and density
-        z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col)
-        rho = _compute_rho(T_col, p_full_col)
+        # Heights and density (moist form — audit 2026-05-12 MEDIUM #8).
+        z_full, z_half = _compute_heights_from_sigma(T_col, p_half_col, q_v=q_v_col)
+        rho = _compute_rho(T_col, p_full_col, q_v=q_v_col)
 
-        T_sfc = T_col[:, -1]
+        T_sfc = _resolve_T_sfc(T_col, phys_state)
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
 
         if needs_tke:
             if phys_state is not None:
-                tke_in = phys_state.tke
+                tke_in = (
+                    phys_state.qke
+                    if scheme_name == "mynn25"
+                    else phys_state.tke
+                )
                 if tke_in.shape != (ncol, nlev):
-                    tke_in = jnp.full((ncol, nlev), scheme_config.tke_min)
+                    tke_in = jnp.full((ncol, nlev), scheme_config.tke_min, dtype=_state_dtype)
             else:
-                tke_in = jnp.full((ncol, nlev), scheme_config.tke_min)
+                tke_in = jnp.full((ncol, nlev), scheme_config.tke_min, dtype=_state_dtype)
             turb_out, tke_new = turb_fn(
                 u_col, v_col, T_col, q_v_col, tke_in,
                 p_full_col, p_half_col, z_full, z_half,
                 T_sfc, q_sfc, rho, dt, scheme_config,
             )
             tke_out = tke_new
-        elif is_ml:
-            if _ml_model_cache[0] is None:
-                key = jax.random.PRNGKey(scheme_config.seed)
-                _ml_model_cache[0] = TurbulenceEmulator(
-                    scheme_config.n_input, scheme_config.n_hidden,
-                    scheme_config.n_layers, scheme_config.n_output,
-                    key=key,
-                )
-            turb_out = turb_fn(
-                u_col, v_col, T_col, q_v_col,
-                p_full_col, p_half_col, z_full, z_half,
-                T_sfc, q_sfc, rho, dt, scheme_config,
-                _ml_model_cache[0],
-            )
         else:
             turb_out = turb_fn(
                 u_col, v_col, T_col, q_v_col,
@@ -586,7 +792,7 @@ def _make_spectral_pe_turbulence(
         return tendencies, tke_out
 
     def reset_state():
-        _ml_model_cache[0] = None
+        return None
 
     physics_fn.reset_state = reset_state
     return physics_fn

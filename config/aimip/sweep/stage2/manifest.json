@@ -1,0 +1,50 @@
+{
+  "stage": 2,
+  "metric": "loss",
+  "top_k": 1,
+  "winners": {
+    "aimip_convection": [
+      {
+        "scheme": "zhang_mcfarlane",
+        "score": 6.381305025936826,
+        "combo_name": "combo_conv_zhang_mcfarlane"
+      }
+    ],
+    "aimip_turbulence": [
+      {
+        "scheme": "edmf",
+        "score": 6.296870765522414,
+        "combo_name": "combo_turb_edmf"
+      }
+    ],
+    "aimip_gwd": [
+      {
+        "scheme": "hines",
+        "score": 6.60640229544708,
+        "combo_name": "combo_gwd_hines"
+      }
+    ],
+    "aimip_microphysics": [
+      {
+        "scheme": "sundqvist",
+        "score": 6.67860107284233,
+        "combo_name": "combo_baseline"
+      }
+    ]
+  },
+  "baseline_score": 6.67860107284233,
+  "n_combos": 1,
+  "combos": [
+    {
+      "name": "combo_conv-zhang_mcfarlane_turb-edmf_gwd-hines_micro-sundqvist",
+      "overrides": {
+        "aimip_convection": "zhang_mcfarlane",
+        "aimip_turbulence": "edmf",
+        "aimip_gwd": "hines",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage2/combo_conv-zhang_mcfarlane_turb-edmf_gwd-hines_micro-sundqvist/suite.yaml"
+    }
+  ],
+  "results_dir": "results/aimip_classical_sweep_stage2"
+}

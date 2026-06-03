@@ -414,3 +414,72 @@ class TestSolverAxes:
         assert "shallow_water" in DYNAMICS_OPTIONS
         assert "cdgrid" in DISCRETIZATION_OPTIONS
         assert "spectral" in DISCRETIZATION_OPTIONS
+
+
+# ===================================================================
+# Lat-lon C-grid tracer transport — face-coordinate evaluation
+# ===================================================================
+
+class TestLatLonTracerTransportFaceEval:
+    """Verify prescribed winds are evaluated at true face coordinates."""
+
+    def test_face_eval_differs_from_cell_avg(self):
+        """A wind that varies sharply in longitude should produce different
+        face values when evaluated at face coords vs averaged from cells.
+        """
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.dynamics.tracer_transport_latlon import (
+            _uface_coords, _vface_coords,
+        )
+
+        grid = create_latlon_grid(16)
+        sigma = create_sigma_coordinate(5)
+
+        lon_u, lat_u = _uface_coords(grid)
+        lon_v, lat_v = _vface_coords(grid)
+
+        # _uface_coords returns n_lon unique faces (no periodic wrap);
+        # the caller appends the wrap column after wind evaluation.
+        assert lon_u.shape == (grid.n_lat, grid.n_lon)
+        assert lat_v.shape == (grid.n_lat + 1, grid.n_lon)
+        # Interior u-face lon should be offset from cell lon by ~dlon/2
+        lon_diff = float(jnp.abs(lon_u[0, 1] - grid.lon[0]))
+        assert lon_diff > 0.01, f"u-face lon not offset: diff={lon_diff}"
+
+    def test_spatially_varying_wind_fidelity(self):
+        """When wind varies sharply, face-evaluated transport must differ
+        from cell-averaged transport.
+        """
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.grids.vertical import create_sigma_coordinate
+        from legoesm.atmosphere.dynamics.tracer_transport_latlon import (
+            TracerTransportLatLonModel, TracerTransportLatLonConfig,
+        )
+
+        grid = create_latlon_grid(16)
+        sigma = create_sigma_coordinate(5)
+        nlev = sigma.n_levels
+
+        # Sharply varying wind: u = sin(4*lon), v = 0, sigma_dot = 0
+        def sharp_wind(t, lon2d, lat2d, sc):
+            u = 10.0 * jnp.sin(4.0 * lon2d)[..., None] * jnp.ones(nlev)
+            v = jnp.zeros_like(u)
+            sd = jnp.zeros((*lon2d.shape, nlev + 1))
+            return u, v, sd
+
+        # Gaussian tracer bump
+        q_data = jnp.exp(-(grid.lon2d**2 + grid.lat2d**2) / 0.5)
+        q_data = q_data[:, :, None, None] * jnp.ones((1, 1, nlev, 1))
+        tracers = Field(data=q_data, name="tracers",
+                        dims=("lat", "lon", "level", "tracer"), units="kg/kg")
+        time = Field(data=jnp.array(0.0), name="time", dims=(), units="s")
+        state = TracerState(tracers=tracers, time=time)
+
+        model = TracerTransportLatLonModel(grid, sigma, sharp_wind)
+        state_new = model.step(state, dt=300.0)
+
+        assert jnp.all(jnp.isfinite(state_new.tracers.data))
+        # The tracer should have been advected (not identical to initial)
+        diff = float(jnp.max(jnp.abs(state_new.tracers.data - q_data)))
+        assert diff > 1e-6, f"Tracer unchanged after transport: max diff = {diff}"

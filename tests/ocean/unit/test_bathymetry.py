@@ -466,7 +466,7 @@ class TestRestStateRealistic:
         cfg = BathymetryConfig(source="idealized")
         state = rest_state_ocean_realistic(
             small_grid, z_coord, cfg,
-            T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+            T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         )
 
         assert state.T.data.shape == (6, 8, 8, 10)
@@ -546,3 +546,664 @@ class TestFileLoadingErrors:
         cfg = BathymetryConfig(source="unknown")
         with pytest.raises(ValueError, match="Unknown bathymetry source"):
             init_ocean_bathymetry(small_grid, cfg)
+
+
+# ============================================================================
+# Mellor-Ezer-Oey r-factor cap
+# ============================================================================
+
+
+class TestMEORFactorCap:
+    """``apply_meo_r_factor_cap`` correctly caps the r-factor while
+    preserving ocean topology and adding minimal volume."""
+
+    def test_already_satisfied_is_noop(self):
+        """If the bathymetry already satisfies r < target, MEO should
+        not change anything."""
+        from legoesm.ocean.bathymetry import apply_meo_r_factor_cap
+        # Uniform bathymetry → r = 0 everywhere.
+        H = np.full((5, 10), 4000.0)
+        ocean = np.ones_like(H)
+        H_out, info = apply_meo_r_factor_cap(H, ocean, 0.2)
+        assert info["initial_r_max"] == 0.0
+        assert info["final_r_max"] == 0.0
+        assert info["cells_modified"] == 0
+        np.testing.assert_array_equal(H_out, H)
+
+    def test_caps_a_step_bathymetry(self):
+        """Sharp step from 200m → 4000m must be smoothed by MEO."""
+        from legoesm.ocean.bathymetry import apply_meo_r_factor_cap
+        H = np.full((5, 10), 4000.0)
+        H[:, :5] = 200.0
+        ocean = np.ones_like(H)
+        # Initial r at the step: |200 - 4000| / 4000 = 0.95
+        H_out, info = apply_meo_r_factor_cap(H, ocean, 0.2, max_iter=200)
+        assert info["initial_r_max"] > 0.9
+        assert info["final_r_max"] <= 0.2 + 1e-10, (
+            f"Final r_max = {info['final_r_max']}"
+        )
+        # All cells should be deeper (or unchanged), never shallower.
+        assert np.all(H_out >= H - 1e-9)
+        # Some cells were modified
+        assert info["cells_modified"] > 0
+        # Volume change is positive (added water by deepening shallow cells)
+        assert info["volume_change_frac"] > 0
+
+    def test_volume_change_bounded(self):
+        """On a moderately-rough field, volume change should be modest
+        (<20% — typical real-world is 1-5%, but a synthetic adversarial
+        case can be larger)."""
+        from legoesm.ocean.bathymetry import apply_meo_r_factor_cap
+        rng = np.random.default_rng(seed=42)
+        # Large H baseline + spotty shallow cells
+        H = np.full((20, 40), 4000.0)
+        # 10 random shallow spots at 200m
+        idx_lat = rng.integers(0, 20, size=10)
+        idx_lon = rng.integers(0, 40, size=10)
+        for i, j in zip(idx_lat, idx_lon):
+            H[i, j] = 200.0
+        ocean = np.ones_like(H)
+        _H_out, info = apply_meo_r_factor_cap(H, ocean, 0.2)
+        # On this adversarial pattern (isolated 200m spots in 4000m sea),
+        # MEO should still finish and cap r below target.
+        assert info["final_r_max"] <= 0.2 + 1e-10
+        assert info["volume_change_frac"] < 0.2
+
+    def test_land_cells_untouched(self):
+        """Land cells (ocean_mask=0) must be unchanged after MEO."""
+        from legoesm.ocean.bathymetry import apply_meo_r_factor_cap
+        H = np.full((5, 10), 4000.0)
+        H[:, :5] = 200.0
+        # Right half is land
+        ocean = np.ones_like(H)
+        ocean[:, 7:] = 0.0
+        H_initial = H.copy()
+        H_out, info = apply_meo_r_factor_cap(H, ocean, 0.2)
+        # Land cells must equal their initial value.
+        land = ocean < 0.5
+        np.testing.assert_array_equal(H_out[land], H_initial[land])
+
+    def test_idempotent(self):
+        """Running MEO twice produces the same result as running once."""
+        from legoesm.ocean.bathymetry import apply_meo_r_factor_cap
+        H = np.full((5, 10), 4000.0)
+        H[:, :5] = 200.0
+        ocean = np.ones_like(H)
+        H_once, _ = apply_meo_r_factor_cap(H, ocean, 0.2)
+        H_twice, info = apply_meo_r_factor_cap(H_once, ocean, 0.2)
+        np.testing.assert_allclose(H_once, H_twice, atol=1e-9)
+        # Second run should converge in 1 iteration with no changes.
+        assert info["cells_modified"] == 0
+
+    def test_invalid_r_factor_raises(self):
+        from legoesm.ocean.bathymetry import apply_meo_r_factor_cap
+        H = np.full((3, 5), 4000.0)
+        ocean = np.ones_like(H)
+        with pytest.raises(ValueError, match="r_factor_max"):
+            apply_meo_r_factor_cap(H, ocean, 0.0)
+        with pytest.raises(ValueError, match="r_factor_max"):
+            apply_meo_r_factor_cap(H, ocean, 1.0)
+        with pytest.raises(ValueError, match="r_factor_max"):
+            apply_meo_r_factor_cap(H, ocean, -0.1)
+
+    def test_meo_via_load_bathymetry_pipeline(self, latlon_grid, tmp_path):
+        """End-to-end: setting ``r_factor_max`` in BathymetryConfig
+        triggers MEO during ``load_bathymetry`` and lowers the final
+        r-factor."""
+        import xarray as xr
+        # Build a synthetic ETOPO with sharp continental-slope-style cuts
+        n_lat, n_lon = 91, 180
+        lat = np.linspace(-90.0, 90.0, n_lat)
+        lon = np.linspace(0.0, 360.0, n_lon, endpoint=False)
+        LAT, LON = np.meshgrid(lat, lon, indexing="ij")
+        # 4000 m ocean, sharp shelf at lon < 30°: depth = 200 m
+        elev = np.where(np.abs(LAT) > 80.0, 100.0,
+                          np.where(LON < 30.0, -200.0, -4000.0))
+        ds = xr.Dataset(
+            {"z": (["lat", "lon"], elev.astype(np.float32))},
+            coords={"lat": lat, "lon": lon},
+        )
+        path = tmp_path / "shelf_synth.nc"
+        ds.to_netcdf(path)
+
+        # Without MEO
+        cfg_no_meo = BathymetryConfig(
+            source="file", path=str(path),
+            smoothing_passes=0, enforce_straits=False,
+            fill_isolated_basins=False, H_min=10.0,
+            r_factor_max=None,
+        )
+        H_no, mask_no = init_ocean_bathymetry(latlon_grid, cfg_no_meo)
+        # With MEO
+        cfg_meo = BathymetryConfig(
+            source="file", path=str(path),
+            smoothing_passes=0, enforce_straits=False,
+            fill_isolated_basins=False, H_min=10.0,
+            r_factor_max=0.2, meo_max_iter=200,
+        )
+        H_meo, mask_meo = init_ocean_bathymetry(latlon_grid, cfg_meo)
+
+        from legoesm.ocean.bathymetry import _r_factor_max
+        r_no = _r_factor_max(np.asarray(H_no), np.asarray(mask_no))
+        r_meo = _r_factor_max(np.asarray(H_meo), np.asarray(mask_meo))
+        assert r_no > 0.5, f"baseline r should be high; got {r_no}"
+        # Allow a small float32 tolerance from get_policy().storage casts
+        # in load_bathymetry_latlon_cgrid.
+        assert r_meo <= 0.2 + 1e-6, (
+            f"MEO failed to cap r-factor; final r = {r_meo}"
+        )
+        # Mask topology preserved (straits not enforced; flat land unchanged)
+        np.testing.assert_array_equal(
+            np.asarray(mask_no), np.asarray(mask_meo),
+        )
+
+
+# ============================================================================
+# MEO r-factor cap on Voronoi (P1a of MPAS realistic-geometry plan)
+# ============================================================================
+
+
+@pytest.fixture
+def small_voronoi_mesh():
+    """Subdivision-level-2 Voronoi mesh (~162 cells)."""
+    from legoesm.grids.voronoi import create_voronoi_mesh
+    return create_voronoi_mesh(subdivision_level=2)
+
+
+class TestMEORFactorCapVoronoi:
+    """``apply_meo_r_factor_cap_voronoi`` — edge-list MEO smoothing on
+    an unstructured Voronoi mesh.  The 2D Cartesian variant is wrong
+    for MPAS because ``np.roll`` along the cell-index axis has no
+    geometric meaning.
+    """
+
+    def test_uniform_bathymetry_is_noop(self, small_voronoi_mesh):
+        """Uniform H gives r=0 everywhere; MEO must not change anything."""
+        from legoesm.ocean.bathymetry import apply_meo_r_factor_cap_voronoi
+        nCells = small_voronoi_mesh.nCells
+        H = np.full(nCells, 4000.0)
+        ocean = np.ones(nCells)
+        H_out, info = apply_meo_r_factor_cap_voronoi(
+            H, ocean, small_voronoi_mesh, 0.2,
+        )
+        assert info["initial_r_max"] == 0.0
+        assert info["final_r_max"] == 0.0
+        assert info["cells_modified"] == 0
+        np.testing.assert_array_equal(H_out, H)
+
+    def test_caps_a_step_bathymetry(self, small_voronoi_mesh):
+        """Sharp 200m → 4000m step (split by latitude) must be capped."""
+        from legoesm.ocean.bathymetry import apply_meo_r_factor_cap_voronoi
+        nCells = small_voronoi_mesh.nCells
+        lat = np.asarray(small_voronoi_mesh.latCell)
+        H = np.where(lat < 0.0, 200.0, 4000.0)
+        ocean = np.ones(nCells)
+        H_out, info = apply_meo_r_factor_cap_voronoi(
+            H, ocean, small_voronoi_mesh, 0.2, max_iter=400,
+        )
+        assert info["initial_r_max"] > 0.9
+        assert info["final_r_max"] <= 0.2 + 1e-10, (
+            f"Final r_max = {info['final_r_max']}"
+        )
+        assert np.all(H_out >= H - 1.0e-9)
+        assert info["cells_modified"] > 0
+        assert info["volume_change_frac"] > 0
+
+    def test_land_cells_untouched(self, small_voronoi_mesh):
+        """Land cells (ocean_mask=0) must be unchanged after MEO."""
+        from legoesm.ocean.bathymetry import apply_meo_r_factor_cap_voronoi
+        nCells = small_voronoi_mesh.nCells
+        lat = np.asarray(small_voronoi_mesh.latCell)
+        H = np.where(lat < 0.0, 200.0, 4000.0)
+        # Northern hemisphere is land
+        ocean = np.where(lat < 0.0, 1.0, 0.0)
+        H_initial = H.copy()
+        H_out, _ = apply_meo_r_factor_cap_voronoi(
+            H, ocean, small_voronoi_mesh, 0.2,
+        )
+        land = ocean < 0.5
+        np.testing.assert_array_equal(H_out[land], H_initial[land])
+
+    def test_idempotent(self, small_voronoi_mesh):
+        """A second MEO pass on already-capped H is a no-op."""
+        from legoesm.ocean.bathymetry import apply_meo_r_factor_cap_voronoi
+        nCells = small_voronoi_mesh.nCells
+        lat = np.asarray(small_voronoi_mesh.latCell)
+        H = np.where(lat < 0.0, 200.0, 4000.0)
+        ocean = np.ones(nCells)
+        H_once, _ = apply_meo_r_factor_cap_voronoi(
+            H, ocean, small_voronoi_mesh, 0.2, max_iter=400,
+        )
+        H_twice, info = apply_meo_r_factor_cap_voronoi(
+            H_once, ocean, small_voronoi_mesh, 0.2, max_iter=400,
+        )
+        np.testing.assert_allclose(H_once, H_twice, atol=1.0e-9)
+        assert info["cells_modified"] == 0
+
+    def test_cells_only_deepen(self, small_voronoi_mesh):
+        """MEO never makes a cell shallower — it deepens shallow cells
+        adjacent to deep ones."""
+        from legoesm.ocean.bathymetry import apply_meo_r_factor_cap_voronoi
+        nCells = small_voronoi_mesh.nCells
+        rng = np.random.default_rng(seed=7)
+        H = rng.uniform(100.0, 5000.0, size=nCells)
+        ocean = np.ones(nCells)
+        H_out, _ = apply_meo_r_factor_cap_voronoi(
+            H, ocean, small_voronoi_mesh, 0.3,
+        )
+        assert np.all(H_out >= H - 1.0e-9), (
+            "MEO violated the monotone-deepening property."
+        )
+
+    def test_invalid_r_factor_raises(self, small_voronoi_mesh):
+        from legoesm.ocean.bathymetry import apply_meo_r_factor_cap_voronoi
+        H = np.full(small_voronoi_mesh.nCells, 4000.0)
+        ocean = np.ones_like(H)
+        with pytest.raises(ValueError, match="r_factor_max"):
+            apply_meo_r_factor_cap_voronoi(H, ocean, small_voronoi_mesh, 0.0)
+        with pytest.raises(ValueError, match="r_factor_max"):
+            apply_meo_r_factor_cap_voronoi(H, ocean, small_voronoi_mesh, 1.0)
+        with pytest.raises(ValueError, match="r_factor_max"):
+            apply_meo_r_factor_cap_voronoi(H, ocean, small_voronoi_mesh, -0.1)
+
+    def test_r_factor_max_voronoi_helper(self, small_voronoi_mesh):
+        """Direct test of the r_max helper on a known-r configuration."""
+        from legoesm.ocean.bathymetry import _r_factor_max_voronoi
+        nCells = small_voronoi_mesh.nCells
+        # Uniform → r_max = 0.
+        H_uniform = np.full(nCells, 1000.0)
+        ocean = np.ones(nCells)
+        assert _r_factor_max_voronoi(
+            H_uniform, ocean, small_voronoi_mesh.cellsOnEdge,
+        ) == 0.0
+        # Two-value field: deep_cells at lat>0, shallow at lat<0 →
+        # at the equator any edge spanning latitudes has r close to
+        # |1000 - 100| / 1000 = 0.9.
+        lat = np.asarray(small_voronoi_mesh.latCell)
+        H_split = np.where(lat < 0.0, 100.0, 1000.0)
+        r = _r_factor_max_voronoi(
+            H_split, ocean, small_voronoi_mesh.cellsOnEdge,
+        )
+        assert abs(r - 0.9) < 1.0e-12, f"Expected 0.9, got {r}"
+
+
+# ============================================================================
+# MPAS realistic-bathymetry end-to-end (P1b of MPAS realistic-geometry plan)
+# ============================================================================
+
+
+class TestMPASRealisticBathymetry:
+    """``rest_state_mpas_ocean(..., bathymetry=cfg)`` loads ETOPO-style
+    NetCDF onto a Voronoi mesh and produces a state with non-uniform
+    ``H_bathy`` and a derived ``land_mask``.  Default invocation
+    (no ``bathymetry`` kwarg) keeps the idealized path bit-exact.
+    """
+
+    @staticmethod
+    def _make_synthetic_etopo_nc(tmp_path, n_lat_src=181, n_lon_src=360):
+        """Hemispherically-symmetric bowl: -4000 m ocean, +100 m land
+        above |lat|=80°.  Same pattern as the lat-lon test."""
+        import xarray as xr
+        lat = np.linspace(-90.0, 90.0, n_lat_src)
+        lon = np.linspace(0.0, 360.0, n_lon_src, endpoint=False)
+        LAT, _ = np.meshgrid(lat, lon, indexing="ij")
+        elev = np.where(np.abs(LAT) > 80.0, 100.0, -4000.0)
+        ds = xr.Dataset(
+            {"z": (["lat", "lon"], elev.astype(np.float32))},
+            coords={"lat": lat, "lon": lon},
+        )
+        path = tmp_path / "synthetic_etopo_mpas.nc"
+        ds.to_netcdf(path)
+        return str(path)
+
+    def test_default_call_unchanged(self, small_voronoi_mesh, z_coord):
+        """No ``bathymetry`` kwarg → idealized path, bit-exact."""
+        from legoesm.ocean.init_mpas import (
+            rest_state_mpas_ocean, idealized_bathymetry_mpas,
+        )
+        state = rest_state_mpas_ocean(
+            small_voronoi_mesh, z_coord, H_max=4000.0,
+            land_lat_threshold=80.0,
+        )
+        H_ref, mask_ref = idealized_bathymetry_mpas(
+            small_voronoi_mesh, 4000.0, 80.0,
+        )
+        np.testing.assert_array_equal(
+            np.asarray(state.H_bathy.data), np.asarray(H_ref),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(state.land_mask.data), np.asarray(mask_ref),
+        )
+
+    def test_realistic_bathymetry_from_file(
+        self, small_voronoi_mesh, z_coord, tmp_path,
+    ):
+        """Pass a ``BathymetryConfig(source='file', path=...)`` and the
+        state must carry a depth pattern matching the ETOPO file."""
+        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+
+        path = self._make_synthetic_etopo_nc(tmp_path)
+        cfg = BathymetryConfig(
+            source="file", path=path,
+            H_max=5500.0, H_min=10.0,
+            smoothing_passes=0,
+            enforce_straits=False,
+            fill_isolated_basins=False,
+            depth_is_negative=True,
+            r_factor_max=None,  # disable MEO for round-trip clarity
+        )
+        state = rest_state_mpas_ocean(small_voronoi_mesh, z_coord, bathymetry=cfg)
+
+        H = np.asarray(state.H_bathy.data)
+        mask = np.asarray(state.land_mask.data)
+        lat_deg = np.asarray(np.degrees(small_voronoi_mesh.latCell))
+
+        # Equatorial cells must be ocean at ~4000 m.
+        eq = np.abs(lat_deg) < 60.0
+        assert mask[eq].mean() > 0.95, (
+            f"Equatorial cells should be ocean; got mask mean "
+            f"{mask[eq].mean():.3f}"
+        )
+        ocean_eq = eq & (mask > 0.5)
+        assert np.all(np.abs(H[ocean_eq] - 4000.0) < 50.0), (
+            f"Equatorial ocean depth should be ~4000 m; got "
+            f"min={H[ocean_eq].min():.1f}, max={H[ocean_eq].max():.1f}"
+        )
+
+        # High-latitude cells must be predominantly land.  We test only
+        # very-high lat (>85°) because the fixture mesh has limited
+        # resolution and sub-grid ocean fraction can flip cells in the
+        # 80-85° transition band.
+        polar = np.abs(lat_deg) > 85.0
+        if polar.any():
+            assert mask[polar].mean() < 0.5, (
+                f"|lat|>85° cells should be predominantly land; got "
+                f"mask mean {mask[polar].mean():.3f}"
+            )
+
+    def test_realistic_bathymetry_preserves_state_shape(
+        self, small_voronoi_mesh, z_coord, tmp_path,
+    ):
+        """Realistic-bathy state has the same field shapes as the
+        idealized state — only ``H_bathy``/``land_mask`` data differs."""
+        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+
+        path = self._make_synthetic_etopo_nc(tmp_path)
+        cfg = BathymetryConfig(
+            source="file", path=path,
+            H_max=5500.0, H_min=10.0,
+            smoothing_passes=0, enforce_straits=False,
+            fill_isolated_basins=False, depth_is_negative=True,
+            r_factor_max=None,
+        )
+        state_ideal = rest_state_mpas_ocean(small_voronoi_mesh, z_coord)
+        state_real = rest_state_mpas_ocean(
+            small_voronoi_mesh, z_coord, bathymetry=cfg,
+        )
+        assert state_real.u.data.shape == state_ideal.u.data.shape
+        assert state_real.T.data.shape == state_ideal.T.data.shape
+        assert state_real.S.data.shape == state_ideal.S.data.shape
+        assert state_real.eta.data.shape == state_ideal.eta.data.shape
+        assert state_real.H_bathy.data.shape == state_ideal.H_bathy.data.shape
+        assert state_real.land_mask.data.shape == state_ideal.land_mask.data.shape
+
+    def test_realistic_bathymetry_with_meo_smoothing(
+        self, small_voronoi_mesh, z_coord, tmp_path,
+    ):
+        """End-to-end pipeline with MEO r-factor cap enabled — exercises
+        the Voronoi-aware ``apply_meo_r_factor_cap_voronoi`` from P1a."""
+        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+        from legoesm.ocean.bathymetry import _r_factor_max_voronoi
+
+        path = self._make_synthetic_etopo_nc(tmp_path)
+        cfg = BathymetryConfig(
+            source="file", path=path,
+            H_max=5500.0, H_min=10.0,
+            smoothing_passes=2,
+            enforce_straits=False, fill_isolated_basins=False,
+            depth_is_negative=True,
+            r_factor_max=0.3,
+        )
+        state = rest_state_mpas_ocean(small_voronoi_mesh, z_coord, bathymetry=cfg)
+        H = np.asarray(state.H_bathy.data)
+        mask = np.asarray(state.land_mask.data)
+        # MEO cap must hold on the resulting bathymetry.
+        r_final = _r_factor_max_voronoi(H, mask, small_voronoi_mesh.cellsOnEdge)
+        assert r_final <= 0.3 + 1e-10, (
+            f"MEO r-factor cap not satisfied: r_final={r_final:.4f}"
+        )
+
+
+# ============================================================================
+# Lat-lon C-grid integration (Phase 0 of realistic-geometry plan)
+# ============================================================================
+
+
+@pytest.fixture
+def latlon_grid():
+    """Small 36×72 (5°) lat-lon grid — same shape as global overturning."""
+    from legoesm.grids.latlon import create_latlon_grid
+    return create_latlon_grid(36, 72)
+
+
+class TestLatLonCGridDispatch:
+    """LatLonGrid must dispatch to its own bathymetry path, not collide
+    with cubed-sphere or Gaussian dispatch (since LatLonGrid has both
+    ``n`` (=n_lat) and ``n_lat`` attributes)."""
+
+    def test_idealized_dispatch_returns_correct_shape(self, latlon_grid):
+        cfg = BathymetryConfig(source="idealized", H_max=4000.0,
+                                land_lat_threshold=80.0)
+        H_bathy, ocean_mask = init_ocean_bathymetry(latlon_grid, cfg)
+        assert H_bathy.shape == (36, 72)
+        assert ocean_mask.shape == (36, 72)
+
+    def test_idealized_dispatch_respects_land_threshold(self, latlon_grid):
+        cfg = BathymetryConfig(source="idealized", H_max=4000.0,
+                                land_lat_threshold=80.0)
+        H_bathy, ocean_mask = init_ocean_bathymetry(latlon_grid, cfg)
+        # At |lat|>80°, cells should be land (mask=0).  On a 5° grid
+        # with cell centres at -87.5, ..., +87.5, this is rows 0, 1, 34, 35.
+        lat_deg = np.abs(np.asarray(latlon_grid.lat2d)) * 180.0 / np.pi
+        polar = lat_deg > 80.0
+        assert np.all(np.asarray(ocean_mask)[polar] < 0.5)
+
+    def test_does_not_collide_with_cubed_sphere(self, latlon_grid):
+        """LatLonGrid has an ``n`` property (=n_lat), but the dispatch
+        must route to the lat-lon path, not the cubed-sphere path.
+        The cubed-sphere idealized_bathymetry would produce shape
+        (6, n, n) — the wrong shape for a LatLonGrid."""
+        cfg = BathymetryConfig(source="idealized")
+        H_bathy, ocean_mask = init_ocean_bathymetry(latlon_grid, cfg)
+        # Lat-lon shape, not cubed-sphere shape.
+        assert H_bathy.ndim == 2
+        assert H_bathy.shape[0] == latlon_grid.n_lat
+
+
+class TestLatLonCGridFileLoading:
+    """Round-trip a synthetic NetCDF bathymetry through the lat-lon
+    C-grid loader."""
+
+    def _make_synthetic_etopo_nc(self, tmp_path, n_lat_src=181, n_lon_src=360):
+        """Create a synthetic ETOPO-style NetCDF (elevation negative under
+        ocean, positive on land) for testing.  Pattern: hemisphere-symmetric
+        bowl 4000 m deep with land above |lat|=80°."""
+        import xarray as xr
+        lat = np.linspace(-90.0, 90.0, n_lat_src)
+        lon = np.linspace(0.0, 360.0, n_lon_src, endpoint=False)
+        LAT, LON = np.meshgrid(lat, lon, indexing="ij")
+        # Ocean: -4000 m everywhere; land where |lat| > 80°.
+        elev = np.where(np.abs(LAT) > 80.0, 100.0, -4000.0)
+        ds = xr.Dataset(
+            {"z": (["lat", "lon"], elev.astype(np.float32))},
+            coords={"lat": lat, "lon": lon},
+        )
+        path = tmp_path / "synthetic_etopo.nc"
+        ds.to_netcdf(path)
+        return str(path)
+
+    def test_roundtrip_synthetic_etopo(self, latlon_grid, tmp_path):
+        path = self._make_synthetic_etopo_nc(tmp_path)
+        cfg = BathymetryConfig(
+            source="file", path=path,
+            H_max=5500.0, H_min=10.0,
+            smoothing_passes=0,
+            enforce_straits=False,    # synthetic data has no real straits
+            fill_isolated_basins=False,
+            depth_is_negative=True,
+        )
+        H_bathy, ocean_mask = init_ocean_bathymetry(latlon_grid, cfg)
+        assert H_bathy.shape == (36, 72)
+        assert ocean_mask.shape == (36, 72)
+        # Open ocean bathy should be approximately 4000 m where ocean.
+        H_arr = np.asarray(H_bathy)
+        mask_arr = np.asarray(ocean_mask)
+        ocean_depths = H_arr[mask_arr > 0.5]
+        assert ocean_depths.size > 0
+        assert np.all(np.abs(ocean_depths - 4000.0) < 100.0), (
+            f"ocean depths span [{ocean_depths.min()}, {ocean_depths.max()}], "
+            f"expected ~4000"
+        )
+        # Polar rows should be land.
+        lat_deg = np.abs(np.asarray(latlon_grid.lat2d)) * 180.0 / np.pi
+        polar_rows = lat_deg.max(axis=1) > 85.0
+        assert np.all(mask_arr[polar_rows] < 0.5)
+
+    def test_handles_duplicate_endpoint_longitudes(self, latlon_grid, tmp_path):
+        """ETOPO/GEBCO files often store lon in [-180, +180] inclusive.
+        After ``% 360`` this produces duplicate values (both -180 and +180
+        → 180), which RegularGridInterpolator rejects.  Verify the loader
+        deduplicates correctly."""
+        import xarray as xr
+        # Inclusive endpoints — 181 lat points, 361 lon points.
+        lat = np.linspace(-90.0, 90.0, 181)
+        lon = np.linspace(-180.0, 180.0, 361)
+        LAT, LON = np.meshgrid(lat, lon, indexing="ij")
+        elev = np.where(np.abs(LAT) > 80.0, 100.0, -3500.0)
+        ds = xr.Dataset(
+            {"altitude": (["lat", "lon"], elev.astype(np.float32))},
+            coords={"lat": lat, "lon": lon},
+        )
+        path = tmp_path / "etopo_endpoint_duplicates.nc"
+        ds.to_netcdf(path)
+        cfg = BathymetryConfig(
+            source="file", path=str(path),
+            smoothing_passes=0, enforce_straits=False,
+            fill_isolated_basins=False, H_min=10.0,
+            depth_is_negative=True,
+        )
+        # Should not raise.
+        H_bathy, ocean_mask = init_ocean_bathymetry(latlon_grid, cfg)
+        assert H_bathy.shape == (36, 72)
+
+    def test_smoothing_reduces_bathymetry_variance(self, latlon_grid, tmp_path):
+        """With smoothing_passes>0, bathy should have lower variance than
+        raw (after the binary mask thresholding)."""
+        # Build a noisier synthetic file: random depth perturbation in ocean.
+        import xarray as xr
+        n_lat_src, n_lon_src = 91, 180
+        lat = np.linspace(-90.0, 90.0, n_lat_src)
+        lon = np.linspace(0.0, 360.0, n_lon_src, endpoint=False)
+        LAT, LON = np.meshgrid(lat, lon, indexing="ij")
+        rng = np.random.default_rng(seed=42)
+        noise = rng.normal(0.0, 500.0, LAT.shape)
+        elev = np.where(np.abs(LAT) > 80.0, 100.0, -4000.0 + noise)
+        ds = xr.Dataset(
+            {"z": (["lat", "lon"], elev.astype(np.float32))},
+            coords={"lat": lat, "lon": lon},
+        )
+        path = tmp_path / "noisy.nc"
+        ds.to_netcdf(path)
+
+        cfg_no_smooth = BathymetryConfig(
+            source="file", path=str(path),
+            smoothing_passes=0, enforce_straits=False,
+            fill_isolated_basins=False, H_min=10.0,
+        )
+        H_no, mask_no = init_ocean_bathymetry(latlon_grid, cfg_no_smooth)
+
+        cfg_smooth = BathymetryConfig(
+            source="file", path=str(path),
+            smoothing_passes=5, enforce_straits=False,
+            fill_isolated_basins=False, H_min=10.0,
+        )
+        H_smooth, mask_smooth = init_ocean_bathymetry(latlon_grid, cfg_smooth)
+
+        # Smoothing should reduce H variance over ocean cells.
+        ocean_no = np.asarray(mask_no) > 0.5
+        ocean_smooth = np.asarray(mask_smooth) > 0.5
+        var_no = float(np.var(np.asarray(H_no)[ocean_no]))
+        var_smooth = float(np.var(np.asarray(H_smooth)[ocean_smooth]))
+        assert var_smooth < var_no, (
+            f"Smoothed variance {var_smooth} should be < unsmoothed {var_no}"
+        )
+
+
+class TestLatLonCGridRestState:
+    """End-to-end rest_state_ocean_realistic on lat-lon C-grid."""
+
+    def test_idealized_yields_LatLonCGridOceanState(self, latlon_grid, z_coord):
+        from legoesm.ocean.state import LatLonCGridOceanState
+        cfg = BathymetryConfig(source="idealized", H_max=4000.0)
+        state = rest_state_ocean_realistic(latlon_grid, z_coord, cfg)
+        assert isinstance(state, LatLonCGridOceanState)
+        # Shapes
+        assert state.T.data.shape == (36, 72, 10)
+        assert state.u.data.shape == (36, 73, 10)   # u-faces
+        assert state.v.data.shape == (37, 72, 10)   # v-faces
+        assert state.eta.data.shape == (36, 72)
+        assert state.H_bathy.data.shape == (36, 72)
+        assert state.land_mask.data.shape == (36, 72)
+        # Face masks present and consistent with land mask
+        assert state.u_mask.data.shape == (36, 73)
+        assert state.v_mask.data.shape == (37, 72)
+        # Rest state: u, v, eta = 0
+        assert float(jnp.max(jnp.abs(state.u.data))) == 0.0
+        assert float(jnp.max(jnp.abs(state.v.data))) == 0.0
+        assert float(jnp.max(jnp.abs(state.eta.data))) == 0.0
+
+    def test_H_bathy_override_preserves_input(self, latlon_grid, z_coord):
+        """Calling rest_state_latlon_cgrid_ocean with H_bathy_override
+        should preserve the supplied bathymetry verbatim (after mask).
+        """
+        from legoesm.ocean.init_latlon_cgrid import (
+            rest_state_latlon_cgrid_ocean,
+        )
+        # Sloping bathymetry: shallow at the south, deep at the north.
+        n_lat, n_lon = 36, 72
+        H = np.linspace(500.0, 4000.0, n_lat)
+        H_bathy_in = jnp.broadcast_to(
+            jnp.asarray(H)[:, None], (n_lat, n_lon),
+        )
+        # Add a couple of land columns to test mask consistency.
+        land_mask = jnp.ones((n_lat, n_lon))
+        land_mask = land_mask.at[:, 10].set(0.0)
+        land_mask = land_mask.at[:, 30].set(0.0)
+        state = rest_state_latlon_cgrid_ocean(
+            latlon_grid, z_coord,
+            land_mask_override=land_mask,
+            H_bathy_override=H_bathy_in,
+        )
+        H_out = np.asarray(state.H_bathy.data)
+        H_in_np = np.asarray(H_bathy_in)
+        np.testing.assert_allclose(H_out, H_in_np, rtol=1e-5)
+
+    def test_H_bathy_override_derives_mask_when_not_given(
+        self, latlon_grid, z_coord
+    ):
+        """If only H_bathy_override is given, ocean_mask = (H_bathy > 0)."""
+        from legoesm.ocean.init_latlon_cgrid import (
+            rest_state_latlon_cgrid_ocean,
+        )
+        n_lat, n_lon = 36, 72
+        H = np.full((n_lat, n_lon), 4000.0)
+        H[0, :] = 0.0   # south pole row = land
+        H[-1, :] = 0.0  # north pole row = land
+        state = rest_state_latlon_cgrid_ocean(
+            latlon_grid, z_coord,
+            H_bathy_override=jnp.asarray(H),
+        )
+        mask = np.asarray(state.land_mask.data)
+        assert mask[0, 0] == 0.0
+        assert mask[-1, 0] == 0.0
+        assert mask[18, 36] == 1.0   # interior should be ocean

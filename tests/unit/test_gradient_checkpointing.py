@@ -13,6 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState
 from legoesm.driver.compiled_segments import (
@@ -27,6 +28,37 @@ from legoesm.grids.cubed_sphere import create_cubed_sphere
 N = 4
 NLEV = 3
 _GRID = create_cubed_sphere(N)
+_OPTIONAL_3D_OUTPUT_FIELDS = (
+    "du_dt",
+    "dv_dt",
+    "dq_i_dt",
+    "dq_s_dt",
+    "dq_g_dt",
+    "dN_c_dt",
+    "dN_r_dt",
+    "dN_i_dt",
+)
+
+
+def _zero_physics_output(T, p_s):
+    kwargs = dict(
+        dT_dt=jnp.zeros(T.shape),
+        dq_v_dt=jnp.zeros(T.shape),
+        dq_c_dt=jnp.zeros(T.shape),
+        dq_r_dt=jnp.zeros(T.shape),
+        precip=jnp.zeros(p_s.shape),
+        sw_net_sfc=jnp.zeros(p_s.shape),
+        lw_net_sfc=jnp.zeros(p_s.shape),
+        sw_up_toa=jnp.zeros(p_s.shape),
+        lw_up_toa=jnp.zeros(p_s.shape),
+        sw_down_toa=jnp.zeros(p_s.shape),
+    )
+    for field_name in _OPTIONAL_3D_OUTPUT_FIELDS:
+        if field_name in PhysicsOutput._fields:
+            kwargs[field_name] = jnp.zeros(T.shape)
+    if "conv_prog" in PhysicsOutput._fields:
+        kwargs["conv_prog"] = jnp.asarray(0.0, dtype=T.dtype)
+    return kwargs
 
 
 class _MockModel:
@@ -43,14 +75,9 @@ def _mock_step_unified(need_rad, T, p_s, q_v, q_c, q_r, u, v,
                        h_dT, h_sw_sfc, h_lw_sfc, h_sw_toa, h_lw_toa, h_sw_dtoa,
                        **kw):
     tau = kw.get("tau_equator", jnp.float32(7.2))
-    phys = PhysicsOutput(
-        dT_dt=jnp.full(T.shape, 1e-5) * tau / 7.2,
-        dq_v_dt=jnp.zeros(T.shape), dq_c_dt=jnp.zeros(T.shape),
-        dq_r_dt=jnp.zeros(T.shape), precip=jnp.zeros(p_s.shape),
-        sw_net_sfc=jnp.zeros(p_s.shape), lw_net_sfc=jnp.zeros(p_s.shape),
-        sw_up_toa=jnp.zeros(p_s.shape), lw_up_toa=jnp.zeros(p_s.shape),
-        sw_down_toa=jnp.zeros(p_s.shape),
-    )
+    kwargs = _zero_physics_output(T, p_s)
+    kwargs["dT_dt"] = jnp.full(T.shape, 1e-5) * tau / 7.2
+    phys = PhysicsOutput(**kwargs)
     held = (h_dT, h_sw_sfc, h_lw_sfc, h_sw_toa, h_lw_toa, h_sw_dtoa)
     return phys, held
 
@@ -77,7 +104,7 @@ def _make_carry(T_val=280.0):
 _FORCING = pack_forcing(
     sst=jnp.full((6,N,N), 300.0), sic=jnp.zeros((6,N,N)),
     day_of_year=1.0, seconds_of_day=0.0,
-    solar_weights=jnp.ones(14), s_0=1361.0,
+    solar_weights=jnp.ones(14), s_0=constants.S_0,
     o3_vmr=jnp.zeros((6,N,N,NLEV)), aerosol_od=jnp.zeros((6,N,N)),
 )
 

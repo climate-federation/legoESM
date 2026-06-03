@@ -28,12 +28,14 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.atmosphere.dynamics.spectral_pe import (
     SpectralHydrostaticState,
     spectral_pe_to_grid,
 )
 from legoesm.grids.gaussian import GaussianGrid, sh_analysis_3d
 from legoesm.atmosphere.physics.neural_physics import NeuralPhysics, _pack_column_features
+from legoesm.atmosphere.physics._shared import zero_like_tracers
 
 
 def build_column_physics(
@@ -126,9 +128,18 @@ def make_column_physics_fn(
         T_col = T.reshape(-1, nlev)
         u_col = u.reshape(-1, nlev)
         v_col = v.reshape(-1, nlev)
-        q_col = jnp.zeros_like(T_col)       # dry spectral PE
+        # Pull q_v from state.tracers when present (PR1's spectral PE
+        # tracers); fall back to zeros for the legacy dry pipeline.
+        # Without this the column MLP sees dry inputs even when ERA5
+        # humidity is loaded into the IC.
+        if state.tracers is not None and "q_v" in state.tracers:
+            _qv_raw = state.tracers["q_v"]
+            _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
+            q_col = _qv_data.reshape(-1, nlev).astype(T_col.dtype)
+        else:
+            q_col = jnp.zeros_like(T_col)
         p_s_col = p_s.reshape(-1)
-        solar_col = jnp.full_like(p_s_col, 1361.0)
+        solar_col = jnp.full_like(p_s_col, constants.S_0)
 
         # Pack features + vmap forward (normalization built into _pack)
         features = jax.vmap(_pack_column_features)(
@@ -142,7 +153,10 @@ def make_column_physics_fn(
         # Convert to spectral temperature tendency
         dT_hat = sh_analysis_3d(grid_, dT_dt.astype(jnp.float64))
 
-        # Column physics: only T tendency; zero for vor, div, lnps
+        # Column physics: only T tendency; zero for vor, div, lnps.
+        # Mirror the input state's tracer pytree as zeros so the
+        # orchestrator and dycore RHS see a consistent tendency
+        # structure (matches the radiation / GWD bridges).
         zero_3d = jnp.zeros_like(state.vor_hat.data)
         zero_2d = jnp.zeros_like(state.lnps_hat.data)
 
@@ -152,6 +166,7 @@ def make_column_physics_fn(
             T_hat=state.T_hat.replace(data=dT_hat),
             lnps_hat=state.lnps_hat.replace(data=zero_2d),
             phis_hat=state.phis_hat.replace(data=zero_2d),
+            tracers=zero_like_tracers(state.tracers),
         )
 
     return physics_fn

@@ -1,0 +1,233 @@
+# AIMIP shared base configuration.
+#
+# Loaded by ``scripts/run_aimip.py``.  Variant overlays under this
+# directory are merged on top of this base (dict-merge — overlay keys
+# replace base keys).  See ``config/aimip/variant_*.yaml`` and
+# ``config/aimip/aimip_suite.yaml``.
+#
+# Loss:
+#   - Variants {classical, column_nn, sfno_physics} share
+#     ``combined_loss`` (training/losses.py) with the per-variable
+#     weights below.  Variant ``sfno_full`` (when enabled) uses the
+#     internal spectral loss of ``train_neural_gcm_spectral``; values
+#     are still comparable in rank-order to the grid-MSE because of
+#     ``normalize_by_scale=True``.
+# Optimizer:
+#   - Default is AdamW (set by ``aimip_optimizer`` below).  Plain
+#     ``muon`` applied MUON to every parameter leaf and caused
+#     silent epoch-1 exits on the 34M-parameter SFNO under the
+#     20-day windowed multi-year setup -- the Newton-Schulz
+#     orthogonalization was degenerate on the 1-D biases and small
+#     embedding tables.  Use ``muon_partitioned`` instead: it
+#     routes MUON to 2-D weight matrices (smaller dim >= 32) and
+#     AdamW to biases, scalars, and small matrices, matching the
+#     original Jordan et al. (2024) SFNO-safe recipe.
+
+# ----- ERA5 source --------------------------------------------------
+era5_zarr: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
+cache_dir: ".cache/aimip_era5"
+# AIMIP multi-year contiguous sampling.  Each window contributes
+# ``n_days`` consecutive IC/target pairs; no cross-window pairing
+# avoids temporal leakage between windows.  Train years 2015 +
+# 2016 (winter + summer windows per year for seasonal coverage);
+# eval year 2017 is held out entirely.  Bump windows + add
+# years for fuller multi-year sweep.
+#
+# Format per window: [year, day_offset_in_year, n_days].
+train_windows:
+  - [2015,   0,  5]     # 2015 Jan (winter)
+  - [2015, 180,  5]     # 2015 Jun (summer)
+  - [2016,   0,  5]     # 2016 Jan
+  - [2016, 180,  5]     # 2016 Jun
+
+eval_windows:
+  - [2017,   0,  4]     # 2017 Jan (held-out year, winter)
+  - [2017, 180,  4]     # 2017 Jun (held-out year, summer)
+
+# Legacy fields kept for backward compatibility when ``train_windows`` /
+# ``eval_windows`` are absent.
+train_year: 2015
+eval_year:  2017
+train_period: ["2015-01-01", "2016-12-31"]
+eval_period:  ["2017-01-01", "2017-12-31"]
+
+n_train_days: 20   # sum of train_windows[*][2]
+n_eval_days:  8    # sum of eval_windows[*][2]
+
+# ----- Grid + dycore ------------------------------------------------
+# Gaussian grid (SFNO requires this; classical + column_nn also run
+# on it, giving every AIMIP variant a common evaluation grid).
+#
+# T21 L8 is a tractable production-relevant intercomparison size
+# that fits a 25-day single-epoch run per variant in a ~10-min
+# compute budget on a single GPU.  Bump to T28 L8 or T42 L10 for a
+# fuller multi-month / multi-epoch sweep (will require multi-hour
+# wall clock per variant).
+aimip_grid: "gaussian"
+n_max: 63            # v10: T63 ≈ 1.9° (96x128 grid, ncol=12288).
+                     # Per-g-point checkpoint refactor in
+                     # ``rrtmgp/rte/two_stream.py`` brought RRTMGP
+                     # backward down to ~0.1 MiB/col, but T127 still
+                     # OOM'd at 20.6 GiB single allocation -- root
+                     # cause is the dycore's spectral-PE backward
+                     # (SH analysis Jacobian materialises
+                     # ``n_lat * n_lon * n_sh * nlev`` ~ 320 GB at
+                     # T127).  T63 keeps n_sh ~ 2080 so the same
+                     # intermediate drops to ~5 GB and the run fits.
+                     # T127 needs a dycore-level gradient checkpoint
+                     # (separate refactor).
+nlev: 8              # full vertical resolution.
+dt: 600.0            # 10-minute dycore timestep.  T63 dt=1200 produced
+                     # NaN at step 0 (2026-05-20) -- likely hyperdiff
+                     # coefficient is too weak for T63 wavenumbers.
+                     # dt=600 gives CFL ~ 0.19 and tighter implicit
+                     # damping per step, surviving the spin-up.
+
+# ----- Training -----------------------------------------------------
+# Cap epochs at a generous upper bound; early stopping (patience +
+# min_delta) will terminate once the loss plateaus, matching the
+# AIMIP guideline of "stop training when no improvement after
+# several months" (one epoch = full pass over the windowed train
+# set, ~tens of model-days of physics integration).
+aimip_n_epochs: 8          # v10: reduced from 15 to keep the T127 single-
+                           # GPU budget tractable (one classical epoch at
+                           # T127 L8 is ~10x more expensive than T11).
+aimip_patience: 3          # tightened along with n_epochs.
+aimip_min_delta: 1.0e-3    # minimum loss improvement to reset patience
+aimip_lr: 3.0e-4
+aimip_warmup: 10           # unchanged.
+aimip_weight_decay: 1.0e-5
+aimip_grad_clip: 1.0
+aimip_optimizer: "adamw"  # adamw | adam | muon | muon_partitioned — see ml/training.create_optimizer
+
+# Radiation backend for the classical variant:
+#   gray   — Frierson two-stream analytic (default, tractable);
+#            differentiates tau_equator, tau_pole only.  ~30s/sample
+#            at T21 L8 on a single GPU after compile.
+#   rrtmgp — Correlated-k LW+SW with explicit cloud-radiation
+#            coupling driven by the trainable Xu-Randall config.
+#            Production-grade realism but ~10-100x slower; needs
+#            GPU acceleration for multi-week training.  Recommended
+#            for closing the residual cold T bias (-2.06 K in
+#            ablation-v2 winner) — gray two-stream cannot
+#            represent cloud LW/SW interaction.
+aimip_radiation: "rrtmgp"  # gray | rrtmgp.  RRTMGP is required for AIMIP
+                           # physics cases per the project policy: gray
+                           # two-stream cannot represent cloud LW/SW
+                           # interaction, which dominates the residual
+                           # cold T bias.  The single-GPU memory
+                           # footprint is contained by the explicit
+                           # ``jax.checkpoint`` wrapper in
+                           # ``radiation/integration.py``
+                           # (``_make_spectral_pe_radiation``) plus the
+                           # aggressive per-step
+                           # ``policy=nothing_saveable`` checkpoint on
+                           # ``spectral_rollout``'s scan body.  Both
+                           # trade ~2-3x forward compute for the
+                           # activation-storage relief that lets a
+                           # 48-step daily rollout fit in 24 GiB.
+aimip_rad_update_interval: 36   # v12: 1 RRTMGP call per 6 sim hours
+                                # (36 steps × 600 s = 21600 s = 6 h).
+                                # Matches the 6-hour rollout +
+                                # diurnal-cycle setup below: each
+                                # training pair sees rad once at its
+                                # IC time-of-day (00/06/12/18 UTC).
+                                # Across pairs the optimizer sees all
+                                # four diurnal phases.
+
+# ----- Spatial surface parameters (over land) ----------------------
+# When true, the AIMIP classical variant exposes seven surface and
+# surface-radiation knobs (Cd_neutral, Ch_neutral, z0, sfc_emissivity,
+# sfc_albedo, albedo_ocean, albedo_ice) as low-rank lat-lon fields
+# parameterized by a Legendre x Fourier basis truncated at l_max=4,
+# m_max=2 (13 coefficients per field, 91 total).  The fields are
+# gated by a soft land mask derived from surface geopotential, so
+# over-ocean columns retain the global scalar baseline and the new
+# flexibility expresses where surface heterogeneity matters most
+# (land roughness, albedo).  See ``training/aimip_spatial.py``.
+aimip_spatial_surface: true
+
+# ----- Spatial-coefficient initialization + per-group LR -----------
+# ``aimip_spatial_init_std > 0`` breaks the zero-gradient symmetry at
+# initialization so the optimizer can move spatial coefficients from
+# step one.  ``aimip_spatial_lr_scale > 1`` routes the spatial-coef
+# leaves through a scaled-LR copy of the base optimizer via
+# ``optax.multi_transform``; the scaled LR brings the per-step update
+# magnitudes of the 91 spatial coefficients to roughly match the
+# sigmoid-bounded scheme scalars (which carry ~3 orders of magnitude
+# more gradient signal at init).  Both knobs only take effect when
+# ``aimip_spatial_surface: true``.
+aimip_spatial_init_std: 0.005   # v6: was 0.02 -- v5 produced a +1.07 K
+                                # warm T bias at T11 L8, suggesting the
+                                # spatial coefs started too far from
+                                # baseline and the optimizer pushed past
+                                # the bias-zero crossing.  0.005
+                                # keeps the initial perturbation in the
+                                # linear-tanh regime so the gradient
+                                # signal still flows but the field
+                                # remains close to ``f_0`` at step 0.
+aimip_spatial_seed: 0
+aimip_spatial_lr_scale: 5.0
+
+# ----- Multi-day rollout supervision -------------------------------
+# Number of consecutive simulated days each training rollout
+# integrates before the loss compares the final state to the target.
+# Default 1 preserves single-day forecast-skill supervision; 3-5
+# propagates the bias signal more strongly and disambiguates physics
+# knobs that saturate at day-1.  Eval uses the same rollout length.
+aimip_rollout_days: 1   # legacy daily horizon.  When
+                        # ``aimip_rollout_hours`` is set below, that
+                        # takes precedence.
+aimip_rollout_hours: 6  # v12: 6-hour AIMIP / NeuralGCM training
+                        # convention.  ERA5 cadence is 6 h, so each
+                        # IC/target pair is consecutive snapshots.
+                        # ~4 IC/target pairs per window-day instead
+                        # of 1, with rollouts of 36 dycore steps
+                        # (vs 144 for daily).  Net training cost
+                        # roughly unchanged; the diversity of IC
+                        # time-of-day exposes the diurnal cycle to
+                        # the optimizer in the same epoch budget.
+
+# ----- Loss (LossConfig fields from training/losses.py) ------------
+# spectral_weight > 0 adds a spectral L^2 penalty on the predicted
+# temperature field; reduces the residual synoptic-scale RMSE that
+# the grid-MSE alone underweights.
+loss:
+  w_T: 1.0
+  w_u: 0.5
+  w_v: 0.5
+  w_q: 0.2
+  w_ps: 0.3
+  # Bias-penalty weights.  v8 with w_bias_T=1000 over-corrected:
+  # classical T bias exploded +1.08 -> +4.40 K and SFNO destabilized
+  # (loss best 10.7 -> end 14.5, early-stopped at epoch 5).  v9
+  # backs off to w_bias_T=300 (with 3-day rollout still on): bias
+  # term contributes 300 * (1.07/30)^2 = 0.38 to the loss, ~17x the
+  # per-cell MSE contribution -- enough to drive bias reduction
+  # without dominating the MSE.  Wind / ps weights scaled to keep
+  # the ratio to w_bias_T constant.
+  w_bias_T: 100.0  # v10: back to v7's setting after v8/v9's larger
+                   # weights destabilised classical.
+  w_bias_u: 1.0
+  w_bias_v: 1.0
+  w_bias_ps: 1.0
+  # v13: CRPS-style probabilistic loss (MAE limit for M=1).  Combined
+  # with MSE this is the NeuralGCM training-loss recipe; the MAE
+  # term penalises large errors more gently than MSE (linear vs
+  # squared) and improves out-of-sample skill.  Weights at ~half the
+  # corresponding MSE weight so both terms contribute on the same
+  # order at the current residual.
+  w_crps_T: 0.5
+  w_crps_u: 0.25
+  w_crps_v: 0.25
+  w_crps_ps: 0.15
+  spectral_weight: 0.3
+  level_weighting: "pressure"
+  normalize_by_scale: true
+  T_scale: 30.0
+  wind_scale: 20.0
+  q_scale: 5.0e-3
+  ps_scale: 1000.0
+
+# ----- Output -------------------------------------------------------
+output_dir: "results/aimip_001"

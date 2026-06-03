@@ -28,6 +28,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.atmosphere.physics._shared import virtual_temperature
 
 
 class PBLHeightConfig(NamedTuple):
@@ -89,9 +90,8 @@ def compute_bulk_richardson(
         Virtual potential temperature, shape (ncol, nlev).
     """
     # Virtual potential temperature
-    theta_v = T * (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa * (
-        1.0 + 0.61 * q_v
-    )
+    exner = (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
+    theta_v = virtual_temperature(T, q_v) * exner
 
     # Surface values (bottom level)
     theta_v_sfc = theta_v[:, -1]  # (ncol,)
@@ -161,8 +161,9 @@ def diagnose_pbl_height(
     # a weighted average that converges to the PBL top in the sharp limit.
     weights = sigma * (1.0 - sigma) + 1e-20
 
-    # Weighted average height (focused on the crossing region)
-    h_pbl = jnp.sum(z_full * weights, axis=1) / jnp.sum(weights, axis=1)
+    # Weighted average height — fuse num/denom into one stacked sum.
+    _h_pair = jnp.sum(jnp.stack([z_full * weights, weights], axis=-1), axis=1)
+    h_pbl = _h_pair[..., 0] / _h_pair[..., 1]
 
     return jnp.clip(h_pbl, config.h_min, config.h_max)
 

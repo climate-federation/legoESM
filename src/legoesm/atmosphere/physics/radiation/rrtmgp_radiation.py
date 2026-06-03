@@ -18,8 +18,19 @@ _instance_cache: dict = {}
 
 
 def _get_instance(config: RRTMGPConfig) -> RRTMGP:
-    """Get or create a cached RRTMGP solver for the given config."""
-    key = RRTMGP._cache_key(config)
+    """Get or create a cached RRTMGP solver for the given config.
+
+    Codex adversarial review 019e5467 (issue #273 follow-up):
+    instance cache MUST key on the full set of solver-behavior
+    fields, not just the optics-table fields.  Previously the cache
+    shared its key with the optics-table cache, so a first call with
+    ``use_scan=False`` stamped a solver instance whose
+    ``self._config.use_scan = False``; a later call with the new
+    auto-pick default ``None`` (or explicit ``True``) silently reused
+    that instance and kept running the for-loop path on GPU,
+    defeating the scan auto-pick the module ships.
+    """
+    key = RRTMGP._instance_cache_key(config)
     if key not in _instance_cache:
         _instance_cache[key] = RRTMGP.from_legoesm_config(config)
     return _instance_cache[key]
@@ -50,7 +61,9 @@ def rrtmgp_radiation(
     cloud_path_ice: jnp.ndarray | None = None,
     cloud_r_eff_liq: jnp.ndarray | None = None,
     cloud_r_eff_ice: jnp.ndarray | None = None,
+    cloud_fraction: jnp.ndarray | None = None,
     aerosol_optical_depth: jnp.ndarray | None = None,
+    aerosol_absorption_optical_depth_lw: jnp.ndarray | None = None,
     solar_spectral_fraction: jnp.ndarray | None = None,
     ghg_vmr_override: dict | None = None,
 ) -> RadiationOutput:
@@ -73,7 +86,9 @@ def rrtmgp_radiation(
         cloud_path_ice=cloud_path_ice,
         cloud_r_eff_liq=cloud_r_eff_liq,
         cloud_r_eff_ice=cloud_r_eff_ice,
+        cloud_fraction=cloud_fraction,
         aerosol_optical_depth=aerosol_optical_depth,
+        aerosol_absorption_optical_depth_lw=aerosol_absorption_optical_depth_lw,
         solar_spectral_fraction=solar_spectral_fraction,
         ghg_vmr_override=ghg_vmr_override,
     )

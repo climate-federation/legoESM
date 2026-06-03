@@ -75,12 +75,12 @@ def trainable_constraints_for_scheme(
         return list(_COMMON_TRAINABLE)
 
 
-def _sigmoid_to_range(raw: jax.Array, lo: float, hi: float) -> jax.Array:
+def sigmoid_to_range(raw: jax.Array, lo: float, hi: float) -> jax.Array:
     """Map unconstrained raw value to [lo, hi] via sigmoid."""
     return lo + (hi - lo) * jax.nn.sigmoid(raw)
 
 
-def _range_to_sigmoid(val: float, lo: float, hi: float) -> float:
+def range_to_sigmoid(val: float, lo: float, hi: float) -> float:
     """Inverse: map [lo, hi] value to unconstrained raw (logit)."""
     t = (val - lo) / (hi - lo)
     t = max(min(t, 0.999), 0.001)  # clamp for numerical stability
@@ -128,7 +128,7 @@ class TrainablePhysicsParams(eqx.Module):
 
             if c.transform == "sigmoid":
                 raw[c.name] = jnp.array(
-                    _range_to_sigmoid(default, c.min_val, c.max_val),
+                    range_to_sigmoid(default, c.min_val, c.max_val),
                     dtype=param_dtype,
                 )
             elif c.transform == "softplus":
@@ -147,7 +147,7 @@ class TrainablePhysicsParams(eqx.Module):
         for c in self.constraints:
             raw = self.raw_values[c.name]
             if c.transform == "sigmoid":
-                result[c.name] = _sigmoid_to_range(raw, c.min_val, c.max_val)
+                result[c.name] = sigmoid_to_range(raw, c.min_val, c.max_val)
             elif c.transform == "softplus":
                 result[c.name] = jax.nn.softplus(raw)
             else:

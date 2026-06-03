@@ -13,6 +13,56 @@ from legoesm.ocean.state import LatLonCGridOceanState
 from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks
 
 
+def partial_periodic_seam_wall_latlon(
+    grid: LatLonGrid,
+    open_lat_south_deg: float,
+    open_lat_north_deg: float,
+    seam_column_index: int = 0,
+    base_mask: jnp.ndarray | None = None,
+):
+    """Build a per-cell land mask that creates a wall at one longitude
+    column EVERYWHERE EXCEPT in a specified latitude band.
+
+    The lat-lon C-grid operators wrap longitude periodically via
+    ``jnp.roll``. To represent a closed basin with a re-entrant
+    channel band (Drake passage analog), mark a single longitude
+    column as land outside the open band — the periodic identification
+    sees a wall there, except inside the band where the cells stay
+    ocean.
+
+    Parameters
+    ----------
+    grid : LatLonGrid
+    open_lat_south_deg, open_lat_north_deg : float
+        Latitude band [°N] in which the seam stays open (no wall).
+    seam_column_index : int, default 0
+        Longitude column index that hosts the wall. Defaults to the
+        westernmost column (index 0); pick the easternmost (n_lon-1)
+        for the same effect with periodic identification.
+    base_mask : array, optional
+        Pre-existing land mask (n_lat, n_lon). The seam wall is
+        intersected with it.
+
+    Returns
+    -------
+    land_mask : jax array, shape (n_lat, n_lon)
+        1.0 = ocean, 0.0 = land.
+    """
+    lat_1d_deg = jnp.degrees(grid.lat)  # (n_lat,)
+    in_open_band = (
+        (lat_1d_deg >= open_lat_south_deg)
+        & (lat_1d_deg <= open_lat_north_deg)
+    )
+    is_seam_col = jnp.zeros(grid.n_lon).at[seam_column_index].set(1.0)
+    is_outside_band = jnp.where(in_open_band, 0.0, 1.0)
+    seam_wall_2d = is_outside_band[:, None] * is_seam_col[None, :]
+    if base_mask is None:
+        land_mask = 1.0 - seam_wall_2d
+    else:
+        land_mask = jnp.where(base_mask > 0.5, 1.0 - seam_wall_2d, 0.0)
+    return land_mask.astype(jnp.float32)
+
+
 def idealized_bathymetry_latlon_cgrid(
     grid: LatLonGrid,
     H_max: float = 5500.0,
@@ -53,11 +103,13 @@ def idealized_bathymetry_latlon_cgrid(
 def rest_state_latlon_cgrid_ocean(
     grid: LatLonGrid,
     z_coord: OceanZStarCoordinate,
-    T_surface: float = 20.0,
+    T_water_init_C: float = 20.0,
     T_deep: float = 2.0,
     S_uniform: float = 35.0,
     H_max: float = 5500.0,
     land_lat_threshold: float = 80.0,
+    land_mask_override: jnp.ndarray | None = None,
+    H_bathy_override: jnp.ndarray | None = None,
 ) -> LatLonCGridOceanState:
     """Create a rest-state initial condition on a C-grid lat-lon grid.
 
@@ -70,14 +122,26 @@ def rest_state_latlon_cgrid_ocean(
     ----------
     grid : LatLonGrid
     z_coord : OceanZStarCoordinate
-    T_surface, T_deep : float
+    T_water_init_C, T_deep : float
         Surface and deep temperature [degC].
     S_uniform : float
         Uniform salinity [PSU].
     H_max : float
         Maximum ocean depth [m].
     land_lat_threshold : float
-        Latitude threshold for land [degrees].
+        Latitude threshold for land [degrees].  Ignored when
+        *land_mask_override* is provided.
+    land_mask_override : array (n_lat, n_lon), optional
+        If provided, use this as the land mask (1=ocean, 0=land) instead
+        of deriving one from *land_lat_threshold*.  Face masks (u_mask,
+        v_mask) are computed from it automatically.
+    H_bathy_override : array (n_lat, n_lon), optional
+        If provided, use this as the per-cell bathymetry depth [m].
+        When supplied together with *land_mask_override*, both are used
+        as-is (caller is responsible for consistency between them).
+        When supplied without *land_mask_override*, the land mask is
+        derived from ``H_bathy_override > 0``.  When neither is given,
+        a flat-bottom idealized bathymetry is constructed.
 
     Returns
     -------
@@ -87,12 +151,26 @@ def rest_state_latlon_cgrid_ocean(
     n_lon = grid.n_lon
     nlev = z_coord.n_levels
 
-    H_bathy, land_mask = idealized_bathymetry_latlon_cgrid(
-        grid, H_max, land_lat_threshold,
-    )
+    # Cast bathymetry/mask inputs to the active precision policy so that a
+    # caller running under x32 does not silently get x64 fields (codex
+    # adversarial review iter-1, bug #6).
+    dtype = get_policy().storage
+    if H_bathy_override is not None:
+        H_bathy = jnp.asarray(H_bathy_override).astype(dtype)
+        if land_mask_override is not None:
+            land_mask = jnp.asarray(land_mask_override).astype(dtype)
+        else:
+            land_mask = (H_bathy > 0.0).astype(dtype)
+    elif land_mask_override is not None:
+        land_mask = jnp.asarray(land_mask_override).astype(dtype)
+        H_bathy = jnp.full((n_lat, n_lon), H_max, dtype=dtype)
+    else:
+        H_bathy, land_mask = idealized_bathymetry_latlon_cgrid(
+            grid, H_max, land_lat_threshold,
+        )
 
     # Exponential T stratification
-    T_profile = T_deep + (T_surface - T_deep) * jnp.exp(
+    T_profile = T_deep + (T_water_init_C - T_deep) * jnp.exp(
         z_coord.z_full_ref / _SCALE_DEPTH,
     )
     dtype = get_policy().storage
@@ -109,6 +187,9 @@ def rest_state_latlon_cgrid_ocean(
 
     # Face masks
     u_mask, v_mask = compute_face_masks(land_mask)
+
+    # Initialize vertical velocity with zeros (will be computed during step)
+    w_zeros = jnp.zeros((n_lat, n_lon, nlev), dtype=dtype)
 
     dims_u = ("lat", "lon_u", "level")
     dims_v = ("lat_v", "lon", "level")
@@ -129,6 +210,7 @@ def rest_state_latlon_cgrid_ocean(
         land_mask=Field(data=land_mask, name="land_mask", dims=dims_2d, units=""),
         u_mask=Field(data=u_mask, name="u_mask", dims=dims_u2d, units=""),
         v_mask=Field(data=v_mask, name="v_mask", dims=dims_v2d, units=""),
+        w=Field(data=w_zeros, name="w", dims=dims_3d, units="m/s"),
     )
 
 
@@ -170,6 +252,9 @@ def wind_driven_gyre_latlon_cgrid(
 
     u_mask, v_mask = compute_face_masks(land_mask)
 
+    # Initialize vertical velocity with zeros (will be computed during step)
+    w_zeros = jnp.zeros((n_lat, n_lon, nlev), dtype=dtype)
+
     dims_u = ("lat", "lon_u", "level")
     dims_v = ("lat_v", "lon", "level")
     dims_3d = ("lat", "lon", "level")
@@ -189,6 +274,7 @@ def wind_driven_gyre_latlon_cgrid(
         land_mask=Field(data=land_mask, name="land_mask", dims=dims_2d, units=""),
         u_mask=Field(data=u_mask, name="u_mask", dims=dims_u2d, units=""),
         v_mask=Field(data=v_mask, name="v_mask", dims=dims_v2d, units=""),
+        w=Field(data=w_zeros, name="w", dims=dims_3d, units="m/s"),
     )
 
 
@@ -197,7 +283,7 @@ def regional_rest_state_latlon_cgrid(
     wall_mask: jnp.ndarray,
     z_coord: OceanZStarCoordinate,
     H_max: float = 5500.0,
-    T_surface: float = 20.0,
+    T_water_init_C: float = 20.0,
     T_deep: float = 2.0,
     S_uniform: float = 35.0,
 ) -> LatLonCGridOceanState:
@@ -211,7 +297,7 @@ def regional_rest_state_latlon_cgrid(
         1 = ocean interior, 0 = wall.
     z_coord : OceanZStarCoordinate
     H_max : float
-    T_surface, T_deep : float
+    T_water_init_C, T_deep : float
     S_uniform : float
 
     Returns
@@ -225,7 +311,7 @@ def regional_rest_state_latlon_cgrid(
 
     H_bathy = jnp.full((n_lat, n_lon), H_max, dtype=dtype)
 
-    T_profile = T_deep + (T_surface - T_deep) * jnp.exp(
+    T_profile = T_deep + (T_water_init_C - T_deep) * jnp.exp(
         z_coord.z_full_ref / _SCALE_DEPTH,
     )
     T_3d = jnp.broadcast_to(
@@ -241,6 +327,9 @@ def regional_rest_state_latlon_cgrid(
     land_mask = wall_mask.astype(dtype)
     u_mask, v_mask = compute_face_masks(land_mask)
 
+    # Initialize vertical velocity with zeros (will be computed during step)
+    w_zeros = jnp.zeros((n_lat, n_lon, nlev), dtype=dtype)
+
     dims_u = ("lat", "lon_u", "level")
     dims_v = ("lat_v", "lon", "level")
     dims_3d = ("lat", "lon", "level")
@@ -260,4 +349,26 @@ def regional_rest_state_latlon_cgrid(
         land_mask=Field(data=land_mask, name="land_mask", dims=dims_2d, units=""),
         u_mask=Field(data=u_mask, name="u_mask", dims=dims_u2d, units=""),
         v_mask=Field(data=v_mask, name="v_mask", dims=dims_v2d, units=""),
+        w=Field(data=w_zeros, name="w", dims=dims_3d, units="m/s"),
+    )
+
+
+def replace_land_mask(
+    state: LatLonCGridOceanState,
+    new_land_mask: jnp.ndarray,
+) -> LatLonCGridOceanState:
+    """Replace land_mask and recompute u_mask/v_mask atomically.
+
+    Use this instead of ``state._replace(land_mask=...)`` to ensure
+    face masks stay consistent with the cell mask.
+    """
+    new_land_mask = jnp.asarray(new_land_mask)
+    u_mask, v_mask = compute_face_masks(new_land_mask)
+    return state._replace(
+        land_mask=Field(data=new_land_mask, name="land_mask",
+                        dims=state.land_mask.dims, units=""),
+        u_mask=Field(data=u_mask, name="u_mask",
+                     dims=state.u_mask.dims, units=""),
+        v_mask=Field(data=v_mask, name="v_mask",
+                     dims=state.v_mask.dims, units=""),
     )

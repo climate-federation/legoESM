@@ -33,9 +33,9 @@ from legoesm.core.field import Field
 from legoesm.core.operators import gradient_x, gradient_y, divergence, laplacian
 from legoesm.core.precision import cast
 from legoesm.grids.cubed_sphere import CubedSphereGrid
-from legoesm.grids.halo import pad_halo
+from legoesm.grids.halo import pad_halo, pad_halo_4d
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
-from legoesm.ocean.state import OceanState, OceanTendencies, OceanConfig
+from legoesm.ocean.state import OceanState, OceanConfig
 
 
 # ==============================================================================
@@ -60,11 +60,15 @@ def fill_land_cells(
     land strips 2-3 cells wide between ocean basins), matching the
     lat-lon solver's 3-pass approach.
 
-    Uses ``pad_halo`` for correct cross-face halo exchange.
+    Accepts both 2D-spatial ``(6, n, n)`` and 3D-with-levels
+    ``(6, n, n, nlev)`` ``field`` inputs.  For 4D the field halo uses
+    ``pad_halo_4d`` so all levels share one MPI exchange — replacing the
+    prior ``vmap``-over-levels at the call site that issued ``nlev``
+    separate halo MPI exchanges per pass.  ``mask`` is 2D in both cases.
 
     Parameters
     ----------
-    field : array, shape (6, n, n)
+    field : array, shape (6, n, n) or (6, n, n, nlev)
     mask  : array, shape (6, n, n), 1 = ocean, 0 = land
     grid  : CubedSphereGrid
     n_passes : int
@@ -72,40 +76,53 @@ def fill_land_cells(
 
     Returns
     -------
-    field_filled : array, same shape, ocean cells unchanged, coastal
-        land cells filled.
+    field_filled : array, same shape as ``field``; ocean cells unchanged,
+        coastal land cells filled with ocean-neighbour average.
     """
+    is_4d = field.ndim == 4
+    pad_field = pad_halo_4d if is_4d else pad_halo
+
+    def _bcast(m):
+        # 2D mask quantity → broadcast trailing axis for 4D field path.
+        return m[..., None] if is_4d else m
+
     filled = field
     effective_mask = mask
     for _ in range(n_passes):
-        f_pad = pad_halo(filled, interp_offsets=grid.halo_interp_offsets)
+        f_pad = pad_field(filled, interp_offsets=grid.halo_interp_offsets)
         # Binary {0,1} mask must NOT be interpolated — Lagrange
         # interpolation produces fractional values (0.3-0.7) at face
         # boundaries, corrupting the neighbor-count logic.
         m_pad = pad_halo(effective_mask, interp_offsets=None)
 
-        # 4-connected neighbour sum, weighted by ocean mask
+        # 4-connected neighbour stencil — slicing patterns drop axes 1, 2
+        # and keep any trailing nlev axis implicit.
+        f_w = f_pad[:, 2:, 1:-1]
+        f_e = f_pad[:, :-2, 1:-1]
+        f_n = f_pad[:, 1:-1, 2:]
+        f_s = f_pad[:, 1:-1, :-2]
+        m_w = m_pad[:, 2:, 1:-1]
+        m_e = m_pad[:, :-2, 1:-1]
+        m_n = m_pad[:, 1:-1, 2:]
+        m_s = m_pad[:, 1:-1, :-2]
+
         nbr_sum = (
-            f_pad[:, 2:, 1:-1] * m_pad[:, 2:, 1:-1]
-            + f_pad[:, :-2, 1:-1] * m_pad[:, :-2, 1:-1]
-            + f_pad[:, 1:-1, 2:] * m_pad[:, 1:-1, 2:]
-            + f_pad[:, 1:-1, :-2] * m_pad[:, 1:-1, :-2]
+            f_w * _bcast(m_w)
+            + f_e * _bcast(m_e)
+            + f_n * _bcast(m_n)
+            + f_s * _bcast(m_s)
         )
-        nbr_count = (
-            m_pad[:, 2:, 1:-1]
-            + m_pad[:, :-2, 1:-1]
-            + m_pad[:, 1:-1, 2:]
-            + m_pad[:, 1:-1, :-2]
-        )
-        nbr_avg = nbr_sum / jnp.maximum(nbr_count, 1.0)
+        nbr_count = m_w + m_e + m_n + m_s        # (6, n, n)
+        nbr_avg = nbr_sum / jnp.maximum(_bcast(nbr_count), 1.0)
 
-        is_land = mask < 0.5
-        has_ocean_nbr = nbr_count > 0.0
-        filled = jnp.where(is_land & has_ocean_nbr, nbr_avg, filled)
+        is_land = mask < 0.5                     # (6, n, n)
+        has_ocean_nbr = nbr_count > 0.0          # (6, n, n)
+        cond_2d = is_land & has_ocean_nbr        # (6, n, n)
+        filled = jnp.where(_bcast(cond_2d), nbr_avg, filled)
         # Expand effective mask so next pass can propagate further
-        effective_mask = jnp.where(is_land & has_ocean_nbr, 1.0, effective_mask)
+        effective_mask = jnp.where(cond_2d, 1.0, effective_mask)
 
-    return jnp.where(mask > 0.5, field, filled)
+    return jnp.where(_bcast(mask > 0.5), field, filled)
 
 
 # ==============================================================================
@@ -196,11 +213,15 @@ def barotropic_substeps(
     h_k = compute_layer_thickness(
         eta, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
     )
-    H_total = jnp.sum(h_k, axis=-1)                        # (6, n, n)
+    # H_total + U_bar + V_bar all reduce ``... * h_k`` over the level
+    # axis — fuse into one stacked column reduction.
+    _bar_triple = jnp.sum(
+        jnp.stack([h_k, u * h_k, v * h_k], axis=-1), axis=-2,
+    )
     # Keep depth averages finite if a column becomes too thin.
-    H_total = jnp.maximum(H_total, min_water_col)
-    U_bar = jnp.sum(u * h_k, axis=-1) / H_total * mask     # (6, n, n)
-    V_bar = jnp.sum(v * h_k, axis=-1) / H_total * mask
+    H_total = jnp.maximum(_bar_triple[..., 0], min_water_col)
+    U_bar = _bar_triple[..., 1] / H_total * mask           # (6, n, n)
+    V_bar = _bar_triple[..., 2] / H_total * mask
 
     # No explicit F_slow here: the 3D slow tendency has already been applied
     # to u, v by _pytree_axpy in split_explicit_step before this function is
@@ -233,6 +254,13 @@ def barotropic_substeps(
     )
     nu_dt = (baro_alpha * grid.area).astype(eta.dtype)
 
+    # Hoist the constant ``ocean_area`` out of the substep body — both
+    # ``grid.area`` and ``mask`` are loop-invariant.  Inside the
+    # ``fori_loop`` this previously triggered a redundant reduction
+    # per substep (~30 reductions per barotropic step on serial; under
+    # SPMD/MPI it would also be a redundant allreduce).
+    ocean_area_const = jnp.maximum(jnp.sum(grid.area * mask), 1.0)
+
     # Forward-backward substeps via fori_loop
     def substep_body(i, carry):
         eta_c, U_bar_c, V_bar_c = carry
@@ -253,8 +281,7 @@ def barotropic_substeps(
         eta_new = jnp.maximum(eta_unfloored, eta_floor) * mask
         # Redistribute mass added by floor clamping to preserve continuity.
         mass_added = jnp.sum((eta_new - eta_unfloored) * grid.area * mask)
-        ocean_area = jnp.sum(grid.area * mask)
-        eta_new = (eta_new - mass_added / jnp.maximum(ocean_area, 1.0) * mask)
+        eta_new = (eta_new - mass_added / ocean_area_const * mask)
         # Re-floor after correction to prevent negative water columns
         eta_new = jnp.maximum(eta_new, eta_floor) * mask
 

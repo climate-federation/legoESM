@@ -18,6 +18,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.atmosphere.physics._shared import mixing_length, virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import HoltslagBovilleConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
@@ -25,6 +26,7 @@ from legoesm.atmosphere.physics.turbulence.surface_layer import (
 )
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
+    implicit_vertical_diffusion_theta,
 )
 
 
@@ -87,9 +89,8 @@ def holtslag_boville_turbulence(
     S = jnp.sqrt(S2)
 
     # Virtual potential temperature
-    theta_v = T * (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa * (
-        1.0 + 0.61 * q_v
-    )
+    exner = (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
+    theta_v = virtual_temperature(T, q_v) * exner
 
     theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
     dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
@@ -117,11 +118,19 @@ def holtslag_boville_turbulence(
         dtheta_v_bulk * dz_from_sfc / dV2
     )  # (ncol, nlev)
 
-    # Transition-zone weighting: peaks at Ri_crit crossing, not centroid
-    sharpness = 20.0
-    sigma_pbl = jax.nn.sigmoid(sharpness * (config.Ri_crit - Ri_bulk))  # (ncol, nlev)
+    # Transition-zone weighting: peaks at Ri_crit crossing, not centroid.
+    # Sharpness moved from a hardcoded 20.0 literal to
+    # ``config.pbl_sharpness`` per the strengthened CLAUDE.md
+    # constant-discipline rule (tunable scheme parameters belong in
+    # the scheme's config NamedTuple).
+    sigma_pbl = jax.nn.sigmoid(
+        config.pbl_sharpness * (config.Ri_crit - Ri_bulk)
+    )  # (ncol, nlev)
     w_pbl = sigma_pbl * (1.0 - sigma_pbl) + 1e-20
-    h_pbl = jnp.sum(z_full * w_pbl, axis=1) / jnp.sum(w_pbl, axis=1)  # (ncol,)
+    # Numerator and denominator share the level axis — fuse into one
+    # stacked reduction.
+    _h_pair = jnp.sum(jnp.stack([z_full * w_pbl, w_pbl], axis=-1), axis=1)
+    h_pbl = _h_pair[..., 0] / _h_pair[..., 1]  # (ncol,)
     h_pbl = jnp.clip(h_pbl, 100.0, None)
 
     # ----- K-profile inside PBL -----
@@ -134,37 +143,39 @@ def holtslag_boville_turbulence(
     )  # (ncol, nlev-1)
 
     # Local Ri-based Km above PBL (Louis-style)
-    z_abs = jnp.clip(jnp.abs(z_half_inner), 1.0, None)
-    l_mix = constants.kappa_vk * z_abs / (
-        1.0 + constants.kappa_vk * z_abs / config.l_mix_max
-    )
-    b_louis = 5.0
+    l_mix = mixing_length(z_half_inner, config.l_mix_max)
+    b_louis = config.b_louis
     Ri_pos = jnp.maximum(Ri, 0.0)
-    f_stable = 1.0 / (1.0 + 2.0 * b_louis * Ri_pos / jnp.sqrt(1.0 + 5.0 * Ri_pos))
+    f_stable = 1.0 / (
+        1.0 + 2.0 * b_louis * Ri_pos / jnp.sqrt(1.0 + b_louis * Ri_pos)
+    )
     Ri_neg = jnp.minimum(Ri, 0.0)
     f_unstable = 1.0 - 2.0 * b_louis * Ri_neg / (
-        1.0 + 3.0 * b_louis * 5.0 * l_mix ** 2
+        1.0 + 3.0 * b_louis * b_louis * l_mix ** 2
         * jnp.sqrt(jnp.abs(Ri_neg) + 1e-10) / (dz_half ** 2 + 1e-10)
     )
-    blend_ri = jax.nn.sigmoid(100.0 * Ri)
+    blend_ri = jax.nn.sigmoid(config.blend_ri_sharpness * Ri)
     f_m = (1.0 - blend_ri) * f_unstable + blend_ri * f_stable
     Km_local = l_mix ** 2 * S * f_m  # (ncol, nlev-1)
 
     # Smooth transition from profile (inside PBL) to local (above)
-    blend_pbl = jax.nn.sigmoid(10.0 * (z_norm - 1.0))  # 0 inside PBL, 1 above
+    blend_pbl = jax.nn.sigmoid(
+        config.blend_pbl_sharpness * (z_norm - 1.0)
+    )  # 0 inside PBL, 1 above
     Km_half = (1.0 - blend_pbl) * Km_profile + blend_pbl * Km_local
     Kh_half = Km_half / config.Pr_t
 
-    # Interpolate to full levels for diagnostics
-    Km_full = jnp.zeros((ncol, nlev))
-    Km_full = Km_full.at[:, 1:-1].set(0.5 * (Km_half[:, :-1] + Km_half[:, 1:]))
-    Km_full = Km_full.at[:, 0].set(Km_half[:, 0])
-    Km_full = Km_full.at[:, -1].set(Km_half[:, -1])
-
-    Kh_full = jnp.zeros((ncol, nlev))
-    Kh_full = Kh_full.at[:, 1:-1].set(0.5 * (Kh_half[:, :-1] + Kh_half[:, 1:]))
-    Kh_full = Kh_full.at[:, 0].set(Kh_half[:, 0])
-    Kh_full = Kh_full.at[:, -1].set(Kh_half[:, -1])
+    # Interpolate to full levels for diagnostics — single concat per
+    # field instead of the previous ``zeros + 3 .at[].set`` triple
+    # scatter (XLA lowers the concat to one HLO op).
+    Km_interior = 0.5 * (Km_half[:, :-1] + Km_half[:, 1:])
+    Km_full = jnp.concatenate(
+        [Km_half[:, :1], Km_interior, Km_half[:, -1:]], axis=1,
+    )
+    Kh_interior = 0.5 * (Kh_half[:, :-1] + Kh_half[:, 1:])
+    Kh_full = jnp.concatenate(
+        [Kh_half[:, :1], Kh_interior, Kh_half[:, -1:]], axis=1,
+    )
 
     # Layer thicknesses for diffusion
     dz_layer = jnp.abs(z_half[:, :-1] - z_half[:, 1:])  # (ncol, nlev)
@@ -175,14 +186,26 @@ def holtslag_boville_turbulence(
     sflx_T = shflx / constants.c_pd
     sflx_q = lhflx / constants.L_v
 
-    # ----- Counter-gradient correction for heat -----
-    # Modify effective heat surface flux to account for nonlocal transport:
-    # gamma_h * (w'theta')_sfc / (Km_max * h_pbl)
-    # Applied as an additional correction to the T diffusion RHS
+    # ----- Counter-gradient correction for heat (Holtslag-Boville 1993) -----
+    # Nonlocal transport term γ_h = a·(w'θ')_0 / (w_s·h)  [K/m], added to the
+    # effective temperature gradient.  ``w_s`` is a turbulent VELOCITY scale
+    # [m/s] — here the friction velocity u* (consistent with the u*-based
+    # K-profile above; a convective-w* enhancement would be a further
+    # refinement).
+    #
+    # FIX (audit i43): the previous code divided by ``Km_max`` — a
+    # DIFFUSIVITY [m²/s] — instead of a velocity, so γ_h carried units
+    # [K/m²] and was ~1/(κ·h) ≈ 60× too small for a typical 1 km PBL.  The
+    # nonlocal countergradient (the defining feature of the Holtslag-Boville
+    # scheme versus a purely local closure) was therefore effectively
+    # absent.  Dividing by u* restores the correct [K/m] units and the
+    # O(few K/km) countergradient magnitude.
     wtheta_sfc = shflx / (rho[:, -1] * constants.c_pd)  # kinematic heat flux (ncol,)
-    Km_max = jnp.max(Km_half, axis=1)  # (ncol,)
-    counter_grad = config.gamma_h * wtheta_sfc / (
-        jnp.clip(Km_max, 1e-6, None) * h_pbl
+    # Gate to the convective (unstable) regime: the countergradient is a
+    # convective-BL feature, so it vanishes for neutral/stable surface
+    # forcing (w'θ' ≤ 0) rather than producing a spurious negative γ_h.
+    counter_grad = config.gamma_h * jnp.maximum(wtheta_sfc, 0.0) / (
+        ustar * h_pbl
     )  # (ncol,) [K/m]
 
     # Add counter-gradient to the effective T gradient inside PBL
@@ -191,9 +214,13 @@ def holtslag_boville_turbulence(
     sflx_T_enhanced = sflx_T + rho[:, -1] * jnp.mean(Kh_half, axis=1) * counter_grad
 
     # ----- Implicit vertical diffusion -----
+    # Heat in θ-space so a dry adiabat is neutral; moisture and momentum
+    # use raw diffusion (their conserved form needs no exner conversion).
     u_new = implicit_vertical_diffusion(u, Km_half, rho, dz_layer, dz_half, dt, sflx_u)
     v_new = implicit_vertical_diffusion(v, Km_half, rho, dz_layer, dz_half, dt, sflx_v)
-    T_new = implicit_vertical_diffusion(T, Kh_half, rho, dz_layer, dz_half, dt, sflx_T_enhanced)
+    T_new = implicit_vertical_diffusion_theta(
+        T, Kh_half, rho, dz_layer, dz_half, p_full, dt, sflx_T_enhanced,
+    )
     q_new = implicit_vertical_diffusion(q_v, Kh_half, rho, dz_layer, dz_half, dt, sflx_q)
 
     return TurbulenceOutput(

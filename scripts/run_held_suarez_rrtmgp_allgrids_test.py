@@ -15,6 +15,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm import constants
+
 DAYS = 100
 NLEV = 20
 
@@ -26,7 +28,7 @@ def run_cubed_sphere(days, nlev):
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.primitive_eq_cdgrid import (
         CDGridPrimitiveEquationModel, CDGridPrimitiveEquationConfig)
-    from tests.test_cases.held_suarez import held_suarez_init
+    from legoesm.atmosphere.held_suarez import held_suarez_init
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
     from legoesm.atmosphere.physics.radiation.config import RadiationConfig
     from legoesm.atmosphere.physics.convection.config import ConvectionConfig
@@ -38,7 +40,7 @@ def run_cubed_sphere(days, nlev):
     n = 16
     grid = create_cubed_sphere(n)
     sigma = standard_hybrid_levels(nlev)
-    dx = 6.371e6 * np.pi / (2 * n)
+    dx = constants.R_earth * np.pi / (2 * n)
     dt = 300.0  # Conservative dt
 
     config = CDGridPrimitiveEquationConfig(
@@ -154,7 +156,7 @@ def run_icosahedral(days, nlev):
     from legoesm.grids.vertical import create_sigma_coordinate
     from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
         MPASPrimitiveEquationModel, MPASPrimitiveEquationConfig)
-    from tests.test_cases.held_suarez import held_suarez_init_mpas
+    from legoesm.atmosphere.held_suarez import held_suarez_init_mpas
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
     from legoesm.atmosphere.physics.radiation.config import RadiationConfig
     from legoesm.atmosphere.physics.convection.config import ConvectionConfig
@@ -218,9 +220,9 @@ def run_latlon_spectral_elements(days, nlev):
     on a lat-lon grid which avoids the polar CFL issue.
     """
     from legoesm.grids.latlon import create_latlon_grid
-    from legoesm.atmosphere.dynamics.primitive_eq_latlon import (
-        LatLonPrimitiveEquationModel, LatLonPrimitiveEquationConfig)
-    from tests.test_cases.held_suarez import held_suarez_init_latlon
+    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig)
+    from legoesm.atmosphere.held_suarez import held_suarez_init_latlon
     from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
     from legoesm.atmosphere.physics.radiation.config import RadiationConfig
     from legoesm.atmosphere.physics.convection.config import ConvectionConfig
@@ -232,16 +234,26 @@ def run_latlon_spectral_elements(days, nlev):
     n_lat, n_lon = 36, 72
     grid = create_latlon_grid(n_lat, n_lon)
     sigma = standard_hybrid_levels(nlev)
-    dx = 6.371e6 * np.pi / n_lat
-    # Use small dt to handle polar CFL
-    dt = 120.0
+    import math as _m
+    R = float(grid.radius)
+    dx_pole = R * grid.dlon * _m.cos(_m.pi / 2 - grid.dlat / 2)
+    # Pole-cell CFL-safe dt and A_h for the explicit C-grid solver
+    dt = min(120.0, 0.8 * dx_pole / 300.0)
+    A_h_max = 0.4 * dx_pole ** 2 / dt
+    dx = R * np.pi / n_lat
+    A_h = min(0.01 * dx ** 2, A_h_max)
 
-    config = LatLonPrimitiveEquationConfig(
-        hyperdiff_coeff=dx**4 / 3600.0, hyperdiff_ps_coeff=dx**4 / 3600.0,
-        div_damp_coeff=0.15 * dx**2, A_h=0.01 * dx**2,
-        use_conservation_fixer=True, fix_mass=True)
-    model = LatLonPrimitiveEquationModel(grid, sigma, config)
-    state = held_suarez_init_latlon(grid, sigma)
+    config = CGridLatLonPrimitiveEquationConfig(
+        A_h=A_h,
+        fix_mass=True)
+    model = CGridLatLonPrimitiveEquationModel(grid, sigma, config)
+
+    # Convert to native C-grid state once; step natively to avoid
+    # lossy face↔cell re-projection every timestep.
+    from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+        hydrostatic_to_cgrid)
+    hs_init = held_suarez_init_latlon(grid, sigma)
+    state = hydrostatic_to_cgrid(hs_init, grid)
 
     phys_cfg = PhysicsConfig(
         radiation=RadiationConfig(scheme='rrtmgp'),
@@ -256,20 +268,22 @@ def run_latlon_spectral_elements(days, nlev):
     diag_every = max(1, int(10 * 3600 * 24 / dt))  # every 10 days
 
     flush_print(f"  Lat-lon {n_lat}x{n_lon}: {n_steps} steps, dt={dt}s")
-    state = model.step_with_physics(state, dt, physics_fn)
+    state = model.step(state, dt, physics_fn=physics_fn)
     jax.block_until_ready(state)
     flush_print("  JIT done")
 
     t0 = time.time()
     diag = []
     for i in range(1, n_steps):
-        state = model.step_with_physics(state, dt, physics_fn)
+        state = model.step(state, dt, physics_fn=physics_fn)
         if (i + 1) % diag_every == 0:
             jax.block_until_ready(state)
             day = (i + 1) * dt / 86400
-            T = state.T.data
+            T = state.T
             mean_T = float(jnp.mean(T))
-            max_wind = float(jnp.max(jnp.sqrt(state.u.data**2 + state.v.data**2)))
+            max_wind = float(jnp.max(jnp.sqrt(
+                (0.5 * (state.u[:, :-1] + state.u[:, 1:]))**2
+                + (0.5 * (state.v[:-1] + state.v[1:]))**2)))
             if not jnp.all(jnp.isfinite(T)):
                 flush_print(f"  Day {day:6.1f}: BLOWUP (NaN)")
                 return None

@@ -21,11 +21,19 @@ Public API
 
 from __future__ import annotations
 
+import logging
 from typing import NamedTuple
 
 import numpy as np
 
 from legoesm.forcing.amip_config import AMIPExperimentConfig
+
+logger = logging.getLogger(__name__)
+
+# Set of (table_name, year) pairs that have already triggered the
+# out-of-range GHG warning in this process.  Without de-duplication a
+# 365-step AMIP run would log the same warning 365 times.
+_GHG_OUT_OF_RANGE_WARNED: set[tuple[str, int]] = set()
 
 
 # ======================================================================
@@ -83,9 +91,13 @@ _GHG_HISTORICAL: dict[int, tuple[float, float, float]] = {
     1850: (284.3, 808.2, 273.0),
     1900: (295.7, 911.0, 275.7),
     1950: (310.7, 1147.0, 289.0),
+    1979: (336.78, 1550.0, 301.0),  # AMIP start year (NOAA Mauna Loa + AGGI)
     1980: (338.7, 1547.0, 301.0),
+    1990: (354.39, 1714.0, 308.0),
     2000: (369.5, 1773.0, 316.0),
-    2014: (397.5, 1834.0, 327.0),
+    2010: (389.85, 1798.0, 323.0),
+    2014: (397.5, 1834.0, 327.0),  # AMIP CMIP6 end year
+    2021: (414.72, 1895.0, 334.5),  # CMIP7 AMIP extension
 }
 
 _GHG_SSP245: dict[int, tuple[float, float, float]] = {
@@ -110,6 +122,10 @@ _GHG_TABLES: dict[str, dict[int, tuple[float, float, float]]] = {
     "historical": _GHG_HISTORICAL,
     "ssp245": _GHG_SSP245,
     "ssp585": _GHG_SSP585,
+    # AMIP shares the historical GHG trajectory: the CMIP6 AMIP protocol
+    # mandates the same time-varying CO2/CH4/N2O as the historical run
+    # (only the SST/SIC are observed rather than coupled).
+    "amip": _GHG_HISTORICAL,
 }
 
 
@@ -120,8 +136,19 @@ _GHG_TABLES: dict[str, dict[int, tuple[float, float, float]]] = {
 def _interp_ghg_table(
     table: dict[int, tuple[float, float, float]],
     year: float,
+    table_name: str = "ghg",
 ) -> tuple[float, float, float]:
     """Linearly interpolate a GHG table, clamped at endpoints.
+
+    A one-shot warning is emitted when ``year`` falls more than 0.5
+    years outside the table's anchor range (e.g. ``ghg_at_year("amip",
+    2026)`` when the historical table stops at 2021).  ``np.interp``
+    silently clamps in this case, so the silent extrapolation /
+    constant-tail behaviour is otherwise invisible to the user — this
+    is exactly the kind of forcing bias the iter-3/4 codex review
+    flagged as a high-leverage failure mode for production CMIP6 AMIP
+    runs that extend past 2021 (or past 2014 for the strict CMIP6
+    protocol).
 
     Parameters
     ----------
@@ -129,6 +156,9 @@ def _interp_ghg_table(
         Sparse year-to-concentration mapping.
     year : float
         Target year (may be fractional).
+    table_name : str, optional
+        Used in the out-of-range warning so users can identify which
+        scenario / experiment is producing the clamped value.
 
     Returns
     -------
@@ -139,6 +169,25 @@ def _interp_ghg_table(
     ch4_vals = np.array([table[y][1] for y in years])
     n2o_vals = np.array([table[y][2] for y in years])
     years_arr = np.array(years, dtype=np.float64)
+
+    # One-shot out-of-range warning: triggered once per (table,
+    # integer-year) bin so a multi-year run doesn't flood the log.
+    # Truncate (``int(...)``) rather than round-half-to-even so that
+    # 2025.0 and 2025.5 share the same warning slot.
+    y_min, y_max = float(years_arr[0]), float(years_arr[-1])
+    if year < y_min - 0.5 or year > y_max + 0.5:
+        key = (table_name, int(year))
+        if key not in _GHG_OUT_OF_RANGE_WARNED:
+            _GHG_OUT_OF_RANGE_WARNED.add(key)
+            logger.warning(
+                f"[ghg_table] year={year:.2f} is outside the {table_name!r} "
+                f"GHG anchor range [{y_min:.0f}, {y_max:.0f}] — "
+                f"np.interp will clamp to the endpoint value, producing "
+                f"a flat tail in CO2/CH4/N2O.  For accurate forcing "
+                f"past {y_max:.0f}, supply an external GHG file via "
+                f"--ghg-forcing external --ghg-file <path> or extend "
+                f"the anchor table in src/legoesm/forcing/experiments.py."
+            )
 
     co2 = float(np.interp(year, years_arr, co2_vals))
     ch4 = float(np.interp(year, years_arr, ch4_vals))
@@ -155,10 +204,11 @@ def ghg_at_year(
     Linear interpolation between benchmark years; clamped at the edges
     of each scenario's time series.
 
-    For ``"piControl"`` and ``"amip"`` the concentrations are constant
-    (the template's base values).  For ``"1pctCO2"`` the CO2 grows at
-    1 % per year from 284.3 ppmv while CH4 and N2O stay at
-    pre-industrial levels.
+    For ``"piControl"`` the concentrations are constant (the template's
+    base values).  ``"amip"`` shares the ``"historical"`` GHG table so
+    CO2/CH4/N2O follow the CMIP6 historical trajectory (1979-2014).
+    For ``"1pctCO2"`` the CO2 grows at 1 % per year from 284.3 ppmv
+    while CH4 and N2O stay at pre-industrial levels.
 
     Parameters
     ----------
@@ -186,7 +236,10 @@ def ghg_at_year(
 
     # Experiments with a dedicated GHG table.
     if experiment_name in _GHG_TABLES:
-        return _interp_ghg_table(_GHG_TABLES[experiment_name], year)
+        return _interp_ghg_table(
+            _GHG_TABLES[experiment_name], year,
+            table_name=experiment_name,
+        )
 
     # 1pctCO2: 1 % per year compound increase from pre-industrial CO2.
     if experiment_name == "1pctCO2":
@@ -277,15 +330,18 @@ EXPERIMENT_TEMPLATES: dict[str, ExperimentTemplate] = {
     ),
     "amip": ExperimentTemplate(
         name="amip",
-        description="AMIP simulation with prescribed SST and sea-ice (1979-2014)",
+        description=(
+            "AMIP simulation with prescribed SST and sea-ice (1979-2014). "
+            "GHGs follow the CMIP6 historical trajectory (transient)."
+        ),
         start_year=1979,
         end_year=2014,
         parent_experiment="",
-        forcing_type="fixed",
+        forcing_type="transient",
         variant_label="r1i1p1f1",
-        base_co2_ppmv=348.0,
-        base_ch4_ppbv=1650.0,
-        base_n2o_ppbv=306.0,
+        base_co2_ppmv=336.78,
+        base_ch4_ppbv=1550.0,
+        base_n2o_ppbv=301.0,
     ),
     "1pctCO2": ExperimentTemplate(
         name="1pctCO2",
@@ -425,16 +481,14 @@ def create_experiment_config(
     # when the user hasn't explicitly overridden it.
     _GRID_DEFAULT_DISCRETIZATION = {
         "cubed_sphere": "cdgrid",
-        "latlon": "cdgrid",
+        "latlon": "latlon_cgrid",
         "gaussian": "spectral",
-        "voronoi": "mpas",
         "mpas": "mpas",
     }
     _GRID_DEFAULT_MODEL = {
         "cubed_sphere": "hydrostatic",
         "latlon": "hydrostatic",
         "gaussian": "spectral_pe",
-        "voronoi": "hydrostatic",
         "mpas": "hydrostatic",
     }
     if "discretization" not in dycore_ov and "grid_type" in grid_ov:

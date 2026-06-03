@@ -1,0 +1,12 @@
+# T106 multi-step suite restricted to the classical variant so it can
+# run in parallel with the column_nn and sfno_physics jobs.  Writes
+# its scorecard to a per-variant output_dir to avoid races on the
+# shared scorecard JSON; the three are merged after all three jobs
+# land.
+
+base: "config/aimip/t106/aimip_era5_multistep.yaml"
+
+variants:
+  - classical
+
+output_dir: "results/aimip_multistep_t106_001/classical_run"

@@ -23,6 +23,8 @@ def constant_vertical_mixing(
     z_coord: OceanZStarCoordinate,
     jacobian: jnp.ndarray,
     cfg: ConstantVerticalMixingConfig,
+    apply_diffusion: bool = True,
+    dt: float | None = None,
 ) -> VerticalMixingOutput:
     """Apply constant-coefficient vertical diffusion to u, v, T, S.
 
@@ -42,19 +44,28 @@ def constant_vertical_mixing(
     """
     nlev = u.shape[-1]
 
-    # Velocities with viscosity A_v
-    vel = jnp.stack([u, v], axis=0)
-    vel_tend = jax.vmap(
-        lambda q: vertical_diffusion(q, z_coord, jacobian, cfg.A_v),
-        in_axes=0, out_axes=0,
-    )(vel)
+    # Velocities with viscosity A_v / tracers with diffusivity K_v.
+    # When ``apply_diffusion`` is False, the diffusion is deferred to a
+    # backward-Euler implicit solve in the dynamics step.
+    if apply_diffusion:
+        # Pass dt (when provided) so the explicit-Euler CFL cap
+        # (clean_physics iter-5) fires inside ``vertical_diffusion``.
+        vel = jnp.stack([u, v], axis=0)
+        vel_tend = jax.vmap(
+            lambda q: vertical_diffusion(q, z_coord, jacobian, cfg.A_v, dt=dt),
+            in_axes=0, out_axes=0,
+        )(vel)
 
-    # Tracers with diffusivity K_v
-    tracers = jnp.stack([T, S], axis=0)
-    tr_tend = jax.vmap(
-        lambda q: vertical_diffusion(q, z_coord, jacobian, cfg.K_v),
-        in_axes=0, out_axes=0,
-    )(tracers)
+        tracers = jnp.stack([T, S], axis=0)
+        tr_tend = jax.vmap(
+            lambda q: vertical_diffusion(q, z_coord, jacobian, cfg.K_v, dt=dt),
+            in_axes=0, out_axes=0,
+        )(tracers)
+    else:
+        zero_uv = jnp.zeros_like(u)
+        vel_tend = jnp.stack([zero_uv, zero_uv], axis=0)
+        zero_T = jnp.zeros_like(T)
+        tr_tend = jnp.stack([zero_T, zero_T], axis=0)
 
     # Constant K/A diagnostics at interfaces
     K_diag = jnp.full((*u.shape[:-1], nlev - 1), cfg.K_v, dtype=u.dtype)

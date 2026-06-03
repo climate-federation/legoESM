@@ -89,8 +89,12 @@ def prognostic_spectral_gwd(
         + v[:, None, :] * sin_az[None, :, None]
     )
 
-    # Phase speed per wavenumber: c = N / k
-    # (ncol, nlev, n_wn) via broadcast
+    # Phase speed per wavenumber: c = N / k.  ``k_grid`` is a static
+    # config-derived array — its values never participate in AD — and
+    # the legacy ``clip`` floor preserves the divide's forward
+    # semantics for misconfigured ``k_min ≤ 1e-10`` configs (codex
+    # round 3 flagged that ``safe_divide`` would silently zero
+    # ``c_phase`` and ``wavelength`` in that boundary case).
     c_phase = N_full[:, :, None] / jnp.clip(k_grid[None, None, :], 1e-10, None)
 
     # Layer thickness
@@ -121,6 +125,14 @@ def prognostic_spectral_gwd(
     N_4d = N_full[:, None, None, :]  # (ncol, 1, 1, nlev)
     rho_4d = rho[:, None, None, :]
 
+    # ``N`` is upstream-clipped (``N2_half ≥ 1e-8`` → ``N ≥ 1e-4``) and
+    # ``wavelength`` floors at ``2π/k_max`` ≥ 1e3 m for the default
+    # config, so the legacy ``clip(N, 1e-6) * wavelength`` denominator
+    # is bounded well above zero in normal operation.  The clip on
+    # ``N_4d`` keeps the divide AD-safe via the clip's zero VJP in any
+    # misconfigured neutral layer.  Issue #249 codex round 3:
+    # ``safe_divide`` here would mask trace-but-valid configurations
+    # rather than fall back to the clipped-denominator divide.
     tau_sat = (
         config.breaking_threshold * rho_4d * intrinsic_abs ** 3
         / (jnp.clip(N_4d, 1e-6, None) * wavelength[None, None, :, None])
@@ -150,15 +162,31 @@ def prognostic_spectral_gwd(
     drag_4d = drag_stack.T.reshape(ncol, n_az, n_wn, nlev)
     drag_4d = drag_4d[:, :, :, ::-1]  # reverse to top-first
 
-    # Sum over spectrum to get (ncol, nlev) tendencies
-    # Weight by azimuthal direction for du/dv
-    # drag is stress gradient -> acceleration = -drag_deposit (already divided by dp)
-    # Convert from dp-based to dz-based: multiply by dp/(rho*dz) -> just -drag
-    du_dt_spec = -drag_4d * cos_az[None, :, None, None]  # (ncol, n_az, n_wn, nlev)
-    dv_dt_spec = -drag_4d * sin_az[None, :, None, None]
-
-    du_dt = jnp.sum(du_dt_spec, axis=(1, 2))  # (ncol, nlev)
-    dv_dt = jnp.sum(dv_dt_spec, axis=(1, 2))
+    # Sum over spectrum to get (ncol, nlev) tendencies.
+    # ``drag_deposit = (F_carry - F_new) / dp`` is dimensionless
+    # (both F and dp are in Pa).  To convert to a per-mass force we
+    # use the hydrostatic identity ``dp = -ρ·g·dz`` to get
+    # ``F/(ρ·dz) = F·g/(-dp)`` → the conversion factor is ``g``,
+    # not ``1`` as the earlier comment claimed.  Audit cycle iter-26
+    # finding P0: missing this factor under-counted GWD acceleration
+    # by a factor of ~9.8 in the prognostic-spectral path.
+    # Weight by azimuthal direction for du/dv.
+    # FIXME(F-GWD-1, CRITICAL — opt-in scheme): this deposition is missing the
+    # ``sign(c - U_proj)`` factor, so a symmetric launch spectrum gives a force
+    # independent of the wind (not a drag).  Restoring ``sign(intrinsic)`` makes
+    # it wind-dependent but, with ``c_phase = N/k`` often ≫ U, the
+    # ``tau_sat ~ |intrinsic|^3`` saturation then preferentially breaks the
+    # along-wind waves and ACCELERATES jets (column dissipation eps_gwd < 0).
+    # The sign factor is necessary but not sufficient — the breaking/saturation
+    # energetics need a proper spectral-GWD review + a momentum-deposition /
+    # QBO validation benchmark before this can be trusted operationally. Left
+    # unchanged (default GWD scheme is "none") pending that work; see
+    # parameterization_checks.md F-GWD-1.
+    _trig_stack = jnp.stack([cos_az, sin_az], axis=-1)[None, :, None, None, :]
+    _duv_spec = -drag_4d[..., None] * _trig_stack
+    _duv = jnp.sum(_duv_spec, axis=(1, 2)) * constants.g  # (ncol, nlev, 2)
+    du_dt = _duv[..., 0]
+    dv_dt = _duv[..., 1]
 
     # Frictional heating
     dT_dt = -(u * du_dt + v * dv_dt) / constants.c_pd
@@ -166,8 +194,14 @@ def prognostic_spectral_gwd(
     # Column dissipation (positive-definite: KE lost by the mean flow)
     eps_gwd = -jnp.sum(rho * (u * du_dt + v * dv_dt) * dz, axis=1)
 
-    # Prognostic spectrum update: relax toward launch source
-    launch_source = jnp.full((ncol, n_az, n_wn), config.launch_flux)
+    # Prognostic spectrum update: relax toward launch source.  Pin the
+    # broadcast dtype to the input spectrum dtype so the relaxation
+    # stays at the input precision (defaulting to ``jnp.full`` allows
+    # x64 mode to silently promote the spectrum to f64 even when the
+    # state is f32).
+    launch_source = jnp.full(
+        (ncol, n_az, n_wn), config.launch_flux, dtype=spectrum_in.dtype,
+    )
     spectrum_new = spectrum_in + dt * (launch_source - spectrum_in) / config.tau_decay
 
     return GWDOutput(du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, eps_gwd=eps_gwd), spectrum_new

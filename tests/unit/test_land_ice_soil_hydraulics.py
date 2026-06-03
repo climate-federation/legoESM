@@ -7,6 +7,7 @@ Brooks-Corey, PDI, Lu.
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import pytest
 
@@ -182,6 +183,17 @@ class Test3g_PDI:
         theta_0 = pdi_theta(jnp.array([0.0]), CONFIG)
         assert jnp.allclose(theta_0, CONFIG.theta_sat, atol=1e-6)
 
+    def test_K_approaches_Ksat_at_saturation(self):
+        # Regression: the wet-end smoothstep used to be inverted, so K(h~0)
+        # collapsed to K_sat * Kr_crit (~0.34 * K_sat) instead of K_sat.
+        # Walk h from h_crit down through 1e-12 m and confirm K converges
+        # monotonically to K_sat.
+        psi_wet = -jnp.array([1e-12, 1e-9, 1e-6, 1e-3])
+        K_wet = pdi_K(psi_wet, CONFIG)
+        assert jnp.all(K_wet <= CONFIG.K_sat * (1.0 + 1e-6))
+        assert jnp.all(K_wet >= K_wet[-1])  # monotone increase toward h=0
+        assert jnp.isclose(K_wet[0], CONFIG.K_sat, rtol=1e-6, atol=0.0)
+
 
 # ===================================================================
 # 3h  Lu three-regime -- consistency
@@ -272,3 +284,45 @@ class Test3k_SWRC_Parametrized:
         K = hydraulic_conductivity(psi_vals, theta, config)
         assert jnp.all(jnp.isfinite(K))
         assert jnp.all(K >= 0.0)
+
+
+# ===================================================================
+# 3l  Van Genuchten -- AD-safety at the saturation boundary
+# ===================================================================
+
+
+class Test3l_VanGenuchtenADSafety:
+    """Reverse-mode gradients must be finite at the saturation boundary psi=0.
+
+    Regression: ``van_genuchten_K``'s Mualem term ``(1-(1-Se^{1/m})^m)^2`` had an
+    infinite gradient as Se -> 1, and ``van_genuchten_C``'s ``|alpha psi|^{n-1}``
+    a NaN gradient at psi=0 (n_vg < 2, and the ``where(psi>=0, 0, C)`` turns the
+    inf into 0*inf).  Both saturation states are reached every infiltration /
+    ponding event — richards' ``K_top = hydraulic_conductivity(psi[:,0], ...)``
+    and ``moisture_capacity`` run on the raw psi each Picard iteration — so a NaN
+    here poisons the soil-column adjoint.  Flooring the singular arguments fixes
+    the gradient while keeping the forward exact (K(psi=0)==K_sat, C(psi=0)==0).
+    """
+
+    def test_vg_K_grad_finite_through_saturation(self):
+        cfg = SoilHydraulicsConfig(retention_curve="van_genuchten")
+        # dry -> exact saturation (psi=0) -> ponded (psi>0)
+        psi = jnp.array([-10.0, -1.0, -1e-3, -1e-9, 0.0, 1e-3])
+        g = jax.grad(lambda p: jnp.sum(van_genuchten_K(p, cfg)))(psi)
+        assert jnp.all(jnp.isfinite(g)), f"van_genuchten_K grad not finite: {g}"
+        # Public dispatch path (what richards' K_top exercises on raw psi).
+        g2 = jax.grad(
+            lambda p: jnp.sum(hydraulic_conductivity(p, theta_from_psi(p, cfg), cfg))
+        )(psi)
+        assert jnp.all(jnp.isfinite(g2)), f"hydraulic_conductivity grad not finite: {g2}"
+
+    def test_vg_C_grad_finite_at_saturation(self):
+        cfg = SoilHydraulicsConfig(retention_curve="van_genuchten")
+        psi = jnp.array([-10.0, -1.0, -1e-3, -1e-9, 0.0])
+        g = jax.grad(lambda p: jnp.sum(van_genuchten_C(p, cfg)))(psi)
+        assert jnp.all(jnp.isfinite(g)), f"van_genuchten_C grad not finite: {g}"
+        # Public dispatch path (moisture_capacity, richards Picard iteration).
+        g2 = jax.grad(
+            lambda p: jnp.sum(moisture_capacity(p, theta_from_psi(p, cfg), cfg))
+        )(psi)
+        assert jnp.all(jnp.isfinite(g2)), f"moisture_capacity grad not finite: {g2}"

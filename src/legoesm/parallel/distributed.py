@@ -93,6 +93,33 @@ def initialize_distributed(
             RuntimeWarning,
             stacklevel=2,
         )
+        # FV3_3D 2026-05-27: re-assert the MPI halo backend on every call.
+        # The function contract is "set up MPI halo exchange"; an earlier
+        # `set_halo_backend("local")` (used in reference-vs-MPI bit-for-bit
+        # tests) must not silently outlive a follow-up `initialize_distributed`.
+        from legoesm.grids.halo import get_halo_backend, set_halo_backend
+        if get_halo_backend() != "mpi":
+            set_halo_backend("mpi", _active_topology)
+        # FV3_3D iter-1058 (codex iter-1056 WARN #2): rebuild
+        # ``_active_layout`` when the caller's ``global_n`` differs
+        # from the first-init layout's ``global_n``.  Previously the
+        # re-entry branch silently returned the stale layout, which
+        # would feed wrong tile sizes to ``scatter_to_local`` /
+        # ``gather_to_global``.  The current FV3 step-fidelity tests
+        # never call scatter, so the stale layout was latent, but any
+        # future test or production code path that re-initializes
+        # with a different grid size needs the layout refreshed.
+        if global_n is not None:
+            need_rebuild = (
+                _active_layout is None
+                or getattr(_active_layout, "global_n", None) != global_n
+            )
+            if need_rebuild:
+                _active_layout = make_layout(
+                    rank=_active_topology.rank,
+                    n_ranks=_active_topology.n_processes,
+                    global_n=global_n,
+                )
         from legoesm.parallel.mesh import get_active_config
         config = get_active_config()
         result = [config]
@@ -253,6 +280,125 @@ def initialize_distributed(
     if return_layout:
         result.append(layout)
     return tuple(result) if len(result) > 1 else result[0]
+
+
+def initialize_distributed_latlon(
+    *,
+    global_n_lat: int,
+    global_n_lon: int | None = None,
+    fold=None,
+):
+    """Initialize the MPI halo backend for a latitude-band lat-lon run.
+
+    Parallel entry point to :func:`initialize_distributed` for the
+    SCVT/cubed-sphere grids — separate because the lat-lon path
+    needs neither the face-topology dance nor JAX's device-mesh
+    SPMD machinery.  All the lat-lon MPI work happens through
+    mpi4jax sendrecv (see
+    :mod:`legoesm.parallel.latlon_mpi`) and the backend-dispatched
+    halo helpers (see :mod:`legoesm.grids.halo_latlon`).
+
+    What this does
+    --------------
+    1. Reads ``rank`` and ``n_processes`` from ``MPI.COMM_WORLD``.
+    2. Builds a :class:`LatLonBandLayout` for the band this rank
+       owns.
+    3. Activates ``set_halo_backend("mpi", layout)`` — every
+       subsequent ``pad_halo_latlon`` / ``pad_with_pole_bc_lat``
+       call inside the dycore dispatches through MPI sendrecv at
+       partition cuts + pole-fold / wall-BC constants at boundary
+       ranks, and ``_is_distributed()`` returns True (gating
+       conservation reductions).
+
+    What this does NOT do
+    ---------------------
+    * Does not initialize ``jax.distributed`` (multi-node JAX
+      coordinator).  Single-node CPU MPI runs don't need it; if
+      you need multi-node JAX SPMD, call :func:`initialize_distributed`
+      first (cubed-sphere path) or extend this helper to take the
+      coordinator arguments.
+    * Does not scatter state/forcing.  Callers slice the global
+      grid + initial state themselves using the returned
+      ``LatLonBandLayout`` (see ``scatter_state_latlon``).
+    * Does not register an ``_active_layout`` of the cubed-sphere
+      ``DistributedLayout`` type (those carry ``ownership.face_ids``
+      etc. which have no lat-lon analog).  The
+      ``LatLonBandLayout`` is exposed via ``get_mpi_topology()``
+      from :mod:`legoesm.grids.halo` for code that needs to query
+      "what part of the global lat axis do I own".
+
+    Parameters
+    ----------
+    global_n_lat : int
+        Global number of latitude rows of the grid this rank's band
+        slices into.
+    global_n_lon : int, optional
+        Global number of longitude columns.  Defaults to
+        ``2 * global_n_lat`` (the standard square-cell AMIP layout).
+    fold : FoldDescriptor, optional
+        Tripolar north-fold descriptor (issue #353).  When supplied
+        (and ``fold.is_active``), the returned layout carries it so the
+        northernmost rank applies the permutation-based tripolar fold at
+        the north boundary.  Pass ``geometry.fold`` for an ORCA / eORCA
+        ocean run; omit (``None``) for regular lat-lon.
+
+    Returns
+    -------
+    LatLonBandLayout
+        This rank's band layout.  Use
+        ``layout.lat_start`` / ``layout.lat_end`` to slice the
+        global grid + initial state for this rank.
+    """
+    global _active_topology
+    if _active_topology is not None:
+        active_fold = getattr(_active_topology, "fold", None)
+        active_on = (active_fold is not None
+                     and getattr(active_fold, "is_active", False))
+        requested_on = fold is not None and getattr(fold, "is_active", False)
+        if requested_on and not active_on:
+            # A prior fold-less init must NOT mask a later tripolar (ORCA)
+            # init — otherwise the ocean run would silently use the
+            # geographic pole-fold.  Update the active layout to carry the
+            # fold and re-arm the MPI halo backend.
+            warnings.warn(
+                "initialize_distributed_latlon() re-called with a tripolar "
+                "fold after a fold-less init; updating the active layout to "
+                "carry the fold.",
+                RuntimeWarning, stacklevel=2,
+            )
+            updated = _active_topology._replace(fold=fold)
+            _active_topology = updated
+            from legoesm.grids.halo import set_halo_backend
+            set_halo_backend("mpi", updated)
+            return updated
+        warnings.warn(
+            "initialize_distributed_latlon() called more than once. "
+            "Returning the existing topology.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return _active_topology
+
+    if global_n_lon is None:
+        global_n_lon = 2 * global_n_lat
+
+    # Validate MPI dependencies before touching JAX.
+    _mpi4jax, MPI = _require_mpi_stack()
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
+    n_processes = comm.Get_size()
+
+    from legoesm.parallel.latlon_mpi import make_latlon_band_layout
+    layout = make_latlon_band_layout(
+        rank=rank, n_ranks=n_processes,
+        n_lat=global_n_lat, n_lon=global_n_lon,
+        fold=fold,
+    )
+    _active_topology = layout
+
+    from legoesm.grids.halo import set_halo_backend
+    set_halo_backend("mpi", layout)
+    return layout
 
 
 def get_active_topology() -> CommTopology | None:

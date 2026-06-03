@@ -10,6 +10,13 @@ from legoesm.ocean.physics.vertical_mixing.output import VerticalMixingOutput
 from legoesm.ocean.physics.vertical_mixing.integration import (
     make_vertical_mixing_physics,
 )
+from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
+    implicit_vertical_diffusion_ocean,
+    build_dz_half,
+)
+from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+    compute_vertical_K_profiles,
+)
 
 __all__ = [
     "VerticalMixingConfig",
@@ -18,4 +25,7 @@ __all__ = [
     "KPPConfig",
     "VerticalMixingOutput",
     "make_vertical_mixing_physics",
+    "implicit_vertical_diffusion_ocean",
+    "build_dz_half",
+    "compute_vertical_K_profiles",
 ]

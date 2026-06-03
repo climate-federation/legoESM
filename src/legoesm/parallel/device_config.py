@@ -156,12 +156,48 @@ def detect_devices() -> HardwareConfig:
     """Auto-detect hardware and return configuration.
 
     Queries JAX for available devices and infers backend capabilities.
-    This function does not modify any JAX state.
+
+    Side-effect: applies environment-variable-only XLA scheduler flags
+    *before* the first ``jax.devices()`` query.  Setting XLA flags
+    after PJRT initialisation is silently ineffective on most JAX
+    versions, which would defeat the latency-hiding scheduler flag
+    that is critical for multi-GPU strong scaling.  We therefore
+    sniff the GPU vendor from env-vars only (no ``jax.*`` calls)
+    and prime ``XLA_FLAGS`` here, before the device query.  The
+    follow-up :func:`configure_jax_for_device` call still sets
+    backend-specific JAX-level options (matmul precision, SPMD mode,
+    etc.) which are safe to set post-init.
 
     Returns
     -------
     HardwareConfig
     """
+    # Pre-init: set XLA scheduler flags based on env-var-only vendor
+    # detection, before jax.devices() is called.  After PJRT init,
+    # mutating XLA_FLAGS is silently ineffective on most JAX versions.
+    try:
+        from legoesm.runtime.backend import (
+            _detect_gpu_vendor_pre_init,
+            _NVIDIA_GPU_XLA_FLAGS,
+            _AMD_GPU_XLA_FLAGS,
+            _TPU_XLA_FLAGS,
+            _set_xla_flags,
+        )
+
+        _platforms = os.environ.get("JAX_PLATFORMS", "").lower()
+        if "tpu" in _platforms:
+            _set_xla_flags(_TPU_XLA_FLAGS)
+        else:
+            _vendor = _detect_gpu_vendor_pre_init()
+            if _vendor == "nvidia":
+                _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
+            elif _vendor == "amd":
+                _set_xla_flags(_AMD_GPU_XLA_FLAGS)
+    except Exception:
+        # Non-fatal: if the runtime helpers are unavailable for any
+        # reason, fall through to plain JAX detection.
+        pass
+
     backend = jax.default_backend().lower()
     devices = jax.devices()
     device_count = len(devices)
@@ -193,16 +229,14 @@ def detect_devices() -> HardwareConfig:
 
 
 # ============================================================================
-# XLA flags — canonical definitions live in runtime.backend;
-# re-exported here for configure_jax_for_device().
+# XLA flags — canonical definitions live in runtime.backend.  They are imported
+# *function-scope* inside the _configure_* helpers below (not at module top):
+# a top-level ``from legoesm.runtime.backend import ...`` here closes a
+# parallel->runtime->parallel import cycle (runtime.devices re-exports
+# MixedPrecisionPolicy from this module, which is defined further down), so a
+# cold import of device_config crashed with "cannot import name
+# 'MixedPrecisionPolicy' from partially initialized module".
 # ============================================================================
-
-from legoesm.runtime.backend import (          # noqa: E402
-    _TPU_XLA_FLAGS,
-    _NVIDIA_GPU_XLA_FLAGS,
-    _AMD_GPU_XLA_FLAGS,
-    _set_xla_flags,
-)
 
 
 def configure_jax_for_device(config: HardwareConfig) -> None:
@@ -233,6 +267,7 @@ def configure_jax_for_device(config: HardwareConfig) -> None:
 
 def _configure_tpu(config: HardwareConfig) -> None:
     """Apply TPU-specific JAX and XLA configuration."""
+    from legoesm.runtime.backend import _set_xla_flags, _TPU_XLA_FLAGS
     # Set XLA flags for TPU optimization.
     _set_xla_flags(_TPU_XLA_FLAGS)
 
@@ -240,9 +275,11 @@ def _configure_tpu(config: HardwareConfig) -> None:
     # to allow XLA to choose bf16 for non-critical ops.
     jax.config.update("jax_default_matmul_precision", "bfloat16")
 
-    # For multi-host TPU pods, ensure SPMD partitioning is enabled.
-    if config.num_hosts > 1:
-        jax.config.update("jax_spmd_mode", "allow_all")
+    # NOTE: the legacy `jax_spmd_mode='allow_all'` toggle was removed
+    # in modern JAX (0.9+) — `jax.config.update("jax_spmd_mode", ...)`
+    # raises AttributeError.  Under the unified sharding model SPMD
+    # partitioning is the default for sharded arrays, so no explicit
+    # toggle is required for multi-host TPU pods.
 
 
 def _configure_gpu(config: HardwareConfig) -> None:
@@ -251,21 +288,48 @@ def _configure_gpu(config: HardwareConfig) -> None:
     Detects NVIDIA vs AMD GPUs and applies vendor-appropriate flags.
     NVIDIA: cuDNN GEMM fusion + TensorFloat32 matmul precision.
     AMD (ROCm): no cuDNN flags, default float32 matmul precision.
+
+    Uses the pre-init detector first so XLA scheduler flags land
+    *before* the PJRT client is initialised — once ``jax.devices()``
+    runs, mutating ``XLA_FLAGS`` is silently ineffective on most JAX
+    versions, which would defeat the latency-hiding flags critical
+    for multi-GPU scaling.
     """
-    from legoesm.runtime.backend import gpu_vendor
+    from legoesm.runtime.backend import (
+        _detect_gpu_vendor_pre_init, gpu_vendor,
+        _set_xla_flags, _NVIDIA_GPU_XLA_FLAGS, _AMD_GPU_XLA_FLAGS,
+    )
 
-    vendor = gpu_vendor()
-
-    if config.device_count > 1:
-        if vendor == "nvidia":
-            _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
-        elif vendor == "amd":
-            _set_xla_flags(_AMD_GPU_XLA_FLAGS)
+    # Pre-init detection (env-var only, no jax.devices()) to land
+    # XLA_FLAGS on time.
+    pre_vendor = _detect_gpu_vendor_pre_init()
+    if pre_vendor == "nvidia":
+        _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
+    elif pre_vendor == "amd":
+        _set_xla_flags(_AMD_GPU_XLA_FLAGS)
 
     # Pre-allocate 90% of GPU memory to avoid fragmentation.
     # Only set if not already configured by the user.
     if "XLA_PYTHON_CLIENT_MEM_FRACTION" not in os.environ:
         os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.90"
+
+    # Now safe to query JAX about the GPU.
+    vendor = gpu_vendor()
+
+    # If pre-init detection missed the vendor, apply best-effort flags
+    # post-init (may not take effect, but won't make things worse) and
+    # warn so the user can fix the env for next run.
+    if pre_vendor is None and vendor != "unknown":
+        if vendor == "nvidia":
+            _set_xla_flags(_NVIDIA_GPU_XLA_FLAGS)
+        elif vendor == "amd":
+            _set_xla_flags(_AMD_GPU_XLA_FLAGS)
+        logger.warning(
+            "GPU vendor detected post-init from device_config; XLA "
+            "scheduler flags may not take effect this run.  Set "
+            "CUDA_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES or "
+            "JAX_PLATFORMS before import to enable latency-hiding flags.",
+        )
 
     # TensorFloat32 is an NVIDIA Ampere+ feature (19-bit mantissa) —
     # faster than FP32 with negligible accuracy loss for weather/climate.
@@ -283,30 +347,39 @@ def _configure_metal(config: HardwareConfig) -> None:
     automatically.  We enable multi-threading for CPU fallback operations
     to ensure the spectral transforms (which run on CPU) use all cores.
     """
-    if "XLA_FLAGS" not in os.environ:
-        try:
-            n_cores = os.cpu_count() or 4
-            _set_xla_flags({
-                "xla_cpu_multi_thread_eigen": "true",
-                "intra_op_parallelism_threads": str(n_cores),
-            })
-        except Exception:
-            pass  # Non-critical; XLA will use defaults.
+    _enable_cpu_multithreading()
 
 
 def _configure_cpu(config: HardwareConfig) -> None:
     """Apply CPU-specific JAX configuration."""
-    # Set intra-op parallelism to use all available cores unless
-    # the user has already set it.
+    _enable_cpu_multithreading()
+
+
+def _enable_cpu_multithreading() -> None:
+    """Enable multi-threaded Eigen on the CPU backend.
+
+    XLA dropped the ``--intra_op_parallelism_threads`` flag in jaxlib
+    0.10; passing it now aborts the process at backend init.  Multi-thread
+    Eigen is still enabled via ``--xla_cpu_multi_thread_eigen``, and the
+    Eigen worker count is controlled by ``OMP_NUM_THREADS`` (defaults to
+    hardware concurrency).
+    """
     if "XLA_FLAGS" not in os.environ:
         try:
-            n_cores = os.cpu_count() or 4
-            _set_xla_flags({
-                "xla_cpu_multi_thread_eigen": "true",
-                "intra_op_parallelism_threads": str(n_cores),
-            })
+            from legoesm.runtime.backend import _set_xla_flags
+            # NOTE: the legacy `intra_op_parallelism_threads=N` XLA flag
+            # is NOT recognized by current XLA and crashes JAX at first
+            # use with a fatal `Unknown flag in XLA_FLAGS` error from
+            # parse_flags_from_env.cc.  Drop it; rely on XLA's default
+            # CPU thread-pool autoscaling from os.cpu_count().
+            _set_xla_flags({"xla_cpu_multi_thread_eigen": "true"})
         except Exception:
             pass  # Non-critical; XLA will use defaults.
+    if "OMP_NUM_THREADS" not in os.environ:
+        try:
+            os.environ["OMP_NUM_THREADS"] = str(os.cpu_count() or 4)
+        except Exception:
+            pass
 
 
 # ============================================================================

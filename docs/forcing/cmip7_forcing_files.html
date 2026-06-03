@@ -1,0 +1,1239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CMIP7 Forcing Files — scripts/run_amip.py</title>
+<style>
+    :root {
+        --bg: #fafbfc;
+        --surface: #ffffff;
+        --text: #1f2328;
+        --text-muted: #656d76;
+        --border: #d0d7de;
+        --border-soft: #eaeef2;
+        --accent: #0969da;
+        --accent-soft: #ddf4ff;
+        --code-bg: #eff1f3;
+        --code-text: #24292f;
+        --header-bg: #f6f8fa;
+        --row-alt: #f8fafb;
+        --success: #1a7f37;
+        --success-bg: #dafbe1;
+        --success-border: #4ac26b;
+        --warn: #9a6700;
+        --warn-bg: #fff8c5;
+        --warn-border: #d4a72c;
+        --info: #0969da;
+        --info-bg: #ddf4ff;
+        --info-border: #54aeff;
+        --danger: #cf222e;
+        --tag-var-bg: #fff1e5;
+        --tag-var-text: #8c4a00;
+        --tag-dim-bg: #eef7ff;
+        --tag-dim-text: #0550ae;
+        --tag-path-bg: #f0f3f6;
+        --tag-path-text: #3f4752;
+        --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+        --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, Arial, Helvetica, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+        margin: 0;
+        padding: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--sans);
+        font-size: 15px;
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+    }
+
+    .page-header {
+        background: linear-gradient(135deg, #1f7a4c 0%, #2da160 50%, #3fb950 100%);
+        color: #fff;
+        padding: 40px 24px 36px;
+        border-bottom: 1px solid var(--border);
+    }
+
+    .page-header .inner {
+        max-width: 1180px;
+        margin: 0 auto;
+    }
+
+    .page-header .eyebrow {
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        opacity: 0.85;
+        margin-bottom: 8px;
+    }
+
+    .page-header h1 {
+        margin: 0 0 10px 0;
+        font-size: 32px;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+    }
+
+    .page-header .subtitle {
+        font-size: 15px;
+        opacity: 0.92;
+        max-width: 840px;
+    }
+
+    .page-header .meta-row {
+        margin-top: 18px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    .meta-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: rgba(255, 255, 255, 0.18);
+        border: 1px solid rgba(255, 255, 255, 0.28);
+        color: #fff;
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-family: var(--mono);
+    }
+
+    .container {
+        max-width: 1180px;
+        margin: 0 auto;
+        padding: 32px 24px 80px;
+    }
+
+    nav.toc {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 16px 20px;
+        margin-bottom: 32px;
+        box-shadow: 0 1px 2px rgba(31, 35, 40, 0.04);
+    }
+
+    nav.toc h2 {
+        margin: 0 0 10px 0;
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--text-muted);
+        font-weight: 600;
+    }
+
+    nav.toc ol {
+        margin: 0;
+        padding-left: 20px;
+        columns: 2;
+        column-gap: 32px;
+    }
+
+    nav.toc li {
+        margin: 4px 0;
+    }
+
+    nav.toc a {
+        color: var(--accent);
+        text-decoration: none;
+    }
+
+    nav.toc a:hover { text-decoration: underline; }
+
+    section {
+        margin-bottom: 48px;
+        scroll-margin-top: 16px;
+    }
+
+    h2.section-title {
+        font-size: 24px;
+        font-weight: 700;
+        margin: 0 0 6px 0;
+        padding-bottom: 10px;
+        border-bottom: 2px solid var(--border-soft);
+        letter-spacing: -0.01em;
+    }
+
+    h2.section-title .section-num {
+        display: inline-block;
+        min-width: 32px;
+        height: 32px;
+        line-height: 32px;
+        text-align: center;
+        border-radius: 8px;
+        background: #e6f4ea;
+        color: #1f7a4c;
+        font-family: var(--mono);
+        font-size: 14px;
+        font-weight: 700;
+        margin-right: 12px;
+        vertical-align: middle;
+        padding: 0 8px;
+    }
+
+    h3 {
+        font-size: 18px;
+        font-weight: 600;
+        margin: 28px 0 12px 0;
+    }
+
+    h3 .tag-emoji {
+        font-size: 20px;
+        margin-right: 6px;
+        vertical-align: -2px;
+    }
+
+    h4.sub {
+        font-size: 15px;
+        font-weight: 600;
+        margin: 22px 0 8px 0;
+        color: var(--text);
+    }
+
+    p { margin: 10px 0; }
+
+    /* Inline badges / code */
+    code, .badge {
+        font-family: var(--mono);
+        font-size: 0.88em;
+    }
+
+    code {
+        background: var(--code-bg);
+        color: var(--code-text);
+        padding: 1px 6px;
+        border-radius: 4px;
+        border: 1px solid var(--border-soft);
+        white-space: nowrap;
+    }
+
+    .badge-var {
+        background: var(--tag-var-bg);
+        color: var(--tag-var-text);
+        border: 1px solid rgba(140, 74, 0, 0.2);
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-family: var(--mono);
+        font-size: 0.86em;
+        white-space: nowrap;
+    }
+
+    .badge-dim {
+        background: var(--tag-dim-bg);
+        color: var(--tag-dim-text);
+        border: 1px solid rgba(5, 80, 174, 0.2);
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-family: var(--mono);
+        font-size: 0.86em;
+        white-space: nowrap;
+    }
+
+    .badge-path {
+        background: var(--tag-path-bg);
+        color: var(--tag-path-text);
+        border: 1px solid var(--border);
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-family: var(--mono);
+        font-size: 0.84em;
+        display: inline-block;
+        word-break: break-all;
+    }
+
+    /* Tables */
+    .table-wrap {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        overflow: auto;
+        max-height: 720px;
+        background: var(--surface);
+        box-shadow: 0 1px 2px rgba(31, 35, 40, 0.04);
+    }
+
+    table {
+        width: 100%;
+        border-collapse: separate;
+        border-spacing: 0;
+        font-size: 13.5px;
+    }
+
+    thead th {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        background: var(--header-bg);
+        color: var(--text);
+        text-align: left;
+        font-weight: 600;
+        font-size: 12px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        padding: 12px 14px;
+        border-bottom: 2px solid var(--border);
+        white-space: nowrap;
+    }
+
+    tbody td {
+        padding: 14px;
+        border-bottom: 1px solid var(--border-soft);
+        vertical-align: top;
+    }
+
+    tbody tr:nth-child(even) td { background: var(--row-alt); }
+    tbody tr:hover td { background: #f1f8ff; }
+    tbody tr:last-child td { border-bottom: none; }
+
+    td.col-file {
+        font-weight: 600;
+        min-width: 240px;
+    }
+
+    /* Callout boxes */
+    .callout {
+        border: 1px solid var(--border);
+        border-left-width: 4px;
+        border-radius: 6px;
+        padding: 14px 18px;
+        margin: 14px 0;
+        background: var(--surface);
+    }
+
+    .callout.success {
+        border-left-color: var(--success-border);
+        background: var(--success-bg);
+    }
+
+    .callout.warn {
+        border-left-color: var(--warn-border);
+        background: var(--warn-bg);
+    }
+
+    .callout.info {
+        border-left-color: var(--info-border);
+        background: var(--info-bg);
+    }
+
+    .callout .title {
+        font-weight: 700;
+        margin-bottom: 4px;
+        display: block;
+    }
+
+    .callout ul { margin: 8px 0 0 0; padding-left: 22px; }
+    .callout ul ul { margin-top: 4px; }
+    .callout li { margin: 4px 0; }
+
+    /* Key-value blocks for glossary */
+    .kv-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 14px;
+        margin: 14px 0;
+    }
+
+    .kv-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 16px 18px;
+        box-shadow: 0 1px 2px rgba(31, 35, 40, 0.04);
+    }
+
+    .kv-card h4 {
+        margin: 0 0 6px 0;
+        font-size: 14px;
+        color: var(--text-muted);
+        font-weight: 600;
+        letter-spacing: 0.02em;
+    }
+
+    .kv-card .value {
+        font-family: var(--mono);
+        font-size: 18px;
+        color: #1f7a4c;
+        font-weight: 600;
+    }
+
+    /* Recommended changes list */
+    ol.recs { padding-left: 0; list-style: none; counter-reset: reccount; }
+    ol.recs li {
+        counter-increment: reccount;
+        position: relative;
+        padding: 14px 16px 14px 56px;
+        margin-bottom: 10px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        box-shadow: 0 1px 2px rgba(31, 35, 40, 0.04);
+    }
+    ol.recs li::before {
+        content: counter(reccount);
+        position: absolute;
+        left: 14px;
+        top: 14px;
+        width: 28px;
+        height: 28px;
+        line-height: 28px;
+        text-align: center;
+        background: #1f7a4c;
+        color: white;
+        font-family: var(--mono);
+        font-weight: 700;
+        border-radius: 50%;
+        font-size: 13px;
+    }
+
+    ul.plain { padding-left: 22px; }
+    ul.plain li { margin: 6px 0; }
+    ul.plain li ul { margin-top: 4px; }
+
+    pre.code-block {
+        background: #0d1117;
+        color: #c9d1d9;
+        border-radius: 8px;
+        padding: 16px 20px;
+        margin: 14px 0;
+        font-family: var(--mono);
+        font-size: 13px;
+        line-height: 1.55;
+        overflow-x: auto;
+        white-space: pre;
+    }
+    pre.code-block .flag { color: #ffa657; }
+    pre.code-block .val  { color: #79c0ff; }
+    pre.code-block .cmt  { color: #8b949e; }
+
+    /* Expandable details boxes */
+    details.expandable {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface);
+        margin: 12px 0;
+        box-shadow: 0 1px 2px rgba(31, 35, 40, 0.04);
+        overflow: hidden;
+        transition: box-shadow 0.15s ease;
+    }
+    details.expandable[open] {
+        box-shadow: 0 2px 8px rgba(31, 35, 40, 0.08);
+        border-color: #1f7a4c;
+    }
+    details.expandable summary {
+        cursor: pointer;
+        padding: 12px 18px;
+        font-weight: 600;
+        font-size: 14.5px;
+        color: var(--text);
+        list-style: none;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        user-select: none;
+        background: var(--header-bg);
+        transition: background 0.15s ease;
+    }
+    details.expandable summary:hover {
+        background: #e6f4ea;
+    }
+    details.expandable summary::-webkit-details-marker { display: none; }
+    details.expandable summary::before {
+        content: "▸";
+        display: inline-block;
+        color: #1f7a4c;
+        font-size: 14px;
+        transition: transform 0.15s ease;
+        width: 12px;
+        flex-shrink: 0;
+    }
+    details.expandable[open] summary::before {
+        transform: rotate(90deg);
+    }
+    details.expandable summary .tag {
+        display: inline-block;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        background: #1f7a4c;
+        color: #fff;
+        padding: 2px 8px;
+        border-radius: 4px;
+        margin-left: auto;
+    }
+    details.expandable .details-body {
+        padding: 16px 20px 18px 40px;
+        border-top: 1px solid var(--border-soft);
+        background: var(--surface);
+    }
+    details.expandable .details-body > *:first-child { margin-top: 0; }
+    details.expandable .details-body > *:last-child { margin-bottom: 0; }
+    details.expandable ol, details.expandable ul { padding-left: 22px; }
+    details.expandable li { margin: 6px 0; }
+
+    footer {
+        margin-top: 60px;
+        padding-top: 20px;
+        border-top: 1px solid var(--border-soft);
+        color: var(--text-muted);
+        font-size: 12px;
+        text-align: center;
+    }
+
+    @media (max-width: 700px) {
+        nav.toc ol { columns: 1; }
+        .page-header h1 { font-size: 24px; }
+        thead th, tbody td { padding: 10px; }
+    }
+</style>
+</head>
+<body>
+
+<header class="page-header">
+    <div class="inner">
+        <div class="eyebrow">legoESM · Forcing Analysis · CMIP7</div>
+        <h1>CMIP7 Forcing Files — <code style="background: rgba(255,255,255,0.15); color:#fff; border-color: rgba(255,255,255,0.3);">scripts/run_amip.py</code></h1>
+        <div class="subtitle">Expected schema derived from <code style="background: rgba(255,255,255,0.15); color:#fff; border-color: rgba(255,255,255,0.3);">legoesm.forcing.external</code> + <code style="background: rgba(255,255,255,0.15); color:#fff; border-color: rgba(255,255,255,0.3);">legoesm.forcing.amip</code> (post-<code style="background: rgba(255,255,255,0.15); color:#fff; border-color: rgba(255,255,255,0.3);">ap/fix-amip-external-forcing</code>) compared against the raw CMIP7 input4MIPs files on Levante. Includes recoverable matches, hard mismatches, and loader-code recommendations.</div>
+        <div class="meta-row">
+            <span class="meta-pill">📂 /work/bd1179/CMIP7_forcings_raw</span>
+            <span class="meta-pill">🏷️ mip_era=CMIP7</span>
+            <span class="meta-pill">🐍 xarray / netCDF4</span>
+            <span class="meta-pill">🌐 input4MIPs</span>
+        </div>
+    </div>
+</header>
+
+<div class="container">
+
+<nav class="toc">
+    <h2>Contents</h2>
+    <ol>
+        <li><a href="#s1">Expected schema (from loader code)</a></li>
+        <li><a href="#s2">Actual file structures on HPC</a></li>
+        <li><a href="#s3">Compatibility assessment</a></li>
+        <li><a href="#s4">Required CLI invocation today</a></li>
+        <li><a href="#s5">Recommended code changes</a></li>
+        <li><a href="#s6">Glossary — CMIP7-specific terms</a></li>
+    </ol>
+</nav>
+
+<!-- SECTION 1 -->
+<section id="s1">
+    <h2 class="section-title"><span class="section-num">§1</span>Expected schema <span style="font-weight:400;color:var(--text-muted);font-size:16px;">(from loader code)</span></h2>
+    <p>Loader API reproduced from the AMIP/CMIP6 analysis so this document is self-contained. Line numbers reflect the current <code>main</code> branch after <code>ap/fix-amip-external-forcing</code>: loaders now parse <code>"months since"</code> units (<code>external.py:93-105</code>) and use non-cyclic linear-in-time interpolation for multi-year ozone files (<code>external.py:785-790</code>).</p>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Forcing File</th>
+                    <th>Variables</th>
+                    <th>Dimensions / Shape</th>
+                    <th>Bands / Levels</th>
+                    <th>Code Line / Notes</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td class="col-file">SST/SIC — <code>--forcing-path</code><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(COBE preset)</span></td>
+                    <td><span class="badge-var">SST_cpl</span> [K], <span class="badge-var">ice_cov</span> [%], <span class="badge-var">time</span>, <span class="badge-var">lat</span>, <span class="badge-var">lon</span></td>
+                    <td><span class="badge-dim">(ntime, nlat, nlon)</span> regular lat-lon</td>
+                    <td>Surface only</td>
+                    <td><code>amip.py:110-117</code>; <code>sic_scale=0.01</code>, <code>sst_offset=0.0</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file">SST/SIC — <code>--forcing-path</code><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(HadISST preset)</span></td>
+                    <td><span class="badge-var">sst</span> [°C], <span class="badge-var">sic</span> [fraction]</td>
+                    <td><span class="badge-dim">(ntime, nlat, nlon)</span></td>
+                    <td>Surface only</td>
+                    <td><code>amip.py:118-125</code>; <code>sst_offset=+273.15</code>, <code>sic_scale=1.0</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file">SST/SIC — <code>--forcing-path</code><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(custom)</span></td>
+                    <td><code>--sst-var</code>/<code>--sic-var</code>, <span class="badge-var">time</span>, <span class="badge-var">lat</span>, <span class="badge-var">lon</span></td>
+                    <td><span class="badge-dim">(ntime, nlat, nlon)</span> or broadcast from <span class="badge-dim">(nlat, nlon)</span></td>
+                    <td>Surface only</td>
+                    <td><code>amip.py:339-363</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file">SIC split file — <code>--sic-path</code></td>
+                    <td><code>&lt;sic_var&gt;</code> only</td>
+                    <td><span class="badge-dim">(ntime, nlat, nlon)</span> or <span class="badge-dim">(ntime, ncell)</span></td>
+                    <td>Surface only</td>
+                    <td><code>amip.py:288-302</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file">Ozone — <code>--ozone-file</code><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(<code>--ozone-forcing external</code>)</span></td>
+                    <td>auto-detect: <span class="badge-var">ozone</span> / <span class="badge-var">vmro3</span> / <span class="badge-var">o3</span> / <span class="badge-var">O3</span> / <span class="badge-var">tro3</span> [mol/mol], <span class="badge-var">time</span>, <span class="badge-var">lat</span>, optional <span class="badge-var">plev</span>/<span class="badge-var">level</span>/<span class="badge-var">lev</span></td>
+                    <td>CMIP <span class="badge-dim">(time, plev, lat, lon)</span> → zonal-mean, axis-swapped to <span class="badge-dim">(time, lat, plev)</span></td>
+                    <td><code>plev</code> in Pa (hPa auto-converted via <code>units</code> attr or <code>max&lt;1500</code>)</td>
+                    <td><code>external.py:231-299</code> <code>_load_monthly_zonal_with_levels</code>; <code>external.py:735-800</code>; cyclic when <code>ntime=12</code>, linear-in-time otherwise</td>
+                </tr>
+                <tr>
+                    <td class="col-file">GHG annual — <code>--ghg-file</code><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(<code>--ghg-forcing annual_file</code>)</span></td>
+                    <td><span class="badge-var">CO2</span>, <span class="badge-var">CH4</span>, <span class="badge-var">N2O</span>, <span class="badge-var">CFC_11</span>, <span class="badge-var">CFC_12</span> <strong>all in one file</strong>; time as <code>"year as %Y.%f"</code></td>
+                    <td><span class="badge-dim">(time, lat=1, lon=1)</span> → squeezed</td>
+                    <td>Global-mean scalar</td>
+                    <td><code>external.py:525-564</code> <code>_load_ghg_annual_file</code>; <code>external.py:598-614</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file">GHG timeseries — <code>--ghg-file</code><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(<code>--ghg-forcing file</code>)</span></td>
+                    <td><span class="badge-var">co2_ppmv</span>, <span class="badge-var">ch4_ppbv</span>, <span class="badge-var">n2o_ppbv</span>, <span class="badge-var">time</span></td>
+                    <td><span class="badge-dim">(time,)</span> days</td>
+                    <td>Global-mean scalar</td>
+                    <td><code>external.py:589-597</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file">Solar TSI — <code>--solar-file</code><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(<code>--solar-source file</code>)</span></td>
+                    <td><span class="badge-var">tsi</span> (case-insensitive; CLI <code>--solar-tsi-var</code> override), <span class="badge-var">time</span></td>
+                    <td><span class="badge-dim">(time,)</span> 1-D</td>
+                    <td>Broadband scalar</td>
+                    <td><code>external.py:1109-1113</code>; <code>_load_timeseries</code>; abs-day ref = 1850-01-01</td>
+                </tr>
+                <tr>
+                    <td class="col-file">Solar spectral — <code>--solar-file</code><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(<code>--solar-source spectral_file</code>)</span></td>
+                    <td><span class="badge-var">tsi</span> (opt.), <span class="badge-var">solar_fraction_by_gpt</span> or <code>--solar-spectral-var</code>, <span class="badge-var">time</span></td>
+                    <td><span class="badge-dim">(time, nspec)</span> where <code>nspec ∈ {14 SW bands, 112/224 g-points}</code></td>
+                    <td>14 RRTMG-SW bands → 112 g-points (<code>nspec&lt;50</code>)</td>
+                    <td><code>external.py:303-355</code> <code>_load_time_gpt</code>; <code>external.py:1115-1141</code>; <code>_expand_bands_to_gpoints</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file">Aerosol climatology — <code>--aerosol-file</code><br><span style="font-weight:400;color:var(--text-muted);font-size:12px;">(<code>--aerosol-forcing external</code>)</span></td>
+                    <td><strong><span class="badge-var">aod</span></strong> [550 nm], <span class="badge-var">time</span>, <span class="badge-var">lat</span>/<span class="badge-var">latitude</span>, opt. <span class="badge-var">lon</span>, opt. band axis</td>
+                    <td><span class="badge-dim">(time=12, lat)</span> after zonal + band collapse</td>
+                    <td>Bands collapsed</td>
+                    <td><code>external.py:171-227</code> <code>_load_monthly_zonal</code>; <code>external.py:984-1010</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file">Volcanic aerosol — <code>--volcanic-aerosol-file</code></td>
+                    <td>CMIP6: <span class="badge-var">ext_sun</span>/<span class="badge-var">ext_earth</span> + <span class="badge-var">altitude</span>; OR Kinne <span class="badge-var">aod</span></td>
+                    <td>Auto-dispatched; CMIP6 → <span class="badge-dim">(time=12, lat)</span> after vertical integration + band average</td>
+                    <td>14 SW or 16 LW bands (averaged)</td>
+                    <td><code>external.py:807-907</code>; <code>_is_cmip6_volcanic_file</code> auto-dispatch</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+    <div class="callout info">
+        <span class="title">No loader exists today for:</span>
+        per-species GHG files, anthropogenic/biomass-burning emissions, CMIP7 UOEXETER 4-D optical properties, atmospheric δ¹³C/Δ¹⁴C, or LUH3 land-state forcings — these categories are CMIP7-only with no CMIP6 counterpart.
+    </div>
+</section>
+
+<!-- SECTION 2 -->
+<section id="s2">
+    <h2 class="section-title"><span class="section-num">§2</span>Actual file structures on HPC</h2>
+    <p>Structural metadata extracted via <code>inspect_cmip7_forcing.py</code> (xarray <code>decode_times=False</code>) from representative files under <span class="badge-path">/work/bd1179/CMIP7_forcings_raw</span>. All follow <code>input4MIPs</code> CMOR conventions and carry <code>mip_era: CMIP7</code>.</p>
+
+    <h3>2.1 Solar — <code>SOLARIS-HEPPA-CMIP-4-6</code></h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>File</th><th>Dimensions</th><th>Key Variables</th><th>Bands / Levels</th><th>Time axis</th></tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td class="col-file"><span class="badge-path">solar/multiple_…_gn_185001-202312.nc</span> (monthly)</td>
+                    <td><span class="badge-dim">time=2088</span>, <span class="badge-dim">wlen=3890</span></td>
+                    <td><span class="badge-var">tsi</span>(time) [W m⁻²], <span class="badge-var">ssi</span>(time,&nbsp;wlen) [W m⁻² nm⁻¹], <span class="badge-var">wlen</span>(wlen) [nm] 10.5…99975.0, <span class="badge-var">wlen_bnds</span>(wlen, nbd), <span class="badge-var">f107</span>, <span class="badge-var">kp</span>, <span class="badge-var">ap</span>, <span class="badge-var">ssn</span>, <span class="badge-var">scnum</span>, <span class="badge-var">scph</span>, <span class="badge-var">calyear</span>/<span class="badge-var">calmonth</span>/<span class="badge-var">calday</span></td>
+                    <td>3890 nm wavelength bins (UV → FIR, 0.01–100 µm)</td>
+                    <td><code>"days since 1850-01-01"</code>, <code>gregorian</code>, <code>frequency=mon</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">solar/multiple_…_gn_18500101-20231231.nc</span> (daily)</td>
+                    <td><span class="badge-dim">time=63552</span>, <span class="badge-dim">wlen=3890</span>, <span class="badge-dim">glat=32</span>, <span class="badge-dim">plev=61</span></td>
+                    <td>Same SSI/TSI + <span class="badge-var">iprp</span>, <span class="badge-var">iprg</span>, <span class="badge-var">iprm</span> (ion-pair production, g⁻¹ s⁻¹), <span class="badge-var">lshell_bnds</span></td>
+                    <td>Geomagnetic-lat × pressure-level ion fluxes</td>
+                    <td><code>"days since 1850-01-01"</code>, <code>frequency=day</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">solar/multiple_…_gn.nc</span> (climatology/fx)</td>
+                    <td><span class="badge-dim">time=1</span>, <span class="badge-dim">wlen=3890</span>, <span class="badge-dim">glat=32</span>, <span class="badge-dim">plev=61</span></td>
+                    <td>Same vars, single snapshot</td>
+                    <td>Single timestep</td>
+                    <td><code>"days since 1850-01-01"</code>, <code>frequency=fx</code></td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <h3>2.2 GHG concentrations — <code>CR-CMIP-1-0-0</code> (one file per species)</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>File pattern</th><th>Dimensions</th><th>Key Variables</th><th>Bands / Levels</th><th>Time axis</th></tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td class="col-file"><span class="badge-path">GHG_concentrations/&lt;sp&gt;_…_gm_175001-202212.nc</span></td>
+                    <td><span class="badge-dim">time=3276</span></td>
+                    <td><span class="badge-var">&lt;sp&gt;</span>(time) — <span class="badge-var">co2</span> [ppm], <span class="badge-var">ch4</span> [ppb], <span class="badge-var">n2o</span> [ppb], <span class="badge-var">cfc11</span> [ppt], <span class="badge-var">cfc12</span> [ppt], …</td>
+                    <td>Global-mean scalar</td>
+                    <td><code>"days since 1850-01-01"</code>, <code>proleptic_gregorian</code>, <code>frequency=mon</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">GHG_concentrations/&lt;sp&gt;_…_gnz_175001-202212.nc</span></td>
+                    <td><span class="badge-dim">time=3276</span>, <span class="badge-dim">lat=12</span></td>
+                    <td><span class="badge-var">&lt;sp&gt;</span>(time, lat); latitude midpoints −82.5° … 82.5°</td>
+                    <td>12 zonal bands</td>
+                    <td>same</td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">GHG_concentrations/&lt;sp&gt;_…_gr1z_175001-202212.nc</span></td>
+                    <td><span class="badge-dim">time=3276</span>, <span class="badge-dim">lat=2</span></td>
+                    <td><span class="badge-var">&lt;sp&gt;</span>(time, lat); hemispheric means (±45°)</td>
+                    <td>Hemispheric</td>
+                    <td>same</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+    <details class="expandable">
+        <summary>47 species present <span class="tag">Species list</span></summary>
+        <div class="details-body">
+            <p><code>co2</code>, <code>ch4</code>, <code>n2o</code>, <code>cfc11</code>, <code>cfc12</code>, <code>cfc113</code>, <code>cfc114</code>, <code>cfc115</code>, <code>cfc11eq</code>, <code>cfc12eq</code>, <code>hfc23</code>, <code>hfc32</code>, <code>hfc125</code>, <code>hfc134a</code>, <code>hfc134aeq</code>, <code>hfc143a</code>, <code>hfc152a</code>, <code>hfc227ea</code>, <code>hfc236fa</code>, <code>hfc245fa</code>, <code>hfc365mfc</code>, <code>hfc4310mee</code>, <code>halon1211</code>, <code>halon1301</code>, <code>halon2402</code>, <code>hcfc22</code>, <code>hcfc141b</code>, <code>hcfc142b</code>, <code>ccl4</code>, <code>ch2cl2</code>, <code>chcl3</code>, <code>ch3br</code>, <code>ch3ccl3</code>, <code>ch3cl</code>, <code>c2f6</code>, <code>c3f8</code>, <code>c4f10</code>, <code>c5f12</code>, <code>c6f14</code>, <code>c7f16</code>, <code>c8f18</code>, <code>cc4f8</code>, <code>cf4</code>, <code>nf3</code>, <code>sf6</code>, <code>so2f2</code>.</p>
+            <p>Variable names are <strong>lowercase</strong>; the CMIP6 annual-mean file stored SCREAMING_CASE (<code>CO2</code>, <code>CH4</code>, …).</p>
+        </div>
+    </details>
+
+    <h3>2.3 Ozone — <code>FZJ-CMIP-ozone-{1-2, 2-0}</code></h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>File</th><th>Dimensions</th><th>Key Variables</th><th>Bands / Levels</th><th>Time axis</th></tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td class="col-file"><span class="badge-path">ozone/vmro3_…_gn_200001-202212.nc</span> (historical chunk)</td>
+                    <td><span class="badge-dim">time=276</span>, <span class="badge-dim">plev=66</span>, <span class="badge-dim">lat=96</span>, <span class="badge-dim">lon=144</span></td>
+                    <td><span class="badge-var">vmro3</span>(time, plev, lat, lon) [mol mol⁻¹], <span class="badge-var">plev_bnds</span></td>
+                    <td>66 pressure levels (1000 hPa → 1e-4 hPa)</td>
+                    <td><code>"days since 1850-01-01"</code>, <code>noleap</code>, <code>frequency=mon</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">ozone/vmro3_…_gn_185001-185012-clim.nc</span></td>
+                    <td><span class="badge-dim">time=12</span>, <span class="badge-dim">plev=66</span>, <span class="badge-dim">lat=96</span>, <span class="badge-dim">lon=144</span></td>
+                    <td>Same plus <span class="badge-var">time_climatology</span></td>
+                    <td>Same</td>
+                    <td><code>"days since 1850-01-01"</code>, <code>365_day</code>, <code>frequency=monC</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">ozone/zmta_…_gn_185001-202212.nc</span></td>
+                    <td><span class="badge-dim">time=2076</span>, <span class="badge-dim">plev=66</span>, <span class="badge-dim">lat=96</span></td>
+                    <td><span class="badge-var">zmta</span>(time, plev, lat) [K]</td>
+                    <td>Same</td>
+                    <td><code>"days since 1850-01-01"</code>, <code>frequency=mon</code></td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+    <div class="callout info">
+        The historical span is sharded across five or six 50-year chunks (<code>182901-184912</code>, <code>185001-189912</code>, <code>190001-194912</code>, <code>195001-199912</code>, <code>200001-202212</code>). Units are <code>days since 1850-01-01</code>, so CMIP7 <strong>no longer ships the <code>months since 1850-01-01</code> axis</strong> that needed a fix in CMIP6.
+    </div>
+
+    <h3>2.4 SST &amp; sea-ice — <code>PCMDI-AMIP-1-1-10</code></h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>File</th><th>Dimensions</th><th>Key Variables</th><th>Notes</th><th>Time axis</th></tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td class="col-file"><span class="badge-path">tos_…_gn_187001-202212.nc</span></td>
+                    <td><span class="badge-dim">time=1836</span>, <span class="badge-dim">lat=180</span>, <span class="badge-dim">lon=360</span></td>
+                    <td><span class="badge-var">tos</span>(time, lat, lon) [<strong>degC</strong>]</td>
+                    <td>1° regular, <code>lat=-89.5…89.5</code>, <code>lon=0.5…359.5</code></td>
+                    <td><code>"days since 1870-01-01"</code>, <code>gregorian</code>, <code>frequency=mon</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">tosbcs_…_gn_187001-202212.nc</span></td>
+                    <td>same</td>
+                    <td><span class="badge-var">tosbcs</span>(time, lat, lon) [degC], <code>cell_methods = time: point</code></td>
+                    <td>Taylor-smoothed <em>bcs</em> mid-month BC</td>
+                    <td>same</td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">siconc_…_gn_187001-202212.nc</span></td>
+                    <td>same</td>
+                    <td><span class="badge-var">siconc</span>(time, lat, lon) [<strong>%</strong>]</td>
+                    <td>Monthly mean</td>
+                    <td>same</td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">siconcbcs_…_gn_187001-202212.nc</span></td>
+                    <td>same</td>
+                    <td><span class="badge-var">siconcbcs</span>(time, lat, lon) [%], <code>cell_methods = time: point</code></td>
+                    <td>Taylor-smoothed BC variant</td>
+                    <td>same</td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">areacello_…_gn.nc</span> / <span class="badge-path">sftof_…_gn.nc</span></td>
+                    <td><span class="badge-dim">lat=180</span>, <span class="badge-dim">lon=360</span></td>
+                    <td><span class="badge-var">areacello</span> [m²], <span class="badge-var">sftof</span> [%]</td>
+                    <td>Grid-cell area and ocean fraction</td>
+                    <td>static</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <h3>2.5 Aerosol properties — <code>UOEXETER-CMIP-2-2-1</code></h3>
+    <p>Seven optical/size properties per file; both time-series and 12-month climatology variants.</p>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>File</th><th>Dimensions</th><th>Variable</th><th>Units</th><th>Wavelength axis</th></tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td class="col-file"><span class="badge-path">aerosol/ext_…_gnz_185001-202112-clim.nc</span></td>
+                    <td><span class="badge-dim">time=12</span>, <span class="badge-dim">lat=36</span>, <span class="badge-dim">height=70</span>, <span class="badge-dim">wavelength=41</span></td>
+                    <td><span class="badge-var">ext</span>(time, lat, height, wavelength)</td>
+                    <td><code>m⁻¹</code> (volume extinction)</td>
+                    <td>1.6e-7 … 1e-4 m (41 bins, SW → LW)</td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">aerosol/asy_…_gnz_185001-202112-clim.nc</span></td>
+                    <td>same</td>
+                    <td><span class="badge-var">asy</span>(time, lat, height, wavelength)</td>
+                    <td>— (asymmetry)</td>
+                    <td>same</td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">aerosol/ssa_…_gnz_185001-202112-clim.nc</span></td>
+                    <td>same</td>
+                    <td><span class="badge-var">ssa</span>(time, lat, height, wavelength)</td>
+                    <td>— (single-scattering albedo)</td>
+                    <td>same</td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">aerosol/nd_…_gnz_185001-202112-clim.nc</span></td>
+                    <td><span class="badge-dim">time=12</span>, <span class="badge-dim">lat=36</span>, <span class="badge-dim">height=70</span></td>
+                    <td><span class="badge-var">nd</span>(time, lat, height)</td>
+                    <td><code>cm⁻³</code> (H₂SO₄ number density)</td>
+                    <td>—</td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">aerosol/reff_…_gnz_185001-202112-clim.nc</span></td>
+                    <td>same</td>
+                    <td><span class="badge-var">reff</span>(time, lat, height)</td>
+                    <td>effective radius</td>
+                    <td>—</td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">aerosol/sad_…_gnz_185001-202112-clim.nc</span></td>
+                    <td>same</td>
+                    <td><span class="badge-var">sad</span>(time, lat, height)</td>
+                    <td>surface area density</td>
+                    <td>—</td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">aerosol/vd_…_gnz_185001-202112-clim.nc</span></td>
+                    <td>same</td>
+                    <td><span class="badge-var">vd</span>(time, lat, height)</td>
+                    <td>volume density</td>
+                    <td>—</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+    <div class="callout info">
+        Height grid: 70 layers, 5 000 m → 39 500 m above sea level — identical to the CMIP6 volcanic <code>altitude</code> axis. This product <strong>is</strong> the CMIP7 stratospheric aerosol dataset; full-time-series files (<code>…175001-202312.nc</code>) at ~2.7 GB each exist for <code>ext</code>/<code>asy</code>/<code>ssa</code>.
+    </div>
+
+    <h3>2.6 Emissions — CEDS (anthropogenic) + DRES BB4CMIP7 (biomass burning)</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>File pattern</th><th>Dimensions</th><th>Variable</th><th>Units</th><th>Notes</th></tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td class="col-file"><span class="badge-path">emissions/&lt;SP&gt;-em-anthro_…_CEDS-…_gn_YYYY.nc</span></td>
+                    <td><span class="badge-dim">time</span>, <span class="badge-dim">sector=8</span>, <span class="badge-dim">lat=360</span>, <span class="badge-dim">lon=720</span></td>
+                    <td><span class="badge-var">&lt;SP&gt;_em_anthro</span>(time, sector, lat, lon)</td>
+                    <td><code>kg m⁻² s⁻¹</code></td>
+                    <td>0.5° grid, sector 0…7 (AGR/ENE/IND/TRA/RCO/SLV/WST/SHP); <code>"days since 1750-01-01"</code>, <code>365_day</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">emissions/&lt;SP&gt;-em-AIR-anthro_…_gn_YYYY.nc</span></td>
+                    <td><span class="badge-dim">time</span>, <span class="badge-dim">level=25</span>, <span class="badge-dim">lat</span>, <span class="badge-dim">lon</span></td>
+                    <td><span class="badge-var">&lt;SP&gt;_em_AIR_anthro</span>(time, level, lat, lon)</td>
+                    <td><code>kg m⁻² s⁻¹</code></td>
+                    <td>Aircraft emissions; <code>level</code> in km, 0.305 … 14.945 km</td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">emissions/&lt;SP&gt;-em-SOLID-BIOFUEL-anthro_…_gn_YYYY.nc</span></td>
+                    <td><span class="badge-dim">time</span>, <span class="badge-dim">sector=8</span>, <span class="badge-dim">lat</span>, <span class="badge-dim">lon</span></td>
+                    <td><span class="badge-var">&lt;SP&gt;_em_SOLID_BIOFUEL_anthro</span></td>
+                    <td><code>kg m⁻² s⁻¹</code></td>
+                    <td>Supplemental residential solid-biofuel product</td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">emissions/&lt;SP&gt;_…_DRES-CMIP-BB4CMIP7-2-1_gn_YYYY.nc</span></td>
+                    <td><span class="badge-dim">time</span>, <span class="badge-dim">latitude=720</span>, <span class="badge-dim">longitude=1440</span></td>
+                    <td><span class="badge-var">&lt;SP&gt;</span>(time, latitude, longitude)</td>
+                    <td><code>kg m⁻² s⁻¹</code></td>
+                    <td>0.25° grid (note: <code>latitude</code>/<code>longitude</code>, not <code>lat</code>/<code>lon</code>); <code>"days since 1900-01-01"</code>, <code>noleap</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">emissions/&lt;SP&gt;percentage&lt;TYPE&gt;_…_DRES-…_gn_YYYY.nc</span></td>
+                    <td><span class="badge-dim">time</span>, <span class="badge-dim">latitude</span>, <span class="badge-dim">longitude</span></td>
+                    <td><span class="badge-var">&lt;SP&gt;percentage&lt;TYPE&gt;</span></td>
+                    <td><code>%</code></td>
+                    <td>Per-fire-type attribution (AGRI/BORF/DEFO/PEAT/SAVA/TEMF)</td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">emissions/areacella_…_CEDS-…_gn.nc</span></td>
+                    <td><span class="badge-dim">lat=360</span>, <span class="badge-dim">lon=720</span></td>
+                    <td><span class="badge-var">areacella</span>(lat, lon)</td>
+                    <td><code>m²</code></td>
+                    <td>CEDS grid-cell area (static)</td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">emissions/gridcellarea_…_DRES-…_gn.nc</span></td>
+                    <td><span class="badge-dim">latitude=720</span>, <span class="badge-dim">longitude=1440</span></td>
+                    <td><span class="badge-var">gridcellarea</span>(latitude, longitude)</td>
+                    <td><code>m²</code></td>
+                    <td>BB4CMIP7 grid-cell area (static)</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+    <details class="expandable">
+        <summary>Species sets <span class="tag">Emissions inventory</span></summary>
+        <div class="details-body">
+            <p><strong>CEDS-anthro</strong> (incomplete list): <code>BC, CH4, CO, CO2, NH3, NMVOC, NOx, OC, SO2</code> plus AIR and SOLID-BIOFUEL variants.</p>
+            <p><strong>BB4CMIP7</strong>: <code>BC, OC, SO2, NH3, NMVOC, NOx, CO, CO2, CH4, C10H16, C2H2, C2H4, C2H4O, C2H5OH, C2H6, C2H6S, C3H6, C3H6O, C3H8, C5H8, C6H6, C7H8, …</code> (speciated VOCs).</p>
+        </div>
+    </details>
+
+    <h3>2.7 Atmospheric state — <code>ImperialCollege-3-0</code> (C4MIP)</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>File</th><th>Dimensions</th><th>Variable</th><th>Units</th><th>Time axis</th></tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td class="col-file"><span class="badge-path">atmospheric_state/delta13co2_…_gm_1700-2023.nc</span></td>
+                    <td><span class="badge-dim">time=324</span></td>
+                    <td><span class="badge-var">delta13co2</span>(time)</td>
+                    <td><code>1</code> (‰ after × 1000)</td>
+                    <td><code>"days since 1700-01-01"</code>, <code>365_day</code>, <code>frequency=yr</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">atmospheric_state/Delta14co2_…_gz_1700-2023.nc</span></td>
+                    <td><span class="badge-dim">time=324</span>, <span class="badge-dim">lat=4</span></td>
+                    <td><span class="badge-var">Delta14co2</span>(time, lat)</td>
+                    <td><code>1</code> (‰)</td>
+                    <td>same; <code>lat = -60, -20, 20, 60</code> zonal bands</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <h3>2.8 Land state — <code>UofMD-landState-3-1-{1, 2}</code> (LUH3)</h3>
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr><th>File</th><th>Dimensions</th><th>Variables (selected)</th><th>Units</th><th>Time axis</th></tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td class="col-file"><span class="badge-path">land_state/multiple-states_…_gn_0850-2024.nc</span></td>
+                    <td><span class="badge-dim">time=1175</span>, <span class="badge-dim">lat=720</span>, <span class="badge-dim">lon=1440</span></td>
+                    <td><span class="badge-var">primf, primn, secdf, secdn, urban, c3ann, c4ann, c3per, c4per, c3nfx, pastr, range, secmb, secma, pltns</span></td>
+                    <td><code>1</code> (grid fraction), <code>kg m⁻²</code>, or <code>years</code></td>
+                    <td><code>"days since 0850-01-01"</code>, <code>noleap</code>, <code>frequency=yr</code></td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">land_state/multiple-management_…_gn_0850-2024.nc</span></td>
+                    <td>same</td>
+                    <td><span class="badge-var">addtc, combf, cpbf1_c3ann, …</span></td>
+                    <td>various</td>
+                    <td>same</td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">land_state/multiple-transitions_…_gn_0850-2023.nc</span></td>
+                    <td><span class="badge-dim">time=1174</span>, <span class="badge-dim">lat=720</span>, <span class="badge-dim">lon=1440</span></td>
+                    <td><span class="badge-var">primf_to_secdn, primf_to_urban, …</span></td>
+                    <td><code>1 yr⁻¹</code></td>
+                    <td>same</td>
+                </tr>
+                <tr>
+                    <td class="col-file"><span class="badge-path">land_state/multiple-static_…_gn.nc</span></td>
+                    <td><span class="badge-dim">lat=720</span>, <span class="badge-dim">lon=1440</span></td>
+                    <td><span class="badge-var">ptbio, fstnf, carea, icwtr, ccode</span></td>
+                    <td><code>kg m⁻²</code> / <code>1</code> / <code>km²</code></td>
+                    <td>static</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<!-- SECTION 3 -->
+<section id="s3">
+    <h2 class="section-title"><span class="section-num">§3</span>Compatibility assessment vs. <code style="background: var(--code-bg); color: var(--code-text);">run_amip.py</code></h2>
+
+    <h3><span class="tag-emoji">✅</span>Correct or recoverable matches</h3>
+
+    <div class="callout success">
+        <span class="title">Ozone, CMIP7 historical <span class="badge-path">vmro3_…_gn_YYYY.nc</span> → <code>--ozone-forcing external --ozone-file …</code></span>
+        <ul>
+            <li><code>vmro3</code> is in <code>_OZONE_VARNAMES</code> (<code>external.py:714</code>), auto-detected.</li>
+            <li>Time axis <code>days since 1850-01-01</code>, calendar <code>noleap</code> — <code>_to_days_float</code> handles numeric + <code>days since</code> trivially (<code>external.py:92-105</code>). No <code>months since</code> parsing pitfall as in CMIP6.</li>
+            <li>Shape <span class="badge-dim">(time, plev, lat, lon)</span> with <code>plev</code> in hPa is reduced zonally and axis-swapped to <span class="badge-dim">(time, lat, plev)</span> by <code>_load_monthly_zonal_with_levels</code> (<code>external.py:278-296</code>); hPa → Pa via the <code>units="hPa"</code> branch (<code>external.py:270-271</code>).</li>
+            <li><code>ntime=276 &gt; 12</code> → <code>_interp_time_linear</code> preserves interannual evolution (<code>external.py:787-790</code>).</li>
+            <li><strong>Practical limitation</strong>: the ingestion opens a single path. The historical span is sharded across 5–6 50-year chunks (<code>185001-189912</code>, …). Running past 2000 needs <code>xarray.open_mfdataset</code> pre-concatenation or concatenating the chunks covering the simulation window — the loader does not glob.</li>
+        </ul>
+    </div>
+
+    <div class="callout success">
+        <span class="title">Ozone, CMIP7 climatology <span class="badge-path">vmro3_…_gn_185001-185012-clim.nc</span> → same flags</span>
+        <ul>
+            <li><code>ntime=12</code> → <code>_interp_monthly_cyclic</code> branch (<code>external.py:786</code>). Works without change.</li>
+        </ul>
+    </div>
+
+    <div class="callout success">
+        <span class="title">Solar CMIP7 TSI-only <span class="badge-path">solar/multiple_…_gn_185001-202312.nc</span> → <code>--solar-source file --solar-file … --solar-tsi-var tsi</code></span>
+        <ul>
+            <li>Lowercase <code>tsi(time)</code> is the default (<code>SolarConfig.tsi_var="tsi"</code>, <code>external.py:1085</code>), so no CLI override is needed — cleaner than CMIP6 which required <code>--solar-tsi-var TSI</code>.</li>
+            <li>Time units <code>days since 1850-01-01</code> match <code>_REF_YEAR=1850</code> exactly (<code>external.py:1106</code>).</li>
+        </ul>
+    </div>
+
+    <div class="callout success">
+        <span class="title">SST/SIC CMIP7 (<span class="badge-var">tos</span>, <span class="badge-var">siconc</span>) → custom-var invocation</span>
+        <ul>
+            <li>Neither the COBE nor HadISST preset matches. Required explicit flags:
+                <ul>
+                    <li><code>--sst-var tos --sst-offset 273.15</code> (file is °C)</li>
+                    <li><code>--sic-var siconc --sic-scale 0.01</code> (file is %)</li>
+                    <li><code>--sic-path …siconc_…nc</code> (SIC lives in a separate file)</li>
+                </ul>
+            </li>
+            <li>Shape <span class="badge-dim">(1836, 180, 360)</span>, 1° regular grid, <code>lat=-89.5…89.5</code>, <code>lon=0.5…359.5</code> — consumed by <code>load_amip_forcing</code> → <code>RegularGridInterpolator</code> (<code>amip.py:417-427</code>).</li>
+            <li>Time axis <code>days since 1870-01-01</code>, calendar <code>gregorian</code>, numeric float64 — <code>_time_coord_to_days</code> numeric branch (<code>amip.py:164-172</code>).</li>
+            <li><strong>Recommendation</strong>: prefer <code>tosbcs</code>/<code>siconcbcs</code>. These are Taylor et al. (2000) mid-month boundary-condition fields (<code>cell_methods = time: point</code>) and are the PCMDI-recommended AMIP inputs; the non-<code>bcs</code> variants are monthly means that can under-represent the seasonal cycle when sampled daily.</li>
+        </ul>
+    </div>
+
+    <h3><span class="tag-emoji">⚠️</span>Mismatches / bugs</h3>
+
+    <div class="callout warn">
+        <span class="title">GHG — CMIP7 drops the combined annual-mean file used by the loader</span>
+        <ul>
+            <li><code>--ghg-forcing annual_file</code> expects <strong>one</strong> NetCDF with all five variables <span class="badge-var">CO2, CH4, N2O, CFC_11, CFC_12</span> (<code>external.py:547</code>) plus time in <code>"year as %Y.%f"</code> (<code>external.py:531-532</code>).</li>
+            <li>CMIP7 ships <strong>one file per species</strong>, lowercase variable name matching the filename (<code>co2</code>, <code>ch4</code>, …), <code>time</code> in <code>days since 1850-01-01</code>, monthly. The underscore form <code>CFC_11</code> does not exist — it is <code>cfc11</code>/<code>cfc12</code>.</li>
+            <li><code>--ghg-forcing file</code> also fails: it expects <span class="badge-var">co2_ppmv</span>, <span class="badge-var">ch4_ppbv</span>, <span class="badge-var">n2o_ppbv</span> <strong>in one file</strong> as 1-D <span class="badge-dim">(time,)</span> arrays (<code>external.py:592</code>). Split files + lowercase names without unit suffixes break this too.</li>
+            <li><strong>Fix needed</strong>: new <code>source="per_species_files"</code> that accepts a mapping <code>{co2: path, ch4: path, …}</code> (or a directory + glob), reads lowercase per-species variables, parses <code>days since &lt;year&gt;</code> time axes. Unit scaling also changes: CMIP6 stored mole fractions with native scale factors (1e-6/1e-9/1e-12); CMIP7 stores already-scaled values in <code>ppm</code>/<code>ppb</code>/<code>ppt</code> → drop the per-species multiplier in <code>get_ghg_at_time</code> for this path.</li>
+            <li>Note: the <code>gm</code> files are global-monthly-mean; for zonal GHG variations use the <code>gnz</code> (12 zonal bands) or <code>gr1z</code> (2 hemispheres) variants — neither shape matches the current 1-D <span class="badge-dim">(time,)</span> expectation.</li>
+        </ul>
+    </div>
+
+    <div class="callout warn">
+        <span class="title">Aerosol — CMIP7 has no <code>aod</code> variable</span>
+        <ul>
+            <li><code>_load_monthly_zonal(path, "aod")</code> is hard-coded in <code>get_aerosol_at_time</code> (<code>external.py:985</code>). CMIP7 UOEXETER files carry <span class="badge-var">ext</span> / <span class="badge-var">asy</span> / <span class="badge-var">ssa</span> / <span class="badge-var">nd</span> / <span class="badge-var">reff</span> / <span class="badge-var">sad</span> / <span class="badge-var">vd</span> — <em>not</em> AOD.</li>
+            <li>Shape <span class="badge-dim">(time=12, lat=36, height=70, wavelength=41)</span>. <code>ext</code> is a 4-D <strong>volume extinction coefficient</strong> in m⁻¹. A column AOD requires integrating over <code>height</code> and picking (or interpolating to) 550 nm from the 41-bin wavelength axis.</li>
+            <li>Fire-path: first <code>ValueError: Variable 'aod' not found in &lt;file&gt;</code> at <code>external.py:187</code>.</li>
+            <li><strong>Fix needed</strong>: auto-detect CMIP7 aerosol files by presence of <code>ext</code> + <code>height</code> + <code>wavelength</code> dims (analogous to <code>_is_cmip6_volcanic_file</code>), then (a) vertically integrate <code>ext × Δz</code>, (b) select the 550 nm bin from <code>wavelength</code>, (c) return <span class="badge-dim">(mid_days, lat, aod_column)</span>. Alternative (preferred for RRTMG-SW): keep <code>wavelength</code> as an axis, remap to 14 RRTMG-SW band weights, and thread the band dimension through the aerosol forcing path.</li>
+        </ul>
+    </div>
+
+    <div class="callout warn">
+        <span class="title">Volcanic — CMIP7 has no separate volcanic file</span>
+        <ul>
+            <li>CMIP6 shipped <span class="badge-path">bc_aeropt_cmip6_volc_lw_b16_sw_b14_*.nc</span> with <span class="badge-var">ext_sun</span>/<span class="badge-var">ext_earth</span> + <span class="badge-var">altitude</span> — detected by <code>_is_cmip6_volcanic_file</code> (<code>external.py:807-819</code>).</li>
+            <li>CMIP7 folds stratospheric aerosol into the UOEXETER aerosolProperties product (same <code>ext</code>/<code>height</code>/<code>wavelength</code> layout as tropospheric aerosol). Neither <code>ext_sun</code> nor <code>altitude</code> are present.</li>
+            <li><code>_is_cmip6_volcanic_file</code> returns <code>False</code> → dispatch falls through to <code>_load_monthly_zonal(path, "aod")</code> → same "no <code>aod</code> variable" failure.</li>
+            <li><strong>Fix needed</strong>: extend the CMIP6 volcanic loader (or add a sibling) to recognise <code>ext</code> + <code>height</code> + <code>wavelength</code> and select the 550 nm (or RRTMG-SW) band before vertical integration. The 70-layer <code>height</code> axis in CMIP7 (5 → 39.5 km above sea level) matches the CMIP6 altitude grid exactly — algorithmically the vertical integration step is identical.</li>
+        </ul>
+    </div>
+
+    <div class="callout warn">
+        <span class="title">Solar spectral — CMIP7 stores SSI on a nm-wavelength axis, not on RRTMG bands</span>
+        <ul>
+            <li><code>spectral_file</code> path expects <span class="badge-dim">(time, nspec)</span> with <code>nspec ∈ {14 RRTMG-SW bands, 112 g-points, 224 g-points}</code> (<code>external.py:1129-1133</code>).</li>
+            <li>CMIP7 provides <code>ssi(time, wlen)</code> with <code>wlen=3890</code> bins from 10.5 nm to 99 975 nm in <code>W m⁻² nm⁻¹</code>, i.e. a fine-resolution spectrum covering UV → far-IR, <em>not</em> a per-band solar fraction.</li>
+            <li>Passing this file to <code>--solar-source spectral_file --solar-spectral-var ssi</code> will:
+                <ol>
+                    <li>Pass the <code>spec.ndim==2</code> and <code>spec.shape[0]==ntime</code> checks (<code>external.py:336-341</code>),</li>
+                    <li>Hit <code>spec_series.shape[1]=3890</code>, which is ≥ 50, so the band-expansion branch is skipped,</li>
+                    <li>Try to feed a 3890-long per-g-point fraction into the RRTMG-SW solver that expects 112 g-points — shape mismatch downstream.</li>
+                </ol>
+            </li>
+            <li><strong>Fix needed</strong>: new CMIP7 path that integrates <code>ssi(time, wlen) × wlenbinsize</code> over each of the 14 RRTMG-SW band intervals, yielding <span class="badge-dim">(time, 14)</span> band-integrated power. Divide by total TSI for per-band fractions, then expand to g-points via the existing <code>_expand_bands_to_gpoints</code>. The file carries <code>tsi(time)</code> directly, so the overall scale is unambiguous.</li>
+        </ul>
+    </div>
+
+    <div class="callout warn">
+        <span class="title">Multi-chunk concatenation</span>
+        <ul>
+            <li>Most CMIP7 categories (ozone, emissions, land state) are physically split into 50-year chunks on disk. Every loader in <code>external.py</code> / <code>amip.py</code> opens exactly one file via <code>xarray.open_dataset</code> / <code>_open_forcing_dataset</code> — no <code>open_mfdataset</code>, no globbing.</li>
+            <li><strong>Operational workaround</strong>: pre-concatenate the chunks covering the simulation window with <code>cdo cat</code> / <code>ncrcat</code> / <code>xarray.open_mfdataset</code> before passing <code>--ozone-file</code>, <code>--aerosol-file</code>, etc. This was acceptable for CMIP6 (one historical file) but becomes a per-simulation step in CMIP7.</li>
+        </ul>
+    </div>
+
+    <h3><span class="tag-emoji">ℹ️</span>Categories with no loader today</h3>
+
+    <div class="callout info">
+        <span class="title">CMIP7 introduces several categories that have no corresponding <code>ExternalForcingConfig</code> sub-config in <code>external.py</code>:</span>
+        <ul>
+            <li><strong><code>emissions/</code> (CEDS + BB4CMIP7)</strong> — 0.25°/0.5° 3-D <span class="badge-dim">(time, lat, lon)</span> fluxes in <code>kg m⁻² s⁻¹</code>, with an extra <code>sector</code> axis for anthropogenic sources and a <code>level</code> axis for aircraft. legoESM does not run interactive chemistry or online aerosol, so these are currently out of scope. They become the natural emission boundary condition if a chemistry coupling is added later.</li>
+            <li><strong><code>atmospheric_state/</code> (ImperialCollege C4MIP)</strong> — δ¹³C and Δ¹⁴C of atmospheric CO₂, yearly. Only relevant for isotope-enabled carbon-cycle runs.</li>
+            <li><strong><code>land_state/</code> (UofMD LUH3)</strong> — yearly 0.25° land-use states, management layers, and transitions; multi-GB per variable. A dynamic-vegetation or land-use-change driver would consume these; the current AMIP run path does not.</li>
+            <li><strong><code>emissions/areacella_*.nc</code> / <code>emissions/gridcellarea_*.nc</code></strong> and <strong><code>sst_and_seaice/areacello_*.nc</code> / <code>sftof_*.nc</code></strong> — grid-cell area and ocean-fraction masks relevant only for flux conversions. Not currently read by any loader.</li>
+        </ul>
+    </div>
+</section>
+
+<!-- SECTION 4 -->
+<section id="s4">
+    <h2 class="section-title"><span class="section-num">§4</span>Required CLI invocation for CMIP7 today</h2>
+    <p>Given the compatibility state above, only these flags point at real CMIP7 files without code changes:</p>
+    <pre class="code-block"><span class="cmt"># AMIP-style CMIP7 run with loader support as of ap/fix-amip-external-forcing</span>
+scripts/run_amip.py \
+  <span class="flag">--forcing-path</span>  <span class="val">/work/bd1179/CMIP7_forcings_raw/sst_and_seaice/tos_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-10_gn_187001-202212.nc</span> \
+  <span class="flag">--sic-path</span>      <span class="val">/work/bd1179/CMIP7_forcings_raw/sst_and_seaice/siconc_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-10_gn_187001-202212.nc</span> \
+  <span class="flag">--sst-var</span>       <span class="val">tos</span> <span class="flag">--sst-offset</span> <span class="val">273.15</span> \
+  <span class="flag">--sic-var</span>       <span class="val">siconc</span> <span class="flag">--sic-scale</span> <span class="val">0.01</span> \
+  <span class="flag">--ozone-forcing</span> <span class="val">external</span> \
+  <span class="flag">--ozone-file</span>    <span class="val">/work/bd1179/CMIP7_forcings_raw/ozone/&lt;pre-concatenated-vmro3-covering-run-window&gt;.nc</span> \
+  <span class="flag">--solar-source</span>  <span class="val">file</span> \
+  <span class="flag">--solar-file</span>    <span class="val">/work/bd1179/CMIP7_forcings_raw/solar/multiple_input4MIPs_solar_CMIP_SOLARIS-HEPPA-CMIP-4-6_gn_185001-202312.nc</span> \
+  <span class="flag">--solar-tsi-var</span> <span class="val">tsi</span></pre>
+    <div class="callout warn">
+        <span class="title">Dropped relative to CMIP6 until loaders are updated</span>
+        <ul>
+            <li><code>--ghg-forcing annual_file --ghg-file …</code> — use <code>--ghg-forcing constant</code> with per-period fixed concentrations in the meantime.</li>
+            <li><code>--aerosol-forcing external --aerosol-file …</code> — use <code>--aerosol-forcing constant</code> / <code>use_reference_if_missing=True</code>.</li>
+            <li><code>--solar-source spectral_file</code> — use broadband <code>file</code> only; spectral requires a new band-integration loader.</li>
+            <li><code>--volcanic-aerosol-file …</code> — none.</li>
+        </ul>
+    </div>
+</section>
+
+<!-- SECTION 5 -->
+<section id="s5">
+    <h2 class="section-title"><span class="section-num">§5</span>Recommended code changes <span style="font-weight:400;color:var(--text-muted);font-size:16px;">(in order of priority)</span></h2>
+    <ol class="recs">
+        <li><strong><code>external.py</code> — CMIP7 GHG loader.</strong>
+            Add <code>source="per_species_files"</code> (or similar) to <code>GHGConfig</code> that accepts a mapping <code>{co2: path, ch4: path, …}</code> (or a directory + glob) and reads lowercase per-species variables with <code>days since …</code> monthly time axes. Keep the existing <code>annual_file</code> path for CMIP6.</li>
+        <li><strong><code>external.py</code> — CMIP7 aerosol loader.</strong>
+            Auto-detect <code>ext + height + wavelength</code> dims (as <code>_is_cmip6_volcanic_file</code> does for <code>ext_sun + altitude</code>), integrate over height, pick the 550 nm bin from <code>wavelength</code>, return <span class="badge-dim">(mid_days, lat, aod_column)</span> so the rest of <code>get_aerosol_at_time</code> is unchanged. Optional band-aware variant: keep <code>wavelength</code> → remap to RRTMG-SW 14 bands and thread through as a band axis.</li>
+        <li><strong><code>external.py</code> — CMIP7 volcanic support.</strong>
+            Same detection as aerosol; <code>altitude</code> is replaced by <code>height</code> (both in m or km). Integration logic is otherwise identical to <code>_load_volcanic_cmip6</code> (<code>external.py:822-900</code>).</li>
+        <li><strong><code>external.py</code> — CMIP7 spectral solar loader.</strong>
+            Integrate <code>ssi(time, wlen) × wlenbinsize</code> over RRTMG-SW band wavelength intervals → <span class="badge-dim">(time, 14)</span> per-band power; optionally normalise by <code>tsi(time)</code> and feed the existing <code>_expand_bands_to_gpoints</code> path.</li>
+        <li><strong>Multi-file concatenation.</strong>
+            Add an <code>open_forcing_dataset_mf</code> helper that accepts a list of paths or a glob and concatenates along <code>time</code> — used by ozone, per-species GHG, and large emission products.</li>
+        <li><strong><code>amip.py</code> — CMIP7 SST/SIC preset.</strong>
+            <code>get_amip_preset("cmip7")</code> returning <code>sst_var="tos"</code>, <code>sic_var="siconc"</code>, <code>sst_offset=273.15</code>, <code>sic_scale=0.01</code>, and recommending the <code>_bcs</code> variants when available. Avoids the 4-flag incantation above.</li>
+        <li><strong>Documentation in <code>scripts/run_amip.py</code> help strings.</strong>
+            Point at the CMIP7 layout and warn that <code>--ghg-forcing external</code> and <code>--aerosol-forcing external</code> are not wired for CMIP7 yet.</li>
+    </ol>
+</section>
+
+<!-- SECTION 6 -->
+<section id="s6">
+    <h2 class="section-title"><span class="section-num">§6</span>Glossary — CMIP7-specific terms</h2>
+
+    <h3>input4MIPs grid labels</h3>
+    <div class="kv-grid">
+        <div class="kv-card">
+            <h4>gm</h4>
+            <div class="value">global-mean</div>
+            <p style="margin-top:8px; color:var(--text-muted); font-size:13px;">1-D time series. Used by CR GHG concentrations and C4MIP δ¹³CO₂.</p>
+        </div>
+        <div class="kv-card">
+            <h4>gnz</h4>
+            <div class="value">native zonal</div>
+            <p style="margin-top:8px; color:var(--text-muted); font-size:13px;">Non-regridded latitude bands. CMIP7 CR GHGs use 12 bands at ±82.5°, …</p>
+        </div>
+        <div class="kv-card">
+            <h4>gr1z</h4>
+            <div class="value">regridded 1-D zonal (NH/SH)</div>
+            <p style="margin-top:8px; color:var(--text-muted); font-size:13px;">Compact 2-cell hemispheric-mean summary.</p>
+        </div>
+        <div class="kv-card">
+            <h4>gn</h4>
+            <div class="value">native grid</div>
+            <p style="margin-top:8px; color:var(--text-muted); font-size:13px;">0.5°, 0.25°, 1°, or model native depending on the product.</p>
+        </div>
+    </div>
+
+    <h3>Frequency mnemonics</h3>
+    <div class="callout info">
+        <ul>
+            <li><code>mon</code> — monthly means, one record per calendar month (historical time series).</li>
+            <li><code>monC</code> — monthly climatology, 12-record cyclic dataset (e.g. 1850-01-01 clim ozone).</li>
+            <li><code>day</code>, <code>yr</code>, <code>fx</code> — daily, yearly, and fixed (time-invariant).</li>
+        </ul>
+    </div>
+
+    <h3>Reference datasets</h3>
+    <div class="kv-grid">
+        <div class="kv-card">
+            <h4>PCMDI-AMIP-1-1-10</h4>
+            <div class="value">tos / siconc (°C, %)</div>
+            <p style="margin-top:8px; color:var(--text-muted); font-size:13px;">CMIP7 version renames from CMIP6 <code>SST_cpl</code>/<code>ice_cov</code> (COBE-SST2) to CMOR-compliant <code>tos</code>/<code>siconc</code>. The <code>_bcs</code> suffix marks Taylor et al. (2000) mid-month BC variant.</p>
+        </div>
+        <div class="kv-card">
+            <h4>LUH3</h4>
+            <div class="value">UofMD-landState-3-1-*</div>
+            <p style="margin-top:8px; color:var(--text-muted); font-size:13px;">Successor to LUH2 (CMIP6); re-gridded to 0.25°, extended to 850–2024. States / management / transitions in separate files to keep each under ~10 GB.</p>
+        </div>
+        <div class="kv-card">
+            <h4>BB4CMIP7</h4>
+            <div class="value">DRES-CMIP-BB4CMIP7-2-1</div>
+            <p style="margin-top:8px; color:var(--text-muted); font-size:13px;">CMIP7 biomass-burning emissions at 0.25° with per-fire-type attribution (AGRI/BORF/DEFO/PEAT/SAVA/TEMF) carried as separate <code>…percentage&lt;TYPE&gt;</code> variables.</p>
+        </div>
+        <div class="kv-card">
+            <h4>CEDS-2025-04-18</h4>
+            <div class="value">0.5°, 8-sector anthropogenic</div>
+            <p style="margin-top:8px; color:var(--text-muted); font-size:13px;">CMIP7 anthropogenic emission inventory. Sector axis: AGR, ENE, IND, TRA, RCO, SLV, WST, SHP.</p>
+        </div>
+        <div class="kv-card">
+            <h4>SOLARIS-HEPPA-CMIP-4-6</h4>
+            <div class="value">solar (TSI, SSI, ion-pair rates)</div>
+            <p style="margin-top:8px; color:var(--text-muted); font-size:13px;">CMIP7 solar forcing with 3890-bin SSI spectrum (10.5 nm → 100 µm) and ion-pair production rates on geomagnetic-lat × pressure.</p>
+        </div>
+        <div class="kv-card">
+            <h4>UOEXETER-CMIP-2-2-1</h4>
+            <div class="value">4-D aerosol optical properties</div>
+            <p style="margin-top:8px; color:var(--text-muted); font-size:13px;">Combined tropospheric + stratospheric aerosol as <code>ext/asy/ssa/nd/reff/sad/vd</code> on <code>(time, lat=36, height=70, wavelength=41)</code>.</p>
+        </div>
+    </div>
+
+    <details class="expandable">
+        <summary>Relationship to CMIP6 CMOR layout <span class="tag">Deep dive</span></summary>
+        <div class="details-body">
+            <ul>
+                <li><strong>GHGs.</strong> CMIP6 MPI-M: one file, uppercase variables, time = <code>"year as %Y.%f"</code>. CMIP7: one file per species, lowercase variables, time = <code>"days since 1850-01-01"</code>, plus zonal-mean (<code>gnz</code>) and hemispheric-mean (<code>gr1z</code>) variants.</li>
+                <li><strong>Aerosol.</strong> CMIP6 (Kinne): per-band AOD/asymmetry/SSA + vertical redistribution factor. CMIP7 (UOEXETER): per-wavelength extinction coefficient (m⁻¹) on an absolute height grid; both tropospheric + stratospheric in one product.</li>
+                <li><strong>Volcanic.</strong> CMIP6 had a dedicated <code>bc_aeropt_cmip6_volc_*</code> file with <code>ext_sun</code>/<code>ext_earth</code> + <code>altitude</code>. CMIP7 folds stratospheric aerosol into the UOEXETER product — no separate volcanic forcing.</li>
+                <li><strong>Ozone.</strong> CMIP6 MPI-M: <code>months since 1850-01-01</code> (required a loader fix). CMIP7: <code>days since 1850-01-01</code> — standard-compliant. Still 66 plev / 96 lat / 144 lon, <code>vmro3</code> variable.</li>
+                <li><strong>SST/SIC.</strong> CMIP6 ICAR COBE-SST2: <code>SST_cpl</code> (K), <code>ice_cov</code> (%). CMIP7 PCMDI-AMIP: <code>tos</code> (°C), <code>siconc</code> (%) — CMOR-compliant names, plus Taylor-smoothed <code>_bcs</code> mid-month BC variants.</li>
+                <li><strong>Solar.</strong> CMIP6: 14-band SW flux with <code>TSI</code>/<code>SSI</code>/<code>SSI_frac</code>. CMIP7: 3890-bin nm-wavelength SSI + ion-pair production rates; no pre-binned RRTMG-band form.</li>
+            </ul>
+        </div>
+    </details>
+</section>
+
+<footer>
+    Generated from <code>cmip7_forcing_files.md</code> · legoESM forcing analysis · <code>inspect_cmip7_forcing.py</code> · CMIP7 <code>input4MIPs</code> compatibility report
+</footer>
+
+</div>
+
+</body>
+</html>

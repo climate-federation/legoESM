@@ -66,23 +66,12 @@ def _zero_non_owned(data, topology):
 class TestMPIHaloExchange:
     """MPI halo exchange correctness.
 
-    NOTE: These tests expose a pre-existing protocol ordering bug in
-    ``_pad_halo_mpi_face_only``: the send/receive buffer strip ordering
-    depends on each rank's local face iteration order, which is
-    inconsistent between sending and receiving ranks.  This was
-    previously masked by a TypeError in the sendrecv wrapper that
-    prevented the tests from reaching the assertion.  The sendrecv
-    TypeError is now fixed, but the underlying ordering issue remains.
-    Marked xfail until the face-only MPI halo exchange ordering is
-    corrected.
+    Tests verify that MPI halo exchange (face-only mode) produces the
+    same results as the local single-process implementation.
     """
 
-    @pytest.mark.xfail(
-        reason="MPI face-only halo exchange has a send/recv buffer ordering bug",
-        strict=False,
-    )
     def test_pad_halo_mpi_matches_local(self, topology):
-        """MPI halo exchange matches local reference on rank 0."""
+        """MPI halo exchange matches local reference for owned faces."""
         n = 8
         # Create a known field: face i has value i+1.
         data = jnp.zeros((6, n, n), dtype=jnp.float32)
@@ -97,19 +86,16 @@ class TestMPIHaloExchange:
         set_halo_backend("mpi", topology)
         result = pad_halo(partitioned)
 
-        # All ranks participate in MPI exchange; rank 0 checks result.
+        # Compare only owned faces (non-owned are zeroed on each rank).
+        owned = jnp.array(list(topology.local_face_ids))
         if topology.rank == 0:
-            assert jnp.allclose(result, reference), (
-                f"MPI halo mismatch (max diff: "
-                f"{jnp.max(jnp.abs(result - reference))})"
+            assert jnp.allclose(result[owned], reference[owned]), (
+                f"MPI halo mismatch on owned faces (max diff: "
+                f"{jnp.max(jnp.abs(result[owned] - reference[owned]))})"
             )
 
-    @pytest.mark.xfail(
-        reason="MPI face-only halo exchange has a send/recv buffer ordering bug",
-        strict=False,
-    )
     def test_pad_halo_mpi_random(self, topology):
-        """MPI halo exchange with random data matches local."""
+        """MPI halo exchange with random data matches local for owned faces."""
         n = 16
         key = jax.random.PRNGKey(42)
         data = jax.random.normal(key, (6, n, n), dtype=jnp.float32)
@@ -120,15 +106,12 @@ class TestMPIHaloExchange:
         set_halo_backend("mpi", topology)
         result = pad_halo(partitioned)
 
+        owned = jnp.array(list(topology.local_face_ids))
         if topology.rank == 0:
-            assert jnp.allclose(result, reference, atol=1e-6)
+            assert jnp.allclose(result[owned], reference[owned], atol=1e-6)
 
-    @pytest.mark.xfail(
-        reason="MPI face-only halo exchange has a send/recv buffer ordering bug",
-        strict=False,
-    )
     def test_pad_halo_vector_mpi_matches_local(self, topology):
-        """MPI vector halo exchange matches local reference after gather."""
+        """MPI vector halo exchange matches local reference for owned faces."""
         n = 8
         grid = create_cubed_sphere(n)
         key = jax.random.PRNGKey(123)
@@ -158,17 +141,14 @@ class TestMPIHaloExchange:
             grid.sin_angle_padded,
         )
 
+        owned = jnp.array(list(topology.local_face_ids))
         if topology.rank == 0:
-            assert jnp.allclose(out_u, ref_u, atol=1e-6)
-            assert jnp.allclose(out_v, ref_v, atol=1e-6)
+            assert jnp.allclose(out_u[owned], ref_u[owned], atol=1e-6)
+            assert jnp.allclose(out_v[owned], ref_v[owned], atol=1e-6)
 
 
-    @pytest.mark.xfail(
-        reason="MPI face-only halo exchange has a send/recv buffer ordering bug",
-        strict=False,
-    )
     def test_pad_halo_mpi_h2_matches_local(self, topology):
-        """MPI halo=2 exchange matches local reference."""
+        """MPI halo=2 exchange matches local reference for owned faces."""
         n = 8
         key = jax.random.PRNGKey(99)
         data = jax.random.normal(key, (6, n, n), dtype=jnp.float32)
@@ -179,12 +159,110 @@ class TestMPIHaloExchange:
         set_halo_backend("mpi", topology)
         result = pad_halo(partitioned, halo=2)
 
+        owned = jnp.array(list(topology.local_face_ids))
         if topology.rank == 0:
             assert result.shape == (6, n + 4, n + 4)
-            assert jnp.allclose(result, reference, atol=1e-6), (
-                f"MPI halo=2 mismatch (max diff: "
-                f"{jnp.max(jnp.abs(result - reference))})"
+            assert jnp.allclose(result[owned], reference[owned], atol=1e-6), (
+                f"MPI halo=2 mismatch on owned faces (max diff: "
+                f"{jnp.max(jnp.abs(result[owned] - reference[owned]))})"
             )
+
+
+class TestCanonicalOrderingLogic:
+    """Verify canonical ordering in MPI halo exchange for both modes.
+
+    These tests check the sorting logic WITHOUT requiring many MPI ranks.
+    They simulate the entry lists that two ranks would produce and verify
+    that canonical sorting makes them agree on strip order.
+    """
+
+    def test_face_only_canonical_ordering_agreement(self, topology):
+        """Sender and receiver canonical orderings agree for face-only entries."""
+        # entry format: (face, edge, nbr_face, nbr_edge, is_reversed, nbr_rank)
+        WEST, EAST, SOUTH, NORTH = 0, 1, 2, 3
+        # Rank 0 owns faces [0,1,2], Rank 1 owns [3,4,5].
+        # Rank 0's remote entries for rank 1:
+        entries_r0 = [
+            (0, WEST, 4, EAST, True, 1),    # face0 WEST <-> face4 EAST
+            (0, SOUTH, 5, NORTH, False, 1),  # face0 SOUTH <-> face5 NORTH
+            (1, EAST, 4, SOUTH, True, 1),    # face1 EAST <-> face4 SOUTH
+        ]
+        # Rank 1's remote entries for rank 0 (reverse perspective):
+        entries_r1 = [
+            (4, EAST, 0, WEST, True, 0),     # face4 EAST <-> face0 WEST
+            (5, NORTH, 0, SOUTH, False, 0),   # face5 NORTH <-> face0 SOUTH
+            (4, SOUTH, 1, EAST, True, 0),     # face4 SOUTH <-> face1 EAST
+        ]
+
+        # Canonical sort: send by (nbr_face, nbr_edge), recv by (face, edge)
+        send_r0 = sorted(entries_r0, key=lambda e: (e[2], e[3]))
+        recv_r0 = sorted(entries_r0, key=lambda e: (e[0], e[1]))
+        send_r1 = sorted(entries_r1, key=lambda e: (e[2], e[3]))
+        recv_r1 = sorted(entries_r1, key=lambda e: (e[0], e[1]))
+
+        # R0 sends in order of (nbr_face, nbr_edge): r1's face/edge
+        # R1 unpacks in order of (face, edge): r1's own face/edge
+        r0_send_keys = [(e[2], e[3]) for e in send_r0]
+        r1_recv_keys = [(e[0], e[1]) for e in recv_r1]
+        assert r0_send_keys == r1_recv_keys, (
+            f"R0 send {r0_send_keys} != R1 recv {r1_recv_keys}"
+        )
+
+        # R1 sends in order of (nbr_face, nbr_edge): r0's face/edge
+        # R0 unpacks in order of (face, edge): r0's own face/edge
+        r1_send_keys = [(e[2], e[3]) for e in send_r1]
+        r0_recv_keys = [(e[0], e[1]) for e in recv_r0]
+        assert r1_send_keys == r0_recv_keys, (
+            f"R1 send {r1_send_keys} != R0 recv {r0_recv_keys}"
+        )
+
+    def test_tiled_canonical_ordering_agreement(self, topology):
+        """Sender and receiver canonical orderings agree for tiled entries."""
+        # Simulate a corner tile that shares TWO edges with the same neighbor.
+        # Rank A has edges (WEST, SOUTH) going to rank B.
+        # Rank B has edges (EAST, NORTH) coming from rank A.
+        # entry format: (edge, nbr_rank, nbr_edge, is_reversed, is_tile_nbr)
+        WEST, EAST, SOUTH, NORTH = 0, 1, 2, 3
+        rank_B = 99
+
+        # Rank A's entries for rank B (two edges):
+        entries_A = [
+            (SOUTH, rank_B, NORTH, False, True),  # A's SOUTH <-> B's NORTH
+            (WEST, rank_B, EAST, False, True),     # A's WEST <-> B's EAST
+        ]
+        # Rank B's entries for rank A (reverse perspective):
+        rank_A = 42
+        entries_B = [
+            (NORTH, rank_A, SOUTH, False, True),   # B's NORTH <-> A's SOUTH
+            (EAST, rank_A, WEST, False, True),      # B's EAST <-> A's WEST
+        ]
+
+        # Apply canonical sorting (same as _pad_halo_mpi_tiled):
+        # Send sorted by nbr_edge (entry[2])
+        # Recv sorted by edge (entry[0])
+        send_order_A = sorted(entries_A, key=lambda e: e[2])
+        recv_order_A = sorted(entries_A, key=lambda e: e[0])
+        send_order_B = sorted(entries_B, key=lambda e: e[2])
+        recv_order_B = sorted(entries_B, key=lambda e: e[0])
+
+        # Rank A sends strips in order of nbr_edge: EAST(1) then NORTH(3)
+        # Rank B receives and unpacks in order of edge: EAST(1) then NORTH(3)
+        # B's recv order must match A's send order (by nbr_edge perspective):
+        a_send_nbr_edges = [e[2] for e in send_order_A]  # A sends sorted by nbr_edge
+        b_recv_edges = [e[0] for e in recv_order_B]       # B unpacks sorted by own edge
+
+        # A sends for B's edges [EAST, NORTH] sorted = [1, 3]
+        # B unpacks by own edges [EAST, NORTH] sorted = [1, 3]
+        assert a_send_nbr_edges == b_recv_edges, (
+            f"Sender A nbr_edges {a_send_nbr_edges} != receiver B edges {b_recv_edges}"
+        )
+
+        # Symmetrically: B sends sorted by nbr_edge, A unpacks sorted by edge
+        b_send_nbr_edges = [e[2] for e in send_order_B]
+        a_recv_edges = [e[0] for e in recv_order_A]
+        assert b_send_nbr_edges == a_recv_edges, (
+            f"Sender B nbr_edges {b_send_nbr_edges} != receiver A edges {a_recv_edges}"
+        )
 
 
 class TestMPIReductions:

@@ -7,6 +7,7 @@ device counts and grid types.
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 import jax
 import jax.numpy as jnp
@@ -213,3 +214,148 @@ class TestDeviceConfigNamedTuple:
         _ = config.is_distributed
         _ = config.tiling
         _ = config.grid_type
+
+
+# ---------------------------------------------------------------------------
+# Issue #273: level-parallel cubed-sphere fallback for awkward device counts
+# ---------------------------------------------------------------------------
+
+class TestCubedSphereLevelFallback:
+    """Issue #273: 4-GPU A100 nodes fail face-sharding divisibility
+    (4 ∉ {1, 2, 3, 6, 24, ...}).  Level-parallel fallback keeps all 4
+    devices busy by replicating the horizontal stencil and sharding
+    the level axis."""
+
+    def test_create_cubed_sphere_level_mesh_single_device(self):
+        from legoesm.parallel.mesh import create_cubed_sphere_level_mesh
+        cfg = create_cubed_sphere_level_mesh(n_devices=1)
+        assert cfg.n_devices == 1
+        assert cfg.grid_type == "cubed_sphere_level"
+        assert cfg.mesh is None
+
+    def test_validate_accepts_4_with_level_fallback(self):
+        from legoesm.parallel.runtime import validate_device_count
+        # Default validation rejects 4.
+        with pytest.raises(ValueError, match="Unsupported device count 4"):
+            validate_device_count(4, grid_type="cubed_sphere")
+        # With level fallback enabled, accepted.
+        validate_device_count(
+            4, grid_type="cubed_sphere", allow_level_fallback=True,
+        )
+
+    def test_validate_accepts_arbitrary_counts_with_level_fallback(self):
+        from legoesm.parallel.runtime import validate_device_count
+        # Pick a handful of values that fail face-sharding divisibility.
+        for n in (4, 5, 7, 9, 11, 100):
+            validate_device_count(
+                n, grid_type="cubed_sphere", allow_level_fallback=True,
+            )
+
+    def test_create_device_mesh_falls_back_when_allowed(self):
+        """When ``allow_level_fallback=True`` and the requested device
+        count fails face-sharding, the factory routes to the level-
+        parallel mesh instead of raising ValueError."""
+        # ``n_devices=4`` exceeds the single test device, but the
+        # fallback path is exercised before any device-clamp logic.
+        # We assert the path is taken by checking that the returned
+        # config carries the level-mesh ``grid_type`` tag.
+        from legoesm.parallel.mesh import create_device_mesh
+        cfg = create_device_mesh(
+            n_devices=4, allow_level_fallback=True,
+        )
+        # On a single-device host the level mesh degenerates to
+        # ``n_devices=1``, which is still tagged as the level path.
+        assert cfg.grid_type == "cubed_sphere_level"
+
+    def test_create_device_mesh_without_fallback_still_clamps(self):
+        """Backward compat: existing call sites that do NOT pass
+        ``allow_level_fallback`` get the legacy behavior — either
+        clamp-to-available when the requested count exceeds the host
+        device count (single-device host), or raise ``ValueError``
+        when the explicit count fails face-sharding divisibility
+        (multi-device host).  This PR keeps the new fallback strictly
+        opt-in."""
+        from legoesm.parallel.mesh import create_device_mesh
+        if len(jax.devices()) <= 3:
+            # Single-device test host: 4 > 1 → clamp path → n_dev=1.
+            cfg = create_device_mesh(n_devices=4)
+            assert cfg.grid_type == "cubed_sphere"
+            assert cfg.n_devices == 1
+        else:
+            # Multi-device host: 4 ≤ 8 (no clamp), 4 fails
+            # face-divisibility → raise per Codex review contract.
+            with pytest.raises(ValueError, match="divide 6"):
+                create_device_mesh(n_devices=4)
+
+
+class TestCubedSphereLevelReplicatedDycore:
+    """Issue #273 follow-up: the level-parallel cubed-sphere fallback
+    routes the dycore through a fully-replicated sharding so every
+    device runs the complete horizontal stencil.  Locks in the
+    contract that ``shard_state`` / ``shard_pytree`` on a
+    ``cubed_sphere_level`` mesh do NOT attempt to address a ``face``
+    axis (which the mesh does not have) and instead replicate the
+    state across all devices."""
+
+    def test_sharding_spec_is_replicated(self):
+        """``_make_sharding_spec`` returns ``P()`` for both 3D and 4D
+        face arrays when the mesh is level-parallel."""
+        from legoesm.parallel.mesh import create_cubed_sphere_level_mesh
+        from legoesm.parallel.sharded_dynamics import _make_sharding_spec
+        from jax.sharding import PartitionSpec as P
+        cfg = create_cubed_sphere_level_mesh(n_devices=1)
+        spec = _make_sharding_spec(cfg)
+        assert spec.face_3d == P()
+        assert spec.face_2d == P()
+        assert spec.replicated == P()
+        assert spec.tiled_3d is None
+        assert spec.tiled_2d is None
+
+    def test_shard_pytree_replicates_on_level_mesh(self):
+        """``shard_pytree`` on a level mesh must NOT try to address a
+        ``face`` axis (which would raise a JAX
+        ``unmatched mesh axis`` error)."""
+        if len(jax.devices()) < 2:
+            pytest.skip("multi-device mesh needs ≥2 emulated devices")
+        from legoesm.parallel.mesh import (
+            create_cubed_sphere_level_mesh, shard_pytree,
+        )
+        cfg = create_cubed_sphere_level_mesh(
+            n_devices=len(jax.devices()),
+        )
+        arr_4d = jnp.arange(6 * 4 * 4 * 5, dtype=jnp.float64).reshape(6, 4, 4, 5)
+        arr_3d = jnp.arange(6 * 4 * 4, dtype=jnp.float64).reshape(6, 4, 4)
+        # Must succeed without raising.
+        out = shard_pytree({"u": arr_4d, "p_s": arr_3d}, cfg)
+        # Replicated arrays compare equal element-wise to the original.
+        np.testing.assert_array_equal(np.asarray(out["u"]), np.asarray(arr_4d))
+        np.testing.assert_array_equal(np.asarray(out["p_s"]), np.asarray(arr_3d))
+
+    def test_shard_state_replicates_on_level_mesh(self):
+        """``shard_state`` (the canonical model-driver entry point)
+        must also replicate, not face-shard, on a level mesh."""
+        if len(jax.devices()) < 2:
+            pytest.skip("multi-device mesh needs ≥2 emulated devices")
+        from legoesm.parallel.mesh import create_cubed_sphere_level_mesh
+        from legoesm.parallel.sharded_dynamics import shard_state
+        cfg = create_cubed_sphere_level_mesh(
+            n_devices=len(jax.devices()),
+        )
+
+        # Simulate the prognostic field portion of a HydrostaticState.
+        state = {
+            "u": jnp.zeros((6, 4, 4, 5), dtype=jnp.float64),
+            "v": jnp.zeros((6, 4, 4, 5), dtype=jnp.float64),
+            "T": jnp.full((6, 4, 4, 5), 250.0, dtype=jnp.float64),
+            "p_s": jnp.full((6, 4, 4), 1.0e5, dtype=jnp.float64),
+            "phis": jnp.zeros((6, 4, 4), dtype=jnp.float64),
+        }
+        out = shard_state(state, cfg)
+        # Output preserves values and shapes (replication is a no-op
+        # numerically; only the device placement changes).
+        np.testing.assert_array_equal(
+            np.asarray(out["u"]), np.asarray(state["u"]),
+        )
+        np.testing.assert_array_equal(
+            np.asarray(out["p_s"]), np.asarray(state["p_s"]),
+        )

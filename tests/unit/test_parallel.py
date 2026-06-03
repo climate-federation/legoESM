@@ -97,13 +97,23 @@ class TestDeviceMesh:
         config = create_device_mesh(n_devices=1)
         assert get_active_config() is config
 
-    def test_auto_falls_back_from_invalid_count(self):
-        """Auto mode with 4 devices raises ValueError (4 does not divide 6)."""
+    def test_auto_falls_back_from_invalid_count(self, caplog):
+        """Auto mode with 4 devices warns and rounds to a valid count.
+
+        The pre-iter implementation raised ``ValueError`` here.  The
+        current ``create_device_mesh`` (since the iter-N hardening of
+        the device-mesh constructor) instead emits a warning and rounds
+        the invalid count down to the nearest valid cubed-sphere count
+        (3 in this case — divisors of 6 in [1, 4]).  The test now
+        matches the actual behaviour: a warning is logged and the
+        returned config uses 3 devices.
+        """
         fake_devices = [object(), object(), object(), object()]
         with patch("legoesm.parallel.mesh.jax.devices", return_value=fake_devices):
             with patch("legoesm.parallel.mesh.jax.default_backend", return_value="gpu"):
-                with pytest.raises(ValueError, match="must divide 6"):
-                    create_device_mesh(n_devices="auto")
+                config = create_device_mesh(n_devices="auto")
+        assert config.n_devices == 3
+        assert "must divide 6" in caplog.text or "Using 3 device" in caplog.text
 
     def test_distributed_mode_uses_local_devices(self):
         """When process_count>1 and no backend override, use local devices."""

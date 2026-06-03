@@ -278,11 +278,14 @@ class CoupledESMDriver:
         if not cfg.co2_tracer:
             return
 
-        # CO2 as a prognostic atmospheric tracer
-        # Mixing ratio: co2_ppmv * 1e-6 * (M_CO2 / M_air)
-        M_CO2 = 44.01
-        M_air = 28.97
-        co2_init_kgkg = cfg.co2_ppmv_init * 1.0e-6 * (M_CO2 / M_air)
+        # CO2 as a prognostic atmospheric tracer.
+        # Mixing ratio: co2_ppmv * 1e-6 * (M_CO2 / M_air).
+        # Molar masses come from ``legoesm.constants`` per CLAUDE.md
+        # (no hardcoded physical constants in production code).
+        co2_init_kgkg = (
+            cfg.co2_ppmv_init * 1.0e-6
+            * (constants.M_CO2 / constants.M_air)
+        )
 
         # Get 3D shape from atmosphere state
         T_data = self._atm.state.T.data
@@ -351,12 +354,28 @@ class CoupledESMDriver:
         sw_down = sw_net_sfc / jnp.maximum(1.0 - albedo_eff, 0.01)
 
         T_sfc = blend_surface_temperature(sst, sic, acfg.T_ice)
-        eps_sfc = 0.96
+        # Surface emissivity comes from the coupler config (per-tile
+        # ocean/ice/land emissivity is blended via tile fractions
+        # downstream).  The 0.96 broad-spectrum default lives in the
+        # ``CoupledDriverConfig.surface_emissivity`` field, falling
+        # back to the canonical ocean emissivity from
+        # ``constants.emissivity_ocean`` if not set.
+        eps_sfc = getattr(
+            self.coupled_cfg, "surface_emissivity",
+            constants.emissivity_ocean,
+        )
         lw_up_sfc = eps_sfc * constants.sigma_sb * T_sfc ** 4
         lw_down = (lw_net_sfc + lw_up_sfc) / jnp.maximum(eps_sfc, 0.01)
 
         precip_total = jnp.maximum(seg_precip, 0.0)
-        snow_frac = jnp.where(T_low < constants.T_freeze, 1.0, 0.0)
+        # Smooth snow fraction (Wigmosta 1994 / Dai 2008): ramp from 0
+        # at T_low = T_freeze + 2 K to 1 at T_low = T_freeze - 2 K.
+        # The prior hard step ``where(T_low < T_freeze, 1, 0)`` killed
+        # gradients (training/DA paths) and miscounted mixed-phase
+        # precipitation in the 0–4 °C band.
+        snow_frac = jnp.clip(
+            (constants.T_freeze + 2.0 - T_low) / 4.0, 0.0, 1.0,
+        )
         precip_snow = precip_total * snow_frac
 
         # Cosine zenith
@@ -365,7 +384,9 @@ class CoupledESMDriver:
         lat = self._atm._grid_lat
         if lat is not None:
             from legoesm.atmosphere.physics.radiation.solar import daily_mean_insolation
-            S_0 = getattr(acfg, 'S_0', 1360.0)
+            # Solar constant from legoesm.constants per CLAUDE.md.
+            # ``acfg.S_0`` allows override for sensitivity studies.
+            S_0 = getattr(acfg, 'S_0', constants.S_0)
             Q_daily = daily_mean_insolation(lat, float(doy), S_0=S_0)
             cos_zen = jnp.clip(Q_daily / S_0, 0.0, 1.0)
         else:
@@ -373,9 +394,10 @@ class CoupledESMDriver:
 
         # CO2: prognostic or constant
         if self.coupled_cfg.co2_tracer and hasattr(self, '_co2_field'):
-            M_CO2, M_air = 44.01, 28.97
             co2_lowest = self._co2_field[..., -1]
-            co2_ppmv = co2_lowest / (M_CO2 / M_air) * 1.0e6
+            co2_ppmv = (
+                co2_lowest / (constants.M_CO2 / constants.M_air) * 1.0e6
+            )
         else:
             co2_ppmv = jnp.full_like(p_s, self.atm_config.co2_ppmv)
 
@@ -398,7 +420,28 @@ class CoupledESMDriver:
         )
 
     def _step_ocean(self, atm_forcing, dt):
-        """Advance the slab ocean one coupling step."""
+        """Advance the slab ocean one coupling step.
+
+        **One-way ice -> ocean coupling (intentional for the slab ocean).**
+        ``step_sea_ice`` populates ice -> ocean back-reaction channels on
+        the surface response (``freshwater_flux``, ``ocean_heat_extraction``,
+        ``salt_flux``, ``ocean_stress_x``/``ocean_stress_y``), but this
+        driver advances the :class:`SimpleOcean` slab, a thermodynamic
+        mixed-layer model with no prognostic salinity and no prognostic
+        momentum.  It therefore cannot consume those feedbacks:
+
+        * ``salt_flux`` / ``freshwater_flux`` -> no salinity prognostic;
+        * ``ocean_stress_x``/``ocean_stress_y`` -> no momentum prognostic
+          (the slab returns ``u_sfc = v_sfc = 0``);
+        * ``ocean_heat_extraction`` -> the slab already diagnoses its own
+          ``Q_freeze`` (the heat removed by its freezing clamp); adding the
+          ice's basal heat extraction on top would double-count against it.
+
+        The channels remain available on ``self._last_sfc_response`` for a
+        full prognostic ocean (salinity + momentum + a two-way
+        ``Q_freeze`` <-> ice-seeding contract), which is tracked as separate
+        feature work; they are deliberately NOT applied to the slab here.
+        """
         if self._ocean_step is None:
             return
         self._ocean_state, sst_new, u_sfc, v_sfc = self._ocean_step(
@@ -470,22 +513,39 @@ class CoupledESMDriver:
         self._log_coupled_diag(day)
 
     def _log_coupled_diag(self, day):
-        """Record coupled diagnostics for this segment."""
+        """Record coupled diagnostics for this segment.
+
+        Stacks all reductions into one ``jnp.stack`` and pulls them in
+        a single ``np.asarray`` transfer.  Each ``float(jnp.X(...))``
+        was previously its own device→host sync, serialising 3-5
+        GPU stalls per coupling segment.
+        """
         sst = self._ocean_state.T_sfc.data
-        area = self._atm.grid.area if hasattr(self._atm.grid, 'area') else None
+        has_co2 = self.coupled_cfg.co2_tracer and hasattr(self, '_co2_field')
+        has_T_sfc = self._last_sfc_response is not None
+
+        terms = [jnp.mean(sst), jnp.min(sst), jnp.max(sst)]
+        if has_co2:
+            terms.append(jnp.mean(self._co2_field))
+        if has_T_sfc:
+            terms.append(jnp.mean(self._last_sfc_response.T_surface))
+        host = np.asarray(jnp.stack(terms))
 
         diag = {
             "day": float(day),
-            "sst_mean": float(jnp.mean(sst)),
-            "sst_min": float(jnp.min(sst)),
-            "sst_max": float(jnp.max(sst)),
+            "sst_mean": float(host[0]),
+            "sst_min": float(host[1]),
+            "sst_max": float(host[2]),
         }
-        if self.coupled_cfg.co2_tracer and hasattr(self, '_co2_field'):
-            M_CO2, M_air = 44.01, 28.97
-            co2_mean = float(jnp.mean(self._co2_field)) / (M_CO2 / M_air) * 1e6
-            diag["co2_ppmv_mean"] = co2_mean
-        if self._last_sfc_response is not None:
-            diag["T_sfc_mean"] = float(jnp.mean(self._last_sfc_response.T_surface))
+        idx = 3
+        if has_co2:
+            diag["co2_ppmv_mean"] = (
+                float(host[idx])
+                / (constants.M_CO2 / constants.M_air) * 1e6
+            )
+            idx += 1
+        if has_T_sfc:
+            diag["T_sfc_mean"] = float(host[idx])
 
         self._coupled_diag.append(diag)
 

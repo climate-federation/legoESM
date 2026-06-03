@@ -1,0 +1,440 @@
+"""Ocean grid setup and model creation for the ocean test matrix."""
+
+from __future__ import annotations
+
+import numpy as np
+
+from ocean_test_matrix import config
+
+
+def _parse_resolution(tc):
+    """Parse resolution string and return grid-appropriate parameters."""
+    if tc.grid_type == "cubed_sphere":
+        return {"n": int(tc.resolution[1:])}
+    elif tc.grid_type == "latlon":
+        parts = tc.resolution.split("x")
+        return {"n_lat": int(parts[0]), "n_lon": int(parts[1])}
+    elif tc.grid_type == "mpas":
+        return {"level": int(tc.resolution.replace("ico", ""))}
+    elif tc.grid_type == "mpas_regional":
+        return {"resolution_km": int(tc.resolution.replace("km", ""))}
+    elif tc.grid_type == "latlon_regional":
+        parts = tc.resolution.split("x")
+        return {"n_lat": int(parts[0]), "n_lon": int(parts[1])}
+    elif tc.grid_type == "cs_regional":
+        return {"n": int(tc.resolution[1:])}
+    elif tc.grid_type == "latlon_channel":
+        parts = tc.resolution.split("x")
+        return {"n_lat": int(parts[0]), "n_lon": int(parts[1])}
+    elif tc.grid_type == "mpas_channel":
+        return {"resolution_km": int(tc.resolution.replace("km", ""))}
+    elif tc.grid_type == "spectral":
+        return {"truncation": int(tc.resolution[1:])}
+    raise ValueError(f"Unknown grid type: {tc.grid_type}")
+
+
+def _create_ocean_setup(tc, nlev: int | None = None,
+                        H_max: float | None = None, physics=None,
+                        A_h: float | None = None,
+                        B_h: float | None = None,
+                        C_smag: float | None = None,
+                        A_v: float | None = None,
+                        K_h: float | None = None,
+                        K_v: float | None = None,
+                        K_bih: float | None = None,
+                        bottom_drag_r: float | None = None,
+                        eos: str | None = None,
+                        eos_linear=None,
+                        barotropic_diffusion_alpha: float | None = None,
+                        barotropic_div_damp: float | None = None,
+                        tracer_advection: str | None = None,
+                        gm_redi=None,
+                        pv_scheme: str | None = None,
+                        apvm_dt: float | None = None,
+                        pv_alpha: float | None = None,
+                        K_zeta_bih: float | None = None,
+                        C_leith: float | None = None,
+                        C_leith_modified: bool | None = None,
+                        momentum_advection: str | None = None,
+                        weno_d_term: bool | None = None,
+                        barotropic_solver: str | None = None):
+    """Create grid, z_coord, and rest-state for any grid type.
+
+    Parameters
+    ----------
+    tc : TestCase
+    nlev : int
+    H_max : float
+    physics : OceanPhysicsConfig or None
+        If provided, passed to the model config to enable physics
+        (e.g. prescribed surface forcing for wind-driven experiments).
+    A_h : float or None
+        Override horizontal viscosity [m^2/s]. If None, uses config default.
+
+    Returns (grid, z_coord, config, model, coord_kind, lon_deg, lat_deg).
+    """
+    if nlev is None:
+        nlev = config.DEFAULT_NLEV
+    if H_max is None:
+        H_max = config.DEFAULT_H_MAX
+    from legoesm.ocean.vertical import create_ocean_z_star
+
+    z_coord = create_ocean_z_star(n_levels=nlev, H_max=H_max)
+    params = _parse_resolution(tc)
+
+    if tc.grid_type == "cubed_sphere":
+        from legoesm.grids.cubed_sphere import create_cubed_sphere
+        from legoesm.ocean.dynamics.ocean_model import OceanModel
+        from legoesm.ocean.state import OceanConfig
+
+        # iter-175 parity with iter-174 monolithic fix:
+        # cubed_sphere ``OceanConfig`` does not expose
+        # ``bottom_drag_r``.  Previously the modular path
+        # silently dropped the parameter without even a
+        # warning (worse than the monolithic path which at
+        # least emitted ``warnings.warn``).  Codex iter-173
+        # MEDIUM-1 flagged the same issue in the monolithic
+        # path: a silent drop lets cube gyre runs produce
+        # ``PASS`` results in cross-grid comparisons that
+        # are NOT physically comparable to lat-lon / MPAS
+        # because bottom drag is missing.
+        #
+        # Same fix as iter-174 (monolithic): raise
+        # ``NotImplementedError`` so the main runner's
+        # exception handler converts the case to ``SKIP``
+        # with the reason in the notes field.
+        if bottom_drag_r is not None and bottom_drag_r > 0.0:
+            raise NotImplementedError(
+                f"cubed_sphere OceanConfig does not expose "
+                f"bottom_drag_r (requested {bottom_drag_r:g}); "
+                f"cube ocean dycore lacks linear bottom drag "
+                f"(deferred per user). Use latlon or mpas for "
+                f"this case to get cross-grid-comparable results."
+            )
+
+        n = params["n"]
+        grid = create_cubed_sphere(n)
+        kw = dict(n_barotropic_substeps=30, physics=physics)
+        if A_h is not None:
+            kw["A_h"] = A_h
+        if A_v is not None:
+            kw["A_v"] = A_v
+        cfg = OceanConfig(**kw)
+        model = OceanModel(grid, z_coord, cfg)
+        coord_kind = "cube"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+        return grid, z_coord, cfg, model, coord_kind, lon_deg, lat_deg
+
+    elif tc.grid_type == "latlon":
+        from legoesm.grids.latlon import create_latlon_grid
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+
+        grid = create_latlon_grid(params["n_lat"], params["n_lon"])
+        kw = dict(n_barotropic_substeps=30, physics=physics)
+        if A_h is not None:
+            kw["A_h"] = A_h
+        if A_v is not None:
+            kw["A_v"] = A_v
+        cfg = LatLonCGridOceanConfig(**kw)
+        model = LatLonCGridOceanModel(grid, z_coord, cfg)
+        coord_kind = "latlon"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+        return grid, z_coord, cfg, model, coord_kind, lon_deg, lat_deg
+
+    elif tc.grid_type == "mpas":
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+        from legoesm.ocean.mpas_config import MPASOceanConfig
+
+        mesh = create_voronoi_mesh(params["level"])
+        kw = dict(n_barotropic_substeps=30, physics=physics)
+        if A_h is not None:
+            kw["A_h"] = A_h
+        if B_h is not None:
+            kw["B_h"] = B_h
+        if C_smag is not None:
+            kw["C_smag"] = C_smag
+        if A_v is not None:
+            kw["A_v"] = A_v
+        if K_v is not None:
+            kw["K_v"] = K_v
+        if K_h is not None:
+            kw["K_h"] = K_h
+        if K_bih is not None:
+            kw["K_bih"] = K_bih
+        if bottom_drag_r is not None:
+            kw["bottom_drag_r"] = bottom_drag_r
+        if eos is not None:
+            kw["eos"] = eos
+        if eos_linear is not None:
+            kw["eos_linear"] = eos_linear
+        if barotropic_diffusion_alpha is not None:
+            kw["barotropic_diffusion_alpha"] = barotropic_diffusion_alpha
+        if barotropic_div_damp is not None:
+            kw["barotropic_div_damp"] = barotropic_div_damp
+        if tracer_advection is not None:
+            kw["tracer_advection"] = tracer_advection
+        if pv_scheme is not None:
+            kw["pv_scheme"] = pv_scheme
+        if apvm_dt is not None:
+            kw["apvm_dt"] = apvm_dt
+        if pv_alpha is not None:
+            kw["pv_alpha"] = pv_alpha
+        if K_zeta_bih is not None:
+            kw["K_zeta_bih"] = K_zeta_bih
+        if C_leith is not None:
+            kw["C_leith"] = C_leith
+        if C_leith_modified is not None:
+            kw["C_leith_modified"] = C_leith_modified
+        cfg = MPASOceanConfig(**kw)
+        model = MPASOceanModel(mesh, z_coord, cfg)
+        coord_kind = "mpas"
+        lon_deg = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
+        return mesh, z_coord, cfg, model, coord_kind, lon_deg, lat_deg
+
+    elif tc.grid_type == "mpas_regional":
+        from legoesm.grids.voronoi import create_regional_voronoi_mesh
+        from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+        from legoesm.ocean.mpas_config import MPASOceanConfig
+
+        res_km = params["resolution_km"]
+        # Default gyre basin bounds
+        lon_w = tc.run_kwargs.get("lon_west", 0.0)
+        lon_e = tc.run_kwargs.get("lon_east", 120.0)
+        lat_s = tc.run_kwargs.get("lat_south", 15.0)
+        lat_n = tc.run_kwargs.get("lat_north", 75.0)
+        mesh = create_regional_voronoi_mesh(
+            (lon_w, lon_e), (lat_s, lat_n), resolution_km=res_km)
+        kw = dict(n_barotropic_substeps=30, physics=physics)
+        if A_h is not None:
+            kw["A_h"] = A_h
+        if B_h is not None:
+            kw["B_h"] = B_h
+        if C_smag is not None:
+            kw["C_smag"] = C_smag
+        if A_v is not None:
+            kw["A_v"] = A_v
+        if K_v is not None:
+            kw["K_v"] = K_v
+        if K_h is not None:
+            kw["K_h"] = K_h
+        if K_bih is not None:
+            kw["K_bih"] = K_bih
+        if bottom_drag_r is not None:
+            kw["bottom_drag_r"] = bottom_drag_r
+        if eos is not None:
+            kw["eos"] = eos
+        if eos_linear is not None:
+            kw["eos_linear"] = eos_linear
+        if barotropic_diffusion_alpha is not None:
+            kw["barotropic_diffusion_alpha"] = barotropic_diffusion_alpha
+        if barotropic_div_damp is not None:
+            kw["barotropic_div_damp"] = barotropic_div_damp
+        if tracer_advection is not None:
+            kw["tracer_advection"] = tracer_advection
+        if pv_scheme is not None:
+            kw["pv_scheme"] = pv_scheme
+        if apvm_dt is not None:
+            kw["apvm_dt"] = apvm_dt
+        if pv_alpha is not None:
+            kw["pv_alpha"] = pv_alpha
+        if K_zeta_bih is not None:
+            kw["K_zeta_bih"] = K_zeta_bih
+        if C_leith is not None:
+            kw["C_leith"] = C_leith
+        if C_leith_modified is not None:
+            kw["C_leith_modified"] = C_leith_modified
+        # pv_scheme defaults to "enstrophy" in MPASOceanConfig.
+        # apvm_dt left at 0 (disabled); see mpas_channel branch notes.
+        cfg = MPASOceanConfig(**kw)
+        model = MPASOceanModel(mesh, z_coord, cfg)
+        coord_kind = "mpas"
+        lon_deg = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
+        return mesh, z_coord, cfg, model, coord_kind, lon_deg, lat_deg
+
+    elif tc.grid_type == "latlon_regional":
+        from legoesm.grids.latlon import create_regional_latlon_grid
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+
+        n_lat, n_lon = params["n_lat"], params["n_lon"]
+        lon_w = tc.run_kwargs.get("lon_west", 0.0)
+        lon_e = tc.run_kwargs.get("lon_east", 120.0)
+        lat_s = tc.run_kwargs.get("lat_south", 15.0)
+        lat_n = tc.run_kwargs.get("lat_north", 75.0)
+        grid, wall_mask = create_regional_latlon_grid(
+            n_lat, n_lon, lat_s, lat_n, lon_w, lon_e)
+        kw = dict(n_barotropic_substeps=30, physics=physics)
+        if A_h is not None:
+            kw["A_h"] = A_h
+        if A_v is not None:
+            kw["A_v"] = A_v
+        cfg = LatLonCGridOceanConfig(**kw)
+        model = LatLonCGridOceanModel(grid, z_coord, cfg)
+        coord_kind = "latlon"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+        return grid, z_coord, cfg, model, coord_kind, lon_deg, lat_deg
+
+    elif tc.grid_type == "latlon_channel":
+        from legoesm.grids.latlon import create_regional_latlon_grid
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+        from legoesm.ocean.state import LatLonCGridOceanConfig
+
+        n_lat, n_lon = params["n_lat"], params["n_lon"]
+        lat_s = tc.run_kwargs.get("lat_south", 25.0)
+        lat_n = tc.run_kwargs.get("lat_north", 65.0)
+        lon_w = tc.run_kwargs.get("lon_west", 0.0)
+        lon_e = tc.run_kwargs.get("lon_east", 360.0)
+        grid, wall_mask = create_regional_latlon_grid(
+            n_lat, n_lon, lat_s, lat_n,
+            lon_west=lon_w, lon_east=lon_e, periodic_x=True)
+        kw = dict(n_barotropic_substeps=30, physics=physics)
+        if A_h is not None:
+            kw["A_h"] = A_h
+        if B_h is not None:
+            kw["B_h"] = B_h
+        if C_smag is not None:
+            kw["C_smag"] = C_smag
+        if A_v is not None:
+            kw["A_v"] = A_v
+        if K_v is not None:
+            kw["K_v"] = K_v
+        if K_h is not None:
+            kw["K_h"] = K_h
+        if K_bih is not None:
+            kw["K_bih"] = K_bih
+        if bottom_drag_r is not None:
+            kw["bottom_drag_r"] = bottom_drag_r
+        if eos is not None:
+            kw["eos"] = eos
+        if eos_linear is not None:
+            kw["eos_linear"] = eos_linear
+        if barotropic_diffusion_alpha is not None:
+            kw["barotropic_diffusion_alpha"] = barotropic_diffusion_alpha
+        if barotropic_div_damp is not None:
+            kw["barotropic_div_damp"] = barotropic_div_damp
+        if tracer_advection is not None:
+            kw["tracer_advection"] = tracer_advection
+        if gm_redi is not None:
+            kw["gm_redi"] = gm_redi
+        if momentum_advection is not None:
+            kw["momentum_advection"] = momentum_advection
+        if weno_d_term is not None:
+            kw["weno_d_term"] = weno_d_term
+        if barotropic_solver is not None:
+            kw["barotropic_solver"] = barotropic_solver
+        cfg = LatLonCGridOceanConfig(**kw)
+        model = LatLonCGridOceanModel(grid, z_coord, cfg)
+        coord_kind = "latlon"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+        return grid, z_coord, cfg, model, coord_kind, lon_deg, lat_deg
+
+    elif tc.grid_type == "mpas_channel":
+        from legoesm.grids.voronoi import create_regional_voronoi_mesh
+        from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
+        from legoesm.ocean.mpas_config import MPASOceanConfig
+
+        res_km = params["resolution_km"]
+        lat_s = tc.run_kwargs.get("lat_south", 25.0)
+        lat_n = tc.run_kwargs.get("lat_north", 65.0)
+        # Periodic-x zonal extent: defaults to the full 360° (legacy) but
+        # can be overridden via run_kwargs to match a lat-lon channel
+        # (e.g. the Eady lon_west/lon_east bounds).
+        lon_w = tc.run_kwargs.get("lon_west", 0.0)
+        lon_e = tc.run_kwargs.get("lon_east", 360.0)
+        mesh = create_regional_voronoi_mesh(
+            (lon_w, lon_e), (lat_s, lat_n), resolution_km=res_km,
+            periodic_x=True)
+        kw = dict(n_barotropic_substeps=30, physics=physics)
+        if A_h is not None:
+            kw["A_h"] = A_h
+        if B_h is not None:
+            kw["B_h"] = B_h
+        if C_smag is not None:
+            kw["C_smag"] = C_smag
+        if A_v is not None:
+            kw["A_v"] = A_v
+        if K_v is not None:
+            kw["K_v"] = K_v
+        if K_h is not None:
+            kw["K_h"] = K_h
+        if K_bih is not None:
+            kw["K_bih"] = K_bih
+        if bottom_drag_r is not None:
+            kw["bottom_drag_r"] = bottom_drag_r
+        if eos is not None:
+            kw["eos"] = eos
+        if eos_linear is not None:
+            kw["eos_linear"] = eos_linear
+        if barotropic_diffusion_alpha is not None:
+            kw["barotropic_diffusion_alpha"] = barotropic_diffusion_alpha
+        if barotropic_div_damp is not None:
+            kw["barotropic_div_damp"] = barotropic_div_damp
+        if tracer_advection is not None:
+            kw["tracer_advection"] = tracer_advection
+        if pv_scheme is not None:
+            kw["pv_scheme"] = pv_scheme
+        if apvm_dt is not None:
+            kw["apvm_dt"] = apvm_dt
+        if pv_alpha is not None:
+            kw["pv_alpha"] = pv_alpha
+        if K_zeta_bih is not None:
+            kw["K_zeta_bih"] = K_zeta_bih
+        if C_leith is not None:
+            kw["C_leith"] = C_leith
+        if C_leith_modified is not None:
+            kw["C_leith_modified"] = C_leith_modified
+        if gm_redi is not None:
+            kw["gm_redi"] = gm_redi
+        # pv_scheme defaults to "enstrophy" in MPASOceanConfig — suppresses
+        # the ζ-checkerboard null mode of the energy-conserving scheme.
+        # APVM is left disabled (``apvm_dt=0``); enabling it on top of
+        # enstrophy was found to *destabilise* Eady channel simulations.
+        cfg = MPASOceanConfig(**kw)
+        model = MPASOceanModel(mesh, z_coord, cfg)
+        coord_kind = "mpas"
+        lon_deg = np.asarray(mesh.lonCell, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(mesh.latCell, dtype=np.float64) * 180 / np.pi
+        return mesh, z_coord, cfg, model, coord_kind, lon_deg, lat_deg
+
+    elif tc.grid_type == "cs_regional":
+        from legoesm.grids.cubed_sphere import create_cubed_sphere_panel
+        from legoesm.ocean.dynamics.ocean_model import OceanModel
+        from legoesm.ocean.state import OceanConfig
+
+        n = params["n"]
+        grid = create_cubed_sphere_panel(n, face_id=0, return_cdgrid=False)
+        kw = dict(n_barotropic_substeps=30, physics=physics)
+        if A_h is not None:
+            kw["A_h"] = A_h
+        if A_v is not None:
+            kw["A_v"] = A_v
+        cfg = OceanConfig(**kw)
+        model = OceanModel(grid, z_coord, cfg)
+        coord_kind = "cube"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+        return grid, z_coord, cfg, model, coord_kind, lon_deg, lat_deg
+
+    elif tc.grid_type == "spectral":
+        from legoesm.grids.gaussian import create_gaussian_grid
+        from legoesm.ocean.dynamics.spectral_ocean_pe import SpectralOceanModel
+        from legoesm.ocean.state import SpectralOceanConfig
+
+        trunc = params["truncation"]
+        grid = create_gaussian_grid(trunc)
+        cfg = SpectralOceanConfig()
+        model = SpectralOceanModel(grid, z_coord, cfg)
+        coord_kind = "gaussian"
+        lon_deg = np.asarray(grid.lon, dtype=np.float64) * 180 / np.pi
+        lat_deg = np.asarray(grid.lat, dtype=np.float64) * 180 / np.pi
+        return grid, z_coord, cfg, model, coord_kind, lon_deg, lat_deg
+
+    raise ValueError(f"Unknown grid type: {tc.grid_type}")

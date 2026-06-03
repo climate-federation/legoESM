@@ -1,12 +1,13 @@
 """Atmospheric microphysics parameterization for legoESM.
 
-Six backends are available, spanning warm-rain through mixed-phase to ML:
+Seven backends are available, spanning warm-rain through mixed-phase to ML:
 1. **Kessler**: Warm-rain one-moment (Kessler 1969)
 2. **Sundqvist**: Large-scale diagnostic condensation (Sundqvist 1989)
 3. **Seifert-Beheng**: Two-moment warm rain (Seifert & Beheng 2001)
 4. **Morrison**: Double-moment ice+liquid (Morrison et al. 2005)
 5. **Thompson**: Hybrid moment with graupel (Thompson et al. 2008)
-6. **ML Emulator**: Equinox MLP surrogate
+6. **P3**: Predicted Particle Properties single-category ice (Morrison & Milbrandt 2015)
+7. **ML Emulator**: Equinox MLP surrogate
 
 All produce the same `MicrophysicsOutput` interface.
 
@@ -29,6 +30,7 @@ from legoesm.atmosphere.physics.microphysics.config import (
     SeifertBehengConfig,
     MorrisonConfig,
     ThompsonConfig,
+    P3Config,
     MLEmulatorConfig,
 )
 from legoesm.atmosphere.physics.microphysics.output import (
@@ -43,6 +45,7 @@ from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphy
 from legoesm.atmosphere.physics.microphysics.seifert_beheng import seifert_beheng_microphysics
 from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
 from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
+from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics
 from legoesm.atmosphere.physics.microphysics.ml_emulator import (
     ml_microphysics,
     MicrophysicsEmulator,

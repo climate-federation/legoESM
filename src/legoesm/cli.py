@@ -100,6 +100,7 @@ def cmd_run(args):
 
         # Now safe to import JAX-heavy model code.
         from legoesm.driver.model_driver import ModelDriver
+        from legoesm.driver.run_status import status_to_exit_code
 
         experiment_config = config.to_experiment_config()
 
@@ -109,6 +110,17 @@ def cmd_run(args):
         logger.info("Running simulation...")
         status = driver.run()
         logger.info(f"Simulation completed: {status}")
+        # iter-109 (codex iter-104 MEDIUM-8): propagate
+        # ModelDriver status to exit code so wrappers /
+        # automation can detect BLOWUP via ``$?``.  Pre-iter-109
+        # this CLI exited 0 even when ``status="BLOWUP at day 5"``.
+        rc = status_to_exit_code(status)
+        if rc != 0:
+            logger.error(
+                f"Simulation status '{status}' does not indicate "
+                f"a clean run; exiting with code {rc}."
+            )
+            sys.exit(rc)
     except Exception as e:
         logger.error(f"Error running simulation: {e}", exc_info=True)
         sys.exit(1)
@@ -126,10 +138,19 @@ def cmd_test(args):
     from legoesm.runtime import bootstrap
     rc = bootstrap(precision="fp32")
 
+    # tests/ is not an installed package; add the project root so the import
+    # works whether invoked via the console-script entry point or python -m.
+    import pathlib
+    _project_root = pathlib.Path(__file__).parent.parent.parent
+    if str(_project_root) not in sys.path:
+        sys.path.insert(0, str(_project_root))
+
     import jax
-    import jax.numpy as jnp
     from legoesm.grids.cubed_sphere import create_cubed_sphere
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterModel as ShallowWaterModel, CDGridShallowWaterConfig as ShallowWaterConfig
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        CDGridShallowWaterModel as ShallowWaterModel,
+        williamson_cli_calibration,
+    )
     from tests.test_cases.williamson import (
         williamson_test2, williamson_test5, williamson_test2_exact,
         compute_error_norms,
@@ -150,21 +171,35 @@ def cmd_test(args):
 
     # Create initial condition
     if args.case == 2:
-        state = williamson_test2(grid)
+        sw_state = williamson_test2(grid)
     elif args.case == 5:
-        state = williamson_test5(grid)
+        sw_state = williamson_test5(grid)
     else:
         logger.error(f"Unknown test case: {args.case}")
         sys.exit(1)
 
-    # Create model with hyperdiffusion for stability
-    # Scale hyperdiffusion coefficient with grid spacing^4 for scale-selectivity
-    mean_dx = float(jnp.mean(grid.dx))
-    hyperdiff = 1e-4 * mean_dx**4 / args.dt  # CFL-scaled hyperdiffusion
-    config = ShallowWaterConfig(
-        hyperdiff_coeff=hyperdiff,
-        use_conservation_fixer=True,
+    # Convert cell-centre ShallowWaterState -> CDGridShallowWaterState
+    from legoesm.core.operators_cdgrid import center_to_dgrid_vector
+    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+        CDGridShallowWaterState, create_cubed_sphere_cdgrid,
     )
+    _cdgrid_tmp = create_cubed_sphere_cdgrid(grid)
+    u_cc = sw_state.u.data if hasattr(sw_state.u, 'data') else sw_state.u
+    v_cc = sw_state.v.data if hasattr(sw_state.v, 'data') else sw_state.v
+    h    = sw_state.h.data if hasattr(sw_state.h, 'data') else sw_state.h
+    h_s  = sw_state.h_s.data if hasattr(sw_state.h_s, 'data') else sw_state.h_s
+    u_d, v_d = center_to_dgrid_vector(u_cc, v_cc, _cdgrid_tmp)
+    state = CDGridShallowWaterState(h=h, u_d=u_d, v_d=v_d, h_s=h_s)
+
+    # Use the production-calibrated cubed-sphere shallow-water knobs
+    # (see #269).  Earlier CLI defaults used a heuristic
+    # ``1e-4 * mean_dx**4 / dt`` hyperdiffusion with no boundary fix,
+    # divergence damping, or vorticity damping, which left visible
+    # O(dx) v-wind streaks on one cube panel at C48 + 5 days even
+    # though L2 error was small.  ``williamson_cli_calibration`` is
+    # the single source of truth that the matrix runner and tests also
+    # use, so future calibration updates flow through one place.
+    config = williamson_cli_calibration(int(args.resolution))
     model = ShallowWaterModel(grid, config)
 
     # Integrate
@@ -172,14 +207,32 @@ def cmd_test(args):
     diag_interval = max(1, n_steps // 20)  # ~20 diagnostic outputs
 
     logger.info(f"Integrating {n_steps} steps...")
-    diagnostics = [compute_conservation_diagnostics(state, grid)]
+    from legoesm.core.operators_cdgrid import dgrid_to_center_vector
+    from legoesm.core.state import ShallowWaterState
+    from legoesm.core.field import Field as _Field
+
+    def _to_sw_state(cdgrid_state):
+        _h  = cdgrid_state.h.data  if hasattr(cdgrid_state.h,   'data') else cdgrid_state.h
+        _hs = cdgrid_state.h_s.data if hasattr(cdgrid_state.h_s, 'data') else cdgrid_state.h_s
+        _ud = cdgrid_state.u_d.data if hasattr(cdgrid_state.u_d, 'data') else cdgrid_state.u_d
+        _vd = cdgrid_state.v_d.data if hasattr(cdgrid_state.v_d, 'data') else cdgrid_state.v_d
+        u_cc, v_cc = dgrid_to_center_vector(_ud, _vd)
+        dims = ("face", "x", "y")
+        return ShallowWaterState(
+            h=_Field(data=_h,   name="h",   dims=dims, units="m",   long_name="Fluid depth"),
+            u=_Field(data=u_cc, name="u",   dims=dims, units="m/s", long_name="Zonal velocity"),
+            v=_Field(data=v_cc, name="v",   dims=dims, units="m/s", long_name="Meridional velocity"),
+            h_s=_Field(data=_hs, name="h_s", dims=dims, units="m",  long_name="Topography"),
+        )
+
+    diagnostics = [compute_conservation_diagnostics(_to_sw_state(state), grid)]
 
     t_start = time.time()
     for i in range(n_steps):
         state = model.step(state, args.dt)
 
         if (i + 1) % diag_interval == 0:
-            diag = compute_conservation_diagnostics(state, grid)
+            diag = compute_conservation_diagnostics(_to_sw_state(state), grid)
             diagnostics.append(diag)
             progress = (i + 1) / n_steps * 100
             mass_err = abs(float(diag['total_mass'] - diagnostics[0]['total_mass']))
@@ -193,7 +246,7 @@ def cmd_test(args):
     # Error norms (Test 2 only)
     if args.case == 2:
         exact = williamson_test2_exact(grid, args.days * 86400)
-        norms = compute_error_norms(state, exact, grid)
+        norms = compute_error_norms(_to_sw_state(state), exact, grid)
         logger.info("Error norms (height field):")
         logger.info(f"  L1:   {norms['l1']:.6e}")
         logger.info(f"  L2:   {norms['l2']:.6e}")
@@ -215,8 +268,10 @@ def cmd_test(args):
         try:
             from legoesm.visualization.maps import (
                 plot_global_field, plot_conservation_timeseries,
+                plot_dgrid_winds_per_tile,
             )
             import os
+            import numpy as np
             os.makedirs(args.output, exist_ok=True)
 
             plot_global_field(
@@ -230,6 +285,64 @@ def cmd_test(args):
                 diagnostics, dt=args.dt * diag_interval,
                 title=f"Williamson Test {args.case}: Conservation",
                 save_path=os.path.join(args.output, f"williamson{args.case}_conservation.png"),
+            )
+
+            # Issue #274: emit final winds.  The PlateCarree plots show
+            # geographic east/north components, so they go through
+            # ``dgrid_to_center_geographic`` (rotates BEFORE the corner
+            # → cell-centre 4-point average).  Skipping the rotation —
+            # e.g. via the face-local ``dgrid_to_center_vector`` /
+            # ``_to_sw_state`` path — mislabels face-aligned components
+            # as zonal/meridional and produces spurious O(25 m/s)
+            # ``v_north`` for a purely zonal initial condition.  The
+            # native D-grid arrays then go to a per-tile panel since
+            # no canonical (lon, lat) is defined at the D-grid corners.
+            from legoesm.core.operators_cdgrid import dgrid_to_center_geographic
+            from legoesm.core.field import Field as _Field
+            u_east, v_north = dgrid_to_center_geographic(
+                state.u_d, state.v_d, _cdgrid_tmp,
+            )
+            u_east_field = _Field(
+                data=u_east, name="u_east", dims=("face", "x", "y"),
+                units="m/s", long_name="Zonal (eastward) wind",
+            )
+            v_north_field = _Field(
+                data=v_north, name="v_north", dims=("face", "x", "y"),
+                units="m/s", long_name="Meridional (northward) wind",
+            )
+            wind_lim = float(np.nanmax(np.abs(np.asarray(u_east))))
+            wind_lim = max(
+                wind_lim,
+                float(np.nanmax(np.abs(np.asarray(v_north)))),
+            )
+            wind_lim = wind_lim if wind_lim > 0 else 1.0
+            plot_global_field(
+                u_east_field, grid,
+                title=f"Williamson Test {args.case}: zonal wind u (Day {args.days})",
+                cmap="RdBu_r",
+                vmin=-wind_lim, vmax=wind_lim,
+                projection="platecarree",
+                colorbar_label="u [m/s]",
+                save_path=os.path.join(args.output, f"williamson{args.case}_u_platecarree.png"),
+            )
+            plot_global_field(
+                v_north_field, grid,
+                title=f"Williamson Test {args.case}: meridional wind v (Day {args.days})",
+                cmap="RdBu_r",
+                vmin=-wind_lim, vmax=wind_lim,
+                projection="platecarree",
+                colorbar_label="v [m/s]",
+                save_path=os.path.join(args.output, f"williamson{args.case}_v_platecarree.png"),
+            )
+            plot_dgrid_winds_per_tile(
+                state.u_d, state.v_d,
+                title=(
+                    f"Williamson Test {args.case}: native D-grid winds "
+                    f"(Day {args.days})"
+                ),
+                save_path=os.path.join(
+                    args.output, f"williamson{args.case}_dgrid_winds.png"
+                ),
             )
             logger.info(f"Plots saved to {args.output}/")
         except ImportError:

@@ -22,8 +22,24 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm.atmosphere.dynamics.spectral_pe import (
+    SpectralHydrostaticState,
+    spectral_pe_to_grid,
+)
 from legoesm.core.field import Field
-from legoesm.core.state import HydrostaticState, HydrostaticTendencies
+from legoesm.core.precision import get_policy
+from legoesm.core.state import (
+    HydrostaticState,
+    HydrostaticTendencies,
+    MPASHydrostaticState,
+    MPASHydrostaticTendencies,
+)
+from legoesm.grids.gaussian import (
+    sh_analysis,
+    sh_analysis_3d,
+    sh_analysis_oc2_3d,
+    sh_analysis_dmu_3d,
+)
 from legoesm.grids.vertical import (
     SigmaCoordinate,
     HybridSigmaPressureCoordinate,
@@ -52,8 +68,8 @@ DELTA_T_Y = 60.0    # [K] meridional temperature gradient
 DELTA_THETA_Z = 10.0  # [K] vertical potential temperature gradient
 T_MIN = 200.0        # [K] minimum equilibrium temperature
 
-# Reference pressure
-P_0 = 1.0e5  # [Pa]
+# Reference pressure (alias for constants.p_ref kept for local readability)
+P_0 = constants.p_ref
 
 
 # ==============================================================================
@@ -63,10 +79,16 @@ P_0 = 1.0e5  # [Pa]
 def held_suarez_equilibrium_temperature(
     lat: jax.Array,
     p: jax.Array,
+    delta_T_y: float = DELTA_T_Y,
+    delta_theta_z: float = DELTA_THETA_Z,
+    T_min: float = T_MIN,
+    p_ref: float = P_0,
 ) -> jax.Array:
     """Compute the Held-Suarez equilibrium temperature T_eq.
 
-    T_eq = max(200, (315 - DeltaT_y sin^2(phi) - Delta_theta_z ln(p/p0) cos^2(phi)) * (p/p0)^kappa)
+    T_eq = max(T_min,
+               (315 - delta_T_y sin^2(phi)
+                    - delta_theta_z ln(p/p_ref) cos^2(phi)) * (p/p_ref)^kappa)
 
     Parameters
     ----------
@@ -74,6 +96,11 @@ def held_suarez_equilibrium_temperature(
         Latitude in radians. Can be any shape that broadcasts with p.
     p : jax.Array
         Pressure [Pa]. Same broadcastable shape.
+    delta_T_y, delta_theta_z, T_min, p_ref : float
+        Optional overrides of the module-level Held-Suarez parameters.
+        Default to ``DELTA_T_Y``, ``DELTA_THETA_Z``, ``T_MIN``, ``P_0``
+        respectively.  Passing them as traced JAX scalars makes them
+        reachable by ``jax.grad`` for parameter estimation.
 
     Returns
     -------
@@ -84,17 +111,17 @@ def held_suarez_equilibrium_temperature(
     cos_lat = jnp.cos(lat)
 
     # Pressure ratio
-    p_ratio = p / P_0
+    p_ratio = p / p_ref
 
     # Equilibrium temperature (before min-capping)
     T_eq = (
-        (315.0 - DELTA_T_Y * sin_lat**2
-         - DELTA_THETA_Z * jnp.log(p_ratio) * cos_lat**2)
+        (315.0 - delta_T_y * sin_lat**2
+         - delta_theta_z * jnp.log(p_ratio) * cos_lat**2)
         * p_ratio**kappa
     )
 
     # Cap at minimum temperature
-    T_eq = jnp.maximum(T_eq, T_MIN)
+    T_eq = jnp.maximum(T_eq, T_min)
 
     return T_eq
 
@@ -107,6 +134,15 @@ def held_suarez_forcing(
     state: HydrostaticState,
     grid,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
+    *,
+    k_a: float = K_A,
+    k_s: float = K_S,
+    k_f: float = K_F,
+    sigma_b: float = SIGMA_B,
+    delta_T_y: float = DELTA_T_Y,
+    delta_theta_z: float = DELTA_THETA_Z,
+    T_min: float = T_MIN,
+    p_ref: float = P_0,
 ) -> HydrostaticTendencies:
     """Compute Held-Suarez physics tendencies on a cubed-sphere grid.
 
@@ -118,6 +154,11 @@ def held_suarez_forcing(
         Horizontal grid (provides latitude).
     sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
         Vertical coordinate.
+    k_a, k_s, k_f, sigma_b, delta_T_y, delta_theta_z, T_min, p_ref : float
+        Held-Suarez tunable parameters with the module-level defaults
+        from Held & Suarez 1994 Table 1.  Each can be passed as a
+        traced JAX scalar so ``jax.grad`` reaches them for parameter
+        estimation (issue #249-style AD coverage).
 
     Returns
     -------
@@ -143,25 +184,27 @@ def held_suarez_forcing(
     # --- Equilibrium temperature ---
     # lat shape (6,n,n) -> broadcast to (6,n,n,nlev)
     T_eq = held_suarez_equilibrium_temperature(
-        lat[..., None], p_full
+        lat[..., None], p_full,
+        delta_T_y=delta_T_y, delta_theta_z=delta_theta_z,
+        T_min=T_min, p_ref=p_ref,
     )  # (6,n,n,nlev)
 
     # --- Temperature relaxation coefficient k_T(sigma, phi) ---
     # k_T = k_a + (k_s - k_a) * max(0, (sigma-sigma_b)/(1-sigma_b)) * cos^4(phi)
     sigma_factor = jnp.maximum(
-        0.0, (sigma_eff - SIGMA_B) / (1.0 - SIGMA_B)
+        0.0, (sigma_eff - sigma_b) / (1.0 - sigma_b)
     )
     cos_lat_4 = jnp.cos(lat)**4  # (6,n,n)
 
-    k_T = K_A + (K_S - K_A) * sigma_factor * cos_lat_4[..., None]
+    k_T = k_a + (k_s - k_a) * sigma_factor * cos_lat_4[..., None]
 
     # --- Newtonian relaxation: Q_T = -k_T * (T - T_eq) ---
     dT_dt_phys = -k_T * (T - T_eq)
 
     # --- Rayleigh friction coefficient k_v(sigma) ---
     # k_v = k_f * max(0, (sigma-sigma_b)/(1-sigma_b))
-    k_v = K_F * jnp.maximum(
-        0.0, (sigma_eff - SIGMA_B) / (1.0 - SIGMA_B)
+    k_v = k_f * jnp.maximum(
+        0.0, (sigma_eff - sigma_b) / (1.0 - sigma_b)
     )
 
     # --- Rayleigh friction: Q_u = -k_v*u, Q_v = -k_v*v ---
@@ -189,7 +232,7 @@ def held_suarez_init(
     grid,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     T_init: float = 300.0,
-    p_s_init: float = 1.0e5,
+    p_s_init: float = constants.p_ref,
     perturbation_amplitude: float = 1.0,
     seed: int = 42,
     phis: jnp.ndarray | None = None,
@@ -223,7 +266,6 @@ def held_suarez_init(
     -------
     HydrostaticState : Initial state.
     """
-    from legoesm.core.precision import get_policy
     _dtype = get_policy().storage
 
     n = grid.n
@@ -348,7 +390,7 @@ def held_suarez_init_latlon(
     grid,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     T_init: float = 300.0,
-    p_s_init: float = 1.0e5,
+    p_s_init: float = constants.p_ref,
     perturbation_amplitude: float = 1.0,
     seed: int = 42,
     phis: jnp.ndarray | None = None,
@@ -381,7 +423,6 @@ def held_suarez_init_latlon(
     -------
     HydrostaticState : Initial state.
     """
-    from legoesm.core.precision import get_policy
     _dtype = get_policy().storage
 
     n_lat = grid.n_lat
@@ -444,8 +485,6 @@ def held_suarez_forcing_mpas(
     -------
     MPASHydrostaticTendencies
     """
-    from legoesm.core.state import MPASHydrostaticTendencies
-
     u = state.u.data       # (nEdges, nlev)
     T = state.T.data       # (nCells, nlev)
     p_s = state.p_s.data   # (nCells,)
@@ -514,7 +553,7 @@ def held_suarez_init_mpas(
     mesh,
     sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
     T_init: float = 300.0,
-    p_s_init: float = 1.0e5,
+    p_s_init: float = constants.p_ref,
     perturbation_amplitude: float = 1.0,
     seed: int = 42,
     phis: jnp.ndarray | None = None,
@@ -544,9 +583,6 @@ def held_suarez_init_mpas(
     -------
     MPASHydrostaticState
     """
-    from legoesm.core.state import MPASHydrostaticState
-    from legoesm.core.precision import get_policy
-
     _dtype = get_policy().storage
 
     nCells = mesh.nCells
@@ -611,17 +647,6 @@ def held_suarez_forcing_spectral(
     SpectralHydrostaticState
         Physics tendencies in spectral space (same pytree structure).
     """
-    from legoesm.atmosphere.dynamics.spectral_pe import (
-        SpectralHydrostaticState,
-        spectral_pe_to_grid,
-    )
-    from legoesm.grids.gaussian import (
-        sh_analysis,
-        sh_analysis_3d,
-        sh_analysis_oc2_3d,
-        sh_analysis_dmu_3d,
-    )
-
     # --- 1. Transform state to grid space ---
     fields = spectral_pe_to_grid(state, grid, sigma_coord)
     u = fields['u']         # (n_lat, n_lon, nlev)

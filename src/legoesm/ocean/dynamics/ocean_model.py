@@ -28,12 +28,21 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.ocean.vertical import OceanZStarCoordinate
 from legoesm.ocean.state import OceanState, OceanConfig
 from legoesm.core.precision import cast_pytree
 from legoesm.ocean.dynamics.barotropic import barotropic_substeps
+from legoesm.ocean.dynamics.ocean_pe_cdgrid import ocean_baroclinic_tendencies_cdgrid
+from legoesm.ocean.dynamics.barotropic_cgrid import (
+    barotropic_substeps_cgrid, barotropic_substeps_fv3sw,
+    barotropic_substeps_fv3edge,
+)
+from legoesm.ocean.conservation import ocean_conservation_fixer
+from legoesm.ocean.physics.combined import make_ocean_physics
 
 OCEAN_DISCRETIZATIONS = ["cdgrid"]
 
@@ -115,12 +124,55 @@ class OceanModel:
         if cdgrid is not None:
             self._cdgrid = cdgrid
         else:
-            from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
             self._cdgrid = create_cubed_sphere_cdgrid(grid)
+
+        # FC-Gram spectral baroclinic-tendency backend (optional).
+        # When ``fc_config`` is provided, the baroclinic tendencies are
+        # computed by ``ocean_baroclinic_tendencies_fc`` using FC-Gram
+        # spectral horizontal operators on each cube face — eliminating
+        # the face-edge halo amplification that the default A-L
+        # cd-grid path exhibits under horizontal density gradients
+        # (see docs/ocean_experiments/cubed_sphere_pgf_stability.md).
+        # Required to make cubed-sphere OMIP integrations survive
+        # multi-day WOA restoring at ~5° resolution.
+        self._fc_config = fc_config
+
+        # FV3-faithful barotropic: route the free-surface mode through the
+        # validated cube shallow-water core (vector-invariant absolute-vorticity
+        # flux + SSP-RK3 + divergence damping/hyperdiffusion).  Built once (the
+        # SW model's step is jitted on a static ``self``).  See
+        # ``barotropic_substeps_fv3sw`` and ``fv3_faithful.md``.
+        self._sw_baro_model = None
+        if self.config.barotropic_staggering in ("fv3sw", "fv3edge"):
+            from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
+                CDGridShallowWaterModel, FV3EdgeShallowWaterModel,
+                iter1009_dual_target_config,
+            )
+            n = self._cdgrid.n
+            sw_cfg = iter1009_dual_target_config(
+                n,
+                div_damp_factor=self.config.barotropic_sw_div_damp_factor,
+                damp_v=self.config.barotropic_sw_damp_v,
+            )._replace(
+                g=self.config.g,
+                # The SW core's global mass fixer conserves land-INCLUSIVE
+                # sum(h*area); the ocean invariant is wet-ocean free-surface
+                # volume.  Disable it and let the ocean's masked
+                # ocean_conservation_fixer (applied after the barotropic) handle
+                # conservation on the wet domain (codex review of bd74c45b).
+                fix_mass=False,
+            )
+            # "fv3sw" = corner-staggered CDGrid (centered, validated default);
+            # "fv3edge" = TRUE FV3 edge-staggered core (upwind flux + _d2a2c_vect,
+            # algorithmically faithful).
+            if self.config.barotropic_staggering == "fv3edge":
+                self._sw_baro_model = FV3EdgeShallowWaterModel(grid, sw_cfg)
+            else:
+                self._sw_baro_model = CDGridShallowWaterModel(grid, sw_cfg)
+            self._sw_baro_model.cdgrid = self._cdgrid
 
         # Build physics function if configured
         if self.config.physics is not None:
-            from legoesm.ocean.physics.combined import make_ocean_physics
             self._physics_fn = make_ocean_physics(self.config.physics)
         else:
             self._physics_fn = None
@@ -167,98 +219,144 @@ class OceanModel:
                 "salinity_min_psu must be <= salinity_max_psu, got "
                 f"{config.salinity_min_psu!r} > {config.salinity_max_psu!r}",
             )
-        if not (0.0 <= config.edge_blend_strength <= 1.0):
+        if config.barotropic_staggering not in (
+            "a_grid", "c_grid", "fv3sw", "fv3edge",
+        ):
             raise ValueError(
-                "edge_blend_strength must be in [0, 1], got "
-                f"{config.edge_blend_strength!r}",
-            )
-        if config.edge_blend_depth < 0:
-            raise ValueError(
-                "edge_blend_depth must be >= 0, got "
-                f"{config.edge_blend_depth!r}",
+                "barotropic_staggering must be 'a_grid', 'c_grid', 'fv3sw' or "
+                f"'fv3edge', got {config.barotropic_staggering!r}",
             )
 
     def _assert_runtime_invariants(self, state: OceanState) -> None:
-        """Host-side runtime checks for debugging/regression hardening."""
+        """Host-side runtime checks for debugging/regression hardening.
+
+        All reductions are fused into a single ``jnp.stack`` and pulled
+        to host with one ``np.asarray`` call so enabling
+        ``enable_runtime_checks`` costs one GPU→host sync per step
+        instead of 11.
+        """
+        u = state.u.data
+        v = state.v.data
+        T = state.T.data
+        S = state.S.data
+        eta = state.eta.data
+        H_bathy = state.H_bathy.data
         mask = state.land_mask.data
+
         wet = mask > 0.5
         land = ~wet
+        wet3 = wet[..., jnp.newaxis]
+        land3 = jnp.broadcast_to(land[..., jnp.newaxis], u.shape)
+        any_wet = jnp.any(wet)
+        any_land = jnp.any(land)
+        water_col = eta + H_bathy
 
-        finite_ok = bool(
-            jnp.all(jnp.isfinite(state.u.data))
-            & jnp.all(jnp.isfinite(state.v.data))
-            & jnp.all(jnp.isfinite(state.T.data))
-            & jnp.all(jnp.isfinite(state.S.data))
-            & jnp.all(jnp.isfinite(state.eta.data))
-            & jnp.all(jnp.isfinite(state.H_bathy.data))
+        finite_ok = (
+            jnp.all(jnp.isfinite(u))
+            & jnp.all(jnp.isfinite(v))
+            & jnp.all(jnp.isfinite(T))
+            & jnp.all(jnp.isfinite(S))
+            & jnp.all(jnp.isfinite(eta))
+            & jnp.all(jnp.isfinite(H_bathy))
         )
-        if not finite_ok:
-            raise FloatingPointError("Ocean runtime check failed: non-finite state detected")
 
-        water_col = state.eta.data + state.H_bathy.data
-        min_water_col = float(
-            jnp.min(jnp.where(wet, water_col, jnp.inf))
-        ) if bool(jnp.any(wet)) else float("inf")
+        # Mask reductions so the safe scalars can be shipped together.
+        T_wet = jnp.where(wet3, T, jnp.nan)
+        S_wet = jnp.where(wet3, S, jnp.nan)
+        eta_wet = jnp.where(wet, eta, 0.0)
+        wc_wet = jnp.where(wet, water_col, jnp.inf)
+
+        u_land = jnp.where(land3, u, 0.0)
+        v_land = jnp.where(land3, v, 0.0)
+        eta_land = jnp.where(land, eta, 0.0)
+
+        _stats = jnp.stack([
+            finite_ok.astype(eta.dtype),
+            any_wet.astype(eta.dtype),
+            any_land.astype(eta.dtype),
+            jnp.min(wc_wet).astype(eta.dtype),
+            jnp.max(jnp.abs(eta_wet)).astype(eta.dtype),
+            jnp.nanmin(T_wet).astype(eta.dtype),
+            jnp.nanmax(T_wet).astype(eta.dtype),
+            jnp.nanmin(S_wet).astype(eta.dtype),
+            jnp.nanmax(S_wet).astype(eta.dtype),
+            jnp.max(jnp.abs(u_land)).astype(eta.dtype),
+            jnp.max(jnp.abs(v_land)).astype(eta.dtype),
+            jnp.max(jnp.abs(eta_land)).astype(eta.dtype),
+        ])
+        host = np.asarray(_stats)
+        finite_ok_h = bool(host[0] > 0.5)
+        any_wet_h = bool(host[1] > 0.5)
+        any_land_h = bool(host[2] > 0.5)
+        min_water_col = float(host[3]) if any_wet_h else float("inf")
+        eta_abs = float(host[4]) if any_wet_h else 0.0
+        T_min = float(host[5]) if any_wet_h else float("nan")
+        T_max = float(host[6]) if any_wet_h else float("nan")
+        S_min = float(host[7]) if any_wet_h else float("nan")
+        S_max = float(host[8]) if any_wet_h else float("nan")
+        max_land_u = float(host[9])
+        max_land_v = float(host[10])
+        max_land_eta = float(host[11])
+
+        if not finite_ok_h:
+            raise FloatingPointError("Ocean runtime check failed: non-finite state detected")
         if min_water_col < self.config.min_water_column_m:
             raise ValueError(
                 "Ocean runtime check failed: water column too small. "
                 f"min(eta+H_bathy)={min_water_col:.6g} m, "
                 f"threshold={self.config.min_water_column_m:.6g} m",
             )
-
-        eta_abs = float(
-            jnp.max(jnp.abs(jnp.where(wet, state.eta.data, 0.0)))
-        ) if bool(jnp.any(wet)) else 0.0
         if eta_abs > self.config.max_abs_eta_m:
             raise ValueError(
                 "Ocean runtime check failed: |eta| exceeded threshold. "
                 f"max|eta|={eta_abs:.6g} m, threshold={self.config.max_abs_eta_m:.6g} m",
             )
-
-        if bool(jnp.any(wet)):
-            T_ocean = jnp.where(wet[..., jnp.newaxis], state.T.data, jnp.nan)
-            T_min = float(jnp.nanmin(T_ocean))
-            T_max = float(jnp.nanmax(T_ocean))
-            if T_min < self.config.temperature_min_c or T_max > self.config.temperature_max_c:
-                raise ValueError(
-                    "Ocean runtime check failed: temperature out of bounds. "
-                    f"range=[{T_min:.3f}, {T_max:.3f}] C, "
-                    f"bounds=[{self.config.temperature_min_c:.3f}, "
-                    f"{self.config.temperature_max_c:.3f}] C",
-                )
-
-            S_ocean = jnp.where(wet[..., jnp.newaxis], state.S.data, jnp.nan)
-            S_min = float(jnp.nanmin(S_ocean))
-            S_max = float(jnp.nanmax(S_ocean))
-            if S_min < self.config.salinity_min_psu or S_max > self.config.salinity_max_psu:
-                raise ValueError(
-                    "Ocean runtime check failed: salinity out of bounds. "
-                    f"range=[{S_min:.3f}, {S_max:.3f}] PSU, "
-                    f"bounds=[{self.config.salinity_min_psu:.3f}, "
-                    f"{self.config.salinity_max_psu:.3f}] PSU",
-                )
-
-        if bool(jnp.any(land)):
-            land_3d = jnp.broadcast_to(land[..., jnp.newaxis], state.u.data.shape)
-            max_land_u = float(jnp.max(jnp.abs(jnp.where(land_3d, state.u.data, 0.0))))
-            max_land_v = float(jnp.max(jnp.abs(jnp.where(land_3d, state.v.data, 0.0))))
-            max_land_eta = float(jnp.max(jnp.abs(jnp.where(land, state.eta.data, 0.0))))
-            if max(max_land_u, max_land_v, max_land_eta) > 1.0e-8:
-                raise ValueError(
-                    "Ocean runtime check failed: land cells are not zero. "
-                    f"max(|u_land|,|v_land|,|eta_land|)="
-                    f"{max(max_land_u, max_land_v, max_land_eta):.3e}",
-                )
+        if any_wet_h and (
+            T_min < self.config.temperature_min_c
+            or T_max > self.config.temperature_max_c
+        ):
+            raise ValueError(
+                "Ocean runtime check failed: temperature out of bounds. "
+                f"range=[{T_min:.3f}, {T_max:.3f}] C, "
+                f"bounds=[{self.config.temperature_min_c:.3f}, "
+                f"{self.config.temperature_max_c:.3f}] C",
+            )
+        if any_wet_h and (
+            S_min < self.config.salinity_min_psu
+            or S_max > self.config.salinity_max_psu
+        ):
+            raise ValueError(
+                "Ocean runtime check failed: salinity out of bounds. "
+                f"range=[{S_min:.3f}, {S_max:.3f}] PSU, "
+                f"bounds=[{self.config.salinity_min_psu:.3f}, "
+                f"{self.config.salinity_max_psu:.3f}] PSU",
+            )
+        if any_land_h and max(max_land_u, max_land_v, max_land_eta) > 1.0e-8:
+            raise ValueError(
+                "Ocean runtime check failed: land cells are not zero. "
+                f"max(|u_land|,|v_land|,|eta_land|)="
+                f"{max(max_land_u, max_land_v, max_land_eta):.3e}",
+            )
 
     def tendencies(self, state: OceanState, surface_forcing=None):
         """Compute baroclinic tendencies (pure function wrapper)."""
         return self._compute_tendencies(state, surface_forcing)
 
     def _compute_tendencies(self, state: OceanState, surface_forcing=None):
-        """Compute baroclinic tendencies using C-D grid operators."""
-        from legoesm.ocean.dynamics.ocean_pe_cdgrid import (
-            ocean_baroclinic_tendencies_cdgrid,
-        )
+        """Compute baroclinic tendencies on the configured backend."""
+        if self._fc_config is not None:
+            # FC-Gram spectral operators on each cube face — used to
+            # bypass the cd-grid A-L face-edge halo instability under
+            # horizontal density gradients (cubed-sphere OMIP fix).
+            from legoesm.ocean.dynamics.ocean_pe_fc import (
+                ocean_baroclinic_tendencies_fc,
+            )
+            return ocean_baroclinic_tendencies_fc(
+                state, self.grid, self.z_coord,
+                self._fc_config, self.config,
+                physics_fn=self._physics_fn,
+                surface_forcing=surface_forcing,
+            )
         return ocean_baroclinic_tendencies_cdgrid(
             state, self.grid, self.z_coord,
             self._cdgrid, self.config,
@@ -317,20 +415,47 @@ class OceanModel:
         # double-count the eta tendency.
         # Slow u/v tendency is already included in state_mid.
         dt_s = dt / self.config.n_barotropic_substeps
-        state_new = barotropic_substeps(
-            state_mid,
-            dt_s, self.config.n_barotropic_substeps,
-            self.grid, self.z_coord, self.config,
-        )
+        if self.config.barotropic_staggering == "fv3edge":
+            state_new = barotropic_substeps_fv3edge(
+                state_mid,
+                dt_s, self.config.n_barotropic_substeps,
+                self.grid, self._cdgrid, self.z_coord, self.config,
+                self._sw_baro_model,
+            )
+        elif self.config.barotropic_staggering == "fv3sw":
+            state_new = barotropic_substeps_fv3sw(
+                state_mid,
+                dt_s, self.config.n_barotropic_substeps,
+                self.grid, self._cdgrid, self.z_coord, self.config,
+                self._sw_baro_model,
+            )
+        elif self.config.barotropic_staggering == "c_grid":
+            state_new = barotropic_substeps_cgrid(
+                state_mid,
+                dt_s, self.config.n_barotropic_substeps,
+                self.grid, self._cdgrid, self.z_coord, self.config,
+            )
+        else:
+            state_new = barotropic_substeps(
+                state_mid,
+                dt_s, self.config.n_barotropic_substeps,
+                self.grid, self.z_coord, self.config,
+            )
 
         # --- 5. Conservation fixers ---
         if self.config.use_conservation_fixer:
-            from legoesm.ocean.conservation import ocean_conservation_fixer
             state_new = ocean_conservation_fixer(
                 state_new, state, self.grid, self.z_coord, self.config,
             )
 
-        return cast_pytree(state_new, None, "storage")
+        # ``allow_downcast=True`` is required here so the output state
+        # matches the user-provided input dtype.  Without it the
+        # ``cast_pytree(..., "compute")`` upcast at the top of ``step``
+        # silently ratchets fp32 inputs to fp64 outputs under
+        # ``JAX_ENABLE_X64``, breaking ``jax.lax.scan`` carry-dtype
+        # invariants and any downstream consumer that expects
+        # the storage-precision policy to be respected.
+        return cast_pytree(state_new, None, "storage", allow_downcast=True)
 
     def step_checked(self, state: OceanState, dt: float,
                      surface_forcing=None) -> OceanState:

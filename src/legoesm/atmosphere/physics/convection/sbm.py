@@ -38,6 +38,7 @@ from legoesm.atmosphere.physics.thermodynamics import (
 )
 from legoesm.atmosphere.physics.convection.config import SBMConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
+from legoesm.atmosphere.physics._shared import safe_divide
 
 
 def sbm_convection(
@@ -72,6 +73,13 @@ def sbm_convection(
     """
     ncol, nlev = T.shape
     dp = p_half[:, 1:] - p_half[:, :-1]  # (ncol, nlev) layer thickness
+    # ``jnp.full`` lowers to a single ``Broadcast`` HLO op; the previous
+    # ``broadcast_to(jnp.asarray(scalar, dtype), shape)`` form additionally
+    # forced a ``ConvertElementType`` for the implicit promotion of the
+    # Python float, which is unnecessary work per convection step.
+    tau_c = jnp.full((ncol,), config.tau_c, dtype=T.dtype)
+    RH_ref = jnp.full((ncol,), config.RH_ref, dtype=T.dtype)
+    CAPE_threshold = jnp.full((ncol,), config.CAPE_threshold, dtype=T.dtype)
 
     # 1. Surface temperature as parcel starting point
     T_base = T[:, -1]  # (ncol,)
@@ -82,7 +90,17 @@ def sbm_convection(
     # 3. Identify the convective layer: only levels where the moist adiabat
     #    is warmer than the environment (conditional instability).
     #    This prevents adjusting the stable stratosphere (Frierson 2007).
-    cloud_mask = (T_moist >= T).astype(T.dtype)  # (ncol, nlev)
+    #
+    #    A pure ``(T_moist >= T).astype(...)`` boolean breaks
+    #    differentiability (∂mask/∂T = 0 a.e.), but a pure sigmoid changes
+    #    the FORWARD semantics — at the surface the moist adiabat is
+    #    initialized from T[:,-1] so ``T_moist - T = 0`` gives mask = 0.5
+    #    instead of the prior mask = 1.  Use a straight-through estimator:
+    #    forward = hard step (preserve prior numerics exactly), backward =
+    #    sigmoid' (keep gradients alive across layer membership).
+    soft = jax.nn.sigmoid(config.cloud_mask_sharpness * (T_moist - T))
+    hard = (T_moist >= T).astype(T.dtype)
+    cloud_mask = soft + jax.lax.stop_gradient(hard - soft)  # (ncol, nlev)
 
     # 4. Compute CAPE from the RAW moist adiabat (before enthalpy correction)
     #    to avoid artificial CAPE from the Newton correction.
@@ -91,7 +109,7 @@ def sbm_convection(
     # 5. Enthalpy-conserving correction (Newton iteration)
     #    Only over the cloud layer (masked levels).
     def _newton_step(T_trial):
-        q_trial = config.RH_ref * saturation_mixing_ratio(T_trial, p_full)
+        q_trial = RH_ref[:, None] * saturation_mixing_ratio(T_trial, p_full)
         residual = jnp.sum(
             cloud_mask * (constants.c_pd * (T_trial - T)
                           + constants.L_v * (q_trial - q_v)) * dp,
@@ -101,7 +119,7 @@ def sbm_convection(
         dqsat_dT = constants.L_v * q_sat_trial / (constants.R_v * T_trial ** 2)
         jacobian = jnp.sum(
             cloud_mask * (constants.c_pd
-                          + constants.L_v * config.RH_ref * dqsat_dT) * dp,
+                          + constants.L_v * RH_ref[:, None] * dqsat_dT) * dp,
             axis=1,
         )  # (ncol,)
         dT = -residual / jnp.clip(jacobian, 1.0, None)
@@ -111,30 +129,56 @@ def sbm_convection(
     T_ref = _newton_step(T_ref)    # second iteration
 
     # Reference moisture at converged temperature
-    q_ref = config.RH_ref * saturation_mixing_ratio(T_ref, p_full)
+    q_ref = RH_ref[:, None] * saturation_mixing_ratio(T_ref, p_full)
 
     # 6. Smooth trigger: sigmoid(sharpness * (CAPE - threshold))
     trigger = jax.nn.sigmoid(
-        config.smooth_trigger_sharpness * (cape - config.CAPE_threshold)
+        config.smooth_trigger_sharpness * (cape - CAPE_threshold)
     )  # (ncol,)
 
     # 7. Relaxation tendencies — only within the convective (cloud) layer
-    tau_c = config.tau_c
-    dT_dt = trigger[:, None] * cloud_mask * (T_ref - T) / tau_c
-    dq_v_dt = trigger[:, None] * cloud_mask * (q_ref - q_v) / tau_c
+    dT_dt = trigger[:, None] * cloud_mask * (T_ref - T) / tau_c[:, None]
+    dq_v_dt = trigger[:, None] * cloud_mask * (q_ref - q_v) / tau_c[:, None]
 
-    # 7. Precipitation: column-integrated moisture sink
-    # precip = -sum(dq_v_dt * dp) / g, clipped >= 0
-    precipitation = jnp.clip(
-        -jnp.sum(dq_v_dt * dp, axis=1) / constants.g,
-        0.0,
-        None,
-    )  # (ncol,)
+    # 7. Convective source for cloud water: vapor that condenses at each
+    # level becomes cloud water rather than precipitating instantly.
+    # Microphysics processes this through autoconversion, sedimentation,
+    # and evaporation, and produces the surface precipitation diagnostic.
+    #
+    # Naive ``max(-dq_v_dt, 0)`` per level would *create* water
+    # column-wide whenever the relaxation has both drying and
+    # moistening layers (column-integrated dq_v + column-integrated
+    # max(-dq_v, 0) = moistening_part > 0). To preserve column water
+    # conservation we rescale the per-level condensation candidate so
+    # its column integral equals the column-net drying — this matches
+    # the legacy ``precipitation`` formula exactly. Per-level the
+    # field is still non-negative (no negative q_c production); when
+    # the column is net moistening (col_dq_v > 0) the scale is 0 and
+    # dq_c_conv_dt = 0 everywhere, mirroring the legacy
+    # ``clip(-col_dq_v, 0)`` behavior.
+    local_cond = jnp.maximum(-dq_v_dt, 0.0)
+    # Both column reductions share the ``* dp / g`` weight on the level
+    # axis — stack the two integrands and reduce once.
+    _col_pair = jnp.sum(
+        jnp.stack([local_cond, dq_v_dt], axis=-1) * (dp / constants.g)[..., None],
+        axis=-2,
+    )
+    col_local_cond = _col_pair[..., 0:1]
+    col_net_drying = jnp.clip(-_col_pair[..., 1:2], 0.0, None)
+    # AD-safe column rescaling: ``col_local_cond`` and ``col_net_drying``
+    # vanish together when the column is barely triggered.  ``clip + divide``
+    # is forward-safe but the divide's reverse-mode VJP still emits
+    # ``-a/eps**2`` terms that overflow under ``jax.value_and_grad``
+    # (issue #249).  ``safe_divide`` masks the bad branch *before* the
+    # divide so neither cotangent path differentiates ``1/x²`` at tiny ``x``.
+    dq_c_conv_dt = local_cond * safe_divide(
+        col_net_drying, col_local_cond, eps=1e-20,
+    )  # (ncol, nlev) [kg/kg/s]
 
     return ConvectionOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
-        precipitation=precipitation,
+        dq_c_conv_dt=dq_c_conv_dt,
         cape=cape,
         convective_mask=trigger,
     )

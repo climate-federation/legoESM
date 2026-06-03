@@ -15,6 +15,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from legoesm import constants
+
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.forcing.amip_config import (
@@ -39,7 +41,7 @@ from legoesm.forcing.external import (
 )
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.vertical import create_sigma_coordinate
-from tests.test_cases.held_suarez import held_suarez_init
+from legoesm.atmosphere.held_suarez import held_suarez_init
 
 
 class TestAMIPExperimentConfig:
@@ -51,7 +53,7 @@ class TestAMIPExperimentConfig:
         assert cfg.checkpoint_days == 0
 
     def test_to_dict_roundtrip(self):
-        cfg = AMIPExperimentConfig(resolution=24, days=365, S_0=1361.0)
+        cfg = AMIPExperimentConfig(resolution=24, days=365, S_0=constants.S_0)
         d = config_to_dict(cfg)
         cfg2 = config_from_dict(d)
         assert cfg == cfg2
@@ -98,7 +100,7 @@ class TestCheckpointRestart:
         ckpt_path = tmp_path / "checkpoint.npz"
 
         save_checkpoint(ckpt_path, state, q_v, step=100, day=10.0, config=config)
-        state2, q_v2, step2, day2, config2, diag_acc, _, _ = load_checkpoint(
+        state2, q_v2, step2, day2, config2, diag_acc, _, _, _ = load_checkpoint(
             ckpt_path, grid, sigma,
         )
 
@@ -125,7 +127,7 @@ class TestCheckpointRestart:
         save_checkpoint(ckpt_path, state, q_v, step=50, day=5.0,
                         config=config, diag_accumulators=accum)
 
-        _, _, _, _, _, diag_acc, _, _ = load_checkpoint(ckpt_path, grid, sigma)
+        _, _, _, _, _, diag_acc, _, _, _ = load_checkpoint(ckpt_path, grid, sigma)
         assert "precip_total" in diag_acc
         assert "rad_total" in diag_acc
         np.testing.assert_allclose(diag_acc["precip_total"], 3.14, atol=1e-12)
@@ -135,7 +137,7 @@ class TestCheckpointRestart:
         ckpt_path = tmp_path / "checkpoint_nodiag.npz"
 
         save_checkpoint(ckpt_path, state, q_v, step=1, day=0.1, config=config)
-        _, _, _, _, _, diag_acc, _, _ = load_checkpoint(ckpt_path, grid, sigma)
+        _, _, _, _, _, diag_acc, _, _, _ = load_checkpoint(ckpt_path, grid, sigma)
         assert diag_acc == {}
 
 

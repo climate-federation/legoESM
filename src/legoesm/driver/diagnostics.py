@@ -12,7 +12,12 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.diagnostics.column_integrals import column_water_vapor
-from legoesm.diagnostics.energy_budget import EnergyBudgetTracker
+from legoesm.diagnostics.energy_budget import (
+    EnergyBudgetTracker,
+    MoistureBudgetTracker,
+)
+from legoesm.diagnostics.monthly_means import MonthlyAccumulator
+from legoesm.forcing.surface_utils import blend_surface_temperature
 from legoesm.forcing.time_utils import day_to_calendar
 from legoesm.io.cmor_output import CMIP6_PLEV19
 
@@ -101,12 +106,29 @@ def _apply_structured_regrid_3d(
     w: _StructuredRegridWeights,
 ) -> np.ndarray:
     """Apply bilinear interpolation to a 3-D field (nlat_src, nlon_src, nlev)
-    → (nlat_tgt, nlon_tgt, nlev)."""
-    nlev = field.shape[2]
-    result = np.empty((len(w.i_lo), len(w.j_lo), nlev), dtype=field.dtype)
-    for k in range(nlev):
-        result[:, :, k] = _apply_structured_regrid_2d(field[:, :, k], w)
-    return result
+    → (nlat_tgt, nlon_tgt, nlev).
+
+    Vectorised over the level axis — gather the four bilinear
+    neighbours once and apply the per-cell weights with NumPy
+    broadcasting instead of looping ``nlev`` times.  At T63L49 with
+    ~50 levels this turns 50 separate per-level NumPy calls into one.
+    """
+    i0 = w.i_lo
+    i1 = np.minimum(i0 + 1, w.src_nlat - 1)
+    j0 = w.j_lo
+    j1 = np.minimum(j0 + 1, w.src_nlon - 1)
+    wi = w.wi[:, None, None]   # (n_lat_tgt, 1, 1)
+    wj = w.wj[None, :, None]   # (1, n_lon_tgt, 1)
+    f00 = field[np.ix_(i0, j0)]   # (n_lat_tgt, n_lon_tgt, nlev)
+    f10 = field[np.ix_(i1, j0)]
+    f01 = field[np.ix_(i0, j1)]
+    f11 = field[np.ix_(i1, j1)]
+    return (
+        (1 - wi) * (1 - wj) * f00
+        + wi * (1 - wj) * f10
+        + (1 - wi) * wj * f01
+        + wi * wj * f11
+    )
 
 
 class DiagnosticCollector:
@@ -147,6 +169,7 @@ class DiagnosticCollector:
         n_days: int = 200,
         output_dir: str | Path = "",
         cmip_resolution_deg: float = 5.0,
+        start_year: int = 1979,
     ):
         self.nlev = nlev
         self.sigma_full = sigma_full
@@ -174,21 +197,23 @@ class DiagnosticCollector:
         self.energy_tracker = EnergyBudgetTracker()
 
         # Moisture budget tracker
-        from legoesm.diagnostics.energy_budget import MoistureBudgetTracker
         self.moisture_tracker = MoistureBudgetTracker()
 
         # Monthly means
         self.monthly_means = monthly_means
         self.monthly_accum = None
         if monthly_means:
-            from legoesm.diagnostics.monthly_means import MonthlyAccumulator
             self.monthly_accum = MonthlyAccumulator(nlev=nlev, n_lat_bins=90)
 
         # CFWriter + spatial monthly accumulator for CMIP output
         self.cf_writer = None
         self._spatial_monthly = None
         self._cs_regrid_weights = None  # cached cubed-sphere → lat-lon weights
-        self._cmip_start_year = 1  # updated by set_cmip_start_year()
+        # Time axis reference is the experiment start year (CMIP6 AMIP
+        # convention: ``days since <start_year>-01-01``), which makes the
+        # stored time values start at zero and decode to the correct
+        # wall-clock dates without relying on a distant epoch.
+        self._cmip_start_year = start_year
         if cmip_output:
             from legoesm.io.cmor_output import CFWriter
             cmor_dir = str(Path(output_dir) / "cmor") if output_dir else "cmor"
@@ -198,21 +223,44 @@ class DiagnosticCollector:
                 model_id="legoESM-1-0",
                 freq="mon",
                 calendar="noleap",
-                ref_date="0001-01-01",
+                ref_date=f"{start_year:04d}-01-01",
             )
             if not monthly_means:
-                from legoesm.diagnostics.monthly_means import MonthlyAccumulator
+                # iter-169: removed redundant local import that
+                # caused F823 "referenced before assignment" — the
+                # local import shadows the module-level
+                # ``MonthlyAccumulator`` (line 19) for the entire
+                # function scope, making the line-206 reference
+                # inside the same ``__init__`` block invalid.  Use
+                # the module-level import directly.
                 self.monthly_means = True
                 self.monthly_accum = MonthlyAccumulator(nlev=nlev, n_lat_bins=90)
             # Full spatial accumulator for CMIP NetCDF output
-            from legoesm.diagnostics.monthly_means import SpatialMonthlyAccumulator
+            from legoesm.diagnostics.monthly_means import (
+                SpatialMonthlyAccumulator, SpatialDailyAccumulator,
+            )
             _cmip_nlon = int(round(360.0 / cmip_resolution_deg))
             _cmip_nlat = int(round(180.0 / cmip_resolution_deg))
             self._spatial_monthly = SpatialMonthlyAccumulator(
                 nlat=_cmip_nlat, nlon=_cmip_nlon, nlev=nlev,
             )
+            # Daily accumulator (CMIP6 ``day`` table) — tracks running
+            # min/max for tas so tasmin/tasmax can be emitted.
+            self._spatial_daily = SpatialDailyAccumulator(
+                nlat=_cmip_nlat, nlon=_cmip_nlon,
+                track_extremes={"tas"},
+            )
             self._cmip_nlat = _cmip_nlat
             self._cmip_nlon = _cmip_nlon
+            # Time-invariant (``fx`` table) fields — filled by
+            # ``set_fixed_fields`` if the driver supplies topography /
+            # land mask; written once at end-of-run.
+            self._fixed_phis: np.ndarray | None = None
+            self._fixed_land_fraction: np.ndarray | None = None
+        else:
+            self._spatial_daily = None
+            self._fixed_phis = None
+            self._fixed_land_fraction = None
 
         # Snapshots
         self.snapshot_days: set[int] = set()
@@ -270,12 +318,34 @@ class DiagnosticCollector:
                     tgt_nlat=self._cmip_nlat,
                     tgt_nlon=self._cmip_nlon,
                 )
-        elif grid_type in ("voronoi", "mpas"):
+        elif grid_type == "mpas":
             raise ValueError(
                 f"CMIP output is not supported for grid_type={grid_type!r}. "
-                f"Voronoi/MPAS grids require unstructured-to-latlon regridding "
-                f"which is not yet implemented."
+                f"The SCVT Voronoi mesh requires unstructured-to-latlon "
+                f"regridding which is not yet implemented."
             )
+
+    def set_fixed_fields(
+        self,
+        phis: np.ndarray | None = None,
+        land_fraction: np.ndarray | None = None,
+    ) -> None:
+        """Register time-invariant source fields for the CMIP6 ``fx`` file.
+
+        Parameters
+        ----------
+        phis : array, optional
+            Surface geopotential [m2/s2] on the native model grid.
+            Converted to orography (``orog = phis / g``) and regridded
+            to the CMIP target grid at save time.
+        land_fraction : array, optional
+            Land fraction in [0, 1] on the native model grid.  Emitted
+            as ``sftlf`` (percent) on the CMIP target grid.
+        """
+        if phis is not None:
+            self._fixed_phis = np.asarray(phis)
+        if land_fraction is not None:
+            self._fixed_land_fraction = np.asarray(land_fraction)
 
     def _regrid_to_latlon_2d(self, field) -> np.ndarray | None:
         """Regrid a 2-D field to the CMIP lat-lon grid.
@@ -355,34 +425,35 @@ class DiagnosticCollector:
         log_p_model = np.log(np.maximum(p_model, 1e-10))
         log_plev = np.log(plev_target)
 
-        # For each target level, find bracketing model levels and interpolate
+        # Vectorise over the target-pressure axis instead of looping
+        # ``n_target`` times.  Each target level only needed two
+        # bracketing model levels and a log-linear interp; we can do
+        # all target levels in a single ``take_along_axis`` by
+        # broadcasting the searchsorted indices to ``(..., n_target)``.
+        # Iter 11: 19 full-grid NumPy passes per 3-D field → 1 vectorised
+        # pass per field.
         n_target = len(plev_target)
-        out_shape = field_np.shape[:-1] + (n_target,)
-        result = np.empty(out_shape, dtype=np.float64)
 
-        for k in range(n_target):
-            log_pt = log_plev[k]
-            # searchsorted on the last axis of log_p_model
-            # p_model is ascending (sigma is ascending: top→bottom)
-            idx_hi = np.searchsorted(
-                sigma, plev_target[k] / np.maximum(p_s_np, 1e-10),
-            )
-            idx_hi = np.clip(idx_hi, 1, len(sigma) - 1)
-            idx_lo = idx_hi - 1
+        # target_sigma shape: (..., n_target).  ``sigma`` is the ascending
+        # 1-D array of model layer-mid sigmas; for each cell we want the
+        # model-level index whose sigma first exceeds the target.
+        target_sigma = (
+            plev_target.reshape((1,) * p_s_np.ndim + (n_target,))
+            / np.maximum(p_s_np[..., None], 1e-10)
+        )
+        idx_hi = np.searchsorted(sigma, target_sigma)
+        idx_hi = np.clip(idx_hi, 1, len(sigma) - 1)
+        idx_lo = idx_hi - 1
 
-            # Gather bracket values using advanced indexing
-            flat_shape = field_np.shape[:-1]
-            f_lo = np.take_along_axis(field_np, idx_lo[..., None], axis=-1)[..., 0]
-            f_hi = np.take_along_axis(field_np, idx_hi[..., None], axis=-1)[..., 0]
-            lp_lo = np.take_along_axis(log_p_model, idx_lo[..., None], axis=-1)[..., 0]
-            lp_hi = np.take_along_axis(log_p_model, idx_hi[..., None], axis=-1)[..., 0]
+        f_lo = np.take_along_axis(field_np, idx_lo, axis=-1)
+        f_hi = np.take_along_axis(field_np, idx_hi, axis=-1)
+        lp_lo = np.take_along_axis(log_p_model, idx_lo, axis=-1)
+        lp_hi = np.take_along_axis(log_p_model, idx_hi, axis=-1)
 
-            denom = lp_hi - lp_lo
-            denom = np.where(denom == 0.0, 1.0, denom)
-            alpha = np.clip((log_pt - lp_lo) / denom, 0.0, 1.0)
-            result[..., k] = f_lo + alpha * (f_hi - f_lo)
-
-        return result
+        log_pt = log_plev.reshape((1,) * p_s_np.ndim + (n_target,))
+        denom = np.where(lp_hi == lp_lo, 1.0, lp_hi - lp_lo)
+        alpha = np.clip((log_pt - lp_lo) / denom, 0.0, 1.0)
+        return f_lo + alpha * (f_hi - f_lo)
 
     def collect(
         self,
@@ -425,24 +496,44 @@ class DiagnosticCollector:
         lat_deg_grid : array, optional
             Latitude in degrees for monthly means.
         """
-        from legoesm.forcing.surface_utils import blend_surface_temperature
-
-        mean_sst = float(jnp.mean(sst))
-        mean_sic = float(jnp.mean(sic))
-        mean_T = float(jnp.mean(state.T.data))
-        mean_T_low = float(jnp.mean(state.T.data[..., -1]))
+        # Fuse 12 diagnostic reductions into one ``jnp.stack`` +
+        # ``np.asarray`` host transfer.  Each ``float(jnp.X(...))``
+        # was previously its own device→host sync, serialising the
+        # GPU pipeline at every diagnostic interval.  The model step
+        # following ``collect()`` cannot launch until all 12 have
+        # round-tripped — fusing them collapses the stall to one.
         if hasattr(state, 'v'):
-            max_v = float(jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2)))
+            wind_term = jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2))
         else:
-            max_v = float(jnp.max(jnp.abs(state.u.data)))
-        mean_precip = float(jnp.mean(precip_total)) * 86400.0
+            wind_term = jnp.max(jnp.abs(state.u.data))
         cwv = column_water_vapor(q_v, state.p_s.data, self.dsigma)
-        mean_cwv = float(jnp.mean(cwv))
-        mean_sw_toa = float(jnp.mean(sw_up_toa))
-        mean_lw_toa = float(jnp.mean(lw_up_toa))
-        mean_ps = float(jnp.mean(state.p_s.data))
-        mean_sw_sfc = float(jnp.mean(sw_net_sfc))
-        mean_lw_sfc = float(jnp.mean(lw_net_sfc))
+        _stats = jnp.stack([
+            jnp.mean(sst),
+            jnp.mean(sic),
+            jnp.mean(state.T.data),
+            jnp.mean(state.T.data[..., -1]),
+            wind_term,
+            jnp.mean(precip_total),
+            jnp.mean(cwv),
+            jnp.mean(sw_up_toa),
+            jnp.mean(lw_up_toa),
+            jnp.mean(state.p_s.data),
+            jnp.mean(sw_net_sfc),
+            jnp.mean(lw_net_sfc),
+        ])
+        _stats_host = np.asarray(_stats)
+        mean_sst = float(_stats_host[0])
+        mean_sic = float(_stats_host[1])
+        mean_T = float(_stats_host[2])
+        mean_T_low = float(_stats_host[3])
+        max_v = float(_stats_host[4])
+        mean_precip = float(_stats_host[5]) * 86400.0
+        mean_cwv = float(_stats_host[6])
+        mean_sw_toa = float(_stats_host[7])
+        mean_lw_toa = float(_stats_host[8])
+        mean_ps = float(_stats_host[9])
+        mean_sw_sfc = float(_stats_host[10])
+        mean_lw_sfc = float(_stats_host[11])
 
         self.times.append(elapsed_day)
         self.sst.append(mean_sst)
@@ -461,24 +552,30 @@ class DiagnosticCollector:
         # Mean over all spatial axes except the last (vertical).
         # Cubed-sphere: (6,n,n,nlev) → mean over (0,1,2) → (nlev,)
         # Lat-lon:      (nlat,nlon,nlev) → mean over (0,1) → (nlev,)
+        # Stacked into one ``np.asarray`` host transfer (same dtype as
+        # T) so the two profile means share a single device→host sync.
         spatial_axes = tuple(range(state.T.data.ndim - 1))
-        self.profiles_T.append(
-            np.asarray(jnp.mean(state.T.data, axis=spatial_axes))
-        )
-        self.profiles_qv.append(
-            np.asarray(jnp.mean(q_v, axis=spatial_axes)) * 1000.0
-        )
+        _profiles_host = np.asarray(jnp.stack([
+            jnp.mean(state.T.data, axis=spatial_axes),
+            jnp.mean(q_v, axis=spatial_axes).astype(state.T.data.dtype),
+        ]))
+        self.profiles_T.append(_profiles_host[0])
+        self.profiles_qv.append(_profiles_host[1] * 1000.0)
 
         # Snapshots
         iday = int(round(elapsed_day))
         if iday in self.snapshot_days:
             T_sfc_snap = blend_surface_temperature(sst, sic, T_ice)
+            q_c_low = np.asarray(jnp.zeros_like(q_v[..., -1]) if q_c is None else q_c[..., -1]) * 1000.0
+            q_r_low = np.asarray(jnp.zeros_like(q_v[..., -1]) if q_r is None else q_r[..., -1]) * 1000.0
             self.snapshots[iday] = {
                 'SST': np.asarray(sst),
                 'SIC': np.asarray(sic),
                 'T_sfc': np.asarray(T_sfc_snap),
                 'T_low': np.asarray(state.T.data[..., -1]),
                 'q_v_low': np.asarray(q_v[..., -1]) * 1000.0,
+                'q_c_low': q_c_low,
+                'q_r_low': q_r_low,
                 'precip': np.asarray(precip_total) * 86400.0,
                 'wind': np.asarray(
                     jnp.sqrt(state.u.data[..., -1] ** 2 + state.v.data[..., -1] ** 2)
@@ -636,6 +733,24 @@ class DiagnosticCollector:
             if fields_3d:
                 self._spatial_monthly.add_3d(doy, year, fields_3d)
 
+            # Daily accumulation (CMIP6 ``day`` table).  Reuses the 2-D
+            # regridded fields computed above, plus 850 hPa winds sliced
+            # out of the already-regridded 3-D ua/va arrays.
+            if self._spatial_daily is not None:
+                daily_2d: dict[str, np.ndarray] = {}
+                for _name in ("tas", "pr", "psl"):
+                    if _name in fields_2d:
+                        daily_2d[_name] = fields_2d[_name]
+                # 850 hPa is index 16 in the ascending-sorted PLEV19 axis
+                # (same sort order used by ``_interp_to_plev19``).
+                _plev_sorted = np.sort(CMIP6_PLEV19)
+                _idx850 = int(np.argmin(np.abs(_plev_sorted - 85000.0)))
+                for _src, _dst in (("ua", "ua850"), ("va", "va850")):
+                    if _src in fields_3d and fields_3d[_src].shape[2] > _idx850:
+                        daily_2d[_dst] = fields_3d[_src][:, :, _idx850]
+                if daily_2d:
+                    self._spatial_daily.add_2d(doy, year, daily_2d)
+
         return {
             'mean_sst': mean_sst,
             'mean_sic': mean_sic,
@@ -676,22 +791,43 @@ class DiagnosticCollector:
 
         Returns the same dict keys as ``collect`` for logging compatibility.
         """
-        mean_sst = float(jnp.mean(sst))
-        mean_sic = float(jnp.mean(sic))
-        mean_T = float(jnp.mean(state.T.data))
-        mean_T_low = float(jnp.mean(state.T.data[..., -1]))
+        # Fuse the 12 reductions into one ``jnp.stack`` + ``np.asarray``
+        # device→host transfer.  The "minimal" docstring promised low
+        # overhead, but the previous per-scalar ``float(...)`` chain
+        # serialised 12 GPU stalls per diagnostic step — exactly the
+        # sin the long ``collect`` path was already corrected for.
         if hasattr(state, 'v'):
-            max_v = float(jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2)))
+            wind_term = jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2))
         else:
-            max_v = float(jnp.max(jnp.abs(state.u.data)))
-        mean_precip = float(jnp.mean(precip_total)) * 86400.0
+            wind_term = jnp.max(jnp.abs(state.u.data))
         cwv = column_water_vapor(q_v, state.p_s.data, self.dsigma)
-        mean_cwv = float(jnp.mean(cwv))
-        mean_sw_toa = float(jnp.mean(sw_up_toa))
-        mean_lw_toa = float(jnp.mean(lw_up_toa))
-        mean_ps = float(jnp.mean(state.p_s.data))
-        mean_sw_sfc = float(jnp.mean(sw_net_sfc))
-        mean_lw_sfc = float(jnp.mean(lw_net_sfc))
+        _stats = jnp.stack([
+            jnp.mean(sst),
+            jnp.mean(sic),
+            jnp.mean(state.T.data),
+            jnp.mean(state.T.data[..., -1]),
+            wind_term,
+            jnp.mean(precip_total),
+            jnp.mean(cwv),
+            jnp.mean(sw_up_toa),
+            jnp.mean(lw_up_toa),
+            jnp.mean(state.p_s.data),
+            jnp.mean(sw_net_sfc),
+            jnp.mean(lw_net_sfc),
+        ])
+        _h = np.asarray(_stats)
+        mean_sst = float(_h[0])
+        mean_sic = float(_h[1])
+        mean_T = float(_h[2])
+        mean_T_low = float(_h[3])
+        max_v = float(_h[4])
+        mean_precip = float(_h[5]) * 86400.0
+        mean_cwv = float(_h[6])
+        mean_sw_toa = float(_h[7])
+        mean_lw_toa = float(_h[8])
+        mean_ps = float(_h[9])
+        mean_sw_sfc = float(_h[10])
+        mean_lw_sfc = float(_h[11])
 
         # Append to time-series (same as collect, for continuity).
         self.times.append(elapsed_day)
@@ -803,10 +939,8 @@ class DiagnosticCollector:
         if self._spatial_monthly is None or self.cf_writer is None:
             return
 
-        from legoesm.forcing.time_utils import day_to_calendar
         doy, _ = day_to_calendar(current_day)
         current_year = int(current_day // 365.0)
-        from legoesm.diagnostics.monthly_means import MonthlyAccumulator
         current_month = MonthlyAccumulator.day_to_month(doy)
 
         data = self._spatial_monthly.pop_completed_months(
@@ -867,6 +1001,8 @@ class DiagnosticCollector:
 
         if self.cf_writer is not None:
             self._write_cmip_monthly_files()
+            self._write_cmip_daily_files()
+            self._write_cmip_fixed_files()
             self.cf_writer.close()
 
     def _write_cmip_monthly_files(self) -> None:
@@ -878,6 +1014,93 @@ class DiagnosticCollector:
             return
         data = self._spatial_monthly.finalize()
         self._write_cmip_data(data)
+
+    def _cmip_target_latlon(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return (lat, lon) 1-D arrays for the CMIP target grid."""
+        dlat = 180.0 / self._cmip_nlat
+        dlon = 360.0 / self._cmip_nlon
+        lat = np.linspace(
+            -90.0 + dlat / 2, 90.0 - dlat / 2, self._cmip_nlat,
+        )
+        lon = np.linspace(
+            dlon / 2, 360.0 - dlon / 2, self._cmip_nlon,
+        )
+        return lat, lon
+
+    def _write_cmip_daily_files(self) -> None:
+        """Flush the daily accumulator to CMIP6 ``day`` NetCDF files."""
+        if self._spatial_daily is None or self.cf_writer is None:
+            return
+        data = self._spatial_daily.finalize()
+        if not data.get("days"):
+            return
+        lat, lon = self._cmip_target_latlon()
+        self.cf_writer.write_daily(data, lat=lat, lon=lon)
+
+    def _write_cmip_fixed_files(self) -> None:
+        """Write the CMIP6 ``fx`` file (orog / sftlf / areacella).
+
+        ``areacella`` is always computed from the CMIP target lat-lon
+        grid (cosine-latitude weights on Earth's radius).  ``orog`` and
+        ``sftlf`` are written only when ``set_fixed_fields`` supplied
+        the source data.
+        """
+        if self.cf_writer is None:
+            return
+        if getattr(self, "_cmip_nlat", None) is None:
+            return
+
+        from legoesm import constants as _c
+
+        lat, lon = self._cmip_target_latlon()
+
+        # areacella: cell area on the target grid [m^2].  Using exact
+        # sin-latitude differences (not small-angle approx) keeps total
+        # surface area equal to 4 π R^2 to machine precision.
+        lat_edges_deg = np.linspace(-90.0, 90.0, self._cmip_nlat + 1)
+        sin_edges = np.sin(np.radians(lat_edges_deg))
+        band_area_frac = sin_edges[1:] - sin_edges[:-1]  # (nlat,)
+        dlon_rad = 2.0 * np.pi / self._cmip_nlon
+        R = float(_c.R_earth)
+        area_lat = (R ** 2) * band_area_frac * dlon_rad  # (nlat,)
+        areacella = np.broadcast_to(
+            area_lat[:, None], (self._cmip_nlat, self._cmip_nlon),
+        ).astype(np.float64)
+        try:
+            self.cf_writer.write_fixed(
+                var_name="areacella",
+                data=areacella, lat=lat, lon=lon,
+            )
+        except (KeyError, ValueError):
+            pass
+
+        # orog: surface altitude = phis / g
+        if self._fixed_phis is not None:
+            orog_native = np.asarray(self._fixed_phis) / float(_c.g)
+            orog = self._regrid_to_latlon_2d(orog_native)
+            if orog is not None:
+                try:
+                    self.cf_writer.write_fixed(
+                        var_name="orog",
+                        data=orog, lat=lat, lon=lon,
+                    )
+                except (KeyError, ValueError):
+                    pass
+
+        # sftlf: land area fraction in %.  Clipped to [0, 100] to guard
+        # against small negative overshoots from bilinear regridding.
+        if self._fixed_land_fraction is not None:
+            lf_native = np.asarray(self._fixed_land_fraction)
+            sftlf = self._regrid_to_latlon_2d(lf_native)
+            if sftlf is not None:
+                sftlf = np.clip(sftlf * 100.0, 0.0, 100.0)
+                try:
+                    self.cf_writer.write_fixed(
+                        var_name="sftlf",
+                        data=sftlf, lat=lat, lon=lon,
+                    )
+                except (KeyError, ValueError):
+                    pass
 
     def _write_cmip_data(self, data: dict) -> None:
         """Write a batch of CMIP monthly data to NetCDF files.
@@ -898,12 +1121,13 @@ class DiagnosticCollector:
         lon = np.linspace(dlon / 2, 360.0 - dlon / 2, self._cmip_nlon)
 
         month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-        start_year = self._cmip_start_year
 
-        from legoesm.io.cmor_output import CMIP6_PLEV19
-
+        # ``yr`` here is the 0-based run-relative calendar year (not the
+        # absolute calendar year) because the CFWriter's ``ref_date`` is
+        # ``<start_year>-01-01``, so time values must start from zero at
+        # the first simulation month.
         for i, (yr, mo) in enumerate(months):
-            year_offset = (start_year - 1 + yr) * 365.0
+            year_offset = yr * 365.0
             day_start = year_offset + sum(month_days[:mo - 1])
             day_end = day_start + month_days[mo - 1]
             time_mid = 0.5 * (day_start + day_end)
@@ -966,20 +1190,41 @@ class DiagnosticCollector:
         str or None
             Error message if blow-up detected, None if stable.
         """
-        if not jnp.all(jnp.isfinite(state.u.data)):
-            return f"BLOWUP at day {elapsed_day:.0f}: non-finite winds"
+        # Fuse all device→host syncs into one ``jnp.stack`` so the
+        # blowup probe (called every diagnostic interval inside the
+        # integration loop) costs one GPU stall per call instead of
+        # 6-7.  The boolean ``isfinite`` checks on u and T are folded
+        # into the same stack as 0/1 floats.
         if hasattr(state, 'v'):
-            max_v = float(jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2)))
+            wind_term = jnp.max(jnp.sqrt(state.u.data ** 2 + state.v.data ** 2))
         else:
-            max_v = float(jnp.max(jnp.abs(state.u.data)))
+            wind_term = jnp.max(jnp.abs(state.u.data))
+        has_p_s = hasattr(state, 'p_s')
+        terms = [
+            jnp.all(jnp.isfinite(state.u.data)).astype(state.T.data.dtype),
+            jnp.all(jnp.isfinite(state.T.data)).astype(state.T.data.dtype),
+            wind_term.astype(state.T.data.dtype),
+            jnp.min(state.T.data).astype(state.T.data.dtype),
+            jnp.max(state.T.data).astype(state.T.data.dtype),
+        ]
+        if has_p_s:
+            terms.append(jnp.min(state.p_s.data).astype(state.T.data.dtype))
+            terms.append(jnp.max(state.p_s.data).astype(state.T.data.dtype))
+        host = np.asarray(jnp.stack(terms))
+        u_finite = bool(host[0] > 0.5)
+        T_finite = bool(host[1] > 0.5)
+        max_v = float(host[2])
+        T_min_val = float(host[3])
+        T_max_val = float(host[4])
+
+        if not u_finite:
+            return f"BLOWUP at day {elapsed_day:.0f}: non-finite winds"
         if max_v > 500:
             return f"BLOWUP at day {elapsed_day:.0f}: max wind {max_v:.1f} m/s"
-        if not jnp.all(jnp.isfinite(state.T.data)):
+        if not T_finite:
             return f"BLOWUP at day {elapsed_day:.0f}: non-finite T"
 
         # Temperature bounds (physical range for Earth atmosphere)
-        T_min_val = float(jnp.min(state.T.data))
-        T_max_val = float(jnp.max(state.T.data))
         if T_min_val < 100.0 or T_max_val > 400.0:
             return (
                 f"BLOWUP at day {elapsed_day:.0f}: temperature out of physical bounds "
@@ -988,9 +1233,9 @@ class DiagnosticCollector:
             )
 
         # Surface pressure bounds
-        if hasattr(state, 'p_s'):
-            ps_min = float(jnp.min(state.p_s.data))
-            ps_max = float(jnp.max(state.p_s.data))
+        if has_p_s:
+            ps_min = float(host[5])
+            ps_max = float(host[6])
             if ps_min < 40000.0 or ps_max > 115000.0:
                 return (
                     f"BLOWUP at day {elapsed_day:.0f}: surface pressure out of bounds "

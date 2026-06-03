@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import jax
 import numpy as np
 
 from legoesm.forcing.amip_config import (
@@ -126,23 +127,25 @@ def save_checkpoint_zarr(
 
     root = zarr.open_group(str(path), mode="w")
 
-    # State arrays
-    arrays = {
-        "T": np.asarray(state.T.data),
-        "u": np.asarray(state.u.data),
-        "v": np.asarray(state.v.data),
-        "p_s": np.asarray(state.p_s.data),
-        "phis": np.asarray(state.phis.data),
-        "q_v": np.asarray(q_v),
-    }
+    # Pull all state arrays in a single ``jax.device_get`` call so the
+    # JAX runtime can pipeline the device→host transfers in parallel.
+    # The previous per-leaf ``np.asarray(...)`` chain forced the
+    # transfers to serialize, blocking the GPU pipeline at every
+    # checkpoint cadence.
+    _names = ["T", "u", "v", "p_s", "phis", "q_v"]
+    _values = [
+        state.T.data, state.u.data, state.v.data,
+        state.p_s.data, state.phis.data, q_v,
+    ]
     if q_c is not None:
-        arrays["q_c"] = np.asarray(q_c)
+        _names.append("q_c"); _values.append(q_c)
     if q_r is not None:
-        arrays["q_r"] = np.asarray(q_r)
-
+        _names.append("q_r"); _values.append(q_r)
     if diag_accumulators:
         for k, v in diag_accumulators.items():
-            arrays[f"diag_{k}"] = np.asarray(v)
+            _names.append(f"diag_{k}"); _values.append(v)
+    _host = jax.device_get(_values)
+    arrays = {name: np.asarray(val) for name, val in zip(_names, _host)}
 
     for name, arr in arrays.items():
         kwargs = dict(

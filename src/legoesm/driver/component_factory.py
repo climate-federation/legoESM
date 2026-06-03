@@ -60,17 +60,28 @@ _DRIVER_SUPPORTED: dict[tuple[str, str, str], str] = {
     ("hydrostatic",   "spectral",       "gaussian"):     "spectral_primitive_equations",
     ("nonhydrostatic","spectral",       "gaussian"):     "spectral_compressible_euler",
 
-    # --- Lat-lon finite-volume ---
-    ("shallow_water", "finite_volume",  "latlon"):       "fv_shallow_water_latlon",
-    ("hydrostatic",   "finite_volume",  "latlon"):       "fv_primitive_equations_latlon",
-    ("nonhydrostatic","finite_volume",  "latlon"):       "fv_compressible_euler_latlon",
-    ("shallow_water", "centered",       "latlon"):       "fv_shallow_water_latlon",
-    ("hydrostatic",   "centered",       "latlon"):       "fv_primitive_equations_latlon",
-    ("nonhydrostatic","centered",       "latlon"):       "fv_compressible_euler_latlon",
+    # --- Lat-lon C-grid ---
+    ("shallow_water", "finite_volume",  "latlon"):       "latlon_cgrid_shallow_water",
+    ("hydrostatic",   "finite_volume",  "latlon"):       "latlon_cgrid_primitive_equations",
+    ("shallow_water", "centered",       "latlon"):       "latlon_cgrid_shallow_water",
+    ("hydrostatic",   "centered",       "latlon"):       "latlon_cgrid_primitive_equations",
+    ("shallow_water", "latlon_cgrid",   "latlon"):       "latlon_cgrid_shallow_water",
+    ("hydrostatic",   "latlon_cgrid",   "latlon"):       "latlon_cgrid_primitive_equations",
 
-    # --- MPAS icosahedral ---
-    ("hydrostatic",   "mpas",           "voronoi"):      "mpas_primitive_equations",
-    ("nonhydrostatic","mpas",           "voronoi"):      "mpas_compressible_euler",
+    # --- MPAS / SCVT Voronoi mesh + TRiSK discretization
+    # (Ringler 2010, Thuburn 2009).  Canonical grid_type = "mpas"
+    # (matching the ocean side); legacy aliases voronoi /
+    # icosahedral / mpas_voronoi are normalised at the config
+    # boundary via driver.config.normalize_grid_type. ---
+    ("hydrostatic",   "mpas",           "mpas"):        "mpas_primitive_equations",
+    ("nonhydrostatic","mpas",           "mpas"):        "mpas_compressible_euler",
+
+    # --- Doubly-periodic plane (CRM rollout, PR2c) ---
+    # Plane only supports the non-hydrostatic compressible Euler dycore.
+    # All other (model_type, plane) combinations fall through to
+    # ``_fail_unsupported`` so users see a clear error pointing at the
+    # PR2c roadmap rather than a quiet construction crash.
+    ("nonhydrostatic","plane",          "plane"):        "plane_compressible_euler",
 
     # --- SFNO data-driven ---
     ("shallow_water", "sfno",           "cubed_sphere"): "sfno_shallow_water",
@@ -172,7 +183,14 @@ def create_atmosphere_dycore(
 
     model_type = dc.model_type
     discretization = dc.discretization
-    grid_type = gc.grid_type
+    # Defensive canonical-name normalization at the factory entry: callers
+    # that bypass run_amip's argparse postprocessor (direct test fixtures,
+    # ad-hoc scripts, older YAML loaders) might still pass ``voronoi`` /
+    # ``icosahedral`` / ``mpas_voronoi`` for the SCVT mesh.  The dispatch
+    # table below speaks only the canonical ``mpas`` so we normalise
+    # here too — the cost is one dict lookup.
+    from legoesm.driver.config import normalize_grid_type
+    grid_type = normalize_grid_type(gc.grid_type)
 
     key = (model_type, discretization, grid_type)
 
@@ -210,6 +228,12 @@ def create_atmosphere_dycore(
             div_damp_coeff=diff.div_damp,
             use_conservation_fixer=dc.conservation_fixer,
             fix_mass=dc.fix_mass,
+            # Issue #273 Phase 3: forward the implicit gravity-wave
+            # damping switches from the canonical driver config.
+            # Default off (both 0/False) keeps the explicit path
+            # bit-exact for existing call sites.
+            implicit_grav_wave_use_pcg=dc.implicit_grav_wave_use_pcg,
+            implicit_grav_wave_damping=dc.implicit_grav_wave_damping,
         )
         return CDGridPrimitiveEquationModel(grid, sigma, cfg)
 
@@ -285,6 +309,177 @@ def create_atmosphere_dycore(
     if solver_name == "mpas_compressible_euler":
         from legoesm.atmosphere.dynamics.compressible_euler_mpas import MPASCompressibleEulerModel
         return MPASCompressibleEulerModel(mesh=grid, sigma_coord=sigma)
+
+    # ----- Doubly-periodic plane -----
+    if solver_name == "plane_compressible_euler":
+        from legoesm.atmosphere.dynamics.compressible_euler import (
+            CompressibleEulerConfig,
+        )
+        from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+            PlaneCompressibleEulerModel,
+            make_flat_plane_terrain_metric,
+        )
+        # PR2c MVP: every plane setup is dry and uses flat terrain. The
+        # plane grid carries its own ``f_y`` (Coriolis) field built at
+        # ``create_plane_grid`` time; the driver does not override it.
+        # Build a flat terrain metric if the grid did not preattach one,
+        # and a default height coordinate if the driver did not pass a
+        # vertical coordinate that exposes ``z_full`` / ``z_half``.
+        height_coord = getattr(grid, "height_coord", None)
+        terrain_metric = getattr(grid, "terrain_metric", None)
+        if height_coord is None:
+            from legoesm.grids.vertical import create_height_coordinate
+            nlev = grid.nlev
+            # 30 km model top is the same default used by the
+            # cubed-sphere NH branch above.
+            height_coord = create_height_coordinate(nlev, H=30_000.0)
+        if terrain_metric is None:
+            terrain_metric = make_flat_plane_terrain_metric(grid, height_coord)
+        # PR2c keeps the driver path strict: hyperdiff / sponge knobs
+        # come from the dycore config but the plane dycore rejects
+        # them per ``validate_plane_config`` until PR3. The driver
+        # therefore constructs a minimal config that is safe for
+        # ``PR2c`` use; users wanting sponge enabled can construct
+        # ``PlaneCompressibleEulerModel`` directly with a custom
+        # ``CompressibleEulerConfig``.
+        cfg = CompressibleEulerConfig(
+            sponge_coeff=0.0,
+            hyperdiff_coeff=0.0,
+            hyperdiff_rho_coeff=0.0,
+            hyperdiff_w_coeff=0.0,
+            semi_implicit_acoustic=False,
+            use_coriolis=False,
+            fix_mass=dc.fix_mass,
+            anchor_mass_to_initial=dc.fix_mass,
+        )
+        return PlaneCompressibleEulerModel(grid, height_coord, terrain_metric, cfg)
+
+    # ----- Lat-lon C-grid solvers -----
+    if solver_name in ("latlon_cgrid_shallow_water",
+                       "latlon_cgrid_primitive_equations"):
+        # The lat-lon C-grid configs support A_h and fix_mass but not
+        # The lat-lon C-grid solver uses Laplacian viscosity (A_h) only —
+        # it has no biharmonic hyperdiffusion operator.  However, the
+        # driver still uses compute_diffusion().hyperdiff for moisture
+        # smoothing, so hyperdiff_scale is NOT rejected here.
+        #
+        # Divergence damping is not used anywhere on lat-lon, so values
+        # > 1.0 (requesting amplified damping) are rejected.
+        if dc.div_damp_scale > 1.0:
+            raise ValueError(
+                f"Lat-lon C-grid solver does not support divergence "
+                f"damping. div_damp_scale={dc.div_damp_scale} was "
+                f"requested but this mechanism is not implemented. "
+                f"Set div_damp_scale=1.0 (default) or 0.0 (disabled)."
+            )
+
+        # Honor conservation_fixer: when explicitly False, disable fix_mass
+        # even if dc.fix_mass is True.
+        _fix_mass = dc.fix_mass
+        if dc.conservation_fixer is False:
+            _fix_mass = False
+            if dc.fix_mass:
+                logger.info(
+                    "Lat-lon C-grid solver: conservation_fixer=False "
+                    "overrides fix_mass=True → mass fixer disabled",
+                )
+
+        # ---- Pole-cell CFL safeguards ----
+        # The explicit C-grid solver on a lat-lon grid has its smallest
+        # cell at the poles: dx_pole = R * dlon * cos(π/2 - dlat/2).
+        # Both the advective CFL (dt < dx / c_grav) and the diffusive
+        # CFL (A_h < 0.4 * dx² / dt) must be satisfied there.
+        #
+        # Stage 3-E: when ``dc.use_polar_filter`` is True, the Fourier
+        # polar filter truncates Fourier modes in longitude that would
+        # violate CFL at high latitudes, so the dynamics is stable at
+        # ``dt`` set by the equatorial CFL instead of the pole CFL.
+        # ``dx_equator`` = R * dlon ≫ dx_pole at all but the lowest
+        # resolutions, so this typically lifts the clamp by ~100x at
+        # n_lat=180 and ~10x at n_lat=90 — enough to make a 100-y AMIP
+        # at 1° feasible within a chained 72-h SLURM budget.
+        from legoesm.core.cfl import (
+            pole_cell_dx, cfl_max_dt, max_laplacian_viscosity,
+        )
+        dx_pole = pole_cell_dx(grid)
+        c_grav = 300.0  # gravity wave speed [m/s]
+        dt_max_advective_pole = cfl_max_dt(
+            dx_pole, c_grav, cfl_number=0.8, ndim=1,
+        )
+        _effective_dt = dc.dt
+
+        if getattr(dc, "use_polar_filter", False):
+            # Filter on → equatorial CFL is the effective limit.
+            # dx_equator = R * dlon = circumference / n_lon.
+            import math as _math
+            dx_equator = float(2.0 * _math.pi * grid.radius / grid.n_lon)
+            dt_max_advective = cfl_max_dt(
+                dx_equator, c_grav, cfl_number=0.8, ndim=1,
+            )
+            dx_for_diffusion = dx_equator
+            _clamp_dx_label = "equatorial"
+        else:
+            dt_max_advective = dt_max_advective_pole
+            dx_for_diffusion = dx_pole
+            _clamp_dx_label = "pole-cell"
+
+        if _effective_dt > dt_max_advective:
+            logger.warning(
+                "Lat-lon C-grid: dt=%.1f s exceeds %s advective "
+                "CFL limit (%.1f s); clamping to %.1f s. "
+                "Set dycore.dt <= %.1f for this grid.",
+                _effective_dt, _clamp_dx_label, dt_max_advective,
+                dt_max_advective, dt_max_advective,
+            )
+            _effective_dt = dt_max_advective
+
+        A_h_max = max_laplacian_viscosity(dx_for_diffusion, _effective_dt)
+        _A_h = min(diff.A_h, A_h_max)
+        if diff.A_h > A_h_max:
+            logger.warning(
+                "Lat-lon C-grid: A_h=%.2e exceeds %s diffusive "
+                "CFL limit (%.2e); clamping.",
+                diff.A_h, _clamp_dx_label, A_h_max,
+            )
+
+    if solver_name == "latlon_cgrid_shallow_water":
+        from legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid import (
+            CGridLatLonShallowWaterModel, CGridLatLonShallowWaterConfig,
+        )
+        cfg = CGridLatLonShallowWaterConfig(
+            A_h=_A_h,
+            fix_mass=_fix_mass,
+        )
+        model = CGridLatLonShallowWaterModel(grid, cfg, dt=_effective_dt)
+        model.effective_dt = _effective_dt
+        return model
+
+    if solver_name == "latlon_cgrid_primitive_equations":
+        from legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid import (
+            CGridLatLonPrimitiveEquationModel, CGridLatLonPrimitiveEquationConfig,
+        )
+        cfg = CGridLatLonPrimitiveEquationConfig(
+            A_h=_A_h,
+            fix_mass=_fix_mass,
+            # Stage 3-E: pass polar-filter parameters through.  When
+            # use_polar_filter is False (default) the model's filter
+            # mask is None and no FFT is applied — bit-identical to
+            # pre-Stage-3-E behaviour.
+            use_polar_filter=getattr(dc, "use_polar_filter", False),
+            polar_filter_cutoff_deg=getattr(
+                dc, "polar_filter_cutoff_deg", 60.0,
+            ),
+            polar_filter_max_wave_speed=getattr(
+                dc, "polar_filter_max_wave_speed", 300.0,
+            ),
+            # Task #25: time integrator (default ssp_rk3, opt into
+            # ssp_rk3_scan for ~1.5× JIT compile speedup at scale).
+            time_integrator=getattr(dc, "time_integrator", "ssp_rk3"),
+        )
+        model = CGridLatLonPrimitiveEquationModel(
+            grid, sigma, cfg, dt=_effective_dt)
+        model.effective_dt = _effective_dt
+        return model
 
     # ----- SFNO data-driven -----
     if solver_name == "sfno_shallow_water":

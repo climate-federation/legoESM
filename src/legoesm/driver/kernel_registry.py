@@ -13,7 +13,9 @@ Public API
 RADIATION_REGISTRY : dict
     ``{"gray": ..., "rrtmgp": ...}``
 CONVECTION_REGISTRY : dict
-    ``{"sbm": ..., "dca": ..., "kuo": ..., "mass_flux": ..., "edmf": ...}``
+    ``{"sbm": ..., "dca": ..., "kuo": ..., "mass_flux": ..., "edmf": ...,
+       "zhang_mcfarlane": ..., "kain_fritsch": ..., "emanuel": ...,
+       "tiedtke": ..., "bechtold": ...}``
 MICROPHYSICS_REGISTRY : dict
     ``{"kessler": ..., "sundqvist": ..., "seifert_beheng": ...,
       "morrison": ..., "thompson": ...}``
@@ -71,8 +73,28 @@ CONVECTION_REGISTRY: dict[str, _Entry] = {
         "mass_flux_convection",
     ),
     "edmf": (
-        "legoesm.atmosphere.physics.convection.edmf",
+        "legoesm.atmosphere.physics.convection.mass_flux",
         "edmf_convection",
+    ),
+    "zhang_mcfarlane": (
+        "legoesm.atmosphere.physics.convection.zhang_mcfarlane",
+        "zhang_mcfarlane_convection",
+    ),
+    "kain_fritsch": (
+        "legoesm.atmosphere.physics.convection.kain_fritsch",
+        "kain_fritsch_convection",
+    ),
+    "emanuel": (
+        "legoesm.atmosphere.physics.convection.emanuel",
+        "emanuel_convection",
+    ),
+    "tiedtke": (
+        "legoesm.atmosphere.physics.convection.tiedtke",
+        "tiedtke_convection",
+    ),
+    "bechtold": (
+        "legoesm.atmosphere.physics.convection.bechtold",
+        "bechtold_convection",
     ),
 }
 

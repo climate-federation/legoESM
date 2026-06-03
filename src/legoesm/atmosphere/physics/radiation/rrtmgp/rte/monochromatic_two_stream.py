@@ -30,6 +30,7 @@ from typing import TypeAlias
 import jax
 import jax.numpy as jnp
 import numpy as np
+from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.radiation.rrtmgp import kernel_ops
 from legoesm.atmosphere.physics.radiation.rrtmgp.rte import rte_utils
 
@@ -77,8 +78,16 @@ def lw_combine_sources(planck_srcs: StatesMap) -> StatesMap:
   """
   planck_src_top = planck_srcs['planck_src_top']
   planck_src_bottom = planck_srcs['planck_src_bottom']
+  # AD-safe floor (restored from commit 59407953): ``maximum(x, 0.0)`` gives
+  # ``sqrt(0)`` which has ``1/sqrt(0) = inf`` in the backward VJP; combined
+  # with zero cotangents (e.g. from stop_gradient'd spinup carries) this
+  # produces ``0 * inf = NaN`` by mul.  Floor at ``_EPSILON`` (same
+  # convention as ``_k_fn``) so the VJP stays bounded at
+  # ``1/(2*sqrt(_EPSILON)) = O(500)``.  Floor is physically negligible:
+  # combined Planck source values are O(0.01-10) W/m²/sr, while
+  # ``sqrt(_EPSILON) = 1e-3``.
   combined_src_top = jnp.sqrt(jnp.maximum(
-      planck_src_top * _shift_down(planck_src_bottom), 0.0
+      planck_src_top * _shift_down(planck_src_bottom), _EPSILON
   ))
   combined_src_bottom = _shift_up(combined_src_top)
   return {
@@ -115,6 +124,15 @@ def _rt_denominator_direct(
   # Guard ssa against zero: clear-sky layers have ssa=0 and the direct
   # reflectance/transmittance is zero there (handled by downstream clipping).
   # Using safe_ssa keeps the denominator finite for reverse-mode AD.
+  #
+  # iter-30 codex-survivor audit kept the legacy ``max(ssa, _EPSILON)``
+  # form rather than swapping to ``safe_divide``: this function is
+  # called from ``_direct_reflectance`` / ``_direct_transmittance``
+  # which then divide BY this denominator, so a ``fill=0`` from
+  # safe_divide would turn the downstream divide into ``num/0 → inf``.
+  # The legacy "denominator → eps, downstream computes huge but
+  # bounded result, output clamping handles it" pattern is the
+  # correct flow here — see iter-30 commit message.
   safe_ssa = jnp.maximum(ssa, _EPSILON)
 
   # Equation 14, multiplying top and bottom by exp(-k*tau) and rearranging to
@@ -210,6 +228,7 @@ def lw_cell_source_and_properties(
     level_src_bottom: Array,
     level_src_top: Array,
     asymmetry_factor: Array,
+    lw_diffusive_factor: float | Array = _LW_DIFFUSIVE_FACTOR,
 ) -> StatesMap:
   """Compute the longwave two-stream reflectance, transmittance, and sources.
 
@@ -223,6 +242,13 @@ def lw_cell_source_and_properties(
     level_src_bottom: The Planck source at the bottom cell face [W / m^2 / sr].
     level_src_top: The Planck source at the top cell face [W / m^2 / sr].
     asymmetry_factor: The pointwise asymmetry factor.
+    lw_diffusive_factor: Secant of the diffusivity angle.  Scalar (e.g. the
+      Fu-Liou ``1.66`` default) or an ``Array`` broadcastable against the
+      ``(ncol, 1, nlev+2)`` shape of ``optical_depth``.  Upstream RRTMGP
+      computes a per-band, per-column value from a polynomial fit on the
+      column total optical depth (``compute_optimal_angles``); pass the
+      broadcast secant from ``solve_lw`` when the gas-optics file ships
+      ``optimal_angle_fit`` coefficients.
 
   Returns:
     A dictionary containing the following items:
@@ -238,9 +264,9 @@ def lw_cell_source_and_properties(
   optical_depth = jnp.maximum(optical_depth, 0.0)
 
   # The coefficient of the parallel irradiance in the 2-stream RTE.
-  gamma1 = _LW_DIFFUSIVE_FACTOR * (1 - 0.5 * ssa * (1 + asymmetry_factor))
+  gamma1 = lw_diffusive_factor * (1 - 0.5 * ssa * (1 + asymmetry_factor))
   # The coefficient of the antiparallel irradiance in the 2-stream RTE.
-  gamma2 = _LW_DIFFUSIVE_FACTOR * 0.5 * ssa * (1 - asymmetry_factor)
+  gamma2 = lw_diffusive_factor * 0.5 * ssa * (1 - asymmetry_factor)
 
   r_diff = _diffuse_reflectance(gamma1, gamma2, optical_depth)
   t_diff = _diffuse_transmittance(gamma1, gamma2, optical_depth)
@@ -249,6 +275,16 @@ def lw_cell_source_and_properties(
   # Taylor series expansion of the Planck function in terms of the optical
   # depth.  Guard denominator for AD: when tau→0 the source is masked anyway,
   # but jnp.where evaluates both branches so the division must stay finite.
+  #
+  # iter-30 audited swapping this to ``safe_divide`` for AD-safety but
+  # reverted: ``b_1`` flows into ``c_up_top/c_up_bottom`` via simple add,
+  # which downstream subtracts other quantities — replacing the legacy
+  # "denom→eps, num/eps = large but bounded" with ``safe_divide(fill=0)``
+  # silently breaks the LW source computation for cells where
+  # ``optical_depth * (gamma1+gamma2) < _EPSILON`` because the legacy
+  # large-b_1 form is what the downstream
+  # ``cell_center_src_fn(tau > _MIN_TAU_FOR_LW_SRC, src, 0.0)`` mask is
+  # designed to handle.
   safe_denom = jnp.maximum(optical_depth * (gamma1 + gamma2), _EPSILON)
   b_1 = (level_src_bottom - level_src_top) / safe_denom
 
@@ -375,7 +411,7 @@ def sw_cell_source(
     toa_flux: Array,
     sfc_albedo_direct: Array,
     zenith: float | Array,
-    use_scan: bool = False,
+    use_scan: bool | None = None,
 ) -> StatesMap:
   """Compute the monochromatic shortwave direct-beam flux and diffuse source.
 
@@ -453,7 +489,7 @@ def _solve_rte_2stream(
     toa_flux_down: Array,
     sfc_emission: Array,
     sfc_reflectance: Array,
-    use_scan: bool = False,
+    use_scan: bool | None = None,
 ) -> StatesMap:
   """Solves the monochromatic two-stream radiative transfer equation.
 
@@ -493,8 +529,17 @@ def _solve_rte_2stream(
   ) -> tuple[Array, Array]:
     """Recurrent formula for albedo solution, starting from the surface."""
     # Geometric series solution accounting for infinite reflection events.
-    # Clamp denominator away from zero for AD stability.
-    beta = 1 / jnp.maximum(1 - r_diff * albedo_below, _EPSILON)
+    # AD-safe denominator (restored from commit 59407953): ``1 /
+    # jnp.maximum(x, _EPSILON)`` has a ``-1/x**2`` VJP that overflows when
+    # ``x`` is at the floor, propagating NaN gradients into every upstream
+    # traced parameter whose state path touches the column optical depth
+    # (e.g. C_H/C_E via boundary-layer-driven T/q_v perturbations).
+    # ``safe_divide`` masks the bad branch before the divide so the
+    # backward never differentiates ``1/x`` at tiny ``x``.
+    denom = 1 - r_diff * albedo_below
+    beta = safe_divide(
+        jnp.ones_like(denom), denom, eps=_EPSILON, fill=1.0 / _EPSILON,
+    )
     out = r_diff + t_diff**2 * beta * albedo_below
     return out, out  # Carry and output are the same.
 
@@ -523,7 +568,11 @@ def _solve_rte_2stream(
   ) -> tuple[Array, Array]:
     """Recurrent formula for upward emission, starting from the surface."""
     # Geometric series solution accounting for infinite reflection events.
-    beta = 1 / jnp.maximum(1 - r_diff * albedo, _EPSILON)
+    # AD-safe denominator (see ``albedo_op`` above, restored from 59407953).
+    denom = 1 - r_diff * albedo
+    beta = safe_divide(
+        jnp.ones_like(denom), denom, eps=_EPSILON, fill=1.0 / _EPSILON,
+    )
     out = src_up + t_diff * beta * (emission_from_below + src_down * albedo)
     return out, out  # Carry and output are the same.
 
@@ -557,7 +606,11 @@ def _solve_rte_2stream(
   ) -> tuple[Array, Array]:
     """Recurrent formula for downwelling flux initiating at top boundar."""
     # Geometric series solution accounting for infinite reflection events.
-    beta = 1 / jnp.maximum(1 - r_diff * albedo, _EPSILON)
+    # AD-safe denominator (see ``albedo_op`` above, restored from 59407953).
+    denom = 1 - r_diff * albedo
+    beta = safe_divide(
+        jnp.ones_like(denom), denom, eps=_EPSILON, fill=1.0 / _EPSILON,
+    )
     out = (t_diff * flux_down_from_above + r_diff * emiss_up + src_down) * beta
     return out, out  # Carry and output are the same.
 
@@ -592,7 +645,7 @@ def lw_transport(
     toa_flux_down: Array,
     sfc_src: Array,
     sfc_emissivity: Array,
-    use_scan: bool = False,
+    use_scan: bool | None = None,
 ) -> StatesMap:
   """Compute the monochromatic longwave diffusive flux of the atmosphere.
 
@@ -645,7 +698,7 @@ def sw_transport(
     sfc_src: Array,
     sfc_albedo: Array,
     flux_down_dir: Array,
-    use_scan: bool = False,
+    use_scan: bool | None = None,
 ) -> StatesMap:
   """Compute the monochromatic shortwave fluxes in a layered atmosphere.
 

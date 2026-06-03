@@ -13,6 +13,10 @@ from legoesm.coupler.config import CouplerConfig
 from legoesm.coupler.coupling_fields import AtmToSurface
 from legoesm.core.state import HydrostaticState, NonHydrostaticState
 from legoesm.grids.vertical import SigmaCoordinate
+from legoesm.atmosphere.physics.thermodynamics import (
+    pressure_from_eos,
+    temperature_from_theta,
+)
 
 
 def extract_atm_to_surface(
@@ -56,6 +60,10 @@ def extract_atm_to_surface(
     T_lowest = state.T.data[..., -1]
     u_lowest = state.u.data[..., -1]
     v_lowest = state.v.data[..., -1]
+    # Pin defaulted allocations to the state precision so x64 zeros do
+    # not silently widen the AtmToSurface struct precision.  This is on
+    # the hot path: surface_exchange runs every coupling step.
+    _state_dtype = T_lowest.dtype
 
     # Humidity: extract from tracers if available; else assume dry.
     if state.tracers is not None and "q_v" in state.tracers:
@@ -63,13 +71,19 @@ def extract_atm_to_surface(
         _qv_data = _qv_raw.data if hasattr(_qv_raw, "data") else _qv_raw
         q_lowest = _qv_data[..., -1]
     else:
-        q_lowest = jnp.zeros(shape)
+        q_lowest = jnp.zeros(shape, dtype=_state_dtype)
 
-    # Air density from ideal gas law
-    rho_lowest = p_lowest / (constants.R_d * T_lowest)
+    # Air density from ideal gas law for moist air: ``p = ρ · R_d · T_v``
+    # where ``T_v = T · (1 + (1/ε − 1) · q_v)``.  The previous dry form
+    # ``ρ = p / (R_d · T)`` underestimated density by ~0.6 % in the
+    # tropics (q_v ~ 17 g/kg, T_v − T ~ 1.7 K), biasing bulk-flux
+    # surface stress and turbulent fluxes via every downstream caller
+    # that uses ``forcing.rho_lowest``.
+    T_v_lowest = T_lowest * (1.0 + (1.0 / constants.epsilon - 1.0) * q_lowest)
+    rho_lowest = p_lowest / (constants.R_d * T_v_lowest)
 
     # Default unavailable fields to zero with flags
-    zero = jnp.zeros(shape)
+    zero = jnp.zeros(shape, dtype=_state_dtype)
     has_rad = jnp.array(1.0) if sw_down is not None else jnp.array(0.0)
     has_precip = jnp.array(1.0) if precip_total is not None else jnp.array(0.0)
 
@@ -107,11 +121,6 @@ def extract_atm_to_surface_nh(
 
     Reads only the lowest model level (index -1) plus surface fields.
     """
-    from legoesm.atmosphere.physics.thermodynamics import (
-        pressure_from_eos,
-        temperature_from_theta,
-    )
-
     shape = state.phis.data.shape  # (6, n, n)
 
     # Lowest-level fields
@@ -130,9 +139,17 @@ def extract_atm_to_surface_nh(
     u_lowest = state.u.data[..., -1]
     v_lowest = state.v.data[..., -1]
 
-    # Humidity from tracers if available
-    has_tracers = state.tracers.data.shape[-1] > 0
-    q_lowest = jnp.where(has_tracers, state.tracers.data[..., -1, 0], 0.0)
+    # Humidity from tracers if available.  Use a Python ``if`` rather
+    # than ``jnp.where`` because the latter still traces both branches,
+    # and ``state.tracers.data[..., -1, 0]`` crashes at trace time when
+    # the n_tracers axis is empty (dry NH simulations have shape
+    # ``(..., nlev, 0)`` and indexing axis-0 position 0 is out of
+    # bounds).  Mirrors the hydrostatic branch's static-shape check
+    # (lines 69-74).
+    if state.tracers.data.shape[-1] > 0:
+        q_lowest = state.tracers.data[..., -1, 0]
+    else:
+        q_lowest = jnp.zeros_like(T_lowest)
 
     rho_lowest = rho_low
 
@@ -140,7 +157,8 @@ def extract_atm_to_surface_nh(
     dz_sfc = height_coord.z_half[-1] - height_coord.z_half[-2]
     p_surface = p_lowest + constants.g * rho_low * jnp.abs(dz_sfc) * 0.5
 
-    zero = jnp.zeros(shape)
+    # Pin to the state precision (T_lowest is derived from theta_prime + theta_0).
+    zero = jnp.zeros(shape, dtype=T_lowest.dtype)
     has_rad = jnp.array(1.0) if sw_down is not None else jnp.array(0.0)
     has_precip = jnp.array(1.0) if precip_total is not None else jnp.array(0.0)
 

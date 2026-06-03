@@ -9,10 +9,12 @@ import numpy as np
 from numpy.linalg import eig
 import pytest
 
-R_d = 287.05
-c_p = 1004.0
+from legoesm import constants
+
+R_d = constants.R_d
+c_p = constants.c_pd
 kappa = R_d / c_p
-a = 6.371e6
+a = constants.R_earth
 
 
 def analyze_pe(nlev, sigma_top, T_ref=300.0, n_waves=[1, 5, 10, 21, 42]):

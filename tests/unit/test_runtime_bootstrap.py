@@ -400,7 +400,12 @@ class TestLegacyCompat:
 
     def test_legacy_unsupported_f64_constant(self):
         from legoesm.core.hardware import _UNSUPPORTED_F64_BACKENDS
-        assert "METAL" in _UNSUPPORTED_F64_BACKENDS
+        # The canonical constant stores backend names in lowercase
+        # (matching `runtime.backend._NO_F64_BACKENDS`).  Call sites
+        # always compare with `backend.lower()` before membership
+        # (see hardware.py line 86).  Earlier version of this test
+        # asserted `"METAL"` (uppercase), which is stale.
+        assert "metal" in _UNSUPPORTED_F64_BACKENDS
 
     def test_legacy_parse_precision_dtype(self):
         from legoesm.core.hardware import _parse_precision_dtype
@@ -520,3 +525,58 @@ class TestSpectralBackendGuard:
                 check_spectral_backend(allow_unsupported=True)
         finally:
             jax.config.update("jax_enable_x64", original)
+
+
+class TestCubedSphereLevelFallbackBootstrap:
+    """Codex adversarial review 019e544b (issue #273): the
+    ``allow_level_fallback`` flag added in ``d0deac3d`` was unreachable
+    from the canonical ``runtime.bootstrap`` path.  These tests pin the
+    end-to-end opt-in contract so the 4-GPU unblock is actually
+    routable from production startup."""
+
+    def test_default_bootstrap_keeps_face_path(self):
+        """Default bootstrap on a cubed-sphere grid lands on the
+        face-sharding path (``grid_type='cubed_sphere'``), not the
+        level fallback.  On a single-device host this is the trivial
+        ``n_devices=1`` path; the assertion still proves the default
+        does not silently switch to the level mesh."""
+        from legoesm.runtime.config import bootstrap
+        rc = bootstrap(precision="fp32", grid_type="cubed_sphere")
+        assert rc.device_config.grid_type == "cubed_sphere"
+
+    def test_explicit_4_devices_with_fallback_takes_level_path(self):
+        """Bootstrap with ``allow_level_fallback=True`` and an explicit
+        ``n_devices=4`` must route to ``cubed_sphere_level``.  Skipped
+        unless the test host has ≥4 emulated devices.  To exercise
+        locally:
+
+            XLA_FLAGS="--xla_force_host_platform_device_count=4" \\
+              JAX_PLATFORMS=cpu pytest tests/unit/test_runtime_bootstrap.py
+        """
+        if len(jax.devices()) < 4:
+            pytest.skip("needs ≥4 emulated devices")
+        from legoesm.runtime.config import bootstrap
+        rc = bootstrap(
+            precision="fp32",
+            grid_type="cubed_sphere",
+            n_devices=4,
+            allow_level_fallback=True,
+        )
+        assert rc.device_config.grid_type == "cubed_sphere_level"
+        assert rc.device_config.n_devices == 4
+
+    def test_explicit_4_devices_without_fallback_raises(self):
+        """Without the opt-in, ``n_devices=4`` on cubed-sphere must
+        raise — proves the face-divisibility constraint is still
+        enforced on the legacy path and the new fallback flag is the
+        only escape hatch."""
+        if len(jax.devices()) < 4:
+            pytest.skip("needs ≥4 emulated devices")
+        from legoesm.runtime.config import bootstrap
+        with pytest.raises((ValueError, RuntimeError)):
+            bootstrap(
+                precision="fp32",
+                grid_type="cubed_sphere",
+                n_devices=4,
+                allow_level_fallback=False,
+            )

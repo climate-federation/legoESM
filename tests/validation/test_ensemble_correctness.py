@@ -56,9 +56,40 @@ N_ENSEMBLE = 2 # number of ensemble members
 
 SHAPE_3D = (N_FACES, N, N, NLEV)
 SHAPE_2D = (N_FACES, N, N)
+_OPTIONAL_3D_OUTPUT_FIELDS = (
+    "du_dt",
+    "dv_dt",
+    "dq_i_dt",
+    "dq_s_dt",
+    "dq_g_dt",
+    "dN_c_dt",
+    "dN_r_dt",
+    "dN_i_dt",
+)
 
 # Build the cubed-sphere grid once (expensive to recreate per test).
 _GRID = create_cubed_sphere(N)
+
+
+def _zero_physics_output(T, p_s):
+    kwargs = dict(
+        dT_dt=jnp.zeros(T.shape),
+        dq_v_dt=jnp.zeros(T.shape),
+        dq_c_dt=jnp.zeros(T.shape),
+        dq_r_dt=jnp.zeros(T.shape),
+        precip=jnp.zeros(p_s.shape),
+        sw_net_sfc=jnp.zeros(p_s.shape),
+        lw_net_sfc=jnp.zeros(p_s.shape),
+        sw_up_toa=jnp.zeros(p_s.shape),
+        lw_up_toa=jnp.zeros(p_s.shape),
+        sw_down_toa=jnp.zeros(p_s.shape),
+    )
+    for field_name in _OPTIONAL_3D_OUTPUT_FIELDS:
+        if field_name in PhysicsOutput._fields:
+            kwargs[field_name] = jnp.zeros(T.shape)
+    if "conv_prog" in PhysicsOutput._fields:
+        kwargs["conv_prog"] = jnp.asarray(0.0, dtype=T.dtype)
+    return kwargs
 
 
 # ---------------------------------------------------------------------------
@@ -97,19 +128,9 @@ def _mock_step_unified(
 ):
     """Mock physics: small constant warming tendency, no moisture change."""
     shape_3d = T.shape
-    shape_2d = p_s.shape
-    phys_out = PhysicsOutput(
-        dT_dt=jnp.full(shape_3d, 1e-5),
-        dq_v_dt=jnp.zeros(shape_3d),
-        dq_c_dt=jnp.zeros(shape_3d),
-        dq_r_dt=jnp.zeros(shape_3d),
-        precip=jnp.zeros(shape_2d),
-        sw_net_sfc=jnp.zeros(shape_2d),
-        lw_net_sfc=jnp.zeros(shape_2d),
-        sw_up_toa=jnp.zeros(shape_2d),
-        lw_up_toa=jnp.zeros(shape_2d),
-        sw_down_toa=jnp.zeros(shape_2d),
-    )
+    kwargs = _zero_physics_output(T, p_s)
+    kwargs["dT_dt"] = jnp.full(shape_3d, 1e-5)
+    phys_out = PhysicsOutput(**kwargs)
     held_new = (
         held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
         held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
@@ -129,7 +150,7 @@ def _make_forcing() -> SegmentForcing:
         day_of_year=1.0,
         seconds_of_day=0.0,
         solar_weights=jnp.ones(14),
-        s_0=1361.0,
+        s_0=constants.S_0,
         o3_vmr=jnp.zeros(SHAPE_3D),
         aerosol_od=jnp.zeros(SHAPE_2D),
     )

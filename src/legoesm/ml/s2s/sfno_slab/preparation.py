@@ -9,6 +9,7 @@ from typing import Sequence
 import numpy as np
 import xarray as xr
 
+from legoesm import constants
 from legoesm.ml.s2s.sfno_slab.config import CHAOSBENCH_DATA_DIR
 from legoesm.ml.s2s.sfno_slab.regrid import build_target_grid, regrid_channels_to_gaussian
 
@@ -198,7 +199,7 @@ def _sst_to_forcing_units(values: np.ndarray) -> np.ndarray:
     values = np.asarray(values, dtype=np.float32)
     finite = values[np.isfinite(values)]
     if finite.size and float(np.nanmean(finite)) > 200.0:
-        return values - np.float32(273.15)
+        return values - np.float32(constants.T_freeze)
     return values
 
 

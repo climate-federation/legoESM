@@ -14,6 +14,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.ocean.eos import wright_eos, compute_hydrostatic_pressure
 from legoesm.ocean.vertical import (
@@ -219,19 +220,19 @@ class TestMPIAwareness:
     def test_conservation_uses_is_distributed(self):
         """Conservation fixers should use _is_distributed pattern."""
         import inspect
-        from legoesm.ocean.conservation import _ocean_area_sum, _ocean_global_sum
+        from legoesm.ocean.conservation import _ocean_area_sum, ocean_global_sum
 
         area_source = inspect.getsource(_ocean_area_sum)
-        assert "_ocean_global_sum" in area_source, (
-            "_ocean_area_sum should route reductions through _ocean_global_sum"
+        assert "ocean_global_sum" in area_source, (
+            "_ocean_area_sum should route reductions through ocean_global_sum"
         )
 
-        global_source = inspect.getsource(_ocean_global_sum)
+        global_source = inspect.getsource(ocean_global_sum)
         assert "_is_distributed" in global_source, (
-            "_ocean_global_sum must check _is_distributed for MPI"
+            "ocean_global_sum must check _is_distributed for MPI"
         )
         assert "global_sum_mpi" in global_source, (
-            "_ocean_global_sum must call global_sum_mpi for MPI allreduce"
+            "ocean_global_sum must call global_sum_mpi for MPI allreduce"
         )
 
     def test_operators_use_halo_exchange(self):
@@ -322,11 +323,11 @@ class TestDifferentiability:
             rho = jnp.broadcast_to(rho_val, (5,))
             p = compute_hydrostatic_pressure(
                 rho, jnp.array(0.0), z_coord.dz_ref,
-                jnp.array(1.0), rho_ref=1025.0,
+                jnp.array(1.0), rho_ref=constants.rho_ocean,
             )
             return jnp.sum(p)
 
-        grad = jax.grad(loss)(jnp.array(1025.0))
+        grad = jax.grad(loss)(jnp.array(constants.rho_ocean))
         assert jnp.isfinite(grad)
 
     def test_grad_through_tendencies(self, state, grid, cdgrid, z_coord, config):

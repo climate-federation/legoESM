@@ -33,6 +33,7 @@ def mcfarlane_gwd(
     lat: jax.Array,
     dt: float,
     config: McFarlaneConfig,
+    h_topo_col: jax.Array | None = None,
 ) -> GWDOutput:
     """Compute McFarlane orographic GWD tendencies.
 
@@ -40,6 +41,11 @@ def mcfarlane_gwd(
     ----------
     u, v, T, p_full, p_half, z_full, z_half, rho, lat, dt, config
         Standard GWD backend signature. All column arrays (ncol, nlev).
+    h_topo_col : jax.Array, shape (ncol,) or None
+        Optional per-column subgrid orographic standard deviation [m]
+        overriding the global ``config.h_topo`` (audit 2026-05-12
+        MEDIUM #9).  When ``None`` the scalar config value is used
+        everywhere (legacy behaviour).
 
     Returns
     -------
@@ -72,32 +78,65 @@ def mcfarlane_gwd(
     sin_a = v_sfc / U_ll
 
     # Smooth minimum wind activation
-    U_activated = jax.nn.sigmoid(20.0 * (U_ll - config.min_wind)) * U_ll
+    U_activated = jax.nn.sigmoid(config.min_wind_sharpness * (U_ll - config.min_wind)) * U_ll
 
     # Wind projection along wave direction
     U_proj = u * cos_a[:, None] + v * sin_a[:, None]
     U_proj_abs = jnp.clip(jnp.abs(U_proj), 1e-2, None)
 
-    # Launch flux
+    # Launch flux: orographic gravity-wave stress
+    #     tau_0 = G_0 * rho * N * k * h^2 * U
+    # (after McFarlane 1987 / Palmer 1986).  ``G_0`` is *dimensionless*;
+    # the dimensional factors that turn the formula into a stress
+    # [Pa = kg/(m·s²)] are ``rho * N * k * h^2 * U``.  The earlier
+    # implementation omitted ``k_wave`` and clipped the result to
+    # ``[0, 10] Pa`` — which combined with the missing wavenumber gave
+    # the formula units of ``kg²/(m²·s⁴)`` and a magnitude of order
+    # ``10⁴`` (numerically) → clip truncated to 10 → drag ~1e-21 m/s²
+    # (audit's "McFarlane stress dimensionally suspect").
     rho_sfc = rho[:, -1]
     N_sfc = N_full[:, -1]
-    tau_0 = config.G_0 * U_activated * config.h_topo ** 2 * N_sfc * rho_sfc
+    if h_topo_col is None:
+        h_topo_sq = config.h_topo ** 2
+    else:
+        h_topo_sq = jnp.clip(h_topo_col, 0.0, None) ** 2
+    tau_0 = (
+        config.G_0
+        * rho_sfc
+        * N_sfc
+        * config.k_wave
+        * h_topo_sq
+        * U_activated
+    )
     tau_0 = tau_0 * config.directional_spread
-    tau_0 = jnp.clip(tau_0, 0.0, 10.0)
+    tau_0 = jnp.clip(tau_0, 0.0, config.tau_max)
 
-    # Saturation stress per level
+    # Saturation stress per level (Lindzen 1981 / McFarlane 1987):
+    #     tau_sat = efficiency * rho * U^3 * k_wave / (N * envelope)   [Pa]
+    # The earlier formulation omitted ``k_wave`` and had units
+    # ``kg/s^2`` rather than ``Pa = kg/(m·s^2)`` — together with the
+    # missing ``k_wave`` in the launch stress (fixed earlier in this
+    # file) the scheme produced dimensionally inconsistent stresses
+    # whose numerical magnitudes were off by a factor of ~k_wave that
+    # the ``tau_0`` clip then masked operationally.  Lindzen
+    # (``lindzen.py:85``) implements the correct form; McFarlane is
+    # now aligned with it.
     envelope = config.envelope_scale
-    tau_sat = config.efficiency * rho * U_proj_abs ** 3 / (
-        jnp.clip(N_full, 1e-6, None) * envelope
+    tau_sat = (
+        config.efficiency
+        * rho
+        * U_proj_abs ** 3
+        * config.k_wave
+        / (jnp.clip(N_full, 1e-6, None) * envelope)
     )
     tau_sat = jnp.clip(tau_sat, 1e-10, None)
 
     # Top-down scan with smooth min (softmin via logsumexp)
+    alpha = config.softmin_sharpness
     def scan_fn(carry, k_rev):
         tau_carry = carry
         k = nlev - 1 - k_rev
         # Smooth min: softmin(a, b) = -logsumexp(-alpha*[a,b])/alpha
-        alpha = 50.0
         tau_k = -jax.nn.logsumexp(
             jnp.stack([-alpha * tau_carry, -alpha * tau_sat[:, k]], axis=0),
             axis=0,

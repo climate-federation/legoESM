@@ -25,6 +25,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import jax
 import numpy as np
 
 from legoesm.forcing.amip_config import config_to_dict, config_from_dict
@@ -40,14 +41,18 @@ def _rank_filename(rank: int) -> str:
 
 
 def _state_to_arrays(state) -> dict[str, np.ndarray]:
-    """Extract numpy arrays from a HydrostaticState."""
-    return {
-        "T": np.asarray(state.T.data),
-        "u": np.asarray(state.u.data),
-        "v": np.asarray(state.v.data),
-        "p_s": np.asarray(state.p_s.data),
-        "phis": np.asarray(state.phis.data),
-    }
+    """Extract numpy arrays from a HydrostaticState.
+
+    Single batched ``jax.device_get`` instead of one ``np.asarray``
+    per leaf so transfers can overlap across the 5 fields.
+    """
+    names = ["T", "u", "v", "p_s", "phis"]
+    values = [
+        state.T.data, state.u.data, state.v.data,
+        state.p_s.data, state.phis.data,
+    ]
+    host = jax.device_get(values)
+    return {n: np.asarray(v) for n, v in zip(names, host)}
 
 
 # ---------------------------------------------------------------------------
@@ -102,17 +107,28 @@ def save_checkpoint_distributed(
     path.mkdir(parents=True, exist_ok=True)
 
     # -- Per-rank arrays --
-    arrays: dict[str, np.ndarray] = _state_to_arrays(state)
+    # Batch the moisture / diag arrays into one ``jax.device_get`` so
+    # the GPU runtime can overlap transfers with the state arrays
+    # already pulled inside ``_state_to_arrays``.  (We could pass them
+    # in via ``_state_to_arrays``; keeping the helper minimal preserves
+    # API for non-moisture state tests.)
+    extra_names: list[str] = []
+    extra_values: list = []
     if q_v is not None:
-        arrays["q_v"] = np.asarray(q_v)
+        extra_names.append("q_v"); extra_values.append(q_v)
     if q_c is not None:
-        arrays["q_c"] = np.asarray(q_c)
+        extra_names.append("q_c"); extra_values.append(q_c)
     if q_r is not None:
-        arrays["q_r"] = np.asarray(q_r)
-
+        extra_names.append("q_r"); extra_values.append(q_r)
     if diag_accumulators:
         for k, v in diag_accumulators.items():
-            arrays[f"diag_{k}"] = np.asarray(v)
+            extra_names.append(f"diag_{k}"); extra_values.append(v)
+
+    arrays: dict[str, np.ndarray] = _state_to_arrays(state)
+    if extra_values:
+        host_extra = jax.device_get(extra_values)
+        for n, v in zip(extra_names, host_extra):
+            arrays[n] = np.asarray(v)
 
     np.savez(str(path / _rank_filename(rank)), **arrays)
 
@@ -256,13 +272,19 @@ def save_checkpoint_sharded(
     path.mkdir(parents=True, exist_ok=True)
 
     # Gather all arrays into a flat dict for serialization.
-    arrays = _state_to_arrays(state)
+    extra_names: list[str] = []
+    extra_values: list = []
     if q_v is not None:
-        arrays["q_v"] = np.asarray(q_v)
+        extra_names.append("q_v"); extra_values.append(q_v)
     if q_c is not None:
-        arrays["q_c"] = np.asarray(q_c)
+        extra_names.append("q_c"); extra_values.append(q_c)
     if q_r is not None:
-        arrays["q_r"] = np.asarray(q_r)
+        extra_names.append("q_r"); extra_values.append(q_r)
+    arrays = _state_to_arrays(state)
+    if extra_values:
+        host_extra = jax.device_get(extra_values)
+        for n, v in zip(extra_names, host_extra):
+            arrays[n] = np.asarray(v)
 
     # Synchronize across hosts before writing.
     multihost_utils.sync_global_devices("save_checkpoint_sharded_pre")
@@ -329,16 +351,22 @@ def save_checkpoint_distributed_zarr(
     else:
         grp = root.create_group(group_name)
 
-    arrays: dict[str, np.ndarray] = _state_to_arrays(state)
+    extra_names: list[str] = []
+    extra_values: list = []
     if q_v is not None:
-        arrays["q_v"] = np.asarray(q_v)
+        extra_names.append("q_v"); extra_values.append(q_v)
     if q_c is not None:
-        arrays["q_c"] = np.asarray(q_c)
+        extra_names.append("q_c"); extra_values.append(q_c)
     if q_r is not None:
-        arrays["q_r"] = np.asarray(q_r)
+        extra_names.append("q_r"); extra_values.append(q_r)
     if diag_accumulators:
         for k, v in diag_accumulators.items():
-            arrays[f"diag_{k}"] = np.asarray(v)
+            extra_names.append(f"diag_{k}"); extra_values.append(v)
+    arrays: dict[str, np.ndarray] = _state_to_arrays(state)
+    if extra_values:
+        host_extra = jax.device_get(extra_values)
+        for n, v in zip(extra_names, host_extra):
+            arrays[n] = np.asarray(v)
 
     for name, arr in arrays.items():
         if name in grp:

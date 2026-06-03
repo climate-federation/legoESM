@@ -13,11 +13,14 @@ Test cases:
     - open_water_freeze    Open-water freezing from supercooled ocean
     - maykut_untersteiner  Seasonal equilibrium: Arctic forcing → ~3m ice
 
-  Dynamics (EVP):
+  Dynamics (EVP / mEVP):
     - evp_zero_strength    P_star=0 recovers near free-drift velocity
     - evp_compression      Uniform compression: isotropic stress = -P/2
     - evp_convergence      EVP stress converges to VP target with N_evp
     - mehlmann_lkf         Cyclone-driven LKF benchmark (Mehlmann+ 2021)
+    - mevp_zero_strength   mEVP analog of evp_zero_strength
+    - mevp_compression     mEVP analog of evp_compression
+    - mevp_convergence     mEVP stress converges to VP target with N_mevp
 
   Transport:
     - advect_uniform       Uniform field advection preserves state
@@ -30,9 +33,10 @@ Test cases:
     - itd_roundtrip        Distribute -> aggregate -> distribute roundtrip
 
   Integration:
-    - slab_100_steps       100-step slab integration stability
-    - dynamic_20_steps     20-step dynamic (EVP + transport) stability
-    - multi_cat_10_steps   10-step 5-category integration stability
+    - slab_100_steps          100-step slab integration stability
+    - dynamic_20_steps        20-step dynamic (EVP + transport) stability
+    - dynamic_mevp_20_steps   20-step dynamic (mEVP + transport) stability
+    - multi_cat_10_steps      10-step 5-category integration stability
 
 Output structure:
     results/sea_ice/<case>/<grid_type>/<resolution>/
@@ -99,6 +103,7 @@ import matplotlib.pyplot as plt
 
 from legoesm import constants
 from legoesm.core.field import Field
+from legoesm.diagnostics.conservation_drift import compute_relative_drift
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.ice.config import SeaIceConfig
 from legoesm.ice.state import (
@@ -107,7 +112,7 @@ from legoesm.ice.state import (
     init_dynamic_ice_state,
 )
 from legoesm.ice.sea_ice import step_sea_ice
-from legoesm.ice.dynamics import evp_solver, free_drift_velocity
+from legoesm.ice.dynamics import evp_solver, mevp_solver, free_drift_velocity
 from legoesm.ice.rheology import ice_strength, vp_stress, delta_deformation
 from legoesm.ice.itd import (
     category_bounds,
@@ -177,6 +182,11 @@ def _build_test_matrix() -> list[TestCase]:
         ("evp_compression",    1,  1, {}),
         ("evp_convergence",    1,  1, {}),
         ("mehlmann_lkf",      48, 12, {}),  # 2 days at dt=3600s, quick=12h
+        # mEVP mirrors the EVP cases: same physical asserts, different
+        # solver, to catch mEVP-only regressions in the matrix harness.
+        ("mevp_zero_strength", 1,  1, {"P_star": 0.0}),
+        ("mevp_compression",   1,  1, {}),
+        ("mevp_convergence",   1,  1, {}),
     ]:
         matrix.append(TestCase("dynamics", case, "cubed_sphere",
                                 res["cubed_sphere"], steps, quick, 3600.0,
@@ -207,6 +217,8 @@ def _build_test_matrix() -> list[TestCase]:
                            res["column"], 100, 30, 3600.0))
     # Dynamic: cubed_sphere
     matrix.append(TestCase("integration", "dynamic_20_steps",
+                           "cubed_sphere", res["cubed_sphere"], 20, 5, 3600.0))
+    matrix.append(TestCase("integration", "dynamic_mevp_20_steps",
                            "cubed_sphere", res["cubed_sphere"], 20, 5, 3600.0))
     # Multi-category: cubed_sphere
     matrix.append(TestCase("integration", "multi_cat_10_steps",
@@ -250,7 +262,7 @@ def _make_forcing(shape, dims, **kw):
     f = jnp.float64
     defaults = dict(
         sw_down=100.0, lw_down=200.0, T_lowest=250.0, q_lowest=1e-3,
-        u_lowest=5.0, v_lowest=-3.0, p_lowest=9.5e4, p_surface=1e5,
+        u_lowest=5.0, v_lowest=-3.0, p_lowest=9.5e4, p_surface=constants.p_ref,
         rho_lowest=1.2, cos_zenith=0.5, co2_ppmv=400.0,
     )
     defaults.update(kw)
@@ -535,13 +547,21 @@ def run_evp_compression(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, s
     h = jnp.ones(shape)
     A = jnp.full(shape, 0.9)
 
-    _, _, s11, s22, s12 = evp_solver(
-        jnp.zeros(shape), jnp.zeros(shape), s0, s0, s0,
-        h_ice=h, concentration=A,
-        wind_u=jnp.zeros(shape), wind_v=jnp.zeros(shape),
-        ocean_u=jnp.zeros(shape), ocean_v=jnp.zeros(shape),
-        grid=grid, dt=3600.0, N_evp=50,
-    )
+    # EVP relaxes ~1 - exp(-1/(2*T_evp)) ~ 0.75 of the VP target per
+    # DYNAMIC step (T_evp=0.36), converging to -P/2 over several steps as
+    # sigma is carried forward — it does NOT reach -P/2 in a single call.
+    # Iterate dynamic steps (matches the F-EVP validation-test fix).
+    u = jnp.zeros(shape)
+    v = jnp.zeros(shape)
+    s11 = s22 = s12 = s0
+    for _ in range(6):
+        u, v, s11, s22, s12 = evp_solver(
+            u, v, s11, s22, s12,
+            h_ice=h, concentration=A,
+            wind_u=jnp.zeros(shape), wind_v=jnp.zeros(shape),
+            ocean_u=jnp.zeros(shape), ocean_v=jnp.zeros(shape),
+            grid=grid, dt=3600.0, N_evp=50,
+        )
 
     P = ice_strength(h[0, 0, 0], A[0, 0, 0])
     target = float(-P / 2)
@@ -596,6 +616,114 @@ def run_evp_convergence(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, s
     if not ok:
         return "FAIL", f"errors={[f'{e:.1f}' for e in errors]}"
     return "PASS", f"EVP converges: |s11|={[f'{e:.0f}' for e in errors]}"
+
+
+def run_mevp_zero_strength(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, str]:
+    """P_star=0: mEVP should give near free-drift velocity (mirror of EVP)."""
+    grid = create_cubed_sphere(8)
+    n = grid.n
+    shape = (6, n, n)
+    s0 = jnp.zeros(shape)
+
+    u_new, v_new, _, _, _ = mevp_solver(
+        jnp.zeros(shape), jnp.zeros(shape), s0, s0, s0,
+        h_ice=jnp.ones(shape),
+        concentration=jnp.ones(shape),
+        wind_u=jnp.full(shape, 10.0),
+        wind_v=jnp.zeros(shape),
+        ocean_u=jnp.zeros(shape),
+        ocean_v=jnp.zeros(shape),
+        grid=grid, dt=3600.0, N_mevp=100, P_star=0.0,
+        alpha_mevp=500.0, beta_mevp=500.0,
+    )
+
+    finite = jnp.all(jnp.isfinite(u_new)) and jnp.all(jnp.isfinite(v_new))
+    has_motion = float(jnp.max(jnp.abs(u_new))) > 1e-4
+
+    diag = {"times": [1], "max_u": [float(jnp.max(jnp.abs(u_new)))],
+            "max_v": [float(jnp.max(jnp.abs(v_new)))]}
+    _save_results(outdir, tc, diag)
+
+    ok = bool(finite and has_motion)
+    if not ok:
+        return "FAIL", f"finite={finite}, has_motion={has_motion}"
+    return "PASS", f"max|u|={float(jnp.max(jnp.abs(u_new))):.4f} m/s"
+
+
+def run_mevp_compression(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, str]:
+    """Uniform ice, zero forcing: mEVP stress should converge to -P/2."""
+    grid = create_cubed_sphere(8)
+    n = grid.n
+    shape = (6, n, n)
+    s0 = jnp.zeros(shape)
+    h = jnp.ones(shape)
+    A = jnp.full(shape, 0.9)
+
+    # Smaller alpha → faster per-iteration convergence to VP target;
+    # 200 iterations is enough for ~10% residual at alpha=50.
+    _, _, s11, s22, s12 = mevp_solver(
+        jnp.zeros(shape), jnp.zeros(shape), s0, s0, s0,
+        h_ice=h, concentration=A,
+        wind_u=jnp.zeros(shape), wind_v=jnp.zeros(shape),
+        ocean_u=jnp.zeros(shape), ocean_v=jnp.zeros(shape),
+        grid=grid, dt=3600.0, N_mevp=200,
+        alpha_mevp=50.0, beta_mevp=50.0,
+    )
+
+    P = ice_strength(h[0, 0, 0], A[0, 0, 0])
+    target = float(-P / 2)
+    s11_mean = float(jnp.mean(s11))
+    s22_mean = float(jnp.mean(s22))
+    s12_mean = float(jnp.mean(s12))
+    rel_err_11 = abs(s11_mean - target) / abs(target) if abs(target) > 1 else abs(s11_mean - target)
+    rel_err_22 = abs(s22_mean - target) / abs(target) if abs(target) > 1 else abs(s22_mean - target)
+
+    diag = {"times": [1],
+            "s11_mean": [s11_mean], "s22_mean": [s22_mean], "s12_mean": [s12_mean],
+            "target": [target]}
+    _save_results(outdir, tc, diag)
+
+    ok = rel_err_11 < 0.2 and rel_err_22 < 0.2 and abs(s12_mean) < 100.0
+    if not ok:
+        return "FAIL", f"s11={s11_mean:.1f}, s22={s22_mean:.1f}, target={target:.1f}"
+    return "PASS", f"s11~s22~{target:.1f} (err<20%), s12~0"
+
+
+def run_mevp_convergence(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, str]:
+    """mEVP stress should converge toward VP target as N_mevp increases."""
+    grid = create_cubed_sphere(8)
+    n = grid.n
+    shape = (6, n, n)
+    s0 = jnp.zeros(shape)
+    h = jnp.full(shape, 1.5)
+    A = jnp.full(shape, 0.9)
+
+    errors = []
+    N_values = [10, 50, 200, 1000]
+
+    # alpha=50 keeps per-iteration relaxation = 2 %, so N=1000 gives
+    # (1-1/50)^1000 ≈ 2e-9 residual on the stress side.
+    for N in N_values:
+        _, _, s11, _, _ = mevp_solver(
+            jnp.zeros(shape), jnp.zeros(shape), s0, s0, s0,
+            h_ice=h, concentration=A,
+            wind_u=jnp.full(shape, 5.0), wind_v=jnp.full(shape, -2.0),
+            ocean_u=jnp.full(shape, 0.1), ocean_v=jnp.zeros(shape),
+            grid=grid, dt=3600.0, N_mevp=N,
+            alpha_mevp=50.0, beta_mevp=50.0,
+        )
+        errors.append(float(jnp.mean(jnp.abs(s11))))
+
+    diag = {"times": N_values, "mean_abs_s11": errors}
+    _save_results(outdir, tc, diag)
+
+    converging = abs(errors[-1] - errors[-2]) < 0.3 * abs(errors[-2]) if errors[-2] > 1 else True
+    finite = all(np.isfinite(e) for e in errors)
+
+    ok = bool(finite and converging)
+    if not ok:
+        return "FAIL", f"errors={[f'{e:.1f}' for e in errors]}"
+    return "PASS", f"mEVP converges: |s11|={[f'{e:.0f}' for e in errors]}"
 
 
 # ===========================================================================
@@ -667,9 +795,9 @@ def run_advect_step(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, str]:
 
     h_nonneg = float(jnp.min(h)) >= -1e-10
     a_bounded = float(jnp.min(a)) >= -1e-10 and float(jnp.max(a)) <= 1.0 + 1e-10
-    T_bounded = float(jnp.min(T)) >= 180.0 - 1e-6 and float(jnp.max(T)) <= 271.35 + 1e-6
+    T_bounded = float(jnp.min(T)) >= 180.0 - 1e-6 and float(jnp.max(T)) <= constants.T_freeze_ocean + 1e-6
     vol_final = float(jnp.sum(h * a))
-    vol_drift = abs(vol_final - vol_init) / max(vol_init, 1e-20)
+    vol_drift = compute_relative_drift([vol_init, vol_final])
 
     ok = bool(h_nonneg and a_bounded and T_bounded)
     if not ok:
@@ -708,8 +836,8 @@ def run_itd_growth_remap(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, 
             if float(h_r[k]) < float(lo[k]) - 1e-8 or float(h_r[k]) > float(hi[k]) + 1e-8:
                 bounds_ok = False
 
-    vol_drift = abs(vol_after - vol_before) / max(vol_before, 1e-20)
-    T_bounded = jnp.all(T_r >= 180.0) and jnp.all(T_r <= 271.35)
+    vol_drift = compute_relative_drift([vol_before, vol_after])
+    T_bounded = jnp.all(T_r >= 180.0) and jnp.all(T_r <= constants.T_freeze_ocean)
 
     diag = {"times": [1], "vol_before": [vol_before], "vol_after": [vol_after],
             "vol_drift": [vol_drift]}
@@ -745,7 +873,7 @@ def run_itd_melt_remap(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, st
                 bounds_ok = False
 
     a_bounded = jnp.all(a_r >= 0.0) and jnp.all(a_r <= 1.0)
-    vol_drift = abs(vol_after - vol_before) / max(vol_before, 1e-20)
+    vol_drift = compute_relative_drift([vol_before, vol_after])
 
     diag = {"times": [1], "vol_drift": [vol_drift]}
     _save_results(outdir, tc, diag)
@@ -768,7 +896,7 @@ def run_itd_roundtrip(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, str
     h_agg, T_agg, a_agg = aggregate_state(h_mc, T_mc, a_mc)
 
     vol_agg = float(h_agg * a_agg)
-    vol_drift = abs(vol_agg - vol_init) / max(vol_init, 1e-20)
+    vol_drift = compute_relative_drift([vol_init, vol_agg])
 
     h_err = abs(float(h_agg) - float(h_slab))
     T_err = abs(float(T_agg) - float(T_slab))
@@ -864,6 +992,64 @@ def run_dynamic_20_steps(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, 
     return "PASS", f"Stable for {n_steps} steps, max|u|={diag['max_u'][-1]:.4f} m/s"
 
 
+def run_dynamic_mevp_20_steps(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, str]:
+    """20-step dynamic (mEVP + transport) integration — mirror of
+    ``run_dynamic_20_steps`` for the mEVP rheology branch.
+    """
+    grid = create_cubed_sphere(8)
+    n = grid.n
+    shape = (6, n, n)
+    dims = DIMS_CS
+    config = SeaIceConfig(
+        dynamics="mevp", transport="advect", N_mevp=20,
+        alpha_mevp=500.0, beta_mevp=500.0,
+    )
+    dt = tc.dt
+    n_steps = tc.quick_steps if quick else tc.duration_steps
+
+    state = init_dynamic_ice_state(shape)
+    state = state._replace(
+        h_ice=state.h_ice.replace(data=jnp.ones(shape) * 1.5),
+        concentration=state.concentration.replace(data=jnp.full(shape, 0.9)),
+    )
+    forcing = _make_forcing(shape, dims)
+    ocean_sst = jnp.full(shape, 271.0)
+    ocean_u = jnp.zeros(shape)
+    ocean_v = jnp.zeros(shape)
+
+    diag = {"times": [], "h_mean": [], "max_u": [], "max_sigma": []}
+
+    for i in range(n_steps):
+        state, _ = step_sea_ice(state, forcing, ocean_sst, ocean_u, ocean_v,
+                                config, U_min=1.0, dt=dt, grid=grid)
+        diag["times"].append(i + 1)
+        diag["h_mean"].append(float(jnp.mean(state.h_ice.data)))
+        diag["max_u"].append(float(jnp.max(jnp.abs(state.u_ice.data))))
+        diag["max_sigma"].append(float(jnp.max(jnp.abs(state.sigma_11.data))))
+
+    _save_results(outdir, tc, diag)
+
+    finite = (jnp.all(jnp.isfinite(state.h_ice.data)) and
+              jnp.all(jnp.isfinite(state.u_ice.data)) and
+              jnp.all(jnp.isfinite(state.sigma_11.data)))
+    h_ok = jnp.all(state.h_ice.data >= 0.0)
+    u_bounded = diag["max_u"][-1] < 2.0      # Arctic drift O(0.1 m/s)
+    sigma_bounded = diag["max_sigma"][-1] < 1.0e6  # typical max ~1e5
+
+    ok = bool(finite and h_ok and u_bounded and sigma_bounded)
+    if not ok:
+        return "FAIL", (
+            f"finite={finite}, h>=0={h_ok}, "
+            f"max|u|={diag['max_u'][-1]:.3f}, "
+            f"max|σ|={diag['max_sigma'][-1]:.2e}"
+        )
+    return "PASS", (
+        f"Stable for {n_steps} steps, "
+        f"max|u|={diag['max_u'][-1]:.4f} m/s, "
+        f"max|σ|={diag['max_sigma'][-1]:.2e} N/m"
+    )
+
+
 def run_multi_cat_10_steps(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, str]:
     """10-step 5-category integration with ITD remap."""
     grid = create_cubed_sphere(8)
@@ -877,15 +1063,16 @@ def run_multi_cat_10_steps(tc: TestCase, outdir: Path, quick: bool) -> tuple[str
     h_mc, T_mc, a_mc = distribute_to_categories(
         jnp.full(shape, 1.5), jnp.full(shape, 255.0), jnp.full(shape, 0.7), 5)
 
-    state = DynamicSeaIceState(
+    # Build a fully-formed 5-category state (all 12 fields incl. the
+    # snow / brine / pond tracers) via the canonical initializer, then
+    # overwrite h/T/conc with the distributed multi-category arrays.
+    # Hand-constructing DynamicSeaIceState here would omit the new-physics
+    # fields and raise a TypeError (state grew; this harness had not).
+    state = init_dynamic_ice_state(h_mc.shape, n_categories=5)
+    state = state._replace(
         h_ice=Field(data=h_mc, name="h_ice", dims=("face", "x", "y", "cat"), units="m"),
         T_ice=Field(data=T_mc, name="T_ice", dims=("face", "x", "y", "cat"), units="K"),
         concentration=Field(data=a_mc, name="conc", dims=("face", "x", "y", "cat"), units="1"),
-        u_ice=Field(data=jnp.zeros(shape), name="u_ice", dims=dims, units="m/s"),
-        v_ice=Field(data=jnp.zeros(shape), name="v_ice", dims=dims, units="m/s"),
-        sigma_11=Field(data=jnp.zeros(shape), name="s11", dims=dims, units="N/m"),
-        sigma_22=Field(data=jnp.zeros(shape), name="s22", dims=dims, units="N/m"),
-        sigma_12=Field(data=jnp.zeros(shape), name="s12", dims=dims, units="N/m"),
     )
 
     forcing = _make_forcing(shape, dims)
@@ -1007,7 +1194,7 @@ def run_cosine_bell(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, str]:
 
         if (i + 1) % max(1, n_steps // 20) == 0 or i == n_steps - 1:
             vol_now = float(jnp.sum(h * a * grid.area))
-            vol_drift = abs(vol_now - vol_init) / max(vol_init, 1e-20)
+            vol_drift = compute_relative_drift([vol_init, vol_now])
             # Compute L2 error against initial condition
             diff = h - h_init
             L2 = float(jnp.sqrt(jnp.sum(diff ** 2 * grid.area) / jnp.sum(grid.area)))
@@ -1023,7 +1210,7 @@ def run_cosine_bell(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, str]:
     L2 = float(jnp.sqrt(jnp.sum(diff ** 2 * area) / jnp.sum(h_init ** 2 * area + 1e-30)))
     Linf = float(jnp.max(jnp.abs(diff)) / (jnp.max(h_init) + 1e-30))
     vol_final = float(jnp.sum(h * a * area))
-    vol_drift = abs(vol_final - vol_init) / max(vol_init, 1e-20)
+    vol_drift = compute_relative_drift([vol_init, vol_final])
 
     _save_results(outdir, tc, diag)
 
@@ -1345,6 +1532,9 @@ RUNNERS = {
     "evp_compression": run_evp_compression,
     "evp_convergence": run_evp_convergence,
     "mehlmann_lkf": run_mehlmann_lkf,
+    "mevp_zero_strength": run_mevp_zero_strength,
+    "mevp_compression": run_mevp_compression,
+    "mevp_convergence": run_mevp_convergence,
     # Transport
     "advect_uniform": run_advect_uniform,
     "advect_step": run_advect_step,
@@ -1356,6 +1546,7 @@ RUNNERS = {
     # Integration
     "slab_100_steps": run_slab_100_steps,
     "dynamic_20_steps": run_dynamic_20_steps,
+    "dynamic_mevp_20_steps": run_dynamic_mevp_20_steps,
     "multi_cat_10_steps": run_multi_cat_10_steps,
 }
 

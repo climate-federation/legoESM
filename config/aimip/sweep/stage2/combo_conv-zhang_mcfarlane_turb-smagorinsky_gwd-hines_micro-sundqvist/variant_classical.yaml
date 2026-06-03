@@ -1,0 +1,4 @@
+aimip_convection: zhang_mcfarlane
+aimip_turbulence: smagorinsky
+aimip_gwd: hines
+aimip_microphysics: sundqvist

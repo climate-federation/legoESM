@@ -1,0 +1,272 @@
+"""Sea-ice bulk salinity + brine rejection.
+
+Tracks a single bulk-mean salinity ``S_ice`` per ice category and
+computes the salt mass flux to the ocean implied by the per-process
+ice-mass budget over a thermodynamic step:
+
+- **Lead freezing**: open-water ice forms at ``S_ice_new`` (low
+  bulk salinity, default 4 PSU).  The remainder of the ocean's
+  salt stays in the ocean → brine rejection into ocean.
+- **Basal / surface melt and sublimation**: ice salt is returned
+  to the ocean at the ice's current ``S_ice``.
+- **Snow-ice flooding**: new white ice forms with salinity
+  ``S_white = pore_frac · S_ocean``.  The seawater that filled
+  the snow pores carried this salt out of the ocean column → salt
+  uptake into ice (negative salt flux).
+
+Net salt flux to ocean:
+    salt_flux  = − Δ(S_ice · V_ice · ρ_ice) / dt          [kg(salt)/m²/s]
+              = + brine_release_from_freezing
+                + salt_release_from_melt
+                − salt_uptake_in_white_ice
+
+with ``S_ice`` in PSU (≈ g/kg → ×1e-3 to get kg of salt per kg of ice).
+
+When ``BrineConfig.enabled = False`` the helpers degenerate to
+zero salinity / zero salt flux, preserving the legacy
+freshwater-only convention.
+"""
+
+from __future__ import annotations
+
+from typing import NamedTuple
+
+import jax.numpy as jnp
+
+
+PSU_TO_KG_PER_KG = 1.0e-3  # 1 PSU ≈ 1 g/kg = 1e-3 kg of salt per kg of seawater
+
+
+class SaltBudgetResult(NamedTuple):
+    """Output of :func:`update_salinity_and_salt_flux`.
+
+    ``S_ice_new`` is the post-step bulk ice salinity per category;
+    ``salt_flux_to_ocean`` is positive when salt enters the ocean
+    (brine rejection during freezing or salt release during melt).
+    """
+    S_ice_new: jnp.ndarray
+    salt_flux_to_ocean: jnp.ndarray   # [kg(salt)/m²/s]
+
+
+def update_salinity_and_salt_flux(
+    S_ice_old: jnp.ndarray,
+    V_ice_old: jnp.ndarray,
+    V_ice_new: jnp.ndarray,
+    delta_V_lead_freeze: jnp.ndarray,
+    delta_V_white_ice: jnp.ndarray,
+    *,
+    rho_ice: float,
+    dt: float,
+    S_lead_ice: float,
+    S_white_ice: float,
+    delta_V_basal_freeze: jnp.ndarray | float = 0.0,
+    S_basal_ice: float | None = None,
+    delta_V_sublim: jnp.ndarray | float = 0.0,
+    delta_V_fresh_refreeze: jnp.ndarray | float = 0.0,
+    S_fresh_ice: float = 0.0,
+    S_ice_min: float = 0.0,
+    S_ice_max: float = 12.0,
+) -> SaltBudgetResult:
+    """Update bulk ice salinity and emit ocean salt-flux diagnostic.
+
+    Mass-budget convention: ``V_ice`` is ice volume per unit
+    grid-cell area ``[m_ice]`` (i.e. ``h_ice * a_ice``).
+    ``delta_V_lead_freeze`` and ``delta_V_white_ice`` are
+    non-negative; the implied basal + surface melt + sublimation
+    contribution is the residual
+
+        ΔV_melt_release = V_old + ΔV_freeze + ΔV_white − V_new   (≥ 0 when net melt)
+
+    The post-step salt content per area is
+
+        Salt_new = S_ice_old · V_remain
+                 + S_lead   · ΔV_freeze
+                 + S_white  · ΔV_white                 [kg salt / m²]
+
+    with ``V_remain = V_old − ΔV_melt_release`` (the ice that
+    *survived* and kept its old salinity), and
+    ``Salt`` converted to mass via ``× rho_ice × 1e-3``.
+
+    Salt flux to ocean is the *negative* time-derivative of the
+    ice column's salt mass — positive when ice loses salt to ocean.
+
+    Parameters
+    ----------
+    S_ice_old : array
+        Pre-step bulk salinity per category [PSU].
+    V_ice_old, V_ice_new : array
+        Pre / post ice volume per area per category [m].
+    delta_V_lead_freeze : array
+        Volume of new ice formed in leads this step [m, ≥ 0].
+    delta_V_white_ice : array
+        Volume of white ice formed by snow-ice flooding [m, ≥ 0].
+    rho_ice : float
+        Ice density [kg/m³].
+    dt : float
+        Time step [s].
+    S_lead_ice : float
+        Salinity of newly frozen lead ice [PSU] (typically 4).
+    S_white_ice : float
+        Salinity of white ice from flooding [PSU] (typically
+        ``0.5 · S_ocean_ref ≈ 17``).
+    delta_V_basal_freeze : array or float
+        Volume of new ice formed by basal congelation this step
+        [m, ≥ 0, per grid-cell area].  Treated as a salty-ice source
+        symmetric with lead freezing so basal growth removes salt
+        from the ocean consistently with the freshwater it extracts.
+        Default ``0.0`` preserves the legacy budget.
+    S_basal_ice : float or None
+        Salinity of basal congelation ice [PSU].  ``None`` (default)
+        uses ``S_lead_ice``.
+    delta_V_sublim : array or float
+        Volume of ice removed by sublimation this step [m, ≥ 0, per
+        grid-cell area].  Sublimation is a vapour-phase loss to the
+        ATMOSPHERE, not the ocean: its salt stays behind, concentrating
+        the remaining ice.  Excluded from the ocean salt-release
+        residual so a dry sublimating column does not emit spurious
+        positive salt flux with no accompanying water exchange.  Default
+        ``0.0`` preserves the legacy budget.
+    delta_V_fresh_refreeze : array or float
+        Volume of NEW ice formed this step by refreezing of fresh
+        meltwater (e.g. refrozen melt-pond water) [m, ≥ 0, per grid-cell
+        area].  This crystallises at ``S_fresh_ice`` (≈ 0), NOT from
+        surviving old ice, so it is counted as a freeze gain in the melt
+        residual and added to the stored salt at its own (fresh) salinity
+        — never absorbing the old ice's salt.  Without this, refrozen pond
+        ice would be mistaken for surviving old ice and bury old salt
+        (under-reporting the ocean salt release).  Default ``0.0``.
+    S_fresh_ice : float
+        Salinity of the fresh refrozen-meltwater ice [PSU], default 0.
+    S_ice_min, S_ice_max : float
+        Numerical clamp [PSU].
+
+    Returns
+    -------
+    result : :class:`SaltBudgetResult`
+    """
+    # Pre-step salt mass per area in the ice column [kg salt / m²].
+    salt_old = S_ice_old * V_ice_old * rho_ice * PSU_TO_KG_PER_KG
+
+    # Basal congelation growth (seawater freezing onto the ice base)
+    # is a salty-ice source just like lead freezing.  When the caller
+    # does not supply a distinct basal-ice salinity, use the lead-ice
+    # salinity (first-year congelation and frazil ice have similar low
+    # bulk salinities).  Without this term, basal growth would dilute
+    # ``S_ice`` toward zero and emit zero salt flux, so the ocean would
+    # lose freshwater (via the ice-mass budget) but keep all its salt —
+    # breaking joint freshwater/salt closure for congelation growth.
+    S_basal = S_lead_ice if S_basal_ice is None else S_basal_ice
+
+    # Implied OCEAN melt-release volume: ice that disappeared between
+    # ``V_old`` and ``V_new`` after accounting for ALL freeze gains
+    # (lead, white-ice flooding, basal congelation) AND for the
+    # sublimation loss, which leaves to the atmosphere rather than the
+    # ocean.  ``delta_V_sublim`` is therefore subtracted from the
+    # residual so it is NOT counted as ocean salt release.
+    delta_V_sublim_pos = jnp.maximum(delta_V_sublim, 0.0)
+    delta_V_fresh_pos = jnp.maximum(delta_V_fresh_refreeze, 0.0)
+    delta_V_melt = jnp.maximum(
+        V_ice_old + delta_V_lead_freeze + delta_V_white_ice
+        + delta_V_basal_freeze + delta_V_fresh_pos
+        - delta_V_sublim_pos - V_ice_new,
+        0.0,
+    )
+    # Ice that survived (kept its old bulk salinity).  Both ocean melt
+    # and sublimation remove ice from the old column; the difference is
+    # only WHERE the salt goes (ocean vs retained in ice).
+    V_remain = jnp.maximum(
+        V_ice_old - delta_V_melt - delta_V_sublim_pos, 0.0
+    )
+
+    # Salt retained by sublimation: the vapour carries no salt, so the salt of
+    # the sublimated ice stays behind and concentrates the SURVIVING OLD ice
+    # (``V_remain``) — it must NOT ride on ice that newly formed this step
+    # (lead/white/basal), which crystallises from ocean water at its own low
+    # salinity.  The surviving old ice can hold at most ``S_ice_max`` PSU, so
+    # the retained sublimation salt is capped at the old ice's remaining
+    # headroom ``(S_ice_max - S_ice_old) * V_remain``.  Any excess — including
+    # the ENTIRE residual when the old ice fully sublimates (``V_remain -> 0``,
+    # no surviving carrier) — is rejected to the ocean via the salt-flux
+    # residual below (brine drainage; the water already left to the
+    # atmosphere).  Without this cap, a step that fully sublimates old ice
+    # while freezing new lead ice would bury the old salt in the new ice
+    # (spuriously raising its salinity) and under-report the ocean salt flux.
+    old_salt_headroom = jnp.maximum(
+        (S_ice_max - S_ice_old) * V_remain, 0.0
+    )
+    salt_retained_from_sublim = jnp.minimum(
+        S_ice_old * delta_V_sublim_pos, old_salt_headroom,
+    ) * rho_ice * PSU_TO_KG_PER_KG
+
+    # Post-step salt mass per area: melt releases ice that had the
+    # *old* bulk salinity TO THE OCEAN; freezing adds ice at the (fixed)
+    # low ``S_lead_ice``; flooding adds white ice with elevated
+    # ``S_white_ice``; basal congelation adds ice at ``S_basal``;
+    # sublimation retains its salt in the column.
+    salt_new = (
+        S_ice_old * V_remain
+        + S_lead_ice * delta_V_lead_freeze
+        + S_white_ice * delta_V_white_ice
+        + S_basal * delta_V_basal_freeze
+        + S_fresh_ice * delta_V_fresh_pos
+    ) * rho_ice * PSU_TO_KG_PER_KG + salt_retained_from_sublim
+
+    # Recover bulk ice salinity per category, then clamp to physical
+    # bounds.  The salt flux MUST be computed from the salt mass the ice
+    # state actually stores AFTER clamping — otherwise a saturating cap
+    # (e.g. 17-PSU white ice vs a 12-PSU S_ice_max) would remove salt
+    # from the ocean that the ice never retains, breaking conservation.
+    V_safe = jnp.where(V_ice_new > 1e-12, V_ice_new, 1.0)
+    S_ice_unclamped = jnp.where(
+        V_ice_new > 1e-12,
+        salt_new / (V_safe * rho_ice * PSU_TO_KG_PER_KG),
+        0.0,
+    )
+    S_ice_new = jnp.clip(S_ice_unclamped, S_ice_min, S_ice_max)
+
+    # Actual stored salt mass in the post-step ice (consistent with the
+    # clamped salinity and the new volume).
+    salt_stored = S_ice_new * V_ice_new * rho_ice * PSU_TO_KG_PER_KG
+
+    # Salt flux to ocean (per-cat per-area): positive = INTO ocean.  Defined
+    # as the drop in the ice column's stored salt, so salt is conserved BY
+    # CONSTRUCTION: ``salt_old = salt_stored + salt_flux*dt`` always.
+    #
+    # Sublimation interaction: the sublimated ice's salt is folded into
+    # ``salt_new`` (``salt_retained_from_sublim``) so it CONCENTRATES the
+    # remaining ice and emits NO ocean flux WHILE ice remains and the
+    # concentrated salinity stays below ``S_ice_max``.  But the vapour carried
+    # the WATER to the atmosphere, not the salt, so when the column fully
+    # sublimates (``V_ice_new -> 0`` forces ``S_ice_new = 0``, ``salt_stored =
+    # 0``) — or when concentration would exceed ``S_ice_max`` — the residual
+    # salt has no ice to occupy and is rejected to the OCEAN (brine drainage):
+    # ``salt_flux = salt_old/dt`` at full sublimation.  This is salt-conserving
+    # (the salt cannot follow the water into the vapour phase) and pairs with
+    # the freshwater budget, which correctly sends the sublimated WATER to the
+    # atmosphere (excluded from the ocean freshwater flux), so the ocean gains
+    # salt without water (salinity up) — the physically correct outcome.
+    salt_flux = (salt_old - salt_stored) / dt
+    return SaltBudgetResult(S_ice_new=S_ice_new, salt_flux_to_ocean=salt_flux)
+
+
+def aggregate_salt_flux(
+    salt_flux_per_cat: jnp.ndarray,
+    *,
+    axis: int = -1,
+) -> jnp.ndarray:
+    """Sum per-category salt flux to the cell-mean salt flux.
+
+    Parameters
+    ----------
+    salt_flux_per_cat : array (..., n_cat) or (..., )
+    axis : int
+        Category axis to reduce over.  Default last.
+
+    Returns
+    -------
+    salt_flux_cell : array (...)
+        Total salt mass flux per grid-cell area [kg/m²/s].
+    """
+    if salt_flux_per_cat.ndim == 0 or salt_flux_per_cat.shape[axis] == 1:
+        return jnp.squeeze(salt_flux_per_cat, axis=axis) if salt_flux_per_cat.ndim > 0 else salt_flux_per_cat
+    return jnp.sum(salt_flux_per_cat, axis=axis)

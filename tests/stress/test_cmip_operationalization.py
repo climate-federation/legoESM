@@ -142,12 +142,12 @@ class TestGridAwareExperimentConfig:
         assert cfg.dycore.model_type == "hydrostatic"
 
     def test_latlon_auto_discretization(self):
-        """grid_type='latlon' auto-selects latlon_fv discretization."""
+        """grid_type='latlon' auto-selects latlon_cgrid discretization."""
         from legoesm.forcing.experiments import create_experiment_config
         cfg = create_experiment_config(
             "piControl", grid_type="latlon", resolution=16,
         )
-        assert cfg.dycore.discretization == "latlon_fv"
+        assert cfg.dycore.discretization == "latlon_cgrid"
         assert cfg.dycore.model_type == "hydrostatic"
         assert cfg.grid.grid_type == "latlon"
 

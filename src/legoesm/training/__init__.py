@@ -16,6 +16,11 @@ from legoesm.training.vertical_interp import (  # noqa: F401
 )
 from legoesm.training.losses import LossConfig, combined_loss  # noqa: F401
 from legoesm.training.trainable_params import TrainablePhysicsParams  # noqa: F401
+from legoesm.training.aimip_params import (  # noqa: F401
+    AIMIP_CLASSICAL_CONSTRAINTS,
+    AIMIPClassicalParams,
+    make_aimip_classical_spectral_physics,
+)
 from legoesm.training.dycore_rollout import (  # noqa: F401
     RolloutConfig,
     differentiable_rollout,

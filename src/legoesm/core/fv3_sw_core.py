@@ -1,43 +1,376 @@
-"""FV3-inspired shallow water forward-backward core (EXPERIMENTAL).
+"""FV3-inspired SW forward-backward core (EXPERIMENTAL; fv3_fb_sw_step unstable).
 
-Implements a c_sw + d_sw forward-backward step adapted from GFDL's
-FV3 dynamical core (sw_core.F90).  The operators use FV3's covariant
-velocity convention with sin_sg flux scaling.
-
-**Status**: experimental.  The full forward-backward step
-(``fv3_fb_sw_step``) is known to be unstable — use ``fv3_sw_tendencies``
-(operators_cdgrid.py) or ``fv3_csw_tendencies`` for production work.
-
-The c_sw half-step operates at C-grid face positions (gradient and
-vorticity at the same stagger — essential for geostrophic balance).
-The d_sw half-step operates at D-grid edge-midpoint positions (reusing
-the existing Arakawa-Lamb gradient which is consistent at that stagger).
-
-References
-----------
-- Lin (2004): A "Vertically Lagrangian" FV Dynamical Core
-- Mouallem, Harris & Chen (2023): Duo-Grid edge effect fix
-- GFDL sw_core.F90: c_sw (lines 79-488), d2a2c_vect (lines 3006-3345)
+GFDL sw_core.F90 port (c_sw 79-488, d2a2c_vect 3006-3345). Covariant velocity + sin_sg flux scaling.
+Use fv3_sw_tendencies (operators_cdgrid.py) or fv3_csw_tendencies for production.
+Lin 2004; Mouallem, Harris & Chen 2023.
 """
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 
-from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
-from legoesm.grids.halo import pad_halo_vector
+from legoesm import constants
+from legoesm.core.fv_tp_2d import (
+    _pert_ppm,
+    compute_transport_quantities,
+    fv_tp_2d,
+    transport_step,
+)
 from legoesm.core.operators_cdgrid import (
     _pad_halo_auto,
     cgrid_mass_flux_divergence,
-    dgrid_vorticity,
     _interp_center_to_corner,
-    _arakawa_lamb_gradient,
-    _extrapolate_boundary_corners,
+    _interp_center_to_corner_a2b_ord4,
     cgrid_divergence,
+    fv3_cc2c,
+    fv3_d2cc,
+)
+from legoesm.grids.cubed_sphere_cdgrid import CubedSphereCDGrid
+from legoesm.grids.duogrid import ext_vector_dgrid
+from legoesm.grids.halo import (
+    pad_halo,
+    pad_halo_vector,
+    synchronize_bgrid_ne_corner_geo,
+    synchronize_cgrid_fluxes,
 )
 
 _EPS = float(jnp.finfo(jnp.float32).eps)
+
+
+def _pad_halo_dgrid_for_ppm(u_d, v_d, cdgrid, halo: int = 2):
+    """iter-945: cross-face halo for D-grid winds via ext_vector_dgrid (rotated cube_rmp).
+
+    Output: u_d_ihalo (6, n+2h, n+1) and v_d_jhalo (6, n+1, n+2h) for d_sw3 PPM sweeps.
+    Equivalent to single-rank mpp_update_domains(DGRID_NE). Interior preserved exactly.
+    Requires duogrid with ng >= halo.
+    """
+    n = cdgrid.n
+    h = halo
+    grid = cdgrid.base
+    dg = grid.duogrid
+    if dg is None or dg.ng < h:
+        raise ValueError(
+            f"_pad_halo_dgrid_for_ppm: requires duogrid with ng>={h}, "
+            f"got ng={None if dg is None else dg.ng}."
+        )
+
+    # A-grid prep: 2nd-order length-weighted D→A avg (mirror of _d2a2c_vect_duogrid step 1)
+    dx_u = cdgrid.dx_edge_y  # (6, n, n+1)
+    dy_v = cdgrid.dy_edge_x  # (6, n+1, n) — y-length at v_d positions
+    wu = u_d * dx_u
+    wv = v_d * dy_v
+    utmp_2nd = (wu[:, :, :-1] + wu[:, :, 1:]) / (
+        dx_u[:, :, :-1] + dx_u[:, :, 1:])  # (6, n, n)
+    vtmp_2nd = (wv[:, :-1, :] + wv[:, 1:, :]) / (
+        dy_v[:, :-1, :] + dy_v[:, 1:, :])  # (6, n, n)
+    cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
+    rsin2 = cdgrid.rsin2_cell
+
+    u_d_full, v_d_full = ext_vector_dgrid(
+        utmp_2nd, vtmp_2nd, dg,
+        grid.cos_angle, grid.sin_angle,
+        cos_sg5, rsin2,
+        halo=h,
+    )  # u_d_full: (6, n+2h, n+2h-1); v_d_full: (6, n+2h-1, n+2h)
+
+    # Preserve interior exactly (mirror Fortran mpp_update_domains: halo cells only)
+    u_d_full = u_d_full.at[:, h:h + n, h - 1:h + n].set(u_d)
+    v_d_full = v_d_full.at[:, h - 1:h + n, h:h + n].set(v_d)
+
+    # Slice j-stagger axis (n+2h-1 → n+1) for PPM transport
+    u_d_ihalo = u_d_full[:, :, h - 1:h + n]
+    v_d_jhalo = v_d_full[:, h - 1:h + n, :]
+
+    return u_d_ihalo, v_d_jhalo
+
+
+def _pad_halo_uc_vc_via_d2a2c(u_d, v_d, cdgrid):
+    """iter-946 NEGATIVE-RESULT: 4th-order d2a2c uc/vc halo from OLD u_d/v_d.
+
+    OLD-derived halo lacks c_sw+p_grad_c increment → OLD/NEW mismatch in d_sw 4-cell avg.
+    Measured C36 W2 1d: |v|=156 m/s vs mode='edge' baseline 81 m/s (WORSE). Reverted.
+    Retained for iter-947+ work (needs c_sw+p_grad_c halo propagation).
+    Requires duogrid ng>=3.
+    """
+    n = cdgrid.n
+    grid = cdgrid.base
+    dg = grid.duogrid
+    if dg is None or dg.ng < 3:
+        raise ValueError(
+            f"_pad_halo_uc_vc_via_d2a2c: requires duogrid with ng>=3 "
+            f"(j-halo extension on the 4-point j-stencil); "
+            f"got ng={None if dg is None else dg.ng}."
+        )
+    h = 3
+
+    # Step 1: A-grid prep (mirror _d2a2c_vect_duogrid: length-weighted 2nd-order D→A avg)
+    dx_u = cdgrid.dx_edge_y
+    dy_v = cdgrid.dy_edge_x
+    wu = u_d * dx_u
+    wv = v_d * dy_v
+    utmp_2nd = (wu[:, :, :-1] + wu[:, :, 1:]) / (
+        dx_u[:, :, :-1] + dx_u[:, :, 1:])  # (6, n, n)
+    vtmp_2nd = (wv[:, :-1, :] + wv[:, 1:, :]) / (
+        dy_v[:, :-1, :] + dy_v[:, 1:, :])  # (6, n, n)
+    cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
+    rsin2 = cdgrid.rsin2_cell
+
+    u_d_full, v_d_full = ext_vector_dgrid(
+        utmp_2nd, vtmp_2nd, dg,
+        grid.cos_angle, grid.sin_angle,
+        cos_sg5, rsin2,
+        halo=h,
+    )  # u_d_full: (6, n+2h, n+2h-1); v_d_full: (6, n+2h-1, n+2h)
+
+    # Preserve interior exactly (mirror Fortran mpp_update_domains)
+    u_d_full = u_d_full.at[:, h:h + n, h - 1:h + n].set(u_d)
+    v_d_full = v_d_full.at[:, h - 1:h + n, h:h + n].set(v_d)
+
+    # Step 2: utmp at i-halo full + j-halo=1 (j ∈ [-1, n]). 4-pt j-stencil needs h>=3
+    utmp_T = (
+        _A2 * (u_d_full[:, :, h - 3:h - 3 + n + 2]
+               + u_d_full[:, :, h:h + n + 2])
+        + _A1 * (u_d_full[:, :, h - 2:h - 2 + n + 2]
+                 + u_d_full[:, :, h - 1:h - 1 + n + 2])
+    )  # (6, n+2h, n+2)
+
+    # Step 3: 4th-order A→C i-stencil → uc with j-halo=1
+    uc_jhalo = (
+        _A2 * (utmp_T[:, h - 2:h - 2 + n + 1, :]
+               + utmp_T[:, h + 1:h + 1 + n + 1, :])
+        + _A1 * (utmp_T[:, h - 1:h - 1 + n + 1, :]
+                 + utmp_T[:, h:h + n + 1, :])
+    )  # (6, n+1, n+2)
+
+    # Step 4: vtmp at j-halo full + i-halo=1 (symmetric to step 2)
+    vtmp_T = (
+        _A2 * (v_d_full[:, h - 3:h - 3 + n + 2, :]
+               + v_d_full[:, h:h + n + 2, :])
+        + _A1 * (v_d_full[:, h - 2:h - 2 + n + 2, :]
+                 + v_d_full[:, h - 1:h - 1 + n + 2, :])
+    )  # (6, n+2, n+2h)
+
+    # Step 5: 4th-order A→C j-stencil → vc with i-halo=1
+    vc_ihalo = (
+        _A2 * (vtmp_T[:, :, h - 2:h - 2 + n + 1]
+               + vtmp_T[:, :, h + 1:h + 1 + n + 1])
+        + _A1 * (vtmp_T[:, :, h - 1:h - 1 + n + 1]
+                 + vtmp_T[:, :, h:h + n + 1])
+    )  # (6, n+2, n+1)
+
+    return uc_jhalo, vc_ihalo
+
+
+def _pad_halo_uc_vc_new_via_old_delta(uc, vc, u_d, v_d, cdgrid):
+    """iter-947: NEW uc/vc halo via NEW_boundary + OLD cross-face delta.
+
+    uc_NEW_halo[H] = uc[B]_NEW + (uc_OLD_halo[H] - uc_OLD[B]).
+    OLD delta carries cross-face rotation; NEW anchor keeps c_sw+p_grad_c consistent.
+    Fixes iter-946 OLD/NEW mismatch. Requires duogrid ng>=3.
+
+    Returns
+    -------
+    uc_pad : (6, n+1, n+2) — uc with NEW-consistent j-halo (j=-1, j=n)
+    vc_pad : (6, n+2, n+1) — vc with NEW-consistent i-halo (i=-1, i=n)
+    """
+    n = cdgrid.n
+
+    # OLD halo via iter-946 d2a2c machinery
+    uc_old_jhalo, vc_old_ihalo = _pad_halo_uc_vc_via_d2a2c(u_d, v_d, cdgrid)
+
+    # OLD interior uc/vc for cross-face delta only. iter-948 NEGATIVE: linear extrap worsens W2 |v_max| 75→87.
+    _, _, uc_old_int, vc_old_int, _, _ = _d2a2c_vect(u_d, v_d, cdgrid)
+
+    # uc south/north halo delta
+    delta_uc_south = uc_old_jhalo[:, :, 0:1] - uc_old_int[:, :, 0:1]
+    delta_uc_north = uc_old_jhalo[:, :, n + 1:n + 2] - uc_old_int[:, :, n - 1:n]
+
+    uc_new_south = uc[:, :, 0:1] + delta_uc_south
+    uc_new_north = uc[:, :, n - 1:n] + delta_uc_north
+    uc_pad = jnp.concatenate([uc_new_south, uc, uc_new_north], axis=2)  # (6, n+1, n+2)
+
+    # vc west/east halo delta
+    delta_vc_west = vc_old_ihalo[:, 0:1, :] - vc_old_int[:, 0:1, :]
+    delta_vc_east = vc_old_ihalo[:, n + 1:n + 2, :] - vc_old_int[:, n - 1:n, :]
+
+    vc_new_west = vc[:, 0:1, :] + delta_vc_west
+    vc_new_east = vc[:, n - 1:n, :] + delta_vc_east
+    vc_pad = jnp.concatenate([vc_new_west, vc, vc_new_east], axis=1)  # (6, n+2, n+1)
+
+    return uc_pad, vc_pad
+
+
+def _d_sw1_recompute_ut_vt(uc, vc, cdgrid, dt,
+                            u_d_old=None, v_d_old=None):
+    """FV3 d_sw1 ut/vt recomputation (sw_core.F90:618-812).
+
+    4-cell cross-vel avg + face-boundary sin_sg upwind + adjacent strip + corner 2x2 solve.
+    iter-947: u_d_old/v_d_old enable NEW-corrected duogrid halo (ng>=3).
+    """
+    n = cdgrid.n
+    dg = cdgrid.base.duogrid
+    use_duogrid = dg is not None and dg.ng >= 2
+
+    cosa_u = cdgrid.cosa_u  # (6, n+1, n)
+    cosa_v = cdgrid.cosa_v  # (6, n, n+1)
+    rsin_u = cdgrid.rsin_u  # (6, n+1, n)
+    rsin_v = cdgrid.rsin_v  # (6, n, n+1)
+    sg = cdgrid.sin_sg
+
+    # Part 1: Interior ut/vt from 4-cell vc/uc avg.
+    # ut(I,j) = (uc - 0.25*cosa_u*(vc(I-1,j)+vc(I,j)+vc(I-1,j+1)+vc(I,j+1)))*rsin_u
+    # iter-947: NEW-corrected duogrid halo via _pad_halo_uc_vc_new_via_old_delta (carries OLD cross-face delta).
+    # iter-946 d2a2c-only halo regressed W2 (OLD/NEW mismatch with c_sw+p_grad_c increments).
+    if (use_duogrid and dg.ng >= 3
+            and u_d_old is not None and v_d_old is not None):
+        uc_pad, vc_pad = _pad_halo_uc_vc_new_via_old_delta(
+            uc, vc, u_d_old, v_d_old, cdgrid)
+    else:
+        vc_pad = jnp.pad(vc, [(0, 0), (1, 1), (0, 0)], mode='edge')
+        uc_pad = jnp.pad(uc, [(0, 0), (0, 0), (1, 1)], mode='edge')
+    # 4-cell averages at u-face/v-face
+    vc_avg = (vc_pad[:, :-1, :-1] + vc_pad[:, 1:, :-1]
+              + vc_pad[:, :-1, 1:] + vc_pad[:, 1:, 1:])  # (6, n+1, n)
+    ut = (uc - 0.25 * cosa_u * vc_avg) * rsin_u
+
+    uc_avg = (uc_pad[:, :-1, :-1] + uc_pad[:, 1:, :-1]
+              + uc_pad[:, :-1, 1:] + uc_pad[:, 1:, 1:])  # (6, n, n+1)
+    vt = (vc - 0.25 * cosa_v * uc_avg) * rsin_v
+
+    # iter-953/954 NEGATIVE: Parts 2-4 on duogrid regress v_ll_Linf (sin_sg padding conflicts; Part 2 drops cosa_u term)
+    if use_duogrid:
+        return ut, vt
+
+    # Part 2: Non-duogrid face-boundary overrides (ut = uc / sin_sg(upwind))
+    sin_w_left = sg[:, :, :, 2]
+    sin_w_right = sg[:, :, :, 0]
+    grid = cdgrid.base
+    offsets = grid.halo_interp_offsets
+    se_pad = pad_halo(sin_w_left, interp_offsets=offsets)
+    sw_pad = pad_halo(sin_w_right, interp_offsets=offsets)
+
+    # West face (I=0)
+    sin_upwind_w = jnp.where(uc[:, 0, :] * dt > 0,
+                             se_pad[:, :n+1, 1:-1][:, 0, :],
+                             sw_pad[:, 1:n+2, 1:-1][:, 0, :])
+    ut = ut.at[:, 0, :].set(uc[:, 0, :] / jnp.maximum(jnp.abs(sin_upwind_w), _EPS))
+
+    # East face (I=n)
+    sin_upwind_e = jnp.where(uc[:, n, :] * dt > 0,
+                             se_pad[:, :n+1, 1:-1][:, n, :],
+                             sw_pad[:, 1:n+2, 1:-1][:, n, :])
+    ut = ut.at[:, n, :].set(uc[:, n, :] / jnp.maximum(jnp.abs(sin_upwind_e), _EPS))
+
+    # South face (J=0)
+    sin_s_below = sg[:, :, :, 3]
+    sin_s_above = sg[:, :, :, 1]
+    sn_pad = pad_halo(sin_s_below, interp_offsets=offsets)
+    ss_pad = pad_halo(sin_s_above, interp_offsets=offsets)
+
+    sin_upwind_s = jnp.where(vc[:, :, 0] * dt > 0,
+                             sn_pad[:, 1:-1, :n+1][:, :, 0],
+                             ss_pad[:, 1:-1, 1:n+2][:, :, 0])
+    vt = vt.at[:, :, 0].set(vc[:, :, 0] / jnp.maximum(jnp.abs(sin_upwind_s), _EPS))
+
+    # North face (J=n)
+    sin_upwind_n = jnp.where(vc[:, :, n] * dt > 0,
+                             sn_pad[:, 1:-1, :n+1][:, :, n],
+                             ss_pad[:, 1:-1, 1:n+2][:, :, n])
+    vt = vt.at[:, :, n].set(vc[:, :, n] / jnp.maximum(jnp.abs(sin_upwind_n), _EPS))
+
+    # Part 3: adjacent strip recomputation (FV3 sw_core.F90:666-726)
+    if n > 4:
+        jlo = 2; jhi = n - 1
+
+        # West rows 0, 1
+        for row in [0, 1]:
+            avg = (ut[:, row, jlo-1:jhi] + ut[:, row+1, jlo-1:jhi]
+                   + ut[:, row, jlo:jhi+1] + ut[:, row+1, jlo:jhi+1])  # (6, jhi-jlo+1)
+            vt = vt.at[:, row, jlo:jhi+1].set(
+                vc[:, row, jlo:jhi+1] - 0.25 * cosa_v[:, row, jlo:jhi+1] * avg)
+
+        # East rows n-2, n-1
+        for row in [n-2, n-1]:
+            if row >= 0 and row + 1 <= n:
+                avg = (ut[:, row, jlo-1:jhi] + ut[:, row+1, jlo-1:jhi]
+                       + ut[:, row, jlo:jhi+1] + ut[:, row+1, jlo:jhi+1])
+                vt = vt.at[:, row, jlo:jhi+1].set(
+                    vc[:, row, jlo:jhi+1] - 0.25 * cosa_v[:, row, jlo:jhi+1] * avg)
+
+        # South cols 0, 1
+        ilo = 2; ihi = n - 1
+        for col in [0, 1]:
+            avg = (vt[:, ilo-1:ihi, col] + vt[:, ilo:ihi+1, col]
+                   + vt[:, ilo-1:ihi, col+1] + vt[:, ilo:ihi+1, col+1])
+            ut = ut.at[:, ilo:ihi+1, col].set(
+                uc[:, ilo:ihi+1, col] - 0.25 * cosa_u[:, ilo:ihi+1, col] * avg)
+
+        # North cols n-1, n
+        for col in [n-1, n]:
+            if col - 1 >= 0 and col <= n:
+                avg = (vt[:, ilo-1:ihi, col-1] + vt[:, ilo:ihi+1, col-1]
+                       + vt[:, ilo-1:ihi, col] + vt[:, ilo:ihi+1, col])
+                ut = ut.at[:, ilo:ihi+1, col].set(
+                    uc[:, ilo:ihi+1, col] - 0.25 * cosa_u[:, ilo:ihi+1, col] * avg)
+
+    # Part 4: Corner 2x2 coupled solve at cube vertices (FV3 sw_core.F90:739-811)
+    # Fortran (2,1) → Python (1,0). damp = 1/(1 - 0.0625*cu*cv)
+    cu = cosa_u  # (6, n+1, n)
+    cv = cosa_v  # (6, n, n+1)
+
+    # SW corner
+    damp = 1.0 / (1.0 - 0.0625 * cu[:, 1, 0] * cv[:, 0, 1])
+    ut = ut.at[:, 1, 0].set(
+        (uc[:, 1, 0] - 0.25 * cu[:, 1, 0] * (
+            vt[:, 0, 0] + vt[:, 1, 0] + vt[:, 1, 1] + vc[:, 0, 1]
+            - 0.25 * cv[:, 0, 1] * (ut[:, 0, 0] + ut[:, 0, 1] + ut[:, 1, 1])
+        )) * damp)
+    vt = vt.at[:, 0, 1].set(
+        (vc[:, 0, 1] - 0.25 * cv[:, 0, 1] * (
+            ut[:, 0, 0] + ut[:, 0, 1] + ut[:, 1, 1] + uc[:, 1, 0]
+            - 0.25 * cu[:, 1, 0] * (vt[:, 0, 0] + vt[:, 1, 0] + vt[:, 1, 1])
+        )) * damp)
+
+    # SE corner
+    damp = 1.0 / (1.0 - 0.0625 * cu[:, n-1, 0] * cv[:, n-2, 1])
+    ut = ut.at[:, n-1, 0].set(
+        (uc[:, n-1, 0] - 0.25 * cu[:, n-1, 0] * (
+            vt[:, n-2, 0] + vt[:, n-3, 0] + vt[:, n-3, 1] + vc[:, n-2, 1]
+            - 0.25 * cv[:, n-2, 1] * (ut[:, n, 0] + ut[:, n, 1] + ut[:, n-1, 1])
+        )) * damp)
+    vt = vt.at[:, n-2, 1].set(
+        (vc[:, n-2, 1] - 0.25 * cv[:, n-2, 1] * (
+            ut[:, n, 0] + ut[:, n, 1] + ut[:, n-1, 1] + uc[:, n-1, 0]
+            - 0.25 * cu[:, n-1, 0] * (vt[:, n-2, 0] + vt[:, n-3, 0] + vt[:, n-3, 1])
+        )) * damp)
+
+    # NE corner
+    damp = 1.0 / (1.0 - 0.0625 * cu[:, n-1, n-1] * cv[:, n-2, n-1])
+    ut = ut.at[:, n-1, n-1].set(
+        (uc[:, n-1, n-1] - 0.25 * cu[:, n-1, n-1] * (
+            vt[:, n-2, n] + vt[:, n-3, n] + vt[:, n-3, n-1] + vc[:, n-2, n-1]
+            - 0.25 * cv[:, n-2, n-1] * (ut[:, n, n-1] + ut[:, n, n-2] + ut[:, n-1, n-2])
+        )) * damp)
+    vt = vt.at[:, n-2, n-1].set(
+        (vc[:, n-2, n-1] - 0.25 * cv[:, n-2, n-1] * (
+            ut[:, n, n-1] + ut[:, n, n-2] + ut[:, n-1, n-2] + uc[:, n-1, n-1]
+            - 0.25 * cu[:, n-1, n-1] * (vt[:, n-2, n] + vt[:, n-3, n] + vt[:, n-3, n-1])
+        )) * damp)
+
+    # NW corner
+    damp = 1.0 / (1.0 - 0.0625 * cu[:, 1, n-1] * cv[:, 0, n-1])
+    ut = ut.at[:, 1, n-1].set(
+        (uc[:, 1, n-1] - 0.25 * cu[:, 1, n-1] * (
+            vt[:, 0, n] + vt[:, 1, n] + vt[:, 1, n-1] + vc[:, 0, n-1]
+            - 0.25 * cv[:, 0, n-1] * (ut[:, 0, n-1] + ut[:, 0, n-2] + ut[:, 1, n-2])
+        )) * damp)
+    vt = vt.at[:, 0, n-1].set(
+        (vc[:, 0, n-1] - 0.25 * cv[:, 0, n-1] * (
+            ut[:, 0, n-1] + ut[:, 0, n-2] + ut[:, 1, n-2] + uc[:, 1, n-1]
+            - 0.25 * cu[:, 1, n-1] * (vt[:, 0, n] + vt[:, 1, n] + vt[:, 1, n-1])
+        )) * damp)
+
+    return ut, vt
 
 
 def _edge_interpolate4(ua4, dxa4):
@@ -65,36 +398,197 @@ _C3 = 5.0 / 14.0
 # d2a2c_vect: D-grid → A-grid → C-grid (FV3 covariant convention)
 # ==============================================================================
 
-def _d2a2c_vect(u_d, v_d, cdgrid):
-    """FV3 D-grid → A-grid → C-grid vector conversion.
+def _d2a2c_vect_duogrid(u_d, v_d, cdgrid):
+    """D→A→C duogrid (FV3 sw_core.F90:3419-3454 gridstruct%dg%is_initialized branch).
 
-    Adapted from GFDL sw_core.F90 d2a2c_vect.  Returns C-grid
-    velocities in FV3's COVARIANT convention (uc = interpolated covariant
-    utmp, NOT the physical face-normal velocity).
+    1. ext_vector pipeline (c2l_ord2 + lat/lon halo + cubed_a2d_halo) = FV3 mpp_update_domains(DGRID_NE)
+    2. 4th-order D→A on fully-haloed domain
+    3. Covariant → contravariant via cosa_s/rsin2 (FV3:3451-3452)
+    4. 4th-order A→C on full-halo utmp/vtmp
+    """
+    n = cdgrid.n
+    grid = cdgrid.base
+    dg = grid.duogrid
+    # iter-654: h=3 when ng>=3 (c_sw cube-edge upwind needs 3-ring halo); h=2 fallback
+    h = 3 if (dg is not None and dg.ng >= 3) else 2
+    cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
+    rsin2 = cdgrid.rsin2_cell
+
+    # Step 1: ext_vector D-grid halo (FV3 fv_duogrid.F90:741-826): c2l_ord2 → A-cov → lat/lon →
+    # scalar halo cube_rmp → cubed_a2d_halo. Length-weighted utmp = (u*dx)|sum / dx|sum
+    # (preserves constant state). Fortran c2l_ord2 has leading 2 absorbed into a11/a22.
+    dx_u = cdgrid.dx_edge_y  # (6, n, n+1)
+    dy_v = cdgrid.dy_edge_x  # (6, n+1, n) — y-length at v_d positions
+    wu = u_d * dx_u
+    wv = v_d * dy_v
+    utmp_2nd = (wu[:, :, :-1] + wu[:, :, 1:]) / (
+        dx_u[:, :, :-1] + dx_u[:, :, 1:])  # (6, n, n)
+    vtmp_2nd = (wv[:, :-1, :] + wv[:, 1:, :]) / (
+        dy_v[:, :-1, :] + dy_v[:, 1:, :])  # (6, n, n)
+    u_d_full, v_d_full = ext_vector_dgrid(
+        utmp_2nd, vtmp_2nd, dg,
+        grid.cos_angle, grid.sin_angle,
+        cos_sg5, rsin2,
+        halo=h,
+    )  # u_d_full: (6, n+2h, n+2h-1), v_d_full: (6, n+2h-1, n+2h)
+
+    # Preserve interior exactly (mirror Fortran mpp_update_domains)
+    u_d_full = u_d_full.at[:, h:h + n, h - 1:h + n].set(u_d)
+    v_d_full = v_d_full.at[:, h - 1:h + n, h:h + n].set(v_d)
+
+    # Step 2: 4th-order D→A on fully-haloed domain (FV3 sw_core.F90:3421-3435 duogrid).
+    # utmp(i, j_cell) = a2*(u(j-1)+u(j+2)) + a1*(u(j)+u(j+1)). iter-654: h>=2 generalised.
+    if n > 3:
+        utmp_full = (
+            _A2 * (u_d_full[:, :, h - 2:h - 2 + n]
+                   + u_d_full[:, :, h + 1:h + 1 + n])
+            + _A1 * (u_d_full[:, :, h - 1:h - 1 + n]
+                     + u_d_full[:, :, h:h + n])
+        )  # (6, n+2h, n) — i-halo full, j-interior only
+        vtmp_full = (
+            _A2 * (v_d_full[:, h - 2:h - 2 + n, :]
+                   + v_d_full[:, h + 1:h + 1 + n, :])
+            + _A1 * (v_d_full[:, h - 1:h - 1 + n, :]
+                     + v_d_full[:, h:h + n, :])
+        )  # (6, n, n+2h) — j-halo full, i-interior only
+    else:
+        # Tiny grid fallback: 2-point average without 4th-order stencil.
+        # Read edges [j_cell, j_cell+1] → padded [j_cell+(h-1), j_cell+h].
+        utmp_full = 0.5 * (u_d_full[:, :, h - 1:h - 1 + n]
+                            + u_d_full[:, :, h:h + n])
+        vtmp_full = 0.5 * (v_d_full[:, h - 1:h - 1 + n, :]
+                            + v_d_full[:, h:h + n, :])
+
+    # ---- Step 3: Covariant→contravariant at cell centres (interior) ----
+    # FV3 sw_core.F90:3451-3452:
+    #   ua(i,j) = (utmp(i,j)-vtmp(i,j)*cosa_s(i,j)) * rsin2(i,j)
+    # Take the i-interior slice of utmp_full / j-interior of vtmp_full
+    # (ua/va only needs interior for downstream operators).
+    utmp_int = utmp_full[:, h:h + n, :]
+    vtmp_int = vtmp_full[:, :, h:h + n]
+    ua = (utmp_int - vtmp_int * cos_sg5) * rsin2
+    va = (vtmp_int - utmp_int * cos_sg5) * rsin2
+
+    # ---- Step 4: 4th-order A→C interpolation ----
+    # uc(i+1/2, j) = a2*(utmp(i-1,j)+utmp(i+2,j)) + a1*(utmp(i,j)+utmp(i+1,j))
+    # utmp_full has shape (6, n+2h, n).  Padded i-index p maps to cell
+    # (p - h).  For u-face k in [0, n], the stencil reads cells
+    # [k-2, k-1, k, k+1] → padded [k-2+h, k-1+h, k+h, k+1+h].
+    # For k in [0, n] (n+1 faces): padded ranges
+    #   [h-2:h-1+n, h-1:h+n, h:h+n+1, h+1:h+2+n]
+    # At h=2 these collapse to [0:n+1, 1:n+2, 2:n+3, 3:n+4] == the
+    # original `[:-3, 1:-2, 2:-1, 3:]` slicing of length (n+4).
+    uc = (_A2 * (utmp_full[:, h - 2:h - 1 + n, :]
+                 + utmp_full[:, h + 1:h + 2 + n, :])
+          + _A1 * (utmp_full[:, h - 1:h + n, :]
+                   + utmp_full[:, h:h + n + 1, :]))  # (6, n+1, n)
+
+    ut = (uc - v_d * cdgrid.cosa_u) * cdgrid.rsin_u
+
+    vc = (_A2 * (vtmp_full[:, :, h - 2:h - 1 + n]
+                 + vtmp_full[:, :, h + 1:h + 2 + n])
+          + _A1 * (vtmp_full[:, :, h - 1:h + n]
+                   + vtmp_full[:, :, h:h + n + 1]))  # (6, n, n+1)
+
+    vt = (vc - u_d * cdgrid.cosa_v) * cdgrid.rsin_v
+
+    return ua, va, uc, vc, ut, vt
+
+
+def _apply_fortran_d2a2c_corner_overrides(utmp_pad, vtmp_pad, n):
+    """Iter-938 port of Fortran sw_core.F90:3527-3545 + 3620-3639
+    cube-corner sign-flip overrides on utmp_pad / vtmp_pad.
+
+    Fortran applies four corner overrides per axis (SW/SE/NE/NW),
+    each writing 3 halo cells (i=-2..0 or i=0..2) at the boundary
+    halo row/col.  Our Python pad_halo_vector(halo=2) only provides
+    2 halo cells per side, so we port the 2 deepest cells (depth
+    -1 and -0 in Fortran indexing → padded-index depth-2 and
+    depth-1).  The third Fortran cell (depth-3) is OUT of our
+    halo=2 reach and is skipped — a documented partial port.
+
+    Index map (with halo=2, padded shape (n+4, n+4)):
+      Fortran i=-1 → padded 0   (depth-2 west halo)
+      Fortran i=0  → padded 1   (depth-1 west halo)
+      Fortran i=1  → padded 2   (first interior, west boundary)
+      Fortran i=npx → padded n+2 (depth-1 east halo)
+      Fortran i=npx+1 → padded n+3 (depth-2 east halo)
+
+    The Fortran utmp/vtmp interior values are NOT modified — only
+    halo cells.  This matches our intent of correcting `pad_halo_vector`'s
+    `_fill_corners_h2` 2-point AVERAGE with Fortran's sign-flipped
+    cross-component copy at the cube vertex.
+
+    The vtmp overrides read from utmp_pad INTERIOR cells (which the
+    utmp overrides do NOT modify), so the two override blocks are
+    independent in input/output and may be applied in either order.
 
     Parameters
     ----------
-    u_d : (6, n, n+1) D-grid x-velocity at x-edge midpoints
-    v_d : (6, n+1, n) D-grid y-velocity at y-edge midpoints
-    cdgrid : CubedSphereCDGrid
+    utmp_pad : (6, n+4, n+4) — pad_halo_vector output
+    vtmp_pad : (6, n+4, n+4) — pad_halo_vector output
+    n : int — interior grid size
 
     Returns
     -------
-    ua, va : (6, n, n) A-grid contravariant
-    uc : (6, n+1, n) C-grid covariant u
-    vc : (6, n, n+1) C-grid covariant v
-    ut : (6, n+1, n) C-grid contravariant u (transport)
-    vt : (6, n, n+1) C-grid contravariant v (transport)
+    utmp_pad, vtmp_pad : same shapes, with cube-vertex halo cells
+        overwritten using Fortran's sign-flip cross-component values.
     """
+    # ---- utmp x-direction overrides (Fortran 3527-3545) ----
+    # SW corner: utmp(i=-1..0, j=0) = -vtmp(0, 1-i)
+    utmp_pad = utmp_pad.at[:, 0, 1].set(-vtmp_pad[:, 1, 3])  # i=-1
+    utmp_pad = utmp_pad.at[:, 1, 1].set(-vtmp_pad[:, 1, 2])  # i=0
+    # SE corner: utmp(npx+i, 0) = +vtmp(npx, i+1)  for i in {0, 1}
+    utmp_pad = utmp_pad.at[:, n+2, 1].set(+vtmp_pad[:, n+2, 2])
+    utmp_pad = utmp_pad.at[:, n+3, 1].set(+vtmp_pad[:, n+2, 3])
+    # NE corner: utmp(npx+i, npy) = -vtmp(npx, npy-1-i) for i in {0, 1}
+    utmp_pad = utmp_pad.at[:, n+2, n+2].set(-vtmp_pad[:, n+2, n+1])
+    utmp_pad = utmp_pad.at[:, n+3, n+2].set(-vtmp_pad[:, n+2, n])
+    # NW corner: utmp(i=-1..0, npy) = +vtmp(0, npy-1+i+1)
+    utmp_pad = utmp_pad.at[:, 0, n+2].set(+vtmp_pad[:, 1, n])     # i=-1
+    utmp_pad = utmp_pad.at[:, 1, n+2].set(+vtmp_pad[:, 1, n+1])   # i=0
+
+    # ---- vtmp y-direction overrides (Fortran 3620-3639) ----
+    # SW corner: vtmp(0, j=-1..0) = -utmp(1-j, 0)
+    vtmp_pad = vtmp_pad.at[:, 1, 0].set(-utmp_pad[:, 3, 1])  # j=-1, reads utmp(2, 0)
+    vtmp_pad = vtmp_pad.at[:, 1, 1].set(-utmp_pad[:, 2, 1])  # j=0,  reads utmp(1, 0)
+    # NW corner: vtmp(0, npy+j) = +utmp(j+1, npy)  for j in {0, 1}
+    vtmp_pad = vtmp_pad.at[:, 1, n+2].set(+utmp_pad[:, 2, n+2])
+    vtmp_pad = vtmp_pad.at[:, 1, n+3].set(+utmp_pad[:, 3, n+2])
+    # SE corner: vtmp(npx, j=-1..0) = +utmp(ie+j, 0)
+    vtmp_pad = vtmp_pad.at[:, n+2, 0].set(+utmp_pad[:, n,   1])   # j=-1 → utmp(npx-2, 0)
+    vtmp_pad = vtmp_pad.at[:, n+2, 1].set(+utmp_pad[:, n+1, 1])   # j=0  → utmp(npx-1, 0)
+    # NE corner: vtmp(npx, npy+j) = -utmp(ie-j, npy) for j in {0, 1}
+    vtmp_pad = vtmp_pad.at[:, n+2, n+2].set(-utmp_pad[:, n+1, n+2])
+    vtmp_pad = vtmp_pad.at[:, n+2, n+3].set(-utmp_pad[:, n,   n+2])
+
+    return utmp_pad, vtmp_pad
+
+
+def _d2a2c_vect(u_d, v_d, cdgrid):
+    """FV3 D-grid → A-grid → C-grid (covariant). FV3 sw_core.F90 d2a2c_vect.
+
+    Dispatches to _d2a2c_vect_duogrid when dg.ng>=2 (FV3 dg%is_initialized branch).
+    Returns ua/va (A-cov), uc/vc (C-cov), ut/vt (C-contravariant transport).
+    """
+    # Duogrid path: 4th-order everywhere, skip edge/corner specials (FV3 sw_core.F90:3419)
+    dg = cdgrid.base.duogrid
+    if dg is not None and dg.ng >= 2:
+        return _d2a2c_vect_duogrid(u_d, v_d, cdgrid)
+
     n = cdgrid.n
     npt = min(4, n // 2)
 
-    # ---- Step 1: D-grid → covariant cell centres (utmp, vtmp) ----
+    # iter-108 audit: Fortran sw_core.F90:3527-3545 + 3620-3640 cube-vertex sign-flip overrides
+    # on utmp/vtmp NOT ported to non-duogrid path. Python uses pad_halo_vector +
+    # _fill_corners_h1/h2 (2-point avg) instead of Fortran sign-flip copy. Delta O(dx²) on smooth fields.
+
+    # Step 1: D-grid → covariant cell centres
     utmp = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])   # (6, n, n)
     vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])   # (6, n, n)
 
-    # 4th-order interior (at least npt cells from each edge)
-    if n > 2 * npt:
+    # 4th-order interior (npt cells from each edge; needs n > 2*npt)
+    if n > 2 * npt and npt > 0:
         u4 = (_A2 * (u_d[:, :, :-3] + u_d[:, :, 3:])
               + _A1 * (u_d[:, :, 1:-2] + u_d[:, :, 2:-1]))
         utmp = utmp.at[:, :, npt:n - npt].set(u4[:, :, npt - 1:n - npt - 1])
@@ -102,135 +596,708 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
               + _A1 * (v_d[:, 1:-2, :] + v_d[:, 2:-1, :]))
         vtmp = vtmp.at[:, npt:n - npt, :].set(v4[:, npt - 1:n - npt - 1, :])
 
-    # ---- Step 2: Halo-exchange COVARIANT utmp/vtmp ----
-    # pad_halo_vector rotates wind components across face boundaries —
-    # correct for covariant (grid-aligned) winds.
+    # Step 2: Halo-exchange covariant utmp/vtmp (halo=2 for edge_interpolate4, FV3:3587)
     grid = cdgrid.base
+    h = 2
     utmp_pad, vtmp_pad = pad_halo_vector(
         utmp, vtmp,
         grid.cos_angle, grid.sin_angle,
-        grid.cos_angle_padded, grid.sin_angle_padded,
-        interp_offsets=grid.halo_interp_offsets,
-    )  # each (6, n+2, n+2)
+        grid.cos_angle_padded_h2, grid.sin_angle_padded_h2,
+        interp_offsets=grid.halo_interp_offsets_h2,
+        halo=h,
+    )  # each (6, n+4, n+4)
 
-    # ---- Step 3: Contravariant at cell centres (including halo) ----
+    # iter-938: Fortran cube-corner sign-flip overrides (sw_core.F90:3527-3545, 3620-3639) available
+    # as _apply_fortran_d2a2c_corner_overrides but output-dead without edge_interpolate4 j-slice extension.
+
+    # Step 3: Contravariant at cell centres
     cos_sg5 = cdgrid.cos_sg[:, :, :, 4]
     rsin2 = cdgrid.rsin2_cell
-    cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (1, 1), (1, 1)], mode='edge')
-    rsin2_pad = jnp.pad(rsin2, [(0, 0), (1, 1), (1, 1)], mode='edge')
+    cos_sg5_pad = jnp.pad(cos_sg5, [(0, 0), (h, h), (h, h)], mode='edge')
+    rsin2_pad = jnp.pad(rsin2, [(0, 0), (h, h), (h, h)], mode='edge')
 
     ua_pad = (utmp_pad - vtmp_pad * cos_sg5_pad) * rsin2_pad
     va_pad = (vtmp_pad - utmp_pad * cos_sg5_pad) * rsin2_pad
 
-    ua = ua_pad[:, 1:-1, 1:-1]  # (6, n, n)
-    va = va_pad[:, 1:-1, 1:-1]
+    ua = ua_pad[:, h:-h, h:-h]  # (6, n, n)
+    va = va_pad[:, h:-h, h:-h]
 
-    # ---- Step 4a: A→C x-direction (covariant utmp → uc) ----
-    # Interior: 4th-order interpolation of COVARIANT utmp
-    uc = 0.5 * (utmp_pad[:, :-1, 1:-1] + utmp_pad[:, 1:, 1:-1])  # (6, n+1, n)
+    # Step 4a: A→C x-dir. u-face i ↔ padded indices i+h-1, i+h
+    uc = 0.5 * (utmp_pad[:, h-1:n+h, h:-h]
+                + utmp_pad[:, h:n+h+1, h:-h])  # (6, n+1, n)
 
     if n > 2 * npt + 2:
-        uc_4th = (_A2 * (utmp_pad[:, :-3, 1:-1] + utmp_pad[:, 3:, 1:-1])
-                  + _A1 * (utmp_pad[:, 1:-2, 1:-1] + utmp_pad[:, 2:-1, 1:-1]))
+        uc_4th = (_A2 * (utmp_pad[:, h-2:n+h-1, h:-h]
+                         + utmp_pad[:, h+1:n+h+2, h:-h])
+                  + _A1 * (utmp_pad[:, h-1:n+h, h:-h]
+                           + utmp_pad[:, h:n+h+1, h:-h]))
         i_lo = npt + 1
         i_hi = n - npt
         uc = uc.at[:, i_lo:i_hi, :].set(uc_4th[:, i_lo - 1:i_hi - 1, :])
 
-    # Near-boundary one-sided stencils (i=2, i=n-2 only — NOT at face edge itself)
+    # One-sided c1/c2/c3 stencil at i=1, n-1 (FV3 sw_core.F90:3586,3594)
     if n > 3:
-        uc = uc.at[:, 2, :].set(
-            _C1 * utmp_pad[:, 5, 1:-1] + _C2 * utmp_pad[:, 4, 1:-1]
-            + _C3 * utmp_pad[:, 3, 1:-1])
-        uc = uc.at[:, n - 2, :].set(
-            _C1 * utmp_pad[:, n - 3, 1:-1] + _C2 * utmp_pad[:, n - 2, 1:-1]
-            + _C3 * utmp_pad[:, n - 1, 1:-1])
+        uc = uc.at[:, 1, :].set(
+            _C1 * utmp_pad[:, h + 2, h:-h] + _C2 * utmp_pad[:, h + 1, h:-h]
+            + _C3 * utmp_pad[:, h, h:-h])
+        uc = uc.at[:, n - 1, :].set(
+            _C1 * utmp_pad[:, n + h - 3, h:-h] + _C2 * utmp_pad[:, n + h - 2, h:-h]
+            + _C3 * utmp_pad[:, n + h - 1, h:-h])
 
-    # AT face boundary (i=1, i=n-1): edge_interpolate4 on CONTRAVARIANT ua
-    # then uc = ut * sin_sg_upwind (covariant from contravariant)
-    dxc_pad_x = jnp.pad(grid.dx, [(0, 0), (1, 1), (0, 0)], mode='edge')
-    for i_bdy in [1, n - 1]:
-        i_p = i_bdy  # padded offset
-        ua4 = jnp.stack([ua_pad[:, i_p - 1, 1:-1], ua_pad[:, i_p, 1:-1],
-                         ua_pad[:, i_p + 1, 1:-1], ua_pad[:, i_p + 2, 1:-1]],
+    # Face boundary (i=0, i=n): edge_interpolate4 on ua (FV3:3587,3603); halo=2 straddles boundary.
+    # Upwind sin_sg from halo cell: ut>0 → sin_sg(i-1,j,3); ut<=0 → sin_sg(i,j,1)
+    dxc_pad_x = jnp.pad(grid.dx, [(0, 0), (h, h), (0, 0)], mode='edge')
+    sin_east = cdgrid.sin_sg[:, :, :, 2]   # E-edge
+    sin_west = cdgrid.sin_sg[:, :, :, 0]   # W-edge
+    offsets = grid.halo_interp_offsets
+    se_pad_x = pad_halo(sin_east, interp_offsets=offsets)  # (6, n+2, n+2)
+    sw_pad_x = pad_halo(sin_west, interp_offsets=offsets)
+    for i_bdy in ([0, n] if n >= 2 else []):
+        i_p = i_bdy + h  # padded offset: cell i → padded index i+h
+        # ua_pad stencil: 4 cells centred on u-face i_bdy
+        ua4 = jnp.stack([ua_pad[:, i_p - 1, h:-h], ua_pad[:, i_p, h:-h],
+                         ua_pad[:, i_p + 1, h:-h], ua_pad[:, i_p + 2, h:-h]],
                         axis=-1)
         dxa4 = jnp.stack([dxc_pad_x[:, i_p - 1, :], dxc_pad_x[:, i_p, :],
                           dxc_pad_x[:, i_p + 1, :], dxc_pad_x[:, i_p + 2, :]],
                          axis=-1)
-        ut_bdy = _edge_interpolate4(ua4, dxa4)  # contravariant
+        ut_bdy = _edge_interpolate4(ua4, dxa4)
 
-        i_left = max(i_bdy - 1, 0)
-        i_right = min(i_bdy, n - 1)
-        sin_left = cdgrid.sin_sg[:, i_left, :, 2]   # E-edge of left cell
-        sin_right = cdgrid.sin_sg[:, i_right, :, 0]  # W-edge of right cell
+        # FV3:3589-3592 upwind sin_sg from halo cell
+        sin_left = se_pad_x[:, i_bdy, 1:-1]
+        sin_right = sw_pad_x[:, i_bdy + 1, 1:-1]  # W-edge of cell to RIGHT of face i_bdy
         uc_bdy = jnp.where(ut_bdy > 0, ut_bdy * sin_left, ut_bdy * sin_right)
         uc = uc.at[:, i_bdy, :].set(uc_bdy)
 
-    # Contravariant ut from covariant uc
-    cosa_u = cdgrid.cosa_u
-    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u ** 2, _EPS))
-    ut = (uc - v_d * cosa_u) / jnp.maximum(sina_u, _EPS)
+    # Contravariant ut (rsin_u = 1/sin²)
+    ut = (uc - v_d * cdgrid.cosa_u) * cdgrid.rsin_u
 
-    # At face boundaries: ut = uc / sin_sg_upwind (not the cosa/sina formula)
-    for i_bdy in [0, 1, n - 1, n]:
-        i_left = max(i_bdy - 1, 0)
-        i_right = min(i_bdy, n - 1)
-        sin_left = cdgrid.sin_sg[:, i_left, :, 2]
-        sin_right = cdgrid.sin_sg[:, i_right, :, 0]
+    # Face boundary: ut = uc/sin_upwind to recover edge_interpolate4 result (FV3:3587,3603)
+    for i_bdy in ([0, n] if n >= 2 else []):
+        sin_left = se_pad_x[:, i_bdy, 1:-1]
+        sin_right = sw_pad_x[:, i_bdy + 1, 1:-1]
         sin_upwind = jnp.where(uc[:, i_bdy, :] > 0, sin_left, sin_right)
         ut = ut.at[:, i_bdy, :].set(
             uc[:, i_bdy, :] / jnp.maximum(sin_upwind, _EPS))
 
-    # ---- Step 4b: A→C y-direction (covariant vtmp → vc) ----
-    vc = 0.5 * (vtmp_pad[:, 1:-1, :-1] + vtmp_pad[:, 1:-1, 1:])  # (6, n, n+1)
+    # Step 4b: A→C y-dir. v-face j ↔ padded j+h-1, j+h
+    vc = 0.5 * (vtmp_pad[:, h:-h, h-1:n+h] + vtmp_pad[:, h:-h, h:n+h+1])  # (6, n, n+1)
 
     if n > 2 * npt + 2:
-        vc_4th = (_A2 * (vtmp_pad[:, 1:-1, :-3] + vtmp_pad[:, 1:-1, 3:])
-                  + _A1 * (vtmp_pad[:, 1:-1, 1:-2] + vtmp_pad[:, 1:-1, 2:-1]))
+        vc_4th = (_A2 * (vtmp_pad[:, h:-h, h-2:n+h-1]
+                         + vtmp_pad[:, h:-h, h+1:n+h+2])
+                  + _A1 * (vtmp_pad[:, h:-h, h-1:n+h]
+                           + vtmp_pad[:, h:-h, h:n+h+1]))
         j_lo = npt + 1
         j_hi = n - npt
         vc = vc.at[:, :, j_lo:j_hi].set(vc_4th[:, :, j_lo - 1:j_hi - 1])
 
+    # One-sided c1/c2/c3 at j=1, n-1
     if n > 3:
-        vc = vc.at[:, :, 2].set(
-            _C1 * vtmp_pad[:, 1:-1, 5] + _C2 * vtmp_pad[:, 1:-1, 4]
-            + _C3 * vtmp_pad[:, 1:-1, 3])
-        vc = vc.at[:, :, n - 2].set(
-            _C1 * vtmp_pad[:, 1:-1, n - 3] + _C2 * vtmp_pad[:, 1:-1, n - 2]
-            + _C3 * vtmp_pad[:, 1:-1, n - 1])
+        vc = vc.at[:, :, 1].set(
+            _C1 * vtmp_pad[:, h:-h, h + 2] + _C2 * vtmp_pad[:, h:-h, h + 1]
+            + _C3 * vtmp_pad[:, h:-h, h])
+        vc = vc.at[:, :, n - 1].set(
+            _C1 * vtmp_pad[:, h:-h, n + h - 3] + _C2 * vtmp_pad[:, h:-h, n + h - 2]
+            + _C3 * vtmp_pad[:, h:-h, n + h - 1])
 
-    # AT face boundary (j=1, j=n-1): edge_interpolate4 on va
-    dyc_pad_y = jnp.pad(grid.dy, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    for j_bdy in [1, n - 1]:
-        j_p = j_bdy
-        va4 = jnp.stack([va_pad[:, 1:-1, j_p - 1], va_pad[:, 1:-1, j_p],
-                         va_pad[:, 1:-1, j_p + 1], va_pad[:, 1:-1, j_p + 2]],
+    # Face boundary y-dir: edge_interpolate4 on va (symmetric to x-dir)
+    dyc_pad_y = jnp.pad(grid.dy, [(0, 0), (0, 0), (h, h)], mode='edge')
+    sin_north = cdgrid.sin_sg[:, :, :, 3]  # N-edge
+    sin_south = cdgrid.sin_sg[:, :, :, 1]  # S-edge
+    sn_pad_y = pad_halo(sin_north, interp_offsets=offsets)
+    ss_pad_y = pad_halo(sin_south, interp_offsets=offsets)
+    for j_bdy in ([0, n] if n >= 2 else []):
+        j_p = j_bdy + h
+        va4 = jnp.stack([va_pad[:, h:-h, j_p - 1], va_pad[:, h:-h, j_p],
+                         va_pad[:, h:-h, j_p + 1], va_pad[:, h:-h, j_p + 2]],
                         axis=-1)
         dya4 = jnp.stack([dyc_pad_y[:, :, j_p - 1], dyc_pad_y[:, :, j_p],
                           dyc_pad_y[:, :, j_p + 1], dyc_pad_y[:, :, j_p + 2]],
                          axis=-1)
         vt_bdy = _edge_interpolate4(va4, dya4)
 
-        j_below = max(j_bdy - 1, 0)
-        j_above = min(j_bdy, n - 1)
-        sin_below = cdgrid.sin_sg[:, :, j_below, 3]
-        sin_above = cdgrid.sin_sg[:, :, j_above, 1]
+        # Upwind sin_sg from halo cell
+        sin_below = sn_pad_y[:, 1:-1, j_bdy]
+        sin_above = ss_pad_y[:, 1:-1, j_bdy + 1]
         vc_bdy = jnp.where(vt_bdy > 0, vt_bdy * sin_below, vt_bdy * sin_above)
         vc = vc.at[:, :, j_bdy].set(vc_bdy)
 
-    cosa_v = cdgrid.cosa_v
-    sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v ** 2, _EPS))
-    vt = (vc - u_d * cosa_v) / jnp.maximum(sina_v, _EPS)
+    vt = (vc - u_d * cdgrid.cosa_v) * cdgrid.rsin_v
 
-    for j_bdy in [0, 1, n - 1, n]:
-        j_below = max(j_bdy - 1, 0)
-        j_above = min(j_bdy, n - 1)
-        sin_below = cdgrid.sin_sg[:, :, j_below, 3]
-        sin_above = cdgrid.sin_sg[:, :, j_above, 1]
+    # Override at face boundary: vt = vc/sin_upwind
+    for j_bdy in [0, n]:
+        sin_below = sn_pad_y[:, 1:-1, j_bdy]
+        sin_above = ss_pad_y[:, 1:-1, j_bdy + 1]
         sin_upwind = jnp.where(vc[:, :, j_bdy] > 0, sin_below, sin_above)
         vt = vt.at[:, :, j_bdy].set(
             vc[:, :, j_bdy] / jnp.maximum(sin_upwind, _EPS))
 
+    # Non-duogrid adjacent-strip vt recomputation at i=0/n-1 (FV3 sw_core.F90:670-691).
+    # j_face ∈ [2, n-2] (Fortran max(3,js), min(npy-2,je+1)).
+    if n >= 4:
+        j_lo, j_hi = 2, n - 1  # j_face range [j_lo, j_hi) → [2, n-2]
+        # West: Fortran vt(1, j) → Python vt[:, 0, j_lo:j_hi]
+        ut_w = (ut[:, 0, j_lo - 1:j_hi - 1] + ut[:, 1, j_lo - 1:j_hi - 1]
+                + ut[:, 0, j_lo:j_hi] + ut[:, 1, j_lo:j_hi])
+        vt_w_new = (vc[:, 0, j_lo:j_hi]
+                    - 0.25 * cdgrid.cosa_v[:, 0, j_lo:j_hi] * ut_w)
+        vt = vt.at[:, 0, j_lo:j_hi].set(vt_w_new)
+        # East: Fortran vt(npx-1, j) → Python vt[:, n-1, j_lo:j_hi]
+        ut_e = (ut[:, n - 1, j_lo - 1:j_hi - 1]
+                + ut[:, n, j_lo - 1:j_hi - 1]
+                + ut[:, n - 1, j_lo:j_hi]
+                + ut[:, n, j_lo:j_hi])
+        vt_e_new = (vc[:, n - 1, j_lo:j_hi]
+                    - 0.25 * cdgrid.cosa_v[:, n - 1, j_lo:j_hi] * ut_e)
+        vt = vt.at[:, n - 1, j_lo:j_hi].set(vt_e_new)
+
+    # Non-duogrid adjacent-strip ut recomputation at j=0/n-1 (FV3:701-707, 716-722).
+    # West/east blocks write vt[i_cell=0,n-1]; south/north read vt at i_cell∈[1,n-3] (no overlap).
+    if n >= 4:
+        i_lo, i_hi = 2, n - 1
+        # South: Fortran ut(i, 1) → Python ut[:, i_lo:i_hi, 0]
+        vt_s = (vt[:, i_lo - 1:i_hi - 1, 0] + vt[:, i_lo:i_hi, 0]
+                + vt[:, i_lo - 1:i_hi - 1, 1] + vt[:, i_lo:i_hi, 1])
+        ut_s_new = (uc[:, i_lo:i_hi, 0]
+                    - 0.25 * cdgrid.cosa_u[:, i_lo:i_hi, 0] * vt_s)
+        ut = ut.at[:, i_lo:i_hi, 0].set(ut_s_new)
+        # North: Fortran ut(i, npy-1) → Python ut[:, i_lo:i_hi, n-1]
+        vt_n = (vt[:, i_lo - 1:i_hi - 1, n - 1]
+                + vt[:, i_lo:i_hi, n - 1]
+                + vt[:, i_lo - 1:i_hi - 1, n]
+                + vt[:, i_lo:i_hi, n])
+        ut_n_new = (uc[:, i_lo:i_hi, n - 1]
+                    - 0.25 * cdgrid.cosa_u[:, i_lo:i_hi, n - 1] * vt_n)
+        ut = ut.at[:, i_lo:i_hi, n - 1].set(ut_n_new)
+
     return ua, va, uc, vc, ut, vt
+
+
+# ==============================================================================
+# Shared FV3 c_sw helpers (used by both _c_sw and fv3_csw_tendencies)
+# ==============================================================================
+
+
+def _sina_u_v_from_sin_sg(cdgrid):
+    """Return `sina_u` (6, n+1, n) and `sina_v` (6, n, n+1) constructed
+    from FV3 sub-grid `sin_sg` per ``fv_grid_utils.F90:505-518``.
+
+    Interior faces:
+      sina_u(i,j) = 0.5*(sin_sg(i-1,j,3) + sin_sg(i,j,1))
+      sina_v(i,j) = 0.5*(sin_sg(i,j-1,4) + sin_sg(i,j,2))
+
+    Panel-edge faces: use the single-side sin_sg at the outermost cell,
+    matching the sina_u/sina_v construction in `cubed_sphere_cdgrid.py`
+    and `_d_sw5_corner_divergence`.
+
+    Using this formulation instead of ``sqrt(1 - cosa_u**2)`` is the
+    Fortran-faithful convention — the two are only identical when
+    ``cosa**2 + sina**2 = 1`` exactly, which is NOT the case for
+    halo-averaged ``cosa_u = 0.5*(cos_sg(E) + cos_sg(W))``.
+    """
+    sg = cdgrid.sin_sg  # (6, n, n, 9): 0=W, 1=S, 2=E, 3=N, 4=center, ...
+    sin_E = sg[:, :, :, 2]
+    sin_W = sg[:, :, :, 0]
+    sin_N = sg[:, :, :, 3]
+    sin_S = sg[:, :, :, 1]
+
+    sina_u_int = 0.5 * (sin_E[:, :-1, :] + sin_W[:, 1:, :])  # (6, n-1, n)
+    sina_u = jnp.concatenate(
+        [sin_W[:, :1, :], sina_u_int, sin_E[:, -1:, :]], axis=1,
+    )  # (6, n+1, n)
+
+    sina_v_int = 0.5 * (sin_N[:, :, :-1] + sin_S[:, :, 1:])  # (6, n, n-1)
+    sina_v = jnp.concatenate(
+        [sin_S[:, :, :1], sina_v_int, sin_N[:, :, -1:]], axis=2,
+    )  # (6, n, n+1)
+
+    return sina_u, sina_v
+
+
+def _ke_upwind(uc, vc, ua, va, u_d, v_d, cdgrid, use_duogrid):
+    """FV3 c_sw KE upwind selection (sw_core.F90:303-365).
+
+    Returns ke_u, ke_v — the upwind-selected covariant velocities for KE.
+    Non-duogrid path applies sin_sg/cos_sg conversion at face boundaries.
+    """
+    n = cdgrid.n
+    ke_u = jnp.where(ua > 0, uc[:, :-1, :], uc[:, 1:, :])
+    ke_v = jnp.where(va > 0, vc[:, :, :-1], vc[:, :, 1:])
+
+    if not use_duogrid:
+        sg = cdgrid.sin_sg
+        cg = cdgrid.cos_sg
+        # West edge (cell 0, ua > 0): uc*sin_sg(W) + v*cos_sg(W)
+        ke_bdy_l = uc[:, 0, :] * sg[:, 0, :, 0] + v_d[:, 0, :] * cg[:, 0, :, 0]
+        ke_u = ke_u.at[:, 0, :].set(
+            jnp.where(ua[:, 0, :] > 0, ke_bdy_l, ke_u[:, 0, :]))
+        # East edge (cell n-1, ua <= 0): uc*sin_sg(E) + v*cos_sg(E)
+        ke_bdy_r = uc[:, n, :] * sg[:, n-1, :, 2] + v_d[:, n, :] * cg[:, n-1, :, 2]
+        ke_u = ke_u.at[:, n-1, :].set(
+            jnp.where(ua[:, n-1, :] > 0, ke_u[:, n-1, :], ke_bdy_r))
+        # South edge (cell j=0, va > 0): vc*sin_sg(S) + u*cos_sg(S)
+        ke_bdy_b = vc[:, :, 0] * sg[:, :, 0, 1] + u_d[:, :, 0] * cg[:, :, 0, 1]
+        ke_v = ke_v.at[:, :, 0].set(
+            jnp.where(va[:, :, 0] > 0, ke_bdy_b, ke_v[:, :, 0]))
+        # North edge (cell j=n-1, va <= 0): vc*sin_sg(N) + u*cos_sg(N)
+        ke_bdy_t = vc[:, :, n] * sg[:, :, n-1, 3] + u_d[:, :, n] * cg[:, :, n-1, 3]
+        ke_v = ke_v.at[:, :, n-1].set(
+            jnp.where(va[:, :, n-1] > 0, ke_v[:, :, n-1], ke_bdy_t))
+
+    return ke_u, ke_v
+
+
+def _del6_vt_flux(nord, damp, q, cdgrid, use_duogrid=False):
+    """FV3 del6_vt_flux: del-n vorticity damping (sw_core.F90:2008-2121).
+
+    nord 0=del-2, 1=del-4, 2=del-6. damp = (damp_v * da_min_c)^(nord+1).
+    Used in d_sw6 when damp_v > 1e-5. Returns (fx2, fy2) raw diffusive fluxes.
+    """
+    n = cdgrid.n
+    grid = cdgrid.base
+    sg = cdgrid.sin_sg
+    dy = cdgrid.dy_edge_x
+    dx = cdgrid.dx_edge_y
+    rdxc = cdgrid.rdxc
+    rdyc = cdgrid.rdyc
+    rarea = 1.0 / grid.area
+
+    # Route halos through duogrid remap when active (FV3 bounded_domain path)
+    dg = grid.duogrid if use_duogrid else None
+    _offs = None if use_duogrid else grid.halo_interp_offsets
+
+    # iter-937b: defer damp factor to end (float32 overflow guard; LINEAR in d2)
+    d2 = q
+
+    # Laplacian diffusive fluxes (USE_SG path, sw_core.F90:2064-2082)
+    d2_pad = pad_halo(d2, interp_offsets=_offs, duogrid=dg)
+    sin_E = sg[:, :, :, 2]
+    sin_W = sg[:, :, :, 0]
+    sin_N = sg[:, :, :, 3]
+    sin_S = sg[:, :, :, 1]
+    se_pad = pad_halo(sin_E, interp_offsets=_offs, duogrid=dg)
+    sw_pad = pad_halo(sin_W, interp_offsets=_offs, duogrid=dg)
+    sn_pad = pad_halo(sin_N, interp_offsets=_offs, duogrid=dg)
+    ss_pad = pad_halo(sin_S, interp_offsets=_offs, duogrid=dg)
+
+    sin_uv_x = 0.5 * (se_pad[:, :n+1, 1:-1] + sw_pad[:, 1:n+2, 1:-1])
+    sin_uv_y = 0.5 * (sn_pad[:, 1:-1, :n+1] + ss_pad[:, 1:-1, 1:n+2])
+
+    fx2 = sin_uv_x * dy * (d2_pad[:, :-1, 1:-1] - d2_pad[:, 1:, 1:-1]) * rdxc
+    fy2 = sin_uv_y * dx * (d2_pad[:, 1:-1, :-1] - d2_pad[:, 1:-1, 1:]) * rdyc
+
+    # Higher-order iteration (sw_core.F90:2084-2119)
+    for _it in range(nord):
+        d2 = (fx2[:, :-1, :] - fx2[:, 1:, :] + fy2[:, :, :-1] - fy2[:, :, 1:]) * rarea
+        d2_pad = pad_halo(d2, interp_offsets=_offs, duogrid=dg)
+        fx2 = sin_uv_x * dy * (d2_pad[:, 1:, 1:-1] - d2_pad[:, :-1, 1:-1]) * rdxc
+        fy2 = sin_uv_y * dx * (d2_pad[:, 1:-1, 1:] - d2_pad[:, 1:-1, :-1]) * rdyc
+
+    # iter-937b: apply deferred damp factor
+    fx2 = damp * fx2
+    fy2 = damp * fy2
+
+    return fx2, fy2
+
+
+def _divergence_corner_duo(u_d, v_d, ua, va, cdgrid):
+    """FV3 divergence_corner_duo (sw_core.F90:2345-2447). Corner divergence for nord>0 hyperviscosity.
+
+    Cross-velocity correction via cos_sg/sin_sg. Face-boundary zeroing + 0.25 attenuation.
+    """
+    n = cdgrid.n
+    sg = cdgrid.sin_sg
+    cg = cdgrid.cos_sg
+    dxc = cdgrid.dxc   # (6, n+1, n) centre-to-centre in x
+    dyc = cdgrid.dyc   # (6, n, n+1) centre-to-centre in y
+    rarea_c = cdgrid.rarea_c  # (6, n+1, n+1)
+
+    # iter-657/949: mode='edge' here is a numerical no-op (face-boundary zeroing kills the diff)
+    ua_pad = jnp.pad(ua, [(0, 0), (1, 1), (0, 0)], mode='edge')  # (6, n+2, n)
+    va_pad = jnp.pad(va, [(0, 0), (0, 0), (1, 1)], mode='edge')  # (6, n, n+2)
+
+    # uf: u-flux at v-face (FV3:2413-2418). uf = (u - 0.25*va_avg*cos_sum)*dyc*0.5*sin_sum
+    va_below = va_pad[:, :, :-1]
+    va_above = va_pad[:, :, 1:]
+
+    cos_N = cg[:, :, :, 3]
+    cos_S = cg[:, :, :, 1]  # (6, n, n)
+    sin_N = sg[:, :, :, 3]  # (6, n, n)
+    sin_S = sg[:, :, :, 1]  # (6, n, n)
+    cos_N_pad = jnp.pad(cos_N, [(0, 0), (0, 0), (1, 1)], mode='edge')
+    cos_S_pad = jnp.pad(cos_S, [(0, 0), (0, 0), (1, 1)], mode='edge')
+    sin_N_pad = jnp.pad(sin_N, [(0, 0), (0, 0), (1, 1)], mode='edge')
+    sin_S_pad = jnp.pad(sin_S, [(0, 0), (0, 0), (1, 1)], mode='edge')
+
+    cos_sum_u = cos_N_pad[:, :, :-1] + cos_S_pad[:, :, 1:]  # (6, n, n+1)
+    sin_sum_u = sin_N_pad[:, :, :-1] + sin_S_pad[:, :, 1:]
+    uf = (u_d - 0.25 * (va_below + va_above) * cos_sum_u) * dyc * 0.5 * sin_sum_u
+
+    # vf: v-flux at u-face (FV3:2420-2425). Symmetric to uf.
+    ua_left = ua_pad[:, :-1, :]
+    ua_right = ua_pad[:, 1:, :]
+
+    cos_E = cg[:, :, :, 2]
+    cos_W = cg[:, :, :, 0]  # (6, n, n) W-edge
+    sin_E = sg[:, :, :, 2]
+    sin_W = sg[:, :, :, 0]
+    cos_E_pad = jnp.pad(cos_E, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    cos_W_pad = jnp.pad(cos_W, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    sin_E_pad = jnp.pad(sin_E, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    sin_W_pad = jnp.pad(sin_W, [(0, 0), (1, 1), (0, 0)], mode='edge')
+
+    cos_sum_v = cos_E_pad[:, :-1, :] + cos_W_pad[:, 1:, :]  # (6, n+1, n)
+    sin_sum_v = sin_E_pad[:, :-1, :] + sin_W_pad[:, 1:, :]
+    vf = (v_d - 0.25 * (ua_left + ua_right) * cos_sum_v) * dxc * 0.5 * sin_sum_v
+
+    # divg_d at corners (FV3:2427-2442). divg_d = (vf[j-1]-vf[j] + uf[i-1]-uf[i])*rarea_c
+    vf_pad = jnp.pad(vf, [(0, 0), (0, 0), (1, 1)], mode='edge')  # (6, n+1, n+2)
+    uf_pad = jnp.pad(uf, [(0, 0), (1, 1), (0, 0)], mode='edge')  # (6, n+2, n+1)
+
+    divg_d = (vf_pad[:, :, :-1] - vf_pad[:, :, 1:]
+              + uf_pad[:, :-1, :] - uf_pad[:, 1:, :]) * rarea_c
+
+    # Face-boundary zeroing (FV3:2431-2434)
+    divg_d = divg_d.at[:, 0, :].set(0.0)
+    divg_d = divg_d.at[:, n, :].set(0.0)
+    divg_d = divg_d.at[:, :, 0].set(0.0)
+    divg_d = divg_d.at[:, :, n].set(0.0)
+
+    # 0.25x attenuation at face-adjacent cells (FV3:2437-2440)
+    divg_d = divg_d.at[:, 1, :].multiply(0.25)
+    divg_d = divg_d.at[:, n - 1, :].multiply(0.25)
+    divg_d = divg_d.at[:, :, 1].multiply(0.25)
+    divg_d = divg_d.at[:, :, n - 1].multiply(0.25)
+
+    return divg_d
+
+
+def _apply_legacy_d_sw4_corner_ke_fix(
+        ke, ut, vt, u_d, v_d, dt,
+        bounded_domain: bool):
+    """iter-869: 4 cube-vertex KE overrides (FV3 sw_core.F90:1442-1465; legacy d_sw4 non-duogrid).
+
+    Gated by Fortran .not.bounded_domain. RHS reads halo cells (mode='edge' fallback;
+    cross-face D-grid edge halo deferred to iter-870+).
+    """
+    if bounded_domain:
+        return ke
+
+    dt6 = dt / 6.0
+
+    # Pad with mode='edge' for halo cells (cross-face upgrade in iter-870+)
+    ut_pad = jnp.pad(ut, [(0, 0), (0, 0), (1, 1)], mode='edge')   # (6, n+1, n+2)
+    vt_pad = jnp.pad(vt, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    u_pad = jnp.pad(u_d, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    v_pad = jnp.pad(v_d, [(0, 0), (0, 0), (1, 1)], mode='edge')
+
+    n = ke.shape[1] - 1
+
+    # SW corner
+    sw_value = dt6 * (
+        (ut[:, 0, 0] + ut_pad[:, 0, 0]) * u_d[:, 0, 0]
+        + (vt[:, 0, 0] + vt_pad[:, 0, 0]) * v_d[:, 0, 0]
+        + (ut[:, 0, 0] + vt[:, 0, 0]) * u_pad[:, 0, 0]
+    )
+
+    # SE corner
+    se_value = dt6 * (
+        (ut[:, -1, 0] + ut_pad[:, -1, 0]) * u_d[:, -1, 0]
+        + (vt_pad[:, -1, 0] + vt[:, -1, 0]) * v_d[:, -1, 0]
+        + (ut[:, -1, 0] - vt[:, -1, 0]) * u_pad[:, -1, 0]
+    )
+
+    # NE corner
+    ne_value = dt6 * (
+        (ut[:, -1, -1] + ut[:, -1, -2]) * u_d[:, -1, -1]
+        + (vt[:, -1, -1] + vt[:, -2, -1]) * v_d[:, -1, -1]
+        + (ut[:, -1, -2] + vt[:, -2, -1]) * u_pad[:, -1, -1]
+    )
+
+    # NW corner
+    nw_value = dt6 * (
+        (ut[:, 0, -1] + ut[:, 0, -2]) * u_d[:, 0, -1]
+        + (vt[:, 0, -1] + vt_pad[:, 0, -1]) * v_d[:, 0, -1]
+        + (ut[:, 0, -2] - vt[:, 0, -1]) * u_pad[:, 0, -1]
+    )
+
+    ke_fixed = ke.at[:, 0, 0].set(sw_value)
+    ke_fixed = ke_fixed.at[:, -1, 0].set(se_value)
+    ke_fixed = ke_fixed.at[:, -1, -1].set(ne_value)
+    ke_fixed = ke_fixed.at[:, 0, -1].set(nw_value)
+    return ke_fixed
+
+
+def _apply_legacy_d_sw5_corner_corrections(field_at_corners, edge_halo_field):
+    """iter-862: cube-vertex corner adjustments (FV3 sw_core.F90:1709-1715, 1773-1776 d_sw5 legacy).
+
+    SW/SE -= edge_halo; NE/NW += edge_halo. Caller gates on non-duogrid + iter-862 opt-in.
+    """
+    f = field_at_corners
+    f = f.at[:, 0, 0].add(-edge_halo_field[:, 0, 0])
+    f = f.at[:, -1, 0].add(-edge_halo_field[:, -1, 0])
+    f = f.at[:, -1, -1].add(edge_halo_field[:, -1, -1])
+    f = f.at[:, 0, -1].add(edge_halo_field[:, 0, -1])
+    return f
+
+
+def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
+                             d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1,
+                             apply_legacy_corner_corrections=False):
+    """FV3 d_sw5 corner divergence damping (sw_core.F90:1641-1821).
+
+    nord=0: del-2 Smag adaptive. nord>0: iterated Laplacian.
+    apply_legacy_corner_corrections (iter-862): Fortran-structural corner corrections at non-duogrid;
+    RHS halo data incomplete (mode='edge' fallback), gated default-OFF until cross-face halo helper lands.
+    Returns ke_damping increment for ke_corner.
+    """
+    n = cdgrid.n
+    cosa_u = cdgrid.cosa_u
+    cosa_v = cdgrid.cosa_v
+    # iter-87: shared helper sin_sg sub-grid form (Fortran-faithful vs sqrt(1-cosa²))
+    sina_u, sina_v = _sina_u_v_from_sin_sg(cdgrid)
+
+    dxc = cdgrid.dxc          # (6, n+1, n)
+    dyc = cdgrid.dyc          # (6, n, n+1)
+    rarea_c = cdgrid.rarea_c  # (6, n+1, n+1)
+    da_min_c = jnp.min(1.0 / rarea_c)  # minimum corner area
+
+    # iter-656: ua/va padding inside nord==0 branch only (not module scope)
+    if nord == 0:
+        # del-2 divergence damping (FV3:1644-1724). iter-655: pad_halo cross-face for nord=0
+        dg = cdgrid.base.duogrid
+        _offs = None if dg is not None else cdgrid.base.halo_interp_offsets
+        ua_full = pad_halo(ua, halo=1, interp_offsets=_offs, duogrid=dg)
+        va_full = pad_halo(va, halo=1, interp_offsets=_offs, duogrid=dg)
+        ua_pad = ua_full[:, :, 1:-1]  # (6, n+2, n)
+        va_pad = va_full[:, 1:-1, :]  # (6, n, n+2)
+
+        # ptc, vort at face midpoints (FV3:1644-1658)
+        va_below = va_pad[:, :, :-1]
+        va_above = va_pad[:, :, 1:]
+        ptc = (u_d - 0.5 * (va_below + va_above) * cosa_v) * dyc * sina_v
+
+        ua_left = ua_pad[:, :-1, :]
+        ua_right = ua_pad[:, 1:, :]
+        vort = (v_d - 0.5 * (ua_left + ua_right) * cosa_u) * dxc * sina_u
+
+        # delpc at corners. iter-655: vort/ptc on edge midpoints; mode='edge' same-face fallback
+        # (proper edge-midpoint cross-face halo helper deferred)
+        vort_pad = jnp.pad(vort, [(0, 0), (0, 0), (1, 1)], mode='edge')
+        ptc_pad = jnp.pad(ptc, [(0, 0), (1, 1), (0, 0)], mode='edge')
+
+        delpc = (vort_pad[:, :, :-1] - vort_pad[:, :, 1:]
+                 + ptc_pad[:, :-1, :] - ptc_pad[:, 1:, :])
+
+        # iter-862: cube-vertex corner corrections (FV3:1709-1715, gated by .not.duogrid).
+        # iter-958: corrections are no-ops on duogrid (boundary-zeroed by _divergence_corner_duo).
+        # Default OFF: RHS data uses mode='edge' (cross-face DGRID halo deferred to iter-863+).
+        if (apply_legacy_corner_corrections
+                and cdgrid.base.duogrid is None):
+            delpc = _apply_legacy_d_sw5_corner_corrections(delpc, vort_pad)
+
+        delpc = rarea_c * delpc
+
+        # Smag adaptive damp (FV3:1720-1721)
+        damp = da_min_c * jnp.maximum(
+            d2_bg, jnp.minimum(0.20, dddmp * jnp.abs(delpc * dt)))
+        ke_damping = damp * delpc
+
+    else:
+        # Higher-order div damping (FV3:1725-1821). _divergence_corner_duo → nord iterations →
+        # del-2 + del-(2*nord+2) composite
+        divg_d = _divergence_corner_duo(u_d, v_d, ua, va, cdgrid)
+        delpc = divg_d
+
+        # dd8 (FV3:1811)
+        dd8 = (da_min_c * d4_bg) ** (nord + 1)
+
+        # Smag del-2 part (FV3:1790-1805)
+        if dddmp > 1e-5:
+            rarea = 1.0 / cdgrid.base.area
+            dx_u = cdgrid.dx_edge_y
+            dy_v = cdgrid.dy_edge_x
+            wk = rarea * (u_d[:, :, :-1] * dx_u[:, :, :-1]
+                          - u_d[:, :, 1:] * dx_u[:, :, 1:]
+                          - v_d[:, :-1, :] * dy_v[:, :-1, :]
+                          + v_d[:, 1:, :] * dy_v[:, 1:, :])
+            # iter-972: a2b_ord4 4th-order (FV3:1795 a2b_ord4 call)
+            wk_corner = _interp_center_to_corner_a2b_ord4(wk, cdgrid)
+            # FV3_3D iter 183: double-where for grad-safe sqrt at rest state
+            _smag_arg = delpc ** 2 + wk_corner ** 2
+            _safe_smag_arg = jnp.where(_smag_arg > 0.0, _smag_arg, 1.0)
+            _smag_root = jnp.where(
+                _smag_arg > 0.0, jnp.sqrt(_safe_smag_arg), 0.0,
+            )
+            smag_vort = jnp.abs(dt) * _smag_root
+            damp2 = da_min_c * jnp.maximum(
+                d2_bg, jnp.minimum(0.20, dddmp * smag_vort))
+        else:
+            damp2 = da_min_c * d2_bg
+
+        # Iterated Laplacian using divg_u/divg_v metrics (FV3:1737-1787, fv_grid_utils.F90:709-735)
+        # divg_u = sina_v * dyc / dx; divg_v = sina_u * dxc / dy
+        dx = cdgrid.dx_edge_y
+        dy = cdgrid.dy_edge_x   # (6, n+1, n)
+        divg_u_met = sina_v * dyc / jnp.maximum(dx, _EPS)  # (6, n, n+1)
+        divg_v_met = sina_u * dxc / jnp.maximum(dy, _EPS)  # (6, n+1, n)
+
+        for _it in range(nord):
+            # iter-132: mode='edge' is O(1) approx at cube vertices vs Fortran MPI/duogrid halo.
+            # Impact only on FB chain (experimental); production A-L+RK3 path unaffected.
+            divg_d_pad = jnp.pad(divg_d, [(0, 0), (1, 1), (1, 1)],
+                                 mode='edge')
+            # Pad metrics for extended gradient stencil
+            divg_u_pad = jnp.pad(divg_u_met, [(0, 0), (1, 1), (0, 0)],
+                                 mode='edge')  # (6, n+2, n+1)
+            divg_v_pad = jnp.pad(divg_v_met, [(0, 0), (0, 0), (1, 1)],
+                                 mode='edge')  # (6, n+1, n+2)
+
+            # x/y gradient → corner convergence (FV3:1748-1769)
+            vc_lap = ((divg_d_pad[:, 1:n+3, 1:n+2]
+                       - divg_d_pad[:, 0:n+2, 1:n+2]) * divg_u_pad)
+            uc_lap = ((divg_d_pad[:, 1:n+2, 1:n+3]
+                       - divg_d_pad[:, 1:n+2, 0:n+2]) * divg_v_pad)
+            divg_d = (uc_lap[:, :, :-1] - uc_lap[:, :, 1:]
+                      + vc_lap[:, :-1, :] - vc_lap[:, 1:, :])
+
+            # iter-862 (FV3:1773-1776, non-duogrid only): cube-vertex corner corrections inside n-loop
+            if (apply_legacy_corner_corrections
+                    and cdgrid.base.duogrid is None):
+                divg_d = _apply_legacy_d_sw5_corner_corrections(
+                    divg_d, uc_lap)
+
+            divg_d = divg_d * rarea_c
+
+        # Composite damping del-2 + del-(2*nord+2) (FV3:1814-1820)
+        ke_damping = damp2 * delpc + dd8 * divg_d
+
+    return ke_damping
+
+
+def _corner_vorticity(uc, vc, cdgrid, use_duogrid):
+    """FV3 c_sw corner vorticity from C-grid circulation (sw_core.F90:378-408)."""
+    n = cdgrid.n
+    fx_circ = uc * cdgrid.dxc    # (6, n+1, n)
+    fy_circ = vc * cdgrid.dyc    # (6, n, n+1)
+
+    # Boundary halo: non-duogrid uses linear extrap (FV3:396-400); duogrid uses cross-face uc/vc
+    # iter-836: mode='edge' on fx/fy loses cross-face rotation (15.6% error at cube vertex on W2)
+    if use_duogrid and n >= 2:
+        # iter-836b: halo-only fix; PRESERVE interior fx_circ/fy_circ exactly (4th-order A→C in _d2a2c_vect_duogrid)
+        uc_cc = 0.5 * (uc[:, :-1, :] + uc[:, 1:, :])
+        vc_cc = 0.5 * (vc[:, :, :-1] + vc[:, :, 1:])
+        grid = cdgrid.base
+        dg = grid.duogrid
+        # iter-837: uc/vc are FV3 COVARIANT — pass cos_theta/sin_theta for pad_halo_vector covariant branch
+        uc_cc_pad, vc_cc_pad = pad_halo_vector(
+            uc_cc, vc_cc,
+            grid.cos_angle, grid.sin_angle,
+            grid.cos_angle_padded, grid.sin_angle_padded,
+            interp_offsets=None, duogrid=dg, halo=1,
+            cos_theta=cdgrid.cosa_cell,
+            sin_theta=cdgrid.sina_cell,
+        )
+        # Extract HALO rows only and reconstruct face-staggered values
+        uc_halo_j_below = 0.5 * (uc_cc_pad[:, :-1, 0] + uc_cc_pad[:, 1:, 0])
+        uc_halo_j_above = 0.5 * (uc_cc_pad[:, :-1, n + 1]
+                                  + uc_cc_pad[:, 1:, n + 1])
+        vc_halo_i_left = 0.5 * (vc_cc_pad[:, 0, :-1] + vc_cc_pad[:, 0, 1:])
+        vc_halo_i_right = 0.5 * (vc_cc_pad[:, n + 1, :-1]
+                                  + vc_cc_pad[:, n + 1, 1:])
+        # Metric halo: edge-copy the boundary dxc/dyc into the halo row.
+        # iter93 oracle finding: FV3 in DUOGRID mode skips the dxc/dyc
+        # edge-extrapolation + mpp_update the non-duogrid path uses
+        # (fv_grid_tools.F90:899-916 + :1107 are gated `.not. duogrid`) and
+        # instead carries the exact CROSS-FACE metric halo from its extended grid,
+        # so this edge-copy is formally a faithfulness gap.  BUT iter94 RULED IT
+        # OUT as a meaningful FB-residual term: replacing edge-copy with O(dx²)
+        # linear extrapolation (2*edge - first-interior) of dxc/dyc changed the FB
+        # W2 C36 day-1 max|u_d| by <0.2% (48.60 → 48.53, still day-2 NaN).  ⇒ the
+        # FB residual is NOT in the corner-vorticity METRIC halo (consistent with
+        # iter82-83 "structural corner coupling, not metric"); the remaining
+        # candidate inside `_corner_vorticity` is the uc/vc halo RECONSTRUCTION
+        # (the 2-pt center-avg + re-stagger above), not the metric.  Kept as
+        # edge-copy — the validated baseline; the exact cross-face metric is a
+        # known-LOW-priority TODO, proven not to move the residual.
+        dxc_halo_j_below = cdgrid.dxc[:, :, 0]    # (6, n+1)
+        dxc_halo_j_above = cdgrid.dxc[:, :, -1]   # (6, n+1)
+        dyc_halo_i_left = cdgrid.dyc[:, 0, :]     # (6, n+1)
+        dyc_halo_i_right = cdgrid.dyc[:, -1, :]   # (6, n+1)
+
+        fx_halo_j_below = uc_halo_j_below * dxc_halo_j_below   # (6, n+1)
+        fx_halo_j_above = uc_halo_j_above * dxc_halo_j_above   # (6, n+1)
+        fy_halo_i_left = vc_halo_i_left * dyc_halo_i_left      # (6, n+1)
+        fy_halo_i_right = vc_halo_i_right * dyc_halo_i_right   # (6, n+1)
+
+        # Interior fx_pad = fx_circ; halo rows at j=-1 and j=n ONLY are
+        # replaced with the rotated values.  Interior values unchanged.
+        fx_pad = jnp.concatenate([
+            fx_halo_j_below[:, :, jnp.newaxis],   # (6, n+1, 1) j=-1
+            fx_circ,                               # (6, n+1, n) interior
+            fx_halo_j_above[:, :, jnp.newaxis],   # (6, n+1, 1) j=n
+        ], axis=2)  # (6, n+1, n+2)
+        fy_pad = jnp.concatenate([
+            fy_halo_i_left[:, jnp.newaxis, :],    # (6, 1, n+1) i=-1
+            fy_circ,                               # (6, n, n+1) interior
+            fy_halo_i_right[:, jnp.newaxis, :],   # (6, 1, n+1) i=n
+        ], axis=1)  # (6, n+2, n+1)
+    else:
+        # Non-duogrid path: edge padding + linear extrapolation at the 4
+        # panel-edge boundaries (sw_core.F90:396-400).
+        fx_pad = jnp.pad(fx_circ, [(0, 0), (0, 0), (1, 1)], mode='edge')
+        fy_pad = jnp.pad(fy_circ, [(0, 0), (1, 1), (0, 0)], mode='edge')
+        if n > 2:
+            fx_pad = fx_pad.at[:, :, 0].set(2 * fx_circ[:, :, 0] - fx_circ[:, :, 1])
+            fx_pad = fx_pad.at[:, :, n + 1].set(2 * fx_circ[:, :, n - 1] - fx_circ[:, :, n - 2])
+            fy_pad = fy_pad.at[:, 0, :].set(2 * fy_circ[:, 0, :] - fy_circ[:, 1, :])
+            fy_pad = fy_pad.at[:, n + 1, :].set(2 * fy_circ[:, n - 1, :] - fy_circ[:, n - 2, :])
+
+    # Direct corner vorticity: vort(i,j) = fx(i,j-1) - fx(i,j) - fy(i-1,j) + fy(i,j)
+    vort = (fx_pad[:, :, :-1] - fx_pad[:, :, 1:]
+            - fy_pad[:, :-1, :] + fy_pad[:, 1:, :])
+
+    # Corner corrections for non-duogrid (FV3 sw_core.F90:396-400)
+    if not use_duogrid:
+        vort = vort.at[:, 0, 0].add(fy_pad[:, 0, 0])
+        vort = vort.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
+        vort = vort.at[:, n, n].add(-fy_pad[:, n + 1, n])
+        vort = vort.at[:, 0, n].add(fy_pad[:, 0, n])
+
+    rarea_c = 1.0 / cdgrid.area_corner
+    return cdgrid.f_corner + rarea_c * vort
+
+
+def _vorticity_flux(v_d, u_d, uc, vc, vort_abs, cdgrid, use_duogrid):
+    """FV3 c_sw vorticity transport flux (sw_core.F90:416-480).
+
+    Returns fy1, vort_x (x-face) and fx1, vort_y (y-face).
+    Uses 1/sin (NOT 1/sin²) per FV3 comment at sw_core.F90:417.
+
+    `sina_u` / `sina_v` come from the sin_sg sub-grid as
+    ``0.5*(sin_sg(i-1,j,3) + sin_sg(i,j,1))`` (matching
+    `fv_grid_utils.F90:505-518`) rather than ``sqrt(1 - cosa**2)``.
+    The two are not identical because `cosa_u` is a halo-averaged
+    value of `cos_sg` and the trigonometric identity does not hold
+    on averaged quantities.
+    """
+    n = cdgrid.n
+    sina_u, sina_v = _sina_u_v_from_sin_sg(cdgrid)
+
+    fy1 = (v_d - uc * cdgrid.cosa_u) / jnp.maximum(sina_u, _EPS)
+    if not use_duogrid:
+        fy1 = fy1.at[:, 0, :].set(v_d[:, 0, :])
+        fy1 = fy1.at[:, n, :].set(v_d[:, n, :])
+    vort_x = jnp.where(fy1 > 0, vort_abs[:, :, :-1], vort_abs[:, :, 1:])
+
+    fx1 = (u_d - vc * cdgrid.cosa_v) / jnp.maximum(sina_v, _EPS)
+    if not use_duogrid:
+        fx1 = fx1.at[:, :, 0].set(u_d[:, :, 0])
+        fx1 = fx1.at[:, :, n].set(u_d[:, :, n])
+    vort_y = jnp.where(fx1 > 0, vort_abs[:, :-1, :], vort_abs[:, 1:, :])
+
+    return fy1, vort_x, fx1, vort_y
 
 
 # ==============================================================================
@@ -238,128 +1305,72 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
 # ==============================================================================
 
 def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
-    """FV3 c_sw: C-grid half of the forward-backward step.
-
-    Updates mass (h) via first-order upwind transport and C-grid
-    covariant velocities (uc, vc) via vorticity flux + KE gradient.
-
-    Parameters
-    ----------
-    h : (6, n, n) height at cell centres
-    u_d : (6, n, n+1) D-grid x-velocity
-    v_d : (6, n+1, n) D-grid y-velocity
-    h_s : (6, n, n) surface topography
-    cdgrid : CubedSphereCDGrid
-    dt : float — full time step (half-step scaling applied internally)
-    g : float — gravitational acceleration
-
-    Returns
-    -------
-    h_star : (6, n, n) transported mass
-    uc_new : (6, n+1, n) updated C-grid covariant u
-    vc_new : (6, n, n+1) updated C-grid covariant v
-    ua : (6, n, n) A-grid contravariant u (for diagnostics)
-    va : (6, n, n) A-grid contravariant v
-    """
+    """FV3 c_sw: C-grid half of forward-backward. Mass via 1st-order upwind; (uc,vc) via vort + KE grad."""
     n = cdgrid.n
-    dt2 = 0.5 * dt  # half-step
+    dt2 = 0.5 * dt
+    dg = cdgrid.base.duogrid
+    use_duogrid = dg is not None and dg.ng >= 2
 
     # 1. d2a2c_vect
     ua, va, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
 
-    # 2. Scale transport velocities with dt/2 * edge_length * sin_sg_upwind
+    # 2. Scale transport: ut/vt * dt2 * edge_length * sin_sg_upwind (FV3 fv_grid_utils.F90:570)
     dy = cdgrid.dy_edge_x   # (6, n+1, n)
     dx = cdgrid.dx_edge_y   # (6, n, n+1)
     sg = cdgrid.sin_sg
+    grid = cdgrid.base
+    _offs = None if use_duogrid else grid.halo_interp_offsets
+    _dg = dg if use_duogrid else None
 
-    # x-direction: ut → scaled flux
-    sin_sg_left_x = jnp.pad(sg[:, :, :, 2], [(0, 0), (1, 0), (0, 0)], mode='edge')
-    sin_sg_right_x = jnp.pad(sg[:, :, :, 0], [(0, 0), (0, 1), (0, 0)], mode='edge')
-    sin_upwind_x = jnp.where(ut > 0, sin_sg_left_x, sin_sg_right_x)
+    # x-direction
+    sin_east = sg[:, :, :, 2]
+    sin_west = sg[:, :, :, 0]
+    se_pad = pad_halo(sin_east, interp_offsets=_offs, duogrid=_dg)
+    sw_pad = pad_halo(sin_west, interp_offsets=_offs, duogrid=_dg)
+    sin_upwind_x = jnp.where(ut > 0, se_pad[:, :n+1, 1:-1],
+                                      sw_pad[:, 1:n+2, 1:-1])
     ut_scaled = dt2 * ut * dy * sin_upwind_x
 
-    # y-direction: vt → scaled flux
-    sin_sg_below_y = jnp.pad(sg[:, :, :, 3], [(0, 0), (0, 0), (1, 0)], mode='edge')
-    sin_sg_above_y = jnp.pad(sg[:, :, :, 1], [(0, 0), (0, 0), (0, 1)], mode='edge')
-    sin_upwind_y = jnp.where(vt > 0, sin_sg_below_y, sin_sg_above_y)
+    # y-direction
+    sin_north = sg[:, :, :, 3]
+    sin_south = sg[:, :, :, 1]
+    sn_pad = pad_halo(sin_north, interp_offsets=_offs, duogrid=_dg)
+    ss_pad = pad_halo(sin_south, interp_offsets=_offs, duogrid=_dg)
+    sin_upwind_y = jnp.where(vt > 0, sn_pad[:, 1:-1, :n+1],
+                                      ss_pad[:, 1:-1, 1:n+2])
     vt_scaled = dt2 * vt * dx * sin_upwind_y
 
     # 3. First-order upwind mass transport
     h_pad = _pad_halo_auto(h, cdgrid)
-    # x-fluxes: upwind h * scaled_ut
     h_left = h_pad[:, :-1, 1:-1]   # (6, n+1, n)
     h_right = h_pad[:, 1:, 1:-1]
     fx = jnp.where(ut_scaled > 0, h_left, h_right) * ut_scaled
 
-    # y-fluxes
     h_bot = h_pad[:, 1:-1, :-1]    # (6, n, n+1)
     h_top = h_pad[:, 1:-1, 1:]
     fy = jnp.where(vt_scaled > 0, h_bot, h_top) * vt_scaled
 
+    # Duogrid flux synchronization (FV3 dyn_core.F90:853-900)
+    if use_duogrid:
+        fx, fy = synchronize_cgrid_fluxes(fx, fy, n)
+
     rarea = 1.0 / cdgrid.base.area
     h_star = h + (fx[:, :-1, :] - fx[:, 1:, :] + fy[:, :, :-1] - fy[:, :, 1:]) * rarea
 
-    # 4. KE at cell centres
-    uc_left = uc[:, :-1, :]   # (6, n, n)
-    uc_right = uc[:, 1:, :]
-    ke_u = jnp.where(ua > 0, uc_left, uc_right)
-
-    vc_bot = vc[:, :, :-1]    # (6, n, n)
-    vc_top = vc[:, :, 1:]
-    ke_v = jnp.where(va > 0, vc_bot, vc_top)
-
-    # ke = dt/4 * (ua * uc_upwind + va * vc_upwind)
-    # NOTE: c_sw uses ONLY kinetic energy for the C-grid gradient, NOT
-    # the full Bernoulli function (g*h is in d_sw only).  This is per
-    # FV3 sw_core.F90 where ke has dt4 = 0.25*dt scaling.
+    # 4. KE at cc (FV3:303-372). c_sw uses KE only (no g*h)
+    ke_u, ke_v = _ke_upwind(uc, vc, ua, va, u_d, v_d, cdgrid, use_duogrid)
     ke_total = dt2 * 0.5 * (ua * ke_u + va * ke_v)
 
-    # 5. Vorticity at D-grid corners from C-grid covariant velocities
-    # FV3 c_sw uses dxc/dyc (center-to-center distances), NOT edge lengths.
-    # uc is covariant along x → uc*dxc = line integral along that path.
-    fx_circ = uc * cdgrid.dxc    # (6, n+1, n) — FV3: fx = uc * dxc
-    fy_circ = vc * cdgrid.dyc    # (6, n, n+1) — FV3: fy = vc * dyc
+    # 5. Corner vorticity (FV3:378-408)
+    vort_abs = _corner_vorticity(uc, vc, cdgrid, use_duogrid)
 
-    fx_pad = jnp.pad(fx_circ, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    fy_pad = jnp.pad(fy_circ, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    # 6. Vorticity flux at C-faces (FV3:416-480)
+    fy1, vort_x, fx1, vort_y = _vorticity_flux(
+        v_d, u_d, uc, vc, vort_abs, cdgrid, use_duogrid)
+    fy1 = dt2 * fy1
+    fx1 = dt2 * fx1
 
-    circ = (fx_pad[:, :, :-1] - fx_pad[:, :, 1:]
-            + fy_pad[:, 1:, :] - fy_pad[:, :-1, :])
-
-    # Cube vertex corrections
-    circ = circ.at[:, 0, 0].add(fy_pad[:, 0, 0])
-    circ = circ.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
-    circ = circ.at[:, n, n].add(-fy_pad[:, n + 1, n])
-    circ = circ.at[:, 0, n].add(fy_pad[:, 0, n])
-
-    vort = circ * cdgrid.rarea_c
-    vort_abs = vort + cdgrid.f_corner
-
-    # 6. Vorticity flux at C-grid face positions
-    # x-face: cross-velocity in j-direction transports vorticity
-    cosa_u = cdgrid.cosa_u
-    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u ** 2, _EPS))
-    fy1 = dt2 * (v_d - uc * cosa_u) / jnp.maximum(sina_u, _EPS)
-    # At face edges: sin_sg cancellation → fy1 = dt2 * v_d
-    fy1 = fy1.at[:, 0, :].set(dt2 * v_d[:, 0, :])
-    fy1 = fy1.at[:, 1, :].set(dt2 * v_d[:, 1, :])
-    fy1 = fy1.at[:, n - 1, :].set(dt2 * v_d[:, n - 1, :])
-    fy1 = fy1.at[:, n, :].set(dt2 * v_d[:, n, :])
-
-    vort_x = jnp.where(fy1 > 0, vort_abs[:, :, :-1], vort_abs[:, :, 1:])
-
-    # y-face: cross-velocity in i-direction
-    cosa_v = cdgrid.cosa_v
-    sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v ** 2, _EPS))
-    fx1 = dt2 * (u_d - vc * cosa_v) / jnp.maximum(sina_v, _EPS)
-    fx1 = fx1.at[:, :, 0].set(dt2 * u_d[:, :, 0])
-    fx1 = fx1.at[:, :, 1].set(dt2 * u_d[:, :, 1])
-    fx1 = fx1.at[:, :, n - 1].set(dt2 * u_d[:, :, n - 1])
-    fx1 = fx1.at[:, :, n].set(dt2 * u_d[:, :, n])
-
-    vort_y = jnp.where(fx1 > 0, vort_abs[:, :-1, :], vort_abs[:, 1:, :])
-
-    # 7. KE gradient at C-grid face positions (2-point difference)
+    # 7. KE gradient at C-faces
     ke_pad = _pad_halo_auto(ke_total, cdgrid)
     dke_x = cdgrid.rdxc * (ke_pad[:, :-1, 1:-1] - ke_pad[:, 1:, 1:-1])
     dke_y = cdgrid.rdyc * (ke_pad[:, 1:-1, :-1] - ke_pad[:, 1:-1, 1:])
@@ -375,288 +1386,103 @@ def _c_sw(h, u_d, v_d, h_s, cdgrid, dt, g):
 # C-grid tendency for RK3 integration
 # ==============================================================================
 
-def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=9.80616,
+def fv3_csw_tendencies(h, u_d, v_d, h_s, cdgrid, g=constants.g,
                        div_damp=0.0, hyperdiff_coeff=0.0):
-    """FV3 c_sw-style shallow water tendencies for RK3 integration.
+    """FV3 c_sw-style SW tendencies for RK3.
 
-    Computes the FULL Bernoulli gradient + vorticity flux at C-grid
-    face positions (same stagger → geostrophic balance preserved), then
-    projects the TOTAL C-grid tendency to D-grid edge-midpoint positions.
-
-    Projecting the SUM (which is near zero for balanced flow) preserves
-    balance, unlike projecting gradient and vorticity separately.
-
-    Parameters
-    ----------
-    h : (6, n, n) height at cell centres
-    u_d : (6, n, n+1) D-grid x-velocity
-    v_d : (6, n+1, n) D-grid y-velocity
-    h_s : (6, n, n) surface topography
-    cdgrid : CubedSphereCDGrid
-    g, div_damp, hyperdiff_coeff : float
-
-    Returns
-    -------
-    dh_dt : (6, n, n)
-    du_dt : (6, n, n+1)
-    dv_dt : (6, n+1, n)
+    Bernoulli + vort flux at C-faces (same stagger → balance preserved); project SUM to D-edges.
     """
     n = cdgrid.n
 
-    from legoesm.core.operators_cdgrid import fv3_d2cc, fv3_cc2c
-
-    # 1. d2a2c_vect: D→A→C for KE and vorticity (covariant convention)
+    # 1. d2a2c_vect (covariant)
     ua, va, uc, vc, ut, vt = _d2a2c_vect(u_d, v_d, cdgrid)
 
-    # 2. Mass transport uses the PROVEN fv3_cc2c (physical face-normal).
+    # 2. Mass transport via fv3_cc2c (physical face-normal)
     u_cc, v_cc = fv3_d2cc(u_d, v_d, cdgrid)
     uc_mass, vc_mass = fv3_cc2c(u_cc, v_cc, cdgrid)
     dh_dt = cgrid_mass_flux_divergence(h, uc_mass, vc_mass, cdgrid)
 
-    # 3. KE at cell centres (FV3 upwind formula)
-    uc_left = uc[:, :-1, :]
-    uc_right = uc[:, 1:, :]
-    ke_u = jnp.where(ua > 0, uc_left, uc_right)
-
-    vc_bot = vc[:, :, :-1]
-    vc_top = vc[:, :, 1:]
-    ke_v = jnp.where(va > 0, vc_bot, vc_top)
-
-    ke = 0.5 * (ua * ke_u + va * ke_v)
+    # 3. KE from physical D-grid (avoids 1/sin² at face boundaries from contravariant)
+    dg = cdgrid.base.duogrid
+    use_duogrid = dg is not None and dg.ng >= 2
+    utmp_ke = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])
+    vtmp_ke = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])
+    ke = 0.5 * (utmp_ke**2 + vtmp_ke**2)
     B = ke + g * (h + h_s)
 
-    # 4. Bernoulli gradient at C-grid face positions (2-point difference)
+    # 4. Bernoulli gradient at C-faces
     B_pad = _pad_halo_auto(B, cdgrid)
-    dB_x = cdgrid.rdxc * (B_pad[:, :-1, 1:-1] - B_pad[:, 1:, 1:-1])  # (6, n+1, n)
-    dB_y = cdgrid.rdyc * (B_pad[:, 1:-1, :-1] - B_pad[:, 1:-1, 1:])  # (6, n, n+1)
+    dB_x = cdgrid.rdxc * (B_pad[:, :-1, 1:-1] - B_pad[:, 1:, 1:-1])
+    dB_y = cdgrid.rdyc * (B_pad[:, 1:-1, :-1] - B_pad[:, 1:-1, 1:])
 
-    # 5. Vorticity at D-grid corners from C-grid covariant velocities
-    # FV3: fx = uc * dxc, fy = vc * dyc (center-to-center distances)
-    fx_circ = uc * cdgrid.dxc
-    fy_circ = vc * cdgrid.dyc
-    fx_pad = jnp.pad(fx_circ, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    fy_pad = jnp.pad(fy_circ, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    # 5/6. Corner vorticity + vorticity flux at C-faces (FV3:378-480)
+    vort_abs = _corner_vorticity(uc, vc, cdgrid, use_duogrid)
+    fy1, vort_x, fx1, vort_y = _vorticity_flux(
+        v_d, u_d, uc, vc, vort_abs, cdgrid, use_duogrid)
 
-    circ = (fx_pad[:, :, :-1] - fx_pad[:, :, 1:]
-            + fy_pad[:, 1:, :] - fy_pad[:, :-1, :])
-    circ = circ.at[:, 0, 0].add(fy_pad[:, 0, 0])
-    circ = circ.at[:, n, 0].add(-fy_pad[:, n + 1, 0])
-    circ = circ.at[:, n, n].add(-fy_pad[:, n + 1, n])
-    circ = circ.at[:, 0, n].add(fy_pad[:, 0, n])
+    # 7. TOTAL C-grid tendency
+    duc = fy1 * vort_x + dB_x
+    dvc = -fx1 * vort_y + dB_y
 
-    vort_abs = circ * cdgrid.rarea_c + cdgrid.f_corner
-
-    # 6. Vorticity flux at C-grid face positions
-    cosa_u = cdgrid.cosa_u
-    sina_u = jnp.sqrt(jnp.maximum(1.0 - cosa_u ** 2, _EPS))
-    fy1 = (v_d - uc * cosa_u) / jnp.maximum(sina_u, _EPS)
-    fy1 = fy1.at[:, 0, :].set(v_d[:, 0, :])
-    fy1 = fy1.at[:, 1, :].set(v_d[:, 1, :])
-    fy1 = fy1.at[:, n - 1, :].set(v_d[:, n - 1, :])
-    fy1 = fy1.at[:, n, :].set(v_d[:, n, :])
-    vort_x = jnp.where(fy1 > 0, vort_abs[:, :, :-1], vort_abs[:, :, 1:])
-
-    cosa_v = cdgrid.cosa_v
-    sina_v = jnp.sqrt(jnp.maximum(1.0 - cosa_v ** 2, _EPS))
-    fx1 = (u_d - vc * cosa_v) / jnp.maximum(sina_v, _EPS)
-    fx1 = fx1.at[:, :, 0].set(u_d[:, :, 0])
-    fx1 = fx1.at[:, :, 1].set(u_d[:, :, 1])
-    fx1 = fx1.at[:, :, n - 1].set(u_d[:, :, n - 1])
-    fx1 = fx1.at[:, :, n].set(u_d[:, :, n])
-    vort_y = jnp.where(fx1 > 0, vort_abs[:, :-1, :], vort_abs[:, 1:, :])
-
-    # 7. TOTAL C-grid tendency = vorticity flux + Bernoulli gradient
-    duc = fy1 * vort_x + dB_x    # (6, n+1, n)
-    dvc = -fx1 * vort_y + dB_y   # (6, n, n+1)
-
-    # 8. Divergence damping (optional)
+    # 8. Div damping: SUBTRACT div_damp*ddiv_x (negated-gradient stencil; iter-57 audit found +sign anti-damps)
     if div_damp > 0:
         div_field = cgrid_divergence(uc, vc, cdgrid)
         div_pad = _pad_halo_auto(div_field, cdgrid)
         ddiv_x = cdgrid.rdxc * (div_pad[:, :-1, 1:-1] - div_pad[:, 1:, 1:-1])
         ddiv_y = cdgrid.rdyc * (div_pad[:, 1:-1, :-1] - div_pad[:, 1:-1, 1:])
-        duc = duc + div_damp * ddiv_x
-        dvc = dvc + div_damp * ddiv_y
+        duc = duc - div_damp * ddiv_x
+        dvc = dvc - div_damp * ddiv_y
 
-    # 9. Project TOTAL C-grid tendency → D-grid edge midpoints (4-point avg)
-    # Projecting the SUM (near zero for balanced flow) preserves balance.
-    duc_pad = jnp.pad(duc, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    du_dt = 0.25 * (duc_pad[:, :-1, :-1] + duc_pad[:, 1:, :-1]
-                     + duc_pad[:, :-1, 1:] + duc_pad[:, 1:, 1:])
-
-    dvc_pad = jnp.pad(dvc, [(0, 0), (1, 1), (0, 0)], mode='edge')
-    dv_dt = 0.25 * (dvc_pad[:, :-1, :-1] + dvc_pad[:, 1:, :-1]
-                     + dvc_pad[:, :-1, 1:] + dvc_pad[:, 1:, 1:])
+    # 9. Project total C-tendency → D-edges via cc-avg + vector halo (avoids edge-copy instability at ~2h)
+    grid = cdgrid.base
+    dg = grid.duogrid
+    offsets = None if dg is not None else grid.halo_interp_offsets
+    duc_cc = 0.5 * (duc[:, :-1, :] + duc[:, 1:, :])
+    dvc_cc = 0.5 * (dvc[:, :, :-1] + dvc[:, :, 1:])
+    duc_pad, dvc_pad = pad_halo_vector(
+        duc_cc, dvc_cc,
+        grid.cos_angle, grid.sin_angle,
+        grid.cos_angle_padded, grid.sin_angle_padded,
+        interp_offsets=offsets, duogrid=dg,
+    )
+    du_dt = 0.5 * (duc_pad[:, 1:-1, :-1] + duc_pad[:, 1:-1, 1:])   # (6, n, n+1)
+    dv_dt = 0.5 * (dvc_pad[:, :-1, 1:-1] + dvc_pad[:, 1:, 1:-1])   # (6, n+1, n)
 
     return dh_dt, du_dt, dv_dt
-
-
-# ==============================================================================
-# d_sw: D-grid half-step
-# ==============================================================================
-
-def _d_sw(h, h_star, u_d, v_d, h_s, uc_new, vc_new, cdgrid, dt, g,
-          div_damp=0.0, hyperdiff_coeff=0.0):
-    """FV3 d_sw: D-grid half of the forward-backward step.
-
-    Uses the UPDATED C-grid velocities from c_sw for mass transport
-    (PPM), then updates D-grid winds using the existing Arakawa-Lamb
-    gradient + corner vorticity (internally consistent at D-grid stagger).
-
-    The Bernoulli gradient uses the ORIGINAL h (same time level as u_d/v_d)
-    to maintain geostrophic balance.  The mass update uses h_star from c_sw.
-
-    Parameters
-    ----------
-    h : (6, n, n) ORIGINAL height (for Bernoulli gradient, same time level as u_d)
-    h_star : (6, n, n) mass from c_sw (for mass transport)
-    u_d : (6, n, n+1) OLD D-grid x-velocity
-    v_d : (6, n+1, n) OLD D-grid y-velocity
-    h_s : (6, n, n) surface topography
-    uc_new : (6, n+1, n) UPDATED C-grid covariant u from c_sw
-    vc_new : (6, n, n+1) UPDATED C-grid covariant v from c_sw
-    cdgrid : CubedSphereCDGrid
-    dt, g, div_damp, hyperdiff_coeff : float
-
-    Returns
-    -------
-    h_new : (6, n, n)
-    u_d_new : (6, n, n+1)
-    v_d_new : (6, n+1, n)
-    """
-    n = cdgrid.n
-
-    # 1. Convert updated covariant uc/vc to physical face-normal velocities.
-    # cgrid_mass_flux_divergence builds fluxes as h_face * u_c * dy, so u_c
-    # must be the physical face-normal velocity, not the covariant projection.
-    # Physical face-normal: uc_phys = (uc_cov - v_at_u * cosa_u) * rsin_u
-    # We approximate v_at_u from the D-grid v_d (same time level as uc_new
-    # was derived from) via simple averaging to the u-face position.
-    cosa_u = cdgrid.cosa_u     # (6, n+1, n)
-    rsin_u = cdgrid.rsin_u     # (6, n+1, n)
-    cosa_v = cdgrid.cosa_v     # (6, n, n+1)
-    rsin_v = cdgrid.rsin_v     # (6, n, n+1)
-
-    # v_d (6, n+1, n) is co-located with cosa_u — use directly as the
-    # cross-velocity at u-face positions (same approximation as _uc_to_ut).
-    v_at_u = v_d  # (6, n+1, n)
-
-    # u_d (6, n, n+1) is co-located with cosa_v — use directly.
-    u_at_v = u_d  # (6, n, n+1)
-
-    uc_phys = (uc_new - v_at_u * cosa_u) * rsin_u
-    vc_phys = (vc_new - u_at_v * cosa_v) * rsin_v
-
-    # 2. Mass transport (PPM) with physical face-normal velocities (dt/2 half-step).
-    dh = cgrid_mass_flux_divergence(h_star, uc_phys, vc_phys, cdgrid)
-    h_new = h_star + 0.5 * dt * dh
-
-    # 3. D-grid momentum update using existing corner operators.
-    # Uses ORIGINAL h (same time level as u_d/v_d) for geostrophic balance.
-    u_cc = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])
-    v_cc = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])
-    KE = 0.5 * (u_cc ** 2 + v_cc ** 2)
-    B = KE + g * (h + h_s)
-    dB_dx, dB_dy_perp = _arakawa_lamb_gradient(B, cdgrid)
-
-    # Corner winds for vorticity
-    u_d_pad = jnp.pad(u_d, [(0, 0), (1, 1), (0, 0)], mode='edge')
-    u_corner = 0.5 * (u_d_pad[:, :-1, :] + u_d_pad[:, 1:, :])
-    v_d_pad = jnp.pad(v_d, [(0, 0), (0, 0), (1, 1)], mode='edge')
-    v_corner = 0.5 * (v_d_pad[:, :, :-1] + v_d_pad[:, :, 1:])
-
-    zeta = dgrid_vorticity(u_corner, v_corner, cdgrid)
-    zeta_abs = zeta + cdgrid.base.f
-    zeta_corner = _interp_center_to_corner(zeta_abs, cdgrid)
-
-    du_corner = zeta_corner * v_corner - dB_dx
-    dv_corner = -zeta_corner * u_corner - dB_dy_perp
-
-    # Divergence damping
-    if div_damp > 0:
-        div_field = cgrid_divergence(uc_new, vc_new, cdgrid)
-        area_min = jnp.min(cdgrid.base.area)
-        d2_bg = div_damp / area_min
-        dddmp = 0.2
-        div_abs_corner = _interp_center_to_corner(jnp.abs(div_field), cdgrid)
-        adaptive_coeff = area_min * jnp.maximum(
-            d2_bg, jnp.minimum(0.20, dddmp * div_abs_corner))
-        ddiv_dx, ddiv_dy = _arakawa_lamb_gradient(div_field, cdgrid)
-        du_corner = du_corner + adaptive_coeff * ddiv_dx
-        dv_corner = dv_corner + adaptive_coeff * ddiv_dy
-
-    # Biharmonic hyperdiffusion
-    if hyperdiff_coeff > 0:
-        from legoesm.core.operators_cdgrid import _laplacian_dgrid
-        du_corner = du_corner - hyperdiff_coeff * _laplacian_dgrid(
-            _laplacian_dgrid(u_corner, cdgrid), cdgrid)
-        dv_corner = dv_corner - hyperdiff_coeff * _laplacian_dgrid(
-            _laplacian_dgrid(v_corner, cdgrid), cdgrid)
-
-    # Boundary fix (consistent at D-grid stagger)
-    du_corner, dv_corner = _extrapolate_boundary_corners(du_corner, dv_corner, n)
-
-    # Average corner tendencies to edge-midpoint D-grid
-    du_d_dt = 0.5 * (du_corner[:, :-1, :] + du_corner[:, 1:, :])
-    dv_d_dt = 0.5 * (dv_corner[:, :, :-1] + dv_corner[:, :, 1:])
-
-    # Forward Euler update with full dt (d_sw is the primary D-grid update)
-    u_d_new = u_d + dt * du_d_dt
-    v_d_new = v_d + dt * dv_d_dt
-
-    # Note: The c_sw half already contributed a KE gradient correction
-    # at C-grid positions (dt/4 scaling). The d_sw provides the FULL
-    # Bernoulli gradient + vorticity at D-grid positions (dt scaling).
-    # The forward-backward coupling is through the mass field (h_star)
-    # and the updated uc_new/vc_new used for transport.
-
-    return h_new, u_d_new, v_d_new
 
 
 # ==============================================================================
 # Complete forward-backward step
 # ==============================================================================
 
-def fv3_forward_backward_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
-                               div_damp=0.0, hyperdiff_coeff=0.0):
-    """EXPERIMENTAL: One complete FV3 forward-backward time step for shallow water.
+def fv3_forward_backward_step(h, u_d, v_d, h_s, cdgrid, dt, g=constants.g,
+                               div_damp=0.0, hyperdiff_coeff=0.0,
+                               apply_legacy_d_sw4_corner_ke_fix=False,
+                               apply_legacy_d_sw5_corner_corrections=False,
+                               apply_fortran_xppm_boundary=False):
+    """EXPERIMENTAL FV3 forward-backward step (unstable by ~50 steps; use fv3_sw_tendencies+RK3 for production).
 
-    Known unstable — produces large errors by step ~50.  Use
-    ``fv3_sw_tendencies`` (operators_cdgrid.py) with RK3 integration
-    for production work.
-
-    Combines c_sw (C-grid half) + d_sw (D-grid half).  The c_sw half
-    uses FV3's covariant velocity convention with sin_sg flux scaling;
-    the d_sw half uses the existing corner-based operators (consistent
-    at D-grid stagger).  The forward-backward coupling connects them
-    without projecting between staggers.
-
-    Parameters
-    ----------
-    h : (6, n, n) height at cell centres
-    u_d : (6, n, n+1) D-grid x-velocity at x-edge midpoints
-    v_d : (6, n+1, n) D-grid y-velocity at y-edge midpoints
-    h_s : (6, n, n) surface topography
-    cdgrid : CubedSphereCDGrid
-    dt : float — full time step
-    g : float
-    div_damp : float — divergence damping coefficient [m²/s]
-    hyperdiff_coeff : float — biharmonic hyperdiffusion coefficient
-
-    Returns
-    -------
-    h_new : (6, n, n)
-    u_d_new : (6, n, n+1)
-    v_d_new : (6, n+1, n)
+    Phase 1: c_sw (C-grid half). Phase 2: p_grad_c. Phase 3: _d_sw_native (FV3 PPM + KE/vort transport).
+    div_damp here is LEGACY/UNUSED (FB chain uses d_sw5 d2_bg/dddmp/d4_bg/nord instead).
     """
-    # C-grid half: mass transport + C-grid velocity update
+    # Phase 1: c_sw
     h_star, uc_new, vc_new, ua, va = _c_sw(
         h, u_d, v_d, h_s, cdgrid, dt, g)
 
-    # D-grid half: PPM mass transport + D-grid velocity update
-    h_new, u_d_new, v_d_new = _d_sw(
-        h, h_star, u_d, v_d, h_s, uc_new, vc_new, cdgrid, dt, g,
-        div_damp=div_damp, hyperdiff_coeff=hyperdiff_coeff)
+    # Phase 2: backward pressure gradient
+    dt2 = 0.5 * dt
+    dp_x, dp_y = _p_grad_c(h_star, h_s, cdgrid, dt2, g)
+    uc_new = uc_new + dp_x
+    vc_new = vc_new + dp_y
+
+    # Phase 3: d_sw_native (iter-871c forwards iter-869b/iter-871b opt-in flags)
+    h_new, u_d_new, v_d_new = _d_sw_native(
+        h, u_d, v_d, h_s, uc_new, vc_new, ua, va, cdgrid, dt, g,
+        div_damp=div_damp,
+        apply_legacy_d_sw4_corner_ke_fix=apply_legacy_d_sw4_corner_ke_fix,
+        apply_legacy_d_sw5_corner_corrections=(
+            apply_legacy_d_sw5_corner_corrections),
+        apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
 
     return h_new, u_d_new, v_d_new
 
@@ -666,251 +1492,520 @@ def fv3_forward_backward_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
 # ==============================================================================
 
 def _p_grad_c(h_star, h_s, cdgrid, dt2, g):
-    """Backward pressure gradient at C-grid positions.
-
-    Applies g*grad(h_star + h_s) at C-grid face positions using a 2-point
-    divided difference.  This is the "backward-in-time" step that couples
-    mass and momentum implicitly, providing stability for gravity waves.
-
-    Parameters
-    ----------
-    h_star : (6, n, n) — half-step height from c_sw
-    h_s : (6, n, n) — surface topography
-    cdgrid : CubedSphereCDGrid
-    dt2 : float — dt/2
-    g : float
-
-    Returns
-    -------
-    dp_x : (6, n+1, n) — pressure gradient contribution to uc
-    dp_y : (6, n, n+1) — pressure gradient contribution to vc
-    """
+    """Backward p-gradient g*grad(h_star+h_s) at C-faces (gravity-wave stability via implicit coupling)."""
     p = g * (h_star + h_s)
     p_pad = _pad_halo_auto(p, cdgrid)
-    # 2-point gradient at C-grid faces (same sign convention as c_sw KE gradient)
+    # 2-point gradient (same sign as c_sw KE gradient)
     dp_x = dt2 * cdgrid.rdxc * (p_pad[:, :-1, 1:-1] - p_pad[:, 1:, 1:-1])
     dp_y = dt2 * cdgrid.rdyc * (p_pad[:, 1:-1, :-1] - p_pad[:, 1:-1, 1:])
     return dp_x, dp_y
 
 
-def _uc_to_ut(uc, vc, u_d, v_d, cdgrid):
-    """Convert updated C-grid covariant (uc, vc) to contravariant (ut, vt).
+def _ppm_transport_1d(field, courant, rdelta, axis, external_halo: int = 0,
+                       apply_d_sw3_boundary_fix: bool = False,
+                       boundary_fix_dx_field=None):
+    """PPM hord=9 staggered-field transport (FV3 ytp_v/xtp_u, sw_core.F90:2897-3353, 2540-2894 jord=9).
 
-    Uses metric correction at interior and sin_sg upwinding at face boundaries.
+    Used for B-grid KE transport in d_sw3. N cells → N+1 interface fluxes.
+    external_halo (iter-945): when > 0, field already has cross-face halo on sweep axis.
+    """
+    # Transpose so sweep axis is axis 1 for uniform indexing
+    if axis == 1:
+        v = field    # (6, N + 2*ext, M)
+        c = courant  # (6, N+1, M)
+        rd = rdelta  # (6, N, M)
+    else:
+        v = jnp.swapaxes(field, 1, 2)     # (6, N + 2*ext, M)
+        c = jnp.swapaxes(courant, 1, 2)   # (6, N+1, M)
+        rd = jnp.swapaxes(rdelta, 1, 2)   # (6, N, M)
 
-    Parameters
-    ----------
-    uc : (6, n+1, n) — updated covariant C-grid u
-    vc : (6, n, n+1) — updated covariant C-grid v
-    u_d : (6, n, n+1) — D-grid x-wind (for metric correction)
-    v_d : (6, n+1, n) — D-grid y-wind (for metric correction)
-    cdgrid : CubedSphereCDGrid
+    nn = v.shape[1] - 2 * external_halo  # interior cells along sweep axis
 
-    Returns
-    -------
-    ut : (6, n+1, n) — contravariant transport u at C-grid x-faces
-    vt : (6, n, n+1) — contravariant transport v at C-grid y-faces
+    # Bring field to total halo h3=4 (external preserved; rest mode='edge')
+    h3 = 4
+    if external_halo == h3:
+        vp = v
+    elif external_halo < h3:
+        gap = h3 - external_halo
+        vp = jnp.pad(v, [(0, 0), (gap, gap), (0, 0)], mode='edge')
+    else:
+        trim = external_halo - h3
+        vp = v[:, trim:v.shape[1] - trim, :]
+    # vp shape: (6, N + 2*h3, M) — same as pre-iter-945 internal layout
+
+    # --- Monotone slopes (FV3 sw_core.F90:3165-3171) ---
+    # dm[j] at each padded cell. We compute for padded cells 1..N+4 (need j±1).
+    xt = 0.25 * (vp[:, 2:, :] - vp[:, :-2, :])  # (6, N+4, M), at padded cells 1..N+4
+    vm = vp[:, 1:-1, :]  # (6, N+4, M)
+    vhi = jnp.maximum(jnp.maximum(vp[:, :-2, :], vm), vp[:, 2:, :])
+    vlo = jnp.minimum(jnp.minimum(vp[:, :-2, :], vm), vp[:, 2:, :])
+    dm = jnp.sign(xt) * jnp.minimum(
+        jnp.abs(xt), jnp.minimum(vhi - vm, vm - vlo))
+    # dm[k] = slope at padded cell k+1 (k=0..N+3)
+
+    # --- Cell differences (FV3 sw_core.F90:3173-3177) ---
+    dq = vp[:, 1:, :] - vp[:, :-1, :]  # (6, N+5, M), dq[k] = v[k+1]-v[k] at padded k
+
+    # --- Edge values (FV3 sw_core.F90:3180-3183) ---
+    # al at interface between padded cells k and k+1:
+    #   al = 0.5*(v[k]+v[k+1]) + r3*(dm_at_k - dm_at_k+1)
+    # dm_at_k = dm[k-1] (dm starts at padded cell 1, so dm index = padded cell - 1)
+    r3 = 1.0 / 3.0
+    al = (0.5 * (vp[:, 1:-2, :] + vp[:, 2:-1, :])
+          + r3 * (dm[:, :-1, :] - dm[:, 1:, :]))
+    # al[k] = interface between padded cells k+1 and k+2, k=0..N+2
+    # al shape: (6, N+3, M)
+
+    # --- PPM reconstruction jord=9 from ytp_v (sw_core.F90:3194-3204) ---
+    # IMPORTANT: ytp_v/xtp_u (B-grid wind transport) uses pmp/lac limiter
+    # for jord=9, NOT pert_ppm(iv=0).  The transported fields (D-grid winds)
+    # are SIGNED, so the positive-definite constraint would incorrectly zero
+    # the reconstruction for negative wind cells.  Only tp_core.F90 xppm/yppm
+    # (mass/vorticity transport via fv_tp_2d) uses pert_ppm(iv=0) for iord=9.
+    #
+    # Need bl/br for cells -1..N (for flux at interfaces 0..N).
+    nc = nn + 2  # cells -1..N
+
+    # Indices in padded coordinates for cells -1..N:
+    # Cell j (original 0-based) sits at padded index j+h3.
+    # Cell -1 → padded h3-1=3; cell N → padded h3+N=nn+4.
+    # al[k] = edge between padded cells k+1 and k+2.
+    # Left edge of cell j: al[j+h3-2]. Right edge: al[j+h3-1].
+    al_l = al[:, 1:1+nc, :]    # al_left for cells -1..N
+    al_r = al[:, 2:2+nc, :]    # al_right for cells -1..N
+    v_c = vp[:, h3-1:h3-1+nc, :]   # v at cells -1..N
+
+    # pmp/lac coefficients (sw_core.F90:3197-3202):
+    #   pmp_1 = -2*dq[j],  lac_1 = pmp_1 + 1.5*dq[j+1]  (bl direction)
+    #   pmp_2 = 2*dq[j-1], lac_2 = pmp_2 - 1.5*dq[j-2]  (br direction)
+    # where dq[j] = v[j+1]-v[j] (single difference).
+    # dq_at_cell(j) = dq[j+h3] in padded indexing (dq[k]=vp[k+1]-vp[k]).
+    # For cells -1..N: dq starts at index h3-1.
+    p_off = h3 - 1  # dq at cell j is at dq index j + p_off
+    pmp_1 = -2.0 * dq[:, p_off:p_off+nc, :]           # -2*dq[j] for j=-1..N
+    lac_1 = pmp_1 + 1.5 * dq[:, p_off+1:p_off+1+nc, :]  # + 1.5*dq[j+1]
+    pmp_2 = 2.0 * dq[:, p_off-1:p_off-1+nc, :]        # 2*dq[j-1]
+    lac_2 = pmp_2 - 1.5 * dq[:, p_off-2:p_off-2+nc, :]  # - 1.5*dq[j-2]
+
+    z = jnp.zeros_like(pmp_1)
+    bl = jnp.minimum(
+        jnp.maximum(jnp.maximum(z, pmp_1), lac_1),
+        jnp.maximum(al_l - v_c,
+                     jnp.minimum(jnp.minimum(z, pmp_1), lac_1)))
+    br = jnp.minimum(
+        jnp.maximum(jnp.maximum(z, pmp_2), lac_2),
+        jnp.maximum(al_r - v_c,
+                     jnp.minimum(jnp.minimum(z, pmp_2), lac_2)))
+    # bl, br: (6, nc, M) for cells -1..N (index 0..nc-1)
+
+    # Iter-967: d_sw3 cube-edge boundary fix (sw_core.F90:3239-3316
+    # ytp_v branch; sw_core.F90:2819-2863 xtp_u branch — same formula
+    # mirrored across the sweep axis).
+    #
+    # CRITICAL Fortran detail: d_sw3 calls ytp_v / xtp_u with
+    # ``bounded_domain=.false.`` HARDCODED at lines 1315-1316 and
+    # 1373-1374, regardless of the global bounded_domain flag.  The
+    # boundary fix in xtp_u at line 2819 fires when
+    # ``(.not. bounded_domain .or. .not. dg%is_initialized)`` — with
+    # the HARDCODED .false., the condition becomes
+    # ``(.not. .false. .or. ...) = .true.``, so the fix ALWAYS FIRES
+    # for d_sw3 wind transport on cube-face boundaries (regardless
+    # of duogrid status).
+    #
+    # Constants from sw_core.F90:38: s11=11/14, s14=4/7, s15=3/14.
+    # Index map: Fortran cell j ↔ Python k = j (when bl/br is indexed
+    # 0..nc-1 over Python cells -1..N, where Python cell j = Fortran
+    # cell j+1 → bl/br index k_python = Fortran j_fortran).
+    #
+    # Boundary overrides at js=1 (south boundary):
+    #   br(2) = al(3) - v(2)
+    #   xt = s15*v(1) + s11*v(2) - s14*dm(2)
+    #   br(1) = xt - v(1);  bl(2) = xt - v(2)
+    #   bl(0) = s14*dm(-1) - s11*dq(-1)
+    #   xt = (length-weighted xt of v(0)/v(-1) and v(1)/v(2) extrap)
+    #   bl(1) = xt - v(1);  br(0) = xt - v(0)
+    #   pert_ppm(v(2), bl(2), br(2), iv=-1) → standard PPM constraint
+    if apply_d_sw3_boundary_fix:
+        s11_c = 11.0 / 14.0
+        s14_c = 4.0 / 7.0
+        s15_c = 3.0 / 14.0
+        # Index map: vp[h3+j_F-1], dm/dq[h3+j_F-2], al[h3+j_F-3]. bl/br at j_F (Python k)
+
+        # SOUTH (Fortran j_F ∈ {-1,0,1,2,3})
+        v_jm1 = vp[:, h3 - 2, :]
+        v_j0 = vp[:, h3 - 1, :]
+        v_j1 = vp[:, h3, :]
+        v_j2 = vp[:, h3 + 1, :]
+        dm_jm1 = dm[:, h3 - 3, :]
+        dm_j2 = dm[:, h3, :]
+        dq_jm1 = dq[:, h3 - 3, :]
+        al_j3 = al[:, h3, :]
+
+        # NORTH (Fortran j_F ∈ {N-1,N,N+1,N+2})
+        v_npy_m2 = vp[:, h3 + nn - 2, :]
+        v_npy_m1 = vp[:, h3 + nn - 1, :]
+        v_npy = vp[:, h3 + nn, :]
+        v_npy_p1 = vp[:, h3 + nn + 1, :]
+        dm_npy_m2 = dm[:, h3 + nn - 3, :]
+        dm_npy_p1 = dm[:, h3 + nn, :]
+        dq_npy = dq[:, h3 + nn - 1, :]
+        al_npy_m2 = al[:, h3 + nn - 4, :]
+
+        # Optional length-weighted xt via dx (interior shape, padded to h3=4)
+        if boundary_fix_dx_field is not None:
+            if axis == 2:
+                dxf_int = jnp.swapaxes(boundary_fix_dx_field, 1, 2)
+            else:
+                dxf_int = boundary_fix_dx_field
+            # Pad sweep axis to total halo h3 to match vp.
+            dxf = jnp.pad(dxf_int, [(0, 0), (h3, h3), (0, 0)],
+                           mode='edge')
+            dx_m2 = dxf[:, h3 - 2, :]
+            dx_m1 = dxf[:, h3 - 1, :]
+            dx_1 = dxf[:, h3, :]
+            dx_2 = dxf[:, h3 + 1, :]
+            dx_npy_m2 = dxf[:, h3 + nn - 2, :]
+            dx_npy_m1 = dxf[:, h3 + nn - 1, :]
+            dx_npy = dxf[:, h3 + nn, :]
+            dx_npy_p1 = dxf[:, h3 + nn + 1, :]
+        else:
+            dx_m2 = dx_m1 = dx_1 = dx_2 = None
+            dx_npy_m2 = dx_npy_m1 = dx_npy = dx_npy_p1 = None
+
+        # SOUTH boundary fix (overrides bl/br at k=0,1,2)
+        br = br.at[:, 2, :].set(al_j3 - v_j2)
+        # xt = s15*v(1) + s11*v(2) - s14*dm(2)
+        xt_s = s15_c * v_j1 + s11_c * v_j2 - s14_c * dm_j2
+        br = br.at[:, 1, :].set(xt_s - v_j1)
+        bl = bl.at[:, 2, :].set(xt_s - v_j2)
+        # bl(0) = s14*dm(-1) - s11*dq(-1)
+        bl = bl.at[:, 0, :].set(s14_c * dm_jm1 - s11_c * dq_jm1)
+        # ELSE branch (length-weighted xt for bl(1), br(0)):
+        if dx_m1 is not None:
+            x0L = 0.5 * (
+                ((2.0 * dx_m1 + dx_m2) * v_j0 - dx_m1 * v_jm1)
+                / jnp.maximum(dx_m1 + dx_m2, _EPS)
+            )
+            x0R = 0.5 * (
+                ((2.0 * dx_1 + dx_2) * v_j1 - dx_1 * v_j2)
+                / jnp.maximum(dx_1 + dx_2, _EPS)
+            )
+            xt_s2 = x0L + x0R
+        else:
+            xt_s2 = 0.5 * ((1.5 * v_j0 - 0.5 * v_jm1)
+                            + (1.5 * v_j1 - 0.5 * v_j2))
+        bl = bl.at[:, 1, :].set(xt_s2 - v_j1)
+        br = br.at[:, 0, :].set(xt_s2 - v_j0)
+
+        # NORTH boundary fix (overrides bl/br at k=N-1,N,N+1)
+        k_nm2 = nn - 1
+        k_nm1 = nn
+        k_n = nn + 1
+
+        # bl(npy-2) = al(npy-2) - v(npy-2)
+        bl = bl.at[:, k_nm2, :].set(al_npy_m2 - v_npy_m2)
+        # xt = s15*v(npy-1) + s11*v(npy-2) + s14*dm(npy-2)
+        xt_n = s15_c * v_npy_m1 + s11_c * v_npy_m2 + s14_c * dm_npy_m2
+        br = br.at[:, k_nm2, :].set(xt_n - v_npy_m2)
+        bl = bl.at[:, k_nm1, :].set(xt_n - v_npy_m1)
+        # br(npy) = s11*dq(npy) - s14*dm(npy+1)
+        br = br.at[:, k_n, :].set(s11_c * dq_npy - s14_c * dm_npy_p1)
+        # ELSE branch (length-weighted xt for br(npy-1), bl(npy)):
+        if dx_npy_m1 is not None:
+            x0L_n = 0.5 * (
+                ((2.0 * dx_npy_m1 + dx_npy_m2) * v_npy_m1
+                  - dx_npy_m1 * v_npy_m2)
+                / jnp.maximum(dx_npy_m1 + dx_npy_m2, _EPS)
+            )
+            x0R_n = 0.5 * (
+                ((2.0 * dx_npy + dx_npy_p1) * v_npy
+                  - dx_npy * v_npy_p1)
+                / jnp.maximum(dx_npy + dx_npy_p1, _EPS)
+            )
+            xt_n2 = x0L_n + x0R_n
+        else:
+            xt_n2 = 0.5 * ((1.5 * v_npy_m1 - 0.5 * v_npy_m2)
+                            + (1.5 * v_npy - 0.5 * v_npy_p1))
+        br = br.at[:, k_nm1, :].set(xt_n2 - v_npy_m1)
+        bl = bl.at[:, k_n, :].set(xt_n2 - v_npy)
+
+        # pert_ppm(iv=1) at j=2 and j=npy-2
+        bl_2 = bl[:, 2, :]
+        br_2 = br[:, 2, :]
+        bl_2_new, br_2_new = _pert_ppm(bl_2, br_2)
+        bl = bl.at[:, 2, :].set(bl_2_new)
+        br = br.at[:, 2, :].set(br_2_new)
+        bl_nm2 = bl[:, k_nm2, :]
+        br_nm2 = br[:, k_nm2, :]
+        bl_nm2_new, br_nm2_new = _pert_ppm(bl_nm2, br_nm2)
+        bl = bl.at[:, k_nm2, :].set(bl_nm2_new)
+        br = br.at[:, k_nm2, :].set(br_nm2_new)
+
+    # Flux evaluation (FV3 sw_core.F90:3339-3349). cfl = c*rdy_upwind
+    rd_pad = jnp.pad(rd, [(0, 0), (1, 1), (0, 0)], mode='edge')
+    rdy_pos = rd_pad[:, :nn+1, :]
+    rdy_neg = rd_pad[:, 1:nn+2, :]
+
+    v_pos = vp[:, h3-1:h3-1+nn+1, :]
+    v_neg = vp[:, h3:h3+nn+1, :]
+    bl_pos = bl[:, :nn+1, :]
+    br_pos = br[:, :nn+1, :]
+    bl_neg = bl[:, 1:nn+2, :]
+    br_neg = br[:, 1:nn+2, :]
+
+    cfl_pos = jnp.abs(c) * rdy_pos
+    cfl_neg = jnp.abs(c) * rdy_neg
+
+    flux_pos = v_pos + (1.0 - cfl_pos) * (br_pos - cfl_pos * (bl_pos + br_pos))
+    flux_neg = v_neg + (1.0 - cfl_neg) * (bl_neg - cfl_neg * (bl_neg + br_neg))
+
+    flux = jnp.where(c > 0, flux_pos, flux_neg)
+
+    # Transpose back
+    if axis == 2:
+        flux = jnp.swapaxes(flux, 1, 2)
+
+    return flux
+
+
+def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
+    """FV3 d_sw3: B-grid KE at corners via 1D PPM transport with contravariant Courant numbers.
+
+    Matches sw_core.F90:1201-1388 (duogrid/bounded_domain branch).
     """
     n = cdgrid.n
-    cosa_u = cdgrid.cosa_u     # (6, n+1, n)
-    rsin_u = cdgrid.rsin_u     # (6, n+1, n)
-    cosa_v = cdgrid.cosa_v     # (6, n, n+1)
-    rsin_v = cdgrid.rsin_v     # (6, n, n+1)
+    dt5 = 0.5 * dt
+    cosa = cdgrid.cosa_corner    # (6, n+1, n+1)
+    rsina = cdgrid.rsin2_corner  # (6, n+1, n+1) = 1/sin²
 
-    # v_d (6, n+1, n) has the same shape as cosa_u — use directly as
-    # the cross-velocity at u-face positions (co-located approximation,
-    # same as _d2a2c_vect line 167).  Similarly u_d (6, n, n+1) matches cosa_v.
-    ut = (uc - v_d * cosa_u) * rsin_u
-    vt = (vc - u_d * cosa_v) * rsin_v
+    dg = cdgrid.base.duogrid
+    use_duogrid = dg is not None and dg.ng >= 2
 
-    # At face boundaries: ut = uc / sin_sg_upwind
-    sg = cdgrid.sin_sg
-    for i_bdy in [0, 1, n - 1, n]:
-        i_left = max(i_bdy - 1, 0)
-        i_right = min(i_bdy, n - 1)
-        sin_left = sg[:, i_left, :, 2]    # E-edge of left cell
-        sin_right = sg[:, i_right, :, 0]  # W-edge of right cell
-        sin_upwind = jnp.where(uc[:, i_bdy, :] > 0, sin_left, sin_right)
-        ut = ut.at[:, i_bdy, :].set(
-            uc[:, i_bdy, :] / jnp.maximum(sin_upwind, _EPS))
+    # Step 1: B-grid contravariant v-velocity Courant number.
+    # vb = dt/2 * (vc_sum - uc_sum*cosa)*rsina at corners.
+    # iter-947: NEW-corrected cross-face halo via _pad_halo_uc_vc_new_via_old_delta (ng>=3)
+    if use_duogrid and dg.ng >= 3:
+        uc_pad, vc_pad = _pad_halo_uc_vc_new_via_old_delta(
+            uc, vc, u_d, v_d, cdgrid)
+    else:
+        vc_pad = jnp.pad(vc, [(0, 0), (1, 1), (0, 0)], mode='edge')
+        uc_pad = jnp.pad(uc, [(0, 0), (0, 0), (1, 1)], mode='edge')
+    vc_sum = vc_pad[:, :-1, :] + vc_pad[:, 1:, :]  # (6, n+1, n+1)
+    uc_sum = uc_pad[:, :, :-1] + uc_pad[:, :, 1:]  # (6, n+1, n+1)
 
-    for j_bdy in [0, 1, n - 1, n]:
-        j_below = max(j_bdy - 1, 0)
-        j_above = min(j_bdy, n - 1)
-        sin_below = sg[:, :, j_below, 3]  # N-edge of cell below
-        sin_above = sg[:, :, j_above, 1]  # S-edge of cell above
-        sin_upwind = jnp.where(vc[:, :, j_bdy] > 0, sin_below, sin_above)
-        vt = vt.at[:, :, j_bdy].set(
-            vc[:, :, j_bdy] / jnp.maximum(sin_upwind, _EPS))
+    vb = dt5 * (vc_sum - uc_sum * cosa) * rsina  # (6, n+1, n+1)
 
-    return ut, vt
+    # iter-945: cross-face halo for (u_d, v_d) PPM sweep via _pad_halo_dgrid_for_ppm
+    # (FV3 mpp_update_domains DGRID_NE analogue). iter-950 NEGATIVE: h_dg=3 regresses v_ll_Linf.
+    if use_duogrid:
+        h_dg = 2
+        u_d_ihalo, v_d_jhalo = _pad_halo_dgrid_for_ppm(
+            u_d, v_d, cdgrid, halo=h_dg)
+    else:
+        h_dg = 0
+        u_d_ihalo = u_d
+        v_d_jhalo = v_d
+
+    # Step 2: PPM ytp_v hord=9 (FV3:1315). iter-967 NEGATIVE: d_sw3 boundary fix conflicts with iter-945 halo.
+    rdy = 1.0 / jnp.maximum(cdgrid.dy_edge_x, _EPS)  # (6, n+1, n)
+    transported_y = _ppm_transport_1d(
+        v_d_jhalo, vb, rdy, axis=2, external_halo=h_dg)
+
+    # --- Step 3: B-grid contravariant u-velocity (Courant number) ---
+    ub = dt5 * (uc_sum - vc_sum * cosa) * rsina  # (6, n+1, n+1)
+
+    # --- Step 4: transport u_d in x-direction using ub (PPM hord=9) ---
+    rdx = 1.0 / jnp.maximum(cdgrid.dx_edge_y, _EPS)  # (6, n, n+1)
+    transported_x = _ppm_transport_1d(
+        u_d_ihalo, ub, rdx, axis=1, external_halo=h_dg)
+
+    # Step 5: BGRID_NE component sync (FV3 dyn_core.F90:968-1019). Fortran fires inside if(duogrid) block.
+    # iter-102: route vector avg through geographic frame (avoids per-seam rotation tables).
+    # iter-944b: gate on duogrid (Fortran-faithful).
+    ubbtemp = transported_y
+    vbbtemp = vb
+    ubb = ub
+    vbb = transported_x
+    if use_duogrid:
+        cac = cdgrid.cos_angle_corner
+        sac = cdgrid.sin_angle_corner
+        ubb, vbbtemp = synchronize_bgrid_ne_corner_geo(
+            ubb, vbbtemp, cac, sac, n)
+
+    # Step 6: KE at corners = 0.5*(ubbtemp*vbbtemp + ubb*vbb) (FV3 dyn_core.F90:1013-1020 Lin-Rood)
+    ke_corner = 0.5 * (ubbtemp * vbbtemp + ubb * vbb)
+
+    return ke_corner
 
 
-def _d_sw_native(h, u_d, v_d, uc, vc, ua, va, cdgrid, dt, g,
-                 div_damp=0.0):
-    """D-grid full-step without Arakawa-Lamb gradient.
+def _d_sw_native(h, u_d, v_d, h_s, uc, vc, ua, va, cdgrid, dt, g,
+                 div_damp=0.0, d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1,
+                 damp_v=0.0, nord_v=0,
+                 apply_legacy_d_sw4_corner_ke_fix=False,
+                 apply_legacy_d_sw5_corner_corrections=False,
+                 apply_fortran_xppm_boundary=False):
+    """FV3 d_sw1..d_sw6 D-grid full-step (dyn_core.F90).
 
-    Mass transport uses PPM via the updated C-grid velocities (which already
-    include the backward pressure gradient from p_grad_c).  D-grid winds are
-    updated using:
-    - KE at corners (interpolated from cell centres, NO A-L stencil)
-    - Vorticity transport to D-grid edges via fv_tp_2d
-    - Divergence damping at corners
-
-    The pressure gradient is NOT in this function — it was already incorporated
-    into uc/vc by p_grad_c.  The D-grid wind update involves only the (small)
-    KE gradient and vorticity flux.  For balanced geostrophic flow (Williamson 2),
-    both are near zero, so halo errors have minimal impact.
-
-    Parameters
-    ----------
-    h : (6, n, n) — ORIGINAL height (for PPM mass transport)
-    u_d : (6, n, n+1) — OLD D-grid x-velocity
-    v_d : (6, n+1, n) — OLD D-grid y-velocity
-    uc : (6, n+1, n) — UPDATED covariant C-grid u (from c_sw + p_grad_c)
-    vc : (6, n, n+1) — UPDATED covariant C-grid v (from c_sw + p_grad_c)
-    ua, va : (6, n, n) — A-grid contravariant (from c_sw's d2a2c_vect)
-    cdgrid : CubedSphereCDGrid
-    dt : float — full time step
-    g : float
-    div_damp : float
-
-    Returns
-    -------
-    h_new, u_d_new, v_d_new
+    d_sw1: transport velocity + PPM mass transport. d_sw3: B-grid KE transport.
+    d_sw5: corner div damping + vorticity transport. d_sw6: wind replacement + vorticity damping.
+    d_sw5 damping uses d2_bg/dddmp/d4_bg/nord. damp_v/nord_v for d_sw6 vorticity damping (FV3 vtdm4).
+    div_damp LEGACY/UNUSED in FB chain.
     """
-    from legoesm.core.fv_tp_2d import (
-        compute_transport_quantities, fv_tp_2d, transport_step,
-    )
     n = cdgrid.n
 
-    # === 1. Contravariant transport velocity from updated C-grid ===
-    ut, vt = _uc_to_ut(uc, vc, u_d, v_d, cdgrid)
+    # Step 1: contravariant transport velocity (FV3 d_sw1).
+    # iter-947: forward OLD u_d/v_d for duogrid NEW-corrected halo via _pad_halo_uc_vc_new_via_old_delta
+    ut, vt = _d_sw1_recompute_ut_vt(
+        uc, vc, cdgrid, dt, u_d_old=u_d, v_d_old=v_d)
+    # iter-944b: REVERTED iter-944 CGRID_NE (ut, vt) sync — Fortran only syncs MASS flux
 
-    # === 2. PPM mass transport using ORIGINAL h ===
-    h_new = transport_step(h, ut, vt, dt, cdgrid)
+    # Step 2: PPM mass transport (FV3 d_sw1, sw_core.F90:886-887 unconditional nord=nord_v, damp_c=damp_v).
+    # Outer threshold lives in fv_tp_2d (damp_c > 1e-4); no Python outer guard.
+    # Fortran.  Codex adversarial review flagged this as a non-
+    # faithful accretion.  Iter-728 removes the guard: always
+    # forward ``nord=nord_v, damp_c=damp_v`` and let the internal
+    # tp_core.F90:217 gate handle damp_v=0.  Fortran-exact; no
+    # behavioural change for any damp_v because both the Python and
+    # the Fortran internal gates are ``> 1e-4`` (so 0 <= damp_v
+    # <= 1e-4 is a no-op both ways, and damp_v > 1e-4 invokes the
+    # del-n smoother both ways).
+    #
+    # NOTE on the Fortran param naming (dyn_core.F90:762-770):
+    #   damp_t = damp_v = damp_vt(k) = flagstruct%vtdm4
+    #   nord_t = nord_v(k)
+    # So mass damping (sw_core.F90:886-887) and vorticity damping
+    # (sw_core.F90:1948) share one coefficient pair.  ``q_con``
+    # transport at sw_core.F90:942-943 uses ``damp_t`` / ``nord_t``
+    # — same numeric value per the dyn_core assignment, but the
+    # code-path names are distinct.  We forward damp_v/nord_v here
+    # because the delp call at sw_core.F90:886-887 names them
+    # literally.
+    # iter-888b: forward xppm_boundary for tp_core.F90:614-628 / 632-647 s11/s14/s15 boundary formula
+    h_new = transport_step(h, ut, vt, dt, cdgrid,
+                           nord=nord_v, damp_c=damp_v,
+                           apply_fortran_xppm_boundary=(
+                               apply_fortran_xppm_boundary))
 
-    # === 3. Cell-centre vorticity from D-grid circulation ===
-    dx_u = cdgrid.dx_edge_y  # (6, n, n+1) — edge length for u_d
-    dy_v = cdgrid.dy_edge_x  # (6, n+1, n) — edge length for v_d
+    # Step 3: cc vorticity from D-grid circulation (CCW: bottom - top + right - left)
+    dx_u = cdgrid.dx_edge_y  # (6, n, n+1)
+    dy_v = cdgrid.dy_edge_x  # (6, n+1, n)
 
-    vt_circ = u_d * dx_u  # (6, n, n+1) — u circulation
-    ut_circ = v_d * dy_v  # (6, n+1, n) — v circulation
+    vt_circ = u_d * dx_u
+    ut_circ = v_d * dy_v
 
-    rarea = 1.0 / cdgrid.base.area  # (6, n, n)
-    # CCW circulation: bottom - top + right - left
+    rarea = 1.0 / cdgrid.base.area
     zeta = rarea * (vt_circ[:, :, :-1] - vt_circ[:, :, 1:]
                     + ut_circ[:, 1:, :] - ut_circ[:, :-1, :])
-    zeta_abs = zeta + cdgrid.base.f  # (6, n, n)
+    zeta_abs = zeta + cdgrid.base.f
 
-    # === 4. KE at cell centres (contravariant × covariant) ===
-    utmp = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])  # (6, n, n)
-    vtmp = 0.5 * (v_d[:, :-1, :] + v_d[:, 1:, :])  # (6, n, n)
-    ke_cell = 0.5 * (ua * utmp + va * vtmp)  # (6, n, n)
+    # Step 4: B-grid KE transport (FV3 d_sw3, sw_core.F90:1201-1388)
+    ke_corner = _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt)
 
-    # === 5. KE at corners via 4-point average with halo ===
-    ke_corner = _interp_center_to_corner(ke_cell, cdgrid)  # (6, n+1, n+1)
+    # iter-869: optional d_sw4 cube-vertex KE fix (FV3:1442-1465, non-bounded_domain)
+    if apply_legacy_d_sw4_corner_ke_fix:
+        ke_corner = _apply_legacy_d_sw4_corner_ke_fix(
+            ke_corner, ut, vt, u_d, v_d, dt,
+            bounded_domain=cdgrid.base.bounded_domain)
 
-    # === 6. Divergence damping at corners (optional) ===
-    if div_damp > 0:
-        div_field = cgrid_divergence(uc, vc, cdgrid)
-        area_min = float(jnp.min(cdgrid.base.area))
-        d2_bg = div_damp / area_min
-        dddmp = 0.2
-        div_abs = jnp.abs(div_field)
-        div_abs_corner = _interp_center_to_corner(div_abs, cdgrid)
-        damp_coeff = area_min * jnp.maximum(
-            d2_bg, jnp.minimum(0.20, dddmp * div_abs_corner))
-        div_corner = _interp_center_to_corner(div_field, cdgrid)
-        ke_corner = ke_corner + damp_coeff * div_corner
+    # Step 5: corner div damping into KE (FV3 d_sw5, sw_core.F90:1641-1821). nord=1, d4_bg=0.16 defaults.
+    use_d_sw5_damping = (d2_bg > 1e-10 or dddmp > 1e-10 or d4_bg > 1e-10)
+    if use_d_sw5_damping:
+        # iter-871b: forward iter-862 corner-corrections flag through FB wrapper
+        ke_damping = _d_sw5_corner_divergence(
+            u_d, v_d, ua, va, cdgrid, dt,
+            d2_bg=d2_bg, dddmp=dddmp, d4_bg=d4_bg, nord=nord,
+            apply_legacy_corner_corrections=(
+                apply_legacy_d_sw5_corner_corrections))
+        ke_corner = ke_corner + ke_damping
 
-    # === 7. KE gradient at D-grid edges (2-point corner difference) ===
-    # u_d[i, j] sits between corners (i, j) and (i+1, j) in the i-direction
-    ke_diff_u = ke_corner[:, :-1, :] - ke_corner[:, 1:, :]  # (6, n, n+1)
-    # But ke_diff has wrong shape for u_d: (6, n+1+1-1=n+1, n+1) → need to
-    # trim j to match u_d's n+1 j-values... Actually ke_corner is (n+1, n+1)
-    # and :-1 / 1: in dim1 gives (n, n+1) ← matches u_d!
+    # iter-944b: REVERTED iter-942 ke_corner sync (FV3 reference has it commented out)
 
-    # v_d[i, j] sits between corners (i, j) and (i, j+1) in the j-direction
-    ke_diff_v = ke_corner[:, :, :-1] - ke_corner[:, :, 1:]  # (6, n+1, n)
+    # Step 6: KE gradient at D-grid edges (FV3 d_sw6, sw_core.F90:1935-1944)
+    ke_diff_u_scaled = ke_corner[:, :-1, :] - ke_corner[:, 1:, :]  # (6, n, n+1)
+    ke_diff_v_scaled = ke_corner[:, :, :-1] - ke_corner[:, :, 1:]  # (6, n+1, n)
 
-    # Scale to circulation: dt * ke_diff has units s × m²/s² = m²/s
-    ke_diff_u_scaled = dt * ke_diff_u
-    ke_diff_v_scaled = dt * ke_diff_v
-
-    # === 8. Vorticity transport to D-grid edges via fv_tp_2d ===
+    # Step 7: vorticity transport to D-edges (FV3 d_sw5 fv_tp_2d).
+    # iter-864: apply_cgrid_flux_sync=False matches Fortran's commented-out sync block (dyn_core.F90:1124-1207)
     crx, cry, xfx, yfx, ra_x, ra_y = compute_transport_quantities(
         ut, vt, dt, cdgrid)
     fx_vort, fy_vort = fv_tp_2d(
-        zeta_abs, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid)
-    # fx_vort: (6, n+1, n) — vorticity flux at x-interfaces (v_d positions)
-    # fy_vort: (6, n, n+1) — vorticity flux at y-interfaces (u_d positions)
+        zeta_abs, crx, cry, xfx, yfx, ra_x, ra_y, cdgrid,
+        apply_cgrid_flux_sync=False,
+        apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
+    # iter-944b: REVERTED iter-944 vorticity flux sync (FV3 reference has it commented out)
 
-    # === 9. D-grid wind update ===
-    # Circulation form: u_new * dx = u_old * dx + ke_diff + fy_vort
-    #                   v_new * dy = v_old * dy + ke_diff - fx_vort
+    # Step 8: D-grid wind update (FV3 d_sw6, sw_core.F90:1935-1944). Incremental: u*dx += ke_diff + fy_vort
     rdx_u = 1.0 / jnp.maximum(dx_u, _EPS)  # (6, n, n+1)
     rdy_v = 1.0 / jnp.maximum(dy_v, _EPS)  # (6, n+1, n)
 
     u_d_new = u_d + (ke_diff_u_scaled + fy_vort) * rdx_u
     v_d_new = v_d + (ke_diff_v_scaled - fx_vort) * rdy_v
 
+    # Step 9: vorticity damping (FV3 d_sw6:1948-2000). damp4 = (damp_v*da_min_c)^(nord_v+1)
+    if damp_v > 1e-5:
+        da_min_c = jnp.min(cdgrid.area_corner)
+        damp4 = (damp_v * da_min_c) ** (nord_v + 1)
+        dg = cdgrid.base.duogrid
+        _use_dg = dg is not None and dg.ng >= 2
+        fx2, fy2 = _del6_vt_flux(nord_v, damp4, zeta, cdgrid,
+                                  use_duogrid=_use_dg)
+        u_d_new = u_d_new + fy2 * rdx_u
+        v_d_new = v_d_new - fx2 * rdy_v
+
     return h_new, u_d_new, v_d_new
 
 
-def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=9.80616,
-                   div_damp=0.0):
-    """EXPERIMENTAL: Complete FV3 forward-backward shallow water time step.
+def fv3_fb_sw_step(h, u_d, v_d, h_s, cdgrid, dt, g=constants.g,
+                   div_damp=0.0, d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1,
+                   damp_v=0.0, nord_v=0,
+                   apply_legacy_d_sw4_corner_ke_fix=False,
+                   apply_legacy_d_sw5_corner_corrections=False,
+                   apply_fortran_xppm_boundary=False):
+    """EXPERIMENTAL FV3 forward-backward SW step (unstable at C16; use fv3_sw_tendencies+RK3 for prod).
 
-    Known unstable (85 m/s v-wind after 1 day, 3% mass error).
-    Use ``fv3_sw_tendencies`` with RK3 for production work.
-
-    Three phases:
-    1. c_sw (forward, dt/2): d2a2c_vect + mass transport + KE/vorticity
-       update at C-grid.
-    2. p_grad_c (backward, dt/2): pressure gradient at C-grid using
-       transported mass (h_star).  This implicit coupling provides stability
-       for gravity waves and keeps the large pressure gradient at C-grid
-       where the 2-point stencil is well-conditioned.
-    3. d_sw (full dt): PPM mass transport + D-grid wind update using ONLY
-       KE gradient (corner differences) and vorticity transport.  No
-       Arakawa-Lamb gradient — the pressure gradient is already in uc/vc.
-
-    For balanced geostrophic flow (Williamson 2), the D-grid winds change
-    by only the small KE and vorticity terms.  This makes the scheme
-    insensitive to halo interpolation errors at face boundaries, unlike
-    the RK3 approach where the full Bernoulli gradient (dominated by g*h)
-    must be computed at D-grid corners with haloed cell-centre data.
-
-    Parameters
-    ----------
-    h : (6, n, n) height
-    u_d : (6, n, n+1) D-grid x-velocity (edge midpoints)
-    v_d : (6, n+1, n) D-grid y-velocity (edge midpoints)
-    h_s : (6, n, n) surface topography
-    cdgrid : CubedSphereCDGrid
-    dt : float
-    g : float
-    div_damp : float
-
-    Returns
-    -------
-    h_new, u_d_new, v_d_new
+    Phase 1: c_sw (dt/2). Phase 2: p_grad_c (dt/2). Phase 3: _d_sw_native d_sw1-6 chain.
+    div_damp LEGACY/UNUSED (FB uses d_sw5 d2_bg/dddmp/d4_bg/nord); damp_v / nord_v for vorticity damping.
     """
     dt2 = 0.5 * dt
 
-    # Phase 1: c_sw — forward half-step at C-grid (KE + vorticity only)
+    # Phase 1: c_sw
     h_star, uc_new, vc_new, ua, va = _c_sw(
         h, u_d, v_d, h_s, cdgrid, dt, g)
 
-    # Phase 2: p_grad_c — backward pressure gradient at C-grid
+    # Phase 2: p_grad_c
     dp_x, dp_y = _p_grad_c(h_star, h_s, cdgrid, dt2, g)
     uc_new = uc_new + dp_x
     vc_new = vc_new + dp_y
 
-    # Phase 3: d_sw — full-step D-grid update (no A-L gradient)
+    # Phase 3: d_sw_native (iter-871c forwards iter-869b/iter-871b opt-in flags)
     h_new, u_d_new, v_d_new = _d_sw_native(
-        h, u_d, v_d, uc_new, vc_new, ua, va, cdgrid, dt, g,
-        div_damp=div_damp)
+        h, u_d, v_d, h_s, uc_new, vc_new, ua, va, cdgrid, dt, g,
+        div_damp=div_damp, d2_bg=d2_bg, dddmp=dddmp, d4_bg=d4_bg, nord=nord,
+        damp_v=damp_v, nord_v=nord_v,
+        apply_legacy_d_sw4_corner_ke_fix=apply_legacy_d_sw4_corner_ke_fix,
+        apply_legacy_d_sw5_corner_corrections=(
+            apply_legacy_d_sw5_corner_corrections),
+        apply_fortran_xppm_boundary=apply_fortran_xppm_boundary)
+
+    # Phase 4: one_grad_p — D-grid BACKWARD pressure-gradient update on the
+    # prognostic winds (FV3 dyn_core.F90:2347 one_grad_p / 1529 grad1_p_update).
+    # iter77 ROOT-CAUSE FIX: pre-iter77 the FB step applied the pressure gradient
+    # ONLY at the C-grid (_p_grad_c on uc/vc, Phase 2), so the prognostic D-grid
+    # winds u_d/v_d never felt the PGF — the vector-invariant momentum eqn was
+    # missing its -∇Φ term.  For a steady geostrophic state (W2) the winds then
+    # had NO restoring force balancing Coriolis, seeding a dt-independent growing
+    # mode that NaN'd ~3 h regardless of dt or dissipation.
+    #
+    # Vector-invariant form: du = -dt·∂Φ/∂x with the geopotential Φ = g·(h+h_s)
+    # at the B-grid CORNERS (a2b_ord4, FV3's a2b(gz)), BACKWARD-centred on the
+    # post-mass-update height h_new.  Same corner-difference staggering + dt-LINEAR
+    # scaling as the d_sw KE gradient (ke_corner ∝ dt, verified), and the same
+    # sign convention (Φ[i]-Φ[i+1] mirrors ke_corner[i]-ke_corner[i+1]).
+    gz_b = _interp_center_to_corner_a2b_ord4(
+        g * (h_new + h_s), cdgrid)  # (6, n+1, n+1) geopotential at corners
+    rdx_u = 1.0 / jnp.maximum(cdgrid.dx_edge_y, _EPS)  # (6, n, n+1) — u_d edge
+    rdy_v = 1.0 / jnp.maximum(cdgrid.dy_edge_x, _EPS)  # (6, n+1, n) — v_d edge
+    u_d_new = u_d_new + dt * rdx_u * (gz_b[:, :-1, :] - gz_b[:, 1:, :])
+    v_d_new = v_d_new + dt * rdy_v * (gz_b[:, :, :-1] - gz_b[:, :, 1:])
 
     return h_new, u_d_new, v_d_new

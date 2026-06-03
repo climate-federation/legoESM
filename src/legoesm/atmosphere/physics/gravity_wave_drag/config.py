@@ -85,7 +85,13 @@ class McFarlaneConfig(NamedTuple):
     N_ref : float
         Reference Brunt-Väisälä frequency [1/s] (default 0.01).
     G_0 : float
-        Launch momentum flux scale [Pa] (default 0.5).
+        Dimensionless launch-flux efficiency factor (default 0.5).
+        The orographic launch stress is
+        ``tau_0 = G_0 * rho * N * k * h^2 * U`` [Pa] — ``G_0`` is the
+        dimensionless prefactor; the dimensional content comes from the
+        thermodynamics / wind / wavenumber.  (Earlier docstring labeled
+        ``G_0`` as Pa, which combined with the missing ``k_wave`` factor
+        in the formula produced stress with the wrong units.)
     efficiency : float
         Breaking efficiency (default 0.5).
     min_wind : float
@@ -94,6 +100,16 @@ class McFarlaneConfig(NamedTuple):
         Vertical envelope scale (default 1.0).
     directional_spread : float
         Multi-directional spreading factor (default 1.0).
+    min_wind_sharpness : float
+        Sigmoid sharpness for the smooth ``U > min_wind`` activation
+        (default 20.0).  Higher values approach a hard step.
+    softmin_sharpness : float
+        Log-sum-exp softmin sharpness used by the saturation cap
+        ``min(tau_carry, tau_sat)`` (default 50.0).  Higher values give
+        a sharper cap at the cost of larger gradients near the kink.
+    tau_max : float
+        Upper clip on launch stress [Pa] (default 10.0).  Operationally
+        protects against runaway stress in pathological columns.
     """
     h_topo: float = 500.0
     k_wave: float = 2.0 * math.pi / 100e3
@@ -103,6 +119,9 @@ class McFarlaneConfig(NamedTuple):
     min_wind: float = 2.0
     envelope_scale: float = 1.0
     directional_spread: float = 1.0
+    min_wind_sharpness: float = 20.0
+    softmin_sharpness: float = 50.0
+    tau_max: float = 10.0
 
 
 class HinesConfig(NamedTuple):
@@ -129,6 +148,7 @@ class HinesConfig(NamedTuple):
     cutoff_wn: float = 2.0 * math.pi / 500.0
     Fmax: float = 0.1
     doppler_sharpness: float = 50.0
+    U_mag_floor: float = 0.1  # Wind-magnitude floor for projection [m/s]
 
 
 class PrognosticSpectralConfig(NamedTuple):
@@ -187,6 +207,9 @@ class MLEmulatorConfig(NamedTuple):
     n_output: int = 3
     seed: int = 0
     use_residual: bool = True
+    norm_u: float = 30.0     # Wind scale [m/s] for u, v normalization
+    norm_T: float = 300.0    # Temperature scale [K]
+    norm_z: float = 30000.0  # Height scale [m]
 
 
 class GravityWaveDragConfig(NamedTuple):

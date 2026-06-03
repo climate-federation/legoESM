@@ -4,47 +4,124 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.physics.surface_forcing.config import RestoringConfig
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
+
+
+def _make_target(cfg: RestoringConfig, lat, dtype, kind: str):
+    """Resolve the restoring target. ``kind`` ∈ {"T", "S"}.
+
+    Priority: user-provided 2D array > built-in cosine/constant formula.
+    """
+    if kind == "T":
+        if cfg.T_star_array is not None:
+            return jnp.asarray(cfg.T_star_array).astype(dtype)
+        if cfg.T_profile == "cosine":
+            return (cfg.T_star_eq
+                    - (cfg.T_star_eq - cfg.T_star_pole) * jnp.sin(lat) ** 2
+                    ).astype(dtype)
+        return jnp.full_like(lat, cfg.T_star_eq, dtype=dtype)
+    # kind == "S"
+    if cfg.S_star_array is not None:
+        return jnp.asarray(cfg.S_star_array).astype(dtype)
+    return jnp.full_like(lat, cfg.S_star, dtype=dtype)
 
 
 def restoring_surface_forcing(
     T: jnp.ndarray,
     S: jnp.ndarray,
-    grid: CubedSphereGrid,
+    grid,
     cfg: RestoringConfig,
+    *,
+    sw_down=None,
+    dt: float | None = None,
+    rho_0: float | None = None,
+    c_p: float | None = None,
+    dz_0: float | None = None,
 ) -> SurfaceForcingOutput:
-    """Apply SST/SSS restoring to target profiles.
+    """Apply SST/SSS restoring to target profiles in the surface layer.
 
     Parameters
     ----------
-    T, S : array (6, n, n, nlev)
-    grid : CubedSphereGrid
+    T, S : array
+        3D tracer fields (any grid layout). Trailing axis is the
+        vertical level; index 0 is the surface.
+    grid : any grid with ``grid_lat`` attribute
     cfg : RestoringConfig
+    sw_down : array, optional
+        Surface shortwave [W/m²]; only used when ``cfg.subtract_qsr=True``.
+        Subtracted from the surface T tendency after the W/m² → K/s
+        conversion (paper eq 8 non-solar split). Shape must match
+        ``grid.grid_lat``.
+    dt : float, optional
+        Baroclinic timestep [s]. Required when ``cfg.implicit=True``.
+    rho_0, c_p, dz_0 : float, optional
+        Required for the Q_sr-subtraction term (W/m² → K/s conversion).
 
     Returns
     -------
     SurfaceForcingOutput
+        ``dT_dt`` and ``dS_dt`` have the shape of ``T``/``S`` with
+        non-zero values only in the surface layer (``[..., 0]``).
+
+    Notes on integration mode
+    -------------------------
+    With ``cfg.implicit=False`` (default), returns a *forward-Euler*
+    tendency ``-(T − T*) / τ``. The dycore's tracer update
+    ``T_new = T_old + dt · dT_dt`` then gives the standard explicit
+    relaxation. Stable iff ``dt < 2·τ`` AND there's no destabilising
+    feedback through other operators.
+
+    With ``cfg.implicit=True``, returns an *effective* tendency that,
+    when applied via the dycore's same forward-Euler tracer update,
+    yields the *analytical implicit-Euler* result
+    ``T_new = (T_old + dt·T*/τ) / (1 + dt/τ)``. By algebra:
+
+        dT_dt_eff = (T_new − T_old) / dt = (T* − T_old) / (τ + dt)
+
+    so the implicit step is just a denominator change ``τ → τ + dt``.
+    Stable for any dt; the new value is bounded between ``T_old`` and
+    ``T*``. Q_sr (when subtract_qsr=True) is treated explicitly because
+    it's a known external forcing, not a function of T.
     """
     shape_3d = T.shape
     dtype = T.dtype
-    lat = grid.grid_lat  # protocol: (6, n, n) or (n_lat, n_lon) etc.
+    lat = grid.grid_lat
 
-    # Target SST profile
-    if cfg.T_profile == "cosine":
-        # T* = T_eq - (T_eq - T_pole) * sin^2(lat)
-        T_star = cfg.T_star_eq - (cfg.T_star_eq - cfg.T_star_pole) * jnp.sin(lat) ** 2
+    T_star = _make_target(cfg, lat, dtype, "T")
+    S_star = _make_target(cfg, lat, dtype, "S")
+
+    if cfg.implicit:
+        if dt is None:
+            raise ValueError(
+                "RestoringConfig.implicit=True requires `dt` to be passed "
+                "to restoring_surface_forcing(...)."
+            )
+        eff_tau_T = cfg.tau_T + dt
+        eff_tau_S = cfg.tau_S + dt
     else:
-        T_star = jnp.full_like(lat, cfg.T_star_eq, dtype=dtype)
+        eff_tau_T = cfg.tau_T
+        eff_tau_S = cfg.tau_S
 
-    S_star = jnp.full_like(lat, cfg.S_star, dtype=dtype)
+    surf_dT = -(T[..., 0] - T_star) / eff_tau_T
+    surf_dS = -(S[..., 0] - S_star) / eff_tau_S
 
-    # Restoring tendency in surface layer only
-    dT_dt = jnp.zeros(shape_3d, dtype=dtype)
-    dS_dt = jnp.zeros(shape_3d, dtype=dtype)
-    dT_dt = dT_dt.at[..., 0].set(-(T[..., 0] - T_star) / cfg.tau_T)
-    dS_dt = dS_dt.at[..., 0].set(-(S[..., 0] - S_star) / cfg.tau_S)
+    if cfg.subtract_qsr:
+        if sw_down is None:
+            raise ValueError(
+                "RestoringConfig.subtract_qsr=True requires `sw_down`."
+            )
+        if rho_0 is None or c_p is None or dz_0 is None:
+            raise ValueError(
+                "RestoringConfig.subtract_qsr=True requires rho_0, c_p, dz_0 "
+                "for the W/m² → K/s conversion."
+            )
+        surf_dT = surf_dT - sw_down / (rho_0 * c_p * dz_0)
+
+    nlev = shape_3d[-1]
+    pad_axes_r = ((0, 0),) * (len(shape_3d) - 1)
+    dT_dt = jnp.pad(surf_dT[..., None], (*pad_axes_r, (0, nlev - 1)))
+    dS_dt = jnp.pad(surf_dS[..., None], (*pad_axes_r, (0, nlev - 1)))
 
     du_dt = jnp.zeros(shape_3d, dtype=dtype)
     dv_dt = jnp.zeros(shape_3d, dtype=dtype)

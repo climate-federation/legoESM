@@ -32,11 +32,13 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.runtime.backend import check_spectral_backend, get_backend
 from legoesm.core.operators_3d import (
     vertical_advection_height,
 )
 from legoesm.grids.gaussian import (
     GaussianGrid,
+    create_gaussian_grid,
     sh_analysis,
     sh_synthesis,
     sh_analysis_3d,
@@ -45,9 +47,16 @@ from legoesm.grids.gaussian import (
     sh_analysis_dmu_3d,
     uv_from_vordiv_3d,
     spectral_hyperdiffusion_3d,
-    _sh_synthesis_H,
+    _sh_synthesis_H_3d,
 )
-from legoesm.grids.vertical import HeightCoordinate, TerrainMetric
+from legoesm.grids.vertical import (
+    HeightCoordinate,
+    TerrainMetric,
+    create_height_coordinate,
+    compute_terrain_metric,
+)
+from legoesm.thermo import saturation_mixing_ratio
+from legoesm.timestepping.tridiagonal import thomas_solve_batched
 from legoesm.atmosphere.dynamics.compressible_euler import (
     compute_exner_perturbation,
     _sponge_profile,
@@ -93,6 +102,13 @@ class SpectralNHConfig(NamedTuple):
     n_acoustic_substeps: int = 6
     small_earth_factor: float = 1.0
     semi_implicit_acoustic: bool = False  # Use tridiagonal solve for acoustics
+    # iter-9: opt-in anchored dry-mass fixer.  Mirrors the spectral PE
+    # iter-3 mechanism (rescale the (n=0,m=0) coefficient of the
+    # prognostic variable so the global integral returns to the
+    # initial snapshot).  Disabled by default to preserve bit-for-bit
+    # baseline for drift-measurement tests.
+    fix_mass: bool = False
+    anchor_mass_to_initial: bool = False
 
 
 # =============================================================================
@@ -115,28 +131,23 @@ def _spectral_gradient_3d(grid, coeffs_3d):
     dfdx, dfdy : (n_lat, n_lon, nlev)
     """
     a = grid.radius
-
-    # Zonal derivative: im * coeffs -> synthesis (per level)
-    # sh_synthesis of (im * coeffs) gives d(f)/d(lambda) on the grid
-    c_t = jnp.moveaxis(coeffs_3d, -1, 0)  # (nlev, n_sh)
     ims = grid.ms.astype(jnp.float64)
-
     cos_lat_2d = jnp.clip(grid.cos_lat[:, None], _COS_LAT_MIN, None)
 
-    def zonal_deriv(c):
-        return sh_synthesis(grid, 1j * ims * c) / (a * cos_lat_2d)
+    # Zonal derivative uses ``sh_synthesis_3d`` directly on the
+    # ``(n_sh, nlev)`` complex spectrum — one batched synthesis vs the
+    # previous moveaxis + vmap(per-level synthesis) + moveaxis.  The
+    # ``ims`` broadcast over the level axis is via a trailing newaxis.
+    dfdx = sh_synthesis_3d(grid, (1j * ims)[:, None] * coeffs_3d) / (
+        a * cos_lat_2d[..., None]
+    )
 
-    dfdx_t = jax.vmap(zonal_deriv)(c_t)  # (nlev, n_lat, n_lon)
-    dfdx = jnp.moveaxis(dfdx_t, 0, -1)
-
-    # Meridional derivative: Hnm synthesis (per level)
-    # _sh_synthesis_H gives cos(lat) * d(f)/d(colatitude)
-    # df/dy = -(1/a) * d(f)/d(colatitude) = -Hnm_synth / (a * cos(lat))
-    def merid_deriv(c):
-        return -_sh_synthesis_H(grid, c) / (a * cos_lat_2d)
-
-    dfdy_t = jax.vmap(merid_deriv)(c_t)
-    dfdy = jnp.moveaxis(dfdy_t, 0, -1)
+    # Meridional derivative uses ``_sh_synthesis_H_3d`` — same one-shot
+    # batched segment-sum + IRFFT as ``sh_synthesis_3d`` (no per-level
+    # moveaxis + vmap).
+    dfdy = -_sh_synthesis_H_3d(grid, coeffs_3d) / (
+        a * cos_lat_2d[..., None]
+    )
 
     return dfdx, dfdy
 
@@ -170,11 +181,37 @@ def spectral_nh_slow_tendencies(
     J = terrain_metric.jacobian   # (n_lat, n_lon)
 
     # --- 1. Transform to grid ---
-    vor = sh_synthesis_3d(grid, state.vor_hat.data)   # (n_lat, n_lon, nlev)
-    div = sh_synthesis_3d(grid, state.div_hat.data)
-    w = sh_synthesis_3d(grid, state.w_hat.data)        # (n_lat, n_lon, nlev+1)
-    theta_p = sh_synthesis_3d(grid, state.theta_prime_hat.data)
-    rho_p = sh_synthesis_3d(grid, state.rho_prime_hat.data)
+    # Batch the four (n_sh, nlev) syntheses into one — vor, div,
+    # theta_p, rho_p all share shape and the inverse SH transform
+    # treats the trailing axis as a passive batch (segment_sum runs
+    # along n_sh, IRFFT runs along longitude).  ``w_hat`` has
+    # (n_sh, nlev+1) — concatenate it onto the trailing axis of the
+    # (vor, div, theta_p, rho_p) batch so that a *single* SH synthesis
+    # serves all five fields.  Total trailing axis = ``4*nlev + (nlev+1)``.
+    # 5 SH-syntheses → 1 (Loop 180 — same exploit as Loop 179 for the
+    # acoustic update path).
+    n_sh, nlev_t = state.vor_hat.data.shape
+    _vdtr_stack = jnp.stack(
+        [
+            state.vor_hat.data,
+            state.div_hat.data,
+            state.theta_prime_hat.data,
+            state.rho_prime_hat.data,
+        ],
+        axis=-1,
+    )  # (n_sh, nlev, 4)
+    _vdtr_flat = _vdtr_stack.reshape(n_sh, nlev_t * 4)
+    _vdtrw_flat = jnp.concatenate(
+        [_vdtr_flat, state.w_hat.data], axis=-1,
+    )  # (n_sh, 4*nlev + (nlev+1))
+    _vdtrw_grid_flat = sh_synthesis_3d(grid, _vdtrw_flat)
+    _vdtr_grid_flat = _vdtrw_grid_flat[..., : nlev_t * 4]
+    _vdtr_grid = _vdtr_grid_flat.reshape(grid.n_lat, grid.n_lon, nlev_t, 4)
+    vor = _vdtr_grid[..., 0]
+    div = _vdtr_grid[..., 1]
+    theta_p = _vdtr_grid[..., 2]
+    rho_p = _vdtr_grid[..., 3]
+    w = _vdtrw_grid_flat[..., nlev_t * 4:]              # (n_lat, n_lon, nlev+1)
 
     n_tracers = state.tracers_hat.data.shape[-1] if state.tracers_hat.data.ndim >= 3 else 0
 
@@ -223,80 +260,113 @@ def spectral_nh_slow_tendencies(
     pgf_u_cos = pgf_x * grid.cos_lat[:, None, None]
     pgf_v_cos = pgf_y * grid.cos_lat[:, None, None]
 
-    # --- 9. Vorticity tendency ---
+    # --- 9-10. Vorticity + divergence tendencies (batched SH analyses) ---
+    # The vor/div tendencies need oc2 of {A_vor, B_vor, pgf_u_cos,
+    # pgf_v_cos, KE_cos2} (5 calls) and dmu of {A_vor, B_vor, pgf_u_cos,
+    # pgf_v_cos} (4 calls).  Stack each variant's inputs along the
+    # trailing axis and fold into the level dim — 9 sequential SH
+    # analyses collapse to 2.  Same trailing-axis-as-passive-batch
+    # property as Loops 95 and 96 for spectral PE.
+    n_lat_v, n_lon_v, nlev_v = A_vor.shape
+    _oc2_stack = jnp.stack(
+        [A_vor, B_vor, pgf_u_cos, pgf_v_cos, KE_cos2], axis=-1,
+    )  # (..., nlev, 5)
+    _dmu_stack = jnp.stack(
+        [A_vor, B_vor, pgf_u_cos, pgf_v_cos], axis=-1,
+    )  # (..., nlev, 4)
+    _oc2_flat = sh_analysis_oc2_3d(
+        grid, _oc2_stack.reshape(n_lat_v, n_lon_v, nlev_v * 5),
+    ).reshape(-1, nlev_v, 5)
+    _dmu_flat = sh_analysis_dmu_3d(
+        grid, _dmu_stack.reshape(n_lat_v, n_lon_v, nlev_v * 4),
+    ).reshape(-1, nlev_v, 4)
+    A_oc2, B_oc2, pgf_u_oc2, pgf_v_oc2, K_hat = (
+        _oc2_flat[..., 0], _oc2_flat[..., 1], _oc2_flat[..., 2],
+        _oc2_flat[..., 3], _oc2_flat[..., 4],
+    )
+    A_dmu, B_dmu, pgf_u_dmu, pgf_v_dmu = (
+        _dmu_flat[..., 0], _dmu_flat[..., 1], _dmu_flat[..., 2],
+        _dmu_flat[..., 3],
+    )
+
     # dvor/dt = -div(abs_vor * v) - curl(PGF)
-    flux_vor_div = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, A_vor)
-        - one_over_a * sh_analysis_dmu_3d(grid, B_vor)
-    )
-    pgf_curl = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, pgf_v_cos)
-        + one_over_a * sh_analysis_dmu_3d(grid, pgf_u_cos)
-    )
+    flux_vor_div = im_over_a[:, None] * A_oc2 - one_over_a * B_dmu
+    pgf_curl = im_over_a[:, None] * pgf_v_oc2 + one_over_a * pgf_u_dmu
     dvor_hat = -flux_vor_div - pgf_curl
 
-    # --- 10. Divergence tendency ---
     # ddiv/dt = curl(abs_vor * v) - lap(K) - div(PGF)
-    flux_vor_curl = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, B_vor)
-        + one_over_a * sh_analysis_dmu_3d(grid, A_vor)
-    )
-    K_hat = sh_analysis_oc2_3d(grid, KE_cos2)
-    pgf_div = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, pgf_u_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, pgf_v_cos)
-    )
+    flux_vor_curl = im_over_a[:, None] * B_oc2 + one_over_a * A_dmu
+    pgf_div = im_over_a[:, None] * pgf_u_oc2 - one_over_a * pgf_v_dmu
     ddiv_hat = flux_vor_curl - grid.lap[:, None] * K_hat - pgf_div
 
-    # --- 11. Vertical advection (grid space) ---
-    # Vertical advection of momentum
+    # --- 11-13. Vertical advection + theta + rho horizontal fluxes (batched) ---
+    # All four flux contributions (vert_adv_u/v on momentum, theta on
+    # heat, rho on continuity) end up needing oc2(F_u_cos) and
+    # dmu(F_v_cos) for the spectral div/curl operators.  Compute the
+    # eight grid-space inputs first, then run a single batched oc2
+    # call and a single batched dmu call instead of 4+4 = 8 sequential
+    # SH analyses.
     vert_adv_u = vertical_advection_height(u, w, dz, dz_half, J)
     vert_adv_v = vertical_advection_height(v, w, dz, dz_half, J)
-
-    # Convert to spectral vor/div contributions
     vu_cos = vert_adv_u * grid.cos_lat[:, None, None]
     vv_cos = vert_adv_v * grid.cos_lat[:, None, None]
-
-    vert_vor = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, vv_cos)
-        + one_over_a * sh_analysis_dmu_3d(grid, vu_cos)
-    )
-    vert_div = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, vu_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, vv_cos)
-    )
-    dvor_hat = dvor_hat + vert_vor
-    ddiv_hat = ddiv_hat + vert_div
-
-    # --- 12. Theta equation ---
-    # Horizontal advection via spectral flux form: -div(theta*v) + theta*div
     theta_u_cos = theta_total * u_cos
     theta_v_cos = theta_total * v_cos
-
-    flux_theta_div = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, theta_u_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, theta_v_cos)
-    )
-    theta_div_hat = sh_analysis_3d(grid, theta_total * div)
-
-    dtheta_p_hat = -flux_theta_div + theta_div_hat
-
-    # NOTE: Vertical advection of theta by w is handled ONLY by the
-    # acoustic substeps (forward-backward scheme) to avoid double counting
-    # in the split-explicit time integration (Skamarock & Klemp 2008).
-
-    # --- 13. Continuity equation (rho') ---
-    # Horizontal only: vertical mass flux divergence handled by acoustic step.
     rho_u_cos = rho_total * u_cos * J[..., None]
     rho_v_cos = rho_total * v_cos * J[..., None]
 
-    flux_rho_div = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, rho_u_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, rho_v_cos)
+    n_lat_f, n_lon_f, nlev_f = vu_cos.shape
+    _flux_oc2_stack = jnp.stack(
+        [vu_cos, vv_cos, theta_u_cos, rho_u_cos], axis=-1,
+    )  # (..., nlev, 4)
+    _flux_dmu_stack = jnp.stack(
+        [vu_cos, vv_cos, theta_v_cos, rho_v_cos], axis=-1,
     )
-    # d(rho')/dt_horiz = -(1/J)*div_h(J*rho*v)
+    _flux_oc2 = sh_analysis_oc2_3d(
+        grid, _flux_oc2_stack.reshape(n_lat_f, n_lon_f, nlev_f * 4),
+    ).reshape(-1, nlev_f, 4)
+    _flux_dmu = sh_analysis_dmu_3d(
+        grid, _flux_dmu_stack.reshape(n_lat_f, n_lon_f, nlev_f * 4),
+    ).reshape(-1, nlev_f, 4)
+    vu_oc2, vv_oc2, theta_u_oc2, rho_u_oc2 = (
+        _flux_oc2[..., 0], _flux_oc2[..., 1], _flux_oc2[..., 2], _flux_oc2[..., 3],
+    )
+    vu_dmu, vv_dmu, theta_v_dmu, rho_v_dmu = (
+        _flux_dmu[..., 0], _flux_dmu[..., 1], _flux_dmu[..., 2], _flux_dmu[..., 3],
+    )
+
+    # Vorticity / divergence: vertical-advection contributions
+    vert_vor = im_over_a[:, None] * vv_oc2 + one_over_a * vu_dmu
+    vert_div = im_over_a[:, None] * vu_oc2 - one_over_a * vv_dmu
+    dvor_hat = dvor_hat + vert_vor
+    ddiv_hat = ddiv_hat + vert_div
+
+    # Theta equation: horizontal advection via spectral flux form.
+    # NOTE: Vertical advection of theta by w is handled ONLY by the
+    # acoustic substeps (forward-backward scheme) to avoid double counting
+    # in the split-explicit time integration (Skamarock & Klemp 2008).
+    flux_theta_div = im_over_a[:, None] * theta_u_oc2 - one_over_a * theta_v_dmu
+    # Continuity equation (rho'): horizontal only — vertical mass flux
+    # divergence handled by acoustic step.
+    flux_rho_div = im_over_a[:, None] * rho_u_oc2 - one_over_a * rho_v_dmu
+
+    # Sum theta_total*div in grid first, transform once: ``theta_div_hat``
+    # and ``rho_horiz_tend_grid`` both feed into a single sh_analysis_3d
+    # but rho_horiz needs a sh_synthesis_3d on flux_rho_div first; batch
+    # the two analyses into one stacked call.
+    #
+    # Loop 187 — when ``n_tracers > 0`` the tracer block (section 15)
+    # also runs an ``sh_analysis_3d(dq_grid_sum_flat)`` whose trailing
+    # axis is ``nlev*n_tracers``.  Defer the (theta_div, rho_horiz)
+    # analysis past the tracer block and ``jnp.concatenate`` all three
+    # grid inputs along the trailing axis, then run a single
+    # ``sh_analysis_3d`` — different trailing-axis sizes
+    # (``nlev*2 + nlev*n_tracers``) all flow through the same
+    # ``segment_sum + projection`` machinery.  2 SH analyses → 1 when
+    # tracers are active.  Same exploit as Loops 184/185.
     rho_horiz_tend_grid = -sh_synthesis_3d(grid, flux_rho_div) / J[..., None]
-    drho_p_hat = sh_analysis_3d(grid, rho_horiz_tend_grid)
+    _theta_div_grid = theta_total * div
+    n_lat_p2, n_lon_p2, nlev_p2 = _theta_div_grid.shape
 
     # --- 14. w tendency (slow part) ---
     # Slow w tendency is zero: vertical PGF, buoyancy, and w-divergence are
@@ -305,30 +375,95 @@ def spectral_nh_slow_tendencies(
 
     # --- 15. Tracer advection ---
     if n_tracers > 0:
-        tracers_hat_t = jnp.moveaxis(state.tracers_hat.data, -1, 0)  # (n_tracers, n_sh, nlev)
+        # Fold the tracer dimension into the trailing level axis so all
+        # SH transforms in the tracer block run ONCE on a thicker
+        # ``(..., nlev*n_tracers)`` tensor instead of being
+        # ``vmap``'d over the leading tracer axis (which materialises a
+        # separate FFT/sum kernel per tracer).  Same passive-trailing-axis
+        # exploit as Loop 137 for the spectral ocean tracer block.
+        tracers_hat_data = state.tracers_hat.data  # (n_sh, nlev, n_tracers)
+        n_sh_t = tracers_hat_data.shape[0]
+        nlev_tr = tracers_hat_data.shape[-2]
+        tracers_hat_flat = tracers_hat_data.reshape(
+            n_sh_t, nlev_tr * n_tracers,
+        )
 
-        def _single_tracer_tendency(q_hat):
-            q = sh_synthesis_3d(grid, q_hat)  # (n_lat, n_lon, nlev)
+        # 1) Single SH synthesis over (level × tracer) — one IRFFT instead
+        # of n_tracers separate ones.
+        q_grid_flat = sh_synthesis_3d(grid, tracers_hat_flat)  # (n_lat, n_lon, nlev*n_tr)
 
-            # Horizontal advection: -div(q*v) + q*div
-            q_u_cos = q * u_cos
-            q_v_cos = q * v_cos
-            flux_q_div = (
-                im_over_a[:, None] * sh_analysis_oc2_3d(grid, q_u_cos)
-                - one_over_a * sh_analysis_dmu_3d(grid, q_v_cos)
-            )
-            q_div_hat = sh_analysis_3d(grid, q * div)
-            dq_hat = -flux_q_div + q_div_hat
+        # 2) Build the four flux fields (q*u_cos, q*v_cos, q*div,
+        # vertical_advection(q)) directly on the folded tensor.  The
+        # ``u_cos``/``v_cos``/``div`` factors broadcast across the
+        # combined trailing axis via ``jnp.repeat`` (same as the existing
+        # tracer-fold convention used elsewhere in the dycore).
+        if n_tracers == 1:
+            u_cos_b = u_cos
+            v_cos_b = v_cos
+            div_b = div
+        else:
+            u_cos_b = jnp.repeat(u_cos, n_tracers, axis=-1)
+            v_cos_b = jnp.repeat(v_cos, n_tracers, axis=-1)
+            div_b = jnp.repeat(div, n_tracers, axis=-1)
 
-            # Vertical advection
-            vert_adv_q = vertical_advection_height(q, w, dz, dz_half, J)
-            dq_hat = dq_hat + sh_analysis_3d(grid, vert_adv_q)
-            return dq_hat
+        q_u_cos_flat = q_grid_flat * u_cos_b
+        q_v_cos_flat = q_grid_flat * v_cos_b
 
-        dtracers_hat_t = jax.vmap(_single_tracer_tendency)(tracers_hat_t)
-        dtracers_hat = jnp.moveaxis(dtracers_hat_t, 0, -1)
+        # 3) Two batched SH analyses (oc2, dmu) — 2*n_tracers calls → 2.
+        flux_q_div_flat = (
+            im_over_a[:, None] * sh_analysis_oc2_3d(grid, q_u_cos_flat)
+            - one_over_a * sh_analysis_dmu_3d(grid, q_v_cos_flat)
+        )
+
+        # 4) Vertical advection still hard-codes axis -1 as nlev, so
+        # keep a vmap, but apply it to the folded tensor (one batched
+        # kernel — JAX traces ``vertical_advection_height`` once).
+        # We carry the (n_lat, n_lon, nlev, n_tracers) shape for the
+        # vertical pass so the level axis remains at -1 during the
+        # stencil.
+        q_grid = q_grid_flat.reshape(
+            q_grid_flat.shape[0], q_grid_flat.shape[1], nlev_tr, n_tracers,
+        )
+        vert_adv_q = jax.vmap(
+            lambda qi: vertical_advection_height(qi, w, dz, dz_half, J),
+            in_axes=-1, out_axes=-1,
+        )(q_grid)  # (n_lat, n_lon, nlev, n_tracers)
+        # Combine the grid-space contributions (q*div + vert_adv) BEFORE
+        # the SH analysis, so a single sh_analysis_3d serves all tracers
+        # and combinations.  Loops 94/137 linearity exploit.
+        dq_grid_sum_flat = (
+            q_grid_flat * div_b
+            + vert_adv_q.reshape(q_grid_flat.shape)
+        )
+        # Loop 187 — merge the (theta_div, rho_horiz) analysis batch
+        # (section 13) into the tracer analysis: concatenate the three
+        # grid inputs along the trailing axis and run a single
+        # ``sh_analysis_3d``.  Trailing axis = ``nlev*2 + nlev*n_tracers``.
+        _all_an_input = jnp.concatenate(
+            [_theta_div_grid, rho_horiz_tend_grid, dq_grid_sum_flat],
+            axis=-1,
+        )  # (n_lat, n_lon, nlev*(2 + n_tracers))
+        _all_an_hat = sh_analysis_3d(grid, _all_an_input)
+        theta_div_hat = _all_an_hat[:, :nlev_p2]
+        drho_p_hat = _all_an_hat[:, nlev_p2:nlev_p2 * 2]
+        dq_hat_flat = -flux_q_div_flat + _all_an_hat[:, nlev_p2 * 2:]
+
+        # Restore the (n_sh, nlev, n_tracers) layout that matches
+        # ``state.tracers_hat.data``.
+        dtracers_hat = dq_hat_flat.reshape(n_sh_t, nlev_tr, n_tracers)
     else:
+        # No tracers — keep the (theta_div, rho_horiz) 2-batch analysis.
+        _theta_rho_pair = jnp.stack(
+            [_theta_div_grid, rho_horiz_tend_grid], axis=-1,
+        )
+        _theta_rho_hat = sh_analysis_3d(
+            grid, _theta_rho_pair.reshape(n_lat_p2, n_lon_p2, nlev_p2 * 2),
+        ).reshape(-1, nlev_p2, 2)
+        theta_div_hat = _theta_rho_hat[..., 0]
+        drho_p_hat = _theta_rho_hat[..., 1]
         dtracers_hat = jnp.zeros_like(state.tracers_hat.data)
+
+    dtheta_p_hat = -flux_theta_div + theta_div_hat
 
     # --- 16. Sponge layer damping ---
     if config.sponge_coeff > 0:
@@ -347,16 +482,28 @@ def spectral_nh_slow_tendencies(
 
     # --- 17. Spectral hyperdiffusion ---
     if config.hyperdiff_coeff > 0:
-        dvor_hat = dvor_hat + spectral_hyperdiffusion_3d(
-            grid, state.vor_hat.data, config.hyperdiff_coeff, config.hyperdiff_order,
-        )
-        ddiv_hat = ddiv_hat + spectral_hyperdiffusion_3d(
-            grid, state.div_hat.data, config.hyperdiff_coeff, config.hyperdiff_order,
-        )
-        dtheta_p_hat = dtheta_p_hat + spectral_hyperdiffusion_3d(
-            grid, state.theta_prime_hat.data,
+        # Batch the three pointwise spectral hyperdiffusions (vor, div,
+        # theta_prime) into one call by stacking spectral coefficients
+        # along a trailing axis.  ``spectral_hyperdiffusion_3d`` is
+        # purely element-wise (``damping * coeffs``), so the trailing
+        # axis is a passive batch — same exploit as Loop 120 in
+        # spectral PE.  3 kernel launches → 1.
+        n_sh_h, nlev_h = state.vor_hat.data.shape
+        _vdt_hat = jnp.stack(
+            [
+                state.vor_hat.data,
+                state.div_hat.data,
+                state.theta_prime_hat.data,
+            ],
+            axis=-1,
+        )  # (n_sh, nlev, 3)
+        _hd_stack = spectral_hyperdiffusion_3d(
+            grid, _vdt_hat.reshape(n_sh_h, nlev_h * 3),
             config.hyperdiff_coeff, config.hyperdiff_order,
-        )
+        ).reshape(n_sh_h, nlev_h, 3)
+        dvor_hat = dvor_hat + _hd_stack[..., 0]
+        ddiv_hat = ddiv_hat + _hd_stack[..., 1]
+        dtheta_p_hat = dtheta_p_hat + _hd_stack[..., 2]
 
     # --- 18. Physics tendencies ---
     if physics_tendency is not None:
@@ -426,15 +573,18 @@ def _acoustic_substeps_grid(
 
         # --- Backward: update rho' ---
         rho_half = 0.5 * (rho_total[..., :-1] + rho_total[..., 1:])
-        rho_w = jnp.zeros_like(w_new)
-        rho_w = rho_w.at[..., 1:-1].set(rho_half * w_new[..., 1:-1])
+        # Use ``jnp.pad`` to attach the zero top/bottom boundaries
+        # instead of allocating ``zeros_like(w_new)`` and scattering
+        # the interior; one Pad HLO op vs alloc + scatter inside
+        # the per-substep ``fori_loop`` body.
+        pad_axes = ((0, 0),) * (w_new.ndim - 1)
+        rho_w = jnp.pad(rho_half * w_new[..., 1:-1], (*pad_axes, (1, 1)))
         vert_div = (rho_w[..., :-1] - rho_w[..., 1:]) / dz
         vert_div = vert_div / J[..., None]
         rho_p_new = rho_p_c - dt_s * vert_div
 
         # --- Backward: update theta' ---
         w_full = 0.5 * (w_new[..., :-1] + w_new[..., 1:])
-        dtheta_dz = jnp.zeros_like(theta_total)
         nlev_local = theta_total.shape[-1]
         if nlev_local > 2:
             dz_half_val = height_coord.dz_half
@@ -442,7 +592,10 @@ def _acoustic_substeps_grid(
             inner_grad = (
                 theta_total[..., :-2] - theta_total[..., 2:]
             ) / dz_centered
-            dtheta_dz = dtheta_dz.at[..., 1:-1].set(inner_grad)
+            theta_pad_axes = ((0, 0),) * (theta_total.ndim - 1)
+            dtheta_dz = jnp.pad(inner_grad, (*theta_pad_axes, (1, 1)))
+        else:
+            dtheta_dz = jnp.zeros_like(theta_total)
         theta_p_new = theta_p_c - dt_s * w_full / J[..., None] * dtheta_dz
 
         return (w_new, theta_p_new, rho_p_new)
@@ -463,8 +616,6 @@ def _acoustic_substeps_grid_semi_implicit(
     gradient in the w equation is treated implicitly via a tridiagonal
     solve, removing the vertical acoustic CFL constraint.
     """
-    from legoesm.timestepping.tridiagonal import thomas_solve_batched
-
     g = config.g
     c_p = constants.c_pd
     R_d = constants.R_d
@@ -509,34 +660,36 @@ def _acoustic_substeps_grid_semi_implicit(
         # --- Tridiagonal coefficients ---
         alpha = dt_s**2 * cs2_half / (dz_inner * J[..., None])**2
 
-        a_tri = jnp.zeros_like(alpha)
-        a_tri = a_tri.at[..., 1:].set(-alpha[..., 1:])
-
-        b_tri = 1.0 + 2.0 * alpha
-        b_tri = b_tri.at[..., 0].set(1.0 + alpha[..., 0])
-        b_tri = b_tri.at[..., -1].set(1.0 + alpha[..., -1])
-
-        c_tri = jnp.zeros_like(alpha)
-        c_tri = c_tri.at[..., :-1].set(-alpha[..., :-1])
+        # Sub/super-diagonals: Pad HLO op replaces alloc-zeros + scatter.
+        # Main diagonal: 1 + alpha + alpha_interior collapses two
+        # boundary scatters + one full-interior expression into a single
+        # add over Pad-of-slice (and the original full-array ``2*alpha``).
+        pad_axes_a = ((0, 0),) * (alpha.ndim - 1)
+        a_tri = jnp.pad(-alpha[..., 1:], (*pad_axes_a, (1, 0)))
+        alpha_interior = jnp.pad(alpha[..., 1:-1], (*pad_axes_a, (1, 1)))
+        b_tri = 1.0 + alpha + alpha_interior
+        c_tri = jnp.pad(-alpha[..., :-1], (*pad_axes_a, (0, 1)))
 
         w_inner_new = thomas_solve_batched(a_tri, b_tri, c_tri, rhs)
         w_new = w_c.at[..., 1:-1].set(w_inner_new)
 
         # --- Backward: update rho' ---
         rho_half = 0.5 * (rho_total[..., :-1] + rho_total[..., 1:])
-        rho_w = jnp.zeros_like(w_new)
-        rho_w = rho_w.at[..., 1:-1].set(rho_half * w_new[..., 1:-1])
+        pad_axes = ((0, 0),) * (w_new.ndim - 1)
+        rho_w = jnp.pad(rho_half * w_new[..., 1:-1], (*pad_axes, (1, 1)))
         vert_div = (rho_w[..., :-1] - rho_w[..., 1:]) / dz
         vert_div = vert_div / J[..., None]
         rho_p_new = rho_p_c - dt_s * vert_div
 
         # --- Backward: update theta' ---
         w_full = 0.5 * (w_new[..., :-1] + w_new[..., 1:])
-        dtheta_dz = jnp.zeros_like(theta_total)
         if nlev > 2:
             dz_centered = dz_half[:-1] + dz_half[1:]
             inner_grad = (theta_total[..., :-2] - theta_total[..., 2:]) / dz_centered
-            dtheta_dz = dtheta_dz.at[..., 1:-1].set(inner_grad)
+            theta_pad_axes = ((0, 0),) * (theta_total.ndim - 1)
+            dtheta_dz = jnp.pad(inner_grad, (*theta_pad_axes, (1, 1)))
+        else:
+            dtheta_dz = jnp.zeros_like(theta_total)
         theta_p_new = theta_p_c - dt_s * w_full / J[..., None] * dtheta_dz
 
         return (w_new, theta_p_new, rho_p_new)
@@ -579,7 +732,6 @@ class SpectralCompressibleEulerModel:
         self.terrain_metric = terrain_metric
         self.config = config or SpectralNHConfig()
         if self.config.small_earth_factor != 1.0:
-            from legoesm import constants
             factor = self.config.small_earth_factor
             grid = grid._replace(
                 radius=constants.R_earth / factor,
@@ -596,7 +748,6 @@ class SpectralCompressibleEulerModel:
                 )
             )
 
-        from legoesm.runtime.backend import get_backend, check_spectral_backend
         backend = get_backend()
         if backend == "metal":
             self._use_cpu_for_spectral = True
@@ -608,6 +759,61 @@ class SpectralCompressibleEulerModel:
             check_spectral_backend(
                 allow_unsupported=allow_unsupported_backend,
             )
+        # iter-9: lazy fp64 dry-mass snapshot for anchor-to-initial.
+        self._target_mass = None
+
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (iter-18; see iter-4 SW twin)."""
+        self._target_mass = None
+
+    def set_target_mass(self, target_mass) -> None:
+        """Explicitly set the anchored mass target (iter-19)."""
+        self._target_mass = target_mass
+
+    def compute_dry_mass(self, state) -> jax.Array:
+        """Global dry mass ``∫ J · (rho_ref + rho') · dz · dA`` (fp64)."""
+        rho_p_grid = sh_synthesis_3d(self.grid, state.rho_prime_hat.data)
+        rho_total = self.height_coord.rho_ref + rho_p_grid  # (n_lat, n_lon, nlev)
+        J = self.terrain_metric.jacobian                    # (n_lat, n_lon)
+        dz = self.height_coord.dz                           # (nlev,)
+        col_mass = jnp.sum(
+            J[..., None] * rho_total * dz[None, None, :], axis=-1,
+        )                                                   # (n_lat, n_lon)
+        acc = jnp.float64
+        return jnp.sum(
+            col_mass.astype(acc) * self.grid.grid_area.astype(acc),
+        )
+
+    def _apply_mass_fixer(self, state):
+        """Anchor ``∫ J · (rho_ref + rho') · dz · dA`` to ``_target_mass``.
+
+        Uniform additive correction in physical space (matches the
+        cubed-sphere / MPAS ``fix_mass_nonhydrostatic`` convention):
+        ``Δρ = (target − current) / (∫ J · dz · dA)``.  Adding ``Δρ`` to
+        ``rho'`` in physical space is equivalent to adding
+        ``Δρ · sqrt(4π)`` to ``rho_prime_hat[0, :]`` (the (n=0,m=0) row),
+        broadcast across all vertical levels.
+        """
+        rho_p_grid = sh_synthesis_3d(self.grid, state.rho_prime_hat.data)
+        rho_total = self.height_coord.rho_ref + rho_p_grid
+        J = self.terrain_metric.jacobian
+        dz = self.height_coord.dz
+        col_mass = jnp.sum(
+            J[..., None] * rho_total * dz[None, None, :], axis=-1,
+        )
+        acc = jnp.float64
+        area_acc = self.grid.grid_area.astype(acc)
+        current_mass = jnp.sum(col_mass.astype(acc) * area_acc)
+        total_vol = jnp.sum(J.astype(acc) * area_acc) * jnp.sum(dz.astype(acc))
+        delta_rho = (self._target_mass - current_mass) / total_vol
+        sqrt_4pi = jnp.sqrt(jnp.asarray(4.0 * jnp.pi, dtype=acc))
+        rho_hat = state.rho_prime_hat.data
+        rho_hat_new = rho_hat.at[0, :].add(
+            (delta_rho * sqrt_4pi).astype(rho_hat.dtype),
+        )
+        return state._replace(
+            rho_prime_hat=state.rho_prime_hat.replace(data=rho_hat_new),
+        )
 
     def _build_se_functions(self):
         """Build slow tendency and acoustic update functions for split-explicit."""
@@ -618,10 +824,24 @@ class SpectralCompressibleEulerModel:
             )
 
         def acoustic_update_fn(s, slow_tend, dt_s, n_sub, cfg):
-            # Convert acoustic variables from spectral to grid
-            w_grid = sh_synthesis_3d(self.grid, s.w_hat.data)
-            theta_p_grid = sh_synthesis_3d(self.grid, s.theta_prime_hat.data)
-            rho_p_grid = sh_synthesis_3d(self.grid, s.rho_prime_hat.data)
+            # Convert acoustic variables from spectral to grid.  Theta_p
+            # and rho_p share (n_sh, nlev); w_hat has (n_sh, nlev+1).
+            # Concatenate all three along the trailing axis and run a
+            # single ``sh_synthesis_3d`` — the 3D transform treats the
+            # trailing axis as a passive batch, so different "level"
+            # axes in different fields combine cleanly into one
+            # ``segment_sum`` + IRFFT.  3 SH syntheses → 1.  Loop 179
+            # extends Loop 97.
+            n_sh_a, nlev_a = s.theta_prime_hat.data.shape
+            nlev_w = s.w_hat.data.shape[-1]  # nlev + 1
+            theta_rho_w_hat = jnp.concatenate(
+                [s.theta_prime_hat.data, s.rho_prime_hat.data, s.w_hat.data],
+                axis=-1,
+            )  # (n_sh, 2*nlev + (nlev+1))
+            theta_rho_w_grid = sh_synthesis_3d(self.grid, theta_rho_w_hat)
+            theta_p_grid = theta_rho_w_grid[..., :nlev_a]
+            rho_p_grid = theta_rho_w_grid[..., nlev_a:2 * nlev_a]
+            w_grid = theta_rho_w_grid[..., 2 * nlev_a:]
 
             # Run acoustic substeps in grid space
             acoustic_fn = (
@@ -635,16 +855,27 @@ class SpectralCompressibleEulerModel:
                 self.height_coord, self.terrain_metric, self.config,
             )
 
-            # Convert back to spectral
+            # Convert back to spectral via the same concat trick — 3 SH
+            # analyses → 1.  Slot order matches the synthesis so we can
+            # slice the result back into (theta_hat, rho_hat, w_hat).
+            n_lat_a = self.grid.n_lat
+            n_lon_a = self.grid.n_lon
+            theta_rho_w_new = jnp.concatenate(
+                [theta_p_new, rho_p_new, w_new], axis=-1,
+            )  # (n_lat, n_lon, 2*nlev + (nlev+1))
+            theta_rho_w_new_hat = sh_analysis_3d(self.grid, theta_rho_w_new)
+            theta_p_new_hat = theta_rho_w_new_hat[..., :nlev_a]
+            rho_p_new_hat = theta_rho_w_new_hat[..., nlev_a:2 * nlev_a]
+            w_new_hat = theta_rho_w_new_hat[..., 2 * nlev_a:]
             return SpectralNHState(
                 vor_hat=s.vor_hat,
                 div_hat=s.div_hat,
-                w_hat=s.w_hat.replace(data=sh_analysis_3d(self.grid, w_new)),
+                w_hat=s.w_hat.replace(data=w_new_hat),
                 theta_prime_hat=s.theta_prime_hat.replace(
-                    data=sh_analysis_3d(self.grid, theta_p_new),
+                    data=theta_p_new_hat,
                 ),
                 rho_prime_hat=s.rho_prime_hat.replace(
-                    data=sh_analysis_3d(self.grid, rho_p_new),
+                    data=rho_p_new_hat,
                 ),
                 phis_hat=s.phis_hat,
                 tracers_hat=s.tracers_hat,
@@ -652,8 +883,17 @@ class SpectralCompressibleEulerModel:
 
         return slow_tendency_fn, acoustic_update_fn
 
-    @partial(jax.jit, static_argnums=(0,))
     def step(self, state: SpectralNHState, dt: float) -> SpectralNHState:
+        """Outer wrapper: snapshots dry mass on first call when
+        ``anchor_mass_to_initial`` is on (fp64, outside JIT)."""
+        if (self.config.fix_mass
+                and self.config.anchor_mass_to_initial
+                and self._target_mass is None):
+            self._target_mass = self.compute_dry_mass(state)
+        return self._step_jit(state, dt)
+
+    @partial(jax.jit, static_argnums=(0,))
+    def _step_jit(self, state: SpectralNHState, dt: float) -> SpectralNHState:
         """Advance one time step using split-explicit RK3.
 
         Slow tendencies use spectral horizontal operators.
@@ -670,11 +910,22 @@ class SpectralCompressibleEulerModel:
                 state_cpu, slow_tendency_fn, acoustic_update_fn,
                 dt, se_config,
             )
-            return jax.device_put(result_cpu, self._default_device)
+            state_new = jax.device_put(result_cpu, self._default_device)
+        else:
+            state_new = split_explicit_step(
+                state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
+            )
 
-        return split_explicit_step(
-            state, slow_tendency_fn, acoustic_update_fn, dt, se_config,
-        )
+        # iter-9: anchored dry-mass fixer.  ``_target_mass`` is None
+        # when disabled OR before the first ``step()`` call (snapshot
+        # happens in the Python wrapper).  When set, it's a fp64 scalar
+        # that JIT captures as a closure constant.
+        if (self.config.fix_mass
+                and self.config.anchor_mass_to_initial
+                and self._target_mass is not None):
+            state_new = self._apply_mass_fixer(state_new)
+
+        return state_new
 
     @partial(jax.jit, static_argnums=(0,))
     def _step_on_cpu(self, state: SpectralNHState, dt: float) -> SpectralNHState:
@@ -767,10 +1018,6 @@ def dcmip25_tc1_init_spectral(
         piecewise_lapse_theta_ref,
     )
     from tests.test_cases.dcmip2025.test_case_1 import TC1_PARAMS
-    from legoesm.grids.vertical import (
-        create_height_coordinate,
-        compute_terrain_metric,
-    )
 
     p = {**TC1_PARAMS, **(params or {})}
 
@@ -944,11 +1191,6 @@ def dcmip25_tc2_init_spectral(
     from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_2 import (
         TC2_PARAMS,
     )
-    from legoesm.grids.gaussian import create_gaussian_grid
-    from legoesm.grids.vertical import (
-        create_height_coordinate,
-        compute_terrain_metric,
-    )
 
     p = {**TC2_PARAMS, **(params or {})}
     factor = p["small_earth_factor"]
@@ -1046,11 +1288,6 @@ def dcmip25_tc3_init_spectral(
     from tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_3 import (
         TC3_PARAMS, _squall_line_sounding, _squall_line_theta_fn,
     )
-    from legoesm.grids.gaussian import create_gaussian_grid
-    from legoesm.grids.vertical import (
-        create_height_coordinate, compute_terrain_metric,
-    )
-    from legoesm.thermo import saturation_mixing_ratio
 
     p = {**TC3_PARAMS, **(params or {})}
     factor = p["small_earth_factor"]

@@ -26,7 +26,7 @@ def ocean_z_coord():
 def ocean_state(ocean_grid, ocean_z_coord):
     return rest_state_ocean(
         ocean_grid, ocean_z_coord,
-        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=4000.0,
     )
 
@@ -136,19 +136,6 @@ def test_ocean_model_fc_gram_cgrid_step(ocean_grid, ocean_z_coord, ocean_state):
     state_new = model.step(ocean_state, 60.0)
     assert jnp.all(jnp.isfinite(state_new.eta.data))
     assert jnp.all(jnp.isfinite(state_new.T.data))
-
-
-def test_ocean_model_fv_tracer_transport(ocean_grid, ocean_z_coord, ocean_state):
-    """OceanModel with FV tracer transport runs a step."""
-    from legoesm.ocean.dynamics.ocean_model import OceanModel
-    config = OceanConfig(
-        use_fv_tracer_transport=True,
-        use_conservation_fixer=False,
-    )
-    model = OceanModel(ocean_grid, ocean_z_coord, config=config)
-    state_new = model.step(ocean_state, 60.0)
-    assert jnp.all(jnp.isfinite(state_new.T.data))
-    assert jnp.all(jnp.isfinite(state_new.S.data))
 
 
 def test_ocean_model_centered_step(ocean_grid, ocean_z_coord, ocean_state):

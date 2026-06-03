@@ -80,16 +80,35 @@ ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
         "legoesm.atmosphere.dynamics.sfno_pe",
     ),
 
-    # -- MPAS icosahedral --
+    # -- MPAS / SCVT Voronoi mesh + TRiSK discretization --
     SolverEntry(
-        "atmosphere", "hydrostatic", "mpas_voronoi",
+        "atmosphere", "hydrostatic", "mpas",
         "mpas_primitive_equations", "MPASPrimitiveEquationModel",
         "legoesm.atmosphere.dynamics.primitive_eq_mpas",
     ),
     SolverEntry(
-        "atmosphere", "nonhydrostatic", "mpas_voronoi",
+        "atmosphere", "nonhydrostatic", "mpas",
         "mpas_compressible_euler", "MPASCompressibleEulerModel",
         "legoesm.atmosphere.dynamics.compressible_euler_mpas",
+    ),
+
+    # -- Lat-lon C-grid (FV) --
+    SolverEntry(
+        "atmosphere", "shallow_water", "latlon_cgrid",
+        "latlon_cgrid_shallow_water", "CGridLatLonShallowWaterModel",
+        "legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid",
+    ),
+    SolverEntry(
+        "atmosphere", "hydrostatic", "latlon_cgrid",
+        "latlon_cgrid_primitive_equations", "CGridLatLonPrimitiveEquationModel",
+        "legoesm.atmosphere.dynamics.primitive_eq_latlon_cgrid",
+    ),
+
+    # -- Doubly-periodic plane (CRM rollout, PR2c) --
+    SolverEntry(
+        "atmosphere", "nonhydrostatic", "plane",
+        "plane_compressible_euler", "PlaneCompressibleEulerModel",
+        "legoesm.atmosphere.dynamics.compressible_euler_plane",
     ),
 
     # -- Tracer transport --
@@ -99,9 +118,14 @@ ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
         "legoesm.atmosphere.dynamics.tracer_transport",
     ),
     SolverEntry(
-        "atmosphere", "tracer_transport", "voronoi",
+        "atmosphere", "tracer_transport", "mpas",
         "tracer_transport_mpas", "TracerTransportMPASModel",
         "legoesm.atmosphere.dynamics.tracer_transport_mpas",
+    ),
+    SolverEntry(
+        "atmosphere", "tracer_transport", "latlon_cgrid",
+        "tracer_transport_latlon", "TracerTransportLatLonModel",
+        "legoesm.atmosphere.dynamics.tracer_transport_latlon",
     ),
 )
 
@@ -119,7 +143,7 @@ OCEAN_MATRIX: tuple[SolverEntry, ...] = (
     # NOTE: spectral ocean is unsupported — land boundary handling in
     # spectral space causes Gibbs ringing and unreliable masking.
     # Kept for reference; not included in the ocean test matrix.
-    # See https://github.com/leap-stc/legoESM/issues/99
+    # See https://github.com/gentine/legoESM/issues/99
     SolverEntry(
         "ocean", "hydrostatic", "spectral_gaussian",
         "spectral", "SpectralOceanModel",
@@ -131,7 +155,7 @@ OCEAN_MATRIX: tuple[SolverEntry, ...] = (
         "legoesm.ocean.dynamics.ocean_model_latlon_cgrid",
     ),
     SolverEntry(
-        "ocean", "hydrostatic", "mpas_voronoi",
+        "ocean", "hydrostatic", "mpas",
         "mpas", "MPASOceanModel",
         "legoesm.ocean.dynamics.ocean_model_mpas",
     ),
@@ -231,9 +255,11 @@ ATMOSPHERE_DEPRECATED_ALIASES: dict[str, tuple[str, str]] = {
 
 
 #: Discretization names that map to the same implementation.
+#: "centered" and "finite_volume" are grid-dependent: they resolve
+#: to "cdgrid" on cubed-sphere grids and "latlon_cgrid" on lat-lon
+#: grids.  The default (without grid context) is "cdgrid".
+#: "cgrid" is a true deprecated alias that always means "cdgrid".
 ATMOSPHERE_DEPRECATED_DISCRETIZATIONS: dict[str, str] = {
-    "centered": "cdgrid",
-    "finite_volume": "cdgrid",
     "cgrid": "cdgrid",
 }
 

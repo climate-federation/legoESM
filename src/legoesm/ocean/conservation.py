@@ -1,7 +1,8 @@
-"""Conservation fixers for the ocean model (cubed-sphere).
+"""Conservation fixers for the ocean model.
 
 Volume (free surface), heat (T), and salt (S) conservation via
-uniform additive corrections.
+uniform additive corrections.  Works with cubed-sphere, lat-lon
+C-grid, and any other grid that exposes a 2D ``area`` attribute.
 
 Limitations
 -----------
@@ -22,17 +23,27 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from typing import Union
+
 from legoesm.core.operators import _is_distributed
 from legoesm.core.precision import cast
-from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
-from legoesm.ocean.state import OceanState, OceanConfig
+from legoesm.ocean.state import (
+    OceanState, OceanConfig, LatLonCGridOceanState, LatLonCGridOceanConfig,
+)
+from legoesm.grids.cubed_sphere import CubedSphereGrid
+from legoesm.grids.latlon import LatLonGrid
+from legoesm.parallel.reductions import global_sum_mpi
+
+# Types accepted by the conservation fixer (cubed-sphere + lat-lon C-grid)
+_OceanStateT = Union[OceanState, LatLonCGridOceanState]
+_OceanConfigT = Union[OceanConfig, LatLonCGridOceanConfig]
+_GridT = Union[CubedSphereGrid, LatLonGrid]
 
 
-def _ocean_global_sum(local_value):
+def ocean_global_sum(local_value):
     """MPI-aware global sum for scalar or vector reductions."""
     if _is_distributed():
-        from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_value)
     return local_value
 
@@ -48,7 +59,7 @@ def _ocean_area_sum(field_2d, mask, grid):
     mask_acc = cast(mask, _M, "accumulate")
     area_acc = cast(grid.area, _M, "accumulate")
     local_sum = jnp.sum(field_acc * mask_acc * area_acc)
-    return _ocean_global_sum(local_sum)
+    return ocean_global_sum(local_sum)
 
 
 def _ocean_volume_sum(field_3d, h_k, mask, grid):
@@ -64,11 +75,11 @@ def _ocean_volume_sum(field_3d, h_k, mask, grid):
 
 
 def fix_volume_ocean(
-    state_new: OceanState,
-    state_old: OceanState,
-    grid: CubedSphereGrid,
+    state_new: _OceanStateT,
+    state_old: _OceanStateT,
+    grid: _GridT,
     min_water_column_m: float | None = None,
-) -> OceanState:
+) -> _OceanStateT:
     """Fix volume conservation via uniform eta correction.
 
     Ensures global integral of eta * area is preserved.
@@ -83,7 +94,7 @@ def fix_volume_ocean(
         jnp.sum(cast(state_new.eta.data, _M, "accumulate") * weighted_area),
         jnp.sum(weighted_area),
     ])
-    vol_old, vol_new, ocean_area = _ocean_global_sum(local_terms)
+    vol_old, vol_new, ocean_area = ocean_global_sum(local_terms)
 
     correction = (vol_old - vol_new) / jnp.maximum(ocean_area, 1.0)
     eta_candidate = state_new.eta.data + correction * mask
@@ -104,12 +115,12 @@ def fix_volume_ocean(
 
 
 def fix_heat_ocean(
-    state_new: OceanState,
-    state_old: OceanState,
-    grid: CubedSphereGrid,
+    state_new: _OceanStateT,
+    state_old: _OceanStateT,
+    grid: _GridT,
     z_coord: OceanZStarCoordinate,
     min_water_column_m: float | None = None,
-) -> OceanState:
+) -> _OceanStateT:
     """Fix heat conservation via uniform T correction.
 
     Ensures global integral of T * h_k * area is preserved.
@@ -140,12 +151,23 @@ def fix_heat_ocean(
     weighted_area = mask_acc * area_acc
     h_k_old_acc = cast(h_k_old, _M, "accumulate")
     h_k_new_acc = cast(h_k_new, _M, "accumulate")
-    local_terms = jnp.stack([
-        jnp.sum(jnp.sum(cast(state_old.T.data, _M, "accumulate") * h_k_old_acc, axis=-1) * weighted_area),
-        jnp.sum(jnp.sum(cast(state_new.T.data, _M, "accumulate") * h_k_new_acc, axis=-1) * weighted_area),
-        jnp.sum(jnp.sum(h_k_new_acc, axis=-1) * weighted_area),
-    ])
-    heat_old, heat_new, ocean_volume = _ocean_global_sum(local_terms)
+    T_old_acc = cast(state_old.T.data, _M, "accumulate")
+    T_new_acc = cast(state_new.T.data, _M, "accumulate")
+    # Three column reductions share the level axis; stack their
+    # integrands and reduce once.  Then the area-weighted outer sum
+    # collapses to one ``jnp.sum`` over the horizontal axes.
+    _heat_inner = jnp.sum(
+        jnp.stack(
+            [T_old_acc * h_k_old_acc, T_new_acc * h_k_new_acc, h_k_new_acc],
+            axis=-1,
+        ),
+        axis=-2,
+    )
+    local_terms = jnp.sum(
+        _heat_inner * weighted_area[..., None],
+        axis=tuple(range(weighted_area.ndim)),
+    )
+    heat_old, heat_new, ocean_volume = ocean_global_sum(local_terms)
     correction = (heat_old - heat_new) / jnp.maximum(ocean_volume, 1.0)
 
     T_fixed = state_new.T.replace(
@@ -155,12 +177,12 @@ def fix_heat_ocean(
 
 
 def fix_salt_ocean(
-    state_new: OceanState,
-    state_old: OceanState,
-    grid: CubedSphereGrid,
+    state_new: _OceanStateT,
+    state_old: _OceanStateT,
+    grid: _GridT,
     z_coord: OceanZStarCoordinate,
     min_water_column_m: float | None = None,
-) -> OceanState:
+) -> _OceanStateT:
     """Fix salt conservation via uniform S correction.
 
     Ensures global integral of S * h_k * area is preserved.
@@ -191,12 +213,21 @@ def fix_salt_ocean(
     weighted_area = mask_acc * area_acc
     h_k_old_acc = cast(h_k_old, _M, "accumulate")
     h_k_new_acc = cast(h_k_new, _M, "accumulate")
-    local_terms = jnp.stack([
-        jnp.sum(jnp.sum(cast(state_old.S.data, _M, "accumulate") * h_k_old_acc, axis=-1) * weighted_area),
-        jnp.sum(jnp.sum(cast(state_new.S.data, _M, "accumulate") * h_k_new_acc, axis=-1) * weighted_area),
-        jnp.sum(jnp.sum(h_k_new_acc, axis=-1) * weighted_area),
-    ])
-    salt_old, salt_new, ocean_volume = _ocean_global_sum(local_terms)
+    S_old_acc = cast(state_old.S.data, _M, "accumulate")
+    S_new_acc = cast(state_new.S.data, _M, "accumulate")
+    # Same 3-into-1 fusion as the heat fixer.
+    _salt_inner = jnp.sum(
+        jnp.stack(
+            [S_old_acc * h_k_old_acc, S_new_acc * h_k_new_acc, h_k_new_acc],
+            axis=-1,
+        ),
+        axis=-2,
+    )
+    local_terms = jnp.sum(
+        _salt_inner * weighted_area[..., None],
+        axis=tuple(range(weighted_area.ndim)),
+    )
+    salt_old, salt_new, ocean_volume = ocean_global_sum(local_terms)
     correction = (salt_old - salt_new) / jnp.maximum(ocean_volume, 1.0)
 
     S_fixed = state_new.S.replace(
@@ -206,12 +237,12 @@ def fix_salt_ocean(
 
 
 def ocean_conservation_fixer(
-    state_new: OceanState,
-    state_old: OceanState,
-    grid: CubedSphereGrid,
+    state_new: _OceanStateT,
+    state_old: _OceanStateT,
+    grid: _GridT,
     z_coord: OceanZStarCoordinate,
-    config: OceanConfig,
-) -> OceanState:
+    config: _OceanConfigT,
+) -> _OceanStateT:
     """Apply all ocean conservation fixers simultaneously.
 
     All corrections are computed from the ORIGINAL state_old's layer
@@ -236,12 +267,18 @@ def ocean_conservation_fixer(
     # --- Volume (eta) correction ---
     eta_corrected = state_new.eta.data
     if config.fix_volume:
-        vol_terms = jnp.stack([
-            jnp.sum(cast(state_old.eta.data, _M, "accumulate") * weighted_area_acc),
-            jnp.sum(cast(state_new.eta.data, _M, "accumulate") * weighted_area_acc),
-            jnp.sum(weighted_area_acc),
-        ])
-        vol_old, vol_new, ocean_area = _ocean_global_sum(vol_terms)
+        eta_old_acc = cast(state_old.eta.data, _M, "accumulate")
+        eta_new_acc = cast(state_new.eta.data, _M, "accumulate")
+        # Three area-weighted scalar sums share the same horizontal axes
+        # and the ``weighted_area_acc`` weight — stack the integrands and
+        # reduce once locally so XLA fires one sum kernel.
+        _vol_stack = jnp.stack(
+            [eta_old_acc, eta_new_acc, jnp.ones_like(eta_old_acc)], axis=-1,
+        ) * weighted_area_acc[..., None]
+        vol_terms = jnp.sum(
+            _vol_stack, axis=tuple(range(weighted_area_acc.ndim)),
+        )
+        vol_old, vol_new, ocean_area = ocean_global_sum(vol_terms)
         eta_correction = (vol_old - vol_new) / jnp.maximum(ocean_area, 1.0)
         eta_corrected = state_new.eta.data + eta_correction.astype(eta_corrected.dtype) * mask
         if min_wc is not None:
@@ -259,26 +296,45 @@ def ocean_conservation_fixer(
     h_k_fix_acc = cast(h_k_corrected, _M, "accumulate")
 
     # --- Heat (T) correction ---
+    # Stack the 3 inner column reductions and the 3 outer area sums per
+    # tracer so each correction pays one column reduction + one area
+    # reduction instead of three of each.
     T_corrected = state_new.T.data
     if config.fix_heat:
-        heat_terms = jnp.stack([
-            jnp.sum(jnp.sum(cast(state_old.T.data, _M, "accumulate") * h_k_old_acc, axis=-1) * weighted_area_acc),
-            jnp.sum(jnp.sum(cast(state_new.T.data, _M, "accumulate") * h_k_fix_acc, axis=-1) * weighted_area_acc),
-            jnp.sum(jnp.sum(h_k_fix_acc, axis=-1) * weighted_area_acc),
-        ])
-        heat_old, heat_new, ocean_vol = _ocean_global_sum(heat_terms)
+        T_old_acc = cast(state_old.T.data, _M, "accumulate")
+        T_new_acc = cast(state_new.T.data, _M, "accumulate")
+        _heat_inner = jnp.sum(
+            jnp.stack(
+                [T_old_acc * h_k_old_acc, T_new_acc * h_k_fix_acc, h_k_fix_acc],
+                axis=-1,
+            ),
+            axis=-2,
+        )
+        heat_terms = jnp.sum(
+            _heat_inner * weighted_area_acc[..., None],
+            axis=tuple(range(weighted_area_acc.ndim)),
+        )
+        heat_old, heat_new, ocean_vol = ocean_global_sum(heat_terms)
         T_correction = (heat_old - heat_new) / jnp.maximum(ocean_vol, 1.0)
         T_corrected = state_new.T.data + T_correction.astype(T_corrected.dtype) * mask[..., jnp.newaxis]
 
     # --- Salt (S) correction ---
     S_corrected = state_new.S.data
     if config.fix_salt:
-        salt_terms = jnp.stack([
-            jnp.sum(jnp.sum(cast(state_old.S.data, _M, "accumulate") * h_k_old_acc, axis=-1) * weighted_area_acc),
-            jnp.sum(jnp.sum(cast(state_new.S.data, _M, "accumulate") * h_k_fix_acc, axis=-1) * weighted_area_acc),
-            jnp.sum(jnp.sum(h_k_fix_acc, axis=-1) * weighted_area_acc),
-        ])
-        salt_old, salt_new, ocean_vol = _ocean_global_sum(salt_terms)
+        S_old_acc = cast(state_old.S.data, _M, "accumulate")
+        S_new_acc = cast(state_new.S.data, _M, "accumulate")
+        _salt_inner = jnp.sum(
+            jnp.stack(
+                [S_old_acc * h_k_old_acc, S_new_acc * h_k_fix_acc, h_k_fix_acc],
+                axis=-1,
+            ),
+            axis=-2,
+        )
+        salt_terms = jnp.sum(
+            _salt_inner * weighted_area_acc[..., None],
+            axis=tuple(range(weighted_area_acc.ndim)),
+        )
+        salt_old, salt_new, ocean_vol = ocean_global_sum(salt_terms)
         S_correction = (salt_old - salt_new) / jnp.maximum(ocean_vol, 1.0)
         S_corrected = state_new.S.data + S_correction.astype(S_corrected.dtype) * mask[..., jnp.newaxis]
 

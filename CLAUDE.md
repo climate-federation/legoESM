@@ -1,157 +1,165 @@
 # legoESM Claude Memory
 
 ## Role
-- Act like a senior JAX engineer and Earth system model developer.
-- Default to careful, skeptical, verification-first work rather than fast iteration.
-- Optimize for scientific correctness, physical consistency, differentiability, and maintainability.
-- If model selection is available, prefer `opusplan` or `opus` with higher effort for nontrivial dycore, physics, parallel, or debugging work.
-- Keep fast mode off for scientific implementation, numerical debugging, and architecture changes unless the user explicitly prioritizes latency.
+Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical consistency, differentiability, maintainability. Prefer `opusplan`/`opus` high effort for dycore/physics/parallel/debug. Fast mode off.
 
 ## Repo Facts
-- This repository is a differentiable Earth system model in JAX spanning atmosphere, ocean, land, sea ice, coupler, DA, and ML components.
-- End-to-end `jax.grad` compatibility is a design goal. Do not break autodiff, JIT, or pytree semantics for convenience.
-- Conservation matters: mass is a hard constraint, and energy/momentum consistency should be preserved whenever the scheme permits.
-- The canonical parallel entry point is `ParallelRuntime.create()`.
-- The codebase supports cubed-sphere, lat-lon, Gaussian/spectral, Voronoi/MPAS, and icosahedral pathways.
+- Differentiable ESM in JAX: atm, ocean, land, sea ice, coupler, DA, ML.
+- End-to-end `jax.grad` compat = goal. Never break autodiff/JIT/pytree.
+- Mass conservation hard. Energy/momentum when scheme permits.
+- Parallel entry: `ParallelRuntime.create()`.
+- Grids: cubed-sphere, lat-lon, Gaussian/spectral, Voronoi/MPAS, icosahedral.
 
-## Training Infrastructure (`src/legoesm/training/`)
-- **Three training modes**: physics parameter tuning, neural GCM, SFNO coupled to dycore.
-- All modes use `build_segment_fn(...).raw` (non-JIT, non-donating) inside `eqx.filter_value_and_grad` for AD compatibility.
-- `SegmentForcing` is an explicit argument to `run_segment`, not closure-captured — prevents recompilation when forcing changes.
-- `TrainablePhysicsParams` wraps 8 physics parameters as an Equinox module with sigmoid constraints.
-- ERA5 data: `era5_to_state.py` handles lat-lon → model grid conversion with local Zarr cache.
-- Losses: `training/losses.py` imports from `ml/loss.py` — never duplicate loss functions.
-- **MPI AD compatibility**: `global_sum_mpi` (allreduce SUM) has full VJP support; MPI halo exchange uses `_sendrecv_vjp` custom_vjp wrapper. Conservation fixers (`fix_mass`, `zero_mean_tendency`) flow gradients correctly through global reductions. `global_max_mpi` / `global_min_mpi` are NOT differentiable — keep them out of loss functions.
+## Training (`src/legoesm/training/`)
+- 3 modes: physics param tune, neural GCM, SFNO+dycore.
+- All: `build_segment_fn(...).raw` (non-JIT, non-donating) inside `eqx.filter_value_and_grad`.
+- `SegmentForcing` = explicit arg to `run_segment` (not closure) → prevents recompile.
+- `TrainablePhysicsParams` wraps 8 params, Equinox module, sigmoid constraints.
+- ERA5: `era5_to_state.py` lat-lon → grid, Zarr cache.
+- Losses: `training/losses.py` imports `ml/loss.py`. No dup.
+- **MPI AD**: `global_sum_mpi` (allreduce SUM) full VJP. MPI halo: `_sendrecv_vjp` custom_vjp. `fix_mass`/`zero_mean_tendency` flow grads via global reductions. `global_max_mpi`/`global_min_mpi` NOT diff — keep out of losses.
 
 ## Operating Mode
-- For any nontrivial task, start with a short plan before editing.
-- Read nearby implementation and tests before proposing or making changes.
-- If a request is ambiguous and could affect numerics, physics, APIs, or scientific conclusions, ask a clarifying question before editing.
-- Prefer minimal, local diffs. Do not refactor unrelated code during targeted bug fixes.
-- Reuse existing shared functions, operators, diagnostics, initial-condition builders, and init/load paths whenever possible.
-- Before adding new helpers or new initialization logic, search for an existing implementation that can be extended or factored into a shared location.
-- Avoid duplicating numerics across dycores, physics packages, grids, or test setups when a common implementation is feasible.
-- Do not trade correctness for speed by skipping validation or making speculative edits.
+- Nontrivial task: short plan before edit. Read nearby impl+tests first. Ambiguous numerics/physics/API: ask.
+- Minimal diffs. No unrelated refactor in bug fix.
+- **Pre-impl search mandatory**: before new fn/helper/class/operator/diagnostic/init/load/loss/numerical routine, grep `src/legoesm/` for similar names/docstrings/formulas in `thermo.py`, `constants.py`, `eos.py`, `ml/loss.py`, `diagnostics/`, `core/`, `atmosphere/physics/_shared.py`. State searched+found. Similar exists → extend/factor.
+- **Shared utilities — never re-derive** (prod, scripts, validators, plotters, tests, notebooks, probes):
+  - Constants: `from legoesm import constants` → `T_freeze`, `R_d`, `c_pd`, `L_v`, `R_v`, `epsilon`, `g`, `p_ref`, `kappa`, `sigma_sb`, `T_freeze_ocean`. No literals `273.15`/`287.0`/`1004.64`/`2.501e6`/`461.51`/`0.622`/`9.80616`/`6.371e6`/`7.292e-5`.
+  - Saturation: `from legoesm.thermo import saturation_vapor_pressure, saturation_mixing_ratio, saturation_mixing_ratio_ice`. No re-impl Tetens/Magnus/Clausius–Clapeyron (plotters incl). Why: re-derived `e_sat=611.2*exp(17.67*Tc/(Tc+243.5))` diverged from model → false supersat in CI.
+  - Column integrals: `legoesm.diagnostics.column_integrals` (`column_water_vapor`). No inline `jnp.sum(q*p_s*dsigma)/g`.
+  - Losses: `ml/loss.py` (`area_weighted_mse`, `spectral_loss`, `per_variable_mse`).
+  - Optimizer: `ml/training.create_optimizer()` (warmup+cosine+clip).
+  - Atm column (h, ρ, virtual T): `atmosphere.physics._shared`.
+  - Ocean EOS/pressure: `ocean.eos` (`compute_ocean_rho`, `compute_ocean_rho_and_pressure`).
+  - SFNO: `ml/sfno.py`. No new neural op archs in training.
+  - Channel packing: `ml/channel_packing.py` (`PE3DChannelSpec`, `pack_pe_state`, `unpack_pe_output`).
+  - Ocean baroclinic (#214): `ocean/dynamics/ocean_tendency_common.py` (`iterate_eos_and_pressure_anomaly`, `apply_sponge_tracer_relaxation`, `apply_freshwater_virtual_salt_top`, `implicit_bottom_drag_factor`) in new `ocean_pe_*.py`.
+  - Ocean barotropic (#214): `ocean/dynamics/barotropic_common.py` (`compute_filter_weights`, `bebt_blend`, `maxvel_clip`) in new `barotropic_*.py`. `tests/ocean/unit/test_no_scheme_duplication.py` enforces.
+  - Plotters NOT exempt. Use model helpers for q_sat, RH, ρ, virtual T, MSE.
+- No duplicate numerics across dycores/physics/grids/tests. Indexing/naming-only copy-paste forbidden.
+- **No laziness on hard/large code** (>100 LOC, multi-component, full operator chains): no `pass`/`NotImplementedError` stubs, no partial-called-done, no skip edge cells/boundary halos/corner stencils/non-duogrid/MPI-sharded/AD-VJP. No happy-path-only tests. Too big → say so, list remainder, quantify risk.
 
-## JAX Engineering Rules
-- Keep functions pure and pytree-friendly.
-- Prefer `jax.lax.scan` for time integration and structured loops.
-- Prefer `jax.vmap` or batched array expressions over Python loops on array dimensions.
-- Use `jnp.where`, `jax.lax.cond`, `jax.lax.fori_loop`, or `scan` instead of Python control flow on traced values.
-- **But**: for on/off feature gating (e.g., `fix_mass`, `fix_moisture`), use Python `if` on a static bool captured in the closure — NOT `jnp.where`, which traces both branches and wastes compute. `jnp.where` is for data-dependent selection on traced values only.
-- Preserve stable shapes and avoid unnecessary retracing.
-- Be explicit about dtype behavior. Spectral solvers expect x64 and complex128; finite-volume pathways may intentionally run in float32.
-- Avoid host/device thrash, unnecessary materialization, or ad hoc NumPy fallbacks inside traced code.
-- Do not introduce hidden non-JAX side effects that break JIT, grad, checkpointing, or sharding.
-- **Buffer donation and `jax.grad`**: `@jax.jit(donate_argnums=...)` frees input buffers after the call. This conflicts with reverse-mode AD, which needs inputs for the backward pass. When a JIT-compiled function will be called inside `jax.grad` or `eqx.filter_value_and_grad`, provide a non-donating variant (e.g., `.raw` attribute) and use that for training. See `build_segment_fn` for the pattern.
-- **Closures vs explicit args for JIT reuse**: values captured in a Python closure become compile-time constants. If a value changes every iteration (e.g., SST, solar forcing), pass it as an explicit traced argument — not a closure capture — so the compiled kernel is reused. See `SegmentForcing` for the pattern.
+## JAX
+- Pure pytree fns. `lax.scan` time integration. `vmap`/batched arrays over Python loops on array dims. `jnp.where`/`lax.cond`/`fori_loop`/`scan` not Python control flow on traced.
+- **Feature gating exception** (`fix_mass`, `fix_moisture`): Python `if` on static bool in closure — NOT `jnp.where` (traces both branches). `jnp.where` only for data-dependent traced selection.
+- Stable shapes. No retrace. Dtype: spectral=x64+complex128; finite-volume can float32.
+- No host/device thrash, NumPy in traced code, hidden non-JAX side effects.
+- **Buffer donation + `jax.grad`**: `donate_argnums` conflicts reverse-mode AD. JIT fn inside `jax.grad`/`eqx.filter_value_and_grad` → provide non-donating variant (`.raw`). See `build_segment_fn`.
+- **Closures vs explicit args**: closure captures = compile-time consts. Per-iter changing val (SST, solar) → pass as traced arg. See `SegmentForcing`.
 
-## Earth System Modeling Rules
-- Treat conservation, metric consistency, staggered-grid consistency, and halo correctness as first-class requirements.
-- Never "fix" numerical problems with silent clipping, damping, or coercion unless scientifically justified and validated.
-- Preserve units, sign conventions, monotonicity/positivity assumptions, and hydrostatic/nonhydrostatic consistency.
-- For cubed-sphere and other curvilinear grids, assume edge and metric errors are likely root causes until ruled out.
-- For physics coupling, maintain column closure and physically consistent flux signs across atmosphere, land, ocean, ice, and coupler interfaces.
-- For DA and differentiable workflows, preserve smoothness where intended and avoid gratuitous nondifferentiable logic.
+## Earth System
+- Conservation, metric consistency, staggered-grid consistency, halo correctness = first-class.
+- No silent clip/damp/coerce unless justified+validated.
+- Preserve units, sign conventions, monotonicity/positivity, hydrostatic/nonhydrostatic.
+- Cubed-sphere/curvilinear: assume edge+metric errors first.
+- Physics coupling: column closure + consistent flux signs.
+- DA/diff: preserve smoothness. No gratuitous nondiff.
 
-## Parallel and HPC Rules
-- Preserve correctness under serial, multi-device, MPI, and hybrid execution.
-- For sharded or distributed code, reason explicitly about halo exchange, reduction semantics, partition specs, and global invariants.
-- Validate single-rank behavior before assuming a distributed bug is fixed.
-- Then verify rank/device equivalence on the smallest meaningful distributed case.
-- Do not assume Metal, GPU, CPU, spectral, and MPI backends have identical dtype or kernel constraints.
-- On Apple Silicon, keep spectral work on CPU.
-- **MPI distributed path**: `initialize_distributed(global_n=N)` → `scatter_to_local()` → rank-local stepping → `gather_to_global()` for I/O only. Both ModelDriver and the benchmark script use this path. Never create a full global state per rank — always scatter.
-- **Native 4D halo exchange**: `pad_halo_4d()` and `pad_halo_vector_4d()` exchange all vertical levels in one MPI message. All 3D operators in `operators_3d.py` use the 4D path. Do not revert to `vmap(pad_halo)` which issues `nlev` separate messages.
-- **MPI halo AD safety**: All `sendrecv` calls go through `_sendrecv_vjp` (`@jax.custom_vjp` wrapper in `halo_exchange.py`) that swaps source/dest in the backward pass. This enables `jax.grad` through MPI halo exchange. Only `allreduce(SUM)` is AD-safe among MPI reductions; `MAX`, `MIN`, `allgather`, and `bcast` are not differentiable — use only in diagnostics.
-- **Device mesh under MPI**: Pass per-rank device count to `create_device_mesh()`, not the total across all ranks. The function warns when clamping.
+## Parallel/HPC
+- Correctness across serial/multi-device/MPI/hybrid.
+- Sharded: reason about halo exchange, reductions, partition specs, global invariants.
+- Validate single-rank → smallest distributed.
+- Backends differ (Metal/GPU/CPU/spectral/MPI). Apple Silicon: spectral on CPU.
+- **MPI**: `initialize_distributed(global_n=N)` → `scatter_to_local()` → rank-local step → `gather_to_global()` for I/O only. Never full global per rank.
+- **4D halo**: `pad_halo_4d()`+`pad_halo_vector_4d()` all vert in one msg. All 3D ops in `operators_3d.py` use 4D. Never `vmap(pad_halo)`.
+- **MPI halo AD**: all `sendrecv` via `_sendrecv_vjp` (`@jax.custom_vjp` in `halo_exchange.py`). Only `allreduce(SUM)` AD-safe; `MAX`/`MIN`/`allgather`/`bcast` = diagnostics only.
+- **Device mesh under MPI**: per-rank count to `create_device_mesh()`, not total.
 
-## Validation Rules
-- Always run the narrowest relevant test after edits.
-- For numerical changes, prefer analytical or benchmark-style validation rather than relying only on unit tests.
-- Use `JAX_ENABLE_X64=1` for most scientific validation unless the task is specifically about float32 or Metal portability.
-- If touching dycore operators, consider Williamson, Galewsky, Jablonowski-Williamson, DCMIP, Held-Suarez, or equivalent ocean benchmarks as appropriate.
-- If touching conservation, reductions, or coupler logic, check mass and energy diagnostics explicitly.
-- If touching parallel code, verify unsharded vs sharded or single-rank vs MPI agreement.
-- If full validation is too expensive, say exactly what was run, what was not run, and what residual risk remains.
-- **CRITICAL — Visual verification for spatial/grid artifacts**: Passing unit tests and error norms is NECESSARY but NOT SUFFICIENT when modifying cubed-sphere operators, halo exchange, diffusion coefficients, or grid metrics. Edge artifacts, cube imprint, and grid-scale noise are ONLY reliably detected by visual inspection of field snapshots (especially v-wind in Williamson 2, wind_speed in Williamson 5). Always run the atmosphere test matrix quick mode (`--only sw --grid cubed_sphere --quick`) and inspect the generated snapshot PNGs before claiming a fix works. Compare against a known-good baseline image. Error norms can improve while visual artifacts get worse (e.g., if artifacts shift location or change character). Never claim "tests pass, edge artifacts fixed" based on pytest results alone.
-- **Diffusion coefficient sensitivity**: Divergence damping and hyperdiffusion coefficients AMPLIFY halo-exchange gradient errors at cubed-sphere face boundaries. Increasing these coefficients (even modestly) can worsen edge artifacts. Always check visual impact on Williamson 2 v-wind when changing `_hyperdiff_cube`, `_div_damp_cube`, or any diffusion parameter.
+## Validation
+- Narrowest test after edits. Numerical changes: analytical/benchmark > unit tests alone. `JAX_ENABLE_X64=1` unless float32/Metal task.
+- Dycore: Williamson, Galewsky, Jablonowski-Williamson, DCMIP, Held-Suarez, ocean benchmarks.
+- Conservation/reductions/coupler: mass+energy diagnostics.
+- Parallel: unsharded vs sharded, single-rank vs MPI.
+- Too expensive: say what ran/didn't, residual risk.
+- **CRITICAL — Visual verify spatial/grid artifacts**: passing tests+norms NECESSARY ≠ SUFFICIENT for cubed-sphere ops, halo exchange, diffusion coeffs, grid metrics. Edge artifacts/cube imprint/grid-scale noise only detected visually (v-wind W2, wind_speed W5). Run `--only sw --grid cubed_sphere --quick` + inspect PNGs vs baseline. Norms can improve while artifacts worsen. Never claim "tests pass, edge fixed" from pytest alone.
+- **Diffusion sensitivity**: div damping + hyperdiff AMPLIFY halo errors at cubed-sphere face boundaries. Check W2 v-wind visually when touching `_hyperdiff_cube`, `_div_damp_cube`, diffusion params.
 
-## Project-Specific Commands
+## Commands
 - Install: `pip install -e ".[dev]"`
-- General tests: `.venv/bin/python -m pytest tests/`
-- Targeted scientific tests: `JAX_ENABLE_X64=1 .venv/bin/python -m pytest <target>`
-- Atmosphere test matrix: `JAX_ENABLE_X64=1 .venv/bin/python scripts/run_atmosphere_test_matrix.py`
-- Ocean test matrix: `JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py`
-- AMIP production: `.venv/bin/python scripts/run_amip.py`
-- Dycore progression suite: `.venv/bin/python tests/validation/run_dycore_progression_suite.py`
-- GPU/MPI scaling benchmark: `.venv/bin/python scripts/run_levante_gpu_scaling.py --grid cubed-sphere --mode strong` (see `docs/REAL_HARDWARE_SCALING.md`)
-- MPI distributed tests: `mpirun -np 2 .venv/bin/python -m pytest tests/distributed/`
-- MPI differentiability tests: `mpirun -np 2 .venv/bin/python -m pytest tests/distributed/test_mpi_differentiability.py`
+- Tests: `.venv/bin/python -m pytest tests/`
+- Sci tests: `JAX_ENABLE_X64=1 .venv/bin/python -m pytest <target>`
+- Atm matrix: `JAX_ENABLE_X64=1 .venv/bin/python scripts/run_atmosphere_test_matrix.py`
+- Ocean matrix: `JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py`
+- AMIP: `.venv/bin/python scripts/run_amip.py`
+- Dycore progression: `.venv/bin/python tests/validation/run_dycore_progression_suite.py`
+- GPU/MPI scaling: `.venv/bin/python scripts/run_levante_gpu_scaling.py --grid cubed-sphere --mode strong` (`docs/REAL_HARDWARE_SCALING.md`)
+- MPI tests: `mpirun -np 2 .venv/bin/python -m pytest tests/distributed/`
+- MPI diff: `mpirun -np 2 .venv/bin/python -m pytest tests/distributed/test_mpi_differentiability.py`
 
-## How To Think About Bugs
-- For instability: check CFL, boundary treatment, metric terms, halo exchange, pressure-gradient formulation, diffusion, and dtype first.
-- For conservation drift: inspect flux form, area/volume weights, reductions, and state updates before adding fixers.
-- For differentiability failures: inspect control flow, shape changes, side effects, checkpointing, and nondifferentiable branches.
-- For performance regressions: look for retracing, host callbacks, excessive scatters, poor sharding, and accidental Python loops.
-- For cross-backend discrepancies: inspect dtype assumptions, x64 requirements, unsupported kernels, and communication semantics.
+## Bug Triage
+- Instability: CFL, boundary, metric, halo, pressure-gradient, diffusion, dtype.
+- Conservation drift: flux form, weights, reductions, state updates before fixers.
+- Differentiability: control flow, shape changes, side effects, checkpointing, nondiff branches.
+- Perf regression: retrace, host callbacks, scatters, sharding, Python loops.
+- Cross-backend: dtype, x64, unsupported kernels, comm semantics.
 
-## Code Hygiene Rules
-- Every new `.py` source file must have at least one test that imports and exercises it. Do not add files to `__init__.py` lazy imports or `supported_matrix.py` without a corresponding test.
-- New config dispatch branches (new Literal values in config NamedTuples + factory cases in `integration.py`) must have a test exercising that branch.
-- When removing a source module, also remove: its `__init__.py` re-export, its `supported_matrix.py` entry, its dispatch entry, its test file, and any stale `__pycache__` files.
-- Do not add deprecated backward-compatibility wrappers. If an API changes, update call sites directly.
-- Grid-specific variants are legitimate when they have genuinely different numerics. Copy-paste with only indexing changes is forbidden — factor shared logic into a common function.
-- Run the slopbuster agent (`/slopbuster audit all` or `/slopbuster review`) periodically, especially before releases.
+## Hygiene/Imports/Tests (audit)
+- Every new `.py` ≥1 direct unit test importing+exercising leaf module (tendencies for physics schemes — not just integration via factory). No `__init__.py` re-export / `supported_matrix.py` / factory dispatch add without same-PR test. Block PRs growing untested-LIVE count.
+- New config dispatch (Literal + factory in `integration.py`): test via public config.
+- Removing module: also remove `__init__.py` re-export, `supported_matrix.py` entry, dispatch, test file, `__pycache__`.
+- No deprecated backward-compat wrappers — update call sites. No thin dispatch-only wrappers (`X_utils.py` re-exporting `X.py`) — inline/factor. Real branching across callers (`land/stomata_utils.py`) legit. Grid variants legit when genuinely different numerics; indexing-only copy-paste forbidden.
+- **No top-level cross-package imports from `core/` to `runtime/`/`parallel/`/`driver/`/`training/`/`experiments/`.** Why: `from legoesm.runtime.backend import ...` at top of `core/precision.py` triggered `runtime/__init__.py` → `runtime.precision` → `core.precision` mid-init, breaking isolated pytest. Use function-scope deferred imports.
+- **No import of private (`_`-prefixed) symbols across modules.** Promote (drop underscore + `__init__.py` re-export) or factor public wrapper. Audit: `grep -rE "from legoesm\.[^ ]+ import [^,]*\b_[a-z]" src/legoesm/` = 0.
+- **Test-only modules MUST be acknowledged.** Not wired into factory/`__init__.py`/prod driver: (a) wire same PR, (b) move to `_future/` + docstring + xfail/skip, or (c) delete.
+- **Never commit `docs/references/`.** Local research PDFs/extracts. Cite by filename/DOI. Notes elsewhere (`docs/ocean_experiments/`). Staging: explicit paths, never `git add .`/`-A`.
+- Slopbuster periodic: `/slopbuster audit all` or `/slopbuster review`.
+- High-priority untested LIVE (touch any → add test same PR): `ocean/experiments/global_overturning.py`, `ocean/physics/{bottom_drag,convection,surface_forcing,vertical_mixing}/output.py`, `ocean/physics/convection/enhanced_diffusion.py`, `ocean/physics/vertical_mixing/{k_profiles,mpas_integration}.py`. RESOLVED 2026-05-29 (direct tests added): `coupler/surface_energy.py`, `ocean/dynamics/barotropic_common.py`, `atmosphere/dynamics/sfno_pe.py`, `atmosphere/dynamics/tracer_transport_mpas.py`; `atmosphere/physics/convection/_triggers.py` + `timestepping/tridiagonal.py` already covered.
 
-## Common Mistakes to Avoid
-These are recurring mistakes caught by slopbuster. Check for them before submitting code:
+## Constants/Params (audit)
+- **All physical constants in `src/legoesm/constants.py`.** New constant (T, ρ, c, L, k, μ, EOS coeff, Schmidt#, R_earth) MUST be added BEFORE use. No constants in `config.py`/fn bodies/test fixtures/plotters/notebooks even with `# = constants.X` comment.
+- **`getattr(..., "X", <literal>)` fallbacks count as hardcoded.** Use `getattr(grid, "radius", constants.R_earth)`. Same `setattr`/`dict.get`/`kwargs.get`.
+- **No hardcoded physical constants in fn sigs/bodies in `src/legoesm/`.** No `def f(g=9.80616, ...)` → `g: float = constants.g` or config NamedTuple. NamedTuple defaults SHOULD reference constants. Tunable scheme params (sigmoid sharpness, τ, drag) stay in config NamedTuple.
+- **No hardcoded tunable params in physics bodies.** Sigmoid sharpness, τ, Louis coeffs, KPP epsilon, emissivity, drag → scheme `*Config` NamedTuple. Exempt: safety floors (`eps=1e-30`), math constants (`0.5`, `2.0`), category lookup tables (PFT `L_v` in `surface_params.py`) with doc.
+- **No `273.15` for C↔K in prod.** Use `constants.T_freeze`. `T_freeze_ocean=271.35 K` in `ocean/eos.py` = only intentional exception.
+- **Tests+scripts+plotters same rule.** `from legoesm import constants`. No `9.80616`, `7.292e-5`, `6.371e6` literals.
+- **Sigmoid sharpness/transition widths in JAX hot loops forbidden as magic numbers.** Inside `scan_step`/`cond`: fn kwarg with doc default OR scheme `*Config` field. Ex: `compute_moist_adiabat(lcl_sigmoid_width_pa=100.0)`, `PlumeConfig.active_sigmoid_sharpness=1e4`, DM95 `transition_width_frac=0.1` on `dm95_taper`/`dm95_taper_scalar`/`_triad_taper`.
+- **Saturation re-impl in forcing modules forbidden.** Use `legoesm.thermo.saturation_mixing_ratio`/`saturation_vapor_pressure`.
 
-### NamedTuple field names
-- When accessing NamedTuple fields, **verify the actual field name** — not what you think it should be. Example: `PhysicsOutput` has `precip`, not `precipitation`. A `hasattr` guard silently degrades to a fallback instead of catching the typo.
-- When adding fields to a NamedTuple (e.g., `SegmentCarry`), **update every call site** that constructs the NamedTuple. Search with `grep -rn "SegmentCarry(" --include="*.py"` for all constructors. Missing a field causes a runtime error, but tests in other files may not run until CI catches it.
+## Naming
+- Surface T = `T_sfc` everywhere. No new `T_surface`/`Ts`.
+- Driver/config schema field names match runtime field. New tunable: same name in `driver/config.py`, scheme config NamedTuple, YAML schema (consistent `hyperdiff_coeff`).
+- **Same name + different units = bug magnet (audit).** Unit hint (`_C`, `_K`, `_s`, `_days`, `_m`, `_km`): use everywhere. New C-vs-K args MUST carry `_C`/`_K`. Config fields sharing base (`tau_*`, `T_*`, `c_*`, `C_*`) MUST have consistent unit suffixes OR distinct names.
+- **snake_case all NamedTuple fields**, even capitalized symbols (CAPE, CIN, MSE, TKE). `SBMConfig.CAPE_threshold` → `cape_threshold`.
 
-### Reuse before writing
-- **Column integrals**: use `diagnostics.column_integrals.column_water_vapor()` — do not inline `jnp.sum(q * p_s * dsigma) / g`.
-- **Loss functions**: import from `ml/loss.py` (`area_weighted_mse`, `spectral_loss`, `per_variable_mse`) — do not reimplement.
-- **Optimizer setup**: use `ml/training.create_optimizer()` for warmup + cosine decay + grad clipping — do not inline bare `optax.adam()` without schedule.
-- **SFNO model**: import from `ml/sfno.py` — do not create new neural operator architectures in training code.
-- **Channel packing**: import from `ml/channel_packing.py` (`PE3DChannelSpec`, `pack_pe_state`, `unpack_pe_output`) — do not reimplement state↔tensor conversion.
+### Open naming debt
+- `T_sfc`(368)/`T_surface`(59)/`Ts`(~6): coupler+`land/{multilayer_land,snow_budget,stomata_utils,slab_land}.py`, `ice/sea_ice.py`, `coupler/{accumulator,lake/two_layer_lake}.py` still `T_surface`; 3 files MIX BOTH — `driver/coupled_esm_driver.py`, `ice/sea_ice.py`, `driver/earth_system_driver.py`. Unify cleanup PR.
+- `nlev`(4119)/`n_levels`(199)/`nz`(33): `nlev` dominates. Cleanup PR.
+- `tau_relax`: RESOLVED 2026-05-29 → `KuoConfig.tau_relax_s`[s], `PhillipsTwoLayerConfig.tau_relax_days`[days] (matches `backscatter.tau_relax_days`). Keep unit suffix on any new relaxation-timescale field.
+- `C_water`/`c_water`: RESOLVED 2026-05-29 → `SoilThermalConfig.C_water_vol`[J/m³/K], `LakeConfig.c_water_mass`[J/kg/K]. Keep `_vol`/`_mass` on new heat-capacity fields.
+- `n_layers` overloaded: soil=`n_soil_layers`, ML=`n_hidden_layers`, reserve `n_layers` for atm/ocean vert.
 
-### JIT and compilation
-- **Never build closures inside training loops**: `build_segment_fn` creates a new function object each call. If called inside a `for epoch` loop or inside `_loss_fn`, it causes JIT recompilation every iteration. Build once outside the loop; pass changing values as explicit arguments.
-- **Helper functions inside `lax.scan` bodies**: Python function definitions inside `_single_step` (the scan body) are recreated every trace. Move helpers (e.g., `_match_dtype`) to module scope.
-- **Dead code from iteration**: when refactoring, search for variables that were assigned but never used (e.g., building a segment function then immediately rebuilding inside a nested `_loss_fn`).
+## Dispatch (audit)
+- **Every `scheme="..."` factory MUST `raise ValueError` on unknown.** Silent `else: <default>` masks typos+dead branches. Historical: `cloud_fraction.compute_cloud_properties` ran sundqvist on typo; `land/carbon/carbon_cycle.py:443` zero CO2; `ocean/biogeochemistry/carbon_cycle.py:108,209` silently disabled BGC; MPAS PV typos → enstrophy in `{compressible_euler_mpas,primitive_eq_mpas,shallow_water_mpas,ocean_pe_mpas}.py`; bulk-scheme typos → constant in `coupler.py:204`, `slab_land.py:156`, `multilayer_land.py:212`, `two_layer_lake.py:66`, `bulk_formulas.py:68`; `io/restart.py:232` silently wrote npz. HARDENED 2026-05-29 (now `raise ValueError`, validated at fn entry on static config): `carbon_cycle.py:step_carbon`, `coupler.py:ocean_tile_response`, `ice/sea_ice.py:_bulk_flux_dispatch`. STILL silent (follow-up): `slab_land.py`, `multilayer_land.py`, `coupler/lake/two_layer_lake.py`, `bulk_formulas.py`.
+- Dispatch in `lax.fori_loop`/`lax.cond` (`coupler/bulk_flux.py:222`): validate at fn entry on static Python val, not traced body.
+- Add membership-set assertions in `ExperimentConfig.validate_strict` for new scheme literals. GAP (2026-05-29 audit): `convection`/`turbulence`/`gravity_wave_drag` have NO validate_strict membership check — typos pass early validation, fail only at JIT inside `integration.py`. Add them.
 
-### Imports
-- Do not import private (`_`-prefixed) functions from other modules. If you need internal functionality, add a public wrapper in the source module.
-- Remove unused imports before committing. Check with `grep -n "^from\|^import" <file>` and verify each is used.
+## Common Mistakes
+**NamedTuple fields**: verify actual field. `PhysicsOutput.precip` not `precipitation`. `hasattr` guard silently degrades. Adding field to `SegmentCarry`: update every call site. `grep -rn "SegmentCarry(" --include="*.py"`.
 
-### SegmentCarry discipline
-- `SegmentCarry` is the canonical hot-loop state. Adding a field is a **cross-cutting change** — update: the NamedTuple definition, `pack_carry`, `unpack_carry` docstring, the per-step Python reference loop in `test_compiled_segments.py`, `test_scale_tpu_compat.py`, `test_scale_jit_health.py`, and any direct `SegmentCarry(...)` constructors in validation tests.
-- New carry fields used only for diagnostics (e.g., `max_cfl`) should be reset to zero at the start of each segment, not accumulated across segments.
+**Land/face masks (latlon C-grid)**:
+- Never `state._replace(land_mask=...)` on `LatLonCGridOceanState` without updating `u_mask`+`v_mask`. Stale face masks → mass flux through walls → silent leak.
+- Preferred: `land_mask_override` to `rest_state_latlon_cgrid_ocean()` at construction.
+- Post-construction: `replace_land_mask(state, new_mask)` from `init_latlon_cgrid.py` — atomic update 3 masks.
+- `_assert_runtime_invariants` (gated `enable_runtime_checks`) catches inconsistencies.
 
-## Physics Constants and Shared Functions
-- **All physical constants** (g, R_d, R_v, c_pd, L_v, T_freeze, sigma_sb, etc.) are defined in `src/legoesm/constants.py`. Never redefine these values locally — always `from legoesm import constants` or import the specific name.
-- **RRTMGP constants** (`radiation/rrtmgp/constants.py`, `optics/constants.py`) re-export from `legoesm.constants` with SCREAMING_CASE aliases. Do not add new hardcoded values there.
-- **NamedTuple config defaults** (e.g. `BulkFormulaConfig.c_pa`, `SeaIceConfig.rho_ice`) should use literal floats matching the central constants. Add a comment referencing the canonical name (e.g. `# = constants.c_pd`).
-- **Ocean-specific constants** (`rho_0`, `c_sw`, `T_freeze_ocean`, `scale_depth`) live in `ocean/eos.py`. The ocean freezing point (271.35 K for seawater) is intentionally different from freshwater `T_freeze = 273.15 K` in `constants.py`.
-- **Ocean physics helpers** (`compute_ocean_rho`, `compute_ocean_rho_and_pressure`) live in `ocean/eos.py`. Do not duplicate EOS + hydrostatic pressure calls in ocean integration bridges.
-- **Saturation thermodynamics**: use `legoesm.thermo` for all saturation computations:
-  - `saturation_vapor_pressure(T)` → e_sat [Pa]
-  - `saturation_mixing_ratio(T, p)` → q_sat [kg/kg]
-  - `saturation_mixing_ratio_ice(T, p)` → q_sat_ice [kg/kg]
-  - Do not inline Tetens/Magnus/Clausius-Clapeyron formulas anywhere.
-- **Atmosphere column helpers** (hydrostatic heights, density, virtual temperature): use `atmosphere.physics._shared`. Do not duplicate in integration bridges.
-- **Function defaults** for `g` should use `constants.g`, not the literal `9.80616`. Same for other constants used as default parameter values.
-- **When adding a new parameterization** (atmosphere, ocean, or land): import thermodynamic helpers from `thermo.py`, constants from `constants.py`, ocean constants from `eos.py`. Do not copy-paste from neighboring schemes.
+**JIT/compilation**:
+- Never build closures in training loops. `build_segment_fn` creates new fn per call → inside `for epoch`/`_loss_fn` recompiles each iter. Build once outside; pass changing vals as args.
+- Helper fns inside `lax.scan` body: Python defs in `_single_step` recreated each trace. Move to module scope.
+- Dead code from iteration: when refactoring, grep for vars assigned never used.
 
-## Existing Claude Assets
-- Specialized agents already exist under `.claude/agents/` for dycore expertise, validation, differentiability, physics, land/ice, and scalability.
-- Use those specialized agents when a task is deep in one of those domains rather than handling everything as generic coding work.
+**SegmentCarry**: canonical hot-loop state. Adding field cross-cutting: NamedTuple def, `pack_carry`, `unpack_carry` docstring, per-step Python ref loop in `test_compiled_segments.py`, `test_scale_tpu_compat.py`, `test_scale_jit_health.py`, direct `SegmentCarry(...)` in validation tests. New diagnostic fields (`max_cfl`) reset to zero at segment start, not accumulated.
+
+## Assets
+Specialized agents in `.claude/agents/` for dycore, validation, differentiability, physics, land/ice, scalability.
 
 ## Response Style
-- Be precise and concrete.
-- State assumptions explicitly.
-- When changing numerics or algorithms, explain the expected effect on stability, accuracy, conservation, or differentiability.
-- Do not present guesses as facts.
+Precise+concrete. Explicit assumptions. Numerics change → explain effect on stability, accuracy, conservation, differentiability. No guesses as facts. **No Read images** unless user asks; report path.
+
+# iterate-with-codex agent
+1. Implement change
+2. `/codex:adversarial-review --wait`
+3. Parse output
+4. Fix flagged
+5. `/codex:review --wait` again
+6. Issues remain → 4
+7. Stop when clean or after 30 iter

@@ -49,6 +49,19 @@ import logging
 import jax
 import jax.numpy as jnp
 
+from legoesm.parallel.layout import (
+    SingleRankLayout,
+    gather,
+    make_layout,
+    scatter,
+)
+from legoesm.parallel.mesh import DeviceConfig, create_device_mesh
+from legoesm.parallel.reductions import (
+    global_max_mpi,
+    global_min_mpi,
+    global_sum_mpi,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -74,12 +87,21 @@ def _supported_device_counts(max_n: int = 1024) -> set[int]:
     return counts
 
 
-def validate_device_count(n: int, grid_type: str = "cubed_sphere") -> None:
+def validate_device_count(
+    n: int,
+    grid_type: str = "cubed_sphere",
+    allow_level_fallback: bool = False,
+) -> None:
     """Raise ``ValueError`` if *n* is not a supported device count.
 
     Unlike the old ``_best_tile_factorization`` which silently rounded
     down, this function fails fast with a precise error message listing
     nearby valid counts.
+
+    Issue #273: pass ``allow_level_fallback=True`` to accept any
+    ``n >= 1`` on the cubed-sphere path — values that fail face-sharding
+    divisibility will route to the level-parallel fallback mesh
+    (``create_cubed_sphere_level_mesh``).
     """
     if grid_type != "cubed_sphere":
         if n < 1:
@@ -91,6 +113,12 @@ def validate_device_count(n: int, grid_type: str = "cubed_sphere") -> None:
 
     valid = _supported_device_counts(max(n * 2, 128))
     if n in valid:
+        return
+
+    if allow_level_fallback:
+        # Level fallback accepts any positive integer; the mesh creator
+        # replicates the horizontal stencil across devices and shards
+        # the level axis.
         return
 
     # Build a helpful suggestion
@@ -107,7 +135,9 @@ def validate_device_count(n: int, grid_type: str = "cubed_sphere") -> None:
         f"Unsupported device count {n} for cubed_sphere. "
         f"Supported counts: 1, 2, 3, 6, 24, 54, 96, 150, 216, 294, 384, ... "
         f"(1/2/3/6 for face-only, or 6*k² for sub-face tiling). "
-        f"{suggestion_str}."
+        f"{suggestion_str}.  Pass allow_level_fallback=True to accept "
+        f"any positive integer via the level-parallel fallback mesh "
+        f"(issue #273)."
     )
 
 
@@ -264,9 +294,6 @@ class ParallelRuntime:
             validate_device_count(total_devices, grid_type)
 
         # Create device mesh for local devices
-        from legoesm.parallel.mesh import create_device_mesh, DeviceConfig
-        from legoesm.parallel.layout import SingleRankLayout, make_layout
-
         _gn = grid_n or 1  # default grid_n for layout construction
 
         if n_local <= 1 and not is_mpi:
@@ -324,11 +351,36 @@ class ParallelRuntime:
             halo = HaloBackend.HYBRID
             reduction = ReductionBackend.HYBRID
 
-        # Build topology for MPI modes
+        # Build topology for MPI modes — grid-specific.
         topology = None
         if is_mpi and grid_type == "cubed_sphere":
             from legoesm.parallel.comm import build_comm_topology
             topology = build_comm_topology(rank, world_size)
+        elif is_mpi and grid_type == "latlon":
+            # Lat-lon band MPI: build a LatLonBandLayout and activate
+            # the MPI halo backend via the standalone helper.  This
+            # is what makes ``pad_halo_latlon*`` / ``pad_ns_zero`` /
+            # ``pad_with_pole_bc_lat`` inside the dycore dispatch
+            # through MPI sendrecv at partition cuts and pole-fold /
+            # wall-BC constants at boundary ranks — see
+            # legoesm.parallel.distributed.initialize_distributed_latlon
+            # for the full activation contract.
+            #
+            # Requires ``grid_n`` (= n_lat) to be passed; cubed-sphere
+            # callers historically pass this as the per-face N, and
+            # for lat-lon AMIP we use n_lat which the CLI postprocessor
+            # threads through ExperimentConfig.grid.resolution.
+            if grid_n is None or grid_n <= 0:
+                raise ValueError(
+                    "Lat-lon MPI initialisation requires grid_n (=n_lat) "
+                    "> 0.  Got grid_n=%r.  Pass it through "
+                    "ParallelRuntime.create(grid_n=...) or set "
+                    "config.grid.resolution before driver setup." % (grid_n,)
+                )
+            from legoesm.parallel.distributed import (
+                initialize_distributed_latlon,
+            )
+            topology = initialize_distributed_latlon(global_n_lat=grid_n)
 
         rt = cls(
             mode=mode,
@@ -436,11 +488,9 @@ class ParallelRuntime:
             axis_names = self._mesh_axis_names()
             if axis_names is not None:
                 local_value = jax.lax.psum(local_value, axis_name=axis_names)
-            from legoesm.parallel.reductions import global_sum_mpi
             return global_sum_mpi(local_value)
 
         # MPI
-        from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_value)
 
     def global_max(self, local_value):
@@ -461,10 +511,8 @@ class ParallelRuntime:
             axis_names = self._mesh_axis_names()
             if axis_names is not None:
                 local_value = jax.lax.pmax(local_value, axis_name=axis_names)
-            from legoesm.parallel.reductions import global_max_mpi
             return global_max_mpi(local_value)
 
-        from legoesm.parallel.reductions import global_max_mpi
         return global_max_mpi(local_value)
 
     def global_min(self, local_value):
@@ -485,10 +533,8 @@ class ParallelRuntime:
             axis_names = self._mesh_axis_names()
             if axis_names is not None:
                 local_value = jax.lax.pmin(local_value, axis_name=axis_names)
-            from legoesm.parallel.reductions import global_min_mpi
             return global_min_mpi(local_value)
 
-        from legoesm.parallel.reductions import global_min_mpi
         return global_min_mpi(local_value)
 
     # ------------------------------------------------------------------
@@ -497,14 +543,12 @@ class ParallelRuntime:
 
     def scatter(self, global_data):
         """Extract this rank's portion from a global array."""
-        from legoesm.parallel.layout import scatter, SingleRankLayout
         if isinstance(self.layout, SingleRankLayout):
             return global_data
         return scatter(global_data, self.layout)
 
     def gather(self, local_data, root_only: bool = False):
         """Reconstruct global array from rank-local data."""
-        from legoesm.parallel.layout import gather, SingleRankLayout
         if isinstance(self.layout, SingleRankLayout):
             return local_data
         return gather(local_data, self.layout, root_only=root_only)

@@ -9,6 +9,10 @@ References
 ----------
 - Louis, J.-F. (1979). A parametric model of vertical eddy fluxes in the
   atmosphere. Boundary-Layer Meteorol., 17, 187-202.
+- Louis, J.-F., Tiedtke, M., & Geleyn, J.-F. (1982). A short history of
+  the operational PBL parameterization at ECMWF. ECMWF Workshop on
+  Planetary Boundary Layer Parameterization, 59-79.  (Separate momentum
+  vs heat stability functions, ``b_h/b_m = 3/2``.)
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import LouisConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
@@ -25,6 +30,7 @@ from legoesm.atmosphere.physics.turbulence.surface_layer import (
 )
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
+    implicit_vertical_diffusion_theta,
 )
 
 
@@ -97,11 +103,11 @@ def louis_turbulence(
     S2 = du_dz ** 2 + dv_dz ** 2 + 1e-10  # shear squared, with floor
     S = jnp.sqrt(S2)
 
-    # Virtual potential temperature for buoyancy
-    # theta_v = T * (p_ref / p)^kappa * (1 + 0.61 * q_v)
-    theta_v = T * (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa * (
-        1.0 + 0.61 * q_v
-    )
+    # Virtual potential temperature for buoyancy:
+    # theta_v = T_v(T, q_v) · (p_ref / p)^kappa, with the canonical
+    # T_v factor 1 + (R_v/R_d - 1) q_v ≈ 1 + 0.6078 q_v.
+    exner = (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
+    theta_v = virtual_temperature(T, q_v) * exner
 
     # Gradient Richardson number at half-levels
     theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
@@ -109,46 +115,58 @@ def louis_turbulence(
     N2 = (constants.g / jnp.clip(theta_v_bar, 1.0, None)) * dtheta_v_dz  # Brunt-Väisälä
     Ri = N2 / S2  # (ncol, nlev-1)
 
-    # Louis (1979) stability functions
-    # Smooth blending using sigmoid to avoid if/else branching
-    # Unstable (Ri < 0): f(Ri) = 1 - 2b*Ri / (1 + 3b*c * l^2 * |Ri|^0.5 / dz^2)
-    # Stable (Ri >= 0): f(Ri) = 1 / (1 + 2b*Ri / sqrt(1 + d*Ri))
+    # Louis stability functions (Louis 1979; separate heat function per
+    # Louis, Tiedtke & Geleyn 1982).  Smooth sigmoid blend avoids if/else.
+    #   Unstable (Ri<0): f = 1 - 2b·Ri / (1 + 3b·c·l²·|Ri|^½ / dz²)
+    #   Stable   (Ri≥0): f = 1 / (1 + 2b·Ri / sqrt(1 + d·Ri))
+    # Momentum uses b_m = b_louis; heat uses b_h = b_heat_ratio·b_louis
+    # (LTG82: 3b heat vs 2b momentum ⇒ ratio 1.5).  The denominators are
+    # SHARED between momentum and heat so only the numerator coefficient
+    # differs: K_m is then exactly independent of b_heat_ratio, and
+    # b_heat_ratio = 1 recovers the Louis (1979) f_h = f_m form.  The
+    # heat function is *more* enhanced when unstable (Pr_t = K_m/K_h < 1)
+    # and *more* suppressed when stable (Pr_t > 1), as observed.
     b_louis = config.b_louis
     c_louis = config.c_louis
     d_louis = config.d_louis
+    b_heat = config.b_heat_ratio * b_louis
 
-    # Unstable branch
+    # Unstable branch — denominator shared between momentum and heat.
     Ri_neg = jnp.minimum(Ri, 0.0)
-    f_unstable = 1.0 - 2.0 * b_louis * Ri_neg / (
+    denom_unstable = (
         1.0 + 3.0 * b_louis * c_louis * l_mix ** 2
         * jnp.sqrt(jnp.abs(Ri_neg) + 1e-10) / (dz_half ** 2 + 1e-10)
     )
+    f_unstable_m = 1.0 - 2.0 * b_louis * Ri_neg / denom_unstable
+    f_unstable_h = 1.0 - 2.0 * b_heat * Ri_neg / denom_unstable
 
-    # Stable branch
+    # Stable branch — sqrt denominator shared between momentum and heat.
     Ri_pos = jnp.maximum(Ri, 0.0)
-    f_stable = 1.0 / (
-        1.0 + 2.0 * b_louis * Ri_pos / jnp.sqrt(1.0 + d_louis * Ri_pos)
-    )
+    sqrt_stable = jnp.sqrt(1.0 + d_louis * Ri_pos)
+    f_stable_m = 1.0 / (1.0 + 2.0 * b_louis * Ri_pos / sqrt_stable)
+    f_stable_h = 1.0 / (1.0 + 2.0 * b_heat * Ri_pos / sqrt_stable)
 
-    # Smooth blending: sigmoid(100 * Ri) transitions from unstable to stable
-    blend = jax.nn.sigmoid(100.0 * Ri)
-    f_m = (1.0 - blend) * f_unstable + blend * f_stable
-    f_h = f_m  # Same stability function for heat (Louis 1979 simplification)
+    # Smooth blending: sigmoid transitions from unstable to stable
+    blend = jax.nn.sigmoid(config.blend_ri_sharpness * Ri)
+    f_m = (1.0 - blend) * f_unstable_m + blend * f_stable_m
+    f_h = (1.0 - blend) * f_unstable_h + blend * f_stable_h
 
     # Eddy diffusivities at half-levels
     Km_half = l_mix ** 2 * S * f_m  # (ncol, nlev-1)
     Kh_half = l_mix ** 2 * S * f_h
 
-    # Interpolate to full levels for diagnostics
-    Km_full = jnp.zeros((ncol, nlev))
-    Km_full = Km_full.at[:, 1:-1].set(0.5 * (Km_half[:, :-1] + Km_half[:, 1:]))
-    Km_full = Km_full.at[:, 0].set(Km_half[:, 0])
-    Km_full = Km_full.at[:, -1].set(Km_half[:, -1])
-
-    Kh_full = jnp.zeros((ncol, nlev))
-    Kh_full = Kh_full.at[:, 1:-1].set(0.5 * (Kh_half[:, :-1] + Kh_half[:, 1:]))
-    Kh_full = Kh_full.at[:, 0].set(Kh_half[:, 0])
-    Kh_full = Kh_full.at[:, -1].set(Kh_half[:, -1])
+    # Interpolate to full levels for diagnostics — single concat per
+    # field instead of the previous ``zeros + 3 .at[].set`` triple
+    # scatter (lowers to one HLO op).  Same pattern as TKE,
+    # Holtslag-Boville, and YSU.
+    Km_interior = 0.5 * (Km_half[:, :-1] + Km_half[:, 1:])
+    Km_full = jnp.concatenate(
+        [Km_half[:, :1], Km_interior, Km_half[:, -1:]], axis=1,
+    )
+    Kh_interior = 0.5 * (Kh_half[:, :-1] + Kh_half[:, 1:])
+    Kh_full = jnp.concatenate(
+        [Kh_half[:, :1], Kh_interior, Kh_half[:, -1:]], axis=1,
+    )
 
     # Layer thicknesses for diffusion
     dz_layer = jnp.abs(z_half[:, :-1] - z_half[:, 1:])  # (ncol, nlev)
@@ -165,10 +183,13 @@ def louis_turbulence(
     sflx_T = shflx / constants.c_pd
     sflx_q = lhflx / constants.L_v
 
-    # Implicit vertical diffusion
+    # Implicit vertical diffusion.  Heat in θ-space so a dry adiabat
+    # stays neutral; moisture and momentum stay in physical space.
     u_new = implicit_vertical_diffusion(u, Km_half, rho, dz_layer, dz_half, dt, sflx_u)
     v_new = implicit_vertical_diffusion(v, Km_half, rho, dz_layer, dz_half, dt, sflx_v)
-    T_new = implicit_vertical_diffusion(T, Kh_half, rho, dz_layer, dz_half, dt, sflx_T)
+    T_new = implicit_vertical_diffusion_theta(
+        T, Kh_half, rho, dz_layer, dz_half, p_full, dt, sflx_T,
+    )
     q_new = implicit_vertical_diffusion(q_v, Kh_half, rho, dz_layer, dz_half, dt, sflx_q)
 
     h_pbl = diagnose_pbl_height(T, q_v, u, v, p_full, z_full)

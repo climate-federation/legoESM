@@ -132,18 +132,24 @@ def plot_conservation(result, name, filename):
     energy0 = result["energy"][0]
     enstrophy0 = result["enstrophy"][0]
 
+    # iter-93 audit followup: previously inlined
+    # ``(result["mass"] - mass0) / abs(mass0)`` etc. would NaN if
+    # the baseline is exactly 0.  Migrated to the shared helper
+    # for the iter-78/80 floor convention (1.0 floor returns
+    # absolute drift in natural units when baseline is near zero).
+    from legoesm.diagnostics.conservation_drift import relative_drift_series
     fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
 
-    axes[0].plot(t, (result["mass"] - mass0) / abs(mass0), "b-", lw=1.5)
+    axes[0].plot(t, relative_drift_series(result["mass"]), "b-", lw=1.5)
     axes[0].set_ylabel("Rel. mass error")
     axes[0].set_title(f"Spectral SW — {name}: Conservation")
     axes[0].ticklabel_format(style="sci", axis="y", scilimits=(-3, 3))
 
-    axes[1].plot(t, (result["energy"] - energy0) / abs(energy0), "r-", lw=1.5)
+    axes[1].plot(t, relative_drift_series(result["energy"]), "r-", lw=1.5)
     axes[1].set_ylabel("Rel. energy error")
     axes[1].ticklabel_format(style="sci", axis="y", scilimits=(-3, 3))
 
-    axes[2].plot(t, (result["enstrophy"] - enstrophy0) / abs(enstrophy0), "g-", lw=1.5)
+    axes[2].plot(t, relative_drift_series(result["enstrophy"]), "g-", lw=1.5)
     axes[2].set_ylabel("Rel. enstrophy error")
     axes[2].set_xlabel("Time [days]")
     axes[2].ticklabel_format(style="sci", axis="y", scilimits=(-3, 3))
@@ -241,8 +247,10 @@ def main():
     h_init = np.array(res2["fields0"]["h"])
     h_err_max = np.max(np.abs(h_final - h_init))
     h_err_rms = np.sqrt(np.mean((h_final - h_init)**2))
-    mass_drift = abs(res2["mass"][-1] - res2["mass"][0]) / abs(res2["mass"][0])
-    energy_drift = abs(res2["energy"][-1] - res2["energy"][0]) / abs(res2["energy"][0])
+    # iter-93: same audit followup; migrate scalar drift to helper.
+    from legoesm.diagnostics.conservation_drift import compute_relative_drift
+    mass_drift = compute_relative_drift(res2["mass"])
+    energy_drift = compute_relative_drift(res2["energy"])
 
     print(f"\n  TC2 Results after 5 days:")
     print(f"    Max |h - h0|   = {h_err_max:.4f} m  (expect < 1 m)")
@@ -270,8 +278,9 @@ def main():
     # Quantitative check
     h_final5 = np.array(res5["fields_final"]["h"])
     h_init5 = np.array(res5["fields0"]["h"])
-    mass_drift5 = abs(res5["mass"][-1] - res5["mass"][0]) / abs(res5["mass"][0])
-    energy_drift5 = abs(res5["energy"][-1] - res5["energy"][0]) / abs(res5["energy"][0])
+    # iter-93: same audit followup.
+    mass_drift5 = compute_relative_drift(res5["mass"])
+    energy_drift5 = compute_relative_drift(res5["energy"])
     h_range_final = np.max(h_final5) - np.min(h_final5)
     h_range_init = np.max(h_init5) - np.min(h_init5)
 

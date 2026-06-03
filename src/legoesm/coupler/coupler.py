@@ -16,7 +16,10 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
-from legoesm.coupler.bulk_flux import simple_bulk_fluxes
+from legoesm.core.precision import get_policy
+from legoesm.coupler.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
+from legoesm.land.multilayer_land import init_multilayer_land_state
+from legoesm.land.surface_params import reshape_params
 from legoesm.coupler.surface_energy import surface_radiation_fluxes
 from legoesm.surface_albedo import ocean_albedo as compute_ocean_albedo
 from legoesm.core.field import Field
@@ -33,6 +36,12 @@ from legoesm.coupler.coupling_fields import (
     SurfaceToAtm,
     TileResponse,
 )
+
+# LY09 sea-surface saturation reduction for typical seawater salinity (~35 PSU).
+# The saturation vapor pressure over saline water is ~2 % lower than over
+# fresh water; q_sat at the air-sea interface is correspondingly reduced.
+# Required by OMIP-2 protocol (Griffies 2016 §2.2 → Large & Yeager 2009 §3).
+_Q_SAT_SALINE_FACTOR = 0.98
 from legoesm.coupler.lake import LakeConfig, LakeState, step_lake
 from legoesm.coupler.tile_fractions import (
     blend_tiles,
@@ -108,13 +117,10 @@ def init_surface_state(
         initialises prognostic carbon pools.
     """
     dims_2d = ("face", "x", "y")
-    from legoesm.core.precision import get_policy
     _sd = get_policy().storage
 
     if isinstance(land_config, MultiLayerLandConfig):
-        from legoesm.land.multilayer_land import init_multilayer_land_state
         # For multi-layer land, ncol = product of spatial dims
-        import math
         ncol = math.prod(shape)
         land = init_multilayer_land_state(
             ncol, land_config, T_init=T_soil_init,
@@ -129,6 +135,11 @@ def init_surface_state(
                              name="snow_depth", dims=dims_2d, units="kg/m2"),
             snow_age=Field(data=jnp.zeros(shape, dtype=_sd),
                            name="snow_age", dims=dims_2d, units="s"),
+            # Initialise runoff to zeros so the pytree shape is
+            # invariant across timesteps (slab_land sets it to a
+            # populated array after every step; matches LakeState.Q_freeze
+            # convention).  Audit F13.
+            runoff=jnp.zeros(shape, dtype=_sd),
         )
 
     ice = SeaIceState(
@@ -140,11 +151,19 @@ def init_surface_state(
                            name="ice_concentration", dims=dims_2d, units="1"),
     )
 
+    # Pin lake temperatures to the same storage precision as the rest
+    # of the coupler state (sea-ice / land use ``_sd`` above) so the
+    # lake fields don't inadvertently default to f64 under x64 mode.
     lake = LakeState(
-        T_epi=Field(data=jnp.full(shape, T_epi_init),
+        T_epi=Field(data=jnp.full(shape, T_epi_init, dtype=_sd),
                     name="T_epi", dims=dims_2d, units="K"),
-        T_hypo=Field(data=jnp.full(shape, T_hypo_init),
+        T_hypo=Field(data=jnp.full(shape, T_hypo_init, dtype=_sd),
                      name="T_hypo", dims=dims_2d, units="K"),
+        # Initialise Q_freeze to zeros so the pytree shape is
+        # invariant across timesteps (two_layer_lake populates this
+        # at every step).  Audit F14.
+        Q_freeze=Field(data=jnp.zeros(shape, dtype=_sd),
+                       name="Q_freeze", dims=dims_2d, units="W/m2"),
     )
 
     acc = reset_accumulator(shape)
@@ -177,11 +196,18 @@ def ocean_tile_response(
     MOST algorithms (COARE 3.0 or Large & Yeager 2004).
     """
     shape = ocean_sst.shape
-    q_sfc = saturation_mixing_ratio(ocean_sst, forcing.p_surface)
+    q_sfc = _Q_SAT_SALINE_FACTOR * saturation_mixing_ratio(
+        ocean_sst, forcing.p_surface,
+    )
     rho = forcing.rho_lowest
 
+    valid_schemes = ("constant", "coare3", "large_yeager")
+    if config.bulk_scheme not in valid_schemes:
+        raise ValueError(
+            f"Unknown coupler bulk_scheme {config.bulk_scheme!r}; "
+            f"expected one of {valid_schemes}."
+        )
     if config.bulk_scheme in ("coare3", "large_yeager"):
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
         # Use wind relative to ocean surface current
         u_rel = forcing.u_lowest - ocean_u
         v_rel = forcing.v_lowest - ocean_v
@@ -191,6 +217,8 @@ def ocean_tile_response(
             ocean_sst, q_sfc,
             rho,
             z_ref=config.z_ref,
+            z_t=config.z_t_atm,
+            z_q=config.z_q_atm,
             z0_init=config.ocean_z0,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,
@@ -220,17 +248,31 @@ def ocean_tile_response(
     if not hasattr(alpha_ocean, 'shape') or alpha_ocean.shape != shape:
         alpha_ocean = jnp.broadcast_to(jnp.asarray(alpha_ocean), shape)
 
-    # Surface radiation (only lw_up needed for ocean tile response)
-    _, _, lw_up = surface_radiation_fluxes(
-        forcing.sw_down, forcing.lw_down, ocean_sst, alpha_ocean,
-        config.ocean_emissivity,
+    # Surface upward longwave: ε σ T⁴ + (1-ε)·lw_down.  Same direct
+    # expression as the loop-11 ``two_layer_lake.py`` fix — avoids the
+    # full ``surface_radiation_fluxes`` call which recomputes
+    # ``sw_net`` and the LW balance only to discard them.
+    lw_up = (
+        config.ocean_emissivity * constants.sigma_sb * ocean_sst ** 4
+        + (1.0 - config.ocean_emissivity) * forcing.lw_down
     )
 
+    # ``jnp.full`` is one ``Broadcast`` HLO op vs the
+    # ``broadcast_to(jnp.array(scalar), shape)`` form which adds a
+    # ``ConvertElementType`` for the implicit Python-float promotion
+    # — same per-coupler-step micro-optimisation as the loop-18 lake
+    # rewrite.
+    _ssh_dtype = ocean_sst.dtype
+    # Ocean tile freshwater: P − E, where evap is back-derived from
+    # lhflx using L_v (ocean is liquid, never sublimes).  Positive =
+    # freshwater INTO ocean.
+    evap_rate = lhflx / constants.L_v   # kg/m²/s, positive = up (ocean → atm)
+    freshwater_flux = forcing.precip_total - evap_rate
     return TileResponse(
         T_surface=ocean_sst,
         albedo=alpha_ocean,
-        emissivity=jnp.broadcast_to(jnp.array(config.ocean_emissivity), shape),
-        z0=jnp.broadcast_to(jnp.array(config.ocean_z0), shape),
+        emissivity=jnp.full(shape, config.ocean_emissivity, dtype=_ssh_dtype),
+        z0=jnp.full(shape, config.ocean_z0, dtype=_ssh_dtype),
         q_surface=q_sfc,
         shflx=shflx,
         lhflx=lhflx,
@@ -239,7 +281,23 @@ def ocean_tile_response(
         lw_up=lw_up,
         u_ocean_sfc=ocean_u,
         v_ocean_sfc=ocean_v,
-        co2_flux=jnp.zeros(shape),
+        co2_flux=jnp.zeros(shape, dtype=_ssh_dtype),
+        freshwater_flux=freshwater_flux,
+        # Ocean tile is itself the source of ocean heat — does not
+        # extract from the ocean.  Sea-ice tiles report their
+        # extraction; the ocean column treats the sum across tiles
+        # (after blending) as a heat-budget sink.
+        ocean_heat_extraction=jnp.zeros(shape, dtype=_ssh_dtype),
+        # Ocean tile contributes its own wind stress (already in
+        # tau_x/tau_y) — back-reaction is the ice tile's job.
+        ocean_stress_x=jnp.zeros(shape, dtype=_ssh_dtype),
+        ocean_stress_y=jnp.zeros(shape, dtype=_ssh_dtype),
+        # Ocean evaporation: lhflx already used L_v, so evap_rate
+        # is the correct mass flux.
+        surface_mass_flux=evap_rate,
+        # Ocean tile is the salt-budget sink, not a source of salt
+        # back to itself — zero flux on this channel.
+        salt_flux=jnp.zeros(shape, dtype=_ssh_dtype),
     )
 
 
@@ -317,7 +375,6 @@ def make_coupler(
                 _lp = _land_param_provider()
             # For slab land: reshape (ncol,) -> spatial shape (e.g. (6,n,n))
             if not _use_multilayer:
-                from legoesm.land.surface_params import reshape_params
                 _lp = reshape_params(_lp, atm_forcing.sw_down.shape)
         else:
             _lp = None
@@ -368,7 +425,10 @@ def make_coupler(
             atm_forcing, ocean_sst, ocean_u_sfc, ocean_v_sfc,
             coupler_config)
 
-        # 5. Tile fractions (ice concentration from updated ice state)
+        # 5. Tile fractions (ice concentration from updated ice state).
+        # The ice tile's ice->ocean exchange fluxes are returned per-grid-cell
+        # and blended by f_water in blend_tiles (F11), so no pre-step
+        # concentration is needed here.
         ice_conc = ice_new.concentration.data
         # Multi-category: sum across categories for total concentration
         if ice_conc.ndim > len(atm_forcing.sw_down.shape):

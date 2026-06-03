@@ -33,6 +33,7 @@ _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38
 
 from legoesm.core.field import Field
 from legoesm.core.operators import _is_distributed
+from legoesm.parallel.reductions import global_sum_mpi
 from legoesm.grids.gaussian import (
     GaussianGrid,
     sh_analysis,
@@ -46,7 +47,8 @@ from legoesm.grids.gaussian import (
     spectral_hyperdiffusion_3d,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
-from legoesm.ocean.eos import compute_hydrostatic_pressure, make_eos_fn
+from legoesm.runtime.backend import get_backend, check_spectral_backend
+from legoesm.ocean.eos import compute_hydrostatic_pressure, make_eos_fn, scale_depth
 from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     compute_layer_thickness,
@@ -66,7 +68,6 @@ def _spectral_cell_area(grid: GaussianGrid) -> jnp.ndarray:
 def _spectral_global_sum(local_value: jnp.ndarray) -> jnp.ndarray:
     """MPI-aware global sum for spectral ocean reductions."""
     if _is_distributed():
-        from legoesm.parallel.reductions import global_sum_mpi
         return global_sum_mpi(local_value)
     return local_value
 
@@ -83,11 +84,22 @@ def _spectral_conservation_fixer(
     mask_3d = mask[..., jnp.newaxis]
     area = _spectral_cell_area(grid)
     weighted_area = mask * area
-    H_bathy = sh_synthesis(grid, state_old.H_bathy_hat.data).real
+    # Batch the three 2D syntheses (eta_old, eta_new, H_bathy) along a
+    # trailing axis — same passive-trailing-axis exploit as Loop 144/151
+    # but extended with H_bathy_hat.  3 SH-syntheses → 1.
+    _ehb_pair = jnp.stack(
+        [
+            state_old.eta_hat.data,
+            state_new.eta_hat.data,
+            state_old.H_bathy_hat.data,
+        ],
+        axis=-1,
+    )  # (n_sh, 3)
+    _ehb_grid = sh_synthesis_3d(grid, _ehb_pair).real  # (n_lat, n_lon, 3)
+    eta_old = _ehb_grid[..., 0] * mask
+    eta_new = _ehb_grid[..., 1] * mask
+    H_bathy = _ehb_grid[..., 2]
     H_bathy = jnp.maximum(H_bathy, 1.0) * mask + 1.0 * (1.0 - mask)
-
-    eta_old = sh_synthesis(grid, state_old.eta_hat.data).real * mask
-    eta_new = sh_synthesis(grid, state_new.eta_hat.data).real * mask
     eta_floor = jnp.asarray(config.min_water_column_m, dtype=eta_new.dtype) - H_bathy
     eta_new = jnp.maximum(eta_new, eta_floor) * mask
 
@@ -109,19 +121,54 @@ def _spectral_conservation_fixer(
         eta_fixed, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
     )
 
-    T_old = sh_synthesis_3d(grid, state_old.T_hat.data).real
-    T_new = sh_synthesis_3d(grid, state_new.T_hat.data).real
-    S_old = sh_synthesis_3d(grid, state_old.S_hat.data).real
-    S_new = sh_synthesis_3d(grid, state_new.S_hat.data).real
+    # Batch the four (n_sh, nlev) tracer syntheses (T_old, T_new, S_old,
+    # S_new) into a single sh_synthesis_3d on a (n_sh, nlev*4) tensor.
+    # 4 SH-syntheses → 1.
+    n_sh_c, nlev_c = state_old.T_hat.data.shape
+    _ts_stack = jnp.stack(
+        [state_old.T_hat.data, state_new.T_hat.data,
+         state_old.S_hat.data, state_new.S_hat.data],
+        axis=-1,
+    )  # (n_sh, nlev, 4)
+    _ts_grid = sh_synthesis_3d(
+        grid, _ts_stack.reshape(n_sh_c, nlev_c * 4),
+    ).real.reshape(grid.n_lat, grid.n_lon, nlev_c, 4)
+    T_old = _ts_grid[..., 0]
+    T_new = _ts_grid[..., 1]
+    S_old = _ts_grid[..., 2]
+    S_new = _ts_grid[..., 3]
 
-    local_tracer_terms = jnp.stack(
+    # Five column reductions split into two groups by their h-weight:
+    #   * ``h_k_old`` weight: ``T_old``, ``S_old``
+    #   * ``h_k_new`` weight: ``T_new``, ``S_new``, ``ones (volume)``
+    # Each group is one stacked column reduction; the area-weighted
+    # outer sum then collapses with ``axis=tuple(range(weighted_area.ndim))``
+    # so the 5 nested ``jnp.sum`` pairs become 2 column reductions
+    # + 1 area reduction.  Concatenate in the order the
+    # ``_spectral_global_sum`` contract expects:
+    # ``heat_old, heat_new, salt_old, salt_new, ocean_volume``.
+    _old_inner = jnp.sum(
+        jnp.stack([T_old * h_k_old, S_old * h_k_old], axis=-1), axis=-2,
+    )  # columns: [T_old, S_old]
+    _new_inner = jnp.sum(
+        jnp.stack(
+            [T_new * h_k_new, S_new * h_k_new, h_k_new], axis=-1,
+        ),
+        axis=-2,
+    )  # columns: [T_new, S_new, vol_new]
+    _inner = jnp.stack(
         [
-            jnp.sum(jnp.sum(T_old * h_k_old, axis=-1) * weighted_area),
-            jnp.sum(jnp.sum(T_new * h_k_new, axis=-1) * weighted_area),
-            jnp.sum(jnp.sum(S_old * h_k_old, axis=-1) * weighted_area),
-            jnp.sum(jnp.sum(S_new * h_k_new, axis=-1) * weighted_area),
-            jnp.sum(jnp.sum(h_k_new, axis=-1) * weighted_area),
+            _old_inner[..., 0],  # heat_old
+            _new_inner[..., 0],  # heat_new
+            _old_inner[..., 1],  # salt_old
+            _new_inner[..., 1],  # salt_new
+            _new_inner[..., 2],  # ocean_volume
         ],
+        axis=-1,
+    )
+    local_tracer_terms = jnp.sum(
+        _inner * weighted_area[..., None],
+        axis=tuple(range(weighted_area.ndim)),
     )
     heat_old, heat_new, salt_old, salt_new, ocean_volume = _spectral_global_sum(
         local_tracer_terms,
@@ -132,10 +179,25 @@ def _spectral_conservation_fixer(
     salt_corr = (salt_old - salt_new) / jnp.maximum(ocean_volume, 1.0)
     S_fixed = S_new + salt_corr * mask_3d
 
+    # Batch the three SH analyses (T_fixed, S_fixed, eta_fixed) into a
+    # single ``sh_analysis_3d`` call.  T_fixed/S_fixed contribute
+    # ``nlev`` slots each along the trailing axis; eta_fixed (2D) is
+    # promoted via ``[..., None]`` to a single trailing slot and
+    # concatenated.  Total trailing axis = ``2*nlev + 1``.  3 SH-analyses
+    # → 1.  Split the result back into (T, S) and (eta) using slot
+    # indexing.
+    _ts_fixed = jnp.stack([T_fixed, S_fixed], axis=-1)  # (..., nlev, 2)
+    _ts_fixed_flat = _ts_fixed.reshape(grid.n_lat, grid.n_lon, nlev_c * 2)
+    _ts_eta_input = jnp.concatenate(
+        [_ts_fixed_flat, eta_fixed[..., jnp.newaxis]], axis=-1,
+    )  # (n_lat, n_lon, 2*nlev + 1)
+    _ts_eta_hat = sh_analysis_3d(grid, _ts_eta_input)  # (n_sh, 2*nlev + 1)
+    _ts_fixed_hat = _ts_eta_hat[:, :nlev_c * 2].reshape(-1, nlev_c, 2)
+    _eta_fixed_hat = _ts_eta_hat[:, nlev_c * 2]
     return state_new._replace(
-        eta_hat=state_new.eta_hat.replace(data=sh_analysis(grid, eta_fixed)),
-        T_hat=state_new.T_hat.replace(data=sh_analysis_3d(grid, T_fixed)),
-        S_hat=state_new.S_hat.replace(data=sh_analysis_3d(grid, S_fixed)),
+        eta_hat=state_new.eta_hat.replace(data=_eta_fixed_hat),
+        T_hat=state_new.T_hat.replace(data=_ts_fixed_hat[..., 0]),
+        S_hat=state_new.S_hat.replace(data=_ts_fixed_hat[..., 1]),
     )
 
 
@@ -164,13 +226,39 @@ def spectral_ocean_tendencies(
     mask_3d = mask[..., jnp.newaxis]  # (n_lat, n_lon, 1)
 
     # --- 1. Transform to grid space ---
-    vor = sh_synthesis_3d(grid, state.vor_hat.data) * mask_3d   # (n_lat, n_lon, nlev)
-    div = sh_synthesis_3d(grid, state.div_hat.data) * mask_3d
+    # Merge the (vor, div, T, S) 3D batch with the (eta, H_bathy) 2D
+    # pair via ``jnp.concatenate``: trailing axis = ``nlev*4 + 2``.
+    # ``sh_synthesis_3d`` treats any trailing axis as a passive batch,
+    # so different "level" sizes (nlev vs 1) combine cleanly into a
+    # single ``segment_sum`` + IRFFT.  6 SH syntheses → 1.  Loop 181
+    # extends Loop 180 (acoustic update path).
+    n_sh_t, nlev_t = state.vor_hat.data.shape
+    _vdts_stack = jnp.stack(
+        [
+            state.vor_hat.data,
+            state.div_hat.data,
+            state.T_hat.data,
+            state.S_hat.data,
+        ],
+        axis=-1,
+    )  # (n_sh, nlev, 4)
+    _vdts_flat = _vdts_stack.reshape(n_sh_t, nlev_t * 4)
+    _vdtseh_flat = jnp.concatenate(
+        [_vdts_flat, state.eta_hat.data[:, jnp.newaxis],
+         state.H_bathy_hat.data[:, jnp.newaxis]],
+        axis=-1,
+    )  # (n_sh, nlev*4 + 2)
+    _vdtseh_grid_flat = sh_synthesis_3d(grid, _vdtseh_flat)
+    _vdts_grid = _vdtseh_grid_flat[..., : nlev_t * 4].reshape(
+        grid.n_lat, grid.n_lon, nlev_t, 4,
+    )
+    vor = _vdts_grid[..., 0] * mask_3d
+    div = _vdts_grid[..., 1] * mask_3d
     # Keep tracer extensions smooth across coastlines; apply mask on tendencies.
-    T = sh_synthesis_3d(grid, state.T_hat.data)
-    S = sh_synthesis_3d(grid, state.S_hat.data)
-    eta = sh_synthesis(grid, state.eta_hat.data) * mask          # (n_lat, n_lon)
-    H_bathy = sh_synthesis(grid, state.H_bathy_hat.data).real
+    T = _vdts_grid[..., 2]
+    S = _vdts_grid[..., 3]
+    eta = _vdtseh_grid_flat[..., nlev_t * 4] * mask     # (n_lat, n_lon)
+    H_bathy = _vdtseh_grid_flat[..., nlev_t * 4 + 1].real
     H_bathy = jnp.maximum(H_bathy, 1.0) * mask + 1.0 * (1.0 - mask)
     min_water_col = jnp.asarray(config.min_water_column_m, dtype=eta.real.dtype)
     eta_floor = min_water_col - H_bathy
@@ -235,33 +323,105 @@ def spectral_ocean_tendencies(
     abs_vor = vor + grid.f[..., jnp.newaxis]
 
     # --- 7. Diagnose z-star transport velocity ---
-    div_h = div.real * h_k.real
-    div_h_rev = div_h[..., ::-1]
+    # Use the FLUX-FORM divergence ``∇·(h_k · v_k)`` rather than the
+    # advective form ``h_k · ∇·v_k``.  On z-star with spatially-varying
+    # ``h_k(η, x, y)``, the two differ by ``v_k · ∇h_k`` — small for
+    # |η|/H_max ~ 1e-4 but non-zero, and using the advective form
+    # makes the diagnosed ``w_euler[0]`` inconsistent with the
+    # prognostic ``∂η/∂t`` (which uses the flux form, line 552), so
+    # the surface kinematic BC ``w(η) = ∂η/∂t`` is silently violated.
+    # Iter-77 fix: compute hu_oc2/hv_dmu in a small pre-batch and use
+    # the flux-form ``div_hv`` for the w cumulative integral.
+
+    # --- 8. Spectral operators (moved up so we can compute div_hv) ---
+    im_over_a = 1j * grid.ms.astype(jnp.float64) / a
+    one_over_a = 1.0 / a
+
+    # Small pre-batch: just (hu_cos, hv_cos) → hu_oc2, hv_dmu.
+    # Caches the result so the main batch below skips these.
+    hu_cos_pre = h_k.real * u_cos * mask_3d
+    hv_cos_pre = h_k.real * v_cos * mask_3d
+    n_lat_pre, n_lon_pre, nlev_pre = hu_cos_pre.shape
+    hu_oc2_pre = sh_analysis_oc2_3d(grid, hu_cos_pre)  # (n_sh, nlev)
+    hv_dmu_pre = sh_analysis_dmu_3d(grid, hv_cos_pre)
+    div_hv_hat_pre = im_over_a[:, jnp.newaxis] * hu_oc2_pre - one_over_a * hv_dmu_pre
+    div_hv_pre = sh_synthesis_3d(grid, div_hv_hat_pre).real * mask_3d
+
+    div_h_rev = div_hv_pre[..., ::-1]
     cumsum_rev = jnp.cumsum(div_h_rev, axis=-1)
     w_inner = -cumsum_rev[..., ::-1]
-    zeros_bottom = jnp.zeros((*div.shape[:-1], 1), dtype=div_h.dtype)
-    w_euler = jnp.concatenate([w_inner, zeros_bottom], axis=-1)
+    # Pad with zero on the bottom — single Pad HLO op vs alloc-zeros
+    # + concatenate.
+    _pad_axes_w = ((0, 0),) * (w_inner.ndim - 1)
+    w_euler = jnp.pad(w_inner, (*_pad_axes_w, (0, 1)))
     # z-star correction: subtract grid velocity so ẇ[0]=0, ẇ[nlev]=0.
+    # ``w_euler[0]`` now equals ``∂η/∂t`` exactly (consistent with the
+    # prognostic form at line 552 below), so the kinematic BC closes.
     sigma = (z_coord.z_half_ref + z_coord.H_max) / z_coord.H_max
     deta_dt_local = w_euler[..., 0:1]
     w = w_euler - sigma * deta_dt_local
 
-    # --- 8. Spectral operators ---
-    im_over_a = 1j * grid.ms.astype(jnp.float64) / a
-    one_over_a = 1.0 / a
-
-    # --- 9. Vorticity fluxes ---
+    # --- 9-12. Vorticity fluxes + energy + vertical advection (batched) ---
+    # The vor/div tendencies need oc2 and dmu of {A_vor, B_vor,
+    # vert_u_cos, vert_v_cos}, plus oc2 of KE_cos2*mask and a single
+    # ``sh_analysis_3d`` of the energy-variable scalar potential.
+    # Compute all the grid inputs first, then batch:
+    #
+    # * 5 oc2 forwards (A_vor, B_vor, vert_u_cos, vert_v_cos, KE)  → 1
+    # * 4 dmu forwards (A_vor, B_vor, vert_u_cos, vert_v_cos)      → 1
+    # * 1 sh_analysis_3d for the scalar energy potential           — stays
+    #
+    # Loop 188 — fold the free-surface mass-flux pair (hu_cos for oc2,
+    # hv_cos for dmu) into the same earlier batch.  Both are
+    # ``h_k * u_cos|v_cos * mask_3d`` and h_k is already computed at
+    # this point, so the inputs are cheap to construct here.  When
+    # ``A_v == 0`` this saves the two standalone ``sh_analysis_oc2_3d``
+    # / ``sh_analysis_dmu_3d`` calls in section 16; when ``A_v > 0``
+    # it shrinks the velocity-vdiff batch to (vdiff_u_cos, vdiff_v_cos)
+    # only — same total SH count there but avoids a redundant per-batch
+    # gather of the same fields.  10 SH-analyses → 3 (with hu/hv
+    # always batched in).
     A_vor = abs_vor * u_cos * mask_3d
     B_vor = abs_vor * v_cos * mask_3d
 
-    flux_vor_div = (
-        im_over_a[:, jnp.newaxis] * sh_analysis_oc2_3d(grid, A_vor)
-        - one_over_a * sh_analysis_dmu_3d(grid, B_vor)
-    )
-    flux_vor_curl = (
-        im_over_a[:, jnp.newaxis] * sh_analysis_oc2_3d(grid, B_vor)
-        + one_over_a * sh_analysis_dmu_3d(grid, A_vor)
-    )
+    vert_adv_u = _vertical_advection_spectral(u.real, w, z_coord, J.real)
+    vert_adv_v = _vertical_advection_spectral(v.real, w, z_coord, J.real)
+    vert_u_cos = vert_adv_u * grid.cos_lat[:, jnp.newaxis, jnp.newaxis] * mask_3d
+    vert_v_cos = vert_adv_v * grid.cos_lat[:, jnp.newaxis, jnp.newaxis] * mask_3d
+
+    KE_cos2_masked = KE_cos2 * mask_3d
+    # Free-surface mass-flux spectral coefficients ``hu_oc2`` and
+    # ``hv_dmu`` were already computed in the iter-77 pre-batch above
+    # (used to build the flux-form ``div_hv`` for the w cumulative
+    # integral).  Reuse them here so the main batch shrinks back from
+    # 6/5 → 5/4 channels and avoids a redundant SH analysis.
+    n_lat_o, n_lon_o, nlev_o = A_vor.shape
+    _ocean_oc2_stack = jnp.stack(
+        [A_vor, B_vor, vert_u_cos, vert_v_cos, KE_cos2_masked], axis=-1,
+    )  # (..., nlev, 5)
+    _ocean_dmu_stack = jnp.stack(
+        [A_vor, B_vor, vert_u_cos, vert_v_cos], axis=-1,
+    )  # (..., nlev, 4)
+    _ocean_oc2 = sh_analysis_oc2_3d(
+        grid, _ocean_oc2_stack.reshape(n_lat_o, n_lon_o, nlev_o * 5),
+    ).reshape(-1, nlev_o, 5)
+    _ocean_dmu = sh_analysis_dmu_3d(
+        grid, _ocean_dmu_stack.reshape(n_lat_o, n_lon_o, nlev_o * 4),
+    ).reshape(-1, nlev_o, 4)
+    A_vor_oc2 = _ocean_oc2[..., 0]
+    B_vor_oc2 = _ocean_oc2[..., 1]
+    vert_u_oc2 = _ocean_oc2[..., 2]
+    vert_v_oc2 = _ocean_oc2[..., 3]
+    KE_oc2 = _ocean_oc2[..., 4]
+    hu_oc2 = hu_oc2_pre   # cached from iter-77 pre-batch
+    A_vor_dmu = _ocean_dmu[..., 0]
+    B_vor_dmu = _ocean_dmu[..., 1]
+    vert_u_dmu = _ocean_dmu[..., 2]
+    vert_v_dmu = _ocean_dmu[..., 3]
+    hv_dmu = hv_dmu_pre   # cached from iter-77 pre-batch
+
+    flux_vor_div = im_over_a[:, jnp.newaxis] * A_vor_oc2 - one_over_a * B_vor_dmu
+    flux_vor_curl = im_over_a[:, jnp.newaxis] * B_vor_oc2 + one_over_a * A_vor_dmu
 
     # --- 10. Energy variable: E = K + p'/rho_0 + g*eta ---
     # Subtract the area-weighted mean pressure at each level to remove
@@ -285,73 +445,81 @@ def spectral_ocean_tendencies(
     p_prime_anom = (p_prime - p_prime_mean) * mask_3d
     # Barotropic PGF: g*eta broadcast to all levels (Boussinesq)
     g_eta_3d = (g * eta_safe)[..., jnp.newaxis]  # (n_lat, n_lon, 1)
-    E_hat = (sh_analysis_oc2_3d(grid, KE_cos2 * mask_3d)
-             + sh_analysis_3d(grid, (p_prime_anom / rho_0 + g_eta_3d) * mask_3d))
-
-    # --- 11. Horizontal tendencies ---
-    dvor_hat = -flux_vor_div
-    ddiv_hat = flux_vor_curl - grid.lap[:, jnp.newaxis] * E_hat
-
-    # --- 12. Vertical advection of momentum ---
-    vert_adv_u = _vertical_advection_spectral(u.real, w, z_coord, J.real)
-    vert_adv_v = _vertical_advection_spectral(v.real, w, z_coord, J.real)
-
-    vert_u_cos = vert_adv_u * grid.cos_lat[:, jnp.newaxis, jnp.newaxis] * mask_3d
-    vert_v_cos = vert_adv_v * grid.cos_lat[:, jnp.newaxis, jnp.newaxis] * mask_3d
-
-    dvor_hat = dvor_hat + (
-        im_over_a[:, jnp.newaxis] * sh_analysis_oc2_3d(grid, vert_v_cos)
-        + one_over_a * sh_analysis_dmu_3d(grid, vert_u_cos)
+    E_hat = KE_oc2 + sh_analysis_3d(
+        grid, (p_prime_anom / rho_0 + g_eta_3d) * mask_3d,
     )
-    ddiv_hat = ddiv_hat + (
-        im_over_a[:, jnp.newaxis] * sh_analysis_oc2_3d(grid, vert_u_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, vert_v_cos)
-    )
+
+    # --- 11. Horizontal tendencies (combine flux + vert-advection) ---
+    vert_vor = im_over_a[:, jnp.newaxis] * vert_v_oc2 + one_over_a * vert_u_dmu
+    vert_div = im_over_a[:, jnp.newaxis] * vert_u_oc2 - one_over_a * vert_v_dmu
+    dvor_hat = -flux_vor_div + vert_vor
+    ddiv_hat = flux_vor_curl - grid.lap[:, jnp.newaxis] * E_hat + vert_div
 
     # --- 13. Tracer equations (vectorized over T, S) ---
     tracers = jnp.stack([T.real, S.real], axis=0)  # (2, n_lat, n_lon, nlev)
     tracers_hat = jnp.stack([state.T_hat.data, state.S_hat.data], axis=0)
 
-    tracer_u_cos = tracers * u_cos[jnp.newaxis, ...] * mask_3d[jnp.newaxis, ...]
-    tracer_v_cos = tracers * v_cos[jnp.newaxis, ...] * mask_3d[jnp.newaxis, ...]
-    tracer_flux_div = jax.vmap(
-        lambda q_u_cos, q_v_cos: (
-            im_over_a[:, jnp.newaxis] * sh_analysis_oc2_3d(grid, q_u_cos)
-            - one_over_a * sh_analysis_dmu_3d(grid, q_v_cos)
-        ),
-        in_axes=0,
-        out_axes=0,
-    )(tracer_u_cos, tracer_v_cos)
+    # Stack tracers along trailing axis and fold into the level dim so
+    # the three SH analyses below (oc2, dmu, plain) each run ONCE on a
+    # ``(n_lat, n_lon, nlev*n_tracers)`` tensor instead of being
+    # ``vmap``'d over the leading tracer axis (which materialises a
+    # separate FFT/sum kernel per tracer).  Same passive-trailing-axis
+    # exploit as the velocity-vdiff + free-surface block in Section 16.
+    n_tr = tracers.shape[0]
+    n_lat_t, n_lon_t, nlev_t = tracers.shape[1:]
+    # ``moveaxis`` brings the tracer axis to the end without a copy
+    # (XLA fuses the layout change with downstream ops).
+    tracers_t = jnp.moveaxis(tracers, 0, -1)  # (n_lat, n_lon, nlev, n_tr)
 
-    tracer_div = tracers * div.real[jnp.newaxis, ...] * mask_3d[jnp.newaxis, ...]
-    dtr_hat = -tracer_flux_div + jax.vmap(
-        lambda q_div: sh_analysis_3d(grid, q_div),
-        in_axes=0,
-        out_axes=0,
-    )(tracer_div)
+    _u_cos_flat = (
+        tracers_t * (u_cos * mask_3d)[..., jnp.newaxis]
+    ).reshape(n_lat_t, n_lon_t, nlev_t * n_tr)
+    _v_cos_flat = (
+        tracers_t * (v_cos * mask_3d)[..., jnp.newaxis]
+    ).reshape(n_lat_t, n_lon_t, nlev_t * n_tr)
+    _u_oc2_flat = sh_analysis_oc2_3d(grid, _u_cos_flat)   # (n_sh, nlev*n_tr)
+    _v_dmu_flat = sh_analysis_dmu_3d(grid, _v_cos_flat)
+    _flux_flat = (
+        im_over_a[:, jnp.newaxis] * _u_oc2_flat
+        - one_over_a * _v_dmu_flat
+    )
+    _flux = _flux_flat.reshape(_flux_flat.shape[0], nlev_t, n_tr)
+    tracer_flux_div = jnp.moveaxis(_flux, -1, 0)  # (n_tr, n_sh, nlev)
 
+    # Combine the grid-space tendency contributions before the SH
+    # forward transform.  ``sh_analysis_3d`` is linear, so summing
+    # tracer_div + tracer_vert_adv (+ tracer_vdiff*mask if K_v > 0) on
+    # the grid first folds three separate vmap'd SH-analysis calls
+    # into a single trailing-axis-batched call (Loop 94 exploit) and
+    # the per-tracer dimension also folds into the same trailing axis
+    # (this commit) — saves another ``n_tr - 1 = 1`` SH analysis per
+    # RK substage on top of the prior fold.
+    tracer_div_t = (
+        tracers_t * (div.real * mask_3d)[..., jnp.newaxis]
+    )  # (n_lat, n_lon, nlev, n_tr)
     tracer_vert_adv = jax.vmap(
         lambda q: _vertical_advection_spectral(q, w, z_coord, J.real),
-        in_axes=0,
-        out_axes=0,
-    )(tracers) * mask_3d[jnp.newaxis, ...]
-    dtr_hat = dtr_hat + jax.vmap(
-        lambda q_adv: sh_analysis_3d(grid, q_adv),
-        in_axes=0,
-        out_axes=0,
-    )(tracer_vert_adv)
+        in_axes=-1,
+        out_axes=-1,
+    )(tracers_t) * mask_3d[..., jnp.newaxis]
 
+    tracer_grid_sum_t = tracer_div_t + tracer_vert_adv
     if config.K_v > 0:
         tracer_vdiff = jax.vmap(
             lambda q: vertical_diffusion(q, z_coord, J.real, config.K_v),
-            in_axes=0,
-            out_axes=0,
-        )(tracers)
-        dtr_hat = dtr_hat + jax.vmap(
-            lambda q_vdiff: sh_analysis_3d(grid, q_vdiff * mask_3d),
-            in_axes=0,
-            out_axes=0,
-        )(tracer_vdiff)
+            in_axes=-1,
+            out_axes=-1,
+        )(tracers_t)
+        tracer_grid_sum_t = tracer_grid_sum_t + tracer_vdiff * mask_3d[..., jnp.newaxis]
+
+    _dtr_grid_flat = tracer_grid_sum_t.reshape(
+        n_lat_t, n_lon_t, nlev_t * n_tr,
+    )
+    # Defer the ``_dtr_sh`` analysis so it can be batched with
+    # ``deta_dt_grid`` below (Loop 185) — initialize ``dtr_hat`` with
+    # only the (already-spectral) flux-divergence contribution; the
+    # grid-tendency SH analysis is added after the merged batch.
+    dtr_hat = -tracer_flux_div
 
     # --- 15. Explicit viscosity/diffusion ---
     if config.A_h > 0 or config.K_h > 0:
@@ -362,6 +530,13 @@ def spectral_ocean_tendencies(
         if config.K_h > 0:
             dtr_hat = dtr_hat + config.K_h * lap[jnp.newaxis, ...] * tracers_hat
 
+    # --- 15-16. Velocity vertical diffusion + free-surface tendency ---
+    # ``hu_oc2`` and ``hv_dmu`` are now produced by the earlier batched
+    # oc2/dmu (Loop 188) — the standalone analyses that used to live
+    # in this block are gone.  When ``A_v > 0`` the velocity-vdiff
+    # vector still needs its own oc2/dmu pair (different inputs, no
+    # cheap fold into the earlier batch since vdiff requires the
+    # vertical_diffusion stencil to run first).
     if config.A_v > 0:
         vel_uv = jnp.stack([u.real, v.real], axis=0)
         vdiff_uv = jax.vmap(
@@ -373,43 +548,73 @@ def spectral_ocean_tendencies(
         vdiff_u_cos = vdiff_u * grid.cos_lat[:, jnp.newaxis, jnp.newaxis]
         vdiff_v_cos = vdiff_v * grid.cos_lat[:, jnp.newaxis, jnp.newaxis]
 
+        n_lat_v, n_lon_v, nlev_v = vdiff_u_cos.shape
+        _vdh_uv_stack = jnp.stack(
+            [vdiff_u_cos, vdiff_v_cos], axis=-1,
+        )  # (..., nlev, 2)
+        _vdh_uv_flat = _vdh_uv_stack.reshape(n_lat_v, n_lon_v, nlev_v * 2)
+        _vdh_oc2 = sh_analysis_oc2_3d(grid, _vdh_uv_flat).reshape(-1, nlev_v, 2)
+        _vdh_dmu = sh_analysis_dmu_3d(grid, _vdh_uv_flat).reshape(-1, nlev_v, 2)
+        vdiff_u_oc2, vdiff_v_oc2 = _vdh_oc2[..., 0], _vdh_oc2[..., 1]
+        vdiff_u_dmu, vdiff_v_dmu = _vdh_dmu[..., 0], _vdh_dmu[..., 1]
+
         dvor_hat = dvor_hat + (
-            im_over_a[:, jnp.newaxis] * sh_analysis_oc2_3d(grid, vdiff_v_cos)
-            + one_over_a * sh_analysis_dmu_3d(grid, vdiff_u_cos)
+            im_over_a[:, jnp.newaxis] * vdiff_v_oc2
+            + one_over_a * vdiff_u_dmu
         )
         ddiv_hat = ddiv_hat + (
-            im_over_a[:, jnp.newaxis] * sh_analysis_oc2_3d(grid, vdiff_u_cos)
-            - one_over_a * sh_analysis_dmu_3d(grid, vdiff_v_cos)
+            im_over_a[:, jnp.newaxis] * vdiff_u_oc2
+            - one_over_a * vdiff_v_dmu
         )
 
     # --- 16. Free-surface tendency ---
     # Use flux-form continuity explicitly: dη/dt = -sum_k div(h_k * v_k).
     # This avoids the div(v)*h approximation error on deforming z-star layers.
-    hu_cos = h_k.real * u_cos * mask_3d
-    hv_cos = h_k.real * v_cos * mask_3d
-    div_hv_hat = (
-        im_over_a[:, jnp.newaxis] * sh_analysis_oc2_3d(grid, hu_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, hv_cos)
-    )
-    div_hv = sh_synthesis_3d(grid, div_hv_hat).real * mask_3d
-    deta_dt_grid = -jnp.sum(div_hv, axis=-1) * mask
-    deta_hat = sh_analysis(grid, deta_dt_grid)
+    # Reuse ``div_hv_pre`` synthesized in section 7 above (same hu/hv
+    # spectral coefficients, no need to synthesize twice — iter-78
+    # Codex follow-up on the iter-77 flux-form fix).
+    deta_dt_grid = -jnp.sum(div_hv_pre, axis=-1) * mask
+
+    # Merge the deferred ``_dtr_grid_flat`` plain analysis with the
+    # ``deta_dt_grid`` 2D analysis via ``jnp.concatenate`` along the
+    # trailing axis: ``nlev*n_tr + 1`` slots.  ``sh_analysis_3d``
+    # treats the trailing axis as a passive batch — same Loop 184
+    # exploit as the spectral PE (dT, Phi, dlnps_dt) merge.  2 SH
+    # analyses → 1.
+    _dtr_eta_input = jnp.concatenate(
+        [_dtr_grid_flat, deta_dt_grid[..., jnp.newaxis]], axis=-1,
+    )  # (n_lat, n_lon, nlev*n_tr + 1)
+    _dtr_eta_hat = sh_analysis_3d(grid, _dtr_eta_input)
+    _dtr_sh_flat = _dtr_eta_hat[:, : nlev_t * n_tr]
+    deta_hat = _dtr_eta_hat[:, nlev_t * n_tr]
+    _dtr_sh = _dtr_sh_flat.reshape(_dtr_sh_flat.shape[0], nlev_t, n_tr)
+    dtr_hat = dtr_hat + jnp.moveaxis(_dtr_sh, -1, 0)
 
     # --- 17. Spectral hyperdiffusion ---
     if config.hyperdiff_coeff > 0:
-        dvor_hat = dvor_hat + spectral_hyperdiffusion_3d(
-            grid, state.vor_hat.data, config.hyperdiff_coeff, config.hyperdiff_order,
+        # Batch all four pointwise hyperdiffusions (vor, div, T, S)
+        # into one call by stacking along a trailing axis.
+        # ``spectral_hyperdiffusion_3d`` is purely ``damping * coeffs``,
+        # so the trailing axis is a passive batch.  Same exploit as
+        # Loops 120/121 for spectral PE/NH; here we collapse 2 + 2
+        # vmap'd tracer calls (4 total) into 1.
+        n_sh_h, nlev_h = state.vor_hat.data.shape
+        # tracers_hat has shape (n_tracers, n_sh, nlev) — move tracer axis
+        # to trailing for stacking.
+        _T_hat = tracers_hat[0]  # (n_sh, nlev)
+        _S_hat = tracers_hat[1]
+        _vdts_stack = jnp.stack(
+            [state.vor_hat.data, state.div_hat.data, _T_hat, _S_hat], axis=-1,
+        )  # (n_sh, nlev, 4)
+        _hd_stack = spectral_hyperdiffusion_3d(
+            grid, _vdts_stack.reshape(n_sh_h, nlev_h * 4),
+            config.hyperdiff_coeff, config.hyperdiff_order,
+        ).reshape(n_sh_h, nlev_h, 4)
+        dvor_hat = dvor_hat + _hd_stack[..., 0]
+        ddiv_hat = ddiv_hat + _hd_stack[..., 1]
+        dtr_hat = dtr_hat + jnp.stack(
+            [_hd_stack[..., 2], _hd_stack[..., 3]], axis=0,
         )
-        ddiv_hat = ddiv_hat + spectral_hyperdiffusion_3d(
-            grid, state.div_hat.data, config.hyperdiff_coeff, config.hyperdiff_order,
-        )
-        dtr_hat = dtr_hat + jax.vmap(
-            lambda coeffs: spectral_hyperdiffusion_3d(
-                grid, coeffs, config.hyperdiff_coeff, config.hyperdiff_order,
-            ),
-            in_axes=0,
-            out_axes=0,
-        )(tracers_hat)
 
     # --- 17b. Barotropic (eta) hyperdiffusion ---
     # The spectral solver uses unsplit SSP-RK3 for the entire system,
@@ -464,29 +669,6 @@ def _vertical_advection_spectral(
     dz_half = z_coord.dz_half_ref * jac_safe
     grad = upwind_vertical_gradient(field, dz_half, w_full)
     return -w_full * grad
-
-
-def _flux_form_vertical_advection_spectral(
-    field: jnp.ndarray,
-    w_half: jnp.ndarray,
-    z_coord: OceanZStarCoordinate,
-    jacobian: jnp.ndarray,
-) -> jnp.ndarray:
-    """Conservative flux-form vertical advection for tracers (spectral)."""
-    T_above = field[..., :-1]
-    T_below = field[..., 1:]
-    w_interior = w_half[..., 1:-1]
-
-    T_at_interface = jnp.where(w_interior > 0, T_below, T_above)
-    F_interior = w_interior * T_at_interface
-
-    zeros = jnp.zeros((*field.shape[:-1], 1), dtype=field.dtype)
-    flux = jnp.concatenate([zeros, F_interior, zeros], axis=-1)
-
-    jac_safe = jnp.maximum(jacobian[..., jnp.newaxis], 1.0e-10)
-    h_k = z_coord.dz_ref * jac_safe
-
-    return (flux[..., 1:] - flux[..., :-1]) / h_k
 
 
 # ==============================================================================
@@ -557,7 +739,6 @@ class SpectralOceanModel:
             else:
                 raise ValueError(msg)
 
-        from legoesm.runtime.backend import get_backend, check_spectral_backend
         backend = get_backend()
         if backend == "metal":
             self._use_cpu_for_spectral = True
@@ -738,7 +919,7 @@ class SpectralOceanModel:
 def rest_state_spectral_ocean(
     grid: GaussianGrid,
     z_coord: OceanZStarCoordinate,
-    T_surface: float = 20.0,
+    T_water_init_C: float = 20.0,
     T_deep: float = 2.0,
     S_uniform: float = 35.0,
     H_max: float = 5500.0,
@@ -752,7 +933,7 @@ def rest_state_spectral_ocean(
         Gaussian grid.
     z_coord : OceanZStarCoordinate
         Vertical coordinate.
-    T_surface, T_deep : float
+    T_water_init_C, T_deep : float
         Surface and deep temperature [degC].
     S_uniform : float
         Uniform salinity [PSU].
@@ -769,7 +950,7 @@ def rest_state_spectral_ocean(
             f"got {land_lat_threshold!r}",
         )
     for name, value in {
-        "T_surface": T_surface,
+        "T_water_init_C": T_water_init_C,
         "T_deep": T_deep,
         "S_uniform": S_uniform,
     }.items():
@@ -794,9 +975,11 @@ def rest_state_spectral_ocean(
         mask = 0.5 * (1.0 - jnp.tanh((lat_deg - land_lat_threshold) / taper_width))
         H_bathy_grid = 1.0 + (H_max - 1.0) * mask
 
-    # Temperature profile (exponential stratification)
-    scale_depth = 1000.0
-    T_profile = T_deep + (T_surface - T_deep) * jnp.exp(z_coord.z_full_ref / scale_depth)
+    # Temperature profile (exponential stratification).  ``scale_depth``
+    # comes from ``legoesm.ocean.eos`` (the canonical 1000 m e-folding
+    # depth for ocean stratification) rather than a local literal —
+    # iter-66 audit fix.
+    T_profile = T_deep + (T_water_init_C - T_deep) * jnp.exp(z_coord.z_full_ref / scale_depth)
     T_grid = jnp.broadcast_to(
         T_profile[jnp.newaxis, jnp.newaxis, :],
         (grid.n_lat, grid.n_lon, nlev),

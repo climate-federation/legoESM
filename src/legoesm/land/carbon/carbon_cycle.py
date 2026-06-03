@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.land.carbon.config import CarbonConfig, CarbonState
 
 # ---------------------------------------------------------------------------
@@ -70,12 +71,17 @@ def compute_gpp(
     fAPAR = 1.0 - jnp.exp(-config.k_ext * LAI)
     APAR = fAPAR * PAR_MJ
 
-    # Temperature response — Gaussian around T_opt
-    T_C = T - 273.15
+    T_C = T - constants.T_freeze
     f_T = jnp.exp(-0.5 * ((T_C - config.T_opt) / config.T_width) ** 2)
 
-    # CO2 fertilization — Michaelis-Menten
-    co2 = jnp.broadcast_to(jnp.asarray(co2_ppmv, dtype=T.dtype), T.shape)
+    # CO2 fertilization — Michaelis-Menten.  Use ``jnp.full`` (single
+    # ``Broadcast`` HLO op) instead of
+    # ``broadcast_to(jnp.asarray(scalar, dtype), shape)`` which
+    # additionally forces a ``ConvertElementType``.
+    if hasattr(co2_ppmv, "shape"):
+        co2 = jnp.broadcast_to(co2_ppmv.astype(T.dtype), T.shape)
+    else:
+        co2 = jnp.full(T.shape, co2_ppmv, dtype=T.dtype)
     f_CO2 = co2 / (co2 + config.K_CO2)
 
     # GPP = epsilon * APAR * f_T * f_CO2 * beta  [gC/m2/s]
@@ -134,8 +140,14 @@ def compute_phenology(
     wf = config.leaf_fall_period * sqrt2_half
     osf = _phenology_offset(config.leaf_lifespan, wf)
 
-    # Hemisphere-aware effective doy (shift by half year for SH)
-    doy_arr = jnp.broadcast_to(jnp.asarray(doy, dtype=lat.dtype), lat.shape)
+    # Hemisphere-aware effective doy (shift by half year for SH).
+    # ``jnp.full`` is one ``Broadcast`` HLO op vs the
+    # ``broadcast_to(jnp.asarray(...))`` form's
+    # ``ConvertElementType + Broadcast`` pair.
+    if hasattr(doy, "shape"):
+        doy_arr = jnp.broadcast_to(doy.astype(lat.dtype), lat.shape)
+    else:
+        doy_arr = jnp.full(lat.shape, doy, dtype=lat.dtype)
     if config.hemisphere_aware:
         doy_eff = jnp.where(
             lat < 0,
@@ -169,7 +181,7 @@ def _temperate_modifier(
     temp_factor = jnp.exp(config.Q10_exp * (T - config.T_ref))
     precip_ratio = precip / jnp.maximum(config.precip_ref, 1e-10)
     moist = (precip_ratio - 1.0) * config.moisture_factor + 1.0
-    moist = jnp.clip(moist, 0.1, 3.0)
+    moist = jnp.clip(moist, config.moist_modifier_min, config.moist_modifier_max)
     return temp_factor * moist
 
 
@@ -274,6 +286,43 @@ def step_carbon_differland(
         jnp.asarray(config.tor_root), dt_days,
     )
 
+    # NPP deficit (NPP_day < 0, GPP cannot cover R_auto).  Cascade the
+    # draw C_lab → C_fol → C_root → C_wood so the atmosphere gain via
+    # NEE is matched exactly by biomass loss, even if any single pool
+    # is exhausted.  Each draw is capped at the **net** pool contents
+    # after natural turnover flows (lab_release / leaf_litter / etc.)
+    # so the pool cannot go below 0 once both the natural drain AND
+    # the deficit are applied — preventing the ``_soft_pos`` smoothing
+    # bias from leaking ``_alpha·log(2)`` of phantom carbon per pool.
+    # Codex iter-63 stop-time review: "exhausted-labile case still
+    # leaks carbon" — caused by the prior cap using raw state.C_x
+    # without subtracting the natural turnover drain.
+    _inv_dt_days = 1.0 / jnp.maximum(dt_days, 1e-10)
+    npp_deficit_day = jnp.maximum(-NPP_day, 0.0)
+    # Net pool capacity per day after subtracting natural turnover drain
+    # (and adding natural turnover gain, e.g. ``lab_release → C_fol``).
+    # ``A_x`` contributions are zero in deficit regime (NPP_pos = 0).
+    lab_net_avail = jnp.maximum(
+        state.C_lab + (A_lab - lab_release) * dt_days, 0.0,
+    ) * _inv_dt_days
+    fol_net_avail = jnp.maximum(
+        state.C_fol + (A_fol + lab_release - leaf_litter) * dt_days, 0.0,
+    ) * _inv_dt_days
+    root_net_avail = jnp.maximum(
+        state.C_root + (A_root - root_litter) * dt_days, 0.0,
+    ) * _inv_dt_days
+    wood_net_avail = jnp.maximum(
+        state.C_wood + (A_wood - wood_litter) * dt_days, 0.0,
+    ) * _inv_dt_days
+
+    lab_deficit_draw = jnp.minimum(npp_deficit_day, lab_net_avail)
+    remaining_after_lab = npp_deficit_day - lab_deficit_draw
+    fol_deficit_draw = jnp.minimum(remaining_after_lab, fol_net_avail)
+    remaining_after_fol = remaining_after_lab - fol_deficit_draw
+    root_deficit_draw = jnp.minimum(remaining_after_fol, root_net_avail)
+    remaining_after_root = remaining_after_fol - root_deficit_draw
+    wood_deficit_draw = jnp.minimum(remaining_after_root, wood_net_avail)
+
     # --- Heterotrophic respiration & decomposition -------------------------
     tempmod = _temperate_modifier(T, precip, config)
 
@@ -288,21 +337,32 @@ def step_carbon_differland(
     )
 
     # --- Pool updates (Euler, gC/m2/day rates * dt_days) -------------------
-    # Smooth non-negativity (softplus): preserves AD gradients and allows
-    # pools to approach zero without the artificial 1 gC/m2 hard floor.
-    _alpha = 0.01  # smoothing scale [gC/m2]
+    # Hard non-negativity ``jnp.maximum(x, 0)``.  The iter-64 cap
+    # (``lab_net_avail`` etc., computed against the pool AFTER natural
+    # turnover) guarantees ``state.C + (A − drain − deficit) · dt ≥ 0``
+    # exactly, so no smoothing is required.  Previously a softplus
+    # (``_alpha · logaddexp(x/_alpha, 0)`` with ``_alpha = 0.01``) was
+    # used; even when ``raw_new_C == 0`` exactly, ``softplus(0) =
+    # _alpha · log(2) ≈ 0.007 gC/m2`` of phantom carbon was added per
+    # pool per step (codex iter-63 stop-time review).  ``jnp.maximum``
+    # has subgradient 0 below 0 and 1 above — well-defined for both
+    # forward simulation and AD when crossing zero is unphysical
+    # anyway.
     def _soft_pos(x):
-        return _alpha * jnp.logaddexp(x / _alpha, 0.0)
+        return jnp.maximum(x, 0.0)
 
     new_state = CarbonState(
         C_lab=_soft_pos(
-            state.C_lab + (A_lab - lab_release) * dt_days),
+            state.C_lab + (A_lab - lab_release - lab_deficit_draw) * dt_days),
         C_fol=_soft_pos(
-            state.C_fol + (A_fol + lab_release - leaf_litter) * dt_days),
+            state.C_fol + (A_fol + lab_release - leaf_litter
+                           - fol_deficit_draw) * dt_days),
         C_root=_soft_pos(
-            state.C_root + (A_root - root_litter) * dt_days),
+            state.C_root + (A_root - root_litter
+                            - root_deficit_draw) * dt_days),
         C_wood=_soft_pos(
-            state.C_wood + (A_wood - wood_litter) * dt_days),
+            state.C_wood + (A_wood - wood_litter
+                            - wood_deficit_draw) * dt_days),
         C_lit=_soft_pos(
             state.C_lit + (leaf_litter + root_litter
                            - R_het_lit - lit_to_som) * dt_days),
@@ -389,8 +449,13 @@ def step_carbon(
         )
     elif config.scheme == "seasonal":
         return carbon_state, seasonal_co2_flux(doy, lat, config)
-    else:
+    elif config.scheme == "none":
         return carbon_state, jnp.zeros_like(T)
+    else:
+        raise ValueError(
+            f"Unknown carbon scheme {config.scheme!r}; expected one of "
+            "'none', 'differland', 'seasonal'."
+        )
 
 
 # ===================================================================

@@ -32,6 +32,11 @@ from legoesm.core.operators_fv import (
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.halo import pad_halo_4d, pad_halo_vector_4d
 
+# legoesm.parallel.async_halo (overlapped_halo_compute[_vector]) is imported at
+# function scope in the overlapped_* operators below: core/ must not import
+# parallel/ at module top level (re-enters parallel/__init__ mid-load and breaks
+# isolated pytest of core modules; CLAUDE.md).
+
 
 def vorticity_3d(
     u_3d: jax.Array, v_3d: jax.Array, grid: CubedSphereGrid,
@@ -49,11 +54,13 @@ def vorticity_3d(
     jax.Array : Vorticity, shape (6, n, n, nlev).
     """
     # One 4D vector halo exchange = 2 MPI messages (instead of 2*nlev)
+    dg = getattr(grid, 'duogrid', None)
+    offsets = None if dg is not None else grid.halo_interp_offsets
     u_pad, v_pad = pad_halo_vector_4d(
         u_3d, v_3d,
         grid.cos_angle, grid.sin_angle,
         grid.cos_angle_padded, grid.sin_angle_padded,
-        interp_offsets=grid.halo_interp_offsets,
+        interp_offsets=offsets, duogrid=dg,
     )
 
     # Stencil identical to 2D curl_z but with trailing level axis
@@ -85,7 +92,9 @@ def gradient_x_3d(
     jax.Array : d(field)/dx, shape (6, n, n, nlev).
     """
     if padded is None:
-        padded = pad_halo_4d(field_3d, interp_offsets=grid.halo_interp_offsets)
+        dg = getattr(grid, 'duogrid', None)
+        offsets = None if dg is not None else grid.halo_interp_offsets
+        padded = pad_halo_4d(field_3d, interp_offsets=offsets, duogrid=dg)
     return (padded[:, 2:, 1:-1, :] - padded[:, :-2, 1:-1, :]) / grid.dx[..., None]
 
 
@@ -108,7 +117,9 @@ def gradient_y_3d(
     jax.Array : d(field)/dy, shape (6, n, n, nlev).
     """
     if padded is None:
-        padded = pad_halo_4d(field_3d, interp_offsets=grid.halo_interp_offsets)
+        dg = getattr(grid, 'duogrid', None)
+        offsets = None if dg is not None else grid.halo_interp_offsets
+        padded = pad_halo_4d(field_3d, interp_offsets=offsets, duogrid=dg)
     return (padded[:, 1:-1, 2:, :] - padded[:, 1:-1, :-2, :]) / grid.dy[..., None]
 
 
@@ -127,11 +138,13 @@ def divergence_3d(
     jax.Array : Divergence, shape (6, n, n, nlev).
     """
     # One 4D vector halo exchange = 2 MPI messages (instead of 2*nlev)
+    dg = getattr(grid, 'duogrid', None)
+    offsets = None if dg is not None else grid.halo_interp_offsets
     u_pad, v_pad = pad_halo_vector_4d(
         u_3d, v_3d,
         grid.cos_angle, grid.sin_angle,
         grid.cos_angle_padded, grid.sin_angle_padded,
-        interp_offsets=grid.halo_interp_offsets,
+        interp_offsets=offsets, duogrid=dg,
     )
 
     flux_x_pad = u_pad * grid.hy_ext[..., None]
@@ -145,35 +158,57 @@ def divergence_3d(
 
 def hyperdiffusion_3d(
     field_3d: jax.Array, grid: CubedSphereGrid, coeff: float,
+    padded: jax.Array | None = None,
+    inner_lap: jax.Array | None = None,
 ) -> jax.Array:
     """Compute hyperdiffusion at all levels using native 4D halo.
 
     -coeff * nabla^4(field) where the inner Laplacian is the compact
     stencil and the outer is the standard div(grad) form.
 
-    Total halo exchanges: 5 (regardless of nlev), down from 5*nlev.
-
     Parameters
     ----------
     field_3d : jax.Array, shape (6, n, n, nlev)
     grid : CubedSphereGrid
     coeff : float
+    padded : jax.Array or None
+        Pre-padded field, shape (6, n+2, n+2, nlev).  When provided,
+        the inner Laplacian skips its own halo exchange (saves 1 msg).
+    inner_lap : jax.Array or None
+        Pre-computed inner ``∇²(field_3d)`` (compact stencil), shape
+        ``(6, n, n, nlev)``.  When provided, the inner Laplacian
+        computation is skipped entirely — useful when the caller has
+        already evaluated the same ∇² for an explicit ``A_h``
+        Laplacian on the same input and wants to reuse it for the
+        biharmonic.  ``padded`` is then ignored for the inner stage
+        (still does not affect the outer halo).
 
     Returns
     -------
     jax.Array : Hyperdiffusion tendency, shape (6, n, n, nlev).
     """
-    # Inner ∇² (compact): 1 halo exchange
-    lap1 = laplacian_compact_3d(field_3d, grid)
-    # Outer ∇² = div(grad): gradient_x + gradient_y + divergence = 1+1+2 = 4 halo exchanges
-    gx = gradient_x_3d(lap1, grid)
-    gy = gradient_y_3d(lap1, grid)
+    # Inner ∇² (compact): uses pre-padded if available, or skip the
+    # whole computation when the caller already has the result.
+    if inner_lap is not None:
+        lap1 = inner_lap
+    else:
+        lap1 = laplacian_compact_3d(field_3d, grid, padded=padded)
+    # Outer ∇² = div(grad).  Pad lap1 once and feed it to both
+    # gradient_x_3d and gradient_y_3d via their ``padded=`` kwarg —
+    # otherwise each grad call would emit its own pad_halo_4d MPI
+    # exchange on the same lap1 (saves 1 halo MPI call per hyperdiff).
+    dg = getattr(grid, 'duogrid', None)
+    offsets = None if dg is not None else grid.halo_interp_offsets
+    lap1_pad = pad_halo_4d(lap1, interp_offsets=offsets, duogrid=dg)
+    gx = gradient_x_3d(lap1, grid, padded=lap1_pad)
+    gy = gradient_y_3d(lap1, grid, padded=lap1_pad)
     lap2 = divergence_3d(gx, gy, grid)
     return -coeff * lap2
 
 
 def laplacian_compact_3d(
     field_3d: jax.Array, grid: CubedSphereGrid,
+    padded: jax.Array | None = None,
 ) -> jax.Array:
     """Compact-stencil Laplacian at all levels using native 4D halo.
 
@@ -184,12 +219,18 @@ def laplacian_compact_3d(
     ----------
     field_3d : jax.Array, shape (6, n, n, nlev)
     grid : CubedSphereGrid
+    padded : jax.Array or None
+        Pre-padded field, shape (6, n+2, n+2, nlev).  When provided,
+        the internal halo exchange is skipped (saves 1 MPI message).
 
     Returns
     -------
     jax.Array : ∇²f, shape (6, n, n, nlev)
     """
-    padded = pad_halo_4d(field_3d, interp_offsets=grid.halo_interp_offsets)
+    if padded is None:
+        dg = getattr(grid, 'duogrid', None)
+        offsets = None if dg is not None else grid.halo_interp_offsets
+        padded = pad_halo_4d(field_3d, interp_offsets=offsets, duogrid=dg)
     interior = padded[:, 1:-1, 1:-1, :]
     hx_sq = (grid.dx / 2.0) ** 2
     hy_sq = (grid.dy / 2.0) ** 2
@@ -204,7 +245,15 @@ def fv_flux_divergence_3d(
     q_3d: jax.Array, u_3d: jax.Array, v_3d: jax.Array,
     grid: CubedSphereGrid, limiter: bool = True,
 ) -> jax.Array:
-    """Conservative FV flux divergence at all levels via vmap.
+    """Conservative FV flux-divergence TENDENCY at all levels via vmap.
+
+    **Sign convention** (load-bearing, audit cycle iter-35):
+    Returns the tracer tendency form ``dq/dt = -div(q · v)``, NOT
+    the raw divergence ``+div(q · v)``.  Callers that want moisture
+    convergence should use this output directly without further
+    negation; callers that want the divergence quantity itself should
+    explicitly negate the output.  See the underlying ``_fv_flux_
+    divergence_2d`` (operators_fv.py) for the formula.
 
     Parameters
     ----------
@@ -216,6 +265,7 @@ def fv_flux_divergence_3d(
     Returns
     -------
     jax.Array : shape (6, n, n, nlev)
+        ``dq/dt = -div(q · v)`` — the tracer-advection tendency.
     """
     def single_level(q_k, u_k, v_k):
         return _fv_flux_divergence_2d(q_k, u_k, v_k, grid, limiter)
@@ -534,20 +584,16 @@ def vertical_advection_height(
     w_full = 0.5 * (w_half[..., :-1] + w_half[..., 1:])
     w_star = w_full / jacobian[..., None]
 
-    # Backward difference (upward)
-    df_bwd = field_full[..., :-1] - field_full[..., 1:]
-    grad_bwd = jnp.concatenate(
-        [jnp.zeros((*field_full.shape[:-1], 1)),
-         df_bwd / dz_half],
-        axis=-1,
-    )
-
-    # Forward difference (downward)
-    grad_fwd = jnp.concatenate(
-        [df_bwd / dz_half,
-         jnp.zeros((*field_full.shape[:-1], 1))],
-        axis=-1,
-    )
+    # Backward / forward differences share ``df_bwd / dz_half`` — pad
+    # along the trailing axis instead of allocating two fresh
+    # ``jnp.zeros`` buffers and concatenating.  Single Pad HLO op
+    # each, no zero-buffer allocation.
+    df = (field_full[..., :-1] - field_full[..., 1:]) / dz_half
+    pad_axes = ((0, 0),) * (df.ndim - 1)
+    # Backward difference (upward): zero at the surface boundary.
+    grad_bwd = jnp.pad(df, (*pad_axes, (1, 0)))
+    # Forward difference (downward): zero at the top boundary.
+    grad_fwd = jnp.pad(df, (*pad_axes, (0, 1)))
 
     # Upwind: w* > 0 = upward => backward; w* < 0 = downward => forward
     grad = jnp.where(w_star > 0, grad_bwd, grad_fwd)

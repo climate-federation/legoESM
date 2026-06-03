@@ -107,13 +107,24 @@ def compute_simple_seb_fluxes(
     # --- Surface saturation humidity: ice over snow, liquid over bare soil ---
     q_sat_liq = saturation_mixing_ratio(T_surface, forcing.p_surface)
     q_sat_ice = saturation_mixing_ratio_ice(T_surface, forcing.p_surface)
-    has_snow = snow > 1e-6
+    # Iter-68 audit fix (ported from main during the jianing/land ↔ main
+    # sync 2026-06-03).  A brief warm-surface snowfall event would
+    # otherwise flip the latent-heat phase to L_s for the whole step even
+    # though the new snow melts in seconds.  Gate the phase decision on
+    # (existing snowpack) OR (fresh snowfall AND T_surface < T_freeze) so
+    # we only enter snow phase when the snow can actually survive the step.
+    fresh_snow_mass = forcing.precip_snow * dt
+    has_existing_snow = snow > 1e-6
+    has_surviving_fresh_snow = (
+        (fresh_snow_mass > 1e-6) & (T_surface < constants.T_freeze)
+    )
+    has_snow = has_existing_snow | has_surviving_fresh_snow
     q_sat_sfc = jnp.where(has_snow, q_sat_ice, q_sat_liq)
     # Snow surface is freely evaporating (snowpack limits later).
     beta_effective = jnp.where(has_snow, 1.0, beta)
     q_sfc = beta_effective * q_sat_sfc
 
-    # Phase-appropriate latent heat.
+    # Phase-appropriate latent heat (consistent with iter-68 gate above).
     L_eff = jnp.where(has_snow, constants.L_s, constants.L_v)
 
     # --- Bulk fluxes ---
@@ -139,10 +150,20 @@ def compute_simple_seb_fluxes(
             L_latent=L_eff,
         )
 
-    # --- Surface albedo (from current snow state) ---
+    # --- Surface albedo (iter-71 audit fix ported from main 2026-06-03) ---
+    # Use the SAME effective snow mass as the iter-68 bulk-flux phase
+    # decision above so SW absorption does not lag the LH/SH phase
+    # transition by one step on every fresh-snow event.  Without this
+    # consistency, albedo would treat the column as snow-free for one
+    # step while LH was already computed as snow phase.
+    snow_effective = jnp.where(
+        has_existing_snow | has_surviving_fresh_snow,
+        snow + jnp.where(has_surviving_fresh_snow, fresh_snow_mass, 0.0),
+        snow,
+    )
     if land_config.snow_albedo_feedback and lat is not None:
         alpha = compute_land_albedo(
-            lat, snow, snow_age, land_config.land_albedo)
+            lat, snow_effective, snow_age, land_config.land_albedo)
     else:
         alpha = jnp.broadcast_to(jnp.asarray(albedo_land), T_surface.shape)
 

@@ -180,6 +180,7 @@ class TestSegmentCarryJIT:
             q_v=jnp.zeros(shape, dtype=jnp.float32),
             q_c=jnp.zeros(shape, dtype=jnp.float32),
             q_r=jnp.zeros(shape, dtype=jnp.float32),
+            conv_prog=jnp.zeros((6 * n * n,), dtype=jnp.float32),
             held_dT_rad=jnp.zeros(shape, dtype=jnp.float32),
             held_sw_net_sfc=jnp.zeros(shape2d, dtype=jnp.float32),
             held_lw_net_sfc=jnp.zeros(shape2d, dtype=jnp.float32),
@@ -193,6 +194,7 @@ class TestSegmentCarryJIT:
             precip_accum=jnp.zeros(shape2d, dtype=jnp.float32),
             shflx_accum=jnp.zeros(shape2d, dtype=jnp.float32),
             lhflx_accum=jnp.zeros(shape2d, dtype=jnp.float32),
+            T_land=jnp.zeros(shape2d, dtype=jnp.float32),
         )
 
     def test_carry_through_scan(self):

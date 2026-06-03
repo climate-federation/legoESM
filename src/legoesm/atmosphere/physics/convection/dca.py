@@ -27,6 +27,7 @@ from legoesm.atmosphere.physics.thermodynamics import (
 )
 from legoesm.atmosphere.physics.convection.config import DCAConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
+from legoesm.atmosphere.physics._shared import safe_divide
 
 
 def _adjust_one_iteration(
@@ -35,6 +36,7 @@ def _adjust_one_iteration(
     p_full: jax.Array,
     dp: jax.Array,
     mixing_fraction: float,
+    instability_blend_sharpness: float,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """One bottom-to-top sweep adjusting unstable layer pairs.
 
@@ -56,6 +58,9 @@ def _adjust_one_iteration(
         Layer thickness [Pa], shape (ncol, nlev).
     mixing_fraction : float
         Fraction of adjustment per iteration.
+    instability_blend_sharpness : float
+        Sigmoid sharpness on the dimensionless superadiabatic-instability
+        metric controlling adjustment blending.
 
     Returns
     -------
@@ -110,7 +115,7 @@ def _adjust_one_iteration(
         instability = (actual_dTdp - gamma_m) / jnp.clip(gamma_dry, 1e-10, None)
 
         # Smooth trigger: sigmoid with steep transition on dimensionless metric
-        blend = jax.nn.sigmoid(10.0 * instability) * mixing_fraction
+        blend = jax.nn.sigmoid(instability_blend_sharpness * instability) * mixing_fraction
 
         # Target temperature for upper level: T_target = T_below - gamma_m * dp_pair
         T_target_upper = T_below - gamma_m * dp_pair
@@ -147,9 +152,24 @@ def _adjust_one_iteration(
         q_adj_below = q_below + blend * (q_new_below - q_below)
 
         # Accumulate precipitation from moisture removal
-        dq_upper = (q_upper - q_adj_upper) * dp_upper
-        dq_below = (q_below - q_adj_below) * dp_below
-        precip_new = precip_accum + (dq_upper + dq_below) / constants.g
+        dq_upper_pa = (q_upper - q_adj_upper) * dp_upper  # kg/kg · Pa
+        dq_below_pa = (q_below - q_adj_below) * dp_below  # kg/kg · Pa
+        precip_new = precip_accum + (dq_upper_pa + dq_below_pa) / constants.g
+
+        # Moist static energy conservation: condensed water releases L_v
+        # energy per unit mass.  The previous implementation conserved
+        # only dry static energy (mass-weighted T preserved), losing
+        # L_v · ⟨Δq⟩ ≈ 2.5 K per g/kg of column-mean condensed water.
+        # Adding the latent warming uniformly to the pair preserves the
+        # moist-adiabatic lapse rate just imposed via T_target while
+        # closing the moist static energy budget:
+        #   c_p ⟨ΔT⟩ + L_v ⟨Δq⟩ = 0  (column mean over the pair).
+        delta_T_lh = (
+            constants.L_v * (dq_upper_pa + dq_below_pa)
+            / (constants.c_pd * (dp_below + dp_upper))
+        )
+        T_adj_upper = T_adj_upper + delta_T_lh
+        T_adj_below = T_adj_below + delta_T_lh
 
         T_work = T_work.at[:, k - 1].set(T_adj_below)
         T_work = T_work.at[:, k].set(T_adj_upper)
@@ -158,7 +178,13 @@ def _adjust_one_iteration(
 
         return (T_work, q_work, precip_new), None
 
-    init_carry = (T_rev, q_v_rev, jnp.zeros(ncol))
+    # Pin the precip carry dtype to whatever ``q * dp`` actually
+    # produces inside the scan body — under standard promotion the
+    # compute precision wins when ``q_v`` is at storage precision but
+    # ``dp_rev`` comes from sigma-coord arrays at compute precision.
+    # ``jnp.result_type`` resolves this without materializing a scalar.
+    _precip_dtype = jnp.result_type(q_v_rev, dp_rev)
+    init_carry = (T_rev, q_v_rev, jnp.zeros(ncol, dtype=_precip_dtype))
     level_indices = jnp.arange(1, nlev)
     (T_adj_rev, q_adj_rev, precip_col), _ = jax.lax.scan(
         scan_step, init_carry, level_indices,
@@ -204,15 +230,20 @@ def dca_convection(
     ncol, nlev = T.shape
     dp = p_half[:, 1:] - p_half[:, :-1]  # (ncol, nlev)
 
-    # Apply adjustment iterations
+    # Apply adjustment iterations.  ``prec_iter`` returned by the inner
+    # scan inherits ``q * dp`` precision (compute precision wins when
+    # state is f32 but sigma-coord-derived dp is f64), so pin
+    # ``precip_total`` to the same result-type so the outer scan carry
+    # input matches its output.
     T_adj = T
     q_adj = q_v
-    precip_total = jnp.zeros(ncol)
+    precip_total = jnp.zeros(ncol, dtype=jnp.result_type(q_v, dp))
 
     def body_fn(carry, _):
         T_c, q_c, prec = carry
         T_new, q_new, prec_iter = _adjust_one_iteration(
             T_c, q_c, p_full, dp, config.mixing_fraction,
+            config.instability_blend_sharpness,
         )
         return (T_new, q_new, prec + prec_iter), None
 
@@ -234,7 +265,29 @@ def dca_convection(
     # Convert to tendencies, gated by CAPE
     dT_dt = cape_gate[:, None] * (T_adj - T) / dt
     dq_v_dt = cape_gate[:, None] * (q_adj - q_v) / dt
-    precipitation = jnp.clip(cape_gate * precip_total / dt, 0.0, None)
+    # Convective source for cloud water — column-conservative
+    # rescaling so that ∫ dq_c_conv_dt dp/g equals the column-net
+    # drying (matches the legacy ``precipitation`` formula). Naive
+    # per-level ``max(-dq_v_dt, 0)`` would create water column-wide
+    # whenever the adjustment has mixed-sign vapor tendencies; this
+    # rescaling removes that bug while keeping the field non-negative
+    # at every level. ``precip_total`` (the scan-accumulated column
+    # total) is no longer surfaced — microphysics owns the surface
+    # precipitation diagnostic.
+    del precip_total
+    local_cond = jnp.maximum(-dq_v_dt, 0.0)
+    # Both column reductions share the ``* dp / g`` weight on the level
+    # axis — stack the two integrands and reduce once.
+    _col_pair = jnp.sum(
+        jnp.stack([local_cond, dq_v_dt], axis=-1) * (dp / constants.g)[..., None],
+        axis=-2,
+    )
+    col_local_cond = _col_pair[..., 0:1]
+    col_net_drying = jnp.clip(-_col_pair[..., 1:2], 0.0, None)
+    # AD-safe column rescaling — see sbm.py for derivation; issue #249.
+    dq_c_conv_dt = local_cond * safe_divide(
+        col_net_drying, col_local_cond, eps=1e-20,
+    )  # (ncol, nlev) [kg/kg/s]
 
     # Convective mask: CAPE-gated
     convective_mask = cape_gate
@@ -242,7 +295,7 @@ def dca_convection(
     return ConvectionOutput(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
-        precipitation=precipitation,
+        dq_c_conv_dt=dq_c_conv_dt,
         cape=cape,
         convective_mask=convective_mask,
     )

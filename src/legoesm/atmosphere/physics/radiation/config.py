@@ -17,7 +17,12 @@ References
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
+
+from legoesm import constants
+
+if TYPE_CHECKING:
+    from legoesm.atmosphere.physics.clouds.config import CloudConfig
 
 
 class GrayRadiationConfig(NamedTuple):
@@ -68,7 +73,7 @@ class GrayRadiationConfig(NamedTuple):
     sfc_emissivity: float = 1.0
     sw_tau_0: float = 0.22
     sw_exponent: float = 2.0
-    S_0: float = 1361.0  # = constants.S_0
+    S_0: float = constants.S_0
     sfc_albedo: float = 0.31
     perpetual_equinox: bool = True
     obliquity: float = 23.45
@@ -108,10 +113,30 @@ class RRTMGPConfig(NamedTuple):
     aerosol_g : float
         Bulk aerosol asymmetry factor used when aerosol optical depth is
         externally prescribed (default 0.70).
-    use_scan : bool
-        If True, use lax.scan (differentiable); else fori_loop (default False).
+    use_scan : bool | None
+        Column recurrence implementation inside the two-stream solver.
+
+        * ``None`` (default, issue #273 tuning): defer the choice to
+          ``rte_utils.recurrent_op_with_halos`` which auto-picks
+          ``True`` on GPU/TPU (``lax.scan`` lowers to one fused
+          kernel + drastically reduces the XLA graph size — directly
+          shrinks the 2600s cold / 600s warm AMIP JIT cost called
+          out in issue #273) and ``False`` on CPU/Metal (where the
+          unrolled path benchmarked faster historically).
+        * ``True``: force ``jax.lax.scan`` — smaller graph,
+          preferred for large nlev and reverse-mode AD.
+        * ``False``: force Python for-loop unroll — larger graph,
+          sometimes faster on CPU for typical atmospheric nlev.
     include_clouds : bool
         If True, include cloud optics (default False).
+    use_optimal_angle : bool
+        If True, replace the fixed Fu-Liou ``1.66`` longwave diffusivity
+        secant with the per-band, per-column optimal angle computed from
+        the ``optimal_angle_fit`` polynomial in the gas-optics file (see
+        upstream ``compute_optimal_angles``).  Default False to preserve
+        bit-reproducibility with the historical legoESM output; enable
+        for upper-troposphere/stratosphere fidelity matching upstream
+        rte-rrtmgp.
     """
     lw_gas_file: str = ""
     sw_gas_file: str = ""
@@ -122,11 +147,24 @@ class RRTMGPConfig(NamedTuple):
     n2o_ppbv: float = 332.0
     sfc_emissivity: float = 0.98
     sfc_albedo: float = 0.06
-    S_0: float = 1361.0  # = constants.S_0
+    # Optional DIRECT-beam surface albedo (RAD-3). None ⇒ use sfc_albedo for
+    # both beams (legacy). SAM splits direct (Briegleb zenith-dependent ocean
+    # albedo) from diffuse (sfc_albedo=0.07 RCEMIP); set this to the direct
+    # value so the two-stream solver reflects the direct beam faithfully.
+    sfc_albedo_direct: float | None = None
+    S_0: float = constants.S_0
     aerosol_ssa: float = 0.93
     aerosol_g: float = 0.70
-    use_scan: bool = False
+    use_scan: bool | None = None
     include_clouds: bool = False
+    use_optimal_angle: bool = False
+    # Run the optics tables + RTE solve in float32 even when JAX x64 is on.
+    # The dycore needs fp64, but radiation (a flux calculation) does not —
+    # fp32 is ~2x faster on fp64-limited GPUs (e.g. RTX 8000, fp64 ≈ 1/32 of
+    # fp32) with negligible heating change (benchmark: heating identical to
+    # <0.01 K/day vs fp64).  Default off; the MPAS driver enables it for the
+    # long-run rrtmgp path.
+    compute_fp32: bool = False
 
 
 class OzoneProfileConfig(NamedTuple):
@@ -146,7 +184,17 @@ class OzoneProfileConfig(NamedTuple):
         - ``"analytical"``: latitude-dependent Gaussian profile with
           configurable parameters.  Peak scaled by
           ``1 + 0.5 * sin²(lat)`` when ``lat_dependence`` is True.
+        - ``"mls"``: the SAM mid-latitude-summer (MLS) standard O3 profile,
+          bundled from gSAM's ``rrtmg_lw.nc`` and interpolated (log-log) to
+          the model levels.  Use this for SAM-faithful RCEMIP runs — it is
+          the same ozone the gSAM oracle uses (vs the Gaussian "standard",
+          which over-estimates lower-stratospheric O3 ~3x).  See
+          :mod:`legoesm.atmosphere.physics.radiation.ozone_mls`.
         - ``"none"``: zero ozone (disables ozone absorption entirely).
+        - ``"ml"``: machine-learning ridge regression predictor of Ma et al.
+          (UKESM-trained, per-gridpoint T -> O3 column).  Requires
+          ``ml_weights_path`` to point at a directory of NetCDF weights;
+          see :mod:`legoesm.atmosphere.physics.radiation.ozone_ml`.
     p_peak_hPa : float
         Peak pressure [hPa] for the analytical profile (default 30.0).
     o3_max_vmr : float
@@ -156,12 +204,22 @@ class OzoneProfileConfig(NamedTuple):
     lat_dependence : bool
         If True, scale analytical ozone by ``1 + 0.5 * sin²(lat)``
         (default True).  Only used when ``source="analytical"``.
+    ml_weights_path : str or None
+        Directory of NetCDF coefficient files for ``source="ml"``.  Must
+        contain ``coefs*.nc``, ``Scaler_x*.nc``, ``Scaler_y*.nc`` and a
+        pressure-coordinate sidecar (``plev.npy`` / ``plev.nc``).
+    ml_mmr_to_vmr : bool
+        If True, multiply ridge output by ``M_dry / M_o3`` to convert mass
+        mixing ratio to volume mixing ratio.  Set False if upstream
+        weights are already in VMR.  Default True.
     """
     source: str = "standard"
     p_peak_hPa: float = 30.0
     o3_max_vmr: float = 8.0e-6
     sigma_logp: float = 1.5
     lat_dependence: bool = True
+    ml_weights_path: str | None = None
+    ml_mmr_to_vmr: bool = True
 
 
 class RadiationConfig(NamedTuple):
@@ -191,6 +249,15 @@ class RadiationConfig(NamedTuple):
         Cloud fraction scheme for cloud-radiation coupling:
         ``"none"`` (clear-sky, default), ``"sundqvist"``, or ``"xu_randall"``.
         Only affects RRTMGP; gray radiation ignores clouds.
+    rce_fixed_cos_zenith : float or None
+        Perpetual fixed-zenith RCE insolation (SAM ``doperpetual``).  When
+        set (e.g. 0.620 = 51.7° SAM RCE, or 0.7425 = 42.05° RCEMIP), the
+        TOA insolation is ``S_0·cosθ`` UNIFORMLY (no latitude/daily-mean
+        dependence) and ``cosθ`` is used directly as the SW optical-path
+        cosine — matching SAM's fixed-sun RCE rather than the daily-mean
+        daytime-effective cos(SZA).  Pair with a reduced ``S_0`` (SAM RCE
+        uses 685 W/m² ⇒ 685·0.620 ≈ 425 W/m²).  ``None`` (default) keeps
+        the latitude-based daily-mean / perpetual-equinox path.
     """
     scheme: str = "gray"
     gray: GrayRadiationConfig = GrayRadiationConfig()
@@ -199,3 +266,13 @@ class RadiationConfig(NamedTuple):
     diurnal_cycle: bool = False
     ozone: OzoneProfileConfig = OzoneProfileConfig()
     cloud_scheme: str = "none"
+    rce_fixed_cos_zenith: float | None = None
+    # Optional full ``CloudConfig`` (rh_crit, xu_p, alpha_xr, q_c_diagnostic, ...).
+    # When ``None`` the integration bridge builds a default
+    # ``CloudConfig(scheme=cloud_scheme)`` — backward-compatible.
+    # When supplied, its scalar fields flow through the AD graph so
+    # cloud-fraction knobs become trainable end-to-end via the
+    # cloud-radiation coupling (AIMIP).  Forward-reference avoids a
+    # circular import (clouds.config is a downstream consumer that
+    # already imports from this module via the integration bridge).
+    cloud_config: "CloudConfig | None" = None

@@ -22,6 +22,7 @@ import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 
+from legoesm import constants
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.ocean.vertical import create_ocean_z_star
@@ -161,11 +162,11 @@ class TestIGWAnalyticalComparison:
         f0 = igw_config.f0
         kx = igw_config.wavenumber_x
         ky = igw_config.wavenumber_y
-        R = 6.371e6
+        R = constants.R_earth
 
         k_phys = kx / R
         l_phys = ky / R
-        omega_expected = np.sqrt(f0**2 + 9.80616 * H * (k_phys**2 + l_phys**2))
+        omega_expected = np.sqrt(f0**2 + constants.g * H * (k_phys**2 + l_phys**2))
 
         # Should be dominated by f0 for low wavenumbers
         assert omega_expected > f0

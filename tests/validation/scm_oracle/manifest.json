@@ -1,0 +1,17 @@
+{
+  "jax_scm_commit": "5e93a7d1426e96a8110aef00cd6b63a430673c88",
+  "files": {
+    "gabls1_Nz64.nc": {
+      "sha256": "3d3f8023742522510343b976eec0663bf49de0ab9e2f2d765cffaaae6b33599c",
+      "bytes": 728019
+    },
+    "andren1994_Nz64.nc": {
+      "sha256": "f8de6a7c4d0c88fa35bae8e0bc073ccdde7d72a6ff68d11ded7d2fc8670f45fc",
+      "bytes": 2161481
+    },
+    "wangara_Nz64.nc": {
+      "sha256": "1ba883d92f2d1463f2fe2d618bc5140a610980f09354f0daadb25858d25adb8a",
+      "bytes": 577743
+    }
+  }
+}

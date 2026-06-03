@@ -77,7 +77,10 @@ class TestAtmosphereDynamicsAliases:
 class TestResolveSolverName:
     """Deprecation warnings in resolve_solver_name."""
 
-    def test_deprecated_discretization_warns(self):
+    def test_ambiguous_discretization_resolves_to_cdgrid(self):
+        """'centered' and 'finite_volume' are ambiguous (cdgrid on cubed-sphere,
+        latlon_cgrid on lat-lon).  Without grid context they resolve to cdgrid
+        without a deprecation warning (they are valid, not deprecated)."""
         from legoesm.atmosphere.dynamics import resolve_solver_name
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
@@ -86,8 +89,7 @@ class TestResolveSolverName:
             )
             assert name == "cdgrid_shallow_water"
             dep_warns = [x for x in w if issubclass(x.category, DeprecationWarning)]
-            assert len(dep_warns) >= 1
-            assert "centered" in str(dep_warns[0].message)
+            assert len(dep_warns) == 0
 
     def test_deprecated_solver_name_warns(self):
         from legoesm.atmosphere.dynamics import resolve_solver_name
@@ -114,7 +116,8 @@ class TestResolveSolverName:
             ]
             assert len(dep_warns) == 0
 
-    def test_finite_volume_warns(self):
+    def test_finite_volume_resolves_to_cdgrid(self):
+        """'finite_volume' is ambiguous — defaults to cdgrid without warning."""
         from legoesm.atmosphere.dynamics import resolve_solver_name
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
@@ -123,7 +126,7 @@ class TestResolveSolverName:
             )
             assert name == "cdgrid_primitive_equations"
             dep_warns = [x for x in w if issubclass(x.category, DeprecationWarning)]
-            assert len(dep_warns) >= 1
+            assert len(dep_warns) == 0
 
 
 # ===================================================================
@@ -252,8 +255,8 @@ class TestSupportedMatrix:
         from legoesm.supported_matrix import (
             ATMOSPHERE_MATRIX, OCEAN_MATRIX,
         )
-        # 16 atmosphere + 5 ocean = 21 genuinely distinct implementations
-        assert len(ATMOSPHERE_MATRIX) == 16
+        # 15 atmosphere + 5 ocean = 20 genuinely distinct implementations
+        assert len(ATMOSPHERE_MATRIX) == 15
         assert len(OCEAN_MATRIX) == 5
 
     def test_canonical_solver_names_helper(self):

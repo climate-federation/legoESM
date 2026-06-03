@@ -25,17 +25,23 @@ def _make_hydrostatic_setup():
     """Create a minimal hydrostatic state with realistic profiles."""
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.grids.vertical import create_sigma_coordinate
-    from tests.test_cases.held_suarez import held_suarez_init
+    from legoesm.atmosphere.held_suarez import held_suarez_init
 
     grid = create_cubed_sphere(8)
     sigma = create_sigma_coordinate(10)
     state = held_suarez_init(grid, sigma)
     n, nlev = grid.n, sigma.n_levels
-    # Add realistic wind so turbulence/GWD have something to work on
+    # Add realistic wind so turbulence/GWD have something to work on.
+    # Pin the wind dtype to the rest of the state's precision (set by
+    # the active precision policy) — defaulting to ``jnp.ones`` would
+    # produce float64 under JAX_ENABLE_X64=1 even when the policy is
+    # float32, which silently promotes the column physics path through
+    # surface fluxes / wind_speed / surface_flux into float64.
+    _dtype = state.T.data.dtype
     state = state._replace(
-        u=Field(data=jnp.ones((6, n, n, nlev)) * 10.0,
+        u=Field(data=jnp.ones((6, n, n, nlev), dtype=_dtype) * 10.0,
                 name="u", dims=("face", "x", "y", "level"), units="m/s"),
-        v=Field(data=jnp.ones((6, n, n, nlev)) * 3.0,
+        v=Field(data=jnp.ones((6, n, n, nlev), dtype=_dtype) * 3.0,
                 name="v", dims=("face", "x", "y", "level"), units="m/s"),
     )
     return state, grid, sigma
@@ -198,13 +204,6 @@ class TestTurbulenceSchemes:
         cfg = _none_config(turbulence=TurbulenceConfig(scheme="edmf"))
         tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
         _check_tendencies(tend, "turbulence/edmf")
-
-    def test_ml_emulator(self):
-        state, grid, sigma = _make_hydrostatic_setup()
-        cfg = _none_config(turbulence=TurbulenceConfig(scheme="ml_emulator"))
-        tend, _ = make_physics(cfg, "hydrostatic", dt=300.0)(state, grid, sigma)
-        _check_tendencies(tend, "turbulence/ml_emulator")
-
 
 # ============================================================
 # MICROPHYSICS

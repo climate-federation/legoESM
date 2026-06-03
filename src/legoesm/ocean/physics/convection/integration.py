@@ -15,16 +15,25 @@ from legoesm.ocean.eos import (
 from legoesm.ocean.state import OceanState, OceanTendencies
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
+from legoesm.ocean.physics.convection.enhanced_diffusion import enhanced_diffusion_convection
+from legoesm.ocean.physics.convection.plume import plume_convection
 
 
 def make_convection_physics(
     config: OceanConvectionConfig,
+    apply_diffusion: bool = True,
 ) -> Callable:
     """Create an ocean convection physics function.
 
     Parameters
     ----------
     config : OceanConvectionConfig
+    apply_diffusion : bool
+        If False, the ``enhanced_diffusion`` scheme returns zero tendency
+        but still produces the K_v profile so the dynamics step can apply
+        it via an implicit backward-Euler solve (combined with KPP /
+        background diffusivities).  The ``plume`` scheme ignores this
+        flag (it is not a diffusion).
 
     Returns
     -------
@@ -35,7 +44,7 @@ def make_convection_physics(
     if scheme == "none":
         return _make_none()
     elif scheme == "enhanced_diffusion":
-        return _make_enhanced_diffusion(config)
+        return _make_enhanced_diffusion(config, apply_diffusion=apply_diffusion)
     elif scheme == "plume":
         return _make_plume(config)
     else:
@@ -50,8 +59,8 @@ def _make_none() -> Callable:
     return physics_fn
 
 
-def _make_enhanced_diffusion(config: OceanConvectionConfig) -> Callable:
-    from legoesm.ocean.physics.convection.enhanced_diffusion import enhanced_diffusion_convection
+def _make_enhanced_diffusion(config: OceanConvectionConfig,
+                             apply_diffusion: bool = True) -> Callable:
     cfg = config.enhanced_diffusion
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
@@ -61,14 +70,20 @@ def _make_enhanced_diffusion(config: OceanConvectionConfig) -> Callable:
         rho = _compute_rho(state, z_coord, J)
         out = enhanced_diffusion_convection(
             state.T.data, state.S.data, rho, z_coord, J, cfg,
+            apply_diffusion=apply_diffusion,
         )
         z3 = jnp.zeros_like(state.u.data)
-        return _wrap_tendencies(z3, z3, out.dT_dt, out.dS_dt, state)
+        t = _wrap_tendencies(z3, z3, out.dT_dt, out.dS_dt, state)
+        # When implicit, pass convection K_v through for downstream
+        # use by the tridiagonal solve (avoids re-running EOS/N² in
+        # compute_vertical_K_profiles).
+        if not apply_diffusion and out.K_v is not None:
+            t = t._replace(K_v=out.K_v)
+        return t
     return physics_fn
 
 
 def _make_plume(config: OceanConvectionConfig) -> Callable:
-    from legoesm.ocean.physics.convection.plume import plume_convection
     cfg = config.plume
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,

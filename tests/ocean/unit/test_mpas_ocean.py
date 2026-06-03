@@ -71,7 +71,7 @@ def state(mesh, z_coord):
     """Rest-state initial condition."""
     return rest_state_mpas_ocean(
         mesh, z_coord,
-        T_surface=20.0, T_deep=2.0, S_uniform=35.0,
+        T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=500.0, land_lat_threshold=85.0,
     )
 
@@ -103,12 +103,14 @@ class TestStateConstruction:
             T=Field(jnp.ones((nCells, nlev)) * 15.0, "T", ("nCells", "nlev"), "degC"),
             S=Field(jnp.ones((nCells, nlev)) * 35.0, "S", ("nCells", "nlev"), "PSU"),
             eta=Field(jnp.zeros(nCells), "eta", ("nCells",), "m"),
+            w=Field(jnp.zeros((nCells, nlev + 1)), "w", ("nCells", "nlev+1"), "m/s"),
             H_bathy=Field(jnp.full(nCells, 5000.0), "H_bathy", ("nCells",), "m"),
             land_mask=Field(jnp.ones(nCells), "land_mask", ("nCells",), "1"),
         )
         assert state.u.data.shape == (nEdges, nlev)
         assert state.T.data.shape == (nCells, nlev)
         assert state.eta.data.shape == (nCells,)
+        assert state.w.data.shape == (nCells, nlev + 1)
 
     def test_mpas_ocean_tendencies_fields(self):
         """MPASOceanTendencies has expected fields."""
@@ -260,6 +262,223 @@ class TestBaroclinicTendencies:
             assert jnp.allclose(tend.deta_dt.data[land_cells], 0.0)
 
 
+class TestScalarLaplacianOperators:
+    """Unit tests for ``laplacian_cell_3d`` / ``bilaplacian_cell_3d``."""
+
+    def test_laplacian_of_constant_is_zero(self, mesh):
+        """div(grad(const)) == 0 for cell-centered constant field."""
+        from legoesm.core.operators_voronoi import laplacian_cell_3d
+        nlev = 4
+        f = jnp.full((mesh.nCells, nlev), 3.7)
+        lap = laplacian_cell_3d(f, mesh)
+        assert float(jnp.max(jnp.abs(lap))) == 0.0
+
+    def test_bilaplacian_of_constant_is_zero(self, mesh):
+        """Bilaplacian of a constant field is identically zero."""
+        from legoesm.core.operators_voronoi import bilaplacian_cell_3d
+        nlev = 3
+        f = jnp.full((mesh.nCells, nlev), -1.25)
+        bilap = bilaplacian_cell_3d(f, mesh)
+        assert float(jnp.max(jnp.abs(bilap))) == 0.0
+
+    def test_bilaplacian_equals_lap_of_lap(self, mesh):
+        """``bilaplacian_cell_3d(f) == laplacian_cell_3d(laplacian_cell_3d(f))``."""
+        import numpy as np
+        from legoesm.core.operators_voronoi import (
+            laplacian_cell_3d, bilaplacian_cell_3d,
+        )
+        rng = np.random.default_rng(0)
+        f = jnp.asarray(rng.normal(size=(mesh.nCells, 5)))
+        direct = bilaplacian_cell_3d(f, mesh)
+        chained = laplacian_cell_3d(laplacian_cell_3d(f, mesh), mesh)
+        assert jnp.allclose(direct, chained)
+
+    def test_mask_zeroes_land_output(self, mesh):
+        """Cell mask zeroes the output on land and gradients at coastlines."""
+        import numpy as np
+        from legoesm.core.operators_voronoi import (
+            laplacian_cell_3d, bilaplacian_cell_3d,
+        )
+        rng = np.random.default_rng(1)
+        f = jnp.asarray(rng.normal(size=(mesh.nCells, 4)))
+        land = jnp.arange(mesh.nCells) < mesh.nCells // 4
+        mask = (~land).astype(jnp.float64)
+        lap = laplacian_cell_3d(f, mesh, mask=mask)
+        bilap = bilaplacian_cell_3d(f, mesh, mask=mask)
+        assert jnp.allclose(lap[land], 0.0)
+        assert jnp.allclose(bilap[land], 0.0)
+
+    def test_mask_matches_hand_applied_mask(self, mesh):
+        """mask= kw equals explicitly applying edge+cell masks step by step."""
+        import numpy as np
+        from legoesm.core.operators_voronoi import (
+            laplacian_cell_3d, divergence_cell_3d, gradient_edge_3d,
+        )
+        rng = np.random.default_rng(2)
+        f = jnp.asarray(rng.normal(size=(mesh.nCells, 3)))
+        land = jnp.arange(mesh.nCells) < mesh.nCells // 3
+        mask = (~land).astype(jnp.float64)
+        c1 = mesh.cellsOnEdge[0]
+        c2 = mesh.cellsOnEdge[1]
+        edge_mask = mask[c1] * mask[c2]
+        grad = gradient_edge_3d(f, mesh) * edge_mask[:, None]
+        lap_manual = divergence_cell_3d(grad, mesh) * mask[:, None]
+        lap_op = laplacian_cell_3d(f, mesh, mask=mask)
+        assert jnp.allclose(lap_manual, lap_op)
+
+
+class TestBiharmonicTracerDiffusion:
+    """Issue #206: scalar biharmonic tracer diffusion (K_bih) on MPAS."""
+
+    def _perturbed_state(self, state, seed=0, amp=0.1):
+        import numpy as np
+        rng = np.random.default_rng(seed)
+        noise = jnp.asarray(rng.normal(size=state.T.data.shape)) * amp
+        return state._replace(T=state.T.replace(data=state.T.data + noise))
+
+    def test_config_default_is_zero(self):
+        """K_bih defaults to 0 — no behaviour change when unused."""
+        assert MPASOceanConfig().K_bih == 0.0
+
+    def test_kbih_zero_reproduces_explicit_harmonic_formula(self, state, mesh, z_coord):
+        """K_bih=0 must reproduce the K_h-only harmonic tracer tendency *formula*.
+
+        Instead of comparing two semantically identical configs, rebuild the
+        pre-K_bih horizontal tracer tendency directly from its algebraic
+        definition
+
+            dT/dt_horiz = K_h * div(grad(T) * edge_mask) / h_safe * h_k
+
+        on a minimal setup (no vertical mixing, no harmonic advection) and
+        assert the MPAS tendency equals this formula when K_bih=0.  If the
+        new branch ever leaks computation into K_bih=0, the hand-derived
+        reference will diverge.
+        """
+        from legoesm.core.operators_voronoi import (
+            divergence_cell_3d, gradient_edge_3d,
+        )
+        from legoesm.ocean.vertical import compute_layer_thickness
+
+        K_h = 1.0e2
+        cfg = MPASOceanConfig(K_h=K_h, K_bih=0.0, A_v=0.0, K_v=0.0,
+                               n_barotropic_substeps=5)
+        perturbed = self._perturbed_state(state)
+        tend = mpas_ocean_baroclinic_tendencies(perturbed, mesh, z_coord, cfg)
+
+        # Hand-computed harmonic horizontal tracer tendency.
+        cell_mask = state.land_mask.data
+        c1 = mesh.cellsOnEdge[0]
+        c2 = mesh.cellsOnEdge[1]
+        edge_mask = cell_mask[c1] * cell_mask[c2]
+        h_k = compute_layer_thickness(
+            perturbed.eta.data, perturbed.H_bathy.data, z_coord,
+            min_water_column_m=cfg.min_water_column_m,
+        )
+        h_safe = jnp.maximum(h_k, 1e-10)
+
+        def _kh_lap(f):
+            grad = gradient_edge_3d(f, mesh) * edge_mask[:, jnp.newaxis]
+            return (K_h * divergence_cell_3d(grad, mesh) / h_safe * h_k
+                    * cell_mask[:, jnp.newaxis])
+
+        expected_dT = _kh_lap(perturbed.T.data)
+        expected_dS = _kh_lap(perturbed.S.data)
+        assert jnp.allclose(tend.dT_dt.data, expected_dT, atol=0.0, rtol=0.0)
+        assert jnp.allclose(tend.dS_dt.data, expected_dS, atol=0.0, rtol=0.0)
+
+    def test_kbih_activation_changes_tracer_tendency(self, state, mesh, z_coord):
+        """K_bih>0 must measurably alter the tracer tendency."""
+        cfg_off = MPASOceanConfig(K_h=0.0, K_bih=0.0, A_v=0.0, K_v=0.0,
+                                   n_barotropic_substeps=5)
+        cfg_on = MPASOceanConfig(K_h=0.0, K_bih=1.0e10, A_v=0.0, K_v=0.0,
+                                  n_barotropic_substeps=5)
+        perturbed = self._perturbed_state(state)
+        t_off = mpas_ocean_baroclinic_tendencies(perturbed, mesh, z_coord, cfg_off)
+        t_on = mpas_ocean_baroclinic_tendencies(perturbed, mesh, z_coord, cfg_on)
+        diff = jnp.max(jnp.abs(t_on.dT_dt.data - t_off.dT_dt.data))
+        assert float(diff) > 0.0
+        assert jnp.all(jnp.isfinite(t_on.dT_dt.data))
+        assert jnp.all(jnp.isfinite(t_on.dS_dt.data))
+
+    def test_kbih_respects_land_mask(self, state, mesh, z_coord):
+        """Bilaplacian diffusion must not inject tendency on land cells."""
+        cfg_on = MPASOceanConfig(K_h=0.0, K_bih=1.0e10, A_v=0.0, K_v=0.0,
+                                  n_barotropic_substeps=5)
+        perturbed = self._perturbed_state(state)
+        tend = mpas_ocean_baroclinic_tendencies(perturbed, mesh, z_coord, cfg_on)
+        land = state.land_mask.data < 0.5
+        if jnp.any(land):
+            assert jnp.allclose(tend.dT_dt.data[land], 0.0)
+            assert jnp.allclose(tend.dS_dt.data[land], 0.0)
+
+    def test_kbih_opposes_harmonic_sign_on_perturbation(self, state, mesh, z_coord):
+        """K_bih applies ``-K_bih * ∇⁴T`` (scale-selective dissipation).
+
+        For a small-scale tracer perturbation, bilap(T) has the same sign
+        as T at the perturbation peak, so the biharmonic tendency damps
+        the peak (opposite sign to the perturbation), matching the
+        latlon ``bilaplacian_cgrid`` convention in ocean_pe_latlon_cgrid.
+        """
+        mask = state.land_mask.data
+        ocean_idx = int(jnp.argmax(mask))
+        bump = jnp.zeros_like(state.T.data).at[ocean_idx, 0].set(1.0)
+        perturbed = state._replace(T=state.T.replace(data=state.T.data + bump))
+        cfg_on = MPASOceanConfig(K_h=0.0, K_bih=1.0e10, A_v=0.0, K_v=0.0,
+                                  n_barotropic_substeps=5)
+        cfg_off = MPASOceanConfig(K_h=0.0, K_bih=0.0, A_v=0.0, K_v=0.0,
+                                   n_barotropic_substeps=5)
+        t_on = mpas_ocean_baroclinic_tendencies(perturbed, mesh, z_coord, cfg_on)
+        t_off = mpas_ocean_baroclinic_tendencies(perturbed, mesh, z_coord, cfg_off)
+        delta = t_on.dT_dt.data - t_off.dT_dt.data
+        # Damping at the bump location (top level where the bump lives):
+        # with -K_bih*bilap and bump at centre → ΔdT/dt < 0 at centre.
+        assert float(delta[ocean_idx, 0]) < 0.0
+
+    def test_bilaplacian_area_sum_near_zero_on_closed_mesh(self, mesh):
+        """``Σ_c A_c · bilap(T)_c ≈ 0`` on a closed (unmasked) mesh.
+
+        Two passes of ``div(grad(·))`` telescope on a closed manifold:
+        the area-weighted sum of the divergence of a cell-centred field
+        is zero by discrete Stokes. This is the finite-volume
+        conservation property that prevents the biharmonic from leaking
+        area-integrated tracer mass/heat/salt in the open ocean interior.
+        """
+        import numpy as np
+        from legoesm.core.operators_voronoi import bilaplacian_cell_3d
+        rng = np.random.default_rng(123)
+        nlev = 3
+        f = jnp.asarray(rng.normal(size=(mesh.nCells, nlev)))
+        bilap = bilaplacian_cell_3d(f, mesh)
+        area_weighted_sum = jnp.sum(mesh.areaCell[:, None] * bilap, axis=0)
+        scale = float(jnp.sum(mesh.areaCell)) * float(jnp.max(jnp.abs(f)))
+        # Discrete Stokes identity — tolerance scaled to area·peak magnitude.
+        assert float(jnp.max(jnp.abs(area_weighted_sum))) < 1e-10 * max(scale, 1.0)
+
+    def test_bilaplacian_quadratic_form_dissipative(self, mesh):
+        """``∫ f·∇⁴f dA = ∫ (∇²f)² dA ≥ 0`` — the key damping property.
+
+        For a closed Voronoi mesh, integration by parts yields
+        ``⟨f, bilap(f)⟩_A = ⟨lap(f), lap(f)⟩_A ≥ 0`` (for the scalar
+        Laplacian built from ``div(grad())``).  Therefore
+        ``-K_bih · bilap`` dissipates the quadratic tracer variance
+        ``⟨f, f⟩_A`` at a scale-selective rate proportional to ``k⁴`` —
+        the defining feature of scale-selective biharmonic damping.
+        """
+        import numpy as np
+        from legoesm.core.operators_voronoi import (
+            bilaplacian_cell_3d, laplacian_cell_3d,
+        )
+        rng = np.random.default_rng(7)
+        f = jnp.asarray(rng.normal(size=(mesh.nCells, 1)))
+        bilap = bilaplacian_cell_3d(f, mesh)
+        lap = laplacian_cell_3d(f, mesh)
+        lhs = float(jnp.sum(mesh.areaCell[:, None] * f * bilap))
+        rhs = float(jnp.sum(mesh.areaCell[:, None] * lap * lap))
+        assert lhs >= 0.0
+        # Integration-by-parts identity (closed mesh, no coastlines).
+        assert abs(lhs - rhs) < 1e-10 * max(abs(rhs), 1.0)
+
+
 # ============================================================================
 # Test: Barotropic Substeps
 # ============================================================================
@@ -270,25 +489,27 @@ class TestBarotropicSubsteps:
     def test_barotropic_shapes(self, state, mesh, z_coord, config):
         """Barotropic substeps return correct shapes."""
         dt_baro = 10.0
-        eta_new, u_bar_new = barotropic_substeps_mpas(
+        eta_new, u_bar_new, Hu_avg = barotropic_substeps_mpas(
             state, mesh, z_coord, config, dt_baro, 3,
         )
         assert eta_new.shape == state.eta.data.shape
         assert u_bar_new.shape == (mesh.nEdges,)
+        assert Hu_avg.shape == (mesh.nEdges,)
 
     def test_barotropic_finite(self, state, mesh, z_coord, config):
         """Barotropic output is finite."""
         dt_baro = 10.0
-        eta_new, u_bar_new = barotropic_substeps_mpas(
+        eta_new, u_bar_new, Hu_avg = barotropic_substeps_mpas(
             state, mesh, z_coord, config, dt_baro, 3,
         )
         assert jnp.all(jnp.isfinite(eta_new))
         assert jnp.all(jnp.isfinite(u_bar_new))
+        assert jnp.all(jnp.isfinite(Hu_avg))
 
     def test_rest_state_barotropic_stable(self, state, mesh, z_coord, config):
         """Rest state remains at rest through barotropic substeps."""
         dt_baro = 10.0
-        eta_new, u_bar_new = barotropic_substeps_mpas(
+        eta_new, u_bar_new, Hu_avg = barotropic_substeps_mpas(
             state, mesh, z_coord, config, dt_baro, 5,
         )
         assert jnp.max(jnp.abs(eta_new - state.eta.data)) < 1e-10
@@ -306,6 +527,74 @@ class TestBarotropicSubsteps:
             state.u.data, u_bar_old, u_bar_new, mesh, mask,
         )
         assert u_3d_new.shape == state.u.data.shape
+
+    def test_barotropic_u_viscosity_damps_grid_noise(
+        self, state, mesh, z_coord, config,
+    ):
+        """``barotropic_u_viscosity`` damps grid-scale noise on u_bar.
+
+        Targets the TRiSK rotational null branch on hexagonal C-grids
+        (Thuburn 2008; Ringler et al. 2010, JCP §6) — a noise mode
+        that has both ∇·u_bar ≈ 0 and is not damped by eta diffusion
+        or divergence damping.
+
+        Strategy: seed the 3D velocity with random edge noise (which
+        projects onto all wavenumbers including the null branch),
+        run a single barotropic substep with and without viscosity,
+        and assert that the viscous run has significantly lower
+        u_bar variance.
+        """
+        import numpy as np
+
+        rng = np.random.default_rng(0)
+        u_noise = jnp.asarray(
+            0.01 * rng.standard_normal(state.u.data.shape),
+            dtype=state.u.data.dtype,
+        )
+        c1 = mesh.cellsOnEdge[0]
+        c2 = mesh.cellsOnEdge[1]
+        edge_mask = state.land_mask.data[c1] * state.land_mask.data[c2]
+        u_noise = u_noise * edge_mask[:, None]
+
+        state_noisy = state._replace(u=state.u.replace(data=u_noise))
+
+        dt_baro = 30.0
+        n_sub = 30
+
+        # Run without viscosity (baseline)
+        cfg_off = config._replace(
+            barotropic_u_viscosity=0.0,
+            barotropic_diffusion_alpha=0.0,
+            barotropic_div_damp=0.0,
+        )
+        _, u_bar_off, _ = barotropic_substeps_mpas(
+            state_noisy, mesh, z_coord, cfg_off, dt_baro, n_sub,
+        )
+
+        # Run with viscosity ON. On the level-2 mesh (~2400 km),
+        # forward-Euler stability requires A * dt / dx² < 0.5; with
+        # dt=30 s and dx²≈7e12 this gives A < 1.2e11. Pick A=1e10:
+        # diffusion timescale dx²/A ≈ 700 s, so ~30 substeps × 30 s
+        # = 900 s gives an O(1) reduction at the highest wavenumbers.
+        cfg_on = config._replace(
+            barotropic_u_viscosity=1.0e10,
+            barotropic_diffusion_alpha=0.0,
+            barotropic_div_damp=0.0,
+        )
+        _, u_bar_on, _ = barotropic_substeps_mpas(
+            state_noisy, mesh, z_coord, cfg_on, dt_baro, n_sub,
+        )
+
+        var_off = float(jnp.var(u_bar_off))
+        var_on = float(jnp.var(u_bar_on))
+        assert var_on < 0.5 * var_off, (
+            f"u_bar viscosity should reduce variance by ≥2×; "
+            f"got var_off={var_off:.3e}, var_on={var_on:.3e}"
+        )
+
+    def test_barotropic_u_viscosity_default_off(self, config):
+        """Default config keeps u_bar viscosity disabled for bit-stability."""
+        assert config.barotropic_u_viscosity == 0.0
 
 
 # ============================================================================
@@ -350,6 +639,179 @@ class TestMPASOceanModel:
         assert jnp.all(jnp.isfinite(s.T.data))
         assert jnp.all(jnp.isfinite(s.eta.data))
 
+    def test_step_checked_finite_state(self, mesh, z_coord, config, state):
+        """step_checked must validate finite state without crashing.
+
+        Regression test for an AttributeError on jax bool-array `.broadcast_to`
+        in `_assert_runtime_invariants` (#174 item 6). Default T/S bounds are
+        wide enough for the rest state, so the validator should pass through
+        cleanly and return a finite stepped state.
+        """
+        config_rc = config._replace(enable_runtime_checks=True)
+        model = MPASOceanModel(mesh, z_coord, config_rc)
+        state_new = model.step_checked(state, dt=60.0)
+        assert jnp.all(jnp.isfinite(state_new.T.data))
+        assert jnp.all(jnp.isfinite(state_new.S.data))
+        assert jnp.all(jnp.isfinite(state_new.eta.data))
+
+    def test_step_preserves_land_tracer_values(
+        self, mesh, z_coord, config, state,
+    ):
+        """Regression for issue #164 bug 1.
+
+        The old code zeroed T and S on land cells at the end of every
+        flux-form tracer update (``jnp.where(mask > 0.5, tr_new, 0.0)``
+        in ``ocean_model_mpas.py``). Combined with the single-iteration
+        Neumann fill, that produced a cold/fresh front that propagated
+        one cell per step along coastlines. The fix preserves the
+        pre-step tracer value on land, matching the lat-lon pattern.
+        """
+        mask_1d = state.land_mask.data
+        is_land = mask_1d < 0.5
+        # Sanity check: the default rest state has at least one land cell.
+        assert int(jnp.sum(is_land)) > 0, (
+            "rest_state_mpas_ocean fixture has no land cells; test cannot "
+            "discriminate the #164 fix."
+        )
+        T_land_before = state.T.data[is_land]
+        S_land_before = state.S.data[is_land]
+        # Rest state is non-trivially warm and salty.
+        assert float(jnp.min(T_land_before)) > 1.0
+        assert float(jnp.min(S_land_before)) > 10.0
+
+        model = MPASOceanModel(mesh, z_coord, config)
+        state_new = model.step(state, 60.0)
+
+        T_land_after = state_new.T.data[is_land]
+        S_land_after = state_new.S.data[is_land]
+        # The old bug would make these exactly zero.
+        assert float(jnp.min(T_land_after)) > 1.0, (
+            f"Land T zeroed after step — bug #164 is back. "
+            f"min={float(jnp.min(T_land_after))}"
+        )
+        assert float(jnp.min(S_land_after)) > 10.0, (
+            f"Land S zeroed after step — bug #164 is back. "
+            f"min={float(jnp.min(S_land_after))}"
+        )
+        # And the land values should track the pre-step values closely
+        # (preservation, not arbitrary drift). Tolerance accommodates
+        # fp32 round-off accumulated through the fill average and the
+        # h_k_old / h_k_new ratio in the flux-form tracer update —
+        # orders of magnitude below the ~20 K delta the old bug
+        # would produce.
+        assert float(jnp.max(jnp.abs(T_land_after - T_land_before))) < 1e-3
+        assert float(jnp.max(jnp.abs(S_land_after - S_land_before))) < 1e-3
+
+
+# ============================================================================
+# Test: Land-cell Neumann fill
+# ============================================================================
+
+class TestMPASLandFill:
+    """Regression tests for ``fill_land_cells_mpas`` (issue #164 bug 2)."""
+
+    @staticmethod
+    def _chain_connectivity(n):
+        """Build c1, c2 arrays for a linear chain of n cells."""
+        c1 = jnp.arange(n - 1)
+        c2 = jnp.arange(1, n)
+        return c1, c2
+
+    def test_single_iter_reaches_only_one_ring(self):
+        """With n_iter=1, only land cells adjacent to ocean get filled.
+
+        Documents the old (single-iteration) behaviour as a regression
+        guard: n_iter=1 fills the first ring but leaves deeper interior
+        land cells at their stale value. This is what the MPAS ocean
+        had before issue #164 — any land cell two or more edges from
+        ocean stayed zero.
+        """
+        from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
+
+        # Chain: ocean ocean ocean land land land
+        field = jnp.array([1.0, 2.0, 3.0, 0.0, 0.0, 0.0])
+        mask = jnp.array([1.0, 1.0, 1.0, 0.0, 0.0, 0.0])
+        c1, c2 = self._chain_connectivity(6)
+
+        filled = fill_land_cells_mpas(field, mask, c1, c2, n_iter=1)
+        # Cell 3 (1 edge from ocean) → filled with cell-2 value.
+        assert float(filled[3]) == 3.0
+        # Cells 4, 5 (2-3 edges from ocean) → unfilled.
+        assert float(filled[4]) == 0.0
+        assert float(filled[5]) == 0.0
+
+    def test_three_iter_reaches_three_rings(self):
+        """With n_iter=3 (new default), land cells up to 3 edges from
+        ocean get filled. This matches the lat-lon
+        ``_neumann_fill_cgrid`` 3-pass behaviour.
+        """
+        from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
+
+        field = jnp.array([1.0, 2.0, 3.0, 0.0, 0.0, 0.0])
+        mask = jnp.array([1.0, 1.0, 1.0, 0.0, 0.0, 0.0])
+        c1, c2 = self._chain_connectivity(6)
+
+        filled = fill_land_cells_mpas(field, mask, c1, c2)  # default n_iter=3
+        # Every land cell in the chain is reachable within 3 edges.
+        assert float(filled[3]) == 3.0
+        assert float(filled[4]) == 3.0
+        assert float(filled[5]) == 3.0
+        # Ocean cells untouched.
+        assert float(filled[0]) == 1.0
+        assert float(filled[1]) == 2.0
+        assert float(filled[2]) == 3.0
+
+    def test_fill_preserves_ocean_values_2d(self):
+        """2D (per-level) field: fill must not mutate ocean cells or
+        collapse across levels.
+        """
+        from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
+
+        nlev = 3
+        field = jnp.stack(
+            [
+                jnp.array([1.0, 2.0, 3.0, 0.0, 0.0, 0.0]),
+                jnp.array([4.0, 5.0, 6.0, 0.0, 0.0, 0.0]),
+                jnp.array([7.0, 8.0, 9.0, 0.0, 0.0, 0.0]),
+            ],
+            axis=-1,
+        )  # (6, 3)
+        mask = jnp.array([1.0, 1.0, 1.0, 0.0, 0.0, 0.0])
+        c1, c2 = self._chain_connectivity(6)
+
+        filled = fill_land_cells_mpas(field, mask, c1, c2)  # n_iter=3
+        # Ocean cells preserved per-level.
+        assert jnp.allclose(filled[0], jnp.array([1.0, 4.0, 7.0]))
+        assert jnp.allclose(filled[2], jnp.array([3.0, 6.0, 9.0]))
+        # Land cells get the last-ocean-cell value per level.
+        assert jnp.allclose(filled[3], jnp.array([3.0, 6.0, 9.0]))
+        assert jnp.allclose(filled[5], jnp.array([3.0, 6.0, 9.0]))
+
+    def test_deep_land_beyond_n_iter_unchanged(self):
+        """Land cells deeper than n_iter edges from ocean stay at
+        their stale value. Documents the known limitation of the
+        iterative fill — the 'proper' fix (precomputed nearest-ocean
+        lookup) is still future work per issue #164's suggested fix.
+        """
+        from legoesm.ocean.dynamics.mpas_fill import fill_land_cells_mpas
+
+        # 6 ocean + 5 land; land cells 4..8 are 1..5 edges from ocean.
+        n = 11
+        field = jnp.array(
+            [1.0] * 6 + [-99.0] * 5, dtype=jnp.float32,
+        )
+        mask = jnp.array([1.0] * 6 + [0.0] * 5, dtype=jnp.float32)
+        c1, c2 = self._chain_connectivity(n)
+
+        filled = fill_land_cells_mpas(field, mask, c1, c2, n_iter=3)
+        # Cells 6, 7, 8 are 1, 2, 3 edges from ocean → filled.
+        assert float(filled[6]) == 1.0
+        assert float(filled[7]) == 1.0
+        assert float(filled[8]) == 1.0
+        # Cells 9, 10 are 4, 5 edges from ocean → unchanged.
+        assert float(filled[9]) == -99.0
+        assert float(filled[10]) == -99.0
+
 
 # ============================================================================
 # Test: Conservation
@@ -369,13 +831,18 @@ class TestConservation:
             eta=state.eta.replace(data=eta_perturbed),
         )
 
-        vol_before = jnp.sum(state.eta.data * mask * area)
+        # Verify in float64 — the fixer accumulates in float64 but the
+        # corrected state may be float32 under the default precision policy.
+        _f64 = jnp.float64
+        vol_before = jnp.sum(state.eta.data.astype(_f64) * mask.astype(_f64) * area.astype(_f64))
         state_fixed = fix_volume_mpas(state_new, state, mesh, z_coord)
-        vol_after = jnp.sum(state_fixed.eta.data * mask * area)
+        vol_after = jnp.sum(state_fixed.eta.data.astype(_f64) * mask.astype(_f64) * area.astype(_f64))
 
-        # Use absolute tolerance when reference volume is near zero
-        total_area = jnp.sum(mask * area)
-        assert jnp.abs(vol_after - vol_before) < 1e-10 * total_area
+        # Use absolute tolerance when reference volume is near zero.
+        # With float32 state, the correction's float32 representation
+        # introduces O(nCells * eps_f32 * |correction|) residual.
+        total_area = jnp.sum(mask.astype(_f64) * area.astype(_f64))
+        assert jnp.abs(vol_after - vol_before) < 1e-5 * total_area
 
     def test_heat_conservation(self, state, mesh, z_coord):
         """Heat fixer restores total heat content."""
@@ -390,21 +857,24 @@ class TestConservation:
             T=state.T.replace(data=T_perturbed),
         )
 
+        _f64 = jnp.float64
         h_k = compute_layer_thickness(state.eta.data, H_bathy, z_coord)
         heat_before = jnp.sum(
-            state.T.data * h_k * mask[:, jnp.newaxis] * mesh.areaCell[:, jnp.newaxis]
+            state.T.data.astype(_f64) * h_k.astype(_f64)
+            * mask.astype(_f64)[:, jnp.newaxis] * mesh.areaCell.astype(_f64)[:, jnp.newaxis]
         )
 
         state_fixed = fix_heat_mpas(state_new, state, mesh, z_coord)
         h_k_new = compute_layer_thickness(state_fixed.eta.data, H_bathy, z_coord)
         heat_after = jnp.sum(
-            state_fixed.T.data * h_k_new * mask[:, jnp.newaxis] * mesh.areaCell[:, jnp.newaxis]
+            state_fixed.T.data.astype(_f64) * h_k_new.astype(_f64)
+            * mask.astype(_f64)[:, jnp.newaxis] * mesh.areaCell.astype(_f64)[:, jnp.newaxis]
         )
 
         rel_err = jnp.abs(heat_after - heat_before) / jnp.maximum(
             jnp.abs(heat_before), 1e-30,
         )
-        assert rel_err < 1e-10
+        assert rel_err < 1e-5
 
     def test_full_fixer(self, state, mesh, z_coord, config):
         """Full conservation fixer chain works."""
@@ -418,6 +888,71 @@ class TestConservation:
         )
         assert jnp.all(jnp.isfinite(state_fixed.eta.data))
         assert jnp.all(jnp.isfinite(state_fixed.T.data))
+
+    def test_fixer_runs_under_fp32_policy(
+        self, state, mesh, z_coord, config,
+    ):
+        """Regression for issue #167.
+
+        The previous implementation hard-coded float64 upcasts in every
+        reduction, which crashed on backends without x64 support (notably
+        Apple Metal). The fix routes all accumulations through the
+        ``ocean_diagnostics`` precision policy. Under a pure fp32 policy
+        with no module overrides — simulating the Metal backend on an
+        x64-capable host — the fixer must run and return finite, fp32
+        output instead of silently upcasting back to fp64.
+        """
+        from legoesm.core.precision import (
+            PrecisionPolicy,
+            get_policy,
+            set_policy,
+            clear_module_overrides,
+            get_module_overrides,
+            set_module_override,
+        )
+
+        prev_policy = get_policy()
+        prev_overrides = get_module_overrides()
+
+        try:
+            set_policy(PrecisionPolicy.fp32())
+            clear_module_overrides()
+
+            # Cast the fixture state down to fp32 to match the policy.
+            def _to_fp32(leaf):
+                if (
+                    isinstance(leaf, jax.Array)
+                    and jnp.issubdtype(leaf.dtype, jnp.floating)
+                ):
+                    return leaf.astype(jnp.float32)
+                return leaf
+
+            state_fp32 = jax.tree.map(_to_fp32, state)
+
+            state_new = state_fp32._replace(
+                eta=state_fp32.eta.replace(
+                    data=state_fp32.eta.data
+                    + jnp.float32(0.01) * state_fp32.land_mask.data,
+                ),
+            )
+
+            state_fixed = mpas_ocean_conservation_fixer(
+                state_new, state_fp32, mesh, z_coord, config,
+            )
+
+            assert jnp.all(jnp.isfinite(state_fixed.eta.data))
+            assert jnp.all(jnp.isfinite(state_fixed.T.data))
+            assert jnp.all(jnp.isfinite(state_fixed.S.data))
+            # No silent upcast — outputs must stay in fp32.
+            assert state_fixed.eta.data.dtype == jnp.float32
+            assert state_fixed.T.data.dtype == jnp.float32
+            assert state_fixed.S.data.dtype == jnp.float32
+        finally:
+            set_policy(prev_policy)
+            clear_module_overrides()
+            for module, roles in prev_overrides.items():
+                if roles:
+                    set_module_override(module, **roles)
 
 
 # ============================================================================
@@ -545,37 +1080,27 @@ class TestSurfaceForcing:
         assert float(jnp.max(jnp.abs(tend.du_dt.data[:, 1:]))) == 0.0
 
     def test_bottom_drag_produces_tendency(self, mesh, z_coord):
-        """Linear bottom drag produces nonzero bottom-layer tendency."""
-        from legoesm.ocean.physics.mpas_physics import make_mpas_ocean_physics
-        from legoesm.ocean.physics.combined import OceanPhysicsConfig
-        from legoesm.ocean.physics.bottom_drag.config import (
-            BottomDragConfig, LinearDragConfig,
-        )
+        """Dynamics-level linear bottom drag produces nonzero tendency."""
+        from legoesm.ocean.dynamics.ocean_pe_mpas import mpas_ocean_baroclinic_tendencies
         from legoesm.ocean.init_mpas import rest_state_mpas_ocean
 
-        config = OceanPhysicsConfig(
-            bottom_drag=BottomDragConfig(
-                scheme="linear", linear=LinearDragConfig(r=1e-4)),
-        )
-        fn = make_mpas_ocean_physics(config)
+        config = MPASOceanConfig(bottom_drag_r=1e-4)
 
         # Create state with nonzero bottom velocity
         s = rest_state_mpas_ocean(mesh, z_coord, H_max=500.0)
         u_data = s.u.data.at[:, -1].set(1.0)
         s = s._replace(u=s.u.replace(data=u_data))
 
-        tend = fn(s, mesh, z_coord)
-        # Bottom layer should have drag: du/dt = -r * u = -1e-4
+        tend = mpas_ocean_baroclinic_tendencies(
+            s, mesh, z_coord, config)
+        # Bottom layer should have drag: du/dt = -r * u / dz_bottom
         assert float(jnp.max(jnp.abs(tend.du_dt.data[:, -1]))) > 0
 
     def test_model_step_with_physics(self, mesh, z_coord):
-        """Full model step with physics produces circulation."""
+        """Full model step with wind + dynamics bottom drag produces circulation."""
         from legoesm.ocean.physics.combined import OceanPhysicsConfig
         from legoesm.ocean.physics.surface_forcing.config import (
             PrescribedForcingConfig, SurfaceForcingConfig,
-        )
-        from legoesm.ocean.physics.bottom_drag.config import (
-            BottomDragConfig, LinearDragConfig,
         )
         from legoesm.ocean.init_mpas import wind_driven_gyre_mpas
 
@@ -585,11 +1110,10 @@ class TestSurfaceForcing:
                 prescribed=PrescribedForcingConfig(
                     wind_profile="single_gyre", tau_max=0.1),
             ),
-            bottom_drag=BottomDragConfig(
-                scheme="linear", linear=LinearDragConfig(r=1e-4)),
         )
         config = MPASOceanConfig(
-            n_barotropic_substeps=5, physics=physics, A_h=1e3)
+            n_barotropic_substeps=5, physics=physics, A_h=1e3,
+            bottom_drag_r=1e-4)
         model = MPASOceanModel(mesh, z_coord, config)
 
         state = wind_driven_gyre_mpas(mesh, z_coord, H_max=500.0)
@@ -600,3 +1124,153 @@ class TestSurfaceForcing:
         assert jnp.all(jnp.isfinite(state_new.eta.data))
         # Wind stress should produce motion
         assert float(jnp.max(jnp.abs(state_new.u.data))) > 0
+
+
+# ============================================================================
+# Test: TVD Advection on MPAS
+# ============================================================================
+
+class TestMPASTVDAdvection:
+    """Test TVD tracer advection on Voronoi mesh."""
+
+    def test_upup_cell_shapes(self, mesh):
+        """compute_upup_cells returns correct shapes."""
+        from legoesm.ocean.dynamics.advection_mpas import compute_upup_cells
+
+        upup_pos, upup_neg = compute_upup_cells(mesh)
+        assert upup_pos.shape == (mesh.nEdges,)
+        assert upup_neg.shape == (mesh.nEdges,)
+
+    def test_upup_cell_valid_indices(self, mesh):
+        """Upup cell indices are within valid range."""
+        from legoesm.ocean.dynamics.advection_mpas import compute_upup_cells
+
+        upup_pos, upup_neg = compute_upup_cells(mesh)
+        assert int(jnp.min(upup_pos)) >= 0
+        assert int(jnp.max(upup_pos)) < mesh.nCells
+        assert int(jnp.min(upup_neg)) >= 0
+        assert int(jnp.max(upup_neg)) < mesh.nCells
+
+    def test_upup_cell_differs_from_neighbor(self, mesh):
+        """Upup cell is generally different from the direct neighbor.
+
+        For most interior edges, the opposite-cell lookup should yield
+        a cell that is distinct from both c1 and c2.
+        """
+        from legoesm.ocean.dynamics.advection_mpas import compute_upup_cells
+
+        upup_pos, upup_neg = compute_upup_cells(mesh)
+        c1 = mesh.cellsOnEdge[0]
+        c2 = mesh.cellsOnEdge[1]
+
+        # At least 50% of edges should have upup != c2 for pos flow
+        # (the opposite cell of c1 should not be c2 itself)
+        frac_distinct_pos = float(jnp.mean((upup_pos != c2).astype(jnp.float32)))
+        assert frac_distinct_pos > 0.5, (
+            f"Only {frac_distinct_pos:.0%} of upup_pos differ from c2 — "
+            f"opposite-cell lookup may be broken"
+        )
+
+    def test_tvd_to_edges_shapes(self, mesh):
+        """tvd_tracer_to_edges returns correct shapes."""
+        from legoesm.ocean.dynamics.advection_mpas import (
+            compute_upup_cells, tvd_tracer_to_edges,
+        )
+
+        nlev = 5
+        upup_pos, upup_neg = compute_upup_cells(mesh)
+        tr = jnp.ones((mesh.nCells, nlev)) * 15.0
+        mass_flux = jnp.ones((mesh.nEdges, nlev)) * 0.01
+
+        tr_edge = tvd_tracer_to_edges(tr, mass_flux, mesh, upup_pos, upup_neg)
+        assert tr_edge.shape == (mesh.nEdges, nlev)
+
+    def test_tvd_recovers_constant_field(self, mesh):
+        """TVD reconstruction of a uniform field is exact."""
+        from legoesm.ocean.dynamics.advection_mpas import (
+            compute_upup_cells, tvd_tracer_to_edges,
+        )
+
+        nlev = 3
+        upup_pos, upup_neg = compute_upup_cells(mesh)
+        tr = jnp.ones((mesh.nCells, nlev)) * 20.0
+        mass_flux = jnp.sin(mesh.angleEdge)[:, jnp.newaxis] * jnp.ones(nlev)
+
+        tr_edge = tvd_tracer_to_edges(tr, mass_flux, mesh, upup_pos, upup_neg)
+        assert jnp.allclose(tr_edge, 20.0, atol=1e-12)
+
+    def test_tvd_model_step(self, mesh, z_coord, state):
+        """MPAS model with TVD advection takes a step successfully."""
+        config_tvd = MPASOceanConfig(
+            A_h=1.0e3, K_h=1.0e2, A_v=1.0e-3, K_v=1.0e-4,
+            n_barotropic_substeps=5,
+            tracer_advection="tvd",
+        )
+        model = MPASOceanModel(mesh, z_coord, config_tvd)
+        state_new = model.step(state, 60.0)
+
+        assert jnp.all(jnp.isfinite(state_new.u.data))
+        assert jnp.all(jnp.isfinite(state_new.T.data))
+        assert jnp.all(jnp.isfinite(state_new.S.data))
+        assert jnp.all(jnp.isfinite(state_new.eta.data))
+
+    def test_tvd_multi_step_stability(self, mesh, z_coord, state):
+        """TVD model is stable for multiple steps."""
+        config_tvd = MPASOceanConfig(
+            A_h=1.0e3, K_h=1.0e2, A_v=1.0e-3, K_v=1.0e-4,
+            n_barotropic_substeps=5,
+            tracer_advection="tvd",
+        )
+        model = MPASOceanModel(mesh, z_coord, config_tvd)
+        s = state
+        for _ in range(5):
+            s = model.step(s, 30.0)
+        assert jnp.all(jnp.isfinite(s.T.data))
+        assert jnp.all(jnp.isfinite(s.S.data))
+
+    def test_tvd_less_diffusive_than_upwind(self, mesh, z_coord):
+        """TVD produces less numerical diffusion than upwind.
+
+        Creates a state with a sharp temperature gradient at the equator,
+        applies a uniform flow, and verifies that TVD preserves the
+        gradient better than upwind after several steps.
+        """
+        from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+
+        state = rest_state_mpas_ocean(
+            mesh, z_coord, T_water_init_C=20.0, T_deep=2.0,
+            S_uniform=35.0, H_max=500.0, land_lat_threshold=85.0,
+        )
+        # Sharp T front at equator — broadcast to (nCells, nlev)
+        nlev = state.T.data.shape[1]
+        north = (mesh.latCell > 0).astype(state.T.data.dtype)
+        T_front = (north * 20.0 + (1 - north) * 10.0)[:, jnp.newaxis]
+        T_front = jnp.broadcast_to(T_front, (mesh.nCells, nlev))
+        mask = state.land_mask.data
+        T_front = T_front * mask[:, jnp.newaxis]
+        state_front = state._replace(T=state.T.replace(data=T_front))
+
+        var_T_initial = float(jnp.var(T_front[mask > 0.5]))
+
+        dt = 30.0
+        n_steps = 5
+
+        results = {}
+        for scheme in ["upwind", "tvd"]:
+            cfg = MPASOceanConfig(
+                A_h=1.0e3, K_h=0.0, A_v=1.0e-3, K_v=0.0,
+                n_barotropic_substeps=5,
+                tracer_advection=scheme,
+            )
+            model = MPASOceanModel(mesh, z_coord, cfg)
+            s = state_front
+            for _ in range(n_steps):
+                s = model.step(s, dt)
+            var_T_final = float(jnp.var(s.T.data[mask > 0.5]))
+            results[scheme] = var_T_final
+
+        # TVD should preserve more variance (less diffusive)
+        assert results["tvd"] >= results["upwind"] * 0.99, (
+            f"TVD Var(T)={results['tvd']:.6f} should be >= "
+            f"upwind Var(T)={results['upwind']:.6f}"
+        )

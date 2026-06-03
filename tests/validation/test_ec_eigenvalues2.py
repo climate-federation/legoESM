@@ -6,11 +6,13 @@ or from the adiabatic heating discretization?
 import numpy as np
 from numpy.linalg import eig
 
+from legoesm import constants
+
 nlev = 20
 sigma_top = 0.01
 T_ref = 300.0
-R_d = 287.05
-kappa = R_d / 1004.0
+R_d = constants.R_d
+kappa = R_d / constants.c_pd
 lnps_0 = np.log(1e5)
 
 # Build sigma coordinate
@@ -79,7 +81,7 @@ def analyze_system(label, N, M, n_waves=[1, 5, 10, 21, 42]):
     print(f"\n  {label}")
     print(f"  {'n':>4s}  {'max_real':>12s}  {'unstable':>8s}  {'max_imag':>12s}")
     for n_wave in n_waves:
-        a = 6.371e6
+        a = constants.R_earth
         lambda_n = n_wave * (n_wave + 1) / a**2
         n_total = 2 * nlev + 1
         A = np.zeros((n_total, n_total))
@@ -169,10 +171,10 @@ print("=" * 70)
 # X = [D_0,...,D_{L-1}, T'_0,...,T'_{L-1}, lnps']
 # Q = sum_k D_k^2/(2*lambda) * dsigma_k + sum_k c_p*T'_k^2/(2*T_ref)*dsigma_k
 #     + c_p*T_ref*sigma_range/2 * lnps'^2 + c_p*sum_k T'_k*dsigma_k*lnps'
-c_p = 1004.0
+c_p = constants.c_pd
 
 for n_wave in [5, 10]:
-    a = 6.371e6
+    a = constants.R_earth
     lambda_n = n_wave * (n_wave + 1) / a**2
     n_total = 2 * nlev + 1
 

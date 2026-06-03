@@ -1,6 +1,6 @@
 """Atmospheric turbulence / boundary layer parameterization for legoESM.
 
-Eight backends are available, with increasing complexity:
+Seven backends are available, with increasing complexity:
 1. **Smagorinsky**: constant eddy diffusivity — simplest baseline
 2. **Louis (1979)**: stability-dependent diffusion — standard GCM scheme
 3. **TKE / MY2.5**: prognostic turbulent kinetic energy closure
@@ -8,7 +8,6 @@ Eight backends are available, with increasing complexity:
 5. **Holtslag-Boville**: nonlocal K-profile with counter-gradient correction
 6. **YSU**: nonlocal K-profile with entrainment flux at PBL top
 7. **EDMF**: eddy-diffusivity mass-flux unified framework
-8. **ML Emulator**: Equinox MLP turbulence surrogate
 
 All produce the same `TurbulenceOutput` interface.
 
@@ -35,7 +34,6 @@ from legoesm.atmosphere.physics.turbulence.config import (
     HoltslagBovilleConfig,
     YSUConfig,
     EDMFConfig,
-    MLTurbulenceEmulatorConfig,
 )
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.smagorinsky import smagorinsky_turbulence
@@ -47,10 +45,6 @@ from legoesm.atmosphere.physics.turbulence.holtslag_boville import (
 )
 from legoesm.atmosphere.physics.turbulence.ysu import ysu_turbulence
 from legoesm.atmosphere.physics.turbulence.edmf import edmf_turbulence
-from legoesm.atmosphere.physics.turbulence.ml_emulator import (
-    ml_turbulence,
-    TurbulenceEmulator,
-)
 from legoesm.atmosphere.physics.turbulence.pbl_height import (
     PBLHeightConfig,
     compute_bulk_richardson,

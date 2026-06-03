@@ -17,6 +17,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import YSUConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
@@ -24,6 +25,7 @@ from legoesm.atmosphere.physics.turbulence.surface_layer import (
 )
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
     implicit_vertical_diffusion,
+    implicit_vertical_diffusion_theta,
 )
 
 
@@ -86,9 +88,8 @@ def ysu_turbulence(
     S = jnp.sqrt(S2)
 
     # Virtual potential temperature
-    theta_v = T * (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa * (
-        1.0 + 0.61 * q_v
-    )
+    exner = (constants.p_ref / jnp.clip(p_full, 1.0, None)) ** constants.kappa
+    theta_v = virtual_temperature(T, q_v) * exner
 
     theta_v_bar = 0.5 * (theta_v[:, :-1] + theta_v[:, 1:])
     dtheta_v_dz = (theta_v[:, :-1] - theta_v[:, 1:]) / dz_half
@@ -118,7 +119,10 @@ def ysu_turbulence(
     # Transition-zone weighting: peaks at Ri_crit crossing, not centroid
     sigma_pbl = jax.nn.sigmoid(config.pbl_smooth_sharpness * (config.Ri_crit - Ri_bulk))
     w_pbl = sigma_pbl * (1.0 - sigma_pbl) + 1e-20
-    h_pbl = jnp.sum(z_full * w_pbl, axis=1) / jnp.sum(w_pbl, axis=1)
+    # Numerator and denominator share the level axis — fuse into one
+    # stacked reduction.
+    _h_pair = jnp.sum(jnp.stack([z_full * w_pbl, w_pbl], axis=-1), axis=1)
+    h_pbl = _h_pair[..., 0] / _h_pair[..., 1]
     h_pbl = jnp.clip(h_pbl, 100.0, None)
 
     # ----- K-profile -----
@@ -134,20 +138,29 @@ def ysu_turbulence(
     l_mix = constants.kappa_vk * z_abs / (
         1.0 + constants.kappa_vk * z_abs / config.l_mix_max
     )
-    b_louis = 5.0
+    # Louis (1982) stability constants come from config; the previous
+    # hardcoded ``b_louis = 5.0`` and ``5.0`` literals violated the
+    # constant-discipline rule (CLAUDE.md).  Note that Louis (1982)
+    # distinguishes three coefficients (b, c, d): ``b`` enters both
+    # branches, ``d`` is the stable-branch sqrt coefficient, and ``c``
+    # is the unstable-branch denominator coefficient — the repository's
+    # louis.py already follows this split, and YSU now does too.
+    b_louis = config.louis_b
+    c_louis = config.louis_c
+    d_louis = config.louis_d
     Ri_pos = jnp.maximum(Ri, 0.0)
-    f_stable = 1.0 / (1.0 + 2.0 * b_louis * Ri_pos / jnp.sqrt(1.0 + 5.0 * Ri_pos))
+    f_stable = 1.0 / (1.0 + 2.0 * b_louis * Ri_pos / jnp.sqrt(1.0 + d_louis * Ri_pos))
     Ri_neg = jnp.minimum(Ri, 0.0)
     f_unstable = 1.0 - 2.0 * b_louis * Ri_neg / (
-        1.0 + 3.0 * b_louis * 5.0 * l_mix ** 2
+        1.0 + 3.0 * b_louis * c_louis * l_mix ** 2
         * jnp.sqrt(jnp.abs(Ri_neg) + 1e-10) / (dz_half ** 2 + 1e-10)
     )
-    blend_ri = jax.nn.sigmoid(100.0 * Ri)
+    blend_ri = jax.nn.sigmoid(config.blend_ri_sharpness * Ri)
     f_m = (1.0 - blend_ri) * f_unstable + blend_ri * f_stable
     Km_local = l_mix ** 2 * S * f_m
 
     # Smooth blend from K-profile to local
-    blend_pbl = jax.nn.sigmoid(10.0 * (z_norm - 1.0))
+    blend_pbl = jax.nn.sigmoid(config.blend_pbl_sharpness * (z_norm - 1.0))
 
     # ----- Entrainment flux at PBL top -----
     # Convective velocity scale: w* = (g * h * (w'theta')_sfc / theta_bar)^(1/3)
@@ -172,16 +185,17 @@ def ysu_turbulence(
     Km_half = (1.0 - blend_pbl) * Km_profile + blend_pbl * Km_local + K_ent
     Kh_half = Km_half / config.Pr_t
 
-    # Interpolate to full levels for diagnostics
-    Km_full = jnp.zeros((ncol, nlev))
-    Km_full = Km_full.at[:, 1:-1].set(0.5 * (Km_half[:, :-1] + Km_half[:, 1:]))
-    Km_full = Km_full.at[:, 0].set(Km_half[:, 0])
-    Km_full = Km_full.at[:, -1].set(Km_half[:, -1])
-
-    Kh_full = jnp.zeros((ncol, nlev))
-    Kh_full = Kh_full.at[:, 1:-1].set(0.5 * (Kh_half[:, :-1] + Kh_half[:, 1:]))
-    Kh_full = Kh_full.at[:, 0].set(Kh_half[:, 0])
-    Kh_full = Kh_full.at[:, -1].set(Kh_half[:, -1])
+    # Interpolate to full levels for diagnostics — single concat per
+    # field instead of the previous ``zeros + 3 .at[].set`` triple
+    # scatter (lowers to one HLO op).
+    Km_interior = 0.5 * (Km_half[:, :-1] + Km_half[:, 1:])
+    Km_full = jnp.concatenate(
+        [Km_half[:, :1], Km_interior, Km_half[:, -1:]], axis=1,
+    )
+    Kh_interior = 0.5 * (Kh_half[:, :-1] + Kh_half[:, 1:])
+    Kh_full = jnp.concatenate(
+        [Kh_half[:, :1], Kh_interior, Kh_half[:, -1:]], axis=1,
+    )
 
     # Layer thicknesses
     dz_layer = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
@@ -192,10 +206,27 @@ def ysu_turbulence(
     sflx_T = shflx / constants.c_pd
     sflx_q = lhflx / constants.L_v
 
-    # Implicit vertical diffusion
+    # ----- Nonlocal countergradient (Troen-Mahrt 1986 / Hong et al. 2006) -----
+    # γ_c = b·(w'θ')_0 / (w_s·h)  [K/m], YSU's defining nonlocal upward
+    # heat transport in the convective BL.  Gated to unstable surface
+    # forcing via max(w'θ', 0) (zero for neutral/stable), with the
+    # convective velocity scale w* in the denominator (⇒ the usual
+    # γ_c ∝ (w'θ')^{2/3} convective scaling).  Applied as an enhanced
+    # heat surface flux (same convention as the Holtslag-Boville scheme).
+    # The previous YSU had only the local K-profile + entrainment K, so
+    # the nonlocal countergradient (the whole point of the scheme) was
+    # absent.
+    counter_grad = config.countergrad_coeff * jnp.maximum(wtheta_sfc, 0.0) / (
+        jnp.clip(w_star, 1e-6, None) * h_pbl
+    )  # (ncol,) [K/m]
+    sflx_T_enhanced = sflx_T + rho[:, -1] * jnp.mean(Kh_half, axis=1) * counter_grad
+
+    # Implicit vertical diffusion.  Heat in θ-space (dry-adiabat neutral).
     u_new = implicit_vertical_diffusion(u, Km_half, rho, dz_layer, dz_half, dt, sflx_u)
     v_new = implicit_vertical_diffusion(v, Km_half, rho, dz_layer, dz_half, dt, sflx_v)
-    T_new = implicit_vertical_diffusion(T, Kh_half, rho, dz_layer, dz_half, dt, sflx_T)
+    T_new = implicit_vertical_diffusion_theta(
+        T, Kh_half, rho, dz_layer, dz_half, p_full, dt, sflx_T_enhanced,
+    )
     q_new = implicit_vertical_diffusion(q_v, Kh_half, rho, dz_layer, dz_half, dt, sflx_q)
 
     return TurbulenceOutput(

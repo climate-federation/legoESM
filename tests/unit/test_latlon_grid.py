@@ -74,9 +74,14 @@ class TestGridConstruction:
         pole_idx = 0  # southernmost
         assert float(grid.dx[eq_idx, 0]) > float(grid.dx[pole_idx, 0])
 
-    def test_dy_is_scalar(self, grid):
-        """dy should be a constant (scalar float)."""
-        assert isinstance(grid.dy, float)
+    def test_dy_is_1d_array(self, grid):
+        """dy is a 1D jax.Array of shape (n_lat,) — see docs/mercator_grid_plan.md.
+
+        For uniform-dlat grids (this one) all entries are equal.
+        """
+        assert grid.dy.shape == (grid.n_lat,)
+        # Uniform-dlat: all entries equal to the equatorial value.
+        assert jnp.allclose(grid.dy, grid.dy[0])
 
     def test_area_positive(self, grid):
         """All cell areas should be positive."""

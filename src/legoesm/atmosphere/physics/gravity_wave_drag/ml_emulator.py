@@ -65,14 +65,13 @@ def ml_gwd(
     """
     ncol, nlev = u.shape
 
-    # Build input features: [u/30, v/30, T/300, log(p/p_ref), z/30000, sin(lat), cos(lat)]
     lat_3d = jnp.broadcast_to(lat[:, None], (ncol, nlev))
     features = jnp.stack([
-        u / 30.0,
-        v / 30.0,
-        T / 300.0,
+        u / config.norm_u,
+        v / config.norm_u,
+        T / config.norm_T,
         jnp.log(jnp.clip(p_full, 1.0) / constants.p_ref),
-        z_full / 30000.0,
+        z_full / config.norm_z,
         jnp.sin(lat_3d),
         jnp.cos(lat_3d),
     ], axis=-1)  # (ncol, nlev, n_input)
@@ -92,8 +91,14 @@ def ml_gwd(
         dv_dt = dv_dt * 0.01
         dT_dt = dT_dt * 0.01
 
-    # Column dissipation
+    # Column dissipation: KE → heat conversion rate.  Use the same
+    # ``-(u·du + v·dv)`` form as Lindzen / McFarlane / Hines so the
+    # conservation tie-back ``c_pd · ∫ρ·dT_dt·dz = eps_gwd`` holds.
+    # The earlier ``jnp.abs(u·du + v·dv)`` lost the sign of the
+    # untrained tendency: a model that accidentally adds energy
+    # would still report eps_gwd as positive, hiding the violation.
+    # Audit cycle iter-26 finding P1.
     dz = jnp.abs(z_half[:, :-1] - z_half[:, 1:])
-    eps_gwd = jnp.sum(rho * jnp.abs(u * du_dt + v * dv_dt) * dz, axis=1)
+    eps_gwd = -jnp.sum(rho * (u * du_dt + v * dv_dt) * dz, axis=1)
 
     return GWDOutput(du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, eps_gwd=eps_gwd)

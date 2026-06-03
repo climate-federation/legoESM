@@ -28,6 +28,7 @@ References
 
 from __future__ import annotations
 
+import math
 from functools import partial
 from typing import NamedTuple
 
@@ -35,6 +36,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.runtime.backend import check_spectral_backend, get_backend
 from legoesm.grids.gaussian import (
     GaussianGrid,
     sh_analysis,
@@ -43,6 +45,7 @@ from legoesm.grids.gaussian import (
     sh_synthesis_3d,
     sh_analysis_oc2_3d,
     sh_analysis_dmu_3d,
+    sh_analysis_oc2_dmu_3d,
     uv_from_vordiv_3d,
     spectral_hyperdiffusion_3d,
     _sh_synthesis_H,
@@ -58,10 +61,23 @@ from legoesm.grids.vertical import (
     compute_omega_hybrid,
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
+from legoesm.timestepping.semi_implicit import (
+    euler_si_step,
+    leapfrog_si_step,
+    precompute_si_matrices,
+    robert_asselin_filter,
+    ssp_rk3_step_si,
+)
 from legoesm import constants
 
-_LNPS_MIN = float(jnp.log(100.0))
-_LNPS_MAX = float(jnp.log(2.0e6))
+# Log-surface-pressure clamp bounds [ln Pa].  Pure host constants — use
+# ``math.log`` (not ``jnp.log``) so this module imports without dispatching a
+# device computation.  An eager ``float(jnp.log(...))`` here compiles a tiny
+# HLO at import time, which (a) wastes a compile on every backend and (b)
+# hard-crashes the Apple/Metal backend ("unknown attribute code") before any
+# model is even constructed, taking down the whole physics/driver import chain.
+_LNPS_MIN = math.log(100.0)
+_LNPS_MAX = math.log(2.0e6)
 _COS_LAT_MIN = 1.0e-6
 
 
@@ -74,12 +90,22 @@ class SpectralHydrostaticState(NamedTuple):
 
     3D spectral fields: shape (n_sh, nlev) complex128
     2D spectral fields: shape (n_sh,) complex128
+
+    Tracers (optional): a ``dict[str, Field]`` mapping tracer name
+    (``"q_v"``, ``"q_c"``, ``"q_r"``, ...) to a grid-space ``Field``
+    of shape ``(n_lat, n_lon, nlev)``.  The spectral PE time-integration
+    loop does NOT yet apply tracer tendencies — the field exists so
+    physics bridges (radiation, convection, microphysics) can read
+    ``q_v`` directly from the state without a duck-typed wrapper.
+    Adding tracer advection / time-stepping is the dedicated "spectral
+    PE tracers" follow-up.  Mirrors :class:`HydrostaticState.tracers`.
     """
     vor_hat: Field    # Spectral relative vorticity [1/s]
     div_hat: Field    # Spectral divergence [1/s]
     T_hat: Field      # Spectral temperature [K]
     lnps_hat: Field   # Spectral log(surface pressure) [-]
     phis_hat: Field   # Spectral surface geopotential [m^2/s^2] (static)
+    tracers: dict | None = None  # name → grid-space Field (n_lat, n_lon, nlev)
 
 
 class SpectralPEConfig(NamedTuple):
@@ -113,8 +139,24 @@ class SpectralPEConfig(NamedTuple):
     implicit_hyperdiff: bool = False
     # Pressure floor for adiabatic heating (limits 1/p at model top)
     p_floor: float = 10.0           # Pa; adiabatic uses max(p, p_floor) to prevent omega/p overflow
-    # Robert-Asselin filter for leapfrog (controls computational mode)
-    robert_asselin_coeff: float = 0.05  # Filter coefficient (0 = off, 0.05-0.1 typical)
+    # Robert-Asselin-Williams filter for leapfrog (controls computational mode)
+    robert_asselin_coeff: float = 0.05  # Filter coefficient γ (0 = off, 0.05-0.1 typical)
+    # Williams 2009 α parameter.  0.53 is conditionally stable and is
+    # the recommended practical RAW choice; 0.5 conserves the
+    # three-time-level mean exactly but is unconditionally unstable.
+    # 1.0 recovers the original Robert-Asselin filter (3rd-order phase
+    # error retained).
+    robert_asselin_alpha: float = 0.53
+    # Iter-3: optional initial-mass anchor for the spectral primitive
+    # equations.  When ``fix_mass`` is on and
+    # ``anchor_mass_to_initial`` is True, ``step()`` snapshots the
+    # initial total dry mass (∫ p_s dA, fp64) on first call and rescales
+    # ``lnps_hat[0]`` after each step so the global integral returns to
+    # the snapshot.  Mirrors ``primitive_eq_cdgrid``/``primitive_eq_latlon_cgrid``
+    # behaviour.  Disabled by default to preserve pre-iter-3 baseline
+    # numerics for tests that intentionally measure drift.
+    fix_mass: bool = False
+    anchor_mass_to_initial: bool = False
 
 
 # =============================================================================
@@ -148,39 +190,55 @@ def _compute_geopotential_gaussian(T, p_s, sigma_coord, phis):
 
 
 def _compute_sigma_dot_gaussian(div_3d, sigma_coord):
-    """Sigma-dot on arbitrary grid shape. div_3d is (..., nlev)."""
+    """Sigma-dot on arbitrary grid shape. div_3d is (..., nlev).
+
+    Returns ``(sigma_dot, D_total)`` where ``D_total`` is the
+    column-integrated divergence (``sum(div * dsigma, axis=-1,
+    keepdims=True)``) — exposing it lets the caller reuse the value
+    in the surface-pressure tendency without re-summing the column.
+    """
     dsigma = sigma_coord.dsigma
     fractional_sigma = sigma_coord.fractional_sigma
 
     div_dsigma = div_3d * dsigma
-    D_total = jnp.sum(div_dsigma, axis=-1, keepdims=True)
+    # ``cumsum`` already contains ``sum`` as its last entry — extract it
+    # rather than computing the sum independently.  Under level-sharding
+    # this drops the per-stage allreduce-equivalent cumsum-axis collective
+    # from 2 to 1 (the prefix-cumsum + slicing the last index reuses the
+    # same prefix-scan kernel).
     cumsum_div = jnp.cumsum(div_dsigma, axis=-1)
+    D_total = cumsum_div[..., -1:]
 
     sigma_dot_inner = fractional_sigma * D_total - cumsum_div
 
-    shape_2d = div_3d.shape[:-1]
-    zero_top = jnp.zeros((*shape_2d, 1))
-    sigma_dot = jnp.concatenate([zero_top, sigma_dot_inner], axis=-1)
-    sigma_dot = sigma_dot.at[..., -1].set(0.0)
-    return sigma_dot
+    # Top BC: σ̇=0; bottom BC: zero by construction
+    # (frac_sigma[-1]=1, cumsum_div[-1]=D_total → sigma_dot_inner[-1]=0).
+    # Drop the (∼0) trailing element + pad with zeros on both ends in
+    # one ``jnp.pad`` — replaces ``jnp.pad`` + scatter (2 HLO ops) with
+    # slice + Pad (2 HLO ops) but eliminates the float roundoff in
+    # sigma_dot[-1].
+    pad_axes = ((0, 0),) * (sigma_dot_inner.ndim - 1) + ((1, 1),)
+    sigma_dot = jnp.pad(sigma_dot_inner[..., :-1], pad_axes)
+    return sigma_dot, D_total
 
 
 def _vertical_advection_sigma_gaussian(field, sigma_dot, sigma_coord):
-    """Vertical advection -sigma_dot * dfield/dsigma (upwind). Generic shapes."""
+    """Vertical advection -sigma_dot * dfield/dsigma (upwind). Generic shapes.
+
+    Top/bottom boundaries pad with a zero gradient; using ``jnp.pad``
+    instead of ``concatenate([jnp.zeros(...), ...])`` lowers to a
+    single XLA ``Pad`` op rather than allocating a fresh zero buffer
+    every RHS evaluation (this helper runs 3-5× per outer step under
+    SSP-RK).
+    """
     sigma_dot_full = 0.5 * (sigma_dot[..., :-1] + sigma_dot[..., 1:])
     dsigma_bwd = sigma_coord.dsigma_full
     df_bwd = jnp.diff(field, axis=-1)
+    diff = df_bwd / dsigma_bwd
 
-    grad_bwd = jnp.concatenate(
-        [jnp.zeros((*field.shape[:-1], 1)),
-         df_bwd / dsigma_bwd],
-        axis=-1,
-    )
-    grad_fwd = jnp.concatenate(
-        [df_bwd / dsigma_bwd,
-         jnp.zeros((*field.shape[:-1], 1))],
-        axis=-1,
-    )
+    pad_axes = ((0, 0),) * (diff.ndim - 1)
+    grad_bwd = jnp.pad(diff, (*pad_axes, (1, 0)))
+    grad_fwd = jnp.pad(diff, (*pad_axes, (0, 1)))
 
     grad = jnp.where(sigma_dot_full > 0, grad_bwd, grad_fwd)
     return -sigma_dot_full * grad
@@ -192,6 +250,88 @@ def _compute_omega_gaussian(sigma_dot, p_s, dp_s_dt, sigma_coord):
     sigma_dot_full = 0.5 * (sigma_dot[..., :-1] + sigma_dot[..., 1:])
     omega = sigma_full * dp_s_dt[..., None] + p_s[..., None] * sigma_dot_full
     return omega
+
+
+def _tracer_advection_gaussian(
+    q_grid: jnp.ndarray,
+    u_cos: jnp.ndarray,
+    v_cos: jnp.ndarray,
+    div: jnp.ndarray,
+    sigma_dot: jnp.ndarray,
+    sigma_coord: SigmaCoordinate | HybridSigmaPressureCoordinate,
+    grid: GaussianGrid,
+) -> jnp.ndarray:
+    """Compute advective tendency ``∂q/∂t = -v · ∇q - σ̇ · ∂q/∂σ`` on grid.
+
+    Uses the conservative + correction form (matching the T equation
+    in :func:`spectral_pe_tendencies`):
+
+        ∂q/∂t = -∇·(q v_h) + q · D - σ̇ · ∂q/∂σ
+
+    Spectral horizontal divergence via the pole-safe ``oc2`` / ``dmu``
+    operators; vertical advection via the existing upwind helper.
+
+    Parameters
+    ----------
+    q_grid : jax.Array, shape (n_lat, n_lon, nlev)
+        Tracer mixing ratio at full levels.
+    u_cos, v_cos : jax.Array, shape (n_lat, n_lon, nlev)
+        ``u·cos φ``, ``v·cos φ`` (pole-safe; matches the convention
+        used elsewhere in the spectral PE RHS).
+    div : jax.Array, shape (n_lat, n_lon, nlev)
+        Horizontal divergence ``∇·v_h`` on grid.
+    sigma_dot : jax.Array, shape (n_lat, n_lon, nlev+1)
+        Sigma-dot at half levels (only used for the σ-coord branch).
+        For hybrid coords this argument is ignored — the helper falls
+        back to the same pseudospectral horizontal pathway and the
+        caller drives vertical advection via
+        ``vertical_advection_hybrid``.
+    sigma_coord : SigmaCoordinate or HybridSigmaPressureCoordinate
+    grid : GaussianGrid
+
+    Returns
+    -------
+    jax.Array, shape (n_lat, n_lon, nlev)
+        Tracer tendency ``∂q/∂t`` on grid (no physics added).
+    """
+    a = grid.radius
+    im_over_a = 1j * grid.ms.astype(jnp.float64) / a
+    one_over_a = 1.0 / a
+
+    # Horizontal flux ``q·v_h`` with cos-φ weighting absorbed; pair the
+    # two analyses into a single oc2 / dmu batch (4 SH forwards → 2).
+    flux_x = q_grid * u_cos      # = q · u · cos φ
+    flux_y = q_grid * v_cos      # = q · v · cos φ
+    n_lat_q, n_lon_q, nlev_q = q_grid.shape
+    _flux_stack = jnp.stack([flux_x, flux_y], axis=-1)
+    _flux_flat = _flux_stack.reshape(n_lat_q, n_lon_q, nlev_q * 2)
+    # Iter-81: fused oc2+dmu shares the FFT + gather (was 2 separate
+    # forward transforms on the same input).
+    _oc2_raw, _dmu_raw = sh_analysis_oc2_dmu_3d(grid, _flux_flat)
+    _oc2_pair = _oc2_raw.reshape(-1, nlev_q, 2)
+    _dmu_pair = _dmu_raw.reshape(-1, nlev_q, 2)
+    flux_x_oc2 = _oc2_pair[..., 0]
+    flux_y_dmu = _dmu_pair[..., 1]
+
+    # Spectral horizontal divergence of ``(q·u, q·v)``.
+    flux_q_div_hat = im_over_a[:, None] * flux_x_oc2 - one_over_a * flux_y_dmu
+    flux_q_div_grid = sh_synthesis_3d(grid, flux_q_div_hat)
+
+    # Conservative advection + divergence-of-velocity correction:
+    #   -∇·(q v) + q · ∇·v  ≡  -v · ∇q       (advective form)
+    horiz_adv = -flux_q_div_grid + q_grid * div
+
+    # Vertical advection.  Hybrid coords use the mass-flux helper from
+    # the dycore; sigma coords use the existing upwind-stable helper.
+    if isinstance(sigma_coord, HybridSigmaPressureCoordinate):
+        # ``sigma_dot`` is ignored in this branch; the hybrid path is
+        # handled by the caller post-return (it has access to mass_flux
+        # and p_s).  Returning horizontal-only here keeps the helper
+        # non-conditional on ``sigma_dot``.
+        return horiz_adv
+
+    vert_adv = _vertical_advection_sigma_gaussian(q_grid, sigma_dot, sigma_coord)
+    return horiz_adv + vert_adv
 
 
 # =============================================================================
@@ -232,18 +372,48 @@ def spectral_pe_tendencies(
         _dealias_3d = None
 
     # --- 1. Transform to grid space ---
-    vor = sh_synthesis_3d(grid, state.vor_hat.data)   # (n_lat, n_lon, nlev)
-    div = sh_synthesis_3d(grid, state.div_hat.data)
-    T = sh_synthesis_3d(grid, state.T_hat.data)
+    # Merge the (vor, div, T) 3D batch with the (lnps, phis, im·lnps)
+    # 2D triplet via ``jnp.concatenate``: trailing axis = ``nlev*3 + 3``.
+    # ``sh_synthesis_3d`` treats any trailing axis as a passive batch,
+    # so different "level" sizes (nlev vs 1) combine cleanly into a
+    # single ``segment_sum`` + IRFFT.  6 SH syntheses → 1.  Loop 182
+    # extends Loop 181 (spectral ocean merge).
+    n_sh, nlev = state.vor_hat.data.shape
+    _hat_stack = jnp.stack(
+        [state.vor_hat.data, state.div_hat.data, state.T_hat.data],
+        axis=-1,
+    )  # (n_sh, nlev, 3)
+    _hat_flat = _hat_stack.reshape(n_sh, nlev * 3)
+    # Append the three 2D fields as single-level slots.  ``im·lnps_hat``
+    # is the spectral pre-multiply that yields ``∂(lnps)/∂λ`` on the
+    # grid post-synthesis (Loop 147 trick).
+    _ims_lnps = (1j * grid.ms) * state.lnps_hat.data  # (n_sh,)
+    _all_hat_flat = jnp.concatenate(
+        [
+            _hat_flat,
+            state.lnps_hat.data[:, jnp.newaxis],
+            state.phis_hat.data[:, jnp.newaxis],
+            _ims_lnps[:, jnp.newaxis],
+        ],
+        axis=-1,
+    )  # (n_sh, nlev*3 + 3)
+    _all_grid_flat = sh_synthesis_3d(grid, _all_hat_flat)
+    _grid_stack = _all_grid_flat[..., : nlev * 3].reshape(
+        grid.n_lat, grid.n_lon, nlev, 3,
+    )
+    vor = _grid_stack[..., 0]
+    div = _grid_stack[..., 1]
+    T = _grid_stack[..., 2]
     # Smooth positivity protection (C∞ differentiable, scaled softplus for ~0.07K bias)
     _sp_scale = 0.1
     T = T + _sp_scale * jax.nn.softplus((config.T_min - T) / _sp_scale)
-    lnps_raw = sh_synthesis(grid, state.lnps_hat.data)
+    lnps_raw = _all_grid_flat[..., nlev * 3]
+    phis = _all_grid_flat[..., nlev * 3 + 1]
+    _dfdlon_lnps = _all_grid_flat[..., nlev * 3 + 2]
     # Smooth two-sided clip with zero bias in interior:
     # softplus(lo - x) pulls up near lower bound; softplus(x - hi) pulls down near upper
     lnps = lnps_raw + jax.nn.softplus(_LNPS_MIN - lnps_raw) - jax.nn.softplus(lnps_raw - _LNPS_MAX)
     # (n_lat, n_lon)
-    phis = sh_synthesis(grid, state.phis_hat.data)
 
     # --- 2. Velocities ---
     u_cos, v_cos = uv_from_vordiv_3d(
@@ -280,20 +450,40 @@ def spectral_pe_tendencies(
 
     # --- 7. Vertical velocity ---
     if _hybrid:
-        mass_flux = compute_mass_flux_hybrid(div, p_s, sigma_coord)
+        # ``compute_mass_flux_hybrid`` returns the column-integrated
+        # mass-weighted divergence ``D_total_p`` alongside the mass
+        # flux — reuse it in step 8 instead of recomputing
+        # ``jnp.sum(div * dp, axis=-1)``.  Saves one cross-level
+        # collective per RK3 stage under level-sharding.
+        mass_flux, _D_total_p_full = compute_mass_flux_hybrid(
+            div, p_s, sigma_coord,
+        )
+        sigma_dot = None   # hybrid path uses ``mass_flux`` instead
+        _D_total_sigma_full = None
     else:
-        sigma_dot = _compute_sigma_dot_gaussian(div, sigma_coord)
+        # ``D_total_sigma_full`` is the (..., 1)-shaped column-sum that
+        # ``_compute_sigma_dot_gaussian`` already produced — reuse it
+        # below in the surface-pressure tendency rather than recomputing
+        # ``jnp.sum(div * dsigma, axis=-1)``.  Saves one cross-level
+        # collective per RK3 stage under level-sharding.
+        sigma_dot, _D_total_sigma_full = _compute_sigma_dot_gaussian(
+            div, sigma_coord,
+        )
+        _D_total_p_full = None
 
     # --- 8. Surface pressure tendency ---
     if _hybrid:
-        D_total_p = jnp.sum(div * dp, axis=-1)
+        # ``_D_total_p_full`` has trailing-axis size 1; drop the
+        # singleton to match the original ``jnp.sum(...)`` shape.
+        D_total_p = _D_total_p_full[..., 0]
         dlnps_dt_grid = -D_total_p / (p_s * sigma_coord.B_range)
         dp_s_dt_grid = p_s * dlnps_dt_grid
     else:
-        dsigma = sigma_coord.dsigma
         sigma_top = sigma_coord.sigma_half[0]
         sigma_range = 1.0 - sigma_top
-        D_total = jnp.sum(div * dsigma, axis=-1)
+        # ``D_total_sigma_full`` has trailing-axis size 1; drop the
+        # singleton to match the original ``jnp.sum(...)`` shape.
+        D_total = _D_total_sigma_full[..., 0]
         dlnps_dt_grid = -D_total / sigma_range
         dp_s_dt_grid = p_s * dlnps_dt_grid
 
@@ -302,20 +492,31 @@ def spectral_pe_tendencies(
     one_over_a = 1.0 / a
 
     # --- 10. Vorticity fluxes: (zeta+f)*u*cos, (zeta+f)*v*cos ---
+    # Batch the four SH analyses (oc2 on A_vor & B_vor, dmu on A_vor &
+    # B_vor) into two: stack ``(A_vor, B_vor)`` along a trailing axis
+    # and fold into the level dim so each SH-analysis variant runs once
+    # on a thicker (n_lat, n_lon, nlev*2) tensor.  Both
+    # ``sh_analysis_oc2_3d`` and ``sh_analysis_dmu_3d`` treat the
+    # trailing axis as a passive batch (FFT on lon, weighted sum over
+    # lat — neither touches the trailing axis), so the result is
+    # identical to two separate calls.  4 SH forwards → 2.
     A_vor = abs_vor * u_cos   # (n_lat, n_lon, nlev)
     B_vor = abs_vor * v_cos
+    _AB_stack = jnp.stack([A_vor, B_vor], axis=-1)  # (..., nlev, 2)
+    n_lat_t, n_lon_t, nlev_t, _ = _AB_stack.shape
+    _AB_flat = _AB_stack.reshape(n_lat_t, n_lon_t, nlev_t * 2)
+    # Iter-81: fused oc2+dmu shares the FFT + gather.
+    _oc2_AB_raw, _dmu_AB_raw = sh_analysis_oc2_dmu_3d(grid, _AB_flat)
+    _oc2_AB = _oc2_AB_raw.reshape(-1, nlev_t, 2)
+    _dmu_AB = _dmu_AB_raw.reshape(-1, nlev_t, 2)
+    _A_oc2, _B_oc2 = _oc2_AB[..., 0], _oc2_AB[..., 1]
+    _A_dmu, _B_dmu = _dmu_AB[..., 0], _dmu_AB[..., 1]
 
     # Spectral divergence of vorticity flux -> dvor/dt
-    flux_vor_div = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, A_vor)
-        - one_over_a * sh_analysis_dmu_3d(grid, B_vor)
-    )  # (n_sh, nlev)
+    flux_vor_div = im_over_a[:, None] * _A_oc2 - one_over_a * _B_dmu  # (n_sh, nlev)
 
     # Spectral curl of vorticity flux -> ddiv/dt contribution
-    flux_vor_curl = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, B_vor)
-        + one_over_a * sh_analysis_dmu_3d(grid, A_vor)
-    )
+    flux_vor_curl = im_over_a[:, None] * _B_oc2 + one_over_a * _A_dmu
 
     # --- 11. Pressure gradient force (correct form, NOT Bourke E-variable) ---
     # The PGF divergence is: -∇²(K + Φ) - ∇·(R_d·T·∇lnps)
@@ -330,10 +531,12 @@ def spectral_pe_tendencies(
     # (-R_d·lnps_0·∇²T') that is unstable when combined with
     # adiabatic heating.
     T_ref = config.si_T_ref
-    KPhi_hat = sh_analysis_oc2_3d(grid, KE_cos2) + sh_analysis_3d(grid, Phi)
 
-    # Compute ∇(lnps) on grid (needed for PGF correction and adiabatic)
-    dfdlon = sh_synthesis(grid, 1j * grid.ms * state.lnps_hat.data)
+    # Compute ∇(lnps) on grid (needed for PGF correction and adiabatic).
+    # ``dfdlon`` is reused from the batched (lnps, phis, im·lnps)
+    # synthesis above (Loop 147) — saves a separate ``sh_synthesis``
+    # call on the same input.
+    dfdlon = _dfdlon_lnps
     cos_lat_2d = jnp.clip(grid.cos_lat[:, None], _COS_LAT_MIN, None)
     dlnps_dx = dfdlon / (a * cos_lat_2d)
     dfdtheta_cos = _sh_synthesis_H(grid, state.lnps_hat.data)
@@ -352,19 +555,6 @@ def spectral_pe_tendencies(
         _pgf_dlnps_dy = _pgf_dlnps_dy * _hf
     pgf_Fx_cos = R_d * T_prime_pgf * _pgf_dlnps_dx * cos_lat_3d
     pgf_Fy_cos = R_d * T_prime_pgf * _pgf_dlnps_dy * cos_lat_3d
-    pgf_correction_hat = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, pgf_Fx_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, pgf_Fy_cos)
-    )
-
-    # --- 12. Horizontal tendencies ---
-    dvor_hat = -flux_vor_div
-    ddiv_hat = (
-        flux_vor_curl
-        - grid.lap[:, None] * KPhi_hat
-        - R_d * T_ref * grid.lap[:, None] * state.lnps_hat.data[:, None]
-        - pgf_correction_hat
-    )
 
     # --- 13. Temperature equation ---
     # Horizontal: dT/dt = -v·∇T = -div(T*v) + T*div(v)
@@ -378,22 +568,64 @@ def spectral_pe_tendencies(
     T_prime_u_cos = T_prime * u_cos
     T_prime_v_cos = T_prime * v_cos
 
+    # Batch SH oc2: PGF needs oc2(Fx), the T equation needs oc2(T'u),
+    # and ``KPhi_hat`` (used by the divergence Laplacian below) needs
+    # oc2(KE_cos2).  All three are oc2 forward analyses on
+    # ``(n_lat, n_lon, nlev)`` grid fields; stack along a trailing axis
+    # and fold into level so the oc2 SH runs once on a thicker
+    # ``(n_lat, n_lon, nlev*3)`` tensor — 3 separate oc2 forwards
+    # collapse to 1.  ``Phi`` still needs the *plain* sh_analysis_3d
+    # weights, so it stays in its own (single) call.  The dmu branch
+    # remains a 2-input batch (PGF Fy + T'v).
+    _pgfTK_oc2_stack = jnp.stack(
+        [pgf_Fx_cos, T_prime_u_cos, KE_cos2], axis=-1,
+    )  # (..., nlev, 3)
+    _pgfT_dmu_stack = jnp.stack([pgf_Fy_cos, T_prime_v_cos], axis=-1)
+    n_lat_p, n_lon_p, nlev_p, _ = _pgfTK_oc2_stack.shape
+    _oc2_triple = sh_analysis_oc2_3d(
+        grid, _pgfTK_oc2_stack.reshape(n_lat_p, n_lon_p, nlev_p * 3),
+    ).reshape(-1, nlev_p, 3)
+    _dmu_pair = sh_analysis_dmu_3d(
+        grid, _pgfT_dmu_stack.reshape(n_lat_p, n_lon_p, nlev_p * 2),
+    ).reshape(-1, nlev_p, 2)
+
+    pgf_correction_hat = (
+        im_over_a[:, None] * _oc2_triple[..., 0]
+        - one_over_a * _dmu_pair[..., 0]
+    )
+
+    # ``KPhi_hat`` consumes the third slice of the oc2 batch above
+    # (``oc2(KE_cos2)``) plus the *plain* SH analysis of geopotential
+    # ``Phi`` (different SH weight matrix → cannot share the oc2 call).
+    # The plain ``sh_analysis_3d(Phi)`` is batched with the temperature
+    # tendency analysis below (Loop 145), so we keep ``KPhi_oc2`` here
+    # and add the Phi contribution after the batch.
+    KPhi_oc2 = _oc2_triple[..., 2]
+
+    # --- 12. Horizontal tendencies ---
+    dvor_hat = -flux_vor_div
+    # Build ``ddiv_hat`` with the KE contribution to ``KPhi_hat``
+    # already in place; the geopotential ``Phi`` contribution is added
+    # after the batched sh_analysis_3d below (Loop 145).
+    ddiv_hat = (
+        flux_vor_curl
+        - grid.lap[:, None] * KPhi_oc2
+        - R_d * T_ref * grid.lap[:, None] * state.lnps_hat.data[:, None]
+        - pgf_correction_hat
+    )
+
     flux_T_div = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, T_prime_u_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, T_prime_v_cos)
+        im_over_a[:, None] * _oc2_triple[..., 1]
+        - one_over_a * _dmu_pair[..., 1]
     )
 
     T_prime_div = T_prime * div
-    T_prime_div_hat = sh_analysis_3d(grid, T_prime_div)
-
-    dT_hat = -flux_T_div + T_prime_div_hat
 
     # Vertical advection of T
     if _hybrid:
         vert_adv_T = vertical_advection_hybrid(T, mass_flux, p_s, sigma_coord)
     else:
         vert_adv_T = _vertical_advection_sigma_gaussian(T, sigma_dot, sigma_coord)
-    dT_hat = dT_hat + sh_analysis_3d(grid, vert_adv_T)
 
     # Adiabatic heating: kappa * T * omega / p
     if _hybrid:
@@ -410,7 +642,36 @@ def spectral_pe_tendencies(
         v_dot_grad_lnps = v_dot_grad_lnps * (sigma_coord.B_full * p_s[..., None] / p_adiab)
     adiabatic = adiabatic + kappa * T * v_dot_grad_lnps
 
-    dT_hat = dT_hat + sh_analysis_3d(grid, adiabatic)
+    # Combine the three grid-space contributions to dT/dt before the SH
+    # forward transform.  ``sh_analysis_3d`` is linear, so
+    # ``Σ_i sh_analysis_3d(f_i) = sh_analysis_3d(Σ_i f_i)`` — summing on
+    # grid first replaces three SH analyses (each one ``segment_sum`` +
+    # one FFT) with one.  ``vert_adv_T``, ``adiabatic``, and
+    # ``T_prime_div`` all share the (n_lat, n_lon, nlev) grid shape.
+    dT_grid_sum = T_prime_div + vert_adv_T + adiabatic
+
+    # Batch the dT-grid SH analysis with the geopotential ``Phi``
+    # analysis (Loop 145) AND the ``dlnps_dt_grid`` 2D analysis (Loop
+    # 184).  All three are plain ``sh_analysis_3d`` calls on grid
+    # fields with the same Legendre weight matrix; ``dlnps_dt_grid``
+    # is 2D (n_lat, n_lon) so it joins as a single-level slot via
+    # ``[..., None]`` + ``jnp.concatenate``.  Trailing axis =
+    # ``nlev*2 + 1``.  3 plain SH analyses → 1.
+    n_lat_T, n_lon_T, nlev_T = dT_grid_sum.shape
+    _Tphi_stack = jnp.stack([dT_grid_sum, Phi], axis=-1)
+    _Tphi_flat = _Tphi_stack.reshape(n_lat_T, n_lon_T, nlev_T * 2)
+    _Tphi_lnps_input = jnp.concatenate(
+        [_Tphi_flat, dlnps_dt_grid[..., jnp.newaxis]], axis=-1,
+    )  # (n_lat, n_lon, nlev*2 + 1)
+    _Tphi_lnps_hat = sh_analysis_3d(grid, _Tphi_lnps_input)
+    _Tphi_hat = _Tphi_lnps_hat[:, : nlev_T * 2].reshape(-1, nlev_T, 2)
+    _dT_grid_hat = _Tphi_hat[..., 0]
+    _Phi_hat = _Tphi_hat[..., 1]
+    _dlnps_hat_pre = _Tphi_lnps_hat[:, nlev_T * 2]
+    dT_hat = -flux_T_div + _dT_grid_hat
+    # Apply the deferred ``-∇²(Φ)`` contribution to the divergence
+    # tendency now that ``Phi_hat`` is available from the batch.
+    ddiv_hat = ddiv_hat - grid.lap[:, None] * _Phi_hat
 
     # --- 14. Vertical advection of momentum ---
     if _hybrid:
@@ -420,26 +681,35 @@ def spectral_pe_tendencies(
         vert_adv_u = _vertical_advection_sigma_gaussian(u, sigma_dot, sigma_coord)
         vert_adv_v = _vertical_advection_sigma_gaussian(v, sigma_dot, sigma_coord)
 
-    # Convert to spectral vor/div contributions
+    # Convert to spectral vor/div contributions.  Same batching pattern
+    # as the vorticity-flux SH analyses above: stack (vert_u_cos,
+    # vert_v_cos) along a trailing axis and run each SH variant once on
+    # a thicker (..., nlev*2) tensor — 4 SH forwards collapse to 2.
     vert_u_cos = vert_adv_u * grid.cos_lat[:, None, None]
     vert_v_cos = vert_adv_v * grid.cos_lat[:, None, None]
+    _vert_uv_stack = jnp.stack([vert_u_cos, vert_v_cos], axis=-1)
+    n_lat_v, n_lon_v, nlev_v, _ = _vert_uv_stack.shape
+    _vert_uv_flat = _vert_uv_stack.reshape(n_lat_v, n_lon_v, nlev_v * 2)
+    # Iter-81: fused oc2+dmu shares the FFT + gather.
+    _vert_oc2_raw, _vert_dmu_raw = sh_analysis_oc2_dmu_3d(grid, _vert_uv_flat)
+    _vert_oc2 = _vert_oc2_raw.reshape(-1, nlev_v, 2)
+    _vert_dmu = _vert_dmu_raw.reshape(-1, nlev_v, 2)
+    _vu_oc2, _vv_oc2 = _vert_oc2[..., 0], _vert_oc2[..., 1]
+    _vu_dmu, _vv_dmu = _vert_dmu[..., 0], _vert_dmu[..., 1]
 
     # curl(vert_adv) -> dvor_hat
-    vert_vor_tend = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, vert_v_cos)
-        + one_over_a * sh_analysis_dmu_3d(grid, vert_u_cos)
-    )
+    vert_vor_tend = im_over_a[:, None] * _vv_oc2 + one_over_a * _vu_dmu
     # div(vert_adv) -> ddiv_hat
-    vert_div_tend = (
-        im_over_a[:, None] * sh_analysis_oc2_3d(grid, vert_u_cos)
-        - one_over_a * sh_analysis_dmu_3d(grid, vert_v_cos)
-    )
+    vert_div_tend = im_over_a[:, None] * _vu_oc2 - one_over_a * _vv_dmu
 
     dvor_hat = dvor_hat + vert_vor_tend
     ddiv_hat = ddiv_hat + vert_div_tend
 
     # --- 15. Surface pressure tendency (spectral) ---
-    dlnps_hat = sh_analysis(grid, dlnps_dt_grid)
+    # ``_dlnps_hat_pre`` was already computed alongside (dT_grid_sum,
+    # Phi) via the batched ``sh_analysis_3d`` above (Loop 184); reuse
+    # it instead of issuing a standalone 2D ``sh_analysis``.
+    dlnps_hat = _dlnps_hat_pre
 
     # --- 16. Spectral hyperdiffusion ---
     hyperdiff_coeff = config.hyperdiff_coeff
@@ -447,15 +717,22 @@ def spectral_pe_tendencies(
         hyperdiff_coeff = hyperdiff_coeff * config.si_hyperdiff_boost
 
     if hyperdiff_coeff > 0 and not config.implicit_hyperdiff:
-        base_diff_vor = spectral_hyperdiffusion_3d(
-            grid, state.vor_hat.data, hyperdiff_coeff, config.hyperdiff_order,
-        )
-        base_diff_div = spectral_hyperdiffusion_3d(
-            grid, state.div_hat.data, hyperdiff_coeff, config.hyperdiff_order,
-        )
-        base_diff_T = spectral_hyperdiffusion_3d(
-            grid, state.T_hat.data, hyperdiff_coeff, config.hyperdiff_order,
-        )
+        # Batch the three pointwise spectral hyperdiffusions (vor, div,
+        # T) into one call by stacking the spectral coefficients along
+        # a trailing axis.  ``spectral_hyperdiffusion_3d`` is just
+        # ``damping[:, None] * coeffs`` — element-wise multiplication
+        # with the trailing axis as a passive batch — so 3 separate
+        # kernel launches collapse to 1 fused multiply on the thicker
+        # tensor.  Same-axis pattern as Loops 93 / 97 for the SH
+        # transforms above.
+        n_sh_h, nlev_h = state.vor_hat.data.shape
+        _vdT_hat = jnp.stack(
+            [state.vor_hat.data, state.div_hat.data, state.T_hat.data], axis=-1,
+        )  # (n_sh, nlev, 3)
+        base_diff_stack = spectral_hyperdiffusion_3d(
+            grid, _vdT_hat.reshape(n_sh_h, nlev_h * 3),
+            hyperdiff_coeff, config.hyperdiff_order,
+        ).reshape(n_sh_h, nlev_h, 3)
 
         if config.hyperdiff_pscale > 0:
             # Level-dependent scaling: (p_ref/p_k)^exponent
@@ -466,14 +743,12 @@ def spectral_pe_tendencies(
                 sigma_full = sigma_coord.sigma_full
             p_ref_sigma = sigma_full[-1]  # near-surface reference
             scale = (p_ref_sigma / jnp.clip(sigma_full, 1e-6, None)) ** config.hyperdiff_pscale
-            scale = scale[None, :]  # (1, nlev)
-            base_diff_vor = base_diff_vor * scale
-            base_diff_div = base_diff_div * scale
-            base_diff_T = base_diff_T * scale
+            # Apply scale on the level axis once for the stacked tensor.
+            base_diff_stack = base_diff_stack * scale[None, :, None]
 
-        dvor_hat = dvor_hat + base_diff_vor
-        ddiv_hat = ddiv_hat + base_diff_div
-        dT_hat = dT_hat + base_diff_T
+        dvor_hat = dvor_hat + base_diff_stack[..., 0]
+        ddiv_hat = ddiv_hat + base_diff_stack[..., 1]
+        dT_hat = dT_hat + base_diff_stack[..., 2]
 
     # --- 17. Add physics tendencies if provided ---
     if physics_tendency is not None:
@@ -489,13 +764,65 @@ def spectral_pe_tendencies(
         dT_hat = dT_hat * _dealias_3d
         dlnps_hat = dlnps_hat * _dealias
 
-    # Return as same pytree structure (for SSP-RK3)
+    # --- 18. Tracer tendencies ---
+    # When the input state carries a ``tracers`` dict the tendency
+    # must mirror the same pytree structure for SSP-RK ``tree.map``.
+    # Each tracer gets:
+    #   ∂q/∂t = -∇·(q v_h) + q · D - σ̇ · ∂q/∂σ + (physics tendency)
+    # where the spectral PE bridge / orchestrator may inject a grid
+    # tendency via ``physics_tendency.tracers[name]``.
+    #
+    # Tracer values are duck-typed: callers may store ``Field`` objects
+    # (with ``.data`` / ``.replace``) or raw JAX arrays.  We extract a
+    # raw array for the math, then wrap the result back into the same
+    # container so pytree leaves match.
+    if state.tracers is None:
+        tracers_tend = None
+    else:
+        is_hybrid = isinstance(sigma_coord, HybridSigmaPressureCoordinate)
+        tracers_tend = {}
+        for name, value in state.tracers.items():
+            q_grid = value.data if hasattr(value, "data") else value
+            # Compute advective tendency.  Sigma-coord branch handles
+            # vertical advection internally; hybrid path returns
+            # horizontal-only and we add vertical advection here using
+            # the same ``vertical_advection_hybrid`` helper used for
+            # T, u, v above (lines 604, 656-657).  Without this addition
+            # tracers had NO vertical transport on the hybrid path —
+            # iter-51 audit caught this CRITICAL bug.
+            dq_dt_grid = _tracer_advection_gaussian(
+                q_grid, u_cos, v_cos, div, sigma_dot,
+                sigma_coord, grid,
+            )
+            if is_hybrid:
+                vert_adv_q = vertical_advection_hybrid(
+                    q_grid, mass_flux, p_s, sigma_coord
+                )
+                dq_dt_grid = dq_dt_grid + vert_adv_q
+            # Add physics tendency for this tracer when the bridge
+            # provided one.
+            if (
+                physics_tendency is not None
+                and physics_tendency.tracers is not None
+                and name in physics_tendency.tracers
+            ):
+                phys_v = physics_tendency.tracers[name]
+                phys_grid = phys_v.data if hasattr(phys_v, "data") else phys_v
+                dq_dt_grid = dq_dt_grid + phys_grid
+            # Wrap back into the original container type so pytree
+            # leaves match.
+            if hasattr(value, "data") and hasattr(value, "replace"):
+                tracers_tend[name] = value.replace(data=dq_dt_grid)
+            else:
+                tracers_tend[name] = dq_dt_grid
+
     return SpectralHydrostaticState(
         vor_hat=state.vor_hat.replace(data=dvor_hat),
         div_hat=state.div_hat.replace(data=ddiv_hat),
         T_hat=state.T_hat.replace(data=dT_hat),
         lnps_hat=state.lnps_hat.replace(data=dlnps_hat),
         phis_hat=state.phis_hat.replace(data=jnp.zeros_like(state.phis_hat.data)),
+        tracers=tracers_tend,
     )
 
 
@@ -543,7 +870,7 @@ def _compute_sponge_factor(sigma_full, sponge_sigma, sponge_tau, dt):
     return jnp.exp(-damping_rate * dt)
 
 
-def _apply_sponge_filter(state, sponge_factor, ms):
+def _apply_sponge_filter(state, sponge_factor, sponge_factor_T):
     """Apply multiplicative sponge damping to vor, div, and T' at top levels.
 
     Damps vor and div toward zero.  Damps T perturbations (m != 0 modes)
@@ -555,19 +882,17 @@ def _apply_sponge_filter(state, sponge_factor, ms):
     state : SpectralHydrostaticState
     sponge_factor : jax.Array, shape (nlev,)
         Per-level damping factors in [0, 1].
-    ms : jax.Array, shape (n_sh,)
-        Zonal wavenumber for each spectral coefficient.
+    sponge_factor_T : jax.Array, shape (n_sh, nlev)
+        Per-mode T damping factor.  Iter-70: precomputed in
+        ``_ensure_sponge_factor`` to avoid the per-step
+        ``jnp.where(is_zonal, 1.0, sf)`` cost.  Equals 1.0 at m=0
+        and ``sponge_factor[None,:]`` elsewhere.
     """
     sf = sponge_factor[None, :]  # (1, nlev)
 
     vor_hat_damped = state.vor_hat.data * sf
     div_hat_damped = state.div_hat.data * sf
-
-    # For temperature, only damp non-zonal modes (m != 0) to preserve
-    # the mean thermal stratification
-    is_zonal = (ms == 0)[:, None]  # (n_sh, 1) bool
-    T_sf = jnp.where(is_zonal, 1.0, sf)  # no damping for m=0
-    T_hat_damped = state.T_hat.data * T_sf
+    T_hat_damped = state.T_hat.data * sponge_factor_T
 
     return state._replace(
         vor_hat=state.vor_hat.replace(data=vor_hat_damped),
@@ -594,6 +919,79 @@ def _apply_spectral_filter_to_state(state, spectral_filter):
         T_hat=state.T_hat.replace(data=state.T_hat.data * sf_3d),
         lnps_hat=state.lnps_hat.replace(data=state.lnps_hat.data * sf_2d),
     )
+
+
+def _apply_filter_to_tracers(tracers, multiplicative_filter, grid):
+    """Apply a per-SH-mode multiplicative filter to grid-space tracers.
+
+    Tracers are stored on the model grid (shape ``(n_lat, n_lon, nlev)``)
+    in :class:`SpectralHydrostaticState`, so a single SH round-trip per
+    tracer per step is required: ``q_grid → q_hat → q_hat * filter →
+    q_grid_filtered``.  The same diagonal filter is reused for the
+    spectral exponential (de-aliasing) post-step damping AND the
+    implicit hyperdiffusion damping — both are pure pointwise
+    multiplications in spectral space, so they collapse into one filter
+    applied via one transform pair.
+
+    Parameters
+    ----------
+    tracers : dict[str, Field | jax.Array] or None
+        Tracer dict with grid-space values (shape ``(n_lat, n_lon, nlev)``).
+        ``Field`` and raw-array values are duck-typed.  ``None`` is a
+        no-op (returns ``None``).
+    multiplicative_filter : jax.Array, shape (n_sh,)
+        Diagonal filter per spherical-harmonic coefficient.  Typically a
+        product of ``spectral_filter`` and ``exp(-nu · eig · dt_eff)``.
+    grid : GaussianGrid
+
+    Returns
+    -------
+    dict or None
+        Filtered tracers, container-type-preserving (Field stays Field,
+        raw stays raw).
+    """
+    if tracers is None or multiplicative_filter is None:
+        return tracers
+    sf_3d = multiplicative_filter[:, None]  # (n_sh, 1) — broadcasts over level
+    names = list(tracers.keys())
+    if not names:
+        return tracers
+    # Iter-85: stack all tracers along the trailing axis and do ONE
+    # SH analysis + ONE multiply + ONE SH synthesis.  Both
+    # ``sh_analysis_3d`` and ``sh_synthesis_3d`` treat any trailing
+    # axis as a passive batch — so 5 tracers (q_v, q_c, q_r, q_i, q_s)
+    # collapse from 10 SH transforms (5 forward + 5 inverse) to 2.
+    sample = tracers[names[0]]
+    sample_data = sample.data if hasattr(sample, "data") else sample
+    n_lat_q, n_lon_q, nlev_q = sample_data.shape
+    n_tracers = len(names)
+    # Track each tracer's dtype so we can cast back per-tracer at the end.
+    raw = [
+        (tracers[n].data if hasattr(tracers[n], "data") else tracers[n])
+        for n in names
+    ]
+    # Promote all to the highest float dtype to avoid silent precision loss
+    # in the SH transform (SH transforms internally promote to complex128).
+    target_dtype = jnp.result_type(*[r.dtype for r in raw])
+    stacked = jnp.stack(
+        [r.astype(target_dtype) for r in raw], axis=-1,
+    )  # (n_lat, n_lon, nlev, n_tracers)
+    flat = stacked.reshape(n_lat_q, n_lon_q, nlev_q * n_tracers)
+    hat_flat = sh_analysis_3d(grid, flat)  # (n_sh, nlev * n_tracers)
+    hat_filtered_flat = hat_flat * sf_3d
+    grid_filtered_flat = sh_synthesis_3d(grid, hat_filtered_flat)
+    grid_filtered = grid_filtered_flat.reshape(
+        n_lat_q, n_lon_q, nlev_q, n_tracers,
+    )
+    out = {}
+    for i, name in enumerate(names):
+        value = tracers[name]
+        out_data = grid_filtered[..., i]
+        if hasattr(value, "data") and hasattr(value, "replace"):
+            out[name] = value.replace(data=out_data.astype(value.data.dtype))
+        else:
+            out[name] = out_data.astype(value.dtype)
+    return out
 
 
 # =============================================================================
@@ -629,7 +1027,10 @@ class SpectralPrimitiveEquationModel:
         try:
             from mpi4py import MPI
             _mpi_world = MPI.COMM_WORLD.Get_size()
-        except ImportError:
+        except (ImportError, RuntimeError, OSError):
+            # mpi4py installed but libmpi missing/incompatible → assume
+            # single-rank. Distributed launches will surface real MPI
+            # errors elsewhere.
             pass
         if _mpi_world > 1:
             raise RuntimeError(
@@ -671,12 +1072,25 @@ class SpectralPrimitiveEquationModel:
         self._si_data_lf = None  # SI data for leapfrog (dt_eff = 2*dt)
         self._si_dt_lf = None
         self._sponge_factor = None
+        self._sponge_factor_T = None  # iter-70: precomputed (n_sh, nlev) T factor
         self._sponge_dt = None
         # Leapfrog state management
         self._state_prev = None  # Previous time level for leapfrog
         # Precompute implicit hyperdiffusion filter (unconditionally stable)
         self._hyperdiff_filter = None
+        self._hyperdiff_filter_div = None  # iter-69: precomputed hf**2
         self._hyperdiff_filter_dt = None
+        # Tracer filter (combined spectral + implicit hyperdiff) is
+        # precomputed lazily because it depends on dt.  ``None`` means
+        # neither knob is active and we skip the SH round-trip on
+        # tracers entirely.
+        self._tracer_filter = None
+        self._tracer_filter_dt = None
+        # Iter-3: anchored mass target.  Lazily filled by ``step()`` on
+        # first call when ``fix_mass`` and ``anchor_mass_to_initial`` are
+        # both set.  Stored in fp64 so per-step corrections aren't
+        # contaminated by storage round-trips.
+        self._target_mass = None
 
         if legoesm_config is not None:
             allow_unsupported_backend = bool(
@@ -686,7 +1100,6 @@ class SpectralPrimitiveEquationModel:
             )
 
         # --- Metal detection MUST happen before any float64 computation ---
-        from legoesm.runtime.backend import get_backend, check_spectral_backend
         backend = get_backend()
         if backend == "metal":
             self._use_cpu_for_spectral = True
@@ -720,8 +1133,6 @@ class SpectralPrimitiveEquationModel:
         if not self.config.semi_implicit:
             return
 
-        from legoesm.timestepping.semi_implicit import precompute_si_matrices
-
         dt_si = float(dt) / float(self.config.si_substeps)
         if self._si_data is None or self._si_dt != dt_si:
             self._si_data = precompute_si_matrices(
@@ -733,7 +1144,14 @@ class SpectralPrimitiveEquationModel:
             self._si_dt = dt_si
 
     def _ensure_sponge_factor(self, dt: float):
-        """Lazily precompute sponge damping factors and refresh when dt changes."""
+        """Lazily precompute sponge damping factors and refresh when dt changes.
+
+        Iter-70: precompute the per-mode T sponge factor as a single
+        ``(n_sh, nlev)`` array (zonal m=0 modes preserved at 1.0,
+        non-zonal modes get the sponge factor).  Avoids the per-step
+        ``jnp.where(is_zonal, 1.0, sf)`` op in
+        ``_apply_sponge_filter``.
+        """
         if self.config.sponge_tau <= 0:
             return
         if self._sponge_factor is not None and self._sponge_dt == dt:
@@ -748,10 +1166,17 @@ class SpectralPrimitiveEquationModel:
         self._sponge_factor = _compute_sponge_factor(
             sigma_full, self.config.sponge_sigma, self.config.sponge_tau, dt,
         )
+        # Per-(n_sh, nlev) factor for T: 1.0 at m=0, sf elsewhere.
+        _is_zonal = (self.grid.ms == 0)[:, None]  # (n_sh, 1) bool
+        self._sponge_factor_T = jnp.where(
+            _is_zonal, 1.0, self._sponge_factor[None, :],
+        )  # (n_sh, nlev)
         self._sponge_dt = dt
 
     def _ensure_hyperdiff_filter(self, dt: float):
-        """Lazily precompute implicit hyperdiffusion filter."""
+        """Lazily precompute implicit hyperdiffusion filter and the
+        ``hf**2`` divergence variant.
+        """
         if not self.config.implicit_hyperdiff or self.config.hyperdiff_coeff <= 0:
             return
         if self._hyperdiff_filter is not None and self._hyperdiff_filter_dt == dt:
@@ -765,6 +1190,10 @@ class SpectralPrimitiveEquationModel:
         dt_eff = 2.0 * dt if 'leapfrog' in integrator else dt
         # Multiplicative filter: exp(-nu * eig * dt_eff)
         self._hyperdiff_filter = jnp.exp(-nu * eig * dt_eff)
+        # Iter-69: precompute the squared variant used for divergence
+        # (``div`` gets 2× stronger damping than ``vor`` / ``T``).
+        # Avoids the per-step ``hf ** 2`` op and broadcasts cleanly.
+        self._hyperdiff_filter_div = self._hyperdiff_filter ** 2
         self._hyperdiff_filter_dt = dt
 
     def _apply_implicit_hyperdiff(self, state):
@@ -776,10 +1205,8 @@ class SpectralPrimitiveEquationModel:
         """
         if self._hyperdiff_filter is None:
             return state
-        hf = self._hyperdiff_filter
-        hf_3d = hf[:, None]  # (n_sh, 1) for 3D fields
-        hf_div = hf ** 2  # stronger damping for divergence
-        hf_div_3d = hf_div[:, None]
+        hf_3d = self._hyperdiff_filter[:, None]  # (n_sh, 1) for 3D fields
+        hf_div_3d = self._hyperdiff_filter_div[:, None]
         return state._replace(
             vor_hat=state.vor_hat.replace(data=state.vor_hat.data * hf_3d),
             div_hat=state.div_hat.replace(data=state.div_hat.data * hf_div_3d),
@@ -787,10 +1214,66 @@ class SpectralPrimitiveEquationModel:
             # lnps and phis are NOT diffused (mass conservation)
         )
 
+    def _ensure_tracer_filter(self, dt: float):
+        """Lazily precompute the combined post-step filter applied to
+        tracers in grid space.
+
+        The filter is the product of:
+
+        * the spectral exponential filter (de-aliasing) — same factor
+          used by ``_apply_spectral_filter_to_state`` for vor/div/T;
+        * the implicit hyperdiffusion factor ``exp(-nu · eig · dt_eff)``
+          — same eigenvalue used by ``_ensure_hyperdiff_filter``.
+
+        Both are diagonal in spectral space, so we collapse them into a
+        single ``(n_sh,)`` multiplier applied per SH mode via one SH
+        round-trip per tracer per step (see
+        :func:`_apply_filter_to_tracers`).
+
+        Effective time step matches the integrator: ``dt_eff = 2·dt``
+        for leapfrog (which spans 2 model dt per step), ``dt_eff = dt``
+        for SSP-RK and semi-implicit RK.
+
+        Stored as ``self._tracer_filter`` (or ``None`` when neither knob
+        is active — the apply pathway then short-circuits).
+        """
+        if self._tracer_filter is not None and self._tracer_filter_dt == dt:
+            return
+        components = []
+        if self._spectral_filter is not None:
+            components.append(self._spectral_filter)
+        if self.config.hyperdiff_coeff > 0:
+            nu = self.config.hyperdiff_coeff
+            order = self.config.hyperdiff_order
+            eig = (
+                self.grid.ls * (self.grid.ls + 1) / self.grid.radius ** 2
+            ) ** order
+            integrator = self.config.time_integrator.lower()
+            dt_eff = 2.0 * dt if 'leapfrog' in integrator else dt
+            components.append(jnp.exp(-nu * eig * dt_eff))
+        if not components:
+            self._tracer_filter = None
+            self._tracer_filter_dt = dt
+            return
+        combined = components[0]
+        for c in components[1:]:
+            combined = combined * c
+        self._tracer_filter = combined
+        self._tracer_filter_dt = dt
+
+    def _apply_tracer_filter(self, state):
+        """Apply the precomputed tracer filter to ``state.tracers`` (no-op
+        when filter or tracers are absent)."""
+        if self._tracer_filter is None or state.tracers is None:
+            return state
+        return state._replace(
+            tracers=_apply_filter_to_tracers(
+                state.tracers, self._tracer_filter, self.grid,
+            )
+        )
+
     def _ensure_si_data_leapfrog(self, dt: float):
         """Precompute SI matrices for leapfrog (dt_eff = 2*dt)."""
-        from legoesm.timestepping.semi_implicit import precompute_si_matrices
-
         dt_eff = 2.0 * float(dt)
         if self._si_data_lf is None or self._si_dt_lf != dt_eff:
             self._si_data_lf = precompute_si_matrices(
@@ -805,21 +1288,38 @@ class SpectralPrimitiveEquationModel:
         """Reset leapfrog state (next step will use Euler startup)."""
         self._state_prev = None
 
-    def _do_step(self, state, dt, tendency_fn):
-        """Core step: explicit RK3/RK54 or semi-implicit RK3, then sponge."""
+    def _do_step(self, state, dt, tendency_fn,
+                 si_data=None, sponge_factor=None):
+        """Core step: explicit RK3/RK54 or semi-implicit RK3, then sponge.
+
+        ``si_data`` and ``sponge_factor`` are passed as **dynamic args**
+        (not read off ``self``).  This is required because :func:`step`
+        wraps this in a ``@jax.jit`` with ``static_argnums=(0, ...)`` —
+        JAX caches on object identity for ``self``, which means a
+        Python-level mutation of ``self._si_data`` after a dt change
+        is invisible to the cache and the compiled function would
+        keep using stale matrices (verified: ``maxdiff_after_dt_change_vs_fresh
+        = 2.45e-05`` at dt=300 → 600).  Threading them as dynamic
+        inputs lets XLA capture them as runtime tensors without
+        recompilation.
+        """
+        if si_data is None:
+            si_data = self._si_data
+        if sponge_factor is None:
+            sponge_factor = self._sponge_factor
+
         if self.config.semi_implicit:
-            from legoesm.timestepping.semi_implicit import ssp_rk3_step_si
             n_substeps = int(self.config.si_substeps)
             dt_si = dt / float(n_substeps)
 
             if n_substeps == 1:
                 result = ssp_rk3_step_si(
-                    state, tendency_fn, dt_si, self._si_data, self.grid,
+                    state, tendency_fn, dt_si, si_data, self.grid,
                 )
             else:
                 def si_substep(_, s):
                     return ssp_rk3_step_si(
-                        s, tendency_fn, dt_si, self._si_data, self.grid,
+                        s, tendency_fn, dt_si, si_data, self.grid,
                     )
                 result = jax.lax.fori_loop(0, n_substeps, si_substep, state)
         else:
@@ -829,61 +1329,188 @@ class SpectralPrimitiveEquationModel:
 
         # Apply implicit sponge filter (unconditionally stable)
         if self._sponge_factor is not None:
-            result = _apply_sponge_filter(result, self._sponge_factor, self.grid.ms)
+            result = _apply_sponge_filter(result, self._sponge_factor, self._sponge_factor_T)
 
         # Apply spectral filter (damps highest wavenumbers)
         if self._spectral_filter is not None:
             result = _apply_spectral_filter_to_state(result, self._spectral_filter)
 
+        # Apply combined spectral-filter + implicit-hyperdiff to tracers
+        # via one SH round-trip per tracer (no-op when neither knob is
+        # active or ``state.tracers is None``).
+        result = self._apply_tracer_filter(result)
+
+        # Iter-3: anchored-mass fixer.  ``_target_mass`` is None when
+        # disabled (``fix_mass`` off or ``anchor_mass_to_initial`` off)
+        # OR on the very first call (snapshot happens in ``step()``
+        # OUTSIDE this JIT).  When set, it's a fp64 scalar that JIT
+        # captures as a closure constant — same pattern as cubed-sphere
+        # ``self._target_mass`` access in ``_step_fv3``.
+        if (self.config.fix_mass
+                and self.config.anchor_mass_to_initial
+                and self._target_mass is not None):
+            result = self._apply_mass_fixer(result)
+
         return result
 
-    def step(self, state: SpectralHydrostaticState, dt: float, physics_fn=None) -> SpectralHydrostaticState:
+    def _apply_mass_fixer(self, state):
+        """Rescale ``lnps_hat[0]`` so the global integral matches ``_target_mass``.
+
+        With the spectral basis ``(4π)``-normalised on the unit sphere
+        (``sh_analysis(ones)[0] = sqrt(4π)``), adding a constant ``Δ`` to
+        ``lnps`` in physical space is equivalent to adding ``Δ·sqrt(4π)``
+        to ``lnps_hat[0]``.  We solve ``Δ = log(target / current)`` so
+        that ``exp(lnps + Δ) = (target/current) · exp(lnps)`` and the
+        integral is restored multiplicatively (gradients of ``p_s`` are
+        preserved exactly — same property as the cubed-sphere/lat-lon
+        ``fix_ps_mass`` additive uniform correction, just expressed in
+        log-space because ``lnps`` is the prognostic variable).
+        """
+        lnps_grid = sh_synthesis(self.grid, state.lnps_hat.data)
+        p_s_grid = jnp.exp(lnps_grid)
+        acc = jnp.float64
+        mass_now = jnp.sum(
+            p_s_grid.astype(acc) * self.grid.grid_area.astype(acc),
+        )
+        log_scale = jnp.log(self._target_mass / mass_now)
+        # sqrt(4π) is the (0,0) coefficient of a constant=1 field under
+        # the (4π)-normalised real-SH convention this module uses.
+        sqrt_4pi = jnp.sqrt(jnp.asarray(4.0 * jnp.pi, dtype=acc))
+        lnps_hat_new = state.lnps_hat.data.at[0].add(
+            (log_scale * sqrt_4pi).astype(state.lnps_hat.data.dtype),
+        )
+        return state._replace(
+            lnps_hat=state.lnps_hat.replace(data=lnps_hat_new),
+        )
+
+    def _compute_initial_mass(self, state):
+        """Compute total dry mass ``∫ p_s dA`` in fp64 from a spectral state."""
+        lnps_grid = sh_synthesis(self.grid, state.lnps_hat.data)
+        p_s_grid = jnp.exp(lnps_grid)
+        return jnp.sum(
+            p_s_grid.astype(jnp.float64)
+            * self.grid.grid_area.astype(jnp.float64),
+        )
+
+    def compute_mass(self, state) -> jax.Array:
+        """Public alias of ``_compute_initial_mass`` (iter-22).
+
+        Provides the same name as the cube / lat-lon / MPAS PE
+        ``compute_mass(state)`` helpers — single API across all four
+        hydrostatic dycores.
+        """
+        return self._compute_initial_mass(state)
+
+    def reset_target_mass(self) -> None:
+        """Clear the anchored mass target (iter-18; see iter-4 SW twin)."""
+        self._target_mass = None
+
+    def set_target_mass(self, target_mass) -> None:
+        """Explicitly set the anchored mass target (iter-19)."""
+        self._target_mass = target_mass
+
+    def step(
+        self,
+        state: SpectralHydrostaticState,
+        dt: float,
+        physics_fn=None,
+        forcing_data=None,
+    ) -> SpectralHydrostaticState:
         """Advance one time step, optionally with physics forcing.
 
         Dispatches to leapfrog+SI or SSP-RK3 based on config.time_integrator.
+
+        Parameters
+        ----------
+        forcing_data : pytree of jax.Array, optional
+            Dynamic forcing data passed as a TRACED argument to
+            ``physics_fn(state, grid, sigma_coord, forcing_data)``.
+            When provided, the JIT cache is keyed by physics_fn
+            identity (static) but the forcing data is treated as a
+            dynamic argument — JAX retraces only if the pytree
+            *structure* (not values) changes.  This avoids the
+            stale-day pathology of closure-captured Python state
+            (audit iter-74).  When None, falls back to the legacy
+            3-arg ``physics_fn(state, grid, sigma_coord)`` API for
+            backward compatibility.
         """
+        # Iter-3: anchor mass on first call (outside JIT so the fp64
+        # scalar becomes a closure constant).  Mirrors
+        # ``primitive_eq_cdgrid.step()`` precompute pattern.
+        if (self.config.fix_mass
+                and self.config.anchor_mass_to_initial
+                and self._target_mass is None):
+            self._target_mass = self._compute_initial_mass(state)
+
         integrator = self.config.time_integrator.lower()
         if integrator in ("leapfrog", "leapfrog_si"):
-            return self._leapfrog_step(state, dt, physics_fn)
+            return self._leapfrog_step(state, dt, physics_fn, forcing_data)
 
         self._ensure_si_data(dt)
         self._ensure_sponge_factor(dt)
+        self._ensure_tracer_filter(dt)
+        if forcing_data is not None:
+            return self._step_with_forcing_jit(
+                state, dt, physics_fn, forcing_data,
+            )
         return self._step_jit(state, dt, physics_fn)
 
-    def _leapfrog_step(self, state, dt, physics_fn=None):
+    def _leapfrog_step(self, state, dt, physics_fn=None, forcing_data=None):
         """Leapfrog + SI step with Robert-Asselin filter + implicit diffusion.
 
         First call: forward Euler + SI (startup).
         Subsequent calls: leapfrog + SI + RA filter + implicit hyperdiffusion.
+
+        ``forcing_data`` is threaded through to physics_fn as a TRACED
+        pytree argument when provided (iter-95 extension to the iter-92
+        forcing_data API).
         """
         self._ensure_sponge_factor(dt)
         self._ensure_hyperdiff_filter(dt)
+        self._ensure_tracer_filter(dt)
 
         if self._state_prev is None:
             # --- First step: forward Euler + SI ---
             self._ensure_si_data(dt)  # SI matrices for dt
             # Also precompute leapfrog SI for next step (avoids stale jit)
             self._ensure_si_data_leapfrog(dt)
-            result = self._euler_si_jit(state, dt, physics_fn)
+            if forcing_data is not None:
+                result = self._euler_si_with_forcing_jit(
+                    state, dt, physics_fn, forcing_data,
+                )
+            else:
+                result = self._euler_si_jit(state, dt, physics_fn)
             # Apply sponge and spectral filter
             if self._sponge_factor is not None:
-                result = _apply_sponge_filter(result, self._sponge_factor, self.grid.ms)
+                result = _apply_sponge_filter(result, self._sponge_factor, self._sponge_factor_T)
             if self._spectral_filter is not None:
                 result = _apply_spectral_filter_to_state(result, self._spectral_filter)
             # Implicit hyperdiffusion (unconditionally stable)
             result = self._apply_implicit_hyperdiff(result)
+            # Same combined filter applied to grid-space tracers
+            result = self._apply_tracer_filter(result)
+            # Iter-3: anchored mass fixer (leapfrog Euler-startup branch).
+            if (self.config.fix_mass
+                    and self.config.anchor_mass_to_initial
+                    and self._target_mass is not None):
+                result = self._apply_mass_fixer(result)
             self._state_prev = state
             return result
         else:
             # --- Leapfrog + SI ---
             self._ensure_si_data_leapfrog(dt)
-            state_np1 = self._leapfrog_si_jit(
-                state, self._state_prev, dt, physics_fn,
-            )
+            if forcing_data is not None:
+                state_np1 = self._leapfrog_si_with_forcing_jit(
+                    state, self._state_prev, dt, physics_fn, forcing_data,
+                )
+            else:
+                state_np1 = self._leapfrog_si_jit(
+                    state, self._state_prev, dt, physics_fn,
+                )
             # Apply sponge and spectral filter
             if self._sponge_factor is not None:
                 state_np1 = _apply_sponge_filter(
-                    state_np1, self._sponge_factor, self.grid.ms,
+                    state_np1, self._sponge_factor, self._sponge_factor_T,
                 )
             if self._spectral_filter is not None:
                 state_np1 = _apply_spectral_filter_to_state(
@@ -891,16 +1518,26 @@ class SpectralPrimitiveEquationModel:
                 )
             # Implicit hyperdiffusion (unconditionally stable with leapfrog)
             state_np1 = self._apply_implicit_hyperdiff(state_np1)
-            # Robert-Asselin filter on time-n state
+            # Same combined filter applied to grid-space tracers
+            state_np1 = self._apply_tracer_filter(state_np1)
+            # Robert-Asselin-Williams filter on time-n / time-(n+1) states.
             gamma = self.config.robert_asselin_coeff
+            alpha = self.config.robert_asselin_alpha
             if gamma > 0:
-                from legoesm.timestepping.semi_implicit import robert_asselin_filter
                 state_n_filtered, state_np1_filtered = robert_asselin_filter(
-                    self._state_prev, state, state_np1, gamma,
+                    self._state_prev, state, state_np1, gamma, alpha=alpha,
                 )
             else:
                 state_n_filtered = state
                 state_np1_filtered = state_np1
+            # Iter-3: anchored mass fixer (leapfrog body).  Applied to
+            # the time-(n+1) state AFTER the Robert-Asselin filter so
+            # the computational mode is damped first, then mass is
+            # restored exactly to the initial integral.
+            if (self.config.fix_mass
+                    and self.config.anchor_mass_to_initial
+                    and self._target_mass is not None):
+                state_np1_filtered = self._apply_mass_fixer(state_np1_filtered)
             self._state_prev = state_n_filtered
             return state_np1_filtered
 
@@ -917,7 +1554,7 @@ class SpectralPrimitiveEquationModel:
         """Backward-compatible wrapper for _leapfrog_step() with physics."""
         return self._leapfrog_step(state, dt, physics_fn=physics_fn)
 
-    @partial(jax.jit, static_argnums=(0, 2, 3))
+    @partial(jax.jit, static_argnums=(0, 3))
     def _euler_si_jit(self, state, dt, physics_fn=None):
         """JIT-compiled Euler + SI step (leapfrog startup), optionally with physics."""
         def tendency_fn(s):
@@ -931,7 +1568,28 @@ class SpectralPrimitiveEquationModel:
         from legoesm.timestepping.semi_implicit import euler_si_step
         return euler_si_step(state, tendency_fn, dt, self._si_data, self.grid)
 
-    @partial(jax.jit, static_argnums=(0, 3, 4))
+    @partial(jax.jit, static_argnums=(0, 3))
+    def _euler_si_with_forcing_jit(self, state, dt, physics_fn, forcing_data):
+        """Iter-95: Euler + SI step with TRACED forcing_data threading.
+
+        ``static_argnums=(0, 3)`` matches main's CPU/GPU scaling change
+        (PR #232): only ``self`` and ``physics_fn`` are static; ``dt``
+        and ``forcing_data`` are both traced.  This is required for
+        multi-device sharding compatibility.
+        """
+        def tendency_fn(s):
+            phys = None
+            if physics_fn is not None:
+                _phys_result = physics_fn(
+                    s, self.grid, self.sigma_coord, forcing_data,
+                )
+                phys = _phys_result[0] if type(_phys_result) is tuple else _phys_result
+            return spectral_pe_tendencies(
+                s, self.grid, self.sigma_coord, self.config, phys,
+            )
+        return euler_si_step(state, tendency_fn, dt, self._si_data, self.grid)
+
+    @partial(jax.jit, static_argnums=(0, 4))
     def _leapfrog_si_jit(self, state_n, state_nm1, dt, physics_fn=None):
         """JIT-compiled leapfrog + SI step, optionally with physics."""
         def tendency_fn(s):
@@ -942,19 +1600,56 @@ class SpectralPrimitiveEquationModel:
             return spectral_pe_tendencies(
                 s, self.grid, self.sigma_coord, self.config, phys,
             )
-        from legoesm.timestepping.semi_implicit import leapfrog_si_step
         return leapfrog_si_step(
             state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
         )
 
-    @partial(jax.jit, static_argnums=(0, 2, 3))
+    @partial(jax.jit, static_argnums=(0, 4))
+    def _leapfrog_si_with_forcing_jit(
+        self, state_n, state_nm1, dt, physics_fn, forcing_data,
+    ):
+        """Iter-95: leapfrog + SI step with TRACED forcing_data threading.
+
+        ``static_argnums=(0, 4)`` matches main's CPU/GPU scaling
+        pattern: only ``self`` and ``physics_fn`` static; ``dt``
+        and ``forcing_data`` traced.
+        """
+        def tendency_fn(s):
+            phys = None
+            if physics_fn is not None:
+                _phys_result = physics_fn(
+                    s, self.grid, self.sigma_coord, forcing_data,
+                )
+                phys = _phys_result[0] if type(_phys_result) is tuple else _phys_result
+            return spectral_pe_tendencies(
+                s, self.grid, self.sigma_coord, self.config, phys,
+            )
+        return leapfrog_si_step(
+            state_n, state_nm1, tendency_fn, dt, self._si_data_lf, self.grid,
+        )
+
+    @partial(jax.jit, static_argnums=(0, 3))
     def _step_jit(
         self,
         state: SpectralHydrostaticState,
         dt: float,
         physics_fn=None,
     ) -> SpectralHydrostaticState:
-        """JIT-compiled inner step (SI matrices already precomputed), optionally with physics."""
+        """JIT-compiled inner step (SI matrices already precomputed), optionally with physics.
+
+        ``dt`` is intentionally a **static** arg.  Iter-211 measured a
+        ~60 % throughput regression on spectral T21 GPU when ``dt`` was
+        made traced (479 → 284 sps with ``--scan-steps=24``): with
+        ``dt`` static the SI matrices, sponge factors and hyperdiff
+        filters constant-fold into the compiled program, but a traced
+        ``dt`` forces a more general program that pays an extra
+        broadcast at every reference.  My iter-5 ``si_data``/
+        ``sponge_factor`` dynamic-arg variant is reverted here in favour
+        of main's measured perf choice; the dt-stale-matrix risk is
+        mitigated by ``_ensure_si_data`` / ``_ensure_sponge_factor``
+        recomputing on every ``step()`` entry — the JIT cache is keyed
+        on ``id(self)`` and the dt value, so a dt change re-traces.
+        """
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:
@@ -976,14 +1671,67 @@ class SpectralPrimitiveEquationModel:
     _leapfrog_si_physics_jit = _leapfrog_si_jit
     _step_with_physics_jit = _step_jit
 
-    @partial(jax.jit, static_argnums=(0, 2, 3))
+    @partial(jax.jit, static_argnums=(0, 3))
+    def _step_with_forcing_jit(
+        self,
+        state: SpectralHydrostaticState,
+        dt: float,
+        physics_fn,
+        forcing_data,
+    ) -> SpectralHydrostaticState:
+        """JIT-compiled step with TRACED ``forcing_data``.
+
+        ``forcing_data`` is a non-static pytree — values can change
+        between calls without triggering retrace (only structure
+        changes do).  This solves the iter-74 ``_DayRef`` JIT-cache
+        stale-day issue: callers pass ``day``, ``sst``, ``sic`` etc.
+        as a JAX-array dict, and JAX retraces ONCE at first call but
+        treats the values as dynamic for all subsequent calls.
+
+        physics_fn is called with ``(state, grid, sigma_coord,
+        forcing_data)`` — a 4-arg signature.  Existing 3-arg
+        physics_fn implementations need to be extended.
+
+        ``static_argnums=(0, 3)`` matches main's CPU/GPU scaling
+        pattern (PR #232): only ``self`` and ``physics_fn`` are
+        static; ``dt`` and ``forcing_data`` are both traced.
+        """
+        def tendency_fn(s):
+            phys = None
+            if physics_fn is not None:
+                _phys_result = physics_fn(
+                    s, self.grid, self.sigma_coord, forcing_data,
+                )
+                phys = _phys_result[0] if type(_phys_result) is tuple else _phys_result
+            return spectral_pe_tendencies(
+                s, self.grid, self.sigma_coord, self.config, phys,
+            )
+
+        if self._use_cpu_for_spectral:
+            state_cpu = jax.device_put(state, self._cpu_device)
+            forcing_cpu = jax.device_put(forcing_data, self._cpu_device)
+            # Note: _do_step closes over tendency_fn which references
+            # forcing_data; the cpu-put forcing is not directly used
+            # but the device_put ensures the trace is on CPU.
+            del forcing_cpu  # keep linter happy
+            result_cpu = self._do_step(state_cpu, dt, tendency_fn)
+            return jax.device_put(result_cpu, self._default_device)
+
+        return self._do_step(state, dt, tendency_fn)
+
+    @partial(jax.jit, static_argnums=(0, 3))
     def _step_on_cpu(
         self,
         state: SpectralHydrostaticState,
         dt: float,
         physics_fn=None,
     ) -> SpectralHydrostaticState:
-        """Step on CPU without device transfers, optionally with physics."""
+        """Step on CPU without device transfers, optionally with physics.
+
+        Same static-arg pattern as :func:`_step_jit`; reverted from the
+        iter-5 dynamic-arg variant in favour of main's measured perf
+        choice (see ``_step_jit`` docstring for the iter-211 rationale).
+        """
         def tendency_fn(s):
             phys = None
             if physics_fn is not None:
@@ -1014,6 +1762,7 @@ class SpectralPrimitiveEquationModel:
         n_steps = int(duration / dt)
         self._ensure_si_data(dt)
         self._ensure_sponge_factor(dt)
+        self._ensure_tracer_filter(dt)
 
         if self._use_cpu_for_spectral:
             return self._integrate_on_cpu(state, n_steps, dt, save_every, physics_fn)
@@ -1030,6 +1779,9 @@ class SpectralPrimitiveEquationModel:
         state_cpu = jax.device_put(state, self._cpu_device)
         trajectory_cpu = [state_cpu]
 
+        # Refresh dt-dependent matrices on the host once before stepping.
+        self._ensure_si_data(dt)
+        self._ensure_sponge_factor(dt)
         for i in range(n_steps):
             state_cpu = self._step_on_cpu(state_cpu, dt, physics_fn)
             if (i + 1) % save_every == 0:
@@ -1051,10 +1803,11 @@ def isothermal_rest_state_spectral(
     grid: GaussianGrid,
     sigma_coord: SigmaCoordinate,
     T_init: float = 300.0,
-    p_s_init: float = 1e5,
+    p_s_init: float = constants.p_ref,
     phis: jnp.ndarray | None = None,
     perturbation_amplitude: float = 1.0,
     seed: int = 42,
+    tracers: dict | None = None,
 ) -> SpectralHydrostaticState:
     """Create an isothermal rest-state initial condition in spectral space.
 
@@ -1082,10 +1835,13 @@ def isothermal_rest_state_spectral(
         Set to 0.0 to disable.
     seed : int
         Random seed for temperature perturbation.
+    tracers : dict or None
+        Optional initial tracer dict ``{name: Field | jax.Array}`` of
+        grid-space mixing ratios with shape ``(n_lat, n_lon, nlev)``.
+        Default ``None`` matches the dry pre-tracer pipeline.  Tracer
+        values may be ``Field``-wrapped or raw JAX arrays — the dycore
+        RHS duck-types both.
     """
-    import jax
-    from legoesm import constants
-
     nlev = sigma_coord.n_levels
     n_sh = grid.n_sh
 
@@ -1135,6 +1891,7 @@ def isothermal_rest_state_spectral(
         T_hat=Field(data=T_hat, name="T_hat", dims=dims_3d, units="K"),
         lnps_hat=Field(data=lnps_hat, name="lnps_hat", dims=dims_2d, units=""),
         phis_hat=Field(data=phis_hat_data, name="phis_hat", dims=dims_2d, units="m^2/s^2"),
+        tracers=tracers,
     )
 
 
@@ -1153,15 +1910,32 @@ def spectral_pe_to_grid(
     -------
     dict with keys: 'u', 'v', 'T', 'vor', 'div', 'lnps', 'p_s', 'phis'
     """
-    vor = sh_synthesis_3d(grid, state.vor_hat.data)
-    div = sh_synthesis_3d(grid, state.div_hat.data)
-    T = sh_synthesis_3d(grid, state.T_hat.data)
-    lnps = jnp.clip(
-        sh_synthesis(grid, state.lnps_hat.data),
-        _LNPS_MIN,
-        _LNPS_MAX,
+    # Merge the (vor, div, T) 3D batch with the (lnps, phis) 2D pair
+    # via ``jnp.concatenate`` — same exploit as Loop 182 in the tendency
+    # block.  Trailing axis = ``nlev*3 + 2``.  5 SH syntheses → 1.
+    n_sh_d, nlev_d = state.vor_hat.data.shape
+    _vdT_stack = jnp.stack(
+        [state.vor_hat.data, state.div_hat.data, state.T_hat.data],
+        axis=-1,
+    )  # (n_sh, nlev, 3)
+    _vdT_flat = _vdT_stack.reshape(n_sh_d, nlev_d * 3)
+    _all_diag_flat = jnp.concatenate(
+        [
+            _vdT_flat,
+            state.lnps_hat.data[:, jnp.newaxis],
+            state.phis_hat.data[:, jnp.newaxis],
+        ],
+        axis=-1,
+    )  # (n_sh, nlev*3 + 2)
+    _all_grid_diag = sh_synthesis_3d(grid, _all_diag_flat)
+    _vdT_grid = _all_grid_diag[..., : nlev_d * 3].reshape(
+        grid.n_lat, grid.n_lon, nlev_d, 3,
     )
-    phis = sh_synthesis(grid, state.phis_hat.data)
+    vor = _vdT_grid[..., 0]
+    div = _vdT_grid[..., 1]
+    T = _vdT_grid[..., 2]
+    lnps = jnp.clip(_all_grid_diag[..., nlev_d * 3], _LNPS_MIN, _LNPS_MAX)
+    phis = _all_grid_diag[..., nlev_d * 3 + 1]
 
     u_cos, v_cos = uv_from_vordiv_3d(
         grid, state.vor_hat.data, state.div_hat.data,
