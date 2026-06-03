@@ -327,10 +327,14 @@ class TestOceanMatrixAlignment:
             "overflow",
             "stommel_gyre_tracer",
         }
-        assert runners_keys == expected, (
-            f"RUNNERS keys mismatch.\n"
-            f"  Expected: {sorted(expected)}\n"
-            f"  Got:      {sorted(runners_keys)}"
+        # The canonical cases must EXIST (test name: ..._cases_exist); the
+        # ocean session adds new runners (acc_channel, dino, eady_*, isomip_plus,
+        # ...) over time, so assert the canonical set is a subset rather than an
+        # exact match — additions are allowed, a MISSING canonical case is not.
+        missing = expected - runners_keys
+        assert not missing, (
+            f"RUNNERS is missing canonical runner case(s): {sorted(missing)}\n"
+            f"  Got: {sorted(runners_keys)}"
         )
 
     def test_all_grids_matrix_cases_subset_of_canonical(self):
