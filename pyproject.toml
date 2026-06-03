@@ -24,6 +24,11 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Atmospheric Science",
 ]
 dependencies = [
+    # The substrate, carved into its own installable member (uv workspace).
+    # Everything still imports as ``legoesm.<subpkg>`` via the shared PEP-420
+    # namespace; this is what lets ``legoesm-atmosphere`` / ``-ocean`` / ... be
+    # shipped independently on top of the same core (see FEDERATION.md).
+    "legoesm-core",
     "jax>=0.4.35",              # install minimum; tested with 0.8–0.9
     "jaxlib>=0.4.35",           # must match jax
     "equinox>=0.11",
@@ -83,6 +88,18 @@ fv3edge = "legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid:_build_fv3edge_b
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/legoesm"]
+
+# === uv workspace (federation carve) ===
+# The repo is a uv workspace; the substrate lives in its own member
+# (packages/legoesm-core) and the root ``legoesm`` is the meta-member that
+# depends on it.  As components are carved out they each become a member here
+# and the root depends on them via [tool.uv.sources].  All members ship into the
+# one ``legoesm`` PEP-420 namespace, so imports are unchanged.
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+legoesm-core = { workspace = true }
 
 [tool.ruff]
 line-length = 100
