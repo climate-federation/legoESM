@@ -85,16 +85,11 @@ all = [
 [project.scripts]
 legoesm = "legoesm.cli:main"
 
-# Shallow-water barotropic-core providers, discovered LAZILY by
-# legoesm.registry.SW_BAROTROPIC_REGISTRY on first lookup.  This is the
-# substrate-owned bootstrap: the 3-D ocean's barotropic solver resolves an SW
-# core by name and the registry loads the provider at runtime (importlib.metadata
-# — NOT a static import), so the ocean reuses the atmosphere shallow-water dycore
-# without importing the atmosphere component AND without any caller import-order
-# dependence (a fresh process building a cube ocean works without preloading atm).
-[project.entry-points."legoesm.sw_barotropics"]
-fv3sw = "legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid:_build_fv3sw_barotropic_model"
-fv3edge = "legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid:_build_fv3edge_barotropic_model"
+# NOTE: the "legoesm.sw_barotropics" entry points (the FV3 shallow-water dycore
+# providers the ocean barotropic solver resolves by name) are declared by their
+# PROVIDER, legoesm-atmosphere, NOT here — so `pip install legoesm-ocean
+# legoesm-atmosphere` registers them without the root meta-package.  See
+# packages/legoesm-atmosphere/pyproject.toml.
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/legoesm"]

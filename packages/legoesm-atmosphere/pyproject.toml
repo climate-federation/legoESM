@@ -33,6 +33,16 @@ dependencies = [
 [tool.uv.sources]
 legoesm-core = { workspace = true }
 
+# This component PROVIDES the FV3 shallow-water barotropic dycores that the ocean
+# component's barotropic solver resolves BY NAME through
+# legoesm.registry.SW_BAROTROPIC_REGISTRY (importlib.metadata entry points — NOT a
+# static import).  Declaring them here means installing legoesm-atmosphere makes
+# the ocean reuse the SAME shallow-water dycore (zero duplication) without either
+# component importing the other.
+[project.entry-points."legoesm.sw_barotropics"]
+fv3sw = "legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid:_build_fv3sw_barotropic_model"
+fv3edge = "legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid:_build_fv3edge_barotropic_model"
+
 # PEP-420 namespace package: no src/legoesm/__init__.py; this wheel ships only
 # legoesm/atmosphere into the shared `legoesm` namespace, so it imports as legoesm.atmosphere.
 [tool.hatch.build.targets.wheel]
