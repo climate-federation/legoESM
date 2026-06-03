@@ -220,7 +220,7 @@ def _apply_cgrid_surface_fluxes(state, forc, *, dz_0, rho_0, c_p,
     The wind-stress *sign* (ocean reaction = -tau), by contrast, is corrected
     here vs the previous (+tau) latlon code -- see the momentum comment below.
     """
-    T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + 273.15
+    T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + constants.T_freeze
     q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)), dtype=np.float64)
     tau_x, tau_y, sh, lh = air_sea_fluxes(
         u10=jnp.asarray(forc["u10"]),
