@@ -182,3 +182,38 @@ class CanopyLandParams(NamedTuple):
 #
 # Dispatch happens inside ``step_multilayer_land`` / ``step_land`` via
 # ``isinstance`` on the ``surface_scheme`` field.
+
+
+# ---------------------------------------------------------------------------
+# CLMMLCanopyConfig — configuration for the CLM-ML-JAX multilayer canopy
+# ---------------------------------------------------------------------------
+
+class CLMMLCanopyConfig(NamedTuple):
+    """Configuration for the CLM-ML-JAX multilayer canopy surface scheme.
+
+    Used as ``MultiLayerLandConfig(surface_scheme=CLMMLCanopyConfig())``.
+    Dispatch inside ``step_multilayer_land`` detects this type via
+    ``isinstance`` and routes to the CLM-ML-JAX interface in
+    ``legoesm.land.canopy.clm_ml_interface``.
+
+    All fields are static (Python scalars captured in the closure at
+    JIT compile time — never traced).  Per-column spatial parameters
+    (LAI, SAI, htop, hbot) are provided via ``LandSurfaceParams`` at
+    each timestep.
+    """
+
+    # Canopy vertical discretisation
+    nlevmlcan: int = 9          # Number of canopy layers (MLclm_varpar.nlevmlcan)
+
+    # Sub-cycling / Runge-Kutta integration
+    # 10 → Euler (nrk_steps = 0); 2x → RK with x stages
+    runge_kutta_type: int = 10
+    num_ml_steps: int = 1       # CLM sub-steps per legoESM timestep
+
+    # Reference O2 concentration [mmol/mol]
+    o2ref: float = 209.0
+
+    # Atmospheric forcing interpolation mode:
+    #   0 → no interpolation (single forcing value per CLM step)
+    #   3 → 3-point centred interpolation (bef / cur / next)
+    met_type: int = 0

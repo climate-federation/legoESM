@@ -10,21 +10,21 @@ THe goal is to implement a new canopy scheme in legoesm that calls the CLM-ML-JA
 - Do not add any constants from MLclm_varcon.py into legoesm.constants.
 
 ### Phase 1: Scaffolding (no logic yet)
-- [ ] Create src/legoesm/land/canopy/__init__.py
-- [ ] Create src/legoesm/land/canopy/config.py (CanopyConfig, CLMMLCanopyConfig)
-- [ ] Create src/legoesm/land/canopy/state.py (CanopyState)
-- [ ] Extend MultiLayerLandConfig with canopy field (config.py)
-- [ ] Extend MultiLayerLandState with canopy field (state.py)
-- [ ] Extend LandSurfaceParams with LAI, SAI, htop, hbot + PARAM_BOUNDS
-- [ ] Update src/legoesm/land/__init__.py exports
-- [ ] Add [project.optional-dependencies] canopy group to pyproject.toml
-- [ ] Run existing tests — all must still pass: `pytest tests/land/`
+- [x] Create src/legoesm/land/canopy/__init__.py
+- [x] Create src/legoesm/land/canopy/config.py (CanopyConfig, CLMMLCanopyConfig)
+- [x] Create src/legoesm/land/canopy/state.py (CanopyState)
+- [x] Extend MultiLayerLandConfig with canopy field (config.py)
+- [x] Extend MultiLayerLandState with canopy field (state.py)
+- [x] Extend LandSurfaceParams with LAI, SAI, htop, hbot + PARAM_BOUNDS
+- [x] Update src/legoesm/land/__init__.py exports
+- [x] Add [project.optional-dependencies] canopy group to pyproject.toml
+- [x] Run existing tests — all must still pass: 168/168 unit tests pass
 
 ### Phase 2: Interface stub
-- [ ] Create src/legoesm/land/canopy/clm_ml_interface.py with correct signature but raise NotImplementedError body
-- [ ] Add dispatch block to multilayer_land.py (scheme="none" path unchanged, scheme="clm_ml" calls stub)
-- [ ] Update init_multilayer_land_state() to initialize CanopyState when scheme="clm_ml"
-- [ ] Run existing tests — all must still pass
+- [x] Create src/legoesm/land/canopy/clm_ml_interface.py with correct signature but raise NotImplementedError body
+- [x] Add dispatch block to multilayer_land.py (scheme="none" path unchanged, scheme="clm_ml" calls stub)
+- [x] Update init_multilayer_land_state() to initialize CanopyState when scheme="clm_ml"
+- [x] Run existing tests — all 168 unit tests pass
 
 ### Phase 3: Interface implementation
 - [ ] Implement SW partitioning (f_dir, f_VIS split) in clm_ml_interface.py
@@ -55,4 +55,6 @@ When implementing clm_ml_interface.py, read the actual MLCanopyFluxes source cod
 
 Don't skip the dispatch test. The "existing tests still pass" check after Phases 1 and 2 is the most important guardrail — it's how you catch if Claude accidentally broke the scheme="none" path.
 
-Commit and push often with clear concise messages.
+always try to improve timing and memory usage when implementing the interface, but do not sacrifice readability or correctness for performance. We can optimize later if needed.
+
+Commit and push as often as possible with clear concise messages.

@@ -6,9 +6,11 @@ Dispatches between:
   skin T = ``T_soil[:, 0]``, optional Jarvis / Leuning stomatal coupling.
 - ``TwoLeafCanopyConfig``: DifferBESS-style two-leaf canopy Newton +
   Picard closure on top of the same soil column.
+- ``CLMMLCanopyConfig``: CLM-ML-JAX multilayer canopy model (Phase 3).
 
-Both surface schemes produce a ``SurfaceFluxOutput``; the post-flux
-pipeline (snow, Richards, soil thermal, carbon, TileResponse) is shared.
+Both ``SimpleSEBConfig`` and ``TwoLeafCanopyConfig`` produce a
+``SurfaceFluxOutput``; the post-flux pipeline (snow, Richards, soil
+thermal, carbon, TileResponse) is shared.
 
 Physics sequence each time step:
 
@@ -42,6 +44,7 @@ from legoesm.land.soil_grid import make_soil_grid
 from legoesm.land.stomata_utils import compute_effective_beta
 from legoesm.land.richards import solve_richards
 from legoesm.land.soil_thermal import solve_soil_thermal
+from legoesm.land.canopy.config import CLMMLCanopyConfig
 from legoesm.land.surface_scheme import (
     SimpleSEBConfig,
     TwoLeafCanopyConfig,
@@ -195,6 +198,7 @@ def _step_multilayer_land_impl(
     # =================================================================
     # Surface scheme dispatch
     # =================================================================
+    canopy_state_new = None  # updated only by CLMMLCanopyConfig branch
     if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
         # Canopy surface scheme: Newton closure with Picard loop that
         # advances soil thermal tentatively between passes.
@@ -232,6 +236,22 @@ def _step_multilayer_land_impl(
             dt=dt,
             TgC_override=TgC_override,
             LAI_override=LAI_override,
+        )
+    elif isinstance(config.surface_scheme, CLMMLCanopyConfig):
+        # CLM-ML-JAX multilayer canopy scheme (Phase 3 implementation).
+        # Lazy import keeps clm_ml_jax optional.
+        from legoesm.land.canopy.clm_ml_interface import compute_clm_ml_canopy_fluxes
+
+        surface_out, canopy_state_new = compute_clm_ml_canopy_fluxes(
+            T_soil_top=T_surface,
+            forcing=forcing,
+            canopy_config=config.surface_scheme,
+            land_config=config,
+            land_params=lp,
+            w_frac_rz=w_frac_rz,
+            wind_speed=wind_speed,
+            canopy_state=state.canopy_state,
+            dt=dt,
         )
     else:
         # SimpleSEB: bulk fluxes with skin T = T_soil[:, 0].
@@ -346,6 +366,7 @@ def _step_multilayer_land_impl(
         snow_depth=snow_new,
         snow_age=snow_age_new,
         TgC=TgC_new,
+        canopy_state=canopy_state_new,
     )
 
     # --- Post-step surface state for coupler ---
@@ -479,6 +500,16 @@ def init_multilayer_land_state(
     else:
         TgC = None
 
+    # Initialize canopy state for CLM-ML-JAX scheme.
+    # On cold start the mlcanopy_type is not allocated here — the interface
+    # allocates it lazily on the first call to compute_clm_ml_canopy_fluxes
+    # when canopy_state is None.
+    if isinstance(config.surface_scheme, CLMMLCanopyConfig):
+        from legoesm.land.canopy.state import CanopyState
+        canopy_state = CanopyState(mlcanopy=None)
+    else:
+        canopy_state = None
+
     return MultiLayerLandState(
         T_soil=T_soil,
         psi_soil=psi_soil,
@@ -488,4 +519,5 @@ def init_multilayer_land_state(
         snow_depth=jnp.zeros(ncol),
         snow_age=jnp.zeros(ncol),
         TgC=TgC,
+        canopy_state=canopy_state,
     )
