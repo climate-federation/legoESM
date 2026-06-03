@@ -99,13 +99,7 @@ def compute_upup_cells(mesh: VoronoiMesh) -> tuple[jnp.ndarray, jnp.ndarray]:
     return upup_pos, upup_neg
 
 
-def _van_leer_limiter(r: jnp.ndarray) -> jnp.ndarray:
-    """Van Leer flux limiter: phi(r) = (r + |r|) / (1 + |r|).
-
-    Differentiable, bounded in [0, 2), TVD.  Identical to the limiter
-    used for lat-lon TVD (ocean_pe_latlon_cgrid.py).
-    """
-    return (r + jnp.abs(r)) / (1.0 + jnp.abs(r))
+from legoesm.ocean.dynamics._flux_limiters import van_leer_limiter as _van_leer_limiter
 
 
 def tvd_tracer_to_edges(
@@ -115,8 +109,14 @@ def tvd_tracer_to_edges(
     upup_pos: jnp.ndarray,
     upup_neg: jnp.ndarray,
     cell_active: jnp.ndarray | None = None,
+    limiter_fn=_van_leer_limiter,
 ) -> jnp.ndarray:
-    """Van Leer TVD interpolation of cell-center tracer to edges.
+    """TVD interpolation of cell-center tracer to edges.
+
+    ``limiter_fn`` selects the flux limiter family; defaults to Van Leer
+    (used by ``tracer_advection="tvd"``). Pass
+    :func:`legoesm.ocean.dynamics._flux_limiters.sweby_limiter` for
+    Veros-compatible superbee (``tracer_advection="superbee"``).
 
     Second-order accurate in smooth regions, monotone (no new extrema).
     Falls back to first-order upwind at sharp fronts and boundaries.
@@ -161,7 +161,7 @@ def tvd_tracer_to_edges(
     delta_pos = tr_c2 - tr_c1                        # downstream - donor
     r_pos = (tr_c1 - tr_upup_pos) / jnp.where(
         jnp.abs(delta_pos) > eps, delta_pos, eps)
-    tr_face_pos = tr_c1 + 0.5 * _van_leer_limiter(r_pos) * delta_pos
+    tr_face_pos = tr_c1 + 0.5 * limiter_fn(r_pos) * delta_pos
 
     # --- Negative flow (c2 → c1): donor = c2 ---
     tr_upup_neg = tr[upup_neg]                       # (nEdges, nlev)
@@ -171,7 +171,7 @@ def tvd_tracer_to_edges(
     delta_neg = tr_c1 - tr_c2                        # downstream - donor
     r_neg = (tr_c2 - tr_upup_neg) / jnp.where(
         jnp.abs(delta_neg) > eps, delta_neg, eps)
-    tr_face_neg = tr_c2 + 0.5 * _van_leer_limiter(r_neg) * delta_neg
+    tr_face_neg = tr_c2 + 0.5 * limiter_fn(r_neg) * delta_neg
 
     # Select based on mass flux direction
     return jnp.where(mass_flux > 0, tr_face_pos, tr_face_neg)

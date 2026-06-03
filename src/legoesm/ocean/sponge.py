@@ -47,20 +47,23 @@ class SpongeForcing(NamedTuple):
     v_ref: jnp.ndarray | None = None
 
 
-def compute_sponge_gamma_latlon(
-    grid,
+def compute_sponge_gamma(
+    lat_deg: np.ndarray,
     lat_south: float,
     lat_north: float,
     width_deg: float = 2.0,
     timescale_days: float = 1.0,
 ) -> np.ndarray:
-    """Compute sponge relaxation coefficient on a lat-lon grid.
+    """Quadratic sponge ramp as a function of latitude — the shared kernel.
 
-    Quadratic ramp from 0 in the interior to ``1/tau`` at the walls.
+    Ramp from 0 in the interior to ``1/tau`` at the south/north walls, with
+    south taking precedence in the (degenerate) overlap. Works on any-shaped
+    ``lat_deg`` array; the grid-specific wrappers below supply the latitudes.
 
     Parameters
     ----------
-    grid : LatLonGrid
+    lat_deg : ndarray
+        Latitudes [degrees], any shape.
     lat_south, lat_north : float
         Domain boundaries [degrees].
     width_deg : float
@@ -70,22 +73,41 @@ def compute_sponge_gamma_latlon(
 
     Returns
     -------
-    gamma : ndarray, shape (n_lat, n_lon)
+    gamma : ndarray, same shape as ``lat_deg``
         Relaxation coefficient [1/s].
     """
-    lat_deg = np.degrees(np.asarray(grid.lat))
+    lat_deg = np.asarray(lat_deg, dtype=np.float64)
     tau = timescale_days * 86400.0
-    gamma = np.zeros((grid.n_lat, grid.n_lon), dtype=np.float64)
+    dist_south = lat_deg - lat_south
+    dist_north = lat_north - lat_deg
+    # Nested where reproduces the original ``if south elif north`` precedence.
+    return np.where(
+        dist_south < width_deg,
+        (1.0 - dist_south / width_deg) ** 2 / tau,
+        np.where(
+            dist_north < width_deg,
+            (1.0 - dist_north / width_deg) ** 2 / tau,
+            0.0,
+        ),
+    )
 
-    for i, lat in enumerate(lat_deg):
-        dist_south = lat - lat_south
-        dist_north = lat_north - lat
-        if dist_south < width_deg:
-            gamma[i, :] = (1.0 - dist_south / width_deg) ** 2 / tau
-        elif dist_north < width_deg:
-            gamma[i, :] = (1.0 - dist_north / width_deg) ** 2 / tau
 
-    return gamma
+def compute_sponge_gamma_latlon(
+    grid,
+    lat_south: float,
+    lat_north: float,
+    width_deg: float = 2.0,
+    timescale_days: float = 1.0,
+) -> np.ndarray:
+    """Sponge relaxation coefficient on a lat-lon grid, shape ``(n_lat, n_lon)``
+    (constant in longitude). Thin wrapper over :func:`compute_sponge_gamma`."""
+    lat_deg = np.degrees(np.asarray(grid.lat))
+    gamma_lat = compute_sponge_gamma(
+        lat_deg, lat_south, lat_north, width_deg, timescale_days,
+    )
+    return np.broadcast_to(
+        gamma_lat[:, None], (grid.n_lat, grid.n_lon),
+    ).copy()
 
 
 def compute_sponge_gamma_mpas(
@@ -95,36 +117,9 @@ def compute_sponge_gamma_mpas(
     width_deg: float = 2.0,
     timescale_days: float = 1.0,
 ) -> np.ndarray:
-    """Compute sponge relaxation coefficient on an MPAS Voronoi mesh.
-
-    Same quadratic ramp as the lat-lon version, applied per cell.
-
-    Parameters
-    ----------
-    mesh : VoronoiMesh
-    lat_south, lat_north : float
-        Domain boundaries [degrees].
-    width_deg : float
-        Sponge zone width [degrees].
-    timescale_days : float
-        Relaxation e-folding timescale [days].
-
-    Returns
-    -------
-    gamma : ndarray, shape (nCells,)
-        Relaxation coefficient [1/s].
-    """
+    """Sponge relaxation coefficient on an MPAS Voronoi mesh, shape
+    ``(nCells,)``. Thin wrapper over :func:`compute_sponge_gamma`."""
     lat_deg = np.degrees(np.asarray(mesh.latCell))
-    tau = timescale_days * 86400.0
-    n_cells = lat_deg.shape[0]
-    gamma = np.zeros(n_cells, dtype=np.float64)
-
-    for i, lat in enumerate(lat_deg):
-        dist_south = lat - lat_south
-        dist_north = lat_north - lat
-        if dist_south < width_deg:
-            gamma[i] = (1.0 - dist_south / width_deg) ** 2 / tau
-        elif dist_north < width_deg:
-            gamma[i] = (1.0 - dist_north / width_deg) ** 2 / tau
-
-    return gamma
+    return compute_sponge_gamma(
+        lat_deg, lat_south, lat_north, width_deg, timescale_days,
+    )

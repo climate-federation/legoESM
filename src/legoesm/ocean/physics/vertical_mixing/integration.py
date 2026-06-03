@@ -6,15 +6,13 @@ from typing import Callable
 
 import jax.numpy as jnp
 
-from legoesm import constants
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.eos import (
     compute_ocean_rho as _compute_rho,
-    rho_0 as _RHO_0,
-    c_sw as _C_SW,
     thermal_expansion_coeff,
     haline_contraction_coeff,
 )
+from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.state import OceanState, OceanTendencies
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_ocean_jacobian
 from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
@@ -26,6 +24,7 @@ from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
 def make_vertical_mixing_physics(
     config: VerticalMixingConfig,
     apply_diffusion: bool = True,
+    constants_config: ConstantsConfig = ConstantsConfig(),
 ) -> Callable:
     """Create a vertical mixing physics function.
 
@@ -52,7 +51,10 @@ def make_vertical_mixing_physics(
     elif scheme == "richardson":
         return _make_richardson(config, apply_diffusion=apply_diffusion)
     elif scheme == "kpp":
-        return _make_kpp(config, apply_diffusion=apply_diffusion)
+        return _make_kpp(config, apply_diffusion=apply_diffusion,
+                         constants_config=constants_config)
+    elif scheme == "tke":
+        return _make_tke(config, apply_diffusion=apply_diffusion)
     else:
         raise ValueError(f"Unknown vertical mixing scheme: {scheme!r}")
 
@@ -105,7 +107,8 @@ def _make_richardson(config: VerticalMixingConfig,
 
 
 def _make_kpp(config: VerticalMixingConfig,
-              apply_diffusion: bool = True) -> Callable:
+              apply_diffusion: bool = True,
+              constants_config: ConstantsConfig = ConstantsConfig()) -> Callable:
     cfg = config.kpp
 
     def physics_fn(state: OceanState, grid: CubedSphereGrid,
@@ -133,7 +136,7 @@ def _make_kpp(config: VerticalMixingConfig,
         Q_sfc_T = None
         B_f = None
         if q_net is not None:
-            Q_sfc_T = q_net / (_RHO_0 * _C_SW)
+            Q_sfc_T = q_net / (constants_config.rho_0 * constants_config.c_sw)
             # Surface thermal expansion at the top layer.
             T_sfc = state.T.data[..., 0]
             S_sfc = state.S.data[..., 0]
@@ -143,7 +146,7 @@ def _make_kpp(config: VerticalMixingConfig,
             # Q_T = warming = lighter water at top = stabilizing).  KPP
             # convention is B_f > 0 = unstable (cooling-driven), so we
             # keep the *negative* of the heat-driven contribution.
-            B_f = -constants.g * alpha * Q_sfc_T
+            B_f = -constants_config.g * alpha * Q_sfc_T
 
         # Surface kinematic salt flux from freshwater: Q_S = -S_sfc * F_fw
         # / rho_0  [PSU m/s].  Net P-E entering ocean (F_fw > 0) freshens
@@ -158,9 +161,9 @@ def _make_kpp(config: VerticalMixingConfig,
             # (-S*fw/rho) PLUS the REAL salt-mass flux (+salt*1e3/rho).
             Q_sfc_S = jnp.zeros_like(S_sfc)
             if fw is not None:
-                Q_sfc_S = Q_sfc_S - S_sfc * fw / _RHO_0
+                Q_sfc_S = Q_sfc_S - S_sfc * fw / constants_config.rho_0
             if salt is not None:
-                Q_sfc_S = Q_sfc_S + salt * 1.0e3 / _RHO_0
+                Q_sfc_S = Q_sfc_S + salt * 1.0e3 / constants_config.rho_0
             # Salt-driven surface buoyancy flux (KPP convention,
             # B_f > 0 = unstable):
             #   B_f = -g*(alpha*Q_T - beta*Q_S) = -g*alpha*Q_T + g*beta*Q_S
@@ -170,7 +173,7 @@ def _make_kpp(config: VerticalMixingConfig,
             # (stabilizing, lighter water on top).  Brine rejection / a
             # positive real salt flux gives Q_sfc_S>0 → B_salt > 0
             # (destabilizing).
-            B_salt = constants.g * beta * Q_sfc_S
+            B_salt = constants_config.g * beta * Q_sfc_S
             B_f = B_salt if B_f is None else (B_f + B_salt)
 
         # KPP expects u, v at cell centers (same shape as T).
@@ -200,6 +203,44 @@ def _make_kpp(config: VerticalMixingConfig,
                                 A_v=out.A_v if not apply_diffusion else None)
     return physics_fn
 
+
+
+def _make_tke(config: VerticalMixingConfig,
+              apply_diffusion: bool = True) -> Callable:
+    """Factory for the Gaspar 1990 / Burchard 2002 TKE closure
+    (Veros's canonical vertical mixing scheme).
+
+    The TKE closure requires the implicit vertical-mixing path
+    (``LatLonCGridOceanConfig.implicit_vertical_mixing=True``). The
+    actual K_M / K_H computation runs inside
+    :func:`legoesm.ocean.physics.vertical_mixing.k_profiles._vmix_K_profiles`
+    where the model timestep is available; this factory simply returns
+    a no-op physics tendency (zero everywhere, ``K_v=None``,
+    ``A_v=None``) so that the model's implicit-mixing path triggers
+    the ``compute_vertical_K_profiles`` fallback and uses the TKE
+    branch wired there.
+
+    When ``apply_diffusion`` is ``True`` (explicit-vertical-mixing
+    mode) we raise — TKE is implicit-only in legoESM v1 to match
+    Veros's ``enable_implicit_vert_friction=True`` recipe convention.
+    """
+    if apply_diffusion:
+        raise ValueError(
+            "vertical_mixing=\"tke\" requires implicit_vertical_mixing=True. "
+            "Set LatLonCGridOceanConfig.implicit_vertical_mixing=True so the "
+            "implicit vertical solver can consume the K profiles computed "
+            "by the TKE closure."
+        )
+
+    def physics_fn(state, grid, z_coord, surface_forcing=None):
+        # No-op: TKE K-profiles are computed by the implicit solver via
+        # _vmix_K_profiles (k_profiles.py). Returning K_v=None /
+        # A_v=None triggers the fallback path in
+        # _apply_implicit_vertical_mixing → compute_vertical_K_profiles.
+        return _wrap_tendencies(None, None, None, None, state,
+                                 K_v=None, A_v=None)
+
+    return physics_fn
 
 
 def _zero_tendencies(state):

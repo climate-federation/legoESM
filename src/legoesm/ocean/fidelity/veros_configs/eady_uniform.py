@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import math
 
+from legoesm.ocean.constants_config import VEROS_CONSTANTS_CONFIG
+
 # ---------------------------------------------------------------------------
 # Domain (matches EadyUniformConfig defaults from legoESM)
 # ---------------------------------------------------------------------------
@@ -57,9 +59,11 @@ T_PERTURBATION_K: float = 0.1
 PERTURBATION_WAVENUMBER: int = 3
 
 # Veros linear-EOS coefficients (veros.core.density.linear_eq) — fixed.
-_VEROS_BETA_T: float = 1.67e-4  # 1/K
-_VEROS_GRAV: float = 9.81       # m/s^2
-_OMEGA: float = 7.292115e-5     # rad/s
+_VEROS_BETA_T: float = 1.67e-4  # 1/K (EOS coefficient — lives with the EOS, not
+                                # ConstantsConfig, which holds base constants only)
+# Base physical constants reference the single Veros source (no bare literals).
+_VEROS_GRAV: float = VEROS_CONSTANTS_CONFIG.g       # 9.81 m/s^2
+_OMEGA: float = VEROS_CONSTANTS_CONFIG.Omega        # 7.292115e-5 rad/s
 
 # Run length — long enough for the unstable mode to e-fold a few times
 # (sigma ~ 0.31 * f0 * Lambda / N implies tau ~ 5 d for the default knobs;
@@ -205,7 +209,7 @@ def _build_eady_uniform_setup_class():
             # radius (``radius=6370e3`` in ``veros/settings.py``) so the
             # numerator of the thermal-wind integral matches Veros's
             # internal metric exactly.
-            R_earth = 6.370e6
+            R_earth = VEROS_CONSTANTS_CONFIG.R_earth   # 6.370e6 m (Veros source)
             y_m = npx.radians(vs.yt - LAT_CENTER_DEG) * R_earth   # (ny,)
             # Trapezoid: T_anom(j) = sum_{i<j} 0.5*(env[i]+env[i+1])
             #                      * (y[i+1]-y[i]) * dTdy

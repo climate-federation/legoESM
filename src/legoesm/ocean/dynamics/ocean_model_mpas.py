@@ -163,11 +163,19 @@ class MPASOceanModel:
 
         # Precompute upwind-of-upwind cell indices for TVD advection.
         # This is a one-time mesh topology operation stored as static data.
-        if self.config.tracer_advection == "tvd":
+        # "tvd" (Van Leer) and "superbee" (Sweby) share the upup stencil and
+        # differ only in the flux limiter applied at the face.
+        if self.config.tracer_advection in ("tvd", "superbee"):
             self._upup_pos, self._upup_neg = compute_upup_cells(mesh)
-        else:
+        elif self.config.tracer_advection == "upwind":
             self._upup_pos = None
             self._upup_neg = None
+        else:
+            raise ValueError(
+                f"Unknown tracer_advection literal "
+                f"{self.config.tracer_advection!r}; expected one of: "
+                f"upwind, tvd, superbee."
+            )
 
         if self.config.physics is not None:
             self._physics_fn = make_mpas_ocean_physics(
@@ -668,7 +676,10 @@ class MPASOceanModel:
         # This matches the latlon C-grid algorithm (ocean_model_latlon_cgrid.py).
         # ``active_3d`` (built above) is per-level on partial cells.
 
-        use_tvd = config.tracer_advection == "tvd"
+        use_tvd = config.tracer_advection in ("tvd", "superbee")
+        if use_tvd:
+            from legoesm.ocean.dynamics._flux_limiters import resolve_tvd_limiter
+            limiter_fn = resolve_tvd_limiter(config.tracer_advection)
 
         for tr_name in ['T', 'S']:
             tr = T_new if tr_name == 'T' else S_new
@@ -680,6 +691,7 @@ class MPASOceanModel:
                     tr, mass_flux, mesh,
                     self._upup_pos, self._upup_neg,
                     cell_active=active_3d,
+                    limiter_fn=limiter_fn,
                 )
             else:
                 # First-order upwind
@@ -692,7 +704,9 @@ class MPASOceanModel:
             # Vertical flux divergence
             if use_tvd:
                 vert_flux_div = flux_form_vertical_tracer_advection_tvd(
-                    tr, w, h_k_old, dt, cell_active=active_3d)
+                    tr, w, h_k_old, dt, cell_active=active_3d,
+                    limiter_fn=limiter_fn,
+                )
             else:
                 vert_flux_div = flux_form_vertical_tracer_advection(tr, w)
 

@@ -11,6 +11,7 @@ from typing import NamedTuple
 
 from legoesm import constants
 from legoesm.core.field import Field
+from legoesm.ocean.constants_config import ConstantsConfig
 
 
 # ==============================================================================
@@ -360,6 +361,34 @@ class LatLonCGridOceanState(NamedTuple):
     S_som: object = None
     T_flux_div_prev: object = None  # Previous advection flux divergence for T (AB2 only)
     S_flux_div_prev: object = None  # Previous advection flux divergence for S (AB2 only)
+    # Prognostic eddy kinetic energy [m^2/s^2], 2-D Field (n_lat, n_lon), used only
+    # when the prognostic-EKE GM closure is active (config.gm_redi.eke not None).
+    # Default None -> inert (no EKE): zero behaviour change for existing configs.
+    eke: object = None
+    # Prior EXPLICIT increment ΔX_expl^{n-1} for the AB2 outer integrator
+    # (config.outer_integrator == "ab2"): the explicit-only forward-Euler increment
+    # (advection, GM/Redi, lateral friction, Coriolis, barotropic solve, freshwater)
+    # WITHOUT the implicit vertical mixing — implicit mixing is applied once, after
+    # the AB2 extrapolation, and is NOT carried. Tracers store the full explicit
+    # increment; u/v store the BAROCLINIC-deviation explicit increment (the barotropic
+    # mode is kept from the barotropic solve, un-AB2'd). Default None -> inert
+    # (forward-Euler): zero behaviour change.
+    T_incr_prev: object = None
+    S_incr_prev: object = None
+    u_incr_prev: object = None
+    v_incr_prev: object = None
+    # Rigid-lid barotropic streamfunction state (config.barotropic_solver ==
+    # "rigid_lid").  ``psi`` is the vertex-point streamfunction [m^3/s], shape
+    # (n_lat+1, n_lon+1).  ``dpsi``/``dpsi_prev`` are the interior streamfunction
+    # tendencies ∂ψ/∂t at the current/previous solved step (the AB2 history +
+    # the leapfrog CG-guess history).  ``dpsin``/``dpsin_prev`` are the
+    # per-island streamfunction-constant tendencies, shape (nisle,).  All default
+    # None -> inert (free-surface path unaffected; zero behaviour change).
+    psi: object = None
+    dpsi: object = None
+    dpsi_prev: object = None
+    dpsin: object = None
+    dpsin_prev: object = None
 
 
 class LatLonCGridOceanDiagnostics(NamedTuple):
@@ -406,11 +435,58 @@ class LatLonCGridOceanDiagnostics(NamedTuple):
     wind_stress_y: Field
 
 
+class SurfaceTracerForcing(NamedTuple):
+    """Surface TRACER forcing RATE (restoring + prescribed q_net + penetrating
+    shortwave) WITHHELD from the explicit ``dT_dt``/``dS_dt`` so the model step
+    can apply it IMPLICITLY (weight 1.0, no AB2 extrapolation) inside the
+    backward-Euler vertical-mixing solve — matching Veros's
+    ``forc_temp_surface``/``forc_salt_surface`` placement
+    (``veros/core/thermodynamics.py``: the surface forcing enters the implicit
+    vertical-diffusion tridiagonal RHS, not the explicit AB2 tendency).
+
+    Populated ONLY when ``LatLonCGridOceanConfig.surface_forcing_implicit`` is
+    True; ``None`` otherwise (default), keeping the tendency pytree + every
+    existing path bit-identical.
+
+    Fields
+    ------
+    dT_dt : Field
+        Surface temperature forcing rate [degC/s], full-column shape
+        ``(n_lat, n_lon, nlev)`` — nonzero in the surface layer (index 0) for
+        the restoring + non-solar q_net, plus the shortwave-penetration column.
+    dS_dt : Field
+        Surface salinity forcing rate [PSU/s], full-column shape; surface-layer
+        restoring only (Veros ACC does not restore salinity).
+    """
+    dT_dt: Field
+    dS_dt: Field
+
+
 class LatLonCGridOceanTendencies(NamedTuple):
     """Tendencies for the lat-lon C-grid ocean primitive equations.
 
     K_v / A_v are optional interface-level diffusivity / viscosity
     profiles populated when ``implicit_vertical_mixing`` is enabled.
+
+    Ah_visc_u / Ah_visc_v are the harmonic LATERAL-viscosity momentum
+    tendencies (``A_h∇²u`` / ``A_h∇²v`` [m/s²], face-masked), populated
+    ONLY when the prognostic-EKE ``source_kdiss_h`` option is on (so the
+    3-D EKE step can route the mean-KE they remove into the EKE source —
+    Veros's ``K_diss_h``, the DYNAMICAL-form path). ``None`` otherwise
+    (default), keeping the tendency pytree + every existing path bit-identical.
+
+    Ah_kediss_cell is the FAITHFUL positive-definite K_diss_h dissipation
+    density (``A_h·(div² + <ζ²>)`` [m²/s³] at cell centres), populated ONLY
+    when ``source_kdiss_h`` AND ``kdiss_h_flux_form`` are both on (the ACC
+    recipe). It is the Helmholtz KE-removal of the vector-Laplacian lateral
+    viscosity — ≥ 0 everywhere by construction (no clamp). ``None`` otherwise.
+
+    surface_tracer_forcing is a :class:`SurfaceTracerForcing` (dT/dS rate)
+    populated ONLY when ``surface_forcing_implicit`` is on (the ACC recipe): the
+    surface TRACER forcing (restoring + q_net + shortwave penetration) is then
+    WITHHELD from ``dT_dt``/``dS_dt`` and applied at weight 1.0 inside the
+    backward-Euler implicit vertical-mixing solve (Veros placement). ``None``
+    otherwise (default), keeping every existing path bit-identical.
     """
     du_dt: Field
     dv_dt: Field
@@ -421,6 +497,10 @@ class LatLonCGridOceanTendencies(NamedTuple):
     dland_mask_dt: Field
     K_v: object = None
     A_v: object = None
+    Ah_visc_u: object = None
+    Ah_visc_v: object = None
+    Ah_kediss_cell: object = None
+    surface_tracer_forcing: object = None
 
 
 class MomentumTendencyDiagnostics(NamedTuple):
@@ -521,18 +601,78 @@ class MomentumTendencyDiagnostics(NamedTuple):
 class LatLonCGridOceanConfig(NamedTuple):
     """Configuration for the lat-lon C-grid FV ocean model.
 
-    Same parameter set as LatLonOceanConfig; kept separate for clarity
-    since operator semantics differ (compact stencils vs centered).
+    ~70 fields. This docstring is the *map* the flat field list lacks; the
+    fields group as:
+
+    - **Physical constants**: ``g``, ``rho_0``, ``constants`` (ConstantsConfig).
+    - **Lateral (harmonic) viscosity**: ``A_h`` + ``A_h_lat_scaling``,
+      ``A_h_cos_power``, ``A_h_floor``, ``A_h_eq_boost``/``A_h_eq_sigma_deg``,
+      ``A_h_merid``, ``A_h_cap_*``.
+    - **Biharmonic viscosity**: ``B_h`` + ``B_h_lat_scaling``, ``B_h_barotropic``.
+    - **Eddy-viscosity closures**: ``C_smag``, ``C_smag_lap``, ``C_leith``,
+      ``C_leith_modified``, ``slope_foot_*``.
+    - **Tracer diffusivity / vertical mixing**: ``K_h``, ``K_bih``, ``A_v``,
+      ``K_v``, ``implicit_vertical_mixing``.
+    - **Bottom drag**: ``bottom_drag_r`` + ``bottom_drag_bbl_thickness``,
+      ``bottom_drag_bg_velocity`` (physics-level BottomDragConfig is deprecated).
+    - **Barotropic solver**: ``barotropic_solver``, ``n_barotropic_substeps``,
+      ``bebt``, ``barotropic_div_damp``, ``barotropic_diffusion_*``,
+      ``maxvel_barotropic``, ``barotropic_time_filter``, ``barotropic_implicit_*``,
+      ``differentiable_barotropic``.
+    - **Numerics choices**: ``tracer_advection``, ``momentum_advection``,
+      ``ke_gradient_scheme``, ``weno_d_term``, ``pgf_scheme``,
+      ``tracer_time_integrator``/``ab2_epsilon``, ``hyperdiff_coeff``.
+    - **EOS / eddy param / physics**: ``eos`` (+ ``eos_linear``), ``gm_redi``,
+      ``physics`` (full OceanPhysicsConfig pipeline).
+    - **Conservation & freshwater**: ``use_conservation_fixer``,
+      ``fix_volume``/``fix_heat``/``fix_salt``, ``fix_eta_drift``,
+      ``freshwater_closure``, ``S_ref``.
+    - **Runtime invariant checks**: ``enable_runtime_checks`` + bounds
+      (``min_water_column_m``, ``max_abs_eta_m``, ``temperature_min/max_c``,
+      ``salinity_min/max_psu``).
+
+    Minimal run (everything else defaults to sane Earth values)::
+
+        cfg = LatLonCGridOceanConfig()       # constant A_v/K_v, no physics pipeline
+
+    Production-style::
+
+        cfg = LatLonCGridOceanConfig(
+            A_h=3e4, A_h_lat_scaling=True, B_h=1e10, C_smag=0.15,
+            bottom_drag_r=2.5e-3, implicit_vertical_mixing=True,
+            barotropic_solver="implicit", eos="wright",
+            physics=OceanPhysicsConfig(...),  # KPP/TKE + GM/Redi
+        )
+
+    Same parameter set as LatLonOceanConfig; kept separate since operator
+    semantics differ (compact stencils vs centered).
+
+    Section headers below mark the contiguous top run of fields. The trailing
+    fields (from ``n_barotropic_substeps`` on) are kept in *chronological*
+    append order to preserve positional construction for legacy callers, so
+    they span several topics — use the group-map above to locate them, not the
+    physical field order.
     """
 
+    # --- Physical constants (defaults reference legoesm.constants; pin via
+    #     ConstantsConfig for a reference-model recipe) ---
     g: float = constants.g
     rho_0: float = constants.rho_ocean
+
+    # --- Lateral (harmonic Laplacian) viscosity ---
     A_h: float = 1.0e4
-    A_h_lat_scaling: bool = False  # When True, A_h is scaled by cos(lat) to
+    A_h_lat_scaling: bool = False  # When True, A_h is scaled by cos(lat)^N to
                                     # keep the grid Reynolds number latitude-
                                     # independent on lat-lon grids.  Default
                                     # False to preserve bit-exact regression on
                                     # legacy configs.
+    A_h_cos_power: int = 1         # Exponent N on cos(lat) used when
+                                    # ``A_h_lat_scaling`` is True.  Equivalent
+                                    # to Veros's ``hor_friction_cosPower``.
+                                    # N=1 (constant grid Reynolds, default) is
+                                    # the production choice; N=2 (constant
+                                    # viscous CFL, legacy) preserves the
+                                    # pre-2024 convention.
     A_h_floor: float = 0.0         # Minimum effective A_h [m²/s] after latitude
                                     # scaling.  Prevents viscosity from vanishing
                                     # at extreme latitudes.  Recommended 1000.0
@@ -560,6 +700,8 @@ class LatLonCGridOceanConfig(NamedTuple):
                                     # dx/dy anisotropy makes isotropic A_h
                                     # either too strong (zonal) or too weak
                                     # (meridional).
+
+    # --- Biharmonic viscosity ---
     B_h: float = 0.0
     B_h_lat_scaling: bool = True   # Apply (cos(lat)/cos_max)⁴ scaling to B_h.
                                     # Default True (MOM6 convention) prevents
@@ -576,6 +718,7 @@ class LatLonCGridOceanConfig(NamedTuple):
                                    # baroclinic geostrophy (which lives
                                    # in u' = u_3d - U_bar).  HIM/MOM6
                                    # BIHARMONIC_BAROTROPIC analog.
+    # --- Smagorinsky eddy viscosity ---
     C_smag: float = 0.0            # Biharmonic Smagorinsky coefficient
     C_smag_lap: float = 0.0        # Laplacian Smagorinsky coefficient.
                                     # When > 0, adds flow-adaptive Laplacian
@@ -592,6 +735,9 @@ class LatLonCGridOceanConfig(NamedTuple):
                                     # current jets WITHOUT self-CFL-violating at
                                     # the sharp jet (the WBC cold-start blowup).
                                     # ~0.125 (1/8) is a safe 2-D Laplacian cap.
+
+    # --- Bottom drag (dynamics-level; the physics-pathway BottomDragConfig is
+    #     deprecated — set drag here) ---
     bottom_drag_r: float = 0.0
     bottom_drag_bbl_thickness: float = 0.0
     bottom_drag_bg_velocity: float = 0.0  # MOM6 DRAG_BG_VEL [m/s]; when >0,
@@ -599,10 +745,18 @@ class LatLonCGridOceanConfig(NamedTuple):
                                            # tau ∝ √(u²+v²+u_bg²) · u, with
                                            # the linear-in-u limit set to
                                            # bottom_drag_r at |u|→0.
+
+    # --- Tracer diffusivity & vertical mixing (A_v/K_v are constant fallbacks
+    #     unless a physics vertical-mixing scheme / implicit_vertical_mixing
+    #     overrides them) ---
     K_h: float = 0.0
     K_bih: float = 0.0
     A_v: float = 1.0e-3
     K_v: float = 1.0e-4
+
+    # === Chronological (positional-stability) tail — grouped in the docstring
+    #     map, NOT by field order: barotropic solver, conservation, numerics
+    #     choices, runtime-check bounds, polar-cap boost, EOS/physics, constants.
     n_barotropic_substeps: int = 30
     hyperdiff_coeff: float = 0.0
     use_conservation_fixer: bool = False
@@ -636,7 +790,7 @@ class LatLonCGridOceanConfig(NamedTuple):
     differentiable_barotropic: bool = False
     freshwater_closure: str = "virtual_salt_flux"
     S_ref: float = 35.0          # Reference salinity for virtual salt flux [PSU]
-    tracer_advection: str = "tvd"  # "upwind", "tvd", "ppm_fct", "ppm", "dst3", "dst3_multidim", "som", "weno5", "weno7"
+    tracer_advection: str = "tvd"  # "upwind", "centered" (unlimited 2nd-order, Veros adv_flux_2nd), "tvd" (Van Leer), "superbee" (Sweby/Veros), "ppm_fct", "ppm", "dst3", "dst3_multidim", "som", "weno5", "weno7"
     gm_redi: object = None         # GMRediConfig or None; enables GM/Redi lateral mixing
     physics: object = None
     eos: str = "wright"
@@ -690,6 +844,19 @@ class LatLonCGridOceanConfig(NamedTuple):
     barotropic_implicit_theta_pgf: float = 0.55
     barotropic_implicit_pcg_tol: float = 1.0e-10
     barotropic_implicit_pcg_maxiter: int = 200
+    # Rigid-lid streamfunction solver knobs (only used when
+    # ``barotropic_solver = 'rigid_lid'``).  The rigid lid removes the free
+    # surface entirely: the depth-integrated flow is non-divergent and carried
+    # by a barotropic streamfunction ψ on vertex (corner) points, solved each
+    # step from the elliptic vorticity equation ∇·((1/H)∇)ψ = curl((1/H)∫F dz)
+    # (Veros core/external/solve_stream.py).  The column depth H is FIXED at the
+    # bathymetry (no eta dependence).  ψ is integrated with Adams-Bashforth-2
+    # reusing ``ab2_epsilon`` as the Veros AB_eps.  The elliptic solve is the
+    # AD-safe ``jax.scipy.sparse.linalg.cg`` (the operator is symmetric).  The
+    # net transport through multiply-connected/periodic-channel domains is set
+    # by the island line-integral constraints (see rigid_lid_islands.py).
+    rigid_lid_cg_tol: float = 1.0e-11
+    rigid_lid_cg_maxiter: int = 1000
     # Pressure-gradient force scheme on partial cells.  ``"adcroft"``
     # (default): existing centered-diff p_prime + Adcroft & Campin 2004
     # face-PGF correction.  ``"smc03"``: full Shchepetkin & McWilliams
@@ -713,7 +880,27 @@ class LatLonCGridOceanConfig(NamedTuple):
     #   is NOT preserved in this form — new extrema may appear with
     #   nonlinear limiters (TVD, WENO, FCT).
     tracer_time_integrator: str = "euler"
-    ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar)
+    ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar) — also the
+    #   Adams-Bashforth ε for the OUTER integrator (Veros AB_eps=0.1).
+    # Outer (baroclinic) time integrator. "forward_euler" (default) = the existing
+    # single-step split-explicit scheme. "ab2" = Adams-Bashforth-2 on the EXPLICIT
+    # tendency with implicit vertical mixing applied ONCE afterward (Veros-faithful;
+    # core/thermodynamics.py tracers + core/external/solve_stream.py momentum):
+    #   X*      = X^n + (1.5+ε)·ΔX_expl^n − (0.5+ε)·ΔX_expl^{n-1}
+    #   X^{n+1} = ImplicitVertMix(X*)
+    # where ΔX_expl is the explicit-only forward-Euler increment (NOT including the
+    # implicit vertical mixing), carried on ``{T,S,u,v}_incr_prev``. The barotropic
+    # mode is kept from the barotropic solve (un-AB2'd); only the baroclinic momentum
+    # deviation is AB2'd. Because implicit vertical mixing is applied once (a
+    # backward-Euler solve), the scheme is UNCONDITIONALLY stable in the vertical and
+    # compatible with convective adjustment. Do NOT combine with
+    # ``tracer_time_integrator="ab2"`` (double-AB2 of the explicit tracer tendency).
+    # CONSERVATION: AB2 extrapolates the tracer CONCENTRATION (like Veros), so the
+    # area·thickness-weighted heat/salt content is conserved EXACTLY only with fixed
+    # layer thickness — ``barotropic_solver="rigid_lid"`` (the faithful ACC config) or
+    # ``use_conservation_fixer=True``. Under a moving free surface it has a small
+    # O(Δη) tracer-content drift; "forward_euler" conserves to machine zero.
+    outer_integrator: str = "forward_euler"
     # Implicit (backward-Euler) vertical mixing.  When True (default):
     #   1. The PE tendency function skips the explicit ``A_v`` viscous
     #      block (lines tagged ``if config.A_v > 0 ...``).
@@ -755,6 +942,71 @@ class LatLonCGridOceanConfig(NamedTuple):
     A_h_cap_lat_deg: float = 75.0
     # Half-width of the polar-cap boost tanh transition [°]; default 5°.
     A_h_cap_width_deg: float = 5.0
+    # Ocean-scoped physical constants (Phase G, G-C1). Defaults reference
+    # legoesm.constants (canonical Earth) -> zero behaviour change. A recipe
+    # pins these to a reference model (e.g. Veros) via the public config API.
+    # Read-through wiring (de-mirroring) is G-C2+. NOTE: no field whose default
+    # READS the `constants` module may be declared after this one — the default
+    # here assigns the class-body name `constants` to a ConstantsConfig
+    # instance, shadowing the module. Fields with literal defaults (e.g.
+    # momentum_flux_scheme below) are fine to append.
+    constants: ConstantsConfig = ConstantsConfig()
+    # Horizontal momentum-flux reconstruction, used ONLY when
+    # momentum_advection="flux_form": "upwind" (1st-order, dissipative, stable)
+    # or "centered" (2nd-order, non-dissipative). Ignored by the
+    # vector_invariant / weno momentum paths. Literal default -> safe after
+    # `constants`.
+    momentum_flux_scheme: str = "upwind"
+    # Lateral (harmonic) momentum-viscosity OPERATOR form. Selects how the A_h
+    # Laplacian viscosity acts on the vector velocity field:
+    #   "vector_laplacian" (default) — legoESM's VECTOR Laplacian
+    #     ∇²_vec(u,v) = grad(div) − k×grad(curl) (``vector_laplacian_cgrid``),
+    #     which carries the spherical curvature coupling between u and v. The
+    #     paired K_diss_h (when source_kdiss_h+kdiss_h_flux_form) is the Helmholtz
+    #     form A_h·(div²+ζ²) (``vector_laplacian_dissipation_cgrid``). DEFAULT ⇒
+    #     every existing run is BIT-IDENTICAL.
+    #   "flux_divergence" — Veros's component-wise FLUX-DIVERGENCE harmonic
+    #     friction ∇·(A_h∇u), ∇·(A_h∇v) per velocity component, with NO
+    #     curvature coupling (``flux_divergence_viscosity_cgrid``; matches
+    #     ``veros/core/friction.py`` ``harmonic_friction``). The same cos(lat)
+    #     A_h scaling (``A_h_lat_scaling``/``A_h_cos_power``) is applied INSIDE the
+    #     flux as Veros's ``enable_hor_friction_cos_scaling``/``hor_friction_cosPower``.
+    #     The paired K_diss_h is the energy-consistent component-wise A_h·|∇u|²
+    #     (Veros ``calc_diss_u``/``calc_diss_v``), built from the SAME face fluxes.
+    #     B_h biharmonic / Smagorinsky / Leith are unaffected (they still use the
+    #     vector operators). The ACC recipe opts in. Literal default -> safe after
+    #     `constants`.
+    lateral_viscosity_operator: str = "vector_laplacian"
+    # Asynchronous ("distorted-physics") time stepping: dt_mom = dt / dt_mom_ratio.
+    # The `dt` passed to step()/integrate_scan IS dt_tracer (the clock — Veros
+    # advances vs.time by dt_tracer), and momentum + the barotropic solve + implicit
+    # vertical FRICTION are integrated with the SHORTER dt_mom, while tracers +
+    # continuity/eta + implicit vertical DIFFUSION + the clock use dt_tracer. This is
+    # Veros's dt_mom≠dt_tracer (acc.py dt_mom=4800, dt_tracer=43200 ⇒ ratio 9): NOT a
+    # subcycle (momentum() runs once), an under-relaxation that accelerates the
+    # transient to the SAME steady state. Default 1.0 ⇒ dt_mom == dt_tracer == dt ⇒
+    # BIT-IDENTICAL. Requires barotropic_solver="rigid_lid" when != 1.0: under the
+    # rigid lid the column depth H is fixed, so the tracer flux-form update (h fixed)
+    # is exactly dt-independent and tracer mass is conserved; a moving free surface
+    # would mix a dt_mom-evolved thickness with a dt_tracer flux divergence and leak
+    # O((dt_tracer−dt_mom)·∂h/∂t) tracer mass (rejected at config validation).
+    dt_mom_ratio: float = 1.0
+    # Apply the surface TRACER forcing (T*/S* restoring + prescribed q_net +
+    # penetrating shortwave) IMPLICITLY inside the backward-Euler vertical-mixing
+    # solve — matching Veros, which adds ``dt_tracer·forc/dz[surface]`` to the
+    # implicit vertical-diffusion tridiagonal RHS at weight 1.0
+    # (``veros/core/thermodynamics.py``), NOT as an AB2-extrapolated explicit
+    # tendency. When True, that surface forcing is WITHHELD from the explicit
+    # ``dT_dt``/``dS_dt`` (so under the faithful AB2 outer integrator it is not
+    # over-applied by the 1.6× extrapolation) and routed into
+    # ``LatLonCGridOceanTendencies.surface_tracer_forcing``, which the model step
+    # adds (× dt_tracer) to the tracer solve INPUT before the tridiagonal solve.
+    # WIND STRESS (→ du_dt/dv_dt) is unaffected — it is explicit/AB2'd in BOTH
+    # legoESM and Veros and already matches. Requires
+    # ``implicit_vertical_mixing=True`` (the implicit solve is where the source
+    # is placed); rejected otherwise at config validation. Default False ⇒
+    # current EXPLICIT surface-forcing placement ⇒ BIT-IDENTICAL.
+    surface_forcing_implicit: bool = False
 
     # --- Adaptive-implicit vertical momentum advection ---
     # (Shchepetkin 2015 / NEMO ``ln_zad_Aimp``).  Appended at the end of

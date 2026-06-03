@@ -24,6 +24,82 @@ class RichardsonVerticalMixingConfig(NamedTuple):
     Pr_t: float = 10.0   # Turbulent Prandtl number
 
 
+class TKEConfig(NamedTuple):
+    """Gaspar (1990) / Burchard (2002) prognostic TKE closure.
+
+    Veros's canonical vertical-mixing scheme (``enable_tke=True``).
+    Solves a prognostic budget for turbulent kinetic energy per unit
+    mass, then derives the eddy diffusivities ``K_M`` / ``K_H`` from
+    TKE and a mixing-length closure.
+
+    Closure equations (per column, at interfaces unless noted):
+
+        dTKE/dt = P_s + P_b - eps + d/dz(alpha_tke * K_M * dTKE/dz)
+
+    with
+
+        P_s   = K_M * (du/dz)^2 + K_M * (dv/dz)^2     (shear production)
+        P_b   = -K_H * N^2                            (buoyancy work)
+        eps   = c_eps * TKE^(3/2) / l_eps             (dissipation)
+        K_M   = c_k * l_k * sqrt(2 * TKE)
+        K_H   = K_M
+
+    The mixing lengths ``l_k`` (for K_M) and ``l_eps`` (for dissipation)
+    follow the Bougeault-Lacarrere asymmetric construction
+    (``tke_mxl_choice=2``): an upward and downward integration of TKE
+    against the local Brunt-Vaisala frequency gives ``l_up`` and
+    ``l_dn``; ``l_k = sqrt(l_up * l_dn)`` and
+    ``l_eps = max(l_up, l_dn)``. ``tke_mxl_choice=1`` selects a simple
+    parabolic-bounded length scale; choice ``2`` is the production
+    default.
+
+    Surface flux into TKE is ``(|tau|/rho_0)^(3/2)`` (Wallace surface
+    parameterisation).
+
+    Parameter naming mirrors Veros's settings 1:1 so the legoESM-Veros
+    recipe maps each knob directly. Defaults are Veros's DINO / ACC
+    canonical values.
+    """
+    c_k: float = 0.1
+    c_eps: float = 0.7
+    alpha_tke: float = 30.0
+    mxl_min: float = 1.0e-8
+    tke_mxl_choice: int = 2
+    kappaM_min: float = 2.0e-4
+    kappaM_max: float = 100.0            # convective ceiling on K_M [m^2/s] (Veros default)
+    kappaH_min: float = 2.0e-5
+    enable_kappaH_profile: bool = True
+    tke_surface_min: float = 1.0e-4      # surface TKE floor [m^2/s^2]
+    tke_background: float = 1.0e-6       # interior TKE floor [m^2/s^2]
+    # ----- Static-stability N^2 mode (deep-ocean ventilation / convection) -----
+    # ``"insitu"`` (default, BIT-IDENTICAL legacy): N^2 from the in-situ
+    #   density difference at native pressures, clipped >= 0 (convection
+    #   never fires through the TKE -- a static-stability bias that leaves
+    #   the abyss unventilated).
+    # ``"adiabatic"``: N^2 by adiabatic parcel displacement to the upper
+    #   cell's pressure (Veros thermodynamics.py:99-103), SIGNED (not
+    #   clipped). With this, a statically-unstable column gives N^2 < 0, the
+    #   buoyancy length scale blows up, and K_M saturates toward
+    #   ``kappaM_max`` -- i.e. the TKE itself convects, exactly as Veros's
+    #   ``enable_tke`` path does. Requires the caller to pass T/S/pressure
+    #   + an EOS to :func:`tke_vertical_mixing`.
+    n2_mode: str = "insitu"
+    # ----- Tracer/momentum Prandtl chain (abyssal over-diffusion fix) -----
+    # ``"unit"`` (default, BIT-IDENTICAL legacy): K_H = max(K_M, kappaH_min)
+    #   -- the MOMENTUM floor ``kappaM_min`` leaks into the TRACER floor
+    #   (``kappaH_min`` is dead) -> abyssal K_H ~ kappaM_min, ~6-10x too
+    #   diffusive vs Veros.
+    # ``"constant"``: K_H = max(kappaH_min, K_M / Prandtl_tke0).
+    # ``"richardson"``: Veros ``enable_Prandtl_tke=True`` --
+    #   Prandtl = max(1, min(10, 6.6 * Ri)) with the gradient Richardson
+    #   number Ri = N^2 / max(shear^2, eps); K_H = max(kappaH_min,
+    #   K_M / Prandtl). In the stratified interior Pr -> 10 (small abyssal
+    #   K_H); in a convecting column Ri < 0 -> Pr -> 1 (K_H tracks the large
+    #   convective K_M). This is the Veros ACC default.
+    prandtl_mode: str = "unit"
+    Prandtl_tke0: float = 10.0           # constant Prandtl number (Veros Prandtl_tke0)
+
+
 class KPPConfig(NamedTuple):
     """LMD94-style K-Profile Parameterization.
 
@@ -69,10 +145,11 @@ class KPPConfig(NamedTuple):
 
 class VerticalMixingConfig(NamedTuple):
     """Top-level vertical mixing configuration."""
-    scheme: str = "constant"  # "constant", "richardson", "kpp", "none"
+    scheme: str = "constant"  # "constant", "richardson", "kpp", "tke", "none"
     constant: ConstantVerticalMixingConfig = ConstantVerticalMixingConfig()
     richardson: RichardsonVerticalMixingConfig = RichardsonVerticalMixingConfig()
     kpp: KPPConfig = KPPConfig()
+    tke: TKEConfig = TKEConfig()
     # Tidal mixing is ADDITIVE: when ``tidal.enabled=True`` the
     # caller computes a ``K_tidal(x, y, z)`` field via
     # :func:`legoesm.ocean.physics.vertical_mixing.tidal.compute_tidal_diffusivity`
