@@ -28,10 +28,14 @@ import jax.numpy as jnp
 
 from legoesm.core.field import Field
 from legoesm.core.state import MPASHydrostaticState
-from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
-    MPASPrimitiveEquationConfig,
-    mpas_hydrostatic_tendencies,
-)
+# NOTE: the MPAS dynamics live in the atmosphere component (a layer ABOVE this
+# shared-substrate ``parallel`` package).  Importing them here would make
+# legoesm-core depend on legoesm-atmosphere (a cycle), so — exactly as
+# ``latlon_mpi`` does — the rank-local model is re-instantiated from the
+# passed-in instance via ``type(model)(...)`` and its ``.tendencies`` method is
+# used, never the atmosphere module.  The ``MPASPrimitiveEquationConfig``
+# annotation is a lazy string (``from __future__ import annotations``), so it
+# needs no import either.
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.parallel.voronoi_partition import (
     VoronoiPartition,
@@ -309,7 +313,7 @@ def make_voronoi_mpi_step(
     model,
     layout: VoronoiPartitionLayout,
     sigma_coord,
-    config: MPASPrimitiveEquationConfig | None = None,
+    config=None,
 ):
     """Build an MPI-parallel step function for MPAS dynamics.
 
@@ -335,6 +339,14 @@ def make_voronoi_mpi_step(
     local_mesh = layout.local_mesh
     halo_ex = layout.halo_exchange
     owned_mask = layout.owned_mask_cells
+
+    # Re-instantiate the dynamics model on the rank-LOCAL mesh using the same
+    # class as the passed-in instance (``type(model)``) — so this substrate
+    # ``parallel`` module never imports the atmosphere component yet still drives
+    # the exact MPAS tendency the global model would.  ``.tendencies(state)``
+    # forwards to ``mpas_hydrostatic_tendencies(state, mesh, sigma_coord, config)``
+    # with the matching defaults (physics_tendency=None, dt=0.0).
+    local_model = type(model)(local_mesh, sigma_coord, config)
 
     # Pre-compute the owned-area mask and the global total area once at
     # setup time.  Both are state-independent constants:
@@ -392,9 +404,7 @@ def make_voronoi_mpi_step(
     def _mpi_tendency_fn(state: MPASHydrostaticState) -> MPASHydrostaticState:
         """Exchange halos then compute tendencies on local mesh."""
         state_ex = _exchange_mpas_state(state)
-        tend = mpas_hydrostatic_tendencies(
-            state_ex, local_mesh, sigma_coord, config,
-        )
+        tend = local_model.tendencies(state_ex)
         return MPASHydrostaticState(
             u=state.u.replace(data=tend.du_dt.data),
             T=state.T.replace(data=tend.dT_dt.data),

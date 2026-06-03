@@ -268,8 +268,14 @@ ignore_imports = [
     "legoesm.core.hardware -> legoesm.runtime.backend",
     "legoesm.core.hardware -> legoesm.runtime.config",
     "legoesm.core.precision -> legoesm.runtime.backend",
-    # parallel -> atmosphere (MPAS-MPI): fixed next via type(model) reinstantiation.
-    "legoesm.parallel.voronoi_mpi -> legoesm.atmosphere.dynamics.primitive_eq_mpas",
+    # parallel.voronoi_mpi: FIXED — re-instantiates the dynamics model via
+    # type(model)(local_mesh, ...) and calls .tendencies (no atmosphere import).
+    # parallel.sharded_dynamics: still baselined.  Its tendency call runs INSIDE a
+    # shard_map on a TRACED per-device mesh, so type(model)(...) can't be used
+    # (the model __init__ takes float(jnp.sum(mesh.areaCell)) — concretization
+    # error under tracing).  Deferred follow-up: inject the tendency fn (DI) or
+    # resolve it via a registry.  This is a function-scope import, so it does NOT
+    # block import-time independence — only the standalone-runtime MPAS-sharded path.
     "legoesm.parallel.sharded_dynamics -> legoesm.atmosphere.dynamics.primitive_eq_mpas",
     # io config-aware checkpoint/restart -> forcing/driver: fixed via io re-scope
     # (config-aware modules move to a higher member; pure-array io stays in core).
