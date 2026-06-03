@@ -115,6 +115,17 @@ def test_operators_on_spectral_grid_raises():
         instantiate("gaussian", extent="global", resolution=4, operators=True)
 
 
+def test_plane_operators_live_with_the_component_not_a_substrate_adapter():
+    # The doubly-periodic plane's operators are the Cartesian operators in the
+    # atmosphere component, not a substrate adapter — instantiate flags this
+    # rather than returning a half-built pair.
+    with pytest.raises(ValueError, match="plane.*operators are Cartesian"):
+        instantiate(
+            "plane", extent="double_periodic", operators=True,
+            nx=8, ny=8, nlev=4, dx=1e3, dy=1e3,
+        )
+
+
 def test_nesting_is_flagged_unavailable():
     with pytest.raises(NotImplementedError, match="nesting is not"):
         instantiate("latlon", extent="regional", nesting=True, n_lat=8, n_lon=8)

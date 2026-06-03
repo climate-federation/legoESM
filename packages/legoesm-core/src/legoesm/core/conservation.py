@@ -1069,18 +1069,28 @@ def fix_energy_mpas(state_new, state_old, mesh, g=constants.g):
     Rescales ``u`` so the total energy of ``state_new`` matches that of
     ``state_old``: the four contributing sums (KE/PE of old and new) are batched
     into ONE allreduce instead of four when the mesh is sharded across ranks.
+
+    The KE/PE integrands are promoted to the precision-policy ``conservation_
+    accumulator`` (fp64 where supported, fp32 fallback on Metal) BEFORE the
+    area-weighted reduction — so the energy budget does not lose digits to fp32
+    cancellation when the model runs in fp32 storage (same rationale as
+    :func:`fix_mass_mpas`).  The resulting ``scale`` is a dimensionless ratio,
+    cast back to ``u``'s storage dtype so the velocity field keeps its policy
+    dtype (the accumulator only sharpens the ratio, it does not widen ``u``).
     """
     _TINY = float(jnp.finfo(jnp.float32).tiny)
-    area = mesh.areaCell
+    acc = conservation_accumulator()
+    area = mesh.areaCell.astype(acc)
+    g_acc = jnp.asarray(g, dtype=acc)
 
     def _ke_pe_terms(state):
-        h = state.h.data
-        u = state.u.data
-        h_s = state.h_s.data
+        h = state.h.data.astype(acc)
+        u = state.u.data.astype(acc)
+        h_s = state.h_s.data.astype(acc)
         # KE and PE share ``area`` on the same horizontal axes — stack the two
         # integrands and reduce locally once.
         _stack = jnp.stack(
-            [kinetic_energy_cell(u, mesh) * h, 0.5 * g * (h + h_s) ** 2],
+            [kinetic_energy_cell(u, mesh) * h, 0.5 * g_acc * (h + h_s) ** 2],
             axis=-1,
         ) * area[..., None]
         _pair = jnp.sum(_stack, axis=tuple(range(area.ndim)))
@@ -1099,5 +1109,7 @@ def fix_energy_mpas(state_new, state_old, mesh, g=constants.g):
     KE_target = jnp.maximum(E_old - PE_new, 0.0)
     scale = jnp.where(KE_new > _TINY, jnp.sqrt(KE_target / KE_new), 1.0)
 
+    # ``scale`` is dimensionless — cast back so ``u`` keeps its storage dtype.
+    scale = scale.astype(state_new.u.data.dtype)
     u_fixed = state_new.u.replace(data=state_new.u.data * scale)
     return state_new._replace(u=u_fixed)
