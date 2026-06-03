@@ -171,6 +171,14 @@ ACC_GM_REDI_CONFIG = GMRediConfig(
     #                              the explicit F_z (the tier-2 dtemp_iso residual).
     K_iso_steep=500.0,           # ↔ Veros K_iso_steep (acc.py:41): horizontal-
     #                              diffusion floor on K_11/K_22 at steep slopes.
+    slope_density="neutral",     # ↔ Veros isoneutral.py:40-41: build the slopes
+    #                              from the LOCALLY-REFERENCED neutral density
+    #                              gradient ∂ρ/∂T·∇T+∂ρ/∂S·∇S (get_drhodT/get_drhodS
+    #                              at abs(zt)), NOT the in-situ ∇ρ. Removes the
+    #                              adiabatic compressibility bias in ∂_zρ that
+    #                              collapsed legoESM's K_33 (and S²) 10-25× interior
+    #                              / ~10⁴× near surface vs Veros — the genuine
+    #                              T_iso oracle-gap lever (corr 0.17 in-situ).
     # Prognostic EKE (Eden-Greatbatch) with the Rhines-limited mixing length —
     # Veros ACC runs enable_eke=True (veros/setups/acc/acc.py:67-75). The closure
     # FORM + params reproduce Veros's GM coefficient K_gm AND eke_len/L_rossby/

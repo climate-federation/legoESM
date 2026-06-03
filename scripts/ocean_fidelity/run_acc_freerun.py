@@ -210,7 +210,14 @@ context; see docs/ocean_fidelity/oracle_recipe_strategy.md §8):
   4. EKE Redi K_iso=K_gm: now MATCHED (prognostic Redi, commit 4c1ec219) -- the
      step drives kappa_Redi from the prognostic kappa (Veros
      enable_eke_isopycnal_diffusion), oracle machine-exact (gate R3).
-  5. GM/Redi isoneutral discretization differs (tier-2 T_iso corr ~0.17).
+  5. GM/Redi isoneutral slopes: NOW use the Veros-faithful NEUTRAL
+     (locally-referenced) density gradient ∂ρ/∂T·∇T+∂ρ/∂S·∇S
+     (GMRediConfig.slope_density="neutral", isoneutral.py:40-41), removing the
+     in-situ compressibility bias that collapsed K_33. Tier-2 T_iso interior
+     corr 0.20 (in-situ) -> 0.37 (neutral, Veros K_iso fed); neutral K_33 now
+     tracks Veros (ratio ~1.0 at the thermocline). Residual = the per-triad
+     drodzb kr-sum + exact metric factors (dxu/dxt/dyu/dyt/cost), documented as
+     a follow-up; inert on this uniform channel.
 These are NOT bugs; they are the documented gaps a measure-first run quantifies.\
 """
 

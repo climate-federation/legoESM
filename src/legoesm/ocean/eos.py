@@ -206,6 +206,76 @@ def haline_contraction_coeff(
     return (drho_dS / rho).astype(T.dtype)
 
 
+def eos_density_derivatives(
+    eos_fn,
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    p: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    r"""Locally-referenced EOS partial derivatives ``(∂ρ/∂T, ∂ρ/∂S)``.
+
+    Returns the two partial derivatives of an arbitrary EOS callable
+    ``eos_fn(T, S, p) -> ρ`` evaluated at the LOCAL pressure ``p`` — the
+    ingredients of the locally-referenced *neutral* density gradient
+    ``∇_neutral ρ = (∂ρ/∂T)·∇T + (∂ρ/∂S)·∇S`` used by isoneutral mixing
+    (Veros ``get_drhodT`` / ``get_drhodS`` at ``abs(zt)``;
+    ``veros/core/isoneutral/isoneutral.py:40-41``).
+
+    Relationship to the thermodynamic coefficients already in this module:
+    ``∂ρ/∂T = −ρ·α`` (``thermal_expansion_coeff``) and
+    ``∂ρ/∂S = +ρ·β`` (``haline_contraction_coeff``).  Rather than restrict
+    to those wright-only helpers, this differentiates the *selected*
+    ``eos_fn`` directly via :func:`jax.grad` so EVERY dispatchable EOS
+    (wright, linear, unesco80, veros_nonlin2/3) is supported with one code
+    path — exactly the autodiff α/β already use internally for wright.
+
+    Holding ``p`` fixed during the differentiation is deliberate and
+    faithful: the neutral gradient is the density change at constant
+    (local) reference pressure, so the adiabatic compressibility term
+    ``∂ρ/∂p·∂p/∂z`` — which makes the in-situ ``∂ρ/∂z`` ~4× too steep — is
+    excluded by construction.
+
+    Parameters
+    ----------
+    eos_fn : Callable[[array, array, array], array]
+        Equation of state (e.g. from :func:`make_eos_fn`).
+    T, S, p : array
+        Potential temperature [°C], salinity [PSU], pressure [Pa] at the
+        SAME points; identical shapes.
+
+    Returns
+    -------
+    drho_dT : array — ``∂ρ/∂T`` [kg/m³/K], same shape as inputs.
+    drho_dS : array — ``∂ρ/∂S`` [kg/m³/(g/kg)], same shape as inputs.
+
+    Notes
+    -----
+    Fully ``jax.grad``-safe: only EOS evaluations + autodiff, no
+    ``where``/``cond`` on traced values.  Promotes to the EOS compute dtype
+    (float64 in mixed mode) for the polynomial evaluation, matching α/β.
+    """
+    hi = _resolve_dtype("equation_of_state", "compute")
+    T64 = T.astype(hi)
+    S64 = S.astype(hi)
+    p64 = p.astype(hi)
+    flat_T = T64.ravel()
+    flat_S = S64.ravel()
+    flat_p = p64.ravel()
+
+    def _scalar(t, s, pp):
+        # eos_fn is array-shaped; wrap scalars in length-1 arrays so the
+        # promotion-to-float64 astype inside the EOS sees an ndarray.
+        return eos_fn(t[None], s[None], pp[None])[0]
+
+    drho_dT = jax.vmap(jax.grad(_scalar, argnums=0))(
+        flat_T, flat_S, flat_p
+    ).reshape(T.shape)
+    drho_dS = jax.vmap(jax.grad(_scalar, argnums=1))(
+        flat_T, flat_S, flat_p
+    ).reshape(T.shape)
+    return drho_dT.astype(T.dtype), drho_dS.astype(T.dtype)
+
+
 # ==============================================================================
 # Linear equation of state
 # ==============================================================================

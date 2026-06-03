@@ -113,6 +113,27 @@ class GMRediConfig(NamedTuple):
     # ``iso_slopec=0.01, iso_dslope=0.005`` this is ``0.5``.
     visbeck: VisbeckConfig = VisbeckConfig()
     slope_scheme: str = "triads"     # "triads" (default) or "centered"
+    slope_density: str = "in_situ"   # "in_situ" (default) or "neutral"
+    # ^ Density gradient used to build the isoneutral SLOPES (NOT the tracer
+    # gradients, which are always the raw T/S gradients).
+    # - "in_situ" (default): slope = -∇_h ρ / ∂_z ρ from the IN-SITU density ρ.
+    #   ∂_z ρ then carries the adiabatic compressibility term ∂ρ/∂p·∂p/∂z
+    #   (≈ g·ρ₀/c_s² ≈ 4.5e-3 kg/m³/m), making |∂_z ρ| ~4× too steep, S ~4× too
+    #   small, S² ~16×, and the vertical isoneutral diagonal K_33 ∝ S² 10–25×
+    #   too small (≫ near the surface). BIT-IDENTICAL to the pre-2026 scheme.
+    # - "neutral": build the slope-input density gradients from the LOCALLY-
+    #   REFERENCED NEUTRAL form ∂ρ/∂T·∇T + ∂ρ/∂S·∇S with ∂ρ/∂T, ∂ρ/∂S the EOS
+    #   partial derivatives at the LOCAL cell pressure (Veros get_drhodT /
+    #   get_drhodS at abs(zt); veros/core/isoneutral/isoneutral.py:40-41). This
+    #   removes the compressibility bias so the slope, S², and K_33 track Veros.
+    #   The stable-strat floor min(0,∂_zρ)-eps is applied to the NEUTRAL ∂_zρ.
+    #   ACC recipe opts in. Supported by both slope_scheme="triads" and
+    #   "centered" on the lat-lon C-grid.
+    #   FOLLOW-UP (documented, NOT built here): Veros sums BOTH kr triad levels
+    #   for drodzb and carries the exact metric factors dxu/dxt/dyu/dyt/cost in
+    #   the K_11/K_22/K_33 assembly; legoESM uses the upper-cell drdT for ∂_zρ
+    #   and the uniform-metric 0.25·Σ. Inert on the uniform ACC channel; a true
+    #   tripolar/variable-metric run would want the kr-sum + metric factors.
     surface_complement: bool = True  # Add horizontal diffusion (kappa_Redi)
                                       # in the surface layer where DM95 tapers
                                       # Redi to zero.  Ferrari et al. (2008).

@@ -36,7 +36,12 @@ from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import _neumann_fill_cgrid
 from legoesm.ocean.dynamics.ocean_tendency_common import (
     iterate_eos_and_pressure_anomaly,
 )
-from legoesm.ocean.eos import make_eos_fn, rho_0 as _RHO_0
+from legoesm.ocean.eos import (
+    compute_hydrostatic_pressure,
+    eos_density_derivatives,
+    make_eos_fn,
+    rho_0 as _RHO_0,
+)
 from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
     _EPS,
     compute_eke_kappa_gm,
@@ -117,6 +122,125 @@ def _kappa_center_uvw(kappa, nlev: int):
 
 
 # =====================================================================
+# Neutral (locally-referenced) density-gradient ingredients
+# =====================================================================
+
+_VALID_SLOPE_DENSITY = frozenset({"in_situ", "neutral"})
+
+
+def _validate_slope_density(slope_density: str) -> None:
+    """Fail-fast on an unknown ``slope_density`` literal (Dispatch Discipline).
+
+    The in-situ / neutral selection is a binary ``if`` rather than a factory,
+    but an unrecognised value must NOT silently fall through to the in-situ
+    branch (a typo would then mask the neutral option entirely).
+    """
+    if slope_density not in _VALID_SLOPE_DENSITY:
+        raise ValueError(
+            f"Unknown GMRediConfig.slope_density={slope_density!r}; "
+            f"expected one of {sorted(_VALID_SLOPE_DENSITY)}."
+        )
+
+
+def _neutral_drho_derivs(T, S, mask, z_coord, jacobian, eos_fn, rho_0, g):
+    """Cell-centred EOS partials ``(∂ρ/∂T, ∂ρ/∂S)`` at the LOCAL cell pressure.
+
+    The ingredients of the locally-referenced *neutral* density gradient used
+    by the ``slope_density="neutral"`` isoneutral slope build (Veros
+    ``get_drhodT`` / ``get_drhodS`` at ``abs(zt)``;
+    ``veros/core/isoneutral/isoneutral.py:40-41``).
+
+    The LOCAL pressure is built EXACTLY as the in-situ EOS iteration
+    (``iterate_eos_and_pressure_anomaly``) builds it — the *reference*
+    hydrostatic pressure ``compute_hydrostatic_pressure(ρ, η=0, dz_ref, J=1)``
+    — so the neutral derivatives reference the SAME cell pressure the in-situ
+    ρ (and hence the in-situ slope) already uses (plan §"local pressure must
+    be the SAME hydrostatic pressure the slope builder uses").  For a
+    hydrostatic column this is ``ρ₀·g·z``, the legoESM analogue of Veros's
+    ``abs(zt)``.  T, S are Neumann-filled so the partials on land take an
+    ocean-neighbour value (the gradients across coastlines are still masked by
+    the face masks downstream).
+
+    Returns ``(drdT, drdS)`` each ``(n_lat, n_lon, nlev)`` at cell centres,
+    masked to the wet domain.
+    """
+    T_filled = _neumann_fill_cgrid(T, mask)
+    S_filled = _neumann_fill_cgrid(S, mask)
+    # In-situ density via the SAME 2-iteration EOS coupling the slope builder
+    # uses, then the reference hydrostatic pressure (η=0, J=1) — identical to
+    # iterate_eos_and_pressure_anomaly's internal p_hydro.
+    horiz_shape = T.shape[:-1]
+    J_ref = jnp.ones(horiz_shape, dtype=T.dtype)
+    eta_ref = jnp.zeros(horiz_shape, dtype=T.dtype)
+    rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T))
+    for _ in range(2):
+        p_hydro = compute_hydrostatic_pressure(
+            rho, eta_ref, z_coord.dz_ref, J_ref, rho_0, g,
+        )
+        rho = eos_fn(T_filled, S_filled, p_hydro)
+    drdT, drdS = eos_density_derivatives(eos_fn, T_filled, S_filled, p_hydro)
+    return drdT * mask[:, :, jnp.newaxis], drdS * mask[:, :, jnp.newaxis]
+
+
+def _slope_density_face_grads(
+    rho_filled, T, S, mask, z_coord, jacobian, grid, slope_density,
+    eos_fn, rho_0, g,
+):
+    """Density gradients at the C-grid faces used to BUILD isoneutral slopes.
+
+    Returns ``(drho_dx_u, drho_dy_v, drho_dz_w)`` — the eastward (u-face),
+    northward (v-face) and vertical (w-face) density gradients with the
+    stable-strat floor on ``drho_dz_w``.  Two modes:
+
+    - ``"in_situ"`` (default, BIT-IDENTICAL): finite-difference the in-situ
+      ``rho_filled``.
+    - ``"neutral"``: the locally-referenced neutral form
+      ``∂ρ/∂T·∇T + ∂ρ/∂S·∇S``.  The horizontal face gradients use ``∂ρ/∂T``
+      interpolated to the u/v-face (``interp_cell_to_uface`` / ``..._vface``)
+      times the raw tracer face gradient; the vertical w-face gradient uses the
+      UPPER-cell ``∂ρ/∂T`` (``drdT[:, :, :-1]``) — the validated probe form,
+      matching Veros's ``drodzb`` with the cell's own derivative (the kr-sum
+      over both triad levels is the documented metric-faithful follow-up).
+
+    Shared by the centred slope builder (Visbeck/EKE diagnostics) so the two
+    modes never diverge there.  The TRIAD / K_33 path uses
+    :func:`_w_triad_slope_density_grads` instead (per-triad cell references).
+    """
+    dz_half = z_coord.dz_half_ref * jacobian[:, :, jnp.newaxis]
+    if slope_density == "neutral":
+        drdT, drdS = _neutral_drho_derivs(
+            T, S, mask, z_coord, jacobian, eos_fn, rho_0, g,
+        )
+        T_filled = _neumann_fill_cgrid(T, mask)
+        S_filled = _neumann_fill_cgrid(S, mask)
+        dTdx_u = gradient_x_cgrid(T_filled, grid)
+        dSdx_u = gradient_x_cgrid(S_filled, grid)
+        dTdy_v = gradient_y_cgrid(T_filled, grid)
+        dSdy_v = gradient_y_cgrid(S_filled, grid)
+        dTdz_w = (T_filled[:, :, :-1] - T_filled[:, :, 1:]) / jnp.maximum(
+            dz_half, _EPS_DIV)
+        dSdz_w = (S_filled[:, :, :-1] - S_filled[:, :, 1:]) / jnp.maximum(
+            dz_half, _EPS_DIV)
+        drdT_u = interp_cell_to_uface(drdT)
+        drdS_u = interp_cell_to_uface(drdS)
+        drdT_v = interp_cell_to_vface(drdT)
+        drdS_v = interp_cell_to_vface(drdS)
+        drho_dx_u = drdT_u * dTdx_u + drdS_u * dSdx_u
+        drho_dy_v = drdT_v * dTdy_v + drdS_v * dSdy_v
+        drdT_w = drdT[:, :, :-1]
+        drdS_w = drdS[:, :, :-1]
+        drho_dz_w = drdT_w * dTdz_w + drdS_w * dSdz_w
+    else:
+        drho_dx_u = gradient_x_cgrid(rho_filled, grid)
+        drho_dy_v = gradient_y_cgrid(rho_filled, grid)
+        drho_dz_w = (rho_filled[:, :, :-1] - rho_filled[:, :, 1:]) / jnp.maximum(
+            dz_half, _EPS_DIV)
+    # Stable-strat floor: ∂_zρ must be negative (z UPWARD ⇒ ρ denser below).
+    drho_dz_w = jnp.minimum(drho_dz_w, -_EPS_DIV)
+    return drho_dx_u, drho_dy_v, drho_dz_w
+
+
+# =====================================================================
 # Isopycnal slope computation
 # =====================================================================
 
@@ -127,6 +251,12 @@ def compute_isopycnal_slopes_latlon_cgrid(
     jacobian: jnp.ndarray,
     grid: LatLonGrid,
     cfg: GMRediConfig,
+    *,
+    T: jnp.ndarray | None = None,
+    S: jnp.ndarray | None = None,
+    eos_fn=None,
+    rho_0: float = _RHO_0,
+    g: float = constants.g,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Compute tapered isopycnal slopes at vertical interfaces.
 
@@ -141,6 +271,15 @@ def compute_isopycnal_slopes_latlon_cgrid(
         z-star Jacobian (eta + H) / H.
     grid : LatLonGrid
     cfg : GMRediConfig
+    T, S : (n_lat, n_lon, nlev) or None
+        Tracer fields, REQUIRED when ``cfg.slope_density == "neutral"`` so the
+        neutral density gradient ``∂ρ/∂T·∇T + ∂ρ/∂S·∇S`` can be built; ignored
+        for the default ``"in_situ"`` mode (then only ``rho`` is used).
+    eos_fn : callable or None
+        EOS ``fn(T, S, p) -> ρ`` (needed only for the neutral mode; the local
+        cell pressure / EOS partials are built from it).
+    rho_0, g : float
+        Reference density / gravity for the local hydrostatic pressure.
 
     Returns
     -------
@@ -149,13 +288,22 @@ def compute_isopycnal_slopes_latlon_cgrid(
     taper : (n_lat, n_lon, nlev-1)
         DM95 taper factor in [0, 1].
     """
+    slope_density = getattr(cfg, "slope_density", "in_situ")
+    _validate_slope_density(slope_density)
+    if slope_density == "neutral" and (T is None or S is None or eos_fn is None):
+        raise ValueError(
+            "compute_isopycnal_slopes_latlon_cgrid: slope_density='neutral' "
+            "requires T, S and eos_fn to build the neutral density gradient."
+        )
     # Neumann-fill density to prevent garbage gradients at coastlines.
     rho_filled = _neumann_fill_cgrid(rho, mask)
 
-    # --- Horizontal density gradients at full levels ---
-    # gradient_x_cgrid handles 3D natively: (n_lat, n_lon, nlev) -> (n_lat, n_lon+1, nlev)
-    drho_dx_u = gradient_x_cgrid(rho_filled, grid)  # at u-faces
-    drho_dy_v = gradient_y_cgrid(rho_filled, grid)  # at v-faces
+    # Face density gradients (in-situ FD of rho, or the neutral
+    # ∂ρ/∂T·∇T+∂ρ/∂S·∇S form) — shared with the centred K_33 / triad builders.
+    drho_dx_u, drho_dy_v, drho_dz_safe = _slope_density_face_grads(
+        rho_filled, T, S, mask, z_coord, jacobian, grid, slope_density,
+        eos_fn, rho_0, g,
+    )
 
     # Average face gradients to cell centers.
     # u-face j is between cell (j-1) and cell j, so cell j's gradient
@@ -169,19 +317,22 @@ def compute_isopycnal_slopes_latlon_cgrid(
     drho_dx_half = 0.5 * (drho_dx[:, :, :-1] + drho_dx[:, :, 1:])  # (n_lat, n_lon, nlev-1)
     drho_dy_half = 0.5 * (drho_dy[:, :, :-1] + drho_dy[:, :, 1:])
 
-    # --- Vertical density gradient at interfaces ---
-    # dz_half_ref is the distance between adjacent cell centers (nlev-1,).
-    dz_half = z_coord.dz_half_ref * jacobian[:, :, jnp.newaxis]  # (n_lat, n_lon, nlev-1)
-    drho_dz = (rho_filled[:, :, :-1] - rho_filled[:, :, 1:]) / jnp.maximum(dz_half, _EPS_DIV)
-    # Force stable stratification: drho/dz must be negative (density increases downward).
-    drho_dz_safe = jnp.minimum(drho_dz, -_EPS_DIV)
+    # drho_dz_safe already carries the stable-strat floor (min(0,·)-eps) for
+    # both modes (applied inside _slope_density_face_grads).
 
     # --- Slopes ---
-    S_x = jnp.clip(-drho_dx_half / drho_dz_safe, -cfg.S_max, cfg.S_max)
-    S_y = jnp.clip(-drho_dy_half / drho_dz_safe, -cfg.S_max, cfg.S_max)
+    # in_situ clips to ±S_max (legoESM safety); neutral leaves the slope
+    # UNCLIPPED and lets the DM95 taper suppress steep slopes (Veros never
+    # clips — see _w_triad_slopes_tapers).  dm95_taper returns S·taper, which is
+    # bounded for |S| → ∞ (taper decays faster than S grows).
+    S_x_raw = -drho_dx_half / drho_dz_safe
+    S_y_raw = -drho_dy_half / drho_dz_safe
+    if slope_density != "neutral":
+        S_x_raw = jnp.clip(S_x_raw, -cfg.S_max, cfg.S_max)
+        S_y_raw = jnp.clip(S_y_raw, -cfg.S_max, cfg.S_max)
 
     # DM95 tapering via shared helper (identical formula across grids).
-    return dm95_taper(S_x, S_y, cfg.S_max, _EPS, cfg.taper_width_frac)
+    return dm95_taper(S_x_raw, S_y_raw, cfg.S_max, _EPS, cfg.taper_width_frac)
 
 
 # =====================================================================
@@ -413,26 +564,145 @@ def _to_vface_north(field: jnp.ndarray) -> jnp.ndarray:
 
 
 
+def _w_face_slope_density_inputs(
+    rho_filled, T, S, mask, z_coord, jacobian, grid, slope_density,
+    eos_fn, rho_0, g,
+):
+    """Build the W-face slope-density inputs for :func:`_w_triad_slopes_tapers`.
+
+    Returns a dict of keyword arguments — ``drho_dx_u``, ``drho_dy_v``,
+    ``drho_dz_w`` and (for the neutral mode) ``drdT_w``, ``drdS_w``, ``dTdx_u``,
+    ``dSdx_u``, ``dTdy_v``, ``dSdy_v`` — so the K_33 getter and the realized
+    GM-skew conversion (both W-face-only consumers) build the slopes through the
+    SAME path as the triad ``F_z`` and never diverge.
+
+    ``"in_situ"`` (BIT-IDENTICAL): the in-situ face gradients + floored vertical
+    gradient (exactly the prior inline code).  ``"neutral"``: the locally-
+    referenced ``∂ρ/∂T·∇T + ∂ρ/∂S·∇S`` ingredients (W-cell ``drdT_w`` + tracer
+    face gradients), with the floor applied to the neutral ``drho_dz_w``.
+    """
+    _validate_slope_density(slope_density)
+    dz_half = z_coord.dz_half_ref * jacobian[:, :, jnp.newaxis]
+    if slope_density == "neutral":
+        drdT_c, drdS_c = _neutral_drho_derivs(
+            T, S, mask, z_coord, jacobian, eos_fn, rho_0, g,
+        )
+        T_filled = _neumann_fill_cgrid(T, mask)
+        S_filled = _neumann_fill_cgrid(S, mask)
+        dTdx_u = gradient_x_cgrid(T_filled, grid)
+        dSdx_u = gradient_x_cgrid(S_filled, grid)
+        dTdy_v = gradient_y_cgrid(T_filled, grid)
+        dSdy_v = gradient_y_cgrid(S_filled, grid)
+        dTdz_w = (T_filled[:, :, :-1] - T_filled[:, :, 1:]) / jnp.maximum(
+            dz_half, _EPS_DIV)
+        dSdz_w = (S_filled[:, :, :-1] - S_filled[:, :, 1:]) / jnp.maximum(
+            dz_half, _EPS_DIV)
+        drdT_w = drdT_c[:, :, :-1]
+        drdS_w = drdS_c[:, :, :-1]
+        drho_dz_w = jnp.minimum(drdT_w * dTdz_w + drdS_w * dSdz_w, -_EPS_DIV)
+        return dict(
+            drho_dx_u=None, drho_dy_v=None, drho_dz_w=drho_dz_w,
+            slope_density="neutral", drdT_w=drdT_w, drdS_w=drdS_w,
+            dTdx_u=dTdx_u, dSdx_u=dSdx_u, dTdy_v=dTdy_v, dSdy_v=dSdy_v,
+        )
+    drho_dx_u = gradient_x_cgrid(rho_filled, grid)
+    drho_dy_v = gradient_y_cgrid(rho_filled, grid)
+    drho_dz_raw = (rho_filled[:, :, :-1] - rho_filled[:, :, 1:]) / jnp.maximum(
+        dz_half, _EPS_DIV)
+    drho_dz_w = jnp.minimum(drho_dz_raw, -_EPS_DIV)
+    return dict(
+        drho_dx_u=drho_dx_u, drho_dy_v=drho_dy_v, drho_dz_w=drho_dz_w,
+        slope_density="in_situ",
+    )
+
+
+def _w_triad_numerators(slope_density, drho_dx_u, drho_dy_v,
+                        drdT_w, drdS_w, dTdx_u, dSdx_u, dTdy_v, dSdy_v,
+                        n_lat, n_lon):
+    """The 8 W-face triad horizontal density-gradient *numerators* ``-∇_hρ``.
+
+    Returns ``(nx_W, nx_E, nx_Wb, nx_Eb, ny_S, ny_N, ny_Sb, ny_Nb)`` where the
+    A-suffix (W/E/S/N) is the upper-level (k) horizontal gradient and the
+    b-suffix is the lower-level (k+1) one, all at the ``nlev-1`` w-faces.
+
+    - ``"in_situ"`` (BIT-IDENTICAL): the corresponding slices of the in-situ
+      face gradient ``drho_dx_u`` / ``drho_dy_v`` (exactly the slices the prior
+      inline code used).
+    - ``"neutral"``: the locally-referenced ``∂ρ/∂T·∇T + ∂ρ/∂S·∇S`` form, with
+      the W-cell's own ``drdT_w`` / ``drdS_w`` (``(n_lat,n_lon,nlev-1)``) — the
+      SAME center-cell derivative Veros's K_33 uses for ALL triads at a w-face
+      (``isoneutral.py:177-187`` uses ``drdT[2:-2,2:-2,...]`` for ``drodxb``
+      AND ``drodzb``, shifting only the tracer-gradient index by ``ip``).
+    """
+    if slope_density == "neutral":
+        nx_W = drdT_w * dTdx_u[:, :n_lon, :-1] + drdS_w * dSdx_u[:, :n_lon, :-1]
+        nx_E = (drdT_w * dTdx_u[:, 1:n_lon + 1, :-1]
+                + drdS_w * dSdx_u[:, 1:n_lon + 1, :-1])
+        nx_Wb = drdT_w * dTdx_u[:, :n_lon, 1:] + drdS_w * dSdx_u[:, :n_lon, 1:]
+        nx_Eb = (drdT_w * dTdx_u[:, 1:n_lon + 1, 1:]
+                 + drdS_w * dSdx_u[:, 1:n_lon + 1, 1:])
+        ny_S = drdT_w * dTdy_v[:n_lat, :, :-1] + drdS_w * dSdy_v[:n_lat, :, :-1]
+        ny_N = (drdT_w * dTdy_v[1:n_lat + 1, :, :-1]
+                + drdS_w * dSdy_v[1:n_lat + 1, :, :-1])
+        ny_Sb = drdT_w * dTdy_v[:n_lat, :, 1:] + drdS_w * dSdy_v[:n_lat, :, 1:]
+        ny_Nb = (drdT_w * dTdy_v[1:n_lat + 1, :, 1:]
+                 + drdS_w * dSdy_v[1:n_lat + 1, :, 1:])
+    else:
+        nx_W = drho_dx_u[:, :n_lon, :-1]
+        nx_E = drho_dx_u[:, 1:n_lon + 1, :-1]
+        nx_Wb = drho_dx_u[:, :n_lon, 1:]
+        nx_Eb = drho_dx_u[:, 1:n_lon + 1, 1:]
+        ny_S = drho_dy_v[:n_lat, :, :-1]
+        ny_N = drho_dy_v[1:n_lat + 1, :, :-1]
+        ny_Sb = drho_dy_v[:n_lat, :, 1:]
+        ny_Nb = drho_dy_v[1:n_lat + 1, :, 1:]
+    return nx_W, nx_E, nx_Wb, nx_Eb, ny_S, ny_N, ny_Sb, ny_Nb
+
+
 def _w_triad_slopes_tapers(drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon,
-                           S_max, taper_width_frac):
+                           S_max, taper_width_frac,
+                           slope_density="in_situ",
+                           drdT_w=None, drdS_w=None,
+                           dTdx_u=None, dSdx_u=None, dTdy_v=None, dSdy_v=None):
     """W-face (vertical-flux) triad isopycnal slopes + DM95 tapers.
 
     Shared by the explicit ``F_z`` assembly (in
-    ``gm_redi_tracer_tendency_triads_latlon_cgrid``) and the implicit-K_33
-    diffusivity getter (``compute_isoneutral_K33_latlon``) so the two can never
-    diverge.  ``A`` = upper level k, ``B`` = lower level k+1; the x-triads use
-    the west/east u-faces, the y-triads the south/north v-faces.  Returns the 8
-    per-triad slopes followed by their 8 DM95 tapers, each at the w-faces
-    (n_lat, n_lon, nlev-1).
+    ``gm_redi_tracer_tendency_triads_latlon_cgrid``), the implicit-K_33
+    diffusivity getter (``compute_isoneutral_K33_latlon``), and the realized
+    GM-skew EKE source so the slope numerics can never diverge.  ``A`` = upper
+    level k, ``B`` = lower level k+1; the x-triads use the west/east u-faces,
+    the y-triads the south/north v-faces.  Returns the 8 per-triad slopes
+    followed by their 8 DM95 tapers, each at the w-faces (n_lat, n_lon, nlev-1).
+
+    ``slope_density`` selects the density gradient that builds the slopes:
+    ``"in_situ"`` (default, BIT-IDENTICAL) slices ``drho_dx_u`` / ``drho_dy_v``
+    and CLIPS the slope to ±S_max before the DM95 taper (the legoESM safety
+    convention); ``"neutral"`` builds ``∂ρ/∂T·∇T + ∂ρ/∂S·∇S`` from the W-cell
+    ``drdT_w`` / ``drdS_w`` and the raw tracer face gradients, and does NOT clip
+    — Veros never clips the slope, it relies on the DM95 taper (``dm_taper``) to
+    suppress steep slopes (``taper → 0`` as ``|S| → ∞``).  The neutral slope is
+    ~4× steeper than the in-situ one (compressibility removed from ``∂_zρ``), so
+    it routinely exceeds S_max; clipping it would saturate the taper at its
+    S_max value (0.5) and inflate K_33 ~10× over Veros — the unclipped taper is
+    what makes the neutral K_33 track Veros (ratio ~1.0 at the thermocline).
     """
-    S_Wx1 = jnp.clip(-drho_dx_u[:, :n_lon, :-1] / drho_dz_w, -S_max, S_max)       # W,A
-    S_Wx2 = jnp.clip(-drho_dx_u[:, 1:n_lon + 1, :-1] / drho_dz_w, -S_max, S_max)  # E,A
-    S_Wx3 = jnp.clip(-drho_dx_u[:, :n_lon, 1:] / drho_dz_w, -S_max, S_max)        # W,B
-    S_Wx4 = jnp.clip(-drho_dx_u[:, 1:n_lon + 1, 1:] / drho_dz_w, -S_max, S_max)   # E,B
-    S_Wy1 = jnp.clip(-drho_dy_v[:n_lat, :, :-1] / drho_dz_w, -S_max, S_max)       # S,A
-    S_Wy2 = jnp.clip(-drho_dy_v[1:n_lat + 1, :, :-1] / drho_dz_w, -S_max, S_max)  # N,A
-    S_Wy3 = jnp.clip(-drho_dy_v[:n_lat, :, 1:] / drho_dz_w, -S_max, S_max)        # S,B
-    S_Wy4 = jnp.clip(-drho_dy_v[1:n_lat + 1, :, 1:] / drho_dz_w, -S_max, S_max)   # N,B
+    (nx_W, nx_E, nx_Wb, nx_Eb, ny_S, ny_N, ny_Sb, ny_Nb) = _w_triad_numerators(
+        slope_density, drho_dx_u, drho_dy_v, drdT_w, drdS_w,
+        dTdx_u, dSdx_u, dTdy_v, dSdy_v, n_lat, n_lon)
+    clip = slope_density != "neutral"
+
+    def _slope(num):
+        s = -num / drho_dz_w
+        return jnp.clip(s, -S_max, S_max) if clip else s
+
+    S_Wx1 = _slope(nx_W)    # W,A
+    S_Wx2 = _slope(nx_E)    # E,A
+    S_Wx3 = _slope(nx_Wb)   # W,B
+    S_Wx4 = _slope(nx_Eb)   # E,B
+    S_Wy1 = _slope(ny_S)    # S,A
+    S_Wy2 = _slope(ny_N)    # N,A
+    S_Wy3 = _slope(ny_Sb)   # S,B
+    S_Wy4 = _slope(ny_Nb)   # N,B
     tw = lambda s: dm95_taper_scalar(s, S_max, transition_width_frac=taper_width_frac)[1]
     return (S_Wx1, S_Wx2, S_Wx3, S_Wx4, S_Wy1, S_Wy2, S_Wy3, S_Wy4,
             tw(S_Wx1), tw(S_Wx2), tw(S_Wx3), tw(S_Wx4),
@@ -454,6 +724,12 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     taper_width_frac: float = 0.1,
     implicit_K33: bool = False,
     K_iso_steep: float = 0.0,
+    slope_density: str = "in_situ",
+    T_tracer: jnp.ndarray | None = None,
+    S_tracer: jnp.ndarray | None = None,
+    eos_fn=None,
+    rho_0: float = _RHO_0,
+    g: float = constants.g,
 ) -> jnp.ndarray:
     """Triad-based GM+Redi tracer tendency on the lat-lon C-grid.
 
@@ -494,6 +770,7 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     -------
     tendency : (n_lat, n_lon, nlev)
     """
+    _validate_slope_density(slope_density)
     n_lat, n_lon, nlev = q.shape
     dz_actual = z_coord.dz_ref * jacobian[:, :, jnp.newaxis]
     dz_half = z_coord.dz_half_ref * jacobian[:, :, jnp.newaxis]
@@ -527,19 +804,81 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     # -----------------------------------------------------------------
     # 1. Density and tracer gradients on the native C-grid
     # -----------------------------------------------------------------
-    drho_dx_u = gradient_x_cgrid(rho_filled, grid)        # (n_lat, n_lon+1, nlev)
-    drho_dy_v = gradient_y_cgrid(rho_filled, grid)        # (n_lat+1, n_lon, nlev)
     dq_dx_u = gradient_x_cgrid(q_filled, grid)
     dq_dy_v = gradient_y_cgrid(q_filled, grid)
-
-    drho_dz_raw = (rho_filled[:, :, :-1] - rho_filled[:, :, 1:]) / jnp.maximum(
-        dz_half, _EPS_DIV
-    )
-    # Stable-strat floor: drho_dz must be negative (z UPWARD ⇒ rho denser below).
-    drho_dz_w = jnp.minimum(drho_dz_raw, -_EPS_DIV)        # (n_lat, n_lon, nlev-1)
     dq_dz_w = (q_filled[:, :, :-1] - q_filled[:, :, 1:]) / jnp.maximum(
         dz_half, _EPS_DIV
     )
+
+    # Density gradients that BUILD the slopes.  For the per-triad u/v-face
+    # slopes, the horizontal density gradient references the TRIAD's cell (Veros
+    # K_11 ``drodxe`` uses ``drdT[1+ip]`` — west cell for the W triads, east for
+    # the E triads); the W-face triads use the W-cell's own derivative (Veros
+    # K_33 uses ``drdT[2:-2]`` for all triads).  So we build the neutral
+    # vertical w-face gradient with each cell's own drdT (so the cell-shifted
+    # ``_to_uface_west/east`` already select the right per-triad drho_dz), and
+    # the neutral horizontal numerators per reference cell below.
+    if slope_density == "neutral":
+        if T_tracer is None or S_tracer is None or eos_fn is None:
+            raise ValueError(
+                "gm_redi_tracer_tendency_triads_latlon_cgrid: "
+                "slope_density='neutral' requires T_tracer, S_tracer, eos_fn."
+            )
+        drdT_c, drdS_c = _neutral_drho_derivs(
+            T_tracer, S_tracer, mask, z_coord, jacobian, eos_fn, rho_0, g,
+        )
+        T_filled = _neumann_fill_cgrid(T_tracer, mask)
+        S_filled = _neumann_fill_cgrid(S_tracer, mask)
+        dTdx_u = gradient_x_cgrid(T_filled, grid)
+        dSdx_u = gradient_x_cgrid(S_filled, grid)
+        dTdy_v = gradient_y_cgrid(T_filled, grid)
+        dSdy_v = gradient_y_cgrid(S_filled, grid)
+        dTdz_w = (T_filled[:, :, :-1] - T_filled[:, :, 1:]) / jnp.maximum(
+            dz_half, _EPS_DIV)
+        dSdz_w = (S_filled[:, :, :-1] - S_filled[:, :, 1:]) / jnp.maximum(
+            dz_half, _EPS_DIV)
+        # Per-cell neutral vertical gradient at the w-face (upper cell's drdT),
+        # floored for stable strat.  Each cell's value, so the west/east shift
+        # below picks the per-triad reference cell (the Veros K_11 ``drodze``).
+        drdT_w = drdT_c[:, :, :-1]
+        drdS_w = drdS_c[:, :, :-1]
+        drho_dz_w = jnp.minimum(drdT_w * dTdz_w + drdS_w * dSdz_w, -_EPS_DIV)
+        # Per-reference-cell neutral horizontal gradients at the u/v-faces, used
+        # by the u/v-face slopes (S_T*/S_V*).  drdT lifted to the west/east
+        # (south/north) neighbour of each u-face (v-face).
+        drdT_uw = _to_uface_west(drdT_c)   # (n_lat, n_lon+1, nlev)
+        drdS_uw = _to_uface_west(drdS_c)
+        drdT_ue = _to_uface_east(drdT_c)
+        drdS_ue = _to_uface_east(drdS_c)
+        drho_dx_u_west = drdT_uw * dTdx_u + drdS_uw * dSdx_u   # W-triad numerator
+        drho_dx_u_east = drdT_ue * dTdx_u + drdS_ue * dSdx_u   # E-triad numerator
+        drdT_vs = _to_vface_south(drdT_c)  # (n_lat+1, n_lon, nlev)
+        drdS_vs = _to_vface_south(drdS_c)
+        drdT_vn = _to_vface_north(drdT_c)
+        drdS_vn = _to_vface_north(drdS_c)
+        drho_dy_v_south = drdT_vs * dTdy_v + drdS_vs * dSdy_v
+        drho_dy_v_north = drdT_vn * dTdy_v + drdS_vn * dSdy_v
+        # Single drho_dx_u / drho_dy_v are unused in the neutral path (the W-face
+        # builder takes the tracer gradients + drdT_w directly); set to None so
+        # any accidental in-situ slice raises.
+        drho_dx_u = None
+        drho_dy_v = None
+    else:
+        drho_dx_u = gradient_x_cgrid(rho_filled, grid)        # (n_lat, n_lon+1, nlev)
+        drho_dy_v = gradient_y_cgrid(rho_filled, grid)        # (n_lat+1, n_lon, nlev)
+        drho_dz_raw = (rho_filled[:, :, :-1] - rho_filled[:, :, 1:]) / jnp.maximum(
+            dz_half, _EPS_DIV
+        )
+        # Stable-strat floor: drho_dz must be negative (z UPWARD ⇒ rho denser below).
+        drho_dz_w = jnp.minimum(drho_dz_raw, -_EPS_DIV)        # (n_lat, n_lon, nlev-1)
+        # In-situ: the same single face gradient feeds all triads at a face.
+        drho_dx_u_west = drho_dx_u
+        drho_dx_u_east = drho_dx_u
+        drho_dy_v_south = drho_dy_v
+        drho_dy_v_north = drho_dy_v
+        drdT_w = None
+        drdS_w = None
+        dTdx_u = dSdx_u = dTdy_v = dSdy_v = None
 
     # -----------------------------------------------------------------
     # 2. Pad drho_dz_w / dq_dz_w along the level axis so that boundary
@@ -599,11 +938,22 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
     valid_T3 = _to_uface_east(valid_below)
     valid_T4 = _to_uface_east(valid_above)
 
-    # Raw clipped slopes — DO NOT taper here; taper goes on the whole flux.
-    S_T1 = jnp.clip(-drho_dx_u / drho_dz_T1, -S_max, S_max)
-    S_T2 = jnp.clip(-drho_dx_u / drho_dz_T2, -S_max, S_max)
-    S_T3 = jnp.clip(-drho_dx_u / drho_dz_T3, -S_max, S_max)
-    S_T4 = jnp.clip(-drho_dx_u / drho_dz_T4, -S_max, S_max)
+    # Raw slopes — DO NOT taper here; taper goes on the whole flux.
+    # T1/T2 reference the WEST cell, T3/T4 the EAST cell (Veros K_11 drodxe uses
+    # drdT[1+ip]); in-situ both branches share the single face gradient so this
+    # is bit-identical there.  in_situ clips to ±S_max (legoESM safety); neutral
+    # leaves the slope UNCLIPPED (Veros relies on the DM95 taper — see
+    # _w_triad_slopes_tapers) since neutral slopes routinely exceed S_max.
+    _clip_slope = slope_density != "neutral"
+
+    def _uvslope(num, dz):
+        s = -num / dz
+        return jnp.clip(s, -S_max, S_max) if _clip_slope else s
+
+    S_T1 = _uvslope(drho_dx_u_west, drho_dz_T1)
+    S_T2 = _uvslope(drho_dx_u_west, drho_dz_T2)
+    S_T3 = _uvslope(drho_dx_u_east, drho_dz_T3)
+    S_T4 = _uvslope(drho_dx_u_east, drho_dz_T4)
 
     taper_T1 = dm95_taper_scalar(S_T1, S_max, transition_width_frac=taper_width_frac)[1]
     taper_T2 = dm95_taper_scalar(S_T2, S_max, transition_width_frac=taper_width_frac)[1]
@@ -659,10 +1009,13 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
 
     # At pole v-faces drho_dy_v = 0 ⇒ all S_V* = 0 ⇒ flux = K_R·dq_dy_v = 0
     # (gradient_y_cgrid sets dq_dy_v = 0 there); v_mask zeros the result.
-    S_V1 = jnp.clip(-drho_dy_v / drho_dz_V1, -S_max, S_max)
-    S_V2 = jnp.clip(-drho_dy_v / drho_dz_V2, -S_max, S_max)
-    S_V3 = jnp.clip(-drho_dy_v / drho_dz_V3, -S_max, S_max)
-    S_V4 = jnp.clip(-drho_dy_v / drho_dz_V4, -S_max, S_max)
+    # V1/V2 reference the SOUTH cell, V3/V4 the NORTH cell (Veros K_22 drodyb);
+    # in-situ both share the single face gradient (bit-identical).  neutral
+    # leaves the slope unclipped (see S_T* above / _w_triad_slopes_tapers).
+    S_V1 = _uvslope(drho_dy_v_south, drho_dz_V1)
+    S_V2 = _uvslope(drho_dy_v_south, drho_dz_V2)
+    S_V3 = _uvslope(drho_dy_v_north, drho_dz_V3)
+    S_V4 = _uvslope(drho_dy_v_north, drho_dz_V4)
 
     taper_V1 = dm95_taper_scalar(S_V1, S_max, transition_width_frac=taper_width_frac)[1]
     taper_V2 = dm95_taper_scalar(S_V2, S_max, transition_width_frac=taper_width_frac)[1]
@@ -719,10 +1072,14 @@ def gm_redi_tracer_tendency_triads_latlon_cgrid(
 
     # rho-based per-triad slopes + DM95 tapers (shared with the K_33 getter so
     # the explicit F_z and the implicit K_33 use bit-identical slopes/tapers).
+    # Neutral mode passes the W-cell drdT_w/drdS_w + tracer face gradients so the
+    # W-face slopes use the same ∂ρ/∂T·∇T+∂ρ/∂S·∇S form Veros K_33 uses.
     (S_Wx1, S_Wx2, S_Wx3, S_Wx4, S_Wy1, S_Wy2, S_Wy3, S_Wy4,
      taper_Wx1, taper_Wx2, taper_Wx3, taper_Wx4,
      taper_Wy1, taper_Wy2, taper_Wy3, taper_Wy4) = _w_triad_slopes_tapers(
-        drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon, S_max, taper_width_frac)
+        drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon, S_max, taper_width_frac,
+        slope_density=slope_density, drdT_w=drdT_w, drdS_w=drdS_w,
+        dTdx_u=dTdx_u, dSdx_u=dSdx_u, dTdy_v=dTdy_v, dSdy_v=dSdy_v)
 
     # Per-triad vertical flux.  The off-diagonal skew (kR+kG)·S·dq/dx is ALWAYS
     # explicit.  The DIAGONAL K_33 term (kR·S²·dq/dz — the "enhanced vertical
@@ -831,10 +1188,15 @@ def gm_redi_tracer_tendency_latlon(
         n_iter=2,
     )
 
+    slope_density = getattr(cfg, "slope_density", "in_situ")
+
     # Centred interface slopes — used for Visbeck (only ⟨N|S|⟩_z is
     # needed; the cancellation property of triads is irrelevant there).
+    # T, S, eos_fn are passed so the neutral mode can build the
+    # locally-referenced gradient; ignored for the default in-situ mode.
     S_x, S_y, _taper = compute_isopycnal_slopes_latlon_cgrid(
         rho, mask, z_coord, jacobian, grid, cfg,
+        T=T, S=S, eos_fn=eos_fn, rho_0=rho_0, g=g,
     )
 
     # GM coefficient. Precedence: prognostic-EKE override (computed by the step
@@ -865,11 +1227,15 @@ def gm_redi_tracer_tendency_latlon(
             T, rho, mask, u_mask, v_mask,
             z_coord, jacobian, grid, kappa_GM, kappa_Redi_eff, cfg.S_max,
             cfg.taper_width_frac, cfg.implicit_K33, cfg.K_iso_steep,
+            slope_density=slope_density, T_tracer=T, S_tracer=S,
+            eos_fn=eos_fn, rho_0=rho_0, g=g,
         )
         dS_dt = gm_redi_tracer_tendency_triads_latlon_cgrid(
             S, rho, mask, u_mask, v_mask,
             z_coord, jacobian, grid, kappa_GM, kappa_Redi_eff, cfg.S_max,
             cfg.taper_width_frac, cfg.implicit_K33, cfg.K_iso_steep,
+            slope_density=slope_density, T_tracer=T, S_tracer=S,
+            eos_fn=eos_fn, rho_0=rho_0, g=g,
         )
     elif scheme == "centered":
         dT_dt = gm_redi_tracer_tendency_latlon_cgrid(
@@ -974,16 +1340,15 @@ def compute_isoneutral_K33_latlon(
     kappa_Redi_w = _kappa_center_uvw(kappa_Redi, nlev)[3]
     n_lat, n_lon = mask.shape
     rho_filled = _neumann_fill_cgrid(rho, mask)
-    drho_dx_u = gradient_x_cgrid(rho_filled, grid)
-    drho_dy_v = gradient_y_cgrid(rho_filled, grid)
-    dz_half = z_coord.dz_half_ref * jacobian[:, :, jnp.newaxis]
-    drho_dz_raw = (rho_filled[:, :, :-1] - rho_filled[:, :, 1:]) / jnp.maximum(
-        dz_half, _EPS_DIV
+    slope_density = getattr(cfg, "slope_density", "in_situ")
+    w_inputs = _w_face_slope_density_inputs(
+        rho_filled, T, S, mask, z_coord, jacobian, grid, slope_density,
+        eos_fn, rho_0, g,
     )
-    drho_dz_w = jnp.minimum(drho_dz_raw, -_EPS_DIV)
     (S_Wx1, S_Wx2, S_Wx3, S_Wx4, S_Wy1, S_Wy2, S_Wy3, S_Wy4,
      tWx1, tWx2, tWx3, tWx4, tWy1, tWy2, tWy3, tWy4) = _w_triad_slopes_tapers(
-        drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon, cfg.S_max, cfg.taper_width_frac)
+        n_lat=n_lat, n_lon=n_lon, S_max=cfg.S_max,
+        taper_width_frac=cfg.taper_width_frac, **w_inputs)
     K_33 = 0.25 * kappa_Redi_w * (
         tWx1 * S_Wx1 ** 2 + tWx2 * S_Wx2 ** 2 + tWx3 * S_Wx3 ** 2 + tWx4 * S_Wx4 ** 2
         + tWy1 * S_Wy1 ** 2 + tWy2 * S_Wy2 ** 2 + tWy3 * S_Wy3 ** 2 + tWy4 * S_Wy4 ** 2)
@@ -1170,21 +1535,23 @@ def compute_realized_gm_skew_conversion(
     )
     n_lat, n_lon = mask.shape
     rho_filled = _neumann_fill_cgrid(rho, mask)
-    drho_dx_u = gradient_x_cgrid(rho_filled, grid)
-    drho_dy_v = gradient_y_cgrid(rho_filled, grid)
-    dz_half = z_coord.dz_half_ref * jacobian[:, :, jnp.newaxis]
-    drho_dz_raw = (rho_filled[:, :, :-1] - rho_filled[:, :, 1:]) / jnp.maximum(
-        dz_half, _EPS_DIV
+    slope_density = getattr(cfg, "slope_density", "in_situ")
+    w_inputs = _w_face_slope_density_inputs(
+        rho_filled, T, S, mask, z_coord, jacobian, grid, slope_density,
+        eos_fn, rho_0, g,
     )
-    drho_dz_w = jnp.minimum(drho_dz_raw, -_EPS_DIV)        # (n_lat, n_lon, nlev-1)
+    drho_dz_w = w_inputs["drho_dz_w"]      # (n_lat, n_lon, nlev-1)
     (S_Wx1, S_Wx2, S_Wx3, S_Wx4, S_Wy1, S_Wy2, S_Wy3, S_Wy4,
      tWx1, tWx2, tWx3, tWx4, tWy1, tWy2, tWy3, tWy4) = _w_triad_slopes_tapers(
-        drho_dx_u, drho_dy_v, drho_dz_w, n_lat, n_lon, cfg.S_max, cfg.taper_width_frac)
+        n_lat=n_lat, n_lon=n_lon, S_max=cfg.S_max,
+        taper_width_frac=cfg.taper_width_frac, **w_inputs)
     # Per-triad slope variance <S²>_triad = 0.25·Σ taper·S²  (= K_33/κ_Redi).
     S2_triad = 0.25 * (
         tWx1 * S_Wx1 ** 2 + tWx2 * S_Wx2 ** 2 + tWx3 * S_Wx3 ** 2 + tWx4 * S_Wx4 ** 2
         + tWy1 * S_Wy1 ** 2 + tWy2 * S_Wy2 ** 2 + tWy3 * S_Wy3 ** 2 + tWy4 * S_Wy4 ** 2)
     # True local buoyancy frequency at the W-faces: N²_w = (g/ρ₀)|∂ρ/∂z| ≥ 0.
+    # In the neutral mode this is the locally-referenced N² (compressibility
+    # bias removed), consistent with the neutral slope variance above.
     N2_w = (g / rho_0) * jnp.abs(drho_dz_w)
     P_skew = jnp.maximum(kappa_gm_w, 0.0) * N2_w * S2_triad
     return jnp.maximum(P_skew, 0.0) * mask[:, :, jnp.newaxis]
@@ -1394,6 +1761,7 @@ def compute_eke_step_kappa(
     )
     S_x, S_y, _taper = compute_isopycnal_slopes_latlon_cgrid(
         rho, mask, z_coord, jacobian, grid, cfg,
+        T=T, S=S, eos_fn=eos_fn, rho_0=rho_0, g=g,
     )
     f_coriolis = jnp.broadcast_to(grid.f, mask.shape)
     # β = df/dy = 2Ω cosφ/R (analytic; grid.cos_lat is cosφ). Broadcast (n_lat,)
