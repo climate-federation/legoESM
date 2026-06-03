@@ -23,17 +23,15 @@ Three tests:
 from __future__ import annotations
 
 import ast
-from pathlib import Path
 
 import pytest
 
 from tests._iter187_marker import ITER187_GATE, ITER187_HELPER
+from tests.legoesm_paths import legoesm_source_path
 
 
-_PE_SRC_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "src" / "legoesm" / "atmosphere" / "dynamics"
-    / "primitive_eq_cdgrid.py"
+_PE_SRC_PATH = legoesm_source_path(
+    "atmosphere/dynamics/primitive_eq_cdgrid.py"
 )
 
 

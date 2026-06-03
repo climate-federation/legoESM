@@ -11,8 +11,6 @@ code duplication with the cubed-sphere implementation.
 
 from __future__ import annotations
 
-import pathlib
-
 import jax
 import jax.numpy as jnp
 import pytest
@@ -28,6 +26,7 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     gm_redi_tracer_tendency_latlon,
     gm_redi_lateral_mixing_latlon,
 )
+from tests.legoesm_paths import legoesm_source_path
 
 
 # =====================================================================
@@ -479,8 +478,7 @@ class TestLateralMixingOutput:
 class TestNoDuplication:
     """Verify that the lat-lon GM/Redi reuses shared helpers."""
 
-    _SRC = pathlib.Path(__file__).resolve().parents[3] / \
-        "src" / "legoesm" / "ocean" / "physics" / "lateral_mixing"
+    _SRC = legoesm_source_path("ocean/physics/lateral_mixing")
 
     def _read(self, name):
         return (self._SRC / name).read_text()

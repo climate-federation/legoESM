@@ -1061,8 +1061,8 @@ class TestYSU:
         # contents and asserting the literal token ``config.louis_c`` is
         # used in ysu.py is non-vacuous: the prior hardcoded version had
         # no such reference.
-        from pathlib import Path
-        ysu_src = Path(__file__).resolve().parent.parent.parent.parent.parent / (
+        from tests.legoesm_paths import legoesm_source_path
+        ysu_src = legoesm_source_path(
             "src/legoesm/atmosphere/physics/turbulence/ysu.py"
         )
         ysu_text = ysu_src.read_text()

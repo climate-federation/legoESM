@@ -28,10 +28,11 @@ magnitude, so the more-correct halo yields the lower non-zonal variance.
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 import numpy as np
 import pytest
+
+from tests.legoesm_paths import legoesm_source_path
 
 jax = pytest.importorskip("jax")
 jax.config.update("jax_enable_x64", True)
@@ -102,10 +103,7 @@ def test_fc_velocity_viscosity_vector_halo_preserves_zonal_symmetry():
 def test_fc_velocity_viscosity_source_uses_vector_halo():
     """Source guard: the velocity viscosity must NOT scalar-pad a stacked
     (u, v); it must use _fc_pad_halo_vector."""
-    src = (
-        Path(__file__).resolve().parents[3]
-        / "src" / "legoesm" / "ocean" / "dynamics" / "ocean_pe_fc.py"
-    ).read_text()
+    src = legoesm_source_path("ocean/dynamics/ocean_pe_fc.py").read_text()
     # No stacked-(u,v) -> scalar pad_halo_4d for the velocity viscosity.
     bad = re.search(
         r"jnp\.stack\(\s*\[\s*u\s*\*\s*mask[^\]]*,\s*v\s*\*\s*mask[^\]]*\]"

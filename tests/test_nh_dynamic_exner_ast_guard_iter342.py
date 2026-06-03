@@ -21,15 +21,14 @@ Tests
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 import pytest
 
+from tests.legoesm_paths import legoesm_source_path
 
-SRC_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "src" / "legoesm" / "atmosphere" / "dynamics"
-    / "compressible_euler_cdgrid.py"
+
+SRC_PATH = legoesm_source_path(
+    "atmosphere/dynamics/compressible_euler_cdgrid.py"
 )
 
 

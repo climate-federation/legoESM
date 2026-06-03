@@ -55,8 +55,6 @@ Cross-cutting:
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -82,6 +80,8 @@ from legoesm.grids.vertical import (
     create_height_coordinate, compute_terrain_metric,
     standard_hybrid_levels,
 )
+
+from tests.legoesm_paths import legoesm_source_path
 
 
 # ---------------------------------------------------------------- PE fixtures
@@ -406,16 +406,8 @@ def test_smag_vort_uses_relative_vorticity_via_a2b_ord4():
     The literal substring matched is robust to small whitespace changes
     but unique to the iter-187 site (``_zeta_smag_corner`` is unused
     elsewhere)."""
-    pe_path = (
-        Path(__file__).resolve().parent.parent
-        / "src" / "legoesm" / "atmosphere" / "dynamics"
-        / "primitive_eq_cdgrid.py"
-    )
-    nh_path = (
-        Path(__file__).resolve().parent.parent
-        / "src" / "legoesm" / "atmosphere" / "dynamics"
-        / "compressible_euler_cdgrid.py"
-    )
+    pe_path = legoesm_source_path("atmosphere/dynamics/primitive_eq_cdgrid.py")
+    nh_path = legoesm_source_path("atmosphere/dynamics/compressible_euler_cdgrid.py")
 
     for label, p in [("PE", pe_path), ("NH", nh_path)]:
         src = p.read_text()

@@ -46,7 +46,6 @@ jax.config.update("jax_enable_x64", True)
 
 import ast
 import inspect
-from pathlib import Path
 
 import numpy as np
 import jax.numpy as jnp
@@ -59,6 +58,8 @@ from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
 from legoesm.core.operators_cdgrid import fv3_sw_tendencies
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
+
+from tests.legoesm_paths import legoesm_source_path
 
 
 def _grid_and_state(n=8, seed=2026, scale_div=1.0):
@@ -191,9 +192,8 @@ def test_production_step_forwards_dddmp_prod():
     silently bypass the new ``dddmp_prod`` config field and re-pin the
     historic hardcoded value.
     """
-    src = (Path(__file__).resolve().parent.parent
-           / "src" / "legoesm" / "atmosphere" / "dynamics"
-           / "shallow_water_fv3_cdgrid.py")
+    src = legoesm_source_path(
+        "atmosphere/dynamics/shallow_water_fv3_cdgrid.py")
     tree = ast.parse(src.read_text())
 
     cls = next(
@@ -409,9 +409,8 @@ def test_iter872c_take3_cdgrid_shallow_water_does_not_forward_dddmp():
     directly to ``cdgrid_momentum_tendencies`` (the Fortran-strict
     0.0 default kwarg added in iter-872c).
     """
-    src = (Path(__file__).resolve().parent.parent
-           / "src" / "legoesm" / "atmosphere" / "dynamics"
-           / "shallow_water_fv3_cdgrid.py")
+    src = legoesm_source_path(
+        "atmosphere/dynamics/shallow_water_fv3_cdgrid.py")
     tree = ast.parse(src.read_text())
 
     fn = next(

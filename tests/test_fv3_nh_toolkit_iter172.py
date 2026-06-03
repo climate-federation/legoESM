@@ -40,6 +40,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from tests._iter187_marker import ITER187_GATE, ITER187_HELPER
+from tests.legoesm_paths import legoesm_source_path
 
 from legoesm.atmosphere.dynamics.compressible_euler_cdgrid import (
     CDGridCompressibleEulerConfig,
@@ -340,10 +341,8 @@ def test_nh_fv3_config_fields_ast_regression():
     silently changes any of these defaults — the runtime gate would
     still pass but the FV3-faithful damping would be silently
     disabled or its strength changed."""
-    src_path = (
-        Path(__file__).resolve().parent.parent
-        / "src" / "legoesm" / "atmosphere" / "dynamics"
-        / "compressible_euler_cdgrid.py"
+    src_path = legoesm_source_path(
+        "atmosphere/dynamics/compressible_euler_cdgrid.py"
     )
     tree = ast.parse(src_path.read_text())
 
@@ -501,10 +500,8 @@ def test_nh_fv3_call_sites_ast_regression():
     source.  Searches the source text for the Python-static gate
     expressions that activate each mechanism.  Catches a regression
     where the config field stays but the call-site is dropped."""
-    src_path = (
-        Path(__file__).resolve().parent.parent
-        / "src" / "legoesm" / "atmosphere" / "dynamics"
-        / "compressible_euler_cdgrid.py"
+    src_path = legoesm_source_path(
+        "atmosphere/dynamics/compressible_euler_cdgrid.py"
     )
     src_text = src_path.read_text()
 

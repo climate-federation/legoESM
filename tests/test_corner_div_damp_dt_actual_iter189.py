@@ -34,8 +34,6 @@ Tests
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -64,16 +62,14 @@ from legoesm.grids.vertical import (
     standard_hybrid_levels,
 )
 
+from tests.legoesm_paths import legoesm_source_path
 
-_PE_SRC = (
-    Path(__file__).resolve().parent.parent
-    / "src" / "legoesm" / "atmosphere" / "dynamics"
-    / "primitive_eq_cdgrid.py"
+
+_PE_SRC = legoesm_source_path(
+    "atmosphere/dynamics/primitive_eq_cdgrid.py"
 )
-_NH_SRC = (
-    Path(__file__).resolve().parent.parent
-    / "src" / "legoesm" / "atmosphere" / "dynamics"
-    / "compressible_euler_cdgrid.py"
+_NH_SRC = legoesm_source_path(
+    "atmosphere/dynamics/compressible_euler_cdgrid.py"
 )
 
 
