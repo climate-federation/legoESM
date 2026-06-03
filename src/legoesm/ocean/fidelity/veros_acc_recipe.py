@@ -648,6 +648,16 @@ def build_acc_model_config(grid: LatLonGrid | None = None, *,
         # is what the model actually reads (ocean_model_latlon_cgrid.py:998).
         # Setting it only in physics.lateral_mixing left GM/Redi inactive.
         gm_redi=ACC_GM_REDI_CONFIG,
+        # Veros applies the surface TRACER forcing (forc_temp_surface restoring)
+        # IMPLICITLY — it enters the backward-Euler vertical-mixing tridiagonal
+        # RHS at weight 1.0 (core/thermodynamics.py), NOT as an AB2-extrapolated
+        # explicit tendency. Match that placement so the restoring is not
+        # over-applied 1.6× by the faithful AB2 outer integrator. Only meaningful
+        # with surface forcing present; the frozen-state tendency probe
+        # (with_surface_forcing=False, no restoring) stays bit-identical either
+        # way, so gate it on with_surface_forcing to keep the probe path
+        # unambiguous.
+        surface_forcing_implicit=with_surface_forcing,
         physics=build_acc_physics_config(
             grid, with_surface_forcing=with_surface_forcing),
     )

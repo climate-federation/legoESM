@@ -517,9 +517,33 @@ class LatLonCGridOceanModel:
         # first concrete state (host-side flood-fill).  None until built.
         self.rigid_lid_data = None
 
+        # Surface-forcing IMPLICIT routing (Veros placement): when enabled, the
+        # combined physics is built with surface_forcing.scheme="none" so the
+        # T*/S* restoring is NOT summed into the explicit dT_dt; a SEPARATE
+        # restoring function (``_surface_tracer_forcing_fn``) supplies the
+        # restoring RATE, which the tendency builder routes onto
+        # ``tendencies.surface_tracer_forcing`` (together with the withheld
+        # q_net / shortwave heat) for the backward-Euler implicit application.
+        self._surface_tracer_forcing_fn = None
         if self.config.physics is not None:
+            physics_for_combined = self.config.physics
+            if self.config.surface_forcing_implicit:
+                from legoesm.ocean.physics.surface_forcing.integration import (
+                    make_surface_forcing_physics,
+                )
+                _sf_cfg = self.config.physics.surface_forcing
+                # Build the restoring rate function from the REAL surface_forcing
+                # config (verbatim reuse — no duplicated restoring numerics).
+                self._surface_tracer_forcing_fn = make_surface_forcing_physics(_sf_cfg)
+                # Strip the restoring from the explicit combined physics so it is
+                # not double-counted (summed into dT_dt) — it is applied
+                # implicitly instead.
+                _sf_none = _sf_cfg._replace(scheme="none")
+                physics_for_combined = self.config.physics._replace(
+                    surface_forcing=_sf_none,
+                )
             self._physics_fn = make_ocean_physics(
-                self.config.physics,
+                physics_for_combined,
                 apply_vertical_diffusion=not self.config.implicit_vertical_mixing,
             )
         else:
@@ -724,6 +748,22 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"ab2_epsilon must be >= 0, got {config.ab2_epsilon!r}")
 
+        # Implicit surface-forcing placement (Veros) requires the implicit
+        # vertical-mixing solve — that is where the surface TRACER source is
+        # added (the backward-Euler RHS).  With explicit vertical mixing there
+        # is no implicit solve to host it; reject the combination rather than
+        # silently applying the forcing explicitly (dispatch discipline).
+        if config.surface_forcing_implicit and not config.implicit_vertical_mixing:
+            raise ValueError(
+                "surface_forcing_implicit=True requires "
+                "implicit_vertical_mixing=True: the surface TRACER forcing "
+                "(restoring + q_net + shortwave) is applied at weight 1.0 inside "
+                "the backward-Euler vertical-mixing solve (Veros's "
+                "core/thermodynamics.py placement). With explicit vertical "
+                "mixing there is no implicit solve to host the source. Set "
+                "implicit_vertical_mixing=True, or surface_forcing_implicit=False "
+                "to keep the explicit surface-forcing placement.")
+
     def check_barotropic_cfl(self, dt: float) -> float:
         """Check barotropic CFL and warn if marginal or unstable.
 
@@ -790,6 +830,7 @@ class LatLonCGridOceanModel:
             surface_forcing=surface_forcing,
             sponge=sponge,
             dt=dt,
+            surface_tracer_forcing_fn=self._surface_tracer_forcing_fn,
         )
 
     def tendencies_with_diagnostics(
@@ -818,6 +859,7 @@ class LatLonCGridOceanModel:
             sponge=sponge,
             dt=dt,
             diagnose_momentum=True,
+            surface_tracer_forcing_fn=self._surface_tracer_forcing_fn,
         )
 
     def _step_impl(self, state: LatLonCGridOceanState, dt: float,
@@ -1491,6 +1533,7 @@ class LatLonCGridOceanModel:
                 state_new, dt, surface_forcing,
                 K_v_phys=tend.K_v, A_v_phys=tend.A_v,
                 K33_iso=k33_implicit, dt_mom=dt_mom,
+                surface_tracer_forcing=tend.surface_tracer_forcing,
             )
 
         # 9. Conservation fixers
@@ -1503,10 +1546,14 @@ class LatLonCGridOceanModel:
         if not _apply_implicit_vmix:
             # Faithful AB2 path: return the explicit-only state plus the
             # implicit-mixing diffusivity profiles (evaluated from u^n, like
-            # Veros's du_mix / kappaH).  ``_ab2_step`` applies implicit vertical
-            # mixing ONCE after the AB2 extrapolation and runs the conservation
-            # fixer once on the final state.
-            return state_new, (tend.K_v, tend.A_v, k33_implicit)
+            # Veros's du_mix / kappaH) and the WITHHELD surface-tracer forcing.
+            # ``_ab2_step`` applies implicit vertical mixing ONCE after the AB2
+            # extrapolation — adding the surface forcing INSIDE that implicit
+            # solve (so it is NOT AB2-extrapolated) — and runs the conservation
+            # fixer once on the final state.  ``tend.surface_tracer_forcing`` is
+            # ``None`` unless ``surface_forcing_implicit`` is on ⇒ bit-identical.
+            return state_new, (tend.K_v, tend.A_v, k33_implicit,
+                               tend.surface_tracer_forcing)
         return state_new
 
     @staticmethod
@@ -1751,6 +1798,7 @@ class LatLonCGridOceanModel:
         K33_iso=None,
         *,
         dt_mom=None,
+        surface_tracer_forcing=None,
     ) -> LatLonCGridOceanState:
         """Backward-Euler vertical diffusion for ``u, v, T, S``.
 
@@ -1772,6 +1820,16 @@ class LatLonCGridOceanModel:
         ``dt_mom_ratio != 1.0`` stepping — Veros applies implicit friction on
         dt_mom (friction.py) and implicit diffusion on dt_tracer
         (thermodynamics.py).  ``dt_mom is None`` ⇒ ``dt`` ⇒ bit-identical.
+
+        ``surface_tracer_forcing`` (a :class:`SurfaceTracerForcing` or ``None``)
+        is the WITHHELD surface TRACER forcing rate (restoring + q_net +
+        shortwave), populated only under ``config.surface_forcing_implicit``.
+        When present its ``dt·rate`` (masked) is added to the T/S solve INPUT
+        BEFORE the tridiagonal solve, realising the backward-Euler RHS-source
+        identity ``(I − dt·L)·X_new = X_old + dt·S_surf`` at weight 1.0 — Veros's
+        implicit surface-forcing placement (``core/thermodynamics.py``).  ``dt``
+        here is dt_tracer (the tracer timestep), matching Veros.  ``None`` ⇒
+        no surface source ⇒ bit-identical.
 
         Called only when ``config.implicit_vertical_mixing == True``.
         """
@@ -1848,11 +1906,23 @@ class LatLonCGridOceanModel:
             # interfaces, same (n_lat, n_lon, nlev-1) shape as K_v_cell.  TRACERS
             # ONLY — momentum uses A_v_cell, which is untouched.
             K_v_cell = K_v_cell + K33_iso.astype(state.T.data.dtype)
+        # IMPLICIT surface TRACER forcing (Veros placement): add dt·S_surf
+        # (masked) to the solve INPUT so the backward-Euler tridiagonal solve
+        # realises ``(I − dt·L)·X_new = X_old + dt·S_surf`` at weight 1.0.  dt
+        # here is dt_tracer (the tracer timestep), matching Veros's
+        # ``dt_tracer·forc/dz[surface]`` RHS source.  No-op when None.
+        T_solve_in = state.T.data
+        S_solve_in = state.S.data
+        if surface_tracer_forcing is not None:
+            _dT_surf = surface_tracer_forcing.dT_dt.data.astype(state.T.data.dtype)
+            _dS_surf = surface_tracer_forcing.dS_dt.data.astype(state.S.data.dtype)
+            T_solve_in = state.T.data + dt * _dT_surf * mask_3d
+            S_solve_in = state.S.data + dt * _dS_surf * mask_3d
         T_new = implicit_vertical_diffusion_ocean(
-            state.T.data, K_v_cell, dz_cell, dz_half_cell, dt,
+            T_solve_in, K_v_cell, dz_cell, dz_half_cell, dt,
         )
         S_new = implicit_vertical_diffusion_ocean(
-            state.S.data, K_v_cell, dz_cell, dz_half_cell, dt,
+            S_solve_in, K_v_cell, dz_cell, dz_half_cell, dt,
         )
         T_new = jnp.where(mask_3d > 0.5, T_new, state.T.data)
         S_new = jnp.where(mask_3d > 0.5, S_new, state.S.data)
@@ -1982,7 +2052,8 @@ class LatLonCGridOceanModel:
         # conservation fixer) + the implicit-mixing diffusivity profiles from the
         # tendencies (pre-step state u^n where the vmix scheme surfaces them; else
         # None ⇒ recomputed in _apply_implicit_vertical_mixing, as the FE path).
-        state_expl, (K_v_phys, A_v_phys, k33_implicit) = self._step_impl(
+        state_expl, (K_v_phys, A_v_phys, k33_implicit,
+                     surface_tracer_forcing) = self._step_impl(
             state, dt, freshwater=freshwater,
             surface_forcing=surface_forcing, sponge=sponge,
             _apply_implicit_vmix=False)
@@ -2049,6 +2120,7 @@ class LatLonCGridOceanModel:
                 state_ab2, dt, surface_forcing,
                 K_v_phys=K_v_phys, A_v_phys=A_v_phys, K33_iso=k33_implicit,
                 dt_mom=dt / self.config.dt_mom_ratio,
+                surface_tracer_forcing=surface_tracer_forcing,
             )
 
         # --- Conservation fixer once, on the final state ---

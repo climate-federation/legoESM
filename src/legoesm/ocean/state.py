@@ -420,6 +420,33 @@ class LatLonCGridOceanDiagnostics(NamedTuple):
     wind_stress_y: Field
 
 
+class SurfaceTracerForcing(NamedTuple):
+    """Surface TRACER forcing RATE (restoring + prescribed q_net + penetrating
+    shortwave) WITHHELD from the explicit ``dT_dt``/``dS_dt`` so the model step
+    can apply it IMPLICITLY (weight 1.0, no AB2 extrapolation) inside the
+    backward-Euler vertical-mixing solve — matching Veros's
+    ``forc_temp_surface``/``forc_salt_surface`` placement
+    (``veros/core/thermodynamics.py``: the surface forcing enters the implicit
+    vertical-diffusion tridiagonal RHS, not the explicit AB2 tendency).
+
+    Populated ONLY when ``LatLonCGridOceanConfig.surface_forcing_implicit`` is
+    True; ``None`` otherwise (default), keeping the tendency pytree + every
+    existing path bit-identical.
+
+    Fields
+    ------
+    dT_dt : Field
+        Surface temperature forcing rate [degC/s], full-column shape
+        ``(n_lat, n_lon, nlev)`` — nonzero in the surface layer (index 0) for
+        the restoring + non-solar q_net, plus the shortwave-penetration column.
+    dS_dt : Field
+        Surface salinity forcing rate [PSU/s], full-column shape; surface-layer
+        restoring only (Veros ACC does not restore salinity).
+    """
+    dT_dt: Field
+    dS_dt: Field
+
+
 class LatLonCGridOceanTendencies(NamedTuple):
     """Tendencies for the lat-lon C-grid ocean primitive equations.
 
@@ -438,6 +465,13 @@ class LatLonCGridOceanTendencies(NamedTuple):
     when ``source_kdiss_h`` AND ``kdiss_h_flux_form`` are both on (the ACC
     recipe). It is the Helmholtz KE-removal of the vector-Laplacian lateral
     viscosity — ≥ 0 everywhere by construction (no clamp). ``None`` otherwise.
+
+    surface_tracer_forcing is a :class:`SurfaceTracerForcing` (dT/dS rate)
+    populated ONLY when ``surface_forcing_implicit`` is on (the ACC recipe): the
+    surface TRACER forcing (restoring + q_net + shortwave penetration) is then
+    WITHHELD from ``dT_dt``/``dS_dt`` and applied at weight 1.0 inside the
+    backward-Euler implicit vertical-mixing solve (Veros placement). ``None``
+    otherwise (default), keeping every existing path bit-identical.
     """
     du_dt: Field
     dv_dt: Field
@@ -451,6 +485,7 @@ class LatLonCGridOceanTendencies(NamedTuple):
     Ah_visc_u: object = None
     Ah_visc_v: object = None
     Ah_kediss_cell: object = None
+    surface_tracer_forcing: object = None
 
 
 class MomentumTendencyDiagnostics(NamedTuple):
@@ -921,3 +956,19 @@ class LatLonCGridOceanConfig(NamedTuple):
     # would mix a dt_mom-evolved thickness with a dt_tracer flux divergence and leak
     # O((dt_tracer−dt_mom)·∂h/∂t) tracer mass (rejected at config validation).
     dt_mom_ratio: float = 1.0
+    # Apply the surface TRACER forcing (T*/S* restoring + prescribed q_net +
+    # penetrating shortwave) IMPLICITLY inside the backward-Euler vertical-mixing
+    # solve — matching Veros, which adds ``dt_tracer·forc/dz[surface]`` to the
+    # implicit vertical-diffusion tridiagonal RHS at weight 1.0
+    # (``veros/core/thermodynamics.py``), NOT as an AB2-extrapolated explicit
+    # tendency. When True, that surface forcing is WITHHELD from the explicit
+    # ``dT_dt``/``dS_dt`` (so under the faithful AB2 outer integrator it is not
+    # over-applied by the 1.6× extrapolation) and routed into
+    # ``LatLonCGridOceanTendencies.surface_tracer_forcing``, which the model step
+    # adds (× dt_tracer) to the tracer solve INPUT before the tridiagonal solve.
+    # WIND STRESS (→ du_dt/dv_dt) is unaffected — it is explicit/AB2'd in BOTH
+    # legoESM and Veros and already matches. Requires
+    # ``implicit_vertical_mixing=True`` (the implicit solve is where the source
+    # is placed); rejected otherwise at config validation. Default False ⇒
+    # current EXPLICIT surface-forcing placement ⇒ BIT-IDENTICAL.
+    surface_forcing_implicit: bool = False

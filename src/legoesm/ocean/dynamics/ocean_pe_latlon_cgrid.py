@@ -53,6 +53,7 @@ from legoesm.ocean.state import (
     LatLonCGridOceanTendencies,
     MomentumTendencyDiagnostics,
     LatLonCGridOceanConfig,
+    SurfaceTracerForcing,
 )
 from legoesm.ocean.dynamics.ocean_tendency_common import (
     apply_sponge_tracer_relaxation,
@@ -2026,11 +2027,25 @@ def _bc_physics_tendencies(du_dt, dv_dt, dT_dt, dS_dt, physics_fn, state, grid, 
     return du_dt, dv_dt, dT_dt, dS_dt, phys_K_v, phys_A_v, diag_phys_u, diag_phys_v
 
 
-def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, z_coord, J, grid, rho_0, mask, mask_3d):
+def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, z_coord, J, grid, rho_0, mask, mask_3d, *, route_heat_to_implicit=False):
     """Stage 10b': external surface forcing (wind stress tau_x/tau_y, net heat
     q_net, penetrating shortwave) from a coupled / OMIP OceanSurfaceForcing,
     with tripolar east-north -> grid-aligned rotation. Pure verbatim extraction
-    (Q8). Returns ``(du_dt, dv_dt, dT_dt, dS_dt)``."""
+    (Q8).
+
+    WIND STRESS (tau_x/tau_y → du_dt/dv_dt[...,0]) is ALWAYS applied explicitly
+    (matching Veros's AB2'd ``tend_tauxyf``).  The HEAT forcing (non-solar q_net
+    surface term + penetrating-shortwave column) is normally added to ``dT_dt``
+    (explicit).  When ``route_heat_to_implicit=True`` (the
+    ``surface_forcing_implicit`` config path) it is instead accumulated into a
+    SEPARATE ``dT_surf`` array and WITHHELD from ``dT_dt`` so the model step can
+    add it (× dt_tracer) inside the backward-Euler vertical-mixing solve at
+    weight 1.0 (Veros's implicit surface-forcing placement).
+
+    Returns ``(du_dt, dv_dt, dT_dt, dS_dt, dT_surf)`` where ``dT_surf`` is a
+    full-column zero array unless ``route_heat_to_implicit`` AND a q_net forcing
+    were both present."""
+    dT_surf = jnp.zeros_like(dT_dt)
     # --- 10b'. External surface forcing (e.g. from JRA55 bulk fluxes) ---
     # When the caller passes an OceanSurfaceForcing carrying tau_x /
     # tau_y / q_net / sw_down, apply them here.  Mirrors
@@ -2093,12 +2108,18 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
                 * jnp.maximum(dz_0_T_q, 1e-10)
             )
             q_net_T = jnp.asarray(_sf_q_net, dtype=T.dtype)
+            # The heat forcing lands on the EXPLICIT ``dT_dt`` (default) or, when
+            # ``route_heat_to_implicit``, the SEPARATE ``dT_surf`` accumulator.
+            # Bind ``dT_target`` to the recipient array so the explicit branch
+            # uses the SAME scatter-add/add sequence as before (bit-identical
+            # default-off path); the implicit branch starts from zeros.
+            dT_target = dT_surf if route_heat_to_implicit else dT_dt
             if _sf_sw is not None:
                 # Split: non-solar at surface, solar penetrating column.
                 sw_T = jnp.asarray(_sf_sw, dtype=T.dtype)
                 sw_absorbed = sw_T * jnp.asarray(0.94, dtype=T.dtype)
                 q_nonsolar = q_net_T - sw_absorbed
-                dT_dt = dT_dt.at[..., 0].add(
+                dT_target = dT_target.at[..., 0].add(
                     q_nonsolar * inv_rho_csw_dz * mask
                 )
                 from legoesm.ocean.physics.shortwave_penetration import (
@@ -2111,12 +2132,16 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
                     J,
                     rho_0=float(rho_0),
                 )
-                dT_dt = dT_dt + sw_tend * mask_3d
+                dT_target = dT_target + sw_tend * mask_3d
             else:
-                dT_dt = dT_dt.at[..., 0].add(
+                dT_target = dT_target.at[..., 0].add(
                     q_net_T * inv_rho_csw_dz * mask
                 )
-    return du_dt, dv_dt, dT_dt, dS_dt
+            if route_heat_to_implicit:
+                dT_surf = dT_target
+            else:
+                dT_dt = dT_target
+    return du_dt, dv_dt, dT_dt, dS_dt, dT_surf
 
 
 def _bc_sponge_relaxation(du_dt, dv_dt, dT_dt, dS_dt, T, S, u, v, sponge, grid):
@@ -2262,6 +2287,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     sponge=None,
     dt: float = 300.0,
     diagnose_momentum: bool = False,
+    surface_tracer_forcing_fn=None,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -2282,6 +2308,16 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         just ``tendencies``.  Used by the budget-closure infrastructure;
         adds memory but no recompilation.  Default ``False`` (existing
         behavior).
+    surface_tracer_forcing_fn : callable, optional
+        Surface-restoring physics function (``make_surface_forcing_physics``)
+        used ONLY when ``config.surface_forcing_implicit`` is True.  In that
+        mode ``physics_fn`` is built with ``surface_forcing.scheme="none"`` (so
+        the restoring is NOT summed into ``dT_dt``); this function instead
+        supplies the restoring RATE which — together with the prescribed
+        q_net / shortwave heat (also withheld from ``dT_dt``) — is returned on
+        ``tendencies.surface_tracer_forcing`` for the implicit (backward-Euler)
+        application in the model step.  ``None`` (default) ⇒ surface forcing is
+        applied explicitly (bit-identical legacy path).
 
     Returns
     -------
@@ -2453,10 +2489,40 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     )
 
     # --- Stage 10b': external surface forcing (wind stress / heat / shortwave). ---
-    du_dt, dv_dt, dT_dt, dS_dt = _bc_external_surface_forcing(
+    # ``surface_forcing_implicit`` (the ACC recipe): WITHHOLD the surface TRACER
+    # heat (q_net + penetrating shortwave) from the explicit ``dT_dt`` and route
+    # it into ``dT_surf`` for the implicit (backward-Euler) application; WIND
+    # STRESS stays explicit either way (it is AB2'd in both legoESM and Veros).
+    _sf_implicit = bool(getattr(config, "surface_forcing_implicit", False))
+    du_dt, dv_dt, dT_dt, dS_dt, dT_surf_heat = _bc_external_surface_forcing(
         du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, z_coord, J, grid,
-        rho_0, mask, mask_3d,
+        rho_0, mask, mask_3d, route_heat_to_implicit=_sf_implicit,
     )
+
+    # --- Stage 10b'': surface TRACER restoring (T*/S*) routed for IMPLICIT
+    # application when ``surface_forcing_implicit`` is on.  In that mode
+    # ``physics_fn`` carries no restoring (its surface_forcing.scheme is "none"),
+    # so the restoring RATE is computed here via ``surface_tracer_forcing_fn``
+    # and combined with the withheld q_net/shortwave heat into
+    # ``surface_tracer_forcing``.  When OFF, this block is skipped entirely and
+    # ``surface_tracer_forcing`` stays ``None`` (bit-identical legacy path). ---
+    surface_tracer_forcing = None
+    if _sf_implicit:
+        dT_surf = dT_surf_heat
+        dS_surf = jnp.zeros_like(dS_dt)
+        if surface_tracer_forcing_fn is not None:
+            _sf_phys = surface_tracer_forcing_fn(state, grid, z_coord, surface_forcing)
+            dT_surf = dT_surf + _sf_phys.dT_dt.data
+            dS_surf = dS_surf + _sf_phys.dS_dt.data
+        # Mask consistently with the explicit tracer tendencies (applied below).
+        dT_surf = dT_surf * mask_3d
+        dS_surf = dS_surf * mask_3d
+        surface_tracer_forcing = SurfaceTracerForcing(
+            dT_dt=Field(data=dT_surf, name="dT_surf_rate",
+                        dims=("lat", "lon", "level"), units="degC/s"),
+            dS_dt=Field(data=dS_surf, name="dS_surf_rate",
+                        dims=("lat", "lon", "level"), units="PSU/s"),
+        )
 
     # --- Stage 10c: sponge-layer relaxation. ---
     du_dt, dv_dt, dT_dt, dS_dt, diag_sponge_u, diag_sponge_v = _bc_sponge_relaxation(
@@ -2520,6 +2586,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         Ah_visc_u=Ah_visc_u,
         Ah_visc_v=Ah_visc_v,
         Ah_kediss_cell=Ah_kediss_cell,
+        surface_tracer_forcing=surface_tracer_forcing,
     )
 
     if not diagnose_momentum:
