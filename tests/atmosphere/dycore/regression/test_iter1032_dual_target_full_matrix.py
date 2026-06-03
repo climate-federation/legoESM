@@ -41,7 +41,7 @@ from tests.atmosphere.shallow_water.test_cases.williamson import (
     williamson_test5,
 )
 from tests.test_cases.cosine_bell import cosine_bell_cubesphere
-from tests.test_iter921_w2_v_vs_h_pareto_sentinel import (
+from tests.atmosphere.dycore.regression.test_iter921_w2_v_vs_h_pareto_sentinel import (
     cell_centre_angles_from_4edge,
 )
 
