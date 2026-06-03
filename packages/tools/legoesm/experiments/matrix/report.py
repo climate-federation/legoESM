@@ -87,9 +87,25 @@ def write_summary(
     return json_path
 
 
-def _result_key(rec: dict[str, Any]) -> tuple[str, str, str, str]:
-    return (rec.get("component", ""), rec.get("test", ""),
-            rec.get("grid", ""), rec.get("resolution", ""))
+def _result_key(rec: dict[str, Any]) -> tuple[str, ...]:
+    """Stable case identity for regression matching.
+
+    Must include EVERY dimension that distinguishes a :class:`MatrixCase`'s
+    output path (codex review HIGH): keying on only (component, test, grid,
+    resolution) collapses sibling cases that differ by ``complexity`` or
+    ``vertical_coord`` (e.g. the same case/grid/res run hydrostatic vs
+    nonhydrostatic, or sigma vs hybrid), so one sibling's status would clobber
+    the other's in the prior-status map and a real PASS->FAIL could go
+    unreported.
+    """
+    return (
+        rec.get("component", ""),
+        rec.get("complexity", ""),
+        rec.get("test", ""),
+        rec.get("grid", ""),
+        rec.get("resolution", ""),
+        rec.get("vertical_coord", ""),
+    )
 
 
 def detect_regressions(
@@ -112,8 +128,13 @@ def detect_regressions(
         d = r.to_dict()
         was = prev_status.get(_result_key(d))
         if r.status in (RunStatus.FAIL, RunStatus.ERROR) and was == "PASS":
+            # Include complexity + vcoord so sibling cases sharing the partial
+            # key are distinguishable in the report (matches _result_key).
+            cx = f"/{d['complexity']}" if d.get("complexity") else ""
+            vc = (f"/{d['vertical_coord']}"
+                  if d.get("vertical_coord") not in (None, "", "none") else "")
             regressions.append(
-                f"REGRESSION {d['component']}/{d['test']}/{d['grid']}: "
-                f"was PASS, now {r.status.value} — {d['notes']}"
+                f"REGRESSION {d['component']}{cx}/{d['test']}/{d['grid']}"
+                f"{vc}: was PASS, now {r.status.value} — {d['notes']}"
             )
     return regressions

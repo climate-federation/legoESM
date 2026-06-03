@@ -209,6 +209,28 @@ def test_detect_regressions_empty_without_prior(tmp_path):
     assert detect_regressions(cur, tmp_path / "missing.json") == []
 
 
+def test_detect_regressions_distinguishes_sibling_cases(tmp_path):
+    # codex HIGH: two cases with the SAME component/test/grid/resolution but
+    # different complexity (or vertical_coord) must not collide in the
+    # prior-status map — a regression in one must not be masked by the other.
+    a = MatrixCase("atmosphere", "baroclinic", "cubed_sphere", tier=2,
+                   complexity="hydrostatic", resolution="C48", vertical_coord="sigma")
+    b = MatrixCase("atmosphere", "baroclinic", "cubed_sphere", tier=2,
+                   complexity="nonhydrostatic", resolution="C48", vertical_coord="sigma")
+    prev = ResultRecorder(verbose=False)
+    prev.record(a, RunStatus.PASS, 1.0)
+    prev.record(b, RunStatus.PASS, 1.0)
+    write_summary(tmp_path, prev, total_wall=2.0)
+
+    cur = ResultRecorder(verbose=False)
+    cur.record(a, RunStatus.PASS, 1.0)          # hydrostatic still passes
+    cur.record(b, RunStatus.FAIL, 1.0, "blew up")  # nonhydrostatic regressed
+    regressions = detect_regressions(cur, tmp_path / "summary.json")
+    # exactly the nonhydrostatic sibling must be flagged (not masked by the
+    # passing hydrostatic sibling sharing the partial key).
+    assert len(regressions) == 1 and "nonhydrostatic" in regressions[0]
+
+
 # --- registry.MatrixRunner --------------------------------------------------
 
 class _DummyRunner(MatrixRunner):
