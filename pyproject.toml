@@ -243,10 +243,20 @@ ignore_imports = []
 
 [[tool.importlinter.contracts]]
 # A standalone component package may use the shared SUBSTRATE that legoesm-core
-# bundles (core, runtime, parallel, grids, io, timestepping, diagnostics) — but
-# never the orchestration layers ABOVE it: the coupler, the driver, or training.
-# That one-way dependency is what makes `pip install legoesm-ocean` runnable.
-name = "Components must not import the coupler, driver, or training (layers above)"
+# bundles (core, runtime, parallel, grids, io, timestepping) — but never the
+# orchestration layers ABOVE it: coupler, driver, ml/training/da, or the tools
+# (forcing, diagnostics, experiments, visualization).  That one-way dependency is
+# what makes `pip install legoesm-ocean` (base, core-only) run standalone.
+#
+# The ONLY allowed component->above edges are the OPTIONAL heavy features whose
+# install path is declared as a per-component extra (legoesm-atmosphere[ml],
+# legoesm-ocean[ml], legoesm-ocean[tools]) — the SFNO neural dycores / ML physics
+# parameterization (-> legoesm.ml.*) and the Stommel-gyre drift diagnostic
+# (-> legoesm.diagnostics).  Those exact edges are baselined below; the BASE
+# component import is still core-only (`import legoesm.atmosphere`/`legoesm.ocean`
+# pulls no ml/tools — verified).  alerting="error" makes this a ratchet: any NEW
+# component->above edge that is not one of these declared-optional ones fails.
+name = "Components must not import the orchestration layers above them"
 type = "forbidden"
 source_modules = [
     "legoesm.atmosphere",
@@ -259,16 +269,34 @@ forbidden_modules = [
     "legoesm.coupler",
     "legoesm.driver",
     "legoesm.training",
+    "legoesm.ml",
+    "legoesm.da",
+    "legoesm.forcing",
+    "legoesm.diagnostics",
+    "legoesm.experiments",
+    "legoesm.visualization",
 ]
 unmatched_ignore_imports_alerting = "error"
 ignore_imports = [
-    # The shared coupling pytrees (coupling_fields), surface-flux/energy formulas
-    # (bulk_flux, surface_energy), the PhysicsOutput tendency pytree, and the
-    # grid ColumnAdapter have ALL been MOVED to legoesm.core, so every former
-    # component -> coupler / component -> driver edge is gone (components now
-    # import them from core, which is allowed).  This contract is now
-    # ZERO-IGNORE: the components are genuinely independent of the coupler,
-    # driver, and training layers, not merely suppressed.
+    # OPTIONAL FEATURE: SFNO neural dynamical cores + ML physics parameterization.
+    # Declared by the legoesm-atmosphere[ml] / legoesm-ocean[ml] extras (top-level
+    # imports; the base component does not pull these modules).
+    "legoesm.atmosphere.dynamics.sfno_sw -> legoesm.ml.sfno",
+    "legoesm.atmosphere.dynamics.sfno_sw -> legoesm.ml.normalization",
+    "legoesm.atmosphere.dynamics.sfno_sw -> legoesm.ml.channel_packing",
+    "legoesm.atmosphere.dynamics.sfno_pe -> legoesm.ml.sfno",
+    "legoesm.atmosphere.dynamics.sfno_pe -> legoesm.ml.normalization",
+    "legoesm.atmosphere.dynamics.sfno_pe -> legoesm.ml.channel_packing",
+    "legoesm.atmosphere.dynamics.sfno_pe -> legoesm.ml.conservation",
+    "legoesm.atmosphere.physics.ml_parameterization -> legoesm.ml.normalization",
+    "legoesm.atmosphere.physics.ml_parameterization -> legoesm.ml.physics.io",
+    "legoesm.atmosphere.physics.ml_parameterization -> legoesm.ml.physics.model",
+    "legoesm.ocean.dynamics.sfno_ocean -> legoesm.ml.sfno",
+    "legoesm.ocean.dynamics.sfno_ocean -> legoesm.ml.normalization",
+    "legoesm.ocean.dynamics.sfno_ocean -> legoesm.ml.conservation",
+    # OPTIONAL FEATURE: ocean Stommel-gyre tracer experiment drift diagnostic.
+    # Declared by the legoesm-ocean[tools] extra (deferred/function-scope import).
+    "legoesm.ocean.experiments.stommel_gyre_tracer -> legoesm.diagnostics",
 ]
 
 [[tool.importlinter.contracts]]

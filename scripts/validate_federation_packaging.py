@@ -25,6 +25,7 @@ CI matrix; needs ``build`` + ``hatchling`` (``pip install build hatchling``).
 
 from __future__ import annotations
 
+import ast
 import subprocess
 import sys
 import sysconfig
@@ -66,6 +67,19 @@ MEMBER_SUBPKGS = {
 #: at top level, so it must travel with the substrate they depend on.
 SUBSTRATE_LOOSE = {"constants.py", "thermo.py", "registry.py",
                    "_version.py", "surface_albedo.py"}
+
+#: Which member owns a given top-level ``legoesm.<X>`` import target.  Used to
+#: check that every cross-member import in a wheel has a declared dependency
+#: (hard OR optional extra) — a standalone install must not ship a module that
+#: crashes on a missing sibling member.
+SUBPKG_MEMBER = {sub: m for m, subs in MEMBER_SUBPKGS.items() for sub in subs}
+LOOSE_MEMBER = {
+    "constants": "legoesm-core", "thermo": "legoesm-core", "registry": "legoesm-core",
+    "surface_albedo": "legoesm-core", "_version": "legoesm-core",
+    "tuning": "legoesm-ml",
+    "cli": "legoesm", "config": "legoesm", "dycore_factory": "legoesm",
+    "supported_matrix": "legoesm", "taxonomy": "legoesm",
+}
 
 
 def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -156,6 +170,67 @@ def check_dependency_dag(wheels: dict[str, Path]) -> None:
     print("  dependency DAG OK (every member -> core; core -> nothing)")
 
 
+def _declared_member_reqs(whl: Path) -> set[str]:
+    """All ``legoesm-*`` names in the wheel's Requires-Dist (hard OR extra-gated)."""
+    names: set[str] = set()
+    for n in zipfile.ZipFile(whl).namelist():
+        if n.endswith("METADATA"):
+            for ln in zipfile.ZipFile(whl).read(n).decode().splitlines():
+                if ln.lower().startswith("requires-dist:"):
+                    spec = ln.split(":", 1)[1].strip().split(";", 1)[0].strip()
+                    name = spec.split()[0] if spec else ""
+                    for sep in ("~=", "==", ">=", "<=", "!=", ">", "<", "="):
+                        name = name.split(sep)[0]
+                    name = name.strip()
+                    if name.startswith("legoesm-"):
+                        names.add(name)
+            break
+    return names
+
+
+def _legoesm_import_targets(src: str) -> set[str]:
+    """Members imported by a source file via ``legoesm.<X>...`` (any X owner)."""
+    out: set[str] = set()
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return out
+    for node in ast.walk(tree):
+        mods: list[str] = []
+        if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            mods.append(node.module)
+        elif isinstance(node, ast.Import):
+            mods += [a.name for a in node.names]
+        for mod in mods:
+            p = mod.split(".")
+            if p[0] != "legoesm" or len(p) < 2:
+                continue
+            owner = SUBPKG_MEMBER.get(p[1]) or LOOSE_MEMBER.get(p[1])
+            if owner:
+                out.add(owner)
+    return out
+
+
+def check_import_edges_covered_by_metadata(wheels: dict[str, Path]) -> None:
+    # Every cross-member ``legoesm.*`` import in a wheel's shipped source must have
+    # a declared dependency (hard or optional extra) on the target member.  Without
+    # this, a standalone install can ship a public module that crashes on import of
+    # a missing sibling (e.g. atmosphere's SFNO dycore -> legoesm.ml).
+    for m, whl in wheels.items():
+        declared = _declared_member_reqs(whl) | {m, "legoesm-core"}
+        targets: set[str] = set()
+        z = zipfile.ZipFile(whl)
+        for n in z.namelist():
+            if n.startswith("legoesm/") and n.endswith(".py"):
+                targets |= _legoesm_import_targets(z.read(n).decode("utf-8", "replace"))
+        missing = {t for t in targets if t != m} - declared
+        if missing:
+            _fail(f"{m} wheel imports {sorted(missing)} but its METADATA declares no "
+                  f"dependency (hard or extra) on them — a standalone install would "
+                  f"ship modules that crash on import")
+    print("  import-edge coverage OK (every cross-member import has a declared dep/extra)")
+
+
 def _site_packages() -> str:
     return sysconfig.get_paths()["purelib"]
 
@@ -209,6 +284,36 @@ def check_land_standalone_uses_core_surface_albedo(wheels: dict[str, Path], tmp:
     print("  land standalone OK (legoesm.land resolves surface_albedo from core, no meta)")
 
 
+def check_sfno_gated_by_ml_extra(wheels: dict[str, Path], tmp: Path) -> None:
+    # The SFNO neural dycore is an OPTIONAL feature: it lives in legoesm-atmosphere
+    # but imports legoesm.ml at top level, so it is reachable only via the
+    # legoesm-atmosphere[ml] extra.  Prove the extra is load-bearing: WITHOUT ml,
+    # importing the SFNO module must fail cleanly on the missing legoesm.ml — never
+    # silently "work" (which would mean the extra is spurious or ml leaked in).
+    target = tmp / "atm_no_ml"
+    r = _run([
+        sys.executable, "-m", "pip", "install", "--quiet", "--target", str(target),
+        "--no-deps", str(wheels["legoesm-core"]), str(wheels["legoesm-atmosphere"]),
+    ])
+    if r.returncode != 0:
+        _fail(f"installing core+atmosphere wheels:\n{r.stderr}")
+    code = (
+        "import legoesm.atmosphere\n"                      # base must import fine
+        "try:\n"
+        "    import legoesm.atmosphere.dynamics.sfno_sw\n"
+        "    print('UNEXPECTED-OK')\n"
+        "except ModuleNotFoundError as e:\n"
+        "    assert 'legoesm.ml' in str(e), str(e)\n"
+        "    print('OK')\n"
+    )
+    env = {"PYTHONPATH": f"{target}:{_site_packages()}", "JAX_PLATFORMS": "cpu",
+           "PATH": "/usr/bin:/bin"}
+    r = _run([sys.executable, "-S", "-c", code], env=env)
+    if r.returncode != 0 or "OK" not in r.stdout or "UNEXPECTED-OK" in r.stdout:
+        _fail(f"SFNO must be gated by the [ml] extra:\n{r.stdout}\n{r.stderr}")
+    print("  SFNO gating OK (base atmosphere imports; sfno_sw needs the [ml] extra)")
+
+
 def check_entry_point_sharing(wheels: dict[str, Path], tmp: Path) -> None:
     target = tmp / "ep_share"
     r = _run([
@@ -246,10 +351,14 @@ def main() -> int:
         check_wheel_contents(wheels)
         print("Checking dependency DAG...")
         check_dependency_dag(wheels)
+        print("Checking import-edge metadata coverage...")
+        check_import_edges_covered_by_metadata(wheels)
         print("Root-absent install...")
         check_root_absent_install(wheels, tmp)
         print("Land standalone (surface_albedo from core)...")
         check_land_standalone_uses_core_surface_albedo(wheels, tmp)
+        print("SFNO gated by [ml] extra...")
+        check_sfno_gated_by_ml_extra(wheels, tmp)
         print("Entry-point dycore sharing...")
         check_entry_point_sharing(wheels, tmp)
     print("PASS: federation packaging validated (wheels + root-absent install).")

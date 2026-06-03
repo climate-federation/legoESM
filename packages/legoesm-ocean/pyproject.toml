@@ -30,8 +30,23 @@ dependencies = [
     "equinox>=0.11",
 ]
 
+# Optional heavy features that reach UP into the orchestration cluster.  The BASE
+# ocean imports only legoesm-core (verified: `import legoesm.ocean` does not pull
+# ml/tools), so the component stays standalone; these extras declare the install
+# path for the specific modules that do:
+#   * ml    — the SFNO neural ocean dycore (ocean.dynamics.sfno_ocean imports
+#             legoesm.ml.{sfno,normalization,conservation}) at top level;
+#   * tools — the Stommel-gyre tracer experiment's drift diagnostic
+#             (ocean.experiments.stommel_gyre_tracer -> legoesm.diagnostics, deferred).
+# These component->higher edges are baselined in import-linter contract #3.
+[project.optional-dependencies]
+ml = ["legoesm-ml~=0.1.0"]
+tools = ["legoesm-tools~=0.1.0"]
+
 [tool.uv.sources]
 legoesm-core = { workspace = true }
+legoesm-ml = { workspace = true }
+legoesm-tools = { workspace = true }
 
 # PEP-420 namespace package: no src/legoesm/__init__.py; this wheel ships only
 # legoesm/ocean into the shared `legoesm` namespace, so it imports as legoesm.ocean.

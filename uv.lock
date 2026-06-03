@@ -1702,14 +1702,21 @@ dependencies = [
     { name = "numpy" },
 ]
 
+[package.optional-dependencies]
+ml = [
+    { name = "legoesm-ml" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "equinox", specifier = ">=0.11" },
     { name = "jax", specifier = ">=0.4.35" },
     { name = "jaxlib", specifier = ">=0.4.35" },
     { name = "legoesm-core", editable = "packages/legoesm-core" },
+    { name = "legoesm-ml", marker = "extra == 'ml'", editable = "packages/legoesm-ml" },
     { name = "numpy", specifier = ">=1.26" },
 ]
+provides-extras = ["ml"]
 
 [[package]]
 name = "legoesm-core"
@@ -1856,14 +1863,25 @@ dependencies = [
     { name = "numpy" },
 ]
 
+[package.optional-dependencies]
+ml = [
+    { name = "legoesm-ml" },
+]
+tools = [
+    { name = "legoesm-tools" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "equinox", specifier = ">=0.11" },
     { name = "jax", specifier = ">=0.4.35" },
     { name = "jaxlib", specifier = ">=0.4.35" },
     { name = "legoesm-core", editable = "packages/legoesm-core" },
+    { name = "legoesm-ml", marker = "extra == 'ml'", editable = "packages/legoesm-ml" },
+    { name = "legoesm-tools", marker = "extra == 'tools'", editable = "packages/legoesm-tools" },
     { name = "numpy", specifier = ">=1.26" },
 ]
+provides-extras = ["ml", "tools"]
 
 [[package]]
 name = "legoesm-tools"
