@@ -297,6 +297,26 @@ def test_runner_main_captures_exception_as_error(tmp_path):
     assert "boom" in rec["results"][0]["notes"]
 
 
+def test_runner_main_output_dir_not_double_prefixed(tmp_path):
+    # codex review: case_dir must be run_root/<component>/<complexity>/... — the
+    # component segment from MatrixCase.output_path must NOT be joined twice.
+    captured = {}
+
+    class CaptureRunner(_DummyRunner):
+        def run_case(self, case, *, quick, output_dir):
+            captured[case.case] = output_dir
+            return RunStatus.PASS, "ok", {}
+
+    CaptureRunner().main(["--output", str(tmp_path), "--tier", "1"])
+    out = captured["rest_state"]
+    expected = tmp_path / "ocean" / "full_3d" / "rest_state" / "cubed_sphere" / "C24"
+    assert out == expected, out
+    # specifically: the component appears exactly once
+    assert str(out).count("/ocean/") == 1, out
+    # and the summary still lands at run_root/<component>/summary.json
+    assert (tmp_path / "ocean" / "summary.json").exists()
+
+
 def test_runner_main_empty_selection_fails(tmp_path, capsys):
     # codex HIGH-1: a typo'd --grid selects zero cases; must FAIL (rc!=0), not
     # silently write a zero-test summary and return 0.

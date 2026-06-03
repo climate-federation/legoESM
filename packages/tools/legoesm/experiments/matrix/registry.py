@@ -171,11 +171,18 @@ class MatrixRunner:
             )
             return 2
 
-        output_base = Path(args.output) / self.component
+        # Single-source the component path (codex review): MatrixCase.output_path
+        # ALREADY begins with the component segment, so per-case artifacts hang
+        # off the run root directly (results/<component>/<complexity>/<case>/...);
+        # the summary lives one level up at results/<component>/.  Joining the
+        # component twice (output_base / case.output_path) would double-prefix to
+        # results/<component>/<component>/... and misplace every artifact.
+        run_root = Path(args.output)
+        summary_dir = run_root / self.component
         recorder = ResultRecorder()
         t0 = time.time()
         for case in selected:
-            case_dir = output_base / case.output_path
+            case_dir = run_root / case.output_path
             cstart = time.time()
             try:
                 status, notes, metrics = self.run_case(
@@ -191,9 +198,9 @@ class MatrixRunner:
             recorder.record(case, status, time.time() - cstart, notes, metrics)
 
         total_wall = time.time() - t0
-        regressions = detect_regressions(recorder, output_base / "summary.json")
+        regressions = detect_regressions(recorder, summary_dir / "summary.json")
         json_path = write_summary(
-            output_base, recorder, total_wall=total_wall,
+            summary_dir, recorder, total_wall=total_wall,
             title=f"{self.title} — {self.component}",
             meta={"quick_mode": args.quick},
         )
