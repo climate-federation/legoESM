@@ -11,8 +11,21 @@ byte-identical numerics.
 This makes the operator contract load-bearing: a dynamical core can call
 ``ops.divergence(u, v)`` without knowing which grid it holds (design L2).  This
 module supplies the lat-lon C-grid adapter (over the shared operators in
-:mod:`legoesm.grids.operators_latlon_cgrid`); the cubed-sphere (FC-Gram / Duo-Grid)
-and MPAS (TRiSK) adapters follow the same pattern.
+:mod:`legoesm.grids.operators_latlon_cgrid`), the cubed-sphere C-D adapter (over
+:mod:`legoesm.core.operators_cdgrid`), and the MPAS edge-normal adapter (the
+:class:`~legoesm.grids.operator_protocol.EdgeOperators` sibling, over the TRiSK
+kernels in :mod:`legoesm.core.operators_voronoi`).
+
+**Load-bearing status.**  Two production dycores actually *route through* their
+adapter (byte-identical, since the adapter delegates to the same free functions):
+the lat-lon C-grid shallow-water core (``ops.divergence``/``gradient``/``vorticity``)
+and the MPAS shallow-water core (``ops.divergence``/``gradient``).  The cubed-sphere
+SW core is FV3-faithful with *bespoke* operators (FB-mode, 2-stage, duogrid corner
+work — ``dgrid_to_cgrid``, ``_d_sw5_corner_divergence``, ``fv3_del6_vorticity_damping``),
+NOT the generic ``cgrid_*`` functions the cube adapter wraps, so the cube adapter is
+a validated *forward contract*, not a drop-in route (routing it would change FV3
+numerics).  Spectral / SFNO operate through global transforms / neural maps and
+expose neither differential contract.
 """
 
 from __future__ import annotations
