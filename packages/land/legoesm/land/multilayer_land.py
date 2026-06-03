@@ -261,6 +261,11 @@ def _step_multilayer_land_impl(
             wind_speed=wind_speed,
             canopy_state=state.canopy_state,
             dt=dt,
+            T_soil=T_soil,
+            psi_soil=psi,
+            theta_soil=theta,
+            lat=lat,
+            doy=doy,
         )
     else:
         # SimpleSEB: bulk fluxes with skin T = T_soil[:, 0].
