@@ -220,3 +220,62 @@ ignore_imports = [
     # ZERO-IGNORE: the components are genuinely independent of the coupler,
     # driver, and training layers, not merely suppressed.
 ]
+
+[[tool.importlinter.contracts]]
+# The legoesm-core MEMBER (the uv-workspace substrate: FEDERATION.md) is more
+# than the `core` subpackage — it also bundles grids/runtime/parallel/io/
+# timestepping/components.  Contract #1 only guards `core`, so UP-imports from
+# those sibling substrate packages into the Earth-system / orchestration layer
+# slipped through and would make `pip install legoesm-core` pull atmosphere /
+# forcing / driver (a dependency cycle).  This contract guards the WHOLE member
+# so the carve stays a mechanical file move, not a dependency inversion.
+name = "legoesm-core member imports nothing above it"
+type = "forbidden"
+source_modules = [
+    "legoesm.core",
+    "legoesm.grids",
+    "legoesm.runtime",
+    "legoesm.parallel",
+    "legoesm.io",
+    "legoesm.timestepping",
+    "legoesm.components",
+]
+forbidden_modules = [
+    "legoesm.atmosphere",
+    "legoesm.ocean",
+    "legoesm.land",
+    "legoesm.ice",
+    "legoesm.coupler",
+    "legoesm.driver",
+    "legoesm.training",
+    "legoesm.ml",
+    "legoesm.da",
+    "legoesm.forcing",
+    "legoesm.diagnostics",
+    "legoesm.experiments",
+    "legoesm.visualization",
+]
+unmatched_ignore_imports_alerting = "error"
+# RATCHET baseline — the exact current UP-import edges (top-level + grimp-visible
+# deferred/function-scope).  alerting="error" means a stale entry (edge removed)
+# OR a new one BOTH fail, so this list can only shrink toward zero.  Each fix
+# (voronoi_mpi type(model); io re-scope) deletes its lines here.
+ignore_imports = [
+    # core->runtime: the same intentional function-scope deferred imports already
+    # baselined in contract #1 (runtime/__init__ <-> core init cycle).
+    "legoesm.core -> legoesm.runtime.backend",
+    "legoesm.core.conservation -> legoesm.runtime.backend",
+    "legoesm.core.hardware -> legoesm.runtime.backend",
+    "legoesm.core.hardware -> legoesm.runtime.config",
+    "legoesm.core.precision -> legoesm.runtime.backend",
+    # parallel -> atmosphere (MPAS-MPI): fixed next via type(model) reinstantiation.
+    "legoesm.parallel.voronoi_mpi -> legoesm.atmosphere.dynamics.primitive_eq_mpas",
+    "legoesm.parallel.sharded_dynamics -> legoesm.atmosphere.dynamics.primitive_eq_mpas",
+    # io config-aware checkpoint/restart -> forcing/driver: fixed via io re-scope
+    # (config-aware modules move to a higher member; pure-array io stays in core).
+    "legoesm.io.checkpoint -> legoesm.forcing.amip_config",
+    "legoesm.io.distributed_checkpoint -> legoesm.forcing.amip_config",
+    "legoesm.io.restart -> legoesm.forcing.amip_config",
+    "legoesm.io.checkpoint -> legoesm.driver.config",
+    "legoesm.io.restart -> legoesm.driver.config",
+]
