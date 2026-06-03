@@ -27,8 +27,10 @@ dependencies = [
     # The substrate, carved into its own installable member (uv workspace).
     # Everything still imports as ``legoesm.<subpkg>`` via the shared PEP-420
     # namespace; this is what lets ``legoesm-atmosphere`` / ``-ocean`` / ... be
-    # shipped independently on top of the same core (see FEDERATION.md).
-    "legoesm-core",
+    # shipped independently on top of the same core (see FEDERATION.md).  Pinned
+    # to the matching minor (single-sourced version; members bump in lock-step)
+    # so a non-workspace ``pip install legoesm`` cannot resolve a mismatched core.
+    "legoesm-core~=0.1.0",
     "jax>=0.4.35",              # install minimum; tested with 0.8–0.9
     "jaxlib>=0.4.35",           # must match jax
     "equinox>=0.11",
