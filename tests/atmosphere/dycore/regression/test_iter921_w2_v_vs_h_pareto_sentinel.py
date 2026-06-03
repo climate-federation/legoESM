@@ -140,7 +140,9 @@ def _w2_production_iter893():
     "shift) or recalibrate the pin once the restructure settles. xfail rather "
     "than silently widening the tolerance, so the drift stays visible. The "
     "h_err pins below + iter1032 dual-target sentinel still guard W2.",
-    strict=False,
+    strict=True,  # codex review: strict so an XPASS (drift fixed) FAILS CI and
+                  # forces deliberate removal/rebaseline of this temporary
+                  # exception — the drift cannot be silently resolved + forgotten.
 )
 def test_iter921_v_ll_linf_matches_iter893(_w2_production_iter893):
     """v_ll_Linf at the iter-893 production matrix is 0.1319 m/s.
