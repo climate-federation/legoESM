@@ -34,8 +34,14 @@ from legoesm.grids.factory import (
     create_regional_grid,
 )
 
-#: The three spatial extents.
-EXTENTS: tuple[str, ...] = ("global", "regional", "double_periodic")
+#: The spatial extents.  ``column`` is the 0-D (single-column / SCM) extent: the
+#: horizontal grid degenerates to one point and only the vertical is resolved —
+#: available to EVERY component (a column atmosphere/ocean/land/ice), and the
+#: cheapest harness for a single/multi-layer "slab" model.
+EXTENTS: tuple[str, ...] = ("global", "regional", "double_periodic", "column")
+
+#: The four Earth-system components (for the per-component complexity axis).
+COMPONENTS: tuple[str, ...] = ("atmosphere", "ocean", "land", "ice")
 
 #: Hardware architectures legoESM can target (JAX platforms).  Validation only
 #: checks the *name*; whether a given device is actually present is decided at
@@ -159,9 +165,14 @@ def _all_grid_types() -> set[str]:
 
 
 def supported_extents(grid_type: str) -> frozenset[str]:
-    """The extents a grid supports (derived from the factory's grid-type sets)."""
+    """The extents a grid supports (derived from the factory's grid-type sets).
+
+    Every grid family also supports ``"column"`` — the 0-D single-column extent
+    collapses the horizontal to one point, so it is available regardless of the
+    horizontal discretization.
+    """
     g = _canonical(grid_type)
-    extents: set[str] = set()
+    extents: set[str] = {"column"}
     if g in GLOBAL_GRID_TYPES:
         extents.add("global")
     if g in REGIONAL_GRID_TYPES:
@@ -169,6 +180,46 @@ def supported_extents(grid_type: str) -> frozenset[str]:
     if g in _DOUBLE_PERIODIC:
         extents.add("double_periodic")
     return frozenset(extents)
+
+
+def component_complexities(component: str) -> tuple[str, ...]:
+    """The complexity rungs available for a component (fidelity ladder).
+
+    From the ``legoesm.components.complexity`` enums (single source) — e.g.
+    ocean ``fixed_sst / slab / slab_multilayer / full_3d``, land ``slab /
+    multilayer``, atmosphere ``shallow_water / hydrostatic / nonhydrostatic``,
+    ice ``thermodynamic / dynamic``.  A "slab" model (single- or multi-layer) is
+    a low rung here; combine with ``extent="column"`` for the 0-D version.
+    """
+    from legoesm.components import complexity as _cx
+
+    enums = {
+        "atmosphere": _cx.AtmosphereComplexity,
+        "ocean": _cx.OceanComplexity,
+        "land": _cx.LandComplexity,
+        "ice": _cx.IceComplexity,
+    }
+    if component not in enums:
+        raise ValueError(
+            f"Unknown component {component!r}; expected one of {COMPONENTS}."
+        )
+    return tuple(e.value for e in enums[component])
+
+
+def validate_complexity(component: str, complexity: str) -> None:
+    """Validate a ``(component, complexity)`` pair against the fidelity ladder.
+
+    Raises ``ValueError`` for an unknown component or a complexity rung that
+    component does not offer (e.g. ``("land", "full_3d")`` or
+    ``("atmosphere", "slab")`` — the atmosphere's slab/0-D form is
+    ``extent="column"``, not a dycore complexity rung).
+    """
+    rungs = component_complexities(component)  # also validates the component
+    if complexity.strip().lower() not in rungs:
+        raise ValueError(
+            f"complexity {complexity!r} is not a rung of the {component} ladder; "
+            f"available: {list(rungs)}."
+        )
 
 
 def operator_family(grid_type: str) -> str | None:
@@ -235,6 +286,8 @@ def instantiate(
     architecture: str | None = None,
     precision: str | None = None,
     time_integrator: str | None = None,
+    component: str | None = None,
+    complexity: str | None = None,
     configure: bool = False,
     **kwargs: Any,
 ):
@@ -290,6 +343,19 @@ def instantiate(
     # front so an impossible runtime fails before any grid is built.
     validate_runtime(architecture, precision, time_integrator)
 
+    # Validate the per-component complexity (fidelity) axis, if requested.
+    if complexity is not None:
+        if component is None:
+            raise ValueError(
+                "complexity requires a component (one of "
+                f"{COMPONENTS}) — the fidelity ladder is per-component."
+            )
+        validate_complexity(component, complexity)
+    elif component is not None and component not in COMPONENTS:
+        raise ValueError(
+            f"Unknown component {component!r}; expected one of {COMPONENTS}."
+        )
+
     g = _canonical(grid_type)
     if g not in _all_grid_types():
         raise ValueError(
@@ -333,6 +399,22 @@ def instantiate(
             apply_precision(precision)
 
     # --- build the grid via the existing single-source factories ---
+    if extent == "column":
+        # 0-D: the horizontal collapses to a single column (SCM / slab harness),
+        # so the grid is a degenerate one-point SingleColumnGrid regardless of the
+        # named grid family.  ``operators`` make no sense in 0-D — there is no
+        # horizontal stencil — so reject them rather than build a useless adapter.
+        if operators:
+            raise ValueError(
+                "extent='column' is 0-D (single column): there are no horizontal "
+                "differential operators to build — drop operators=True."
+            )
+        import jax.numpy as jnp
+        from legoesm.core.grid_adapters import SingleColumnGrid
+
+        lat = jnp.asarray(kwargs.pop("lat", 0.0))
+        lon = jnp.asarray(kwargs.pop("lon", 0.0))
+        return SingleColumnGrid(lat=lat, lon=lon)
     if extent == "global":
         grid = create_grid(g, **kwargs)
     elif extent == "regional":

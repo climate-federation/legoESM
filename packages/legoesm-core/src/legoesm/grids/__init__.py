@@ -31,6 +31,9 @@ from legoesm.grids.capability import (
     available_precision_modes,
     available_integrators,
     ARCHITECTURES,
+    COMPONENTS,
+    component_complexities,
+    validate_complexity,
 )
 from legoesm.grids.tripole import (
     create_tripole_grid,

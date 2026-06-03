@@ -24,13 +24,13 @@ def test_capability_matrix_shape():
 
 
 def test_extent_support_is_derived_from_the_factory():
-    # global-only spectral grid, regional-only mercator, double-periodic plane.
-    assert supported_extents("gaussian") == frozenset({"global"})
-    assert supported_extents("mercator") == frozenset({"regional"})
-    assert supported_extents("plane") == frozenset({"double_periodic"})
-    # lat-lon and cubed-sphere are both global AND regional.
-    assert supported_extents("latlon") == frozenset({"global", "regional"})
-    assert supported_extents("cubed_sphere") == frozenset({"global", "regional"})
+    # Every grid supports the 0-D "column" extent; horizontal extents are derived
+    # from the factory's grid-type sets.
+    assert supported_extents("gaussian") == frozenset({"global", "column"})
+    assert supported_extents("mercator") == frozenset({"regional", "column"})
+    assert supported_extents("plane") == frozenset({"double_periodic", "column"})
+    assert supported_extents("latlon") == frozenset({"global", "regional", "column"})
+    assert supported_extents("cubed_sphere") == frozenset({"global", "regional", "column"})
 
 
 def test_operator_families():
@@ -132,7 +132,7 @@ def test_nesting_is_flagged_unavailable():
 
 
 def test_extents_constant():
-    assert EXTENTS == ("global", "regional", "double_periodic")
+    assert EXTENTS == ("global", "regional", "double_periodic", "column")
 
 
 # ---------------------------------------------------------------------------
@@ -214,3 +214,65 @@ def test_fp64_without_named_architecture_checks_current_backend():
     # With float64 available, fp64 validates.
     with mock.patch.object(backend, "supports_float64", return_value=True):
         validate_runtime(precision="fp64")
+
+
+# ---------------------------------------------------------------------------
+# 0-D column extent + per-component complexity (slab) axis
+# ---------------------------------------------------------------------------
+
+from legoesm.grids.capability import (
+    COMPONENTS,
+    component_complexities,
+    validate_complexity,
+)
+
+
+def test_column_extent_is_universal():
+    # Every grid family supports the 0-D single-column extent.
+    for g in ("latlon", "cubed_sphere", "mpas", "gaussian", "plane"):
+        assert "column" in supported_extents(g)
+
+
+def test_column_builds_single_column_grid():
+    from legoesm.core.grid_adapters import SingleColumnGrid
+    col = instantiate("latlon", extent="column")
+    assert isinstance(col, SingleColumnGrid)
+    # works for any component family — a column ocean / atmosphere / land / ice.
+    assert isinstance(instantiate("mpas", extent="column"), SingleColumnGrid)
+
+
+def test_column_rejects_operators():
+    with pytest.raises(ValueError, match="0-D.*no horizontal"):
+        instantiate("latlon", extent="column", operators=True)
+
+
+def test_component_complexity_rungs():
+    assert "slab" in component_complexities("ocean")
+    assert "slab_multilayer" in component_complexities("ocean")
+    assert set(component_complexities("land")) == {"slab", "multilayer"}
+    assert "thermodynamic" in component_complexities("ice")
+    assert "hydrostatic" in component_complexities("atmosphere")
+
+
+def test_validate_complexity_rejects_wrong_rung():
+    validate_complexity("ocean", "slab")
+    validate_complexity("land", "multilayer")
+    with pytest.raises(ValueError, match="not a rung of the land ladder"):
+        validate_complexity("land", "full_3d")          # ocean rung, not land
+    with pytest.raises(ValueError, match="not a rung of the atmosphere ladder"):
+        validate_complexity("atmosphere", "slab")        # atm slab = column extent
+    with pytest.raises(ValueError, match="Unknown component"):
+        validate_complexity("biosphere", "slab")
+
+
+def test_instantiate_validates_component_complexity():
+    # A slab ocean column: valid component+complexity, 0-D.
+    from legoesm.core.grid_adapters import SingleColumnGrid
+    col = instantiate("mpas", extent="column", component="ocean", complexity="slab")
+    assert isinstance(col, SingleColumnGrid)
+    # complexity without a component is ambiguous.
+    with pytest.raises(ValueError, match="complexity requires a component"):
+        instantiate("latlon", extent="global", resolution=4, complexity="slab")
+    # an invalid rung is caught before the grid builds.
+    with pytest.raises(ValueError, match="not a rung of the land ladder"):
+        instantiate("latlon", extent="column", component="land", complexity="full_3d")
