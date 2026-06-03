@@ -318,7 +318,10 @@ class DiagnosticCollector:
                     tgt_nlat=self._cmip_nlat,
                     tgt_nlon=self._cmip_nlon,
                 )
-        elif grid_type == "mpas":
+        elif grid_type in ("mpas", "voronoi"):
+            # "mpas" and "voronoi" both name the SCVT Voronoi family; reject
+            # either explicitly so an unstructured mesh never silently falls
+            # through to a no-op CMIP regrid setup.
             raise ValueError(
                 f"CMIP output is not supported for grid_type={grid_type!r}. "
                 f"The SCVT Voronoi mesh requires unstructured-to-latlon "
