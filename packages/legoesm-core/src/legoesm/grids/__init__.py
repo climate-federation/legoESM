@@ -22,6 +22,12 @@ from legoesm.grids.latlon import (
 # follow-up PR (CRM rollout, PR2). For now PlaneGrid is consumed only
 # by ``plane_operators`` and its direct unit tests.
 from legoesm.grids.plane import PlaneGrid, create_plane_grid
+from legoesm.grids.capability import (
+    instantiate as instantiate_grid,
+    capability_matrix,
+    supported_extents,
+    operator_family,
+)
 from legoesm.grids.tripole import (
     create_tripole_grid,
     create_synthetic_tripole,
