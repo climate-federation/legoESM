@@ -128,11 +128,13 @@ baroclinic, DCMIP TC, W5 production, rest-state.
 total energy (597/598), te_correction (601/602), cube-imprint d_con (233/234),
 smag_vort cap formula (249/250), full-toolkit AD (184/185).
 
-**Gap — uncovered after curation:** the *fortran-fidelity flags-default-OFF*
-invariant. Its guardians (`test_fortran_fidelity_default_flags_iter873.py`,
+**Gap — RESOLVED (codex HIGH-2):** the *fortran-fidelity flags-default-OFF*
+invariant. Its original guardians (`test_fortran_fidelity_default_flags_iter873.py`,
 `test_iter928_fortran_fidelity_gap_markers.py`, `test_fv3_fidelity_flag_set_iter369.py`)
-are **source-path-grep sentinels** that match strings in
-`scripts/run_atmosphere_test_matrix.py`; the `restructure` branch moved/renamed
-that runner so the greps fail. They are archived, NOT kept. **Follow-up:** restore
-one fidelity-flag sentinel with its source-path target updated to the
-post-restructure matrix-runner location (`scripts/matrix/` after Phase 4).
+were **source-path-grep sentinels** matching strings in the atmosphere matrix
+runner; the restructure moved that runner so the greps broke. They stay archived.
+The invariant is now guarded **behaviorally** by `test_fidelity_flags_default_off.py`:
+it constructs the actual `CDGridPrimitiveEquationConfig` / `CDGridCompressibleEulerConfig`
+and asserts every `use_fv3_*` flag defaults `False` (auto-discovered, so a new
+fidelity flag that defaults ON also fails) — robust to layout changes, unlike the
+source-grep originals. The faithful-ON side stays pinned by `iter392`.
