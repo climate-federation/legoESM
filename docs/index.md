@@ -55,11 +55,19 @@ asserts a bit-identical result. See [Getting started](getting_started.md).
 
 ## Where to go next
 
-- [Getting started](getting_started.md) — install, first run, the reproduce gate
-- [Single-column model](scm.md) — the cheapest standalone brick + gradient check
-- [Dycore validation catalogue](dycore_validation_catalog.md) — Williamson,
-  Galewsky, Jablonowski–Williamson, DCMIP, Held–Suarez
-- [CMIP readiness](cmip_readiness.md) and [real-hardware scaling](REAL_HARDWARE_SCALING.md)
+```{toctree}
+:maxdepth: 1
+:caption: Documentation
+
+getting_started
+scm
+amip
+ml_physics_parameterization
+dycore_validation_catalog
+PHYSICS_PARAMETERIZATION_TESTS
+cmip_readiness
+REAL_HARDWARE_SCALING
+```
 
 ## Citation
 

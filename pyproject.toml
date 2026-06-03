@@ -49,10 +49,6 @@ data = [
     "fsspec>=2024.2",
 ]
 metal = ["jax-metal"]
-docs = [
-    "mkdocs>=1.6",
-    "mkdocs-material>=9.5",
-]
 mpi = [
     "mpi4py>=4.1,<5",
     "mpi4jax>=0.8,<0.9",
@@ -66,7 +62,7 @@ dev = [
     "pre-commit",
     "import-linter>=2.0",
 ]
-docs = ["sphinx", "myst-parser"]
+docs = ["sphinx", "myst-parser", "furo"]
 all = [
     "legoesm[ml,mesh,viz,data,dev,docs]",
 ]

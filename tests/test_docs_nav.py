@@ -1,40 +1,52 @@
-"""Every page the mkdocs nav references must exist (Stage D — docs).
+"""Every page in the Sphinx index toctree must exist (Stage D — docs).
 
-Guards against a nav entry pointing at a moved/renamed doc, which would break the
-``mkdocs build`` (and the published site) silently until someone runs it.
+Guards against a toctree entry pointing at a moved/renamed doc, which would break
+``sphinx-build`` (and the published site) silently until someone runs it.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
-import yaml
-
 _ROOT = Path(__file__).resolve().parents[1]
+_DOCS = _ROOT / "docs"
 
 
-def _nav_pages(nav):
-    """Flatten the mkdocs nav tree to the list of referenced doc paths."""
-    pages = []
-    if isinstance(nav, str):
-        pages.append(nav)
-    elif isinstance(nav, list):
-        for item in nav:
-            pages.extend(_nav_pages(item))
-    elif isinstance(nav, dict):
-        for value in nav.values():
-            pages.extend(_nav_pages(value))
-    return pages
+def _toctree_entries(index_md: str) -> list[str]:
+    """Extract the document names listed in the index.md MyST {toctree} block."""
+    entries: list[str] = []
+    in_block = False
+    for line in index_md.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```{toctree}"):
+            in_block = True
+            continue
+        if in_block:
+            if stripped.startswith("```"):
+                in_block = False
+                continue
+            if not stripped or stripped.startswith(":"):
+                continue  # toctree option (:maxdepth:, :caption:) or blank
+            entries.append(stripped)
+    return entries
 
 
-def test_every_nav_page_exists() -> None:
-    cfg = yaml.safe_load((_ROOT / "mkdocs.yml").read_text())
-    docs_dir = _ROOT / cfg.get("docs_dir", "docs")
-    missing = [p for p in _nav_pages(cfg["nav"]) if not (docs_dir / p).is_file()]
-    assert not missing, f"mkdocs nav references missing docs: {missing}"
+def test_sphinx_conf_present() -> None:
+    assert (_DOCS / "conf.py").is_file()
+    assert (_DOCS / "index.md").is_file()
 
 
-def test_index_page_present() -> None:
-    cfg = yaml.safe_load((_ROOT / "mkdocs.yml").read_text())
-    docs_dir = _ROOT / cfg.get("docs_dir", "docs")
-    assert (docs_dir / "index.md").is_file()
+def test_every_toctree_entry_resolves_to_a_doc() -> None:
+    entries = _toctree_entries((_DOCS / "index.md").read_text())
+    assert entries, "index.md has no toctree entries"
+    missing = [e for e in entries
+               if not (_DOCS / f"{e}.md").is_file()
+               and not (_DOCS / f"{e}.rst").is_file()]
+    assert not missing, f"toctree references missing docs: {missing}"
+
+
+def test_conf_is_markdown_first() -> None:
+    conf = (_DOCS / "conf.py").read_text()
+    assert "myst_parser" in conf
+    assert re.search(r'"\.md"', conf)  # .md is a recognised source suffix
