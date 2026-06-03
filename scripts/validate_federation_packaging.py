@@ -88,7 +88,21 @@ def check_wheel_contents(wheels: dict[str, Path]) -> None:
             stray = subpkgs - {sub}
             if stray:
                 _fail(f"{m} wheel ships foreign subpackages {stray}")
-    print("  wheel contents OK (namespace, isolation, substrate loose modules)")
+            # A component wheel must ship NO loose top-level legoesm/*.py module —
+            # the substrate's constants.py / thermo.py / registry.py / _version.py
+            # belong to legoesm-core ONLY; a duplicate in a component wheel would
+            # shadow/conflict in the merged namespace.
+            loose = {
+                n[len("legoesm/"):]
+                for n in names
+                if n.startswith("legoesm/")
+                and "/" not in n[len("legoesm/"):]
+                and n.endswith(".py")
+            }
+            if loose:
+                _fail(f"{m} wheel ships loose substrate modules {loose} "
+                      f"(those belong to legoesm-core only)")
+    print("  wheel contents OK (namespace, isolation, no loose-module leakage)")
 
 
 def check_dependency_dag(wheels: dict[str, Path]) -> None:

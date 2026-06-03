@@ -400,14 +400,23 @@ def instantiate(
 
     # --- build the grid via the existing single-source factories ---
     if extent == "column":
-        # 0-D: the horizontal collapses to a single column (SCM / slab harness),
-        # so the grid is a degenerate one-point SingleColumnGrid regardless of the
-        # named grid family.  ``operators`` make no sense in 0-D — there is no
-        # horizontal stencil — so reject them rather than build a useless adapter.
+        # 0-D: the HORIZONTAL collapses to a single point, so the grid is a
+        # degenerate one-point SingleColumnGrid regardless of the named grid
+        # family (the horizontal discretization is moot for a single column).  The
+        # VERTICAL is NOT in the grid — it is resolved by the sigma/level
+        # coordinate the component pairs with this column, so a column model is a
+        # SingleColumnGrid + a vertical coordinate.
+        #
+        # CONTRACT: SingleColumnGrid satisfies only the SCM physics-pipeline subset
+        # of GridProtocol (lat/lon + to_columns/from_columns) — it has NO
+        # horizontal metrics, halo, or differential operators.  That is exactly
+        # the vertical-only / slab use, so operators=True is rejected here rather
+        # than handed a grid that cannot satisfy GridOperators.
         if operators:
             raise ValueError(
-                "extent='column' is 0-D (single column): there are no horizontal "
-                "differential operators to build — drop operators=True."
+                "extent='column' is 0-D (single column): SingleColumnGrid has no "
+                "horizontal differential operators — drop operators=True (a column "
+                "model runs vertical/physics only)."
             )
         import jax.numpy as jnp
         from legoesm.core.grid_adapters import SingleColumnGrid
