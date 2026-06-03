@@ -37,7 +37,14 @@ from typing import Any
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "src"))
+# Federation-aware bootstrap for a non-installed checkout: after the uv-workspace
+# carve the ``legoesm`` namespace is split across packages/<member>/legoesm + the
+# root src/legoesm (meta), so adding only ``<repo>/src`` no longer exposes moved
+# members like ``legoesm.ocean``.  (The canonical setup is an editable install —
+# ``uv sync`` / ``pip install -e`` — which makes this loop a no-op.)
+for _root in [REPO_ROOT / "src", *sorted((REPO_ROOT / "packages").glob("*"))]:
+    if _root.is_dir() and str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
 
 from legoesm.ocean.fidelity import artifacts as _artifacts  # noqa: E402
 from legoesm.ocean.fidelity import cache as _cache  # noqa: E402
