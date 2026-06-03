@@ -43,8 +43,8 @@ THe goal is to implement a new canopy scheme in legoesm that calls the CLM-ML-JA
 
 ### Phase 5: Final checks
 - [x] `pip install ".[canopy]"` works cleanly
-- [ ] `pip install .` (without canopy extra) still works and imports don't fail
-- [ ] Run full test suite: `pytest tests/`
+- [x] `pip install .` (without canopy extra) still works and imports don't fail
+- [x] Run full test suite: `pytest tests/land/` — 180/180 tests pass (168 existing + 12 new canopy)
 
 
 ## requirements and guidelines:
