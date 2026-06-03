@@ -16,15 +16,30 @@ three proven contracts.
 
 | Member | Bundles (`src/legoesm/…`) | Depends on |
 |--------|---------------------------|------------|
-| **legoesm-core** (the substrate) | `core`, `grids`, `runtime`, `parallel`, `io`, `timestepping`, `components` | — (imports nothing above; contract #1) |
+| **legoesm-core** (the substrate) | `core`, `grids`, `runtime`, `parallel`, `io`, `timestepping`, `components` + loose modules `constants`, `thermo`, `registry`, `surface_albedo`, `_version` | — (imports nothing above; contract #1/#4) |
 | **legoesm-atmosphere** | `atmosphere` | core |
 | **legoesm-ocean** | `ocean` | core |
 | **legoesm-land** | `land` | core |
 | **legoesm-ice** | `ice` | core |
-| **legoesm-coupler** | `coupler`, `driver` | core + the four components |
-| **legoesm-ml** | `ml`, `training`, `da` | core (+ components for training) |
-| **legoesm-tools** | `forcing`, `diagnostics`, `experiments`, `visualization` | core + components |
-| **legoesm** (meta) | re-exports; `legoesm[all]` | every member |
+| **legoesm-coupler** | `coupler`, `driver` | core + the four components + ml, tools |
+| **legoesm-ml** | `ml`, `training`, `da` + loose module `tuning` | core, atmosphere, ocean, coupler, tools |
+| **legoesm-tools** | `forcing`, `diagnostics`, `experiments`, `visualization` | core, atmosphere, ocean, coupler |
+| **legoesm** (meta) | loose modules `cli`, `config`, `dycore_factory`, `supported_matrix`, `taxonomy`; `legoesm[all]` | every member |
+
+The orchestration cluster — **legoesm-coupler**, **legoesm-ml**, **legoesm-tools** —
+is *not* a clean DAG: the driver coordinates the components and pulls forcing
+(tools) + a deferred ERA5 path (ml); training (ml) drives the driver (coupler)
+and uses forcing (tools); tools' experiment configs go through the driver. These
+mutual edges (a uv-workspace cycle, which uv resolves) are why the three install
+*together* — unlike the four independent components. The exact member-level
+edges are AST-verified (top-level + deferred) and pinned in each member's
+`pyproject.toml`. The loose top-level modules (not subpackages) are placed by the
+import DAG, not by where the file sits today: `surface_albedo` ships with the
+substrate because land/ice/coupler import it at top level (a standalone
+`pip install legoesm-land` must get it from core); `tuning` ships with ml (its
+only importer); the rest are the meta layer. `tests/test_federation_plan.py` pins
+**both** the subpackage map and the loose-module map, so a new top-level
+subpackage *or* module fails the test until it is assigned to a member.
 
 Contract #2 (the four Earth-system components are mutually independent) is what
 lets `legoesm-atmosphere` / `-ocean` / `-land` / `-ice` be **separate** members

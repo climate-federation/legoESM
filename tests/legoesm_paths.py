@@ -73,3 +73,30 @@ def legoesm_subpackages() -> set[str]:
             ):
                 names.add(child.name)
     return names
+
+
+def legoesm_loose_modules() -> set[str]:
+    """Names of the top-level legoesm *modules* (loose ``.py`` files) across roots.
+
+    A loose module is a non-underscore ``*.py`` file (other than ``__init__.py``)
+    sitting directly in a namespace root — the orchestration/meta modules (cli,
+    config, ...) and the substrate helper modules (constants, thermo, ...) that
+    are not part of any subpackage.  The federation plan must still assign each
+    of these to exactly one member, so this is the module-level counterpart of
+    ``legoesm_subpackages`` (``test_federation_plan`` pins both).  Underscore
+    modules (e.g. ``_version``) are private and excluded, mirroring the
+    subpackage rule.
+    """
+    names: set[str] = set()
+    for root in legoesm_root_paths():
+        if not root.is_dir():
+            continue
+        for child in root.iterdir():
+            if (
+                child.is_file()
+                and child.suffix == ".py"
+                and child.name != "__init__.py"
+                and not child.name.startswith("_")
+            ):
+                names.add(child.stem)
+    return names

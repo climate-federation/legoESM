@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "legoesm-coupler"
+version = "0.1.0"
+description = "differentiable coupler + the composable model driver (run/reproduce, surface flux exchange, coupled ESM)."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "Pierre Gentine" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+]
+# The ORCHESTRATION layer (coupler/driver, ml/training/da, tools) is a
+# mutually-interdependent CLUSTER, not a clean DAG: the driver coordinates every
+# Earth-system component AND pulls forcing/diagnostics (tools); a deferred ERA5
+# init path reaches training (ml).  uv resolves the workspace cycle; these are
+# the real member-level import edges (verified by AST scan of the member source,
+# top-level + deferred):
+#   coupler/driver -> core, the four components, tools, ml
+dependencies = [
+    "legoesm-core~=0.1.0",
+    "legoesm-atmosphere~=0.1.0",
+    "legoesm-ocean~=0.1.0",
+    "legoesm-land~=0.1.0",
+    "legoesm-ice~=0.1.0",
+    "legoesm-ml~=0.1.0",
+    "legoesm-tools~=0.1.0",
+]
+
+[tool.uv.sources]
+legoesm-core = { workspace = true }
+legoesm-atmosphere = { workspace = true }
+legoesm-ocean = { workspace = true }
+legoesm-land = { workspace = true }
+legoesm-ice = { workspace = true }
+legoesm-ml = { workspace = true }
+legoesm-tools = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/legoesm"]

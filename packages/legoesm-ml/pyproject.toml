@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "legoesm-ml"
+version = "0.1.0"
+description = "machine-learning layer: SFNO + neural-GCM nets, training modes, data assimilation, parameter tuning."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "Pierre Gentine" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+]
+# The ORCHESTRATION layer (coupler/driver, ml/training/da, tools) is a
+# mutually-interdependent CLUSTER, not a clean DAG: training drives the driver
+# (coupler) and uses forcing (tools); ml dynamics wrap the atmosphere/ocean
+# dycores.  uv resolves the workspace cycle; these are the real member-level
+# import edges (verified by AST scan, top-level + deferred):
+#   ml/training/da -> core, atmosphere, ocean, coupler, tools
+# (no land/ice edge — ml never imports them).
+dependencies = [
+    "legoesm-core~=0.1.0",
+    "legoesm-atmosphere~=0.1.0",
+    "legoesm-ocean~=0.1.0",
+    "legoesm-coupler~=0.1.0",
+    "legoesm-tools~=0.1.0",
+]
+
+[tool.uv.sources]
+legoesm-core = { workspace = true }
+legoesm-atmosphere = { workspace = true }
+legoesm-ocean = { workspace = true }
+legoesm-coupler = { workspace = true }
+legoesm-tools = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/legoesm"]

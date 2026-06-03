@@ -39,6 +39,13 @@ dependencies = [
     "legoesm-ocean~=0.1.0",
     "legoesm-land~=0.1.0",
     "legoesm-ice~=0.1.0",
+    # The orchestration cluster (coupler/driver, ml/training/da, tools): the meta
+    # package's own modules (cli, config, dycore_factory, taxonomy) import these,
+    # so the meta-member pulls the whole stack.  They are mutually interdependent
+    # (a uv-workspace cycle), unlike the four independent components above.
+    "legoesm-coupler~=0.1.0",
+    "legoesm-ml~=0.1.0",
+    "legoesm-tools~=0.1.0",
     "jax>=0.4.35",              # install minimum; tested with 0.8–0.9
     "jaxlib>=0.4.35",           # must match jax
     "equinox>=0.11",
@@ -107,8 +114,18 @@ packages = ["src/legoesm"]
 [tool.uv.workspace]
 members = ["packages/*"]
 
+# Every inter-member dependency resolves to the in-tree workspace member (never
+# PyPI).  All members must be listed here, or uv would try to fetch e.g.
+# legoesm-atmosphere~=0.1.0 from an index that does not publish it yet.
 [tool.uv.sources]
 legoesm-core = { workspace = true }
+legoesm-atmosphere = { workspace = true }
+legoesm-ocean = { workspace = true }
+legoesm-land = { workspace = true }
+legoesm-ice = { workspace = true }
+legoesm-coupler = { workspace = true }
+legoesm-ml = { workspace = true }
+legoesm-tools = { workspace = true }
 
 [tool.ruff]
 line-length = 100
@@ -265,6 +282,15 @@ source_modules = [
     "legoesm.io",
     "legoesm.timestepping",
     "legoesm.components",
+    # The core member also ships these top-level substrate modules (they have no
+    # __init__-package home); guard them too so the WHOLE member — not just its
+    # subpackages — provably imports nothing above core.  surface_albedo lives
+    # here (not the root meta) because land/ice/coupler import it at top level,
+    # so `pip install legoesm-land` must get it from the substrate.
+    "legoesm.constants",
+    "legoesm.thermo",
+    "legoesm.registry",
+    "legoesm.surface_albedo",
 ]
 forbidden_modules = [
     "legoesm.atmosphere",

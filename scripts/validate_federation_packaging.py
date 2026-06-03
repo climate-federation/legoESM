@@ -39,8 +39,33 @@ MEMBERS = (
     "legoesm-ocean",
     "legoesm-land",
     "legoesm-ice",
+    "legoesm-coupler",
+    "legoesm-ml",
+    "legoesm-tools",
 )
 COMPONENTS = ("legoesm-atmosphere", "legoesm-ocean", "legoesm-land", "legoesm-ice")
+
+#: Member -> the legoesm subpackages it legitimately ships.  Mirrors
+#: tests/test_federation_plan.FEDERATION_MEMBERS (several members bundle more than
+#: one subpackage, so the wheel-isolation check cannot assume member==subpackage).
+MEMBER_SUBPKGS = {
+    "legoesm-core": {"core", "grids", "runtime", "parallel", "io",
+                     "timestepping", "components"},
+    "legoesm-atmosphere": {"atmosphere"},
+    "legoesm-ocean": {"ocean"},
+    "legoesm-land": {"land"},
+    "legoesm-ice": {"ice"},
+    "legoesm-coupler": {"coupler", "driver"},
+    "legoesm-ml": {"ml", "training", "da"},
+    "legoesm-tools": {"forcing", "diagnostics", "experiments", "visualization"},
+}
+
+#: The substrate loose modules belong to legoesm-core ONLY — a duplicate shipped
+#: by any other member would shadow/conflict in the merged PEP-420 namespace.
+#: surface_albedo is here (not the meta layer) because land/ice/coupler import it
+#: at top level, so it must travel with the substrate they depend on.
+SUBSTRATE_LOOSE = {"constants.py", "thermo.py", "registry.py",
+                   "_version.py", "surface_albedo.py"}
 
 
 def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -78,31 +103,34 @@ def check_wheel_contents(wheels: dict[str, Path]) -> None:
             n.split("/")[1] for n in names
             if n.startswith("legoesm/") and "/" in n[len("legoesm/"):]
         }
+        loose = {
+            n[len("legoesm/"):]
+            for n in names
+            if n.startswith("legoesm/")
+            and "/" not in n[len("legoesm/"):]
+            and n.endswith(".py")
+        }
+        stray = subpkgs - MEMBER_SUBPKGS[m]
+        if stray:
+            _fail(f"{m} wheel ships foreign subpackages {stray} "
+                  f"(expected {sorted(MEMBER_SUBPKGS[m])})")
         if m == "legoesm-core":
-            if "ocean" in subpkgs or "atmosphere" in subpkgs:
-                _fail("legoesm-core wheel leaks a component subpackage")
-            if "constants.py" not in {Path(n).name for n in names}:
-                _fail("legoesm-core wheel is missing the substrate constants.py")
+            # core MUST carry the substrate loose modules (and only those).
+            missing = SUBSTRATE_LOOSE - loose
+            if missing:
+                _fail(f"legoesm-core wheel is missing substrate loose modules {missing}")
+            extra = loose - SUBSTRATE_LOOSE
+            if extra:
+                _fail(f"legoesm-core wheel ships unexpected loose modules {extra}")
         else:
-            sub = m.split("-", 1)[1]
-            stray = subpkgs - {sub}
-            if stray:
-                _fail(f"{m} wheel ships foreign subpackages {stray}")
-            # A component wheel must ship NO loose top-level legoesm/*.py module —
-            # the substrate's constants.py / thermo.py / registry.py / _version.py
-            # belong to legoesm-core ONLY; a duplicate in a component wheel would
-            # shadow/conflict in the merged namespace.
-            loose = {
-                n[len("legoesm/"):]
-                for n in names
-                if n.startswith("legoesm/")
-                and "/" not in n[len("legoesm/"):]
-                and n.endswith(".py")
-            }
-            if loose:
-                _fail(f"{m} wheel ships loose substrate modules {loose} "
+            # No other member may ship a substrate loose module — it would
+            # shadow/conflict with legoesm-core in the merged namespace.  A
+            # member's OWN loose module (e.g. ml's tuning.py) is fine.
+            leaked = loose & SUBSTRATE_LOOSE
+            if leaked:
+                _fail(f"{m} wheel ships substrate loose modules {leaked} "
                       f"(those belong to legoesm-core only)")
-    print("  wheel contents OK (namespace, isolation, no loose-module leakage)")
+    print("  wheel contents OK (namespace, subpackage isolation, no substrate-loose leakage)")
 
 
 def check_dependency_dag(wheels: dict[str, Path]) -> None:
@@ -117,13 +145,15 @@ def check_dependency_dag(wheels: dict[str, Path]) -> None:
                 ]
         return []
 
-    for c in COMPONENTS:
-        reqs = " ".join(_requires(wheels[c]))
+    for m in MEMBERS:
+        if m == "legoesm-core":
+            continue
+        reqs = " ".join(_requires(wheels[m]))
         if "legoesm-core" not in reqs:
-            _fail(f"{c} does not Requires-Dist legoesm-core")
+            _fail(f"{m} does not Requires-Dist legoesm-core")
     if any("legoesm-" in r for r in _requires(wheels["legoesm-core"])):
         _fail("legoesm-core depends on another member — it must be the DAG root")
-    print("  dependency DAG OK (components -> core; core -> nothing)")
+    print("  dependency DAG OK (every member -> core; core -> nothing)")
 
 
 def _site_packages() -> str:
@@ -141,7 +171,7 @@ def check_root_absent_install(wheels: dict[str, Path], tmp: Path) -> None:
     code = (
         "import legoesm; assert legoesm.__file__ is None, 'not a namespace pkg'\n"
         "import legoesm.core, legoesm.ocean, legoesm.grids\n"
-        "from legoesm import constants, thermo\n"
+        "from legoesm import constants, thermo, surface_albedo\n"
         "from legoesm.ocean.dynamics.barotropic_mpas import barotropic_substeps_mpas\n"
         "assert abs(constants.g - 9.80616) < 1e-6\n"
         "print('OK')\n"
@@ -152,6 +182,31 @@ def check_root_absent_install(wheels: dict[str, Path], tmp: Path) -> None:
     if r.returncode != 0 or "OK" not in r.stdout:
         _fail(f"root-absent core+ocean import:\n{r.stdout}\n{r.stderr}")
     print("  root-absent install OK (core+ocean import + run, no root, no atmosphere)")
+
+
+def check_land_standalone_uses_core_surface_albedo(wheels: dict[str, Path], tmp: Path) -> None:
+    # The reason surface_albedo lives in legoesm-core, not the meta layer: the land
+    # component imports ``legoesm.surface_albedo`` at top level, so a standalone
+    # ``pip install legoesm-core legoesm-land`` (no meta, no other component) must
+    # be able to import legoesm.land.  This pins that exact invariant.
+    target = tmp / "land_standalone"
+    r = _run([
+        sys.executable, "-m", "pip", "install", "--quiet", "--target", str(target),
+        "--no-deps", str(wheels["legoesm-core"]), str(wheels["legoesm-land"]),
+    ])
+    if r.returncode != 0:
+        _fail(f"installing core+land wheels:\n{r.stderr}")
+    code = (
+        "import legoesm.land.slab_land\n"          # top-level imports legoesm.surface_albedo
+        "from legoesm.surface_albedo import land_albedo, LandAlbedoConfig\n"
+        "print('OK')\n"
+    )
+    env = {"PYTHONPATH": f"{target}:{_site_packages()}", "JAX_PLATFORMS": "cpu",
+           "PATH": "/usr/bin:/bin"}
+    r = _run([sys.executable, "-S", "-c", code], env=env)
+    if r.returncode != 0 or "OK" not in r.stdout:
+        _fail(f"root-absent core+land import (surface_albedo from core):\n{r.stdout}\n{r.stderr}")
+    print("  land standalone OK (legoesm.land resolves surface_albedo from core, no meta)")
 
 
 def check_entry_point_sharing(wheels: dict[str, Path], tmp: Path) -> None:
@@ -193,6 +248,8 @@ def main() -> int:
         check_dependency_dag(wheels)
         print("Root-absent install...")
         check_root_absent_install(wheels, tmp)
+        print("Land standalone (surface_albedo from core)...")
+        check_land_standalone_uses_core_surface_albedo(wheels, tmp)
         print("Entry-point dycore sharing...")
         check_entry_point_sharing(wheels, tmp)
     print("PASS: federation packaging validated (wheels + root-absent install).")
