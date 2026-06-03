@@ -43,6 +43,7 @@ import pytest
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
 from legoesm.core.fv_tp_2d import fv_tp_2d, compute_transport_quantities
+from tests.legoesm_paths import legoesm_source_path
 
 
 def _duogrid_cdgrid(n=8):
@@ -153,8 +154,7 @@ def test_d_sw_native_passes_apply_cgrid_flux_sync_false():
     — the mass-flux call must default to True (matching Fortran's
     ACTIVE mass-flux sync at dyn_core.F90:850-900).
     """
-    src = (Path(__file__).resolve().parent.parent
-           / "src" / "legoesm" / "core" / "fv3_sw_core.py")
+    src = legoesm_source_path("core/fv3_sw_core.py")
     tree = ast.parse(src.read_text())
 
     fn = next(

@@ -59,6 +59,7 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm.core.operators_fv import _ppm_edge_values
+from tests.legoesm_paths import legoesm_source_path
 
 
 def _ppm_edge_values_with_clip(q_1d, blend_edges=False):
@@ -241,8 +242,7 @@ def test_iter880_source_no_jnp_clip_in_ppm_edge_values():
     nested under an ``If`` test of
     ``apply_fortran_xppm_boundary and n_interior is not None``).
     """
-    src_path = (Path(__file__).resolve().parent.parent
-                / "src" / "legoesm" / "core" / "operators_fv.py")
+    src_path = legoesm_source_path("core/operators_fv.py")
     tree = ast.parse(src_path.read_text())
 
     fn = next(

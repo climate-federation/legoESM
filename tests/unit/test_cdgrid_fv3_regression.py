@@ -16,6 +16,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from tests.legoesm_paths import legoesm_root_paths, legoesm_source_path
 
 jax.config.update("jax_enable_x64", True)
 
@@ -1212,9 +1213,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         `shallow_water_fv3_cdgrid.py:<N>`-style same-file reference
         reappears.
         """
-        import pathlib
         import re
-        repo_root = pathlib.Path(__file__).resolve().parents[2]
         # Per-file "same-file" patterns.  A line-number reference
         # to a file IS a same-file reference iff it names the file
         # whose source the comment lives in.  The iter-178/179 drift
@@ -1238,7 +1237,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         ]
         keyword = "div_damp"
         for rel_path, same_file_patterns in files_and_patterns:
-            src = (repo_root / rel_path).read_text()
+            src = legoesm_source_path(rel_path).read_text()
             # Find all lines mentioning div_damp, check a window of
             # +/- 6 lines for forbidden patterns.
             lines = src.splitlines()
@@ -3463,11 +3462,8 @@ class TestCgridMassFluxDivergenceXAxis(unittest.TestCase):
         rejected so new callers are forced to name strips explicitly.
         """
         import ast
-        import pathlib
 
-        root = (pathlib.Path(__file__).resolve()
-                .parent.parent.parent)
-        src_file = root / "src/legoesm/core/operators_cdgrid.py"
+        src_file = legoesm_source_path("core/operators_cdgrid.py")
         src = src_file.read_text()
         tree = ast.parse(src)
 
@@ -3904,10 +3900,7 @@ class TestPpmLimiterAtSmoothExtremum(unittest.TestCase):
         detector used in ``mord==3`` (tp_core.F90:421-424).  If someone
         adds this detector, this test must be UPDATED -- not deleted.
         """
-        import pathlib
-        root = (pathlib.Path(__file__).resolve()
-                .parent.parent.parent)
-        src = (root / "src/legoesm/core/operators_cdgrid.py").read_text()
+        src = legoesm_source_path("core/operators_cdgrid.py").read_text()
         # smt5 / smt6 would appear as symbol names if the detector
         # were ported.  Check they do NOT appear in the PPM function.
         import ast
@@ -10172,8 +10165,6 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
         formatted — will contain this cross-term and fail the lock.
         """
         import ast
-        from pathlib import Path
-        src_dir = Path(__file__).resolve().parent.parent.parent / 'src' / 'legoesm'
 
         # Iter-699: delegate to module-level _dsw4_has_ut_plus_vt_crossterm
         # so this lock is covered by TestDSw4StructuralLockAstScanner.
@@ -10392,15 +10383,16 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
             return _Stripper().visit(tree)
 
         offenders = []
-        for py_file in src_dir.rglob('*.py'):
-            try:
-                text = py_file.read_text()
-                tree = ast.parse(text)
-            except (SyntaxError, UnicodeDecodeError):
-                continue
-            tree = _strip_exempt_functions(tree)
-            if _dsw4_has_ut_plus_vt_crossterm(tree):
-                offenders.append(str(py_file.relative_to(src_dir)))
+        for src_dir in legoesm_root_paths():
+            for py_file in src_dir.rglob('*.py'):
+                try:
+                    text = py_file.read_text()
+                    tree = ast.parse(text)
+                except (SyntaxError, UnicodeDecodeError):
+                    continue
+                tree = _strip_exempt_functions(tree)
+                if _dsw4_has_ut_plus_vt_crossterm(tree):
+                    offenders.append(str(py_file.relative_to(src_dir)))
 
         self.assertEqual(offenders, [],
             msg=(f"Found `ut[...] + vt[...]` (or `vt + ut`) cross-term "
@@ -11600,9 +11592,7 @@ class TestDSw5NonDuogridCornerCorrectionAbsentIter703(unittest.TestCase):
         — which would invert the gate — fails this test.
         """
         import ast
-        from pathlib import Path
-        src = (Path(__file__).resolve().parent.parent.parent
-               / 'src' / 'legoesm' / 'core' / 'fv3_sw_core.py')
+        src = legoesm_source_path('core/fv3_sw_core.py')
         tree = ast.parse(src.read_text())
 
         def is_corner_index(slice_node):
@@ -11824,30 +11814,29 @@ class TestDSw5NonDuogridCornerCorrectionAbsentIter703(unittest.TestCase):
         fill_corners call at line 1746/1754/1762.  Python has no
         `fill_c`-style variable paired with `fill_corners` calls in
         d_sw5.  Simple grep-based absence check."""
-        from pathlib import Path
         import re
-        src_dir = Path(__file__).resolve().parent.parent.parent / 'src' / 'legoesm'
         # Co-occurrence: `fill_c` identifier + `fill_corners` call
         # within 20 lines in the same file.
         fill_c_pattern = re.compile(r'\bfill_c\s*=')
         fill_corners_call = re.compile(r'\bfill_corners\s*\(')
         offenders = []
-        for py_file in src_dir.rglob('*.py'):
-            try:
-                text = py_file.read_text()
-            except Exception:
-                continue
-            fc_lines = [i+1 for i, l in enumerate(text.split('\n'))
-                        if fill_c_pattern.search(l)]
-            fx_lines = [i+1 for i, l in enumerate(text.split('\n'))
-                        if fill_corners_call.search(l)]
-            for a in fc_lines:
-                for b in fx_lines:
-                    if abs(a - b) <= 20:
-                        offenders.append(
-                            f"{py_file.relative_to(src_dir)}: fill_c "
-                            f"at line {a}, fill_corners at line {b}")
-                        break
+        for src_dir in legoesm_root_paths():
+            for py_file in src_dir.rglob('*.py'):
+                try:
+                    text = py_file.read_text()
+                except Exception:
+                    continue
+                fc_lines = [i+1 for i, l in enumerate(text.split('\n'))
+                            if fill_c_pattern.search(l)]
+                fx_lines = [i+1 for i, l in enumerate(text.split('\n'))
+                            if fill_corners_call.search(l)]
+                for a in fc_lines:
+                    for b in fx_lines:
+                        if abs(a - b) <= 20:
+                            offenders.append(
+                                f"{py_file.relative_to(src_dir)}: fill_c "
+                                f"at line {a}, fill_corners at line {b}")
+                            break
         self.assertEqual(offenders, [],
             msg=(f"Found Fortran `fill_c` gate signature in {offenders} "
                  f"— matches non-duogrid d_sw5 corner-fill gate at "

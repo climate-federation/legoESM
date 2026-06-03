@@ -43,6 +43,7 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm.core.fv_tp_2d import _ppm_1d
+from tests.legoesm_paths import legoesm_source_path
 
 
 def test_iter884_source_uses_fortran_faithful_indices():
@@ -50,8 +51,7 @@ def test_iter884_source_uses_fortran_faithful_indices():
     `[0, 1, 2, -3, -2, -1]` (Fortran-faithful) and MUST NOT iterate
     over `[1, 2, 3, -4, -3, -2]` (pre-iter-884 buggy form).
     """
-    src_path = (Path(__file__).resolve().parent.parent
-                / "src" / "legoesm" / "core" / "fv_tp_2d.py")
+    src_path = legoesm_source_path("core/fv_tp_2d.py")
     tree = ast.parse(src_path.read_text())
 
     fn = next(

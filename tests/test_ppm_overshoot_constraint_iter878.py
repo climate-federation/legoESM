@@ -54,6 +54,8 @@ import pytest
 
 from legoesm.core.operators_cdgrid import _ppm_reconstruct_1d
 
+from tests.legoesm_paths import legoesm_source_path
+
 
 def _ppm_cw84_reference(q):
     """Fortran-faithful CW84 PPM reference (1D, axis=-1).
@@ -188,8 +190,7 @@ def test_iter878_source_uses_signed_product():
     operand is a bare ``Name('q_6')`` or ``UnaryOp(USub, Name('q_6'))``
     inside the function.
     """
-    src_path = (Path(__file__).resolve().parent.parent
-                / "src" / "legoesm" / "core" / "operators_cdgrid.py")
+    src_path = legoesm_source_path("core/operators_cdgrid.py")
     tree = ast.parse(src_path.read_text())
 
     fn = next(

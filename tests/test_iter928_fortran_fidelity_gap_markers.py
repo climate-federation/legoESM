@@ -32,14 +32,15 @@ from pathlib import Path
 
 import pytest
 
+from tests.legoesm_paths import legoesm_source_path
+
 
 REPO = Path(__file__).resolve().parents[1]
-SW_FV3_CDGRID = (
-    REPO / "src" / "legoesm" / "atmosphere" / "dynamics"
-    / "shallow_water_fv3_cdgrid.py"
+SW_FV3_CDGRID = legoesm_source_path(
+    "atmosphere/dynamics/shallow_water_fv3_cdgrid.py"
 )
-OPERATORS_CDGRID = REPO / "src" / "legoesm" / "core" / "operators_cdgrid.py"
-FV3_SW_CORE = REPO / "src" / "legoesm" / "core" / "fv3_sw_core.py"
+OPERATORS_CDGRID = legoesm_source_path("core/operators_cdgrid.py")
+FV3_SW_CORE = legoesm_source_path("core/fv3_sw_core.py")
 
 
 def _file_contains(path: Path, needle: str) -> bool:

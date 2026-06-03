@@ -234,9 +234,8 @@ def test_iter865_gate_visible_in_source():
     requires that `If` test contains all three guards via an AND chain.
     """
     import ast
-    from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent
-           / "src" / "legoesm" / "core" / "operators_cdgrid.py")
+    from tests.legoesm_paths import legoesm_source_path
+    src = legoesm_source_path("core/operators_cdgrid.py")
     tree = ast.parse(src.read_text())
 
     fn = next(

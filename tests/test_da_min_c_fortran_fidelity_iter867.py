@@ -88,9 +88,8 @@ def test_da_min_c_used_in_fv3_sw_tendencies(n):
     da_min_c=5.7e10, da_max_c=7.7e10).
     """
     import ast
-    from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent
-           / "src" / "legoesm" / "core" / "operators_cdgrid.py")
+    from tests.legoesm_paths import legoesm_source_path
+    src = legoesm_source_path("core/operators_cdgrid.py")
     tree = ast.parse(src.read_text())
 
     fn = next(

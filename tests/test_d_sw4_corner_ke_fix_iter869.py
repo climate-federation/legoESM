@@ -287,9 +287,8 @@ def test_helper_is_wired_into_d_sw_native_as_opt_in():
        bit-identical to pre-iter-869b behaviour.
     """
     import ast
-    from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent
-           / "src" / "legoesm" / "core" / "fv3_sw_core.py")
+    from tests.legoesm_paths import legoesm_source_path
+    src = legoesm_source_path("core/fv3_sw_core.py")
     tree = ast.parse(src.read_text())
 
     fn = next(

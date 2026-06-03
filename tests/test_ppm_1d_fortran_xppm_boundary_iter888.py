@@ -269,10 +269,9 @@ def test_iter888_constants_match_fortran():
     structure.  This sentinel catches such drift.
     """
     import ast
-    from pathlib import Path
+    from tests.legoesm_paths import legoesm_source_path
 
-    src_path = (Path(__file__).resolve().parent.parent
-                / "src" / "legoesm" / "core" / "fv_tp_2d.py")
+    src_path = legoesm_source_path("core/fv_tp_2d.py")
     tree = ast.parse(src_path.read_text())
 
     fn = next(
@@ -376,7 +375,7 @@ def test_iter888b_fv_tp_2d_forwards_kwarg():
     """
     import ast
     import inspect
-    from pathlib import Path
+    from tests.legoesm_paths import legoesm_source_path
 
     from legoesm.core.fv_tp_2d import fv_tp_2d
 
@@ -392,8 +391,7 @@ def test_iter888b_fv_tp_2d_forwards_kwarg():
 
     # AST: every _xppm/_yppm call inside fv_tp_2d's body must include
     # apply_fortran_xppm_boundary as a kwarg.
-    src_path = (Path(__file__).resolve().parent.parent
-                / "src" / "legoesm" / "core" / "fv_tp_2d.py")
+    src_path = legoesm_source_path("core/fv_tp_2d.py")
     tree = ast.parse(src_path.read_text())
     fn = next(
         (n for n in ast.walk(tree)
@@ -1049,10 +1047,9 @@ def test_iter890_fv_tp_2d_forwards_bounded_domain_from_grid():
     from the call-site forwarding.
     """
     import ast
-    from pathlib import Path
+    from tests.legoesm_paths import legoesm_source_path
 
-    src_path = (Path(__file__).resolve().parent.parent
-                / "src" / "legoesm" / "core" / "fv_tp_2d.py")
+    src_path = legoesm_source_path("core/fv_tp_2d.py")
     tree = ast.parse(src_path.read_text())
     fn = next(
         (n for n in ast.walk(tree)
@@ -1363,10 +1360,9 @@ def test_iter891_constants_match_fortran():
     pairs (-2.0, 14.0), (11.0, 14.0), (5.0, 14.0) for c1/c2/c3.
     """
     import ast
-    from pathlib import Path
+    from tests.legoesm_paths import legoesm_source_path
 
-    src_path = (Path(__file__).resolve().parent.parent
-                / "src" / "legoesm" / "core" / "operators_fv.py")
+    src_path = legoesm_source_path("core/operators_fv.py")
     tree = ast.parse(src_path.read_text())
     fn = next(
         (n for n in ast.walk(tree)
