@@ -37,9 +37,24 @@ from typing import Any
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_TEMPLATES = _REPO_ROOT / "config" / "templates"
 _DEFAULT_STATUS = _REPO_ROOT / "project_status.md"
+_CATALOG = _REPO_ROOT / "config" / "data_catalog.yaml"
 
 _VALID_TIERS = {"tier0", "tier1", "tier2", "tier3"}
 _VALID_MATURITY = {"run_tested", "init_only", "structurally_validated"}
+# Atmosphere complexity rungs whose value must equal the resolved dycore
+# model_type (codex review HIGH-1: a template can declare `complexity:
+# hydrostatic` while the config silently resolves to shallow_water).
+_ATM_RUNGS = {"shallow_water", "hydrostatic", "nonhydrostatic"}
+
+
+def _catalog_ids(catalog: Path | None = None) -> set[str]:
+    """Dataset ids declared in config/data_catalog.yaml (empty if absent)."""
+    import yaml
+    catalog = catalog or _CATALOG
+    if not catalog.is_file():
+        return set()
+    doc = yaml.safe_load(catalog.read_text()) or {}
+    return set((doc.get("datasets") or {}).keys())
 
 
 @dataclass
@@ -88,7 +103,23 @@ def validate_template(path: Path) -> TemplateReport:
         meta = cfg.get("experiment") or {}
         errs = _meta_errors(meta)
         # Resolve + strict-validate through the SAME path `legoesm run` uses.
-        cfg.to_experiment_config().validate_strict()
+        ec = cfg.to_experiment_config()
+        ec.validate_strict()
+        # codex HIGH-1: the declared atmosphere complexity rung MUST equal the
+        # resolved dycore model_type — else a 'hydrostatic' template that left
+        # the canonical `atmosphere.dynamics` at its shallow_water default would
+        # validate while silently describing the wrong experiment.
+        complexity = str(meta.get("complexity", ""))
+        if complexity in _ATM_RUNGS and ec.dycore.model_type != complexity:
+            errs.append(
+                f"complexity={complexity!r} but resolved dycore.model_type="
+                f"{ec.dycore.model_type!r} (set 'atmosphere.dynamics: {complexity}')"
+            )
+        # codex MEDIUM-2: every experiment.data id must exist in the catalog.
+        known = _catalog_ids()
+        for ds in (meta.get("data") or []):
+            if ds not in known:
+                errs.append(f"data id {ds!r} not in config/data_catalog.yaml")
     except Exception as exc:  # noqa: BLE001 — report, don't crash the sweep
         return TemplateReport(
             rel, category, str(meta.get("tier", "?")),

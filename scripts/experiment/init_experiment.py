@@ -45,6 +45,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lego_detect_machine import resolve_machine  # noqa: E402
 
 
+def _config_signature(cfg) -> str:
+    """Deterministic signature of the RESOLVED ExperimentConfig.
+
+    Used to detect overrides that don't actually change the run. NamedTuple
+    ``repr`` is stable; if an override leaves the config unresolvable, the
+    exception text is folded in so before/after still differ (a no-op is only
+    flagged when the resolved config is byte-identical).
+    """
+    try:
+        return repr(cfg.to_experiment_config())
+    except Exception as exc:  # noqa: BLE001
+        return f"<unresolvable: {type(exc).__name__}: {exc}>"
+
+
 def _coerce(value: str) -> Any:
     """Coerce a CLI override string to bool/int/float/None/str (in that order)."""
     low = value.strip().lower()
@@ -145,8 +159,24 @@ def main(argv: list[str] | None = None) -> int:
         if machine.get("precision"):
             cfg.set("hardware.precision.dynamics", machine["precision"])
 
+    # Apply overrides one at a time, asserting each actually changes the
+    # RESOLVED config (codex review HIGH): a typo or non-runtime dot-path
+    # (e.g. -o grid.resoluton=96) is preserved verbatim in config.yaml but
+    # ignored by to_experiment_config, so it would silently no-op while being
+    # recorded as applied. Comparing the canonical config signature before/after
+    # each set catches that.
+    no_ops: list[str] = []
     for key, value in overrides:
+        before = _config_signature(cfg)
         cfg.set(key, value)
+        if _config_signature(cfg) == before:
+            no_ops.append(f"{key}={value!r}")
+    if no_ops:
+        raise SystemExit(
+            "ERROR: override(s) had no effect on the resolved config — likely a "
+            "misspelled or non-runtime dot-path (or set to the existing value): "
+            + ", ".join(no_ops)
+        )
 
     # Strict-validate BEFORE writing anything (fail fast, no half-built dir).
     try:

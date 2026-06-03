@@ -19,7 +19,7 @@ grid:
   n_levels: 26
   vertical_coord: hybrid
 atmosphere:
-  equations: hydrostatic
+  dynamics: hydrostatic        # canonical key -> ExperimentConfig.dycore.model_type
   advection: ppm
   time_integrator: ssp_rk3
   dt_seconds: 450

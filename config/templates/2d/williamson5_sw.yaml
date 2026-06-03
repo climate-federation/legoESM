@@ -27,7 +27,7 @@ grid:
   vertical_coord: none
 
 atmosphere:
-  equations: shallow_water
+  dynamics: shallow_water      # canonical key -> ExperimentConfig.dycore.model_type
   advection: centered
   time_integrator: ssp_rk3
   dt_seconds: 600

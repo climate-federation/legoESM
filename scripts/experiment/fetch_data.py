@@ -54,15 +54,45 @@ def _data_root(explicit: str | None) -> Path:
     return Path(resolve_machine().get("data_root", "./data"))
 
 
+def _verify(entry: dict[str, Any], target: Path) -> tuple[bool, str]:
+    """Is ``target`` present AND intact per the catalog's integrity metadata?
+
+    codex review MEDIUM: bare ``target.exists()`` accepts empty/partial/corrupt
+    downloads.  Honor optional ``sha256`` (file checksum) and ``min_bytes`` (file
+    size floor); for directory targets (zarr stores / dirs), require a non-empty
+    directory (and the ``marker`` file if the catalog names one).
+    """
+    if not target.exists():
+        return False, "missing"
+    if target.is_dir():
+        marker = entry.get("marker")
+        if marker and not (target / marker).exists():
+            return False, f"dir present but marker {marker!r} absent"
+        if not any(target.iterdir()):
+            return False, "dir present but empty"
+        return True, "dir ok"
+    sha = entry.get("sha256")
+    if sha:
+        import hashlib
+        h = hashlib.sha256(target.read_bytes()).hexdigest()
+        if h != sha:
+            return False, f"sha256 mismatch ({h[:12]}…)"
+    min_bytes = entry.get("min_bytes")
+    if min_bytes is not None and target.stat().st_size < int(min_bytes):
+        return False, f"size {target.stat().st_size} < min_bytes {min_bytes}"
+    return True, "ok"
+
+
 def _status(ids: list[str], catalog: dict[str, Any], data_root: Path):
-    """Yield (dataset_id, entry, target_path, present) for each required dataset."""
+    """Yield (dataset_id, entry, target_path, present, reason) for each dataset."""
     for ds in ids:
         entry = catalog.get(ds)
         if entry is None:
-            yield ds, None, None, False
+            yield ds, None, None, False, "not in catalog"
             continue
         target = data_root / entry.get("target", ds)
-        yield ds, entry, target, target.exists()
+        present, reason = _verify(entry, target)
+        yield ds, entry, target, present, reason
 
 
 def cmd_check(ids, catalog, data_root) -> int:
@@ -70,28 +100,54 @@ def cmd_check(ids, catalog, data_root) -> int:
         print("  no external data required (idealized template).")
         return 0
     missing = 0
-    for ds, entry, target, present in _status(ids, catalog, data_root):
+    for ds, entry, target, present, reason in _status(ids, catalog, data_root):
         if entry is None:
             print(f"  ?? {ds}: NOT in data_catalog.yaml")
             missing += 1
         elif present:
             print(f"  OK {ds}: {target}")
         else:
-            print(f"  -- {ds}: MISSING ({target})")
+            print(f"  -- {ds}: MISSING ({target}) [{reason}]")
             missing += 1
     print(f"\n  {len(ids) - missing}/{len(ids)} present under {data_root}.")
     return 0 if missing == 0 else 1
 
 
 def _fetch_one(entry: dict[str, Any], target: Path) -> bool:
-    """Best-effort automated fetch; return True on success."""
+    """Download to a temp path, verify, then atomically move into place.
+
+    codex review MEDIUM: never write directly to the final target — a
+    failed/interrupted download must not leave a partial file that future
+    ``check`` runs accept. Stage to ``<target>.partial``, verify with
+    :func:`_verify`, then ``os.replace``; remove the partial on any failure.
+    """
     url = (entry or {}).get("url", "") or ""
     target.parent.mkdir(parents=True, exist_ok=True)
-    if url.startswith("gs://") and shutil.which("gsutil"):
-        return subprocess.run(["gsutil", "-m", "cp", "-r", url, str(target)]).returncode == 0
-    if url.startswith(("http://", "https://")) and shutil.which("curl"):
-        return subprocess.run(["curl", "-fSL", "-o", str(target), url]).returncode == 0
-    return False
+    tmp = target.with_name(target.name + ".partial")
+    _rm(tmp)
+    try:
+        if url.startswith("gs://") and shutil.which("gsutil"):
+            ok = subprocess.run(["gsutil", "-m", "cp", "-r", url, str(tmp)]).returncode == 0
+        elif url.startswith(("http://", "https://")) and shutil.which("curl"):
+            ok = subprocess.run(["curl", "-fSL", "-o", str(tmp), url]).returncode == 0
+        else:
+            return False  # no automatable url
+        if not ok or not _verify(entry, tmp)[0]:
+            _rm(tmp)
+            return False
+        import os
+        os.replace(tmp, target)
+        return True
+    except Exception:  # noqa: BLE001 — never leave a partial behind
+        _rm(tmp)
+        return False
+
+
+def _rm(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path, ignore_errors=True)
+    elif path.exists():
+        path.unlink()
 
 
 def cmd_fetch(ids, catalog, data_root) -> int:
@@ -99,7 +155,7 @@ def cmd_fetch(ids, catalog, data_root) -> int:
         print("  no external data required (idealized template).")
         return 0
     failed = 0
-    for ds, entry, target, present in _status(ids, catalog, data_root):
+    for ds, entry, target, present, reason in _status(ids, catalog, data_root):
         if present:
             print(f"  OK {ds}: already present ({target})")
             continue
@@ -107,13 +163,13 @@ def cmd_fetch(ids, catalog, data_root) -> int:
             print(f"  ?? {ds}: NOT in data_catalog.yaml — cannot fetch")
             failed += 1
             continue
-        print(f"  .. {ds}: fetching -> {target}")
+        print(f"  .. {ds}: fetching -> {target} [{reason}]")
         if _fetch_one(entry, target):
-            print(f"  OK {ds}: staged")
+            print(f"  OK {ds}: staged + verified")
         else:
             failed += 1
             cred = entry.get("credentials", "")
-            print(f"  !! {ds}: no automatable url; obtain manually -> {target}"
+            print(f"  !! {ds}: no automatable+verifiable url; obtain manually -> {target}"
                   + (f"\n       ({cred})" if cred else ""))
     return 0 if failed == 0 else 1
 

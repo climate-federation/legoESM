@@ -57,6 +57,56 @@ def test_all_shipped_templates_validate(vt):
     )
 
 
+def _write_tmpl(vt, tmp_path, body: str):
+    """Write a template under a tmp templates root and point the module at it."""
+    root = tmp_path / "config" / "templates"
+    (root / "x").mkdir(parents=True, exist_ok=True)
+    f = root / "x" / "t.yaml"
+    f.write_text(body)
+    vt._DEFAULT_TEMPLATES = root
+    return f
+
+
+def test_complexity_must_match_resolved_model_type(vt, tmp_path):
+    # codex HIGH-1: declares hydrostatic but leaves dynamics at the shallow_water
+    # default -> must be reported FAIL (silent wrong-model otherwise).
+    saved = vt._DEFAULT_TEMPLATES
+    try:
+        f = _write_tmpl(vt, tmp_path, (
+            "experiment:\n  tier: tier2\n  complexity: hydrostatic\n  extent: global\n"
+            "  maturity: run_tested\n  description: mismatch\n  data: []\n"
+            "model:\n  type: atmosphere_only\n"
+            "grid:\n  type: cubed_sphere\n  resolution: 36\n  n_levels: 26\n"
+            "  vertical_coord: hybrid\n"
+            "atmosphere:\n  dynamics: shallow_water\n  dt_seconds: 600\n"
+            "time:\n  duration_hours: 24\n"
+        ))
+        r = vt.validate_template(f)
+        assert r.ok is False and "model_type" in r.error
+    finally:
+        vt._DEFAULT_TEMPLATES = saved
+
+
+def test_unknown_data_id_rejected(vt, tmp_path):
+    # codex MEDIUM-2: experiment.data id absent from data_catalog.yaml -> FAIL.
+    saved = vt._DEFAULT_TEMPLATES
+    try:
+        f = _write_tmpl(vt, tmp_path, (
+            "experiment:\n  tier: tier3\n  complexity: shallow_water\n  extent: global\n"
+            "  maturity: init_only\n  description: bad data id\n"
+            "  data: [no_such_dataset_xyz]\n"
+            "model:\n  type: atmosphere_only\n"
+            "grid:\n  type: cubed_sphere\n  resolution: 48\n  n_levels: 1\n"
+            "  vertical_coord: none\n"
+            "atmosphere:\n  dynamics: shallow_water\n  dt_seconds: 600\n"
+            "time:\n  duration_hours: 24\n"
+        ))
+        r = vt.validate_template(f)
+        assert r.ok is False and "data_catalog" in r.error
+    finally:
+        vt._DEFAULT_TEMPLATES = saved
+
+
 def test_malformed_template_reported_not_crash(vt, tmp_path):
     # a template missing the experiment block + with a nonsense grid must be
     # reported FAIL, not raise.

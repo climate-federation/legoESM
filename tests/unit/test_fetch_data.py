@@ -34,9 +34,32 @@ def test_data_gated_template_missing_is_nonzero(fd, tmp_path):
 def test_data_gated_template_present_is_zero(fd, tmp_path):
     target = tmp_path / "amip" / "sst_sic.nc"
     target.parent.mkdir(parents=True)
-    target.write_text("")
+    target.write_bytes(b"\0" * (1024 * 1024 + 1))   # exceed the 1 MiB integrity floor
     rc = fd.main(["check", "coupled/amip", "--data-root", str(tmp_path)])
     assert rc == 0
+
+
+def test_empty_or_truncated_file_rejected_by_integrity(fd, tmp_path):
+    # codex MEDIUM: a 0-byte / truncated placeholder must NOT be accepted as
+    # present (amip_sst_sic carries a min_bytes floor).
+    target = tmp_path / "amip" / "sst_sic.nc"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"\0" * 16)                  # below the floor
+    rc = fd.main(["check", "coupled/amip", "--data-root", str(tmp_path)])
+    assert rc == 1
+
+
+def test_verify_helper(fd, tmp_path):
+    f = tmp_path / "f.bin"
+    f.write_bytes(b"x" * 2048)
+    assert fd._verify({"min_bytes": 1024}, f)[0] is True
+    assert fd._verify({"min_bytes": 4096}, f)[0] is False
+    assert fd._verify({}, tmp_path / "absent")[0] is False
+    d = tmp_path / "store"
+    d.mkdir()
+    assert fd._verify({}, d)[0] is False            # empty dir
+    (d / "x").write_text("y")
+    assert fd._verify({}, d)[0] is True             # non-empty dir
 
 
 def test_unknown_template_raises(fd):

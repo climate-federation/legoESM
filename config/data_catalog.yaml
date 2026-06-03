@@ -19,6 +19,7 @@ datasets:
       Prescribed observed SST + sea-ice concentration for AMIP forcing
       (e.g. PCMDI AMIP II / input4MIPs boundary conditions).
     url: ""                  # input4MIPs requires ESGF account; see below
+    min_bytes: 1048576       # integrity floor (1 MiB): reject empty/truncated files
     credentials: "ESGF account (input4MIPs); download the AMIP II bcs SST/SIC files"
 
   jra55_do:
