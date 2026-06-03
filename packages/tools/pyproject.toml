@@ -36,4 +36,4 @@ legoesm-ocean = { workspace = true }
 legoesm-coupler = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/legoesm"]
+packages = ["legoesm"]

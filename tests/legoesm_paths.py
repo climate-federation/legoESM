@@ -6,12 +6,13 @@ hardcoded ``<repo>/src/legoesm/<sub>/<file>.py``, which assumes the whole
 package lives under a single ``src/legoesm`` tree.
 
 The federation carve (FEDERATION.md) splits the package into uv-workspace
-members — the substrate moves to ``packages/legoesm-core/src/legoesm`` while the
-components stay under ``src/legoesm`` — all merged into one PEP-420 ``legoesm``
-namespace.  Resolving through ``legoesm.__path__`` instead of a hardcoded
-``src/legoesm`` makes these tests location-independent: they pass before the
-carve (single root) and after it (several roots), with no per-test edits when a
-member is moved.
+members — each lives at ``packages/<member>/legoesm/<subpkg>`` (the substrate at
+``packages/core/legoesm``, the components at ``packages/atmosphere/legoesm`` …),
+while the root meta keeps its loose modules at ``src/legoesm`` — all merged into
+one PEP-420 ``legoesm`` namespace.  Resolving through ``legoesm.__path__`` instead
+of a hardcoded ``src/legoesm`` makes these tests location-independent: they pass
+before the carve (single root) and after it (several roots), with no per-test
+edits when a member is moved.
 """
 
 from __future__ import annotations

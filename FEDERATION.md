@@ -12,9 +12,24 @@ only files.
 ## Member layout
 
 Each member depends only on the members *below* it. The arrows are exactly the
-three proven contracts.
+proven import-linter contracts.
 
-| Member | Bundles (`src/legoesm/…`) | Depends on |
+**Directory convention.** A member's folder drops the `legoesm-` prefix (we are
+already under `legoesm`) and there is no `src/` level: the source lives at
+`packages/<member>/legoesm/<subpkg>/` (e.g. `packages/core/legoesm/core/`,
+`packages/ml/legoesm/tuning.py`). Each member's `pyproject.toml` ships it with
+`[tool.hatch.build.targets.wheel] packages = ["legoesm"]` — a PEP-420 portion of
+the shared `legoesm` namespace (NO `legoesm/__init__.py`), so everything still
+imports as `legoesm.<subpkg>`. The **distribution names keep the `legoesm-`
+prefix** (`legoesm-core`, `legoesm-atmosphere`, …) — that is the PyPI identity and
+what `[tool.uv.sources]` resolves; only the on-disk folder is shortened. (We do
+*not* use a `sources` prefix-remap from `src` to `legoesm`: hatchling/uv refuse
+editable installs for prefix-rewriting remaps — `editables` #20 — which would
+break `uv sync`.) The root `legoesm` meta-member is the exception: its loose
+modules stay under `src/legoesm/` so an editable install does not put the repo
+root on `sys.path`.
+
+| Member | Bundles (`legoesm/…`) | Depends on |
 |--------|---------------------------|------------|
 | **legoesm-core** (the substrate) | `core`, `grids`, `runtime`, `parallel`, `io`, `timestepping`, `components` + loose modules `constants`, `thermo`, `registry`, `surface_albedo`, `_version` | — (imports nothing above; contract #1/#4) |
 | **legoesm-atmosphere** | `atmosphere` | core |
@@ -48,26 +63,29 @@ column is its cheapest gradient-check harness; see `legoesm.components`).
 Contract #3 (components must not import coupler/driver/training) is what keeps the
 component members *below* the coupler member, so the DAG stays acyclic.
 
-## Carve procedure (per member, deferred to a coordinated window)
+## Carve procedure (per member — DONE; recorded for adding future members)
 
-1. `packages/<member>/pyproject.toml` — `[project]` with the right inter-member
-   deps; `[tool.hatch.build] packages = ["src/legoesm/<subpkg>"]` (namespace
-   package, so all members still import as `legoesm.<subpkg>`).
-2. `git mv src/legoesm/<subpkg> packages/<member>/src/legoesm/<subpkg>` (byte-identical
+1. `packages/<member>/pyproject.toml` — `[project]` (dist name `legoesm-<member>`)
+   with the right inter-member deps + `[tool.uv.sources]` (`workspace = true`);
+   `[tool.hatch.build.targets.wheel] packages = ["legoesm"]` (namespace package, so
+   all members still import as `legoesm.<subpkg>`).
+2. `git mv` the subpackage to `packages/<member>/legoesm/<subpkg>` (byte-identical
    relocation — numerics provably unchanged).
 3. Root `pyproject.toml`: `[tool.uv.workspace] members = ["packages/*"]`; the root
-   `legoesm` becomes the meta-member whose extras pull the others.
-4. Re-run `lint-imports` (must stay 3 kept / 0 broken — now *enforced across member
-   boundaries*) and the full test matrix before committing the member.
+   `legoesm` meta-member depends on the new member + lists it in `[tool.uv.sources]`.
+4. `pip install --no-deps -e packages/<member>` (or `uv sync`) for the dev wiring;
+   re-run `lint-imports` (4 kept / 0 broken), `tests/test_federation_plan.py`, and
+   `scripts/validate_federation_packaging.py` before committing.
 
-## Why it is deferred, not done here
+## Status: DONE
 
-The relocation touches ocean/ice/atmosphere file paths that a **concurrent session**
-is actively editing, and it needs the full CI matrix (CPU + MPI + the W2/W5 visual
-suite) green per member to prove no path/packaging regression. Doing it blind would
-risk clobbering in-flight work and silent import breakage. The architecture is
-*ready* (the contracts prove it); the physical move is a mechanical follow-up to run
-when the tree is quiet.
+All eight members are carved (`packages/{core,atmosphere,ocean,land,ice,coupler,ml,tools}`)
+plus the root `legoesm` meta. The four import-linter contracts are zero-/baseline-
+locked (`tests/test_import_boundaries.py`), and `scripts/validate_federation_packaging.py`
+builds every member wheel and proves namespace isolation, the dependency DAG,
+root-absent installs (core+ocean, core+land via `surface_albedo`), the SFNO `[ml]`
+extra gating, and entry-point dycore sharing. Dev wiring is proper editable installs
+(no manual `.pth` hack); `uv.lock` pins the full workspace.
 
 ## Already done toward federation
 

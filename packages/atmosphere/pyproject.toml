@@ -56,7 +56,7 @@ legoesm-ml = { workspace = true }
 fv3sw = "legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid:_build_fv3sw_barotropic_model"
 fv3edge = "legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid:_build_fv3edge_barotropic_model"
 
-# PEP-420 namespace package: no src/legoesm/__init__.py; this wheel ships only
+# PEP-420 namespace package: no legoesm/__init__.py; this wheel ships only
 # legoesm/atmosphere into the shared `legoesm` namespace, so it imports as legoesm.atmosphere.
 [tool.hatch.build.targets.wheel]
-packages = ["src/legoesm"]
+packages = ["legoesm"]

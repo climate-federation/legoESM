@@ -100,16 +100,17 @@ legoesm = "legoesm.cli:main"
 # providers the ocean barotropic solver resolves by name) are declared by their
 # PROVIDER, legoesm-atmosphere, NOT here — so `pip install legoesm-ocean
 # legoesm-atmosphere` registers them without the root meta-package.  See
-# packages/legoesm-atmosphere/pyproject.toml.
+# packages/atmosphere/pyproject.toml.
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/legoesm"]
 
 # === uv workspace (federation carve) ===
 # The repo is a uv workspace; the substrate lives in its own member
-# (packages/legoesm-core) and the root ``legoesm`` is the meta-member that
-# depends on it.  As components are carved out they each become a member here
-# and the root depends on them via [tool.uv.sources].  All members ship into the
+# (packages/core, dist name legoesm-core) and the root ``legoesm`` is the
+# meta-member that depends on it.  Each member's folder drops the legoesm- prefix
+# and has no src/ level (packages/<m>/legoesm/<subpkg>); the root depends on them
+# via [tool.uv.sources].  All members ship into the
 # one ``legoesm`` PEP-420 namespace, so imports are unchanged.
 [tool.uv.workspace]
 members = ["packages/*"]

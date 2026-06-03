@@ -48,7 +48,7 @@ legoesm-core = { workspace = true }
 legoesm-ml = { workspace = true }
 legoesm-tools = { workspace = true }
 
-# PEP-420 namespace package: no src/legoesm/__init__.py; this wheel ships only
+# PEP-420 namespace package: no legoesm/__init__.py; this wheel ships only
 # legoesm/ocean into the shared `legoesm` namespace, so it imports as legoesm.ocean.
 [tool.hatch.build.targets.wheel]
-packages = ["src/legoesm"]
+packages = ["legoesm"]

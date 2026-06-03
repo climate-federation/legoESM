@@ -40,11 +40,11 @@ dependencies = [
 mesh = ["pymetis>=1.2", "scipy>=1.10"]
 mpi = ["mpi4py>=4.1,<5", "mpi4jax>=0.8,<0.9"]
 
-# Namespace package: NO src/legoesm/__init__.py, so this wheel ships
+# Namespace package: NO legoesm/__init__.py, so this wheel ships
 # legoesm/{core,grids,runtime,parallel,io,timestepping,components} + the
 # substrate top-level modules (constants, thermo, registry, _version) as a
 # PEP-420 portion of the shared ``legoesm`` namespace.  Sibling members
 # (legoesm-atmosphere, ...) contribute their own subpackages to the same
 # namespace, so everything still imports as ``legoesm.<subpkg>``.
 [tool.hatch.build.targets.wheel]
-packages = ["src/legoesm"]
+packages = ["legoesm"]

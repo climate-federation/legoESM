@@ -94,9 +94,12 @@ def _fail(msg: str) -> "NoReturn":  # type: ignore[name-defined]
 def build_wheels(outdir: Path) -> dict[str, Path]:
     wheels: dict[str, Path] = {}
     for m in MEMBERS:
+        # Folder names drop the ``legoesm-`` prefix (we are already in legoesm):
+        # the distribution is ``legoesm-core`` but its source lives in packages/core.
+        member_dir = REPO / "packages" / m.removeprefix("legoesm-")
         r = _run([
             sys.executable, "-m", "build", "--wheel", "--no-isolation",
-            "--outdir", str(outdir), str(REPO / "packages" / m),
+            "--outdir", str(outdir), str(member_dir),
         ])
         if r.returncode != 0:
             _fail(f"building {m}:\n{r.stdout}\n{r.stderr}")

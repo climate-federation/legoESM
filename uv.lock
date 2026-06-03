@@ -1656,14 +1656,14 @@ requires-dist = [
     { name = "jax-metal", marker = "extra == 'metal'" },
     { name = "jaxlib", specifier = ">=0.4.35" },
     { name = "legoesm", extras = ["ml", "mesh", "viz", "data", "dev", "docs"], marker = "extra == 'all'" },
-    { name = "legoesm-atmosphere", editable = "packages/legoesm-atmosphere" },
-    { name = "legoesm-core", editable = "packages/legoesm-core" },
-    { name = "legoesm-coupler", editable = "packages/legoesm-coupler" },
-    { name = "legoesm-ice", editable = "packages/legoesm-ice" },
-    { name = "legoesm-land", editable = "packages/legoesm-land" },
-    { name = "legoesm-ml", editable = "packages/legoesm-ml" },
-    { name = "legoesm-ocean", editable = "packages/legoesm-ocean" },
-    { name = "legoesm-tools", editable = "packages/legoesm-tools" },
+    { name = "legoesm-atmosphere", editable = "packages/atmosphere" },
+    { name = "legoesm-core", editable = "packages/core" },
+    { name = "legoesm-coupler", editable = "packages/coupler" },
+    { name = "legoesm-ice", editable = "packages/ice" },
+    { name = "legoesm-land", editable = "packages/land" },
+    { name = "legoesm-ml", editable = "packages/ml" },
+    { name = "legoesm-ocean", editable = "packages/ocean" },
+    { name = "legoesm-tools", editable = "packages/tools" },
     { name = "matplotlib", specifier = ">=3.9" },
     { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.9" },
     { name = "mpi4jax", marker = "extra == 'mpi'", specifier = ">=0.8,<0.9" },
@@ -1693,7 +1693,7 @@ provides-extras = ["ml", "mesh", "viz", "data", "metal", "mpi", "dev", "docs", "
 [[package]]
 name = "legoesm-atmosphere"
 version = "0.1.0"
-source = { editable = "packages/legoesm-atmosphere" }
+source = { editable = "packages/atmosphere" }
 dependencies = [
     { name = "equinox" },
     { name = "jax" },
@@ -1712,8 +1712,8 @@ requires-dist = [
     { name = "equinox", specifier = ">=0.11" },
     { name = "jax", specifier = ">=0.4.35" },
     { name = "jaxlib", specifier = ">=0.4.35" },
-    { name = "legoesm-core", editable = "packages/legoesm-core" },
-    { name = "legoesm-ml", marker = "extra == 'ml'", editable = "packages/legoesm-ml" },
+    { name = "legoesm-core", editable = "packages/core" },
+    { name = "legoesm-ml", marker = "extra == 'ml'", editable = "packages/ml" },
     { name = "numpy", specifier = ">=1.26" },
 ]
 provides-extras = ["ml"]
@@ -1721,7 +1721,7 @@ provides-extras = ["ml"]
 [[package]]
 name = "legoesm-core"
 version = "0.1.0"
-source = { editable = "packages/legoesm-core" }
+source = { editable = "packages/core" }
 dependencies = [
     { name = "equinox" },
     { name = "jax" },
@@ -1766,7 +1766,7 @@ provides-extras = ["mesh", "mpi"]
 [[package]]
 name = "legoesm-coupler"
 version = "0.1.0"
-source = { editable = "packages/legoesm-coupler" }
+source = { editable = "packages/coupler" }
 dependencies = [
     { name = "legoesm-atmosphere" },
     { name = "legoesm-core" },
@@ -1779,19 +1779,19 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "legoesm-atmosphere", editable = "packages/legoesm-atmosphere" },
-    { name = "legoesm-core", editable = "packages/legoesm-core" },
-    { name = "legoesm-ice", editable = "packages/legoesm-ice" },
-    { name = "legoesm-land", editable = "packages/legoesm-land" },
-    { name = "legoesm-ml", editable = "packages/legoesm-ml" },
-    { name = "legoesm-ocean", editable = "packages/legoesm-ocean" },
-    { name = "legoesm-tools", editable = "packages/legoesm-tools" },
+    { name = "legoesm-atmosphere", editable = "packages/atmosphere" },
+    { name = "legoesm-core", editable = "packages/core" },
+    { name = "legoesm-ice", editable = "packages/ice" },
+    { name = "legoesm-land", editable = "packages/land" },
+    { name = "legoesm-ml", editable = "packages/ml" },
+    { name = "legoesm-ocean", editable = "packages/ocean" },
+    { name = "legoesm-tools", editable = "packages/tools" },
 ]
 
 [[package]]
 name = "legoesm-ice"
 version = "0.1.0"
-source = { editable = "packages/legoesm-ice" }
+source = { editable = "packages/ice" }
 dependencies = [
     { name = "equinox" },
     { name = "jax" },
@@ -1805,14 +1805,14 @@ requires-dist = [
     { name = "equinox", specifier = ">=0.11" },
     { name = "jax", specifier = ">=0.4.35" },
     { name = "jaxlib", specifier = ">=0.4.35" },
-    { name = "legoesm-core", editable = "packages/legoesm-core" },
+    { name = "legoesm-core", editable = "packages/core" },
     { name = "numpy", specifier = ">=1.26" },
 ]
 
 [[package]]
 name = "legoesm-land"
 version = "0.1.0"
-source = { editable = "packages/legoesm-land" }
+source = { editable = "packages/land" }
 dependencies = [
     { name = "equinox" },
     { name = "jax" },
@@ -1826,14 +1826,14 @@ requires-dist = [
     { name = "equinox", specifier = ">=0.11" },
     { name = "jax", specifier = ">=0.4.35" },
     { name = "jaxlib", specifier = ">=0.4.35" },
-    { name = "legoesm-core", editable = "packages/legoesm-core" },
+    { name = "legoesm-core", editable = "packages/core" },
     { name = "numpy", specifier = ">=1.26" },
 ]
 
 [[package]]
 name = "legoesm-ml"
 version = "0.1.0"
-source = { editable = "packages/legoesm-ml" }
+source = { editable = "packages/ml" }
 dependencies = [
     { name = "legoesm-atmosphere" },
     { name = "legoesm-core" },
@@ -1844,17 +1844,17 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "legoesm-atmosphere", editable = "packages/legoesm-atmosphere" },
-    { name = "legoesm-core", editable = "packages/legoesm-core" },
-    { name = "legoesm-coupler", editable = "packages/legoesm-coupler" },
-    { name = "legoesm-ocean", editable = "packages/legoesm-ocean" },
-    { name = "legoesm-tools", editable = "packages/legoesm-tools" },
+    { name = "legoesm-atmosphere", editable = "packages/atmosphere" },
+    { name = "legoesm-core", editable = "packages/core" },
+    { name = "legoesm-coupler", editable = "packages/coupler" },
+    { name = "legoesm-ocean", editable = "packages/ocean" },
+    { name = "legoesm-tools", editable = "packages/tools" },
 ]
 
 [[package]]
 name = "legoesm-ocean"
 version = "0.1.0"
-source = { editable = "packages/legoesm-ocean" }
+source = { editable = "packages/ocean" }
 dependencies = [
     { name = "equinox" },
     { name = "jax" },
@@ -1876,9 +1876,9 @@ requires-dist = [
     { name = "equinox", specifier = ">=0.11" },
     { name = "jax", specifier = ">=0.4.35" },
     { name = "jaxlib", specifier = ">=0.4.35" },
-    { name = "legoesm-core", editable = "packages/legoesm-core" },
-    { name = "legoesm-ml", marker = "extra == 'ml'", editable = "packages/legoesm-ml" },
-    { name = "legoesm-tools", marker = "extra == 'tools'", editable = "packages/legoesm-tools" },
+    { name = "legoesm-core", editable = "packages/core" },
+    { name = "legoesm-ml", marker = "extra == 'ml'", editable = "packages/ml" },
+    { name = "legoesm-tools", marker = "extra == 'tools'", editable = "packages/tools" },
     { name = "numpy", specifier = ">=1.26" },
 ]
 provides-extras = ["ml", "tools"]
@@ -1886,7 +1886,7 @@ provides-extras = ["ml", "tools"]
 [[package]]
 name = "legoesm-tools"
 version = "0.1.0"
-source = { editable = "packages/legoesm-tools" }
+source = { editable = "packages/tools" }
 dependencies = [
     { name = "legoesm-atmosphere" },
     { name = "legoesm-core" },
@@ -1896,10 +1896,10 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "legoesm-atmosphere", editable = "packages/legoesm-atmosphere" },
-    { name = "legoesm-core", editable = "packages/legoesm-core" },
-    { name = "legoesm-coupler", editable = "packages/legoesm-coupler" },
-    { name = "legoesm-ocean", editable = "packages/legoesm-ocean" },
+    { name = "legoesm-atmosphere", editable = "packages/atmosphere" },
+    { name = "legoesm-core", editable = "packages/core" },
+    { name = "legoesm-coupler", editable = "packages/coupler" },
+    { name = "legoesm-ocean", editable = "packages/ocean" },
 ]
 
 [[package]]
