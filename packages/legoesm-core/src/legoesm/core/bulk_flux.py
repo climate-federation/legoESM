@@ -65,6 +65,27 @@ def validate_bulk_scheme(scheme: str) -> None:
         )
 
 
+def large_yeager_neutral_cd(wind):
+    """Large & Yeager (2009) Eq. 6 neutral 10-m drag coefficient ``C_DN``.
+
+    .. math::
+        C_{DN} = \\left(\\frac{2.7}{U} + 0.142 + \\frac{U}{13.09}
+                  - 3.14807\\times10^{-10}\\,U^{6}\\right)\\times10^{-3}
+
+    clipped to ``[0.5e-3, 3.0e-3]``.  The ``-3.14807e-10·U⁶`` high-wind term is
+    LY09's correction over LY04 (which over-estimated drag at ``U > 30 m/s``) and
+    is REQUIRED by the OMIP-2 protocol (Griffies 2016 §2.2).  ``wind`` is the
+    10-m wind speed [m/s]; floored to 0.5 to avoid the ``1/U`` blow-up at calm
+    winds.  The canonical drag law shared by the MOST flux solver and the OMIP-2
+    air-sea bulk formulas (no per-component re-derivation).
+    """
+    U = jnp.maximum(jnp.asarray(wind), 0.5)
+    C_DN = (
+        2.7 / U + 0.142 + U / 13.09 - 3.14807e-10 * U ** 6
+    ) * 1e-3
+    return jnp.clip(C_DN, 0.5e-3, 3.0e-3)
+
+
 # ============================================================================
 # Stability functions (Businger-Dyer)
 # ============================================================================

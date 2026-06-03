@@ -49,12 +49,18 @@ _CH_STABLE: float = 1.18e-3
 
 
 def large_yeager_cd(u10_speed):
-    """L&Y 2009 open-ocean wind-speed-dependent drag coefficient.
+    """L&Y 2009 open-ocean wind-speed-dependent neutral drag coefficient.
 
-    Returns ``C_d`` (dimensionless), valid for u10 in roughly [0.5, 25] m/s.
+    Delegates to the canonical substrate kernel
+    :func:`legoesm.core.bulk_flux.large_yeager_neutral_cd` (redundancy audit) so
+    the ocean uses the FULL LY09 Eq. 6 — including the ``-3.14807e-10·U⁶``
+    high-wind correction the OMIP-2 protocol (Griffies 2016) requires and this
+    local copy previously omitted — and the same ``[0.5e-3, 3.0e-3]`` clip as the
+    MOST flux solver.  Returns ``C_d`` (dimensionless).
     """
-    u = jnp.maximum(jnp.asarray(u10_speed, dtype=jnp.float64), _U10_FLOOR_M_S)
-    return 1e-3 * (2.7 / u + 0.142 + 0.0764 * u)
+    from legoesm.core.bulk_flux import large_yeager_neutral_cd
+
+    return large_yeager_neutral_cd(jnp.asarray(u10_speed, dtype=jnp.float64))
 
 
 def large_yeager_ch(T_air_K, T_sfc_K):
