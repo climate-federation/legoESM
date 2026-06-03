@@ -76,6 +76,10 @@ dev = [
     "mypy",
     "pre-commit",
     "import-linter>=2.0",
+    # Federation packaging validation (scripts/validate_federation_packaging.py):
+    # build the per-member wheels + root-absent install in CI.
+    "build>=1.0",
+    "hatchling",
 ]
 docs = ["sphinx", "myst-parser", "furo"]
 all = [
