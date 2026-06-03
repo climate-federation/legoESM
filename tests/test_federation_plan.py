@@ -8,9 +8,7 @@ contract, so the carve stays consistent with the proven boundaries.
 
 from __future__ import annotations
 
-from pathlib import Path
-
-_SRC = Path(__file__).resolve().parents[1] / "src" / "legoesm"
+from tests.legoesm_paths import legoesm_subpackages
 
 #: The carve blueprint: federation member -> the src/legoesm subpackages it bundles.
 #: Mirrors the table in FEDERATION.md (and the import-linter layer DAG).
@@ -32,9 +30,9 @@ COMPONENT_MEMBERS = ("legoesm-atmosphere", "legoesm-ocean",
 
 
 def _actual_subpackages() -> set[str]:
-    return {p.name for p in _SRC.iterdir()
-            if p.is_dir() and (p / "__init__.py").is_file()
-            and not p.name.startswith("_")}
+    # Namespace-aware: spans every legoesm.__path__ root, so the substrate
+    # packages stay visible after the carve relocates them out of src/legoesm.
+    return legoesm_subpackages()
 
 
 def test_every_subpackage_is_assigned_to_exactly_one_member() -> None:

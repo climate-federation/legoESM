@@ -74,7 +74,13 @@ import pytest
 
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
-PRODUCTION_ROOTS = ("src/legoesm", "scripts")
+# Carve-aware: every legoesm namespace root (src/legoesm today; also
+# packages/<member>/src/legoesm after the carve), reported repo-relative so the
+# scan + the parametrize IDs stay stable, plus scripts.
+from tests.legoesm_paths import legoesm_root_paths as _legoesm_root_paths
+PRODUCTION_ROOTS = tuple(
+    str(p.relative_to(REPO_ROOT)) for p in _legoesm_root_paths()
+) + ("scripts",)
 
 
 # Map of grandfathered production file → set of ``tests.X`` modules

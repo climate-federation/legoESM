@@ -695,11 +695,14 @@ class TestStructuralRegressionNoNewIter78Pathology:
         tests/, excluding __pycache__.
         """
         from pathlib import Path
+        from tests.legoesm_paths import legoesm_root_paths
         repo_root = Path(__file__).resolve().parent.parent.parent
+        # Carve-aware: scan every legoesm namespace root (the substrate may live
+        # outside src/legoesm) plus scripts and tests.
         roots = [
             repo_root / "scripts",
-            repo_root / "src" / "legoesm",
             repo_root / "tests",
+            *legoesm_root_paths(),
         ]
         # Files that legitimately contain the pattern as DATA
         # (test assertions checking string presence/absence,

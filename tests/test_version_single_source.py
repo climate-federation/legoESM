@@ -94,14 +94,17 @@ def test_no_hardcoded_version_literal_in_source() -> None:
     2. The *current* project version appearing as a literal anywhere else.
     """
     version = _pyproject_version()
-    pkg_root = REPO_ROOT / "src" / "legoesm"
+    from tests.legoesm_paths import legoesm_root_paths
     offenders: list[str] = []
-    for path in pkg_root.rglob("*.py"):
-        text = path.read_text(encoding="utf-8")
-        for lineno, line in enumerate(text.splitlines(), start=1):
-            if _BANNER_LITERAL.search(line) or version in line:
-                rel = path.relative_to(REPO_ROOT)
-                offenders.append(f"{rel}:{lineno}: {line.strip()}")
+    # Scan every legoesm namespace root (carve-aware: the substrate may live
+    # outside src/legoesm).
+    for pkg_root in legoesm_root_paths():
+        for path in pkg_root.rglob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                if _BANNER_LITERAL.search(line) or version in line:
+                    rel = path.relative_to(REPO_ROOT)
+                    offenders.append(f"{rel}:{lineno}: {line.strip()}")
     assert not offenders, (
         "Hardcoded version literal found in source (interpolate "
         "legoesm._version.__version__ instead):\n" + "\n".join(offenders)

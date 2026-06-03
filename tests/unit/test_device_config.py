@@ -319,13 +319,12 @@ class TestXLAFlags:
         emission of the `intra_op_parallelism_threads` XLA flag so
         a future refactor can't silently re-introduce the crash.
         """
-        import pathlib
-        repo_root = pathlib.Path(__file__).resolve().parents[2]
+        from tests.legoesm_paths import legoesm_source_path
         for rel_path in (
-            "src/legoesm/runtime/backend.py",
-            "src/legoesm/parallel/device_config.py",
+            "runtime/backend.py",
+            "parallel/device_config.py",
         ):
-            src = (repo_root / rel_path).read_text()
+            src = legoesm_source_path(rel_path).read_text()
             docstring_lines = _docstring_line_numbers(src)
             for lineno, line in enumerate(src.splitlines(), 1):
                 if lineno in docstring_lines:
@@ -396,13 +395,12 @@ class TestXLAFlags:
         # call (i.e. not inside a `#` comment).  This catches
         # re-introduction via copy-paste while letting the explanatory
         # NOTE comments the fix left behind remain.
-        import pathlib
+        from tests.legoesm_paths import legoesm_source_path
         for rel_path in (
-            "src/legoesm/parallel/device_config.py",
-            "src/legoesm/runtime/backend.py",
+            "parallel/device_config.py",
+            "runtime/backend.py",
         ):
-            repo_root = pathlib.Path(__file__).resolve().parents[2]
-            src = (repo_root / rel_path).read_text()
+            src = legoesm_source_path(rel_path).read_text()
             docstring_lines = _docstring_line_numbers(src)
             for lineno, line in enumerate(src.splitlines(), 1):
                 if lineno in docstring_lines:
