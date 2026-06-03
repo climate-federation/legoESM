@@ -1729,9 +1729,6 @@ def make_voronoi_sharded_step(
         from jax import shard_map  # JAX >= 0.8 exposes it at top level
     except ImportError:  # JAX < 0.8 fallback
         from jax.experimental.shard_map import shard_map
-    from legoesm.atmosphere.dynamics.primitive_eq_mpas import (
-        mpas_hydrostatic_tendencies,
-    )
     from legoesm.core.state import MPASHydrostaticState
 
     n_dev = dev_config.n_devices
@@ -1748,6 +1745,20 @@ def make_voronoi_sharded_step(
     global_mesh = model.mesh
     sigma = model.sigma_coord
     cfg = model.config
+
+    # The MPAS RHS comes from the passed-in model instance, not an atmosphere
+    # import — this substrate ``parallel`` module must not depend UP on the
+    # atmosphere component (federation: legoesm-core stays standalone-installable).
+    # The free function is needed (not ``.tendencies``) because each device runs
+    # it on its own rank-local, traced mesh.
+    mpas_hydrostatic_tendencies = getattr(model, "sharded_tendency_fn", None)
+    if mpas_hydrostatic_tendencies is None:
+        raise TypeError(
+            f"{type(model).__name__} does not expose a 'sharded_tendency_fn' "
+            f"staticmethod; the multi-device Voronoi sharder needs the free "
+            f"tendency RHS (state, mesh, sigma_coord, config, *, dt=...) to run "
+            f"on a rank-local mesh without importing the dycore's component."
+        )
 
     # ------------------------------------------------------------------
     # Auto-select halo strategy based on grid size per device

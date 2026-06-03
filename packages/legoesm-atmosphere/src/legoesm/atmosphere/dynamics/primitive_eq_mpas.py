@@ -498,6 +498,15 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
     config : MPASPrimitiveEquationConfig, optional
     """
 
+    #: The free RHS function ``(state, mesh, sigma_coord, config, *, dt, ...)``,
+    #: exposed on the model so the shared-substrate multi-device sharder
+    #: (``parallel.sharded_dynamics``) can compute tendencies on a rank-LOCAL,
+    #: traced mesh WITHOUT importing this atmosphere module — keeping
+    #: legoesm-core free of an upward atmosphere dependency.  (The ``.tendencies``
+    #: method binds ``self.mesh``; the sharder needs the per-device mesh, so it
+    #: needs the unbound function.)
+    sharded_tendency_fn = staticmethod(mpas_hydrostatic_tendencies)
+
     def __init__(
         self,
         mesh: VoronoiMesh,
