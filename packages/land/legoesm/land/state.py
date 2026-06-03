@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import jax
 
@@ -44,3 +44,7 @@ class MultiLayerLandState(NamedTuple):
     # 30-day exponential moving average of near-surface air temperature
     # in [°C] — see ``LandState.TgC``.  Optional; ``None`` by default.
     TgC: jax.Array | None = None
+    # Prognostic state for the CLM-ML-JAX multilayer canopy scheme.
+    # Holds the ``mlcanopy_type`` instance carried forward between steps.
+    # ``None`` when the CLM-ML canopy scheme is not active.
+    canopy_state: Any | None = None

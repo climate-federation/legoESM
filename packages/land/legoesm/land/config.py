@@ -115,8 +115,9 @@ class MultiLayerLandConfig(NamedTuple):
     carbon: CarbonConfig = CarbonConfig()
     # Stomatal conductance / plant physiology
     stomata: StomataConfig = StomataConfig()
-    # Surface scheme: ``SimpleSEBConfig`` (default) or ``TwoLeafCanopyConfig``.
-    # Runtime dispatch via ``isinstance`` inside ``step_multilayer_land``.
+    # Surface scheme: ``SimpleSEBConfig`` (default), ``TwoLeafCanopyConfig``,
+    # or ``CLMMLCanopyConfig``.  Runtime dispatch via ``isinstance`` inside
+    # ``step_multilayer_land``.
     surface_scheme: Any = SimpleSEBConfig()
 
 
