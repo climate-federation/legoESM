@@ -1,6 +1,31 @@
 # Scripts
 
 Canonical run scripts for legoESM validation, benchmarking, and production runs.
+See `docs/TESTING.md` for the overarching tiered test & experiment strategy.
+
+## `experiment/` — the experiment harness
+
+Versioned templates + provenance ergonomics layered on `legoesm run` /
+`legoesm reproduce` (see `docs/TESTING.md` §4 and `config/templates/`):
+
+| Script | Purpose |
+|--------|---------|
+| `experiment/init_experiment.py <category/name> --name N --output-dir D [-o k=v]` | Resolve a `config/templates/` template + overrides + machine profile → runnable dir (`config.yaml`, `run.sh`, `run.yaml`). Strict-validates before writing. |
+| `experiment/validate_templates.py [--write-status]` | Validate every template through `Config…validate_strict`; regenerate `project_status.md`. |
+| `experiment/lego_detect_machine.py` | Resolve the `config/machines/` profile for the current host. |
+| `experiment/fetch_data.py check\|fetch <template>` | Check/stage a template's external datasets (`config/data_catalog.yaml`). |
+
+## `tmp/` — throwaway staging (NOT for production)
+
+Debug/diagnostic/iteration scripts and archived artifacts live under
+`scripts/tmp/` (e.g. `tmp/dycore_iter_archive/`, the non-curated ralph-loop
+dycore tests). Nothing here is wired into CI; the directory is slated for
+eventual deletion. Do not add production scripts here.
+
+> A further reorganization of the flat production scripts below into
+> `run/ matrix/ bench/ plot/ validate/ data/` subdirs is planned (it requires
+> updating ~25 tests that import scripts by path); until then they remain at the
+> `scripts/` root as documented in the tables below.
 
 ## Atmosphere
 
