@@ -62,6 +62,7 @@ class AMIPExperimentConfig(NamedTuple):
     diurnal_cycle: bool = False  # use instantaneous solar zenith angle
     solar_source: str = "constant"  # "constant", "file", or "spectral_file"
     solar_file: str = ""
+    solar_tsi_var: str = "tsi"  # NetCDF var for total solar irradiance in solar_file
     solar_spectral_var: str = "solar_fraction_by_gpt"
     # Band ordering of a per-band (14-band) solar file (issue #322):
     # "auto" rotates to RRTMGP order only for the unambiguous MPI-M
