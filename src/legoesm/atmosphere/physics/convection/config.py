@@ -74,11 +74,17 @@ class DCAConfig(NamedTuple):
         Columns with CAPE below this are not adjusted.
     cape_sharpness : float
         Sigmoid sharpness [1/(J/kg)] for smooth CAPE gating (default 0.02).
+    instability_blend_sharpness : float
+        Dimensionless sigmoid sharpness on the superadiabatic-instability
+        metric controlling per-pair adjustment blending inside the
+        ``lax.scan`` sweep (default 10.0).  Lifted from a hardcoded literal
+        so the trigger transition width is tunable.
     """
     n_iterations: int = 1
     mixing_fraction: float = 1.0
     cape_threshold: float = 100.0
     cape_sharpness: float = 0.1   # sigmoid(-10)≈5e-5 at CAPE=0; 0.5 at threshold
+    instability_blend_sharpness: float = 10.0
 
 
 class KuoConfig(NamedTuple):
@@ -92,7 +98,7 @@ class KuoConfig(NamedTuple):
         Minimum column moisture excess to trigger convection [kg/m^2].
     smooth_trigger_sharpness : float
         Sigmoid sharpness on column moisture excess trigger [1/(kg/m^2)].
-    tau_relax : float
+    tau_relax_s : float
         Relaxation timescale [s].  Default 7200 (2 h).  The earlier
         default 3600 (1 h) ate the entire column moisture excess every
         hour, which combined with the surface-evap supply rate gave
@@ -104,7 +110,7 @@ class KuoConfig(NamedTuple):
     alpha_heat: float = 0.75
     me_threshold: float = 1e-5
     smooth_trigger_sharpness: float = 1e4
-    tau_relax: float = 7200.0
+    tau_relax_s: float = 7200.0
 
 
 class MassFluxConfig(NamedTuple):
@@ -384,7 +390,7 @@ class TiedtkeConfig(NamedTuple):
     The full Tiedtke 1989 closure uses column moisture convergence
     for the deep branch.  Until the PR-0 ``compute_moisture_convergence``
     diagnostic ships, we use a saturation-deficit proxy
-    ``MC_proxy = (q_sat - q_v) / tau_relax`` that has the same
+    ``MC_proxy = (q_sat - q_v) / tau_relax_s`` that has the same
     qualitative behavior (positive in moist columns, zero in dry
     columns).
 

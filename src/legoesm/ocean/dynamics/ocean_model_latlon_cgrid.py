@@ -684,6 +684,21 @@ class LatLonCGridOceanModel:
                 f"{sorted(VALID_LATERAL_VISCOSITY_OPERATOR)}, "
                 f"got {config.lateral_viscosity_operator!r}",
             )
+
+        # The lat-lon C-grid applies OceanSurfaceForcing.tau/q_net/salt DIRECTLY
+        # in its dynamics (+ the freshwater= arg for eta + virtual salt), so it
+        # must NOT also route the same forcing through the 'external' physics
+        # scheme — that would double-apply momentum/heat/salt.  'external' is the
+        # cubed-sphere physics-path coupling route; lat-lon uses the direct path.
+        if (config.physics is not None
+                and config.physics.surface_forcing.scheme == "external"):
+            raise ValueError(
+                "surface_forcing.scheme='external' is not supported on the "
+                "lat-lon C-grid ocean: it applies OceanSurfaceForcing directly "
+                "in its dynamics, so the external physics scheme would "
+                "double-apply the forcing. Pass surface_forcing= (and "
+                "freshwater=) to step() instead.",
+            )
         if config.max_abs_eta_m <= 0.0:
             raise ValueError(
                 f"max_abs_eta_m must be > 0, got {config.max_abs_eta_m!r}")
@@ -747,6 +762,12 @@ class LatLonCGridOceanModel:
         if config.ab2_epsilon < 0.0:
             raise ValueError(
                 f"ab2_epsilon must be >= 0, got {config.ab2_epsilon!r}")
+        _valid_mom_int = {"euler", "rk3"}
+        _mom_ti = getattr(config, "momentum_time_integrator", "euler")
+        if _mom_ti not in _valid_mom_int:
+            raise ValueError(
+                f"momentum_time_integrator must be one of {_valid_mom_int}, "
+                f"got {_mom_ti!r}")
 
         # Implicit surface-forcing placement (Veros) requires the implicit
         # vertical-mixing solve — that is where the surface TRACER source is
@@ -843,9 +864,15 @@ class LatLonCGridOceanModel:
         Returns
         -------
         (LatLonCGridOceanTendencies, MomentumTendencyDiagnostics)
-            The diagnostics satisfy
-            ``Σ components == du_dt`` to machine precision (verified by
-            ``tests/ocean/unit/test_momentum_diagnostics_closure.py``).
+            The diagnostics satisfy ``Σ components == du_dt`` to machine
+            precision (verified by
+            ``tests/ocean/unit/test_momentum_diagnostics_closure.py``)
+            UNLESS ``config.adaptive_implicit_vertadv`` is set, in which
+            case ``vertadv_{u,v}`` is a diagnostic-only start-of-step
+            estimate excluded from ``du_dt`` and the closure becomes
+            ``Σ (components except vertadv) == du_dt`` (see
+            ``MomentumTendencyDiagnostics`` and
+            ``latlon_cgrid_ocean_baroclinic_tendencies`` docstrings).
 
         Use the returned tendencies as the start-of-step approximation
         of what the model integrates internally; for the
@@ -999,8 +1026,49 @@ class LatLonCGridOceanModel:
             F_slow_u = F_slow_u * state.u_mask.data
             F_slow_v = F_slow_v * state.v_mask.data
 
-        u_star = state.u.data + dt_mom * du_dt_pert
-        v_star = state.v.data + dt_mom * dv_dt_pert
+        # Outer baroclinic momentum integrator (NEMO-mirror, #RK3).  The
+        # cold-start amplifiers (pressure gradient + KE gradient + relative
+        # vorticity flux) live in ``du_dt`` and are integrated explicitly
+        # here; forward-Euler has no stability region for them, so the violent
+        # geostrophic adjustment from rest amplifies.  SSP-RK3 (Shu-Osher)
+        # mirrors NEMO's RK3 outer step.  T,S,eta + surface forcing are frozen
+        # across the 3 stages (operator-split with the Matsuno Coriolis +
+        # barotropic + tracer stages below); the barotropic slow forcing
+        # F_slow_{u,v} is the stage-1 value already computed above.  Static
+        # Python branch on the config string (no retrace / no jnp.where).
+        # NOTE: the MOMENTUM stepping uses ``dt_mom`` (= dt / dt_mom_ratio) for
+        # Veros-faithful asynchronous dt_mom≠dt_tracer stepping; the inner
+        # ``self.tendencies(..., dt=dt)`` call keeps ``dt`` (= dt_tracer), which
+        # is the tracer flux-limiter timestep.  dt_mom_ratio=1.0 (default) ⇒
+        # dt_mom == dt ⇒ bit-identical for all existing configs.
+        if getattr(self.config, "momentum_time_integrator", "euler") == "rk3":
+            u0 = state.u.data
+            v0 = state.v.data
+
+            def _mom_pert(u_in, v_in):
+                st = state._replace(
+                    u=state.u.replace(data=u_in * u_mask_3d),
+                    v=state.v.replace(data=v_in * v_mask_3d),
+                )
+                td = self.tendencies(st, surface_forcing, sponge=sponge, dt=dt)
+                _du = td.du_dt.data
+                _dv = td.dv_dt.data
+                _Fu = jnp.sum(_du * h_u_pre, axis=-1) / H_u_pre * state.u_mask.data
+                _Fv = jnp.sum(_dv * h_v_pre, axis=-1) / H_v_pre * state.v_mask.data
+                return _du - _Fu[..., jnp.newaxis], _dv - _Fv[..., jnp.newaxis]
+
+            # Stage 1 perturbation = du_dt_pert/dv_dt_pert (computed above).
+            u1 = u0 + dt_mom * du_dt_pert
+            v1 = v0 + dt_mom * dv_dt_pert
+            p1u, p1v = _mom_pert(u1, v1)
+            u2 = 0.75 * u0 + 0.25 * (u1 + dt_mom * p1u)
+            v2 = 0.75 * v0 + 0.25 * (v1 + dt_mom * p1v)
+            p2u, p2v = _mom_pert(u2, v2)
+            u_star = (1.0 / 3.0) * u0 + (2.0 / 3.0) * (u2 + dt_mom * p2u)
+            v_star = (1.0 / 3.0) * v0 + (2.0 / 3.0) * (v2 + dt_mom * p2v)
+        else:
+            u_star = state.u.data + dt_mom * du_dt_pert
+            v_star = state.v.data + dt_mom * dv_dt_pert
 
         # 4. Forward-backward Coriolis on perturbation velocity
         #
@@ -1258,6 +1326,54 @@ class LatLonCGridOceanModel:
         w_baro = diagnose_w_from_flux_div(
             flux_div_k, self.z_coord, thickness_weighted=True,
         )
+
+        # 7b. Adaptive-implicit vertical momentum advection
+        #     (Shchepetkin 2015 / NEMO ``ln_zad_Aimp``).  The explicit
+        #     in-tendency vertical momentum advection has no vertical-CFL
+        #     limit and amplifies a spurious ``w`` super-exponentially in
+        #     thin cells (the OMIP cold-start "vertadv" runaway).  When
+        #     ``config.adaptive_implicit_vertadv`` is set, the PE tendency
+        #     skips that explicit term and it is applied here instead,
+        #     after the barotropic solve, on the barotropic-consistent
+        #     ``w_baro`` (the same vertical velocity that advects tracers).
+        #     It acts on the baroclinic perturbation ``u' = u - U_bar``
+        #     (depth-mean removed — the barotropic mode is owned by the
+        #     barotropic solver), exactly like the explicit scheme, then
+        #     restores ``U_bar``.  Unconditionally stable + conservative.
+        #     No-op (and bit-exact) when the flag is off.
+        if getattr(self.config, "adaptive_implicit_vertadv", False):
+            from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+                interp_cell_to_vface,
+            )
+            from legoesm.ocean.vertical import (
+                adaptive_implicit_vertical_momentum_advection,
+            )
+            # w_baro at cell centers -> momentum faces (fold-aware for v).
+            w_u_half = interp_cell_to_uface(w_baro)            # (lat, lon+1, nlev+1)
+            w_v_half = interp_cell_to_vface(w_baro, self.grid)  # (lat+1, lon, nlev+1)
+            # Depth-mean (barotropic) velocity at the faces, from the
+            # already-computed thickness-weighted transports (lines above).
+            U_bar = (Hu_3d / jnp.maximum(H_u_old, 1e-10))[..., jnp.newaxis]
+            V_bar = (Hv_3d / jnp.maximum(H_v_old, 1e-10))[..., jnp.newaxis]
+            u_face_active = jnp.broadcast_to(u_mask_3d_tracer, u_3d.shape)
+            v_face_active = jnp.broadcast_to(v_mask_3d_tracer, v_3d.shape)
+            u_adv = adaptive_implicit_vertical_momentum_advection(
+                u_3d - U_bar, w_u_half, h_u_old, dt,
+                face_active=u_face_active,
+            ) + U_bar
+            v_adv = adaptive_implicit_vertical_momentum_advection(
+                v_3d - V_bar, w_v_half, h_v_old, dt,
+                face_active=v_face_active,
+            ) + V_bar
+            # Re-apply the 2D wet mask + periodic wrap column (matches the
+            # tendency path's post-update masking at u[:, -1] = u[:, 0]).
+            u_adv = u_adv * u_mask_3d
+            u_adv = u_adv.at[:, -1].set(u_adv[:, 0])
+            v_adv = v_adv * v_mask_3d
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=u_adv),
+                v=state_new.v.replace(data=v_adv),
+            )
 
         T_mid = state_new.T.data  # tracer after diffusion+physics Euler step
         S_mid = state_new.S.data

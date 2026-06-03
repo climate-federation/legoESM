@@ -1063,6 +1063,41 @@ def _regrid_land_mask(mask_arr: np.ndarray, lon_deg: np.ndarray,
     return mask_interp.reshape(n_lat, n_lon)
 
 
+def _roll_lon_to_pm180(arr: np.ndarray, lon_deg: np.ndarray) -> np.ndarray:
+    """Roll a 2-D/3-D array so its longitude axis runs from -180 to +180.
+
+    Ocean latlon grids commonly store lon in ``[0, 360)``; regridded
+    cube/MPAS targets are ``[-180, 180]``.  Without rolling, the
+    raw-latlon snapshot PNGs misplace features by 180° versus the
+    cube/mpas snapshots (Williamson-style mountain at +90 vs -90).
+    """
+    lon = np.asarray(lon_deg, dtype=np.float64).ravel()
+    if lon.size < 2:
+        return arr
+    if float(lon.min()) >= -1e-9 and float(lon.max()) > 180.0 + 1e-9:
+        cross = int(np.searchsorted(lon, 180.0 + 1e-9))
+        if 0 < cross < lon.size:
+            return np.roll(arr, -cross, axis=1)
+    return arr
+
+
+def _assert_global_0_360_target(target_lon, n_lon: int, branch: str) -> None:
+    """Guard (codex iter141): the cube regrid branch only emits the global
+    [0,360] canvas (after the +n_lon//2 roll); it does NOT honor an arbitrary
+    target_lon.  Raise if a caller passes a target_lon that is not the supported
+    full-global [0,360] convention of the matching size, so a wrong-convention
+    request fails loud instead of silently re-introducing the 180deg offset."""
+    if target_lon is None:
+        return
+    tl = np.asarray(target_lon, dtype=np.float64).ravel()
+    if tl.size != n_lon or float(tl.min()) < -1e-6 or float(tl.max()) <= 180.0:
+        raise ValueError(
+            f"_regrid_{branch} produces a global [0,360] lon of size {n_lon}; "
+            f"target_lon (size {tl.size}, range [{tl.min():.1f},{tl.max():.1f}]) is "
+            f"not the supported [0,360] full-canvas convention -- this branch does "
+            f"not honor an arbitrary target_lon.")
+
+
 def _regrid_2d(field_arr: np.ndarray, lon_deg: np.ndarray,
                lat_deg: np.ndarray, coord_kind: str,
                target_lat: np.ndarray | None = None,
@@ -1077,6 +1112,18 @@ def _regrid_2d(field_arr: np.ndarray, lon_deg: np.ndarray,
         cells are excluded from the interpolation KDTree.
     """
     if coord_kind in ("latlon", "gaussian"):
+        # 180deg-fix: native lat-lon grids are already physical [0, 360).
+        # The snapshot lon axis is labelled with these same native
+        # coordinates (see save loop: latlon_arrays["lon"] = src_lon), so
+        # the data must stay in native [0, 360) order to match the label
+        # (and the now-physical cube/mpas convention).  Do NOT roll to
+        # [-180, 180) here -- that was the source of the 180deg offset
+        # between the latlon snapshot data and its own lon axis.
+        # NOTE (codex iter141): this branch is SELF-CONSISTENT (returns native
+        # data; the saved lon axis is that same native src_lon), so there is no
+        # silent-mislabel risk -- and NO size guard vs target_lon, because
+        # staggered native fields legitimately have lon size n_lon+1 (C-grid
+        # edges) which differs from the cell-centre target_lon.
         return np.asarray(field_arr, dtype=np.float64)
     # Cubed-sphere: use face-aware bilinear interpolation (no edge artifacts).
     if coord_kind == "cube":
@@ -1089,7 +1136,23 @@ def _regrid_2d(field_arr: np.ndarray, lon_deg: np.ndarray,
             n = int(round(np.sqrt(arr.size / 6)))
             arr = arr.reshape(6, n, n)
         w = get_cubedsphere_to_latlon_weights(n)
-        return apply_cubedsphere_to_latlon(arr, w)
+        out = apply_cubedsphere_to_latlon(arr, w)
+        # 180deg-fix: apply_cubedsphere_to_latlon emits lon on
+        # [-180, 180) (lon_cent = linspace(-180,180,n_lon,endpoint=False)
+        # + 180/n_lon), so its column 0 is ~+180degE physical.  The
+        # snapshot lon axis is labelled [0, 360] (np.linspace(0,360,n_lon)).
+        # Roll by +n_lon//2 to convert the regridder output to [0, 360]
+        # ordering: physical 0degE moves to column 0 and a feature at
+        # physical 180degE lands at column n_lon//2 (lon=180 label),
+        # matching the physical mpas convention.
+        n_lon = out.shape[-1]
+        out = np.roll(out, n_lon // 2, axis=-1)
+        # Robustness guard (codex iter141): this branch ONLY produces the
+        # global [0,360] canvas; it does NOT honor an arbitrary target_lon
+        # ordering.  Fail LOUD (not silent) if a caller requests a different
+        # convention/size, so the 180deg offset cannot silently re-appear.
+        _assert_global_0_360_target(target_lon, n_lon, "cube")
+        return out
     return _bin_to_latlon(field_arr.ravel(), lon_deg.ravel(), lat_deg.ravel(),
                           target_lat=target_lat, target_lon=target_lon,
                           ocean_mask=ocean_mask)
@@ -1105,6 +1168,9 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
     if coord_kind in ("latlon", "gaussian"):
         if arr.ndim == 2:
             arr = arr[..., None]
+        # 180deg-fix: keep native [0, 360) ordering (see _regrid_2d).
+        # Self-consistent (native data + native label); no target_lon size
+        # guard (staggered native fields legitimately differ in lon size).
         return arr
     # Cubed-sphere: use face-aware bilinear interpolation.
     if coord_kind == "cube":
@@ -1117,7 +1183,20 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
             n = int(round(np.sqrt(arr.size / (6 * nlev))))
             arr = arr.reshape(6, n, n, nlev)
         w = get_cubedsphere_to_latlon_weights(n)
-        return apply_cubedsphere_to_latlon_3d(arr, w)
+        out = apply_cubedsphere_to_latlon_3d(arr, w)
+        # 180deg-fix: regridder emits lon on [-180, 180); the snapshot lon
+        # axis is labelled [0, 360].  Roll +n_lon//2 along the lon axis to
+        # convert to [0, 360] ordering (see _regrid_2d for full rationale).
+        # For 3-D output (n_lat, n_lon, nlev) the lon axis is axis=1.
+        if out.ndim >= 3:
+            n_lon = out.shape[1]
+            out = np.roll(out, n_lon // 2, axis=1)
+        else:
+            n_lon = out.shape[-1]
+            out = np.roll(out, n_lon // 2, axis=-1)
+        # Robustness guard (codex iter141): global [0,360] only, see _regrid_2d.
+        _assert_global_0_360_target(target_lon, n_lon, "3d_level cube")
+        return out
     if arr.ndim == 1:
         arr = arr[:, None]
     nlev = arr.shape[-1]
@@ -1351,7 +1430,8 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
                          coord_kind: str, lon_deg: np.ndarray,
                          lat_deg: np.ndarray,
                          domain_extent: tuple[float,float,float,float] | None = None,
-                         mesh=None):
+                         mesh=None,
+                         filename_suffix: str = ""):
     """Save snapshot evolution plots for each 2D field.
 
     Parameters
@@ -1360,6 +1440,11 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
         When provided and coord_kind is ``"mpas"``, snapshot plots use
         native Voronoi polygon rendering (PolyCollection) instead of
         regrid-then-imshow, eliminating land-bleed interpolation artifacts.
+    filename_suffix : str, optional
+        Appended before ``.png`` (e.g. ``"_latlon"``) so a single case
+        can carry both native and lat-lon projected renderings without
+        clobbering filenames.  When non-empty the field_snapshots alias
+        is skipped (the native pass owns it).
     """
     if not snapshots:
         return
@@ -1594,14 +1679,15 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
 
         fig.suptitle(f"{case_name} — {field_key} ({field_label})", fontsize=11)
         fig.tight_layout()
-        fname = f"snapshots_{field_key}.png"
+        fname = f"snapshots_{field_key}{filename_suffix}.png"
         fig.savefig(output_dir / fname, dpi=150, bbox_inches="tight")
         plt.close(fig)
         if first_saved is None:
             first_saved = fname
 
-    # Alias first field as field_snapshots.png
-    if first_saved and (output_dir / first_saved).exists():
+    # Alias first field as field_snapshots.png (only on the canonical
+    # pass — suffixed passes leave the alias untouched).
+    if not filename_suffix and first_saved and (output_dir / first_saved).exists():
         shutil.copy2(output_dir / first_saved,
                      output_dir / "field_snapshots.png")
 
@@ -2082,6 +2168,16 @@ def _save_case_diagnostics(
         output_dir, case_name, snapshots, dt, field_specs_2d,
         coord_kind, lon_deg, lat_deg, domain_extent=domain_extent,
         mesh=mesh)
+    # Lat-lon projection pass: regrid-then-imshow on every grid whose
+    # native rendering differs from a lat-lon canvas (MPAS Voronoi
+    # polygons, cube native panels, icos scatter).  For ``latlon`` /
+    # ``gaussian`` the native pass already IS a lat-lon imshow, so the
+    # extra pass would duplicate output and is skipped.
+    if coord_kind not in ("latlon", "gaussian"):
+        _save_snapshot_plots(
+            output_dir, case_name, snapshots, dt, field_specs_2d,
+            coord_kind, lon_deg, lat_deg, domain_extent=domain_extent,
+            mesh=None, filename_suffix="_latlon")
     _save_snapshot_times(output_dir, snapshots, dt)
     _save_snapshot_data(
         output_dir, snapshots, dt, coord_kind, lon_deg, lat_deg,
@@ -2166,7 +2262,8 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
                         A_h: float | None = None,
                         A_v: float | None = None,
                         bottom_drag_r: float | None = None,
-                        cube_use_fc: bool = False):
+                        cube_use_fc: bool | None = None,
+                        cube_fc_light_diffusion: bool = False):
     """Create grid, z_coord, and rest-state for any grid type.
 
     Parameters
@@ -2193,6 +2290,16 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
         nlev = DEFAULT_NLEV
     if H_max is None:
         H_max = DEFAULT_H_MAX
+    if cube_use_fc is None:
+        # Default the cubed-sphere ocean to the FC-Gram spectral
+        # baroclinic-tendency backend, which removes the face-edge PGF
+        # instability documented in
+        # docs/ocean_experiments/cubed_sphere_pgf_stability.md (RESOLVED
+        # 2026-05-20) and which scripts/run_omip.py already enables by
+        # default for cubed_sphere.  Without it the rest_state +
+        # barotropic_wave cube cases NaN around physical day 1-2 while
+        # latlon/MPAS stay stable.  Non-cube grids are unaffected.
+        cube_use_fc = (tc.grid_type == "cubed_sphere")
     from legoesm.ocean.vertical import create_ocean_z_star
 
     z_coord = create_ocean_z_star(n_levels=nlev, H_max=H_max)
@@ -2226,12 +2333,36 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
                 barotropic_diffusion_alpha=0.3,
                 use_conservation_fixer=True,
                 physics=physics,
+                # FV3-faithful barotropic: route the free-surface mode through
+                # the validated cube SW core (vector-invariant absolute-vorticity
+                # flux + RK3 + div-damp/hyperdiff).  Replaces the A-grid solver,
+                # whose computational pressure mode grew a 40% non-zonal
+                # geostrophic_adjustment eta artifact (a_grid forbidden by the
+                # never-A-grid / FV3-faithfulness directive).  Ocean-tuned SW
+                # barotropic damping (OceanConfig default div_damp_factor=120)
+                # so phillips_two_layer matches latlon/mpas without over-damping
+                # barotropic_wave / geostrophic_adjustment.
+                barotropic_staggering="fv3sw",
             )
-            if A_h is None:
+            if cube_fc_light_diffusion:
+                # Wave tests (barotropic_wave, inertia_gravity_wave) carry
+                # NO horizontal density gradient, so they do not excite the
+                # face-edge baroclinic-PGF instability that the raised
+                # A_h=5e5 / K_h=5e6 exists to suppress.  The FC-Gram
+                # spectral gradient alone removes the eta-gradient face
+                # artifact that NaN'd the legacy A-L path.  Keep light
+                # lateral diffusion so the small-amplitude wave is not
+                # over-damped (raised K_h decays barotropic_wave 0.1 m ->
+                # 0.04 m; codex iter-8 flagged the coupling).  A_h/K_h fall
+                # back to the caller value / OceanConfig default.
+                if A_h is not None:
+                    kw["A_h"] = A_h
+            elif A_h is None:
                 kw["A_h"] = 5.0e5
+                kw["K_h"] = 5.0e6
             else:
                 kw["A_h"] = max(A_h, 5.0e5)
-            kw["K_h"] = 5.0e6
+                kw["K_h"] = 5.0e6
         else:
             kw = dict(n_barotropic_substeps=30, physics=physics)
             if A_h is not None:
@@ -3409,8 +3540,11 @@ def run_barotropic_wave(tc: TestCase, output_dir: Path, days: float
     if tc.grid_type == "spectral":
         raise NotImplementedError(
             "Barotropic wave skipped for spectral grid (land masking issues)")
+    # Cube: use the FC-Gram backend for face-edge stability but WITHOUT the
+    # raised A_h/K_h (no density gradient here, so the heavy diffusion only
+    # over-damps the small-amplitude wave — codex iter-8).
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc))
+        _create_ocean_setup(tc, cube_fc_light_diffusion=True))
     state = _create_rest_state(tc, grid, z_coord)
     state = _add_barotropic_wave_perturbation(
         state, tc.grid_type, grid, z_coord)
@@ -4808,8 +4942,15 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
     dispersion properties.
     """
     H_max = 1000.0  # equivalent depth (m)
+    # Cube: keep the legacy (non-FC) path.  The IGW is a single-level
+    # barotropic wave with NO horizontal density gradient, so it does NOT
+    # excite the face-edge baroclinic-PGF instability the FC-Gram backend
+    # exists to cure — it is already finite/stable on the A-L path
+    # (amp_ratio 0.068).  FC's Fourier-continuation smoothing only adds
+    # dissipation (amp_ratio 0.008), so routing IGW through the new
+    # cube-default FC backend would strictly worsen it.  Opt out.
     grid, z_coord, config, model, coord_kind, lon_deg, lat_deg = (
-        _create_ocean_setup(tc, nlev=2, H_max=H_max))
+        _create_ocean_setup(tc, nlev=2, H_max=H_max, cube_use_fc=False))
     state = _create_rest_state(tc, grid, z_coord, H_max=H_max)
     state = _init_inertia_gravity_wave(state, tc.grid_type, grid, z_coord)
 
@@ -6241,6 +6382,12 @@ def build_parser() -> argparse.ArgumentParser:
             "computed at t=0 and t=T and dumped to "
             "``results/ocean/<case>/<grid>/<res>/diagnostics.json``."
         ))
+    p.add_argument(
+        "--mpi-case-split", action="store_true",
+        help="Distribute filtered test cases across MPI ranks (each rank "
+             "runs tests[rank::size]).  Requires mpi4py + mpirun.  "
+             "Only rank 0 generates cross-grid comparison plots after "
+             "an MPI barrier.")
     return p
 
 
@@ -6966,12 +7113,28 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
                               figsize=(3.5 * actual_cols, 3.0 * n_rows),
                               squeeze=False)
 
+    # Shared vmin/vmax across all (grid, time) panels for direct
+    # cross-grid comparability.  FIELD_RANGES override when supplied.
+    diverging = cmap in ("RdBu_r", "RdBu", "seismic", "bwr", "coolwarm")
+    if field in field_ranges and field_ranges[field] != (None, None):
+        shared_vmin, shared_vmax = field_ranges[field]
+    else:
+        all_finite = np.concatenate(
+            [arr.ravel()[np.isfinite(arr.ravel())] for arr in all_fields]
+            or [np.asarray([0.0])]
+        )
+        if all_finite.size:
+            shared_vmin = float(all_finite.min())
+            shared_vmax = float(all_finite.max())
+            if diverging:
+                m = max(abs(shared_vmin), abs(shared_vmax))
+                shared_vmin, shared_vmax = -m, m
+        else:
+            shared_vmin, shared_vmax = None, None
+
+    panel_im = None
     for i_row, gname in enumerate(actual_grids):
         entries = grid_field_data[gname]
-
-        # Color range is computed per-panel below so that spatial patterns
-        # within each snapshot are visible (temporal trends otherwise
-        # dominate the shared range and wash out spatial structure).
 
         # Get plot extent — prefer source coordinate range for accurate
         # regional domain cropping on unstructured meshes.
@@ -7023,20 +7186,9 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
                     if crop_slices is not None:
                         r0, r1, c0, c1 = crop_slices
                         f2d = f2d[r0:r1, c0:c1]
-                    # Per-panel color range
-                    if field in field_ranges and field_ranges[field] != (None, None):
-                        p_vmin, p_vmax = field_ranges[field]
-                    else:
-                        pf = f2d.ravel()
-                        pf = pf[np.isfinite(pf)]
-                        if pf.size:
-                            p_vmin, p_vmax = float(pf.min()), float(pf.max())
-                        else:
-                            p_vmin, p_vmax = None, None
                     panel_im = ax.imshow(f2d, origin='lower', aspect='auto',
                                          cmap=cmap, extent=extent,
-                                         vmin=p_vmin, vmax=p_vmax)
-                    fig.colorbar(panel_im, ax=ax, fraction=0.046, pad=0.04)
+                                         vmin=shared_vmin, vmax=shared_vmax)
                 else:
                     ax.text(0.5, 0.5, f'{field} not available',
                             transform=ax.transAxes,
@@ -7059,7 +7211,10 @@ def _create_comparison_evolution(test_case_dir: Path, grid_results: dict,
     fig.suptitle(f"{field.upper()} Evolution — {test_case_dir.name}",
                  fontsize=13, fontweight='bold')
 
-    fig.tight_layout()
+    fig.tight_layout(rect=[0.0, 0.0, 0.92, 0.96])
+    if panel_im is not None:
+        cax = fig.add_axes([0.93, 0.10, 0.015, 0.78])
+        fig.colorbar(panel_im, cax=cax, label=field)
     out = test_case_dir / f"comparison_evolution_{field}.png"
     fig.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -7390,6 +7545,125 @@ def _create_comparison_vertical_evolution(
     print(f"    Saved: {out.name}")
 
 
+def _create_per_timestep_grid_summary(
+    test_case_dir: Path, grid_results: dict, field: str = "eta",
+    *, max_times: int = 6,
+) -> None:
+    """Per-timestep cross-grid summary for ``field``.
+
+    For each of up to ``max_times`` snapshot times, write
+    ``summary_grids_<field>_t<day>d.png`` with one subpanel per grid
+    sharing a single colorbar across grids.  Provides direct visual
+    comparability of the same physical field across discretisations
+    at a fixed instant.
+    """
+    test_case = _extract_test_case_name(test_case_dir.name)
+    field_ranges = FIELD_RANGES.get(test_case, {})
+
+    if field == "eta" or field in ("w_133m", "w_sfc"):
+        cmap = "RdBu_r"
+    elif field in ("SST", "T"):
+        cmap = "plasma"
+    elif field == "speed_sfc":
+        cmap = "magma"
+    else:
+        cmap = "viridis"
+    diverging = cmap in ("RdBu_r", "RdBu", "seismic", "bwr", "coolwarm")
+
+    per_grid_3d: dict[str, np.ndarray] = {}
+    per_grid_times: dict[str, np.ndarray] = {}
+    per_grid_land: dict[str, np.ndarray | None] = {}
+    for g, data in grid_results.items():
+        snaps = data["snapshots"]
+        if snaps is None or field not in snaps.files:
+            continue
+        arr = np.asarray(snaps[field])
+        if arr.ndim == 4:
+            arr = arr[..., -1]
+        if arr.ndim != 3:
+            continue
+        per_grid_3d[g] = arr
+        per_grid_times[g] = (np.asarray(snaps["times_days"]).ravel()
+                             if "times_days" in snaps.files
+                             else np.arange(arr.shape[0], dtype=np.float64))
+        per_grid_land[g] = (np.asarray(snaps["land_mask"])
+                            if "land_mask" in snaps.files else None)
+    if len(per_grid_3d) < 2:
+        return
+
+    ref_times = max(per_grid_times.values(), key=lambda a: a.size)
+    if ref_times.size > max_times:
+        idx_sel = np.linspace(0, ref_times.size - 1, max_times).astype(int)
+    else:
+        idx_sel = np.arange(ref_times.size)
+
+    if field in field_ranges and field_ranges[field] != (None, None):
+        shared_vmin, shared_vmax = field_ranges[field]
+    else:
+        all_finite = np.concatenate(
+            [a.ravel()[np.isfinite(a.ravel())] for a in per_grid_3d.values()]
+            or [np.asarray([0.0])])
+        if all_finite.size:
+            shared_vmin = float(all_finite.min())
+            shared_vmax = float(all_finite.max())
+            if diverging:
+                m = max(abs(shared_vmin), abs(shared_vmax))
+                shared_vmin, shared_vmax = -m, m
+        else:
+            shared_vmin, shared_vmax = None, None
+
+    slot_order = list(per_grid_3d.keys())
+
+    for ti in idx_sel:
+        day_ref = float(ref_times[ti])
+        ncols = len(slot_order)
+        fig, axes = plt.subplots(
+            1, ncols, figsize=(3.6 * ncols, 3.4), squeeze=False)
+        im = None
+        for slot, ax in enumerate(axes[0]):
+            g = slot_order[slot]
+            arr_3d = per_grid_3d[g]
+            g_times = per_grid_times[g]
+            gi = int(np.argmin(np.abs(g_times - day_ref))) \
+                if g_times.size else 0
+            gi = min(gi, arr_3d.shape[0] - 1)
+            f2 = arr_3d[gi]
+            lm = per_grid_land[g]
+            if lm is not None:
+                lm2 = lm[gi] if lm.ndim == 3 else lm
+                f2 = np.where(lm2 > 0.5, f2, np.nan)
+            snaps = grid_results[g]["snapshots"]
+            n_lat, n_lon = f2.shape
+            lat = (np.asarray(snaps["lat"]) if "lat" in snaps.files
+                   and np.asarray(snaps["lat"]).size == n_lat
+                   else np.linspace(-90.0, 90.0, n_lat))
+            lon = (np.asarray(snaps["lon"]) if "lon" in snaps.files
+                   and np.asarray(snaps["lon"]).size == n_lon
+                   else np.linspace(-180.0, 180.0, n_lon))
+            im = ax.imshow(
+                f2, origin="lower", aspect="auto",
+                extent=[float(lon.min()), float(lon.max()),
+                        float(lat.min()), float(lat.max())],
+                cmap=cmap, vmin=shared_vmin, vmax=shared_vmax)
+            ax.set_title(
+                f"{g} ({grid_results[g]['resolution']})", fontsize=9)
+            ax.set_xlabel("Longitude")
+            if slot == 0:
+                ax.set_ylabel("Latitude")
+        fig.suptitle(
+            f"{test_case_dir.name} — {field}  t={day_ref:.2f} d",
+            fontsize=12, fontweight="bold")
+        if im is not None:
+            cax = fig.add_axes([0.93, 0.15, 0.012, 0.70])
+            fig.colorbar(im, cax=cax, label=field)
+        fig.subplots_adjust(
+            left=0.05, right=0.91, top=0.86, bottom=0.12, wspace=0.10)
+        out_file = test_case_dir / (
+            f"summary_grids_{field}_t{day_ref:05.2f}d.png")
+        plt.savefig(out_file, dpi=130, bbox_inches="tight")
+        plt.close(fig)
+
+
 def _create_cross_grid_comparisons(test_case_dir: Path, grid_results: dict) -> None:
     """Create all cross-grid comparison plots and summary for a test case.
 
@@ -7444,6 +7718,9 @@ def _create_cross_grid_comparisons(test_case_dir: Path, grid_results: dict) -> N
                 test_case_dir, grids_with_snapshots, field,
             )
             _create_comparison_evolution(
+                test_case_dir, grids_with_snapshots, field,
+            )
+            _create_per_timestep_grid_summary(
                 test_case_dir, grids_with_snapshots, field,
             )
 
@@ -7793,6 +8070,20 @@ def main():
 
     tests = filter_tests(TEST_MATRIX, args)
 
+    # MPI case-split: each rank takes a disjoint slice of the filtered
+    # test list.  Each case writes to its own (case, grid, resolution)
+    # directory so ranks never collide on filesystem.  Cross-grid
+    # comparisons must be deferred to rank 0 after a barrier because no
+    # single rank holds all grids of any given case.
+    mpi_rank, mpi_size, mpi_comm = 0, 1, None
+    if args.mpi_case_split:
+        from mpi4py import MPI as _MPI
+        mpi_comm = _MPI.COMM_WORLD
+        mpi_rank = mpi_comm.Get_rank()
+        mpi_size = mpi_comm.Get_size()
+        tests = tests[mpi_rank::mpi_size]
+        print(f"[rank {mpi_rank}/{mpi_size}] {len(tests)} cases assigned")
+
     if args.list:
         print(f"{'#':>3}  {'Case':<22}  {'Grid':<14}  "
               f"{'Resolution':<10}  {'Days':>8}  {'Quick':>8}")
@@ -7902,18 +8193,34 @@ def main():
         finally:
             _ensure_required_artifacts(out_dir)
         
-        # Check if this test case just completed across all its grids
-        if tc.case not in completed_test_cases:
+        # Check if this test case just completed across all its grids.
+        # Skip the in-loop generation under MPI case-split: no single
+        # rank holds every grid for a case, so the per-case dispatch
+        # would fire prematurely.  Cross-grid comparisons are produced
+        # exclusively on rank 0 after the barrier below.
+        if mpi_comm is None and tc.case not in completed_test_cases:
             # Find how many grids are supposed to run for this test case
             test_case_tests = [t for t in tests if t.case == tc.case]
             test_case_results = [r for r in ALL_RESULTS if r['test'] == tc.case]
-            
+
             # If we have results for all grids of this test case, generate comparisons
             if len(test_case_results) >= len(test_case_tests):
                 _check_and_generate_comparisons(output_base, tc.case, ALL_RESULTS)
                 completed_test_cases.add(tc.case)
 
     total_wall = time.time() - t_start_all
+
+    # MPI: gather per-rank ALL_RESULTS into rank 0 before summary/
+    # comparison generation; non-root ranks exit early.
+    if mpi_comm is not None:
+        mpi_comm.Barrier()
+        per_rank_results = mpi_comm.gather(ALL_RESULTS, root=0)
+        if mpi_rank == 0 and per_rank_results is not None:
+            ALL_RESULTS.clear()
+            for chunk in per_rank_results:
+                ALL_RESULTS.extend(chunk)
+        if mpi_rank != 0:
+            return
 
     # --- Summary ---
     print("\n" + "=" * 78)

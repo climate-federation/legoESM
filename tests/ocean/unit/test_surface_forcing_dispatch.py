@@ -23,7 +23,7 @@ from legoesm.ocean.physics.surface_forcing.integration import (
 
 @pytest.mark.parametrize(
     "scheme",
-    ["none", "prescribed", "restoring", "combined", "bulk_formulas"],
+    ["none", "prescribed", "restoring", "combined", "bulk_formulas", "external"],
 )
 def test_factory_returns_callable_for_every_scheme(scheme):
     config = SurfaceForcingConfig(scheme=scheme)
@@ -54,6 +54,22 @@ def test_bulk_formulas_constant_and_coare3_select_correctly():
         config = SurfaceForcingConfig(scheme="bulk_formulas", bulk_formulas=bf)
         fn = make_surface_forcing_physics(config)
         assert callable(fn)
+
+
+def test_validate_bulk_scheme_rejects_typo():
+    """Shared bulk-flux dispatch guard (used by all 7 surface-flux dispatchers:
+    coupler, surface_layer, slab_land, multilayer_land, two_layer_lake,
+    bulk_formulas, sea_ice).  A typo'd ``bulk_scheme`` previously fell through
+    each ``if scheme in (...): MOST else: <constant>`` gate to the constant
+    branch, silently running the wrong air-sea physics.  The guard now raises.
+    """
+    from legoesm.coupler.bulk_flux import validate_bulk_scheme
+
+    for ok in ("constant", "most", "coare3", "large_yeager"):
+        validate_bulk_scheme(ok)  # must not raise
+    for bad in ("coar3", "neutral", "MOST", "large-yeager", ""):
+        with pytest.raises(ValueError, match="Unknown bulk_scheme"):
+            validate_bulk_scheme(bad)
 
 
 def test_bulk_formula_emissivity_field_present():

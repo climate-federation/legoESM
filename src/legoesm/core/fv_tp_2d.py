@@ -502,7 +502,16 @@ def _ppm_1d(q, n, off_left=None, off_right=None,
         dm_c = dm[:, 1:n + 3, :]
         bl, br = apply_hord8_limiter(bl, br, dm_c)
     elif hord == 9:
-        bl, br = _pert_ppm(bl, br)
+        # FV3 iord=9 → pert_ppm(iv=0) for the SCALAR/mass/vorticity transport
+        # (tp_core.F90:610: `if(iord==9 .or. iord==13) call pert_ppm(...,0)`).
+        # iv=1 (`_pert_ppm`) is FV3's BOUNDARY-only limiter (tp_core.F90:629,
+        # 648) + the MOMENTUM ytp_v/xtp_u path (handled separately in
+        # fv3_sw_core `_ppm_transport_1d`).  This `_ppm_1d` is the scalar
+        # path, so hord=9 must use iv=0 — matching the `_pert_ppm_iv0`
+        # docstring ("the limiter used by hord=9") and the hord=12 default.
+        # (Was `_pert_ppm` (iv=1): a latent mislabel; unexercised because the
+        # live scalar callers use the hord=12 default — codex/oracle iter62.)
+        bl, br = _pert_ppm_iv0(q_c, bl, br)
     elif hord == 10:
         dm_c = dm[:, 1:n + 3, :]
         bl, br = apply_hord10_limiter(bl, br, dm_c, q_c)
@@ -1130,8 +1139,8 @@ def transport_step(h, ut, vt, dt, cdgrid, mass_target=None,
     # the noise as a visible mass drift.  Promotion preserves bit-clean
     # flux closure (cube panel-edge flux is conservative when summed
     # in fp64).  Output cast back to input dtype.
-    from legoesm.core.conservation import _conservation_accumulator
-    _acc = _conservation_accumulator()
+    from legoesm.core.conservation import conservation_accumulator
+    _acc = conservation_accumulator()
     h64 = h.astype(_acc)
     fx64 = fx.astype(_acc)
     fy64 = fy.astype(_acc)
@@ -1149,8 +1158,8 @@ def transport_step(h, ut, vt, dt, cdgrid, mass_target=None,
         # in fp32 over ~6·N² cells and leaks ~N·eps noise into ``scale``,
         # which then multiplies every cell — turning O(1e-7) reduction
         # noise into a directly visible cosine_bell mass drift.
-        from legoesm.core.conservation import _conservation_accumulator
-        _acc = _conservation_accumulator()
+        from legoesm.core.conservation import conservation_accumulator
+        _acc = conservation_accumulator()
         # Step 1: clip negatives to zero
         h_pos = jnp.maximum(h_new, 0.0)
         mass_pos = jnp.sum(h_pos.astype(_acc) * area.astype(_acc))

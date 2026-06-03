@@ -1207,6 +1207,21 @@ def _run_timeloop(
 # Diagnostic saving
 # ===========================================================================
 
+# Canonical cross-grid comparison canvas.  MUST match the cube/icosa weight
+# target in ``legoesm.grids.regridding`` (regridding.py:457): latitude
+# node-centered on [-90, 90]; longitude CELL-centered on [-180, 180)
+# (``linspace(-180,180,n,endpoint=False)+180/n``).  EVERY grid's snapshot regrid,
+# the icosa KD-tree target, AND the saved lon/lat metadata go through these so
+# all grids share one registration with no half-cell drift between the data and
+# its longitude labels (or between grids).
+def _canvas_lat(n_lat: int = 181) -> np.ndarray:
+    return np.linspace(-90.0, 90.0, n_lat)
+
+
+def _canvas_lon(n_lon: int = 360) -> np.ndarray:
+    return np.linspace(-180.0, 180.0, n_lon, endpoint=False) + 180.0 / n_lon
+
+
 def _build_latlon_weights(
     lon_deg: np.ndarray,
     lat_deg: np.ndarray,
@@ -1226,8 +1241,8 @@ def _build_latlon_weights(
         np.cos(lat * d2r) * np.cos(lon * d2r),
         np.cos(lat * d2r) * np.sin(lon * d2r),
         np.sin(lat * d2r)])
-    lat_1d = np.linspace(-90.0, 90.0, n_lat)
-    lon_1d = np.linspace(-180.0, 180.0, n_lon)
+    lat_1d = _canvas_lat(n_lat)
+    lon_1d = _canvas_lon(n_lon)  # cell-centered — share the cube canvas
     lo, la = np.meshgrid(lon_1d, lat_1d)
     tgt = np.column_stack([
         np.cos(la.ravel() * d2r) * np.cos(lo.ravel() * d2r),
@@ -1272,36 +1287,50 @@ def _bin_to_latlon(
     return _apply_weights(vals, idxs, w, n_lat, n_lon)
 
 
-def _interp_gaussian_to_latlon(field: np.ndarray, lat_gauss_deg: np.ndarray,
-                               n_lat_out: int = 181) -> np.ndarray:
-    """Interpolate a Gaussian-grid latitude axis to a regular lat-lon grid.
-
-    Uses linear interpolation along the latitude dimension so that
-    cross-section plots have smooth rendering instead of blocky stripes.
-
-    Parameters
-    ----------
-    field : (n_lat_gauss, ...) — data on Gaussian latitudes
-    lat_gauss_deg : (n_lat_gauss,) — Gaussian latitudes in degrees
-    n_lat_out : int — number of output latitudes (default 181 for 1-deg)
-
-    Returns
-    -------
-    out : (n_lat_out, ...) — interpolated to regular latitudes
-    """
-    from scipy.interpolate import interp1d
-    lat_out = np.linspace(-90.0, 90.0, n_lat_out)
-    lat_g = np.asarray(lat_gauss_deg, dtype=np.float64).ravel()
-    # interp1d along axis 0
-    f = interp1d(lat_g, field, axis=0, kind='linear',
-                 bounds_error=False, fill_value='extrapolate')
-    return f(lat_out)
-
-
 def _get_cs_weights(n: int, n_lat: int = 181, n_lon: int = 360):
     """Get (or compute and cache) face-aware bilinear CS→latlon weights."""
     from legoesm.grids.regridding import get_cubedsphere_to_latlon_weights
     return get_cubedsphere_to_latlon_weights(n, n_lon=n_lon, n_lat=n_lat)
+
+
+def _regrid_latlon_to_181x360(arr: np.ndarray, lon_deg: np.ndarray,
+                              lat_deg: np.ndarray) -> np.ndarray:
+    """Regrid a native lat-lon field to the common (181, 360) [-180,180) canvas.
+
+    The lat-lon grid uses lon in ``[0, 2pi) = [0, 360)`` while cube/icosa regrid
+    to ``[-180, 180)`` at (181, 360).  Previously the lat-lon branch only ROLLED
+    (kept native 72x144) so ``snapshots_latlon.npz`` stored 144-column data under
+    a 360-point lon label — the cross-grid comparison then plotted it on the
+    360-point axis and the field appeared LONGITUDE-TRANSLATED relative to the
+    other grids (the per-grid display imshow with extent=[-180,180] was fine; the
+    npz/comparison was not).  Bilinear-interpolate (periodic in lon) onto the same
+    (181, 360) target the cube/icosa use so all grids share one canvas.  Handles
+    2D ``(nlat, nlon)`` and 3D ``(nlat, nlon, nlev)`` inputs.
+    """
+    from scipy.interpolate import RegularGridInterpolator
+    a = np.asarray(arr, dtype=np.float64)
+    lon_src = np.asarray(lon_deg, dtype=np.float64).ravel() % 360.0
+    lat_src = np.asarray(lat_deg, dtype=np.float64).ravel()
+    if lat_src[0] > lat_src[-1]:
+        lat_src = lat_src[::-1]
+        a = a[::-1]
+    order = np.argsort(lon_src)
+    lon_s = lon_src[order]
+    a = a[:, order]
+    # Periodic wrap so the [-180,180) target interpolates across the seam.
+    lon_per = np.concatenate([lon_s[-1:] - 360.0, lon_s, lon_s[:1] + 360.0])
+    a_per = np.concatenate([a[:, -1:], a, a[:, :1]], axis=1)
+    rgi = RegularGridInterpolator(
+        (lat_src, lon_per), a_per, method="linear",
+        bounds_error=False, fill_value=None,
+    )
+    # Target the shared canonical canvas (cell-centered lon, node-centered lat).
+    # Source is [0,360); wrap the canvas lon into [0,360) for the interpolation.
+    tgt_lat = _canvas_lat()
+    tgt_lon = _canvas_lon() % 360.0
+    la, lo = np.meshgrid(tgt_lat, tgt_lon, indexing="ij")
+    out = rgi(np.stack([la.ravel(), lo.ravel()], axis=-1))
+    return out.reshape((tgt_lat.size, tgt_lon.size) + a.shape[2:])
 
 
 def _regrid_2d(field: np.ndarray, lon_deg: np.ndarray, lat_deg: np.ndarray,
@@ -1309,11 +1338,16 @@ def _regrid_2d(field: np.ndarray, lon_deg: np.ndarray, lat_deg: np.ndarray,
     """Regrid a 2D field to (181, 360) lat-lon."""
     arr = np.asarray(field, dtype=np.float64)
     if coord_kind == "latlon":
-        return arr
+        # fv3_faithful: regrid native lat-lon ([0,360)) to the common (181,360)
+        # [-180,180) canvas so it is not longitude-translated vs cube/icosa.
+        return _regrid_latlon_to_181x360(arr, lon_deg, lat_deg)
     if coord_kind == "gaussian":
-        # Gaussian grid: interpolate lat axis to regular spacing
+        # Gaussian grid: non-uniform lat, uniform lon in [0,360).  Regrid BOTH
+        # axes onto the common (181,360) [-180,180) canvas (linear RGI matches
+        # the old linear lat interp and additionally maps lon 64->360 so the
+        # spectral snapshot is not narrower / longitude-shifted vs the others).
         lat_gauss = np.asarray(lat_deg, dtype=np.float64).ravel()
-        return _interp_gaussian_to_latlon(arr, lat_gauss)
+        return _regrid_latlon_to_181x360(arr, lon_deg, lat_gauss)
     if coord_kind == "icosa":
         # Some MPAS extractors already return regular lat-lon fields for 2D
         # quantities because edge- and cell-based variables need different
@@ -1342,15 +1376,14 @@ def _regrid_3d_level(field_3d: np.ndarray, lon_deg: np.ndarray,
     """Regrid a 3D field (*, nlev) to (n_lat, n_lon, nlev)."""
     arr = np.asarray(field_3d, dtype=np.float64)
     if coord_kind == "latlon":
-        if arr.ndim == 2:
-            arr = arr[..., None]
-        return arr
+        return _regrid_latlon_to_181x360(arr, lon_deg, lat_deg)
     if coord_kind == "gaussian":
         if arr.ndim == 2:
             arr = arr[..., None]
-        # Interpolate the Gaussian latitude axis to regular 1-deg spacing
+        # Regrid Gaussian (non-uniform lat, uniform lon) onto the common
+        # (181,360) [-180,180) canvas in both axes (see _regrid_2d).
         lat_gauss = np.asarray(lat_deg, dtype=np.float64).ravel()
-        return _interp_gaussian_to_latlon(arr, lat_gauss)
+        return _regrid_latlon_to_181x360(arr, lon_deg, lat_gauss)
     if coord_kind == "icosa":
         if arr.ndim == 1:
             arr = arr[:, None]
@@ -1637,12 +1670,11 @@ def _save_snapshot_plots(output_dir: Path, case_name: str, snapshots: dict,
             r, c = divmod(idx, n_cols)
             axes[r, c].set_visible(False)
 
-        if im is not None:
-            fig.colorbar(
-                im, ax=axes.ravel().tolist(), orientation="vertical",
-                fraction=0.02, pad=0.02, label=field_label)
         fig.suptitle(f"{case_name} — {field_key}", fontsize=11)
-        fig.tight_layout(rect=[0, 0, 0.96, 0.95])
+        fig.tight_layout(rect=[0.0, 0.0, 0.90, 0.95])
+        if im is not None:
+            cax = fig.add_axes([0.92, 0.10, 0.015, 0.78])
+            fig.colorbar(im, cax=cax, label=field_label)
         fname = f"snapshots_{field_key}.png"
         fig.savefig(output_dir / fname, dpi=150, bbox_inches="tight")
         plt.close(fig)
@@ -1669,8 +1701,8 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
         valid_steps = [valid_steps[i] for i in idx]
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    lat_axis = np.linspace(-90, 90, 181)
-    lon_axis = np.linspace(-180, 180, 360)
+    lat_axis = _canvas_lat()
+    lon_axis = _canvas_lon()  # cell-centered — match the regridded data canvas
 
     for fname, axis_vals, axis_key, mean_axis, xlabel in [
         ("latitude_vertical_cross_sections.png", lat_axis, "lat", 1, "Latitude"),
@@ -1709,13 +1741,12 @@ def _save_cross_sections(output_dir: Path, case_name: str, snapshots: dict,
             ax.set_xlabel(xlabel)
 
         axes_arr[0].set_ylabel(level_label)
-        if im is not None:
-            fig.colorbar(
-                im, ax=axes_arr, orientation="vertical", fraction=0.028,
-                pad=0.02, label=field_3d_key)
         fig.suptitle(
             f"{case_name} — {field_3d_key} cross-sections", fontsize=11)
-        fig.tight_layout(rect=[0, 0, 0.96, 0.95])
+        fig.tight_layout(rect=[0.0, 0.0, 0.90, 0.95])
+        if im is not None:
+            cax = fig.add_axes([0.92, 0.12, 0.015, 0.74])
+            fig.colorbar(im, cax=cax, label=field_3d_key)
         fig.savefig(output_dir / fname, dpi=150, bbox_inches="tight")
         plt.close(fig)
 
@@ -1748,6 +1779,157 @@ def _save_profiles(output_dir: Path, case_name: str, snapshots: dict,
     fig.savefig(
         output_dir / "vertical_profiles.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+
+def _save_native_snapshot_plots(
+    output_dir: Path,
+    case_name: str,
+    snapshots: dict,
+    dt: float,
+    field_specs: list[tuple[str, str, str]],
+    coord_kind: str,
+    lon_deg: np.ndarray,
+    lat_deg: np.ndarray,
+):
+    """Native-grid snapshot rendering (no regrid).
+
+    Produces ``snapshots_{field}_native.png`` showing the field on its
+    native discretisation, so cubed-sphere face boundaries, icosahedral
+    Voronoi cells, and Gaussian-latitude stretching are visually
+    apparent.  Complements the regridded lat-lon panels written by
+    :func:`_save_snapshot_plots`.
+    """
+    if not snapshots:
+        return
+    output_dir.mkdir(parents=True, exist_ok=True)
+    valid_steps = sorted(snapshots.keys())
+
+    lon_flat = np.asarray(lon_deg, dtype=np.float64).ravel()
+    lat_flat = np.asarray(lat_deg, dtype=np.float64).ravel()
+    # Map [0, 360) -> [-180, 180) for plotting consistency with regridded
+    # canvas.  Cubed-sphere/icos coordinates already arrive in [-180, 180].
+    lon_flat = ((lon_flat + 180.0) % 360.0) - 180.0
+
+    def _native_field(snap: dict, field_key: str) -> np.ndarray:
+        """Resolve the array to plot on the *native* discretisation.
+
+        For cubed-sphere (and any grid that stores cell-centre geographic
+        winds), the snapshot dict keeps ``u``/``v``/``wind_speed`` already
+        **regridded** to the (181, 360) lat-lon canvas for the regridded
+        panels — their flat size (65160) does not match the native point
+        count (e.g. 6·n·n = 7776 at C36), so the native scatter would be
+        left blank.  The un-regridded native cell-centre winds are stored
+        under ``u_cc_east`` / ``v_cc_north``; prefer those here so the
+        native velocity (and any cube-edge imprint) is actually rendered.
+        """
+        if field_key == "wind_speed" and {"u_cc_east", "v_cc_north"} <= snap.keys():
+            ue = np.asarray(snap["u_cc_east"], dtype=np.float64)
+            vn = np.asarray(snap["v_cc_north"], dtype=np.float64)
+            return np.sqrt(ue ** 2 + vn ** 2)
+        alias = {"u": "u_cc_east", "v": "v_cc_north"}.get(field_key)
+        if alias is not None and alias in snap:
+            return np.asarray(snap[alias], dtype=np.float64)
+        return np.asarray(snap[field_key], dtype=np.float64)
+
+    for field_key, field_label, cmap in field_specs:
+        steps = [s for s in valid_steps if field_key in snapshots[s]]
+        if not steps:
+            continue
+        if len(steps) > 8:
+            idx = np.linspace(0, len(steps) - 1, 8).astype(int)
+            steps = [steps[i] for i in idx]
+
+        # Shared color limits across all snapshot panels (NOT regridded —
+        # use raw native values).
+        all_vals = np.concatenate([
+            _native_field(snapshots[s], field_key).ravel()
+            for s in steps
+        ])
+        all_vals = all_vals[np.isfinite(all_vals)]
+        if all_vals.size:
+            vmin, vmax = float(all_vals.min()), float(all_vals.max())
+            if cmap in ("RdBu_r", "RdBu", "seismic", "bwr", "coolwarm"):
+                m = max(abs(vmin), abs(vmax))
+                vmin, vmax = -m, m
+        else:
+            vmin, vmax = 0.0, 1.0
+
+        n_cols = min(4, len(steps))
+        n_rows = (len(steps) + n_cols - 1) // n_cols
+        fig, axes = plt.subplots(
+            n_rows, n_cols, figsize=(4.5 * n_cols, 3.5 * n_rows))
+        axes = np.atleast_2d(axes)
+        im = None
+
+        for idx, step in enumerate(steps):
+            r, c = divmod(idx, n_cols)
+            ax = axes[r, c]
+            raw = _native_field(snapshots[step], field_key)
+            vals = raw.ravel()
+            if coord_kind == "latlon":
+                im = ax.imshow(
+                    raw, origin="lower", aspect="auto", cmap=cmap,
+                    extent=[float(lon_flat.min()), float(lon_flat.max()),
+                            float(lat_flat.min()), float(lat_flat.max())],
+                    vmin=vmin, vmax=vmax)
+            elif coord_kind == "gaussian":
+                # Gaussian latitudes are non-uniform; use pcolormesh with
+                # explicit lat axis so the latitudinal stretching is
+                # visible.  lon_deg is uniform.
+                lon_1d = np.asarray(lon_deg, dtype=np.float64).ravel()
+                lat_1d = np.asarray(lat_deg, dtype=np.float64).ravel()
+                lon_1d_p = ((lon_1d + 180.0) % 360.0) - 180.0
+                # Need raw shape to match (n_lat, n_lon).
+                if raw.shape == (lat_1d.size, lon_1d.size):
+                    order = np.argsort(lon_1d_p)
+                    raw_o = raw[:, order]
+                    lon_o = lon_1d_p[order]
+                    im = ax.pcolormesh(
+                        lon_o, lat_1d, raw_o, cmap=cmap,
+                        vmin=vmin, vmax=vmax, shading="nearest")
+                else:
+                    im = ax.scatter(
+                        lon_flat, lat_flat, c=vals[:lon_flat.size], s=4,
+                        cmap=cmap, vmin=vmin, vmax=vmax, marker="s",
+                        edgecolors="none")
+            else:
+                # cube / icosa: scatter at native cell centers.  Marker
+                # size is set so cells just touch at the target figure
+                # resolution.  This makes the face boundaries (cube)
+                # and Voronoi tessellation (icos) visually obvious.
+                if vals.size != lon_flat.size:
+                    # 3-D field accidentally passed — flatten along the
+                    # surface axis.  Skip if shape cannot be matched.
+                    if vals.size % lon_flat.size == 0:
+                        vals = raw.reshape(lon_flat.size, -1)[:, -1]
+                    else:
+                        continue
+                im = ax.scatter(
+                    lon_flat, lat_flat, c=vals, s=8, cmap=cmap,
+                    vmin=vmin, vmax=vmax, marker="s", edgecolors="none")
+                ax.set_xlim(-180, 180)
+                ax.set_ylim(-90, 90)
+            day = step * dt / 86400.0
+            ax.set_title(f"t={day:.2f} d", fontsize=9)
+            if c == 0:
+                ax.set_ylabel("Latitude")
+            if r == n_rows - 1:
+                ax.set_xlabel("Longitude")
+
+        for idx in range(len(steps), n_rows * n_cols):
+            r, c = divmod(idx, n_cols)
+            axes[r, c].set_visible(False)
+
+        fig.suptitle(
+            f"{case_name} — {field_key} (native {coord_kind})", fontsize=11)
+        fig.tight_layout(rect=[0.0, 0.0, 0.90, 0.95])
+        if im is not None:
+            cax = fig.add_axes([0.92, 0.10, 0.015, 0.78])
+            fig.colorbar(im, cax=cax, label=field_label)
+        fig.savefig(
+            output_dir / f"snapshots_{field_key}_native.png",
+            dpi=150, bbox_inches="tight")
+        plt.close(fig)
 
 
 def _save_snapshot_times(output_dir: Path, snapshots: dict, dt: float):
@@ -1801,8 +1983,8 @@ def _save_snapshot_data(
     # Build time-series arrays for native grid
     native_arrays = dict(common_metadata)
     latlon_arrays = dict(common_metadata)
-    latlon_arrays["lat"] = np.linspace(-90.0, 90.0, 181)
-    latlon_arrays["lon"] = np.linspace(-180.0, 180.0, 360)
+    latlon_arrays["lat"] = _canvas_lat()
+    latlon_arrays["lon"] = _canvas_lon()  # cell-centered — match the regrid data
 
     for field_key in all_field_keys:
         # Collect this field across all timesteps
@@ -1868,6 +2050,14 @@ def _save_case_diagnostics(
         _save_conservation(output_dir, case_name, diag, mass_key, energy_key)
 
     _save_snapshot_plots(
+        output_dir, case_name, snapshots, dt, field_specs_2d,
+        coord_kind, lon_deg, lat_deg)
+    # Native-grid rendering (cube faces, icosa cells, Gaussian lats).
+    # For ``latlon`` the native and regridded views are identical, but we
+    # still emit the ``_native`` variant so every case carries the full
+    # complement of files and the cross-grid PNG suffix convention is
+    # uniform.
+    _save_native_snapshot_plots(
         output_dir, case_name, snapshots, dt, field_specs_2d,
         coord_kind, lon_deg, lat_deg)
     _save_snapshot_times(output_dir, snapshots, dt)
@@ -2086,8 +2276,19 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             # 87% of the 1.0->2.5x improvement is captured by 1.0->2.0.
             # 2.0x retained per the iter-54/iter-55 precedent
             # (calibrated values kept unless gain exceeds noise).
+            # Damping-sensitivity knobs (default = the calibrated
+            # iter-44/iter-1030 values, so unset == unchanged).  Used to
+            # probe whether the stacked div-damp + biharmonic hyperdiff
+            # over-damps W5 wave propagation on the cube relative to
+            # latlon / MPAS.  Mirrors the LEGOESM_* env knobs used in the
+            # primitive-eq path below.
+            _sw_dd_fac = float(
+                os.environ.get("LEGOESM_SW_DIV_DAMP_FACTOR", "8.0"))
+            _sw_hd_fac = float(
+                os.environ.get("LEGOESM_SW_HYPERDIFF_FACTOR", "2.0"))
             config = iter1009_dual_target_config(
-                n, hyperdiff_coeff=2.0 * _hyperdiff_cube(n),
+                n, div_damp_factor=_sw_dd_fac,
+                hyperdiff_coeff=_sw_hd_fac * _hyperdiff_cube(n),
             )
         else:
             config = iter1009_dual_target_config(n)
@@ -2335,9 +2536,9 @@ def run_shallow_water(tc: TestCase, output_dir: Path, days: float, *,
             }
 
         key_array_fn = lambda s: s.h.data
-        coord_kind = "latlon"  # already regridded
-        lon_deg = np.linspace(-180, 180, 360, endpoint=False)
-        lat_deg = np.linspace(-90, 90, 181)
+        coord_kind = "latlon"  # already on the canonical (181,360) canvas
+        lon_deg = _canvas_lon()  # cell-centered -> re-regrid is identity
+        lat_deg = _canvas_lat()
 
     elif tc.grid_type == "spectral":
         from legoesm.grids.gaussian import (
@@ -2744,10 +2945,8 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
         _u_frozen = _u_face
         _v_frozen = _v_face
         _mass_init = _area_weighted_sum(state.h, grid.area)
-        from legoesm.core.conservation import (
-            _conservation_accumulator as _acc_iter61,
-        )
-        _acc_dt = _acc_iter61()
+        from legoesm.core.conservation import conservation_accumulator
+        _acc_dt = conservation_accumulator()
         _area64_iter61 = grid.area.astype(_acc_dt)
         _mass_target_iter61 = jnp.sum(
             state.h.astype(_acc_dt) * _area64_iter61)
@@ -2899,9 +3098,9 @@ def run_cosine_bell(tc: TestCase, output_dir: Path, days: float, *,
                 lon_cell, lat_cell)}
 
         key_array_fn = lambda s: s.h.data
-        coord_kind = "latlon"  # already regridded
-        lon_deg = np.linspace(-180, 180, 360, endpoint=False)
-        lat_deg = np.linspace(-90, 90, 181)
+        coord_kind = "latlon"  # already on the canonical (181,360) canvas
+        lon_deg = _canvas_lon()  # cell-centered -> re-regrid is identity
+        lat_deg = _canvas_lat()
 
         def error_fn(s, t):
             h_exact = cosine_bell_exact(mesh.lonCell, mesh.latCell,
@@ -3647,9 +3846,27 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
         ah = ah * _ah_scale
         # FV3_3D iter 66 / 67: opt-in CFL-aware dt (factored helper).
         dt = _resolve_dt_cube(n, label="baroclinic")
+        # FV3-faithful B-grid corner-divergence damping (port of
+        # sw_core.F90 divergence_corner + d_sw5), exposed for PROBING the
+        # large cube baroclinic v-imprint (v_rms ~3.4 m/s at t=0.2 d vs
+        # latlon ~0.02 m/s, ~150x; grows from a clean v=0 IC, so it is a
+        # prognostic grid-seeded mode, not a diagnostic rotation error).
+        # DEFAULT INERT (all 0 => gate ``corner_div_damp_d2_bg>0`` off =>
+        # bit-identical to the pre-iter-4 config).  PROBE RESULT (iter-4):
+        # the corner damping DESTABILISES this case — d2_bg=0.001 and
+        # 0.003 both BLOW UP at step 100 (day 0.23, NaN at the corner
+        # divergence) — so it is NOT a usable fix here (unlike held_suarez,
+        # where d2_bg=0.001 helps).  Knobs retained for future probing of
+        # smaller coefficients / a metric-level fix.
+        _bcl_cdd_nord = int(os.environ.get("LEGOESM_CDD_NORD", "0"))
+        _bcl_cdd_d4_bg = float(os.environ.get("LEGOESM_CDD_D4BG", "0.0"))
+        _bcl_cdd_d2_bg = float(os.environ.get("LEGOESM_CDD_D2BG", "0.0"))
         config = PrimitiveEquationConfig(
             hyperdiff_coeff=hd, hyperdiff_ps_coeff=hd,
             div_damp_coeff=dd, A_h=ah,
+            corner_div_damp_nord=_bcl_cdd_nord,
+            corner_div_damp_d4_bg=_bcl_cdd_d4_bg,
+            corner_div_damp_d2_bg=_bcl_cdd_d2_bg,
             use_conservation_fixer=True, fix_mass=True,
             anchor_mass_to_initial=True,
             # new_test_dycores iter-18: enable PE iter-338 metric-
@@ -3693,15 +3910,22 @@ def run_baroclinic(tc: TestCase, output_dir: Path, days: float, *,
                 grid, sigma_for_init,
                 perturbed=_rot_perturbed, alpha=_rot_alpha)
         elif _rest:
-            # new_test_dycores iter-73 audit finding: cube rest_state_topo
-            # shows ~1.3 m/s residual motion at quick-mode 1-day vs ico/latlon
-            # 0.1 m/s (13x worse).  Analytic exact solution is zero motion.
-            # Likely cube panel-edge metric errors interacting with non-trivial
-            # phis at face boundaries.  PASS by current matrix tolerance; not
-            # a regression — recorded as queued investigation.  iter-88 noted
-            # this measurement is at quick mode (1 day); full 7-day behaviour
-            # may differ.  Investigation requires probing the per-step PGF
-            # field on cube near panel corners with non-zero topography.
+            # cube rest_state_topo shows ~1.3 m/s residual motion at quick-mode
+            # 1-day vs ico/latlon 0.1 m/s (13x worse); analytic exact = zero
+            # motion.  ROOT (iter100 t=0 PGF probe): this is FLOAT32 PRECISION, NOT
+            # a cube metric/discretization/faithfulness bug.  The cube hydrostatic
+            # PGF is EXACTLY well-balanced in float64 (compute_geopotential uses
+            # only sigma-derived ln_ratio/alpha, so Phi = phis + per-level-const
+            # for uniform T => -grad Phi cancels -R_d T grad ln_ps to machine
+            # zero; forcing float64 gives (Phi_k - phis) std = 0.0 exactly).  The
+            # PE runs FLOAT32 by design (create_sigma_coordinate defaults float32),
+            # and the large Phi~2.5e5 vs phis~1.8e4 add loses ~7 digits in float32
+            # -> a spurious ~1e-7 m/s2 PGF (7x worse at the panel edges where the
+            # A-L gradient/∇phis is larger) that grows nonlinearly to ~1.3 m/s.
+            # PASS by tolerance; not a faithfulness regression.  FIX (optional,
+            # float32 only): reference-subtraction well-balanced PGF -- gradient
+            # (KE + Phi - phis) and phis SEPARATELY so the large Phi never enters
+            # the float32 cancellation (mathematically identical in float64).
             from tests.test_cases.dcmip2012.rest_state_topography import (
                 rest_state_topography_init)
             state = rest_state_topography_init(grid, sigma, h_0=_rest_h0)
@@ -5940,11 +6164,11 @@ def _create_atmosphere_comparison_snapshots(
             if md_lat.size == n_lat:
                 lat = md_lat
             else:
-                lat = np.linspace(-90.0, 90.0, n_lat)
+                lat = _canvas_lat(n_lat)
             if md_lon.size == n_lon:
                 lon = md_lon
             else:
-                lon = np.linspace(-180.0, 180.0, n_lon)
+                lon = _canvas_lon(n_lon)
             if have_cartopy:
                 im = ax.pcolormesh(
                     lon, lat, f2, cmap=cmap, vmin=vmin, vmax=vmax,
@@ -5983,6 +6207,150 @@ def _create_atmosphere_comparison_snapshots(
         plt.savefig(out_file, dpi=140, bbox_inches="tight")
         plt.close(fig)
         print(f"    Saved: {out_file.name}")
+
+
+def _create_atmosphere_per_timestep_summary(
+    test_case_dir: Path,
+    grid_results: dict,
+    fields: list[dict],
+    *,
+    label: str | None = None,
+    max_times: int = 6,
+) -> None:
+    """Per-timestep summary: for each 2-D field, one PNG per snapshot
+    time with subpanels = grids, shared colorbar across the row.
+
+    Produces ``summary_grids_<field>_t<day>d.png``.  Cross-grid
+    comparable by construction.  Skip times for which fewer than 2
+    grids have data.
+    """
+    try:
+        import cartopy.crs as ccrs  # type: ignore
+        have_cartopy = True
+    except Exception:
+        have_cartopy = False
+
+    case_name = label if label is not None else test_case_dir.name
+
+    times_per_grid: dict[str, np.ndarray] = {}
+    for g, data in grid_results.items():
+        snaps = data["snapshots"]
+        if "times_days" in snaps.files:
+            times_per_grid[g] = np.asarray(snaps["times_days"]).ravel()
+    if not times_per_grid:
+        return
+    ref_times = max(times_per_grid.values(), key=lambda a: a.size)
+    if ref_times.size > max_times:
+        idx_sel = np.linspace(0, ref_times.size - 1, max_times).astype(int)
+    else:
+        idx_sel = np.arange(ref_times.size)
+
+    slot_order = [g for g in GRID_TYPES if g in grid_results]
+    slot_order += [g for g in grid_results if g not in slot_order]
+
+    for spec in fields:
+        field = spec["field"]
+        vmin = spec["vmin"]
+        vmax = spec["vmax"]
+        cmap = spec["cmap"]
+        units = spec.get("units", "")
+
+        per_grid_3d: dict[str, np.ndarray] = {}
+        per_grid_times: dict[str, np.ndarray] = {}
+        for g, data in grid_results.items():
+            snaps = data["snapshots"]
+            if field not in snaps.files:
+                continue
+            arr = np.asarray(snaps[field])
+            if arr.ndim == 4:
+                arr = arr[..., -1]
+            if arr.ndim != 3:
+                continue
+            per_grid_3d[g] = arr
+            per_grid_times[g] = times_per_grid.get(
+                g, np.arange(arr.shape[0], dtype=np.float64))
+        if not per_grid_3d:
+            continue
+
+        all_finite = np.concatenate(
+            [a.ravel()[np.isfinite(a.ravel())] for a in per_grid_3d.values()]
+            or [np.asarray([0.0])])
+        if all_finite.size:
+            auto_lo = float(all_finite.min())
+            auto_hi = float(all_finite.max())
+        else:
+            auto_lo, auto_hi = 0.0, 1.0
+        shared_vmin = vmin if vmin is not None else auto_lo
+        shared_vmax = vmax if vmax is not None else auto_hi
+        if cmap in ("RdBu_r", "RdBu", "seismic", "bwr", "coolwarm"):
+            m = max(abs(shared_vmin), abs(shared_vmax))
+            shared_vmin, shared_vmax = -m, m
+
+        for ti in idx_sel:
+            day_ref = float(ref_times[ti])
+
+            ncols = len(slot_order)
+            if have_cartopy:
+                proj = ccrs.PlateCarree()
+                fig, axes = plt.subplots(
+                    1, ncols, figsize=(3.6 * ncols, 3.4),
+                    subplot_kw={"projection": proj}, squeeze=False)
+            else:
+                fig, axes = plt.subplots(
+                    1, ncols, figsize=(3.6 * ncols, 3.4), squeeze=False)
+
+            im = None
+            for slot, ax in enumerate(axes[0]):
+                g = slot_order[slot]
+                if g not in per_grid_3d:
+                    ax.set_visible(False)
+                    continue
+                arr_3d = per_grid_3d[g]
+                g_times = per_grid_times[g]
+                gi = int(np.argmin(np.abs(g_times - day_ref))) if g_times.size else 0
+                gi = min(gi, arr_3d.shape[0] - 1)
+                f2 = arr_3d[gi]
+                snaps = grid_results[g]["snapshots"]
+                n_lat, n_lon = f2.shape
+                md_lat = np.asarray(snaps["lat"]) if "lat" in snaps.files else None
+                md_lon = np.asarray(snaps["lon"]) if "lon" in snaps.files else None
+                lat = md_lat if md_lat is not None and md_lat.size == n_lat \
+                    else _canvas_lat(n_lat)
+                lon = md_lon if md_lon is not None and md_lon.size == n_lon \
+                    else _canvas_lon(n_lon)
+                if have_cartopy:
+                    im = ax.pcolormesh(
+                        lon, lat, f2, cmap=cmap,
+                        vmin=shared_vmin, vmax=shared_vmax,
+                        transform=ccrs.PlateCarree(), shading="auto")
+                    ax.set_global()
+                    ax.coastlines(linewidth=0.4, color="black", alpha=0.6)
+                else:
+                    im = ax.imshow(
+                        f2, origin="lower", aspect="auto",
+                        extent=[float(lon.min()), float(lon.max()),
+                                float(lat.min()), float(lat.max())],
+                        cmap=cmap, vmin=shared_vmin, vmax=shared_vmax)
+                    ax.set_xlabel("Longitude")
+                    if slot == 0:
+                        ax.set_ylabel("Latitude")
+                ax.set_title(
+                    f"{g} ({grid_results[g]['resolution']})", fontsize=9)
+
+            fig.suptitle(
+                f"{case_name} — {field}  t={day_ref:.2f} d",
+                fontsize=12, fontweight="bold")
+            if im is not None:
+                cax = fig.add_axes([0.93, 0.15, 0.012, 0.70])
+                cb = fig.colorbar(im, cax=cax)
+                cb.set_label(f"{field}" + (f" ({units})" if units else ""))
+            fig.subplots_adjust(
+                left=0.03, right=0.91, top=0.86, bottom=0.10, wspace=0.10)
+
+            out_file = test_case_dir / (
+                f"summary_grids_{field}_t{day_ref:05.2f}d.png")
+            plt.savefig(out_file, dpi=130, bbox_inches="tight")
+            plt.close(fig)
 
 
 # Iter-10: fraction of trailing snapshots to average for zonal-mean
@@ -6663,6 +7031,9 @@ def _create_cross_grid_comparisons_atmosphere(
     _create_atmosphere_comparison_snapshots(
         out_dir, grid_results, fields, label=label,
     )
+    _create_atmosphere_per_timestep_summary(
+        out_dir, grid_results, fields, label=label,
+    )
     _create_atmosphere_comparison_timeseries(
         out_dir, grid_results, label=label,
     )
@@ -6890,6 +7261,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--cross-grid-plots-only", action="store_true",
         help="Skip running tests; only generate cross-grid comparison plots "
              "from an existing output tree.")
+    p.add_argument(
+        "--mpi-case-split", action="store_true",
+        help="Distribute filtered test cases across MPI ranks (each rank "
+             "runs tests[rank::size]).  Requires mpi4py + mpirun.  "
+             "Only rank 0 generates cross-grid comparison plots after "
+             "an MPI barrier.")
     return p
 
 
@@ -6987,6 +7364,19 @@ def main():
     _RES_DIR_WARNED.clear()
 
     tests = filter_tests(TEST_MATRIX, args)
+
+    # MPI case-split: each rank takes a disjoint slice of the filtered
+    # test list.  Cases write to distinct directories so no I/O
+    # collision.  Cross-grid comparisons run on rank 0 only, after a
+    # barrier.
+    mpi_rank, mpi_size, mpi_comm = 0, 1, None
+    if args.mpi_case_split:
+        from mpi4py import MPI as _MPI
+        mpi_comm = _MPI.COMM_WORLD
+        mpi_rank = mpi_comm.Get_rank()
+        mpi_size = mpi_comm.Get_size()
+        tests = tests[mpi_rank::mpi_size]
+        print(f"[rank {mpi_rank}/{mpi_size}] {len(tests)} cases assigned")
 
     if args.list_category_scripts:
         print("Canonical category runner scripts:")
@@ -7199,6 +7589,22 @@ def main():
           f"ERROR: {n_error} | Wall: {total_wall:.1f}s "
           f"({total_wall / 60:.1f} min)")
     print("=" * 78)
+
+    # MPI: each rank writes its own per-rank summary; rank 0 merges
+    # results across ranks for the global summary.
+    if mpi_comm is not None:
+        mpi_comm.Barrier()
+        per_rank_results = mpi_comm.gather(ALL_RESULTS, root=0)
+        if mpi_rank == 0 and per_rank_results is not None:
+            ALL_RESULTS.clear()
+            for chunk in per_rank_results:
+                ALL_RESULTS.extend(chunk)
+            n_pass = sum(1 for r in ALL_RESULTS if r["status"] == "PASS")
+            n_fail = sum(1 for r in ALL_RESULTS if r["status"] == "FAIL")
+            n_skip = sum(1 for r in ALL_RESULTS if r["status"] == "SKIP")
+            n_error = sum(1 for r in ALL_RESULTS if r["status"] == "ERROR")
+        if mpi_rank != 0:
+            return  # non-root ranks exit before summary/comparison
 
     # Save summary
     output_base.mkdir(parents=True, exist_ok=True)

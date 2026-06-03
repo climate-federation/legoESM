@@ -1,0 +1,338 @@
+{
+  "stage": 1,
+  "baseline": {
+    "aimip_convection": "tiedtke",
+    "aimip_turbulence": "louis",
+    "aimip_gwd": "mcfarlane",
+    "aimip_microphysics": "sundqvist"
+  },
+  "baseline_yaml": "config/aimip/sweep/stage1/baseline_classical_t21_rrtmgp.yaml",
+  "results_dir": "results/aimip_classical_sweep_stage1",
+  "n_combos": 27,
+  "combos": [
+    {
+      "name": "combo_baseline",
+      "dim": "baseline",
+      "scheme": "tiedtke+louis+mcfarlane+sundqvist",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_baseline/suite.yaml"
+    },
+    {
+      "name": "combo_conv_sbm",
+      "dim": "aimip_convection",
+      "scheme": "sbm",
+      "overrides": {
+        "aimip_convection": "sbm",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_conv_sbm/suite.yaml"
+    },
+    {
+      "name": "combo_conv_dca",
+      "dim": "aimip_convection",
+      "scheme": "dca",
+      "overrides": {
+        "aimip_convection": "dca",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_conv_dca/suite.yaml"
+    },
+    {
+      "name": "combo_conv_kuo",
+      "dim": "aimip_convection",
+      "scheme": "kuo",
+      "overrides": {
+        "aimip_convection": "kuo",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_conv_kuo/suite.yaml"
+    },
+    {
+      "name": "combo_conv_mass_flux",
+      "dim": "aimip_convection",
+      "scheme": "mass_flux",
+      "overrides": {
+        "aimip_convection": "mass_flux",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_conv_mass_flux/suite.yaml"
+    },
+    {
+      "name": "combo_conv_edmf",
+      "dim": "aimip_convection",
+      "scheme": "edmf",
+      "overrides": {
+        "aimip_convection": "edmf",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_conv_edmf/suite.yaml"
+    },
+    {
+      "name": "combo_conv_zhang_mcfarlane",
+      "dim": "aimip_convection",
+      "scheme": "zhang_mcfarlane",
+      "overrides": {
+        "aimip_convection": "zhang_mcfarlane",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_conv_zhang_mcfarlane/suite.yaml"
+    },
+    {
+      "name": "combo_conv_kain_fritsch",
+      "dim": "aimip_convection",
+      "scheme": "kain_fritsch",
+      "overrides": {
+        "aimip_convection": "kain_fritsch",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_conv_kain_fritsch/suite.yaml"
+    },
+    {
+      "name": "combo_conv_emanuel",
+      "dim": "aimip_convection",
+      "scheme": "emanuel",
+      "overrides": {
+        "aimip_convection": "emanuel",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_conv_emanuel/suite.yaml"
+    },
+    {
+      "name": "combo_conv_bechtold",
+      "dim": "aimip_convection",
+      "scheme": "bechtold",
+      "overrides": {
+        "aimip_convection": "bechtold",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_conv_bechtold/suite.yaml"
+    },
+    {
+      "name": "combo_turb_tke",
+      "dim": "aimip_turbulence",
+      "scheme": "tke",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "tke",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_turb_tke/suite.yaml"
+    },
+    {
+      "name": "combo_turb_smagorinsky",
+      "dim": "aimip_turbulence",
+      "scheme": "smagorinsky",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "smagorinsky",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_turb_smagorinsky/suite.yaml"
+    },
+    {
+      "name": "combo_turb_clubb_lite",
+      "dim": "aimip_turbulence",
+      "scheme": "clubb_lite",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "clubb_lite",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_turb_clubb_lite/suite.yaml"
+    },
+    {
+      "name": "combo_turb_holtslag_boville",
+      "dim": "aimip_turbulence",
+      "scheme": "holtslag_boville",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "holtslag_boville",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_turb_holtslag_boville/suite.yaml"
+    },
+    {
+      "name": "combo_turb_ysu",
+      "dim": "aimip_turbulence",
+      "scheme": "ysu",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "ysu",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_turb_ysu/suite.yaml"
+    },
+    {
+      "name": "combo_turb_edmf",
+      "dim": "aimip_turbulence",
+      "scheme": "edmf",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "edmf",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_turb_edmf/suite.yaml"
+    },
+    {
+      "name": "combo_turb_none",
+      "dim": "aimip_turbulence",
+      "scheme": "none",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "none",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_turb_none/suite.yaml"
+    },
+    {
+      "name": "combo_gwd_lindzen",
+      "dim": "aimip_gwd",
+      "scheme": "lindzen",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "lindzen",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_gwd_lindzen/suite.yaml"
+    },
+    {
+      "name": "combo_gwd_rayleigh",
+      "dim": "aimip_gwd",
+      "scheme": "rayleigh",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "rayleigh",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_gwd_rayleigh/suite.yaml"
+    },
+    {
+      "name": "combo_gwd_hines",
+      "dim": "aimip_gwd",
+      "scheme": "hines",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "hines",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_gwd_hines/suite.yaml"
+    },
+    {
+      "name": "combo_gwd_prognostic_spectral",
+      "dim": "aimip_gwd",
+      "scheme": "prognostic_spectral",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "prognostic_spectral",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_gwd_prognostic_spectral/suite.yaml"
+    },
+    {
+      "name": "combo_gwd_none",
+      "dim": "aimip_gwd",
+      "scheme": "none",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "none",
+        "aimip_microphysics": "sundqvist"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_gwd_none/suite.yaml"
+    },
+    {
+      "name": "combo_micro_kessler",
+      "dim": "aimip_microphysics",
+      "scheme": "kessler",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "kessler"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_micro_kessler/suite.yaml"
+    },
+    {
+      "name": "combo_micro_seifert_beheng",
+      "dim": "aimip_microphysics",
+      "scheme": "seifert_beheng",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "seifert_beheng"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_micro_seifert_beheng/suite.yaml"
+    },
+    {
+      "name": "combo_micro_morrison",
+      "dim": "aimip_microphysics",
+      "scheme": "morrison",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "morrison"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_micro_morrison/suite.yaml"
+    },
+    {
+      "name": "combo_micro_thompson",
+      "dim": "aimip_microphysics",
+      "scheme": "thompson",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "thompson"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_micro_thompson/suite.yaml"
+    },
+    {
+      "name": "combo_micro_none",
+      "dim": "aimip_microphysics",
+      "scheme": "none",
+      "overrides": {
+        "aimip_convection": "tiedtke",
+        "aimip_turbulence": "louis",
+        "aimip_gwd": "mcfarlane",
+        "aimip_microphysics": "none"
+      },
+      "suite": "config/aimip/sweep/stage1/combo_micro_none/suite.yaml"
+    }
+  ]
+}

@@ -223,6 +223,35 @@ def virtual_temperature(T, q_v):
     return T * (1.0 + coeff * q_v)
 
 
+def mixing_length(z, l_mix_max, z_floor=1.0):
+    """Asymptotic master mixing length ``l = κz / (1 + κz/l_∞)`` (Blackadar 1962).
+
+    The neutral surface-layer limit ``l → κz`` near the ground blends
+    smoothly into the free-atmosphere asymptote ``l → l_mix_max`` aloft.
+    Shared by the Louis, TKE, CLUBB-lite, Holtslag–Boville, EDMF and
+    Smagorinsky–Lilly closures (audit: turbulence ``l_mix`` dedup — five
+    schemes inlined this identical expression).
+
+    Parameters
+    ----------
+    z : array
+        Height above the surface [m] (half-level interface or full level).
+    l_mix_max : float
+        Free-atmosphere asymptotic mixing length ``l_∞`` [m].
+    z_floor : float
+        Lower clip on ``|z|`` [m] so ``l`` stays finite and its gradient
+        well-defined at the surface (default 1.0 m).
+
+    Returns
+    -------
+    array
+        Mixing length [m], same shape as ``z``.
+    """
+    kappa = constants.kappa_vk
+    z_abs = jnp.clip(jnp.abs(z), z_floor, None)
+    return kappa * z_abs / (1.0 + kappa * z_abs / l_mix_max)
+
+
 # ---------------------------------------------------------------------------
 # Hydrostatic column extraction helpers (shared across physics integration bridges)
 # ---------------------------------------------------------------------------

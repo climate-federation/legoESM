@@ -4,6 +4,24 @@ Non-orographic GWD scheme based on Doppler shifting and spectral
 saturation of gravity waves. Uses bottom-up propagation with smooth
 sigmoid activation for full differentiability.
 
+.. note::
+
+   **Disclosed simplification / limitation (F-GWD-2, defer).** This is a
+   *single bulk-amplitude* approximation of the Hines spectrum: one rms
+   wave amplitude ``sigma`` is propagated and saturated per column rather
+   than the full azimuthal + vertical-wavenumber spectrum.  Consequently
+   the whole packet saturates at once and the per-level deposition
+   ``(sigma_grown^2 - sigma_sat^2)·rho`` is large; the ``Fmax`` clip then
+   *binds* over a substantial fraction of a realistic column (≈22-40 % of
+   levels on 30-60 level grids at the default ``total_rms_wind``), so the
+   cap — not the Doppler-spread physics — shapes the drag profile there.
+   The drag remains a physically-signed momentum sink and is fully
+   differentiable; only its *vertical distribution* is cap-dominated.  A
+   faithful upgrade (spectral/azimuthal Hines) plus a QBO / momentum-flux
+   benchmark is required before retuning ``Fmax`` / ``total_rms_wind`` —
+   retuning without a benchmark would be guessing.  Default GWD scheme is
+   ``none``; this scheme is opt-in.
+
 References
 ----------
 - Hines, C. O. (1997). Doppler-spread parameterization of gravity-wave

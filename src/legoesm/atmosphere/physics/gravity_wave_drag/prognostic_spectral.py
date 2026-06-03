@@ -171,6 +171,17 @@ def prognostic_spectral_gwd(
     # finding P0: missing this factor under-counted GWD acceleration
     # by a factor of ~9.8 in the prognostic-spectral path.
     # Weight by azimuthal direction for du/dv.
+    # FIXME(F-GWD-1, CRITICAL — opt-in scheme): this deposition is missing the
+    # ``sign(c - U_proj)`` factor, so a symmetric launch spectrum gives a force
+    # independent of the wind (not a drag).  Restoring ``sign(intrinsic)`` makes
+    # it wind-dependent but, with ``c_phase = N/k`` often ≫ U, the
+    # ``tau_sat ~ |intrinsic|^3`` saturation then preferentially breaks the
+    # along-wind waves and ACCELERATES jets (column dissipation eps_gwd < 0).
+    # The sign factor is necessary but not sufficient — the breaking/saturation
+    # energetics need a proper spectral-GWD review + a momentum-deposition /
+    # QBO validation benchmark before this can be trusted operationally. Left
+    # unchanged (default GWD scheme is "none") pending that work; see
+    # parameterization_checks.md F-GWD-1.
     _trig_stack = jnp.stack([cos_az, sin_az], axis=-1)[None, :, None, None, :]
     _duv_spec = -drag_4d[..., None] * _trig_stack
     _duv = jnp.sum(_duv_spec, axis=(1, 2)) * constants.g  # (ncol, nlev, 2)

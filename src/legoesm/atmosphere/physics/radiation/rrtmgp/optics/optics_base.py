@@ -19,16 +19,11 @@ from collections.abc import Mapping
 from typing import TypeAlias
 
 import jax
-import jax.numpy as jnp
+from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.radiation.rrtmgp import interpolation
 from legoesm.atmosphere.physics.radiation.rrtmgp import kernel_ops
 
 Array: TypeAlias = jax.Array
-
-
-def _shift_up(f: Array) -> Array:
-  """output_i = f_{i-1}."""
-  return kernel_ops.shift_from_minus(f, 2)
 
 
 def _shift_down(f: Array) -> Array:
@@ -224,13 +219,26 @@ class OpticsScheme(abc.ABC):
     # Combine single-scattering albedos.
     ssa_unnormalized = tau1 * ssa1 + tau2 * ssa2
 
-    # Combine asymmetry factors.
-    g = (tau1 * ssa1 * g1 + tau2 * ssa2 * g2) / jnp.maximum(
-        ssa_unnormalized, self._EPSILON
+    # Combine asymmetry factors.  Use ``safe_divide`` instead of
+    # ``num / jnp.maximum(denom, eps)``: the latter is forward-safe but
+    # has a ``-num / denom**2`` reverse-mode VJP that overflows when
+    # ``denom`` is at the floor (``eps**2 = 1e-12`` underflows to 0
+    # under fp64).  Same pattern as the iter-14 restoration of commit
+    # 59407953; codex iter-18 review flagged this as a survivor.  For
+    # the gas-only LW path ``ssa_unnormalized`` is zero (gas scattering
+    # ≈ 0 except for Rayleigh in SW), so the safe-divide ``fill=0.0``
+    # branch is the routine case rather than an edge.
+    g = safe_divide(
+        tau1 * ssa1 * g1 + tau2 * ssa2 * g2,
+        ssa_unnormalized,
+        eps=self._EPSILON,
+        fill=0.0,
     )
 
     return {
         'optical_depth': tau,
-        'ssa': ssa_unnormalized / jnp.maximum(tau, self._EPSILON),
+        'ssa': safe_divide(
+            ssa_unnormalized, tau, eps=self._EPSILON, fill=0.0,
+        ),
         'asymmetry_factor': g,
     }

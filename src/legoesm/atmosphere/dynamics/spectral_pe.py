@@ -28,6 +28,7 @@ References
 
 from __future__ import annotations
 
+import math
 from functools import partial
 from typing import NamedTuple
 
@@ -69,8 +70,14 @@ from legoesm.timestepping.semi_implicit import (
 )
 from legoesm import constants
 
-_LNPS_MIN = float(jnp.log(100.0))
-_LNPS_MAX = float(jnp.log(2.0e6))
+# Log-surface-pressure clamp bounds [ln Pa].  Pure host constants — use
+# ``math.log`` (not ``jnp.log``) so this module imports without dispatching a
+# device computation.  An eager ``float(jnp.log(...))`` here compiles a tiny
+# HLO at import time, which (a) wastes a compile on every backend and (b)
+# hard-crashes the Apple/Metal backend ("unknown attribute code") before any
+# model is even constructed, taking down the whole physics/driver import chain.
+_LNPS_MIN = math.log(100.0)
+_LNPS_MAX = math.log(2.0e6)
 _COS_LAT_MIN = 1.0e-6
 
 

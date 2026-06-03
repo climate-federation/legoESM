@@ -37,6 +37,7 @@ def test_nh_factory_can_disable_single_flag():
     assert cfg.use_fv3_vector_halo_uv is True
     assert cfg.use_fv3_dynamic_exner is True
     assert cfg.use_fv3_metric_aware_d_con is False
+    # FV3_3D iter-1077: re-enabled via pad_halo_dgrid_scalar_4d.
     assert cfg.use_fv3_cross_face_du_proj is True
 
 

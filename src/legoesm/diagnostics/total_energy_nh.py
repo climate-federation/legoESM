@@ -47,8 +47,8 @@ def compute_total_energy_nh(state, grid, hc) -> tuple[jax.Array, float]:
         Globally-integrated total energy [J].
     """
     # iter-45: promote to fp64 budget accumulator (see total_energy_pe).
-    from legoesm.core.conservation import _conservation_accumulator
-    acc = _conservation_accumulator()
+    from legoesm.core.conservation import conservation_accumulator
+    acc = conservation_accumulator()
 
     # Reference profile broadcasts
     dz_b = jnp.asarray(hc.dz, dtype=acc)[None, None, None, :]

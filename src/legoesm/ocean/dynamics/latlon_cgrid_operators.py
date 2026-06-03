@@ -50,7 +50,21 @@ from legoesm.grids.latlon import LatLonGrid  # noqa: F401 — kept for type comp
 
 
 def pad_ns_zero(interior: jnp.ndarray) -> jnp.ndarray:
-    """Zero-pad south and north rows (wall BC).
+    """Zero-pad south and north rows (wall BC), backend-dispatched.
+
+    Local backend
+        Pads ``interior`` with zeros at both lat ends (the historical
+        single-rank wall BC).  Bit-identical to the previous
+        implementation.
+
+    MPI backend (lat-lon band layout)
+        Pole-touching ranks pad their pole side with zero (wall BC at
+        the actual pole); interior partition cuts MPI-sendrecv with
+        the neighbour rank so the gradient / divergence stencil sees
+        continuous data across the cut.  Routes through
+        :func:`legoesm.grids.halo_latlon.pad_with_pole_bc_lat` which
+        in turn delegates to
+        :func:`legoesm.parallel.latlon_mpi._pad_with_pole_bc_lat_mpi`.
 
     Parameters
     ----------
@@ -61,8 +75,12 @@ def pad_ns_zero(interior: jnp.ndarray) -> jnp.ndarray:
     -------
     padded : (..., n_interior+2, n_lon, ...)
     """
-    pad_axes = ((0, 0),) * (interior.ndim - 1)
-    return jnp.pad(interior, ((1, 1), *pad_axes))
+    # Deferred import to avoid cycles — ocean.dynamics is imported by
+    # many grid-related modules.
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
+    return pad_with_pole_bc_lat(
+        interior, halo=1, south_value=0.0, north_value=0.0,
+    )
 
 
 def is_tripolar(grid) -> bool:
@@ -285,22 +303,35 @@ def interp_cell_to_uface(f: jnp.ndarray) -> jnp.ndarray:
     return jnp.concatenate([f_u, f_u[:, 0:1]], axis=1)
 
 
-def interp_cell_to_vface(f: jnp.ndarray) -> jnp.ndarray:
+def interp_cell_to_vface(f: jnp.ndarray, grid=None) -> jnp.ndarray:
     """Interpolate a cell-center field to v-face (lat interface) positions.
 
     Interior faces: average of adjacent cells.
-    Pole faces (south=0, north=n_lat): copy the adjacent cell value.
-    The pole value is numerically inert since v = 0 at the wall.
+
+    Boundary faces depend on ``grid``:
+
+    - ``grid is None`` (legacy default): south/north pole faces copy the
+      adjacent cell value.  The pole value is numerically inert since
+      ``v = 0`` at the wall.  Bit-exact backwards-compat.
+    - ``grid`` provided: use :func:`pad_ns_scalar` — south = 0 and north
+      = 0 (wall) on regular lat-lon, or north = fold-reflected on a
+      tripolar grid where the north boundary is an active fold rather
+      than a wall.  This is the form needed when the v-face value at the
+      north fold is physically meaningful (e.g. interpolating a vertical
+      velocity for momentum advection on eORCA1).
 
     Parameters
     ----------
     f : (n_lat, n_lon, ...) at cell centers.
+    grid : optional LatLonGrid or LatLonCGridGeometry.
 
     Returns
     -------
     f_v : (n_lat+1, n_lon, ...) at v-faces.
     """
     f_v_interior = 0.5 * (f[:-1] + f[1:])  # (n_lat-1, ...)
+    if grid is not None:
+        return pad_ns_scalar(f_v_interior, grid)
     return jnp.concatenate([f[0:1], f_v_interior, f[-1:]], axis=0)
 
 
@@ -510,48 +541,86 @@ def gradient_y_cgrid(
     -------
     df_dy : array, shape (n_lat+1, n_lon, ...) at v-points.
     """
-    # dy at v-point: on a regular lat-lon grid this is the scalar
-    # R*dlat; on a tripolar grid it varies per cell.  Use the scalar
-    # when dlat > 0 (regular grid) for bit-exact backward compat.
+    # Tripolar grids retain the legacy compact-stencil-then-pad path
+    # — the north fold-face gradient uses a per-cell partner lookup
+    # that does not fit the pre-pad model.  Regular / Mercator lat-lon
+    # grids switch to pre-pad-then-stencil so the compact stencil
+    # spans rank-local partition cuts via backend-dispatched halo
+    # exchange (the cross-partition correctness fix flagged in the
+    # previous commit).
     if is_tripolar(grid):
-        # Tripolar: per-cell meridional spacing
         dy_v_int = grid.dy_v[1:-1]  # (n_lat-1, n_lon)
-        dy_v_interior = dy_v_int if f.ndim == 2 else dy_v_int[:, :, jnp.newaxis]
-    else:
-        # Regular or Mercator: variable-dy safe.
-        dy_h = grid.dy * 0.5                           # (n_lat,) cell-row heights
-        dy_v_interior = 0.5 * (dy_h[1:] + dy_h[:-1])    # (n_lat-1,)
-
-    # Interior v-faces: i=1..n_lat-1
-    f_diff = f[1:] - f[:-1]
-    if dy_v_interior.ndim < f_diff.ndim:
-        # 1D dy (regular/Mercator): broadcast over lon and level axes
-        bcast = (slice(None),) + (jnp.newaxis,) * (f_diff.ndim - 1)
-        df_interior = f_diff / dy_v_interior[bcast]
-    else:
-        # 2D/3D dy (tripolar): already shaped for direct division
+        dy_v_interior = (
+            dy_v_int if f.ndim == 2 else dy_v_int[:, :, jnp.newaxis]
+        )
+        f_diff = f[1:] - f[:-1]
         df_interior = f_diff / dy_v_interior
-
-    # Boundary: wall BC (zero) on regular lat-lon; fold gradient on tripolar.
-    fold = getattr(grid, "fold", None)
-    if fold is not None and fold.is_active:
-        # The fold face connects cell (fold_j, i) with its fold partner
-        # (fold_j, perm_T[i]).  Compute the gradient directly rather than
-        # reflecting the interior gradient (which is at a different location).
-        f_partner = f[-1:, fold.perm_T]  # (1, n_lon, ...)
-        dy_fold = grid.dy_v[-1:]  # (1, n_lon) — fold-face distance
+        # Tripolar north-boundary fold partner.
+        fold = grid.fold
+        f_partner = f[-1:, fold.perm_T]
+        dy_fold = grid.dy_v[-1:]
         if f.ndim == 3:
             dy_fold = dy_fold[:, :, jnp.newaxis]
-        # Pure numerical guard against division by zero at degenerate
-        # fold cells. Real ocean fold cells are O(km); 1e-30 only kicks
-        # in when ``dy_v`` is identically zero (e.g. synthetic test).
         dy_fold_safe = jnp.maximum(dy_fold, 1.0e-30)
         df_fold = (f_partner - f[-1:]) / dy_fold_safe
         south = jnp.zeros_like(df_interior[:1])
-        df_dy = jnp.concatenate([south, df_interior, df_fold], axis=0)
+        return jnp.concatenate([south, df_interior, df_fold], axis=0)
+
+    # ---- Regular / Mercator lat-lon: pre-pad then compact stencil ----
+    #
+    # Why pre-pad: the old "compute interior gradient → pad with
+    # zero" pattern hid an architectural mismatch under MPI.  At
+    # interior partition cuts the band-end v-face should carry the
+    # gradient across the cut (= (this_rank_f[0] - south_neighbour_f[-1])
+    # / dy_v), but the old pad helper had no access to the neighbour
+    # ``f`` value — only to a sendrecv'd ``df`` endpoint, which is
+    # the wrong v-face's gradient.
+    #
+    # The new path pre-pads ``f`` via ``pad_halo_latlon`` (backend-
+    # dispatched: local pole-fold OR MPI sendrecv + boundary pole-
+    # fold), runs the compact stencil on the padded ``f``, and then
+    # overrides the polar v-faces with zero via ``zero_polar_lat_ends``
+    # (also backend-aware so interior cuts are left alone).
+    #
+    # Serial bit-exactness: the local backend's pole-fold gives a
+    # non-zero gradient at v-faces 0 and -1, exactly what the new
+    # path computes; ``zero_polar_lat_ends`` then zeros those two
+    # ends — equivalent to the historical ``pad_ns_zero(df_interior)``.
+    from legoesm.grids.halo_latlon import (
+        pad_halo_latlon,
+        pad_halo_latlon_3d,
+        zero_polar_lat_ends,
+    )
+    if f.ndim == 2:
+        f_padded = pad_halo_latlon(f, halo=1)
+        # Strip the lon halo — gradient_y only needs the lat halo.
+        f_padded = f_padded[:, 1:-1]
+    elif f.ndim == 3:
+        f_padded = pad_halo_latlon_3d(f, halo=1)
+        f_padded = f_padded[:, 1:-1, :]
     else:
-        df_dy = pad_ns_zero(df_interior)
-    return df_dy
+        raise ValueError(
+            f"gradient_y_cgrid: f.ndim must be 2 or 3, got {f.ndim}"
+        )
+
+    # Compact stencil on padded f — gradient at ALL v-faces of the
+    # rank-local band, including the partition cuts.
+    f_diff = f_padded[1:] - f_padded[:-1]  # (n_lat_v, n_lon[, nlev])
+
+    # ``dy_v`` at all v-faces.  For uniform-dlat regular lat-lon
+    # this is constant (= R * dlat); ``mode='edge'`` pad simply
+    # repeats the constant.  For Mercator (variable dlat) edge-pad
+    # is the existing convention extended by one row — kept here so
+    # the operator's behaviour is unchanged on Mercator grids.
+    dy_h = grid.dy * 0.5                           # (n_lat,)
+    dy_h_padded = jnp.pad(dy_h, (1, 1), mode="edge")
+    dy_v = 0.5 * (dy_h_padded[1:] + dy_h_padded[:-1])  # (n_lat+1,)
+    bcast = (slice(None),) + (jnp.newaxis,) * (f_diff.ndim - 1)
+    df_dy = f_diff / dy_v[bcast]
+
+    # Wall BC at the pole-touching v-faces.  Under MPI on interior
+    # ranks this is a no-op; cross-partition gradients survive.
+    return zero_polar_lat_ends(df_dy)
 
 
 # =============================================================================
@@ -665,7 +734,15 @@ def divergence_cgrid(
         lat = grid.lat
         lat_interior = 0.5 * (lat[:-1] + lat[1:])
         cos_lat_v_interior = jnp.cos(lat_interior)
-        cos_lat_v = jnp.pad(cos_lat_v_interior, (1, 1))
+        # Wall-BC pad: cos at the polar v-faces = 0 (no flux through
+        # the pole).  Under MPI on a band-only rank the same call
+        # sendrecv's the neighbour's cos_lat_v_interior at interior
+        # partition cuts so flux continuity holds across the cut.
+        from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
+        cos_lat_v = pad_with_pole_bc_lat(
+            cos_lat_v_interior, halo=1,
+            south_value=0.0, north_value=0.0,
+        )
         face_dx = grid.radius * cos_lat_v * grid.dlon  # (n_lat+1,)
 
     # North face flux - south face flux
@@ -901,7 +978,13 @@ def curl_vertex_cgrid(
         lat = grid.lat
         cos_lat = grid.cos_lat
         sin_lat = jnp.sin(lat)
-        sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
+        # Wall-BC pad of sin_lat: sin(south_pole)=-1, sin(north_pole)=+1.
+        # Backend-aware so MPI interior ranks sendrecv from neighbour
+        # rather than apply pole BC at the wrong location.
+        from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
+        sin_ext = pad_with_pole_bc_lat(
+            sin_lat, halo=1, south_value=-1.0, north_value=1.0,
+        )
         A_vertex_all = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])
         A_vertex_interior = A_vertex_all[1:-1]
         dx_cell = R * cos_lat * dlon
@@ -928,10 +1011,14 @@ def curl_vertex_cgrid(
         dv_circ = (v_east - v_west) * dy_edge[bcast_lat]
 
     # u contribution: u[i-1, j]*dx[i-1] - u[i, j]*dx[i].
-    # Pad with zeros at poles along the lat axis (axis 0).  Extra
-    # ``(0, 0)`` pad-tuples for any trailing dims (level axis in 3D).
-    pad_extra = ((0, 0),) * (u.ndim - 2)
-    u_ext = jnp.pad(u, ((1, 1), (0, 0), *pad_extra))
+    # Pad with zeros at poles along the lat axis (axis 0).  Wall BC
+    # at the pole; under MPI on an interior rank the same call
+    # sendrecv's the neighbour's u row instead (the pole pad fires
+    # only at boundary ranks).
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
+    u_ext = pad_with_pole_bc_lat(
+        u, halo=1, south_value=0.0, north_value=0.0,
+    )
     if _tripolar_curl:
         # dx_cell is 2D (n_lat, n_lon); pad lat axis, append wrap column
         dx_pad = jnp.pad(dx_cell, ((1, 1), (0, 0)))  # (n_lat+2, n_lon)
@@ -945,7 +1032,12 @@ def curl_vertex_cgrid(
         u_north = u_ext[1:]
         du_circ = u_south * dx_south - u_north * dx_north
     else:
-        dx_ext = jnp.pad(dx_cell, (1, 1))
+        # Wall-BC pad of dx_cell at poles (zero contribution beyond
+        # the pole); under MPI interior ranks pad with neighbour's
+        # dx via sendrecv instead.
+        dx_ext = pad_with_pole_bc_lat(
+            dx_cell, halo=1, south_value=0.0, north_value=0.0,
+        )
         u_south = u_ext[:-1]
         u_north = u_ext[1:]
         dx_south = dx_ext[:-1]
@@ -3334,16 +3426,19 @@ def density_jacobian_pgf_smc03_x(
        (η=0 reference, consistent with the rest of the baroclinic
        path.)
     2. Per-column ``σ`` from ``reconstruct_harmonic_slopes``.
-    3. **Face-adaptive z_target** = ``0.5 · (z_centroid_W + z_centroid_E)``
-       (Option B from plan §2.3).  At full-cell faces this reduces to
-       the standard reference-cell centroid (both centroids equal
-       ``|z_full_ref[k]|``).  At partial-cell faces — where the
-       column-independent ``|z_full_ref[k]|`` of Option A can fall
-       below one column's seafloor when the partial cell sits in the
-       upper half of the reference cell — the per-face midpoint of
-       centroids is by construction inside both columns' partial
-       cells.  This avoids the clamp pathology that drove the BH
-       seamount blowup with Option A.
+    3. **Face-adaptive z_target** = ``min(z_centroid_W, z_centroid_E)`` — the
+       *shallower* of the two cell centroids (see the code below, which uses
+       ``jnp.minimum``).  At full-cell faces this reduces to the standard
+       reference-cell centroid (both centroids equal).  The ``min`` (NOT the
+       midpoint ``0.5·(z_c_W+z_c_E)`` once tried as "Option B") is what
+       guarantees the target lies inside BOTH columns: the midpoint can fall
+       *below* the shallower column's seafloor when its partial cell is thin
+       (``h < dz/3``), producing an asymmetric seafloor clamp and a spurious
+       ~10⁶ Pa/face pressure gradient — the C1 bug that drove the BH-seamount
+       blowup (see ``docs/ocean_experiments/pgf_smc03_code_review.md``).
+       ``min`` matches the Adcroft & Campin 2004 /
+       ``partial_cell_pgf_correction_x`` convention
+       (``face_ref = jnp.minimum(centroid_east, centroid_west)``).
     4. ``P_at_target`` per column from
        ``compute_pressure_at_target_smc03`` (each column evaluated at
        the face-pair midpoint of *its* face).

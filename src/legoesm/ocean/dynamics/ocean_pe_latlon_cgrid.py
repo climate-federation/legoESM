@@ -771,6 +771,46 @@ def _weno_cell_to_vface(
     return jnp.concatenate([zero, phi_at_v_interior, zero], axis=0)
 
 
+def laplacian_smag_cfl_cap(grid, dt: float, safety: float):
+    """Per-cell upper-bound (ceiling) on the Laplacian-Smagorinsky coefficient.
+
+    Returns ``(cap_h, cap_q)`` = ``safety * area * cos^2(lat) / dt`` at cell
+    centres and vertices -- the maximum STABILISING viscosity supplied to the
+    under-resolved western-boundary-current jets during the cold start.
+
+    This is a TUNED per-cell viscosity ceiling, deliberately NOT the strict
+    rectangular explicit-diffusion CFL limit ``safety/(dt*(1/dx^2+1/dy^2))``.
+    EMPIRICAL EVIDENCE (eORCA025 WOA cold-start): the rectangular/metric form is
+    too conservative -- it STARVES the marginally-resolved WBC of the viscosity
+    it needs and blew up by day 0.25 (job 8126978); ``area*cos^2(lat)/dt`` runs
+    stably (the energy-stable stress-tensor operator tolerates this larger
+    coefficient, which is ~20% above the rectangular limit at the WBC and more
+    at high latitude). So the cold start needs the LARGER ceiling, not the
+    smaller "correct" CFL bound. ``cos^2(lat)`` (floored at 0.04, ~78.5 deg)
+    tapers the ceiling toward the poles so the small, metrically distorted
+    high-latitude coastal cells keep the lighter default viscosity.
+
+    Grid dispatch: ``LatLonCGridGeometry`` (tripole/Mercator) exposes
+    ``area_T``/``lat_T``; the simpler ``LatLonGrid`` exposes ``area``/``lat2d``.
+    ``cap_q`` replicates the centre ceiling onto the (n_lat+1, n_lon+1) vertex
+    field, edge-padded in latitude and PERIODIC in longitude (append column 0 --
+    the SAME cyclic wrap the q-point Laplacian uses), so the seam is continuous:
+    ``cap_q[:, -1] == cap_q[:, 0]`` (no edge-replication discontinuity).
+    """
+    lat2d = getattr(grid, "lat_T", None)
+    if lat2d is None:
+        lat2d = grid.lat2d
+    area_h = getattr(grid, "area_T", None)
+    if area_h is None:
+        area_h = grid.area
+    cos2 = jnp.maximum(jnp.cos(lat2d) ** 2, 0.04)            # poleward floor
+    cap_h = safety * area_h * cos2 / dt                      # (n_lat, n_lon)
+    # Vertex ceiling: pad to (n_lat+1, n_lon+1) -- edge in lat, periodic in lon.
+    cap_q = jnp.pad(cap_h, ((0, 1), (0, 0)), mode="edge")    # (n_lat+1, n_lon)
+    cap_q = jnp.concatenate([cap_q, cap_q[:, :1]], axis=1)   # (n_lat+1, n_lon+1)
+    return cap_h, cap_q
+
+
 def _bc_geometry_and_density(
     eta_safe, H_bathy, z_coord, config, T, S, mask, grid, rho_0, g_val,
 ):
@@ -1384,12 +1424,19 @@ def _bc_dterm(du_dt, dv_dt, u, v, u_mask_3d, v_mask_3d, mask, grid, config, _mom
 
 def _bc_vertical_momentum_advection(
     du_dt, dv_dt, u_prime, v_prime, w, h_u, h_v, u_mask_3d, v_mask_3d,
-    grid, _mom_adv, _weno_order,
+    grid, _mom_adv, _weno_order, config, diagnose_momentum=False,
 ):
     """Stage 8: flux-form vertical advection of the perturbation momentum
     (1st-order upwind, or WENO when momentum_advection is weno5/weno7). Pure
     verbatim extraction (Q8). Returns ``(du_dt, dv_dt, diag_vertadv_u,
-    diag_vertadv_v)``."""
+    diag_vertadv_v)``.
+
+    The ``adaptive_implicit_vertadv`` gate (Shchepetkin 2015 / NEMO
+    ln_zad_Aimp) is applied here: when ``config.adaptive_implicit_vertadv``
+    is True the explicit vertadv tendency is NOT added to ``du_dt`` (it is
+    applied as a separate operator-split stage at the step level on the
+    barotropic-consistent ``w``); it is still returned as the start-of-step
+    diagnostic estimate when ``diagnose_momentum`` is True."""
     # --- 8. Vertical advection of u, v (perturbation velocity) ---
     # Issue #171 Level-1 fix: use interface-upwind flux-form momentum
     # advection instead of the cell-centered upwind gradient form.
@@ -1404,41 +1451,85 @@ def _bc_vertical_momentum_advection(
     # equal dz_ref * J_u / J_v; for partial cells, h_k is zero below
     # the seafloor so divisions inside the flux-form vertical advection
     # do not pull thickness from inactive levels.
-    h_u_old = h_u
-    h_v_old = h_v
-    w_u = interp_cell_to_uface(w)
-    w_v = _interp_to_v_points(w, grid=grid)
-    if _mom_adv in ("weno5", "weno7"):
-        # WENO vertical momentum advection removes the implicit viscosity
-        # (~|w|*dz/2) that first-order upwind provides.  Requires
-        # compensating vertical viscosity (KPP / Richardson-A_v, #204).
-        diag_vertadv_u = _flux_form_vertical_momentum_advection_weno(
-            u_prime, w_u, h_u_old, order=_weno_order)
-        diag_vertadv_v = _flux_form_vertical_momentum_advection_weno(
-            v_prime, w_v, h_v_old, order=_weno_order)
-    else:
-        # Default: 1st-order upwind.  The implicit viscosity (~|w|*dz/2)
-        # damps baroclinic shear that explicit A_v=1e-5 cannot.
-        # Pass u/v face-activity masks so vertical momentum flux is
-        # exactly zero at faces below the seafloor — otherwise float-
-        # precision noise in w_u/w_v drives spurious tendencies inside
-        # the rock (and poorly-conditions adjoints).  ``u_mask_3d`` may
-        # be shape ``(..., 1)`` for pure z* (2D-broadcast) or
-        # ``(..., nlev)`` for partial; broadcast to the velocity shape
-        # so the helper's per-level slicing along the last axis works.
-        u_face_active = jnp.broadcast_to(u_mask_3d, u_prime.shape)
-        v_face_active = jnp.broadcast_to(v_mask_3d, v_prime.shape)
-        diag_vertadv_u = _flux_form_vertical_momentum_advection(
-            u_prime, w_u, h_u_old, face_active=u_face_active)
-        diag_vertadv_v = _flux_form_vertical_momentum_advection(
-            v_prime, w_v, h_v_old, face_active=v_face_active)
-    du_dt = du_dt + diag_vertadv_u
-    dv_dt = dv_dt + diag_vertadv_v
+    #
+    # Adaptive-implicit gate (Shchepetkin 2015 / NEMO ln_zad_Aimp): when
+    # ``config.adaptive_implicit_vertadv`` is set, the explicit vertical
+    # momentum advection here is NOT added to ``du_dt`` (the slow
+    # baroclinic forcing fed to the barotropic solver must stay
+    # vertical-advection-free, because vertadv is applied as a separate
+    # operator-split stage at the step level
+    # ``ocean_model_latlon_cgrid._step_impl`` on the barotropic-consistent
+    # ``w``).  The explicit flux-form tendency is STILL computed and
+    # stored in ``diag_vertadv_{u,v}`` as the start-of-step estimate of
+    # the (otherwise implicit) vertical-advection term, so the momentum
+    # budget reports the term being stabilised rather than a silent zero
+    # (it matches the O(dt) start-of-step semantics already documented on
+    # ``tendencies_with_diagnostics``).
+    #
+    # Closure contract:
+    #   - flag OFF: ``vertadv`` is in ``du_dt``     -> Σ(terms) == du_dt.
+    #   - flag ON : ``vertadv`` is a diagnostic only -> Σ(terms) ==
+    #     du_dt + diag_vertadv (the vertadv slice is the start-of-step
+    #     estimate of the step-level implicit operator, excluded from the
+    #     slow forcing on purpose).  ``test_momentum_diagnostics_closure``
+    #     runs with the default (flag off) config, so the strict
+    #     ``Σ == du_dt`` identity it enforces is unaffected.
+    _aimp_vertadv = getattr(config, "adaptive_implicit_vertadv", False)
+    # Default the diagnostics to zero so the (Q8-decomposed) helper's
+    # ``(du_dt, dv_dt, diag_vertadv_u, diag_vertadv_v)`` return contract
+    # holds even on the flag-on / not-diagnosing fast path where the
+    # explicit tendency is never built.
+    diag_vertadv_u = jnp.zeros_like(du_dt)
+    diag_vertadv_v = jnp.zeros_like(dv_dt)
+    # Compute the explicit flux-form vertadv tendency when it is either
+    # (a) part of the slow forcing (flag off), or (b) needed for the
+    # momentum budget as the start-of-step estimate (flag on AND
+    # diagnosing).  When the flag is on and we are not diagnosing, skip it
+    # entirely so the hot step path adds no extra graph nodes (the actual
+    # vertical advection is applied at the step level instead).  These are
+    # Python ``if`` on static (compile-time) flags -- the feature-gating
+    # exception, not ``jnp.where``.
+    if (not _aimp_vertadv) or diagnose_momentum:
+        h_u_old = h_u
+        h_v_old = h_v
+        w_u = interp_cell_to_uface(w)
+        w_v = _interp_to_v_points(w, grid=grid)
+        if _mom_adv in ("weno5", "weno7"):
+            # WENO vertical momentum advection removes the implicit
+            # viscosity (~|w|*dz/2) that first-order upwind provides.
+            # Requires compensating vertical viscosity (KPP / Richardson-
+            # A_v, #204).
+            diag_vertadv_u = _flux_form_vertical_momentum_advection_weno(
+                u_prime, w_u, h_u_old, order=_weno_order)
+            diag_vertadv_v = _flux_form_vertical_momentum_advection_weno(
+                v_prime, w_v, h_v_old, order=_weno_order)
+        else:
+            # Default: 1st-order upwind.  The implicit viscosity
+            # (~|w|*dz/2) damps baroclinic shear that explicit A_v=1e-5
+            # cannot.  Pass u/v face-activity masks so vertical momentum
+            # flux is exactly zero at faces below the seafloor —
+            # otherwise float-precision noise in w_u/w_v drives spurious
+            # tendencies inside the rock (and poorly-conditions
+            # adjoints).  ``u_mask_3d`` may be shape ``(..., 1)`` for
+            # pure z* (2D-broadcast) or ``(..., nlev)`` for partial;
+            # broadcast to the velocity shape so the helper's per-level
+            # slicing along the last axis works.
+            u_face_active = jnp.broadcast_to(u_mask_3d, u_prime.shape)
+            v_face_active = jnp.broadcast_to(v_mask_3d, v_prime.shape)
+            diag_vertadv_u = _flux_form_vertical_momentum_advection(
+                u_prime, w_u, h_u_old, face_active=u_face_active)
+            diag_vertadv_v = _flux_form_vertical_momentum_advection(
+                v_prime, w_v, h_v_old, face_active=v_face_active)
+        if not _aimp_vertadv:
+            # Explicit path: vertadv is part of the slow baroclinic
+            # forcing.  (Flag on: it stays a diagnostic only.)
+            du_dt = du_dt + diag_vertadv_u
+            dv_dt = dv_dt + diag_vertadv_v
     return du_dt, dv_dt, diag_vertadv_u, diag_vertadv_v
 
 
 def _bc_horizontal_viscosity(
-    du_dt, dv_dt, u, v, grid, mask, u_mask, v_mask, config, z_coord, H_bathy,
+    du_dt, dv_dt, u, v, grid, mask, u_mask, v_mask, config, z_coord, H_bathy, dt,
 ):
     """Stages 10 + 10b: horizontal viscosity (A_h Laplacian + B_h biharmonic +
     Smagorinsky + Leith, with cos(lat) / equatorial / polar-cap scaling and the
@@ -1727,6 +1818,24 @@ def _bc_horizontal_viscosity(
             mask=mask, u_mask=u_mask, v_mask=v_mask)
         A_smag_q = smagorinsky_viscosity_q_cgrid(
             D_T, D_S, grid, config.C_smag_lap, mask=mask)
+        # Per-cell viscosity ceiling on the Laplacian-Smagorinsky coefficient.
+        # A_smag = (C*dx)^2 * |D| grows without bound at sharp jets (|D| large)
+        # and self-CFL-violates there -- the western-boundary-current cold-start
+        # blowup. Cap A_smag at ``safety * area * cos^2(lat) / dt`` (see
+        # ``laplacian_smag_cfl_cap``) -- a TUNED ceiling that supplies the
+        # MAXIMUM stabilising viscosity to the under-resolved WBC jets while
+        # leaving the quiescent interior untouched (the resolution-appropriate
+        # analogue of NEMO's WBC-enhanced eddy_viscosity_3D). NOTE: the stricter
+        # rectangular CFL bound safety/(dt*(1/dx^2+1/dy^2)) STARVES the WBC and
+        # blew up the eORCA025 cold-start (job 8126978) -- the larger area*cos^2
+        # ceiling is what the cold start needs (empirically validated).
+        if config.smag_cfl_safety > 0.0:
+            _cap_h, _cap_q = laplacian_smag_cfl_cap(
+                grid, dt, config.smag_cfl_safety)
+            A_smag_h = jnp.minimum(
+                A_smag_h, _cap_h[..., None] if A_smag_h.ndim == 3 else _cap_h)
+            A_smag_q = jnp.minimum(
+                A_smag_q, _cap_q[..., None] if A_smag_q.ndim == 3 else _cap_q)
         _smag_lap_u, _smag_lap_v = viscous_tendency_cgrid(
             u, v, grid, A_smag_h, A_smag_q,
             mask=mask, u_mask=u_mask, v_mask=v_mask)
@@ -2027,7 +2136,7 @@ def _bc_physics_tendencies(du_dt, dv_dt, dT_dt, dS_dt, physics_fn, state, grid, 
     return du_dt, dv_dt, dT_dt, dS_dt, phys_K_v, phys_A_v, diag_phys_u, diag_phys_v
 
 
-def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, z_coord, J, grid, rho_0, mask, mask_3d, *, route_heat_to_implicit=False):
+def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S, h_k, z_coord, J, grid, rho_0, mask, mask_3d, *, route_heat_to_implicit=False):
     """Stage 10b': external surface forcing (wind stress tau_x/tau_y, net heat
     q_net, penetrating shortwave) from a coupled / OMIP OceanSurfaceForcing,
     with tripolar east-north -> grid-aligned rotation. Pure verbatim extraction
@@ -2062,6 +2171,7 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
         _sf_tau_y = getattr(surface_forcing, "tau_y", None)
         _sf_q_net = getattr(surface_forcing, "q_net", None)
         _sf_sw = getattr(surface_forcing, "sw_down", None)
+        _sf_salt = getattr(surface_forcing, "salt_flux", None)
 
         if _sf_tau_x is not None and _sf_tau_y is not None:
             # Atmosphere convention (opposes wind) -> ocean reaction.
@@ -2141,6 +2251,20 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
                 dT_surf = dT_target
             else:
                 dT_dt = dT_target
+
+        # Real salt-mass flux (e.g. sea-ice brine rejection) -> top-layer S.
+        # Distinct from the freshwater virtual-salt path (which the freshwater=
+        # argument applies); this is the explicit salt-mass channel (#F11).
+        if _sf_salt is not None:
+            from legoesm.ocean.freshwater import salt_flux_salinity_tendency
+            # Use the ACTUAL partial-cell-aware top-layer thickness h_k[...,0]
+            # (the tracer cell that carries the salinity mass), NOT
+            # dz_ref[0]*J, so the real salt source is mass-conservative on
+            # shallow top-partial columns (codex).
+            dz_0_T_s = jnp.asarray(h_k[..., 0], dtype=S.dtype)
+            dS_salt = salt_flux_salinity_tendency(
+                jnp.asarray(_sf_salt, dtype=S.dtype), dz_0_T_s, float(rho_0))
+            dS_dt = dS_dt.at[..., 0].add(dS_salt * mask)
     return du_dt, dv_dt, dT_dt, dS_dt, dT_surf
 
 
@@ -2458,7 +2582,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # --- Stage 8: vertical momentum advection. ---
     du_dt, dv_dt, diag_vertadv_u, diag_vertadv_v = _bc_vertical_momentum_advection(
         du_dt, dv_dt, u_prime, v_prime, w, h_u, h_v, u_mask_3d, v_mask_3d,
-        grid, _mom_adv, _weno_order,
+        grid, _mom_adv, _weno_order, config, diagnose_momentum,
     )
 
     # --- Stage 9: tracer diffusion tendencies (dT_dt, dS_dt). ---
@@ -2468,7 +2592,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     (du_dt, dv_dt, diag_Ah_lap_u, diag_Ah_lap_v, diag_Bh_bilap_u,
      diag_Bh_bilap_v, diag_Cs_smag_u, diag_Cs_smag_v, diag_Cl_leith_u,
      diag_Cl_leith_v, kdiss_h_cell) = _bc_horizontal_viscosity(
-        du_dt, dv_dt, u, v, grid, mask, u_mask, v_mask, config, z_coord, H_bathy,
+        du_dt, dv_dt, u, v, grid, mask, u_mask, v_mask, config, z_coord, H_bathy, dt,
     )
 
     # --- Bottom drag. ---
@@ -2495,7 +2619,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # STRESS stays explicit either way (it is AB2'd in both legoESM and Veros).
     _sf_implicit = bool(getattr(config, "surface_forcing_implicit", False))
     du_dt, dv_dt, dT_dt, dS_dt, dT_surf_heat = _bc_external_surface_forcing(
-        du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, z_coord, J, grid,
+        du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S, h_k, z_coord, J, grid,
         rho_0, mask, mask_3d, route_heat_to_implicit=_sf_implicit,
     )
 
@@ -2595,7 +2719,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # Apply the same land mask to every diagnostic component.  Because
     # the final masking is `du_dt = du_dt * u_mask_3d` and × distributes
     # over +, applying the mask uniformly to all components preserves
-    # ``Σ components == total`` exactly.
+    # ``Σ components == total`` exactly (flag off).  With
+    # ``adaptive_implicit_vertadv`` on, ``vertadv_{u,v}`` is a
+    # diagnostic-only start-of-step estimate excluded from ``total`` /
+    # ``du_dt`` -> closure is ``Σ (components except vertadv) == total``.
     def _mu(x):
         return Field(data=x * u_mask_3d, name="diag_u", dims=dims_u, units="m/s^2")
     def _mv(x):

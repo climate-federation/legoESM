@@ -121,13 +121,41 @@ def _del6_vt_flux(q, damp, nord, del6_u, del6_v, rarea, cdgrid):
     """
     if nord not in (0, 1, 2):
         raise ValueError(f"nord must be 0, 1, or 2; got {nord}")
+    if q.ndim not in (3, 4):
+        raise ValueError(
+            f"_del6_vt_flux expects q.ndim ∈ {{3, 4}}; "
+            f"got ndim={q.ndim}, shape={tuple(q.shape)}."
+        )
 
     _EPS = 1e-20
     dg = getattr(cdgrid.base, 'duogrid', None)
     offsets = None if dg is not None else cdgrid.base.halo_interp_offsets
 
-    def pad_scalar(field):
-        return pad_halo(field, interp_offsets=offsets, duogrid=dg)
+    # FV3_3D iter-1045: ndim-aware halo dispatch.  For 4D ``q`` use
+    # ``pad_halo_4d`` (one batched MPI sendrecv per call); for 3D use
+    # the legacy ``pad_halo``.  3D static metrics ``del6_u``, ``del6_v``,
+    # ``rarea`` get a trailing ``[..., None]`` axis for broadcasting
+    # against 4D data.  Closes the last documented vmap-around-
+    # ``pad_halo`` site in the NH compressible-Euler 3D path
+    # (``damp_v`` / ``damp_w`` post-step at compressible_euler_cdgrid.py:
+    # 1197 / 1389).
+    _is_4d = q.ndim == 4
+    if _is_4d:
+        from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
+
+        def pad_scalar(field):
+            return _pad_halo_4d(field, interp_offsets=offsets, duogrid=dg)
+
+        del6_u_b = del6_u[..., None]
+        del6_v_b = del6_v[..., None]
+        rarea_b = rarea[..., None]
+    else:
+        def pad_scalar(field):
+            return pad_halo(field, interp_offsets=offsets, duogrid=dg)
+
+        del6_u_b = del6_u
+        del6_v_b = del6_v
+        rarea_b = rarea
 
     # Step 1: initial damping.
     #
@@ -157,15 +185,15 @@ def _del6_vt_flux(q, damp, nord, del6_u, del6_v, rarea, cdgrid):
     # u-edge positions are at (i+0.5, j) for i in [0, n], j in [0, n-1].
     # fx2[i, j] = del6_v[i, j] * (d2[i-1, j] - d2[i, j])
     #          = del6_v[i, j] * (d2_pad[i, j+1] - d2_pad[i+1, j+1])  # where i ranges 0..n, so n+1 values
-    d2_west = d2_pad[:, :-1, 1:-1]   # (6, n+1, n)
-    d2_east = d2_pad[:, 1:, 1:-1]    # (6, n+1, n)
-    fx2 = del6_v * (d2_west - d2_east)               # (6, n+1, n)
+    d2_west = d2_pad[:, :-1, 1:-1]   # (6, n+1, n[, nlev])
+    d2_east = d2_pad[:, 1:, 1:-1]
+    fx2 = del6_v_b * (d2_west - d2_east)
 
     # fy2 at v-edge (6, n, n+1): d2[south] - d2[north] convention.
     # fy2[i, j] = del6_u[i, j] * (d2[i, j-1] - d2[i, j])
-    d2_south = d2_pad[:, 1:-1, :-1]  # (6, n, n+1)
-    d2_north = d2_pad[:, 1:-1, 1:]   # (6, n, n+1)
-    fy2 = del6_u * (d2_south - d2_north)             # (6, n, n+1)
+    d2_south = d2_pad[:, 1:-1, :-1]  # (6, n, n+1[, nlev])
+    d2_north = d2_pad[:, 1:-1, 1:]
+    fy2 = del6_u_b * (d2_south - d2_north)
 
     # Iterate the del-n operator.
     # nord=0: return fx2, fy2 as-is (del-2).
@@ -174,12 +202,12 @@ def _del6_vt_flux(q, damp, nord, del6_u, del6_v, rarea, cdgrid):
         # d2 = rarea * (fx2 - fx2_east + fy2 - fy2_north)
         # fx2 shape (6, n+1, n): fx2[i, j] and fx2[i+1, j] at each cell.
         # For cell (i, j), fx2 contribution is fx2[i, j] - fx2[i+1, j].
-        fx2_west = fx2[:, :-1, :]    # (6, n, n)
-        fx2_east_contrib = fx2[:, 1:, :]  # (6, n, n)
-        fy2_south = fy2[:, :, :-1]   # (6, n, n)
-        fy2_north_contrib = fy2[:, :, 1:]  # (6, n, n)
-        d2 = rarea * (fx2_west - fx2_east_contrib
-                      + fy2_south - fy2_north_contrib)
+        fx2_west = fx2[:, :-1, :]
+        fx2_east_contrib = fx2[:, 1:, :]
+        fy2_south = fy2[:, :, :-1]
+        fy2_north_contrib = fy2[:, :, 1:]
+        d2 = rarea_b * (fx2_west - fx2_east_contrib
+                        + fy2_south - fy2_north_contrib)
 
         # Halo exchange d2.
         d2_pad = pad_scalar(d2)
@@ -189,11 +217,11 @@ def _del6_vt_flux(q, damp, nord, del6_u, del6_v, rarea, cdgrid):
         # `d2(i-1,j) - d2(i,j)`).
         d2_west = d2_pad[:, :-1, 1:-1]
         d2_east = d2_pad[:, 1:, 1:-1]
-        fx2 = del6_v * (d2_east - d2_west)           # sign flipped
+        fx2 = del6_v_b * (d2_east - d2_west)           # sign flipped
 
         d2_south = d2_pad[:, 1:-1, :-1]
         d2_north = d2_pad[:, 1:-1, 1:]
-        fy2 = del6_u * (d2_north - d2_south)         # sign flipped
+        fy2 = del6_u_b * (d2_north - d2_south)         # sign flipped
 
     # Iter-937: apply the deferred `damp` factor at the final output
     # stage.  See Step 1 comment for the float32-overflow rationale.
@@ -263,35 +291,49 @@ def fv3_del6_vorticity_damping(u_d, v_d, damp, nord, cdgrid):
       and rarea [1/m²]: final fx2/fy2 have units [m²/s] (circulation).
       fy2 / dx_edge_y = [m²/s] / [m] = [m/s] — velocity unit.
     """
+    if u_d.ndim not in (3, 4) or v_d.ndim != u_d.ndim:
+        raise ValueError(
+            f"fv3_del6_vorticity_damping: u_d and v_d must share "
+            f"ndim ∈ {{3, 4}}; got u_d.ndim={u_d.ndim}, "
+            f"v_d.ndim={v_d.ndim}."
+        )
+
     del6_u_m, del6_v_m = compute_del6_metrics(cdgrid)
     rarea = 1.0 / cdgrid.base.area
 
+    # FV3_3D iter-1045: ndim-aware broadcasting of 3D static metrics
+    # against 4D dynamic data.  ``dx_edge_y`` and ``dy_edge_x`` are
+    # 3D; multiply against per-level (u_d, v_d) via ``[..., None]``.
+    _is_4d = u_d.ndim == 4
+    if _is_4d:
+        dx_edge_y_b = cdgrid.dx_edge_y[..., None]
+        dy_edge_x_b = cdgrid.dy_edge_x[..., None]
+        rarea_b = rarea[..., None]
+    else:
+        dx_edge_y_b = cdgrid.dx_edge_y
+        dy_edge_x_b = cdgrid.dy_edge_x
+        rarea_b = rarea
+
     # Step 1: circulation.
-    vt = u_d * cdgrid.dx_edge_y      # (6, n, n+1)  [m²/s]
-    ut = v_d * cdgrid.dy_edge_x      # (6, n+1, n)  [m²/s]
+    vt = u_d * dx_edge_y_b
+    ut = v_d * dy_edge_x_b
 
     # Step 2: cell-mean vorticity wk.
-    # Fortran: wk(i,j) = rarea * (vt(i,j) - vt(i,j+1) - ut(i,j) + ut(i+1,j))
-    vt_south = vt[:, :, :-1]     # (6, n, n)
-    vt_north = vt[:, :, 1:]      # (6, n, n)
-    ut_west  = ut[:, :-1, :]     # (6, n, n)
-    ut_east  = ut[:, 1:, :]      # (6, n, n)
-    wk = rarea * (vt_south - vt_north - ut_west + ut_east)   # [1/s]
+    vt_south = vt[:, :, :-1]
+    vt_north = vt[:, :, 1:]
+    ut_west  = ut[:, :-1, :]
+    ut_east  = ut[:, 1:, :]
+    wk = rarea_b * (vt_south - vt_north - ut_west + ut_east)
 
-    # Step 3: del-n flux.  Outputs are in CIRCULATION units [m²/s].
+    # Step 3: del-n flux.  ``_del6_vt_flux`` is iter-1045 ndim-aware.
     fx2, fy2 = _del6_vt_flux(
         wk, damp, nord,
         del6_u=del6_u_m, del6_v=del6_v_m,
         rarea=rarea, cdgrid=cdgrid,
     )
 
-    # Step 4: Apply Fortran sign and convert to velocity via Fortran's
-    # rdx, rdy metrics (fv_grid_utils.F90):
-    #   rdx(i,j) = 1/dx(i,j)    at v-interface
-    #   rdy(i,j) = 1/dy(i,j)    at u-interface
-    # In our cdgrid convention these are 1/cdgrid.dx_edge_y and
-    # 1/cdgrid.dy_edge_x respectively.
-    du_d_damping = fy2 / cdgrid.dx_edge_y       # [m²/s] / [m] = [m/s]
-    dv_d_damping = -fx2 / cdgrid.dy_edge_x      # [m²/s] / [m] = [m/s]
+    # Step 4: convert circulation to velocity (Fortran rdx, rdy).
+    du_d_damping = fy2 / dx_edge_y_b
+    dv_d_damping = -fx2 / dy_edge_x_b
 
     return du_d_damping, dv_d_damping

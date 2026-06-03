@@ -66,9 +66,13 @@ class TestDetectFold:
         gphit = jnp.broadcast_to(
             jnp.linspace(-70.0, 60.0, n_lat)[:, None], (n_lat, n_lon),
         )
-        # Inject a 0.5 deg lat bump that the default 0.1 tolerance rejects
+        # Inject a 0.5 deg lat bump that the default 0.1 tolerance rejects.
+        # Perturb column 1 (not 0): column 0 is a fixed point of the
+        # (n_lon-i)%n_lon convention, so a col-0 bump would be "symmetric"
+        # under that perm and slip past the auto-detected check. Column 1 is
+        # asymmetric under BOTH supported conventions, so both reject it.
         gphit = gphit.at[-1].set(60.0)
-        gphit = gphit.at[-1, 0].set(60.5)
+        gphit = gphit.at[-1, 1].set(60.5)
 
         with pytest.raises(ValueError):
             _detect_fold(glamt, gphit, n_lat, n_lon)
@@ -77,6 +81,77 @@ class TestDetectFold:
             glamt, gphit, n_lat, n_lon, max_fold_asym_deg=1.0,
         )
         assert fold.is_active is True
+
+    def test_pure_periodic_fold_convention(self):
+        """De-haloed NEMO meshes (e.g. eORCA025) self-permute the fold row
+        under perm[i] = (n_lon - i) % n_lon, not n_lon-1-i. _detect_fold must
+        auto-detect this convention rather than rejecting the grid."""
+        from legoesm.grids.tripole import _detect_fold
+
+        n_lat, n_lon = 12, 24
+        lon = jnp.linspace(0.0, 360.0, n_lon, endpoint=False)
+        lat = jnp.linspace(-80.0, 60.0, n_lat)
+        glamt = jnp.broadcast_to(lon[None, :], (n_lat, n_lon))
+        gphit = jnp.broadcast_to(lat[:, None], (n_lat, n_lon))
+        # cos(2*pi*i/n_lon) is even under i -> (n_lon - i) % n_lon (fixed points
+        # at i=0 and i=n_lon/2) but NOT under i -> n_lon-1-i, so this fold row
+        # is symmetric only in the pure-periodic convention.
+        i = jnp.arange(n_lon)
+        fold_row = 60.0 + 5.0 * jnp.cos(2.0 * jnp.pi * i / n_lon)
+        gphit = gphit.at[-1].set(fold_row)
+
+        fold = _detect_fold(glamt, gphit, n_lat, n_lon)
+        assert fold.is_active is True
+        expected = (n_lon - jnp.arange(n_lon)) % n_lon
+        assert jnp.all(fold.perm_T == expected)
+        assert jnp.all(fold.perm_v == fold.perm_T)
+        # And the eORCA1.2-style convention is still detected as n_lon-1-i.
+        gphit2 = gphit.at[-1].set(60.0)  # constant row -> ties break to n_lon-1-i
+        fold2 = _detect_fold(glamt, gphit2, n_lat, n_lon)
+        assert jnp.all(fold2.perm_T == jnp.arange(n_lon - 1, -1, -1))
+
+    def test_explicit_fold_convention_overrides_ambiguous_tie(self):
+        """A constant fold-row latitude is a silent tie that auto-detect breaks
+        to n_lon-1-i. An explicit ``fold_convention`` bypasses the tie (still
+        verified against the tolerance), giving a de-haloed mesh its correct
+        pure-periodic origin."""
+        from legoesm.grids.tripole import _detect_fold
+
+        n_lat, n_lon = 12, 24
+        lon = jnp.linspace(0.0, 360.0, n_lon, endpoint=False)
+        glamt = jnp.broadcast_to(lon[None, :], (n_lat, n_lon))
+        gphit = jnp.broadcast_to(
+            jnp.linspace(-80.0, 60.0, n_lat)[:, None], (n_lat, n_lon))
+        gphit = gphit.at[-1].set(60.0)   # constant fold row -> auto ties
+        # auto -> n_lon-1-i (documented tie-break)
+        assert jnp.all(
+            _detect_fold(glamt, gphit, n_lat, n_lon).perm_T
+            == jnp.arange(n_lon - 1, -1, -1))
+        # explicit pure-periodic -> the OTHER origin, verified (asym 0 <= tol)
+        f = _detect_fold(glamt, gphit, n_lat, n_lon,
+                         fold_convention="(n_lon-i)%n_lon")
+        assert jnp.all(f.perm_T == (n_lon - jnp.arange(n_lon)) % n_lon)
+        assert jnp.all(f.perm_v == f.perm_T)
+
+    def test_explicit_wrong_convention_raises(self):
+        """An explicit convention that does not actually fold the grid is
+        rejected by the tolerance check (not silently accepted); a bogus name
+        is rejected outright."""
+        from legoesm.grids.tripole import _detect_fold
+
+        n_lat, n_lon = 12, 24
+        lon = jnp.linspace(0.0, 360.0, n_lon, endpoint=False)
+        glamt = jnp.broadcast_to(lon[None, :], (n_lat, n_lon))
+        gphit = jnp.broadcast_to(
+            jnp.linspace(-80.0, 60.0, n_lat)[:, None], (n_lat, n_lon))
+        # cos(2*pi*i/n) is symmetric ONLY under (n_lon-i)%n_lon, not n_lon-1-i.
+        i = jnp.arange(n_lon)
+        gphit = gphit.at[-1].set(60.0 + 5.0 * jnp.cos(2.0 * jnp.pi * i / n_lon))
+        with pytest.raises(ValueError, match="Fold symmetry check failed"):
+            _detect_fold(glamt, gphit, n_lat, n_lon,
+                         fold_convention="n_lon-1-i")
+        with pytest.raises(ValueError, match="fold_convention must be"):
+            _detect_fold(glamt, gphit, n_lat, n_lon, fold_convention="bogus")
 
 
 # -------------------------------------------------------------------------

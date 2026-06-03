@@ -86,7 +86,30 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     apvm_scale: float = 0.0       # APVM upwinding (0 = off)
     fix_mass: bool = True
     anchor_mass_to_initial: bool = False  # iter-11: mirror PE/SW anchor pattern
-    time_integrator: str = "ssp_rk3"
+    # Default integrator is the 5-stage 4th-order SSP scheme — NOT the
+    # 3-stage ``ssp_rk3`` — because ``ssp_rk3`` has the smaller absolute-
+    # stability region and cannot tolerate the operational ``del2``/``del4``
+    # hyperdiffusion at the time steps used here.  Measured (GPU jobs
+    # 8087100/8088578, reproduced CPU x64 in
+    # ``tests/unit/test_mpas_atmosphere.py::TestMPASHydrostaticIntegratorStability``):
+    #   * With ZERO dissipation (nu_del2 = nu_del4 = 0, the bare config),
+    #     BOTH ssp_rk3 and ssp_rk54 are stable to dt >= 600 s on L4/nlev30
+    #     from a near-rest IC — the integrator choice is irrelevant.
+    #   * With hyperdiffusion ON, ssp_rk3 diverges within ~3 steps at
+    #     dt = 600 s while ssp_rk54 stays bounded.  The biharmonic ∇⁴
+    #     operator's (negative-real-axis) eigenvalues fall outside ssp_rk3's
+    #     stability region at this dt but inside the 5-stage ssp_rk54 one.
+    # A long run should damp grid-scale noise with hyperdiffusion, so the
+    # default must cope with it; ssp_rk54 also matches the spectral-PE
+    # default (``component_factory`` builds Spectral PE with ``ssp_rk54``).
+    #
+    # This supersedes the earlier "undamped gravity wave on the imaginary
+    # axis / hidden-CFL at ~300 s any resolution" explanation, which the
+    # zero-dissipation sweep disproved.  The separate ~450 s dt-ceiling seen
+    # with the gray AMIP deck (driver ``_run_mpas``) is a radiative startup
+    # transient (T=300 K isothermal IC), integrator-independent — and well
+    # above the production dt=240 s, which is stable for both integrators.
+    time_integrator: str = "ssp_rk54"
 
 
 # ============================================================================
@@ -392,6 +415,40 @@ def mpas_hydrostatic_tendencies(
         dT_dt_3d = dT_dt_3d + physics_tendency.dT_dt.data
         dp_s_dt = dp_s_dt + physics_tendency.dp_s_dt.data
 
+    # --- 7. Tracer transport (moisture etc.) ---
+    # Advect prognostic tracers with the dycore's OWN edge wind (u_3d) and
+    # vertical mass flux (mass_flux for hybrid / sigma_dot for σ), so moisture
+    # transport is MASS-CONSISTENT with the thermodynamics — same horizontal
+    # operator (shared ``tracer_horizontal_advection``) and the SAME vertical
+    # operator the dycore uses for T.  Physics (microphysics/convection)
+    # tracer tendencies add on.  ``tracers=None`` ⇒ dry, no extra work.
+    tracer_tends_out = None
+    if state.tracers is not None and len(state.tracers) > 0:
+        from legoesm.atmosphere.dynamics.tracer_transport_mpas import (
+            tracer_horizontal_advection,
+        )
+        _tnames = list(state.tracers.keys())
+        q = jnp.stack([state.tracers[k].data for k in _tnames], axis=-1)
+        dq = tracer_horizontal_advection(q, u_3d, mesh)
+        if _hybrid:
+            dq = dq + jax.vmap(
+                lambda qk: vertical_advection_hybrid(qk, mass_flux, p_s, sigma_coord),
+                in_axes=-1, out_axes=-1)(q)
+        else:
+            dq = dq + jax.vmap(
+                lambda qk: vertical_advection(qk, sigma_dot, sigma_coord),
+                in_axes=-1, out_axes=-1)(q)
+        _phys_tt = (physics_tendency.tracer_tendencies
+                    if physics_tendency is not None else None)
+        for _i, k in enumerate(_tnames):
+            if _phys_tt is not None and k in _phys_tt:
+                dq = dq.at[..., _i].add(_phys_tt[k].data)
+        tracer_tends_out = {
+            k: Field(data=dq[..., _i], name=f"d{k}_dt",
+                     dims=("nCells", "nlev"), units="kg/kg/s")
+            for _i, k in enumerate(_tnames)
+        }
+
     return MPASHydrostaticTendencies(
         du_dt=Field(data=du_dt_3d, name="du_dt",
                     dims=("nEdges", "nlev"), units="m/s²"),
@@ -401,6 +458,7 @@ def mpas_hydrostatic_tendencies(
                       dims=("nCells",), units="Pa/s"),
         dphis_dt=Field(data=jnp.zeros_like(phis), name="dphis_dt",
                        dims=("nCells",), units="m²/s³"),
+        tracer_tendencies=tracer_tends_out,
     )
 
 
@@ -459,6 +517,11 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         self._total_area = float(jnp.sum(mesh.areaCell))
         # iter-11: lazy fp64 mass snapshot for anchor-to-initial.
         self._target_mass: jax.Array | None = None
+        # Operator-split physics carry (prognostic TKE / convection state).
+        # ``step`` stashes the physics-state OUT here each call so the driver
+        # can feed it back in via ``phys_state`` next step, while ``step``
+        # itself still returns just the dynamical state (backward-compatible).
+        self._phys_state = None
 
     def reset_target_mass(self) -> None:
         """Clear the anchored mass target (iter-18; see iter-4 SW twin)."""
@@ -491,14 +554,28 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         state: MPASHydrostaticState,
         dt: float,
         physics_fn=None,
+        forcing=None,
+        phys_state=None,
     ):
         """Outer wrapper: snapshots initial mass on first call when
-        ``anchor_mass_to_initial`` is on (fp64, outside JIT)."""
+        ``anchor_mass_to_initial`` is on (fp64, outside JIT).
+
+        ``forcing`` is an optional TRACED pytree (e.g. ``{"T_sfc": (nCells,)}``)
+        threaded to ``physics_fn`` — the AMIP path passes a time-varying
+        prescribed SST through here WITHOUT retracing (jit argument, not a
+        static closure).  ``phys_state`` is the operator-split physics carry
+        (prognostic TKE / convection state); pass back ``model._phys_state``
+        from the previous step.  ``step`` returns just the dynamical state
+        (backward-compatible) and stashes the physics-state OUT on
+        ``self._phys_state``.
+        """
         if (self.config.fix_mass
                 and self.config.anchor_mass_to_initial
                 and self._target_mass is None):
             self._target_mass = self.compute_mass(state)
-        return self._step_jit(state, dt, physics_fn, self._target_mass)
+        state_new, self._phys_state = self._step_jit(
+            state, dt, physics_fn, self._target_mass, forcing, phys_state)
+        return state_new
 
     @partial(jax.jit, static_argnums=(0, 3))
     def _step_jit(
@@ -507,48 +584,109 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         dt: float,
         physics_fn=None,
         target_mass: jax.Array | None = None,
-    ) -> MPASHydrostaticState:
-        """Advance one time step.
+        forcing=None,
+        phys_state=None,
+    ):
+        """Advance one time step with OPERATOR-SPLIT physics.
 
-        Parameters
-        ----------
-        state : MPASHydrostaticState
-        dt : float
-        physics_fn : callable, optional
-            Function (state, mesh, sigma_coord) -> MPASHydrostaticTendencies.
+        Dynamics (incl. tracer ADVECTION) are RK-integrated first with NO
+        physics in the per-stage tendency; the physics package is then
+        evaluated ONCE on the post-dynamics state and its tendencies applied
+        forward over ``dt``.  This is the correct coupling for implicit /
+        stateful physics (turbulent vertical diffusion, microphysics
+        saturation adjustment, prognostic TKE), which assume a single forward
+        application per step — mixing them into the per-RK-stage tendency
+        (the previous scheme) integrates an adjustment scheme with sub-dt RK
+        weights, which is wrong, and re-evaluates expensive physics
+        (radiation) once per stage.  Additive physics (radiation heating) is
+        unaffected to leading order.
 
-        Returns
-        -------
-        MPASHydrostaticState
+        Returns ``(state_new, phys_state_out)``.  ``phys_state`` carries the
+        prognostic physics state (TKE etc.) across steps; ``forcing`` carries
+        per-step traced forcing (e.g. prescribed ``T_sfc``).  Both are jit
+        arguments (NOT static), so new values each step do not retrace.
+
+        NB: the spectral and cubed-sphere PE paths add physics INSIDE the
+        per-RK-stage tendency (see ``spectral_pe.py`` / ``primitive_eq.py``);
+        MPAS deliberately diverges to operator-split because its physics now
+        includes the stateful / implicit turbulence (TKE + vertical diffusion)
+        the others do not run.  Converging those paths onto operator-split is
+        a future-consistency item, not a correctness issue here.
         """
         state = cast_pytree(state, None, "compute")
 
-        def tendency_fn(s):
-            phys = None
-            if physics_fn is not None:
-                _phys_result = physics_fn(s, self.mesh, self.sigma_coord)
-                phys = _phys_result[0] if type(_phys_result) is tuple else _phys_result
+        # --- 1. Dynamics: RK-integrate dynamics-only tendencies (physics OFF;
+        #        tracer ADVECTION stays in the dynamics, mass-consistently). ---
+        def dyn_tendency_fn(s):
             tend = mpas_hydrostatic_tendencies(
                 s, self.mesh, self.sigma_coord, self.config,
-                physics_tendency=phys, dt=dt,
+                physics_tendency=None, dt=dt,
             )
-            return MPASHydrostaticState(
+            _new = MPASHydrostaticState(
                 u=s.u.replace(data=tend.du_dt.data),
                 T=s.T.replace(data=tend.dT_dt.data),
                 p_s=s.p_s.replace(data=tend.dp_s_dt.data),
                 phis=s.phis.replace(data=jnp.zeros_like(s.phis.data)),
             )
+            # Carry tracer ADVECTION tendencies as a tendency-shaped state so
+            # the pytree RK integrator advances moisture with u/T/p_s.  Same
+            # tracer keys as the input state ⇒ tree-axpy lines up.
+            if s.tracers is not None and tend.tracer_tendencies is not None:
+                _new = _new._replace(tracers={
+                    k: s.tracers[k].replace(data=tend.tracer_tendencies[k].data)
+                    for k in s.tracers
+                })
+            return _new
 
         state_new = dispatch_integrator(
-            state, tendency_fn, dt, self.config.time_integrator,
+            state, dyn_tendency_fn, dt, self.config.time_integrator,
         )
 
-        # Temperature floor
-        if self.config.T_min > 0:
-            T_clipped = jnp.maximum(state_new.T.data, self.config.T_min)
-            state_new = state_new._replace(
-                T=state_new.T.replace(data=T_clipped),
+        # --- 2. Operator-split physics: evaluate ONCE on the post-dynamics
+        #        state, apply forward over dt.  ``state += dt * tendency``
+        #        recovers a scheme's internal dt integration when its tendency
+        #        is defined as (post-physics - pre)/dt (the package's
+        #        convention). ---
+        phys_state_out = phys_state
+        if physics_fn is not None:
+            _pr = physics_fn(state_new, self.mesh, self.sigma_coord,
+                             phys_state=phys_state, forcing=forcing)
+            if type(_pr) is tuple:
+                _pt, phys_state_out = _pr[0], _pr[1]
+            else:
+                _pt = _pr
+            state_new = MPASHydrostaticState(
+                u=state_new.u.replace(data=state_new.u.data + dt * _pt.du_dt.data),
+                T=state_new.T.replace(data=state_new.T.data + dt * _pt.dT_dt.data),
+                p_s=state_new.p_s.replace(
+                    data=state_new.p_s.data + dt * _pt.dp_s_dt.data),
+                phis=state_new.phis,
+                tracers=state_new.tracers,
             )
+            if (state_new.tracers is not None
+                    and _pt.tracer_tendencies is not None):
+                state_new = state_new._replace(tracers={
+                    k: (state_new.tracers[k].replace(
+                            data=state_new.tracers[k].data
+                            + dt * _pt.tracer_tendencies[k].data)
+                        if k in _pt.tracer_tendencies else state_new.tracers[k])
+                    for k in state_new.tracers
+                })
+
+        # --- 3. Floors ---
+        if self.config.T_min > 0:
+            state_new = state_new._replace(
+                T=state_new.T.replace(
+                    data=jnp.maximum(state_new.T.data, self.config.T_min)))
+        # Tracer non-negativity: advection is not positive-definite and
+        # microphysics can leave tiny undershoots; clamp before they feed
+        # saturation calculations.  (Negligible mass impact vs the donor
+        # clamps inside the schemes.)
+        if state_new.tracers is not None:
+            state_new = state_new._replace(tracers={
+                k: f.replace(data=jnp.maximum(f.data, 0.0))
+                for k, f in state_new.tracers.items()
+            })
 
         if self.config.fix_mass:
             state_new = _fix_mass_mpas_hydro(
@@ -557,7 +695,7 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 target_mass=target_mass,
             )
 
-        return cast_pytree(state_new, None, "storage")
+        return cast_pytree(state_new, None, "storage"), phys_state_out
 
     # integrate() and integrate_scan() inherited from IntegrationMixin
 

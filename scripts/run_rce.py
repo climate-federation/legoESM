@@ -51,7 +51,11 @@ def main():
                         help="Grid resolution (N for cubed-sphere, n_max for spectral, etc.)")
     parser.add_argument("--nlev", type=int, default=20)
     parser.add_argument("--dt", type=float, default=None,
-                        help="Timestep [s] (auto: 600 for N<=24, 300 for N>24)")
+                        help="Timestep [s]. Auto: 600 for N<=24, 300 "
+                             "for N>24 on cubed_sphere/latlon/gaussian; "
+                             "300 unconditionally on voronoi/MPAS (V4 "
+                             "blows up at dt>=450 in the cross-grid "
+                             "smoke).")
     parser.add_argument("--diag-days", type=int, default=5)
     parser.add_argument("--sst-init", type=float, default=300.0,
                         help="Initial SST [K] (ocean) or soil T [K] (land)")
@@ -84,6 +88,51 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # iter-71 (mirrors iter-67/70 on run_rce_mpi_long.py): validate
+    # numeric CLI args reject NaN/inf + out-of-range values with
+    # concise SystemExit. Without these, ``--days -1`` silently
+    # produces a 0-day run with empty diag_log; ``--resolution 0``
+    # crashes deep in grid creation; ``--sst-init nan`` propagates
+    # to all column ICs.
+    import math as _math
+    if args.dt is not None and not _math.isfinite(args.dt):
+        raise SystemExit(
+            f"error: --dt rejected: must be finite, got {args.dt!r}"
+        )
+    if args.dt is not None and args.dt <= 0.0:
+        raise SystemExit(
+            f"error: --dt rejected: must be positive, got {args.dt!r}"
+        )
+    if not _math.isfinite(args.sst_init):
+        raise SystemExit(
+            f"error: --sst-init rejected: must be finite, got "
+            f"{args.sst_init!r}"
+        )
+    # iter-74 Codex HIGH: --sst-init is a Kelvin temperature; negative
+    # values are physically invalid. iter-71 only checked finiteness.
+    if args.sst_init <= 0.0:
+        raise SystemExit(
+            f"error: --sst-init rejected: must be positive Kelvin "
+            f"temperature, got {args.sst_init!r}"
+        )
+    _POSITIVE_INTS = {
+        "--days": args.days,
+        "--resolution": args.resolution,
+        "--nlev": args.nlev,
+        "--diag-days": args.diag_days,
+    }
+    for _flag, _val in _POSITIVE_INTS.items():
+        if _val <= 0:
+            raise SystemExit(
+                f"error: {_flag} rejected: must be positive integer, "
+                f"got {_val!r}"
+            )
+    if args.truncation is not None and args.truncation <= 0:
+        raise SystemExit(
+            f"error: --truncation rejected: must be positive integer "
+            f"when set, got {args.truncation!r}"
+        )
 
     # Translate the legacy ``latlon_fv`` alias to the canonical
     # ``finite_volume`` name registered in
@@ -138,7 +187,18 @@ def main():
 
     N = args.resolution
     NLEV = args.nlev
-    DT = args.dt or (300.0 if N > 24 else 600.0)
+    # Auto-dt ladder lives in legoesm.driver.rce_dt (iter-24: was
+    # inline here through iter-21 but Codex iter-19 LOW asked for an
+    # importable function so the test mirror in
+    # test_rce_cross_grid_dt_defaults.py can call the SAME logic
+    # instead of hand-copying it). See CRM_implementation.md
+    # iter-12..23 for the per-tier empirical measurements; the
+    # function raises for N>96 to refuse silent extrapolation.
+    from legoesm.driver.rce_dt import auto_dt_rce
+    if args.dt is not None:
+        DT = args.dt
+    else:
+        DT = auto_dt_rce(args.grid_type, N)
     OUTPUT_DIR = Path(args.output or f"results/rce_{args.mode}")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -183,6 +243,61 @@ def main():
         ))
         if DT > _dt_max_pole:
             DT = _dt_max_pole
+
+    # CFL-formula advisory (Codex iter-21 MEDIUM #2 — does not
+    # override the ladder, just surfaces the formula bound so
+    # operators see the headroom they're running on).
+    #
+    # Codex iter-24 HIGH: previous broad `except Exception` would
+    # swallow TypeErrors from signature drift in cfl_max_dt and
+    # AttributeErrors from renamed estimators, masking real bugs.
+    # Now we only swallow ImportError (e.g. mid-refactor missing
+    # module) and re-raise everything else.
+    try:
+        from legoesm.core.cfl import (
+            cfl_max_dt, estimate_min_dx_cubed_sphere,
+            estimate_min_dx_gaussian, estimate_min_dx_icosahedral,
+            estimate_min_dx_latlon,
+        )
+    except ImportError as _exc:
+        print(f"  CFL advisory unavailable ({_exc!r}); skipping.")
+    else:
+        if grid_type == "cubed_sphere":
+            _dx_min = estimate_min_dx_cubed_sphere(N)
+        elif grid_type == "latlon":
+            _dx_min = estimate_min_dx_latlon(N)
+        elif grid_type == "gaussian":
+            _dx_min = estimate_min_dx_gaussian(N)
+        elif grid_type == "voronoi":
+            _dx_min = estimate_min_dx_icosahedral(N)
+        else:
+            _dx_min = None
+        if _dx_min is not None:
+            # Two reference bounds (both informational, do NOT
+            # override the ladder):
+            #   * gravity-wave CFL (iter-23): dt ∝ dx with safety 0.8.
+            #     Loose upper bound; the destabilising mode isn't
+            #     gravity-wave CFL.
+            #   * empirical dx² fit (iter-29): α≈2 fit of the
+            #     iter-12..26 ladder. Tight reference — the ladder
+            #     should agree with this within 30 %.
+            _dt_cfl_gravity = float(cfl_max_dt(_dx_min, 300.0, 0.8, ndim=2))
+            try:
+                from legoesm.driver.rce_dt import empirical_dt_dx2
+                _dt_fit = float(empirical_dt_dx2(_dx_min))
+                _fit_ratio = DT / _dt_fit
+                _fit_part = (
+                    f", dx² fit dt={_dt_fit:.0f} s "
+                    f"({_fit_ratio:.2f}× fit)"
+                )
+            except ImportError:
+                _fit_part = ""
+            print(
+                f"  CFL advisory: dx_min={_dx_min:.0f} m, "
+                f"gravity-wave dt_max={_dt_cfl_gravity:.0f} s "
+                f"({DT/_dt_cfl_gravity:.2f}× formula)"
+                f"{_fit_part}, using DT={DT:.0f} s."
+            )
 
     config = ExperimentConfig(
         grid=GridConfig(grid_type=grid_type, resolution=N, nlev=NLEV),
@@ -510,6 +625,17 @@ def main():
     # ---------------------------------------------------------------
     n_steps = int(args.days * 86400 / DT)
     diag_interval = int(args.diag_days * 86400 / DT)
+    # iter-75 (mirror of plane CRM iter-75 fix): reject huge --dt that
+    # truncates n_steps to 0. iter-71 caught --days <= 0 at parse time
+    # but a finite positive --dt > days*86400 silently produces a
+    # zero-step run.
+    if n_steps < 1:
+        raise SystemExit(
+            f"error: --dt rejected: n_steps={n_steps} (computed "
+            f"from --days={args.days} × 86400 s / dt={DT}); must "
+            f"be >= 1. Either --dt is too large or --days is too "
+            f"small."
+        )
 
     _ocean_label = OCEAN_MODE if not IS_LAND else "slab_soil"
     print("=" * 70)
@@ -605,7 +731,17 @@ def main():
                 "max_wind": max_v,
             })
 
-            if not bool(is_finite_state(state)) or max_v > 500:
+            # BLOWUP threshold lowered from 500 -> 200 m/s in iter-13
+            # (2026-05). At 500 m/s the iter-13 C48 run cleared the
+            # gate but was clearly unphysical (max|v|=236 m/s after a
+            # cooling crash that pulled mean_T_sfc to 289 K — slab
+            # ocean dropped 11 K from IC in 30 days). Jet streams cap
+            # at ~100 m/s and the sound speed is ~330 m/s; anything
+            # over 200 m/s in a hydrostatic RCE is either a CFL crash
+            # in progress or a numerical instability that is about to
+            # NaN. Catching it earlier surfaces the right config
+            # change (lower dt) instead of saving a corrupted file.
+            if not bool(is_finite_state(state)) or max_v > 200:
                 print(f"  BLOWUP at day {day:.0f}")
                 blowup = True
                 break

@@ -50,6 +50,8 @@ T_freeze = 273.15               # Freezing point of water [K]
 T_freeze_ocean = 271.35         # Freezing point of seawater [K] (~-1.8 C)
 S_ice_bulk_default = 4.0        # Default bulk ice salinity [g/kg or PSU] (CICE-style)
 S_ocean_ref = 34.7              # Reference ocean salinity [g/kg or PSU] (~WOA mean)
+mu_ice_freeze = 0.054           # Liquidus slope / freezing-point depression [degC/PSU] (Bitz-Lipscomb 1999, CICE)
+beta_ice_cond = 0.13            # Brine thermal-conductivity coefficient [W/(m*PSU)] (Untersteiner 1964; k = k0 + beta*S/T)
 T_deep_ocean_ref_C = 1.5        # Global mean deep-ocean potential T [degC]
                                 # (WOCE / WOA18 abyssal climatology — used as
                                 # fallback fill when an interpolated profile
@@ -154,6 +156,10 @@ RAD_TO_DEG = 180.0 / jnp.pi
 # ==============================================================================
 kappa_vk = 0.4                  # von Kármán constant
 nu_air = 1.5e-5                 # Kinematic viscosity of air at 15°C [m^2/s]
+prandtl_air = 0.71              # Molecular Prandtl number of air ν/α [-] (DNS
+                                # heat diffusion κ = ν / Pr). Schmidt number of
+                                # water vapour in air is ~0.6 (close); reuse this
+                                # for the DNS scalar leg unless set separately.
 
 # ==============================================================================
 # Shallow Water Test Case Constants

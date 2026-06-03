@@ -318,11 +318,11 @@ class DiagnosticCollector:
                     tgt_nlat=self._cmip_nlat,
                     tgt_nlon=self._cmip_nlon,
                 )
-        elif grid_type in ("voronoi", "mpas"):
+        elif grid_type == "mpas":
             raise ValueError(
                 f"CMIP output is not supported for grid_type={grid_type!r}. "
-                f"Voronoi/MPAS grids require unstructured-to-latlon regridding "
-                f"which is not yet implemented."
+                f"The SCVT Voronoi mesh requires unstructured-to-latlon "
+                f"regridding which is not yet implemented."
             )
 
     def set_fixed_fields(

@@ -50,7 +50,7 @@ from legoesm.grids.cubed_sphere_cdgrid import (
 )
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
-from legoesm.core.conservation import _conservation_accumulator
+from legoesm.core.conservation import conservation_accumulator
 from legoesm.core.fv3_sw_core import (
     _d2a2c_vect,
     _d_sw5_corner_divergence,
@@ -755,7 +755,7 @@ class CDGridShallowWaterModel(IntegrationMixin):
         # cubed-sphere arrays leak ~N·eps noise into the anchor and
         # produced ~10^-7 spurious "mass drift" in W5.  Matches the
         # cubed-sphere PE ``_batch_global_area_sums`` precision.
-        _acc = _conservation_accumulator()
+        _acc = conservation_accumulator()
         self._target_mass = jnp.sum(
             state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
         )
@@ -770,7 +770,7 @@ class CDGridShallowWaterModel(IntegrationMixin):
 
     def compute_mass(self, state) -> jax.Array:
         """Global ``∫ h dA`` (fp64).  iter-21: API parity with PE / NH twins."""
-        _acc = _conservation_accumulator()
+        _acc = conservation_accumulator()
         return jnp.sum(
             state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
         )
@@ -785,7 +785,17 @@ class CDGridShallowWaterModel(IntegrationMixin):
         pairwise averaging introduces.
 
         Vertices (shared by 3 faces) are owned by the lowest face index.
+
+        FV3_3D iter-1052: MPI dispatch.  Under ``_halo_backend == "mpi"``
+        the single-device logic reads ``ue[nbr_face, ...]`` directly,
+        which under MPI replicated mode returns stale values for
+        non-owned faces.  The MPI variant uses batched-per-peer
+        sendrecv (iter-1051 pattern) for edge sync and an ``allreduce
+        SUM`` for the 8 cube-vertex broadcasts.
         """
+        from legoesm.grids.halo import get_halo_backend
+        if get_halo_backend() == "mpi":
+            return self._sync_dgrid_boundary_mpi(state)
         u_d, v_d = state.u_d, state.v_d
         n = self.grid.n
         ca_c = self.cdgrid.cos_angle_corner
@@ -849,6 +859,242 @@ class CDGridShallowWaterModel(IntegrationMixin):
         v_d_new = -sa_c * ue + ca_c * vn
         return state._replace(u_d=u_d_new, v_d=v_d_new)
 
+    def _sync_dgrid_boundary_mpi(self, state: CDGridShallowWaterState):
+        """FV3_3D iter-1052: MPI-aware variant of :meth:`_sync_dgrid_boundary`.
+
+        Edge sync uses the iter-1051 batched-per-peer ``sendrecv``
+        pattern: each rank packs its boundary strips (``ue``, ``vn``)
+        for ALL cross-rank edges with a given peer into one buffer,
+        and exchanges with that peer in a single ``sendrecv``.
+        Each side's recv buffer contains the peer's strips for the
+        same shared edges; the non-owner side (higher face index)
+        overwrites its local value with the owner's strip.
+
+        Vertex sync uses ``mpi4jax.allreduce(SUM)`` on a per-rank
+        ``(8, 2)`` array where each rank fills the owner-face value
+        for vertices it owns and zeros elsewhere.  After the
+        allreduce every rank has the owner value for all 8 cube
+        vertices and applies them to the 3 face-positions per
+        vertex.  Sum is correct because each vertex has exactly
+        ONE owner_face → one rank contributes a non-zero value.
+
+        Owned-face contract preserved: only owned-face cells are
+        written; non-owned face state retains its pre-sync value
+        (same contract as iter-1040+ MPI tests).
+        """
+        from collections import defaultdict
+        from legoesm.grids.halo import _mpi_topology, get_halo_backend
+        from legoesm.parallel.halo_exchange import _get_sendrecv_vjp
+        try:
+            import mpi4jax
+            from mpi4py import MPI as _MPI
+        except ImportError as exc:
+            raise ImportError(
+                "MPI _sync_dgrid_boundary_mpi requires mpi4jax + mpi4py."
+            ) from exc
+        topology = _mpi_topology
+        # FV3_3D iter-1052 (codex F-15): face-only MPI only.  Sub-face
+        # tiled mode would need tile-local D-grid sync logic — same
+        # limitation as iter-1040+ ``pad_halo_mpi(interp_offsets=...)``.
+        if topology.tiling != (1, 1):
+            raise NotImplementedError(
+                "CDGridShallowWaterModel._sync_dgrid_boundary_mpi only "
+                "supports face-only MPI (tiling=(1, 1)); got tiling="
+                f"{topology.tiling}.  Sub-face tiling needs tile-local "
+                "edge / vertex sync logic which is not yet derived."
+            )
+        sendrecv = _get_sendrecv_vjp(mpi4jax)
+        comm = _MPI.COMM_WORLD
+        rank = topology.rank
+        n = self.grid.n
+        # CDGridShallowWaterState stores winds at corners with shape
+        # ``(6, n+1, n+1)`` — boundary strips have length ``n+1``.
+        strip_len = n + 1
+
+        u_d, v_d = state.u_d, state.v_d
+        ca_c = self.cdgrid.cos_angle_corner
+        sa_c = self.cdgrid.sin_angle_corner
+        ue = ca_c * u_d - sa_c * v_d
+        vn = sa_c * u_d + ca_c * v_d
+
+        def _get_strip(arr, face, edge):
+            if edge == WEST:    return arr[face, 0, :]
+            elif edge == EAST:  return arr[face, n, :]
+            elif edge == SOUTH: return arr[face, :, 0]
+            else:               return arr[face, :, n]
+
+        def _is_owned(f):
+            return f in topology.local_face_ids
+
+        # === EDGE SYNC: batched-per-peer ===
+        # Classify each (owned_face, edge) where nbr_face != owned_face.
+        # Group cross-rank edges by peer rank.  Each shared edge has
+        # ONE entry per rank's view; both sides agree on canonical
+        # ordering by sorting on the LOWER face index (then edge).
+        cross_rank_edges = defaultdict(list)
+        local_edges_nonowner = []
+        for face in topology.local_face_ids:
+            for edge in [WEST, EAST, SOUTH, NORTH]:
+                nbr_face, nbr_edge, rev = CONNECTIVITY[face][edge]
+                if nbr_face >= face:
+                    # face is OWNER for this edge (or self-loop, n/a).
+                    # Non-owner side handles the write; if non-owner
+                    # is on same rank, queue it as local-nonowner case.
+                    if _is_owned(nbr_face):
+                        # Local owner-case: nothing to do (the peer
+                        # face on this rank will copy from us).
+                        pass
+                    else:
+                        # Cross-rank owner-case: send our strip to
+                        # the non-owner's rank (already covered when
+                        # iterating from that side).
+                        nbr_rank = topology.neighbor_ranks.get((face, edge))
+                        if nbr_rank is not None and nbr_rank != rank:
+                            cross_rank_edges[nbr_rank].append(
+                                (face, edge, nbr_face, nbr_edge, rev,
+                                 True)  # is_owner_local
+                            )
+                else:
+                    # face is NON-OWNER (nbr_face < face).
+                    if _is_owned(nbr_face):
+                        # Local non-owner case: direct copy from nbr_face.
+                        local_edges_nonowner.append(
+                            (face, edge, nbr_face, nbr_edge, rev)
+                        )
+                    else:
+                        nbr_rank = topology.neighbor_ranks.get((face, edge))
+                        if nbr_rank is not None:
+                            cross_rank_edges[nbr_rank].append(
+                                (face, edge, nbr_face, nbr_edge, rev,
+                                 False)  # is_owner_local
+                            )
+
+        # Per peer: pack send strips (ue, vn) in canonical order.
+        # Canonical key: (min(my_face, nbr_face), min(my_edge, nbr_edge_at_min_face)).
+        # Both ranks compute same key for the same shared edge.
+        def _canon_key(entry):
+            f, e, nf, ne, rev, owner_local = entry
+            if f < nf:
+                return (f, e)
+            return (nf, ne)
+
+        nbr_recv_strips = {}  # (face, edge) -> (ue_strip, vn_strip)
+        # FV3_3D iter-1053: iterate peers in ascending rank order so
+        # ALL ranks issue their sendrecv calls in the same global
+        # peer-sequence — avoids cyclic-wait deadlock at np=6 where
+        # each rank has 4 peers and dict-insertion order would
+        # otherwise produce ``rank 0 → rank 3 → rank 2 → rank 1 →
+        # rank 0`` cyclic blocking.  Sorted ordering ensures rank A
+        # talks to rank B in the same iteration on both sides.
+        for peer_rank in sorted(cross_rank_edges.keys()):
+            entries = cross_rank_edges[peer_rank]
+            ordered = sorted(entries, key=_canon_key)
+            # Each side packs its OWN side's strips at each shared edge.
+            # Even though only owner's strip is needed, packing both
+            # makes shape symmetric → mpi4jax.sendrecv with equal-shape
+            # send/recv works.
+            ue_parts = []
+            vn_parts = []
+            for f, e, nf, ne, rev, owner_local in ordered:
+                ue_parts.append(_get_strip(ue, f, e))
+                vn_parts.append(_get_strip(vn, f, e))
+            send_ue = jnp.concatenate(ue_parts, axis=0)
+            send_vn = jnp.concatenate(vn_parts, axis=0)
+            send_buf = jnp.concatenate([send_ue, send_vn], axis=0)
+            send_tag = rank
+            recv_tag = peer_rank
+            recv_buf = sendrecv(
+                send_buf, jnp.zeros_like(send_buf),
+                peer_rank, peer_rank,
+                send_tag, recv_tag, comm,
+            )
+            # Unpack: first half = peer's ue strips; second half = peer's vn.
+            total_strip_size = send_ue.shape[0]
+            recv_ue = recv_buf[:total_strip_size]
+            recv_vn = recv_buf[total_strip_size:]
+            offset = 0
+            for f, e, nf, ne, rev, owner_local in ordered:
+                chunk_ue = recv_ue[offset:offset + strip_len]
+                chunk_vn = recv_vn[offset:offset + strip_len]
+                offset += strip_len
+                if not owner_local:
+                    # Apply reversal — peer's strip is in nbr_face's
+                    # coord frame; flip if shared edge has axis swap.
+                    if rev:
+                        chunk_ue = chunk_ue[::-1]
+                        chunk_vn = chunk_vn[::-1]
+                    nbr_recv_strips[(f, e)] = (chunk_ue, chunk_vn)
+
+        # Pre-extract local non-owner case strips BEFORE writes.
+        local_nonowner_strips = {}
+        for f, e, nf, ne, rev in local_edges_nonowner:
+            s_ue = _get_strip(ue, nf, ne)
+            s_vn = _get_strip(vn, nf, ne)
+            if rev:
+                s_ue = s_ue[::-1]
+                s_vn = s_vn[::-1]
+            local_nonowner_strips[(f, e)] = (s_ue, s_vn)
+
+        # Write back: for each owned face's non-owner edge, overwrite.
+        def _set_edge(arr, face, edge, strip):
+            if edge == WEST:
+                return arr.at[face, 0, :].set(strip)
+            elif edge == EAST:
+                return arr.at[face, n, :].set(strip)
+            elif edge == SOUTH:
+                return arr.at[face, :, 0].set(strip)
+            else:
+                return arr.at[face, :, n].set(strip)
+
+        for f, e, nf, ne, rev in local_edges_nonowner:
+            s_ue, s_vn = local_nonowner_strips[(f, e)]
+            ue = _set_edge(ue, f, e, s_ue)
+            vn = _set_edge(vn, f, e, s_vn)
+        for (f, e), (s_ue, s_vn) in nbr_recv_strips.items():
+            ue = _set_edge(ue, f, e, s_ue)
+            vn = _set_edge(vn, f, e, s_vn)
+
+        # === VERTEX SYNC: allreduce(SUM) ===
+        _vtx = [
+            [(0, 0, 0), (3, n, 0), (5, 0, n)],
+            [(0, n, 0), (1, 0, 0), (5, n, n)],
+            [(0, 0, n), (3, n, n), (4, 0, 0)],
+            [(0, n, n), (1, 0, n), (4, n, 0)],
+            [(1, n, 0), (2, 0, 0), (5, n, 0)],
+            [(1, n, n), (2, 0, n), (4, n, n)],
+            [(2, n, 0), (3, 0, 0), (5, 0, 0)],
+            [(2, n, n), (3, 0, n), (4, 0, n)],
+        ]
+        # Each rank fills owner-face value for vertices it owns.
+        my_vtx = jnp.zeros((8, 2), dtype=ue.dtype)
+        for i, vtx in enumerate(_vtx):
+            owner_face, oi, oj = vtx[0]
+            if _is_owned(owner_face):
+                my_vtx = my_vtx.at[i, 0].set(ue[owner_face, oi, oj])
+                my_vtx = my_vtx.at[i, 1].set(vn[owner_face, oi, oj])
+        # Allreduce SUM: exactly one rank contributes non-zero per row.
+        # mpi4jax.allreduce returns (result, token) or just result; use
+        # ``_mpi4jax_array_result`` helper to normalize.
+        from legoesm.parallel.reductions import _mpi4jax_array_result
+        all_vtx = _mpi4jax_array_result(
+            mpi4jax.allreduce(my_vtx, op=_MPI.SUM, comm=comm)
+        )
+        # Apply: for each vertex, set all owned face positions.
+        for i, vtx in enumerate(_vtx):
+            ue_own = all_vtx[i, 0]
+            vn_own = all_vtx[i, 1]
+            for f, ii, jj in vtx:
+                if _is_owned(f):
+                    ue = ue.at[f, ii, jj].set(ue_own)
+                    vn = vn.at[f, ii, jj].set(vn_own)
+
+        # Convert back to face-local.  ca_c * ue + sa_c * vn for u_d;
+        # -sa_c * ue + ca_c * vn for v_d.  This applies to all 6
+        # faces — non-owned face values retain pre-sync content.
+        u_d_new = ca_c * ue + sa_c * vn
+        v_d_new = -sa_c * ue + ca_c * vn
+        return state._replace(u_d=u_d_new, v_d=v_d_new)
+
     def tendencies(self, state: CDGridShallowWaterState):
         """Compute tendencies (pure function wrapper)."""
         return cdgrid_shallow_water_tendencies(
@@ -882,7 +1128,7 @@ class CDGridShallowWaterModel(IntegrationMixin):
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
             # iter-5: fp64 budget accumulator (see set_initial_mass).
-            acc = _conservation_accumulator()
+            acc = conservation_accumulator()
             area = self.cdgrid.base.area.astype(acc)
             total_area = jnp.sum(area)
             if self._target_mass is not None:
@@ -988,7 +1234,7 @@ class FV3FBShallowWaterModel:
         # cubed-sphere arrays leak ~N·eps noise into the anchor and
         # produced ~10^-7 spurious "mass drift" in W5.  Matches the
         # cubed-sphere PE ``_batch_global_area_sums`` precision.
-        _acc = _conservation_accumulator()
+        _acc = conservation_accumulator()
         self._target_mass = jnp.sum(
             state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
         )
@@ -1007,7 +1253,7 @@ class FV3FBShallowWaterModel:
 
     def compute_mass(self, state) -> jax.Array:
         """Global ``∫ h dA`` (fp64).  iter-21: API parity with PE / NH twins."""
-        _acc = _conservation_accumulator()
+        _acc = conservation_accumulator()
         return jnp.sum(
             state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
         )
@@ -1057,7 +1303,7 @@ class FV3FBShallowWaterModel:
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
             # iter-5: fp64 budget accumulator (see set_initial_mass).
-            acc = _conservation_accumulator()
+            acc = conservation_accumulator()
             area = self.cdgrid.base.area.astype(acc)
             total_area = jnp.sum(area)
             if self._target_mass is not None:
@@ -1127,7 +1373,7 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
         # cubed-sphere arrays leak ~N·eps noise into the anchor and
         # produced ~10^-7 spurious "mass drift" in W5.  Matches the
         # cubed-sphere PE ``_batch_global_area_sums`` precision.
-        _acc = _conservation_accumulator()
+        _acc = conservation_accumulator()
         self._target_mass = jnp.sum(
             state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
         )
@@ -1146,7 +1392,7 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
 
     def compute_mass(self, state) -> jax.Array:
         """Global ``∫ h dA`` (fp64).  iter-21: API parity with PE / NH twins."""
-        _acc = _conservation_accumulator()
+        _acc = conservation_accumulator()
         return jnp.sum(
             state.h.astype(_acc) * self.cdgrid.base.area.astype(_acc),
         )
@@ -1392,7 +1638,7 @@ class FV3EdgeShallowWaterModel(IntegrationMixin):
         # Conservation fixer
         if self.config.use_conservation_fixer and self.config.fix_mass:
             # iter-5: fp64 budget accumulator (see set_initial_mass).
-            acc = _conservation_accumulator()
+            acc = conservation_accumulator()
             area = self.cdgrid.base.area.astype(acc)
             total_area = jnp.sum(area)
             if self._target_mass is not None:

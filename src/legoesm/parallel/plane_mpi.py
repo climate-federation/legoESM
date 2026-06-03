@@ -300,6 +300,11 @@ def exchange_halo_plane_yxz(
         sendrecv = None  # never used; single-rank shortcut above
 
     trailing = field_yxz.shape[2:]
+    # iter-57 Codex LOW#2 doc: MPI tag namespace. N/S exchanges use
+    # tag 1000+, E/W use 2000+; mpi4jax adds a per-field index so the
+    # two ranges never collide as long as no individual call site
+    # uses >999 distinct tags. Two-axis pencil layout only emits 2
+    # tag bases total per packed halo round, well below the limit.
     _TAG_NS = 1_000
     _TAG_EW = 2_000
     rank = layout.rank

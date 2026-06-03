@@ -194,7 +194,13 @@ def make_sfno_step_unified(
             held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
             held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
         ])
-        trad_out, held_new = traditional_step_unified(*trad_args, **kwargs)
+        _trad = traditional_step_unified(*trad_args, **kwargs)
+        trad_out, held_new = _trad[0], _trad[1]
+        # The traditional PhysicsPipeline step returns a 3rd value (the
+        # slab-land skin temperature, #325); carry it through so an
+        # SFNO-correction run with an active land tile still evolves
+        # T_land.  Older 2-tuple steps leave it None (land inert).
+        _trad_T_land = _trad[2] if len(_trad) > 2 else None
 
         corrected = PhysicsOutput(
             **_physics_output_kwargs(
@@ -213,6 +219,6 @@ def make_sfno_step_unified(
                 conv_prog=conv_prog,
             )
         )
-        return corrected, held_new
+        return corrected, held_new, _trad_T_land
 
     return step_unified

@@ -20,11 +20,9 @@ from typing import Callable, TypeAlias, cast
 import logging
 import jax
 import jax.numpy as jnp
-import numpy as np
-from legoesm.atmosphere.physics.radiation.rrtmgp import kernel_ops
+from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.radiation.rrtmgp.config import radiative_transfer
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import cloud_optics
-from legoesm.atmosphere.physics.radiation.rrtmgp.optics import constants
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import gas_optics
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_cloud_optics
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_gas_optics_base
@@ -59,17 +57,39 @@ class RRTMOptics(optics_base.OpticsScheme):
       self,
       vmr_lib: LookupVolumeMixingRatio,
       params: radiative_transfer.OpticsParameters,
+      include_clouds: bool = True,
   ):
+    """
+    Args:
+      vmr_lib: Lookup table of volume mixing ratios.
+      params: Optics parameters (gas + cloud NetCDF file paths).
+      include_clouds: When False, skip loading the cloud_optics_lw /
+        cloud_optics_sw tables.  iter-40 memory optimisation:
+        ``RRTMOptics`` is constructed from cached entries
+        (``_legoesm_optics_cache``), and clear-sky-only workflows
+        previously paid for the ~MB cloud-table load every time.
+        ``solve_columns`` only invokes the cloud branch when
+        ``has_clouds=config.include_clouds and (cloud_path_liq is not
+        None or cloud_path_ice is not None)``, so the cloud_optics
+        attributes are safely ``None``-able when include_clouds=False.
+    """
     super().__init__()
     assert isinstance(params.optics, radiative_transfer.RRTMOptics)
     rrtm_params = params.optics
     self.vmr_lib = vmr_lib
-    self.cloud_optics_lw = lookup_cloud_optics.from_data_file(
-        rrtm_params.cloud_longwave_nc_filepath
-    )
-    self.cloud_optics_sw = lookup_cloud_optics.from_data_file(
-        rrtm_params.cloud_shortwave_nc_filepath
-    )
+    if include_clouds:
+      self.cloud_optics_lw = lookup_cloud_optics.from_data_file(
+          rrtm_params.cloud_longwave_nc_filepath
+      )
+      self.cloud_optics_sw = lookup_cloud_optics.from_data_file(
+          rrtm_params.cloud_shortwave_nc_filepath
+      )
+    else:
+      # Clear-sky configuration: skip the cloud-table load entirely.
+      # solve_columns' has_clouds gate ensures the cloud branch is
+      # never invoked, so these attributes stay None-safe.
+      self.cloud_optics_lw = None
+      self.cloud_optics_sw = None
     self.gas_optics_lw = lookup_gas_optics_longwave.from_data_file(
         rrtm_params.longwave_nc_filepath
     )
@@ -259,6 +279,15 @@ class RRTMOptics(optics_base.OpticsScheme):
     """The actual cloud optical properties calculation."""
     logging.info('Calling cloud optical properties graph.')
     cloud_lookup = self.cloud_optics_lw if is_lw else self.cloud_optics_sw
+    # iter-41: defensive guard.  The public entry point
+    # ``_combine_gas_and_cloud_properties`` already errors out when
+    # ``cloud_optics_*`` is None (iter-40 include_clouds=False
+    # path), but ``_cloud_props`` is exposed via
+    # ``cloud_properties_fn`` so a direct caller could still hit it.
+    assert cloud_lookup is not None, (
+        "_cloud_props called with cloud_optics_lw/sw=None; "
+        "rebuild RRTMOptics with include_clouds=True."
+    )
     return cloud_optics.compute_optical_properties(
         cloud_lookup,
         cloud_path_liq,
@@ -307,11 +336,17 @@ class RRTMOptics(optics_base.OpticsScheme):
     ssa = cloud_optical_props['ssa']
     g = cloud_optical_props['asymmetry_factor']
 
-    # Apply delta scaling
+    # Apply delta scaling.  Use ``safe_divide`` instead of
+    # ``num / jnp.maximum(denom, eps)`` for the two divides — the
+    # latter is forward-safe but has a ``-num / denom**2`` reverse-
+    # mode VJP that overflows when ``denom`` is at the floor
+    # (``denom**2 = eps**2 = 1e-12`` underflows to 0 under fp64).
+    # Same pattern as the iter-14 restoration of commit 59407953;
+    # codex iter-18 review flagged this as a survivor.
     wf = ssa * g**2
     cloud_tau = (1 - wf) * optical_depth
-    cloud_ssa = (ssa - wf) / jnp.maximum(1 - wf, _EPSILON)
-    cloud_asy = (g - g**2) / jnp.maximum(1 - g**2, _EPSILON)
+    cloud_ssa = safe_divide(ssa - wf, 1 - wf, eps=_EPSILON, fill=0.0)
+    cloud_asy = safe_divide(g - g**2, 1 - g**2, eps=_EPSILON, fill=0.0)
 
     return {
         'optical_depth': cloud_tau,
@@ -336,6 +371,22 @@ class RRTMOptics(optics_base.OpticsScheme):
     by the fractional cloud cover so that partially-cloudy grid cells
     have proportionally reduced cloud radiative effect.
     """
+    # iter-41 codex review: explicit None-guard for the cloud-optics
+    # lookups.  When ``RRTMOptics`` was constructed with
+    # ``include_clouds=False`` (iter-40), the cloud_optics_lw/sw
+    # attributes are ``None`` and the public ``solve_columns`` gate
+    # ensures cloud paths are also None — so this branch isn't
+    # reached.  But a direct caller that bypasses ``solve_columns``
+    # and invokes ``compute_lw_optical_properties`` with cloud paths
+    # would hit ``None.cloud_optics_*`` here.  Raise a clear error
+    # instead of letting the AttributeError propagate.
+    cloud_lookup = self.cloud_optics_lw if is_lw else self.cloud_optics_sw
+    if cloud_lookup is None:
+      raise ValueError(
+          "RRTMOptics was constructed with include_clouds=False but "
+          "cloud_path_liq or cloud_path_ice is non-None.  Either rebuild "
+          "the solver with include_clouds=True or omit the cloud kwargs."
+      )
     gas_lookup = self.gas_optics_lw if is_lw else self.gas_optics_sw
     assert gas_lookup is not None  # Type narrowing.
 
@@ -595,166 +646,10 @@ class RRTMOptics(optics_base.OpticsScheme):
     return self.gas_optics_sw.solar_src_scaled
 
 
-class GrayAtmosphereOptics(optics_base.OpticsScheme):
-  """Implementation of the gray atmosphere optics scheme."""
-
-  def __init__(
-      self,
-      params: radiative_transfer.OpticsParameters,
-  ):
-    super().__init__()
-    optics = params.optics
-    assert isinstance(optics, radiative_transfer.GrayAtmosphereOptics)
-    self._p0 = optics.p0
-    self._alpha = optics.alpha
-    self._d0_lw = optics.d0_lw
-    self._d0_sw = optics.d0_sw
-
-  @override
-  def compute_lw_optical_properties(
-      self,
-      pressure: Array,
-      *args,
-      **kwargs,
-  ) -> dict[str, Array]:
-    """Compute longwave optical properties based on pressure and lapse rate.
-
-    See Schneider 2004, J. Atmos. Sci. (2004) 61 (12): 1317–1340.
-    DOI: https://doi.org/10.1175/1520-0469(2004)061<1317:TTATTS>2.0.CO;2
-    To obtain the local optical depth of the layer, the expression for
-    cumulative optical depth (from the top of the atmosphere to an arbitrary
-    pressure level) was differentiated with respect to the pressure and
-    multiplied by the pressure difference across the grid cell.
-
-    Args:
-      pressure: The pressure field [Pa].
-      *args: Miscellaneous inherited arguments.
-      **kwargs: Miscellaneous inherited keyword arguments.
-
-    Returns:
-      A dictionary containing the optical depth (`optical_depth`), the single-
-      scattering albedo (`ssa`), and the asymmetry factor (`asymmetry_factor`)
-      for longwave radiation.
-    """
-    # Compute the centered pressure difference in z: (p_{k+1} - p_{k-1}) / 2.
-    dp = 0.5 * kernel_ops.centered_difference(pressure, dim=2)
-    # Compute the pointwise optical depth as a function of pressure only.
-    alpha, d0_lw, p0 = self._alpha, self._d0_lw, self._p0
-    tau = jnp.abs(alpha * d0_lw * (pressure / p0) ** alpha / pressure * dp)
-
-    return {
-        'optical_depth': tau,
-        'ssa': jnp.zeros_like(pressure),
-        'asymmetry_factor': jnp.zeros_like(pressure),
-    }
-
-  @override
-  def compute_sw_optical_properties(
-      self,
-      pressure: Array,
-      *args,
-      **kwargs,
-  ) -> dict[str, Array]:
-    """Compute the shortwave optical properties of a gray atmosphere.
-
-    See O'Gorman 2008, Journal of Climate Vol 21, Page(s): 3815–3832.
-    DOI: https://doi.org/10.1175/2007JCLI2065.1. In particular, the cumulative
-    optical depth expression shown in equation 3 inside the exponential is
-    differentiated with respect to pressure and scaled by the pressure
-    difference across the grid cell.
-
-    Args:
-      pressure: The pressure field [Pa].
-      *args: Miscellaneous inherited arguments.
-      **kwargs: Miscellaneous inherited keyword arguments.
-
-    Returns:
-      A dictionary containing the optical depth (`optical_depth`), the single-
-      scattering albedo (`ssa`), and the asymmetry factor (`asymmetry_factor`)
-      for shortwave radiation.
-    """
-    # Compute the centered pressure difference in z:
-    #   dp_{i,j,k} = (p_{i,j,k+1} - p_{i,j,k-1}) / 2.
-    dp = 0.5 * kernel_ops.centered_difference(pressure, dim=2)
-
-    # Compute the pointwise optical depth as a function of pressure only.
-    d0_sw, p0 = self._d0_sw, self._p0
-    tau = jnp.abs(2 * d0_sw * (pressure / p0) * (dp / p0))
-
-    return {
-        'optical_depth': tau,
-        'ssa': jnp.zeros_like(pressure),
-        'asymmetry_factor': jnp.zeros_like(pressure),
-    }
-
-  @override
-  def compute_planck_sources(
-      self,
-      pressure: Array,
-      temperature: Array,
-      *args,
-      sfc_temperature: Array | None = None,
-  ) -> dict[str, Array]:
-    """Compute the Planck sources used in the longwave problem.
-
-    The computation is based on Stefan-Boltzmann's law, which states that the
-    thermal radiation emitted from a blackbody is directly proportional to the
-    4-th power of its absolute temperature.
-
-    Args:
-      pressure: The pressure field [Pa].
-      temperature: The temperature [K].
-      *args: Miscellaneous inherited arguments.
-      sfc_temperature: The optional surface temperature [K], 2D field.
-
-    Returns:
-      A dictionary containing the Planck source at the cell center
-      (`planck_src`), the top cell boundary (`planck_src_top`), and the bottom
-      cell boundary (`planck_src_bottom`).
-    """
-    del pressure
-    assert sfc_temperature is not None, 'sfc_temperature is required.'
-
-    def src_fn(t: Array) -> Array:
-      return constants.STEFAN_BOLTZMANN * t**4 / np.pi
-
-    # Interpolate temperature from (ccc) to (ccf), and also provide a shifted
-    # copy.
-    temperature_bottom, temperature_top = optics_base.reconstruct_face_values(
-        temperature, f_lower_bc=sfc_temperature
-    )
-
-    planck_srcs = {
-        'planck_src': src_fn(temperature),
-        'planck_src_top': src_fn(temperature_top),
-        'planck_src_bottom': src_fn(temperature_bottom),
-    }
-    if sfc_temperature is not None:
-      planck_srcs['planck_src_sfc'] = src_fn(sfc_temperature)
-    return planck_srcs
-
-  @property
-  @override
-  def n_gpt_lw(self) -> int:
-    """The number of g-points in the longwave bands."""
-    return 1
-
-  @property
-  @override
-  def n_gpt_sw(self) -> int:
-    """The number of g-points in the shortwave bands."""
-    return 1
-
-  @override
-  @property
-  def solar_fraction_by_gpt(self) -> Array:
-    """Mapping from g-point to the fraction of total solar radiation."""
-    return jnp.array([1.0], dtype=jnp.float_)
-
-
 def optics_factory(
     params: radiative_transfer.OpticsParameters,
     vmr_lib: LookupVolumeMixingRatio | None = None,
+    include_clouds: bool = True,
 ) -> optics_base.OpticsScheme:
   """Construct an instance of `OpticsScheme`.
 
@@ -762,14 +657,26 @@ def optics_factory(
     params: The optics parameters.
     vmr_lib: An instance of `LookupVolumeMixingRatio` containing gas
       concentrations.
+    include_clouds: When False, the constructed ``RRTMOptics`` will
+      have ``cloud_optics_lw = cloud_optics_sw = None`` and skip the
+      cloud-table load.  See ``RRTMOptics.__init__`` docstring for
+      the safety argument (iter-40 memory optimisation).
 
   Returns:
     An instance of `OpticsScheme`.
   """
   if isinstance(params.optics, radiative_transfer.RRTMOptics):
     assert vmr_lib is not None, '`vmr_lib` is required for `RRTMOptics`.'
-    return RRTMOptics(vmr_lib, params)
-  elif isinstance(params.optics, radiative_transfer.GrayAtmosphereOptics):
-    return GrayAtmosphereOptics(params)
-  else:
-    raise ValueError('Unsupported optics scheme.')
+    return RRTMOptics(vmr_lib, params, include_clouds=include_clouds)
+  # iter-61 removed the ``GrayAtmosphereOptics`` impl path.  That class
+  # carried its own ``compute_planck_sources`` based on
+  # Schneider 2004 / O'Gorman 2008 gray-atmosphere lapse-rate Planck —
+  # NOT the RRTMGP correlated-k Planck source.  The RRTMGP Planck path
+  # (``RRTMOptics.compute_planck_sources`` → ``gas_optics.planck_source``)
+  # is untouched and remains the only Planck source legoESM uses.
+  raise ValueError(
+      f'Unsupported optics scheme: {type(params.optics).__name__!r}. '
+      'Only RRTMOptics is supported in legoESM (iter-61 dropped the '
+      'swirl_jatmos GrayAtmosphereOptics path; use '
+      'legoesm.atmosphere.physics.radiation.gray for gray radiation).'
+  )

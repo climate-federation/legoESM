@@ -55,7 +55,22 @@ THETA_PERT = 0.5
 Q_V_SFC = 0.012
 
 
-def _build_setup():
+def _build_setup(fix_mass: bool = True):
+    """Spectral plane setup helper.
+
+    ``fix_mass`` (default True) toggles BOTH ``fix_mass`` and
+    ``anchor_mass_to_initial`` in the underlying
+    ``CompressibleEulerConfig``. The default-True path is what the
+    ``test_spectral_rce_smoke_stable_and_conservative`` 1e-6 cap
+    requires (anchored per-step clamp brings drift to ~1e-15
+    machine precision).
+
+    The ``fix_mass=False`` path is for
+    ``test_spectral_rce_dycore_natural_conservation`` which checks
+    the dycore's own conservation (no fixer) against a looser
+    5e-3 cap. The two tests together separate ``did the fixer
+    fire?`` from ``did the dycore stay close to conservative?``.
+    """
     nx = ny = 6
     grid = create_plane_grid(
         nx=nx, ny=ny, nlev=NLEV, dx=4_000.0, dy=4_000.0,
@@ -69,7 +84,8 @@ def _build_setup():
         hyperdiff_rho_coeff=1.0e5,
         hyperdiff_w_coeff=1.0e5,
         semi_implicit_acoustic=False, use_coriolis=False,
-        fix_mass=False, smagorinsky_cs=0.2, smagorinsky_prandtl=1.0,
+        fix_mass=fix_mass, anchor_mass_to_initial=fix_mass,
+        smagorinsky_cs=0.2, smagorinsky_prandtl=1.0,
     )
     return grid, hc, tm, cfg
 
@@ -143,6 +159,66 @@ def test_spectral_rce_smoke_stable_and_conservative():
     # negative bias.
     assert min_q_v >= -1.0e-9, f"q_v negative bias: {min_q_v:.3e}"
     assert max_q_v < 0.030
+
+
+def test_spectral_rce_dycore_natural_conservation():
+    """Companion to the 1e-6 post-fixer cap above. With
+    ``fix_mass=False`` the anchored dry-mass fixer is OFF — drift
+    reflects the dycore's natural conservation alone.
+
+    Measured drift over 30 steps + 1 sim-min on the 6x6x8 grid at
+    dx=4 km: ~6e-4 (rfft2/irfft2 + dealias + sponge + FD-plane
+    natural conservation noise floor). Cap set at 5e-3 = ~8×
+    margin over the measurement — loose enough to absorb
+    JAX/XLA/FFT version variance (the cross-version FFT
+    rounding-floor can shift by O(1e-4)) but tight enough to
+    catch a fully-broken dycore (>1e-2 = >1% total mass drift
+    over the 30-step / 1-sim-min window; on production-scale
+    runs the natural drift would have to integrate to >100x the
+    iter-183 30-day measured -1.6% MSE drift to trip this gate).
+
+    Without this test, ``test_spectral_rce_smoke_stable_and_conservative``
+    (with fixer ON) would silently absorb any regression in the
+    natural conservation pathway — the fixer simply re-anchors
+    each step. The two tests together separate ``did the fixer
+    fire?`` from ``did the dycore stay close to conservative?``.
+    """
+    from scripts.run_rcemip_plane import make_rcemip_physics
+    grid, hc, tm, cfg = _build_setup(fix_mass=False)
+    spec_model = SpectralPlaneCompressibleEulerModel(
+        grid, hc, tm, cfg,
+        spectral_config=SpectralPlaneConfig(
+            use_spectral_hyperdiff=False, apply_dealias=True,
+        ),
+    )
+    phys = _build_initial_phys(grid, hc, grid.ny, grid.nx)
+    physics_fn = make_rcemip_physics(
+        grid, hc, tm,
+        radiation_config=RadiationConfig(
+            scheme="gray", gray=GrayRadiationConfig(),
+        ),
+        microphysics_config=MicrophysicsConfig(
+            scheme="kessler", kessler=KesslerConfig(),
+        ),
+        dt=DT, T_sfc=300.0, q_sfc=Q_V_SFC,
+    )
+    spec = spec_state_from_physical(phys)
+    mass_0 = float(spec_model.compute_dry_mass(spec))
+    for _ in range(N_STEPS):
+        spec = spec_model.step(spec, dt=DT, physics_fn=physics_fn)
+    mass_drift = abs(
+        float(spec_model.compute_dry_mass(spec)) - mass_0
+    ) / abs(mass_0)
+    print(f"\n[spectral_dycore_no_fixer] drift={mass_drift:.2e}")
+    # Cap 5e-3 = ~8x margin over the measured ~6e-4 baseline drift.
+    # Loose enough to absorb JAX/XLA/FFT cross-version rounding
+    # variance (O(1e-4) shift across jax 0.4.x..0.8.x); tight enough
+    # to catch a fully-broken dycore (>1e-2 = >1% TOTAL drift over
+    # the 30-step / 1-sim-min window — NOT per-step).
+    assert mass_drift < 5.0e-3, (
+        f"Dycore natural mass conservation regressed: drift="
+        f"{mass_drift:.3e} > 5e-3 cap (baseline ~6e-4 on this grid)."
+    )
 
 
 def test_spectral_extras_off_matches_fd_plane_within_tolerance():

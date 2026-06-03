@@ -18,7 +18,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.atmosphere.physics._shared import virtual_temperature
+from legoesm.atmosphere.physics._shared import mixing_length, virtual_temperature
 from legoesm.atmosphere.physics.turbulence.config import EDMFConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
@@ -92,10 +92,7 @@ def edmf_turbulence(
     dz_half = jnp.clip(dz_half, 1.0, None)
 
     # Mixing length
-    z_abs = jnp.clip(jnp.abs(z_full), 1.0, None)
-    l_mix = constants.kappa_vk * z_abs / (
-        1.0 + constants.kappa_vk * z_abs / config.l_mix_max
-    )
+    l_mix = mixing_length(z_full, config.l_mix_max)
 
     # Eddy diffusivities from TKE
     sqrt_tke = jnp.sqrt(tke)
@@ -202,16 +199,18 @@ def edmf_turbulence(
         #
         #     w · dw/dz = B − ε · w²       ⇔     d(w²)/dz = 2(B − ε·w²).
         #
-        # Use the **squared form** so the discrete update is dimensionally
-        # consistent (m²/s² on both sides) and naturally handles w → 0:
-        # ``w_new² = w² + 2·(B − ε·w²)·dz``, clamped at zero.  The
-        # previous formulation ``dw/dz ≈ B − ε·w`` mixed [m/s²] and
-        # [1/s] in a single sum, missed the canonical ``B/w`` term in
-        # the Lagrangian form, and consequently flipped the sign of
-        # dw/dz at small w_u — strangling buoyant updrafts that should
-        # accelerate.
+        # **Backward-Euler in the linear damping term** so the update is
+        # unconditionally stable for any ``ε·dz``:
+        #     w²_new = (w²_old + 2·B·dz) / (1 + 2·ε·dz),    clamped ≥ 0.
+        # Forward Euler ``w² + 2(B − ε·w²)·dz`` is only stable when
+        # ``ε·dz < 0.5``; at T21 with 8 sigma levels ``dz`` can reach
+        # ~3-5 km and the default ``ε = 1e-3 /m`` gives ``ε·dz ~ 3-5``,
+        # which flips the sign of the w² coefficient and amplifies it
+        # each layer — the original sample-46 NaN crash.  Backward
+        # Euler matches the forward form to O(ε·dz) and is the
+        # canonical choice for stiff linear damping.
         eps = config.entrainment_rate
-        w_u_sq_raw = w_u ** 2 + 2.0 * (buoy - eps * w_u ** 2) * dz_k
+        w_u_sq_raw = (w_u ** 2 + 2.0 * buoy * dz_k) / (1.0 + 2.0 * eps * dz_k)
         # AD-safe sqrt: ``d/dx sqrt(x) = 1/(2·sqrt(x))`` blows up at 0,
         # so floor the argument before sqrt and zero the result for
         # genuinely-negative w² (dead updraft) via an outer ``where``.
@@ -220,13 +219,23 @@ def edmf_turbulence(
 
         # Entrain environment air (mass-conservation form):
         #   d(φ_u)/dz = −ε · (φ_u − φ_env).
-        dtheta_dz = -eps * (theta_u - theta_env)
-        dq_dz = -eps * (q_u - q_env)
-        theta_u_new = theta_u + dtheta_dz * dz_k
-        q_u_new = q_u + dq_dz * dz_k
+        # **Backward-Euler**: ``φ_new = (φ_old + ε·dz·φ_env) / (1 + ε·dz)``.
+        # Unconditionally stable convex combination of plume and
+        # environment for any ``ε·dz``.  The original forward-Euler form
+        # ``φ + dz · [-ε(φ − φ_env)]`` flips the coefficient sign when
+        # ``ε·dz > 1`` (which happens at coarse-vertical T21 with the
+        # default ``ε = 1e-3 /m``); the resulting θ_u runaway drove the
+        # NaN crash in ``combo_turb_edmf`` of the sweep.  Both forms
+        # agree to O(ε·dz) so calibration with fine-vertical schemes is
+        # preserved.
+        eps_dz = eps * dz_k
+        theta_u_new = (theta_u + eps_dz * theta_env) / (1.0 + eps_dz)
+        q_u_new = (q_u + eps_dz * q_env) / (1.0 + eps_dz)
 
         # Smooth deactivation where w_u -> 0
-        active = jax.nn.sigmoid(20.0 * w_u_new / config.w_updraft_min)
+        active = jax.nn.sigmoid(
+            config.updraft_deactivation_sharpness * w_u_new / config.w_updraft_min
+        )
         w_u_new = w_u_new * active
         theta_u_new = theta_u_new * active + theta_env * (1.0 - active)
         q_u_new = q_u_new * active + q_env * (1.0 - active)

@@ -151,7 +151,7 @@ class CubedSphereCDGrid(NamedTuple):
         return self.base.radius
 
 
-def _compute_sin_cos_sg(n, face_gnomonic_to_lonlat):
+def _compute_sin_cos_sg(n, padded_supergrid_lon, padded_supergrid_lat):
     """Compute Duo-Grid sub-grid metrics at 9 positions per cell.
 
     Uses a supergrid (half the cell spacing) to evaluate the angle between
@@ -199,14 +199,14 @@ def _compute_sin_cos_sg(n, face_gnomonic_to_lonlat):
     #   2k+1: corner k        for k = 0..n
     #   2k+2: cell centre k   for k = 0..n-1
     #   2n+2: pi/4 + dalpha/2 (padding)
-    n_sg = 2 * n + 3
-    alpha_sg = jnp.linspace(-jnp.pi / 4 - dalpha / 2,
-                            jnp.pi / 4 + dalpha / 2, n_sg)
-    ax_sg, ay_sg = jnp.meshgrid(alpha_sg, alpha_sg, indexing='ij')
+    # Padded supergrid (2n+3 per axis) supplied precomputed (grid-type-agnostic,
+    # iter71); index per face instead of the equiangular parametric map.
+    padded_supergrid_lon = jnp.asarray(padded_supergrid_lon)
+    padded_supergrid_lat = jnp.asarray(padded_supergrid_lat)
 
     all_cos_sg = []
     for face in range(6):
-        lon_sg, lat_sg = face_gnomonic_to_lonlat(face, ax_sg, ay_sg)
+        lon_sg, lat_sg = padded_supergrid_lon[face], padded_supergrid_lat[face]
         cos_lat = jnp.cos(lat_sg)
         px = cos_lat * jnp.cos(lon_sg)
         py = cos_lat * jnp.sin(lon_sg)
@@ -288,11 +288,15 @@ def _supergrid_quad_area(px, py, pz, i0, j0, i1, j1, i2, j2, i3, j3, radius):
     return 0.5 * jnp.sqrt(cx**2 + cy**2 + cz**2) * radius**2
 
 
-def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
+def _compute_supergrid_metrics(n, supergrid_lon, supergrid_lat, radius):
     """Compute area_c and dxc/dyc from the FV3 supergrid.
 
     Uses the SAME 2x-refined supergrid as sin_sg/cos_sg to ensure all
     metrics are mutually consistent (discrete Stokes theorem).
+
+    ``supergrid_lon/lat`` are the precomputed ``(6, 2n+1, 2n+1)`` supergrid
+    node positions — equiangular or gnomonic_ed — so this metric computation
+    is grid-type-agnostic (iter71: was the equiangular parametric map).
 
     FV3 convention (fv_grid_tools.F90 line 1459):
         area_c(i,j) = sum of 4 supergrid cell areas around dual-cell corner
@@ -310,10 +314,8 @@ def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
     """
     import numpy as np
 
-    dalpha = np.pi / (2 * n)
-    n_sg = 2 * n + 1  # supergrid without extra padding
-    alpha_sg = np.linspace(-np.pi / 4, np.pi / 4, n_sg)
-    ax_sg, ay_sg = np.meshgrid(alpha_sg, alpha_sg, indexing='ij')
+    supergrid_lon = np.asarray(supergrid_lon)
+    supergrid_lat = np.asarray(supergrid_lat)
 
     all_area_c = []
     all_dxc = []
@@ -322,9 +324,8 @@ def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
     all_dya = []
 
     for face in range(6):
-        lon_sg, lat_sg = face_gnomonic_to_lonlat(face,
-            jnp.array(ax_sg), jnp.array(ay_sg))
-        lon_sg = np.asarray(lon_sg); lat_sg = np.asarray(lat_sg)
+        lon_sg = supergrid_lon[face]
+        lat_sg = supergrid_lat[face]
         cos_lat = np.cos(lat_sg)
         px = cos_lat * np.cos(lon_sg)
         py = cos_lat * np.sin(lon_sg)
@@ -347,6 +348,18 @@ def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
 
         # Compute ALL supergrid quadrilateral areas: (2n, 2n)
         # Each quad (si, sj) has corners at (si,sj),(si+1,sj),(si+1,sj+1),(si,sj+1)
+        # NOTE: this is the PLANAR chord-cross-product area (0.5*|d1×d2|*R²), a
+        # deliberate O(dx²) approximation to FV3's spherical-excess `get_area`
+        # (fv_grid_utils.F90).  The two agree to ~1e-4 at C36 / ~1e-2 at C8 and
+        # converge as the grid refines; the entire SW-core gold-file fingerprint
+        # surface (cosine-bell, d_sw_native, production-tendencies, corner-
+        # vorticity, ...) is pinned to this chord convention.  The FV3-faithful
+        # part of `area_corner` is the (#faces)-junction SCALING below (edges ×2,
+        # vertices ×3); switching the absolute per-quadrant area to spherical
+        # get_area is a tracked follow-up (see fv3_faithful.md, requires
+        # regenerating all chord-era gold files) — NOT done here to keep the C1
+        # guard fix regression-isolated.  At C1 this chord area gives a
+        # cube-vertex area of 0.659*cell vs the spherical 0.75*cell.
         d1x = px[1:, 1:] - px[:-1, :-1]; d1y = py[1:, 1:] - py[:-1, :-1]; d1z = pz[1:, 1:] - pz[:-1, :-1]
         d2x = px[1:, :-1] - px[:-1, 1:]; d2y = py[1:, :-1] - py[:-1, 1:]; d2z = pz[1:, :-1] - pz[:-1, 1:]
         cx = d1y*d2z - d1z*d2y; cy = d1z*d2x - d1x*d2z; cz = d1x*d2y - d1y*d2x
@@ -384,8 +397,8 @@ def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
         # (exact match at leading order for uniform cubed-sphere; the
         # neighbour-face area is identical.)
         #
-        # For n >= 2, extrapolate interior values to the boundary.
-        # For n < 2, fall back to the partial-quadrant sum.
+        # For n >= 1, scale the boundary corners by the number of faces meeting
+        # at the node (edges ×2, vertices ×3); see the FV3 grid_area block below.
         area_c = np.zeros((n + 1, n + 1))
         for i in range(n + 1):
             for j in range(n + 1):
@@ -400,17 +413,31 @@ def _compute_supergrid_metrics(n, face_gnomonic_to_lonlat, radius):
                 if si < 2 * n and sj < 2 * n:
                     total += sg_area[si, sj]
                 area_c[i, j] = total
-        if n >= 2:
-            # Extrapolate edges from adjacent interior.
-            area_c[0, 1:n]    = area_c[1, 1:n]        # west edge
-            area_c[n, 1:n]    = area_c[n - 1, 1:n]    # east edge
-            area_c[1:n, 0]    = area_c[1:n, 1]        # south edge
-            area_c[1:n, n]    = area_c[1:n, n - 1]    # north edge
-            # Extrapolate corners from the diagonal interior cell.
-            area_c[0, 0]     = area_c[1, 1]
-            area_c[0, n]     = area_c[1, n - 1]
-            area_c[n, 0]     = area_c[n - 1, 1]
-            area_c[n, n]     = area_c[n - 1, n - 1]
+        if n >= 1:
+            # FV3 boundary corner control-volume area = (# faces meeting at the
+            # node) × (the ON-FACE sub-quadrant sum already accumulated in area_c
+            # by the loop above).  fv_grid_tools.F90:980-1067:
+            #   - interior corner: full 4-quadrant dual cell (loop value, no scale);
+            #   - cube EDGE node (2 faces meet): loop = 2 on-face quadrants → ×2
+            #     (FV3 2*get_area = 2*(sg_area[0,2j-1]+sg_area[0,2j]) etc.);
+            #   - cube VERTEX (3-face junction): loop = 1 on-face quadrant → ×3
+            #     (FV3 3*get_area, lines 1036-1067).
+            # iter84 fixed the vertices (×3); iter89 (codex review of 4ad2fea0)
+            # extends the same (#faces)-scaling to the EDGES — the prior inward
+            # interior-copy extrapolation was ~1.2% off at C96 on O(n) boundary
+            # corners (rarea_c silently low → boundary vorticity/divergence bias).
+            # The edge slices are empty no-ops at n=1 (1:n is empty); the four
+            # cube vertices still need the ×3 there (all C1 corners are 3-face
+            # junctions), so the whole block runs for n >= 1 — iter90 (codex
+            # review of d7108d48), guarding C1 against a 3× corner under-count.
+            area_c[0, 1:n] = 2.0 * area_c[0, 1:n]    # west edge  (i=0)
+            area_c[n, 1:n] = 2.0 * area_c[n, 1:n]    # east edge  (i=n)
+            area_c[1:n, 0] = 2.0 * area_c[1:n, 0]    # south edge (j=0)
+            area_c[1:n, n] = 2.0 * area_c[1:n, n]    # north edge (j=n)
+            area_c[0, 0] = 3.0 * area_c[0, 0]        # SW vertex (= 3*sg_area[0,0])
+            area_c[0, n] = 3.0 * area_c[0, n]        # NW vertex
+            area_c[n, 0] = 3.0 * area_c[n, 0]        # SE vertex
+            area_c[n, n] = 3.0 * area_c[n, n]        # NE vertex
         all_area_c.append(area_c)
 
         # --- dxc: distance between cell centers (i-1,j) and (i,j) ---
@@ -539,6 +566,7 @@ def create_cubed_sphere_cdgrid(
     base: CubedSphereGrid,
     omega: float | None = None,
     metric_dtype=None,
+    gnomonic: str = "auto",
 ) -> CubedSphereCDGrid:
     """Create a C-D grid from an existing cell-centre grid.
 
@@ -570,21 +598,82 @@ def create_cubed_sphere_cdgrid(
     n = base.n
     radius = base.radius
 
-    # FV3 supergrid metrics: area_c, dxc, dyc from 2x-refined grid
-    # (same supergrid as sin_sg/cos_sg → mutual consistency)
-    area_c_sg, dxc_sg, dyc_sg, dxa_sg, dya_sg = _compute_supergrid_metrics(
-        n, _face_gnomonic_to_lonlat, radius)
+    # iter72 (codex finding): the base CubedSphereGrid is a JAX-pytree NamedTuple
+    # so it cannot carry a string `gnomonic` field (non-traceable leaf would
+    # break JIT/grad).  Instead INFER the grid type from `base` by its cell-
+    # aspect signature so an ed A-grid never silently gets equiangular C/D
+    # metrics (the model constructors call this with no explicit flag): FV3
+    # gnomonic_ed has near-uniform cells (max aspect ~1.06) while equiangular —
+    # incl. Schmidt-stretched — is ≥1.3.  Explicit `gnomonic="ed"/"equiangular"`
+    # overrides the inference.
+    if gnomonic == "auto":
+        _dx = jnp.asarray(base.dx); _dy = jnp.asarray(base.dy)
+        _aspect = float(jnp.max(jnp.maximum(_dx, _dy) / jnp.maximum(jnp.minimum(_dx, _dy), 1e-30)))
+        if _aspect < 1.15:
+            gnomonic = "ed"
+        elif _aspect > 1.25:
+            gnomonic = "equiangular"
+        else:
+            raise ValueError(
+                f"cannot infer grid type from base (max cell aspect {_aspect:.3f} "
+                f"in the ambiguous band [1.15,1.25]); pass gnomonic= explicitly.")
 
-    # Cell corner positions (gnomonic grid edges: n+1 per side)
-    alpha_edges = jnp.linspace(-jnp.pi / 4, jnp.pi / 4, n + 1)
-    ax_e, ay_e = jnp.meshgrid(alpha_edges, alpha_edges, indexing='ij')
+    # ------------------------------------------------------------------
+    # The C-D supergrid metrics all derive from 4 node-grids: the 2n+1
+    # supergrid, the n+1 corners, the n+3 extended-corner grid (corner/edge
+    # angles), and the 2n+3 padded supergrid (sin_sg).  Build all four for the
+    # requested grid type (iter71 cdgrid ed rework) — equiangular default
+    # BYTE-IDENTICAL; gnomonic_ed via the construct→mirror→remap helpers.
+    # ------------------------------------------------------------------
+    if gnomonic == "ed":
+        from legoesm.grids.cubed_sphere import (
+            gnomonic_ed_supergrid_lonlat, gnomonic_ed_corner_ext_lonlat,
+            gnomonic_ed_padded_supergrid_lonlat, make_fv3_native_grid,
+            _gnomonic_ed_remap_to_create)
+        _sg_lon, _sg_lat = gnomonic_ed_supergrid_lonlat(n)            # (6,2n+1,2n+1)
+        corner_lon, corner_lat = _gnomonic_ed_remap_to_create(
+            *make_fv3_native_grid(n, grid_type=0))                   # (6,n+1,n+1)
+        corner_ext_lon, corner_ext_lat = gnomonic_ed_corner_ext_lonlat(n)  # (6,n+3,n+3)
+        _psg_lon, _psg_lat = gnomonic_ed_padded_supergrid_lonlat(n)  # (6,2n+3,2n+3)
+    elif gnomonic == "equiangular":
+        _alpha_sg = jnp.linspace(-jnp.pi / 4, jnp.pi / 4, 2 * n + 1)
+        _ax_sg, _ay_sg = jnp.meshgrid(_alpha_sg, _alpha_sg, indexing='ij')
+        _sg = [_face_gnomonic_to_lonlat(f, _ax_sg, _ay_sg) for f in range(6)]
+        _sg_lon = jnp.stack([s[0] for s in _sg])
+        _sg_lat = jnp.stack([s[1] for s in _sg])
+        _alpha_edges = jnp.linspace(-jnp.pi / 4, jnp.pi / 4, n + 1)
+        _ax_e, _ay_e = jnp.meshgrid(_alpha_edges, _alpha_edges, indexing='ij')
+        _cg = [_face_gnomonic_to_lonlat(f, _ax_e, _ay_e) for f in range(6)]
+        corner_lon = jnp.stack([c[0] for c in _cg])
+        corner_lat = jnp.stack([c[1] for c in _cg])
+        _dalpha = jnp.pi / (2 * n)
+        _alpha_ext = jnp.linspace(-jnp.pi / 4 - _dalpha, jnp.pi / 4 + _dalpha, n + 3)
+        _axe, _aye = jnp.meshgrid(_alpha_ext, _alpha_ext, indexing='ij')
+        _ceg = [_face_gnomonic_to_lonlat(f, _axe, _aye) for f in range(6)]
+        corner_ext_lon = jnp.stack([c[0] for c in _ceg])
+        corner_ext_lat = jnp.stack([c[1] for c in _ceg])
+        _dasg = jnp.pi / (2 * n)
+        _alpha_psg = jnp.linspace(
+            -jnp.pi / 4 - _dasg / 2, jnp.pi / 4 + _dasg / 2, 2 * n + 3)
+        _axp, _ayp = jnp.meshgrid(_alpha_psg, _alpha_psg, indexing='ij')
+        _psg = [_face_gnomonic_to_lonlat(f, _axp, _ayp) for f in range(6)]
+        _psg_lon = jnp.stack([s[0] for s in _psg])
+        _psg_lat = jnp.stack([s[1] for s in _psg])
+    else:
+        raise ValueError(
+            f"gnomonic must be 'equiangular' or 'ed', got {gnomonic!r}")
+
+    # FV3 supergrid metrics: area_c, dxc, dyc from the 2x-refined supergrid
+    # (same supergrid as sin_sg/cos_sg → mutual consistency).
+    area_c_sg, dxc_sg, dyc_sg, dxa_sg, dya_sg = _compute_supergrid_metrics(
+        n, _sg_lon, _sg_lat, radius)
 
     all_lon_c, all_lat_c = [], []
     all_angle_c = []
     all_dx_ey, all_dy_ex = [], []
 
     for face in range(6):
-        lon_c, lat_c = _face_gnomonic_to_lonlat(face, ax_e, ay_e)
+        lon_c, lat_c = corner_lon[face], corner_lat[face]
         all_lon_c.append(lon_c)
         all_lat_c.append(lat_c)
 
@@ -635,13 +724,8 @@ def create_cubed_sphere_cdgrid(
         all_dx_ey.append(dx_ey)
 
         # Grid angle at corners: computed from Cartesian tangent vectors
-        # on extended gnomonic grid (analytical, no centred-difference error).
-        dalpha = jnp.pi / (2 * n)
-        n_ext = n + 3
-        alpha_ext = jnp.linspace(
-            -jnp.pi / 4 - dalpha, jnp.pi / 4 + dalpha, n_ext)
-        ax_ext, ay_ext = jnp.meshgrid(alpha_ext, alpha_ext, indexing='ij')
-        lon_ext, lat_ext = _face_gnomonic_to_lonlat(face, ax_ext, ay_ext)
+        # on the precomputed extended grid (analytical, no centred-diff error).
+        lon_ext, lat_ext = corner_ext_lon[face], corner_ext_lat[face]
         cos_lat_ext_full = jnp.cos(lat_ext)
         # Cartesian positions on unit sphere (extended grid)
         px_ext = cos_lat_ext_full * jnp.cos(lon_ext)
@@ -780,15 +864,11 @@ def create_cubed_sphere_cdgrid(
     # the i-tangent and j-tangent vectors using Cartesian positions on
     # the unit sphere from an extended gnomonic grid.
     # ------------------------------------------------------------------
-    dalpha = jnp.pi / (2 * n)
-    # Extended grid: n+3 points → centred diffs yield (n+1) output
-    alpha_ext = jnp.linspace(
-        -jnp.pi / 4 - dalpha, jnp.pi / 4 + dalpha, n + 3)
-    ax_ext, ay_ext = jnp.meshgrid(alpha_ext, alpha_ext, indexing='ij')
-
+    # Reuse the precomputed (6, n+3, n+3) extended corner grid (same n+3
+    # layout as the corner grid-angle); grid-type-agnostic (iter71).
     all_cosa_c = []
     for face in range(6):
-        lon_ext, lat_ext = _face_gnomonic_to_lonlat(face, ax_ext, ay_ext)
+        lon_ext, lat_ext = corner_ext_lon[face], corner_ext_lat[face]
         cos_lat_ext = jnp.cos(lat_ext)
         # Cartesian positions on unit sphere
         px = cos_lat_ext * jnp.cos(lon_ext)
@@ -838,7 +918,9 @@ def create_cubed_sphere_cdgrid(
     # 0-indexed: 0=W, 1=S, 2=E, 3=N (edge midpoints); 4=center;
     #            5=SW, 6=SE, 7=NE, 8=NW (corners)
     # ------------------------------------------------------------------
-    sin_sg, cos_sg = _compute_sin_cos_sg(n, _face_gnomonic_to_lonlat)
+    # Padded supergrid (2n+3 per axis) for sin_sg/cos_sg — built above per
+    # grid type (`_psg_lon/_psg_lat`).
+    sin_sg, cos_sg = _compute_sin_cos_sg(n, _psg_lon, _psg_lat)
 
     # ------------------------------------------------------------------
     # C-grid face metrics from sin_sg/cos_sg (FV3 fv_grid_utils.F90:505-518)
@@ -945,27 +1027,11 @@ def create_cubed_sphere_cdgrid(
     # for y-edges at (n+1, n) positions.
     all_angle_ex = []
     all_angle_ey = []
-    dalpha_e = jnp.pi / (2 * n)
-    # Extended grid: n+4 points gives n+2 after centred diff, which is
-    # enough to slice both (n, n+1) and (n+1, n) sub-grids.
-    n_ext2 = n + 4
-    alpha_ext2 = jnp.linspace(
-        -jnp.pi / 4 - 1.5 * dalpha_e,
-        jnp.pi / 4 + 1.5 * dalpha_e,
-        n_ext2,
-    )
-    # For edge midpoints we need positions on half-integer gnomonic lines.
-    # x-edge midpoint (i+0.5, j): gnomonic alpha shifted by half a cell
-    # in the first index.  Use (n+3) points centred on half-integers.
-    alpha_centers = jnp.linspace(-jnp.pi / 4, jnp.pi / 4, n + 1)
-    alpha_half_x = 0.5 * (alpha_centers[:-1] + alpha_centers[1:])  # (n,)
-    alpha_half_y = alpha_half_x  # symmetric grid
-
-    # Build extended half-grid lines for centred differences
-    # x-edge: need alpha_half_x with one extra point on each side for
-    # centred diffs in the i-direction (for grid angle).
-    # Instead of constructing a custom half-grid, we can evaluate
-    # the tangent vectors at the Cartesian edge-midpoints directly.
+    # iter71: the edge-midpoint grid angles are computed directly from the
+    # Cartesian corner positions (xc/yc/zc, from the precomputed corner grid)
+    # and edge midpoints (mx/my) — grid-type-agnostic.  The former equiangular
+    # `alpha_ext2`/`alpha_half_*` (n+4 / half-integer linspace) were DEAD CODE
+    # (computed, never used) and are removed.
 
     for face in range(6):
         # --- Grid angle at x-edge midpoints (n, n+1) ---
@@ -1013,9 +1079,8 @@ def create_cubed_sphere_cdgrid(
         # i-tangent at (i, j+0.5) ≈ avg of (corner(i+1,j)-corner(i-1,j))
         # at j and j+1.  We need padding for the boundary.
 
-        # Use extended gnomonic grid for y-edge tangent vectors
-        lon_ext_f, lat_ext_f = _face_gnomonic_to_lonlat(
-            face, ax_ext, ay_ext)
+        # Use the precomputed (6, n+3, n+3) extended grid for y-edge tangents
+        lon_ext_f, lat_ext_f = corner_ext_lon[face], corner_ext_lat[face]
         cos_lat_extf = jnp.cos(lat_ext_f)
         px_e = cos_lat_extf * jnp.cos(lon_ext_f)
         py_e = cos_lat_extf * jnp.sin(lon_ext_f)

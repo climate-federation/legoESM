@@ -18,6 +18,7 @@ from typing import TypeAlias, cast
 
 import jax
 import jax.numpy as jnp
+from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.radiation.rrtmgp import constants
 from legoesm.atmosphere.physics.radiation.rrtmgp import kernel_ops
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import atmospheric_state
@@ -46,8 +47,20 @@ def _compute_local_properties_lw(
     cloud_r_eff_ice: Array | None = None,
     cloud_path_ice: Array | None = None,
     cloud_fraction: Array | None = None,
+    lw_diffusive_factor: float | Array = monochromatic_two_stream._LW_DIFFUSIVE_FACTOR,
+    precomputed_lw_optical_props: dict[str, Array] | None = None,
 ) -> dict[str, Array]:
-  """Compute local optical properties for longwave radiative transfer."""
+  """Compute local optical properties for longwave radiative transfer.
+
+  ``precomputed_lw_optical_props`` lets the caller share an already-
+  computed optics dict (e.g. the optimal-angle path in ``solve_lw``
+  needs the optical depth to derive the per-column secant, and would
+  otherwise repeat the table interpolation here).  When ``None`` the
+  function calls ``optics_lib.compute_lw_optical_properties`` itself.
+  XLA's CSE pass already deduplicates identical-input calls under
+  JIT, but threading the dict through keeps the graph compact and
+  makes the dependency explicit.
+  """
   if isinstance(sfc_temperature, float):
     # Create a plane for the surface temperature representation.
     nx, ny, _ = temperature.shape
@@ -55,19 +68,22 @@ def _compute_local_properties_lw(
         (nx, ny), dtype=temperature.dtype
     )
 
-  # Compute optical properties: `optical_depth`, `ssa`, & `asymmetry_factor`.
-  lw_optical_props = optics_lib.compute_lw_optical_properties(
-      pressure,
-      temperature,
-      molecules,
-      igpt,
-      vmr_fields,
-      cloud_r_eff_liq,
-      cloud_path_liq,
-      cloud_r_eff_ice,
-      cloud_path_ice,
-      cloud_fraction=cloud_fraction,
-  )
+  if precomputed_lw_optical_props is not None:
+    lw_optical_props = precomputed_lw_optical_props
+  else:
+    # Compute optical properties: `optical_depth`, `ssa`, & `asymmetry_factor`.
+    lw_optical_props = optics_lib.compute_lw_optical_properties(
+        pressure,
+        temperature,
+        molecules,
+        igpt,
+        vmr_fields,
+        cloud_r_eff_liq,
+        cloud_path_liq,
+        cloud_r_eff_ice,
+        cloud_path_ice,
+        cloud_fraction=cloud_fraction,
+    )
 
   # Compute Planck sources: `planck_src`, `planck_src_bottom`, `planck_src_top`,
   # and `planck_src_sfc`.
@@ -91,6 +107,7 @@ def _compute_local_properties_lw(
       combined_srcs['planck_src_bottom'],
       combined_srcs['planck_src_top'],
       lw_optical_props['asymmetry_factor'],
+      lw_diffusive_factor=lw_diffusive_factor,
   )
   src_and_properties['sfc_src'] = sfc_src
 
@@ -121,6 +138,62 @@ def _replace_top_flux(f: Array) -> Array:
   return f
 
 
+def _compute_optimal_lw_secant(
+    optical_depth: Array,
+    band_idx: Array,
+    optimal_angle_fit: Array,
+    halo_width: int = 1,
+) -> Array:
+  """Compute upstream RRTMGP's optimal longwave diffusivity secant.
+
+  Replicates ``rte-rrtmgp``'s ``compute_optimal_angles``: a per-band linear
+  fit on the column transmissivity ``trans = exp(-sum_z tau)``::
+
+      secant(col, gpt) = optimal_angle_fit[band, 0] * trans
+                       + optimal_angle_fit[band, 1]
+
+  Operates on the per-g-point optical depth slice ``(ncol, 1, nlev+2)``,
+  excluding halo cells from the sum since halos carry linearly-extrapolated
+  values that are stripped before the recurrent integration anyway.
+
+  Args:
+    optical_depth: ``(ncol, 1, nlev+2)`` per-g-point optical depth slice.
+    band_idx: 0-D scalar with the spectral band corresponding to the
+      current g-point (``g_point_to_bnd[igpt]``).
+    optimal_angle_fit: ``(n_bnd, 2)`` polynomial-fit coefficients loaded
+      from the longwave gas-optics file.
+    halo_width: Vertical halo width to exclude from the column sum.
+
+  Returns:
+    ``(ncol, 1, 1)`` secant ready to broadcast against the
+    ``(ncol, 1, nlev+2)`` optical-depth array.
+  """
+  # Interior column (halos excluded) total optical depth.
+  hw = halo_width
+  if hw > 0:
+    tau_interior = optical_depth[:, :, hw:-hw]
+  else:
+    tau_interior = optical_depth
+  # ``jnp.maximum(tau, 0.0)`` is a deliberate departure from the literal
+  # upstream formula ``tau_total = sum(tau)`` (codex iter-2 review, LOW).
+  # Upstream is invoked on freshly computed positive optical depths so the
+  # difference is zero in practice; in legoESM the same array is reused
+  # downstream after the recurrence strips halos, but during scan tracing
+  # a halo cell whose interpolated tau briefly dipped below zero would
+  # otherwise inject a negative term into ``trans_total`` and amplify
+  # ``-secant`` errors.  Clamping to zero matches the physical meaning of
+  # "no optical depth" and keeps ``exp(-tau_total) ∈ [0, 1]``.  Interior
+  # cells (the ones that actually contribute) almost always have
+  # ``tau >= 0`` from the kmajor/kminor lookup, so this clamp acts only
+  # as a guard.
+  tau_total = jnp.sum(jnp.maximum(tau_interior, 0.0), axis=-1, keepdims=True)
+  # ``tau_total`` shape ``(ncol, 1, 1)``.  Compute column transmissivity.
+  trans_total = jnp.exp(-tau_total)
+  c0 = optimal_angle_fit[band_idx, 0]
+  c1 = optimal_angle_fit[band_idx, 1]
+  return c0 * trans_total + c1
+
+
 def solve_lw(
     pressure: Array,
     temperature: Array,
@@ -134,7 +207,9 @@ def solve_lw(
     cloud_r_eff_ice: Array | None = None,
     cloud_path_ice: Array | None = None,
     cloud_fraction: Array | None = None,
+    aerosol_absorption_optical_depth: Array | None = None,
     use_scan: bool | None = None,
+    use_optimal_angle: bool = False,
 ) -> dict[str, Array]:
   """Solves two-stream radiative transfer equation over the longwave spectrum.
 
@@ -166,6 +241,14 @@ def solve_lw(
     cloud_r_eff_ice: The effective radius of cloud ice particles [m].
     cloud_path_ice: The cloud ice water path in each atmospheric grid cell
       [kg/m²].
+    aerosol_absorption_optical_depth: Optional prescribed longwave aerosol
+      **absorption** optical depth per layer [-] (NOT extinction): it is
+      added directly to the absorption optical depth with single-scattering
+      albedo 0.  Longwave aerosol scattering is neglected (the dominant LW
+      aerosol effect is absorption/emission); a caller holding extinction
+      optical depth must pre-multiply by the LW absorption fraction
+      (1 − ω) before passing it here.  ``None`` (the default) leaves the
+      longwave solution byte-identical.
     use_scan: Whether to use scan or for loops for the recurrent operation.
 
   Returns:
@@ -174,13 +257,83 @@ def solve_lw(
       `flux_down`: The downwelling longwave radiative flux at face i - 1/2.
       `flux_net`: The net longwave radiative flux at face i - 1/2.
   """
-  optics_lib = cast(optics.RRTMOptics | optics.GrayAtmosphereOptics, optics_lib)
+  optics_lib = cast(optics.RRTMOptics, optics_lib)
   if vmr_fields is not None:
     # Convert the chemical formulas of the gas species to RRTM-consistent
     # numerical identifiers.
     vmr_fields = _reindex_vmr_fields(vmr_fields, optics_lib.gas_optics_lw)
 
+  # Resolve the optimal-angle table once, outside the scan body, so the
+  # branch is selected at trace time and does not introduce a Python ``if``
+  # on a traced value inside the scan.  Raise explicitly when the caller
+  # requested ``use_optimal_angle=True`` but the gas-optics file does not
+  # ship ``optimal_angle_fit`` — silently degrading to the fixed Fu-Liou
+  # 1.66 contradicts the config contract documented on
+  # ``RRTMGPConfig.use_optimal_angle`` (codex iter-2 review, MEDIUM).
+  optimal_angle_fit = None
+  if use_optimal_angle:
+    candidate = None
+    if hasattr(optics_lib, 'gas_optics_lw'):
+      candidate = getattr(optics_lib.gas_optics_lw, 'optimal_angle_fit', None)
+    if candidate is None:
+      raise ValueError(
+          "solve_lw(use_optimal_angle=True) requires the longwave "
+          "gas-optics file to ship 'optimal_angle_fit' (added to "
+          "rrtmgp-gas-lw-* in rte-rrtmgp >= 1.7).  Either upgrade the "
+          "data file or set use_optimal_angle=False to keep the fixed "
+          "Fu-Liou 1.66 diffusivity secant."
+      )
+    optimal_angle_fit = candidate
+
   def step_fn(igpt, cumulative_flux):
+    # Compute the LW optics once per g-point; reuse for both the
+    # optimal-angle secant and the source-and-properties solve.
+    # Without this, the optimal-angle path would call
+    # ``compute_lw_optical_properties`` twice per igpt and rely on
+    # XLA's CSE to deduplicate — explicit reuse keeps the graph
+    # smaller and the dependency obvious.
+    precomputed_props = optics_lib.compute_lw_optical_properties(
+        pressure, temperature, molecules, igpt, vmr_fields,
+        cloud_r_eff_liq, cloud_path_liq,
+        cloud_r_eff_ice, cloud_path_ice,
+        cloud_fraction=cloud_fraction,
+    )
+    if aerosol_absorption_optical_depth is not None:
+      # Prescribed longwave aerosol as a pure-absorbing layer
+      # (single-scattering albedo 0): add its absorption optical depth to
+      # the background gas+cloud optical depth and dilute the combined ssa
+      # accordingly.  The asymmetry factor of the (scattering) background
+      # is unchanged because the aerosol contributes no scattering
+      # (g_tot = tau_bg w_bg g_bg / (tau_tot w_tot) = g_bg).  Injected
+      # into ``precomputed_props`` *before* the optimal-angle secant so
+      # the per-band diffusivity sees the aerosol-inclusive transmissivity
+      # (the secant is fit on exp(-sum tau)); the same dict then feeds the
+      # source-and-properties solve, keeping both paths consistent.
+      # ``safe_divide`` avoids the -a/b^2 VJP overflow at the tau floor
+      # (same rationale as the shortwave aerosol mix in ``solve_sw``).
+      tau_bg = jnp.maximum(precomputed_props['optical_depth'], 1.0e-12)
+      tau_aer = jnp.maximum(aerosol_absorption_optical_depth, 0.0)
+      tau_tot = tau_bg + tau_aer
+      w_tot = jnp.clip(
+          safe_divide(
+              tau_bg * precomputed_props['ssa'], tau_tot, eps=1.0e-12, fill=0.0,
+          ),
+          0.0,
+          1.0,
+      )
+      precomputed_props = {
+          'optical_depth': tau_tot,
+          'ssa': w_tot,
+          'asymmetry_factor': precomputed_props['asymmetry_factor'],
+      }
+    if optimal_angle_fit is not None:
+      band_idx = optics_lib.gas_optics_lw.g_point_to_bnd[igpt]
+      lw_diffusive_factor = _compute_optimal_lw_secant(
+          precomputed_props['optical_depth'], band_idx, optimal_angle_fit
+      )
+    else:
+      lw_diffusive_factor = monochromatic_two_stream._LW_DIFFUSIVE_FACTOR
+
     optical_props_2stream = _compute_local_properties_lw(
         pressure,
         temperature,
@@ -194,6 +347,8 @@ def solve_lw(
         cloud_r_eff_ice,
         cloud_path_ice,
         cloud_fraction=cloud_fraction,
+        lw_diffusive_factor=lw_diffusive_factor,
+        precomputed_lw_optical_props=precomputed_props,
     )
 
     # Boundary conditions.
@@ -212,7 +367,18 @@ def solve_lw(
         use_scan,
     )
     # cumulative_flux keys: 'flux_up', 'flux_down', 'flux_net'
-    return jax.tree.map(jnp.add, fluxes, cumulative_flux)
+    # Coerce each g-point's flux to the ACCUMULATOR dtype before adding.
+    # Under ``compute_fp32`` the scan carry (``cumulative_flux``, init
+    # ``zeros_like(temperature)``) is float32, but the per-g-point transport
+    # solve re-promotes to float64 via stray x64 constants in the RTE kernel,
+    # so a bare ``jnp.add`` returns float64 and ``lax.scan`` rejects the
+    # carry-in != carry-out dtype mismatch.  Casting the contribution to the
+    # carry dtype keeps the accumulator at ``temperature``'s precision (float32
+    # for fp32 runs, float64 otherwise -> byte-identical no-op on the default
+    # path).
+    return jax.tree.map(
+        lambda _f, _c: _c + _f.astype(_c.dtype), fluxes, cumulative_flux,
+    )
 
   flux_keys = ['flux_up', 'flux_down', 'flux_net']
   init_val = {key: jnp.zeros_like(temperature) for key in flux_keys}
@@ -305,7 +471,7 @@ def solve_sw(
       `flux_net`: The net shortwave radiative flux at face i - 1/2.
   """
   zenith = atmos_state.zenith
-  optics_lib = cast(optics.RRTMOptics | optics.GrayAtmosphereOptics, optics_lib)
+  optics_lib = cast(optics.RRTMOptics, optics_lib)
   if vmr_fields is not None:
     # Convert the chemical formulas of the gas species to RRTM-consistent
     # numerical identifiers.
@@ -348,13 +514,27 @@ def solve_sw(
       w_bg = sw_optical_props['ssa']
       g_bg = sw_optical_props['asymmetry_factor']
       w_num = tau_bg * w_bg + tau_aer * aerosol_single_scattering_albedo
-      w_tot = jnp.clip(w_num / jnp.maximum(tau_tot, 1.0e-12), 0.0, 1.0)
+      # AD-safe SW optical-property mixing (restored from commit 59407953
+      # after AIMIP-#312 merge reverted it).  ``a / jnp.maximum(b, eps)``
+      # has a ``-a/b**2`` VJP that overflows when ``b`` is at the floor —
+      # for cloud-free, low-water-vapor stratospheric layers ``tau_tot``
+      # can reach the 1e-12 floor and the backward propagates NaN to every
+      # upstream traced parameter whose state path touches gas absorption.
+      # ``safe_divide`` masks the bad branch before the divide.  The outer
+      # ``jnp.clip`` preserves the original output range; with ``fill=0.0``
+      # the bad branch lands inside that range.
+      w_tot = jnp.clip(
+          safe_divide(w_num, tau_tot, eps=1.0e-12, fill=0.0),
+          0.0,
+          1.0,
+      )
       g_num = (
           tau_bg * w_bg * g_bg
           + tau_aer * aerosol_single_scattering_albedo * aerosol_asymmetry_factor
       )
+      g_denom = tau_tot * jnp.maximum(w_tot, 1.0e-12)
       g_tot = jnp.clip(
-          g_num / jnp.maximum(tau_tot * jnp.maximum(w_tot, 1.0e-12), 1.0e-12),
+          safe_divide(g_num, g_denom, eps=1.0e-12, fill=0.0),
           -1.0,
           1.0,
       )
@@ -371,8 +551,15 @@ def solve_sw(
     )
 
     # Surface albedo: broadcast per-column array or scalar to 2D plane
-    # with the same horizontal sharding as the temperature.
+    # with the same horizontal sharding as the temperature. The DIFFUSE
+    # reflection uses sfc_alb; the DIRECT beam uses sfc_alb_dir when set
+    # (RAD-3 SAM direct/diffuse split), else falls back to sfc_alb.
     sfc_albedo = atmos_state.sfc_alb * jnp.ones_like(temperature[:, :, 0])
+    _alb_dir_src = (
+        atmos_state.sfc_alb if atmos_state.sfc_alb_dir is None
+        else atmos_state.sfc_alb_dir
+    )
+    sfc_albedo_dir = _alb_dir_src * jnp.ones_like(temperature[:, :, 0])
 
     # Monochromatic top of atmosphere flux.
     if solar_fraction_by_gpt is None:
@@ -387,7 +574,7 @@ def solve_sw(
         r_dir=optical_props_2stream['r_dir'],
         optical_depth=sw_optical_props['optical_depth'],
         toa_flux=toa_flux,
-        sfc_albedo_direct=sfc_albedo,
+        sfc_albedo_direct=sfc_albedo_dir,
         zenith=safe_zenith,
         use_scan=use_scan,
     )
@@ -402,7 +589,14 @@ def solve_sw(
         flux_down_dir=sources_2stream['flux_down_dir'],
         use_scan=use_scan,
     )
-    total_sw_fluxes = jax.tree.map(jnp.add, sw_fluxes, partial_fluxes)
+    # Cast each g-point contribution to the accumulator dtype (see solve_lw):
+    # under ``compute_fp32`` the carry (``partial_fluxes``, init
+    # ``zeros_like(temperature)``) is float32 but the transport solve
+    # re-promotes to float64, so a bare ``jnp.add`` would break the scan carry
+    # dtype invariant.  No-op on the default float64 path.
+    total_sw_fluxes = jax.tree.map(
+        lambda _f, _c: _c + _f.astype(_c.dtype), sw_fluxes, partial_fluxes,
+    )
     return total_sw_fluxes
 
   flux_keys = ['flux_up', 'flux_down', 'flux_net']
@@ -472,8 +666,20 @@ def compute_heating_rate(
       dp = 0.5 * kernel_ops.centered_difference(pressure, dim=2)
 
   # Compute the forward pressure difference of fluxes on faces (like a
-  # derivative of face_to_node).
+  # derivative of face_to_node).  This is the net upward flux out of the
+  # cell; a positive value means the cell radiates away energy and cools.
   dflux = kernel_ops.forward_difference(flux_net, dim=2)
 
-  # Compute the heating rate at the grid cell center in K/s.
-  return constants.G * dflux / dp / constants.CP_D
+  # Heating rate at the grid cell center [K/s].  **Minus sign** (restored
+  # from commit 0be22f0f after the AIMIP-#312 merge reverted it): net
+  # flux *out* cools the cell.  ``abs(dp)`` so the sign is set by the
+  # flux divergence alone, not by the vertical-axis orientation
+  # (``solve_columns`` passes positive layer thickness; the legacy
+  # ``RRTMGP.compute_heating_rate`` callpath passes a centered-difference
+  # negative ``dp`` that abs() canonicalises).
+  #
+  # Pre-fix bug symptom: free-tropospheric LW heating was +2..+5 K/day
+  # (radiative warming) instead of −1..−2 K/day (radiative cooling),
+  # driving thermal runaway in long AMIP integrations (T̄ 261 → 293 K
+  # over 120 days, NaN blowup at day 125).
+  return -constants.G * dflux / jnp.abs(dp) / constants.CP_D

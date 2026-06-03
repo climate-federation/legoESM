@@ -268,6 +268,7 @@ def cfl_check_and_adjust(
     radius: float = constants.R_earth,
     verbose: bool = True,
     grid_type: str = "cubed_sphere",
+    use_polar_filter: bool = False,
 ) -> float:
     """Check CFL condition and reduce dt if needed.
 
@@ -299,10 +300,23 @@ def cfl_check_and_adjust(
         Adjusted time step (≤ dt) that satisfies CFL.
     """
     if grid_type == "latlon":
-        dx_min = estimate_min_dx_latlon(n, radius)
+        if use_polar_filter:
+            # Stage 3-E: Fourier polar filter truncates the
+            # high-wavenumber modes that would violate CFL near the
+            # poles, so the actual stability limit is the equatorial
+            # CFL ``R * dlon``.  Without this branch the legacy
+            # ``estimate_min_dx_latlon`` returns the pole-cell dx
+            # (a ~60x smaller value at n_lat=180) and the driver
+            # clamps ``dt`` to ~5 s — undoing the polar filter's
+            # whole purpose.  See ``component_factory.py`` for the
+            # mirror logic at the model-builder level.
+            n_lon = 2 * n
+            dx_min = float(2.0 * np.pi * radius / n_lon)
+        else:
+            dx_min = estimate_min_dx_latlon(n, radius)
     elif grid_type == "gaussian":
         dx_min = estimate_min_dx_gaussian(n, radius)
-    elif grid_type == "voronoi":
+    elif grid_type == "mpas":
         dx_min = estimate_min_dx_icosahedral(n, radius)
     else:
         dx_min = estimate_min_dx_cubed_sphere(n, radius)
@@ -344,4 +358,22 @@ def cfl_check_and_adjust(
     else:
         if verbose:
             logger.info(f"  CFL OK: dt={dt:.0f}s is within stability limit")
+            if grid_type == "mpas":
+                # NECESSARY, NOT SUFFICIENT for the hydrostatic TRiSK PE.
+                # This advective/gravity-wave CFL has been observed to pass
+                # ("OK") at time steps that then blow up: e.g. L4/nlev40 with
+                # the gray AMIP deck NaNs at dt=450 s (CFL~0.65 here) within a
+                # day, while dt=240/300 s run cleanly.  The extra constraints
+                # this estimate does NOT capture are (a) the cold-start
+                # radiative transient (a T=300 K isothermal IC carries a large
+                # day-0 radiative tendency that a big dt cannot absorb) and
+                # (b) the explicit ∇⁴ hyperdiffusion eigenvalues vs the
+                # integrator's stability region.  Treat this as an upper bound
+                # and keep a margin (CFL <~ 0.5) on a cold start.
+                logger.info(
+                    "  NOTE (mpas): advective/GW CFL is necessary but not "
+                    "sufficient — hydrostatic TRiSK PE can still blow up "
+                    "inside this limit (cold-start radiative transient, "
+                    "hyperdiffusion). Keep a margin on a cold start."
+                )
         return dt

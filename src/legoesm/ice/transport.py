@@ -223,6 +223,7 @@ def advect_ice_tracers(
     dt: float,
     T_ice_min: float = 180.0,
     T_freeze_ocean: float = constants.T_freeze_ocean,
+    T_max: float = constants.T_freeze,
     n_subcycles: int = 1,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Advect ice tracers by the ice velocity field.
@@ -306,11 +307,17 @@ def advect_ice_tracers(
     h_new = jnp.where(has_ice, vol_new / conc_safe, 0.0)
     has_vol = vol_new > 0.0
     vol_safe = jnp.where(has_vol, vol_new, 1.0)
+    # Empty (ice-free) cells are filled at the basal/ocean freezing
+    # point T_freeze_ocean (271.35 K) — there is no ice surface there.
     T_new = jnp.where(has_vol, enth_new / vol_safe, T_freeze_ocean)
 
     # Defensive temperature bounds — monotone advection keeps T_new in
-    # the input range, so this only fires when the enthalpy / volume
-    # ratio crosses the bound due to round-off.
-    T_new = jnp.clip(T_new, T_ice_min, T_freeze_ocean)
+    # the input range, so this only fires on round-off.  The UPPER bound
+    # is the SURFACE melt point ``T_max`` (273.15 K), not the basal
+    # freezing point: ice legitimately carried at the surface melt point
+    # by a prior step must not be re-clamped down to 271.35 K here, which
+    # would delete enthalpy and undo the surface-vs-basal melt-point
+    # split (codex finding).
+    T_new = jnp.clip(T_new, T_ice_min, T_max)
 
     return h_new, conc_new, T_new

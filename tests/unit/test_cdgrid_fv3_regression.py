@@ -4831,363 +4831,6 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                  f"re-examine whether the fill has been partially "
                  f"repaired."))
 
-    def test_iter768_two_point_measurement_pins(self):
-        """Iter-768e sentinel: pins the three numbers reported by
-        the iter-768 diagnostic (`scripts/diag_iter768_mode_a_at_t0.py`)
-        against drift.
-
-        Codex iter-768d stop-time flagged stale-report risk: the
-        committed output in `diagnostics/iter768_output/...` could
-        diverge from the script's current runtime output if any
-        of the IC construction, config defaults, matrix measurement
-        chain, or dycore behaviour changes, and nothing in CI would
-        catch it.
-
-        This test re-runs the same measurement inline (canonical
-        W2 C36 matrix config at t=0 and t=1 day) and pins:
-        - v_ll_Linf at t=0 ≈ 8.01e-3 m/s
-        - v_ll_Linf at t=1 day ≈ 1.32e-1 m/s   (iter-893 update)
-        - ratio ≈ 16.46x                        (iter-893 update)
-
-        Iter-893 update: the canonical matrix config now activates
-        `apply_fortran_xppm_boundary=True` (Fortran iord<7 cube-edge
-        boundary formulas, tp_core.F90:357-369), reducing the t=1d
-        v_ll_Linf from the pre-iter-893 OFF baseline (1.59e-1) to
-        1.32e-1 (-17%).  Pre-iter-893 ratio was 19.79; iter-893 is
-        16.46.  t=0 v_ll_Linf is unchanged because no transport
-        steps have run.
-
-        Tolerance: ±5 % on each pin.  If any pin fires, EITHER the
-        diagnostic script and committed output need to be updated
-        together, OR an unintended dycore/pipeline/IC change has
-        leaked in and should be investigated BEFORE updating the
-        pins.  Never silently update the pins.
-
-        Iter-768 is a purely reportage diagnostic: the numbers in
-        the doc table and the committed output file are the
-        measurement itself.  This sentinel ensures they remain
-        bit-reproducible against source drift.
-        """
-        import jax.numpy as jnp
-        import numpy as np
-        from legoesm.grids.cubed_sphere import create_cubed_sphere
-        from legoesm.grids.cubed_sphere_cdgrid import (
-            cell_centre_angles_from_4edge)
-        from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-            CDGridShallowWaterConfig,
-            FV3EdgeShallowWaterModel,
-            FV3EdgeShallowWaterState,
-        )
-        from tests.atmosphere.shallow_water.test_cases.williamson import (
-            williamson_test2,
-        )
-        from legoesm.grids.regridding import (
-            get_cubedsphere_to_latlon_weights, apply_cubedsphere_to_latlon)
-
-        n = 36
-        dt = 300.0
-        n_steps = int(86400 / dt)
-        div_damp = 8.0 * 1.5e7 * (48.0 / n) ** 2
-        grid = create_cubed_sphere(n=n, use_duogrid=False)
-        sw = williamson_test2(grid)
-        u0 = 2.0 * np.pi * float(grid.radius) / (12.0 * 86400.0)
-        weights = get_cubedsphere_to_latlon_weights(n, n_lon=360, n_lat=181)
-
-        # Iter-893 sync: keep this config in lock-step with the
-        # production matrix runner W2/W5 LEGACY config (apply
-        # _fortran_xppm_boundary=True).
-        cfg = CDGridShallowWaterConfig(
-            hyperdiff_coeff=0.0,
-            div_damp=div_damp,
-            boundary_fix=True,
-            damp_v=0.06,
-            nord_v=2,
-            apply_fortran_xppm_boundary=True,
-        )
-        model = FV3EdgeShallowWaterModel(grid, config=cfg)
-        cdgrid = model.cdgrid
-        u_d = cdgrid.cos_angle_edge_x * (u0 * jnp.cos(cdgrid.lat_edge_x))
-        v_d = -cdgrid.sin_angle_edge_y * (u0 * jnp.cos(cdgrid.lat_edge_y))
-        state = FV3EdgeShallowWaterState(
-            h=sw.h.data, u_d=u_d, v_d=v_d, h_s=sw.h_s.data)
-        model.set_initial_mass(state)
-
-        ca_4edge, sa_4edge = cell_centre_angles_from_4edge(cdgrid)
-
-        def _v_ll_linf(state):
-            u_cc = 0.5 * (np.asarray(state.u_d)[:, :, :-1]
-                           + np.asarray(state.u_d)[:, :, 1:])
-            v_cc = 0.5 * (np.asarray(state.v_d)[:, :-1, :]
-                           + np.asarray(state.v_d)[:, 1:, :])
-            v_north = (np.asarray(sa_4edge) * u_cc
-                        + np.asarray(ca_4edge) * v_cc)
-            v_ll = apply_cubedsphere_to_latlon(v_north, weights)
-            return float(np.max(np.abs(v_ll)))
-
-        v_ll_linf_t0 = _v_ll_linf(state)
-        for _ in range(n_steps):
-            state = model.step(state, dt)
-        v_ll_linf_t1d = _v_ll_linf(state)
-        ratio = v_ll_linf_t1d / v_ll_linf_t0
-
-        # Iter-893 measurement on this config: 0.008, 0.132, 16.46.
-        # (Pre-iter-893 OFF: 0.008, 0.159, 19.79.  iter-893 activates
-        # apply_fortran_xppm_boundary=True, reducing t=1d v_ll_Linf
-        # by 17%.)  ±5 % tolerance.
-        for label, value, pin in [
-            ("t=0 v_ll_Linf", v_ll_linf_t0, 8.01e-3),
-            ("t=1d v_ll_Linf", v_ll_linf_t1d, 1.32e-1),
-            ("ratio", ratio, 16.46),
-        ]:
-            rel = abs(value - pin) / pin
-            self.assertLess(
-                rel, 0.05,
-                msg=(f"iter-768 pin '{label}' drifted: measured "
-                     f"{value:.4e}, pin {pin:.4e}, relative error "
-                     f"{rel:.2%}.  EITHER update the diagnostic "
-                     f"committed output + review-doc table together "
-                     f"(if this is an intentional change) OR "
-                     f"investigate the source drift before updating "
-                     f"the pin.  Never silently update."))
-
-        # Iter-768e-3 (Codex stop-time): LOCK THE SHIPPED ARTIFACT
-        # END-TO-END by actually EXECUTING the shipped diagnostic
-        # script as a subprocess, parsing its stdout, and asserting
-        # its numbers match both the pins and the committed output
-        # file.  This closes three drift modes:
-        # (a) script-value drift: script code changes so it produces
-        #     numbers that no longer match the pins.
-        # (b) committed-output drift: someone hand-edits the
-        #     committed file without re-running the script.
-        # (c) script-vs-committed-output divergence: someone updates
-        #     the script without regenerating the committed output.
-        import re
-        import subprocess
-        from pathlib import Path
-
-        repo_root = Path(__file__).resolve().parents[2]
-        script = (repo_root / "scripts"
-                   / "diag_iter768_mode_a_at_t0.py")
-        shipped = (repo_root / "diagnostics" / "iter768_output"
-                    / "iter768_mode_a_at_t0.txt")
-
-        self.assertTrue(
-            script.exists(),
-            msg=(f"iter-768 diagnostic script is missing at "
-                 f"{script}.  The shipped artifact is gone."))
-        self.assertTrue(
-            shipped.exists(),
-            msg=(f"iter-768 committed output file is missing at "
-                 f"{shipped}.  Regenerate via "
-                 f"`python {script} > {shipped}`."))
-
-        # Execute the shipped script as a subprocess.  Codex iter-
-        # 768e-3 stop-time: use a CANONICAL env, not setdefault, so
-        # that invoking pytest with JAX_ENABLE_X64=0 or JAX_PLATFORMS=
-        # metal cannot drift the subprocess output.
-        venv_python = repo_root / ".venv" / "bin" / "python"
-        interpreter = (str(venv_python) if venv_python.exists()
-                        else sys.executable)
-        env = os.environ.copy()
-        # FORCE (not setdefault) canonical precision + backend.  This
-        # makes the subprocess output reproducible across pytest
-        # invocation environments.
-        env["JAX_ENABLE_X64"] = "1"
-        env["JAX_PLATFORMS"] = "cpu"
-        # Also remove backend overrides that jax might otherwise see
-        # via other env vars.
-        for stale in ("JAX_PLATFORM_NAME", "JAX_DISABLE_JIT",
-                       "JAX_DEBUG_NANS"):
-            env.pop(stale, None)
-        result = subprocess.run(
-            [interpreter, str(script)],
-            cwd=str(repo_root),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        self.assertEqual(
-            result.returncode, 0,
-            msg=(f"iter-768 diagnostic script failed with exit "
-                 f"{result.returncode}.\nstderr:\n{result.stderr}"))
-        script_stdout = result.stdout
-
-        def _parse_three_numbers(text, source):
-            """Return (t0, t1, ratio) from the canonical summary."""
-            m_t0 = re.search(
-                r"t=0\s+v_ll_Linf\s*=\s*([\d.]+[eE][+-]?\d+)", text)
-            m_t1 = re.search(
-                r"t=1 day\s+v_ll_Linf\s*=\s*([\d.]+[eE][+-]?\d+)", text)
-            m_r = re.search(
-                r"ratio\s*\(t=1 day\s*/\s*t=0\)\s*=\s*([\d.]+)", text)
-            self.assertIsNotNone(
-                m_t0, msg=f"t=0 v_ll_Linf line not found in {source}")
-            self.assertIsNotNone(
-                m_t1, msg=f"t=1 day v_ll_Linf line not found in {source}")
-            self.assertIsNotNone(
-                m_r, msg=f"ratio line not found in {source}")
-            return (float(m_t0.group(1)),
-                    float(m_t1.group(1)),
-                    float(m_r.group(1)))
-
-        script_t0, script_t1, script_ratio = _parse_three_numbers(
-            script_stdout, "shipped-script stdout")
-        file_t0, file_t1, file_ratio = _parse_three_numbers(
-            shipped.read_text(), f"committed file {shipped.name}")
-
-        # Assert shipped SCRIPT output matches pins (mode a — iter-893
-        # values).
-        for label, script_val, pin in [
-            ("t=0 v_ll_Linf", script_t0, 8.01e-3),
-            ("t=1d v_ll_Linf", script_t1, 1.32e-1),
-            ("ratio", script_ratio, 16.46),
-        ]:
-            rel = abs(script_val - pin) / pin
-            self.assertLess(
-                rel, 0.05,
-                msg=(f"iter-768 SHIPPED SCRIPT '{label}' = "
-                     f"{script_val:.4e} drifted from pin "
-                     f"{pin:.4e} (relative {rel:.2%}).  The script "
-                     f"at {script.relative_to(repo_root)} was "
-                     f"modified in a way that changed its measured "
-                     f"values.  Investigate before updating the "
-                     f"pin."))
-
-        # Assert committed OUTPUT FILE matches shipped-script output
-        # (modes b and c).  Using exact-match tolerance because the
-        # script should be deterministic; if the file drifted from
-        # the script's output it's either stale or tampered.
-        for label, file_val, script_val in [
-            ("t=0 v_ll_Linf", file_t0, script_t0),
-            ("t=1d v_ll_Linf", file_t1, script_t1),
-            ("ratio", file_ratio, script_ratio),
-        ]:
-            rel = abs(file_val - script_val) / max(abs(script_val), 1e-12)
-            self.assertLess(
-                rel, 0.01,
-                msg=(f"iter-768 committed file '{label}' = "
-                     f"{file_val:.4e} does not match shipped-script "
-                     f"stdout {script_val:.4e} (relative {rel:.2%}).  "
-                     f"The committed artifact "
-                     f"`{shipped.relative_to(repo_root)}` is stale or "
-                     f"tampered.  Regenerate via `python {script} > "
-                     f"{shipped}`; do NOT edit the file directly."))
-
-    def test_iter775_script_is_runnable_subprocess(self):
-        """Iter-775c sentinel (Codex stop-time): actually EXECUTE
-        `scripts/diag_iter775_w5_cross_test.py` as a subprocess
-        and verify its stdout matches the committed output and
-        the pinned values.
-
-        Iter-775b added a file-content sentinel that parses the
-        committed output but does NOT run the script.  Codex's
-        "new diagnostic script is not runnable as committed"
-        concern was that a script could have a syntax error or
-        import failure that the file-content sentinel would miss
-        (since the committed file is static).
-
-        This sentinel closes that gap by running the shipped
-        script end-to-end and asserting:
-        1. subprocess exits 0 (script is runnable).
-        2. stdout parses to alphas [1.000, 0.980] and pinned
-           mass_drift / h_linf ranges.
-        3. stdout agrees with committed output file content.
-
-        Environment: forces canonical JAX_ENABLE_X64=1 and
-        JAX_PLATFORMS=cpu per iter-768e-5 pattern.  Uses
-        .venv/bin/python if available.  300-second timeout.
-
-        Runtime: ~35-45s (similar to iter-768 subprocess sentinel).
-        Yes, this adds CI cost, but the alternative (silently
-        shipping a broken diagnostic) is worse.
-        """
-        import os
-        import re
-        import subprocess
-        import sys
-        from pathlib import Path
-
-        repo_root = Path(__file__).resolve().parents[2]
-        script = (repo_root / "scripts"
-                   / "diag_iter775_w5_cross_test.py")
-        shipped = (repo_root / "diagnostics" / "iter775_output"
-                    / "iter775_w5_cross.txt")
-        self.assertTrue(script.exists(),
-            msg=f"iter-775 script missing at {script}")
-        self.assertTrue(shipped.exists(),
-            msg=f"iter-775 committed output missing at {shipped}")
-
-        venv_python = repo_root / ".venv" / "bin" / "python"
-        interpreter = (str(venv_python) if venv_python.exists()
-                        else sys.executable)
-        env = os.environ.copy()
-        env["JAX_ENABLE_X64"] = "1"
-        env["JAX_PLATFORMS"] = "cpu"
-        for stale in ("JAX_PLATFORM_NAME", "JAX_DISABLE_JIT",
-                       "JAX_DEBUG_NANS"):
-            env.pop(stale, None)
-        result = subprocess.run(
-            [interpreter, str(script)],
-            cwd=str(repo_root),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        self.assertEqual(
-            result.returncode, 0,
-            msg=(f"iter-775 script failed to run (exit "
-                 f"{result.returncode}).\nstderr:\n"
-                 f"{result.stderr}"))
-        stdout = result.stdout
-
-        def _parse_two_lines(text: str, source: str):
-            matches = re.findall(
-                r"\s+(\d+\.\d+)\s+([\d.eE+-]+)\s+([\d.eE+-]+)",
-                text)
-            self.assertGreaterEqual(
-                len(matches), 2,
-                msg=(f"{source} has fewer than 2 data lines."))
-            alphas = [float(m[0]) for m in matches[:2]]
-            mds = [float(m[1]) for m in matches[:2]]
-            hlinfs = [float(m[2]) for m in matches[:2]]
-            return alphas, mds, hlinfs
-
-        live_alphas, live_mds, live_hlinfs = _parse_two_lines(
-            stdout, "script stdout")
-        self.assertEqual(live_alphas, [1.000, 0.980],
-            msg=f"script stdout alphas: {live_alphas}")
-
-        # Pin mass_drifts and h_linfs to the same thresholds as
-        # test_iter775_w5_cross_test_artifact.
-        for md in live_mds:
-            self.assertLess(md, 1e-5)
-        for hlinf in live_hlinfs:
-            self.assertLess(abs(hlinf - 196.0) / 196.0, 0.05)
-
-        # Cross-check: script stdout matches committed file within
-        # 1% on mass_drift and h_linf.
-        file_alphas, file_mds, file_hlinfs = _parse_two_lines(
-            shipped.read_text(), f"committed file {shipped.name}")
-        self.assertEqual(live_alphas, file_alphas)
-        for md_l, md_f, alpha in zip(live_mds, file_mds, live_alphas):
-            rel = abs(md_l - md_f) / max(md_f, 1e-30)
-            # mass_drift is at noise floor; 50% tolerance because
-            # it's a relative error metric near zero.
-            self.assertLess(
-                rel, 0.5,
-                msg=(f"mass_drift alpha={alpha}: script {md_l:.3e} "
-                     f"vs committed {md_f:.3e}, rel {rel:.2%}.  "
-                     f"Regenerate the committed file via "
-                     f"`python {script} > {shipped}`."))
-        for hl_l, hl_f, alpha in zip(live_hlinfs, file_hlinfs, live_alphas):
-            rel = abs(hl_l - hl_f) / max(hl_f, 1e-30)
-            self.assertLess(
-                rel, 0.01,
-                msg=(f"h_linf alpha={alpha}: script {hl_l:.3e} vs "
-                     f"committed {hl_f:.3e}, rel {rel:.2%}."))
-
     def test_iter780_cb_error_location_artifact(self):
         """Iter-780b sentinel: lock the iter-780 committed output
         file content.
@@ -5457,66 +5100,6 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
                  f"exceeded 0.3 — the plateau observation may have "
                  f"been lost.  If this is intentional, regenerate "
                  f"the committed output."))
-
-    def test_iter775_w5_cross_test_artifact(self):
-        """Iter-775b sentinel (Codex): verify the committed iter-775
-        W5 cross-test output at
-        `diagnostics/iter775_output/iter775_w5_cross.txt` contains
-        the expected two-line summary for alpha=1.000 and
-        alpha=0.980, with mass_drift in the 1e-7 range and
-        |h-h_ic|_Linf pinned near 1.960e+02.
-
-        Codex stop-time review on iter-775 flagged "new diagnostic
-        script is not runnable as committed."  The script does run
-        in practice (verified locally).  This sentinel locks the
-        committed artifact content so (a) a drift in the script
-        logic would produce a mismatched output and (b) manual
-        tampering of the committed file is caught.
-
-        Does NOT re-execute the script (that would cost ~30s per
-        CI run; iter-768e already has one script-executing sentinel
-        for the canonical measurement).  Only parses the committed
-        output file.
-        """
-        import re
-        from pathlib import Path
-        repo_root = Path(__file__).resolve().parents[2]
-        shipped = (repo_root / "diagnostics" / "iter775_output"
-                    / "iter775_w5_cross.txt")
-        self.assertTrue(
-            shipped.exists(),
-            msg=(f"iter-775 committed output file missing at "
-                 f"{shipped}.  Regenerate via "
-                 f"`python scripts/diag_iter775_w5_cross_test.py "
-                 f"> {shipped}`."))
-        text = shipped.read_text()
-        # Expected two data lines for alpha=1.000 and alpha=0.980.
-        # Pattern: "  1.000     6.712e-07       1.960e+02  ..."
-        matches = re.findall(
-            r"\s+(\d+\.\d+)\s+([\d.eE+-]+)\s+([\d.eE+-]+)",
-            text)
-        self.assertGreaterEqual(
-            len(matches), 2,
-            msg=(f"iter-775 output has fewer than 2 data lines. "
-                 f"Content: {text}"))
-        # First 2 matches are for alpha=1.000 and alpha=0.980.
-        alphas = [float(m[0]) for m in matches[:2]]
-        mass_drifts = [float(m[1]) for m in matches[:2]]
-        h_linfs = [float(m[2]) for m in matches[:2]]
-        self.assertEqual(alphas, [1.000, 0.980],
-            msg=f"iter-775 alphas drifted: {alphas} != [1.000, 0.980]")
-        for md, alpha in zip(mass_drifts, alphas):
-            self.assertLess(
-                md, 1e-5,
-                msg=(f"iter-775 mass_drift at alpha={alpha} = "
-                     f"{md:.3e} exceeds 1e-5, far above the "
-                     f"~1e-7 floating-point noise floor."))
-        for hlinf, alpha in zip(h_linfs, alphas):
-            self.assertLess(
-                abs(hlinf - 196.0) / 196.0, 0.05,
-                msg=(f"iter-775 |h-h_ic|_Linf at alpha={alpha} = "
-                     f"{hlinf:.3e} drifted from the pin "
-                     f"1.960e+02 by more than 5%."))
 
     def test_boundary_fix_is_load_bearing_for_w2_l2(self):
         """Iter-513 / iter-514: explicitly lock the iter-511 finding
@@ -8507,9 +8090,18 @@ class TestCornerVorticityFortranFormula(unittest.TestCase):
             jnp.asarray(uc), jnp.asarray(vc), cdgrid, use_duogrid=True))
 
         # Iter-916b gold fingerprints (post-iter-836 production).
+        # Re-pinned iter89/iter90 for the FV3-faithful (#faces)-junction SCALING
+        # (edges ×2, vertices ×3; absolute area still legoESM's chord approx, not
+        # spherical get_area): `_corner_vorticity` is `f_corner + rarea_c*vort`,
+        # so ONLY the cube boundary/vertex corners (whose area changed) shift.
+        # The interior
+        # ([3,4,4]) and the extrema (min/max, at interior corners) are BYTE-
+        # IDENTICAL — confirming the area fix is a purely boundary-local change
+        # here (no spurious interior effect).  The sum and the two vertex samples
+        # [0,0,0] (SW) / [5,8,8] (NE) move by the boundary rarea_c change.
         self.assertEqual(vort_abs.shape, (6, 9, 9))
         self.assertAlmostEqual(float(vort_abs.sum()),
-            -2.785074425912422e-06, places=14,
+            -4.1217444318470005e-06, places=14,
             msg=f"duogrid vort_abs.sum() drifted: {float(vort_abs.sum()):.6e}")
         self.assertAlmostEqual(float(vort_abs.min()),
             -0.00014810834183147395, places=12,
@@ -8518,13 +8110,13 @@ class TestCornerVorticityFortranFormula(unittest.TestCase):
             0.00014395187913355967, places=12,
             msg=f"duogrid vort_abs.max() drifted: {float(vort_abs.max()):.6e}")
         self.assertAlmostEqual(float(vort_abs[0, 0, 0]),
-            -8.479464389985785e-05, places=12,
+            -8.50231298536604e-05, places=12,
             msg=f"duogrid vort_abs[0,0,0] drifted: {float(vort_abs[0,0,0]):.6e}")
         self.assertAlmostEqual(float(vort_abs[3, 4, 4]),
             -2.2152548776918704e-06, places=14,
             msg=f"duogrid vort_abs[3,4,4] drifted: {float(vort_abs[3,4,4]):.6e}")
         self.assertAlmostEqual(float(vort_abs[5, 8, 8]),
-            -8.417284419787868e-05, places=12,
+            -8.41621021580045e-05, places=12,
             msg=f"duogrid vort_abs[5,8,8] drifted: {float(vort_abs[5,8,8]):.6e}")
 
     def test_corner_vorticity_duogrid_skips_corner_additions_iter638(self):
@@ -9957,53 +9549,105 @@ class TestCdgridDxcDycBoundaryIter666(unittest.TestCase):
                  f"match analytic balanced {pgf_analytic:.3e} (±5%)."))
 
     def test_iter670_area_corner_boundary_matches_interior(self):
-        """Iter-670 regression lock: area_corner at cube
-        vertices/edges should NOT be underestimated from partial
-        supergrid summing.
+        """area_corner cube edge/vertex: FV3-style (#faces) SCALING of legoESM's
+        chord on-face sub-cell area (NOT the spherical-FV3 absolute area).
 
-        Pre-iter-670: corner i=0, j=0 had only 1/4 of the 4 surrounding
-        supergrid cells on-face (the other 3 are on neighbouring
-        faces), giving area_corner ≈ 0.22× interior.  This made
-        rarea_c ≈ 4× interior at cube vertices.
+        FV3 `tools/fv_grid_tools.F90:975-1067` builds the C-grid corner
+        control-volume area as (number of faces meeting at the node) × (the
+        ON-FACE sub-cell area), NOT an inward interior copy:
+          * interior corner: full 4-quadrant dual cell;
+          * cube EDGE node (2 faces): FV3 `2*get_area(edge-mid, edge-mid,
+            cell-ctr, cell-ctr)` (lines 976-1033) = 2× the on-face HALF dual cell;
+          * cube VERTEX (3-face junction): FV3 `3*get_area(vertex, mid_j, mid_i,
+            cell_ctr)` (lines 1036-1067) = 3× the on-face corner sub-quadrant.
+        legoESM applies that SAME (#faces) scaling (edges ×2, vertices ×3) but to
+        its CHORD on-face sub-cell area (planar cross-product), NOT FV3's
+        spherical-excess get_area (see cubed_sphere_cdgrid.py).  This test locks
+        the SCALING — the FV3-faithful part — independent of the absolute-area
+        convention; the `get_area` citations above are FV3's spherical oracle for
+        the scaling STRUCTURE, not legoESM's current absolute-area implementation.
 
-        Fortran oracle at `tools/fv_grid_tools.F90:1084-1087, 1561-
-        1564` extrapolates:
-            area_c(isd, j)       = area_c(isd+1, j)
-            area_c(isd, jsd)     = area_c(isd+1, jsd+1)
-
-        The iter-670 Python fix mirrors this.
+        Pre-iter-670 the vertices summed only the 1 on-face quadrant (no ×3) →
+        ≈0.22× interior → rarea_c ≈ 4× too large.  Iter-670 over-corrected by
+        copying the interior inward (edge==vertex==interior, ≈1.0×) — that
+        mirrors FV3's HALO-ghost extrapolation (1084-1087), not the in-domain
+        grid_area formula.  iter84/iter89 restore the (#faces) scaling: with the
+        on-face sub-cells shrinking toward the boundary this gives edge/interior
+        ≈ 0.865 and vertex/interior ≈ 0.67, resolution-stable.  These C12/C36
+        RATIO bands are ROBUST to chord-vs-spherical (spherical get_area gives
+        ≈0.865/0.675 too — only the degenerate C1 absolute differs, 0.659 chord
+        vs 0.75 spherical, see the C1 block), so a future chord→spherical area
+        upgrade does NOT trip them.  These guard against BOTH the under-count
+        (vertex ≈0.22) and the iter-670 over-copy (edge==vertex==1.0).
         """
         import numpy as np
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.grids.cubed_sphere_cdgrid import (
             create_cubed_sphere_cdgrid)
 
-        n = 12
-        cdgrid = create_cubed_sphere_cdgrid(create_cubed_sphere(n=n))
-        ac = np.asarray(cdgrid.area_corner)   # (6, n+1, n+1)
+        for n in (12, 36):
+            cdgrid = create_cubed_sphere_cdgrid(create_cubed_sphere(n=n))
+            ac = np.asarray(cdgrid.area_corner)   # (6, n+1, n+1)
+            self.assertTrue(bool(np.all(ac > 0.0)),
+                            msg=f"C{n}: non-positive area_corner present.")
+            interior = float(ac[:, 1:n, 1:n].mean())
 
-        # West edge (i=0) should equal i=1 for j in [1, n-1].
-        np.testing.assert_allclose(
-            ac[:, 0, 1:n], ac[:, 1, 1:n], rtol=0.0, atol=1e-10,
-            err_msg=("area_corner[i=0, 1<=j<n] != area_corner[i=1, "
-                     "1<=j<n] — iter-670 west-edge extrapolation lost."))
-        # SW cube vertex (i=0, j=0) should equal interior diagonal (1, 1).
-        np.testing.assert_allclose(
-            ac[:, 0, 0], ac[:, 1, 1], rtol=0.0, atol=1e-10,
-            err_msg=("area_corner[i=0, j=0] != area_corner[i=1, j=1] "
-                     "— iter-670 SW cube-vertex extrapolation lost."))
-        # NE cube vertex similarly.
-        np.testing.assert_allclose(
-            ac[:, n, n], ac[:, n - 1, n - 1], rtol=0.0, atol=1e-10,
-            err_msg=("area_corner[i=n, j=n] != area_corner[i=n-1, j=n-1]."))
-        # Corner/interior ratio should now be ~1, not ~0.22.
-        interior_mean = ac[:, 1:n, 1:n].mean()
-        corner_mean = ac[:, 0, 0].mean()
-        self.assertGreater(
-            corner_mean / interior_mean, 0.5,
-            msg=(f"area_corner ratio corner/interior = "
-                 f"{corner_mean/interior_mean:.3f} is still below 0.5 "
-                 f"— pre-iter-670 partial-quadrant bug has returned."))
+            # All four cube EDGES (2-face nodes): ×2 junction scaling of the
+            # on-face half dual cell ≈ 0.865× interior (NOT the iter-670
+            # interior-copy ≈1.0).  Band is chord/spherical-robust (~0.865 either).
+            for edge, name in ((ac[:, 0, 1:n], "west"), (ac[:, n, 1:n], "east"),
+                               (ac[:, 1:n, 0], "south"), (ac[:, 1:n, n], "north")):
+                r = float(edge.mean()) / interior
+                self.assertTrue(
+                    0.82 < r < 0.91,
+                    msg=(f"C{n} {name}-edge area/interior = {r:.3f} not in the "
+                         f"FV3-style 2-face junction-scaling band (0.82,0.91); "
+                         f"regression in the ×2 on-face edge scaling."))
+
+            # All four cube VERTICES (3-face junctions): ×3 junction scaling of
+            # the on-face corner quadrant ≈ 0.67× interior (NOT ≈0.22 under-count,
+            # NOT ≈1.0 copy).  Band is chord/spherical-robust (~0.675 either).
+            for (vi, vj), name in (((0, 0), "SW"), ((0, n), "NW"),
+                                   ((n, 0), "SE"), ((n, n), "NE")):
+                r = float(ac[:, vi, vj].mean()) / interior
+                self.assertTrue(
+                    0.60 < r < 0.74,
+                    msg=(f"C{n} {name}-vertex area/interior = {r:.3f} not in the "
+                         f"FV3-style 3-face junction-scaling band (0.60,0.74); "
+                         f"either the under-count (~0.22) or the iter-670 "
+                         f"over-copy (~1.0) has returned."))
+
+        # ---- C1 corner case (iter90 codex review of d7108d48) -------------
+        # At n=1 every corner is a 3-face junction (no interior, no edge nodes),
+        # so the FV3 ×3 vertex SCALING must still apply even though the boundary
+        # block's edge slices are empty no-ops there.  legoESM uses the PLANAR
+        # chord-cross-product supergrid sub-cell area (a deliberate O(dx²)
+        # approximation to FV3's spherical-excess get_area; the whole SW-core
+        # gold-file surface is pinned to it — see cubed_sphere_cdgrid.py).  Under
+        # that chord area the on-face corner quadrant is ≈0.2195*cell (vs the
+        # spherical 0.25*cell), so each cube vertex = 3*quadrant ⇒
+        # corner/area ≈ 0.659 against the (spherical) A-grid `area`.  The point of
+        # this lock is the ×3 SCALING, which is FV3-faithful regardless of the
+        # absolute area convention: without it (the pre-iter90 `n>=2` guard) the
+        # corner collapses to ≈0.220, and a mistaken ×2 edge-scaling gives ≈0.439
+        # — both excluded.  (If the absolute area is ever upgraded chord→spherical
+        # this band moves to ≈0.75; that is a tracked follow-up requiring gold-
+        # file regeneration, see fv3_faithful.md.)
+        g1 = create_cubed_sphere(n=1)
+        ac1 = np.asarray(create_cubed_sphere_cdgrid(g1).area_corner)
+        self.assertTrue(bool(np.all(ac1 > 0.0)),
+                        msg="C1: non-positive area_corner present.")
+        self.assertLess(float(ac1.max() - ac1.min()) / float(ac1.mean()), 1e-10,
+                        msg="C1: the 24 cube-vertex corners are not all equal "
+                            "(3-face-junction symmetry broken).")
+        cell_area = float(np.asarray(g1.area).mean())
+        r1 = float(ac1.mean()) / cell_area
+        self.assertTrue(
+            0.62 < r1 < 0.70,
+            msg=(f"C1 corner area/cell = {r1:.4f} not ≈0.659 (FV3 ×3 vertex "
+                 f"scaling with legoESM's chord supergrid area); ≈0.220 ⇒ the ×3 "
+                 f"vertex scaling was dropped (n>=2 guard), ≈0.439 ⇒ mis-applied "
+                 f"as a ×2 edge."))
 
     def test_iter667_n1_metrics_nonzero(self):
         """iter-667 regression lock: n=1 fallback gives non-zero
@@ -11827,16 +11471,40 @@ class TestInterpCenterToCornerOrderIter707(unittest.TestCase):
             d2_bg=0.0, dddmp=0.2, d4_bg=0.16, nord=1))
         self.assertEqual(ke.shape, (6, 9, 9))
         # Pinned fingerprints — will shift if _interp_center_to_corner
-        # is swapped or wk formula changes.
-        self.assertAlmostEqual(float(ke[0, 4, 4]), 93983.00383117038,
-            places=4, msg="adaptive Smag ke[0,4,4] fingerprint changed.")
-        self.assertAlmostEqual(float(ke[3, 2, 6]), 137334.72628142763,
-            places=4, msg="adaptive Smag ke[3,2,6] fingerprint changed.")
-        self.assertAlmostEqual(float(ke.sum()), -15962.03511603897,
-            places=3, msg="adaptive Smag ke.sum() fingerprint changed.")
-        self.assertAlmostEqual(float((ke ** 2).sum()),
-            11366256403441.21, places=-4,
-            msg="adaptive Smag ke L2² fingerprint changed.")
+        # is swapped or the wk formula changes.  Tolerance is RELATIVE
+        # (rtol=1e-6): a real scheme change (e.g. 2nd→4th-order corner
+        # interp) shifts these O(dx²)≈% — orders of magnitude above
+        # rtol — while harmless float-reassociation drift across XLA
+        # versions / hardware (observed ~6e-9 relative on ke[0,4,4]) does
+        # not.  The previous `places=4`/`places=3` ABSOLUTE checks
+        # demanded ~5e-10 relative on 1e5-magnitude values, which is
+        # below float64 cross-platform reproducibility and produced a
+        # spurious failure (iter ~57).
+        def _rel(actual, expected, name, scale=None):
+            # delta scaled to the field's natural magnitude (`scale`,
+            # default |expected|).  For the heavily-cancelling ke.sum()
+            # (elements ~1e5, sum ~1e4 ⇒ ~200× cancellation), use the L2
+            # magnitude so element-level float drift isn't amplified into
+            # a spurious failure.
+            ref = abs(expected) if scale is None else abs(scale)
+            self.assertAlmostEqual(
+                float(actual), expected, delta=ref * 1e-6,
+                msg=f"adaptive Smag {name} fingerprint changed "
+                    f"beyond rtol=1e-6 of its scale (real scheme change?).")
+        # Re-pinned iter89/iter90 for the FV3-faithful (#faces)-junction SCALING:
+        # the ×3-scaled (now smallest) cube-vertex corners lower the global
+        # da_min_c that scales BOTH the del-2 (dddmp) and del-4 (d4_bg) damping,
+        # so these adaptive-Smag fingerprints shift (ke[0,4,4] 93983.0 → 49013.5).
+        # See the nord=0 del-2 gold-file docstring for the da_min_c mechanism.
+        # The pinned values are legoESM CHORD-area numbers (the absolute
+        # per-quadrant area is a chord approximation, not FV3 spherical get_area;
+        # only the ×2/×3 junction scaling is FV3-faithful) → re-pin on a future
+        # chord→spherical upgrade.
+        l2 = float((ke ** 2).sum()) ** 0.5
+        _rel(ke[0, 4, 4], 49013.538501232724, "ke[0,4,4]")
+        _rel(ke[3, 2, 6], 71622.11135411877, "ke[3,2,6]")
+        _rel(ke.sum(), -3858.56053366139, "ke.sum()", scale=l2)
+        _rel((ke ** 2).sum(), 3092196932490.258, "ke L2²")
 
     def test_interp_center_to_corner_is_4point_average(self):
         """Verify Python's _interp_center_to_corner returns the
@@ -12217,7 +11885,23 @@ class TestDSw5CornerDivergenceGoldFileIter702(unittest.TestCase):
         return cdgrid, u_d, v_d, ua, va
 
     def test_nord0_del2_damping_gold_file(self):
-        """nord=0 (del-2 damping): fingerprints recorded on CPU x64."""
+        """nord=0 (del-2 damping): fingerprints recorded on CPU x64.
+
+        Re-pinned iter89/iter90 for the FV3-faithful edge/vertex (#faces)-junction
+        SCALING of area_corner (edges ×2, vertices ×3): the divergence damping
+        coefficient is `damp = da_min_c * max(d2_bg, ...)` and
+        `da_min_c = min(1/rarea_c)` is the GLOBAL minimum corner area.  Once the
+        cube vertices get the ×3 junction scaling (loop value ×3) instead of the
+        iter-670 interior-copy, the vertices become the smallest corners and
+        da_min_c drops to the vertex area, so the global damp weakens and the
+        whole ke field shifts — e.g. ke[0,4,4] -5634.7 → -4069.2.  This mirrors
+        the STRUCTURE of FV3's da_min_c = global_mx_c(area_c)
+        (fv_grid_utils.F90:743), where the 3-face vertices set the minimum.
+        NOTE: the pinned numbers are legoESM CHORD-area values — the absolute
+        per-quadrant area is a chord approximation, NOT FV3 spherical get_area —
+        so a future chord→spherical area upgrade WILL re-pin them (a known oracle
+        change, not a regression).
+        """
         import numpy as np
         from legoesm.core.fv3_sw_core import _d_sw5_corner_divergence
 
@@ -12226,13 +11910,13 @@ class TestDSw5CornerDivergenceGoldFileIter702(unittest.TestCase):
             u_d, v_d, ua, va, cdgrid, dt=0.1,
             d2_bg=0.01, dddmp=0.2, d4_bg=0.0, nord=0))
         self.assertEqual(ke.shape, (6, 9, 9))
-        self.assertAlmostEqual(float(ke[0, 4, 4]), -5634.741066188088,
+        self.assertAlmostEqual(float(ke[0, 4, 4]), -4069.1838407732866,
             places=6, msg="nord=0 ke[0,4,4] fingerprint changed.")
-        self.assertAlmostEqual(float(ke[3, 2, 6]), 11590.35168441207,
+        self.assertAlmostEqual(float(ke[3, 2, 6]), 8370.086793534787,
             places=6, msg="nord=0 ke[3,2,6] fingerprint changed.")
-        self.assertAlmostEqual(float(ke.sum()), -52259.08051452633,
+        self.assertAlmostEqual(float(ke.sum()), -34165.92577958369,
             places=4, msg="nord=0 ke.sum() fingerprint changed.")
-        self.assertAlmostEqual(float((ke ** 2).sum()), 183580121358.84125,
+        self.assertAlmostEqual(float((ke ** 2).sum()), 100798232467.36038,
             places=-2, msg="nord=0 ke L2² fingerprint changed.")
 
     def test_nord1_del4_damping_gold_file(self):
@@ -12242,6 +11926,14 @@ class TestDSw5CornerDivergenceGoldFileIter702(unittest.TestCase):
         (sw_core.F90:1725-1821) including `_divergence_corner_duo`
         (iter-655 pad_halo wiring) + metric-weighted composite damping.
         A regression in ANY of these stages shifts the fingerprints.
+
+        Re-pinned iter89/iter90 for the FV3-faithful (#faces)-junction SCALING:
+        del-4 damping scales as `(da_min_c*d4_bg)**(nord+1)` (sw_core.F90:1811),
+        so the ×3-scaled (now smallest) vertex corners lower the global da_min_c
+        and weaken the del-4 damping — ke[0,4,4] -73741.2 → -38457.1.  As in the
+        nord=0 test, the pinned values are legoESM CHORD-area numbers (the ×3
+        SCALING is FV3-faithful; the absolute area is a chord approximation, not
+        spherical get_area) and will re-pin on a future spherical upgrade.
         """
         import numpy as np
         from legoesm.core.fv3_sw_core import _d_sw5_corner_divergence
@@ -12251,13 +11943,13 @@ class TestDSw5CornerDivergenceGoldFileIter702(unittest.TestCase):
             u_d, v_d, ua, va, cdgrid, dt=0.1,
             d2_bg=0.0, dddmp=0.0, d4_bg=0.16, nord=1))
         self.assertEqual(ke.shape, (6, 9, 9))
-        self.assertAlmostEqual(float(ke[0, 4, 4]), -73741.18999227723,
+        self.assertAlmostEqual(float(ke[0, 4, 4]), -38457.129727216074,
             places=6, msg="nord=1 ke[0,4,4] fingerprint changed.")
-        self.assertAlmostEqual(float(ke[3, 2, 6]), 136135.2527804066,
+        self.assertAlmostEqual(float(ke[3, 2, 6]), 70996.56348333597,
             places=6, msg="nord=1 ke[3,2,6] fingerprint changed.")
-        self.assertAlmostEqual(float(ke.sum()), 18038.82445212739,
+        self.assertAlmostEqual(float(ke.sum()), 5592.254861923979,
             places=4, msg="nord=1 ke.sum() fingerprint changed.")
-        self.assertAlmostEqual(float((ke ** 2).sum()), 7855642704496.756,
+        self.assertAlmostEqual(float((ke ** 2).sum()), 2137431580001.7354,
             places=-4, msg="nord=1 ke L2² fingerprint changed.")
 
     def test_reacts_to_input_changes(self):

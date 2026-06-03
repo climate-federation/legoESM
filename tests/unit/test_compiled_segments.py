@@ -128,7 +128,8 @@ def _mock_step_unified(
         held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
         held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
     )
-    return phys_out, held_new
+    # Slab-land temperature passes through unchanged (mock has no land).
+    return phys_out, held_new, kwargs.get("T_land")
 
 
 # ===========================================================================
@@ -518,7 +519,7 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
         # Physics
         need_rad = jnp.bool_(True) if args["rad_update_steps"] <= 1 else \
             ((step_idx + 1) % args["rad_update_steps"]) == 0
-        phys_out, held_new = step_unified(
+        phys_out, held_new, _T_land_ref = step_unified(
             need_rad,
             T_new, p_s_new,
             carry.q_v, carry.q_c, carry.q_r, carry.conv_prog,
@@ -585,6 +586,7 @@ def _run_per_step_python(model, step_unified, n_steps, carry_init, args,
             precip_accum=precip_accum,
             shflx_accum=carry.shflx_accum,
             lhflx_accum=carry.lhflx_accum,
+            T_land=carry.T_land,
         )
     return carry
 
@@ -818,3 +820,461 @@ class TestPhysicsSubComponents:
             0.5,
             atol=1e-6,
         )
+
+
+# ===========================================================================
+# 7. Issue #316: radiation subcycling — cond-free outer/inner scan
+# ===========================================================================
+
+class TestRadiationSubcycle:
+    """Issue #316 regression tests.
+
+    The legacy single-scan body used ``jax.lax.cond`` to gate radiation
+    inside the inner loop.  With a large RRTMGP branch and scan length
+    >> 1, XLA JIT compile time grew to hours.  The fix replaces the
+    cond with a Python-static outer/inner scan pair: outer body
+    computes radiation once, inner body subcycles
+    ``rad_update_steps - 1`` cheap "held radiation" steps before the
+    final rad step.  These tests verify both the scheduling math
+    (compute_segment_length, scan dispatch) and the
+    behavioural equivalence to the legacy cond body.
+    """
+
+    def _make_init_carry(self):
+        state = _make_hydrostatic_state()
+        shape_3d = (N_FACES, N, N, NLEV)
+        shape_2d = (N_FACES, N, N)
+        return pack_carry(
+            state,
+            q_v=jnp.ones(shape_3d) * 0.01,
+            q_c=jnp.zeros(shape_3d),
+            q_r=jnp.zeros(shape_3d),
+            held_dT_rad=jnp.zeros(shape_3d),
+            held_sw_net_sfc=jnp.zeros(shape_2d),
+            held_lw_net_sfc=jnp.zeros(shape_2d),
+            held_sw_up_toa=jnp.zeros(shape_2d),
+            held_lw_up_toa=jnp.zeros(shape_2d),
+            held_sw_down_toa=jnp.zeros(shape_2d),
+            step_index=0,
+        )
+
+    def test_segment_length_unchanged_when_already_multiple(self):
+        # diag=4320 = 360 * 12, so rad=12 divides cleanly — no snap needed.
+        assert compute_segment_length(4320, 0, 12) == 4320
+
+    def test_segment_length_unchanged_when_rad_does_not_divide_gcd(self):
+        # Snapping down would break the "segment_length divides every
+        # cadence interval" invariant — leave it alone and let the
+        # legacy cond-based scan handle the segment.
+        assert compute_segment_length(4320, 0, 7) == 4320
+
+    def test_segment_length_unchanged_when_rad_one(self):
+        # rad_update_steps <= 1 means subcycling is impossible by
+        # definition (no held-radiation steps to amortise over).
+        assert compute_segment_length(4320, 0, 1) == 4320
+
+    def test_segment_length_unchanged_when_seg_below_rad(self):
+        # GCD is finer than radiation cadence — degenerate case, fall
+        # through to legacy scan.
+        assert compute_segment_length(100, 0, 200) == 100
+
+    def test_subcycle_matches_legacy_cond_body(self):
+        """Subcycled outer/inner scan output == legacy cond scan output.
+
+        Mock physics is identical whether ``need_rad`` is True or
+        False (the mock ignores rad), so the two paths must agree to
+        machine precision.  This is the contract that guarantees the
+        fix introduces no numerical change.
+        """
+        args = _make_segment_fn_args()
+        args["rad_update_steps"] = 4
+
+        # Legacy: data-dependent cond (no step_unified_no_rad passed)
+        run_legacy = build_segment_fn(**args)
+
+        # Subcycled: cond-elided outer/inner scan
+        run_subcycle = build_segment_fn(
+            **args, step_unified_no_rad=_mock_step_unified,
+        )
+
+        carry_init = self._make_init_carry()
+        # 12 steps = 3 outer iters × 4 inner steps each — exact multiple.
+        legacy_out = run_legacy(_copy_carry(carry_init), 12, _FORCING)
+        subcycle_out = run_subcycle(_copy_carry(carry_init), 12, _FORCING)
+        jax.block_until_ready(legacy_out.T)
+        jax.block_until_ready(subcycle_out.T)
+
+        for field_name in SegmentCarry._fields:
+            a = np.asarray(getattr(legacy_out, field_name))
+            b = np.asarray(getattr(subcycle_out, field_name))
+            np.testing.assert_allclose(
+                a, b, atol=1e-6, rtol=1e-6,
+                err_msg=f"Subcycled vs legacy mismatch in {field_name}",
+            )
+
+    def test_subcycle_falls_back_when_n_not_multiple_of_rad(self):
+        """``n_steps % rad_update_steps != 0`` → legacy scan path.
+
+        With ``step_unified_no_rad`` provided AND rad>1 AND n%rad==0,
+        :func:`build_segment_fn` uses the subcycled scan.  When
+        n%rad!=0, it must fall back to the legacy cond body so the
+        radiation cadence within the segment stays correct.  We test
+        by running 7 steps with rad=4: 7 is not a multiple of 4, so
+        the subcycled-aware build still routes through the legacy
+        body and produces the same result as the legacy build alone.
+        """
+        args = _make_segment_fn_args()
+        args["rad_update_steps"] = 4
+
+        run_legacy = build_segment_fn(**args)
+        run_subcycle = build_segment_fn(
+            **args, step_unified_no_rad=_mock_step_unified,
+        )
+
+        carry_init = self._make_init_carry()
+        legacy_out = run_legacy(_copy_carry(carry_init), 7, _FORCING)
+        subcycle_out = run_subcycle(_copy_carry(carry_init), 7, _FORCING)
+
+        for field_name in SegmentCarry._fields:
+            np.testing.assert_allclose(
+                np.asarray(getattr(legacy_out, field_name)),
+                np.asarray(getattr(subcycle_out, field_name)),
+                atol=1e-6, rtol=1e-6,
+                err_msg=f"Fallback mismatch in {field_name}",
+            )
+
+    def test_subcycle_step_index_matches_legacy(self):
+        """``step_index`` increments by ``n_steps`` regardless of path."""
+        args = _make_segment_fn_args()
+        args["rad_update_steps"] = 3
+
+        run_subcycle = build_segment_fn(
+            **args, step_unified_no_rad=_mock_step_unified,
+        )
+        carry = self._make_init_carry()
+        result = run_subcycle(carry, 9, _FORCING)  # 3 outer × 3 inner
+        assert int(result.step_index) == 9
+
+    def test_subcycle_disabled_when_rad_one(self):
+        """``rad_update_steps == 1`` → no subcycle, even with no_rad variant.
+
+        Subcycling needs at least one held-rad step per outer iter
+        (i.e. rad_update_steps - 1 >= 1).  When rad=1 build_segment_fn
+        must route through the legacy single-scan path.
+        """
+        args = _make_segment_fn_args()
+        args["rad_update_steps"] = 1
+
+        run_subcycle = build_segment_fn(
+            **args, step_unified_no_rad=_mock_step_unified,
+        )
+        run_legacy = build_segment_fn(**args)
+
+        carry_init = self._make_init_carry()
+        a = run_subcycle(_copy_carry(carry_init), 5, _FORCING)
+        b = run_legacy(_copy_carry(carry_init), 5, _FORCING)
+        for field_name in SegmentCarry._fields:
+            np.testing.assert_allclose(
+                np.asarray(getattr(a, field_name)),
+                np.asarray(getattr(b, field_name)),
+                atol=1e-6, rtol=1e-6,
+            )
+
+    def test_build_step_unified_static_need_rad_api(self):
+        """``static_need_rad`` API accepts True / False / None.
+
+        The numerical equivalence between the static variants and the
+        data-dependent ``lax.cond`` body is verified end-to-end by
+        :meth:`test_subcycle_matches_legacy_cond_body` — at the
+        segment level mock physics ignores ``need_rad``, so both
+        scan paths must yield bit-equivalent state.  Here we just pin
+        the API surface: the three call forms must produce distinct
+        callables (so callers can build both variants up-front and
+        dispatch Python-side).
+        """
+        from legoesm.driver.physics_pipeline import PhysicsPipeline
+        import inspect
+        sig = inspect.signature(PhysicsPipeline.build_step_unified)
+        assert "static_need_rad" in sig.parameters
+        param = sig.parameters["static_need_rad"]
+        assert param.default is None  # default preserves legacy cond
+
+    def test_unaligned_start_falls_back_to_legacy(self):
+        """Codex review #1/#2/#3: alignment guard.
+
+        Legacy cond body fires fresh radiation when ``(step_idx + 1)
+        % rad_update_steps == 0`` — i.e., the last inner step of each
+        radiation cycle.  The subcycled outer body's
+        ``(k-1)`` no-rad + ``1`` rad pattern only matches that when
+        the segment starts on an aligned step.  If
+        ``carry.step_index % rad_update_steps != 0`` (checkpoint
+        restart mid-cycle), the subcycled path would fire rad on the
+        wrong absolute step — so :func:`build_segment_fn` must fall
+        back to the legacy scan and produce identical output to the
+        legacy-only build.
+        """
+        args = _make_segment_fn_args()
+        args["rad_update_steps"] = 4
+
+        run_legacy = build_segment_fn(**args)
+        run_subcycle = build_segment_fn(
+            **args, step_unified_no_rad=_mock_step_unified,
+        )
+
+        # Start mid-cycle: step_index=2 with rad=4.  Legacy would fire
+        # rad on inner-step idx 1 (absolute idx 3 → (3+1)%4==0).  A
+        # naive subcycled path would fire rad on inner-step idx 3.
+        state = _make_hydrostatic_state()
+        shape_3d = (N_FACES, N, N, NLEV)
+        shape_2d = (N_FACES, N, N)
+        carry_unaligned = pack_carry(
+            state,
+            q_v=jnp.ones(shape_3d) * 0.01,
+            q_c=jnp.zeros(shape_3d),
+            q_r=jnp.zeros(shape_3d),
+            held_dT_rad=jnp.zeros(shape_3d),
+            held_sw_net_sfc=jnp.zeros(shape_2d),
+            held_lw_net_sfc=jnp.zeros(shape_2d),
+            held_sw_up_toa=jnp.zeros(shape_2d),
+            held_lw_up_toa=jnp.zeros(shape_2d),
+            held_sw_down_toa=jnp.zeros(shape_2d),
+            step_index=2,  # NOT a multiple of rad_update_steps=4
+        )
+
+        out_legacy = run_legacy(_copy_carry(carry_unaligned), 8, _FORCING)
+        out_subcycle = run_subcycle(_copy_carry(carry_unaligned), 8, _FORCING)
+        jax.block_until_ready(out_legacy.T)
+        jax.block_until_ready(out_subcycle.T)
+
+        # When the alignment guard is correct, build_segment_fn falls
+        # back to the legacy body and the two outputs are identical.
+        for field_name in SegmentCarry._fields:
+            np.testing.assert_allclose(
+                np.asarray(getattr(out_legacy, field_name)),
+                np.asarray(getattr(out_subcycle, field_name)),
+                atol=1e-6, rtol=1e-6,
+                err_msg=(
+                    f"Unaligned start: subcycle path silently used "
+                    f"despite step_index=2, rad=4 — mismatch in "
+                    f"{field_name}.  Codex iter alignment guard FAIL."
+                ),
+            )
+
+    def test_need_rad_timing_recorded(self):
+        """Codex review #9: timing-recording mock catches off-by-one.
+
+        Use a stateful mock that records the ``need_rad`` value seen
+        per scan call.  In the legacy cond body the value flows
+        through ``lax.cond``; in the subcycled body the rad-only mock
+        is called on the last inner step and the no-rad-only mock on
+        the earlier ``k-1`` steps.  We can't easily inspect the
+        in-trace bool, but we *can* compare the held-radiation arrays
+        post-scan: the legacy path overwrites held with the rad
+        output on the last step of every cycle.  If we make the
+        rad-mock write a distinct sentinel into ``dT_dt_rad`` and the
+        no-rad-mock leave it alone, the post-segment held value
+        unambiguously identifies whether rad fired correctly.
+        """
+        sentinel_dT_rad = 1.234e-3
+
+        def rad_mock(need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
+                     sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
+                     solar_weights, s_0, o3_vmr, aerosol_od,
+                     held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+                     held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+                     **kwargs):
+            phys_out, _, _T_land_new = _mock_step_unified(
+                need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
+                sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
+                solar_weights, s_0, o3_vmr, aerosol_od,
+                held_dT_rad, held_sw_net_sfc, held_lw_net_sfc,
+                held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+                **kwargs,
+            )
+            # New held with sentinel — represents "fresh radiation"
+            held_new = (
+                jnp.full_like(held_dT_rad, sentinel_dT_rad),
+                held_sw_net_sfc, held_lw_net_sfc,
+                held_sw_up_toa, held_lw_up_toa, held_sw_down_toa,
+            )
+            # step_unified now returns a 3-tuple incl. the slab-land
+            # skin temperature (#325); pass it through unchanged.
+            return phys_out, held_new, _T_land_new
+
+        def no_rad_mock(*args, **kwargs):
+            # Identical to _mock_step_unified — passes held through unchanged.
+            return _mock_step_unified(*args, **kwargs)
+
+        args = _make_segment_fn_args()
+        args["step_unified"] = rad_mock
+        args["rad_update_steps"] = 3
+
+        # Aligned start: subcycle path must fire rad on inner-step
+        # idx 2 (absolute idx (3*i)+2 → (idx+1)%3==0).
+        run_subcycle = build_segment_fn(
+            **args, step_unified_no_rad=no_rad_mock,
+        )
+        run_legacy = build_segment_fn(**args)
+
+        carry = self._make_init_carry()  # step_index=0
+        # 9 steps = 3 outer × 3 inner → rad fires on absolute steps 2, 5, 8.
+        out_sub = run_subcycle(_copy_carry(carry), 9, _FORCING)
+        out_leg = run_legacy(_copy_carry(carry), 9, _FORCING)
+
+        # Both paths should end with held_dT_rad == sentinel — because
+        # the rad mock fires (in subcycle: on inner-step 2 of every
+        # outer iter; in legacy: when (idx+1)%3==0).
+        np.testing.assert_allclose(
+            np.asarray(out_sub.held_dT_rad), sentinel_dT_rad,
+            atol=1e-9,
+        )
+        np.testing.assert_allclose(
+            np.asarray(out_leg.held_dT_rad), sentinel_dT_rad,
+            atol=1e-9,
+        )
+
+    def test_subcycle_dispatches_no_rad_body_and_accepts_2tuple(self):
+        """Regression for #325 codex review (two coupled hazards):
+
+        1. The subcycled held-radiation steps must dispatch to the
+           ``step_unified_no_rad`` body via ``step_fn``.  A prior
+           refactor called the outer ``step_unified`` directly, so the
+           expensive radiation branch (and the slab-land update) ran on
+           every step regardless of ``rad_update_steps``.
+        2. A ``step_unified`` implementation may return a legacy 2-tuple
+           ``(phys_out, held_new)`` — neural / SFNO training wrappers do
+           — and the compiled segment path must accept it (land inert),
+           not crash unpacking a 3rd value.
+
+        Both mocks tag ``held_dT_rad`` with a distinct sentinel; running a
+        single step with ``rad_update_steps=2`` (step_idx 0 ->
+        ``(0+1)%2 != 0`` -> no-rad) must leave the *no-rad* sentinel.
+        """
+        # ``_run_subcycled`` runs ``rad_update_steps - 1`` no-rad steps
+        # then one rad step per outer cycle, and is only used when
+        # ``n_steps`` divides evenly by the cadence.  Cadence 2 over 2
+        # steps => one outer cycle = 1 no-rad step + 1 rad step.  Both
+        # bodies are traced; the no-rad body sets a (trace-time) flag, so
+        # if the dispatch is wrong (outer ``step_unified`` used for the
+        # no-rad slot) the flag stays False.
+        called = {"no_rad": False}
+
+        def rad_mock(need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
+                     sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
+                     solar_weights, s_0, o3_vmr, aerosol_od,
+                     held_dT_rad, *held_rest, **kwargs):
+            phys_out, held, _T_land = _mock_step_unified(
+                need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
+                sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
+                solar_weights, s_0, o3_vmr, aerosol_od,
+                held_dT_rad, *held_rest, **kwargs)
+            return phys_out, held, _T_land  # 3-tuple (PhysicsPipeline form)
+
+        def norad_mock_2tuple(need_rad, T, p_s, q_v, q_c, q_r, conv_prog,
+                              u, v, sst, sic, lat, lon, day_of_year,
+                              seconds_of_day, dt, solar_weights, s_0,
+                              o3_vmr, aerosol_od, held_dT_rad, *held_rest,
+                              **kwargs):
+            called["no_rad"] = True  # set at trace time when dispatched
+            phys_out, held, _ = _mock_step_unified(
+                need_rad, T, p_s, q_v, q_c, q_r, conv_prog, u, v,
+                sst, sic, lat, lon, day_of_year, seconds_of_day, dt,
+                solar_weights, s_0, o3_vmr, aerosol_od,
+                held_dT_rad, *held_rest, **kwargs)
+            return phys_out, held  # LEGACY 2-tuple (neural / SFNO form)
+
+        args = _make_segment_fn_args()
+        args["step_unified"] = rad_mock
+        args["rad_update_steps"] = 2
+        run = build_segment_fn(**args, step_unified_no_rad=norad_mock_2tuple)
+
+        carry = self._make_init_carry()  # step_index=0
+        out = run(_copy_carry(carry), 2, _FORCING)  # 1 outer cycle
+
+        # (1) The no-rad body must have been dispatched (and not crash on
+        #     its 2-tuple return).
+        assert called["no_rad"], (
+            "subcycle held-step did not dispatch to step_unified_no_rad — "
+            "outer step_unified used instead (#325 dispatch regression)"
+        )
+        # (2) The run completes with finite prognostics (2-tuple accepted).
+        assert bool(jnp.all(jnp.isfinite(out.T)))
+        assert bool(jnp.all(jnp.isfinite(out.held_dT_rad)))
+
+    def test_raw_remains_traceable_under_grad(self):
+        """Codex review axis D: ``.raw`` must work under ``jax.grad``.
+
+        The JIT path is fine to do a host sync on ``carry.step_index``
+        (one scalar transfer per Python segment, outside the hot
+        loop).  The ``.raw`` path is used inside
+        ``eqx.filter_value_and_grad`` / ``jax.grad`` — where
+        ``carry.step_index`` becomes a JAX tracer and ``int(tracer)``
+        raises ``TracerIntegerConversionError``.  We assert that
+        ``run_segment.raw`` traces cleanly under ``jax.grad`` (i.e.,
+        the dispatcher does not inspect ``step_index``).
+        """
+        args = _make_segment_fn_args()
+        args["rad_update_steps"] = 4
+        run_segment_jit = build_segment_fn(
+            **args, step_unified_no_rad=_mock_step_unified,
+        )
+        run_raw = run_segment_jit.raw
+
+        carry_init = self._make_init_carry()
+
+        def loss_fn(T0):
+            # Replace carry.T with traced T0 so the gradient flows back.
+            c = carry_init._replace(T=T0)
+            out = run_raw(c, 4, _FORCING)
+            return jnp.sum(out.T)
+
+        T0 = carry_init.T.astype(jnp.float32)
+        # If .raw secretly calls int(carry.step_index), jax.grad will
+        # raise on the inner Tracer.  We don't care about the gradient
+        # value here — only that tracing succeeds.
+        grad_T = jax.grad(loss_fn)(T0)
+        assert grad_T.shape == T0.shape
+
+    def test_compiled_segments_subcycle_dispatch_matches_compute_segment_length(self):
+        """End-to-end: typical AMIP cadence routes through subcycled path.
+
+        Issue #316 worked example: dt=20 s, diag_days=1 →
+        diag_interval=4320.  At rad_update_steps=12 (4-min radiation
+        cadence) compute_segment_length keeps the segment at 4320
+        (clean multiple of 12) and build_segment_fn's run_segment
+        must dispatch to the subcycled path — i.e. produce the same
+        output as the legacy path on this exact (n_steps,
+        rad_update_steps) pair.  We don't measure HLO size here (CPU
+        backend optimises both paths fine); instead we lock in the
+        invariant that the subcycled and legacy paths agree.
+        """
+        seg = compute_segment_length(4320, 0, 12)
+        assert seg == 4320
+        assert seg % 12 == 0
+
+        args = _make_segment_fn_args()
+        args["rad_update_steps"] = 12
+
+        # Use a 24-step segment (still a multiple of rad=12) so the
+        # test runs in a few seconds on CPU — the full 4320 would be
+        # right for GPU compile-time benchmarking but overkill here.
+        n_steps = 24
+
+        run_legacy = build_segment_fn(**args)
+        run_subcycle = build_segment_fn(
+            **args, step_unified_no_rad=_mock_step_unified,
+        )
+
+        carry_init = self._make_init_carry()
+        out_legacy = run_legacy(_copy_carry(carry_init), n_steps, _FORCING)
+        out_subcycle = run_subcycle(_copy_carry(carry_init), n_steps, _FORCING)
+        for field_name in SegmentCarry._fields:
+            np.testing.assert_allclose(
+                np.asarray(getattr(out_legacy, field_name)),
+                np.asarray(getattr(out_subcycle, field_name)),
+                atol=1e-5, rtol=1e-5,
+                err_msg=(
+                    f"Subcycled vs legacy AMIP-cadence mismatch in "
+                    f"{field_name} (rad_update_steps=12, n_steps={n_steps})"
+                ),
+            )

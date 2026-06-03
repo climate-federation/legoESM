@@ -9,13 +9,19 @@ boundary layer cases).
 The SCM reuses the canonical hydrostatic physics factory
 (`legoesm.atmosphere.physics.combined.make_physics`) so any scheme that
 works in the full 3-D model also works here without modification. There
-is no horizontal advection, no pressure-gradient force, and no Coriolis
-— only column tendencies from radiation, convection, turbulence,
-microphysics, and gravity-wave drag, integrated forward Euler.
+is no horizontal advection from the dynamical core, no pressure-gradient
+force, and no intrinsic Coriolis — only column tendencies from
+radiation, convection, turbulence, microphysics, and gravity-wave drag,
+optionally augmented by a user-supplied :class:`SCMForcing` that
+contributes external large-scale forcing (Coriolis + geostrophic wind,
+large-scale subsidence, prescribed horizontal-advection tendencies, and
+the Phase-B prescribed-surface-flux hooks).  Tendencies are then
+combined and integrated with forward Euler, RK2, or RK4.
 
 Example
 -------
 >>> from legoesm.atmosphere.scm import SingleColumnModel
+>>> from legoesm.atmosphere.scm_forcing import SCMForcing
 >>> from legoesm.atmosphere.physics import (
 ...     PhysicsConfig, RadiationConfig, TurbulenceConfig,
 ... )
@@ -23,9 +29,14 @@ Example
 ...     radiation=RadiationConfig(scheme="gray"),
 ...     turbulence=TurbulenceConfig(scheme="louis"),
 ... )
+>>> forcing = SCMForcing(
+...     f_c=1e-4,
+...     u_geo=lambda t: jnp.full(40, 8.0),
+... )
 >>> scm = SingleColumnModel.create(
 ...     physics_config=cfg, nlev=40, dt=300.0,
 ...     latitude_deg=0.0, T_profile=jnp.linspace(220.0, 295.0, 40),
+...     forcing=forcing,
 ... )
 >>> final_state, history = scm.run(nsteps=288, save_every=12)
 """
@@ -40,11 +51,25 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState, HydrostaticTendencies
+from legoesm.core.column_stepping import (
+    ab2_effective_tendency,
+    build_explicit_integrators,
+    register_integrator,
+)
 from legoesm.grids.vertical import SigmaCoordinate, create_sigma_coordinate
 from legoesm.atmosphere.physics.combined import PhysicsConfig, make_physics
 from legoesm.atmosphere.physics.physics_state import (
     PhysicsState,
     init_physics_state,
+)
+from legoesm.atmosphere.scm_forcing import (
+    SCMForcing,
+    add_tendencies,
+    compute_forcing_tendencies,
+    default_forcing,
+    inject_prescribed_T_sfc_into_phys_state,
+    validate_forcing,
+    validate_forcing_against_state,
 )
 
 
@@ -192,48 +217,58 @@ def _apply_tendencies(
     )
 
 
-def _tendency_fn(physics_fn, grid, sigma_coord):
-    """Return a closure ``(state, phys_state) -> (tend, phys_state_out)``.
+def _tendency_fn(physics_fn, grid, sigma_coord, forcing: SCMForcing | None = None):
+    """Return a closure ``(state, phys_state, t) -> (tend, phys_state_out)``.
 
     Used by the time-integrator strategies so they all share the same
     physics-evaluation interface regardless of which scheme is active.
+    ``t`` is the **stage time** in seconds since model start (RK stages
+    pass intermediate values); it is forwarded to ``forcing`` callables
+    so time-dependent geostrophic wind, prescribed surface forcing, etc.
+    are evaluated at the correct sub-step time.  ``forcing=None`` is a
+    no-op.
     """
-    def f(state, phys_state):
-        return physics_fn(state, grid, sigma_coord, phys_state=phys_state)
+    def f(state, phys_state, t):
+        # For ``prescribe="T_s"``: write the prescribed skin temperature
+        # into ``phys_state.surface_T_sfc_override`` so the turbulence
+        # scheme's bulk-flux call sees ``T_sfc != T[..., -1]`` and
+        # produces a non-zero sensible flux.  Lowest air temperature
+        # evolves freely under that flux (do NOT mutate state.T[-1] —
+        # collapses the gradient — Phase B codex iter-1 high finding).
+        # Also notify radiation via ``physics_fn.set_T_sfc_override`` so
+        # surface longwave emission uses the same prescribed value
+        # (Phase B v2 codex iter-2 high finding — without this the
+        # boundary was silently split between turbulence and radiation).
+        #
+        # The radiation hook is process-local mutable closure state on
+        # ``physics_fn``; wrap the call in try/finally so the override
+        # is always cleared, preventing leakage across SCM instances
+        # that share a ``physics_fn`` (Phase B v2 codex iter-5 high
+        # finding).
+        rad_hook = None
+        hook_armed = False
+        if forcing is not None and forcing.prescribe == "T_s":
+            phys_state = inject_prescribed_T_sfc_into_phys_state(
+                phys_state, forcing.T_s(t),
+            )
+            rad_hook = getattr(physics_fn, "set_T_sfc_override", None)
+            if callable(rad_hook):
+                rad_hook(phys_state.surface_T_sfc_override)
+                hook_armed = True
+
+        try:
+            tend, phys_out = physics_fn(
+                state, grid, sigma_coord, phys_state=phys_state,
+            )
+        finally:
+            if hook_armed:
+                rad_hook(None)
+
+        if forcing is not None:
+            ftend = compute_forcing_tendencies(state, sigma_coord, forcing, t)
+            tend = add_tendencies(tend, ftend)
+        return tend, phys_out
     return f
-
-
-def _euler_step(state, phys_state, f, dt):
-    """Forward Euler (1st order)."""
-    tend, phys_out = f(state, phys_state)
-    return _apply_tendencies(state, tend, dt), phys_out
-
-
-def _rk2_step(state, phys_state, f, dt):
-    """Heun's method (RK2, midpoint-correction variant).
-
-    ``phys_state`` is advanced once per outer step (stage-1 update) to
-    keep the prognostic-physics carry single-valued. Tendencies are
-    averaged between the predictor and corrector stages.
-    """
-    tend1, phys_mid = f(state, phys_state)
-    mid = _apply_tendencies(state, tend1, dt)
-    tend2, _ = f(mid, phys_mid)
-    avg = _average_tendencies(tend1, tend2, weights=(0.5, 0.5))
-    return _apply_tendencies(state, avg, dt), phys_mid
-
-
-def _rk4_step(state, phys_state, f, dt):
-    """Classical RK4. Physics-state carry advanced from stage-1 only."""
-    k1, phys_mid = f(state, phys_state)
-    s2 = _apply_tendencies(state, k1, 0.5 * dt)
-    k2, _ = f(s2, phys_mid)
-    s3 = _apply_tendencies(state, k2, 0.5 * dt)
-    k3, _ = f(s3, phys_mid)
-    s4 = _apply_tendencies(state, k3, dt)
-    k4, _ = f(s4, phys_mid)
-    avg = _average_tendencies(k1, k2, k3, k4, weights=(1/6, 1/3, 1/3, 1/6))
-    return _apply_tendencies(state, avg, dt), phys_mid
 
 
 def _average_tendencies(*tends, weights):
@@ -278,22 +313,34 @@ def _average_tendencies(*tends, weights):
 
 
 # Public registry — same naming pattern as PhysicsConfig schemes so that
-# swapping integrators feels like swapping a parameterization.
-TIME_INTEGRATORS: dict[str, Callable] = {
-    "forward_euler": _euler_step,
-    "rk2": _rk2_step,
-    "rk4": _rk4_step,
-}
+# swapping integrators feels like swapping a parameterization.  The
+# integrator numerics (Euler / RK2 / RK4 stage weights + the AB2 first-
+# step fallback) live in :mod:`legoesm.core.column_stepping` and are shared
+# with the ocean single-column model; only the atmosphere-specific
+# ``_apply_tendencies`` / ``_average_tendencies`` operators are injected
+# here.  The true AB2 multistep update lives in
+# :meth:`SingleColumnModel.step` to keep its prev-tendency cache isolated
+# per SCM instance.
+TIME_INTEGRATORS: dict[str, Callable] = build_explicit_integrators(
+    _apply_tendencies, _average_tendencies,
+)
 
 
 def register_time_integrator(name: str, step_fn: Callable) -> None:
-    """Register a custom time-integrator under ``name``.
+    """Register a custom time-integrator under ``name`` (atmosphere SCM).
 
-    The signature must be ``step_fn(state, phys_state, f, dt)`` where
-    ``f`` is the tendency callable returned by :func:`_tendency_fn`. The
-    integrator must return ``(new_state, new_phys_state)``.
+    Thin wrapper over
+    :func:`legoesm.core.column_stepping.register_integrator` targeting this
+    module's :data:`TIME_INTEGRATORS` registry.  The canonical signature is
+    ``step_fn(state, phys_state, f, dt, t)`` where ``f`` is the tendency
+    callable returned by :func:`_tendency_fn` and expects
+    ``f(state, phys_state, stage_t_seconds)``; the integrator must return
+    ``(new_state, new_phys_state)``.  See
+    :func:`~legoesm.core.column_stepping.register_integrator` for the 4-arg
+    legacy-shim behaviour (sampling forcing at the outer-step time only,
+    tagged ``_is_legacy_4arg``) and the full arity-validation rules.
     """
-    TIME_INTEGRATORS[name] = step_fn
+    register_integrator(TIME_INTEGRATORS, name, step_fn)
 
 
 class SCMHistory(NamedTuple):
@@ -340,12 +387,79 @@ class SingleColumnModel:
         sigma_coord: SigmaCoordinate,
         dt: float,
         time_integrator: str = "forward_euler",
+        forcing: SCMForcing | None = None,
+        t0_seconds: float = 0.0,
+        physics_config: PhysicsConfig | None = None,
+        _built_by_create: bool = False,
     ):
+        # Private marker set ONLY by :meth:`create`.  Direct callers
+        # leave it ``False``; used below by the
+        # ``prescribe='fluxes'`` validation to guarantee that
+        # ``physics_fn`` was built from a single validated
+        # ``physics_config`` (which only ``create`` can enforce).
+        self._built_by_create = bool(_built_by_create)
         if time_integrator not in TIME_INTEGRATORS:
             raise ValueError(
                 f"Unknown time_integrator: {time_integrator!r}. "
                 f"Available: {sorted(TIME_INTEGRATORS)}."
             )
+        step_fn_obj = TIME_INTEGRATORS[time_integrator]
+        if forcing is not None:
+            validate_forcing(forcing)
+            validate_forcing_against_state(forcing, state)
+            # Direct ``SingleColumnModel(...)`` construction bypasses
+            # :meth:`create`'s ``_validate_prescribed_fluxes_no_double_count``
+            # gate.  Re-run it here when ``physics_config`` is supplied;
+            # otherwise refuse ``prescribe='fluxes'`` so the user is
+            # forced to either pass ``physics_config`` (validatable) or
+            # route through :meth:`create` (Phase F fix #2 codex iter-1
+            # medium finding).
+            if forcing.prescribe == "fluxes":
+                # ``physics_config`` is required AND must have been used
+                # to build ``physics_fn``.  Direct construction cannot
+                # verify the latter from outside, so the only safe path
+                # is to refuse direct construction with prescribe='fluxes'
+                # unless the caller routed through :meth:`create` (which
+                # owns both objects).  ``create()`` sets a private
+                # ``_built_by_create`` marker on the returned instance
+                # before this check fires — direct constructor calls
+                # never set it, so the guard cleanly distinguishes the
+                # two paths.  Phase F fix #2 codex iter-2 medium finding.
+                if not getattr(self, "_built_by_create", False):
+                    raise ValueError(
+                        "SCMForcing.prescribe='fluxes' requires that "
+                        "``physics_fn`` was built from a validated "
+                        "``physics_config`` — direct ``SingleColumnModel"
+                        "(...)`` construction cannot enforce that "
+                        "physics_fn ≡ make_physics(physics_config), so a "
+                        "caller could pass a benign physics_config to "
+                        "satisfy validation while running a physics_fn "
+                        "that double-counts the prescribed flux.  Route "
+                        "through ``SingleColumnModel.create(...)``, "
+                        "which owns construction of both objects from a "
+                        "single config."
+                    )
+                if physics_config is None:
+                    raise ValueError(
+                        "SingleColumnModel.create() must pass "
+                        "physics_config through to the constructor for "
+                        "no-double-count validation."
+                    )
+                self._validate_prescribed_fluxes_no_double_count(
+                    physics_config, forcing,
+                )
+            if getattr(step_fn_obj, "_is_legacy_4arg", False):
+                raise ValueError(
+                    f"time_integrator={time_integrator!r} was registered "
+                    "with the legacy 4-arg signature and is wrapped by "
+                    "the compatibility shim.  That shim only samples "
+                    "forcing at the outer-step time, which would "
+                    "silently corrupt time-dependent SCM forcing "
+                    "(geostrophic wind drift, prescribed surface T_s "
+                    "trajectory, advective tendencies). Migrate the "
+                    "integrator to the 5-arg ``(state, phys, f, dt, t)`` "
+                    "signature, or drop the forcing argument."
+                )
         self.physics_fn = physics_fn
         self.state = state
         self.phys_state = phys_state
@@ -353,8 +467,91 @@ class SingleColumnModel:
         self.sigma_coord = sigma_coord
         self.dt = float(dt)
         self.time_integrator = time_integrator
-        self._step_fn = TIME_INTEGRATORS[time_integrator]
-        self._tend_fn = _tendency_fn(physics_fn, grid, sigma_coord)
+        self.forcing = forcing if forcing is not None else default_forcing()
+        self.t_seconds = float(t0_seconds)
+        self._step_fn = step_fn_obj
+        # AB2 stores the previous-step tendency to combine with the
+        # current step's tendency as ``1.5·tend_n − 0.5·tend_{n-1}``
+        # (second-order linear multistep).  Per-instance so multiple
+        # SCMs sharing a physics_fn cannot cross-contaminate.
+        self._ab2_prev_tend: HydrostaticTendencies | None = None
+        # Pass the *original* forcing arg (not the default sentinel) so
+        # _tendency_fn skips the forcing branch entirely when no forcing
+        # was supplied — preserves bit-exact behaviour for callers that
+        # never use forcing.
+        self._tend_fn = _tendency_fn(
+            physics_fn, grid, sigma_coord, forcing=forcing,
+        )
+
+    @staticmethod
+    def _validate_prescribed_fluxes_no_double_count(
+        physics_config: PhysicsConfig, forcing,
+    ) -> None:
+        """Reject configurations that double-count the surface flux.
+
+        ``SCMForcing(prescribe='fluxes')`` injects user-supplied
+        kinematic surface fluxes (``w'θ'``, ``w'qv'``) as a lowest-
+        cell tendency.  If the active turbulence scheme also runs its
+        bulk-flux formula with a non-zero heat-transfer coefficient
+        ``Ch_neutral``, the sensible / latent heat flux gets counted
+        twice (once via the prescribed-flux tendency, once via the
+        turbulence's vertical-diffusion bottom-BC).  Reject at SCM
+        construction so the user gets a clear error instead of a
+        silently warmed lowest cell.
+
+        Deferred-item #2 from the Phase F summary.  Momentum drag
+        (``Cd_neutral``) is *not* checked because the prescribed-flux
+        channel injects only ``w'θ'`` / ``w'qv'`` — turbulence
+        retains responsibility for surface momentum stress.
+        """
+        if forcing is None or forcing.prescribe != "fluxes":
+            return
+        turb = physics_config.turbulence
+        if turb.scheme == "none":
+            return
+        scheme_sub = getattr(turb, turb.scheme, None)
+        if scheme_sub is None:
+            return
+        surf = getattr(scheme_sub, "surface", None)
+        if surf is None:
+            return
+
+        # MOST bulk schemes (COARE3, Large-Yeager) compute sensible /
+        # latent heat fluxes from iterative MOST scaling parameters
+        # and do NOT honour ``Ch_neutral`` — they always produce a
+        # non-zero heat flux from any non-zero
+        # ``(T_sfc − T_air)`` / ``(q_sfc − q_air)`` gradient.  Setting
+        # ``Ch_neutral=0`` does not suppress them, so the only safe
+        # combination with ``prescribe='fluxes'`` is the
+        # ``bulk_scheme='constant'`` family + ``Ch_neutral=0``.
+        # Phase F fix #2 codex iter-1 high finding.
+        bulk_scheme = getattr(surf, "bulk_scheme", "constant")
+        if bulk_scheme in ("coare3", "large_yeager"):
+            raise ValueError(
+                "SCMForcing.prescribe='fluxes' is set, but the active "
+                f"turbulence scheme {turb.scheme!r} uses "
+                f"bulk_scheme={bulk_scheme!r}, which solves MOST "
+                "iteratively for sensible / latent heat flux and does "
+                "NOT honour Ch_neutral.  The bulk formula would "
+                "double-count the prescribed surface flux.  Switch to "
+                "bulk_scheme='constant' with Ch_neutral=0, or drop "
+                "prescribe='fluxes'."
+            )
+
+        Ch = getattr(surf, "Ch_neutral", 0.0)
+        if Ch != 0.0:
+            raise ValueError(
+                "SCMForcing.prescribe='fluxes' is set, but the active "
+                f"turbulence scheme {turb.scheme!r} has a non-zero "
+                f"surface.Ch_neutral={Ch}.  The prescribed-flux "
+                "channel injects ``w'θ'`` / ``w'qv'`` at the lowest "
+                "cell; turbulence's bulk-flux formula would inject "
+                "the same flux through the implicit-diffusion bottom "
+                "BC, double-counting it.  Set "
+                f"turbulence.{turb.scheme}.surface.Ch_neutral=0.0 "
+                "(retain Cd_neutral for momentum drag) or drop the "
+                "prescribed-flux channel."
+            )
 
     @staticmethod
     def _validate_integrator_compatibility(
@@ -370,10 +567,23 @@ class SingleColumnModel:
         stale carry and the result would not be a true RK update of the
         coupled (state, phys_state) system.
         """
+        # Forward Euler evaluates physics once per outer step at a
+        # single ``t`` and never reuses an in-flight stage carry, so
+        # it is compatible with stateful and diurnal physics.
         if time_integrator in ("forward_euler",):
             return
+        # AB2 also evaluates ``_tend_fn`` once per outer step (no sub-
+        # stages) but the multistep formula only applies to
+        # ``HydrostaticState`` tendencies — prognostic ``PhysicsState``
+        # carries (MYNN qke, TKE, convective profile, GWD spectrum,
+        # AR1 stochastic state) are advanced by the current step's
+        # physics call alone, not by any multistep history.  That
+        # mismatch silently breaks O(dt²) accuracy and benchmark
+        # parity for any scheme with a prognostic carry, so we reject
+        # the same combinations as the RK paths until a proper coupled
+        # AB2 lands (Phase D codex iter-1 medium finding).
         stateful_turb = physics_config.turbulence.scheme in (
-            "tke", "clubb_lite", "edmf"
+            "tke", "mynn25", "clubb_lite", "edmf"
         )
         # Schemes that *read* the previous ``conv_prog_profile`` or
         # ``conv_stoch_state`` — and therefore must not be advanced
@@ -436,6 +646,8 @@ class SingleColumnModel:
         prng_seed: int = 0,
         dtype=None,
         time_integrator: str = "forward_euler",
+        forcing: SCMForcing | None = None,
+        t0_seconds: float = 0.0,
     ) -> "SingleColumnModel":
         """Build a single-column model with sensible defaults.
 
@@ -469,8 +681,20 @@ class SingleColumnModel:
             Seed for the stochastic-physics PRNG carry.
         dtype
             Optional dtype override for state arrays.
+        forcing
+            Optional :class:`SCMForcing` carrying time-dependent
+            geostrophic wind + Coriolis, large-scale subsidence,
+            horizontal-advection tendencies, and prescribed surface
+            forcing.  ``None`` (default) reproduces the pre-forcing
+            SCM behaviour bit-for-bit.
+        t0_seconds
+            Initial simulation time (seconds since model start) seen by
+            forcing callables.  Defaults to ``0.0``.
         """
         cls._validate_integrator_compatibility(physics_config, time_integrator)
+        cls._validate_prescribed_fluxes_no_double_count(
+            physics_config, forcing,
+        )
         grid = make_scm_grid(latitude_deg, longitude_deg)
         sigma_coord = create_sigma_coordinate(nlev, sigma_top=sigma_top, dtype=dtype)
 
@@ -508,6 +732,9 @@ class SingleColumnModel:
             physics_fn=physics_fn, state=state, phys_state=phys_state,
             grid=grid, sigma_coord=sigma_coord, dt=dt,
             time_integrator=time_integrator,
+            forcing=forcing, t0_seconds=t0_seconds,
+            physics_config=physics_config,
+            _built_by_create=True,
         )
 
     def set_time(self, day_of_year: float, seconds_of_day: float) -> None:
@@ -517,13 +744,56 @@ class SingleColumnModel:
             set_time(day_of_year, seconds_of_day)
 
     def step(self) -> HydrostaticState:
-        """Advance the column by one step using the selected integrator."""
-        new_state, new_phys = self._step_fn(
-            self.state, self.phys_state, self._tend_fn, self.dt,
-        )
+        """Advance the column by one step using the selected integrator.
+
+        Stage time is sampled from ``self.t_seconds`` and the simulation
+        clock is advanced by ``self.dt`` after the step.  Time-dependent
+        SCM forcing callables are evaluated at the correct stage abscissae
+        inside the integrator (see the RK2 / RK4 steps in
+        :mod:`legoesm.core.column_stepping`).
+        """
+        if self.time_integrator == "ab2":
+            # Adams-Bashforth 2 — single ``_tend_fn`` evaluation per
+            # outer step (no sub-stages, no bootstrap re-evaluation).
+            # First step falls back to forward Euler using the *same*
+            # tendency that gets cached as ``prev_tend``; evaluating
+            # ``_tend_fn`` twice would risk side-effect divergence in
+            # forcing callables (iterators, counters, mutable hooks)
+            # and could pair the cached tendency with a different
+            # ``phys_state`` than the one actually applied — Phase D
+            # codex iter-1 high finding.
+            tend_n, new_phys = self._tend_fn(
+                self.state, self.phys_state, self.t_seconds,
+            )
+            if self._ab2_prev_tend is None:
+                tend_eff = tend_n
+            else:
+                tend_eff = ab2_effective_tendency(
+                    tend_n, self._ab2_prev_tend, _average_tendencies,
+                )
+            new_state = _apply_tendencies(self.state, tend_eff, self.dt)
+            self._ab2_prev_tend = tend_n
+        else:
+            new_state, new_phys = self._step_fn(
+                self.state, self.phys_state, self._tend_fn, self.dt,
+                self.t_seconds,
+            )
+        self.t_seconds += self.dt
         self.state = new_state
         if new_phys is not None:
             self.phys_state = new_phys
+        # NB: No end-of-step ``forcing.T_s`` re-stamp.  The inject
+        # inside ``_tend_fn`` (per-stage) is the single source of
+        # truth — calling ``T_s(t)`` again here would double-fire
+        # iterator / counter / file-cursor backed forcing callables
+        # for every model step (Phase D codex iter-2 high finding).
+        # The trade-off: zero-physics runs (no tagged_fns) cannot
+        # persist the override on ``self.phys_state`` between steps
+        # because ``physics_fn`` returns ``new_phys=None``.  No module
+        # reads the persistent override between stages, so this is
+        # observationally invisible; tests that need to inspect the
+        # persistent override after ``step()`` must use an
+        # active-physics config (Louis / gray rad / MYNN).
         return self.state
 
     def run(

@@ -195,7 +195,15 @@ class TestMPIHaloExchange:
     """Verify halo exchange works under MPI with the bootstrapped topology."""
 
     def test_halo_exchange_produces_finite_result(self, topology):
-        """A scalar halo exchange should produce finite results on local faces."""
+        """A scalar halo exchange should produce finite results on local faces.
+
+        FV3_3D iter-1059: ``scatter_to_local`` returns shape
+        ``(n_local_faces, n, n)`` per its iter-aa707bda contract change
+        (was ``(6, n, n)`` zero-masked under the legacy
+        ``partition_state``).  The pre-existing assertions in this
+        test still expected the legacy shape — fixed here to match
+        the scattered-mode contract.
+        """
         from legoesm.grids.halo import pad_halo
         from legoesm.parallel.distributed import scatter_to_local
 
@@ -209,14 +217,20 @@ class TestMPIHaloExchange:
         partitioned = scatter_to_local(data)
 
         result = pad_halo(partitioned)
-        assert result.shape == (6, n + 2, n + 2)
+        n_local = len(topology.local_face_ids)
+        assert result.shape == (n_local, n + 2, n + 2)
 
-        # Local faces should have all-finite values.
-        for f in topology.local_face_ids:
-            assert jnp.all(jnp.isfinite(result[f]))
+        # Local faces should have all-finite values.  ``result`` is
+        # indexed by LOCAL face position, not global face id.
+        for f_local in range(n_local):
+            assert jnp.all(jnp.isfinite(result[f_local]))
 
     def test_halo_exchange_roundtrip(self, topology):
-        """partition -> halo -> gather should recover local interior data."""
+        """partition -> halo -> gather should recover local interior data.
+
+        FV3_3D iter-1059: see sibling test for the
+        ``scatter_to_local`` shape-contract fix.
+        """
         from legoesm.grids.halo import pad_halo
         from legoesm.parallel.distributed import scatter_to_local
 
@@ -227,10 +241,12 @@ class TestMPIHaloExchange:
         partitioned = scatter_to_local(data)
 
         result = pad_halo(partitioned)
-        # Interior of each local face should match original data.
-        for f in topology.local_face_ids:
-            interior = result[f, 1:-1, 1:-1]
-            assert jnp.allclose(interior, data[f], atol=1e-6)
+        # Interior of each local face should match the corresponding
+        # global face.  ``result`` is local-indexed; map LOCAL position
+        # → GLOBAL face id via enumerate(local_face_ids).
+        for f_local, f_global in enumerate(topology.local_face_ids):
+            interior = result[f_local, 1:-1, 1:-1]
+            assert jnp.allclose(interior, data[f_global], atol=1e-6)
 
 
 # ---------------------------------------------------------------------------

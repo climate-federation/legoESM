@@ -14,25 +14,18 @@
 
 """Implementation of a radiative transfer solver."""
 
-from collections.abc import Sequence
 from pathlib import Path
 from typing import TypeAlias
 
 import jax
 import jax.numpy as jnp
 from legoesm.atmosphere.physics.radiation.rrtmgp import constants
-from legoesm.atmosphere.physics.radiation.rrtmgp import kernel_ops
-from legoesm.atmosphere.physics.radiation.rrtmgp import stretched_grid_util
-from legoesm.atmosphere.physics.radiation.rrtmgp import rrtmgp_common
-from legoesm.atmosphere.physics.radiation.rrtmgp.config import radiative_transfer
 from legoesm.atmosphere.physics.radiation.rrtmgp.config.radiative_transfer import (
     OpticsParameters,
     RRTMOptics as RRTMOpticsConfig,
 )
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import atmospheric_state
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import constants as optics_constants
-from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_volume_mixing_ratio
-from legoesm.atmosphere.physics.radiation.rrtmgp.optics import optics
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics.lookup_volume_mixing_ratio import (
     LookupVolumeMixingRatio,
 )
@@ -80,9 +73,53 @@ def _add_halos(f_3d):
 
 
 def _standard_o3_profile(p_full):
-    """Simple climatological ozone profile (VMR). US Std Atm 1976 fit."""
+    """Climatological ozone VMR profile, US Std Atm 1976 piecewise fit.
+
+    Skewed log-Gaussian peaking at 9 ppm near 10 hPa with separate
+    widths for the tropospheric (``sigma_trop = 0.9`` in natural log of
+    pressure) and stratospheric (``sigma_strat = 1.5``) sides, plus a
+    constant tropospheric **background** of 20 ppb captured via
+    ``jnp.maximum``.  The skewed shape captures the asymmetric real
+    profile (sharp fall through the tropopause, gentle decay into the
+    mesosphere); the background captures the well-mixed tropospheric
+    ozone the Gaussian alone underestimates by 2-3 orders of magnitude
+    near the surface.
+
+    Reference values at canonical levels vs. US Std Atm 1976::
+
+        level    real      old (σ=1.5,A=8)   iter-3 (skew+bg, A=9)
+        1000 hPa  ~25 ppb  ~70 ppb           20 ppb  (background)
+         500 hPa  ~50 ppb  ~570 ppb          20 ppb  (background)
+         200 hPa ~100 ppb  ~1.5 ppm          35 ppb  (Gaussian)
+         100 hPa ~250 ppb  ~2.5 ppm         ~340 ppb (Gaussian)
+          30 hPa  ~5 ppm   ~5.6 ppm          ~4.3 ppm
+          10 hPa  ~9 ppm   ~8 ppm             9 ppm (peak)
+           1 hPa  ~3 ppm   ~2.5 ppm          ~2.8 ppm
+         0.1 hPa  ~80 ppb  ~5 ppb            ~80 ppb
+
+    NOT meant as a high-fidelity climatology — drivers should provide
+    an external ``o3_vmr`` field for production runs.  This fallback
+    only ensures that radiative transfer sees a non-trivial ozone
+    column when no ozone source is configured.
+
+    The skewed-Gaussian transition has a derivative discontinuity at
+    ``p = 10 hPa`` but is C0-continuous and finite everywhere; the
+    ``jnp.maximum`` with the background introduces a second
+    sub-differentiable transition where the Gaussian tail crosses
+    20 ppb (around p ~ 250 hPa).  Both are AD-safe (finite gradients
+    on each side).
+    """
     p_hPa = p_full / 100.0
-    o3 = 8.0e-6 * jnp.exp(-0.5 * ((jnp.log(p_hPa) - jnp.log(10.0)) / 1.5) ** 2)
+    log_p = jnp.log(p_hPa)
+    log_p_peak = jnp.log(10.0)
+    sigma_trop = 0.9
+    sigma_strat = 1.5
+    sigma = jnp.where(log_p > log_p_peak, sigma_trop, sigma_strat)
+    arg = (log_p - log_p_peak) / sigma
+    o3_gauss = 9.0e-6 * jnp.exp(-0.5 * arg * arg)
+    # 20 ppb tropospheric background (US Std Atm 1976 surface value).
+    o3_background = 2.0e-8
+    o3 = jnp.maximum(o3_gauss, o3_background)
     return jnp.clip(o3, 1.0e-10, None)
 
 
@@ -99,345 +136,86 @@ def standard_o3_profile(p_full):
     return _standard_o3_profile(p_full)
 
 
-def _humidity_to_volume_mixing_ratio(
-    q_t: Array, q_c: Array
-) -> Array:
-  """For water vapor, convert humidity to a volume mixing ratio."""
-  mol_ratio = constants.R_V / constants.R_D
-  q_v = q_t - q_c
-  mix_ratio = q_v / (1 - q_t)
-  return mol_ratio * mix_ratio
+def _cast_optics_f64_to_f32(obj, _seen=None):
+    """Recursively cast every float64 array leaf in ``obj`` to float32.
 
+    The RRTMGP optics objects are plain Python classes (``RRTMOptics``)
+    holding stdlib ``@dataclasses.dataclass(frozen=True)`` lookup tables
+    (``gas_optics_lw/sw``, ``cloud_optics_lw/sw``) whose fields are
+    ``jax.Array`` tables.  NONE of these are registered JAX pytrees, so
+    ``jax.tree_util.tree_map`` treats each as a single opaque leaf and casts
+    NOTHING — the silent no-op this replaces (fp32 heating came out
+    bit-identical to fp64 because the tables stayed float64).  This walks the
+    structure by hand: float64 arrays are cast; frozen dataclasses are rebuilt
+    via ``dataclasses.replace``; dicts / lists / tuples are mapped; and plain
+    objects with a ``__dict__`` (e.g. ``RRTMOptics``) have each attribute cast
+    in place.  Integer index tables and non-float leaves are left untouched.
 
-def _air_molecules_per_area(p_xxc: Array, vmr_h2o_xxc: Array) -> Array:
-  """Compute the number of molecules in a grid cell per area."""
-  dp_xxc = kernel_ops.centered_difference(p_xxc, dim=2)
-  mol_m_air_xxc = (
-      constants.DRY_AIR_MOL_MASS + constants.WATER_MOL_MASS * vmr_h2o_xxc
-  )
-  return -(dp_xxc / constants.G) * constants.AVOGADRO / mol_m_air_xxc
+    An ``id``-keyed ``_seen`` set breaks reference cycles in the plain-object
+    graph (``OpticsScheme`` subclasses bind ``functools.partial``/closures that
+    capture ``self`` and other optics objects, so a naive deep walk recurses
+    forever — the ``RecursionError`` this guards against).  Callables, modules,
+    and types are skipped (they hold no float tables and are common cycle
+    waypoints).  Used only on the ``compute_fp32`` path.
+    """
+    import dataclasses as _dc
+    import types as _types
 
+    if _seen is None:
+        _seen = set()
 
-def _compute_cloud_path(
-    rho: Array, q_c: Array, dz: float, sg_map: dict[str, Array]
-) -> Array:
-  """Compute the cloud water/ice path in each atmospheric grid cell."""
-  use_stretched_grid_z = stretched_grid_util.get_use_stretched_grid(sg_map)[2]
-  if use_stretched_grid_z:
-    h = sg_map[stretched_grid_util.hc_key(2)]
-  else:
-    h = dz
-  return rho * q_c * h
+    # Array leaf (jax or numpy): cast float64 -> float32, keep everything else
+    # (int index tables, already-float32, bool) as is.
+    _dtype = getattr(obj, "dtype", None)
+    if _dtype is not None and hasattr(obj, "astype"):
+        return obj.astype(jnp.float32) if _dtype == jnp.float64 else obj
+    # Skip leaves that hold no tables and are common cycle waypoints.
+    if (obj is None or isinstance(obj, (str, bytes, int, float, bool,
+                                        _types.ModuleType, type))
+            or callable(obj)):
+        return obj
+    # Cycle guard: only mutable containers/objects can form cycles.
+    _oid = id(obj)
+    if _oid in _seen:
+        return obj
+    _seen.add(_oid)
 
-
-def _horiz_mean(f: Array) -> Array:
-  """Compute the horizontal mean of `f`.
-
-  Args:
-    f: The array to compute the horizontal mean of.
-
-  Returns:
-    The horizontal mean of `f`, preserving the input dtype.
-  """
-  return jnp.mean(f, axis=(0, 1))
+    # Frozen / plain stdlib dataclass instance: rebuild changed float fields.
+    if _dc.is_dataclass(obj) and not isinstance(obj, type):
+        changes = {}
+        for _f in _dc.fields(obj):
+            _v = getattr(obj, _f.name)
+            _nv = _cast_optics_f64_to_f32(_v, _seen)
+            if _nv is not _v:
+                changes[_f.name] = _nv
+        return _dc.replace(obj, **changes) if changes else obj
+    if isinstance(obj, dict):
+        return {_k: _cast_optics_f64_to_f32(_v, _seen) for _k, _v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_cast_optics_f64_to_f32(_v, _seen) for _v in obj)
+    # Plain object (e.g. RRTMOptics, which is mutable): cast each data attribute
+    # in place and return the same object.  Methods/bound closures are skipped
+    # by the callable guard above when recursed into.
+    if hasattr(obj, "__dict__"):
+        for _a, _v in vars(obj).items():
+            if callable(_v):
+                continue
+            _nv = _cast_optics_f64_to_f32(_v, _seen)
+            if _nv is not _v:
+                setattr(obj, _a, _nv)
+        return obj
+    return obj
 
 
 class RRTMGP:
-  """Rapid Radiative Transfer Model for General Circulation Models (RRTMGP)."""
+  """Rapid Radiative Transfer Model for General Circulation Models (RRTMGP).
 
-  def __init__(
-      self,
-      radiative_transfer_cfg: radiative_transfer.RadiativeTransfer,
-      dz: float,
-      diagnostic_fields: Sequence[str] = tuple(),
-  ):
-    self._dz = dz  # Store dz (only used if not using stretched grid in z).
-    self._diagnostic_fields = diagnostic_fields
-    self._save_lw_sw_heating_rates = (
-        radiative_transfer_cfg.save_lw_sw_heating_rates
-    )
-    self._do_clear_sky = radiative_transfer_cfg.do_clear_sky
-
-    # Load and store the atmospheric gas concentrations.
-    self.atmospheric_state = atmospheric_state.from_config(
-        radiative_transfer_cfg.atmospheric_state_cfg
-    )
-    # Create the optics library.
-    self.optics_lib = optics.optics_factory(
-        radiative_transfer_cfg.optics, self.atmospheric_state.vmr
-    )
-
-  def compute_heating_rate(
-      self,
-      rho_xxc: Array,
-      q_t: Array,
-      q_liq: Array,
-      q_ice: Array,
-      q_c: Array,
-      cloud_r_eff_liq: Array,
-      cloud_r_eff_ice: Array,
-      temperature: Array,
-      sfc_temperature: Array,
-      p_ref_xxc: Array,
-      sg_map: dict[str, Array],
-      use_scan: bool | None = None,
-  ) -> dict[str, Array]:
-    """Compute the local heating rate due to radiative transfer.
-
-    The optical properties of the layered atmosphere are computed using RRTMGP
-    and the two-stream radiative transfer equation is solved for the net fluxes
-    at the grid cell faces.  Based on the overall net radiative flux of the grid
-    cell, a local heating rate is determined.
-
-    Returns:
-      A dictionary containing the following keys:
-        rrtmgp_common.KEY_STORED_RADIATION: The heating rate [K/s].
-      Optional keys depending on config:
-        'rad_heat_sw_3d': The net shortwave radiative heating rate [K/s].
-        'rad_heat_lw_3d': The net longwave radiative heating rate [K/s].
-        'sw_flux_up_full': Full shortwave upward flux profile [W/m²]
-        'sw_flux_down_full': Full shortwave downward flux profile [W/m²]
-        'lw_flux_up_full': Full longwave upward flux profile [W/m²]
-        'lw_flux_down_full': Full longwave downward flux profile [W/m²]
-    """
-    # Temperature may have NaNs in the halos (this is intentional).  These NaNs
-    # cause problems later on, so fill in the halo values with linear
-    # extrapolations.  Note that NaNs in other fields do not cause issues
-    # because halos are discarded later on, but there are places where the halos
-    # of the temperature are used to determine interior values.
-    def fill_halo(f: Array) -> Array:
-      # Linear extrapolation into the bottom/top halo cells.  Single
-      # concatenate-of-three replaces two scatter ops (and preserves
-      # the interior ``f[:, :, 1:-1]`` values verbatim).
-      bottom_halo_val = 2 * f[:, :, 1] - f[:, :, 2]
-      top_halo_val = 2 * f[:, :, -2] - f[:, :, -3]
-      return jnp.concatenate(
-          [bottom_halo_val[..., None], f[:, :, 1:-1],
-           top_halo_val[..., None]],
-          axis=-1,
-      )
-
-    temperature = fill_halo(temperature)
-
-    # Sometimes, the simulation can result in q_t or q_c with negative values.
-    # Clip these to zero, otherwise there can be extremely deleterious effects
-    # in the radiation solver.  E.g., negative relative abundance of gas species
-    # and negative values in optical depth and Planck fraction that are
-    # inherently nonnegative.
-    q_t = jnp.clip(q_t, 0.0, None)
-    q_liq = jnp.clip(q_liq, 0.0, None)
-    q_ice = jnp.clip(q_ice, 0.0, None)
-    q_c = jnp.clip(q_c, 0.0, None)
-
-    # Reconstruct the volume mixing ratio (vmr) of relevant gas species.
-    vmr_lib = self.atmospheric_state.vmr
-    vmr_fields = (
-        lookup_volume_mixing_ratio.reconstruct_vmr_fields_from_pressure(
-            vmr_lib, p_ref_xxc
-        )
-    )
-    # Derive the water vapor vmr from the simulation state itself.
-    vmr_fields['h2o'] = _humidity_to_volume_mixing_ratio(q_t, q_c)
-
-    # Compute molecules
-    molecules_per_area = _air_molecules_per_area(p_ref_xxc, vmr_fields['h2o'])
-
-    # Compute water paths for liquid and ice cloud condensate.
-    liq_water_path = _compute_cloud_path(rho_xxc, q_liq, self._dz, sg_map)
-    ice_water_path = _compute_cloud_path(rho_xxc, q_ice, self._dz, sg_map)
-
-    lw_fluxes = two_stream.solve_lw(
-        p_ref_xxc,
-        temperature,
-        molecules_per_area,
-        self.optics_lib,
-        self.atmospheric_state,
-        vmr_fields,
-        sfc_temperature,
-        cloud_r_eff_liq=cloud_r_eff_liq,
-        cloud_path_liq=liq_water_path,
-        cloud_r_eff_ice=cloud_r_eff_ice,
-        cloud_path_ice=ice_water_path,
-        use_scan=use_scan,
-    )
-    sw_fluxes = two_stream.solve_sw(
-        p_ref_xxc,
-        temperature,
-        molecules_per_area,
-        self.optics_lib,
-        self.atmospheric_state,
-        vmr_fields,
-        cloud_r_eff_liq=cloud_r_eff_liq,
-        cloud_path_liq=liq_water_path,
-        cloud_r_eff_ice=cloud_r_eff_ice,
-        cloud_path_ice=ice_water_path,
-        use_scan=use_scan,
-    )
-
-    # Compute the heating rate in K/s.
-    lw_heating_rate = two_stream.compute_heating_rate(
-        lw_fluxes['flux_net'], p_ref_xxc
-    )
-    sw_heating_rate = two_stream.compute_heating_rate(
-        sw_fluxes['flux_net'], p_ref_xxc
-    )
-    # Compute the total heating rate (temperature tendency due to radiation).
-    heating_rate = lw_heating_rate + sw_heating_rate
-
-    output = {rrtmgp_common.KEY_STORED_RADIATION: heating_rate}
-
-    # add LW, SW heating rate or fluxes if desired.
-    if self._save_lw_sw_heating_rates:
-      output['rad_heat_sw_3d'] = sw_heating_rate
-      output['rad_heat_lw_3d'] = lw_heating_rate
-
-    # Compute diagnostics, if desired.
-    lw_flux_down = lw_fluxes['flux_down']
-    lw_flux_up = lw_fluxes['flux_up']
-    sw_flux_down = sw_fluxes['flux_down']
-    sw_flux_up = sw_fluxes['flux_up']
-    hw = 1  # halo width.
-
-    # Add full flux profiles (remove surface halos)
-    output['sw_flux_up_full'] = sw_flux_up[:, :, hw:]  # Full profile (..., nlev+1)
-    output['sw_flux_down_full'] = sw_flux_down[:, :, hw:]  # Full profile (..., nlev+1)
-    output['lw_flux_up_full'] = lw_flux_up[:, :, hw:]  # Full profile (..., nlev+1)
-    output['lw_flux_down_full'] = lw_flux_down[:, :, hw:]  # Full profile (..., nlev+1)
-
-    # 2D diagnostics
-    if (v := 'surf_lw_flux_down_2d_xy') in self._diagnostic_fields:
-      output[v] = lw_flux_down[:, :, hw]
-    if (v := 'surf_lw_flux_up_2d_xy') in self._diagnostic_fields:
-      output[v] = lw_flux_up[:, :, hw]
-    if (v := 'surf_sw_flux_down_2d_xy') in self._diagnostic_fields:
-      output[v] = sw_flux_down[:, :, hw]
-    if (v:= 'surf_sw_flux_up_2d_xy') in self._diagnostic_fields:
-      output[v] = sw_flux_up[:, :, hw]
-    # Add clear sky surf
-
-    if (v := 'toa_sw_flux_incoming_2d_xy') in self._diagnostic_fields:
-      output[v] = sw_flux_down[:, :, -hw]
-    if (v := 'toa_sw_flux_outgoing_2d_xy') in self._diagnostic_fields:
-      output[v] = sw_flux_up[:, :, -hw]
-    if (v := 'toa_lw_flux_outgoing_2d_xy') in self._diagnostic_fields:
-      output[v] = lw_flux_up[:, :, -hw]
-    # Add clear sky toa
-
-    # 1D diagnostics
-    if (v := 'rad_heat_lw_1d_z') in self._diagnostic_fields:
-      output[v] = _horiz_mean(lw_heating_rate)
-    if (v := 'rad_heat_sw_1d_z') in self._diagnostic_fields:
-      output[v] = _horiz_mean(sw_heating_rate)
-
-    # Compute clear-sky radiative transfer and diagnostics, if desired.
-    if self._do_clear_sky:
-      lw_fluxes_clearsky = two_stream.solve_lw(
-          p_ref_xxc,
-          temperature,
-          molecules_per_area,
-          self.optics_lib,
-          self.atmospheric_state,
-          vmr_fields,
-          sfc_temperature,
-          cloud_r_eff_liq=None,
-          cloud_path_liq=None,
-          cloud_r_eff_ice=None,
-          cloud_path_ice=None,
-          use_scan=use_scan,
-      )
-      sw_fluxes_clearsky = two_stream.solve_sw(
-          p_ref_xxc,
-          temperature,
-          molecules_per_area,
-          self.optics_lib,
-          self.atmospheric_state,
-          vmr_fields,
-          cloud_r_eff_liq=None,
-          cloud_path_liq=None,
-          cloud_r_eff_ice=None,
-          cloud_path_ice=None,
-          use_scan=use_scan,
-      )
-      # Compute the heating rate in K/s.
-      lw_heating_rate_clearsky = two_stream.compute_heating_rate(
-          lw_fluxes_clearsky['flux_net'], p_ref_xxc
-      )
-      sw_heating_rate_clearsky = two_stream.compute_heating_rate(
-          sw_fluxes_clearsky['flux_net'], p_ref_xxc
-      )
-
-      if self._save_lw_sw_heating_rates:
-        output['rad_heat_sw_clearsky_3d'] = sw_heating_rate_clearsky
-        output['rad_heat_lw_clearsky_3d'] = lw_heating_rate_clearsky
-
-      lw_flux_down_clearsky = lw_fluxes_clearsky['flux_down']
-      lw_flux_up_clearsky = lw_fluxes_clearsky['flux_up']
-      sw_flux_down_clearsky = sw_fluxes_clearsky['flux_down']
-      sw_flux_up_clearsky = sw_fluxes_clearsky['flux_up']
-
-      # Add clear-sky full flux profiles (remove surface halos)
-      output['sw_flux_up_clearsky_full'] = sw_flux_up_clearsky[:, :, hw:]  # Full profile (..., nlev+1)
-      output['sw_flux_down_clearsky_full'] = sw_flux_down_clearsky[:, :, hw:]  # Full profile (..., nlev+1)
-      output['lw_flux_up_clearsky_full'] = lw_flux_up_clearsky[:, :, hw:]  # Full profile (..., nlev+1)
-      output['lw_flux_down_clearsky_full'] = lw_flux_down_clearsky[:, :, hw:]  # Full profile (..., nlev+1)
-
-      # 2D diagnostics
-      if (v := 'surf_lw_flux_down_clearsky_2d_xy') in self._diagnostic_fields:
-        output[v] = lw_flux_down_clearsky[:, :, hw]
-      if (v := 'surf_lw_flux_up_clearsky_2d_xy') in self._diagnostic_fields:
-        output[v] = lw_flux_up_clearsky[:, :, hw]
-      if (v := 'surf_sw_flux_down_clearsky_2d_xy') in self._diagnostic_fields:
-        output[v] = sw_flux_down_clearsky[:, :, hw]
-      if (v := 'surf_sw_flux_up_clearsky_2d_xy') in self._diagnostic_fields:
-        output[v] = sw_flux_up_clearsky[:, :, hw]
-
-      df = self._diagnostic_fields
-      if (v := 'toa_sw_flux_outgoing_clearsky_2d_xy') in df:
-        output[v] = sw_flux_up_clearsky[:, :, -hw]
-      if (v := 'toa_lw_flux_outgoing_clearsky_2d_xy') in df:
-        output[v] = lw_flux_up_clearsky[:, :, -hw]
-
-      # 1D diagnostics
-      if (v := 'rad_heat_lw_clearsky_1d_z') in self._diagnostic_fields:
-        output[v] = _horiz_mean(lw_heating_rate_clearsky)
-      if (v := 'rad_heat_sw_clearsky_1d_z') in self._diagnostic_fields:
-        output[v] = _horiz_mean(sw_heating_rate_clearsky)
-
-    return output
-
-  # =========================================================================
-  # legoESM integration API
-  # =========================================================================
-
-  @staticmethod
-  def _cache_key(config):
-      """Compute a hashable cache key from an RRTMGPConfig.
-
-      .. deprecated:: issue #273 follow-up
-         This key drives **both** the heavy optics-table cache
-         (``_legoesm_optics_cache`` — keyed only on table-shape
-         inputs) and the lighter solver-instance cache
-         (``_instance_cache`` in ``rrtmgp_radiation.py`` — needs to
-         additionally invalidate on solver-behavior fields like
-         ``use_scan``).  Sharing one key for both caches meant a
-         first call with ``use_scan=False`` would cache a solver
-         instance whose ``_config.use_scan`` is ``False``; a later
-         call with ``use_scan=True`` (or the new ``None`` auto-pick)
-         would reuse that stale instance and silently keep running
-         the for-loop path — defeating the GPU scan auto-pick this
-         module ships.
-
-         Production code should call the more specific keys:
-
-         * ``_optics_cache_key(config)`` for the optics tables
-           (omits behavior fields that don't change tables).
-         * ``_instance_cache_key(config)`` for solver instances
-           (includes behavior fields like ``use_scan``).
-
-         ``_cache_key`` remains as a backward-compatible alias for
-         ``_optics_cache_key``.
-      """
-      return RRTMGP._optics_cache_key(config)
+  legoESM integration API — construct with
+  ``RRTMGP.from_legoesm_config(rrtmgp_config)`` and drive via
+  ``solve_columns(...)``.  The swirl_jatmos-style ``__init__`` and
+  ``compute_heating_rate`` API were removed in iter-22 after zero
+  callers were found across the codebase.
+  """
 
   @staticmethod
   def _optics_cache_key(config):
@@ -448,6 +226,15 @@ class RRTMGP:
       x64 precision (table dtype depends on it).  Solver-behavior
       fields like ``use_scan`` deliberately omitted — the tables
       themselves are independent of how the solver traverses them.
+
+      Iter-40: re-introduced ``include_clouds`` here BUT for a
+      different reason than the pre-iter-36 state — iter-40 made
+      ``RRTMOptics.__init__`` skip the cloud-table load when
+      ``include_clouds=False``, so the constructed optics_lib is
+      now genuinely different across the True/False configurations
+      (one has cloud_optics_lw/sw populated, the other has them set
+      to None).  Memory: clear-sky workflows save ~MB of cloud
+      tables per cached entry.
       """
       import jax
       x64 = bool(jax.config.jax_enable_x64)
@@ -455,7 +242,7 @@ class RRTMGP:
               config.lw_cloud_file, config.sw_cloud_file,
               config.include_clouds,
               config.co2_ppmv, config.ch4_ppbv, config.n2o_ppbv,
-              x64)
+              x64, getattr(config, "compute_fp32", False))
 
   @staticmethod
   def _instance_cache_key(config):
@@ -463,14 +250,74 @@ class RRTMGP:
 
       Extends the optics key with the behavior fields that change
       the *result* of ``solve_columns`` (or its compile-time graph)
-      without changing the optics tables.  Critically includes
-      ``use_scan`` so the issue-#273 GPU auto-pick (``None`` ⇒ scan
-      on GPU/TPU, for-loop on CPU) is honored even when an earlier
-      call cached an explicit ``False``.
+      without changing the optics tables.
+
+      Includes:
+      - ``use_scan`` (issue #273): GPU auto-pick (``None`` ⇒ scan on
+        GPU/TPU, for-loop on CPU) is honored even when an earlier call
+        cached an explicit ``False``.
+      - ``use_optimal_angle`` (iter-2): the optimal-angle path traces
+        a different two-stream graph (per-band/per-column secant) than
+        the fixed-1.66 path, so a config flip must rebuild.
+      - ``S_0``, ``aerosol_ssa``, ``aerosol_g`` (iter-32 audit): these
+        are NOT overridable per-call via ``solve_columns(...)`` kwargs
+        — they are read off ``self._config`` every call.  Without
+        them in the cache key, a later config that bumps e.g.
+        ``aerosol_ssa = 0.95`` would silently reuse a solver instance
+        built with ``aerosol_ssa = 0.93`` and apply the stale value.
+      - ``sfc_emissivity``, ``sfc_albedo`` (iter-32 audit): these ARE
+        overridable per call, but ``_resolve_surface_field(override,
+        fallback)`` falls back to the config default when no override
+        is passed.  AIMIP populates these with ``(ncol,)`` arrays
+        (low-rank lat-lon expansion) — arrays aren't hashable, so we
+        use ``id(...)`` for arrays (cache-correct as long as AIMIP
+        doesn't mutate in place, which JAX immutability prevents).
+        Scalar floats hash directly.
       """
+      def _hashable(x):
+          # Float / int / None / str / bool: hashable directly.
+          try:
+              hash(x)
+              return x
+          except TypeError:
+              # 0-D arrays (jnp/np scalar shape == ()): convert to a
+              # stable value-hashable form so two ``jnp.array(0.07)``
+              # values share the cache key.  iter-39 + codex iter-40
+              # review: ``float(x)`` fails on complex dtypes; gate
+              # on dtype kind to keep ``float()`` safe for the
+              # legitimate ``float`` / ``int`` / ``bool`` config
+              # fields and fall through to ``id()`` for exotic
+              # dtypes (e.g. complex, which RRTMGPConfig should
+              # never see).
+              shape = getattr(x, "shape", None)
+              if shape == ():
+                  dtype_kind = getattr(getattr(x, "dtype", None), "kind", None)
+                  # 'f' float, 'i' int, 'b' bool, 'u' uint — all safely
+                  # coerce to Python float.  'c' complex, 'O' object,
+                  # 'U' unicode, etc. fall through to id().
+                  if dtype_kind in ("f", "i", "b", "u"):
+                      return float(x)
+              # N-D arrays (or 0-D with non-numeric dtype): id-based
+              # key.  Safe under JAX immutability; a new array (e.g.
+              # fresh AIMIP fit per epoch) gets a new id and
+              # rebuilds the cached instance.
+              return id(x)
+
+      # iter-40: ``include_clouds`` is now ALSO in the optics key
+      # (because RRTMOptics conditionally loads cloud tables on it),
+      # so it's redundant here.  Keeping it would not be a
+      # correctness bug, just a minor duplicate that adds no info on
+      # top of the optics key tuple.  Dropped to reduce tuple size.
       return (
           RRTMGP._optics_cache_key(config),
           config.use_scan,
+          getattr(config, "use_optimal_angle", False),
+          config.S_0,
+          config.aerosol_ssa,
+          config.aerosol_g,
+          _hashable(config.sfc_emissivity),
+          _hashable(config.sfc_albedo),
+          _hashable(config.sfc_albedo_direct),
       )
 
   @staticmethod
@@ -521,7 +368,24 @@ class RRTMGP:
               global_means=global_means, profiles=None,
           )
 
-          optics_lib = optics_factory(optics_params, vmr_lib)
+          # iter-40: pass include_clouds to skip cloud-table load for
+          # clear-sky-only workflows; ~MB saved per cached entry.
+          optics_lib = optics_factory(
+              optics_params, vmr_lib,
+              include_clouds=config.include_clouds,
+          )
+          if getattr(config, "compute_fp32", False):
+              # Cast the optics tables float64 -> float32 (the dycore keeps
+              # fp64).  GATED OFF in production: the MPAS driver sets
+              # ``compute_fp32=False`` because the fp32 RTE path still crashes
+              # (the shortwave direct-beam recurrence re-promotes the scan carry
+              # to float64) -- see ``_run_mpas`` + PR #343.  Retained inert so a
+              # future kernel-wide precision audit can flip the flag.
+              # ``_cast_optics_f64_to_f32`` walks the RRTMOptics object + its
+              # frozen-dataclass tables by hand (they are NOT registered JAX
+              # pytrees, so ``tree_map`` would no-op).
+              vmr_lib = _cast_optics_f64_to_f32(vmr_lib)
+              optics_lib = _cast_optics_f64_to_f32(optics_lib)
           _legoesm_optics_cache[key] = (optics_lib, vmr_lib)
       return _legoesm_optics_cache[key]
 
@@ -541,24 +405,14 @@ class RRTMGP:
       """
       instance = object.__new__(cls)
       optics_lib, vmr_lib = cls._build_optics_and_vmr(config)
-      # Minimal atmospheric state with VMR library; zenith/albedo/emissivity
-      # are overridden per-call in solve_columns().
-      instance.atmospheric_state = atmospheric_state.AtmosphericState(
-          sfc_emis=config.sfc_emissivity,
-          sfc_alb=config.sfc_albedo,
-          zenith=0.0,
-          irrad=config.S_0,
-          vmr=vmr_lib,
-          toa_flux_lw=0.0,
-      )
+      # Store the VMR library directly — the per-call ``atmos_state``
+      # in ``solve_columns`` carries the actual zenith / albedo /
+      # emissivity for the call.  iter-33 dropped the redundant
+      # ``instance.atmospheric_state`` field (previously a default
+      # AtmosphericState whose only purpose was to expose ``vmr``).
+      instance._vmr_lib = vmr_lib
       instance.optics_lib = optics_lib
       instance._config = config
-      # Unused by solve_columns() but set for compatibility with
-      # compute_heating_rate().
-      instance._dz = 0.0
-      instance._diagnostic_fields = ()
-      instance._save_lw_sw_heating_rates = False
-      instance._do_clear_sky = False
       return instance
 
   @classmethod
@@ -593,6 +447,7 @@ class RRTMGP:
       q_v: jnp.ndarray,
       cos_zenith: jnp.ndarray,
       sfc_albedo: jnp.ndarray | float | None = None,
+      sfc_albedo_direct: jnp.ndarray | float | None = None,
       sfc_emissivity: jnp.ndarray | float | None = None,
       o3_vmr: jnp.ndarray | None = None,
       cloud_path_liq: jnp.ndarray | None = None,
@@ -601,6 +456,7 @@ class RRTMGP:
       cloud_r_eff_ice: jnp.ndarray | None = None,
       cloud_fraction: jnp.ndarray | None = None,
       aerosol_optical_depth: jnp.ndarray | None = None,
+      aerosol_absorption_optical_depth_lw: jnp.ndarray | None = None,
       solar_spectral_fraction: jnp.ndarray | None = None,
       ghg_vmr_override: dict | None = None,
   ):
@@ -644,7 +500,15 @@ class RRTMGP:
       cloud_r_eff_ice : jnp.ndarray | None
           Ice cloud effective radius (ncol, nlev) [m].
       aerosol_optical_depth : jnp.ndarray | None
-          Prescribed aerosol optical depth per layer (ncol, nlev).
+          Prescribed shortwave aerosol optical depth per layer
+          (ncol, nlev).
+      aerosol_absorption_optical_depth_lw : jnp.ndarray | None
+          Prescribed longwave aerosol **absorption** optical depth per
+          layer (ncol, nlev) — NOT extinction.  Added to the absorption
+          optical depth with ssa=0 (LW scattering neglected; a caller
+          holding extinction OD must scale by the absorption fraction
+          1−ω first).  ``None`` (default) leaves the longwave solution
+          byte-identical.
       solar_spectral_fraction : jnp.ndarray | None
           Per-g-point solar source weights (ngpt_sw,).
       ghg_vmr_override : dict | None
@@ -729,7 +593,7 @@ class RRTMGP:
 
       # --- 3. Build atmospheric state ---
       optics_lib = self.optics_lib
-      vmr_lib = self.atmospheric_state.vmr
+      vmr_lib = self._vmr_lib
 
       cos_z_col = jnp.clip(cos_zenith, 0.0, 1.0)
       zenith_col = jnp.arccos(cos_z_col)[:, None, None]
@@ -756,10 +620,22 @@ class RRTMGP:
 
       eff_albedo = _resolve_surface_field(sfc_albedo, config.sfc_albedo)
       eff_emis = _resolve_surface_field(sfc_emissivity, config.sfc_emissivity)
+      # RAD-3 direct/diffuse albedo split: the DIRECT-beam albedo defaults to
+      # the diffuse eff_albedo (legacy single-albedo) unless a direct value is
+      # given via the param or config.sfc_albedo_direct.
+      _alb_dir_src = (
+          sfc_albedo_direct if sfc_albedo_direct is not None
+          else config.sfc_albedo_direct
+      )
+      eff_albedo_dir = (
+          None if _alb_dir_src is None
+          else _resolve_surface_field(_alb_dir_src, eff_albedo)
+      )
 
       atmos_state = atmospheric_state.AtmosphericState(
           sfc_emis=eff_emis,
           sfc_alb=eff_albedo,
+          sfc_alb_dir=eff_albedo_dir,
           zenith=zenith_col,
           irrad=config.S_0,
           vmr=vmr_lib,
@@ -790,13 +666,21 @@ class RRTMGP:
       else:
           cpl_3d = cpi_3d = crl_3d = cri_3d = cf_3d = None
 
-      # Optional aerosol optical depth
+      # Optional aerosol optical depth (shortwave)
       if aerosol_optical_depth is not None:
           aerosol_od_3d = _add_halos(
               jnp.clip(aerosol_optical_depth, 0.0, None)[:, None, ::-1],
           )
       else:
           aerosol_od_3d = None
+
+      # Optional aerosol optical depth (longwave, pure absorber)
+      if aerosol_absorption_optical_depth_lw is not None:
+          aerosol_od_lw_3d = _add_halos(
+              jnp.clip(aerosol_absorption_optical_depth_lw, 0.0, None)[:, None, ::-1],
+          )
+      else:
+          aerosol_od_lw_3d = None
 
       # Optional spectral solar forcing
       if solar_spectral_fraction is not None:
@@ -825,7 +709,9 @@ class RRTMGP:
           cloud_r_eff_ice=cri_3d,
           cloud_path_ice=cpi_3d,
           cloud_fraction=cf_3d,
+          aerosol_absorption_optical_depth=aerosol_od_lw_3d,
           use_scan=config.use_scan,
+          use_optimal_angle=getattr(config, "use_optimal_angle", False),
       )
 
       # --- 5. Solve SW ---

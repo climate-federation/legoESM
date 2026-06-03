@@ -1,6 +1,11 @@
 """Cubed-sphere grid for legoESM.
 
-Implements a gnomonic equidistant cubed-sphere grid with 6 faces.
+Implements a gnomonic EQUIANGULAR cubed-sphere grid with 6 faces (cell-edge
+coordinates equally spaced in ANGLE alpha in [-pi/4, pi/4], projected via
+tan(alpha) — FV3's gnomonic_angl / grid_type=2).  NOTE: GFDL FV3's *operational*
+grid is gnomonic_ed (grid_type=0), a different (more cell-uniform) gnomonic
+variant — see fv_grid_utils.F90:gnomonic_ed.  Same family + same spherical-excess
+cell areas, but the cell-corner distribution differs from FV3's operational grid.
 Each face is an N x N grid of cells. The grid uses an A-grid (collocated)
 staggering for the shallow-water milestone, with all variables at cell centers.
 
@@ -252,6 +257,7 @@ def create_cubed_sphere(
     target_lat: float = -0.5 * 3.141592653589793,  # -π/2 = no rotation
     do_cube_transform: bool = False,
     shift_fac: float = 0.0,
+    gnomonic: str = "equiangular",
 ) -> CubedSphereGrid:
     """Create a cubed-sphere grid.
 
@@ -265,20 +271,52 @@ def create_cubed_sphere(
     omega : float
         Planetary rotation rate [rad/s]. Default: Earth rotation rate.
         Scale for small-Earth experiments.
+    gnomonic : str, default "equiangular"
+        Grid-line distribution.  ``"equiangular"`` = legoESM's historical
+        gnomonic_angl (FV3 grid_type=2); ``"ed"`` = FV3's OPERATIONAL
+        gnomonic_ed (grid_type=0, equal-great-circle edges, near-uniform cells,
+        max aspect 1.06).  The ``"ed"`` path swaps in the ``*_ed`` metric/halo
+        builders (centres, padded angle/half-metrics, areas, halo-interp
+        offsets) and is incompatible with the Schmidt/shift transforms.
 
     Returns
     -------
     CubedSphereGrid
         The grid with all metric terms computed.
     """
+    if gnomonic == "equiangular":
+        _lonlat, _angle_b, _half_b, _area_b = (
+            _compute_gnomonic_lonlat, compute_padded_angle,
+            compute_padded_half_metrics, _compute_exact_cell_areas)
+        _off_b, _off_h2_b, _off_h3_b = (
+            compute_halo_interp_offsets, compute_halo_interp_offsets_h2,
+            compute_halo_interp_offsets_h3)
+    elif gnomonic == "ed":
+        from legoesm.grids.halo import (
+            compute_halo_interp_offsets_ed, compute_halo_interp_offsets_ed_h2,
+            compute_halo_interp_offsets_ed_h3)
+        _lonlat, _angle_b, _half_b, _area_b = (
+            _compute_gnomonic_ed_lonlat, compute_padded_angle_ed,
+            compute_padded_half_metrics_ed, _compute_exact_cell_areas_ed)
+        _off_b, _off_h2_b, _off_h3_b = (
+            compute_halo_interp_offsets_ed, compute_halo_interp_offsets_ed_h2,
+            compute_halo_interp_offsets_ed_h3)
+    else:
+        raise ValueError(
+            f"gnomonic must be 'equiangular' or 'ed', got {gnomonic!r}")
+
     # Compute gnomonic coordinates on each face
-    lon, lat = _compute_gnomonic_lonlat(n)
+    lon, lat = _lonlat(n)
 
     # FV3_3D iter 586/589: optional Schmidt stretching.
     apply_schmidt = (
         abs(stretch_fac - 1.0) > 1e-5
         or target_lat > -0.5 * jnp.pi + 1e-5
     )
+    if gnomonic == "ed" and (apply_schmidt or shift_fac > 1e-4):
+        raise ValueError(
+            "gnomonic='ed' is incompatible with Schmidt/shift transforms "
+            "(the *_ed padded-metric builders do not apply them).")
     if apply_schmidt:
         if do_cube_transform:
             # FV3 cube_transform (fv_grid_utils.F90:920-980)
@@ -317,14 +355,14 @@ def create_cubed_sphere(
     # discontinuity at cube-face edges.  The O(Δα⁴) accuracy difference
     # vs pad_halo-based interior values is well below the O(Δα²)
     # truncation error of the 2nd-order stencils.
-    angle_padded = compute_padded_angle(n)
-    hx_ext, hy_ext = compute_padded_half_metrics(n, radius)
+    angle_padded = _angle_b(n)
+    hx_ext, hy_ext = _half_b(n, radius)
 
     # Extract interior from padded arrays (no override — single source)
     angle = angle_padded[:, 1:-1, 1:-1]
     dx = 2.0 * hx_ext[:, 1:-1, 1:-1]
     dy = 2.0 * hy_ext[:, 1:-1, 1:-1]
-    area = _compute_exact_cell_areas(n, radius)
+    area = _area_b(n, radius)
 
     # Precompute trig of grid angle for vector halo exchange
     cos_angle_val = jnp.cos(angle)
@@ -333,23 +371,23 @@ def create_cubed_sphere(
     sin_angle_padded_val = jnp.sin(angle_padded)
 
     # Halo interpolation offsets for corrected cross-face exchange
-    halo_offsets = compute_halo_interp_offsets(n)
+    halo_offsets = _off_b(n)
 
     # halo=2 quantities for higher-order reconstruction (PPM, WENO5)
-    angle_padded_h2 = compute_padded_angle(n, halo=2)
-    hx_ext_h2, hy_ext_h2 = compute_padded_half_metrics(n, radius, halo=2)
+    angle_padded_h2 = _angle_b(n, halo=2)
+    hx_ext_h2, hy_ext_h2 = _half_b(n, radius, halo=2)
     cos_angle_padded_h2_val = jnp.cos(angle_padded_h2)
     sin_angle_padded_h2_val = jnp.sin(angle_padded_h2)
-    halo_offsets_h2 = compute_halo_interp_offsets_h2(n)
+    halo_offsets_h2 = _off_h2_b(n)
 
     # halo=3 quantities for the iter-496..501 ng=3 halo extension
     # (FB-chain stability prerequisite, review-doc item #2).
-    halo_offsets_h3 = compute_halo_interp_offsets_h3(n)
+    halo_offsets_h3 = _off_h3_b(n)
     # Iter-595: add grid-angle + half-metrics at halo=3 so the vector
     # halo round-trip has the padded-angle reference needed to enable
     # `pad_halo_vector(halo=3)` on the non-MPI backend.
-    angle_padded_h3 = compute_padded_angle(n, halo=3)
-    hx_ext_h3, hy_ext_h3 = compute_padded_half_metrics(n, radius, halo=3)
+    angle_padded_h3 = _angle_b(n, halo=3)
+    hx_ext_h3, hy_ext_h3 = _half_b(n, radius, halo=3)
     cos_angle_padded_h3_val = jnp.cos(angle_padded_h3)
     sin_angle_padded_h3_val = jnp.sin(angle_padded_h3)
 
@@ -601,8 +639,10 @@ def cube_transform(
 def _compute_gnomonic_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
     """Compute longitude and latitude on the gnomonic cubed-sphere.
 
-    Uses the equidistant gnomonic projection. Each face of the cube
-    is mapped to the sphere via central projection.
+    Uses the EQUIANGULAR gnomonic projection (alpha equally spaced in angle,
+    x = tan(alpha)) — i.e. FV3 gnomonic_angl / grid_type=2, NOT equidistant
+    (grid_type=1) nor FV3's operational gnomonic_ed (grid_type=0). Each face of
+    the cube is mapped to the sphere via central (gnomonic) projection.
 
     Parameters
     ----------
@@ -641,6 +681,94 @@ def _compute_gnomonic_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
     lat = jnp.stack(all_lat, axis=0)  # (6, n, n)
 
     return lon, lat
+
+
+def _gnomonic_ed_6face_from_theta(
+    theta: jax.Array, alpha: float,
+) -> tuple[jax.Array, jax.Array]:
+    """gnomonic_ed 6-face grid in create's numbering from a 1D W-edge angle
+    array ``theta`` (grid POINTS — cell centers or corners as supplied).
+
+    Shared pipeline construct → ``-π`` FV3 orientation shift → ``mirror_grid_
+    faces`` → ``_gnomonic_ed_remap_to_create``.  Both symmetrization passes are
+    machine-zero no-ops on gnomonic_ed.  This is the SINGLE source of gnomonic_ed
+    cell-center positions so grid.lon/lat and the padded metrics (angle, hx/hy)
+    refer to the SAME centers — mirroring the equiangular convention (cell-
+    centre parametric coordinate for both), unlike a cell_center2-of-corners
+    centre which differs by ~½ cell (iter67 consistency fix).
+    """
+    lon1, lat1 = _gnomonic_ed_construct(theta, alpha=alpha)
+    lon1 = lon1 - jnp.pi
+    lon6, lat6 = mirror_grid_faces(lon1, lat1)
+    return _gnomonic_ed_remap_to_create(lon6, lat6)
+
+
+def _compute_gnomonic_ed_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
+    """Cell-center lon/lat for the FV3 OPERATIONAL gnomonic_ed grid (grid_type=0).
+
+    Building block for the gated ``create_cubed_sphere(gnomonic="ed")`` path.
+    Drop-in ``(6, n, n)`` replacement for :func:`_compute_gnomonic_lonlat`
+    (equiangular).  Uses the cell-centre great-circle-edge angle distribution
+    through the shared :func:`_gnomonic_ed_6face_from_theta` pipeline, so these
+    centres are CONSISTENT with the padded metric builders (same definition;
+    iter67 fixed an earlier cell_center2-of-corners centre that differed by ~½
+    cell from the padded-metric centres).
+
+    gnomonic_ed gives near-uniform cells (max aspect 1.06 vs equiangular's 1.40
+    at corners) — why FV3 uses it operationally and the candidate fix for the
+    C96 high-res cube-edge eigenmode.  Tested in
+    ``tests/grids/test_gnomonic_ed_centers_iter62.py``.
+
+    Centres = ``cell_center2`` of the gnomonic_ed CORNERS (the FV3 agrid
+    definition).  NOTE (iter67): constructing centres via ``construct`` at a
+    cell-centre θ distribution is WRONG for gnomonic_ed — its great-circle
+    construction is range-dependent (a θ sub-range yields a different cell
+    distribution, 1.80 vs the √2 1.31 corner-derived ratio), unlike
+    equiangular's parametric ``tan(α)``.  So corner→cell_center2 is the
+    consistent centre source; the padded metric builders must match it
+    (corner-derived), not construct-at-cell-centre-θ.
+    """
+    lon_c, lat_c = make_fv3_native_grid(n, grid_type=0)  # (6, n+1, n+1) corners
+    lon_c, lat_c = _gnomonic_ed_remap_to_create(lon_c, lat_c)  # → create numbering
+    return cell_center2(
+        lon_c[:, :-1, :-1], lat_c[:, :-1, :-1],   # SW
+        lon_c[:, 1:, :-1], lat_c[:, 1:, :-1],     # SE
+        lon_c[:, 1:, 1:], lat_c[:, 1:, 1:],       # NE
+        lon_c[:, :-1, 1:], lat_c[:, :-1, 1:],     # NW
+    )
+
+
+# Face permutation + D4 rotation mapping make_fv3_native_grid's FV3 face
+# numbering/orientation onto create_cubed_sphere's _face_to_cartesian numbering.
+# Derived + validated iter66 by matching the EQUIANGULAR grid on both sides
+# (residual 2.46e-4 = the two equiangular constructions' diff; the integer
+# (face, rot) selection is unambiguous) and confirmed SEAM-CONTINUOUS
+# (cross-face ratio 1.22 through create's halo tables).
+_GNOMONIC_ED_FACE_PERM = (0, 1, 3, 4, 5, 2)
+_GNOMONIC_ED_FACE_ROT = (0, 0, 1, 1, 0, 3)  # k for jnp.rot90 (counter-clockwise)
+
+
+def _gnomonic_ed_remap_to_create(
+    lon: jax.Array, lat: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+    """Remap a 6-face grid from make_fv3_native_grid's FV3 face
+    numbering/orientation to create_cubed_sphere's convention.
+
+    Required because make_fv3_native_grid builds faces by mirroring face-1
+    (FV3 orientation) — seam-continuous but PERMUTED/ROTATED relative to
+    create's per-face ``_face_to_cartesian`` layout.  Applying this keeps the
+    seam topology consistent with create's halo tables.  Works on corner
+    ``(6, m, m)`` or centre ``(6, n, n)`` arrays.
+    """
+    lo = jnp.stack([
+        jnp.rot90(lon[_GNOMONIC_ED_FACE_PERM[F]], _GNOMONIC_ED_FACE_ROT[F])
+        for F in range(6)
+    ])
+    la = jnp.stack([
+        jnp.rot90(lat[_GNOMONIC_ED_FACE_PERM[F]], _GNOMONIC_ED_FACE_ROT[F])
+        for F in range(6)
+    ])
+    return lo, la
 
 
 def _face_to_cartesian(
@@ -1959,6 +2087,271 @@ def gnomonic_ed(im: int) -> tuple[jax.Array, jax.Array]:
     return lon_out, lat_out
 
 
+def _gnomonic_ed_construct(
+    theta_w: jax.Array, alpha: float | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """Generalized gnomonic_ed face-2 construction for an arbitrary W-edge
+    latitude array ``theta_w`` (the equal-great-circle-angle edge distribution).
+
+    Identical to :func:`gnomonic_ed` (FV3 fv_grid_utils.F90:1313) but with the
+    W/E-edge latitudes supplied directly instead of derived from ``im`` — so the
+    same construction builds the in-domain grid (``theta_w = -α + (2α/im)·[0..im]``,
+    α=arcsin(1/√3)) AND the HALO-extended grid (``theta_w`` spanning beyond ±α).
+    This is the reusable core for the gated gnomonic_ed padded-metric builders.
+
+    ``alpha`` fixes the SW/NE corners that define the mirror diagonal
+    (default arcsin(1/√3) = the in-domain face half-extent).  This MUST stay
+    pinned to the in-domain face even when ``theta_w`` extends into the halo —
+    otherwise the diagonal moves and the interior no longer matches the
+    in-domain grid.  The extended W-edge points are reflected across this FIXED
+    diagonal to give the (continued) S-edge great circle.
+
+    Returns the ``(m, m)`` face-2 (lon, lat), ``m = len(theta_w)``.
+    """
+    rsq3 = 1.0 / jnp.sqrt(3.0)
+    pi = jnp.pi
+    if alpha is None:
+        alpha = float(jnp.arcsin(rsq3))
+    theta_w = jnp.asarray(theta_w)
+    m = theta_w.shape[0]
+    im = m - 1
+
+    lon = jnp.zeros((m, m), dtype=jnp.float64)
+    lat = jnp.zeros((m, m), dtype=jnp.float64)
+    # W (i=0) and E (i=im) edges: constant lon, lat = theta_w
+    lon = lon.at[0, :].set(0.75 * pi)
+    lon = lon.at[im, :].set(1.25 * pi)
+    lat = lat.at[0, :].set(theta_w)
+    lat = lat.at[im, :].set(theta_w)
+
+    # S/N edges by mirror_latlon of the W-edge column across the SW–NE diagonal.
+    # The diagonal is pinned to the IN-DOMAIN corners (lat=±alpha) so the
+    # interior is invariant to halo extension of theta_w.
+    i_int = jnp.arange(1, im)
+    lon_s_row, lat_s_row = mirror_latlon(
+        0.75 * pi, -alpha, 1.25 * pi, alpha,
+        lon[0, i_int], lat[0, i_int],
+    )
+    lon = lon.at[i_int, 0].set(lon_s_row)
+    lat = lat.at[i_int, 0].set(lat_s_row)
+    lon = lon.at[i_int, im].set(lon_s_row)
+    lat = lat.at[i_int, im].set(-lat_s_row)
+
+    # Project edges onto the constant-x = -1/√3 cube face
+    x_w, y_w, z_w = latlon2xyz(lon[0, :], lat[0, :])
+    safe_x_w = jnp.where(jnp.abs(x_w) > 1e-30, x_w, 1.0)
+    pp2_i0 = -y_w * rsq3 / safe_x_w
+    pp3_i0 = -z_w * rsq3 / safe_x_w
+    x_s, y_s, z_s = latlon2xyz(lon[:, 0], lat[:, 0])
+    safe_x_s = jnp.where(jnp.abs(x_s) > 1e-30, x_s, 1.0)
+    pp2_j0 = -y_s * rsq3 / safe_x_s
+    pp3_j0 = -z_s * rsq3 / safe_x_s
+
+    pp1 = jnp.full((m, m), -rsq3)
+    pp2 = jnp.broadcast_to(pp2_j0[:, None], (m, m))
+    pp3 = jnp.broadcast_to(pp3_i0[None, :], (m, m))
+    pp3 = pp3.at[:, 0].set(pp3_j0)
+    pp2 = pp2.at[0, :].set(pp2_i0)
+    pp3 = pp3.at[:, im].set(-pp3_j0)
+    pp2 = pp2.at[im, :].set(-pp2_i0)
+
+    return xyz2latlon(pp1, pp2, pp3)
+
+
+def _gnomonic_ed_padded_centers(n: int, halo: int) -> tuple[jax.Array, jax.Array]:
+    """gnomonic_ed cell CENTRES on the padded grid, ``(6, n_big, n_big)`` create-
+    numbered, ``n_big = n+2*halo+2`` (the equiangular padded-metric convention).
+
+    Definition-A centres (cell_center2 of the extended CORNER grid) — CONSISTENT
+    with :func:`_compute_gnomonic_ed_lonlat` (in-domain block matches to ~1e-15).
+    Corner θ are uniform in great-circle edge angle (gnomonic_ed's defining
+    property); the construct's interior is invariant to halo extension (the
+    mirror diagonal is pinned to ±α), so the in-domain centres reproduce the FV3
+    grid and the surrounding cells are the same-face halo extension.  This is
+    the single source the padded metric builders use, so grid.lon/lat and the
+    metrics share one centre definition (iter67 consistency fix; the earlier
+    construct-at-cell-centre-θ approach was range-dependent and inconsistent).
+    """
+    rsq3 = 1.0 / jnp.sqrt(3.0)
+    alpha = float(jnp.arcsin(rsq3))
+    dely = 2.0 * alpha / n
+    ext = halo + 1
+    n_big = n + 2 * halo + 2
+    kc = jnp.arange(n_big + 1, dtype=jnp.float64)  # corner nodes
+    theta_c = -alpha - ext * dely + kc * dely
+    lo, la = _gnomonic_ed_6face_from_theta(theta_c, alpha)  # (6, M, M) corners
+    return cell_center2(
+        lo[:, :-1, :-1], la[:, :-1, :-1], lo[:, 1:, :-1], la[:, 1:, :-1],
+        lo[:, 1:, 1:], la[:, 1:, 1:], lo[:, :-1, 1:], la[:, :-1, 1:],
+    )  # (6, n_big, n_big)
+
+
+def _gnomonic_ed_angle_1d(ncells: int) -> jax.Array:
+    """1D gnomonic-ANGLE distribution of the FV3 gnomonic_ed grid: ``ncells+1``
+    nodes, symmetric about 0, spanning ``[-π/4, π/4]``, non-uniform (cells wider
+    at the face centre, ~√2 narrower at the edges).
+
+    The gnomonic_ed grid is EXACTLY separable per face in gnomonic angle and all
+    6 faces are congruent, so the whole grid is
+    ``_face_gnomonic_to_lonlat(f, meshgrid(this, this))`` — verified to reproduce
+    the FV3 native ``make_fv3_native_grid(grid_type=0)`` corners to ~3e-15 over
+    all 6 faces, with per-face separability ~1e-16 (iter73).  This is the ed
+    analog of equiangular's uniform ``linspace(-π/4, π/4)``: the SAME builder,
+    only the 1D node distribution differs.  Extracting it (vs the
+    construct→mirror→remap pipeline) lets the cdgrid extended grids extend the
+    edge-PERPENDICULAR halo by simple 1D extrapolation in gnomonic angle — which
+    the construct cannot do (it pins the W/E edges to the boundary meridians,
+    collapsing the perpendicular halo at the cube corners; iter73 W2 bug).
+    """
+    lon0, lat0 = _gnomonic_ed_remap_to_create(
+        *make_fv3_native_grid(ncells, grid_type=0))
+    lon0 = jnp.asarray(lon0)[0]
+    lat0 = jnp.asarray(lat0)[0]
+    # face 0 (+x): tan(alpha_x) = y/x varies along i only (separable to ~1e-16)
+    x = jnp.cos(lat0) * jnp.cos(lon0)
+    y = jnp.cos(lat0) * jnp.sin(lon0)
+    return jnp.mean(jnp.arctan2(y, x), axis=1)  # (ncells+1,)
+
+
+def _gnomonic_ed_extrap1d(a: jax.Array) -> jax.Array:
+    """Linear ±1-node extrapolation of a 1D gnomonic-angle array — the smooth
+    SAME-FACE ghost node for the cdgrid centred-difference stencils.  Reduces
+    EXACTLY to equiangular's ``linspace`` extension (``±dα``) for a uniform
+    array, so this is the faithful ed analog (the halo error vs a θ-uniform
+    extension is O(cell²), and unlike the construct it never collapses)."""
+    return jnp.concatenate([2.0 * a[:1] - a[1:2], a, 2.0 * a[-1:] - a[-2:-1]])
+
+
+def _gnomonic_ed_faces_from_angle_1d(
+    ax_1d: jax.Array, ay_1d: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """Build all 6 gnomonic_ed faces from the separable 1D angle array(s) via the
+    tested forward map :func:`legoesm.grids.halo._face_gnomonic_to_lonlat` — the
+    same builder the equiangular cdgrid uses, only the 1D distribution differs."""
+    from legoesm.grids.halo import _face_gnomonic_to_lonlat
+    if ay_1d is None:
+        ay_1d = ax_1d
+    ax_mesh, ay_mesh = jnp.meshgrid(ax_1d, ay_1d, indexing="ij")
+    los, las = [], []
+    for f in range(6):
+        lo, la = _face_gnomonic_to_lonlat(f, ax_mesh, ay_mesh)
+        los.append(lo)
+        las.append(la)
+    return jnp.stack(los), jnp.stack(las)
+
+
+def gnomonic_ed_supergrid_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
+    """gnomonic_ed 2×-refined SUPERGRID nodes, ``(6, 2n+1, 2n+1)`` create-numbered
+    (area_c/dxc/dyc source).  REFINEMENT-CONSISTENT: the even nodes ``[::2, ::2]``
+    reproduce the gnomonic_ed corners (the 2n angle array's even entries ARE the
+    n-corner angles).  iter73: built from the separable 1D ed angle array via
+    :func:`_gnomonic_ed_faces_from_angle_1d` (matches the construct→mirror→remap
+    pipeline to ~3e-15) — the ed analog of equiangular's ``linspace`` supergrid.
+    """
+    return _gnomonic_ed_faces_from_angle_1d(_gnomonic_ed_angle_1d(2 * n))
+
+
+def gnomonic_ed_corner_ext_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
+    """gnomonic_ed corner grid + 1 halo, ``(6, n+3, n+3)`` create-numbered — the
+    ed source for the cdgrid corner/edge grid-angle extended grid (the ed analog
+    of equiangular's ``linspace(-π/4-dα, π/4+dα, n+3)``).  Interior ``[1:-1,1:-1]``
+    = the gnomonic_ed corners; the ±1 halo is the SAME-FACE smooth continuation
+    (1D linear extrapolation in gnomonic angle), so the cube-corner centred-
+    difference stencils stay non-degenerate.
+
+    iter73: REPLACES the construct→extended-θ halo, which collapsed the edge-
+    perpendicular halo onto the boundary meridians at the 4 cube corners (zero-
+    width cells → degenerate corner metrics → 8× W2 error vs equiangular).  See
+    :func:`_gnomonic_ed_angle_1d`.
+    """
+    return _gnomonic_ed_faces_from_angle_1d(
+        _gnomonic_ed_extrap1d(_gnomonic_ed_angle_1d(n)))
+
+
+def gnomonic_ed_padded_supergrid_lonlat(n: int) -> tuple[jax.Array, jax.Array]:
+    """gnomonic_ed padded supergrid, ``(6, 2n+3, 2n+3)`` create-numbered — the ed
+    source for the cdgrid sin_sg/cos_sg (the ed analog of equiangular's
+    ``linspace(-π/4-dα/2, π/4+dα/2, 2n+3)``).  Interior ``[1:-1,1:-1]`` = the 2×
+    supergrid; the ±1 (half-cell) halo is the SAME-FACE 1D extrapolation.
+
+    iter73: REPLACES the construct halo (which collapsed at the cube corners,
+    corrupting the corner sin_sg).  See :func:`_gnomonic_ed_angle_1d`.
+    """
+    return _gnomonic_ed_faces_from_angle_1d(
+        _gnomonic_ed_extrap1d(_gnomonic_ed_angle_1d(2 * n)))
+
+
+def compute_padded_half_metrics_ed(
+    n: int, radius: float, halo: int = 1,
+) -> tuple[jax.Array, jax.Array]:
+    """gnomonic_ed counterpart of :func:`legoesm.grids.halo.compute_padded_half_metrics`.
+
+    ``hx_ext, hy_ext`` of shape ``(6, n+2*halo, n+2*halo)``, each = half the
+    single-cell edge length (``dx/2``) — built on the FV3 gnomonic_ed grid via
+    the 2-cell great-circle chord of the definition-A padded CENTRES
+    (:func:`_gnomonic_ed_padded_centers`), per face (CONSISTENT with grid.lon/lat;
+    the chord convention matches the equiangular builder).
+    """
+    lon, lat = _gnomonic_ed_padded_centers(n, halo)  # (6, n_big, n_big)
+    cos_lat = jnp.cos(lat)
+    x = cos_lat * jnp.cos(lon)
+    y = cos_lat * jnp.sin(lon)
+    z = jnp.sin(lat)
+    dx_chord = jnp.sqrt(
+        (x[:, 2:, 1:-1] - x[:, :-2, 1:-1]) ** 2
+        + (y[:, 2:, 1:-1] - y[:, :-2, 1:-1]) ** 2
+        + (z[:, 2:, 1:-1] - z[:, :-2, 1:-1]) ** 2
+    )
+    hx = radius * 2.0 * jnp.arcsin(jnp.clip(dx_chord / 2.0, 0.0, 1.0)) * 0.5
+    dy_chord = jnp.sqrt(
+        (x[:, 1:-1, 2:] - x[:, 1:-1, :-2]) ** 2
+        + (y[:, 1:-1, 2:] - y[:, 1:-1, :-2]) ** 2
+        + (z[:, 1:-1, 2:] - z[:, 1:-1, :-2]) ** 2
+    )
+    hy = radius * 2.0 * jnp.arcsin(jnp.clip(dy_chord / 2.0, 0.0, 1.0)) * 0.5
+    return hx, hy  # (6, n+2*halo, n+2*halo)
+
+
+def compute_padded_angle_ed(n: int, halo: int = 1) -> jax.Array:
+    """gnomonic_ed counterpart of :func:`legoesm.grids.halo.compute_padded_angle`.
+
+    Grid angle on the padded grid, ``(6, n+2*halo, n+2*halo)`` — per-face
+    i-direction centered-difference angle (identical formula to the equiangular
+    builder) of the definition-A padded CENTRES (CONSISTENT with grid.lon/lat).
+    Angle is face-dependent (equatorial faces 0-3 share one value; polar 4-5
+    differ by π — a real N/S orientation flip, present in the equiangular grid).
+    """
+    lon6, lat6 = _gnomonic_ed_padded_centers(n, halo)  # (6, n_big, n_big)
+    all_angle = []
+    for f in range(6):
+        lon, lat = lon6[f], lat6[f]
+        dlon_dx = lon[2:, 1:-1] - lon[:-2, 1:-1]
+        dlat_dx = lat[2:, 1:-1] - lat[:-2, 1:-1]
+        dlon_dx = jnp.where(dlon_dx > jnp.pi, dlon_dx - 2 * jnp.pi, dlon_dx)
+        dlon_dx = jnp.where(dlon_dx < -jnp.pi, dlon_dx + 2 * jnp.pi, dlon_dx)
+        cos_lat_ext = jnp.cos(lat[1:-1, 1:-1])
+        all_angle.append(jnp.arctan2(dlat_dx, dlon_dx * cos_lat_ext))
+    return jnp.stack(all_angle, axis=0)
+
+
+def _compute_exact_cell_areas_ed(n: int, radius: float) -> jax.Array:
+    """gnomonic_ed counterpart of :func:`_compute_exact_cell_areas`.
+
+    Spherical-excess cell areas on the FV3 gnomonic_ed grid, ``(6, n, n)``,
+    via the faithful FV3 :func:`get_area` applied to the remapped (create-
+    numbered) gnomonic_ed corners.
+    """
+    lon_c, lat_c = make_fv3_native_grid(n, grid_type=0)
+    lon_c, lat_c = _gnomonic_ed_remap_to_create(lon_c, lat_c)  # (6, n+1, n+1)
+    return get_area(
+        lon_c[:, :-1, :-1], lat_c[:, :-1, :-1],   # SW
+        lon_c[:, 1:, :-1], lat_c[:, 1:, :-1],     # SE
+        lon_c[:, 1:, 1:], lat_c[:, 1:, 1:],       # NE
+        lon_c[:, :-1, 1:], lat_c[:, :-1, 1:],     # NW
+        radius=radius,
+    )
+
+
 def symm_ed(
     lamda: jax.Array, theta: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
@@ -2875,6 +3268,94 @@ def project_sphere_v(
     """
     ap = jnp.sum(f * e, axis=-1, keepdims=True)
     return f - ap * e
+
+
+def get_unit_vector_fv3(
+    lon1: jax.Array, lat1: jax.Array,
+    lon2: jax.Array, lat2: jax.Array,
+    lon3: jax.Array, lat3: jax.Array,
+) -> jax.Array:
+    """FV3_3D iter 659 (restored iter-1069): unit tangent vector at p2
+    from p1 → p3.
+
+    Faithful JAX port of FV3 ``get_unit_vector``
+    (``tools/test_cases.F90:8366-8385``).  Used by FV3-faithful
+    test-case wind initialization paths (``rotate_winds_fv3``,
+    ``dcmip16_tc_rotate_winds``) for the DCMIP-16 baroclinic-wave and
+    tropical-cyclone test cases.  Currently called only from those
+    test-init paths; placed here (rather than in test utilities)
+    because it is a faithful FV3 oracle port that may be reused by
+    future production code paths that perform sphere-to-cube wind
+    rotation outside the standard ``rotate_winds_geo_to_grid`` flow.
+
+    Algorithm:
+
+        xyz1, xyz2, xyz3 = latlon2xyz(...)
+        uvect = xyz3 - xyz1                     # chord
+        uvect = project_sphere_v(uvect, xyz2)   # tangent at p2
+        uvect = normalize(uvect)
+
+    Returns the unit tangent vector at ``p2`` pointing in the
+    direction from ``p1`` toward ``p3`` (projected onto the local
+    tangent plane).
+
+    Note: iter 905 (commit c1c0e42b) removed this definition during
+    drift cleanup but left the callers in
+    ``rotate_winds_fv3`` / ``dcmip16_tc_rotate_winds`` referencing
+    it, which caused ``NameError`` at test time
+    (test_fv3_rotate_winds_iter661.py / test_fv3_tc_uwind_pert_iter672.py).
+    iter-1069 restores it.
+
+    Returns shape ``(..., 3)``; broadcasts on leading axes.
+    """
+    x1, y1, z1 = latlon2xyz(lon1, lat1)
+    x2, y2, z2 = latlon2xyz(lon2, lat2)
+    x3, y3, z3 = latlon2xyz(lon3, lat3)
+    p2 = jnp.stack([x2, y2, z2], axis=-1)
+    uvect_raw = jnp.stack([x3 - x1, y3 - y1, z3 - z1], axis=-1)
+    uvect_tangent = project_sphere_v(uvect_raw, p2)
+    return normalize_vect(uvect_tangent)
+
+
+def coriolis_parameter_fv3(
+    lat: jax.Array,
+    units: str = "rad",
+) -> jax.Array:
+    """FV3_3D iter 778 (restored iter-1069): Coriolis parameter
+    ``f = 2·Ω·sin(lat)``.
+
+    Vertical component of the planetary vorticity vector
+    (``2·Ω·sin(lat)``) acting on horizontal flow.  Centred on Earth:
+    ``Ω = constants.Omega`` = 7.292·10⁻⁵ rad/s.
+
+    Currently called only by ``dcmip16_tc_uwind_pert`` (the DCMIP-16
+    tropical-cyclone wind initialization).  Placed here (rather than
+    in test utilities) because it is a faithful FV3 oracle port of
+    a fundamental geophysical quantity that may be reused by future
+    production code paths (geostrophic balance, Rossby-wave
+    dispersion, Ekman pumping, etc.).
+
+    Note: iter 905 (commit c1c0e42b) removed this definition during
+    drift cleanup but left the caller in ``dcmip16_tc_uwind_pert``
+    referencing it, which caused ``NameError`` at test time.
+    iter-1069 restores it.
+
+    Parameters
+    ----------
+    lat : jax.Array
+        Latitude (radians by default; pass ``units='deg'`` for
+        degrees input).
+    units : {'rad', 'deg'}
+
+    Returns
+    -------
+    f : jax.Array
+        Coriolis parameter (s⁻¹).
+    """
+    if units not in ("rad", "deg"):
+        raise ValueError(f"units must be 'rad' or 'deg', got {units!r}")
+    lat_rad = jnp.radians(lat) if units == "deg" else lat
+    return 2.0 * constants.Omega * jnp.sin(lat_rad)
 
 
 def terminator_tracers(

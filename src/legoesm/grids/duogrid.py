@@ -1271,14 +1271,22 @@ def ext_vector_dgrid(
     n = duogrid.n
     h = halo
 
-    # Step 1: Convert covariant → contravariant → geographic (lat/lon).
-    # FV3's c2l_ord2 combines these steps via a11/a12/a21/a22 matrices.
-    # Here we decompose: first covariant→contravariant using cosa_s/rsin2,
-    # then contravariant→geographic using grid angle rotation.
-    ua = (utmp - vtmp * cosa_s) * rsin2
-    va = (vtmp - utmp * cosa_s) * rsin2
-    u_east = cos_angle * ua - sin_angle * va
-    v_north = sin_angle * ua + cos_angle * va
+    # Step 1: Convert covariant → geographic (lat/lon).
+    # iter147 FIX (running-FV3 halo audit): the previous code raised the index
+    # to the CONTRAVARIANT coefficients (ua,va) and then applied a SINGLE
+    # (orthogonal) grid-angle rotation — valid only if the grid axes were
+    # perpendicular.  On the cubed sphere the tangents are NON-orthogonal
+    # (e1·e2 = cosa_s ≠ 0) at face edges/corners, so the va·e2 projection
+    # dropped the O(cosa_s) non-orthogonality term, giving a GROSS, resolution-
+    # NON-convergent halo error (~tens of m/s) at the cube edges that seeded the
+    # FB edge instability.  Use the exact non-orthogonal covariant→geographic
+    # conversion (identical to the production `pad_halo_vector`, halo.py): utmp/
+    # vtmp are the covariant projections V·x̂, V·ŷ; cosa_s = cos(θ_between_axes);
+    # st = sin θ.  Reduces to the old orthogonal form when cosa_s→0 (interior).
+    _EPS_NO = float(jnp.finfo(jnp.float32).eps)
+    st = jnp.maximum(jnp.sqrt(jnp.maximum(1.0 - cosa_s ** 2, 0.0)), _EPS_NO)
+    u_east = cos_angle * utmp + sin_angle * (utmp * cosa_s - vtmp) / st
+    v_north = sin_angle * utmp + cos_angle * (vtmp - utmp * cosa_s) / st
 
     # Step 2: Halo-exchange lat/lon winds as SCALARS with Duo-Grid remap.
     # This applies cube_rmp (kinked→extended) + fill_corner_region.

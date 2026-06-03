@@ -36,6 +36,7 @@ from typing import Callable, NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
 
@@ -1166,7 +1167,15 @@ def compute_dz_L32() -> tuple[jax.Array, jax.Array]:
     return dz_flipped, ztop
 
 
-_A60 = jnp.asarray([
+# iter-93: stored as numpy (not jnp) at module-top. jnp.asarray at
+# import time eagerly dispatches to the default JAX backend (Metal
+# on macOS), which currently rejects convert_element_type with
+# "UNIMPLEMENTED: default_memory_space is not supported". That
+# bricks `import legoesm` on Apple Silicon even for pure-Python
+# unit tests. Defer jnp conversion to inside `set_eta_L60()` so
+# only callers that actually need the FV3 L60 hybrid coord pay the
+# JAX device-init cost.
+_A60 = np.asarray([
     300.0000, 430.00000, 558.00000, 700.00000, 863.05803,
     1051.07995, 1265.75194, 1510.71101, 1790.05098, 2108.36604,
     2470.78817, 2883.03811, 3351.46002, 3883.05187, 4485.49315,
@@ -1181,7 +1190,7 @@ _A60 = jnp.asarray([
     776.23591, 581.48797, 408.53400, 255.26520, 119.70243,
     0.0,
 ])
-_B60 = jnp.asarray([
+_B60 = np.asarray([
     0.00000, 0.00000, 0.00000, 0.00000, 0.00000,
     0.00000, 0.00000, 0.00000, 0.00000, 0.00000,
     0.00000, 0.00000, 0.00000, 0.00000, 0.00000,
@@ -1221,8 +1230,8 @@ def set_eta_L60() -> tuple[jax.Array, jax.Array, jax.Array, int]:
         Number of pure-pressure LAYERS = max index where bk < eps
         (from iter-637 set_external_eta).
     """
-    ak = _A60
-    bk = _B60
+    ak = jnp.asarray(_A60)
+    bk = jnp.asarray(_B60)
     ptop = ak[0]
     # ks = last index where bk < 1e-7
     eps = 1.0e-7
@@ -1557,7 +1566,7 @@ def mount_waves(
         raise ValueError(f"mount_waves requires km >= 23, got {km}")
     g = constants.g
     rdgas = constants.R_d
-    p00 = 1.0e5
+    p00 = constants.p_ref
     t0 = 300.0
 
     dz0 = 500.0 if km <= 60 else 250.0
@@ -2272,6 +2281,15 @@ class HeightCoordinate(NamedTuple):
         Reference Exner function at half levels [-], shape (nlev+1,).
     rho_ref_half : jax.Array
         Reference density at half levels [kg/m^3], shape (nlev+1,).
+    u_geo0, v_geo0 : jax.Array | None
+        Geostrophic reference wind profiles [m/s], shape (nlev,) or None.
+        SAM ``coriolis.f90`` applies the Coriolis force to the DEPARTURE
+        from the geostrophic wind — ``dudt += f·(v−vg0)``,
+        ``dvdt −= f·(u−ug0)`` — so the large-scale balanced mean wind is
+        not spuriously spun up by an inertial oscillation. ``None`` (the
+        default) means zero reference wind (the RCE / no-mean-wind case),
+        which reduces to applying Coriolis to the full wind. For GATE/LBA
+        these carry the prescribed initial/geostrophic sounding wind.
     """
     n_levels: int
     H: float
@@ -2284,6 +2302,8 @@ class HeightCoordinate(NamedTuple):
     exner_ref: jax.Array
     exner_ref_half: jax.Array
     rho_ref_half: jax.Array
+    u_geo0: jax.Array | None = None
+    v_geo0: jax.Array | None = None
 
 
 class TerrainMetric(NamedTuple):
@@ -2326,11 +2346,11 @@ def _default_theta_ref(z: jax.Array) -> jax.Array:
 def compute_reference_state(
     z: jax.Array,
     theta_ref_fn: Callable[[jax.Array], jax.Array],
+    p_sfc: float | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Compute 1D reference state by integrating hydrostatic balance.
 
-    Given theta_0(z), integrate the hydrostatic equation downward from
-    the model top:
+    Given theta_0(z), integrate the hydrostatic equation:
 
         d(pi_0)/dz = -g / (c_p · theta_0(z))
 
@@ -2338,7 +2358,33 @@ def compute_reference_state(
 
     Then recover density from the equation of state:
 
-        rho_0 = p_0 · pi_0^(c_v/R_d) / (R_d · theta_0)
+        rho_0 = p / (R_d · theta_0 · pi_0)
+
+    Two boundary-condition modes:
+
+    1. **Top-down (legacy, default when p_sfc is None)**: integrate
+       downward from a model-top BC ``p_top = p_0 * exp(-g * z_top /
+       (R_d * 250))`` with hardcoded T_avg=250 K column-mean. This
+       gives the wrong pi at high-pressure levels for tall domains:
+       for Wing 2018 RCE300 with a 33 km model top, ``pi(z=550m) =
+       1.027`` instead of the correct 0.987 (4% over-estimate;
+       12 K too-hot diagnosed T at lowest model level). Kept as
+       DEFAULT for backward-compat with hundreds of existing tests
+       that assert specific reference-state values.
+
+    2. **Bottom-up (iter-95, opt-in via p_sfc)**: integrate UPWARD
+       from a known surface BC ``pi_sfc = (p_sfc/p_ref)^kappa``.
+       Scientifically correct; matches Wing 2018 T at z=550m to
+       0.07 K (vs 12 K error in legacy mode). Use this for any IC
+       where surface pressure is known, especially RCE / RCEMIP1
+       / aquaplanet / Held-Suarez setups.
+
+    iter-95 motivation: the legacy BC error broke surface-flux
+    coupling in the plane CRM (air ~9 K above prescribed SST=300 K
+    driving the wrong sign of heat flux), preventing convection
+    initiation even after 9+ sim-days at 12x12 AND 32x32 domains.
+    See CRM_implementation.md iter-95 for the full diagnostic
+    chain.
 
     Parameters
     ----------
@@ -2347,6 +2393,11 @@ def compute_reference_state(
         top-to-bottom (decreasing).
     theta_ref_fn : callable
         Function theta_0(z) -> potential temperature [K].
+    p_sfc : float, optional
+        Surface pressure (at z=0) [Pa]. If provided, switches to
+        the bottom-up integration mode (iter-95 correct BC). For
+        Wing 2018 RCE cases, pass 101480.0 Pa. If None (default),
+        uses the legacy top-down BC for backward-compat.
 
     Returns
     -------
@@ -2359,39 +2410,75 @@ def compute_reference_state(
     """
     g = constants.g
     c_p = constants.c_pd
-    c_v = constants.c_vd
     R_d = constants.R_d
     p_0 = constants.p_ref
 
     theta_0 = theta_ref_fn(z)
-
-    # Integrate d(pi)/dz = -g / (c_p * theta_0) downward from top.
-    # Use trapezoidal rule: pi[k+1] = pi[k] + (-g/(c_p*theta_avg)) * (z[k+1]-z[k])
-    # Note: z is top-to-bottom, so z[k+1] < z[k], and dz = z[k+1]-z[k] < 0.
-    # This means pi increases downward (as expected).
-
-    # Start with pi at model top. Use a reasonable value:
-    # T_top = theta_top * pi_top => pi_top = T_top / theta_top
-    # For ~40km top, T ~ 250K, theta ~ 1000K => pi ~ 0.25
-    # Better: use standard atmosphere pressure at model top.
-    # p_top = p_0 * exp(-g * z_top / (R_d * T_avg))
-    z_top = z[0]
-    T_avg = 250.0  # rough average temperature for scale height
-    p_top = p_0 * jnp.exp(-g * z_top / (R_d * T_avg))
-    pi_top = (p_top / p_0) ** (R_d / c_p)
-
-    # Integrate downward level by level
     n = z.shape[0]
     dz_vals = jnp.diff(z)  # (n-1,) — negative since z decreasing
-
-    # Trapezoidal integration of -g / (c_p * theta_0)
     integrand = -g / (c_p * theta_0)  # (n,)
     integrand_avg = 0.5 * (integrand[:-1] + integrand[1:])  # (n-1,)
-    d_pi = integrand_avg * dz_vals  # (n-1,)
 
-    # Cumulative sum gives pi at each level
-    pi_increments = jnp.cumsum(d_pi)  # (n-1,)
-    exner_0 = jnp.concatenate([jnp.array([pi_top]), pi_top + pi_increments])
+    if p_sfc is None:
+        # --------------- LEGACY: top-down integration ----------
+        z_top = z[0]
+        T_avg = 250.0  # rough average temperature for scale height
+        p_top = p_0 * jnp.exp(-g * z_top / (R_d * T_avg))
+        pi_top = (p_top / p_0) ** (R_d / c_p)
+        d_pi = integrand_avg * dz_vals  # POSITIVE (negative * negative)
+        pi_increments = jnp.cumsum(d_pi)  # (n-1,)
+        exner_0 = jnp.concatenate(
+            [jnp.array([pi_top]), pi_top + pi_increments]
+        )
+    else:
+        # --------------- iter-95: bottom-up integration --------
+        # pi_sfc at z=0 from known p_sfc.
+        pi_sfc = (p_sfc / p_0) ** (R_d / c_p)
+        # Extrapolate from z=0 (where pi=pi_sfc) to z[-1] (lowest
+        # model level, > 0) using local d(pi)/dz at theta(z=0).
+        theta_sfc = theta_ref_fn(jnp.array([0.0]))[0]
+        pi_lowest = pi_sfc + (-g / (c_p * theta_sfc)) * z[-1]
+        # Walk upward from z[-1] (pi_lowest) to z[0] (top).
+        # d_pi_up[i] = -integrand_avg[i] * (-dz_vals[i]) = increment
+        # going UP (NEGATIVE since pi decreases upward).
+        d_pi_up = integrand_avg * dz_vals  # POSITIVE = going DOWN
+        d_pi_up = -d_pi_up  # NEGATIVE = going UP
+        # Reverse cumsum: pi[k] = pi_lowest + sum_{j=k}^{n-2} d_pi_up[j].
+        pi_increments_reversed = jnp.cumsum(d_pi_up[::-1])  # (n-1,)
+        pi_increments = pi_increments_reversed[::-1]  # (n-1,)
+        exner_0 = jnp.concatenate(
+            [pi_lowest + pi_increments, jnp.array([pi_lowest])]
+        )
+
+    # Fail fast on a non-physical reference Exner. A constant-θ
+    # (isentropic) atmosphere reaches exner = 0 (p = T = 0) at
+    # z = c_p·θ/g (≈ 30.7 km for θ = 300 K), so a tall model top with the
+    # default constant reference silently yields exner_0 ≤ 0 → rho_0 = NaN
+    # → a step-1 NaN far from the real cause. Raise at construction
+    # instead with an actionable message. Concrete-only (skipped if z /
+    # theta_ref_fn are traced — values aren't available then).
+    try:
+        exner_host = np.asarray(exner_0)
+        z_host = np.asarray(z)
+    except jax.errors.TracerArrayConversionError:
+        exner_host = None
+    if exner_host is not None and (
+        not np.all(np.isfinite(exner_host))
+        or float(np.min(exner_host)) <= 0.0
+    ):
+        k_bad = int(np.nanargmin(exner_host))
+        raise ValueError(
+            "compute_reference_state produced a non-physical reference "
+            f"Exner (min={float(np.nanmin(exner_host)):.4g} at level index "
+            f"{k_bad}, z={float(z_host[k_bad]):.0f} m). The theta_ref "
+            "profile cannot hydrostatically support this column: a "
+            "constant potential temperature is ISENTROPIC and reaches "
+            "exner=0 at z = c_p·theta/g (~30.7 km for theta=300 K). For "
+            "deep model tops (>~30 km) pass a theta_ref_fn whose theta "
+            "increases aloft (tropopause + stratosphere sounding), e.g. "
+            "the RCEMIP/Wing-2018 profile, instead of the constant-300 K "
+            "default."
+        )
 
     # Recover density from equation of state:
     # p = p_0 * pi^(c_p/R_d)
@@ -2406,6 +2493,7 @@ def create_height_coordinate(
     n_levels: int,
     H: float,
     theta_ref_fn: Callable[[jax.Array], jax.Array] | None = None,
+    p_sfc: float | None = None,
 ) -> HeightCoordinate:
     """Create a uniformly-spaced height-based (z-star) vertical coordinate.
 
@@ -2418,33 +2506,72 @@ def create_height_coordinate(
     theta_ref_fn : callable, optional
         Function theta_0(z) -> potential temperature [K].
         Default: constant 300 K (isothermal reference).
+    p_sfc : float, optional
+        Surface pressure [Pa]. When provided, switches the
+        hydrostatic integration to bottom-up mode with surface
+        BC ``pi_sfc=(p_sfc/p_ref)^kappa`` (iter-95 fix). For
+        Wing 2018 RCE cases pass 101480.0 Pa. Default (None) uses
+        the legacy top-down BC for backward-compat. See
+        ``compute_reference_state`` docstring.
 
     Returns
     -------
     HeightCoordinate
         The vertical coordinate with precomputed reference state.
     """
-    if theta_ref_fn is None:
-        theta_ref_fn = _default_theta_ref
-
     # z* grid: top-to-bottom (z_half[0] = H, z_half[-1] = 0)
     # Use JAX default dtype (float64 when x64 is enabled, float32 otherwise)
     z_half = jnp.linspace(H, 0.0, n_levels + 1)
+    return create_height_coordinate_from_z_half(
+        z_half, theta_ref_fn=theta_ref_fn, p_sfc=p_sfc,
+    )
+
+
+def create_height_coordinate_from_z_half(
+    z_half: jax.Array,
+    theta_ref_fn: Callable[[jax.Array], jax.Array] | None = None,
+    p_sfc: float | None = None,
+) -> HeightCoordinate:
+    """HeightCoordinate from an EXPLICIT ``z_half`` interface array.
+
+    For CUSTOM vertical grids that are neither uniform
+    (:func:`create_height_coordinate`) nor geometrically stretched
+    (:func:`create_stretched_height_coordinate`) — e.g. SAM's ``grd``-file
+    levels (``read_sam_grd``), which are dz=50 m uniform in the boundary layer,
+    ~100 m uniform through the deep-convection layer, then stretched aloft.
+
+    ``z_half`` MUST be top-to-bottom (``z_half[0]`` = model top H,
+    ``z_half[-1]`` = 0 surface, strictly decreasing) — the same convention as
+    the other builders. The shared ``z_half → (z_full, dz, dz_half, reference
+    state)`` core lives here; the uniform builder above just supplies a
+    ``linspace`` ``z_half``.
+    """
+    if theta_ref_fn is None:
+        theta_ref_fn = _default_theta_ref
+    z_half = jnp.asarray(z_half)
+    if z_half.ndim != 1 or z_half.shape[0] < 3:
+        raise ValueError(
+            f"z_half must be 1-D with >=3 interfaces, got shape "
+            f"{tuple(z_half.shape)}.")
+    if not bool(jnp.all(jnp.diff(z_half) < 0.0)):
+        raise ValueError(
+            "z_half must be STRICTLY DECREASING top-to-bottom "
+            "(z_half[0]=H top, z_half[-1]=0 surface).")
     z_full = 0.5 * (z_half[:-1] + z_half[1:])  # (nlev,)
     dz = z_half[:-1] - z_half[1:]  # (nlev,) positive
     dz_half = z_full[:-1] - z_full[1:]  # (nlev-1,) positive
 
     # Compute reference state at full and half levels
     rho_ref, theta_ref, exner_ref = compute_reference_state(
-        z_full, theta_ref_fn
+        z_full, theta_ref_fn, p_sfc=p_sfc,
     )
     rho_ref_half, _, exner_ref_half = compute_reference_state(
-        z_half, theta_ref_fn
+        z_half, theta_ref_fn, p_sfc=p_sfc,
     )
 
     return HeightCoordinate(
-        n_levels=n_levels,
-        H=H,
+        n_levels=int(z_full.shape[0]),
+        H=float(z_half[0]),
         z_full=z_full,
         z_half=z_half,
         dz=dz,
@@ -2463,6 +2590,7 @@ def create_stretched_height_coordinate(
     dz_sfc: float = 50.0,
     stretching: float | None = None,
     theta_ref_fn: Callable[[jax.Array], jax.Array] | None = None,
+    p_sfc: float | None = None,
 ) -> HeightCoordinate:
     """Geometrically-stretched height-based (z-star) vertical coordinate.
 
@@ -2621,10 +2749,10 @@ def create_stretched_height_coordinate(
     dz_half = z_full[:-1] - z_full[1:]
 
     rho_ref, theta_ref, exner_ref = compute_reference_state(
-        z_full, theta_ref_fn,
+        z_full, theta_ref_fn, p_sfc=p_sfc,
     )
     rho_ref_half, _, exner_ref_half = compute_reference_state(
-        z_half, theta_ref_fn,
+        z_half, theta_ref_fn, p_sfc=p_sfc,
     )
 
     return HeightCoordinate(

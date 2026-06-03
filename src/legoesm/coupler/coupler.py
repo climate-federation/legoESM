@@ -201,6 +201,12 @@ def ocean_tile_response(
     )
     rho = forcing.rho_lowest
 
+    valid_schemes = ("constant", "coare3", "large_yeager")
+    if config.bulk_scheme not in valid_schemes:
+        raise ValueError(
+            f"Unknown coupler bulk_scheme {config.bulk_scheme!r}; "
+            f"expected one of {valid_schemes}."
+        )
     if config.bulk_scheme in ("coare3", "large_yeager"):
         # Use wind relative to ocean surface current
         u_rel = forcing.u_lowest - ocean_u
@@ -419,7 +425,10 @@ def make_coupler(
             atm_forcing, ocean_sst, ocean_u_sfc, ocean_v_sfc,
             coupler_config)
 
-        # 5. Tile fractions (ice concentration from updated ice state)
+        # 5. Tile fractions (ice concentration from updated ice state).
+        # The ice tile's ice->ocean exchange fluxes are returned per-grid-cell
+        # and blended by f_water in blend_tiles (F11), so no pre-step
+        # concentration is needed here.
         ice_conc = ice_new.concentration.data
         # Multi-category: sum across categories for total concentration
         if ice_conc.ndim > len(atm_forcing.sw_down.shape):

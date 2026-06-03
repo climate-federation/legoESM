@@ -317,8 +317,16 @@ def cdgrid_compressible_euler_slow_tendencies(
         )
     elif _hb_step6 == "mpi":
         from legoesm.grids.halo import _mpi_topology as _mpi_topo_step6
+        # FV3_3D iter-1041: pass interp_offsets when duogrid is off so the
+        # packed MPI (K, pi_prime) exchange Lagrange-remaps halos rather
+        # than nearest-copying — matches the local path which has
+        # ``operators`` doing per-field ``pad_halo_4d(interp_offsets=...)``.
+        _nh_offs_step6 = (
+            None if _nh_dg is not None else grid.halo_interp_offsets
+        )
         _K_pad_step6, _pi_pad_step6 = packed_pad_halo_mpi_4d(
             K, pi_prime, topology=_mpi_topo_step6, duogrid=_nh_dg,
+            interp_offsets=_nh_offs_step6,
         )
     else:
         _K_pad_step6 = _pi_pad_step6 = None
@@ -365,14 +373,14 @@ def cdgrid_compressible_euler_slow_tendencies(
         from legoesm.core.operators_cdgrid import (
             _interp_center_to_corner_a2b_ord4,
         )
-        # a2b_ord4 takes 3D shape (6, n, n) — vmap over level axis.
-        if zeta.ndim == 4:
-            _zeta_a2b_ord4 = jax.vmap(
-                lambda lev: _interp_center_to_corner_a2b_ord4(lev, cdgrid),
-                in_axes=-1, out_axes=-1,
-            )(zeta)
-        else:
-            _zeta_a2b_ord4 = _interp_center_to_corner_a2b_ord4(zeta, cdgrid)
+        # FV3_3D iter-1043: ``_interp_center_to_corner_a2b_ord4`` is
+        # shape-polymorphic (axis-1/2 slicing, trailing axes broadcast)
+        # and ``_pad_halo_auto_h2`` already dispatches to
+        # ``pad_halo_4d`` for 4D input.  Calling it directly on the 4D
+        # ``zeta`` avoids a ``jax.vmap`` that would wrap ``pad_halo``
+        # under MPI — mpi4jax's sendrecv batching rule asserts matching
+        # batch axes and fires when sendrecv runs inside vmap.
+        _zeta_a2b_ord4 = _interp_center_to_corner_a2b_ord4(zeta, cdgrid)
 
     if config.use_fv3_a2b_zeta_corner:
         zeta_corner = _zeta_a2b_ord4
@@ -386,13 +394,9 @@ def cdgrid_compressible_euler_slow_tendencies(
         from legoesm.core.operators_cdgrid import (
             _interp_center_to_corner_a2b_ord4 as _icc_a2b_ord4_theta,
         )
-        if theta_total.ndim == 4:
-            theta_corner = jax.vmap(
-                lambda lev: _icc_a2b_ord4_theta(lev, cdgrid),
-                in_axes=-1, out_axes=-1,
-            )(theta_total)
-        else:
-            theta_corner = _icc_a2b_ord4_theta(theta_total, cdgrid)
+        # FV3_3D iter-1043: same lift-out-of-vmap rationale as the
+        # ``zeta`` a2b path above.
+        theta_corner = _icc_a2b_ord4_theta(theta_total, cdgrid)
     else:
         theta_corner = _interp_center_to_corner(theta_total, cdgrid)
 
@@ -621,18 +625,17 @@ def cdgrid_compressible_euler_slow_tendencies(
             )
             _vfill = config.corner_div_damp_fv3_vector_fill
 
-            def _lap_per_level(field_3d):
-                return jax.vmap(
-                    lambda lev: fv3_corner_laplacian_iteration(
-                        lev, cdgrid, apply_vector_corner_fill=_vfill,
-                    ),
-                    in_axes=-1, out_axes=-1,
-                )(field_3d)
-
+            # FV3_3D iter-1044: ``fv3_corner_laplacian_iteration`` is now
+            # shape-polymorphic (3D and 4D dispatched at pad_halo step).
+            # Calling it directly on the 4D ``delpc`` field avoids a
+            # ``jax.vmap`` that would wrap ``pad_halo`` under MPI — same
+            # mpi4jax sendrecv batch-axis fix as iter-1042 / iter-1043.
             _delpc_initial = delpc
             _divg_d_iter = delpc
             for _ in range(config.corner_div_damp_nord):
-                _divg_d_iter = _lap_per_level(_divg_d_iter)
+                _divg_d_iter = fv3_corner_laplacian_iteration(
+                    _divg_d_iter, cdgrid, apply_vector_corner_fill=_vfill,
+                )
 
             # FV3_3D iter 187: smag_vort cap for nord>=1 (FV3 sw_core.F90:1797-1809).
             # smag_vort = |dt|*sqrt(delpc² + ζ²); iter-181/183 double-where guards sqrt(0).
@@ -1182,20 +1185,15 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                 self.config.nord_v + 1
             )
 
-            def _per_level(args):
-                u_lev, v_lev = args
-                return fv3_del6_vorticity_damping(
-                    u_lev, v_lev, damp=damp_step,
-                    nord=self.config.nord_v, cdgrid=self.cdgrid,
-                )
-
-            u_normal_t = jnp.moveaxis(u_normal, -1, 0)
-            v_normal_t = jnp.moveaxis(v_normal, -1, 0)
-            du_normal_t, dv_normal_t = jax.vmap(_per_level)(
-                (u_normal_t, v_normal_t),
+            # FV3_3D iter-1045: ``fv3_del6_vorticity_damping`` is now
+            # 4D-native (3D static metrics broadcast via ``[..., None]``;
+            # halo dispatched to ``pad_halo_4d``).  Direct call avoids
+            # ``jax.vmap`` around ``pad_halo`` under MPI — same pattern
+            # as iter-1042 / iter-1043 / iter-1044.
+            du_normal, dv_normal = fv3_del6_vorticity_damping(
+                u_normal, v_normal, damp=damp_step,
+                nord=self.config.nord_v, cdgrid=self.cdgrid,
             )
-            du_normal = jnp.moveaxis(du_normal_t, 0, -1)
-            dv_normal = jnp.moveaxis(dv_normal_t, 0, -1)
 
             # FV3_3D iter 442/447: sponge boost of damp_v at k=0,1 (NOT k=2). FV3 damp_vt = 0.5*d2_divg.
             if self.config.use_fv3_sponge_damp_v:
@@ -1220,12 +1218,50 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                 )
 
             # Project FV3 normal → corners (mode='edge' pad + avg)
-            # FV3_3D iter 370 (mirror of PE 370): cross-face halo
+            # FV3_3D iter 370 (mirror of PE 370): cross-face halo.
+            #
+            # iter-1046 fix: gate the `pad_halo_4d` call.  ``du_normal``
+            # / ``dv_normal`` are NON-SQUARE ``(6, n, n+1, nlev)`` /
+            # ``(6, n+1, n, nlev)`` fields.  The cubed-sphere
+            # ``pad_halo_4d`` MPI path is built for square
+            # ``(6, n, n, nlev)`` (uses precomputed connectivity tables
+            # / ``interp_offsets`` of shape ``(6, 4, n)``); feeding
+            # non-square data through the MPI scatter / interp helpers
+            # crashes ``_place_strip_4d`` with a ``(n+1, nlev)`` vs
+            # ``(n, nlev)`` broadcast mismatch.  Under the local
+            # backend the non-square call DOES still produce a
+            # measurable diff vs ``mode='edge'`` (the iter-370
+            # regression test depends on this), so we can't drop the
+            # call universally — only fall through to ``mode='edge'``
+            # when the MPI backend is active without duogrid.  With
+            # duogrid=True the post-pad remap reshapes correctly
+            # under both backends.
+            # FV3_3D iter-1083: route (du_normal, dv_normal) through
+            # the dgrid vector halo.  Local backend: iter-1078
+            # pad_halo_dgrid_vector_4d (full 24/24 bit-for-bit).
+            # MPI backend: iter-1083 pad_halo_dgrid_vector_4d_replicated_mpi
+            # (batched-per-peer sendrecv per
+            # _pad_halo_mpi_face_only_4d pattern, deadlock-free at
+            # np ∈ {2, 3, 6}; bit-for-bit against single-device
+            # reference on owned faces).
+            from legoesm.grids.halo import get_halo_backend as _ghb_nh
             if self.config.use_fv3_cross_face_du_proj:
-                _dg = self.grid.duogrid
-                du_full = _pad_halo_4d_module(du_normal, duogrid=_dg)
+                if _ghb_nh() == "mpi":
+                    from legoesm.grids.halo import _mpi_topology
+                    from legoesm.grids.dgrid_halo import (
+                        pad_halo_dgrid_vector_4d_replicated_mpi,
+                    )
+                    du_full, dv_full = pad_halo_dgrid_vector_4d_replicated_mpi(
+                        du_normal, dv_normal, _mpi_topology,
+                    )
+                else:
+                    from legoesm.grids.dgrid_halo import (
+                        pad_halo_dgrid_vector_4d,
+                    )
+                    du_full, dv_full = pad_halo_dgrid_vector_4d(
+                        du_normal, dv_normal,
+                    )
                 du_pad = du_full[:, :, 1:-1, :]
-                dv_full = _pad_halo_4d_module(dv_normal, duogrid=_dg)
                 dv_pad = dv_full[:, 1:-1, :, :]
             else:
                 du_pad = jnp.pad(
@@ -1372,24 +1408,22 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
                 self.config.nord_w + 1
             )
 
-            def _per_half_level(w_2d):
-                # Returns (fx2, fy2) for (6, n, n) w_2d
-                return _del6_vt_flux(
-                    w_2d, damp=damp_step_w, nord=self.config.nord_w,
-                    del6_u=del6_u_w, del6_v=del6_v_w, rarea=rarea_w,
-                    cdgrid=self.cdgrid,
-                )
-
-            # Vmap over half-level axis
+            # FV3_3D iter-1045: ``_del6_vt_flux`` is now 4D-native.
+            # Direct call on the full half-level field avoids ``jax.vmap``
+            # around ``pad_halo`` under MPI.  Output ``fx2``/``fy2`` are
+            # 4D (6, n+1, n, nlev_half) and (6, n, n+1, nlev_half).
             w_new_data = state_new.w.data        # (6, n, n, nlev_half)
-            w_t = jnp.moveaxis(w_new_data, -1, 0)
-            fx2_t, fy2_t = jax.vmap(_per_half_level)(w_t)
-            # FV3 flux convention: fx2[w]-fx2[e]; fy2[s]-fy2[n]. Fluxes include damp factor.
-            dw_t = (
-                fx2_t[..., :-1, :] - fx2_t[..., 1:, :]
-                + fy2_t[..., :-1] - fy2_t[..., 1:]
-            ) * rarea_w[None, ...]               # (nlev_half, 6, n, n)
-            dw = jnp.moveaxis(dw_t, 0, -1)       # (6, n, n, nlev_half)
+            fx2_w, fy2_w = _del6_vt_flux(
+                w_new_data, damp=damp_step_w, nord=self.config.nord_w,
+                del6_u=del6_u_w, del6_v=del6_v_w, rarea=rarea_w,
+                cdgrid=self.cdgrid,
+            )
+            # FV3 flux convention: fx2[w]-fx2[e]; fy2[s]-fy2[n].
+            # Broadcast 3D rarea_w against 4D net-flux.
+            dw = (
+                fx2_w[:, :-1, :, :] - fx2_w[:, 1:, :, :]
+                + fy2_w[:, :, :-1, :] - fy2_w[:, :, 1:, :]
+            ) * rarea_w[..., None]               # (6, n, n, nlev_half)
 
             # FV3_3D iter 441/447: sponge boost of damp_w at k=0/1/2. Factor 1.0 (FV3 damp_w = d2_divg).
             if self.config.use_fv3_sponge_damp_w:
@@ -1551,8 +1585,40 @@ class CDGridCompressibleEulerModel(IntegrationMixin):
 def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
     """FV3_3D iter 392: factory for FV3-faithful NH config.
 
-    Pair with use_duogrid=True so iter-325 halo wiring + iter-370 cross_face transfer values.
-    Enables iter-320/328/336/339/370/431/436/437/451/459/441/442.
+    Pair with ``use_duogrid=True`` so iter-325 halo wiring + iter-370
+    ``use_fv3_cross_face_du_proj`` transfer values.  Enables
+    iter-320/328/336/339/370/431/436/437/451/459/441/442.
+
+    FV3-fidelity flags:
+
+    Enabled by default:
+
+    - ``use_fv3_d_con_cv``: FV3 c_vd branch at d_con sites (iter-320,
+      KE→heat conversion with c_v_air instead of c_p_air).
+    - ``use_fv3_vector_halo_uv``: vector halo for u/v cell→corner
+      interp (iter-328).
+    - ``use_fv3_a2b_ord4_vector_uv``: 4th-order a2b corner interp
+      for u/v (iter-698, -25.8% θ′ edge ratio at C8).
+    - ``use_fv3_dynamic_exner``: dynamic ``Π = Π_ref + π'`` at all
+      d_con sites + delt_max caps (iter-336).
+    - ``use_fv3_metric_aware_d_con``: metric-aware d_con form
+      (iter-339, ``cosa_s/rsin2`` at all 5 d_con sites).
+
+    Disabled by default (opt-in via ``overrides``):
+
+    - ``use_fv3_cross_face_du_proj``: cross-face halo for damp_v
+      wind projection (iter-370).  Disabled as of iter-1072 — the
+      non-square ``du_normal`` / ``dv_normal`` data (shapes
+      ``(6, n+1, n, nlev)`` and ``(6, n, n+1, nlev)``) is silently
+      corrupted by ``pad_halo_4d`` (probe verified: NORTH halo
+      zeros).  Tracked as iter-1046 non-square halo follow-up.
+
+    Plus production knobs: ``d_con_top_zero_levels``, ``delt_max``,
+    ``nord_v``, ``corner_div_damp_nord``, ``corner_div_damp_d4_bg``,
+    ``heat_source_del2_iters``, ``use_fv3_sponge_damp_v``,
+    ``use_fv3_sponge_damp_w``.
+
+    Pass ``overrides`` kwargs to override any default.
     """
     defaults = dict(
         use_fv3_d_con_cv=True,
@@ -1560,6 +1626,11 @@ def make_fv3_faithful_nh_config(**overrides) -> CDGridCompressibleEulerConfig:
         use_fv3_a2b_ord4_vector_uv=True,   # iter-698: -25.8% θ′ edge ratio at C8
         use_fv3_dynamic_exner=True,
         use_fv3_metric_aware_d_con=True,
+        # FV3_3D iter-1079: enabled by default.  Routes (du_normal,
+        # dv_normal) through pad_halo_dgrid_vector_4d (iter-1078) —
+        # all 24 directed cubed-sphere edges bit-for-bit FV3-faithful
+        # via iter-1076 same-axis (16/24) + iter-1078 DGRID_NE
+        # component swap (8/24 axis-swap edges).
         use_fv3_cross_face_du_proj=True,
         d_con_top_zero_levels=2,
         delt_max=1.0,

@@ -1,0 +1,21 @@
+{
+  "metric": "loss",
+  "winner": {
+    "aimip_convection": "zhang_mcfarlane",
+    "aimip_turbulence": "edmf",
+    "aimip_gwd": "hines",
+    "aimip_microphysics": "sundqvist"
+  },
+  "stage1_scores": {
+    "conv_zhang_mcfarlane": 6.3813,
+    "turb_edmf": 6.2969,
+    "turb_smagorinsky_runner_up": 6.5334,
+    "gwd_hines": 6.6064,
+    "micro_sundqvist": 6.6786,
+    "baseline_tiedtke_louis_mcfarlane_sundqvist": 6.678601
+  },
+  "edmf_fix_note": "combo_turb_edmf failed in the initial 8031745_15 array task (forward-Euler θ_u/q_u/w² instability at T21 dz~3.5km). Switched to backward-Euler in src/legoesm/atmosphere/physics/turbulence/edmf.py; rerun 8033395_15 produced loss=6.2969, the best single-scheme score in the sweep.",
+  "config_dir": "config/aimip/t106_headtohead",
+  "results_dir": "results/aimip_t106_headtohead",
+  "selected_via": "scripts/run_aimip_classical_sweep_stage2.py --metric loss --top-k 1 (full 27/27 scorecards)"
+}

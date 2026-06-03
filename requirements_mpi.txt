@@ -1,0 +1,80 @@
+# MPI workload version pins for legoESM.
+#
+# Why this exists
+# ---------------
+# The default project install (``pip install -e ".[dev]"``) pulls the
+# latest JAX. As of 2026-05 that's JAX 0.10.1, but ``mpi4jax`` 0.8.x +
+# 0.9.x use the legacy ``custom_call`` API that JAX has been removing:
+#   * JAX <= 0.7 (jaxlib <= 0.7): CustomCallV1 + V2 fully supported.
+#   * JAX 0.8 (jaxlib 0.8): XLA:CPU dropped ``API_VERSION_STATUS_RETURNING``
+#     (mpi4jax 0.8.x uses this).
+#   * JAX 0.9: CustomCallV1 deprecated; STATUS_RETURNING still emits
+#     warnings + the slow path.
+#   * JAX 0.10: CustomCallV1 fully removed.
+#
+# **Platform-status note (verified iter-11, 2026-05)**: macOS arm64
+# Python 3.13 wheels for jaxlib only start at 0.4.34 — earlier
+# versions are unavailable. The tested jax+mpi4jax pin combinations
+# all still hit the slow XLA:CPU fallback:
+#
+#   jaxlib 0.4.34 + mpi4jax 0.5.4 -> blocked by legoesm runtime check
+#                                    (requires mpi4jax >= 0.8 < 0.9
+#                                    for token-semantics reasons).
+#   jaxlib 0.8.3 + mpi4jax 0.8.1.post2 -> XLA prints
+#                                    STATUS_RETURNING-not-supported
+#                                    for every sendrecv + allreduce;
+#                                    measured ~0.7 s/step at np=2 (no
+#                                    speedup vs JAX 0.10).
+#   jaxlib 0.9.2 + mpi4jax 0.8.1.post2 -> same slow path.
+#
+# **Bottom line**: until ``mpi4jax`` ships its FFI rewrite (tracking
+# https://github.com/mpi4jax/mpi4jax issue #289), local MPI scaling
+# benchmarks on macOS are NOT MEANINGFUL — every mpi4jax call routes
+# through the legacy custom-call slow path. Real scaling validation
+# requires either (a) a cluster Linux build that links against an
+# older jaxlib with full custom-call support, or (b) the mpi4jax
+# FFI release.
+#
+# This file documents the LEAST-BROKEN combination for local smoke
+# testing of MPI code paths, and is wired into
+# scripts/setup_mpi_venv.sh as the default ``.venv-mpi`` install.
+#
+# How to use
+# ----------
+# 1. Create a dedicated venv for MPI work:
+#      python3.13 -m venv .venv-mpi
+#      .venv-mpi/bin/pip install --upgrade pip
+# 2. Install the project + this pin set:
+#      .venv-mpi/bin/pip install -e .
+#      .venv-mpi/bin/pip install -r requirements_mpi.txt
+# 3. Run MPI scripts via ``.venv-mpi/bin/python``:
+#      JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun -np 4 \
+#          .venv-mpi/bin/python scripts/bench_plane_crm_dd_scaling.py ...
+#
+# Validation
+# ----------
+# The pin set is verified by tests/distributed/test_mpi_differentiability.py
+# under the existing CI mpi-distributed.yml job. Local validation:
+#   .venv-mpi/bin/python -m pytest tests/distributed/ -q
+# should run mpirun -np 2 without the slow-path mpi4jax fallback
+# warning fired by the default ``.venv`` install.
+#
+# When you can DROP this file
+# ---------------------------
+# Once mpi4jax >=0.10 ships with FFI support for JAX >=0.10, the
+# default install becomes scaling-safe and this file can be deleted.
+# CRM_implementation.md F9 tracks the milestone.
+
+# Tested-compatible pair (mpi4jax 0.8.x + JAX 0.9.x). The legoesm
+# warning in src/legoesm/parallel/reductions.py:225 declares the
+# tested range "jax>=0.8.0,<0.10.0" + "mpi4jax>=0.8.0,<0.9.0", so
+# pinning JAX 0.9.2 + mpi4jax 0.8.1.post2 (latest 0.8.x) lands
+# inside that envelope.
+jax==0.9.2
+jaxlib==0.9.2
+mpi4jax==0.8.1.post2
+mpi4py>=4.0,<5.0
+
+# Pin numpy to a JAX-0.9-compatible major to avoid the
+# numpy.lib.npyio deprecations that mpi4jax 0.8 trips on.
+numpy>=2.1,<2.3

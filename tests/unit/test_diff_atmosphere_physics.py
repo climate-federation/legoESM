@@ -235,7 +235,17 @@ class TestTurbulenceGrad:
 
         config = TurbulenceConfig(scheme=scheme)
         turb_fn = make_turbulence_physics(config, model_type="hydrostatic", dt=300.0)
-        state = self.state
+        # Use a super-adiabatic (convectively unstable) temperature profile
+        # so every turbulence scheme is genuinely active.  The default
+        # near-isothermal state is stable in θ almost everywhere, where the
+        # faithful shear-driven Smagorinsky-Lilly closure *correctly* gives
+        # K≈0 via its hard Lilly stable-cutoff — so ∂(dT/dt)/∂T is sparse
+        # there.  An unstable column exercises the active branch of all
+        # schemes (the random u/v already supply the vertical shear).
+        sigma_full = self.sigma.sigma_full                       # (nlev,)
+        T_unstable = 240.0 + 50.0 * sigma_full                   # warm surface
+        T_unstable = jnp.broadcast_to(T_unstable, self.state.T.data.shape)
+        state = self.state._replace(T=self.state.T.replace(data=T_unstable))
 
         def loss(T_data):
             s = state._replace(T=state.T.replace(data=T_data))

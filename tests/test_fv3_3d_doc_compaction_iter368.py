@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 
-DOC = Path(__file__).resolve().parents[1] / "FV3_3D.md"
+DOC = Path(__file__).resolve().parents[1] / "docs" / "specs" / "FV3_3D.md"
 
 
 @pytest.fixture(scope="module")

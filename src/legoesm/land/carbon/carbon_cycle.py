@@ -449,8 +449,13 @@ def step_carbon(
         )
     elif config.scheme == "seasonal":
         return carbon_state, seasonal_co2_flux(doy, lat, config)
-    else:
+    elif config.scheme == "none":
         return carbon_state, jnp.zeros_like(T)
+    else:
+        raise ValueError(
+            f"Unknown carbon scheme {config.scheme!r}; expected one of "
+            "'none', 'differland', 'seasonal'."
+        )
 
 
 # ===================================================================

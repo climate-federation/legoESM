@@ -49,6 +49,7 @@ from legoesm.atmosphere.physics.microphysics.sundqvist import sundqvist_microphy
 from legoesm.atmosphere.physics.microphysics.seifert_beheng import seifert_beheng_microphysics
 from legoesm.atmosphere.physics.microphysics.morrison import morrison_microphysics
 from legoesm.atmosphere.physics.microphysics.thompson import thompson_microphysics
+from legoesm.atmosphere.physics.microphysics.p3 import p3_microphysics
 from legoesm.atmosphere.physics.microphysics.ml_emulator import (
     ml_microphysics,
     MicrophysicsEmulator,
@@ -79,6 +80,8 @@ def _get_microphysics_fn(config: MicrophysicsConfig):
         return "morrison", morrison_microphysics, config.morrison
     elif config.scheme == "thompson":
         return "thompson", thompson_microphysics, config.thompson
+    elif config.scheme == "p3":
+        return "p3", p3_microphysics, config.p3
     elif config.scheme == "ml_emulator":
         return "ml_emulator", ml_microphysics, config.ml_emulator
     elif config.scheme == "none":
@@ -467,6 +470,7 @@ _PLANE_MIN_TRACER_SLOTS = {
     "seifert_beheng": 9,    # q_{v,c,r,i,s,g} + N_{c,r,i}
     "morrison": 9,          # q_{v,c,r,i,s,g} + N_{c,r,i}
     "thompson": 9,          # q_{v,c,r,i,s,g} + N_{c,r,i}
+    "p3": 9,                # q_{v,c,r,i} + q_rim(s) + B_rim(g) + N_{c,r,i}
     "ml_emulator": 9,       # generic full layout
     "none": 0,              # no-op
 }
@@ -597,6 +601,11 @@ def _make_plane_microphysics(
             q_c=_get_tracer(1), q_r=_get_tracer(2), q_i=_get_tracer(3),
             q_s=_get_tracer(4), q_g=_get_tracer(5),
             N_c=_get_tracer(6), N_r=_get_tracer(7), N_i=_get_tracer(8),
+            # Slot [9] = prognostic snow number ⇒ double-moment snow; absent
+            # (≤9 slots) ⇒ None ⇒ single-moment snow (Morrison falls back).
+            N_s=(_get_tracer(9) if n_tracers > 9 else None),
+            # Slot [10] = prognostic graupel number ⇒ double-moment graupel.
+            N_g=(_get_tracer(10) if n_tracers > 10 else None),
         )
 
         if is_ml:
@@ -625,9 +634,14 @@ def _make_plane_microphysics(
             micro_out.dq_v_dt, micro_out.dq_c_dt, micro_out.dq_r_dt,
             micro_out.dq_i_dt, micro_out.dq_s_dt, micro_out.dq_g_dt,
             micro_out.dN_c_dt, micro_out.dN_r_dt, micro_out.dN_i_dt,
+            # Slot [9] = snow-number tendency (double-moment snow); None for
+            # single-moment schemes ⇒ skipped below.
+            micro_out.dN_s_dt,
+            # Slot [10] = graupel-number tendency (double-moment graupel).
+            micro_out.dN_g_dt,
         ]
         for idx, field in enumerate(tend_fields):
-            if n_tracers > idx:
+            if field is not None and n_tracers > idx:
                 dtracers = dtracers.at[..., idx].set(field.reshape(shape_3d))
 
         return PlaneNonHydrostaticTendencies(

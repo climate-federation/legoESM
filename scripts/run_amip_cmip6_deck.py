@@ -153,8 +153,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--checkpoint-days", type=int, default=0)
 
     parser.add_argument("--grid-type", type=str, default="cubed_sphere",
-                        choices=["cubed_sphere", "gaussian", "latlon", "voronoi"])
-    parser.add_argument("--discretization", type=str, default="centered",
+                        choices=["cubed_sphere", "gaussian", "latlon",
+                                 "mpas",
+                                 # Legacy aliases for the SCVT mesh,
+                                 # normalised by run_amip.py
+                                 "voronoi", "icosahedral", "mpas_voronoi"])
+    parser.add_argument("--discretization", type=str, default="finite_volume",
                         choices=["centered", "finite_volume", "cgrid",
                                   "latlon_cgrid", "cdgrid", "mpas", "spectral"])
 
@@ -176,6 +180,15 @@ def main(argv: list[str] | None = None) -> int:
                         action="store_false")
 
     # Output
+    parser.add_argument("--ic", type=str, default="default",
+                        choices=["default", "standard", "era5"],
+                        help="Initial condition: 'default' (uniform T_init rest "
+                             "state), 'standard' (realistic lapse-rate + "
+                             "equator-pole gradient + thermal-wind jet; lat-lon "
+                             "only — Earth-like CWV), or 'era5' (reanalysis from "
+                             "--ic-path).")
+    parser.add_argument("--ic-path", type=str, default="",
+                        help="ERA5 Zarr path when --ic era5.")
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--monthly-means", action="store_true", default=True)
 
@@ -288,6 +301,10 @@ def main(argv: list[str] | None = None) -> int:
         "--solar-file", str(files["solar"]),
         "--solar-tsi-var", "TSI",
         "--solar-spectral-var", "SSI_frac",
+        # The MPI-M CMIP6 SSI_frac file is in RRTMG-SW band order; rotate
+        # it to RRTMGP order before g-point expansion (issue #322),
+        # otherwise UV flux is dumped into the near-IR water-vapour band.
+        "--solar-spectral-band-order", "rrtmg_sw",
         # Convection / clouds / microphysics
         "--convection", args.convection,
         "--turbulence", args.turbulence,
@@ -300,6 +317,12 @@ def main(argv: list[str] | None = None) -> int:
         # Diagnostics
         "--clear-sky-diag",
     ]
+    # Initial condition (default keeps the prior uniform-T_init behaviour; pass
+    # --ic standard for a physically realistic lapse-rate + balanced-jet IC on
+    # lat-lon — Earth-like column water vapour).
+    cmd += ["--ic", args.ic]
+    if args.ic == "era5":
+        cmd += ["--ic-path", args.ic_path]
     if args.diurnal_cycle:
         cmd.append("--diurnal-cycle")
     if args.monthly_means:

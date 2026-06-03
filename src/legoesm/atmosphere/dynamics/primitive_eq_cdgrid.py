@@ -23,6 +23,7 @@ from legoesm.core.state import (
 from legoesm.core.operators_cdgrid import (
     dgrid_to_cgrid,
     dgrid_to_center_vector,
+    center_to_dgrid_vector,
     cgrid_divergence,
     dgrid_vorticity,
     _arakawa_lamb_gradient,
@@ -32,6 +33,7 @@ from legoesm.core.operators_cdgrid import (
 from legoesm.core.operators_3d import (
     gradient_x_3d as _gradient_x_3d,
     gradient_y_3d as _gradient_y_3d,
+    divergence_3d as _divergence_3d,
     hyperdiffusion_3d as _hyperdiffusion_3d,
     laplacian_compact_3d as _laplacian_compact_3d,
 )
@@ -53,7 +55,7 @@ from legoesm.parallel.cubesphere_exchange import (
 from legoesm.parallel.halo_exchange import (
     packed_pad_halo_mpi_4d as _packed_pad_halo_4d_mpi,
 )
-from legoesm.core.precision import _resolve_dtype, cast_pytree
+from legoesm.core.precision import resolve_dtype, cast_pytree
 from legoesm.grids.halo import pad_halo_4d as _pad_halo_4d
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.cubed_sphere_cdgrid import (
@@ -365,8 +367,14 @@ def fv3_hydrostatic_tendencies(
         )
     elif _halo_backend == "mpi":
         from legoesm.grids.halo import _mpi_topology
+        # FV3_3D iter-1041: pass interp_offsets when duogrid is off so the
+        # packed MPI exchange Lagrange-remaps halos rather than nearest-
+        # copying — matches the single-device path which threads
+        # ``grid.halo_interp_offsets`` here.
+        _pe_offs_zeta = None if _pe_dg is not None else grid.halo_interp_offsets
         _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_mpi_4d(
             zeta, B, inv_T, topology=_mpi_topology, duogrid=_pe_dg,
+            interp_offsets=_pe_offs_zeta,
         )
     else:
         _zeta_pad = _B_pad = _invT_pad = None  # operators do own exchange
@@ -388,14 +396,12 @@ def fv3_hydrostatic_tendencies(
         from legoesm.core.operators_cdgrid import (
             _interp_center_to_corner_a2b_ord4,
         )
-        # a2b_ord4 takes 3D shape (6, n, n) — vmap over level axis.
-        if zeta.ndim == 4:
-            _zeta_a2b_ord4 = jax.vmap(
-                lambda lev: _interp_center_to_corner_a2b_ord4(lev, cdgrid),
-                in_axes=-1, out_axes=-1,
-            )(zeta)
-        else:
-            _zeta_a2b_ord4 = _interp_center_to_corner_a2b_ord4(zeta, cdgrid)
+        # FV3_3D iter-1043: ``_interp_center_to_corner_a2b_ord4`` is
+        # shape-polymorphic (axes-1/2 slicing, trailing axes broadcast)
+        # and ``_pad_halo_auto_h2`` already dispatches to ``pad_halo_4d``
+        # for 4D input.  Calling it directly on 4D avoids a ``jax.vmap``
+        # that would wrap ``pad_halo`` under MPI — same fix as NH iter-1043.
+        _zeta_a2b_ord4 = _interp_center_to_corner_a2b_ord4(zeta, cdgrid)
 
     if config.use_fv3_a2b_zeta_corner:
         zeta_corner_relative = _zeta_a2b_ord4
@@ -410,7 +416,7 @@ def fv3_hydrostatic_tendencies(
 
     # --- 8. Pressure gradient correction at D-grid corners ---
     # Higher precision for PGF to avoid catastrophic cancellation
-    _pg_dt = jnp.result_type(ln_ps.dtype, _resolve_dtype("atm_pressure_gradient", "compute"))
+    _pg_dt = jnp.result_type(ln_ps.dtype, resolve_dtype("atm_pressure_gradient", "compute"))
     ln_ps_hi = ln_ps.astype(_pg_dt)
     # iter-59: reuse _lnps_pad from merged stage halo when dtype matches
     if _lnps_pad is not None and ln_ps.dtype == _pg_dt:
@@ -573,18 +579,16 @@ def fv3_hydrostatic_tendencies(
             )
             _vfill = config.corner_div_damp_fv3_vector_fill
 
-            def _lap_per_level(field_3d):
-                return jax.vmap(
-                    lambda lev: fv3_corner_laplacian_iteration(
-                        lev, cdgrid, apply_vector_corner_fill=_vfill,
-                    ),
-                    in_axes=-1, out_axes=-1,
-                )(field_3d)
-
+            # FV3_3D iter-1044: ``fv3_corner_laplacian_iteration`` is now
+            # 4D-native (mirror of NH iter-1044).  Direct call avoids
+            # ``jax.vmap`` around ``pad_halo`` which fires mpi4jax's
+            # sendrecv batch-axis assertion under MPI.
             _delpc_initial = delpc
             _divg_d_iter = delpc
             for _ in range(config.corner_div_damp_nord):
-                _divg_d_iter = _lap_per_level(_divg_d_iter)
+                _divg_d_iter = fv3_corner_laplacian_iteration(
+                    _divg_d_iter, cdgrid, apply_vector_corner_fill=_vfill,
+                )
 
             # FV3_3D iter 187: smag_vort cap for nord>=1 (FV3 sw_core.F90:1797-1809).
             # smag_vort = |dt|*sqrt(delpc² + wk_corner²); wk_corner = a2b_ord4(zeta_relative).
@@ -772,26 +776,38 @@ def fv3_hydrostatic_tendencies(
     _pad_halo_4d = _pad_halo_4d_module
     _pe_dg = grid.duogrid
     ln_ps_3d = ln_ps[..., jnp.newaxis]  # (6, n, n, 1)
+    # Scalars T + ln(ps): packed halo (MPI) / per-field halo (single-device).
     if _halo_backend == "mpi":
         from legoesm.grids.halo import _mpi_topology
-        if _needs_uv_pad:
-            _T_pad, _u_cc_pad, _v_cc_pad, _lnps_pad = packed_pad_halo_mpi_4d(
-                T, u_cell, v_cell, ln_ps_3d,
-                topology=_mpi_topology, duogrid=_pe_dg,
-            )
-        else:
-            _T_pad, _lnps_pad = packed_pad_halo_mpi_4d(
-                T, ln_ps_3d, topology=_mpi_topology, duogrid=_pe_dg,
-            )
-            _u_cc_pad = _v_cc_pad = None
+        # FV3_3D iter-1041: thread interp_offsets through the packed MPI
+        # exchange to match the single-device Lagrange remap when duogrid off.
+        _pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets
+        _T_pad, _lnps_pad = packed_pad_halo_mpi_4d(
+            T, ln_ps_3d, topology=_mpi_topology, duogrid=_pe_dg,
+            interp_offsets=_pe_offs,
+        )
     else:
         # Duogrid remap when active (matches _pad_halo_auto pattern)
         _pe_offs = None if _pe_dg is not None else grid.halo_interp_offsets
         _T_pad = _pad_halo_4d(T, interp_offsets=_pe_offs, duogrid=_pe_dg)
         _lnps_pad = _pad_halo_4d(ln_ps_3d, interp_offsets=_pe_offs, duogrid=_pe_dg)
-        if _needs_uv_pad:
-            _u_cc_pad = _pad_halo_4d(u_cell, interp_offsets=_pe_offs, duogrid=_pe_dg)
-            _v_cc_pad = _pad_halo_4d(v_cell, interp_offsets=_pe_offs, duogrid=_pe_dg)
+    # u_cell/v_cell are face-local VECTOR components — pad with the rotation-aware
+    # vector halo in BOTH paths.  fv3_faithful (iter-14): `pad_halo_vector_4d`
+    # auto-dispatches to the MPI/SPMD backend (rotate→pad→rotate), so the ∇²/∇⁴
+    # diffusion stencil reads ROTATED neighbour-face halos at cube panel seams on
+    # every backend.  The MPI path previously packed (u,v) as SCALARS, which fed
+    # UNROTATED seam halos into the diffusion → the cube panel-edge imprint
+    # returned under MPI (single-device was already fixed).
+    if _needs_uv_pad:
+        _u_cc_pad, _v_cc_pad = pad_halo_vector_4d(
+            u_cell, v_cell,
+            cdgrid.base.cos_angle, cdgrid.base.sin_angle,
+            cdgrid.base.cos_angle_padded, cdgrid.base.sin_angle_padded,
+            interp_offsets=_pe_offs,
+            duogrid=_pe_dg,
+        )
+    else:
+        _u_cc_pad = _v_cc_pad = None
 
     dT_dx = _gradient_x_3d(T, grid, padded=_T_pad)
     dT_dy = _gradient_y_3d(T, grid, padded=_T_pad)
@@ -856,59 +872,61 @@ def fv3_hydrostatic_tendencies(
     if config.A_h > 0:
         lap_uvT = _lap_flat.reshape(n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT, 3)
     if config.hyperdiff_coeff > 0:
-        hyperdiff_flat = _hyperdiffusion_3d(
-            _uvT_flat, grid, config.hyperdiff_coeff,
-            padded=_uvT_pad_flat,
-            inner_lap=_lap_flat,  # reuse ∇² when A_h>0 (biharmonic skip)
-        )
-        hyperdiff_uvT = hyperdiff_flat.reshape(
+        # fv3_faithful (iter-14): the shared ``_hyperdiffusion_3d`` scalar-pads
+        # the inner ∇²(u,v) result for its OUTER ∇², re-injecting an UNROTATED
+        # panel-seam halo into the wind biharmonic (the inner ∇² is already
+        # vector-halo'd above).  Build ∇⁴(u,v)=∇²(∇²(u,v)) with a VECTOR halo on
+        # the inner ∇²(u,v); T keeps the scalar shared path (a true scalar).
+        _hd_offs = None if _pe_dg is not None else grid.halo_interp_offsets
+        _lap_r = _lap_flat.reshape(
             n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT, 3,
         )
+        _il_u, _il_v, _il_T = _lap_r[..., 0], _lap_r[..., 1], _lap_r[..., 2]
+        _il_u_pad, _il_v_pad = pad_halo_vector_4d(
+            _il_u, _il_v,
+            cdgrid.base.cos_angle, cdgrid.base.sin_angle,
+            cdgrid.base.cos_angle_padded, cdgrid.base.sin_angle_padded,
+            interp_offsets=_hd_offs, duogrid=_pe_dg,
+        )
+        _hd_u = -config.hyperdiff_coeff * _divergence_3d(
+            _gradient_x_3d(_il_u, grid, padded=_il_u_pad),
+            _gradient_y_3d(_il_u, grid, padded=_il_u_pad), grid,
+        )
+        _hd_v = -config.hyperdiff_coeff * _divergence_3d(
+            _gradient_x_3d(_il_v, grid, padded=_il_v_pad),
+            _gradient_y_3d(_il_v, grid, padded=_il_v_pad), grid,
+        )
+        _hd_T = _hyperdiffusion_3d(
+            T, grid, config.hyperdiff_coeff, inner_lap=_il_T,
+        )
+        hyperdiff_uvT = jnp.stack([_hd_u, _hd_v, _hd_T], axis=-1)
 
-    # Build cc batch: vert_adv + lap (A_h>0) + hyperdiff (>0) + phys_cc (iter-65)
-    _uv_corner_blocks = [
-        _vert_adv_uv_cc.reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2),
-    ]
-    if lap_uvT is not None:
-        _uv_corner_blocks.append(
-            lap_uvT[..., :2].reshape(n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 2)
-        )
-    if hyperdiff_uvT is not None:
-        _uv_corner_blocks.append(
-            hyperdiff_uvT[..., :2].reshape(n_face_uvT, n_i_uvT, n_j_uvT, nlev_uvT * 2)
-        )
-    if physics_tendency_cc is not None and physics_tendency_cc.du_dt is not None:
-        _phys_uv_cc = jnp.stack(
-            [physics_tendency_cc.du_dt.data, physics_tendency_cc.dv_dt.data],
-            axis=-1,
-        ).reshape(n_face_uv, n_i_uv, n_j_uv, nlev_uv * 2)
-        _uv_corner_blocks.append(_phys_uv_cc)
-    _n_blocks = len(_uv_corner_blocks)
-    if _n_blocks == 1:
-        _combined_uv_cc = _uv_corner_blocks[0]
-    else:
-        _combined_uv_cc = jnp.concatenate(_uv_corner_blocks, axis=-1)
-    _combined_uv_d_flat = _interp_center_to_corner(_combined_uv_cc, cdgrid)
-    _combined_uv_d = _combined_uv_d_flat.reshape(
-        _combined_uv_d_flat.shape[0], _combined_uv_d_flat.shape[1],
-        _combined_uv_d_flat.shape[2], _n_blocks, nlev_uv, 2,
-    )  # (n_face_d, n_i_d, n_j_d, n_blocks, nlev, 2-uv)
-    _block_idx = 0
-    _vert_adv_uv_d = _combined_uv_d[:, :, :, _block_idx]
-    _block_idx += 1
+    # Lift each cc VECTOR tendency block (vert_adv + lap + hyperdiff + physics)
+    # to D-grid corners.  fv3_faithful (iter-14): these are face-local (u, v)
+    # vector increments, so the cc→corner interp must ROTATE components across
+    # cube panel seams.  The previous batched ``_interp_center_to_corner`` on
+    # the concatenated (u, v) treated them as scalars and seam-blended without
+    # rotation (the same bug fixed for the wind lift), re-injecting a cube-edge
+    # imprint into every diffusion/physics tendency.  Use ``center_to_dgrid_vector``
+    # per block.  Output convention preserved: ``_*_uv_d[..., 0]`` = u_d,
+    # ``[..., 1]`` = v_d at corners (6, n+1, n+1, nlev, 2).
+    def _lift_uv_cc(_u_cc, _v_cc):
+        _u_d, _v_d = center_to_dgrid_vector(_u_cc, _v_cc, cdgrid)
+        return jnp.stack([_u_d, _v_d], axis=-1)
+
+    _vert_adv_uv_d = _lift_uv_cc(
+        _vert_adv_uv_cc[..., 0], _vert_adv_uv_cc[..., 1])
     _lap_uv_d = None
     if lap_uvT is not None:
-        _lap_uv_d = _combined_uv_d[:, :, :, _block_idx]
-        _block_idx += 1
+        _lap_uv_d = _lift_uv_cc(lap_uvT[..., 0], lap_uvT[..., 1])
     _hd_uv_d = None
     if hyperdiff_uvT is not None:
-        _hd_uv_d = _combined_uv_d[:, :, :, _block_idx]
-        _block_idx += 1
+        _hd_uv_d = _lift_uv_cc(hyperdiff_uvT[..., 0], hyperdiff_uvT[..., 1])
     _phys_uv_d = None
     if (physics_tendency_cc is not None
             and physics_tendency_cc.du_dt is not None):
-        _phys_uv_d = _combined_uv_d[:, :, :, _block_idx]
-        _block_idx += 1
+        _phys_uv_d = _lift_uv_cc(
+            physics_tendency_cc.du_dt.data, physics_tendency_cc.dv_dt.data)
 
     # vert_adv contribution
     du_d_dt = du_d_dt + _vert_adv_uv_d[..., 0]
@@ -1305,21 +1323,14 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
                 self.config.nord_v + 1
             )
 
-            # Per-level vmap over (6, n, n+1) and (6, n+1, n)
-            def _per_level(args):
-                u_lev, v_lev = args
-                return fv3_del6_vorticity_damping(
-                    u_lev, v_lev, damp=damp_step,
-                    nord=self.config.nord_v, cdgrid=self.cdgrid,
-                )
-
-            u_normal_t = jnp.moveaxis(u_normal, -1, 0)  # (nlev, 6, n, n+1)
-            v_normal_t = jnp.moveaxis(v_normal, -1, 0)  # (nlev, 6, n+1, n)
-            du_normal_t, dv_normal_t = jax.vmap(_per_level)(
-                (u_normal_t, v_normal_t),
+            # FV3_3D iter-1045: ``fv3_del6_vorticity_damping`` is now
+            # 4D-native (3D static metrics broadcast via ``[..., None]``;
+            # halo dispatched to ``pad_halo_4d``).  Direct call avoids
+            # ``jax.vmap`` around ``pad_halo`` under MPI.
+            du_normal, dv_normal = fv3_del6_vorticity_damping(
+                u_normal, v_normal, damp=damp_step,
+                nord=self.config.nord_v, cdgrid=self.cdgrid,
             )
-            du_normal = jnp.moveaxis(du_normal_t, 0, -1)
-            dv_normal = jnp.moveaxis(dv_normal_t, 0, -1)
 
             # FV3_3D iter 443 (PE mirror of NH 442): sponge boost at k=0,k=1 (NOT k=2)
             if self.config.use_fv3_sponge_damp_v:
@@ -1345,14 +1356,34 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
 
             # Project FV3 normal → corners by mode='edge' padding + avg
             # FV3_3D iter 370: opt cross-face halo via pad_halo_4d (duogrid-aware)
+            # iter-1046: ``du_normal``/``dv_normal`` are non-square
+            # ``(6, n, n+1, nlev)``/``(6, n+1, n, nlev)``; the cubed-
+            # sphere ``pad_halo_4d`` MPI path assumes square ``(6, n, n,
+            # nlev)`` and crashes on non-square data without duogrid.
+            # Fall through to ``mode='edge'`` only when MPI is active
+            # AND duogrid is off (the iter-370 regression test depends
+            # on the non-square local diff being non-zero, so we keep
+            # the call on the local backend).
+            # FV3_3D iter-1083: see NH counterpart for the local-vs-
+            # MPI dispatch via pad_halo_dgrid_vector_4d{,_replicated_mpi}.
+            from legoesm.grids.halo import get_halo_backend as _ghb_pe
             if self.config.use_fv3_cross_face_du_proj:
-                from legoesm.grids.halo import pad_halo_4d as _pad_h4
-                _dg = self.grid.duogrid
-                du_full = _pad_h4(du_normal, duogrid=_dg)
-                # (6, n+2, n+3, nlev) → slice axis=2 to (n+1)
+                if _ghb_pe() == "mpi":
+                    from legoesm.grids.halo import _mpi_topology
+                    from legoesm.grids.dgrid_halo import (
+                        pad_halo_dgrid_vector_4d_replicated_mpi,
+                    )
+                    du_full, dv_full = pad_halo_dgrid_vector_4d_replicated_mpi(
+                        du_normal, dv_normal, _mpi_topology,
+                    )
+                else:
+                    from legoesm.grids.dgrid_halo import (
+                        pad_halo_dgrid_vector_4d,
+                    )
+                    du_full, dv_full = pad_halo_dgrid_vector_4d(
+                        du_normal, dv_normal,
+                    )
                 du_pad = du_full[:, :, 1:-1, :]
-                dv_full = _pad_h4(dv_normal, duogrid=_dg)
-                # (6, n+3, n+2, nlev) → slice axis=1 to (n+1)
                 dv_pad = dv_full[:, 1:-1, :, :]
             else:
                 du_pad = jnp.pad(
@@ -1563,21 +1594,21 @@ class CDGridPrimitiveEquationModel(IntegrationMixin):
         physics_fn=None,
     ) -> HydrostaticState:
         """Cell-centre wrapper: cc winds → D-grid corners (entry); back to cc (exit)."""
-        # Batched cc → D-grid interp for (u, v)
+        # cc → D-grid interp for (u, v).
+        # fv3_faithful (iter-14): the winds are a VECTOR, so the cc→corner
+        # interp must rotate face-local components across panel seams.  The
+        # previous ``_interp_center_to_corner`` on the stacked (u, v) treated
+        # them as two SCALARS and blended seam-crossing components WITHOUT
+        # rotation, producing D-grid winds that were ~167×/83× rougher at
+        # panel edges than the interior → a ~229× rougher relative vorticity
+        # → the cube discrete-balance v-imprint (steady jet developed 3.4 m/s
+        # spurious v).  ``center_to_dgrid_vector`` is the rotation-aware
+        # (vector) interpolation and is the inverse of the vector-aware exit
+        # (``dgrid_to_center_vector`` in ``fv3_to_hydrostatic``); with it the
+        # wind/vorticity edge-roughness drops to ~1× (interior level).
         _u_in = state.u.data
         _v_in = state.v.data
-        _ni_face, _ni_i, _ni_j, _ni_lev = _u_in.shape
-        _uv_in = jnp.stack([_u_in, _v_in], axis=-1)
-        _uv_d_flat = _interp_center_to_corner(
-            _uv_in.reshape(_ni_face, _ni_i, _ni_j, _ni_lev * 2),
-            self.cdgrid,
-        )
-        _uv_d = _uv_d_flat.reshape(
-            _uv_d_flat.shape[0], _uv_d_flat.shape[1], _uv_d_flat.shape[2],
-            _ni_lev, 2,
-        )
-        u_d = _uv_d[..., 0]
-        v_d = _uv_d[..., 1]
+        u_d, v_d = center_to_dgrid_vector(_u_in, _v_in, self.cdgrid)
         fv3_state = FV3HydrostaticState(
             u_d=state.u.replace(data=u_d, name="u_d"),
             v_d=state.v.replace(data=v_d, name="v_d"),
@@ -1612,20 +1643,13 @@ def cdgrid_hydrostatic_tendencies(
     if isinstance(state, FV3HydrostaticState):
         return fv3_hydrostatic_tendencies(state, grid, sigma_coord, cdgrid, config, physics_tendency)
 
-    # HydrostaticState path: convert cell-centre -> D-grid (batched).
-    _u_in = state.u.data
-    _v_in = state.v.data
-    _ni_face, _ni_i, _ni_j, _ni_lev = _u_in.shape
-    _uv_in = jnp.stack([_u_in, _v_in], axis=-1)
-    _uv_d_flat = _interp_center_to_corner(
-        _uv_in.reshape(_ni_face, _ni_i, _ni_j, _ni_lev * 2), cdgrid,
-    )
-    _uv_d = _uv_d_flat.reshape(
-        _uv_d_flat.shape[0], _uv_d_flat.shape[1], _uv_d_flat.shape[2],
-        _ni_lev, 2,
-    )
-    u_d = _uv_d[..., 0]
-    v_d = _uv_d[..., 1]
+    # HydrostaticState path: convert cell-centre -> D-grid.
+    # fv3_faithful (iter-14): the winds are a VECTOR — use the rotation-aware
+    # ``center_to_dgrid_vector`` (matching ``_step_cell_centre``), NOT a scalar
+    # ``_interp_center_to_corner`` on the stacked (u, v), which blends face-local
+    # components across panel seams without rotation and re-injects the
+    # cube-edge vorticity imprint.  Keeps ``step`` and ``tendencies`` consistent.
+    u_d, v_d = center_to_dgrid_vector(state.u.data, state.v.data, cdgrid)
     fv3_state = FV3HydrostaticState(
         u_d=state.u.replace(data=u_d, name="u_d"),
         v_d=state.v.replace(data=v_d, name="v_d"),
@@ -1675,12 +1699,20 @@ def hydrostatic_to_fv3(
     _u_in = state.u.data
     _v_in = state.v.data
     base = cdgrid.base
+    # fv3_faithful (iter-14): thread the duogrid through the vector halo so this
+    # cc→D-grid entry lift matches the duogrid-aware center_to_dgrid_vector used
+    # in _step_cell_centre / tendencies() (suppress interp_offsets when duogrid
+    # is active).  No-op when duogrid is off (the matrix), where base.duogrid is
+    # None and interp_offsets stays base.halo_interp_offsets.
+    _ho_dg = base.duogrid
+    _ho_offs = None if _ho_dg is not None else base.halo_interp_offsets
     if _u_in.ndim == 4:
         u_pad, v_pad = pad_halo_vector_4d(
             _u_in, _v_in,
             base.cos_angle, base.sin_angle,
             base.cos_angle_padded, base.sin_angle_padded,
-            interp_offsets=base.halo_interp_offsets,
+            interp_offsets=_ho_offs,
+            duogrid=_ho_dg,
         )
         u_d = 0.25 * (u_pad[:, :-1, :-1] + u_pad[:, 1:, :-1]
                       + u_pad[:, :-1, 1:] + u_pad[:, 1:, 1:])
@@ -1711,12 +1743,37 @@ def hydrostatic_to_fv3(
 def make_fv3_faithful_pe_config(**overrides) -> CDGridPrimitiveEquationConfig:
     """FV3_3D iter 392: factory for FV3-faithful PE config.
 
-    Pair with use_duogrid=True so iter-370 cross_face_du_proj has effect (iter-384).
-    Enables iter-14/338/370/433/436/437/451/459/443.
+    Pair with ``use_duogrid=True`` so ``iter-370 use_fv3_cross_face_du_proj``
+    has effect (iter-384).  Enables iter-14/338/370/433/436/437/451/459/443.
+
+    FV3-fidelity flags:
+
+    Enabled by default:
+
+    - ``use_fv3_a2b_zeta_corner``: FV3 4th-order A→B ζ corner interp
+      (iter-14, mirror of SW sw_core.F90:a2b_ord4).
+    - ``use_fv3_metric_aware_d_con``: metric-aware d_con form
+      (iter-338, cosa_s/rsin2 form at all 5 d_con sites).
+
+    Disabled by default (opt-in via ``overrides``):
+
+    - ``use_fv3_cross_face_du_proj``: cross-face halo for damp_v
+      wind projection (iter-370).  Disabled as of iter-1072
+      (non-square halo silent corruption — see NH factory docstring
+      + FV3_3D.md iter-1072).
+
+    Plus production knobs: ``d_con_top_zero_levels``, ``delt_max``,
+    ``nord_v``, ``corner_div_damp_nord``, ``corner_div_damp_d4_bg``,
+    ``heat_source_del2_iters``, ``use_fv3_sponge_damp_v``.
+
+    Pass ``overrides`` kwargs to override any default.
     """
     defaults = dict(
         use_fv3_a2b_zeta_corner=True,
         use_fv3_metric_aware_d_con=True,
+        # FV3_3D iter-1079: enabled.  See NH factory note —
+        # pad_halo_dgrid_vector_4d (iter-1078) gives all 24 directed
+        # edges bit-for-bit FV3-faithful.
         use_fv3_cross_face_du_proj=True,
         d_con_top_zero_levels=2,
         delt_max=1.0,

@@ -41,6 +41,37 @@ def _make_hydrostatic_setup():
     return state, grid, sigma
 
 
+def _make_turbulent_setup():
+    """Active boundary-layer column for the faithful turbulence closures.
+
+    ``held_suarez_init`` gives a near-isothermal (hence θ-stably
+    stratified) column; the deformation-based Smagorinsky–Lilly closure
+    *correctly* produces ~zero interior diffusivity there (hard Lilly
+    cutoff at Ri ≥ Pr_t), so it would generate no heat tendency.  To
+    exercise the schemes in their intended regime we add (1) vertical
+    shear so |S| > 0 and (2) a super-adiabatic surface layer so the
+    near-surface gradient Richardson number is negative — the canonical
+    convective-boundary-layer state where turbulence mixes heat.
+    """
+    state, grid, sigma = _make_hydrostatic_setup()
+    n, nlev = grid.n, sigma.n_levels
+    # Vertical shear: wind grows from ~5 m/s aloft toward the surface.
+    lev = jnp.arange(nlev)
+    u_shear = (5.0 + 3.0 * lev)[None, None, None, :] * jnp.ones((6, n, n, nlev))
+    # Super-adiabatic surface layer: warm the lowest three levels (warmest
+    # at the surface) so the near-surface stratification is unstable.
+    T_active = state.T.data.at[..., nlev - 3:].add(
+        jnp.array([10.0, 22.0, 40.0])
+    )
+    state = state._replace(
+        u=Field(data=u_shear, name="u",
+                dims=("face", "x", "y", "level"), units="m/s"),
+        T=Field(data=T_active, name="T",
+                dims=("face", "x", "y", "level"), units="K"),
+    )
+    return state, grid, sigma
+
+
 class TestPhysicsConfig:
     """Tests for PhysicsConfig defaults and construction."""
 
@@ -108,8 +139,13 @@ class TestCombinedHydrostatic:
         assert jnp.allclose(tend.du_dt.data, 0.0)
 
     def test_turbulence_only(self):
-        """Turbulence only should give nonzero wind and T tendencies."""
-        state, grid, sigma = _make_hydrostatic_setup()
+        """Turbulence only should give nonzero wind and T tendencies.
+
+        Uses an active (sheared + super-adiabatic) column so the faithful
+        Smagorinsky–Lilly closure mixes heat — on a quiescent stable
+        column its hard Lilly cutoff correctly yields zero dT_dt.
+        """
+        state, grid, sigma = _make_turbulent_setup()
         cfg = PhysicsConfig(
             radiation=RadiationConfig(scheme="none"),
             convection=ConvectionConfig(scheme="none"),
@@ -239,8 +275,14 @@ class TestCombinedHydrostatic:
         assert not jnp.allclose(tend_gray.dT_dt.data, tend_none.dT_dt.data)
 
     def test_scheme_selection_turbulence(self):
-        """Switching turbulence scheme should change the result."""
-        state, grid, sigma = _make_hydrostatic_setup()
+        """Switching turbulence scheme should change the result.
+
+        Uses an active (sheared + super-adiabatic) column: the
+        deformation-based Smagorinsky–Lilly and stability-function Louis
+        closures only diverge meaningfully where interior mixing is
+        actually switched on.
+        """
+        state, grid, sigma = _make_turbulent_setup()
 
         cfg_smag = PhysicsConfig(
             radiation=RadiationConfig(scheme="none"),

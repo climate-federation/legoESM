@@ -17,6 +17,7 @@ from legoesm.atmosphere.physics.radiation.config import (
     GrayRadiationConfig,
     OzoneProfileConfig,
     RadiationConfig,
+    RRTMGPConfig,
 )
 from legoesm.atmosphere.physics.radiation.output import RadiationOutput
 from legoesm.atmosphere.physics.radiation.solar import (
@@ -36,6 +37,23 @@ from legoesm.atmosphere.physics.clouds.cloud_fraction import (
     xu_randall_cloud_fraction,
 )
 from legoesm import constants
+from legoesm.runtime.backend import metal_fell_back_to_cpu
+
+
+# Skip marker for tests that exercise jax.device_put with a shard Mesh.
+# On Apple Silicon with JAX-Metal installed but non-functional (jax-metal /
+# JAX version mismatch), the runtime falls back to CPU for compute but the
+# Metal platform stays registered, and ``batched_copy_array_to_devices_with_sharding``
+# raises ``UNIMPLEMENTED: default_memory_space is not supported``.  Skip on
+# this exact environment; the tests still run on CI Linux/CUDA where the
+# Metal platform is absent.
+_skip_if_metal_broken = pytest.mark.skipif(
+    metal_fell_back_to_cpu(),
+    reason=(
+        "JAX-Metal/CPU fallback env: device_put with shard Mesh hits "
+        "UNIMPLEMENTED default_memory_space.  CI Linux/CUDA runs this."
+    ),
+)
 
 
 # ===========================================================================
@@ -693,6 +711,308 @@ class TestRRTMGP:
         assert RRTMGP._instance_cache_key(cfg_loop) != RRTMGP._instance_cache_key(cfg_auto)
         assert RRTMGP._instance_cache_key(cfg_scan) != RRTMGP._instance_cache_key(cfg_auto)
 
+    def test_iter51_clear_sky_solve_columns_with_no_cloud_paths(self):
+        """iter-51: when ``RRTMOptics`` was built with
+        ``include_clouds=False`` AND the user calls ``solve_columns``
+        without any cloud_path kwargs, the run must succeed and the
+        cloud-skip optics must not be invoked.  Mirror-image of
+        iter-41's ``test_iter41_clear_sky_optics_raises_on_direct_cloud_call``.
+
+        Pins: the public solve_columns API gates clouds on
+        ``config.include_clouds AND has any cloud kwarg``, so a
+        cfg(include_clouds=False) call with no cloud_path_liq /
+        cloud_path_ice / cloud_r_eff_* should silently skip the
+        cloud branch and produce finite clear-sky fluxes.
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        solver = RRTMGP.from_legoesm_config(
+            RRTMGPConfig(include_clouds=False)
+        )
+        ncol, nlev = 2, 8
+        p_half = jnp.broadcast_to(
+            jnp.linspace(100.0, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1)
+        )
+        p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+        T = jnp.broadcast_to(
+            jnp.linspace(220.0, 290.0, nlev)[None, :], (ncol, nlev)
+        )
+        sfc_T = jnp.full((ncol,), 295.0)
+        q_v = jnp.full((ncol, nlev), 5e-3)
+        cos_z = jnp.full((ncol,), 0.5)
+
+        out = solver.solve_columns(
+            T=T, p_full=p_full, p_half=p_half, sfc_temperature=sfc_T,
+            q_v=q_v, cos_zenith=cos_z,
+        )
+        # All fluxes finite — the cloud-skip didn't sneak into the
+        # gas-only path.
+        for name in ("lw_flux_up", "lw_flux_down", "sw_flux_up",
+                     "sw_flux_down", "heating_rate"):
+            val = getattr(out, name)
+            assert jnp.all(jnp.isfinite(val)), (
+                f"{name} non-finite under cfg(include_clouds=False) + "
+                f"no cloud kwargs"
+            )
+        # Confirm the optics_lib actually has cloud_optics_*=None.
+        assert solver.optics_lib.cloud_optics_lw is None
+        assert solver.optics_lib.cloud_optics_sw is None
+
+    def test_iter41_clear_sky_optics_raises_on_direct_cloud_call(self):
+        """iter-41 codex review follow-up: when RRTMOptics was built
+        with include_clouds=False, the cloud_optics_lw/sw attributes
+        are None.  The public ``solve_columns`` gate prevents this
+        path from being reached, but a direct caller that bypasses
+        the gate and feeds cloud_path_liq through
+        ``compute_lw_optical_properties`` must get a clear
+        ValueError pointing at the include_clouds=False mismatch,
+        not an opaque AttributeError on ``None.cloud_optics_lw``.
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        cfg = RRTMGPConfig(include_clouds=False)
+        solver = RRTMGP.from_legoesm_config(cfg)
+        # Direct call to compute_lw_optical_properties with non-None
+        # cloud paths should raise ValueError, not AttributeError.
+        ncol, nlev = 1, 4
+        T = jnp.full((ncol, 1, nlev), 250.0)
+        p = jnp.full((ncol, 1, nlev), 5e4)
+        mol = jnp.full((ncol, 1, nlev), 1e22)
+        cloud_path = jnp.full((ncol, 1, nlev), 1e-3)
+        cloud_reff = jnp.full((ncol, 1, nlev), 1e-5)
+        with pytest.raises(ValueError, match="include_clouds=False"):
+            solver.optics_lib.compute_lw_optical_properties(
+                p, T, mol, igpt=jnp.array(0),
+                cloud_path_liq=cloud_path,
+                cloud_r_eff_liq=cloud_reff,
+            )
+
+    def test_iter40_include_clouds_in_optics_key_with_conditional_load(self):
+        """iter-40 supersedes the iter-36 semantics: ``include_clouds``
+        is back in ``_optics_cache_key``, but now for a *meaningful*
+        reason — iter-40 made ``RRTMOptics.__init__`` conditionally
+        skip the cloud-table load when ``include_clouds=False``, so
+        the two configurations produce genuinely different
+        optics_libs (one with cloud_optics_lw/sw populated, the other
+        with them = None).
+
+        Pin: ``include_clouds`` is in the OPTICS key now, and the
+        instance key inherits via the optics-key sub-tuple.
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        cfg_on = RRTMGPConfig(include_clouds=True)
+        cfg_off = RRTMGPConfig(include_clouds=False)
+        # Optics key: distinct (different cloud-table load).
+        assert RRTMGP._optics_cache_key(cfg_on) != RRTMGP._optics_cache_key(cfg_off)
+        # Instance key: distinct (inherits via optics key).
+        assert RRTMGP._instance_cache_key(cfg_on) != RRTMGP._instance_cache_key(cfg_off)
+        # Build both optics_libs and verify the cloud-table skip.
+        optics_on, _ = RRTMGP._build_optics_and_vmr(cfg_on)
+        optics_off, _ = RRTMGP._build_optics_and_vmr(cfg_off)
+        assert optics_on.cloud_optics_lw is not None
+        assert optics_off.cloud_optics_lw is None
+        assert optics_on.cloud_optics_sw is not None
+        assert optics_off.cloud_optics_sw is None
+
+    def test_iter37_include_clouds_flag_changes_flux(self):
+        """iter-37: end-to-end pin for the iter-36 cache-key move.
+        Two ``rrtmgp_radiation`` calls with the same non-trivial
+        cloud_path_liq but different ``include_clouds`` settings must
+        produce different LW fluxes.  Pre-iter-36 the include_clouds
+        flag was in the OPTICS cache key, so flipping it would have
+        rebuilt the optics tables — a heavyweight no-op since the
+        tables are include_clouds-independent.  Iter-36 moved it to
+        the instance key so the optics tables are shared but the
+        solver instance is fresh, and the per-call ``has_clouds``
+        gate correctly turns cloud processing on/off."""
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+            rrtmgp_radiation,
+            _instance_cache,
+        )
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+
+        ncol, nlev = 2, 8
+        T, p_full, p_half, T_sfc, _, _ = _make_column_data(ncol, nlev)
+        q_v = jnp.full((ncol, nlev), 5e-3)
+        cos_zen = jnp.full(ncol, 0.5)
+        # Non-trivial cloud path in the lower troposphere.
+        cloud_path_liq = jnp.zeros((ncol, nlev))
+        cloud_path_liq = cloud_path_liq.at[:, -3:].set(0.1)
+        cloud_r_eff_liq = jnp.full((ncol, nlev), 1.0e-5)
+
+        cfg_off = RRTMGPConfig(include_clouds=False)
+        cfg_on = RRTMGPConfig(include_clouds=True)
+
+        _instance_cache.clear()
+        out_off = rrtmgp_radiation(
+            T, p_full, p_half, T_sfc, q_v, cos_zen, cfg_off,
+            cloud_path_liq=cloud_path_liq,
+            cloud_r_eff_liq=cloud_r_eff_liq,
+        )
+        out_on = rrtmgp_radiation(
+            T, p_full, p_half, T_sfc, q_v, cos_zen, cfg_on,
+            cloud_path_liq=cloud_path_liq,
+            cloud_r_eff_liq=cloud_r_eff_liq,
+        )
+        # Cloud effect on LW flux: TOA outgoing LW should be reduced
+        # by the cloud (the cloud absorbs LW from below + emits at
+        # cooler T).  The difference must be substantial.
+        max_diff = float(jnp.max(jnp.abs(out_off.lw_flux_up - out_on.lw_flux_up)))
+        assert max_diff > 1.0, (
+            f"flipping include_clouds must change LW flux when "
+            f"cloud_path_liq is non-zero; got max_diff={max_diff:.6e} "
+            f"W/m².  Pre-iter-36 this could have failed if the "
+            f"instance cache had silently shared the off-config solver "
+            f"with the on-config call."
+        )
+
+    def test_cache_keys_distinguish_iter32_baked_in_config_fields(self):
+        """Iter-32 audit: ``S_0``, ``aerosol_ssa``, ``aerosol_g``,
+        ``sfc_emissivity``, ``sfc_albedo`` are baked into solver
+        instances (no per-call override for the aerosol/solar pair,
+        and the surface pair falls back to the config default).  A
+        config change in any of these must produce a different
+        instance cache key so the previous solver instance is not
+        silently reused.
+        """
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        base = RRTMGPConfig()
+        base_key = RRTMGP._instance_cache_key(base)
+        # Each tweak must change the instance key.
+        tweaks = [
+            base._replace(S_0=base.S_0 + 1.0),
+            base._replace(aerosol_ssa=base.aerosol_ssa + 0.01),
+            base._replace(aerosol_g=base.aerosol_g + 0.01),
+            base._replace(sfc_emissivity=base.sfc_emissivity - 0.01),
+            base._replace(sfc_albedo=base.sfc_albedo + 0.01),
+        ]
+        for tweak in tweaks:
+            assert RRTMGP._instance_cache_key(tweak) != base_key, (
+                f"instance cache key did not change for tweak: {tweak}"
+            )
+        # Same change to *unrelated* field (gas file path) must NOT
+        # collide with these — optics_cache_key still differentiates.
+        assert RRTMGP._instance_cache_key(base._replace(co2_ppmv=base.co2_ppmv + 1.0)) != base_key
+
+    def test_iter32_cache_key_fix_changes_aerosol_flux(self):
+        """End-to-end pin for iter-32 cache-key fix: bumping
+        ``RRTMGPConfig.aerosol_ssa`` between two ``rrtmgp_radiation``
+        calls must change the SW flux output.  Pre-iter-32 the
+        instance cache key was missing ``aerosol_ssa`` so the second
+        call silently reused the stale solver and produced the same
+        output as the first.
+        """
+        from legoesm.atmosphere.physics.radiation.rrtmgp_radiation import (
+            rrtmgp_radiation,
+            _instance_cache,
+        )
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+
+        ncol, nlev = 2, 8
+        T, p_full, p_half, T_sfc, _, _ = _make_column_data(ncol, nlev)
+        q_v = jnp.full((ncol, nlev), 5e-3)
+        cos_zen = jnp.full(ncol, 0.5)
+        # Prescribe a non-trivial aerosol AOD so the SW fluxes depend
+        # on aerosol_ssa.
+        aod = jnp.full((ncol, nlev), 0.05)
+
+        cfg_a = RRTMGPConfig(aerosol_ssa=0.93)
+        cfg_b = RRTMGPConfig(aerosol_ssa=0.98)
+
+        _instance_cache.clear()
+        out_a = rrtmgp_radiation(
+            T, p_full, p_half, T_sfc, q_v, cos_zen, cfg_a,
+            aerosol_optical_depth=aod,
+        )
+        out_b = rrtmgp_radiation(
+            T, p_full, p_half, T_sfc, q_v, cos_zen, cfg_b,
+            aerosol_optical_depth=aod,
+        )
+        # SW flux at surface MUST differ between the two configs.
+        max_diff = float(jnp.max(jnp.abs(out_a.sw_flux_down - out_b.sw_flux_down)))
+        assert max_diff > 1e-3, (
+            f"changing aerosol_ssa from 0.93 to 0.98 must change SW "
+            f"flux_down (cache key must rebuild the solver instance); "
+            f"got max_diff={max_diff:.6e} W/m², which suggests the "
+            f"iter-32 cache-key fix regressed and the second call "
+            f"silently reused the stale solver."
+        )
+
+    def test_iter42_hashable_shim_edge_dtypes(self):
+        """iter-41 codex follow-up: pin the dtype-kind gate in
+        ``_hashable``.  Verify that exotic 0-D dtypes that
+        ``RRTMGPConfig`` should never see (e.g. complex64) fall
+        through to id() instead of raising ``TypeError`` from
+        ``float()``, and that legitimate 0-D dtypes (float32, int,
+        bool) correctly value-hash."""
+        import numpy as np
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        # 0-D bool: dtype.kind='b' → value-hash (so True / False produce
+        # distinct keys via float(0.0) / float(1.0)).
+        cfg_t = RRTMGPConfig()._replace(sfc_albedo=jnp.array(True))
+        cfg_f = RRTMGPConfig()._replace(sfc_albedo=jnp.array(False))
+        assert (
+            RRTMGP._instance_cache_key(cfg_t)
+            != RRTMGP._instance_cache_key(cfg_f)
+        )
+
+        # 0-D float32: dtype.kind='f' → value-hash.
+        cfg_a = RRTMGPConfig()._replace(
+            sfc_albedo=jnp.array(0.07, dtype=jnp.float32)
+        )
+        cfg_b = RRTMGPConfig()._replace(
+            sfc_albedo=jnp.array(0.07, dtype=jnp.float32)
+        )
+        assert (
+            RRTMGP._instance_cache_key(cfg_a)
+            == RRTMGP._instance_cache_key(cfg_b)
+        ), "two equal-valued float32 0-D arrays must share cache key"
+
+        # 0-D complex (hypothetical; RRTMGPConfig should never see it):
+        # must fall through to id() without raising.
+        cfg_c = RRTMGPConfig()._replace(
+            sfc_albedo=np.array(0.07 + 0j, dtype=np.complex64)
+        )
+        try:
+            key = RRTMGP._instance_cache_key(cfg_c)
+            # Should not raise.
+            assert isinstance(key, tuple)
+        except TypeError as e:
+            raise AssertionError(
+                f"_hashable should fall through to id() for complex "
+                f"0-D arrays; got TypeError: {e}"
+            )
+
+    def test_cache_keys_handle_array_valued_sfc_fields(self):
+        """AIMIP populates ``config.sfc_albedo`` / ``sfc_emissivity``
+        with ``(ncol,)`` arrays.  Arrays aren't hashable; the
+        ``_hashable`` shim falls back to ``id()`` for arrays.  Verify
+        the cache key construction does not raise."""
+        import jax.numpy as jnp
+        from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
+        from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
+
+        # NamedTuple allows _replace with any type; runtime tolerates
+        # arrays in these slots because solve_columns handles them
+        # via ``_resolve_surface_field``.
+        cfg = RRTMGPConfig()._replace(
+            sfc_albedo=jnp.array([0.06, 0.08, 0.10]),
+            sfc_emissivity=jnp.array([0.98, 0.97, 0.96]),
+        )
+        # Should not raise.
+        key = RRTMGP._instance_cache_key(cfg)
+        # Should be hashable (e.g., dict-key usable).
+        d = {key: "ok"}
+        assert d[key] == "ok"
+
     def test_use_scan_none_matches_explicit_choice(self):
         """Issue #273 GPU tuning: ``RRTMGPConfig(use_scan=None)`` (the
         new production default) must produce the same heating rates
@@ -1053,12 +1373,23 @@ class TestCloudFraction:
         cf = sundqvist_cloud_fraction(RH, config)
         assert jnp.allclose(cf, 1.0, atol=1e-10)
 
-    def test_sundqvist_linear_ramp(self):
-        """Sundqvist should give 0.5 at RH = (1 + RH_crit) / 2."""
+    def test_sundqvist_sqrt_form(self):
+        """Faithful Sundqvist √-form: b = 1 − √((1−RH)/(1−RH_crit)).
+        At RH = (1+RH_crit)/2 the argument is 1/2 ⇒ b = 1 − √0.5 ≈ 0.293
+        (NOT 0.5 — the earlier linear-ramp value)."""
         config = CloudConfig(scheme="sundqvist", rh_crit=0.7)
-        RH_mid = jnp.array([[(1.0 + 0.7) / 2]])
+        RH_mid = jnp.array([[(1.0 + 0.7) / 2]])      # = 0.85, arg = 0.5
         cf = sundqvist_cloud_fraction(RH_mid, config)
-        assert jnp.allclose(cf, 0.5, atol=1e-6)
+        assert jnp.allclose(cf, 1.0 - jnp.sqrt(jnp.array(0.5)), atol=1e-6)
+        # Monotonic increasing in RH between RH_crit and 1.
+        RH = jnp.array([[0.7, 0.8, 0.9, 1.0]])
+        cf_seq = sundqvist_cloud_fraction(RH, config)
+        assert jnp.all(jnp.diff(cf_seq[0]) > 0)
+        # AD-safe at saturation (√ derivative would be infinite at RH=1).
+        g = jax.grad(lambda r: jnp.sum(sundqvist_cloud_fraction(r, config)))(
+            jnp.array([[1.0, 0.99]])
+        )
+        assert jnp.all(jnp.isfinite(g))
 
     def test_xu_randall_zero_without_condensate(self):
         """Xu-Randall should give 0 when condensate is zero."""
@@ -1069,6 +1400,29 @@ class TestCloudFraction:
         q_sat = jnp.full((ncol, nlev), 0.01)
         cf = xu_randall_cloud_fraction(RH, q_c, q_sat, config)
         assert jnp.allclose(cf, 0.0, atol=1e-8)
+
+    def test_xu_randall_gradient_finite_at_zero_rh(self):
+        """d(cloud fraction)/d(RH) must be finite at RH=0 (dry layer).
+
+        Regression: ``RH**p_xr`` with ``p_xr<1`` has an infinite derivative at
+        RH=0 (the clip floor was 0), so reverse-mode AD produced an inf
+        gradient d(cf)/d(q_v) for any dry layer (upper stratosphere / dry init),
+        poisoning end-to-end training that touches a dry column.  Flooring the
+        clip base fixes the gradient; the forward (cf -> 0 as condensate -> 0)
+        is unchanged.
+        """
+        config = CloudConfig(scheme="xu_randall")
+        q_sat = jnp.full((3,), 0.01)
+        q_c = jnp.full((3,), 1e-4)
+
+        def loss(RH):
+            return jnp.sum(xu_randall_cloud_fraction(RH, q_c, q_sat, config))
+
+        for rh0 in (0.0, 1e-9, 0.5):
+            grad = jax.grad(loss)(jnp.full((3,), rh0))
+            assert bool(jnp.all(jnp.isfinite(grad))), (
+                f"xu_randall cloud-fraction gradient not finite at RH={rh0}: {grad}"
+            )
 
     def test_xu_randall_increases_with_condensate(self):
         """Xu-Randall cloud fraction should increase with condensate."""
@@ -1101,6 +1455,36 @@ class TestCloudFraction:
         assert jnp.all(props.cloud_fraction >= 0.0)
         assert jnp.all(props.cloud_fraction <= 1.0)
 
+    def test_liquid_reff_psd_m2005(self):
+        """RAD-1-liq: the M2005 PSD liquid effective radius
+        reffc=(PGAM+3)/(2·LAMC) (mp_graupel:495) replaces the fixed r_eff_liq
+        when N_c is supplied; pins a known case + the q_c/N_c dependence and the
+        no-N_c / liquid-free fallback to the config constant."""
+        config = CloudConfig(scheme="resolved", r_eff_liq=14.0e-6)
+        T = jnp.full((1, 1), 280.0)
+        p_full = jnp.full((1, 1), 90000.0)
+        q_v = jnp.full((1, 1), 0.005)
+        dp = jnp.full((1, 1), 1000.0)
+        q_c = jnp.full((1, 1), 5.0e-4)   # 0.5 g/kg
+        N_c = jnp.full((1, 1), 1.0e8)    # 100 /cm³ (per-VOLUME)
+
+        def reff(qc, nc):
+            return float(compute_cloud_properties(
+                T, p_full, q_v, dp, config, q_cloud=qc, n_cloud=nc
+            ).r_eff_liq[0, 0])
+
+        r = reff(q_c, N_c)
+        assert 8.0e-6 < r < 14.0e-6, f"PSD reffc out of range: {r}"
+        # more q_c ⇒ larger drops; more N_c ⇒ smaller drops.
+        assert reff(q_c * 4.0, N_c) > r
+        assert reff(q_c, N_c * 8.0) < r
+        # No N_c ⇒ fixed config constant (back-compat).
+        no_nc = float(compute_cloud_properties(
+            T, p_full, q_v, dp, config, q_cloud=q_c).r_eff_liq[0, 0])
+        assert abs(no_nc - 14.0e-6) < 1.0e-12
+        # Liquid-free cell ⇒ fall back to the constant.
+        assert abs(reff(jnp.zeros((1, 1)), N_c) - 14.0e-6) < 1.0e-12
+
     def test_cloud_properties_diagnostic_condensate(self):
         """Without explicit condensate, diagnostic q_c should scale with cf."""
         config = CloudConfig(scheme="sundqvist", rh_crit=0.7)
@@ -1114,8 +1498,10 @@ class TestCloudFraction:
         q_v_moist = 0.9 * q_sat  # RH = 0.9 > rh_crit
 
         props = compute_cloud_properties(T, p_full, q_v_moist, dp, config)
-        # Should have nonzero cloud fraction and water paths
-        assert float(jnp.max(props.cloud_fraction)) > 0.5
+        # Significant cloud at RH=0.9.  The faithful Sundqvist √-form gives
+        # 1 − √((1−0.9)/(1−0.7)) ≈ 0.42 here (full cloud only near
+        # saturation), vs the old linear ramp's 0.67.
+        assert float(jnp.max(props.cloud_fraction)) > 0.4
         assert float(jnp.sum(props.lwp + props.iwp)) > 0.0
 
     def test_cloud_properties_ice_at_cold_temperatures(self):
@@ -1277,6 +1663,7 @@ class TestColumnShardedRadiation:
         sigma = create_sigma_coordinate(nlev)
         return grid, sigma, held_suarez_init(grid, sigma)
 
+    @_skip_if_metal_broken
     def test_sharded_matches_unsharded_on_single_device(self):
         """Single-device mesh degenerates to no-op sharding; output
         must still match exactly."""
@@ -1349,4 +1736,62 @@ class TestColumnShardedRadiation:
             np.asarray(out.dT_dt.data),
             np.asarray(ref.dT_dt.data),
             rtol=1.0e-12, atol=1.0e-14,
+        )
+
+    @_skip_if_metal_broken
+    def test_rrtmgp_sharded_matches_unsharded_on_single_device(self):
+        """Iter-28: same numerical-equivalence contract as the gray
+        path, but for ``scheme="rrtmgp"``.  Catches regressions that
+        break the gray path's column-shard invariance but happen to
+        only affect the RRTMGP-specific kernel (e.g. cache key bugs
+        that flip ``use_scan`` per-shard, JIT specialisation on
+        sharded vs non-sharded shapes, or the iter-13 sign fix
+        inadvertently breaking under sharded input)."""
+        from legoesm.parallel.column_shard import create_column_mesh
+        grid, sigma, state = self._make_state(n=4, nlev=8)
+        config = RadiationConfig(scheme="rrtmgp")
+        ref = make_radiation_physics(
+            config, model_type="hydrostatic",
+        )(state, grid, sigma)
+        mesh = create_column_mesh(n_devices=1)
+        out = make_radiation_physics(
+            config, model_type="hydrostatic", column_mesh=mesh,
+        )(state, grid, sigma)
+        np.testing.assert_allclose(
+            np.asarray(out.dT_dt.data),
+            np.asarray(ref.dT_dt.data),
+            rtol=1.0e-10, atol=1.0e-12,
+        )
+
+    @_skip_if_metal_broken
+    def test_rrtmgp_optimal_angle_sharded_matches_unsharded(self):
+        """Iter-29: column-shard invariance for the optimal-angle path.
+
+        The optimal-angle code in solve_lw sums tau across all interior
+        layers per column to derive the secant; a per-rank tau sum that
+        accidentally uses sharded-only data (instead of the full column
+        tau) would silently change the secant and the LW flux when the
+        same physical column is split across shards.
+
+        Single-device mesh degenerates to no-op sharding so the
+        sharded and unsharded outputs must match exactly.  This is
+        the gating test before any future enabling of
+        ``use_optimal_angle=True`` by default."""
+        from legoesm.parallel.column_shard import create_column_mesh
+        grid, sigma, state = self._make_state(n=4, nlev=8)
+        config = RadiationConfig(
+            scheme="rrtmgp",
+            rrtmgp=RRTMGPConfig(use_optimal_angle=True),
+        )
+        ref = make_radiation_physics(
+            config, model_type="hydrostatic",
+        )(state, grid, sigma)
+        mesh = create_column_mesh(n_devices=1)
+        out = make_radiation_physics(
+            config, model_type="hydrostatic", column_mesh=mesh,
+        )(state, grid, sigma)
+        np.testing.assert_allclose(
+            np.asarray(out.dT_dt.data),
+            np.asarray(ref.dT_dt.data),
+            rtol=1.0e-10, atol=1.0e-12,
         )

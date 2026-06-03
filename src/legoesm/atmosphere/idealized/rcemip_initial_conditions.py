@@ -49,6 +49,12 @@ from legoesm import constants
 # Wing 2018 Tab A1 canonical constants.
 WING_GAMMA = 0.0067         # K/m, lapse rate below tropopause
 WING_Z_T = 15_000.0         # m, tropopause height
+WING_T_V0 = 295.0           # K, surface VIRTUAL temperature — RCEMIP (Wing 2018
+                            # Tab 1) PRESCRIBES this FIXED for ALL SST cases
+                            # (295/300/305 K); only q_v0 and the surface BC vary
+                            # with SST. Deriving it from the SST instead made the
+                            # whole profile (incl. the tropopause cold point
+                            # T_v0-Γ·z_t) ~8 K too warm at SST=300.
 WING_Z_Q1 = 4_000.0         # m, q_v lower-troposphere e-folding scale
 WING_Z_Q2 = 7_500.0         # m, q_v upper-troposphere Gaussian scale
 WING_Q_T = 1.0e-11          # kg/kg, stratospheric humidity floor
@@ -66,16 +72,17 @@ _VIRTUAL_T_FACTOR = 1.0 / constants.epsilon - 1.0
 
 def wing2018_virtual_temperature_profile(
     z: jax.Array,
-    T_sfc: float = WING_T_SFC_DEFAULT,
-    q_sfc: float = WING_Q_SFC_DEFAULT,
+    T_v0: float = WING_T_V0,
     z_t: float = WING_Z_T,
     Gamma: float = WING_GAMMA,
 ) -> jax.Array:
     """Wing 2018 *virtual* temperature ``T_v(z)``.
 
-    Below the tropopause: linear lapse from the surface virtual
-    temperature ``T_v0 = T_sfc · (1 + ε⁻¹·q_sfc - q_sfc)``. Above:
-    isothermal cap at ``T_v0 - Γ · z_t``. Wing 2018 Tab A1 prescribes
+    Below the tropopause: linear lapse from the surface virtual temperature
+    ``T_v0`` (RCEMIP-prescribed FIXED 295 K, Wing 2018 Tab 1 — NOT derived from
+    the SST: the earlier ``T_v0 = T_sfc·(1+0.608·q_sfc)`` made the profile, incl.
+    the tropopause cold point, ~8 K too warm at SST=300). Above: isothermal cap
+    at ``T_v0 - Γ · z_t``. Wing 2018 Tab A1 prescribes
     this analytic profile on **virtual** T so the hydrostatic
     integral remains closed-form (the moist-air gas constant
     ``R = R_d · (1 + 0.608 q_v)`` absorbs into the virtual T,
@@ -97,7 +104,6 @@ def wing2018_virtual_temperature_profile(
     Gamma : float
         Tropospheric virtual-T lapse rate [K/m]. Default 0.0067 K/m.
     """
-    T_v0 = T_sfc * (1.0 + _VIRTUAL_T_FACTOR * q_sfc)
     T_v_below = T_v0 - Gamma * z
     T_v_top = T_v0 - Gamma * z_t
     return jnp.where(z < z_t, T_v_below, T_v_top)
@@ -105,7 +111,7 @@ def wing2018_virtual_temperature_profile(
 
 def wing2018_temperature_profile(
     z: jax.Array,
-    T_sfc: float = WING_T_SFC_DEFAULT,
+    T_v0: float = WING_T_V0,
     q_sfc: float = WING_Q_SFC_DEFAULT,
     z_t: float = WING_Z_T,
     Gamma: float = WING_GAMMA,
@@ -125,7 +131,7 @@ def wing2018_temperature_profile(
     to evaluate q_v(z) for the virtual→actual conversion).
     """
     T_v = wing2018_virtual_temperature_profile(
-        z, T_sfc=T_sfc, q_sfc=q_sfc, z_t=z_t, Gamma=Gamma,
+        z, T_v0=T_v0, z_t=z_t, Gamma=Gamma,
     )
     q_v = wing2018_qv_profile(
         z, q_sfc=q_sfc, z_t=z_t, z_q1=z_q1, z_q2=z_q2, q_t=q_t,
@@ -157,7 +163,7 @@ def wing2018_qv_profile(
 
 def wing2018_pressure_profile(
     z: jax.Array,
-    T_sfc: float = WING_T_SFC_DEFAULT,
+    T_v0: float = WING_T_V0,
     q_sfc: float = WING_Q_SFC_DEFAULT,
     z_t: float = WING_Z_T,
     Gamma: float = WING_GAMMA,
@@ -180,7 +186,6 @@ def wing2018_pressure_profile(
     (q_v ≈ q_t = 10⁻¹¹) so dry-air ``R_d`` with ``T_t = T_v0 - Γ·z_t``
     is exact.
     """
-    T_v0 = T_sfc * (1.0 + _VIRTUAL_T_FACTOR * q_sfc)
     exp_trop = constants.g / (constants.R_d * Gamma)
     p_below = p_sfc * (1.0 - Gamma * z / T_v0) ** exp_trop
     p_at_z_t = p_sfc * (1.0 - Gamma * z_t / T_v0) ** exp_trop
@@ -193,7 +198,7 @@ def wing2018_pressure_profile(
 
 def wing2018_theta_profile(
     z: jax.Array,
-    T_sfc: float = WING_T_SFC_DEFAULT,
+    T_v0: float = WING_T_V0,
     q_sfc: float = WING_Q_SFC_DEFAULT,
     z_t: float = WING_Z_T,
     Gamma: float = WING_GAMMA,
@@ -212,11 +217,11 @@ def wing2018_theta_profile(
     Suitable as ``theta_ref_fn`` for the HeightCoordinate factories.
     """
     T = wing2018_temperature_profile(
-        z, T_sfc=T_sfc, q_sfc=q_sfc, z_t=z_t, Gamma=Gamma,
+        z, T_v0=T_v0, q_sfc=q_sfc, z_t=z_t, Gamma=Gamma,
         z_q1=z_q1, z_q2=z_q2, q_t=q_t,
     )
     p = wing2018_pressure_profile(
-        z, T_sfc=T_sfc, q_sfc=q_sfc, z_t=z_t, Gamma=Gamma, p_sfc=p_sfc,
+        z, T_v0=T_v0, q_sfc=q_sfc, z_t=z_t, Gamma=Gamma, p_sfc=p_sfc,
     )
     return T * (constants.p_ref / p) ** constants.kappa
 
@@ -229,7 +234,7 @@ def _make_closure(fn, **defaults):
 
 
 def make_wing2018_theta_ref_fn(
-    T_sfc: float = WING_T_SFC_DEFAULT,
+    T_v0: float = WING_T_V0,
     q_sfc: float = WING_Q_SFC_DEFAULT,
     z_t: float = WING_Z_T,
     Gamma: float = WING_GAMMA,
@@ -241,7 +246,7 @@ def make_wing2018_theta_ref_fn(
     """``z -> θ(z)`` closure for HeightCoordinate factories."""
     return _make_closure(
         wing2018_theta_profile,
-        T_sfc=T_sfc, q_sfc=q_sfc, z_t=z_t, Gamma=Gamma,
+        T_v0=T_v0, q_sfc=q_sfc, z_t=z_t, Gamma=Gamma,
         z_q1=z_q1, z_q2=z_q2, q_t=q_t, p_sfc=p_sfc,
     )
 
@@ -263,7 +268,7 @@ def make_wing2018_qv_ref_fn(
 
 
 def make_wing2018_pressure_ref_fn(
-    T_sfc: float = WING_T_SFC_DEFAULT,
+    T_v0: float = WING_T_V0,
     q_sfc: float = WING_Q_SFC_DEFAULT,
     z_t: float = WING_Z_T,
     Gamma: float = WING_GAMMA,
@@ -273,12 +278,12 @@ def make_wing2018_pressure_ref_fn(
     pressure profile). Hydrostatic integral with virtual-T base."""
     return _make_closure(
         wing2018_pressure_profile,
-        T_sfc=T_sfc, q_sfc=q_sfc, z_t=z_t, Gamma=Gamma, p_sfc=p_sfc,
+        T_v0=T_v0, q_sfc=q_sfc, z_t=z_t, Gamma=Gamma, p_sfc=p_sfc,
     )
 
 
 def make_wing2018_temperature_ref_fn(
-    T_sfc: float = WING_T_SFC_DEFAULT,
+    T_v0: float = WING_T_V0,
     q_sfc: float = WING_Q_SFC_DEFAULT,
     z_t: float = WING_Z_T,
     Gamma: float = WING_GAMMA,
@@ -289,6 +294,33 @@ def make_wing2018_temperature_ref_fn(
     """``z -> T(z)`` (actual, dry-bulb) closure for IC builders."""
     return _make_closure(
         wing2018_temperature_profile,
-        T_sfc=T_sfc, q_sfc=q_sfc, z_t=z_t, Gamma=Gamma,
+        T_v0=T_v0, q_sfc=q_sfc, z_t=z_t, Gamma=Gamma,
         z_q1=z_q1, z_q2=z_q2, q_t=q_t,
     )
+
+
+def build_smooth_k1_pattern(ny: int, nx: int) -> jnp.ndarray:
+    """Build the iter-203 smooth_k1 theta'-noise IC pattern.
+
+    Returns a ``(ny, nx)`` array of ``0.5 * (cos(2π x/nx) + cos(2π y/ny))``
+    with the horizontal mean explicitly subtracted to GUARANTEE zero
+    mean on degenerate grids (nx=1 → cos=1 everywhere, mean=1, not
+    zero-mean per the F11 fix-path-3 contract; iter-207 Codex MEDIUM
+    #1 fix).
+
+    Peak amplitude is 1.0 on healthy grids (nx, ny >= 2); the driver
+    multiplies by ``theta_noise_amp`` [K] to scale.
+
+    iter-208 promoted this helper from scripts/run_rce_mpi_long.py
+    to the rcemip_initial_conditions module so the unit test can
+    import it via the standard package path without loading the
+    heavy driver module (mpi4jax / jax-MPI / argparse / etc.).
+    """
+    jj = jnp.arange(ny, dtype=jnp.float64)
+    ii = jnp.arange(nx, dtype=jnp.float64)
+    yy, xx = jnp.meshgrid(jj, ii, indexing="ij")
+    two_pi = 2.0 * jnp.pi
+    pattern = 0.5 * (
+        jnp.cos(two_pi * xx / nx) + jnp.cos(two_pi * yy / ny)
+    )
+    return pattern - jnp.mean(pattern)

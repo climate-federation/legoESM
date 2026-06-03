@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Run a real AMIP simulation (with actual GHG / aerosol / ozone /
 # solar forcing from CMIP6-compatible files) on each supported grid
 # type and produce a cross-grid comparison via the atmosphere-matrix
@@ -41,39 +41,35 @@ OZONE_FILE=${4:-}
 AEROSOL_FILE=${5:-}
 ANY_FAILED=0
 
-# Map grid_type → (resolution, discretization, folder) appropriate
-# for ~3 deg coverage (matrix-runner default for AMIP).  AMIP needs
-# realistic SSTs, so the 1-degree grid is overkill for cross-grid
-# consistency testing.
-declare -A GRID_RES=(
-    [cubed_sphere]="48"
-    [latlon]="90"
-    [voronoi]="6"
-    [gaussian]="42"
-)
+# Grid configuration table (parallel-array form; macOS default
+# Bash 3.2 lacks ``declare -A`` — same iter-7 / iter-32 fix as the
+# RCE wrapper). Each row is
+#   "<grid_type>:<resolution>:<discretization>:<output_folder>:<extra_flags>:<dt>"
+# Empty trailing fields stay empty. iter-32 wires the dt column to
+# the iter-13/iter-26 stability ladder (legoesm.driver.rce_dt.
+# auto_dt_rce) so AMIP cross-grid at C48 picks dt=150 instead of
+# the run_amip.py default of 600 (which is the iter-13-banned
+# value that produced the C48 BLOWUP in RCE).
+#
 # iter-74: ``run_amip.py --resolution`` is ``type=int`` and means
 # different things per grid:
 #   cubed_sphere → n      (C48 → 48 cells per face per face dim)
 #   latlon       → n_lat  (run_amip.py sets n_lon = 2 * n_lat)
 #   voronoi      → MPAS level
 #   gaussian     → ignored (use --truncation instead)
-# The previous "90x180" form for latlon was never run end-to-end
-# and would have failed at argparse (int conversion).
-declare -A GRID_DISC=(
-    [cubed_sphere]="cdgrid"
-    [latlon]="latlon_cgrid"
-    [voronoi]="mpas"
-    [gaussian]="spectral"
+GRID_TABLE=(
+    "cubed_sphere:48:cdgrid:cubed_sphere::150"
+    "latlon:90:latlon_cgrid:latlon::"
+    "voronoi:6:mpas:icosahedral::60"
+    "gaussian:42:spectral:spectral:--truncation 42:150"
 )
-declare -A GRID_FOLDER=(
-    [cubed_sphere]="cubed_sphere"
-    [latlon]="latlon"
-    [voronoi]="icosahedral"
-    [gaussian]="spectral"
-)
-declare -A GRID_TRUNC=(
-    [gaussian]="--truncation 42"
-)
+# Voronoi dt notes (iter-32 Codex HIGH):
+#   scripts/smoke_test_amip_all_grids.py uses --dt 60 at V4 explicitly,
+#   noting "the MPAS hydrostatic dycore is unstable at the default
+#   600 s step despite the CFL diagnostic reporting 0.09". V6 is
+#   ~4x as many cells as V4 (10242 vs 2562) so MUST be at least as
+#   tight as V4. Pinned dt=60 here. iter-32 measurement of V6
+#   30-day at dt=60 is the pending follow-up.
 
 # Build the optional-forcing flag set once.
 EXTRA_FLAGS=""
@@ -87,11 +83,8 @@ if [ -n "$AEROSOL_FILE" ]; then
     EXTRA_FLAGS+=" --aerosol-forcing external --aerosol-file $AEROSOL_FILE"
 fi
 
-for GRID in cubed_sphere latlon voronoi gaussian; do
-    RES=${GRID_RES[$GRID]}
-    DISC=${GRID_DISC[$GRID]}
-    FOLDER=${GRID_FOLDER[$GRID]}
-    TRUNC=${GRID_TRUNC[$GRID]:-}
+for ENTRY in "${GRID_TABLE[@]}"; do
+    IFS=':' read -r GRID RES DISC FOLDER TRUNC DT_OVERRIDE <<< "$ENTRY"
     OUTDIR="$OUTPUT/hydrostatic/amip/$FOLDER/$RES"
     echo "=================================================="
     echo "  AMIP on $GRID/$DISC (resolution=$RES, days=$DAYS)"
@@ -127,10 +120,19 @@ for GRID in cubed_sphere latlon voronoi gaussian; do
     # explicitly so cube C48 runs at C48, latlon at the right
     # n_lat, etc.  ``$TRUNC`` (--truncation) is the gaussian-
     # specific override that the iter-41 wrapper already had.
-    JAX_ENABLE_X64=1 .venv/bin/python scripts/run_amip.py \
+    # iter-32: pass iter-13-validated dt to AMIP at C48/T42 to
+    # avoid the iter-13-banned dt=600 default (which produced
+    # C48 30-day BLOWUP in RCE iter-12). Other grids fall through
+    # to run_amip.py's default of 600 until measured otherwise.
+    # iter-7 RCE wrapper Metal fix replicated for the AMIP wrapper.
+    DT_FLAG=""
+    if [ -n "$DT_OVERRIDE" ]; then
+        DT_FLAG="--dt $DT_OVERRIDE"
+    fi
+    JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}" JAX_ENABLE_X64=1 .venv/bin/python scripts/run_amip.py \
         --grid-type "$GRID" --discretization "$DISC" \
         --resolution "$RES" \
-        $TRUNC --days "$DAYS" --diag-days 1 --output "$OUTDIR" \
+        $TRUNC $DT_FLAG --days "$DAYS" --diag-days 1 --output "$OUTDIR" \
         $EXTRA_FLAGS || {
         echo "  WARNING: run_amip.py failed for $GRID; continuing"
         echo "  with cross-grid loop so other grids still produce"

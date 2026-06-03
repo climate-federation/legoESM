@@ -206,6 +206,7 @@ def linear_remap(
     T_new: jnp.ndarray | None = None,
     T_ice_min: float = 180.0,
     T_freeze_ocean: float = constants.T_freeze_ocean,
+    T_max: float = constants.T_freeze,
 ) -> tuple[jnp.ndarray, jnp.ndarray] | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Redistribute ice across categories after thermodynamic changes.
 
@@ -360,8 +361,13 @@ def linear_remap(
     vol_safe = jnp.maximum(vol_remap, 1e-30)
     T_remap = jnp.where(vol_remap > 0.0, E_remap / vol_safe, T_new)
 
-    # Clamp temperature to physical bounds
-    T_remap = jnp.clip(T_remap, T_ice_min, T_freeze_ocean)
+    # Clamp temperature to physical bounds.  Upper bound is the SURFACE
+    # melt point (T_max = T_freeze = 273.15 K), not the saline basal
+    # freezing point T_freeze_ocean (271.35 K) — otherwise the remap
+    # would re-clamp a melting surface back below 0 C every step and
+    # undo the surface-vs-basal melt-point split.  ``T_freeze_ocean`` is
+    # kept as the empty-cell fill value above.
+    T_remap = jnp.clip(T_remap, T_ice_min, T_max)
 
     return h_remap, a_remap, T_remap
 
@@ -547,6 +553,7 @@ def lipscomb_2001_remap(
     V_pond_new: jnp.ndarray | None = None,
     T_ice_min: float = 180.0,
     T_freeze_ocean: float = constants.T_freeze_ocean,
+    T_max: float = constants.T_freeze,
 ) -> dict:
     """Lipscomb (2001) piecewise-linear ITD remapping.
 
@@ -643,7 +650,11 @@ def lipscomb_2001_remap(
         "a": a_f.reshape(full_shape),
     }
     if T_new is not None:
-        result["T"] = jnp.clip(T_f.reshape(full_shape), T_ice_min, T_freeze_ocean)
+        # Upper clamp is the SURFACE melt point (T_max = T_freeze =
+        # 273.15 K), not the basal freezing point T_freeze_ocean
+        # (271.35 K); clamping to the latter would re-freeze a melting
+        # surface every remap and defeat the surface-melt-point split.
+        result["T"] = jnp.clip(T_f.reshape(full_shape), T_ice_min, T_max)
     if S_new is not None:
         result["S"] = jnp.clip(S_f.reshape(full_shape), 0.0, None)
     if V_snow_new is not None:

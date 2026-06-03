@@ -42,6 +42,7 @@ def setup_devices(
     distributed: bool = False,
     grid_type: str = "cubed_sphere",
     allow_level_fallback: bool = False,
+    grid_n: int | None = None,
 ) -> DeviceConfig:
     """One-shot device setup.
 
@@ -67,6 +68,41 @@ def setup_devices(
     from legoesm.parallel import mesh as _mesh
 
     if distributed:
+        if grid_type == "latlon":
+            # Lat-lon band MPI: build a LatLonBandLayout and activate
+            # set_halo_backend("mpi", layout).  See
+            # legoesm.parallel.distributed.initialize_distributed_latlon.
+            # Returns a *layout* (not a DeviceConfig) — we wrap it
+            # in a minimal DeviceConfig for ModelDriver's
+            # ``_device_config`` slot.  CPU MPI doesn't need a JAX
+            # device mesh — each rank has 1 CPU device and mpi4jax
+            # handles inter-rank comm.
+            if grid_n is None or grid_n <= 0:
+                raise ValueError(
+                    "Lat-lon MPI initialisation requires grid_n "
+                    "(=n_lat) > 0.  Pass it through "
+                    "bootstrap(..., grid_n=config.grid.resolution)."
+                )
+            from legoesm.parallel.distributed import (
+                initialize_distributed_latlon,
+            )
+            initialize_distributed_latlon(global_n_lat=grid_n)
+            # Build a minimal DeviceConfig.  ``is_distributed=True``
+            # is what ModelDriver checks; the cubed-sphere fields
+            # (face_sharding, replicated_sharding, mesh) stay None
+            # — operators consume them only via the cubed-sphere
+            # SPMD code paths that lat-lon never reaches.
+            import jax
+            return DeviceConfig(
+                mesh=None,
+                face_sharding=None,
+                replicated_sharding=None,
+                n_devices=1,
+                backend=jax.default_backend().upper(),
+                is_distributed=True,
+                tiling=(1, 1),
+                grid_type=grid_type,
+            )
         from legoesm.parallel.distributed import initialize_distributed
         return initialize_distributed(grid_type=grid_type)
 

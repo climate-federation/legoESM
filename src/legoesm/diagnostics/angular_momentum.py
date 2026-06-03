@@ -67,8 +67,8 @@ def compute_atmospheric_angular_momentum(
     # ~10^32 magnitude diagnostic with O(1) sensitivity to drift; fp32
     # accumulation noise would mask the very drift this function is
     # designed to monitor.
-    from legoesm.core.conservation import _conservation_accumulator
-    acc = _conservation_accumulator()
+    from legoesm.core.conservation import conservation_accumulator
+    acc = conservation_accumulator()
 
     R = float(grid.radius)
     cos_lat = jnp.cos(grid.lat).astype(acc)            # (6, n, n)
@@ -164,8 +164,8 @@ def apply_aam_correction_nh(state_old, state_new, grid, hc):
 
     # iter-46: promote to fp64 budget accumulator for the M_fac
     # mass-moment integral (same fp32-field fix as the AAM helper).
-    from legoesm.core.conservation import _conservation_accumulator
-    acc = _conservation_accumulator()
+    from legoesm.core.conservation import conservation_accumulator
+    acc = conservation_accumulator()
     cos2_lat = (jnp.cos(grid.lat) ** 2).astype(acc)     # (6, n, n)
     dz_b = jnp.asarray(hc.dz, dtype=acc)[None, None, None, :]
     rho_ref_b = jnp.asarray(hc.rho_ref, dtype=acc)[None, None, None, :]
@@ -248,8 +248,8 @@ def aam_from_pe_state(state, grid, coord) -> tuple[jax.Array, float]:
     aam_column, aam_total
     """
     # iter-46: promote to fp64 budget accumulator (see NH twin).
-    from legoesm.core.conservation import _conservation_accumulator
-    acc = _conservation_accumulator()
+    from legoesm.core.conservation import conservation_accumulator
+    acc = conservation_accumulator()
 
     # D-grid → cell-center wind
     u_d = state.u_d.data.astype(acc)
@@ -329,8 +329,8 @@ def apply_aam_correction_pe(state_old, state_new, grid, coord):
     _, aam_curr = aam_from_pe_state(state_new, grid, coord)
 
     # iter-46: promote to fp64 budget accumulator for M_fac integral.
-    from legoesm.core.conservation import _conservation_accumulator
-    acc = _conservation_accumulator()
+    from legoesm.core.conservation import conservation_accumulator
+    acc = conservation_accumulator()
 
     # M_fac_total = sum over cells of R²·cos²·column_mass.
     # Used as the analytic Jacobian estimate dAAM/du0.

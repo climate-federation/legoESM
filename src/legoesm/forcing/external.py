@@ -1644,6 +1644,20 @@ class SolarConfig(NamedTuple):
         Variable name for TSI time series.
     spectral_var : str
         Variable name for per-g-point solar fractions when source="spectral_file".
+    spectral_band_order : str
+        Band ordering of a *per-band* (14-band) ``spectral_file`` input,
+        used to align it to the RRTMGP-SW g-point table before
+        expansion (issue #322).  Ignored for per-g-point inputs.
+
+        - ``"auto"`` (default): rotate to RRTMGP order IFF the input
+          carries the unambiguous MPI-M CMIP6 signature (variable
+          ``SSI_frac`` or ``swflux_14band`` filename); otherwise leave
+          untouched.  Never silently mis-expands the canonical CMIP6
+          file and never rotates a generic file lacking the signature.
+        - ``"rrtmg_sw"``: always rotate (caller asserts the file is in
+          RRTMG-SW / CMIP order, 820-2680 cm^-1 band last).
+        - ``"as_is"``: never rotate (caller asserts the file is already
+          in RRTMGP band order).
     normalize_spectral : bool
         If True, normalize interpolated spectral fractions to sum to one.
     start_year : int
@@ -1656,6 +1670,7 @@ class SolarConfig(NamedTuple):
     path: str = ""
     tsi_var: str = "tsi"
     spectral_var: str = "solar_fraction_by_gpt"
+    spectral_band_order: str = "auto"
     normalize_spectral: bool = True
     start_year: int = 1979
 
@@ -1715,8 +1730,47 @@ def get_solar_forcing_at_time(config: SolarConfig, day: float) -> dict:
         from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import (
             _DEFAULT_SW_GAS,
         )
+        if config.spectral_band_order not in ("auto", "as_is", "rrtmg_sw"):
+            raise ValueError(
+                "SolarConfig.spectral_band_order must be 'auto', 'as_is' "
+                f"or 'rrtmg_sw'; got {config.spectral_band_order!r}",
+            )
         _n_bands, _n_gpt = _rrtmg_sw_band_counts(_DEFAULT_SW_GAS)
         if spec_series.shape[1] == _n_bands and _n_bands != _n_gpt:
+            # A per-band (14-band) file may need reordering to the
+            # RRTMGP-SW g-point table order before index-based expansion.
+            # The MPI-M CMIP6 ``swflux_14band_cmip6`` file is in RRTMG-SW
+            # order (820-2680 cm^-1 overlap band LAST), which differs
+            # from RRTMGP order (that band FIRST) by a one-band cyclic
+            # rotation.  Expanding by index without reordering shifts the
+            # whole spectrum one band toward longer wavelengths, dumping
+            # UV flux into the near-IR water-vapour band (~2x clear-sky
+            # SW absorption, issue #322).
+            #
+            #   "rrtmg_sw" -> always rotate (caller asserts CMIP order).
+            #   "as_is"    -> never rotate (caller asserts RRTMGP order).
+            #   "auto"     -> rotate IFF the input carries the unambiguous
+            #                 MPI-M CMIP6 signature (variable ``SSI_frac``
+            #                 or ``swflux_14band`` filename), else leave
+            #                 untouched.  This never silently mis-expands
+            #                 the canonical CMIP6 file, and never rotates a
+            #                 generic file that lacks the signature.
+            _looks_cmip = (
+                "ssi_frac" in (config.spectral_var or "").lower()
+                or "swflux_14band" in (config.path or "").lower()
+            )
+            if config.spectral_band_order == "rrtmg_sw" or (
+                config.spectral_band_order == "auto" and _looks_cmip
+            ):
+                if config.spectral_band_order == "auto":
+                    logger.info(
+                        "Auto-detected MPI-M CMIP6 14-band solar file %r "
+                        "(spectral_var=%r); applying 'rrtmg_sw' band order "
+                        "(RRTMG-SW -> RRTMGP one-band rotation, issue "
+                        "#322). Set spectral_band_order explicitly to "
+                        "override.", config.path, config.spectral_var,
+                    )
+                spec = _cmip_sw_band_order_to_rrtmgp(spec)
             spec = _expand_bands_to_gpoints(spec, _DEFAULT_SW_GAS)
         if config.normalize_spectral:
             denom = float(np.sum(spec))
@@ -1806,6 +1860,46 @@ def _expand_bands_to_gpoints(spec_bands: np.ndarray, rrtmg_sw_path: str) -> np.n
             spec_bands[..., i:i + 1] / n_gpt_in_band
         )
     return out
+
+
+def _cmip_sw_band_order_to_rrtmgp(spec_bands: np.ndarray) -> np.ndarray:
+    """Re-order per-band SW fractions from CMIP6 / RRTMG-SW band order
+    to the RRTMGP-SW gas-optics-table band order.
+
+    The MPI-M CMIP6 spectral-solar file (``swflux_14band_cmip6``) stores
+    its 14 fractions in **RRTMG-SW** band order, where the long-wave
+    overlap band (820-2680 cm^-1) is the LAST band.  The RRTMGP-SW
+    gas-optics table (``rrtmgp-gas-sw-g112.nc``, ``bnd_limits_wavenumber``)
+    lists the SAME 14 wavenumber intervals but with that band FIRST, so
+    the two orderings differ by exactly a one-band cyclic rotation
+    (issue #322):
+
+        RRTMGP band ``i``  ==  CMIP band ``(i - 1) mod 14``
+
+    hence ``np.roll(spec, +1, axis=-1)`` converts CMIP order -> RRTMGP
+    order.  Without it, ``_expand_bands_to_gpoints`` (which maps by array
+    index) assigns each CMIP band's flux to the wrong RRTMGP band,
+    shifting the whole spectrum one band toward longer wavelengths — e.g.
+    UV flux lands in the near-IR water-vapour band, roughly doubling
+    clear-sky shortwave absorption.
+
+    This is applied ONLY on the ``spectral_file`` ingest path (per-band
+    14-element MPI-M input).  ``_expand_bands_to_gpoints`` itself stays a
+    pure index-preserving expansion so its band-integral contract is
+    unchanged.
+
+    Parameters
+    ----------
+    spec_bands : np.ndarray, shape ``(..., 14)``
+        Per-band fractions in CMIP / RRTMG-SW order (trailing axis).
+
+    Returns
+    -------
+    np.ndarray
+        Same shape, re-ordered to RRTMGP-SW band order.
+    """
+    spec_bands = np.asarray(spec_bands, dtype=np.float64)
+    return np.roll(spec_bands, 1, axis=-1)
 
 
 def get_tsi_at_time(config: SolarConfig, day: float) -> float:

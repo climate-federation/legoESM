@@ -58,8 +58,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         choices=["sigma", "hybrid"])
     parser.add_argument("--p-top", type=float, default=None)
     parser.add_argument("--stretching", type=float, default=None)
+    # ``mpas`` is the canonical name for the SCVT Voronoi mesh + TRiSK
+    # discretization (Ringler 2010 / Thuburn 2009), matching the ocean
+    # side which has always used this name.  Legacy aliases
+    # ``voronoi`` / ``icosahedral`` / ``mpas_voronoi`` are accepted and
+    # normalised by ``legoesm.driver.config.normalize_grid_type``
+    # before reaching any internal dispatch.
     parser.add_argument("--grid-type", type=str, default="cubed_sphere",
-                        choices=["cubed_sphere", "gaussian", "latlon", "voronoi"])
+                        choices=["cubed_sphere", "gaussian", "latlon",
+                                 "mpas",
+                                 "voronoi", "icosahedral", "mpas_voronoi"])
     # The canonical names in `supported_matrix.py` are:
     #   - centered       (cubed_sphere, latlon)
     #   - finite_volume  (cubed_sphere, latlon)
@@ -87,6 +95,41 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # ``--implicit-grav-wave-use-pcg --implicit-grav-wave-damping
     # 1e8`` (typical α ~ 1e7–1e8 m²/s) to remove the explicit-CFL
     # ceiling and enable larger ``--dt``.
+    # Stage 3-E: Fourier polar filter for lat-lon C-grid.  Lifts the
+    # pole-cell CFL constraint by truncating high-wavenumber Fourier
+    # modes near the poles, so ``--dt`` can be set by the equatorial
+    # CFL.  Essential for 1° AMIP runs spanning >10 yr.
+    parser.add_argument(
+        "--use-polar-filter", action="store_true",
+        help="Enable Fourier polar filter for lat-lon C-grid (lifts "
+             "pole-cell CFL → enables larger --dt at high resolution).",
+    )
+    parser.add_argument(
+        "--polar-filter-cutoff-deg", type=float, default=60.0,
+        help="Latitude (degrees) poleward of which the polar filter "
+             "is applied (default 60.0).",
+    )
+    parser.add_argument(
+        "--polar-filter-max-wave-speed", type=float, default=300.0,
+        help="Max wave speed [m/s] used to size the polar filter "
+             "CFL mask (default 300.0 = external gravity wave).",
+    )
+    # Task #25: JIT compile bloat at production scale.  The inline
+    # SSP-RK3 calls tendency_fn 3× sequentially → XLA inlines three
+    # copies of the entire tendency pipeline.  Folding the 3 stages
+    # into a single ``lax.scan`` body cuts the jaxpr ~2× and the
+    # compile time 1.3–1.9× (measured on lat-lon C-grid + 3 tracers
+    # + polar filter, profile job 8070275).  Same RK3 coefficients,
+    # bit-equivalent output (pinned by
+    # tests/timestepping/test_ssp_rk3_scan_bit_equivalence.py).
+    parser.add_argument(
+        "--time-integrator", type=str, default="ssp_rk3",
+        choices=["ssp_rk3", "ssp_rk3_scan", "ssp_rk34", "ssp_rk54",
+                  "rk4"],
+        help="Time integrator (default ssp_rk3 — IEEE-identical to "
+             "existing runs).  ssp_rk3_scan is the JIT-compile-time "
+             "optimised variant for production lat-lon C-grid AMIP.",
+    )
     parser.add_argument(
         "--implicit-grav-wave-use-pcg", action="store_true",
         default=False,
@@ -121,8 +164,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rh-init", type=float, default=None,
                         help="Initial relative humidity (default 0.7); lower for drier IC")
     parser.add_argument("--ic", type=str, default="default",
-                        choices=["default", "era5"],
-                        help="Initial condition source: 'default' uses held_suarez_init; "
+                        choices=["default", "standard", "era5"],
+                        help="Initial condition source: 'default' uses a uniform "
+                             "T_init rest state; 'standard' uses a realistic "
+                             "constant-lapse-rate atmosphere with an equator-pole "
+                             "surface-temperature gradient (Earth-like CWV); "
                              "'era5' loads reanalysis from --ic-path")
     parser.add_argument("--ic-path", type=str, default="",
                         help="Path to ERA5 Zarr store for --ic era5")
@@ -215,6 +261,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "(112 g-points on the default RRTMG-SW table) so the "
             "radiation solver receives one weight per g-point."
         ))
+    parser.add_argument(
+        "--solar-spectral-band-order", type=str, default="auto",
+        choices=["auto", "as_is", "rrtmg_sw"],
+        help=(
+            "Band ordering of a per-band (14-band) --solar-spectral-var "
+            "input (issue #322).  'auto' (default) rotates to RRTMGP "
+            "order only when the input carries the MPI-M CMIP6 signature "
+            "(SSI_frac variable / swflux_14band filename) and leaves "
+            "generic files untouched.  'rrtmg_sw' always rotates (file "
+            "in RRTMG-SW / CMIP order, 820-2680 cm^-1 band last); "
+            "'as_is' never rotates (file already in RRTMGP order)."
+        ))
 
     # Aerosol
     parser.add_argument("--aerosol-forcing", type=str, default="off",
@@ -275,6 +333,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--topography", type=str, default="flat")
     parser.add_argument("--topo-smoothing", type=int, default=4)
     parser.add_argument("--topo-edge-blend", type=float, default=0.3)
+    parser.add_argument("--land-mask-file", type=str, default="",
+                        help="Land-sea-mask NetCDF (CMIP6 sftlf / ERA5 lsm). "
+                             "When set, activates the slab-land surface tile "
+                             "with the land fraction from this file.")
 
     # Surface / diagnostics
     parser.add_argument("--monthly-means", action="store_true", default=False)
@@ -364,6 +426,12 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         dt=args.dt,
         implicit_grav_wave_use_pcg=args.implicit_grav_wave_use_pcg,
         implicit_grav_wave_damping=args.implicit_grav_wave_damping,
+        # Stage 3-E: polar filter for lat-lon C-grid pole-CFL relief.
+        use_polar_filter=args.use_polar_filter,
+        polar_filter_cutoff_deg=args.polar_filter_cutoff_deg,
+        polar_filter_max_wave_speed=args.polar_filter_max_wave_speed,
+        # Task #25: time integrator selection.
+        time_integrator=args.time_integrator,
     )
 
     output_config = OutputConfig(
@@ -407,6 +475,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         solar_file=args.solar_file,
         solar_tsi_var=args.solar_tsi_var,
         solar_spectral_var=args.solar_spectral_var,
+        solar_spectral_band_order=args.solar_spectral_band_order,
         aerosol_forcing=args.aerosol_forcing,
         aerosol_file=args.aerosol_file,
         aerosol_reference_aod=args.aerosol_reference_aod,
@@ -421,6 +490,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         topography=args.topography,
         topo_smoothing=args.topo_smoothing,
         topo_edge_blend=args.topo_edge_blend,
+        land_mask_path=args.land_mask_file,
         dynamic_albedo=False,
         experiment=args.experiment,
         start_year=args.start_year,
@@ -495,6 +565,13 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser)
     # triple.  ``cdgrid`` is the cubed-sphere C-D grid; keep it as-is.
     if args.discretization == "cgrid" and args.grid_type == "latlon":
         args.discretization = "latlon_cgrid"
+
+    # Normalise the SCVT Voronoi mesh aliases (voronoi / icosahedral /
+    # mpas-as-grid_type) to the canonical ``mpas_voronoi`` before any
+    # downstream consumer sees them.  See
+    # ``legoesm.driver.config.normalize_grid_type``.
+    from legoesm.driver.config import normalize_grid_type
+    args.grid_type = normalize_grid_type(args.grid_type)
 
     # Issue #275 fix C: ``--production-profile`` bundles defaults that
     # the CLI cannot ship as global defaults (because they would silently
@@ -610,6 +687,34 @@ def main(argv: list[str] | None = None):
     parser = build_arg_parser()
     args = parser.parse_args(argv)
     args = _postprocess_args(args, parser)
+
+    # iter-36: dt sanity advisory, generalising the iter-32
+    # AMIP-wrapper fix to the script level. The hard-coded
+    # default(--dt) = 600 was iter-13-validated only at N <= 24.
+    # Higher resolutions (e.g. C48 at dt=600) BLOWUP at day 25.
+    # Warn (don't raise) when the user-supplied dt exceeds the
+    # iter-13/iter-26 cross-grid ladder by > 2× so the operator
+    # can decide whether to override consciously.
+    try:
+        from legoesm.driver.rce_dt import auto_dt_rce
+        try:
+            _auto = auto_dt_rce(args.grid_type, args.resolution)
+        except ValueError:
+            # N > 96 — auto_dt_rce refuses; no comparison possible.
+            _auto = None
+        if _auto is not None and args.dt > 2.0 * _auto:
+            print(
+                f"WARNING: --dt {args.dt:.0f} s exceeds the iter-13/26 "
+                f"AMIP/RCE cross-grid ladder ({_auto:.0f} s for "
+                f"{args.grid_type}/N={args.resolution}) by "
+                f"{args.dt / _auto:.1f}×. Long runs at this dt may "
+                "BLOWUP (see CRM_implementation.md iter-12/20). "
+                "Pass --dt explicitly to suppress this warning.",
+                file=sys.stderr,
+            )
+    except ImportError:
+        pass
+
     config = build_config_from_args(args)
 
     from legoesm.driver.model_driver import ModelDriver

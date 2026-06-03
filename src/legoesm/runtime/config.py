@@ -66,6 +66,7 @@ def bootstrap(
     grid_type: str = "cubed_sphere",
     configure_xla: bool = True,
     allow_level_fallback: bool = False,
+    grid_n: int | None = None,
 ) -> RuntimeConfig:
     """One-shot runtime initialisation.
 
@@ -146,6 +147,7 @@ def bootstrap(
         distributed=distributed,
         grid_type=grid_type,
         allow_level_fallback=allow_level_fallback,
+        grid_n=grid_n,
     )
 
     # 5. Build immutable snapshot --------------------------------------------

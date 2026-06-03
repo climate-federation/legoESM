@@ -21,6 +21,20 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 from legoesm.core.precision import get_policy
+from legoesm.timestepping.tridiagonal import thomas_solve
+
+# Shchepetkin (2015) adaptive-implicit vertical-advection Courant
+# thresholds (NEMO ``ln_zad_Aimp`` PARAMETERs).  Below ``CU_MIN`` the
+# vertical advection is fully explicit; above ``CU_CUT = 2*CU_MAX - CU_MIN``
+# it is fully implicit; in between a smooth ramp blends the two.  These
+# are scheme constants (not physical constants), so they live here as
+# documented module defaults rather than in ``constants.py``; expose as
+# kwargs on the wrapper so a single edit retunes the scheme.
+_AIMP_CU_MIN = 0.15
+_AIMP_CU_MAX = 0.30
+# Layer-thickness floor [m] for advective-tendency / Courant denominators
+# (matches ``flux_form_vertical_momentum_advection``).
+_H_FLOOR = 1.0e-10
 
 
 class OceanZStarCoordinate(NamedTuple):
@@ -808,6 +822,220 @@ def flux_form_vertical_momentum_advection(
     )
     h_u_safe = jnp.maximum(h_u, 1.0e-10)
     return -vert_flux_div / h_u_safe
+
+
+# ---------------------------------------------------------------------------
+# Adaptive-implicit vertical momentum advection
+# (Shchepetkin 2015 / NEMO ``ln_zad_Aimp``)
+# ---------------------------------------------------------------------------
+#
+# Explicit first-order-upwind vertical momentum advection (above) is only
+# stable while the vertical Courant number ``Cw = |w| dt / h`` stays below
+# 1.  In an OMIP cold-start the spurious equatorial pressure-gradient seed
+# drives a transient convergence -> spurious ``w`` -> ``Cw > 1`` in thin
+# cells, and the explicit scheme then amplifies it super-exponentially (the
+# documented "vertadv is the residual amplifier" runaway).  NEMO removes
+# this CFL limit with Shchepetkin's adaptive-implicit scheme: at each
+# interface the vertical velocity is split ``w = w_exp + w_imp`` by a
+# Courant-dependent fraction; ``w_exp`` (Courant-capped) goes through the
+# normal explicit flux-form scheme, and ``w_imp`` is handled by a
+# backward-Euler first-order-upwind solve that is unconditionally stable,
+# monotone, and conservative (an M-matrix tridiagonal).
+#
+# Reference: A.F. Shchepetkin (2015), "An adaptive, Courant-number-dependent
+# implicit scheme for vertical advection in oceanic modeling", Ocean
+# Modelling 91, 38-69.  NEMO impl: sshwzv.F90 (split), trazdf.F90 /
+# dynzdf.F90 (implicit solve).
+
+
+def shchepetkin_implicit_fraction(
+    cu: jnp.ndarray,
+    cu_min: float = _AIMP_CU_MIN,
+    cu_max: float = _AIMP_CU_MAX,
+) -> jnp.ndarray:
+    """Implicit fraction ``zcff(Cu)`` of Shchepetkin (2015) / NEMO wAimp.
+
+    Maps a (non-negative) vertical Courant number ``cu`` to the fraction
+    of the vertical velocity that is treated implicitly:
+
+    - ``cu <= cu_min``                : ``0``  (fully explicit, high order)
+    - ``cu_min < cu < cu_cut``        : ``d² / (Fcu + d²)``, ``d = cu-cu_min``
+    - ``cu >= cu_cut``                : ``(cu - cu_max) / cu``
+    - then clipped to ``<= 1``
+
+    with ``cu_cut = 2 cu_max - cu_min`` and ``Fcu = 4 cu_max (cu_max-cu_min)``.
+    The two interior branches join continuously at ``cu_cut`` (both give
+    ``(cu_max-cu_min)/(2 cu_max-cu_min)``) and the ramp is monotone
+    increasing from 0 to 1.  Pure ``jnp.where`` (no Python control flow) so
+    it is safe on traced Courant numbers and differentiable.
+    """
+    cu_cut = 2.0 * cu_max - cu_min
+    fcu = 4.0 * cu_max * (cu_max - cu_min)
+    d = cu - cu_min
+    mid = (d * d) / (fcu + d * d)
+    # Guard the division in the high branch; cu >= cu_cut > 0 there.
+    high = (cu - cu_max) / jnp.maximum(cu, 1.0e-30)
+    zcff = jnp.where(
+        cu <= cu_min,
+        jnp.zeros_like(cu),
+        jnp.where(cu < cu_cut, mid, high),
+    )
+    return jnp.minimum(zcff, 1.0)
+
+
+def implicit_vertical_advection_ocean(
+    field: jnp.ndarray,
+    w_imp_half: jnp.ndarray,
+    h: jnp.ndarray,
+    dt: float,
+    face_active: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Backward-Euler first-order-upwind vertical advection (one solve).
+
+    Solves, per column, the unconditionally-stable implicit update
+
+        field_new[k] + (dt/h[k]) * (F[k] - F[k+1]) = field[k]
+
+    with the interface-upwind flux ``F[k] = max(w[k],0) field_new[k] +
+    min(w[k],0) field_new[k-1]`` (``w`` positive = upward, interface ``k``
+    sits above level ``k``; ``w[0] = w[nlev] = 0``).  Grouping by unknown
+    gives the tridiagonal system
+
+        a[k] =  dt * min(w_top[k], 0) / h[k]            (sub-diagonal)
+        b[k] =  1 + dt*(max(w_top[k],0) - min(w_bot[k],0)) / h[k]  (diag)
+        c[k] = -dt * max(w_bot[k], 0) / h[k]            (super-diagonal)
+        d[k] =  field[k]                                (rhs)
+
+    where ``w_top = w_imp_half[..., :-1]`` and ``w_bot = w_imp_half[..., 1:]``.
+    This is an M-matrix (``b >= 1``, off-diagonals ``<= 0``) so the
+    backward-Euler step is unconditionally stable and monotone, and the
+    telescoping flux form conserves the column integral ``sum_k h[k]*field[k]``
+    to machine precision (with the zero-flux top/bottom boundaries).
+
+    Solver-conditioning note
+    ------------------------
+    ``thomas_solve`` adds a ``finfo(float32).tiny`` (~1.18e-38) guard to
+    its pivots.  Because ``b >= 1`` here, ``b + tiny`` underflows back to
+    ``b`` at both float32 and float64 (``tiny`` is below the ULP of any
+    number ``>= 1``), and the forward-elimination pivots of a
+    diagonally-dominant M-matrix stay ``O(1)`` so the ``|denom| < tiny``
+    fallback is never selected.  The guard is therefore inert for this
+    matrix class: the solve is *exactly* the conservative finite-volume
+    solve, a ``w = 0`` system is bit-exact identity, and an inactive
+    (``a = c = 0, b = 1``) row reproduces its input to round-off.
+    (Verified: ``test_w_zero_is_exact_identity``,
+    ``test_conservation_machine_precision_high_courant``.)
+
+    Parameters mirror :func:`flux_form_vertical_momentum_advection`.
+    ``face_active`` (1 = wet, 0 = below the partial seafloor) gates the
+    implicit flux at interfaces bordering any inactive cell to exactly
+    zero, so rock cells decouple (``a = c = 0``, ``b = 1`` -> identity) and
+    cannot mix spurious values up the column.
+    """
+    nlev = field.shape[-1]
+    if nlev < 2:
+        return field
+
+    w = w_imp_half
+    if face_active is not None:
+        # Interior interface i (1..nlev-1) is between cells i-1 and i;
+        # gate it to zero unless both are active.  Surface/bottom
+        # interfaces are zero by construction (w_half[0]=w_half[nlev]=0).
+        active_above = face_active[..., :-1]   # cells 0..nlev-2
+        active_below = face_active[..., 1:]    # cells 1..nlev-1
+        face_int = active_above * active_below
+        pad_axes = ((0, 0),) * (face_int.ndim - 1)
+        gate = jnp.pad(face_int, (*pad_axes, (1, 1)))   # (..., nlev+1)
+        w = w * gate
+
+    w_top = w[..., :-1]    # interface above each cell, (..., nlev); w_top[0]=0
+    w_bot = w[..., 1:]     # interface below each cell, (..., nlev); w_bot[-1]=0
+    inv_h = 1.0 / jnp.maximum(h, _H_FLOOR)
+
+    a = dt * jnp.minimum(w_top, 0.0) * inv_h
+    c = -dt * jnp.maximum(w_bot, 0.0) * inv_h
+    b = 1.0 + dt * (jnp.maximum(w_top, 0.0) - jnp.minimum(w_bot, 0.0)) * inv_h
+
+    return thomas_solve(a, b, c, field)
+
+
+def adaptive_implicit_vertical_momentum_advection(
+    u: jnp.ndarray,
+    w_half: jnp.ndarray,
+    h: jnp.ndarray,
+    dt: float,
+    *,
+    cu_min: float = _AIMP_CU_MIN,
+    cu_max: float = _AIMP_CU_MAX,
+    face_active: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Adaptive-implicit vertical momentum advection (Shchepetkin 2015).
+
+    Returns the velocity field ``u`` after one step of vertical advection
+    ``-w du/dz``, split into a Courant-capped explicit part and an
+    unconditionally-stable backward-Euler implicit part so the explicit
+    flux-form scheme can never violate the vertical CFL limit (NEMO
+    ``ln_zad_Aimp``).  Reduces *exactly* to the explicit
+    :func:`flux_form_vertical_momentum_advection` wherever the vertical
+    Courant number stays below ``cu_min`` (``w_imp = 0`` there), so it is a
+    drop-in robustness upgrade that only changes the answer in the
+    high-Courant cells where the explicit scheme is unstable anyway.
+
+    Parameters
+    ----------
+    u : array, shape ``(..., nlev)``
+        Velocity at the momentum point (u-face or v-face).
+    w_half : array, shape ``(..., nlev+1)``
+        Vertical velocity on interfaces at the same momentum point,
+        positive up, zero at surface and bottom.
+    h : array, shape ``(..., nlev)``
+        Layer thickness at the momentum point.
+    dt : float
+        Time step [s].
+    cu_min, cu_max : float
+        Shchepetkin Courant thresholds (see
+        :func:`shchepetkin_implicit_fraction`).
+    face_active : array | None, shape ``(..., nlev)``
+        Per-level face-activity mask (1 = wet, 0 = below seafloor).
+    """
+    nlev = u.shape[-1]
+    if nlev < 2:
+        return u
+
+    inv_h = 1.0 / jnp.maximum(h, _H_FLOOR)
+    # Per-cell vertical (outflow) Courant number: the upward outflow
+    # through the top interface plus the downward outflow through the
+    # bottom interface, normalised by the cell thickness.  This is the
+    # quantity the vertical-advection CFL limit constrains.  (NEMO also
+    # folds in the horizontal flux divergence to form a single combined
+    # Courant number; we use the vertical-only Courant because only the
+    # vertical advection is being made implicit here -- the horizontal
+    # CFL is governed separately by dt and the grid spacing.)
+    w_top = w_half[..., :-1]
+    w_bot = w_half[..., 1:]
+    cu_cell = dt * (jnp.maximum(w_top, 0.0) - jnp.minimum(w_bot, 0.0)) * inv_h
+
+    # Interface Courant number = max over the two adjacent cells
+    # (interior interfaces 1..nlev-1); pad the surface/bottom interfaces
+    # with zero (w_half is zero there anyway).
+    cu_iface = jnp.maximum(cu_cell[..., :-1], cu_cell[..., 1:])  # (..., nlev-1)
+    zcff_int = shchepetkin_implicit_fraction(cu_iface, cu_min, cu_max)
+    pad_axes = ((0, 0),) * (zcff_int.ndim - 1)
+    zcff = jnp.pad(zcff_int, (*pad_axes, (1, 1)))                # (..., nlev+1)
+
+    w_imp = zcff * w_half
+    w_exp = (1.0 - zcff) * w_half
+
+    # Explicit (Courant-capped) part through the existing flux-form scheme.
+    tend_exp = flux_form_vertical_momentum_advection(
+        u, w_exp, h, face_active=face_active,
+    )
+    u_exp = u + dt * tend_exp
+
+    # Implicit part: unconditionally-stable backward-Euler upwind solve.
+    return implicit_vertical_advection_ocean(
+        u_exp, w_imp, h, dt, face_active=face_active,
+    )
 
 
 def flux_form_vertical_tracer_advection(

@@ -7,6 +7,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 
+from legoesm import constants
 from legoesm.coupler.config import TileConfig
 from legoesm.coupler.coupling_fields import SurfaceToAtm, TileResponse
 
@@ -34,7 +35,17 @@ def compute_tile_fractions(
     f_land = jnp.clip(tile_config.f_land, 0.0, 1.0)
     f_lake = jnp.clip(tile_config.f_lake, 0.0, 1.0)
     total_static = f_land + f_lake
-    static_scale = jnp.where(total_static > 1.0, 1.0 / total_static, 1.0)
+    # Floor the reciprocal denominator at 1.0 so the *dead* branch of the where
+    # never forms 1/0 at total_static = 0 (a pure-ocean cell, f_land = f_lake =
+    # 0 — the most common cell).  The reciprocal is only *selected* when
+    # total_static > 1, where ``maximum(total_static, 1.0) == total_static`` keeps
+    # it bit-identical; without the floor, reverse-mode AD differentiates
+    # ``1/total_static`` at 0 -> inf and the where injects ``0*inf = NaN`` into
+    # d/d(f_land), d/d(f_lake) for every ocean cell (tile-mask sensitivity /
+    # end-to-end adjoint).
+    static_scale = jnp.where(
+        total_static > 1.0, 1.0 / jnp.maximum(total_static, 1.0), 1.0
+    )
     f_land = f_land * static_scale
     f_lake = f_lake * static_scale
 
@@ -62,9 +73,24 @@ def blend_tiles(
     fi = fracs.f_ice
     fl = fracs.f_land
     fk = fracs.f_lake
+    # Water fraction (ocean + ice).  The sea-ice tile returns its ice->ocean
+    # mass/energy EXCHANGE fluxes (freshwater / heat / salt) as PER-GRID-CELL
+    # (per-water-area) budgets — it has already summed the per-process,
+    # per-category area weights internally — so they are blended with the full
+    # water fraction, NOT ``f_ice``.  This delivers the exact per-cell budget
+    # regardless of how the ice fraction evolved within the step (melt retreat,
+    # terminal melt-out, new-ice formation, ridging, ITD remap), and avoids any
+    # 1/conc normalisation that could blow up as a cell melts out.  F11.
+    f_water = fo + fi
 
     def _blend(o, i, l, k):
         return fo * o + fi * i + fl * l + fk * k
+
+    def _blend_exchange(o, i, l, k):
+        # Ice term is per-grid-cell (per-water-area) -> weight by f_water; the
+        # other tiles' contributions (ocean P-E, land runoff, lake P-E) are
+        # per-tile-area and keep their own fractions.
+        return fo * o + f_water * i + fl * l + fk * k
 
     return SurfaceToAtm(
         T_surface=_blend(ocean_resp.T_surface, ice_resp.T_surface,
@@ -79,8 +105,29 @@ def blend_tiles(
                          land_resp.q_surface, lake_resp.q_surface),
         shflx=_blend(ocean_resp.shflx, ice_resp.shflx,
                      land_resp.shflx, lake_resp.shflx),
-        lhflx=_blend(ocean_resp.lhflx, ice_resp.lhflx,
-                     land_resp.lhflx, lake_resp.lhflx),
+        # Latent heat flux.  The SEA-ICE latent term is delivered on the SAME
+        # realized per-cell / f_water basis as its moisture (surface_mass_flux):
+        # L_s * (per-cell sublimation mass), so the atmosphere's ice latent
+        # ENERGY and water MASS agree exactly and both survive terminal melt-out
+        # (post-step f_ice -> 0 would otherwise drop the energy while the mass,
+        # blended by f_water, is delivered).  Equals f_ice*ice_lhflx in the
+        # steady no-clamp limit (L_s*surface_mass_flux = lhflx*conc_pre).  Ocean
+        # evap / land ET / lake evap keep their own instantaneous fractions
+        # (#28, codex; mirrors the F11 exchange convention).
+        #
+        # NOTE (bounded surface-energy residual, tracked with #28): the sea-ice
+        # surface energy balance inside step_sea_ice forms Q_sfc with the
+        # UNCAPPED bulk lhflx, while this delivers the REALIZED (capped) latent
+        # energy to the atmosphere.  When the over-ablation cap fires the two
+        # differ by L_s*(uncapped - realized) sublimation -- bounded by the thin
+        # column's latent capacity (L_s*rho_ice*h/dt) and only on sub-cm clamped
+        # ice -- so the atmosphere energy & water now pair exactly but the ice
+        # thermo solve was cooled by slightly more latent than the atmosphere
+        # received.  Closing this exactly needs an implicit latent-cap in the
+        # T_new solve (a thermo rework); the mass budget IS closed here.
+        lhflx=(fo * ocean_resp.lhflx
+               + f_water * (constants.L_s * ice_resp.surface_mass_flux)
+               + fl * land_resp.lhflx + fk * lake_resp.lhflx),
         tau_x=_blend(ocean_resp.tau_x, ice_resp.tau_x,
                      land_resp.tau_x, lake_resp.tau_x),
         tau_y=_blend(ocean_resp.tau_y, ice_resp.tau_y,
@@ -93,16 +140,19 @@ def blend_tiles(
                            land_resp.v_ocean_sfc, lake_resp.v_ocean_sfc),
         co2_flux=_blend(ocean_resp.co2_flux, ice_resp.co2_flux,
                         land_resp.co2_flux, lake_resp.co2_flux),
-        # Tile-blended freshwater flux to the ocean.  Each tile
-        # populates freshwater_flux as a populated array (zeros for
-        # tiles that don't deliver freshwater), so this blend is a
-        # straight area-weighted sum.
-        freshwater_flux=_blend(
+        # Tile-blended freshwater flux to the ocean.  Each tile populates
+        # freshwater_flux (zeros for tiles that don't deliver freshwater).
+        # The ice tile's melt/freeze freshwater is a mass TRANSFER from the
+        # ice present during the step, so it carries the exchange-area weight
+        # (F11); the ocean P-E / land runoff / lake P-E terms keep their normal
+        # fractions.
+        freshwater_flux=_blend_exchange(
             ocean_resp.freshwater_flux, ice_resp.freshwater_flux,
             land_resp.freshwater_flux, lake_resp.freshwater_flux,
         ),
-        # Tile-blended heat extracted from the ocean by ice.  Audit F8.
-        ocean_heat_extraction=_blend(
+        # Tile-blended heat extracted from the ocean by ice (ice-only channel;
+        # an energy TRANSFER -> exchange-area weight).  Audit F8 / F11.
+        ocean_heat_extraction=_blend_exchange(
             ocean_resp.ocean_heat_extraction,
             ice_resp.ocean_heat_extraction,
             land_resp.ocean_heat_extraction,
@@ -117,14 +167,21 @@ def blend_tiles(
             ocean_resp.ocean_stress_y, ice_resp.ocean_stress_y,
             land_resp.ocean_stress_y, lake_resp.ocean_stress_y,
         ),
-        # Phase-aware blended surface mass flux.  Audit F3.
-        surface_mass_flux=_blend(
+        # Phase-aware blended surface mass flux (Audit F3).  The sea-ice tile
+        # returns its REALIZED sublimation/deposition mass as a PER-GRID-CELL
+        # flux (already weighted by the pre-step ice fraction inside the kernel),
+        # so it carries the exchange-area weight f_water like the other ice
+        # transfer channels -- this delivers the ice's atmosphere water loss in
+        # full even at terminal melt-out (post-step f_ice -> 0 would otherwise
+        # drop it), keeping the ice + ocean + atmosphere water budget closed
+        # (#28).  Ocean P-E / land ET / lake P-E keep their own fractions.
+        surface_mass_flux=_blend_exchange(
             ocean_resp.surface_mass_flux, ice_resp.surface_mass_flux,
             land_resp.surface_mass_flux, lake_resp.surface_mass_flux,
         ),
-        # Salt-flux blend (only sea-ice tile is non-zero in current
-        # implementation; other tiles return zeros).
-        salt_flux=_blend(
+        # Salt-flux blend (only sea-ice tile is non-zero; brine rejection /
+        # melt is a salt-mass TRANSFER -> exchange-area weight).  F11.
+        salt_flux=_blend_exchange(
             ocean_resp.salt_flux, ice_resp.salt_flux,
             land_resp.salt_flux, lake_resp.salt_flux,
         ),

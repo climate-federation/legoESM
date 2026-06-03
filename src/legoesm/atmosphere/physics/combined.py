@@ -183,13 +183,24 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     if config.convection.scheme != "none":
         tagged_fns.append((make_convection_physics(config.convection, model_type, dt), True, "conv_prog_profile"))
     if config.turbulence.scheme != "none":
-        tagged_fns.append((make_turbulence_physics(config.turbulence, model_type, dt), True, "tke"))
+        # MYNN-2.5 writes its prognostic ``qke = 2·TKE`` into a
+        # dedicated PhysicsState field so a restart-time scheme switch
+        # cannot silently feed the wrong moment as energy (Phase C
+        # codex iter-1 medium finding).
+        _turb_field = (
+            "qke" if config.turbulence.scheme == "mynn25" else "tke"
+        )
+        tagged_fns.append((
+            make_turbulence_physics(config.turbulence, model_type, dt),
+            True,
+            _turb_field,
+        ))
     if config.microphysics.scheme != "none":
         tagged_fns.append((make_microphysics_physics(config.microphysics, model_type, dt), False, None))
     if config.gravity_wave_drag.scheme != "none":
         tagged_fns.append((make_gwd_physics(config.gravity_wave_drag, model_type, dt), True, "gwd_spectrum"))
 
-    def physics_fn(state, grid, sigma_coord, phys_state=None):
+    def physics_fn(state, grid, sigma_coord, phys_state=None, forcing=None):
         has_v = state.v is not None
 
         if not tagged_fns:
@@ -219,7 +230,11 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
 
         fn0, accepts_ps, field_name = tagged_fns[0]
         if accepts_ps:
-            first, field_val = fn0(state, grid, sigma_coord, phys_state=phys_state)
+            if getattr(fn0, "_wants_forcing", False):
+                first, field_val = fn0(state, grid, sigma_coord,
+                                       phys_state=phys_state, forcing=forcing)
+            else:
+                first, field_val = fn0(state, grid, sigma_coord, phys_state=phys_state)
             if field_val is not None and field_name is not None:
                 # Multi-field updates (e.g., Bechtold's conv_prog_profile
                 # and conv_stoch_state) are returned as a dict, which
@@ -229,7 +244,10 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                 else:
                     phys_updates[field_name] = field_val
         else:
-            first = fn0(state, grid, sigma_coord)
+            if getattr(fn0, "_wants_forcing", False):
+                first = fn0(state, grid, sigma_coord, forcing=forcing)
+            else:
+                first = fn0(state, grid, sigma_coord)
         du_dt = first.du_dt.data
         dv_dt = first.dv_dt.data if first.dv_dt is not None else None
         dT_dt = first.dT_dt.data
@@ -244,7 +262,11 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
 
         for fn, accepts_ps, field_name in tagged_fns[1:]:
             if accepts_ps:
-                t, field_val = fn(state, grid, sigma_coord, phys_state=phys_state)
+                if getattr(fn, "_wants_forcing", False):
+                    t, field_val = fn(state, grid, sigma_coord,
+                                      phys_state=phys_state, forcing=forcing)
+                else:
+                    t, field_val = fn(state, grid, sigma_coord, phys_state=phys_state)
                 if field_val is not None and field_name is not None:
                     # Match the first-iteration branch: dict updates
                     # (e.g., Bechtold's conv_prog_profile +
@@ -256,7 +278,10 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                     else:
                         phys_updates[field_name] = field_val
             else:
-                t = fn(state, grid, sigma_coord)
+                if getattr(fn, "_wants_forcing", False):
+                    t = fn(state, grid, sigma_coord, forcing=forcing)
+                else:
+                    t = fn(state, grid, sigma_coord)
             du_dt = du_dt + t.du_dt.data
             if dv_dt is not None and t.dv_dt is not None:
                 dv_dt = dv_dt + t.dv_dt.data
@@ -308,8 +333,23 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             if callable(st):
                 st(day_of_year, seconds_of_day)
 
+    def set_T_sfc_override(value):
+        """Propagate prescribed-T_sfc override to sub-physics that honour
+        the hook (currently radiation; turbulence reads from PhysicsState).
+
+        Called by the single-column driver when
+        ``SCMForcing(prescribe="T_s")`` so the radiative surface
+        boundary stays in sync with turbulence's bulk-flux boundary
+        (Phase B v2 codex iter-2 finding).
+        """
+        for fn, _, _ in tagged_fns:
+            st = getattr(fn, "set_T_sfc_override", None)
+            if callable(st):
+                st(value)
+
     physics_fn.reset_state = reset_state
     physics_fn.set_time = set_time
+    physics_fn.set_T_sfc_override = set_T_sfc_override
     return physics_fn
 
 
@@ -324,7 +364,17 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
     if config.convection.scheme != "none":
         tagged_fns.append((make_convection_physics(config.convection, "nonhydrostatic", dt), True, "conv_prog_profile"))
     if config.turbulence.scheme != "none":
-        tagged_fns.append((make_turbulence_physics(config.turbulence, "nonhydrostatic", dt), True, "tke"))
+        # Phase C codex iter-2 high: route MYNN-2.5 to ``qke``
+        # (PhysicsState) so a non-SCM nonhydrostatic run also persists
+        # qke across steps.
+        _turb_field = (
+            "qke" if config.turbulence.scheme == "mynn25" else "tke"
+        )
+        tagged_fns.append((
+            make_turbulence_physics(config.turbulence, "nonhydrostatic", dt),
+            True,
+            _turb_field,
+        ))
     if config.microphysics.scheme != "none":
         tagged_fns.append((make_microphysics_physics(config.microphysics, "nonhydrostatic", dt), False, None))
     if config.gravity_wave_drag.scheme != "none":
@@ -421,8 +471,17 @@ def _make_nonhydrostatic_combined(config: PhysicsConfig, dt: float) -> Callable:
             if callable(st):
                 st(day_of_year, seconds_of_day)
 
+    def set_T_sfc_override(value):
+        """Propagate prescribed-T_sfc override to sub-physics radiation
+        modules (SCM Phase B v2)."""
+        for fn, _, _ in tagged_fns:
+            st = getattr(fn, "set_T_sfc_override", None)
+            if callable(st):
+                st(value)
+
     physics_fn.reset_state = reset_state
     physics_fn.set_time = set_time
+    physics_fn.set_T_sfc_override = set_T_sfc_override
     return physics_fn
 
 
@@ -437,7 +496,16 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
     if config.convection.scheme != "none":
         tagged_fns.append((make_convection_physics(config.convection, "spectral_pe", dt), True, "conv_prog_profile"))
     if config.turbulence.scheme != "none":
-        tagged_fns.append((make_turbulence_physics(config.turbulence, "spectral_pe", dt), True, "tke"))
+        # Phase C codex iter-2 high: route MYNN-2.5 to ``qke`` on the
+        # spectral PE combined path too.
+        _turb_field = (
+            "qke" if config.turbulence.scheme == "mynn25" else "tke"
+        )
+        tagged_fns.append((
+            make_turbulence_physics(config.turbulence, "spectral_pe", dt),
+            True,
+            _turb_field,
+        ))
     if config.microphysics.scheme != "none":
         tagged_fns.append((make_microphysics_physics(config.microphysics, "spectral_pe", dt), False, None))
     if config.gravity_wave_drag.scheme != "none":
@@ -581,8 +649,17 @@ def _make_spectral_pe_combined(config: PhysicsConfig, dt: float) -> Callable:
             if callable(st):
                 st(day_of_year, seconds_of_day)
 
+    def set_T_sfc_override(value):
+        """Propagate prescribed-T_sfc override to sub-physics radiation
+        modules (SCM Phase B v2)."""
+        for fn, _, _ in tagged_fns:
+            st = getattr(fn, "set_T_sfc_override", None)
+            if callable(st):
+                st(value)
+
     physics_fn.reset_state = reset_state
     physics_fn.set_time = set_time
+    physics_fn.set_T_sfc_override = set_T_sfc_override
     return physics_fn
 
 

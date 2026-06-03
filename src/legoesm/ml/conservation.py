@@ -54,10 +54,17 @@ def correct_dry_air_mass(
     """
     # Area weights: w(lat) for Gaussian quadrature, uniform in longitude
     w = grid.weights[:, None]  # (n_lat, 1)
+    # Total spherical area weight: latitude weights summed, replicated over
+    # all n_lon longitudes.
     w_total = jnp.sum(w) * grid.n_lon
 
-    # Global mean difference
-    dp = jnp.sum((p_s_new - p_s_old) * w) * grid.n_lon / w_total
+    # Area-weighted global-mean surface-pressure difference.  Summing
+    # ``(p_s_new - p_s_old) * w`` over (lat, lon) already accumulates all
+    # n_lon longitudes, so divide by the full ``w_total`` directly.  (The
+    # previous form multiplied the numerator by an extra ``grid.n_lon``,
+    # which double-counted longitude and made ``dp`` n_lon-times too large —
+    # the correction then only no-op'd near zero imbalance.)
+    dp = jnp.sum((p_s_new - p_s_old) * w) / w_total
 
     return p_s_new - dp
 

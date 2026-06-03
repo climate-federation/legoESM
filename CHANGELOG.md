@@ -8,7 +8,7 @@ All notable changes to legoESM. Format roughly follows
 ### Atmosphere
 
 - **Single-column model (SCM)** (`legoesm.atmosphere.scm`,
-  `scripts/run_scm_rce.py`): dycore-free driver that reuses the full
+  `scripts/run_scm_test_matrix.py`): dycore-free driver that reuses the full
   physics factory. Includes a swap-matrix sweep crossing every
   parameterization with every time integrator
   (`forward_euler`, `rk2`, `rk4`). Integrator/physics compatibility

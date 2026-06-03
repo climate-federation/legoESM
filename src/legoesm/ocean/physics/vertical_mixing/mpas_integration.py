@@ -176,6 +176,7 @@ def make_kpp_physics_mpas(config: VerticalMixingConfig) -> Callable:
         tau_y = getattr(surface_forcing, "tau_y", None) if surface_forcing else None
         q_net = getattr(surface_forcing, "q_net", None) if surface_forcing else None
         fw = getattr(surface_forcing, "freshwater", None) if surface_forcing else None
+        salt = getattr(surface_forcing, "salt_flux", None) if surface_forcing else None
 
         Q_sfc_T = None
         B_f = None
@@ -188,13 +189,42 @@ def make_kpp_physics_mpas(config: VerticalMixingConfig) -> Callable:
             B_f = -constants.g * alpha * Q_sfc_T
 
         Q_sfc_S = None
-        if fw is not None:
+        if fw is not None or salt is not None:
             S_sfc = S_3d[..., 0]
             T_sfc = T_3d[..., 0]
             p_sfc = jnp.zeros_like(T_sfc)
             beta = haline_contraction_coeff(T_sfc, S_sfc, p_sfc)
-            Q_sfc_S = -S_sfc * fw / _RHO_0
-            B_salt = constants.g * beta * Q_sfc_S
+            B_salt = jnp.zeros_like(S_sfc)
+            # Explicit ZERO non-local salinity flux baseline.  Leaving Q_sfc_S
+            # None makes kpp_vertical_mixing DIAGNOSE a non-local salinity flux
+            # from the near-surface gradient (K_sfc*dS/dz) — which would inject a
+            # KPP non-local salt term whenever salt_flux is present without
+            # freshwater.  The real salt is handled by the explicit floored-h_k
+            # source (buoyancy-only here), so the salt non-local flux must be 0.
+            Q_sfc_S = jnp.zeros_like(S_sfc)
+            if fw is not None:
+                # Freshwater dilution (virtual salt): stabilizing on melt.
+                # Feeds BOTH the surface buoyancy and the KPP non-local
+                # redistribution (Q_sfc_S).  Virtual salt is not a conserved
+                # real mass, so the partial-cell non-local masking residual is
+                # an accepted closure approximation.
+                Q_sfc_S = -S_sfc * jnp.asarray(fw, S_sfc.dtype) / _RHO_0
+                B_salt = B_salt + constants.g * beta * Q_sfc_S
+            if salt is not None:
+                # Real brine salt-mass flux: destabilizing.  Feeds the surface
+                # BUOYANCY ONLY — deliberately NOT added to Q_sfc_S (the KPP
+                # non-local salinity flux).  The net real-salt injection is the
+                # explicit, mass-exact floored-h_k source in
+                # mpas_ocean_baroclinic_tendencies; adding salt to the non-local
+                # term would inject a SECOND real-salt contribution that is NOT
+                # mass-conservative on partial cells (the non-local tendency is
+                # built on the full reference grid then masked to active levels,
+                # so its actual-thickness column integral is nonzero when the
+                # boundary layer reaches a shallow partial seafloor).
+                # Buoyancy-only keeps MPAS real-salt mass exact everywhere while
+                # still deepening the boundary layer under brine rejection.
+                B_salt = B_salt + constants.g * beta * (
+                    jnp.asarray(salt, S_sfc.dtype) * 1.0e3 / _RHO_0)
             B_f = B_salt if B_f is None else (B_f + B_salt)
 
         # Zero-out fields on land cells so KPP doesn't see junk values.
@@ -404,6 +434,7 @@ def make_kpp_profiles_mpas(config: VerticalMixingConfig) -> Callable:
         tau_y = getattr(surface_forcing, "tau_y", None) if surface_forcing else None
         q_net = getattr(surface_forcing, "q_net", None) if surface_forcing else None
         fw = getattr(surface_forcing, "freshwater", None) if surface_forcing else None
+        salt = getattr(surface_forcing, "salt_flux", None) if surface_forcing else None
 
         Q_sfc_T = None
         B_f = None
@@ -416,13 +447,42 @@ def make_kpp_profiles_mpas(config: VerticalMixingConfig) -> Callable:
             B_f = -constants.g * alpha * Q_sfc_T
 
         Q_sfc_S = None
-        if fw is not None:
+        if fw is not None or salt is not None:
             S_sfc = S_3d[..., 0]
             T_sfc = T_3d[..., 0]
             p_sfc = jnp.zeros_like(T_sfc)
             beta = haline_contraction_coeff(T_sfc, S_sfc, p_sfc)
-            Q_sfc_S = -S_sfc * fw / _RHO_0
-            B_salt = constants.g * beta * Q_sfc_S
+            B_salt = jnp.zeros_like(S_sfc)
+            # Explicit ZERO non-local salinity flux baseline.  Leaving Q_sfc_S
+            # None makes kpp_vertical_mixing DIAGNOSE a non-local salinity flux
+            # from the near-surface gradient (K_sfc*dS/dz) — which would inject a
+            # KPP non-local salt term whenever salt_flux is present without
+            # freshwater.  The real salt is handled by the explicit floored-h_k
+            # source (buoyancy-only here), so the salt non-local flux must be 0.
+            Q_sfc_S = jnp.zeros_like(S_sfc)
+            if fw is not None:
+                # Freshwater dilution (virtual salt): stabilizing on melt.
+                # Feeds BOTH the surface buoyancy and the KPP non-local
+                # redistribution (Q_sfc_S).  Virtual salt is not a conserved
+                # real mass, so the partial-cell non-local masking residual is
+                # an accepted closure approximation.
+                Q_sfc_S = -S_sfc * jnp.asarray(fw, S_sfc.dtype) / _RHO_0
+                B_salt = B_salt + constants.g * beta * Q_sfc_S
+            if salt is not None:
+                # Real brine salt-mass flux: destabilizing.  Feeds the surface
+                # BUOYANCY ONLY — deliberately NOT added to Q_sfc_S (the KPP
+                # non-local salinity flux).  The net real-salt injection is the
+                # explicit, mass-exact floored-h_k source in
+                # mpas_ocean_baroclinic_tendencies; adding salt to the non-local
+                # term would inject a SECOND real-salt contribution that is NOT
+                # mass-conservative on partial cells (the non-local tendency is
+                # built on the full reference grid then masked to active levels,
+                # so its actual-thickness column integral is nonzero when the
+                # boundary layer reaches a shallow partial seafloor).
+                # Buoyancy-only keeps MPAS real-salt mass exact everywhere while
+                # still deepening the boundary layer under brine rejection.
+                B_salt = B_salt + constants.g * beta * (
+                    jnp.asarray(salt, S_sfc.dtype) * 1.0e3 / _RHO_0)
             B_f = B_salt if B_f is None else (B_f + B_salt)
 
         # Zero-out fields on land cells; fill sub-seafloor levels.

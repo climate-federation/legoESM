@@ -396,7 +396,7 @@ class TestRCEMIPCompose:
         rad_fn = make_radiation_physics(rad_cfg, model_type="plane")
         sfc_fn = _make_surface_flux_physics(
             plane_setup["grid"], plane_setup["hc"], plane_setup["tm"],
-            Cd=1e-3, Ch=1e-3, T_sfc=300.0, q_sfc=0.018,
+            T_sfc=300.0, p_sfc=1.0e5,
         )
         t_rad = rad_fn(
             plane_setup["state"], plane_setup["grid"],

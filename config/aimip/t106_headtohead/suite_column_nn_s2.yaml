@@ -1,0 +1,6 @@
+base: config/aimip/t106_headtohead/base.yaml
+variants:
+- column_nn
+output_dir: results/aimip_t106_headtohead_column_nn_s2
+cfg_overrides:
+  nn_seed: 2

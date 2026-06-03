@@ -220,6 +220,97 @@ def compute_halo_interp_offsets(n: int) -> jnp.ndarray:
     return jnp.array(offsets, dtype=jnp.float64)
 
 
+def _ed_indomain_boundary_strip(arr, edge, n, ext):
+    """In-domain boundary strip (length n, ascending array order) of an
+    ``(M, M)`` padded gnomonic_ed face, in-domain block ``[ext:ext+n]``."""
+    if edge == WEST:
+        return arr[ext, ext:ext + n]
+    elif edge == EAST:
+        return arr[ext + n - 1, ext:ext + n]
+    elif edge == SOUTH:
+        return arr[ext:ext + n, ext]
+    else:  # NORTH
+        return arr[ext:ext + n, ext + n - 1]
+
+
+def _ed_halo_strip(arr, edge, n, ext, depth):
+    """Halo strip at ``depth`` cells beyond ``edge`` (depth 0 = adjacent to the
+    in-domain boundary), length n, ascending array order."""
+    if edge == WEST:
+        return arr[ext - 1 - depth, ext:ext + n]
+    elif edge == EAST:
+        return arr[ext + n + depth, ext:ext + n]
+    elif edge == SOUTH:
+        return arr[ext:ext + n, ext - 1 - depth]
+    else:  # NORTH
+        return arr[ext:ext + n, ext + n + depth]
+
+
+def _compute_halo_interp_offsets_ed_hN(n: int, halo: int) -> jnp.ndarray:
+    """gnomonic_ed cross-face halo interp offsets, ``(6, 4, halo, n)``.
+
+    Position-matching on the actual extended gnomonic_ed cell centres
+    (`_gnomonic_ed_padded_centers`, which extend cleanly into the halo): each
+    halo cell (depth 0..halo-1 beyond an edge) is matched to its neighbour's
+    in-domain edge strip via a parabola-vertex fit on great-circle distance,
+    giving the true fractional index; ``δ = frac − j``.  gnomonic_ed-specific
+    (the equiangular analytic offsets are the wrong geometry — codex gating
+    blocker).
+    """
+    from legoesm.grids.cubed_sphere import _gnomonic_ed_padded_centers
+
+    ext = halo + 1
+    lon, lat = _gnomonic_ed_padded_centers(n, halo)  # (6, M, M), M=n+2*halo+2
+    lon = np.asarray(lon)
+    lat = np.asarray(lat)
+    xyz = np.stack([
+        np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)
+    ], axis=-1)
+
+    edges = [WEST, EAST, SOUTH, NORTH]
+    offsets = np.zeros((6, 4, halo, n), dtype=np.float64)
+
+    for face in range(6):
+        for edge_idx, edge in enumerate(edges):
+            nbr_face, nbr_edge, is_reversed = CONNECTIVITY[face][edge]
+            nbr_strip = _ed_indomain_boundary_strip(xyz[nbr_face], nbr_edge, n, ext)
+            for depth in range(halo):
+                halo_strip = _ed_halo_strip(xyz[face], edge, n, ext, depth)
+                for j in range(n):
+                    d2 = np.sum((nbr_strip - halo_strip[j][None, :]) ** 2, axis=1)
+                    k = int(np.argmin(d2))
+                    if 0 < k < n - 1:
+                        dl, dc, dr = d2[k - 1], d2[k], d2[k + 1]
+                        denom = dl - 2.0 * dc + dr
+                        delta = (0.5 * (dl - dr) / denom
+                                 if abs(denom) > 1e-30 else 0.0)
+                        delta = float(np.clip(delta, -1.0, 1.0))
+                    else:
+                        delta = 0.0
+                    frac = k + delta
+                    if is_reversed:
+                        frac = (n - 1) - frac
+                    offsets[face, edge_idx, depth, j] = frac - j
+
+    return jnp.array(offsets, dtype=jnp.float64)
+
+
+def compute_halo_interp_offsets_ed(n: int) -> jnp.ndarray:
+    """gnomonic_ed counterpart of :func:`compute_halo_interp_offsets` —
+    ``(6, 4, n)`` (halo=1, squeezed).  See :func:`_compute_halo_interp_offsets_ed_hN`."""
+    return _compute_halo_interp_offsets_ed_hN(n, 1)[:, :, 0, :]
+
+
+def compute_halo_interp_offsets_ed_h2(n: int) -> jnp.ndarray:
+    """gnomonic_ed counterpart of :func:`compute_halo_interp_offsets_h2` — ``(6, 4, 2, n)``."""
+    return _compute_halo_interp_offsets_ed_hN(n, 2)
+
+
+def compute_halo_interp_offsets_ed_h3(n: int) -> jnp.ndarray:
+    """gnomonic_ed counterpart of :func:`compute_halo_interp_offsets_h3` — ``(6, 4, 3, n)``."""
+    return _compute_halo_interp_offsets_ed_hN(n, 3)
+
+
 def compute_halo_interp_offsets_h2(n: int) -> jnp.ndarray:
     """Precompute fractional-index offsets for halo=2 exchange.
 
@@ -395,14 +486,24 @@ def set_halo_backend(backend: str, topology=None) -> None:
         ``"spmd"`` uses ``shard_map`` + ``all_gather`` for explicit
         multi-GPU collectives (set via
         :func:`parallel.cubesphere_exchange.activate_spmd_halo_backend`).
-    topology : CommTopology, optional
-        Required when ``backend="mpi"``.
+    topology : CommTopology or LatLonBandLayout, optional
+        Required when ``backend="mpi"``.  Cubed-sphere passes a
+        :class:`~legoesm.parallel.comm.CommTopology`; the lat-lon
+        band path passes a
+        :class:`~legoesm.parallel.latlon_mpi.LatLonBandLayout`.  The
+        per-grid ``pad_halo*`` functions branch on the topology's
+        type, so a single backend slot serves both grids and the
+        conservation reductions' ``_is_distributed()`` gate fires
+        uniformly.
     """
     global _halo_backend, _mpi_topology
     if backend not in ("local", "mpi", "spmd"):
         raise ValueError(f"Unknown halo backend: {backend!r}")
     if backend == "mpi" and topology is None:
-        raise ValueError("CommTopology is required for MPI halo backend")
+        raise ValueError(
+            "MPI halo backend requires a topology "
+            "(CommTopology for cubed-sphere, LatLonBandLayout for lat-lon)."
+        )
     _halo_backend = backend
     _mpi_topology = topology
 
@@ -410,6 +511,18 @@ def set_halo_backend(backend: str, topology=None) -> None:
 def get_halo_backend() -> str:
     """Return the current halo exchange backend name."""
     return _halo_backend
+
+
+def get_mpi_topology():
+    """Return the active MPI topology object (or ``None``).
+
+    Cubed-sphere callers receive a
+    :class:`~legoesm.parallel.comm.CommTopology`; lat-lon callers
+    receive a
+    :class:`~legoesm.parallel.latlon_mpi.LatLonBandLayout`.  Each
+    grid's halo-pad dispatch checks the type before consuming it.
+    """
+    return _mpi_topology
 
 
 # ==============================================================================
@@ -570,26 +683,18 @@ def pad_halo(
         # all handle three halo depths, and corner cells are filled by
         # `_fill_corners_h3`.
         #
-        # Iter-631 (Codex stop-time finding on iter-630): the MPI helpers
-        # do NOT honor `interp_offsets` — they do a nearest-index copy
-        # only.  Before iter-630 this silent-drop was unreachable on the
-        # halo=3 path because of the halo=3 guard; removing that guard
-        # newly exposed the hazard.  Refuse with a clear error instead of
-        # silently producing wrong results.  `duogrid` is handled below
-        # in the MPI path via the scalar `pad_halo_mpi` + post-dispatch
-        # `cube_rmp_vectorized` (offsets is None there by construction of
-        # line 541), so it is NOT affected.
-        if offsets is not None:
-            raise NotImplementedError(
-                "pad_halo(interp_offsets=...) is not supported on the "
-                "MPI backend: `pad_halo_mpi` does a nearest-index copy "
-                "only.  If you need interpolated halo placement under "
-                "MPI, either (a) teach `pad_halo_mpi` / `pad_halo_mpi_4d` "
-                "to carry offsets and apply `_interp_strip_*` on the "
-                "receive side, or (b) pre-interpolate before calling "
-                "pad_halo.  Single-device backend supports this today.")
+        # FV3_3D 2026-05-27: option (a) implemented — `pad_halo_mpi`
+        # now carries `interp_offsets` through to the face-only receive
+        # path and applies `_interp_strip` strip-by-strip.  This brings
+        # the duogrid Lagrange-extrapolated halo to MPI, making the
+        # FV3 3D PE/NH cubed-sphere paths bit-for-bit identical to the
+        # single-device backend under MPI.  Sub-face tiling still
+        # refuses — the `(6, 4, n)` offsets are global-face-indexed,
+        # tile-local indexing has not been derived.
         from legoesm.parallel.halo_exchange import pad_halo_mpi
-        padded = pad_halo_mpi(data, _mpi_topology, halo=halo)
+        padded = pad_halo_mpi(
+            data, _mpi_topology, halo=halo, interp_offsets=offsets,
+        )
     # SPMD dispatch (explicit all_gather for multi-GPU).
     elif _halo_backend == "spmd" and _spmd_mesh is not None:
         if halo == 3:
@@ -672,29 +777,20 @@ def pad_halo_pair_h2(
         )
         return q1_pad_4d[..., 0], q2_pad_4d[..., 0]
     if _halo_backend == "mpi" and _mpi_topology is not None:
-        # MPI: ``packed_pad_halo_mpi_4d`` already supports halo=2 and
-        # halves the MPI message count from 2 → 1 by stacking the two
-        # fields along the trailing axis.  Same singleton-channel trick
-        # as the SPMD path.  ``packed_pad_halo_mpi_4d`` does not
-        # currently support ``interp_offsets`` (the underlying MPI
-        # exchange ignores them — see the explicit guard in
-        # ``pad_halo_mpi_4d``); when offsets are requested, fall back
-        # to the per-field unpacked ``pad_halo`` path which raises a
-        # clear NotImplementedError so callers know to either run with
-        # duogrid (preferred) or accept the unpacked MPI path until
-        # offset-aware MPI exchange lands.
-        if interp_offsets is None:
-            from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
-            q1_4d = q1[..., None]
-            q2_4d = q2[..., None]
-            q1_pad_4d, q2_pad_4d = packed_pad_halo_mpi_4d(
-                q1_4d, q2_4d, topology=_mpi_topology,
-                halo=2, duogrid=duogrid,
-            )
-            return q1_pad_4d[..., 0], q2_pad_4d[..., 0]
-        # offsets requested under MPI — `pad_halo` already raises a
-        # clear NotImplementedError on this combination.  Let the
-        # per-field path do that for a sharper error than ours.
+        # MPI: ``packed_pad_halo_mpi_4d`` supports halo=2 and halves the
+        # MPI message count from 2 → 1 by stacking the two fields along
+        # the trailing axis.  FV3_3D iter-1041: also threads
+        # ``interp_offsets``, so the single packed exchange handles both
+        # the no-offsets path and the duogrid Lagrange-remap path.
+        from legoesm.parallel.halo_exchange import packed_pad_halo_mpi_4d
+        q1_4d = q1[..., None]
+        q2_4d = q2[..., None]
+        q1_pad_4d, q2_pad_4d = packed_pad_halo_mpi_4d(
+            q1_4d, q2_4d, topology=_mpi_topology,
+            halo=2, duogrid=duogrid,
+            interp_offsets=interp_offsets,
+        )
+        return q1_pad_4d[..., 0], q2_pad_4d[..., 0]
     # Local backend (or MPI-with-offsets — handled above): two
     # sequential pad_halo calls with identical arithmetic.
     q1_pad = pad_halo(q1, halo=2, interp_offsets=interp_offsets,
@@ -739,6 +835,29 @@ def pad_halo_4d(
     """
     if data.ndim != 4:
         raise ValueError(f"pad_halo_4d expects 4D input, got {data.ndim}D")
+    # FV3_3D iter-1072: non-square (n_x, n_y) data is silently
+    # corrupted by ``_pad_halo_local_4d`` / ``_pad_halo_mpi_face_only_4d``
+    # because both use ``_get_halo_tables_h1(n=data.shape[1])`` which
+    # assumes square shape — the y-axis halo cells past index n_x are
+    # left at the jnp.pad default of 0, and the cells filled past
+    # ``data.shape[2]`` index out-of-bounds.  Probe verified at
+    # iter-1072: pad_halo_4d on shape ``(6, 5, 6, 1)`` returns
+    # face-0 WEST halo with 6th cell corrupted, face-0 NORTH halo
+    # all zero.  Loud error here surfaces the silent bug for any
+    # caller passing non-square data (notably
+    # ``use_fv3_cross_face_du_proj`` paths on ``du_normal`` /
+    # ``dv_normal`` D-grid wind increments with shape
+    # ``(6, n+1, n, nlev)`` / ``(6, n, n+1, nlev)``).
+    if data.shape[0] >= 1 and data.shape[1] != data.shape[2]:
+        raise ValueError(
+            f"pad_halo_4d expects square (n, n) data on each face, "
+            f"got shape {tuple(data.shape)} with data.shape[1] != "
+            f"data.shape[2].  Non-square halo is a known iter-1046 "
+            f"follow-up — see FV3_3D.md iter-1072 for the silent-"
+            f"corruption probe.  Workaround: extend non-square data "
+            f"to square via jnp.pad before calling pad_halo_4d, then "
+            f"trim back, OR disable use_fv3_cross_face_du_proj."
+        )
     if interp_offsets is not None and duogrid is not None:
         raise ValueError(
             "interp_offsets and duogrid are mutually exclusive"
@@ -776,24 +895,15 @@ def pad_halo_4d(
 
     # MPI dispatch.
     if _halo_backend == "mpi":
-        # Iter-632 (Codex stop-time finding on iter-631): same silent-
-        # drop hazard as the scalar `pad_halo` MPI branch — `pad_halo_mpi_4d`
-        # does not carry or honor `interp_offsets`, so a caller passing
-        # offsets under MPI would silently get nearest-index placement.
-        # Guard mirrors the scalar version (same message for grep-
-        # locality); halo=3 is already rejected by the guard above so
-        # this fires only for halo=1/2 under MPI.
-        if offsets is not None:
-            raise NotImplementedError(
-                "pad_halo_4d(interp_offsets=...) is not supported on "
-                "the MPI backend: `pad_halo_mpi_4d` does nearest-index "
-                "copy only.  If you need interpolated halo placement "
-                "under MPI, either teach `pad_halo_mpi_4d` to carry "
-                "offsets and apply `_interp_strip_*` on the receive "
-                "side, or pre-interpolate before calling pad_halo_4d. "
-                "Single-device backend supports this today.")
+        # FV3_3D 2026-05-27: option (a) implemented — `pad_halo_mpi_4d`
+        # now carries `interp_offsets` through and applies `_interp_strip`
+        # per (face, edge[, depth]) strip on the receive side.  Sibling
+        # of the scalar `pad_halo` fix in the same iteration.  Sub-face
+        # tiling still refuses (offsets are global-face-indexed).
         from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
-        padded = pad_halo_mpi_4d(data, _mpi_topology, halo=halo)
+        padded = pad_halo_mpi_4d(
+            data, _mpi_topology, halo=halo, interp_offsets=offsets,
+        )
     # SPMD dispatch (explicit all_gather for multi-GPU).
     elif _halo_backend == "spmd" and _spmd_mesh is not None:
         if halo == 3:
@@ -1049,6 +1159,20 @@ def pad_halo_vector_4d(
     -------
     u_padded, v_padded : jax.Array, shape (6, n+2*halo, n+2*halo, nlev)
     """
+    # FV3_3D iter-1073 (codex iter-1072 BLOCKER): mirror the iter-1072
+    # non-square guard.  Vector halo also assumes square (n, n) per
+    # face — all internal kernels and the SPMD/MPI dispatches share
+    # the same square-shape assumption.
+    if u_data.shape[1] != u_data.shape[2]:
+        raise ValueError(
+            f"pad_halo_vector_4d u_data expects square (n, n), got "
+            f"shape {tuple(u_data.shape)}.  See FV3_3D.md iter-1072."
+        )
+    if v_data.shape[1] != v_data.shape[2]:
+        raise ValueError(
+            f"pad_halo_vector_4d v_data expects square (n, n), got "
+            f"shape {tuple(v_data.shape)}.  See FV3_3D.md iter-1072."
+        )
     # SPMD dispatch: pack both components into a single collective.
     if _halo_backend == "spmd" and _spmd_mesh is not None and halo == 1:
         from legoesm.parallel.cubesphere_exchange import (
@@ -1080,23 +1204,12 @@ def pad_halo_vector_4d(
     # When MPI is active, pack both components along the level axis and
     # do one exchange instead of two, halving MPI message count.
     if _halo_backend == "mpi":
-        # Iter-632/633 refused both `interp_offsets != None` and
-        # `duogrid != None`.  Iter-634 (Codex stop-time follow-up):
-        # `pad_halo_4d` already applies `cube_rmp_vectorized` +
-        # `fill_corner_region` post-dispatch regardless of backend,
-        # so per-component fallback under MPI is drop-in correct.
-        # Reinstate the duogrid path via that fallback; keep refusing
-        # `interp_offsets` because no path under MPI honors offsets.
-        if interp_offsets is not None:
-            raise NotImplementedError(
-                "pad_halo_vector_4d(interp_offsets=...) is not supported "
-                "on the MPI backend: `pad_halo_mpi_4d` does "
-                "nearest-index copy only.  If you need interpolated "
-                "halo placement under MPI, either teach `pad_halo_mpi_4d` "
-                "to carry offsets and apply `_interp_strip_*` on the "
-                "receive side, or pre-interpolate before calling "
-                "pad_halo_vector_4d.  Single-device backend supports "
-                "this today.")
+        # FV3_3D 2026-05-27: `pad_halo_mpi_4d` now honors `interp_offsets`,
+        # so the packed (u_east, v_north) exchange can apply the Lagrange
+        # remap once for both components.  This was previously a hard
+        # `NotImplementedError` blocking the FV3 3D PE step under MPI
+        # (the `hydrostatic_to_fv3` cell-center→D-grid corner lift uses
+        # this path with `interp_offsets=base.halo_interp_offsets`).
         if duogrid is not None:
             # Iter-634: per-component scalar `pad_halo_4d` fallback.
             u_east_padded = pad_halo_4d(
@@ -1112,7 +1225,10 @@ def pad_halo_vector_4d(
         else:
             from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
             packed = jnp.concatenate([u_east, v_north], axis=-1)  # (6, n, n, 2*nlev)
-            packed_padded = pad_halo_mpi_4d(packed, _mpi_topology, halo=halo)
+            packed_padded = pad_halo_mpi_4d(
+                packed, _mpi_topology, halo=halo,
+                interp_offsets=interp_offsets,
+            )
             nlev = u_data.shape[-1]
             u_east_padded = packed_padded[..., :nlev]
             v_north_padded = packed_padded[..., nlev:]
@@ -2033,16 +2149,9 @@ def pad_halo_vector(
         # fallback is correct.  The `interp_offsets` refusal stays
         # because `pad_halo_mpi` (invoked by the scalar fallback) does
         # not carry offsets either.
-        if interp_offsets is not None:
-            raise NotImplementedError(
-                "pad_halo_vector(interp_offsets=...) is not supported "
-                "on the MPI backend: `pad_halo_mpi` / `pad_halo_mpi_4d` "
-                "do nearest-index copy only.  If you need interpolated "
-                "halo placement under MPI, either teach the MPI helpers "
-                "to carry offsets and apply `_interp_strip_*` on the "
-                "receive side, or pre-interpolate before calling "
-                "pad_halo_vector.  Single-device backend supports this "
-                "today.")
+        # FV3_3D 2026-05-27: `pad_halo_mpi_4d` now honors `interp_offsets`,
+        # so the packed (u_east, v_north) MPI exchange threads offsets
+        # through.  Previously this was a hard NotImplementedError.
         if duogrid is not None:
             # Iter-634: per-component scalar fallback.  Pays 2 MPI
             # messages instead of 1 packed exchange, but exercises
@@ -2061,7 +2170,10 @@ def pad_halo_vector(
         else:
             from legoesm.parallel.halo_exchange import pad_halo_mpi_4d
             packed = jnp.stack([u_east, v_north], axis=-1)  # (6, n, n, 2)
-            packed_padded = pad_halo_mpi_4d(packed, _mpi_topology, halo=halo)
+            packed_padded = pad_halo_mpi_4d(
+                packed, _mpi_topology, halo=halo,
+                interp_offsets=interp_offsets,
+            )
             u_east_padded = packed_padded[..., 0]
             v_north_padded = packed_padded[..., 1]
     else:
@@ -2330,6 +2442,13 @@ _FLUX_SIGN_FLIP_EDGES = frozenset({
 def synchronize_cgrid_fluxes(fx, fy, n):
     """Average C-grid fluxes at shared face boundaries (duogrid conservation fix).
 
+    FV3_3D iter-1049: under the MPI backend (``_halo_backend == "mpi"``)
+    we dispatch to :func:`_synchronize_cgrid_fluxes_mpi`, which uses
+    ``mpi4jax.sendrecv`` to swap boundary flux strips between ranks
+    before averaging.  Without that swap, ``fx[nbr_face, ...]`` reads
+    of non-owned faces return values computed with zero halos and
+    contaminate the averaged result on OWNED faces.
+
     Implements the duogrid flux averaging from FV3 dyn_core.F90:853-900.
     Each shared face boundary flux is replaced by the average of both
     faces' independently computed boundary fluxes, ensuring that the mass
@@ -2361,6 +2480,10 @@ def synchronize_cgrid_fluxes(fx, fy, n):
     fx_sync, fy_sync : jax.Array
         Fluxes with averaged boundary values.
     """
+    # FV3_3D iter-1049: MPI dispatch.
+    if _halo_backend == "mpi" and _mpi_topology is not None:
+        return _synchronize_cgrid_fluxes_mpi(fx, fy, n, _mpi_topology)
+
     # Pre-compute all boundary averages from the ORIGINAL (unsynchronized)
     # fluxes so that we read before writing.
     avgs = {}
@@ -2387,6 +2510,147 @@ def synchronize_cgrid_fluxes(fx, fy, n):
                 fy = fy.at[face, :, 0].set(avg)
             else:  # NORTH
                 fy = fy.at[face, :, n].set(avg)
+
+    return fx, fy
+
+
+def _synchronize_cgrid_fluxes_mpi(fx, fy, n, topology):
+    """MPI-aware variant of :func:`synchronize_cgrid_fluxes`.
+
+    For each owned face's edge, locate the neighbour face and its
+    cross-face edge.  If both endpoints live on this rank (local
+    edge), read directly from ``fx`` / ``fy`` — same as the
+    single-device path.  Otherwise issue an ``mpi4jax.sendrecv``
+    that swaps the local boundary flux strip with the neighbour
+    rank's strip from the corresponding edge.
+
+    The function leaves non-owned face boundary values UNCHANGED in
+    the returned arrays — only owned faces get the averaged result.
+    Callers comparing across local/MPI must compare owned faces only
+    (the MPI-replicated-mode contract).
+    """
+    from legoesm.parallel.halo_exchange import _get_sendrecv_vjp
+    from collections import defaultdict
+    try:
+        import mpi4jax
+        from mpi4py import MPI as _MPI
+    except ImportError as exc:
+        raise ImportError(
+            "MPI synchronize_cgrid_fluxes requires mpi4jax + mpi4py."
+        ) from exc
+    sendrecv = _get_sendrecv_vjp(mpi4jax)
+    comm = _MPI.COMM_WORLD
+    rank = topology.rank
+
+    # Classify each (owned face, edge) as local or remote.
+    local_edges = []
+    remote_edges = []
+    for face in topology.local_face_ids:
+        for edge in (WEST, EAST, SOUTH, NORTH):
+            nbr_face, nbr_edge, rev = CONNECTIVITY[face][edge]
+            nbr_rank = topology.neighbor_ranks[(face, edge)]
+            entry = (face, edge, nbr_face, nbr_edge, rev, nbr_rank)
+            if nbr_rank == rank:
+                local_edges.append(entry)
+            else:
+                remote_edges.append(entry)
+
+    def _bdy_strip(face, edge):
+        return _extract_cgrid_boundary(fx, fy, face, edge, n)
+
+    # FV3_3D iter-1051: batched-per-neighbour sendrecv.  The iter-1049
+    # per-edge sendrecv pattern deadlocked at runtime because each
+    # ``mpi4jax.sendrecv`` blocks on its own ``recv`` until the peer
+    # issues a matching call.  With multiple sendrecvs per neighbour
+    # rank, both ranks block on their first call's recv waiting for
+    # the other's later send → deadlock.  The pad_halo_mpi pattern
+    # packs ALL strips for a given neighbour into ONE contiguous
+    # send/recv buffer (sorted canonically: send by ``(nbr_face,
+    # nbr_edge)``, recv by ``(face, edge)``).  One sendrecv per
+    # peer rank — at most 3 peers in face-only mode, so at most 3
+    # MPI calls per sync.
+
+    # Pre-extract every owned-face boundary strip.
+    local_strips = {}
+    for face in topology.local_face_ids:
+        for edge in (WEST, EAST, SOUTH, NORTH):
+            local_strips[(face, edge)] = _bdy_strip(face, edge)
+
+    # Holding place for neighbour strips fetched via MPI (remote
+    # edges).  Local-edge strips are read directly later.
+    nbr_strips_remote = {}
+
+    # Group remote edges by neighbour rank.
+    by_nbr_rank: dict[int, list] = defaultdict(list)
+    for entry in remote_edges:
+        by_nbr_rank[entry[5]].append(entry)
+
+    # Per-neighbour single sendrecv with canonically-ordered batched
+    # strips.  Send ordered by ``(nbr_face, nbr_edge)`` = the peer's
+    # local-edge identity, so the peer's recv-side canonical order
+    # (sorted by ``(face, edge)``) matches.  Tag is the peer rank
+    # itself (matches ``pad_halo_mpi_face_only`` pattern).
+    #
+    # All boundary strips share the same length ``n`` along axis 0
+    # (cell axis) and the same trailing shape (e.g., ``(nlev,)`` for
+    # 4D).  Pack by stacking on axis 0; unpack by slicing axis 0
+    # in chunks of ``n``.
+    # FV3_3D iter-1053: iterate peers in ascending rank order so all
+    # ranks issue sendrecv calls in the same global peer-sequence
+    # (mirror of the iter-1053 fix applied to ``_sync_dgrid_boundary_mpi``).
+    for nbr_rank in sorted(by_nbr_rank.keys()):
+        entries = by_nbr_rank[nbr_rank]
+        send_order = sorted(entries, key=lambda e: (e[2], e[3]))
+        recv_order = sorted(entries, key=lambda e: (e[0], e[1]))
+
+        send_parts = [local_strips[(f, e)] for f, e, *_ in send_order]
+        send_buf = jnp.concatenate(send_parts, axis=0)
+
+        send_tag = rank
+        recv_tag = nbr_rank
+        recv_buf = sendrecv(
+            send_buf, jnp.zeros_like(send_buf),
+            nbr_rank, nbr_rank,
+            send_tag, recv_tag, comm,
+        )
+
+        # Unpack recv_buf in canonical recv order.  Each strip is
+        # ``n`` cells along axis 0; trailing axes match the input.
+        offset = 0
+        for face, edge, nbr_face, nbr_edge, rev, _ in recv_order:
+            chunk = recv_buf[offset:offset + n]
+            offset += n
+            nbr_strips_remote[(face, edge)] = chunk
+
+    # FV3_3D iter-1051: pre-extract local-edge neighbour strips
+    # BEFORE the write loop.  Reading on-demand inside the loop
+    # picks up already-averaged values (write-before-read) on edges
+    # whose neighbour face was processed earlier in the iteration.
+    nbr_strips_local = {}
+    for face, edge, nbr_face, nbr_edge, rev, _ in local_edges:
+        nbr_strips_local[(face, edge)] = _bdy_strip(nbr_face, nbr_edge)
+
+    # Compute averages and write back to owned faces.
+    all_entries = local_edges + remote_edges
+    for face, edge, nbr_face, nbr_edge, rev, nbr_rank in all_entries:
+        local_bdy = local_strips[(face, edge)]
+        if nbr_rank == rank:
+            nbr_bdy = nbr_strips_local[(face, edge)]
+        else:
+            nbr_bdy = nbr_strips_remote[(face, edge)]
+        if rev:
+            nbr_bdy = nbr_bdy[::-1]
+        if (face, edge) in _FLUX_SIGN_FLIP_EDGES:
+            nbr_bdy = -nbr_bdy
+        avg = 0.5 * (local_bdy + nbr_bdy)
+        if edge == WEST:
+            fx = fx.at[face, 0, :].set(avg)
+        elif edge == EAST:
+            fx = fx.at[face, n, :].set(avg)
+        elif edge == SOUTH:
+            fy = fy.at[face, :, 0].set(avg)
+        else:  # NORTH
+            fy = fy.at[face, :, n].set(avg)
 
     return fx, fy
 
@@ -2856,4 +3120,77 @@ def compute_edge_artifact_metric(field_data):
         "edge_std": e,
         "interior_std": i,
         "ratio": e / max(i, 1e-30),
+    }
+
+
+def compute_cross_face_continuity(field_data, interp_offsets=None):
+    """TRUE cross-face seam-continuity diagnostic (iter ~58).
+
+    The reliable edge-artifact metric: pads ``field_data`` with the
+    model's *real* inter-face halo (:func:`pad_halo_4d`) and, per face,
+    compares the cross-seam first difference (edge interior cell minus
+    its physical neighbor on the adjacent face) to the same-face interior
+    first difference (the field's natural gradient)::
+
+        ratio = RMS(cross-seam Δ) / RMS(same-face interior Δ)
+
+    Interpretation: ``ratio ≈ 1`` ⇒ the field is as smooth across the
+    panel seam as it is in the interior (CONTINUOUS).  A genuine seam
+    discontinuity registers 5–50×.
+
+    This SUPERSEDES :func:`compute_edge_artifact_metric` for edge-artifact
+    claims.  That helper is a *same-face* edge-vs-interior std ratio: it
+    amplifies high-frequency edge curvature and is unreliable in BOTH
+    directions (it both over- and under-states — verified iter ~57-58:
+    same-face 2nd-diff gave 5.95× on W5 v where the true cross-face
+    continuity is 1.30×).  Use this function, applied to a *geographic*
+    (seam-continuous) field component, for the real continuity check.
+
+    Parameters
+    ----------
+    field_data : array, shape ``(6, n, n)`` or ``(6, n, n, nlev)``
+        A scalar or geographic-component field on the cubed sphere.  For
+        a vector, pass each *geographic* component (north/east) — those
+        are continuous across seams; do NOT pass face-local components.
+    interp_offsets : array, optional
+        Halo interpolation offsets (``grid.halo_interp_offsets``) for the
+        corrected cross-face interpolation; ``None`` uses the plain halo.
+
+    Returns
+    -------
+    dict with keys ``per_face_ratio`` (list, len 6), ``max_ratio``,
+    ``mean_ratio``.
+    """
+    import numpy as np
+    arr = np.asarray(field_data)
+    if arr.ndim == 3:
+        arr = arr[..., None]
+    fp = np.asarray(
+        pad_halo_4d(jnp.asarray(arr), halo=1, interp_offsets=interp_offsets)
+    )
+    n_face = fp.shape[0]
+    per_face = []
+    for f in range(n_face):
+        a = fp[f]  # (n+2, n+2, nlev); interior = a[1:-1, 1:-1]
+        # Interior first differences — STRICTLY between interior cells, so the
+        # halo (cross-seam) rows/cols never enter the denominator.  (Codex
+        # iter61: a[2:,...]/a[...,2:] included the N/E halo row a[n+1]-a[n],
+        # i.e. a seam jump, self-normalizing the ratio and suppressing
+        # detection of N/E-edge artifacts.)
+        gx = (a[2:-1, 1:-1] - a[1:-2, 1:-1]).ravel()   # i-diff, interior only
+        gy = (a[1:-1, 2:-1] - a[1:-1, 1:-2]).ravel()   # j-diff, interior only
+        gi = float(np.sqrt(np.mean(np.concatenate([gx, gy]) ** 2)))
+        seam = np.concatenate([
+            (a[1, 1:-1] - a[0, 1:-1]).ravel(),
+            (a[-1, 1:-1] - a[-2, 1:-1]).ravel(),
+            (a[1:-1, 1] - a[1:-1, 0]).ravel(),
+            (a[1:-1, -1] - a[1:-1, -2]).ravel(),
+        ])
+        gs = float(np.sqrt(np.mean(seam ** 2)))
+        per_face.append(gs / max(gi, 1e-30))
+    per_face = np.asarray(per_face)
+    return {
+        "per_face_ratio": per_face.tolist(),
+        "max_ratio": float(per_face.max()),
+        "mean_ratio": float(per_face.mean()),
     }

@@ -137,8 +137,23 @@ def van_genuchten_K(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarr
     """Hydraulic conductivity from matric potential."""
     Se = van_genuchten_Se(psi, config)
     m = 1.0 - 1.0 / config.n_vg
-    inner = 1.0 - (1.0 - Se ** (1.0 / m)) ** m
-    return config.K_sat * jnp.sqrt(Se) * inner ** 2
+    # AD-safe Mualem conductivity.  Two reachable boundaries carry an infinite
+    # reverse-mode derivative even though the forward value is finite:
+    #   * Se -> 0 (dry):       sqrt'(Se) = inf;
+    #   * Se -> 1 (saturation, e.g. a ponded top layer via richards' K_top on
+    #     raw psi): the inner term 1 - (1 - Se^{1/m})^m -> 1, but (1-Se^{1/m})^m
+    #     has an infinite slope as its base u -> 0.
+    # sqrt: floor Se at a sub-physical 1e-12 (Se=0 needs psi=-inf), so the
+    # forward is bit-identical for any real Se.  Mualem term: a where-before-pow
+    # keeps the forward *exact* at saturation (u=0 -> u**m=0 -> inner=1 ->
+    # K=K_sat) — important for the K(psi=0)==K_sat contract — while masking the
+    # pow's infinite-slope branch (the dead branch raises 1.0, not 0).
+    Se_safe = jnp.maximum(Se, 1e-12)
+    u = 1.0 - Se_safe ** (1.0 / m)
+    mask = u > 1e-12
+    u_pow = jnp.where(mask, jnp.where(mask, u, 1.0) ** m, 0.0)
+    inner = 1.0 - u_pow
+    return config.K_sat * jnp.sqrt(Se_safe) * inner ** 2
 
 
 def van_genuchten_C(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarray:
@@ -146,7 +161,14 @@ def van_genuchten_C(psi: jnp.ndarray, config: SoilHydraulicsConfig) -> jnp.ndarr
     m = 1.0 - 1.0 / config.n_vg
     n = config.n_vg
     alpha = config.alpha_vg
-    abs_alpha_psi = jnp.abs(alpha * psi)
+    # Floor |alpha*psi| away from 0 before the (n-1) power.  At psi -> 0
+    # (saturation) |alpha psi|^{n-1} has an infinite derivative for n < 2 (the
+    # usual VG case), so its reverse-mode gradient is inf there and the ``where``
+    # below turns that into 0*inf = NaN — reachable whenever a layer ponds /
+    # saturates (psi=0), which happens every infiltration event and is hit each
+    # Picard iteration via moisture_capacity().  The floor is negligible
+    # (|psi| ~ 1e-12/alpha) so the forward stays unchanged for any real psi.
+    abs_alpha_psi = jnp.maximum(jnp.abs(alpha * psi), 1e-12)
     term = 1.0 + abs_alpha_psi ** n
     C = (alpha * m * n * abs_alpha_psi ** (n - 1.0)
          * (config.theta_sat - config.theta_r)

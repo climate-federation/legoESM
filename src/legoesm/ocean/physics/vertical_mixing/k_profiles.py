@@ -233,6 +233,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         tau_y = getattr(surface_forcing, "tau_y", None) if surface_forcing else None
         q_net = getattr(surface_forcing, "q_net", None) if surface_forcing else None
         fw = getattr(surface_forcing, "freshwater", None) if surface_forcing else None
+        salt = getattr(surface_forcing, "salt_flux", None) if surface_forcing else None
 
         Q_sfc_T = None
         B_f = None
@@ -245,12 +246,19 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             B_f = -constants_config.g * alpha * Q_sfc_T
 
         Q_sfc_S = None
-        if fw is not None:
+        if fw is not None or salt is not None:
             S_sfc = state.S.data[..., 0]
             T_sfc = state.T.data[..., 0]
             p_sfc = jnp.zeros_like(T_sfc)
             beta = haline_contraction_coeff(T_sfc, S_sfc, p_sfc)
-            Q_sfc_S = -S_sfc * fw / constants_config.rho_0
+            # Kinematic surface salt flux [PSU·m/s]: freshwater dilution
+            # (-S*fw/rho, fw>0 in -> stabilizing) PLUS a REAL salt-mass flux
+            # (+salt*1e3/rho, salt>0 in -> destabilizing brine rejection).
+            Q_sfc_S = jnp.zeros_like(S_sfc)
+            if fw is not None:
+                Q_sfc_S = Q_sfc_S - S_sfc * fw / constants_config.rho_0
+            if salt is not None:
+                Q_sfc_S = Q_sfc_S + salt * 1.0e3 / constants_config.rho_0
             B_salt = constants_config.g * beta * Q_sfc_S
             B_f = B_salt if B_f is None else (B_f + B_salt)
 

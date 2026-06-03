@@ -60,6 +60,14 @@ class LatLonGrid(NamedTuple):
     lon2d: jax.Array            # (n_lat, n_lon)
     cos_lat: jax.Array          # (n_lat,) — clamped to avoid zero at poles
     sin_lat: jax.Array          # (n_lat,)
+    # v-face (lat-interface) coordinates — length n_lat+1.  Stored
+    # explicitly so the Stage 3-E polar filter can build a v-face
+    # mask whose latitudes match the actual v-face positions on
+    # both the global grid AND each MPI band (Codex review round 3
+    # caught the prior approach reconstructing v-face lat with ±π/2
+    # padding, which mislabels interior bands' endpoints as poles).
+    lat_v: jax.Array            # (n_lat+1,) lat at v-face interfaces
+    cos_lat_v: jax.Array        # (n_lat+1,) cos(lat_v)
     f: jax.Array                # (n_lat, n_lon) Coriolis = 2*Omega*sin(lat)
     dx: jax.Array               # (n_lat, n_lon) distance over 2 cells in lon [m]
     dy: jax.Array               # (n_lat,) distance over 2 cells in lat [m]
@@ -156,13 +164,6 @@ def create_latlon_grid(
     if n_lon is None:
         n_lon = 2 * n_lat
 
-    if dtype is None:
-        try:
-            from legoesm.core.precision import get_policy
-            dtype = get_policy().storage
-        except Exception:
-            dtype = jnp.float32
-
     dlat = jnp.pi / n_lat
     dlon = 2.0 * jnp.pi / n_lon
 
@@ -174,10 +175,101 @@ def create_latlon_grid(
     )
     lon = jnp.linspace(0.0, 2.0 * jnp.pi - dlon, n_lon)
 
+    return _build_uniform_latlon_grid_from_axes(
+        lat=lat, lon=lon, dlat=dlat, dlon=dlon,
+        radius=radius, omega=omega, dtype=dtype,
+    )
+
+
+def _compute_v_face_coords(
+    lat: jax.Array, dlat: float,
+) -> tuple[jax.Array, jax.Array]:
+    """Compute ``(lat_v, cos_lat_v)`` at the v-face (lat-interface).
+
+    Length ``n_lat+1``.  Interior: ``lat_v[i] = (lat[i-1] + lat[i])/2``
+    for i in [1, n_lat).  Boundary: half-cell extrapolation past the
+    cell-center endpoints.  For a GLOBAL grid spanning
+    ``[-π/2 + dlat/2, π/2 - dlat/2]`` this puts the boundary v-faces
+    at ±π/2.  Under MPI, a band's south/north endpoints are interior
+    latitudes; the same half-cell extrapolation gives the correct
+    v-face there too — do NOT hard-code ±π/2 (Codex review Stage 3-E
+    round 3 caught this regression).
+
+    ``cos_lat_v`` is clamped against zero via ``jnp.maximum(...,
+    1e-10)`` so operators that divide by it stay finite at the global
+    poles.
+    """
+    lat_v_interior = 0.5 * (lat[:-1] + lat[1:])
+    lat_v = jnp.concatenate([
+        lat[:1] - 0.5 * dlat,
+        lat_v_interior,
+        lat[-1:] + 0.5 * dlat,
+    ])
+    cos_lat_v = jnp.maximum(jnp.abs(jnp.cos(lat_v)), 1e-10)
+    return lat_v, cos_lat_v
+
+
+def _build_uniform_latlon_grid_from_axes(
+    lat: jax.Array,
+    lon: jax.Array,
+    dlat: float,
+    dlon: float,
+    radius: float = constants.R_earth,
+    omega: float = constants.Omega,
+    dtype=None,
+) -> LatLonGrid:
+    """Assemble a uniform-``dlat`` ``LatLonGrid`` from pre-computed axes.
+
+    Shared body of ``create_latlon_grid`` and the MPI band-extension
+    helper :func:`legoesm.parallel.latlon_mpi.build_padded_grid` — the
+    latter feeds in a ``lat`` array extrapolated past one or both
+    poles by ``dlat`` so vertex areas stay strictly positive in the
+    halo region.  Centralising the metric construction here lets the
+    MPI path reuse the exact same formulas instead of inlining a
+    near-duplicate that could drift from the serial reference.
+
+    Parameters
+    ----------
+    lat : (n_lat,) array of cell-center latitudes [rad]; need not lie
+        in ``[-π/2, π/2]`` (the MPI extension produces values past
+        the poles for halo rows).
+    lon : (n_lon,) array of cell-center longitudes [rad].
+    dlat : scalar latitude spacing [rad].  Uniform across ``lat`` is
+        assumed; for Mercator / variable-dlat grids this helper is
+        not appropriate.
+    dlon : scalar longitude spacing [rad].
+    radius, omega : sphere radius [m] and rotation rate [rad/s].
+    dtype : optional storage dtype; falls back to the active
+        precision policy when ``None``.
+
+    Returns
+    -------
+    LatLonGrid
+    """
+    n_lat = lat.shape[0]
+    n_lon = lon.shape[0]
+
+    if dtype is None:
+        try:
+            from legoesm.core.precision import get_policy
+            dtype = get_policy().storage
+        except Exception:
+            dtype = jnp.float32
+
     lat2d, lon2d = jnp.meshgrid(lat, lon, indexing="ij")  # (n_lat, n_lon)
 
-    cos_lat = jnp.maximum(jnp.cos(lat), 1e-10)
+    # ``abs(cos(lat))`` is identical to ``cos(lat)`` for lat in
+    # [-π/2, π/2] (cos is non-negative there) but stays positive for
+    # latitudes extrapolated past the poles — which is what the
+    # MPI band-extension helper feeds in for halo rows
+    # (``build_padded_grid`` in legoesm.parallel.latlon_mpi).
+    # Without ``abs`` the post-pole cos values went negative,
+    # clamped to 1e-10, and produced ``dx ≈ 0`` → infinite zonal
+    # gradients in the halo region.
+    cos_lat = jnp.maximum(jnp.abs(jnp.cos(lat)), 1e-10)
     sin_lat = jnp.sin(lat)
+
+    lat_v, cos_lat_v = _compute_v_face_coords(lat, dlat)
 
     # Coriolis parameter
     f = 2.0 * omega * sin_lat[:, None] * jnp.ones((1, n_lon))
@@ -206,6 +298,8 @@ def create_latlon_grid(
         lon2d=_c(lon2d),
         cos_lat=_c(cos_lat),
         sin_lat=_c(sin_lat),
+        lat_v=_c(lat_v),
+        cos_lat_v=_c(cos_lat_v),
         f=_c(f),
         dx=_c(dx),
         dy=_c(dy),
@@ -317,6 +411,7 @@ def create_regional_latlon_grid(
 
     cos_lat = jnp.maximum(jnp.cos(lat), 1e-10)
     sin_lat = jnp.sin(lat)
+    lat_v, cos_lat_v = _compute_v_face_coords(lat, dlat)
 
     f = 2.0 * omega * sin_lat[:, None] * jnp.ones((1, nx))
 
@@ -347,6 +442,8 @@ def create_regional_latlon_grid(
         lon2d=_c(lon2d),
         cos_lat=_c(cos_lat),
         sin_lat=_c(sin_lat),
+        lat_v=_c(lat_v),
+        cos_lat_v=_c(cos_lat_v),
         f=_c(f),
         dx=_c(dx),
         dy=_c(dy),
@@ -495,6 +592,12 @@ def create_mercator_grid(
 
     cos_lat = jnp.maximum(jnp.cos(lat), 1e-10)
     sin_lat = jnp.sin(lat)
+    # ``lat_face`` is already the v-face axis (length n_lat+1).  Reuse
+    # it directly rather than calling ``_compute_v_face_coords`` which
+    # would extrapolate from cell centers and give a slightly
+    # different placement on non-uniform Mercator.
+    lat_v = lat_face
+    cos_lat_v = jnp.maximum(jnp.abs(jnp.cos(lat_v)), 1e-10)
 
     f = 2.0 * omega * sin_lat[:, None] * jnp.ones((1, n_lon))
 
@@ -533,6 +636,8 @@ def create_mercator_grid(
         lon2d=_c(lon2d),
         cos_lat=_c(cos_lat),
         sin_lat=_c(sin_lat),
+        lat_v=_c(lat_v),
+        cos_lat_v=_c(cos_lat_v),
         f=_c(f),
         dx=_c(dx),
         dy=_c(dy),

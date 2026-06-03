@@ -36,8 +36,7 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.thermodynamics import (
-    compute_cape,
-    compute_moist_adiabat,
+    parcel_profile_and_cape,
 )
 from legoesm.atmosphere.physics.convection.config import TiedtkeConfig
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
@@ -113,8 +112,11 @@ def tiedtke_convection(
     T_base = T[:, -1]
     q_base = q_v[:, -1]
     p_base = p_full[:, -1]
-    T_moist = compute_moist_adiabat(T_base, p_full)
-    cape = compute_cape(T, T_moist, p_full, p_half)
+    # Lift the surface parcel along its dry->LCL->moist path with the actual
+    # boundary-layer humidity and compute virtual-T CAPE (shared recipe).
+    # The legacy saturated-from-base parcel spuriously inflates CAPE in dry
+    # columns; passing q_v is required for a faithful trigger.
+    T_moist, cape = parcel_profile_and_cape(T, p_full, p_half, q_v=q_v)
     cape_weight = cape_trigger(cape, config.cape_threshold, config.cape_sharpness)
 
     # -- LCL, LFC, LNB diagnostics -----------------------------------------

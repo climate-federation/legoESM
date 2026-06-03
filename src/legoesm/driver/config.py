@@ -29,13 +29,61 @@ AIMIP_VARIANTS: tuple[str, ...] = (
 
 
 class GridConfig(NamedTuple):
-    """Horizontal and vertical grid configuration."""
-    grid_type: str = "cubed_sphere"  # cubed_sphere, gaussian, latlon, voronoi
+    """Horizontal and vertical grid configuration.
+
+    ``grid_type`` is one of the canonical names:
+    ``cubed_sphere``, ``gaussian``, ``latlon``, ``mpas``.
+
+    ``mpas`` is the SCVT Voronoi mesh + TRiSK discretization
+    (Ringler 2010, Thuburn 2009).  Pre-2026-05 the codebase used
+    multiple aliases for this single mesh on the atmosphere side
+    (``voronoi``, ``icosahedral``, ``mpas_voronoi``) while the ocean
+    consistently used ``mpas``.  All variants now normalize to
+    ``mpas`` at the config boundary so the atmosphere and ocean
+    use one identifier; internal dispatch checks only the canonical
+    name.  See :func:`normalize_grid_type`.
+    """
+    grid_type: str = "cubed_sphere"  # cubed_sphere, gaussian, latlon, mpas
     resolution: int = 16             # N for CS, n_max for spectral
     nlev: int = 40
     vertical_coord: str = "hybrid"   # sigma, hybrid
     p_top_Pa: float = 200.0
     stretching: float = 2.0
+
+
+# Canonical name for the SCVT Voronoi mesh + TRiSK discretization.
+# Atmosphere-side pre-2026-05 aliases that all refer to the same mesh:
+_GRID_TYPE_ALIASES: dict[str, str] = {
+    "voronoi": "mpas",
+    "icosahedral": "mpas",
+    "ico": "mpas",
+    "mpas_voronoi": "mpas",
+}
+
+
+def normalize_grid_type(name: str) -> str:
+    """Canonicalise legacy aliases for the SCVT Voronoi mesh.
+
+    Maps ``"voronoi"``, ``"icosahedral"``, ``"ico"``,
+    ``"mpas_voronoi"`` all to ``"mpas"`` (the name the ocean side
+    has always used).  Every other grid_type string passes through
+    unchanged.
+
+    Callers
+    -------
+    * ``scripts/run_amip*.py`` argparse postprocessors.
+    * Test fixtures that construct ``GridConfig`` directly with the
+      legacy names.
+    * Internal code that branches on grid_type SHOULD assume the
+      string has already been normalised — i.e. compare to
+      ``"mpas"``, not to the aliases.
+
+    Returns
+    -------
+    str
+        Canonical grid-type name.
+    """
+    return _GRID_TYPE_ALIASES.get(name, name)
 
 
 class DycoreConfig(NamedTuple):
@@ -59,6 +107,45 @@ class DycoreConfig(NamedTuple):
     # Default OFF (False, 0.0) preserves legacy bit-exact behavior.
     implicit_grav_wave_use_pcg: bool = False
     implicit_grav_wave_damping: float = 0.0
+
+    # Stage 3-E: Fourier polar filter for lat-lon C-grid.
+    # The polar CFL problem: dx_pole = R * dlon * cos(π/2 - dlat/2) → 0
+    # at the poles, forcing an explicit ``dt`` ≤ ~5 s at 1° resolution
+    # even when the equatorial CFL allows ~600 s.  Enabling
+    # ``use_polar_filter`` truncates Fourier modes in longitude that
+    # would violate CFL at high latitudes, so the run can use the
+    # equatorial-CFL ``dt`` everywhere.  Without this, 100-y AMIP at
+    # 1° lat-lon FV requires ~600 B time steps and is not feasible
+    # within a chained 72-h SLURM budget.
+    #
+    # The filter is lon-only FFT (``jnp.fft.rfft`` along axis -1), so
+    # under lat-band MPI each rank applies it independently on its
+    # own band — no MPI exchange needed for the filter itself.  See
+    # ``src/legoesm/grids/polar_filter.py`` for the algorithm and
+    # ``CGridLatLonPrimitiveEquationConfig.use_polar_filter`` for the
+    # model-side flag this propagates to.
+    use_polar_filter: bool = False
+    polar_filter_cutoff_deg: float = 60.0
+    polar_filter_max_wave_speed: float = 300.0
+
+    # Task #25: time integrator override.  Lat-lon C-grid uses
+    # ``ssp_rk3`` by default — three RK3 stages unrolled with the
+    # tendency function inlined 3×.  Setting
+    # ``time_integrator="ssp_rk3_scan"`` folds the 3 stages into a
+    # single ``jax.lax.scan`` body so XLA optimises the tendency
+    # pipeline ONCE.  Same SSP coefficients (α = (0, 0.75, 1/3),
+    # β = (1, 0.25, 2/3)), same number of tendency calls per step,
+    # IEEE-identical output (pinned by
+    # tests/timestepping/test_ssp_rk3_scan_bit_equivalence.py).
+    # At the production AMIP shape (lat-lon C-grid + tracers + polar
+    # filter) profile job 8070275 measured a 1.3–1.9× JIT compile
+    # speedup — meaningful for the 100-y AMIP submission where the
+    # smoke jobs were paying ~2.5 h of compile per rank-count.
+    #
+    # Default ``"ssp_rk3"`` preserves bit-equivalent behaviour for
+    # the existing scientific validation suite.  ``"ssp_rk3_scan"``
+    # is the opt-in for production at scale.
+    time_integrator: str = "ssp_rk3"
 
 
 class OutputConfig(NamedTuple):
@@ -133,6 +220,7 @@ class ExperimentConfig(NamedTuple):
     solar_file: str = ""
     solar_tsi_var: str = "tsi"
     solar_spectral_var: str = "solar_fraction_by_gpt"
+    solar_spectral_band_order: str = "auto"   # auto | as_is | rrtmg_sw (#322)
 
     # Aerosol
     aerosol_forcing: str = "off"        # off, external
@@ -157,6 +245,10 @@ class ExperimentConfig(NamedTuple):
     topography: str = "flat"
     topo_smoothing: int = 4
     topo_edge_blend: float = 0.3
+    # Optional land-sea-mask NetCDF (CMIP6 sftlf / ERA5 lsm).  When set,
+    # the land fraction is taken from this file and the slab-land tile
+    # is activated; empty → ocean-only surface.
+    land_mask_path: str = ""
 
     # Surface
     T_init: float = 300.0
@@ -165,7 +257,7 @@ class ExperimentConfig(NamedTuple):
     carbon_cycle: str = "none"
 
     # Initial conditions
-    ic: str = "default"   # "default" (held_suarez_init) or "era5"
+    ic: str = "default"   # "default" (uniform T_init), "standard" (lapse-rate + equator-pole gradient), or "era5"
     ic_path: str = ""     # ERA5 Zarr path when ic="era5"
 
     # CMIP
@@ -283,11 +375,49 @@ class ExperimentConfig(NamedTuple):
                 "physics_parameterization_layers must be > 0, "
                 f"got {self.physics_parameterization_layers}"
             )
-        _valid_cloud_schemes = ("none", "sundqvist", "xu_randall")
+        _valid_cloud_schemes = ("none", "sundqvist", "xu_randall", "resolved")
         if self.cloud_scheme not in _valid_cloud_schemes:
             errors.append(
                 f"cloud_scheme must be one of {_valid_cloud_schemes}, "
                 f"got {self.cloud_scheme!r}"
+            )
+        _valid_microphysics = (
+            "none", "kessler", "sundqvist", "seifert_beheng",
+            "morrison", "thompson", "p3", "ml_emulator",
+        )
+        if self.microphysics not in _valid_microphysics:
+            errors.append(
+                f"microphysics must be one of {_valid_microphysics}, "
+                f"got {self.microphysics!r}"
+            )
+        # Physics-scheme membership (mirror the integration.py factory sets so
+        # a typo fails here, not only at JIT-compile inside integration.py).
+        _valid_convection = (
+            "sbm", "dca", "kuo", "mass_flux", "edmf", "zhang_mcfarlane",
+            "kain_fritsch", "emanuel", "tiedtke", "bechtold", "none",
+        )
+        if self.convection not in _valid_convection:
+            errors.append(
+                f"convection must be one of {_valid_convection}, "
+                f"got {self.convection!r}"
+            )
+        _valid_turbulence = (
+            "smagorinsky", "louis", "tke", "mynn25", "clubb_lite",
+            "holtslag_boville", "ysu", "edmf", "none",
+        )
+        if self.turbulence not in _valid_turbulence:
+            errors.append(
+                f"turbulence must be one of {_valid_turbulence}, "
+                f"got {self.turbulence!r}"
+            )
+        _valid_gwd = (
+            "rayleigh", "lindzen", "mcfarlane", "hines",
+            "prognostic_spectral", "ml_emulator", "none",
+        )
+        if self.gravity_wave_drag not in _valid_gwd:
+            errors.append(
+                f"gravity_wave_drag must be one of {_valid_gwd}, "
+                f"got {self.gravity_wave_drag!r}"
             )
         # Reject unsupported coupled/ESM modes with actionable errors.
         if self.carbon_cycle != "none":
@@ -296,11 +426,42 @@ class ExperimentConfig(NamedTuple):
                 f"ModelDriver is atmosphere-only with prescribed SST/SIC. "
                 f"Set carbon_cycle='none' or use a coupled driver."
             )
-        _valid_ic = ("default", "era5")
+        _valid_ic = ("default", "standard", "era5")
         if self.ic not in _valid_ic:
             errors.append(f"ic must be one of {_valid_ic}, got {self.ic!r}")
         if self.ic == "era5" and not self.ic_path:
             errors.append("ic='era5' requires ic_path to be set")
+        if self.ic == "standard":
+            # The standard-atmosphere IC overrides a grid-space temperature
+            # Field AND a geographic (eastward) thermal-wind jet.  On lat-lon
+            # the A-grid u IS geographic-east, so the assignment is direct and
+            # correct.  Other grids need extra handling not yet wired:
+            #   * cubed_sphere: u/v are cube-LOCAL vector components — the
+            #     geographic jet must be rotated by the grid angle first;
+            #   * gaussian/spectral: temperature lives in spectral space (T_hat),
+            #     no grid-space T Field;
+            #   * mpas: not wired.
+            # Restrict to lat-lon here so the advertised IC is exactly the
+            # implemented+validated one — fail early, before setup.
+            _gt_std = normalize_grid_type(self.grid.grid_type)
+            if _gt_std != "latlon":
+                errors.append(
+                    f"ic='standard' is currently implemented only for "
+                    f"grid_type='latlon'; got grid_type={self.grid.grid_type!r} "
+                    f"(discretization={self.dycore.discretization!r}). "
+                    f"Use ic='default', or ic='era5' for cubed_sphere/spectral."
+                )
+            # T_init is the equator surface temperature; the pole is
+            # T_init - 40 K (StandardAtmosphereConfig.equator_pole_delta_K). A
+            # too-cold T_init drives the pole surface temperature non-positive
+            # and would NaN the thermal-wind setup, so require a physical
+            # equator surface temperature here (fail-early, before setup).
+            if not (150.0 <= self.T_init <= 360.0):
+                errors.append(
+                    f"ic='standard' requires a physical equator surface "
+                    f"temperature 150 K <= T_init <= 360 K; got "
+                    f"T_init={self.T_init} K."
+                )
 
         if self.aimip_variant not in AIMIP_VARIANTS:
             errors.append(
@@ -464,6 +625,7 @@ class ExperimentConfig(NamedTuple):
             solar_file=getattr(amip_cfg, 'solar_file', ''),
             solar_tsi_var=getattr(amip_cfg, 'solar_tsi_var', 'tsi'),
             solar_spectral_var=getattr(amip_cfg, 'solar_spectral_var', 'solar_fraction_by_gpt'),
+            solar_spectral_band_order=getattr(amip_cfg, 'solar_spectral_band_order', 'auto'),
             aerosol_forcing=getattr(amip_cfg, 'aerosol_forcing', 'off'),
             aerosol_file=getattr(amip_cfg, 'aerosol_file', ''),
             aerosol_reference_aod=getattr(amip_cfg, 'aerosol_reference_aod', 0.03),
@@ -478,6 +640,7 @@ class ExperimentConfig(NamedTuple):
             topography=amip_cfg.topography,
             topo_smoothing=amip_cfg.topo_smoothing,
             topo_edge_blend=amip_cfg.topo_edge_blend,
+            land_mask_path=getattr(amip_cfg, 'land_mask_path', ''),
             T_init=amip_cfg.T_init,
             RH_init=amip_cfg.RH_init,
             dynamic_albedo=amip_cfg.dynamic_albedo,
@@ -566,6 +729,7 @@ class ExperimentConfig(NamedTuple):
             solar_file=self.solar_file,
             solar_tsi_var=self.solar_tsi_var,
             solar_spectral_var=self.solar_spectral_var,
+            solar_spectral_band_order=self.solar_spectral_band_order,
             aerosol_forcing=self.aerosol_forcing,
             aerosol_file=self.aerosol_file,
             aerosol_reference_aod=self.aerosol_reference_aod,

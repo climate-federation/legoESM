@@ -45,6 +45,9 @@ from legoesm.atmosphere.dynamics.mean_wind_filter import (
 from legoesm.atmosphere.dynamics.moist_mass_fixer import (
     compute_total_water_mass_plane, fix_moist_mass_plane,
 )
+from legoesm.atmosphere.dynamics.compressible_euler_plane import (
+    compute_dry_mass_plane, fix_mass_nonhydrostatic_plane,
+)
 
 
 def _validate_layout(layout) -> None:
@@ -245,4 +248,137 @@ def fix_moist_mass_plane_mpi(
         )
     return state._replace(
         tracers=state.tracers.replace(data=new_tracers),
+    )
+
+
+def _validate_plane_state_for_mpi_dry(
+    state, height_coord, grid, terrain_metric,
+) -> None:
+    """Geometry + state-shape validation for the dry-mass MPI helpers.
+
+    Mirrors :func:`_validate_plane_state_for_mpi_water` but checks
+    only the fields the dry-mass path actually uses (rho_prime,
+    rho_ref, dz, area_T, terrain Jacobian). Catches the
+    broadcast-silent-wrong-shape failure mode flagged by Codex.
+    """
+    rho_p = state.rho_prime.data
+    if rho_p.ndim != 3:
+        raise ValueError(
+            f"rho_prime must be 3D (ny, nx, nlev); got ndim={rho_p.ndim} "
+            f"shape={rho_p.shape}."
+        )
+    ny, nx, nlev = rho_p.shape
+    if grid.area_T.shape != (ny, nx):
+        raise ValueError(
+            f"grid.area_T shape {grid.area_T.shape} != (ny={ny}, nx={nx})."
+        )
+    if terrain_metric.jacobian.shape != (ny, nx):
+        raise ValueError(
+            f"terrain_metric.jacobian shape "
+            f"{terrain_metric.jacobian.shape} != (ny={ny}, nx={nx})."
+        )
+    if height_coord.dz.shape != (nlev,):
+        raise ValueError(
+            f"height_coord.dz shape {height_coord.dz.shape} != (nlev={nlev},)."
+        )
+    if height_coord.rho_ref.shape != (nlev,):
+        raise ValueError(
+            f"height_coord.rho_ref shape {height_coord.rho_ref.shape} "
+            f"!= (nlev={nlev},)."
+        )
+
+
+def compute_dry_mass_plane_mpi(
+    state, grid, height_coord, terrain_metric, layout, owned_mask,
+) -> jax.Array:
+    """MPI-aware dry-air mass on the plane (R7).
+
+    Per-rank local sum × ``owned_mask`` (zeros the halo / overlap
+    cells so they aren't double-counted), then ``global_sum_mpi``
+    across ranks. Returns the GLOBAL dry mass.
+
+    Single-rank short-circuits to :func:`compute_dry_mass_plane`.
+    """
+    _validate_layout(layout)
+    if layout.n_ranks == 1:
+        return compute_dry_mass_plane(
+            state, grid, height_coord, terrain_metric,
+        )
+    _validate_plane_state_for_mpi_dry(
+        state, height_coord, grid, terrain_metric,
+    )
+    rho_p = state.rho_prime.data
+    ny, nx, _ = rho_p.shape
+    _validate_owned_mask(owned_mask, (ny, nx))
+    from legoesm.parallel.reductions import global_sum_mpi
+
+    rho_total = height_coord.rho_ref + rho_p
+    weight_horizontal = (
+        terrain_metric.jacobian * grid.area_T * owned_mask
+    )[:, :, None]
+    cell_mass = rho_total * weight_horizontal * height_coord.dz
+    local_mass = jnp.sum(cell_mass)
+    return global_sum_mpi(local_mass)
+
+
+def _plane_volume_weight_mpi(
+    grid, height_coord, terrain_metric, layout, owned_mask,
+) -> jax.Array:
+    """Global owned-cell volume ``sum_owned(J · area_T · dz)``.
+
+    Pure geometry (no state) so the result is constant once the
+    layout + grid are fixed. Used as the denominator of the additive
+    rho' correction in :func:`fix_mass_nonhydrostatic_plane_mpi` so
+    every rank applies the same uniform shift.
+    """
+    if layout.n_ranks == 1:
+        weight_horizontal = (
+            terrain_metric.jacobian * grid.area_T
+        )[:, :, None]
+        return jnp.sum(weight_horizontal * height_coord.dz)
+    from legoesm.parallel.reductions import global_sum_mpi
+
+    weight_horizontal = (
+        terrain_metric.jacobian * grid.area_T * owned_mask
+    )[:, :, None]
+    local_volume = jnp.sum(weight_horizontal * height_coord.dz)
+    return global_sum_mpi(local_volume)
+
+
+def fix_mass_nonhydrostatic_plane_mpi(
+    state, target_mass, grid, height_coord, terrain_metric,
+    layout, owned_mask,
+):
+    """MPI-aware dry-mass fixer (R7).
+
+    Uniform additive correction to ``rho_prime``:
+
+        delta = (target_mass - current_global) / global_volume_weight
+        rho_prime' = rho_prime + delta
+
+    where ``current_global`` and ``global_volume_weight`` are both
+    ``global_sum_mpi`` reductions. Every rank applies the same
+    ``delta`` so the resulting global mass exactly matches
+    ``target_mass`` to round-off.
+
+    Mirrors the serial :func:`fix_mass_nonhydrostatic_plane` — AD-safe
+    (pure additive correction, no clip, no branch on traced values).
+
+    Single-rank short-circuits to the serial fixer.
+    """
+    _validate_layout(layout)
+    if layout.n_ranks == 1:
+        return fix_mass_nonhydrostatic_plane(
+            state, target_mass, grid, height_coord, terrain_metric,
+        )
+    current_mass = compute_dry_mass_plane_mpi(
+        state, grid, height_coord, terrain_metric, layout, owned_mask,
+    )
+    volume = _plane_volume_weight_mpi(
+        grid, height_coord, terrain_metric, layout, owned_mask,
+    )
+    delta = (target_mass - current_mass) / volume
+    new_rho_p = state.rho_prime.data + delta
+    return state._replace(
+        rho_prime=state.rho_prime.replace(data=new_rho_p),
     )

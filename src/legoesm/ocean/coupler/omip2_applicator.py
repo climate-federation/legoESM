@@ -45,31 +45,64 @@ import numpy as np
 
 from legoesm import constants
 from legoesm.core.field import Field
+from legoesm.thermo import saturation_vapor_pressure
 from legoesm.ocean.bulk_flux_omip import air_sea_fluxes
 
 
 def _bolton_q_sat(T_K, p_hpa: float = 1013.25):
-    """Bolton (1980) saturation specific humidity at temperature T_K."""
-    T_C = T_K - 273.15
-    e_s = 6.112 * jnp.exp(17.67 * T_C / (T_C + 243.5))
-    return 0.622 * e_s / (p_hpa - 0.378 * e_s)
+    """Saturation specific humidity [kg/kg] at temperature T_K [K], pressure p_hpa [hPa].
+
+    Uses the canonical saturation vapour pressure from :mod:`legoesm.thermo`
+    (no re-derived Magnus/Tetens coefficients) and ``constants.epsilon`` for
+    the specific-humidity conversion ``q = eps e / (p - (1 - eps) e)``.
+    """
+    e_s = saturation_vapor_pressure(T_K) / 100.0  # Pa -> hPa
+    return constants.epsilon * e_s / (p_hpa - (1.0 - constants.epsilon) * e_s)
+
+
+# Cache of precomputed nearest-neighbour (lat_idx, lon_idx) maps, keyed by a
+# (src, dst) signature. The target points (grid cell centres) are fixed within
+# a run, so the O(src*dst) index search runs once; per-step calls are a single
+# fancy-index.
+_NN_INDEX_CACHE: dict = {}
 
 
 def _nn_interp_to_points(field, src_lat_deg, src_lon_deg,
                          dst_lat_deg_pts, dst_lon_deg_pts):
-    """Nearest-neighbour 1-D-axis lookup from (src_lat, src_lon) to a
-    1-D set of target points ``(dst_lat_pts, dst_lon_pts)``.
+    """True nearest-neighbour lookup from a regular 1-D ``(src_lat, src_lon)``
+    grid to a 1-D set of target points ``(dst_lat_pts, dst_lon_pts)``.
 
-    Used for cube + MPAS grids where the target lives on unstructured
-    cell centres rather than a regular lat-lon mesh; the lat-lon-
-    coupled path goes through ``conservative_regrid`` instead.
+    Latitude: nearest by ``|Δlat|``. Longitude: nearest by *periodic*
+    (wrap-around) distance, so a target near the 0/360 seam picks the truly
+    closest source column. Source axes need not be pre-sorted. Used for cube,
+    MPAS, and tripole targets (unstructured / 2-D cell centres); the regular
+    lat-lon path uses ``conservative_regrid`` instead.
     """
-    src_lat = np.asarray(src_lat_deg)
-    src_lon = np.asarray(src_lon_deg) % 360.0
-    dst_lat = np.asarray(dst_lat_deg_pts)
-    dst_lon = np.asarray(dst_lon_deg_pts) % 360.0
-    i = np.clip(np.searchsorted(src_lat, dst_lat), 0, src_lat.size - 1)
-    j = np.clip(np.searchsorted(src_lon, dst_lon), 0, src_lon.size - 1)
+    src_lat = np.asarray(src_lat_deg, dtype=np.float64)
+    src_lon = np.asarray(src_lon_deg, dtype=np.float64) % 360.0
+    dst_lat = np.asarray(dst_lat_deg_pts, dtype=np.float64)
+    dst_lon = np.asarray(dst_lon_deg_pts, dtype=np.float64) % 360.0
+    # Robust signature of BOTH source and destination coords (codex: the dst
+    # longitude checksum was missing, so two same-shape targets differing only
+    # in interior lon could collide and reuse the wrong index map).
+    key = (
+        src_lat.size, src_lon.size, dst_lat.size,
+        float(src_lat[0]), float(src_lat[-1]), float(src_lat.sum()),
+        float(src_lon[0]), float(src_lon[-1]), float(src_lon.sum()),
+        float(dst_lat[0]), float(dst_lat[-1]), float(dst_lat.sum()),
+        float(dst_lon[0]), float(dst_lon[-1]), float(dst_lon.sum()),
+    )
+    idx = _NN_INDEX_CACHE.get(key)
+    if idx is None:
+        # nearest source latitude (absolute difference)
+        i = np.argmin(np.abs(src_lat[:, None] - dst_lat[None, :]), axis=0)
+        # nearest source longitude (periodic distance on the circle)
+        dlon = np.abs(src_lon[:, None] - dst_lon[None, :])
+        dlon = np.minimum(dlon, 360.0 - dlon)
+        j = np.argmin(dlon, axis=0)
+        idx = (i, j)
+        _NN_INDEX_CACHE[key] = idx
+    i, j = idx
     return np.asarray(field)[i, j]
 
 
@@ -163,6 +196,110 @@ def _sample_forcing_points(forcing, idx_t, lat_pts_deg, lon_pts_deg):
     return out
 
 
+def _apply_cgrid_surface_fluxes(state, forc, *, dz_0, rho_0, c_p,
+                                rho_air, sigma_sb, dt, grid=None):
+    """Apply bulk fluxes to a lat-lon C-grid state from already-sampled forcing.
+
+    Shared by the ``latlon`` / ``latlon_regional`` path (forcing conservatively
+    regridded onto the regular T grid) and the curvilinear ``tripole`` path
+    (forcing nearest-neighbour sampled onto the 2-D T grid) -- both use the
+    identical ``LatLonCGridOceanState`` layout (T cell-centred; u on EW faces
+    ``(n_lat, n_lon+1)``; v on NS faces ``(n_lat+1, n_lon)``). ``forc`` holds
+    the seven channels as 2-D ``(n_lat, n_lon)`` arrays. Forward-Euler update of
+    the top layer of T, u, v; land masking via state masks.
+
+    ``grid`` (optional) supplies ``cos_alpha_u`` / ``sin_alpha_u`` /
+    ``cos_alpha_v`` / ``sin_alpha_v`` for the geographic->grid wind-stress
+    rotation on curvilinear (tripole) geometries; absent on a regular lat-lon
+    grid, where the rotation is the identity.
+
+    NOTE (inherited tech debt, pre-existing in the latlon branch this factors):
+    ``_bolton_q_sat`` re-implements saturation and ``273.15`` / ``0.97`` are
+    hardcoded -- should move to ``legoesm.thermo`` / ``constants`` / a config in
+    a dedicated cleanup; kept verbatim here to preserve the heat-flux results.
+    The wind-stress *sign* (ocean reaction = -tau), by contrast, is corrected
+    here vs the previous (+tau) latlon code -- see the momentum comment below.
+    """
+    T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + 273.15
+    q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)), dtype=np.float64)
+    tau_x, tau_y, sh, lh = air_sea_fluxes(
+        u10=jnp.asarray(forc["u10"]),
+        v10=jnp.asarray(forc["v10"]),
+        T_air_K=jnp.asarray(forc["T_air"]),
+        q_air=jnp.asarray(forc["q_air"]),
+        T_sfc_K=jnp.asarray(T_sfc_K),
+        q_sfc=jnp.asarray(q_sfc),
+        rho_air=jnp.asarray(rho_air),
+    )
+    # --- Heat: Q_net positive into the ocean warms the top cell. ---
+    lw_up = 0.97 * sigma_sb * T_sfc_K ** 4
+    Q_net = (np.asarray(sh) + np.asarray(lh)
+             + forc["sw_down"] - lw_up + forc["lw_down"])
+    mask = np.asarray(state.land_mask.data, dtype=np.float64)
+    T_new = np.asarray(state.T.data, dtype=np.float64).copy()
+    T_new[..., 0] = T_new[..., 0] + Q_net / (rho_0 * c_p * dz_0) * dt * mask
+
+    # --- Momentum: OCEAN REACTION force. ``air_sea_fluxes`` returns tau in the
+    # ATMOSPHERIC convention (tau = -rho_air Cd |U| U, i.e. opposing the wind),
+    # so the ocean feels -tau (Newton's 3rd law). This sign flip mirrors the
+    # dynamics-core external-tau block (ocean_pe_latlon_cgrid.py:1892); without
+    # it the wind drives the ocean BACKWARDS. Geographic east/north stress is
+    # then rotated to grid-aligned (i, j) via cos_alpha_u / sin_alpha_u when the
+    # grid is curvilinear (tripole); a regular lat-lon C-grid lacks those
+    # attributes, so the rotation is the identity (grid-i == east). ---
+    tau_e = -np.asarray(tau_x, dtype=np.float64)   # eastward stress ON ocean
+    tau_n = -np.asarray(tau_y, dtype=np.float64)   # northward stress ON ocean
+    n_lat, n_lon = tau_e.shape
+
+    def _cell_to_uface(a):
+        f = np.zeros((n_lat, n_lon + 1), dtype=np.float64)
+        f[:, 1:-1] = 0.5 * (a[:, :-1] + a[:, 1:])
+        f[:, 0] = a[:, 0]
+        f[:, -1] = a[:, -1]
+        return f
+
+    def _cell_to_vface(a):
+        f = np.zeros((n_lat + 1, n_lon), dtype=np.float64)
+        f[1:-1, :] = 0.5 * (a[:-1, :] + a[1:, :])
+        f[0, :] = a[0, :]
+        f[-1, :] = a[-1, :]
+        return f
+
+    tau_e_u, tau_n_u = _cell_to_uface(tau_e), _cell_to_uface(tau_n)
+    tau_e_v, tau_n_v = _cell_to_vface(tau_e), _cell_to_vface(tau_n)
+
+    ca_u = getattr(grid, "cos_alpha_u", None) if grid is not None else None
+    sa_u = getattr(grid, "sin_alpha_u", None) if grid is not None else None
+    ca_v = getattr(grid, "cos_alpha_v", None) if grid is not None else None
+    sa_v = getattr(grid, "sin_alpha_v", None) if grid is not None else None
+    if ca_u is not None and sa_u is not None:
+        tau_i_u = (tau_e_u * np.asarray(ca_u, dtype=np.float64)
+                   + tau_n_u * np.asarray(sa_u, dtype=np.float64))
+    else:
+        tau_i_u = tau_e_u
+    if ca_v is not None and sa_v is not None:
+        tau_j_v = (-tau_e_v * np.asarray(sa_v, dtype=np.float64)
+                   + tau_n_v * np.asarray(ca_v, dtype=np.float64))
+    else:
+        tau_j_v = tau_n_v
+
+    u_face = np.asarray(state.u.data, dtype=np.float64).copy()
+    v_face = np.asarray(state.v.data, dtype=np.float64).copy()
+    u_mask = np.asarray(state.u_mask.data, dtype=np.float64)
+    v_mask = np.asarray(state.v_mask.data, dtype=np.float64)
+    u_face[..., 0] = u_face[..., 0] + tau_i_u / (rho_0 * dz_0) * dt * u_mask
+    v_face[..., 0] = v_face[..., 0] + tau_j_v / (rho_0 * dz_0) * dt * v_mask
+
+    return state._replace(
+        T=Field(jnp.asarray(T_new), name=state.T.name,
+                dims=state.T.dims, units=state.T.units),
+        u=Field(jnp.asarray(u_face), name=state.u.name,
+                dims=state.u.dims, units=state.u.units),
+        v=Field(jnp.asarray(v_face), name=state.v.name,
+                dims=state.v.dims, units=state.v.units),
+    )
+
+
 def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
                                  z_coord, grid, grid_type: str,
                                  dt: float,
@@ -171,11 +308,14 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
                                  rho_air: float = 1.225):
     """Apply one timestep of JRA55-do / CORE-II forcing to ``state``.
 
-    Currently supports ``grid_type="latlon"`` and
-    ``grid_type="latlon_regional"`` -- the two grids the OMIP-2 and
-    Bryan-THC drivers use. MPAS + cube support stubbed (raises
-    ``NotImplementedError``) because the production OMIP-2 spec uses
-    lat-lon; MPAS extension is a follow-up.
+    Supported ``grid_type``: ``latlon`` / ``latlon_regional`` (conservative
+    regrid onto the regular T grid), ``cubed_sphere`` and ``mpas`` /
+    ``mpas_regional`` (nearest-neighbour onto cell centres), and ``tripole``
+    (curvilinear lat-lon C-grid; nearest-neighbour onto the 2-D ``lat_T``/
+    ``lon_T`` grid, sharing the latlon C-grid application via
+    ``_apply_cgrid_surface_fluxes``). The ``spectral`` grid is NOT supported
+    (its state carries no grid-space u/v faces -- forcing it needs a
+    spectral-space path; tracked as a follow-up in OMIP_faithful.md).
 
     Returns a new ``state`` with updated top-layer u, v, T fields.
     """
@@ -184,61 +324,39 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
     if c_p is None:
         c_p = float(constants.c_sw)
 
-    sigma_sb = float(getattr(constants, "sigma_sb", 5.67e-8))
+    sigma_sb = float(constants.sigma_sb)
     dz_0 = float(np.asarray(z_coord.dz_ref)[0])
 
     if grid_type in ("latlon", "latlon_regional"):
         lat_deg = np.degrees(np.asarray(grid.lat))
         lon_deg = np.degrees(np.asarray(grid.lon))
         forc = _sample_forcing_latlon(forcing, idx_t, lat_deg, lon_deg)
-        T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + 273.15
-        q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)),
-                           dtype=np.float64)
-        tau_x, tau_y, sh, lh = air_sea_fluxes(
-            u10=jnp.asarray(forc["u10"]),
-            v10=jnp.asarray(forc["v10"]),
-            T_air_K=jnp.asarray(forc["T_air"]),
-            q_air=jnp.asarray(forc["q_air"]),
-            T_sfc_K=jnp.asarray(T_sfc_K),
-            q_sfc=jnp.asarray(q_sfc),
-            rho_air=jnp.asarray(rho_air),
+        return _apply_cgrid_surface_fluxes(
+            state, forc, dz_0=dz_0, rho_0=rho_0, c_p=c_p,
+            rho_air=rho_air, sigma_sb=sigma_sb, dt=dt, grid=grid,
         )
-        tau_x_np = np.asarray(tau_x)
-        tau_y_np = np.asarray(tau_y)
-        lw_up = 0.97 * sigma_sb * T_sfc_K ** 4
-        Q_net = (np.asarray(sh) + np.asarray(lh)
-                 + forc["sw_down"] - lw_up + forc["lw_down"])
-        mask = np.asarray(state.land_mask.data, dtype=np.float64)
-        dT_top = Q_net / (rho_0 * c_p * dz_0) * dt * mask
-        T_new = np.asarray(state.T.data, dtype=np.float64).copy()
-        T_new[..., 0] = T_new[..., 0] + dT_top
-        # C-grid face interpolation for tau_x, tau_y.
-        u_face = np.asarray(state.u.data, dtype=np.float64).copy()
-        v_face = np.asarray(state.v.data, dtype=np.float64).copy()
-        n_lat, n_lon = tau_x_np.shape
-        tau_x_face = np.zeros((n_lat, n_lon + 1), dtype=np.float64)
-        tau_x_face[:, 1:-1] = 0.5 * (tau_x_np[:, :-1] + tau_x_np[:, 1:])
-        tau_x_face[:, 0] = tau_x_np[:, 0]
-        tau_x_face[:, -1] = tau_x_np[:, -1]
-        u_mask = np.asarray(state.u_mask.data, dtype=np.float64)
-        u_face[..., 0] = u_face[..., 0] + (
-            tau_x_face / (rho_0 * dz_0) * dt * u_mask
+
+    if grid_type == "tripole":
+        # Curvilinear tripolar grid: same C-grid state layout as latlon
+        # (T cell-centred; u/v on EW/NS faces) but the T-point coordinates are
+        # 2-D (lat_T, lon_T). Conservative regrid needs a regular destination
+        # grid, so sample CORE-II at each T cell by nearest-neighbour (as the
+        # cube / MPAS paths do). NOTE: tau_x/tau_y are geographic (eastward /
+        # northward); south of the ~50 deg N tripole join the grid is regular
+        # lat-lon (grid-i == east exactly), so only in the largely ice-masked
+        # Arctic fold is the unrotated stress application an approximation
+        # (tracked in OMIP_faithful.md).
+        lat_pts = np.degrees(np.asarray(grid.lat_T))   # (n_lat, n_lon)
+        lon_pts = np.degrees(np.asarray(grid.lon_T))
+        shp = lat_pts.shape
+        forc = _sample_forcing_points(
+            forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1),
         )
-        tau_y_face = np.zeros((n_lat + 1, n_lon), dtype=np.float64)
-        tau_y_face[1:-1, :] = 0.5 * (tau_y_np[:-1, :] + tau_y_np[1:, :])
-        tau_y_face[0, :] = tau_y_np[0, :]
-        tau_y_face[-1, :] = tau_y_np[-1, :]
-        v_mask = np.asarray(state.v_mask.data, dtype=np.float64)
-        v_face[..., 0] = v_face[..., 0] + (
-            tau_y_face / (rho_0 * dz_0) * dt * v_mask
-        )
-        return state._replace(
-            T=Field(jnp.asarray(T_new), name=state.T.name,
-                    dims=state.T.dims, units=state.T.units),
-            u=Field(jnp.asarray(u_face), name=state.u.name,
-                    dims=state.u.dims, units=state.u.units),
-            v=Field(jnp.asarray(v_face), name=state.v.name,
-                    dims=state.v.dims, units=state.v.units),
+        for _k, _v in forc.items():
+            forc[_k] = _v.reshape(shp)
+        return _apply_cgrid_surface_fluxes(
+            state, forc, dz_0=dz_0, rho_0=rho_0, c_p=c_p,
+            rho_air=rho_air, sigma_sb=sigma_sb, dt=dt, grid=grid,
         )
 
     if grid_type == "cubed_sphere":
@@ -253,7 +371,7 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
         )
         for k, v in forc.items():
             forc[k] = v.reshape(flat_shape)
-        T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + 273.15
+        T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + constants.T_freeze
         q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)),
                            dtype=np.float64)
         tau_x, tau_y, sh, lh = air_sea_fluxes(
@@ -275,11 +393,16 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
         )
         u_new = np.asarray(state.u.data, dtype=np.float64).copy()
         v_new = np.asarray(state.v.data, dtype=np.float64).copy()
+        # Ocean reaction force: air_sea_fluxes returns atmospheric-convention
+        # tau (opposing the wind), so the ocean feels -tau (Newton's 3rd law),
+        # consistent with the lat-lon/tripole helper above. NOTE: applied
+        # without geographic->cube-frame rotation (pre-existing limitation;
+        # tracked in OMIP_faithful.md).
         u_new[..., 0] = u_new[..., 0] + (
-            np.asarray(tau_x) / (rho_0 * dz_0) * dt * mask
+            -np.asarray(tau_x) / (rho_0 * dz_0) * dt * mask
         )
         v_new[..., 0] = v_new[..., 0] + (
-            np.asarray(tau_y) / (rho_0 * dz_0) * dt * mask
+            -np.asarray(tau_y) / (rho_0 * dz_0) * dt * mask
         )
         return state._replace(
             T=Field(jnp.asarray(T_new), name=state.T.name,
@@ -300,7 +423,7 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
         forc = _sample_forcing_points(
             forcing, idx_t, lat_pts, lon_pts,
         )
-        T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[:, 0] + 273.15
+        T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[:, 0] + constants.T_freeze
         q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)),
                            dtype=np.float64)
         tau_x, tau_y, sh, lh = air_sea_fluxes(
@@ -326,7 +449,10 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
         angle = np.asarray(grid.angleEdge, dtype=np.float64)
         tau_x_edge = 0.5 * (np.asarray(tau_x)[c1] + np.asarray(tau_x)[c2])
         tau_y_edge = 0.5 * (np.asarray(tau_y)[c1] + np.asarray(tau_y)[c2])
-        tau_n = tau_x_edge * np.cos(angle) + tau_y_edge * np.sin(angle)
+        # Ocean reaction force (-tau): air_sea_fluxes returns atmospheric
+        # convention. The angleEdge projection rotates geographic E/N onto the
+        # edge normal; the leading minus is the wind->ocean sign flip.
+        tau_n = -(tau_x_edge * np.cos(angle) + tau_y_edge * np.sin(angle))
         edge_wet = ((mask[c1] > 0.5) & (mask[c2] > 0.5)).astype(np.float64)
         u_new = np.asarray(state.u.data, dtype=np.float64).copy()
         u_new[:, 0] = u_new[:, 0] + (
@@ -344,4 +470,241 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
     )
 
 
-__all__ = ["apply_omip2_surface_fluxes"]
+def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
+                                  grid, grid_type: str,
+                                  rho_air: float = 1.225):
+    """Build an :class:`OceanSurfaceForcing` (tau_x, tau_y, q_net, sw_down) on
+    the model grid from CORE-II / JRA55 forcing, for INTEGRATION INSIDE
+    ``model.step(state, dt, surface_forcing=...)`` -- the dynamics-core
+    external-tau block -- rather than the operator-split forward-Euler
+    :func:`apply_omip2_surface_fluxes`. Integrating the forcing within the
+    timestep is energetically consistent with the dynamics (the split applicator
+    pumps spurious KE -> runaway velocities over a multi-month global run).
+
+    Conventions (matching the dynamics-core consumer, ocean_pe_latlon_cgrid):
+    * ``tau_x``/``tau_y`` are left in the ATMOSPHERIC convention exactly as
+      ``air_sea_fluxes`` returns them; the core applies the ``-tau`` ocean
+      reaction + the geographic->grid rotation (so no sign/rotation here).
+    * ``q_net`` is the TOTAL net surface heat flux into the ocean (turbulent +
+      longwave + shortwave); the core subtracts the penetrating ``sw_down`` and
+      distributes it over depth.
+
+    Supports the lat-lon C-grid family (``latlon`` / ``latlon_regional`` via
+    conservative regrid; ``tripole`` via nearest-neighbour on the 2-D T grid).
+    """
+    from legoesm.ocean.state import OceanSurfaceForcing
+    sigma_sb = float(getattr(constants, "sigma_sb", 5.67e-8))
+    T_freeze = float(constants.T_freeze)
+
+    if grid_type in ("latlon", "latlon_regional"):
+        lat_deg = np.degrees(np.asarray(grid.lat))
+        lon_deg = np.degrees(np.asarray(grid.lon))
+        forc = _sample_forcing_latlon(forcing, idx_t, lat_deg, lon_deg)
+    elif grid_type == "tripole":
+        lat_pts = np.degrees(np.asarray(grid.lat_T))
+        lon_pts = np.degrees(np.asarray(grid.lon_T))
+        shp = lat_pts.shape
+        forc = _sample_forcing_points(
+            forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1),
+        )
+        forc = {k: v.reshape(shp) for k, v in forc.items()}
+    else:
+        raise NotImplementedError(
+            f"compute_omip2_surface_forcing does not support grid_type={grid_type!r}"
+        )
+
+    # Top-cell ocean temperature (state stored in degC) -> K.
+    T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + T_freeze
+    q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)), dtype=np.float64)
+    tau_x, tau_y, sh, lh = air_sea_fluxes(
+        u10=jnp.asarray(forc["u10"]),
+        v10=jnp.asarray(forc["v10"]),
+        T_air_K=jnp.asarray(forc["T_air"]),
+        q_air=jnp.asarray(forc["q_air"]),
+        T_sfc_K=jnp.asarray(T_sfc_K),
+        q_sfc=jnp.asarray(q_sfc),
+        rho_air=jnp.asarray(rho_air),
+    )
+    lw_up = 0.97 * sigma_sb * T_sfc_K ** 4
+    q_net = (np.asarray(sh) + np.asarray(lh)
+             + forc["lw_down"] - lw_up + forc["sw_down"])
+    return OceanSurfaceForcing(
+        tau_x=jnp.asarray(np.asarray(tau_x)),
+        tau_y=jnp.asarray(np.asarray(tau_y)),
+        q_net=jnp.asarray(q_net),
+        sw_down=jnp.asarray(forc["sw_down"]),
+    )
+
+
+# ===========================================================================
+# JAX-traceable / lax.scan-fusable forcing path (issue #354)
+# ===========================================================================
+#
+# ``compute_omip2_surface_forcing`` (above) pulls ``state.T`` to the host
+# every step (np.asarray) to compute the saturation humidity, which forces
+# a device sync per step and prevents wrapping the time loop in
+# ``jax.lax.scan``.  The functions below provide a pure-JAX equivalent for
+# the tripole grid: the forcing is lifted to device arrays ONCE and the
+# spatial nearest-neighbour sample is a static gather, so the whole block
+# of steps fuses on-device.  At 1/4 deg the raw CORE-II forcing
+# (1460 x 94 x 192 x 7ch, ~1.4 GB) fits on device, whereas pre-sampling all
+# records to the model grid (1206 x 1440) would not — hence the gather.
+
+
+def core2_forcing_nn_indices(forcing, lat_pts_deg, lon_pts_deg):
+    """Fixed nearest-neighbour source indices ``(i, j)`` from the CORE-II
+    forcing grid to a set of model points.
+
+    Geometry-only (time-independent), so the spatial sample inside a
+    ``lax.scan`` becomes a static gather.  Replicates the ``(i, j)``
+    computed in :func:`_nn_interp_to_points` EXACTLY (nearest latitude by
+    ``|Δlat|``; nearest longitude by periodic wrap distance).
+    """
+    src_lat = np.asarray(forcing.lat, dtype=np.float64)
+    src_lon = np.asarray(forcing.lon, dtype=np.float64) % 360.0
+    dst_lat = np.asarray(lat_pts_deg, dtype=np.float64)
+    dst_lon = np.asarray(lon_pts_deg, dtype=np.float64) % 360.0
+    i = np.argmin(np.abs(src_lat[:, None] - dst_lat[None, :]), axis=0)
+    dlon = np.abs(src_lon[:, None] - dst_lon[None, :])
+    dlon = np.minimum(dlon, 360.0 - dlon)
+    j = np.argmin(dlon, axis=0)
+    return i.astype(np.int32), j.astype(np.int32)
+
+
+def build_core2_forcing_device_stack(forcing, grid, grid_type: str):
+    """Lift CORE-II forcing to device arrays + fixed NN indices for the
+    scan kernel (issue #354).  Tripole only (the faithful OMIP path);
+    other grids keep the host per-step sampling.
+
+    Returns
+    -------
+    forcing_stack : dict[str, jax.Array]
+        6 channels (u10, v10, T_air, q_air, sw_down, lw_down), each
+        ``(n_rec, n_lat_f, n_lon_f)`` on device.
+    nn_i, nn_j : jax.Array (int32, ``(n_lat*n_lon,)``)
+        Nearest-neighbour source indices into the forcing grid.
+    grid_shape : tuple
+        ``(n_lat, n_lon)`` of the model T grid.
+    """
+    if grid_type != "tripole":
+        raise NotImplementedError(
+            "build_core2_forcing_device_stack: the lax.scan forcing path is "
+            "implemented for grid_type='tripole' (the faithful OMIP path); "
+            f"got {grid_type!r}.  Use the host compute_omip2_surface_forcing."
+        )
+    lat_pts = np.degrees(np.asarray(grid.lat_T)).reshape(-1)
+    lon_pts = np.degrees(np.asarray(grid.lon_T)).reshape(-1)
+    nn_i, nn_j = core2_forcing_nn_indices(forcing, lat_pts, lon_pts)
+    channels = ("u10", "v10", "T_air", "q_air", "sw_down", "lw_down")
+    forcing_stack = {
+        name: jnp.asarray(np.asarray(getattr(forcing, name)))
+        for name in channels
+    }
+    grid_shape = tuple(np.asarray(grid.lat_T).shape)
+    return forcing_stack, jnp.asarray(nn_i), jnp.asarray(nn_j), grid_shape
+
+
+def compute_omip2_surface_forcing_jax(
+    state, *, forcing_stack, nn_i, nn_j, grid_shape, idx_t, rho_air=1.225,
+):
+    """Pure-JAX, ``lax.scan``-traceable form of
+    :func:`compute_omip2_surface_forcing` for the tripole grid (issue #354).
+
+    ``idx_t`` is the (possibly traced) 6-hourly CORE-II record index.  The
+    spatial sample is a static nearest-neighbour gather via the fixed
+    ``(nn_i, nn_j)`` map, so there is NO host roundtrip per step.
+    Bit-equivalent (to fp tolerance) to the host function: identical
+    ``air_sea_fluxes``, ``_bolton_q_sat`` and net-heat formula, identical
+    nearest-neighbour spatial sample.
+    """
+    from legoesm.ocean.state import OceanSurfaceForcing
+    sigma_sb = float(getattr(constants, "sigma_sb", 5.67e-8))
+    T_freeze = float(constants.T_freeze)
+
+    def _sample(name):
+        rec = forcing_stack[name][idx_t]            # (n_lat_f, n_lon_f)
+        return rec[nn_i, nn_j].reshape(grid_shape)  # (n_lat, n_lon)
+
+    u10 = _sample("u10")
+    v10 = _sample("v10")
+    T_air = _sample("T_air")
+    q_air = _sample("q_air")
+    sw_down = _sample("sw_down")
+    lw_down = _sample("lw_down")
+
+    # Top-cell ocean temperature (state in degC) -> K, pure JAX (no host pull).
+    T_sfc_K = state.T.data[..., 0] + T_freeze
+    q_sfc = _bolton_q_sat(T_sfc_K)
+    tau_x, tau_y, sh, lh = air_sea_fluxes(
+        u10=u10, v10=v10, T_air_K=T_air, q_air=q_air,
+        T_sfc_K=T_sfc_K, q_sfc=q_sfc, rho_air=jnp.asarray(rho_air),
+    )
+    lw_up = 0.97 * sigma_sb * T_sfc_K ** 4
+    q_net = sh + lh + lw_down - lw_up + sw_down
+    return OceanSurfaceForcing(
+        tau_x=tau_x, tau_y=tau_y, q_net=q_net, sw_down=sw_down,
+    )
+
+
+def build_omip2_scan_block_fn(
+    model, dt, grid_shape, *, rho_air=1.225, ramp_s=0.0,
+):
+    """Build a JIT-compiled ``lax.scan`` block-step function for the tripole
+    OMIP time loop (issue #354).
+
+    The returned
+    ``block_fn(state, forcing_stack, nn_i, nn_j, idx_t_block, step0)``
+    advances ``state`` over ``len(idx_t_block)`` steps; each step samples
+    the CORE-II forcing on-device via
+    :func:`compute_omip2_surface_forcing_jax`, optionally applies the
+    spin-up wind/heat ramp, and calls ``model._step_impl`` (the un-wrapped
+    core step, so no nested JIT).  Because the forcing has no host
+    roundtrip, XLA fuses the whole block.
+
+    ``forcing_stack`` / ``nn_i`` / ``nn_j`` are explicit JIT arguments
+    (NOT closure captures), so the ~1.3 GB 1/4-deg forcing is a device
+    INPUT rather than an embedded compiled constant.  ``grid_shape`` is a
+    static (closure) shape used only in ``reshape``.
+
+    Host-side per-step pieces of the Python loop (diagnostics, snapshots,
+    non-finite abort, optional WOA nudging / spin-up drag) are intentionally
+    NOT inside the scan — the caller runs them at block boundaries and must
+    not enable nudging/drag on the scan path.
+    """
+    import jax
+    from jax import lax
+
+    apply_ramp = ramp_s > 0.0  # static gate (CLAUDE.md feature-gating)
+
+    @jax.jit
+    def block_fn(state, forcing_stack, nn_i, nn_j, idx_t_block, step0):
+        def _body(carry, idx_t):
+            st, step = carry
+            sf = compute_omip2_surface_forcing_jax(
+                st, forcing_stack=forcing_stack, nn_i=nn_i, nn_j=nn_j,
+                grid_shape=grid_shape, idx_t=idx_t, rho_air=rho_air,
+            )
+            if apply_ramp:
+                ramp = jnp.minimum(
+                    1.0, (step.astype(sf.tau_x.dtype) * dt) / ramp_s)
+                sf = sf._replace(
+                    tau_x=sf.tau_x * ramp, tau_y=sf.tau_y * ramp,
+                    q_net=sf.q_net * ramp, sw_down=sf.sw_down * ramp,
+                )
+            st = model._step_impl(st, dt, surface_forcing=sf)
+            return (st, step + 1), None
+
+        (state, _), _ = lax.scan(_body, (state, step0), idx_t_block)
+        return state
+
+    return block_fn
+
+
+__all__ = [
+    "apply_omip2_surface_fluxes",
+    "compute_omip2_surface_forcing",
+    "compute_omip2_surface_forcing_jax",
+    "build_core2_forcing_device_stack",
+    "build_omip2_scan_block_fn",
+    "core2_forcing_nn_indices",
+]

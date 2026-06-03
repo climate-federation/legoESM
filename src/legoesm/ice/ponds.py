@@ -40,6 +40,7 @@ def step_ponds(
     pond_to_ice_max_area: float,
     depth_to_area_ratio: float,
     snow_block_threshold: float = 5.0e-3,
+    refreeze_width_K: float = 0.5,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Advance pond area + depth one time step.
 
@@ -72,6 +73,11 @@ def step_ponds(
     depth_to_area_ratio : float
         ``h_pond / a_pond`` ratio assumed for converting added
         volume into the (area, depth) split.
+    refreeze_width_K : float
+        Half-width [K] of the smooth linear ramp over which ponds
+        transition from fully liquid to fully refrozen as ``T_air``
+        crosses ``refreeze_threshold``.  Keeps the refreeze response
+        differentiable; smaller → sharper (CICE-like) cutoff.
 
     Returns
     -------
@@ -100,9 +106,9 @@ def step_ponds(
     V_pond = pond_area * pond_depth
 
     # Refreezing: when T_air < threshold, drain everything back to
-    # ice.  Smooth ramp over ±0.5 K for differentiability.
+    # ice.  Smooth ramp over ``refreeze_width_K`` for differentiability.
     refreeze_fraction = jnp.clip(
-        (refreeze_threshold - T_air) / 0.5,
+        (refreeze_threshold - T_air) / refreeze_width_K,
         0.0,
         1.0,
     )
@@ -120,7 +126,13 @@ def step_ponds(
     # Recover (a_pond, h_pond) under the ratio constraint:
     #   h_pond = sqrt(depth_to_area_ratio · V_new)
     #   a_pond = V_new / max(h_pond, 1e-6)
-    h_new = jnp.sqrt(jnp.maximum(depth_to_area_ratio * V_new, 0.0))
+    # Floor the sqrt argument at a tiny positive (not 0): at an empty pond
+    # (V_new = 0 — the common no-melt / cold-season state) sqrt'(0) = inf gives
+    # a NaN reverse-mode gradient through h_new.  The forward is unchanged for
+    # any real pond (and at V_new=0 the downstream ``max(h_new, 1e-6)`` and
+    # ``a_new = V_new/h_safe = 0`` are identical).  Mirrors the sea_ice.py
+    # pond_depth fix (iter 2).
+    h_new = jnp.sqrt(jnp.maximum(depth_to_area_ratio * V_new, 1e-14))
     h_safe = jnp.maximum(h_new, 1e-6)
     a_new = V_new / h_safe
     a_new = jnp.clip(a_new, 0.0, pond_to_ice_max_area)

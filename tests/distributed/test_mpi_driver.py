@@ -31,7 +31,14 @@ from legoesm.parallel.distributed import initialize_distributed
 
 @pytest.fixture(autouse=True)
 def reset_halo_backend():
-    """Reset halo backend to local after each test."""
+    """Reset halo backend to local before AND after each test.
+
+    FV3_3D iter-1063: the conftest session fixture pre-initializes
+    MPI and leaves the backend in 'mpi' mode.  Each test must start
+    with a clean 'local' baseline so preconditions like
+    ``assert get_halo_backend() == 'local'`` hold.
+    """
+    set_halo_backend("local")
     yield
     set_halo_backend("local")
 
@@ -46,7 +53,16 @@ class TestMPIDriverPath:
         assert get_halo_backend() == "mpi"
 
     def test_pad_halo_4d_mpi_matches_local(self):
-        """4D MPI halo exchange matches local reference."""
+        """4D MPI halo exchange matches local reference on owned faces.
+
+        FV3_3D iter-1063: under MPI with replicated ``(6, n, n, nlev)``
+        input, the helper only exchanges halos for the rank's
+        locally-owned faces (face-only mode).  Non-owned faces in
+        the output have unfilled (zero) halo cells, so a full
+        ``(6, n+2, n+2, nlev)`` comparison fails on every rank.
+        Compare per-owned-face only — matches the FV3 step-fidelity
+        and iter-1061 patterns.
+        """
         rank = MPI.COMM_WORLD.Get_rank()
         n, nlev = 8, 5
 
@@ -61,9 +77,12 @@ class TestMPIDriverPath:
         set_halo_backend("mpi", topology)
         result = pad_halo_4d(data_global)
 
-        if rank == 0:
-            diff = jnp.max(jnp.abs(result - ref))
-            assert diff == 0.0, f"4D MPI halo mismatch: max diff = {diff}"
+        for f in topology.local_face_ids:
+            diff = jnp.max(jnp.abs(result[f] - ref[f]))
+            assert diff == 0.0, (
+                f"4D MPI halo mismatch on owned face {f} (rank {rank}): "
+                f"max diff = {diff}"
+            )
 
     def test_distributed_3_steps_matches_single_rank(self):
         """Multi-rank result matches single-rank reference.
@@ -118,9 +137,11 @@ class TestMPIDriverPath:
         for _ in range(n_steps):
             dist_state = model.step(dist_state, dt)
 
-        # Compare on rank 0
+        # Compare on rank 0.  FV3HydrostaticState stores winds on the
+        # D-grid (u_d, v_d at corners); the cell-centre (u, v) name only
+        # applies to the pre-FV3 HydrostaticState fed to hydrostatic_to_fv3.
         if rank == 0:
-            for field_name in ("T", "u", "v", "p_s"):
+            for field_name in ("T", "u_d", "v_d", "p_s"):
                 ref_arr = np.asarray(getattr(ref_state, field_name).data)
                 dist_arr = np.asarray(getattr(dist_state, field_name).data)
                 np.testing.assert_allclose(

@@ -85,7 +85,7 @@ from legoesm.core.cfl import pole_cell_dx, cfl_max_dt
 from legoesm.core.conservation import (
     zero_mean_tendency,
     _batch_global_area_sums,
-    _conservation_accumulator,
+    conservation_accumulator,
 )
 from legoesm.core.precision import cast_pytree
 from legoesm.core.operators_fv_latlon import (
@@ -127,6 +127,17 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     """Configuration for the C-grid lat-lon hydrostatic PE model.
 
     Time integrator options: "ssp_rk3", "ssp_rk34", "ssp_rk54", "rk4".
+
+    pole_v_bc : tuple[bool, bool]
+        (south, north) — whether to zero ``v`` at the south / north pole
+        rows of the lat axis.  Default ``(True, True)`` is the serial /
+        single-rank convention (wall BC at both global poles).  Under
+        latitude-band MPI, the wrapper sets each flag to
+        ``layout.<side>_rank is None`` so only the boundary ranks zero
+        the actual global poles and interior ranks leave their band
+        boundaries (which are interior v-faces shared with the
+        neighbour rank) alone.  See
+        :func:`legoesm.parallel.latlon_mpi.make_latlon_mpi_step`.
     """
     g: float = constants.g
     A_h: float = 0.0              # Laplacian viscosity [m^2/s]
@@ -140,6 +151,54 @@ class CGridLatLonPrimitiveEquationConfig(NamedTuple):
     use_polar_filter: bool = False
     polar_filter_cutoff_deg: float = 60.0
     polar_filter_max_wave_speed: float = 300.0
+    pole_v_bc: tuple = (True, True)  # (south_pole, north_pole) — see docstring
+    pole_v_bc_offset: int = 0
+    """Where the global pole rows live relative to the array ends.
+
+    ``0`` (serial / single-rank): the actual pole rows sit at indices
+    ``v[0]`` and ``v[-1]``, matching the legacy
+    ``jnp.pad(v[1:-1], ((1, 1), ...))`` pattern.
+
+    ``halo`` (lat-lon MPI on a state padded by ``halo`` rows on each
+    side): the actual pole rows are ``halo`` cells *into* the padded
+    array — ``v[halo]`` and ``v[-(halo+1)]``.  Zeroing the padded
+    ends instead silently leaves the real poles non-zero, drives the
+    next RK stage into a divergent state, and produces NaNs (caught
+    by ``tests/parallel/test_latlon_mpi_step_serial.py`` on Stage-2
+    smoke).
+    """
+
+
+def _zero_v_at_pole(v, *, south: bool, north: bool, offset: int = 0):
+    """Zero ``v`` at the south / north pole rows (wall BC).
+
+    Default ``offset=0`` reproduces the legacy
+    ``jnp.pad(v[1:-1], ((1, 1), (0, 0), (0, 0)))`` exactly — same
+    single-Pad HLO, same bit-output.
+
+    With ``offset>0`` the helper zeros ``v[offset]`` (south pole on an
+    array padded by ``offset`` halo rows below) and ``v[-(offset+1)]``
+    (north pole on an array padded by ``offset`` halo rows above).
+    The halo rows themselves are left unchanged; they get stripped
+    after the step by the MPI wrapper.
+
+    Implementation note: for the asymmetric ``offset>0`` paths we use
+    ``.at[...].set(0.0)`` rather than ``jnp.pad`` because the latter
+    only models zero-pads at the array ends, not at an interior
+    index.  ``.at`` lowers to a small ``Scatter`` on the lat axis —
+    one HLO more than the legacy Pad, acceptable for the few
+    per-step v-updates.
+    """
+    if south and north and offset == 0:
+        # Legacy fast path — single Pad HLO, serial bit-identical.
+        return jnp.pad(v[1:-1, :, :], ((1, 1), (0, 0), (0, 0)))
+    out = v
+    if south:
+        out = out.at[offset].set(jnp.zeros_like(out[offset]))
+    if north:
+        n = out.shape[0]
+        out = out.at[n - 1 - offset].set(jnp.zeros_like(out[n - 1 - offset]))
+    return out
 
 
 # interp_cell_to_uface and interp_cell_to_vface are imported from
@@ -542,10 +601,16 @@ def cgrid_latlon_hydrostatic_tendencies(
 
     # Enforce zero tendency at poles (wall BC) so that intermediate RK
     # stages never see nonzero v at poles feeding into divergence/Coriolis.
-    # Single ``Pad`` HLO op (zero-pad the interior slice) replaces two
-    # ``ScatterUpdate`` ops on the leading lat axis — same per-RK-stage
-    # pattern as the spectral_nh ``w_new`` rewrite.
-    dv_dt = jnp.pad(dv_dt[1:-1, :, :], ((1, 1), (0, 0), (0, 0)))
+    # Rank-aware via config.pole_v_bc — under latitude-band MPI, only the
+    # boundary ranks zero the actual global poles; interior ranks pass
+    # through unchanged (their band-edge v-faces are shared with the
+    # neighbour rank and kept consistent by halo exchange).
+    dv_dt = _zero_v_at_pole(
+        dv_dt,
+        south=config.pole_v_bc[0],
+        north=config.pole_v_bc[1],
+        offset=config.pole_v_bc_offset,
+    )
 
     return du_dt, dv_dt, dT_dt, dp_s_dt, tracer_tends
 
@@ -583,19 +648,41 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         self.sigma_coord = sigma_coord
         self.config = config or CGridLatLonPrimitiveEquationConfig()
 
+        # Stash the constructor ``dt`` so callers downstream (notably
+        # ``make_latlon_mpi_step`` rebuilding an MPI-aware model) can
+        # recover it without falling back to the pole-cell ``_max_dt``
+        # — Codex review Stage 3-E round 3 BLOCK caught the fallback
+        # silently using ``_max_dt`` on direct-construction paths
+        # where ``component_factory`` did not set ``effective_dt``.
+        self.dt = float(dt)
+
         # Pole-cell CFL limit: dx_pole is the smallest cell on the grid.
         dx_pole = pole_cell_dx(grid)
         self._max_dt = cfl_max_dt(dx_pole, 300.0, cfl_number=0.8, ndim=1)
 
-        # Precompute polar filter mask
+        # Precompute polar filter masks: one for cell-centered fields
+        # (dT, dps, du after lon-trim, every tracer) and one for v-face
+        # fields (dv).  The v-face mask is built against
+        # ``grid.cos_lat_v`` + the half-cell-offset lat-interface
+        # coordinates so the wavenumber cutoff matches the actual
+        # v-face CFL — using the cell-centered mask on v-face indices
+        # admits k modes the v-face CFL forbids (Codex review Stage
+        # 3-E round 2 BLOCK #1).
         if self.config.use_polar_filter:
             self._polar_mask = compute_polar_filter_mask(
                 grid, dt=dt,
                 max_wave_speed=self.config.polar_filter_max_wave_speed,
                 cutoff_lat_deg=self.config.polar_filter_cutoff_deg,
             )
+            self._polar_mask_v = compute_polar_filter_mask(
+                grid, dt=dt,
+                max_wave_speed=self.config.polar_filter_max_wave_speed,
+                cutoff_lat_deg=self.config.polar_filter_cutoff_deg,
+                is_v_face=True,
+            )
         else:
             self._polar_mask = None
+            self._polar_mask_v = None
 
         # Cache for the last C-grid output state.  Keyed on Python id()
         # of (u, v, T, p_s, phis, tracers) arrays in the HydrostaticState.
@@ -633,7 +720,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         anchored target and blocked sub-fp32 conservation even after
         iter-2's anchor wiring.
         """
-        acc = _conservation_accumulator()
+        acc = conservation_accumulator()
         return jnp.sum(state.p_s.astype(acc) * self.grid.area.astype(acc))
 
     def tendencies(self, state: CGridLatLonHydrostaticState):
@@ -708,12 +795,44 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                         if name in dq:
                             dq[name] = dq[name] + dq_field.data
 
-            # Polar filter: damp high-frequency modes near poles
+            # Polar filter: damp high-frequency modes near poles for
+            # EVERY transported quantity (dT, dps, du, dv, every dq).
+            # Filtering only dT/dps/du leaves dv + tracers running at
+            # full explicit resolution near the poles, so the lifted
+            # equatorial-CFL dt (which only the filtered fields can
+            # tolerate) would crash on the unfiltered transport.
+            # Codex review of Stage 3-E BLOCK #1 + #2 caught this.
             if self._polar_mask is not None:
                 dT = fourier_filter_3d(dT, self.grid, self._polar_mask)
                 dps = fourier_filter(dps, self.grid, self._polar_mask)
+
+                # u: lon-interface, shape (n_lat, n_lon+1, nlev).  Drop
+                # the duplicated last lon column, filter, then restore
+                # the periodicity column from the filtered first column.
                 du_int = fourier_filter_3d(du[:, :-1, :], self.grid, self._polar_mask)
                 du = jnp.concatenate([du_int, du_int[:, 0:1, :]], axis=1)
+
+                # v: lat-interface, shape (n_lat+1, n_lon, nlev).  Use
+                # the v-face mask (precomputed in __init__ against
+                # cos_lat_v) so EVERY v-face row is filtered — not
+                # only the first n_lat rows.  Codex review Stage 3-E
+                # round 2 caught: under lat-band MPI, interior ranks'
+                # ``dv[-1]`` is NOT a pole row (it's a shared v-face
+                # with the northern neighbour) so re-appending it
+                # unfiltered would leak an unfiltered perturbation
+                # into v at each step.
+                dv = fourier_filter_3d(dv, self.grid, self._polar_mask_v)
+
+                # Tracers: each transported tracer has the same
+                # (n_lat, n_lon, nlev) shape as dT, so the same mask
+                # applies directly.  Without this loop, the lifted
+                # equatorial-CFL dt would race the (un-filtered)
+                # polar tracer advection past its CFL.
+                if dq:
+                    dq = {
+                        name: fourier_filter_3d(dq_field, self.grid, self._polar_mask)
+                        for name, dq_field in dq.items()
+                    }
 
             return CGridLatLonHydrostaticState(
                 u=du, v=dv, T=dT, p_s=dps,
@@ -725,9 +844,16 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
             state_c, tendency_fn, dt, self.config.time_integrator,
         )
 
-        # Enforce v = 0 at poles via a single Pad HLO op (matches the
-        # tendency-side rewrite above).
-        v_new = jnp.pad(state_new.v[1:-1, :, :], ((1, 1), (0, 0), (0, 0)))
+        # Enforce v = 0 at poles via the rank-aware helper (matches the
+        # tendency-side rewrite above).  Serial config has
+        # ``pole_v_bc=(True, True)`` so this preserves bit-exact
+        # behaviour with the pre-refactor single-Pad implementation.
+        v_new = _zero_v_at_pole(
+            state_new.v,
+            south=self.config.pole_v_bc[0],
+            north=self.config.pole_v_bc[1],
+            offset=self.config.pole_v_bc_offset,
+        )
         state_new = state_new._replace(v=v_new)
 
         # Safety rails: T floor, p_s floor, mass fixer
@@ -761,7 +887,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
         # Conservation fixer for mass — fp64 budget accumulator
         # (iter-12 mirrors compute_mass; see docstring there).
         if self.config.fix_mass:
-            acc = _conservation_accumulator()
+            acc = conservation_accumulator()
             # ``grid_total_area`` is a precomputed scalar on the grid;
             # avoids recomputing ``jnp.sum(area)`` every step (one
             # extra reduction in serial, one extra allreduce under
@@ -872,7 +998,7 @@ class CGridLatLonPrimitiveEquationModel(IntegrationMixin):
                 # HS path: cell-centred Field state.  ``compute_mass``
                 # expects a CGrid state, but the integral is the same
                 # area-weighted sum of p_s.  Iter-12: fp64 budget acc.
-                acc = _conservation_accumulator()
+                acc = conservation_accumulator()
                 self._target_mass = jnp.sum(
                     state.p_s.data.astype(acc) * self.grid.area.astype(acc)
                 )

@@ -418,3 +418,47 @@ def compute_cape(
     # consumed it (audit cycle iter-39 finding HIGH #1).
     p_mid = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
     return constants.R_d * jnp.sum(buoyancy * dp / p_mid, axis=1)
+
+
+def parcel_profile_and_cape(
+    T: jax.Array,
+    p_full: jax.Array,
+    p_half: jax.Array,
+    q_v: jax.Array | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """Lift a surface parcel and return its temperature profile and CAPE.
+
+    Shared parcel -> CAPE recipe for every mass-flux / CAPE-closure convection
+    scheme (mass flux, Zhang-McFarlane, Tiedtke).  Centralising the launch
+    humidity handling keeps the schemes from drifting apart:
+
+    * ``q_v`` provided — the parcel is lifted **dry-adiabatically below the LCL
+      and moist-adiabatically above**, using the lowest-level (surface)
+      water-vapor mixing ratio as the launch humidity, and CAPE uses the
+      **virtual temperature**.  This is the physically correct trigger for
+      unsaturated boundary layers; the legacy saturated-from-base parcel lifts a
+      *saturated* parcel from the surface, which spuriously inflates CAPE (and
+      fires deep convection) in dry columns and biases buoyancy aloft.
+    * ``q_v = None`` — legacy saturated-from-base parcel with dry-T CAPE, kept
+      only for callers that genuinely have no humidity to thread.
+
+    The parcel-vapor profile is ``min(q_v_base, q_sat(T_moist, p))`` — exact
+    below the LCL (dry-adiabatic ascent conserves mixing ratio) and tracking
+    saturation above.  Profiles use the canonical ``(ncol, nlev)`` surface-last
+    convention.
+
+    Returns ``(T_moist, cape)`` with shapes ``(ncol, nlev)`` and ``(ncol,)``.
+    """
+    T_base = T[:, -1]
+    q_v_base = None if q_v is None else q_v[:, -1]
+    T_moist = compute_moist_adiabat(T_base, p_full, q_v_base=q_v_base)
+    if q_v is None:
+        cape = compute_cape(T, T_moist, p_full, p_half)
+    else:
+        q_sat_parcel = saturation_mixing_ratio(T_moist, p_full)
+        q_v_parcel = jnp.minimum(q_v_base[:, None], q_sat_parcel)
+        cape = compute_cape(
+            T, T_moist, p_full, p_half,
+            q_v_env=q_v, q_v_parcel=q_v_parcel,
+        )
+    return T_moist, cape

@@ -150,7 +150,11 @@ class TestIssue2_HydrostaticMicrophysicsTracers:
             sigma.sigma_full, shape_3d,
         )
         q_sat = saturation_mixing_ratio(T_data, p_full)
-        q_v_data = 0.95 * q_sat
+        # Supersaturated so Kessler condensation actually fires.  At
+        # 0.95·q_sat (subsaturated, with no cloud water or rain present)
+        # the scheme correctly does nothing — the old setup asserted a
+        # no-op would produce a tendency.
+        q_v_data = 1.05 * q_sat
 
         state = HydrostaticState(
             u=Field(data=jnp.zeros(shape_3d), name="u", dims=("face", "x", "y", "level"), units="m/s"),
@@ -243,6 +247,13 @@ class TestIssue3_MicrophysicsRateSemantics:
         mod = importlib.import_module(f"legoesm.atmosphere.physics.microphysics.{scheme_name}")
         fn = getattr(mod, scheme_fn)
         T, q_v, hydrometeors, p_full, p_half, rho, dz = _make_warm_micro_columns()
+        # Supersaturate so the (instant) condensation component — the one
+        # under test — actually fires for every scheme.  The shared fixture
+        # is subsaturated (0.95·q_sat), which leaves a rate-based scheme
+        # like Sundqvist with zero condensation and only a (correctly)
+        # dt-independent rain-evaporation rate, so the dt-dependence of
+        # condensation could never be detected.
+        q_v = 1.05 * saturation_mixing_ratio(T, p_full)
         out1 = fn(T, q_v, hydrometeors, p_full, p_half, rho, dz, dt=60.0)
         out2 = fn(T, q_v, hydrometeors, p_full, p_half, rho, dz, dt=600.0)
 
@@ -401,10 +412,13 @@ class TestIssue6_KuoTriggerUnits:
 class TestIssue7_KPP:
 
     def test_ri_crit_default_matches_lmd94(self):
-        """KPP Ri_crit default should be 0.25 per LMD94."""
+        """KPP critical bulk Richardson number default should be 0.3 — the
+        value stated in Large, McWilliams & Doney (1994) and used by
+        NCAR POP2 / MOM6 (CVMix).  (The earlier 0.25 here contradicted the
+        cited reference; 0.3 is LMD94's actual Ri_c.)"""
         from legoesm.ocean.physics.vertical_mixing.config import KPPConfig
         cfg = KPPConfig()
-        assert cfg.Ri_crit == 0.25, f"Expected Ri_crit=0.25, got {cfg.Ri_crit}"
+        assert cfg.Ri_crit == 0.3, f"Expected Ri_crit=0.3, got {cfg.Ri_crit}"
 
     def test_nonlocal_transport_uses_shape_function(self):
         """Non-local T tendency should have the G(sigma) profile shape."""

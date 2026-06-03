@@ -46,34 +46,40 @@ except ImportError:
 
 # ---------------------------------------------------------------------------
 # Static connectivity tables (built once at import).
+#
+# iter-93: stored as ``np.array`` at module-top to avoid eager
+# JAX device dispatch on ``import legoesm.parallel.cubesphere_exchange``.
+# See ``src/legoesm/grids/vertical.py`` for the same pattern + rationale
+# (Metal default_memory_space crash before fallback applies). Callers
+# convert via ``jnp.asarray(...)`` inside the per-exchange closures.
 # ---------------------------------------------------------------------------
 
-_NBR_FACES = jnp.array([
+_NBR_FACES = np.array([
     [3, 1, 5, 4],   # face 0: W←3, E←1, S←5, N←4
     [0, 2, 5, 4],   # face 1
     [1, 3, 5, 4],   # face 2
     [2, 0, 5, 4],   # face 3
     [3, 1, 0, 2],   # face 4
     [3, 1, 2, 0],   # face 5
-], dtype=jnp.int32)
+], dtype=np.int32)
 
-_NBR_EDGES = jnp.array([
+_NBR_EDGES = np.array([
     [EAST, WEST, NORTH, SOUTH],    # face 0
     [EAST, WEST, EAST,  EAST],     # face 1
     [EAST, WEST, SOUTH, NORTH],    # face 2
     [EAST, WEST, WEST,  WEST],     # face 3
     [NORTH, NORTH, NORTH, NORTH],  # face 4
     [SOUTH, SOUTH, SOUTH, SOUTH],  # face 5
-], dtype=jnp.int32)
+], dtype=np.int32)
 
-_IS_REVERSED = jnp.array([
+_IS_REVERSED = np.array([
     [0, 0, 0, 0],
     [0, 0, 1, 0],
     [0, 0, 1, 1],
     [0, 0, 0, 1],
     [1, 0, 0, 1],
     [0, 1, 1, 0],
-], dtype=jnp.int32)
+], dtype=np.int32)
 
 
 # ---------------------------------------------------------------------------
@@ -130,11 +136,18 @@ def _build_ppermute_tables():
         rounds_recv.append(tuple(recv_e))
         rounds_rev.append(tuple(recv_r))
 
+    # iter-94d: return np.array (not jnp.array) so the module-top
+    # call ``_PPERMUTE_* = _build_ppermute_tables()`` does NOT
+    # eagerly dispatch to the JAX default platform (METAL on
+    # macOS, which raises UNIMPLEMENTED). Same pattern as the
+    # iter-93b refactor of ``_NBR_FACES``/``_NBR_EDGES``/
+    # ``_IS_REVERSED``. Callers convert via ``jnp.asarray`` inside
+    # the ``_make_exchange_ppermute._exchange`` closure.
     return (
         rounds_perm,
-        jnp.array(rounds_send, dtype=jnp.int32),   # (4, 6)
-        jnp.array(rounds_recv, dtype=jnp.int32),
-        jnp.array(rounds_rev, dtype=jnp.int32),
+        np.array(rounds_send, dtype=np.int32),   # (4, 6)
+        np.array(rounds_recv, dtype=np.int32),
+        np.array(rounds_rev, dtype=np.int32),
     )
 
 
@@ -256,6 +269,13 @@ def _make_exchange_allgather(mesh, ndim, with_offsets=False):
     else:
         in_sp = in_sp_data
 
+    # iter-94g: build jnp tables in outer factory body (not inside
+    # shard_map body) so they're closure-captured constants. See
+    # detailed rationale in `_make_exchange_ppermute` below.
+    nbr_faces_j = jnp.asarray(_NBR_FACES)
+    nbr_edges_j = jnp.asarray(_NBR_EDGES)
+    is_reversed_j = jnp.asarray(_IS_REVERSED)
+
     @partial(shard_map, mesh=mesh, in_specs=in_sp, out_specs=out_sp,
              check_vma=False)
     def _exchange(*args):
@@ -319,9 +339,9 @@ def _make_exchange_allgather(mesh, ndim, with_offsets=False):
         padded_faces = []
         for i in range(n_faces_per_shard):
             global_face = my_idx * n_faces_per_shard + i
-            nbr_f = _NBR_FACES[global_face]
-            nbr_e = _NBR_EDGES[global_face]
-            rev = _IS_REVERSED[global_face]
+            nbr_f = nbr_faces_j[global_face]
+            nbr_e = nbr_edges_j[global_face]
+            rev = is_reversed_j[global_face]
             face = local_shard[i]
             if ndim == 3:
                 padded = jnp.pad(face, ((1, 1), (1, 1)))
@@ -370,6 +390,12 @@ def _make_exchange_allgather_h2(mesh, ndim, with_offsets=False):
         in_sp = (in_sp_data, P())
     else:
         in_sp = in_sp_data
+
+    # iter-94g: build jnp tables in outer factory body, not inside
+    # shard_map body. See _make_exchange_ppermute rationale.
+    nbr_faces_j = jnp.asarray(_NBR_FACES)
+    nbr_edges_j = jnp.asarray(_NBR_EDGES)
+    is_reversed_j = jnp.asarray(_IS_REVERSED)
 
     @partial(shard_map, mesh=mesh, in_specs=in_sp, out_specs=out_sp,
              check_vma=False)
@@ -426,9 +452,9 @@ def _make_exchange_allgather_h2(mesh, ndim, with_offsets=False):
         padded_faces = []
         for i in range(n_faces_per_shard):
             global_face = my_idx * n_faces_per_shard + i
-            nbr_f = _NBR_FACES[global_face]
-            nbr_e = _NBR_EDGES[global_face]
-            rev = _IS_REVERSED[global_face]
+            nbr_f = nbr_faces_j[global_face]
+            nbr_e = nbr_edges_j[global_face]
+            rev = is_reversed_j[global_face]
             face = local_shard[i]
 
             if ndim == 3:
@@ -484,6 +510,22 @@ def _make_exchange_ppermute(mesh, ndim, with_offsets=False):
     else:
         in_sp = in_sp_data
 
+    # iter-94g: build the jnp tables HERE (in the outer factory
+    # body, outside the shard_map decorator), so they are regular
+    # jax.Array constants captured by reference in the shard_map
+    # closure — same semantics as the pre-iter-93b module-top
+    # jnp.array. Building them INSIDE the shard_map body (iter-94d
+    # initial attempt) caused JAX/XLA to behave differently under
+    # multi-device emulation (10x worse numerical drift on 6-device
+    # cubed-sphere SPMD tests vs. pre-iter-93b baseline). The
+    # outer-scope construction runs ONCE per factory call (when
+    # `_make_exchange_ppermute` is called from
+    # `activate_spmd_halo_backend`), which is after
+    # `ensure_metal_or_fallback()` has run — so no Metal crash.
+    ppermute_send_j = jnp.asarray(_PPERMUTE_SEND)
+    ppermute_recv_j = jnp.asarray(_PPERMUTE_RECV)
+    ppermute_rev_j = jnp.asarray(_PPERMUTE_REV)
+
     @partial(shard_map, mesh=mesh, in_specs=in_sp, out_specs=out_sp,
              check_vma=False)
     def _exchange(*args):
@@ -515,13 +557,13 @@ def _make_exchange_ppermute(mesh, ndim, with_offsets=False):
             from legoesm.grids.halo import _interp_strip
 
         for r in range(4):
-            send_edge = _PPERMUTE_SEND[r, my_idx]   # traced int
+            send_edge = ppermute_send_j[r, my_idx]   # traced int
             to_send = my_strips[send_edge]           # (n,) or (n, C)
             received = jax.lax.ppermute(
                 to_send, "face", _PPERMUTE_PERMS[r],
             )
-            recv_edge = _PPERMUTE_RECV[r, my_idx]
-            rev = _PPERMUTE_REV[r, my_idx]
+            recv_edge = ppermute_recv_j[r, my_idx]
+            rev = ppermute_rev_j[r, my_idx]
             received = jnp.where(rev, received[::-1], received)
             if with_offsets:
                 # offsets[my_idx, recv_edge] selects the right per-edge
@@ -702,6 +744,17 @@ def explicit_pad_halo_4d(data, mesh, halo=1, interp_offsets=None):
     See :func:`explicit_pad_halo` for the halo support matrix and the
     ``interp_offsets`` semantics.
     """
+    # FV3_3D iter-1073 (codex iter-1072 BLOCKER): mirror the iter-1072
+    # non-square guard from ``pad_halo_4d`` so SPMD callers don't
+    # bypass the silent-corruption check.  ``_pad_halo_local_4d``
+    # fallback path (``halo != 1, halo != 2``) and the SPMD exchanges
+    # all assume square ``(n, n)``.
+    if data.shape[1] != data.shape[2]:
+        raise ValueError(
+            f"explicit_pad_halo_4d expects square (n, n) data on each "
+            f"face, got shape {tuple(data.shape)}.  See FV3_3D.md "
+            f"iter-1072 for the silent-corruption probe."
+        )
     if halo == 2:
         if interp_offsets is None:
             return _get_exchange(mesh, 4, False, halo=2)(data)
@@ -819,6 +872,15 @@ def packed_pad_halo_4d(
     """
     if not fields:
         return []
+    # FV3_3D iter-1073 (codex iter-1072 BLOCKER): non-square guard
+    # mirroring ``pad_halo_4d``.  Each field must be square (n, n).
+    for i, f in enumerate(fields):
+        if f.shape[1] != f.shape[2]:
+            raise ValueError(
+                f"packed_pad_halo_4d field {i}: expects square (n, n) "
+                f"data on each face, got shape {tuple(f.shape)}.  See "
+                f"FV3_3D.md iter-1072."
+            )
 
     if len(fields) == 1:
         return [explicit_pad_halo_4d(
@@ -903,6 +965,23 @@ def activate_spmd_halo_backend(mesh, n: int = 0, nlev: int = 1) -> None:
         "n=%d, nlev=%d, exchange=%s)",
         mesh.axis_names, n_devices, n, nlev, backend_name,
     )
+
+    # Pre-warm the exchange kernel cache so the factories are never
+    # called from inside a JIT trace.  The first call to _get_exchange
+    # for a given key triggers jnp.asarray in the factory outer body;
+    # if that call happens while _step_cell_centre is being traced, the
+    # resulting jax.Array gets captured in the _exchange closure and
+    # stored in the module-level _cache — an UnexpectedTracerError
+    # (production job 25211021 crashed after 5 min).  Calling all
+    # relevant (ndim, halo, with_offsets, use_ppermute) combinations
+    # here, outside any JIT scope, populates the cache before the first
+    # compilation begins.  (Fix from bd072199 on ap/amip_upper_atm.)
+    for _ndim in (3, 4):
+        for _pp in (False, True):
+            _get_exchange(mesh, _ndim, _pp, halo=1, with_offsets=False)
+            _get_exchange(mesh, _ndim, _pp, halo=1, with_offsets=True)
+        _get_exchange(mesh, _ndim, False, halo=2, with_offsets=False)
+        _get_exchange(mesh, _ndim, False, halo=2, with_offsets=True)
 
 
 def deactivate_spmd_halo_backend() -> None:

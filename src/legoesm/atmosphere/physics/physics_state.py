@@ -72,12 +72,33 @@ class PhysicsState(NamedTuple):
         ``enable_stochastic=True``) fold this key with a module-id and
         consume the derived sub-key for their AR1 innovation.  When all
         stochastic modules are disabled the key is carried unchanged.
+    surface_T_sfc_override : jax.Array, shape (ncol,)
+        Per-column override for the surface temperature seen by the
+        turbulence scheme's bulk-flux call.  ``NaN`` (the default) is
+        the sentinel for "no override — fall back to ``T_col[:, -1]``",
+        preserving the legacy ``T_sfc = lowest air temp`` convention
+        for every 3-D run.  The single-column model populates this
+        from ``SCMForcing.T_s(t)`` when ``prescribe="T_s"`` so that the
+        bulk-flux gradient ``T_sfc − T[..., -1]`` is non-zero (without
+        this override, anchoring ``T[..., -1]`` to the prescribed value
+        collapses the sensible-flux gradient — Phase B codex iter-1
+        finding).
+    qke : jax.Array, shape (ncol, nlev)
+        Prognostic ``qke = 2·TKE`` [m²/s²] for the MYNN-2.5 turbulence
+        scheme (Nakanishi-Niino 2009).  Carried in a slot **distinct**
+        from :attr:`tke` so a restart that switches schemes between
+        MY-2.5 (``tke``) and MYNN-2.5 (``qke``) cannot silently feed
+        the wrong moment as energy — the active scheme reads its own
+        field.  Zero-filled when the active turbulence scheme is not
+        MYNN-2.5 (Phase C codex iter-1 medium finding).
     """
     tke: jnp.ndarray
     conv_prog_profile: jnp.ndarray
     conv_stoch_state: jnp.ndarray
     gwd_spectrum: jnp.ndarray
     prng_key: jnp.ndarray
+    surface_T_sfc_override: jnp.ndarray
+    qke: jnp.ndarray
 
 
 def init_physics_state(
@@ -122,7 +143,13 @@ def init_physics_state(
     schemes may write into.  This keeps the layout uniform across all
     convection schemes (current and future).
     """
-    # --- Turbulence TKE ---
+    # --- Turbulence TKE (MY-2.5 family) vs qke (MYNN-2.5) ---
+    # Distinct fields so a restart that switches schemes cannot
+    # silently feed the wrong moment as energy: MY-2.5 / CLUBB-lite /
+    # EDMF carry TKE in ``tke``; MYNN-2.5 carries ``qke = 2·TKE`` in
+    # ``qke``.  Inactive slots stay zero-filled with no per-step cost
+    # because the dispatcher only reads the slot tied to the active
+    # scheme.
     turb_cfg = physics_config.turbulence
     tke_schemes = ("tke", "clubb_lite", "edmf")
     if turb_cfg.scheme in tke_schemes:
@@ -131,6 +158,11 @@ def init_physics_state(
         tke = jnp.full((ncol, nlev), tke_min, dtype=dtype)
     else:
         tke = jnp.zeros((ncol, nlev), dtype=dtype)
+    if turb_cfg.scheme == "mynn25":
+        qke_min = getattr(turb_cfg.mynn25, "tke_min", 1e-10)
+        qke = jnp.full((ncol, nlev), qke_min, dtype=dtype)
+    else:
+        qke = jnp.zeros((ncol, nlev), dtype=dtype)
 
     # --- Convection prognostic profile ---
     conv_cfg = physics_config.convection
@@ -165,12 +197,21 @@ def init_physics_state(
     import jax
     prng_key = jax.random.PRNGKey(int(prng_seed))
 
+    # --- Surface-temperature override (SCM forcing hook) ---
+    # NaN sentinel = "no override; turbulence falls back to ``T[:, -1]``".
+    # This preserves all existing 3-D behaviour bit-for-bit while letting
+    # the single-column driver inject a separate skin-temperature value
+    # when ``SCMForcing.prescribe == "T_s"``.
+    surface_T_sfc_override = jnp.full((ncol,), jnp.nan, dtype=dtype)
+
     return PhysicsState(
         tke=tke,
         conv_prog_profile=conv_prog_profile,
         conv_stoch_state=conv_stoch_state,
         gwd_spectrum=gwd_spectrum,
         prng_key=prng_key,
+        surface_T_sfc_override=surface_T_sfc_override,
+        qke=qke,
     )
 
 
@@ -207,4 +248,8 @@ def update_physics_state(phys_state, updates):
         ),
         gwd_spectrum=updates.get("gwd_spectrum", phys_state.gwd_spectrum),
         prng_key=updates.get("prng_key", phys_state.prng_key),
+        surface_T_sfc_override=updates.get(
+            "surface_T_sfc_override", phys_state.surface_T_sfc_override,
+        ),
+        qke=updates.get("qke", phys_state.qke),
     )

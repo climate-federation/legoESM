@@ -903,13 +903,8 @@ class TestKPP:
         )
         out_brine = physics_fn(state, grid, z_coord, surface_forcing=sf_brine)
 
-        # Compute column-averaged K_v to compare overall mixing intensity.
-        K_v_fresh = float(jnp.mean(out_fresh.K_v if hasattr(out_fresh, "K_v")
-                                   else jnp.zeros(1)))
-        # The factory wraps to OceanTendencies which doesn't expose K_v;
-        # fall back to comparing dT/dt (non-local) magnitudes.
-        diff_T = float(jnp.max(jnp.abs(out_brine.dT_dt.data - out_fresh.dT_dt.data)))
-
+        # The factory wraps to OceanTendencies, which doesn't expose K_v
+        # (it is None), so compare the non-local dT/dt magnitudes instead.
         # Brine rejection should produce STRONGER mixing (larger |dT/dt|)
         # than freshening — the asymmetry is exactly what would FAIL
         # under the buggy `B_salt = -g*beta*Q_S` (which would invert

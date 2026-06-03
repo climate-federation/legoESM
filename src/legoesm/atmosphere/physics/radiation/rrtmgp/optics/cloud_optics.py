@@ -25,6 +25,7 @@ def _tiny(x=None):
   dtype = x.dtype if x is not None else jnp.float_
   return float(jnp.finfo(dtype).tiny)
 
+from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import lookup_cloud_optics
 from legoesm.atmosphere.physics.radiation.rrtmgp.optics import optics_utils
 
@@ -41,8 +42,13 @@ def _particle_size_interpolant(
     f: Array, lower_bnd: float, upper_bnd: float, n_size: int
 ) -> dict[str, Callable[..., Interpolant]]:
   """Creates effective radius interpolant based on desired number of points."""
+  # Reference grid in ``f``'s working dtype.  A bare ``jnp.linspace`` defaults
+  # to float64 under ``jax_enable_x64`` and, via the interpolation weights in
+  # ``create_linear_interpolant``, would re-promote the cloud optical
+  # properties to float64 on the ``compute_fp32`` path.  ``f.dtype`` is float64
+  # on the default path -> byte-identical there.
   interp = optics_utils.create_linear_interpolant(
-      f, jnp.linspace(lower_bnd, upper_bnd, n_size)
+      f, jnp.linspace(lower_bnd, upper_bnd, n_size, dtype=f.dtype)
   )
   return collections.OrderedDict({'r': lambda: interp})
 
@@ -149,21 +155,24 @@ def compute_optical_properties(
     optical_props.append(props)
 
   combined_props = jax.tree.map(jnp.add, *optical_props)
-  # Use safe denominators: jnp.where evaluates both branches so the division
-  # must never produce inf/NaN even on the "inactive" branch.
-  _floor = _tiny(combined_props['tau'])
-  safe_tau = jnp.maximum(combined_props['tau'], _floor)
-  safe_tau_ssa = jnp.maximum(combined_props['tau_ssa'], _floor)
+  # AD-safe denominators (restored from commit 59407953 after AIMIP-#312
+  # merge reverted it).  The previous ``safe_tau = jnp.maximum(tau, tiny)``
+  # pattern is forward-safe but NOT backward-safe under fp64: the local
+  # VJP ``-num/denom**2`` evaluates ``denom**2 = tiny**2 = 4.8e-616`` which
+  # underflows to 0, so ``-num/0 = NaN`` propagates via JAX's where-
+  # backward (both branches are differentiated; the inactive branch's NaN
+  # cotangent multiplies a zero mask to give 0*inf = NaN).  ``safe_divide``
+  # uses ``where(mask, denom, 1.0)`` so the inactive denom is exactly 1.0
+  # (no underflow on square), keeping backward finite.  Pinpointed via
+  # ``jax.checkify(nan_checks)`` on AMIP+RRTMG reverse-mode AD.
   return {
       'optical_depth': combined_props['tau'],
-      'ssa': jnp.where(
-          combined_props['tau'] > 0,
-          combined_props['tau_ssa'] / safe_tau,
-          0.0,
+      'ssa': safe_divide(
+          combined_props['tau_ssa'], combined_props['tau'],
+          eps=_EPSILON, fill=0.0,
       ),
-      'asymmetry_factor': jnp.where(
-          combined_props['tau_ssa'] > 0,
-          combined_props['tau_ssa_g'] / safe_tau_ssa,
-          0.0,
+      'asymmetry_factor': safe_divide(
+          combined_props['tau_ssa_g'], combined_props['tau_ssa'],
+          eps=_EPSILON, fill=0.0,
       ),
   }

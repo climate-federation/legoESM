@@ -204,7 +204,7 @@ class TestConvectionParams:
     def _supersaturated_column(self, nlev=12, ncol=2):
         """Column with q_v > q_sat in mid-troposphere so Kuo's internal
         MC = column-integrated max(q_v − q_sat, 0) is strictly positive.
-        This unblocks the alpha_heat / tau_relax AD paths."""
+        This unblocks the alpha_heat / tau_relax_s AD paths."""
         p_s = 1.0e5
         sigma_half = jnp.linspace(0.0, 1.0, nlev + 1)
         sigma_full = 0.5 * (sigma_half[:-1] + sigma_half[1:])
@@ -230,15 +230,15 @@ class TestConvectionParams:
 
         assert_param_grad_ok(loss, KuoConfig().alpha_heat, "Kuo alpha_heat")
 
-    def test_kuo_tau_relax(self):
+    def test_kuo_tau_relax_s(self):
         T, q_v, p_full, p_half = self._supersaturated_column()
 
         def loss(t):
-            cfg = KuoConfig()._replace(tau_relax=t)
+            cfg = KuoConfig()._replace(tau_relax_s=t)
             out = kuo_convection(T, q_v, p_full, p_half, 300.0, config=cfg)
             return jnp.sum(out.dT_dt ** 2)
 
-        assert_param_grad_ok(loss, KuoConfig().tau_relax, "Kuo tau_relax")
+        assert_param_grad_ok(loss, KuoConfig().tau_relax_s, "Kuo tau_relax_s")
 
 
 # ===========================================================================
@@ -343,13 +343,37 @@ class TestMicrophysicsParams:
         )
 
         def loss(d):
-            cfg = MorrisonConfig()._replace(dep_coeff=d)
+            # dep_coeff feeds the legacy "heuristic" deposition path
+            # (the default "m2005" path is tuned by
+            # ice_deposition_efficiency instead — iter-8).
+            cfg = MorrisonConfig()._replace(
+                dep_coeff=d, ice_deposition_scheme="heuristic",
+            )
             out = morrison_microphysics(
                 T, q_v, hydro, p_full, p_half, rho, dz, 300.0, config=cfg,
             )
             return jnp.sum(out.dq_i_dt ** 2)
 
         assert_param_grad_ok(loss, 1e-3, "Morrison dep_coeff")
+
+    def test_morrison_ice_deposition_efficiency(self):
+        # The m2005 deposition multiplier must be reachable by AD.
+        T, q_v, hydro, p_full, p_half, rho, dz = _moist_microphys_column()
+        T = jnp.full_like(T, 240.0)
+        hydro = hydro._replace(
+            N_c=jnp.full(hydro.q_c.shape, 1e8),
+            q_i=jnp.full(hydro.q_c.shape, 1e-5),
+            N_i=jnp.full(hydro.q_c.shape, 1e5),
+        )
+
+        def loss(eff):
+            cfg = MorrisonConfig()._replace(ice_deposition_efficiency=eff)
+            out = morrison_microphysics(
+                T, q_v, hydro, p_full, p_half, rho, dz, 300.0, config=cfg,
+            )
+            return jnp.sum(out.dq_i_dt ** 2)
+
+        assert_param_grad_ok(loss, 1.0, "Morrison ice_deposition_efficiency")
 
     def test_morrison_agg_coeff(self):
         T, q_v, hydro, p_full, p_half, rho, dz = _moist_microphys_column()
@@ -361,7 +385,12 @@ class TestMicrophysicsParams:
         )
 
         def loss(a):
-            cfg = MorrisonConfig()._replace(agg_coeff=a)
+            # agg_coeff is the HEURISTIC ice→snow aggregation coefficient; the
+            # default ice_to_snow_scheme is now m2005_autoconv (SAM PRCI, which
+            # ignores agg_coeff), so select the heuristic path to exercise the
+            # parameter this test is about.
+            cfg = MorrisonConfig()._replace(
+                agg_coeff=a, ice_to_snow_scheme="heuristic")
             out = morrison_microphysics(
                 T, q_v, hydro, p_full, p_half, rho, dz, 300.0, config=cfg,
             )
@@ -374,53 +403,55 @@ class TestMicrophysicsParams:
 # 11c  Turbulence scheme parameters
 # ===========================================================================
 
-def _turbulence_column(nlev=10, ncol=2):
-    """Build a column with vertical T/u shear so eddy diffusivities act."""
-    p_s = 1.0e5
-    sigma_half = jnp.linspace(0.0, 1.0, nlev + 1)
-    sigma_full = 0.5 * (sigma_half[:-1] + sigma_half[1:])
-    p_half = jnp.broadcast_to((sigma_half * p_s)[None, :], (ncol, nlev + 1))
-    p_full = jnp.broadcast_to((sigma_full * p_s)[None, :], (ncol, nlev))
-    T = jnp.broadcast_to(
-        (250.0 + 50.0 * sigma_full)[None, :], (ncol, nlev),
-    )  # warmer near sfc
-    q_v = jnp.broadcast_to(
-        (1e-4 + 1e-2 * sigma_full)[None, :], (ncol, nlev),
-    )
-    u = jnp.broadcast_to(
-        (10.0 - 8.0 * sigma_full)[None, :], (ncol, nlev),
-    )  # surface 2 m/s, top 10 m/s
-    v = jnp.zeros_like(u)
-    rho = p_full / (constants.R_d * T)
+def _turbulence_column_pbl(nlev=10, ncol=2):
+    """Shallow (0-2 km), near-neutral, strongly-sheared boundary layer.
+
+    Smagorinsky-Lilly is a deformation closure with a *hard* Lilly
+    cutoff at Ri ≥ Pr_t, so it produces K_m = 0 in a deep, strongly
+    θ-stratified column (Ri ≫ 1) — which would make C_s / Pr_t
+    unreachable by AD.  This PBL-scale column keeps a small θ-gradient
+    with ~10 m/s shear over 2 km so 0 < Ri < Pr_t: K_m > 0 and the
+    gradient is non-trivial for the heat path to act on.  Louis (whose
+    stable f only asymptotes toward 0) is also exercised here.
+    """
     z_half = jnp.broadcast_to(
-        jnp.linspace(20000.0, 0.0, nlev + 1)[None, :], (ncol, nlev + 1),
+        jnp.linspace(2000.0, 0.0, nlev + 1)[None, :], (ncol, nlev + 1),
     )
     z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
-    T_sfc = jnp.full((ncol,), 295.0)
-    q_sfc = saturation_mixing_ratio(T_sfc, jnp.full((ncol,), p_s))
+    p_half = jnp.broadcast_to(
+        jnp.linspace(8.0e4, 1.0e5, nlev + 1)[None, :], (ncol, nlev + 1),
+    )
+    p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+    T = 290.0 - 0.0095 * z_full          # near dry-adiabatic (mildly stable in θ)
+    u = 0.005 * z_full                    # ~10 m/s shear over 2 km
+    v = jnp.zeros_like(u)
+    q_v = jnp.full_like(T, 5e-3)
+    rho = p_full / (constants.R_d * T)
+    T_sfc = T[:, -1] + 1.0
+    q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
     return u, v, T, q_v, p_full, p_half, z_full, z_half, T_sfc, q_sfc, rho
 
 
 class TestTurbulenceParams:
 
-    def test_smagorinsky_Km(self):
+    def test_smagorinsky_C_s(self):
         u, v, T, q_v, p_full, p_half, z_full, z_half, T_sfc, q_sfc, rho = (
-            _turbulence_column()
+            _turbulence_column_pbl()
         )
 
-        def loss(km):
-            cfg = SmagorinskyConfig()._replace(Km=km)
+        def loss(c_s):
+            cfg = SmagorinskyConfig()._replace(C_s=c_s)
             out = smagorinsky_turbulence(
                 u, v, T, q_v, p_full, p_half, z_full, z_half,
                 T_sfc, q_sfc, rho, 300.0, cfg,
             )
             return jnp.sum(out.du_dt ** 2)
 
-        assert_param_grad_ok(loss, 10.0, "Smagorinsky Km")
+        assert_param_grad_ok(loss, 0.2, "Smagorinsky C_s")
 
     def test_smagorinsky_Pr_t(self):
         u, v, T, q_v, p_full, p_half, z_full, z_half, T_sfc, q_sfc, rho = (
-            _turbulence_column()
+            _turbulence_column_pbl()
         )
 
         def loss(pr):
@@ -435,7 +466,7 @@ class TestTurbulenceParams:
 
     def test_louis_l_mix_max(self):
         u, v, T, q_v, p_full, p_half, z_full, z_half, T_sfc, q_sfc, rho = (
-            _turbulence_column()
+            _turbulence_column_pbl()
         )
 
         def loss(l):
@@ -450,7 +481,7 @@ class TestTurbulenceParams:
 
     def test_louis_b_louis(self):
         u, v, T, q_v, p_full, p_half, z_full, z_half, T_sfc, q_sfc, rho = (
-            _turbulence_column()
+            _turbulence_column_pbl()
         )
 
         def loss(b):

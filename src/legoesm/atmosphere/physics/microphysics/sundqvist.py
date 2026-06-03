@@ -58,9 +58,25 @@ def diagnose_sundqvist_process_rates(
     RH = q_v / jnp.clip(q_sat, 1e-10)
 
     # 1. Smooth condensation activation — convert increment [kg/kg] to tendency [kg/kg/s]
+    #
+    # Sundqvist (1989) gates condensation on RH > RH_crit (partial
+    # cloud-fraction regime), but the *thermodynamic target* the
+    # condensation drives ``q_v`` toward is ``q_sat``, not
+    # ``RH_crit * q_sat``.  The previous code used
+    # ``max(q_v - RH_crit * q_sat, 0.0)`` which removed any vapor
+    # above ``0.8 * q_sat`` in a single step: at RH=1.0 the column
+    # lost ``0.2 * q_sat`` of vapor per call (verified with a
+    # T=290 K, p=80 kPa probe: dq_v_dt = -1e-5 kg/kg/s, dropping RH
+    # from 1.00 → 0.80 in one 300-s step).  Kessler at the same
+    # conditions removed zero (no supersat).  The fix removes only
+    # the *supersaturation* (``q_v - q_sat``), with ``f`` keeping
+    # the smooth RH_crit *onset* gating intact — Sundqvist's
+    # partial-cloud-fraction subgrid variance is diagnosed
+    # separately by :func:`legoesm.atmosphere.physics.clouds.cloud_fraction.sundqvist_cloud_fraction`
+    # and is not the microphysics tendency's concern.
     f = jax.nn.sigmoid(sharpness * (RH - config.RH_crit))
     condensation = (
-        f * jnp.maximum(q_v - config.RH_crit * q_sat, 0.0) / dt
+        f * jnp.maximum(q_v - q_sat, 0.0) / dt
     )  # [kg/kg/s]
 
     # 2. Autoconversion
@@ -71,12 +87,33 @@ def diagnose_sundqvist_process_rates(
     # ``auto_rate · dt = 1e-3·1800 = 1.8`` over ~30 min for typical
     # ``q_c ≈ 1e-4 kg/kg`` overshoots the available mass by ~80 %.
     qc_avail = jnp.maximum(q_c + condensation * dt, 0.0)
-    P_auto_demand = config.auto_rate * qc_avail
+    # Sundqvist (1989) autoconversion: P_auto = c_0·q_c·(1−exp(−(q_c/q_c,crit)²)).
+    # The threshold factor suppresses autoconversion below the critical
+    # cloud water (drizzle forms only when cloud droplets are large
+    # enough) — the previous code dropped it, autoconverting linearly at
+    # any q_c despite the docstring's "exceeds a critical threshold".
+    # The factor ∈ [0,1) is smooth + AD-safe (exp of a non-positive arg;
+    # → 0 as q_c → 0, → 1 for q_c ≫ q_c,crit).
+    threshold = 1.0 - jnp.exp(
+        -(qc_avail / jnp.maximum(config.qc_crit, 1e-12)) ** 2
+    )
+    P_auto_demand = config.auto_rate * qc_avail * threshold
     # Donor cap: rate · dt ≤ qc_avail → rate ≤ qc_avail / dt.
     dt_safe = jnp.maximum(dt, 1.0e-12)
     P_auto = jnp.minimum(P_auto_demand, qc_avail / dt_safe)
 
     # 3. Sub-cloud evaporation
+    #
+    # legoESM column layout convention: level index 0 = TOA, level
+    # index ``nlev-1`` = surface (``sigma_full`` runs 0→1 top→bottom;
+    # ``p_full[..., 0]`` is the lowest pressure).  ``moveaxis(..., 1,
+    # 0)`` puts the vertical axis first so :func:`jax.lax.scan`
+    # iterates TOA → surface — the correct direction for falling
+    # rain: ``P_above`` starts at zero (no rain above TOA),
+    # accumulates the autoconversion source ``P_local`` layer-by-
+    # layer on the way down, and lands at the surface as the final
+    # carry ``P_final``.  Sub-cloud evaporation reduces ``P_total``
+    # in sub-saturated layers (``evap_mask`` peaks where ``RH < RH_crit``).
     evap_mask = jax.nn.sigmoid(sharpness * (config.RH_crit - RH))
     P_flux_layer = P_auto * rho * dz
 

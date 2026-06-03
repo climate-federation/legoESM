@@ -523,6 +523,15 @@ where $\beta\ge 0$ is the off-centering parameter (\texttt{acoustic\_off\_center
   r(z) = r_{\max}\sin^2\!\Bigl(\frac{\pi}{2}\,\frac{\max(0,\,z-z_{\mathrm{bot}})}{z_{\mathrm{top}}-z_{\mathrm{bot}}}\Bigr).
 \end{equation}
 
+\subsubsection{Turbulence closure: CRM, LES, and DNS}
+The diffusion terms $D_u,D_v,D_w,D_\theta$ are evaluated in flux form, $D_\phi = \rho_0^{-1}\,\partial_j\!\bigl(\rho_0\,K_\phi\,\partial_j\phi\bigr)$, over the horizontal directions and (optionally) a mass-weighted vertical leg.  The same discrete operator spans three turbulence-resolving regimes that differ only in the viscosity $K_m$ and the grid spacing $\Delta x$ (heat and scalars use $K_h=K_m/\mathrm{Pr}$), selected by the \texttt{turbulence\_closure} parameter:
+\begin{itemize}
+  \item \textbf{CRM} (convection-permitting, $\Delta x\sim1$--$4$\,km; \texttt{smagorinsky}): the 3-D Smagorinsky--Lilly eddy viscosity $K_m=(C_s\Delta)^2\sqrt{\max(0,\,|S|^2-\mathrm{Pr}\,N^2)}$ with $\Delta=(\Delta x\,\Delta y\,\Delta z)^{1/3}$, the full strain $|S|^2=2S_{ij}S_{ij}$, $C_s\approx0.19$, and the SAM \texttt{dosmagor} moist stratification cutoff $N^2$.  The energy-containing eddies are entirely sub-grid; this is the regime validated against gSAM for the GATE, LBA, and RCE cases.
+  \item \textbf{LES} (large-eddy simulation, $\Delta x\sim10$--$100$\,m; \texttt{smagorinsky}): the same closure with $C_s\approx0.15$ and an optional near-wall limiter $\ell_m=\min(C_s\Delta,\kappa z)$; the energy-containing eddies are resolved.  gSAM's GATE and LBA references are themselves $100$\,m LES, so this mode uses the identical closure at the identical resolution.
+  \item \textbf{DNS} (direct numerical simulation, $\Delta x\to$ the Kolmogorov scale; \texttt{molecular}): no turbulence model; $K_m$ is the constant molecular kinematic viscosity $\nu$ with $K_h=\nu/\mathrm{Pr}$ ($\mathrm{Pr}\approx0.71$ for air), giving the molecular dissipation $\nu\nabla^2\bm u$ directly.
+\end{itemize}
+Because the three regimes share one discrete flux-form operator, LES and DNS are configuration changes rather than separate code paths; the molecular closure reproduces the analytical viscous decay $\partial_t\hat u=-\nu k^2\hat u$ of an isolated shear mode to within the time-integration error.
+
 %=============================================================================
 \section{Atmospheric Physics}
 %=============================================================================

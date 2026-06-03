@@ -51,6 +51,16 @@ class HydrometeorState(NamedTuple):
     N_c: jax.Array    # cloud droplet number [1/m³] (Seifert-Beheng per-volume)
     N_r: jax.Array    # rain drop number     [1/m³] (Seifert-Beheng per-volume)
     N_i: jax.Array    # ice crystal number   [1/kg] (Morrison/Thompson per-mass)
+    # Optional prognostic SNOW number [1/kg] (per-mass, like N_i / SAM NS3D).
+    # ``None`` ⇒ single-moment snow (bulk fall speed, no snow PSD); an array
+    # ⇒ double-moment snow (PSD slope LAMS=(π·ρ_sn·N_s/q_s)^⅓, PSD fall speed).
+    # Carried in tracer slot [9] by the plane CRM when allocated with ≥10 slots.
+    N_s: jax.Array | None = None
+    # Optional prognostic GRAUPEL number [1/kg] (per-mass, like N_s / SAM NG3D).
+    # ``None`` ⇒ single-moment graupel (fixed intercept N0G, LAMG=(π·ρ_g·N0G/
+    # (ρ·q_g))^¼); an array ⇒ double-moment graupel (LAMG=(π·ρ_g·N_g/q_g)^⅓).
+    # Carried in tracer slot [10] by the plane CRM when allocated with ≥11 slots.
+    N_g: jax.Array | None = None
 
 
 class MicrophysicsOutput(NamedTuple):
@@ -71,6 +81,12 @@ class MicrophysicsOutput(NamedTuple):
     dN_r_dt: jax.Array        # rain number tendency  [1/(m³·s)] per-volume
     dN_i_dt: jax.Array        # ice number tendency   [1/(kg·s)] per-mass
     precipitation: jax.Array  # surface precip [kg/m^2/s]
+    # Optional SNOW number tendency [1/(kg·s)] per-mass; None for single-moment
+    # snow (matches HydrometeorState.N_s). Written to tracer slot [9].
+    dN_s_dt: jax.Array | None = None
+    # Optional GRAUPEL number tendency [1/(kg·s)] per-mass; None for single-
+    # moment graupel (matches HydrometeorState.N_g). Written to tracer slot [10].
+    dN_g_dt: jax.Array | None = None
 
 
 def make_zero_hydrometeors(

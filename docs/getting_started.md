@@ -6,7 +6,7 @@ running simulation — and a map for "where do I look next?"
 If you have never touched legoESM before, read this top-to-bottom; it
 takes about 20 minutes including the first run.
 
-For technical depth, see [SPECIFICATION.md](../SPECIFICATION.md). For
+For technical depth, see [SPECIFICATION.md](specs/SPECIFICATION.md). For
 context on what changed recently, see [CHANGELOG.md](../CHANGELOG.md).
 
 ---
@@ -137,7 +137,7 @@ src/legoesm/
 ├── thermo.py          # saturation thermodynamics (use, do not re-derive)
 └── supported_matrix.py  # canonical dispatch entries
 
-scripts/               # CLI runners (run_amip.py, run_omip.py, run_scm_rce.py, ...)
+scripts/               # CLI runners (run_amip.py, run_omip.py, run_scm_test_matrix.py, ...)
 tests/                 # pytest suite + distributed/ + validation/
 docs/                  # this folder
 ```
@@ -161,7 +161,7 @@ A few principles to internalise:
 | Run a 3-D atmosphere | `ModelDriver` / `scripts/run_amip.py` |
 | Run a fully coupled simulation | `CoupledESMDriver` / `scripts/run_coupled.py` |
 | Run an OMIP ocean spin-up | `scripts/run_omip.py` |
-| Run a single column | `SingleColumnModel.create()` / `scripts/run_scm_rce.py` |
+| Run a single column | `SingleColumnModel.create()` / `scripts/run_scm_test_matrix.py` |
 | Run a Williamson / DCMIP test | `scripts/run_atmosphere_test_matrix.py` |
 | Run the ocean test matrix | `scripts/run_ocean_test_matrix.py` |
 | Multi-device or MPI | `ParallelRuntime.create()` |
@@ -247,7 +247,7 @@ Sea ice: `scripts/run_sea_ice_test_matrix.py` (15 standard benchmarks).
 ## 9. Where to go next
 
 - [README.md](../README.md) — feature inventory and platform matrix.
-- [SPECIFICATION.md](../SPECIFICATION.md) — full technical specification.
+- [SPECIFICATION.md](specs/SPECIFICATION.md) — full technical specification.
 - [docs/cmip_readiness.md](cmip_readiness.md) — CMIP production checklist.
 - [docs/amip.md](amip.md) — AMIP workflow.
 - [docs/scm.md](scm.md) — single-column model.
