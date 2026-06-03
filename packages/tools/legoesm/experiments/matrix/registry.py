@@ -130,6 +130,10 @@ class MatrixRunner:
                        help="run tiers up to and including this one")
         p.add_argument("--list", action="store_true",
                        help="list selected cases and exit (no integration)")
+        p.add_argument("--allow-empty", action="store_true",
+                       help="permit a zero-case selection instead of failing "
+                            "(default: an empty selection is an error so a typo "
+                            "in --grid/--only/--tier cannot silently pass CI)")
         self.add_arguments(p)
         return p
 
@@ -151,6 +155,21 @@ class MatrixRunner:
                       f"[{c.maturity}]  ({c.resolution})")
             print(f"\n  {len(selected)} case(s) selected of {len(self.cases)}.")
             return 0
+
+        # Fail-fast on an empty selection (codex review HIGH-1): a typo in
+        # --grid/--only/--tier would otherwise write a zero-test summary and
+        # return 0 (recorder.ok is vacuously True with no FAIL/ERROR), silently
+        # passing CI with no coverage.  --allow-empty opts out for the rare
+        # legitimately-empty filter.
+        if not selected and not args.allow_empty:
+            print(
+                f"  ERROR: 0 of {len(self.cases)} cases selected for "
+                f"'{self.component}' "
+                f"(tier={args.tier}, max_tier={args.max_tier}, "
+                f"grid={args.grid!r}, only={args.only!r}). "
+                f"Check the filters, or pass --allow-empty if intended."
+            )
+            return 2
 
         output_base = Path(args.output) / self.component
         recorder = ResultRecorder()

@@ -105,12 +105,36 @@ def mass_gate(ok, notes, series, *, component="atmosphere", tol=None):
 
 
 def energy_gate(ok, notes, series, *, component="atmosphere", tol=None):
-    """Total-energy conservation drift gate (key ``energy_rel_drift``).
+    """Total-energy / heat-content conservation drift gate.
 
-    Feed the ``compute_total_energy_nh``/``_pe`` column-or-total series.
+    Component-agnostic by alias (codex review MEDIUM-1): the ocean's energy
+    diagnostic is heat content (``heat_rel_drift``), the atmosphere/land/coupled
+    use total energy (``energy_rel_drift``).  This routes ``component="ocean"``
+    to the ocean heat key so the advertised shared gate works for every
+    component that has an energy tolerance — feed the
+    ``compute_total_energy_nh``/``_pe`` series (atmosphere) or the ocean
+    heat-content series accordingly.  ``sea_ice`` has no energy key (it gates on
+    volume/mass) and raises a clear ``KeyError`` if passed here.
     """
+    key = "heat_rel_drift" if component == "ocean" else "energy_rel_drift"
     return drift_gate(ok, notes, series, label="energy", component=component,
-                      key="energy_rel_drift", tol=tol)
+                      key=key, tol=tol)
+
+
+def heat_gate(ok, notes, series, *, component="ocean", tol=None):
+    """Ocean heat-content conservation drift gate (key ``heat_rel_drift``).
+
+    Explicit alias of :func:`energy_gate` for ocean callers that prefer the
+    domain-native name; identical routing.
+    """
+    return drift_gate(ok, notes, series, label="heat", component=component,
+                      key="heat_rel_drift", tol=tol)
+
+
+def salt_gate(ok, notes, series, *, component="ocean", tol=None):
+    """Ocean salt conservation drift gate (key ``salt_rel_drift``)."""
+    return drift_gate(ok, notes, series, label="salt", component=component,
+                      key="salt_rel_drift", tol=tol)
 
 
 def moisture_gate(ok, notes, series, *, component="atmosphere", tol=None):

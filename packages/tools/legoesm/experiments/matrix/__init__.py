@@ -27,8 +27,10 @@ from legoesm.experiments.matrix.gates import (
     drift_gate,
     energy_gate,
     finite_gate,
+    heat_gate,
     mass_gate,
     moisture_gate,
+    salt_gate,
 )
 from legoesm.experiments.matrix.registry import MatrixRunner
 from legoesm.experiments.matrix.report import (
@@ -50,8 +52,10 @@ __all__ = [
     "drift_gate",
     "energy_gate",
     "finite_gate",
+    "heat_gate",
     "mass_gate",
     "moisture_gate",
+    "salt_gate",
     "MatrixRunner",
     "detect_regressions",
     "write_summary",

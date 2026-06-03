@@ -23,7 +23,9 @@ from legoesm.experiments.matrix import (
     detect_regressions,
     energy_gate,
     finite_gate,
+    heat_gate,
     mass_gate,
+    salt_gate,
     write_summary,
 )
 from legoesm.experiments.matrix.gates import (
@@ -128,6 +130,30 @@ def test_mass_gate_ocean_uses_volume_key():
 def test_energy_gate_fails_on_nan_anywhere():
     ok, notes = energy_gate(True, "", [1.0, float("nan"), 1.0], component="atmosphere")
     assert ok is False
+
+
+def test_energy_gate_routes_ocean_to_heat_key():
+    # codex MEDIUM-1: energy_gate(component="ocean") must NOT KeyError on the
+    # missing energy_rel_drift; it routes to the ocean heat_rel_drift tolerance.
+    ok, _ = energy_gate(True, "", [1e25, 1e25], component="ocean")
+    assert ok is True
+    bad, notes = energy_gate(True, "", [1e25, 2e25], component="ocean")
+    assert bad is False and "energy" in notes
+
+
+def test_energy_gate_works_for_every_energy_component():
+    # Every CONS_THRESH component that has an energy/heat tolerance must be
+    # callable through the shared energy_gate without KeyError.
+    for comp in ("atmosphere", "ocean", "land", "coupled"):
+        ok, _ = energy_gate(True, "", [1.0e6, 1.0e6], component=comp)
+        assert ok is True, comp
+
+
+def test_heat_gate_and_salt_gate_ocean():
+    ok, _ = heat_gate(True, "", [1e25, 1e25])
+    assert ok is True
+    ok2, _ = salt_gate(True, "", [4.9e16, 4.9e16])
+    assert ok2 is True
 
 
 def test_benchmark_error_gate_le():
@@ -247,3 +273,25 @@ def test_runner_main_captures_exception_as_error(tmp_path):
     rec = json.loads((tmp_path / "ocean" / "summary.json").read_text())
     assert rec["n_error"] == 1
     assert "boom" in rec["results"][0]["notes"]
+
+
+def test_runner_main_empty_selection_fails(tmp_path, capsys):
+    # codex HIGH-1: a typo'd --grid selects zero cases; must FAIL (rc!=0), not
+    # silently write a zero-test summary and return 0.
+    rc = _DummyRunner().main(["--output", str(tmp_path), "--grid", "cubedsphere"])
+    assert rc == 2
+    assert "0 of 3 cases selected" in capsys.readouterr().out
+
+
+def test_runner_main_empty_selection_allow_empty_ok(tmp_path):
+    rc = _DummyRunner().main(
+        ["--output", str(tmp_path), "--grid", "nonesuch", "--allow-empty"]
+    )
+    assert rc == 0
+
+
+def test_runner_main_list_empty_does_not_fail(tmp_path):
+    # --list short-circuits before the empty-selection guard (listing nothing
+    # is legitimate); only the run path fails fast.
+    rc = _DummyRunner().main(["--list", "--grid", "nonesuch"])
+    assert rc == 0
