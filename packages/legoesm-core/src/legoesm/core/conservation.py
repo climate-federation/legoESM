@@ -914,31 +914,57 @@ def global_integral_voronoi(field, mesh) -> jax.Array:
     return jnp.sum(field.astype(acc) * mesh.areaCell.astype(acc))
 
 
-def fix_mass_mpas(state, target_mass, mesh):
-    """Fix mass conservation on Voronoi mesh via uniform h correction.
+def fix_mass_mpas(state_new, state_old, mesh, target_mass=None):
+    """Fix mass conservation on a Voronoi mesh via a uniform additive ``h``
+    correction — the canonical MPI-aware fixer shared by the MPAS shallow-water
+    dycore (federation dedup: ``atmosphere.shallow_water_mpas`` imports this
+    instead of carrying its own copy).
 
-    Parameters
-    ----------
-    state : MPASShallowWaterState
-    target_mass : jax.Array
-        Target global mass (∫ h * dA).
-    mesh : VoronoiMesh
+    Upcasts to the conservation accumulator (fp64 where supported, fp32 fallback
+    on Metal / no-x64 — policy-aware, unlike a hardcoded ``float64`` which is
+    Metal-unsafe) for the global reduction, to avoid catastrophic cancellation
+    in the mass difference.  The sums are batched into ONE allreduce for
+    multi-rank scaling.
 
-    Returns
-    -------
-    MPASShallowWaterState
+    ``target_mass`` given (anchor-to-initial mode) → skip the ``state_old`` sum;
+    only ``mass_new`` and ``total_area`` need a reduction.  ``target_mass=None``
+    (match-previous-state mode) → reduce all three.
     """
-    current_mass = global_integral_voronoi(state.h.data, mesh)
-    # ``mesh.grid_total_area`` is precomputed at mesh construction —
-    # avoid recomputing the global ``jnp.sum(areaCell)`` every step
-    # (one extra reduction in serial; one extra allreduce under
-    # multi-rank Voronoi sharding).  Iter-13: cast to fp64 so the
-    # divisor matches the fp64 ``current_mass`` and ``target_mass``;
-    # otherwise an fp32 ``total_area`` leaks ~N·eps into ``correction``.
-    total_area = mesh.grid_total_area.astype(conservation_accumulator())
-    correction = (target_mass - current_mass) / total_area
-    h_fixed = state.h.replace(data=state.h.data + correction)
-    return state._replace(h=h_fixed)
+    acc = conservation_accumulator()
+    area = mesh.areaCell.astype(acc)
+    if target_mass is not None:
+        _h_stack = jnp.stack(
+            [
+                state_new.h.data.astype(acc),
+                jnp.ones_like(state_new.h.data, dtype=acc),
+            ],
+            axis=-1,
+        ) * area[..., None]
+        local = jnp.sum(_h_stack, axis=tuple(range(area.ndim)))
+        if jax.process_count() > 1:
+            from legoesm.parallel.reductions import global_sum_mpi
+            local = global_sum_mpi(local)
+        mass_new, total_area = local[0], local[1]
+        mass_old = target_mass
+    else:
+        _h_stack = jnp.stack(
+            [
+                state_old.h.data.astype(acc),
+                state_new.h.data.astype(acc),
+                jnp.ones_like(state_new.h.data, dtype=acc),
+            ],
+            axis=-1,
+        ) * area[..., None]
+        local = jnp.sum(_h_stack, axis=tuple(range(area.ndim)))
+        if jax.process_count() > 1:
+            from legoesm.parallel.reductions import global_sum_mpi
+            local = global_sum_mpi(local)
+        mass_old, mass_new, total_area = local[0], local[1], local[2]
+    correction = (mass_old - mass_new) / total_area
+    # No cast-back: the fp64 correction promotes the add — load-bearing for the
+    # ~1e-12 mass conservation in test_sw_mass_conservation_anchored.
+    h_fixed = state_new.h.replace(data=state_new.h.data + correction)
+    return state_new._replace(h=h_fixed)
 
 
 def compute_nh_dry_mass_mpas(
@@ -1035,49 +1061,43 @@ def _batch_global_area_sums_voronoi(
     return local_sums
 
 
-def fix_energy_mpas(state, target_energy, mesh, g=constants.g):
-    """Fix energy conservation on Voronoi mesh via velocity scaling.
+def fix_energy_mpas(state_new, state_old, mesh, g=constants.g):
+    """Fix energy conservation on a Voronoi mesh via velocity scaling — the
+    canonical MPI-aware fixer shared by the MPAS shallow-water dycore (federation
+    dedup: ``atmosphere.shallow_water_mpas`` imports this).
 
-    Batches the KE / PE sums into one stacked reduction so the helper
-    issues a single ``jnp.sum`` per accumulator pair instead of two
-    separate ones — half the allreduce traffic when the Voronoi mesh
-    is sharded across ranks (matching the ``shallow_water_mpas`` /
-    ``conservation_mpas`` fixers).
-
-    Parameters
-    ----------
-    state : MPASShallowWaterState
-    target_energy : jax.Array
-        Target total energy.
-    mesh : VoronoiMesh
-    g : float
-
-    Returns
-    -------
-    MPASShallowWaterState
+    Rescales ``u`` so the total energy of ``state_new`` matches that of
+    ``state_old``: the four contributing sums (KE/PE of old and new) are batched
+    into ONE allreduce instead of four when the mesh is sharded across ranks.
     """
-    # iter-42: promote energy fields to the fp64 budget accumulator
-    # before the area-weighted sum (same fix as
-    # ``fix_energy_shallow_water`` for the SW-on-any-grid path).
-    acc = conservation_accumulator()
-    h = state.h.data.astype(acc)
-    u = state.u.data.astype(acc)
-    h_s = state.h_s.data.astype(acc)
-    area = mesh.areaCell.astype(acc)
-    g_acc = jnp.asarray(g, dtype=acc)
+    _TINY = float(jnp.finfo(jnp.float32).tiny)
+    area = mesh.areaCell
 
-    KE_cells = kinetic_energy_cell(u, mesh)
-    # Both KE and PE share the ``area`` weight on the horizontal axes —
-    # stack the two integrands and reduce once locally so XLA fires one
-    # sum kernel; the stacked result still yields a 2-vector for the
-    # downstream ``KE / PE`` split (and a future allreduce, if any).
-    _energy_intg = jnp.stack(
-        [KE_cells * h, 0.5 * g_acc * (h + h_s) ** 2], axis=-1,
-    ) * area[..., None]
-    energy_terms = jnp.sum(_energy_intg, axis=tuple(range(area.ndim)))
-    KE, PE = energy_terms[0], energy_terms[1]
+    def _ke_pe_terms(state):
+        h = state.h.data
+        u = state.u.data
+        h_s = state.h_s.data
+        # KE and PE share ``area`` on the same horizontal axes — stack the two
+        # integrands and reduce locally once.
+        _stack = jnp.stack(
+            [kinetic_energy_cell(u, mesh) * h, 0.5 * g * (h + h_s) ** 2],
+            axis=-1,
+        ) * area[..., None]
+        _pair = jnp.sum(_stack, axis=tuple(range(area.ndim)))
+        return _pair[0], _pair[1]
 
-    KE_target = jnp.maximum(target_energy - PE, _EPS_ENERGY)
-    scale = jnp.where(KE > _tiny(KE), jnp.sqrt(KE_target / KE), 1.0)
-    u_fixed = state.u.replace(data=u * scale)
-    return state._replace(u=u_fixed)
+    KE_old, PE_old = _ke_pe_terms(state_old)
+    KE_new, PE_new = _ke_pe_terms(state_new)
+
+    local = jnp.stack([KE_old, PE_old, KE_new, PE_new])
+    if jax.process_count() > 1:
+        from legoesm.parallel.reductions import global_sum_mpi
+        local = global_sum_mpi(local)
+    KE_old, PE_old, KE_new, PE_new = local[0], local[1], local[2], local[3]
+    E_old = KE_old + PE_old
+
+    KE_target = jnp.maximum(E_old - PE_new, 0.0)
+    scale = jnp.where(KE_new > _TINY, jnp.sqrt(KE_target / KE_new), 1.0)
+
+    u_fixed = state_new.u.replace(data=state_new.u.data * scale)
+    return state_new._replace(u=u_fixed)
