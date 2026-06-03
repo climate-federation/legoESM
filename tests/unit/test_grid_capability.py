@@ -193,3 +193,24 @@ def test_instantiate_with_valid_runtime_builds():
     grid = instantiate("latlon", extent="global", resolution=4,
                        architecture="cpu", precision="fp32", time_integrator="ssp_rk3")
     assert grid is not None
+
+
+def test_fp64_without_named_architecture_checks_current_backend():
+    # architecture=None falls back to the CURRENT backend: if it has no float64
+    # (e.g. Metal), an fp64-storage precision must still be rejected, not slip
+    # through to a silent float32 truncation (codex review).
+    from unittest import mock
+    import legoesm.runtime.backend as backend
+
+    with mock.patch.object(backend, "supports_float64", return_value=False):
+        with pytest.raises(ValueError, match="no float64 support"):
+            validate_runtime(precision="fp64")
+        with pytest.raises(ValueError, match="no float64 support"):
+            validate_runtime(precision="mixed_fp64_storage")
+        # fp32 / mixed (fp32 storage) stay fine on an fp64-less backend.
+        validate_runtime(precision="fp32")
+        validate_runtime(precision="mixed")
+
+    # With float64 available, fp64 validates.
+    with mock.patch.object(backend, "supports_float64", return_value=True):
+        validate_runtime(precision="fp64")

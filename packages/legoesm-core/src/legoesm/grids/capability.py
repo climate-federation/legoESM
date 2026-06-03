@@ -123,19 +123,26 @@ def validate_runtime(
                 f"Unknown time_integrator {time_integrator!r}; expected one of "
                 f"{ints}."
             )
-    # Cross-constraint: fp64 storage needs an fp64-capable backend.
-    if architecture is not None and precision is not None:
-        from legoesm.runtime.backend import supports_float64
+    # Cross-constraint: an fp64-STORAGE precision needs an fp64-capable backend.
+    # Checked even when ``architecture is None`` — then it falls back to the
+    # CURRENT backend (``supports_float64(None)``), so requesting fp64 without
+    # naming an architecture still fails on a Metal machine instead of silently
+    # truncating state to float32.
+    if precision is not None:
         from legoesm.runtime.precision import precision_requires_fp64
 
-        arch = architecture.strip().lower()
-        if precision_requires_fp64(precision) and not supports_float64(arch):
-            raise ValueError(
-                f"precision {precision!r} stores state in float64, but the "
-                f"{arch!r} backend has no float64 support — choose a different "
-                f"architecture (cpu/gpu/tpu) or an fp32-storage precision "
-                f"('fp32' or 'mixed')."
-            )
+        if precision_requires_fp64(precision):
+            from legoesm.runtime.backend import supports_float64
+
+            arch = architecture.strip().lower() if architecture is not None else None
+            if not supports_float64(arch):
+                where = f"{arch!r} backend" if arch is not None else "current backend"
+                raise ValueError(
+                    f"precision {precision!r} stores state in float64, but the "
+                    f"{where} has no float64 support — choose a different "
+                    f"architecture (cpu/gpu/tpu) or an fp32-storage precision "
+                    f"('fp32' or 'mixed')."
+                )
 
 
 def _canonical(grid_type: str) -> str:
