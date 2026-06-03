@@ -64,3 +64,28 @@ when the tree is quiet.
   `parallel` no longer reaches up into atmosphere (`type(model)(...)`).
 - Per-layer `[project.optional-dependencies]` feature extras (`ml`, `mesh`, `viz`,
   `data`, `docs`, `mpi`) already split optional weight off the core install.
+
+## Breaking changes (the carve is intentionally not backward-compatible)
+
+Independent shipping is incompatible with the old monolithic `legoesm.*` surface:
+you cannot have both a package that re-exports everything AND members that install
+separately. These breaks were taken early (pre-publication, zero internal callers —
+verified by grep) and are *gated by `tests/test_public_surface.py`* so they cannot
+regress silently. **Do not "fix" them with shims** — a `legoesm/__init__.py` shim
+re-breaks PEP-420, and a `legoesm/io/restart.py` shim re-adds the `io → driver`
+edge the independence contract forbids.
+
+| Removed | Replacement |
+|---------|-------------|
+| `legoesm.__version__` | `importlib.metadata.version("legoesm")` (or `legoesm._version.__version__`) |
+| `from legoesm import Field` | `from legoesm.core.field import Field` |
+| `legoesm.hours/minutes/days/years` | inline the factor, or a local helper (these were unused conveniences) |
+| `import legoesm.io.restart` / `from legoesm.io import save_restart` | `from legoesm.driver.restart import save_restart` |
+| `legoesm.io.checkpoint` | `legoesm.driver.checkpoint` |
+| `legoesm.io.distributed_checkpoint` | `legoesm.driver.distributed_checkpoint` |
+
+`legoesm.io` now exposes only the substrate I/O — CMOR output, the generic
+`state_checkpoint`, and the pure `state_digest` helpers. The config-aware
+checkpoint/restart (run manifest, reproducibility spine, config serialization)
+lives in the driver layer because it depends on the experiment-config schema,
+which sits above the substrate.
