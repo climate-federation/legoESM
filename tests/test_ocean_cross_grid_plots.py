@@ -16,6 +16,16 @@ import numpy as np
 import pytest
 
 
+def _read_repo_or_legoesm(repo, rel):
+    """Read a repo file; carve-aware for legoesm sources (a subpackage may live in
+    a uv-workspace member, so resolve ``src/legoesm/...`` via the namespace)."""
+    if str(rel).startswith(("src/legoesm/", "legoesm/")):
+        from tests.legoesm_paths import legoesm_source_path
+
+        return legoesm_source_path(rel).read_text()
+    return (repo / rel).read_text()
+
+
 _SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
@@ -2006,7 +2016,7 @@ class TestIter123OceanDriftTolerance:
             "scripts/ocean_test_matrix/experiments.py",
             "src/legoesm/diagnostics/conservation_drift.py",
         ):
-            text = (repo / rel).read_text()
+            text = _read_repo_or_legoesm(repo, rel)
             # An actual op="lt_zero" call would look like
             # ``op="lt_zero"`` or ``op='lt_zero'`` in code.
             # Allow it in docstrings/comments only.
@@ -2686,7 +2696,7 @@ class TestIter123OceanDriftTolerance:
             if stale_line == ":419":
                 continue
             for rel in files_to_check:
-                text = (repo / rel).read_text()
+                text = _read_repo_or_legoesm(repo, rel)
                 marker = f"ocean_experiments_reference.md{stale_line}"
                 assert marker not in text, (
                     f"iter-131: {rel} has stale doc line "
