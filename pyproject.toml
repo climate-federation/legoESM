@@ -31,6 +31,14 @@ dependencies = [
     # to the matching minor (single-sourced version; members bump in lock-step)
     # so a non-workspace ``pip install legoesm`` cannot resolve a mismatched core.
     "legoesm-core~=0.1.0",
+    # The four Earth-system components, each its own installable member on top of
+    # legoesm-core (mutually independent — import-linter contract #2).  The meta
+    # ``legoesm`` pulls them all; ``pip install legoesm-ocean`` alone is enough to
+    # run the ocean standalone.
+    "legoesm-atmosphere~=0.1.0",
+    "legoesm-ocean~=0.1.0",
+    "legoesm-land~=0.1.0",
+    "legoesm-ice~=0.1.0",
     "jax>=0.4.35",              # install minimum; tested with 0.8–0.9
     "jaxlib>=0.4.35",           # must match jax
     "equinox>=0.11",
