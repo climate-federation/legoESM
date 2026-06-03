@@ -99,6 +99,11 @@ def test_analytic_equilibrium_differentiable_vs_fd():
     g_fd = (float(T_sfc_eq(eps0 + h)) - float(T_sfc_eq(eps0 - h))) / (2 * h)
     assert g_ad == pytest.approx(g_fd, rel=1e-6)
     assert g_ad > 0.0  # more emissivity → warmer surface
+    # The validation must not break the JIT / grad-of-JIT path when emissivity is
+    # itself a tracer (parameter-sensitivity under jit): the domain check skips
+    # traced fields, so the analytic equilibrium stays traceable.
+    assert float(jax.jit(T_sfc_eq)(eps0)) == pytest.approx(float(T_sfc_eq(eps0)), rel=1e-12)
+    assert float(jax.grad(jax.jit(T_sfc_eq))(eps0)) == pytest.approx(g_ad, rel=1e-9)
 
 
 def test_stepped_run_is_differentiable():
@@ -130,7 +135,7 @@ def test_config_domain_validation():
         slab_equilibrium(_S, SlabAtmosphereConfig(sw_atm_absorption=1.5))
     with pytest.raises(ValueError, match="albedo"):
         slab_equilibrium(_S, SlabAtmosphereConfig(albedo=1.0))
-    with pytest.raises(ValueError, match="heat capacities"):
+    with pytest.raises(ValueError, match="c_sfc must be > 0"):
         slab_equilibrium(_S, SlabAtmosphereConfig(c_sfc=0.0))
 
 

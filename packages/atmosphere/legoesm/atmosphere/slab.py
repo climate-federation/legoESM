@@ -37,6 +37,7 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+import jax
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -80,27 +81,40 @@ class SlabAtmosphereState(NamedTuple):
     T_sfc: jnp.ndarray
 
 
+def _is_traced(x) -> bool:
+    """True if ``x`` is a JAX tracer (so Python control flow on it is illegal)."""
+    return isinstance(x, jax.core.Tracer)
+
+
 def validate_slab_config(config: SlabAtmosphereConfig) -> None:
     """Reject parameter values outside the physical domain.
 
-    Validated on the static config at entry (CLAUDE.md pattern), so it is JIT/grad
-    safe.  In particular ``emissivity > 0`` is required: with ``emissivity == 0``
-    the atmosphere has no longwave emission channel, so the
-    ``sw_atm_absorption / emissivity`` term in :func:`slab_equilibrium` is singular
-    and no radiative steady state exists when the air also absorbs shortwave.
+    Domain checks run on CONCRETE config fields (the common case — parameters are
+    static Python floats).  A field that is a JAX *tracer* — e.g. when
+    differentiating/jitting the equilibrium with respect to ``emissivity`` for a
+    parameter-sensitivity study — is SKIPPED (Python ``bool`` on a tracer is
+    illegal), so the analytic path stays jit/grad-traceable; the caller then
+    guarantees the domain.  In particular ``emissivity > 0`` is required for a
+    concrete config: with ``emissivity == 0`` the atmosphere has no longwave
+    emission channel, so the ``sw_atm_absorption / emissivity`` term in
+    :func:`slab_equilibrium` is singular and no radiative steady state exists when
+    the air also absorbs shortwave.
     """
-    if not (0.0 < config.emissivity <= 1.0):
+    eps = config.emissivity
+    if not _is_traced(eps) and not (0.0 < eps <= 1.0):
         raise ValueError(
             f"emissivity must be in (0, 1] (a transparent ε=0 atmosphere has no "
-            f"LW emission channel and no radiative equilibrium), got {config.emissivity}")
-    if not (0.0 <= config.sw_atm_absorption <= 1.0):
-        raise ValueError(
-            f"sw_atm_absorption must be in [0, 1], got {config.sw_atm_absorption}")
-    if not (0.0 <= config.albedo < 1.0):
-        raise ValueError(f"albedo must be in [0, 1), got {config.albedo}")
-    if config.c_atm <= 0.0 or config.c_sfc <= 0.0:
-        raise ValueError(
-            f"heat capacities must be > 0, got c_atm={config.c_atm}, c_sfc={config.c_sfc}")
+            f"LW emission channel and no radiative equilibrium), got {eps}")
+    a = config.sw_atm_absorption
+    if not _is_traced(a) and not (0.0 <= a <= 1.0):
+        raise ValueError(f"sw_atm_absorption must be in [0, 1], got {a}")
+    al = config.albedo
+    if not _is_traced(al) and not (0.0 <= al < 1.0):
+        raise ValueError(f"albedo must be in [0, 1), got {al}")
+    if not _is_traced(config.c_atm) and config.c_atm <= 0.0:
+        raise ValueError(f"c_atm must be > 0, got {config.c_atm}")
+    if not _is_traced(config.c_sfc) and config.c_sfc <= 0.0:
+        raise ValueError(f"c_sfc must be > 0, got {config.c_sfc}")
 
 
 def _radiative_terms(state: SlabAtmosphereState, insolation, config: SlabAtmosphereConfig):
