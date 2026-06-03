@@ -133,3 +133,63 @@ def test_nesting_is_flagged_unavailable():
 
 def test_extents_constant():
     assert EXTENTS == ("global", "regional", "double_periodic")
+
+
+# ---------------------------------------------------------------------------
+# Runtime axes: architecture x precision x time integrator
+# ---------------------------------------------------------------------------
+
+from legoesm.grids.capability import (
+    ARCHITECTURES,
+    available_integrators,
+    available_precision_modes,
+    validate_runtime,
+)
+
+
+def test_runtime_axes_sets():
+    assert set(ARCHITECTURES) == {"cpu", "gpu", "tpu", "metal"}
+    assert {"fp32", "fp64", "mixed"} <= set(available_precision_modes())
+    ints = available_integrators()
+    assert "ssp_rk3" in ints and "rk4" in ints
+
+
+def test_validate_runtime_accepts_valid_combos():
+    validate_runtime("cpu", "fp64", "ssp_rk3")
+    validate_runtime("gpu", "mixed", "rk4")
+    validate_runtime(architecture="metal", precision="fp32")  # fp32 ok on metal
+    validate_runtime()  # all None — no-op
+
+
+def test_unknown_architecture_precision_integrator_raise():
+    with pytest.raises(ValueError, match="Unknown architecture"):
+        validate_runtime(architecture="quantum")
+    with pytest.raises(ValueError, match="Unknown precision"):
+        validate_runtime(precision="fp128")
+    with pytest.raises(ValueError, match="Unknown time_integrator"):
+        validate_runtime(time_integrator="forward_euler")
+
+
+def test_fp64_on_metal_is_rejected():
+    # fp64 storage needs an fp64-capable backend; Metal has none.
+    with pytest.raises(ValueError, match="no float64 support"):
+        validate_runtime(architecture="metal", precision="fp64")
+    with pytest.raises(ValueError, match="no float64 support"):
+        validate_runtime(architecture="metal", precision="mixed_fp64_storage")
+
+
+def test_instantiate_validates_runtime_before_building():
+    # A bad runtime axis is caught before any grid is built (validate-only).
+    with pytest.raises(ValueError, match="no float64 support"):
+        instantiate("latlon", extent="global", resolution=4,
+                    architecture="metal", precision="fp64")
+    with pytest.raises(ValueError, match="Unknown time_integrator"):
+        instantiate("cubed_sphere", extent="global", resolution=4,
+                    time_integrator="leapfrog_3")
+
+
+def test_instantiate_with_valid_runtime_builds():
+    # Valid runtime axes (validate-only, configure=False) + a real grid.
+    grid = instantiate("latlon", extent="global", resolution=4,
+                       architecture="cpu", precision="fp32", time_integrator="ssp_rk3")
+    assert grid is not None

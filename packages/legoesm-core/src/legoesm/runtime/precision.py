@@ -51,6 +51,21 @@ _MODE_FACTORIES = {
     "mixed_fp64_storage": PrecisionPolicy.mixed_fp64_storage,
 }
 
+#: Precision modes whose STORAGE is float64 (so they require an fp64-capable
+#: backend — e.g. not Apple Metal).  ``"mixed"`` keeps fp32 storage, so it is OK
+#: on fp64-less backends.
+_FP64_STORAGE_MODES = frozenset({"fp64", "float64", "mixed_fp64_storage"})
+
+
+def available_precision_modes() -> tuple[str, ...]:
+    """Sorted names of the precision modes ``apply_precision`` accepts."""
+    return tuple(sorted(_MODE_FACTORIES))
+
+
+def precision_requires_fp64(mode: str) -> bool:
+    """True if *mode* stores state in float64 (needs an fp64-capable backend)."""
+    return mode.strip().lower() in _FP64_STORAGE_MODES
+
 
 def resolve_precision(mode: str = "fp32") -> PrecisionPolicy:
     """Return the ``PrecisionPolicy`` for *mode*.

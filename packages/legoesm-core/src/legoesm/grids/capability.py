@@ -37,6 +37,11 @@ from legoesm.grids.factory import (
 #: The three spatial extents.
 EXTENTS: tuple[str, ...] = ("global", "regional", "double_periodic")
 
+#: Hardware architectures legoESM can target (JAX platforms).  Validation only
+#: checks the *name*; whether a given device is actually present is decided at
+#: configure time by :func:`legoesm.runtime.backend.configure_backend`.
+ARCHITECTURES: tuple[str, ...] = ("cpu", "gpu", "tpu", "metal")
+
 #: User-facing grid aliases -> canonical factory grid_type.  The MPAS Voronoi mesh
 #: is built on an icosahedral base (``grids.voronoi._icosahedral_base``), so
 #: ``"icosahedral"`` is the same family as ``"mpas"``; ``"plane"`` / ``"xy"`` name
@@ -70,6 +75,67 @@ _DOUBLE_PERIODIC: frozenset[str] = frozenset({"plane"})
 #: any grid yet.  ``grid_type -> frozenset of extents at which nesting exists``;
 #: empty everywhere today, so any ``nesting=True`` request is flagged.
 _NESTING_SUPPORT: dict[str, frozenset[str]] = {}
+
+
+def available_precision_modes() -> tuple[str, ...]:
+    """Precision modes (fp32 / fp64 / mixed / mixed_fp64_storage)."""
+    from legoesm.runtime.precision import available_precision_modes as _modes
+
+    return _modes()
+
+
+def available_integrators() -> tuple[str, ...]:
+    """Time integrators (SSP-RK3/34/54, RK4, the scan variants)."""
+    from legoesm.timestepping.dispatch import available_integrators as _ints
+
+    return _ints()
+
+
+def validate_runtime(
+    architecture: str | None = None,
+    precision: str | None = None,
+    time_integrator: str | None = None,
+) -> None:
+    """Validate a ``(architecture, precision, time_integrator)`` runtime combo.
+
+    Each axis is checked against its available set, and the one real
+    cross-constraint is enforced: an **fp64-storage precision** (``fp64`` /
+    ``mixed_fp64_storage``) needs an **fp64-capable backend**, which Apple
+    ``metal`` is not — that combination raises rather than silently truncating
+    state to float32.  ``None`` on an axis skips it (leave it at the default /
+    already-configured value).  Raises ``ValueError`` on any invalid choice.
+    """
+    if architecture is not None and architecture.strip().lower() not in ARCHITECTURES:
+        raise ValueError(
+            f"Unknown architecture {architecture!r}; expected one of "
+            f"{ARCHITECTURES}."
+        )
+    if precision is not None:
+        modes = available_precision_modes()
+        if precision.strip().lower() not in modes:
+            raise ValueError(
+                f"Unknown precision {precision!r}; expected one of {modes}."
+            )
+    if time_integrator is not None:
+        ints = available_integrators()
+        if time_integrator.strip().lower() not in ints:
+            raise ValueError(
+                f"Unknown time_integrator {time_integrator!r}; expected one of "
+                f"{ints}."
+            )
+    # Cross-constraint: fp64 storage needs an fp64-capable backend.
+    if architecture is not None and precision is not None:
+        from legoesm.runtime.backend import supports_float64
+        from legoesm.runtime.precision import precision_requires_fp64
+
+        arch = architecture.strip().lower()
+        if precision_requires_fp64(precision) and not supports_float64(arch):
+            raise ValueError(
+                f"precision {precision!r} stores state in float64, but the "
+                f"{arch!r} backend has no float64 support — choose a different "
+                f"architecture (cpu/gpu/tpu) or an fp32-storage precision "
+                f"('fp32' or 'mixed')."
+            )
 
 
 def _canonical(grid_type: str) -> str:
@@ -159,9 +225,19 @@ def instantiate(
     extent: str = "global",
     operators: bool = False,
     nesting: bool = False,
+    architecture: str | None = None,
+    precision: str | None = None,
+    time_integrator: str | None = None,
+    configure: bool = False,
     **kwargs: Any,
 ):
     """Validate and build a ``(grid [, operators])`` for the requested combination.
+
+    Applies to EVERY component (atmosphere/ocean/land/ice) — the grid, its
+    operators, the hardware architecture, the numerical precision, and the time
+    integrator are all foundational choices validated here against what actually
+    exists, so an impossible combination fails with a clear message instead of a
+    silent wrong default.
 
     Parameters
     ----------
@@ -178,15 +254,35 @@ def instantiate(
         If true, request a *nested* (refined-child) grid.  Not implemented for any
         grid yet, so this currently always raises ``NotImplementedError`` — the
         hook is here so callers get a clear message instead of a wrong grid.
+    architecture
+        ``"cpu"`` | ``"gpu"`` | ``"tpu"`` | ``"metal"`` (or ``None`` to leave the
+        current backend).  Validated by :func:`validate_runtime`.
+    precision
+        ``"fp32"`` | ``"fp64"`` | ``"mixed"`` | ``"mixed_fp64_storage"`` (or
+        ``None``).  An fp64-storage precision on a backend without float64 (Metal)
+        is rejected.
+    time_integrator
+        A name accepted by ``timestepping.dispatch_integrator`` (e.g. ``"ssp_rk3"``,
+        ``"rk4"``), or ``None``.  Validated against :func:`available_integrators`.
+    configure
+        If true, actually APPLY the runtime choices now — call
+        ``runtime.backend.configure_backend(architecture)`` and
+        ``runtime.precision.apply_precision(precision)`` (global side effects).
+        Default false: validate only.
 
     Raises
     ------
     ValueError
-        Unknown grid type, unknown/unsupported extent for the grid, or operators
-        requested on a grid that has none.
+        Unknown grid / extent / architecture / precision / time_integrator, an
+        extent unsupported for the grid, operators requested on a grid that has
+        none, or an fp64 precision on an fp64-less architecture.
     NotImplementedError
         Nesting requested where it is not available.
     """
+    # Validate the runtime axes (architecture / precision / time integrator) up
+    # front so an impossible runtime fails before any grid is built.
+    validate_runtime(architecture, precision, time_integrator)
+
     g = _canonical(grid_type)
     if g not in _all_grid_types():
         raise ValueError(
@@ -217,6 +313,17 @@ def instantiate(
                 f"at extent {extent!r}; grid nesting is not yet implemented for "
                 f"any grid in legoESM."
             )
+
+    # --- optionally APPLY the validated runtime (global side effects) ---
+    if configure:
+        if architecture is not None:
+            from legoesm.runtime.backend import configure_backend
+
+            configure_backend(architecture)
+        if precision is not None:
+            from legoesm.runtime.precision import apply_precision
+
+            apply_precision(precision)
 
     # --- build the grid via the existing single-source factories ---
     if extent == "global":

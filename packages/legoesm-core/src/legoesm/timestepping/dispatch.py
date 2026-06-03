@@ -54,6 +54,16 @@ _INTEGRATORS = {
 }
 
 
+def available_integrators() -> tuple[str, ...]:
+    """Sorted names of the time integrators ``dispatch_integrator`` accepts.
+
+    The single source of truth for validators (e.g. the grid/runtime capability
+    matrix) that need to check a requested integrator without importing the
+    private ``_INTEGRATORS`` dispatch table.
+    """
+    return tuple(sorted(_INTEGRATORS))
+
+
 def dispatch_integrator(state, tendency_fn, dt, integrator_name):
     """Dispatch to the appropriate time integrator.
 

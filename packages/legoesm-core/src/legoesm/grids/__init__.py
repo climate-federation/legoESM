@@ -27,6 +27,10 @@ from legoesm.grids.capability import (
     capability_matrix,
     supported_extents,
     operator_family,
+    validate_runtime,
+    available_precision_modes,
+    available_integrators,
+    ARCHITECTURES,
 )
 from legoesm.grids.tripole import (
     create_tripole_grid,
