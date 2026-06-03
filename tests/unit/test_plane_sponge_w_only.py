@@ -144,8 +144,8 @@ def test_crm_scripts_set_sam_faithful_sponge():
     SAM-faithful sponge (w-only + rational taper). A regression dropping either
     would silently un-faithful the top damping."""
     from pathlib import Path
-    import legoesm
-    repo = Path(legoesm.__file__).resolve().parents[2]
+    # namespace-safe repo root (legoesm is a PEP-420 namespace pkg, no __file__)
+    repo = Path(__file__).resolve().parents[2]
     for script in ("run_gate_plane.py", "run_lba_plane.py",
                    "run_rcemip_plane.py"):
         src = (repo / "scripts" / script).read_text()

@@ -63,7 +63,9 @@ def test_runtime_version_matches_pyproject() -> None:
     ``importlib.metadata`` cannot resolve the package and ``_version`` falls back
     to a clearly-fake sentinel.
     """
-    from legoesm import __version__
+    # ``legoesm`` is a PEP-420 namespace package (federation carve) with no
+    # ``__init__``, so the version lives on the single-source ``_version`` module.
+    from legoesm._version import __version__
 
     if __version__.endswith("+unknown"):
         pytest.skip("legoesm not installed (bare source tree); metadata version unavailable")

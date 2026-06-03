@@ -90,7 +90,7 @@ import mpi4py, mpi4jax
 print(f'mpi4py {mpi4py.__version__}')
 print(f'mpi4jax {getattr(mpi4jax, \"__version__\", \"<no __version__>\")}')
 import legoesm
-print(f'legoesm import OK from {legoesm.__file__}')
+print(f'legoesm import OK from {list(legoesm.__path__)}')
 print('SETUP OK')
 "
 

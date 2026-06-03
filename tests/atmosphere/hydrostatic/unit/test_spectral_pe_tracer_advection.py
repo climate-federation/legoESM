@@ -222,10 +222,12 @@ class TestSpectralPEHybridTracerVerticalAdvection:
         loop — falsifies the missing-call version by construction.
         """
         from pathlib import Path
-        import legoesm
+        # namespace-safe: resolve via the atmosphere package (a real package with
+        # __file__); legoesm itself is a PEP-420 namespace pkg with no __file__
+        import legoesm.atmosphere
         spectral_pe_src = (
-            Path(legoesm.__file__).parent
-            / "atmosphere" / "dynamics" / "spectral_pe.py"
+            Path(legoesm.atmosphere.__file__).parent
+            / "dynamics" / "spectral_pe.py"
         )
         text = spectral_pe_src.read_text()
         # Look for the hybrid branch tracer call inside spectral_pe_tendencies
