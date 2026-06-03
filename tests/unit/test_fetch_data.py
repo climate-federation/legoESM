@@ -57,9 +57,13 @@ def test_verify_helper(fd, tmp_path):
     assert fd._verify({}, tmp_path / "absent")[0] is False
     d = tmp_path / "store"
     d.mkdir()
-    assert fd._verify({}, d)[0] is False            # empty dir
+    # directory datasets REQUIRE a completeness marker (codex followup):
+    assert fd._verify({}, d)[0] is False            # no marker declared -> reject
     (d / "x").write_text("y")
-    assert fd._verify({}, d)[0] is True             # non-empty dir
+    assert fd._verify({}, d)[0] is False            # non-empty but still no marker
+    assert fd._verify({"marker": ".complete"}, d)[0] is False   # marker absent -> incomplete
+    (d / ".complete").write_text("")
+    assert fd._verify({"marker": ".complete"}, d)[0] is True    # marker present -> ok
 
 
 def test_unknown_template_raises(fd):

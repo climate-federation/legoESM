@@ -26,9 +26,11 @@ datasets:
     target: ocean/jra55_do/
     description: "JRA55-do surface forcing for OMIP ocean runs."
     url: ""
+    marker: .complete        # write this sentinel after a verified manual stage
     credentials: "JRA55-do registration (https://climate.mri-jma.go.jp/)"
 
   era5_wb2:
     target: era5/wb2.zarr
     description: "ERA5 (WeatherBench2 1440x721 6h) for AMIP/ERA5-ingest tiers."
     url: "gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr"
+    marker: .zmetadata       # zarr consolidated metadata = store-complete sentinel

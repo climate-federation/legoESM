@@ -65,9 +65,16 @@ def _verify(entry: dict[str, Any], target: Path) -> tuple[bool, str]:
     if not target.exists():
         return False, "missing"
     if target.is_dir():
+        # codex review (followup): a non-empty directory is NOT enough — an
+        # interrupted zarr/forcing copy leaves a partial tree. Directory datasets
+        # MUST declare a completeness `marker` in the catalog (e.g. a zarr's
+        # `.zmetadata`, or a `.complete` sentinel written after a verified stage);
+        # its presence is what attests the store is whole.
         marker = entry.get("marker")
-        if marker and not (target / marker).exists():
-            return False, f"dir present but marker {marker!r} absent"
+        if not marker:
+            return False, "directory dataset requires a 'marker' in data_catalog.yaml"
+        if not (target / marker).exists():
+            return False, f"incomplete: marker {marker!r} absent"
         if not any(target.iterdir()):
             return False, "dir present but empty"
         return True, "dir ok"
