@@ -20,6 +20,9 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+
+pytestmark = pytest.mark.tier1  # research: single-column ocean (convection/Ekman)
+
 import jax
 import jax.numpy as jnp
 

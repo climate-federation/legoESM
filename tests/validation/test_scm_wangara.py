@@ -22,6 +22,8 @@ import pathlib
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.tier1  # research: single-column (Wangara)
+
 pytest.importorskip("netCDF4")
 xr = pytest.importorskip("xarray")
 

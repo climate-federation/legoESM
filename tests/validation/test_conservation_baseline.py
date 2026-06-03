@@ -18,6 +18,8 @@ import numpy as np
 import jax.numpy as jnp
 import pytest
 
+pytestmark = pytest.mark.tier2  # intermediate: AMIP smoke, mass+energy gates
+
 from legoesm.driver.config import ExperimentConfig, GridConfig, DycoreConfig, OutputConfig
 from legoesm.driver.model_driver import ModelDriver
 from legoesm.core.operators import global_integral

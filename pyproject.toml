@@ -145,6 +145,13 @@ testpaths = ["tests"]
 addopts = "-v --tb=short -m 'not slow'"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    # Complexity-tier ladder (docs/TESTING.md). Opt-in selectors: run a rung
+    # with e.g. `-m 'tier1 and not slow'`. The default addopts stays `not slow`
+    # (does NOT tier-gate) so untagged tests still run until the suite is tagged.
+    "tier0: unit/operator tests — kernels, no model integration (numerical invariants)",
+    "tier1: research tier — idealized/column/shallow-water; mass+energy+AAM gates, analytic benchmarks",
+    "tier2: intermediate tier — hydrostatic 3D + slab; mass+energy+moisture gates (often slow)",
+    "tier3: operational tier — full complexity + real forcing (AMIP/OMIP/ERA5); budget closure (slow)",
 ]
 
 # ---------------------------------------------------------------------------
