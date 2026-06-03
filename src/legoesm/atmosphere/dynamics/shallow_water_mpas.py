@@ -28,11 +28,10 @@ import jax.numpy as jnp
 
 _TINY = float(jnp.finfo(jnp.float32).tiny)  # Smallest normal float32 (~1.18e-38)
 
+from legoesm import constants
 from legoesm.core.field import Field
-from legoesm.core.state import MPASShallowWaterState, MPASShallowWaterTendencies
 from legoesm.core.operators_voronoi import (
-    divergence_cell,
-    gradient_edge,
+    apvm_correction,
     kinetic_energy_cell,
     potential_vorticity_vertex,
     pv_flux_energy_conserving,
@@ -40,14 +39,14 @@ from legoesm.core.operators_voronoi import (
     thickness_flux,
     vector_laplacian_del2,
     vector_laplacian_del4,
-    apvm_correction,
 )
+from legoesm.core.precision import cast_pytree
+from legoesm.core.state import MPASShallowWaterState, MPASShallowWaterTendencies
+from legoesm.grids.operator_adapters import mpas_edge_operators
 from legoesm.grids.voronoi import VoronoiMesh
+from legoesm.parallel.reductions import global_sum_mpi
 from legoesm.timestepping.dispatch import dispatch_integrator
 from legoesm.timestepping.integration import IntegrationMixin
-from legoesm.core.precision import cast_pytree
-from legoesm.parallel.reductions import global_sum_mpi
-from legoesm import constants
 
 
 class MPASShallowWaterConfig(NamedTuple):
@@ -89,9 +88,16 @@ def mpas_shallow_water_tendencies(
     h_s = state.h_s.data   # (nCells,)
     g = config.g
 
+    # The grid-dispatched edge-normal operator interface (B2): the TRiSK
+    # divergence/gradient flow through ``ops`` rather than the bare free functions,
+    # so the core calls operators without naming the mesh (design L2).  The adapter
+    # delegates to the same core.operators_voronoi kernels -> byte-identical (its
+    # delegation is pinned in test_grid_operators_adapter).
+    ops = mpas_edge_operators(mesh)
+
     # --- Thickness tendency: dh/dt = -div(h_edge * u) ---
     h_flux = thickness_flux(h, u, mesh, order=config.thickness_order)
-    dh_dt_data = -divergence_cell(h_flux, mesh)
+    dh_dt_data = -ops.divergence(h_flux)
 
     # --- Kinetic energy at cells ---
     ke = kinetic_energy_cell(u, mesh)  # (nCells,)
@@ -100,7 +106,7 @@ def mpas_shallow_water_tendencies(
     bernoulli = ke + g * (h + h_s)
 
     # --- Pressure/Bernoulli gradient ---
-    grad_B = gradient_edge(bernoulli, mesh)  # (nEdges,)
+    grad_B = ops.gradient(bernoulli)  # (nEdges,)
 
     # --- Potential vorticity ---
     q = potential_vorticity_vertex(u, h, mesh.fVertex, mesh)
