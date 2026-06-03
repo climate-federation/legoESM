@@ -993,13 +993,13 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         calls = []
         real_pad_halo = fv3_sw_core_mod.pad_halo
 
-        def recording(q, halo=1, interp_offsets=None, duogrid=None):
+        def recording(q, halo=1, interp_offsets=None, duogrid=None, **kwargs):
             calls.append(
                 ('interp_offsets_none' if interp_offsets is None else 'interp_offsets_set',
                  'duogrid_none' if duogrid is None else 'duogrid_set'))
             return real_pad_halo(q, halo=halo,
                                  interp_offsets=interp_offsets,
-                                 duogrid=duogrid)
+                                 duogrid=duogrid, **kwargs)
 
         with mock.patch.object(fv3_sw_core_mod, 'pad_halo', recording):
             fv3_sw_core_mod._del6_vt_flux(
@@ -1034,13 +1034,13 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         calls = []
         real_pad_halo = fv_tp_2d_mod.pad_halo
 
-        def recording(q, halo=1, interp_offsets=None, duogrid=None):
+        def recording(q, halo=1, interp_offsets=None, duogrid=None, **kwargs):
             calls.append(
                 ('interp_offsets_none' if interp_offsets is None else 'interp_offsets_set',
                  'duogrid_none' if duogrid is None else 'duogrid_set'))
             return real_pad_halo(q, halo=halo,
                                  interp_offsets=interp_offsets,
-                                 duogrid=duogrid)
+                                 duogrid=duogrid, **kwargs)
 
         with mock.patch.object(fv_tp_2d_mod, 'pad_halo', recording):
             fv_tp_2d_mod.compute_transport_quantities(ut, vt, dt, cdgrid_dg)
@@ -2911,7 +2911,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         sin_sg_calls = []
         real_pad_halo = halo_mod.pad_halo
 
-        def recording(q, halo=1, interp_offsets=None, duogrid=None):
+        def recording(q, halo=1, interp_offsets=None, duogrid=None, **kwargs):
             # sin_sg fields are (6, n, n) cell-centre scalars
             if (hasattr(q, 'shape') and q.shape == (6, n, n) and halo == 1):
                 sin_sg_calls.append(
@@ -2919,7 +2919,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                      'duogrid_none' if duogrid is None else 'duogrid_set'))
             return real_pad_halo(q, halo=halo,
                                  interp_offsets=interp_offsets,
-                                 duogrid=duogrid)
+                                 duogrid=duogrid, **kwargs)
 
         with mock.patch.object(halo_mod, 'pad_halo', recording):
             fv3_sw_core_mod._c_sw(h, u_d, v_d, h_s, cdgrid_dg, dt=300.0, g=constants.g)
@@ -2955,13 +2955,13 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         calls = []
         real_pad_halo = fv_tp_2d_mod.pad_halo
 
-        def recording(q, halo=1, interp_offsets=None, duogrid=None):
+        def recording(q, halo=1, interp_offsets=None, duogrid=None, **kwargs):
             calls.append(
                 ('interp_offsets_none' if interp_offsets is None else 'interp_offsets_set',
                  'duogrid_none' if duogrid is None else 'duogrid_set'))
             return real_pad_halo(q, halo=halo,
                                  interp_offsets=interp_offsets,
-                                 duogrid=duogrid)
+                                 duogrid=duogrid, **kwargs)
 
         with mock.patch.object(fv_tp_2d_mod, 'pad_halo', recording):
             fv_tp_2d_mod._deln_flux(1, 0.001, q, fx, fy, cdgrid_dg)

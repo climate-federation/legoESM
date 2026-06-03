@@ -33,6 +33,33 @@ from legoesm.runtime.backend import (
 )
 
 
+def _docstring_line_numbers(src: str) -> set[int]:
+    """1-based line numbers spanned by module/class/function docstrings.
+
+    The reintroduction guards below scan source text for forbidden XLA
+    flag / config names.  The fix that removed those names left
+    explanatory docstrings that *cite* them by name (so a future reader
+    understands why they are gone); a docstring mention is NOT an
+    executable emission and must not trip the guard.  ``#`` comments are
+    already handled by ``line.split('#')`` at the call site — this only
+    covers triple-quoted docstrings, which that split cannot see.
+    """
+    import ast as _ast
+
+    lines: set[int] = set()
+    for node in _ast.walk(_ast.parse(src)):
+        if not isinstance(
+            node,
+            (_ast.Module, _ast.ClassDef, _ast.FunctionDef, _ast.AsyncFunctionDef),
+        ):
+            continue
+        if _ast.get_docstring(node, clean=False) is None:
+            continue
+        doc = node.body[0].value  # the docstring Constant node
+        lines.update(range(doc.lineno, (doc.end_lineno or doc.lineno) + 1))
+    return lines
+
+
 # ============================================================================
 # Hardware detection
 # ============================================================================
@@ -299,7 +326,10 @@ class TestXLAFlags:
             "src/legoesm/parallel/device_config.py",
         ):
             src = (repo_root / rel_path).read_text()
+            docstring_lines = _docstring_line_numbers(src)
             for lineno, line in enumerate(src.splitlines(), 1):
+                if lineno in docstring_lines:
+                    continue
                 code_part = line.split("#", 1)[0]
                 if "intra_op_parallelism_threads" in code_part:
                     raise AssertionError(
@@ -373,7 +403,10 @@ class TestXLAFlags:
         ):
             repo_root = pathlib.Path(__file__).resolve().parents[2]
             src = (repo_root / rel_path).read_text()
+            docstring_lines = _docstring_line_numbers(src)
             for lineno, line in enumerate(src.splitlines(), 1):
+                if lineno in docstring_lines:
+                    continue
                 # Strip Python line comment before inspecting for the
                 # forbidden pattern — NOTE comments mention the API by
                 # name, and that is fine.
