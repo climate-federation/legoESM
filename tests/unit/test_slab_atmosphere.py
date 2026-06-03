@@ -115,6 +115,25 @@ def test_stepped_run_is_differentiable():
     assert jnp.isfinite(g) and g > 0.0  # more sun → warmer surface
 
 
+def test_zero_emissivity_with_sw_absorption_is_rejected():
+    # ε=0 (transparent LW) with a>0 (air absorbs SW) has no radiative equilibrium
+    # — the a/ε term is singular; slab_equilibrium must reject it, not diverge.
+    cfg = SlabAtmosphereConfig(emissivity=0.0, sw_atm_absorption=0.2)
+    with pytest.raises(ValueError, match="emissivity must be in"):
+        slab_equilibrium(_S, cfg)
+    with pytest.raises(ValueError, match="emissivity must be in"):
+        SlabAtmosphereModel(cfg)
+
+
+def test_config_domain_validation():
+    with pytest.raises(ValueError, match="sw_atm_absorption"):
+        slab_equilibrium(_S, SlabAtmosphereConfig(sw_atm_absorption=1.5))
+    with pytest.raises(ValueError, match="albedo"):
+        slab_equilibrium(_S, SlabAtmosphereConfig(albedo=1.0))
+    with pytest.raises(ValueError, match="heat capacities"):
+        slab_equilibrium(_S, SlabAtmosphereConfig(c_sfc=0.0))
+
+
 def test_vectorized_over_columns():
     cfg = SlabAtmosphereConfig(emissivity=0.8)
     insol = jnp.asarray([_S, _S * 0.5, _S * 1.2])  # 3 columns

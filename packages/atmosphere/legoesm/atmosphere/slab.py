@@ -49,6 +49,7 @@ __all__ = [
     "slab_equilibrium",
     "toa_imbalance",
     "outgoing_longwave",
+    "validate_slab_config",
     "SlabAtmosphereModel",
 ]
 
@@ -77,6 +78,29 @@ class SlabAtmosphereState(NamedTuple):
 
     T_atm: jnp.ndarray
     T_sfc: jnp.ndarray
+
+
+def validate_slab_config(config: SlabAtmosphereConfig) -> None:
+    """Reject parameter values outside the physical domain.
+
+    Validated on the static config at entry (CLAUDE.md pattern), so it is JIT/grad
+    safe.  In particular ``emissivity > 0`` is required: with ``emissivity == 0``
+    the atmosphere has no longwave emission channel, so the
+    ``sw_atm_absorption / emissivity`` term in :func:`slab_equilibrium` is singular
+    and no radiative steady state exists when the air also absorbs shortwave.
+    """
+    if not (0.0 < config.emissivity <= 1.0):
+        raise ValueError(
+            f"emissivity must be in (0, 1] (a transparent ε=0 atmosphere has no "
+            f"LW emission channel and no radiative equilibrium), got {config.emissivity}")
+    if not (0.0 <= config.sw_atm_absorption <= 1.0):
+        raise ValueError(
+            f"sw_atm_absorption must be in [0, 1], got {config.sw_atm_absorption}")
+    if not (0.0 <= config.albedo < 1.0):
+        raise ValueError(f"albedo must be in [0, 1), got {config.albedo}")
+    if config.c_atm <= 0.0 or config.c_sfc <= 0.0:
+        raise ValueError(
+            f"heat capacities must be > 0, got c_atm={config.c_atm}, c_sfc={config.c_sfc}")
 
 
 def _radiative_terms(state: SlabAtmosphereState, insolation, config: SlabAtmosphereConfig):
@@ -133,6 +157,7 @@ def slab_equilibrium(insolation, config: SlabAtmosphereConfig) -> SlabAtmosphere
     For ``sensible_coeff ≠ 0`` use :class:`SlabAtmosphereModel` / :func:`slab_step`
     and integrate to a numerical steady state.
     """
+    validate_slab_config(config)
     sig = constants.sigma_sb
     a = config.sw_atm_absorption
     eps = config.emissivity
@@ -159,6 +184,7 @@ class SlabAtmosphereModel:
         if dt <= 0:
             raise ValueError(f"dt must be > 0, got {dt}")
         self.config = config if config is not None else SlabAtmosphereConfig()
+        validate_slab_config(self.config)
         self.dt = float(dt)
 
     def _insolation_at(self, insolation, elapsed: float):
