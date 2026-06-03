@@ -99,13 +99,10 @@ def compute_upup_cells(mesh: VoronoiMesh) -> tuple[jnp.ndarray, jnp.ndarray]:
     return upup_pos, upup_neg
 
 
-def _van_leer_limiter(r: jnp.ndarray) -> jnp.ndarray:
-    """Van Leer flux limiter: phi(r) = (r + |r|) / (1 + |r|).
-
-    Differentiable, bounded in [0, 2), TVD.  Identical to the limiter
-    used for lat-lon TVD (ocean_pe_latlon_cgrid.py).
-    """
-    return (r + jnp.abs(r)) / (1.0 + jnp.abs(r))
+# Canonical Van Leer limiter from core (redundancy audit) — the same kernel the
+# lat-lon TVD path uses; aliased to the local private name so call sites are
+# unchanged.
+from legoesm.core.flux_limiters import van_leer_limiter as _van_leer_limiter
 
 
 def tvd_tracer_to_edges(

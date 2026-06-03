@@ -1132,9 +1132,9 @@ def flux_form_vertical_tracer_advection(
     return vert_flux_div
 
 
-def _van_leer_limiter_vert(r: jnp.ndarray) -> jnp.ndarray:
-    """Van Leer flux limiter: phi(r) = (r + |r|) / (1 + |r|)."""
-    return (r + jnp.abs(r)) / (1.0 + jnp.abs(r))
+# Canonical Van Leer limiter from core (redundancy audit), aliased to the local
+# vertical-advection private name so call sites are unchanged.
+from legoesm.core.flux_limiters import van_leer_limiter as _van_leer_limiter_vert
 
 
 def flux_form_vertical_tracer_advection_tvd(

@@ -48,6 +48,8 @@ from dataclasses import dataclass
 
 import jax.numpy as jnp
 
+from legoesm import constants
+
 
 # --- Freezing-point coefficients (Jenkins 1991) ---
 _A_FREEZE: float = -5.73e-2     # K / (g/kg)
@@ -55,7 +57,9 @@ _B_FREEZE: float = 8.32e-2      # K
 _C_FREEZE: float = -7.61e-4     # K / dbar
 
 # --- Thermodynamic constants ---
-_L_F: float = 3.34e5            # J/kg latent heat of fusion
+# Latent heat of fusion: use the canonical substrate constant (redundancy audit)
+# instead of a locally-rounded 3.34e5 (which drifted 0.09% from constants.L_f).
+_L_F: float = constants.L_f    # J/kg latent heat of fusion
 _C_P_SW: float = 3974.0         # J/kg/K seawater heat capacity (Jenkins 1991)
 _RHO_FW: float = 1000.0         # kg/m^3 freshwater density
 _RHO_ICE: float = 918.0         # kg/m^3 ice density

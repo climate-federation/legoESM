@@ -128,9 +128,9 @@ def _interp_to_v_points(f: jnp.ndarray, grid=None) -> jnp.ndarray:
     return pad_ns_zero(f_interior)
 
 
-def _van_leer_limiter(r: jnp.ndarray) -> jnp.ndarray:
-    """Van Leer flux limiter: phi(r) = (r + |r|) / (1 + |r|). Differentiable, TVD."""
-    return (r + jnp.abs(r)) / (1.0 + jnp.abs(r))
+# Canonical Van Leer limiter from core (redundancy audit), aliased to the local
+# private name so call sites are unchanged.
+from legoesm.core.flux_limiters import van_leer_limiter as _van_leer_limiter
 
 
 def _tvd_to_u_points(f: jnp.ndarray, mass_flux_u: jnp.ndarray) -> jnp.ndarray:

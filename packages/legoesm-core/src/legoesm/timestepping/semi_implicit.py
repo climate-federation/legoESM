@@ -550,11 +550,10 @@ def robert_asselin_filter(state_nm1, state_n, state_np1, gamma, alpha=0.53):
     return state_n_filtered, state_np1_filtered
 
 
-def _pytree_axpy(x, y, alpha):
-    """Compute x + alpha * y for two pytrees."""
-    return jax.tree.map(lambda xi, yi: xi + alpha * yi, x, y)
-
-
-def _pytree_linear_combination(x, y, a, b):
-    """Compute a * x + b * y for two pytrees."""
-    return jax.tree.map(lambda xi, yi: a * xi + b * yi, x, y)
+# Pytree arithmetic shared with every other integrator (ssp_rk*, split_explicit):
+# import the canonical helpers instead of re-defining them locally (redundancy
+# audit).  Aliased to the existing private names so call sites are unchanged.
+from legoesm.timestepping.pytree_ops import (
+    pytree_axpy as _pytree_axpy,
+    pytree_linear_combination as _pytree_linear_combination,
+)

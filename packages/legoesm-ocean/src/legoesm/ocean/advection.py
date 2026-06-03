@@ -45,13 +45,10 @@ def _sweby_limiter(r: jnp.ndarray) -> jnp.ndarray:
     )
 
 
-def _van_leer_limiter(r: jnp.ndarray) -> jnp.ndarray:
-    """Van Leer flux limiter: phi(r) = (r + |r|) / (1 + |r|).
-
-    Smooth, second-order, TVD. Bounded by [0, 2). Less aggressive
-    than Sweby, better stability for DST-3 at low CFL.
-    """
-    return (r + jnp.abs(r)) / (1.0 + jnp.abs(r))
+# Van Leer limiter is the canonical core kernel (redundancy audit) — import it
+# instead of re-deriving phi(r) = (r+|r|)/(1+|r|); aliased to the local private
+# name so call sites are unchanged.
+from legoesm.core.flux_limiters import van_leer_limiter as _van_leer_limiter
 
 
 # =============================================================================
