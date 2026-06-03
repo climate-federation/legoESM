@@ -603,20 +603,21 @@ def create_cubed_sphere_cdgrid(
     # break JIT/grad).  Instead INFER the grid type from `base` by its cell-
     # aspect signature so an ed A-grid never silently gets equiangular C/D
     # metrics (the model constructors call this with no explicit flag): FV3
-    # gnomonic_ed has near-uniform cells (max aspect ~1.06) while equiangular —
-    # incl. Schmidt-stretched — is ≥1.3.  Explicit `gnomonic="ed"/"equiangular"`
-    # overrides the inference.
+    # gnomonic_ed has near-uniform cells (max aspect ≤ ~1.057 across all n)
+    # while equiangular — incl. Schmidt-stretched — has max aspect ≥ ~1.16 for
+    # every n≥4 (the only resolutions used in practice), degenerating to ~1.0
+    # only at n=2 where the two constructions are indistinguishable by aspect
+    # alone.  A single cut at 1.10 sits safely inside the [1.057, 1.16] gap for
+    # all n≥4, so an ed base grid is never silently given equiangular C/D
+    # metrics (the codex-flagged bug) — while a legitimate low-n equiangular
+    # grid (n=4 → 1.163, n=6 → 1.239) is no longer mis-rejected.  The n=2
+    # degenerate case falls to the historical equiangular default; pass
+    # `gnomonic="ed"` explicitly for an n=2 ed grid.  Explicit
+    # `gnomonic="ed"/"equiangular"` always overrides the inference.
     if gnomonic == "auto":
         _dx = jnp.asarray(base.dx); _dy = jnp.asarray(base.dy)
         _aspect = float(jnp.max(jnp.maximum(_dx, _dy) / jnp.maximum(jnp.minimum(_dx, _dy), 1e-30)))
-        if _aspect < 1.15:
-            gnomonic = "ed"
-        elif _aspect > 1.25:
-            gnomonic = "equiangular"
-        else:
-            raise ValueError(
-                f"cannot infer grid type from base (max cell aspect {_aspect:.3f} "
-                f"in the ambiguous band [1.15,1.25]); pass gnomonic= explicitly.")
+        gnomonic = "ed" if _aspect < 1.10 else "equiangular"
 
     # ------------------------------------------------------------------
     # The C-D supergrid metrics all derive from 4 node-grids: the 2n+1
