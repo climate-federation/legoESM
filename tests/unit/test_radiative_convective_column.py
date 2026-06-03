@@ -76,17 +76,13 @@ def test_radiative_equilibrium_relaxes():
     assert bool(jnp.all(jnp.isfinite(state.T)))
 
 
-def test_convection_preserves_balance_and_flattens_unstable_layer():
-    col, state, dT_start, dT_end = _relax(convective=True)
-    assert dT_end < dT_start * 0.3            # relaxed toward a steady RCE state
-    assert abs(_net_sfc(col, state)) < 0.5    # surface energy balance still closed
-    assert bool(jnp.all(jnp.isfinite(state.T)))
-    # Pure radiative equilibrium is strongly super-adiabatic at the bottom;
-    # convection must flatten that lowest-layer temperature jump.
-    _, rad_state, _, _ = _relax(convective=False)
-    conv_jump = float(state.T[0, -1] - state.T[0, -2])
-    rad_jump = float(rad_state.T[0, -1] - rad_state.T[0, -2])
-    assert conv_jump < rad_jump
+def test_convective_adjustment_is_guarded_not_yet_supported():
+    # The dry convective adjustment is deferred: the existing dca scheme targets
+    # the saturated moist adiabat + moist-CAPE gate, so it is NOT a dry adjustment.
+    # The column must REFUSE convective_adjustment=True (fail fast), not silently
+    # produce wrong (moist-adiabat-in-a-dry-column) physics.
+    with pytest.raises(NotImplementedError, match="dry adjustment"):
+        RadiativeConvectiveColumn(RCEColumnConfig(nlev=10, convective_adjustment=True))
 
 
 def test_column_is_differentiable():
