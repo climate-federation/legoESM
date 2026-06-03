@@ -676,6 +676,20 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"barotropic_solver must be one of {_valid_solvers}, "
                 f"got {config.barotropic_solver!r}")
+        # Asynchronous dt_mom≠dt_tracer stepping (dt_mom = dt / dt_mom_ratio).
+        if config.dt_mom_ratio < 1.0:
+            raise ValueError(
+                "dt_mom_ratio must be >= 1.0 (dt_mom <= dt_tracer), "
+                f"got {config.dt_mom_ratio!r}")
+        if config.dt_mom_ratio != 1.0 and config.barotropic_solver != "rigid_lid":
+            raise ValueError(
+                "dt_mom_ratio != 1.0 (asynchronous dt_mom≠dt_tracer stepping) "
+                "requires barotropic_solver='rigid_lid': under the rigid lid the "
+                "column depth H is fixed, so the tracer flux-form update is exactly "
+                "dt-independent and tracer mass is conserved (matching Veros's "
+                "streamfunction rigid lid). A moving free surface would leak "
+                "O((dt_tracer-dt_mom)·∂h/∂t) tracer mass. Got barotropic_solver="
+                f"{config.barotropic_solver!r}.")
         if config.rigid_lid_cg_tol <= 0.0:
             raise ValueError(
                 f"rigid_lid_cg_tol must be > 0, got {config.rigid_lid_cg_tol!r}")
@@ -831,6 +845,15 @@ class LatLonCGridOceanModel:
         """
         state = cast_pytree(state, None, "compute")
 
+        # Asynchronous ("distorted-physics") time stepping: the public ``dt`` IS
+        # dt_tracer (the clock; Veros advances vs.time by dt_tracer). Momentum + the
+        # barotropic solve + implicit vertical FRICTION use the shorter dt_mom; the
+        # tracer/continuity/eta/EKE/freshwater path + implicit vertical DIFFUSION keep
+        # ``dt`` (=dt_tracer). dt_mom_ratio=1.0 (default) ⇒ dt_mom == dt ⇒ bit-identical.
+        # Validation requires barotropic_solver="rigid_lid" when ratio != 1.0 (fixed
+        # column depth ⇒ exact tracer conservation; Veros's streamfunction rigid lid).
+        dt_mom = dt / self.config.dt_mom_ratio
+
         u_mask_3d = state.u_mask.data[..., jnp.newaxis]
         v_mask_3d = state.v_mask.data[..., jnp.newaxis]
         mask_3d = state.land_mask.data[..., jnp.newaxis]
@@ -934,8 +957,8 @@ class LatLonCGridOceanModel:
             F_slow_u = F_slow_u * state.u_mask.data
             F_slow_v = F_slow_v * state.v_mask.data
 
-        u_star = state.u.data + dt * du_dt_pert
-        v_star = state.v.data + dt * dv_dt_pert
+        u_star = state.u.data + dt_mom * du_dt_pert
+        v_star = state.v.data + dt_mom * dv_dt_pert
 
         # 4. Forward-backward Coriolis on perturbation velocity
         #
@@ -946,7 +969,7 @@ class LatLonCGridOceanModel:
         #   v' -= dt * f * u'_new_at_v      (backward: new u')
         # This matches the barotropic solver's Coriolis treatment.
         u_star, v_star = _forward_backward_coriolis_3d(
-            u_star, v_star, dt, self.grid, self.z_coord, self.config,
+            u_star, v_star, dt_mom, self.grid, self.z_coord, self.config,
             state.u_mask.data, state.v_mask.data, state.land_mask.data,
             state.eta.data, state.H_bathy.data,
         )
@@ -991,19 +1014,19 @@ class LatLonCGridOceanModel:
             )
             rl_data = self._ensure_rigid_lid_data(state_mid)
             state_new, (Hu_avg, Hv_avg) = barotropic_rigid_lid_latlon_cgrid(
-                state_mid, dt, self.grid, self.z_coord, self.config, rl_data,
+                state_mid, dt_mom, self.grid, self.z_coord, self.config, rl_data,
                 F_slow_u=F_slow_u, F_slow_v=F_slow_v,
             )
         elif self.config.barotropic_solver == "implicit_cn":
             state_new, (Hu_avg, Hv_avg) = barotropic_implicit_latlon_cgrid(
-                state_mid, dt,
+                state_mid, dt_mom,
                 self.grid, self.z_coord, self.config,
                 F_slow_eta=F_slow_eta,
                 F_slow_u=F_slow_u,
                 F_slow_v=F_slow_v,
             )
         else:
-            dt_s = dt / self.config.n_barotropic_substeps
+            dt_s = dt_mom / self.config.n_barotropic_substeps
             state_new, (Hu_avg, Hv_avg) = barotropic_substeps_latlon_cgrid(
                 state_mid, dt_s, self.config.n_barotropic_substeps,
                 self.grid, self.z_coord, self.config,
@@ -1467,7 +1490,7 @@ class LatLonCGridOceanModel:
             state_new = self._apply_implicit_vertical_mixing(
                 state_new, dt, surface_forcing,
                 K_v_phys=tend.K_v, A_v_phys=tend.A_v,
-                K33_iso=k33_implicit,
+                K33_iso=k33_implicit, dt_mom=dt_mom,
             )
 
         # 9. Conservation fixers
@@ -1726,6 +1749,8 @@ class LatLonCGridOceanModel:
         K_v_phys=None,
         A_v_phys=None,
         K33_iso=None,
+        *,
+        dt_mom=None,
     ) -> LatLonCGridOceanState:
         """Backward-Euler vertical diffusion for ``u, v, T, S``.
 
@@ -1741,8 +1766,17 @@ class LatLonCGridOceanModel:
         physics that doesn't produce K profiles), falls back to
         ``compute_vertical_K_profiles`` for a fresh computation.
 
+        ``dt`` is the TRACER timestep (implicit vertical DIFFUSION of T, S);
+        ``dt_mom`` (default ``dt``) is the MOMENTUM timestep (implicit vertical
+        FRICTION of u, v).  They differ only under asynchronous
+        ``dt_mom_ratio != 1.0`` stepping — Veros applies implicit friction on
+        dt_mom (friction.py) and implicit diffusion on dt_tracer
+        (thermodynamics.py).  ``dt_mom is None`` ⇒ ``dt`` ⇒ bit-identical.
+
         Called only when ``config.implicit_vertical_mixing == True``.
         """
+        if dt_mom is None:
+            dt_mom = dt
         from legoesm.ocean.physics.vertical_mixing import (
             implicit_vertical_diffusion_ocean, build_dz_half,
             compute_vertical_K_profiles,
@@ -1838,10 +1872,10 @@ class LatLonCGridOceanModel:
         u_mask_3d = state.u_mask.data[..., jnp.newaxis]
         v_mask_3d = state.v_mask.data[..., jnp.newaxis]
         u_new = implicit_vertical_diffusion_ocean(
-            state.u.data, A_v_u, dz_u, dz_half_u, dt,
+            state.u.data, A_v_u, dz_u, dz_half_u, dt_mom,
         )
         v_new = implicit_vertical_diffusion_ocean(
-            state.v.data, A_v_v, dz_v, dz_half_v, dt,
+            state.v.data, A_v_v, dz_v, dz_half_v, dt_mom,
         )
         u_new = jnp.where(u_mask_3d > 0.5, u_new, state.u.data)
         v_new = jnp.where(v_mask_3d > 0.5, v_new, state.v.data)
@@ -2014,6 +2048,7 @@ class LatLonCGridOceanModel:
             state_ab2 = self._apply_implicit_vertical_mixing(
                 state_ab2, dt, surface_forcing,
                 K_v_phys=K_v_phys, A_v_phys=A_v_phys, K33_iso=k33_implicit,
+                dt_mom=dt / self.config.dt_mom_ratio,
             )
 
         # --- Conservation fixer once, on the final state ---

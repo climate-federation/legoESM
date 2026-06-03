@@ -907,3 +907,17 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     vector operators). The ACC recipe opts in. Literal default -> safe after
     #     `constants`.
     lateral_viscosity_operator: str = "vector_laplacian"
+    # Asynchronous ("distorted-physics") time stepping: dt_mom = dt / dt_mom_ratio.
+    # The `dt` passed to step()/integrate_scan IS dt_tracer (the clock — Veros
+    # advances vs.time by dt_tracer), and momentum + the barotropic solve + implicit
+    # vertical FRICTION are integrated with the SHORTER dt_mom, while tracers +
+    # continuity/eta + implicit vertical DIFFUSION + the clock use dt_tracer. This is
+    # Veros's dt_mom≠dt_tracer (acc.py dt_mom=4800, dt_tracer=43200 ⇒ ratio 9): NOT a
+    # subcycle (momentum() runs once), an under-relaxation that accelerates the
+    # transient to the SAME steady state. Default 1.0 ⇒ dt_mom == dt_tracer == dt ⇒
+    # BIT-IDENTICAL. Requires barotropic_solver="rigid_lid" when != 1.0: under the
+    # rigid lid the column depth H is fixed, so the tracer flux-form update (h fixed)
+    # is exactly dt-independent and tracer mass is conserved; a moving free surface
+    # would mix a dt_mom-evolved thickness with a dt_tracer flux divergence and leak
+    # O((dt_tracer−dt_mom)·∂h/∂t) tracer mass (rejected at config validation).
+    dt_mom_ratio: float = 1.0

@@ -86,7 +86,7 @@ def _bulk_stats(state, z_coord, grid):
 
 
 def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None,
-                 bottom_drag_r=None, barotropic_solver=None):
+                 bottom_drag_r=None, barotropic_solver=None, dt_mom_ratio=None):
     import jax
     import jax.numpy as jnp
     from legoesm.core.field import Field
@@ -109,6 +109,14 @@ def _run_legoesm(years, dt, *, snapshot_every_days=None, outer_integrator=None,
         # rather than the legoESM split-explicit free surface). The dissipation
         # audit isolated the barotropic formulation as the genuine ACC gap.
         cfg = cfg._replace(barotropic_solver=barotropic_solver)
+    if dt_mom_ratio is not None:
+        # Veros dt_mom≠dt_tracer asynchronous stepping (#44 Stage B): the `dt`
+        # passed here IS dt_tracer (the clock); momentum + barotropic + implicit
+        # friction use dt_mom = dt / dt_mom_ratio. Veros ACC = DT_TRACER_S/DT_MOM_S
+        # = 43200/4800 = 9.0. Requires barotropic_solver="rigid_lid" (fixed depth ⇒
+        # exact tracer conservation). Pass `--dt 43200 --dt-mom-ratio 9
+        # --barotropic-solver rigid_lid --outer-integrator ab2` for the faithful run.
+        cfg = cfg._replace(dt_mom_ratio=dt_mom_ratio)
     model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, cfg)
     sf = recipe.wind_forcing
     state = recipe.initial_state
@@ -185,13 +193,17 @@ context; see docs/ocean_fidelity/oracle_recipe_strategy.md §8):
      1yr revealed the over-damping.) CONFIRMED: a rigid-lid option (--barotropic-solver
      rigid_lid) is now built and RESTORES an O(100 Sv) ACC vs the free surface's collapsed
      18 Sv at the SAME faithful drag -> the barotropic formulation was the dominant control.
-  1. Time integrator: legoESM forward-Euler/split-explicit vs Veros Adams-Bashforth-2
-     (this Veros version is AB2, NOT leapfrog+RA: tracers temp[taup1]=temp[tau]+
-     dt_tracer*((1.5+eps)*dtemp[tau]-(0.5+eps)*dtemp[taum1]), separate dt_tracer/dt_mom,
-     AB2 eps-offset). An AB2 outer_integrator="ab2" option was built + is stable, but it
-     does NOT move the gap (the bottom drag, item 0, did). A leapfrog+RA attempt was
-     built + REVERTED (d1648f8e): wrong scheme + unstable. dt_tracer!=dt_mom not yet done.
-  2. Timestep: legoESM single dt=4800 s; Veros dt_mom=4800 / dt_tracer=43200 s.
+  1. Time integrator: NOW MATCHED (#44). --outer-integrator ab2 is the faithful Veros
+     scheme — AB2 on the EXPLICIT tendency + implicit vertical mixing applied ONCE
+     (tracers temp[taup1]=temp[tau]+dt_tracer*((1.5+eps)*dtemp[tau]-(0.5+eps)*dtemp[taum1]),
+     AB2 eps-offset; core/thermodynamics.py + core/external/solve_stream.py). Stable +
+     compatible with convective adjustment. Measured NOT the climate lever (the residual
+     is the eddy-mean equilibration, not the dycore numerics).
+  2. Timestep: NOW MATCHED (#44). --dt-mom-ratio 9 gives Veros's dt_mom=4800 /
+     dt_tracer=43200 asynchronous ("distorted-physics") stepping (--dt IS dt_tracer;
+     dt_mom = dt/ratio). Requires --barotropic-solver rigid_lid (fixed depth ⇒ exact
+     tracer conservation). Faithful run: --dt 43200 --dt-mom-ratio 9 --barotropic-solver
+     rigid_lid --outer-integrator ab2.
   3. EKE GM coefficient: ON, prognostic Eden-Greatbatch with the Rhines `eke_len`
      (form + eke_len reproduce Veros's K_gm/eke_len to machine precision, gates
      E9 + L4) -> the GM *skew* coefficient MATCHES Veros. EKE cold-starts at e_min.
@@ -228,6 +240,12 @@ def main() -> int:
                          "barotropic FORMULATION (streamfunction) — the dissipation "
                          "audit isolated the free-surface-vs-rigid-lid difference as "
                          "the genuine ACC transport gap.")
+    ap.add_argument("--dt-mom-ratio", type=float, default=None,
+                    help="Veros dt_mom≠dt_tracer asynchronous stepping (#44): dt_mom = "
+                         "dt / ratio (--dt IS dt_tracer). Veros ACC = 9 (dt_tracer=43200, "
+                         "dt_mom=4800). Requires --barotropic-solver rigid_lid. Faithful "
+                         "run: --dt 43200 --dt-mom-ratio 9 --barotropic-solver rigid_lid "
+                         "--outer-integrator ab2.")
     args = ap.parse_args()
 
     import jax
@@ -241,12 +259,16 @@ def main() -> int:
     try:
         _oi = args.outer_integrator or "recipe default (forward_euler)"
         _bs = args.barotropic_solver or "recipe default (free surface)"
+        _dr = f"dt_mom={args.dt/args.dt_mom_ratio:.0f}s (ratio {args.dt_mom_ratio:g})" \
+            if args.dt_mom_ratio else "dt_mom=dt_tracer (synchronous)"
         print(f"== legoESM ACC free run: {years*_DAYS_PER_YEAR:.0f} days, "
-              f"dt={args.dt:.0f} s (fp64), integrator={_oi}, barotropic={_bs} ==")
+              f"dt_tracer={args.dt:.0f} s (fp64), integrator={_oi}, barotropic={_bs}, "
+              f"{_dr} ==")
         lego_state, recipe = _run_legoesm(
             years, args.dt, outer_integrator=args.outer_integrator,
             bottom_drag_r=args.bottom_drag_r,
-            barotropic_solver=args.barotropic_solver)
+            barotropic_solver=args.barotropic_solver,
+            dt_mom_ratio=args.dt_mom_ratio)
         lego = _bulk_stats(lego_state, recipe.z_coord, recipe.grid)
 
         veros = None
