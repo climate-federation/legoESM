@@ -58,7 +58,7 @@ from legoesm.ocean.physics.surface_forcing.config import PrescribedForcingConfig
 from legoesm.ocean.physics.surface_forcing.prescribed import (
     prescribed_surface_forcing,
 )
-from legoesm.ocean.physics.combined import wrap_ocean_tendencies
+from legoesm.ocean.physics.tendencies import wrap_ocean_tendencies
 
 
 ScalarFn = Callable[[float], jax.Array]

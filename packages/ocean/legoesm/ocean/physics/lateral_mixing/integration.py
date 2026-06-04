@@ -12,6 +12,7 @@ from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
 from legoesm.ocean.physics.lateral_mixing.harmonic import harmonic_lateral_mixing
 from legoesm.ocean.physics.lateral_mixing.biharmonic import biharmonic_lateral_mixing
 from legoesm.ocean.physics.lateral_mixing.gm_redi import gm_redi_lateral_mixing
+from legoesm.ocean.physics.tendencies import make_none_physics_fn, wrap_ocean_tendencies
 
 
 def make_lateral_mixing_physics(
@@ -30,7 +31,7 @@ def make_lateral_mixing_physics(
     scheme = config.scheme
 
     if scheme == "none":
-        return _make_none()
+        return make_none_physics_fn()
     elif scheme == "harmonic":
         return _make_harmonic(config)
     elif scheme == "biharmonic":
@@ -39,14 +40,6 @@ def make_lateral_mixing_physics(
         return _make_gm_redi(config)
     else:
         raise ValueError(f"Unknown lateral mixing scheme: {scheme!r}")
-
-
-def _make_none() -> Callable:
-    def physics_fn(state: OceanState, grid: CubedSphereGrid,
-                   z_coord: OceanZStarCoordinate,
-                   surface_forcing=None) -> OceanTendencies:
-        return _zero_tendencies(state)
-    return physics_fn
 
 
 def _make_harmonic(config: LateralMixingConfig) -> Callable:
@@ -59,7 +52,7 @@ def _make_harmonic(config: LateralMixingConfig) -> Callable:
             state.u.data, state.v.data, state.T.data, state.S.data,
             state.land_mask.data, grid, cfg,
         )
-        return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
+        return wrap_ocean_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
     return physics_fn
 
 
@@ -73,7 +66,7 @@ def _make_biharmonic(config: LateralMixingConfig) -> Callable:
             state.u.data, state.v.data, state.T.data, state.S.data,
             state.land_mask.data, grid, cfg,
         )
-        return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
+        return wrap_ocean_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
     return physics_fn
 
 
@@ -103,16 +96,8 @@ def _make_gm_redi(config: LateralMixingConfig) -> Callable:
             state.u.data, state.v.data, state.T.data, state.S.data,
             rho, z_coord, J, grid, cfg,
         )
-        return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
+        return wrap_ocean_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
     return physics_fn
 
 
 
-def _zero_tendencies(state):
-    from legoesm.ocean.physics.combined import zero_ocean_tendencies
-    return zero_ocean_tendencies(state)
-
-
-def _wrap_tendencies(du_dt, dv_dt, dT_dt, dS_dt, state):
-    from legoesm.ocean.physics.combined import wrap_ocean_tendencies
-    return wrap_ocean_tendencies(du_dt, dv_dt, dT_dt, dS_dt, state)

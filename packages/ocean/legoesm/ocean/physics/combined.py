@@ -15,6 +15,7 @@ from legoesm.core.field import Field
 from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.ocean.state import OceanState, OceanSurfaceForcing, OceanTendencies
 from legoesm.ocean.vertical import OceanZStarCoordinate
+from legoesm.ocean.physics.tendencies import zero_ocean_tendencies
 
 from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
 from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
@@ -111,7 +112,7 @@ def make_ocean_physics(
         surface_forcing: OceanSurfaceForcing | None = None,
     ) -> OceanTendencies:
         if not fns and sw_config is None:
-            return _zero_tendencies(state)
+            return zero_ocean_tendencies(state)
 
         # Sum tendencies from all enabled sub-physics modules.
         # When implicit vertical mixing is active, the vertical-mixing
@@ -188,52 +189,3 @@ def make_ocean_physics(
         )
 
     return physics_fn
-
-
-def _zero_tendencies(state: OceanState) -> OceanTendencies:
-    return zero_ocean_tendencies(state)
-
-
-# ---------------------------------------------------------------------------
-# Shared tendency helpers (used by all ocean physics integration modules)
-# ---------------------------------------------------------------------------
-
-def zero_ocean_tendencies(state: OceanState) -> OceanTendencies:
-    """Return zero tendencies matching *state* shapes."""
-    z3 = jnp.zeros_like(state.u.data)
-    z2 = jnp.zeros_like(state.eta.data)
-    dims_3d = state.u.dims if hasattr(state.u, 'dims') else ("face", "x", "y", "level")
-    dims_2d = state.eta.dims if hasattr(state.eta, 'dims') else ("face", "x", "y")
-    return OceanTendencies(
-        du_dt=Field(data=z3, name="du_dt", dims=dims_3d, units="m/s^2"),
-        dv_dt=Field(data=z3, name="dv_dt", dims=dims_3d, units="m/s^2"),
-        dT_dt=Field(data=z3, name="dT_dt", dims=dims_3d, units="degC/s"),
-        dS_dt=Field(data=z3, name="dS_dt", dims=dims_3d, units="PSU/s"),
-        deta_dt=Field(data=z2, name="deta_dt", dims=dims_2d, units="m/s"),
-        dH_bathy_dt=Field(data=z2, name="dH_bathy_dt", dims=dims_2d, units="m/s"),
-        dland_mask_dt=Field(data=z2, name="dland_mask_dt", dims=dims_2d, units="1/s"),
-    )
-
-
-def wrap_ocean_tendencies(
-    du_dt, dv_dt, dT_dt, dS_dt, state: OceanState,
-) -> OceanTendencies:
-    """Wrap raw tendency arrays into an ``OceanTendencies`` NamedTuple.
-
-    2-D fields (deta_dt, dH_bathy_dt, dland_mask_dt) are set to zero.
-    Any of du_dt … dS_dt may be ``None``, in which case the corresponding
-    tendency is set to zero.
-    """
-    z3 = jnp.zeros_like(state.u.data)
-    z2 = jnp.zeros_like(state.eta.data)
-    dims_3d = state.u.dims if hasattr(state.u, 'dims') else ("face", "x", "y", "level")
-    dims_2d = state.eta.dims if hasattr(state.eta, 'dims') else ("face", "x", "y")
-    return OceanTendencies(
-        du_dt=Field(data=du_dt if du_dt is not None else z3, name="du_dt", dims=dims_3d, units="m/s^2"),
-        dv_dt=Field(data=dv_dt if dv_dt is not None else z3, name="dv_dt", dims=dims_3d, units="m/s^2"),
-        dT_dt=Field(data=dT_dt if dT_dt is not None else z3, name="dT_dt", dims=dims_3d, units="degC/s"),
-        dS_dt=Field(data=dS_dt if dS_dt is not None else z3, name="dS_dt", dims=dims_3d, units="PSU/s"),
-        deta_dt=Field(data=z2, name="deta_dt", dims=dims_2d, units="m/s"),
-        dH_bathy_dt=Field(data=z2, name="dH_bathy_dt", dims=dims_2d, units="m/s"),
-        dland_mask_dt=Field(data=z2, name="dland_mask_dt", dims=dims_2d, units="1/s"),
-    )

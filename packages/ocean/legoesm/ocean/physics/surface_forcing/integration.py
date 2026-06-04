@@ -16,6 +16,11 @@ from legoesm.ocean.physics.surface_forcing.prescribed import prescribed_surface_
 from legoesm.ocean.physics.surface_forcing.external import external_surface_forcing
 from legoesm.ocean.physics.surface_forcing.restoring import restoring_surface_forcing
 from legoesm.ocean.physics.surface_forcing.bulk_formulas import bulk_formula_surface_forcing
+from legoesm.ocean.physics.tendencies import (
+    make_none_physics_fn,
+    wrap_ocean_tendencies,
+    zero_ocean_tendencies,
+)
 
 
 def make_surface_forcing_physics(
@@ -34,7 +39,7 @@ def make_surface_forcing_physics(
     scheme = config.scheme
 
     if scheme == "none":
-        return _make_none()
+        return make_none_physics_fn()
     elif scheme == "prescribed":
         return _make_prescribed(config)
     elif scheme == "restoring":
@@ -49,14 +54,6 @@ def make_surface_forcing_physics(
         raise ValueError(f"Unknown surface forcing scheme: {scheme!r}")
 
 
-def _make_none() -> Callable:
-    def physics_fn(state: OceanState, grid: CubedSphereGrid,
-                   z_coord: OceanZStarCoordinate,
-                   surface_forcing=None) -> OceanTendencies:
-        return _zero_tendencies(state)
-    return physics_fn
-
-
 def _make_prescribed(config: SurfaceForcingConfig) -> Callable:
     cfg = config.prescribed
 
@@ -68,7 +65,7 @@ def _make_prescribed(config: SurfaceForcingConfig) -> Callable:
             state.u.data, state.v.data, state.T.data, state.S.data,
             z_coord, J, grid, cfg,
         )
-        return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
+        return wrap_ocean_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
     return physics_fn
 
 
@@ -80,7 +77,7 @@ def _make_external(config: SurfaceForcingConfig) -> Callable:
                    z_coord: OceanZStarCoordinate,
                    surface_forcing=None) -> OceanTendencies:
         if surface_forcing is None:
-            return _zero_tendencies(state)
+            return zero_ocean_tendencies(state)
         # Partial-cell-aware ACTUAL top-layer thickness (not dz_ref[0]*J) so the
         # flux-to-tendency conversion is conservative on shallow top cells.
         h = compute_layer_thickness(state.eta.data, state.H_bathy.data, z_coord)
@@ -88,7 +85,7 @@ def _make_external(config: SurfaceForcingConfig) -> Callable:
             state.u.data, state.v.data, state.T.data, state.S.data,
             h[..., 0], surface_forcing,
         )
-        return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
+        return wrap_ocean_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
     return physics_fn
 
 
@@ -99,7 +96,7 @@ def _make_restoring(config: SurfaceForcingConfig) -> Callable:
                    z_coord: OceanZStarCoordinate,
                    surface_forcing=None) -> OceanTendencies:
         out = restoring_surface_forcing(state.T.data, state.S.data, grid, cfg)
-        return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
+        return wrap_ocean_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
     return physics_fn
 
 
@@ -117,7 +114,7 @@ def _make_combined(config: SurfaceForcingConfig) -> Callable:
             z_coord, J, grid, cfg_p,
         )
         r = restoring_surface_forcing(state.T.data, state.S.data, grid, cfg_r)
-        return _wrap_tendencies(
+        return wrap_ocean_tendencies(
             p.du_dt + r.du_dt,
             p.dv_dt + r.dv_dt,
             p.dT_dt + r.dT_dt,
@@ -137,17 +134,7 @@ def _make_bulk_formulas(config: SurfaceForcingConfig) -> Callable:
         out = bulk_formula_surface_forcing(
             state.T.data, state.S.data, z_coord, J, cfg,
         )
-        return _wrap_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
+        return wrap_ocean_tendencies(out.du_dt, out.dv_dt, out.dT_dt, out.dS_dt, state)
     return physics_fn
 
 
-# --- Helpers ---
-
-def _zero_tendencies(state):
-    from legoesm.ocean.physics.combined import zero_ocean_tendencies
-    return zero_ocean_tendencies(state)
-
-
-def _wrap_tendencies(du_dt, dv_dt, dT_dt, dS_dt, state):
-    from legoesm.ocean.physics.combined import wrap_ocean_tendencies
-    return wrap_ocean_tendencies(du_dt, dv_dt, dT_dt, dS_dt, state)

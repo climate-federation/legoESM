@@ -21,6 +21,7 @@ from legoesm.ocean.physics.vertical_mixing.config import VerticalMixingConfig
 from legoesm.ocean.physics.vertical_mixing.constant import constant_vertical_mixing
 from legoesm.ocean.physics.vertical_mixing.richardson import richardson_vertical_mixing
 from legoesm.ocean.physics.vertical_mixing.kpp import kpp_vertical_mixing
+from legoesm.ocean.physics.tendencies import make_none_physics_fn, wrap_ocean_tendencies
 
 
 def make_vertical_mixing_physics(
@@ -46,7 +47,7 @@ def make_vertical_mixing_physics(
     scheme = config.scheme
 
     if scheme == "none":
-        return _make_none()
+        return make_none_physics_fn()
     elif scheme == "constant":
         return _make_constant(config, apply_diffusion=apply_diffusion)
     elif scheme == "richardson":
@@ -55,14 +56,6 @@ def make_vertical_mixing_physics(
         return _make_kpp(config, apply_diffusion=apply_diffusion)
     else:
         raise ValueError(f"Unknown vertical mixing scheme: {scheme!r}")
-
-
-def _make_none() -> Callable:
-    def physics_fn(state: OceanState, grid: CubedSphereGrid,
-                   z_coord: OceanZStarCoordinate,
-                   surface_forcing=None) -> OceanTendencies:
-        return _zero_tendencies(state)
-    return physics_fn
 
 
 def _make_constant(config: VerticalMixingConfig,
@@ -202,14 +195,8 @@ def _make_kpp(config: VerticalMixingConfig,
 
 
 
-def _zero_tendencies(state):
-    from legoesm.ocean.physics.combined import zero_ocean_tendencies
-    return zero_ocean_tendencies(state)
-
-
 def _wrap_tendencies(du_dt, dv_dt, dT_dt, dS_dt, state,
                      K_v=None, A_v=None):
-    from legoesm.ocean.physics.combined import wrap_ocean_tendencies
     t = wrap_ocean_tendencies(du_dt, dv_dt, dT_dt, dS_dt, state)
     if K_v is not None or A_v is not None:
         t = t._replace(K_v=K_v, A_v=A_v)
