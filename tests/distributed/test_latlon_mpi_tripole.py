@@ -33,7 +33,7 @@ mpi4jax = pytest.importorskip("mpi4jax")
 MPI = pytest.importorskip("mpi4py.MPI")
 
 from legoesm.grids.tripole import create_synthetic_tripole
-from legoesm.grids.halo import get_halo_backend, set_halo_backend
+from legoesm.grids.halo import set_halo_backend
 from legoesm.parallel.latlon_mpi import (
     _fold_tripolar_north,
     _tripolar_fold_perm_sign,
