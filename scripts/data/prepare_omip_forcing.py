@@ -57,7 +57,7 @@ import numpy as np
 
 
 # Repo root on path so this works without an editable install if needed.
-_PROJECT_ROOT = str(Path(__file__).resolve().parents[1])
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 

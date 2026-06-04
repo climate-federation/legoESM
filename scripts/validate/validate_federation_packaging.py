@@ -33,7 +33,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 MEMBERS = (
     "legoesm-core",
     "legoesm-atmosphere",

@@ -38,7 +38,7 @@ from legoesm.ocean.vertical import create_ocean_z_star
 
 set_policy(PrecisionPolicy.fp64())
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 OUT_DIR = REPO_ROOT / "results" / "ocean" / "term_by_term_analytic"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 

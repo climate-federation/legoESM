@@ -22,7 +22,7 @@ from pathlib import Path
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
-_PROJECT_ROOT = str(Path(__file__).resolve().parents[1])
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 

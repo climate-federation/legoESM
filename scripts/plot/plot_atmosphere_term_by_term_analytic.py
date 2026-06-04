@@ -37,7 +37,7 @@ from legoesm.grids.latlon import create_regional_latlon_grid
 
 set_policy(PrecisionPolicy.fp64())
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[2]
 OUT_DIR = REPO_ROOT / "results" / "atmosphere" / "term_by_term_analytic"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 

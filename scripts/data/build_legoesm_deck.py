@@ -57,7 +57,7 @@ HEADER_FONT = "Georgia"
 BODY_FONT = "Calibri"
 MONO_FONT = "Consolas"
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 RESULTS = REPO / "results" / "old"
 DOCS = REPO / "docs"
 DIAG = REPO / "diagnostics" / "fv3_visual"

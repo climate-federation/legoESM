@@ -41,7 +41,7 @@ Files produced (under ``--out``):
     aerosol_amip_clim.nc
     volcanic_amip_1979-2014.nc
 
-The driver (``scripts/run_amip_cmip6_deck.py``) consumes them through
+The driver (``scripts/run/run_amip_cmip6_deck.py``) consumes them through
 the standard ``run_amip.py`` flags (``--forcing-path``, ``--ghg-file``,
 ``--ozone-file`` …).
 """
@@ -57,7 +57,7 @@ import numpy as np
 
 # CLAUDE.md "Constant and Parameter Discipline": never hardcode 273.15 etc.
 import sys as _sys
-_sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+_sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from legoesm import constants  # noqa: E402
 
 

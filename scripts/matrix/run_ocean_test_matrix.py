@@ -75,7 +75,7 @@ import traceback
 from dataclasses import dataclass, field
 
 # Ensure project root is on sys.path (for legoesm imports).
-_PROJECT_ROOT = str(Path(__file__).resolve().parents[1])
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
@@ -2295,7 +2295,7 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
         # baroclinic-tendency backend, which removes the face-edge PGF
         # instability documented in
         # docs/ocean_experiments/cubed_sphere_pgf_stability.md (RESOLVED
-        # 2026-05-20) and which scripts/run_omip.py already enables by
+        # 2026-05-20) and which scripts/run/run_omip.py already enables by
         # default for cubed_sphere.  Without it the rest_state +
         # barotropic_wave cube cases NaN around physical day 1-2 while
         # latlon/MPAS stay stable.  Non-cube grids are unaffected.
@@ -2315,7 +2315,7 @@ def _create_ocean_setup(tc: TestCase, nlev: int | None = None,
         if cube_use_fc:
             # Cubed-sphere ocean uses the FC-Gram spectral baroclinic
             # tendency backend + raised face-edge dissipation (per
-            # scripts/run_omip.py and docs/ocean_experiments/
+            # scripts/run/run_omip.py and docs/ocean_experiments/
             # cubed_sphere_pgf_stability.md). The default A-L cd-grid
             # path exhibits exponential PGF instability at face
             # boundaries under any horizontal density gradient

@@ -29,7 +29,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 from pathlib import Path
 
 # Make the sibling test-matrix package importable.
-_REPO = Path(__file__).resolve().parent.parent
+_REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO / "scripts"))
 
 import jax

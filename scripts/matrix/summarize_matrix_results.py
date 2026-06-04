@@ -55,7 +55,7 @@ def _emit(label, summary):
 
 
 def main() -> int:
-    root = Path(__file__).resolve().parents[1] / "results"
+    root = Path(__file__).resolve().parents[2] / "results"
     _emit("ATMOSPHERE", _load(root / "atmosphere" / "summary.json"))
     _emit("OCEAN", _load(root / "ocean" / "summary.json"))
     return 0

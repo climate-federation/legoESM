@@ -29,7 +29,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 # Per-case configuration.  Keys are unique labels; values supply the
@@ -104,7 +104,7 @@ def run_one(label: str, *, days: int, resolution: int | None,
         out = Path(td) / "run"
         cmd = [
             sys.executable,
-            str(_REPO_ROOT / "scripts" / "run_amip_cmip6_deck.py"),
+            str(_REPO_ROOT / "scripts" / "run" / "run_amip_cmip6_deck.py"),
             "--forcing-dir", str(forcing_dir),
             "--start-year", str(_FORCING_START_YEAR),
             "--end-year", str(_FORCING_END_YEAR),
