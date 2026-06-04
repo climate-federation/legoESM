@@ -1174,9 +1174,9 @@ def test_iter890c_fv_tp_2d_no_crash_with_panel_offsets():
 
 
 # ----------------------------------------------------------------------
-# Iter-891 — parallel `_ppm_edge_values` Fortran iord<7 boundary
+# Iter-891 — parallel `ppm_edge_values` Fortran iord<7 boundary
 # overrides (tp_core.F90:357-369).  Mirrors iter-889's pattern but for
-# `operators_fv.py:_ppm_edge_values`, which is used by the lat-lon /
+# `operators_fv.py:ppm_edge_values`, which is used by the lat-lon /
 # 3D / non-cubed-sphere PPM transport paths and (via
 # `_ppm_reconstruct_x` / `_y` / `fv_flux_divergence`) the cubed-sphere
 # `fv_flux_divergence` path.  Production W2 (`fv3_sw_tendencies`) and
@@ -1187,26 +1187,26 @@ def test_iter890c_fv_tp_2d_no_crash_with_panel_offsets():
 
 
 def test_iter891_default_off_preserves_prior_behaviour():
-    """Iter-891: `_ppm_edge_values` called without the new kwarg or
+    """Iter-891: `ppm_edge_values` called without the new kwarg or
     with `apply_fortran_xppm_boundary=False` must produce output
     bit-identical to pre-iter-891.  Default-OFF preservation.
     """
-    from legoesm.core.operators_fv import _ppm_edge_values
+    from legoesm.core.operators_fv import ppm_edge_values
 
     n = 12
     K = 3
     rng = np.random.default_rng(891)
     q = jnp.asarray(rng.normal(size=(6, n + 4, K)))
 
-    q_hat_default = _ppm_edge_values(q)
-    q_hat_off = _ppm_edge_values(q, apply_fortran_xppm_boundary=False)
+    q_hat_default = ppm_edge_values(q)
+    q_hat_off = ppm_edge_values(q, apply_fortran_xppm_boundary=False)
 
     np.testing.assert_array_equal(
         np.asarray(q_hat_default), np.asarray(q_hat_off))
 
 
 def test_iter891_on_path_overrides_4_boundary_indices():
-    """Iter-891b (Codex iter-891 stop-time fix): `_ppm_edge_values`
+    """Iter-891b (Codex iter-891 stop-time fix): `ppm_edge_values`
     with kwarg=True AND `n_interior` provided MUST overwrite the
     4 cube-edge `q_hat` indices [1, 2, n_interior, n_interior+1]
     corresponding to Fortran al(1), al(2), al(npx-1), al(npx).
@@ -1227,15 +1227,15 @@ def test_iter891_on_path_overrides_4_boundary_indices():
     Indices outside the cube-edge override (the standard 4th-order
     interior) MUST be identical.
     """
-    from legoesm.core.operators_fv import _ppm_edge_values
+    from legoesm.core.operators_fv import ppm_edge_values
 
     n = 16
     K = 1
     rng = np.random.default_rng(8911)
     q = jnp.asarray(rng.normal(size=(6, n + 4, K)))
 
-    q_hat_off = _ppm_edge_values(q, apply_fortran_xppm_boundary=False)
-    q_hat_on = _ppm_edge_values(q, apply_fortran_xppm_boundary=True,
+    q_hat_off = ppm_edge_values(q, apply_fortran_xppm_boundary=False)
+    q_hat_on = ppm_edge_values(q, apply_fortran_xppm_boundary=True,
                                  n_interior=n)
 
     # Indices that MUST differ (al(1), al(2), al(npx-1), al(npx))
@@ -1286,7 +1286,7 @@ def test_iter891_on_matches_fortran_formula_predictions():
         xt = 0.75*(q1(npx-1)+q1(npx)) - 0.25*(q1(npx-2)+q1(npx+1))
         clipped to min/max(q1(npx-2..npx+1)).
     """
-    from legoesm.core.operators_fv import _ppm_edge_values
+    from legoesm.core.operators_fv import ppm_edge_values
 
     n = 16
     K = 1
@@ -1333,7 +1333,7 @@ def test_iter891_on_matches_fortran_formula_predictions():
         np.maximum(q_np[..., n + 2, :], q_np[..., n + 3, :]))
     expected_aln = np.clip(xt_R, q_lo_R, q_hi_R)
 
-    q_hat_on = _ppm_edge_values(q, apply_fortran_xppm_boundary=True,
+    q_hat_on = ppm_edge_values(q, apply_fortran_xppm_boundary=True,
                                  n_interior=n)
     q_hat_np = np.asarray(q_hat_on)
 
@@ -1356,7 +1356,7 @@ def test_iter891_on_matches_fortran_formula_predictions():
 
 
 def test_iter891_constants_match_fortran():
-    """AST scan: `_ppm_edge_values` source contains BinOp(Div) literal
+    """AST scan: `ppm_edge_values` source contains BinOp(Div) literal
     pairs (-2.0, 14.0), (11.0, 14.0), (5.0, 14.0) for c1/c2/c3.
     """
     import ast
@@ -1366,7 +1366,7 @@ def test_iter891_constants_match_fortran():
     tree = ast.parse(src_path.read_text())
     fn = next(
         (n for n in ast.walk(tree)
-         if isinstance(n, ast.FunctionDef) and n.name == "_ppm_edge_values"),
+         if isinstance(n, ast.FunctionDef) and n.name == "ppm_edge_values"),
         None,
     )
     assert fn is not None
@@ -1392,7 +1392,7 @@ def test_iter891_constants_match_fortran():
     expected = {(-2.0, 14.0): "c1", (11.0, 14.0): "c2", (5.0, 14.0): "c3"}
     missing = [n for p, n in expected.items() if p not in found_pairs]
     assert not missing, (
-        f"`_ppm_edge_values` is missing iter-891 constants {missing}.  "
+        f"`ppm_edge_values` is missing iter-891 constants {missing}.  "
         f"Fortran reference: tp_core.F90:63-65 c1=-2/14, c2=11/14, "
         f"c3=5/14.  Found pairs: {sorted(found_pairs)}")
 
@@ -1400,7 +1400,7 @@ def test_iter891_constants_match_fortran():
 def test_iter891_fv_flux_divergence_responds_to_flag_on_global_cubed_sphere():
     """`fv_flux_divergence` on a non-bounded-domain global cubed sphere
     MUST produce different output for kwarg ON vs OFF.  Validates the
-    plumbing through `_ppm_reconstruct_x` / `_y` / `_ppm_edge_values`.
+    plumbing through `_ppm_reconstruct_x` / `_y` / `ppm_edge_values`.
     """
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.core.operators_fv import fv_flux_divergence

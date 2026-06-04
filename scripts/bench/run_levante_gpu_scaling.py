@@ -652,14 +652,14 @@ def _build_segment_benchmark(
     # ``conv_prog`` slot and would raise) and seed ``target_mass`` so
     # the segment-level mass fixer has a non-zero anchor.  We compute
     # the global mass via the existing budget-aware
-    # ``_global_area_sum`` helper (fp64 accumulator when JAX has x64
+    # ``global_area_sum`` helper (fp64 accumulator when JAX has x64
     # enabled — see ``conservation_accumulator``).
     shape_2d = ctx["shape_2d"]
     shape_3d = ctx["shape_3d"]
     _sd = ctx["_sd"]
 
-    from legoesm.core.conservation import _global_area_sum
-    _target_mass = _global_area_sum(driver.state.p_s.data, driver.grid)
+    from legoesm.core.conservation import global_area_sum
+    _target_mass = global_area_sum(driver.state.p_s.data, driver.grid)
 
     carry = pack_carry(
         driver.state, driver.q_v, driver.q_c, driver.q_r,

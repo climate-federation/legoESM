@@ -1,7 +1,7 @@
 """Iter-880: pin the iter-880 fix that removed the non-Fortran-
-faithful edge-value clip in `_ppm_edge_values`.
+faithful edge-value clip in `ppm_edge_values`.
 
-Pre-iter-880, ``_ppm_edge_values`` (`src/legoesm/core/operators_fv.py`)
+Pre-iter-880, ``ppm_edge_values`` (`src/legoesm/core/operators_fv.py`)
 contained an extra clip step:
 
     q_hat = jnp.clip(q_hat,
@@ -9,7 +9,7 @@ contained an extra clip step:
                      max(q_1d[i], q_1d[i+1]))
 
 This clamped each 4th-order edge value into the local [min, max]
-range BEFORE the downstream CW84 constraint (``_ppm_limit``) could
+range BEFORE the downstream CW84 constraint (``ppm_limit``) could
 see it.  Fortran's ``xppm`` (tp_core.F90:353-355) does NOT clip:
 
     do i=is1, ie3
@@ -39,7 +39,7 @@ Tests:
    iter-880 fix is firing.
 
 4. ``test_iter880_source_no_jnp_clip_in_ppm_edge_values``: AST scan
-   asserting `_ppm_edge_values` source contains no `jnp.clip`
+   asserting `ppm_edge_values` source contains no `jnp.clip`
    call (catches a regression that re-introduces the clip).
 """
 import os
@@ -58,12 +58,12 @@ import numpy as np
 import jax.numpy as jnp
 import pytest
 
-from legoesm.core.operators_fv import _ppm_edge_values
+from legoesm.core.operators_fv import ppm_edge_values
 from tests.legoesm_paths import legoesm_source_path
 
 
 def _ppm_edge_values_with_clip(q_1d, blend_edges=False):
-    """Pre-iter-880 reference: same `_ppm_edge_values` body but WITH
+    """Pre-iter-880 reference: same `ppm_edge_values` body but WITH
     the clip step that iter-880 removed.  Mirrors the production
     signature (`blend_edges=False` by default) so the only
     behavioural difference vs the iter-880 function is the clip
@@ -114,7 +114,7 @@ def test_iter880_constant_field_unchanged():
     (sanity)."""
     n = 8
     q = jnp.ones((6, n + 4, n)) * 7.0
-    q_hat = _ppm_edge_values(q)
+    q_hat = ppm_edge_values(q)
     np.testing.assert_allclose(np.asarray(q_hat), 7.0, atol=1e-12)
 
 
@@ -124,7 +124,7 @@ def test_iter880_linear_field_unchanged():
     n = 8
     x = jnp.arange(n + 4, dtype=jnp.float64)
     q = jnp.broadcast_to(x[None, :, None], (6, n + 4, n))
-    q_hat = _ppm_edge_values(q)
+    q_hat = ppm_edge_values(q)
     expected_inner = x[1:-2] + 0.5
     expected_lo = 0.5 * (x[0] + x[1])
     expected_hi = 0.5 * (x[-2] + x[-1])
@@ -165,13 +165,13 @@ def test_iter880_overshoot_input_differs_from_clipped(blend_edges):
         dtype=jnp.float64)
     q = jnp.broadcast_to(x[None, :, None], (6, n + 4, n))
 
-    q_hat_unclipped = _ppm_edge_values(q, blend_edges=blend_edges)
+    q_hat_unclipped = ppm_edge_values(q, blend_edges=blend_edges)
     q_hat_clipped = _ppm_edge_values_with_clip(q, blend_edges=blend_edges)
 
     diff = float(jnp.max(jnp.abs(q_hat_unclipped - q_hat_clipped)))
     assert diff > 1e-6, (
         f"Iter-880 fix invisible (blend_edges={blend_edges}): "
-        f"`_ppm_edge_values` output bit-matches the pre-iter-880 "
+        f"`ppm_edge_values` output bit-matches the pre-iter-880 "
         f"clipped reference on an impulse input "
         f"(max |Δ|={diff:.3e}). Either the fix was reverted or the "
         f"input doesn't trigger the clip-vs-no-clip divergence.  "
@@ -195,7 +195,7 @@ def test_iter880b_reference_isolates_clip_only_diff():
     q = jnp.broadcast_to(x[None, :, None], (6, n + 4, n))
 
     for blend_edges in (False, True):
-        q_hat_unclipped = _ppm_edge_values(q, blend_edges=blend_edges)
+        q_hat_unclipped = ppm_edge_values(q, blend_edges=blend_edges)
         q_hat_clipped = _ppm_edge_values_with_clip(q,
                                                    blend_edges=blend_edges)
         # On a linear ramp the 4th-order formula is exact, the
@@ -222,7 +222,7 @@ def test_iter880b_reference_isolates_clip_only_diff():
 
 
 def test_iter880_source_no_jnp_clip_in_ppm_edge_values():
-    """AST scan: ``_ppm_edge_values`` source MUST NOT contain a
+    """AST scan: ``ppm_edge_values`` source MUST NOT contain a
     ``jnp.clip(q_hat, ...)`` call on the STANDARD 4th-order edge
     path.  The pre-iter-880 clip step flattened edge overshoots
     before the CW84 constraint could process them, making the scheme
@@ -248,10 +248,10 @@ def test_iter880_source_no_jnp_clip_in_ppm_edge_values():
     fn = next(
         (n for n in ast.walk(tree)
          if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-         and n.name == "_ppm_edge_values"),
+         and n.name == "ppm_edge_values"),
         None,
     )
-    assert fn is not None, "Could not find _ppm_edge_values"
+    assert fn is not None, "Could not find ppm_edge_values"
 
     # Build a parent-pointer map so we can walk up from each `jnp.clip`
     # call to check whether it lives under the iter-891 boundary block.
@@ -286,7 +286,7 @@ def test_iter880_source_no_jnp_clip_in_ppm_edge_values():
                     bad_clips.append(ast.unparse(node))
 
     assert not bad_clips, (
-        f"`_ppm_edge_values` re-introduced a `jnp.clip` call OUTSIDE "
+        f"`ppm_edge_values` re-introduced a `jnp.clip` call OUTSIDE "
         f"the iter-891 Fortran-iord<7 boundary override block:\n"
         + "\n".join(f"  - {c}" for c in bad_clips)
         + "\nIter-880 removed the standard 4th-order clip step for "

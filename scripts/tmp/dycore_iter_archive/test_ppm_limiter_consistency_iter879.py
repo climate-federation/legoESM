@@ -5,7 +5,7 @@ The repo has TWO PPM monotonicity limiter implementations:
 
 1. ``_ppm_reconstruct_1d`` in ``src/legoesm/core/operators_cdgrid.py``
    (used by ``cgrid_mass_flux_divergence`` — production W2 path).
-2. ``_ppm_limit`` in ``src/legoesm/core/operators_fv.py`` (used by
+2. ``ppm_limit`` in ``src/legoesm/core/operators_fv.py`` (used by
    ``fv_flux_divergence`` — alternative FV transport path).
 
 Both implement the Colella-Woodward 1984 (CW84) monotonicity
@@ -15,7 +15,7 @@ constraint per eq. 1.10:
     if Δa · q_6 < -(Δa)²:  q_R = 3q - 2q_L
 
 Pre-iter-878, ``_ppm_reconstruct_1d`` had the buggy form
-``q_6 > Δa²`` (missing the ``Δa`` factor) while ``_ppm_limit`` had
+``q_6 > Δa²`` (missing the ``Δa`` factor) while ``ppm_limit`` had
 the correct ``Δa · q_6 > Δa²``.  iter-878 fixed
 ``_ppm_reconstruct_1d`` to match.
 
@@ -89,7 +89,7 @@ import jax.numpy as jnp
 import pytest
 
 from legoesm.core.operators_cdgrid import _ppm_reconstruct_1d
-from legoesm.core.operators_fv import _ppm_limit
+from legoesm.core.operators_fv import ppm_limit
 
 
 def _compute_face_values_4thorder(q_pad):
@@ -108,7 +108,7 @@ def test_iter879_ppm_reconstruct_1d_matches_ppm_limit(seed):
 
     This is the CANONICAL regression sentinel for the iter-878 fix
     that brought ``_ppm_reconstruct_1d`` into agreement with
-    ``_ppm_limit``.  A regression in EITHER source file (any form
+    ``ppm_limit``.  A regression in EITHER source file (any form
     — Compare, function call, algebraic rewrite, rename, etc.)
     that changes the limiter semantics will fail this bit-match
     check at 1e-12 rtol.
@@ -132,10 +132,10 @@ def test_iter879_ppm_reconstruct_1d_matches_ppm_limit(seed):
     q_L_a, q_R_a = _ppm_reconstruct_1d(q, axis=0)
 
     # Manually compute the same 4th-order face values, then run the
-    # _ppm_limit limiter.
+    # ppm_limit limiter.
     q_pad = np.pad(q_np, (2, 2), mode='edge')
     q_L_unlimited, q_R_unlimited = _compute_face_values_4thorder(q_pad)
-    q_L_b, q_R_b = _ppm_limit(
+    q_L_b, q_R_b = ppm_limit(
         jnp.asarray(q_np),
         jnp.asarray(q_L_unlimited),
         jnp.asarray(q_R_unlimited))
@@ -143,16 +143,16 @@ def test_iter879_ppm_reconstruct_1d_matches_ppm_limit(seed):
     np.testing.assert_allclose(
         np.asarray(q_L_a), np.asarray(q_L_b), rtol=1e-12, atol=1e-12,
         err_msg=(
-            f"`_ppm_reconstruct_1d` and `_ppm_limit` produce "
+            f"`_ppm_reconstruct_1d` and `ppm_limit` produce "
             f"DIFFERENT q_L on seed={seed}.  This means one of the "
             f"two PPM limiter implementations diverged from CW84 "
             f"eq. 1.10 / Fortran pert_ppm.  Audit both and bring "
             f"them back into agreement (iter-878 made "
-            f"`_ppm_reconstruct_1d` match `_ppm_limit`)."))
+            f"`_ppm_reconstruct_1d` match `ppm_limit`)."))
     np.testing.assert_allclose(
         np.asarray(q_R_a), np.asarray(q_R_b), rtol=1e-12, atol=1e-12,
         err_msg=(
-            f"`_ppm_reconstruct_1d` and `_ppm_limit` produce "
+            f"`_ppm_reconstruct_1d` and `ppm_limit` produce "
             f"DIFFERENT q_R on seed={seed}."))
 
 
@@ -175,7 +175,7 @@ def test_iter879_ppm_consistency_across_scales(scale):
     q_L_a, q_R_a = _ppm_reconstruct_1d(q, axis=0)
     q_pad = np.pad(q_np, (2, 2), mode='edge')
     q_L_unlimited, q_R_unlimited = _compute_face_values_4thorder(q_pad)
-    q_L_b, q_R_b = _ppm_limit(
+    q_L_b, q_R_b = ppm_limit(
         jnp.asarray(q_np),
         jnp.asarray(q_L_unlimited),
         jnp.asarray(q_R_unlimited))
@@ -189,7 +189,7 @@ def test_iter879_ppm_consistency_across_scales(scale):
         err_msg=(
             f"PPM limiter divergence at scale={scale} q_L.  "
             f"iter-879f cross-scale consistency check failed; "
-            f"audit both `_ppm_reconstruct_1d` and `_ppm_limit`."))
+            f"audit both `_ppm_reconstruct_1d` and `ppm_limit`."))
     np.testing.assert_allclose(
         np.asarray(q_R_a), np.asarray(q_R_b), rtol=1e-12, atol=atol)
 
@@ -257,7 +257,7 @@ def test_iter879g_ppm_consistency_on_edge_cases(name):
     q_L_a, q_R_a = _ppm_reconstruct_1d(q, axis=0)
     q_pad = np.pad(q_np, (2, 2), mode='edge')
     q_L_unlimited, q_R_unlimited = _compute_face_values_4thorder(q_pad)
-    q_L_b, q_R_b = _ppm_limit(
+    q_L_b, q_R_b = ppm_limit(
         jnp.asarray(q_np),
         jnp.asarray(q_L_unlimited),
         jnp.asarray(q_R_unlimited))
@@ -269,7 +269,7 @@ def test_iter879g_ppm_consistency_on_edge_cases(name):
         err_msg=(
             f"PPM limiter divergence on edge case `{name}` (q_L).  "
             f"iter-879g edge-case consistency check failed; "
-            f"audit both `_ppm_reconstruct_1d` and `_ppm_limit`."))
+            f"audit both `_ppm_reconstruct_1d` and `ppm_limit`."))
     np.testing.assert_allclose(
         np.asarray(q_R_a), np.asarray(q_R_b), rtol=1e-12, atol=atol,
         err_msg=(
