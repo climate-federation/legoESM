@@ -21,29 +21,13 @@ hard-coded float64 upcast.  See issue #167.
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 
-from legoesm.core.operators import _is_distributed
 from legoesm.core.precision import cast
 from legoesm.ocean.vertical import compute_layer_thickness
-from legoesm.parallel.reductions import global_sum_mpi
+from legoesm.parallel.reductions import global_sum_if_distributed
 
 _ACC_MODULE = "ocean_diagnostics"
-
-
-def _is_multi_process() -> bool:
-    """Check MPI or multi-process JAX (#177)."""
-    if jax.process_count() > 1:
-        return True
-    return _is_distributed()
-
-
-def _global_sum(x):
-    """MPI-aware global sum (#177)."""
-    if _is_multi_process():
-        return global_sum_mpi(x)
-    return x
 
 
 def _ownership_weight(mask, owned_mask):
@@ -69,7 +53,7 @@ def _ocean_area_sum_mpas(field_2d, mask, mesh, owned_mask=None):
     eff_mask = _ownership_weight(mask, owned_mask)
     mask_acc = cast(eff_mask, _ACC_MODULE, "accumulate")
     area_acc = cast(mesh.areaCell, _ACC_MODULE, "accumulate")
-    return _global_sum(jnp.sum(field_acc * mask_acc * area_acc))
+    return global_sum_if_distributed(jnp.sum(field_acc * mask_acc * area_acc))
 
 
 def _ocean_volume_sum_mpas(field_3d, h_k, mask, mesh, owned_mask=None):
@@ -79,7 +63,7 @@ def _ocean_volume_sum_mpas(field_3d, h_k, mask, mesh, owned_mask=None):
     eff_mask = _ownership_weight(mask, owned_mask)
     mask_acc = cast(eff_mask, _ACC_MODULE, "accumulate")
     area_acc = cast(mesh.areaCell, _ACC_MODULE, "accumulate")
-    return _global_sum(jnp.sum(
+    return global_sum_if_distributed(jnp.sum(
         field_acc * h_k_acc * mask_acc[:, jnp.newaxis] * area_acc[:, jnp.newaxis]
     ))
 
@@ -87,11 +71,11 @@ def _ocean_volume_sum_mpas(field_3d, h_k, mask, mesh, owned_mask=None):
 def _ocean_volume_sums_old_new(field_old, h_k_old, field_new, h_k_new,
                                 mask, mesh, owned_mask=None):
     """Stack the 3 (old / new / volume) volume-weighted scalar sums into
-    a single ``_global_sum`` allreduce.
+    a single ``global_sum_if_distributed`` allreduce.
 
     The old leg uses ``h_k_old``; both new legs share ``h_k_new``, so
     the new pair is fused into one column reduction first, then the 3
-    scalars are stacked for a single ``_global_sum``.
+    scalars are stacked for a single ``global_sum_if_distributed``.
 
     ``owned_mask`` (optional) zeros out halo cells in the local sum
     before the global allreduce — see :func:`_ownership_weight`.
@@ -112,7 +96,7 @@ def _ocean_volume_sums_old_new(field_old, h_k_old, field_new, h_k_new,
         axis=tuple(range(fnew_acc.ndim)),
     )
     field_old_sum = jnp.sum(fold_acc * h_old_acc * weighted)
-    return _global_sum(jnp.stack([field_old_sum, _new_pair[..., 0], _new_pair[..., 1]]))
+    return global_sum_if_distributed(jnp.stack([field_old_sum, _new_pair[..., 0], _new_pair[..., 1]]))
 
 
 def fix_volume_mpas(state_new, state_old, mesh, z_coord,
@@ -139,7 +123,7 @@ def fix_volume_mpas(state_new, state_old, mesh, z_coord,
         * weighted[..., None],
         axis=tuple(range(eta_old_acc.ndim)),
     )
-    vol_old, vol_new, ocean_area = _global_sum(_local)
+    vol_old, vol_new, ocean_area = global_sum_if_distributed(_local)
 
     correction = (vol_old - vol_new) / jnp.maximum(ocean_area, 1.0)
     eta_fixed = state_new.eta.data + correction.astype(state_new.eta.data.dtype) * mask
@@ -262,7 +246,7 @@ def mpas_ocean_conservation_fixer(
             [eta_old_acc, eta_new_acc, jnp.ones_like(eta_old_acc)], axis=-1,
         ) * weighted_area_acc[..., None]
         vol_terms = jnp.sum(_vol_stack, axis=tuple(range(eta_old_acc.ndim)))
-        vol_old, vol_new, ocean_area = _global_sum(vol_terms)
+        vol_old, vol_new, ocean_area = global_sum_if_distributed(vol_terms)
         eta_correction = (vol_old - vol_new) / jnp.maximum(ocean_area, 1.0)
         eta_corrected = state_new.eta.data + eta_correction.astype(eta_corrected.dtype) * mask
         if min_col is not None:
@@ -296,7 +280,7 @@ def mpas_ocean_conservation_fixer(
             axis=-2,
         )
         heat_terms = jnp.sum(_heat_inner * weighted_area_acc[..., None], axis=0)
-        heat_old, heat_new, ocean_vol = _global_sum(heat_terms)
+        heat_old, heat_new, ocean_vol = global_sum_if_distributed(heat_terms)
         heat_expected = heat_old + jnp.asarray(expected_dHeat, dtype=heat_old.dtype)
         T_correction = (heat_expected - heat_new) / jnp.maximum(ocean_vol, 1.0)
         T_corrected = state_new.T.data + T_correction.astype(T_corrected.dtype) * mask[:, jnp.newaxis]
@@ -314,7 +298,7 @@ def mpas_ocean_conservation_fixer(
             axis=-2,
         )
         salt_terms = jnp.sum(_salt_inner * weighted_area_acc[..., None], axis=0)
-        salt_old, salt_new, ocean_vol = _global_sum(salt_terms)
+        salt_old, salt_new, ocean_vol = global_sum_if_distributed(salt_terms)
         salt_expected = salt_old + jnp.asarray(expected_dSalt, dtype=salt_old.dtype)
         S_correction = (salt_expected - salt_new) / jnp.maximum(ocean_vol, 1.0)
         S_corrected = state_new.S.data + S_correction.astype(S_corrected.dtype) * mask[:, jnp.newaxis]

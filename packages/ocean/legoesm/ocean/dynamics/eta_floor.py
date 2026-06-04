@@ -5,23 +5,9 @@ Redistributes mass injected by the floor clamp over cells with headroom.
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 
-from legoesm.core.operators import _is_distributed
-from legoesm.parallel.reductions import batch_allreduce_mpi, global_sum_mpi
-
-
-def _is_multi_process() -> bool:
-    if jax.process_count() > 1:
-        return True
-    return _is_distributed()
-
-
-def _global_sum(x):
-    if _is_multi_process():
-        return global_sum_mpi(x)
-    return x
+from legoesm.parallel.reductions import batch_allreduce_mpi, is_multi_process
 
 
 def _global_sum_pair(a: jnp.ndarray, b: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -35,7 +21,7 @@ def _global_sum_pair(a: jnp.ndarray, b: jnp.ndarray) -> tuple[jnp.ndarray, jnp.n
     barotropic-loop cost on multi-GPU runs is precisely this MPI
     latency, not bandwidth.
     """
-    if _is_multi_process():
+    if is_multi_process():
         a_g, b_g = batch_allreduce_mpi([a, b], op="sum")
         return a_g, b_g
     return a, b

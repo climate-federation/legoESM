@@ -231,6 +231,42 @@ def global_sum_mpi(local_value: jax.Array) -> jax.Array:
     return global_val
 
 
+def is_multi_process() -> bool:
+    """Whether reductions must cross process/rank boundaries.
+
+    ``jax.process_count() > 1`` covers JAX multi-host runs; ``_is_distributed()``
+    covers the mpi4jax single-host-multi-rank path where ``process_count`` stays
+    1.  Either condition means a local partial sum must be all-reduced to obtain
+    the global value.  Canonical home (#177) for the predicate the ocean
+    conservation fixers and the eta-floor mass redistribution previously each
+    re-implemented identically.
+    """
+    # Function-scope import: ``core.operators`` imports ``global_sum_mpi`` from
+    # this module (function-scope), so importing ``_is_distributed`` at module
+    # top level would risk an operators<->reductions import cycle.
+    from legoesm.core.operators import _is_distributed
+    if jax.process_count() > 1:
+        return True
+    return _is_distributed()
+
+
+def global_sum_if_distributed(local_value: jax.Array) -> jax.Array:
+    """Global SUM across processes when distributed, else identity.
+
+    Returns ``global_sum_mpi(local_value)`` under multi-process JAX or the
+    MPI/sharded distribution flag (see :func:`is_multi_process`); otherwise
+    returns ``local_value`` unchanged so single-rank runs pay no reduction.
+
+    **Differentiable**: built on ``global_sum_mpi`` (allreduce SUM) which carries
+    a full VJP — safe inside ``jax.grad`` (cf. the halo-exchange ``custom_vjp``
+    notes).  Single canonical MPI-aware reduction (#177) shared by
+    ``ocean.conservation_mpas`` and ``ocean.dynamics.eta_floor``.
+    """
+    if is_multi_process():
+        return global_sum_mpi(local_value)
+    return local_value
+
+
 def global_max_mpi(local_value: jax.Array) -> jax.Array:
     """Compute a global maximum across all MPI ranks.
 

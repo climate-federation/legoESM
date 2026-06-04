@@ -762,8 +762,8 @@ class MPASOceanModel:
             # Globally sum the locally-masked expected forcing so the
             # comparison against the globally-summed ``heat_old`` /
             # ``salt_old`` inside the fixer is consistent.
-            from legoesm.ocean.conservation_mpas import _is_multi_process
-            if _is_multi_process():
+            from legoesm.parallel.reductions import is_multi_process
+            if is_multi_process():
                 from legoesm.parallel.reductions import global_sum_mpi
                 expected_dHeat = global_sum_mpi(expected_dHeat_local)
                 expected_dSalt = global_sum_mpi(expected_dSalt_local)
