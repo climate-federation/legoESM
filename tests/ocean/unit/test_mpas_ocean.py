@@ -384,8 +384,15 @@ class TestBiharmonicTracerDiffusion:
 
         expected_dT = _kh_lap(perturbed.T.data)
         expected_dS = _kh_lap(perturbed.S.data)
-        assert jnp.allclose(tend.dT_dt.data, expected_dT, atol=0.0, rtol=0.0)
-        assert jnp.allclose(tend.dS_dt.data, expected_dS, atol=0.0, rtol=0.0)
+        # The K_bih=0 model path shares the inner ``div(grad*edge_mask)`` between
+        # the K_h Laplacian and the (skipped) biharmonic, and computes the tracer
+        # gradient batched over a stacked [T,S] field.  That reorders the
+        # floating-point ops relative to this per-tracer hand formula, so the two
+        # agree to ~1 ULP (measured max relative diff 2.6e-16), NOT bit-for-bit.
+        # A real leak of the K_bih term into the K_bih=0 path would be
+        # order-unity relative, so a machine-precision tolerance still guards it.
+        assert jnp.allclose(tend.dT_dt.data, expected_dT, atol=1e-15, rtol=1e-9)
+        assert jnp.allclose(tend.dS_dt.data, expected_dS, atol=1e-15, rtol=1e-9)
 
     def test_kbih_activation_changes_tracer_tendency(self, state, mesh, z_coord):
         """K_bih>0 must measurably alter the tracer tendency."""
