@@ -75,6 +75,11 @@ echo ""
 
 cd "$REPO"
 
+# NOTE: scripts/run_amip_levante.py is NOT tracked in this repo (it never was —
+# a Levante-specific AMIP driver with --year/--ic-zarr/--production-profile that
+# was developed locally and not committed). This invocation is therefore a
+# PRE-EXISTING broken reference, unrelated to the Phase-4 scripts reorg; restore
+# the driver (or repoint to a committed AMIP runner with matching args) before use.
 $PYTHON scripts/run_amip_levante.py \
     --year "$YEAR" \
     --days "$DAYS" \
