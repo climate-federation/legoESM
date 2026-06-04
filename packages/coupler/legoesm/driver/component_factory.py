@@ -279,6 +279,17 @@ def create_atmosphere_dycore(
         a = grid.radius
         eig_max = n_max * (n_max + 1) / (a * a)
         hyperdiff = 1.0 / (0.5 * 3600.0 * eig_max ** 2)
+        # Spectral hydrostatic PE requires the 5-stage SSP-RK54 (spectral
+        # stability); it does not support the other integrators.  Tolerate the
+        # global default (no deliberate choice) but REJECT any other EXPLICIT
+        # time_integrator with a clear message instead of silently overriding it.
+        if dc.time_integrator not in ("ssp_rk54", type(dc)().time_integrator):
+            raise ValueError(
+                f"spectral hydrostatic PE supports only time_integrator='ssp_rk54' "
+                f"(spectral stability); got dycore.time_integrator="
+                f"{dc.time_integrator!r} — that integrator is not implemented for "
+                f"the spectral path."
+            )
         pe_config = SpectralPEConfig(
             hyperdiff_coeff=hyperdiff,
             hyperdiff_order=2,
