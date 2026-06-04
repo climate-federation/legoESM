@@ -460,7 +460,9 @@ def create_experiment_config(
         # Legacy flat field names from AMIPExperimentConfig
         elif k == "resolution":
             grid_ov["resolution"] = v
-        elif k == "nlev":
+        elif k in ("n_levels", "nlev"):
+            # Config files use the canonical key ``n_levels`` (#7); ``nlev`` kept
+            # for back-compat.  Both map to the GridConfig field, which is ``nlev``.
             grid_ov["nlev"] = v
         elif k == "dt":
             dycore_ov["dt"] = v
