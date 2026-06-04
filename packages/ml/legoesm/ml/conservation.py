@@ -167,10 +167,7 @@ def correct_ocean_volume(
     array, shape (n_lat, n_lon)
         Corrected eta.
     """
-    w = grid.weights[:, None]  # (n_lat, 1)
-    dlon = 2.0 * jnp.pi / grid.n_lon
-    area = (grid.radius ** 2) * w * dlon  # (n_lat, 1)
-    weighted_area = mask * area
+    weighted_area = mask * grid.grid_area  # canonical Gaussian cell area
 
     ocean_area = jnp.sum(weighted_area)
     vol_old = jnp.sum(eta_old * weighted_area)
@@ -213,10 +210,7 @@ def correct_ocean_heat(
     array, shape (n_lat, n_lon, nlev)
         Corrected temperature.
     """
-    w = grid.weights[:, None]
-    dlon = 2.0 * jnp.pi / grid.n_lon
-    area = (grid.radius ** 2) * w * dlon
-    weighted_area = mask * area
+    weighted_area = mask * grid.grid_area  # canonical Gaussian cell area
     mask_3d = mask[..., None]
 
     # Volume-integrated heat — fuse the 3 column reductions into one
@@ -266,10 +260,7 @@ def correct_ocean_salt(
     array, shape (n_lat, n_lon, nlev)
         Corrected salinity.
     """
-    w = grid.weights[:, None]
-    dlon = 2.0 * jnp.pi / grid.n_lon
-    area = (grid.radius ** 2) * w * dlon
-    weighted_area = mask * area
+    weighted_area = mask * grid.grid_area  # canonical Gaussian cell area
     mask_3d = mask[..., None]
 
     # Volume-integrated salt — same 3-into-1 fusion as the heat fixer.

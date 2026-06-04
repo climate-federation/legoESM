@@ -69,7 +69,7 @@ class SlabAtmosphereConfig(NamedTuple):
     sw_atm_absorption: float = 0.0   # fraction a ∈ [0, 1] of (1−α)S absorbed in the air
     # Column heat capacities [J m⁻² K⁻¹] (slab depths are the model choice):
     c_atm: float = constants.c_pd * constants.p_ref / constants.g   # dry air column
-    c_sfc: float = 50.0 * 4.18e6                                    # 50 m ocean mixed layer
+    c_sfc: float = 50.0 * constants.rho_water * constants.c_pw      # 50 m ocean mixed layer
     # H = sensible_coeff·(T_sfc − T_atm) [W m⁻² K⁻¹]; 0 → radiative-only (analytic eq.)
     sensible_coeff: float = 0.0
 

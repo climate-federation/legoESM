@@ -72,7 +72,7 @@ class RCEColumnConfig(NamedTuple):
     p_s: float = constants.p_ref          # surface pressure [Pa]
     sigma_top: float = 0.01               # model-top sigma (≈ p_top/p_s)
     lat_deg: float = 0.0                  # column latitude [deg] (LW τ depends on lat)
-    c_sfc: float = 50.0 * 4.18e6          # slab-surface heat capacity [J m⁻² K⁻¹]
+    c_sfc: float = 50.0 * constants.rho_water * constants.c_pw  # slab-surface heat capacity [J m⁻² K⁻¹]
     # Convective adjustment is NOT yet wired (see rce_column_step): the existing
     # physics.convection.dca scheme targets the *saturated moist* adiabat and gates
     # by moist CAPE, so it cannot serve as the dry adjustment a dry (q_v=0) column

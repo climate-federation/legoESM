@@ -126,6 +126,14 @@ def idealized_bathymetry_mpas(
     land_mask : jnp.ndarray, shape (nCells,)
         1=ocean, 0=land.
     """
+    if H_max <= 0.0:
+        raise ValueError(f"H_max must be > 0, got {H_max!r}")
+    if land_lat_threshold < 0.0 or land_lat_threshold > 90.0:
+        raise ValueError(
+            "land_lat_threshold must be in [0, 90] degrees, "
+            f"got {land_lat_threshold!r}",
+        )
+
     dtype = get_policy().storage
     lat_deg = jnp.abs(jnp.degrees(mesh.latCell))
     land_mask = (lat_deg < land_lat_threshold).astype(dtype)
