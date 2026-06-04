@@ -60,6 +60,7 @@ asserts a bit-identical result. See [Getting started](getting_started.md).
 :caption: Documentation
 
 getting_started
+composability
 scm
 amip
 ml_physics_parameterization
