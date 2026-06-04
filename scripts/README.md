@@ -22,10 +22,23 @@ Debug/diagnostic/iteration scripts and archived artifacts live under
 dycore tests). Nothing here is wired into CI; the directory is slated for
 eventual deletion. Do not add production scripts here.
 
-> A further reorganization of the flat production scripts below into
-> `run/ matrix/ bench/ plot/ validate/ data/` subdirs is planned (it requires
-> updating ~25 tests that import scripts by path); until then they remain at the
-> `scripts/` root as documented in the tables below.
+## Layout
+
+Scripts are organized into bucket subdirs (the `scripts/` root holds only
+`__init__.py`). The tables below name scripts by basename — find each under its
+bucket:
+
+| Bucket | Contents |
+|--------|----------|
+| `run/` | Production experiment drivers (`run_amip`, `run_omip`, `run_rce`, `run_held_suarez*`, `run_dino`, `run_coupled`, `run_aimip*`, the cross-grid `.sh` wrappers, …). |
+| `matrix/` | The complexity-tiered test-matrix runners (`run_{atmosphere,ocean,sea_ice,scm}_test_matrix`, `summarize_matrix_results`, `validate_matrix_report`, `check_conservation_all`). See `docs/TESTING.md`. |
+| `experiment/` | The template/provenance harness (see above). |
+| `bench/` | Benchmarking, scaling, profiling (`bench_*`, `profile_*`, `*scaling*`, `analyze_*`). |
+| `plot/` | Plotting / figure regeneration (`plot_*`, `replot_*`, `regen_*`). |
+| `validate/` | Validators + intercomparison (`validate_*`, `verify_*`, `eval_*`, `audit_*`, `compare_*`). |
+| `data/` | Forcing/data prep + environment setup (`download_*`, `prepare_*`, `generate_*`, `build_*`, `make_ryf`, `setup_*`). |
+| `tmp/` | Throwaway (above) — slated for deletion. |
+| _other subdirs_ | `scm/`, `ocean_test_matrix/`, `global_overturning/`, `diagnostic/`, `profile/`, `s2s/`, … (pre-existing component packages, unchanged). |
 
 ## Atmosphere
 
