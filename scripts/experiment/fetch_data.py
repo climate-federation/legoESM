@@ -143,6 +143,9 @@ def _fetch_one(entry: dict[str, Any], target: Path) -> bool:
             _rm(tmp)
             return False
         import os
+        # Replace any stale/partial target (os.replace can't overwrite a
+        # non-empty directory) — safe because the staged tmp is already verified.
+        _rm(target)
         os.replace(tmp, target)
         return True
     except Exception:  # noqa: BLE001 — never leave a partial behind
