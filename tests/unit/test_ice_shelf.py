@@ -35,9 +35,9 @@ class TestFreezingPoint:
 
     def test_pressure_lowers_freezing_point(self):
         """Increasing pressure → freezing point DROPS (negative c)."""
-        T_surface = float(freezing_point_C(jnp.array(34.7), jnp.array(0.0)))
+        T_sfc = float(freezing_point_C(jnp.array(34.7), jnp.array(0.0)))
         T_deep = float(freezing_point_C(jnp.array(34.7), jnp.array(500.0)))
-        assert T_deep < T_surface
+        assert T_deep < T_sfc
 
     def test_salinity_lowers_freezing_point(self):
         """Saltier water has a lower freezing point (negative a)."""

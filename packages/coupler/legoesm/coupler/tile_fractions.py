@@ -93,8 +93,8 @@ def blend_tiles(
         return fo * o + f_water * i + fl * l + fk * k
 
     return SurfaceToAtm(
-        T_surface=_blend(ocean_resp.T_surface, ice_resp.T_surface,
-                         land_resp.T_surface, lake_resp.T_surface),
+        T_sfc=_blend(ocean_resp.T_sfc, ice_resp.T_sfc,
+                         land_resp.T_sfc, lake_resp.T_sfc),
         albedo=_blend(ocean_resp.albedo, ice_resp.albedo,
                       land_resp.albedo, lake_resp.albedo),
         emissivity=_blend(ocean_resp.emissivity, ice_resp.emissivity,

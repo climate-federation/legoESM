@@ -636,7 +636,7 @@ class TestMultilayerLandStep(unittest.TestCase):
         self.assertEqual(new_state.theta_soil.shape, (ncol, nlayers))
         self.assertEqual(new_state.psi_soil.shape, (ncol, nlayers))
         self.assertEqual(new_state.runoff_surface.shape, (ncol,))
-        self.assertEqual(response.T_surface.shape, (ncol,))
+        self.assertEqual(response.T_sfc.shape, (ncol,))
         self.assertEqual(response.shflx.shape, (ncol,))
 
     def test_surface_temperature_responds(self):
@@ -855,7 +855,7 @@ class TestMultilayerLandStep(unittest.TestCase):
         )
 
         # The returned q_surface should be LESS than fully saturated
-        T_sfc = response.T_surface
+        T_sfc = response.T_sfc
         q_sat = saturation_mixing_ratio(T_sfc, forcing.p_surface)
 
         # q_surface should be strictly less than q_sat (stomata limiting)

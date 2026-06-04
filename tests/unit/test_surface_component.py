@@ -55,7 +55,7 @@ def _land_brick():
         step_fn,
         prognostic_variables=("T_soil", "W_bucket", "snow_depth", "snow_age"),
         required_forcing=("atm_forcing",),
-        provided_fluxes=("shflx", "lhflx", "lw_up", "T_surface"),
+        provided_fluxes=("shflx", "lhflx", "lw_up", "T_sfc"),
     )
     return brick, state, "T_soil", lambda r: r.shflx
 
@@ -83,7 +83,7 @@ def _ice_brick():
         step_fn,
         prognostic_variables=("h_ice", "T_ice", "concentration"),
         required_forcing=("atm_forcing", "ocean_state"),
-        provided_fluxes=("shflx", "lhflx", "tau_x", "tau_y", "lw_up", "T_surface"),
+        provided_fluxes=("shflx", "lhflx", "tau_x", "tau_y", "lw_up", "T_sfc"),
     )
     return brick, state, "T_ice", lambda r: r.shflx
 

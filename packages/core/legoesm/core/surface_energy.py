@@ -15,7 +15,7 @@ from legoesm import constants
 def surface_radiation_fluxes(
     sw_down: jnp.ndarray,
     lw_down: jnp.ndarray,
-    T_surface: jnp.ndarray,
+    T_sfc: jnp.ndarray,
     alpha: jnp.ndarray,
     emissivity: float | jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
@@ -27,7 +27,7 @@ def surface_radiation_fluxes(
         Downward shortwave radiation at surface [W/m2].
     lw_down : array
         Downward longwave radiation at surface [W/m2].
-    T_surface : array
+    T_sfc : array
         Surface temperature [K].
     alpha : array or float
         Surface albedo [0, 1].
@@ -45,7 +45,7 @@ def surface_radiation_fluxes(
     """
     sw_net = (1.0 - alpha) * sw_down
     lw_down_abs = emissivity * lw_down
-    lw_emit = emissivity * constants.sigma_sb * T_surface ** 4
+    lw_emit = emissivity * constants.sigma_sb * T_sfc ** 4
     # Total upward LW = thermal emission + reflected downward LW
     # (consistent with gray-radiation surface BC)
     lw_up = lw_emit + (1.0 - emissivity) * lw_down

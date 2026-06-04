@@ -118,9 +118,9 @@ class Test14g_AllTilesSameForcing:
             assert jnp.all(jnp.isfinite(getattr(resp_ice, name))), f"Ice.{name} not finite"
             assert jnp.all(jnp.isfinite(getattr(resp_lake, name))), f"Lake.{name} not finite"
 
-        # T_surface should differ between tiles
-        assert not jnp.allclose(resp_land.T_surface, resp_ice.T_surface, atol=0.1)
-        assert not jnp.allclose(resp_land.T_surface, resp_lake.T_surface, atol=0.1)
+        # T_sfc should differ between tiles
+        assert not jnp.allclose(resp_land.T_sfc, resp_ice.T_sfc, atol=0.1)
+        assert not jnp.allclose(resp_land.T_sfc, resp_lake.T_sfc, atol=0.1)
 
         # Albedo should differ
         assert not jnp.allclose(resp_land.albedo, resp_ice.albedo, atol=0.01)

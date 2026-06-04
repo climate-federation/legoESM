@@ -23,7 +23,7 @@ from legoesm import constants
 def update_snow(
     snow: jnp.ndarray,
     snow_age: jnp.ndarray,
-    T_surface: jnp.ndarray,
+    T_sfc: jnp.ndarray,
     precip_snow: jnp.ndarray,
     dt: float,
     *,
@@ -39,7 +39,7 @@ def update_snow(
         Current snow depth [kg/m2].
     snow_age : jnp.ndarray
         Current snow age [s].
-    T_surface : jnp.ndarray
+    T_sfc : jnp.ndarray
         Surface temperature [K].
     precip_snow : jnp.ndarray
         Snowfall rate [kg/m2/s].
@@ -75,14 +75,14 @@ def update_snow(
 
     if Q_net is not None:
         # --- Energy-limited melt (scientific guide, eq. for M) ---
-        # Only melt when T_surface >= T_snow_melt AND Q_net > 0
-        above_freezing = T_surface >= T_snow_melt
+        # Only melt when T_sfc >= T_snow_melt AND Q_net > 0
+        above_freezing = T_sfc >= T_snow_melt
         energy_melt = jnp.maximum(Q_net * dt / constants.L_f, 0.0)  # kg/m2
         snow_melt = jnp.where(above_freezing, energy_melt, 0.0)
         snow_melt = jnp.minimum(snow_melt, snow_available)
     else:
         # --- Legacy degree-day fallback ---
-        melt_rate = snow_melt_rate * jnp.maximum(T_surface - T_snow_melt, 0.0)
+        melt_rate = snow_melt_rate * jnp.maximum(T_sfc - T_snow_melt, 0.0)
         snow_melt = jnp.minimum(melt_rate * dt, snow_available)
 
     snow_new = jnp.maximum(snow_available - snow_melt, 0.0)

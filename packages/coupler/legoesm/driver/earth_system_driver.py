@@ -216,10 +216,10 @@ class EarthSystemDriver:
 
         # Feed surface response back: update atmosphere's land surface
         # temperature override if available.  This is the primary feedback
-        # mechanism — the coupler's blended T_surface influences the next
+        # mechanism — the coupler's blended T_sfc influences the next
         # atmosphere segment's boundary layer computation.
         if hasattr(driver, '_sfc_T_override'):
-            driver._sfc_T_override = sfc_response.T_surface
+            driver._sfc_T_override = sfc_response.T_sfc
         # Store last surface response for diagnostics
         self._last_sfc_response = sfc_response
 

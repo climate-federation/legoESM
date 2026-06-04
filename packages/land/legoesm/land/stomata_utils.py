@@ -19,7 +19,7 @@ from legoesm.land.carbon.stomata import (
 
 
 def compute_effective_beta(
-    T_surface: jnp.ndarray,
+    T_sfc: jnp.ndarray,
     forcing: AtmToSurface,
     beta_soil: jnp.ndarray,
     config,
@@ -35,7 +35,7 @@ def compute_effective_beta(
 
     Parameters
     ----------
-    T_surface : jnp.ndarray
+    T_sfc : jnp.ndarray
         Surface temperature [K].
     forcing : AtmToSurface
         Atmospheric forcing fields (provides sw_down, co2_ppmv,
@@ -75,14 +75,14 @@ def compute_effective_beta(
         if config.carbon.scheme == "differland" and carbon_state is not None:
             LAI = carbon_state.C_fol / _carbon.LCMA
             gs, gpp_farq = coupled_farquhar_stomata(
-                T_surface, forcing.sw_down, forcing.co2_ppmv,
+                T_sfc, forcing.sw_down, forcing.co2_ppmv,
                 forcing.q_lowest, forcing.p_surface, LAI, beta_soil,
                 _stomata)
             beta = compute_stomatal_beta(
                 gs, LAI, beta_soil, _stomata)
         else:
             gs = jarvis_gs(
-                T_surface, forcing.sw_down, forcing.q_lowest,
+                T_sfc, forcing.sw_down, forcing.q_lowest,
                 forcing.p_surface, beta_soil, _stomata)
             beta = compute_stomatal_beta(
                 gs, None, beta_soil, _stomata)

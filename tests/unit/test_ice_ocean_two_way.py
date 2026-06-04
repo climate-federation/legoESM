@@ -29,7 +29,7 @@ from legoesm import constants
 def _zero_tile(shape):
     z = jnp.zeros(shape)
     return TileResponse(
-        T_surface=z, albedo=z, emissivity=z, z0=z, q_surface=z, shflx=z,
+        T_sfc=z, albedo=z, emissivity=z, z0=z, q_surface=z, shflx=z,
         lhflx=z, tau_x=z, tau_y=z, lw_up=z, u_ocean_sfc=z, v_ocean_sfc=z,
         co2_flux=z, freshwater_flux=z, ocean_heat_extraction=z,
         ocean_stress_x=z, ocean_stress_y=z, surface_mass_flux=z, salt_flux=z)

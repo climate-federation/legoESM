@@ -287,7 +287,7 @@ def ocean_tile_response(
     evap_rate = lhflx / constants.L_v   # kg/m²/s, positive = up (ocean → atm)
     freshwater_flux = forcing.precip_total - evap_rate
     return TileResponse(
-        T_surface=ocean_sst,
+        T_sfc=ocean_sst,
         albedo=alpha_ocean,
         emissivity=jnp.full(shape, config.ocean_emissivity, dtype=_ssh_dtype),
         z0=jnp.full(shape, config.ocean_z0, dtype=_ssh_dtype),

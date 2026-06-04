@@ -528,7 +528,7 @@ class CoupledESMDriver:
         if has_co2:
             terms.append(jnp.mean(self._co2_field))
         if has_T_sfc:
-            terms.append(jnp.mean(self._last_sfc_response.T_surface))
+            terms.append(jnp.mean(self._last_sfc_response.T_sfc))
         host = np.asarray(jnp.stack(terms))
 
         diag = {

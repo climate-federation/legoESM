@@ -78,7 +78,7 @@ def accumulate(
     """Add one sub-step to the accumulator, weighted by dt."""
     dt_arr = jnp.asarray(dt, dtype=acc.total_dt.dtype)
     return FluxAccumulator(
-        sum_T_surface=acc.sum_T_surface + dt_arr * sfc.T_surface,
+        sum_T_surface=acc.sum_T_surface + dt_arr * sfc.T_sfc,
         sum_albedo=acc.sum_albedo + dt_arr * sfc.albedo,
         sum_emissivity=acc.sum_emissivity + dt_arr * sfc.emissivity,
         sum_z0=acc.sum_z0 + dt_arr * sfc.z0,
@@ -109,7 +109,7 @@ def mean_accumulator(acc: FluxAccumulator) -> SurfaceToAtm:
     """Compute dt-weighted mean from the accumulator."""
     inv_dt = 1.0 / jnp.clip(acc.total_dt, _tiny(acc.total_dt.dtype), None)
     return SurfaceToAtm(
-        T_surface=acc.sum_T_surface * inv_dt,
+        T_sfc=acc.sum_T_surface * inv_dt,
         albedo=acc.sum_albedo * inv_dt,
         emissivity=acc.sum_emissivity * inv_dt,
         z0=acc.sum_z0 * inv_dt,
@@ -138,9 +138,9 @@ def accumulator_from_flux(
     dtype: jnp.dtype | None = None,
 ) -> FluxAccumulator:
     """Create an accumulator seeded with one constant-flux segment."""
-    dt_arr = jnp.asarray(dt, dtype=dtype if dtype is not None else sfc.T_surface.dtype)
+    dt_arr = jnp.asarray(dt, dtype=dtype if dtype is not None else sfc.T_sfc.dtype)
     return FluxAccumulator(
-        sum_T_surface=dt_arr * sfc.T_surface,
+        sum_T_surface=dt_arr * sfc.T_sfc,
         sum_albedo=dt_arr * sfc.albedo,
         sum_emissivity=dt_arr * sfc.emissivity,
         sum_z0=dt_arr * sfc.z0,

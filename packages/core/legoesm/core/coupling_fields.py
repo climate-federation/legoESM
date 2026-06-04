@@ -33,7 +33,7 @@ class AtmToSurface(NamedTuple):
 class TileResponse(NamedTuple):
     """Per-tile surface response returned to the coupler.
 
-    **Temporal semantics**: state fields (``T_surface``, ``q_surface``,
+    **Temporal semantics**: state fields (``T_sfc``, ``q_surface``,
     ``albedo``, ``lw_up``) reflect the **end-of-step** surface state.
     Turbulent fluxes (``shflx``, ``lhflx``, ``tau_x``, ``tau_y``) are
     computed from the **beginning-of-step** state and represent the
@@ -48,7 +48,7 @@ class TileResponse(NamedTuple):
     Tiles that do not produce a freshwater channel return zeros.
     Added in the Physical_Consistency cycle (audit F4).
     """
-    T_surface: jax.Array         # [end-of-step] Surface skin temperature [K]
+    T_sfc: jax.Array         # [end-of-step] Surface skin temperature [K]
     albedo: jax.Array            # [end-of-step] Surface albedo [0-1]
     emissivity: jax.Array        # Surface emissivity [0-1]
     z0: jax.Array                # Roughness length [m]
@@ -120,7 +120,7 @@ class TileResponse(NamedTuple):
 
 class SurfaceToAtm(NamedTuple):
     """Blended surface -> atmosphere coupling fields. Shape (6, n, n)."""
-    T_surface: jax.Array
+    T_sfc: jax.Array
     albedo: jax.Array
     emissivity: jax.Array
     z0: jax.Array

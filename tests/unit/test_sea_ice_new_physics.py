@@ -985,7 +985,7 @@ class TestGridValidation:
             jnp.zeros(shape), jnp.zeros(shape), config, 1.0, 3600.0, grid=grid,
         )
         assert jnp.all(jnp.isfinite(new_state.h_ice.data))
-        assert jnp.all(jnp.isfinite(resp.T_surface))
+        assert jnp.all(jnp.isfinite(resp.T_sfc))
 
 
 # ==============================================================================

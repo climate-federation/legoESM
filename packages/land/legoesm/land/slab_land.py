@@ -302,7 +302,7 @@ def step_land(
         co2_flux = jnp.zeros_like(T_soil)
 
     response = TileResponse(
-        T_surface=T_soil_new,
+        T_sfc=T_soil_new,
         albedo=alpha_new,
         emissivity=jnp.full(T_soil.shape, emissivity, dtype=T_soil.dtype),
         z0=jnp.full(T_soil.shape, z0, dtype=T_soil.dtype),

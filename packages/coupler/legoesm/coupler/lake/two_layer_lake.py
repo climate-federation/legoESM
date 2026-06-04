@@ -201,7 +201,7 @@ def step_lake(
     evap_rate = lhflx / L_eff
     freshwater_flux = forcing.precip_total - evap_rate
     response = TileResponse(
-        T_surface=T_epi_new,
+        T_sfc=T_epi_new,
         albedo=jnp.full(T_epi.shape, config.albedo_lake, dtype=_t_dtype),
         emissivity=jnp.full(T_epi.shape, config.emissivity_lake, dtype=_t_dtype),
         z0=jnp.full(T_epi.shape, config.z0_lake, dtype=_t_dtype),

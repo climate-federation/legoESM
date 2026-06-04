@@ -64,10 +64,10 @@ def _make_unstable_columns(ncol=4, nlev=10):
 
     # Temperature: warm surface, decreasing faster than moist adiabat
     # (conditionally unstable)
-    T_surface = 300.0
+    T_sfc = 300.0
     T_top = 200.0
     T = jnp.broadcast_to(
-        jnp.linspace(T_top, T_surface, nlev)[None, :],
+        jnp.linspace(T_top, T_sfc, nlev)[None, :],
         (ncol, nlev),
     )
 

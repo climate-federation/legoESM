@@ -545,7 +545,7 @@ def _step_slab(
     ocean_stress_y = -tau_oi_y
 
     response = TileResponse(
-        T_surface=T_ice_new,
+        T_sfc=T_ice_new,
         albedo=alpha_ice,
         emissivity=jnp.full(h.shape, config.emissivity_ice, dtype=_h_dtype),
         z0=jnp.full(h.shape, config.z0_ice, dtype=_h_dtype),
@@ -1498,7 +1498,7 @@ def _build_response(
         ocean_stress_y = jnp.zeros_like(h)
 
     return TileResponse(
-        T_surface=T_ice,
+        T_sfc=T_ice,
         albedo=alpha_ice,
         emissivity=jnp.full(h.shape, config.emissivity_ice, dtype=h.dtype),
         z0=jnp.full(h.shape, config.z0_ice, dtype=h.dtype),
@@ -2562,7 +2562,7 @@ def _step_dynamic_v2(
     ocean_stress_y = -tau_oi_y
 
     response = TileResponse(
-        T_surface=T_agg,
+        T_sfc=T_agg,
         albedo=alpha_resp,
         emissivity=jnp.full(h_agg.shape, config.emissivity_ice, dtype=h_agg.dtype),
         z0=jnp.full(h_agg.shape, config.z0_ice, dtype=h_agg.dtype),

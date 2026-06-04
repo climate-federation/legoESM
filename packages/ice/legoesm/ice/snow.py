@@ -39,7 +39,7 @@ from legoesm import constants
 
 def combined_conductive_flux(
     T_base: jnp.ndarray,
-    T_surface: jnp.ndarray,
+    T_sfc: jnp.ndarray,
     h_ice: jnp.ndarray,
     h_snow: jnp.ndarray,
     k_ice: float,
@@ -49,7 +49,7 @@ def combined_conductive_flux(
 ) -> jnp.ndarray:
     """Conductive flux through the combined snow+ice column.
 
-    F_cond = (T_base - T_surface) / (h_snow/k_snow + h_ice/k_ice)
+    F_cond = (T_base - T_sfc) / (h_snow/k_snow + h_ice/k_ice)
 
     Smooth lower bounds prevent ``1/0`` when a layer is absent.
     Sign convention: positive = upward energy into the surface
@@ -60,7 +60,7 @@ def combined_conductive_flux(
     T_base : array
         Bottom (ice-ocean interface) temperature [K].  Sea-ice models
         typically use ``T_freeze_ocean ≈ 271.35 K``.
-    T_surface : array
+    T_sfc : array
         Snow / ice top surface temperature [K].
     h_ice, h_snow : array
         Ice and snow column thickness [m].
@@ -72,7 +72,7 @@ def combined_conductive_flux(
     """
     return combined_conductance(
         h_ice, h_snow, k_ice, k_snow, h_ice_min, h_snow_min,
-    ) * (T_base - T_surface)
+    ) * (T_base - T_sfc)
 
 
 def combined_conductance(
@@ -86,7 +86,7 @@ def combined_conductance(
     """Series snow+ice thermal conductance ``K = 1 / R_total`` [W/(m^2 K)].
 
     ``R_total = h_snow/k_snow + h_ice/k_ice`` (with smooth thickness
-    floors).  The conductive flux is ``K * (T_base - T_surface)``.  Exposed
+    floors).  The conductive flux is ``K * (T_base - T_sfc)``.  Exposed
     separately from :func:`combined_conductive_flux` so the surface energy
     balance can treat the conductive term semi-implicitly (evaluate it at
     the *new* surface temperature), which is unconditionally stable for thin

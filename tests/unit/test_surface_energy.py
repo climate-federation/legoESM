@@ -31,7 +31,7 @@ SHAPE = (3, 4, 4)  # small but non-trivial
 def _call(
     sw_down=200.0,
     lw_down=300.0,
-    T_surface=288.0,
+    T_sfc=288.0,
     alpha=0.1,
     emissivity=0.95,
     shape=SHAPE,
@@ -40,7 +40,7 @@ def _call(
     return surface_radiation_fluxes(
         jnp.full(shape, sw_down),
         jnp.full(shape, lw_down),
-        jnp.full(shape, T_surface),
+        jnp.full(shape, T_sfc),
         jnp.full(shape, alpha),
         emissivity,
     )
@@ -96,7 +96,7 @@ def test_lw_up_magnitude_matches_stefan_boltzmann():
 
 
 def test_lw_up_monotone_with_temperature():
-    """lw_up strictly increases with T_surface (Stefan-Boltzmann T^4 law)."""
+    """lw_up strictly increases with T_sfc (Stefan-Boltzmann T^4 law)."""
     temps = jnp.array([250.0, 270.0, 288.0, 300.0, 320.0])
     for i in range(len(temps) - 1):
         _, _, lw_up_lo = surface_radiation_fluxes(
@@ -365,7 +365,7 @@ def test_grad_sw_net_wrt_alpha_is_negative():
 
 
 def test_grad_wrt_emissivity_lw_up_is_positive_when_T_warm():
-    """d(lw_up)/d(emissivity) > 0 when T_surface is warm (emission > lw_down).
+    """d(lw_up)/d(emissivity) > 0 when T_sfc is warm (emission > lw_down).
 
     lw_up = eps*sigma*T^4 + (1-eps)*lw_down
     d(lw_up)/d(eps) = sigma*T^4 - lw_down > 0 when emission > lw_down.
@@ -387,7 +387,7 @@ def test_grad_wrt_emissivity_lw_up_is_positive_when_T_warm():
 
 
 def test_full_output_differentiable_via_reduction():
-    """sum(sw_net + lw_net + lw_up) is differentiable wrt T_surface over a 3D array."""
+    """sum(sw_net + lw_net + lw_up) is differentiable wrt T_sfc over a 3D array."""
     def total_flux(T_sfc):
         sw_net, lw_net, lw_up = surface_radiation_fluxes(
             jnp.full(SHAPE, 200.0),

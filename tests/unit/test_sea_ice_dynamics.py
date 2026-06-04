@@ -717,7 +717,7 @@ class TestStepSeaIceBackwardCompat:
         )
         assert isinstance(new_state, SeaIceState)
         assert jnp.all(jnp.isfinite(new_state.h_ice.data))
-        assert jnp.all(jnp.isfinite(response.T_surface))
+        assert jnp.all(jnp.isfinite(response.T_sfc))
 
     def test_slab_accepts_dynamic_state(self):
         """Slab mode should accept DynamicSeaIceState and convert."""
@@ -853,7 +853,7 @@ class TestMultiCategoryIntegration:
         assert new_state.h_ice.data.shape == h_mc.shape
         assert jnp.all(jnp.isfinite(new_state.h_ice.data))
         # Response should be 2D (aggregated)
-        assert response.T_surface.shape == shape
+        assert response.T_sfc.shape == shape
 
 
 # ==============================================================================
@@ -1645,7 +1645,7 @@ class TestMEVPMultiCategory:
         assert jnp.all(conc_sum >= 0.0)
         assert jnp.all(conc_sum <= 1.0 + 1e-10)
         # Response aggregated to 2D
-        assert response.T_surface.shape == shape
+        assert response.T_sfc.shape == shape
 
 
 class TestMEVPTransport:
@@ -2769,7 +2769,7 @@ class TestAllOceanGridsCoupled:
         # ---- coupler blend delivers a paired exchange on this grid ----
         zt = jnp.zeros(shape)
         zero = TileResponse(
-            T_surface=zt, albedo=zt, emissivity=zt, z0=zt, q_surface=zt,
+            T_sfc=zt, albedo=zt, emissivity=zt, z0=zt, q_surface=zt,
             shflx=zt, lhflx=zt, tau_x=zt, tau_y=zt, lw_up=zt, u_ocean_sfc=zt,
             v_ocean_sfc=zt, co2_flux=zt, freshwater_flux=zt,
             ocean_heat_extraction=zt, ocean_stress_x=zt, ocean_stress_y=zt,

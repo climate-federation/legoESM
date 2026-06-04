@@ -165,10 +165,10 @@ class TestTileResponseConsistency(unittest.TestCase):
 
         eps = config.emissivity_land
         # lw_up = emitted + reflected = eps*sigma*T^4 + (1-eps)*lw_down
-        expected_lw_up = (eps * constants.sigma_sb * resp.T_surface ** 4
+        expected_lw_up = (eps * constants.sigma_sb * resp.T_sfc ** 4
                           + (1.0 - eps) * forcing.lw_down)
         npt.assert_allclose(resp.lw_up, expected_lw_up, rtol=1e-6,
-                            err_msg="lw_up should match end-of-step T_surface")
+                            err_msg="lw_up should match end-of-step T_sfc")
 
     def test_q_surface_matches_end_of_step_state(self):
         """q_surface should be consistent with end-of-step T and moisture."""
@@ -183,7 +183,7 @@ class TestTileResponseConsistency(unittest.TestCase):
         state2, resp, _ = step_land(state, forcing, config, U_min=1.0, dt=3600.0)
 
         # q_surface should be beta_new * q_sat(T_new, p)
-        q_sat = saturation_mixing_ratio(resp.T_surface, forcing.p_surface)
+        q_sat = saturation_mixing_ratio(resp.T_sfc, forcing.p_surface)
         # beta_new from post-step W
         W_new = state2.W_bucket.data
         w_frac = jnp.clip(W_new / config.W_max, 0.0, 1.0)

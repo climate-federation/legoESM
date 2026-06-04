@@ -102,8 +102,8 @@ class Test13e_CouplingInterface:
             snow_age=_field(0.0, "snow_age", "s"),
         )
         new_state, resp, _ = step_land(state, make_forcing(), LandConfig(), 1.0, DT)
-        # T_surface in response should equal updated T_soil
-        assert jnp.allclose(resp.T_surface, new_state.T_soil.data, atol=1e-10)
+        # T_sfc in response should equal updated T_soil
+        assert jnp.allclose(resp.T_sfc, new_state.T_soil.data, atol=1e-10)
 
 
 class Test13f_ConsistentSignConventions:

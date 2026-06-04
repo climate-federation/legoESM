@@ -109,8 +109,8 @@ def step_multilayer_land(
     theta_fc = _get(lp, "theta_fc", config.theta_fc)
 
     # Surface temperature = top soil layer
-    T_surface = T_soil[:, 0]
-    ncol = T_surface.shape[0]
+    T_sfc = T_soil[:, 0]
+    ncol = T_sfc.shape[0]
 
     # --- Smooth wind speed floor ---
     wind_speed = jnp.sqrt(
@@ -167,7 +167,7 @@ def step_multilayer_land(
 
     # --- Stomatal conductance (if enabled) ---
     beta, gpp_farq = compute_effective_beta(
-        T_surface, forcing, beta_soil, config, carbon_state, dt,
+        T_sfc, forcing, beta_soil, config, carbon_state, dt,
         land_params=lp,
     )
 
@@ -177,8 +177,8 @@ def step_multilayer_land(
     stomatal_ratio = beta / jnp.maximum(beta_soil, 1e-10)
 
     # --- Surface saturation humidity: use ice saturation over snow ---
-    q_sat_liq = saturation_mixing_ratio(T_surface, forcing.p_surface)
-    q_sat_ice = saturation_mixing_ratio_ice(T_surface, forcing.p_surface)
+    q_sat_liq = saturation_mixing_ratio(T_sfc, forcing.p_surface)
+    q_sat_ice = saturation_mixing_ratio_ice(T_sfc, forcing.p_surface)
     # Treat a column as snow-covered when:
     #   (a) Existing snowpack > 1e-6 kg/m² (always snow regardless of
     #       fresh accumulation OR melt), OR
@@ -190,13 +190,13 @@ def step_multilayer_land(
     # receiving precip_snow would have been routed as L_s
     # sublimation over an ice qsat surface for the whole turbulent
     # step even though the snow melts away in seconds.  By gating
-    # on T_surface < T_freeze we only switch to snow phase when the
+    # on T_sfc < T_freeze we only switch to snow phase when the
     # snow can survive.  Existing snow always uses snow phase
     # regardless of surface temperature (snow_budget handles melt
     # energy correctly).  Iter-68 audit fix.
     fresh_snow_mass = forcing.precip_snow * dt
     has_existing_snow = snow > 1e-6
-    has_surviving_fresh_snow = (fresh_snow_mass > 1e-6) & (T_surface < constants.T_freeze)
+    has_surviving_fresh_snow = (fresh_snow_mass > 1e-6) & (T_sfc < constants.T_freeze)
     has_snow = has_existing_snow | has_surviving_fresh_snow
     q_sat_sfc = jnp.where(has_snow, q_sat_ice, q_sat_liq)
     # Over snow, moisture is freely available from the snowpack (beta=1)
@@ -218,7 +218,7 @@ def step_multilayer_land(
         tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
             forcing.u_lowest, forcing.v_lowest,
             forcing.T_lowest, forcing.q_lowest,
-            T_surface, q_sfc, rho,
+            T_sfc, q_sfc, rho,
             z_ref=config.z_ref,
             z0_init=z0,
             scheme=config.bulk_scheme,
@@ -229,7 +229,7 @@ def step_multilayer_land(
         tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
             forcing.u_lowest, forcing.v_lowest,
             forcing.T_lowest, forcing.q_lowest,
-            T_surface, q_sfc, rho, wind_speed,
+            T_sfc, q_sfc, rho, wind_speed,
             config.Cd_land, config.Ch_land,
             L_latent=L_eff,
         )
@@ -237,7 +237,7 @@ def step_multilayer_land(
     # --- Surface albedo (snow-mass dependent) ---
     # Use the SAME effective snow mass as the bulk-flux phase decision
     # (iter-68 fix): existing snow always counts; fresh snow counts
-    # only when T_surface < T_freeze (it survives the step).  Without
+    # only when T_sfc < T_freeze (it survives the step).  Without
     # this consistency, SW absorption would lag the LH/SH phase
     # transition by one step on every fresh-snow event.  Iter-71 fix.
     snow_effective = jnp.where(
@@ -250,11 +250,11 @@ def step_multilayer_land(
             lat, snow_effective, snow_age, config.land_albedo,
         )
     else:
-        alpha = jnp.full(T_surface.shape, albedo_land, dtype=T_surface.dtype)
+        alpha = jnp.full(T_sfc.shape, albedo_land, dtype=T_sfc.dtype)
 
     # --- Radiation ---
     sw_net, lw_net, lw_up = surface_radiation_fluxes(
-        forcing.sw_down, forcing.lw_down, T_surface, alpha,
+        forcing.sw_down, forcing.lw_down, T_sfc, alpha,
         emissivity,
     )
 
@@ -265,7 +265,7 @@ def step_multilayer_land(
     # --- Snow budget (energy-limited melt) ---
     # G_surface drives the melt: M = max(0, G * dt / L_f)
     snow_new, snow_age_new, snow_melt = update_snow(
-        snow, snow_age, T_surface, forcing.precip_snow, dt,
+        snow, snow_age, T_sfc, forcing.precip_snow, dt,
         Q_net=G_surface,
         snow_melt_rate=config.snow_melt_rate,
         T_snow_melt=config.T_snow_melt,
@@ -396,7 +396,7 @@ def step_multilayer_land(
     )
 
     # --- Build TileResponse ---
-    T_surface_new = T_soil_new[:, 0]
+    T_sfc_new = T_soil_new[:, 0]
 
     # Post-step albedo: reflects updated snow for the next atmosphere step
     if config.snow_albedo_feedback and lat is not None:
@@ -407,7 +407,7 @@ def step_multilayer_land(
         alpha_new = alpha
 
     _, _, lw_up_new = surface_radiation_fluxes(
-        forcing.sw_down, forcing.lw_down, T_surface_new, alpha_new,
+        forcing.sw_down, forcing.lw_down, T_sfc_new, alpha_new,
         emissivity,
     )
 
@@ -444,8 +444,8 @@ def step_multilayer_land(
     )
     beta_soil_new = config.beta_min + (1.0 - config.beta_min) * w_frac_rz_new
     beta_new = stomatal_ratio * beta_soil_new
-    q_sat_liq_new = saturation_mixing_ratio(T_surface_new, forcing.p_surface)
-    q_sat_ice_new = saturation_mixing_ratio_ice(T_surface_new, forcing.p_surface)
+    q_sat_liq_new = saturation_mixing_ratio(T_sfc_new, forcing.p_surface)
+    q_sat_ice_new = saturation_mixing_ratio_ice(T_sfc_new, forcing.p_surface)
     has_snow_new = snow_new > 1e-6
     q_sat_sfc_new = jnp.where(has_snow_new, q_sat_ice_new, q_sat_liq_new)
     # Over snow, moisture is freely available (beta=1)
@@ -458,11 +458,11 @@ def step_multilayer_land(
         # Recompute Farquhar GPP with updated T and moisture so that
         # photosynthesis and respiration use consistent end-of-step state.
         _, gpp_farq_new = compute_effective_beta(
-            T_surface_new, forcing, beta_soil_new, config, carbon_state, dt,
+            T_sfc_new, forcing, beta_soil_new, config, carbon_state, dt,
             land_params=lp,
         )
         carbon_state_new, co2_flux = step_carbon(
-            carbon_state, forcing.sw_down, T_surface_new, forcing.co2_ppmv,
+            carbon_state, forcing.sw_down, T_sfc_new, forcing.co2_ppmv,
             beta_soil_new, lat_arr, doy, forcing.precip_total, config.carbon, dt,
             gpp_override=gpp_farq_new,
         )
@@ -471,10 +471,10 @@ def step_multilayer_land(
         co2_flux = jnp.zeros(ncol)
 
     response = TileResponse(
-        T_surface=T_surface_new,
+        T_sfc=T_sfc_new,
         albedo=alpha_new,
-        emissivity=jnp.full(T_surface.shape, emissivity, dtype=T_surface.dtype),
-        z0=jnp.full(T_surface.shape, z0, dtype=T_surface.dtype),
+        emissivity=jnp.full(T_sfc.shape, emissivity, dtype=T_sfc.dtype),
+        z0=jnp.full(T_sfc.shape, z0, dtype=T_sfc.dtype),
         q_surface=q_sfc_new,
         shflx=shflx,
         lhflx=lhflx_actual,

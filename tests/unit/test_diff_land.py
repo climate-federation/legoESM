@@ -145,15 +145,15 @@ class TestSnowBudgetGrad:
         snow_age = 1000.0 * jnp.ones(ncol)
         precip_snow = 1e-5 * jnp.ones(ncol)
 
-        def loss(T_surface):
+        def loss(T_sfc):
             snow_new, _, _ = update_snow(
-                snow, snow_age, T_surface, precip_snow, dt=3600.0,
+                snow, snow_age, T_sfc, precip_snow, dt=3600.0,
             )
             return jnp.sum(snow_new ** 2)
 
         T_sfc = 275.0 * jnp.ones(ncol)
         grad = jax.grad(loss)(T_sfc)
-        assert_gradient_ok(grad, "Snow budget w.r.t. T_surface")
+        assert_gradient_ok(grad, "Snow budget w.r.t. T_sfc")
 
 
 # ============================================================================

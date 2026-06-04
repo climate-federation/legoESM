@@ -261,7 +261,7 @@ class TestCouplerDifferentiability:
 
         def loss(sst):
             _, response = step_fn(sfc, atm, tile, sst, ocean_u, ocean_v, dt=300.0)
-            return jnp.mean(response.T_surface ** 2)
+            return jnp.mean(response.T_sfc ** 2)
 
         grads = jax.grad(loss)(ocean_sst)
         assert jnp.all(jnp.isfinite(grads))
