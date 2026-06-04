@@ -25,6 +25,8 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm import constants
+
 logger = logging.getLogger(__name__)
 
 
@@ -1665,7 +1667,7 @@ class SolarConfig(NamedTuple):
         start) to the absolute day count used in file-based solar records
         whose time axis is expressed as "days since 1850-01-01".
     """
-    S_0: float = 1360.0
+    S_0: float = constants.S_0
     source: str = "constant"
     path: str = ""
     tsi_var: str = "tsi"

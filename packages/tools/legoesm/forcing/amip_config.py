@@ -73,7 +73,7 @@ class AMIPExperimentConfig(NamedTuple):
     # Physics — gray radiation
     tau_equator: float = 7.2
     tau_pole: float = 1.8
-    S_0: float = 1360.0
+    S_0: float = constants.S_0
     sbm_tau_c: float = 7200.0
     sbm_RH_ref: float = 0.7
     sbm_cape_threshold: float = 70.0

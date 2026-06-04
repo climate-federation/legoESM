@@ -11,6 +11,7 @@ from typing import NamedTuple
 
 from legoesm.forcing.amip_config import AMIPExperimentConfig
 
+from legoesm import constants
 
 # ---------------------------------------------------------------------------
 # Data structure
@@ -91,7 +92,7 @@ TUNING_PARAMETERS: dict[str, TuningParameter] = {
     ),
     "S_0": TuningParameter(
         name="S_0",
-        default=1360.0,
+        default=constants.S_0,
         min_val=1340.0,
         max_val=1380.0,
         units="W/m^2",
