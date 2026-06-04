@@ -480,11 +480,24 @@ def instantiate(
     if not operators:
         return grid
 
-    # ``create_regional_grid('latlon', ...)`` returns a plain ``(grid, wall_mask)``
-    # 2-tuple; unwrap the grid.  But most grids are themselves NamedTuples (e.g.
-    # CubedSphereGrid), which are ALSO tuples — so only unwrap a PLAIN tuple
-    # (NamedTuples carry ``_fields``); otherwise grid[0] would grab the first field
-    # (an int) instead of the grid.
-    grid_obj = grid[0] if isinstance(grid, tuple) and not hasattr(grid, "_fields") else grid
+    # Select the operator-ready grid object per (family, extent).  Regional
+    # factories return varied PLAIN tuples (latlon -> (grid, wall_mask);
+    # cubed_sphere panel -> (panel, cdgrid_panel)), while global grids are
+    # themselves NamedTuples (CubedSphereGrid etc., which are ALSO tuples) — so a
+    # blanket ``grid[0]`` unwrap is wrong (it grabs a NamedTuple's first field, or
+    # discards the panel's already-built CDGrid).
+    if extent == "regional":
+        if g == "latlon":
+            grid_obj = grid[0]  # (grid, wall_mask) — wrap the grid, drop the mask
+        else:
+            raise ValueError(
+                f"operators=True is not yet implemented for a regional {g!r} grid "
+                f"(its single-face panel needs panel-local C-D metrics, distinct "
+                f"from the global six-face supergrid metrics); only regional latlon "
+                f"and the global grids expose operators here. Requires implementation."
+            )
+    else:
+        # global / double_periodic: the grid IS the operator grid.
+        grid_obj = grid
     ops = _build_operators(g, grid_obj)
     return grid, ops

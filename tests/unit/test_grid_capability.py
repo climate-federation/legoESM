@@ -93,6 +93,15 @@ def test_cubed_sphere_operators_are_callable():
     assert gx.shape[0] == 6 and gy.shape[0] == 6
 
 
+def test_regional_cubed_sphere_operators_raises_not_implemented():
+    # Regional cubed-sphere panels need panel-local C-D metrics (not the global
+    # six-face supergrid metrics); operators=True must raise a clear
+    # requires-implementation error, not silently discard the panel's CDGrid or
+    # build six-face operators for a one-face panel.
+    with pytest.raises(ValueError, match="[Ii]mplement"):
+        instantiate("cubed_sphere", extent="regional", operators=True, n=8)
+
+
 # ---------------------------------------------------------------------------
 # Error cases — the whole point: flag unavailable combinations
 # ---------------------------------------------------------------------------
