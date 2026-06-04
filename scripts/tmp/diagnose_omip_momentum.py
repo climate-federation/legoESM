@@ -49,7 +49,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
 from scipy.ndimage import binary_erosion
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import jax

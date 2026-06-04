@@ -30,7 +30,7 @@ import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 
 
-_REPO = Path(__file__).resolve().parent.parent
+_REPO = Path(__file__).resolve().parents[2]
 _BASELINE = _REPO / "results" / "atmosphere" / "hydrostatic" / "held_suarez" / "cubed_sphere" / "C36" / "hybrid"
 _ITER189 = _REPO / "results" / "atmosphere_iter189" / "hydrostatic" / "held_suarez" / "cubed_sphere" / "C36" / "hybrid"
 _OUT = _REPO / "results" / "atmosphere_iter189" / "iter189_cube_imprint_comparison.png"

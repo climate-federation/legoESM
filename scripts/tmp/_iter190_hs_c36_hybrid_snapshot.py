@@ -46,7 +46,7 @@ from legoesm.grids.regridding import (
 from legoesm.grids.vertical import standard_hybrid_levels
 
 
-_REPO = Path(__file__).resolve().parent.parent
+_REPO = Path(__file__).resolve().parents[2]
 _OUT_DIR = _REPO / "results" / "iter190_hs_c36_hybrid"
 
 
