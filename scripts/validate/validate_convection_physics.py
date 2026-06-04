@@ -45,7 +45,7 @@ import jax.numpy as jnp
 from legoesm import constants
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.atmosphere.physics.convection.config import (
-    SBMConfig, MassFluxConfig, EDMFConfig, KuoConfig,
+    SBMConfig, MassFluxConfig, ConvectiveEDMFConfig, KuoConfig,
     ZhangMcFarlaneConfig, KainFritschConfig, EmanuelConfig,
     TiedtkeConfig, BechtoldConfig,
 )
@@ -142,7 +142,7 @@ def call_scheme(
     if name == "edmf":
         a_u0 = jnp.zeros((ncol,)) if fresh_carry else jnp.full((ncol,), 0.05)
         out, _ = edmf_convection(
-            **common, a_u=a_u0, config=EDMFConfig(),
+            **common, a_u=a_u0, config=ConvectiveEDMFConfig(),
         )
         return out
     if name == "kuo":
