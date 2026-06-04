@@ -18,14 +18,14 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 echo "=== HOST ==="; hostname; date; nvidia-smi --query-gpu=name --format=csv,noheader
 
 echo; echo "### ARM A: --partial-cell adcroft, WOA cold-start, 30d, diag 0.5d"
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/run_omip_core2.py \
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/run/run_omip_core2.py \
   --grid tripole --woa-init --partial-cell --pgf-scheme adcroft \
   --years 0.0833 --dt 600 --diag-every-days 0.5 \
   --output results/omip_nemo/pcellv2_adcroft 2>&1 | grep -vE "Constant folding|This isn|If you|reduce-window|slow_operation|^$"
 echo "[armA_rc]=${PIPESTATUS[0]}"
 
 echo; echo "### ARM B: --partial-cell smc03, WOA cold-start, 30d, diag 0.5d"
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/run_omip_core2.py \
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/run/run_omip_core2.py \
   --grid tripole --woa-init --partial-cell --pgf-scheme smc03 \
   --years 0.0833 --dt 600 --diag-every-days 0.5 \
   --output results/omip_nemo/pcellv2_smc03 2>&1 | grep -vE "Constant folding|This isn|If you|reduce-window|slow_operation|^$"

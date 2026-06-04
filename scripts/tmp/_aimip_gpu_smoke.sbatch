@@ -46,7 +46,7 @@ PY
 # Run smoke variant of the multi-step suite (only the classical
 # variant -- if that traces, the column_nn and sfno_physics variants
 # will too since they share the training loop).
-$PYTHON -u scripts/run_aimip.py \
+$PYTHON -u scripts/run/run_aimip.py \
     --suite config/aimip/aimip_suite_multistep.yaml \
     --variants classical \
     --smoke

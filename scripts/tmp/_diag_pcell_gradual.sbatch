@@ -20,7 +20,7 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 echo "=== HOST ==="; hostname; date; nvidia-smi --query-gpu=name --format=csv,noheader
 
 echo; echo "### ARM A: --partial-cell smc03 + nudge60 + drag(1,120), 180d"
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/run_omip_core2.py \
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/run/run_omip_core2.py \
   --grid tripole --woa-init --partial-cell --pgf-scheme smc03 \
   --nudge-woa-tau-days 60 --spinup-drag-tau-days 1 --spinup-drag-days 120 \
   --years 0.5 --dt 600 --diag-every-days 5 \
@@ -29,7 +29,7 @@ JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/run_omip_core2.py \
 echo "[armA_rc]=${PIPESTATUS[0]}"
 
 echo; echo "### ARM B: --partial-cell smc03 + nudge60(release d120) + drag(5,120), 180d"
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/run_omip_core2.py \
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/run/run_omip_core2.py \
   --grid tripole --woa-init --partial-cell --pgf-scheme smc03 \
   --nudge-woa-tau-days 60 --nudge-release-day 120 \
   --spinup-drag-tau-days 5 --spinup-drag-days 120 \

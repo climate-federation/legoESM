@@ -20,13 +20,13 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 echo "=== HOST ==="; hostname; date; nvidia-smi --query-gpu=name --format=csv,noheader
 
 echo; echo "### ARM A: tripole --partial-cell, WOA cold-start, 90d, NO drag"
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/run_omip_core2.py \
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/run/run_omip_core2.py \
   --grid tripole --woa-init --partial-cell --years 0.25 --dt 600 \
   --diag-every-days 2 --output results/omip_nemo/pcell_nodrag 2>&1
 echo "[armA_rc]=$?"
 
 echo; echo "### ARM B: tripole --partial-cell + light drag (tau10/30d), 90d"
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/run_omip_core2.py \
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/run/run_omip_core2.py \
   --grid tripole --woa-init --partial-cell --years 0.25 --dt 600 \
   --spinup-drag-tau-days 10 --spinup-drag-days 30 \
   --diag-every-days 2 --output results/omip_nemo/pcell_drag 2>&1

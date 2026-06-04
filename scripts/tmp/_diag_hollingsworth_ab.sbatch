@@ -33,7 +33,7 @@ run_arm () {
   echo "### ARM: $name"
   echo "### args: $*"
   echo "############################################################"
-  JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/run_omip_core2.py \
+  JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/run/run_omip_core2.py \
     --woa-init --dt 600 --diag-every-days 0.5 "$@" 2>&1
   echo "[arm_rc:$name]=$?"
 }
