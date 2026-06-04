@@ -29,13 +29,13 @@ regression tests in
 * 1× NVIDIA RTX 5090 Laptop (Blackwell, 82 SMs, 18 GB VRAM, PCI 02:00.0)
 * Driver/userspace mismatch (kernel module 580.126.09, userspace 580.142
   → `cuInit` returns `CUDA_ERROR_COMPAT_NOT_SUPPORTED_ON_DEVICE`)
-* Workaround that needs **no sudo**: `source scripts/gpu_env.sh` extracts
+* Workaround that needs **no sudo**: `source scripts/data/gpu_env.sh` extracts
   matching 580.126 userspace libs from the apt cache and prepends to
   `LD_LIBRARY_PATH`.  Idempotent.
 
 ```bash
 env -i HOME=$HOME PATH=$PATH JAX_ENABLE_X64=1 bash -c \
-    "source scripts/gpu_env.sh && \
+    "source scripts/data/gpu_env.sh && \
      PYTHONPATH=. .venv/bin/python -c 'import jax; print(jax.devices())'"
 # → [CudaDevice(id=0)]
 ```
@@ -47,7 +47,7 @@ recipe.
 
 ## 1. Baseline single-device JW BCW benchmark (2-day, default config)
 
-`scripts/run_baroclinic_wave_benchmark.py` produces a 2-day Jablonowski-
+`scripts/run/run_baroclinic_wave_benchmark.py` produces a 2-day Jablonowski-
 Williamson dry baroclinic wave with the default `dt`/`hyperdiff` per
 grid.  Numbers below are this iteration's actual single-device
 measurements (warm step, JIT compiled once).
@@ -66,7 +66,7 @@ on both backends for the spectral and MPAS-style dycores.
 
 ## 2. Conservation matrix (12 case × grid × dycore cells)
 
-`scripts/check_conservation_all.py` exercises every supported dycore on
+`scripts/matrix/check_conservation_all.py` exercises every supported dycore on
 every supported grid for a short integration and prints relative mass +
 energy drift.  Without conservation fixers (intrinsic dycore property)
 all twelve cells produce drifts below `4e-6`:
@@ -148,7 +148,7 @@ filter audit and is filed as a follow-up dycore issue.
 
 ## 4. Single-device strong-scaling sweep (iter-201/202, 2026-05-03)
 
-`scripts/run_strong_scaling_sweep.sh` exercises each grid at two
+`scripts/bench/run_strong_scaling_sweep.sh` exercises each grid at two
 resolutions on both backends; throughput is now persisted per cell in
 the diagnostic NPZ via `steps_per_sec`/`wall_time_s`/`backend` (added
 iter-202).  GPU sweep results (1-day BCW, warm step + JIT inline):
@@ -248,7 +248,7 @@ control-flow reorganisation, not a numerical change.
 
 ## 6. iter-206: scan-steps equivalence verifier + multi-CPU emulation result
 
-Added ``scripts/verify_scan_steps_equivalence.py`` — runs N=12 BCW
+Added ``scripts/validate/verify_scan_steps_equivalence.py`` — runs N=12 BCW
 steps via the per-step Python loop and via a single
 ``jax.lax.scan(length=N)`` kernel and compares the two final states
 leaf-by-leaf.  Tolerance is set to ``1e-3`` absolute (≈10× fp32 eps ×
@@ -348,7 +348,7 @@ the blow-up check, which was inheriting the same modulo bug.
 ## 9. iter-210: definitive multi-CPU emulation result via direct ``_do_step`` JIT
 
 To bypass the iter-207 ``CompiledShardedStep`` ``static_argnums``
-conflict, ``scripts/probe_spectral_shard.py`` jits
+conflict, ``scripts/bench/probe_spectral_shard.py`` jits
 ``model._do_step(state, dt_arr, tendency_fn)`` directly with primed
 caches.  This gets us a clean shard target without source changes.
 
@@ -448,7 +448,7 @@ numbers.
 
 ## 11. iter-214: per-grid scan-steps tuning + plot ingest mode
 
-`scripts/run_strong_scaling_sweep.sh` now uses the iter-212 honest
+`scripts/bench/run_strong_scaling_sweep.sh` now uses the iter-212 honest
 recommendation per grid:
 
 | grid          | --scan-steps | rationale                                  |
@@ -457,7 +457,7 @@ recommendation per grid:
 | cubed-sphere  |           24 | +20 % gain                                  |
 | icosahedral   |            1 | MPAS already well-fused; scan=24 was -9 %   |
 
-`scripts/plot_scaling.py --ingest 'pattern'` overrides the inline
+`scripts/plot/plot_scaling.py --ingest 'pattern'` overrides the inline
 STRONG_SCALING dict with throughput from any matching NPZ files
 (uses the iter-202-added ``steps_per_sec`` field).  Verified: ingests
 the iter-201 sweep and rewrites the GPU/CPU curve points without
@@ -506,7 +506,7 @@ The iter-219 inline dispatch dict was a private ``_AUTO_SCAN_STEPS``
 local inside ``main()`` — it could be tweaked silently by a future
 ``/clear`` cycle without any test catching the drift.  iter-220
 hoists it to a module-level ``AUTO_SCAN_STEPS`` constant
-(``scripts/run_baroclinic_wave_benchmark.py:78``) and pins the values
+(``scripts/run/run_baroclinic_wave_benchmark.py:78``) and pins the values
 with two regression tests
 (``tests/test_bcw_benchmark_scan_steps.py``):
 
@@ -685,7 +685,7 @@ hot-path PE dycores by hand.  Iter-228 codifies the result so future
     ``_halo_backend`` ×1, ``_spmd_mesh`` ×1, ``_mpi_topology`` ×2 —
     all mutated at runtime by ``set_halo_backend`` /
     ``activate_spmd_halo_backend``).
-* Wired into ``scripts/validate_scaling.sh`` as phase ``[5/5]`` so
+* Wired into ``scripts/bench/validate_scaling.sh`` as phase ``[5/5]`` so
   every iteration's pre-flight (≈2 min wall) catches drift in 0.05 s.
 * While writing the audit, found and fixed:
   - ``spectral_pe.py``: 2 inline imports (``get_backend`` /

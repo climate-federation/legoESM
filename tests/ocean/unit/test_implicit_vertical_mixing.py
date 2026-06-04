@@ -193,31 +193,3 @@ class TestStabilityAtLargeK:
         # toward the second layer's warm value.
         T_sfc_after = float(s.T.data[5, 5, 0])
         assert T_sfc_after > -2.0
-
-
-def test_vmap_vertical_diffusion_shared_kernel():
-    """vmap_vertical_diffusion is the shared stack/vmap/unstack kernel the
-    constant + Richardson schemes delegate to. Directly exercise it: a simple
-    identity diffuse_fn must pass each field through with its own coefficient,
-    and apply_diffusion=False must return zero stacks."""
-    import jax.numpy as jnp
-    import numpy as np
-    from legoesm.ocean.physics.vertical_mixing._shared import (
-        vmap_vertical_diffusion,
-    )
-    u = jnp.ones((3, 4, 2)); v = 2.0 * u; T = 3.0 * u; S = 4.0 * u
-
-    # diffuse_fn(q, coeff) = q * coeff -> checks the per-pair coefficient routing.
-    vel, tr = vmap_vertical_diffusion(
-        u, v, T, S, 10.0, 100.0, lambda q, c: q * c, apply_diffusion=True,
-    )
-    assert vel.shape == (2, 3, 4, 2) and tr.shape == (2, 3, 4, 2)
-    np.testing.assert_array_equal(np.asarray(vel[0]), np.asarray(u * 10.0))
-    np.testing.assert_array_equal(np.asarray(vel[1]), np.asarray(v * 10.0))
-    np.testing.assert_array_equal(np.asarray(tr[0]), np.asarray(T * 100.0))
-    np.testing.assert_array_equal(np.asarray(tr[1]), np.asarray(S * 100.0))
-
-    velz, trz = vmap_vertical_diffusion(
-        u, v, T, S, 10.0, 100.0, lambda q, c: q * c, apply_diffusion=False,
-    )
-    assert np.all(np.asarray(velz) == 0.0) and np.all(np.asarray(trz) == 0.0)

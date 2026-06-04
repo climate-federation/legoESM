@@ -18,7 +18,7 @@ Locations:
 - `results/ocean/eady_uniform/mpas_channel/20km/tvd_mpas_20km_U02_Bh2.3e11_Cs0.0_600d/`
 - `results/ocean/eady_uniform/cross_grid_compare_U02_600d/` — 5-run overlay
 - `results/ocean/eady_uniform/mpas_channel/20km/advection_compare_U02_600d/` — MPAS-only overlay
-- `results/ocean/eady_uniform/bci_development/*__bci_snapshots.png` — 5 per-run BCI-development figures (via new `scripts/replot_eady_bci.py`)
+- `results/ocean/eady_uniform/bci_development/*__bci_snapshots.png` — 5 per-run BCI-development figures (via new `scripts/plot/replot_eady_bci.py`)
 
 Both runs PASS; `T_drift` at machine precision; `max_speed` 0.057–0.058 m/s (BCI does not amplify at this forcing).
 
@@ -29,8 +29,8 @@ Both runs PASS; `T_drift` at machine precision; `max_speed` 0.057–0.058 m/s (B
 - **MPAS IC velocity has 17% zonal noise off-jet** — see IC investigation below. Not a bug, a discretization artefact. Noise decays, no instability.
 
 ### 5. Minor bug fixes applied during this session
-- `scripts/plot_T_volumetric_census.py` — hardcoded `(0, 360)` for MPAS mesh reconstruction → now reads `(cfg.lon_west, cfg.lon_east)` from `EadyUniformConfig`.
-- `scripts/replot_eady_bci.py` (new script) — produces physical-aspect, domain-cropped snapshot figures with a `SST − zonal-mean` anomaly row. Fixes the stock `snapshots_SST.png` showing 0–360° canvas for a 10°-wide domain. Color range excludes t=0 IC perturbation so evolving structure is visible.
+- `scripts/plot/plot_T_volumetric_census.py` — hardcoded `(0, 360)` for MPAS mesh reconstruction → now reads `(cfg.lon_west, cfg.lon_east)` from `EadyUniformConfig`.
+- `scripts/plot/replot_eady_bci.py` (new script) — produces physical-aspect, domain-cropped snapshot figures with a `SST − zonal-mean` anomaly row. Fixes the stock `snapshots_SST.png` showing 0–360° canvas for a 10°-wide domain. Color range excludes t=0 IC perturbation so evolving structure is visible.
 
 ## What is IN PROGRESS at bedtime
 
@@ -38,13 +38,13 @@ Both runs PASS; `T_drift` at machine precision; `max_speed` 0.057–0.058 m/s (B
 
 Commands used:
 ```bash
-CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
   --only =eady_uniform --grid mpas_channel --resolution 20km --levels 20 \
   --days 200 --dt 300 --tracer-advection upwind \
   --B-h 2.3e11 --C-smag 0 --no-sponge \
   --tag upwind_mpas_20km_U08_Bh2.3e11_Cs0.0_200d
 
-CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
   --only =eady_uniform --grid mpas_channel --resolution 20km --levels 20 \
   --days 200 --dt 300 --tracer-advection tvd \
   --B-h 2.3e11 --C-smag 0 --no-sponge \
@@ -76,7 +76,7 @@ Logs: `logs/advection_matrix/mpas_{upwind,tvd}_U08_200d.log`
 1. `cat results/ocean/eady_uniform/mpas_channel/20km/*_U08_*/results.txt` — confirm PASS and final numbers.
 2. Regenerate BCI-development figures:
    ```bash
-   .venv/bin/python scripts/replot_eady_bci.py \
+   .venv/bin/python scripts/plot/replot_eady_bci.py \
      results/ocean/eady_uniform/mpas_channel/20km/upwind_mpas_20km_U08_Bh2.3e11_Cs0.0_200d \
      results/ocean/eady_uniform/mpas_channel/20km/tvd_mpas_20km_U08_Bh2.3e11_Cs0.0_200d \
      results/ocean/eady_uniform/latlon_channel/100x50/upwind_nosponge_200d \
@@ -87,7 +87,7 @@ Logs: `logs/advection_matrix/mpas_{upwind,tvd}_U08_200d.log`
    Target days may need tweaking — strong forcing saturates earlier. Consider editing `TARGET_DAYS = [0, 30, 60, 100, 140, 200]` at top of `replot_eady_bci.py`.
 3. Generate T-census overlay:
    ```bash
-   .venv/bin/python scripts/plot_T_volumetric_census.py \
+   .venv/bin/python scripts/plot/plot_T_volumetric_census.py \
      results/ocean/eady_uniform/mpas_channel/20km/upwind_mpas_20km_U08_Bh2.3e11_Cs0.0_200d \
      results/ocean/eady_uniform/mpas_channel/20km/tvd_mpas_20km_U08_Bh2.3e11_Cs0.0_200d \
      --out results/ocean/eady_uniform/mpas_channel/20km/advection_compare_U08_200d
@@ -102,8 +102,8 @@ Ocean-expert recommendation is to rewrite `_set_linear_shear_mpas` in `src/legoe
 ### C) Files changed, awaiting decision on commit
 ```
 M docs/ocean_experiments/advection_scheme_comparison.md
-M scripts/plot_T_volumetric_census.py
-?? scripts/replot_eady_bci.py
+M scripts/plot/plot_T_volumetric_census.py
+?? scripts/plot/replot_eady_bci.py
 ?? docs/ocean_experiments/NEXT_STEPS_advection_comparison.md (this file)
 ?? results/ocean/eady_uniform/bci_development/ (5 PNGs)
 ?? results/ocean/eady_uniform/cross_grid_compare_U02_600d/ (3 PNGs)

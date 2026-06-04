@@ -1,4 +1,4 @@
-"""Smoke test for ``scripts/run_rce_convection_sweep.py``.
+"""Smoke test for ``scripts/run/run_rce_convection_sweep.py``.
 
 iter-273: ``run_rce_convection_sweep.py`` sweeps 8 cumulus
 convection schemes (sbm, tiedtke, zhang_mcfarlane, emanuel,
@@ -26,7 +26,7 @@ from tests.atmosphere.nonhydrostatic.integration._bench_smoke_helpers import (
 )
 
 
-SCRIPT = REPO_ROOT / "scripts" / "run_rce_convection_sweep.py"
+SCRIPT = REPO_ROOT / "scripts" / "run" / "run_rce_convection_sweep.py"
 
 
 # Summary table line: "  kuo    1.0   300.00   292.27     0.000   73.88     0.60      0.9  OK"

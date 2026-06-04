@@ -1300,10 +1300,10 @@ class TestFluxSyncCallSitesWired:
         wrapper elsewhere in the file must not satisfy this test.
         """
         import ast
+        from tests.legoesm_paths import legoesm_source_path
 
-        root = self._repo_root()
         for rel, func_name in self.REQUIRED_SITES:
-            path = root / rel
+            path = legoesm_source_path(rel)
             tree = ast.parse(path.read_text())
             func = self._find_function(tree, func_name)
             assert func is not None, (
@@ -1357,7 +1357,7 @@ class TestFluxSyncCallSitesWired:
         happens in the CALLER — the function returns synced fluxes.
         """
         import ast
-        root = self._repo_root()
+        from tests.legoesm_paths import legoesm_source_path
 
         # Functions where the consumption stencil lives IN THE SAME
         # function body (so lexical ordering matters).  `fv_tp_2d` is
@@ -1392,7 +1392,7 @@ class TestFluxSyncCallSitesWired:
                     stack.append((child, child_nested))
 
         for rel, func_name in SAME_BODY_SITES:
-            path = root / rel
+            path = legoesm_source_path(rel)
             tree = ast.parse(path.read_text())
             func = self._find_function(tree, func_name)
             assert func is not None, (
@@ -1475,10 +1475,10 @@ class TestFluxSyncCallSitesWired:
         causes a 110x W2 regression for non-duogrid, per the inline
         comment in `cgrid_mass_flux_divergence`."""
         import ast
+        from tests.legoesm_paths import legoesm_source_path
 
-        root = self._repo_root()
         for rel, func_name in self.REQUIRED_SITES:
-            path = root / rel
+            path = legoesm_source_path(rel)
             src = path.read_text()
             tree = ast.parse(src)
             func = self._find_function(tree, func_name)
@@ -1605,10 +1605,10 @@ class TestBgridNeCornerSyncCallSiteWired:
         different function must fail this test.
         """
         import ast
+        from tests.legoesm_paths import legoesm_source_path
 
-        root = self._repo_root()
         for rel, func_name, callee in self.REQUIRED_SITES:
-            path = root / rel
+            path = legoesm_source_path(rel)
             tree = ast.parse(path.read_text())
             func = self._find_function(tree, func_name)
             assert func is not None, (
@@ -1630,10 +1630,10 @@ class TestBgridNeCornerSyncCallSiteWired:
         unnecessarily cost time in non-duogrid paths and could mask
         test-only issues in the non-duogrid fallback."""
         import ast
+        from tests.legoesm_paths import legoesm_source_path
 
-        root = self._repo_root()
         for rel, func_name, callee in self.REQUIRED_SITES:
-            path = root / rel
+            path = legoesm_source_path(rel)
             src = path.read_text()
             tree = ast.parse(src)
             func = self._find_function(tree, func_name)
@@ -2354,10 +2354,9 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
         target function.
         """
         import ast
-        import pathlib
+        from tests.legoesm_paths import legoesm_source_path
 
-        root = pathlib.Path(__file__).resolve().parent.parent.parent
-        src = (root / "src/legoesm/core/fv3_sw_core.py").read_text()
+        src = legoesm_source_path("src/legoesm/core/fv3_sw_core.py").read_text()
         tree = ast.parse(src)
 
         REQUIRED_GATES = [
@@ -3043,10 +3042,9 @@ class TestLegacyEdgePathsBypassedUnderDuogrid:
         Fortran-faithful gating against silent regression by a future
         "remove conditional" refactor."""
         import ast
-        import pathlib
+        from tests.legoesm_paths import legoesm_source_path
 
-        root = pathlib.Path(__file__).resolve().parent.parent.parent
-        src = (root / "src/legoesm/grids/cubed_sphere_cdgrid.py").read_text()
+        src = legoesm_source_path("src/legoesm/grids/cubed_sphere_cdgrid.py").read_text()
         tree = ast.parse(src)
 
         # Find the unique `_bounded_domain = ...` assignment and the

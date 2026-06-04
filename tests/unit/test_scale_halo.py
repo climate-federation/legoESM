@@ -1305,11 +1305,9 @@ class TestPadHaloH3Guardrails:
           - `corner-fill-tiled-early` (tiled docstring)
           - `corner-fill-tiled-late` (tiled docstring)
         """
-        import pathlib
         import tokenize
-        src = pathlib.Path(
-            __file__).resolve().parent.parent.parent / (
-            "src/legoesm/parallel/halo_exchange.py")
+        from tests.legoesm_paths import legoesm_source_path
+        src = legoesm_source_path("parallel/halo_exchange.py")
         text = src.read_text()
         required_anchors = (
             "local-edge-depth-extraction",

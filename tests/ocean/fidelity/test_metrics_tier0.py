@@ -174,7 +174,7 @@ def real_rest_state_bundle():
     if not candidates:
         pytest.skip(
             "no real rest_state artifacts under results/ocean/ — run "
-            "`scripts/run_ocean_test_matrix.py --only rest_state --grid latlon "
+            "`scripts/matrix/run_ocean_test_matrix.py --only rest_state --grid latlon "
             "--emit-fidelity-artifacts` to populate."
         )
     return artifacts.load(candidates[0])

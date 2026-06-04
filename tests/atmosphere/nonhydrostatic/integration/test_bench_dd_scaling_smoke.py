@@ -1,4 +1,4 @@
-"""Smoke test for ``scripts/bench_dd_scaling.py``.
+"""Smoke test for ``scripts/bench/bench_dd_scaling.py``.
 
 iter-255: third script in the iter-252 / iter-254 untested-bench
 chain. ``bench_dd_scaling.py`` is the original domain-decomposed
@@ -17,7 +17,7 @@ from tests.atmosphere.nonhydrostatic.integration._bench_smoke_helpers import (
 )
 
 
-SCRIPT = REPO_ROOT / "scripts" / "bench_dd_scaling.py"
+SCRIPT = REPO_ROOT / "scripts" / "bench" / "bench_dd_scaling.py"
 
 
 # iter-256 (Codex iter-252..255 round-1 HIGH#2): end-anchored.

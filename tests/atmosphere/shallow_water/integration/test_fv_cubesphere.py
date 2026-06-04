@@ -202,8 +202,20 @@ class TestCubeCswW2Residual:
             h, u_d, v_d, h_s, cdgrid, dt, constants.g)
         duc = uc_new - uc_base
         dvc = vc_new - vc_base
-        # iter-4 probe at C36: |duc|_max = 2.7076 m/s,
-        # |dvc|_max = 3.2887 m/s.  Pin 10 % above current.
+        # C36 baseline: |duc|_max = 2.7086 m/s, |dvc|_max = 4.3163 m/s.
+        # The |dvc| ceiling was 3.6 (pinned at 3.2887 in iter-4, commit
+        # 3a6e830f) and is re-pinned to 4.75 here. The growth is NOT a
+        # regression: the FV3-faithfulness corner-area work that landed after
+        # iter-4 (4ad2fea0 cube-vertex 3-face-junction area, d7108d48 EDGE
+        # area_corner, 5d1d273a C1 vertex 3x scaling) corrects the under-
+        # resolved vertex/edge control-volume areas, and ``_corner_vorticity``
+        # returns ``f_corner + rarea_c*vort`` so the residual at the 8 cube
+        # vertices scales mechanically with the corrected (1.73x) metric.
+        # Visually verified (controlled old-vs-new A/B): the entire growth is
+        # localized to 8 vertex cells (0.1% of the field, interior bit-
+        # identical), with NO checkerboard / face-edge stripes / grid-scale
+        # noise; W2 L2=1.76e-4 unchanged and W5 mass drift ~3e-16. Ceilings
+        # pinned ~10% above current.
         duc_max = float(jnp.max(jnp.abs(duc)))
         dvc_max = float(jnp.max(jnp.abs(dvc)))
         assert duc_max < 3.0, (
@@ -211,8 +223,8 @@ class TestCubeCswW2Residual:
             "(cube-vertex regression; check _corner_vorticity / "
             "_vorticity_flux)"
         )
-        assert dvc_max < 3.6, (
-            f"c_sw |dvc|_max = {dvc_max:.4f} m/s exceeds 3.6 ceiling"
+        assert dvc_max < 4.75, (
+            f"c_sw |dvc|_max = {dvc_max:.4f} m/s exceeds 4.75 ceiling"
         )
 
         # Combined c_sw + p_grad_c residual should be smaller (partial
@@ -227,6 +239,8 @@ class TestCubeCswW2Residual:
             f"|duc - dp_x|_max = {sum_uc:.4f} m/s exceeds 6.0 ceiling "
             "(cube-vertex c_sw + p_grad_c residual regression)"
         )
-        assert sum_vc < 6.0, (
-            f"|dvc - dp_y|_max = {sum_vc:.4f} m/s exceeds 6.0 ceiling"
+        # Re-pinned 6.0 -> 6.6 alongside the |dvc| ceiling: the same FV3-faithful
+        # vertex-area correction lifts the combined residual to 5.98 (~10% margin).
+        assert sum_vc < 6.6, (
+            f"|dvc - dp_y|_max = {sum_vc:.4f} m/s exceeds 6.6 ceiling"
         )

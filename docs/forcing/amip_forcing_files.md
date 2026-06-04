@@ -1,4 +1,4 @@
-# AMIP Forcing Files — `scripts/run_amip.py`
+# AMIP Forcing Files — `scripts/run/run_amip.py`
 
 ## 1. Expected schema (from loader code)
 

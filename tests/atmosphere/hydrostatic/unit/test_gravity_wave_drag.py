@@ -20,7 +20,7 @@ from legoesm.atmosphere.physics.gravity_wave_drag.config import (
     McFarlaneConfig,
     HinesConfig,
     PrognosticSpectralConfig,
-    MLEmulatorConfig,
+    GWDMLEmulatorConfig,
     GravityWaveDragConfig,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput, make_zero_output
@@ -482,7 +482,7 @@ class TestMLEmulator:
     def test_output_shapes(self):
         ncol, nlev = 4, 10
         u, v, T, p_full, p_half, z_full, z_half, rho, lat = _make_columns(ncol, nlev)
-        config = MLEmulatorConfig()
+        config = GWDMLEmulatorConfig()
         model = GWDEmulator(config.n_input, config.n_hidden, config.n_layers,
                             config.n_output, key=jax.random.PRNGKey(0))
         out = ml_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config, model)
@@ -492,7 +492,7 @@ class TestMLEmulator:
     def test_finite_outputs(self):
         ncol, nlev = 4, 10
         u, v, T, p_full, p_half, z_full, z_half, rho, lat = _make_columns(ncol, nlev)
-        config = MLEmulatorConfig()
+        config = GWDMLEmulatorConfig()
         model = GWDEmulator(config.n_input, config.n_hidden, config.n_layers,
                             config.n_output, key=jax.random.PRNGKey(0))
         out = ml_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config, model)
@@ -502,7 +502,7 @@ class TestMLEmulator:
     def test_differentiable(self):
         ncol, nlev = 4, 10
         u, v, T, p_full, p_half, z_full, z_half, rho, lat = _make_columns(ncol, nlev)
-        config = MLEmulatorConfig()
+        config = GWDMLEmulatorConfig()
         model = GWDEmulator(config.n_input, config.n_hidden, config.n_layers,
                             config.n_output, key=jax.random.PRNGKey(0))
 
@@ -517,7 +517,7 @@ class TestMLEmulator:
         """Random init with residual scaling should produce small tendencies."""
         ncol, nlev = 4, 10
         u, v, T, p_full, p_half, z_full, z_half, rho, lat = _make_columns(ncol, nlev)
-        config = MLEmulatorConfig(use_residual=True)
+        config = GWDMLEmulatorConfig(use_residual=True)
         model = GWDEmulator(config.n_input, config.n_hidden, config.n_layers,
                             config.n_output, key=jax.random.PRNGKey(0))
         out = ml_gwd(u, v, T, p_full, p_half, z_full, z_half, rho, lat, 300.0, config, model)

@@ -1,7 +1,7 @@
 """Tests for swappable radiation + microphysics on the plane NH dycore.
 
 Covers the PR5-follow-up that lifts the inlined Newtonian /
-no-microphysics placeholder in ``scripts/run_rcemip_plane.py`` to
+no-microphysics placeholder in ``scripts/run/run_rcemip_plane.py`` to
 the canonical factory dispatch:
 
 * ``make_radiation_physics(radiation_config, model_type="plane")`` —
@@ -334,12 +334,12 @@ class TestPlanePhysicsDifferentiable:
 
 
 class TestRCEMIPCompose:
-    """``make_rcemip_physics`` from ``scripts/run_rcemip_plane.py``
+    """``make_rcemip_physics`` from ``scripts/run/run_rcemip_plane.py``
     composes surface_fluxes + radiation + microphysics via field-wise
     tendency summation; verify it stays finite through a few steps."""
 
     def test_compose_gray_kessler_runs_5_steps(self, plane_setup):
-        from scripts.run_rcemip_plane import make_rcemip_physics
+        from scripts.run.run_rcemip_plane import make_rcemip_physics
         from legoesm.atmosphere.dynamics.compressible_euler import (
             CompressibleEulerConfig,
         )
@@ -380,14 +380,14 @@ class TestRCEMIPCompose:
         """Codex review 2026-05-24: ``_sum_plane_tendencies()`` with no
         inputs has no canonical empty tendency to return — must raise
         rather than IndexError on ``tendencies[0]`` inside the helper."""
-        from scripts.run_rcemip_plane import _sum_plane_tendencies
+        from scripts.run.run_rcemip_plane import _sum_plane_tendencies
         with pytest.raises(ValueError, match="at least one tendency"):
             _sum_plane_tendencies()
 
     def test_sum_plane_tendencies_field_wise_correctness(self, plane_setup):
         """Summing surface_flux + radiation tendencies must equal the
         element-wise sum on every field's ``.data`` array."""
-        from scripts.run_rcemip_plane import (
+        from scripts.run.run_rcemip_plane import (
             _make_surface_flux_physics, _sum_plane_tendencies,
         )
         rad_cfg = RadiationConfig(
@@ -425,7 +425,7 @@ class TestRCEMIPCompose:
         surface fluxes only — still a valid physics_fn. Rest state has
         u=v=0 (no drag) and T_lo≈T_sfc (no SHF), so use the latent-heat
         branch: q_lo=0.01 < q_sfc=0.018 deposits q_v at lowest level."""
-        from scripts.run_rcemip_plane import make_rcemip_physics
+        from scripts.run.run_rcemip_plane import make_rcemip_physics
         physics_fn = make_rcemip_physics(
             plane_setup["grid"], plane_setup["hc"], plane_setup["tm"],
             radiation_config=None, microphysics_config=None, dt=1.0,

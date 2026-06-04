@@ -21,7 +21,7 @@ import pytest
 
 
 def _matrix_module():
-    """Load ``scripts/run_ocean_test_matrix.py`` once for fixture reuse."""
+    """Load ``scripts/matrix/run_ocean_test_matrix.py`` once for fixture reuse."""
     if not hasattr(_matrix_module, "_mod"):
         repo_root = Path(__file__).resolve().parents[3]
         scripts_dir = repo_root / "scripts"

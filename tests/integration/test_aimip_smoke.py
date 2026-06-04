@@ -23,7 +23,7 @@ Covers:
 5. ``ml.training.TrainingConfig(optimizer='muon')`` builds a valid
    optimizer via ``create_optimizer``.
 
-The full ERA5-driven smoke run lives in ``scripts/run_aimip.py
+The full ERA5-driven smoke run lives in ``scripts/run/run_aimip.py
 --smoke`` and is exercised by users; it is omitted here to keep
 CI cost bounded (network IO + spectral transforms).
 """
@@ -254,13 +254,13 @@ def test_create_optimizer_rejects_unknown():
 # ----------------------------------------------------------------------
 
 def test_run_aimip_module_importable_and_lists_variants():
-    """``scripts/run_aimip.py`` imports cleanly and exposes the variant set."""
+    """``scripts/run/run_aimip.py`` imports cleanly and exposes the variant set."""
     import importlib.util
     import pathlib
 
     repo_root = pathlib.Path(__file__).resolve().parents[2]
     spec = importlib.util.spec_from_file_location(
-        "_aimip_run", repo_root / "scripts" / "run_aimip.py",
+        "_aimip_run", repo_root / "scripts" / "run" / "run_aimip.py",
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

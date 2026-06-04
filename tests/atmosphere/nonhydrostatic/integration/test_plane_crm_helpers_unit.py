@@ -27,7 +27,7 @@ from tests.atmosphere.nonhydrostatic.integration._plane_crm_helpers import (
 
 def test_parse_rad_call_count_basic():
     """Driver's actual ``Done.`` line format from
-    ``scripts/run_rce_mpi_long.py:896-899``."""
+    ``scripts/run/run_rce_mpi_long.py:896-899``."""
     stdout = (
         "step  N\n"
         "Done. 60 steps, 0.003 days sim. Wall: 2.1 min. rad_calls=5.\n"

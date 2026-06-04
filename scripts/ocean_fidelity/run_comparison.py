@@ -7,7 +7,7 @@ report enumerating both pipelines side by side.
 
 Direct quantitative comparison is only available when the same case has
 both a Veros adapter (``src/legoesm/ocean/fidelity/veros_configs/``) and
-a legoESM matrix runner (``scripts/run_ocean_test_matrix.py::RUNNERS``).
+a legoESM matrix runner (``scripts/matrix/run_ocean_test_matrix.py::RUNNERS``).
 The current gaps are tracked as plan tasks #11 (legoESM runners for
 acc_channel / global_overturning / dino) and #12 (Veros setups for
 lock_exchange / overflow / eady_uniform / dino). The script handles the
@@ -21,7 +21,7 @@ Usage::
         --output docs/ocean_fidelity/initial_comparison_<sha>.md
 
 The script does NOT trigger runs — it only reads what is already on disk.
-Run ``scripts/run_ocean_test_matrix.py`` and the Veros runner separately
+Run ``scripts/matrix/run_ocean_test_matrix.py`` and the Veros runner separately
 to populate both sides first.
 """
 
@@ -37,7 +37,14 @@ from typing import Any
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "src"))
+# Federation-aware bootstrap for a non-installed checkout: after the uv-workspace
+# carve the ``legoesm`` namespace is split across packages/<member>/legoesm + the
+# root src/legoesm (meta), so adding only ``<repo>/src`` no longer exposes moved
+# members like ``legoesm.ocean``.  (The canonical setup is an editable install —
+# ``uv sync`` / ``pip install -e`` — which makes this loop a no-op.)
+for _root in [REPO_ROOT / "src", *sorted((REPO_ROOT / "packages").glob("*"))]:
+    if _root.is_dir() and str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
 
 from legoesm.ocean.fidelity import artifacts as _artifacts  # noqa: E402
 from legoesm.ocean.fidelity import cache as _cache  # noqa: E402
@@ -326,7 +333,7 @@ def render_report(
         lines.append("")
         lines.append(
             "_No legoESM matrix artifacts found. Run "
-            "`scripts/run_ocean_test_matrix.py --grid latlon --quick "
+            "`scripts/matrix/run_ocean_test_matrix.py --grid latlon --quick "
             "--emit-fidelity-artifacts` first._"
         )
         lines.append("")

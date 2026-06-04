@@ -136,7 +136,7 @@ Run 1 sim-yr with `barotropic_div_damp = 0.1` (was 0).  Tests the
 hypothesis that activating divergence damping suppresses the noise.
 
 - *Already running as
-  `scripts/run_drake_momentum_budget_divdamp.py`*
+  `scripts/run/run_drake_momentum_budget_divdamp.py`*
 - Decision: if Crit 1 is met with `barotropic_div_damp = 0.05`, we
   may stop here (simple fix, change config default).
 - Risk: even if it works, the cosine filter remains a known issue
@@ -355,7 +355,7 @@ Follow-up C in `docs/ocean_experiments/global_overturning_plan.md`.
   (Stage 3 implicit solver, 415 LOC).
 - `src/legoesm/ocean/state.py` — `MomentumTendencyDiagnostics` NamedTuple
   + `barotropic_solver` config field.
-- `scripts/_drake_momentum_budget_runner.py` — shared JIT-compiled
+- `scripts/run/_drake_momentum_budget_runner.py` — shared JIT-compiled
   diagnostic runner (380 LOC, 8.4× speedup verified).
 - `scripts/run_drake_momentum_budget*.py` — three thinned runners
   (~80 LOC each).
@@ -363,7 +363,7 @@ Follow-up C in `docs/ocean_experiments/global_overturning_plan.md`.
   spinup driver.
 - `scripts/global_overturning/run_global_overturning_50yr_implicit_continuation.py` —
   40-yr continuation to redo the original 50yr experiment.
-- `scripts/_overnight_chain.sh` — orchestrator for the spinup → verify
+- `scripts/tmp/_overnight_chain.sh` — orchestrator for the spinup → verify
   → continue chain.
 - `tests/ocean/unit/test_momentum_diagnostics_closure.py` — closure
   to 1e-12 (4 tests).

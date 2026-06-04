@@ -24,7 +24,7 @@ pd = pytest.importorskip("pandas")
 
 
 # Load make_ryf as a module (it lives in scripts/, not in the package).
-_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "make_ryf.py"
+_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "data" / "make_ryf.py"
 _spec = importlib.util.spec_from_file_location("make_ryf", _SCRIPT)
 make_ryf_mod = importlib.util.module_from_spec(_spec)
 sys.modules["make_ryf"] = make_ryf_mod

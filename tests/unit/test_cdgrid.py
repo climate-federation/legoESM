@@ -3159,10 +3159,9 @@ class TestDgridToCgridAsymmetryIsIntentional(unittest.TestCase):
         return funcs[0]
 
     def _read_operators_cdgrid(self):
-        import pathlib
-        root = pathlib.Path(__file__).resolve().parent.parent.parent
-        return (root / "src/legoesm/grids/__init__.py").exists() and (
-            root / "src/legoesm/core/operators_cdgrid.py").read_text()
+        from tests.legoesm_paths import legoesm_source_path
+        return legoesm_source_path("grids/__init__.py").exists() and (
+            legoesm_source_path("core/operators_cdgrid.py").read_text())
 
     def test_dgrid_to_cgrid_u_has_correction_v_does_not(self):
         """`dgrid_to_cgrid`: `u_c =` line must contain BOTH `sina_u`

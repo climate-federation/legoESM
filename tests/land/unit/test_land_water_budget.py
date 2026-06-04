@@ -18,7 +18,7 @@ jax.config.update("jax_enable_x64", True)
 
 from legoesm import constants
 from legoesm.core.field import Field
-from legoesm.coupler.coupling_fields import AtmToSurface
+from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.config import LandConfig, MultiLayerLandConfig
 from legoesm.land.state import LandState
 

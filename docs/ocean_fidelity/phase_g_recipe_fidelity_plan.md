@@ -353,17 +353,11 @@ acceptance metrics that prove it.
    block G.0 acceptance. It matters for tier-3 free-run match —
    tracked as a follow-up.
 4. **Recipe completeness.** EKE (Eden & Greatbatch 2008) is enabled
-   in Veros ACC. **UPDATE (2026-05-29):** legoESM now HAS the
-   Eden-Greatbatch prognostic-EKE closure (`lateral_mixing/eke.py` +
-   `GMRediConfig.eke`); its `kappa_GM=c_k·L·√E` formula + ACC params
-   were verified against Veros's `K_gm` to machine precision (gate E9;
-   see the strategy doc §8 EKE ledger). It is built + truth-tier
-   verified (E1–E8) but NOT yet flipped on in the recipe: legoESM's
-   mixing length `L` (Visbeck Rossby radius) does not yet match Veros's
-   `eke_len` (which adds the eddy-dependent Rhines limiting), so the
-   prognostic kappa_GM would be ~25× too large. Adoption is deferred
-   behind the `eke_len` mixing-length variant (§8 "next must-build").
-   The current recipe uses constant GM kappa (≈Veros's effective GM).
+   in Veros ACC; legoESM does not have an EKE closure. The current
+   recipe builder leaves EKE out; the eddy-induced transport
+   contribution is approximated by GM/Redi only, which understates
+   the eddy mixing the ACC paper-canonical recipe expects. The
+   first G.0c acceptance run will quantify how much this matters.
 5. **Cube and MPAS grids.** Phase G is lat-lon C-grid only for now
    (ACC uses lat-lon natively). Cube + MPAS recipes are a later
    sub-phase that needs the lat-lon → cube interpolation question
@@ -414,12 +408,10 @@ acceptance metrics that prove it.
   ``outer_integrator="leapfrog_ab2"`` requires extending
   ``SegmentCarry`` with a τ-1 carry field. Tier-2 unaffected;
   needed for tier-3 free-run match.
-- **EKE closure (Eden & Greatbatch 2008).** **DONE (2026-05-29):**
-  built as a canonical block (`lateral_mixing/eke.py` + `GMRediConfig.eke`),
-  truth-tier verified (E1–E8), closure form + ACC params oracle-verified
-  vs Veros `K_gm` to machine precision (E9). Remaining: the `eke_len`
-  mixing-length variant (Rhines limiting) before recipe adoption — see
-  the strategy doc §8 EKE ledger.
+- **EKE closure (Eden & Greatbatch 2008).** Veros ACC enables it
+  but legoESM does not have an EKE module. Sequence after the
+  first G.0c acceptance run quantifies its impact on the
+  GM/Redi-only approximation.
 - **Veros gallery beyond ACC.** ``GlobalFourDegreeSetup``,
   ``global_1deg``, ``global_flexible``, ``north_atlantic``,
   ``wave_propagation``. Each is a new recipe builder analogous

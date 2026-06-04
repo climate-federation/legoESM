@@ -21,7 +21,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
-from legoesm.coupler.coupling_fields import AtmToSurface
+from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.land.config import LandConfig, MultiLayerLandConfig
 from legoesm.land.state import LandState, MultiLayerLandState
 from legoesm.land.slab_land import step_land

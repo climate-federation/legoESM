@@ -346,13 +346,13 @@ class TestIssue5_EDMFPrecipitation:
         bound for any physically reasonable column.
         """
         from legoesm.atmosphere.physics.convection.mass_flux import edmf_convection
-        from legoesm.atmosphere.physics.convection.config import EDMFConfig
+        from legoesm.atmosphere.physics.convection.config import ConvectiveEDMFConfig
 
         T, q_v, p_full, p_half = _make_unstable_columns()
         ncol = T.shape[0]
         a_u = jnp.full(ncol, 0.1)
 
-        config = EDMFConfig(cape_threshold=0.0)
+        config = ConvectiveEDMFConfig(cape_threshold=0.0)
         out, _ = edmf_convection(T, q_v, p_full, p_half, a_u, dt=300.0, config=config)
 
         max_rate = jnp.max(out.dq_c_conv_dt)

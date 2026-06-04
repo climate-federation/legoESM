@@ -92,7 +92,7 @@ def test_bcw_script_latlon_branch_imports():
     here = Path(__file__).resolve().parents[1]
     spec = importlib.util.spec_from_file_location(
         "_bcw_benchmark",
-        here / "scripts" / "run_baroclinic_wave_benchmark.py",
+        here / "scripts" / "run" / "run_baroclinic_wave_benchmark.py",
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

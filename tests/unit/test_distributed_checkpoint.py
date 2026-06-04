@@ -13,7 +13,7 @@ import pytest
 from legoesm.core.field import Field
 from legoesm.core.state import HydrostaticState
 from legoesm.forcing.amip_config import AMIPExperimentConfig
-from legoesm.io.distributed_checkpoint import (
+from legoesm.driver.distributed_checkpoint import (
     _rank_filename,
     _state_to_arrays,
     save_checkpoint_distributed,

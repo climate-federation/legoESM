@@ -16,6 +16,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from tests.legoesm_paths import legoesm_root_paths, legoesm_source_path
 
 jax.config.update("jax_enable_x64", True)
 
@@ -993,13 +994,13 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         calls = []
         real_pad_halo = fv3_sw_core_mod.pad_halo
 
-        def recording(q, halo=1, interp_offsets=None, duogrid=None):
+        def recording(q, halo=1, interp_offsets=None, duogrid=None, **kwargs):
             calls.append(
                 ('interp_offsets_none' if interp_offsets is None else 'interp_offsets_set',
                  'duogrid_none' if duogrid is None else 'duogrid_set'))
             return real_pad_halo(q, halo=halo,
                                  interp_offsets=interp_offsets,
-                                 duogrid=duogrid)
+                                 duogrid=duogrid, **kwargs)
 
         with mock.patch.object(fv3_sw_core_mod, 'pad_halo', recording):
             fv3_sw_core_mod._del6_vt_flux(
@@ -1034,13 +1035,13 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         calls = []
         real_pad_halo = fv_tp_2d_mod.pad_halo
 
-        def recording(q, halo=1, interp_offsets=None, duogrid=None):
+        def recording(q, halo=1, interp_offsets=None, duogrid=None, **kwargs):
             calls.append(
                 ('interp_offsets_none' if interp_offsets is None else 'interp_offsets_set',
                  'duogrid_none' if duogrid is None else 'duogrid_set'))
             return real_pad_halo(q, halo=halo,
                                  interp_offsets=interp_offsets,
-                                 duogrid=duogrid)
+                                 duogrid=duogrid, **kwargs)
 
         with mock.patch.object(fv_tp_2d_mod, 'pad_halo', recording):
             fv_tp_2d_mod.compute_transport_quantities(ut, vt, dt, cdgrid_dg)
@@ -1212,9 +1213,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         `shallow_water_fv3_cdgrid.py:<N>`-style same-file reference
         reappears.
         """
-        import pathlib
         import re
-        repo_root = pathlib.Path(__file__).resolve().parents[2]
         # Per-file "same-file" patterns.  A line-number reference
         # to a file IS a same-file reference iff it names the file
         # whose source the comment lives in.  The iter-178/179 drift
@@ -1238,7 +1237,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         ]
         keyword = "div_damp"
         for rel_path, same_file_patterns in files_and_patterns:
-            src = (repo_root / rel_path).read_text()
+            src = legoesm_source_path(rel_path).read_text()
             # Find all lines mentioning div_damp, check a window of
             # +/- 6 lines for forbidden patterns.
             lines = src.splitlines()
@@ -2911,7 +2910,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         sin_sg_calls = []
         real_pad_halo = halo_mod.pad_halo
 
-        def recording(q, halo=1, interp_offsets=None, duogrid=None):
+        def recording(q, halo=1, interp_offsets=None, duogrid=None, **kwargs):
             # sin_sg fields are (6, n, n) cell-centre scalars
             if (hasattr(q, 'shape') and q.shape == (6, n, n) and halo == 1):
                 sin_sg_calls.append(
@@ -2919,7 +2918,7 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
                      'duogrid_none' if duogrid is None else 'duogrid_set'))
             return real_pad_halo(q, halo=halo,
                                  interp_offsets=interp_offsets,
-                                 duogrid=duogrid)
+                                 duogrid=duogrid, **kwargs)
 
         with mock.patch.object(halo_mod, 'pad_halo', recording):
             fv3_sw_core_mod._c_sw(h, u_d, v_d, h_s, cdgrid_dg, dt=300.0, g=constants.g)
@@ -2955,13 +2954,13 @@ class TestFvTp2dCornerInvariant(unittest.TestCase):
         calls = []
         real_pad_halo = fv_tp_2d_mod.pad_halo
 
-        def recording(q, halo=1, interp_offsets=None, duogrid=None):
+        def recording(q, halo=1, interp_offsets=None, duogrid=None, **kwargs):
             calls.append(
                 ('interp_offsets_none' if interp_offsets is None else 'interp_offsets_set',
                  'duogrid_none' if duogrid is None else 'duogrid_set'))
             return real_pad_halo(q, halo=halo,
                                  interp_offsets=interp_offsets,
-                                 duogrid=duogrid)
+                                 duogrid=duogrid, **kwargs)
 
         with mock.patch.object(fv_tp_2d_mod, 'pad_halo', recording):
             fv_tp_2d_mod._deln_flux(1, 0.001, q, fx, fy, cdgrid_dg)
@@ -3463,11 +3462,8 @@ class TestCgridMassFluxDivergenceXAxis(unittest.TestCase):
         rejected so new callers are forced to name strips explicitly.
         """
         import ast
-        import pathlib
 
-        root = (pathlib.Path(__file__).resolve()
-                .parent.parent.parent)
-        src_file = root / "src/legoesm/core/operators_cdgrid.py"
+        src_file = legoesm_source_path("core/operators_cdgrid.py")
         src = src_file.read_text()
         tree = ast.parse(src)
 
@@ -3904,10 +3900,7 @@ class TestPpmLimiterAtSmoothExtremum(unittest.TestCase):
         detector used in ``mord==3`` (tp_core.F90:421-424).  If someone
         adds this detector, this test must be UPDATED -- not deleted.
         """
-        import pathlib
-        root = (pathlib.Path(__file__).resolve()
-                .parent.parent.parent)
-        src = (root / "src/legoesm/core/operators_cdgrid.py").read_text()
+        src = legoesm_source_path("core/operators_cdgrid.py").read_text()
         # smt5 / smt6 would appear as symbol names if the detector
         # were ported.  Check they do NOT appear in the PPM function.
         import ast
@@ -3935,7 +3928,7 @@ class TestPpmLimiterAtSmoothExtremum(unittest.TestCase):
 class TestW2BoundaryErrorBudget(unittest.TestCase):
     """Iter-511 / iter-512: lock the post-iter-505 Williamson 2 error
     budget on the LEGACY production harness (pre-iter-760) that used
-    `scripts/run_atmosphere_test_matrix.py` with `hyperdiff_coeff=
+    `scripts/matrix/run_atmosphere_test_matrix.py` with `hyperdiff_coeff=
     _hyperdiff_cube(n)`, `div_damp=_div_damp_cube(n)`, `damp_v=0`.
 
     **Iter-761 scope clarification.**  The matrix default was
@@ -4137,7 +4130,7 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         import re
         matrix_path = (
             pathlib.Path(__file__).resolve().parent.parent.parent
-            / "scripts" / "run_atmosphere_test_matrix.py")
+            / "scripts" / "matrix" / "run_atmosphere_test_matrix.py")
         assert matrix_path.is_file(), (
             f"Matrix script not found at {matrix_path}")
         lines = matrix_path.read_text().splitlines()
@@ -4212,7 +4205,7 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         missing = [t for t in required_tokens if t not in config_body]
         self.assertEqual(
             missing, [],
-            msg=(f"scripts/run_atmosphere_test_matrix.py W2/W5 "
+            msg=(f"scripts/matrix/run_atmosphere_test_matrix.py W2/W5 "
                  f"CDGridShallowWaterConfig block (lines "
                  f"{config_open_idx + 1}-{config_close_idx + 1}) is "
                  f"missing iter-761 canonical tokens: {missing}.  A "
@@ -4231,7 +4224,7 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         Iter-765f: sentinel measures the documented v_ll_Linf
         metric using the IN-REPO regrid helpers from
         `legoesm.grids.regridding` (NOT the fragile `_regrid_2d`
-        import from `scripts/run_atmosphere_test_matrix.py`).
+        import from `scripts/matrix/run_atmosphere_test_matrix.py`).
 
         Iter-765 added this opt-in as a diagnostic for future cube-
         corner halo investigations, but left it unguarded by any
@@ -5299,7 +5292,7 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         import ast
         import pathlib
         repo_root = pathlib.Path(__file__).resolve().parent.parent.parent
-        matrix_src = (repo_root / "scripts/run_atmosphere_test_matrix.py"
+        matrix_src = (repo_root / "scripts/matrix/run_atmosphere_test_matrix.py"
                       ).read_text()
         matrix_tree = ast.parse(matrix_src)
         snap_func_def = next(
@@ -5487,7 +5480,7 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
 
         grid = create_cubed_sphere(n=n, use_duogrid=False)
         # Iter-893: keep this sentinel synchronized with the
-        # production matrix runner config (`scripts/run_atmosphere_test_matrix.py`).
+        # production matrix runner config (`scripts/matrix/run_atmosphere_test_matrix.py`).
         # iter-893 enables `apply_fortran_xppm_boundary=True` on the
         # canonical W2 LEGACY config.  Iter-895 metrics clarification
         # (Codex iter-894 stop-time): the W2 v-wind imprint has TWO
@@ -6070,7 +6063,7 @@ class TestW2CubeFaceImprintCharacterization(unittest.TestCase):
             williamson_test2,
         )
         # Iter-610 Codex follow-up: replaced
-        # `from scripts.run_atmosphere_test_matrix import _regrid_2d`
+        # `from scripts.matrix.run_atmosphere_test_matrix import _regrid_2d`
         # with direct use of `legoesm.grids.regridding` helpers.  The
         # script has top-level side effects (jax_enable_x64, matplotlib
         # backend, Metal fallback) that MUTATE global state on import
@@ -10172,8 +10165,6 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
         formatted — will contain this cross-term and fail the lock.
         """
         import ast
-        from pathlib import Path
-        src_dir = Path(__file__).resolve().parent.parent.parent / 'src' / 'legoesm'
 
         # Iter-699: delegate to module-level _dsw4_has_ut_plus_vt_crossterm
         # so this lock is covered by TestDSw4StructuralLockAstScanner.
@@ -10392,15 +10383,16 @@ class TestBgridKeTransportDuogridIter685(unittest.TestCase):
             return _Stripper().visit(tree)
 
         offenders = []
-        for py_file in src_dir.rglob('*.py'):
-            try:
-                text = py_file.read_text()
-                tree = ast.parse(text)
-            except (SyntaxError, UnicodeDecodeError):
-                continue
-            tree = _strip_exempt_functions(tree)
-            if _dsw4_has_ut_plus_vt_crossterm(tree):
-                offenders.append(str(py_file.relative_to(src_dir)))
+        for src_dir in legoesm_root_paths():
+            for py_file in src_dir.rglob('*.py'):
+                try:
+                    text = py_file.read_text()
+                    tree = ast.parse(text)
+                except (SyntaxError, UnicodeDecodeError):
+                    continue
+                tree = _strip_exempt_functions(tree)
+                if _dsw4_has_ut_plus_vt_crossterm(tree):
+                    offenders.append(str(py_file.relative_to(src_dir)))
 
         self.assertEqual(offenders, [],
             msg=(f"Found `ut[...] + vt[...]` (or `vt + ut`) cross-term "
@@ -11600,9 +11592,7 @@ class TestDSw5NonDuogridCornerCorrectionAbsentIter703(unittest.TestCase):
         — which would invert the gate — fails this test.
         """
         import ast
-        from pathlib import Path
-        src = (Path(__file__).resolve().parent.parent.parent
-               / 'src' / 'legoesm' / 'core' / 'fv3_sw_core.py')
+        src = legoesm_source_path('core/fv3_sw_core.py')
         tree = ast.parse(src.read_text())
 
         def is_corner_index(slice_node):
@@ -11824,30 +11814,29 @@ class TestDSw5NonDuogridCornerCorrectionAbsentIter703(unittest.TestCase):
         fill_corners call at line 1746/1754/1762.  Python has no
         `fill_c`-style variable paired with `fill_corners` calls in
         d_sw5.  Simple grep-based absence check."""
-        from pathlib import Path
         import re
-        src_dir = Path(__file__).resolve().parent.parent.parent / 'src' / 'legoesm'
         # Co-occurrence: `fill_c` identifier + `fill_corners` call
         # within 20 lines in the same file.
         fill_c_pattern = re.compile(r'\bfill_c\s*=')
         fill_corners_call = re.compile(r'\bfill_corners\s*\(')
         offenders = []
-        for py_file in src_dir.rglob('*.py'):
-            try:
-                text = py_file.read_text()
-            except Exception:
-                continue
-            fc_lines = [i+1 for i, l in enumerate(text.split('\n'))
-                        if fill_c_pattern.search(l)]
-            fx_lines = [i+1 for i, l in enumerate(text.split('\n'))
-                        if fill_corners_call.search(l)]
-            for a in fc_lines:
-                for b in fx_lines:
-                    if abs(a - b) <= 20:
-                        offenders.append(
-                            f"{py_file.relative_to(src_dir)}: fill_c "
-                            f"at line {a}, fill_corners at line {b}")
-                        break
+        for src_dir in legoesm_root_paths():
+            for py_file in src_dir.rglob('*.py'):
+                try:
+                    text = py_file.read_text()
+                except Exception:
+                    continue
+                fc_lines = [i+1 for i, l in enumerate(text.split('\n'))
+                            if fill_c_pattern.search(l)]
+                fx_lines = [i+1 for i, l in enumerate(text.split('\n'))
+                            if fill_corners_call.search(l)]
+                for a in fc_lines:
+                    for b in fx_lines:
+                        if abs(a - b) <= 20:
+                            offenders.append(
+                                f"{py_file.relative_to(src_dir)}: fill_c "
+                                f"at line {a}, fill_corners at line {b}")
+                            break
         self.assertEqual(offenders, [],
             msg=(f"Found Fortran `fill_c` gate signature in {offenders} "
                  f"— matches non-duogrid d_sw5 corner-fill gate at "

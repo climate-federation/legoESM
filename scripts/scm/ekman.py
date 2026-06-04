@@ -15,7 +15,7 @@ column tall enough to cover the spin-up Ekman layer (``sigma_top=0.85``
 
 Usage:
     JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu \\
-        .venv/bin/python scripts/run_scm_test_matrix.py ekman --hours 6
+        .venv/bin/python scripts/matrix/run_scm_test_matrix.py ekman --hours 6
 """
 
 from __future__ import annotations

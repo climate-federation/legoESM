@@ -18,7 +18,7 @@ from legoesm.forcing.amip_config import (
     save_checkpoint,
     load_checkpoint,
 )
-from legoesm.io.checkpoint import (
+from legoesm.driver.checkpoint import (
     save_checkpoint_zarr,
     load_checkpoint_zarr,
     load_checkpoint_auto,

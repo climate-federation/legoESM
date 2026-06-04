@@ -24,7 +24,7 @@ from legoesm.atmosphere.physics.turbulence.config import (
     CLUBBLiteConfig,
     HoltslagBovilleConfig,
     YSUConfig,
-    EDMFConfig,
+    TurbulentEDMFConfig,
     TurbulenceConfig,
 )
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
@@ -1061,8 +1061,8 @@ class TestYSU:
         # contents and asserting the literal token ``config.louis_c`` is
         # used in ysu.py is non-vacuous: the prior hardcoded version had
         # no such reference.
-        from pathlib import Path
-        ysu_src = Path(__file__).resolve().parent.parent.parent.parent.parent / (
+        from tests.legoesm_paths import legoesm_source_path
+        ysu_src = legoesm_source_path(
             "src/legoesm/atmosphere/physics/turbulence/ysu.py"
         )
         ysu_text = ysu_src.read_text()
@@ -1123,7 +1123,7 @@ class TestEDMF:
         T_sfc = T[:, -1] + 5.0
         q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
         tke = jnp.full((ncol, nlev), 0.1)
-        config = EDMFConfig()
+        config = TurbulentEDMFConfig()
 
         out, tke_new = edmf_turbulence(
             u, v, T, q_v, tke, p_full, p_half, z_full, z_half,
@@ -1145,7 +1145,7 @@ class TestEDMF:
         T_sfc = T[:, -1] + 5.0
         q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
         tke = jnp.full((ncol, nlev), 0.1)
-        config = EDMFConfig()
+        config = TurbulentEDMFConfig()
 
         out, _ = edmf_turbulence(
             u, v, T, q_v, tke, p_full, p_half, z_full, z_half,
@@ -1162,7 +1162,7 @@ class TestEDMF:
         T_sfc = T[:, -1] + 5.0
         q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
         tke = jnp.full((ncol, nlev), 0.1)
-        config = EDMFConfig()
+        config = TurbulentEDMFConfig()
 
         def loss(T_in):
             out, _ = edmf_turbulence(
@@ -1182,7 +1182,7 @@ class TestEDMF:
         T_sfc = T[:, -1] + 5.0
         q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
         tke = jnp.full((ncol, nlev), 0.1)
-        config = EDMFConfig()
+        config = TurbulentEDMFConfig()
 
         out, tke_new = edmf_turbulence(
             u, v, T, q_v, tke, p_full, p_half, z_full, z_half,
@@ -1201,7 +1201,7 @@ class TestEDMF:
         T_sfc = T[:, -1] + 5.0
         q_sfc = saturation_mixing_ratio(T_sfc, p_full[:, -1])
         tke = jnp.full((ncol, nlev), 0.1)
-        config = EDMFConfig()
+        config = TurbulentEDMFConfig()
 
         out, tke_new = edmf_turbulence(
             u, v, T, q_v, tke, p_full, p_half, z_full, z_half,
@@ -1221,14 +1221,14 @@ class TestEDMF:
         tke = jnp.full((ncol, nlev), 0.1)
 
         # With mass flux
-        config_mf = EDMFConfig(a_updraft=0.1)
+        config_mf = TurbulentEDMFConfig(a_updraft=0.1)
         out_mf, _ = edmf_turbulence(
             u, v, T, q_v, tke, p_full, p_half, z_full, z_half,
             T_sfc, q_sfc, rho, dt=300.0, config=config_mf,
         )
 
         # Without mass flux (zero updraft area)
-        config_no_mf = EDMFConfig(a_updraft=0.0)
+        config_no_mf = TurbulentEDMFConfig(a_updraft=0.0)
         out_no_mf, _ = edmf_turbulence(
             u, v, T, q_v, tke, p_full, p_half, z_full, z_half,
             T_sfc, q_sfc, rho, dt=300.0, config=config_no_mf,
@@ -1415,7 +1415,7 @@ class TestPBLHeight:
         # EDMF
         out, _ = edmf_turbulence(
             u, v, T, q_v, tke, p_full, p_half, z_full, z_half,
-            T_sfc, q_sfc, rho, dt=300.0, config=EDMFConfig(),
+            T_sfc, q_sfc, rho, dt=300.0, config=TurbulentEDMFConfig(),
         )
         assert out.h_pbl.shape == (ncol,)
         assert jnp.all(jnp.isfinite(out.h_pbl))

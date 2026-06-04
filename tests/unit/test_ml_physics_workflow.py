@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from scripts.ml_physics_parameterization import (
+from scripts.run.ml_physics_parameterization import (
     _make_base_config,
     _sample_days_from_args,
     build_arg_parser,

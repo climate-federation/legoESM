@@ -25,7 +25,7 @@ The 2026-05-20 cleanup left the tripolar pieces almost ready:
    — the same external-forcing path MPAS uses. The model itself
    needs no changes; tripolar uses this same model.
 2. **`_setup_jra55_forcing_state` + `_jra55_step`** in
-   `scripts/run_omip.py` already implement JRA55-cache → bulk-flux →
+   `scripts/run/run_omip.py` already implement JRA55-cache → bulk-flux →
    `surface_forcing` for both `latlon` and `mpas`. Currently gated
    to `_supported_jra55_grids = ("latlon", "mpas")` at line 878.
 3. **`create_tripole_grid(min_dx_m=1000.0)`** loads eORCA1.2 with

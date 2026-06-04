@@ -1,4 +1,4 @@
-"""Smoke test for ``scripts/bench_plane_dycore.py``.
+"""Smoke test for ``scripts/bench/bench_plane_dycore.py``.
 
 iter-259: sixth (and last) script in the iter-252..258
 untested-bench coverage chain. ``bench_plane_dycore.py`` is the
@@ -18,7 +18,7 @@ from tests.atmosphere.nonhydrostatic.integration._bench_smoke_helpers import (
 )
 
 
-SCRIPT = REPO_ROOT / "scripts" / "bench_plane_dycore.py"
+SCRIPT = REPO_ROOT / "scripts" / "bench" / "bench_plane_dycore.py"
 
 
 # Stdout snippets the bench emits (literal substrings):

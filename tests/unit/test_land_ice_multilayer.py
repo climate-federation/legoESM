@@ -23,7 +23,7 @@ from legoesm.land.soil_hydraulics import (
 )
 from legoesm.land.richards import solve_richards, RichardsConfig, RichardsOutput
 from legoesm.land.soil_grid import make_soil_grid, SoilGridConfig, SoilGrid
-from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
+from legoesm.core.coupling_fields import AtmToSurface, TileResponse
 from legoesm import constants
 
 

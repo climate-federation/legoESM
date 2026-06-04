@@ -17,7 +17,7 @@ what each iteration delivered.
 
 Add `_collect_grid_results_atmosphere`, `_create_atmosphere_comparison_*`,
 and CLI flags `--no-cross-grid-plots`, `--cross-grid-plots-only` to
-`scripts/run_atmosphere_test_matrix.py`.  Cross-grid plots produced for
+`scripts/matrix/run_atmosphere_test_matrix.py`.  Cross-grid plots produced for
 SW (W2, W5, cosine_bell) on all 4 grids: shared cartopy PlateCarrée
 projection, shared colorbar per field, 4-panel layout.
 
@@ -241,7 +241,7 @@ The iterate-with-codex protocol on iter-10..15 is now CLEAN
       aerosol + CMIP6 ozone infrastructure that needs to be
       wired in.
 - [ ] **RCE cross-grid comparison**.  Infrastructure
-      (`scripts/run_rce.py`) supports all 4 grid types; needs
+      (`scripts/run/run_rce.py`) supports all 4 grid types; needs
       a wrapper that runs each grid and feeds the iter-1..16
       comparison plotter.
 - [ ] **OMIP integration** with ocean test matrix (already has

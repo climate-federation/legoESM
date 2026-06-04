@@ -1,0 +1,11 @@
+# Fallback machine profile — used when no other profile's hostname pattern
+# matches (lego_detect_machine.py). Conservative single-node CPU defaults.
+machine:
+  name: default
+  hostnames: []              # matches nothing; pure fallback
+  scheduler: none            # none | slurm
+  jax_platforms: cpu         # value for the JAX_PLATFORMS env var
+  precision: float32         # default dynamics precision
+  venv_activate: ""          # shell line to activate the venv (empty = inherit)
+  data_root: ./data          # where fetch_data.py stages external datasets
+  slurm: {}                  # scheduler directives (partition/account/...) when scheduler=slurm

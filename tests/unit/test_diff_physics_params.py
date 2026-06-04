@@ -51,7 +51,7 @@ from legoesm.atmosphere.physics.turbulence.louis import louis_turbulence
 from legoesm.atmosphere.physics.turbulence.config import (
     SmagorinskyConfig, LouisConfig,
 )
-from legoesm.coupler.bulk_flux import compute_most_fluxes
+from legoesm.core.bulk_flux import compute_most_fluxes
 from legoesm.thermo import saturation_mixing_ratio
 
 

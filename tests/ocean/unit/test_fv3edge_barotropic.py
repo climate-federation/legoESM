@@ -73,7 +73,7 @@ def test_fv3edge_barotropic_stable_and_resolves_artifact():
     A-grid artifact was ~40% non-zonal)."""
     import importlib.util, sys
     spec = importlib.util.spec_from_file_location(
-        "rom_t", "scripts/run_ocean_test_matrix.py")
+        "rom_t", "scripts/matrix/run_ocean_test_matrix.py")
     rom = importlib.util.module_from_spec(spec)
     sys.modules["rom_t"] = rom
     spec.loader.exec_module(rom)

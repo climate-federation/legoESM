@@ -614,7 +614,7 @@ class TestSlabLandIntegration(unittest.TestCase):
         from legoesm.land.config import LandConfig
         from legoesm.land.state import LandState
         from legoesm.land.slab_land import step_land
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
 
         shape = (6, 4, 4)
         dims_2d = ("face", "x", "y")
@@ -663,7 +663,7 @@ class TestSlabLandIntegration(unittest.TestCase):
         from legoesm.land.config import LandConfig
         from legoesm.land.state import LandState
         from legoesm.land.slab_land import step_land
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
 
         shape = (6, 4, 4)
         dims_2d = ("face", "x", "y")

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.run_amip import build_arg_parser, build_config_from_args, _postprocess_args
+from scripts.run.run_amip import build_arg_parser, build_config_from_args, _postprocess_args
 
 
 def test_build_config_includes_joint_physics_parameterization_flags():

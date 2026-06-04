@@ -31,6 +31,8 @@ import pathlib
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.tier1  # research: single-column (GABLS1)
+
 pytest.importorskip("netCDF4")
 xr = pytest.importorskip("xarray")
 
@@ -188,7 +190,7 @@ def test_gabls1_oracle_present_and_plausible_magnitudes():
     before benchmark comparison runs."""
     if not ORACLE_PATH.exists():
         pytest.skip(
-            f"Oracle missing: {ORACLE_PATH}.  Run scripts/run_scm_test_matrix.py oracle"
+            f"Oracle missing: {ORACLE_PATH}.  Run scripts/matrix/run_scm_test_matrix.py oracle"
         )
     ds = xr.open_dataset(ORACLE_PATH)
     try:

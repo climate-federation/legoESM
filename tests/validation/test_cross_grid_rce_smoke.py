@@ -88,7 +88,7 @@ def test_rce_smoke_plane():
     )
     from legoesm.grids.plane import create_plane_grid
     from legoesm.grids.vertical import create_height_coordinate
-    from scripts.run_rcemip_plane import make_rcemip_physics
+    from scripts.run.run_rcemip_plane import make_rcemip_physics
 
     nx = ny = 6
     grid = create_plane_grid(
@@ -419,7 +419,7 @@ def test_rce_cross_grid_buoyancy_sign_consistent():
     import jax.numpy as jnp_
     results = {}
     # Plane
-    from scripts.run_rcemip_plane import make_rcemip_physics
+    from scripts.run.run_rcemip_plane import make_rcemip_physics
     from legoesm.atmosphere.dynamics.compressible_euler import (
         CompressibleEulerConfig,
     )

@@ -162,45 +162,6 @@ def test_cache_key_changes_on_case_change(isolated_cache):
     assert a != b
 
 
-def test_cache_key_changes_on_capture_vars_change(isolated_cache):
-    """A request for MORE variables must yield a different key, so a
-    capture-incomplete cached snapshot is never silently reused (the SCHEMA v2
-    fix). A subset key != superset key => the superset request recomputes."""
-    runner = _import_runner_module()
-    base = runner._cache_key(
-        "acc_channel", runlen_s=86400.0, identifier="x",
-        capture_vars=runner.DEFAULT_CAPTURE_VARS)
-    more = runner._cache_key(
-        "acc_channel", runlen_s=86400.0, identifier="x",
-        capture_vars=tuple(runner.DEFAULT_CAPTURE_VARS) + ("eke", "K_gm"))
-    assert base != more, (
-        "adding capture vars must change the cache key (else a subset-captured "
-        "snapshot is silently reused for a superset request)"
-    )
-
-
-def test_cache_key_capture_vars_order_independent(isolated_cache):
-    """Same capture SET in a different order shares a cache (content-equivalent),
-    so ordering does not fragment the cache."""
-    runner = _import_runner_module()
-    k1 = runner._cache_key("acc_channel", runlen_s=86400.0, identifier="x",
-                           capture_vars=("u", "v", "temp"))
-    k2 = runner._cache_key("acc_channel", runlen_s=86400.0, identifier="x",
-                           capture_vars=("temp", "v", "u", "v"))
-    assert k1 == k2
-
-
-def test_cache_key_default_capture_matches_explicit_default(isolated_cache):
-    """Omitting capture_vars uses DEFAULT_CAPTURE_VARS — the implicit and
-    explicit-default keys agree (back-compatible with existing callers)."""
-    runner = _import_runner_module()
-    implicit = runner._cache_key("acc_channel", runlen_s=86400.0, identifier="x")
-    explicit = runner._cache_key(
-        "acc_channel", runlen_s=86400.0, identifier="x",
-        capture_vars=runner.DEFAULT_CAPTURE_VARS)
-    assert implicit == explicit
-
-
 def test_veros_result_is_frozen_namedtuple(isolated_cache):
     runner = _import_runner_module()
     result = runner.VerosResult(
@@ -371,32 +332,3 @@ def test_acc_channel_caching_round_trip(isolated_cache):
     # second call is dominated by pickle load; wall_seconds is preserved
     # from the cached run, so the new call still reports the original time
     assert first.provenance["wall_seconds"] == second.provenance["wall_seconds"]
-
-
-@pytest.mark.slow
-def test_superset_capture_does_not_reuse_subset_cache(isolated_cache):
-    """End-to-end proof of the SCHEMA v2 fix: a snapshot cached with the DEFAULT
-    capture set must NOT be reused for a request that needs MORE variables — the
-    second call recomputes (different key) and the result actually contains the
-    extra vars, instead of silently serving a capture-incomplete snapshot.
-
-    This reproduces the exact bug that produced a degenerate ACC tier-2 report
-    (empty momentum/tracer tables, exit 0)."""
-    runner = _import_runner_module()
-    runlen_s = 1.5 * 43200.0
-    subset = runner.run_veros("acc_channel", runlen_s=runlen_s)
-    extra = ("eke", "K_gm", "eke_len")
-    superset = runner.run_veros(
-        "acc_channel", runlen_s=runlen_s,
-        capture_vars=tuple(runner.DEFAULT_CAPTURE_VARS) + extra)
-    # Different capture sets -> different keys -> the subset cache was NOT reused.
-    assert subset.provenance["key"] != superset.provenance["key"]
-    # The superset result genuinely has the EKE fields (active in Veros ACC).
-    for name in extra:
-        assert name in superset.variables, (
-            f"{name!r} missing from superset capture -> degenerate cache reuse"
-        )
-        assert np.asarray(superset.variables[name]).size > 0
-    # provenance records the requested set + any genuinely-absent vars.
-    assert set(extra).issubset(set(superset.provenance["capture_vars"]))
-    assert superset.provenance["missing_capture_vars"] == []

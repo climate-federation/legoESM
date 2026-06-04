@@ -1,0 +1,540 @@
+"""Main surface coupler: factory and step function.
+
+The coupler steps all surface tiles, blends their responses, and
+accumulates fluxes for asynchronous coupling. It never accesses
+full atmospheric state — only AtmToSurface.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Any, NamedTuple
+import warnings
+
+import jax
+import jax.numpy as jnp
+
+from legoesm import constants
+from legoesm.thermo import saturation_mixing_ratio
+from legoesm.core.precision import get_policy
+from legoesm.core.bulk_flux import simple_bulk_fluxes, compute_most_fluxes
+from legoesm.land.multilayer_land import init_multilayer_land_state
+from legoesm.land.surface_params import reshape_params
+from legoesm.core.surface_energy import surface_radiation_fluxes
+from legoesm.surface_albedo import ocean_albedo as compute_ocean_albedo
+from legoesm.core.field import Field
+from legoesm.coupler.accumulator import (
+    FluxAccumulator,
+    accumulate,
+    accumulator_from_flux,
+    mean_accumulator,
+    reset_accumulator,
+)
+from legoesm.coupler.config import CouplerConfig, TileConfig
+from legoesm.core.coupling_fields import (
+    AtmToSurface,
+    SurfaceToAtm,
+    TileResponse,
+)
+
+# LY09 sea-surface saturation reduction for typical seawater salinity (~35 PSU).
+# The saturation vapor pressure over saline water is ~2 % lower than over
+# fresh water; q_sat at the air-sea interface is correspondingly reduced.
+# Required by OMIP-2 protocol (Griffies 2016 §2.2 → Large & Yeager 2009 §3).
+_Q_SAT_SALINE_FACTOR = 0.98
+from legoesm.coupler.lake import LakeConfig, LakeState, step_lake
+from legoesm.coupler.tile_fractions import (
+    blend_tiles,
+    compute_tile_fractions,
+)
+from legoesm.ice.config import SeaIceConfig
+from legoesm.ice.sea_ice import step_sea_ice
+from legoesm.ice.state import SeaIceState
+from legoesm.land.carbon.config import CarbonState
+from legoesm.land.carbon.carbon_cycle import init_carbon_state
+from legoesm.land.config import LandConfig, MultiLayerLandConfig
+from legoesm.land.slab_land import step_land
+from legoesm.land.multilayer_land import step_multilayer_land
+from legoesm.land.state import LandState
+
+
+class SurfaceState(NamedTuple):
+    """Combined surface state for all tiles."""
+    land: LandState
+    ice: SeaIceState
+    lake: LakeState
+    accumulator: FluxAccumulator
+    carbon: CarbonState | None = None
+
+
+class _TileContext(NamedTuple):
+    """Per-step inputs shared by every surface-tile step (see :func:`make_coupler`).
+
+    The coupler iterates a uniform catalog of tile-step closures; each closure
+    receives this context and returns ``(TileResponse, state_updates)``, so the
+    surface tiles are a data-driven set rather than hardcoded inline pairs.
+    """
+
+    sfc_state: SurfaceState
+    atm_forcing: AtmToSurface
+    doy: float
+    dt: float
+    ocean_sst: jnp.ndarray
+    ocean_u: jnp.ndarray
+    ocean_v: jnp.ndarray
+    land_params: Any  # materialized LandSurfaceParams, or None
+
+
+def _validate_coupler_config(config: CouplerConfig) -> None:
+    """Fail fast on clearly invalid coupler parameters."""
+    if config.coupling_dt <= 0.0:
+        raise ValueError(f"coupling_dt must be > 0, got {config.coupling_dt!r}")
+    if config.U_min < 0.0:
+        raise ValueError(f"U_min must be >= 0, got {config.U_min!r}")
+    if not 0.0 <= config.ocean_albedo <= 1.0:
+        raise ValueError(
+            "ocean_albedo must be in [0, 1], got "
+            f"{config.ocean_albedo!r}",
+        )
+    if not 0.0 <= config.ocean_emissivity <= 1.0:
+        raise ValueError(
+            "ocean_emissivity must be in [0, 1], got "
+            f"{config.ocean_emissivity!r}",
+        )
+    if config.ocean_z0 <= 0.0:
+        raise ValueError(f"ocean_z0 must be > 0, got {config.ocean_z0!r}")
+    if config.Cd_ocean < 0.0:
+        raise ValueError(f"Cd_ocean must be >= 0, got {config.Cd_ocean!r}")
+    if config.Ch_ocean < 0.0:
+        raise ValueError(f"Ch_ocean must be >= 0, got {config.Ch_ocean!r}")
+    if config.blend_sharpness != 20.0:
+        warnings.warn(
+            "CouplerConfig.blend_sharpness is currently unused in blend_tiles().",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+
+def init_surface_state(
+    shape: tuple[int, ...],
+    T_soil_init: float = 280.0,
+    W_bucket_init: float = 75.0,
+    T_epi_init: float = 285.0,
+    T_hypo_init: float = 278.0,
+    T_ice_init: float = 260.0,
+    land_config: LandConfig | None = None,
+) -> SurfaceState:
+    """Initialize all surface tile states.
+
+    Parameters
+    ----------
+    shape : tuple
+        Spatial shape, typically (6, n, n).
+    land_config : LandConfig, optional
+        If provided and ``land_config.carbon.scheme == "differland"``,
+        initialises prognostic carbon pools.
+    """
+    dims_2d = ("face", "x", "y")
+    _sd = get_policy().storage
+
+    if isinstance(land_config, MultiLayerLandConfig):
+        # For multi-layer land, ncol = product of spatial dims
+        ncol = math.prod(shape)
+        land = init_multilayer_land_state(
+            ncol, land_config, T_init=T_soil_init,
+        )
+    else:
+        land = LandState(
+            T_soil=Field(data=jnp.full(shape, T_soil_init, dtype=_sd),
+                         name="T_soil", dims=dims_2d, units="K"),
+            W_bucket=Field(data=jnp.full(shape, W_bucket_init, dtype=_sd),
+                           name="W_bucket", dims=dims_2d, units="kg/m2"),
+            snow_depth=Field(data=jnp.zeros(shape, dtype=_sd),
+                             name="snow_depth", dims=dims_2d, units="kg/m2"),
+            snow_age=Field(data=jnp.zeros(shape, dtype=_sd),
+                           name="snow_age", dims=dims_2d, units="s"),
+            # Initialise runoff to zeros so the pytree shape is
+            # invariant across timesteps (slab_land sets it to a
+            # populated array after every step; matches LakeState.Q_freeze
+            # convention).  Audit F13.
+            runoff=jnp.zeros(shape, dtype=_sd),
+        )
+
+    ice = SeaIceState(
+        h_ice=Field(data=jnp.zeros(shape, dtype=_sd),
+                    name="h_ice", dims=dims_2d, units="m"),
+        T_ice=Field(data=jnp.full(shape, T_ice_init, dtype=_sd),
+                    name="T_ice", dims=dims_2d, units="K"),
+        concentration=Field(data=jnp.zeros(shape, dtype=_sd),
+                           name="ice_concentration", dims=dims_2d, units="1"),
+    )
+
+    # Pin lake temperatures to the same storage precision as the rest
+    # of the coupler state (sea-ice / land use ``_sd`` above) so the
+    # lake fields don't inadvertently default to f64 under x64 mode.
+    lake = LakeState(
+        T_epi=Field(data=jnp.full(shape, T_epi_init, dtype=_sd),
+                    name="T_epi", dims=dims_2d, units="K"),
+        T_hypo=Field(data=jnp.full(shape, T_hypo_init, dtype=_sd),
+                     name="T_hypo", dims=dims_2d, units="K"),
+        # Initialise Q_freeze to zeros so the pytree shape is
+        # invariant across timesteps (two_layer_lake populates this
+        # at every step).  Audit F14.
+        Q_freeze=Field(data=jnp.zeros(shape, dtype=_sd),
+                       name="Q_freeze", dims=dims_2d, units="W/m2"),
+    )
+
+    acc = reset_accumulator(shape)
+
+    # Carbon pools (only for differland scheme)
+    carbon = None
+    if land_config is not None and land_config.carbon.scheme == "differland":
+        # Multi-layer land uses columnar (ncol,) shape; slab uses spatial shape
+        if isinstance(land_config, MultiLayerLandConfig):
+            carbon_shape = (math.prod(shape),)
+        else:
+            carbon_shape = shape
+        carbon = init_carbon_state(carbon_shape, land_config.carbon)
+
+    return SurfaceState(land=land, ice=ice, lake=lake, accumulator=acc,
+                        carbon=carbon)
+
+
+def ocean_tile_response(
+    forcing: AtmToSurface,
+    ocean_sst: jnp.ndarray,
+    ocean_u: jnp.ndarray,
+    ocean_v: jnp.ndarray,
+    config: CouplerConfig,
+) -> TileResponse:
+    """Compute surface response for the ocean tile.
+
+    Ocean provides SST with fixed albedo/emissivity. Bulk fluxes
+    are computed using either constant coefficients or stability-dependent
+    MOST algorithms (COARE 3.0 or Large & Yeager 2004).
+    """
+    shape = ocean_sst.shape
+    q_sfc = _Q_SAT_SALINE_FACTOR * saturation_mixing_ratio(
+        ocean_sst, forcing.p_surface,
+    )
+    rho = forcing.rho_lowest
+
+    valid_schemes = ("constant", "coare3", "large_yeager")
+    if config.bulk_scheme not in valid_schemes:
+        raise ValueError(
+            f"Unknown coupler bulk_scheme {config.bulk_scheme!r}; "
+            f"expected one of {valid_schemes}."
+        )
+    if config.bulk_scheme in ("coare3", "large_yeager"):
+        # Use wind relative to ocean surface current
+        u_rel = forcing.u_lowest - ocean_u
+        v_rel = forcing.v_lowest - ocean_v
+        tau_x, tau_y, shflx, lhflx, _ = compute_most_fluxes(
+            u_rel, v_rel,
+            forcing.T_lowest, forcing.q_lowest,
+            ocean_sst, q_sfc,
+            rho,
+            z_ref=config.z_ref,
+            z_t=config.z_t_atm,
+            z_q=config.z_q_atm,
+            z0_init=config.ocean_z0,
+            scheme=config.bulk_scheme,
+            n_iter=config.bulk_n_iter,
+        )
+    else:
+        # Constant neutral coefficients (original behavior)
+        wind_speed = jnp.sqrt(
+            forcing.u_lowest ** 2 + forcing.v_lowest ** 2 + config.U_min ** 2
+        )
+        tau_x, tau_y, shflx, lhflx = simple_bulk_fluxes(
+            forcing.u_lowest, forcing.v_lowest,
+            forcing.T_lowest, forcing.q_lowest,
+            ocean_sst, q_sfc, rho, wind_speed,
+            config.Cd_ocean, config.Ch_ocean,
+        )
+
+    # Ocean albedo: constant or zenith-dependent
+    # Honour CouplerConfig.ocean_albedo for the constant-albedo path by
+    # overriding alpha_ocean_const in the OceanAlbedoConfig.
+    oac = config.ocean_albedo_config
+    if oac.method == "constant":
+        oac = oac._replace(alpha_ocean_const=config.ocean_albedo)
+    alpha_ocean = compute_ocean_albedo(
+        forcing.cos_zenith, oac,
+    )
+    # Ensure correct shape
+    if not hasattr(alpha_ocean, 'shape') or alpha_ocean.shape != shape:
+        alpha_ocean = jnp.broadcast_to(jnp.asarray(alpha_ocean), shape)
+
+    # Surface upward longwave: ε σ T⁴ + (1-ε)·lw_down.  Same direct
+    # expression as the loop-11 ``two_layer_lake.py`` fix — avoids the
+    # full ``surface_radiation_fluxes`` call which recomputes
+    # ``sw_net`` and the LW balance only to discard them.
+    lw_up = (
+        config.ocean_emissivity * constants.sigma_sb * ocean_sst ** 4
+        + (1.0 - config.ocean_emissivity) * forcing.lw_down
+    )
+
+    # ``jnp.full`` is one ``Broadcast`` HLO op vs the
+    # ``broadcast_to(jnp.array(scalar), shape)`` form which adds a
+    # ``ConvertElementType`` for the implicit Python-float promotion
+    # — same per-coupler-step micro-optimisation as the loop-18 lake
+    # rewrite.
+    _ssh_dtype = ocean_sst.dtype
+    # Ocean tile freshwater: P − E, where evap is back-derived from
+    # lhflx using L_v (ocean is liquid, never sublimes).  Positive =
+    # freshwater INTO ocean.
+    evap_rate = lhflx / constants.L_v   # kg/m²/s, positive = up (ocean → atm)
+    freshwater_flux = forcing.precip_total - evap_rate
+    return TileResponse(
+        T_sfc=ocean_sst,
+        albedo=alpha_ocean,
+        emissivity=jnp.full(shape, config.ocean_emissivity, dtype=_ssh_dtype),
+        z0=jnp.full(shape, config.ocean_z0, dtype=_ssh_dtype),
+        q_surface=q_sfc,
+        shflx=shflx,
+        lhflx=lhflx,
+        tau_x=tau_x,
+        tau_y=tau_y,
+        lw_up=lw_up,
+        u_ocean_sfc=ocean_u,
+        v_ocean_sfc=ocean_v,
+        co2_flux=jnp.zeros(shape, dtype=_ssh_dtype),
+        freshwater_flux=freshwater_flux,
+        # Ocean tile is itself the source of ocean heat — does not
+        # extract from the ocean.  Sea-ice tiles report their
+        # extraction; the ocean column treats the sum across tiles
+        # (after blending) as a heat-budget sink.
+        ocean_heat_extraction=jnp.zeros(shape, dtype=_ssh_dtype),
+        # Ocean tile contributes its own wind stress (already in
+        # tau_x/tau_y) — back-reaction is the ice tile's job.
+        ocean_stress_x=jnp.zeros(shape, dtype=_ssh_dtype),
+        ocean_stress_y=jnp.zeros(shape, dtype=_ssh_dtype),
+        # Ocean evaporation: lhflx already used L_v, so evap_rate
+        # is the correct mass flux.
+        surface_mass_flux=evap_rate,
+        # Ocean tile is the salt-budget sink, not a source of salt
+        # back to itself — zero flux on this channel.
+        salt_flux=jnp.zeros(shape, dtype=_ssh_dtype),
+    )
+
+
+def make_coupler(
+    coupler_config: CouplerConfig,
+    land_config: LandConfig,
+    ice_config: SeaIceConfig,
+    lake_config: LakeConfig,
+    lat: jnp.ndarray | None = None,
+    grid=None,
+    land_param_provider=None,
+    land_features: jnp.ndarray | None = None,
+):
+    """Factory that returns step_surface function.
+
+    Parameters
+    ----------
+    lat : jnp.ndarray, optional
+        Latitude [radians], same spatial shape as forcing fields.
+        Required when the land carbon cycle is enabled.
+    grid : CubedSphereGrid, optional
+        Required when ``ice_config.dynamics != "none"`` or
+        ``ice_config.transport != "none"``.
+    land_param_provider : eqx.Module, optional
+        Provider that produces spatially-varying ``LandSurfaceParams``.
+        If None, step functions use scalar config values (backward compat).
+    land_features : jnp.ndarray, optional
+        Static feature matrix ``(ncol, n_input)`` for neural provider.
+        Required when ``land_param_provider`` is a ``NeuralParamProvider``.
+
+    Returns
+    -------
+    step_surface : callable
+        (SurfaceState, AtmToSurface, TileConfig, ocean_sst, ocean_u,
+         ocean_v, dt, doy) -> (SurfaceState, SurfaceToAtm)
+    """
+    _validate_coupler_config(coupler_config)
+    U_min = coupler_config.U_min
+    coupling_dt = float(coupler_config.coupling_dt)
+    _lat = lat
+    _grid = grid
+    _use_multilayer = isinstance(land_config, MultiLayerLandConfig)
+    _land_param_provider = land_param_provider
+    _land_features = land_features
+
+    # --- Surface-tile catalog -------------------------------------------------
+    # Each tile is a step closure ``(ctx) -> (TileResponse, state_updates)``.  The
+    # four Earth-system surface tiles step INDEPENDENTLY of one another (no tile
+    # reads another's freshly-stepped state; ice concentration is consumed only
+    # afterwards, by tile-fraction blending), so the coupler can iterate this
+    # catalog in any order and assemble the result uniformly — replacing the
+    # former hardcoded inline land/ice/lake/ocean stepping with a data-driven set.
+
+    def _step_land_tile(ctx: _TileContext):
+        if _use_multilayer:
+            # Multi-layer land operates on columnar (ncol,) arrays.
+            # Flatten (6,n,n) forcing to (ncol,) and unflatten response.
+            _spatial_shape = ctx.atm_forcing.sw_down.shape
+            _flat_forcing = jax.tree.map(
+                lambda x: x.reshape(-1) if hasattr(x, 'reshape') else x,
+                ctx.atm_forcing,
+            )
+            _flat_lat = (_lat.reshape(-1)
+                         if _lat is not None and hasattr(_lat, 'reshape')
+                         else _lat)
+            land_new, land_resp_flat, carbon_new = step_multilayer_land(
+                ctx.sfc_state.land, _flat_forcing, land_config, U_min, ctx.dt,
+                lat=_flat_lat, carbon_state=ctx.sfc_state.carbon, doy=ctx.doy,
+                land_params=ctx.land_params,
+            )
+            # Unflatten TileResponse fields back to spatial shape
+            land_resp = jax.tree.map(
+                lambda x: (x.reshape(_spatial_shape)
+                           if hasattr(x, 'reshape') and x.ndim == 1
+                              and x.shape[0] == math.prod(_spatial_shape)
+                           else x),
+                land_resp_flat,
+            )
+        else:
+            land_new, land_resp, carbon_new = step_land(
+                ctx.sfc_state.land, ctx.atm_forcing, land_config, U_min, ctx.dt,
+                lat=_lat, carbon_state=ctx.sfc_state.carbon, doy=ctx.doy,
+                land_params=ctx.land_params,
+            )
+        return land_resp, {"land": land_new, "carbon": carbon_new}
+
+    def _step_ice_tile(ctx: _TileContext):
+        ice_new, ice_resp = step_sea_ice(
+            ctx.sfc_state.ice, ctx.atm_forcing, ctx.ocean_sst, ctx.ocean_u,
+            ctx.ocean_v, ice_config, U_min, ctx.dt, grid=_grid)
+        return ice_resp, {"ice": ice_new}
+
+    def _step_lake_tile(ctx: _TileContext):
+        lake_new, lake_resp = step_lake(
+            ctx.sfc_state.lake, ctx.atm_forcing, lake_config, U_min, ctx.dt)
+        return lake_resp, {"lake": lake_new}
+
+    def _step_ocean_tile(ctx: _TileContext):
+        # Diagnostic tile — the ocean model handles its own state, so no update.
+        ocean_resp = ocean_tile_response(
+            ctx.atm_forcing, ctx.ocean_sst, ctx.ocean_u, ctx.ocean_v,
+            coupler_config)
+        return ocean_resp, {}
+
+    _tile_catalog = (
+        ("ocean", _step_ocean_tile),
+        ("ice", _step_ice_tile),
+        ("land", _step_land_tile),
+        ("lake", _step_lake_tile),
+    )
+
+    def step_surface(
+        sfc_state: SurfaceState,
+        atm_forcing: AtmToSurface,
+        tile_config: TileConfig,
+        ocean_sst: jnp.ndarray,
+        ocean_u_sfc: jnp.ndarray,
+        ocean_v_sfc: jnp.ndarray,
+        dt: float,
+        doy: float = 0.0,
+    ) -> tuple[SurfaceState, SurfaceToAtm]:
+        """Step all surface tiles and return blended response."""
+        if dt <= 0.0:
+            raise ValueError(f"dt must be > 0, got {dt!r}")
+        if tile_config.f_land.shape != atm_forcing.sw_down.shape:
+            raise ValueError(
+                "tile_config.f_land shape must match forcing shape, got "
+                f"{tile_config.f_land.shape!r} vs {atm_forcing.sw_down.shape!r}",
+            )
+        if tile_config.f_lake.shape != atm_forcing.sw_down.shape:
+            raise ValueError(
+                "tile_config.f_lake shape must match forcing shape, got "
+                f"{tile_config.f_lake.shape!r} vs {atm_forcing.sw_down.shape!r}",
+            )
+
+        # 1. Materialize spatial land params (once per coupler step)
+        if _land_param_provider is not None:
+            if _land_features is not None:
+                _lp = _land_param_provider(_land_features)
+            else:
+                _lp = _land_param_provider()
+            # For slab land: reshape (ncol,) -> spatial shape (e.g. (6,n,n))
+            if not _use_multilayer:
+                _lp = reshape_params(_lp, atm_forcing.sw_down.shape)
+        else:
+            _lp = None
+
+        # 2. Step every surface tile via the uniform catalog.  Each closure
+        # returns its TileResponse and its state updates; the tiles step
+        # independently so iteration order does not affect the result.
+        ctx = _TileContext(
+            sfc_state=sfc_state, atm_forcing=atm_forcing, doy=doy, dt=dt,
+            ocean_sst=ocean_sst, ocean_u=ocean_u_sfc, ocean_v=ocean_v_sfc,
+            land_params=_lp,
+        )
+        responses: dict = {}
+        updates: dict = {}
+        for _name, _tile_step in _tile_catalog:
+            _resp, _upd = _tile_step(ctx)
+            responses[_name] = _resp
+            updates.update(_upd)
+
+        # 3. Tile fractions (ice concentration from the updated ice state).
+        # The ice tile's ice->ocean exchange fluxes are returned per-grid-cell
+        # and blended by f_water in blend_tiles (F11), so no pre-step
+        # concentration is needed here.
+        ice_conc = updates["ice"].concentration.data
+        # Multi-category: sum across categories for total concentration
+        if ice_conc.ndim > len(atm_forcing.sw_down.shape):
+            ice_conc = jnp.sum(ice_conc, axis=-1)
+        fracs = compute_tile_fractions(tile_config, ice_conc)
+
+        # 4. Blend the tile responses (area-weighted; conservation unchanged).
+        blended = blend_tiles(
+            responses["ocean"], responses["ice"], responses["land"],
+            responses["lake"], fracs)
+
+        # 7. Accumulate
+        acc_new = accumulate(sfc_state.accumulator, blended, dt)
+        dt_arr = jnp.asarray(dt, dtype=acc_new.total_dt.dtype)
+        coupling_dt_arr = jnp.asarray(coupling_dt, dtype=acc_new.total_dt.dtype)
+
+        # If we crossed the coupling window, emit the window mean and carry any
+        # residual dt from this step into the next window.
+        def _on_flush(_):
+            dt_prev = sfc_state.accumulator.total_dt
+            dt_to_close = jnp.clip(coupling_dt_arr - dt_prev, 0.0, dt_arr)
+            acc_closed = accumulate(sfc_state.accumulator, blended, dt_to_close)
+            blended_out = mean_accumulator(acc_closed)
+
+            # Cast blended_out to match blended's leaf dtypes so both
+            # jax.lax.cond branches return the same types.
+            blended_out = jax.tree.map(
+                lambda a, b: a.astype(b.dtype) if hasattr(b, "dtype") else a,
+                blended_out, blended,
+            )
+
+            dt_excess = jnp.maximum(dt_arr - dt_to_close, 0.0)
+            acc_next = accumulator_from_flux(
+                blended,
+                dt_excess,
+                dtype=acc_new.total_dt.dtype,
+            )
+            return acc_next, blended_out
+
+        def _no_flush(_):
+            return acc_new, blended
+
+        acc_next, blended_out = jax.lax.cond(
+            acc_new.total_dt >= coupling_dt_arr,
+            _on_flush,
+            _no_flush,
+            operand=None,
+        )
+
+        new_state = SurfaceState(
+            land=updates["land"], ice=updates["ice"], lake=updates["lake"],
+            accumulator=acc_next, carbon=updates["carbon"])
+
+        return new_state, blended_out
+
+    return step_surface

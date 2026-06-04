@@ -50,7 +50,7 @@ from legoesm.ocean.physics.surface_forcing.config import (
 from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
 
 
-# ----- Crit 1 metrics (mirror scripts/eval_barotropic_noise_invariants.py) -----
+# ----- Crit 1 metrics (mirror scripts/validate/eval_barotropic_noise_invariants.py) -----
 
 
 def _depth_mean_to_face(field_3d, dz):

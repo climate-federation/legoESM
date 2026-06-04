@@ -205,6 +205,60 @@ class TestFailFast:
 
 
 # =========================================================================
+# 3b. Any global grid (built via create_grid) feeds a compatible atmosphere
+# =========================================================================
+
+class TestAtmosphereOnEveryGlobalGrid:
+    """The user ask "instantiate any grid for the atmosphere": each global grid
+    from the uniform factory builds a *compatible* dycore (cheapest per grid)."""
+
+    @pytest.mark.parametrize(
+        "grid_type,resolution,model_type,discretization,grid_kwargs,expected_cls,grid_attr",
+        [
+            ("cubed_sphere", 8, "shallow_water", "cdgrid", {},
+             "CDGridShallowWaterModel", "grid"),
+            pytest.param(
+                "gaussian", 21, "shallow_water", "spectral", {},
+                "SpectralShallowWaterModel", "grid",
+                marks=pytest.mark.skipif(
+                    not jax.config.read("jax_enable_x64"),
+                    reason="spectral/Gaussian needs JAX_ENABLE_X64=1",
+                ),
+            ),
+            ("latlon", 16, "shallow_water", "latlon_cgrid", {},
+             "CGridLatLonShallowWaterModel", "grid"),
+            # mpas exposes no shallow_water in the driver matrix -> hydrostatic;
+            # the TRiSK mesh is held on the model as `.mesh`, not `.grid`.
+            ("mpas", 1, "hydrostatic", "mpas", {"lloyd_iterations": 2},
+             "MPASPrimitiveEquationModel", "mesh"),
+        ],
+    )
+    def test_dycore_builds_on_factory_grid(
+        self, grid_type, resolution, model_type, discretization,
+        grid_kwargs, expected_cls, grid_attr,
+    ):
+        from legoesm.grids.factory import create_grid
+
+        grid = create_grid(grid_type, resolution, **grid_kwargs)
+        nlev = 5 if model_type == "shallow_water" else 2
+        config = _make_config(
+            model_type=model_type,
+            discretization=discretization,
+            grid_type=grid_type,
+            resolution=resolution,
+            nlev=nlev,
+        )
+        model = create_atmosphere_dycore(config, grid, _make_sigma(nlev))
+        # Right *class* for this (grid, model_type, discretization) — not merely
+        # something step-capable (every dycore has .step), so a key wired to the
+        # wrong solver is caught.
+        assert type(model).__name__ == expected_cls
+        assert hasattr(model, "step")
+        # The exact factory grid object is handed through to the model.
+        assert getattr(model, grid_attr) is grid
+
+
+# =========================================================================
 # 4. ModelDriver delegates to factory
 # =========================================================================
 
