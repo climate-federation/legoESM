@@ -183,7 +183,7 @@ class PrognosticSpectralConfig(NamedTuple):
     tau_decay: float = 86400.0
 
 
-class MLEmulatorConfig(NamedTuple):
+class GWDMLEmulatorConfig(NamedTuple):
     """Configuration for ML-based GWD emulator.
 
     Fields
@@ -232,7 +232,7 @@ class GravityWaveDragConfig(NamedTuple):
         Configuration for Hines Doppler-spread scheme.
     prognostic_spectral : PrognosticSpectralConfig
         Configuration for prognostic spectral scheme.
-    ml_emulator : MLEmulatorConfig
+    ml_emulator : GWDMLEmulatorConfig
         Configuration for ML emulator scheme.
     """
     scheme: str = "none"
@@ -241,4 +241,4 @@ class GravityWaveDragConfig(NamedTuple):
     mcfarlane: McFarlaneConfig = McFarlaneConfig()
     hines: HinesConfig = HinesConfig()
     prognostic_spectral: PrognosticSpectralConfig = PrognosticSpectralConfig()
-    ml_emulator: MLEmulatorConfig = MLEmulatorConfig()
+    ml_emulator: GWDMLEmulatorConfig = GWDMLEmulatorConfig()

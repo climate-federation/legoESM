@@ -5,7 +5,7 @@ differentiable with jax.grad. The MLP maps per-level thermodynamic
 inputs to per-level microphysics tendencies.
 
 The model is initialized lazily on first call using the seed from
-MLEmulatorConfig. An untrained model returns near-zero tendencies
+MicrophysicsMLEmulatorConfig. An untrained model returns near-zero tendencies
 (suitable for testing).
 """
 
@@ -16,7 +16,7 @@ import jax.numpy as jnp
 import equinox as eqx
 
 from legoesm import constants
-from legoesm.atmosphere.physics.microphysics.config import MLEmulatorConfig
+from legoesm.atmosphere.physics.microphysics.config import MicrophysicsMLEmulatorConfig
 from legoesm.atmosphere.physics.microphysics.output import (
     HydrometeorState,
     MicrophysicsOutput,
@@ -50,7 +50,7 @@ def ml_microphysics(
     rho: jax.Array,
     dz: jax.Array,
     dt: float,
-    config: MLEmulatorConfig,
+    config: MicrophysicsMLEmulatorConfig,
     model: MicrophysicsEmulator,
 ) -> MicrophysicsOutput:
     """Compute ML emulator microphysics tendencies.

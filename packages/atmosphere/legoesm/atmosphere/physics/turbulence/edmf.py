@@ -19,7 +19,7 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.atmosphere.physics._shared import mixing_length, virtual_temperature
-from legoesm.atmosphere.physics.turbulence.config import EDMFConfig
+from legoesm.atmosphere.physics.turbulence.config import TurbulentEDMFConfig
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.pbl_height import diagnose_pbl_height
 from legoesm.atmosphere.physics.turbulence.surface_layer import (
@@ -45,7 +45,7 @@ def edmf_turbulence(
     q_sfc: jax.Array,
     rho: jax.Array,
     dt: float,
-    config: EDMFConfig,
+    config: TurbulentEDMFConfig,
 ) -> tuple[TurbulenceOutput, jax.Array]:
     """Compute turbulence tendencies using EDMF.
 
@@ -75,7 +75,7 @@ def edmf_turbulence(
         Air density at full levels [kg/m^3], shape (ncol, nlev).
     dt : float
         Time step [s].
-    config : EDMFConfig
+    config : TurbulentEDMFConfig
 
     Returns
     -------

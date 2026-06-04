@@ -30,7 +30,7 @@ from legoesm.atmosphere.physics.gravity_wave_drag.config import (
     McFarlaneConfig,
     HinesConfig,
     PrognosticSpectralConfig,
-    MLEmulatorConfig,
+    GWDMLEmulatorConfig,
 )
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
 from legoesm.atmosphere.physics.gravity_wave_drag.rayleigh import rayleigh_gwd

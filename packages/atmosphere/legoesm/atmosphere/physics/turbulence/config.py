@@ -338,7 +338,7 @@ class YSUConfig(NamedTuple):
     surface: SurfaceLayerConfig = SurfaceLayerConfig()
 
 
-class EDMFConfig(NamedTuple):
+class TurbulentEDMFConfig(NamedTuple):
     """Configuration for EDMF eddy-diffusivity mass-flux turbulence.
 
     Fields
@@ -417,7 +417,7 @@ class TurbulenceConfig(NamedTuple):
         Configuration for Holtslag-Boville scheme.
     ysu : YSUConfig
         Configuration for YSU scheme.
-    edmf : EDMFConfig
+    edmf : TurbulentEDMFConfig
         Configuration for EDMF scheme.
     update_interval_steps : int
         Recompute turbulence every N time steps (1 = every step).
@@ -430,5 +430,5 @@ class TurbulenceConfig(NamedTuple):
     clubb_lite: CLUBBLiteConfig = CLUBBLiteConfig()
     holtslag_boville: HoltslagBovilleConfig = HoltslagBovilleConfig()
     ysu: YSUConfig = YSUConfig()
-    edmf: EDMFConfig = EDMFConfig()
+    edmf: TurbulentEDMFConfig = TurbulentEDMFConfig()
     update_interval_steps: int = 1

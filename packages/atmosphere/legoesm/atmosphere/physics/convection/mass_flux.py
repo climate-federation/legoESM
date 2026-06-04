@@ -59,7 +59,7 @@ from legoesm.atmosphere.physics.thermodynamics import (
     parcel_profile_and_cape,
 )
 from legoesm.atmosphere.physics.convection.config import (
-    EDMFConfig,
+    ConvectiveEDMFConfig,
     MassFluxConfig,
 )
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
@@ -422,7 +422,7 @@ def edmf_convection(
     p_half: jax.Array,
     a_u: jax.Array,
     dt: float,
-    config: EDMFConfig = EDMFConfig(),
+    config: ConvectiveEDMFConfig = ConvectiveEDMFConfig(),
 ) -> Tuple[ConvectionOutput, jax.Array]:
     """Compute simplified EDMF convection tendencies.
 
@@ -440,7 +440,7 @@ def edmf_convection(
         Updraft area fraction, shape ``(ncol,)``.
     dt : float
         Model time step [s].
-    config : EDMFConfig
+    config : ConvectiveEDMFConfig
         Convection configuration.
 
     Returns

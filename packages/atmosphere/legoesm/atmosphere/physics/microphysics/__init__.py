@@ -31,7 +31,7 @@ from legoesm.atmosphere.physics.microphysics.config import (
     MorrisonConfig,
     ThompsonConfig,
     P3Config,
-    MLEmulatorConfig,
+    MicrophysicsMLEmulatorConfig,
 )
 from legoesm.atmosphere.physics.microphysics.output import (
     MicrophysicsOutput,

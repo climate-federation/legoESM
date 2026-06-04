@@ -29,7 +29,7 @@ from legoesm.atmosphere.physics.convection.config import (
     SBMConfig,
     KuoConfig,
     MassFluxConfig,
-    EDMFConfig,
+    ConvectiveEDMFConfig,
 )
 from legoesm.atmosphere.physics.convection.output import ConvectionOutput
 from legoesm.atmosphere.physics.convection.sbm import sbm_convection

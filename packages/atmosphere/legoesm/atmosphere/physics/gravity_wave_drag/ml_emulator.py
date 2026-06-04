@@ -14,7 +14,7 @@ import jax.numpy as jnp
 import equinox as eqx
 
 from legoesm import constants
-from legoesm.atmosphere.physics.gravity_wave_drag.config import MLEmulatorConfig
+from legoesm.atmosphere.physics.gravity_wave_drag.config import GWDMLEmulatorConfig
 from legoesm.atmosphere.physics.gravity_wave_drag.output import GWDOutput
 
 
@@ -47,7 +47,7 @@ def ml_gwd(
     rho: jax.Array,
     lat: jax.Array,
     dt: float,
-    config: MLEmulatorConfig,
+    config: GWDMLEmulatorConfig,
     model: GWDEmulator,
 ) -> GWDOutput:
     """Compute ML emulator GWD tendencies.

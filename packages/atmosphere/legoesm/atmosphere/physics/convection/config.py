@@ -589,7 +589,7 @@ class BechtoldConfig(NamedTuple):
     buoyancy_death_memory: bool = False
 
 
-class EDMFConfig(NamedTuple):
+class ConvectiveEDMFConfig(NamedTuple):
     """Configuration for simplified EDMF convection (mass-flux part only).
 
     Fields
@@ -644,7 +644,7 @@ class ConvectionConfig(NamedTuple):
     dca: DCAConfig = DCAConfig()
     kuo: KuoConfig = KuoConfig()
     mass_flux: MassFluxConfig = MassFluxConfig()
-    edmf: EDMFConfig = EDMFConfig()
+    edmf: ConvectiveEDMFConfig = ConvectiveEDMFConfig()
     zhang_mcfarlane: ZhangMcFarlaneConfig = ZhangMcFarlaneConfig()
     kain_fritsch: KainFritschConfig = KainFritschConfig()
     emanuel: EmanuelConfig = EmanuelConfig()

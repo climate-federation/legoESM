@@ -430,7 +430,7 @@ class P3Config(NamedTuple):
     rho_ice: float = constants.rho_ice  # Solid ice density [kg/m³]
 
 
-class MLEmulatorConfig(NamedTuple):
+class MicrophysicsMLEmulatorConfig(NamedTuple):
     """Configuration for ML microphysics emulator (Equinox MLP)."""
     n_input: int = 9
     n_hidden: int = 128
@@ -461,7 +461,7 @@ class MicrophysicsConfig(NamedTuple):
     morrison : MorrisonConfig
     thompson : ThompsonConfig
     p3 : P3Config
-    ml_emulator : MLEmulatorConfig
+    ml_emulator : MicrophysicsMLEmulatorConfig
     """
     scheme: str = "none"
     kessler: KesslerConfig = KesslerConfig()
@@ -470,4 +470,4 @@ class MicrophysicsConfig(NamedTuple):
     morrison: MorrisonConfig = MorrisonConfig()
     thompson: ThompsonConfig = ThompsonConfig()
     p3: P3Config = P3Config()
-    ml_emulator: MLEmulatorConfig = MLEmulatorConfig()
+    ml_emulator: MicrophysicsMLEmulatorConfig = MicrophysicsMLEmulatorConfig()

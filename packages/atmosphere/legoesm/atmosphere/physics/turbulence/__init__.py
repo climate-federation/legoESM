@@ -33,7 +33,7 @@ from legoesm.atmosphere.physics.turbulence.config import (
     CLUBBLiteConfig,
     HoltslagBovilleConfig,
     YSUConfig,
-    EDMFConfig,
+    TurbulentEDMFConfig,
 )
 from legoesm.atmosphere.physics.turbulence.output import TurbulenceOutput
 from legoesm.atmosphere.physics.turbulence.smagorinsky import smagorinsky_turbulence
