@@ -18,7 +18,7 @@ export PYTHONPATH=/burg-archive/glab/users/pg2328/legoESM/src:$PYTHONPATH
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 GRID="${1:-tripole}"; EXTRA="$2"; YEARS="${3:-0.1}"
 echo "=== HOST ==="; hostname; date; echo "grid=$GRID years=$YEARS extra=$EXTRA"
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/run_omip_core2.py \
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/run/run_omip_core2.py \
   --grid "$GRID" --years "$YEARS" --dt 600 --diag-every-days 10 $EXTRA \
   --output results/omip_nemo/test_newforcing_${GRID} 2>&1 | tail -55
 echo "fc_rc=${PIPESTATUS[0]}"

@@ -19,7 +19,7 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 RES="${1:-180x360}"; DT="${2:-300}"
 echo "=== HOST ==="; hostname; nvidia-smi --query-gpu=name --format=csv,noheader 2>&1|head -1; date
 echo "res=$RES dt=$DT"
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/run_omip_core2.py \
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/run/run_omip_core2.py \
   --grid latlon_bathy --latlon-res "$RES" --smoke --dt "$DT" --woa-init \
   --diag-every-days 1 --output results/omip_nemo/legoesm_latlon_woa_smoke 2>&1 | tail -45
 echo "ll_rc=${PIPESTATUS[0]}"

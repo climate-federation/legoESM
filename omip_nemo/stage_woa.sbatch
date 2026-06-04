@@ -12,7 +12,7 @@
 set +e
 cd /burg-archive/glab/users/pg2328/legoESM
 echo "=== HOST ==="; hostname; date
-bash scripts/download_omip_data.sh 2>&1 | tail -20
+bash scripts/data/download_omip_data.sh 2>&1 | tail -20
 echo "woa_rc=$?"
 echo "=== staged ==="; ls -la data/woa18/ 2>&1
 echo "=== DONE ==="

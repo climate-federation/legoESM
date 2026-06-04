@@ -17,7 +17,7 @@ export PYTHONPATH=/burg-archive/glab/users/pg2328/legoESM/src:$PYTHONPATH
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 TAU="${1:-60}"
 echo "=== HOST ==="; hostname; date; echo "nudge tau=${TAU}d"
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/run_omip_core2.py \
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/run/run_omip_core2.py \
   --smoke --dt 600 --nudge-woa-tau-days "$TAU" --diag-every-days 1 \
   --output results/omip_nemo/legoesm_tripole_nudge_smoke 2>&1 | tail -40
 echo "ndg_rc=${PIPESTATUS[0]}"

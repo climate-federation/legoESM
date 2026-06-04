@@ -15,6 +15,6 @@ export PYTHONPATH=/burg-archive/glab/users/pg2328/legoESM/src:$PYTHONPATH
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 INPUTS=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS
 echo "=== HOST ==="; hostname; date
-JAX_PLATFORMS=cpu $PY scripts/build_core2_nyf_zarr.py --inputs-dir "$INPUTS" 2>&1 | tail -30
+JAX_PLATFORMS=cpu $PY scripts/data/build_core2_nyf_zarr.py --inputs-dir "$INPUTS" 2>&1 | tail -30
 echo "c2z_rc=$?"
 echo "=== DONE ==="

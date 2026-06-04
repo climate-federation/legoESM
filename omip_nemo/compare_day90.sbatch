@@ -15,7 +15,7 @@ cd /burg-archive/glab/users/pg2328/legoESM
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 NEMO=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_REF/ORCA1_1m_20000101_20041231_grid_T.nc
 echo "=== HOST ==="; hostname; date
-$PY scripts/compare_omip_nemo.py \
+$PY scripts/validate/compare_omip_nemo.py \
   --legoesm-snapshot results/omip_nemo/test_newforcing_tripole/snapshot_final.npz \
   --nemo-gridt "$NEMO" --nemo-time-idx 2 \
   --output-dir results/omip_nemo/compare_day90 2>&1 | tail -25
