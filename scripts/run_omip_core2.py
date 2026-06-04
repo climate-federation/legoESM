@@ -5,7 +5,7 @@ grid -- the faithful counterpart to the NEMO ORCA1 reference (see
 
 Both models use the SAME CORE-II forcing: NEMO reads the raw COREv2 files; here
 ``load_core2_nyf`` reads ``nyf.zarr`` built from those same files by
-``scripts/build_core2_nyf_zarr.py`` (native 6-hourly winds, so the nonlinear
+``scripts/data/build_core2_nyf_zarr.py`` (native 6-hourly winds, so the nonlinear
 bulk fluxes match). The eORCA1 grid + land mask + bathymetry come from NEMO's
 own ``eORCA1.2_mesh_mask.nc`` (tmaskutil / e3t_0), so the geometry matches too.
 

@@ -220,12 +220,12 @@ def jra55_to_freshwater(slice, lhflx, dt) -> FreshwaterForcing:
 
 Mentioned here for completeness but not built in Item 2.
 
-### Phase 5 — `scripts/prepare_omip_forcing.py` (~½ day)
+### Phase 5 — `scripts/data/prepare_omip_forcing.py` (~½ day)
 
 Thin CLI wrapper:
 
 ```bash
-python scripts/prepare_omip_forcing.py \
+python scripts/data/prepare_omip_forcing.py \
     --source gs://noresm-jra55do/v1.4/corrected \
     --years 1958 2018 \
     --target-grid latlon_1deg \

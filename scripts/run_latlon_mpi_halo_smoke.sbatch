@@ -37,7 +37,7 @@ cd "${REPO_ROOT}"
 mkdir -p results/latlon_mpi
 
 # Prefer the pg2328-owned venv with mpi4jax (created by
-# ``scripts/setup_legoesm_mpi_venv.sbatch``); fall back to jn2808's
+# ``scripts/data/setup_legoesm_mpi_venv.sbatch``); fall back to jn2808's
 # conda env when running tests that don't need MPI.  The pre-flight
 # below will abort if mpi4jax isn't importable from the chosen Python.
 PG_VENV="${HOME}/.venvs/legoesm-mpi/bin/python"

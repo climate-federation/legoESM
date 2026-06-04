@@ -64,7 +64,7 @@ run_one() {
 
   printf "[iter222] >>> %s (n=%d) ... " "${tag}" "${ncells}"
   if env -i HOME="${HOME}" PATH="${PATH}" JAX_ENABLE_X64=1 \
-      bash -c "source '${ROOT}/scripts/gpu_env.sh' && \
+      bash -c "source '${ROOT}/scripts/data/gpu_env.sh' && \
                PYTHONPATH='${ROOT}' '${ROOT}/.venv/bin/python' \
                  '${ROOT}/scripts/run_baroclinic_wave_benchmark.py' \
                  --grid ${grid} --resolution ${res} --dt ${dt} --days 1 \

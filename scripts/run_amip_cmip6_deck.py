@@ -116,7 +116,7 @@ def _auto_generate(forcing_dir: Path, start_year: int, end_year: int,
     print(f"[deck] Auto-generating forcing files in {forcing_dir} …")
     cmd = [
         sys.executable,
-        str(_REPO_ROOT / "scripts" / "generate_amip_forcing.py"),
+        str(_REPO_ROOT / "scripts" / "data" / "generate_amip_forcing.py"),
         "--out", str(forcing_dir),
         "--start-year", str(start_year),
         "--end-year", str(end_year),
@@ -260,7 +260,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[deck] ERROR — forcing dir {forcing_dir} is missing files: "
                   f"{files['_missing']}")
             print(f"[deck]   re-run with --auto-generate to create them, or "
-                  "run scripts/generate_amip_forcing.py manually first.")
+                  "run scripts/data/generate_amip_forcing.py manually first.")
             return 2
 
     # Build the run_amip.py command

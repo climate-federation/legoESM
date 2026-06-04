@@ -43,7 +43,7 @@ mkdir -p results/amip_latlon_restart_smoke
 PY="${HOME}/.venvs/legoesm-mpi/bin/python"
 if [[ ! -x "${PY}" ]]; then
     echo "FATAL: ${PY} not found.  Build the venv first:" >&2
-    echo "    sbatch scripts/setup_legoesm_mpi_venv.sbatch" >&2
+    echo "    sbatch scripts/data/setup_legoesm_mpi_venv.sbatch" >&2
     exit 2
 fi
 export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"

@@ -214,7 +214,7 @@ def parse_args():
                        "Surface forcing source. 'restoring' (default) uses "
                        "Haney SST/SSS restoring toward WOA. 'jra55_do_tropical' "
                        "uses LY09 bulk fluxes from a pre-built JRA55-do cache "
-                       "(see scripts/prepare_omip_forcing.py). Currently "
+                       "(see scripts/data/prepare_omip_forcing.py). Currently "
                        "supports only --grid latlon."
                    ))
     p.add_argument("--jra55-cache", type=str, default=None,
@@ -1033,7 +1033,7 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
     if not cache_path.exists():
         raise FileNotFoundError(
             f"JRA55-do cache not found at {cache_path}. Build one with "
-            "scripts/prepare_omip_forcing.py."
+            "scripts/data/prepare_omip_forcing.py."
         )
 
     import xarray as xr

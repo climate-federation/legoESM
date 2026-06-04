@@ -29,13 +29,13 @@ regression tests in
 * 1× NVIDIA RTX 5090 Laptop (Blackwell, 82 SMs, 18 GB VRAM, PCI 02:00.0)
 * Driver/userspace mismatch (kernel module 580.126.09, userspace 580.142
   → `cuInit` returns `CUDA_ERROR_COMPAT_NOT_SUPPORTED_ON_DEVICE`)
-* Workaround that needs **no sudo**: `source scripts/gpu_env.sh` extracts
+* Workaround that needs **no sudo**: `source scripts/data/gpu_env.sh` extracts
   matching 580.126 userspace libs from the apt cache and prepends to
   `LD_LIBRARY_PATH`.  Idempotent.
 
 ```bash
 env -i HOME=$HOME PATH=$PATH JAX_ENABLE_X64=1 bash -c \
-    "source scripts/gpu_env.sh && \
+    "source scripts/data/gpu_env.sh && \
      PYTHONPATH=. .venv/bin/python -c 'import jax; print(jax.devices())'"
 # → [CudaDevice(id=0)]
 ```

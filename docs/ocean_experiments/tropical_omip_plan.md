@@ -138,7 +138,7 @@ comparison and a list of any required code changes.
 
 **Effort**: 1 wk. Gates item 4.
 
-`scripts/prepare_omip_forcing.py`. Operations:
+`scripts/data/prepare_omip_forcing.py`. Operations:
 
 1. Download/locate JRA55-do v1.4+ "corrected" files (Tsujino et al. 2018, 2020).
    Variables: `uas`, `vas` (3-hourly winds); `tas`, `huss`, `psl`, `prra`,

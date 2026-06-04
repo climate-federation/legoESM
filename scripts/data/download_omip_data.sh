@@ -19,9 +19,9 @@
 #   ./scripts/download_omip_data.sh --with-jra55-1990-1991  # WOA + IAF
 #   ./scripts/download_omip_data.sh --jra55-only          # IAF only
 #
-# After IAF lands, build the RYF year via ``scripts/make_ryf.py``
+# After IAF lands, build the RYF year via ``scripts/data/make_ryf.py``
 # (Stewart 2020 smooth wraparound), then point our cache builder
-# (``scripts/prepare_omip_forcing.py``) at the resulting Zarr.
+# (``scripts/data/prepare_omip_forcing.py``) at the resulting Zarr.
 
 set -euo pipefail
 
@@ -119,7 +119,7 @@ fi
 
 # ---------------------------------------------------------------------------
 # JRA55-do v1.6.0 IAF — opt-in via --with-jra55-1990-1991 / --jra55-only.
-# Delegates to scripts/download_jra55_iaf.py for resumable per-file fetching
+# Delegates to scripts/data/download_jra55_iaf.py for resumable per-file fetching
 # with size verification against the live ESGF Solr catalog.
 # ---------------------------------------------------------------------------
 
@@ -148,13 +148,13 @@ fi
 #
 # Instead, with --with-jra55-1990-1991 we pull the raw IAF window
 # (~23 GB, public Globus HTTPS, no auth) and build the RYF year
-# locally via ``scripts/make_ryf.py`` (Stewart 2020 smooth wraparound).
+# locally via ``scripts/data/make_ryf.py`` (Stewart 2020 smooth wraparound).
 # This is the path the paper itself recommends for users not at NCI.
 #
 # After IAF lands and ``make_ryf.py`` produces the blended year,
 # point the OMIP cache builder at it:
 #
-#   python scripts/prepare_omip_forcing.py \
+#   python scripts/data/prepare_omip_forcing.py \
 #       --source data/jra55_ryf/RYF9091.zarr \
 #       --years 1990 1990 \
 #       --target-resolution-deg 1.0 \

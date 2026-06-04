@@ -37,7 +37,7 @@
 # ~~~~~~~~~~~~
 # The pg2328 MPI venv with mpi4jax must exist at
 # ``~/.venvs/legoesm-mpi``; build it once with
-# ``sbatch scripts/setup_legoesm_mpi_venv.sbatch``.
+# ``sbatch scripts/data/setup_legoesm_mpi_venv.sbatch``.
 
 set -euo pipefail
 
@@ -73,7 +73,7 @@ mkdir -p "${FORCING_DIR}"
 PY="${HOME}/.venvs/legoesm-mpi/bin/python"
 if [[ ! -x "${PY}" ]]; then
     echo "FATAL: ${PY} not found.  Build the venv first:" >&2
-    echo "    sbatch scripts/setup_legoesm_mpi_venv.sbatch" >&2
+    echo "    sbatch scripts/data/setup_legoesm_mpi_venv.sbatch" >&2
     exit 2
 fi
 export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"

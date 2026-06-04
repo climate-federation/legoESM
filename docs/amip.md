@@ -30,11 +30,11 @@ The `forcing_amip/` directory expects six files following the CMIP6 schemas:
 To regenerate (or seed) the synthetic deck:
 
 ```bash
-python scripts/generate_amip_forcing.py --out forcing_amip \
+python scripts/data/generate_amip_forcing.py --out forcing_amip \
     --start-year 1979 --end-year 2014
 # Optional: interannually-varying ozone (exercises the loader's
 # non-cyclic dispatch instead of the 12-month climatology):
-python scripts/generate_amip_forcing.py --out forcing_amip \
+python scripts/data/generate_amip_forcing.py --out forcing_amip \
     --start-year 1979 --end-year 2014 \
     --component ozone --ozone-interannual
 ```

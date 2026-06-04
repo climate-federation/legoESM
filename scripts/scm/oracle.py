@@ -7,7 +7,7 @@ together with a sha256 manifest pinned to the upstream commit hash.
 
 Usage
 -----
-After ``scripts/setup_jax_scm_oracle.sh`` populates ``.venv-jax-scm/``
+After ``scripts/data/setup_jax_scm_oracle.sh`` populates ``.venv-jax-scm/``
 with the upstream package::
 
     .venv-jax-scm/bin/python scripts/run_scm_test_matrix.py oracle \\

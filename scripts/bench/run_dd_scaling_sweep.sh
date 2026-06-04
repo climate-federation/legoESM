@@ -33,7 +33,7 @@ TIME_STEPS="${TIME_STEPS:-20}"
 RANKS="${RANKS:-1 2 4}"
 OUTPUT="${OUTPUT:-results/dd_scaling}"
 # Prefer the MPI-compatible pinned venv (.venv-mpi from
-# scripts/setup_mpi_venv.sh + requirements_mpi.txt) if present. F9
+# scripts/data/setup_mpi_venv.sh + requirements_mpi.txt) if present. F9
 # explains why: the default .venv ships JAX 0.10 + mpi4jax 0.9 which
 # falls back to the slow compatibility path and gives ~70x per-step
 # slowdown at np=2.
@@ -44,7 +44,7 @@ if [ -z "${PYBIN:-}" ]; then
         PYBIN=".venv/bin/python"
         echo "NOTE: .venv-mpi not found — scaling numbers will be"
         echo "      dominated by the F9 mpi4jax/JAX mismatch overhead."
-        echo "      Run scripts/setup_mpi_venv.sh first for real numbers."
+        echo "      Run scripts/data/setup_mpi_venv.sh first for real numbers."
     fi
 fi
 

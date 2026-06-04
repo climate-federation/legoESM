@@ -2,9 +2,9 @@
 # End-to-end smoke test of the JRA55-do RYF pipeline on real data.
 #
 # Pre-req:
-#   - WOA18 in data/woa18/  (run scripts/download_omip_data.sh)
+#   - WOA18 in data/woa18/  (run scripts/data/download_omip_data.sh)
 #   - JRA55-do IAF 1990+1991 in data/jra55_iaf/
-#       (run scripts/download_omip_data.sh --jra55-only)
+#       (run scripts/data/download_omip_data.sh --jra55-only)
 #
 # Stages (each idempotent — skipped if its output already exists):
 #   1. make_ryf.py  → data/jra55_ryf/RYF9091.zarr
@@ -56,7 +56,7 @@ echo "=========================================="
 
 if [[ ! -d "$IAF_DIR" ]]; then
     echo "ERROR: IAF dir not found: $IAF_DIR" >&2
-    echo "  Run scripts/download_omip_data.sh --jra55-only first." >&2
+    echo "  Run scripts/data/download_omip_data.sh --jra55-only first." >&2
     exit 1
 fi
 
@@ -69,7 +69,7 @@ fi
 
 if [[ ! -f "$WOA_T" || ! -f "$WOA_S" ]]; then
     echo "ERROR: WOA18 NetCDFs missing." >&2
-    echo "  Run scripts/download_omip_data.sh first." >&2
+    echo "  Run scripts/data/download_omip_data.sh first." >&2
     exit 1
 fi
 
@@ -83,7 +83,7 @@ if [[ -e "$RYF_PATH" ]]; then
 else
     echo ""
     echo "[1/4] Building RYF9091 (Stewart 2020 splice) ..."
-    JAX_ENABLE_X64=1 python "$REPO_ROOT/scripts/make_ryf.py" \
+    JAX_ENABLE_X64=1 python "$REPO_ROOT/scripts/data/make_ryf.py" \
         --iaf-dir "$IAF_DIR" \
         --year1 1990 --year2 1991 \
         --out "$RYF_PATH"
@@ -103,7 +103,7 @@ else
     # Stewart 2020 / make_ryf.py, the RYF time axis is re-based to
     # 1900-01-01.  We pass --years 1900 1900 + --ref-year 1900 to
     # match.
-    JAX_ENABLE_X64=1 python "$REPO_ROOT/scripts/prepare_omip_forcing.py" \
+    JAX_ENABLE_X64=1 python "$REPO_ROOT/scripts/data/prepare_omip_forcing.py" \
         --source "$RYF_PATH" \
         --years 1900 1900 \
         --target-resolution-deg 1.0 \

@@ -191,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
               flush=True)
         gen_cmd = [
             sys.executable,
-            str(_REPO_ROOT / "scripts" / "generate_amip_forcing.py"),
+            str(_REPO_ROOT / "scripts" / "data" / "generate_amip_forcing.py"),
             "--out", str(forcing_dir),
             # Single-year deck — minimal coverage to keep the smoke
             # test fast.  Year window matches what we pass to the deck

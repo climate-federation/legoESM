@@ -5,7 +5,7 @@ Implements the Stewart et al. 2020 algorithm faithfully — modernised
 from the canonical reference at https://github.com/COSIMA/make_ryf
 (Python 2, MOM-specific) into a Python 3 implementation that produces
 a single combined Zarr cache directly consumable by our
-``scripts/prepare_omip_forcing.py``.
+``scripts/data/prepare_omip_forcing.py``.
 
 Algorithm
 ---------
@@ -35,7 +35,7 @@ Inputs
 ------
 
 A directory containing JRA55-do IAF NetCDFs in the input4MIPs layout
-(matches what ``scripts/download_jra55_iaf.py`` produces)::
+(matches what ``scripts/data/download_jra55_iaf.py`` produces)::
 
     <iaf_dir>/atmos/3hrPt/<var>/v20240531/<var>_..._<YYYY>01010000-<YYYY>12312100.nc
     <iaf_dir>/atmos/3hr/<var>/v20240531/<var>_..._<YYYY>01010130-<YYYY>12312230.nc
@@ -55,7 +55,7 @@ time axis (re-based to ``1900-01-01 00:00`` with ``calendar=noleap``):
         friver                         — daily, broadcast across the 8
                                          sub-daily slots of each noleap day
 
-This format is what ``scripts/prepare_omip_forcing.py`` expects.
+This format is what ``scripts/data/prepare_omip_forcing.py`` expects.
 
 Usage
 -----

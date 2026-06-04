@@ -233,7 +233,7 @@ def test_one_step_flux_magnitudes_are_realistic(tmp_path):
 #
 # Build the cache once:
 #
-#   python scripts/prepare_omip_forcing.py \
+#   python scripts/data/prepare_omip_forcing.py \
 #       --source /scratch/jra55_do_v14/raw.zarr \
 #       --years 2000 2000 \
 #       --target-resolution-deg 1.0 \

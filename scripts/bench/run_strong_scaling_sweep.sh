@@ -24,7 +24,7 @@ run_one() {
 
     if [[ "$backend" == "gpu" ]]; then
         env -i HOME=$HOME PATH=$PATH JAX_ENABLE_X64=1 bash -c \
-            "source scripts/gpu_env.sh >/dev/null && \
+            "source scripts/data/gpu_env.sh >/dev/null && \
              PYTHONPATH=. .venv/bin/python scripts/run_baroclinic_wave_benchmark.py \
                  --grid '$grid' --resolution '$res' --dt '$dt' --days '$days' \
                  --tag '${TAG}_${label}' $extra 2>&1" \

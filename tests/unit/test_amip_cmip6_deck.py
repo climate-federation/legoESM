@@ -1,6 +1,6 @@
 """Tests for the synthetic CMIP6 AMIP forcing deck.
 
-Validates that the files produced by ``scripts/generate_amip_forcing.py``
+Validates that the files produced by ``scripts/data/generate_amip_forcing.py``
 are loaded correctly by the corresponding production loaders in
 ``src/legoesm/forcing/external.py`` and ``src/legoesm/forcing/amip.py``,
 and that the values returned at canonical query points are physically
@@ -20,9 +20,10 @@ import pytest
 
 # Ensure scripts/ is importable
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_REPO_ROOT))           # for `from scripts.data import ...`
 sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 
-import generate_amip_forcing as gaf  # noqa: E402
+from scripts.data import generate_amip_forcing as gaf  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 from legoesm.forcing.external import (  # noqa: E402

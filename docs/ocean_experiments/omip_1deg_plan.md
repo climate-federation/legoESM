@@ -326,7 +326,7 @@ atmosphere).
 
 ### Phase 2: Forcing Data Preparation (~100 LOC)
 
-Create `scripts/prepare_omip_forcing.py` that:
+Create `scripts/data/prepare_omip_forcing.py` that:
 
 1. Downloads ERA5 surface fields (or points to existing Zarr store)
 2. Regrids to 1° lat-lon (if needed)
