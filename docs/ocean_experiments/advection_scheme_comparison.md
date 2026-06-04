@@ -320,7 +320,7 @@ equivalent quantity over T classes to obtain an effective diapycnal
 diffusivity κ_eff. The volume-weighted Var(T) time series is a single
 scalar that captures the same physics.
 
-The post-processing script `scripts/plot_T_volumetric_census.py` computes
+The post-processing script `scripts/plot/plot_T_volumetric_census.py` computes
 this and three related metrics:
 
 - `<T>` drift — scheme conservation error (should be ~0)
@@ -471,7 +471,7 @@ close the comparison. That is listed in "Open issues" below.
 ### BCI development — the visualisations tell a different story
 
 Generating per-run SST / SST-anomaly / η / surface-speed panels
-(`scripts/replot_eady_bci.py` → `results/ocean/eady_uniform/bci_development/*_bci_snapshots.png`)
+(`scripts/plot/replot_eady_bci.py` → `results/ocean/eady_uniform/bci_development/*_bci_snapshots.png`)
 on a physical aspect ratio cropped to the domain reveals a real
 dynamical divergence between the grids that the scalar metrics hide:
 
@@ -677,7 +677,7 @@ specifically missing in the **weak-forcing** regime is only the
 **wall-trapped secondary instability**, not BCI growth itself. This
 narrows the wall-eddy-suppression follow-up significantly.
 
-Once the tvd run finishes, rerun `scripts/replot_eady_bci.py` on the
+Once the tvd run finishes, rerun `scripts/plot/replot_eady_bci.py` on the
 strong-forcing dirs (same script, no changes needed; may want to
 edit `TARGET_DAYS` to `[0, 30, 60, 100, 140, 180]` since strong
 forcing saturates earlier) to generate eddy-development figures
@@ -860,7 +860,7 @@ even at weak forcing.
   scientific-correctness gap for 20 km weak-forcing runs, but would
   be needed for MPAS equivalents of the lat-lon SOM recipe at
   higher resolutions.
-- **Fix applied in passing**: `scripts/plot_T_volumetric_census.py`
+- **Fix applied in passing**: `scripts/plot/plot_T_volumetric_census.py`
   previously hardcoded `(0, 360)` for MPAS mesh reconstruction.
   Now reads `(cfg.lon_west, cfg.lon_east)` from `EadyUniformConfig`
   so it works on the sub-360° periodic mesh.
@@ -891,7 +891,7 @@ even at weak forcing.
   thin strip. Existing runs can be regenerated via direct
   `_replot_case_snapshots(case_dir)` invocation; see
   `docs/ocean_experiments/NEXT_STEPS_advection_comparison.md`.
-  `scripts/replot_eady_bci.py` (native Voronoi, physical aspect,
+  `scripts/plot/replot_eady_bci.py` (native Voronoi, physical aspect,
   SST-anomaly row) is still the preferred figure for cross-grid
   comparisons because it uses the 20 km mesh natively rather than
   the ~1° regrid.

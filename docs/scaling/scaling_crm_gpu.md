@@ -114,7 +114,7 @@ Dispatch floor: ~10 ms at N=24 regardless of precision (acoustic
 substep launch × 36 + scan overhead). Same shape as atm CS, ocean
 LL — fixed launch cost dominates below 50k cell-lev.
 
-Plot reuse: `scripts/plot_gpu_scaling.py` (from PR #319, already in
+Plot reuse: `scripts/plot/plot_gpu_scaling.py` (from PR #319, already in
 main) → `results/scaling_crm_gpu/scaling_gpu_*.png` (4 figures).
 
 ### Iter 78 — 2026-05-27 — FINAL: at single-GPU theoretical limit, declaring DONE

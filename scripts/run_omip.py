@@ -3531,7 +3531,7 @@ def run_omip_single(grid_type: str, args) -> dict:
     _snapshot_fn = None
     if grid_type == "mpas":
         try:
-            from plot_mpas_omip_snapshot import plot_snapshot as _plot_snap
+            from scripts.plot.plot_mpas_omip_snapshot import plot_snapshot as _plot_snap
             import threading
             _snap_mesh = grid
             _snap_z = z_coord

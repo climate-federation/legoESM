@@ -11,7 +11,7 @@ Quick start::
 
     JAX_ENABLE_X64=1 python scripts/run_dino.py --days 10
     JAX_ENABLE_X64=1 python scripts/run_dino.py --grid mpas --days 10
-    JAX_ENABLE_X64=1 python scripts/plot_dino.py results/dino   # visualize
+    JAX_ENABLE_X64=1 python scripts/plot/plot_dino.py results/dino   # visualize
 
 For the full list of options::
 

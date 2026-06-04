@@ -25,5 +25,5 @@ fi
 
 N=$(echo "$RESTARTS" | wc -w)
 echo "Generating $N yearly snapshots on CPU..."
-CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu .venv/bin/python scripts/plot_mpas_omip_snapshot.py \
+CUDA_VISIBLE_DEVICES="" JAX_PLATFORMS=cpu .venv/bin/python scripts/plot/plot_mpas_omip_snapshot.py \
   --sub $SUB $RESTARTS

@@ -953,14 +953,14 @@ def test_wrapper_emit_trajectory_png_default_off(wrapper_text):
 
 def test_wrapper_emit_trajectory_png_invokes_plot_rce_log(wrapper_text):
     """iter-125: when the EMIT_TRAJECTORY_PNG=1 branch fires, it
-    must invoke scripts/plot_rce_log.py against $OUTPUT."""
+    must invoke scripts/plot/plot_rce_log.py against $OUTPUT."""
     code = _strip_bash_comments(wrapper_text)
     assert re.search(
-        r'"\$PYBIN"\s+"\$REPO_ROOT/scripts/plot_rce_log\.py"\s+"\$OUTPUT"',
+        r'"\$PYBIN"\s+"\$REPO_ROOT/scripts/plot/plot_rce_log\.py"\s+"\$OUTPUT"',
         code,
     ), (
         "run_rce_30day.sh EMIT_TRAJECTORY_PNG=1 branch must call "
-        "``\"$PYBIN\" \"$REPO_ROOT/scripts/plot_rce_log.py\" "
+        "``\"$PYBIN\" \"$REPO_ROOT/scripts/plot/plot_rce_log.py\" "
         "\"$OUTPUT\"``."
     )
 

@@ -85,10 +85,10 @@ over 600 d.
 
 1. `--U-surface` CLI flag on the test matrix runner (threads through
    `run_eady_uniform`'s override dict).
-2. `scripts/plot_T_volumetric_census.py` — volumetric T-histogram plus
+2. `scripts/plot/plot_T_volumetric_census.py` — volumetric T-histogram plus
    Var(T), T-range, <T> scalars; matched-time comparison across runs;
    "slumping vs diffusion" cross-section figure.
-3. `scripts/plot_rossby_number.py` — ζ/f from cell-centered u_3d, v_3d;
+3. `scripts/plot/plot_rossby_number.py` — ζ/f from cell-centered u_3d, v_3d;
    percentiles per layer; zonal-mean field (nearly empty, confirming
    eddy cancellation — the info is in the distribution).
 

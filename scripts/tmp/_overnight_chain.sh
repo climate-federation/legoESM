@@ -132,7 +132,7 @@ tail -10 results/ocean/global_overturning_50yr_implicit/run.log | tee -a "$LOG"
 
 # --- Step 4: comparison plots ---
 echo "[$(ts)] Step 4: comparison plots vs original 50yr run" | tee -a "$LOG"
-JAX_ENABLE_X64=1 "$PY" scripts/plot_implicit_spinup_restart.py 18250 \
+JAX_ENABLE_X64=1 "$PY" scripts/plot/plot_implicit_spinup_restart.py 18250 \
     > /dev/null 2>&1 || true
 
 echo "[$(ts)] Overnight chain COMPLETE" | tee -a "$LOG"

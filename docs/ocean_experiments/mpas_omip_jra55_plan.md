@@ -85,7 +85,7 @@ Full PR #261 recipe wired into `run_omip.py`:
 
 ### 7. Auto-Snapshot Generation
 
-Tripcolor + cartopy Robinson projection snapshots (`scripts/plot_mpas_omip_snapshot.py`)
+Tripcolor + cartopy Robinson projection snapshots (`scripts/plot/plot_mpas_omip_snapshot.py`)
 are auto-generated alongside each 30-day restart checkpoint.
 
 Layout (2×3): Surface speed | SSH | SST | Zonal-mean T(lat,z) | SSS | Deep T

@@ -122,7 +122,7 @@
 #                landed (where the FileNotFoundError is expected).
 #   EMIT_TRAJECTORY_PNG  Trajectory PNG rendering mode:
 #                0      (default) — skip the PNG step.
-#                1      — best-effort. Render via scripts/plot_rce_log.py;
+#                1      — best-effort. Render via scripts/plot/plot_rce_log.py;
 #                         WARN on failure but DO NOT change wrapper exit.
 #                strict — render + propagate failure as the wrapper's
 #                         exit code. Use in CI gates that REQUIRE the
@@ -361,7 +361,7 @@ esac
 if [ "$EMIT_TRAJECTORY_PNG" = "1" ] || [ "$EMIT_TRAJECTORY_PNG" = "strict" ]; then
     echo "Rendering trajectory PNG (mode=$EMIT_TRAJECTORY_PNG)..."
     set +e
-    "$PYBIN" "$REPO_ROOT/scripts/plot_rce_log.py" "$OUTPUT" \
+    "$PYBIN" "$REPO_ROOT/scripts/plot/plot_rce_log.py" "$OUTPUT" \
         > "$OUTPUT/trajectory_plot.log" 2>&1
     plot_status=$?
     set -e

@@ -67,4 +67,4 @@ for backend in gpu cpu; do
 done
 
 echo
-echo "All cells written to output/*$TAG*.npz; summarize with scripts/plot_scaling.py"
+echo "All cells written to output/*$TAG*.npz; summarize with scripts/plot/plot_scaling.py"

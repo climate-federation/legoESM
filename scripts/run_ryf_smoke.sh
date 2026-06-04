@@ -139,7 +139,7 @@ JAX_ENABLE_X64=1 python "$REPO_ROOT/scripts/run_omip.py" \
 echo ""
 echo "[4/4] Generating progress plots ..."
 if [[ -d "$RUN_DIR" ]]; then
-    JAX_ENABLE_X64=1 python "$REPO_ROOT/scripts/plot_jra55_tropical_progress.py" \
+    JAX_ENABLE_X64=1 python "$REPO_ROOT/scripts/plot/plot_jra55_tropical_progress.py" \
         --run-dir "$RUN_DIR" || echo "  (plotter exited non-zero — check for missing matplotlib?)"
 else
     echo "  WARNING: run dir not found: $RUN_DIR"

@@ -69,7 +69,7 @@ Grid types to cover:
 ### Iter 1 — 2026-05-26 — baseline inventory
 - Reuse: `scripts/run_levante_gpu_scaling.py` (atm 4 grids, weak+strong, supports n_gpus=1)
 - Reuse: `scripts/bench_dd_scaling.py` (RCE plane MPI domain-decomp)
-- Reuse: `scripts/plot_scaling.py`, `plot_scaling_laws.py`
+- Reuse: `scripts/plot/plot_scaling.py`, `plot_scaling_laws.py`
 - No ocean GPU bench exists — needs adding (reuse ocean test-matrix init helpers)
 - Branch: `feature/gpu-scaling`
 - Lat-lon atm removed (#115) — only spectral/cubed-sphere/icosahedral usable
@@ -361,7 +361,7 @@ Side-effect check on CS atm:
 
 ### Code artifacts
 - `scripts/bench_ocean_gpu_scaling.py` — ocean GPU bench (latlon C-grid + MPAS Voronoi), uses lax.scan fuse + CUDA graphs by default
-- `scripts/plot_gpu_scaling.py` — generic CSV → 3 figures, precision-aware legend, theoretical floor overlay
+- `scripts/plot/plot_gpu_scaling.py` — generic CSV → 3 figures, precision-aware legend, theoretical floor overlay
 - `scripts/analyze_gpu_scaling.py` — 2-precision linear decomposition with valid-regime guards (only applies fit when ratio ∈ [1.5, 2.5])
 - `scripts/profile_cs_dycore.py` — JAX profiler trace of C48 step stages
 
@@ -649,7 +649,7 @@ Updated final ladder:
 
 ### Code summary
 - `scripts/bench_ocean_gpu_scaling.py` (228 LOC) — ocean GPU bench with CUDA graphs + lax.scan fuse
-- `scripts/plot_gpu_scaling.py` (260 LOC) — 4 plots, precision-aware legend, theoretical floor, peak-bar
+- `scripts/plot/plot_gpu_scaling.py` (260 LOC) — 4 plots, precision-aware legend, theoretical floor, peak-bar
 - `scripts/analyze_gpu_scaling.py` (143 LOC) — 2-precision decomposition with valid-regime guards
 - `scripts/profile_cs_dycore.py` — JAX profiler trace of C48 step stages
 - `scaling_gpu.md` — full iteration log (this file)

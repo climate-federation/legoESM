@@ -457,7 +457,7 @@ recommendation per grid:
 | cubed-sphere  |           24 | +20 % gain                                  |
 | icosahedral   |            1 | MPAS already well-fused; scan=24 was -9 %   |
 
-`scripts/plot_scaling.py --ingest 'pattern'` overrides the inline
+`scripts/plot/plot_scaling.py --ingest 'pattern'` overrides the inline
 STRONG_SCALING dict with throughput from any matching NPZ files
 (uses the iter-202-added ``steps_per_sec`` field).  Verified: ingests
 the iter-201 sweep and rewrites the GPU/CPU curve points without

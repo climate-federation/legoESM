@@ -6,7 +6,7 @@ Covers:
   global-overturning plotter expects.
 - ``_run_omip_loop(checkpoint_days=...)`` actually triggers restart
   saves at the right cadence.
-- ``scripts/plot_jra55_tropical_progress.py`` reads those restarts
+- ``scripts/plot/plot_jra55_tropical_progress.py`` reads those restarts
   and produces the four progress PNGs without crashing.
 """
 
