@@ -80,7 +80,9 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 # Ensure scripts/ is on sys.path (for ocean_test_matrix package).
-_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
+# __file__ is scripts/matrix/run_ocean_test_matrix.py; the ocean_test_matrix
+# package lives at scripts/ocean_test_matrix, so parents[1] == scripts/.
+_SCRIPTS_DIR = str(Path(__file__).resolve().parents[1])
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
@@ -5195,7 +5197,7 @@ def _run_experiment_via_registry(
       kwargs that aren't derivable from the config class.
     """
     import sys as _sys
-    _sys.path.insert(0, str(Path(__file__).parent))
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from ocean_test_matrix.setup import (
         _create_ocean_setup as _create_ocean_setup_rich,
     )
