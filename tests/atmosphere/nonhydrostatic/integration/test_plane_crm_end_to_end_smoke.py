@@ -142,21 +142,21 @@ def test_plane_crm_short_smoke_clean_ic(tmp_path):
     cwv_first = float(rows[0]["CWV_mean"])
     cwv_final = float(rows[-1]["CWV_mean"])
 
-    # Anchor the IC CWV: the 12x12@nlev=20 Wing 2018 IC carries
-    # 49.78 mm at this nlev/H after the iter-95 hydrostatic-BC fix.
-    # (Was 49.78 mm when pinned at #315, where the driver called
-    # make_wing2018_theta_ref_fn(T_sfc=300) against the old actual-
-    # temperature parameterization. That surface-temp parameter was
-    # since renamed T_sfc -> T_v0 = surface VIRTUAL temperature, so the
-    # driver now passes T_v0=300 -> a slightly cooler actual surface T
-    # and +0.31 mm CWV. The driver crashed continuously between that
-    # rename and the kwarg fix, so this sentinel was never re-validated;
-    # 49.78 mm is the correct IC under the current, more physical T_v0
-    # parameterization.) If a future commit silently shifts the Wing
-    # profile coefficients or reverts the BC, the drift assertion below
-    # would still pass against the new IC and miss the regression — this
-    # gate makes the IC itself part of the contract. Tolerance 0.01 mm
-    # (~2e-4 relative).
+    # Anchor the IC CWV: the 12x12@nlev=20 Wing 2018 IC carries 49.78 mm at
+    # this nlev/H after the iter-95 hydrostatic-BC fix. This driver is a
+    # near-EQUILIBRIUM RCE smoke: build_height_coord_and_state sets the theta
+    # reference to T_v0 = SST = 300 K so the column starts quiescent and CWV
+    # stays pinned until convection spins up. (Strict RCEMIP fixes T_v0=295 K,
+    # which sits ~8 K below the SST and would flood the column — CWV ~49.78 mm
+    # and rapidly growing — breaking this smoke's quiescent-start contract; the
+    # canonical-295 path is covered by test_rcemip_plane_smoke.) Was 49.4691 mm
+    # when pinned at #315 under the pre-rename make_wing2018_theta_ref_fn(
+    # T_sfc=300) actual-temperature parameterization; the +0.31 mm is the
+    # virtual-vs-actual surface-temp difference under the renamed T_v0 param.
+    # If a future commit silently shifts the Wing profile coefficients or
+    # reverts the BC, the drift assertion below would still pass against the new
+    # IC and miss the regression — this gate makes the IC itself part of the
+    # contract. Tolerance 0.01 mm (~2e-4 relative).
     assert abs(cwv_first - 49.78) < 0.01, (
         f"plane CRM smoke: IC CWV={cwv_first:.4f} mm != 49.78 ± 0.01. "
         f"The Wing 2018 reference profile or its area weighting "

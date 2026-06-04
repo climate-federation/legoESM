@@ -148,9 +148,9 @@ def main():
         nx=nx_global, ny=ny_global, nlev=args.nlev,
         dx=args.dx, dy=args.dx, dtype=jnp.float64,
     )
-    # make_wing2018_theta_ref_fn's surface-temp param was renamed T_sfc -> T_v0
-    # (surface virtual temperature); pass T_v0=, not T_sfc= (old kwarg raises
-    # TypeError).
+    # Near-EQUILIBRIUM CRM benchmark: theta reference uses T_v0=300 K to match
+    # the 300 K surface setup (NOT the strict-RCEMIP fixed 295 K). The surface-
+    # temp param was renamed T_sfc -> T_v0 (old kwarg TypeErrors).
     theta_fn = make_wing2018_theta_ref_fn(
         T_v0=300.0, q_sfc=0.0224, z_t=15_000.0, Gamma=6.7e-3,
     )

@@ -397,10 +397,13 @@ def parse_args():
 
 
 def build_height_coord_and_state(args, grid):
-    # make_wing2018_theta_ref_fn's surface-temperature parameter was renamed
-    # T_sfc -> T_v0 (surface virtual temperature); pass T_v0=, not T_sfc= (the
-    # old kwarg raised TypeError). This driver sets the reference T_v0 to the
-    # SST (T_SFC_K), which the IC-CWV sentinel (49.4691 mm) is pinned to.
+    # This RCE driver is a near-EQUILIBRIUM smoke: its SST (T_SFC_K), qv
+    # profile, and radiation are tuned for a quiescent ~300 K start, so the
+    # theta reference deliberately uses T_v0=T_SFC_K — NOT the strict-RCEMIP
+    # fixed 295 K, which sits ~8 K below the SST and floods the column with
+    # convection (CWV/max|w| blow up). Strict-RCEMIP runs (test_rcemip_plane_smoke,
+    # run_rcemip_plane) keep the 295 K default. The surface-temp param was
+    # renamed T_sfc -> T_v0 (the old T_sfc= kwarg raised TypeError).
     theta_fn = make_wing2018_theta_ref_fn(
         T_v0=T_SFC_K, q_sfc=Q_SFC_FRAC, z_t=Z_T, Gamma=GAMMA_TROP,
     )

@@ -117,9 +117,9 @@ def parse_args():
 
 
 def build_height_coord_and_state(args, grid):
-    # make_wing2018_theta_ref_fn's surface-temp param was renamed T_sfc -> T_v0
-    # (surface virtual temperature); pass T_v0=, not T_sfc= (old kwarg raises
-    # TypeError). This driver uses the SST (T_SFC_K) as the reference T_v0.
+    # Near-EQUILIBRIUM RCE smoke: theta reference uses T_v0=T_SFC_K to match the
+    # SST=300 K setup (NOT the strict-RCEMIP fixed 295 K, which floods the column).
+    # The surface-temp param was renamed T_sfc -> T_v0 (old kwarg TypeErrors).
     theta_fn = make_wing2018_theta_ref_fn(
         T_v0=T_SFC_K, q_sfc=Q_SFC_FRAC, z_t=Z_T, Gamma=GAMMA_TROP,
     )
