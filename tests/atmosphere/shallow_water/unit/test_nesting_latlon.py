@@ -192,6 +192,81 @@ class TestInterp:
         nh = nest.n_halo
         assert np.allclose(out[nh:-nh, nh:-nh], expect[nh:-nh, nh:-nh], atol=1e-6)
 
+    def test_face_prolongation_reproduces_parent_face(self, nest_fp64):
+        # BUG 1 regression: the u/v-face operators must source DIRECTLY from the
+        # parent FACE fields (stagger-correct), so a child face coincident with a
+        # parent face REPRODUCES the parent face value to ~round-off — not a
+        # smoothed blend of adjacent parent-face cell-centre averages.  Under
+        # integer refinement (r=3) every r-th child face lines up with a parent
+        # face exactly.
+        nest = nest_fp64
+        p, c = nest.parent, nest.child
+        r = nest.refinement_ratio
+
+        # --- u-faces (lon interfaces, at cell-centre latitudes) ---
+        pu = jnp.asarray(
+            np.random.default_rng(0).standard_normal((p.n_lat, p.n_lon + 1))
+        )
+        cu = np.asarray(apply_boundary_interp(pu, nest.interp_uface))
+        # parent u-face longitudes and child u-face longitudes
+        pu_lon = float(np.asarray(p.lon)[0]) - 0.5 * p.dlon + np.arange(p.n_lon + 1) * p.dlon
+        cu_lon = float(np.asarray(c.lon)[0]) - 0.5 * c.dlon + np.arange(c.n_lon + 1) * c.dlon
+        plat = np.asarray(p.lat)
+        clat = np.asarray(c.lat)
+        # match aligned child u-faces (col) and child rows to parent faces/rows
+        n_matched_u = 0
+        for kc, lon in enumerate(cu_lon):
+            kp = int(np.argmin(np.abs(pu_lon - lon)))
+            if abs(pu_lon[kp] - lon) > 1e-9:
+                continue
+            for jc, la in enumerate(clat):
+                jp = int(np.argmin(np.abs(plat - la)))
+                if abs(plat[jp] - la) > 1e-9:
+                    continue
+                assert abs(cu[jc, kc] - float(pu[jp, kp])) < 1e-12
+                n_matched_u += 1
+        assert n_matched_u > 0  # at least some faces align (r-fold)
+
+        # --- v-faces (lat interfaces, at cell-centre longitudes) ---
+        pv = jnp.asarray(
+            np.random.default_rng(1).standard_normal((p.n_lat + 1, p.n_lon))
+        )
+        cv = np.asarray(apply_boundary_interp(pv, nest.interp_vface))
+        pv_lat = float(np.asarray(p.lat)[0]) - 0.5 * p.dlat + np.arange(p.n_lat + 1) * p.dlat
+        cv_lat = float(np.asarray(c.lat)[0]) - 0.5 * c.dlat + np.arange(c.n_lat + 1) * c.dlat
+        plon = np.asarray(p.lon)
+        clon = np.asarray(c.lon)
+        n_matched_v = 0
+        for jc, la in enumerate(cv_lat):
+            jp = int(np.argmin(np.abs(pv_lat - la)))
+            if abs(pv_lat[jp] - la) > 1e-9:
+                continue
+            for ic, lo in enumerate(clon):
+                ip = int(np.argmin(np.abs(plon - lo)))
+                if abs(plon[ip] - lo) > 1e-9:
+                    continue
+                assert abs(cv[jc, ic] - float(pv[jp, ip])) < 1e-12
+                n_matched_v += 1
+        assert n_matched_v > 0
+
+    def test_balanced_w2_parent_gives_zero_boundary_v(self, nest_fp64):
+        # BUG 1: a BALANCED Williamson-2 C-grid parent (v-face wind == 0
+        # everywhere by construction) must prolong to ~0 v-wind on the child v
+        # faces in the prescribed boundary band + relaxation zone — the
+        # stagger-correct face-to-face operator does NOT manufacture spurious
+        # meridional wind there.  (The old cell-centre round-trip could, because
+        # averaging u-faces and re-interpolating breaks the discrete balance.)
+        nest = nest_fp64
+        parent_ic = williamson_test2_cgrid(nest.parent)
+        # W2 is a zonal geostrophic flow: parent v faces are identically 0.
+        assert float(jnp.max(jnp.abs(parent_ic.v))) < 1e-10
+        bc = interpolate_parent_to_child(parent_ic, nest)
+        # child v faces over the band + relaxation zone must stay ~0.
+        wv = np.asarray(nest.relax_weight_vface)  # >0 on band+relax v faces
+        band = wv > 0.0
+        assert band.any()
+        assert float(np.max(np.abs(np.asarray(bc.v)[band]))) < 1e-10
+
 
 # ---------------------------------------------------------------------------
 # Capability wiring
@@ -257,6 +332,67 @@ class TestStepping:
         assert np.allclose(
             np.asarray(new.child.h)[bmask], np.asarray(bc.h)[bmask], atol=1e-10,
         )
+
+    def test_hard_band_enforced_at_every_substage(self, nest, monkeypatch):
+        # BUG 2 regression: the prescribed hard band must equal the interpolated
+        # parent BC for EVERY tendency evaluation DURING the integrator (initial
+        # state + each SSP-RK3 substage), not only after the final overwrite.
+        # Otherwise globally-polluted (periodic/pole-advanced) boundary values
+        # feed later-stage tendencies into the relaxation zone / free interior.
+        #
+        # We wrap the tendency function the nest stepper calls and assert the
+        # hard band of every state it receives matches the BC — this is the
+        # "before the next tendency evaluation" invariant the bug violated.
+        import legoesm.atmosphere.dynamics.shallow_water_nesting as swn
+
+        parent_ic = williamson_test2_cgrid(nest.parent)
+        state = initial_nested_state(nest, parent_ic)
+        cfg = CGridLatLonShallowWaterConfig(fix_mass=True, use_ppm_transport=True)
+        bc = interpolate_parent_to_child(parent_ic, nest)
+
+        # Hard-band masks (w == 1) on each staggered location.
+        hb_h = np.isclose(np.asarray(nest.relax_weight), 1.0)
+        hb_u = np.isclose(np.asarray(nest.relax_weight_uface), 1.0)
+        hb_v = np.isclose(np.asarray(nest.relax_weight_vface), 1.0)
+        bc_h, bc_u, bc_v = (
+            np.asarray(bc.h), np.asarray(bc.u), np.asarray(bc.v),
+        )
+
+        seen = {"n": 0, "max_err": 0.0}
+        real_tend = swn.cgrid_latlon_sw_tendencies
+
+        def recording_tend(s, grid, config):
+            sh, su, sv = np.asarray(s.h), np.asarray(s.u), np.asarray(s.v)
+            err = max(
+                float(np.max(np.abs(sh[hb_h] - bc_h[hb_h]))),
+                float(np.max(np.abs(su[hb_u] - bc_u[hb_u]))),
+                float(np.max(np.abs(sv[hb_v] - bc_v[hb_v]))),
+            )
+            seen["n"] += 1
+            seen["max_err"] = max(seen["max_err"], err)
+            return real_tend(s, grid, config)
+
+        monkeypatch.setattr(swn, "cgrid_latlon_sw_tendencies", recording_tend)
+        tgt = interior_mass(state.child, nest)
+        _ = swn.step_child(state.child, state.parent, nest, 90.0, tgt, cfg)
+
+        # SSP-RK3 evaluates the tendency 3 times (initial + 2 substage states);
+        # each must have seen the prescribed hard band.
+        assert seen["n"] == 3, f"expected 3 tendency evals, got {seen['n']}"
+        assert seen["max_err"] < 1e-10, (
+            f"hard band drifted during integration: max err {seen['max_err']:.3e}"
+        )
+
+    def test_rejects_unsupported_integrator_for_nest(self, nest):
+        # The per-substage boundary enforcement is only valid for the SSP-RK3
+        # stage structure; any other integrator must raise rather than silently
+        # mis-enforce a scheme whose substages mean something else.
+        parent_ic = williamson_test2_cgrid(nest.parent)
+        state = initial_nested_state(nest, parent_ic)
+        cfg = CGridLatLonShallowWaterConfig(time_integrator="rk4", fix_mass=False)
+        tgt = interior_mass(state.child, nest)
+        with pytest.raises(ValueError, match="SSP-RK3"):
+            step_child(state.child, state.parent, nest, 90.0, tgt, cfg)
 
     def test_step_child_only_matches_combined_child(self, nest):
         # step_child (child-only, parent integrated separately) must produce the

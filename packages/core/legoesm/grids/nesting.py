@@ -92,10 +92,14 @@ class NestedLatLonGrid(NamedTuple):
     A JAX pytree (NamedTuple of grids + arrays).  ``parent`` is a global uniform
     lat-lon grid; ``child`` is a uniform lat-lon grid refined by
     ``refinement_ratio`` covering a rectangular sub-region of the parent.  The
-    interpolation operators map the parent CELL-CENTRE field to the child cell
-    centres (``interp_centers``), the child u-faces (``interp_uface``) and the
-    child v-faces (``interp_vface``) so the staggered C-grid boundary can be
-    prescribed component-by-component.
+    interpolation operators are STAGGER-MATCHED: ``interp_centers`` maps the
+    parent CELL-CENTRE field to the child cell centres, ``interp_uface`` maps the
+    parent U-FACE field to the child u-faces, and ``interp_vface`` maps the parent
+    V-FACE field to the child v-faces — each source location matches its target so
+    the staggered C-grid boundary is prescribed component-by-component, face to
+    face (a child face coincident with a parent face reproduces the parent value
+    exactly, preserving the discrete divergence/geostrophic balance at the nest
+    edge).
 
     ``n_halo`` is the width (in child cells) of the HARD-prescribed boundary band
     on each side (set exactly to the interpolated parent); the interior (cells at
@@ -234,55 +238,95 @@ def _relax_weight_profile(
 # ----------------------------------------------------------------------------
 
 
-def _bilinear_weights_to_targets(
-    parent: LatLonGrid,
+def _bilinear_weights_general(
     tgt_lat: np.ndarray,
     tgt_lon: np.ndarray,
+    *,
+    lat0: float,
+    dlat_p: float,
+    n_lat_src: int,
+    lon0: float,
+    dlon_p: float,
+    n_lon_src: int,
+    lon_periodic_period: int | None,
 ) -> BoundaryInterpWeights:
-    """Bilinear gather weights from parent cell centres to arbitrary targets.
+    """Bilinear gather weights from a uniform SOURCE node grid to targets.
 
-    ``tgt_lat`` / ``tgt_lon`` are 2-D target-point coordinate grids [rad].  The
-    parent is a GLOBAL uniform lat-lon grid: longitude is periodic (wraps
-    modulo 2*pi at the seam between the last and first parent column), latitude
-    is clamped to the parent's first/last cell-centre row (the child footprint
-    is validated to lie strictly inside the parent latitude band, so no
-    extrapolation past the poles occurs).
+    The source is a uniform lat-lon NODE grid laid out row-major as
+    ``(n_lat_src, n_lon_src)`` whose node ``(j, i)`` sits at latitude
+    ``lat0 + j*dlat_p`` and longitude ``lon0 + i*dlon_p``.  This is the single
+    geometry kernel behind all three parent->child operators: the SAME bilinear
+    gather serves parent CELL CENTRES, parent U-FACES and parent V-FACES — only
+    the source ORIGIN, SPACING, COUNT and the longitude periodicity differ
+    between the three staggered locations.  Centralising it (rather than three
+    near-identical copies) is what the no-duplication rule requires.
+
+    Crucially, bilinear interpolation is EXACT at the source nodes: when a target
+    point coincides with a source node (e.g. a child face that lands exactly on a
+    parent face under integer refinement) the gather puts unit weight on that
+    node and REPRODUCES the parent value to round-off — the stagger-correct
+    prolongation property the C-grid boundary forcing relies on.
+
+    Parameters
+    ----------
+    tgt_lat, tgt_lon
+        2-D target-point coordinate grids [rad] (same shape).
+    lat0, dlat_p, n_lat_src
+        Latitude of source row 0, row spacing, number of source rows.  Latitude
+        is always CLAMPED to ``[0, n_lat_src-1]`` (the child footprint is
+        validated to lie strictly inside the parent band, so no pole
+        extrapolation; v-faces extend half a child cell past the outer cell
+        centres but stay well inside the >=1-parent-row margin).
+    lon0, dlon_p, n_lon_src
+        Longitude of source column 0, column spacing, number of STORED source
+        columns (the flattened row stride).
+    lon_periodic_period
+        If not ``None``, longitude is PERIODIC with this many DISTINCT columns
+        (the global parent has ``n_lon_p`` distinct longitudes): the fractional
+        column index wraps modulo this period and ``i1`` wraps too, so the seam
+        between the last and first column interpolates correctly.  Pass ``None``
+        for a NON-periodic / already-seam-padded longitude axis (e.g. the parent
+        u-FACE field that stores ``n_lon_p+1`` columns with the duplicate seam at
+        column ``n_lon_p``): then ``i0`` is clamped to ``[0, n_lon_src-2]`` and
+        ``i1 = i0+1`` indexes the stored duplicate directly.
     """
-    plat = np.asarray(parent.lat, dtype=np.float64)  # (n_lat_p,)
-    plon = np.asarray(parent.lon, dtype=np.float64)  # (n_lon_p,)
-    n_lat_p = plat.shape[0]
-    n_lon_p = plon.shape[0]
-    dlat_p = float(parent.dlat)
-    dlon_p = float(parent.dlon)
-    lon0 = float(plon[0])
-    lat0 = float(plat[0])
-
     target_shape = tuple(int(s) for s in np.asarray(tgt_lat).shape)
     tlat = np.asarray(tgt_lat, dtype=np.float64).reshape(-1)
     tlon = np.asarray(tgt_lon, dtype=np.float64).reshape(-1)
 
-    # --- Latitude: fractional index into parent rows, clamped to interior. ---
-    # parent row j sits at lat0 + j*dlat_p (uniform global grid).
+    # --- Latitude: fractional index into source rows, clamped to interior. ---
     fj = (tlat - lat0) / dlat_p
-    fj = np.clip(fj, 0.0, n_lat_p - 1.0 - 1e-12)
+    fj = np.clip(fj, 0.0, n_lat_src - 1.0 - 1e-12)
     j0 = np.floor(fj).astype(np.int64)
-    j0 = np.clip(j0, 0, n_lat_p - 2)
+    j0 = np.clip(j0, 0, n_lat_src - 2)
     wj = fj - j0  # in [0, 1)
     j1 = j0 + 1
 
-    # --- Longitude: fractional index into parent columns, PERIODIC wrap. ---
-    # Bring (tlon - lon0) into [0, 2*pi) so the seam between column n_lon_p-1
-    # and column 0 interpolates across the periodic boundary.
-    two_pi = 2.0 * np.pi
-    dlon_rel = np.mod(tlon - lon0, two_pi)
-    fi = dlon_rel / dlon_p
-    i0 = np.floor(fi).astype(np.int64) % n_lon_p
-    wi = fi - np.floor(fi)  # in [0, 1)
-    i1 = (i0 + 1) % n_lon_p
+    # --- Longitude: fractional index into source columns. ---
+    if lon_periodic_period is not None:
+        # PERIODIC: bring (tlon - lon0) into [0, period*dlon) so the seam
+        # between the last and first DISTINCT column interpolates across the
+        # periodic boundary.
+        period = int(lon_periodic_period)
+        span = period * dlon_p
+        dlon_rel = np.mod(tlon - lon0, span)
+        fi = dlon_rel / dlon_p
+        i0 = np.floor(fi).astype(np.int64) % period
+        wi = fi - np.floor(fi)  # in [0, 1)
+        i1 = (i0 + 1) % period
+    else:
+        # NON-periodic / seam-padded: clamp into the stored columns; the caller
+        # has stored a duplicate seam column so i1 = i0+1 is always in range.
+        fi = (tlon - lon0) / dlon_p
+        fi = np.clip(fi, 0.0, n_lon_src - 1.0 - 1e-12)
+        i0 = np.floor(fi).astype(np.int64)
+        i0 = np.clip(i0, 0, n_lon_src - 2)
+        wi = fi - i0  # in [0, 1)
+        i1 = i0 + 1
 
     # Four corners: SW (j0,i0), SE (j0,i1), NW (j1,i0), NE (j1,i1).
     def flat(j, i):
-        return (j * n_lon_p + i).astype(np.int32)
+        return (j * n_lon_src + i).astype(np.int32)
 
     src = np.stack(
         [flat(j0, i0), flat(j0, i1), flat(j1, i0), flat(j1, i1)], axis=-1,
@@ -300,7 +344,89 @@ def _bilinear_weights_to_targets(
         src_indices=jnp.asarray(src, dtype=jnp.int32),
         weights=jnp.asarray(w),
         target_shape=target_shape,
-        parent_flat_size=int(n_lat_p * n_lon_p),
+        parent_flat_size=int(n_lat_src * n_lon_src),
+    )
+
+
+def _bilinear_weights_to_targets(
+    parent: LatLonGrid,
+    tgt_lat: np.ndarray,
+    tgt_lon: np.ndarray,
+) -> BoundaryInterpWeights:
+    """Bilinear gather weights from parent CELL CENTRES to arbitrary targets.
+
+    Thin wrapper over :func:`_bilinear_weights_general` for the parent
+    cell-centre source grid: rows at ``lat[0] + j*dlat_p``, columns at
+    ``lon[0] + i*dlon_p`` periodic over the global ``n_lon_p`` columns, latitude
+    clamped to the first/last cell-centre row (the child footprint is validated to
+    lie strictly inside the parent latitude band, so no pole extrapolation).
+    """
+    plat = np.asarray(parent.lat, dtype=np.float64)  # (n_lat_p,)
+    plon = np.asarray(parent.lon, dtype=np.float64)  # (n_lon_p,)
+    n_lon_p = plon.shape[0]
+    return _bilinear_weights_general(
+        tgt_lat, tgt_lon,
+        lat0=float(plat[0]), dlat_p=float(parent.dlat), n_lat_src=plat.shape[0],
+        lon0=float(plon[0]), dlon_p=float(parent.dlon), n_lon_src=n_lon_p,
+        lon_periodic_period=n_lon_p,
+    )
+
+
+def _bilinear_weights_from_parent_uface(
+    parent: LatLonGrid,
+    tgt_lat: np.ndarray,
+    tgt_lon: np.ndarray,
+) -> BoundaryInterpWeights:
+    """Bilinear gather weights from the parent U-FACE field to child u-faces.
+
+    The parent u (zonal) velocity lives on its lon INTERFACES: the stored field
+    is ``(n_lat_p, n_lon_p+1)`` with face column ``k`` at longitude
+    ``lon[0] - dlon_p/2 + k*dlon_p`` and the latitude axis at the parent CELL
+    CENTRES ``lat[j]``.  Face column ``n_lon_p`` is the periodic DUPLICATE of
+    column 0 (it stores the same value shifted by 2*pi), so we treat the lon axis
+    as a seam-PADDED non-periodic axis of ``n_lon_p+1`` stored columns: a child
+    u-face between parent faces ``k`` and ``k+1`` gathers stored columns ``k`` and
+    ``k+1`` directly, and a child u-face exactly on parent face ``k`` reproduces
+    ``parent.u[:, k]`` to round-off (face-to-face prolongation; no cell-centre
+    round-trip that would smooth the geostrophic balance and seed checkerboard
+    boundary noise).
+    """
+    plat = np.asarray(parent.lat, dtype=np.float64)  # (n_lat_p,) cell-centre lat
+    n_lon_p = int(parent.n_lon)
+    dlon_p = float(parent.dlon)
+    lon_w0 = float(np.asarray(parent.lon, dtype=np.float64)[0]) - 0.5 * dlon_p
+    return _bilinear_weights_general(
+        tgt_lat, tgt_lon,
+        lat0=float(plat[0]), dlat_p=float(parent.dlat), n_lat_src=plat.shape[0],
+        lon0=lon_w0, dlon_p=dlon_p, n_lon_src=n_lon_p + 1,
+        lon_periodic_period=None,
+    )
+
+
+def _bilinear_weights_from_parent_vface(
+    parent: LatLonGrid,
+    tgt_lat: np.ndarray,
+    tgt_lon: np.ndarray,
+) -> BoundaryInterpWeights:
+    """Bilinear gather weights from the parent V-FACE field to child v-faces.
+
+    The parent v (meridional) velocity lives on its lat INTERFACES: the stored
+    field is ``(n_lat_p+1, n_lon_p)`` with face row ``j`` at latitude
+    ``lat[0] - dlat_p/2 + j*dlat_p`` and the longitude axis at the parent CELL
+    CENTRES ``lon[i]`` (periodic over ``n_lon_p`` distinct columns).  Latitude is
+    clamped to the stored face rows.  A child v-face exactly on a parent v-face
+    reproduces ``parent.v`` there to round-off (face-to-face prolongation).
+    """
+    plon = np.asarray(parent.lon, dtype=np.float64)  # (n_lon_p,) cell-centre lon
+    n_lat_p = int(parent.n_lat)
+    n_lon_p = plon.shape[0]
+    dlat_p = float(parent.dlat)
+    lat_s0 = float(np.asarray(parent.lat, dtype=np.float64)[0]) - 0.5 * dlat_p
+    return _bilinear_weights_general(
+        tgt_lat, tgt_lon,
+        lat0=lat_s0, dlat_p=dlat_p, n_lat_src=n_lat_p + 1,
+        lon0=float(plon[0]), dlon_p=float(parent.dlon), n_lon_src=n_lon_p,
+        lon_periodic_period=n_lon_p,
     )
 
 
@@ -481,24 +607,34 @@ def create_nested_latlon_grid(
     interp_centers = _bilinear_weights_to_targets(parent, child_lat2d, child_lon2d)
 
     # u-face targets: lon interfaces, shape (n_lat_c, n_lon_c+1).  u-face k sits
-    # at lon_c west-edge + k*dlon_c, latitude = cell-centre lat.
+    # at lon_c west-edge + k*dlon_c, latitude = cell-centre lat.  STAGGER-CORRECT
+    # prolongation: source DIRECTLY from the parent U-FACE field (not from
+    # cell-centre averages of u), so a child u-face coincident with a parent
+    # u-face reproduces the parent face value exactly and the discrete
+    # divergence/geostrophic balance is preserved at the boundary (no
+    # checkerboard wind noise from a centre round-trip).
     lon_w_edge = float(lon_c[0]) - 0.5 * dlon_c
     uface_lon = lon_w_edge + np.arange(n_lon_c + 1) * dlon_c
     uface_lat2d, uface_lon2d = np.meshgrid(
         np.asarray(child.lat, dtype=np.float64), uface_lon, indexing="ij",
     )
-    interp_uface = _bilinear_weights_to_targets(parent, uface_lat2d, uface_lon2d)
+    interp_uface = _bilinear_weights_from_parent_uface(
+        parent, uface_lat2d, uface_lon2d,
+    )
 
     # v-face targets: lat interfaces, shape (n_lat_c+1, n_lon_c).  v-face k sits
     # at lat_c south-edge + k*dlat_c, longitude = cell-centre lon.  The +/-
     # half-child-cell extension at the child N/S edges stays well inside the
-    # >= 1-parent-row margin enforced above.
+    # >= 1-parent-row margin enforced above.  STAGGER-CORRECT prolongation:
+    # source DIRECTLY from the parent V-FACE field (face-to-face).
     lat_s_edge = float(lat_c[0]) - 0.5 * dlat_c
     vface_lat = lat_s_edge + np.arange(n_lat_c + 1) * dlat_c
     vface_lat2d, vface_lon2d = np.meshgrid(
         vface_lat, np.asarray(child.lon, dtype=np.float64), indexing="ij",
     )
-    interp_vface = _bilinear_weights_to_targets(parent, vface_lat2d, vface_lon2d)
+    interp_vface = _bilinear_weights_from_parent_vface(
+        parent, vface_lat2d, vface_lon2d,
+    )
 
     return NestedLatLonGrid(
         parent=parent,
