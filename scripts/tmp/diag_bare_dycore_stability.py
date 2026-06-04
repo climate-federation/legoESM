@@ -96,8 +96,9 @@ def main():
         nx=args.nx, ny=args.ny, nlev=args.nlev,
         dx=args.dx, dy=args.dx, dtype=jnp.float64,
     )
+    # Equilibrium CRM debug: T_v0 = SST (param renamed T_sfc -> T_v0).
     theta_fn = make_wing2018_theta_ref_fn(
-        T_sfc=300.0, q_sfc=0.0224, z_t=15000.0, Gamma=6.7e-3,
+        T_v0=300.0, q_sfc=0.0224, z_t=15000.0, Gamma=6.7e-3,
     )
     hc = create_height_coordinate(
         n_levels=args.nlev, H=args.H, theta_ref_fn=theta_fn,

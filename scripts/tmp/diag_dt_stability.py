@@ -60,8 +60,9 @@ def make_state_and_hc(nx, ny, nlev, dx, H, with_qv=True):
     grid = create_plane_grid(
         nx=nx, ny=ny, nlev=nlev, dx=dx, dy=dx, dtype=jnp.float64,
     )
+    # Equilibrium CRM debug: T_v0 = SST (param renamed T_sfc -> T_v0).
     theta_fn = make_wing2018_theta_ref_fn(
-        T_sfc=T_SFC_K, q_sfc=Q_SFC_FRAC, z_t=Z_T, Gamma=GAMMA_TROP,
+        T_v0=T_SFC_K, q_sfc=Q_SFC_FRAC, z_t=Z_T, Gamma=GAMMA_TROP,
     )
     hc = create_height_coordinate(nlev, H=H, theta_ref_fn=theta_fn)
     tm = make_flat_plane_terrain_metric(grid, hc)
