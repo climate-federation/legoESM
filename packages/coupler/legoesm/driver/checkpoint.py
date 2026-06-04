@@ -15,11 +15,6 @@ from typing import Any
 import jax
 import numpy as np
 
-from legoesm.forcing.amip_config import (
-    config_to_dict,
-    config_from_dict,
-    AMIPExperimentConfig,
-)
 
 # Lazy imports to avoid circular dependency:
 #   io.checkpoint → driver.config → driver.__init__ → model_driver → io.checkpoint
@@ -49,7 +44,10 @@ def _config_from_dict_auto(d: dict):
         ecfd = _get_experiment_config_from_dict()
         return ecfd(d)
     else:
-        # Legacy AMIPExperimentConfig format — load then upconvert
+        # Legacy AMIPExperimentConfig format — load then upconvert.
+        # Deferred driver.config import: a top-level one would reintroduce the
+        # io.checkpoint -> driver.config -> driver.__init__ -> model_driver cycle.
+        from legoesm.driver.config import config_from_dict
         amip_cfg = config_from_dict(d)
         from legoesm.driver.config import ExperimentConfig
         return ExperimentConfig.from_amip_config(amip_cfg)
@@ -162,6 +160,7 @@ def save_checkpoint_zarr(
     # Metadata as root attributes
     root.attrs["step"] = int(step)
     root.attrs["day"] = float(day)
+    from legoesm.driver.config import config_to_dict
     root.attrs["config_json"] = json.dumps(config_to_dict(config))
 
     zarr.consolidate_metadata(root.store)

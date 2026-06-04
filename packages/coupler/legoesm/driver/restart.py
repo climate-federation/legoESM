@@ -22,7 +22,6 @@ import jax
 import numpy as np
 
 from legoesm.forcing.amip_config import (
-    config_to_dict as _amip_config_to_dict,
     load_checkpoint,
     save_checkpoint,
 )
@@ -100,8 +99,11 @@ def _config_to_dict_any(config) -> dict:
     EC, ectd = _get_experiment_config_type()
     if isinstance(config, EC):
         return ectd(config)
-    # Legacy AMIPExperimentConfig or anything with _asdict
-    return _amip_config_to_dict(config)
+    # Legacy AMIPExperimentConfig or anything with _asdict. Deferred driver.config
+    # import (canonical codec) — restart routes through the cycle-prone driver
+    # package, so a top-level import is unsafe.
+    from legoesm.driver.config import config_to_dict
+    return config_to_dict(config)
 
 
 def config_to_dict(config) -> dict:
