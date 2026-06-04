@@ -141,7 +141,10 @@ class EarthSystemDriver:
         # lw_net = eps * lw_down - eps * sigma * T_sfc^4
         # lw_down = (lw_net + eps * sigma * T_sfc^4) / eps
         T_sfc = blend_surface_temperature(sst, sic, cfg.T_ice)
-        eps_sfc = 0.96  # typical surface emissivity
+        # Surface emissivity from canonical constants, blended ocean/ice over sea-ice
+        # fraction (same blend as albedo above) — not a magic 0.96 literal.
+        eps_sfc = blend_surface_property(
+            sic, constants.emissivity_ice, constants.emissivity_ocean)
         lw_up_sfc = eps_sfc * constants.sigma_sb * T_sfc ** 4
         lw_down = (lw_net_sfc + lw_up_sfc) / jnp.maximum(eps_sfc, 0.01)
 
@@ -156,7 +159,7 @@ class EarthSystemDriver:
         lat = self._atm._grid_lat
         if lat is not None:
             from legoesm.atmosphere.physics.radiation.solar import daily_mean_insolation
-            S_0 = getattr(cfg, 'S_0', 1360.0)
+            S_0 = getattr(cfg, 'S_0', constants.S_0)
             Q_daily = daily_mean_insolation(lat, float(doy), S_0=S_0)
             cos_zen = jnp.clip(Q_daily / S_0, 0.0, 1.0)
         else:

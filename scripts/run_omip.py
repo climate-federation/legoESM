@@ -1910,8 +1910,10 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt):
                 prsn = _interp(raw_stack["prsn"])
                 friver = _interp(runoff_records)
 
-                # Derived: virtual-T density + solar zenith
-                T_v = tas * (1.0 + 0.61 * huss)
+                # Derived: virtual-T density + solar zenith. Canonical coefficient
+                # 1/epsilon - 1 (~0.608), not the rounded 0.61 (~0.4% drift) — must
+                # match jra55_to_atm_surface / _shared.virtual_temperature.
+                T_v = tas * (1.0 + (1.0 / _const.epsilon - 1.0) * huss)
                 rho_a = psl / (_const.R_d * T_v)
                 doy = jnp.mod(day, 365.0) + 1.0
                 hour = jnp.mod(day, 1.0) * 24.0
