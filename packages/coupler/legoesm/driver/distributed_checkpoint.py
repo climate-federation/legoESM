@@ -28,7 +28,7 @@ from typing import Any
 import jax
 import numpy as np
 
-from legoesm.forcing.amip_config import config_to_dict, config_from_dict
+from legoesm.driver.config import config_to_dict, config_from_dict
 
 
 # ---------------------------------------------------------------------------

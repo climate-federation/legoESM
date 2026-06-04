@@ -158,39 +158,26 @@ class AMIPExperimentConfig(NamedTuple):
 
 
 def config_to_dict(config) -> dict:
-    """Convert config to a plain dict for JSON serialization.
+    """Generic config -> JSON-safe dict codec.
 
-    Accepts ``AMIPExperimentConfig`` or ``ExperimentConfig``.
-    Sub-config NamedTuples (GridConfig, DycoreConfig, OutputConfig) are
-    recursively converted to dicts.
+    Thin delegator to the canonical home ``legoesm.driver.config.config_to_dict``
+    (federation carve, Step 3): a single implementation, kept here as a back-compat
+    entry point for callers that import it from ``forcing.amip_config``. Deferred
+    import avoids a forcing<->driver module-init cycle.
     """
-    d = config._asdict()
-    for key, val in d.items():
-        if hasattr(val, '_asdict'):
-            d[key] = val._asdict()
-    return d
+    from legoesm.driver.config import config_to_dict as _impl
+    return _impl(config)
 
 
 def config_from_dict(d: dict):
-    """Reconstruct config from a dict (e.g., loaded from JSON / a checkpoint).
+    """Reconstruct a config from a dict written by :func:`config_to_dict`.
 
-    Auto-detects the schema so it round-trips whatever ``config_to_dict`` wrote:
-    an ``ExperimentConfig`` serializes with nested ``grid``/``dycore``/``output``
-    sub-config dicts (and carries fields like ``seed`` that
-    ``AMIPExperimentConfig`` lacks), so it is reconstructed through the canonical
-    ``experiment_config_from_dict`` — otherwise the dict is treated as the legacy
-    flat ``AMIPExperimentConfig``.  Without this, loading an NPZ checkpoint saved
-    from an ``ExperimentConfig`` silently dropped every field outside the AMIP
-    schema (including the master RNG ``seed``).
+    Thin delegator to the canonical ``legoesm.driver.config.config_from_dict``
+    (auto-detects ExperimentConfig vs legacy flat AMIPExperimentConfig). Deferred
+    import avoids a forcing<->driver module-init cycle.
     """
-    if isinstance(d.get("grid"), dict) or isinstance(d.get("dycore"), dict):
-        # Deferred import: forcing -> driver only at call time (avoids a module
-        # import cycle, since driver.config imports AMIPExperimentConfig here).
-        from legoesm.driver.config import experiment_config_from_dict
-        return experiment_config_from_dict(d)
-    known = set(AMIPExperimentConfig._fields)
-    filtered = {k: v for k, v in d.items() if k in known}
-    return AMIPExperimentConfig(**filtered)
+    from legoesm.driver.config import config_from_dict as _impl
+    return _impl(d)
 
 
 def save_config(config: AMIPExperimentConfig, path: Path) -> None:
