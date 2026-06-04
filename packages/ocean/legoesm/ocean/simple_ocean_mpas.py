@@ -26,9 +26,18 @@ class MPASSlabOceanState(NamedTuple):
         Sea surface temperature [K], shape (nCells,).
     T_deep : Field
         Deep layer temperature [K], shape (nCells,).
+    Q_freeze : Field or None
+        Diagnostic latent-heat-of-fusion flux [W/m²] populated when the
+        freezing clamp fires.  Captures the energy that would have pushed
+        SST below ``T_freeze`` and represents the latent heat released to
+        ice formation; consumers closing the sea-ice freezing budget should
+        integrate this term.  Mirrors :class:`legoesm.ocean.simple_ocean.SlabOceanState`
+        and the lake (coupler-conservation audit F6).  Defaults to ``None``
+        so legacy callers that ignore freezing energy keep working unchanged.
     """
     T_sfc: Field
     T_deep: Field
+    Q_freeze: Field | None = None  # latent-heat-of-fusion flux at freezing clamp
 
 
 def init_mpas_slab_state(
@@ -50,6 +59,13 @@ def init_mpas_slab_state(
     Returns
     -------
     MPASSlabOceanState
+
+    Notes
+    -----
+    ``Q_freeze`` is initialised to a zero Field so the pytree shape is
+    invariant across timesteps (matches the structured-grid
+    ``init_slab_state`` and ``LakeState.Q_freeze`` convention).  Step
+    functions update the values in place via ``Q_freeze.replace(data=...)``.
     """
     return MPASSlabOceanState(
         T_sfc=Field(
@@ -59,6 +75,10 @@ def init_mpas_slab_state(
         T_deep=Field(
             data=jnp.full(nCells, T_deep_init),
             name="T_deep", dims=("nCells",), units="K",
+        ),
+        Q_freeze=Field(
+            data=jnp.zeros(nCells),
+            name="Q_freeze", dims=("nCells",), units="W/m2",
         ),
     )
 
@@ -92,12 +112,22 @@ def _slab_step(state, forcing, config, dt):
 
     # Energy balance
     dT_dt = (sw_net + lw_net - shflx - lhflx + config.Q_flux) / C_mix
-    T_new = T_sfc + dt * dT_dt
-    T_new = jnp.maximum(T_new, config.T_freeze)
+    T_trial = T_sfc + dt * dT_dt
+
+    # Freezing clamp.  The heat the clamp removes to keep SST at T_freeze is
+    # the latent heat of fusion handed to ice formation — diagnose it as
+    # Q_freeze on the new state instead of letting the clamp silently
+    # destroy energy (mirrors simple_ocean._slab_step; coupler audit F6).
+    T_new = jnp.maximum(T_trial, config.T_freeze)
+    Q_freeze = C_mix * jnp.maximum(config.T_freeze - T_trial, 0.0) / dt
 
     new_state = MPASSlabOceanState(
         T_sfc=state.T_sfc.replace(data=T_new),
         T_deep=state.T_deep,
+        Q_freeze=(state.Q_freeze.replace(data=Q_freeze)
+                  if state.Q_freeze is not None
+                  else Field(data=Q_freeze, name="Q_freeze",
+                             dims=state.T_sfc.dims, units="W/m2")),
     )
     return new_state, T_new, jnp.zeros_like(T_new), jnp.zeros_like(T_new)
 
@@ -133,8 +163,12 @@ def _two_layer_step(state, forcing, config, dt):
 
     # Mixed layer
     dT_sfc_dt = (sw_net + lw_net - shflx - lhflx + config.Q_flux) / C_mix - mix_flux / config.h_mix
-    T_sfc_new = T_sfc + dt * dT_sfc_dt
-    T_sfc_new = jnp.maximum(T_sfc_new, config.T_freeze)
+    T_sfc_trial = T_sfc + dt * dT_sfc_dt
+
+    # Freezing clamp on the surface layer — diagnose Q_freeze (see
+    # _slab_step + simple_ocean._two_layer_step; coupler audit F6).
+    T_sfc_new = jnp.maximum(T_sfc_trial, config.T_freeze)
+    Q_freeze = C_mix * jnp.maximum(config.T_freeze - T_sfc_trial, 0.0) / dt
 
     # Deep layer
     dT_deep_dt = mix_flux / config.h_deep
@@ -145,6 +179,10 @@ def _two_layer_step(state, forcing, config, dt):
     new_state = MPASSlabOceanState(
         T_sfc=state.T_sfc.replace(data=T_sfc_new),
         T_deep=state.T_deep.replace(data=T_deep_new),
+        Q_freeze=(state.Q_freeze.replace(data=Q_freeze)
+                  if state.Q_freeze is not None
+                  else Field(data=Q_freeze, name="Q_freeze",
+                             dims=state.T_sfc.dims, units="W/m2")),
     )
     return new_state, T_sfc_new, jnp.zeros_like(T_sfc_new), jnp.zeros_like(T_sfc_new)
 

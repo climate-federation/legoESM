@@ -22,6 +22,7 @@ import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.core.field import Field
+from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.grids.voronoi import create_voronoi_mesh
 from legoesm.ocean.vertical import create_ocean_z_star, compute_layer_thickness
@@ -985,6 +986,137 @@ class TestSimpleOcean:
         state = init_mpas_slab_state(20)
         _, sst, _, _ = step(state, None, 3600.0)
         assert jnp.allclose(sst, sst_map)
+
+
+# ============================================================================
+# Test: Simple Ocean freezing-energy conservation (coupler audit F6)
+# ============================================================================
+
+def _cooling_forcing(nCells):
+    """Strongly cooling MPAS surface forcing (drives trial SST below freezing)."""
+    z = jnp.zeros(nCells)
+    return AtmToSurface(
+        sw_down=z,                              # polar night: no shortwave
+        lw_down=jnp.full(nCells, 150.0),        # weak downwelling longwave
+        precip_total=z,
+        precip_snow=z,
+        T_lowest=jnp.full(nCells, 240.0),       # cold air -> strong sensible loss
+        q_lowest=z,                             # dry air -> strong latent loss
+        u_lowest=jnp.full(nCells, 15.0),        # strong wind -> large exchange
+        v_lowest=z,
+        p_lowest=jnp.full(nCells, 95000.0),
+        p_surface=jnp.full(nCells, 1.0e5),
+        rho_lowest=jnp.full(nCells, 1.25),
+        cos_zenith=z,
+        co2_ppmv=jnp.array(400.0),
+        has_radiation=jnp.array(1.0),
+        has_precipitation=jnp.array(1.0),
+    )
+
+
+def _warm_forcing(nCells):
+    """Heating forcing (clamp never fires; Q_freeze stays zero)."""
+    z = jnp.zeros(nCells)
+    return AtmToSurface(
+        sw_down=jnp.full(nCells, 400.0),
+        lw_down=jnp.full(nCells, 350.0),
+        precip_total=z, precip_snow=z,
+        T_lowest=jnp.full(nCells, 305.0),
+        q_lowest=jnp.full(nCells, 2.0e-2),
+        u_lowest=jnp.full(nCells, 3.0),
+        v_lowest=z,
+        p_lowest=jnp.full(nCells, 95000.0),
+        p_surface=jnp.full(nCells, 1.0e5),
+        rho_lowest=jnp.full(nCells, 1.15),
+        cos_zenith=jnp.full(nCells, 0.8),
+        co2_ppmv=jnp.array(400.0),
+        has_radiation=jnp.array(1.0),
+        has_precipitation=jnp.array(1.0),
+    )
+
+
+class TestSimpleOceanFreezeConservation:
+    """The MPAS slab/two-layer freezing clamp must book the heat it removes
+    as ``Q_freeze`` so the surface energy budget closes (coupler audit F6).
+
+    Strategy: run the SAME cooling forcing twice — once with the default
+    freezing point (clamp fires) and once with ``T_freeze`` set unreachably
+    low (clamp disabled, identical fluxes since ``T_freeze`` never enters the
+    energy balance).  The clamp injects exactly the latent heat of fusion, so
+    ``C_mix * (T_clamp - T_noclamp) / dt`` must equal the diagnosed
+    ``Q_freeze`` to machine precision, with NO re-derivation of the bulk-flux
+    formulas in the test.
+    """
+
+    DT = 86400.0   # daily step: cooling forcing drives a ~0.5 K drop over h_mix=50 m
+    NCELLS = 16
+
+    def _C_mix(self, cfg):
+        return cfg.rho_ocean * cfg.c_ocean * cfg.h_mix
+
+    def test_slab_freeze_energy_conservation(self):
+        forcing = _cooling_forcing(self.NCELLS)
+        cfg = MPASSimpleOceanConfig(mode="slab")              # T_freeze = 271.35 K
+        cfg_noclamp = cfg._replace(T_freeze=100.0)            # clamp never fires
+        C_mix = self._C_mix(cfg)
+        st = init_mpas_slab_state(self.NCELLS, T_sfc_init=271.5)  # just above freezing
+
+        sf, _, _, _ = make_mpas_ocean(cfg)(st, forcing, self.DT)
+        sn, _, _, _ = make_mpas_ocean(cfg_noclamp)(st, forcing, self.DT)
+
+        # Clamp holds SST at/above the freezing point.
+        assert bool(jnp.all(sf.T_sfc.data >= cfg.T_freeze - 1e-9))
+        # The unclamped twin genuinely undershoots — the test exercises the clamp.
+        assert bool(jnp.any(sn.T_sfc.data < cfg.T_freeze))
+        # Energy closure: the heat the clamp injected == diagnosed Q_freeze.
+        injected = C_mix * (sf.T_sfc.data - sn.T_sfc.data) / self.DT
+        assert jnp.allclose(injected, sf.Q_freeze.data, atol=1e-6, rtol=1e-9)
+        # Sign + units.
+        assert bool(jnp.all(sf.Q_freeze.data >= 0.0))
+        assert bool(jnp.any(sf.Q_freeze.data > 0.0))
+        assert sf.Q_freeze.units == "W/m2"
+
+    def test_two_layer_freeze_energy_conservation(self):
+        forcing = _cooling_forcing(self.NCELLS)
+        cfg = MPASSimpleOceanConfig(mode="two_layer")
+        cfg_noclamp = cfg._replace(T_freeze=100.0)
+        C_mix = self._C_mix(cfg)
+        st = init_mpas_slab_state(self.NCELLS, T_sfc_init=271.5, T_deep_init=275.0)
+
+        sf, _, _, _ = make_mpas_ocean(cfg)(st, forcing, self.DT)
+        sn, _, _, _ = make_mpas_ocean(cfg_noclamp)(st, forcing, self.DT)
+
+        assert bool(jnp.all(sf.T_sfc.data >= cfg.T_freeze - 1e-9))
+        assert bool(jnp.any(sn.T_sfc.data < cfg.T_freeze))
+        # Deep layer evolves identically (T_freeze does not touch it).
+        assert jnp.allclose(sf.T_deep.data, sn.T_deep.data, atol=1e-9)
+        injected = C_mix * (sf.T_sfc.data - sn.T_sfc.data) / self.DT
+        assert jnp.allclose(injected, sf.Q_freeze.data, atol=1e-6, rtol=1e-9)
+        assert bool(jnp.any(sf.Q_freeze.data > 0.0))
+
+    def test_warm_case_no_freeze(self):
+        for mode in ("slab", "two_layer"):
+            cfg = MPASSimpleOceanConfig(mode=mode)
+            st = init_mpas_slab_state(8, T_sfc_init=300.0)
+            s, _, _, _ = make_mpas_ocean(cfg)(st, _warm_forcing(8), self.DT)
+            assert jnp.allclose(s.Q_freeze.data, 0.0)
+
+    def test_q_freeze_differentiable(self):
+        """Total diagnosed freezing heat is differentiable wrt initial SST."""
+        cfg = MPASSimpleOceanConfig(mode="slab")
+        forcing = _cooling_forcing(self.NCELLS)
+
+        def total_q_freeze(T0):
+            st = MPASSlabOceanState(
+                T_sfc=Field(jnp.full(self.NCELLS, T0), "T_sfc", ("nCells",), "K"),
+                T_deep=Field(jnp.full(self.NCELLS, 275.0), "T_deep", ("nCells",), "K"),
+                Q_freeze=Field(jnp.zeros(self.NCELLS), "Q_freeze", ("nCells",), "W/m2"),
+            )
+            s, _, _, _ = make_mpas_ocean(cfg)(st, forcing, self.DT)
+            return jnp.sum(s.Q_freeze.data)
+
+        g = jax.grad(total_q_freeze)(271.5)
+        assert jnp.isfinite(g)
 
 
 # ============================================================================
