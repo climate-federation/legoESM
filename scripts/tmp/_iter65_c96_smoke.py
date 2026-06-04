@@ -42,8 +42,9 @@ import numpy as np
 
 jax.config.update("jax_enable_x64", True)
 
-# Allow `import run_atmosphere_test_matrix` when running from repo root.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Allow `import run_atmosphere_test_matrix` (a KEPT script at scripts/ root) after
+# this file moved into scripts/tmp/ — parent.parent is scripts/, not scripts/tmp/.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 def _run_c96_smoke(
