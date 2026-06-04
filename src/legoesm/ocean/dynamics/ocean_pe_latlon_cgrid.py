@@ -77,6 +77,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     curl_vertex_cgrid,
     pad_ns_scalar,
     pad_ns_zero,
+    _fold_is_local,
     smagorinsky_biharmonic_tendency_cgrid,
     smagorinsky_viscosity_cgrid,
     smagorinsky_viscosity_q_cgrid,
@@ -128,7 +129,7 @@ def _interp_to_v_points(f: jnp.ndarray, grid=None) -> jnp.ndarray:
     from legoesm.grids.halo_latlon import zero_polar_lat_ends
     f_v = zero_polar_lat_ends(f_v)
     fold = getattr(grid, "fold", None) if grid is not None else None
-    if fold is not None and fold.is_active and fold.fold_j >= 0:
+    if _fold_is_local(grid):
         n_cols = f_v.shape[1]
         n_lon = fold.perm_T.shape[0]
         last_interior_vface = 0.5 * (f[-2:-1] + f[-1:])
