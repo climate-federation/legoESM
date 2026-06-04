@@ -480,8 +480,11 @@ def instantiate(
     if not operators:
         return grid
 
-    # ``create_regional_grid('latlon', ...)`` returns ``(grid, wall_mask)``; wrap
-    # the grid object, not the tuple.
-    grid_obj = grid[0] if isinstance(grid, tuple) else grid
+    # ``create_regional_grid('latlon', ...)`` returns a plain ``(grid, wall_mask)``
+    # 2-tuple; unwrap the grid.  But most grids are themselves NamedTuples (e.g.
+    # CubedSphereGrid), which are ALSO tuples — so only unwrap a PLAIN tuple
+    # (NamedTuples carry ``_fields``); otherwise grid[0] would grab the first field
+    # (an int) instead of the grid.
+    grid_obj = grid[0] if isinstance(grid, tuple) and not hasattr(grid, "_fields") else grid
     ops = _build_operators(g, grid_obj)
     return grid, ops
