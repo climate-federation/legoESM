@@ -32,6 +32,20 @@ data/
 !scripts/data/**
 wandb/
 
+# Runtime logs — job stdout/stderr dumps, matrix exit-code logs, scheduler
+# output, etc. (`*.log` is already ignored above under LaTeX artifacts.)
+logs/
+**/logs/
+
+# Runtime diagnostic dumps written by ad-hoc probe/plot scripts (PNG/NetCDF
+# spilled into a `diagnostics/` tree during a run).
+# EXCEPTION: the curated cubed-sphere visual-regression baselines under
+# `diagnostics/fv3_visual/` are tracked deliberately (iter921 MANIFEST +
+# CLAUDE.md visual-verify rule); negate them back in below.
+diagnostics/
+!diagnostics/fv3_visual/
+!diagnostics/fv3_visual/**
+
 # Diagnostic plots dropped at repo root by ad-hoc scripts.
 # Tracked diagnostic PNGs live under `diagnostics/` and are still
 # allowed because these patterns are anchored to the repo root with `/`.
