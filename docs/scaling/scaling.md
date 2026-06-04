@@ -248,7 +248,7 @@ control-flow reorganisation, not a numerical change.
 
 ## 6. iter-206: scan-steps equivalence verifier + multi-CPU emulation result
 
-Added ``scripts/verify_scan_steps_equivalence.py`` — runs N=12 BCW
+Added ``scripts/validate/verify_scan_steps_equivalence.py`` — runs N=12 BCW
 steps via the per-step Python loop and via a single
 ``jax.lax.scan(length=N)`` kernel and compares the two final states
 leaf-by-leaf.  Tolerance is set to ``1e-3`` absolute (≈10× fp32 eps ×

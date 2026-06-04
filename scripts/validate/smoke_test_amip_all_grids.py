@@ -134,7 +134,7 @@ def run_one(label: str, *, days: int, resolution: int | None,
 
         # Validate output
         valid_cmd = [sys.executable,
-                     str(_REPO_ROOT / "scripts" / "validate_amip_run.py"),
+                     str(_REPO_ROOT / "scripts" / "validate" / "validate_amip_run.py"),
                      str(out)]
         v = subprocess.run(valid_cmd, capture_output=True, text=True)
         if v.returncode != 0:

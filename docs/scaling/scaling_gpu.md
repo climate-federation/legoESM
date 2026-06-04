@@ -576,7 +576,7 @@ Also landed: `scripts/bench/profile_mpas_ocean.py` (iter-7 artifact, was uncommi
 ### Iter 14 — 2026-05-27 — impl_cn numerical validation
 
 Open thread from iters 11-13: speed gain of `implicit_cn` came with no
-correctness check. Added `scripts/validate_baro_solver.py`:
+correctness check. Added `scripts/validate/validate_baro_solver.py`:
 
 - builds same grid twice — explicit_substep + implicit_cn
 - kicks eta with localized Gaussian bump (2D for LL, contiguous slice for MPAS)

@@ -1,0 +1,1 @@
+"""legoESM scripts — validate bucket."""

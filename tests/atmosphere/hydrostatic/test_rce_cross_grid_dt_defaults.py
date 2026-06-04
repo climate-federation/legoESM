@@ -123,7 +123,7 @@ def test_auto_dt_rce_lies_inside_cfl_envelope():
 
 def test_print_rce_auto_dt_table_script_runs():
     """Smoke: the iter-31 diagnostic table script
-    (scripts/print_rce_auto_dt_table.py) must run cleanly and print
+    (scripts/validate/print_rce_auto_dt_table.py) must run cleanly and print
     rows for every cubed_sphere row in the parametrise above.
 
     Lightweight — no JAX dycore, no run_rce.py invocation. Catches
@@ -133,7 +133,7 @@ def test_print_rce_auto_dt_table_script_runs():
     import subprocess
     import sys
     from pathlib import Path
-    script = Path(__file__).resolve().parents[3] / "scripts" / "print_rce_auto_dt_table.py"
+    script = Path(__file__).resolve().parents[3] / "scripts" / "validate" / "print_rce_auto_dt_table.py"
     result = subprocess.run(
         [sys.executable, str(script)],
         capture_output=True, text=True, timeout=30,

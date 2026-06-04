@@ -25,7 +25,7 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root (scripts/validate/ -> repo)
 # Reuse bench-script helpers + JAX-config order (bench_ocean_gpu_scaling -> scripts/bench/)
 from scripts.bench.bench_ocean_gpu_scaling import _build_latlon, _build_mpas, _block_state  # noqa
 

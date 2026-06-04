@@ -37,7 +37,7 @@ Canonical state of CRM rollout — built, broken, next. Each iteration appends d
      structural slow nightly + iter-39 with-rad symmetric coverage).
      Full 30-day plane CRM wall-time-gated (~8 days single-rank).
 2. **Reach radiative-convective equilibrium**:
-   * **CWV plateau range**: Wing 2018 RCEMIP1 multi-model band at SST = 300 K (Wing et al. 2018, *Geoscientific Model Development* 11(2):793–813, doi:10.5194/gmd-11-793-2018; Fig. 5b PWV at SST = 300 K shows inter-model spread ~45–60 mm). Code gate: `scripts/summarize_rce_trajectory.py:DEFAULT_CWV_RANGE_MM = (35, 65)` (Wing band 45–60 mm + 10 mm lower-bound margin to absorb the IC dip — iter-98 IC = 49.94 mm so a +-5 mm symmetric band would touch the lower edge — plus 5 mm upper-bound tolerance for the iter-98 day-4 overshoot to 57.18 mm).
+   * **CWV plateau range**: Wing 2018 RCEMIP1 multi-model band at SST = 300 K (Wing et al. 2018, *Geoscientific Model Development* 11(2):793–813, doi:10.5194/gmd-11-793-2018; Fig. 5b PWV at SST = 300 K shows inter-model spread ~45–60 mm). Code gate: `scripts/validate/summarize_rce_trajectory.py:DEFAULT_CWV_RANGE_MM = (35, 65)` (Wing band 45–60 mm + 10 mm lower-bound margin to absorb the IC dip — iter-98 IC = 49.94 mm so a +-5 mm symmetric band would touch the lower edge — plus 5 mm upper-bound tolerance for the iter-98 day-4 overshoot to 57.18 mm).
    * **Precip plateau**: ~3 mm/day (Wing 2018 mean).
    * **MSE drift**: split into TWO numbers to remove the iter-104 Codex MEDIUM confusion between the production DOD requirement and the spinup-window gate:
      - **Final 30-day DOD requirement**: < 1 % over last 10 days of the 30-day window (production target; gates the *equilibrated* run).
@@ -1212,7 +1212,7 @@ extends the 30-day wrapper, all driven by the iter-98 success.
 **iter-99..101 — 30-day wrapper + summarizer integration** (commits
 `8b2d36ab`, `cc5533d6`, `d740019f`):
 * iter-99: drop ``exec`` from ``run_rce_30day.sh`` mpirun line +
-  append a post-run ``scripts/summarize_rce_trajectory.py``
+  append a post-run ``scripts/validate/summarize_rce_trajectory.py``
   invocation. Writes ``trajectory.csv`` per production run.
 * iter-100: Codex review of iter-98/99 flagged 4 MEDIUM + 2 LOW —
   anchored ``snap_day_(\d{4})\.npz`` regex (no stray-file
@@ -1271,7 +1271,7 @@ utility — max |d cwv_mean| = 0 across days 0-3).
 
 **iter-110..111 — trajectory diff utility** (commits
 `94f73913`, `e16cdc55`):
-* iter-110: new ``scripts/compare_rce_trajectories.py`` — reads
+* iter-110: new ``scripts/validate/compare_rce_trajectories.py`` — reads
   two run output dirs via ``collect_trajectory`` + prints
   per-day delta table for CWV (mean/max), MSE, T_sfc, qc/qr_sfc
   max, wind. iter-98 vs iter-105 bit-equal through day 3 +
@@ -1345,8 +1345,8 @@ utility — max |d cwv_mean| = 0 across days 0-3).
   ``test_dod_doc_code_consistency`` tests = 85 new regression
   tests across the iter 99..120 chain (verified by Codex iter-122
   audit; iter-121's "87" was a 2-test over-count).
-* Tools added: ``scripts/summarize_rce_trajectory.py``,
-  ``scripts/compare_rce_trajectories.py``.
+* Tools added: ``scripts/validate/summarize_rce_trajectory.py``,
+  ``scripts/validate/compare_rce_trajectories.py``.
 * Wrapper integration: ``EVALUATE_DOD`` env var (0/1/final) +
   ``ALLOW_SUMMARY_FAILURE`` (0/1) on ``scripts/run_rce_30day.sh``.
 * iter-105 30-day in flight; DOD ``--final-dod`` verdict
@@ -1361,7 +1361,7 @@ compare + 6 distinct exit codes + doc/code consistency lock.
 
 **Code change** (commit `93fd0ba8`):
 
-* `scripts/summarize_rce_trajectory.py` (new, 158 lines): reads
+* `scripts/validate/summarize_rce_trajectory.py` (new, 158 lines): reads
   every `<out_dir>/snapshots/snap_day_NNNN.npz` written by
   `run_rce_mpi_long.py:save_snapshot_2d`, optionally folds in
   matching `<out_dir>/profiles/prof_day_NNNN.npz`
@@ -1754,7 +1754,7 @@ and git log. One-line summary per iter below:
 | 28 | Cross-grid plotter Metal pin (`JAX_PLATFORMS=cpu` for `run_atmosphere_test_matrix.py --cross-grid-plots-only`) + new structural test `test_auto_dt_rce_lies_inside_cfl_envelope` asserts every empirical ladder value ≤ 2x gravity-wave CFL. |
 | 29 | Empirical `dt ∝ dx²` scaling identified (α=2.0 fit over C24/C48/C72/C96). New `empirical_dt_dx2(dx_min)` diagnostic + `test_ladder_matches_empirical_dt_dx2_fit` (30% tolerance). 3 layers of regression coverage now. |
 | 30 | CFL advisory print in `run_rce.py` now shows BOTH gravity-wave + dx² fit bounds. Try/except ImportError guard preserved per Codex iter-22..24 HIGH. |
-| 31 | Auto-dt diagnostic table script (`scripts/print_rce_auto_dt_table.py`) + smoke test. Shows per-grid ladder + CFL + dx² fit + their ratios. |
+| 31 | Auto-dt diagnostic table script (`scripts/validate/print_rce_auto_dt_table.py`) + smoke test. Shows per-grid ladder + CFL + dx² fit + their ratios. |
 | 32 | AMIP cross-grid wrapper at iter-7 + iter-13 parity (macOS Bash 3.2 compat + dt=150 for C48/T42 AMIP rows). |
 | 33 | Codex iter-31/32 HIGH (voronoi V6 AMIP dt=600 BLOWUP risk → pin dt=60) + 2 MEDIUM (table refresh, K-anchor drift acknowledged). |
 | 34 | `test_cross_grid_wrapper_dt_overrides.py` regression: parses AMIP wrapper GRID_TABLE, asserts each dt override sits within 0.5× — 2.0× of central ladder. |

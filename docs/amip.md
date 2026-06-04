@@ -42,14 +42,14 @@ python scripts/data/generate_amip_forcing.py --out forcing_amip \
 To validate a finished run:
 
 ```bash
-python scripts/validate_amip_run.py results/amip_deck_test
+python scripts/validate/validate_amip_run.py results/amip_deck_test
 ```
 
 To run the deck across every supported (grid, discretization)
 combination as a smoke test:
 
 ```bash
-python scripts/smoke_test_amip_all_grids.py --days 1
+python scripts/validate/smoke_test_amip_all_grids.py --days 1
 # All 8 cases pass on legoESM main:
 #   cubed_sphere/{centered,finite_volume,cdgrid}
 #   latlon/{centered,finite_volume,latlon_cgrid}

@@ -292,7 +292,7 @@ if [ "$CHECK_LOG_MAX_W" = "1" ]; then
 fi
 echo "Computing per-day RCE trajectory summary..."
 set +e
-"$PYBIN" "$REPO_ROOT/scripts/summarize_rce_trajectory.py" "$OUTPUT" \
+"$PYBIN" "$REPO_ROOT/scripts/validate/summarize_rce_trajectory.py" "$OUTPUT" \
     $EVAL_FLAG \
     > "$OUTPUT/trajectory.txt" 2>&1
 summary_status=$?
@@ -329,7 +329,7 @@ if [ "$EVALUATE_DOD" != "final" ] && [ "${DAYS%.*}" -ge 30 ] 2>/dev/null; then
     echo "Hint: this is a >=30-day production run with EVALUATE_DOD=$EVALUATE_DOD."
     echo "  To grade the trajectory against the final DOD criterion 2"
     echo "  (Wing 2018 plateau, 1 % MSE drift over last 10 days), run:"
-    echo "    $PYBIN scripts/summarize_rce_trajectory.py \\"
+    echo "    $PYBIN scripts/validate/summarize_rce_trajectory.py \\"
     echo "      $OUTPUT --final-dod --check-log-max-w"
     echo "  --check-log-max-w covers criterion 1 (max|w| < 50 m/s)"
     echo "  and requires $OUTPUT/log.txt to be present; drop it if the"

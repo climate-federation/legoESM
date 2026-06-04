@@ -2,7 +2,7 @@
 
 iter-108: ``CRM_implementation.md`` ``Definition of done`` section
 quotes the DOD criterion 2 thresholds (CWV Wing 2018 plateau range,
-MSE drift bound, plateau-window length) that ``scripts/summarize_rce_trajectory.py``
+MSE drift bound, plateau-window length) that ``scripts/validate/summarize_rce_trajectory.py``
 ``evaluate_rce_quality`` actually gates against. If the two ever drift
 apart — for example, the doc is updated but the code is not, or
 vice-versa — production runs gate against one set of numbers while
@@ -29,7 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def _load_summarizer_module():
     """Load the summarizer module the same way the integration tests
     do — by path. Lives under ``scripts/`` which is not on sys.path."""
-    path = REPO_ROOT / "scripts" / "summarize_rce_trajectory.py"
+    path = REPO_ROOT / "scripts" / "validate" / "summarize_rce_trajectory.py"
     spec = importlib.util.spec_from_file_location(
         "summarize_rce_trajectory_for_consistency", path,
     )

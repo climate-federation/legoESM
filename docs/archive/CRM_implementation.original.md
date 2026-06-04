@@ -1630,7 +1630,7 @@ and git log. One-line summary per iter below:
 | 28 | Cross-grid plotter Metal pin (`JAX_PLATFORMS=cpu` for `run_atmosphere_test_matrix.py --cross-grid-plots-only`) + new structural test `test_auto_dt_rce_lies_inside_cfl_envelope` asserts every empirical ladder value ≤ 2x gravity-wave CFL. |
 | 29 | Empirical `dt ∝ dx²` scaling identified (α=2.0 fit over C24/C48/C72/C96). New `empirical_dt_dx2(dx_min)` diagnostic + `test_ladder_matches_empirical_dt_dx2_fit` (30% tolerance). 3 layers of regression coverage now. |
 | 30 | CFL advisory print in `run_rce.py` now shows BOTH gravity-wave + dx² fit bounds. Try/except ImportError guard preserved per Codex iter-22..24 HIGH. |
-| 31 | Auto-dt diagnostic table script (`scripts/print_rce_auto_dt_table.py`) + smoke test. Shows per-grid ladder + CFL + dx² fit + their ratios. |
+| 31 | Auto-dt diagnostic table script (`scripts/validate/print_rce_auto_dt_table.py`) + smoke test. Shows per-grid ladder + CFL + dx² fit + their ratios. |
 | 32 | AMIP cross-grid wrapper at iter-7 + iter-13 parity (macOS Bash 3.2 compat + dt=150 for C48/T42 AMIP rows). |
 | 33 | Codex iter-31/32 HIGH (voronoi V6 AMIP dt=600 BLOWUP risk → pin dt=60) + 2 MEDIUM (table refresh, K-anchor drift acknowledged). |
 | 34 | `test_cross_grid_wrapper_dt_overrides.py` regression: parses AMIP wrapper GRID_TABLE, asserts each dt override sits within 0.5× — 2.0× of central ladder. |

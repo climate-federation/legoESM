@@ -56,7 +56,7 @@ echo
 echo "[3/5] --scan-steps equivalence (per-dycore bit-or-fp32)"
 check "scan=12 vs Python loop agreement" \
     bash -c "JAX_ENABLE_X64=1 PYTHONPATH=. .venv/bin/python \
-        scripts/verify_scan_steps_equivalence.py 2>&1 | grep -q DIVERGED && \
+        scripts/validate/verify_scan_steps_equivalence.py 2>&1 | grep -q DIVERGED && \
         exit 1 || exit 0"
 
 echo

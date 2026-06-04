@@ -326,7 +326,7 @@ def _strip_bash_comments(text: str) -> str:
 
 def test_wrapper_invokes_post_run_summarizer(wrapper_text):
     """iter-99: ``run_rce_30day.sh`` must call
-    ``scripts/summarize_rce_trajectory.py`` AFTER the mpirun line so
+    ``scripts/validate/summarize_rce_trajectory.py`` AFTER the mpirun line so
     every production run emits ``<OUTPUT>/trajectory.csv``. Three
     invariants (iter-99 Codex review hardened):
 
@@ -363,7 +363,7 @@ def test_wrapper_invokes_post_run_summarizer(wrapper_text):
     # MEDIUM#4 — comments stripped above, but anchoring belt-and-
     # braces against an executable heredoc / dead branch).
     summary_match = re.search(
-        r'^\s*"\$PYBIN"\s+"\$REPO_ROOT/scripts/summarize_rce_trajectory\.py"\s+"\$OUTPUT"',
+        r'^\s*"\$PYBIN"\s+"\$REPO_ROOT/scripts/validate/summarize_rce_trajectory\.py"\s+"\$OUTPUT"',
         code,
         re.MULTILINE,
     )
@@ -374,7 +374,7 @@ def test_wrapper_invokes_post_run_summarizer(wrapper_text):
     )
     assert summary_match is not None, (
         "run_rce_30day.sh missing the post-run "
-        "``\"$PYBIN\" \"$REPO_ROOT/scripts/summarize_rce_trajectory.py\" "
+        "``\"$PYBIN\" \"$REPO_ROOT/scripts/validate/summarize_rce_trajectory.py\" "
         "\"$OUTPUT\"`` call in executable code (only matched in "
         "comments?). Production runs would land snapshots but no "
         "aggregated per-day trajectory CSV (iter-99 contract)."

@@ -383,11 +383,11 @@ iterations; full details in the iteration log below.  Highlights:
 
 **New code**
 
-- `scripts/smoke_test_amip_all_grids.py` — drives a 1-day AMIP run on
+- `scripts/validate/smoke_test_amip_all_grids.py` — drives a 1-day AMIP run on
   each grid (cubed_sphere/centered/C12, latlon/centered/24, gaussian/
   spectral/T21, voronoi/mpas/level=4) and validates each via
   `validate_amip_run.py`. Returns non-zero if any grid fails.
-- `scripts/validate_amip_run.py` — physics-realism / conservation
+- `scripts/validate/validate_amip_run.py` — physics-realism / conservation
   checker.  Bounds:
     - Final atmospheric T in [200, 320] K (fatal)
     - Precip in [0, 30] mm/day (warn-only)
@@ -537,7 +537,7 @@ least 1 day with the analytical AMIP IC.  This is a hidden CFL
 constraint — likely tied to the MPAS PV-flux closure or the
 hydrostatic adjustment cadence — and is tracked in "Known issues" #2.
 
-Update `scripts/smoke_test_amip_all_grids.py` to pass `--dt 60` for
+Update `scripts/validate/smoke_test_amip_all_grids.py` to pass `--dt 60` for
 the voronoi case.
 
 **Final validation matrix (1-day analytical AMIP runs, post-iter-10)**
@@ -577,7 +577,7 @@ exercises:
 
 ### Iter 8 — Extend smoke-test matrix to all 8 (grid, discretization) cases
 
-Updated `scripts/smoke_test_amip_all_grids.py` to cover every
+Updated `scripts/validate/smoke_test_amip_all_grids.py` to cover every
 supported hydrostatic AMIP path: 3 cubed-sphere discretizations
 (centered, finite_volume, cdgrid), 3 latlon (centered, finite_volume,
 latlon_cgrid), spectral on Gaussian, and MPAS on voronoi.

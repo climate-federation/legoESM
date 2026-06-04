@@ -449,7 +449,7 @@ barotropic-mode-noise issue spun out (see `docs/issues/`).
   decimals despite 1e-4 per-cell fp divergence from chaotic compounding).
 - ✅ Three runner scripts (baseline / divdamp / implicit) thinned to
   ~80 LOC each, all calling the helper.  Verification harness at
-  `scripts/verify_drake_runner_jit.py`.
+  `scripts/validate/verify_drake_runner_jit.py`.
 - ✅ Drake-band budget computed across all three configurations
   (baseline / Stage 0 / Stage 3-implicit) — see issue doc table.
 

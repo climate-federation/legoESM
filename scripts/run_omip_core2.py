@@ -598,7 +598,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
     """
     import run_omip
     import xarray as xr
-    from compare_omip_nemo import regrid_curv_to_latlon
+    from scripts.validate.compare_omip_nemo import regrid_curv_to_latlon
     res = f"{n_lat}x{n_lon}"
     grid, z_coord, config, model, _ = run_omip._create_setup(
         "latlon", res, nlev, H_max, physics_preset="full", water_type="II",

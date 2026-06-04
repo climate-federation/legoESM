@@ -64,7 +64,7 @@ GRID_TABLE=(
     "gaussian:42:spectral:spectral:--truncation 42:150"
 )
 # Voronoi dt notes (iter-32 Codex HIGH):
-#   scripts/smoke_test_amip_all_grids.py uses --dt 60 at V4 explicitly,
+#   scripts/validate/smoke_test_amip_all_grids.py uses --dt 60 at V4 explicitly,
 #   noting "the MPAS hydrostatic dycore is unstable at the default
 #   600 s step despite the CFL diagnostic reporting 0.09". V6 is
 #   ~4x as many cells as V4 (10242 vs 2562) so MUST be at least as

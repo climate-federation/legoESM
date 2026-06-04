@@ -40,7 +40,7 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DECK_DRIVER = _REPO_ROOT / "scripts" / "run_amip_cmip6_deck.py"
-_VALIDATOR = _REPO_ROOT / "scripts" / "validate_amip_run.py"
+_VALIDATOR = _REPO_ROOT / "scripts" / "validate" / "validate_amip_run.py"
 
 
 pytestmark = pytest.mark.skipif(

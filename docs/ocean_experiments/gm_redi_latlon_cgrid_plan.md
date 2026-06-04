@@ -463,7 +463,7 @@ Effect on the **production** Eady setup (22×10×20, κ_R = 5×10⁴):
 
 #### 120-day Eady validation (κ_R = 5×10⁴)
 
-`scripts/validate_triad_redi_120day.py` compares baseline (no GM/Redi)
+`scripts/validate/validate_triad_redi_120day.py` compares baseline (no GM/Redi)
 against Redi-only with both schemes.  The original framing of the test
 ("the Redi-only simulation should stay unchanged from baseline") relies
 on `q = f(ρ)` being maintained throughout the integration — which in

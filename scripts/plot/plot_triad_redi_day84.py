@@ -7,7 +7,7 @@ Bottom row: difference from baseline for the two Redi-only runs (so the
 triad column should be empty / round-off, while centered shows the
 spurious cross-isopycnal mixing the plan was worried about).
 
-Run after ``scripts/validate_triad_redi_120day.py``.
+Run after ``scripts/validate/validate_triad_redi_120day.py``.
 
 Run with:
     python scripts/plot_triad_redi_day84.py
@@ -37,7 +37,7 @@ OUT_PNG = Path("results/triad_phase6_validation/T_yz_day84_comparison.png")
 def _load(case: str) -> dict:
     f = RESULTS_ROOT / case / "snapshots_native.npz"
     if not f.exists():
-        sys.exit(f"missing {f} — run scripts/validate_triad_redi_120day.py first")
+        sys.exit(f"missing {f} — run scripts/validate/validate_triad_redi_120day.py first")
     return dict(np.load(f, allow_pickle=False))
 
 

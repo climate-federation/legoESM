@@ -3,7 +3,7 @@
 Every cell-centered global grid must sum its cell area to 4πR² and
 satisfy the area-weighted moments expected of an unbiased sphere
 covering. This test pins the consistency the audit script
-``scripts/audit_grid_metrics.py`` enforces so a regression in any one
+``scripts/validate/audit_grid_metrics.py`` enforces so a regression in any one
 grid factory is caught at unit-test time.
 
 The dominant historical break was the uniform lat-lon factory's

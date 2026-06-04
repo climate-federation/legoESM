@@ -1609,7 +1609,7 @@ class TestVolcanicNonCyclic:
 
 
 class TestValidator:
-    """Regression tests for ``scripts/validate_amip_run.py``.
+    """Regression tests for ``scripts/validate/validate_amip_run.py``.
 
     Two specific failure modes the loose validator can exhibit:
     1. ``Status: BLOWUP`` line in ``results.txt`` should be **fatal**
@@ -1664,7 +1664,7 @@ class TestValidator:
         """A ``Status: BLOWUP`` run with otherwise OK scalars must
         return non-zero from validate() with ``strict=False``."""
         sys.path.insert(0, str(_REPO_ROOT / "scripts"))
-        from validate_amip_run import validate
+        from scripts.validate.validate_amip_run import validate
 
         run = tmp_path / "blowup_run"
         # Diagnostics inside bounds, but status says BLOWUP.
@@ -1678,7 +1678,7 @@ class TestValidator:
 
     def test_failed_status_fatal_even_without_strict(self, tmp_path):
         sys.path.insert(0, str(_REPO_ROOT / "scripts"))
-        from validate_amip_run import validate
+        from scripts.validate.validate_amip_run import validate
 
         run = tmp_path / "failed_run"
         self._write_run(run, status="FAILED", residual_max=10.0,
@@ -1688,7 +1688,7 @@ class TestValidator:
 
     def test_completed_status_passes(self, tmp_path):
         sys.path.insert(0, str(_REPO_ROOT / "scripts"))
-        from validate_amip_run import validate
+        from scripts.validate.validate_amip_run import validate
 
         run = tmp_path / "ok_run"
         self._write_run(run, status="COMPLETED", residual_max=10.0,
@@ -1705,7 +1705,7 @@ class TestValidator:
         elapsed simulated days.
         """
         sys.path.insert(0, str(_REPO_ROOT / "scripts"))
-        from validate_amip_run import validate
+        from scripts.validate.validate_amip_run import validate
 
         run = tmp_path / "long_run"
         # 400 simulated days, 5-day diagnostic cadence → 80 samples.
@@ -1724,7 +1724,7 @@ class TestValidator:
         """A 1-day cold-start run with residual=400 W/m² must still
         pass — the cold-start tolerance is 500 W/m²."""
         sys.path.insert(0, str(_REPO_ROOT / "scripts"))
-        from validate_amip_run import validate
+        from scripts.validate.validate_amip_run import validate
 
         run = tmp_path / "short_run"
         self._write_run(run, status="COMPLETED", residual_max=400.0,
