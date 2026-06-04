@@ -10,7 +10,7 @@
 # (cubed-sphere C24 — see scaling.md §3.b).
 
 set -e
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 mkdir -p results/scaling
 SUMMARY="results/scaling/strong_sweep.json"
@@ -25,13 +25,13 @@ run_one() {
     if [[ "$backend" == "gpu" ]]; then
         env -i HOME=$HOME PATH=$PATH JAX_ENABLE_X64=1 bash -c \
             "source scripts/data/gpu_env.sh >/dev/null && \
-             PYTHONPATH=. .venv/bin/python scripts/run_baroclinic_wave_benchmark.py \
+             PYTHONPATH=. .venv/bin/python scripts/run/run_baroclinic_wave_benchmark.py \
                  --grid '$grid' --resolution '$res' --dt '$dt' --days '$days' \
                  --tag '${TAG}_${label}' $extra 2>&1" \
             | grep -E "Integration complete|Wall time|drift|BLOWUP" || true
     else
         JAX_ENABLE_X64=1 PYTHONPATH=. .venv/bin/python \
-            scripts/run_baroclinic_wave_benchmark.py \
+            scripts/run/run_baroclinic_wave_benchmark.py \
             --grid "$grid" --resolution "$res" --dt "$dt" --days "$days" \
             --tag "${TAG}_${label}" $extra 2>&1 \
             | grep -E "Integration complete|Wall time|drift|BLOWUP" || true

@@ -6063,7 +6063,7 @@ class TestW2CubeFaceImprintCharacterization(unittest.TestCase):
             williamson_test2,
         )
         # Iter-610 Codex follow-up: replaced
-        # `from scripts.run_atmosphere_test_matrix import _regrid_2d`
+        # `from scripts.matrix.run_atmosphere_test_matrix import _regrid_2d`
         # with direct use of `legoesm.grids.regridding` helpers.  The
         # script has top-level side effects (jax_enable_x64, matplotlib
         # backend, Metal fallback) that MUTATE global state on import

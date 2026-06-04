@@ -78,7 +78,7 @@ def _run_one(
     cache_dir: str,
 ) -> dict[str, Any]:
     """Train + evaluate one (variant, arch_size) combination."""
-    from scripts.run_aimip import _train_variant, _evaluate_variant
+    from scripts.run.run_aimip import _train_variant, _evaluate_variant
 
     cfg = _merge(base_cfg, variant_overlay)
     cfg = _merge(cfg, overrides)

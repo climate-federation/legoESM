@@ -32,7 +32,7 @@ from typing import Callable
 
 # Reuse the segment benchmark builder from the production scaling driver.
 _HERE = Path(__file__).resolve().parent
-_REPO = _HERE.parent
+_REPO = _HERE.parent.parent  # scripts/bench/ -> repo root
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
@@ -42,7 +42,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import jax
 import jax.numpy as jnp
 
-from scripts.run_levante_gpu_scaling import _build_segment_benchmark
+from scripts.bench.run_levante_gpu_scaling import _build_segment_benchmark
 
 # Production modules used only for *isolated sub-stage* profiling.
 from legoesm.core.operators_3d import (

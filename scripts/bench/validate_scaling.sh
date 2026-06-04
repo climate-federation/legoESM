@@ -14,7 +14,7 @@
 # new iteration calls before adding code.
 
 set -e
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 GREEN=$'\033[0;32m'
 RED=$'\033[0;31m'

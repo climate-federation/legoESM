@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT_DIR="${ROOT}/results/scaling/iter222"
 CSV="${ROOT}/results/scaling/iter222_weak.csv"
 mkdir -p "${OUT_DIR}"
@@ -66,7 +66,7 @@ run_one() {
   if env -i HOME="${HOME}" PATH="${PATH}" JAX_ENABLE_X64=1 \
       bash -c "source '${ROOT}/scripts/data/gpu_env.sh' && \
                PYTHONPATH='${ROOT}' '${ROOT}/.venv/bin/python' \
-                 '${ROOT}/scripts/run_baroclinic_wave_benchmark.py' \
+                 '${ROOT}/scripts/run/run_baroclinic_wave_benchmark.py' \
                  --grid ${grid} --resolution ${res} --dt ${dt} --days 1 \
                  --output-dir '${outdir}' --tag '${tag}'" \
       > "${logfile}" 2>&1; then
