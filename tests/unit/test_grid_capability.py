@@ -126,9 +126,40 @@ def test_plane_operators_live_with_the_component_not_a_substrate_adapter():
         )
 
 
-def test_nesting_is_flagged_unavailable():
+def test_nesting_unavailable_for_non_latlon_grids():
+    # Nesting is implemented only for lat-lon (a one-way parent->child nest);
+    # every other grid still raises a precise NotImplementedError.
     with pytest.raises(NotImplementedError, match="nesting is not"):
-        instantiate("latlon", extent="regional", nesting=True, n_lat=8, n_lon=8)
+        instantiate("cubed_sphere", extent="regional", nesting=True, n=12)
+
+
+def test_latlon_nesting_builds_nested_grid():
+    from legoesm.grids.nesting import NestedLatLonGrid
+
+    nest = instantiate(
+        "latlon", extent="regional", nesting=True,
+        parent_n_lat=24, refinement_ratio=2,
+        lat_south_deg=0.0, lat_north_deg=40.0,
+        lon_west_deg=0.0, lon_east_deg=80.0,
+    )
+    assert isinstance(nest, NestedLatLonGrid)
+    assert nest.refinement_ratio == 2
+
+
+def test_latlon_nesting_in_capability_matrix():
+    m = capability_matrix()
+    assert "regional" in m["latlon"]["nesting_extents"]
+    assert m["cubed_sphere"]["nesting_extents"] == []
+
+
+def test_nesting_with_operators_rejected():
+    with pytest.raises(ValueError, match="pair"):
+        instantiate(
+            "latlon", extent="regional", nesting=True, operators=True,
+            parent_n_lat=24, refinement_ratio=2,
+            lat_south_deg=0.0, lat_north_deg=40.0,
+            lon_west_deg=0.0, lon_east_deg=80.0,
+        )
 
 
 def test_extents_constant():

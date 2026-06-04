@@ -18,6 +18,12 @@ from legoesm.grids.latlon import (
     create_mercator_grid,
     create_regional_latlon_grid,
 )
+from legoesm.grids.nesting import (
+    NestedLatLonGrid,
+    BoundaryInterpWeights,
+    create_nested_latlon_grid,
+    apply_boundary_interp,
+)
 # Experimental, staged-not-integrated. Plane NH dycore lands in a
 # follow-up PR (CRM rollout, PR2). For now PlaneGrid is consumed only
 # by ``plane_operators`` and its direct unit tests.

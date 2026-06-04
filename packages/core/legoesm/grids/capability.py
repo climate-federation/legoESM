@@ -7,7 +7,8 @@ operator families (component ``(u, v)`` C-grid operators, edge-normal TRiSK
 operators, Cartesian plane operators, or global spectral transforms).  **Not
 every combination exists** — e.g. you cannot build a regional Gaussian/spectral
 grid, edge operators do not apply to a lat-lon C-grid, and regional *nesting* is
-not implemented for any grid yet.
+implemented only for the lat-lon grid (a one-way parent->child refinement; see
+:mod:`legoesm.grids.nesting`).
 
 This module is the single validated entry point: :func:`instantiate` checks the
 requested ``(grid_type, extent, operators, nesting)`` against the capability
@@ -77,10 +78,15 @@ _OPERATOR_FAMILY: dict[str, str | None] = {
 #: Doubly-periodic Cartesian box grid(s) — the third extent.
 _DOUBLE_PERIODIC: frozenset[str] = frozenset({"plane"})
 
-#: Regional NESTING (a child grid refined inside a parent) — not implemented for
-#: any grid yet.  ``grid_type -> frozenset of extents at which nesting exists``;
-#: empty everywhere today, so any ``nesting=True`` request is flagged.
-_NESTING_SUPPORT: dict[str, frozenset[str]] = {}
+#: Regional NESTING (a refined child grid inside a coarse parent).
+#: ``grid_type -> frozenset of extents at which nesting exists``.  Today only the
+#: lat-lon grid has a one-way (parent->child) nest
+#: (:func:`legoesm.grids.nesting.create_nested_latlon_grid`), at the ``regional``
+#: extent (the nest IS a regional refinement of a global parent).  Any other
+#: ``nesting=True`` request still raises ``NotImplementedError``.
+_NESTING_SUPPORT: dict[str, frozenset[str]] = {
+    "latlon": frozenset({"regional"}),
+}
 
 
 def available_precision_modes() -> tuple[str, ...]:
@@ -311,9 +317,13 @@ def instantiate(
         a ``(grid, operators)`` tuple.  Raises if the grid has no grid-local
         operators (spectral) — see :func:`operator_family`.
     nesting
-        If true, request a *nested* (refined-child) grid.  Not implemented for any
-        grid yet, so this currently always raises ``NotImplementedError`` — the
-        hook is here so callers get a clear message instead of a wrong grid.
+        If true, request a *nested* (coarse-parent + refined-child) grid.  Wired
+        for ``latlon`` at ``extent="regional"`` — returns a
+        :class:`legoesm.grids.nesting.NestedLatLonGrid` built from the per-type
+        kwargs (``parent_n_lat``, ``refinement_ratio``, ``lat_south_deg`` …).
+        Any other ``(grid, extent)`` still raises ``NotImplementedError``.
+        ``operators=True`` with ``nesting=True`` is rejected (a nest is a grid
+        PAIR, not one grid).
     architecture
         ``"cpu"`` | ``"gpu"`` | ``"tpu"`` | ``"metal"`` (or ``None`` to leave the
         current backend).  Validated by :func:`validate_runtime`.
@@ -383,9 +393,35 @@ def instantiate(
         if extent not in nest_extents:
             raise NotImplementedError(
                 f"regional nesting is not available for grid {grid_type!r} ({g}) "
-                f"at extent {extent!r}; grid nesting is not yet implemented for "
-                f"any grid in legoESM."
+                f"at extent {extent!r}; nesting exists only for "
+                f"{sorted(k for k, v in _NESTING_SUPPORT.items() if v)} "
+                f"(see legoesm.grids.nesting)."
             )
+        if operators:
+            # A nest is a (parent, child) pair, not a single grid object; the
+            # operator adapter wraps one grid.  Build the nest, then wrap each
+            # grid's operators separately at the call site (e.g. the SW nesting
+            # driver) rather than returning an ambiguous single adapter here.
+            raise ValueError(
+                "nesting=True returns a NestedLatLonGrid (parent + child pair); "
+                "operators=True is not meaningful for the pair — build the nest "
+                "(operators=False) and take operators on nest.parent / nest.child "
+                "individually."
+            )
+        from legoesm.grids.nesting import create_nested_latlon_grid
+
+        # Validated runtime side effects (precision/backend) still apply below;
+        # do them first so the nest is built under the requested precision.
+        if configure:
+            if architecture is not None:
+                from legoesm.runtime.backend import configure_backend
+
+                configure_backend(architecture)
+            if precision is not None:
+                from legoesm.runtime.precision import apply_precision
+
+                apply_precision(precision)
+        return create_nested_latlon_grid(**kwargs)
 
     # --- optionally APPLY the validated runtime (global side effects) ---
     if configure:
