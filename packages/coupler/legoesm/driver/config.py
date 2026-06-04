@@ -401,14 +401,15 @@ class ExperimentConfig(NamedTuple):
                 "physics_parameterization_layers must be > 0, "
                 f"got {self.physics_parameterization_layers}"
             )
-        # NOTE: a ``radiation`` membership check is deliberately NOT added here.
-        # The accepted set is currently inconsistent across three code paths —
-        # ``physics_pipeline.build_physics_pipeline`` silently maps any unknown
-        # (incl. "none" and the "rrtmg" alias) to rrtmgp; ``_get_radiation_fn``
-        # accepts only gray/rrtmgp; ``model_driver`` maps "none"->disabled.
-        # Hardening radiation safely requires first reconciling those paths
-        # (remove the silent default per the dispatch rule, fix "none"
-        # semantics), which is a dedicated change — see A1 follow-up.
+        # Radiation membership (reconciled: physics_pipeline now raises on
+        # unknown and builds an explicit zero-radiation fn for "none", matching
+        # this accepted set = _RADIATION_BUILDERS keys).
+        _valid_radiation = ("none", "gray", "rrtmgp", "rrtmg")
+        if self.radiation not in _valid_radiation:
+            errors.append(
+                f"radiation must be one of {_valid_radiation}, "
+                f"got {self.radiation!r}"
+            )
         _valid_cloud_schemes = ("none", "sundqvist", "xu_randall", "resolved")
         if self.cloud_scheme not in _valid_cloud_schemes:
             errors.append(

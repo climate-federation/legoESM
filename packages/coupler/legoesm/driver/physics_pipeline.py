@@ -870,6 +870,41 @@ class PhysicsPipeline:
 # Radiation wrapper builders
 # ---------------------------------------------------------------------------
 
+def _build_none_radiation_fn(config):
+    """Build a zero-tendency radiation_fn for ``radiation='none'``.
+
+    Returns a :class:`RadiationOutput` with all-zero heating rates and SW/LW
+    fluxes, so the pipeline EXPLICITLY disables radiation. Previously
+    ``radiation='none'`` (a documented disable value) fell through the dispatch
+    and silently built the full RRTMGP scheme. Matches the gray/rrtmgp
+    radiation_fn call signature (all inputs ignored).
+    """
+    del config
+    from legoesm.atmosphere.physics.radiation.output import RadiationOutput
+
+    @jax.jit
+    def radiation_fn(T_col, p_full_col, p_half_col, q_v_col, T_sfc_col,
+                     lat_col, lon_col, day_of_year, seconds_of_day,
+                     albedo_col, emis_col, o3_vmr_col, aerosol_od_col,
+                     solar_weights, s_0=0.0,
+                     tau_equator=None, tau_pole=None,
+                     ghg_vmr_override=None,
+                     cloud_path_liq=None, cloud_path_ice=None,
+                     cloud_r_eff_liq=None, cloud_r_eff_ice=None,
+                     cloud_fraction=None):
+        ncol, nlev = T_col.shape
+        z_full = jnp.zeros((ncol, nlev), dtype=T_col.dtype)
+        z_half = jnp.zeros((ncol, nlev + 1), dtype=T_col.dtype)
+        return RadiationOutput(
+            lw_flux_up=z_half, lw_flux_down=z_half,
+            sw_flux_up=z_half, sw_flux_down=z_half,
+            heating_rate=z_full, lw_heating_rate=z_full,
+            sw_heating_rate=z_full,
+        )
+
+    return radiation_fn
+
+
 def _build_gray_radiation_fn(config):
     """Build a JIT-compiled gray radiation wrapper from config."""
     from legoesm.atmosphere.physics.radiation.config import GrayRadiationConfig
@@ -1033,6 +1068,7 @@ def _build_rrtmgp_radiation_fn(config):
 
 # Map radiation scheme names to builder functions.
 _RADIATION_BUILDERS: dict[str, callable] = {
+    "none": _build_none_radiation_fn,  # explicit zero-radiation (was silently rrtmgp)
     "gray": _build_gray_radiation_fn,
     "rrtmgp": _build_rrtmgp_radiation_fn,
     "rrtmg": _build_rrtmgp_radiation_fn,  # common alias
@@ -1265,8 +1301,11 @@ def build_physics_pipeline(grid, sigma, config):
     # Resolve radiation via registry-driven builder
     rad_scheme = config.radiation
     if rad_scheme not in _RADIATION_BUILDERS:
-        # Default to rrtmgp for any non-gray scheme (preserves old behaviour)
-        rad_scheme = "rrtmgp"
+        raise ValueError(
+            f"Unknown radiation scheme {rad_scheme!r}; expected one of "
+            f"{sorted(_RADIATION_BUILDERS)}. (Previously this silently defaulted "
+            "to rrtmgp, masking typos and running full RRTMGP for 'none'.)"
+        )
     radiation_fn = _RADIATION_BUILDERS[rad_scheme](config)
 
     # Resolve convection via registry
