@@ -7,6 +7,33 @@ Excess moisture is removed as precipitation.
 Uses jax.lax.scan for JIT-friendliness and differentiability.
 Smooth sigmoid triggers ensure continuous gradients.
 
+Planned: a DRY convective-adjustment mode (DCAConfig.dry=False default)
+--------------------------------------------------------------------
+The gray radiative–convective-equilibrium column
+(``atmosphere.idealized.radiative_convective_column``) needs a *dry* adjustment,
+but this scheme currently always targets the SATURATED MOIST adiabat (the
+``gamma_m = moist_adiabat_lapse_rate(T_mid, p_mid)`` target in
+``_adjust_one_iteration`` uses ``q_sat(T,p)``, NOT the supplied ``q_v``) and gates
+by moist CAPE — so ``q_v=0`` does NOT yield a dry adjustment.  To add a correct
+dry mode (additive, default-off, existing moist path byte-identical):
+
+1. ``DCAConfig.dry: bool = False``.
+2. In ``_adjust_one_iteration`` (thread ``dry`` through), when ``dry``:
+   * use the dry-adiabatic target ``gamma = gamma_dry = R_d*T_mid/(c_pd*p_mid)``
+     (already computed) for both the instability metric and ``T_target_upper``;
+   * SKIP the moisture branch entirely (no ``q_sat`` saturation/removal, no
+     ``delta_T_lh`` latent warming) — ``q`` unchanged, precip 0.  This makes the
+     pair adjustment conserve dry static energy ``c_p*T*dp`` exactly.
+3. In ``dca_convection``: when ``dry``, replace the moist-CAPE gate
+   (``compute_cape`` vs ``cape_threshold``) with a DRY static-stability gate —
+   e.g. a smooth sigmoid on the column's max super-adiabatic excess
+   ``(actual_dTdp - gamma_dry)`` — so the adjustment actually fires for a dry
+   super-adiabatic column (moist CAPE is ~0 there and would suppress it).
+4. Validate (new test): a super-adiabatic dry column relaxes to dry-adiabatic
+   NEUTRALITY (constant potential temperature ``theta`` to tol), column dry
+   enthalpy ``sum(c_p*T*dp)`` conserved (no precip), jax.grad finite; then
+   re-enable the column's ``convective_adjustment=True`` path against it.
+
 References
 ----------
 - Manabe, S., Smagorinsky, J., & Strickler, R. F. (1965).
