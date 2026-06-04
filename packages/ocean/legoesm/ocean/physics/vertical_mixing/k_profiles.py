@@ -28,11 +28,9 @@ from typing import Tuple
 import jax
 import jax.numpy as jnp
 
-from legoesm import constants
+from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.eos import (
     compute_ocean_rho as _compute_rho,
-    rho_0 as _RHO_0,
-    c_sw as _C_SW,
     thermal_expansion_coeff,
     haline_contraction_coeff,
 )
@@ -49,6 +47,7 @@ def compute_vertical_K_profiles(
     physics_config,
     A_v_background: float = 0.0,
     K_v_background: float = 0.0,
+    eos_fn=None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Compute total ``(K_v, A_v)`` at interior interfaces for an implicit solve.
 
@@ -66,6 +65,13 @@ def compute_vertical_K_profiles(
     A_v_background, K_v_background
         Optional additional floors added uniformly to all interfaces
         (typically ``LatLonCGridOceanConfig.A_v`` / ``K_v``).
+    eos_fn
+        Optional EOS ``fn(T, S, p) -> rho`` (e.g. the recipe's
+        ``veros_nonlin2``). When None, the schemes' density (and the TKE
+        static-stability N²) default to Wright 1997 — bit-identical with
+        the historical behaviour. Passing the model's EOS makes the TKE
+        N² (and, for ``n2_mode="adiabatic"``, the convective trigger)
+        consistent with the dynamical core.
 
     Returns
     -------
@@ -86,7 +92,9 @@ def compute_vertical_K_profiles(
 
     vmix = physics_config.vertical_mixing
     if vmix.scheme != "none":
-        K_vmix, A_vmix = _vmix_K_profiles(state, z_coord, surface_forcing, vmix)
+        K_vmix, A_vmix = _vmix_K_profiles(
+            state, z_coord, surface_forcing, vmix, physics_config.constants,
+            eos_fn=eos_fn)
         K_v_total = K_v_total + K_vmix
         A_v_total = A_v_total + A_vmix
 
@@ -121,13 +129,17 @@ def compute_vertical_K_profiles(
 # ---------------------------------------------------------------------------
 
 
-def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg):
+def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
+                     constants_config=ConstantsConfig(), eos_fn=None):
     """Re-compute K_v, A_v at interfaces for the chosen vmix scheme.
 
     For ``constant`` / ``richardson`` this duplicates only the K
     computation (cheap).  For ``kpp`` this also re-runs the boundary
     layer diagnosis, which is somewhat more expensive but still much
     cheaper than the tridiagonal solve it enables.
+
+    ``eos_fn`` (optional) overrides the density EOS used to compute N²
+    (default Wright 1997 -> bit-identical legacy).
     """
     scheme = vmix_cfg.scheme
     J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
@@ -141,7 +153,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg):
         A_v = jnp.full(shape, cfg.A_v, dtype=dtype)
         return K_v, A_v
 
-    rho = _compute_rho(state, z_coord, J)
+    rho = _compute_rho(state, z_coord, J, eos_fn=eos_fn)
 
     if scheme == "richardson":
         from legoesm.ocean.physics.vertical_mixing.richardson import (
@@ -153,6 +165,62 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg):
             apply_diffusion=False,
         )
         return out.K_v, out.A_v
+
+    if scheme == "tke":
+        from legoesm.ocean.physics.vertical_mixing.tke import (
+            tke_vertical_mixing,
+        )
+        # Interpolate u, v to cell centres for the closure on C-grid;
+        # on cubed-sphere they are already at cell centres.
+        u_data = state.u.data
+        v_data = state.v.data
+        T_data = state.T.data
+        S_data = state.S.data
+        if u_data.shape[1] != T_data.shape[1]:
+            u_data = 0.5 * (u_data[:, :-1, :] + u_data[:, 1:, :])
+            v_data = 0.5 * (v_data[:-1, :, :] + v_data[1:, :, :])
+        dz_half = jnp.broadcast_to(
+            z_coord.dz_half_ref * J[..., jnp.newaxis],
+            T_data.shape[:-1] + (z_coord.n_levels - 1,),
+        )
+        tau_x = (getattr(surface_forcing, "tau_x", None)
+                 if surface_forcing is not None else None)
+        tau_y = (getattr(surface_forcing, "tau_y", None)
+                 if surface_forcing is not None else None)
+        # Adiabatic static-stability N² (Veros parcel displacement) needs
+        # the cell-centre hydrostatic pressure + the same EOS as the
+        # dynamical core. Only computed when the TKE config opts in
+        # (``n2_mode="adiabatic"``) so the default path is unchanged.
+        p_cell = None
+        if getattr(vmix_cfg.tke, "n2_mode", "insitu") == "adiabatic":
+            from legoesm.ocean.eos import compute_hydrostatic_pressure
+            from legoesm.ocean.eos import _maybe_partial_h_actual
+            h_actual = _maybe_partial_h_actual(state, z_coord)
+            p_cell = compute_hydrostatic_pressure(
+                rho, state.eta.data, z_coord.dz_ref, J,
+                constants_config.rho_0, h_actual=h_actual,
+            )
+        # Use Mode B (diagnostic / quasi-steady) iteration: ``tke_old=None``
+        # seeds at background and 3 iterations of the same backward-Euler
+        # step bring TKE to within ~few % of the prognostic equilibrium
+        # for typical ocean shear / stratification. True prognostic mode
+        # (TKE carried across timesteps via ``state.tke``) is a future
+        # upgrade tracked in the Phase G audit doc.
+        _DIAGNOSTIC_DT = 86400.0   # long dt drives implicit solve to equilibrium
+        tke_out = tke_vertical_mixing(
+            u_data, v_data, T_data, S_data, rho, dz_half,
+            tke_old=None,
+            tau_x_surface=tau_x, tau_y_surface=tau_y,
+            dt=_DIAGNOSTIC_DT, cfg=vmix_cfg.tke,
+            rho_0=constants_config.rho_0, g=constants_config.g,
+            n_iterations=3,
+            p_cell=p_cell, dz_ref=z_coord.dz_ref, jacobian=J, eos_fn=eos_fn,
+            # Interior interface depths (nlev-1) for the Bryan-Lewis kappaH
+            # floor (Veros enable_kappaH_profile); z_half_ref is negative
+            # downward, interior interfaces drop the surface (k=0) + bottom.
+            z_interface=z_coord.z_half_ref[1:-1],
+        )
+        return tke_out.K_H, tke_out.K_M
 
     if scheme == "kpp":
         from legoesm.ocean.physics.vertical_mixing.kpp import (
@@ -170,12 +238,12 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg):
         Q_sfc_T = None
         B_f = None
         if q_net is not None:
-            Q_sfc_T = q_net / (_RHO_0 * _C_SW)
+            Q_sfc_T = q_net / (constants_config.rho_0 * constants_config.c_sw)
             T_sfc = state.T.data[..., 0]
             S_sfc = state.S.data[..., 0]
             p_sfc = jnp.zeros_like(T_sfc)
             alpha = thermal_expansion_coeff(T_sfc, S_sfc, p_sfc)
-            B_f = -constants.g * alpha * Q_sfc_T
+            B_f = -constants_config.g * alpha * Q_sfc_T
 
         Q_sfc_S = None
         if fw is not None or salt is not None:
@@ -188,10 +256,10 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg):
             # (+salt*1e3/rho, salt>0 in -> destabilizing brine rejection).
             Q_sfc_S = jnp.zeros_like(S_sfc)
             if fw is not None:
-                Q_sfc_S = Q_sfc_S - S_sfc * fw / _RHO_0
+                Q_sfc_S = Q_sfc_S - S_sfc * fw / constants_config.rho_0
             if salt is not None:
-                Q_sfc_S = Q_sfc_S + salt * 1.0e3 / _RHO_0
-            B_salt = constants.g * beta * Q_sfc_S
+                Q_sfc_S = Q_sfc_S + salt * 1.0e3 / constants_config.rho_0
+            B_salt = constants_config.g * beta * Q_sfc_S
             B_f = B_salt if B_f is None else (B_f + B_salt)
 
         out = kpp_vertical_mixing(

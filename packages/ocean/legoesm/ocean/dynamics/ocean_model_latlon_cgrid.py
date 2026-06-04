@@ -34,6 +34,7 @@ from legoesm.ocean.vertical import (
     diagnose_w_from_flux_div,
     flux_form_vertical_tracer_advection,
     flux_form_vertical_tracer_advection_tvd,
+    flux_form_vertical_tracer_advection_centered,
 )
 from legoesm.ocean.state import (
     LatLonCGridOceanState,
@@ -42,6 +43,7 @@ from legoesm.ocean.state import (
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
     _interp_to_v_points,
+    _centered_cell_to_uface,
     _upwind_to_u_points,
     _upwind_to_v_points,
     _tvd_to_u_points,
@@ -63,8 +65,16 @@ from legoesm.ocean.dynamics.barotropic_implicit_latlon_cgrid import (
 from legoesm.ocean.freshwater import freshwater_eta_tendency, virtual_salt_flux
 from legoesm.ocean.physics.combined import make_ocean_physics
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+    compute_eke_step_kappa,
+    compute_realized_gm_skew_conversion,
+    eke_horizontal_transport,
+    eke_3d_horizontal_transport,
+    eke_3d_vertical_diffusion,
     gm_redi_tracer_tendency_latlon,
+    harmonic_lateral_kediss_eke_source,
+    compute_isoneutral_K33_latlon,
 )
+from legoesm.ocean.physics.lateral_mixing.eke import eke_apply_local_source
 from legoesm.ocean.advection_som import som_advect_tracers
 from legoesm.ocean.advection import (
     fct_tracer_advection,
@@ -180,11 +190,40 @@ def _compute_advection_flux_div(
         tracer_flux_v = mass_flux_v * tr_v
         div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, grid)
         vert_flux_div = _vert_fn(tr, w_baro, h_k_old, dt)
-    else:
-        # upwind or tvd
-        if tracer_advection == "tvd":
-            tr_u = _tvd_to_u_points(tr, mass_flux_u)
-            tr_v = _tvd_to_v_points(tr, mass_flux_v, grid=grid)
+    elif tracer_advection == "centered":
+        # Veros ``adv_flux_2nd`` (veros/core/advection.py;
+        # enable_superbee_advection=False): UNLIMITED centered 2nd-order
+        # tracer flux. The face value is the plain 2-cell average
+        #   horizontal: T_face = 0.5*(T[i] + T[i+1])
+        #   vertical:   T_face = 0.5*(T[k] + T[k+1])
+        # and the flux is F = T_face * (h*u) on the C-grid faces. This
+        # REUSES the same flux-form divergence machinery as the TVD /
+        # WENO / DST3 paths (build a face value -> mass_flux*tr_face ->
+        # divergence_cgrid); "centered" is simply the unlimited face
+        # value. The horizontal face values come from the canonical
+        # centered cell->face interpolations (``_centered_cell_to_uface``,
+        # periodic in longitude; ``_interp_to_v_points``, the centered
+        # cell->v-face interp with the solid-wall / tripolar-fold BC).
+        # Wall masking is carried by ``mass_flux_u``/``mass_flux_v``
+        # (zero through walls) — the analogue of Veros's maskU/maskV.
+        #
+        # DISPERSION: centered 2nd order is unlimited, hence dispersive —
+        # it can over/undershoot near sharp gradients (non-monotone,
+        # locally negative tracers) with zero implicit diapycnal mixing.
+        # Used for the Veros-faithful ACC comparison; legoESM's production
+        # default stays TVD (Van Leer), which is monotone.
+        tr_u = _centered_cell_to_uface(tr)
+        tr_v = _interp_to_v_points(tr, grid)
+        tracer_flux_u = mass_flux_u * tr_u
+        tracer_flux_v = mass_flux_v * tr_v
+        div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, grid)
+        vert_flux_div = flux_form_vertical_tracer_advection_centered(tr, w_baro)
+    elif tracer_advection in ("tvd", "superbee", "upwind"):
+        from legoesm.ocean.dynamics._flux_limiters import resolve_tvd_limiter
+        if tracer_advection in ("tvd", "superbee"):
+            limiter_fn = resolve_tvd_limiter(tracer_advection)
+            tr_u = _tvd_to_u_points(tr, mass_flux_u, limiter_fn=limiter_fn)
+            tr_v = _tvd_to_v_points(tr, mass_flux_v, grid=grid, limiter_fn=limiter_fn)
         else:
             tr_u = _upwind_to_u_points(tr, mass_flux_u)
             tr_v = _upwind_to_v_points(tr, mass_flux_v, grid=grid)
@@ -192,11 +231,19 @@ def _compute_advection_flux_div(
         tracer_flux_v = mass_flux_v * tr_v
         div_hut = divergence_cgrid(tracer_flux_u, tracer_flux_v, grid)
 
-        if tracer_advection == "tvd":
+        if tracer_advection in ("tvd", "superbee"):
             vert_flux_div = flux_form_vertical_tracer_advection_tvd(
-                tr, w_baro, h_k_old, dt)
+                tr, w_baro, h_k_old, dt,
+                limiter_fn=resolve_tvd_limiter(tracer_advection),
+            )
         else:
             vert_flux_div = flux_form_vertical_tracer_advection(tr, w_baro)
+    else:
+        raise ValueError(
+            f"Unknown tracer_advection literal {tracer_advection!r}; "
+            f"expected one of: upwind, centered, tvd, superbee, ppm, "
+            f"ppm_fct, dst3, dst3_multidim, weno5, weno7."
+        )
 
     return div_hut, vert_flux_div
 
@@ -394,6 +441,38 @@ def _forward_backward_coriolis_3d(
     return u_new, v_new
 
 
+def _eke_av_at_interior_wfaces(A_v_phys, A_v_bg, nlev, prefix_shape):
+    """Vertical viscosity at the ``M-1 = nlev-2`` INTERIOR W-interfaces, for the
+    3-D EKE implicit vertical diffusion (the ``eke_3d`` path).
+
+    The 3-D EKE field lives on the ``nlev-1`` interior T-interfaces (the W-grid);
+    its implicit vertical diffusion needs the diffusivity at the ``nlev-2``
+    interfaces BETWEEN those W-levels, which sit at the interior T-centres
+    ``k = 1 .. nlev-2`` (interior W-interface ``k`` is at T-centre ``k+1``).
+    ``A_v_phys`` may be:
+
+    - ``None`` — use the constant background ``A_v_bg`` (the ACC case: the TKE
+      path leaves ``tend.A_v`` unset);
+    - cell-centred (last axis ``nlev``) — the interior T-centres are ``[...,1:nlev-1]``;
+    - at the T-interfaces (last axis ``nlev-1``; the shape the vertical-mixing
+      modules KPP/TKE/Richardson produce) — average adjacent T-interfaces to the
+      interior T-centres (Veros's ``0.5*(kappaM[k]+kappaM[k+1])``).
+
+    Returns ``(*prefix_shape, nlev-2)``, ``>= 0``.  ``A_v_bg`` carries the dtype.
+    """
+    if A_v_phys is None:
+        return jnp.broadcast_to(A_v_bg, tuple(prefix_shape) + (nlev - 2,))
+    A_v_p = jnp.asarray(A_v_phys, dtype=A_v_bg.dtype) + A_v_bg
+    if A_v_p.shape[-1] == nlev:                 # cell-centred -> interior T-centres
+        return A_v_p[..., 1:nlev - 1]
+    if A_v_p.shape[-1] == nlev - 1:             # T-interfaces -> avg to interior T-centres
+        return 0.5 * (A_v_p[..., :-1] + A_v_p[..., 1:])
+    raise ValueError(
+        "eke_3d vertical diffusion: A_v_phys last axis must be nlev (cell-centred) "
+        f"or nlev-1 (interfaces); got {A_v_p.shape[-1]} (nlev={nlev})."
+    )
+
+
 class LatLonCGridOceanModel:
     """Boussinesq hydrostatic ocean model on a C-grid latitude-longitude grid.
 
@@ -434,14 +513,59 @@ class LatLonCGridOceanModel:
         self.config = config or LatLonCGridOceanConfig()
         self._validate_config(self.config)
         self._cfl_checked = False
+        # Static rigid-lid data (islands, basis, depths), built eagerly from the
+        # first concrete state (host-side flood-fill).  None until built.
+        self.rigid_lid_data = None
 
+        # Surface-forcing IMPLICIT routing (Veros placement): when enabled, the
+        # combined physics is built with surface_forcing.scheme="none" so the
+        # T*/S* restoring is NOT summed into the explicit dT_dt; a SEPARATE
+        # restoring function (``_surface_tracer_forcing_fn``) supplies the
+        # restoring RATE, which the tendency builder routes onto
+        # ``tendencies.surface_tracer_forcing`` (together with the withheld
+        # q_net / shortwave heat) for the backward-Euler implicit application.
+        self._surface_tracer_forcing_fn = None
         if self.config.physics is not None:
+            physics_for_combined = self.config.physics
+            if self.config.surface_forcing_implicit:
+                from legoesm.ocean.physics.surface_forcing.integration import (
+                    make_surface_forcing_physics,
+                )
+                _sf_cfg = self.config.physics.surface_forcing
+                # Build the restoring rate function from the REAL surface_forcing
+                # config (verbatim reuse — no duplicated restoring numerics).
+                self._surface_tracer_forcing_fn = make_surface_forcing_physics(_sf_cfg)
+                # Strip the restoring from the explicit combined physics so it is
+                # not double-counted (summed into dT_dt) — it is applied
+                # implicitly instead.
+                _sf_none = _sf_cfg._replace(scheme="none")
+                physics_for_combined = self.config.physics._replace(
+                    surface_forcing=_sf_none,
+                )
             self._physics_fn = make_ocean_physics(
-                self.config.physics,
+                physics_for_combined,
                 apply_vertical_diffusion=not self.config.implicit_vertical_mixing,
             )
         else:
             self._physics_fn = None
+
+    def _ensure_rigid_lid_data(self, state):
+        """Build + cache the static rigid-lid data from a CONCRETE state.
+
+        The island flood-fill is host-side (numpy), so this must run eagerly on
+        concrete bathymetry/masks — ``integrate``/``integrate_scan`` pre-build it
+        before the (jitted) scan so the captured data is a compile-time
+        constant.  A standalone ``step`` on a concrete state builds it lazily.
+        """
+        if self.rigid_lid_data is not None:
+            return self.rigid_lid_data
+        from legoesm.ocean.dynamics.rigid_lid_islands import build_rigid_lid_data
+        self.rigid_lid_data = build_rigid_lid_data(
+            state.H_bathy.data, state.land_mask.data,
+            state.u_mask.data, state.v_mask.data,
+            self.config, self.grid, periodic_x=True,
+        )
+        return self.rigid_lid_data
 
     @staticmethod
     def _validate_config(config: LatLonCGridOceanConfig) -> None:
@@ -458,6 +582,25 @@ class LatLonCGridOceanModel:
         for name, value in nonnegative.items():
             if value < 0.0:
                 raise ValueError(f"{name} must be >= 0, got {value!r}")
+
+        # Lateral mixing on the lat-lon C-grid is a DYNAMICS-level concern:
+        # horizontal viscosity via config.A_h/config.B_h, GM/Redi via the
+        # top-level config.gm_redi field (applied in the model step). The
+        # physics-pathway lateral-mixing factory (config.physics.lateral_mixing)
+        # is cubed-sphere-only — harmonic/biharmonic crash on lat-lon array
+        # shapes and gm_redi raises TypeError — so any non-"none" scheme there
+        # is a mis-wiring that would fail (or silently no-op via the probe) at
+        # runtime. Reject it at construction with a clear message.
+        if (config.physics is not None
+                and config.physics.lateral_mixing.scheme != "none"):
+            raise ValueError(
+                "On the lat-lon C-grid, config.physics.lateral_mixing.scheme="
+                f"{config.physics.lateral_mixing.scheme!r} is unsupported (the "
+                "physics lateral-mixing factory is cubed-sphere-only). Set "
+                "horizontal viscosity via config.A_h / config.B_h and GM/Redi "
+                "via the top-level config.gm_redi; keep "
+                "physics.lateral_mixing.scheme='none'."
+            )
 
         if config.n_barotropic_substeps < 1:
             raise ValueError(
@@ -480,6 +623,68 @@ class LatLonCGridOceanModel:
                 f"freshwater_closure must be one of {_valid_fw}, "
                 f"got {config.freshwater_closure!r}",
             )
+
+        # Fail-fast EOS dispatch validation (dispatch discipline: validate the
+        # static literal at construction, not lazily at the first step where
+        # make_eos_fn would raise). Uses the single VALID_EOS_SCHEMES source so
+        # the valid set is never duplicated. A linear EOS leaves eos_linear=None
+        # -> make_eos_fn supplies LinearEOSConfig() defaults (documented), so no
+        # eos/eos_linear coupling error is raised for that case.
+        from legoesm.ocean.eos import VALID_EOS_SCHEMES
+        if config.eos not in VALID_EOS_SCHEMES:
+            raise ValueError(
+                f"eos must be one of {sorted(VALID_EOS_SCHEMES)}, "
+                f"got {config.eos!r}",
+            )
+
+        # Fail-fast EKE-config validation (dispatch discipline: the EKE literals +
+        # the source-augmentation flags are validated at construction). The EKE
+        # SOURCE augmentation (source_kdiss_h, gm_source_mode="realized") is only
+        # implemented on the 3-D (eke_3d=True) W-grid source path — reject the
+        # combination with eke_3d=False rather than silently ignoring it.
+        if config.gm_redi is not None and getattr(config.gm_redi, "eke", None) is not None:
+            from legoesm.ocean.physics.lateral_mixing.eke import validate_eke_config
+            _eke = config.gm_redi.eke
+            validate_eke_config(_eke)
+            if not _eke.eke_3d and (
+                _eke.source_kdiss_h or _eke.gm_source_mode != "parameterized"
+            ):
+                raise ValueError(
+                    "EKEConfig source augmentation (source_kdiss_h="
+                    f"{_eke.source_kdiss_h!r}, gm_source_mode="
+                    f"{_eke.gm_source_mode!r}) requires eke_3d=True (the source "
+                    "terms live on the 3-D W-grid). Set eke_3d=True or leave the "
+                    "augmentation at its defaults (source_kdiss_h=False, "
+                    "gm_source_mode='parameterized')."
+                )
+
+        # Fail-fast momentum-advection dispatch validation (was a silent
+        # fallthrough to vector-invariant for any unknown literal). Single
+        # source: VALID_MOMENTUM_ADVECTION in ocean_pe_latlon_cgrid.
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            VALID_MOMENTUM_ADVECTION,
+            VALID_MOMENTUM_FLUX_SCHEME,
+            VALID_LATERAL_VISCOSITY_OPERATOR,
+        )
+        if config.momentum_advection not in VALID_MOMENTUM_ADVECTION:
+            raise ValueError(
+                f"momentum_advection must be one of "
+                f"{sorted(VALID_MOMENTUM_ADVECTION)}, "
+                f"got {config.momentum_advection!r}",
+            )
+        if config.momentum_flux_scheme not in VALID_MOMENTUM_FLUX_SCHEME:
+            raise ValueError(
+                f"momentum_flux_scheme must be one of "
+                f"{sorted(VALID_MOMENTUM_FLUX_SCHEME)}, "
+                f"got {config.momentum_flux_scheme!r}",
+            )
+        if config.lateral_viscosity_operator not in VALID_LATERAL_VISCOSITY_OPERATOR:
+            raise ValueError(
+                f"lateral_viscosity_operator must be one of "
+                f"{sorted(VALID_LATERAL_VISCOSITY_OPERATOR)}, "
+                f"got {config.lateral_viscosity_operator!r}",
+            )
+
         # The lat-lon C-grid applies OceanSurfaceForcing.tau/q_net/salt DIRECTLY
         # in its dynamics (+ the freshwater= arg for eta + virtual salt), so it
         # must NOT also route the same forcing through the 'external' physics
@@ -505,11 +710,32 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"salinity_min_psu ({config.salinity_min_psu}) must be "
                 f"< salinity_max_psu ({config.salinity_max_psu})")
-        _valid_solvers = {"explicit_substep", "implicit_cn"}
+        _valid_solvers = {"explicit_substep", "implicit_cn", "rigid_lid"}
         if config.barotropic_solver not in _valid_solvers:
             raise ValueError(
                 f"barotropic_solver must be one of {_valid_solvers}, "
                 f"got {config.barotropic_solver!r}")
+        # Asynchronous dt_mom≠dt_tracer stepping (dt_mom = dt / dt_mom_ratio).
+        if config.dt_mom_ratio < 1.0:
+            raise ValueError(
+                "dt_mom_ratio must be >= 1.0 (dt_mom <= dt_tracer), "
+                f"got {config.dt_mom_ratio!r}")
+        if config.dt_mom_ratio != 1.0 and config.barotropic_solver != "rigid_lid":
+            raise ValueError(
+                "dt_mom_ratio != 1.0 (asynchronous dt_mom≠dt_tracer stepping) "
+                "requires barotropic_solver='rigid_lid': under the rigid lid the "
+                "column depth H is fixed, so the tracer flux-form update is exactly "
+                "dt-independent and tracer mass is conserved (matching Veros's "
+                "streamfunction rigid lid). A moving free surface would leak "
+                "O((dt_tracer-dt_mom)·∂h/∂t) tracer mass. Got barotropic_solver="
+                f"{config.barotropic_solver!r}.")
+        if config.rigid_lid_cg_tol <= 0.0:
+            raise ValueError(
+                f"rigid_lid_cg_tol must be > 0, got {config.rigid_lid_cg_tol!r}")
+        if config.rigid_lid_cg_maxiter < 1:
+            raise ValueError(
+                f"rigid_lid_cg_maxiter must be >= 1, "
+                f"got {config.rigid_lid_cg_maxiter!r}")
         for fld in ("barotropic_implicit_theta_eta",
                     "barotropic_implicit_theta_pgf"):
             v = getattr(config, fld)
@@ -542,6 +768,22 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 f"momentum_time_integrator must be one of {_valid_mom_int}, "
                 f"got {_mom_ti!r}")
+
+        # Implicit surface-forcing placement (Veros) requires the implicit
+        # vertical-mixing solve — that is where the surface TRACER source is
+        # added (the backward-Euler RHS).  With explicit vertical mixing there
+        # is no implicit solve to host it; reject the combination rather than
+        # silently applying the forcing explicitly (dispatch discipline).
+        if config.surface_forcing_implicit and not config.implicit_vertical_mixing:
+            raise ValueError(
+                "surface_forcing_implicit=True requires "
+                "implicit_vertical_mixing=True: the surface TRACER forcing "
+                "(restoring + q_net + shortwave) is applied at weight 1.0 inside "
+                "the backward-Euler vertical-mixing solve (Veros's "
+                "core/thermodynamics.py placement). With explicit vertical "
+                "mixing there is no implicit solve to host the source. Set "
+                "implicit_vertical_mixing=True, or surface_forcing_implicit=False "
+                "to keep the explicit surface-forcing placement.")
 
     def check_barotropic_cfl(self, dt: float) -> float:
         """Check barotropic CFL and warn if marginal or unstable.
@@ -609,6 +851,7 @@ class LatLonCGridOceanModel:
             surface_forcing=surface_forcing,
             sponge=sponge,
             dt=dt,
+            surface_tracer_forcing_fn=self._surface_tracer_forcing_fn,
         )
 
     def tendencies_with_diagnostics(
@@ -643,11 +886,12 @@ class LatLonCGridOceanModel:
             sponge=sponge,
             dt=dt,
             diagnose_momentum=True,
+            surface_tracer_forcing_fn=self._surface_tracer_forcing_fn,
         )
 
     def _step_impl(self, state: LatLonCGridOceanState, dt: float,
                    freshwater=None, surface_forcing=None,
-                   sponge=None) -> LatLonCGridOceanState:
+                   sponge=None, *, _apply_implicit_vmix: bool = True):
         """Core step logic — no JIT wrapper.
 
         Use this directly inside an outer ``@jax.jit`` context (e.g.
@@ -655,8 +899,29 @@ class LatLonCGridOceanModel:
         that can cause numerical divergence with partial-cell
         coordinates.  For standalone calls, use ``step()`` which wraps
         this in ``@jax.jit``.
+
+        ``_apply_implicit_vmix`` (private): when ``False`` the final implicit
+        vertical-mixing solve and the conservation fixer are skipped and the
+        method returns ``(state_explicit, (tend.K_v, tend.A_v, K33))`` — the
+        explicit-only forward-Euler state plus the implicit-mixing diffusivity
+        profiles from the tendencies (``tend.K_v``/``tend.A_v`` may be ``None`` for
+        schemes, e.g. TKE, that don't surface them — then the consumer recomputes,
+        as the forward-Euler path does).  Used ONLY by the faithful AB2 path
+        (``_ab2_step``), which AB2-extrapolates the explicit increment and then
+        applies implicit vertical mixing ONCE (Veros core/thermodynamics.py +
+        core/external/solve_stream.py).  The default ``True`` leaves every other
+        caller bit-identical.
         """
         state = cast_pytree(state, None, "compute")
+
+        # Asynchronous ("distorted-physics") time stepping: the public ``dt`` IS
+        # dt_tracer (the clock; Veros advances vs.time by dt_tracer). Momentum + the
+        # barotropic solve + implicit vertical FRICTION use the shorter dt_mom; the
+        # tracer/continuity/eta/EKE/freshwater path + implicit vertical DIFFUSION keep
+        # ``dt`` (=dt_tracer). dt_mom_ratio=1.0 (default) ⇒ dt_mom == dt ⇒ bit-identical.
+        # Validation requires barotropic_solver="rigid_lid" when ratio != 1.0 (fixed
+        # column depth ⇒ exact tracer conservation; Veros's streamfunction rigid lid).
+        dt_mom = dt / self.config.dt_mom_ratio
 
         u_mask_3d = state.u_mask.data[..., jnp.newaxis]
         v_mask_3d = state.v_mask.data[..., jnp.newaxis]
@@ -771,6 +1036,11 @@ class LatLonCGridOceanModel:
         # barotropic + tracer stages below); the barotropic slow forcing
         # F_slow_{u,v} is the stage-1 value already computed above.  Static
         # Python branch on the config string (no retrace / no jnp.where).
+        # NOTE: the MOMENTUM stepping uses ``dt_mom`` (= dt / dt_mom_ratio) for
+        # Veros-faithful asynchronous dt_mom≠dt_tracer stepping; the inner
+        # ``self.tendencies(..., dt=dt)`` call keeps ``dt`` (= dt_tracer), which
+        # is the tracer flux-limiter timestep.  dt_mom_ratio=1.0 (default) ⇒
+        # dt_mom == dt ⇒ bit-identical for all existing configs.
         if getattr(self.config, "momentum_time_integrator", "euler") == "rk3":
             u0 = state.u.data
             v0 = state.v.data
@@ -788,17 +1058,17 @@ class LatLonCGridOceanModel:
                 return _du - _Fu[..., jnp.newaxis], _dv - _Fv[..., jnp.newaxis]
 
             # Stage 1 perturbation = du_dt_pert/dv_dt_pert (computed above).
-            u1 = u0 + dt * du_dt_pert
-            v1 = v0 + dt * dv_dt_pert
+            u1 = u0 + dt_mom * du_dt_pert
+            v1 = v0 + dt_mom * dv_dt_pert
             p1u, p1v = _mom_pert(u1, v1)
-            u2 = 0.75 * u0 + 0.25 * (u1 + dt * p1u)
-            v2 = 0.75 * v0 + 0.25 * (v1 + dt * p1v)
+            u2 = 0.75 * u0 + 0.25 * (u1 + dt_mom * p1u)
+            v2 = 0.75 * v0 + 0.25 * (v1 + dt_mom * p1v)
             p2u, p2v = _mom_pert(u2, v2)
-            u_star = (1.0 / 3.0) * u0 + (2.0 / 3.0) * (u2 + dt * p2u)
-            v_star = (1.0 / 3.0) * v0 + (2.0 / 3.0) * (v2 + dt * p2v)
+            u_star = (1.0 / 3.0) * u0 + (2.0 / 3.0) * (u2 + dt_mom * p2u)
+            v_star = (1.0 / 3.0) * v0 + (2.0 / 3.0) * (v2 + dt_mom * p2v)
         else:
-            u_star = state.u.data + dt * du_dt_pert
-            v_star = state.v.data + dt * dv_dt_pert
+            u_star = state.u.data + dt_mom * du_dt_pert
+            v_star = state.v.data + dt_mom * dv_dt_pert
 
         # 4. Forward-backward Coriolis on perturbation velocity
         #
@@ -809,7 +1079,7 @@ class LatLonCGridOceanModel:
         #   v' -= dt * f * u'_new_at_v      (backward: new u')
         # This matches the barotropic solver's Coriolis treatment.
         u_star, v_star = _forward_backward_coriolis_3d(
-            u_star, v_star, dt, self.grid, self.z_coord, self.config,
+            u_star, v_star, dt_mom, self.grid, self.z_coord, self.config,
             state.u_mask.data, state.v_mask.data, state.land_mask.data,
             state.eta.data, state.H_bathy.data,
         )
@@ -844,16 +1114,29 @@ class LatLonCGridOceanModel:
                 freshwater, self.config.rho_0,
             ) * state.land_mask.data
 
-        if self.config.barotropic_solver == "implicit_cn":
+        if self.config.barotropic_solver == "rigid_lid":
+            # Rigid lid: no free surface — solve the barotropic streamfunction
+            # from the (Coriolis-augmented) slow forcing.  eta is left unchanged.
+            # Freshwater (F_slow_eta) cannot change a rigid lid's volume; it
+            # enters elsewhere as a virtual salt flux.
+            from legoesm.ocean.dynamics.rigid_lid_latlon_cgrid import (
+                barotropic_rigid_lid_latlon_cgrid,
+            )
+            rl_data = self._ensure_rigid_lid_data(state_mid)
+            state_new, (Hu_avg, Hv_avg) = barotropic_rigid_lid_latlon_cgrid(
+                state_mid, dt_mom, self.grid, self.z_coord, self.config, rl_data,
+                F_slow_u=F_slow_u, F_slow_v=F_slow_v,
+            )
+        elif self.config.barotropic_solver == "implicit_cn":
             state_new, (Hu_avg, Hv_avg) = barotropic_implicit_latlon_cgrid(
-                state_mid, dt,
+                state_mid, dt_mom,
                 self.grid, self.z_coord, self.config,
                 F_slow_eta=F_slow_eta,
                 F_slow_u=F_slow_u,
                 F_slow_v=F_slow_v,
             )
         else:
-            dt_s = dt / self.config.n_barotropic_substeps
+            dt_s = dt_mom / self.config.n_barotropic_substeps
             state_new, (Hu_avg, Hv_avg) = barotropic_substeps_latlon_cgrid(
                 state_mid, dt_s, self.config.n_barotropic_substeps,
                 self.grid, self.z_coord, self.config,
@@ -1096,17 +1379,92 @@ class LatLonCGridOceanModel:
         S_mid = state_new.S.data
 
         # GM/Redi isopycnal mixing (if configured)
+        k33_implicit = None  # vertical isoneutral diffusivity K_33 for the
+        #                      implicit tracer solve (set below iff implicit_K33).
         if self.config.gm_redi is not None:
+            gm_cfg = self.config.gm_redi
+            kappa_gm_override = None
+            kappa_redi_override = None
+            eke_new = None
+            # Prognostic-EKE GM closure (Eden-Greatbatch): kappa_GM = c_k·L·√E
+            # from the evolving eddy-energy field, and integrate E one step
+            # (transport by the depth-mean flow + semi-implicit source/sink).
+            # Gated on gm_cfg.eke -> default None leaves the existing path
+            # (constant / Visbeck) bit-identical.
+            if gm_cfg.eke is not None:
+                eke_cfg = gm_cfg.eke
+                lm = state.land_mask.data
+                if eke_cfg.eke_3d:
+                    # 3-D (depth-resolved) prognostic-EKE path: E lives on the
+                    # interior interfaces (W-grid, nlev-1), the GM/Redi override
+                    # kappa is a 3-D interface field, and E evolves by the
+                    # depth-resolved source/sink + implicit vertical EKE diffusion
+                    # + per-interface horizontal transport (Veros's 3-D vs.eke).
+                    eke_new, kappa_gm_override = self._eke_3d_step(
+                        state, state_new, T_mid, S_mid, gm_cfg, eke_cfg, lm,
+                        tend.A_v, dt,
+                        Ah_visc_u=tend.Ah_visc_u, Ah_visc_v=tend.Ah_visc_v,
+                        Ah_kediss_cell=tend.Ah_kediss_cell,
+                    )
+                else:
+                    if state.eke is not None:
+                        E = state.eke.data
+                    else:
+                        E = jnp.full(lm.shape, eke_cfg.e_min, dtype=T_mid.dtype)
+                    kappa_gm_override, sigma_bar, L = compute_eke_step_kappa(
+                        T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
+                        E, self.grid, self.z_coord, gm_cfg,
+                        eos=self.config.eos, eos_linear=self.config.eos_linear,
+                        mask=lm,
+                        rho_0=self.config.constants.rho_0,
+                        g=self.config.constants.g,
+                        omega=self.config.constants.Omega,
+                        r_earth=self.config.constants.R_earth,
+                    )
+                    # Depth-mean advecting flow (level-mean; preserves the periodic
+                    # wrap so the transport conserves the area-integral of E).
+                    U_bar = jnp.mean(state.u.data, axis=-1) * state.u_mask.data
+                    V_bar = jnp.mean(state.v.data, axis=-1) * state.v_mask.data
+                    E_t = E + dt * eke_horizontal_transport(
+                        E, U_bar, V_bar, self.grid, eke_cfg,
+                        lm, state.u_mask.data, state.v_mask.data,
+                    )
+                    E_new = eke_apply_local_source(E_t, sigma_bar, L, eke_cfg, dt)
+                    eke_new = Field(data=E_new * lm, name="eke",
+                                    dims=("lat", "lon"), units="m^2/s^2")
+                # K_iso = K_gm (Veros enable_eke_isopycnal_diffusion): drive the
+                # Redi tracer diffusivity from the same prognostic kappa as GM.
+                if eke_cfg.isopycnal_diffusion:
+                    kappa_redi_override = kappa_gm_override
             dT_gm, dS_gm = gm_redi_tracer_tendency_latlon(
                 T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
-                self.grid, self.z_coord, self.config.gm_redi,
+                self.grid, self.z_coord, gm_cfg,
                 eos=self.config.eos, eos_linear=self.config.eos_linear,
                 mask=state.land_mask.data,
                 u_mask=state.u_mask.data,
                 v_mask=state.v_mask.data,
+                rho_0=self.config.constants.rho_0, g=self.config.constants.g,
+                kappa_gm_override=kappa_gm_override,
+                kappa_redi_override=kappa_redi_override,
             )
+            if gm_cfg.implicit_K33:
+                # Veros-faithful: K_33 (the vertical isoneutral diagonal ∝ S²) was
+                # dropped from the explicit F_z above (implicit_K33=True); recompute
+                # it from the SAME density/slopes as dT_gm and fold it into the
+                # implicit vertical-diffusion solve below, so the stiff S²-enhanced
+                # vertical mixing is applied backward-Euler exactly as in Veros.
+                k33_implicit = compute_isoneutral_K33_latlon(
+                    T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
+                    self.grid, self.z_coord, gm_cfg,
+                    eos=self.config.eos, eos_linear=self.config.eos_linear,
+                    mask=state.land_mask.data,
+                    rho_0=self.config.constants.rho_0, g=self.config.constants.g,
+                    kappa_redi_override=kappa_redi_override,
+                )
             T_mid = T_mid + dt * dT_gm * mask_3d
             S_mid = S_mid + dt * dS_gm * mask_3d
+            if eke_new is not None:
+                state_new = state_new._replace(eke=eke_new)
 
         if self.config.tracer_advection == "som":
             # SOM (Prather 1986): Second Order Moments advection (#210).
@@ -1286,19 +1644,33 @@ class LatLonCGridOceanModel:
         # and bottom and is split-stepped (Lie splitting, 1st-order)
         # after tracer advection, GM/Redi, and the freshwater virtual
         # salt flux — matching MOM6's diabatic-process ordering.
-        if self.config.implicit_vertical_mixing:
+        if self.config.implicit_vertical_mixing and _apply_implicit_vmix:
             state_new = self._apply_implicit_vertical_mixing(
                 state_new, dt, surface_forcing,
                 K_v_phys=tend.K_v, A_v_phys=tend.A_v,
+                K33_iso=k33_implicit, dt_mom=dt_mom,
+                surface_tracer_forcing=tend.surface_tracer_forcing,
             )
 
         # 9. Conservation fixers
-        if self.config.use_conservation_fixer:
+        if self.config.use_conservation_fixer and _apply_implicit_vmix:
             state_new = ocean_conservation_fixer(
                 state_new, state, self.grid, self.z_coord, self.config,
             )
 
-        return cast_pytree(state_new, None, "storage", allow_downcast=True)
+        state_new = cast_pytree(state_new, None, "storage", allow_downcast=True)
+        if not _apply_implicit_vmix:
+            # Faithful AB2 path: return the explicit-only state plus the
+            # implicit-mixing diffusivity profiles (evaluated from u^n, like
+            # Veros's du_mix / kappaH) and the WITHHELD surface-tracer forcing.
+            # ``_ab2_step`` applies implicit vertical mixing ONCE after the AB2
+            # extrapolation — adding the surface forcing INSIDE that implicit
+            # solve (so it is NOT AB2-extrapolated) — and runs the conservation
+            # fixer once on the final state.  ``tend.surface_tracer_forcing`` is
+            # ``None`` unless ``surface_forcing_implicit`` is on ⇒ bit-identical.
+            return state_new, (tend.K_v, tend.A_v, k33_implicit,
+                               tend.surface_tracer_forcing)
+        return state_new
 
     @staticmethod
     def _symmetrize_fold(state, fold):
@@ -1336,6 +1708,202 @@ class LatLonCGridOceanModel:
             v=state.v.replace(data=v),
         )
 
+    def _eke_3d_step(
+        self,
+        state: LatLonCGridOceanState,
+        state_new: LatLonCGridOceanState,
+        T_mid: jnp.ndarray,
+        S_mid: jnp.ndarray,
+        gm_cfg,
+        eke_cfg,
+        lm: jnp.ndarray,
+        A_v_phys,
+        dt: float,
+        *,
+        Ah_visc_u=None,
+        Ah_visc_v=None,
+        Ah_kediss_cell=None,
+    ) -> tuple:
+        """One step of the 3-D (depth-resolved) prognostic-EKE closure.
+
+        The eddy-energy field ``E`` lives on the ``nlev-1`` interior interfaces
+        (the W-grid), matching Veros's 3-D ``vs.eke``.  Returns
+        ``(eke_field_new, kappa_gm_override)`` where ``eke_field_new`` is the
+        updated 3-D ``Field (n_lat, n_lon, nlev-1)`` (floored at ``e_min``,
+        masked to wet columns) and ``kappa_gm_override`` is the 3-D
+        interface GM coefficient ``kappa_GM(z) = c_k·L(z)·√E`` fed to the GM/Redi
+        tracer tendency (Stage 3 consumes the 3-D interface kappa).
+
+        Operator-split (each sub-step unconditionally stable / positivity-
+        respecting), applied in the order:
+
+          1. per-interface horizontal transport (explicit upwind advection +
+             lateral diffusion), advecting ``E`` by the flow AT EACH INTERFACE
+             (the full-level u/v vertically averaged to the W-grid),
+          2. implicit (backward-Euler) vertical EKE diffusion ``K = alpha_eke·A_v``,
+          3. semi-implicit local source/sink ``P(z) - eps(z)`` (positivity-
+             preserving, no clip).
+
+        The source/sink is applied LAST so the depth-resolved production
+        ``P(z) = kappa_GM(z)·sigma(z)²`` enters after transport+diffusion have
+        redistributed ``E`` — mirroring the 2-D path's (transport → source)
+        order, with the vertical diffusion inserted between (the 2-D path has no
+        vertical operator).  ``E`` is finally floored at ``e_min`` and masked.
+
+        EKE-source augmentation (Veros apples-to-apples; both default off via
+        ``eke_cfg`` flags ⇒ the existing source is bit-identical):
+
+          - ``source_kdiss_h`` — add the mean-KE removed by the harmonic LATERAL
+            viscosity (Veros ``K_diss_h``) as a non-negative source, built from the
+            harmonic-viscosity momentum tendency ``A_h∇²(u,v)`` (``Ah_visc_u/v``,
+            computed once by the tendency function) via
+            :func:`...gm_redi_latlon_cgrid.harmonic_lateral_kediss_eke_source`.
+          - ``gm_source_mode="realized"`` — REPLACE the parameterized GM conversion
+            ``kappa_GM·sigma²`` with the realized GM-skew buoyancy conversion
+            ``-(g/ρ₀)∇ρ·F_skew`` (Veros ``-P_diss_skew``) via
+            :func:`...gm_redi_latlon_cgrid.compute_realized_gm_skew_conversion`.
+
+        Both enter the EXPLICIT production of the semi-implicit update, so
+        positivity-by-construction is preserved (both are ≥ 0).
+
+        W-grid metrics (subtle — documented):
+
+        - ``dz_w`` = the W-cell thicknesses = ``build_dz_half(dz_cell)`` =
+          ``0.5(dz_k + dz_{k+1})`` (the distance between adjacent T-cell centres
+          = Veros's ``dzw``; the divergence divisor in the implicit solve, and
+          the weight in the conserved column integral ``Σ E·dz_w``).
+        - ``dz_half_w`` = ``build_dz_half(dz_w)`` = the midpoint spacing between
+          adjacent W-cell centres (the flux divisor in the implicit solve).  The
+          legoESM W-grid is treated as an independent ``M=nlev-1``-level column
+          with zero-flux BCs at its top/bottom, so this midpoint spacing is the
+          self-consistent flux metric (it equals Veros's ``dzt`` flux divisor on
+          a uniform grid; the 2nd-order metric difference on a stretched grid is
+          within the documented operator-split treatment).
+        - ``A_v`` at the ``M-1`` interior W-interfaces: the interior W-interface
+          ``k`` sits at the centre of T-cell ``k+1``, so the vertical viscosity
+          there is ``A_v_cell[..., 1:nlev-1]`` (Veros's
+          ``0.5(kappaM[k]+kappaM[k+1])`` averaged to the W-interfaces; the
+          jacobian-scaled cell-centred ``A_v`` is the same profile the implicit
+          momentum solve uses, plus the config background floor).
+        """
+        from legoesm.ocean.physics.vertical_mixing import build_dz_half
+        from legoesm.ocean.vertical import compute_ocean_jacobian
+
+        dtype = T_mid.dtype
+        nlev = T_mid.shape[-1]
+        # E on the interior interfaces (W-grid).  Seeded to e_min if absent so
+        # the None -> Field transition (which would break the scan-carry pytree)
+        # never happens inside the step when integrate_scan pre-seeded it.
+        if state.eke is not None:
+            E = state.eke.data
+        else:
+            E = jnp.full(lm.shape + (nlev - 1,), eke_cfg.e_min, dtype=dtype)
+
+        # Depth-resolved kappa_GM(z), Eady growth sigma(z), mixing length L(z) at
+        # the interior interfaces (Stage 1 depth_resolved path).
+        kappa_gm_override, sigma3, L3 = compute_eke_step_kappa(
+            T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
+            E, self.grid, self.z_coord, gm_cfg,
+            eos=self.config.eos, eos_linear=self.config.eos_linear,
+            mask=lm,
+            rho_0=self.config.constants.rho_0,
+            g=self.config.constants.g,
+            omega=self.config.constants.Omega,
+            r_earth=self.config.constants.R_earth,
+            depth_resolved=True,
+        )
+
+        # Per-interface advecting flow: full-level u/v (nlev) vertically averaged
+        # to the nlev-1 interior interfaces (0.5*(u[...,k]+u[...,k+1])).  Face
+        # masks (2-D) are applied so transport sees no flow through walls; the
+        # 3-D transport broadcasts them over the level axis internally.
+        u_mask = state.u_mask.data
+        v_mask = state.v_mask.data
+        U_z = 0.5 * (state.u.data[..., :-1] + state.u.data[..., 1:])
+        V_z = 0.5 * (state.v.data[..., :-1] + state.v.data[..., 1:])
+        U_z = U_z * u_mask[:, :, jnp.newaxis]
+        V_z = V_z * v_mask[:, :, jnp.newaxis]
+
+        # (1) Per-interface horizontal transport (explicit).
+        E = E + dt * eke_3d_horizontal_transport(
+            E, U_z, V_z, self.grid, eke_cfg, lm, u_mask, v_mask,
+        )
+
+        # (2) Implicit vertical EKE diffusion on the W-grid column.
+        # W-cell thicknesses dz_w (= Veros dzw) and the interior-W-interface
+        # viscosity A_v, from the jacobian-scaled cell metrics + the physics A_v.
+        J_cell = compute_ocean_jacobian(
+            state.eta.data, state.H_bathy.data, self.z_coord,
+        )
+        # dz metrics in the field dtype so the implicit solve stays consistent
+        # (dz_ref is f64 while the eddy-energy field runs at the storage policy's
+        # dtype — cast to E's dtype to avoid a f64->f32 scatter cast).
+        dz_cell = (self.z_coord.dz_ref * J_cell[..., jnp.newaxis]).astype(dtype)
+        dz_w = build_dz_half(dz_cell)                              # (..., nlev-1) = M
+        dz_half_w = build_dz_half(dz_w)                            # (..., nlev-2) = M-1
+        # A_v at the M-1 interior W-interfaces for the EKE vertical diffusion --
+        # handles A_v_phys cell-centred (nlev) / at T-interfaces (nlev-1) / None.
+        A_v_w = _eke_av_at_interior_wfaces(
+            A_v_phys, jnp.asarray(self.config.A_v, dtype=dtype), nlev,
+            dz_cell.shape[:-1],
+        )
+        E = eke_3d_vertical_diffusion(E, A_v_w, dz_w, dz_half_w, dt, eke_cfg)
+
+        # (3) Semi-implicit local source/sink (positivity-preserving, no clip).
+        # EKE-source augmentation (Veros apples-to-apples; both default off ⇒ the
+        # production is bit-identical to the parameterized kappa_GM·sigma² closure):
+        #   - gm_source_mode="realized": REPLACE kappa_GM·sigma² with the realized
+        #     GM-skew buoyancy conversion -(g/ρ₀)∇ρ·F_skew (Veros -P_diss_skew),
+        #     built from the SAME per-triad W-face slopes the GM tracer flux uses
+        #     and the SAME 3-D kappa_GM(z) override (kappa_gm_override).
+        #   - source_kdiss_h: ADD the mean-KE removed by the harmonic lateral
+        #     viscosity (Veros K_diss_h), from the A_h∇²(u,v) tendency.
+        # Both are ≥ 0 and enter the EXPLICIT production, so the semi-implicit
+        # update stays positivity-preserving (numerator ≥ 0, denominator ≥ 1).
+        production_override = None
+        if eke_cfg.gm_source_mode == "realized":
+            production_override = compute_realized_gm_skew_conversion(
+                T_mid, S_mid, state_new.eta.data, state_new.H_bathy.data,
+                self.grid, self.z_coord, gm_cfg, kappa_gm_override,
+                eos=self.config.eos, eos_linear=self.config.eos_linear,
+                mask=lm,
+                rho_0=self.config.constants.rho_0, g=self.config.constants.g,
+            )
+        extra_source = None
+        if eke_cfg.source_kdiss_h and Ah_visc_u is not None:
+            # Flux form (kdiss_h_flux_form=True): pass the pre-computed positive-
+            # definite cell-centre dissipation density (Ah_kediss_cell) so the
+            # source builder maps it to the W-grid with NO clamp.  Dynamical form
+            # (Ah_kediss_cell is None): the clamped -u·A_h∇²u path.
+            _kdiss_cell = (Ah_kediss_cell.data if Ah_kediss_cell is not None
+                           else None)
+            extra_source = harmonic_lateral_kediss_eke_source(
+                Ah_visc_u.data, Ah_visc_v.data, state.u.data, state.v.data,
+                self.grid, lm, kdiss_h_cell=_kdiss_cell,
+            )
+        E = eke_apply_local_source(
+            E, sigma3, L3, eke_cfg, dt,
+            production_override=production_override, extra_source=extra_source,
+        )
+
+        # Floor at e_min on wet columns, zero on land (kappa_gm_override is
+        # already wet-masked by compute_eke_kappa_gm).  Cast back to the field
+        # dtype: the source/sink promotes through the f64 sigma(z)/L(z), but the
+        # stored eke must keep the storage-policy dtype so the scan-carry pytree
+        # is dtype-stable (the step's final cast_pytree would also enforce this,
+        # but keep this code path self-consistently typed).
+        lm3 = lm[:, :, jnp.newaxis]
+        # The source/sink promotes E through the f64 sigma(z)/L(z); cast the final
+        # field back to the storage dtype EXPLICITLY (jax.lax.convert_element_type,
+        # not .astype) so the scan-carry pytree stays dtype-stable WITHOUT JAX's
+        # implicit-downcast FutureWarning (which a future JAX makes an error).
+        E_new = jax.lax.convert_element_type(
+            jnp.where(lm3 > 0.5, jnp.maximum(E, eke_cfg.e_min), 0.0), dtype,
+        )
+        eke_new = Field(data=E_new, name="eke",
+                        dims=("lat", "lon", "level"), units="m^2/s^2")
+        return eke_new, kappa_gm_override
+
     def _apply_implicit_vertical_mixing(
         self,
         state: LatLonCGridOceanState,
@@ -1343,6 +1911,10 @@ class LatLonCGridOceanModel:
         surface_forcing,
         K_v_phys=None,
         A_v_phys=None,
+        K33_iso=None,
+        *,
+        dt_mom=None,
+        surface_tracer_forcing=None,
     ) -> LatLonCGridOceanState:
         """Backward-Euler vertical diffusion for ``u, v, T, S``.
 
@@ -1358,8 +1930,27 @@ class LatLonCGridOceanModel:
         physics that doesn't produce K profiles), falls back to
         ``compute_vertical_K_profiles`` for a fresh computation.
 
+        ``dt`` is the TRACER timestep (implicit vertical DIFFUSION of T, S);
+        ``dt_mom`` (default ``dt``) is the MOMENTUM timestep (implicit vertical
+        FRICTION of u, v).  They differ only under asynchronous
+        ``dt_mom_ratio != 1.0`` stepping — Veros applies implicit friction on
+        dt_mom (friction.py) and implicit diffusion on dt_tracer
+        (thermodynamics.py).  ``dt_mom is None`` ⇒ ``dt`` ⇒ bit-identical.
+
+        ``surface_tracer_forcing`` (a :class:`SurfaceTracerForcing` or ``None``)
+        is the WITHHELD surface TRACER forcing rate (restoring + q_net +
+        shortwave), populated only under ``config.surface_forcing_implicit``.
+        When present its ``dt·rate`` (masked) is added to the T/S solve INPUT
+        BEFORE the tridiagonal solve, realising the backward-Euler RHS-source
+        identity ``(I − dt·L)·X_new = X_old + dt·S_surf`` at weight 1.0 — Veros's
+        implicit surface-forcing placement (``core/thermodynamics.py``).  ``dt``
+        here is dt_tracer (the tracer timestep), matching Veros.  ``None`` ⇒
+        no surface source ⇒ bit-identical.
+
         Called only when ``config.implicit_vertical_mixing == True``.
         """
+        if dt_mom is None:
+            dt_mom = dt
         from legoesm.ocean.physics.vertical_mixing import (
             implicit_vertical_diffusion_ocean, build_dz_half,
             compute_vertical_K_profiles,
@@ -1397,10 +1988,19 @@ class LatLonCGridOceanModel:
                 u=state.u.replace(data=u_cell),
                 v=state.v.replace(data=v_cell),
             )
+            # Use the model's own EOS for the vmix density / static-stability
+            # N² so the TKE convection trigger (n2_mode="adiabatic") is
+            # consistent with the dynamical core. None for Wright leaves the
+            # legacy behaviour bit-identical.
+            from legoesm.ocean.eos import make_eos_fn as _make_eos_fn
+            _vmix_eos_fn = _make_eos_fn(
+                eos=self.config.eos, eos_linear=self.config.eos_linear,
+            )
             K_v_cell, A_v_cell = compute_vertical_K_profiles(
                 cc_state, self.z_coord, surface_forcing, physics_config,
                 A_v_background=float(self.config.A_v),
                 K_v_background=float(self.config.K_v),
+                eos_fn=_vmix_eos_fn,
             )
 
         # dz at cell centers (jacobian-corrected so the eta-stretched
@@ -1416,11 +2016,29 @@ class LatLonCGridOceanModel:
 
         # ---- Tracers (cell-centered: K aligns with T, S directly) ----
         K_v_cell = K_v_cell.astype(state.T.data.dtype)
+        if K33_iso is not None:
+            # Fold the vertical isoneutral diffusivity K_33 into the implicit
+            # tracer solve (Veros core/isoneutral/diffusion.py:154). K_33 ≥ 0 at
+            # interfaces, same (n_lat, n_lon, nlev-1) shape as K_v_cell.  TRACERS
+            # ONLY — momentum uses A_v_cell, which is untouched.
+            K_v_cell = K_v_cell + K33_iso.astype(state.T.data.dtype)
+        # IMPLICIT surface TRACER forcing (Veros placement): add dt·S_surf
+        # (masked) to the solve INPUT so the backward-Euler tridiagonal solve
+        # realises ``(I − dt·L)·X_new = X_old + dt·S_surf`` at weight 1.0.  dt
+        # here is dt_tracer (the tracer timestep), matching Veros's
+        # ``dt_tracer·forc/dz[surface]`` RHS source.  No-op when None.
+        T_solve_in = state.T.data
+        S_solve_in = state.S.data
+        if surface_tracer_forcing is not None:
+            _dT_surf = surface_tracer_forcing.dT_dt.data.astype(state.T.data.dtype)
+            _dS_surf = surface_tracer_forcing.dS_dt.data.astype(state.S.data.dtype)
+            T_solve_in = state.T.data + dt * _dT_surf * mask_3d
+            S_solve_in = state.S.data + dt * _dS_surf * mask_3d
         T_new = implicit_vertical_diffusion_ocean(
-            state.T.data, K_v_cell, dz_cell, dz_half_cell, dt,
+            T_solve_in, K_v_cell, dz_cell, dz_half_cell, dt,
         )
         S_new = implicit_vertical_diffusion_ocean(
-            state.S.data, K_v_cell, dz_cell, dz_half_cell, dt,
+            S_solve_in, K_v_cell, dz_cell, dz_half_cell, dt,
         )
         T_new = jnp.where(mask_3d > 0.5, T_new, state.T.data)
         S_new = jnp.where(mask_3d > 0.5, S_new, state.S.data)
@@ -1440,10 +2058,10 @@ class LatLonCGridOceanModel:
         u_mask_3d = state.u_mask.data[..., jnp.newaxis]
         v_mask_3d = state.v_mask.data[..., jnp.newaxis]
         u_new = implicit_vertical_diffusion_ocean(
-            state.u.data, A_v_u, dz_u, dz_half_u, dt,
+            state.u.data, A_v_u, dz_u, dz_half_u, dt_mom,
         )
         v_new = implicit_vertical_diffusion_ocean(
-            state.v.data, A_v_v, dz_v, dz_half_v, dt,
+            state.v.data, A_v_v, dz_v, dz_half_v, dt_mom,
         )
         u_new = jnp.where(u_mask_3d > 0.5, u_new, state.u.data)
         v_new = jnp.where(v_mask_3d > 0.5, v_new, state.v.data)
@@ -1479,9 +2097,166 @@ class LatLonCGridOceanModel:
         -------
         LatLonCGridOceanState
         """
+        _oi = getattr(self.config, "outer_integrator", "forward_euler")
+        if _oi not in ("forward_euler", "ab2"):
+            raise ValueError(
+                "config.outer_integrator must be 'forward_euler' or 'ab2', "
+                f"got {_oi!r}")
+        if _oi == "ab2":
+            if self.config.tracer_time_integrator == "ab2":
+                raise ValueError(
+                    "outer_integrator='ab2' double-counts with "
+                    "tracer_time_integrator='ab2'; set the inner one to 'euler'.")
+            # The faithful AB2 path (``_ab2_step``) AB2-extrapolates ONLY the
+            # explicit tendency and applies implicit vertical mixing ONCE
+            # afterward (Veros core/thermodynamics.py + core/external/
+            # solve_stream.py), so it is unconditionally stable in the vertical
+            # and compatible with convective adjustment — no convection guard.
+            return self._ab2_step(
+                state, dt, freshwater=freshwater,
+                surface_forcing=surface_forcing, sponge=sponge)
         return self._step_impl(state, dt, freshwater=freshwater,
                                surface_forcing=surface_forcing,
                                sponge=sponge)
+
+    def _ab2_step(self, state: LatLonCGridOceanState, dt: float,
+                  freshwater=None, surface_forcing=None, sponge=None,
+                  ) -> LatLonCGridOceanState:
+        """Adams-Bashforth-2 outer integrator (Veros's faithful scheme).
+
+        Veros AB2-extrapolates only the EXPLICIT tendency and applies implicit
+        vertical mixing ONCE afterward (``core/thermodynamics.py`` tracers,
+        ``core/external/solve_stream.py`` momentum)::
+
+            X*       = X^n + (1.5+ε)·ΔX_expl^n − (0.5+ε)·ΔX_expl^{n-1}
+            X^{n+1}  = ImplicitVertMix(X*)
+
+        where ``ΔX_expl`` is the explicit-only forward-Euler increment
+        (advection, GM/Redi, lateral friction, Coriolis, the split-explicit /
+        rigid-lid barotropic solve, freshwater) — NOT including the implicit
+        vertical mixing.  This is the FAITHFUL refinement of the prior scheme,
+        which AB2-extrapolated the TOTAL increment (implicit mixing included)
+        and so was only conditionally stable in the vertical and had to reject
+        convective adjustment.  Applying implicit mixing once (it is a
+        backward-Euler solve, unconditionally stable) restores unconditional
+        vertical stability ⇒ compatible with convective adjustment.
+
+        The prior EXPLICIT increment ``ΔX_expl^{n-1}`` is carried on
+        ``{T,S,u,v}_incr_prev``; a missing carry bootstraps ``ΔX_expl^{n-1}=0``
+        (a 1.6× first step).  Tracers AB2 the full explicit increment; MOMENTUM
+        AB2s only the baroclinic deviation (thickness-weighted depth-mean
+        split), KEEPING the barotropic mode from the barotropic solve un-AB2'd
+        (the barotropic gravity wave is CFL-stiff and must not be extrapolated).
+        Every op is linear in the increments ⇒ differentiable.
+
+        CONSERVATION: like Veros (and like the prior AB2 scheme), this extrapolates
+        the tracer CONCENTRATION ``T``, so the area·thickness-weighted heat/salt
+        content ``Σ(T·h·area)`` is conserved EXACTLY only when the layer thickness is
+        fixed — under ``barotropic_solver="rigid_lid"`` (Veros's streamfunction rigid
+        lid; the faithful ACC config) or with ``use_conservation_fixer=True``. Under a
+        moving free surface (z*) the concentration extrapolation carries an O(Δη)
+        tracer-content drift (small: heat ~1e-7 over 200 closed-channel steps, salt at
+        round-off). The forward-Euler path conserves to machine zero regardless.
+
+        K-PROFILE FIDELITY: the implicit-once solve reuses the diffusivity profiles
+        returned by ``tendencies`` (from the pre-step state u^n) when the vmix scheme
+        surfaces them on ``tend.K_v``/``tend.A_v``; for schemes that don't (e.g. TKE),
+        ``_apply_implicit_vertical_mixing`` recomputes them from the state it acts on —
+        exactly as the forward-Euler path does (a 2nd-order difference, not a regression).
+        """
+        # Explicit-only forward-Euler step (skips implicit vertical mixing AND the
+        # conservation fixer) + the implicit-mixing diffusivity profiles from the
+        # tendencies (pre-step state u^n where the vmix scheme surfaces them; else
+        # None ⇒ recomputed in _apply_implicit_vertical_mixing, as the FE path).
+        state_expl, (K_v_phys, A_v_phys, k33_implicit,
+                     surface_tracer_forcing) = self._step_impl(
+            state, dt, freshwater=freshwater,
+            surface_forcing=surface_forcing, sponge=sponge,
+            _apply_implicit_vmix=False)
+        eps = self.config.ab2_epsilon
+        a_n, a_p = 1.5 + eps, 0.5 + eps
+        mask3 = state.land_mask.data[..., jnp.newaxis]
+        u_mask3 = state.u_mask.data[..., jnp.newaxis]
+        v_mask3 = state.v_mask.data[..., jnp.newaxis]
+
+        # --- Tracers: AB2 the full EXPLICIT increment ---
+        dT_n = state_expl.T.data - state.T.data
+        dS_n = state_expl.S.data - state.S.data
+        dT_p = (state.T_incr_prev.data if state.T_incr_prev is not None
+                else jnp.zeros_like(dT_n))
+        dS_p = (state.S_incr_prev.data if state.S_incr_prev is not None
+                else jnp.zeros_like(dS_n))
+        T_ab2 = (state.T.data + a_n * dT_n - a_p * dT_p) * mask3
+        S_ab2 = (state.S.data + a_n * dS_n - a_p * dS_p) * mask3
+
+        # --- Momentum: AB2 the BAROCLINIC increment; keep the explicit
+        #     barotropic mode (CFL-stiff, set by the barotropic solver) ---
+        h_k = compute_layer_thickness(
+            state.eta.data, state.H_bathy.data, self.z_coord,
+            min_water_column_m=self.config.min_water_column_m)
+        h_u = min_cell_to_uface(h_k)
+        h_v = min_cell_to_vface(h_k, self.grid)
+
+        def _split(field, h_face):
+            bt = (jnp.sum(field * h_face, axis=-1, keepdims=True)
+                  / jnp.maximum(jnp.sum(h_face, axis=-1, keepdims=True), 1.0e-10))
+            return field - bt, bt          # (baroclinic deviation, barotropic mean)
+
+        # NB (adversarial-review #4, low severity): the carried du_p was depth-mean-
+        # zero under the PREVIOUS step's h_u; applying it at the current h_u injects a
+        # spurious barotropic component ≈ a_p·<du_p>_z(current h). Negligible for ACC
+        # (O(1 m) eta → O(1e-4 m/s)), and exactly zero under rigid-lid (fixed h);
+        # fix for large free-surface motion by re-splitting du_p under the current h_u.
+        ubc_n, _ = _split(state.u.data, h_u)
+        ubc_e, bt_u_e = _split(state_expl.u.data, h_u)
+        vbc_n, _ = _split(state.v.data, h_v)
+        vbc_e, bt_v_e = _split(state_expl.v.data, h_v)
+        du_n = ubc_e - ubc_n          # baroclinic explicit increment
+        dv_n = vbc_e - vbc_n
+        du_p = (state.u_incr_prev.data if state.u_incr_prev is not None
+                else jnp.zeros_like(du_n))
+        dv_p = (state.v_incr_prev.data if state.v_incr_prev is not None
+                else jnp.zeros_like(dv_n))
+        u_ab2 = ((ubc_n + a_n * du_n - a_p * du_p) + bt_u_e) * u_mask3
+        v_ab2 = ((vbc_n + a_n * dv_n - a_p * dv_p) + bt_v_e) * v_mask3
+        u_ab2 = u_ab2.at[:, -1].set(u_ab2[:, 0])   # periodic-lon wrap
+
+        state_ab2 = state_expl._replace(
+            T=state_expl.T.replace(data=T_ab2),
+            S=state_expl.S.replace(data=S_ab2),
+            u=state_expl.u.replace(data=u_ab2),
+            v=state_expl.v.replace(data=v_ab2),
+        )
+
+        # --- Implicit vertical mixing applied ONCE to the AB2 state (Veros
+        #     thermodynamics.py vertmix / solve_stream.py du_mix), with the
+        #     diffusivity profiles from the tendencies (see docstring) ---
+        if self.config.implicit_vertical_mixing:
+            state_ab2 = self._apply_implicit_vertical_mixing(
+                state_ab2, dt, surface_forcing,
+                K_v_phys=K_v_phys, A_v_phys=A_v_phys, K33_iso=k33_implicit,
+                dt_mom=dt / self.config.dt_mom_ratio,
+                surface_tracer_forcing=surface_tracer_forcing,
+            )
+
+        # --- Conservation fixer once, on the final state ---
+        if self.config.use_conservation_fixer:
+            state_ab2 = ocean_conservation_fixer(
+                state_ab2, state, self.grid, self.z_coord, self.config,
+            )
+
+        # Carry the EXPLICIT increments for the next AB2 step (NOT the
+        # post-implicit-mixing increment — that is the prior scheme's bug).
+        return state_ab2._replace(
+            T_incr_prev=Field(data=dT_n * mask3, name="T_incr_prev",
+                              dims=state.T.dims, units=state.T.units),
+            S_incr_prev=Field(data=dS_n * mask3, name="S_incr_prev",
+                              dims=state.S.dims, units=state.S.units),
+            u_incr_prev=Field(data=du_n * u_mask3, name="u_incr_prev",
+                              dims=state.u.dims, units=state.u.units),
+            v_incr_prev=Field(data=dv_n * v_mask3, name="v_incr_prev",
+                              dims=state.v.dims, units=state.v.units),
+        )
 
     def step_checked(
         self,
@@ -1682,6 +2457,68 @@ class LatLonCGridOceanModel:
                     data=_zero, name="S_flux_div_prev",
                     dims=_dims_fd, units="m/s"),
             )
+
+        # AB2 outer integrator: seed the prior-increment carry to ZERO so the scan
+        # keeps a constant pytree (None -> Field would crash lax.scan). The first
+        # step then uses ΔX^{n-1}=0 (a 1.6× forward-Euler seed).
+        if (getattr(self.config, "outer_integrator", "forward_euler") == "ab2"
+                and state.T_incr_prev is None):
+            from legoesm.core.field import Field
+            _z3 = jnp.zeros_like(state.T.data)
+            _zu = jnp.zeros_like(state.u.data)
+            _zv = jnp.zeros_like(state.v.data)
+            state = state._replace(
+                T_incr_prev=Field(data=_z3, name="T_incr_prev",
+                                  dims=state.T.dims, units=state.T.units),
+                S_incr_prev=Field(data=jnp.zeros_like(state.S.data),
+                                  name="S_incr_prev",
+                                  dims=state.S.dims, units=state.S.units),
+                u_incr_prev=Field(data=_zu, name="u_incr_prev",
+                                  dims=state.u.dims, units=state.u.units),
+                v_incr_prev=Field(data=_zv, name="v_incr_prev",
+                                  dims=state.v.dims, units=state.v.units),
+            )
+
+        # Prognostic-EKE carry: when EKE is on but the eddy-energy field has not
+        # been seeded (state.eke is None), pre-seed it to the e_min floor so the
+        # scan keeps a constant pytree (the model step would otherwise turn
+        # eke None -> Field on the first iteration, which crashes lax.scan).  The
+        # shape is STATIC per config: 3-D (n_lat, n_lon, nlev-1) at the interior
+        # interfaces when eke_3d, else 2-D (n_lat, n_lon) — so the carried shape
+        # is fixed for the whole scan.
+        gm_redi = getattr(self.config, "gm_redi", None)
+        if (gm_redi is not None and gm_redi.eke is not None
+                and state.eke is None):
+            from legoesm.core.field import Field
+            lm = state.land_mask.data
+            e_min = gm_redi.eke.e_min
+            if gm_redi.eke.eke_3d:
+                nlev = state.T.data.shape[-1]
+                eke0 = jnp.where(
+                    lm[:, :, jnp.newaxis] > 0.5, e_min, 0.0,
+                ) * jnp.ones((1, 1, nlev - 1), dtype=lm.dtype)
+                eke_dims = ("lat", "lon", "level")
+            else:
+                eke0 = e_min * lm
+                eke_dims = ("lat", "lon")
+            state = state._replace(
+                eke=Field(data=eke0, name="eke", dims=eke_dims,
+                          units="m^2/s^2"))
+
+        # Rigid-lid: pre-build the static island/depth data (host-side
+        # flood-fill) so the scan captures it as a compile-time constant, and
+        # seed the streamfunction carry (ψ, dψ, dψ_prev, dpsin, dpsin_prev) to
+        # zero so the carry pytree is constant across iterations (None -> array
+        # would crash lax.scan).  Cold-start ψ=0 (rest); the AB2 history is 0.
+        if self.config.barotropic_solver == "rigid_lid":
+            rl = self._ensure_rigid_lid_data(state)
+            if state.psi is None:
+                _dt_rl = state.u.data.dtype
+                _zV = jnp.zeros((self.grid.n_lat + 1, self.grid.n_lon + 1),
+                                dtype=_dt_rl)
+                _zI = jnp.zeros((rl.nisle,), dtype=_dt_rl)
+                state = state._replace(
+                    psi=_zV, dpsi=_zV, dpsi_prev=_zV, dpsin=_zI, dpsin_prev=_zI)
 
         def scan_fn(state, _):
             new_state = self.step(state, dt)

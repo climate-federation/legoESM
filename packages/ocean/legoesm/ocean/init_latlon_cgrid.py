@@ -110,10 +110,11 @@ def rest_state_latlon_cgrid_ocean(
     land_lat_threshold: float = 80.0,
     land_mask_override: jnp.ndarray | None = None,
     H_bathy_override: jnp.ndarray | None = None,
+    stratification: str = "exponential",
 ) -> LatLonCGridOceanState:
     """Create a rest-state initial condition on a C-grid lat-lon grid.
 
-    Temperature: exponential profile.
+    Temperature: exponential or linear profile (see ``stratification``).
     Salinity: uniform.
     Velocity: zero.
     Eta: zero.
@@ -142,6 +143,18 @@ def rest_state_latlon_cgrid_ocean(
         When supplied without *land_mask_override*, the land mask is
         derived from ``H_bathy_override > 0``.  When neither is given,
         a flat-bottom idealized bathymetry is constructed.
+    stratification : str, default ``"exponential"``
+        Initial vertical temperature profile:
+
+        - ``"exponential"`` (default, BIT-IDENTICAL legacy):
+          ``T(z) = T_deep + (T_water_init_C - T_deep) * exp(z / scale_depth)``.
+        - ``"linear"``: ``T(z) = T_deep + (T_water_init_C - T_deep) *
+          (1 - z_bottom_frac)`` where ``z_bottom_frac = z / z_bottom``,
+          i.e. T varies linearly from ``T_water_init_C`` at the surface to
+          ``T_deep`` at the deepest interface ``z = z_bottom``. This matches
+          Veros ACC's ``T = (1 - z / z_bottom) * 15`` initial condition
+          (``veros/setups/acc/acc.py:117``; ``T_deep=0`` there), which the
+          exponential profile leaves ~1 °C too warm at the deepest cell.
 
     Returns
     -------
@@ -169,10 +182,23 @@ def rest_state_latlon_cgrid_ocean(
             grid, H_max, land_lat_threshold,
         )
 
-    # Exponential T stratification
-    T_profile = T_deep + (T_water_init_C - T_deep) * jnp.exp(
-        z_coord.z_full_ref / _SCALE_DEPTH,
-    )
+    # Vertical T stratification: exponential (default, legacy) or linear.
+    if stratification == "exponential":
+        T_profile = T_deep + (T_water_init_C - T_deep) * jnp.exp(
+            z_coord.z_full_ref / _SCALE_DEPTH,
+        )
+    elif stratification == "linear":
+        # T linear from T_water_init_C at the surface (z=0) to T_deep at the
+        # deepest interface z_bottom (= z_half_ref[-1] = -H_max). Veros ACC:
+        # T = (1 - z/z_bottom)*15 (T_deep=0).
+        z_bottom = z_coord.z_half_ref[-1]
+        frac = z_coord.z_full_ref / z_bottom          # 0 (surface) -> ~1 (bottom)
+        T_profile = T_water_init_C + (T_deep - T_water_init_C) * frac
+    else:
+        raise ValueError(
+            f"Unknown stratification={stratification!r}; expected "
+            f"'exponential' or 'linear'."
+        )
     dtype = get_policy().storage
     T_3d = jnp.broadcast_to(
         T_profile[jnp.newaxis, jnp.newaxis, :], (n_lat, n_lon, nlev),

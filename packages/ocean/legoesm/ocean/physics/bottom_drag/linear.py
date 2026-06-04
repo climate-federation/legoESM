@@ -11,7 +11,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 
 from legoesm.ocean.physics.bottom_drag.config import LinearDragConfig
-from legoesm.ocean.physics.bottom_drag.output import BottomDragOutput
+from legoesm.ocean.physics.bottom_drag.output import bottom_level_drag_output
 from legoesm.ocean.vertical import OceanZStarCoordinate
 
 _EPS = float(jnp.finfo(jnp.float32).eps)
@@ -50,13 +50,7 @@ def linear_bottom_drag(
     dz_bottom = z_coord.dz_ref[-1] * jacobian  # (...)
     inv_dz = 1.0 / jnp.maximum(dz_bottom, _EPS)
 
-    # Pad with zero on top instead of allocating ``zeros_like`` and
-    # scattering only the bottom row.  Single Pad HLO op vs alloc +
-    # dynamic_update_slice.
-    nlev = u.shape[-1]
     drag_u = -cfg.r * u[..., -1] * inv_dz
     drag_v = -cfg.r * v[..., -1] * inv_dz
-    pad_axes = ((0, 0),) * (drag_u.ndim)
-    du_dt = jnp.pad(drag_u[..., None], (*pad_axes, (nlev - 1, 0)))
-    dv_dt = jnp.pad(drag_v[..., None], (*pad_axes, (nlev - 1, 0)))
-    return BottomDragOutput(du_dt=du_dt, dv_dt=dv_dt)
+    # Place the bottom-level drag at the deepest level, zeros above (shared).
+    return bottom_level_drag_output(drag_u, drag_v, u.shape[-1])

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+from legoesm.ocean.physics.lateral_mixing.eke import EKEConfig
+
 
 class HarmonicConfig(NamedTuple):
     """Laplacian (harmonic) lateral mixing.
@@ -101,9 +103,37 @@ class GMRediConfig(NamedTuple):
     """
     kappa_GM: float = 1e3       # GM bolus transport coefficient [m^2/s]
     kappa_Redi: float = 1e3     # Redi isopycnal diffusivity [m^2/s]
-    S_max: float = 0.01         # Maximum isopycnal slope for tapering
+    S_max: float = 0.01         # Slope at which DM95 taper crosses 0.5.
+                                # Equivalent to Veros's ``iso_slopec``.
+    taper_width_frac: float = 0.1
+    # ^ Tanh transition half-width as a fraction of ``S_max``. Default
+    # 0.1 matches legoESM's pre-2026 hardcoded behavior. Veros's
+    # ``iso_dslope`` parameter maps via
+    # ``taper_width_frac = iso_dslope / iso_slopec``. For DINO's
+    # ``iso_slopec=0.01, iso_dslope=0.005`` this is ``0.5``.
     visbeck: VisbeckConfig = VisbeckConfig()
     slope_scheme: str = "triads"     # "triads" (default) or "centered"
+    slope_density: str = "in_situ"   # "in_situ" (default) or "neutral"
+    # ^ Density gradient used to build the isoneutral SLOPES (NOT the tracer
+    # gradients, which are always the raw T/S gradients).
+    # - "in_situ" (default): slope = -∇_h ρ / ∂_z ρ from the IN-SITU density ρ.
+    #   ∂_z ρ then carries the adiabatic compressibility term ∂ρ/∂p·∂p/∂z
+    #   (≈ g·ρ₀/c_s² ≈ 4.5e-3 kg/m³/m), making |∂_z ρ| ~4× too steep, S ~4× too
+    #   small, S² ~16×, and the vertical isoneutral diagonal K_33 ∝ S² 10–25×
+    #   too small (≫ near the surface). BIT-IDENTICAL to the pre-2026 scheme.
+    # - "neutral": build the slope-input density gradients from the LOCALLY-
+    #   REFERENCED NEUTRAL form ∂ρ/∂T·∇T + ∂ρ/∂S·∇S with ∂ρ/∂T, ∂ρ/∂S the EOS
+    #   partial derivatives at the LOCAL cell pressure (Veros get_drhodT /
+    #   get_drhodS at abs(zt); veros/core/isoneutral/isoneutral.py:40-41). This
+    #   removes the compressibility bias so the slope, S², and K_33 track Veros.
+    #   The stable-strat floor min(0,∂_zρ)-eps is applied to the NEUTRAL ∂_zρ.
+    #   ACC recipe opts in. Supported by both slope_scheme="triads" and
+    #   "centered" on the lat-lon C-grid.
+    #   FOLLOW-UP (documented, NOT built here): Veros sums BOTH kr triad levels
+    #   for drodzb and carries the exact metric factors dxu/dxt/dyu/dyt/cost in
+    #   the K_11/K_22/K_33 assembly; legoESM uses the upper-cell drdT for ∂_zρ
+    #   and the uniform-metric 0.25·Σ. Inert on the uniform ACC channel; a true
+    #   tripolar/variable-metric run would want the kr-sum + metric factors.
     surface_complement: bool = True  # Add horizontal diffusion (kappa_Redi)
                                       # in the surface layer where DM95 tapers
                                       # Redi to zero.  Ferrari et al. (2008).
@@ -112,6 +142,33 @@ class GMRediConfig(NamedTuple):
                                       # KPP boundary-layer depth when available).
                                       # Only active for slope_scheme="centered".
     surface_complement_depth: float = 100.0  # Depth [m] of the surface layer
+    # --- Veros-faithful isoneutral options (oracle-matching; default off) ---
+    implicit_K33: bool = False
+    # ^ When True, the vertical isoneutral diagonal K_33 = kappa_Redi·S² (the
+    # "enhanced vertical mixing ∝ S²" noted above) is REMOVED from the explicit
+    # F_z and folded into the IMPLICIT vertical-diffusion tridiagonal solve
+    # (backward-Euler), matching Veros (core/isoneutral/diffusion.py:
+    # delta = dt/dzw·K_33). The explicit F_z then carries ONLY the off-diagonal
+    # skew. Stiff-stable; required to reproduce Veros's dtemp_iso (which folds the
+    # implicit K_33 increment into the diagnosed isoneutral tendency). Supported
+    # only by slope_scheme="triads" on the lat-lon C-grid model.
+    K_iso_steep: float = 0.0
+    # ^ Steep-slope floor on the HORIZONTAL isoneutral diffusivity: the effective
+    # along-isopycnal diffusivity becomes max(K_iso_steep, kappa·taper) (Veros
+    # K_11/K_22, isoneutral.py:128/165; NOT applied to K_33). Default 0 = no floor.
+    # NB legoESM clips the slope to S_max BEFORE the DM95 taper, so the taper
+    # bottoms at 0.5 (its value at S_max) instead of →0; the floor therefore only
+    # bites for kappa < 2·K_iso_steep. At Veros ACC (kappa≈1000, K_iso_steep=500)
+    # the clipped-taper diagonal already equals K_iso_steep at steep slopes, so the
+    # floor is correct but INERT for ACC — it matches Veros either way. (A fully
+    # Veros-faithful steep-slope taper would need the UNCLIPPED slope; that is the
+    # deeper slope-stencil difference, deferred.)
+    # Prognostic EKE (Eden-Greatbatch 2008): when not None, kappa_GM becomes
+    # prognostic (c_k·L·√E) from the evolving eddy-energy field E, instead of the
+    # constant ``kappa_GM`` / Visbeck diagnostic. Selection is presence-based
+    # (None = off). The Rossby-radius length uses the ``visbeck`` length params.
+    # Veros ACC runs with EKE on (enable_eke=True).
+    eke: EKEConfig | None = None
 
 
 class LateralMixingConfig(NamedTuple):
