@@ -90,6 +90,13 @@ Set any sub-config's `scheme="none"` to drop that process, and
 `shortwave_penetration=None` to drop solar-penetration heating. With every
 process off, the tendency is identically zero.
 
+**Tidal mixing** rides on `VerticalMixingConfig.tidal` but is *not* part of this
+composition: it is a separate caller-applied additive step (precompute
+`K_tidal` with `vertical_mixing.tidal.compute_tidal_diffusivity`, apply with
+`ocean.coupler.tidal_mixing_apply.apply_tidal_mixing_step`). To keep the
+contract honest, `make_ocean_physics` **raises** if `tidal.enabled=True` rather
+than silently ignoring it.
+
 ## Land
 
 The land surface is a single-column model, so its composability is

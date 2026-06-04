@@ -46,6 +46,23 @@ def make_vertical_mixing_physics(
     """
     scheme = config.scheme
 
+    # Tidal mixing rides on VerticalMixingConfig but is NOT applied by this
+    # factory (nor by make_ocean_physics) — it is a separate caller-applied
+    # additive step: precompute K_tidal via
+    # vertical_mixing.tidal.compute_tidal_diffusivity and apply it with
+    # ocean.coupler.tidal_mixing_apply.apply_tidal_mixing_step. Reject
+    # enabled=True here so it cannot SILENTLY no-op inside the physics
+    # composition (per the no-silent-default dispatch rule).
+    if config.tidal.enabled:
+        raise NotImplementedError(
+            "VerticalMixingConfig.tidal.enabled=True is not consumed by "
+            "make_vertical_mixing_physics / make_ocean_physics. Tidal mixing is "
+            "applied as a separate additive step via "
+            "ocean.coupler.tidal_mixing_apply.apply_tidal_mixing_step (with a "
+            "K_tidal field from vertical_mixing.tidal.compute_tidal_diffusivity); "
+            "enable it there, not in the physics-composition config."
+        )
+
     if scheme == "none":
         return make_none_physics_fn()
     elif scheme == "constant":

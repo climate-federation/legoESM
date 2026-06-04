@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.ocean.vertical import create_ocean_z_star
@@ -27,6 +28,7 @@ from legoesm.ocean.physics.lateral_mixing.config import LateralMixingConfig
 from legoesm.ocean.physics.surface_forcing.config import SurfaceForcingConfig
 from legoesm.ocean.physics.convection.config import OceanConvectionConfig
 from legoesm.ocean.physics.shortwave_penetration import ShortwavePenetrationConfig
+from legoesm.ocean.physics.vertical_mixing.tidal import TidalMixingConfig
 
 _N = 4
 _NLEV = 12
@@ -133,6 +135,25 @@ def test_shortwave_only_heats_temperature_only():
     assert float(jnp.max(jnp.abs(t.dT_dt.data))) > 0.0, "SW penetration did not heat"
     for fld in ("du_dt", "dv_dt", "dS_dt"):
         assert jnp.all(getattr(t, fld).data == 0.0), f"SW penetration touched {fld}"
+
+
+def test_tidal_enabled_rejected_not_silently_ignored():
+    """Tidal mixing rides on VerticalMixingConfig but is a SEPARATE caller-applied
+    additive step (apply_tidal_mixing_step), not part of the make_ocean_physics
+    composition. Enabling it on the composition config must RAISE, not silently
+    no-op."""
+    cfg = OceanPhysicsConfig(
+        vertical_mixing=VerticalMixingConfig(
+            scheme="constant", tidal=TidalMixingConfig(enabled=True),
+        ),
+        lateral_mixing=LateralMixingConfig(scheme="none"),
+        surface_forcing=SurfaceForcingConfig(scheme="none"),
+        bottom_drag=OceanPhysicsConfig().bottom_drag,
+        convection=OceanConvectionConfig(scheme="none"),
+        shortwave_penetration=None,
+    )
+    with pytest.raises(NotImplementedError, match="tidal"):
+        make_ocean_physics(cfg)
 
 
 def test_disabling_removes_exactly_that_contribution():

@@ -79,5 +79,8 @@ class VerticalMixingConfig(NamedTuple):
     # and adds it on top of the diffusivity field from ``scheme``
     # before applying the tracer mixing step.  Default off
     # (``enabled=False``) preserves bit-exact regression on legacy
-    # configs.
+    # configs.  NOTE: ``make_vertical_mixing_physics`` / ``make_ocean_physics``
+    # do NOT apply tidal mixing and RAISE if ``enabled=True`` — apply it via
+    # ``ocean.coupler.tidal_mixing_apply.apply_tidal_mixing_step`` so it cannot
+    # silently no-op inside the physics composition.
     tidal: TidalMixingConfig = TidalMixingConfig()
