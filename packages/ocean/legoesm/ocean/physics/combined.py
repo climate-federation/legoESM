@@ -73,6 +73,20 @@ def make_ocean_physics(
     -------
     Callable : physics_fn(state, grid, z_coord, surface_forcing=None) -> OceanTendencies
     """
+    # Tidal mixing rides on VerticalMixingConfig but is a SEPARATE caller-applied
+    # additive step (ocean.coupler.tidal_mixing_apply.apply_tidal_mixing_step),
+    # not part of this composition. Reject it here — before the scheme dispatch —
+    # so it cannot silently no-op even when vertical_mixing.scheme == "none".
+    if config.vertical_mixing.tidal.enabled:
+        raise NotImplementedError(
+            "VerticalMixingConfig.tidal.enabled=True is not consumed by "
+            "make_ocean_physics. Tidal mixing is applied as a separate additive "
+            "step via ocean.coupler.tidal_mixing_apply.apply_tidal_mixing_step "
+            "(with a K_tidal field from "
+            "vertical_mixing.tidal.compute_tidal_diffusivity); enable it there, "
+            "not in the physics-composition config."
+        )
+
     fns = []
 
     if config.vertical_mixing.scheme != "none":

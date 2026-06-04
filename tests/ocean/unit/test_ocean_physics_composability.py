@@ -137,14 +137,16 @@ def test_shortwave_only_heats_temperature_only():
         assert jnp.all(getattr(t, fld).data == 0.0), f"SW penetration touched {fld}"
 
 
-def test_tidal_enabled_rejected_not_silently_ignored():
+@pytest.mark.parametrize("vmix_scheme", ["constant", "none"])
+def test_tidal_enabled_rejected_not_silently_ignored(vmix_scheme):
     """Tidal mixing rides on VerticalMixingConfig but is a SEPARATE caller-applied
     additive step (apply_tidal_mixing_step), not part of the make_ocean_physics
     composition. Enabling it on the composition config must RAISE, not silently
-    no-op."""
+    no-op — including when vertical_mixing.scheme == 'none' (which bypasses
+    make_vertical_mixing_physics, so make_ocean_physics guards it directly)."""
     cfg = OceanPhysicsConfig(
         vertical_mixing=VerticalMixingConfig(
-            scheme="constant", tidal=TidalMixingConfig(enabled=True),
+            scheme=vmix_scheme, tidal=TidalMixingConfig(enabled=True),
         ),
         lateral_mixing=LateralMixingConfig(scheme="none"),
         surface_forcing=SurfaceForcingConfig(scheme="none"),
