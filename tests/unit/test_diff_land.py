@@ -137,7 +137,7 @@ class TestMultiLayerLandGrad:
 
 class TestSnowBudgetGrad:
 
-    def test_grad_wrt_T_surface(self):
+    def test_grad_wrt_T_sfc(self):
         from legoesm.land.snow_budget import update_snow
 
         ncol = 32

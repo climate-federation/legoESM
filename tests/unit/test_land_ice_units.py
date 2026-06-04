@@ -94,7 +94,7 @@ class Test13d_ConstantsCrossCheck:
 
 
 class Test13e_CouplingInterface:
-    def test_land_T_surface_matches(self):
+    def test_land_T_sfc_matches(self):
         state = LandState(
             T_soil=_field(285.0, "T_soil", "K"),
             W_bucket=_field(50.0, "W_bucket", "kg/m2"),
