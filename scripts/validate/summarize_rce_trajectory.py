@@ -441,7 +441,7 @@ def parse_log_max_w(out_dir: "Path | str") -> tuple[float, int]:
     """Return ``(max_w_seen, n_rows_parsed)`` from
     ``<out_dir>/log.txt``.
 
-    Driver schema at ``scripts/run_rce_mpi_long.py``: lines starting
+    Driver schema at ``scripts/run/run_rce_mpi_long.py``: lines starting
     with ``#`` are header / schema / config; data rows are
     comma-separated with the column order pinned in the
     ``# step,day,CWV_mean,CWV_max,MSE_mean,max|w|,max(qc),...``

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Visualize a DINO run produced by ``scripts/run_dino.py``.
+"""Visualize a DINO run produced by ``scripts/run/run_dino.py``.
 
 Reads the NPZ snapshots and ``run_metadata.json`` from a run directory
 and writes diagnostic PNGs alongside them. Handles both lat-lon

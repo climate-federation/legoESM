@@ -24,7 +24,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
-# Stage definitions match scripts/run_aimip_ablation_loop.sh.
+# Stage definitions match scripts/run/run_aimip_ablation_loop.sh.
 _STAGES: list[tuple[str, list[str]]] = [
     ("baseline",     ["baseline"]),
     ("gwd",          ["gwd_lindzen", "gwd_hines", "gwd_rayleigh"]),

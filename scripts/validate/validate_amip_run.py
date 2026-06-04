@@ -2,7 +2,7 @@
 """Validate physical realism and conservation in an AMIP run output.
 
 Reads ``timeseries.npz`` and ``results.txt`` from an AMIP run directory
-(produced by ``scripts/run_amip.py``) and checks:
+(produced by ``scripts/run/run_amip.py``) and checks:
 
 - Run completed without blowup / NaN
 - Global-mean temperature in physically reasonable band

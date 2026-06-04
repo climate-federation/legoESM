@@ -192,7 +192,7 @@ def main():
     # Final restart
     _save_restart(state, final_day, OUTPUT_DIR)
     print(f"\nReady for verification: re-run "
-          f"scripts/run_drake_momentum_budget_implicit.py with "
+          f"scripts/run/run_drake_momentum_budget_implicit.py with "
           f"RESTART_PATH = {OUTPUT_DIR}/restart_day{int(round(final_day)):06d}.npz")
 
 

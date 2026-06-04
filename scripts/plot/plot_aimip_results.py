@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Plot AIMIP intercomparison scorecard.
 
-Reads ``aimip_scorecard.json`` produced by ``scripts/run_aimip.py``
+Reads ``aimip_scorecard.json`` produced by ``scripts/run/run_aimip.py``
 and emits three PNGs alongside it:
 
 * ``aimip_loss_curves.png`` — per-variant training-loss curves.

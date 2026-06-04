@@ -13,7 +13,7 @@
 # One-time setup: create a pg2328-owned virtualenv that inherits the
 # jn2808 conda env's site-packages and adds mpi4jax (which jn2808's env
 # lacks).  This is the prerequisite for
-# ``scripts/run_latlon_mpi_halo_smoke.sbatch`` (the smoke sbatch has a
+# ``scripts/run/run_latlon_mpi_halo_smoke.sbatch`` (the smoke sbatch has a
 # pre-flight that refuses to run without mpi4jax in scope).
 #
 # After this completes, the new venv at ``~/.venvs/legoesm-mpi/bin/python``
