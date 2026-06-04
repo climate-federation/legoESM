@@ -212,7 +212,11 @@ def compute_isopycnal_slopes_mpas(
     S_n_clipped = jnp.clip(S_n_raw, -cfg.S_max, cfg.S_max)
 
     # DM95 scalar taper (single-component variant — see _gm_redi_common).
-    return dm95_taper_scalar(S_n_clipped, cfg.S_max)
+    # ``taper_width_frac`` maps to Veros's ``iso_dslope / iso_slopec``.
+    return dm95_taper_scalar(
+        S_n_clipped, cfg.S_max,
+        transition_width_frac=cfg.taper_width_frac,
+    )
 
 
 def _perot_inner_product_cell(

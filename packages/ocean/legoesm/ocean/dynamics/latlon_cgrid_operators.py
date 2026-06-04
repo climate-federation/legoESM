@@ -212,6 +212,49 @@ def pad_ns_vector_pair(
 
 
 
+def interp_wface_to_center(f: jnp.ndarray) -> jnp.ndarray:
+    """Interpolate an interface (w-face) field UP to full (cell-center) levels.
+
+    Inverse-direction vertical companion to ``interp_cell_to_uface`` /
+    ``interp_cell_to_vface`` (which move horizontally between cell centers
+    and u/v-faces).  Here the staggering is vertical: the input lives at the
+    ``nlev-1`` interior interfaces (w-faces, between adjacent cell centers),
+    the output at the ``nlev`` cell centers.
+
+    Convention matches the rest of this package: ``k=0`` is the surface,
+    ``k`` increases downward, and interface ``k`` (for ``k = 0 .. nlev-2``)
+    sits between full levels ``k`` and ``k+1``.  So interior center ``k``
+    (``1 <= k <= nlev-2``) is the average of the interfaces above (``k-1``)
+    and below (``k``); the top center (``k=0``) and bottom center
+    (``k=nlev-1``) have only one adjacent interface and take it one-sided::
+
+        center[0]      = iface[0]
+        center[k]      = 0.5 * (iface[k-1] + iface[k])   1 <= k <= nlev-2
+        center[nlev-1] = iface[nlev-2]
+
+    Used to lift a depth-resolved interface diffusivity (the 3-D EKE
+    ``kappa_GM`` / ``kappa_Redi``, which lives at the W-grid interfaces) to
+    cell centers before horizontal interpolation to u/v-faces in the GM/Redi
+    tracer-tendency operators — so the interface kappa is placed directly on
+    the w-faces for the vertical flux (no lossy round-trip) while the
+    horizontal flux still sees a center-then-face interpolation.
+
+    Pure slicing + concatenation: pytree-friendly, vmappable, differentiable.
+
+    Parameters
+    ----------
+    f : (n_lat, n_lon, nlev-1) at interior interfaces (w-faces).
+
+    Returns
+    -------
+    f_c : (n_lat, n_lon, nlev) at cell centers.
+    """
+    interior = 0.5 * (f[:, :, :-1] + f[:, :, 1:])  # (n_lat, n_lon, nlev-2)
+    top = f[:, :, 0:1]                              # (n_lat, n_lon, 1)
+    bottom = f[:, :, -1:]                           # (n_lat, n_lon, 1)
+    return jnp.concatenate([top, interior, bottom], axis=-1)
+
+
 def min_cell_to_uface(f: jnp.ndarray) -> jnp.ndarray:
     """Min-rule interpolation of a cell-center thickness to u-faces.
 
@@ -423,6 +466,611 @@ def coriolis_cgrid(
 
 
 
+def recover_velocity_from_streamfunction(
+    psi: jnp.ndarray,
+    inv_H_u: jnp.ndarray,
+    inv_H_v: jnp.ndarray,
+    grid: LatLonGrid,
+    *,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Barotropic velocity from a vertex streamfunction ``psi`` (rigid lid).
+
+    Under a rigid lid the depth-integrated transport is non-divergent and
+    carried by a streamfunction on vertex (corner) points:
+
+        (H·u_bt, H·v_bt) = ∇⊥ψ = (-∂ψ/∂y, +∂ψ/∂x)
+
+    so the barotropic velocity at the C-grid faces is
+
+        u_bt = -(1/H_u)·∂ψ/∂y      at u-faces (n_lat, n_lon+1)
+        v_bt = +(1/H_v)·∂ψ/∂x      at v-faces (n_lat+1, n_lon)
+
+    The tangential vertex-gradient stencils ``_gradient_curl_to_u`` /
+    ``_gradient_curl_to_v`` supply ∂ψ/∂y at u-faces and ∂ψ/∂x at v-faces
+    (periodic-wrap + pole/wall handling inherited).  Sign convention matches
+    ``diagnostics_streamfunction.barotropic_streamfunction`` and Veros
+    ``core/external/solve_stream.py`` (u = -1/H ∂ψ/∂y, v = +1/H ∂ψ/∂x).
+
+    Parameters
+    ----------
+    psi : (n_lat+1, n_lon+1) vertex streamfunction [m^3/s].
+    inv_H_u : (n_lat, n_lon+1) reciprocal column depth at u-faces [1/m].
+    inv_H_v : (n_lat+1, n_lon) reciprocal column depth at v-faces [1/m].
+    grid : LatLonGrid.
+    u_mask, v_mask : optional face masks (zero velocity on land faces).
+
+    Returns
+    -------
+    (u_bt, v_bt) : zonal velocity (n_lat, n_lon+1) and meridional (n_lat+1, n_lon).
+    """
+    dpsi_dy_u = _gradient_curl_to_u(psi, grid)   # (n_lat, n_lon+1) — ∂ψ/∂y at u-faces
+    dpsi_dx_v = _gradient_curl_to_v(psi, grid)   # (n_lat+1, n_lon) — ∂ψ/∂x at v-faces
+    u_bt = -inv_H_u * dpsi_dy_u
+    v_bt = inv_H_v * dpsi_dx_v
+    if u_mask is not None:
+        u_bt = u_bt * u_mask
+    if v_mask is not None:
+        v_bt = v_bt * v_mask
+    return u_bt, v_bt
+
+
+def streamfunction_vorticity_operator(
+    psi: jnp.ndarray,
+    inv_H_u: jnp.ndarray,
+    inv_H_v: jnp.ndarray,
+    grid: LatLonGrid,
+    *,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Weighted vertex Laplacian ``L(ψ) = ∇·((1/H)∇ψ)`` on the C-grid.
+
+    This is the rigid-lid elliptic operator (Veros ``poisson_matrix``): the
+    barotropic vorticity equation is ``L(∂ψ/∂t) = curl((1/H)∫F dz)``.
+
+    It is exactly the vertex curl of the recovered barotropic velocity::
+
+        L(ψ) = curl_vertex( u_bt(ψ), v_bt(ψ) )
+
+    because ``div_vertex(fx, fy) = curl_vertex(-fy, fx)`` and the velocity
+    recovery ``(-(1/H)∂ψ/∂y, +(1/H)∂ψ/∂x)`` is exactly ``(-fy, fx)`` with the
+    flux ``f = (1/H)∇ψ``.  Defining the operator as this composition (rather
+    than a separately-assembled matrix) guarantees the discrete operator and
+    the right-hand side ``curl_vertex((1/H)∫F dz)`` use *identical* stencils,
+    so there is no operator/RHS discretisation mismatch.  Self-adjoint and
+    negative semi-definite in the continuum; the discrete form reuses the
+    audited ``curl_vertex_cgrid`` + ``_gradient_curl_to_*`` stencils.
+
+    The land/Dirichlet handling (ψ = island constant on land, pinned for the
+    interior solve) lives in the solver (``rigid_lid_latlon_cgrid``), not here:
+    pass ``u_mask``/``v_mask`` to zero land-face velocities.
+
+    Returns
+    -------
+    L(ψ) : vertex field (n_lat+1, n_lon+1).
+    """
+    u_bt, v_bt = recover_velocity_from_streamfunction(
+        psi, inv_H_u, inv_H_v, grid, u_mask=u_mask, v_mask=v_mask)
+    return curl_vertex_cgrid(u_bt, v_bt, grid)
+
+
+def vertex_area_cgrid(grid: LatLonGrid) -> jnp.ndarray:
+    """Dual-cell area at vertex (corner) points, shape (n_lat+1, n_lon+1).
+
+    This is the area by which ``curl_vertex_cgrid`` divides the circulation
+    to obtain the vertex vorticity, i.e. ``A_vertex·ζ_vertex`` is the discrete
+    circulation around the vertex's dual cell.  Summing ``A_vertex·ζ_vertex``
+    over a set of vertices therefore gives (discrete Stokes) the circulation
+    around the boundary of the union of their dual cells — the basis for the
+    rigid-lid island line integrals (``rigid_lid_islands``).
+
+    Pole/wall rows (i = 0, n_lat) carry zero area (wall BC), matching the
+    pole handling in ``curl_vertex_cgrid``.
+    """
+    if is_tripolar(grid):
+        # Full 2D vertex areas; pole rows zero.
+        A_int = grid.area_q[1:-1]                       # (n_lat-1, n_lon+1)
+        n_lon1 = A_int.shape[1]
+        zero_row = jnp.zeros((1, n_lon1), dtype=A_int.dtype)
+        return jnp.concatenate([zero_row, A_int, zero_row], axis=0)
+    R = grid.radius
+    dlon = grid.dlon
+    lat = grid.lat
+    sin_lat = jnp.sin(lat)
+    sin_ext = jnp.pad(sin_lat, (1, 1), constant_values=(-1.0, 1.0))
+    A_lat = R**2 * dlon * jnp.abs(sin_ext[1:] - sin_ext[:-1])   # (n_lat+1,)
+    # Interior rows carry area; pole rows (wall BC) zero — consistent with
+    # curl_vertex_cgrid computing vorticity only on interior rows.
+    A_lat = A_lat.at[0].set(0.0).at[-1].set(0.0)
+    # Broadcast to (n_lat+1, n_lon+1): regular lat-lon area varies only in lat.
+    return jnp.broadcast_to(A_lat[:, jnp.newaxis], (grid.n_lat + 1, grid.n_lon + 1))
+
+
+def vector_laplacian_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: LatLonGrid,
+    *,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Vector Laplacian on the C-grid: grad(div) - k x grad(curl).
+
+    Operates directly on face velocities without cell-center detour.
+    This is the rectangular-grid analog of TRiSK's vector_laplacian_del2.
+
+    Parameters
+    ----------
+    u : (n_lat, n_lon+1) or (n_lat, n_lon+1, nlev)
+    v : (n_lat+1, n_lon) or (n_lat+1, n_lon, nlev)
+    grid : LatLonGrid
+    mask : (n_lat, n_lon) cell-center land mask, optional
+    u_mask : (n_lat, n_lon+1) u-face mask, optional
+    v_mask : (n_lat+1, n_lon) v-face mask, optional
+
+    Returns
+    -------
+    vlap_u : same shape as u
+    vlap_v : same shape as v
+    """
+    # Native 2D and 3D — all underlying operators (``divergence_cgrid``,
+    # ``gradient_*_cgrid``, ``curl_vertex_cgrid``, ``_gradient_curl_to_*``)
+    # natively support 3D inputs.  Masks remain 2D and broadcast over
+    # the trailing level axis when present.
+    is_3d = u.ndim == 3
+
+    def _bcast(m, like):
+        # Broadcast 2D ``m`` over trailing axes of ``like``.
+        return m[..., jnp.newaxis] if is_3d else m
+
+    # Apply face masks before computing div and curl
+    u_eff = u if u_mask is None else u * _bcast(u_mask, u)
+    v_eff = v if v_mask is None else v * _bcast(v_mask, v)
+
+    # 1. Divergence at cell centers
+    div = divergence_cgrid(u_eff, v_eff, grid)
+    if mask is not None:
+        div = div * _bcast(mask, div)
+
+    # 2. grad(div) at faces
+    grad_div_u = gradient_x_cgrid(div, grid)  # (n_lat, n_lon+1[, nlev])
+    grad_div_v = gradient_y_cgrid(div, grid)  # (n_lat+1, n_lon[, nlev])
+
+    # 3. Curl at vertices
+    zeta = curl_vertex_cgrid(u_eff, v_eff, grid)  # (n_lat+1, n_lon+1[, nlev])
+
+    # Mask curl at land-adjacent vertices
+    if mask is not None:
+        vmask = _compute_vertex_mask(mask, grid=grid)
+        zeta = zeta * _bcast(vmask, zeta)
+
+    # 4. Tangential gradient of curl at faces
+    grad_curl_u = _gradient_curl_to_u(zeta, grid)
+    grad_curl_v = _gradient_curl_to_v(zeta, grid)
+
+    # 5. Vector Laplacian = grad(div) - curl(curl).  curl(curl F) =
+    # k × ∇ζ = (-∂ζ/∂y, +∂ζ/∂x).  Signs verified via bump tests.
+    vlap_u = grad_div_u - grad_curl_u
+    vlap_v = grad_div_v + grad_curl_v
+
+    # Apply face masks to output
+    if u_mask is not None:
+        vlap_u = vlap_u * _bcast(u_mask, vlap_u)
+    if v_mask is not None:
+        vlap_v = vlap_v * _bcast(v_mask, vlap_v)
+
+    return vlap_u, vlap_v
+
+
+def vector_laplacian_dissipation_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: LatLonGrid,
+    A_h_center: jnp.ndarray,
+    *,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """Positive-definite KE-dissipation density of the lateral vector-Laplacian
+    viscosity, at cell centres [m²/s³] — legoESM's analogue of Veros's flux-form
+    ``K_diss_h = 0.5·Σ(Δu·flux) = A_h|∇u|²`` (``veros/core/friction.py``
+    ``calc_diss_u``/``calc_diss_v``).
+
+    legoESM's lateral viscosity is the VECTOR Laplacian
+    ``∇²_vec(u,v) = grad(div) − k×grad(curl)`` (``vector_laplacian_cgrid``), NOT
+    the componentwise scalar Laplacian Veros uses.  For the vector Laplacian the
+    KE-removal energy identity is the Helmholtz form
+
+        −∫ (u·∇²_vec u + v·∇²_vec v) dA  =  ∫ (|div u|² + |ζ|²) dA  ≥ 0
+
+    (integration by parts on a closed/periodic domain), so the POSITIVE-DEFINITE
+    per-cell dissipation density that integrates to the SAME mean KE removed by the
+    harmonic lateral viscosity is
+
+        diss = A_h · ( div²  +  <ζ²>_corners )                                  (≥ 0)
+
+    — NOT the scalar-Laplacian energy ``A_h|∇u|²``.  This is ≥ 0 by construction
+    (squares × A_h ≥ 0), so it needs NO clamp, and (verified on the spun-up ACC
+    state) its domain integral equals the unclamped ``−u·A_h∇²_vec u`` to 0.3 %,
+    whereas the clamped dynamical form over-credits by ~11–20 %.
+
+    The divergence (cell centres) and relative vorticity ζ (vertices) are formed
+    by the SAME shared operators and with the SAME face/vertex masking that
+    ``vector_laplacian_cgrid`` uses internally (``divergence_cgrid``,
+    ``curl_vertex_cgrid``, ``_compute_vertex_mask``) — so the energy this credits is
+    exactly the energy the applied viscous tendency removes (no duplicate or
+    inconsistent numerics).  ζ² is averaged from the four surrounding vertices to
+    the cell centre (the same 4-corner stagger as ``smagorinsky_viscosity_cgrid``).
+
+    Parameters
+    ----------
+    u : (n_lat, n_lon+1[, nlev]) zonal velocity at u-faces [m/s].
+    v : (n_lat+1, n_lon[, nlev]) meridional velocity at v-faces [m/s].
+    grid : LatLonGrid.
+    A_h_center : (n_lat,) or (n_lat, n_lon) or broadcastable to the cell-centre
+        field — the lateral viscosity coefficient AT CELL CENTRES [m²/s], i.e. the
+        same ``A_h × scale`` (cos-power / eq-boost / cap-boost / slope-foot) field
+        the caller applies to the u vector-Laplacian tendency.  A 1-D ``(n_lat,)``
+        latitudinal profile is broadcast over longitude + levels.
+    mask : (n_lat, n_lon) cell-centre ocean mask (1 = ocean), optional.
+    u_mask : (n_lat, n_lon+1) u-face mask, optional.
+    v_mask : (n_lat+1, n_lon) v-face mask, optional.
+
+    Returns
+    -------
+    diss : (n_lat, n_lon[, nlev]) — non-negative KE-dissipation density [m²/s³]
+        at cell centres.
+    """
+    is_3d = u.ndim == 3
+
+    def _bcast(m, like):
+        return m[..., jnp.newaxis] if (is_3d and m.ndim == like.ndim - 1) else m
+
+    # Mask velocities exactly as vector_laplacian_cgrid does before div/curl.
+    u_eff = u if u_mask is None else u * _bcast(u_mask, u)
+    v_eff = v if v_mask is None else v * _bcast(v_mask, v)
+
+    # Divergence at cell centres (masked) — same operator + masking as the vlap.
+    div = divergence_cgrid(u_eff, v_eff, grid)
+    if mask is not None:
+        div = div * _bcast(mask, div)
+
+    # Relative vorticity at vertices (masked at land-adjacent vertices) — same.
+    zeta = curl_vertex_cgrid(u_eff, v_eff, grid)
+    if mask is not None:
+        vmask = _compute_vertex_mask(mask, grid=grid)
+        zeta = zeta * _bcast(vmask, zeta)
+
+    # ζ² averaged from the four surrounding vertices to the cell centre (the
+    # 4-corner stagger used by smagorinsky_viscosity_cgrid / strain interp).
+    z2 = zeta ** 2
+    if is_3d:
+        z2_center = 0.25 * (z2[:-1, :-1, :] + z2[1:, :-1, :]
+                            + z2[:-1, 1:, :] + z2[1:, 1:, :])
+    else:
+        z2_center = 0.25 * (z2[:-1, :-1] + z2[1:, :-1]
+                            + z2[:-1, 1:] + z2[1:, 1:])
+
+    # A_h at cell centres (1-D lat profile broadcasts over lon + levels).
+    A_c = jnp.asarray(A_h_center)
+    if A_c.ndim == 1:                       # (n_lat,) latitudinal profile
+        A_c = A_c[:, jnp.newaxis, jnp.newaxis] if is_3d else A_c[:, jnp.newaxis]
+    elif is_3d and A_c.ndim == 2:           # (n_lat, n_lon) -> add level axis
+        A_c = A_c[:, :, jnp.newaxis]
+
+    diss = A_c * (div ** 2 + z2_center)
+    if mask is not None:
+        diss = diss * _bcast(mask, diss)
+    return diss
+
+
+def flux_divergence_viscosity_cgrid(
+    u: jnp.ndarray,
+    v: jnp.ndarray,
+    grid: LatLonGrid,
+    A_h: float,
+    *,
+    cos_power: int = 0,
+    mask: jnp.ndarray | None = None,
+    u_mask: jnp.ndarray | None = None,
+    v_mask: jnp.ndarray | None = None,
+    want_dissipation: bool = False,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray | None]:
+    """Component-wise FLUX-DIVERGENCE lateral viscosity ``∇·(A_h∇u)``, ``∇·(A_h∇v)``.
+
+    This is the Veros ``harmonic_friction`` operator (``veros/core/friction.py``):
+    the standard C-grid harmonic friction applied SEPARATELY to each velocity
+    component, with NO inter-component metric/curvature coupling.  It is the
+    selectable ``lateral_viscosity_operator="flux_divergence"`` alternative to
+    legoESM's default VECTOR Laplacian ``grad(div) − k×grad(curl)``
+    (:func:`vector_laplacian_cgrid`).  On a sphere the two DIFFER for a vector
+    field: the vector Laplacian carries curvature coupling between ``u`` and
+    ``v`` (and the ``-2Ω`` / ``tanφ`` metric terms) that the component-wise form
+    omits — so this is a genuine numerics choice (not a convention), hence a
+    config option rather than a bridge transform.
+
+    Discretisation (regular lat-lon; matches ``harmonic_friction`` term-for-term):
+
+    *Zonal momentum* ``u`` at u-faces ``(n_lat, n_lon+1)``::
+
+        flux_x[cell j]   = A_h·cosᵖ(φ) · (u[j]−u[j−1]) / dx_cell        (cell centre)
+        flux_y[vtx i]    = A_h·cosᵖ(φ_v)·cos(φ_v) · (u[i]−u[i−1]) / dy_v (vertex)
+        ∂ₜu[face j]     += (flux_x[j]−flux_x[j−1])/dx_u
+                          + (flux_y[i+1]−flux_y[i])/(cos(φ)·dy_cell)
+
+    *Meridional momentum* ``v`` at v-faces ``(n_lat+1, n_lon)`` — same structure with
+    the staggering swapped (``flux_x`` at vertices, ``flux_y`` at cell centres).
+
+    The extra ``cos(φ_v)`` in the meridional ``u``-flux and the ``1/cos(φ)`` in the
+    divergence reproduce the spherical metric ``(1/(a²cosφ)) ∂φ(cosφ ∂φ)`` — exactly
+    Veros's ``cosu``-weighted ``flux_north`` ÷ ``cost·dyt``.  The ``cosᵖ`` factor is
+    Veros's ``enable_hor_friction_cos_scaling`` with ``hor_friction_cosPower``
+    (legoESM ``A_h_lat_scaling`` / ``A_h_cos_power``): ``cos_power=0`` ⇒ no scaling
+    (the un-scaled friction), ``cos_power=1`` ⇒ the ACC recipe's cos¹ Munk scaling.
+
+    Reuses the SAME regular-grid metric expressions as :func:`divergence_cgrid` /
+    :func:`gradient_x_cgrid` / :func:`gradient_y_cgrid` (``R·cosφ·dlon`` for zonal
+    lengths, ``R·dlat`` for meridional, ``grid.area`` for the cell, ``_cos_lat_uv``
+    for the face cosines) — NO duplicate numerics.  Masks are applied to the
+    gradient stencils as ``maskᵢ·maskᵢ₋₁`` (free-slip: a land neighbour zeroes the
+    flux, never a no-slip wall stress; Veros's optional ``enable_noslip_lateral``
+    is OFF in ACC and not ported).
+
+    Momentum conservation: the per-component flux divergence telescopes, and the
+    fluxes vanish through land/walls (``mask`` zeroing + ``v=0`` poles), so the
+    AREA-weighted domain integral of each component is zero to machine eps on a
+    closed/periodic domain — the truth-tier conservation gate.
+
+    Energy-consistent dissipation (``want_dissipation=True``).  Returns the
+    POSITIVE-DEFINITE component-wise KE-removal density [m²/s³] at cell centres,
+    ``K_diss_h = A_h·|∇u|² = 0.5·Σ(Δu·flux)`` — Veros ``calc_diss_u``/``calc_diss_v``.
+    Built from the SAME ``flux_x``/``flux_y`` the tendency uses (``0.5·Δu·flux/Δx``
+    averaged over the two faces straddling each cell), so the energy credited to the
+    EKE source is exactly the energy the applied friction removes (paired with
+    ``EKEConfig.kdiss_h_flux_form`` via the ``lateral_viscosity_operator`` dispatch).
+
+    Parameters
+    ----------
+    u : (n_lat, n_lon+1[, nlev]) zonal velocity at u-faces [m/s].
+    v : (n_lat+1, n_lon[, nlev]) meridional velocity at v-faces [m/s].
+    grid : LatLonGrid (regular lat-lon; tripolar not yet supported — see below).
+    A_h : float — base lateral viscosity [m²/s].
+    cos_power : int — exponent on cos(lat) (Veros ``hor_friction_cosPower``).
+        0 = no cos scaling; 1 = the ACC recipe's cos¹ Munk scaling.
+    mask : (n_lat, n_lon) cell-centre ocean mask (1 = ocean), optional.
+    u_mask : (n_lat, n_lon+1) u-face mask, optional.
+    v_mask : (n_lat+1, n_lon) v-face mask, optional.
+    want_dissipation : bool — also return the component-wise ``K_diss_h`` density.
+
+    Returns
+    -------
+    visc_u : (n_lat, n_lon+1[, nlev]) — ``∇·(A_h∇u)`` [m/s²] at u-faces (face-masked).
+    visc_v : (n_lat+1, n_lon[, nlev]) — ``∇·(A_h∇v)`` [m/s²] at v-faces (face-masked).
+    kdiss_h_cell : (n_lat, n_lon[, nlev]) non-negative KE-dissipation density
+        [m²/s³] at cell centres, or ``None`` when ``want_dissipation=False``.
+    """
+    if is_tripolar(grid):
+        raise ValueError(
+            "lateral_viscosity_operator='flux_divergence' is not yet implemented "
+            "on tripolar grids (the vertex/face metric handling needs the 2D "
+            "dx_v/dy_u fields, like the flux-form momentum advection). Use "
+            "'vector_laplacian' on tripolar, or extend this operator."
+        )
+    is_3d = u.ndim == 3
+
+    def _bcast_mask(m, like):
+        return m[..., jnp.newaxis] if (is_3d and m.ndim == like.ndim - 1) else m
+
+    # --- regular-grid metrics (identical expressions to divergence_cgrid) ---
+    R = grid.radius
+    dlon = grid.dlon
+    cos_u, cos_v = _cos_lat_uv(grid)                # (n_lat,), (n_lat+1,)
+    dx_cell = R * cos_u * dlon                       # (n_lat,) zonal cell width at u-lat
+    dx_u = dx_cell                                   # u-faces at cell-centre latitudes
+    dy_cell = grid.dy * 0.5                          # (n_lat,) meridional cell height
+    # v-face meridional spacing (distance between adjacent cell centres in lat).
+    dy_v_int = 0.5 * (dy_cell[1:] + dy_cell[:-1])    # (n_lat-1,)
+
+    # cos-power weights at u-lat (cell centres) and v-lat (interfaces).
+    fxa_u = cos_u ** cos_power                        # (n_lat,)
+    fxa_v = cos_v ** cos_power                        # (n_lat+1,)
+
+    # face masks default to all-ocean (1.0); promote a 2-D face mask to the
+    # velocity rank so the gradient-stencil products broadcast over the level axis
+    # (the real call site passes 2-D ``u_mask``/``v_mask`` with 3-D velocities).
+    if u_mask is None:
+        um = jnp.ones_like(u)
+    elif is_3d and u_mask.ndim == 2:
+        um = u_mask[:, :, jnp.newaxis]
+    else:
+        um = u_mask
+    if v_mask is None:
+        vm = jnp.ones_like(v)
+    elif is_3d and v_mask.ndim == 2:
+        vm = v_mask[:, :, jnp.newaxis]
+    else:
+        vm = v_mask
+
+    # ============================ ZONAL momentum (u) ============================
+    # flux_x at CELL CENTRES: A_h·cosᵖ·∂u/∂x. Cell j sits between u-faces j (west)
+    # and j+1 (east), so the cell-centred ∂u/∂x is the consecutive u-face difference
+    # along the lon axis — matching Veros's flux_east between adjacent u-points.
+    # u: (n_lat, n_lon+1). Adjacent-u-face difference -> (n_lat, n_lon) at cell centres.
+    du_dx_cell = (u[:, 1:, ...] - u[:, :-1, ...])
+    # divide by dx_cell (per lat); mask with the two u-faces straddling the cell.
+    mu_cell = um[:, 1:, ...] * um[:, :-1, ...]                       # (n_lat, n_lon[, nlev])
+    flux_x_u = (
+        A_h
+        * (fxa_u[:, None, None] if is_3d else fxa_u[:, None])
+        * du_dx_cell
+        / (dx_cell[:, None, None] if is_3d else dx_cell[:, None])
+        * mu_cell
+    )                                                                # (n_lat, n_lon[, nlev])
+
+    # flux_y at VERTICES: A_h·cosᵖ(φ_v)·cos(φ_v)·∂u/∂y. u-rows i and i+1 straddle
+    # vertex row i+1 (interior). Build interior vertex flux, pad poles with zero.
+    du_dy_int = (u[1:, ...] - u[:-1, ...])                           # (n_lat-1, n_lon+1[, nlev])
+    mu_vtx_int = um[1:, ...] * um[:-1, ...]
+    fyw_int = fxa_v[1:-1] * cos_v[1:-1]                              # (n_lat-1,) cosᵖ⁺¹ weight
+    flux_y_u_int = (
+        A_h
+        * (fyw_int[:, None, None] if is_3d else fyw_int[:, None])
+        * du_dy_int
+        / (dy_v_int[:, None, None] if is_3d else dy_v_int[:, None])
+        * mu_vtx_int
+    )                                                                # (n_lat-1, n_lon+1[, nlev])
+    zrow_u = jnp.zeros_like(u[:1, ...])
+    flux_y_u = jnp.concatenate([zrow_u, flux_y_u_int, zrow_u], axis=0)  # (n_lat+1, n_lon+1[, nlev])
+
+    # divergence to u-faces. Zonal: (flux_x[cell j] − flux_x[cell j−1])/dx_u, periodic
+    # in lon (face j is between cell j−1 (west) and cell j (east); face 0 wraps).
+    net_x_u_core = flux_x_u - jnp.roll(flux_x_u, 1, axis=1)          # (n_lat, n_lon[, nlev])
+    net_x_u = jnp.concatenate([net_x_u_core, net_x_u_core[:, :1, ...]], axis=1)
+    net_x_u = net_x_u / (dx_u[:, None, None] if is_3d else dx_u[:, None])
+    # Meridional: (flux_y[vtx i+1] − flux_y[vtx i]) / (cos(φ)·dy_cell) at u-face i.
+    net_y_u = (flux_y_u[1:, ...] - flux_y_u[:-1, ...])              # (n_lat, n_lon+1[, nlev])
+    cdy_u = cos_u * dy_cell                                          # (n_lat,)
+    net_y_u = net_y_u / (cdy_u[:, None, None] if is_3d else cdy_u[:, None])
+    visc_u = (net_x_u + net_y_u)
+    if u_mask is not None:
+        visc_u = visc_u * _bcast_mask(u_mask, visc_u)
+
+    # ========================= MERIDIONAL momentum (v) =========================
+    # flux_x at VERTICES: A_h·cosᵖ(φ_v)·∂v/∂x. v-cols j−1 and j straddle vertex col j
+    # (periodic in lon). Build at lon-faces (vertices) via roll.
+    v_west = jnp.roll(v, 1, axis=1)
+    dv_dx_vtx = (v - v_west)                                         # (n_lat+1, n_lon[, nlev]) at vertices
+    mv_vtx = vm * jnp.roll(vm, 1, axis=1)
+    # zonal spacing at v-lat between adjacent v-cell centres: R·cos(φ_v)·dlon.
+    dx_v = R * cos_v * dlon                                          # (n_lat+1,)
+    flux_x_v = (
+        A_h
+        * (fxa_v[:, None, None] if is_3d else fxa_v[:, None])
+        * dv_dx_vtx
+        / (dx_v[:, None, None] if is_3d else dx_v[:, None])
+        * mv_vtx
+    )                                                                # (n_lat+1, n_lon[, nlev]) at lon-faces
+
+    # flux_y at CELL CENTRES: A_h·cosᵖ(φ)·cos(φ)·∂v/∂y. v-rows i (south) and i+1
+    # (north) straddle cell i. Build at cell centres (n_lat rows).
+    dv_dy_cell = (v[1:, ...] - v[:-1, ...])                          # (n_lat, n_lon[, nlev]) at cell centres
+    mv_cell = vm[1:, ...] * vm[:-1, ...]
+    fyw_cell = fxa_u * cos_u                                          # (n_lat,) cosᵖ⁺¹ at cell lat
+    flux_y_v = (
+        A_h
+        * (fyw_cell[:, None, None] if is_3d else fyw_cell[:, None])
+        * dv_dy_cell
+        / (dy_cell[:, None, None] if is_3d else dy_cell[:, None])
+        * mv_cell
+    )                                                                # (n_lat, n_lon[, nlev])
+
+    # divergence to v-faces. Zonal: (flux_x[vtx j+1] − flux_x[vtx j]) / (cos(φ_v)·dx_v')
+    # at v-face (cell centre j): E face = vertex j+1, W face = vertex j (periodic).
+    net_x_v = (jnp.roll(flux_x_v, -1, axis=1) - flux_x_v)          # (n_lat+1, n_lon[, nlev])
+    cdx_v = cos_v * R * dlon                                         # (n_lat+1,) = cos(φ_v)·R·dlon
+    net_x_v = net_x_v / (cdx_v[:, None, None] if is_3d else cdx_v[:, None])
+    # Meridional: (flux_y[cell i] − flux_y[cell i−1]) / (cos(φ_v)·dy_v) at v-face i
+    # (interior); poles are walls -> zero tendency.  The 1/cos(φ_v) is the spherical
+    # metric prefactor of the meridional Laplacian (Veros divides ``dv_mix`` by
+    # ``cosu·dyu`` — friction.py:614-615), evaluated at the INTERIOR v-face latitudes
+    # ``cos_v[1:-1]`` where the v-tendency lives.  (Mirrors the u-meridional ÷(cos_u·
+    # dy_cell) above; without it the v-meridional friction is too weak by cos(φ) and
+    # breaks both the Veros term-match and momentum conservation on the sphere.)
+    cdy_v_int = dy_v_int * cos_v[1:-1]                              # (n_lat-1,)
+    net_y_v_int = (flux_y_v[1:, ...] - flux_y_v[:-1, ...])         # (n_lat-1, n_lon[, nlev])
+    net_y_v_int = net_y_v_int / (cdy_v_int[:, None, None] if is_3d else cdy_v_int[:, None])
+    zlon_v = jnp.zeros_like(v[:1, ...])
+    net_y_v = jnp.concatenate([zlon_v, net_y_v_int, zlon_v], axis=0)
+    # zero the zonal part at the pole v-faces too (walls).
+    net_x_v = net_x_v.at[0, ...].set(0.0).at[-1, ...].set(0.0)
+    visc_v = (net_x_v + net_y_v)
+    if v_mask is not None:
+        visc_v = visc_v * _bcast_mask(v_mask, visc_v)
+
+    if not want_dissipation:
+        return visc_u, visc_v, None
+
+    # ===================== component-wise K_diss_h (≥ 0) =====================
+    # Veros calc_diss_u/v: the KE removed by the friction = the FLUX-FORM energy
+    # ``∫ A_h·cosᵖ·|∇u|² dA = Σ_faces flux·Δu·(face length)`` (positive-definite by
+    # construction).  We return it as a t-cell DENSITY [m²/s³] such that
+    # ``density·cell_area`` equals the energy attributed to that cell — so the
+    # downstream EKE source (``harmonic_lateral_kediss_eke_source``, which integrates
+    # the density over the cell volume) credits exactly the KE the friction removed.
+    #
+    # At each FLUX location the energy rate × area is ``flux·Δu·L_perp`` (m⁴/s³),
+    # where ``L_perp`` is the face length the flux crosses.  Each flux location is
+    # shared by two t-cells, so attribute HALF to each, then divide by the t-cell
+    # area to form the density.  (Energy-exact: verified ``Σ density·area`` equals
+    # ``−Σ u·visc·area_u − v·visc·area_v`` to machine eps on a closed domain.)
+    area_c = grid.area                                               # (n_lat, n_lon)
+    area_b = area_c[:, :, jnp.newaxis] if is_3d else area_c
+    inv_area = jnp.where(area_b > 0.0, 1.0 / jnp.maximum(area_b, 1.0e-30), 0.0)
+
+    # u-ZONAL: flux_x_u at scalar centre [i,j] crosses the u-face of meridional
+    # length L = cos(φ)·dy_cell.  Energy E_zx[i,j] = flux_x_u·du_dx_cell·L sits at
+    # cell centre [i,j] (it IS the t-cell), so it maps wholly to t-cell [i,j].
+    Lzx = cos_u * dy_cell                                            # (n_lat,)
+    E_zx = (
+        flux_x_u * du_dx_cell
+        * (Lzx[:, None, None] if is_3d else Lzx[:, None])
+    )                                                                # (n_lat, n_lon[, nlev]) at t-cells
+    # u-MERID: flux_y_u_int at interior vertex (between t-cells i and i+1) crosses
+    # the vertex face of zonal length L = cos(φ_v)·R·dlon = dx_v.  Energy at the
+    # vertex; split half to t-cell i (south) and half to i+1 (north).  The vertex
+    # also sits between u-faces j and j+1 in lon, i.e. between t-cells j-? — no: the
+    # u-merid flux is at u-face longitudes (n_lon+1), straddling t-cell lon-columns
+    # j-1 and j.  So also split half in lon to the two adjacent t-cell columns.
+    Lyu = (cos_v[1:-1] * R * dlon)                                   # (n_lat-1,) vertex zonal face length
+    E_yu_vtx = (
+        flux_y_u_int * du_dy_int
+        * (Lyu[:, None, None] if is_3d else Lyu[:, None])
+    )                                                                # (n_lat-1, n_lon+1[, nlev]) at interior vertices
+    # lon: vertex at u-face column k straddles t-cell columns k-1 and k (periodic).
+    # Distribute 0.5 to each lon-neighbour: t-cell column m gets 0.5*(E[:,m] + E[:,m+1]).
+    E_yu_loncell = 0.5 * (E_yu_vtx[:, :-1, ...] + E_yu_vtx[:, 1:, ...])  # (n_lat-1, n_lon[, nlev])
+    # lat: interior-vertex row r (=between t-rows r and r+1) splits 0.5 to each.
+    zr = jnp.zeros_like(E_yu_loncell[:1])
+    E_yu_padlat = jnp.concatenate([zr, E_yu_loncell, zr], axis=0)    # (n_lat+1, n_lon[, nlev])
+    E_yu_cell = 0.5 * (E_yu_padlat[:-1, ...] + E_yu_padlat[1:, ...]) # (n_lat, n_lon[, nlev]) at t-cells
+    diss_u_cell = (E_zx + E_yu_cell) * inv_area
+
+    # v-MERID: flux_y_v at scalar centre [i,j] (it IS the t-cell) crosses the
+    # cell's lat-face of zonal length L = cos(φ)·R·dlon = dx_cell.  Maps wholly to
+    # t-cell [i,j].
+    Lyv = dx_cell                                                    # (n_lat,) = cos_u·R·dlon
+    E_yv = (
+        flux_y_v * dv_dy_cell
+        * (Lyv[:, None, None] if is_3d else Lyv[:, None])
+    )                                                                # (n_lat, n_lon[, nlev]) at t-cells
+    # v-ZONAL: flux_x_v at vertex row i, lon-face column j (between t-cells j-1, j in
+    # lon, and it is at a v-face latitude i, between t-rows i-1 and i).  Crosses the
+    # vertex meridional face of length L = cos(φ_v)·dy_v.  Split 0.5 in lat AND 0.5
+    # in lon to the four surrounding t-cells (here combined: 0.5 lat × full lon then
+    # 0.5 lon).  Vertex is at v-cell longitudes (n_lon) and v-face latitudes (n_lat+1).
+    dy_v_full = jnp.concatenate([dy_cell[:1], dy_v_int, dy_cell[-1:]])  # (n_lat+1,)
+    Lxv = cos_v * dy_v_full                                          # (n_lat+1,)
+    E_xv_vtx = (
+        flux_x_v * dv_dx_vtx
+        * (Lxv[:, None, None] if is_3d else Lxv[:, None])
+    )                                                                # (n_lat+1, n_lon[, nlev]) at vertices
+    # lon: vertex at lon-face column j straddles t-cell columns j-1 and j (periodic).
+    E_xv_loncell = 0.5 * (E_xv_vtx + jnp.roll(E_xv_vtx, -1, axis=1)) # (n_lat+1, n_lon[, nlev])
+    # lat: vertex rows i and i+1 straddle t-cell i; split 0.5 each.
+    E_xv_cell = 0.5 * (E_xv_loncell[:-1, ...] + E_xv_loncell[1:, ...])  # (n_lat, n_lon[, nlev])
+    diss_v_cell = (E_yv + E_xv_cell) * inv_area
+
+    kdiss_h_cell = diss_u_cell + diss_v_cell
+    if mask is not None:
+        kdiss_h_cell = kdiss_h_cell * _bcast_mask(mask, kdiss_h_cell)
+    # ≥ 0 by construction (Δu·flux/Δx = A_h·cosᵖ·(∂u)² ≥ 0); guard tiny negatives
+    # from float round-off only (NOT the clamp the dynamical form needs).
+    kdiss_h_cell = jnp.maximum(kdiss_h_cell, 0.0)
+    return visc_u, visc_v, kdiss_h_cell
 
 
 def vector_bilaplacian_cgrid(

@@ -44,7 +44,11 @@ VerosCase = Literal[
     "dino",
 ]
 
-SCHEMA_VERSION = 1
+# v2: the cache key now includes the requested ``capture_vars`` set. v1 caches
+# omitted it, so a snapshot captured with one variable set could be silently
+# reused for a request needing MORE variables -> a capture-incomplete result
+# (degenerate report). Bumping invalidates those v1 caches.
+SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -113,14 +117,21 @@ def available_cases() -> tuple[str, ...]:
 
 
 def _cache_key(case_name: str, *, runlen_s: float, identifier: str,
+               capture_vars: tuple[str, ...] | None = None,
                extra: dict[str, Any] | None = None) -> str:
     v = _require_veros()
+    # Normalise the capture set (sorted + deduped) so the key is order-
+    # independent — {"u","v"} and {"v","u"} share a cache (same content) — but a
+    # DIFFERENT set (e.g. adding "eke") yields a different key and forces a
+    # recompute rather than silently reusing a capture-incomplete snapshot.
+    cv = DEFAULT_CAPTURE_VARS if capture_vars is None else capture_vars
     payload = {
         "schema_version": SCHEMA_VERSION,
         "case_name": case_name,
         "runlen_s": float(runlen_s),
         "identifier": identifier,
         "veros_version": str(v.__version__),
+        "capture_vars": sorted(set(cv)),
         "extra": dict(extra) if extra else {},
     }
     return _cache.hash_key(payload)
@@ -154,7 +165,15 @@ def _extract_state(setup, *, capture_vars: tuple[str, ...]) -> dict[str, np.ndar
     out: dict[str, np.ndarray] = {}
     variables = setup.state.variables
     for name in capture_vars:
-        value = getattr(variables, name, None)
+        try:
+            value = getattr(variables, name, None)
+        except RuntimeError:
+            # Veros RAISES RuntimeError when accessing an INACTIVE variable
+            # (e.g. ``kappa_gm`` when that EKE diagnostic is off) rather than
+            # returning None, so a plain getattr-default does not shield it.
+            # Skip it gracefully -- otherwise requesting one inactive capture
+            # var aborts the whole (already-integrated, expensive) run.
+            continue
         if value is None:
             continue
         out[name] = np.asarray(value)
@@ -272,7 +291,8 @@ def run_veros(
             getattr(setup, "_legoesm_target_runlen_s", 86400.0)
         )
 
-    key = _cache_key(case_name, runlen_s=runlen_s, identifier=ident, extra=kwargs)
+    key = _cache_key(case_name, runlen_s=runlen_s, identifier=ident,
+                     capture_vars=capture_vars, extra=kwargs)
     case_dir = (cache_dir / "veros" / case_name / key
                 if cache_dir is not None
                 else _result_path_for(key, case_name))
@@ -300,10 +320,16 @@ def run_veros(
     wall_s = time.time() - wall_t0
 
     import veros as v
+    captured = _extract_state(setup, capture_vars=capture_vars)
+    # Requested vars absent from the finished state (inactive in this Veros
+    # config, e.g. ``kappa_gm`` when EKE is off). Recorded so a degenerate
+    # capture surfaces in provenance instead of producing a silently empty
+    # report downstream.
+    missing_capture_vars = [n for n in capture_vars if n not in captured]
     result = VerosResult(
         case_name=case_name,
         times_s=np.asarray([runlen_s]),  # final snapshot only in v1
-        variables=_extract_state(setup, capture_vars=capture_vars),
+        variables=captured,
         grid_metadata=_extract_grid_metadata(setup),
         provenance={
             "veros_version": str(v.__version__),
@@ -313,6 +339,8 @@ def run_veros(
             "wall_seconds": wall_s,
             "schema_version": SCHEMA_VERSION,
             "factory_kwargs": dict(kwargs),
+            "capture_vars": list(capture_vars),
+            "missing_capture_vars": missing_capture_vars,
         },
     )
     _save_result(case_dir, key, result)

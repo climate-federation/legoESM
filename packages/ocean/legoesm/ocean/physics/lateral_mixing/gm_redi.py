@@ -103,8 +103,9 @@ def _compute_tapered_slopes(
     S_x = jnp.clip(-drho_dx_half / drho_dz_safe, -cfg.S_max, cfg.S_max)
     S_y = jnp.clip(-drho_dy_half / drho_dz_safe, -cfg.S_max, cfg.S_max)
 
-    # DM95 tapering: smooth taper near S_max
-    return dm95_taper(S_x, S_y, cfg.S_max, eps)
+    # DM95 tapering: smooth taper near S_max. ``taper_width_frac`` maps
+    # to Veros's ``iso_dslope / iso_slopec``.
+    return dm95_taper(S_x, S_y, cfg.S_max, eps, cfg.taper_width_frac)
 
 
 def _tracer_tendency_gm_redi(

@@ -6,10 +6,10 @@ viscosity A_v and diffusivity K_v.
 
 from __future__ import annotations
 
-import jax
 import jax.numpy as jnp
 
 from legoesm.ocean.physics.mixing import vertical_diffusion
+from legoesm.ocean.physics.vertical_mixing._shared import vmap_vertical_diffusion
 from legoesm.ocean.physics.vertical_mixing.config import ConstantVerticalMixingConfig
 from legoesm.ocean.physics.vertical_mixing.output import VerticalMixingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
@@ -46,26 +46,13 @@ def constant_vertical_mixing(
 
     # Velocities with viscosity A_v / tracers with diffusivity K_v.
     # When ``apply_diffusion`` is False, the diffusion is deferred to a
-    # backward-Euler implicit solve in the dynamics step.
-    if apply_diffusion:
-        # Pass dt (when provided) so the explicit-Euler CFL cap
-        # (clean_physics iter-5) fires inside ``vertical_diffusion``.
-        vel = jnp.stack([u, v], axis=0)
-        vel_tend = jax.vmap(
-            lambda q: vertical_diffusion(q, z_coord, jacobian, cfg.A_v, dt=dt),
-            in_axes=0, out_axes=0,
-        )(vel)
-
-        tracers = jnp.stack([T, S], axis=0)
-        tr_tend = jax.vmap(
-            lambda q: vertical_diffusion(q, z_coord, jacobian, cfg.K_v, dt=dt),
-            in_axes=0, out_axes=0,
-        )(tracers)
-    else:
-        zero_uv = jnp.zeros_like(u)
-        vel_tend = jnp.stack([zero_uv, zero_uv], axis=0)
-        zero_T = jnp.zeros_like(T)
-        tr_tend = jnp.stack([zero_T, zero_T], axis=0)
+    # backward-Euler implicit solve in the dynamics step.  dt (when provided)
+    # is passed so the explicit-Euler CFL cap fires inside ``vertical_diffusion``.
+    vel_tend, tr_tend = vmap_vertical_diffusion(
+        u, v, T, S, cfg.A_v, cfg.K_v,
+        lambda q, c: vertical_diffusion(q, z_coord, jacobian, c, dt=dt),
+        apply_diffusion,
+    )
 
     # Constant K/A diagnostics at interfaces
     K_diag = jnp.full((*u.shape[:-1], nlev - 1), cfg.K_v, dtype=u.dtype)
