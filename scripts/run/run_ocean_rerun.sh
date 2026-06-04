@@ -2,7 +2,7 @@
 # Re-run the ocean cases that errored in the Phase-1 matrix run.
 # Writes each case-family's logs/summaries under results/ocean_rerun/<case>.
 set -u
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
 OUTBASE="results/ocean_rerun"

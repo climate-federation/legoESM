@@ -2,7 +2,7 @@
 # Runs ocean → sea_ice → validator once atmosphere has finished.
 # The atmosphere log is written to results/atmosphere_run.log in advance.
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
 # Wait until atmosphere summary.json exists (written at end of run).

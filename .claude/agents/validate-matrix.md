@@ -13,7 +13,7 @@ $ARGUMENTS
 Run the atmosphere test matrix in quick mode first for fast feedback:
 
 ```bash
-JAX_ENABLE_X64=1 python scripts/run_atmosphere_test_matrix.py --quick --output results/atmosphere
+JAX_ENABLE_X64=1 python scripts/matrix/run_atmosphere_test_matrix.py --quick --output results/atmosphere
 ```
 
 If the user requests a full run or specific subset, use the appropriate flags:
@@ -28,7 +28,7 @@ If the user requests a full run or specific subset, use the appropriate flags:
 Run the ocean test matrix:
 
 ```bash
-JAX_ENABLE_X64=1 python scripts/run_ocean_test_matrix.py --quick --output results/ocean
+JAX_ENABLE_X64=1 python scripts/matrix/run_ocean_test_matrix.py --quick --output results/ocean
 ```
 
 Flags:
