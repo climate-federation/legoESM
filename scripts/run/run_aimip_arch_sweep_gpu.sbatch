@@ -30,7 +30,7 @@ export HOME=${HOME:-/burg-archive/home/pg2328}
 
 echo "[arch-sweep] $(date)  host=$(hostname)"
 nvidia-smi -L 2>&1 | head -5 || echo "  (nvidia-smi unavailable)"
-$PYTHON -u scripts/run_aimip_arch_sweep.py \
+$PYTHON -u scripts/run/run_aimip_arch_sweep.py \
     --base config/aimip/aimip_era5_multistep.yaml \
     --output-dir results/aimip_arch_sweep_001
 

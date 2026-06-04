@@ -2,7 +2,7 @@
 
 Validates the PR4 RCE harness skeleton — not the full RCEMIP
 equilibrium (which requires ~100 days of integration on a 100x100
-km / 1 km grid; see ``scripts/run_rcemip_plane.py``). The CI test
+km / 1 km grid; see ``scripts/run/run_rcemip_plane.py``). The CI test
 just confirms the harness composes cleanly: dycore + Smag +
 hyperdiff + sponge + tracer transport + bulk-flux + gray
 radiation + Kessler microphysics physics_fn → stable,
@@ -26,7 +26,7 @@ import jax.numpy as jnp
 import pytest
 
 # Add scripts/ to import path so the test can import make_rcemip_physics.
-_SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
+_SCRIPTS = Path(__file__).resolve().parents[2] / "scripts" / "run"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
@@ -56,7 +56,7 @@ from legoesm.grids.vertical import create_height_coordinate
 
 
 # iter-247 (Codex iter-243 round-1 HIGH#2): the original
-# scripts/run_rcemip_plane.py:_make_rcemip_physics composed bulk
+# scripts/run/run_rcemip_plane.py:_make_rcemip_physics composed bulk
 # surface fluxes + 5-day Newtonian relaxation toward 300 K + Kessler
 # microphysics. The 0ec1da4b rename to make_rcemip_physics swapped
 # Newtonian for the canonical gray-radiation factory. The iter-243
@@ -191,7 +191,7 @@ def test_deep_column_reference_state_requires_physical_theta_profile():
     iter-4 codex review, ``compute_reference_state`` now FAILS FAST
     (raises) on non-positive Exner, and the Wing 2018 θ profile (capped
     at ≈400 K aloft) keeps the reference physical — what
-    ``scripts/run_rcemip_plane.py`` now passes as ``theta_ref_fn``."""
+    ``scripts/run/run_rcemip_plane.py`` now passes as ``theta_ref_fn``."""
     import numpy as np
     # Constant-θ default over 33 km now RAISES at construction (was a
     # silent NaN reference → step-1 NaN).

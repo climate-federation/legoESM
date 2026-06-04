@@ -25,9 +25,9 @@ from pathlib import Path
 import numpy as np
 
 sys.stdout.reconfigure(line_buffering=True)
-# scripts/ (parent.parent from scripts/tmp/) so `import run_omip_core2` — a KEPT
-# script still at scripts/ root — resolves after this file moved into scripts/tmp/.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# scripts/run/ (run_omip_core2 moved there) so `import run_omip_core2` resolves
+# from this file's scripts/tmp/ location.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "run"))
 
 import jax  # noqa: E402
 jax.config.update("jax_enable_x64", True)

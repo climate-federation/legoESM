@@ -70,7 +70,7 @@ Both compatible with the clip-helper stack:
   (iter-539).
 - Performance: +0.6% overhead vs raw jit (iter-541).
 
-See ``scripts/example_fv3_clip_helper.py`` for a runnable
+See ``scripts/run/example_fv3_clip_helper.py`` for a runnable
 end-to-end demo.
 
 ## FV3-fidelity stack (iter 356/423 update)
@@ -1512,7 +1512,7 @@ Key iterations:
     DIFFERENT goals — min_edge minimizes TOTAL noise;
     aggressive minimizes RATIO.  Both valid.
   - iter 535: example script
-    ``scripts/example_fv3_clip_helper.py`` showing end-to-
+    ``scripts/run/example_fv3_clip_helper.py`` showing end-to-
     end API.  Reproduces iter-521 values within 5%.
   - iter 536: slack sweep at C16 SBR.  slack=0.0 marginally
     best (0.7% better than slack=0.5 default).  All within

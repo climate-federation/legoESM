@@ -16,7 +16,7 @@ through PRs #296–#305 on the plane non-hydrostatic CRM dycore:
 This is a SMOKE script — runs a small number of outer steps to
 verify the full stack wires together and produces finite + physically
 plausible diagnostics. Long RCE production runs (~100 days) go
-through ``scripts/run_rcemip_long.py`` once item 13 (cloud-rad
+through ``scripts/run/run_rcemip_long.py`` once item 13 (cloud-rad
 coupling) lands.
 
 CLI

@@ -30,7 +30,7 @@ run_variant() {
   echo "================================================================"
   echo "[run] $label  schemes: gwd=$GWD conv=$CONV turb=$TURB micro=$MICRO cloud=$CLOUD"
   echo "================================================================"
-  JAX_ENABLE_X64=1 .venv/bin/python -u scripts/_aimip_ablation_single.py \
+  JAX_ENABLE_X64=1 .venv/bin/python -u scripts/run/_aimip_ablation_single.py \
     --label "$label" \
     --gwd-scheme "$GWD" \
     --convection-scheme "$CONV" \

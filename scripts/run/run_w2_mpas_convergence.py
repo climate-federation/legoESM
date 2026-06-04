@@ -16,7 +16,7 @@ import time
 import math
 
 # Ensure project root is on sys.path so tests can be imported
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 import jax
 jax.config.update("jax_enable_x64", True)

@@ -1535,7 +1535,7 @@ Full AMIP simulation on the spectral PE dycore with operator-split physics:
 
 Clear seasonal cycle in all diagnostics; zonal-mean structure with ITCZ precipitation, midlatitude jets, and realistic radiative balance.
 
-#### 4.6.5 AMIP FV Cubed-Sphere Experiment (`scripts/run_amip.py`)
+#### 4.6.5 AMIP FV Cubed-Sphere Experiment (`scripts/run/run_amip.py`)
 
 Full AMIP simulation on the FV cubed-sphere dycore with operator-split physics:
 

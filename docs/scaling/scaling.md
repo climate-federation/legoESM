@@ -47,7 +47,7 @@ recipe.
 
 ## 1. Baseline single-device JW BCW benchmark (2-day, default config)
 
-`scripts/run_baroclinic_wave_benchmark.py` produces a 2-day Jablonowski-
+`scripts/run/run_baroclinic_wave_benchmark.py` produces a 2-day Jablonowski-
 Williamson dry baroclinic wave with the default `dt`/`hyperdiff` per
 grid.  Numbers below are this iteration's actual single-device
 measurements (warm step, JIT compiled once).
@@ -506,7 +506,7 @@ The iter-219 inline dispatch dict was a private ``_AUTO_SCAN_STEPS``
 local inside ``main()`` — it could be tweaked silently by a future
 ``/clear`` cycle without any test catching the drift.  iter-220
 hoists it to a module-level ``AUTO_SCAN_STEPS`` constant
-(``scripts/run_baroclinic_wave_benchmark.py:78``) and pins the values
+(``scripts/run/run_baroclinic_wave_benchmark.py:78``) and pins the values
 with two regression tests
 (``tests/test_bcw_benchmark_scan_steps.py``):
 

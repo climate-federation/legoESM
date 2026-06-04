@@ -2,7 +2,7 @@
 
 Companion to ``tests/parallel/test_latlon_mpi_gather_scatter.py``
 (serial, single-rank).  This file is invoked under
-``mpirun -n {2,4}`` by ``scripts/run_latlon_mpi_halo_smoke.sbatch``.
+``mpirun -n {2,4}`` by ``scripts/run/run_latlon_mpi_halo_smoke.sbatch``.
 
 Stage 3-D validates that:
 

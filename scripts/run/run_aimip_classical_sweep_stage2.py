@@ -27,13 +27,13 @@ Outputs (idempotent)
 - ``config/aimip/sweep/stage2/<combo_name>/{suite,variant_classical}.yaml``
 - ``config/aimip/sweep/stage2/manifest.json``
 - ``config/aimip/sweep/stage2/stage1_winners.json``  (audit trail)
-- ``scripts/_aimip_sweep_stage2_runner.sbatch``
+- ``scripts/run/_aimip_sweep_stage2_runner.sbatch``
 
 Launching
 ---------
 ::
 
-    sbatch --array=0-15 scripts/_aimip_sweep_stage2_runner.sbatch
+    sbatch --array=0-15 scripts/run/_aimip_sweep_stage2_runner.sbatch
 
 After stage-2, identify the single best classical combo (lowest eval
 loss) for the final T106 head-to-head against column_nn and sfno.
@@ -81,7 +81,7 @@ def _load_stage1_manifest(repo_root: Path) -> dict:
     path = repo_root / "config/aimip/sweep/stage1/manifest.json"
     if not path.exists():
         raise FileNotFoundError(
-            f"Missing {path} — run scripts/run_aimip_classical_sweep_stage1.py first."
+            f"Missing {path} — run scripts/run/run_aimip_classical_sweep_stage1.py first."
         )
     return json.loads(path.read_text())
 
@@ -222,7 +222,7 @@ def _write_combo(repo_root: Path, combo_name: str, overrides: dict) -> str:
 
 
 def _write_runner_sbatch(repo_root: Path, manifest_rel: Path) -> Path:
-    path = repo_root / "scripts" / "_aimip_sweep_stage2_runner.sbatch"
+    path = repo_root / "scripts" / "run" / "_aimip_sweep_stage2_runner.sbatch"
     content = f"""#!/bin/bash
 #SBATCH --job-name=aimip_sweep_s2
 #SBATCH --output=results/aimip_classical_sweep_stage2/slurm_logs/sweep_s2_%A_%a.out
@@ -261,7 +261,7 @@ export JAX_ENABLE_X64=1
 
 echo "[$(date)] task ${{SLURM_ARRAY_TASK_ID}} -> suite=${{SUITE_PATH}}"
 /burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python \\
-    scripts/run_aimip.py \\
+    scripts/run/run_aimip.py \\
     --suite "${{SUITE_PATH}}" \\
     --variants classical
 echo "[$(date)] task ${{SLURM_ARRAY_TASK_ID}} done"
@@ -368,7 +368,7 @@ def main():
     print(f"Runner sbatch: {runner_sbatch.relative_to(repo_root)}")
     print()
     print(f"Launch with:")
-    print(f"  sbatch --array=0-{len(stage2_combos) - 1} scripts/_aimip_sweep_stage2_runner.sbatch")
+    print(f"  sbatch --array=0-{len(stage2_combos) - 1} scripts/run/_aimip_sweep_stage2_runner.sbatch")
 
 
 if __name__ == "__main__":

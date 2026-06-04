@@ -80,7 +80,7 @@ _CUBED_ONLY_ATTRS = (
 # sfc-* is non-default, misuse is reported.
 _SFC_SHARED_ATTRS = ("sfc_Cd", "sfc_Ch", "sfc_T", "sfc_q")
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 

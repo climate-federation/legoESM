@@ -31,7 +31,7 @@ echo "[t106-column_nn] $(date)  host=$(hostname)  GPU info:"
 nvidia-smi -L 2>&1 | head -5 || echo "  (nvidia-smi unavailable)"
 
 echo "[t106-column_nn] Suite: config/aimip/t106/aimip_suite_column_nn.yaml"
-$PYTHON -u scripts/run_aimip.py \
+$PYTHON -u scripts/run/run_aimip.py \
     --suite config/aimip/t106/aimip_suite_column_nn.yaml
 
 echo "[t106-column_nn] Scorecard:"

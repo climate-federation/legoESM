@@ -241,7 +241,7 @@ The iterate-with-codex protocol on iter-10..15 is now CLEAN
       aerosol + CMIP6 ozone infrastructure that needs to be
       wired in.
 - [ ] **RCE cross-grid comparison**.  Infrastructure
-      (`scripts/run_rce.py`) supports all 4 grid types; needs
+      (`scripts/run/run_rce.py`) supports all 4 grid types; needs
       a wrapper that runs each grid and feeds the iter-1..16
       comparison plotter.
 - [ ] **OMIP integration** with ocean test matrix (already has

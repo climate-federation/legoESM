@@ -1,4 +1,4 @@
-"""Smoke test for the LBA land-diurnal plane run (``scripts/run_lba_plane.py``).
+"""Smoke test for the LBA land-diurnal plane run (``scripts/run/run_lba_plane.py``).
 
 Assembles SAM's LBA case (sounding + the diurnal H/LE surface-flux series) on the
 plane CRM and integrates a few steps with the prescribed surface fluxes active
@@ -17,7 +17,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-_SCRIPTS = Path(__file__).resolve().parents[2] / "scripts"
+_SCRIPTS = Path(__file__).resolve().parents[2] / "scripts" / "run"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 

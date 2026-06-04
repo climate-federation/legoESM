@@ -3,7 +3,7 @@ production-imports-from-tests anti-pattern.
 
 Background
 ----------
-Issue #188: ``scripts/run_amip.py`` (and other top-level scripts under
+Issue #188: ``scripts/run/run_amip.py`` (and other top-level scripts under
 ``scripts/``) crashed at startup with
 ``ModuleNotFoundError: No module named 'tests'`` because
 ``src/legoesm/driver/model_driver.py`` was importing Held-Suarez from
@@ -126,7 +126,7 @@ GRANDFATHERED_TESTS_IMPORTS_BY_FILE: dict[str, frozenset[str]] = {
         "tests.test_cases.dcmip_transport",
         "tests.test_cases.williamson",
     }),
-    "scripts/run_baroclinic_wave_benchmark.py": frozenset({
+    "scripts/run/run_baroclinic_wave_benchmark.py": frozenset({
         "tests.test_cases.baroclinic_wave",
     }),
     "scripts/bench/run_cpu_mpi_scaling.py": frozenset({
@@ -135,7 +135,7 @@ GRANDFATHERED_TESTS_IMPORTS_BY_FILE: dict[str, frozenset[str]] = {
     "scripts/bench/run_levante_gpu_scaling.py": frozenset({
         "tests.test_cases.baroclinic_wave",
     }),
-    "scripts/run_w2_mpas_convergence.py": frozenset({
+    "scripts/run/run_w2_mpas_convergence.py": frozenset({
         "tests.atmosphere.shallow_water.test_cases.williamson_mpas",
     }),
     "src/legoesm/atmosphere/dynamics/spectral_nh.py": frozenset({
@@ -361,7 +361,7 @@ def test_run_amip_help_starts_without_tests_on_path():
     ``run_amip.py`` and its import closure. Any stale ``tests.*``
     reference at module scope along that graph will surface here.
     """
-    script = REPO_ROOT / "scripts" / "run_amip.py"
+    script = REPO_ROOT / "scripts" / "run" / "run_amip.py"
     assert script.is_file(), f"script not found: {script}"
     result = _run_subprocess_without_repo_root(
         "import runpy, sys\n"

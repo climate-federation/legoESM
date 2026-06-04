@@ -56,7 +56,7 @@ print("  jax:", jax.__version__, " devices:", jax.devices())
 PY
 
 echo "[aimip-multistep] Suite manifest: config/aimip/aimip_suite_multistep.yaml"
-$PYTHON -u scripts/run_aimip.py \
+$PYTHON -u scripts/run/run_aimip.py \
     --suite config/aimip/aimip_suite_multistep.yaml
 
 echo "[aimip-multistep] Scorecard:"

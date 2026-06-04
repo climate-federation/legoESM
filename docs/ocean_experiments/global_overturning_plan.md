@@ -388,7 +388,7 @@ follow that pattern.
    relative norm.  Standard practice in MOM6/NEMO: budget cannot diverge
    from the integrated state by more than floating-point order-of-ops.
 
-4. **Driver script** `scripts/run_drake_momentum_budget.py`:
+4. **Driver script** `scripts/run/run_drake_momentum_budget.py`:
    - Restart from `restart_day018250.npz`.
    - Run 1 sim-year (52,560 steps at dt=600 s) with
      `step_with_diagnostics`.
@@ -442,7 +442,7 @@ barotropic-mode-noise issue spun out (see `docs/issues/`).
   4/4 at 1e-12 relative.  Existing C-grid regression suite (17 tests)
   still passes.
 - ✅ Diagnostic runner refactored: shared helper
-  `scripts/_drake_momentum_budget_runner.py` rolls
+  `scripts/run/_drake_momentum_budget_runner.py` rolls
   `tendencies_with_diagnostics + step + accumulate` into a JIT-compiled
   `lax.scan` block.  Speedup measured at **8.4× (82 min → 9.8 min) for
   a 1-yr run** with bit-equivalent science (headline number ±0 at 3

@@ -241,7 +241,7 @@ def test_one_step_flux_magnitudes_are_realistic(tmp_path):
 #
 # Then run the smoke at 1°/30 days:
 #
-#   JAX_ENABLE_X64=1 python scripts/run_omip.py \
+#   JAX_ENABLE_X64=1 python scripts/run/run_omip.py \
 #       --grid latlon \
 #       --resolution 180x360 \
 #       --nlev 20 \

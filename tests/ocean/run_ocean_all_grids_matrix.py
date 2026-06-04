@@ -39,7 +39,7 @@ REQUESTED_CASES = (
     "stommel_gyre_tracer",
 )
 
-# Spectral runner (scripts/run_ocean_spectral_tests.py) covers a subset.
+# Spectral runner (scripts/run/run_ocean_spectral_tests.py) covers a subset.
 SPECTRAL_CASES = (
     "rest_state",
     "gravity_wave",
@@ -418,7 +418,7 @@ def main() -> int:
         def build_spectral_cmd(dt_now: float) -> list[str]:
             return [
                 args.python,
-                "scripts/run_ocean_spectral_tests.py",
+                "scripts/run/run_ocean_spectral_tests.py",
                 "--x64",
                 "--truncation",
                 str(spectral_trunc),

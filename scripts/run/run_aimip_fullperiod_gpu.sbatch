@@ -34,7 +34,7 @@ export HOME=${HOME:-/burg-archive/home/pg2328}
 echo "[full-period] $(date)  host=$(hostname)"
 nvidia-smi -L 2>&1 | head -5 || echo "  (nvidia-smi unavailable)"
 
-$PYTHON -u scripts/run_aimip.py \
+$PYTHON -u scripts/run/run_aimip.py \
     --suite config/aimip/aimip_suite_fullperiod.yaml
 
 echo "[full-period] Scorecard:"

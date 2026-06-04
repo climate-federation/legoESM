@@ -841,7 +841,7 @@ class TestOmipBlowupReporting:
         import importlib
         import sys
         from pathlib import Path
-        scripts_dir = Path(__file__).resolve().parent.parent / "scripts"
+        scripts_dir = Path(__file__).resolve().parent.parent / "scripts" / "run"
         if str(scripts_dir) not in sys.path:
             sys.path.insert(0, str(scripts_dir))
         return importlib.import_module("run_omip")

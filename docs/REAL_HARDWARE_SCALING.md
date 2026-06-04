@@ -16,7 +16,7 @@ It is focused on commands that already exist in this repository:
   Large multi-GPU runs benefit most.
 - **SPMD halo backend** (issue #275) is activated in the AMIP
   production profile for multi-device runs.
-- **OMIP centennial driver** (`scripts/run_omip.py`) supports
+- **OMIP centennial driver** (`scripts/run/run_omip.py`) supports
   tripolar (eORCA1), MPAS Voronoi (ico5 / ico6), lat-lon, and
   cubed-sphere grids with auto-restart and `jra55_3way` run sets.
 - **mpi4jax compatibility guardrails** in `legoesm.parallel.reductions`

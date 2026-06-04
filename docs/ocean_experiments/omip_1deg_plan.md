@@ -214,7 +214,7 @@ The equatorial boost is fully implemented and committed:
 - `equatorial_boost_factor()` in `latlon_cgrid_operators.py`
 - Config fields `A_h_eq_boost`, `A_h_eq_sigma_deg` in `LatLonCGridOceanConfig`
 - Wired into both Laplacian application sites in `ocean_pe_latlon_cgrid.py`
-- CLI args `--A-h-eq-boost`, `--A-h-eq-sigma` in `scripts/run_omip.py`
+- CLI args `--A-h-eq-boost`, `--A-h-eq-sigma` in `scripts/run/run_omip.py`
 
 ### How to launch a sweep
 
@@ -222,7 +222,7 @@ Pin each run to a separate GPU on the 2× V100S machine:
 
 ```bash
 # Run E — conservative reduction
-CUDA_VISIBLE_DEVICES=0 nohup python scripts/run_omip.py \
+CUDA_VISIBLE_DEVICES=0 nohup python scripts/run/run_omip.py \
   --days 1825 --A-h 1.2e5 --K-h 0 --B-h 5e9 \
   --A-h-eq-boost 3.0 --A-h-eq-sigma 5.0 \
   --C-smag 0.2 --slope-foot-alpha 3.0 \
@@ -232,7 +232,7 @@ CUDA_VISIBLE_DEVICES=0 nohup python scripts/run_omip.py \
   > results/sweep_E.log 2>&1 &
 
 # Run F — moderate reduction
-CUDA_VISIBLE_DEVICES=1 nohup python scripts/run_omip.py \
+CUDA_VISIBLE_DEVICES=1 nohup python scripts/run/run_omip.py \
   --days 1825 --A-h 1.5e5 --K-h 0 --B-h 5e9 \
   --A-h-eq-boost 2.0 --A-h-eq-sigma 5.0 \
   --C-smag 0.2 --slope-foot-alpha 3.0 \
@@ -320,7 +320,7 @@ Create `scripts/run_omip_ocean.py` — a standalone script that:
 
 This bypasses the full atmosphere model and coupler complexity.
 
-**Template**: Follow the pattern of `scripts/run_amip.py` (atmosphere
+**Template**: Follow the pattern of `scripts/run/run_amip.py` (atmosphere
 forced by prescribed SST) but in reverse (ocean forced by prescribed
 atmosphere).
 
@@ -456,7 +456,7 @@ For ERA5 at 0.25° regridded to 1°, 6-hourly, 10 years:
 
 ## Key Files
 
-- `scripts/run_amip.py` — template for a forced model driver
+- `scripts/run/run_amip.py` — template for a forced model driver
 - `src/legoesm/forcing/external.py` — Zarr/NetCDF forcing loader
 - `src/legoesm/training/era5_to_state.py` — ERA5 data loading patterns
 - `src/legoesm/ocean/physics/combined.py` — OceanPhysicsConfig + make_ocean_physics

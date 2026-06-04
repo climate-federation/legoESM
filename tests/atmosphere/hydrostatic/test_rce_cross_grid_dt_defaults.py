@@ -1,4 +1,4 @@
-"""Pin the auto-dt heuristic used by ``scripts/run_rce.py``.
+"""Pin the auto-dt heuristic used by ``scripts/run/run_rce.py``.
 
 iter-24: now imports ``legoesm.driver.rce_dt.auto_dt_rce`` directly
 instead of hand-copying the production logic into a test mirror
@@ -94,7 +94,7 @@ def test_auto_dt_rce_lies_inside_cfl_envelope():
 
     Latlon is also excluded: ``auto_dt_rce`` returns the un-clamped
     ladder value, but ``run_rce.py`` runs a SECOND pole-cell-CFL
-    clamp afterwards (see scripts/run_rce.py:229-235) that drops
+    clamp afterwards (see scripts/run/run_rce.py:229-235) that drops
     the effective dt below the latlon CFL formula. Measuring the
     auto-dt ladder against the formula directly is therefore not
     meaningful for latlon — the effective dt is the clamped value.

@@ -147,7 +147,7 @@ def main():
 
     # --- Set up JRA55 forcing ---
     print("Setting up JRA55-do forcing…")
-    from scripts.run_omip import _setup_jra55_forcing_state, _jra55_step
+    from scripts.run.run_omip import _setup_jra55_forcing_state, _jra55_step
     import argparse
     args = argparse.Namespace(
         jra55_cache="data/jra55_ryf_cache/jra55_do_v14_omip2_1deg_noleap.zarr",

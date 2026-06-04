@@ -22,7 +22,7 @@ This script writes (idempotent):
   config/aimip/sweep/stage1/combo_<name>/suite.yaml
   config/aimip/sweep/stage1/combo_<name>/variant_classical.yaml
   config/aimip/sweep/stage1/manifest.json
-  scripts/_aimip_sweep_stage1_runner.sbatch
+  scripts/run/_aimip_sweep_stage1_runner.sbatch
   scripts/run_aimip_classical_sweep_stage1.sbatch
 
 Launching
@@ -30,14 +30,14 @@ Launching
 After this script runs (writes configs only, no jobs submitted):
 ::
 
-    sbatch --array=0-27 scripts/_aimip_sweep_stage1_runner.sbatch
+    sbatch --array=0-27 scripts/run/_aimip_sweep_stage1_runner.sbatch
 
 The array job index selects one combo from the manifest and runs
-``scripts/run_aimip.py --suite <combo>/suite.yaml --variants classical``
+``scripts/run/run_aimip.py --suite <combo>/suite.yaml --variants classical``
 under JAX/CUDA on a single GPU.
 
 After stage-1 finishes, parse the per-combo scorecards with
-``scripts/run_aimip_classical_sweep_stage2.py`` (TBD) which picks
+``scripts/run/run_aimip_classical_sweep_stage2.py`` (TBD) which picks
 top-2 per dimension and launches the 16-run full-Cartesian stage-2
 sweep.
 """
@@ -120,7 +120,7 @@ def _write_combo(repo_root: Path, combo_name: str, overrides: dict, *,
 
 def _write_runner_sbatch(repo_root: Path, manifest_rel: Path) -> Path:
     """Write the SLURM array runner that picks one combo from the manifest."""
-    path = repo_root / "scripts" / "_aimip_sweep_stage1_runner.sbatch"
+    path = repo_root / "scripts" / "run" / "_aimip_sweep_stage1_runner.sbatch"
     content = f"""#!/bin/bash
 #SBATCH --job-name=aimip_sweep_s1
 #SBATCH --output=results/aimip_classical_sweep_stage1/slurm_logs/sweep_s1_%A_%a.out
@@ -137,7 +137,7 @@ def _write_runner_sbatch(repo_root: Path, manifest_rel: Path) -> Path:
 # with --variants classical on the corresponding suite YAML.
 #
 # Submit with:
-#     sbatch --array=0-N scripts/_aimip_sweep_stage1_runner.sbatch
+#     sbatch --array=0-N scripts/run/_aimip_sweep_stage1_runner.sbatch
 # where N+1 = number of combos in the manifest (currently 28; counted
 # at submission time).
 
@@ -164,7 +164,7 @@ export JAX_ENABLE_X64=1
 
 echo "[$(date)] task ${{SLURM_ARRAY_TASK_ID}} -> suite=${{SUITE_PATH}}"
 /burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python \\
-    scripts/run_aimip.py \\
+    scripts/run/run_aimip.py \\
     --suite "${{SUITE_PATH}}" \\
     --variants classical
 echo "[$(date)] task ${{SLURM_ARRAY_TASK_ID}} done"
@@ -241,7 +241,7 @@ def main():
         print(f"  [{i:2d}] {combo['name']:35s} -> {combo['scheme']}")
     print()
     print(f"Launch with:")
-    print(f"  sbatch --array=0-{len(combos) - 1} scripts/_aimip_sweep_stage1_runner.sbatch")
+    print(f"  sbatch --array=0-{len(combos) - 1} scripts/run/_aimip_sweep_stage1_runner.sbatch")
 
 
 if __name__ == "__main__":

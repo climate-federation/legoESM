@@ -21,9 +21,9 @@ Configs written
 
 Launchers written (one per variant for max parallelism)
 -------------------------------------------------------
-``scripts/run_aimip_headtohead_t106_classical.sbatch``
-``scripts/run_aimip_headtohead_t106_column_nn.sbatch``
-``scripts/run_aimip_headtohead_t106_sfno_physics.sbatch``
+``scripts/run/run_aimip_headtohead_t106_classical.sbatch``
+``scripts/run/run_aimip_headtohead_t106_column_nn.sbatch``
+``scripts/run/run_aimip_headtohead_t106_sfno_physics.sbatch``
 
 Submit any subset; they're independent and target distinct GPUs.
 """
@@ -50,7 +50,7 @@ def _load_winner(repo_root: Path, metric: str) -> tuple[dict, list[dict]]:
     if not manifest_path.exists():
         raise FileNotFoundError(
             f"Missing stage-2 manifest at {manifest_path}.  Run "
-            "scripts/run_aimip_classical_sweep_stage2.py first."
+            "scripts/run/run_aimip_classical_sweep_stage2.py first."
         )
     manifest = json.loads(manifest_path.read_text())
 
@@ -223,7 +223,7 @@ export JAX_PLATFORMS=cuda
 export JAX_ENABLE_X64=1
 
 /burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python \\
-    scripts/run_aimip.py \\
+    scripts/run/run_aimip.py \\
     --suite {HEADTOHEAD_DIR_REL}/suite.yaml \\
     --variants {variant}
 """

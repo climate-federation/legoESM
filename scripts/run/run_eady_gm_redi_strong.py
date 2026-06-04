@@ -22,7 +22,7 @@ from pathlib import Path
 # Ensure the repo's scripts directory is on sys.path so we can import
 # the test-matrix experiment modules without installing them.
 import sys
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from ocean_test_matrix.experiments import run_eady_gm_redi  # noqa: E402

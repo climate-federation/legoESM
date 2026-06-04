@@ -92,7 +92,7 @@ echo "========================================"
 # ----------------------------------------------------------------------
 echo
 echo "--- Reference: 4-day continuous run ---"
-"${MPI_LAUNCH[@]}" -n 4 "${PY}" "${REPO_ROOT}/scripts/run_amip.py" \
+"${MPI_LAUNCH[@]}" -n 4 "${PY}" "${REPO_ROOT}/scripts/run/run_amip.py" \
     --resolution "${RES}" \
     --grid-type latlon \
     --discretization finite_volume \
@@ -118,7 +118,7 @@ fi
 # ----------------------------------------------------------------------
 echo
 echo "--- Chain leg 1: 0 → 2 days, writes day-2 checkpoint ---"
-"${MPI_LAUNCH[@]}" -n 4 "${PY}" "${REPO_ROOT}/scripts/run_amip.py" \
+"${MPI_LAUNCH[@]}" -n 4 "${PY}" "${REPO_ROOT}/scripts/run/run_amip.py" \
     --resolution "${RES}" \
     --grid-type latlon \
     --discretization finite_volume \
@@ -147,7 +147,7 @@ echo "--- Chain leg 2: restart day-2 → day-4 ---"
 # ``_run_compiled``), which would mismatch the reference filename
 # even though the underlying STATE is bit-equivalent.  Codex review
 # round 3 caught this filename-vs-state inconsistency.
-"${MPI_LAUNCH[@]}" -n 4 "${PY}" "${REPO_ROOT}/scripts/run_amip.py" \
+"${MPI_LAUNCH[@]}" -n 4 "${PY}" "${REPO_ROOT}/scripts/run/run_amip.py" \
     --resolution "${RES}" \
     --grid-type latlon \
     --discretization finite_volume \

@@ -1,9 +1,9 @@
-# CMIP7 Forcing Files — `scripts/run_amip.py`
+# CMIP7 Forcing Files — `scripts/run/run_amip.py`
 
 Scope: structural comparison between the forcing files under
 `/work/bd1179/CMIP7_forcings_raw/` and the ingestion paths in
 `src/legoesm/forcing/external.py` + `src/legoesm/forcing/amip.py`
-(driven by `scripts/run_amip.py`).  Line numbers below reflect the
+(driven by `scripts/run/run_amip.py`).  Line numbers below reflect the
 current `main` branch (post-`ap/fix-amip-external-forcing`); loaders
 now parse `"months since"` time units (`external.py:93-105`) and do
 non-cyclic linear-in-time interpolation for multi-year ozone files
@@ -200,7 +200,7 @@ CMIP7 introduces several categories that have no corresponding `ExternalForcingC
 Given the compatibility state above, only these flags point at real CMIP7 files without code changes:
 
 ```bash
-scripts/run_amip.py \
+scripts/run/run_amip.py \
   --forcing-path  /work/bd1179/CMIP7_forcings_raw/sst_and_seaice/tos_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-10_gn_187001-202212.nc \
   --sic-path      /work/bd1179/CMIP7_forcings_raw/sst_and_seaice/siconc_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-10_gn_187001-202212.nc \
   --sst-var       tos --sst-offset 273.15 \
@@ -232,7 +232,7 @@ Dropped relative to CMIP6 until loaders are updated:
    Add an `open_forcing_dataset_mf` helper that accepts a list of paths or a glob and concatenates along `time` — used by ozone, per-species GHG, and large emission products.
 6. **`amip.py` — CMIP7 SST/SIC preset**
    `get_amip_preset("cmip7")` returning `sst_var="tos"`, `sic_var="siconc"`, `sst_offset=273.15`, `sic_scale=0.01`, and recommending the `_bcs` variants when available. Avoids the 4-flag incantation above.
-7. **Documentation in `scripts/run_amip.py` help strings**
+7. **Documentation in `scripts/run/run_amip.py` help strings**
    Point at the CMIP7 layout and warn that `--ghg-forcing external` and `--aerosol-forcing external` are not wired for CMIP7 yet.
 
 ## 6. Glossary additions (CMIP7-specific)

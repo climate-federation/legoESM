@@ -15,9 +15,9 @@ Canonical state of CRM rollout — built, broken, next. Each iteration appends d
 | Plane CRM acoustic substeps (SI) | `compressible_euler.py:acoustic_substeps_semi_implicit`, `compressible_euler_plane.py:plane_acoustic_substeps_semi_implicit` | Built. Substep KW78 placement algebraically correct but inert (F2); R9 outer-step variant no longer on critical path (F10 + iter-12 dt=5 s PASS) |
 | 2-D pencil MPI layout + halo exchange | `src/legoesm/parallel/plane_mpi.py` | Built, AD-safe (iter-4 + iter-5) |
 | MPI-aware reductions for RCE | `src/legoesm/atmosphere/dynamics/rce_mpi.py` | Built (iter-4 R7 — full DD mass fixer) |
-| 30-day production driver | `scripts/run_rce_mpi_long.py`, `scripts/run_rce_30day.sh` | DD path wired via ``--use-dd`` (iter-5); legacy rank-0-broadcast retained as F8-stable default. Real MPI scaling F9-platform-blocked on macOS Python 3.13 |
-| Multi-grid RCE driver | `scripts/run_rce.py`, `scripts/run_rce_cross_grid.sh` | Built for `cubed_sphere`, `latlon`, `voronoi`, `gaussian`. 30-day production validated for {C24, C48, C72, V4, LL32, T21} (iter-12 + iter-15 + iter-26); C96 stays at 2-day nightly per iter-22 wall-time decision |
-| Bare-dycore stability diagnostic | `scripts/diag_bare_dycore_stability.py` | Built (iter-1) with `--implicit-buoyancy` / `--vertical-theta-diffusion` / `--advection` switches |
+| 30-day production driver | `scripts/run/run_rce_mpi_long.py`, `scripts/run/run_rce_30day.sh` | DD path wired via ``--use-dd`` (iter-5); legacy rank-0-broadcast retained as F8-stable default. Real MPI scaling F9-platform-blocked on macOS Python 3.13 |
+| Multi-grid RCE driver | `scripts/run/run_rce.py`, `scripts/run/run_rce_cross_grid.sh` | Built for `cubed_sphere`, `latlon`, `voronoi`, `gaussian`. 30-day production validated for {C24, C48, C72, V4, LL32, T21} (iter-12 + iter-15 + iter-26); C96 stays at 2-day nightly per iter-22 wall-time decision |
+| Bare-dycore stability diagnostic | `scripts/tmp/diag_bare_dycore_stability.py` | Built (iter-1) with `--implicit-buoyancy` / `--vertical-theta-diffusion` / `--advection` switches |
 | Auto-dt ladder | `src/legoesm/driver/rce_dt.py` | Built (iter-24). 5-tier per-grid ladder + N>96 hard refusal (iter-21). Anchored by 5 measurement layers (iter-28/29/34/36/51) |
 | Radiation-schedule helper | `src/legoesm/driver/physics_schedule.py` | Built (iter-42). Single source of truth for the ``rad_call_every_steps`` arithmetic; 22 unit tests (iter-42 + iter-43 NaN/inf/sys.maxsize hardening) |
 | Shared RCE assertion helpers | `tests/atmosphere/hydrostatic/test_rce_cross_grid_smoke.py` | Built (iter-46). `_assert_dt_used` + `_assert_max_wind_peak_below` shared across C48/C72/C96/V4/LL32/T21 nightlies; 16 unit tests (iter-52) |
@@ -30,7 +30,7 @@ Canonical state of CRM rollout — built, broken, next. Each iteration appends d
 
 1. **Run to completion** without NaN, `max|w| < 50 m/s` throughout.
 2. **Reach radiative-convective equilibrium**: CWV plateaus in 30 ± 5 mm range, precip plateaus ~3 mm/day, MSE drift < 1 % over last 10 days.
-3. **Reproduce on each supported grid type** via `scripts/run_rce_cross_grid.sh` (cubed-sphere, latlon, voronoi, gaussian). Currently only *plane* CRM has explicit CRM physics; cubed-sphere/latlon/voronoi/gaussian use hydrostatic dycore in RCE mode and cross-grid wrapper validates they converge to similar CWV / precip / MSE.
+3. **Reproduce on each supported grid type** via `scripts/run/run_rce_cross_grid.sh` (cubed-sphere, latlon, voronoi, gaussian). Currently only *plane* CRM has explicit CRM physics; cubed-sphere/latlon/voronoi/gaussian use hydrostatic dycore in RCE mode and cross-grid wrapper validates they converge to similar CWV / precip / MSE.
 4. **Scale with MPI**:
    * **Strong scaling**: 30-day-clock-time on 12 ranks ≤ 1.5× of 1-rank time / 12 (efficiency ≥ 67 %).
    * **Weak scaling**: per-rank cost grows < 1.3× when grid doubled in each dim and ranks doubled in each dim (4× total).
@@ -69,7 +69,7 @@ Tested simultaneously: max|w| @ step 100 = 480 m/s (worse than baseline). WENO5 
 
 ### F4. Production 30-day driver does not actually use MPI DD
 
-`scripts/run_rce_mpi_long.py` calls `model.step(state, ...)` on **rank 0** inside `if rank == 0:`, then `_broadcast_state(state, comm, root=0)` to every rank. Dycore + physics run replicated; only reductions (`global_sum_mpi` via `compute_total_water_mass_plane_mpi`, etc.) genuinely MPI. **Net**: 12 ranks ≈ 1 rank speed (overhead dominates). Strong/weak scaling: not achievable until `model.step_halo(...)` path taken on multi-rank.
+`scripts/run/run_rce_mpi_long.py` calls `model.step(state, ...)` on **rank 0** inside `if rank == 0:`, then `_broadcast_state(state, comm, root=0)` to every rank. Dycore + physics run replicated; only reductions (`global_sum_mpi` via `compute_total_water_mass_plane_mpi`, etc.) genuinely MPI. **Net**: 12 ranks ≈ 1 rank speed (overhead dominates). Strong/weak scaling: not achievable until `model.step_halo(...)` path taken on multi-rank.
 
 ### F5. Halo-aware slow tendency lacks production features
 
@@ -120,8 +120,8 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 ### 2026-05-26 — iter 1 (this entry)
 
 **Changes**
-* `scripts/run_rce_mpi_long.py`: added `--implicit-buoyancy` flag, wired through `CompressibleEulerConfig.implicit_buoyancy`. Hard-fails if `--implicit-buoyancy` set without `--semi-implicit-acoustic`.
-* `scripts/run_rce_30day.sh`: reduced default `DT` from 6.0 s → 1.0 s (6.0 s default untested; 2.0 s reproducibly blows up; 1.0 s reproduces F1 stable). Added `--semi-implicit-acoustic` and `--acoustic-off-centering 0.1` to launch line. Exposed `N_ACOUSTIC`, `ADVECTION` env vars. Documented dt-stability ladder in script header.
+* `scripts/run/run_rce_mpi_long.py`: added `--implicit-buoyancy` flag, wired through `CompressibleEulerConfig.implicit_buoyancy`. Hard-fails if `--implicit-buoyancy` set without `--semi-implicit-acoustic`.
+* `scripts/run/run_rce_30day.sh`: reduced default `DT` from 6.0 s → 1.0 s (6.0 s default untested; 2.0 s reproducibly blows up; 1.0 s reproduces F1 stable). Added `--semi-implicit-acoustic` and `--acoustic-off-centering 0.1` to launch line. Exposed `N_ACOUSTIC`, `ADVECTION` env vars. Documented dt-stability ladder in script header.
 * `CRM_implementation.md` created with state + roadmap + findings.
 
 **Measurements**
@@ -176,9 +176,9 @@ Direct probe pre-iter-75:
 
 iter-75 adds `total_steps >= 1` guard AFTER total_steps derivation
 in both drivers:
-* ``scripts/run_rce_mpi_long.py``: after line 830 ``total_steps =
+* ``scripts/run/run_rce_mpi_long.py``: after line 830 ``total_steps =
   int(total_t / args.dt)``.
-* ``scripts/run_rce.py``: after line 626 ``n_steps = int(...)``.
+* ``scripts/run/run_rce.py``: after line 626 ``n_steps = int(...)``.
 
 Both produce: ``error: --dt rejected: total_steps=0 ... must be
 >= 1`` exit 1.
@@ -258,7 +258,7 @@ gated).
 
 **Regression test for iter-71 ``run_rce.py`` CLI validation.**
 
-iter-71 added input-validation guards to ``scripts/run_rce.py`` but
+iter-71 added input-validation guards to ``scripts/run/run_rce.py`` but
 the contract had no regression backstop. iter-72 lands
 ``tests/atmosphere/hydrostatic/test_run_rce_cli_validation.py``
 with 10 parametric cases:
@@ -286,11 +286,11 @@ production drivers). F9 platform-blocked.
 
 ### 2026-05-26 — iter 71
 
-**Mirror iter-67/70 CLI input validation onto ``scripts/run_rce.py``
+**Mirror iter-67/70 CLI input validation onto ``scripts/run/run_rce.py``
 (hydrostatic driver).**
 
-iter-67/68/69/70 hardened ``scripts/run_rce_mpi_long.py`` against
-bad numeric CLI inputs. The hydrostatic sibling ``scripts/run_rce.py``
+iter-67/68/69/70 hardened ``scripts/run/run_rce_mpi_long.py`` against
+bad numeric CLI inputs. The hydrostatic sibling ``scripts/run/run_rce.py``
 (used by the cross-grid 30-day nightlies via the cross-grid wrapper)
 had the same class of silent-pass bugs: ``--days -1`` produced a
 "Complete: 0.0s wall time" with zero diag rows. Direct probe
@@ -565,7 +565,7 @@ exit code 1.
 **Before** (raw traceback):
 ```
 Traceback (most recent call last):
-  File "scripts/run_rce_mpi_long.py", line 672, in main
+  File "scripts/run/run_rce_mpi_long.py", line 672, in main
     rad_call_every_steps = _rad_every(args.rad_call_interval_s, args.dt)
   File "src/legoesm/driver/physics_schedule.py", line 76, in radiation_call_every_steps
     raise ValueError(...)
@@ -823,7 +823,7 @@ removal — CLAUDE.md slopbuster hygiene), R6 ✓. F9 platform-blocked.
 **Refreshed plane CRM production driver argparse default + AST regression test.**
 
 iter-58 fixed the wrapper script defaults. iter-59 audit of the underlying
-``scripts/run_rce_mpi_long.py`` argparse found the same staleness:
+``scripts/run/run_rce_mpi_long.py`` argparse found the same staleness:
 
 * ``--n-acoustic-substeps`` default = ``24`` (iter-1 dt=1.0 s legacy);
   iter-14 + iter-38 production use ``N=12`` at the driver's
@@ -868,7 +868,7 @@ Test inventory (post-iter-59):
 
 **Refreshed stale `run_rce_30day.sh` defaults + landed regression test.**
 
-iter-58 audit of ``scripts/run_rce_30day.sh`` (the production-launch
+iter-58 audit of ``scripts/run/run_rce_30day.sh`` (the production-launch
 wrapper) found two stale defaults dating to iter-1 / pre-F10:
 
 * ``N_ACOUSTIC`` env default ``24`` — was set for iter-1's
@@ -887,7 +887,7 @@ wrapper) found two stale defaults dating to iter-1 / pre-F10:
   path.
 
 **Fixes**:
-* ``scripts/run_rce_30day.sh``: bumped ``N_ACOUSTIC`` default
+* ``scripts/run/run_rce_30day.sh``: bumped ``N_ACOUSTIC`` default
   ``24 → 12``; rewrote the stability-history comment block to
   reflect F7/F8/F10/iter-14 + iter-38 reality.
 
@@ -921,7 +921,7 @@ platform-blocked. R11 30-day plane CRM still wall-time gated
 production-path modules.**
 
 Final piece of the DOD item 5 holistic Codex pass:
-* iter-55: production driver (``scripts/run_rce_mpi_long.py``) — 0 HIGH + 0 MEDIUM, 2 LOW deferred.
+* iter-55: production driver (``scripts/run/run_rce_mpi_long.py``) — 0 HIGH + 0 MEDIUM, 2 LOW deferred.
 * iter-56: dycore + halo-aware slow tendency (``compressible_euler_plane.py`` + ``compressible_euler_plane_halo.py``) — 0 HIGH + 0 MEDIUM (production); 2 HIGH + 2 MEDIUM in the bench-only fast-path closed via fallback gate.
 * iter-57: MPI halo + reductions (``src/legoesm/parallel/plane_mpi.py``) — 0 HIGH + 0 MEDIUM + 3 LOW.
 
@@ -1012,7 +1012,7 @@ with explicit fallback for non-production configs.
 bugs — both fixed.**
 
 iter-39/40/42/54 each added a radiation-path change to
-``scripts/run_rce_mpi_long.py``. iter-55 ran a fresh Codex review
+``scripts/run/run_rce_mpi_long.py``. iter-55 ran a fresh Codex review
 across the whole file to verify the post-stack composition. Found:
 
 * **MEDIUM#1 — ``--no-radiation`` + bogus ``--rad-call-interval-s``
@@ -1416,7 +1416,7 @@ CLAUDE.md DRY rule + Codex iter-39/40/41 review trail flagged inline arithmetic 
 
 **Wiring**:
 * ``src/legoesm/driver/__init__.py`` re-exports all three names.
-* ``scripts/run_rce_mpi_long.py`` uses ``radiation_call_every_steps`` (function-scope import to avoid cross-package eager-import pattern CLAUDE.md warns against).
+* ``scripts/run/run_rce_mpi_long.py`` uses ``radiation_call_every_steps`` (function-scope import to avoid cross-package eager-import pattern CLAUDE.md warns against).
 * ``tests/atmosphere/nonhydrostatic/integration/
   test_plane_crm_end_to_end_smoke.py``: iter-16 + iter-39 assertions now go through ``radiation_call_schedule`` instead of re-deriving formula locally. Single canonical source driver also uses.
 
@@ -1482,7 +1482,7 @@ Codex iter-39 HIGH#2 fix in iter-39 only touched iter-38/iter-39 slow tests. 12�
 
 Codex iter-39 MEDIUM#1 noted iter-39 with-radiation slow test didn't actually assert radiation tick fires expected number of times — broken ``rad_call_every_steps`` arithmetic (e.g. int-truncation regression pinning interval to 1 or ``total_steps``) would silently shift call schedule without tripping MSE-sandwich assertion in many regimes.
 
-**Driver change** (``scripts/run_rce_mpi_long.py``):
+**Driver change** (``scripts/run/run_rce_mpi_long.py``):
 * New ``_maybe_fire_radiation(step_idx)`` closure consolidates rad-firing branch from both DD path (n_ranks>1, use_dd) and legacy rank-0 path. Returns True on fire so caller can increment counter.
 * New ``rad_call_count`` Python counter incremented at each fire.
 * New ``rad_calls=N`` token added to final ``Done.`` line so any subprocess/CI parser can assert on it.
@@ -1516,7 +1516,7 @@ Codex iter-39 MEDIUM#1 noted iter-39 with-radiation slow test didn't actually as
 
 * **Codex iter-39 HIGH#2** (real bug in iter-38): iter-38 helper passed ``--rad-call-interval-s 1e9`` thinking that disables radiation. Inspection of driver loop showed radiation tick uses ``(step - 1) % rad_call_every_steps == 0`` — at step 1 modulo is 0 regardless of interval, so radiation fires ONCE at step 1 and caches tendency for full run. iter-38 actually exercising "dycore + 1 cached radiation tendency", not pure dycore-only.
 
-  Fixed by wiring real ``--no-radiation`` CLI flag into ``scripts/run_rce_mpi_long.py``:
+  Fixed by wiring real ``--no-radiation`` CLI flag into ``scripts/run/run_rce_mpi_long.py``:
 
   ```python
   if not args.no_radiation and (step - 1) % rad_call_every_steps == 0:

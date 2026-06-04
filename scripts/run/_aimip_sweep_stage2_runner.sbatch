@@ -36,7 +36,7 @@ export JAX_ENABLE_X64=1
 
 echo "[$(date)] task ${SLURM_ARRAY_TASK_ID} -> suite=${SUITE_PATH}"
 /burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python \
-    scripts/run_aimip.py \
+    scripts/run/run_aimip.py \
     --suite "${SUITE_PATH}" \
     --variants classical
 echo "[$(date)] task ${SLURM_ARRAY_TASK_ID} done"

@@ -314,7 +314,7 @@ round caught real issues; final convergence is clean.
 | Shallow water tests on all grids | ✅ DONE |
 | Hydrostatic Held-Suarez on all grids | ✅ DONE (with documented structural disagreement) |
 | Hydrostatic RCE on all grids | ✅ DONE (iter-24: ``mean_timeseries.csv`` + ``results.txt`` output, ``run_rce_cross_grid.sh`` wrapper) |
-| Hydrostatic AMIP w/ realistic GHG/aerosol/O3 | ⚠️ iter-22 RRTMGP wired (steady-state); iter-31 ``--co2-ppmv`` / ``--ch4-ppbv`` / ``--n2o-ppbv`` matrix-runner knobs; iter-34/36 ``--cloud-scheme`` with auto-``include_clouds=True``; iter-39 ``--ozone-source`` / ``--ozone-peak-hpa`` / ``--ozone-max-vmr`` knobs.  iter-41/42 ``scripts/run_amip_cross_grid.sh`` wrapper + ``_amip_to_matrix_format.py`` post-processor: invokes the real ``scripts/run_amip.py`` (with full CMIP6 GHG / aerosol / ozone file support) per grid then bridges the output format so the matrix-runner cross-grid plot path collects the AMIP results.  Matrix-runner ``run_amip`` remains an HS+RRTMGP stub for cross-grid CONSISTENCY testing rather than full AMIP. |
+| Hydrostatic AMIP w/ realistic GHG/aerosol/O3 | ⚠️ iter-22 RRTMGP wired (steady-state); iter-31 ``--co2-ppmv`` / ``--ch4-ppbv`` / ``--n2o-ppbv`` matrix-runner knobs; iter-34/36 ``--cloud-scheme`` with auto-``include_clouds=True``; iter-39 ``--ozone-source`` / ``--ozone-peak-hpa`` / ``--ozone-max-vmr`` knobs.  iter-41/42 ``scripts/run/run_amip_cross_grid.sh`` wrapper + ``_amip_to_matrix_format.py`` post-processor: invokes the real ``scripts/run/run_amip.py`` (with full CMIP6 GHG / aerosol / ozone file support) per grid then bridges the output format so the matrix-runner cross-grid plot path collects the AMIP results.  Matrix-runner ``run_amip`` remains an HS+RRTMGP stub for cross-grid CONSISTENCY testing rather than full AMIP. |
 | Ocean test cases on all grids | ✅ DONE |
 | OMIP | ✅ DONE (iter-25: matrix-compatible CSV + results.txt, ``run_omip_cross_grid.sh`` wrapper; iter-49 relaxes the ocean collector to accept timeseries-only OMIP runs so ``run_ocean_test_matrix.py --cross-grid-plots-only`` picks them up) |
 | Same colorbar/projection across grids | ✅ DONE (cartopy PlateCarrée + shared cmap) |
@@ -456,9 +456,9 @@ round caught real issues; final convergence is clean.
   (``--ozone-peak-hpa``); ``results.txt`` key casing made
   consistent.
 
-* iter-41: ``scripts/run_amip_cross_grid.sh`` wrapper added.
+* iter-41: ``scripts/run/run_amip_cross_grid.sh`` wrapper added.
   Mirrors the iter-24 RCE / iter-25 OMIP wrappers: invokes the
-  real ``scripts/run_amip.py`` (full CMIP6 GHG/aerosol/ozone
+  real ``scripts/run/run_amip.py`` (full CMIP6 GHG/aerosol/ozone
   file support — the matrix runner's ``run_amip`` is HS+RRTMGP
   only) once per grid, then calls the matrix runner's
   ``--cross-grid-plots-only`` to produce the comparison plots.
@@ -467,7 +467,7 @@ round caught real issues; final convergence is clean.
   runs.  Bash syntax-checked; usage error fires on missing
   OUTPUT.
 * iter-42: fix iter-41 output-format mismatch.
-  ``scripts/run_amip.py`` writes ``timeseries.npz`` + a free-
+  ``scripts/run/run_amip.py`` writes ``timeseries.npz`` + a free-
   form ``results.txt`` (e.g. "Grid: ...\\nStatus: ..."), but
   the matrix-runner cross-grid plot collector requires
   ``mean_timeseries.csv`` + a key:value ``results.txt`` (e.g.
@@ -475,7 +475,7 @@ round caught real issues; final convergence is clean.
   iter-41 wrapper silently skips every grid in the cross-grid
   pass — exactly the include_clouds-style "plumbed but never
   read" failure mode iter-39 codex caught.  Added
-  ``scripts/_amip_to_matrix_format.py`` (90 LOC) +
+  ``scripts/run/_amip_to_matrix_format.py`` (90 LOC) +
   invocation step in the wrapper.  5 new unit tests pin
   the converter behaviour: end-to-end output, COMPLETED→PASS
   status mapping, missing-npz graceful fallback, integration

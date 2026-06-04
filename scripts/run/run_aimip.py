@@ -322,7 +322,7 @@ def _train_aimip_classical(
     # Physics scheme dispatch from YAML.  Defaults reproduce the legacy
     # AIMIP classical recipe (tiedtke + louis + mcfarlane + none).
     # Used by the combinatorial physics sweep
-    # (scripts/run_aimip_classical_sweep_stage1.py).
+    # (scripts/run/run_aimip_classical_sweep_stage1.py).
     conv_scheme = str(cfg.get("aimip_convection", "tiedtke"))
     turb_scheme = str(cfg.get("aimip_turbulence", "louis"))
     gwd_scheme = str(cfg.get("aimip_gwd", "mcfarlane"))

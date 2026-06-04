@@ -6,7 +6,7 @@
 #
 # Iter-41: addresses the user's prompt item "hydrostatic AMIP with
 # realistic GHG, aerosol and ozone forcing, on all grid types".
-# This wrapper invokes ``scripts/run_amip.py`` (NOT the matrix
+# This wrapper invokes ``scripts/run/run_amip.py`` (NOT the matrix
 # runner's stub ``run_amip``, which is HS + optional RRTMGP without
 # external forcing files) once per grid; output is laid out at
 # ``$OUTPUT/hydrostatic/amip/<grid>/<resolution>/`` so the matrix
@@ -129,7 +129,7 @@ for ENTRY in "${GRID_TABLE[@]}"; do
     if [ -n "$DT_OVERRIDE" ]; then
         DT_FLAG="--dt $DT_OVERRIDE"
     fi
-    JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}" JAX_ENABLE_X64=1 .venv/bin/python scripts/run_amip.py \
+    JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}" JAX_ENABLE_X64=1 .venv/bin/python scripts/run/run_amip.py \
         --grid-type "$GRID" --discretization "$DISC" \
         --resolution "$RES" \
         $TRUNC $DT_FLAG --days "$DAYS" --diag-days 1 --output "$OUTDIR" \
@@ -157,7 +157,7 @@ for ENTRY in "${GRID_TABLE[@]}"; do
     # timeseries.npz (= failed AMIP run); we honor that exit
     # status by setting ANY_FAILED so the cross-grid plot step
     # can warn the user.
-    if ! .venv/bin/python scripts/_amip_to_matrix_format.py "$OUTDIR"; then
+    if ! .venv/bin/python scripts/run/_amip_to_matrix_format.py "$OUTDIR"; then
         echo "  WARNING: $GRID has no usable AMIP output; cross-"
         echo "  grid collection will skip it."
         ANY_FAILED=1

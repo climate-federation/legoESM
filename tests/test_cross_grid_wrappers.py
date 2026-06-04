@@ -48,7 +48,7 @@ _RCE_AMIP_GRID_DISC = {
 }
 
 # OMIP uses ocean-side spelling: ``mpas`` / ``spectral`` directly as
-# grid_type names (see ``scripts/run_omip.py`` ``--grid`` choices).
+# grid_type names (see ``scripts/run/run_omip.py`` ``--grid`` choices).
 _OMIP_GRIDS = {"cubed_sphere", "latlon", "mpas", "spectral"}
 
 
@@ -128,7 +128,7 @@ def _strip_comments(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 class TestRceCrossGridWrapper:
-    """Pin ``scripts/run_rce_cross_grid.sh`` (iter-24)."""
+    """Pin ``scripts/run/run_rce_cross_grid.sh`` (iter-24)."""
 
     @pytest.fixture(scope="class")
     def wrapper_text(self):
@@ -284,7 +284,7 @@ class TestRceCrossGridWrapper:
         purge_match = re.search(
             r'rm\s+-f\s+"\$OUTDIR/mean_timeseries\.csv"', body,
         )
-        run_match = re.search(r'scripts/run_rce\.py', body)
+        run_match = re.search(r'scripts/run/run_rce\.py', body)
         assert purge_match, (
             "iter-75 codex HIGH: RCE wrapper must purge stale "
             "$OUTDIR/mean_timeseries.csv before each run"
@@ -296,7 +296,7 @@ class TestRceCrossGridWrapper:
 
 
 class TestOmipCrossGridWrapper:
-    """Pin ``scripts/run_omip_cross_grid.sh`` (iter-25).
+    """Pin ``scripts/run/run_omip_cross_grid.sh`` (iter-25).
 
     iter-53 codex HIGH: extended from minimal coverage (loop +
     executable only) to also pin: per-grid output convention, OMIP
@@ -428,7 +428,7 @@ class TestOmipCrossGridWrapper:
         purge_match = re.search(
             r'rm\s+-rf\s+"\$OUTDIR/\$GRID"', body,
         )
-        run_match = re.search(r'scripts/run_omip\.py', body)
+        run_match = re.search(r'scripts/run/run_omip\.py', body)
         assert purge_match, (
             "iter-75 codex HIGH: OMIP wrapper must purge "
             "$OUTDIR/$GRID before each run"
@@ -440,7 +440,7 @@ class TestOmipCrossGridWrapper:
 
 
 class TestAmipCrossGridWrapper:
-    """Pin ``scripts/run_amip_cross_grid.sh`` (iter-41) and the
+    """Pin ``scripts/run/run_amip_cross_grid.sh`` (iter-41) and the
     iter-42/43/44/45 converter integration."""
 
     @pytest.fixture(scope="class")
@@ -510,7 +510,7 @@ class TestAmipCrossGridWrapper:
             r'rm\s+-f\s+"\$OUTDIR/timeseries\.npz"',
             body,
         )
-        run_match = re.search(r'scripts/run_amip\.py', body)
+        run_match = re.search(r'scripts/run/run_amip\.py', body)
         assert purge_match, (
             "iter-43 codex HIGH guard missing INSIDE the loop body: "
             'rm -f "$OUTDIR/timeseries.npz"'
@@ -526,9 +526,9 @@ class TestAmipCrossGridWrapper:
         ``run_amip.py`` finishes within EACH per-grid iteration,
         not just somewhere after the whole loop."""
         _, _, body = _extract_grid_loop_body(wrapper_code)
-        run_match = re.search(r'scripts/run_amip\.py', body)
+        run_match = re.search(r'scripts/run/run_amip\.py', body)
         conv_match = re.search(
-            r'scripts/_amip_to_matrix_format\.py', body,
+            r'scripts/run/_amip_to_matrix_format\.py', body,
         )
         assert run_match and conv_match, (
             "Both run_amip.py and _amip_to_matrix_format.py must "
@@ -566,7 +566,7 @@ class TestAmipCrossGridWrapper:
         _, _, body = _extract_grid_loop_body(wrapper_code)
         # Find the converter's if-not block opening.
         if_open = re.search(
-            r'if\s+!\s+\.venv/bin/python\s+scripts/_amip_to_matrix_format\.py'
+            r'if\s+!\s+\.venv/bin/python\s+scripts/run/_amip_to_matrix_format\.py'
             r'\s+"\$OUTDIR";?\s*then',
             body,
         )

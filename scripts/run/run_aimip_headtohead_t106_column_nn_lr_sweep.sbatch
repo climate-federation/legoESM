@@ -54,7 +54,7 @@ echo "[h2h-column_nn-lr-sweep] $(date)  task=${TASK_ID}  suite=${SUITE}  host=$(
 nvidia-smi -L 2>&1 | head -5 || echo "  (nvidia-smi unavailable)"
 
 /burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python \
-    -u scripts/run_aimip.py \
+    -u scripts/run/run_aimip.py \
     --suite "${SUITE}" \
     --variants column_nn
 

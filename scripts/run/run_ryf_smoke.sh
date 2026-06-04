@@ -118,7 +118,7 @@ fi
 
 echo ""
 echo "[3/4] Running ${SMOKE_DAYS}-day RYF smoke @ $SMOKE_RES, $SMOKE_NLEV levels, dt=${SMOKE_DT}s ..."
-JAX_ENABLE_X64=1 python "$REPO_ROOT/scripts/run_omip.py" \
+JAX_ENABLE_X64=1 python "$REPO_ROOT/scripts/run/run_omip.py" \
     --grid latlon \
     --resolution "$SMOKE_RES" \
     --nlev "$SMOKE_NLEV" \

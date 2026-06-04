@@ -190,7 +190,7 @@ Zarr + lazy chunked reads with local cache).
 `src/legoesm/ocean/forced_driver.py` if it grows large enough to warrant a
 module).
 
-Templated on `scripts/run_amip.py` but reversed (ocean forced by atmosphere
+Templated on `scripts/run/run_amip.py` but reversed (ocean forced by atmosphere
 instead of atmosphere forced by SST).
 
 **Per-step loop** (must be JIT-clean per CLAUDE.md):

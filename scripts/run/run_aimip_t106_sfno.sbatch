@@ -33,7 +33,7 @@ echo "[t106-sfno] $(date)  host=$(hostname)  GPU info:"
 nvidia-smi -L 2>&1 | head -5 || echo "  (nvidia-smi unavailable)"
 
 echo "[t106-sfno] Suite: config/aimip/t106/aimip_suite_sfno.yaml"
-$PYTHON -u scripts/run_aimip.py \
+$PYTHON -u scripts/run/run_aimip.py \
     --suite config/aimip/t106/aimip_suite_sfno.yaml
 
 echo "[t106-sfno] Scorecard:"

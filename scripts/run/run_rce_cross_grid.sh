@@ -3,7 +3,7 @@
 # time-series comparison via the atmosphere-matrix plotter.
 #
 # Iter-24: addresses the user's prompt item "RCE on all grid types".
-# ``scripts/run_rce.py`` (now with iter-24 mean_timeseries.csv +
+# ``scripts/run/run_rce.py`` (now with iter-24 mean_timeseries.csv +
 # results.txt outputs) is invoked once per grid; output is laid out at
 # ``$OUTPUT/hydrostatic/rce/<grid>/<resolution>/`` so
 # ``run_atmosphere_test_matrix.py --cross-grid-plots-only`` picks it up.
@@ -66,7 +66,7 @@ for ENTRY in "${GRID_TABLE[@]}"; do
     # spectral + voronoi paths trigger an MLIR legalisation error on
     # Apple Metal ("func.func op ... data types not supported"). User
     # can override with JAX_PLATFORMS=metal at their own risk.
-    JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}" JAX_ENABLE_X64=1 .venv/bin/python scripts/run_rce.py \
+    JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}" JAX_ENABLE_X64=1 .venv/bin/python scripts/run/run_rce.py \
         --grid-type "$GRID" --discretization "$DISC" \
         --resolution "$RES" --days "$DAYS" --diag-days "$DIAG_DAYS" \
         --output "$OUTDIR" || {

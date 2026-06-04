@@ -43,7 +43,7 @@ from pressure/barotropic/physics.
 ## Tools
 
 - **Test file**: `tests/ocean/test_advection_convergence.py` (pytest)
-- **Runner script**: `scripts/run_advection_convergence.py` (standalone, produces plots)
+- **Runner script**: `scripts/run/run_advection_convergence.py` (standalone, produces plots)
 - **Output**: `results/advection_convergence/`
 
 ---
@@ -891,7 +891,7 @@ Cosine bell at (180°E, 45°N), non-divergent flow deforms and reverses
 over 5 days. Error at t=T measures combined spatial, temporal, and
 dimensional-splitting accuracy.
 
-Script: `scripts/run_advection_convergence_2d.py`
+Script: `scripts/run/run_advection_convergence_2d.py`
 
 | Scheme | 32x64 L2 | 64x128 L2 | 128x256 L2 | Rate | Status |
 |---|---|---|---|---|---|

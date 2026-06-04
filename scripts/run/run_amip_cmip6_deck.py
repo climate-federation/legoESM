@@ -48,7 +48,7 @@ import sys
 from pathlib import Path
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_FORCING = _REPO_ROOT / "forcing_amip"
 
 # CLAUDE.md "Constant and Parameter Discipline": never hardcode 273.15 etc.
@@ -264,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     # Build the run_amip.py command
-    run_amip = _REPO_ROOT / "scripts" / "run_amip.py"
+    run_amip = _REPO_ROOT / "scripts" / "run" / "run_amip.py"
     cmd = [
         sys.executable, str(run_amip),
         "--dataset", "custom",

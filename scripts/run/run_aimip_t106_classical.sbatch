@@ -16,8 +16,8 @@
 #
 # Submit all three with:
 #   sbatch scripts/run_aimip_t106_classical.sbatch
-#   sbatch scripts/run_aimip_t106_column_nn.sbatch
-#   sbatch scripts/run_aimip_t106_sfno.sbatch
+#   sbatch scripts/run/run_aimip_t106_column_nn.sbatch
+#   sbatch scripts/run/run_aimip_t106_sfno.sbatch
 
 set -euo pipefail
 
@@ -37,7 +37,7 @@ echo "[t106-classical] $(date)  host=$(hostname)  GPU info:"
 nvidia-smi -L 2>&1 | head -5 || echo "  (nvidia-smi unavailable)"
 
 echo "[t106-classical] Suite: config/aimip/t106/aimip_suite_classical.yaml"
-$PYTHON -u scripts/run_aimip.py \
+$PYTHON -u scripts/run/run_aimip.py \
     --suite config/aimip/t106/aimip_suite_classical.yaml
 
 echo "[t106-classical] Scorecard:"

@@ -100,7 +100,7 @@ if (( DAYS_THIS_JOB <= 0 )); then
     exit 0
 fi
 
-CMD=( "${PY}" -u scripts/run_amip.py
+CMD=( "${PY}" -u scripts/run/run_amip.py
     --dataset analytical
     --grid-type voronoi --discretization mpas
     --resolution "${RES}" --nlev "${NLEV}"

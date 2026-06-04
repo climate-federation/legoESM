@@ -10,7 +10,7 @@ on it.
 
 All tests run without JIT and at small problem sizes so the suite
 stays cheap.  Production-scale integration of DINO is covered by
-``scripts/run_dino.py`` and the experiment registry; this file is
+``scripts/run/run_dino.py`` and the experiment registry; this file is
 the slopbuster-mandated direct-coverage entry point.
 """
 

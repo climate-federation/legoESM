@@ -3,7 +3,7 @@
 Runs a short AMIP integration and checks that mass, energy, and
 moisture budgets close properly.  The short run (5 days at C8/L5)
 serves as a smoke test; the full 365-day baseline is run via
-scripts/run_amip.py --conservation-audit.
+scripts/run/run_amip.py --conservation-audit.
 
 Tests:
 1. Dry mass conservation: relative drift < 1e-10

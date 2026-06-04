@@ -34,7 +34,7 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-DRIVER = REPO_ROOT / "scripts" / "run_rce_mpi_long.py"
+DRIVER = REPO_ROOT / "scripts" / "run" / "run_rce_mpi_long.py"
 
 
 def _run_driver(output_dir):

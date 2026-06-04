@@ -24,6 +24,6 @@ export JAX_PLATFORMS=cuda
 export JAX_ENABLE_X64=1
 
 /burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python \
-    scripts/run_aimip.py \
+    scripts/run/run_aimip.py \
     --suite config/aimip/t106_headtohead/suite.yaml \
     --variants sfno_physics

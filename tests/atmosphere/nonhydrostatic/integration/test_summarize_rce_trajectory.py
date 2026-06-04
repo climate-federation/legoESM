@@ -4,7 +4,7 @@ iter-98: a tool tracking per-day RCE diagnostics is only useful if its
 field extraction matches ``run_rce_mpi_long.py``'s snapshot writer.
 These tests build synthetic ``snap_day_*.npz`` + ``prof_day_*.npz``
 files with the exact key set the production driver writes (verified
-against ``scripts/run_rce_mpi_long.py:save_snapshot_2d`` and
+against ``scripts/run/run_rce_mpi_long.py:save_snapshot_2d`` and
 ``save_profile``) and assert that:
 
 1. Every column in the printed table + the CSV is finite and tracks
@@ -128,7 +128,7 @@ def test_snapshot_key_contract_matches_driver():
     in lockstep, surfacing the contract drift."""
     driver_path = (
         Path(__file__).resolve().parents[4]
-        / "scripts" / "run_rce_mpi_long.py"
+        / "scripts" / "run" / "run_rce_mpi_long.py"
     )
     text = driver_path.read_text()
     for key in SNAP_KEYS:
@@ -143,7 +143,7 @@ def test_profile_key_contract_matches_driver():
     ``qc``, ``qr``, ``cloud_fraction``, ``w_variance``."""
     driver_path = (
         Path(__file__).resolve().parents[4]
-        / "scripts" / "run_rce_mpi_long.py"
+        / "scripts" / "run" / "run_rce_mpi_long.py"
     )
     text = driver_path.read_text()
     for key in ("qc", "qr", "cloud_fraction", "w_variance"):

@@ -1,6 +1,6 @@
 """Convert ``run_amip.py`` output to the matrix-runner cross-grid layout.
 
-iter-42: addresses an iter-41 oversight.  ``scripts/run_amip.py`` writes:
+iter-42: addresses an iter-41 oversight.  ``scripts/run/run_amip.py`` writes:
 
     output_dir/
         timeseries.npz       (numpy keys: days, T_atm, max_wind, ...)

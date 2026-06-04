@@ -34,11 +34,11 @@ from pathlib import Path
 
 sys.stdout.reconfigure(line_buffering=True)
 
-_PROJECT_ROOT = str(Path(__file__).resolve().parents[1])
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 # Insert src/ directory so legoesm can be found regardless of install state.
-_SRC_ROOT = str(Path(__file__).resolve().parents[1] / "src")
+_SRC_ROOT = str(Path(__file__).resolve().parents[2] / "src")
 if _SRC_ROOT not in sys.path:
     sys.path.insert(0, _SRC_ROOT)
 

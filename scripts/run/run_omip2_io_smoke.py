@@ -30,7 +30,7 @@ import tempfile
 from pathlib import Path
 
 # Make the project importable when invoked from a checkout
-_PROJ = Path(__file__).resolve().parents[1]
+_PROJ = Path(__file__).resolve().parents[2]
 if str(_PROJ) not in sys.path:
     sys.path.insert(0, str(_PROJ))
 

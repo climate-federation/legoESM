@@ -1,7 +1,7 @@
-"""Cross-grid CRM smoke for ``scripts/run_rcemip_long.py``.
+"""Cross-grid CRM smoke for ``scripts/run/run_rcemip_long.py``.
 
 iter-238: the multi-grid non-hydrostatic CRM driver
-``scripts/run_rcemip_long.py`` dispatches on ``--grid {plane_fd,
+``scripts/run/run_rcemip_long.py`` dispatches on ``--grid {plane_fd,
 plane_spectral, cubed_sphere, mpas}`` and reuses the same RCEMIP-like
 moist Wing-2018 initial condition across all four grid backends.
 Pre iter-238 it had ZERO test coverage — a silent regression on any
@@ -49,7 +49,7 @@ from tests.atmosphere.nonhydrostatic.integration._bench_smoke_helpers import (
 )
 
 
-DRIVER = REPO_ROOT / "scripts" / "run_rcemip_long.py"
+DRIVER = REPO_ROOT / "scripts" / "run" / "run_rcemip_long.py"
 
 
 def _run_driver(output_file: Path, grid: str, days: float = 0.001,

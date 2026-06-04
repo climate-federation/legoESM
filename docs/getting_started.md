@@ -89,7 +89,7 @@ Kessler microphysics, and a simple mass-flux convection scheme. See
 ### c. A 1-year AMIP smoke test
 
 ```bash
-JAX_ENABLE_X64=1 .venv/bin/python scripts/run_amip.py \
+JAX_ENABLE_X64=1 .venv/bin/python scripts/run/run_amip.py \
     --grid-type cubed_sphere --resolution 16 --days 365
 ```
 
@@ -99,7 +99,7 @@ production-grade end-to-end run. Output lands under `output/`.
 ### d. (Optional) A coupled aquaplanet
 
 ```bash
-JAX_ENABLE_X64=1 .venv/bin/python scripts/run_coupled.py --preset slab_simple --days 365
+JAX_ENABLE_X64=1 .venv/bin/python scripts/run/run_coupled.py --preset slab_simple --days 365
 ```
 
 Fully coupled atmosphere + slab ocean + bucket land. Other presets:
@@ -158,9 +158,9 @@ A few principles to internalise:
 
 | You want to... | Use |
 |---|---|
-| Run a 3-D atmosphere | `ModelDriver` / `scripts/run_amip.py` |
-| Run a fully coupled simulation | `CoupledESMDriver` / `scripts/run_coupled.py` |
-| Run an OMIP ocean spin-up | `scripts/run_omip.py` |
+| Run a 3-D atmosphere | `ModelDriver` / `scripts/run/run_amip.py` |
+| Run a fully coupled simulation | `CoupledESMDriver` / `scripts/run/run_coupled.py` |
+| Run an OMIP ocean spin-up | `scripts/run/run_omip.py` |
 | Run a single column | `SingleColumnModel.create()` / `scripts/matrix/run_scm_test_matrix.py` |
 | Run a Williamson / DCMIP test | `scripts/matrix/run_atmosphere_test_matrix.py` |
 | Run the ocean test matrix | `scripts/matrix/run_ocean_test_matrix.py` |

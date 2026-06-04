@@ -151,7 +151,7 @@ def _scrape_driver_argparse_default(flag: str) -> str | int | float:
     """Scrape ``--<flag>``'s argparse default literal from
     run_rce_mpi_long.py. Helper for the parametrized
     preamble-claim consistency tests below."""
-    driver_text = (REPO_ROOT / "scripts" / "run_rce_mpi_long.py").read_text()
+    driver_text = (REPO_ROOT / "scripts" / "run" / "run_rce_mpi_long.py").read_text()
     pat = (
         rf'p\.add_argument\("--{flag}",\s*type=(int|float),'
         rf'\s*default=([0-9.eE_+-]+)'
@@ -225,7 +225,7 @@ def test_dod_quotes_driver_production_grid_size():
     leave the doc claim stale until a human noticed.
     """
     dod = _read_dod_section()
-    driver_text = (REPO_ROOT / "scripts" / "run_rce_mpi_long.py").read_text()
+    driver_text = (REPO_ROOT / "scripts" / "run" / "run_rce_mpi_long.py").read_text()
     # Scrape ``--nx`` and ``--ny`` defaults from argparse calls.
     nx_m = re.search(
         r'p\.add_argument\("--nx",\s*type=int,\s*default=(\d+)',
@@ -260,7 +260,7 @@ def test_dod_quotes_wrapper_default_ranks():
     line, then asserts criterion 2's text references the same N.
     """
     dod = _read_dod_section()
-    wrapper_text = (REPO_ROOT / "scripts" / "run_rce_30day.sh").read_text()
+    wrapper_text = (REPO_ROOT / "scripts" / "run" / "run_rce_30day.sh").read_text()
     m = re.search(r'^RANKS="\$\{RANKS:-(\d+)\}"', wrapper_text, re.MULTILINE)
     assert m, "wrapper missing RANKS env default"
     ranks = int(m.group(1))

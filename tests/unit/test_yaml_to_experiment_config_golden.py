@@ -13,7 +13,7 @@ review — exactly the bit-repro discipline the master plan mandates.
 
 Scope: the standalone ``config/*.yaml`` files that ``legoesm run`` feeds through
 ``to_experiment_config`` (today, the Williamson cases).  The ``config/aimip/``
-configs are consumed by ``scripts/run_aimip.py``'s separate AMIP loader, not by
+configs are consumed by ``scripts/run/run_aimip.py``'s separate AMIP loader, not by
 this function (several even use an incompatible ``radiation:`` string schema);
 they are folded into this golden surface at Stage C1 when the loaders unify.
 

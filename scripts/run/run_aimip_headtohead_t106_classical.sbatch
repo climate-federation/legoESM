@@ -15,7 +15,7 @@
 #
 # 72 h single-shot walltime (chain disabled)
 # ------------------------------------------
-# Runs ``scripts/run_aimip.py --resume`` once: scans
+# Runs ``scripts/run/run_aimip.py --resume`` once: scans
 # ``results/aimip_t106_headtohead/classical/`` for the latest
 # ``epoch_NNNN.eqx`` and continues training from epoch+1.  72 h is
 # enough headroom for the full 4-epoch run including the one-time
@@ -62,7 +62,7 @@ echo "[h2h-${VARIANT}] $(date)  link=${LINK}/${MAX_LINKS}  host=$(hostname)  job
 nvidia-smi -L 2>&1 | head -5 || echo "  (nvidia-smi unavailable)"
 
 /burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python \
-    -u scripts/run_aimip.py \
+    -u scripts/run/run_aimip.py \
     --suite "${SUITE}" \
     --variants "${VARIANT}" \
     --resume

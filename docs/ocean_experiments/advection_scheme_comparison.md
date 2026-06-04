@@ -696,7 +696,7 @@ changes the dynamics.
 WENO stability tests and contaminating V_baro time-means. The implicit
 solver should give cleaner dynamics.
 
-**Tool**: new standalone script `scripts/run_eady_advection_comparison.py`
+**Tool**: new standalone script `scripts/run/run_eady_advection_comparison.py`
 with EKE, Var(T), and zonal spectra diagnostics.
 
 ### Setup

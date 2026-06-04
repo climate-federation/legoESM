@@ -573,7 +573,7 @@ class TestIter92AuditFollowupDelegation:
         """
         from pathlib import Path
         path = Path(__file__).resolve().parent.parent.parent / \
-               "scripts" / "run_w2_w5_cosine_bell_iter1030.py"
+               "scripts" / "run" / "run_w2_w5_cosine_bell_iter1030.py"
         text = path.read_text()
         code_only = "\n".join(
             line for line in text.splitlines()
@@ -590,7 +590,7 @@ class TestIter92AuditFollowupDelegation:
         """
         from pathlib import Path
         path = Path(__file__).resolve().parent.parent.parent / \
-               "scripts" / "run_advection_convergence_2d.py"
+               "scripts" / "run" / "run_advection_convergence_2d.py"
         text = path.read_text()
         code_only = "\n".join(
             line for line in text.splitlines()

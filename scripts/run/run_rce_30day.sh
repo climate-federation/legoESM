@@ -13,7 +13,7 @@
 # 0.0/0.1).
 # Hourly 3D MSE/qv/T snapshots for GIF, daily surface snapshots, 5-day profiles.
 #
-# Stability history (measured by scripts/diag_bare_dycore_stability.py
+# Stability history (measured by scripts/tmp/diag_bare_dycore_stability.py
 # at nx=ny=48, nlev=30, dx=2 km, H=33 km, --semi-implicit-acoustic):
 # F1 (iter-1, with bubble IC):
 #   dt=1.0 s -> stable; dt=1.5 s -> growing; dt=2.0 s -> blows up step 70
@@ -220,7 +220,7 @@ echo "Logs:    $LOGFILE"
 # pipefail`` (already enabled above) preserves mpirun's exit status
 # through the ``| tee`` pipe.
 mpirun -np "$RANKS" "$PYBIN" \
-    "$REPO_ROOT/scripts/run_rce_mpi_long.py" \
+    "$REPO_ROOT/scripts/run/run_rce_mpi_long.py" \
     --nx "$NX" --ny "$NY" \
     --days "$DAYS" --dt "$DT" \
     --semi-implicit-acoustic \

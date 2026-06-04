@@ -133,7 +133,7 @@ if (( DAYS_THIS_JOB <= 0 )); then
 fi
 
 CMD=(
-    "${PY}" "${REPO_ROOT}/scripts/run_amip_cmip6_deck.py"
+    "${PY}" "${REPO_ROOT}/scripts/run/run_amip_cmip6_deck.py"
     --forcing-dir "${FORCING_DIR}"
     --auto-generate
     --start-year "${START_YEAR}"

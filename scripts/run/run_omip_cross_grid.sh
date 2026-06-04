@@ -3,7 +3,7 @@
 # comparison via the ocean-matrix plotter.
 #
 # Iter-25: addresses the user's prompt item "OMIP" cross-grid.
-# ``scripts/run_omip.py`` (now with iter-25 mean_timeseries.csv +
+# ``scripts/run/run_omip.py`` (now with iter-25 mean_timeseries.csv +
 # results.txt outputs) is invoked once per grid; ``run_omip.py``
 # already places output at ``$OUTPUT/<grid>/<resolution>/`` which
 # is the same layout the ocean cross-grid plotter expects.
@@ -55,7 +55,7 @@ for GRID in cubed_sphere latlon mpas spectral; do
     # contributing to the cross-grid plot.  Mirrors the iter-43
     # AMIP wrapper pattern: log a warning, set ANY_FAILED=1,
     # and continue.
-    JAX_ENABLE_X64=1 .venv/bin/python scripts/run_omip.py \
+    JAX_ENABLE_X64=1 .venv/bin/python scripts/run/run_omip.py \
         --grid "$GRID" --days "$DAYS" --physics "$PHYSICS" \
         --output "$OUTDIR" || {
         echo "  WARNING: run_omip.py FAILED for $GRID"
