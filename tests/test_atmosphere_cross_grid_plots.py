@@ -1835,14 +1835,11 @@ class TestHeldSuarezInitConsistency:
         # missing module + ``FileNotFoundError`` for missing mesh
         # data file are legitimate skips; everything else is a real
         # bug we want to surface.
-        try:
-            from legoesm.grids.mpas import create_mpas_mesh
-        except ImportError:
-            pytest.skip("MPAS mesh module unavailable")
-        try:
-            mesh = create_mpas_mesh(level=2)
-        except FileNotFoundError:
-            pytest.skip("MPAS level-2 mesh data file unavailable")
+        # Level-1 Voronoi (42 cells) — procedural, no data file; restores
+        # the MPAS held_suarez init coverage previously dead-skipped via a
+        # nonexistent legoesm.grids.mpas import.
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        mesh = create_voronoi_mesh(subdivision_level=1)
         s_mpas = hs_module.held_suarez_init_mpas(mesh, sigma)
         assert float(jnp.max(jnp.abs(s_mpas.u.data))) == 0.0
 
@@ -1908,14 +1905,11 @@ class TestHeldSuarezInitConsistency:
 
         # MPAS.
         # iter-48 codex LOW: only catch legitimate-skip exceptions.
-        try:
-            from legoesm.grids.mpas import create_mpas_mesh
-        except ImportError:
-            pytest.skip("MPAS mesh module unavailable; cube/latlon coverage suffices")
-        try:
-            mesh = create_mpas_mesh(level=2)
-        except FileNotFoundError:
-            pytest.skip("MPAS level-2 mesh data file unavailable")
+        # Level-1 Voronoi (42 cells) — procedural, no data file; restores
+        # the MPAS held_suarez init coverage previously dead-skipped via a
+        # nonexistent legoesm.grids.mpas import.
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        mesh = create_voronoi_mesh(subdivision_level=1)
         s_mpas = hs_module.held_suarez_init_mpas(mesh, sigma)
         p_s_mpas = jnp.asarray(s_mpas.p_s.data)
         assert abs(float(jnp.min(p_s_mpas)) - p_ref) < 1e-6
@@ -1960,14 +1954,11 @@ class TestHeldSuarezInitConsistency:
 
         # MPAS.
         # iter-48 codex LOW: legitimate-skip-only catches.
-        try:
-            from legoesm.grids.mpas import create_mpas_mesh
-        except ImportError:
-            pytest.skip("MPAS mesh module unavailable")
-        try:
-            mesh = create_mpas_mesh(level=2)
-        except FileNotFoundError:
-            pytest.skip("MPAS level-2 mesh data file unavailable")
+        # Level-1 Voronoi (42 cells) — procedural, no data file; restores
+        # the MPAS held_suarez init coverage previously dead-skipped via a
+        # nonexistent legoesm.grids.mpas import.
+        from legoesm.grids.voronoi import create_voronoi_mesh
+        mesh = create_voronoi_mesh(subdivision_level=1)
         s_mpas = hs_module.held_suarez_init_mpas(mesh, sigma)
         mean_T_mpas = float(jnp.mean(s_mpas.T.data))
         assert abs(mean_T_mpas - 300.0) < 0.2, (
