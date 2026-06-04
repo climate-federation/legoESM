@@ -985,8 +985,9 @@ def jra55_to_atm_surface(
     AtmToSurface
         Ready for ``ocean_tile_response``.
     """
-    # Virtual temperature: T_v = T (1 + 0.61 q)
-    T_v = slice.tas * (1.0 + 0.61 * slice.huss)
+    # Virtual temperature: T_v = T (1 + (1/epsilon - 1) q); canonical coefficient
+    # (~0.608), not the rounded 0.61 literal (~0.4% drift).
+    T_v = slice.tas * (1.0 + (1.0 / constants.epsilon - 1.0) * slice.huss)
     rho_a = slice.psl / (constants.R_d * T_v)
 
     cos_z = _jra55_cos_zenith(lat_rad, lon_rad, day, ref_year=ref_year)

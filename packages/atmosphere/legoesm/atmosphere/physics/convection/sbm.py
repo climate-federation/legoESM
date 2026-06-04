@@ -31,7 +31,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_dT
 from legoesm.atmosphere.physics.thermodynamics import (
     compute_moist_adiabat,
     compute_cape,
@@ -115,8 +115,9 @@ def sbm_convection(
                           + constants.L_v * (q_trial - q_v)) * dp,
             axis=1,
         )  # (ncol,)
-        q_sat_trial = saturation_mixing_ratio(T_trial, p_full)
-        dqsat_dT = constants.L_v * q_sat_trial / (constants.R_v * T_trial ** 2)
+        # Tetens-exact mixing-ratio derivative (matches the mixing-ratio residual
+        # above + the emanuel.py convention) — not the CC-approximate inline form.
+        dqsat_dT = saturation_mixing_ratio_dT(T_trial, p_full)
         jacobian = jnp.sum(
             cloud_mask * (constants.c_pd
                           + constants.L_v * RH_ref[:, None] * dqsat_dT) * dp,

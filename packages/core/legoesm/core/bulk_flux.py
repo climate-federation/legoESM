@@ -294,17 +294,11 @@ def compute_most_fluxes(
             )
             U_10N = jnp.clip(U_10N, 0.5, 50.0)
 
-            # 2) LY09 neutral 10-m drag coefficient (Large & Yeager 2009 Eq. 6).
-            # The −3.14807e-10·U⁶ term is LY09's high-wind correction; LY04
-            # lacked it and over-estimated drag at U > 30 m/s. Required by
-            # the OMIP-2 protocol (Griffies 2016 §2.2).
-            C_DN = (
-                2.7 / U_10N
-                + 0.142
-                + U_10N / 13.09
-                - 3.14807e-10 * U_10N ** 6
-            ) * 1e-3
-            C_DN = jnp.clip(C_DN, 0.5e-3, 3.0e-3)
+            # 2) LY09 neutral 10-m drag coefficient — the canonical shared drag
+            # law (Large & Yeager 2009 Eq. 6, incl. the −3.14807e-10·U⁶ high-wind
+            # correction + clip), NOT a per-component re-derivation.  U_10N is
+            # already clipped to [0.5, 50], so the helper's 0.5 floor is a no-op.
+            C_DN = large_yeager_neutral_cd(U_10N)
 
             # 3) Neutral exchange coefficients at 10 m
             rdn = jnp.sqrt(C_DN)

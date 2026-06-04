@@ -220,7 +220,9 @@ def extract_surface_forcing_from_dataset(
 
     temperature_np = np.asarray(temperature, dtype=float)
     humidity_np = np.asarray(specific_humidity, dtype=float)
-    virtual_temperature = temperature_np * (1.0 + 0.61 * humidity_np)
+    # Canonical virtual-temperature coefficient 1/epsilon - 1 (~0.608), not the
+    # rounded 0.61 literal (~0.4% drift) — matches atmosphere.physics._shared.
+    virtual_temperature = temperature_np * (1.0 + (1.0 / constants.epsilon - 1.0) * humidity_np)
     rho_lowest = _assign_coords_like(
         np.asarray(p_lowest, dtype=float) / (constants.R_d * virtual_temperature),
         temperature,
