@@ -29,7 +29,6 @@ from typing import TypeAlias
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from legoesm.atmosphere.physics._shared import safe_divide
 from legoesm.atmosphere.physics.radiation.rrtmgp import kernel_ops
 from legoesm.atmosphere.physics.radiation.rrtmgp.rte import rte_utils
@@ -673,7 +672,7 @@ def lw_transport(
       'net_flux': The net radiative flux.
   """
   # The source of diffuse radiation is the surface emission.
-  sfc_emission = np.pi * sfc_emissivity * sfc_src
+  sfc_emission = math.pi * sfc_emissivity * sfc_src
   # The surface reflectance is just the complement of the surface emissivity.
   sfc_reflectance = 1 - sfc_emissivity
   fluxes = _solve_rte_2stream(

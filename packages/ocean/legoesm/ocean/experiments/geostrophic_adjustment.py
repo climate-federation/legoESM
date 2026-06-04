@@ -39,13 +39,9 @@ References:
 
 from __future__ import annotations
 
-import jax.numpy as jnp
-import numpy as np
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
-from legoesm.constants import g
-from legoesm.core.field import Field
 
 
 @dataclass

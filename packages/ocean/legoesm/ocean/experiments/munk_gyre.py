@@ -60,8 +60,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict
 
-import numpy as np
-
 from legoesm.ocean.experiments.regional_gyre import (
     RegionalGyreConfig,
     create_initial_conditions as _regional_create_ic,

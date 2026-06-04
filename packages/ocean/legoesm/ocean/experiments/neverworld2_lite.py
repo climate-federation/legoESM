@@ -46,14 +46,10 @@ limitation per Phase B.2).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict
-
-import numpy as np
+from typing import Dict
 
 from legoesm.ocean.experiments.dino import (
     DINOConfig,
-    create_dino_z_star,
-    dino_initial_T_S,
     dino_lat_lon_state,
     dino_lat_lon_model_config,
     dino_lat_lon_surface_forcing_arrays,

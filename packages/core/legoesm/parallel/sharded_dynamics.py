@@ -77,7 +77,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+from jax.sharding import NamedSharding, PartitionSpec as P
 
 from legoesm.parallel.mesh import DeviceConfig, _N_FACES
 from legoesm.core.field import Field
@@ -1724,7 +1724,6 @@ def make_voronoi_sharded_step(
     if dev_config.n_devices <= 1 or dev_config.mesh is None:
         return model.step
 
-    import numpy as np
     try:
         from jax import shard_map  # JAX >= 0.8 exposes it at top level
     except ImportError:  # JAX < 0.8 fallback

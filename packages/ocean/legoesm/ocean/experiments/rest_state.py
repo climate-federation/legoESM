@@ -30,12 +30,9 @@ References:
 from __future__ import annotations
 
 import jax.numpy as jnp
-import numpy as np
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, Tuple
 
-from legoesm.constants import g
 
 
 @dataclass
