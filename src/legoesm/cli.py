@@ -483,7 +483,6 @@ def cmd_benchmark(args):
     rc = bootstrap(precision="fp32")
 
     import jax
-    import jax.numpy as jnp
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import CDGridShallowWaterModel as ShallowWaterModel
     from tests.test_cases.williamson import williamson_test2

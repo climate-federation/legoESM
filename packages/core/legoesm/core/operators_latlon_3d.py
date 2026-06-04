@@ -11,7 +11,6 @@ All functions operate on raw jax.Array data with shape
 from __future__ import annotations
 
 import jax
-import jax.numpy as jnp
 
 from legoesm.grids.latlon import LatLonGrid
 from legoesm.grids.halo_latlon import (

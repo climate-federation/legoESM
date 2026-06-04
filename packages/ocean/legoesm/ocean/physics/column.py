@@ -29,7 +29,6 @@ re-deriving N²/EOS/diffusion.
 
 from __future__ import annotations
 
-import jax.numpy as jnp
 
 from legoesm.ocean.physics.convection.config import EnhancedDiffusionConfig
 from legoesm.ocean.physics.convection.enhanced_diffusion import (

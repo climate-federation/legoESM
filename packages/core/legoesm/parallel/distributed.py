@@ -30,16 +30,13 @@ from __future__ import annotations
 import warnings
 
 import jax
-import jax.numpy as jnp
 
 from legoesm.parallel.comm import CommTopology, build_comm_topology
 from legoesm.parallel.layout import (
     DistributedLayout,
     SingleRankLayout,
     make_layout,
-    scatter as layout_scatter,
     scatter_pytree as layout_scatter_pytree,
-    gather as layout_gather,
     gather_pytree as layout_gather_pytree,
 )
 from legoesm.parallel.mesh import (
@@ -47,7 +44,7 @@ from legoesm.parallel.mesh import (
     create_device_mesh,
     set_active_config,
 )
-from legoesm.parallel.reductions import _require_mpi_stack, _mpi4jax_array_result
+from legoesm.parallel.reductions import _require_mpi_stack
 
 _active_topology: CommTopology | None = None
 _active_layout: DistributedLayout | SingleRankLayout | None = None

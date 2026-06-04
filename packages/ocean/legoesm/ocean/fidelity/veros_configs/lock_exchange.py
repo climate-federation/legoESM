@@ -16,7 +16,6 @@ is exactly what Petersen 2015 measures.
 
 from __future__ import annotations
 
-import os
 
 DEFAULT_RUNLEN_S: float = 17.0 * 3600.0  # 17 hours — Petersen 2015 Fig. 5 window
 
@@ -37,7 +36,7 @@ def _build_lock_exchange_setup_class():
     """Build the LockExchangeSetup class lazily so this module imports
     even when Veros itself is not installed."""
     from veros import VerosSetup, veros_routine
-    from veros.core.operators import numpy as npx, update, at
+    from veros.core.operators import update, at
 
     class LockExchangeSetup(VerosSetup):
         """Petersen 2015 Fig. 5 lock-exchange test."""

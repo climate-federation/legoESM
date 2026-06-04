@@ -47,7 +47,6 @@ from __future__ import annotations
 import logging
 
 import jax
-import jax.numpy as jnp
 
 from legoesm.parallel.layout import (
     SingleRankLayout,

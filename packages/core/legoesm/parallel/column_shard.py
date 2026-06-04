@@ -41,7 +41,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import jax
-import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
 

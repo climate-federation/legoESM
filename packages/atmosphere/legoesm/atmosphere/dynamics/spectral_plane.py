@@ -63,7 +63,6 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import jax
-import jax.numpy as jnp
 
 from legoesm.atmosphere.dynamics.compressible_euler import (
     CompressibleEulerConfig,
@@ -75,7 +74,6 @@ from legoesm.core.field import Field
 from legoesm.core.spectral_plane_ops import (
     SpectralPlaneAxis,
     apply_dealias,
-    biharmonic_spec,
     make_spectral_axis,
     to_phys,
     to_spec,
@@ -83,7 +81,6 @@ from legoesm.core.spectral_plane_ops import (
 from legoesm.core.state import (
     PlaneNonHydrostaticState,
     SpectralPlanePhysicsState,
-    SpectralPlanePhysicsTendencies,
 )
 from legoesm.grids.plane import PlaneGrid
 from legoesm.grids.vertical import HeightCoordinate, TerrainMetric
