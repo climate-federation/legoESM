@@ -5,7 +5,7 @@ atmosphere and ocean components on CPUs/GPUs and MPI clusters.
 
 It is focused on commands that already exist in this repository:
 - `scripts/bench/run_levante_gpu_scaling.py` (atmosphere scaling + MPI validation)
-- `scripts/run_ocean_test_matrix.py` (ocean runtime/regression matrix)
+- `scripts/matrix/run_ocean_test_matrix.py` (ocean runtime/regression matrix)
 - `tests/distributed/test_halo_mpi.py` and `tests/ocean/distributed/test_ocean_mpi_conservation.py` (MPI ocean/distributed checks)
 
 ## 0. What's new (2026-05)
@@ -146,7 +146,7 @@ Use the workflow below to cover real ocean hardware behavior.
 ### 4.1 Ocean scaling matrix (single-process runtime/perf trend)
 
 ```bash
-.venv/bin/python scripts/run_ocean_test_matrix.py \
+.venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
   --output "$OUTDIR/ocean_matrix_cpu" \
   --std-resolutions 8,16 \
   --std-levels 10,20 \
@@ -163,7 +163,7 @@ Use the workflow below to cover real ocean hardware behavior.
 GPU backend variant:
 
 ```bash
-JAX_PLATFORMS=gpu .venv/bin/python scripts/run_ocean_test_matrix.py \
+JAX_PLATFORMS=gpu .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
   --output "$OUTDIR/ocean_matrix_gpu" \
   --std-resolutions 8,16 \
   --std-levels 10,20 \

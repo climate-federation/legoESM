@@ -1,5 +1,5 @@
 """Unit tests for the cross-grid comparison helpers in
-``scripts/run_atmosphere_test_matrix.py``.
+``scripts/matrix/run_atmosphere_test_matrix.py``.
 
 These pin the iter-1..10 helpers (``_area_weighted_mean``,
 ``_zonal_mean_at_final_time``, ``_zonal_mean_climatology``,
@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 
 # Make the script importable as a module without invoking ``main()``.
-_SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
+_SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts" / "matrix"
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
@@ -3216,7 +3216,7 @@ class TestCliResolutionPerGridDispatch:
         pytest.skip(
             "iter-95 smoke test: invoke "
             "``JAX_ENABLE_X64=1 .venv/bin/python "
-            "scripts/run_atmosphere_test_matrix.py "
+            "scripts/matrix/run_atmosphere_test_matrix.py "
             "--only sw --quick --resolution 16`` to verify; "
             "expected 12/12 PASS (4 grids × 3 SW cases) since "
             "iter-95.  Inline pytest-driven runs would require "
@@ -3943,7 +3943,7 @@ class TestCliResolutionValidation:
         repo_root = Path(__file__).resolve().parent.parent
         result = subprocess.run(
             [".venv/bin/python",
-             "scripts/run_atmosphere_test_matrix.py",
+             "scripts/matrix/run_atmosphere_test_matrix.py",
              "--only", "sw", "--quick", "--resolution", "0",
              "--no-cross-grid-plots"],
             cwd=str(repo_root),
@@ -3969,7 +3969,7 @@ class TestCliResolutionValidation:
         repo_root = Path(__file__).resolve().parent.parent
         result = subprocess.run(
             [".venv/bin/python",
-             "scripts/run_atmosphere_test_matrix.py",
+             "scripts/matrix/run_atmosphere_test_matrix.py",
              "--only", "sw", "--quick", "--resolution", "-16",
              "--no-cross-grid-plots"],
             cwd=str(repo_root),
@@ -3995,7 +3995,7 @@ class TestCliResolutionValidation:
         repo_root = Path(__file__).resolve().parent.parent
         result = subprocess.run(
             [".venv/bin/python",
-             "scripts/run_atmosphere_test_matrix.py",
+             "scripts/matrix/run_atmosphere_test_matrix.py",
              "--only", "sw", "--quick", "--resolution", "0.5",
              "--no-cross-grid-plots"],
             cwd=str(repo_root),
@@ -4026,7 +4026,7 @@ class TestCliResolutionValidation:
         repo_root = Path(__file__).resolve().parent.parent
         result = subprocess.run(
             [".venv/bin/python",
-             "scripts/run_atmosphere_test_matrix.py",
+             "scripts/matrix/run_atmosphere_test_matrix.py",
              "--only", "sw", "--quick", "--resolution", "-0.5",
              "--no-cross-grid-plots"],
             cwd=str(repo_root),
@@ -4047,7 +4047,7 @@ class TestCliResolutionValidation:
         for bad in (".5", "1.", "1e3", "inf", "nan"):
             result = subprocess.run(
                 [".venv/bin/python",
-                 "scripts/run_atmosphere_test_matrix.py",
+                 "scripts/matrix/run_atmosphere_test_matrix.py",
                  "--only", "sw", "--quick", "--resolution", bad,
                  "--no-cross-grid-plots"],
                 cwd=str(repo_root),
@@ -4557,7 +4557,7 @@ class TestSpectralW2L2Norm:
         repo_root = Path(__file__).resolve().parent.parent
         result = subprocess.run(
             [".venv/bin/python",
-             "scripts/run_atmosphere_test_matrix.py",
+             "scripts/matrix/run_atmosphere_test_matrix.py",
              "--only", "sw", "--test", "williamson2",
              "--grid", "spectral",
              "--quick", "--resolution", "16",
@@ -5026,7 +5026,7 @@ class TestHeldSuarezMassDriftTolerance:
 
         Run manually:
             JAX_ENABLE_X64=1 .venv/bin/python \\
-                scripts/run_atmosphere_test_matrix.py \\
+                scripts/matrix/run_atmosphere_test_matrix.py \\
                 --only hydro --test held_suarez \\
                 --quick --resolution 16
         """

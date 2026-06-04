@@ -17,7 +17,7 @@ what each iteration delivered.
 
 Add `_collect_grid_results_atmosphere`, `_create_atmosphere_comparison_*`,
 and CLI flags `--no-cross-grid-plots`, `--cross-grid-plots-only` to
-`scripts/run_atmosphere_test_matrix.py`.  Cross-grid plots produced for
+`scripts/matrix/run_atmosphere_test_matrix.py`.  Cross-grid plots produced for
 SW (W2, W5, cosine_bell) on all 4 grids: shared cartopy PlateCarrée
 projection, shared colorbar per field, 4-panel layout.
 

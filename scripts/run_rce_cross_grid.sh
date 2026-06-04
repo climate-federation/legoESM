@@ -97,7 +97,7 @@ fi
 # comparison-plot step crash even though every per-grid run wrote
 # valid output.
 PLOT_FAILED=0
-JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}" JAX_ENABLE_X64=1 .venv/bin/python scripts/run_atmosphere_test_matrix.py \
+JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}" JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_atmosphere_test_matrix.py \
     --cross-grid-plots-only --test rce --output "$OUTPUT" \
     || PLOT_FAILED=1
 if [ "$PLOT_FAILED" = "1" ]; then

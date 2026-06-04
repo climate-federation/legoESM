@@ -7,7 +7,7 @@
 #   jax_scm pins ``jax==0.9.*``; legoESM tracks the newer ``jax`` line.
 #   Co-installing both into the same environment would break either the
 #   oracle or the production legoESM tests.  The oracle script
-#   ``scripts/run_scm_test_matrix.py oracle`` runs only inside this venv; the
+#   ``scripts/matrix/run_scm_test_matrix.py oracle`` runs only inside this venv; the
 #   benchmarks in ``tests/validation/test_scm_*.py`` load the resulting
 #   NetCDF files from disk and don't need jax_scm at import time.
 #
@@ -43,4 +43,4 @@ else
 fi
 
 echo "[setup_jax_scm_oracle] done.  Regenerate oracle outputs with:"
-echo "  JAX_PLATFORMS=cpu ${VENV_DIR}/bin/python scripts/run_scm_test_matrix.py oracle"
+echo "  JAX_PLATFORMS=cpu ${VENV_DIR}/bin/python scripts/matrix/run_scm_test_matrix.py oracle"

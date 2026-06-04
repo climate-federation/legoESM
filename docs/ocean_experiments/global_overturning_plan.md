@@ -132,7 +132,7 @@ Add `run_global_overturning()` runner:
 ### Validation (lat-lon 1 deg, 60-90 days)
 
 ```bash
-JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
   --grid latlon --resolution 180x360 --levels 20 --only global_overturning
 ```
 
@@ -143,7 +143,7 @@ Check: gyres, ACC, stratification, WBC, stability.
 ## Phase 4: MPAS cross-grid validation
 
 ```bash
-JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
   --grid mpas --resolution ico6 --levels 20 --only global_overturning
 ```
 

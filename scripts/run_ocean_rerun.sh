@@ -10,7 +10,7 @@ mkdir -p "$OUTBASE"
 
 for case_pat in rest_state_uniform barotropic_double_gyre global_barotropic_wind inertia_gravity_wave lock_exchange phillips_two_layer stommel_gyre_tracer; do
     echo "=== Re-running $case_pat ==="
-    JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py --quick \
+    JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py --quick \
         --only "$case_pat" --output "$OUTBASE/$case_pat" \
         > "$OUTBASE/${case_pat}.log" 2>&1 || true
 done

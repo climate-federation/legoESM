@@ -38,13 +38,13 @@ Both runs PASS; `T_drift` at machine precision; `max_speed` 0.057–0.058 m/s (B
 
 Commands used:
 ```bash
-CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+CUDA_VISIBLE_DEVICES=0 JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
   --only =eady_uniform --grid mpas_channel --resolution 20km --levels 20 \
   --days 200 --dt 300 --tracer-advection upwind \
   --B-h 2.3e11 --C-smag 0 --no-sponge \
   --tag upwind_mpas_20km_U08_Bh2.3e11_Cs0.0_200d
 
-CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+CUDA_VISIBLE_DEVICES=1 JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
   --only =eady_uniform --grid mpas_channel --resolution 20km --levels 20 \
   --days 200 --dt 300 --tracer-advection tvd \
   --B-h 2.3e11 --C-smag 0 --no-sponge \

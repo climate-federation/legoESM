@@ -7,7 +7,7 @@ report enumerating both pipelines side by side.
 
 Direct quantitative comparison is only available when the same case has
 both a Veros adapter (``src/legoesm/ocean/fidelity/veros_configs/``) and
-a legoESM matrix runner (``scripts/run_ocean_test_matrix.py::RUNNERS``).
+a legoESM matrix runner (``scripts/matrix/run_ocean_test_matrix.py::RUNNERS``).
 The current gaps are tracked as plan tasks #11 (legoESM runners for
 acc_channel / global_overturning / dino) and #12 (Veros setups for
 lock_exchange / overflow / eady_uniform / dino). The script handles the
@@ -21,7 +21,7 @@ Usage::
         --output docs/ocean_fidelity/initial_comparison_<sha>.md
 
 The script does NOT trigger runs — it only reads what is already on disk.
-Run ``scripts/run_ocean_test_matrix.py`` and the Veros runner separately
+Run ``scripts/matrix/run_ocean_test_matrix.py`` and the Veros runner separately
 to populate both sides first.
 """
 
@@ -333,7 +333,7 @@ def render_report(
         lines.append("")
         lines.append(
             "_No legoESM matrix artifacts found. Run "
-            "`scripts/run_ocean_test_matrix.py --grid latlon --quick "
+            "`scripts/matrix/run_ocean_test_matrix.py --grid latlon --quick "
             "--emit-fidelity-artifacts` first._"
         )
         lines.append("")

@@ -1,5 +1,5 @@
 """new_test_dycores iter-9: AST guard for the iter-5/6/7 NH cube parity
-fix in ``scripts/run_atmosphere_test_matrix.py``.
+fix in ``scripts/matrix/run_atmosphere_test_matrix.py``.
 
 Iter-5/6/7 closed the cube NH parity gap for DCMIP TC1/TC2/TC3 by
 enabling two FV3-faithful flags on each cube branch:
@@ -29,6 +29,7 @@ from pathlib import Path
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[1]
     / "scripts"
+    / "matrix"
     / "run_atmosphere_test_matrix.py"
 )
 

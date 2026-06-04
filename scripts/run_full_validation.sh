@@ -13,14 +13,14 @@ echo "=== Full Validation Run Started: $(date) ===" | tee "$LOG"
 run_atm() {
     local desc="$1"; shift
     echo "--- ATM: $desc ---" | tee -a "$LOG"
-    $PYTHON scripts/run_atmosphere_test_matrix.py --quick "$@" 2>&1 | tee -a "$LOG"
+    $PYTHON scripts/matrix/run_atmosphere_test_matrix.py --quick "$@" 2>&1 | tee -a "$LOG"
     echo "--- ATM: $desc DONE: $(date) ---" | tee -a "$LOG"
 }
 
 run_ocn() {
     local desc="$1"; shift
     echo "--- OCN: $desc ---" | tee -a "$LOG"
-    $PYTHON scripts/run_ocean_test_matrix.py --quick "$@" 2>&1 | tee -a "$LOG"
+    $PYTHON scripts/matrix/run_ocean_test_matrix.py --quick "$@" 2>&1 | tee -a "$LOG"
     echo "--- OCN: $desc DONE: $(date) ---" | tee -a "$LOG"
 }
 

@@ -190,7 +190,7 @@ def test_gabls1_oracle_present_and_plausible_magnitudes():
     before benchmark comparison runs."""
     if not ORACLE_PATH.exists():
         pytest.skip(
-            f"Oracle missing: {ORACLE_PATH}.  Run scripts/run_scm_test_matrix.py oracle"
+            f"Oracle missing: {ORACLE_PATH}.  Run scripts/matrix/run_scm_test_matrix.py oracle"
         )
     ds = xr.open_dataset(ORACLE_PATH)
     try:

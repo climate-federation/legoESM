@@ -242,9 +242,9 @@ JAX_ENABLE_X64=1 python -m pytest tests/ocean/unit/test_gm_redi_latlon_cgrid.py 
     tests/ocean/unit/test_gm_redi_eady_physics.py tests/ocean/unit/test_visbeck_gm.py -v
 
 # Ocean test matrix (Eady GM/Redi visual validation)
-JAX_ENABLE_X64=1 python scripts/run_ocean_test_matrix.py --only eady_gm_redi_gm_only
-JAX_ENABLE_X64=1 python scripts/run_ocean_test_matrix.py --only eady_gm_redi_redi_only
-JAX_ENABLE_X64=1 python scripts/run_ocean_test_matrix.py --only eady_gm_redi
+JAX_ENABLE_X64=1 python scripts/matrix/run_ocean_test_matrix.py --only eady_gm_redi_gm_only
+JAX_ENABLE_X64=1 python scripts/matrix/run_ocean_test_matrix.py --only eady_gm_redi_redi_only
+JAX_ENABLE_X64=1 python scripts/matrix/run_ocean_test_matrix.py --only eady_gm_redi
 ```
 
 ---
@@ -422,7 +422,7 @@ Implemented as a separate code path in `gm_redi_latlon_cgrid.py`:
   through the triad path.  4 new physics tests confirm the per-kappa
   cancellation, equivalence-or-better with centered, and the orchestrator
   end-to-end.
-- Three triad-variant Eady cases added to `scripts/run_ocean_test_matrix.py`
+- Three triad-variant Eady cases added to `scripts/matrix/run_ocean_test_matrix.py`
   (`eady_gm_redi_*_triads`); all pass.
 
 #### Taper-on-flux (vs taper-on-slope)

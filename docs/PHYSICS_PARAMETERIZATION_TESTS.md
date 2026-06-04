@@ -280,8 +280,8 @@ Sea-ice has **no idealized validation tests** beyond unit-level differentiabilit
 
 | Test | File | What it checks |
 |------|------|----------------|
-| Atmosphere physics matrix | `scripts/run_atmosphere_test_matrix.py` | Every (dycore × physics × grid) combination launches and runs |
-| Ocean physics matrix | `scripts/run_ocean_test_matrix.py` | Every (mixing × surface_forcing × eos × grid) combination |
+| Atmosphere physics matrix | `scripts/matrix/run_atmosphere_test_matrix.py` | Every (dycore × physics × grid) combination launches and runs |
+| Ocean physics matrix | `scripts/matrix/run_ocean_test_matrix.py` | Every (mixing × surface_forcing × eos × grid) combination |
 | Slopbuster audit | `.claude/agents/slopbuster.md` | Constant hygiene, dead modules, untested dispatch |
 | Code-hygiene audit | rolling cycles | NamedTuple field consistency, unused imports |
 

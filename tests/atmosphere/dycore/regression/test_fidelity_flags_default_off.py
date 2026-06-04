@@ -8,7 +8,7 @@ and fidelity is *opt-in* (via ``make_fv3_faithful_{pe,nh}_config`` — pinned by
 ``test_fv3_faithful_config_factories_iter392.py``).
 
 Why behavioral, not source-grep: the archived sentinels grepped
-``scripts/run_atmosphere_test_matrix.py`` source text for config-construction
+``scripts/matrix/run_atmosphere_test_matrix.py`` source text for config-construction
 strings and broke when the federation restructure moved/renamed the runner.
 This version constructs the actual config objects and reads their defaults, so
 it is robust to layout changes and to *new* fidelity flags — it auto-discovers

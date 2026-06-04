@@ -122,8 +122,8 @@ with hidden / internal directories (``__pycache__``,
 
 ## 1. Cross-grid plotting infrastructure (DONE)
 
-`scripts/run_atmosphere_test_matrix.py` and
-`scripts/run_ocean_test_matrix.py` now produce, for every test case
+`scripts/matrix/run_atmosphere_test_matrix.py` and
+`scripts/matrix/run_ocean_test_matrix.py` now produce, for every test case
 and every available pair of grids:
 
 * `comparison_snapshots_<field>.png` — 4-panel layout, **shared

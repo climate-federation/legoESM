@@ -1549,7 +1549,7 @@ Added `--replot` flag to `run_ocean_test_matrix.py`. When set:
 
 Usage:
 ```bash
-python scripts/run_ocean_test_matrix.py --only baroclinic_gyre --replot
+python scripts/matrix/run_ocean_test_matrix.py --only baroclinic_gyre --replot
 ```
 
 ---

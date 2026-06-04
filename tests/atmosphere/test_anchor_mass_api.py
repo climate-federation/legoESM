@@ -209,7 +209,7 @@ def test_matrix_runner_mass_drift_constants_sane():
     """
     import sys
     import importlib
-    sys.path.insert(0, "scripts")
+    sys.path.insert(0, "scripts/matrix")
     try:
         runner = importlib.import_module("run_atmosphere_test_matrix")
     finally:

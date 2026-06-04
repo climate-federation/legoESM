@@ -201,7 +201,7 @@ class TestRceCrossGridWrapper:
 
     def test_cross_grid_plot_is_last_python_invocation(self, wrapper_code):
         """iter-53 codex HIGH: the cross-grid plot must be the LAST
-        ``python scripts/run_atmosphere_test_matrix.py`` invocation
+        ``python scripts/matrix/run_atmosphere_test_matrix.py`` invocation
         in the file — otherwise a refactor that adds an unrelated
         post-step could leave the cross-grid plot calling against
         partial output."""
@@ -590,7 +590,7 @@ class TestAmipCrossGridWrapper:
         invocations = [
             (m.start(), m.group(0))
             for m in re.finditer(
-                r"python\s+scripts/run_atmosphere_test_matrix\.py"
+                r"python\s+scripts/matrix/run_atmosphere_test_matrix\.py"
                 r"(?:[^\n\\]|\\\n)*",
                 wrapper_code,
             )

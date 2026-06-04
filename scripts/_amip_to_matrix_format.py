@@ -8,7 +8,7 @@ iter-42: addresses an iter-41 oversight.  ``scripts/run_amip.py`` writes:
                               "legoESM AMIP run\\nGrid: ...\\n...")
 
 But the matrix-runner cross-grid plot collector
-(``scripts/run_atmosphere_test_matrix.py:_has_collectable``) expects:
+(``scripts/matrix/run_atmosphere_test_matrix.py:_has_collectable``) expects:
 
     output_dir/
         mean_timeseries.csv  (header + comma-separated rows)

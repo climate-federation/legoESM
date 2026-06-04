@@ -77,7 +77,7 @@ def test_cube_ocean_barotropic_is_fv3sw_never_a_grid():
     FV3-faithful ``fv3sw`` barotropic, never the A-grid solver."""
     src = (
         Path(__file__).resolve().parents[3]
-        / "scripts" / "run_ocean_test_matrix.py"
+        / "scripts" / "matrix" / "run_ocean_test_matrix.py"
     ).read_text()
     # The cubed-sphere branch must request fv3sw.
     assert 'barotropic_staggering="fv3sw"' in src, (

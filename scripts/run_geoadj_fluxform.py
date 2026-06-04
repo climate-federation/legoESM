@@ -7,8 +7,8 @@ Usage:
 import sys
 import os
 
-# Add scripts dir to path so we can import the test matrix
-sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+# Add scripts/matrix to path so we can import the test matrix runner
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "matrix"))
 
 # Override CLI args for the test matrix
 sys.argv = [

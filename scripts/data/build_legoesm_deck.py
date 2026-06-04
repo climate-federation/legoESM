@@ -1481,11 +1481,11 @@ def slide_validation_overview():
     add_content_chrome(b, idg, "Validation harness — what we run, when",
                        "validation", 31, TOTAL_SLIDES)
     rows = [
-        ["Atmosphere test matrix",       "scripts/run_atmosphere_test_matrix.py",      "sw · hydro · nh · climate · tracer · dcmip2008 · dcmip2012 · dcmip2016 · hughes"],
+        ["Atmosphere test matrix",       "scripts/matrix/run_atmosphere_test_matrix.py",      "sw · hydro · nh · climate · tracer · dcmip2008 · dcmip2012 · dcmip2016 · hughes"],
         ["Dycore progression suite",     "tests/validation/run_dycore_progression_suite.py",
                                           "SW spectral → SW FV → hydro FV → spectral HS → NH FV → spectral NH"],
-        ["Ocean test matrix",            "scripts/run_ocean_test_matrix.py",            "57 / 57 PASS across lat-lon, tripolar, cubed-sphere, MPAS Voronoi"],
-        ["Sea ice test matrix",          "scripts/run_sea_ice_test_matrix.py",          "15 benchmarks: thermo · dynamics · transport · ITD · integration"],
+        ["Ocean test matrix",            "scripts/matrix/run_ocean_test_matrix.py",            "57 / 57 PASS across lat-lon, tripolar, cubed-sphere, MPAS Voronoi"],
+        ["Sea ice test matrix",          "scripts/matrix/run_sea_ice_test_matrix.py",          "15 benchmarks: thermo · dynamics · transport · ITD · integration"],
         ["MPI differentiability tests",  "tests/distributed/test_mpi_differentiability.py",
                                           "AD safety of _sendrecv_vjp + allreduce(SUM), checked via 2-rank runs"],
         ["Ocean fidelity vs Veros",      "ocean/fidelity/",                              "DINO · ACC · lock exchange · overflow · Eady uniform — cross-model report"],

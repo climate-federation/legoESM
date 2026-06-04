@@ -47,10 +47,10 @@ echo
 echo "[2/5] Conservation harness (12 cells, no fixers)"
 check "All cells finite + bounded drift" \
     bash -c "PYTHONPATH=. JAX_ENABLE_X64=1 .venv/bin/python \
-        scripts/check_conservation_all.py 2>&1 | \
+        scripts/matrix/check_conservation_all.py 2>&1 | \
         grep -q ' OK ' && \
         ! ( PYTHONPATH=. JAX_ENABLE_X64=1 .venv/bin/python \
-            scripts/check_conservation_all.py 2>&1 | grep -q ERROR )"
+            scripts/matrix/check_conservation_all.py 2>&1 | grep -q ERROR )"
 
 echo
 echo "[3/5] --scan-steps equivalence (per-dycore bit-or-fp32)"

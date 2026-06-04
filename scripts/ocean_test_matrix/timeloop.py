@@ -37,7 +37,7 @@ def _compute_drift(values: list[float]) -> float:
     iter-91 (codex iter-90 followup audit): the previous inline
     implementation used ``max(abs(values[0]), 1e-30)`` — the iter-78
     pathology pattern that was already fixed in
-    ``scripts/run_ocean_test_matrix.py:_compute_drift`` (iter-90)
+    ``scripts/matrix/run_ocean_test_matrix.py:_compute_drift`` (iter-90)
     and factored into
     ``legoesm.diagnostics.conservation_drift`` (iter-88).  This
     second copy in the ``ocean_test_matrix`` package was missed in
@@ -94,7 +94,7 @@ def _apply_value_threshold(
 
 # iter-154: import the centralized sentinel from
 # legoesm.diagnostics so the same singleton is used here and
-# in scripts/run_ocean_test_matrix.py.
+# in scripts/matrix/run_ocean_test_matrix.py.
 from legoesm.diagnostics import DAYS_REQUIRED as _DAYS_REQUIRED
 
 

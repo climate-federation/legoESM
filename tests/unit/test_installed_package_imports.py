@@ -115,7 +115,7 @@ GRANDFATHERED_TESTS_IMPORTS_BY_FILE: dict[str, frozenset[str]] = {
         "tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_1",
         "tests.test_cases.williamson",
     }),
-    "scripts/run_atmosphere_test_matrix.py": frozenset({
+    "scripts/matrix/run_atmosphere_test_matrix.py": frozenset({
         "tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_1_mpas",
         "tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_2_mpas",
         "tests.atmosphere.nonhydrostatic.test_cases.dcmip2025.test_case_3_mpas",

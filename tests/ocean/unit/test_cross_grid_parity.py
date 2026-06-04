@@ -274,10 +274,10 @@ class TestOceanMatrixAlignment:
         from pathlib import Path
 
         matrix_path = (
-            Path(__file__).resolve().parents[3] / "scripts" / "run_ocean_test_matrix.py"
+            Path(__file__).resolve().parents[3] / "scripts" / "matrix" / "run_ocean_test_matrix.py"
         )
         if not matrix_path.exists():
-            pytest.skip("scripts/run_ocean_test_matrix.py not found")
+            pytest.skip("scripts/matrix/run_ocean_test_matrix.py not found")
 
         tree = ast.parse(matrix_path.read_text())
 

@@ -74,7 +74,7 @@ def _div_damp_cube(n: int, ref_n: int = 48, ref_coeff: float = 1.5e7) -> float:
     """Second-order divergence damping scale for cubed-sphere (FV3-style).
 
     NOTE (iter-97): bit-identical mirror of
-    ``scripts/run_atmosphere_test_matrix.py:_div_damp_cube`` so SW W2
+    ``scripts/matrix/run_atmosphere_test_matrix.py:_div_damp_cube`` so SW W2
     numerical sentinels can construct matching configs without
     importing the matrix script.  ``ref_n=48`` and ``ref_coeff=1.5e7``
     are the iter-1030 calibration values — keep both copies in sync

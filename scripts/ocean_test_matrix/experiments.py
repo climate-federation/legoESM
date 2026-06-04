@@ -860,7 +860,7 @@ def run_geostrophic_adjustment(tc: TestCase, output_dir: Path, days: float
     # ``docs/ocean_experiments_reference.md:419`` — see
     # iter-128 update of that doc.  Same gate as monolithic
     # ``run_geostrophic_adjustment`` in
-    # ``scripts/run_ocean_test_matrix.py:3745``.
+    # ``scripts/matrix/run_ocean_test_matrix.py:3745``.
     ok, notes = _apply_drift_tolerance(
         ok, notes, T_drift, 1e-8,
         label="T", n_samples=len(diag.get("mean_T", [])))

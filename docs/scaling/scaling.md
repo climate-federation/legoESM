@@ -66,7 +66,7 @@ on both backends for the spectral and MPAS-style dycores.
 
 ## 2. Conservation matrix (12 case × grid × dycore cells)
 
-`scripts/check_conservation_all.py` exercises every supported dycore on
+`scripts/matrix/check_conservation_all.py` exercises every supported dycore on
 every supported grid for a short integration and prints relative mass +
 energy drift.  Without conservation fixers (intrinsic dycore property)
 all twelve cells produce drifts below `4e-6`:

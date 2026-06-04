@@ -84,8 +84,8 @@
 - Install: `pip install -e ".[dev]"`
 - Tests: `.venv/bin/python -m pytest tests/`
 - Scientific tests: `JAX_ENABLE_X64=1 .venv/bin/python -m pytest <target>`
-- Atm matrix: `JAX_ENABLE_X64=1 .venv/bin/python scripts/run_atmosphere_test_matrix.py`
-- Ocean matrix: `JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py`
+- Atm matrix: `JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_atmosphere_test_matrix.py`
+- Ocean matrix: `JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py`
 - AMIP: `.venv/bin/python scripts/run_amip.py`
 - Dycore progression: `.venv/bin/python tests/validation/run_dycore_progression_suite.py`
 - GPU/MPI scaling: `.venv/bin/python scripts/bench/run_levante_gpu_scaling.py --grid cubed-sphere --mode strong` (see `docs/REAL_HARDWARE_SCALING.md`)

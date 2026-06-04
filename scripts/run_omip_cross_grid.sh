@@ -87,7 +87,7 @@ fi
 # (and never reach the explicit exit), so callers couldn't
 # distinguish per-grid BLOWUP from plot-step failure.
 PLOT_FAILED=0
-JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
     --replot --only omip --output "$OUTPUT" || PLOT_FAILED=1
 if [ "$PLOT_FAILED" = "1" ]; then
     echo "  WARNING: comparison-plot step failed; partial plots"

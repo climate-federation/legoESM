@@ -177,7 +177,7 @@ fi
 # iter-104 codex MEDIUM-4: wrap the comparison-plot step.
 # See ``run_omip_cross_grid.sh`` for the rationale.
 PLOT_FAILED=0
-JAX_ENABLE_X64=1 .venv/bin/python scripts/run_atmosphere_test_matrix.py \
+JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_atmosphere_test_matrix.py \
     --cross-grid-plots-only --test amip --output "$OUTPUT" \
     || PLOT_FAILED=1
 if [ "$PLOT_FAILED" = "1" ]; then

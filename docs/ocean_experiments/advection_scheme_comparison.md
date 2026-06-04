@@ -106,16 +106,16 @@ FLAGS="--only eady_uniform --grid latlon_channel --resolution 100x50 \
        --days 200 --no-sponge --B-h 2.3e11 --C-smag 0"
 
 # Run each scheme
-JAX_ENABLE_X64=1 python3 scripts/run_ocean_test_matrix.py $FLAGS \
+JAX_ENABLE_X64=1 python3 scripts/matrix/run_ocean_test_matrix.py $FLAGS \
   --tracer-advection upwind --tag upwind_nosponge
 
-JAX_ENABLE_X64=1 python3 scripts/run_ocean_test_matrix.py $FLAGS \
+JAX_ENABLE_X64=1 python3 scripts/matrix/run_ocean_test_matrix.py $FLAGS \
   --tracer-advection tvd --tag tvd_nosponge
 
-JAX_ENABLE_X64=1 python3 scripts/run_ocean_test_matrix.py $FLAGS \
+JAX_ENABLE_X64=1 python3 scripts/matrix/run_ocean_test_matrix.py $FLAGS \
   --tracer-advection ppm_fct --tag ppm_fct_nosponge
 
-JAX_ENABLE_X64=1 python3 scripts/run_ocean_test_matrix.py $FLAGS \
+JAX_ENABLE_X64=1 python3 scripts/matrix/run_ocean_test_matrix.py $FLAGS \
   --tracer-advection som --tag som_nosponge
 ```
 
@@ -800,33 +800,33 @@ even at weak forcing.
   #    that survives 30 days, then check whether it is physically
   #    reasonable (dimensional analysis vs. eddy decay time):
   for BH in 5e10 1e11 2.3e11 5e11; do
-    JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+    JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
       $COMMON --B-h $BH --C-smag 0.2
   done
 
   # 2. C_smag sensitivity at moderate B_h:
   for CSMAG in 0.1 0.2 0.3 0.4; do
-    JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+    JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
       $COMMON --B-h 5e10 --C-smag $CSMAG
   done
 
   # 3. Divergence damping as an alternative knob — targets grid-scale
   #    compressible modes directly without smearing momentum:
   for DD in 0.01 0.05 0.1 0.2 0.5; do
-    JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+    JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
       $COMMON --B-h 1e10 --C-smag 0.0 --barotropic-div-damp $DD
   done
 
   # 4. Timestep sensitivity (current dt=150s ≈ CFL 0.8 at u=1 m/s):
   for DT in 75 150; do
-    JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+    JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
       $COMMON --B-h 1.44e10 --C-smag 0.2 --dt $DT
   done
 
   # 5. Weak-forcing fallback: scheme stress-test independent of strong
   #    forcing.  If 5e10 / 0.2 still blows under U=0.2, the regime is
   #    not the issue — the scheme/dissipation budget is.
-  JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py \
+  JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
     $COMMON --B-h 1.44e10 --C-smag 0.2 --U-surface 0.2 --days 200
   ```
 

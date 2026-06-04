@@ -3928,7 +3928,7 @@ class TestPpmLimiterAtSmoothExtremum(unittest.TestCase):
 class TestW2BoundaryErrorBudget(unittest.TestCase):
     """Iter-511 / iter-512: lock the post-iter-505 Williamson 2 error
     budget on the LEGACY production harness (pre-iter-760) that used
-    `scripts/run_atmosphere_test_matrix.py` with `hyperdiff_coeff=
+    `scripts/matrix/run_atmosphere_test_matrix.py` with `hyperdiff_coeff=
     _hyperdiff_cube(n)`, `div_damp=_div_damp_cube(n)`, `damp_v=0`.
 
     **Iter-761 scope clarification.**  The matrix default was
@@ -4130,7 +4130,7 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         import re
         matrix_path = (
             pathlib.Path(__file__).resolve().parent.parent.parent
-            / "scripts" / "run_atmosphere_test_matrix.py")
+            / "scripts" / "matrix" / "run_atmosphere_test_matrix.py")
         assert matrix_path.is_file(), (
             f"Matrix script not found at {matrix_path}")
         lines = matrix_path.read_text().splitlines()
@@ -4205,7 +4205,7 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         missing = [t for t in required_tokens if t not in config_body]
         self.assertEqual(
             missing, [],
-            msg=(f"scripts/run_atmosphere_test_matrix.py W2/W5 "
+            msg=(f"scripts/matrix/run_atmosphere_test_matrix.py W2/W5 "
                  f"CDGridShallowWaterConfig block (lines "
                  f"{config_open_idx + 1}-{config_close_idx + 1}) is "
                  f"missing iter-761 canonical tokens: {missing}.  A "
@@ -4224,7 +4224,7 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         Iter-765f: sentinel measures the documented v_ll_Linf
         metric using the IN-REPO regrid helpers from
         `legoesm.grids.regridding` (NOT the fragile `_regrid_2d`
-        import from `scripts/run_atmosphere_test_matrix.py`).
+        import from `scripts/matrix/run_atmosphere_test_matrix.py`).
 
         Iter-765 added this opt-in as a diagnostic for future cube-
         corner halo investigations, but left it unguarded by any
@@ -5292,7 +5292,7 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
         import ast
         import pathlib
         repo_root = pathlib.Path(__file__).resolve().parent.parent.parent
-        matrix_src = (repo_root / "scripts/run_atmosphere_test_matrix.py"
+        matrix_src = (repo_root / "scripts/matrix/run_atmosphere_test_matrix.py"
                       ).read_text()
         matrix_tree = ast.parse(matrix_src)
         snap_func_def = next(
@@ -5480,7 +5480,7 @@ class TestW2BoundaryErrorBudget(unittest.TestCase):
 
         grid = create_cubed_sphere(n=n, use_duogrid=False)
         # Iter-893: keep this sentinel synchronized with the
-        # production matrix runner config (`scripts/run_atmosphere_test_matrix.py`).
+        # production matrix runner config (`scripts/matrix/run_atmosphere_test_matrix.py`).
         # iter-893 enables `apply_fortran_xppm_boundary=True` on the
         # canonical W2 LEGACY config.  Iter-895 metrics clarification
         # (Codex iter-894 stop-time): the W2 v-wind imprint has TWO

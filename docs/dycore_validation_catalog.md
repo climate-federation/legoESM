@@ -21,7 +21,7 @@ The matrix script's `--family` filter selects subsets:
 (`sw / hydro / nh / moist / climate / tracer / dcmip2008 / dcmip2012 /
 dcmip2016`) select sub-families.
 
-Run with `JAX_ENABLE_X64=1 python scripts/run_atmosphere_test_matrix.py
+Run with `JAX_ENABLE_X64=1 python scripts/matrix/run_atmosphere_test_matrix.py
 --quick --family <name>`.
 
 ---
@@ -127,7 +127,7 @@ hydrostatic dycores (no new physics packages). M1.a (delivered in this PR):
 - `src/legoesm/atmosphere/idealized/held_suarez_topo.py` — Held-Suarez
   forcing wrapped over a DCMIP §2-0-0 ridged cosine-bell mountain,
   all four grids
-- `scripts/run_atmosphere_test_matrix.py` — new `--family` filter,
+- `scripts/matrix/run_atmosphere_test_matrix.py` — new `--family` filter,
   `family` field on `TestCase`, `_CASE_TO_FAMILY` lookup, ~16 new
   TestCase rows wired through the existing `run_baroclinic`,
   `run_held_suarez`, and `run_shallow_water` runners

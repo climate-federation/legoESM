@@ -29,7 +29,9 @@ import argparse
 import os
 import sys
 
-_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+# scripts/ (parent of this file's scripts/matrix/ dir) so `from scm import ...`
+# resolves — the scm/ case modules live at scripts/scm/.
+_SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 

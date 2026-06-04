@@ -60,7 +60,7 @@ extension to the lat-lon scalar function) — still ~10x below theory.
 ## Diagnostic fix landed alongside the investigation
 
 The lat-lon C-grid scalar function (``_make_scalar_fn``,
-``scripts/run_ocean_test_matrix.py``) used to report only the surface-
+``scripts/matrix/run_ocean_test_matrix.py``) used to report only the surface-
 level velocity as ``max_speed``. The MPAS path already exposed the
 full-column ``max |u|``; the latlon path did not. With a strong subsurface
 flow (Petersen lock-exchange bottom layer ≈ surface layer in this
@@ -114,7 +114,7 @@ on under-resolved fronts.
 
 ## Run-kwargs in the matrix TestCase (current value)
 
-See `scripts/run_ocean_test_matrix.py` (`_build_test_matrix`):
+See `scripts/matrix/run_ocean_test_matrix.py` (`_build_test_matrix`):
 
 ```python
 TestCase(
@@ -146,7 +146,7 @@ TestCase(
 Re-run after any `LatLonCGridOceanModel` change:
 
 ```bash
-JAX_PLATFORMS=cpu .venv/bin/python scripts/run_ocean_test_matrix.py \
+JAX_PLATFORMS=cpu .venv/bin/python scripts/matrix/run_ocean_test_matrix.py \
     --only lock_exchange --grid latlon_regional
 JAX_PLATFORMS=cpu .venv/bin/python scripts/ocean_fidelity/run_comparison.py \
     --output docs/ocean_fidelity/initial_comparison_$(git rev-parse --short HEAD).md
