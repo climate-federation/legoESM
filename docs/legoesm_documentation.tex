@@ -8,6 +8,27 @@
 \usepackage{titlesec}
 \usepackage{graphicx}
 \usepackage{fancyhdr}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds,calc,shapes.geometric}
+
+% --- Architecture-schematic palette + node styles (Fig. legoESM stack) ---
+\definecolor{legocore}{RGB}{55,71,79}      % substrate (slate)
+\definecolor{legoatm}{RGB}{30,136,229}     % atmosphere (blue)
+\definecolor{legoocn}{RGB}{0,137,123}      % ocean (teal)
+\definecolor{legolnd}{RGB}{124,179,66}     % land (green)
+\definecolor{legoice}{RGB}{0,172,193}      % ice (cyan)
+\definecolor{legoorc}{RGB}{142,36,170}     % orchestration (purple)
+\definecolor{legoml}{RGB}{244,143,177}     % ml accent (pink)
+\definecolor{legoflow}{RGB}{239,108,0}     % data-flow accent (orange)
+\tikzset{
+  lbox/.style={rounded corners=2pt,draw,thick,align=center,font=\footnotesize,
+               inner sep=4pt,minimum height=8mm,text=white},
+  llabel/.style={font=\scriptsize\itshape,text=black!70},
+  lego/.style={draw,thick,rounded corners=2pt,align=center,font=\scriptsize,
+               inner sep=3pt,minimum height=7mm,fill=white},
+  dep/.style={-{Stealth[length=2mm]},draw=black!55,thick},
+  flow/.style={-{Stealth[length=2.5mm]},draw=legoflow,very thick},
+}
 
 \pagestyle{fancy}
 \fancyhead[L]{\small legoESM Technical Documentation}
@@ -59,6 +80,176 @@ legoESM is a modular Earth System Model written entirely in JAX, supporting auto
   \item Multiple dynamical cores share the same physics interface, enabling interchangeable experiments.
   \item Neural-network components (SFNO) integrate seamlessly via the same JAX computational graph.
 \end{itemize}
+
+%=============================================================================
+\section{Model Architecture}
+%=============================================================================
+
+legoESM is organised as a \emph{federation} of eight independently installable
+packages that all ship into one shared \texttt{legoesm} PEP-420 namespace, layered
+as an acyclic dependency graph whose import boundaries are enforced by
+zero-ignore \texttt{lint-imports} contracts (Fig.~\ref{fig:dag}).  A single
+\texttt{legoesm-core} substrate provides fields, grids, vertical coordinates,
+operators, the device/precision runtime, the parallel halo/reduction layer, and
+the grid\,$\times$\,complexity capability matrix; the four Earth-system components
+(\texttt{atmosphere}, \texttt{ocean}, \texttt{land}, \texttt{ice}) depend
+\emph{only} on the substrate and never on each other, so each can be
+\texttt{pip install}ed and gradient-checked in isolation.  Above them sits an
+orchestration cluster --- \texttt{coupler}+\texttt{driver},
+\texttt{ml}+\texttt{training}+\texttt{da}, and \texttt{tools} --- whose mutual
+edges form a uv-workspace cycle, so the three install together.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+% substrate
+\node[lbox,fill=legocore,text width=14.4cm,minimum height=12mm] (core) at (0,0)
+ {\textbf{legoesm-core} --- the substrate (imports nothing above)\\[2pt]
+  \scriptsize \texttt{constants}, \texttt{thermo}, \texttt{grids}\,+\,vertical coords, \texttt{timestepping}, \texttt{runtime}, \texttt{parallel}, \texttt{io}, \texttt{registry}, \texttt{components}, \texttt{surface\_albedo}, \texttt{core} (fields/state/coupling)};
+% components
+\node[lbox,fill=legoatm,text width=2.7cm] (atm) at (-5.4,2.8) {\textbf{atmosphere}\\[1pt]\scriptsize dycores, physics, SCM};
+\node[lbox,fill=legoocn,text width=2.7cm] (ocn) at (-1.8,2.8) {\textbf{ocean}\\[1pt]\scriptsize 3-D dyn, physics, BGC};
+\node[lbox,fill=legolnd,text width=2.7cm] (lnd) at (1.8,2.8) {\textbf{land}\\[1pt]\scriptsize slab, multilayer, carbon};
+\node[lbox,fill=legoice,text width=2.7cm] (ice) at (5.4,2.8) {\textbf{ice}\\[1pt]\scriptsize thermo, EVP, ITD};
+% orchestration cluster
+\node[lbox,fill=legoorc,text width=5.4cm] (coup) at (-3.9,6.0) {\textbf{coupler}\,+\,driver\\[1pt]\scriptsize tile coupler; Model/Coupled\-ESM/EarthSystem drivers};
+\node[lbox,fill=legoml,text=black,text width=2.5cm] (ml) at (1.1,6.0) {\textbf{ml}, training, da\\[1pt]\scriptsize SFNO, losses, 4D-Var};
+\node[lbox,fill=legoorc!78,text width=3.0cm] (tools) at (5.2,6.0) {\textbf{tools}\\[1pt]\scriptsize diagnostics, forcing, experiments, viz};
+% component -> core (depends on)
+\draw[dep] (atm.south) -- (atm.south|-core.north);
+\draw[dep] (ocn.south) -- (ocn.south|-core.north);
+\draw[dep] (lnd.south) -- (lnd.south|-core.north);
+\draw[dep] (ice.south) -- (ice.south|-core.north);
+\begin{scope}[on background layer]
+\node[draw=black!25,rounded corners,fill=black!4,fit=(atm)(ice),inner sep=5pt] (compband){};
+\node[draw=legoorc!40,rounded corners,fill=legoorc!5,fit=(coup)(ml)(tools),inner sep=6pt] (orcband){};
+\end{scope}
+\draw[dep,line width=1pt] (orcband.south) -- node[llabel,right,xshift=1mm]{depend on (coordinate / consume)} (compband.north);
+\draw[dep] (coup.south west) to[out=-130,in=160] node[llabel,left]{+ core} (core.north west);
+\node[llabel,above=1pt of orcband.north,text=legoorc] {\scriptsize mutual edges (uv-workspace cycle) --- installed together};
+\end{tikzpicture}
+\caption{\textbf{Federation dependency DAG.} Arrows point from a package to what
+it imports (``depends on''); the layering is gated by zero-ignore import
+contracts (see \texttt{FEDERATION.md}). The four components are mutually
+independent and standalone-installable (contract \#2); the orchestration cluster
+(coupler\,/\,ml\,/\,tools) sits above and carries the only mutual edges.}
+\label{fig:dag}
+\end{figure}
+
+The ``lego'' in legoESM is the second design axis: standard tensor-in /
+tendency-out interfaces let every block --- dynamical core, each physics
+parameterisation, grid, vertical coordinate, time integrator, and even
+classical-versus-neural physics --- be swapped independently by a string scheme
+name resolved through a factory (Table~\ref{tab:dials}).
+Figure~\ref{fig:flow} traces one coupled time step through these swap points.
+
+\begin{figure}[p]
+\centering
+\begin{tikzpicture}[node distance=4mm]
+% --- atmosphere inner step ---
+\node[lego,draw=legoatm,text width=8.4cm] (dyc) at (0,0)
+ {\textbf{Dycore} \texttt{.step()}\hfill[lego]\\[1pt]
+  cdgrid / spectral / mpas / sfno \;$\to$\; $u,v,T,p_s$};
+\node[lbox,fill=black!55,text width=8.4cm,below=of dyc] (mfix)
+ {dry-mass fixer \texttt{fix\_ps\_mass\_target} (gated)};
+\node[lego,draw=legoatm,text width=8.4cm,below=of mfix] (phys)
+ {\textbf{Physics} \texttt{step\_unified}\hfill[lego]\\[2pt]
+  Radiation: gray / RRTMGP --- sub-cycled by \texttt{lax.cond}\hfill[lego]\\
+  Convection\hfill[lego]\\
+  Microphysics\hfill[lego]\\
+  Surface bulk exchange (shflx / lhflx)\\
+  Turbulence / BL\hfill[lego]\\
+  Gravity-wave drag\hfill[lego]};
+\node[lbox,fill=black!55,text width=8.4cm,below=of phys] (supd)
+ {state update: sat-adj, \texttt{fix\_moisture}, moisture hyperdiff, Rayleigh, pack carry};
+% --- coupled host step ---
+\node[lego,draw=legoocn,text width=8.4cm,below=10mm of supd] (ocn)
+ {\textbf{Ocean} \texttt{.step()}\hfill[lego]\\[1pt]
+  split-explicit baroclinic / barotropic; KPP; GM-Redi};
+\node[lego,draw=legoorc,text width=8.4cm,below=of ocn] (surf)
+ {\textbf{Surface coupler} \texttt{step\_surface}\hfill[lego]\\[1pt]
+  tiles ocean / ice / land / lake --- area-weighted bulk-flux blend (COARE3.0, L\&Y09)};
+\node[lbox,fill=black!55,text width=8.4cm,below=of surf] (co2)
+ {CO$_2$ tracer (gated) \;$\to$\; \texttt{DiagnosticCollector} + conservation gates};
+% loop containers
+\begin{scope}[on background layer]
+\node[draw=legoatm,thick,rounded corners,fill=legoatm!6,fit=(dyc)(supd),inner sep=7pt] (atmloop){};
+\node[draw=legoorc,thick,rounded corners,fill=legoorc!6,fit=(ocn)(co2),inner sep=7pt] (cploop){};
+\end{scope}
+\node[llabel,anchor=south west] at (atmloop.north west) {HOST \texttt{build\_segment\_fn}$\to$\texttt{run\_segment\_jit}: \texttt{jax.lax.scan} inner atmosphere step};
+\node[llabel,anchor=south west] at (cploop.north west) {\texttt{\_segment\_hook}: coupled host step --- sub-cycle at \texttt{coupling\_dt}\,=\,3600\,s};
+% flow arrows
+\draw[flow] (dyc) -- (mfix);
+\draw[flow] (mfix) -- (phys);
+\draw[flow] (phys) -- (supd);
+\draw[flow] (supd) -- (ocn) node[midway,llabel,right]{segment boundary};
+\draw[flow] (ocn) -- (surf);
+\draw[flow] (surf) -- (co2);
+% atm<->surface exchange
+\node[draw=legoflow,thick,rounded corners,fill=legoflow!8,text width=4.0cm,right=10mm of phys,align=left,font=\scriptsize] (exch)
+ {\textbf{atmosphere $\leftrightarrow$ surface}\\[2pt]
+  $\downarrow$ \texttt{AtmToSurface}: sw, lw, precip, $T$, $q$, $u$, $v$, $p$, $\rho$, $\cos z$, CO$_2$\\[2pt]
+  $\uparrow$ \texttt{SurfaceToAtm}: $T_{\mathrm{sfc}}$, albedo, $z_0$, shflx, lhflx, $\tau_x$, $\tau_y$, fluxes};
+\draw[{Stealth[length=2mm]}-{Stealth[length=2mm]},draw=legoflow,very thick] (phys.east) -- (exch.west);
+\draw[{Stealth[length=2mm]}-{Stealth[length=2mm]},draw=legoflow,very thick] (surf.east) to[out=18,in=-90] (exch.south);
+% parallel substrate
+\node[lbox,fill=legocore,text width=14.4cm,below=12mm of cploop.south,anchor=north] (par)
+ {\textbf{ParallelRuntime.create()} --- serial / multi-device (SPMD) / MPI / hybrid\\[1pt]
+  \scriptsize 4-D halo \texttt{pad\_halo\_4d} (AD-safe \texttt{sendrecv} VJP); \texttt{global\_sum}\,=\,\texttt{allreduce(SUM)} AD-safe; scatter $\to$ step $\to$ gather (I/O only)};
+\draw[dep] (cploop.south) -- (par.north);
+\end{tikzpicture}
+\caption{\textbf{Coupled time-step data flow.} White blocks tagged [lego] are
+factory-swapped by scheme name (Table~\ref{tab:dials}); dark blocks are fixed
+numerics. The atmosphere inner step (blue) runs inside a \texttt{jax.lax.scan};
+the slow components (purple) sub-cycle at \texttt{coupling\_dt}. The orange link
+is the bidirectional atmosphere--surface flux exchange. The entire graph executes
+on one \texttt{ParallelRuntime} with AD-safe halo exchange and \texttt{allreduce(SUM)}
+reductions, so \texttt{jax.grad} flows end-to-end through the coupled step.}
+\label{fig:flow}
+\end{figure}
+
+A coupled step runs at three nested cadences. The host \emph{segment loop}
+(\texttt{build\_segment\_fn} $\to$ \texttt{run\_segment\_jit}) drives a
+\texttt{jax.lax.scan} over inner atmosphere steps; each inner step advances the
+dycore ($u,v,T,p_s$), applies the gated dry-mass fixer, runs the unified physics
+pipeline (radiation sub-cycled by \texttt{lax.cond}; then convection,
+microphysics, surface exchange, turbulence/BL, and gravity-wave drag summed as
+tendencies), and closes with the moisture/energy state update. After each
+segment, \texttt{\_segment\_hook} sub-cycles the slow components at
+\texttt{coupling\_dt} (default 3600\,s): the ocean step, the tile surface coupler
+(area-weighted bulk-flux blend over ocean/ice/land/lake), and the gated CO$_2$
+tracer, followed by conservation diagnostics. Because every block is a pure JAX
+pytree function and all communication is differentiable, the same graph supports
+forward simulation, \texttt{jit} compilation, and reverse-mode \texttt{grad}.
+
+\begin{table}[t]
+\centering
+\footnotesize
+\caption{\textbf{The ``lego'' swap dials.} Each axis is selected independently by
+a string scheme name resolved through the listed factory; an unknown name raises
+\texttt{ValueError}. Menus abbreviated.}
+\label{tab:dials}
+\begin{tabular}{@{}p{2.9cm}p{4.4cm}p{7.2cm}@{}}
+\toprule
+\textbf{Swap axis} & \textbf{Factory entry point} & \textbf{Example menu} \\
+\midrule
+Horizontal grid & \texttt{create\_grid()} & cubed-sphere, Gaussian/spectral, lat-lon, MPAS Voronoi, tripolar (ocean) \\
+Dynamical core & \texttt{create\_atmosphere\_dycore()} & \{cdgrid, spectral, mpas, sfno\} $\times$ \{shallow water, hydrostatic PE, NH compressible Euler\}; lat-lon C-grid; plane \\
+Vertical coordinate & \texttt{create\_*\_coordinate()} & sigma, hybrid $\sigma$--$p$, height / $z^*$ \\
+Time integrator & \texttt{dispatch\_integrator()} & ssp\_rk3, ssp\_rk3\_scan, ssp\_rk34, ssp\_rk54, rk4 \\
+Radiation & \texttt{make\_radiation\_physics()} & gray (Frierson), RRTMGP correlated-$k$ \\
+Convection & \texttt{make\_convection\_physics()} & Bechtold, Tiedtke, Kain--Fritsch, Zhang--McFarlane, Emanuel, Kuo, SBM \\
+Microphysics & \texttt{make\_microphysics\_physics()} & Kessler, Sundqvist, Morrison, Seifert--Beheng, Thompson, ML \\
+Turbulence / BL & \texttt{make\_turbulence\_physics()} & Louis, Holtslag--Boville, YSU, EDMF, TKE, CLUBB-lite, Smagorinsky \\
+Gravity-wave drag & \texttt{make\_gwd\_physics()} & Lindzen, Hines, McFarlane, Rayleigh, spectral, ML \\
+Physics core & \texttt{make\_\{physics,hybrid,neural\}} & classical, hybrid, neural (SFNO) \\
+Ocean vertical mixing & \texttt{make\_vertical\_mixing\_physics()} & KPP, Richardson, constant, Jayne--St-Laurent tidal \\
+Ocean lateral mixing & \texttt{make\_lateral\_mixing\_physics()} & harmonic, biharmonic, GM-Redi, Visbeck, Leith, backscatter \\
+Ocean surface forcing & \texttt{make\_surface\_forcing\_physics()} & bulk, restoring, prescribed \\
+Complexity ladder & \texttt{resolve\_model\_complexity()} & idealized, intermediate, full \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 %=============================================================================
 \section{Grid Systems}
