@@ -49,7 +49,7 @@ from legoesm.thermo import saturation_vapor_pressure
 from legoesm.ocean.bulk_flux_omip import air_sea_fluxes
 
 
-def _bolton_q_sat(T_K, p_hpa: float = 1013.25):
+def _bolton_q_sat(T_K, p_hpa: float = constants.p_atm_std / 100.0):
     """Saturation specific humidity [kg/kg] at temperature T_K [K], pressure p_hpa [hPa].
 
     Uses the canonical saturation vapour pressure from :mod:`legoesm.thermo`
@@ -213,12 +213,13 @@ def _apply_cgrid_surface_fluxes(state, forc, *, dz_0, rho_0, c_p,
     rotation on curvilinear (tripole) geometries; absent on a regular lat-lon
     grid, where the rotation is the identity.
 
-    NOTE (inherited tech debt, pre-existing in the latlon branch this factors):
-    ``_bolton_q_sat`` re-implements saturation and ``273.15`` / ``0.97`` are
-    hardcoded -- should move to ``legoesm.thermo`` / ``constants`` / a config in
-    a dedicated cleanup; kept verbatim here to preserve the heat-flux results.
-    The wind-stress *sign* (ocean reaction = -tau), by contrast, is corrected
-    here vs the previous (+tau) latlon code -- see the momentum comment below.
+    Physical constants are routed through :mod:`legoesm.constants`
+    (``emissivity_ocean``, ``rho_air``, ``sigma_sb``, ``p_atm_std``,
+    ``T_freeze``) and saturation through :mod:`legoesm.thermo`
+    (``_bolton_q_sat`` wraps ``saturation_vapor_pressure``) -- no hardcoded
+    thermodynamic literals remain here.  The wind-stress *sign* (ocean reaction
+    = -tau), by contrast, is corrected here vs the previous (+tau) latlon code
+    -- see the momentum comment below.
     """
     T_sfc_K = np.asarray(state.T.data, dtype=np.float64)[..., 0] + constants.T_freeze
     q_sfc = np.asarray(_bolton_q_sat(jnp.asarray(T_sfc_K)), dtype=np.float64)
@@ -232,7 +233,7 @@ def _apply_cgrid_surface_fluxes(state, forc, *, dz_0, rho_0, c_p,
         rho_air=jnp.asarray(rho_air),
     )
     # --- Heat: Q_net positive into the ocean warms the top cell. ---
-    lw_up = 0.97 * sigma_sb * T_sfc_K ** 4
+    lw_up = constants.emissivity_ocean * sigma_sb * T_sfc_K ** 4
     Q_net = (np.asarray(sh) + np.asarray(lh)
              + forc["sw_down"] - lw_up + forc["lw_down"])
     mask = np.asarray(state.land_mask.data, dtype=np.float64)
@@ -305,7 +306,7 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
                                  dt: float,
                                  rho_0: Optional[float] = None,
                                  c_p: Optional[float] = None,
-                                 rho_air: float = 1.225):
+                                 rho_air: float = constants.rho_air):
     """Apply one timestep of JRA55-do / CORE-II forcing to ``state``.
 
     Supported ``grid_type``: ``latlon`` / ``latlon_regional`` (conservative
@@ -383,7 +384,7 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
             q_sfc=jnp.asarray(q_sfc),
             rho_air=jnp.asarray(rho_air),
         )
-        lw_up = 0.97 * sigma_sb * T_sfc_K ** 4
+        lw_up = constants.emissivity_ocean * sigma_sb * T_sfc_K ** 4
         Q_net = (np.asarray(sh) + np.asarray(lh)
                  + forc["sw_down"] - lw_up + forc["lw_down"])
         mask = np.asarray(state.land_mask.data, dtype=np.float64)
@@ -435,7 +436,7 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
             q_sfc=jnp.asarray(q_sfc),
             rho_air=jnp.asarray(rho_air),
         )
-        lw_up = 0.97 * sigma_sb * T_sfc_K ** 4
+        lw_up = constants.emissivity_ocean * sigma_sb * T_sfc_K ** 4
         Q_net = (np.asarray(sh) + np.asarray(lh)
                  + forc["sw_down"] - lw_up + forc["lw_down"])
         mask = np.asarray(state.land_mask.data, dtype=np.float64)
@@ -472,7 +473,7 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
 
 def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
                                   grid, grid_type: str,
-                                  rho_air: float = 1.225):
+                                  rho_air: float = constants.rho_air):
     """Build an :class:`OceanSurfaceForcing` (tau_x, tau_y, q_net, sw_down) on
     the model grid from CORE-II / JRA55 forcing, for INTEGRATION INSIDE
     ``model.step(state, dt, surface_forcing=...)`` -- the dynamics-core
@@ -493,7 +494,7 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
     conservative regrid; ``tripole`` via nearest-neighbour on the 2-D T grid).
     """
     from legoesm.ocean.state import OceanSurfaceForcing
-    sigma_sb = float(getattr(constants, "sigma_sb", 5.67e-8))
+    sigma_sb = float(constants.sigma_sb)
     T_freeze = float(constants.T_freeze)
 
     if grid_type in ("latlon", "latlon_regional"):
@@ -525,7 +526,7 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
         q_sfc=jnp.asarray(q_sfc),
         rho_air=jnp.asarray(rho_air),
     )
-    lw_up = 0.97 * sigma_sb * T_sfc_K ** 4
+    lw_up = constants.emissivity_ocean * sigma_sb * T_sfc_K ** 4
     q_net = (np.asarray(sh) + np.asarray(lh)
              + forc["lw_down"] - lw_up + forc["sw_down"])
     return OceanSurfaceForcing(
@@ -605,7 +606,7 @@ def build_core2_forcing_device_stack(forcing, grid, grid_type: str):
 
 
 def compute_omip2_surface_forcing_jax(
-    state, *, forcing_stack, nn_i, nn_j, grid_shape, idx_t, rho_air=1.225,
+    state, *, forcing_stack, nn_i, nn_j, grid_shape, idx_t, rho_air=constants.rho_air,
 ):
     """Pure-JAX, ``lax.scan``-traceable form of
     :func:`compute_omip2_surface_forcing` for the tripole grid (issue #354).
@@ -618,7 +619,7 @@ def compute_omip2_surface_forcing_jax(
     nearest-neighbour spatial sample.
     """
     from legoesm.ocean.state import OceanSurfaceForcing
-    sigma_sb = float(getattr(constants, "sigma_sb", 5.67e-8))
+    sigma_sb = float(constants.sigma_sb)
     T_freeze = float(constants.T_freeze)
 
     def _sample(name):
@@ -639,7 +640,7 @@ def compute_omip2_surface_forcing_jax(
         u10=u10, v10=v10, T_air_K=T_air, q_air=q_air,
         T_sfc_K=T_sfc_K, q_sfc=q_sfc, rho_air=jnp.asarray(rho_air),
     )
-    lw_up = 0.97 * sigma_sb * T_sfc_K ** 4
+    lw_up = constants.emissivity_ocean * sigma_sb * T_sfc_K ** 4
     q_net = sh + lh + lw_down - lw_up + sw_down
     return OceanSurfaceForcing(
         tau_x=tau_x, tau_y=tau_y, q_net=q_net, sw_down=sw_down,
@@ -647,7 +648,7 @@ def compute_omip2_surface_forcing_jax(
 
 
 def build_omip2_scan_block_fn(
-    model, dt, grid_shape, *, rho_air=1.225, ramp_s=0.0,
+    model, dt, grid_shape, *, rho_air=constants.rho_air, ramp_s=0.0,
 ):
     """Build a JIT-compiled ``lax.scan`` block-step function for the tripole
     OMIP time loop (issue #354).
