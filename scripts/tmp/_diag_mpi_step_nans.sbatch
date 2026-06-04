@@ -21,4 +21,4 @@ export JAX_PLATFORMS=cpu
 export JAX_ENABLE_X64=1
 export OMP_NUM_THREADS=1
 
-${PY} scripts/_diag_mpi_step_nans.py
+${PY} scripts/tmp/_diag_mpi_step_nans.py

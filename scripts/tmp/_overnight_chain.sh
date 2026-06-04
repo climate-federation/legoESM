@@ -11,7 +11,8 @@
 set -e
 set -o pipefail
 
-cd "$(dirname "$0")/.."  # repo root
+# repo root (robust to this script's depth; it now lives in scripts/tmp/)
+cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 
 PY=/Users/dhruvbalwada/code/miniforge3/bin/python
 LOG=results/ocean/_overnight_chain.log

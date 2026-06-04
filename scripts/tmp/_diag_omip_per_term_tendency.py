@@ -13,7 +13,7 @@ geostrophic adjustment is isolated from the CORE-II applicator. A second arm
 adds the forcing to confirm it is not the trigger.
 
 Usage (GPU, sbatch):
-  JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 python scripts/_diag_omip_per_term_tendency.py \
+  JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 python scripts/tmp/_diag_omip_per_term_tendency.py \
       --grid tripole --steps 16 --dt 600 [--forcing] [--ke-gradient-scheme ...]
 """
 from __future__ import annotations

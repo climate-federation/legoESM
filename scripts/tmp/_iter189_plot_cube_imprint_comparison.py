@@ -20,7 +20,7 @@ Produces a side-by-side comparison image at::
 Run::
 
     JAX_ENABLE_X64=1 .venv/bin/python \
-        scripts/_iter189_plot_cube_imprint_comparison.py
+        scripts/tmp/_iter189_plot_cube_imprint_comparison.py
 """
 from __future__ import annotations
 

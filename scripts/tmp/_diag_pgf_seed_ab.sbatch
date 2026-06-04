@@ -22,12 +22,12 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 echo "=== HOST ==="; hostname; date; nvidia-smi --query-gpu=name --format=csv,noheader
 
 echo; echo "### ARM adcroft (tripole default)"
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/_diag_omip_per_term_tendency.py \
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/tmp/_diag_omip_per_term_tendency.py \
   --grid tripole --steps 6 --dt 600 --top-n 5 --pgf-scheme adcroft 2>&1
 echo "[adcroft_rc]=$?"
 
 echo; echo "### ARM smc03 (density-Jacobian partial-cell PGF)"
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/_diag_omip_per_term_tendency.py \
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/tmp/_diag_omip_per_term_tendency.py \
   --grid tripole --steps 6 --dt 600 --top-n 5 --pgf-scheme smc03 2>&1
 echo "[smc03_rc]=$?"
 

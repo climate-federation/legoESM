@@ -9,7 +9,7 @@ specific tendency or column.
 
 Usage::
 
-    python scripts/diag_kessler_amip_blowup.py [--n-steps 200] [--dt 600]
+    python scripts/tmp/diag_kessler_amip_blowup.py [--n-steps 200] [--dt 600]
 
 The script terminates as soon as a NaN is detected and reports:
   - which tendency channel went non-finite first (T, q_v, q_c, q_r, u, v)

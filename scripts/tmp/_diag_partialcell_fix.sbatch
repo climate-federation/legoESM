@@ -29,12 +29,12 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 echo "=== HOST ==="; hostname; date; nvidia-smi --query-gpu=name --format=csv,noheader
 
 echo; echo "### ARM 1: tripole --partial-cell, adcroft PGF, 16 steps"
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/_diag_omip_per_term_tendency.py \
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/tmp/_diag_omip_per_term_tendency.py \
   --grid tripole --steps 16 --dt 600 --top-n 5 --partial-cell --pgf-scheme adcroft 2>&1
 echo "[arm1_rc]=$?"
 
 echo; echo "### ARM 2: tripole --partial-cell, smc03 PGF, 16 steps"
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/_diag_omip_per_term_tendency.py \
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/tmp/_diag_omip_per_term_tendency.py \
   --grid tripole --steps 16 --dt 600 --top-n 5 --partial-cell --pgf-scheme smc03 2>&1
 echo "[arm2_rc]=$?"
 

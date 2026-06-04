@@ -20,18 +20,18 @@ Produces:
   5. Plots: depth profiles, zonal means, balance pair map
 
 Usage:
-    JAX_ENABLE_X64=1 .venv/bin/python scripts/diagnose_omip_momentum.py \\
+    JAX_ENABLE_X64=1 .venv/bin/python scripts/tmp/diagnose_omip_momentum.py \\
         --run-dir results/omip_uniform_profile --restart-day 365 \\
         --bathymetry data/bathymetry/etopo_1deg.nc
 
     # With JRA55 forcing (adds wind stress to the diagnostic):
-    JAX_ENABLE_X64=1 .venv/bin/python scripts/diagnose_omip_momentum.py \\
+    JAX_ENABLE_X64=1 .venv/bin/python scripts/tmp/diagnose_omip_momentum.py \\
         --run-dir results/omip_uniform_profile --restart-day 365 \\
         --bathymetry data/bathymetry/etopo_1deg.nc \\
         --jra55-cache data/jra55_ryf_cache/jra55_do_v14_omip2_1deg_noleap.zarr
 
     # Load parameters from run_config.json automatically:
-    JAX_ENABLE_X64=1 .venv/bin/python scripts/diagnose_omip_momentum.py \\
+    JAX_ENABLE_X64=1 .venv/bin/python scripts/tmp/diagnose_omip_momentum.py \\
         --run-dir results/omip_uniform_50yr
 """
 from __future__ import annotations

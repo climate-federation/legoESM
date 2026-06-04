@@ -20,12 +20,12 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 echo "=== HOST ==="; hostname; date; nvidia-smi --query-gpu=name --format=csv,noheader
 
 echo; echo "### ARM A: tripole, NO forcing (pure cold-start dynamics)"
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/_diag_omip_per_term_tendency.py \
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/tmp/_diag_omip_per_term_tendency.py \
   --grid tripole --steps 16 --dt 600 --top-n 5 2>&1
 echo "[armA_rc]=$?"
 
 echo; echo "### ARM B: tripole, WITH CORE-II forcing"
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/_diag_omip_per_term_tendency.py \
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/tmp/_diag_omip_per_term_tendency.py \
   --grid tripole --steps 16 --dt 600 --top-n 5 --forcing 2>&1
 echo "[armB_rc]=$?"
 

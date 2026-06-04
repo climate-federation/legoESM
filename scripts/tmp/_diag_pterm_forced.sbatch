@@ -19,7 +19,7 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 echo "=== HOST ==="; hostname; date; nvidia-smi --query-gpu=name --format=csv,noheader
 
 echo; echo "### per-term, --partial-cell --forcing, 40 steps"
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/_diag_omip_per_term_tendency.py \
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY scripts/tmp/_diag_omip_per_term_tendency.py \
   --grid tripole --steps 40 --dt 600 --top-n 6 --partial-cell --forcing 2>&1 \
   | grep -vE "Constant folding|This isn|If you|reduce-window|slow_operation|^$"
 echo "[rc]=${PIPESTATUS[0]}"

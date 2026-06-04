@@ -14,7 +14,7 @@ Output: ``results/iter190_hs_c36_hybrid/snapshots_{u,v,wind_speed,p_s}.png``
 Usage::
 
     JAX_ENABLE_X64=1 .venv/bin/python \
-        scripts/_iter190_hs_c36_hybrid_snapshot.py
+        scripts/tmp/_iter190_hs_c36_hybrid_snapshot.py
 """
 from __future__ import annotations
 

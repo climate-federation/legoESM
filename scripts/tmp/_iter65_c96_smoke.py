@@ -19,11 +19,11 @@ diagnostic, the run halts early and reports step_blowup.
 Usage examples::
 
     # iter-65 1-day smoke at C96 dt=200 default
-    .venv/bin/python scripts/_iter65_c96_smoke.py
+    .venv/bin/python scripts/tmp/_iter65_c96_smoke.py
 
     # iter-79 / iter-82 30-day C96 dt=50 long-time validation
     JAX_ENABLE_X64=1 ITER65_DAYS=30.0 ITER65_DT=50.0 \\
-      .venv/bin/python scripts/_iter65_c96_smoke.py
+      .venv/bin/python scripts/tmp/_iter65_c96_smoke.py
 
 The probe lifts the matrix's HS-3D setup verbatim (grid, vertical
 coord, init, config) and runs only the time-stepping with quartile

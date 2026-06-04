@@ -12,7 +12,7 @@ The ETOPO data is small (139 KB, 1° subsample of NOAA ERDDAP etopo180);
 fetched once and cached in ``data/bathymetry/etopo_1deg.nc``.
 
 Usage:
-    JAX_ENABLE_X64=1 python scripts/diagnose_realistic_geometry.py
+    JAX_ENABLE_X64=1 python scripts/tmp/diagnose_realistic_geometry.py
 """
 
 from __future__ import annotations

@@ -28,7 +28,7 @@ Residual = F_wind + F_drag_bot + F_drag_baro - F_adv + F_visc.  Should be
 small if the budget closes and our time-mean approximation is adequate.
 
 Usage:
-    JAX_ENABLE_X64=1 python scripts/diagnose_drake_momentum_budget.py
+    JAX_ENABLE_X64=1 python scripts/tmp/diagnose_drake_momentum_budget.py
 """
 
 from __future__ import annotations

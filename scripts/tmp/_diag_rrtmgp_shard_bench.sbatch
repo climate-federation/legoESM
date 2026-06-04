@@ -29,5 +29,5 @@ export JAX_ENABLE_X64=1
 echo "host=$(hostname) date=$(date)"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader || true
 echo "--- bench ---"
-"$PY" scripts/_diag_rrtmgp_shard_bench.py --res 4 --nlev 30
+"$PY" scripts/tmp/_diag_rrtmgp_shard_bench.py --res 4 --nlev 30
 echo "--- done rc=$? ---"
