@@ -27,6 +27,9 @@ Icon?
 results/
 checkpoints/
 data/
+# ...but scripts/data/ is a version-controlled scripts bucket, not runtime data.
+!scripts/data/
+!scripts/data/**
 wandb/
 
 # Diagnostic plots dropped at repo root by ad-hoc scripts.
