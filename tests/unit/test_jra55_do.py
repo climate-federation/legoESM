@@ -609,10 +609,10 @@ def test_atm_surface_combines_precip_total_correctly():
 
 
 def test_atm_surface_density_from_ideal_gas():
-    """ρ = p / (R_d · T_v), T_v = T (1 + 0.61 q)."""
+    """ρ = p / (R_d · T_v), T_v = T (1 + (1/ε − 1) q) with the canonical coeff."""
     slc = _make_synthetic_slice()
     atm = jra55_to_atm_surface(slc, jnp.zeros((4, 8)), jnp.zeros((4, 8)), day=0.0)
-    T_v = slc.tas * (1.0 + 0.61 * slc.huss)
+    T_v = slc.tas * (1.0 + (1.0 / constants.epsilon - 1.0) * slc.huss)
     expected_rho = slc.psl / (constants.R_d * T_v)
     np.testing.assert_allclose(
         np.asarray(atm.rho_lowest), np.asarray(expected_rho), rtol=1e-12,
