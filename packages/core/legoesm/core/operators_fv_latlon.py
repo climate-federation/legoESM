@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
-from legoesm.core.operators_fv import _ppm_edge_values, _ppm_limit
+from legoesm.core.operators_fv import ppm_edge_values, ppm_limit
 from legoesm.grids.halo_latlon import (
     pad_halo_latlon,
     pad_halo_vector_latlon,
@@ -83,7 +83,7 @@ def _ppm_reconstruct_lon(q_pad_h2, limiter=True):
     q_t = q.T  # (n_lon+4, n_lat)
 
     # Edge values: (n_lon+3, n_lat)
-    q_hat_t = _ppm_edge_values(q_t)
+    q_hat_t = ppm_edge_values(q_t)
 
     # Parabola for interior cells
     a_L_t = q_hat_t[:-1, :]   # (n_lon+2, n_lat)
@@ -91,7 +91,7 @@ def _ppm_reconstruct_lon(q_pad_h2, limiter=True):
     q_c_t = q_t[1:-1, :]      # (n_lon+2, n_lat)
 
     if limiter:
-        a_L_t, a_R_t = _ppm_limit(q_c_t, a_L_t, a_R_t)
+        a_L_t, a_R_t = ppm_limit(q_c_t, a_L_t, a_R_t)
 
     # Extract interface states: n_lon+1 interfaces
     q_left_t = a_R_t[:-1, :]   # (n_lon+1, n_lat)
@@ -119,14 +119,14 @@ def _ppm_reconstruct_lat(q_pad_h2, limiter=True):
     q = q_pad_h2[:, 2:-2]  # (n_lat+4, n_lon)
 
     # axis=-2 is already latitude: (n_lat+4, n_lon)
-    q_hat = _ppm_edge_values(q)  # (n_lat+3, n_lon)
+    q_hat = ppm_edge_values(q)  # (n_lat+3, n_lon)
 
     a_L = q_hat[:-1, :]   # (n_lat+2, n_lon)
     a_R = q_hat[1:, :]
     q_c = q[1:-1, :]      # (n_lat+2, n_lon)
 
     if limiter:
-        a_L, a_R = _ppm_limit(q_c, a_L, a_R)
+        a_L, a_R = ppm_limit(q_c, a_L, a_R)
 
     q_left = a_R[:-1, :]   # (n_lat+1, n_lon)
     q_right = a_L[1:, :]
@@ -255,7 +255,7 @@ def fv_gradient_lon(q, grid):
 
     # Transpose for PPM along longitude
     q_t = q_strip.T  # (n_lon+4, n_lat)
-    q_hat_t = _ppm_edge_values(q_t)  # (n_lon+3, n_lat)
+    q_hat_t = ppm_edge_values(q_t)  # (n_lon+3, n_lat)
 
     # Interior edges: n_lon+1
     q_edges_t = q_hat_t[1:-1, :]  # (n_lon+1, n_lat)
@@ -285,7 +285,7 @@ def fv_gradient_lat(q, grid):
     q_strip = q_pad[:, 2:-2]  # (n_lat+4, n_lon)
 
     # axis=-2 is already latitude
-    q_hat = _ppm_edge_values(q_strip)  # (n_lat+3, n_lon)
+    q_hat = ppm_edge_values(q_strip)  # (n_lat+3, n_lon)
 
     # Interior edges
     q_edges = q_hat[1:-1, :]  # (n_lat+1, n_lon)
@@ -322,9 +322,9 @@ def fv_gradient_lon_3d(q_3d, grid, padded=None):
         # Pad once for all levels.
         padded = pad_halo_latlon_3d(q_3d, halo=2)        # (n_lat+4, n_lon+4, nlev)
     # Strip latitude halo; longitude axis is now axis -2 (the axis
-    # ``_ppm_edge_values`` operates on).
+    # ``ppm_edge_values`` operates on).
     q_strip = padded[2:-2, :, :]                         # (n_lat, n_lon+4, nlev)
-    q_hat = _ppm_edge_values(q_strip)                    # (n_lat, n_lon+3, nlev)
+    q_hat = ppm_edge_values(q_strip)                    # (n_lat, n_lon+3, nlev)
     q_edges = q_hat[:, 1:-1, :]                          # (n_lat, n_lon+1, nlev)
     dq = q_edges[:, 1:, :] - q_edges[:, :-1, :]          # (n_lat, n_lon, nlev)
     return dq / (grid.dx[..., None] / 2.0)
@@ -351,11 +351,11 @@ def fv_gradient_lat_3d(q_3d, grid, padded=None):
     """
     if padded is None:
         padded = pad_halo_latlon_3d(q_3d, halo=2)        # (n_lat+4, n_lon+4, nlev)
-    # Strip longitude halo.  ``_ppm_edge_values`` operates on axis -2,
+    # Strip longitude halo.  ``ppm_edge_values`` operates on axis -2,
     # so swap the lat/lon axes so latitude lives there.
     q_strip = padded[:, 2:-2, :]                         # (n_lat+4, n_lon, nlev)
     q_t = jnp.swapaxes(q_strip, 0, 1)                    # (n_lon, n_lat+4, nlev)
-    q_hat_t = _ppm_edge_values(q_t)                      # (n_lon, n_lat+3, nlev)
+    q_hat_t = ppm_edge_values(q_t)                      # (n_lon, n_lat+3, nlev)
     q_edges_t = q_hat_t[:, 1:-1, :]                      # (n_lon, n_lat+1, nlev)
     dq_t = q_edges_t[:, 1:, :] - q_edges_t[:, :-1, :]    # (n_lon, n_lat, nlev)
     return jnp.swapaxes(dq_t, 0, 1) / (grid.dy[:, None, None] / 2.0)

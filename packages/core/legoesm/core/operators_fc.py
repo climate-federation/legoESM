@@ -51,7 +51,7 @@ def _fc_pad_halo(field: jax.Array, grid) -> jax.Array:
     return pad_halo_4d(field, halo=1, interp_offsets=grid.halo_interp_offsets)
 
 
-def _fc_pad_halo_vector(u: jax.Array, v: jax.Array, grid) -> tuple[jax.Array, jax.Array]:
+def fc_pad_halo_vector(u: jax.Array, v: jax.Array, grid) -> tuple[jax.Array, jax.Array]:
     """Vector halo pad for FC operators, dispatched on rank."""
     if u.ndim == 3:
         return pad_halo_vector(
@@ -256,7 +256,7 @@ def fc_divergence(u: jax.Array, v: jax.Array, grid: CubedSphereGrid,
     Parameters
     ----------
     padded : tuple of (u_pad, v_pad), optional
-        Pre-padded vector pair from ``_fc_pad_halo_vector``.  When
+        Pre-padded vector pair from ``fc_pad_halo_vector``.  When
         provided, the internal vector halo exchange is skipped — share
         with a co-located ``fc_curl_z`` on the same input to halve
         the halo cost.
@@ -264,7 +264,7 @@ def fc_divergence(u: jax.Array, v: jax.Array, grid: CubedSphereGrid,
     if padded is not None:
         u_pad, v_pad = padded
     else:
-        u_pad, v_pad = _fc_pad_halo_vector(u, v, grid)
+        u_pad, v_pad = fc_pad_halo_vector(u, v, grid)
 
     # Metric-weighted fluxes on padded grid.  ``hy_ext`` is (6, n+2, n+2);
     # broadcast to match a possible trailing nlev axis.
@@ -298,7 +298,7 @@ def fc_curl_z(u: jax.Array, v: jax.Array, grid: CubedSphereGrid,
     if padded is not None:
         u_pad, v_pad = padded
     else:
-        u_pad, v_pad = _fc_pad_halo_vector(u, v, grid)
+        u_pad, v_pad = fc_pad_halo_vector(u, v, grid)
 
     hy_ext = _broadcast_metric_to_field(grid.hy_ext, v_pad)
     hx_ext = _broadcast_metric_to_field(grid.hx_ext, u_pad)
@@ -447,7 +447,7 @@ def fc_divergence_damping(u: jax.Array, v: jax.Array,
     grid : CubedSphereGrid
     fc_config : FCOperatorConfig
     padded : tuple of (u_pad, v_pad), optional
-        Pre-padded vector pair from ``_fc_pad_halo_vector``.  When
+        Pre-padded vector pair from ``fc_pad_halo_vector``.  When
         provided, the *inner* divergence skips its halo exchange —
         share with a co-located ``fc_divergence`` / ``fc_curl_z`` on
         the same input.

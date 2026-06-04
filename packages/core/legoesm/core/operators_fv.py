@@ -33,7 +33,7 @@ from legoesm.grids.halo import pad_halo, pad_halo_vector
 # PPM edge reconstruction
 # ==============================================================================
 
-def _ppm_edge_values(q_1d, blend_edges=False,
+def ppm_edge_values(q_1d, blend_edges=False,
                      apply_fortran_xppm_boundary=False,
                      n_interior=None):
     """4th-order edge values from cell averages along last-but-one axis.
@@ -119,7 +119,7 @@ def _ppm_edge_values(q_1d, blend_edges=False,
     # ``[min(q[i],q[i+1]), max(q[i],q[i+1])]`` range here.  Fortran's
     # ``xppm`` (tp_core.F90:353-355) does NOT clip the 4th-order
     # edge values; it passes them directly to the CW84 ``pert_ppm``
-    # constraint (which our caller applies via ``_ppm_limit``).  The
+    # constraint (which our caller applies via ``ppm_limit``).  The
     # extra clip step in our Python made the limiter MORE diffusive
     # than Fortran by pre-flattening edge overshoots before the CW84
     # constraint could see them.  Removed for Fortran fidelity.
@@ -213,7 +213,7 @@ def _ppm_edge_values(q_1d, blend_edges=False,
     return q_hat
 
 
-def _ppm_limit(q_bar, q_L, q_R):
+def ppm_limit(q_bar, q_L, q_R):
     """Colella-Woodward monotonicity limiter for PPM.
 
     Limits left/right parabola edge values to prevent new extrema.
@@ -262,7 +262,7 @@ def _ppm_reconstruct_x(q_pad_h2, limiter=True,
     limiter : bool
         Apply Colella-Woodward limiter.
     apply_fortran_xppm_boundary : bool, default False
-        Iter-891: forwards through to ``_ppm_edge_values`` so the
+        Iter-891: forwards through to ``ppm_edge_values`` so the
         Fortran iord<7 cube-edge boundary formulas
         (`tp_core.F90:357-369`) are reachable from
         ``fv_flux_divergence`` callers.  Default False preserves
@@ -279,7 +279,7 @@ def _ppm_reconstruct_x(q_pad_h2, limiter=True,
     n = q.shape[-2] - 4  # interior cell count along the swept axis
 
     # Edge values: (6, n+3, n) at all M-1 interfaces
-    q_hat = _ppm_edge_values(
+    q_hat = ppm_edge_values(
         q,
         apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
         n_interior=n)
@@ -290,7 +290,7 @@ def _ppm_reconstruct_x(q_pad_h2, limiter=True,
     q_c = q[..., 1:-1, :]       # cell centers, (6, n+2, n)
 
     if limiter:
-        a_L, a_R = _ppm_limit(q_c, a_L, a_R)
+        a_L, a_R = ppm_limit(q_c, a_L, a_R)
 
     # Extract n+1 interior interface states
     q_left = a_R[..., :-1, :]   # right-edge of cell to left of interface
@@ -304,7 +304,7 @@ def _ppm_reconstruct_y(q_pad_h2, limiter=True,
     """PPM reconstruction in y-direction.
 
     Iter-891: forwards ``apply_fortran_xppm_boundary`` to
-    ``_ppm_edge_values``.  Default False preserves prior behaviour.
+    ``ppm_edge_values``.  Default False preserves prior behaviour.
 
     Parameters
     ----------
@@ -318,7 +318,7 @@ def _ppm_reconstruct_y(q_pad_h2, limiter=True,
     n = q.shape[-1] - 4  # interior cell count along the swept axis
     # Transpose to reuse x-direction logic
     q_t = jnp.swapaxes(q, -2, -1)  # (6, n+4, n)
-    q_hat = _ppm_edge_values(
+    q_hat = ppm_edge_values(
         q_t,
         apply_fortran_xppm_boundary=apply_fortran_xppm_boundary,
         n_interior=n)
@@ -328,7 +328,7 @@ def _ppm_reconstruct_y(q_pad_h2, limiter=True,
     q_c = q_t[..., 1:-1, :]
 
     if limiter:
-        a_L, a_R = _ppm_limit(q_c, a_L, a_R)
+        a_L, a_R = ppm_limit(q_c, a_L, a_R)
 
     q_left_t = a_R[..., :-1, :]
     q_right_t = a_L[..., 1:, :]
@@ -363,7 +363,7 @@ def fv_flux_divergence(q, u, v, grid, limiter=True,
     apply_fortran_xppm_boundary : bool, default False
         Iter-891 (parallel to iter-889 production-path plumbing).
         Forwards through to ``_ppm_reconstruct_x`` / ``_ppm_reconstruct_y``
-        / ``_ppm_edge_values`` so Fortran's iord<7 cube-edge boundary
+        / ``ppm_edge_values`` so Fortran's iord<7 cube-edge boundary
         formulas (`tp_core.F90:357-369`) become reachable from
         ``fv_flux_divergence``.  Iter-891 also matches iter-889b's
         bounded_domain gate: we only fire the override when the grid
@@ -378,7 +378,7 @@ def fv_flux_divergence(q, u, v, grid, limiter=True,
     # Iter-891b (matching iter-889b's bounded_domain gate pattern):
     # the iord<7 boundary formulas are gated on `not bounded_domain`
     # in Fortran (`tp_core.F90:333/357`).  Compute the effective flag
-    # here so the leaf `_ppm_edge_values` receives a pre-gated boolean.
+    # here so the leaf `ppm_edge_values` receives a pre-gated boolean.
     effective_xppm_boundary = (
         apply_fortran_xppm_boundary
         and not bool(getattr(grid, "bounded_domain", False)))
@@ -483,7 +483,7 @@ def fv_gradient_x(q, grid):
     q_strip = q_pad[:, :, 2:-2]   # (6, n+4, n) — strip transverse halo
 
     # 4th-order edge values along x: (6, n+3, n)
-    q_hat = _ppm_edge_values(q_strip)
+    q_hat = ppm_edge_values(q_strip)
 
     # Interior edges for n cells: need n+1 edges (indices 1..n+1)
     q_edges = q_hat[:, 1:-1, :]   # (6, n+1, n)
@@ -510,7 +510,7 @@ def fv_gradient_y(q, grid):
 
     # Transpose to reuse x-direction PPM edge values
     q_t = jnp.swapaxes(q_strip, -2, -1)  # (6, n+4, n)
-    q_hat_t = _ppm_edge_values(q_t)       # (6, n+3, n)
+    q_hat_t = ppm_edge_values(q_t)       # (6, n+3, n)
     q_edges_t = q_hat_t[:, 1:-1, :]       # (6, n+1, n)
 
     dq_t = q_edges_t[:, 1:, :] - q_edges_t[:, :-1, :]  # (6, n, n)

@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
-from legoesm.core.operators_fc import FCOperatorConfig, _fc_pad_halo_vector
+from legoesm.core.operators_fc import FCOperatorConfig, fc_pad_halo_vector
 from legoesm.grids.halo import pad_halo_4d
 from legoesm.core.operators_fc_3d import (
     fc_curl_z_3d,
@@ -137,7 +137,7 @@ def ocean_baroclinic_tendencies_fc(
     # two v-inputs along a new trailing axis, fold to (6, n, n, nlev*2),
     # call ``fc_divergence_3d`` once on the thicker tensor, and unfold.
     # The trailing axis is purely passive: the vector rotation in
-    # ``_fc_pad_halo_vector`` broadcasts ``cos_angle/sin_angle`` over the
+    # ``fc_pad_halo_vector`` broadcasts ``cos_angle/sin_angle`` over the
     # trailing axis via ``[..., None]``, the metric weights broadcast the
     # same way, and the FC index-space derivatives operate on axis 1/2
     # only.  2 fc_divergence calls → 1 (one shared vector halo
@@ -154,11 +154,11 @@ def ocean_baroclinic_tendencies_fc(
     # + reshape`` interleaves [h*u, u, h*u, u, ...], so the
     # ``[..., 1::2]`` slot of the padded array is the padded ``u_masked``
     # — exactly what ``fc_curl_z_3d`` needs.  Saves one full
-    # ``_fc_pad_halo_vector`` collective per RHS evaluation (a vector
+    # ``fc_pad_halo_vector`` collective per RHS evaluation (a vector
     # halo with cross-face cos/sin rotation, costlier than a scalar
     # halo) — same Loop 134 exploit as the FC laplacian/hyperdiff
     # share.
-    _combined_u_pad, _combined_v_pad = _fc_pad_halo_vector(
+    _combined_u_pad, _combined_v_pad = fc_pad_halo_vector(
         _div_u_pair_flat, _div_v_pair_flat, grid,
     )
     _div_pair_flat = fc_divergence_3d(
@@ -208,7 +208,7 @@ def ocean_baroclinic_tendencies_fc(
     # combined-pad block above (Loop 173) — slot-1 of the interleaved
     # ``[h*u, u, h*u, u, ...]`` layout.  Pass it via ``padded=`` so
     # the inner divergence inside ``fc_divergence_damping_3d`` skips
-    # its own ``_fc_pad_halo_vector`` collective (Loop 176).
+    # its own ``fc_pad_halo_vector`` collective (Loop 176).
     if fc_config.div_damp_2 > 0 or fc_config.div_damp_4 > 0:
         du_damp, dv_damp = fc_divergence_damping_3d(
             u_masked, v_masked, grid, fc_config,
@@ -310,13 +310,13 @@ def ocean_baroclinic_tendencies_fc(
         # du/dt, dv/dt every step which broke zonal symmetry (the
         # geostrophic_adjustment cube eta grew to ~40% non-zonal variance vs
         # ~0 on latlon/MPAS for a zonally-symmetric thermal-wind IC).  Use the
-        # rotation-aware ``_fc_pad_halo_vector`` — the same vector halo the
+        # rotation-aware ``fc_pad_halo_vector`` — the same vector halo the
         # momentum tendency above already uses, and the direct analogue of the
         # CD-grid atmosphere diffusion-halo fix.
         if config.A_h > 0 or config.hyperdiff_coeff > 0:
             u_visc = u * mask_3d
             v_visc = v * mask_3d
-            u_pad_vec, v_pad_vec = _fc_pad_halo_vector(u_visc, v_visc, grid)
+            u_pad_vec, v_pad_vec = fc_pad_halo_vector(u_visc, v_visc, grid)
         if config.A_h > 0:
             du_dt = du_dt + fc_laplacian_3d(
                 u_visc, grid, fc_config, padded=u_pad_vec) * config.A_h
@@ -341,7 +341,7 @@ def ocean_baroclinic_tendencies_fc(
             # with a SCALAR pad (no rotation).
             lap_u = fc_laplacian_3d(u_visc, grid, fc_config, padded=u_pad_vec)
             lap_v = fc_laplacian_3d(v_visc, grid, fc_config, padded=v_pad_vec)
-            lap_u_pad, lap_v_pad = _fc_pad_halo_vector(lap_u, lap_v, grid)
+            lap_u_pad, lap_v_pad = fc_pad_halo_vector(lap_u, lap_v, grid)
             lap2_u = fc_laplacian_3d(lap_u, grid, fc_config, padded=lap_u_pad)
             lap2_v = fc_laplacian_3d(lap_v, grid, fc_config, padded=lap_v_pad)
             du_dt = du_dt - config.hyperdiff_coeff * lap2_u

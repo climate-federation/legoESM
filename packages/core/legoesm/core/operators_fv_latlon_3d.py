@@ -14,7 +14,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
-from legoesm.core.operators_fv import _ppm_edge_values, _ppm_limit
+from legoesm.core.operators_fv import ppm_edge_values, ppm_limit
 from legoesm.core.operators_fv_latlon import lat_v_interfaces
 from legoesm.grids.halo_latlon import (
     pad_halo_latlon_3d,
@@ -42,15 +42,15 @@ def _ppm_reconstruct_lon_3d(q_pad_h2, limiter=True):
     # Strip latitude halo, keep longitude halo
     q = q_pad_h2[2:-2, :, :]  # (n_lat, n_lon+4, nlev)
 
-    # axis -2 is longitude (n_lon+4) — _ppm_edge_values operates here
-    q_hat = _ppm_edge_values(q)  # (n_lat, n_lon+3, nlev)
+    # axis -2 is longitude (n_lon+4) — ppm_edge_values operates here
+    q_hat = ppm_edge_values(q)  # (n_lat, n_lon+3, nlev)
 
     a_L = q_hat[:, :-1, :]   # (n_lat, n_lon+2, nlev)
     a_R = q_hat[:, 1:, :]
     q_c = q[:, 1:-1, :]      # (n_lat, n_lon+2, nlev)
 
     if limiter:
-        a_L, a_R = _ppm_limit(q_c, a_L, a_R)
+        a_L, a_R = ppm_limit(q_c, a_L, a_R)
 
     q_left = a_R[:, :-1, :]   # (n_lat, n_lon+1, nlev)
     q_right = a_L[:, 1:, :]
@@ -73,9 +73,9 @@ def _ppm_reconstruct_lat_3d(q_pad_h2, limiter=True):
     # Strip longitude halo, keep latitude halo
     q = q_pad_h2[:, 2:-2, :]  # (n_lat+4, n_lon, nlev)
 
-    # Move lat axis (0) to axis -2 (1) so _ppm_edge_values operates on it
+    # Move lat axis (0) to axis -2 (1) so ppm_edge_values operates on it
     q_moved = jnp.moveaxis(q, 0, 1)  # (n_lon, n_lat+4, nlev)
-    q_hat_moved = _ppm_edge_values(q_moved)  # (n_lon, n_lat+3, nlev)
+    q_hat_moved = ppm_edge_values(q_moved)  # (n_lon, n_lat+3, nlev)
     q_hat = jnp.moveaxis(q_hat_moved, 1, 0)  # (n_lat+3, n_lon, nlev)
 
     a_L = q_hat[:-1, :, :]   # (n_lat+2, n_lon, nlev)
@@ -83,7 +83,7 @@ def _ppm_reconstruct_lat_3d(q_pad_h2, limiter=True):
     q_c = q[1:-1, :, :]      # (n_lat+2, n_lon, nlev)
 
     if limiter:
-        a_L, a_R = _ppm_limit(q_c, a_L, a_R)
+        a_L, a_R = ppm_limit(q_c, a_L, a_R)
 
     q_left = a_R[:-1, :, :]   # (n_lat+1, n_lon, nlev)
     q_right = a_L[1:, :, :]

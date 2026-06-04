@@ -85,25 +85,25 @@ class TestZeroMeanTendency:
 
     def test_2d_zero_mean(self, small_grid):
         """2D tendency: correction reduces global integral by orders of magnitude."""
-        from legoesm.core.conservation import zero_mean_tendency, _global_area_sum
+        from legoesm.core.conservation import zero_mean_tendency, global_area_sum
 
         data = jax.random.normal(jax.random.PRNGKey(0), (6, 8, 8))
-        uncorrected_sum = abs(float(_global_area_sum(data, small_grid)))
+        uncorrected_sum = abs(float(global_area_sum(data, small_grid)))
         corrected = zero_mean_tendency(data, small_grid)
-        corrected_sum = abs(float(_global_area_sum(corrected, small_grid)))
+        corrected_sum = abs(float(global_area_sum(corrected, small_grid)))
         # Correction should reduce the global sum by at least 6 orders of magnitude
         assert corrected_sum < uncorrected_sum * 1e-6 or corrected_sum < 0.1
 
     def test_3d_zero_mean(self, small_grid):
         """3D tendency: correction reduces per-level global integrals."""
-        from legoesm.core.conservation import zero_mean_tendency, _global_area_sum
+        from legoesm.core.conservation import zero_mean_tendency, global_area_sum
 
         nlev = 5
         data = jax.random.normal(jax.random.PRNGKey(0), (6, 8, 8, nlev))
         corrected = zero_mean_tendency(data, small_grid)
         for k in range(nlev):
-            orig = abs(float(_global_area_sum(data[..., k], small_grid)))
-            fixed = abs(float(_global_area_sum(corrected[..., k], small_grid)))
+            orig = abs(float(global_area_sum(data[..., k], small_grid)))
+            fixed = abs(float(global_area_sum(corrected[..., k], small_grid)))
             assert fixed < orig * 1e-5 or fixed < 0.1
 
     def test_zero_mean_preserves_pattern(self, small_grid):

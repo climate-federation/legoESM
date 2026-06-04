@@ -1204,10 +1204,10 @@ def _resolve_turbulence(config):
         return None, None
 
     from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
-    from legoesm.atmosphere.physics.turbulence.integration import _get_turbulence_fn
+    from legoesm.atmosphere.physics.turbulence.integration import get_turbulence_fn
 
     tc = TurbulenceConfig(scheme=scheme)
-    _name, turb_fn, turb_config = _get_turbulence_fn(tc)
+    _name, turb_fn, turb_config = get_turbulence_fn(tc)
     return turb_fn, turb_config
 
 

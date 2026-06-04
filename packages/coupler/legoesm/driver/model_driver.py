@@ -3508,7 +3508,7 @@ class ModelDriver:
         # restore from checkpoint if available, else compute from IC.
         # At initialization (step 0) all ranks have identical state, so
         # owned_mask is not strictly needed, but we include it for consistency.
-        from legoesm.core.conservation import compute_global_moisture, _global_area_sum
+        from legoesm.core.conservation import compute_global_moisture, global_area_sum
         _carry_aux = self._carry_aux
         _owned_mask = None
         if self._owned_face_ids is not None:
@@ -3526,7 +3526,7 @@ class ModelDriver:
         # Compute fixed dry mass target for target-anchored conservation
         _target_mass = _carry_aux.get("target_mass", jnp.asarray(0.0))
         if cfg.dycore.fix_mass and float(_target_mass) == 0.0:
-            _target_mass = _global_area_sum(
+            _target_mass = global_area_sum(
                 self.state.p_s.data, self.grid, owned_mask=_owned_mask,
             )
             logger.info(f"  Mass target: {float(_target_mass):.6e} Pa·m²")

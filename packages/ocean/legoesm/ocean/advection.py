@@ -507,7 +507,7 @@ def ppm_to_u_points(
     f_u : array, shape (n_lat, n_lon+1, nlev)
         PPM face values at u-points.
     """
-    from legoesm.core.operators_fv import _ppm_edge_values, _ppm_limit
+    from legoesm.core.operators_fv import ppm_edge_values, ppm_limit
 
     n_lat, n_lon, nlev = f.shape
 
@@ -517,11 +517,11 @@ def ppm_to_u_points(
 
     # PPM edge values along longitude (axis=-2 must be the reconstruction dir)
     # Rearrange to (n_lat, n_lon+4, nlev) → axis=-2 is already longitude ✓
-    # But _ppm_edge_values operates on axis=-2 with shape (..., M, K)
+    # But ppm_edge_values operates on axis=-2 with shape (..., M, K)
     # We need (nlev, n_lat, n_lon+4) then compute along axis=-2=n_lon+4... no.
-    # Actually _ppm_edge_values needs shape (..., M, K) where M=n_lon+4 is the
+    # Actually ppm_edge_values needs shape (..., M, K) where M=n_lon+4 is the
     # direction. Our shape is (n_lat, n_lon+4, nlev): axis=-2=n_lon+4 ✓!
-    q_hat = _ppm_edge_values(f_pad)  # (n_lat, n_lon+3, nlev)
+    q_hat = ppm_edge_values(f_pad)  # (n_lat, n_lon+3, nlev)
 
     # Left/right edge values for each cell
     a_L = q_hat[:, :-1, :]   # (n_lat, n_lon+2, nlev)
@@ -529,7 +529,7 @@ def ppm_to_u_points(
     q_c = f_pad[:, 1:-1, :]  # (n_lat, n_lon+2, nlev) — cell averages
 
     # Colella-Woodward limiter
-    a_L, a_R = _ppm_limit(q_c, a_L, a_R)
+    a_L, a_R = ppm_limit(q_c, a_L, a_R)
 
     # At face j (between cell j-1 and cell j):
     # - positive flow → use right edge of cell j-1 = a_R[j-1] (in padded coords: a_R[j])
@@ -618,7 +618,7 @@ def ppm_to_v_points(
     f_v : array, shape (n_lat+1, n_lon, nlev)
         PPM face values at v-points. Zero at pole boundaries.
     """
-    from legoesm.core.operators_fv import _ppm_limit
+    from legoesm.core.operators_fv import ppm_limit
 
     n_lat, n_lon, nlev = f.shape
 
@@ -653,7 +653,7 @@ def ppm_to_v_points(
     T_R = a_full[1:, :, :]
 
     # Colella-Woodward limiter
-    T_L, T_R = _ppm_limit(f, T_L, T_R)
+    T_L, T_R = ppm_limit(f, T_L, T_R)
 
     # Upwind face value at interior faces:
     # Positive flow (south→north): donor=cell i-1, use T_R of cell i-1
@@ -702,7 +702,7 @@ def flux_form_vertical_tracer_advection_ppm(
     vert_flux_div : array, shape (..., nlev)
         Vertical flux divergence F_top[k] - F_bot[k].
     """
-    from legoesm.core.operators_fv import _ppm_edge_values, _ppm_limit
+    from legoesm.core.operators_fv import ppm_edge_values, ppm_limit
 
     nlev = field.shape[-1]
 
@@ -711,10 +711,10 @@ def flux_form_vertical_tracer_advection_ppm(
         [field[..., 1::-1], field, field[..., -1:-3:-1]], axis=-1)
     # shape: (..., nlev+4)
 
-    # For _ppm_edge_values, we need shape (..., M, K) where M=nlev+4 is
+    # For ppm_edge_values, we need shape (..., M, K) where M=nlev+4 is
     # the reconstruction direction. Add a dummy trailing dimension.
     f_pad_2d = f_pad[..., jnp.newaxis]  # (..., nlev+4, 1)
-    q_hat_2d = _ppm_edge_values(f_pad_2d)  # (..., nlev+3, 1)
+    q_hat_2d = ppm_edge_values(f_pad_2d)  # (..., nlev+3, 1)
     q_hat = q_hat_2d[..., 0]  # (..., nlev+3)
 
     # Left/right edges
@@ -722,11 +722,11 @@ def flux_form_vertical_tracer_advection_ppm(
     a_R = q_hat[..., 1:]    # (..., nlev+2)
     q_c = f_pad[..., 1:-1]  # (..., nlev+2)
 
-    # Add trailing dim for _ppm_limit (needs consistent shapes)
+    # Add trailing dim for ppm_limit (needs consistent shapes)
     a_L_2d = a_L[..., jnp.newaxis]
     a_R_2d = a_R[..., jnp.newaxis]
     q_c_2d = q_c[..., jnp.newaxis]
-    a_L_2d, a_R_2d = _ppm_limit(q_c_2d, a_L_2d, a_R_2d)
+    a_L_2d, a_R_2d = ppm_limit(q_c_2d, a_L_2d, a_R_2d)
     a_L = a_L_2d[..., 0]
     a_R = a_R_2d[..., 0]
 
@@ -833,15 +833,15 @@ def fct_tracer_advection(
     F_vert_low_int = w_int * T_face_low  # (..., nlev-1)
 
     # PPM interface flux
-    from legoesm.core.operators_fv import _ppm_edge_values, _ppm_limit
+    from legoesm.core.operators_fv import ppm_edge_values, ppm_limit
     f_pad = jnp.concatenate(
         [tracer[..., 1::-1], tracer, tracer[..., -1:-3:-1]], axis=-1)
     f_pad_2d = f_pad[..., jnp.newaxis]
-    q_hat = _ppm_edge_values(f_pad_2d)[..., 0]
+    q_hat = ppm_edge_values(f_pad_2d)[..., 0]
     a_L = q_hat[..., :-1]
     a_R = q_hat[..., 1:]
     q_c = f_pad[..., 1:-1]
-    a_L_2d, a_R_2d = _ppm_limit(
+    a_L_2d, a_R_2d = ppm_limit(
         q_c[..., jnp.newaxis], a_L[..., jnp.newaxis], a_R[..., jnp.newaxis])
     a_L, a_R = a_L_2d[..., 0], a_R_2d[..., 0]
     q_R_above = a_R[..., 1:nlev]

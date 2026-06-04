@@ -71,7 +71,7 @@ def conservation_accumulator():
     return _accumulation_dtype()
 
 
-def _global_area_sum(
+def global_area_sum(
     array: jax.Array,
     grid,
     owned_mask: jax.Array | None = None,
@@ -127,7 +127,7 @@ def _batch_global_area_sums(
 ) -> list[jax.Array]:
     """Compute multiple area-weighted global sums in a single MPI call.
 
-    Same semantics as calling :func:`_global_area_sum` on each array
+    Same semantics as calling :func:`global_area_sum` on each array
     individually, but batches all reductions into one ``allreduce``
     when running under MPI, reducing latency from O(N) to O(1).
 
@@ -369,7 +369,7 @@ def zero_mean_tendency(
 
     if tendency.ndim == area_ndim:
         # 2D tendency (lat-lon) or 3D tendency (cubed-sphere) — no level axis
-        global_sum = _global_area_sum(tendency, grid)
+        global_sum = global_area_sum(tendency, grid)
         correction = global_sum / total_area_acc
         return (tendency.astype(acc) - correction).astype(orig_dtype)
     elif tendency.ndim == area_ndim + 1:
@@ -431,7 +431,7 @@ def compute_global_moisture(
         q_v.astype(acc) * p_s.astype(acc)[..., None] * dsigma.astype(acc),
         axis=-1,
     ) / jnp.asarray(constants.g, dtype=acc)
-    return _global_area_sum(cwv, grid, owned_mask=owned_mask)
+    return global_area_sum(cwv, grid, owned_mask=owned_mask)
 
 
 def fix_moisture_hydrostatic(
@@ -641,13 +641,13 @@ def fix_ps_mass_target(
     grid : CubedSphereGrid
     owned_mask : jax.Array, optional
         Shape ``(6,)`` float mask for MPI replicated dynamics.
-        See :func:`_global_area_sum` for details.
+        See :func:`global_area_sum` for details.
 
     Returns
     -------
     jax.Array : Corrected p_s with same shape.
     """
-    mass_new = _global_area_sum(p_s, grid, owned_mask=owned_mask)
+    mass_new = global_area_sum(p_s, grid, owned_mask=owned_mask)
     correction = (target_mass - mass_new) / _total_area(grid)
     return p_s + correction
 
@@ -681,7 +681,7 @@ def compute_nh_dry_mass(
         J[..., None] * rho_total * dz[None, None, None, :],
         axis=-1,
     )  # (6, n, n)
-    return _global_area_sum(col_mass, grid)
+    return global_area_sum(col_mass, grid)
 
 
 def fix_mass_nonhydrostatic(

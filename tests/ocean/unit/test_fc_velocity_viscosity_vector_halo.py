@@ -8,7 +8,7 @@ stack with the SCALAR ``pad_halo_4d`` — blending the two components across cub
 panel seams WITHOUT rotating them into the neighbour face's local basis.  Every
 RHS evaluation then added a panel-edge momentum imprint to ``du/dt, dv/dt``.
 The fix routes the velocity halo through the rotation-aware
-``_fc_pad_halo_vector`` (the same vector halo the momentum tendency already
+``fc_pad_halo_vector`` (the same vector halo the momentum tendency already
 uses, and the analogue of the CD-grid atmosphere diffusion-halo fix) and runs
 the Laplacian / hand-built biharmonic per component.
 
@@ -40,7 +40,7 @@ import jax.numpy as jnp  # noqa: E402
 
 from legoesm.grids.cubed_sphere import create_cubed_sphere  # noqa: E402
 from legoesm.core.operators_fc import (  # noqa: E402
-    build_fc_config, _fc_pad_halo_vector,
+    build_fc_config, fc_pad_halo_vector,
 )
 from legoesm.core.operators_fc_3d import fc_laplacian_3d  # noqa: E402
 from legoesm.grids.halo import pad_halo_4d  # noqa: E402
@@ -78,7 +78,7 @@ def test_fc_velocity_viscosity_vector_halo_preserves_zonal_symmetry():
     weights = get_cubedsphere_to_latlon_weights(n, n_lon=360, n_lat=181)
 
     # Vector (rotation-aware) halo — what the fix uses.
-    u_pad, v_pad = _fc_pad_halo_vector(u, v, grid)
+    u_pad, v_pad = fc_pad_halo_vector(u, v, grid)
     lap_u_vec = fc_laplacian_3d(u, grid, fc_config, padded=u_pad)
     lap_v_vec = fc_laplacian_3d(v, grid, fc_config, padded=v_pad)
     nz_vec = _nonzonal_fraction_of_magnitude(lap_u_vec, lap_v_vec, weights)
@@ -96,13 +96,13 @@ def test_fc_velocity_viscosity_vector_halo_preserves_zonal_symmetry():
         f"vector-halo non-zonal fraction {nz_vec:.3f} is not clearly below the "
         f"scalar-halo {nz_scalar:.3f}: the FC velocity Laplacian halo is no "
         "longer rotation-aware — a scalar halo on stacked (u, v) breaks the "
-        "zonal symmetry of the viscous tendency.  Use _fc_pad_halo_vector."
+        "zonal symmetry of the viscous tendency.  Use fc_pad_halo_vector."
     )
 
 
 def test_fc_velocity_viscosity_source_uses_vector_halo():
     """Source guard: the velocity viscosity must NOT scalar-pad a stacked
-    (u, v); it must use _fc_pad_halo_vector."""
+    (u, v); it must use fc_pad_halo_vector."""
     src = legoesm_source_path("ocean/dynamics/ocean_pe_fc.py").read_text()
     # No stacked-(u,v) -> scalar pad_halo_4d for the velocity viscosity.
     bad = re.search(
@@ -113,10 +113,10 @@ def test_fc_velocity_viscosity_source_uses_vector_halo():
     assert bad is None, (
         "found a stacked-(u, v) -> scalar pad_halo_4d velocity viscosity halo "
         "in ocean_pe_fc.py — this re-introduces the cube panel-seam momentum "
-        "imprint; use _fc_pad_halo_vector per component."
+        "imprint; use fc_pad_halo_vector per component."
     )
-    assert src.count("_fc_pad_halo_vector(") >= 3, (
+    assert src.count("fc_pad_halo_vector(") >= 3, (
         "the FC velocity viscosity must vector-pad (u, v) via "
-        "_fc_pad_halo_vector for the Laplacian and the biharmonic inner/outer "
+        "fc_pad_halo_vector for the Laplacian and the biharmonic inner/outer "
         "Laplacian."
     )

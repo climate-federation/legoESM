@@ -63,7 +63,7 @@ from legoesm.atmosphere.physics.thermodynamics import (
 )
 
 
-def _get_turbulence_fn(config: TurbulenceConfig):
+def get_turbulence_fn(config: TurbulenceConfig):
     """Select the turbulence backend based on config.scheme."""
     if config.scheme == "smagorinsky":
         return "smagorinsky", smagorinsky_turbulence, config.smagorinsky
@@ -186,7 +186,7 @@ def _make_hydrostatic_turbulence(
     When tracers are available, q_v is read from ``state.tracers["q_v"]``
     and the moisture tendency ``dq_v_dt`` is returned via ``tracer_tendencies``.
     """
-    scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
+    scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
     needs_tke = scheme_name in ("tke", "mynn25", "clubb_lite", "edmf")
 
     def physics_fn(
@@ -339,7 +339,7 @@ def _make_mpas_turbulence(
 
     Audit 2026-05-12 finding MEDIUM #10.
     """
-    scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
+    scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
     needs_tke = scheme_name in ("tke", "mynn25", "clubb_lite", "edmf")
 
     def physics_fn(state, mesh, sigma_coord, phys_state=None, forcing=None):
@@ -490,7 +490,7 @@ def _make_nonhydrostatic_turbulence(
     ``phys_state.tke`` and the updated TKE is returned as the second
     element of the result tuple.
     """
-    scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
+    scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
     needs_tke = scheme_name in ("tke", "mynn25", "clubb_lite", "edmf")
     if scheme_name == "mynn25":
         # Phase C codex iter-3 high: the nonhydrostatic CD-grid dynamics
@@ -659,7 +659,7 @@ def _make_spectral_pe_turbulence(
     ``phys_state.tke`` and the updated TKE is returned as the second
     element of the result tuple.
     """
-    scheme_name, turb_fn, scheme_config = _get_turbulence_fn(turbulence_config)
+    scheme_name, turb_fn, scheme_config = get_turbulence_fn(turbulence_config)
     needs_tke = scheme_name in ("tke", "mynn25", "clubb_lite", "edmf")
     if scheme_name == "mynn25":
         # Phase C codex iter-3 high: spectral PE dynamics drops the
