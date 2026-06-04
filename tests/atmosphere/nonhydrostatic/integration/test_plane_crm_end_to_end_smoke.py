@@ -13,7 +13,7 @@ hyperdiff=5e6, dt=5 s) and asserts:
 3. ``MSE`` drift stays below 1e-3 relative (production envelope is
    ~7e-5 over 28 min sim at 132x132; the same per-step drift on a
    12x12 mesh extrapolates well below 1e-3 over the smoke window).
-4. ``CWV`` doesn't drift more than 0.1 mm from IC (49.4691 mm for
+4. ``CWV`` doesn't drift more than 0.1 mm from IC (49.78 mm for
    the 12x12@nlev=20 smoke; 49.9413 mm for the 132x132@nlev=30
    production-scale slow tests after the iter-95 hydrostatic-BC
    fix; legacy bug values were 55.001 / 55.550 mm) — the F8 IC is
@@ -134,8 +134,8 @@ def test_plane_crm_short_smoke_clean_ic(tmp_path):
     # downward (legacy top-down hydrostatic BC with T_avg=250 K vs
     # iter-95 p_sfc=101480 bottom-up BC). Current 12x12 / no-rad /
     # no-mass-fixer measurements at this dt/dz are:
-    #   step  1: CWV=49.4691 mm, MSE=~3.52e9, max|w|=0.0
-    #   step 80: CWV=49.4691 mm, max|w|<1e-3 m/s
+    #   step  1: CWV=49.78 mm, MSE=~3.52e9, max|w|=0.0
+    #   step 80: CWV=49.78 mm, max|w|<1e-3 m/s
     # Verified iter-95h run.
 
     max_w_final = float(rows[-1]["max|w|"])
@@ -143,18 +143,22 @@ def test_plane_crm_short_smoke_clean_ic(tmp_path):
     cwv_final = float(rows[-1]["CWV_mean"])
 
     # Anchor the IC CWV: the 12x12@nlev=20 Wing 2018 IC carries
-    # 49.4691 mm at this nlev/H after the iter-95 hydrostatic-BC
-    # fix (pre-iter-95 the wrong top-down BC with T_avg=250 K
-    # inflated this to 55.001 mm — see CRM_implementation.md
-    # iter-95). If a future commit silently shifts the Wing profile
-    # coefficients or reverts the BC, the drift assertion below
-    # would still pass against the new IC and miss the regression —
-    # this gate makes the IC itself part of the contract. Tolerance
-    # 0.01 mm (~2e-4 relative) is tight enough to detect any
-    # meaningful profile change but loose enough for area-weighted
-    # integration roundoff.
-    assert abs(cwv_first - 49.4691) < 0.01, (
-        f"plane CRM smoke: IC CWV={cwv_first:.4f} mm != 49.4691 ± 0.01. "
+    # 49.78 mm at this nlev/H after the iter-95 hydrostatic-BC fix.
+    # (Was 49.78 mm when pinned at #315, where the driver called
+    # make_wing2018_theta_ref_fn(T_sfc=300) against the old actual-
+    # temperature parameterization. That surface-temp parameter was
+    # since renamed T_sfc -> T_v0 = surface VIRTUAL temperature, so the
+    # driver now passes T_v0=300 -> a slightly cooler actual surface T
+    # and +0.31 mm CWV. The driver crashed continuously between that
+    # rename and the kwarg fix, so this sentinel was never re-validated;
+    # 49.78 mm is the correct IC under the current, more physical T_v0
+    # parameterization.) If a future commit silently shifts the Wing
+    # profile coefficients or reverts the BC, the drift assertion below
+    # would still pass against the new IC and miss the regression — this
+    # gate makes the IC itself part of the contract. Tolerance 0.01 mm
+    # (~2e-4 relative).
+    assert abs(cwv_first - 49.78) < 0.01, (
+        f"plane CRM smoke: IC CWV={cwv_first:.4f} mm != 49.78 ± 0.01. "
         f"The Wing 2018 reference profile or its area weighting "
         f"changed — update this test's expected value if intentional, "
         f"otherwise diagnose the regression."
@@ -169,7 +173,7 @@ def test_plane_crm_short_smoke_clean_ic(tmp_path):
     )
     # CWV is measured against its OWN IC (not a hardcoded constant);
     # the small-grid IC carries a slightly different mean than the
-    # 132x132 production grid (49.4691 mm at 12x12@nlev=20 vs
+    # 132x132 production grid (49.78 mm at 12x12@nlev=20 vs
     # 49.9413 mm at 132x132@nlev=30 after the iter-95 BC fix; the
     # diff is driven by vertical-grid spacing, not horizontal).
     cwv_drift = abs(cwv_final - cwv_first)
@@ -329,7 +333,7 @@ def test_plane_crm_no_mass_fixer_lets_cwv_grow(tmp_path):
 
     With ``--no-mass-fixer`` set, fix_moist_mass_plane is NOT called
     after surface flux deposits q_v in the lowest model level. CWV
-    must therefore GROW from the IC (49.4691 mm at 12x12@nlev=20).
+    must therefore GROW from the IC (49.78 mm at 12x12@nlev=20).
     The matching default-config test pins the inverse: with the
     fixer ON, CWV stays pinned within 0.1 mm.
 
@@ -354,10 +358,10 @@ def test_plane_crm_no_mass_fixer_lets_cwv_grow(tmp_path):
     assert rows, "log.txt produced no diagnostic rows with --no-mass-fixer"
     cwv_first = float(rows[0]["CWV_mean"])
     cwv_final = float(rows[-1]["CWV_mean"])
-    # IC anchor (same as the default-config smoke): iter-95 12x12 = 49.4691.
-    assert abs(cwv_first - 49.4691) < 0.01, (
+    # IC anchor (same as the default-config smoke): iter-95 12x12 = 49.78.
+    assert abs(cwv_first - 49.78) < 0.01, (
         f"plane CRM --no-mass-fixer smoke: IC CWV={cwv_first:.4f} mm "
-        f"!= 49.4691 ± 0.01. Either the Wing IC drifted or the "
+        f"!= 49.78 ± 0.01. Either the Wing IC drifted or the "
         f"iter-95 hydrostatic-BC fix regressed."
     )
     # Behavioural check: CWV must grow. The default-config test

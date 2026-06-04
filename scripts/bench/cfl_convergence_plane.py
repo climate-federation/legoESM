@@ -51,8 +51,11 @@ def fresh_state(nx, dx, H=33_000.0, nlev=30):
     grid = create_plane_grid(
         nx=nx, ny=nx, nlev=nlev, dx=dx, dy=dx, dtype=jnp.float64,
     )
+    # make_wing2018_theta_ref_fn's surface-temp param was renamed T_sfc -> T_v0
+    # (surface virtual temperature); pass T_v0=, not T_sfc= (old kwarg raises
+    # TypeError).
     theta_fn = make_wing2018_theta_ref_fn(
-        T_sfc=300.0, q_sfc=0.018, z_t=15_000.0, Gamma=6.7e-3,
+        T_v0=300.0, q_sfc=0.018, z_t=15_000.0, Gamma=6.7e-3,
     )
     hc = create_height_coordinate(nlev, H=H, theta_ref_fn=theta_fn)
     tm = make_flat_plane_terrain_metric(grid, hc)

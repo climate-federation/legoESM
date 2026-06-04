@@ -126,8 +126,11 @@ def build_height_coord_and_state(nlev, H, dz_sfc, grid):
     moisture in HeightCoordinate; q_v lives entirely on the tracer
     pytree).
     """
+    # make_wing2018_theta_ref_fn's surface-temp param was renamed T_sfc -> T_v0
+    # (surface virtual temperature); pass T_v0=, not T_sfc= (old kwarg raises
+    # TypeError). This driver uses the SST (T_SFC_K) as the reference T_v0.
     theta_fn = make_wing2018_theta_ref_fn(
-        T_sfc=T_SFC_K, q_sfc=Q_SFC_FRAC, z_t=Z_T, Gamma=GAMMA_TROP,
+        T_v0=T_SFC_K, q_sfc=Q_SFC_FRAC, z_t=Z_T, Gamma=GAMMA_TROP,
     )
     qv_fn = make_wing2018_qv_ref_fn(q_sfc=Q_SFC_FRAC, z_t=Z_T)
     # iter-95: pass p_sfc=101480 (Wing 2018 Tab A1) for the
