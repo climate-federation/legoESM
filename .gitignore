@@ -37,14 +37,10 @@ wandb/
 logs/
 **/logs/
 
-# Runtime diagnostic dumps written by ad-hoc probe/plot scripts (PNG/NetCDF
-# spilled into a `diagnostics/` tree during a run).
-# EXCEPTION: the curated cubed-sphere visual-regression baselines under
-# `diagnostics/fv3_visual/` are tracked deliberately (iter921 MANIFEST +
-# CLAUDE.md visual-verify rule); negate them back in below.
+# Diagnostic output folder — PNG/NetCDF dumps written by probe/plot scripts.
+# Excluded wholesale (incl. the former fv3_visual baselines): visual-regression
+# baselines are inspected from local working copies, not tracked in git.
 diagnostics/
-!diagnostics/fv3_visual/
-!diagnostics/fv3_visual/**
 
 # Diagnostic plots dropped at repo root by ad-hoc scripts.
 # Tracked diagnostic PNGs live under `diagnostics/` and are still
