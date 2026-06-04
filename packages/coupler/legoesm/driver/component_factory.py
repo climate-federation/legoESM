@@ -215,6 +215,7 @@ def create_atmosphere_dycore(
             hyperdiff_coeff=diff.hyperdiff,
             use_conservation_fixer=dc.conservation_fixer,
             fix_mass=dc.fix_mass,
+            time_integrator=dc.time_integrator,  # honor the dycore.time_integrator axis
         )
         return CDGridShallowWaterModel(grid, cfg)
 
@@ -234,6 +235,7 @@ def create_atmosphere_dycore(
             # bit-exact for existing call sites.
             implicit_grav_wave_use_pcg=dc.implicit_grav_wave_use_pcg,
             implicit_grav_wave_damping=dc.implicit_grav_wave_damping,
+            time_integrator=dc.time_integrator,  # honor the dycore.time_integrator axis
         )
         return CDGridPrimitiveEquationModel(grid, sigma, cfg)
 
@@ -303,6 +305,7 @@ def create_atmosphere_dycore(
             nu_del4_ps=diff.hyperdiff,
             K_h=diff.A_h,
             fix_mass=dc.fix_mass,
+            time_integrator=dc.time_integrator,  # honor the dycore.time_integrator axis
         )
         return MPASPrimitiveEquationModel(mesh=grid, sigma_coord=sigma, config=cfg)
 
@@ -408,7 +411,7 @@ def create_atmosphere_dycore(
         )
         _effective_dt = dc.dt
 
-        if getattr(dc, "use_polar_filter", False):
+        if dc.use_polar_filter:
             # Filter on → equatorial CFL is the effective limit.
             # dx_equator = R * dlon = circumference / n_lon.
             import math as _math
@@ -465,16 +468,15 @@ def create_atmosphere_dycore(
             # use_polar_filter is False (default) the model's filter
             # mask is None and no FFT is applied — bit-identical to
             # pre-Stage-3-E behaviour.
-            use_polar_filter=getattr(dc, "use_polar_filter", False),
-            polar_filter_cutoff_deg=getattr(
-                dc, "polar_filter_cutoff_deg", 60.0,
-            ),
-            polar_filter_max_wave_speed=getattr(
-                dc, "polar_filter_max_wave_speed", 300.0,
-            ),
+            # Direct attribute access (these are guaranteed DycoreConfig fields);
+            # getattr-with-literal fallbacks would mask a rename behind a stale
+            # default instead of failing (CLAUDE.md).
+            use_polar_filter=dc.use_polar_filter,
+            polar_filter_cutoff_deg=dc.polar_filter_cutoff_deg,
+            polar_filter_max_wave_speed=dc.polar_filter_max_wave_speed,
             # Task #25: time integrator (default ssp_rk3, opt into
             # ssp_rk3_scan for ~1.5× JIT compile speedup at scale).
-            time_integrator=getattr(dc, "time_integrator", "ssp_rk3"),
+            time_integrator=dc.time_integrator,
         )
         model = CGridLatLonPrimitiveEquationModel(
             grid, sigma, cfg, dt=_effective_dt)
@@ -607,6 +609,18 @@ def create_ocean_component(
 
     if isinstance(ocean_config, OceanConfig):
         from legoesm.ocean import OceanModel
+        # full_3d OceanModel is cubed-sphere-only (it calls create_cubed_sphere_cdgrid).
+        # Guard the grid family with a clear message instead of an AttributeError
+        # deep inside cdgrid construction (mirrors the resolve_model_complexity guard).
+        from legoesm.driver.config import normalize_grid_type
+        _gt = normalize_grid_type(config.grid.grid_type)
+        if _gt not in _FULL_OCEAN_GRID_TYPES:
+            raise ValueError(
+                f"full_3d (OceanConfig) ocean is implemented only for grid_type in "
+                f"{sorted(_FULL_OCEAN_GRID_TYPES)} (the cubed-sphere OceanModel); got "
+                f"{_gt!r}. Lat-lon and MPAS full ocean require their grid-specific "
+                f"models/configs — that wiring is not yet implemented here."
+            )
         if vertical_coord is None:
             raise ValueError(
                 "full OceanModel needs a vertical_coord (an ocean z-star "
@@ -660,11 +674,18 @@ def create_land_component(config: ExperimentConfig, grid, *, land_config=None):
     # rung -> config resolution lives here in the factory (which owns the
     # concrete land configs) rather than in the pure components taxonomy.
     if isinstance(land_config, LandComplexity):
-        land_config = (
-            MultiLayerLandConfig()
-            if land_config is LandComplexity.MULTILAYER
-            else LandConfig()
-        )
+        # Explicit, exhaustive rung dispatch with a final raise (CLAUDE.md: never a
+        # silent else:default — a new LandComplexity rung must fail loudly here,
+        # not silently degrade to the slab LandConfig).  Mirrors ice_complexity_config.
+        if land_config is LandComplexity.MULTILAYER:
+            land_config = MultiLayerLandConfig()
+        elif land_config is LandComplexity.SLAB:
+            land_config = LandConfig()
+        else:
+            raise ValueError(
+                f"unhandled LandComplexity rung: {land_config!r} — add its "
+                f"config mapping in create_land_component (not yet implemented)."
+            )
 
     if isinstance(land_config, MultiLayerLandConfig):
         logger.info("Land: multilayer model (n_layers=%d)", land_config.soil_grid.n_layers)
