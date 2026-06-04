@@ -83,9 +83,19 @@ Senior JAX+ESM dev. Skeptical, verify-first. Optimize: correctness, physical con
 - AMIP: `.venv/bin/python scripts/run/run_amip.py`
 - Dycore progression: `.venv/bin/python tests/validation/run_dycore_progression_suite.py`
 - GPU/MPI scaling: `.venv/bin/python scripts/bench/run_levante_gpu_scaling.py --grid cubed-sphere --mode strong` (`docs/REAL_HARDWARE_SCALING.md`)
-- Scripts reorganized into buckets (Phase 4): `scripts/{run,matrix,bench,plot,validate,data,experiment}/`; debug in `scripts/tmp/`. See `scripts/README.md`.
+- Scripts reorganized into buckets: `scripts/{run,matrix,bench,plot,validate,data,experiment,cluster}/`; debug in `scripts/tmp/`. See `scripts/README.md` + `## File Layout` below.
 - MPI tests: `mpirun -np 2 .venv/bin/python -m pytest tests/distributed/`
 - MPI diff: `mpirun -np 2 .venv/bin/python -m pytest tests/distributed/test_mpi_differentiability.py`
+
+## File Layout (audit — enforce on EVERY new file; no random files)
+- **New scripts go in the correct `scripts/` bucket — NEVER `scripts/` root or repo root.** Buckets: `run/` (prod drivers), `matrix/` (test-matrix registries), `bench/` (perf/profiling/scaling), `plot/` (plot/replot/regen), `validate/` (non-matrix validators/verifiers/conservation checks), `data/` (download/build/prepare forcing+IC), `experiment/` (init/reproduce/templates/machine-detect/fetch), `cluster/` (SLURM `.sbatch` job wrappers, e.g. `cluster/omip_nemo/`). Pick the bucket by what the script DOES. New bucket needs a real category, not a dumping ground. See `scripts/README.md`.
+- **Debug / throwaway / one-off → `scripts/tmp/` ONLY** (eventually deleted): `_*`-prefixed probes, `diag_*`/`diagnose_*`, per-iteration scratch. Never at `scripts/` root. `_probe_*.py` is gitignored.
+- **No new files dumped at repo root.** Root keeps ONLY: `README.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `FEDERATION.md`, `project_status.md` (generated), `pyproject.toml`/lockfile/dotfiles. Everything else has a home.
+- **No `.md` notes accumulating at repo root → `docs/`.** Dev-notes, change logs, faithfulness/audit trackers (`*_faithful.md`, `*_checks.md`, review logs) live under `docs/`. Reference by BASENAME so code comments survive the move.
+- **No runtime outputs in git.** `diagnostics/`, `logs/`, `**/logs/`, `results/`, `checkpoints/`, `output/`, `*.zarr`/`*.nc`, root `*.png`/`*.pdf`/`*.svg` gitignored. Visual-regression baselines stay in LOCAL working copies, regenerated on demand — not tracked. Never `git add -f` a runtime artifact.
+- **Source stays under `packages/<pkg>/legoesm/`** (federation namespace). Never add source at `src/`/repo root. New subpackage → update `tests/test_federation_plan.py` same PR.
+- **Tests mirror the package tree under `tests/`** (`tests/<component>/<tier>/...`). Curated dycore regressions in `tests/atmosphere/dycore/regression/`. No new `test_*.py` at repo root.
+- Staging: explicit pathspecs, NEVER `git add .`/`-A` — catches stray scratch + concurrent-session files.
 
 ## Bug Triage
 - Instability: CFL, boundary, metric, halo, pressure-gradient, diffusion, dtype.
