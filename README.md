@@ -2,7 +2,7 @@
   <img src="docs/assets/legoESM.png" alt="legoESM" width="400">
 </p>
 
-# legoESM
+# legoESM v0.1
 
 **A Differentiable Earth System Model in JAX**
 
@@ -390,6 +390,36 @@ To check your current JAX backend:
 ```bash
 python -c "import jax; print(jax.default_backend())"
 ```
+
+## Versioning
+
+legoESM follows [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`).
+**Current release: `0.1.0` (legoESM v0.1).**
+
+The version is **single-sourced and lockstep across the whole federation**:
+
+- **One source of truth** — the literal lives in exactly one place, the root
+  `pyproject.toml` `[project].version`. There is no second copy to drift.
+- **Lockstep members** — all eight workspace packages
+  (`legoesm-core`, `-atmosphere`, `-ocean`, `-land`, `-ice`, `-coupler`, `-ml`,
+  `-tools`) share the same version and depend on each other with `~=0.1.0`, so a
+  non-workspace `pip install legoesm` can never resolve a mismatched core. Bump
+  them together.
+- **Runtime resolution** — `legoesm.__version__` (and `legoesm._version`) reports
+  the version of *the code actually executing*: it reads the source-tree
+  `pyproject.toml` first (so an un-reinstalled checkout is honest), then falls
+  back to installed package metadata. `legoesm --version` prints it.
+- **Docs track MINOR** — the README banner, the Scientific Guide, and the
+  Technical Documentation carry the `MAJOR.MINOR` (e.g. *v0.1*) via a single
+  `\legoesmversion` macro per LaTeX document, kept in step with the package
+  version on each release.
+
+To cut a release: bump `version` in the root and all `packages/*/pyproject.toml`
+(keep them identical), update the `\legoesmversion` macro in the two `docs/*.tex`
++ this banner, tag, and rebuild the PDFs.
+
+`v0.1` is the initial public release: the differentiable core, all components,
+the coupler, the federation packaging, and the tiered test/experiment harness.
 
 ## Documentation
 
