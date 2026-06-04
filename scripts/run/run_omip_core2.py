@@ -435,7 +435,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
     confounds model differences with IC differences over a few-year spinup. (WOA18 is
     a close stand-in for NEMO's exact Gouretski IC, which is the further refinement.)
     """
-    import run_omip
+    from scripts.run import run_omip
     # Pick the tripole resolution from the mesh file: eORCA025 (1/4 deg) vs the
     # default eORCA1 (1 deg). create_tripole_grid reads the grid (glamt/e1t.../
     # tmask + fold) from this SAME file, so the grid and the land_mask/bathy
@@ -596,7 +596,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
     regridded to the lat-lon grid (nearest-neighbour, periodic) -- so the
     geometry still matches the NEMO reference.
     """
-    import run_omip
+    from scripts.run import run_omip
     import xarray as xr
     from scripts.validate.compare_omip_nemo import regrid_curv_to_latlon
     res = f"{n_lat}x{n_lon}"

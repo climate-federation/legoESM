@@ -51,7 +51,7 @@ from pathlib import Path
 from typing import Callable
 
 _HERE = Path(__file__).resolve().parent
-_REPO = _HERE.parent
+_REPO = _HERE.parent.parent  # scripts/bench/ -> repo root
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 

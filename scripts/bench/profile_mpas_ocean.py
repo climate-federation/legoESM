@@ -40,7 +40,7 @@ from typing import Callable
 # --- Environment setup BEFORE jax import ----------------------------------
 # Match scaling bench exactly (fp64 + CUDA-graphs command buffers).
 _HERE = Path(__file__).resolve().parent
-_REPO = _HERE.parent
+_REPO = _HERE.parent.parent  # scripts/bench/ -> repo root
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
