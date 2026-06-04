@@ -15,7 +15,7 @@
 # After this script succeeds, MPI benches/scripts should be invoked
 # via the venv binary, e.g.
 #   JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun -np 4 \
-#       .venv-mpi/bin/python scripts/bench_plane_crm_dd_scaling.py ...
+#       .venv-mpi/bin/python scripts/bench/bench_plane_crm_dd_scaling.py ...
 #
 # A sanity check at the end runs ``python -c "import jax, mpi4jax;
 # print(jax.__version__, mpi4jax.__version__)"`` to verify the pin
@@ -61,4 +61,4 @@ print(f'mpi4py  : {mpi4py.__version__}')
 
 echo ""
 echo "OK. Use $VENV_DIR/bin/python for MPI workloads, e.g.:"
-echo "  mpirun -np 4 $VENV_DIR/bin/python scripts/bench_plane_crm_dd_scaling.py --mode strong --time-steps 10"
+echo "  mpirun -np 4 $VENV_DIR/bin/python scripts/bench/bench_plane_crm_dd_scaling.py --mode strong --time-steps 10"

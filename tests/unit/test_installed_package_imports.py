@@ -129,10 +129,10 @@ GRANDFATHERED_TESTS_IMPORTS_BY_FILE: dict[str, frozenset[str]] = {
     "scripts/run_baroclinic_wave_benchmark.py": frozenset({
         "tests.test_cases.baroclinic_wave",
     }),
-    "scripts/run_cpu_mpi_scaling.py": frozenset({
+    "scripts/bench/run_cpu_mpi_scaling.py": frozenset({
         "tests.test_cases.baroclinic_wave",
     }),
-    "scripts/run_levante_gpu_scaling.py": frozenset({
+    "scripts/bench/run_levante_gpu_scaling.py": frozenset({
         "tests.test_cases.baroclinic_wave",
     }),
     "scripts/run_w2_mpas_convergence.py": frozenset({

@@ -1,6 +1,6 @@
 """Profile the cubed-sphere C48/L26 dycore step on a local GPU.
 
-Builds the C48/L26 model exactly as ``scripts/run_levante_gpu_scaling.py``
+Builds the C48/L26 model exactly as ``scripts/bench/run_levante_gpu_scaling.py``
 does (``run_benchmark(..., grid_type='cubed-sphere', physics_level='gray_sbm')``
 through ``_build_segment_benchmark``), then breaks per-step wall time into
 sub-stages using:

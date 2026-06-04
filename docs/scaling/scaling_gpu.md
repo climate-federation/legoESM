@@ -67,8 +67,8 @@ Grid types to cover:
 ## Iteration log
 
 ### Iter 1 — 2026-05-26 — baseline inventory
-- Reuse: `scripts/run_levante_gpu_scaling.py` (atm 4 grids, weak+strong, supports n_gpus=1)
-- Reuse: `scripts/bench_dd_scaling.py` (RCE plane MPI domain-decomp)
+- Reuse: `scripts/bench/run_levante_gpu_scaling.py` (atm 4 grids, weak+strong, supports n_gpus=1)
+- Reuse: `scripts/bench/bench_dd_scaling.py` (RCE plane MPI domain-decomp)
 - Reuse: `scripts/plot/plot_scaling.py`, `plot_scaling_laws.py`
 - No ocean GPU bench exists — needs adding (reuse ocean test-matrix init helpers)
 - Branch: `feature/gpu-scaling`
@@ -196,7 +196,7 @@ Ocean LL ramps to **211 Mcells/s @ LL192 fp64 / 402 Mcells/s @ LL192 fp32** — 
 
 ### Iter 4 — 2026-05-26 — analysis tool + MPAS fp32 anomaly
 
-Added `scripts/analyze_gpu_scaling.py` — paired fp32/fp64 CSV → infers passes-per-cell, ratio, fp32 effective HBM% assuming memory-bound.
+Added `scripts/bench/analyze_gpu_scaling.py` — paired fp32/fp64 CSV → infers passes-per-cell, ratio, fp32 effective HBM% assuming memory-bound.
 
 **Cubed-sphere atm (ratio ≈ 2, ⇒ bandwidth-bound):**
 
@@ -360,10 +360,10 @@ Side-effect check on CS atm:
 - `results/scaling_gpu/scaling_gpu_weak.png` — ns/cell vs cells (log-log); flat = saturated
 
 ### Code artifacts
-- `scripts/bench_ocean_gpu_scaling.py` — ocean GPU bench (latlon C-grid + MPAS Voronoi), uses lax.scan fuse + CUDA graphs by default
+- `scripts/bench/bench_ocean_gpu_scaling.py` — ocean GPU bench (latlon C-grid + MPAS Voronoi), uses lax.scan fuse + CUDA graphs by default
 - `scripts/plot/plot_gpu_scaling.py` — generic CSV → 3 figures, precision-aware legend, theoretical floor overlay
-- `scripts/analyze_gpu_scaling.py` — 2-precision linear decomposition with valid-regime guards (only applies fit when ratio ∈ [1.5, 2.5])
-- `scripts/profile_cs_dycore.py` — JAX profiler trace of C48 step stages
+- `scripts/bench/analyze_gpu_scaling.py` — 2-precision linear decomposition with valid-regime guards (only applies fit when ratio ∈ [1.5, 2.5])
+- `scripts/bench/profile_cs_dycore.py` — JAX profiler trace of C48 step stages
 
 ### Verdict on user goal: "scale as close to theoretical limit as possible"
 - **Atm cubed-sphere fp32: 100% of memory-bound limit** (ratio fp64/fp32 = 2.12 → tightly bandwidth-bound at peak BW).
@@ -571,7 +571,7 @@ Cross-tested whether CUDA graphs add to the impl_cn win on LL ocean.
 
 CUDA graphs add 1-4% on top of impl_cn for LL — marginal. The impl_cn switch is the dominant lever; graphs only matter for the MPAS Voronoi indirect-addressing path. **Bench default (graphs on) remains correct** — penalty is small even when not needed.
 
-Also landed: `scripts/profile_mpas_ocean.py` (iter-7 artifact, was uncommitted).
+Also landed: `scripts/bench/profile_mpas_ocean.py` (iter-7 artifact, was uncommitted).
 
 ### Iter 14 — 2026-05-27 — impl_cn numerical validation
 
@@ -648,12 +648,12 @@ Updated final ladder:
 | atm spectral fp64 | 25.7            | O(N³) inherent |
 
 ### Code summary
-- `scripts/bench_ocean_gpu_scaling.py` (228 LOC) — ocean GPU bench with CUDA graphs + lax.scan fuse
+- `scripts/bench/bench_ocean_gpu_scaling.py` (228 LOC) — ocean GPU bench with CUDA graphs + lax.scan fuse
 - `scripts/plot/plot_gpu_scaling.py` (260 LOC) — 4 plots, precision-aware legend, theoretical floor, peak-bar
-- `scripts/analyze_gpu_scaling.py` (143 LOC) — 2-precision decomposition with valid-regime guards
-- `scripts/profile_cs_dycore.py` — JAX profiler trace of C48 step stages
+- `scripts/bench/analyze_gpu_scaling.py` (143 LOC) — 2-precision decomposition with valid-regime guards
+- `scripts/bench/profile_cs_dycore.py` — JAX profiler trace of C48 step stages
 - `scaling_gpu.md` — full iteration log (this file)
-- Reused: `scripts/run_levante_gpu_scaling.py` (no modifications)
+- Reused: `scripts/bench/run_levante_gpu_scaling.py` (no modifications)
 
 ### Plots (final)
 - `scaling_gpu_throughput.png` — Mcells/s vs cells, memory-bound roof

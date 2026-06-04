@@ -107,7 +107,7 @@ Smoke at 24×24×30, dx=2 km, dt=1 s, **no bubble + no qv noise**, full physics 
 * [ ] **R5**: Port vertical-θ-diff + WENO5 advection to halo path (column-local → no extra halo).
 * [ ] **R6**: Port KW78 implicit buoyancy to halo SI substep (column-local solve → no extra halo).
 * [ ] **R7**: Implement MPI-aware mass fixer (`compute_dry_mass_plane_mpi` via `global_sum_mpi`); replace rank-0-only `_broadcast_state` flow with `step_halo` multi-rank.
-* [ ] **R8**: Strong + weak scaling benchmarks on 1 / 4 / 12 / 48 ranks via `scripts/run_levante_gpu_scaling.py` (extend for plane CRM).
+* [ ] **R8**: Strong + weak scaling benchmarks on 1 / 4 / 12 / 48 ranks via `scripts/bench/run_levante_gpu_scaling.py` (extend for plane CRM).
 * [ ] **R9**: Klemp-Wilhelmson 1978 **outer-step** implicit buoyancy (substep version in F2 inert). Real fix for buoyancy/w mode amplification, lifts dt limit.
 * [ ] **R10**: Cross-grid CRM validation — extend `run_rce_cross_grid.sh` to thread CRM physics stack through every grid's dycore (or document explicitly that only plane is "CRM" and others are hydrostatic RCE).
 * [ ] **R11**: 30-day production run end-to-end with success criteria 1-5.
@@ -961,7 +961,7 @@ halo-aware slow tendency. iter-56 ran the first holistic Codex
 review since.
 
 Findings in ``slow_tendency_jit_split`` (Python-driven 2-MPI-round
-fast-path orchestrator used by the bench ``scripts/bench_dd_scaling.py``;
+fast-path orchestrator used by the bench ``scripts/bench/bench_dd_scaling.py``;
 NOT used by the production driver):
 
 * **HIGH#1** — silently omits Coriolis when ``config.use_coriolis``

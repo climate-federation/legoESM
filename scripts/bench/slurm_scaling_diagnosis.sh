@@ -128,7 +128,7 @@ export NCCL_NET_GDR_LEVEL=5
 # ---------------------------------------------------------------------------
 # Build command
 # ---------------------------------------------------------------------------
-DIAG_CMD="python scripts/run_scaling_diagnosis.py \
+DIAG_CMD="python scripts/bench/run_scaling_diagnosis.py \
     --mode $MODE \
     --grid $GRID \
     --n $N \
@@ -167,7 +167,7 @@ echo ""
 
 srun --ntasks=$TOTAL_TASKS \
      --gpus-per-task=1 \
-     python scripts/run_levante_gpu_scaling.py \
+     python scripts/bench/run_levante_gpu_scaling.py \
      --grid $GRID \
      --mode both \
      --precision $PRECISION \
@@ -178,4 +178,4 @@ srun --ntasks=$TOTAL_TASKS \
 echo ""
 echo "All done. Transfer $OUTDIR/ to your local machine for analysis:"
 echo "  scp -r levante:$PWD/$OUTDIR/ ."
-echo "  python scripts/analyze_scaling_results.py $OUTDIR/<timestamp>/ --format markdown"
+echo "  python scripts/bench/analyze_scaling_results.py $OUTDIR/<timestamp>/ --format markdown"

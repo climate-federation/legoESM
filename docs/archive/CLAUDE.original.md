@@ -88,7 +88,7 @@
 - Ocean matrix: `JAX_ENABLE_X64=1 .venv/bin/python scripts/run_ocean_test_matrix.py`
 - AMIP: `.venv/bin/python scripts/run_amip.py`
 - Dycore progression: `.venv/bin/python tests/validation/run_dycore_progression_suite.py`
-- GPU/MPI scaling: `.venv/bin/python scripts/run_levante_gpu_scaling.py --grid cubed-sphere --mode strong` (see `docs/REAL_HARDWARE_SCALING.md`)
+- GPU/MPI scaling: `.venv/bin/python scripts/bench/run_levante_gpu_scaling.py --grid cubed-sphere --mode strong` (see `docs/REAL_HARDWARE_SCALING.md`)
 - MPI tests: `mpirun -np 2 .venv/bin/python -m pytest tests/distributed/`
 - MPI diff tests: `mpirun -np 2 .venv/bin/python -m pytest tests/distributed/test_mpi_differentiability.py`
 

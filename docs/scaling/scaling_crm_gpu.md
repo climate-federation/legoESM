@@ -11,7 +11,7 @@ nlev≈30, dt~2 s).
 
 ## Reused infrastructure
 
-- `scripts/run_levante_gpu_scaling.py` — `TimingResult`, `write_csv`, `write_json`, `_configure_jax`
+- `scripts/bench/run_levante_gpu_scaling.py` — `TimingResult`, `write_csv`, `write_json`, `_configure_jax`
 - `bench_plane_crm_dd_scaling.py` MPI bench — same f-plane dycore path (`step` on single-rank uses identical kernels minus halo exchange)
 - `src/legoesm/atmosphere/dynamics/compressible_euler_plane.PlaneCompressibleEulerModel`
 - `make_flat_plane_terrain_metric`, `make_rest_state`, `create_plane_grid`, `create_stretched_height_coordinate`
@@ -20,7 +20,7 @@ nlev≈30, dt~2 s).
 
 ### Iter 2 — 2026-05-27 — profile + acoustic-substep sweep
 
-**Profile (N=96, fp64) via `scripts/profile_crm_step.py`:**
+**Profile (N=96, fp64) via `scripts/bench/profile_crm_step.py`:**
 
 | stage                       | ms/step | % full step |
 |-----------------------------|---------|-------------|
@@ -197,7 +197,7 @@ of memory-boundedness across runs, not an absolute claim.**
 ### Iter 74 — 2026-05-27 — bench `--check-tridiag-backends` + fp64 PCR win
 
 Added `--check-tridiag-backends` flag to
-`scripts/bench_crm_gpu_scaling.py`. After the normal sweep, it
+`scripts/bench/bench_crm_gpu_scaling.py`. After the normal sweep, it
 re-runs each `--nx` in a fresh subprocess with `LEGOESM_TRIDIAG`
 forced to `pcr` / `cusparse` / `legacy` and prints a comparison
 table. Useful for verifying the GPU default choice on a fresh
@@ -232,7 +232,7 @@ this precision.
 
 ### Iter 73 — 2026-05-27 — bench HBM annotation + nsub=3 finding
 
-Extended `scripts/bench_crm_gpu_scaling.py` to print inline HBM
+Extended `scripts/bench/bench_crm_gpu_scaling.py` to print inline HBM
 bandwidth utilization estimate alongside each run:
 
 ```
@@ -873,7 +873,7 @@ in a separate CI job.
 `step_halo` (multi-rank MPI path) uses `plane_acoustic_substeps_semi_implicit`
 which calls `_semi_implicit_acoustic_column_kernel` from `compressible_euler.py`
 → which calls `thomas_solve_batched` (now cuSPARSE-backed). So
-`scripts/bench_plane_crm_dd_scaling.py` will also see the 2.4-5.2× speedup
+`scripts/bench/bench_plane_crm_dd_scaling.py` will also see the 2.4-5.2× speedup
 per-rank when run on a cluster — independent of MPI message count.
 
 Combined effective speedup for production MPI runs on GPU cluster:
@@ -2040,7 +2040,7 @@ Final fp32 plateau: N=256-384 at **57 Mc/s**.
 ### Iter 1 — 2026-05-27 — scaffold + first sweep
 
 - New branch `crm_gpu` off main `21098286`
-- New `scripts/bench_crm_gpu_scaling.py` (~180 LOC, reuses atm-bench helpers)
+- New `scripts/bench/bench_crm_gpu_scaling.py` (~180 LOC, reuses atm-bench helpers)
 - Config: f-plane, semi-implicit acoustic, 12 substeps, no physics, fp64
 - Sweep: N=48, 96, 192, 384 horizontal cells, nlev=30, dx=2000 m, dt=2 s
 - Next: run first sweep, capture baseline, identify bottlenecks

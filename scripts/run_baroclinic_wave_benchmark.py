@@ -786,7 +786,7 @@ def main():
     # -----------------------------------------------------------------------
     npz_path = _out("baroclinic_wave_diagnostics", "npz")
     # Throughput stats land in the npz so post-hoc parsers don't need
-    # to re-grep stdout (used by ``scripts/parse_strong_sweep.py``).
+    # to re-grep stdout (used by ``scripts/bench/parse_strong_sweep.py``).
     npz_data = dict(
         times_days=diag_times,
         dry_mass=diag_dry_mass,

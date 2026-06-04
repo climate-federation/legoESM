@@ -169,7 +169,7 @@ for N_GPUS in "${GPU_LIST[@]}"; do
     # Build the Python command.  Iter 18 fix: pass ``--grid`` (the
     # wrapper previously omitted it, so multi-rank jobs silently
     # ran the default ``spectral`` grid which has no MPI dispatch).
-    PYTHON_CMD=".venv/bin/python scripts/run_levante_gpu_scaling.py"
+    PYTHON_CMD=".venv/bin/python scripts/bench/run_levante_gpu_scaling.py"
     PYTHON_CMD="${PYTHON_CMD} --grid ${GRID}"
     PYTHON_CMD="${PYTHON_CMD} --mode ${MODE}"
     PYTHON_CMD="${PYTHON_CMD} --precision ${PRECISION}"
@@ -326,7 +326,7 @@ else
     echo "    ls ${CAMPAIGN_DIR}/gpu_*/all_scaling.csv"
     echo ""
     echo "  To generate combined plots across all GPU counts:"
-    echo "    python scripts/run_levante_gpu_scaling.py \\"
+    echo "    python scripts/bench/run_levante_gpu_scaling.py \\"
     echo "        --mode ${MODE} --precision ${PRECISION} \\"
     echo "        --output-dir ${CAMPAIGN_DIR}/combined"
 fi

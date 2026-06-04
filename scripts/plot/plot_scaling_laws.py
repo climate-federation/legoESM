@@ -1,7 +1,7 @@
 """Plot strong and weak scaling laws for the GPU-scaling branch results.
 
 Reads the ``strong_scaling.csv`` and ``weak_scaling.csv`` files produced
-by ``scripts/run_levante_gpu_scaling.py`` and plots:
+by ``scripts/bench/run_levante_gpu_scaling.py`` and plots:
 
 1. Strong scaling: time-per-step (and SYPD) vs n_gpus, with the ideal
    ``T_1 / n_gpus`` reference and per-grid efficiency.

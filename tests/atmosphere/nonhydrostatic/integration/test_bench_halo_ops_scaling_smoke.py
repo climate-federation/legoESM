@@ -1,4 +1,4 @@
-"""Smoke test for ``scripts/bench_halo_ops_scaling.py``.
+"""Smoke test for ``scripts/bench/bench_halo_ops_scaling.py``.
 
 iter-254: companion to the iter-252 bench_plane_crm_dd_scaling
 smoke. bench_halo_ops_scaling benches halo-aware operators (8
@@ -25,7 +25,7 @@ from tests.atmosphere.nonhydrostatic.integration._bench_smoke_helpers import (
 )
 
 
-SCRIPT = REPO_ROOT / "scripts" / "bench_halo_ops_scaling.py"
+SCRIPT = REPO_ROOT / "scripts" / "bench" / "bench_halo_ops_scaling.py"
 
 
 # iter-256 (Codex iter-252..255 round-1 HIGH#2): end-anchored

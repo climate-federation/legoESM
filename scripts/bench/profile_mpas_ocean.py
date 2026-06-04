@@ -1,7 +1,7 @@
 """Profile the MPAS-ocean I6/L20 step on a local GPU.
 
 Builds the MPAS Voronoi ocean model exactly as
-``scripts/bench_ocean_gpu_scaling.py`` does (subdivision_level=6,
+``scripts/bench/bench_ocean_gpu_scaling.py`` does (subdivision_level=6,
 lloyd_iterations=5, 20 z* levels, default ``MPASOceanConfig``), then
 breaks per-step wall time into sub-stages using:
 

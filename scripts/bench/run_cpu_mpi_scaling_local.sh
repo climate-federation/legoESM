@@ -43,7 +43,7 @@ echo "  Precision: $PRECISION"
 echo "=================================================="
 
 # Generate cases
-CASES=$(python scripts/run_cpu_mpi_scaling.py --sweep \
+CASES=$(python scripts/bench/run_cpu_mpi_scaling.py --sweep \
     --grid "$GRID_VAL" --mode "$MODE" --physics "$PHYSICS_VAL" \
     --max-ranks "$MAX_RANKS" --precision "$PRECISION")
 
@@ -52,11 +52,11 @@ echo "$CASES" | while IFS= read -r CASE; do
     echo ""
     echo "--- Running: n_ranks=$N_RANKS ---"
     echo "    Case: $CASE"
-    mpirun -np "$N_RANKS" python scripts/run_cpu_mpi_scaling.py \
+    mpirun -np "$N_RANKS" python scripts/bench/run_cpu_mpi_scaling.py \
         --case "$CASE" --n-timing "$N_TIMING"
 done
 
 echo ""
 echo "=== Aggregating results ==="
-python scripts/aggregate_scaling_results.py results/cpu_scaling/
+python scripts/bench/aggregate_scaling_results.py results/cpu_scaling/
 echo "Done."

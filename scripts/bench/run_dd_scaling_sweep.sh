@@ -59,7 +59,7 @@ for MODE in strong weak; do
     for N in $RANKS; do
         echo "--- $MODE n_ranks=$N ---"
         JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 mpirun -np "$N" "$PYBIN" \
-            "$REPO_ROOT/scripts/bench_plane_crm_dd_scaling.py" \
+            "$REPO_ROOT/scripts/bench/bench_plane_crm_dd_scaling.py" \
             --mode "$MODE" \
             --nx "$NX" --ny "$NY" --nlev "$NLEV" \
             --dt "$DT" --n-acoustic-substeps "$N_ACOUSTIC" \

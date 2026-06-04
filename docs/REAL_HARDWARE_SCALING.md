@@ -4,7 +4,7 @@ This runbook describes how to run real-hardware scaling tests for legoESM
 atmosphere and ocean components on CPUs/GPUs and MPI clusters.
 
 It is focused on commands that already exist in this repository:
-- `scripts/run_levante_gpu_scaling.py` (atmosphere scaling + MPI validation)
+- `scripts/bench/run_levante_gpu_scaling.py` (atmosphere scaling + MPI validation)
 - `scripts/run_ocean_test_matrix.py` (ocean runtime/regression matrix)
 - `tests/distributed/test_halo_mpi.py` and `tests/ocean/distributed/test_ocean_mpi_conservation.py` (MPI ocean/distributed checks)
 
@@ -59,7 +59,7 @@ mkdir -p "$OUTDIR"
 
 ## 3. Atmosphere Scaling (Multi-GPU + MPI)
 
-Use `scripts/run_levante_gpu_scaling.py` for atmosphere scaling benchmarks.
+Use `scripts/bench/run_levante_gpu_scaling.py` for atmosphere scaling benchmarks.
 This includes:
 - compile time
 - steady-state time per step
@@ -69,7 +69,7 @@ This includes:
 ### 3.1 Single-node multi-GPU (or multi-CPU) scaling
 
 ```bash
-JAX_PLATFORMS=gpu .venv/bin/python scripts/run_levante_gpu_scaling.py \
+JAX_PLATFORMS=gpu .venv/bin/python scripts/bench/run_levante_gpu_scaling.py \
   --grid cubed-sphere \
   --mode strong \
   --precision float32 \
@@ -82,7 +82,7 @@ JAX_PLATFORMS=gpu .venv/bin/python scripts/run_levante_gpu_scaling.py \
 CPU comparison:
 
 ```bash
-JAX_PLATFORMS=cpu .venv/bin/python scripts/run_levante_gpu_scaling.py \
+JAX_PLATFORMS=cpu .venv/bin/python scripts/bench/run_levante_gpu_scaling.py \
   --grid cubed-sphere \
   --mode strong \
   --precision float32 \
@@ -98,7 +98,7 @@ topology and set up MPI halo exchange.  Each rank keeps the full
 handles inter-rank communication during each step.
 
 ```bash
-mpirun -np 6 .venv/bin/python scripts/run_levante_gpu_scaling.py \
+mpirun -np 6 .venv/bin/python scripts/bench/run_levante_gpu_scaling.py \
   --grid cubed-sphere \
   --mode strong \
   --precision float32 \
@@ -111,7 +111,7 @@ For pure communication-scaling measurement (no global sync from
 conservation fixers):
 
 ```bash
-mpirun -np 6 .venv/bin/python scripts/run_levante_gpu_scaling.py \
+mpirun -np 6 .venv/bin/python scripts/bench/run_levante_gpu_scaling.py \
   --grid cubed-sphere \
   --mode strong \
   --precision float32 \

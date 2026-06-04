@@ -148,7 +148,7 @@ filter audit and is filed as a follow-up dycore issue.
 
 ## 4. Single-device strong-scaling sweep (iter-201/202, 2026-05-03)
 
-`scripts/run_strong_scaling_sweep.sh` exercises each grid at two
+`scripts/bench/run_strong_scaling_sweep.sh` exercises each grid at two
 resolutions on both backends; throughput is now persisted per cell in
 the diagnostic NPZ via `steps_per_sec`/`wall_time_s`/`backend` (added
 iter-202).  GPU sweep results (1-day BCW, warm step + JIT inline):
@@ -348,7 +348,7 @@ the blow-up check, which was inheriting the same modulo bug.
 ## 9. iter-210: definitive multi-CPU emulation result via direct ``_do_step`` JIT
 
 To bypass the iter-207 ``CompiledShardedStep`` ``static_argnums``
-conflict, ``scripts/probe_spectral_shard.py`` jits
+conflict, ``scripts/bench/probe_spectral_shard.py`` jits
 ``model._do_step(state, dt_arr, tendency_fn)`` directly with primed
 caches.  This gets us a clean shard target without source changes.
 
@@ -448,7 +448,7 @@ numbers.
 
 ## 11. iter-214: per-grid scan-steps tuning + plot ingest mode
 
-`scripts/run_strong_scaling_sweep.sh` now uses the iter-212 honest
+`scripts/bench/run_strong_scaling_sweep.sh` now uses the iter-212 honest
 recommendation per grid:
 
 | grid          | --scan-steps | rationale                                  |
@@ -685,7 +685,7 @@ hot-path PE dycores by hand.  Iter-228 codifies the result so future
     ``_halo_backend`` ×1, ``_spmd_mesh`` ×1, ``_mpi_topology`` ×2 —
     all mutated at runtime by ``set_halo_backend`` /
     ``activate_spmd_halo_backend``).
-* Wired into ``scripts/validate_scaling.sh`` as phase ``[5/5]`` so
+* Wired into ``scripts/bench/validate_scaling.sh`` as phase ``[5/5]`` so
   every iteration's pre-flight (≈2 min wall) catches drift in 0.05 s.
 * While writing the audit, found and fixed:
   - ``spectral_pe.py``: 2 inline imports (``get_backend`` /

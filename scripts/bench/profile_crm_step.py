@@ -1,8 +1,8 @@
 """Profile the plane CRM (f-plane compressible Euler) step on GPU.
 
-Mirrors ``scripts/profile_cs_dycore.py`` but for the plane non-hydrostatic
+Mirrors ``scripts/bench/profile_cs_dycore.py`` but for the plane non-hydrostatic
 dycore at N=96 / nlev=30 (276 480 horizontal cells x 30 levels), the same
-configuration used by ``scripts/bench_crm_gpu_scaling.py``.
+configuration used by ``scripts/bench/bench_crm_gpu_scaling.py``.
 
 For each stage we report ``ms/step`` measured via
 ``time.perf_counter()`` + ``jax.block_until_ready`` around isolated
@@ -87,7 +87,7 @@ from legoesm.timestepping.split_explicit import SplitExplicitConfig  # noqa: E40
 
 
 # ===========================================================================
-# Builders — replicate scripts/bench_crm_gpu_scaling.py:_build_model exactly
+# Builders — replicate scripts/bench/bench_crm_gpu_scaling.py:_build_model exactly
 # ===========================================================================
 
 def _build_model(nx: int, ny: int, nlev: int, dx: float, dt: float,

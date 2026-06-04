@@ -1,7 +1,7 @@
 """Parse the steps/s reported by the strong-scaling sweep and emit a
 machine-readable summary at ``results/scaling/strong_sweep.json``.
 
-The sweep wrapper (``scripts/run_strong_scaling_sweep.sh``) writes
+The sweep wrapper (``scripts/bench/run_strong_scaling_sweep.sh``) writes
 ``output/baroclinic_wave_diagnostics_<TAG>_<backend>_<grid>_<res>.npz``
 plus stdout containing ``Integration complete: <S>s (<X> steps/s)``.
 The benchmark itself doesn't store ``steps_per_sec`` in the npz, so

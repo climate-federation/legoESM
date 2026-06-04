@@ -9,7 +9,7 @@
 #
 # Usage:
 #   # Generate cases and submit as SLURM array:
-#   CASES=$(python scripts/run_cpu_mpi_scaling.py --sweep \
+#   CASES=$(python scripts/bench/run_cpu_mpi_scaling.py --sweep \
 #       --grid latlon --mode both --physics held_suarez --max-ranks 64)
 #   N_CASES=$(echo "$CASES" | wc -l)
 #   echo "$CASES" > /tmp/scaling_cases.txt
@@ -38,8 +38,8 @@ echo "Task $TASK_ID: n_ranks=$N_RANKS, case=$CASE"
 # Run the benchmark
 if command -v srun &> /dev/null; then
     srun --ntasks="$N_RANKS" --cpus-per-task=1 \
-        python scripts/run_cpu_mpi_scaling.py --case "$CASE"
+        python scripts/bench/run_cpu_mpi_scaling.py --case "$CASE"
 else
     mpirun -np "$N_RANKS" \
-        python scripts/run_cpu_mpi_scaling.py --case "$CASE"
+        python scripts/bench/run_cpu_mpi_scaling.py --case "$CASE"
 fi
