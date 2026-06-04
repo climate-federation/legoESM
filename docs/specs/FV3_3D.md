@@ -2069,7 +2069,7 @@ For users at C96 PRODUCTION (30-day climatology):
 
 
 iter 65 EMPIRICALLY tested C96 stability via
-``scripts/_iter65_c96_smoke.py``.  Findings overrode the iter-63
+``scripts/tmp/_iter65_c96_smoke.py``.  Findings overrode the iter-63
 guidance:
 
 **The matrix default ``dt=200.0`` is the limiting factor at C96, NOT
@@ -2105,7 +2105,7 @@ Recommended C96+ recipe:
 3. **Run the smoke test first**::
 
        JAX_ENABLE_X64=1 ITER65_DT=150.0 ITER65_DAYS=1.0 \
-         .venv/bin/python scripts/_iter65_c96_smoke.py
+         .venv/bin/python scripts/tmp/_iter65_c96_smoke.py
 
    Confirms stability before committing to a 30-day run.
 

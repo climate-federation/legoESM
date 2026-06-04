@@ -376,7 +376,7 @@ class GlobalOverturningRealisticConfig(GlobalOverturningConfig):
   - `_apply_topology_fixes(land_mask)` — close known under-resolved
     straits if their resolution is below threshold; document each
     fix.
-- Diagnostic: `scripts/diagnose_realistic_geometry.py` produces
+- Diagnostic: `scripts/tmp/diagnose_realistic_geometry.py` produces
   `results/realistic_geometry_check/{bathymetry,coastline,slopes}.png`
   for visual inspection.
 

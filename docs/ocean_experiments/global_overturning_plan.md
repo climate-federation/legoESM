@@ -268,7 +268,7 @@ transformative.
 
 ### Phase 1 — Quantitative attribution via momentum budget (DONE 2026-04-27)
 
-Wrote `scripts/diagnose_drake_momentum_budget.py`.  Computed the
+Wrote `scripts/tmp/diagnose_drake_momentum_budget.py`.  Computed the
 depth-and-zonal-integrated Drake-band zonal-momentum budget from
 time-mean restart and `time_mean.npz` fields.
 

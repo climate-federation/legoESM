@@ -238,7 +238,7 @@ captured in any diagnostic field.  The `vortcor_u/v` fields are
 
 To check geostrophic balance, compute `f×v` independently from the
 restart velocity field and compare with `KE_PGF`.  The script
-`scripts/diagnose_omip_momentum.py` does this automatically.
+`scripts/tmp/diagnose_omip_momentum.py` does this automatically.
 
 At year 1 of the uniform-profile spinup, PGF/f×v ≈ 1 at 600-800m
 depth (geostrophy developing), with PGF exceeding Coriolis toward

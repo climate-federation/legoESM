@@ -363,7 +363,7 @@ Follow-up C in `docs/ocean_experiments/global_overturning_plan.md`.
   spinup driver.
 - `scripts/global_overturning/run_global_overturning_50yr_implicit_continuation.py` —
   40-yr continuation to redo the original 50yr experiment.
-- `scripts/_overnight_chain.sh` — orchestrator for the spinup → verify
+- `scripts/tmp/_overnight_chain.sh` — orchestrator for the spinup → verify
   → continue chain.
 - `tests/ocean/unit/test_momentum_diagnostics_closure.py` — closure
   to 1e-12 (4 tests).

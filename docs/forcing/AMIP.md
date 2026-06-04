@@ -267,7 +267,7 @@ iterations; full details in the iteration log below.  Highlights:
 
 1. **Kessler microphysics destabilises the integrated AMIP path** (NaN
    winds at day ~2) at C16/L30 with default `dt=600 s`.  Kessler-in-
-   isolation is stable (probe in `scripts/diag_kessler_amip_blowup.py`),
+   isolation is stable (probe in `scripts/tmp/diag_kessler_amip_blowup.py`),
    so the failure is in the dycore-T evolution × Kessler-saturation-
    adjustment feedback (sigmoid sat-adjustment `excess/dt` produces
    large per-step latent heating that the Euler dycore can't absorb).
@@ -447,7 +447,7 @@ radiation equilibrium with prescribed SST=292.6 K — physically expected.
 
 **Diagnostic**
 
-- Wrote `scripts/diag_kessler_amip_blowup.py` — a probe that runs Kessler
+- Wrote `scripts/tmp/diag_kessler_amip_blowup.py` — a probe that runs Kessler
   microphysics directly with the AMIP IC (T=300K, RH=0.7 × σ², SST
   blended) for 200 explicit-Euler steps.  **Kessler is stable in
   isolation** (zero condensation, zero tendencies) for the entire 1.4-day
