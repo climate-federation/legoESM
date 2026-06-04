@@ -261,8 +261,16 @@ def _build_operators(grid_type: str, grid: Any) -> Any:
 
         return latlon_cgrid_operators(grid)
     if family == "grid_operators" and g == "cubed_sphere":
+        from legoesm.grids.cubed_sphere_cdgrid import create_cubed_sphere_cdgrid
         from legoesm.grids.operator_adapters import cubed_sphere_cdgrid_operators
 
+        # The bare CubedSphereGrid from create_grid lacks the C-D metrics
+        # (rdxc/rdyc/dxc/dyc) the cgrid operators need; convert to the cdgrid first
+        # (mirrors OceanModel.__init__) so the operators work, instead of handing
+        # back an adapter that AttributeErrors on the first gradient/divergence call.
+        # Idempotent: a grid already carrying the metrics is passed through.
+        if not hasattr(grid, "rdxc"):
+            grid = create_cubed_sphere_cdgrid(grid)
         return cubed_sphere_cdgrid_operators(grid)
     if family == "edge_operators":
         from legoesm.grids.operator_adapters import mpas_edge_operators

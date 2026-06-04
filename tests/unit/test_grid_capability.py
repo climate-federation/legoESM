@@ -78,6 +78,21 @@ def test_mpas_with_operators_is_edge_operators():
     validate_edge_operators(ops)
 
 
+def test_cubed_sphere_operators_are_callable():
+    # Regression: instantiate(cubed_sphere, operators=True) used to hand back an
+    # adapter wrapping the bare CubedSphereGrid (no C-D metrics), which raised
+    # AttributeError 'rdxc' on the FIRST operator call.  The capability path now
+    # converts to the cdgrid, so the operators must actually be callable.
+    import jax.numpy as jnp
+    from legoesm.grids.operator_protocol import validate_grid_operators
+    grid, ops = instantiate("cubed_sphere", extent="global", resolution=8,
+                            operators=True)
+    assert grid is not None and ops is not None
+    validate_grid_operators(ops)
+    gx, gy = ops.gradient(jnp.ones((6, 8, 8)))  # must not AttributeError
+    assert gx.shape[0] == 6 and gy.shape[0] == 6
+
+
 # ---------------------------------------------------------------------------
 # Error cases — the whole point: flag unavailable combinations
 # ---------------------------------------------------------------------------
