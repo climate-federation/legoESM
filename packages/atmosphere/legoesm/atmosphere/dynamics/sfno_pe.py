@@ -120,6 +120,31 @@ class SFNOPrimitiveEquationModel:
         self.sigma_coord = sigma_coord
         self.norm_stats = norm_stats
 
+        # Z-score denormalisation (``y*std + mean``) inverts a *state*
+        # normalisation, so it is only meaningful when the network output is a
+        # state.  In hybrid_tendencies mode the output is read as a tendency;
+        # denormalising it with state-level stats would add the state mean to a
+        # d/dt (a zero output would map to ``mean``).  That needs separate
+        # tendency-output statistics which are not wired here, so reject the
+        # combination rather than silently corrupt the tendency.
+        if self.config.mode == "hybrid_tendencies" and self.config.use_normalization:
+            raise NotImplementedError(
+                "use_normalization=True is not supported with "
+                "mode='hybrid_tendencies': denormalising the network output "
+                "with state-level NormalizationStats would add the state mean "
+                "to a tendency. Use mode='state_update', or supply dedicated "
+                "tendency-output stats (not yet wired)."
+            )
+        # ``use_normalization`` without stats would silently skip (de)normalisation
+        # (see ``_step_state_update`` / ``_sfno_tendency``), so a normalised
+        # checkpoint could run on raw PE channels and emit wrongly-scaled states.
+        # Require the stats up front.
+        if self.config.use_normalization and self.norm_stats is None:
+            raise ValueError(
+                "use_normalization=True requires norm_stats; got None. Pass "
+                "NormalizationStats or set use_normalization=False."
+            )
+
         if sfno_model is not None:
             self.sfno = sfno_model
         else:
@@ -222,12 +247,14 @@ class SFNOPrimitiveEquationModel:
         x = pack_pe_state(state, self.grid, self.sigma_coord)
         x = x.astype(jnp.float32)
 
-        if self.config.use_normalization and self.norm_stats is not None:
+        # ``norm_stats`` is guaranteed present when use_normalization=True
+        # (validated in __init__), so this never silently skips.
+        if self.config.use_normalization:
             x = normalize(x, self.norm_stats)
 
         y = self.sfno(x, self.grid)
 
-        if self.config.use_normalization and self.norm_stats is not None:
+        if self.config.use_normalization:
             y = denormalize(y, self.norm_stats)
 
         return unpack_pe_output(y, state, self.grid, mode="state_update")
@@ -248,12 +275,14 @@ class SFNOPrimitiveEquationModel:
         x = pack_pe_state(state, self.grid, self.sigma_coord)
         x = x.astype(jnp.float32)
 
-        if self.config.use_normalization and self.norm_stats is not None:
+        # ``norm_stats`` guaranteed present when use_normalization=True
+        # (validated in __init__); never silently skips.
+        if self.config.use_normalization:
             x = normalize(x, self.norm_stats)
 
         y = self.sfno(x, self.grid)
 
-        if self.config.use_normalization and self.norm_stats is not None:
+        if self.config.use_normalization:
             y = denormalize(y, self.norm_stats)
 
         return unpack_pe_output(y, state, self.grid, mode="tendencies")

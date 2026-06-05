@@ -86,6 +86,9 @@ _DRIVER_SUPPORTED: dict[tuple[str, str, str], str] = {
     # --- SFNO data-driven ---
     ("shallow_water", "sfno",           "cubed_sphere"): "sfno_shallow_water",
     ("hydrostatic",   "sfno",           "cubed_sphere"): "sfno_primitive_equations",
+
+    # --- U-Cast data-driven (convolutional U-Net emulator) ---
+    ("hydrostatic",   "u_cast",         "cubed_sphere"): "ucast_primitive_equations",
 }
 
 
@@ -502,6 +505,11 @@ def create_atmosphere_dycore(
     if solver_name == "sfno_primitive_equations":
         from legoesm.atmosphere.dynamics.sfno_pe import SFNOPrimitiveEquationModel
         return SFNOPrimitiveEquationModel(grid=grid, sigma_coord=sigma)
+
+    # ----- U-Cast data-driven (convolutional U-Net emulator) -----
+    if solver_name == "ucast_primitive_equations":
+        from legoesm.atmosphere.dynamics.ucast_pe import UCastPrimitiveEquationModel
+        return UCastPrimitiveEquationModel(grid=grid, sigma_coord=sigma)
 
     # Should be unreachable — the key check above guarantees this.
     raise RuntimeError(f"Internal error: unhandled solver {solver_name!r}")
