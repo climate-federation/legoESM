@@ -170,14 +170,19 @@ def main():
     wall = time.time() - t0
     print(f"[DONE] wall={wall:.1f}s  {nsteps/wall:.1f} steps/s")
     um, vm, uu, vv, ww, uw, vw = profiles(st, g)
-    u_star = float((uw[0] ** 2 + vw[0] ** 2) ** 0.25)
+    u_star_res = float((uw[0] ** 2 + vw[0] ** 2) ** 0.25)   # RESOLVED stress only
+    u_star = float(us)   # TOTAL surface stress (wall model = resolved+SGS) — the
+    #                      physically-correct MOST u_* (the resolved part alone is
+    #                      low because the near-wall surface layer is under-resolved
+    #                      on a uniform grid and the SGS carries the rest).
     z = np.asarray(g.z_c)
     np.savez(args.output / "final_profiles.npz",
              z=z, theta=np.full_like(z, 290.0), u=um, v=vm,
              wvar=ww, uu=uu, vv=vv, ww=ww, tke=0.5 * (uu + vv + ww),
-             uw=uw, vw=vw, u_star=u_star, z0=args.z0, case="neutral_spectral")
-    print(f"  profiles -> {args.output}/final_profiles.npz  (u*≈{u_star:.3f}, "
-          f"target {args.ustar})")
+             uw=uw, vw=vw, u_star=u_star, u_star_resolved=u_star_res,
+             z0=args.z0, case="neutral_spectral")
+    print(f"  profiles -> {args.output}/final_profiles.npz  (u*_total≈{u_star:.3f}"
+          f", u*_resolved≈{u_star_res:.3f}, target {args.ustar})")
     return 0
 
 

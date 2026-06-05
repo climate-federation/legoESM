@@ -99,13 +99,19 @@ def validate(npz_path: Path) -> int:
     # 3. resolved variance similarity (needs developed turbulence).
     u_star = u_star_flux if u_star_flux > 1e-3 else u_star_log
     if u_star > 1e-3:
-        k = int(np.argmin(z))
+        # Sample the SURFACE LAYER (z ~ 0.1·BL depth), NOT the wall-adjacent cell:
+        # w' → 0 at the wall by the rigid BC, so σ_w at the first cell is
+        # artificially low; the MOST similarity value applies in the surface
+        # layer above the immediate wall. (Plain `argmin(z)` understates σ_w/u_*.)
+        order = np.argsort(z)
+        zs = z[order]
+        k = int(order[np.argmin(np.abs(zs - 0.1 * zs.max()))])
         sig_w = float(np.sqrt(max(ww[k], 0.0))) / u_star
-        results.append(_check("sigma_w / u_*", sig_w,
+        results.append(_check("sigma_w / u_* (z~0.1h)", sig_w,
                               _SIGMA_W_OVER_USTAR, 0.6))
         if uu is not None:
             sig_u = float(np.sqrt(max(uu[k], 0.0))) / u_star
-            results.append(_check("sigma_u / u_*", sig_u,
+            results.append(_check("sigma_u / u_* (z~0.1h)", sig_u,
                                   _SIGMA_U_OVER_USTAR, 1.2))
 
     n_pass = sum(results)

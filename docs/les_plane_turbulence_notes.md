@@ -203,6 +203,33 @@ SBL/CBL. The spectral core now reproduces surface-layer Monin–Obukhov scaling 
 a genuine quantitative oracle match where the compressible core could not even
 sustain turbulence.
 
+## RESULT: dynamic Bou-Zeid LASD → 4/4 Monin–Obukhov diagnostics PASS
+With the corrected (down-gradient) advection, the 3/2-padding de-aliasing, and the
+**dynamic Bou-Zeid LASD C_s(x,y,z)** wired in (`lasd_core.lasd_cs2`, shared with
+the compressible path), a 96³ neutral channel (3 h, RTX 5090, fp32) reproduces
+Monin–Obukhov similarity — **all four diagnostics within tolerance**:
+
+| diagnostic | value | MOST target |
+|---|---|---|
+| u_*(log)/u_*(flux) | 1.06 | 1.0 ± 0.35 ✅ |
+| φ_m (surface layer) | 0.93 | 1.0 ± 0.5 ✅ |
+| σ_w/u_* (z~0.1h) | 1.06 | 1.25 ± 0.6 ✅ |
+| σ_u/u_* (z~0.1h) | 2.71 | 2.4 ± 1.2 ✅ |
+
+u_*(total)=0.436 (target 0.45), U(z) log, ⟨u'w'⟩<0 (down-gradient) at every level,
+`ww/u_*²` peaks ~1.4 in mid-BL (correct), and the dynamic coefficient self-selects
+C_s≈0.15. Two diagnostic notes: (a) MOST u_* is the TOTAL surface stress (the
+wall-model value); the RESOLVED ⟨u'w'⟩ alone is ~0.5 u_*² because the near-wall
+surface layer is under-resolved on a uniform grid (the SGS carries the rest — a
+standard coarse-LES effect, not a bug); (b) σ_w/u_* is sampled at z~0.1·h (the
+surface layer), not the wall-adjacent cell where w'→0 by the rigid BC.
+
+The pseudo-spectral incompressible core with the LASD closure is now a genuine
+quantitative match to the jax-alfa oracle's physical target — the goal of this
+whole effort. Remaining (faithfulness/extension): the 3 secondary codex items
+(top advection boundary row, near-wall MOST strain, W-node SGS terms), finer/
+stretched near-wall resolution, then buoyancy + scalar for the SBL/CBL cases.
+
 ## Codex review → advection SIGN bug (the "3/4 pass" above was an artefact)
 A codex adversarial review found the rotational-advection RHS had the WRONG SIGN
 on every vertical-vorticity (`w·ω_x`, `w·ω_y`) term: `omega_x_f=dvdz-dwdy`,
