@@ -60,6 +60,9 @@ class SpectralLESConfig(NamedTuple):
     nu_molecular: float = 0.0      # optional explicit viscosity (usually 0)
     smagorinsky_dynamic: bool = False  # Bou-Zeid LASD scale-dependent dynamic C_s(x,y,z)
     cs_max: float = 1.0            # upper clip on the dynamic C_s² (oracle mask)
+    buoyancy: bool = False         # Boussinesq buoyancy in w (θ scalar required)
+    theta_ref0: float = 290.0      # reference θ for the buoyancy term [K]
+    pr_sgs: float = 1.0            # turbulent Prandtl number (K_h = ν_t / Pr)
 
 
 class SpectralLESGrid(NamedTuple):
@@ -82,6 +85,8 @@ class SpectralLESState(NamedTuple):
     rhs_u_prev: jax.Array          # AB2 previous tendencies
     rhs_v_prev: jax.Array
     rhs_w_prev: jax.Array
+    theta: jax.Array | None = None      # (ny,nx,nz) potential temperature [K]
+    rhs_theta_prev: jax.Array | None = None
 
 
 def make_grid(cfg: SpectralLESConfig, dtype=jnp.float64) -> SpectralLESGrid:
@@ -357,6 +362,50 @@ def sgs_and_wall(u, v, w, nu_t, g: SpectralLESGrid, u_geo):
 
 
 # --------------------------------------------------------------------------- #
+# Potential-temperature scalar transport + Boussinesq buoyancy                 #
+# --------------------------------------------------------------------------- #
+def scalar_rhs(theta, u, v, w, nu_t, g: SpectralLESGrid, sfc_flux):
+    """RHS of the θ equation: ``−u·∇θ + ∂_j(K_h ∂_j θ)`` with the SURFACE vertical
+    flux replaced by the prescribed kinematic heat flux ``sfc_flux = ⟨w'θ'⟩_0``
+    (CBL: +ve heating; SBL: −ve cooling), no-flux lid. ``K_h = ν_t / Pr``.
+
+    Advection in flux/skew form (∇·u=0 ⇒ −u·∇θ); horizontal derivatives spectral
+    (de-aliased by 3/2 padding), the vertical ``w ∂θ/∂z`` product formed at faces
+    then averaged. θ at centres, w at faces."""
+    dz = g.dz
+    dthdx, dthdy = ddx(theta, g), ddy(theta, g)            # centres
+    dthdz_f = jnp.pad(ddz_c2f(theta, dz), ((0, 0), (0, 0), (1, 1)))  # faces, 0 walls
+    if g.cfg.dealias:
+        pf, tf = _pad_to_fine, lambda x: _truncate_from_fine(x, *theta.shape[:2])
+        adv = tf(pf(u) * pf(dthdx) + pf(v) * pf(dthdy)
+                 + f2c(pf(w) * pf(dthdz_f)))
+    else:
+        adv = u * dthdx + v * dthdy + f2c(w * dthdz_f)
+    # Horizontal SGS scalar flux divergence (spectral).
+    Kh = nu_t / g.cfg.pr_sgs
+    Hsgs = ddx(Kh * dthdx, g) + ddy(Kh * dthdy, g)
+    # Vertical SGS flux on interior faces + surface flux BC + no-flux lid.
+    Kh_f = c2f(Kh)
+    flux_int = Kh_f * ddz_c2f(theta, dz)                   # (ny,nx,nz-1), J=K∂θ/∂z
+    z = jnp.zeros_like(theta[..., :1])
+    # Surface face carries J = −⟨w'θ'⟩_0 (the diffusive flux is −w'θ'): a +ve
+    # kinematic heat flux ``sfc_flux`` (heating) ⇒ ∂_z(J) WARMS the lowest cell.
+    flux_full = jnp.concatenate([-sfc_flux + z, flux_int, z], axis=-1)  # nz+1
+    Vsgs = ddz_f2c(flux_full, dz)
+    return -adv + Hsgs + Vsgs
+
+
+def buoyancy_w(theta, g: SpectralLESGrid):
+    """Boussinesq buoyancy on the w-faces: ``b = (g/θ_ref0)·(θ − ⟨θ⟩_xy)`` — only
+    the deviation from the horizontal-mean profile drives the eddies (the mean is
+    in hydrostatic balance, absorbed by the pressure)."""
+    g_over_th = constants.g / g.cfg.theta_ref0
+    b_c = g_over_th * (theta - jnp.mean(theta, axis=(0, 1), keepdims=True))
+    bf = jnp.pad(c2f(b_c), ((0, 0), (0, 0), (1, 1)))        # faces, 0 at walls
+    return bf
+
+
+# --------------------------------------------------------------------------- #
 # Pressure projection (fractional step)                                        #
 # --------------------------------------------------------------------------- #
 def project(u_s, v_s, w_s, dt, g: SpectralLESGrid):
@@ -428,7 +477,8 @@ def _thomas_complex(a, b, c, d):
 # --------------------------------------------------------------------------- #
 # One AB2 time step                                                            #
 # --------------------------------------------------------------------------- #
-def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0)):
+def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0),
+        theta=None, sfc_theta_flux=0.0):
     """Momentum RHS = -advection + SGS force + Coriolis + a constant body force.
 
     ``f_cor``≠0 drives a geostrophic/Ekman balance toward ``u_geo=(ug,vg)``; a
@@ -442,26 +492,38 @@ def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0)):
     Ru = Cu + Fu + f_cor * (v - vg) + force[0]
     Rv = Cv + Fv - f_cor * (u - ug) + force[1]
     Rw = Cw + Fw
+    Rtheta = None
+    if theta is not None:
+        Rtheta = scalar_rhs(theta, u, v, w, nu_t, g, sfc_theta_flux)
+        if g.cfg.buoyancy:
+            Rw = Rw + buoyancy_w(theta, g)
     Rw = Rw.at[..., 0].set(0.0).at[..., -1].set(0.0)
-    return Ru, Rv, Rw, u_star
+    return Ru, Rv, Rw, u_star, Rtheta
 
 
 def step(state: SpectralLESState, g: SpectralLESGrid, dt: float,
-         u_geo, f_cor: float, first: bool = False, force=(0.0, 0.0)):
+         u_geo, f_cor: float, first: bool = False, force=(0.0, 0.0),
+         sfc_theta_flux=0.0):
     """One Adams–Bashforth-2 step + pressure projection. ``first`` uses forward
-    Euler (no previous RHS yet)."""
-    u, v, w = state.u, state.v, state.w
-    Ru, Rv, Rw, u_star = rhs(u, v, w, g, u_geo, f_cor, force=force)
+    Euler (no previous RHS yet). When ``state.theta`` is set, advances the
+    potential-temperature scalar (same AB2) and adds Boussinesq buoyancy to w."""
+    u, v, w, th = state.u, state.v, state.w, state.theta
+    Ru, Rv, Rw, u_star, Rth = rhs(u, v, w, g, u_geo, f_cor, force=force,
+                                  theta=th, sfc_theta_flux=sfc_theta_flux)
     if first:
         au, av, aw = Ru, Rv, Rw
+        ath = Rth
     else:
         au = 1.5 * Ru - 0.5 * state.rhs_u_prev
         av = 1.5 * Rv - 0.5 * state.rhs_v_prev
         aw = 1.5 * Rw - 0.5 * state.rhs_w_prev
+        ath = None if Rth is None else 1.5 * Rth - 0.5 * state.rhs_theta_prev
     u_s = u + dt * au
     v_s = v + dt * av
     w_s = w + dt * aw
     w_s = w_s.at[..., 0].set(0.0).at[..., -1].set(0.0)
     u_n, v_n, w_n = project(u_s, v_s, w_s, dt, g)
-    return SpectralLESState(u=u_n, v=v_n, w=w_n,
+    th_n = None if th is None else th + dt * ath
+    return SpectralLESState(u=u_n, v=v_n, w=w_n, theta=th_n,
+                            rhs_theta_prev=Rth,
                             rhs_u_prev=Ru, rhs_v_prev=Rv, rhs_w_prev=Rw), u_star

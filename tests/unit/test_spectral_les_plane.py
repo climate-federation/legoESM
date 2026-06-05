@@ -114,3 +114,24 @@ def test_step_runs_finite_and_walls():
     assert bool(jnp.all(jnp.isfinite(st.w)))
     assert float(jnp.max(jnp.abs(st.w[..., 0]))) == 0.0
     assert float(ustar) > 0.0
+
+
+def test_buoyancy_and_surface_heatflux_signs():
+    """A +ve surface kinematic heat flux WARMS the lowest cell, and a warm
+    parcel (θ > horizontal mean) gets a POSITIVE (upward) buoyancy force."""
+    cfg = sl.SpectralLESConfig(nx=8, ny=8, nz=16, Lx=160.0, Ly=160.0, Lz=320.0,
+                               buoyancy=True, theta_ref0=300.0)
+    g = sl.make_grid(cfg)
+    th = jnp.full((8, 8, 16), 300.0)
+    u = jnp.zeros((8, 8, 16)); v = jnp.zeros((8, 8, 16))
+    w = jnp.zeros((8, 8, 17))
+    nu_t = jnp.full((8, 8, 16), 0.1)
+    Rth = sl.scalar_rhs(th, u, v, w, nu_t, g, sfc_flux=0.05)
+    assert float(Rth[..., 0].mean()) > 0.0          # surface heating warms cell 0
+    th2 = th.at[4, 4, 8].add(1.0)
+    bf = sl.buoyancy_w(th2, g)
+    assert float(bf[4, 4, 8]) > 0.0                 # warm parcel → upward buoyancy
+    # other columns get only the tiny mean-shift compensation (≪ the bubble).
+    assert abs(float(bf[0, 0, 8])) < 0.05 * float(bf[4, 4, 8])
+    # buoyancy is from the DEVIATION: a uniform θ field gives zero force.
+    assert float(jnp.max(jnp.abs(sl.buoyancy_w(th, g)))) < 1e-6
