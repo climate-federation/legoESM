@@ -84,3 +84,55 @@ horizontal tile, so under a horizontal MPI decomposition they are per-rank
 exchange). MPI LES must use the **static** closure (`--static-sgs`), which is
 validated serial==MPI. A faithful MPI LASD needs the spectral filter +
 local average halo-exchanged (distributed FFT / haloed Imfilter) — future work.
+
+## float32 + the time integrator (long runs)
+**float32 is the single biggest win** (12.6× on an RTX 5090). The state, grid and
+height-coordinate must share ONE dtype — a latent mismatch (grid float32, hc
+float64) was silently upcasting the whole state to float64 every step. Fixed via
+`--f32` (build grid+hc+state in float32). `--f32` 96³ LASD: 47.9 steps/s
+(23.6 ns/cell) vs float64 3.8 steps/s (296 ns/cell). A 1 h sim ⇒ ~25 min wall.
+
+**Time step.** The compressible dycore is acoustically limited, but the binding
+constraints here are the horizontal-acoustic substep (`c·dt/n/dx < 1` ⇒
+dt ≲ n·dx/c) and the off-centred (β=0) vertical SI. A dt sweep (off-centring 0)
+runs stably to **dt=0.2 s**, but dt=0.2 produces a transient *numerical*
+turbulence burst (wvar→0.23) that then collapses with the mean wind — not
+physical. **dt≈0.05–0.1 s** is the reliable range (dt=0.1 ⇒ 2× fewer steps).
+Genuinely larger dt needs an anelastic/incompressible reformulation (removes the
+acoustic constraint, ~10–100× larger dt) — the oracle's solver class, and the
+architecture option that was deferred.
+
+`bench_les_plane.py --scan` runs the whole trajectory as one jitted `lax.scan`;
+once in float32 the run is compute/memory-bound (not dispatch-bound) so scan is
+~neutral at 96³ — but it requires the dtype consistency above.
+
+## Multi-hour spin-up result (the open realism gap)
+A **3 h** neutral run (64³, dx=20 m, dt=0.05, float32, GPU, 148 steps/s) shows
+the resolved turbulence **decaying monotonically to zero** (max|w| 0.67 → 0.000,
+wvar → 0; mean wind recovers to laminar 10.0). At dx=20 m / 64³ the compressible
+dycore's numerical + SGS dissipation overwhelms the resolved shear production and
+the BL laminarises. The dt=0.2 burst shows the dycore *can* momentarily hold
+strong turbulence (wvar~0.23), so the limiter is sustained production vs
+dissipation, which is **resolution-dependent**. The jax-alfa oracle runs
+128³–384³ at dx≈2–8 m with a (near-non-dissipative) pseudo-spectral solver.
+
+**128³ / dx=10 m + reduced hyperdiff (0.0003) CONFIRMS the limit:** the seed
+decays identically (wvar 0.036 → 0.0001 in ~80 s sim → 0), the same as 24³ and
+64³. So it is **not resolution** — the limiter is the compressible scheme's
+numerical dissipation (semi-implicit acoustic off-centring + biharmonic hyperdiff
+needed for stability), which caps the EFFECTIVE Reynolds number below the
+turbulence-sustaining threshold: the log-shear flow is linearly stable at this
+effective Re and any seed decays instead of transitioning. The dt=0.2 burst is
+the only time resolved variance grows, and that is a numerical transient, not
+sustained physics.
+
+**Conclusion (honest).** Tuning the compressible plane dycore — surface coupling,
+seeding, IC, dissipation knobs, resolution to 128³, fp32 throughput — fixed every
+STABILITY and book-keeping problem (no blow-up, no wind collapse, conservation,
+GPU speed) but does NOT yield self-sustaining resolved ABL turbulence. The
+jax-alfa oracle sustains it because its pseudo-spectral incompressible solver is
+near-non-dissipative (spectral derivatives + dealiasing, no acoustic filter, no
+biharmonic) ⇒ high effective Re. For a quantitative oracle match the faithful
+path is the **pseudo-spectral incompressible core** (the deferred architecture
+option), now hosting the validated LASD closure + the working surface coupling /
+diagnostics / validation harness built here. Recommend revisiting that decision.
