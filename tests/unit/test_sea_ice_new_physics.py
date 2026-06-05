@@ -888,7 +888,7 @@ class TestGridValidation:
     deep AttributeError."""
 
     def _forcing(self, shape):
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         return AtmToSurface(
             sw_down=jnp.full(shape, 200.0), lw_down=jnp.full(shape, 300.0),
             T_lowest=jnp.full(shape, 260.0), q_lowest=jnp.full(shape, 1e-3),
@@ -985,7 +985,7 @@ class TestGridValidation:
             jnp.zeros(shape), jnp.zeros(shape), config, 1.0, 3600.0, grid=grid,
         )
         assert jnp.all(jnp.isfinite(new_state.h_ice.data))
-        assert jnp.all(jnp.isfinite(resp.T_surface))
+        assert jnp.all(jnp.isfinite(resp.T_sfc))
 
 
 # ==============================================================================
@@ -998,7 +998,7 @@ class TestThinIceAblationClosure:
     exporting basal ocean heat (codex)."""
 
     def _forcing(self, shape, **kw):
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         f = lambda v: jnp.full(shape, v)
         d = dict(sw_down=600.0, lw_down=340.0, T_lowest=288.0, q_lowest=7e-3,
                  u_lowest=5.0)
@@ -1020,7 +1020,7 @@ class TestThinIceAblationClosure:
         """
         from legoesm.ice.sea_ice import _thermo_v2
         from legoesm.ice.config import SeaIceConfig, SnowConfig, MeltPondConfig
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         from legoesm.thermo import saturation_mixing_ratio_ice
         from legoesm import constants
         n = 4
@@ -1071,7 +1071,7 @@ class TestThinIceAblationClosure:
         """
         from legoesm.ice.sea_ice import _thermo_v2
         from legoesm.ice.config import SeaIceConfig, SnowConfig, MeltPondConfig
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         from legoesm.thermo import saturation_mixing_ratio_ice
         from legoesm import constants
         n = 4
@@ -1123,7 +1123,7 @@ class TestThinIceAblationClosure:
         """
         from legoesm.ice.sea_ice import _thermo_v2
         from legoesm.ice.config import SeaIceConfig, SnowConfig, MeltPondConfig
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         from legoesm import constants
         n = 4
         shape = (6, n, n)
@@ -1182,7 +1182,7 @@ class TestThinIceAblationClosure:
         """
         from legoesm.ice.sea_ice import _thermo_v2
         from legoesm.ice.config import SeaIceConfig, SnowConfig
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         n = 4
         shape = (6, n, n)
         f = lambda v: jnp.full(shape, v)
@@ -1249,7 +1249,7 @@ class TestThinIceAblationClosure:
         """
         from legoesm.ice.sea_ice import _thermo_v2
         from legoesm.ice.config import SeaIceConfig, SnowConfig
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         n = 4
         shape = (6, n, n)
         f = lambda v: jnp.full(shape, v)

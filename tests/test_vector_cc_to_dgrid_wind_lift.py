@@ -18,10 +18,11 @@ does not, and (b) the production source no longer scalar-interpolates stacked
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
 import numpy as np
 import pytest
+
+from tests.legoesm_paths import legoesm_source_path
 
 jax = pytest.importorskip("jax")
 jax.config.update("jax_enable_x64", True)
@@ -107,10 +108,8 @@ def test_pe_source_uses_vector_lift_not_scalar_stacked_uv():
     prognostic / tendency winds with a scalar ``_interp_center_to_corner`` on a
     stacked ``(u, v)``.  Catches a silent revert of the iter-14 fix.
     """
-    src = (
-        Path(__file__).resolve().parents[1]
-        / "src" / "legoesm" / "atmosphere" / "dynamics"
-        / "primitive_eq_cdgrid.py"
+    src = legoesm_source_path(
+        "atmosphere/dynamics/primitive_eq_cdgrid.py"
     ).read_text()
     # The three fixed sites must call the vector helper.
     assert src.count("center_to_dgrid_vector(") >= 3, (

@@ -32,7 +32,7 @@ Based on analysis of legoESM's validation frameworks across components, the ocea
 8. `overflow` - Dense water flow (NEMO benchmark)
 9. `stommel_gyre_tracer` - Tracer transport
 
-#### **Current Evaluation Criteria** (`scripts/run_ocean_test_matrix.py`)
+#### **Current Evaluation Criteria** (`scripts/matrix/run_ocean_test_matrix.py`)
 - **Blowup detection**: `|η| < threshold` (100-200m)
 - **Conservation drift**: Basic relative change calculations
 - **Finite field validation**: `jnp.isfinite()` checks

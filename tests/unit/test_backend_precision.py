@@ -25,8 +25,8 @@ import pytest
 
 from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.core.operators_fv import (
-    _ppm_edge_values,
-    _ppm_limit,
+    ppm_edge_values,
+    ppm_limit,
     fv_flux_divergence,
     fv_scalar_advection,
     fv_gradient_x,
@@ -120,7 +120,7 @@ class TestFVFloat32:
     def test_ppm_edge_values(self, grid):
         n = grid.n
         q = jnp.ones((6, n + 4, n), dtype=jnp.float32) * 7.0
-        edges = _ppm_edge_values(q)
+        edges = ppm_edge_values(q)
         assert edges.dtype == jnp.float32
         assert jnp.allclose(edges, 7.0, atol=1e-5)
 
@@ -128,7 +128,7 @@ class TestFVFloat32:
         q_bar = jnp.array([0.0, 1.0, 2.0], dtype=jnp.float32)
         q_L = jnp.array([-0.5, 0.5, 1.5], dtype=jnp.float32)
         q_R = jnp.array([0.5, 1.5, 2.5], dtype=jnp.float32)
-        q_L_lim, q_R_lim = _ppm_limit(q_bar, q_L, q_R)
+        q_L_lim, q_R_lim = ppm_limit(q_bar, q_L, q_R)
         assert q_L_lim.dtype == jnp.float32
         assert q_R_lim.dtype == jnp.float32
 
@@ -283,7 +283,7 @@ class TestFVFloat16:
     def test_ppm_edge_values_float16(self, grid):
         n = grid.n
         q = jnp.ones((6, n + 4, n), dtype=jnp.float16) * 7.0
-        edges = _ppm_edge_values(q)
+        edges = ppm_edge_values(q)
         assert jnp.all(jnp.isfinite(edges))
         assert jnp.allclose(edges, 7.0, atol=0.1)  # looser tolerance for float16
 

@@ -233,7 +233,7 @@ def test_one_step_flux_magnitudes_are_realistic(tmp_path):
 #
 # Build the cache once:
 #
-#   python scripts/prepare_omip_forcing.py \
+#   python scripts/data/prepare_omip_forcing.py \
 #       --source /scratch/jra55_do_v14/raw.zarr \
 #       --years 2000 2000 \
 #       --target-resolution-deg 1.0 \
@@ -241,7 +241,7 @@ def test_one_step_flux_magnitudes_are_realistic(tmp_path):
 #
 # Then run the smoke at 1°/30 days:
 #
-#   JAX_ENABLE_X64=1 python scripts/run_omip.py \
+#   JAX_ENABLE_X64=1 python scripts/run/run_omip.py \
 #       --grid latlon \
 #       --resolution 180x360 \
 #       --nlev 20 \

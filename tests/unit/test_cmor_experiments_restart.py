@@ -527,7 +527,7 @@ class TestStateDigest(unittest.TestCase):
 
     def test_deterministic(self):
         """Same arrays give same digest."""
-        from legoesm.io.restart import compute_state_digest
+        from legoesm.driver.restart import compute_state_digest
 
         arrays = {"T": np.ones(100), "u": np.zeros(100)}
         d1 = compute_state_digest(arrays)
@@ -536,7 +536,7 @@ class TestStateDigest(unittest.TestCase):
 
     def test_different_values(self):
         """Different array values give different digest."""
-        from legoesm.io.restart import compute_state_digest
+        from legoesm.driver.restart import compute_state_digest
 
         d1 = compute_state_digest({"T": np.ones(100)})
         d2 = compute_state_digest({"T": np.zeros(100)})
@@ -544,7 +544,7 @@ class TestStateDigest(unittest.TestCase):
 
     def test_key_order_invariant(self):
         """Digest is invariant to insertion order (keys are sorted)."""
-        from legoesm.io.restart import compute_state_digest
+        from legoesm.driver.restart import compute_state_digest
 
         a = {"b": np.ones(10), "a": np.zeros(10)}
         b = {"a": np.zeros(10), "b": np.ones(10)}
@@ -556,7 +556,7 @@ class TestConfigHash(unittest.TestCase):
 
     def test_deterministic(self):
         """Same config gives same hash."""
-        from legoesm.io.restart import compute_config_hash
+        from legoesm.driver.restart import compute_config_hash
         from legoesm.forcing.amip_config import AMIPExperimentConfig
 
         cfg = AMIPExperimentConfig()
@@ -566,7 +566,7 @@ class TestConfigHash(unittest.TestCase):
 
     def test_different_config(self):
         """Different config gives different hash."""
-        from legoesm.io.restart import compute_config_hash
+        from legoesm.driver.restart import compute_config_hash
         from legoesm.forcing.amip_config import AMIPExperimentConfig
 
         cfg1 = AMIPExperimentConfig(resolution=16)
@@ -600,7 +600,7 @@ class TestSaveLoadRestart(unittest.TestCase):
 
     def test_roundtrip(self):
         """Save and load restart preserves state."""
-        from legoesm.io.restart import save_restart, load_restart
+        from legoesm.driver.restart import save_restart, load_restart
         from legoesm.forcing.amip_config import AMIPExperimentConfig
         import jax.numpy as jnp
 
@@ -627,7 +627,7 @@ class TestSaveLoadRestart(unittest.TestCase):
 
     def test_metadata_written(self):
         """Metadata JSON contains expected fields."""
-        from legoesm.io.restart import save_restart
+        from legoesm.driver.restart import save_restart
         from legoesm.forcing.amip_config import AMIPExperimentConfig
 
         state, q_v = self._make_state()
@@ -655,7 +655,7 @@ class TestReproducibilityReport(unittest.TestCase):
 
     def test_identical_restarts(self):
         """Two identical saves produce matching digests."""
-        from legoesm.io.restart import save_restart, verify_reproducibility
+        from legoesm.driver.restart import save_restart, verify_reproducibility
         from legoesm.forcing.amip_config import AMIPExperimentConfig
         import jax.numpy as jnp
         from legoesm.core.field import Field

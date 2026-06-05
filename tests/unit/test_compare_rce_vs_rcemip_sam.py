@@ -1,4 +1,4 @@
-"""Unit tests for scripts/compare_rce_vs_rcemip_sam.py — the RCE-vs-RCEMIP
+"""Unit tests for scripts/validate/compare_rce_vs_rcemip_sam.py — the RCE-vs-RCEMIP
 faithfulness comparison tool. Exercises the pure ``compute_metrics`` +
 ``evaluate`` functions on synthetic RCE-like profiles with KNOWN bulk
 magnitudes, so a regression in the averaging / pressure / CWV / cold-point /
@@ -9,8 +9,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
-import compare_rce_vs_rcemip_sam as cmp  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root
+from scripts.validate import compare_rce_vs_rcemip_sam as cmp  # noqa: E402
 from legoesm import constants as C  # noqa: E402
 
 _NLEV = 30

@@ -50,7 +50,7 @@ n_eval_days:  10
 
 aimip_grid: "gaussian"
 n_max: 21
-nlev: 8
+n_levels: 8
 dt: 1200.0
 
 # Early stopping: cap at 30 epochs but bail out after 4 consecutive

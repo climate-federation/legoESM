@@ -1,0 +1,11 @@
+# Apple-Silicon laptop profile. The Metal JAX backend is broken for this repo
+# (see CLAUDE.md / metal-backend-broken memory), so force CPU.
+machine:
+  name: macbook
+  hostnames: ["*MacBook*", "*macbook*", "*.local"]
+  scheduler: none
+  jax_platforms: cpu         # Metal backend crashes; CPU only
+  precision: float64         # x64 fine on CPU; default to high precision locally
+  venv_activate: "source .venv/bin/activate"
+  data_root: ./data
+  slurm: {}

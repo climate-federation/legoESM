@@ -24,6 +24,28 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Atmospheric Science",
 ]
 dependencies = [
+    # The substrate, carved into its own installable member (uv workspace).
+    # Everything still imports as ``legoesm.<subpkg>`` via the shared PEP-420
+    # namespace; this is what lets ``legoesm-atmosphere`` / ``-ocean`` / ... be
+    # shipped independently on top of the same core (see FEDERATION.md).  Pinned
+    # to the matching minor (single-sourced version; members bump in lock-step)
+    # so a non-workspace ``pip install legoesm`` cannot resolve a mismatched core.
+    "legoesm-core~=0.1.0",
+    # The four Earth-system components, each its own installable member on top of
+    # legoesm-core (mutually independent — import-linter contract #2).  The meta
+    # ``legoesm`` pulls them all; ``pip install legoesm-ocean`` alone is enough to
+    # run the ocean standalone.
+    "legoesm-atmosphere~=0.1.0",
+    "legoesm-ocean~=0.1.0",
+    "legoesm-land~=0.1.0",
+    "legoesm-ice~=0.1.0",
+    # The orchestration cluster (coupler/driver, ml/training/da, tools): the meta
+    # package's own modules (cli, config, dycore_factory, taxonomy) import these,
+    # so the meta-member pulls the whole stack.  They are mutually interdependent
+    # (a uv-workspace cycle), unlike the four independent components above.
+    "legoesm-coupler~=0.1.0",
+    "legoesm-ml~=0.1.0",
+    "legoesm-tools~=0.1.0",
     "jax>=0.4.35",              # install minimum; tested with 0.8–0.9
     "jaxlib>=0.4.35",           # must match jax
     "equinox>=0.11",
@@ -60,8 +82,13 @@ dev = [
     "ruff",
     "mypy",
     "pre-commit",
+    "import-linter>=2.0",
+    # Federation packaging validation (scripts/validate_federation_packaging.py):
+    # build the per-member wheels + root-absent install in CI.
+    "build>=1.0",
+    "hatchling",
 ]
-docs = ["sphinx", "myst-parser"]
+docs = ["sphinx", "myst-parser", "furo"]
 all = [
     "legoesm[ml,mesh,viz,data,dev,docs]",
 ]
@@ -69,8 +96,37 @@ all = [
 [project.scripts]
 legoesm = "legoesm.cli:main"
 
+# NOTE: the "legoesm.sw_barotropics" entry points (the FV3 shallow-water dycore
+# providers the ocean barotropic solver resolves by name) are declared by their
+# PROVIDER, legoesm-atmosphere, NOT here — so `pip install legoesm-ocean
+# legoesm-atmosphere` registers them without the root meta-package.  See
+# packages/atmosphere/pyproject.toml.
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/legoesm"]
+
+# === uv workspace (federation carve) ===
+# The repo is a uv workspace; the substrate lives in its own member
+# (packages/core, dist name legoesm-core) and the root ``legoesm`` is the
+# meta-member that depends on it.  Each member's folder drops the legoesm- prefix
+# and has no src/ level (packages/<m>/legoesm/<subpkg>); the root depends on them
+# via [tool.uv.sources].  All members ship into the
+# one ``legoesm`` PEP-420 namespace, so imports are unchanged.
+[tool.uv.workspace]
+members = ["packages/*"]
+
+# Every inter-member dependency resolves to the in-tree workspace member (never
+# PyPI).  All members must be listed here, or uv would try to fetch e.g.
+# legoesm-atmosphere~=0.1.0 from an index that does not publish it yet.
+[tool.uv.sources]
+legoesm-core = { workspace = true }
+legoesm-atmosphere = { workspace = true }
+legoesm-ocean = { workspace = true }
+legoesm-land = { workspace = true }
+legoesm-ice = { workspace = true }
+legoesm-coupler = { workspace = true }
+legoesm-ml = { workspace = true }
+legoesm-tools = { workspace = true }
 
 [tool.ruff]
 line-length = 100
@@ -90,4 +146,227 @@ testpaths = ["tests"]
 addopts = "-v --tb=short -m 'not slow'"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    # Complexity-tier ladder (docs/TESTING.md). Opt-in selectors: run a rung
+    # with e.g. `-m 'tier1 and not slow'`. The default addopts stays `not slow`
+    # (does NOT tier-gate) so untagged tests still run until the suite is tagged.
+    "tier0: unit/operator tests — kernels, no model integration (numerical invariants)",
+    "tier1: research tier — idealized/column/shallow-water; mass+energy+AAM gates, analytic benchmarks",
+    "tier2: intermediate tier — hydrostatic 3D + slab; mass+energy+moisture gates (often slow)",
+    "tier3: operational tier — full complexity + real forcing (AMIP/OMIP/ERA5); budget closure (slow)",
+]
+
+# ---------------------------------------------------------------------------
+# Import-boundary enforcement (the path to independent self-running packages).
+# These contracts encode the TARGET layered architecture (master plan D7):
+#   core (substrate)  <  {atmosphere, ocean, land, ice}  <  coupler  <  driver
+# Each Earth-system component must depend only on `core` (+ truly-shared bricks),
+# never on another component or on the coupler/driver — that one-way dependency
+# is exactly what lets `pip install legoesm-ocean` run standalone (Stage D carve).
+#
+# `ignore_imports` is the CURRENT-violation BASELINE: the contracts pass today,
+# and every entry removed is a real step toward independence (a ratchet).  The
+# goal is an empty ignore list = full component independence, enforced in CI.
+# Run: `.venv/bin/lint-imports`
+# ---------------------------------------------------------------------------
+[tool.importlinter]
+root_package = "legoesm"
+
+# === ROOT INVERSION — the highest-priority independence fix ===
+# A handful of low-level / shared modules import UP into atmosphere/ocean
+# component dynamics; because `grids.halo_latlon -> parallel.latlon_mpi`, that
+# single inversion cascades into nearly every cross-component and core→component
+# chain.  Fixing these collapses most of the graph:
+#   parallel.latlon_mpi  -> atmosphere.dynamics.primitive_eq_latlon_cgrid, ocean.state
+#   ml.channel_packing   -> atmosphere.dynamics.{spectral_pe,spectral_sw}, ocean.state
+# (a parallel/ML helper should receive grids/state as ARGS, not import components).
+# The remaining direct fixes: move the shared C-grid operators
+# (ocean.dynamics.latlon_cgrid_operators) and surface-flux/coupling bricks
+# (coupler.{bulk_flux,surface_energy,coupling_fields}) into `core`.
+
+[[tool.importlinter.contracts]]
+name = "core is the shared substrate (imports nothing above it)"
+type = "forbidden"
+source_modules = ["legoesm.core"]
+forbidden_modules = [
+    "legoesm.atmosphere",
+    "legoesm.ocean",
+    "legoesm.land",
+    "legoesm.ice",
+    "legoesm.coupler",
+    "legoesm.driver",
+    "legoesm.runtime",
+    "legoesm.training",
+]
+# EXACT current-violation baseline (no wildcards): alerting="error" means a
+# stale entry (coupling removed) or a missed one (coupling added) BOTH fail, so
+# the list can only shrink — a true ratchet toward zero.
+unmatched_ignore_imports_alerting = "error"
+ignore_imports = [
+    # core->runtime: intentional FUNCTION-SCOPE deferred imports (CLAUDE.md) to
+    # avoid the runtime/__init__ <-> core init cycle — not a real layering break.
+    "legoesm.core -> legoesm.runtime.backend",
+    "legoesm.core.conservation -> legoesm.runtime.backend",
+    "legoesm.core.hardware -> legoesm.runtime.backend",
+    "legoesm.core.hardware -> legoesm.runtime.config",
+    "legoesm.core.precision -> legoesm.runtime.backend",
+    # core->ocean/atmosphere is only via core->grids.halo_latlon->parallel->
+    # component (the root inversion above); baseline the core->grids hop.
+    "legoesm.core.operators_latlon -> legoesm.grids.halo_latlon",
+    "legoesm.core.operators_latlon_3d -> legoesm.grids.halo_latlon",
+    "legoesm.core.operators_fv_latlon -> legoesm.grids.halo_latlon",
+    "legoesm.core.operators_fv_latlon_3d -> legoesm.grids.halo_latlon",
+]
+
+[[tool.importlinter.contracts]]
+name = "Earth-system components are independent of each other"
+type = "independence"
+modules = [
+    "legoesm.atmosphere",
+    "legoesm.ocean",
+    "legoesm.land",
+    "legoesm.ice",
+]
+unmatched_ignore_imports_alerting = "error"
+# ZERO-IGNORE: the atmosphere/ocean/land/ice components are now genuinely
+# independent of one another.  The shared dycore functions are shared through
+# the SUBSTRATE, not component->component imports:
+#   * lat-lon C-grid differential operators -> legoesm.grids.operators_latlon_cgrid
+#     (Group A: both the atm cgrid dycores and the ocean import them from grids);
+#   * the FV3 shallow-water STATE pytrees -> legoesm.core.shallow_water_state
+#     (Group B pt1: shared by the atm SW dycore and the ocean barotropic solver);
+#   * the FV3 shallow-water DYCORE itself is shared via the foundational
+#     legoesm.registry.SW_BAROTROPIC_REGISTRY — the atmosphere registers its
+#     "fv3sw"/"fv3edge" builders on import and the ocean barotropic RESOLVES one
+#     by name (Group B pt2), so neither component imports the other;
+#   * parallel.latlon_mpi re-instantiates the MPI dycore via type(model) from the
+#     passed-in instance (Group C), not an atmosphere import.
+ignore_imports = []
+
+[[tool.importlinter.contracts]]
+# A standalone component package may use the shared SUBSTRATE that legoesm-core
+# bundles (core, runtime, parallel, grids, io, timestepping) — but never the
+# orchestration layers ABOVE it: coupler, driver, ml/training/da, or the tools
+# (forcing, diagnostics, experiments, visualization).  That one-way dependency is
+# what makes `pip install legoesm-ocean` (base, core-only) run standalone.
+#
+# The ONLY allowed component->above edges are the OPTIONAL heavy features whose
+# install path is declared as a per-component extra (legoesm-atmosphere[ml],
+# legoesm-ocean[ml], legoesm-ocean[tools]) — the SFNO neural dycores / ML physics
+# parameterization (-> legoesm.ml.*) and the Stommel-gyre drift diagnostic
+# (-> legoesm.diagnostics).  Those exact edges are baselined below; the BASE
+# component import is still core-only (`import legoesm.atmosphere`/`legoesm.ocean`
+# pulls no ml/tools — verified).  alerting="error" makes this a ratchet: any NEW
+# component->above edge that is not one of these declared-optional ones fails.
+name = "Components must not import the orchestration layers above them"
+type = "forbidden"
+source_modules = [
+    "legoesm.atmosphere",
+    "legoesm.ocean",
+    "legoesm.land",
+    "legoesm.ice",
+    "legoesm.components",
+]
+forbidden_modules = [
+    "legoesm.coupler",
+    "legoesm.driver",
+    "legoesm.training",
+    "legoesm.ml",
+    "legoesm.da",
+    "legoesm.forcing",
+    "legoesm.diagnostics",
+    "legoesm.experiments",
+    "legoesm.visualization",
+]
+unmatched_ignore_imports_alerting = "error"
+ignore_imports = [
+    # OPTIONAL FEATURE: SFNO neural dynamical cores + ML physics parameterization.
+    # Declared by the legoesm-atmosphere[ml] / legoesm-ocean[ml] extras (top-level
+    # imports; the base component does not pull these modules).
+    "legoesm.atmosphere.dynamics.sfno_sw -> legoesm.ml.sfno",
+    "legoesm.atmosphere.dynamics.sfno_sw -> legoesm.ml.normalization",
+    "legoesm.atmosphere.dynamics.sfno_sw -> legoesm.ml.channel_packing",
+    "legoesm.atmosphere.dynamics.sfno_pe -> legoesm.ml.sfno",
+    "legoesm.atmosphere.dynamics.sfno_pe -> legoesm.ml.normalization",
+    "legoesm.atmosphere.dynamics.sfno_pe -> legoesm.ml.channel_packing",
+    "legoesm.atmosphere.dynamics.sfno_pe -> legoesm.ml.conservation",
+    "legoesm.atmosphere.physics.ml_parameterization -> legoesm.ml.normalization",
+    "legoesm.atmosphere.physics.ml_parameterization -> legoesm.ml.physics.io",
+    "legoesm.atmosphere.physics.ml_parameterization -> legoesm.ml.physics.model",
+    "legoesm.ocean.dynamics.sfno_ocean -> legoesm.ml.sfno",
+    "legoesm.ocean.dynamics.sfno_ocean -> legoesm.ml.normalization",
+    "legoesm.ocean.dynamics.sfno_ocean -> legoesm.ml.conservation",
+    # OPTIONAL FEATURE: ocean Stommel-gyre tracer experiment drift diagnostic.
+    # Declared by the legoesm-ocean[tools] extra (deferred/function-scope import).
+    "legoesm.ocean.experiments.stommel_gyre_tracer -> legoesm.diagnostics",
+]
+
+[[tool.importlinter.contracts]]
+# The legoesm-core MEMBER (the uv-workspace substrate: FEDERATION.md) is more
+# than the `core` subpackage — it also bundles grids/runtime/parallel/io/
+# timestepping/components.  Contract #1 only guards `core`, so UP-imports from
+# those sibling substrate packages into the Earth-system / orchestration layer
+# slipped through and would make `pip install legoesm-core` pull atmosphere /
+# forcing / driver (a dependency cycle).  This contract guards the WHOLE member
+# so the carve stays a mechanical file move, not a dependency inversion.
+name = "legoesm-core member imports nothing above it"
+type = "forbidden"
+source_modules = [
+    "legoesm.core",
+    "legoesm.grids",
+    "legoesm.runtime",
+    "legoesm.parallel",
+    "legoesm.io",
+    "legoesm.timestepping",
+    "legoesm.components",
+    # The core member also ships these top-level substrate modules (they have no
+    # __init__-package home); guard them too so the WHOLE member — not just its
+    # subpackages — provably imports nothing above core.  surface_albedo lives
+    # here (not the root meta) because land/ice/coupler import it at top level,
+    # so `pip install legoesm-land` must get it from the substrate.
+    "legoesm.constants",
+    "legoesm.thermo",
+    "legoesm.registry",
+    "legoesm.surface_albedo",
+]
+forbidden_modules = [
+    "legoesm.atmosphere",
+    "legoesm.ocean",
+    "legoesm.land",
+    "legoesm.ice",
+    "legoesm.coupler",
+    "legoesm.driver",
+    "legoesm.training",
+    "legoesm.ml",
+    "legoesm.da",
+    "legoesm.forcing",
+    "legoesm.diagnostics",
+    "legoesm.experiments",
+    "legoesm.visualization",
+]
+unmatched_ignore_imports_alerting = "error"
+# RATCHET baseline — the exact current UP-import edges (top-level + grimp-visible
+# deferred/function-scope).  alerting="error" means a stale entry (edge removed)
+# OR a new one BOTH fail, so this list can only shrink toward zero.  Each fix
+# (voronoi_mpi type(model); io re-scope) deletes its lines here.
+ignore_imports = [
+    # core->runtime: the same intentional function-scope deferred imports already
+    # baselined in contract #1 (runtime/__init__ <-> core init cycle).
+    "legoesm.core -> legoesm.runtime.backend",
+    "legoesm.core.conservation -> legoesm.runtime.backend",
+    "legoesm.core.hardware -> legoesm.runtime.backend",
+    "legoesm.core.hardware -> legoesm.runtime.config",
+    "legoesm.core.precision -> legoesm.runtime.backend",
+    # parallel.voronoi_mpi: FIXED — re-instantiates the dynamics model via
+    # type(model)(local_mesh, ...) and calls .tendencies (no atmosphere import).
+    # parallel.sharded_dynamics: FIXED — the shard_map tendency call now reads the
+    # free RHS off the passed-in model instance (model.sharded_tendency_fn, a
+    # staticmethod), so it runs on the rank-local TRACED mesh without importing
+    # the atmosphere component.  legoesm-core is now standalone-installable AND
+    # standalone-runnable (no upward atmosphere edge remains, top-level or deferred).
+    # io config-aware checkpoint/restart: FIXED via re-scope (Step 3) — the
+    # experiment-aware modules moved to driver.{restart,checkpoint,
+    # distributed_checkpoint}; io keeps only pure-array I/O (cmor_output,
+    # state_checkpoint) + the pure state-digest (io.state_digest), and the
+    # config codec now lives canonically in driver.config.  io imports nothing
+    # above it.
 ]

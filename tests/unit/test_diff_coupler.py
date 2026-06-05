@@ -32,7 +32,7 @@ class TestBulkFluxGrad:
     @pytest.mark.parametrize("scheme", ["coare3", "large_yeager"])
     @pytest.mark.parametrize("n_iter", [1, 5])
     def test_grad_wrt_T_sfc(self, scheme, n_iter):
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
+        from legoesm.core.bulk_flux import compute_most_fluxes
 
         ncol = 32
         T_sfc = 300.0 * jnp.ones(ncol)
@@ -63,7 +63,7 @@ class TestTileBlendingGrad:
     def test_grad_wrt_ice_concentration(self):
         from legoesm.coupler.tile_fractions import compute_tile_fractions, blend_tiles
         from legoesm.coupler.config import TileConfig
-        from legoesm.coupler.coupling_fields import TileResponse
+        from legoesm.core.coupling_fields import TileResponse
 
         n = 4
         shape = (6, n, n)
@@ -75,7 +75,7 @@ class TestTileBlendingGrad:
 
         def make_tile_response(T_sfc):
             return TileResponse(
-                T_surface=T_sfc,
+                T_sfc=T_sfc,
                 albedo=0.1 * ones,
                 emissivity=0.97 * ones,
                 z0=1e-4 * ones,
@@ -104,7 +104,7 @@ class TestTileBlendingGrad:
         def loss(ice_conc):
             fracs = compute_tile_fractions(tile_config, ice_conc)
             blended = blend_tiles(ocean_resp, ice_resp, land_resp, lake_resp, fracs)
-            return jnp.sum(blended.T_surface ** 2)
+            return jnp.sum(blended.T_sfc ** 2)
 
         ice_conc = 0.5 * ones
         grad = jax.grad(loss)(ice_conc)
@@ -152,7 +152,7 @@ class TestFullCouplerGrad:
     def setup(self):
         from legoesm.coupler.coupler import make_coupler
         from legoesm.coupler.config import CouplerConfig, TileConfig
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         from legoesm.coupler.accumulator import reset_accumulator
         from legoesm.land.config import LandConfig
         from legoesm.land.state import LandState
@@ -228,7 +228,7 @@ class TestFullCouplerGrad:
                 jnp.zeros_like(sst), jnp.zeros_like(sst),
                 dt=self.dt,
             )
-            return jnp.sum(sfc_to_atm.T_surface ** 2)
+            return jnp.sum(sfc_to_atm.T_sfc ** 2)
 
         grad = jax.grad(loss)(self.ocean_sst)
         assert_gradient_ok(grad, "Full coupler w.r.t. SST")
@@ -245,14 +245,14 @@ class TestFluxAccumulatorGrad:
         from legoesm.coupler.accumulator import (
             reset_accumulator, accumulate, mean_accumulator,
         )
-        from legoesm.coupler.coupling_fields import SurfaceToAtm
+        from legoesm.core.coupling_fields import SurfaceToAtm
 
         shape = (6, 4, 4)
         ones = jnp.ones(shape)
 
-        def make_sfc_to_atm(T_surface):
+        def make_sfc_to_atm(T_sfc):
             return SurfaceToAtm(
-                T_surface=T_surface,
+                T_sfc=T_sfc,
                 albedo=0.1 * ones,
                 emissivity=0.97 * ones,
                 z0=1e-4 * ones,
@@ -273,18 +273,18 @@ class TestFluxAccumulatorGrad:
                 salt_flux=jnp.zeros(shape),
             )
 
-        def loss(T_surface):
+        def loss(T_sfc):
             acc = reset_accumulator(shape)
-            sfc1 = make_sfc_to_atm(T_surface)
+            sfc1 = make_sfc_to_atm(T_sfc)
             acc = accumulate(acc, sfc1, dt=100.0)
-            sfc2 = make_sfc_to_atm(T_surface + 1.0)
+            sfc2 = make_sfc_to_atm(T_sfc + 1.0)
             acc = accumulate(acc, sfc2, dt=200.0)
             mean = mean_accumulator(acc)
-            return jnp.sum(mean.T_surface ** 2)
+            return jnp.sum(mean.T_sfc ** 2)
 
         T_sfc = 290.0 * ones
         grad = jax.grad(loss)(T_sfc)
-        assert_gradient_ok(grad, "Flux accumulator w.r.t. T_surface")
+        assert_gradient_ok(grad, "Flux accumulator w.r.t. T_sfc")
 
 
 # ============================================================================
@@ -295,7 +295,7 @@ class TestCrossComponentAtmOcean:
 
     def test_grad_T_atm_to_shflx(self):
         """Gradient of sensible heat flux w.r.t. atmospheric temperature."""
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
+        from legoesm.core.bulk_flux import compute_most_fluxes
 
         ncol = 32
         sst = 295.0 * jnp.ones(ncol)
@@ -367,7 +367,7 @@ class TestLakeModelGrad:
 
     @staticmethod
     def _make_lake_forcing(ncol):
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
         ones = jnp.ones(ncol)
         return AtmToSurface(
             sw_down=200.0 * ones,

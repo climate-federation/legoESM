@@ -423,7 +423,7 @@ class TestTrainingAPISignatures:
     def test_neural_gcm_uses_adapter(self):
         """train_neural_gcm must create a ColumnAdapter, not pass grid directly."""
         from legoesm.atmosphere.physics.neural_physics import make_neural_step_unified
-        from legoesm.driver.grid_adapters import make_adapter, ColumnAdapter
+        from legoesm.core.grid_adapters import make_adapter, ColumnAdapter
         import inspect
 
         sig = inspect.signature(make_neural_step_unified)
@@ -468,7 +468,7 @@ class TestTrainingAPISignatures:
             NeuralPhysics,
             make_neural_step_unified,
         )
-        from legoesm.driver.grid_adapters import make_adapter
+        from legoesm.core.grid_adapters import make_adapter
 
         neural = NeuralPhysics(nlev=NLEV, key=jax.random.PRNGKey(0))
         step = make_neural_step_unified(neural, make_adapter(_GRID))

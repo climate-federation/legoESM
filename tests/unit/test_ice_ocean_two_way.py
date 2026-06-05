@@ -19,7 +19,7 @@ from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanMode
 from legoesm.ice.config import SeaIceConfig
 from legoesm.ice.state import init_dynamic_ice_state
 from legoesm.ice.sea_ice import step_sea_ice
-from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
+from legoesm.core.coupling_fields import AtmToSurface, TileResponse
 from legoesm.coupler.config import TileConfig
 from legoesm.coupler.tile_fractions import compute_tile_fractions
 from legoesm.coupler.ocean_forcing import ice_ocean_forcing_from_ice_response
@@ -29,7 +29,7 @@ from legoesm import constants
 def _zero_tile(shape):
     z = jnp.zeros(shape)
     return TileResponse(
-        T_surface=z, albedo=z, emissivity=z, z0=z, q_surface=z, shflx=z,
+        T_sfc=z, albedo=z, emissivity=z, z0=z, q_surface=z, shflx=z,
         lhflx=z, tau_x=z, tau_y=z, lw_up=z, u_ocean_sfc=z, v_ocean_sfc=z,
         co2_flux=z, freshwater_flux=z, ocean_heat_extraction=z,
         ocean_stress_x=z, ocean_stress_y=z, surface_mass_flux=z, salt_flux=z)

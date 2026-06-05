@@ -4,12 +4,12 @@
 
 Five experiments (`eady_uniform`, `eady_instability`, `acc_channel`,
 `dino`, `global_overturning`) had no runner in
-`scripts/run_ocean_test_matrix.py`. All five are now wired and pass
+`scripts/matrix/run_ocean_test_matrix.py`. All five are now wired and pass
 smoke-grade runs on every grid they declare support for.
 
 ## What landed
 
-* `scripts/run_ocean_test_matrix.py`:
+* `scripts/matrix/run_ocean_test_matrix.py`:
   * **New generic helper** `_run_experiment_via_registry(...)` (~140
     LOC) drives any experiment that exposes the standard
     `EXPERIMENT_CONFIG` registry dict (`config_class`,

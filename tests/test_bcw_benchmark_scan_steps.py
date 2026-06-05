@@ -16,7 +16,7 @@ import pytest
 
 
 def _load_bcw_module():
-    """Load ``scripts/run_baroclinic_wave_benchmark.py`` as a module
+    """Load ``scripts/run/run_baroclinic_wave_benchmark.py`` as a module
     via importlib so the AUTO_SCAN_STEPS table can be inspected without
     invoking ``main()``.  Importing the script as a top-level package
     isn't possible (it lives in ``scripts/`` which isn't a package).
@@ -24,7 +24,7 @@ def _load_bcw_module():
     here = Path(__file__).resolve().parents[1]
     spec = importlib.util.spec_from_file_location(
         "_bcw_benchmark",
-        here / "scripts" / "run_baroclinic_wave_benchmark.py",
+        here / "scripts" / "run" / "run_baroclinic_wave_benchmark.py",
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

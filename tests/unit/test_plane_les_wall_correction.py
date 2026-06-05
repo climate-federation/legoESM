@@ -174,8 +174,8 @@ def test_crm_run_scripts_set_dosmagor_no_wall_cap():
     silently make the near-surface SGS mixing un-SAM-faithful — fail loudly
     here instead."""
     from pathlib import Path
-    import legoesm
-    repo = Path(legoesm.__file__).resolve().parents[2]
+    # namespace-safe repo root (legoesm is a PEP-420 namespace pkg, no __file__)
+    repo = Path(__file__).resolve().parents[2]
     for script in ("run_gate_plane.py", "run_lba_plane.py",
                    "run_rcemip_plane.py"):
         src = (repo / "scripts" / script).read_text()

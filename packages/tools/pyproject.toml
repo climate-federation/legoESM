@@ -1,0 +1,39 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "legoesm-tools"
+version = "0.1.0"
+description = "forcing (ERA5/JRA55/AMIP), diagnostics, experiment harnesses, visualization."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "Pierre Gentine" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.11",
+]
+# The ORCHESTRATION layer (coupler/driver, ml/training/da, tools) is a
+# mutually-interdependent CLUSTER, not a clean DAG: forcing/experiments build
+# experiment configs via the driver (coupler) and diagnostics read component
+# state.  uv resolves the workspace cycle; these are the real member-level
+# import edges (verified by AST scan, top-level + deferred):
+#   forcing/diagnostics/experiments/visualization -> core, atmosphere, ocean, coupler
+# (no land/ice/ml edge — tools never imports them).
+dependencies = [
+    "legoesm-core~=0.1.0",
+    "legoesm-atmosphere~=0.1.0",
+    "legoesm-ocean~=0.1.0",
+    "legoesm-coupler~=0.1.0",
+]
+
+[tool.uv.sources]
+legoesm-core = { workspace = true }
+legoesm-atmosphere = { workspace = true }
+legoesm-ocean = { workspace = true }
+legoesm-coupler = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["legoesm"]

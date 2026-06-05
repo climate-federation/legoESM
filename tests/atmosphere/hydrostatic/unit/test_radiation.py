@@ -60,7 +60,7 @@ _skip_if_metal_broken = pytest.mark.skipif(
 # Helpers
 # ===========================================================================
 
-def _make_column_data(ncol=4, nlev=10, T_surface=300.0, T_top=200.0):
+def _make_column_data(ncol=4, nlev=10, T_sfc=300.0, T_top=200.0):
     """Create simple test column data with linear temperature profile."""
     # Pressure: linearly spaced interfaces from 100 Pa (top) to 1e5 Pa (surface)
     p_half = jnp.broadcast_to(
@@ -69,9 +69,9 @@ def _make_column_data(ncol=4, nlev=10, T_surface=300.0, T_top=200.0):
     )
     p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
 
-    # Temperature: linear from T_top to T_surface
+    # Temperature: linear from T_top to T_sfc
     T = jnp.broadcast_to(
-        jnp.linspace(T_top, T_surface, nlev)[None, :],
+        jnp.linspace(T_top, T_sfc, nlev)[None, :],
         (ncol, nlev),
     )
 
@@ -79,7 +79,7 @@ def _make_column_data(ncol=4, nlev=10, T_surface=300.0, T_top=200.0):
     lat = jnp.linspace(0.0, jnp.pi / 3.0, ncol)
 
     # Surface temperature
-    sfc_temperature = jnp.full(ncol, T_surface)
+    sfc_temperature = jnp.full(ncol, T_sfc)
 
     # Insolation from perpetual equinox
     insol = perpetual_equinox_insolation(lat, 1360.0)
@@ -1510,7 +1510,7 @@ class TestCloudFraction:
         ncol, nlev = 4, 20
         # Cold atmosphere
         T, p_full, p_half, T_sfc, lat, insol = _make_column_data(
-            ncol, nlev, T_surface=220.0, T_top=180.0,
+            ncol, nlev, T_sfc=220.0, T_top=180.0,
         )
         dp = p_half[:, 1:] - p_half[:, :-1]
 

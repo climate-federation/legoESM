@@ -1,4 +1,4 @@
-"""Smoke test for ``scripts/bench_mpi_scaling.py``.
+"""Smoke test for ``scripts/bench/bench_mpi_scaling.py``.
 
 iter-258: fifth script in the iter-252..257 untested-bench
 coverage chain. ``bench_mpi_scaling.py`` measures plane CRM MPI
@@ -21,7 +21,7 @@ from tests.atmosphere.nonhydrostatic.integration._bench_smoke_helpers import (
 )
 
 
-SCRIPT = REPO_ROOT / "scripts" / "bench_mpi_scaling.py"
+SCRIPT = REPO_ROOT / "scripts" / "bench" / "bench_mpi_scaling.py"
 
 
 # End-anchored regex (iter-256 round-1 HIGH#2 pattern):

@@ -238,7 +238,7 @@ captured in any diagnostic field.  The `vortcor_u/v` fields are
 
 To check geostrophic balance, compute `f×v` independently from the
 restart velocity field and compare with `KE_PGF`.  The script
-`scripts/diagnose_omip_momentum.py` does this automatically.
+`scripts/tmp/diagnose_omip_momentum.py` does this automatically.
 
 At year 1 of the uniform-profile spinup, PGF/f×v ≈ 1 at 600-800m
 depth (geostrophy developing), with PGF exceeding Coriolis toward
@@ -267,5 +267,5 @@ the bottom (z-star bathymetry-step PGF errors).
 - `src/legoesm/ocean/state.py` — config (A_h_floor, C_smag_lap)
 - `src/legoesm/ocean/dynamics/barotropic_implicit_latlon_cgrid.py` — CG solver
 - `src/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py` — model step
-- `scripts/run_omip.py` — OMIP pipeline with bathymetry processing
+- `scripts/run/run_omip.py` — OMIP pipeline with bathymetry processing
 - `scripts/global_overturning/diagnose_momentum_balance.py` — budget analysis

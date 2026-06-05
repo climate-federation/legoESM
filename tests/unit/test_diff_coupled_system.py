@@ -101,7 +101,7 @@ class TestAtmCouplerLand:
         from legoesm.land.slab_land import step_land
         from legoesm.land.config import LandConfig
         from legoesm.land.state import LandState
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
 
         ncol = 32
         config = LandConfig()
@@ -141,7 +141,7 @@ class TestAtmCouplerLand:
 class TestSSTToFlux:
 
     def test_grad_sst_to_shflx(self):
-        from legoesm.coupler.bulk_flux import compute_most_fluxes
+        from legoesm.core.bulk_flux import compute_most_fluxes
 
         ncol = 32
         T_atm = 290.0 * jnp.ones(ncol)  # cooler air than SST
@@ -179,7 +179,7 @@ class TestIceAlbedoChain:
         from legoesm.ice.sea_ice import step_sea_ice
         from legoesm.ice.config import SeaIceConfig
         from legoesm.ice.state import SeaIceState
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
 
         config = SeaIceConfig(dynamics="none", temp_dependent_albedo=True)
         shape = (6, 4, 4)
@@ -244,7 +244,7 @@ class TestFullAMIPChain:
         from legoesm.land.slab_land import step_land
         from legoesm.land.config import LandConfig
         from legoesm.land.state import LandState
-        from legoesm.coupler.coupling_fields import AtmToSurface
+        from legoesm.core.coupling_fields import AtmToSurface
 
         n, nlev = 4, 5
         grid = create_cubed_sphere(n)

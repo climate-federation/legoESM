@@ -450,7 +450,7 @@ class TestIter92AuditFollowupDelegation:
 
     * ``src/legoesm/diagnostics/precision_drift.py:406`` — production
       energy-drift-rate normalization with ``max(abs(energy_prev), 1e-30)``.
-    * ``scripts/run_sea_ice_test_matrix.py`` — 6 ``vol_drift`` callsites
+    * ``scripts/matrix/run_sea_ice_test_matrix.py`` — 6 ``vol_drift`` callsites
       with ``max(vol_X, 1e-20)`` floors (deferred in iter-91).
     * ``tests/validation/bench_spectral_pe.py:323`` — JW06 KE timeseries
       with ``max(abs(KE_ts[0]), 1e-30)`` floor.
@@ -573,7 +573,7 @@ class TestIter92AuditFollowupDelegation:
         """
         from pathlib import Path
         path = Path(__file__).resolve().parent.parent.parent / \
-               "scripts" / "run_w2_w5_cosine_bell_iter1030.py"
+               "scripts" / "run" / "run_w2_w5_cosine_bell_iter1030.py"
         text = path.read_text()
         code_only = "\n".join(
             line for line in text.splitlines()
@@ -590,7 +590,7 @@ class TestIter92AuditFollowupDelegation:
         """
         from pathlib import Path
         path = Path(__file__).resolve().parent.parent.parent / \
-               "scripts" / "run_advection_convergence_2d.py"
+               "scripts" / "run" / "run_advection_convergence_2d.py"
         text = path.read_text()
         code_only = "\n".join(
             line for line in text.splitlines()
@@ -695,11 +695,14 @@ class TestStructuralRegressionNoNewIter78Pathology:
         tests/, excluding __pycache__.
         """
         from pathlib import Path
+        from tests.legoesm_paths import legoesm_root_paths
         repo_root = Path(__file__).resolve().parent.parent.parent
+        # Carve-aware: scan every legoesm namespace root (the substrate may live
+        # outside src/legoesm) plus scripts and tests.
         roots = [
             repo_root / "scripts",
-            repo_root / "src" / "legoesm",
             repo_root / "tests",
+            *legoesm_root_paths(),
         ]
         # Files that legitimately contain the pattern as DATA
         # (test assertions checking string presence/absence,

@@ -1,4 +1,4 @@
-"""Smoke test for ``scripts/run_scm_test_matrix.py rce``.
+"""Smoke test for ``scripts/matrix/run_scm_test_matrix.py rce``.
 
 iter-300: 10th previously-untested CRM-adjacent script. SCM RCE
 is a single-column radiative-convective equilibrium harness
@@ -37,7 +37,7 @@ from tests.atmosphere.nonhydrostatic.integration._bench_smoke_helpers import (
 )
 
 
-SCRIPT = REPO_ROOT / "scripts" / "run_scm_test_matrix.py"
+SCRIPT = REPO_ROOT / "scripts" / "matrix" / "run_scm_test_matrix.py"
 
 
 _T_SFC_RE = re.compile(r"T_sfc_final\s*=\s*([\d.eE+-]+)\s*K")

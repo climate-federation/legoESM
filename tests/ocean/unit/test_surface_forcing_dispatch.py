@@ -63,7 +63,7 @@ def test_validate_bulk_scheme_rejects_typo():
     each ``if scheme in (...): MOST else: <constant>`` gate to the constant
     branch, silently running the wrong air-sea physics.  The guard now raises.
     """
-    from legoesm.coupler.bulk_flux import validate_bulk_scheme
+    from legoesm.core.bulk_flux import validate_bulk_scheme
 
     for ok in ("constant", "most", "coare3", "large_yeager"):
         validate_bulk_scheme(ok)  # must not raise

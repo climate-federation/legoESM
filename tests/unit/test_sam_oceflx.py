@@ -1,6 +1,6 @@
 """SAM ``oceflx`` faithful bulk-flux tests (iter-5 SF fix).
 
-Covers the new :mod:`legoesm.coupler.bulk_flux` helpers ported from
+Covers the new :mod:`legoesm.core.bulk_flux` helpers ported from
 gSAM ``oceflx.f90``: the salt-reduced ocean surface humidity
 (``sam_ocean_surface_q``), the neutral 10 m drag (``_sam_cdn``), and the
 iterative Monin–Obukhov scheme (``compute_sam_oceflx_fluxes``).
@@ -13,7 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from legoesm.coupler.bulk_flux import (
+from legoesm.core.bulk_flux import (
     _sam_cdn,
     compute_sam_oceflx_fluxes,
     sam_ocean_surface_q,

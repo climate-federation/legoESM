@@ -51,7 +51,7 @@ jax.config.update("jax_enable_x64", True)
 def _import_matrix_module():
     import importlib.util
     repo_root = Path(__file__).resolve().parents[2]
-    matrix_path = repo_root / "scripts" / "run_ocean_test_matrix.py"
+    matrix_path = repo_root / "scripts" / "matrix" / "run_ocean_test_matrix.py"
     spec = importlib.util.spec_from_file_location(
         "_rom_for_bryan", matrix_path,
     )

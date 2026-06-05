@@ -20,7 +20,7 @@ import pytest
 from legoesm.land.slab_land import step_land
 from legoesm.land.config import LandConfig
 from legoesm.land.state import LandState
-from legoesm.coupler.coupling_fields import AtmToSurface, TileResponse
+from legoesm.core.coupling_fields import AtmToSurface, TileResponse
 from legoesm.core.field import Field
 from legoesm import constants
 

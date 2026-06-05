@@ -13,7 +13,7 @@ from legoesm.ocean.simple_ocean import (
     _two_layer_step,
     init_slab_state,
 )
-from legoesm.coupler.coupling_fields import AtmToSurface
+from legoesm.core.coupling_fields import AtmToSurface
 from legoesm.core.field import Field
 
 

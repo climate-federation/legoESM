@@ -830,7 +830,7 @@ class TestCouplerAdapter:
 
     def test_compute_mpas_freshwater_basic(self):
         from legoesm.coupler.mpas_adapter import compute_mpas_freshwater
-        from legoesm.coupler.coupling_fields import AtmToSurface, SurfaceToAtm
+        from legoesm.core.coupling_fields import AtmToSurface, SurfaceToAtm
 
         n = 10
         z = jnp.zeros(n)
@@ -845,7 +845,7 @@ class TestCouplerAdapter:
             cos_zenith=z, co2_ppmv=z, has_radiation=z, has_precipitation=ones,
         )
         sfc = SurfaceToAtm(
-            T_water_init_C=z, albedo=z, emissivity=z, z0=z,
+            T_sfc=z, albedo=z, emissivity=z, z0=z,
             q_surface=z, shflx=z,
             lhflx=ones * 100.0,  # 100 W/m2
             tau_x=z, tau_y=z, lw_up=z,
@@ -857,6 +857,7 @@ class TestCouplerAdapter:
             ocean_heat_extraction=z,
             ocean_stress_x=z, ocean_stress_y=z,
             surface_mass_flux=ones * 100.0 / constants.L_v,
+            salt_flux=z,
         )
         mask = ones
 

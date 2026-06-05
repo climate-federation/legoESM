@@ -8,7 +8,7 @@ This document tracks all modifications made during the ocean test matrix audit a
 **Objective**: Audit ocean test experiments one by one, starting with configuration verification  
 **Branch**: `dhruv/exploration`  
 **Modified Files**: 
-- `scripts/run_ocean_test_matrix.py`
+- `scripts/matrix/run_ocean_test_matrix.py`
 - `docs/ocean_test_experiments_audit.md` (created)
 - `docs/ocean_test_matrix_changelog.md` (this file, created)
 
@@ -37,7 +37,7 @@ Spectral grid was reporting drift metrics in spectral coefficient units instead 
 `_make_scalar_fn()` for spectral grids used raw spectral coefficients (`eta_hat`, `T_hat`) instead of converting to physical fields.
 
 **Files Modified**:
-- `scripts/run_ocean_test_matrix.py`
+- `scripts/matrix/run_ocean_test_matrix.py`
 
 **Changes Made**:
 ```python
@@ -98,7 +98,7 @@ Each grid type's diagnostic plots used individual auto-scaled colormaps, making 
 `ax.imshow()` calls used no `vmin`/`vmax` parameters, causing matplotlib to auto-scale each plot independently.
 
 **Files Modified**:
-- `scripts/run_ocean_test_matrix.py`
+- `scripts/matrix/run_ocean_test_matrix.py`
 
 **Changes Made**:
 
@@ -160,7 +160,7 @@ im = ax.imshow(regridded, origin="lower", aspect="auto", cmap=cmap,
 No way to run tests for custom durations beyond the default/quick modes.
 
 **Files Modified**:
-- `scripts/run_ocean_test_matrix.py`
+- `scripts/matrix/run_ocean_test_matrix.py`
 
 **Changes Made**:
 ```python
@@ -179,10 +179,10 @@ else:
 **Usage Examples**:
 ```bash
 # Run rest_state for 10 days
-python scripts/run_ocean_test_matrix.py --only rest_state --days 10.0
+python scripts/matrix/run_ocean_test_matrix.py --only rest_state --days 10.0
 
 # Run barotropic_wave for 0.5 days  
-python scripts/run_ocean_test_matrix.py --only barotropic_wave --days 0.5
+python scripts/matrix/run_ocean_test_matrix.py --only barotropic_wave --days 0.5
 ```
 
 **Impact**: ✅ Complete success
@@ -247,7 +247,7 @@ Implemented two-tier plotting strategy:
 2. **Cross-grid comparison plots**: Fixed color scales for meaningful comparison
 
 **Files Modified**:
-- `scripts/run_ocean_test_matrix.py`
+- `scripts/matrix/run_ocean_test_matrix.py`
 
 **New Functions Added**:
 ```python
@@ -331,8 +331,8 @@ for step in sorted_steps:
 - **Scientific workflow**: Broken for temporal analysis
 
 **Files Modified**:
-- `scripts/run_ocean_test_matrix.py` 
-- `scripts/run_atmosphere_test_matrix.py`
+- `scripts/matrix/run_ocean_test_matrix.py` 
+- `scripts/matrix/run_atmosphere_test_matrix.py`
 
 **Solution - New Time Series Format**:
 ```python
@@ -386,7 +386,7 @@ ds = xr.Dataset({'eta': (['time', 'lat', 'lon'], data['eta'])})
 **Validation Results**:
 ```bash
 # NEW FORMAT TEST
-python scripts/run_ocean_test_matrix.py --only rest_state --quick
+python scripts/matrix/run_ocean_test_matrix.py --only rest_state --quick
 # ✅ Generated: eta: (11, 181, 360) time series
 # ✅ Cross-grid comparisons work with new format
 # ✅ Backwards compatibility with old format confirmed
@@ -435,7 +435,7 @@ Performed controlled comparison by running both current and old scripts with ide
 **Test Setup**:
 ```bash
 # Current script
-JAX_ENABLE_X64=1 python scripts/run_ocean_test_matrix.py --only rest_state --output results/ocean_current
+JAX_ENABLE_X64=1 python scripts/matrix/run_ocean_test_matrix.py --only rest_state --output results/ocean_current
 
 # Old script  
 JAX_ENABLE_X64=1 python scripts/run_ocean_test_matrix_old.py --only rest_state --output results/ocean_old
@@ -598,13 +598,13 @@ initial_state = wind_gyre.create_initial_conditions(
 **Validation Results**:
 ```bash
 # All experiments tested successfully with new modular architecture
-JAX_ENABLE_X64=1 python scripts/run_ocean_test_matrix.py --only wind_gyre --quick
+JAX_ENABLE_X64=1 python scripts/matrix/run_ocean_test_matrix.py --only wind_gyre --quick
 # ✅ PASS | wind_gyre/cubed_sphere/C24 | 10.9s | max speed=0.0000 m/s
 
-JAX_ENABLE_X64=1 python scripts/run_ocean_test_matrix.py --only baroclinic --quick  
+JAX_ENABLE_X64=1 python scripts/matrix/run_ocean_test_matrix.py --only baroclinic --quick  
 # ✅ PASS | baroclinic/cubed_sphere/C24 | 15.4s | T drift=3.09e-05
 
-JAX_ENABLE_X64=1 python scripts/run_ocean_test_matrix.py --only inertia_gravity_wave --quick
+JAX_ENABLE_X64=1 python scripts/matrix/run_ocean_test_matrix.py --only inertia_gravity_wave --quick
 # ✅ PASS | inertia_gravity_wave/cubed_sphere/C24 | 14.3s | L2=1.2635, omega=1.09e-04
 ```
 
@@ -656,7 +656,7 @@ Gives realistic trade/westerly/polar easterly structure with zero crossings at ~
 **Files Modified**:
 - `src/legoesm/ocean/physics/surface_forcing/prescribed.py`
 - `src/legoesm/ocean/physics/mpas_physics.py`
-- `scripts/run_ocean_test_matrix.py` (forcing profile plot)
+- `scripts/matrix/run_ocean_test_matrix.py` (forcing profile plot)
 
 ---
 
@@ -675,7 +675,7 @@ Gives realistic trade/westerly/polar easterly structure with zero crossings at ~
 For MPAS, cell-center velocity is reconstructed from edge normals via Perot reconstruction at all levels. For latlon C-grid, face velocities are interpolated to cell centers.
 
 **Files Modified**:
-- `scripts/run_ocean_test_matrix.py`
+- `scripts/matrix/run_ocean_test_matrix.py`
 
 ---
 
@@ -694,7 +694,7 @@ For MPAS, cell-center velocity is reconstructed from edge normals via Perot reco
 - Regional gyre experiments pass `(0, 120, 15, 75)` as domain extent
 
 **Files Modified**:
-- `scripts/run_ocean_test_matrix.py`
+- `scripts/matrix/run_ocean_test_matrix.py`
 
 ---
 

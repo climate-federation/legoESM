@@ -21,7 +21,7 @@ legoESM is a differentiable Earth System Model in JAX with 24+ dynamical cores, 
 - `src/legoesm/atmosphere/physics/radiation/solar.py` — zenith angle utilities
 - `src/legoesm/atmosphere/physics/radiation/gray.py` — gray radiation (for testing)
 - `src/legoesm/atmosphere/physics/radiation/rrtmgp_radiation.py` — RRTMGP wrapper
-- `scripts/run_amip.py` and `scripts/run_amip_spectral.py` — pass time-of-day
+- `scripts/run/run_amip.py` and `scripts/run_amip_spectral.py` — pass time-of-day
 
 **Implementation**:
 1. In `solar.py`, ensure there is a function `compute_cos_zenith(lat, lon, day_of_year, seconds_of_day) → cos_sza` that returns the cosine of the solar zenith angle per grid cell. If it already exists, verify it handles the full orbital parameters (declination, hour angle).
@@ -194,7 +194,7 @@ legoESM is a differentiable Earth System Model in JAX with 24+ dynamical cores, 
 **Files to modify**:
 - `src/legoesm/grids/topography.py` — add real topography loading
 - `src/legoesm/coupler/tile_fractions.py` — initialize from real land-sea mask
-- `scripts/run_amip.py` — add topography configuration
+- `scripts/run/run_amip.py` — add topography configuration
 
 **Files to create**:
 - `scripts/prepare_topography.py` — offline preprocessing script that converts raw DEM to Zarr
@@ -261,7 +261,7 @@ legoESM is a differentiable Earth System Model in JAX with 24+ dynamical cores, 
 **Current state**: Kessler, Sundqvist, Seifert-Beheng, Morrison, Thompson, and ML emulator all exist as code. AMIP runs use saturation adjustment only.
 
 **Files to modify**:
-- `scripts/run_amip.py` — add `--microphysics` flag
+- `scripts/run/run_amip.py` — add `--microphysics` flag
 - `src/legoesm/atmosphere/physics/combined.py` — wire microphysics into the physics sequence
 - `src/legoesm/atmosphere/physics/microphysics/integration.py` — ensure `make_microphysics_physics()` works with the AMIP state
 

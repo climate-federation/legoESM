@@ -27,7 +27,20 @@ Icon?
 results/
 checkpoints/
 data/
+# ...but scripts/data/ is a version-controlled scripts bucket, not runtime data.
+!scripts/data/
+!scripts/data/**
 wandb/
+
+# Runtime logs — job stdout/stderr dumps, matrix exit-code logs, scheduler
+# output, etc. (`*.log` is already ignored above under LaTeX artifacts.)
+logs/
+**/logs/
+
+# Diagnostic output folder — PNG/NetCDF dumps written by probe/plot scripts.
+# Excluded wholesale (incl. the former fv3_visual baselines): visual-regression
+# baselines are inspected from local working copies, not tracked in git.
+diagnostics/
 
 # Diagnostic plots dropped at repo root by ad-hoc scripts.
 # Tracked diagnostic PNGs live under `diagnostics/` and are still
@@ -92,3 +105,6 @@ _probe_*.py
 # anchored at the repo root to avoid catching other intentionally
 # tracked `.db` files elsewhere.
 /reviews.db
+
+# import-linter graph cache
+.import_linter_cache/

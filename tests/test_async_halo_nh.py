@@ -17,7 +17,6 @@ Tests
 from __future__ import annotations
 
 import ast
-from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -36,6 +35,8 @@ from legoesm.grids.cubed_sphere import create_cubed_sphere
 from legoesm.grids.vertical import (
     create_height_coordinate, compute_terrain_metric,
 )
+
+from tests.legoesm_paths import legoesm_source_path
 
 
 @pytest.fixture(scope="module")
@@ -142,10 +143,8 @@ def test_nh_async_halo_ast_regression():
     dispatch + helper import) must be present in the source.
     Catches a refactor that drops the async-halo dispatch
     silently."""
-    src_path = (
-        Path(__file__).resolve().parent.parent
-        / "src" / "legoesm" / "atmosphere" / "dynamics"
-        / "compressible_euler_cdgrid.py"
+    src_path = legoesm_source_path(
+        "atmosphere/dynamics/compressible_euler_cdgrid.py"
     )
     src_text = src_path.read_text()
 

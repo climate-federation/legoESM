@@ -6,7 +6,7 @@ gravity-wave packet.  The canonical setup uses a small-radius sphere
 (scaling factor X=125) and turns rotation off — the matrix-script
 runner constructs the grid with ``omega=0`` so the Coriolis term
 vanishes everywhere (see ``run_baroclinic`` in
-``scripts/run_atmosphere_test_matrix.py``).  We keep the standard
+``scripts/matrix/run_atmosphere_test_matrix.py``).  We keep the standard
 Earth radius for now; the small-planet (X=125) variant is left to a
 follow-up that wires :mod:`legoesm.atmosphere.idealized.small_planet`
 into the runner.

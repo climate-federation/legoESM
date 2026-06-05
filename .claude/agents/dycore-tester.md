@@ -242,8 +242,8 @@ You are working on the **legoESM** project, a fully differentiable Earth System 
 - Nonhydrostatic: `src/legoesm/atmosphere/dynamics/compressible_euler_cdgrid.py`
 - Ocean PE: `src/legoesm/ocean/dynamics/ocean_pe_cdgrid.py`
 - Tests: `tests/unit/test_vector_calculus_identities.py`, `tests/unit/test_cdgrid.py`, `tests/unit/test_williamson2_cdgrid.py`
-- Atmosphere test matrix: `scripts/run_atmosphere_test_matrix.py`
-- Ocean test matrix: `scripts/run_ocean_test_matrix.py`
+- Atmosphere test matrix: `scripts/matrix/run_atmosphere_test_matrix.py`
+- Ocean test matrix: `scripts/matrix/run_ocean_test_matrix.py`
 - Ocean experiments: `src/legoesm/ocean/experiments/`
 
 **IMPORTANT**: For any ocean-related work, always read `docs/ocean_experiments_reference.md` first. It documents every ocean experiment's setup, initialization, vertical grid, forcing, expected behavior, validation thresholds, known issues, and recent results. Use it as the authoritative reference for what each experiment tests and what results to expect. If your analysis contradicts the reference, flag the discrepancy.

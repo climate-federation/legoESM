@@ -20,48 +20,14 @@ import jax.numpy as jnp
 
 from legoesm import constants
 
+# Side-effect-free shared TC2 C-D-grid initial condition (single-sourced in
+# test_cases so the Stage-A2 Williamson Experiment rung reuses it without
+# importing this module's global x64 mutation).
+from tests.atmosphere.shallow_water.test_cases.williamson import (
+    williamson2_cdgrid_initial_condition as williamson2_initial_condition,
+)
+
 jax.config.update("jax_enable_x64", True)
-
-
-def williamson2_initial_condition(cdgrid, u_0=38.61068276698372, h_0=29400.0 / constants.g):
-    """Create the Williamson case 2 initial condition on C-D grid.
-
-    Parameters
-    ----------
-    cdgrid : CubedSphereCDGrid
-    u_0 : float
-        Maximum zonal velocity [m/s].
-    h_0 : float
-        Mean geopotential height [m].
-
-    Returns
-    -------
-    h, u_d, v_d, h_s : initial state arrays
-    """
-    from legoesm.atmosphere.dynamics.shallow_water_fv3_cdgrid import (
-        CDGridShallowWaterState,
-    )
-
-    g = constants.g
-    omega = constants.Omega
-    R = cdgrid.radius
-
-    # Height field at cell centres (A-grid)
-    lat_c = cdgrid.base.lat  # (6, n, n)
-    h = h_0 - (R * omega * u_0 + 0.5 * u_0 ** 2) * jnp.sin(lat_c) ** 2 / g
-
-    # Velocity at D-grid corners: u = u_0 * cos(lat), v = 0
-    # In grid-aligned coordinates: u_grid = u_geo * cos(angle), v_grid = u_geo * sin(angle)
-    lat_corner = cdgrid.lat_corner
-    cos_lat = jnp.cos(lat_corner)
-    u_geo = u_0 * cos_lat
-
-    u_d = u_geo * cdgrid.cos_angle_corner
-    v_d = -u_geo * cdgrid.sin_angle_corner
-
-    h_s = jnp.zeros_like(h)
-
-    return CDGridShallowWaterState(h=h, u_d=u_d, v_d=v_d, h_s=h_s)
 
 
 class TestWilliamson2CDGrid(unittest.TestCase):

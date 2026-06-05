@@ -218,24 +218,30 @@ def _enumerate_protected_modules(repo_root: Path) -> list[str]:
     ``__init__.py`` files of the early-imported subpackages plus
     ``parallel/cubesphere_exchange.py`` (Codex LOW#3 latent risk).
     """
+    from tests.legoesm_paths import legoesm_source_path
+
     files: list[Path] = []
 
-    # Full grids/ subtree.
-    grids_dir = repo_root / "src/legoesm/grids"
+    # Full grids/ subtree (carve-aware path resolution).
+    grids_dir = legoesm_source_path("grids")
     if grids_dir.exists():
         files.extend(sorted(grids_dir.rglob("*.py")))
 
-    # Early-imported package __init__s.
+    # Early-imported package __init__s + substrate top-level modules.  (The
+    # legoesm namespace itself has no __init__.py — PEP-420 namespace package —
+    # so it is intentionally absent.)
     for rel in (
-        "src/legoesm/__init__.py",
-        "src/legoesm/core/__init__.py",
-        "src/legoesm/runtime/__init__.py",
-        "src/legoesm/parallel/__init__.py",
-        "src/legoesm/constants.py",
-        "src/legoesm/parallel/cubesphere_exchange.py",
+        "core/__init__.py",
+        "runtime/__init__.py",
+        "parallel/__init__.py",
+        "constants.py",
+        "parallel/cubesphere_exchange.py",
     ):
-        path = repo_root / rel
-        if path.exists() and path not in files:
+        try:
+            path = legoesm_source_path(rel)
+        except FileNotFoundError:
+            continue
+        if path not in files:
             files.append(path)
 
     return [str(p.relative_to(repo_root)) for p in files]

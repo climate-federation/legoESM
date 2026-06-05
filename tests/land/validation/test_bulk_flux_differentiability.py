@@ -8,7 +8,7 @@ Verifies that jax.grad works through the Obukhov length iteration
 import jax
 import jax.numpy as jnp
 
-from legoesm.coupler.bulk_flux import compute_most_fluxes, psi_m, psi_h
+from legoesm.core.bulk_flux import compute_most_fluxes, psi_m, psi_h
 
 
 if __name__ == "__main__":
@@ -142,7 +142,7 @@ if __name__ == "__main__":
     # Test coupler integration
     print("\n--- Coupler ocean_tile_response with MOST ---")
     from legoesm.coupler.config import CouplerConfig
-    from legoesm.coupler.coupling_fields import AtmToSurface
+    from legoesm.core.coupling_fields import AtmToSurface
     from legoesm.coupler.coupler import ocean_tile_response
 
     for scheme in ["constant", "coare3", "large_yeager"]:

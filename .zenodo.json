@@ -1,0 +1,29 @@
+{
+  "title": "legoESM: A Differentiable Earth System Model in JAX",
+  "description": "legoESM is a next-generation, fully differentiable Earth System Model built from scratch in JAX. It spans weather-to-climate timescales, couples atmosphere, ocean, land, and cryosphere through a unified interface, and enables end-to-end gradient computation for data assimilation, parameter estimation, and hybrid AI-physics modeling.",
+  "upload_type": "software",
+  "access_right": "open",
+  "license": "MIT",
+  "creators": [
+    {
+      "name": "Gentine, Pierre",
+      "affiliation": "Columbia University"
+    }
+  ],
+  "keywords": [
+    "earth-system-model",
+    "jax",
+    "differentiable",
+    "weather",
+    "climate",
+    "data-assimilation",
+    "hybrid-ai-physics"
+  ],
+  "related_identifiers": [
+    {
+      "scheme": "url",
+      "identifier": "https://github.com/gentine/legoESM",
+      "relation": "isSupplementTo"
+    }
+  ]
+}

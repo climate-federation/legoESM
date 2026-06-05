@@ -374,4 +374,4 @@ varying η and stratification don't reactivate the partial-cell pathology.
 - `src/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py` — Bug #1 fix
 - `src/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py` — Bug #2 fix
 - `src/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py` — Concern #3
-- `scripts/run_ocean_test_matrix.py` — add PGF tier entries
+- `scripts/matrix/run_ocean_test_matrix.py` — add PGF tier entries

@@ -575,7 +575,7 @@ one or both targets).
 
 Pinned by `tests/test_iter1032_dual_target_full_matrix.py` (3
 tests) and exposed via runnable
-`scripts/run_w2_w5_cosine_bell_iter1030.py`.
+`scripts/run/run_w2_w5_cosine_bell_iter1030.py`.
 
 Full session details in `docs/fv3_fortran_fidelity_review.md`
 (iter-985..1034 entries).

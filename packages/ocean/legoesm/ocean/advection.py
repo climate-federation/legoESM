@@ -1,0 +1,1370 @@
+"""DST-3 flux-limited tracer advection with multi-dimensional correction.
+
+Implements MITgcm scheme 33: Direct Space-Time 3rd-order with Sweby limiter.
+Third-order accurate in both space and time (via CFL-dependent coefficients),
+monotone (via flux limiting), and optionally corrected for operator-splitting
+errors using a multi-dimensional predictor step.
+
+Reference: MITgcm documentation Section 2.17.2.3
+           Adcroft, Hill, Marshall (1997)
+
+The DST-3 face value for positive flow at face j+1/2 (donor = cell j):
+
+    T_face = T_j + psi(r) * [d0(c) * (T_{j+1} - T_j) + d1(c) * (T_{j-1} - T_j)]
+
+where:
+    c = |u| * dt / dx  (Courant number at face)
+    d0(c) = (2 - c)(1 - c) / 6  (anti-diffusive / downstream correction)
+    d1(c) = (1 - c^2) / 6       (upwind-of-upwind correction)
+    psi(r) = Sweby limiter (superbee)
+    r = (T_j - T_{j-1}) / (T_{j+1} - T_j)  (smoothness ratio)
+"""
+
+import jax.numpy as jnp
+
+from legoesm.core.weno import weno5_z, weno7_z, weno_upwind
+from legoesm.grids.latlon import LatLonGrid
+from legoesm.ocean.dynamics.latlon_cgrid_operators import is_tripolar
+
+
+# =============================================================================
+# Flux limiter — DST-3 uses Van Leer (less aggressive than Sweby, better
+# stability for DST-3 at low CFL). Centralized in ``_flux_limiters.py``.
+# =============================================================================
+
+def _sweby_limiter(r: jnp.ndarray) -> jnp.ndarray:
+    """Sweby (superbee) flux limiter.
+
+    psi(r) = max(0, min(1, 2r), min(2, r))
+
+    Traces the upper boundary of the Sweby TVD region, providing
+    maximum anti-diffusion while maintaining monotonicity.
+    """
+    return jnp.maximum(
+        0.0,
+        jnp.maximum(jnp.minimum(1.0, 2.0 * r), jnp.minimum(2.0, r)),
+    )
+
+
+# Van Leer limiter is the canonical core kernel (redundancy audit) — import it
+# instead of re-deriving phi(r) = (r+|r|)/(1+|r|); aliased to the local private
+# name so call sites are unchanged.
+from legoesm.core.flux_limiters import van_leer_limiter as _van_leer_limiter
+
+
+# =============================================================================
+# DST-3 coefficients
+# =============================================================================
+
+def _dst3_d0(c: jnp.ndarray) -> jnp.ndarray:
+    """DST-3 downstream coefficient, stability-capped.
+
+    Raw formula: (1-c)(4-2c)/6 (3rd-order in space+time).
+    Stability cap: (1-c)/2 (Lax-Wendroff limit for forward Euler).
+
+    The cap activates at c < 0.5 where the raw DST-3 coefficient exceeds
+    the forward-Euler stability boundary for the 2-grid-cell mode.
+    At c >= 0.5, the two expressions are equal and the cap is inactive.
+    """
+    d0_dst3 = (1.0 - c) * (4.0 - 2.0 * c) / 6.0
+    d0_lw = (1.0 - c) / 2.0  # Lax-Wendroff stability limit
+    return jnp.minimum(d0_dst3, d0_lw)
+
+
+def _dst3_d1(c: jnp.ndarray) -> jnp.ndarray:
+    """DST-3 upwind-of-upwind coefficient: d1(c) = (1 - c)(1 - 2c) / 6.
+
+    At c=0: d1=1/6.
+    At c=0.5: d1=0 (curvature correction vanishes).
+    At c>0.5: d1<0 (reverses sign — physically correct for large CFL).
+    """
+    return (1.0 - c) * (1.0 - 2.0 * c) / 6.0
+
+
+# =============================================================================
+# Horizontal DST-3: zonal (u-points)
+# =============================================================================
+
+def dst3_to_u_points(
+    f: jnp.ndarray,
+    mass_flux_u: jnp.ndarray,
+    h_u: jnp.ndarray,
+    grid: LatLonGrid,
+    dt: float,
+) -> jnp.ndarray:
+    """DST-3 Sweby-limited interpolation to u-faces (zonal).
+
+    Parameters
+    ----------
+    f : array, shape (n_lat, n_lon, nlev)
+        Tracer at cell centers.
+    mass_flux_u : array, shape (n_lat, n_lon+1, nlev)
+        Thickness-weighted velocity (h*u) at u-faces.
+    h_u : array, shape (n_lat, n_lon+1, nlev)
+        Layer thickness interpolated to u-faces.
+    grid : LatLonGrid
+    dt : float
+        Timestep [s].
+
+    Returns
+    -------
+    f_u : array, shape (n_lat, n_lon+1, nlev)
+        Tracer value at u-faces (to be multiplied by mass_flux_u for flux).
+    """
+    eps = 1e-30
+    n_lon = f.shape[1]
+
+    # Cell-width at u-face latitudes
+    if is_tripolar(grid):
+        dx_3d = grid.dx_u[:, :, jnp.newaxis]  # (n_lat, n_lon+1, 1)
+    else:
+        dx = grid.radius * grid.dlon * grid.cos_lat  # (n_lat,)
+        dx_3d = dx[:, jnp.newaxis, jnp.newaxis]
+
+    # Velocity and CFL at interior faces (n_lat, n_lon, nlev)
+    # Face j sits between cell (j-1) mod n_lon and cell j.
+    # mass_flux interior: first n_lon faces
+    mf = mass_flux_u[:, :n_lon, :]
+    vel = mf / jnp.maximum(h_u[:, :n_lon, :], eps)
+    cfl = jnp.minimum(jnp.abs(vel) * dt / dx_3d, 1.0)
+
+    # 5-point stencil (periodic in longitude)
+    # For face j: donor for positive flow is cell j-1, receiver is cell j
+    f_jm2 = jnp.roll(f, 2, axis=1)   # f[:, (j-2) % n_lon]
+    f_jm1 = jnp.roll(f, 1, axis=1)   # f[:, (j-1) % n_lon] = donor for +flow
+    f_j = f                            # f[:, j] = receiver for +flow
+    f_jp1 = jnp.roll(f, -1, axis=1)  # f[:, (j+1) % n_lon]
+
+    # --- Positive flow (from cell j-1 to cell j) ---
+    # Donor = f_jm1, Downstream = f_j, Upwind-of-donor = f_jm2
+    delta_pos = f_j - f_jm1              # local gradient across face
+    delta_uu_pos = f_jm1 - f_jm2         # upwind gradient
+    r_pos = delta_uu_pos / jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps)
+    psi_pos = _van_leer_limiter(r_pos)
+    d0_pos = _dst3_d0(cfl)
+    d1_pos = _dst3_d1(cfl)
+    # T_face = T_donor + psi * [d0*(T_downstream - T_donor) + d1*(T_upup - T_donor)]
+    f_face_pos = f_jm1 + psi_pos * (d0_pos * delta_pos + d1_pos * (f_jm2 - f_jm1))
+    # Monotonicity clamp: face value must stay between donor and downstream
+    f_face_pos = jnp.clip(f_face_pos, jnp.minimum(f_jm1, f_j), jnp.maximum(f_jm1, f_j))
+
+    # --- Negative flow (from cell j to cell j-1) ---
+    # Donor = f_j, Downstream = f_jm1, Upwind-of-donor = f_jp1
+    delta_neg = f_jm1 - f_j              # local gradient (downstream - donor)
+    # Match TVD convention: r = (f_{j+1}-f_j) / (f_{j-1}-f_j)
+    # This makes negative flow default to upwind at smooth monotone fields,
+    # providing essential implicit diffusion for forward-Euler stability.
+    r_neg = (f_jp1 - f_j) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
+    psi_neg = _van_leer_limiter(r_neg)
+    d0_neg = _dst3_d0(cfl)
+    d1_neg = _dst3_d1(cfl)
+    f_face_neg = f_j + psi_neg * (d0_neg * delta_neg + d1_neg * (f_jp1 - f_j))
+    # Monotonicity clamp
+    f_face_neg = jnp.clip(f_face_neg, jnp.minimum(f_jm1, f_j), jnp.maximum(f_jm1, f_j))
+
+    # Select based on flow direction
+    f_face = jnp.where(mf > 0, f_face_pos, f_face_neg)
+
+    # Wrap: face n_lon equals face 0 (periodic)
+    return jnp.concatenate([f_face, f_face[:, 0:1, :]], axis=1)
+
+
+# =============================================================================
+# Horizontal DST-3: meridional (v-points)
+# =============================================================================
+
+def dst3_to_v_points(
+    f: jnp.ndarray,
+    mass_flux_v: jnp.ndarray,
+    h_v: jnp.ndarray,
+    grid: LatLonGrid,
+    dt: float,
+) -> jnp.ndarray:
+    """DST-3 Sweby-limited interpolation to v-faces (meridional).
+
+    Solid wall boundary at poles. Near-boundary faces (within 2 cells
+    of poles) fall back to first-order upwind where the 5-point stencil
+    is incomplete.
+
+    Parameters
+    ----------
+    f : array, shape (n_lat, n_lon, nlev)
+        Tracer at cell centers.
+    mass_flux_v : array, shape (n_lat+1, n_lon, nlev)
+        Thickness-weighted velocity (h*v) at v-faces.
+    h_v : array, shape (n_lat+1, n_lon, nlev)
+        Layer thickness interpolated to v-faces.
+    grid : LatLonGrid
+    dt : float
+        Timestep [s].
+
+    Returns
+    -------
+    f_v : array, shape (n_lat+1, n_lon, nlev)
+        Tracer value at v-faces. Zero at pole boundaries.
+    """
+    eps = 1e-30
+    n_lat = f.shape[0]
+
+    # Face-to-face distance at interior v-faces.
+    if is_tripolar(grid):
+        # Tripolar: per-cell meridional spacing from 2D metrics.
+        dy_v_int = grid.dy_v[1:-1, 0]  # (n_lat-1,) from interior rows
+    else:
+        # Regular or Mercator: variable-dy safe.
+        dy_h = grid.dy * 0.5                                # (n_lat,)
+        dy_v_int = 0.5 * (dy_h[1:] + dy_h[:-1])              # (n_lat-1,)
+
+    # Interior v-faces: indices 1 to n_lat-1 (between cells 0..n_lat-2 and 1..n_lat-1)
+    # Face i sits between cell i-1 (south) and cell i (north).
+    mf_int = mass_flux_v[1:-1, :, :]   # (n_lat-1, n_lon, nlev)
+    h_v_int = h_v[1:-1, :, :]
+    vel_int = mf_int / jnp.maximum(h_v_int, eps)
+    cfl = jnp.minimum(jnp.abs(vel_int) * dt / dy_v_int[:, jnp.newaxis, jnp.newaxis], 1.0)
+
+    # Build stencil with ghost cells at boundaries (Neumann: copy boundary value)
+    # Ghost: f[-1] = f[0], f[-2] = f[0] at south; f[n_lat] = f[n_lat-1] at north
+    f_ext = jnp.concatenate([f[:1, :, :], f[:1, :, :], f, f[-1:, :, :], f[-1:, :, :]], axis=0)
+    # f_ext indices: 0,1 = south ghosts; 2..n_lat+1 = real; n_lat+2, n_lat+3 = north ghosts
+    # Interior face i (1-indexed in original) corresponds to between cell i-1 and cell i.
+    # In f_ext, cell i-1 = index i+1, cell i = index i+2.
+
+    # Vectorized over all interior faces i=1..n_lat-1 (1-indexed):
+    # Cell k in original lives at f_ext[k+2].
+    # Face i is between cell i-1 (south) and cell i (north):
+    #   south-of-south = cell i-2 → f_ext[i]
+    #   south          = cell i-1 → f_ext[i+1]
+    #   north          = cell i   → f_ext[i+2]
+    #   north-of-north = cell i+1 → f_ext[i+3]
+    # For i=1..n_lat-1 the slices are:
+    f_south2 = f_ext[1:n_lat, :, :]          # f_ext[1..n_lat-1]
+    f_south = f_ext[2:n_lat + 1, :, :]       # f_ext[2..n_lat]
+    f_north = f_ext[3:n_lat + 2, :, :]       # f_ext[3..n_lat+1]
+    f_north2 = f_ext[4:n_lat + 3, :, :]      # f_ext[4..n_lat+2]
+
+    # --- Positive flow (south to north): donor = f_south, downstream = f_north ---
+    delta_pos = f_north - f_south
+    r_pos = (f_south - f_south2) / jnp.where(jnp.abs(delta_pos) > eps, delta_pos, eps)
+    psi_pos = _van_leer_limiter(r_pos)
+    d0_pos = _dst3_d0(cfl)
+    d1_pos = _dst3_d1(cfl)
+    f_face_pos = f_south + psi_pos * (d0_pos * delta_pos + d1_pos * (f_south2 - f_south))
+    # Monotonicity clamp
+    f_face_pos = jnp.clip(f_face_pos, jnp.minimum(f_south, f_north),
+                           jnp.maximum(f_south, f_north))
+
+    # --- Negative flow (north to south): donor = f_north, downstream = f_south ---
+    delta_neg = f_south - f_north
+    # Match TVD convention for implicit diffusion stability
+    r_neg = (f_north2 - f_north) / jnp.where(jnp.abs(delta_neg) > eps, delta_neg, eps)
+    psi_neg = _van_leer_limiter(r_neg)
+    d0_neg = _dst3_d0(cfl)
+    d1_neg = _dst3_d1(cfl)
+    f_face_neg = f_north + psi_neg * (d0_neg * delta_neg + d1_neg * (f_north2 - f_north))
+    # Monotonicity clamp
+    f_face_neg = jnp.clip(f_face_neg, jnp.minimum(f_south, f_north),
+                           jnp.maximum(f_south, f_north))
+
+    # Select based on flow direction
+    f_face = jnp.where(mf_int > 0, f_face_pos, f_face_neg)
+
+    # Solid wall at poles: zero flux.  Single Pad HLO op replaces
+    # alloc-zeros + concatenate-of-three (DST-3 hot path).
+    return jnp.pad(f_face, ((1, 1), (0, 0), (0, 0)))
+
+
+# =============================================================================
+# Vertical DST-3
+# =============================================================================
+
+def flux_form_vertical_tracer_advection_dst3(
+    field: jnp.ndarray,
+    w_half: jnp.ndarray,
+    h_k: jnp.ndarray,
+    dt: float,
+) -> jnp.ndarray:
+    """Flux-form vertical tracer advection with DST-3 Sweby-limited scheme.
+
+    Third-order accurate in smooth regions, falls back to first-order
+    upwind at discontinuities via the Sweby limiter. Monotone.
+
+    Same interface as flux_form_vertical_tracer_advection_tvd.
+
+    Parameters
+    ----------
+    field : array, shape (..., nlev)
+        Tracer at full levels.
+    w_half : array, shape (..., nlev+1)
+        Vertical velocity on half (interface) levels [m/s].
+        Positive = upward. Zero at surface and bottom.
+    h_k : array, shape (..., nlev)
+        Layer thickness [m] at full levels.
+    dt : float
+        Time step [s].
+
+    Returns
+    -------
+    vert_flux_div : array, shape (..., nlev)
+        Vertical flux divergence F_top[k] - F_bot[k] for each level.
+        Units: [tracer]*[m/s] (NOT divided by layer thickness).
+    """
+    eps = 1e-30
+    nlev = field.shape[-1]
+
+    # Interior interfaces: k = 1..nlev-1
+    w_int = w_half[..., 1:nlev]   # (..., nlev-1)
+    T_below = field[..., 1:]      # field[k] for k=1..nlev-1
+    T_above = field[..., :-1]     # field[k-1] for k=1..nlev-1
+
+    # --- First-order upwind flux ---
+    T_upwind = jnp.where(w_int > 0.0, T_below, T_above)
+    F_upwind = w_int * T_upwind
+
+    # --- CFL at each interface ---
+    h_below = h_k[..., 1:]
+    h_above = h_k[..., :-1]
+    h_donor = jnp.where(w_int > 0.0, h_below, h_above)
+    cfl = jnp.minimum(jnp.abs(w_int) * dt / jnp.maximum(h_donor, eps), 1.0)
+
+    # --- DST-3 coefficients ---
+    d0 = _dst3_d0(cfl)
+    d1 = _dst3_d1(cfl)
+
+    # --- 5-point stencil with ghost cells at boundaries ---
+    # Ghost: copy boundary value (Neumann BC → delta=0 → r=0 → upwind)
+    # Extended field: [ghost_top, ghost_top, field, ghost_bot, ghost_bot]
+    f_ext = jnp.concatenate(
+        [field[..., :1], field[..., :1], field, field[..., -1:], field[..., -1:]],
+        axis=-1,
+    )
+    # f_ext indexing (0-based): indices 0,1 are top ghosts; 2..nlev+1 are
+    # actual field; nlev+2, nlev+3 are bottom ghosts.
+    # field[k] lives at f_ext index k+2.
+    #
+    # For interface k (1-indexed, k=1..nlev-1, between level k-1 and k):
+    #   T_above = field[k-1] = f_ext[k+1]
+    #   T_below = field[k]   = f_ext[k+2]
+    #   T_below_below = field[k+1] = f_ext[k+3]  (upup for upward flow)
+    #   T_above_above = field[k-2] = f_ext[k]    (upup for downward flow)
+
+    # Upup for upward flow: field[k+1] for k=1..nlev-1
+    # = f_ext[k+3] for k=1..nlev-1 = f_ext[4:nlev+3]
+    T_below_below = f_ext[..., 4:nlev + 3]  # (nlev-1 elements)
+
+    # Upup for downward flow: field[k-2] for k=1..nlev-1
+    # = f_ext[k] for k=1..nlev-1 = f_ext[1:nlev]
+    T_above_above = f_ext[..., 1:nlev]      # (nlev-1 elements)
+
+    # Smoothness ratio for upward flow (donor=below=field[k]):
+    # r = (donor - upup) / (downstream - donor)
+    # = (T_below - T_below_below) / (T_above - T_below)
+    delta_up = T_above - T_below  # across-face gradient (downstream - donor)
+    r_up = (T_below - T_below_below) / jnp.where(jnp.abs(delta_up) > eps, delta_up, eps)
+
+    # Smoothness ratio for downward flow (donor=above=field[k-1]):
+    # r = (donor - upup) / (downstream - donor)
+    # = (T_above - T_above_above) / (T_below - T_above)
+    delta_down = T_below - T_above  # across-face gradient (downstream - donor)
+    r_down = (T_above - T_above_above) / jnp.where(jnp.abs(delta_down) > eps, delta_down, eps)
+
+    # --- Select by flow direction ---
+    r = jnp.where(w_int > 0.0, r_up, r_down)
+    psi = _van_leer_limiter(r)
+
+    # DST-3 correction:
+    # For upward flow: correction = d0*(T_above - T_below) + d1*(T_below_below - T_below)
+    # For downward flow: correction = d0*(T_below - T_above) + d1*(T_above_above - T_above)
+    # Equivalently: correction = d0*(downstream - donor) + d1*(upup - donor)
+    T_downstream = jnp.where(w_int > 0.0, T_above, T_below)
+    T_donor = T_upwind
+    T_upup = jnp.where(w_int > 0.0, T_below_below, T_above_above)
+
+    correction = d0 * (T_downstream - T_donor) + d1 * (T_upup - T_donor)
+
+    # Limited flux: F = w * T_face = w * (T_donor + psi*correction)
+    #            = F_upwind + w * psi * correction
+    # Must use signed w (not |w|) because correction is relative to donor.
+    # Monotonicity clamp: T_face must stay between donor and downstream.
+    T_face = T_donor + psi * correction
+    T_face = jnp.clip(T_face, jnp.minimum(T_donor, T_downstream),
+                       jnp.maximum(T_donor, T_downstream))
+    F_interior = w_int * T_face
+
+    # Full flux with zero boundaries — single Pad HLO op vs alloc
+    # ``(..., 1)`` zeros + 3-array concat.  Hot per scan step.
+    pad_axes = ((0, 0),) * (F_interior.ndim - 1)
+    F = jnp.pad(F_interior, (*pad_axes, (1, 1)))
+
+    # Flux divergence: F_top[k] - F_bot[k] = F[k] - F[k+1]
+    return F[..., :-1] - F[..., 1:]
+
+
+# =============================================================================
+# Multi-dimensional tracer advection
+# =============================================================================
+
+def multidim_tracer_advection(
+    tracer: jnp.ndarray,
+    mass_flux_u: jnp.ndarray,
+    mass_flux_v: jnp.ndarray,
+    w_half: jnp.ndarray,
+    h_k: jnp.ndarray,
+    h_u: jnp.ndarray,
+    h_v: jnp.ndarray,
+    grid: LatLonGrid,
+    dt: float,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Multi-dimensional DST-3 tracer advection with transverse correction.
+
+    Two-pass approach to reduce operator-splitting errors:
+    1. Compute preliminary upwind transverse fluxes
+    2. Correct tracer for transverse transport (predictor)
+    3. Compute final DST-3 fluxes from corrected tracer
+
+    This removes the leading-order splitting error that causes
+    anisotropy and false extrema at diagonal flows.
+
+    Parameters
+    ----------
+    tracer : (n_lat, n_lon, nlev) tracer field.
+    mass_flux_u : (n_lat, n_lon+1, nlev) at u-faces.
+    mass_flux_v : (n_lat+1, n_lon, nlev) at v-faces.
+    w_half : (..., nlev+1) vertical velocity on half levels.
+    h_k : (n_lat, n_lon, nlev) layer thickness at cell centers.
+    h_u : (n_lat, n_lon+1, nlev) layer thickness at u-faces.
+    h_v : (n_lat+1, n_lon, nlev) layer thickness at v-faces.
+    grid : LatLonGrid
+    dt : float
+
+    Returns
+    -------
+    div_h_flux : (n_lat, n_lon, nlev)
+        Horizontal flux divergence div(mass_flux * T_face).
+    vert_flux_div : (n_lat, n_lon, nlev)
+        Vertical flux divergence.
+    """
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import divergence_cgrid
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        _upwind_to_u_points,
+        _upwind_to_v_points,
+    )
+    from legoesm.ocean.vertical import flux_form_vertical_tracer_advection
+
+    eps = 1e-10
+
+    # --- Pass 1: preliminary upwind fluxes for transverse correction ---
+    tr_u_upw = _upwind_to_u_points(tracer, mass_flux_u)
+    tr_v_upw = _upwind_to_v_points(tracer, mass_flux_v)
+    flux_u_upw = mass_flux_u * tr_u_upw
+    flux_v_upw = mass_flux_v * tr_v_upw
+    div_h_upw = divergence_cgrid(flux_u_upw, flux_v_upw, grid)
+    vert_div_upw = flux_form_vertical_tracer_advection(tracer, w_half)
+
+    # --- Transverse correction (predictor) ---
+    # For x-sweep: correct for y+z transport
+    # For y-sweep: correct for x+z transport
+    # For z-sweep: correct for x+y transport
+    # Simplified: use a single corrected tracer for all sweeps
+    # T* = T - (dt/2) * (div_h + vert_div) / h
+    total_div_upw = div_h_upw + vert_div_upw
+    tracer_corr = tracer - 0.5 * dt * total_div_upw / jnp.maximum(h_k, eps)
+
+    # --- Pass 2: DST-3 fluxes from corrected tracer ---
+    tr_u_dst3 = dst3_to_u_points(tracer_corr, mass_flux_u, h_u, grid, dt)
+    tr_v_dst3 = dst3_to_v_points(tracer_corr, mass_flux_v, h_v, grid, dt)
+    flux_u_dst3 = mass_flux_u * tr_u_dst3
+    flux_v_dst3 = mass_flux_v * tr_v_dst3
+    div_h_flux = divergence_cgrid(flux_u_dst3, flux_v_dst3, grid)
+
+    vert_flux_div = flux_form_vertical_tracer_advection_dst3(
+        tracer_corr, w_half, h_k, dt,
+    )
+
+    return div_h_flux, vert_flux_div
+
+
+# =============================================================================
+# PPM (Piecewise Parabolic Method) — 4th-order reconstruction, monotone
+# =============================================================================
+
+def ppm_to_u_points(
+    f: jnp.ndarray,
+    mass_flux_u: jnp.ndarray,
+) -> jnp.ndarray:
+    """PPM-reconstructed tracer at u-faces (zonal).
+
+    Uses 4th-order edge values with Colella-Woodward monotonicity limiter.
+    No CFL dependence — works at any Courant number with forward Euler.
+
+    Parameters
+    ----------
+    f : array, shape (n_lat, n_lon, nlev)
+        Tracer at cell centers.
+    mass_flux_u : array, shape (n_lat, n_lon+1, nlev)
+        Thickness-weighted velocity at u-faces (sign determines upwind).
+
+    Returns
+    -------
+    f_u : array, shape (n_lat, n_lon+1, nlev)
+        PPM face values at u-points.
+    """
+    from legoesm.core.operators_fv import ppm_edge_values, ppm_limit
+
+    n_lat, n_lon, nlev = f.shape
+
+    # Pad longitude with halo=2 (periodic)
+    f_pad = jnp.concatenate([f[:, -2:, :], f, f[:, :2, :]], axis=1)
+    # f_pad shape: (n_lat, n_lon+4, nlev)
+
+    # PPM edge values along longitude (axis=-2 must be the reconstruction dir)
+    # Rearrange to (n_lat, n_lon+4, nlev) → axis=-2 is already longitude ✓
+    # But ppm_edge_values operates on axis=-2 with shape (..., M, K)
+    # We need (nlev, n_lat, n_lon+4) then compute along axis=-2=n_lon+4... no.
+    # Actually ppm_edge_values needs shape (..., M, K) where M=n_lon+4 is the
+    # direction. Our shape is (n_lat, n_lon+4, nlev): axis=-2=n_lon+4 ✓!
+    q_hat = ppm_edge_values(f_pad)  # (n_lat, n_lon+3, nlev)
+
+    # Left/right edge values for each cell
+    a_L = q_hat[:, :-1, :]   # (n_lat, n_lon+2, nlev)
+    a_R = q_hat[:, 1:, :]    # (n_lat, n_lon+2, nlev)
+    q_c = f_pad[:, 1:-1, :]  # (n_lat, n_lon+2, nlev) — cell averages
+
+    # Colella-Woodward limiter
+    a_L, a_R = ppm_limit(q_c, a_L, a_R)
+
+    # At face j (between cell j-1 and cell j):
+    # - positive flow → use right edge of cell j-1 = a_R[j-1] (in padded coords: a_R[j])
+    # - negative flow → use left edge of cell j = a_L[j] (in padded coords: a_L[j+1])
+    # Interior faces in original coords: j=0..n_lon (n_lon+1 faces, wrapping)
+    # In padded+reconstructed coords: j=0..n_lon maps to a_R[1..n_lon+1], a_L[2..n_lon+2]
+    q_R_left = a_R[:, 1:n_lon + 2, :]   # (n_lat, n_lon+1, nlev)
+    q_L_right = a_L[:, 2:n_lon + 3, :]  # (n_lat, n_lon+1, nlev)
+
+    # But we have n_lon+2 elements in a_R/a_L. Let me recheck...
+    # a_R shape = (n_lat, n_lon+2, nlev). Indices 0..n_lon+1.
+    # For n_lon+1 faces (including periodic wrap):
+    # Face j=0..n_lon: use a_R[1:n_lon+2] and a_L[2:n_lon+3]...
+    # But a_L only has n_lon+2 elements (indices 0..n_lon+1), so a_L[2:n_lon+3]
+    # would exceed bounds for large n_lon. Let me fix:
+    # Face j in original (0-indexed, j=0..n_lon):
+    #   Left cell = (j-1) mod n_lon → in padded: index j+1 (halo offset)
+    #   Right cell = j → in padded: index j+2
+    # a_R for left cell: a_R[j+1-1] = a_R[j] (right edge of padded cell j+1, but...)
+
+    # Actually simpler: after PPM on (n_lat, n_lon+4, nlev), we get n_lon+3 edges.
+    # Remove the outermost edges (fully in halo): keep inner n_lon+1 edges.
+    # These correspond to faces 0..n_lon in the original grid.
+    q_face_edges = q_hat[:, 1:-1, :]  # (n_lat, n_lon+1, nlev) — interior edges
+
+    # For each edge, the left cell's right-edge is the edge value approached from left,
+    # and the right cell's left-edge is approached from right.
+    # With monotone limiting, the upwind face value is:
+    #   positive flow → right-edge of left cell
+    #   negative flow → left-edge of right cell
+
+    # Re-derive from the limited a_L, a_R:
+    # a_L[i], a_R[i] are left/right edges of the i-th cell in the padded array.
+    # Padded cells: 0(halo), 1(halo), 2..n_lon+1(real), n_lon+2(halo), n_lon+3(halo)
+    # Real cells in padded: indices 2..n_lon+1
+    # Faces between real cells: face j (0-indexed) is between real cell j and j+1
+    #   = between padded cells j+2 and j+3
+    #   Left cell right edge = a_R[j+2-1] = a_R[j+1]... no, a_R[k] is right edge of
+    #   padded cell k. So right edge of padded cell j+2 = a_R[j+2].
+    #   But wait: a_R has shape (n_lon+2) — indices 0..n_lon+1.
+    #   Padded cells from which a_L/a_R are computed: cells 1..(n_lon+2) in f_pad
+    #   (from q_c = f_pad[:, 1:-1, :] which is cells 1..n_lon+2, i.e. n_lon+2 cells)
+    #   So a_L[k], a_R[k] for k=0..n_lon+1 correspond to padded cells 1..n_lon+2.
+    #   Real data cells in padded: 2..n_lon+1 → a_L/a_R indices 1..n_lon.
+    #   Face j between real cells j and j+1:
+    #     = between a_L/a_R indices j+1 and j+2
+    #     → left cell right edge = a_R[j+1]
+    #     → right cell left edge = a_L[j+2]
+    #   For j=0..n_lon-1: a_R[1..n_lon] and a_L[2..n_lon+1]
+    #   For periodic face j=n_lon (=face 0): same as face 0.
+
+    # Upwind selection for n_lon interior faces + 1 periodic wrap:
+    q_R_left = a_R[:, 1:n_lon + 1, :]    # (n_lat, n_lon, nlev) — right edge of left cell
+    q_L_right = a_L[:, 2:n_lon + 2, :]   # (n_lat, n_lon, nlev) — left edge of right cell
+
+    mf = mass_flux_u[:, :n_lon, :]  # interior n_lon faces
+    f_face = jnp.where(mf > 0, q_R_left, q_L_right)
+
+    # Monotonicity clamp (local bounds of adjacent cells)
+    f_left = jnp.roll(f, 1, axis=1)  # cell to left of face
+    f_right = f                       # cell to right of face
+    f_face = jnp.clip(f_face, jnp.minimum(f_left, f_right),
+                       jnp.maximum(f_left, f_right))
+
+    # Periodic wrap: face n_lon = face 0
+    return jnp.concatenate([f_face, f_face[:, 0:1, :]], axis=1)
+
+
+def ppm_to_v_points(
+    f: jnp.ndarray,
+    mass_flux_v: jnp.ndarray,
+) -> jnp.ndarray:
+    """PPM-reconstructed tracer at v-faces (meridional).
+
+    Solid wall at poles. Uses 4th-order PPM with Colella-Woodward limiter.
+
+    Parameters
+    ----------
+    f : array, shape (n_lat, n_lon, nlev)
+        Tracer at cell centers.
+    mass_flux_v : array, shape (n_lat+1, n_lon, nlev)
+        Thickness-weighted velocity at v-faces.
+
+    Returns
+    -------
+    f_v : array, shape (n_lat+1, n_lon, nlev)
+        PPM face values at v-points. Zero at pole boundaries.
+    """
+    from legoesm.core.operators_fv import ppm_limit
+
+    n_lat, n_lon, nlev = f.shape
+
+    # Extended field with ghost cells (Neumann BC: reflect boundary rows)
+    f_ext = jnp.concatenate(
+        [f[1::-1, :, :], f, f[-1:-3:-1, :, :]], axis=0)
+    # f_ext shape: (n_lat+4, n_lon, nlev)
+    # Indices: 0,1=south ghosts; 2..n_lat+1=real; n_lat+2,n_lat+3=north ghosts
+
+    # 4th-order edge values at interior faces i=1..n_lat-1:
+    # Face i is between cell i-1 and cell i in original.
+    # In f_ext: cell i-1=index i+1, cell i=index i+2.
+    # a_i = (7/12)*(f_ext[i+1]+f_ext[i+2]) - (1/12)*(f_ext[i]+f_ext[i+3])
+    s0 = f_ext[1:n_lat, :, :]      # f_ext[i] for i=1..n_lat-1
+    s1 = f_ext[2:n_lat + 1, :, :]  # cell i-1
+    s2 = f_ext[3:n_lat + 2, :, :]  # cell i
+    s3 = f_ext[4:n_lat + 3, :, :]  # f_ext[i+3]
+
+    a_int = (7.0 / 12.0) * (s1 + s2) - (1.0 / 12.0) * (s0 + s3)
+    # Monotone clamp between neighbors
+    a_int = jnp.clip(a_int, jnp.minimum(s1, s2), jnp.maximum(s1, s2))
+    # shape: (n_lat-1, n_lon, nlev)
+
+    # Build full edge array (n_lat+1 interfaces):
+    # Face 0=south wall, faces 1..n_lat-1=interior, face n_lat=north wall
+    a_full = jnp.concatenate([f[:1, :, :], a_int, f[-1:, :, :]], axis=0)
+    # shape: (n_lat+1, n_lon, nlev)
+
+    # Left/right edges per cell:
+    # Cell j: T_L=a_full[j] (south edge), T_R=a_full[j+1] (north edge)
+    T_L = a_full[:-1, :, :]  # (n_lat, n_lon, nlev)
+    T_R = a_full[1:, :, :]
+
+    # Colella-Woodward limiter
+    T_L, T_R = ppm_limit(f, T_L, T_R)
+
+    # Upwind face value at interior faces:
+    # Positive flow (south→north): donor=cell i-1, use T_R of cell i-1
+    # Negative flow (north→south): donor=cell i, use T_L of cell i
+    T_R_south = T_R[:-1, :, :]  # T_R of cells 0..n_lat-2
+    T_L_north = T_L[1:, :, :]   # T_L of cells 1..n_lat-1
+
+    mf_int = mass_flux_v[1:-1, :, :]
+    f_face = jnp.where(mf_int > 0, T_R_south, T_L_north)
+
+    # Monotonicity clamp
+    f_south = f[:-1, :, :]
+    f_north = f[1:, :, :]
+    f_face = jnp.clip(f_face, jnp.minimum(f_south, f_north),
+                       jnp.maximum(f_south, f_north))
+
+    # Solid wall at poles: zero flux.  Single Pad HLO op replaces
+    # alloc-zeros + concatenate-of-three (PPM hot path).
+    return jnp.pad(f_face, ((1, 1), (0, 0), (0, 0)))
+
+
+def flux_form_vertical_tracer_advection_ppm(
+    field: jnp.ndarray,
+    w_half: jnp.ndarray,
+    h_k: jnp.ndarray,
+    dt: float,
+) -> jnp.ndarray:
+    """Flux-form vertical tracer advection with PPM reconstruction.
+
+    4th-order edge values with Colella-Woodward monotonicity limiter.
+    Same interface as flux_form_vertical_tracer_advection_tvd.
+
+    Parameters
+    ----------
+    field : array, shape (..., nlev)
+        Tracer at full levels.
+    w_half : array, shape (..., nlev+1)
+        Vertical velocity on half (interface) levels [m/s].
+    h_k : array, shape (..., nlev)
+        Layer thickness [m] at full levels.
+    dt : float
+        Time step [s] (unused — PPM doesn't need CFL).
+
+    Returns
+    -------
+    vert_flux_div : array, shape (..., nlev)
+        Vertical flux divergence F_top[k] - F_bot[k].
+    """
+    from legoesm.core.operators_fv import ppm_edge_values, ppm_limit
+
+    nlev = field.shape[-1]
+
+    # Pad with halo=2 in the vertical (Neumann: copy boundary values)
+    f_pad = jnp.concatenate(
+        [field[..., 1::-1], field, field[..., -1:-3:-1]], axis=-1)
+    # shape: (..., nlev+4)
+
+    # For ppm_edge_values, we need shape (..., M, K) where M=nlev+4 is
+    # the reconstruction direction. Add a dummy trailing dimension.
+    f_pad_2d = f_pad[..., jnp.newaxis]  # (..., nlev+4, 1)
+    q_hat_2d = ppm_edge_values(f_pad_2d)  # (..., nlev+3, 1)
+    q_hat = q_hat_2d[..., 0]  # (..., nlev+3)
+
+    # Left/right edges
+    a_L = q_hat[..., :-1]   # (..., nlev+2)
+    a_R = q_hat[..., 1:]    # (..., nlev+2)
+    q_c = f_pad[..., 1:-1]  # (..., nlev+2)
+
+    # Add trailing dim for ppm_limit (needs consistent shapes)
+    a_L_2d = a_L[..., jnp.newaxis]
+    a_R_2d = a_R[..., jnp.newaxis]
+    q_c_2d = q_c[..., jnp.newaxis]
+    a_L_2d, a_R_2d = ppm_limit(q_c_2d, a_L_2d, a_R_2d)
+    a_L = a_L_2d[..., 0]
+    a_R = a_R_2d[..., 0]
+
+    # Interior interfaces: k=1..nlev-1
+    # Real cells in padded: indices 2..nlev+1 → a_L/a_R indices 1..nlev
+    # Interface k is between level k-1 (above) and level k (below):
+    #   = between a_L/a_R indices k and k+1
+    #   above cell right edge (bottom) = a_R[k]
+    #   below cell left edge (top) = a_L[k+1]
+    q_R_above = a_R[..., 1:nlev]       # (..., nlev-1) — bottom edge of cell above
+    q_L_below = a_L[..., 2:nlev + 1]   # (..., nlev-1) — top edge of cell below
+
+    w_int = w_half[..., 1:nlev]  # interior interfaces
+
+    # Upward flow (w>0): fluid comes from below → use top edge of below cell
+    # Downward flow (w<0): fluid comes from above → use bottom edge of above cell
+    T_face = jnp.where(w_int > 0.0, q_L_below, q_R_above)
+
+    # Monotonicity clamp
+    T_above = field[..., :-1]
+    T_below = field[..., 1:]
+    T_face = jnp.clip(T_face, jnp.minimum(T_above, T_below),
+                       jnp.maximum(T_above, T_below))
+
+    # Flux at interfaces
+    F_interior = w_int * T_face
+
+    # Zero-flux boundaries — single Pad HLO op.
+    pad_axes_b = ((0, 0),) * (F_interior.ndim - 1)
+    F = jnp.pad(F_interior, (*pad_axes_b, (1, 1)))
+
+    # Flux divergence
+    return F[..., :-1] - F[..., 1:]
+
+
+# =============================================================================
+# FCT (Flux-Corrected Transport) — PPM accuracy with upwind stability
+# =============================================================================
+
+def fct_tracer_advection(
+    tracer: jnp.ndarray,
+    mass_flux_u: jnp.ndarray,
+    mass_flux_v: jnp.ndarray,
+    w_half: jnp.ndarray,
+    h_k: jnp.ndarray,
+    grid: "LatLonGrid",
+    dt: float,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """FCT tracer advection: PPM accuracy with guaranteed monotonicity.
+
+    Combines first-order upwind (inherently stable) with PPM (4th-order
+    accurate) using a Zalesak limiter that adds maximum anti-diffusion
+    without creating new extrema.
+
+    The scheme is:
+    - Conservative (flux-form)
+    - Monotone (Zalesak bounds on total tendency)
+    - Stable at any CFL (starts from upwind)
+    - Higher accuracy than TVD at fronts (PPM reconstruction)
+
+    Parameters
+    ----------
+    tracer : (n_lat, n_lon, nlev)
+    mass_flux_u : (n_lat, n_lon+1, nlev)
+    mass_flux_v : (n_lat+1, n_lon, nlev)
+    w_half : (n_lat, n_lon, nlev+1)
+    h_k : (n_lat, n_lon, nlev) layer thickness
+    grid : LatLonGrid
+    dt : float
+
+    Returns
+    -------
+    div_h_flux : (n_lat, n_lon, nlev) horizontal flux divergence
+    vert_flux_div : (n_lat, n_lon, nlev) vertical flux divergence
+    """
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import divergence_cgrid
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        _upwind_to_u_points, _upwind_to_v_points,
+    )
+    from legoesm.ocean.vertical import flux_form_vertical_tracer_advection
+
+    eps = 1e-30
+
+    # --- Step 1: Horizontal face fluxes (low and high order) ---
+    tr_u_low = _upwind_to_u_points(tracer, mass_flux_u)
+    tr_v_low = _upwind_to_v_points(tracer, mass_flux_v)
+    flux_u_low = mass_flux_u * tr_u_low
+    flux_v_low = mass_flux_v * tr_v_low
+    div_h_low = divergence_cgrid(flux_u_low, flux_v_low, grid)
+
+    tr_u_hi = ppm_to_u_points(tracer, mass_flux_u)
+    tr_v_hi = ppm_to_v_points(tracer, mass_flux_v)
+    flux_u_hi = mass_flux_u * tr_u_hi
+    flux_v_hi = mass_flux_v * tr_v_hi
+
+    # --- Step 2: Vertical interface fluxes (low and high order) ---
+    nlev = tracer.shape[-1]
+    w_int = w_half[..., 1:nlev]  # interior interfaces (..., nlev-1)
+    T_below = tracer[..., 1:]    # (..., nlev-1)
+    T_above = tracer[..., :-1]   # (..., nlev-1)
+
+    # Upwind interface flux
+    T_face_low = jnp.where(w_int > 0.0, T_below, T_above)
+    F_vert_low_int = w_int * T_face_low  # (..., nlev-1)
+
+    # PPM interface flux
+    from legoesm.core.operators_fv import ppm_edge_values, ppm_limit
+    f_pad = jnp.concatenate(
+        [tracer[..., 1::-1], tracer, tracer[..., -1:-3:-1]], axis=-1)
+    f_pad_2d = f_pad[..., jnp.newaxis]
+    q_hat = ppm_edge_values(f_pad_2d)[..., 0]
+    a_L = q_hat[..., :-1]
+    a_R = q_hat[..., 1:]
+    q_c = f_pad[..., 1:-1]
+    a_L_2d, a_R_2d = ppm_limit(
+        q_c[..., jnp.newaxis], a_L[..., jnp.newaxis], a_R[..., jnp.newaxis])
+    a_L, a_R = a_L_2d[..., 0], a_R_2d[..., 0]
+    q_R_above = a_R[..., 1:nlev]
+    q_L_below = a_L[..., 2:nlev + 1]
+    T_face_hi = jnp.where(w_int > 0.0, q_L_below, q_R_above)
+    T_face_hi = jnp.clip(T_face_hi,
+                          jnp.minimum(T_above, T_below),
+                          jnp.maximum(T_above, T_below))
+    F_vert_hi_int = w_int * T_face_hi
+
+    # Vertical divergences for Zalesak bounds computation — pad
+    # (single Pad HLO each) instead of allocating a fresh ``(..., 1)``
+    # zero buffer and concatenating it on both ends.
+    pad_axes_v = ((0, 0),) * (F_vert_low_int.ndim - 1)
+    F_vert_low = jnp.pad(F_vert_low_int, (*pad_axes_v, (1, 1)))
+    F_vert_hi = jnp.pad(F_vert_hi_int, (*pad_axes_v, (1, 1)))
+    vert_div_low = F_vert_low[..., :-1] - F_vert_low[..., 1:]
+    vert_div_hi = F_vert_hi[..., :-1] - F_vert_hi[..., 1:]
+
+    # Total tendencies for Zalesak bounds
+    dq_low = -(div_h_low + vert_div_low) / jnp.maximum(h_k, eps)
+    dq_hi_h = divergence_cgrid(flux_u_hi, flux_v_hi, grid)
+    dq_hi = -(dq_hi_h + vert_div_hi) / jnp.maximum(h_k, eps)
+
+    # --- Step 3: True sign-split Zalesak (1979) limiter (issue #212) ---
+    # Anti-diffusive face fluxes:
+    ad_flux_u = flux_u_hi - flux_u_low      # (n_lat, n_lon+1, nlev)
+    ad_flux_v = flux_v_hi - flux_v_low      # (n_lat+1, n_lon, nlev)
+    ad_vert_int = F_vert_hi_int - F_vert_low_int  # (..., nlev-1)
+
+    # Local min / max over the (cell + 6 neighbours) stencil.  For non-
+    # cyclic latitude the boundary cell is its own south/north neighbour
+    # (copy BC); periodic in lon; vertical clamps to top/bottom layer.
+    tr_west = jnp.roll(tracer, 1, axis=1)
+    tr_east = jnp.roll(tracer, -1, axis=1)
+    tr_south = jnp.concatenate([tracer[:1, :, :], tracer[:-1, :, :]], axis=0)
+    tr_north = jnp.concatenate([tracer[1:, :, :], tracer[-1:, :, :]], axis=0)
+    tr_above = jnp.concatenate([tracer[..., :1], tracer[..., :-1]], axis=-1)
+    tr_below = jnp.concatenate([tracer[..., 1:], tracer[..., -1:]], axis=-1)
+    q_min = jnp.minimum(
+        jnp.minimum(jnp.minimum(tracer, tr_west), jnp.minimum(tr_east, tr_south)),
+        jnp.minimum(jnp.minimum(tr_north, tr_above), tr_below),
+    )
+    q_max = jnp.maximum(
+        jnp.maximum(jnp.maximum(tracer, tr_west), jnp.maximum(tr_east, tr_south)),
+        jnp.maximum(jnp.maximum(tr_north, tr_above), tr_below),
+    )
+    q_td = tracer + dq_low * dt  # provisional low-order update
+
+    alpha_u_full, alpha_v, alpha_vert_face = _zalesak_signsplit_face_alphas(
+        ad_flux_u, ad_flux_v, ad_vert_int,
+        q_td, q_min, q_max, h_k, dt, grid, eps,
+    )
+
+    # --- Step 4: limited face fluxes (conservative by construction) ---
+    flux_u_fct = flux_u_low + alpha_u_full * ad_flux_u
+    flux_v_fct = flux_v_low + alpha_v * ad_flux_v
+    div_h_fct = divergence_cgrid(flux_u_fct, flux_v_fct, grid)
+
+    F_vert_fct_int = F_vert_low_int + alpha_vert_face * ad_vert_int
+    F_vert_fct = jnp.pad(F_vert_fct_int, (*pad_axes_v, (1, 1)))
+    vert_div_fct = F_vert_fct[..., :-1] - F_vert_fct[..., 1:]
+
+    return div_h_fct, vert_div_fct
+
+
+# =============================================================================
+# WENO-Z tracer advection (Phase 2a of Silvestri et al. 2024 WENO-ILES plan)
+# =============================================================================
+#
+# High-order essentially non-oscillatory reconstruction at cell faces using
+# the WENO-Z kernels from ``legoesm.core.weno``.  Unlike DST-3 and PPM, WENO
+# uses nonlinear weights (not explicit limiters) to suppress oscillations near
+# discontinuities, so no CFL, limiter, or monotonicity clamp is needed.
+#
+# WENO5: 5th-order, 6-point stencil (3 cells each side of face).
+# WENO7: 7th-order, 8-point stencil (4 cells each side of face).
+
+def _weno_to_u_points(
+    f: jnp.ndarray,
+    mass_flux_u: jnp.ndarray,
+    order: int,
+) -> jnp.ndarray:
+    """WENO-Z interpolation to u-faces (zonal).
+
+    Periodic in longitude. No CFL dependence — reconstruction is
+    purely spatial.
+
+    Parameters
+    ----------
+    f : array, shape (n_lat, n_lon, nlev)
+        Tracer at cell centers.
+    mass_flux_u : array, shape (n_lat, n_lon+1, nlev)
+        Thickness-weighted velocity at u-faces (sign determines upwind).
+    order : {5, 7}
+        WENO order.
+
+    Returns
+    -------
+    f_u : array, shape (n_lat, n_lon+1, nlev)
+        WENO face values at u-points.
+    """
+    weno_fn = {5: weno5_z, 7: weno7_z}[order]
+    hw = {5: 3, 7: 4}[order]
+    n_lon = f.shape[1]
+
+    # Convert point values to cell averages. WENO reconstruction is
+    # a finite-volume method expecting cell-average inputs; passing
+    # point values caps the order at O(dx^3). Conversion order must
+    # match or exceed the WENO order for full accuracy.
+    from legoesm.core.weno import point_to_cellavg_periodic
+    conv_order = {5: 6, 7: 8}[order]
+    f_avg = point_to_cellavg_periodic(f, axis=1, order=conv_order)
+
+    # Build stencil for all faces simultaneously (periodic longitude).
+    # Face j between cell j-1 and cell j: WENO face at I+1/2 where I=j-1.
+    # Need cells j-hw to j+(hw-1), obtained via roll offsets hw..-(hw-1).
+    stencil = [jnp.roll(f_avg, hw - j, axis=1) for j in range(2 * hw)]
+
+    f_plus, f_minus = weno_fn(stencil)
+
+    mf = mass_flux_u[:, :n_lon, :]
+    f_face = weno_upwind(f_plus, f_minus, mf)
+
+    # Periodic wrap: face n_lon = face 0
+    return jnp.concatenate([f_face, f_face[:, 0:1, :]], axis=1)
+
+
+def _weno_to_v_points(
+    f: jnp.ndarray,
+    mass_flux_v: jnp.ndarray,
+    order: int,
+) -> jnp.ndarray:
+    """WENO-Z interpolation to v-faces (meridional).
+
+    Solid wall at poles. Ghost cells use Neumann BC (copy boundary value),
+    which degrades the reconstruction to lower order near boundaries.
+
+    Parameters
+    ----------
+    f : array, shape (n_lat, n_lon, nlev)
+        Tracer at cell centers.
+    mass_flux_v : array, shape (n_lat+1, n_lon, nlev)
+        Thickness-weighted velocity at v-faces.
+    order : {5, 7}
+        WENO order.
+
+    Returns
+    -------
+    f_v : array, shape (n_lat+1, n_lon, nlev)
+        WENO face values at v-points. Zero at pole boundaries.
+    """
+    weno_fn = {5: weno5_z, 7: weno7_z}[order]
+    hw = {5: 3, 7: 4}[order]
+    n_lat = f.shape[0]
+
+    # Convert point values to cell averages (meridional, bounded).
+    from legoesm.core.weno import point_to_cellavg_bounded
+    conv_order = {5: 6, 7: 8}[order]
+    f_avg = point_to_cellavg_bounded(f, axis=0, order=conv_order)
+
+    # Ghost cells (Neumann BC: copy boundary value)
+    f_ext = jnp.concatenate(
+        [f_avg[:1, :, :]] * hw + [f_avg] + [f_avg[-1:, :, :]] * hw, axis=0
+    )
+
+    # Stencil for interior faces i=1..n_lat-1.
+    # Cell k in original = f_ext[k + hw].
+    # Face i: WENO at I+1/2 where I = i-1. Need cells i-hw..i+(hw-1).
+    # In f_ext: indices i..i+(2*hw-1).
+    stencil = [f_ext[1 + j: n_lat + j, :, :] for j in range(2 * hw)]
+
+    f_plus, f_minus = weno_fn(stencil)
+
+    mf_int = mass_flux_v[1:-1, :, :]
+    f_face = weno_upwind(f_plus, f_minus, mf_int)
+
+    # Solid wall at poles: zero flux
+    zero = jnp.zeros((1, f.shape[1], f.shape[2]), dtype=f.dtype)
+    return jnp.concatenate([zero, f_face, zero], axis=0)
+
+
+def _flux_form_vertical_tracer_advection_weno(
+    field: jnp.ndarray,
+    w_half: jnp.ndarray,
+    h_k: jnp.ndarray,
+    dt: float,
+    order: int,
+) -> jnp.ndarray:
+    """Flux-form vertical tracer advection with WENO-Z reconstruction.
+
+    Same interface as ``flux_form_vertical_tracer_advection_dst3``.
+
+    Parameters
+    ----------
+    field : array, shape (..., nlev)
+        Tracer at full levels.
+    w_half : array, shape (..., nlev+1)
+        Vertical velocity on half (interface) levels [m/s].
+        Positive = upward. Zero at surface and bottom.
+    h_k : array, shape (..., nlev)
+        Layer thickness [m] (unused — WENO is purely spatial).
+    dt : float
+        Time step [s] (unused — WENO doesn't need CFL).
+    order : {5, 7}
+        WENO order.
+
+    Returns
+    -------
+    vert_flux_div : array, shape (..., nlev)
+        Vertical flux divergence F_top[k] - F_bot[k] for each level.
+    """
+    weno_fn = {5: weno5_z, 7: weno7_z}[order]
+    hw = {5: 3, 7: 4}[order]
+    nlev = field.shape[-1]
+
+    # Ghost cells (Neumann BC: copy boundary value)
+    f_ext = jnp.concatenate(
+        [field[..., :1]] * hw + [field] + [field[..., -1:]] * hw, axis=-1
+    )
+
+    # Stencil for interior interfaces k=1..nlev-1.
+    # field[k] = f_ext[..., k + hw].
+    # Interface k between level k-1 (above) and level k (below):
+    #   WENO at I+1/2 where I = k-1. Need cells k-hw..k+(hw-1).
+    #   In f_ext: indices k..k+(2*hw-1).
+    stencil = [f_ext[..., 1 + j: nlev + j] for j in range(2 * hw)]
+
+    w_int = w_half[..., 1:nlev]
+    f_plus, f_minus = weno_fn(stencil)
+
+    # Stencil is ordered top-to-bottom (increasing level index).
+    # f_plus = left-biased (from above), f_minus = right-biased (from below).
+    # Upward flow (w > 0): donor is below → use f_minus.
+    # Downward flow (w < 0): donor is above → use f_plus.
+    T_face = jnp.where(w_int >= 0, f_minus, f_plus)
+
+    F_interior = w_int * T_face
+
+    # Zero-flux boundaries
+    zeros = jnp.zeros((*field.shape[:-1], 1), dtype=field.dtype)
+    F = jnp.concatenate([zeros, F_interior, zeros], axis=-1)
+
+    # Flux divergence: F_top[k] - F_bot[k]
+    return F[..., :-1] - F[..., 1:]
+
+
+# --- Public API: WENO5 ---
+
+def weno5_to_u_points(
+    f: jnp.ndarray,
+    mass_flux_u: jnp.ndarray,
+) -> jnp.ndarray:
+    """WENO5-Z interpolation to u-faces (zonal).
+
+    5th-order essentially non-oscillatory reconstruction. Periodic in
+    longitude. See ``_weno_to_u_points`` for details.
+    """
+    return _weno_to_u_points(f, mass_flux_u, order=5)
+
+
+def weno5_to_v_points(
+    f: jnp.ndarray,
+    mass_flux_v: jnp.ndarray,
+) -> jnp.ndarray:
+    """WENO5-Z interpolation to v-faces (meridional).
+
+    5th-order with solid wall BCs at poles.
+    See ``_weno_to_v_points`` for details.
+    """
+    return _weno_to_v_points(f, mass_flux_v, order=5)
+
+
+def flux_form_vertical_tracer_advection_weno5(
+    field: jnp.ndarray,
+    w_half: jnp.ndarray,
+    h_k: jnp.ndarray,
+    dt: float,
+) -> jnp.ndarray:
+    """Flux-form vertical tracer advection with WENO5-Z.
+
+    Same interface as ``flux_form_vertical_tracer_advection_dst3``.
+    *h_k* and *dt* are unused (WENO is purely spatial) but kept for
+    interface compatibility.
+    """
+    return _flux_form_vertical_tracer_advection_weno(field, w_half, h_k, dt, order=5)
+
+
+# --- Public API: WENO7 ---
+
+def weno7_to_u_points(
+    f: jnp.ndarray,
+    mass_flux_u: jnp.ndarray,
+) -> jnp.ndarray:
+    """WENO7-Z interpolation to u-faces (zonal).
+
+    7th-order essentially non-oscillatory reconstruction. Periodic in
+    longitude. See ``_weno_to_u_points`` for details.
+    """
+    return _weno_to_u_points(f, mass_flux_u, order=7)
+
+
+def weno7_to_v_points(
+    f: jnp.ndarray,
+    mass_flux_v: jnp.ndarray,
+) -> jnp.ndarray:
+    """WENO7-Z interpolation to v-faces (meridional).
+
+    7th-order with solid wall BCs at poles.
+    See ``_weno_to_v_points`` for details.
+    """
+    return _weno_to_v_points(f, mass_flux_v, order=7)
+
+
+def flux_form_vertical_tracer_advection_weno7(
+    field: jnp.ndarray,
+    w_half: jnp.ndarray,
+    h_k: jnp.ndarray,
+    dt: float,
+) -> jnp.ndarray:
+    """Flux-form vertical tracer advection with WENO7-Z.
+
+    Same interface as ``flux_form_vertical_tracer_advection_dst3``.
+    *h_k* and *dt* are unused (WENO is purely spatial) but kept for
+    interface compatibility.
+    """
+    return _flux_form_vertical_tracer_advection_weno(field, w_half, h_k, dt, order=7)
+
+
+def _zalesak_signsplit_face_alphas(
+    ad_flux_u: jnp.ndarray,
+    ad_flux_v: jnp.ndarray,
+    ad_vert_int: jnp.ndarray,
+    q_td: jnp.ndarray,
+    q_min: jnp.ndarray,
+    q_max: jnp.ndarray,
+    h_k: jnp.ndarray,
+    dt: float,
+    grid: "LatLonGrid",
+    eps: float = 1e-30,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Zalesak (1979) sign-split FCT face-flux limiter.
+
+    Replaces the conservation-preserving ``alpha_face = min(alpha_left,
+    alpha_right)`` heuristic with the proper monotone limiter.  For each
+    cell ``c`` we compute the incoming and outgoing anti-diffusive
+    increments separately (``P+_c``, ``P-_c``), pair them with the
+    incoming/outgoing budgets ``Q+_c = q_max_c - q_td_c`` and
+    ``Q-_c = q_td_c - q_min_c``, and form the per-cell ratios
+
+        R+_c = min(1, Q+_c / max(P+_c, eps))
+        R-_c = min(1, Q-_c / max(P-_c, eps)).
+
+    Each anti-diffusive face flux is then limited by the smaller of the
+    *receiving* cell's R+ and the *sending* cell's R-, with sender /
+    receiver determined by the sign of the face flux.  This is the
+    monotone version of Zalesak's algorithm and removes the symmetric
+    ``min`` looseness of the old face-min heuristic that allowed grid-
+    scale T noise to leak through under strong-frontal forcing
+    (issue #212; reference Zalesak 1979 J. Comp. Phys. 31, 335; Kuzmin,
+    *Flux-corrected transport*, 2012).
+
+    Parameters
+    ----------
+    ad_flux_u : array (n_lat, n_lon+1, nlev) — anti-diffusive u-face flux
+    ad_flux_v : array (n_lat+1, n_lon, nlev) — anti-diffusive v-face flux
+    ad_vert_int : array (n_lat, n_lon, nlev-1) — anti-diffusive interior
+        vertical interface flux (positive = upward).
+    q_td : array (n_lat, n_lon, nlev) — provisional low-order update.
+    q_min, q_max : array (n_lat, n_lon, nlev) — local stencil bounds.
+    h_k : array (n_lat, n_lon, nlev) — layer thickness.
+    dt : float — baroclinic time step.
+    grid : LatLonGrid.
+    eps : float — divide-by-zero guard for empty P+/P-.
+
+    Returns
+    -------
+    alpha_u_full : (n_lat, n_lon+1, nlev) — alpha for each u-face, with
+        ``face[n_lon] == face[0]`` for periodic-x.
+    alpha_v : (n_lat+1, n_lon, nlev) — alpha for each v-face; the two
+        wall faces carry placeholder 1.0 (their face flux is zero by
+        the wall mask, so any alpha is harmless).
+    alpha_vert_face : (n_lat, n_lon, nlev-1) — alpha for each interior
+        vertical interface.
+    """
+    # Local positive / negative parts of the anti-diffusive face fluxes.
+    F_u_pos = jnp.maximum(ad_flux_u, 0.0)
+    F_u_neg = jnp.maximum(-ad_flux_u, 0.0)
+    F_v_pos = jnp.maximum(ad_flux_v, 0.0)
+    F_v_neg = jnp.maximum(-ad_flux_v, 0.0)
+    F_w_pos = jnp.maximum(ad_vert_int, 0.0)
+    F_w_neg = jnp.maximum(-ad_vert_int, 0.0)
+
+    # Spherical face metrics (mirroring divergence_cgrid).
+    if is_tripolar(grid):
+        # Tripolar: use full 2D metrics — column-0 extraction is NOT
+        # valid on the bipolar cap where dy_u/dx_v vary in longitude.
+        face_dy = grid.dy_u                               # (n_lat, n_lon+1)
+        face_dx = grid.dx_v                               # (n_lat+1, n_lon)
+        _is_2d_dy = True
+        _is_2d_dx = True
+    else:
+        R_planet = grid.radius
+        dlon = grid.dlon
+        # face_dy at h-points: cell-row meridional extent (1D, Mercator-safe).
+        face_dy = (grid.dy * 0.5)[:, jnp.newaxis, jnp.newaxis]  # (n_lat,1,1)
+        lat = grid.lat
+        lat_interior = 0.5 * (lat[:-1] + lat[1:])
+        face_dx = R_planet * dlon * jnp.pad(
+            jnp.cos(lat_interior), (1, 1),
+        )  # (n_lat+1,)
+        _is_2d_dy = False
+        _is_2d_dx = False
+    area = grid.area[..., jnp.newaxis]            # (n_lat, n_lon, 1)
+
+    # Per-cell magnitudes of incoming / outgoing horizontal flux.
+    # u-face j is the WEST face of cell j and EAST face of cell j-1.
+    # Per cell c (index j):
+    #   incoming  = F_u_pos at WEST face (eastward in)  + F_u_neg at EAST face (westward in)
+    #   outgoing  = F_u_neg at WEST face (westward out) + F_u_pos at EAST face (eastward out)
+    if _is_2d_dy:
+        # Per-face dy weighting: west face = face_dy[:, :-1], east = face_dy[:, 1:].
+        dy_w = face_dy[:, :-1, jnp.newaxis]              # (n_lat, n_lon, 1)
+        dy_e = face_dy[:, 1:, jnp.newaxis]               # (n_lat, n_lon, 1)
+        in_u_w  = F_u_pos[:, :-1, :] * dy_w + F_u_neg[:, 1:, :] * dy_e
+        out_u_w = F_u_neg[:, :-1, :] * dy_w + F_u_pos[:, 1:, :] * dy_e
+    else:
+        in_u  = F_u_pos[:, :-1, :] + F_u_neg[:, 1:, :]
+        out_u = F_u_neg[:, :-1, :] + F_u_pos[:, 1:, :]
+
+    # v-face j is the SOUTH face of cell j and NORTH face of cell j-1; weighted by face_dx[j].
+    if _is_2d_dx:
+        dx_s = face_dx[:-1, :, jnp.newaxis]              # (n_lat, n_lon, 1)
+        dx_n = face_dx[1:, :, jnp.newaxis]               # (n_lat, n_lon, 1)
+    else:
+        dx_s = face_dx[:-1, jnp.newaxis, jnp.newaxis]
+        dx_n = face_dx[1:, jnp.newaxis, jnp.newaxis]
+    in_v_w = F_v_pos[:-1, :, :] * dx_s + F_v_neg[1:, :, :] * dx_n
+    out_v_w = F_v_neg[:-1, :, :] * dx_s + F_v_pos[1:, :, :] * dx_n
+
+    # Horizontal-incoming / outgoing tracer increment per cell (same units as ad·dt).
+    if _is_2d_dy:
+        P_in_h = (in_u_w + in_v_w) / area
+        P_out_h = (out_u_w + out_v_w) / area
+    else:
+        P_in_h = (in_u * face_dy + in_v_w) / area
+        P_out_h = (out_u * face_dy + out_v_w) / area
+
+    # Vertical: pad with zeros at the top / bottom (rigid lid + floor) so
+    # cell-c indexing is uniform.  ad_vert_int has shape (n_lat, n_lon,
+    # nlev-1) for interfaces 0..nlev-2 between cell k (above) and k+1
+    # (below); F > 0 = upward.  Pad (single HLO op) instead of
+    # alloc-zeros + 3-array concatenate.
+    pad_axes_v = ((0, 0),) * (F_w_pos.ndim - 1)
+    F_w_pos_full = jnp.pad(F_w_pos, (*pad_axes_v, (1, 1)))
+    F_w_neg_full = jnp.pad(F_w_neg, (*pad_axes_v, (1, 1)))
+    # For cell k:
+    #   TOP    interface index k:   F>0 = upward = leaving k upward, F<0 = entering k from above.
+    #   BOTTOM interface index k+1: F>0 = upward = entering k from below, F<0 = leaving k downward.
+    P_in_w  = F_w_neg_full[..., :-1] + F_w_pos_full[..., 1:]
+    P_out_w = F_w_pos_full[..., :-1] + F_w_neg_full[..., 1:]
+
+    h_safe = jnp.maximum(h_k, eps)
+    inc_in = (P_in_h + P_in_w) * dt / h_safe
+    inc_out = (P_out_h + P_out_w) * dt / h_safe
+
+    # Per-cell budgets and ratios.
+    Q_up = jnp.maximum(q_max - q_td, 0.0)
+    Q_dn = jnp.maximum(q_td - q_min, 0.0)
+    R_in = jnp.minimum(1.0, Q_up / jnp.maximum(inc_in, eps))
+    R_out = jnp.minimum(1.0, Q_dn / jnp.maximum(inc_out, eps))
+
+    # ---- Per-face alpha selection ----
+    # u-face j: cell L = (j-1)%n_lon (west), cell R = j (east).
+    # F > 0  → flow east, into R, out of L  → α = min(R+_R, R-_L).
+    # F < 0  → flow west, into L, out of R  → α = min(R+_L, R-_R).
+    n_lon = ad_flux_u.shape[1] - 1
+    R_in_R_u = R_in                                 # (n_lat, n_lon, nlev)
+    R_in_L_u = jnp.roll(R_in, 1, axis=1)
+    R_out_R_u = R_out
+    R_out_L_u = jnp.roll(R_out, 1, axis=1)
+    ad_face_u_int = ad_flux_u[:, :n_lon, :]
+    alpha_u_pos = jnp.minimum(R_in_R_u, R_out_L_u)
+    alpha_u_neg = jnp.minimum(R_in_L_u, R_out_R_u)
+    alpha_u_int = jnp.where(
+        ad_face_u_int > 0.0, alpha_u_pos,
+        jnp.where(ad_face_u_int < 0.0, alpha_u_neg, 1.0),
+    )
+    # Periodic wrap: face n_lon == face 0.
+    alpha_u_full = jnp.concatenate(
+        [alpha_u_int, alpha_u_int[:, :1, :]], axis=1,
+    )
+
+    # v-face j (interior, 1 ≤ j ≤ n_lat-1): cell S = j-1, cell N = j.
+    R_in_N_v  = R_in[1:, :, :]
+    R_in_S_v  = R_in[:-1, :, :]
+    R_out_N_v = R_out[1:, :, :]
+    R_out_S_v = R_out[:-1, :, :]
+    ad_v_int = ad_flux_v[1:-1, :, :]  # interior faces
+    alpha_v_pos = jnp.minimum(R_in_N_v, R_out_S_v)
+    alpha_v_neg = jnp.minimum(R_in_S_v, R_out_N_v)
+    alpha_v_int_face = jnp.where(
+        ad_v_int > 0.0, alpha_v_pos,
+        jnp.where(ad_v_int < 0.0, alpha_v_neg, 1.0),
+    )
+    # Wall faces (south & north): the wall mass flux is zero, so any
+    # alpha is harmless; use 1 as a neutral placeholder.
+    walls_shape = (1, ad_flux_v.shape[1], ad_flux_v.shape[2])
+    walls = jnp.ones(walls_shape, dtype=ad_flux_v.dtype)
+    alpha_v = jnp.concatenate([walls, alpha_v_int_face, walls], axis=0)
+
+    # Vertical interface k between cell k (above) and cell k+1 (below).
+    # F > 0 = upward → out of (k+1) below, into k above → α = min(R+_above, R-_below).
+    # F < 0 = downward → out of k above, into k+1 below → α = min(R+_below, R-_above).
+    R_in_above_w  = R_in[..., :-1]   # cell k above interface k
+    R_in_below_w  = R_in[..., 1:]    # cell k+1 below interface k
+    R_out_above_w = R_out[..., :-1]
+    R_out_below_w = R_out[..., 1:]
+    alpha_w_pos = jnp.minimum(R_in_above_w, R_out_below_w)
+    alpha_w_neg = jnp.minimum(R_in_below_w, R_out_above_w)
+    alpha_vert_face = jnp.where(
+        ad_vert_int > 0.0, alpha_w_pos,
+        jnp.where(ad_vert_int < 0.0, alpha_w_neg, 1.0),
+    )
+    return alpha_u_full, alpha_v, alpha_vert_face

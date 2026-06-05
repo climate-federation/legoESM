@@ -5,7 +5,7 @@ validation. Domain, resolution, timestep, and integration length are
 scaled down so the test fits in the unit-test budget; the full-
 resolution validation that pins maximum-w / bubble-altitude
 tolerances to published reference values lives in
-``scripts/run_plane_rising_thermal.py`` (PR2e nightly).
+``scripts/run/run_plane_rising_thermal.py`` (PR2e nightly).
 
 PR3b lifted the CI integration from 10 s (PR2d) to 30 s by wiring
 first-order upwind horizontal advection. Standalone runs survive
@@ -57,7 +57,7 @@ CI acceptance criteria
 Reference tolerances against Skamarock 2008 Fig. 8 are NOT enforced
 here — the CI grid (200 m) is too coarse, the integration too short,
 and hyperdiffusion is disabled in PR2d. See
-``scripts/run_plane_rising_thermal.py`` for the full benchmark spec
+``scripts/run/run_plane_rising_thermal.py`` for the full benchmark spec
 used in nightly validation (PR2e).
 """
 
@@ -91,7 +91,7 @@ jax.config.update("jax_enable_x64", True)
 # energy into a sub-grid model — that lands in PR3c), so the CI
 # integration stays well inside the stable window. The full
 # Skamarock 2008 Sec 5b benchmark — with finer grid + LES + longer
-# integration — lives in ``scripts/run_plane_rising_thermal.py``.
+# integration — lives in ``scripts/run/run_plane_rising_thermal.py``.
 NX, NY, NLEV = 20, 4, 20
 DX = DY = 200.0       # m
 LX = NX * DX          # 4 km

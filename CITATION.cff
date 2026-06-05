@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+message: "If you use legoESM in your research, please cite it as below."
+title: "legoESM: A Differentiable Earth System Model in JAX"
+abstract: >-
+  legoESM is a next-generation, fully differentiable Earth System Model built
+  from scratch in JAX. It spans weather-to-climate timescales, couples
+  atmosphere, ocean, land, and cryosphere through a unified interface, and
+  enables end-to-end gradient computation for data assimilation, parameter
+  estimation, and hybrid AI-physics modeling.
+type: software
+authors:
+  - family-names: Gentine
+    given-names: Pierre
+    email: pg2328@columbia.edu
+    affiliation: Columbia University
+    # orcid: "https://orcid.org/0000-0000-0000-0000"  # TODO: add Pierre Gentine's ORCID
+license: MIT
+repository-code: "https://github.com/gentine/legoESM"
+url: "https://github.com/gentine/legoESM"
+# NOTE: `version` is single-sourced from pyproject.toml; the test
+# tests/test_version_single_source.py asserts this string stays in sync.
+version: 0.1.0
+# doi: 10.5281/zenodo.XXXXXXX  # TODO: mint a concept DOI via Zenodo on first Release (Stage D)
+keywords:
+  - earth-system-model
+  - jax
+  - differentiable
+  - weather
+  - climate
+date-released: 2026-06-01

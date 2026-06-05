@@ -314,7 +314,7 @@ ETOPO_FILE = Path("data/bathymetry/etopo_1deg.nc")
 @pytest.mark.skipif(
     not ETOPO_FILE.exists(),
     reason="ETOPO data not cached; run "
-           "scripts/diagnose_realistic_geometry.py first to fetch.",
+           "scripts/tmp/diagnose_realistic_geometry.py first to fetch.",
 )
 class TestRealisticMaskConsistency:
     """Load the ETOPO 1° subset on a 72×144 (2.5°) grid and verify

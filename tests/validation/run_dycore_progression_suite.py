@@ -293,6 +293,30 @@ def main() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     python_exec = args.python if args.python.is_absolute() else (repo_root / args.python)
     python_exec = python_exec.expanduser()
+
+    # The per-case child scripts this suite orchestrates
+    # (run_shallow_water_latlon_cube_compare.py, run_atmosphere_25deg_ssp45_full.py)
+    # were removed in an earlier scripts cleanup; the ordered SW -> hydrostatic ->
+    # non-hydrostatic dycore ladder is now covered by
+    # scripts/matrix/run_atmosphere_test_matrix.py. Fail loudly with a pointer
+    # instead of silently marking every case FAIL while still exiting 0 (which
+    # masked the breakage in CI / stress runs).
+    _required = [
+        repo_root / "scripts/run_shallow_water_latlon_cube_compare.py",
+        repo_root / "scripts/run_atmosphere_25deg_ssp45_full.py",
+    ]
+    _missing = [str(p.relative_to(repo_root)) for p in _required if not p.exists()]
+    if _missing and not args.skip_run:
+        raise SystemExit(
+            "run_dycore_progression_suite is SUPERSEDED: its per-case child "
+            "scripts were removed (" + ", ".join(_missing) + "). Use the "
+            "consolidated matrix runner, which covers the same SW -> "
+            "hydrostatic -> non-hydrostatic ladder:\n"
+            "  JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_atmosphere_test_matrix.py --only sw\n"
+            "  JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_atmosphere_test_matrix.py --only hydro\n"
+            "  JAX_ENABLE_X64=1 .venv/bin/python scripts/matrix/run_atmosphere_test_matrix.py --only nh"
+        )
+
     out_root = (repo_root / args.output).resolve()
     raw_root = out_root / "_raw"
     out_root.mkdir(parents=True, exist_ok=True)
@@ -503,6 +527,10 @@ def main() -> None:
     n_skip = sum(1 for r in suite_records if r["status"] == "SKIPPED")
     print(f"Suite prepared at: {out_root}")
     print(f"PASS={n_pass} FAIL={n_fail} SKIPPED={n_skip} TOTAL={len(suite_records)}")
+    # Propagate failures to the exit code — previously the suite exited 0 even
+    # when every case FAILed, silently masking breakage in CI / stress runs.
+    if n_fail:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 """Unit tests for ``legoesm.driver.physics_schedule``.
 
 Pins the radiation-call schedule arithmetic that the production
-driver (``scripts/run_rce_mpi_long.py``) and the production-scale
+driver (``scripts/run/run_rce_mpi_long.py``) and the production-scale
 slow tests (``tests/atmosphere/nonhydrostatic/integration/
 test_plane_crm_end_to_end_smoke.py``) both depend on. iter-42
 extracted this from inline duplication to ``legoesm.driver`` so
