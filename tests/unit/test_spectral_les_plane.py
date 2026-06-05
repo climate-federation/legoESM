@@ -76,6 +76,28 @@ def test_rotational_advection_conserves_energy():
     assert abs(float(prod)) / float(norm) < 0.05          # small KE-production residual
 
 
+def test_dealias_product_is_alias_free():
+    """3/2 zero-padding (Dealias1/2 port) computes quadratic products alias-free:
+    a resolved product is exact, and an interaction that would alias under plain
+    2/3-truncation is removed to round-off (matches the analytic low-pass)."""
+    ny = nx = 16
+    nz = 3
+    xx = jnp.arange(nx) / nx
+    bcast = lambda f: jnp.broadcast_to(f[None, :, None], (ny, nx, nz))  # noqa: E731
+    # modes 3 and 4 → product modes 1 and 7 (< Nyquist 8): exact.
+    a = bcast(jnp.cos(2 * jnp.pi * 3 * xx))
+    b = bcast(jnp.cos(2 * jnp.pi * 4 * xx))
+    prod = sl._truncate_from_fine(sl._pad_to_fine(a) * sl._pad_to_fine(b), ny, nx)
+    np.testing.assert_allclose(np.asarray(prod), np.asarray(a * b), atol=1e-12)
+    # modes 6 and 5 → product modes 1 and 11; mode 11 aliases to 5 under
+    # truncation, but 3/2 padding drops it → analytic low-pass is 0.5 cos(x).
+    a2 = bcast(jnp.cos(2 * jnp.pi * 6 * xx))
+    b2 = bcast(jnp.cos(2 * jnp.pi * 5 * xx))
+    pp = sl._truncate_from_fine(sl._pad_to_fine(a2) * sl._pad_to_fine(b2), ny, nx)
+    true = bcast(0.5 * jnp.cos(2 * jnp.pi * 1 * xx))
+    np.testing.assert_allclose(np.asarray(pp), np.asarray(true), atol=1e-12)
+
+
 def test_step_runs_finite_and_walls():
     g = _grid()
     ny, nx, nz = g.cfg.ny, g.cfg.nx, g.cfg.nz

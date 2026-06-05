@@ -144,6 +144,38 @@ def _dealias(f, g: SpectralLESGrid):
 
 
 # --------------------------------------------------------------------------- #
+# 3/2-rule (zero-padding) de-aliasing — verbatim port of jax-alfa Dealias1/2.  #
+# Pad each factor to the 3/2 grid, multiply alias-free in physical space, then  #
+# truncate the product back. Removes the quadratic-interaction aliasing that    #
+# 2/3-truncation leaves in the chained rotational advection. Layout (ny,nx):    #
+# the rfft2 FULL axis is y (axis 0), the REDUCED axis is x (axis 1). Both       #
+# Nyquist modes are dropped (unrepresentable derivative; the oracle does too).  #
+# --------------------------------------------------------------------------- #
+def _pad_to_fine(f_yxz):
+    """Coarse ``(ny,nx,nz)`` → fine ``(3ny/2, 3nx/2, nz)`` physical (zero-pad)."""
+    ny, nx, nz = f_yxz.shape
+    nyf, nxf = 3 * ny // 2, 3 * nx // 2
+    nyh, nxr = ny // 2, nx // 2                 # half full-axis; drop x-Nyquist
+    fh = jnp.fft.rfft2(f_yxz, axes=(0, 1))       # (ny, nx//2+1, nz)
+    pad = jnp.zeros((nyf, nxf // 2 + 1, nz), dtype=fh.dtype)
+    pad = pad.at[:nyh, :nxr, :].set(fh[:nyh, :nxr, :])              # +ky, +kx
+    pad = pad.at[nyf - nyh + 1:, :nxr, :].set(fh[nyh + 1:ny, :nxr, :])  # −ky
+    return jnp.fft.irfft2(pad, axes=(0, 1), s=(nyf, nxf))
+
+
+def _truncate_from_fine(f_fine, ny, nx):
+    """Fine ``(3ny/2,3nx/2,nz)`` → coarse ``(ny,nx,nz)`` physical (+9/4 scaling)."""
+    nyf, nxf = f_fine.shape[0], f_fine.shape[1]
+    nz = f_fine.shape[2]
+    nyh, nxr = ny // 2, nx // 2
+    fh = jnp.fft.rfft2(f_fine, axes=(0, 1))      # (nyf, nxf//2+1, nz)
+    out = jnp.zeros((ny, nx // 2 + 1, nz), dtype=fh.dtype)
+    out = out.at[:nyh, :nxr, :].set(fh[:nyh, :nxr, :])
+    out = out.at[ny - nyh + 1:, :nxr, :].set(fh[nyf - nyh + 1:, :nxr, :])
+    return (9.0 / 4.0) * jnp.fft.irfft2(out, axes=(0, 1), s=(ny, nx))
+
+
+# --------------------------------------------------------------------------- #
 # Vertical staggering helpers (uniform Δz)                                     #
 # --------------------------------------------------------------------------- #
 def c2f(fc):
@@ -218,39 +250,40 @@ def advection(u, v, w, g: SpectralLESGrid):
     ``(Cu, Cv, Cw)`` as MINUS the advective tendency (i.e. the RHS contribution
     ``-C``). ``Cu, Cv`` at centres, ``Cw`` at interior faces."""
     dz = g.dz
-    # de-alias the velocities entering the products (3/2-rule analogue).
-    ud, vd = _dealias(u, g), _dealias(v, g)
-    wd = _dealias(w, g)
-    wc = f2c(wd)                                            # w at centres
-    # Vorticity components.
-    dudy, dvdx = ddy(ud, g), ddx(vd, g)
+    ny, nx = u.shape[0], u.shape[1]
+    # Vorticity from spectral/staggered derivatives on the COARSE grid.
+    dudy, dvdx = ddy(u, g), ddx(v, g)
     omega_z = dvdx - dudy                                   # centres
-    dudz_f = jnp.pad(ddz_c2f(ud, dz), ((0, 0), (0, 0), (1, 1)), mode="edge")
-    dvdz_f = jnp.pad(ddz_c2f(vd, dz), ((0, 0), (0, 0), (1, 1)), mode="edge")
-    dwdx_f, dwdy_f = ddx(wd, g), ddy(wd, g)                 # faces
+    dudz_f = jnp.pad(ddz_c2f(u, dz), ((0, 0), (0, 0), (1, 1)), mode="edge")
+    dvdz_f = jnp.pad(ddz_c2f(v, dz), ((0, 0), (0, 0), (1, 1)), mode="edge")
+    dwdx_f, dwdy_f = ddx(w, g), ddy(w, g)                   # faces
     omega_x_f = dvdz_f - dwdy_f                             # faces
     omega_y_f = dwdx_f - dudz_f                             # faces
-    # RHS advection = +(u × ω) (since u·∇u = ω×u + ∇½|u|², the ½|u|² Bernoulli
-    # term is absorbed by the pressure projection). The cross product:
-    #   (u×ω)_x = v ω_z − w ω_y ;  (u×ω)_y = w ω_x − u ω_z ;
-    #   (u×ω)_z = u ω_y − v ω_x .
-    # (The opposite sign −(u×ω) still passes the ⟨u·C⟩=0 energy test — u×ω ⊥ u —
-    #  but reverses the nonlinear transfer into an INVERSE cascade that piles
-    #  energy up and inverts the mean profile; this caught a real sign bug.)
-    # CRITICAL staggering: form the ``w·ω`` products at the FACES (where w and
-    # the vertical-shear vorticity live) and average the PRODUCT to centres —
-    # NOT ⟨ω⟩·⟨w⟩. Since ⟨wX⟩≠⟨w⟩⟨X⟩, the factor-averaged form transports
-    # momentum counter-gradient and pumps the variance; the product-at-face form
-    # (oracle Advection_Dealias / StagGridAvg on the product) is correct.
-    Cu = omega_z * vd - f2c(wd * omega_y_f)                 # centres
-    Cv = f2c(wd * omega_x_f) - omega_z * ud                 # centres
-    # Face tendency Cw = u ω_y − v ω_x: u,v averaged to faces, ω at faces.
-    uf = jnp.pad(c2f(ud), ((0, 0), (0, 0), (1, 1)))         # 0 at walls
-    vf = jnp.pad(c2f(vd), ((0, 0), (0, 0), (1, 1)))
-    Cw = uf * omega_y_f - vf * omega_x_f                    # faces (nz+1)
-    # de-alias the products back to the resolved grid.
-    Cu, Cv = _dealias(Cu, g), _dealias(Cv, g)
-    Cw = _dealias(Cw, g)
+
+    # RHS advection = +(u × ω): (u×ω)_x = v ω_z − w ω_y; (u×ω)_y = w ω_x − u ω_z;
+    # (u×ω)_z = u ω_y − v ω_x. The Bernoulli ½|u|² is absorbed by the pressure.
+    # Each quadratic product is formed ALIAS-FREE by 3/2 zero-padding (verbatim
+    # jax-alfa Dealias1/2): pad both factors to the fine grid, multiply (with the
+    # vertical f2c/c2f staggering done on the fine grid), truncate back. This
+    # replaces the 2/3-truncation, which leaves quadratic-interaction aliasing in
+    # the chained rotational form. ``w·ω`` products are formed at the FACES then
+    # averaged (StagGridAvg-on-the-product).
+    if g.cfg.dealias:
+        pf = _pad_to_fine
+        tf = lambda x: _truncate_from_fine(x, ny, nx)      # noqa: E731
+        u_F, v_F, w_F = pf(u), pf(v), pf(w)
+        omz_F, omx_F, omy_F = pf(omega_z), pf(omega_x_f), pf(omega_y_f)
+        Cu = tf(omz_F * v_F - f2c(w_F * omy_F))             # centres
+        Cv = tf(f2c(w_F * omx_F) - omz_F * u_F)
+        uf_F = jnp.pad(c2f(u_F), ((0, 0), (0, 0), (1, 1)))  # faces, 0 at walls
+        vf_F = jnp.pad(c2f(v_F), ((0, 0), (0, 0), (1, 1)))
+        Cw = tf(uf_F * omy_F - vf_F * omx_F)               # faces (nz+1)
+    else:
+        Cu = omega_z * v - f2c(w * omega_y_f)
+        Cv = f2c(w * omega_x_f) - omega_z * u
+        uf = jnp.pad(c2f(u), ((0, 0), (0, 0), (1, 1)))
+        vf = jnp.pad(c2f(v), ((0, 0), (0, 0), (1, 1)))
+        Cw = uf * omega_y_f - vf * omega_x_f
     return Cu, Cv, Cw
 
 
