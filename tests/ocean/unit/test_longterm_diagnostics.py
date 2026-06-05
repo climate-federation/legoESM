@@ -27,7 +27,9 @@ def _matrix_module():
         scripts_dir = repo_root / "scripts"
         if str(scripts_dir) not in sys.path:
             sys.path.insert(0, str(scripts_dir))
-        matrix_path = scripts_dir / "run_ocean_test_matrix.py"
+        matrix_path = scripts_dir / "matrix" / "run_ocean_test_matrix.py"
+        if not matrix_path.exists():
+            matrix_path = scripts_dir / "run_ocean_test_matrix.py"
         spec = importlib.util.spec_from_file_location(
             "_rom_for_diag_tests", matrix_path,
         )

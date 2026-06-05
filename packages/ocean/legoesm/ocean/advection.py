@@ -28,7 +28,8 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import is_tripolar
 
 
 # =============================================================================
-# Flux limiter
+# Flux limiter — DST-3 uses Van Leer (less aggressive than Sweby, better
+# stability for DST-3 at low CFL). Centralized in ``_flux_limiters.py``.
 # =============================================================================
 
 def _sweby_limiter(r: jnp.ndarray) -> jnp.ndarray:

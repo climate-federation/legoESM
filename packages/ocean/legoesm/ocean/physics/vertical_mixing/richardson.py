@@ -14,11 +14,11 @@ from __future__ import annotations
 
 import warnings
 
-import jax
 import jax.numpy as jnp
 
 from legoesm.ocean.eos import compute_buoyancy_frequency
 from legoesm.ocean.physics.mixing import vertical_diffusion_variable_K
+from legoesm.ocean.physics.vertical_mixing._shared import vmap_vertical_diffusion
 from legoesm.ocean.physics.vertical_mixing.config import RichardsonVerticalMixingConfig
 from legoesm.ocean.physics.vertical_mixing.output import VerticalMixingOutput
 from legoesm.ocean.vertical import OceanZStarCoordinate
@@ -106,30 +106,13 @@ def richardson_vertical_mixing(
     # Apply variable-K vertical diffusion.  When ``apply_diffusion`` is
     # False, return zero tendencies; the caller will apply K_v/A_v via an
     # unconditionally-stable backward-Euler solver after the explicit step.
-    if apply_diffusion:
-        # Pass dt (when provided) so the explicit-Euler CFL cap
-        # introduced in clean_physics iter-5 fires on K_v/A_v at thin
-        # upper layers.  Default None keeps current behaviour.
-        vel = jnp.stack([u, v], axis=0)
-        vel_tend = jax.vmap(
-            lambda q: vertical_diffusion_variable_K(
-                q, z_coord, jacobian, A_v, dt=dt,
-            ),
-            in_axes=0, out_axes=0,
-        )(vel)
-
-        tracers = jnp.stack([T, S], axis=0)
-        tr_tend = jax.vmap(
-            lambda q: vertical_diffusion_variable_K(
-                q, z_coord, jacobian, K_v, dt=dt,
-            ),
-            in_axes=0, out_axes=0,
-        )(tracers)
-    else:
-        zero_uv = jnp.zeros_like(u)
-        vel_tend = jnp.stack([zero_uv, zero_uv], axis=0)
-        zero_T = jnp.zeros_like(T)
-        tr_tend = jnp.stack([zero_T, zero_T], axis=0)
+    # dt (when provided) is passed so the explicit-Euler CFL cap fires on
+    # K_v/A_v at thin upper layers; default None keeps current behaviour.
+    vel_tend, tr_tend = vmap_vertical_diffusion(
+        u, v, T, S, A_v, K_v,
+        lambda q, c: vertical_diffusion_variable_K(q, z_coord, jacobian, c, dt=dt),
+        apply_diffusion,
+    )
 
     return VerticalMixingOutput(
         du_dt=vel_tend[0],
