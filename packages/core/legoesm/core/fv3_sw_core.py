@@ -579,9 +579,16 @@ def _d2a2c_vect(u_d, v_d, cdgrid):
     n = cdgrid.n
     npt = min(4, n // 2)
 
-    # iter-108 audit: Fortran sw_core.F90:3527-3545 + 3620-3640 cube-vertex sign-flip overrides
-    # on utmp/vtmp NOT ported to non-duogrid path. Python uses pad_halo_vector +
-    # _fill_corners_h1/h2 (2-point avg) instead of Fortran sign-flip copy. Delta O(dx²) on smooth fields.
+    # iter-108 faithfulness gap (Priority 3): Fortran's cube-vertex corner
+    # overrides for utmp/vtmp and ua/va (sw_core.F90:3527-3545 and 3620-3640 —
+    # sign-flipped copies of the OTHER component from the adjacent face) are
+    # NOT PORTED to this non-duogrid path.  Python instead uses pad_halo_vector
+    # + _fill_corners_h1/_fill_corners_h2 (2-point edge-halo AVERAGE) — a
+    # DIFFERENT convention that gives DIFFERENT values at cube-vertex cells
+    # (O(1) on random input, O(dx^2) on smooth fields).  The numerical impact
+    # on the non-duogrid FB path has NOT been quantified.  (Duogrid path via
+    # _d2a2c_vect_duogrid is unaffected — Fortran also skips these via
+    # dg%is_initialized.)
 
     # Step 1: D-grid → covariant cell centres
     utmp = 0.5 * (u_d[:, :, :-1] + u_d[:, :, 1:])   # (6, n, n)
@@ -1051,6 +1058,15 @@ def _d_sw5_corner_divergence(u_d, v_d, ua, va, cdgrid, dt,
     apply_legacy_corner_corrections (iter-862): Fortran-structural corner corrections at non-duogrid;
     RHS halo data incomplete (mode='edge' fallback), gated default-OFF until cross-face halo helper lands.
     Returns ke_damping increment for ke_corner.
+
+    FAITHFULNESS GAP (iter-132/133, documentation marker): the iterated-
+    Laplacian halo uses mode='edge' fallback, not proper cubed-sphere corner-
+    staggered cross-face halo exchange.
+    Fortran oracle: sw_core.F90:1737-1785.
+    Only affects the EXPERIMENTAL FB chain (fv3_fb_sw_step), which
+    is independently unstable at C36; production (fv3_sw_tendencies) does not
+    call this.  A future cross-face halo port should update this note + the
+    test_d_sw5_iterated_laplacian_halo_gap_documentation_marker test together.
     """
     n = cdgrid.n
     cosa_u = cdgrid.cosa_u
@@ -1827,10 +1843,13 @@ def _bgrid_ke_transport(u_d, v_d, uc, vc, cdgrid, dt):
     ubb = ub
     vbb = transported_x
     if use_duogrid:
-        cac = cdgrid.cos_angle_corner
-        sac = cdgrid.sin_angle_corner
+        # iter3: exact non-orthogonal corner c2l z-matrix (z11=cos_angle_corner,
+        # z12=sin_angle_corner, z21/z22 = j-tangent rows) — fixes the O(1)
+        # vertex corruption of the prior orthogonal rotation.
         ubb, vbbtemp = synchronize_bgrid_ne_corner_geo(
-            ubb, vbbtemp, cac, sac, n)
+            ubb, vbbtemp,
+            cdgrid.cos_angle_corner, cdgrid.sin_angle_corner,
+            cdgrid.z21_corner, cdgrid.z22_corner, n)
 
     # Step 6: KE at corners = 0.5*(ubbtemp*vbbtemp + ubb*vbb) (FV3 dyn_core.F90:1013-1020 Lin-Rood)
     ke_corner = 0.5 * (ubbtemp * vbbtemp + ubb * vbb)

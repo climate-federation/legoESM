@@ -84,6 +84,8 @@ class CubedSphereCDGrid(NamedTuple):
     # Non-orthogonality metrics (FV3 cos_sg / sin_sg)
     cosa_corner: jax.Array   # (6, n+1, n+1) cos(angle between i and j tangents)
     rsin2_corner: jax.Array  # (6, n+1, n+1) 1/sin²(angle) for gradient correction
+    z21_corner: jax.Array    # (6, n+1, n+1) ec2·east — corner c2l z-matrix row (j-tangent)
+    z22_corner: jax.Array    # (6, n+1, n+1) ec2·north — corner c2l z-matrix row (j-tangent)
     cosa_u: jax.Array        # (6, n+1, n) non-orthogonality at u-interfaces
     cosa_v: jax.Array        # (6, n, n+1) non-orthogonality at v-interfaces
     rsin_u: jax.Array        # (6, n+1, n) 1/sin² interior; 1/sin at panel edges (non-duogrid)
@@ -868,6 +870,8 @@ def create_cubed_sphere_cdgrid(
     # Reuse the precomputed (6, n+3, n+3) extended corner grid (same n+3
     # layout as the corner grid-angle); grid-type-agnostic (iter71).
     all_cosa_c = []
+    all_z21_c = []
+    all_z22_c = []
     for face in range(6):
         lon_ext, lat_ext = corner_ext_lon[face], corner_ext_lat[face]
         cos_lat_ext = jnp.cos(lat_ext)
@@ -908,7 +912,24 @@ def create_cubed_sphere_cdgrid(
         cosa_face = ti_x * tj_x + ti_y * tj_y + ti_z * tj_z
         all_cosa_c.append(cosa_face)
 
+        # iter3: corner z-matrix rows for the j-tangent (FV3 c2l z21/z22).
+        # z21 = ec2·east, z22 = ec2·north — the exact non-orthogonal
+        # covariant→geographic coefficients used by the BGRID_NE corner sync
+        # (synchronize_bgrid_ne_corner_geo).  (z11=ec1·east=cos_angle_corner,
+        # z12=ec1·north=sin_angle_corner already stored.)  Geographic unit
+        # vectors at the corner (lon,lat) = lon_ext/lat_ext[1:-1,1:-1].
+        clon = lon_ext[1:-1, 1:-1]; clat = lat_ext[1:-1, 1:-1]
+        s_lon = jnp.sin(clon); c_lon = jnp.cos(clon)
+        s_lat = jnp.sin(clat); c_lat = jnp.cos(clat)
+        # east = (-sin_lon, cos_lon, 0); north = (-sin_lat cos_lon, -sin_lat sin_lon, cos_lat)
+        z21_face = -s_lon * tj_x + c_lon * tj_y
+        z22_face = (-s_lat * c_lon * tj_x - s_lat * s_lon * tj_y + c_lat * tj_z)
+        all_z21_c.append(z21_face)
+        all_z22_c.append(z22_face)
+
     cosa_corner = jnp.stack(all_cosa_c, axis=0)
+    z21_corner = jnp.stack(all_z21_c, axis=0)
+    z22_corner = jnp.stack(all_z22_c, axis=0)
     sina_corner = jnp.sqrt(jnp.maximum(1.0 - cosa_corner**2, _EPS))
     rsin2_corner = 1.0 / jnp.maximum(sina_corner**2, _EPS)
 
@@ -1260,6 +1281,8 @@ def create_cubed_sphere_cdgrid(
         area_corner=area_corner.astype(_prec),
         cosa_corner=cosa_corner.astype(_prec),
         rsin2_corner=rsin2_corner.astype(_prec),
+        z21_corner=z21_corner.astype(_prec),
+        z22_corner=z22_corner.astype(_prec),
         cosa_u=cosa_u.astype(_prec),
         cosa_v=cosa_v.astype(_prec),
         rsin_u=rsin_u.astype(_prec),
