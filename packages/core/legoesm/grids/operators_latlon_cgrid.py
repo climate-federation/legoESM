@@ -342,8 +342,12 @@ def gradient_y_cgrid(
     f_diff = f_padded[1:] - f_padded[:-1]  # (n_lat_v, n_lon[, nlev])
 
     if is_tripolar(grid):
-        # Full 2D dy_v metric (varies in lon on the bipolar cap).
-        dy_v = grid.dy_v  # (n_lat+1, n_lon)
+        # Full 2D dy_v metric (varies in lon on the bipolar cap).  Floor the
+        # denominator: a tripole built with ``min_dx_m=0.0`` has an exact
+        # zero south pole row, and dividing every f_diff row before
+        # zero_polar_lat_ends would compute nonzero/0 = inf/NaN there (poisons
+        # jax_debug_nans and AD even though the row is overwritten to zero).
+        dy_v = jnp.maximum(grid.dy_v, 1.0e-30)  # (n_lat+1, n_lon)
         bcast = (slice(None), slice(None)) + (jnp.newaxis,) * (f_diff.ndim - 2)
         df_dy = f_diff / dy_v[bcast]
     else:
