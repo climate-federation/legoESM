@@ -203,6 +203,32 @@ SBL/CBL. The spectral core now reproduces surface-layer Monin–Obukhov scaling 
 a genuine quantitative oracle match where the compressible core could not even
 sustain turbulence.
 
+## Codex review → advection SIGN bug (the "3/4 pass" above was an artefact)
+A codex adversarial review found the rotational-advection RHS had the WRONG SIGN
+on every vertical-vorticity (`w·ω_x`, `w·ω_y`) term: `omega_x_f=dvdz-dwdy`,
+`omega_y_f=dwdx-dudz` are the NEGATED standard vorticity, so `+(u×ω)` needs
+`Cu=ω_z·v+f2c(w·ω_y)`, `Cv=-ω_z·u-f2c(w·ω_x)`, `Cw=v_f·ω_x-u_f·ω_y`. The wrong
+sign gave UP-gradient resolved momentum transport (`⟨u'w'⟩>0`), which inverted
+the mean profile AND sustained turbulence SPURIOUSLY by an inverse cascade — so
+the "C_s=0.30, 3/4 pass" result was that artefact, not physical turbulence.
+(Codex also flagged, secondary: the top advection boundary row should use the
+full `arg2[nz-1]` not the ½ from `f2c`; near-wall `|S|` is under-estimated vs the
+oracle's MOST bottom-row strain; the vertical SGS stress omits the W-node
+`dw/dx, dw/dy` terms.)
+
+**After the sign fix the transport is CORRECT** — `⟨u'w'⟩ < 0` (down-gradient) at
+every level, U(z) log-increasing, σ_w/u_*≈0.9 (PASS). New honest state: with
+correct advection the smooth log-IC needs a LOW C_s (~0.06-0.08) + a finite-
+amplitude perturbation to TRANSITION, but then the resolved eddies under-carry the
+flux (resolved u_*≈0.22 of 0.45; SGS carries the rest), φ_m≈2, σ_u≈4. A STATIC
+C_s cannot be both low enough to transition AND carry the right resolved stress at
+this resolution ⇒ the **dynamic Bou-Zeid LASD C_s(z)** — the goal of this effort,
+already implemented for the compressible plane
+(`_compute_scale_dependent_dynamic_smag_cs_plane`) — is the decisive next step:
+wire it into this spectral core. The method + physics are now correct (validated,
+energy-conserving, divergence-free, DOWN-gradient, ~1000 steps/s); the closure
+coefficient is the remaining piece.
+
 The core method (spectral horizontal + projection + diffusion + wall) is
 validated, sustains turbulence and gives the right surface stress (u_*≈0.32 vs
 0.45 target); the residual over-energy is isolated to the advection operator /

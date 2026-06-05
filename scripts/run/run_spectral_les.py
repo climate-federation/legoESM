@@ -52,7 +52,7 @@ def build(args, dtype):
     z = g.z_c
     u_tar = args.ustar / _KAPPA * jnp.log(jnp.clip(z, args.z0, None) / args.z0)
     key = jax.random.PRNGKey(0)
-    amp = 0.05 * args.ustar / _KAPPA     # ~5% of the bulk wind (gentle spin-up)
+    amp = args.ic_amp * args.ustar / _KAPPA   # IC perturbation (fraction of bulk)
     u = jnp.broadcast_to(u_tar, (args.ny, args.nx, args.nz)).astype(dtype) + (
         amp * jax.random.normal(key, (args.ny, args.nx, args.nz), dtype=dtype))
     v = amp * jax.random.normal(jax.random.PRNGKey(1),
@@ -93,6 +93,7 @@ def main():
     p.add_argument("--dt", type=float, default=0.4)
     p.add_argument("--hours", type=float, default=1.5)
     p.add_argument("--f32", action="store_true")
+    p.add_argument("--ic-amp", type=float, default=0.05, help="IC perturbation as fraction of bulk wind")
     p.add_argument("--tau-bulk", type=float, default=100.0, help="bulk-relax timescale [s]")
     p.add_argument("--print-every", type=int, default=1000)
     p.add_argument("--output", type=Path, default=Path("results/spectral_neutral"))
