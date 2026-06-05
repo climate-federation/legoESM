@@ -331,8 +331,12 @@ def sgs_and_wall(u, v, w, nu_t, g: SpectralLESGrid, u_geo):
     nu_t_f = c2f(nu_t)
     dudz_f = ddz_c2f(u, dz)
     dvdz_f = ddz_c2f(v, dz)
-    tau13_f = nu_t_f * dudz_f                               # interior faces (nz-1)
-    tau23_f = nu_t_f * dvdz_f
+    # FULL vertical SGS stress τ_i3 = 2 ν_t S_i3 = ν_t(∂u_i/∂z + ∂w/∂x_i) on the
+    # interior faces (codex faithfulness: the ∂w/∂x, ∂w/∂y terms were missing).
+    dwdx_i = ddx(w, g)[..., 1:-1]                           # faces → interior (nz-1)
+    dwdy_i = ddy(w, g)[..., 1:-1]
+    tau13_f = nu_t_f * (dudz_f + dwdx_i)                    # interior faces (nz-1)
+    tau23_f = nu_t_f * (dvdz_f + dwdy_i)
     # MOST neutral wall stress at the first centre level z_c[0], Moeng (1984)
     # formulation: the drag uses the PLANAR-MEAN speed ⟨|u₁|⟩, not the local
     # instantaneous |u₁|. Using the local speed makes τ_w ∝ u₁² over-respond to
