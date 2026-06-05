@@ -203,14 +203,15 @@ def barotropic_substeps_latlon_cgrid(
         # u-face coefficient: average of adjacent cell areas
         nu_face_u = baro_alpha * 0.5 * (jnp.roll(area, 1, axis=1) + area)
         nu_face_u = jnp.concatenate([nu_face_u, nu_face_u[:, 0:1]], axis=1)
-        # v-face coefficient: average of adjacent cell areas.  Pole rows
-        # are zero (wall BC); single Pad HLO op replaces alloc-zeros +
-        # concatenate-of-three.  Cast first since pad inherits dtype
-        # from the input slice.
-        nu_face_v_interior = baro_alpha * 0.5 * (area[:-1] + area[1:])
-        nu_face_v = jnp.pad(
-            nu_face_v_interior.astype(eta.dtype), ((1, 1), (0, 0)),
-        )
+        # v-face coefficient: average of adjacent cell areas.  Cell-pad-first
+        # (PR357 Bug-2 pattern): pad the cell AREA so the v-face coefficient
+        # at a partition cut averages the neighbour rank's adjacent cell area
+        # (MPI halo exchange) rather than zero-padding a rank-local interior
+        # average.  Pole rows are zero (wall BC) via zero_polar_lat_ends.
+        from legoesm.grids.halo_latlon import zero_polar_lat_ends
+        area_p = pad_ns_zero(area)
+        nu_face_v = baro_alpha * 0.5 * (area_p[:-1] + area_p[1:])
+        nu_face_v = zero_polar_lat_ends(nu_face_v).astype(eta.dtype)
         # Face masks for land boundaries (zero flux at coastlines)
         diff_u_mask = mask * jnp.roll(mask, 1, axis=1)
         diff_u_mask = jnp.concatenate(
@@ -224,7 +225,6 @@ def barotropic_substeps_latlon_cgrid(
         # the rank that owns it (_fold_is_local).
         mask_p = pad_ns_zero(mask)
         diff_v_mask = mask_p[:-1] * mask_p[1:]
-        from legoesm.grids.halo_latlon import zero_polar_lat_ends
         diff_v_mask = zero_polar_lat_ends(diff_v_mask)
         if _fold_is_local(grid):
             north_dm = mask[-1:] * mask[-1:, grid.fold.perm_T]
