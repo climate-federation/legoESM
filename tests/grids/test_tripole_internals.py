@@ -273,3 +273,35 @@ class TestReadNemoMeshMask:
             raw = _read_nemo_mesh_mask(path)
             assert raw["glamt"].shape == (4, 8)
             assert raw["gphit"].shape == (4, 8)
+
+
+# -------------------------------------------------------------------------
+# gradient_y_cgrid: zero-dy_v south pole row (NEMO min_dx_m=0.0) must not
+# produce NaN/inf before the polar wall-BC overwrite (PR358 review).
+# -------------------------------------------------------------------------
+
+
+class TestGradientYZeroPolarMetric:
+    def test_zero_south_dy_v_is_finite_and_differentiable(self):
+        import equinox as eqx
+        import jax
+        from legoesm.grids.tripole import create_synthetic_tripole
+        from legoesm.grids.operators_latlon_cgrid import gradient_y_cgrid
+
+        g = create_synthetic_tripole(n_lat=16, n_lon=24)
+        # Emulate a NEMO tripole built with min_dx_m=0.0: exact-zero south
+        # pole metric row.  The unified gradient_y path divides every row by
+        # dy_v before zeroing the polar v-faces, so without the safe floor
+        # the south row would be nonzero/0.
+        g0 = eqx.tree_at(lambda t: t.dy_v, g, g.dy_v.at[0].set(0.0))
+        f = (jnp.arange(16, dtype=jnp.float64)[:, None]
+             * jnp.ones((16, 24)))
+
+        out = gradient_y_cgrid(f, g0)
+        assert bool(jnp.all(jnp.isfinite(out))), "gradient_y_cgrid not finite"
+        # Polar wall BC: south v-face gradient is zero.
+        assert float(jnp.max(jnp.abs(out[0]))) == 0.0
+
+        grad = jax.grad(
+            lambda x: jnp.sum(gradient_y_cgrid(x, g0) ** 2))(f)
+        assert bool(jnp.all(jnp.isfinite(grad))), "AD grad not finite"
