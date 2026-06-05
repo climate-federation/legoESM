@@ -100,17 +100,32 @@ def compute_vertical_K_profiles(
 
     conv = physics_config.convection
     if conv.scheme == "enhanced_diffusion":
-        K_conv = _enhanced_diffusion_K(state, z_coord, conv)
-        # Convection enhances tracer diffusivity (and indirectly momentum,
-        # since the static instability is shared with KPP's K_conv).
+        # Fail closed: nu_conv/nu_bg cannot be honoured under KPP (the A_conv
+        # momentum term is gated off below to avoid double-counting KPP's
+        # own interior convective viscosity).  Reject rather than silently
+        # ignore — mirrors the guard in combined.make_ocean_physics.
+        _ed = conv.enhanced_diffusion
+        if vmix.scheme == "kpp" and (_ed.nu_conv != 0.0 or _ed.nu_bg != 0.0):
+            raise ValueError(
+                "EnhancedDiffusionConfig convective momentum viscosity "
+                "(nu_conv/nu_bg) cannot be combined with KPP vertical mixing: "
+                "KPP already enhances interior momentum where N²<0, so "
+                "applying nu_* on top would double-count and is suppressed. "
+                "Set EnhancedDiffusionConfig(nu_conv=0.0, nu_bg=0.0) to let "
+                "KPP own convective momentum, or choose a non-KPP "
+                "vertical_mixing scheme."
+            )
+        K_conv, A_conv = _enhanced_diffusion_K(state, z_coord, conv)
+        # Convection enhances tracer diffusivity (convective_κz).
         K_v_total = K_v_total + K_conv
-        # For momentum, the convective enhancement is also applied in KPP
-        # interior (A_interior includes K_conv).  When KPP is on, that
-        # contribution is already in A_vmix.  When KPP is off, we still
-        # apply K_conv to momentum so the explicit/implicit equivalence
+        # Momentum gets the independent convective viscosity (convective_νz
+        # = ``nu_conv``).  When KPP is on, the KPP interior already enhances
+        # momentum for the same N²<0 instability (A_interior includes its
+        # own K_conv), so adding here would double-count — gate it off.
+        # When KPP is off, apply A_conv so the explicit/implicit equivalence
         # holds for the constant + convection composition.
         if vmix.scheme != "kpp":
-            A_v_total = A_v_total + K_conv
+            A_v_total = A_v_total + A_conv
 
     # Clip to KPP K_max when KPP is the vertical mixing scheme, matching
     # the explicit path's saturation behavior.  Otherwise leave the sum
@@ -279,18 +294,22 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
 
 
 def _enhanced_diffusion_K(state, z_coord, conv_cfg: OceanConvectionConfig):
-    """Diffusivity field used by the ``enhanced_diffusion`` convection scheme."""
+    """``(K_v, A_v)`` fields used by the ``enhanced_diffusion`` scheme.
+
+    Returns the convective tracer diffusivity (``convective_κz``) and the
+    independent momentum viscosity (``convective_νz``) at interfaces,
+    bit-identical to the explicit ``enhanced_diffusion_convection`` path.
+    """
+    from legoesm.ocean.physics.convection.enhanced_diffusion import (
+        convective_K_A_flag,
+    )
     cfg = conv_cfg.enhanced_diffusion
     J = compute_ocean_jacobian(state.eta.data, state.H_bathy.data, z_coord)
     rho = _compute_rho(state, z_coord, J)
-    from legoesm.ocean.eos import compute_buoyancy_frequency
-    N2 = compute_buoyancy_frequency(rho, z_coord.dz_ref, J)
-    if cfg.smooth_transition:
-        K = cfg.K_bg + (cfg.K_conv - cfg.K_bg) * jax.nn.sigmoid(
-            -N2 * cfg.sigmoid_sharpness)
-    else:
-        K = jnp.where(N2 < 0.0, cfg.K_conv, cfg.K_bg)
-    # Return the full K (including the scheme's own K_bg).  Summing
-    # across schemes here is the *same* operation as the explicit path:
-    # ``div(K1·∇T) + div(K2·∇T) = div((K1+K2)·∇T)``.
-    return K
+    # Shared, AD-safe helper — bit-for-bit identical to the explicit
+    # ``enhanced_diffusion_convection`` path (no duplicated numerics).
+    # Returns the full K / A (including the scheme's own backgrounds);
+    # summing across schemes here is the *same* operation as the explicit
+    # path: ``div(K1·∇T) + div(K2·∇T) = div((K1+K2)·∇T)``.
+    K, A, _ = convective_K_A_flag(rho, z_coord.dz_ref, J, cfg)
+    return K, A
