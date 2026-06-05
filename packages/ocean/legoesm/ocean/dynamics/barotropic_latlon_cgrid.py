@@ -211,6 +211,13 @@ def barotropic_substeps_latlon_cgrid(
         from legoesm.grids.halo_latlon import zero_polar_lat_ends
         area_p = pad_ns_zero(area)
         nu_face_v = baro_alpha * 0.5 * (area_p[:-1] + area_p[1:])
+        # The north fold row stays zero, matching the pre-existing serial
+        # behaviour (flux_y = nu_face_v * grad_y * diff_v_mask is therefore
+        # zero across the seam regardless of diff_v_mask).  Enabling
+        # fold-seam barotropic diffusion (a non-zero fold-row coefficient)
+        # is a physics change that requires the gradient_y_cgrid fold fix
+        # (PR358) and a tripolar barotropic-diffusion validation case, so it
+        # is deferred to PR358 rather than introduced unvalidated here.
         nu_face_v = zero_polar_lat_ends(nu_face_v).astype(eta.dtype)
         # Face masks for land boundaries (zero flux at coastlines)
         diff_u_mask = mask * jnp.roll(mask, 1, axis=1)
