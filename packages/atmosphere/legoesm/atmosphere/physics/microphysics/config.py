@@ -138,6 +138,45 @@ class MorrisonConfig(NamedTuple):
     nuc_T_sharpness: float = 3.0        # 1/K — ramp ~0.3 K at 265.15 K
     ice_nuc_radius: float = 10.0e-6     # Initial nucleated crystal radius [m]
     #                                     (SAM MI0 = 4/3·π·ρ_ci·r³)
+    # Homogeneous ice nucleation (Koop 2000 / Kärcher-Lohmann 2002) — OPT-IN.
+    # SAM M2005 Cooper (INUC=0) carries ONLY primary/heterogeneous ice (≤500/L),
+    # so NOTHING caps cirrus ice-supersaturation: the diffusional-growth rate
+    # EPSI ∝ N_i^⅔·q_i^⅓ bootstraps slowly when fresh convective outflow floods
+    # an upper-tropospheric level with vapour, leaving RH_ice far above 100%
+    # (transiently >1000% in a violent small-domain RCE spin-up — the deposition
+    # sink lags the convective source). Real cirrus homogeneous freezing of
+    # aqueous haze bursts a HIGH crystal number once RH_ice exceeds the
+    # homogeneous threshold S_hom(T); those crystals deposit the excess vapour
+    # and pin RH_ice near S_hom (~1.5-1.6). This adds that missing process as a
+    # supersaturation-gated ice-NUMBER (+seed-mass) source that feeds the
+    # EXISTING M2005 deposition (so the vapour/ice/number/heat budgets + donor
+    # clamps stay consistent automatically). Default OFF ⇒ byte-identical to the
+    # SAM-faithful Cooper-only path; enable for RCE cirrus realism. AD-safe.
+    #   S_hom(T) = koop_s_hom_a − koop_s_hom_b·T  [K-units], clipped to
+    #   [koop_s_hom_min, koop_s_hom_max]: ≈1.64 at 185 K, ≈1.58 at 200 K,
+    #   ≈1.44 at 235 K. This is the Ren & MacKenzie (2005, QJRMS 131:1585)
+    #   ANALYTICAL LINEAR FIT to the Koop et al. (2000, Nature 406) water-
+    #   activity homogeneous-freezing threshold for a representative critical
+    #   nucleation rate; NOT Koop's full J(Δa_w) integral. Only valid in the
+    #   cold cirrus regime, so activation is additionally gated on T below
+    #   ``hom_freeze_T_max`` (homogeneous freezing of aqueous haze needs
+    #   T ≲ −38 °C). The ``koop_s_hom_min`` floor only bites for T the cold
+    #   gate has already switched off.
+    homogeneous_ice_nucleation: bool = False
+    koop_s_hom_a: float = 2.349         # Ren-MacKenzie 2005 intercept [-]
+    koop_s_hom_b: float = 1.0 / 259.0   # Ren-MacKenzie 2005 slope [1/K]
+    koop_s_hom_min: float = 1.4         # floor on S_hom [-]
+    koop_s_hom_max: float = 1.7         # cap on S_hom [-]
+    hom_freeze_T_max: float = 235.0     # max T for homogeneous freezing [K]
+    hom_freeze_T_sharpness: float = 1.0  # cold-gate ramp [1/K] (~few-K width)
+    hom_ice_nuc_sharpness: float = 200.0  # smooth RH_ice gate ramp [1/(RH unit)]
+    hom_ice_nuc_N: float = 1.0e6        # homogeneous crystal number [1/m³]
+    #                                     (~1 cm⁻³; Kärcher-Lohmann 2002 cirrus
+    #                                     range 1e4-1e7 /m³); stored per-mass via
+    #                                     /ρ. STABILITY: the boosted diffusional-
+    #                                     growth EPSI·dt/ABI stays <1 (no explicit
+    #                                     overshoot) for N up to ~1e7 /m³ at
+    #                                     dt≤20 s; an ON-only cap backstops it.
     # Depositional growth + sublimation.
     #   "m2005" (default) = faithful SAM M2005 diffusional growth
     #     PRD = EPSI·(q_v−q_sat_i)/ABI with EPSI ∝ ρ·DV·N_i^⅔·q_i^⅓ and the

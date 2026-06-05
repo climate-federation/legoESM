@@ -203,9 +203,56 @@ def morrison_microphysics(
     )
     dq_i_nuc = dN_i_nuc * mi0
 
+    # 1b. Homogeneous ice nucleation (Koop 2000 / Kärcher-Lohmann 2002) — OPT-IN.
+    # SAM's Cooper-only ice (≤500/L) leaves NOTHING to cap cirrus ice-super-
+    # saturation, so violent convective outflow can pile q_v to RH_ice ≫ 100 %
+    # faster than the N_i^⅔·q_i^⅓ deposition bootstraps. Real cirrus homogeneous
+    # freezing of aqueous haze bursts a high crystal number once RH_ice exceeds
+    # the homogeneous threshold S_hom(T); the fresh crystals (+ seed mass) feed
+    # the EXISTING M2005 deposition below (N_i / q_i boosts), which then deposits
+    # the excess vapour and pins RH_ice near S_hom. Folded into dN_i_nuc/dq_i_nuc
+    # AFTER §2 so every downstream budget (vapour sink, ice mass/number, L_s
+    # heat, donor clamps) accounts for it once, consistently.
+    if config.homogeneous_ice_nucleation:
+        s_hom = jnp.clip(
+            config.koop_s_hom_a - config.koop_s_hom_b * T,
+            config.koop_s_hom_min, config.koop_s_hom_max,
+        )
+        # Two smooth gates: (i) ice supersaturation past the homogeneous
+        # threshold RH_ice ≥ S_hom; (ii) COLD temperature T ≤ hom_freeze_T_max
+        # (homogeneous freezing of aqueous haze is a deep-cold-cirrus process,
+        # T ≲ −38 °C — do NOT reuse f_ice, which stays ≈1 up to ~260 K and would
+        # let it fire far too warm).
+        hom_gate = (
+            jax.nn.sigmoid(config.hom_ice_nuc_sharpness * (rh_ice - s_hom))
+            * jax.nn.sigmoid(
+                config.hom_freeze_T_sharpness * (config.hom_freeze_T_max - T))
+        )
+        n_hom_target = config.hom_ice_nuc_N / jnp.clip(rho, 0.1)  # per-mass
+        dN_i_hom = (
+            jnp.clip(n_hom_target - jnp.clip(N_i, 0.0), 0.0)
+            / jnp.clip(dt, 1.0) * hom_gate
+        )
+        dq_i_hom = dN_i_hom * mi0
+    else:
+        dN_i_hom = jnp.zeros_like(N_i)
+        dq_i_hom = jnp.zeros_like(q_v)
+
     # 2. Depositional growth + sublimation (SAM M2005 PRD/EPRD,
     #    module_mp_graupel.f90:3427-3514). q_sat_i computed above (§1).
     q_i_eff = jnp.maximum(jnp.clip(q_i, 0.0), config.q_i_min_growth)
+    # Crystals + seed mass freshly produced by homogeneous nucleation (§1b) are
+    # available to deposit vapour THIS step (homogeneous freezing + diffusional
+    # growth are near-instantaneous vs dt) — boost the EPSI number/mass so the
+    # cap engages without a one-step lag. Python static-bool gate (config field,
+    # NOT traced) so the default-OFF path is the ORIGINAL operation graph,
+    # byte-identical to the SAM-faithful Cooper-only deposition.
+    if config.homogeneous_ice_nucleation:
+        N_i_dep = jnp.clip(N_i, 0.0) + dN_i_hom * dt
+        q_i_dep_eff = jnp.maximum(q_i_eff + dq_i_hom * dt, config.q_i_min_growth)
+    else:
+        N_i_dep = jnp.clip(N_i, 0.0)
+        q_i_dep_eff = q_i_eff
     # SAM PRCI ice→snow autoconversion (set inside the m2005 deposition block,
     # which provides DV/ABI/q_sat_i); 0 for the heuristic deposition path.
     ice_to_snow_m2005 = jnp.zeros_like(jnp.clip(q_i, 0.0))
@@ -230,8 +277,8 @@ def morrison_microphysics(
         epsi = (
             2.0 * jnp.pi / cons12_cbrt
             * rho * dv_vap
-            * safe_pow(jnp.clip(N_i, 0.0), 2.0 / 3.0)
-            * safe_pow(q_i_eff, 1.0 / 3.0)
+            * safe_pow(N_i_dep, 2.0 / 3.0)
+            * safe_pow(q_i_dep_eff, 1.0 / 3.0)
         )
         dep_raw = (
             config.ice_deposition_efficiency * epsi
@@ -246,6 +293,18 @@ def morrison_microphysics(
         # that wrongly suppressed warm-mixed-phase (265–273 K) ice growth
         # and the emergent WBF there. Sublimation stays donor-clamped.
         dep_pos = jnp.maximum(dep_raw, 0.0)
+        if config.homogeneous_ice_nucleation:
+            # Stability backstop (ON-path only ⇒ OFF graph unchanged): the
+            # homogeneous-boosted EPSI can make the explicit deposition stiff
+            # (EPSI·dt/ABI → 1); cap the positive deposition at the available
+            # ice supersaturation so q_v cannot OVERSHOOT below q_sat_i in one
+            # step (which would flip to spurious sublimation / oscillation).
+            # This is the analytic single-step relaxation limit, NOT a clip of a
+            # physical quantity — deposition physically halts at saturation.
+            dep_pos = jnp.minimum(
+                dep_pos,
+                jnp.maximum(q_v - q_sat_i, 0.0) / jnp.clip(dt, 1.0),
+            )
         subl_neg = jnp.maximum(
             jnp.minimum(dep_raw, 0.0),
             -jnp.clip(q_i, 0.0) / jnp.clip(dt, 1.0),
@@ -302,6 +361,16 @@ def morrison_microphysics(
             f"{config.ice_deposition_scheme!r}; choose 'm2005' (SAM "
             f"M2005 diffusional growth) or 'heuristic' (legacy)."
         )
+
+    # Fold homogeneous nucleation (§1b) into the Cooper nucleation source so the
+    # vapour sink (−dq_i_nuc), ice mass (+dq_i_nuc), ice number (+dN_i_nuc), L_s
+    # heat (+L_s·dq_i_nuc) and the vapour donor clamp all account for it ONCE.
+    # The bulk of the supersaturation removal is the boosted deposition dq_i_dep
+    # (via N_i_dep/q_i_dep_eff above); this seed term is the small MNUCCD mass.
+    # Static-bool gate ⇒ default-OFF leaves dN_i_nuc/dq_i_nuc untouched.
+    if config.homogeneous_ice_nucleation:
+        dN_i_nuc = dN_i_nuc + dN_i_hom
+        dq_i_nuc = dq_i_nuc + dq_i_hom
 
     # 3. Wegener-Bergeron-Findeisen: cloud water -> ice in the mixed phase.
     # SAM M2005 (faithful) has NO explicit Bergeron rate — WBF EMERGES from
