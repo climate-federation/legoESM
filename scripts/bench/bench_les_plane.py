@@ -35,13 +35,19 @@ import time
 from pathlib import Path
 
 import jax
-import jax.numpy as jnp
-import numpy as np
+
+# Precision is selected BEFORE importing the driver / building the grid, since
+# the grid dtype is fixed at x64-config time. fp32 is the production LES mode on
+# consumer GPUs (RTX 50xx fp64 is ~1/64 of fp32); fp64 is for the bit-exact
+# correctness tests.
+if "--f32" not in sys.argv:
+    jax.config.update("jax_enable_x64", True)
+
+import jax.numpy as jnp  # noqa: E402
+import numpy as np  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "run"))
 import run_les_plane as rlp  # noqa: E402
-
-jax.config.update("jax_enable_x64", True)
 
 
 def _build(case, nx, ny, nlev, dx, H, dz_sfc, dt, sgs):
@@ -53,30 +59,46 @@ def _build(case, nx, ny, nlev, dx, H, dz_sfc, dt, sgs):
         static_sgs=(sgs == "static"),
         scale_dependent=(sgs == "lasd"),
         n_acoustic_substeps=8, hyperdiff=1.0e-3,
+        f32=("--f32" in sys.argv),
     )
     return rlp.build(args), args
 
 
-def bench(case, nx, ny, nlev, dx, H, dz_sfc, dt, sgs, nsteps):
+def bench(case, nx, ny, nlev, dx, H, dz_sfc, dt, sgs, nsteps, scan=False):
     (model, state, surf, grid, hc, spec), args = _build(
         case, nx, ny, nlev, dx, H, dz_sfc, dt, sgs)
 
-    def one(state, t):
-        # model.step and surf are each internally JIT-compiled (matches the
-        # production driver loop); no outer jit (it would nest over the already-
-        # jitted surf and leak a tracer).
-        state = model.step(state, dt=dt, physics_fn=None)
-        return surf(state, t)
+    surf_raw = surf.__wrapped__ if hasattr(surf, "__wrapped__") else surf
 
-    # Warm-up (compile) — excluded from timing.
-    state = one(state, jnp.asarray(0.0))
-    jax.block_until_ready(state)
-
-    t0 = time.time()
-    for i in range(nsteps):
-        state = one(state, jnp.asarray(i * dt))
-    jax.block_until_ready(state)
-    wall = time.time() - t0
+    if scan:
+        # Whole trajectory as ONE jitted lax.scan — no per-step Python dispatch
+        # / kernel-launch overhead. This is the throughput-critical path for the
+        # multi-hour LES runs (the compressible dycore fires thousands of small
+        # kernels per step, so the run is launch-bound, not compute-bound; a
+        # Python for-loop pays that dispatch cost every step).
+        @jax.jit
+        def run(state):
+            def body(s, i):
+                s = model.step(s, dt=dt, physics_fn=None)
+                s = surf_raw(s, i.astype(jnp.float64 if jax.config.jax_enable_x64
+                                         else jnp.float32) * dt)
+                return s, None
+            s, _ = jax.lax.scan(body, state, jnp.arange(nsteps))
+            return s
+        state = jax.block_until_ready(run(state))   # warm-up (compile)
+        t0 = time.time()
+        state = jax.block_until_ready(run(state))
+        wall = time.time() - t0
+    else:
+        def one(state, t):
+            state = model.step(state, dt=dt, physics_fn=None)
+            return surf(state, t)
+        state = jax.block_until_ready(one(state, jnp.asarray(0.0)))  # warm-up
+        t0 = time.time()
+        for i in range(nsteps):
+            state = one(state, jnp.asarray(i * dt))
+        jax.block_until_ready(state)
+        wall = time.time() - t0
 
     ncell = nx * ny * nlev
     sps = nsteps / wall
@@ -105,8 +127,13 @@ def main():
     p.add_argument("--dt", type=float, default=0.05)
     p.add_argument("--sgs", choices=["static", "germano", "lasd"], default="lasd")
     p.add_argument("--nsteps", type=int, default=50)
+    p.add_argument("--f32", action="store_true",
+                   help="Run in float32 (production LES GPU mode). Default fp64.")
+    p.add_argument("--scan", action="store_true",
+                   help="Run the time loop inside one jitted lax.scan (no per-step dispatch).")
     a = p.parse_args()
-    bench(a.case, a.nx, a.ny, a.nlev, a.dx, a.H, a.dz_sfc, a.dt, a.sgs, a.nsteps)
+    bench(a.case, a.nx, a.ny, a.nlev, a.dx, a.H, a.dz_sfc, a.dt, a.sgs,
+          a.nsteps, scan=a.scan)
     return 0
 
 

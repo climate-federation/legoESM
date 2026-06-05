@@ -59,7 +59,25 @@ from legoesm.timestepping.tridiagonal import thomas_solve
 from legoesm.grids.plane import create_plane_grid
 from legoesm.grids.vertical import create_stretched_height_coordinate
 
-jax.config.update("jax_enable_x64", True)
+# x64 is enabled in main() unless --f32 is given (production GPU LES runs in
+# float32 — RTX 50xx fp64 is ~1/64 of fp32 — and float32 keeps grid+hc+state in
+# ONE dtype so the time loop can be a single jitted lax.scan; see build()).
+_DEFAULT_X64 = "--f32" not in sys.argv
+jax.config.update("jax_enable_x64", _DEFAULT_X64)
+
+
+def _cast_height_coord(hc, dtype):
+    """Cast every floating array field of a HeightCoordinate to ``dtype`` so the
+    vertical coordinate matches the grid + state dtype (the dycore otherwise
+    silently upcasts the whole state to the hc dtype, defeating float32)."""
+    fields = {}
+    for name in hc._fields:
+        val = getattr(hc, name)
+        if isinstance(val, jnp.ndarray) and jnp.issubdtype(val.dtype, jnp.floating):
+            fields[name] = val.astype(dtype)
+        else:
+            fields[name] = val
+    return hc._replace(**fields)
 
 
 # --------------------------------------------------------------------------- #
@@ -264,14 +282,19 @@ def build(args):
     f_c = spec["f_c"]
     ug, vg, z0 = spec["ug"], spec["vg"], spec["z0"]
 
+    # Single consistent dtype across grid + hc + state so the dycore does not
+    # upcast (and so the time loop can be one jitted lax.scan): float32 for
+    # production GPU runs (--f32), float64 for the bit-exact science default.
+    dtype = jnp.float32 if getattr(args, "f32", False) else jnp.float64
     grid = create_plane_grid(nx=nx, ny=ny, nlev=nlev, dx=dx, dy=dx,
-                             coriolis_mode="f_plane", f0=f_c)
+                             coriolis_mode="f_plane", f0=f_c, dtype=dtype)
     hc = create_stretched_height_coordinate(
         nlev, H=H, dz_sfc=dz_sfc, theta_ref_fn=spec["theta_ref_fn"],
         p_sfc=1.0e5)
+    hc = _cast_height_coord(hc, dtype)
     # Geostrophic reference wind for the SAM-form Coriolis (f·(u−ug0)).
-    ug0 = jnp.full(nlev, ug)
-    vg0 = jnp.full(nlev, vg)
+    ug0 = jnp.full(nlev, ug, dtype=dtype)
+    vg0 = jnp.full(nlev, vg, dtype=dtype)
     hc = hc._replace(u_geo0=ug0, v_geo0=vg0)
     tm = make_flat_plane_terrain_metric(grid, hc)
 
@@ -430,6 +453,11 @@ def main():
     p.add_argument("--si-w-filter", type=float, default=0.2,
                    help="Vertical Laplacian filter ν on w inside the SI solve "
                         "(damps 2Δz w noise).")
+    p.add_argument("--f32", action="store_true",
+                   help="Run in float32 (production GPU LES). Keeps grid+hc+state "
+                        "in one dtype (no dycore upcast) so the run is fast on "
+                        "consumer GPUs and the time loop can be a single scan. "
+                        "Default float64 (bit-exact science).")
     p.add_argument("--static-sgs", action="store_true",
                    help="Use fixed-C_s Smagorinsky (diagnostic) instead of the "
                         "dynamic coefficient.")
