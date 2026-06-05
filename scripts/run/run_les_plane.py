@@ -241,9 +241,14 @@ def build(args):
         # LES dynamic Smagorinsky.
         smagorinsky_cs=0.17,                 # fallback / initial value
         smagorinsky_dynamic=not args.static_sgs,
-        smagorinsky_dynamic_cs_max=0.3,
+        # Bou-Zeid et al. (2005) scale-dependent dynamic (LASD) — the jax-alfa
+        # oracle closure. cs_max=1.0 to match the oracle's [0,1] C_s² mask.
+        smagorinsky_scale_dependent=args.scale_dependent,
+        smagorinsky_dynamic_cs_max=1.0 if args.scale_dependent else 0.3,
         smagorinsky_prandtl=1.0,
-        smagorinsky_wall_damping=True,       # LES: cap l_m at κz near the wall
+        # LASD's β IS the near-wall scale correction; do NOT also apply the
+        # Mason κz cap (the oracle does not). Standard Germano keeps the cap.
+        smagorinsky_wall_damping=not args.scale_dependent,
         smagorinsky_delta_max=1.0e30,        # fine grid: no horizontal Δ cap
         sgs_vertical_diffusion=True,   # 3D dynamic SGS for resolved eddies; column adds surface coupling
         # weak biharmonic for the 2Δ acoustic mode; small sponge at the top.
@@ -329,6 +334,12 @@ def main():
     p.add_argument("--static-sgs", action="store_true",
                    help="Use fixed-C_s Smagorinsky (diagnostic) instead of the "
                         "dynamic coefficient.")
+    p.add_argument("--scale-dependent", action="store_true",
+                   help="Use the Bou-Zeid et al. (2005) scale-dependent dynamic "
+                        "(LASD) SGS closure — the jax-alfa oracle model — "
+                        "instead of the standard (scale-invariant) Germano "
+                        "dynamic coefficient. Requires the dynamic path "
+                        "(i.e. not --static-sgs).")
     p.add_argument("--n-acoustic-substeps", type=int, default=8,
                    help="Horizontal acoustic substeps per dt. Need "
                         "c·(dt/n)/dx < 1 (c≈340): for dx=25 m, dt=0.5 s ⇒ n≳7.")

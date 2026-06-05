@@ -1221,6 +1221,139 @@ def _horizontal_box_filter_plane(field_yxz: jax.Array) -> jax.Array:
     return (jnp.roll(fx, 1, axis=0) + fx + jnp.roll(fx, -1, axis=0)) / 3.0
 
 
+def _centre_velocities_and_strain_plane(
+    u_yxz: jax.Array,
+    v_yxz: jax.Array,
+    w_yxz_half: jax.Array,
+    grid: PlaneGrid,
+    height_coord: HeightCoordinate,
+):
+    """A-grid cell-centre velocities + full resolved strain tensor ``S_ij``.
+
+    Shared by BOTH dynamic-Smagorinsky paths (standard Germano
+    :func:`_compute_dynamic_smag_cs_plane` and scale-dependent
+    :func:`_compute_scale_dependent_dynamic_smag_cs_plane`) so the two closures
+    diagnose ``C_s`` from byte-identical resolved strain. Centred A-grid
+    differences in the horizontal; the existing full-level centred operator in
+    the vertical. ``Smag = √(2 S_ij S_ij)`` (the SAM/jax-alfa convention)."""
+    uc = 0.5 * (u_yxz + jnp.roll(u_yxz, -1, axis=1))
+    vc = 0.5 * (v_yxz + jnp.roll(v_yxz, -1, axis=0))
+    wc = 0.5 * (w_yxz_half[..., :-1] + w_yxz_half[..., 1:])
+
+    dudx = (jnp.roll(uc, -1, axis=1) - jnp.roll(uc, 1, axis=1)) / (2.0 * grid.dx)
+    dvdx = (jnp.roll(vc, -1, axis=1) - jnp.roll(vc, 1, axis=1)) / (2.0 * grid.dx)
+    dwdx = (jnp.roll(wc, -1, axis=1) - jnp.roll(wc, 1, axis=1)) / (2.0 * grid.dx)
+    dudy = (jnp.roll(uc, -1, axis=0) - jnp.roll(uc, 1, axis=0)) / (2.0 * grid.dy)
+    dvdy = (jnp.roll(vc, -1, axis=0) - jnp.roll(vc, 1, axis=0)) / (2.0 * grid.dy)
+    dwdy = (jnp.roll(wc, -1, axis=0) - jnp.roll(wc, 1, axis=0)) / (2.0 * grid.dy)
+    dudz = _full_level_centred_d_dz(uc, height_coord)
+    dvdz = _full_level_centred_d_dz(vc, height_coord)
+    dwdz = _full_level_centred_d_dz(wc, height_coord)
+
+    S11, S22, S33 = dudx, dvdy, dwdz
+    S12 = 0.5 * (dudy + dvdx)
+    S13 = 0.5 * (dudz + dwdx)
+    S23 = 0.5 * (dvdz + dwdy)
+    Smag = jnp.sqrt(jnp.maximum(
+        2.0 * (S11 ** 2 + S22 ** 2 + S33 ** 2
+               + 2.0 * (S12 ** 2 + S13 ** 2 + S23 ** 2)),
+        1.0e-30))
+    return uc, vc, wc, S11, S22, S33, S12, S13, S23, Smag
+
+
+def _spectral_lowpass_plane(field_yxz: jax.Array, cut_y: int, cut_x: int):
+    """Sharp spectral cutoff TEST filter over the periodic ``(y, x)`` plane.
+
+    Faithful to the jax-alfa LES oracle (``operations/Filtering.py``
+    ``Filtering_Level1/2``): ``rfft2`` over the horizontal, zero every mode with
+    ``|k_y| ≥ cut_y`` or ``k_x ≥ cut_x``, inverse-transform. ``cut = round(N /
+    (2·width_ratio))`` so a test-filter width ratio of 2 keeps ``N/4`` modes per
+    axis (level-1, 2Δ) and ratio 4 keeps ``N/8`` (level-2, 4Δ). Vertical is left
+    unfiltered — the ABL LES is homogeneous only in the horizontal, so the
+    dynamic test filter acts in ``(x, y)`` (standard, Bou-Zeid et al. 2005)."""
+    ny, nx = field_yxz.shape[0], field_yxz.shape[1]
+    fh = jnp.fft.rfft2(field_yxz, axes=(0, 1))
+    iy = jnp.arange(ny)
+    fold_y = jnp.minimum(iy, ny - iy)                       # |k_y| index
+    mask_y = (fold_y < cut_y)[:, None, None]
+    mask_x = (jnp.arange(fh.shape[1]) < cut_x)[None, :, None]
+    fh = jnp.where(mask_y & mask_x, fh, 0.0)
+    return jnp.fft.irfft2(fh, axes=(0, 1), s=(ny, nx))
+
+
+def _imfilter_box3_plane(field_yxz: jax.Array) -> jax.Array:
+    """Periodic 3×3 horizontal box (top-hat) average, per vertical level.
+
+    The local-averaging operator of the LASD model (jax-alfa
+    ``Utilities.Imfilter``): smooths the pointwise Germano ratio
+    ``L_ij M_ij / M_ij M_ij`` over a 3×3 stencil before forming ``C_s²`` so the
+    coefficient is *locally* (not plane-) averaged — the defining feature of the
+    LASD closure relative to the plane-averaged Germano procedure."""
+    fx = (jnp.roll(field_yxz, 1, axis=1) + field_yxz
+          + jnp.roll(field_yxz, -1, axis=1)) / 3.0
+    return (jnp.roll(fx, 1, axis=0) + fx + jnp.roll(fx, -1, axis=0)) / 3.0
+
+
+def _laguerre_max_real_root_beta(coeffs6: jax.Array) -> jax.Array:
+    """Largest real root in ``(0, 5)`` of a quintic, default ``1.0``.
+
+    Faithful port of the jax-alfa β-solver (``Utilities.Roots`` Laguerre +
+    ``DynamicSGS_LASDD_SM.ComputeBeta1``): solve ``ff·x⁵+ee·x⁴+…+aa=0`` for the
+    scale-dependence parameter ``β = C_s²(2Δ)/C_s²(Δ)`` from a spread of fixed
+    initial guesses, keep the max real root in ``(0,5)``, fall back to ``β=1``
+    (scale-invariant) where no valid root exists. Pure arithmetic + a
+    fixed-trip ``while_loop`` ⇒ JIT/AD-safe (no host callback, static shapes).
+
+    ``coeffs6`` is ``(..., 6)`` in DESCENDING degree ``[ff, ee, dd, cc, bb, aa]``.
+    """
+    cdtype = jnp.complex128 if jax.config.jax_enable_x64 else jnp.complex64
+    guesses = jnp.array([0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.5], cdtype)
+    n_deg = 5
+    tol = 1e-6
+    max_iter = 20
+
+    def one_root(coeffs, x0):
+        coeffs = coeffs.astype(cdtype)
+        eps = 1e-16 + 0j
+
+        def step(carry, _):
+            # FIXED-trip scan (static ``max_iter``) instead of a while_loop so
+            # the solver is reverse-mode differentiable (legoESM end-to-end AD).
+            # ``conv`` FREEZES x once the Laguerre step converges, so the extra
+            # iterations are no-ops (no post-convergence drift / NaN).
+            x, conv = carry
+            f = jnp.polyval(coeffs, x)
+            df = jnp.polyval(jnp.polyder(coeffs), x)
+            d2f = jnp.polyval(jnp.polyder(jnp.polyder(coeffs)), x)
+            fs = jnp.where(jnp.abs(f) < jnp.abs(eps), eps, f)
+            G = df / fs
+            H = G ** 2 - d2f / fs
+            disc = (n_deg - 1) * (n_deg * H - G ** 2)
+            sq = jnp.sqrt(disc)
+            d1, d2 = G + sq, G - sq
+            denom = jnp.where(jnp.abs(d1) > jnp.abs(d2), d1, d2)
+            denom = jnp.where(jnp.abs(denom) < jnp.abs(eps), eps, denom)
+            xn = x - n_deg / denom
+            now = (jnp.abs(xn - x) < tol * (1 + jnp.abs(x))) | (jnp.abs(f) < tol)
+            x_next = jnp.where(conv, x, xn)
+            return (x_next, conv | now), None
+
+        (xf, conv), _ = jax.lax.scan(
+            step, (x0, jnp.array(False)), None, length=max_iter)
+        return jnp.where(conv, xf, jnp.nan + 0j)
+
+    def per_level(coeffs):
+        roots = jax.vmap(lambda g: one_root(coeffs, g))(guesses)
+        valid = jnp.where(
+            (jnp.abs(jnp.imag(roots)) < 1e-6)
+            & (jnp.real(roots) > 0.0) & (jnp.real(roots) < 5.0),
+            jnp.real(roots), jnp.nan)
+        mx = jnp.nanmax(valid)
+        return jnp.where(jnp.isnan(mx), 1.0, mx)
+
+    return jax.vmap(per_level)(coeffs6)
+
+
 def _compute_dynamic_smag_cs_plane(
     u_yxz: jax.Array,
     v_yxz: jax.Array,
@@ -1253,30 +1386,9 @@ def _compute_dynamic_smag_cs_plane(
     MPI runs use the static closure (validated serial=MPI). AD/JIT-safe.
     """
     nlev = u_yxz.shape[-1]
-    # --- A-grid cell-centre velocities (C-grid → centre) ---
-    uc = 0.5 * (u_yxz + jnp.roll(u_yxz, -1, axis=1))
-    vc = 0.5 * (v_yxz + jnp.roll(v_yxz, -1, axis=0))
-    wc = 0.5 * (w_yxz_half[..., :-1] + w_yxz_half[..., 1:])
-
-    # --- Resolved strain S_ij at centres (centred A-grid differences) ---
-    dudx = (jnp.roll(uc, -1, axis=1) - jnp.roll(uc, 1, axis=1)) / (2.0 * grid.dx)
-    dvdx = (jnp.roll(vc, -1, axis=1) - jnp.roll(vc, 1, axis=1)) / (2.0 * grid.dx)
-    dwdx = (jnp.roll(wc, -1, axis=1) - jnp.roll(wc, 1, axis=1)) / (2.0 * grid.dx)
-    dudy = (jnp.roll(uc, -1, axis=0) - jnp.roll(uc, 1, axis=0)) / (2.0 * grid.dy)
-    dvdy = (jnp.roll(vc, -1, axis=0) - jnp.roll(vc, 1, axis=0)) / (2.0 * grid.dy)
-    dwdy = (jnp.roll(wc, -1, axis=0) - jnp.roll(wc, 1, axis=0)) / (2.0 * grid.dy)
-    dudz = _full_level_centred_d_dz(uc, height_coord)
-    dvdz = _full_level_centred_d_dz(vc, height_coord)
-    dwdz = _full_level_centred_d_dz(wc, height_coord)
-
-    S11, S22, S33 = dudx, dvdy, dwdz
-    S12 = 0.5 * (dudy + dvdx)
-    S13 = 0.5 * (dudz + dwdx)
-    S23 = 0.5 * (dvdz + dwdy)
-    Smag = jnp.sqrt(jnp.maximum(
-        2.0 * (S11 ** 2 + S22 ** 2 + S33 ** 2
-               + 2.0 * (S12 ** 2 + S13 ** 2 + S23 ** 2)),
-        1.0e-30))
+    uc, vc, wc, S11, S22, S33, S12, S13, S23, Smag = (
+        _centre_velocities_and_strain_plane(
+            u_yxz, v_yxz, w_yxz_half, grid, height_coord))
 
     F = _horizontal_box_filter_plane
     alpha2 = 4.0  # (test/grid filter-width ratio)² = 2²
@@ -1329,6 +1441,156 @@ def _compute_dynamic_smag_cs_plane(
     # √1e-24 = 1e-12 is a negligible C_s floor.
     cs_sq = jnp.clip(cs_sq, 1.0e-24, cs_max ** 2)
     return jnp.sqrt(cs_sq)                                 # C_s(z), (nlev,)
+
+
+def _compute_scale_dependent_dynamic_smag_cs_plane(
+    u_yxz: jax.Array,
+    v_yxz: jax.Array,
+    w_yxz_half: jax.Array,
+    grid: PlaneGrid,
+    height_coord: HeightCoordinate,
+    cs_max: float = 1.0,
+) -> jax.Array:
+    """Scale-dependent dynamic Smagorinsky ``C_s`` (Bou-Zeid–Meneveau–Parlange
+    2005, the LASD closure of the jax-alfa LES oracle).
+
+    Faithful port of ``DynamicSGS_LASDD_SM.LASDD``. The standard Germano
+    procedure (:func:`_compute_dynamic_smag_cs_plane`) assumes ``C_s`` is
+    SCALE-INVARIANT — ``β = C_s²(2Δ)/C_s²(Δ) = 1`` — which over-dissipates near
+    the wall where ``Δ`` is no longer ≪ the integral scale. LASD relaxes this by
+    adding a SECOND test filter at ``4Δ`` and solving the Germano identity at
+    both ratios for ``β`` per level, then forms
+
+        M_ij = 2Δ²·F̂(|S|S_ij) − 2(2Δ)²·β·|Ŝ|·Ŝ_ij
+        C_s²(x,y,z) = Imfilter(L_ij^d M_ij) / Imfilter(M_ij M_ij)
+
+    with ``L_ij`` the resolved (Leonard) stress at ``2Δ`` and ``F̂`` the sharp
+    spectral test filter. The β polynomial coefficients are plane-averaged (per
+    level), exactly as the oracle; the final ``C_s²`` is LOCALLY averaged
+    (3×3 Imfilter) and returned as a 3D field — the operator
+    :func:`_compute_smagorinsky_K_m_plane` broadcasts a 3D ``c_s`` over ``Δ``.
+
+    Returns ``C_s`` (NOT squared), shape ``(ny, nx, nlev)``. Single-rank/GPU LES
+    (plane-mean β + spectral filter over the LOCAL tile); MPI uses the static
+    closure, like the Germano path.
+    """
+    ny, nx, nlev = u_yxz.shape
+    TFR = 2.0
+    uc, vc, wc, S11, S22, S33, S12, S13, S23, S = (
+        _centre_velocities_and_strain_plane(
+            u_yxz, v_yxz, w_yxz_half, grid, height_coord))
+
+    # Grid filter width Δ per level (FGR=1) and the planar-mean helper.
+    delta = (grid.dx * grid.dy * height_coord.dz) ** (1.0 / 3.0)   # (nlev,)
+    L2 = (delta ** 2).reshape(1, 1, nlev)                          # Δ² (1,1,nz)
+
+    cut1y, cut1x = round(ny / (2 * TFR)), round(nx / (2 * TFR))    # 2Δ
+    cut2y, cut2x = round(ny / (2 * TFR * TFR)), round(nx / (2 * TFR * TFR))  # 4Δ
+    F1 = lambda f: _spectral_lowpass_plane(f, cut1y, cut1x)        # noqa: E731
+    F2 = lambda f: _spectral_lowpass_plane(f, cut2y, cut2x)        # noqa: E731
+    pmean = lambda f: jnp.mean(f, axis=(0, 1))                     # noqa: E731
+
+    # Test-filtered velocities + products at both levels (Leonard/Q stresses).
+    u_h, v_h, w_h = F1(uc), F1(vc), F1(wc)
+    u_d, v_d, w_d = F2(uc), F2(vc), F2(wc)
+    L11 = F1(uc * uc) - u_h * u_h
+    L22 = F1(vc * vc) - v_h * v_h
+    L33 = F1(wc * wc) - w_h * w_h
+    L12 = F1(uc * vc) - u_h * v_h
+    L13 = F1(uc * wc) - u_h * w_h
+    L23 = F1(vc * wc) - v_h * w_h
+    Q11 = F2(uc * uc) - u_d * u_d
+    Q22 = F2(vc * vc) - v_d * v_d
+    Q33 = F2(wc * wc) - w_d * w_d
+    Q12 = F2(uc * vc) - u_d * v_d
+    Q13 = F2(uc * wc) - u_d * w_d
+    Q23 = F2(vc * wc) - v_d * w_d
+
+    # Test-filtered strain components and their magnitudes.
+    S11h, S22h, S33h = F1(S11), F1(S22), F1(S33)
+    S12h, S13h, S23h = F1(S12), F1(S13), F1(S23)
+    S11d, S22d, S33d = F2(S11), F2(S22), F2(S33)
+    S12d, S13d, S23d = F2(S12), F2(S13), F2(S23)
+    S_h = jnp.sqrt(2.0 * (S11h ** 2 + S22h ** 2 + S33h ** 2
+                          + 2.0 * (S12h ** 2 + S13h ** 2 + S23h ** 2)))
+    S_d = jnp.sqrt(2.0 * (S11d ** 2 + S22d ** 2 + S33d ** 2
+                          + 2.0 * (S12d ** 2 + S13d ** 2 + S23d ** 2)))
+    # Filtered strain-rate products |S|S_ij.
+    SS11h, SS22h, SS33h = F1(S * S11), F1(S * S22), F1(S * S33)
+    SS12h, SS13h, SS23h = F1(S * S12), F1(S * S13), F1(S * S23)
+    SS11d, SS22d, SS33d = F2(S * S11), F2(S * S22), F2(S * S33)
+    SS12d, SS13d, SS23d = F2(S * S12), F2(S * S13), F2(S * S23)
+
+    # Germano-identity contractions → β-polynomial coefficients (plane mean).
+    a1t = (L11 * SS11h + L22 * SS22h + L33 * SS33h
+           + 2.0 * (L12 * SS12h + L13 * SS13h + L23 * SS23h))
+    a2t = (Q11 * SS11d + Q22 * SS22d + Q33 * SS33d
+           + 2.0 * (Q12 * SS12d + Q13 * SS13d + Q23 * SS23d))
+    a1 = pmean(2.0 * L2 * a1t)
+    a2 = pmean(2.0 * L2 * a2t)
+
+    b1t = (L11 * S11h + L22 * S22h + L33 * S33h
+           + 2.0 * (L12 * S12h + L13 * S13h + L23 * S23h))
+    b2t = (Q11 * S11d + Q22 * S22d + Q33 * S33d
+           + 2.0 * (Q12 * S12d + Q13 * S13d + Q23 * S23d))
+    b1 = pmean(2.0 * L2 * (TFR ** 2) * S_h * b1t)
+    b2 = pmean(2.0 * L2 * (TFR ** 4) * S_d * b2t)
+
+    c1t = (SS11h ** 2 + SS22h ** 2 + SS33h ** 2
+           + 2.0 * (SS12h ** 2 + SS13h ** 2 + SS23h ** 2))
+    c2t = (SS11d ** 2 + SS22d ** 2 + SS33d ** 2
+           + 2.0 * (SS12d ** 2 + SS13d ** 2 + SS23d ** 2))
+    c1 = pmean((2.0 * L2) ** 2 * c1t)
+    c2 = pmean((2.0 * L2) ** 2 * c2t)
+
+    d1t = (S11h ** 2 + S22h ** 2 + S33h ** 2
+           + 2.0 * (S12h ** 2 + S13h ** 2 + S23h ** 2))
+    d2t = (S11d ** 2 + S22d ** 2 + S33d ** 2
+           + 2.0 * (S12d ** 2 + S13d ** 2 + S23d ** 2))
+    d1 = pmean((4.0 * L2 ** 2) * (TFR ** 4) * (S_h ** 2) * d1t)
+    d2 = pmean((4.0 * L2 ** 2) * (TFR ** 8) * (S_d ** 2) * d2t)
+
+    e1t = (S11h * SS11h + S22h * SS22h + S33h * SS33h
+           + 2.0 * (S12h * SS12h + S13h * SS13h + S23h * SS23h))
+    e2t = (S11d * SS11d + S22d * SS22d + S33d * SS33d
+           + 2.0 * (S12d * SS12d + S13d * SS13d + S23d * SS23d))
+    e1 = pmean((8.0 * L2 ** 2) * (TFR ** 2) * S_h * e1t)
+    e2 = pmean((8.0 * L2 ** 2) * (TFR ** 4) * S_d * e2t)
+
+    # Quintic coefficients (descending degree) and per-level β.
+    aa = a1 * c2 - a2 * c1
+    bb = a2 * e1 - b1 * c2
+    cc = b2 * c1 - a1 * e2 - a2 * d1
+    dd = b1 * e2 - b2 * e1
+    ee = a1 * d2 + b2 * d1
+    ff = -b1 * d2
+    coeffs6 = jnp.stack([ff, ee, dd, cc, bb, aa], axis=-1)        # (nz, 6)
+    beta1 = _laguerre_max_real_root_beta(coeffs6)                 # (nz,)
+    beta3d = beta1.reshape(1, 1, nlev)
+
+    # Mixed tensor M_ij = 2Δ²·F̂(|S|S_ij) − 2(2Δ)²·β·|Ŝ|·Ŝ_ij.
+    T1 = 2.0 * L2
+    T2 = 2.0 * (TFR ** 2) * L2
+    M11 = T1 * SS11h - T2 * beta3d * S_h * S11h
+    M22 = T1 * SS22h - T2 * beta3d * S_h * S22h
+    M33 = T1 * SS33h - T2 * beta3d * S_h * S33h
+    M12 = T1 * SS12h - T2 * beta3d * S_h * S12h
+    M13 = T1 * SS13h - T2 * beta3d * S_h * S13h
+    M23 = T1 * SS23h - T2 * beta3d * S_h * S23h
+
+    LM = (L11 * M11 + L22 * M22 + L33 * M33
+          + 2.0 * (L12 * M12 + L13 * M13 + L23 * M23))
+    MM = (M11 ** 2 + M22 ** 2 + M33 ** 2
+          + 2.0 * (M12 ** 2 + M13 ** 2 + M23 ** 2))
+
+    # LOCAL (3×3) average → pointwise C_s², masked to a valid LES range.
+    LMx = _imfilter_box3_plane(LM)
+    MMx = _imfilter_box3_plane(MM)
+    cs2 = LMx / jnp.where(jnp.abs(MMx) < 1.0e-10, 1.0e-10, MMx)
+    invalid = (jnp.abs(MMx) < 1.0e-10) | (cs2 < 0.0) | (cs2 > cs_max ** 2)
+    cs2 = jnp.where(invalid, 0.0, cs2)
+    # Tiny floor so d/dx √(cs2) stays finite at the clip boundary (AD-safe).
+    return jnp.sqrt(jnp.maximum(cs2, 1.0e-24))                    # C_s (ny,nx,nz)
 
 
 def _full_level_centred_d_dz(
@@ -1962,10 +2224,18 @@ def plane_compressible_euler_slow_tendencies(
             # the flag is off (byte-identical). The dynamic C_s(z) array then
             # feeds the SAME (C_s·Δ)²·|S| operator (c_s broadcasts per-level).
             if getattr(config, "smagorinsky_dynamic", False):
-                c_s_arg = _compute_dynamic_smag_cs_plane(
-                    u, v, w, grid, height_coord,
-                    cs_max=getattr(config, "smagorinsky_dynamic_cs_max", 0.4),
-                )
+                cs_max = getattr(config, "smagorinsky_dynamic_cs_max", 0.4)
+                if getattr(config, "smagorinsky_scale_dependent", False):
+                    # Bou-Zeid et al. (2005) scale-dependent dynamic (LASD) —
+                    # adds a 4Δ test filter + per-level β solve; returns a 3D
+                    # C_s field (broadcasts over Δ in the K_m operator).
+                    c_s_arg = _compute_scale_dependent_dynamic_smag_cs_plane(
+                        u, v, w, grid, height_coord, cs_max=cs_max,
+                    )
+                else:
+                    c_s_arg = _compute_dynamic_smag_cs_plane(
+                        u, v, w, grid, height_coord, cs_max=cs_max,
+                    )
             else:
                 c_s_arg = config.smagorinsky_cs
             K_m = _compute_smagorinsky_K_m_plane(
