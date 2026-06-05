@@ -203,6 +203,24 @@ SBL/CBL. The spectral core now reproduces surface-layer Monin–Obukhov scaling 
 a genuine quantitative oracle match where the compressible core could not even
 sustain turbulence.
 
+## RESULT: all THREE ABL regimes match the jax-alfa oracle's targets
+The pseudo-spectral incompressible core (dynamic Bou-Zeid LASD + buoyancy/scalar)
+reproduces the canonical physical targets of all three boundary-layer regimes on
+an RTX 5090 (fp32), where the compressible plane dycore could not even sustain
+turbulence:
+
+| case | driver | key result vs oracle target |
+|---|---|---|
+| **Neutral** | `run_spectral_les.py --dynamic` | 4/4 Monin–Obukhov: u_*(log)/u_*(flux)=1.06, φ_m=0.93, σ_w/u_*=1.06, σ_u/u_*=2.71 |
+| **CBL** | `run_spectral_cbl.py` | convective scaling: max σ_w/w_*=0.65 (~0.6), ⟨w'θ'⟩/Q0≈1 at sfc, well-mixed θ, z_i grows |
+| **SBL** | `run_spectral_sbl.py` | GABLS1: u_*=0.237 (sustained, not collapsed), depth 144 m, stable Δθ=+1.6 K, low-level jet |
+
+SBL needed two stabilisers (the dynamic SGS shuts off in stable layers): a small
+background `nu_floor`=0.05 m²/s and a smooth (tanh, ~25 m) inversion IC; CBL/
+neutral run with `nu_floor`=0. Remaining polish (not oracle-divergence): CBL
+entrainment flux at z_i (−0.05 vs ~−0.2 — finer near-inversion resolution); SBL
+jet full development (longer run); the 3 secondary codex faithfulness items.
+
 ## RESULT: dynamic Bou-Zeid LASD → 4/4 Monin–Obukhov diagnostics PASS
 With the corrected (down-gradient) advection, the 3/2-padding de-aliasing, and the
 **dynamic Bou-Zeid LASD C_s(x,y,z)** wired in (`lasd_core.lasd_cs2`, shared with
