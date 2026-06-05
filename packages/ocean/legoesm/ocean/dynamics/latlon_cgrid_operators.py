@@ -2597,41 +2597,31 @@ def partial_cell_pgf_correction_y(
 
     Output shape: ``(n_lat+1, n_lon, nlev)``.
     """
-    if is_tripolar(grid):
-        dy_v = grid.dy_v  # (n_lat+1, n_lon) — full 2D
-    else:
-        # Regular or Mercator: variable-dy safe.
-        dy_h = grid.dy * 0.5                              # (n_lat,)
-        dy_v_interior = 0.5 * (dy_h[1:] + dy_h[:-1])       # (n_lat-1,)
-
-    # Interior v-faces: between cell i and cell i+1 in latitude
-    centroid_north = centroid_depth[1:]                 # (n_lat-1, n_lon, nlev)
-    centroid_south = centroid_depth[:-1]                # (n_lat-1, n_lon, nlev)
-    rho_prime_north = rho_prime[1:]
-    rho_prime_south = rho_prime[:-1]
+    # Cell-pad-first (PR357 Bug-2 pattern; see ``_interp_to_v_points``):
+    # pad the CELL fields so the v-face at a partition cut is built from the
+    # neighbour rank's adjacent cell column (MPI halo exchange) rather than
+    # from halo-padding an already-computed interior face.  ``pad_ns_zero``
+    # halo-exchanges at interior cuts and zero-pads at the physical pole on
+    # every rank (consistent MPI call count); ``zero_polar_lat_ends`` then
+    # restores the wall BC at the physical pole only.  The fold seam is
+    # overwritten on the rank that owns it (``_fold_is_local``).
+    cd_p = pad_ns_zero(centroid_depth)                  # (n_lat+1, n_lon, nlev)
+    rp_p = pad_ns_zero(rho_prime)
+    centroid_south, centroid_north = cd_p[:-1], cd_p[1:]
+    rho_prime_south, rho_prime_north = rp_p[:-1], rp_p[1:]
 
     face_ref = jnp.minimum(centroid_north, centroid_south)
     excess_north = centroid_north - face_ref
     excess_south = centroid_south - face_ref
 
-    correction_interior = -g * (
+    correction = -g * (
         rho_prime_north * excess_north
         - rho_prime_south * excess_south
     )
 
-    _tripolar_pgf = is_tripolar(grid)
-    if not _tripolar_pgf:
-        # Regular or Mercator: divide before padding so we only divide
-        # interior rows.
-        bcast = (slice(None),) + (jnp.newaxis,) * (correction_interior.ndim - 1)
-        correction_interior = correction_interior / dy_v_interior[bcast]
+    from legoesm.grids.halo_latlon import zero_polar_lat_ends
+    correction = zero_polar_lat_ends(correction)
 
-    # Pad-zero-first (PR357 invariant): every rank calls pad_ns_zero so the
-    # MPI sendrecv call count matches across ranks (zero at the physical
-    # pole, halo-exchange at interior partition cuts).  Only the rank that
-    # physically owns the fold seam (_fold_is_local) overwrites the north
-    # row with the fold-partner correction.
-    correction = pad_ns_zero(correction_interior)
     if _fold_is_local(grid):
         centroid_partner = centroid_depth[-1:, grid.fold.perm_T, :]
         rho_partner = rho_prime[-1:, grid.fold.perm_T, :]
@@ -2645,12 +2635,17 @@ def partial_cell_pgf_correction_y(
             [correction[:-1], correction_fold], axis=0,
         )
 
-    if _tripolar_pgf:
-        # Tripolar: divide by full 2D dy_v after padding.
-        return correction / dy_v[:, :, jnp.newaxis]
+    # Divide by dy_v after the v-face correction is fully formed (both paths).
+    if is_tripolar(grid):
+        return correction / grid.dy_v[:, :, jnp.newaxis]
     else:
-        # Regular or Mercator: already divided above.
-        return correction
+        # Regular or Mercator: variable-dy safe.  Pole rows are zero from
+        # zero_polar_lat_ends, so dividing them by the edge-padded dy is inert.
+        dy_h = grid.dy * 0.5                              # (n_lat,)
+        dy_v_interior = 0.5 * (dy_h[1:] + dy_h[:-1])       # (n_lat-1,)
+        dy_v_full = jnp.pad(dy_v_interior, (1, 1), mode="edge")
+        bcast = (slice(None),) + (jnp.newaxis,) * (correction.ndim - 1)
+        return correction / dy_v_full[bcast]
 
 
 # =============================================================================
@@ -2781,33 +2776,38 @@ def density_jacobian_pgf_smc03_y(
     z_centroid = jnp.cumsum(h_partial, axis=-1) - 0.5 * h_partial
     sigma = reconstruct_harmonic_slopes(rho_per_cell, z_centroid, is_active)
 
-    # North-direction interior pairs (i and i-1).
-    rho_N = rho_per_cell[1:]
-    rho_S = rho_per_cell[:-1]
-    h_N = h_partial[1:]
-    h_S = h_partial[:-1]
-    z_c_N = z_centroid[1:]
-    z_c_S = z_centroid[:-1]
-    sigma_N = sigma[1:]
-    sigma_S = sigma[:-1]
+    # Cell-pad-first (PR357 Bug-2 pattern; see ``_interp_to_v_points``): pad
+    # the CELL columns so the v-face PGF at a partition cut is built from the
+    # neighbour rank's adjacent column (MPI halo exchange) rather than from
+    # halo-padding an already-computed interior face.  ``pad_ns_zero``
+    # halo-exchanges at interior cuts and zero-pads at the physical pole on
+    # every rank (consistent MPI call count); ``zero_polar_lat_ends`` then
+    # restores the wall BC at the physical pole.  ``z_centroid``/``sigma`` are
+    # per-column quantities, so the halo-exchanged neighbour column is exact.
+    rho_p = pad_ns_zero(rho_per_cell)
+    h_p = pad_ns_zero(h_partial)
+    zc_p = pad_ns_zero(z_centroid)
+    sig_p = pad_ns_zero(sigma)
+    rho_S, rho_N = rho_p[:-1], rho_p[1:]
+    h_S, h_N = h_p[:-1], h_p[1:]
+    z_c_S, z_c_N = zc_p[:-1], zc_p[1:]
+    sigma_S, sigma_N = sig_p[:-1], sig_p[1:]
 
     # Shallower-of-centroids (Adcroft & Campin convention; see x-direction
     # operator for the rationale and the C1 bug it resolves).
-    z_target_face_int = jnp.minimum(z_c_S, z_c_N)
+    z_target_face = jnp.minimum(z_c_S, z_c_N)
     P_N = compute_pressure_at_target_smc03(
-        rho_N, h_N, z_c_N, sigma_N, z_target_face_int, g,
+        rho_N, h_N, z_c_N, sigma_N, z_target_face, g,
     )
     P_S = compute_pressure_at_target_smc03(
-        rho_S, h_S, z_c_S, sigma_S, z_target_face_int, g,
+        rho_S, h_S, z_c_S, sigma_S, z_target_face, g,
     )
-    diff_interior = P_N - P_S
+    diff = P_N - P_S  # (n_lat+1, n_lon, nlev)
 
-    # Pad-zero-first (PR357 invariant): every rank calls pad_ns_zero so the
-    # MPI sendrecv call count matches across ranks (zero at the physical
-    # pole, halo-exchange at interior partition cuts).  Only the rank that
-    # physically owns the fold seam (_fold_is_local) overwrites the north
-    # row with the fold-partner PGF.
-    diff = pad_ns_zero(diff_interior)
+    from legoesm.grids.halo_latlon import zero_polar_lat_ends
+    diff = zero_polar_lat_ends(diff)
+
+    # North fold seam: only the rank that owns it overwrites the north row.
     if _fold_is_local(grid):
         fold = grid.fold
         rho_F = rho_per_cell[-1:, fold.perm_T, :]
@@ -2835,9 +2835,9 @@ def density_jacobian_pgf_smc03_y(
         dy_h = grid.dy * 0.5                                # (n_lat,)
         dy_v_interior = 0.5 * (dy_h[1:] + dy_h[:-1])         # (n_lat-1,)
         bcast = (slice(None),) + (jnp.newaxis,) * (diff.ndim - 1)
-        # diff has shape (n_lat+1, n_lon, nlev) — divide only interior rows.
-        # Pad dy_v_interior with edge values for pole rows (harmless since
-        # diff at pole rows is zero from the pad above).
+        # diff has shape (n_lat+1, n_lon, nlev).  Pad dy_v_interior with edge
+        # values for the pole rows — harmless since those rows are zeroed by
+        # zero_polar_lat_ends above.
         dy_v_full = jnp.pad(dy_v_interior, (1, 1), mode='edge')
         return diff / dy_v_full[bcast]
 

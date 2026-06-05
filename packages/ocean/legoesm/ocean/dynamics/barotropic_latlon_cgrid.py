@@ -216,12 +216,16 @@ def barotropic_substeps_latlon_cgrid(
         diff_u_mask = jnp.concatenate(
             [diff_u_mask, diff_u_mask[:, 0:1]], axis=1,
         )
-        diff_v_mask_interior = mask[:-1] * mask[1:]
-        # Pad-zero-first (PR357 invariant): every rank calls pad_ns_zero so
-        # the MPI sendrecv call count matches across ranks; only the rank
-        # owning the fold seam (_fold_is_local) overwrites the north row
-        # with the fold-partner mask product.
-        diff_v_mask = pad_ns_zero(diff_v_mask_interior)
+        # Cell-pad-first (PR357 Bug-2 pattern): pad the cell mask so the
+        # v-face mask at a partition cut is the product of the two adjacent
+        # cells across the cut (MPI halo exchange) rather than a halo-padded
+        # interior face.  pad_ns_zero zero-pads the physical pole on every
+        # rank (consistent MPI call count); the seam is overwritten only on
+        # the rank that owns it (_fold_is_local).
+        mask_p = pad_ns_zero(mask)
+        diff_v_mask = mask_p[:-1] * mask_p[1:]
+        from legoesm.grids.halo_latlon import zero_polar_lat_ends
+        diff_v_mask = zero_polar_lat_ends(diff_v_mask)
         if _fold_is_local(grid):
             north_dm = mask[-1:] * mask[-1:, grid.fold.perm_T]
             diff_v_mask = jnp.concatenate(

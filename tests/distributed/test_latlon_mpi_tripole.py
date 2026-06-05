@@ -225,3 +225,87 @@ class TestIssue356Bug2InterpToVPoints:
             set_halo_backend("local")
         assert jnp.all(jnp.isfinite(result)), (
             f"pad_ns_scalar produced non-finite values on rank {rank}")
+
+
+class TestPgfYMeridionalFoldMPI:
+    """Meridional v-face PGF operators must match serial at partition cuts.
+
+    Follow-up to #357 review: the y-face PGF operators originally built the
+    padded v-face array from already-computed interior faces, which cannot
+    reconstruct the cross-partition v-face (it needs the neighbour rank's
+    adjacent CELL column).  After the cell-pad-first fix, the rank-local
+    result must equal the serial reference slice ``[s:e+1]`` on every rank.
+    """
+
+    NLEV = 4
+
+    def _cell_fields(self, seed):
+        rng = np.random.default_rng(seed)
+        # Positive partial-cell thicknesses and a density field.
+        h = jnp.asarray(
+            0.1 + np.abs(rng.standard_normal(
+                (N_LAT, N_LON, self.NLEV), dtype=np.float64)))
+        rho = jnp.asarray(
+            1025.0 + rng.standard_normal(
+                (N_LAT, N_LON, self.NLEV), dtype=np.float64))
+        is_active = jnp.ones((N_LAT, N_LON, self.NLEV), dtype=bool)
+        return h, rho, is_active
+
+    def test_density_jacobian_pgf_y_matches_serial(self, fold):
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            density_jacobian_pgf_smc03_y,
+        )
+        from legoesm import constants
+        geom = create_synthetic_tripole(n_lat=N_LAT, n_lon=N_LON)
+        h, rho, is_active = self._cell_fields(seed=7)
+        ref = density_jacobian_pgf_smc03_y(rho, h, is_active, geom, constants.g)
+
+        rank = MPI.COMM_WORLD.Get_rank()
+        n_ranks = MPI.COMM_WORLD.Get_size()
+        layout = make_latlon_band_layout(
+            rank, n_ranks, N_LAT, N_LON, fold=geom.fold)
+        band = slice_cgrid_geometry_to_band(geom, layout)
+        s, e = layout.lat_start, layout.lat_end
+        try:
+            set_halo_backend("mpi", layout)
+            local = density_jacobian_pgf_smc03_y(
+                rho[s:e], h[s:e], is_active[s:e], band, constants.g)
+        finally:
+            set_halo_backend("local")
+
+        max_err = float(jnp.max(jnp.abs(local - ref[s:e + 1])))
+        all_errs = MPI.COMM_WORLD.allgather(max_err)
+        assert max(all_errs) < 1e-9, (
+            f"density_jacobian_pgf_smc03_y max error across ranks: {all_errs}")
+
+    def test_partial_cell_pgf_correction_y_matches_serial(self, fold):
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            partial_cell_pgf_correction_y,
+        )
+        from legoesm import constants
+        geom = create_synthetic_tripole(n_lat=N_LAT, n_lon=N_LON)
+        rng = np.random.default_rng(11)
+        centroid = jnp.asarray(
+            np.abs(rng.standard_normal((N_LAT, N_LON, self.NLEV))))
+        rho_prime = jnp.asarray(
+            rng.standard_normal((N_LAT, N_LON, self.NLEV)))
+        ref = partial_cell_pgf_correction_y(
+            centroid, rho_prime, geom, constants.g)
+
+        rank = MPI.COMM_WORLD.Get_rank()
+        n_ranks = MPI.COMM_WORLD.Get_size()
+        layout = make_latlon_band_layout(
+            rank, n_ranks, N_LAT, N_LON, fold=geom.fold)
+        band = slice_cgrid_geometry_to_band(geom, layout)
+        s, e = layout.lat_start, layout.lat_end
+        try:
+            set_halo_backend("mpi", layout)
+            local = partial_cell_pgf_correction_y(
+                centroid[s:e], rho_prime[s:e], band, constants.g)
+        finally:
+            set_halo_backend("local")
+
+        max_err = float(jnp.max(jnp.abs(local - ref[s:e + 1])))
+        all_errs = MPI.COMM_WORLD.allgather(max_err)
+        assert max(all_errs) < 1e-9, (
+            f"partial_cell_pgf_correction_y max error across ranks: {all_errs}")
