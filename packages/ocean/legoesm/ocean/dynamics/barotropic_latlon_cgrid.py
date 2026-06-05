@@ -22,6 +22,7 @@ from legoesm.grids.latlon import LatLonGrid
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
 from legoesm.ocean.state import LatLonCGridOceanState, LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+    _fold_is_local,
     divergence_cgrid,
     fold_vface_row,
     gradient_x_cgrid,
@@ -216,15 +217,16 @@ def barotropic_substeps_latlon_cgrid(
             [diff_u_mask, diff_u_mask[:, 0:1]], axis=1,
         )
         diff_v_mask_interior = mask[:-1] * mask[1:]
-        _fold_dm = getattr(grid, "fold", None)
-        if _fold_dm is not None and _fold_dm.is_active:
-            south_dm = jnp.zeros_like(diff_v_mask_interior[:1])
-            north_dm = mask[-1:] * mask[-1:, _fold_dm.perm_T]
+        # Pad-zero-first (PR357 invariant): every rank calls pad_ns_zero so
+        # the MPI sendrecv call count matches across ranks; only the rank
+        # owning the fold seam (_fold_is_local) overwrites the north row
+        # with the fold-partner mask product.
+        diff_v_mask = pad_ns_zero(diff_v_mask_interior)
+        if _fold_is_local(grid):
+            north_dm = mask[-1:] * mask[-1:, grid.fold.perm_T]
             diff_v_mask = jnp.concatenate(
-                [south_dm, diff_v_mask_interior, north_dm], axis=0,
+                [diff_v_mask[:-1], north_dm], axis=0,
             )
-        else:
-            diff_v_mask = pad_ns_zero(diff_v_mask_interior)
 
     # Divergence damping on barotropic velocity: grad(div(u_bar)).
     # Targets the divergent mode that creates the eta checkerboard,
