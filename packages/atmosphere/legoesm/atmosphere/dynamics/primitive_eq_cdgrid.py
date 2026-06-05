@@ -362,8 +362,17 @@ def fv3_hydrostatic_tendencies(
     _pe_dg = grid.duogrid
     if _halo_backend == "spmd":
         from legoesm.parallel.cubesphere_exchange import _spmd_mesh
+        # FV3_3D 2026-06-04: thread ``interp_offsets`` exactly as the MPI and
+        # single-device paths do (when duogrid is off).  Previously the SPMD
+        # path dropped it, so the packed exchange NEAREST-COPIED cross-face
+        # halos instead of applying the 3-point Lagrange correction — a
+        # ~0.6% global divergence from the single-device reference at 1 step
+        # (the cube-edge halo error propagates through the dynamics).  This
+        # broke the 16 ``test_cubed_sphere_spmd_step`` parity cases.
+        _pe_offs_zeta = None if _pe_dg is not None else grid.halo_interp_offsets
         _zeta_pad, _B_pad, _invT_pad = packed_pad_halo_4d(
             zeta, B, inv_T, mesh=_spmd_mesh, duogrid=_pe_dg,
+            interp_offsets=_pe_offs_zeta,
         )
     elif _halo_backend == "mpi":
         from legoesm.grids.halo import _mpi_topology

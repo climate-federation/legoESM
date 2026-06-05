@@ -2782,54 +2782,70 @@ def synchronize_corner_scalar(field, n):
     return field
 
 
-def synchronize_bgrid_ne_corner_geo(u, v, cos_ang_c, sin_ang_c, n):
-    """BGRID_NE vector corner sync via the geographic frame.
+def synchronize_bgrid_ne_corner_geo(u, v, z11, z12, z21, z22, n):
+    """BGRID_NE vector corner sync via the (exact) geographic frame.
 
-    For every one of the 24 panel-edge seams (including reversed and
-    cross-axis) and for the 8 cube-vertex corners (3 faces meeting),
-    averages the vector (u, v) at corner-stagger positions in the
-    INVARIANT geographic frame.  The rotation-free averaging uses the
-    observation that a physical vector at a shared point has the same
-    (east, north) components regardless of which face we measure it
-    on — so conversion to geo frame sidesteps the per-seam rotation
-    tables that the same-axis-only helper required.
+    FV3 reference: `dyn_core.F90:968-1009` performs the BGRID_NE corner
+    sync as `mpp_get_boundary(gridtype=BGRID_NE)` (exact discrete panel-
+    to-panel rotation into the buffers) followed by a plain 0.5 average
+    in the grid-local frame.  Because a physical vector has the same
+    (east, north) components on every face that shares a corner, that
+    discrete-rotation-then-average is mathematically identical to:
+    convert each face's local components to the INVARIANT geographic
+    frame, average, convert back — PROVIDED the local→geographic
+    conversion is exact.
 
-    Algorithm:
-      1. Convert face-local (u, v) to geographic (u_east, u_north)
-         per corner using:
-           u_east  = cos_ang_c * u - sin_ang_c * v
-           u_north = sin_ang_c * u + cos_ang_c * v
-      2. For each seam, average boundaries:
-           geo_sync = 0.5 * (local_geo + nbr_geo[rev_slice])
-      3. For each of 8 cube vertices, 3-face average (orig pre-sync
-         values) — mirrors `synchronize_corner_scalar` Pass 2.
-      4. Convert synced geo back to face-local:
-           u =  cos_ang_c * u_east + sin_ang_c * u_north
-           v = -sin_ang_c * u_east + cos_ang_c * u_north
+    iter3 FIX (cube-faithfulness): the previous conversion used the
+    ORTHOGONAL rotation `u_east = cos·u − sin·v`, which silently assumes
+    the two grid tangents are perpendicular.  At the 8 cube vertices the
+    inter-tangent angle is non-orthogonal by an O(1) amount that does NOT
+    vanish with resolution (|cos θ| ≈ 0.47), so the orthogonal form
+    corrupted a constant geographic wind by ≈0.35 there (resolution-
+    independent) — the residual W5 vertex mode.  The synced (u, v) are
+    FV3's B-grid Courant components ub = V·x̂′, vb = V·ŷ′ with x̂′ ⊥ e2,
+    ŷ′ ⊥ e1 (from `vb = dt5·(vc − uc·cosa)·rsina`); equivalently
+    V = (u·e1 + v·e2)/sinθ.  The exact non-orthogonal conversion uses the
+    corner c2l z-matrix M = [[z11, z21], [z12, z22]] (rows = (ec1,ec2) ·
+    (east, north)), det M = sinθ > 0::
+
+        u_east  = (z11·u + z21·v) / detM
+        u_north = (z12·u + z22·v) / detM
+        # ... average geographic scalars across faces ...
+        u_sync  =  z22·u_east − z21·u_north      # adjugate (det folds out)
+        v_sync  = −z12·u_east + z11·u_north
+
+    Round-trips to the identity exactly (verified) and reduces to the old
+    orthogonal form on perpendicular axes (z21→−sin, z22→cos, detM→1).
 
     Parameters
     ----------
     u, v : jax.Array, shape (6, n+1, n+1)
-        Face-local corner-stagger vector components.
-    cos_ang_c, sin_ang_c : jax.Array, shape (6, n+1, n+1)
-        cdgrid.cos_angle_corner / sin_angle_corner.
+        Face-local corner-stagger B-grid components (ubb, vbbtemp).
+    z11, z12 : jax.Array, shape (6, n+1, n+1)
+        ec1·east, ec1·north = cdgrid.cos_angle_corner / sin_angle_corner.
+    z21, z22 : jax.Array, shape (6, n+1, n+1)
+        ec2·east, ec2·north = cdgrid.z21_corner / z22_corner.
     n : int
 
     Returns
     -------
     u_sync, v_sync : jax.Array, shape (6, n+1, n+1)
     """
-    # Convert to geographic frame
-    u_east = cos_ang_c * u - sin_ang_c * v
-    u_north = sin_ang_c * u + cos_ang_c * v
+    _EPS = float(jnp.finfo(jnp.float32).eps)
+    det = z11 * z22 - z21 * z12  # = sin(inter-axis angle) > 0, frame-consistent
+    inv = 1.0 / jnp.where(jnp.abs(det) > _EPS, det, 1.0)
 
-    # Sync geo components independently (each is a scalar field)
+    # Exact non-orthogonal local → geographic
+    u_east = (z11 * u + z21 * v) * inv
+    u_north = (z12 * u + z22 * v) * inv
+
+    # Sync geo components independently (each is a frame-invariant scalar)
     u_east = synchronize_corner_scalar(u_east, n)
     u_north = synchronize_corner_scalar(u_north, n)
 
-    # Rotate back to face-local
-    u_sync = cos_ang_c * u_east + sin_ang_c * u_north
-    v_sync = -sin_ang_c * u_east + cos_ang_c * u_north
+    # Exact inverse (adjugate of M; the det cancels the forward 1/det)
+    u_sync = z22 * u_east - z21 * u_north
+    v_sync = -z12 * u_east + z11 * u_north
 
     return u_sync, v_sync
 
