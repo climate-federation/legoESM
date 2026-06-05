@@ -49,6 +49,7 @@ from legoesm.atmosphere.dynamics.compressible_euler import (
     precompute_si_tridiag_bands,
 )
 from legoesm.atmosphere.physics.thermodynamics import sanitize_theta_rho
+from legoesm.atmosphere.physics.turbulence.lasd_core import lasd_cs2 as _lasd_cs2
 from legoesm.core.field import Field
 from legoesm.core.state import (
     PlaneNonHydrostaticState,
@@ -1221,6 +1222,46 @@ def _horizontal_box_filter_plane(field_yxz: jax.Array) -> jax.Array:
     return (jnp.roll(fx, 1, axis=0) + fx + jnp.roll(fx, -1, axis=0)) / 3.0
 
 
+def _centre_velocities_and_strain_plane(
+    u_yxz: jax.Array,
+    v_yxz: jax.Array,
+    w_yxz_half: jax.Array,
+    grid: PlaneGrid,
+    height_coord: HeightCoordinate,
+):
+    """A-grid cell-centre velocities + full resolved strain tensor ``S_ij``.
+
+    Shared by BOTH dynamic-Smagorinsky paths (standard Germano
+    :func:`_compute_dynamic_smag_cs_plane` and scale-dependent
+    :func:`_compute_scale_dependent_dynamic_smag_cs_plane`) so the two closures
+    diagnose ``C_s`` from byte-identical resolved strain. Centred A-grid
+    differences in the horizontal; the existing full-level centred operator in
+    the vertical. ``Smag = √(2 S_ij S_ij)`` (the SAM/jax-alfa convention)."""
+    uc = 0.5 * (u_yxz + jnp.roll(u_yxz, -1, axis=1))
+    vc = 0.5 * (v_yxz + jnp.roll(v_yxz, -1, axis=0))
+    wc = 0.5 * (w_yxz_half[..., :-1] + w_yxz_half[..., 1:])
+
+    dudx = (jnp.roll(uc, -1, axis=1) - jnp.roll(uc, 1, axis=1)) / (2.0 * grid.dx)
+    dvdx = (jnp.roll(vc, -1, axis=1) - jnp.roll(vc, 1, axis=1)) / (2.0 * grid.dx)
+    dwdx = (jnp.roll(wc, -1, axis=1) - jnp.roll(wc, 1, axis=1)) / (2.0 * grid.dx)
+    dudy = (jnp.roll(uc, -1, axis=0) - jnp.roll(uc, 1, axis=0)) / (2.0 * grid.dy)
+    dvdy = (jnp.roll(vc, -1, axis=0) - jnp.roll(vc, 1, axis=0)) / (2.0 * grid.dy)
+    dwdy = (jnp.roll(wc, -1, axis=0) - jnp.roll(wc, 1, axis=0)) / (2.0 * grid.dy)
+    dudz = _full_level_centred_d_dz(uc, height_coord)
+    dvdz = _full_level_centred_d_dz(vc, height_coord)
+    dwdz = _full_level_centred_d_dz(wc, height_coord)
+
+    S11, S22, S33 = dudx, dvdy, dwdz
+    S12 = 0.5 * (dudy + dvdx)
+    S13 = 0.5 * (dudz + dwdx)
+    S23 = 0.5 * (dvdz + dwdy)
+    Smag = jnp.sqrt(jnp.maximum(
+        2.0 * (S11 ** 2 + S22 ** 2 + S33 ** 2
+               + 2.0 * (S12 ** 2 + S13 ** 2 + S23 ** 2)),
+        1.0e-30))
+    return uc, vc, wc, S11, S22, S33, S12, S13, S23, Smag
+
+
 def _compute_dynamic_smag_cs_plane(
     u_yxz: jax.Array,
     v_yxz: jax.Array,
@@ -1253,30 +1294,9 @@ def _compute_dynamic_smag_cs_plane(
     MPI runs use the static closure (validated serial=MPI). AD/JIT-safe.
     """
     nlev = u_yxz.shape[-1]
-    # --- A-grid cell-centre velocities (C-grid → centre) ---
-    uc = 0.5 * (u_yxz + jnp.roll(u_yxz, -1, axis=1))
-    vc = 0.5 * (v_yxz + jnp.roll(v_yxz, -1, axis=0))
-    wc = 0.5 * (w_yxz_half[..., :-1] + w_yxz_half[..., 1:])
-
-    # --- Resolved strain S_ij at centres (centred A-grid differences) ---
-    dudx = (jnp.roll(uc, -1, axis=1) - jnp.roll(uc, 1, axis=1)) / (2.0 * grid.dx)
-    dvdx = (jnp.roll(vc, -1, axis=1) - jnp.roll(vc, 1, axis=1)) / (2.0 * grid.dx)
-    dwdx = (jnp.roll(wc, -1, axis=1) - jnp.roll(wc, 1, axis=1)) / (2.0 * grid.dx)
-    dudy = (jnp.roll(uc, -1, axis=0) - jnp.roll(uc, 1, axis=0)) / (2.0 * grid.dy)
-    dvdy = (jnp.roll(vc, -1, axis=0) - jnp.roll(vc, 1, axis=0)) / (2.0 * grid.dy)
-    dwdy = (jnp.roll(wc, -1, axis=0) - jnp.roll(wc, 1, axis=0)) / (2.0 * grid.dy)
-    dudz = _full_level_centred_d_dz(uc, height_coord)
-    dvdz = _full_level_centred_d_dz(vc, height_coord)
-    dwdz = _full_level_centred_d_dz(wc, height_coord)
-
-    S11, S22, S33 = dudx, dvdy, dwdz
-    S12 = 0.5 * (dudy + dvdx)
-    S13 = 0.5 * (dudz + dwdx)
-    S23 = 0.5 * (dvdz + dwdy)
-    Smag = jnp.sqrt(jnp.maximum(
-        2.0 * (S11 ** 2 + S22 ** 2 + S33 ** 2
-               + 2.0 * (S12 ** 2 + S13 ** 2 + S23 ** 2)),
-        1.0e-30))
+    uc, vc, wc, S11, S22, S33, S12, S13, S23, Smag = (
+        _centre_velocities_and_strain_plane(
+            u_yxz, v_yxz, w_yxz_half, grid, height_coord))
 
     F = _horizontal_box_filter_plane
     alpha2 = 4.0  # (test/grid filter-width ratio)² = 2²
@@ -1329,6 +1349,48 @@ def _compute_dynamic_smag_cs_plane(
     # √1e-24 = 1e-12 is a negligible C_s floor.
     cs_sq = jnp.clip(cs_sq, 1.0e-24, cs_max ** 2)
     return jnp.sqrt(cs_sq)                                 # C_s(z), (nlev,)
+
+
+def _compute_scale_dependent_dynamic_smag_cs_plane(
+    u_yxz: jax.Array,
+    v_yxz: jax.Array,
+    w_yxz_half: jax.Array,
+    grid: PlaneGrid,
+    height_coord: HeightCoordinate,
+    cs_max: float = 1.0,
+) -> jax.Array:
+    """Scale-dependent dynamic Smagorinsky ``C_s`` (Bou-Zeid–Meneveau–Parlange
+    2005, the LASD closure of the jax-alfa LES oracle).
+
+    Faithful port of ``DynamicSGS_LASDD_SM.LASDD``. The standard Germano
+    procedure (:func:`_compute_dynamic_smag_cs_plane`) assumes ``C_s`` is
+    SCALE-INVARIANT — ``β = C_s²(2Δ)/C_s²(Δ) = 1`` — which over-dissipates near
+    the wall where ``Δ`` is no longer ≪ the integral scale. LASD relaxes this by
+    adding a SECOND test filter at ``4Δ`` and solving the Germano identity at
+    both ratios for ``β`` per level, then forms
+
+        M_ij = 2Δ²·F̂(|S|S_ij) − 2(2Δ)²·β·|Ŝ|·Ŝ_ij
+        C_s²(x,y,z) = Imfilter(L_ij^d M_ij) / Imfilter(M_ij M_ij)
+
+    with ``L_ij`` the resolved (Leonard) stress at ``2Δ`` and ``F̂`` the sharp
+    spectral test filter. The β polynomial coefficients are plane-averaged (per
+    level), exactly as the oracle; the final ``C_s²`` is LOCALLY averaged
+    (3×3 Imfilter) and returned as a 3D field — the operator
+    :func:`_compute_smagorinsky_K_m_plane` broadcasts a 3D ``c_s`` over ``Δ``.
+
+    Returns ``C_s`` (NOT squared), shape ``(ny, nx, nlev)``. Single-rank/GPU LES
+    (plane-mean β + spectral filter over the LOCAL tile); MPI uses the static
+    closure, like the Germano path.
+    """
+    nlev = u_yxz.shape[-1]
+    uc, vc, wc, S11, S22, S33, S12, S13, S23, S = (
+        _centre_velocities_and_strain_plane(
+            u_yxz, v_yxz, w_yxz_half, grid, height_coord))
+    delta = (grid.dx * grid.dy * height_coord.dz) ** (1.0 / 3.0)   # (nlev,)
+    cs2 = _lasd_cs2(uc, vc, wc, S11, S22, S33, S12, S13, S23, S,
+                    delta, cs_max=cs_max)
+    # Tiny floor so d/dx √(cs2) stays finite at the clip boundary (AD-safe).
+    return jnp.sqrt(jnp.maximum(cs2, 1.0e-24))                    # C_s (ny,nx,nz)
 
 
 def _full_level_centred_d_dz(
@@ -1962,10 +2024,18 @@ def plane_compressible_euler_slow_tendencies(
             # the flag is off (byte-identical). The dynamic C_s(z) array then
             # feeds the SAME (C_s·Δ)²·|S| operator (c_s broadcasts per-level).
             if getattr(config, "smagorinsky_dynamic", False):
-                c_s_arg = _compute_dynamic_smag_cs_plane(
-                    u, v, w, grid, height_coord,
-                    cs_max=getattr(config, "smagorinsky_dynamic_cs_max", 0.4),
-                )
+                cs_max = getattr(config, "smagorinsky_dynamic_cs_max", 0.4)
+                if getattr(config, "smagorinsky_scale_dependent", False):
+                    # Bou-Zeid et al. (2005) scale-dependent dynamic (LASD) —
+                    # adds a 4Δ test filter + per-level β solve; returns a 3D
+                    # C_s field (broadcasts over Δ in the K_m operator).
+                    c_s_arg = _compute_scale_dependent_dynamic_smag_cs_plane(
+                        u, v, w, grid, height_coord, cs_max=cs_max,
+                    )
+                else:
+                    c_s_arg = _compute_dynamic_smag_cs_plane(
+                        u, v, w, grid, height_coord, cs_max=cs_max,
+                    )
             else:
                 c_s_arg = config.smagorinsky_cs
             K_m = _compute_smagorinsky_K_m_plane(

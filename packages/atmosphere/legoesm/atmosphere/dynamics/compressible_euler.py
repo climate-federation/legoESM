@@ -272,6 +272,24 @@ class CompressibleEulerConfig(NamedTuple):
                                           # (typical LES C_s∈[0,0.25]; 0.4 is a
                                           # generous backstop against the Germano
                                           # ratio spiking where ⟨M_ijM_ij⟩→0).
+    smagorinsky_scale_dependent: bool = False
+                                          # SCALE-DEPENDENT dynamic Smagorinsky
+                                          # (Bou-Zeid, Meneveau & Parlange 2005,
+                                          # Phys. Fluids 17:025105 — the "LASD"
+                                          # closure used by the jax-alfa LES
+                                          # oracle). Extends smagorinsky_dynamic
+                                          # with a SECOND test filter at 4Δ and
+                                          # solves the 5th-order Germano-identity
+                                          # polynomial for β = C_s²(2Δ)/C_s²(Δ),
+                                          # relaxing the scale-INVARIANCE
+                                          # assumption of the standard Germano
+                                          # procedure (which over-dissipates near
+                                          # the wall, where Δ is no longer ≪ the
+                                          # integral scale). Requires
+                                          # smagorinsky_dynamic=True. Returns a
+                                          # LOCALLY-averaged 3D C_s field (oracle
+                                          # Imfilter 3×3) — single-rank/GPU LES;
+                                          # MPI uses the static closure.
     sgs_vertical_diffusion: bool = False
                                           # SGS-VERT (#81): add the VERTICAL SGS
                                           # flux ∂_z(K ∂_z φ) for u/v/θ'/tracers
