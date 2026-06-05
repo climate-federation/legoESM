@@ -666,7 +666,9 @@ def _build_radiation_config(
     )
 
 
-def _build_microphysics_config(scheme: str) -> MicrophysicsConfig | None:
+def _build_microphysics_config(
+    scheme: str, homogeneous_ice_nucleation: bool = False,
+) -> MicrophysicsConfig | None:
     if scheme == "none":
         return None
     valid = ("kessler", "morrison", "sundqvist",
@@ -675,6 +677,14 @@ def _build_microphysics_config(scheme: str) -> MicrophysicsConfig | None:
         raise ValueError(
             f"Unknown --microphysics: {scheme!r}; "
             f"choose from {valid + ('none',)}."
+        )
+    if scheme == "morrison" and homogeneous_ice_nucleation:
+        from legoesm.atmosphere.physics.microphysics.config import (
+            MorrisonConfig,
+        )
+        return MicrophysicsConfig(
+            scheme=scheme,
+            morrison=MorrisonConfig(homogeneous_ice_nucleation=True),
         )
     return MicrophysicsConfig(scheme=scheme)
 
@@ -924,6 +934,15 @@ def parse_args():
                             "none"],
                    default="kessler",
                    help="Microphysics scheme. 'none' skips the branch.")
+    p.add_argument("--homogeneous-ice-nucleation",
+                   action=argparse.BooleanOptionalAction, default=False,
+                   help="Morrison M2005 ONLY: enable Koop-2000 homogeneous ice "
+                        "nucleation (cirrus). Bursts ice crystals once RH_ice "
+                        "exceeds the homogeneous threshold S_hom(T)≈1.5-1.6, "
+                        "which deposit the excess vapour and pin RH_ice near "
+                        "S_hom — caps the unphysical >1000%% ice-supersaturation "
+                        "the SAM-faithful Cooper-only path leaves in violent RCE "
+                        "outflow. Default off = byte-identical Cooper-only.")
     p.add_argument("--print-every", type=int, default=10)
     p.add_argument("--snapshot-every", type=int, default=0,
                    help="Emit a surface-snapshot PNG every N steps "
@@ -965,7 +984,8 @@ def main():
     )
     print(f"  radiation={args.radiation}"
           f"{' (DEFAULT)' if radiation_defaulted else ''}, "
-          f"microphysics={args.microphysics}")
+          f"microphysics={args.microphysics}"
+          f"{', homogeneous_ice_nucleation=ON' if (args.microphysics == 'morrison' and args.homogeneous_ice_nucleation) else ''}")
     # codex iter-63 [HIGH]: fail-LOUD preflight for the rrtmgp+float64+large-grid
     # OOM case (rrtmgp gas-optics tables exhaust 24 GB at 64²×float64; ok ≤48²).
     # Do NOT auto-fall-back to gray — a silent scheme switch is worse
@@ -1088,7 +1108,8 @@ def main():
         args.radiation, update_interval_steps=args.radiation_interval,
         clouds=args.clouds, insolation=args.insolation, t_sfc=args.T_sfc,
     )
-    microphysics_config = _build_microphysics_config(args.microphysics)
+    microphysics_config = _build_microphysics_config(
+        args.microphysics, args.homogeneous_ice_nucleation)
     if args.no_physics:
         physics_fn = None
         rad_physics_fn = None
