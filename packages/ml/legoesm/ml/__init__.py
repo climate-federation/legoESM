@@ -37,6 +37,7 @@ from legoesm.ml.normalization import (
 from legoesm.ml.spectral_conv import SpectralConv
 from legoesm.ml.sfno_block import SFNOBlock
 from legoesm.ml.sfno import SFNO, SFNOConfig
+from legoesm.ml.ucast import UCast, UCastConfig
 # NOTE: ocean channel packing (OceanChannelSpec / pack_ocean_state /
 # unpack_ocean_output) lives in legoesm.ocean.dynamics.channel_packing — NOT
 # re-exported here, since legoesm.ml must not import the ocean component

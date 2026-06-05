@@ -17,7 +17,7 @@ Solver selection
 Use two-axis selection (recommended)::
 
     dynamics:       "shallow_water" | "hydrostatic" | "nonhydrostatic"
-    discretization: "cdgrid" | "spectral" | "sfno" | "mpas"
+    discretization: "cdgrid" | "spectral" | "sfno" | "u_cast" | "mpas"
 
 Supported implementation matrix
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -31,6 +31,7 @@ dynamics                     discretization  solver
 ``hydrostatic``              cdgrid          CDGridPrimitiveEquationModel
 ``hydrostatic``              spectral        SpectralPrimitiveEquationModel
 ``hydrostatic``              sfno            SFNOPrimitiveEquationModel
+``hydrostatic``              u_cast          UCastPrimitiveEquationModel
 ``hydrostatic``              latlon_cgrid    CGridLatLonPrimitiveEquationModel
 ``hydrostatic``              mpas            MPASPrimitiveEquationModel
 ``nonhydrostatic``           cdgrid          CDGridCompressibleEulerModel
@@ -96,6 +97,9 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "SFNOShallowWaterConfig": ("legoesm.atmosphere.dynamics.sfno_sw", "SFNOShallowWaterConfig"),
     "SFNOPrimitiveEquationModel": ("legoesm.atmosphere.dynamics.sfno_pe", "SFNOPrimitiveEquationModel"),
     "SFNOPrimitiveEquationConfig": ("legoesm.atmosphere.dynamics.sfno_pe", "SFNOPrimitiveEquationConfig"),
+    # --- U-Cast (convolutional U-Net, data-driven) ---
+    "UCastPrimitiveEquationModel": ("legoesm.atmosphere.dynamics.ucast_pe", "UCastPrimitiveEquationModel"),
+    "UCastPrimitiveEquationConfig": ("legoesm.atmosphere.dynamics.ucast_pe", "UCastPrimitiveEquationConfig"),
     # --- Lat-lon C-grid cores ---
     "CGridLatLonShallowWaterModel": ("legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid", "CGridLatLonShallowWaterModel"),
     "CGridLatLonShallowWaterConfig": ("legoesm.atmosphere.dynamics.shallow_water_latlon_cgrid", "CGridLatLonShallowWaterConfig"),
@@ -204,6 +208,7 @@ AVAILABLE_SOLVERS = [
     "spectral_compressible_euler",
     "sfno_shallow_water",
     "sfno_primitive_equations",
+    "ucast_primitive_equations",
     "latlon_cgrid_shallow_water",
     "latlon_cgrid_primitive_equations",
     "mpas_primitive_equations",
@@ -233,7 +238,7 @@ _ALL_SOLVER_NAMES = AVAILABLE_SOLVERS + list(_DEPRECATED_SOLVER_NAMES)
 # Valid values for the two-axis config keys
 DYNAMICS_OPTIONS = ["shallow_water", "hydrostatic", "nonhydrostatic"]
 DISCRETIZATION_OPTIONS = [
-    "cdgrid", "spectral", "sfno", "mpas", "latlon_cgrid", "plane",
+    "cdgrid", "spectral", "sfno", "u_cast", "mpas", "latlon_cgrid", "plane",
     # Legacy names kept as valid options (default to cdgrid when grid is
     # unknown; the driver resolves more precisely using grid_type).
     "finite_volume", "centered",
@@ -256,6 +261,7 @@ _AXIS_TO_SOLVER = {
     ("hydrostatic", "cdgrid"): "cdgrid_primitive_equations",
     ("hydrostatic", "spectral"): "spectral_primitive_equations",
     ("hydrostatic", "sfno"): "sfno_primitive_equations",
+    ("hydrostatic", "u_cast"): "ucast_primitive_equations",
     ("hydrostatic", "mpas"): "mpas_primitive_equations",
     ("nonhydrostatic", "cdgrid"): "cdgrid_compressible_euler",
     ("nonhydrostatic", "spectral"): "spectral_compressible_euler",
@@ -374,6 +380,7 @@ _SOLVER_TO_CLASS = {
     "spectral_compressible_euler": "SpectralCompressibleEulerModel",
     "sfno_shallow_water": "SFNOShallowWaterModel",
     "sfno_primitive_equations": "SFNOPrimitiveEquationModel",
+    "ucast_primitive_equations": "UCastPrimitiveEquationModel",
     "tracer_transport": "TracerTransportModel",
     "tracer_transport_mpas": "TracerTransportMPASModel",
     "tracer_transport_latlon": "TracerTransportLatLonModel",
