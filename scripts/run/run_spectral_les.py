@@ -92,6 +92,7 @@ def main():
     p.add_argument("--dt", type=float, default=0.4)
     p.add_argument("--hours", type=float, default=1.5)
     p.add_argument("--f32", action="store_true")
+    p.add_argument("--tau-bulk", type=float, default=100.0, help="bulk-relax timescale [s]")
     p.add_argument("--print-every", type=int, default=1000)
     p.add_argument("--output", type=Path, default=Path("results/spectral_neutral"))
     args = p.parse_args()
@@ -125,25 +126,35 @@ def main():
     rc = (args.dt / tau_sp) * spc
     rf = (args.dt / tau_sp) * spf
 
+    # INTEGRAL-CONTROLLED body force: a uniform fx(t) adapts SLOWLY to hold the
+    # bulk ⟨u⟩ at target. Unlike the exact per-step velocity re-pin (which
+    # re-injected the turbulent ⟨u⟩-fluctuation energy each step → wvar ~5× too
+    # high), the force integrates the bulk error on a slow timescale tau_bulk, so
+    # it tracks only the MEAN drag, not the fast fluctuations. fx is carried
+    # across steps as an explicit state.
+    fx0 = jnp.asarray(args.ustar ** 2 / args.Lz, dtype=dtype)
+    gain = 1.0 / args.tau_bulk
+
     @partial(jax.jit, static_argnames=("first",))
-    def step(state, first=False):
+    def step(state, fx, first=False):
         state, us = sl.step(state, g=g, dt=args.dt, u_geo=(0.0, 0.0),
-                            f_cor=0.0, first=first, force=(0.0, 0.0))
+                            f_cor=0.0, first=first, force=(fx, 0.0))
         u, v, w = state.u, state.v, state.w
-        u = u - rc * (u - u.mean((0, 1), keepdims=True))   # damp fluctuations
+        u = u - rc * (u - u.mean((0, 1), keepdims=True))   # sponge: damp fluctuations
         v = v - rc * (v - v.mean((0, 1), keepdims=True))
-        w = w - rf * w                                       # damp w toward 0
-        u = u + (u_bulk_target - jnp.mean(u))
-        return state._replace(u=u, v=v, w=w), us
+        w = w - rf * w                                       # sponge: damp w toward 0
+        fx = fx + gain * (u_bulk_target - jnp.mean(u))      # slow integral control
+        return state._replace(u=u, v=v, w=w), fx, us
     nsteps = int(args.hours * 3600.0 / args.dt)
     tau = args.Lz / args.ustar                              # eddy turnover [s]
     print(f"[spectral-LES neutral] {args.nx}x{args.ny}x{args.nz} "
           f"L=({args.Lx},{args.Ly},{args.Lz}) m  u*_tar={args.ustar}  dt={args.dt}s "
           f"steps={nsteps}  turnover~{tau:.0f}s  dtype={dtype.__name__}")
-    st, us = step(st, first=True)
+    fx = fx0
+    st, fx, us = step(st, fx, first=True)
     t0 = time.time()
     for i in range(1, nsteps + 1):
-        st, us = step(st, first=False)
+        st, fx, us = step(st, fx, first=False)
         if i % args.print_every == 0:
             wc = sl.f2c(st.w)
             wv = float(jnp.mean(wc ** 2)); mw = float(jnp.max(jnp.abs(st.w)))

@@ -237,16 +237,17 @@ def advection(u, v, w, g: SpectralLESGrid):
     # (The opposite sign −(u×ω) still passes the ⟨u·C⟩=0 energy test — u×ω ⊥ u —
     #  but reverses the nonlinear transfer into an INVERSE cascade that piles
     #  energy up and inverts the mean profile; this caught a real sign bug.)
-    omega_x_c = f2c(omega_x_f)
-    omega_y_c = f2c(omega_y_f)
-    Cu = omega_z * vd - omega_y_c * wc
-    Cv = omega_x_c * wc - omega_z * ud
-    # Face tendency: Cw = (u × ω)_z = u ω_y − v ω_x, with u,v averaged to faces.
+    # CRITICAL staggering: form the ``w·ω`` products at the FACES (where w and
+    # the vertical-shear vorticity live) and average the PRODUCT to centres —
+    # NOT ⟨ω⟩·⟨w⟩. Since ⟨wX⟩≠⟨w⟩⟨X⟩, the factor-averaged form transports
+    # momentum counter-gradient and pumps the variance; the product-at-face form
+    # (oracle Advection_Dealias / StagGridAvg on the product) is correct.
+    Cu = omega_z * vd - f2c(wd * omega_y_f)                 # centres
+    Cv = f2c(wd * omega_x_f) - omega_z * ud                 # centres
+    # Face tendency Cw = u ω_y − v ω_x: u,v averaged to faces, ω at faces.
     uf = jnp.pad(c2f(ud), ((0, 0), (0, 0), (1, 1)))         # 0 at walls
     vf = jnp.pad(c2f(vd), ((0, 0), (0, 0), (1, 1)))
-    omega_x_face = jnp.pad(c2f(omega_x_c), ((0, 0), (0, 0), (1, 1)), mode="edge")
-    omega_y_face = jnp.pad(c2f(omega_y_c), ((0, 0), (0, 0), (1, 1)), mode="edge")
-    Cw = uf * omega_y_face - vf * omega_x_face              # faces (nz+1)
+    Cw = uf * omega_y_f - vf * omega_x_f                    # faces (nz+1)
     # de-alias the products back to the resolved grid.
     Cu, Cv = _dealias(Cu, g), _dealias(Cv, g)
     Cw = _dealias(Cw, g)

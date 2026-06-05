@@ -156,15 +156,41 @@ surface, ~13 m/s, vs the correct log shape). Debugged by elimination:
   −(u×ω) sign still passes the ⟨u·C⟩=0 energy test because u×ω⊥u, but reverses
   the cascade) — necessary but not sufficient.
 
-Root cause: the `f2c`/`c2f` + edge-pad approximation of the staggered advection
-does not faithfully replicate the oracle's exact `Advection_Dealias` index /
-boundary handling (`StagGridAvg` placement, the `u_pad_G[:,:,0:nz-2]` offset, the
-explicit bottom/top rows). **Next: port the oracle's staggered advection exactly**
-(it is the one piece not yet faithful), then re-validate σ_w/u_*, the log law and
-φ_m; then wire the Bou-Zeid LASD coefficient + buoyancy for SBL/CBL. The core
-method (spectral horizontal + projection + diffusion + wall) is validated and
-sustains turbulence; the remaining bug is a faithful-discretisation issue in the
-advection operator alone.
+Fixes applied to the advection (both correct + more faithful, neither sufficient
+alone): the +(u×ω) SIGN, and forming the ``w·ω`` products at the FACES then
+averaging the PRODUCT to centres (``f2c(w·ω_face)``, not ⟨ω⟩⟨w⟩ — the
+energy/transport-correct staggering, matching the oracle's ``StagGridAvg`` on the
+product). The over-energy is robust through all of these.
+
+Remaining suspects (in priority order), still under investigation:
+1. **De-aliasing method** — the oracle uses 3/2 PADDING (`Dealias1`/`Dealias2`:
+   pad to 3/2 grid, multiply, truncate). This module uses 2/3 TRUNCATION of the
+   inputs+outputs. The 2/3 rule is alias-free for a single quadratic product, but
+   the rotational form chains several and the staggered vertical averaging is not
+   spectral — residual aliasing could pump the variance. Port the 3/2 padding.
+2. **Exact boundary rows** of `Advection_Dealias` (`cc[0]=arg1[0]+0.5·arg2[1]`,
+   `cc[nz-1]=arg1[nz-1]+arg2[nz-1]`) vs the edge-pad here.
+3. **Forcing sets the ABSOLUTE level, not the intensity.** Tested per-step exact
+   bulk re-pin, gentle ⟨u⟩-relaxation, and a slow INTEGRAL-CONTROLLED body force
+   (now the driver default — cleaner than the re-pin). The absolute wvar tracks
+   the maintained wind (wvar≈44 at ⟨u⟩≈11; wvar≈0.9 at ⟨u⟩≈1.8), BUT the
+   INTENSITY ratio σ_w/u_* stays ≈10–14 at every operating point. So the forcing
+   is not the cause; the invariant ~10× over-intensity is.
+
+**Bottom line:** the resolved-fluctuation INTENSITY (σ_w/u_*, σ_u/u_*) is ~10×
+the MOST value, invariant to forcing / SGS magnitude / dt / wall form / sponge.
+Diffusion-only is exactly right. ⇒ the rotational advection on the staggered grid
+produces over-intense fluctuations relative to the stress it carries — a faithful-
+discretisation bug. The decisive remaining step is a verbatim port of the oracle
+`Advection_Dealias` (3/2 PADDING de-aliasing — not 2/3 truncation — and the exact
+`StagGridAvg` boundary rows). Until then the spectral core is validated and
+SUSTAINS turbulence with the right surface stress, but is not yet a quantitative
+oracle match on the variances.
+
+The core method (spectral horizontal + projection + diffusion + wall) is
+validated, sustains turbulence and gives the right surface stress (u_*≈0.32 vs
+0.45 target); the residual over-energy is isolated to the advection operator /
+forcing setup, not the spectral method or the projection.
 
 ## Conclusion (compressible core)
 **Conclusion (honest).** Tuning the compressible plane dycore — surface coupling,
