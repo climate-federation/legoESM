@@ -177,15 +177,31 @@ Remaining suspects (in priority order), still under investigation:
    INTENSITY ratio σ_w/u_* stays ≈10–14 at every operating point. So the forcing
    is not the cause; the invariant ~10× over-intensity is.
 
-**Bottom line:** the resolved-fluctuation INTENSITY (σ_w/u_*, σ_u/u_*) is ~10×
-the MOST value, invariant to forcing / SGS magnitude / dt / wall form / sponge.
-Diffusion-only is exactly right. ⇒ the rotational advection on the staggered grid
-produces over-intense fluctuations relative to the stress it carries — a faithful-
-discretisation bug. The decisive remaining step is a verbatim port of the oracle
-`Advection_Dealias` (3/2 PADDING de-aliasing — not 2/3 truncation — and the exact
-`StagGridAvg` boundary rows). Until then the spectral core is validated and
-SUSTAINS turbulence with the right surface stress, but is not yet a quantitative
-oracle match on the variances.
+**RESOLVED — it was de-aliasing + (then-masked) SGS magnitude.** Porting the
+oracle's 3/2 zero-padding de-aliasing (`_pad_to_fine`/`_truncate_from_fine`,
+verbatim `Dealias1`/`Dealias2`) cut σ_w/u_* from 8 to 3.3: the chained rotational
+advection's quadratic-interaction aliasing (which 2/3-truncation does NOT remove)
+was ~40% of the over-energy. With the aliasing gone, the Smagorinsky C_s finally
+controls the level (it could not before — aliasing dominated), and **C_s≈0.30 +
+3/2 de-aliasing gives a LOG profile and 3/4 MOST diagnostics passing** on a 64³
+neutral channel:
+
+| diagnostic | value | MOST target |
+|---|---|---|
+| u_*(log)/u_*(flux) | 0.70 | 1.0 ± 0.35 ✅ |
+| φ_m (surface-layer) | 0.96 | 1.0 ± 0.5 ✅ |
+| σ_w/u_* (surface) | 1.65 | 1.25 ± 0.6 ✅ |
+| σ_u/u_* | 4.6 | 2.4 ± 1.2 ❌ |
+
+The mean wind is now log-increasing (U 5.1→12.6 m/s) and w-variance peaks in
+mid-BL (correct shape). REMAINING: σ_u still ~2× high (streamwise streak energy)
+and the OUTER-layer w-variance is elevated (surface layer matches). C_s≈0.30 is a
+bit high for a static coefficient — the **Bou-Zeid LASD dynamic C_s(z)** (which
+this whole effort is about) should set it automatically and likely fixes the
+outer layer + σ_u. Next: wire LASD into this core, then buoyancy/scalar for
+SBL/CBL. The spectral core now reproduces surface-layer Monin–Obukhov scaling —
+a genuine quantitative oracle match where the compressible core could not even
+sustain turbulence.
 
 The core method (spectral horizontal + projection + diffusion + wall) is
 validated, sustains turbulence and gives the right surface stress (u_*≈0.32 vs

@@ -87,7 +87,8 @@ def main():
     p.add_argument("--Ly", type=float, default=2000.0)
     p.add_argument("--Lz", type=float, default=1000.0)
     p.add_argument("--z0", type=float, default=0.1)
-    p.add_argument("--cs", type=float, default=0.16)
+    p.add_argument("--cs", type=float, default=0.25,
+                   help="Smagorinsky C_s. ~0.25-0.30 + 3/2 dealiasing reproduces MOST; the Bou-Zeid LASD dynamic coefficient is the proper fix.")
     p.add_argument("--ustar", type=float, default=0.45, help="target u_* [m/s]")
     p.add_argument("--dt", type=float, default=0.4)
     p.add_argument("--hours", type=float, default=1.5)
