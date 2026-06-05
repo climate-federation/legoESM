@@ -367,26 +367,30 @@ def _thomas_complex(a, b, c, d):
 # --------------------------------------------------------------------------- #
 # One AB2 time step                                                            #
 # --------------------------------------------------------------------------- #
-def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor):
-    """Momentum RHS = -advection + SGS force + Coriolis(f(v-vg)/...) (neutral)."""
+def rhs(u, v, w, g: SpectralLESGrid, u_geo, f_cor, force=(0.0, 0.0)):
+    """Momentum RHS = -advection + SGS force + Coriolis + a constant body force.
+
+    ``f_cor``≠0 drives a geostrophic/Ekman balance toward ``u_geo=(ug,vg)``; a
+    constant ``force=(fx,fy)`` drives a pressure-gradient channel (``fx=u_*²/Lz``
+    gives a target ``u_*`` and a log-law equilibrium in a few eddy turnovers —
+    the clean Monin–Obukhov validation case)."""
     Cu, Cv, Cw = advection(u, v, w, g)
     nu_t = eddy_viscosity(u, v, w, g)
     Fu, Fv, Fw, u_star = sgs_and_wall(u, v, w, nu_t, g, u_geo)
     ug, vg = u_geo
-    # f-plane Coriolis driving the geostrophic balance: du/dt += f (v - vg).
-    Ru = Cu + Fu + f_cor * (v - vg)
-    Rv = Cv + Fv - f_cor * (u - ug)
+    Ru = Cu + Fu + f_cor * (v - vg) + force[0]
+    Rv = Cv + Fv - f_cor * (u - ug) + force[1]
     Rw = Cw + Fw
     Rw = Rw.at[..., 0].set(0.0).at[..., -1].set(0.0)
     return Ru, Rv, Rw, u_star
 
 
 def step(state: SpectralLESState, g: SpectralLESGrid, dt: float,
-         u_geo, f_cor: float, first: bool = False):
+         u_geo, f_cor: float, first: bool = False, force=(0.0, 0.0)):
     """One Adams–Bashforth-2 step + pressure projection. ``first`` uses forward
     Euler (no previous RHS yet)."""
     u, v, w = state.u, state.v, state.w
-    Ru, Rv, Rw, u_star = rhs(u, v, w, g, u_geo, f_cor)
+    Ru, Rv, Rw, u_star = rhs(u, v, w, g, u_geo, f_cor, force=force)
     if first:
         au, av, aw = Ru, Rv, Rw
     else:

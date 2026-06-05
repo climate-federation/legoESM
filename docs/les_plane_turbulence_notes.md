@@ -126,6 +126,33 @@ effective Re and any seed decays instead of transitioning. The dt=0.2 burst is
 the only time resolved variance grows, and that is a numerical transient, not
 sustained physics.
 
+## Pseudo-spectral incompressible core (the faithful path) — status
+Built in `spectral_les_plane.py` (driver `scripts/run/run_spectral_les.py`):
+rfft2 horizontal + FD-staggered vertical, rotational de-aliased advection,
+fractional-step pressure projection, wall-damped Smagorinsky, MOST wall model,
+AB2. Numerics validated (`tests/unit/test_spectral_les_plane.py`, 4 pass):
+divergence-free projection to 1e-10, exact spectral derivative, energy-conserving
+advection, finite step.
+
+**It does what the compressible core could not:** resolved turbulence SUSTAINS to
+a statistically steady state instead of decaying (neutral channel, 64³, RTX 5090,
+**1200 steps/s** — ~8× the compressible core), and the resolved-stress
+**u_*≈0.35 m/s matches the MOST target** (`validate_les_vs_oracle.py`).
+
+**Open issue (focused):** the equilibrium turbulence is ~5× too energetic
+(σ_w/u_*≈6 vs 1.25; σ_u/u_*≈16 vs 2.4) and the over-mixing flattens the log
+profile. Energy budget: steady TKE/forcing-power ⇒ a dissipation timescale of
+~16 turnovers, i.e. the SGS dissipation is ~10× too weak (raising C_s 0.16→0.25
+only cut the variance ×1.6 — a coefficient bump cannot close a 10× gap). Prime
+suspect is a factor/sign in the SGS stress-divergence (`sgs_and_wall`) or the
+staggered-grid averaging in the advection breaking exact energy conservation
+(the test residual is ⟨u·C⟩/⟨u²⟩≈5%, not machine-zero). Next: a model-energy
+budget (resolved-shear production vs SGS dissipation vs forcing power) to localise
+the missing dissipation, then the Bou-Zeid LASD coefficient + buoyancy/scalar for
+SBL/CBL. The CORE METHOD is sound (it sustains turbulence and gives the right
+surface stress); this is a closure-magnitude bug, not an architecture problem.
+
+## Conclusion (compressible core)
 **Conclusion (honest).** Tuning the compressible plane dycore — surface coupling,
 seeding, IC, dissipation knobs, resolution to 128³, fp32 throughput — fixed every
 STABILITY and book-keeping problem (no blow-up, no wind collapse, conservation,
