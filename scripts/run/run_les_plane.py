@@ -73,6 +73,14 @@ def gabls1_theta_ref(z):
     return jnp.where(z > 100.0, 265.0 + 0.01 * (z - 100.0), 265.0)
 
 
+def neutral_theta_ref(z):
+    """Neutral ABL: well-mixed θ=290 K capped by a strong inversion above 0.7 of
+    the domain (the lid limits BL growth so the shear-driven turbulence reaches a
+    quasi-steady, resolution-converged state — the cleanest test of resolved SGS
+    transport, no buoyancy production/destruction)."""
+    return jnp.where(z > 700.0, 290.0 + 0.02 * (z - 700.0), 290.0)
+
+
 def wangara_theta_ref(z):
     """Wangara Day-33 initial θ(z): ~277 K mixed layer, capping inversion above
     ~1 km (simplified sounding — the convective growth is flux-driven)."""
@@ -80,6 +88,20 @@ def wangara_theta_ref(z):
 
 
 _CASES = {
+    "neutral": dict(
+        theta_ref_fn=neutral_theta_ref,
+        f_c=1.0e-4, ug=10.0, vg=0.0, z0=0.1,
+        moist=False,
+        # 1 km domain, dx=20 m (well-resolved neutral ABL ~ Δ/h ~ 0.02).
+        nx=32, ny=32, nlev=50, dx=20.0, H=1000.0, dz_sfc=10.0,
+        # dt=0.05 s: the LES regime runs with the acoustic w-damping OFF
+        # (--off-centering 0 --si-w-filter 0), so the vertical acoustic CFL needs
+        # a smaller step. With the damping ON the resolved w' is annihilated each
+        # substep and the BL turbulence decays to laminar (max|w|~mm/s); with it
+        # OFF, w' grows and sustains (the resolved eddies the LES is meant to
+        # carry). See docs/les_plane_turbulence_notes.md.
+        dt=0.05, hours=1.0, log_wind=True,
+    ),
     "gabls1": dict(
         theta_ref_fn=gabls1_theta_ref,
         f_c=1.39e-4, ug=8.0, vg=0.0, z0=0.1,
@@ -166,24 +188,50 @@ def _apply_pbl_column(state, t, *, case, hc, z0, dt, ug, vg):
     # rather than being parametrised away (which killed the Wangara CBL eddies).
     f_stab = jnp.where(
         Ri > 0.0, jnp.clip(1.0 - Ri / 0.25, 0.0, 1.0) ** 2, 1.0)
-    # Small numerical floor, CONFINED to the lower domain (z<300 m) so it damps
-    # the near-surface 2Δz mode without eroding the free-atmosphere geostrophic
-    # wind / the stable LLJ aloft (the surface-flux-as-BC, not this floor, is the
-    # primary 2Δz cure — codex review). Decays as exp(−z/150 m).
-    K_floor = 0.02 * jnp.exp(-z_i / 150.0)
-    K_iface = lmix ** 2 * dUdz * f_stab + K_floor
-    K_iface = jnp.minimum(K_iface, 20.0)           # cap (don't over-mix the CBL)
 
-    z1 = z_full[..., 0] if z_full.ndim else z_full
     z1 = z_full[0]
     Umag = jnp.sqrt(uc[..., 0] ** 2 + vc[..., 0] ** 2 + 0.01)
     Cd = (_KAPPA_VK / jnp.log(z1 / z0)) ** 2
     drag = Cd * Umag                               # implicit momentum drag [m/s]
+    u_star = jnp.sqrt(jnp.maximum(Cd, 0.0)) * Umag  # friction velocity (τ=u*²)
+
+    # SURFACE-LAYER-ONLY mixing (the LES fix for laminar collapse).  The dycore
+    # 3D SGS (``sgs_vertical_diffusion=True``) already carries the RESOLVED
+    # vertical SGS flux; a SECOND full-column Louis K here double-counted the
+    # mixing, homogenised the column and killed the resolved eddies (max|w|~cm/s,
+    # wvar~1e-4 — a 1D column, not an LES).  Confine the column's role to its
+    # ONLY irreplaceable job: depositing the surface stress / heat / moisture
+    # flux through the UNDER-RESOLVED surface layer (the lowest O(10) cells),
+    # decaying to ~0 above it so resolved convection + the dycore 3D SGS — not a
+    # K-profile — set the mixed-layer structure.  K_sl = κ u_* z f(Ri)·e^(−z/h_sl)
+    # with a small near-surface floor for the 2Δz mode; NO 20 m²/s cap.
+    h_sl = 40.0                                    # surface-layer decay scale [m]
+    # THIN surface-layer coupling: K_sl deposits the surface stress/flux through
+    # only the under-resolved lowest cells (decay e^(−z/40 m)), so it does NOT
+    # spread the surface drag through a deep layer and spin the whole column down
+    # — the RESOLVED eddies carry momentum/heat aloft (that is the LES). A deep
+    # K_sl (h_sl=100 m) collapsed the geostrophic wind to <1 m/s.
+    K_sl = _KAPPA_VK * u_star[..., None] * z_i * f_stab * jnp.exp(-z_i / h_sl)
+    # Small UNIFORM background K: damps the column 2Δz mode (timescale dz²/2K ~
+    # 5-10 s) without homogenising the resolved large eddies, which mix on the
+    # turnover time ~h/w* ≫ h²/2K for this K. The implicit Thomas solve is
+    # unconditionally stable; this floor only needs to suppress the 2Δz growth
+    # the dycore 3D SGS (explicit, CFL-limited) cannot. Capped well below the
+    # old 20 m²/s that flattened the whole column into a laminar 1D profile.
+    K_floor = 0.3
+    K_iface = jnp.minimum(K_sl + K_floor, 10.0)
 
     new_u = _implicit_vertical_diffusion(u, K_iface, dz, dzc, dt, drag_sfc=drag)
     new_v = _implicit_vertical_diffusion(v, K_iface, dz, dzc, dt, drag_sfc=drag)
 
-    if case == "gabls1":
+    if case == "neutral":
+        # Pure shear-driven ABL: ZERO surface buoyancy flux. θ' is only mixed
+        # (no surface source), so turbulence is generated solely by the resolved
+        # surface shear — the cleanest validation of the SGS momentum transport.
+        new_th = _implicit_vertical_diffusion(thp, K_iface, dz, dzc, dt,
+                                              flux_sfc=0.0)
+        upd = dict(theta_prime=state.theta_prime.replace(data=new_th[..., ::-1]))
+    elif case == "gabls1":
         theta_s = 265.0 - 0.25 * t / 3600.0
         F_th = Cd * Umag * (theta_s - theta[..., 0])      # bulk kinematic w'θ'
         new_th = _implicit_vertical_diffusion(thp, K_iface, dz, dzc, dt,
@@ -246,9 +294,15 @@ def build(args):
         smagorinsky_scale_dependent=args.scale_dependent,
         smagorinsky_dynamic_cs_max=1.0 if args.scale_dependent else 0.3,
         smagorinsky_prandtl=1.0,
-        # LASD's β IS the near-wall scale correction; do NOT also apply the
-        # Mason κz cap (the oracle does not). Standard Germano keeps the cap.
-        smagorinsky_wall_damping=not args.scale_dependent,
+        # Keep the Mason κz mixing-length cap ON even for LASD. It is a NUMERICAL
+        # necessity here: the dycore's 3D SGS vertical flux (_vertical_K_diffusion_full)
+        # is EXPLICIT forward-Euler, so it is CFL-limited (K < 0.5·dz²/dt ≈ 45 m²/s
+        # near the surface for dz≈3 m, dt=0.1 s). Without the cap the uncapped
+        # near-wall LASD K (l_m=Cs·Δ in the high-shear first cell) overshoots that
+        # limit and the explicit vertical SGS blows up at ~0.08 h. The κz cap is
+        # only active in the lowest O(1) cells where κz < Cs·Δ; LASD's β scale
+        # correction still governs the resolved SGS through the rest of the column.
+        smagorinsky_wall_damping=True,
         smagorinsky_delta_max=1.0e30,        # fine grid: no horizontal Δ cap
         sgs_vertical_diffusion=True,   # 3D dynamic SGS for resolved eddies; column adds surface coupling
         # weak biharmonic for the 2Δ acoustic mode; small sponge at the top.
@@ -264,17 +318,59 @@ def build(args):
     # IC: rest state (hydrostatic θ_ref) + geostrophic mean wind + θ' seed.
     dtype = grid.area_T.dtype
     state = make_rest_state(grid, hc, dtype=dtype)
-    u0 = jnp.full((ny, nx, nlev), ug, dtype=dtype)
-    v0 = jnp.full((ny, nx, nlev), vg, dtype=dtype)
-    # Band-limited θ' seed in the bottom quarter to trigger turbulence.
+    # IC perturbations in the bottom half: θ' AND velocity. Seeding velocity
+    # (u', v', w') — not θ' alone — gives the resolved shear/convective eddies a
+    # direct kick so turbulence spins up in O(10) eddy-turnovers instead of
+    # waiting for buoyancy to convert a θ' seed (the θ'-only seed in a stable BL
+    # barely grew, contributing to the laminar collapse).
     key = jax.random.PRNGKey(0)
-    seed = 0.1 * jax.random.normal(key, (ny, nx, nlev), dtype=dtype)
+    k1, k2, k3, k4 = jax.random.split(key, 4)
     zmask = (hc.z_full < 0.5 * H).astype(dtype)
-    seed = seed * zmask
+
+    def _lowpass(noise, frac=6):
+        """Keep only LARGE horizontal scales (|k| < N/frac). A white-noise seed
+        is dominated by 2Δ energy that the biharmonic hyperdiff annihilates in a
+        few steps before it can organise; a smooth, large-scale seed survives to
+        be amplified by the mean shear (resolved production)."""
+        nyy, nxx = noise.shape[0], noise.shape[1]
+        fh = jnp.fft.rfft2(noise, axes=(0, 1))
+        cy = max(1, nyy // frac)
+        cx = max(1, nxx // frac)
+        iy = jnp.arange(nyy)
+        my = (jnp.minimum(iy, nyy - iy) < cy)[:, None, None]
+        mx = (jnp.arange(fh.shape[1]) < cx)[None, :, None]
+        out = jnp.fft.irfft2(jnp.where(my & mx, fh, 0.0), axes=(0, 1),
+                             s=(nyy, nxx))
+        return out / (jnp.std(out) + 1e-12)        # unit-std large-scale field
+
+    th_seed = 0.1 * _lowpass(
+        jax.random.normal(k1, (ny, nx, nlev), dtype=dtype)) * zmask
+    # Large-scale velocity kick (~5% of the mean): seeds eddies at scales the
+    # hyperdiff does not erase, so the mean shear amplifies them.
+    u_amp = 0.05 * abs(ug)
+    # Mean wind: a LOG-LAW profile (shear present from t=0 ⇒ immediate resolved
+    # shear production) for the neutral case; uniform geostrophic otherwise (the
+    # SBL/CBL cases balance the geostrophic wind via Coriolis, not a log IC).
+    if spec.get("log_wind", False):
+        z_f = hc.z_full
+        u_mean = ug * jnp.log(jnp.clip(z_f, z0, None) / z0) / jnp.log(H / z0)
+        u_mean = jnp.clip(u_mean, -abs(ug), abs(ug))
+        u_base = jnp.broadcast_to(u_mean, (ny, nx, nlev))
+    else:
+        u_base = jnp.full((ny, nx, nlev), ug, dtype=dtype)
+    u0 = u_base + u_amp * _lowpass(
+        jax.random.normal(k2, (ny, nx, nlev), dtype=dtype)) * zmask
+    v0 = jnp.full((ny, nx, nlev), vg, dtype=dtype) + (
+        u_amp * _lowpass(jax.random.normal(k3, (ny, nx, nlev), dtype=dtype))
+        * zmask)
+    w0 = (0.5 * u_amp
+          * _lowpass(jax.random.normal(k4, (ny, nx, nlev + 1), dtype=dtype))
+          * (hc.z_half < 0.5 * H).astype(dtype))
     state = state._replace(
         u=state.u.replace(data=u0),
         v=state.v.replace(data=v0),
-        theta_prime=state.theta_prime.replace(data=seed),
+        w=state.w.replace(data=w0),
+        theta_prime=state.theta_prime.replace(data=th_seed),
     )
     if spec["moist"]:
         tracers = jnp.zeros((ny, nx, nlev, 1), dtype=dtype)
@@ -327,8 +423,11 @@ def main():
     p.add_argument("--hours", type=float)
     p.add_argument("--off-centering", type=float, default=0.2,
                    help="SI vertical-acoustic off-centring β (damps the 2Δz "
-                        "vertical mode). 0 = centred (undamped).")
-    p.add_argument("--si-w-filter", type=float, default=0.1,
+                        "vertical mode). 0 = centred (undamped). LES NOTE: this "
+                        "damping ALSO annihilates the resolved w' each acoustic "
+                        "substep — set 0 (with --si-w-filter 0 and a smaller dt) "
+                        "to let BL turbulence sustain; nonzero ⇒ laminar collapse.")
+    p.add_argument("--si-w-filter", type=float, default=0.2,
                    help="Vertical Laplacian filter ν on w inside the SI solve "
                         "(damps 2Δz w noise).")
     p.add_argument("--static-sgs", action="store_true",
