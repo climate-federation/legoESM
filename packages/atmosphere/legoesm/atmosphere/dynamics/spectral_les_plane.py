@@ -40,6 +40,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.atmosphere.physics.turbulence.lasd_core import lasd_cs2
 
 
 # --------------------------------------------------------------------------- #
@@ -53,10 +54,12 @@ class SpectralLESConfig(NamedTuple):
     Ly: float
     Lz: float
     z0: float = 0.1                 # aerodynamic roughness [m]
-    c_s: float = 0.16              # Smagorinsky coefficient (wall-damped)
+    c_s: float = 0.16              # Smagorinsky coefficient (static; wall-damped)
     wall_damping: bool = True      # cap l_m at κz near the surface (Mason 1989)
-    dealias: bool = True           # 3/2-rule (2/3 truncation) de-aliasing
+    dealias: bool = True           # 3/2-rule zero-padding de-aliasing
     nu_molecular: float = 0.0      # optional explicit viscosity (usually 0)
+    smagorinsky_dynamic: bool = False  # Bou-Zeid LASD scale-dependent dynamic C_s(x,y,z)
+    cs_max: float = 1.0            # upper clip on the dynamic C_s² (oracle mask)
 
 
 class SpectralLESGrid(NamedTuple):
@@ -228,10 +231,18 @@ def eddy_viscosity(u, v, w, g: SpectralLESGrid):
     """Wall-damped constant-coefficient Smagorinsky ``ν_t=(C_s l)²|S|`` at centres.
 
     ``l = min(C_s Δ, κ z)`` (Mason 1989) with ``Δ=(Δx Δy Δz)^⅓``. This is the
-    oracle's static-SGS option; the scale-dependent dynamic coefficient is wired
-    separately."""
-    _, Smag = _strain(u, v, w, g)
+    oracle's static-SGS option; the Bou-Zeid scale-dependent dynamic coefficient
+    (``smagorinsky_dynamic``) replaces the constant ``C_s`` + κz cap with the
+    per-(x,y,z) ``C_s²`` from :func:`lasd_core.lasd_cs2` (β IS the near-wall
+    scale correction, so no Mason cap)."""
+    S_tuple, Smag = _strain(u, v, w, g)
     delta = (g.dx * g.dy * g.dz) ** (1.0 / 3.0)
+    if g.cfg.smagorinsky_dynamic:
+        nz = u.shape[-1]
+        wc = f2c(w)
+        cs2 = lasd_cs2(u, v, wc, *S_tuple, Smag,
+                       jnp.full(nz, delta, dtype=u.dtype), cs_max=g.cfg.cs_max)
+        return cs2 * (delta ** 2) * Smag                    # ν_t = C_s²·Δ²·|S|
     l_smag = g.cfg.c_s * delta
     if g.cfg.wall_damping:
         kappa = constants.kappa_von_karman

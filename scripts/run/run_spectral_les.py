@@ -46,7 +46,8 @@ _KAPPA = constants.kappa_von_karman
 def build(args, dtype):
     cfg = sl.SpectralLESConfig(
         nx=args.nx, ny=args.ny, nz=args.nz, Lx=args.Lx, Ly=args.Ly, Lz=args.Lz,
-        z0=args.z0, c_s=args.cs, wall_damping=True, dealias=True)
+        z0=args.z0, c_s=args.cs, wall_damping=True, dealias=True,
+        smagorinsky_dynamic=args.dynamic)
     g = sl.make_grid(cfg, dtype=dtype)
     # Log-law mean IC (shear from t=0) + divergence-free small perturbations.
     z = g.z_c
@@ -93,6 +94,7 @@ def main():
     p.add_argument("--dt", type=float, default=0.4)
     p.add_argument("--hours", type=float, default=1.5)
     p.add_argument("--f32", action="store_true")
+    p.add_argument("--dynamic", action="store_true", help="Bou-Zeid LASD scale-dependent dynamic C_s(x,y,z)")
     p.add_argument("--ic-amp", type=float, default=0.05, help="IC perturbation as fraction of bulk wind")
     p.add_argument("--tau-bulk", type=float, default=100.0, help="bulk-relax timescale [s]")
     p.add_argument("--print-every", type=int, default=1000)

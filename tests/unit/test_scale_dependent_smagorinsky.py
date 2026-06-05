@@ -24,8 +24,10 @@ import numpy as np
 from legoesm.atmosphere.dynamics.compressible_euler_plane import (
     _centre_velocities_and_strain_plane,
     _compute_scale_dependent_dynamic_smag_cs_plane,
-    _imfilter_box3_plane,
-    _laguerre_max_real_root_beta,
+)
+from legoesm.atmosphere.physics.turbulence.lasd_core import (
+    imfilter_box3 as _imfilter_box3_plane,
+    laguerre_max_real_root_beta as _laguerre_max_real_root_beta,
 )
 from legoesm.grids.plane import create_plane_grid
 from legoesm.grids.vertical import create_height_coordinate
