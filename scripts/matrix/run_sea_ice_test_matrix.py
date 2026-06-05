@@ -457,18 +457,31 @@ def run_surface_melt(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, str]
     # freezing point T_freeze_ocean (271.35 K).  Under strong atmospheric
     # warming the surface legitimately warms to T_melt_surface and parks
     # there while excess energy converts to melt (sea_ice.py clamps T_ice
-    # to config.T_melt_surface and books the surplus as dh/dt).  The bound
-    # must therefore be T_melt_surface, matching this case's docstring
-    # ("T_ice stays <= T_freeze") and the model's surface-melt clamp; the
-    # old T_freeze_ocean bound spuriously failed a correct, energy-
-    # conserving surface-melt result (T_ice == 273.15 K exactly).
-    T_bounded = jnp.all(state.T_ice.data <= config.T_melt_surface + 1e-6)
+    # to config.T_melt_surface and books the surplus as dh/dt).
+    #
+    # This is a column SMOKE for the surface-melt regime: it asserts the
+    # clamp ENGAGED (skin reached the melt point — non-vacuous) and did
+    # NOT overshoot it, and that ice did not grow under strong warming.
+    # The quantitative surface-melt ENERGY CLOSURE (rho_ice*L_f*ice_melt +
+    # skin_cap*dT == net surface energy, with no energy dropped) is
+    # asserted directly at the kernel level in
+    # tests/unit/test_land_ice_sea_ice_thermo.py::
+    # TestThinIceImplicitMelt::test_thin_ice_surface_melt_energy_closure —
+    # h_decreased here is a coarse sanity check, not a surface-melt energy
+    # proof (this column's basal flux also affects h).
+    T_max = float(jnp.max(state.T_ice.data))
+    # No overshoot above the surface melt point (the property the case guards).
+    no_overshoot = T_max <= config.T_melt_surface + 1e-6
+    # Clamp engaged: warming was strong enough to drive the skin TO the melt
+    # point, so the surface-melt branch is actually exercised (else vacuous).
+    clamp_engaged = T_max >= config.T_melt_surface - 1e-3
     h_decreased = diag["h_mean"][-1] < h_init
 
-    ok = bool(T_bounded and h_decreased)
+    ok = bool(no_overshoot and clamp_engaged and h_decreased)
     if not ok:
-        return "FAIL", f"T_bounded={T_bounded}, h_decreased={h_decreased}"
-    return "PASS", f"h: {h_init:.3f} -> {diag['h_mean'][-1]:.3f}m, T capped"
+        return "FAIL", (f"no_overshoot={no_overshoot}, clamp_engaged={clamp_engaged}, "
+                        f"h_decreased={h_decreased} (T_max={T_max:.4f}K)")
+    return "PASS", f"h: {h_init:.3f} -> {diag['h_mean'][-1]:.3f}m, skin clamped at melt point"
 
 
 def run_open_water_freeze(tc: TestCase, outdir: Path, quick: bool) -> tuple[str, str]:
